@@ -83,14 +83,14 @@ release-local: _check-signing _check-gh build-daemon
 
 	# ── 2. Embed daemon inside .app ───────────────────────────────────────────
 	@echo "▶  Embedding daemon..."
-	cp $(DAEMON_BIN) "$(APP_BUNDLE)/Contents/MacOS/heimdallr"
-	chmod +x "$(APP_BUNDLE)/Contents/MacOS/heimdallr"
+	cp $(DAEMON_BIN) "$(APP_BUNDLE)/Contents/MacOS/heimdalld"
+	chmod +x "$(APP_BUNDLE)/Contents/MacOS/heimdalld"
 
 	# ── 3. Sign daemon binary with Developer ID ───────────────────────────────
 	@echo "▶  Signing daemon binary..."
 	codesign --force --options runtime \
 	  --sign "$(SIGNING_IDENTITY)" \
-	  "$(APP_BUNDLE)/Contents/MacOS/heimdallr"
+	  "$(APP_BUNDLE)/Contents/MacOS/heimdalld"
 
 	# ── 4. Re-sign the full .app bundle ──────────────────────────────────────
 	@echo "▶  Signing .app bundle..."
@@ -165,7 +165,7 @@ install-service: build-daemon
 # ── CI packaging (used by GitHub Actions) ─────────────────────────────────────
 
 package-macos: build-daemon build-app
-	cp $(DAEMON_BIN) "$(APP_BUNDLE)/Contents/MacOS/heimdallr"
+	cp $(DAEMON_BIN) "$(APP_BUNDLE)/Contents/MacOS/heimdalld"
 	codesign --force --deep --sign - "$(APP_BUNDLE)"
 	mkdir -p dist
 	hdiutil create \

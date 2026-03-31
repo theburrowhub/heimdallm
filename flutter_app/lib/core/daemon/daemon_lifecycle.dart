@@ -40,11 +40,17 @@ class DaemonLifecycle {
   /// Returns the daemon binary path.
   /// Priority:
   ///   1. HEIMDALLR_DAEMON_PATH env var (set by `make dev` for local dev)
-  ///   2. Next to the app executable (production .app bundle)
+  ///   2. 'heimdalld' next to the Flutter binary (production .app bundle)
+  ///      NOTE: named 'heimdalld' — not 'heimdallr' — to avoid overwriting
+  ///      Flutter's 'Heimdallr' binary on case-insensitive APFS filesystems.
+  ///   3. 'heimdallr' fallback (legacy / dev builds)
   static String defaultBinaryPath() {
     final envPath = Platform.environment['HEIMDALLR_DAEMON_PATH'];
     if (envPath != null && envPath.isNotEmpty) return envPath;
-    return '${File(Platform.resolvedExecutable).parent.path}/heimdallr';
+    final dir = File(Platform.resolvedExecutable).parent.path;
+    final preferred = File('$dir/heimdalld');
+    if (preferred.existsSync()) return preferred.path;
+    return '$dir/heimdallr'; // fallback for make dev
   }
 }
 

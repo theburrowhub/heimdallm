@@ -83,21 +83,35 @@ jobs:
             exit 1
           fi
 
-          # Embed daemon
-          cp "daemon/bin/heimdallr" "$APP/Contents/MacOS/heimdallr"
-          chmod +x "$APP/Contents/MacOS/heimdallr"
+          # Embed daemon as 'heimdalld' — MUST differ from Flutter's 'Heimdallr'
+          # because macOS APFS is case-insensitive: heimdallr == Heimdallr,
+          # which would silently overwrite the Flutter binary with the daemon.
+          cp "daemon/bin/heimdallr" "$APP/Contents/MacOS/heimdalld"
+          chmod +x "$APP/Contents/MacOS/heimdalld"
 
           echo "Bundle contents after embedding:"
           ls -lh "$APP/Contents/MacOS/"
 
-          # Verify daemon is really there
-          if [ ! -f "$APP/Contents/MacOS/heimdallr" ]; then
-            echo "❌ Embedding failed — daemon binary not found inside bundle"
+          # Verify both binaries are present and distinct
+          if [ ! -f "$APP/Contents/MacOS/Heimdallr" ]; then
+            echo "❌ Flutter binary Heimdallr missing"
             exit 1
           fi
-          echo "✓ Daemon embedded successfully"
+          if [ ! -f "$APP/Contents/MacOS/heimdalld" ]; then
+            echo "❌ Daemon binary heimdalld missing"
+            exit 1
+          fi
+          FLUTTER_SIZE=$(stat -f%z "$APP/Contents/MacOS/Heimdallr")
+          DAEMON_SIZE=$(stat -f%z "$APP/Contents/MacOS/heimdalld")
+          if [ "$FLUTTER_SIZE" -eq "$DAEMON_SIZE" ] && \
+             cmp -s "$APP/Contents/MacOS/Heimdallr" "$APP/Contents/MacOS/heimdalld"; then
+            echo "❌ Both binaries are identical — case collision detected!"
+            exit 1
+          fi
+          echo "✓ Flutter binary: ${FLUTTER_SIZE} bytes"
+          echo "✓ Daemon binary:  ${DAEMON_SIZE} bytes"
+          echo "✓ Both binaries embedded and distinct"
 
-          # Export path for subsequent steps
           echo "APP=$APP" >> "$GITHUB_ENV"
 
       - name: Ad-hoc codesign (preserving entitlements)
