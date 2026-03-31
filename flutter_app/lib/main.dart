@@ -205,19 +205,8 @@ class _BootstrapAppState extends State<_BootstrapApp> {
   }
 
   /// Returns the daemon binary path, or null if not found.
-  String? _daemonBinaryPath() {
-    // 1. Explicit env var (set by `make dev`)
-    final env = Platform.environment['HEIMDALLR_DAEMON_PATH'];
-    if (env != null && env.isNotEmpty && File(env).existsSync()) return env;
-
-    // 2. Alongside the Flutter binary inside the .app bundle
-    final dir = File(Platform.resolvedExecutable).parent.path;
-    final candidate = '$dir/heimdallr';
-    if (File(candidate).existsSync()) return candidate;
-
-    debugPrint('Daemon binary not found. Checked: $candidate');
-    return null;
-  }
+  /// Delegates to DaemonLifecycle to avoid duplicating logic.
+  String? _daemonBinaryPath() => DaemonLifecycle.defaultBinaryPath();
 
   void _setStatus(String s) {
     if (mounted) setState(() => _status = s);
