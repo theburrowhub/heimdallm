@@ -17,14 +17,17 @@ func TestFetchPRs(t *testing.T) {
 		},
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/search/issues" {
+		switch r.URL.Path {
+		case "/user":
+			json.NewEncoder(w).Encode(map[string]string{"login": "alice"})
+		case "/search/issues":
 			result := struct {
 				Items []gh.PullRequest `json:"items"`
 			}{Items: prs}
 			json.NewEncoder(w).Encode(result)
-			return
+		default:
+			http.NotFound(w, r)
 		}
-		http.NotFound(w, r)
 	}))
 	defer srv.Close()
 

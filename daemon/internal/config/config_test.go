@@ -3,7 +3,6 @@ package config_test
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/heimdallr/daemon/internal/config"
@@ -66,14 +65,13 @@ primary = "codex"
 	}
 }
 
-func TestValidate_MissingRepos(t *testing.T) {
-	cfg := &config.Config{}
-	err := cfg.Validate()
-	if err == nil {
-		t.Error("expected error for empty repositories")
+func TestValidate_EmptyReposAllowed(t *testing.T) {
+	// Empty repositories is valid — daemon polls all user PRs without a repo filter
+	cfg := &config.Config{
+		AI: config.AIConfig{Primary: "claude"},
 	}
-	if !strings.Contains(err.Error(), "repository") {
-		t.Errorf("expected repository error, got: %v", err)
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("empty repositories should be valid, got: %v", err)
 	}
 }
 

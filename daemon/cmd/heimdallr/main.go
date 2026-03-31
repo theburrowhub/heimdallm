@@ -95,9 +95,7 @@ func main() {
 				return
 			}
 			for _, pr := range prs {
-				if pr.Head.Repo.FullName != "" {
-					pr.Repo = pr.Head.Repo.FullName
-				}
+				pr.ResolveRepo()
 				cfgMu.Lock()
 				aiCfg := c.AIForRepo(pr.Repo)
 				cfgMu.Unlock()

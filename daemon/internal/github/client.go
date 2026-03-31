@@ -36,6 +36,27 @@ func NewClient(token string, opts ...Option) *Client {
 	return c
 }
 
+// AuthenticatedUser returns the GitHub login of the token owner.
+// Used to resolve the actual username instead of @me (which some token types reject).
+func (c *Client) AuthenticatedUser() (string, error) {
+	resp, err := c.do("GET", "/user", "application/vnd.github+json")
+	if err != nil {
+		return "", fmt.Errorf("github: get user: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("github: get user: status %d: %s", resp.StatusCode, body)
+	}
+	var u struct {
+		Login string `json:"login"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&u); err != nil {
+		return "", fmt.Errorf("github: decode user: %w", err)
+	}
+	return u.Login, nil
+}
+
 func (c *Client) do(method, path string, accept string) (*http.Response, error) {
 	req, err := http.NewRequest(method, c.baseURL+path, nil)
 	if err != nil {
@@ -48,37 +69,60 @@ func (c *Client) do(method, path string, accept string) (*http.Response, error) 
 }
 
 // FetchPRs fetches open PRs where the token owner is reviewer, assignee, or author.
+// Uses separate queries per qualifier because OR between different qualifier types
+// is rejected by the GitHub Search API with a 422.
 // If repos is non-empty the search is scoped to those repos; otherwise all repos are searched.
 func (c *Client) FetchPRs(repos []string) ([]*PullRequest, error) {
-	var query string
-	if len(repos) == 0 {
-		query = "is:pr is:open (review-requested:@me OR assignee:@me OR author:@me)"
-	} else {
-		repoQuery := "repo:" + strings.Join(repos, " repo:")
-		query = fmt.Sprintf("is:pr is:open (%s) (review-requested:@me OR assignee:@me OR author:@me)", repoQuery)
-	}
-
-	params := url.Values{}
-	params.Set("q", query)
-	params.Set("per_page", "100")
-
-	resp, err := c.do("GET", "/search/issues?"+params.Encode(), "application/vnd.github+json")
+	username, err := c.AuthenticatedUser()
 	if err != nil {
-		return nil, fmt.Errorf("github: search PRs: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("github: search PRs: status %d: %s", resp.StatusCode, body)
+		return nil, fmt.Errorf("github: resolve user: %w", err)
 	}
 
-	var result struct {
-		Items []*PullRequest `json:"items"`
+	repoFilter := ""
+	if len(repos) > 0 {
+		repoFilter = " repo:" + strings.Join(repos, " repo:")
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("github: decode search: %w", err)
+
+	qualifiers := []string{
+		fmt.Sprintf("review-requested:%s", username),
+		fmt.Sprintf("assignee:%s", username),
+		fmt.Sprintf("author:%s", username),
 	}
-	return result.Items, nil
+
+	seen := make(map[int64]struct{})
+	var all []*PullRequest
+
+	for _, qualifier := range qualifiers {
+		query := fmt.Sprintf("is:pr is:open %s%s", qualifier, repoFilter)
+		params := url.Values{}
+		params.Set("q", query)
+		params.Set("per_page", "100")
+
+		resp, err := c.do("GET", "/search/issues?"+params.Encode(), "application/vnd.github+json")
+		if err != nil {
+			return nil, fmt.Errorf("github: search PRs (%s): %w", qualifier, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("github: search PRs (%s): status %d: %s", qualifier, resp.StatusCode, body)
+		}
+
+		var result struct {
+			Items []*PullRequest `json:"items"`
+		}
+		if err := json.Unmarshal(body, &result); err != nil {
+			return nil, fmt.Errorf("github: decode search (%s): %w", qualifier, err)
+		}
+		for _, pr := range result.Items {
+			if _, dup := seen[pr.ID]; !dup {
+				seen[pr.ID] = struct{}{}
+				all = append(all, pr)
+			}
+		}
+	}
+	return all, nil
 }
 
 // FetchDiff returns the unified diff for a PR.
