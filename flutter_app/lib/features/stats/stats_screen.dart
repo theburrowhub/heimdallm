@@ -230,7 +230,7 @@ class _BarChart extends StatelessWidget {
     final maxCount = days.map((d) => (d['count'] as int? ?? 0)).fold(1, (a, b) => a > b ? a : b);
 
     return SizedBox(
-      height: 80,
+      height: 96,
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: days.map((d) {

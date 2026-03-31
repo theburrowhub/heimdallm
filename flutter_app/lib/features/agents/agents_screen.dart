@@ -58,7 +58,7 @@ class _PromptsView extends ConsumerWidget {
           ),
         ),
         SizedBox(
-          height: 110,
+          height: 130,
           child: ListView(
             scrollDirection: Axis.horizontal,
             padding: const EdgeInsets.symmetric(horizontal: 16),
