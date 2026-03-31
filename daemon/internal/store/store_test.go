@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/auto-pr/daemon/internal/store"
+	"github.com/heimdallr/daemon/internal/store"
 )
 
 func newTestStore(t *testing.T) *store.Store {

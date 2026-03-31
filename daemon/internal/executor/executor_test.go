@@ -6,7 +6,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/auto-pr/daemon/internal/executor"
+	"github.com/heimdallr/daemon/internal/executor"
 )
 
 func TestDetect(t *testing.T) {

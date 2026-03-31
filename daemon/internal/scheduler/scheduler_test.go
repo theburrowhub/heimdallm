@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/auto-pr/daemon/internal/scheduler"
+	"github.com/heimdallr/daemon/internal/scheduler"
 )
 
 func TestScheduler_Ticks(t *testing.T) {

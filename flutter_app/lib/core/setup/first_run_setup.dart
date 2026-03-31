@@ -4,7 +4,7 @@ import '../models/config_model.dart';
 /// Handles first-run setup: writes config file to disk and stores
 /// the GitHub token in macOS Keychain via the `security` CLI.
 class FirstRunSetup {
-  static const _keychainService = 'auto-pr';
+  static const _keychainService = 'heimdallr';
   static const _keychainAccount = 'github-token';
 
   /// Stores the GitHub token in macOS Keychain.
@@ -42,12 +42,12 @@ class FirstRunSetup {
     return null;
   }
 
-  /// Writes the daemon config file to ~/.config/auto-pr/config.toml
+  /// Writes the daemon config file to ~/.config/heimdallr/config.toml
   static Future<void> writeConfig(AppConfig config) async {
     final home = Platform.environment['HOME'] ?? '';
     if (home.isEmpty) throw Exception('HOME environment variable not set');
 
-    final dir = Directory('$home/.config/auto-pr');
+    final dir = Directory('$home/.config/heimdallr');
     await dir.create(recursive: true);
 
     final repos = config.repositories.map((r) => '"$r"').join(', ');
@@ -68,13 +68,13 @@ ${fallbackLine}
 [retention]
 max_days = ${config.retentionDays}
 ''';
-    final file = File('$home/.config/auto-pr/config.toml');
+    final file = File('$home/.config/heimdallr/config.toml');
     await file.writeAsString(content);
   }
 
   /// Returns true if a config file already exists.
   static Future<bool> configExists() async {
     final home = Platform.environment['HOME'] ?? '';
-    return File('$home/.config/auto-pr/config.toml').exists();
+    return File('$home/.config/heimdallr/config.toml').exists();
   }
 }

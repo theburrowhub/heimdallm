@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:auto_pr/shared/router.dart';
+import 'package:heimdallr/shared/router.dart';
 
 void main() {
   testWidgets('AutoPRApp builds without error', (tester) async {

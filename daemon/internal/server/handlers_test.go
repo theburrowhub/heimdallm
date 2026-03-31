@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/auto-pr/daemon/internal/server"
-	"github.com/auto-pr/daemon/internal/sse"
-	"github.com/auto-pr/daemon/internal/store"
+	"github.com/heimdallr/daemon/internal/server"
+	"github.com/heimdallr/daemon/internal/sse"
+	"github.com/heimdallr/daemon/internal/store"
 )
 
 func setupServer(t *testing.T) (*server.Server, *store.Store) {

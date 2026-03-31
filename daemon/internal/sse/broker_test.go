@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/auto-pr/daemon/internal/sse"
+	"github.com/heimdallr/daemon/internal/sse"
 )
 
 func TestBroker_PublishAndReceive(t *testing.T) {

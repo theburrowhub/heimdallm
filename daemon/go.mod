@@ -1,4 +1,4 @@
-module github.com/auto-pr/daemon
+module github.com/heimdallr/daemon
 
 go 1.21
 

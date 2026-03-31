@@ -37,10 +37,14 @@ class DaemonLifecycle {
     _process = null;
   }
 
+  /// Returns the daemon binary path.
+  /// Priority:
+  ///   1. HEIMDALLR_DAEMON_PATH env var (set by `make dev` for local dev)
+  ///   2. Next to the app executable (production .app bundle)
   static String defaultBinaryPath() {
-    final exe = Platform.resolvedExecutable;
-    final dir = File(exe).parent.path;
-    return '$dir/auto-pr-daemon';
+    final envPath = Platform.environment['HEIMDALLR_DAEMON_PATH'];
+    if (envPath != null && envPath.isNotEmpty) return envPath;
+    return '${File(Platform.resolvedExecutable).parent.path}/heimdallr';
   }
 }
 

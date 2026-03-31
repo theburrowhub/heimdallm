@@ -2,11 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
-import 'package:auto_pr/core/models/pr.dart';
-import 'package:auto_pr/core/models/review.dart';
-import 'package:auto_pr/features/dashboard/dashboard_providers.dart';
-import 'package:auto_pr/features/pr_detail/pr_detail_providers.dart';
-import 'package:auto_pr/features/pr_detail/pr_detail_screen.dart';
+import 'package:heimdallr/core/models/pr.dart';
+import 'package:heimdallr/core/models/review.dart';
+import 'package:heimdallr/features/dashboard/dashboard_providers.dart';
+import 'package:heimdallr/features/pr_detail/pr_detail_providers.dart';
+import 'package:heimdallr/features/pr_detail/pr_detail_screen.dart';
 
 void main() {
   testWidgets('PRDetailScreen shows review summary', (tester) async {

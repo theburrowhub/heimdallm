@@ -8,14 +8,14 @@ import (
 	"text/template"
 )
 
-const plistName = "com.auto-pr.daemon.plist"
+const plistName = "com.heimdallr.daemon.plist"
 
 var plistTemplate = template.Must(template.New("plist").Parse(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>com.auto-pr.daemon</string>
+	<string>com.heimdallr.daemon</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>{{.BinaryPath}}</string>

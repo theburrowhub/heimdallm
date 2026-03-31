@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:auto_pr/core/api/sse_client.dart';
+import 'package:heimdallr/core/api/sse_client.dart';
 
 void main() {
   test('SseEvent parses type and data', () {

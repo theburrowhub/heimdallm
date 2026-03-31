@@ -101,8 +101,8 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// DefaultPath returns ~/.config/auto-pr/config.toml
+// DefaultPath returns ~/.config/heimdallr/config.toml
 func DefaultPath() string {
 	home, _ := os.UserHomeDir()
-	return home + "/.config/auto-pr/config.toml"
+	return home + "/.config/heimdallr/config.toml"
 }

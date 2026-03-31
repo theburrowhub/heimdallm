@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const service = "auto-pr"
+const service = "heimdallr"
 const account = "github-token"
 
 // Get retrieves the GitHub token from macOS Keychain.

@@ -9,9 +9,9 @@ import (
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/auto-pr/daemon/internal/pipeline"
-	"github.com/auto-pr/daemon/internal/sse"
-	"github.com/auto-pr/daemon/internal/store"
+	"github.com/heimdallr/daemon/internal/pipeline"
+	"github.com/heimdallr/daemon/internal/sse"
+	"github.com/heimdallr/daemon/internal/store"
 )
 
 // Server holds the HTTP router, SSE broker, store, and optional pipeline.

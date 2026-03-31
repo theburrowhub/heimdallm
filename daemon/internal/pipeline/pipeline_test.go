@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/auto-pr/daemon/internal/executor"
-	"github.com/auto-pr/daemon/internal/github"
-	"github.com/auto-pr/daemon/internal/pipeline"
-	"github.com/auto-pr/daemon/internal/store"
+	"github.com/heimdallr/daemon/internal/executor"
+	"github.com/heimdallr/daemon/internal/github"
+	"github.com/heimdallr/daemon/internal/pipeline"
+	"github.com/heimdallr/daemon/internal/store"
 )
 
 type fakeGH struct {

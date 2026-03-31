@@ -10,17 +10,17 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/auto-pr/daemon/internal/config"
-	"github.com/auto-pr/daemon/internal/executor"
-	gh "github.com/auto-pr/daemon/internal/github"
-	"github.com/auto-pr/daemon/internal/keychain"
-	"github.com/auto-pr/daemon/internal/notify"
-	"github.com/auto-pr/daemon/internal/pipeline"
-	"github.com/auto-pr/daemon/internal/scheduler"
-	"github.com/auto-pr/daemon/internal/server"
-	"github.com/auto-pr/daemon/internal/sse"
-	"github.com/auto-pr/daemon/internal/store"
-	"github.com/auto-pr/daemon/launchagent"
+	"github.com/heimdallr/daemon/internal/config"
+	"github.com/heimdallr/daemon/internal/executor"
+	gh "github.com/heimdallr/daemon/internal/github"
+	"github.com/heimdallr/daemon/internal/keychain"
+	"github.com/heimdallr/daemon/internal/notify"
+	"github.com/heimdallr/daemon/internal/pipeline"
+	"github.com/heimdallr/daemon/internal/scheduler"
+	"github.com/heimdallr/daemon/internal/server"
+	"github.com/heimdallr/daemon/internal/sse"
+	"github.com/heimdallr/daemon/internal/store"
+	"github.com/heimdallr/daemon/launchagent"
 )
 
 func main() {

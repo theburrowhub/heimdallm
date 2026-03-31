@@ -52,7 +52,7 @@ class ConfigNotifier extends AsyncNotifier<AppConfig> {
       // 1. Store token in Keychain
       await FirstRunSetup.storeToken(token);
 
-      // 2. Write config to ~/.config/auto-pr/config.toml
+      // 2. Write config to ~/.config/heimdallr/config.toml
       await FirstRunSetup.writeConfig(config);
 
       // 3. Launch daemon

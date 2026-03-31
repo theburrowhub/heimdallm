@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/auto-pr/daemon/internal/config"
+	"github.com/heimdallr/daemon/internal/config"
 )
 
 func TestLoad_Defaults(t *testing.T) {
