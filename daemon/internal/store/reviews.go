@@ -23,7 +23,7 @@ func (s *Store) InsertReview(r *Review) (int64, error) {
 		INSERT INTO reviews (pr_id, cli_used, summary, issues, suggestions, severity, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 	`, r.PRID, r.CLIUsed, r.Summary, r.Issues, r.Suggestions, r.Severity,
-		r.CreatedAt.UTC().Format(time.RFC3339),
+		r.CreatedAt.UTC().Format(sqliteTimeFormat),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("store: insert review: %w", err)
@@ -62,24 +62,30 @@ func (s *Store) LatestReviewForPR(prID int64) (*Review, error) {
 }
 
 // PurgeOldReviews deletes reviews older than maxDays. No-op if maxDays == 0.
+// The cutoff is computed in Go and passed as an RFC3339 string so that the
+// comparison is consistent with how the modernc.org/sqlite driver stores values.
 func (s *Store) PurgeOldReviews(maxDays int) error {
 	if maxDays == 0 {
 		return nil
 	}
-	_, err := s.db.Exec(
-		"DELETE FROM reviews WHERE created_at < datetime('now', ?)",
-		fmt.Sprintf("-%d days", maxDays),
-	)
-	return err
+	cutoff := time.Now().UTC().Add(-time.Duration(maxDays) * 24 * time.Hour).Format(sqliteTimeFormat)
+	_, err := s.db.Exec("DELETE FROM reviews WHERE created_at < ?", cutoff)
+	if err != nil {
+		return fmt.Errorf("store: purge old reviews: %w", err)
+	}
+	return nil
 }
 
 func scanReview(s scanner) (*Review, error) {
 	var rev Review
 	var createdAt string
-	if err := s.Scan(&rev.ID, &rev.PRID, &rev.CLIUsed, &rev.Summary,
+	var err error
+	if err = s.Scan(&rev.ID, &rev.PRID, &rev.CLIUsed, &rev.Summary,
 		&rev.Issues, &rev.Suggestions, &rev.Severity, &createdAt); err != nil {
 		return nil, fmt.Errorf("store: scan review: %w", err)
 	}
-	rev.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+	if rev.CreatedAt, err = time.Parse(sqliteTimeFormat, createdAt); err != nil {
+		return nil, fmt.Errorf("store: parse created_at %q: %w", createdAt, err)
+	}
 	return &rev, nil
 }

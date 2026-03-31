@@ -29,8 +29,8 @@ func (s *Store) UpsertPR(pr *PR) (int64, error) {
 			author=excluded.author, url=excluded.url, state=excluded.state,
 			updated_at=excluded.updated_at, fetched_at=excluded.fetched_at
 	`, pr.GithubID, pr.Repo, pr.Number, pr.Title, pr.Author, pr.URL, pr.State,
-		pr.UpdatedAt.UTC().Format(time.RFC3339),
-		pr.FetchedAt.UTC().Format(time.RFC3339),
+		pr.UpdatedAt.UTC().Format(sqliteTimeFormat),
+		pr.FetchedAt.UTC().Format(sqliteTimeFormat),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("store: upsert pr: %w", err)
@@ -90,11 +90,16 @@ type scanner interface {
 func scanPR(s scanner) (*PR, error) {
 	var pr PR
 	var updatedAt, fetchedAt string
-	if err := s.Scan(&pr.ID, &pr.GithubID, &pr.Repo, &pr.Number, &pr.Title,
+	var err error
+	if err = s.Scan(&pr.ID, &pr.GithubID, &pr.Repo, &pr.Number, &pr.Title,
 		&pr.Author, &pr.URL, &pr.State, &updatedAt, &fetchedAt); err != nil {
 		return nil, fmt.Errorf("store: scan pr: %w", err)
 	}
-	pr.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
-	pr.FetchedAt, _ = time.Parse(time.RFC3339, fetchedAt)
+	if pr.UpdatedAt, err = time.Parse(sqliteTimeFormat, updatedAt); err != nil {
+		return nil, fmt.Errorf("store: parse updated_at %q: %w", updatedAt, err)
+	}
+	if pr.FetchedAt, err = time.Parse(sqliteTimeFormat, fetchedAt); err != nil {
+		return nil, fmt.Errorf("store: parse fetched_at %q: %w", fetchedAt, err)
+	}
 	return &pr, nil
 }

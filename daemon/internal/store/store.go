@@ -3,9 +3,17 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
+
+// sqliteTimeFormat is the datetime layout used when reading time values back from SQLite.
+// The modernc.org/sqlite driver auto-converts stored DATETIME text to RFC3339 on read,
+// so we store and parse in RFC3339. For range comparisons (e.g. PurgeOldReviews) we
+// compute the cutoff in Go rather than using SQLite's datetime() function, which would
+// return a space-separated string that compares incorrectly against RFC3339 values.
+const sqliteTimeFormat = time.RFC3339
 
 // Store wraps a SQLite database connection.
 type Store struct {
