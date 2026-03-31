@@ -1,221 +1,125 @@
 # LLM How-To: Install or Update Heimdallr
 
-This document is written for Claude Code, Cursor, or any AI agent helping a user install or update Heimdallr on macOS. Follow these steps precisely — each one handles a common failure mode.
+Step-by-step guide for Claude Code or any AI agent to install Heimdallr on macOS.
 
 ---
 
-## Prerequisites check
-
-Before starting, verify:
+## 1. Get the latest version
 
 ```bash
-# macOS version (requires 13+)
-sw_vers -productVersion
-
-# gh CLI installed and authenticated
-gh auth status
-
-# Architecture (arm64 = Apple Silicon, x86_64 = Intel)
-uname -m
-```
-
-If `gh auth status` fails, ask the user to run `gh auth login` first.
-
----
-
-## Step 1: Get the latest release URL
-
-```bash
-DOWNLOAD_URL=$(gh release view --repo theburrowhub/heimdallr --json assets \
-  -q '.assets[] | select(.name | endswith(".dmg")) | .browserDownloadUrl' \
-  | head -1)
-
 VERSION=$(gh release view --repo theburrowhub/heimdallr --json tagName -q '.tagName')
+DOWNLOAD_URL=$(gh release view --repo theburrowhub/heimdallr --json assets \
+  -q '.assets[] | select(.name | endswith(".dmg")) | .browserDownloadUrl')
 
 echo "Installing Heimdallr $VERSION"
-echo "From: $DOWNLOAD_URL"
 ```
 
 ---
 
-## Step 2: Download the DMG
+## 2. Download and install
 
 ```bash
-curl -L "$DOWNLOAD_URL" -o "/tmp/Heimdallr-${VERSION}.dmg" --progress-bar
-```
+# Download
+curl -L "$DOWNLOAD_URL" -o "/tmp/Heimdallr.dmg" --progress-bar
 
-Verify the download completed:
-```bash
-ls -lh "/tmp/Heimdallr-${VERSION}.dmg"
-# Should be ~28-35 MB
-```
-
----
-
-## Step 3: Mount the DMG
-
-```bash
-hdiutil attach "/tmp/Heimdallr-${VERSION}.dmg" -nobrowse -quiet
+# Mount
+hdiutil attach /tmp/Heimdallr.dmg -nobrowse -quiet
 sleep 2
-```
 
-Find the mounted app:
-```bash
-APP_SRC=$(find /Volumes -name "Heimdallr.app" -newer "/tmp/Heimdallr-${VERSION}.dmg" 2>/dev/null | head -1)
-# Fallback if timestamp comparison fails:
-[ -z "$APP_SRC" ] && APP_SRC=$(ls -dt /Volumes/Heimdallr*/Heimdallr.app 2>/dev/null | head -1)
-echo "Source: $APP_SRC"
-```
+# Find the app inside the mounted volume
+APP_SRC=$(find /Volumes -name "Heimdallr.app" 2>/dev/null | head -1)
 
-**Verify the bundle has both binaries** (critical — if both are same size, the build is broken):
-```bash
-ls -lh "$APP_SRC/Contents/MacOS/"
-# Expected:
-#   heimdalld   ~15 MB   ← Go daemon
-#   Heimdallr   ~164 KB  ← Flutter launcher
-#
-# If only one file or both are 15 MB → do NOT install, the build has a bug.
-```
+# Verify the bundle has both binaries before installing
+FLUTTER_BIN="$APP_SRC/Contents/MacOS/Heimdallr"
+DAEMON_BIN="$APP_SRC/Contents/MacOS/heimdalld"
 
----
+if [ ! -f "$FLUTTER_BIN" ] || [ ! -f "$DAEMON_BIN" ]; then
+  echo "❌ Bundle is incomplete. Do not install — re-download from releases."
+  exit 1
+fi
 
-## Step 4: Install to /Applications
+if cmp -s "$FLUTTER_BIN" "$DAEMON_BIN"; then
+  echo "❌ Bundle is corrupt (both binaries are identical). Do not install."
+  exit 1
+fi
 
-Stop any running instance first:
-```bash
-pkill -9 -f "Heimdallr" 2>/dev/null; sleep 1
-```
+echo "✓ Bundle looks good ($(ls -lh "$DAEMON_BIN" | awk '{print $5}') daemon, $(ls -lh "$FLUTTER_BIN" | awk '{print $5}') launcher)"
 
-Copy and replace:
-```bash
+# Install
+pkill -9 -f Heimdallr 2>/dev/null; sleep 1
 rm -rf /Applications/Heimdallr.app
 cp -R "$APP_SRC" /Applications/Heimdallr.app
-echo "✓ Copied to /Applications"
+echo "✓ Installed to /Applications"
 ```
 
 ---
 
-## Step 5: Remove quarantine (required for ad-hoc signed builds)
+## 3. Allow macOS to run it
 
-macOS quarantines apps downloaded from the internet. This must be done **after** copying to /Applications (the DMG volume is read-only — xattr would silently fail there).
+macOS blocks apps not signed by Apple by default. This one-time command removes that restriction:
 
 ```bash
 xattr -cr /Applications/Heimdallr.app
-echo "✓ Quarantine removed"
-```
-
-Verify:
-```bash
-xattr -l /Applications/Heimdallr.app | grep quarantine | wc -l
-# Should print 0
+echo "✓ macOS restriction removed"
 ```
 
 ---
 
-## Step 6: Re-sign with local entitlements
-
-The CI build uses ad-hoc signing. Re-signing locally ensures the entitlements
-(no sandbox, network access) are preserved. Without them the app opens and
-closes immediately.
-
-Write the entitlements to a temp file — no repo clone needed:
-
-```bash
-ENTITLEMENTS=$(mktemp /tmp/heimdallr-entitlements.XXXXXX.plist)
-cat > "$ENTITLEMENTS" << 'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <!-- Sandbox disabled: Heimdallr spawns the daemon, runs gh/security/bash -->
-  <key>com.apple.security.app-sandbox</key>
-  <false/>
-  <key>com.apple.security.network.client</key>
-  <true/>
-</dict>
-</plist>
-PLIST
-
-codesign --force --deep --sign - \
-  --entitlements "$ENTITLEMENTS" \
-  /Applications/Heimdallr.app
-
-rm -f "$ENTITLEMENTS"
-codesign --verify /Applications/Heimdallr.app && echo "✓ Signature valid"
-```
-
----
-
-## Step 7: Launch and verify
+## 4. Launch
 
 ```bash
 open /Applications/Heimdallr.app
 sleep 5
 
-# Check it's running
-INSTANCES=$(pgrep -c Heimdallr 2>/dev/null || echo 0)
-echo "Running instances: $INSTANCES"
-# Expected: exactly 1
-# If > 10: fork bomb — kill immediately: pkill -9 -f Heimdallr
+# Confirm it started (should be exactly 1)
+echo "Instances running: $(pgrep -c Heimdallr 2>/dev/null || echo 0)"
 
-# Check daemon is up
+# Confirm the background service is up
 curl -s http://localhost:7842/health
 # Expected: {"status":"ok"}
+```
+
+On first launch Heimdallr detects your `gh` token automatically and sets itself up.
+
+---
+
+## 5. Cleanup
+
+```bash
+HEIMDALLR_DEV=$(mount | grep -i "Heimdallr" | awk '{print $1}' | head -1)
+[ -n "$HEIMDALLR_DEV" ] && hdiutil detach "$HEIMDALLR_DEV" 2>/dev/null
+rm -f /tmp/Heimdallr.dmg
 ```
 
 ---
 
 ## Troubleshooting
 
-### Fork bomb (hundreds of instances spawned)
+**Hundreds of instances spawn immediately**
 ```bash
 pkill -9 -f Heimdallr
 ```
-This means the installed binary is corrupt (daemon and Flutter launcher were the same file). Go back to Step 3 and verify the bundle has **two distinct binaries** before installing.
+The bundle is corrupt — both binaries were the same file. Step 2 guards against this; if it happened anyway, re-download.
 
-### "Operation not permitted" on launch
-The quarantine xattr is still present. Re-run Step 5. Make sure you ran it on `/Applications/Heimdallr.app` (not on the DMG volume).
+**"Operation not permitted" / app killed on launch**
+Step 3 was skipped or ran on the DMG volume (read-only). Re-run it on `/Applications/Heimdallr.app`.
 
-### App opens and closes immediately (no window)
+**App opens and closes immediately**
+Run from Terminal to see errors:
 ```bash
 /Applications/Heimdallr.app/Contents/MacOS/Heimdallr 2>&1 &
-sleep 3
-pgrep Heimdallr
+sleep 4 && pgrep Heimdallr
 ```
-If the process exits in < 3 seconds, check macOS Console.app for crash logs. Most likely cause: missing entitlements (re-run Step 6).
 
-### Daemon not responding after 10 seconds
+**Daemon not responding after 10 seconds**
 ```bash
-# Try starting daemon manually
-/Applications/Heimdallr.app/Contents/MacOS/heimdalld 2>&1 &
-sleep 2
-curl -s http://localhost:7842/health
+/Applications/Heimdallr.app/Contents/MacOS/heimdalld &
+sleep 2 && curl -s http://localhost:7842/health
 ```
-If it exits immediately, there's likely no config at `~/.config/heimdallr/config.toml`. The Heimdallr app creates it on first launch — open the app and go through the Setup screen.
-
-### "Daemon binary not found" error screen
-The app shows this when `heimdalld` is not in `Heimdallr.app/Contents/MacOS/`. Verify:
-```bash
-ls /Applications/Heimdallr.app/Contents/MacOS/
-# Must show both: Heimdallr AND heimdalld
-```
-If `heimdalld` is missing, the CI build was broken. Re-download from the releases page.
-
----
-
-## Cleanup
-
-```bash
-# Unmount the DMG — find the actual device regardless of volume name
-HEIMDALLR_DEV=$(mount | grep -i "Heimdallr" | awk '{print $1}' | head -1)
-[ -n "$HEIMDALLR_DEV" ] && hdiutil detach "$HEIMDALLR_DEV" 2>/dev/null && echo "✓ DMG unmounted"
-
-# Remove downloaded DMG
-rm -f "/tmp/Heimdallr-${VERSION}.dmg"
-```
+If it exits, there's no config yet — the app creates it on first launch.
 
 ---
 
 ## Updating
 
-To update, repeat from Step 1. The app preserves config at `~/.config/heimdallr/config.toml` and the SQLite database at `~/.local/share/heimdallr/heimdallr.db` — no data is lost on update.
+Repeat from step 1. Config (`~/.config/heimdallr/`) and history (`~/.local/share/heimdallr/`) are preserved.
