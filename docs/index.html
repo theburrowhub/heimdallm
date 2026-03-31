@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Heimdallr — AI-powered GitHub PR Reviews for macOS</title>
+  <meta name="description" content="Heimdallr watches your GitHub pull requests and automatically runs AI code reviews using Claude, Gemini or Codex — then posts the review directly to GitHub.">
+  <meta property="og:title" content="Heimdallr">
+  <meta property="og:description" content="AI-powered GitHub PR reviews for macOS. Runs in your menu bar. Reviews automatically. Posts to GitHub.">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #0d1117;
+      --surface:  #161b22;
+      --border:   #30363d;
+      --text:     #e6edf3;
+      --muted:    #8b949e;
+      --accent:   #4493f8;
+      --accent2:  #3fb950;
+      --red:      #f85149;
+      --orange:   #d29922;
+      --radius:   12px;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+    }
+
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* ── Nav ── */
+    nav {
+      position: sticky; top: 0; z-index: 100;
+      background: rgba(13,17,23,0.85);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+      padding: 0 2rem;
+      display: flex; align-items: center; gap: 2rem;
+      height: 60px;
+    }
+    nav .logo {
+      font-weight: 700; font-size: 1.1rem;
+      display: flex; align-items: center; gap: 0.5rem;
+    }
+    nav .logo span { font-size: 1.4rem; }
+    nav a { color: var(--muted); font-size: 0.9rem; }
+    nav a:hover { color: var(--text); text-decoration: none; }
+    nav .cta {
+      margin-left: auto;
+      background: var(--accent);
+      color: #fff !important;
+      padding: 0.4rem 1.1rem;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      font-weight: 600;
+    }
+    nav .cta:hover { background: #58a6ff; text-decoration: none !important; }
+
+    /* ── Hero ── */
+    .hero {
+      text-align: center;
+      padding: 7rem 2rem 5rem;
+      max-width: 860px;
+      margin: 0 auto;
+    }
+    .hero-badge {
+      display: inline-flex; align-items: center; gap: 0.4rem;
+      background: rgba(68,147,248,0.1);
+      border: 1px solid rgba(68,147,248,0.3);
+      color: var(--accent);
+      font-size: 0.8rem; font-weight: 600;
+      padding: 0.3rem 0.8rem;
+      border-radius: 20px;
+      margin-bottom: 1.5rem;
+    }
+    .hero h1 {
+      font-size: clamp(2.2rem, 5vw, 3.5rem);
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      line-height: 1.15;
+      margin-bottom: 1.2rem;
+    }
+    .hero h1 em {
+      font-style: normal;
+      background: linear-gradient(135deg, #4493f8 0%, #a371f7 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .hero p {
+      font-size: 1.15rem;
+      color: var(--muted);
+      max-width: 600px;
+      margin: 0 auto 2.5rem;
+    }
+    .hero-actions {
+      display: flex; justify-content: center; gap: 1rem; flex-wrap: wrap;
+    }
+    .btn {
+      display: inline-flex; align-items: center; gap: 0.4rem;
+      padding: 0.7rem 1.6rem;
+      border-radius: 8px;
+      font-size: 0.95rem; font-weight: 600;
+      cursor: pointer;
+      transition: opacity .15s;
+    }
+    .btn:hover { opacity: .85; text-decoration: none !important; }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-secondary {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+    }
+
+    /* ── Flow ── */
+    .flow {
+      max-width: 860px;
+      margin: 0 auto 5rem;
+      padding: 0 2rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0;
+      flex-wrap: wrap;
+    }
+    .flow-step {
+      text-align: center;
+      padding: 1rem;
+      flex: 1;
+      min-width: 120px;
+    }
+    .flow-icon {
+      font-size: 2rem;
+      display: block;
+      margin-bottom: 0.5rem;
+    }
+    .flow-step p { font-size: 0.82rem; color: var(--muted); margin-top: 0.25rem; }
+    .flow-arrow {
+      color: var(--border);
+      font-size: 1.4rem;
+      padding: 0 0.25rem;
+      flex-shrink: 0;
+    }
+
+    /* ── Features ── */
+    .section { padding: 5rem 2rem; }
+    .section-inner { max-width: 1000px; margin: 0 auto; }
+    .section-label {
+      text-transform: uppercase;
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: .1em;
+      color: var(--accent);
+      margin-bottom: 0.75rem;
+    }
+    .section h2 {
+      font-size: clamp(1.6rem, 3vw, 2.2rem);
+      font-weight: 700;
+      margin-bottom: 1rem;
+    }
+    .section > .section-inner > p {
+      color: var(--muted);
+      max-width: 600px;
+      margin-bottom: 3rem;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 1.25rem;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.5rem;
+    }
+    .card-icon { font-size: 1.6rem; margin-bottom: 0.75rem; }
+    .card h3 { font-size: 1rem; font-weight: 600; margin-bottom: 0.4rem; }
+    .card p { font-size: 0.875rem; color: var(--muted); line-height: 1.5; }
+
+    /* ── Review example ── */
+    .review-box {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.5rem;
+      font-size: 0.875rem;
+      max-width: 680px;
+    }
+    .review-header {
+      display: flex; align-items: center; gap: 0.75rem;
+      margin-bottom: 1rem;
+      padding-bottom: 0.75rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .review-header .avatar {
+      width: 32px; height: 32px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #4493f8, #a371f7);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1rem; flex-shrink: 0;
+    }
+    .review-header .meta { flex: 1; }
+    .review-header .meta strong { display: block; }
+    .review-header .meta span { color: var(--muted); font-size: 0.8rem; }
+    .review-header .badge {
+      background: rgba(248,81,73,0.15);
+      border: 1px solid rgba(248,81,73,0.4);
+      color: var(--red);
+      font-size: 0.75rem; font-weight: 700;
+      padding: 0.2rem 0.6rem;
+      border-radius: 20px;
+    }
+    .review-issue {
+      display: flex; gap: 0.5rem;
+      padding: 0.5rem 0;
+      border-bottom: 1px solid var(--border);
+      line-height: 1.4;
+    }
+    .review-issue:last-of-type { border-bottom: none; }
+    .review-issue .severity { flex-shrink: 0; }
+    .review-issue code {
+      background: rgba(255,255,255,0.07);
+      padding: 0.1em 0.35em;
+      border-radius: 4px;
+      font-size: 0.82em;
+    }
+    .review-summary {
+      color: var(--muted);
+      margin-bottom: 1rem;
+      font-style: italic;
+    }
+
+    /* ── Prompts ── */
+    .prompt-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 0.75rem;
+    }
+    .prompt-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem;
+      display: flex; align-items: flex-start; gap: 0.6rem;
+    }
+    .prompt-card .emoji { font-size: 1.3rem; flex-shrink: 0; margin-top: 0.1rem; }
+    .prompt-card h4 { font-size: 0.9rem; font-weight: 600; }
+    .prompt-card p { font-size: 0.8rem; color: var(--muted); margin-top: 0.2rem; }
+
+    /* ── Install ── */
+    .install-section {
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+    }
+    .install-steps {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 1.5rem;
+      margin-top: 2rem;
+    }
+    .install-step {
+      display: flex; gap: 0.75rem;
+    }
+    .step-num {
+      width: 28px; height: 28px; flex-shrink: 0;
+      background: var(--accent);
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 0.8rem; font-weight: 700; color: #fff;
+    }
+    .install-step h4 { font-size: 0.9rem; font-weight: 600; margin-bottom: 0.2rem; }
+    .install-step p { font-size: 0.82rem; color: var(--muted); }
+    pre.inline-code {
+      background: rgba(255,255,255,0.06);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.75rem 1rem;
+      font-size: 0.82rem;
+      overflow-x: auto;
+      margin-top: 0.5rem;
+      font-family: "SFMono-Regular", Consolas, monospace;
+      color: #79c0ff;
+    }
+
+    /* ── Footer ── */
+    footer {
+      text-align: center;
+      padding: 3rem 2rem;
+      color: var(--muted);
+      font-size: 0.85rem;
+      border-top: 1px solid var(--border);
+    }
+    footer a { color: var(--muted); }
+
+    @media (max-width: 600px) {
+      .flow-arrow { display: none; }
+      nav a:not(.cta) { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- Nav -->
+<nav>
+  <div class="logo"><span>🛡️</span> Heimdallr</div>
+  <a href="#features">Features</a>
+  <a href="#prompts">Prompts</a>
+  <a href="#install">Install</a>
+  <a href="https://github.com/theburrowhub/heimdallr" class="cta">GitHub →</a>
+</nav>
+
+<!-- Hero -->
+<section class="hero">
+  <div class="hero-badge">⚡ macOS · Free · Open Source</div>
+  <h1>Your PRs, <em>reviewed automatically</em>.<br>Posted to GitHub.</h1>
+  <p>
+    Heimdallr runs silently in your menu bar, watches your GitHub review requests,
+    and submits AI-generated code reviews — powered by Claude, Gemini or Codex.
+  </p>
+  <div class="hero-actions">
+    <a href="https://github.com/theburrowhub/heimdallr/releases/latest" class="btn btn-primary">
+      ⬇️ Download for macOS
+    </a>
+    <a href="https://github.com/theburrowhub/heimdallr" class="btn btn-secondary">
+      View on GitHub
+    </a>
+  </div>
+</section>
+
+<!-- Flow -->
+<div class="flow">
+  <div class="flow-step"><span class="flow-icon">🔔</span><strong>PR arrives</strong><p>Someone requests your review on GitHub</p></div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-step"><span class="flow-icon">🤖</span><strong>AI reviews</strong><p>Heimdallr fetches the diff and runs your AI agent</p></div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-step"><span class="flow-icon">📝</span><strong>Posted to GitHub</strong><p>Review submitted as your account with severity rating</p></div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-step"><span class="flow-icon">🔔</span><strong>You're notified</strong><p>Native macOS notification with a link to the review</p></div>
+</div>
+
+<!-- Features -->
+<section class="section" id="features">
+  <div class="section-inner">
+    <div class="section-label">Features</div>
+    <h2>Everything you need. Nothing you don't.</h2>
+    <p>Heimdallr is a small, focused tool that does one thing well.</p>
+    <div class="grid">
+      <div class="card">
+        <div class="card-icon">🔍</div>
+        <h3>Automatic detection</h3>
+        <p>Polls GitHub for <code>review-requested:@me</code>. No setup needed — uses your <code>gh</code> CLI token.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">📬</div>
+        <h3>Posts to GitHub</h3>
+        <p>Reviews are submitted as proper GitHub PR reviews — not stored locally. REQUEST_CHANGES on high severity, APPROVE otherwise.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">🧠</div>
+        <h3>Your AI, your rules</h3>
+        <p>Works with Claude, Gemini and Codex. Configure which agent reviews which repo. Pass custom CLI flags.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">✍️</div>
+        <h3>Custom prompts</h3>
+        <p>Define review profiles: security audit, performance, architecture. Use <code>{diff}</code> <code>{author}</code> <code>{link}</code> placeholders.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">📊</div>
+        <h3>Review statistics</h3>
+        <p>Track reviews over time: severity distribution, top repos, reviews per day, average issues per review.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">🍎</div>
+        <h3>Native macOS</h3>
+        <p>Lives in your menu bar. Dark mode, system notifications, no Electron, no browser. Just a Go daemon and a Flutter UI.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Review example -->
+<section class="section" style="padding-top:0;">
+  <div class="section-inner">
+    <div class="section-label">Example review</div>
+    <h2>What a review looks like on GitHub</h2>
+    <p style="margin-bottom:1.5rem;">Posted as a proper GitHub review under your account, with file-level issues and an overall severity badge.</p>
+    <div class="review-box">
+      <div class="review-header">
+        <div class="avatar">🤖</div>
+        <div class="meta">
+          <strong>Heimdallr AI Review</strong>
+          <span>reviewed just now via heimdallr · Reviewed by claude</span>
+        </div>
+        <span class="badge">HIGH</span>
+      </div>
+      <p class="review-summary">"Migration from kubernetes-labeled runner to generic self-hosted runner with kubectl port-forward for registry access. The approach is functional but has reliability and security concerns around the port-forward lifecycle and kubeconfig handling."</p>
+      <div class="review-issue">
+        <span class="severity">🔴</span>
+        <span><code>.github/workflows/docker-publish.yml:138</code> — Port-forward process (PF_PID) is only killed on the happy path. If docker push fails, the port-forward process leaks.</span>
+      </div>
+      <div class="review-issue">
+        <span class="severity">🔴</span>
+        <span><code>.github/workflows/docker-publish.yml:121</code> — KUBE_CONFIG secret is base64-decoded and written to <code>~/.kube/config</code>. If the job crashes before cleanup, credentials persist on the runner.</span>
+      </div>
+      <div class="review-issue">
+        <span class="severity">🟡</span>
+        <span><code>.github/workflows/docker-publish.yml:128</code> — LOCAL_PORT is defined as a string env var but used in numeric contexts. Two concurrent builds will race on port 5050.</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Prompts -->
+<section class="section" id="prompts">
+  <div class="section-inner">
+    <div class="section-label">Prompts</div>
+    <h2>Built-in review profiles</h2>
+    <p style="margin-bottom:1.5rem;">Choose a preset or write your own with <code>{diff}</code> <code>{title}</code> <code>{author}</code> <code>{link}</code> placeholders.</p>
+    <div class="prompt-grid">
+      <div class="prompt-card"><div class="emoji">🔍</div><div><h4>General Review</h4><p>Correctness, maintainability, error handling, code style</p></div></div>
+      <div class="prompt-card"><div class="emoji">🔒</div><div><h4>Security Audit</h4><p>OWASP Top 10, injection, hardcoded secrets, auth flaws</p></div></div>
+      <div class="prompt-card"><div class="emoji">⚡</div><div><h4>Performance</h4><p>N+1 queries, allocations, blocking I/O, O(n²) algorithms</p></div></div>
+      <div class="prompt-card"><div class="emoji">🏛️</div><div><h4>Architecture</h4><p>SOLID violations, coupling, separation of concerns</p></div></div>
+      <div class="prompt-card"><div class="emoji">📝</div><div><h4>Docs & Style</h4><p>Docstrings, naming, magic numbers, conventions</p></div></div>
+      <div class="prompt-card"><div class="emoji">✨</div><div><h4>Custom</h4><p>Write your own with placeholders and optional full template</p></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- Install -->
+<section class="section install-section" id="install">
+  <div class="section-inner">
+    <div class="section-label">Installation</div>
+    <h2>Up and running in 3 steps</h2>
+    <div class="install-steps">
+      <div class="install-step">
+        <div class="step-num">1</div>
+        <div>
+          <h4>Download</h4>
+          <p>Grab the latest DMG from GitHub Releases.</p>
+          <a href="https://github.com/theburrowhub/heimdallr/releases/latest" class="btn btn-primary" style="margin-top:.75rem; font-size:.85rem; padding:.5rem 1rem;">⬇️ Download Heimdallr</a>
+        </div>
+      </div>
+      <div class="install-step">
+        <div class="step-num">2</div>
+        <div>
+          <h4>Drag to Applications</h4>
+          <p>Open the DMG and drag Heimdallr to the Applications folder shortcut.</p>
+        </div>
+      </div>
+      <div class="install-step">
+        <div class="step-num">3</div>
+        <div>
+          <h4>Remove quarantine</h4>
+          <p>Run this once in Terminal (macOS security requirement for unsigned apps):</p>
+          <pre class="inline-code">xattr -cr /Applications/Heimdallr.app</pre>
+        </div>
+      </div>
+    </div>
+    <p style="margin-top:2rem; color:var(--muted); font-size:.875rem;">
+      Requires macOS 13+, <a href="https://cli.github.com">gh CLI</a> authenticated, and Claude/Gemini/Codex CLI installed.
+      Heimdallr auto-detects your <code>gh auth token</code> on first launch — no configuration needed.
+    </p>
+  </div>
+</section>
+
+<!-- Footer -->
+<footer>
+  <p>
+    <strong>Heimdallr</strong> is open source under the MIT license.<br>
+    <a href="https://github.com/theburrowhub/heimdallr">GitHub</a> ·
+    <a href="https://github.com/theburrowhub/heimdallr/releases">Releases</a> ·
+    <a href="https://github.com/theburrowhub/heimdallr/issues">Issues</a>
+  </p>
+</footer>
+
+</body>
+</html>
