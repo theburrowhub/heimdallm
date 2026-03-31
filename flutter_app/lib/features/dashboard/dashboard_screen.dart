@@ -14,7 +14,7 @@ class DashboardScreen extends ConsumerWidget {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('auto-pr'),
+        title: const Text('Heimdallr'),
         actions: [
           IconButton(
             icon: const Icon(Icons.settings),

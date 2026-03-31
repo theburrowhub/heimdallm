@@ -6,7 +6,7 @@ import 'shared/router.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await _ensureDaemonRunning();
-  runApp(const ProviderScope(child: AutoPRApp()));
+  runApp(const ProviderScope(child: HeimdallrApp()));
 }
 
 Future<void> _ensureDaemonRunning() async {
@@ -21,13 +21,13 @@ Future<void> _ensureDaemonRunning() async {
   }
 }
 
-class AutoPRApp extends StatelessWidget {
-  const AutoPRApp({super.key});
+class HeimdallrApp extends StatelessWidget {
+  const HeimdallrApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp.router(
-      title: 'auto-pr',
+      title: 'Heimdallr',
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF0969DA)),
         useMaterial3: true,
