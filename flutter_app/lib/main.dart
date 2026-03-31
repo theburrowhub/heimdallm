@@ -9,10 +9,12 @@ import 'core/api/api_client.dart';
 import 'core/setup/first_run_setup.dart';
 import 'core/setup/repo_discovery.dart';
 import 'core/models/config_model.dart';
+import 'core/tray/tray_menu.dart';
 import 'shared/router.dart';
 
-/// Global router reference for notification deep-linking.
+/// Global router — accessible by tray menu and notification handlers.
 final _appRouter = createRouter(initialLocation: '/');
+GoRouter get appRouter => _appRouter;
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -38,29 +40,13 @@ Future<void> _setupWindow() async {
 
 Future<void> _setupTray() async {
   await trayManager.setIcon('assets/tray_icon.png');
+  // Initial minimal menu until data loads
   await trayManager.setContextMenu(Menu(items: [
-    MenuItem(key: 'show', label: 'Open Heimdallr'),
+    MenuItem(key: 'open', label: 'Open Heimdallr'),
     MenuItem.separator(),
     MenuItem(key: 'quit', label: 'Quit'),
   ]));
-  trayManager.addListener(_TrayHandler._instance);
-}
-
-class _TrayHandler with TrayListener {
-  static final _instance = _TrayHandler._();
-  _TrayHandler._();
-
-  @override
-  void onTrayIconMouseDown() => trayManager.popUpContextMenu();
-
-  @override
-  void onTrayMenuItemClick(MenuItem menuItem) {
-    if (menuItem.key == 'quit') exit(0);
-    if (menuItem.key == 'show') {
-      windowManager.show();
-      windowManager.focus();
-    }
-  }
+  TrayMenu.instance.init();
 }
 
 /// Send a macOS notification from the Flutter app (correct icon, clickable).
