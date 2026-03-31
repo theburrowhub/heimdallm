@@ -20,9 +20,9 @@ class PRDetailScreen extends ConsumerWidget {
     return Scaffold(
       appBar: AppBar(
         title: const Text('PR Review'),
-        leading: context.canPop()
-            ? IconButton(icon: const Icon(Icons.arrow_back), onPressed: () => context.pop())
-            : null,
+        leading: IconButton(
+            icon: const Icon(Icons.arrow_back),
+            onPressed: () => context.canPop() ? context.pop() : context.go('/')),
         actions: [
           ElevatedButton.icon(
             icon: const Icon(Icons.refresh),

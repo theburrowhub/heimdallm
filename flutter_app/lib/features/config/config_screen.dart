@@ -112,9 +112,9 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Settings'),
-        leading: context.canPop()
-            ? IconButton(icon: const Icon(Icons.arrow_back), onPressed: () => context.pop())
-            : null,
+        leading: IconButton(
+            icon: const Icon(Icons.arrow_back),
+            onPressed: () => context.canPop() ? context.pop() : context.go('/')),
       ),
       body: configAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
