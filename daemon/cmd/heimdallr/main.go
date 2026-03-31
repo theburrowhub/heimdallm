@@ -102,10 +102,9 @@ func main() {
 				existing, _ := s.GetPRByGithubID(pr.ID)
 				if existing != nil {
 					if rev, err := s.LatestReviewForPR(existing.ID); err == nil && rev != nil {
-						cfgMu.Lock()
-						interval := parsePollInterval(c.GitHub.PollInterval)
-						cfgMu.Unlock()
-						if time.Since(rev.CreatedAt) < interval {
+						// Skip if PR has not changed since our last review.
+						// pr.UpdatedAt is newer only if new commits or review requests arrived.
+						if !pr.UpdatedAt.After(rev.CreatedAt) {
 							continue
 						}
 					}
@@ -120,6 +119,8 @@ func main() {
 					broker.Publish(sse.Event{Type: sse.EventReviewCompleted, Data: fmt.Sprintf(`{"pr_number":%d,"repo":%q,"pr_id":%d,"severity":%q}`, pr.Number, pr.Repo, rev.PRID, rev.Severity)})
 				}
 			}
+			// Retry reviews stored locally but not yet published to GitHub
+			p.PublishPending()
 		}
 	}
 

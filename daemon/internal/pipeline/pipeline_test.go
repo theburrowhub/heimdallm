@@ -19,6 +19,10 @@ func (f *fakeGH) FetchDiff(repo string, number int) (string, error) {
 	return f.diff, nil
 }
 
+func (f *fakeGH) SubmitReview(repo string, number int, body, event string) (int64, error) {
+	return 12345, nil // fake GitHub review ID
+}
+
 type fakeExec struct{}
 
 func (f *fakeExec) Detect(primary, fallback string) (string, error) {

@@ -35,14 +35,15 @@ CREATE TABLE IF NOT EXISTS prs (
 );
 
 CREATE TABLE IF NOT EXISTS reviews (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  pr_id       INTEGER NOT NULL REFERENCES prs(id),
-  cli_used    TEXT NOT NULL,
-  summary     TEXT NOT NULL,
-  issues      TEXT NOT NULL,
-  suggestions TEXT NOT NULL,
-  severity    TEXT NOT NULL,
-  created_at  DATETIME NOT NULL
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  pr_id            INTEGER NOT NULL REFERENCES prs(id),
+  cli_used         TEXT NOT NULL,
+  summary          TEXT NOT NULL,
+  issues           TEXT NOT NULL,
+  suggestions      TEXT NOT NULL,
+  severity         TEXT NOT NULL,
+  created_at       DATETIME NOT NULL,
+  github_review_id INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS configs (
@@ -70,6 +71,8 @@ func Open(dsn string) (*Store, error) {
 	if _, err := db.Exec(schema); err != nil {
 		return nil, fmt.Errorf("store: migrate: %w", err)
 	}
+	// Migrate existing DBs (ALTER TABLE ignores "duplicate column" errors silently)
+	db.Exec("ALTER TABLE reviews ADD COLUMN github_review_id INTEGER NOT NULL DEFAULT 0")
 	return &Store{db: db}, nil
 }
 

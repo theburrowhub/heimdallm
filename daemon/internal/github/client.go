@@ -125,6 +125,46 @@ func (c *Client) FetchPRs(repos []string) ([]*PullRequest, error) {
 	return all, nil
 }
 
+// SubmitReview posts an AI-generated review to GitHub as a PR review.
+// event should be "REQUEST_CHANGES", "COMMENT", or "APPROVE".
+// Returns the GitHub review ID.
+func (c *Client) SubmitReview(repo string, number int, body, event string) (int64, error) {
+	path := fmt.Sprintf("/repos/%s/pulls/%d/reviews", repo, number)
+
+	payload := map[string]any{
+		"body":  body,
+		"event": event,
+	}
+
+	data, _ := json.Marshal(payload)
+	req, err := http.NewRequest("POST", c.baseURL+path, strings.NewReader(string(data)))
+	if err != nil {
+		return 0, fmt.Errorf("github: submit review: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("github: submit review: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != 200 {
+		return 0, fmt.Errorf("github: submit review: status %d: %s", resp.StatusCode, respBody)
+	}
+
+	var result struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return 0, fmt.Errorf("github: submit review: decode: %w", err)
+	}
+	return result.ID, nil
+}
+
 // FetchDiff returns the unified diff for a PR.
 func (c *Client) FetchDiff(repo string, number int) (string, error) {
 	path := fmt.Sprintf("/repos/%s/pulls/%d", repo, number)
