@@ -47,11 +47,16 @@ func (c *Client) do(method, path string, accept string) (*http.Response, error) 
 	return c.http.Do(req)
 }
 
-// FetchPRs fetches open PRs from GitHub where the token owner is assigned,
-// review-requested, or has authored PRs in the given repositories.
+// FetchPRs fetches open PRs where the token owner is reviewer, assignee, or author.
+// If repos is non-empty the search is scoped to those repos; otherwise all repos are searched.
 func (c *Client) FetchPRs(repos []string) ([]*PullRequest, error) {
-	repoQuery := "repo:" + strings.Join(repos, " repo:")
-	query := fmt.Sprintf("is:pr is:open (%s) (review-requested:@me OR assignee:@me OR author:@me)", repoQuery)
+	var query string
+	if len(repos) == 0 {
+		query = "is:pr is:open (review-requested:@me OR assignee:@me OR author:@me)"
+	} else {
+		repoQuery := "repo:" + strings.Join(repos, " repo:")
+		query = fmt.Sprintf("is:pr is:open (%s) (review-requested:@me OR assignee:@me OR author:@me)", repoQuery)
+	}
 
 	params := url.Values{}
 	params.Set("q", query)

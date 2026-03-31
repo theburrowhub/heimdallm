@@ -89,9 +89,6 @@ func main() {
 			cfgMu.Lock()
 			repos := c.GitHub.Repositories
 			cfgMu.Unlock()
-			if len(repos) == 0 {
-				return // nothing to poll yet
-			}
 			prs, err := ghClient.FetchPRs(repos)
 			if err != nil {
 				slog.Error("poll: fetch PRs", "err", err)
