@@ -1,0 +1,149 @@
+name: Tag release
+
+# Manual trigger from the GitHub Actions UI.
+# Analyzes conventional commits since the last tag and bumps the version
+# accordingly, then pushes the new tag — which triggers build.yml.
+on:
+  workflow_dispatch:
+    inputs:
+      bump_override:
+        description: |
+          Override the auto-detected bump type.
+          Leave empty to infer from conventional commits:
+            feat!: / BREAKING CHANGE → major
+            feat:                    → minor
+            fix: / refactor: / etc.  → patch
+        required: false
+        default: ''
+        type: choice
+        options:
+          - ''
+          - major
+          - minor
+          - patch
+
+      dry_run:
+        description: 'Dry run — compute the next tag without pushing it'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  tag:
+    name: Compute & push semver tag
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write   # required to push tags
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history to inspect all commits
+
+      - name: Compute next version
+        id: semver
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # ── Last released tag ──────────────────────────────────────────────
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          echo "Last tag: $LAST_TAG"
+
+          # ── Parse current version ──────────────────────────────────────────
+          VERSION="${LAST_TAG#v}"
+          MAJOR=$(echo "$VERSION" | cut -d. -f1)
+          MINOR=$(echo "$VERSION" | cut -d. -f2)
+          PATCH=$(echo "$VERSION" | cut -d. -f3)
+
+          # ── Collect commits since last tag ─────────────────────────────────
+          COMMITS=$(git log "${LAST_TAG}..HEAD" --pretty=format:"%s%n%b" 2>/dev/null || true)
+
+          if [ -z "$COMMITS" ]; then
+            echo "No commits since $LAST_TAG — nothing to release."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Commits since $LAST_TAG:"
+          git log "${LAST_TAG}..HEAD" --oneline
+
+          # ── Determine bump from conventional commits ───────────────────────
+          BUMP="patch"   # default
+
+          while IFS= read -r line; do
+            # Breaking change (feat!: / fix!: / BREAKING CHANGE: in body)
+            if echo "$line" | grep -qE '^(feat|fix|refactor|perf|chore)(\(.+\))?!:|^BREAKING CHANGE:'; then
+              BUMP="major"
+              break
+            fi
+            # New feature
+            if echo "$line" | grep -qE '^feat(\(.+\))?:'; then
+              [ "$BUMP" != "major" ] && BUMP="minor"
+            fi
+            # Patch-level: fix / refactor / perf / build / ci → stay on patch
+          done <<< "$COMMITS"
+
+          # ── Apply manual override if provided ─────────────────────────────
+          OVERRIDE="${{ inputs.bump_override }}"
+          if [ -n "$OVERRIDE" ]; then
+            echo "Override: $OVERRIDE (was: $BUMP)"
+            BUMP="$OVERRIDE"
+          fi
+
+          echo "Bump type: $BUMP"
+
+          # ── Compute new version ────────────────────────────────────────────
+          case "$BUMP" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+          esac
+
+          NEW_TAG="v${MAJOR}.${MINOR}.${PATCH}"
+          echo "New tag: $NEW_TAG"
+
+          echo "skip=false"    >> "$GITHUB_OUTPUT"
+          echo "last=$LAST_TAG" >> "$GITHUB_OUTPUT"
+          echo "tag=$NEW_TAG"   >> "$GITHUB_OUTPUT"
+          echo "bump=$BUMP"     >> "$GITHUB_OUTPUT"
+
+      - name: Show release summary
+        if: steps.semver.outputs.skip != 'true'
+        run: |
+          echo "## Release summary" >> "$GITHUB_STEP_SUMMARY"
+          echo ""                    >> "$GITHUB_STEP_SUMMARY"
+          echo "| | |"              >> "$GITHUB_STEP_SUMMARY"
+          echo "|-|-|"              >> "$GITHUB_STEP_SUMMARY"
+          echo "| Previous tag | \`${{ steps.semver.outputs.last }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| New tag      | \`${{ steps.semver.outputs.tag }}\`  |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Bump type    | \`${{ steps.semver.outputs.bump }}\`  |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Dry run      | ${{ inputs.dry_run }}                 |" >> "$GITHUB_STEP_SUMMARY"
+          echo ""                    >> "$GITHUB_STEP_SUMMARY"
+          echo "### Commits included">> "$GITHUB_STEP_SUMMARY"
+          echo '```'                 >> "$GITHUB_STEP_SUMMARY"
+          git log "${{ steps.semver.outputs.last }}..HEAD" --oneline >> "$GITHUB_STEP_SUMMARY"
+          echo '```'                 >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Push tag
+        if: steps.semver.outputs.skip != 'true' && inputs.dry_run == 'false'
+        env:
+          TAG: ${{ steps.semver.outputs.tag }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $TAG
+
+          Auto-generated by the Tag release workflow.
+          Bump: ${{ steps.semver.outputs.bump }}
+          Previous: ${{ steps.semver.outputs.last }}"
+
+          git push origin "$TAG"
+          echo "Tag $TAG pushed — build.yml will now start."
+
+      - name: Nothing to release
+        if: steps.semver.outputs.skip == 'true'
+        run: |
+          echo "No commits since the last tag. Skipping."
+          exit 0

@@ -7,7 +7,6 @@ import '../../core/setup/repo_discovery.dart';
 import '../../shared/widgets/toast.dart';
 import '../agents/agents_screen.dart' show agentsProvider;
 import '../config/config_providers.dart';
-import '../dashboard/dashboard_providers.dart';
 
 class ReposScreen extends ConsumerStatefulWidget {
   const ReposScreen({super.key});
@@ -272,6 +271,7 @@ class _RepoTile extends StatelessWidget {
 
   Widget _aiDropdown(String label, String? value, ValueChanged<String?> onChanged) {
     return DropdownButtonFormField<String?>(
+      // ignore: deprecated_member_use
       value: value,
       decoration: InputDecoration(labelText: label,
           border: const OutlineInputBorder(), isDense: true),
@@ -287,6 +287,7 @@ class _RepoTile extends StatelessWidget {
 
   Widget _promptDropdown() {
     return DropdownButtonFormField<String?>(
+      // ignore: deprecated_member_use
       value: config.promptId,
       decoration: const InputDecoration(
           labelText: 'Override prompt',

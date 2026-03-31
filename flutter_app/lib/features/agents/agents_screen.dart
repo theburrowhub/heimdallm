@@ -46,7 +46,7 @@ class _PromptsView extends ConsumerWidget {
         if (activePrompt != null)
           _ActiveBanner(prompt: activePrompt)
         else
-          _InfoBanner('No active prompt. Select one to customise review behaviour.'),
+          const _InfoBanner('No active prompt. Select one to customise review behaviour.'),
 
         // Section: Presets
         _SectionHeader(
@@ -407,6 +407,7 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
                 )),
                 const SizedBox(width: 12),
                 DropdownButtonFormField<String>(
+                  // ignore: deprecated_member_use
                   value: _focus,
                   decoration: const InputDecoration(
                       labelText: 'Focus', border: OutlineInputBorder()),

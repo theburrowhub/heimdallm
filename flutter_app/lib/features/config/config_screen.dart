@@ -295,6 +295,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     required ValueChanged<String?> onChanged,
   }) {
     return DropdownButtonFormField<String?>(
+      // ignore: deprecated_member_use
       value: value,
       decoration: InputDecoration(
         labelText: label,
@@ -317,6 +318,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
       children: [
         _sectionHeader('Global defaults'),
         DropdownButtonFormField<String>(
+          // ignore: deprecated_member_use
           value: _pollInterval,
           decoration: const InputDecoration(
             labelText: 'Poll interval',
@@ -329,6 +331,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
         ),
         const SizedBox(height: 12),
         DropdownButtonFormField<String>(
+          // ignore: deprecated_member_use
           value: _aiPrimary,
           decoration: const InputDecoration(
             labelText: 'Primary AI agent',
@@ -340,6 +343,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
         ),
         const SizedBox(height: 12),
         DropdownButtonFormField<String?>(
+          // ignore: deprecated_member_use
           value: _aiFallback.isEmpty ? null : _aiFallback,
           decoration: const InputDecoration(
             labelText: 'Fallback AI agent (optional)',

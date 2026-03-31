@@ -1,0 +1,114 @@
+name: Build & Release
+
+# Only triggered by version tags — never by branch pushes.
+# To create a release, use the "Tag release" workflow (tag.yml).
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false   # never cancel a release build mid-flight
+
+jobs:
+  build:
+    name: Build Heimdallr.dmg
+    runs-on: macos-14
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history for changelog generation
+
+      # ── Toolchains ──────────────────────────────────────────────────────────
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: daemon/go.mod
+          cache-dependency-path: daemon/go.sum
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.x'
+          channel: stable
+          cache: true
+
+      # ── Dependencies ────────────────────────────────────────────────────────
+      - name: Flutter pub get
+        working-directory: flutter_app
+        run: flutter pub get
+
+      - name: CocoaPods
+        working-directory: flutter_app/macos
+        run: pod install --repo-update
+
+      # ── Tests (gate before building) ────────────────────────────────────────
+      - name: Daemon tests
+        working-directory: daemon
+        run: go test ./... -timeout 60s
+
+      - name: Flutter tests
+        working-directory: flutter_app
+        run: flutter test
+
+      # ── Build ───────────────────────────────────────────────────────────────
+      - name: Build daemon
+        run: make build-daemon
+
+      - name: Build Flutter app (release)
+        working-directory: flutter_app
+        run: flutter build macos --release --build-name="${GITHUB_REF_NAME#v}" --build-number="${GITHUB_RUN_NUMBER}"
+
+      # ── Bundle ──────────────────────────────────────────────────────────────
+      - name: Embed daemon inside .app
+        run: |
+          APP="flutter_app/build/macos/Build/Products/Release/Heimdallr.app"
+          cp daemon/bin/heimdallr "$APP/Contents/MacOS/heimdallr"
+          chmod +x "$APP/Contents/MacOS/heimdallr"
+          echo "Bundle contents:"
+          ls -lh "$APP/Contents/MacOS/"
+
+      - name: Ad-hoc codesign
+        run: |
+          APP="flutter_app/build/macos/Build/Products/Release/Heimdallr.app"
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --verbose "$APP"
+
+      # ── Package ─────────────────────────────────────────────────────────────
+      - name: Create DMG
+        run: |
+          APP="flutter_app/build/macos/Build/Products/Release/Heimdallr.app"
+          VERSION="${GITHUB_REF_NAME}"
+          DMG="dist/Heimdallr-${VERSION}.dmg"
+          mkdir -p dist
+
+          hdiutil create \
+            -volname "Heimdallr ${VERSION}" \
+            -srcfolder "$APP" \
+            -ov -format UDZO \
+            "$DMG"
+
+          ls -lh "$DMG"
+          echo "DMG_PATH=$DMG"   >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      # ── Publish ─────────────────────────────────────────────────────────────
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Heimdallr-${{ env.VERSION }}
+          path: ${{ env.DMG_PATH }}
+          retention-days: 90
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Heimdallr ${{ env.VERSION }}
+          tag_name: ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          files: ${{ env.DMG_PATH }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

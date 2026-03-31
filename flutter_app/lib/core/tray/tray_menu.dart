@@ -27,9 +27,8 @@ class TrayMenu with TrayListener {
 
   final ApiClient _api = ApiClient();
 
-  // Latest known data — used by menu item click handlers
+  // Latest known PRs — used by menu item click handlers
   List<PR> _prs = [];
-  String _me = '';
 
   void init() {
     trayManager.addListener(this);
@@ -42,7 +41,6 @@ class TrayMenu with TrayListener {
     required AppConfig config,
   }) async {
     _prs = prs;
-    _me = me;
 
     final myPRs = prs
         .where((p) => p.author.toLowerCase() == me.toLowerCase())
@@ -162,11 +160,11 @@ class TrayMenu with TrayListener {
   }
 
   @override
-  void onTrayMenuItemClick(MenuItem item) {
-    final key = item.key ?? '';
+  void onTrayMenuItemClick(MenuItem menuItem) {
+    final key = menuItem.key ?? '';
 
     // Quit
-    if (key == 'quit') { exit(0); return; }
+    if (key == 'quit') { exit(0); }
 
     // Open main window
     if (key == 'open') {

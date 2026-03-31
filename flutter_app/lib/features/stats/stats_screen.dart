@@ -94,10 +94,10 @@ class _StatsBody extends StatelessWidget {
           if (byCLI.isNotEmpty) ...[
             _sectionTitle(context, 'By AI Agent'),
             const SizedBox(height: 8),
-            _PillRow(data: byCLI, colorMap: {
-              'claude': const Color(0xFF7C4DFF),
-              'gemini': const Color(0xFF1565C0),
-              'codex':  const Color(0xFF00695C),
+            _PillRow(data: byCLI, colorMap: const {
+              'claude': Color(0xFF7C4DFF),
+              'gemini': Color(0xFF1565C0),
+              'codex':  Color(0xFF00695C),
             }),
             const SizedBox(height: 24),
           ],
