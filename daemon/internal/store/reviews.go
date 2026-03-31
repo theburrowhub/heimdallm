@@ -7,14 +7,14 @@ import (
 
 // Review represents a code review result stored locally.
 type Review struct {
-	ID          int64
-	PRID        int64
-	CLIUsed     string
-	Summary     string
-	Issues      string // JSON array
-	Suggestions string // JSON array
-	Severity    string
-	CreatedAt   time.Time
+	ID          int64     `json:"id"`
+	PRID        int64     `json:"pr_id"`
+	CLIUsed     string    `json:"cli_used"`
+	Summary     string    `json:"summary"`
+	Issues      string    `json:"issues"` // JSON array
+	Suggestions string    `json:"suggestions"` // JSON array
+	Severity    string    `json:"severity"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 // InsertReview inserts a new review record and returns its row ID.

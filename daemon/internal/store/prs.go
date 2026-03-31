@@ -7,16 +7,16 @@ import (
 
 // PR represents a GitHub pull request stored locally.
 type PR struct {
-	ID        int64
-	GithubID  int64
-	Repo      string
-	Number    int
-	Title     string
-	Author    string
-	URL       string
-	State     string
-	UpdatedAt time.Time
-	FetchedAt time.Time
+	ID        int64     `json:"id"`
+	GithubID  int64     `json:"github_id"`
+	Repo      string    `json:"repo"`
+	Number    int       `json:"number"`
+	Title     string    `json:"title"`
+	Author    string    `json:"author"`
+	URL       string    `json:"url"`
+	State     string    `json:"state"`
+	UpdatedAt time.Time `json:"updated_at"`
+	FetchedAt time.Time `json:"fetched_at"`
 }
 
 // UpsertPR inserts or updates a PR record, keyed on github_id. Returns the row ID.
