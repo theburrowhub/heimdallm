@@ -214,11 +214,13 @@ class _BootstrapAppState extends State<_BootstrapApp> {
   }
 
   void _setError({required String title, required String details, String? hint}) {
-    if (mounted) setState(() {
-      _errorTitle   = title;
-      _errorDetails = details;
-      _errorHint    = hint;
-    });
+    if (mounted) {
+      setState(() {
+        _errorTitle   = title;
+        _errorDetails = details;
+        _errorHint    = hint;
+      });
+    }
   }
 
   void _go(String location) {
