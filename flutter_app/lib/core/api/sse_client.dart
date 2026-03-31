@@ -12,7 +12,7 @@ class SseClient {
   final int port;
   final http.Client _httpClient;
   StreamController<SseEvent>? _controller;
-  http.StreamedResponse? _response;
+  StreamSubscription<String>? _subscription;
 
   SseClient({this.port = 7842, http.Client? httpClient})
       : _httpClient = httpClient ?? http.Client();
@@ -56,10 +56,10 @@ class SseClient {
       );
       request.headers['Accept'] = 'text/event-stream';
       request.headers['Cache-Control'] = 'no-cache';
-      _response = await _httpClient.send(request);
+      final response = await _httpClient.send(request);
 
       String buffer = '';
-      _response!.stream.transform(utf8.decoder).listen(
+      _subscription = response.stream.transform(utf8.decoder).listen(
         (chunk) {
           buffer += chunk;
           while (buffer.contains('\n\n')) {
@@ -80,6 +80,8 @@ class SseClient {
   }
 
   void disconnect() {
+    _subscription?.cancel();
+    _subscription = null;
     _controller?.close();
     _controller = null;
   }

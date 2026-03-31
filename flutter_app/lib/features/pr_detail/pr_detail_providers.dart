@@ -7,9 +7,24 @@ final prDetailProvider = FutureProvider.family<Map<String, dynamic>, int>((ref, 
   return api.fetchPR(prId);
 });
 
-final triggerReviewProvider = FutureProvider.family<void, int>((ref, prId) async {
-  final api = ref.watch(apiClientProvider);
-  await api.triggerReview(prId);
-  ref.invalidate(prDetailProvider(prId));
-  ref.invalidate(prsProvider);
-});
+class ReviewTriggerNotifier extends AutoDisposeAsyncNotifier<void> {
+  @override
+  Future<void> build() async {}
+
+  Future<void> trigger(int prId) async {
+    state = const AsyncLoading();
+    state = await AsyncValue.guard(() async {
+      final api = ref.read(apiClientProvider);
+      await api.triggerReview(prId);
+    });
+    // Invalidate after successful trigger
+    if (!state.hasError) {
+      ref.invalidate(prDetailProvider(prId));
+      ref.invalidate(prsProvider);
+    }
+  }
+}
+
+final reviewTriggerProvider = AsyncNotifierProvider.autoDispose<ReviewTriggerNotifier, void>(
+  ReviewTriggerNotifier.new,
+);
