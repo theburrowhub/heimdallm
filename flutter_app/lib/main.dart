@@ -6,6 +6,7 @@ import 'package:local_notifier/local_notifier.dart';
 import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
 import 'core/api/api_client.dart';
+import 'core/daemon/daemon_lifecycle.dart';
 import 'core/setup/first_run_setup.dart';
 import 'core/setup/repo_discovery.dart';
 import 'core/models/config_model.dart';
@@ -205,7 +206,7 @@ class _BootstrapAppState extends State<_BootstrapApp> {
   }
 
   /// Returns the daemon binary path, or null if not found.
-  /// Delegates to DaemonLifecycle to avoid duplicating logic.
+  /// Delegates to DaemonLifecycle.defaultBinaryPath() — single source of truth.
   String? _daemonBinaryPath() => DaemonLifecycle.defaultBinaryPath();
 
   void _setStatus(String s) {
