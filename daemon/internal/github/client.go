@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -68,54 +69,41 @@ func (c *Client) do(method, path string, accept string) (*http.Response, error) 
 	return c.http.Do(req)
 }
 
-// FetchPRs fetches open PRs where the token owner is reviewer, assignee, or author.
-// Uses separate queries per qualifier because OR between different qualifier types
-// is rejected by the GitHub Search API with a 422.
-// If repos is non-empty the search is scoped to those repos; otherwise all repos are searched.
+// FetchPRsToReview returns only PRs where the authenticated user is explicitly
+// requested as reviewer. ONLY these should be auto-reviewed by the AI pipeline.
+// This prevents posting reviews on the user's own PRs or PRs they're just assigned to.
+func (c *Client) FetchPRsToReview(repos []string) ([]*PullRequest, error) {
+	username, err := c.AuthenticatedUser()
+	if err != nil {
+		return nil, fmt.Errorf("github: resolve user: %w", err)
+	}
+	prs, err := c.fetchByQualifier(username, "review-requested", repos)
+	if err != nil {
+		return nil, err
+	}
+	slog.Info("github: PRs to review", "count", len(prs))
+	return prs, nil
+}
+
+// FetchPRs fetches all open PRs where the user is reviewer, assignee, or author.
+// Used for the dashboard display only — NOT for triggering AI reviews.
 func (c *Client) FetchPRs(repos []string) ([]*PullRequest, error) {
 	username, err := c.AuthenticatedUser()
 	if err != nil {
 		return nil, fmt.Errorf("github: resolve user: %w", err)
 	}
 
-	repoFilter := ""
-	if len(repos) > 0 {
-		repoFilter = " repo:" + strings.Join(repos, " repo:")
-	}
-
-	qualifiers := []string{
-		fmt.Sprintf("review-requested:%s", username),
-		fmt.Sprintf("assignee:%s", username),
-		fmt.Sprintf("author:%s", username),
-	}
-
+	qualifiers := []string{"review-requested", "assignee", "author"}
 	seen := make(map[int64]struct{})
 	var all []*PullRequest
 
-	for _, qualifier := range qualifiers {
-		query := fmt.Sprintf("is:pr is:open %s%s", qualifier, repoFilter)
-		params := url.Values{}
-		params.Set("q", query)
-		params.Set("per_page", "100")
-
-		resp, err := c.do("GET", "/search/issues?"+params.Encode(), "application/vnd.github+json")
+	for _, q := range qualifiers {
+		prs, err := c.fetchByQualifier(username, q, repos)
 		if err != nil {
-			return nil, fmt.Errorf("github: search PRs (%s): %w", qualifier, err)
+			slog.Warn("github: fetch PRs partial error", "qualifier", q, "err", err)
+			continue
 		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("github: search PRs (%s): status %d: %s", qualifier, resp.StatusCode, body)
-		}
-
-		var result struct {
-			Items []*PullRequest `json:"items"`
-		}
-		if err := json.Unmarshal(body, &result); err != nil {
-			return nil, fmt.Errorf("github: decode search (%s): %w", qualifier, err)
-		}
-		for _, pr := range result.Items {
+		for _, pr := range prs {
 			if _, dup := seen[pr.ID]; !dup {
 				seen[pr.ID] = struct{}{}
 				all = append(all, pr)
@@ -123,6 +111,35 @@ func (c *Client) FetchPRs(repos []string) ([]*PullRequest, error) {
 		}
 	}
 	return all, nil
+}
+
+func (c *Client) fetchByQualifier(username, qualifier string, repos []string) ([]*PullRequest, error) {
+	repoFilter := ""
+	if len(repos) > 0 {
+		repoFilter = " repo:" + strings.Join(repos, " repo:")
+	}
+	query := fmt.Sprintf("is:pr is:open %s:%s%s", qualifier, username, repoFilter)
+	params := url.Values{}
+	params.Set("q", query)
+	params.Set("per_page", "100")
+
+	resp, err := c.do("GET", "/search/issues?"+params.Encode(), "application/vnd.github+json")
+	if err != nil {
+		return nil, fmt.Errorf("github: search PRs (%s): %w", qualifier, err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("github: search PRs (%s): status %d: %s", qualifier, resp.StatusCode, body)
+	}
+	var result struct {
+		Items []*PullRequest `json:"items"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("github: decode search (%s): %w", qualifier, err)
+	}
+	return result.Items, nil
 }
 
 // SubmitReview posts an AI-generated review to GitHub as a PR review.

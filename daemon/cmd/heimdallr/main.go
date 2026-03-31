@@ -84,40 +84,81 @@ func main() {
 	var cfgMu sync.Mutex
 	var sched *scheduler.Scheduler
 
+	// reviewMu prevents concurrent pipeline runs for the same GitHub PR ID.
+	// Key: pr.ID (GitHub PR ID), Value: true while being reviewed.
+	var reviewMu sync.Mutex
+	inFlight := make(map[int64]bool)
+
+	runReview := func(pr *gh.PullRequest, aiCfg config.RepoAI) {
+		// Guard: skip if already being reviewed
+		reviewMu.Lock()
+		if inFlight[pr.ID] {
+			reviewMu.Unlock()
+			slog.Info("review already in flight, skipping", "pr", pr.Number, "repo", pr.Repo)
+			return
+		}
+		inFlight[pr.ID] = true
+		reviewMu.Unlock()
+		defer func() {
+			reviewMu.Lock()
+			delete(inFlight, pr.ID)
+			reviewMu.Unlock()
+		}()
+
+		// Safety check: log exactly what we're about to review
+		slog.Info("pipeline: reviewing PR",
+			"repo", pr.Repo, "number", pr.Number, "github_id", pr.ID, "title", pr.Title)
+
+		broker.Publish(sse.Event{Type: sse.EventPRDetected, Data: fmt.Sprintf(`{"pr_number":%d,"repo":%q}`, pr.Number, pr.Repo)})
+		broker.Publish(sse.Event{Type: sse.EventReviewStarted, Data: fmt.Sprintf(`{"pr_number":%d,"repo":%q}`, pr.Number, pr.Repo)})
+		rev, err := p.Run(pr, aiCfg.Primary, aiCfg.Fallback)
+		if err != nil {
+			slog.Error("pipeline run failed", "repo", pr.Repo, "pr", pr.Number, "err", err)
+			broker.Publish(sse.Event{Type: sse.EventReviewError, Data: fmt.Sprintf(`{"pr_number":%d,"repo":%q,"error":%q}`, pr.Number, pr.Repo, err.Error())})
+			return
+		}
+		slog.Info("pipeline: review done",
+			"repo", pr.Repo, "number", pr.Number, "severity", rev.Severity,
+			"github_review_id", rev.GitHubReviewID)
+		broker.Publish(sse.Event{Type: sse.EventReviewCompleted, Data: fmt.Sprintf(
+			`{"pr_number":%d,"repo":%q,"pr_id":%d,"severity":%q}`,
+			pr.Number, pr.Repo, rev.PRID, rev.Severity,
+		)})
+	}
+
 	makePollFn := func(c *config.Config) func() {
 		return func() {
 			cfgMu.Lock()
 			repos := c.GitHub.Repositories
 			cfgMu.Unlock()
-			prs, err := ghClient.FetchPRs(repos)
+
+			// IMPORTANT: only fetch PRs where the user is explicitly requested as reviewer.
+			// Do NOT auto-review author or assignee PRs — that posts reviews to wrong PRs.
+			prs, err := ghClient.FetchPRsToReview(repos)
 			if err != nil {
-				slog.Error("poll: fetch PRs", "err", err)
+				slog.Error("poll: fetch PRs to review", "err", err)
 				return
 			}
 			for _, pr := range prs {
 				pr.ResolveRepo()
+				if pr.Repo == "" {
+					slog.Warn("poll: skipping PR with empty repo", "pr_number", pr.Number)
+					continue
+				}
 				cfgMu.Lock()
 				aiCfg := c.AIForRepo(pr.Repo)
 				cfgMu.Unlock()
 				existing, _ := s.GetPRByGithubID(pr.ID)
 				if existing != nil {
 					if rev, err := s.LatestReviewForPR(existing.ID); err == nil && rev != nil {
-						// Skip if PR has not changed since our last review.
-						// pr.UpdatedAt is newer only if new commits or review requests arrived.
+						// Skip if PR hasn't changed since our last review.
 						if !pr.UpdatedAt.After(rev.CreatedAt) {
 							continue
 						}
 					}
 				}
-				broker.Publish(sse.Event{Type: sse.EventPRDetected, Data: fmt.Sprintf(`{"pr_number":%d,"repo":%q}`, pr.Number, pr.Repo)})
-				broker.Publish(sse.Event{Type: sse.EventReviewStarted, Data: fmt.Sprintf(`{"pr_number":%d,"repo":%q}`, pr.Number, pr.Repo)})
-				if rev, err := p.Run(pr, aiCfg.Primary, aiCfg.Fallback); err != nil {
-					slog.Error("pipeline run failed", "pr", pr.Number, "err", err)
-					broker.Publish(sse.Event{Type: sse.EventReviewError, Data: fmt.Sprintf(`{"pr_number":%d,"error":%q}`, pr.Number, err.Error())})
-				} else {
-					// Include pr_id (store ID) so the Flutter app can deep-link to the PR detail
-					broker.Publish(sse.Event{Type: sse.EventReviewCompleted, Data: fmt.Sprintf(`{"pr_number":%d,"repo":%q,"pr_id":%d,"severity":%q}`, pr.Number, pr.Repo, rev.PRID, rev.Severity)})
-				}
+				prCopy := *pr // copy to avoid loop variable capture
+				runReview(&prCopy, aiCfg)
 			}
 			// Retry reviews stored locally but not yet published to GitHub
 			p.PublishPending()
@@ -194,11 +235,14 @@ func main() {
 		if err != nil {
 			return fmt.Errorf("trigger review: get pr %d: %w", prID, err)
 		}
+		if pr.Repo == "" {
+			return fmt.Errorf("trigger review: pr %d has empty repo", prID)
+		}
 		cfgMu.Lock()
 		aiCfg := cfg.AIForRepo(pr.Repo)
 		cfgMu.Unlock()
 
-		// Construct a minimal github.PullRequest from the stored data
+		// Construct github.PullRequest from stored data
 		ghPR := &gh.PullRequest{
 			ID:      pr.GithubID,
 			Number:  pr.Number,
@@ -208,6 +252,23 @@ func main() {
 			Repo:    pr.Repo,
 		}
 		ghPR.User.Login = pr.Author
+
+		slog.Info("trigger review: running pipeline",
+			"store_pr_id", prID, "repo", pr.Repo, "number", pr.Number, "github_id", pr.GithubID)
+
+		// Use the same in-flight guard as the poll loop
+		reviewMu.Lock()
+		if inFlight[ghPR.ID] {
+			reviewMu.Unlock()
+			return fmt.Errorf("review already in progress for PR %d", ghPR.Number)
+		}
+		inFlight[ghPR.ID] = true
+		reviewMu.Unlock()
+		defer func() {
+			reviewMu.Lock()
+			delete(inFlight, ghPR.ID)
+			reviewMu.Unlock()
+		}()
 
 		rev, err := p.Run(ghPR, aiCfg.Primary, aiCfg.Fallback)
 		if err != nil {
