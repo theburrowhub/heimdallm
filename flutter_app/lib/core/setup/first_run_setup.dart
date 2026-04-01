@@ -12,7 +12,7 @@ class FirstRunSetup {
 
   /// Tries to get a GitHub token in this priority order:
   ///   1. `gh auth token` (gh CLI, no user interaction needed)
-  ///   2. Heimdallr Keychain entry
+  ///   2. Platform credential store (Keychain on macOS, secret-tool/file on Linux)
   ///   3. GITHUB_TOKEN env var
   ///   4. null (user must enter manually)
   static Future<String?> detectToken() async {
@@ -20,9 +20,9 @@ class FirstRunSetup {
     final ghToken = await _tokenFromGhCli();
     if (ghToken != null) return ghToken;
 
-    // 2. Keychain
-    final keychainToken = await getToken();
-    if (keychainToken != null) return keychainToken;
+    // 2. Platform credential store
+    final stored = await getToken();
+    if (stored != null) return stored;
 
     // 3. Env var
     final envToken = Platform.environment['GITHUB_TOKEN'];
@@ -33,8 +33,29 @@ class FirstRunSetup {
 
   static Future<String?> _tokenFromGhCli() => GhCli.authToken();
 
-  /// Stores the GitHub token in macOS Keychain.
+  /// Stores the GitHub token in the platform credential store.
+  /// macOS: Keychain via `security` CLI.
+  /// Linux: GNOME/KDE secret service via `secret-tool`; falls back to
+  ///        `~/.config/heimdallr/.token` (chmod 600) when secret-tool is unavailable.
   static Future<void> storeToken(String token) async {
+    if (Platform.isMacOS) {
+      await _storeTokenMacOS(token);
+    } else if (Platform.isLinux) {
+      await _storeTokenLinux(token);
+    }
+  }
+
+  /// Retrieves the GitHub token from the platform credential store.
+  /// Returns null if not found.
+  static Future<String?> getToken() async {
+    if (Platform.isMacOS) return _getTokenMacOS();
+    if (Platform.isLinux) return _getTokenLinux();
+    return null;
+  }
+
+  // ── macOS Keychain ───────────────────────────────────────────────────────
+
+  static Future<void> _storeTokenMacOS(String token) async {
     await Process.run('security', [
       'delete-generic-password', '-s', _keychainService, '-a', _keychainAccount,
     ]);
@@ -49,8 +70,7 @@ class FirstRunSetup {
     }
   }
 
-  /// Retrieves the GitHub token from macOS Keychain. Returns null if not found.
-  static Future<String?> getToken() async {
+  static Future<String?> _getTokenMacOS() async {
     final result = await Process.run('security', [
       'find-generic-password', '-s', _keychainService, '-a', _keychainAccount, '-w',
     ]);
@@ -59,6 +79,68 @@ class FirstRunSetup {
       return token.isEmpty ? null : token;
     }
     return null;
+  }
+
+  // ── Linux: secret-tool (GNOME Keyring / KDE Wallet) + file fallback ─────
+
+  static Future<void> _storeTokenLinux(String token) async {
+    // Try secret-tool first (requires libsecret + a keyring daemon running)
+    try {
+      final proc = await Process.start('secret-tool', [
+        'store',
+        '--label=Heimdallr GitHub Token',
+        'service', _keychainService,
+        'account', _keychainAccount,
+      ]);
+      // secret-tool reads the secret from stdin
+      proc.stdin.write(token);
+      await proc.stdin.close();
+      if (await proc.exitCode == 0) return;
+    } catch (_) {
+      // secret-tool not available — fall through to file fallback
+    }
+    // Fallback: plain text file with chmod 600
+    await _writeTokenFile(token);
+  }
+
+  static Future<String?> _getTokenLinux() async {
+    // Try secret-tool first
+    try {
+      final result = await Process.run('secret-tool', [
+        'lookup',
+        'service', _keychainService,
+        'account', _keychainAccount,
+      ]);
+      if (result.exitCode == 0) {
+        final token = (result.stdout as String).trim();
+        if (token.isNotEmpty) return token;
+      }
+    } catch (_) {
+      // secret-tool not available
+    }
+    // Fallback: read from file
+    return _readTokenFile();
+  }
+
+  // ── Linux file fallback (~/.config/heimdallr/.token, chmod 600) ──────────
+
+  static String _tokenFilePath() {
+    final home = Platform.environment['HOME'] ?? '';
+    return '$home/.config/heimdallr/.token';
+  }
+
+  static Future<void> _writeTokenFile(String token) async {
+    final path = _tokenFilePath();
+    await Directory(path).parent.create(recursive: true);
+    await File(path).writeAsString(token);
+    await Process.run('chmod', ['600', path]);
+  }
+
+  static Future<String?> _readTokenFile() async {
+    final file = File(_tokenFilePath());
+    if (!await file.exists()) return null;
+    final token = (await file.readAsString()).trim();
+    return token.isEmpty ? null : token;
   }
 
   // ── Config file ──────────────────────────────────────────────────────────

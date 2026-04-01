@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   build-linux:
-    name: Build Heimdallr Linux (.tar.gz)
+    name: Build Heimdallr Linux packages (.deb / .rpm / .AppImage)
     runs-on: ubuntu-22.04
 
     steps:
@@ -37,22 +37,24 @@ jobs:
           channel: stable
           cache: true
 
-      # ── Linux system dependencies ────────────────────────────────────────────
-      - name: Install Linux build dependencies
+      # ── System dependencies (build + packaging) ──────────────────────────────
+      - name: Install dependencies
         run: |
           sudo apt-get update -y
           sudo apt-get install -y \
             clang cmake ninja-build pkg-config \
             libgtk-3-dev liblzma-dev libstdc++-12-dev \
-            libayatana-appindicator3-dev \
-            libnotify-dev
+            libayatana-appindicator3-dev libnotify-dev \
+            libsecret-1-dev \
+            fakeroot rpm-build libfuse2
+          gem install fpm --no-document
 
-      # ── Dependencies ────────────────────────────────────────────────────────
+      # ── App dependencies ─────────────────────────────────────────────────────
       - name: Flutter pub get
         working-directory: flutter_app
         run: flutter pub get
 
-      # ── Tests (gate before building) ────────────────────────────────────────
+      # ── Tests (gate before building) ─────────────────────────────────────────
       - name: Daemon tests
         working-directory: daemon
         run: go test ./... -timeout 60s
@@ -61,7 +63,7 @@ jobs:
         working-directory: flutter_app
         run: flutter test
 
-      # ── Build ───────────────────────────────────────────────────────────────
+      # ── Build ────────────────────────────────────────────────────────────────
       - name: Build daemon (linux/amd64)
         run: make build-daemon
 
@@ -72,68 +74,173 @@ jobs:
             --build-name="${GITHUB_REF_NAME#v}" \
             --build-number="${GITHUB_RUN_NUMBER}"
 
-      # ── Bundle ──────────────────────────────────────────────────────────────
-      - name: Embed daemon and verify bundle
+      # ── Prepare staging tree ──────────────────────────────────────────────────
+      # Creates a directory that mirrors the final installed filesystem layout.
+      # All packaging formats are built from this single staging tree.
+      - name: Prepare staging directory
         run: |
+          VERSION="${GITHUB_REF_NAME#v}"
           BUNDLE="flutter_app/build/linux/x64/release/bundle"
 
           if [ ! -d "$BUNDLE" ]; then
-            echo "❌ Linux bundle not found at $BUNDLE"
-            ls -la flutter_app/build/linux/ || true
+            echo "❌ Bundle not found at $BUNDLE"
             exit 1
           fi
-
           if [ ! -f "daemon/bin/heimdallr" ]; then
             echo "❌ daemon/bin/heimdallr not found"
             exit 1
           fi
 
-          # Embed daemon alongside Flutter binary
+          # Embed daemon binary
           cp "daemon/bin/heimdallr" "$BUNDLE/heimdalld"
-          chmod +x "$BUNDLE/heimdalld"
+          chmod +x "$BUNDLE/heimdallr" "$BUNDLE/heimdalld"
 
           echo "Bundle contents:"
           ls -lh "$BUNDLE"
 
-          FLUTTER_SIZE=$(stat -c%s "$BUNDLE/heimdallr" 2>/dev/null || stat -c%s "$BUNDLE/Heimdallr" 2>/dev/null || echo 0)
-          DAEMON_SIZE=$(stat -c%s "$BUNDLE/heimdalld")
-          echo "✓ Flutter binary: ${FLUTTER_SIZE} bytes"
-          echo "✓ Daemon binary:  ${DAEMON_SIZE} bytes"
-          echo "BUNDLE=$BUNDLE" >> "$GITHUB_ENV"
-
-      # ── Package ─────────────────────────────────────────────────────────────
-      - name: Create tar.gz
-        run: |
-          VERSION="${GITHUB_REF_NAME}"
-          TAR="dist/Heimdallr-linux-${VERSION}.tar.gz"
+          # Build staging tree: mirrors installed filesystem
+          STAGING="staging"
+          OPT="$STAGING/opt/heimdallr"
+          mkdir -p "$OPT"
+          mkdir -p "$STAGING/usr/bin"
+          mkdir -p "$STAGING/usr/share/applications"
+          mkdir -p "$STAGING/usr/share/icons/hicolor/256x256/apps"
           mkdir -p dist
 
-          # Package bundle as Heimdallr/ directory inside the archive
-          cp -r "${BUNDLE}" dist/Heimdallr
-          tar -czf "$TAR" -C dist Heimdallr
-          rm -rf dist/Heimdallr
+          cp -r "$BUNDLE/." "$OPT/"
+          chmod +x "$OPT/heimdallr" "$OPT/heimdalld"
 
-          ls -lh "$TAR"
-          echo "TAR_PATH=$TAR"    >> "$GITHUB_ENV"
+          # /usr/bin/heimdallr → /opt/heimdallr/heimdallr
+          ln -s /opt/heimdallr/heimdallr "$STAGING/usr/bin/heimdallr"
+
+          # Icon
+          cp flutter_app/assets/icon.png \
+            "$STAGING/usr/share/icons/hicolor/256x256/apps/heimdallr.png"
+
+          # Desktop entry (printf avoids heredoc content at column-0 breaking YAML)
+          printf '%s\n' \
+            '[Desktop Entry]' \
+            'Name=Heimdallr' \
+            'Comment=AI-powered GitHub PR review agent' \
+            'Exec=/opt/heimdallr/heimdallr' \
+            'Icon=heimdallr' \
+            'Type=Application' \
+            'Categories=Development;' \
+            'StartupNotify=true' \
+            > "$STAGING/usr/share/applications/heimdallr.desktop"
+
+          echo "BUNDLE=$BUNDLE"   >> "$GITHUB_ENV"
+          echo "STAGING=$STAGING" >> "$GITHUB_ENV"
+          echo "OPT=$OPT"         >> "$GITHUB_ENV"
           echo "VERSION=$VERSION"  >> "$GITHUB_ENV"
 
-      # ── Publish ─────────────────────────────────────────────────────────────
-      - name: Upload artifact
+      # ── .deb (Ubuntu / Debian / Mint / Pop!_OS) ───────────────────────────────
+      - name: Build .deb package
+        run: |
+          fpm \
+            -s dir \
+            -t deb \
+            -n heimdallr \
+            -v "$VERSION" \
+            --architecture amd64 \
+            --description "AI-powered GitHub PR review agent" \
+            --url "https://github.com/theburrowhub/heimdallr" \
+            --depends "libgtk-3-0" \
+            --depends "libayatana-appindicator3-1" \
+            --depends "libnotify4" \
+            --depends "libsecret-1-0" \
+            --package "dist/heimdallr_${VERSION}_amd64.deb" \
+            -C "$STAGING" \
+            .
+          ls -lh "dist/heimdallr_${VERSION}_amd64.deb"
+          echo "DEB_PATH=dist/heimdallr_${VERSION}_amd64.deb" >> "$GITHUB_ENV"
+
+      # ── .rpm (Fedora / RHEL / openSUSE) ──────────────────────────────────────
+      - name: Build .rpm package
+        run: |
+          fpm \
+            -s dir \
+            -t rpm \
+            -n heimdallr \
+            -v "$VERSION" \
+            --architecture x86_64 \
+            --description "AI-powered GitHub PR review agent" \
+            --url "https://github.com/theburrowhub/heimdallr" \
+            --depends "gtk3" \
+            --depends "libnotify" \
+            --depends "libsecret" \
+            --package "dist/heimdallr-${VERSION}-1.x86_64.rpm" \
+            -C "$STAGING" \
+            .
+          ls -lh "dist/heimdallr-${VERSION}-1.x86_64.rpm"
+          echo "RPM_PATH=dist/heimdallr-${VERSION}-1.x86_64.rpm" >> "$GITHUB_ENV"
+
+      # ── .AppImage (universal — Arch, NixOS, and any other distro) ────────────
+      - name: Build AppImage
+        run: |
+          APPDIR="AppDir"
+          mkdir -p "$APPDIR"
+
+          # Copy bundle into AppDir root
+          cp -r "$OPT/." "$APPDIR/"
+
+          # AppRun — must be executable; finds resources relative to itself
+          printf '%s\n' \
+            '#!/bin/bash' \
+            'SELF="$(readlink -f "$0")"' \
+            'HERE="${SELF%/*}"' \
+            'exec "$HERE/heimdallr" "$@"' \
+            > "$APPDIR/AppRun"
+          chmod +x "$APPDIR/AppRun"
+
+          # Desktop entry (AppImage spec: Exec= is just the binary name)
+          printf '%s\n' \
+            '[Desktop Entry]' \
+            'Name=Heimdallr' \
+            'Comment=AI-powered GitHub PR review agent' \
+            'Exec=heimdallr' \
+            'Icon=heimdallr' \
+            'Type=Application' \
+            'Categories=Development;' \
+            'StartupNotify=true' \
+            > "$APPDIR/heimdallr.desktop"
+
+          # Icon named after the desktop file (required by AppImage spec)
+          cp flutter_app/assets/icon.png "$APPDIR/heimdallr.png"
+
+          # Download appimagetool
+          wget -q \
+            "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage" \
+            -O appimagetool
+          chmod +x appimagetool
+
+          # Build (APPIMAGE_EXTRACT_AND_RUN=1 avoids FUSE requirement in CI)
+          APPIMAGE_EXTRACT_AND_RUN=1 ARCH=x86_64 \
+            ./appimagetool "$APPDIR" "dist/Heimdallr-${VERSION}-x86_64.AppImage"
+
+          ls -lh "dist/Heimdallr-${VERSION}-x86_64.AppImage"
+          echo "APPIMAGE_PATH=dist/Heimdallr-${VERSION}-x86_64.AppImage" >> "$GITHUB_ENV"
+
+      # ── Publish ──────────────────────────────────────────────────────────────
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: Heimdallr-linux-${{ env.VERSION }}
-          path: ${{ env.TAR_PATH }}
+          path: dist/
           retention-days: 90
 
       - name: Create/Update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: Heimdallr ${{ env.VERSION }}
+          name: Heimdallr v${{ env.VERSION }}
           tag_name: ${{ github.ref_name }}
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: false   # macOS job owns the release notes
-          files: ${{ env.TAR_PATH }}
+          files: |
+            ${{ env.DEB_PATH }}
+            ${{ env.RPM_PATH }}
+            ${{ env.APPIMAGE_PATH }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
