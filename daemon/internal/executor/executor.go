@@ -127,7 +127,12 @@ func (e *Executor) Execute(cli, prompt string, opts ExecOptions) (*ReviewResult,
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("executor: run %s: %w (stderr: %s)", cli, err, stderr.String())
+		// Some CLIs (e.g. claude) write errors to stdout rather than stderr.
+		errDetail := strings.TrimSpace(stderr.String())
+		if errDetail == "" {
+			errDetail = strings.TrimSpace(stdout.String())
+		}
+		return nil, fmt.Errorf("executor: run %s: %w (output: %s)", cli, err, errDetail)
 	}
 
 	return parseResult(stdout.Bytes())
