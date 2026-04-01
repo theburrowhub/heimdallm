@@ -1,5 +1,4 @@
 import 'dart:io';
-import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -23,10 +22,6 @@ GoRouter get appRouter => _appRouter;
 /// instance is already running (this process should exit).
 /// Skipped in debug mode — developers restart the app intentionally.
 Future<bool> _ensureSingleInstance() async {
-  // In debug mode (flutter run) the developer may restart intentionally.
-  // LSMultipleInstancesProhibited handles the production .app bundle case.
-  if (!kReleaseMode) return true;
-
   final home = Platform.environment['HOME'] ?? '';
   final dir  = Directory('$home/.local/share/heimdallr');
   await dir.create(recursive: true);
