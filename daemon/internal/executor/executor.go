@@ -60,18 +60,38 @@ func New() *Executor {
 }
 
 // Detect returns the first available CLI (primary → fallback).
+// Also checks the user's login shell environment to handle cases where the
+// daemon is launched from a GUI app without inheriting the full shell PATH
+// (e.g., Homebrew tools at /opt/homebrew/bin not in process PATH).
 func (e *Executor) Detect(primary, fallback string) (string, error) {
-	if primary != "" {
-		if path, err := exec.LookPath(primary); err == nil && path != "" {
-			return primary, nil
-		}
-	}
-	if fallback != "" {
-		if path, err := exec.LookPath(fallback); err == nil && path != "" {
-			return fallback, nil
+	for _, name := range []string{primary, fallback} {
+		if name != "" && resolveCLIPath(name) != "" {
+			return name, nil
 		}
 	}
 	return "", fmt.Errorf("executor: no AI CLI available (tried %q, %q)", primary, fallback)
+}
+
+// resolveCLIPath returns the full path for a CLI tool, checking both the
+// current process PATH and the user's login shell (handles Homebrew, nvm, etc.).
+// Returns "" if not found anywhere.
+func resolveCLIPath(name string) string {
+	// Fast path: already in the process PATH.
+	if path, err := exec.LookPath(name); err == nil && path != "" {
+		return path
+	}
+	// Try login shell — picks up ~/.zshrc, ~/.bashrc, Homebrew, nvm, etc.
+	// This is necessary when the daemon is launched by a macOS GUI app.
+	for _, shell := range []string{"/bin/zsh", "/bin/bash"} {
+		cmd := exec.Command(shell, "-l", "-c", "which "+name)
+		out, err := cmd.Output()
+		if err == nil {
+			if path := strings.TrimSpace(string(out)); path != "" {
+				return path
+			}
+		}
+	}
+	return ""
 }
 
 // Execute runs the AI CLI with the given prompt and options, returning the parsed result.
@@ -79,8 +99,15 @@ func (e *Executor) Execute(cli, prompt string, opts ExecOptions) (*ReviewResult,
 	ctx, cancel := context.WithTimeout(context.Background(), executionTimeout)
 	defer cancel()
 
-	args := buildArgs(cli, opts)
-	cmd := exec.CommandContext(ctx, cli, args...)
+	// Resolve full path so the process works even when the daemon's PATH
+	// doesn't include Homebrew or npm globals (common with GUI-launched processes).
+	cliPath := resolveCLIPath(cli)
+	if cliPath == "" {
+		cliPath = cli // best effort; execution will fail with a useful error
+	}
+
+	args := buildArgs(cli, opts)         // use name for flag logic (switch cases)
+	cmd := exec.CommandContext(ctx, cliPath, args...) // use full path for execution
 	cmd.Stdin = strings.NewReader(prompt)
 	if opts.WorkDir != "" {
 		cmd.Dir = opts.WorkDir
