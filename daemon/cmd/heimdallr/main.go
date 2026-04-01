@@ -194,8 +194,10 @@ func main() {
 						continue
 					}
 					if rev, err := s.LatestReviewForPR(existing.ID); err == nil && rev != nil {
-						// Skip if PR hasn't changed since our last review.
-						if !pr.UpdatedAt.After(rev.CreatedAt) {
+						// Skip if PR hasn't been meaningfully updated since our last review.
+						// Add a 30-second grace period: GitHub bumps updated_at by ~2s when
+						// a review is submitted, which would otherwise trigger an immediate re-review.
+						if !pr.UpdatedAt.After(rev.CreatedAt.Add(30 * time.Second)) {
 							continue
 						}
 					}
