@@ -294,6 +294,8 @@ class _PRTile extends StatelessWidget {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
+            duration: const Duration(seconds: 5),
+            showCloseIcon: true,
             content: Text('PR #${pr.number} dismissed'),
             action: SnackBarAction(
               label: 'Undo',
