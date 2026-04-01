@@ -191,23 +191,39 @@ class _AgentState {
   String approvalMode = '';
   String extraFlags = '';
   String? promptId;
+  // Claude-specific
+  String effort = '';
+  String permissionMode = '';
+  bool bare = false;
+  bool dangerouslySkipPerms = false;
+  bool noSessionPersistence = false;
 
   _AgentState();
 
   _AgentState.from(CLIAgentConfig ac) {
-    model        = ac.model;
-    maxTurns     = ac.maxTurns;
-    approvalMode = ac.approvalMode;
-    extraFlags   = ac.extraFlags;
-    promptId     = ac.promptId;
+    model               = ac.model;
+    maxTurns            = ac.maxTurns;
+    approvalMode        = ac.approvalMode;
+    extraFlags          = ac.extraFlags;
+    promptId            = ac.promptId;
+    effort              = ac.effort;
+    permissionMode      = ac.permissionMode;
+    bare                = ac.bare;
+    dangerouslySkipPerms = ac.dangerouslySkipPerms;
+    noSessionPersistence = ac.noSessionPersistence;
   }
 
   CLIAgentConfig toConfig() => CLIAgentConfig(
-    model:        model,
-    maxTurns:     maxTurns,
-    approvalMode: approvalMode,
-    extraFlags:   extraFlags,
-    promptId:     promptId,
+    model:                model,
+    maxTurns:             maxTurns,
+    approvalMode:         approvalMode,
+    extraFlags:           extraFlags,
+    promptId:             promptId,
+    effort:               effort,
+    permissionMode:       permissionMode,
+    bare:                 bare,
+    dangerouslySkipPerms: dangerouslySkipPerms,
+    noSessionPersistence: noSessionPersistence,
   );
 }
 
@@ -367,7 +383,13 @@ class _AgentSectionState extends State<_AgentSection> {
         _promptDropdown(s),
         const SizedBox(height: 12),
 
-        // Row 3: Execution flags — chip list
+        // Row 3: Claude-specific execution options
+        if (name == 'claude') ...[
+          _claudeOptions(s),
+          const SizedBox(height: 12),
+        ],
+
+        // Row 4: Execution flags — chip list
         Text('Execution flags',
             style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
         const SizedBox(height: 8),
@@ -449,6 +471,136 @@ class _AgentSectionState extends State<_AgentSection> {
         ]),
         const SizedBox(height: 8),
       ],
+    );
+  }
+
+  Widget _claudeOptions(_AgentState s) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Dropdowns: effort + permission-mode
+        Row(children: [
+          Expanded(child: _tipDropdown<String>(
+            label: '--effort',
+            value: s.effort.isEmpty ? null : s.effort,
+            tooltip: 'How much compute Claude uses.\n'
+                'low = quick scan · medium = balanced · high = thorough · max = exhaustive.\n'
+                'Higher effort improves quality but increases cost and latency.',
+            items: [
+              const DropdownMenuItem<String>(value: null, child: Text('Not set (CLI default)')),
+              ...CLIAgentConfig.effortOptions.map(
+                  (v) => DropdownMenuItem(value: v, child: Text(v))),
+            ],
+            onChanged: (v) { setState(() => s.effort = v ?? ''); widget.onChanged(s); },
+          )),
+          const SizedBox(width: 12),
+          Expanded(child: _tipDropdown<String>(
+            label: '--permission-mode',
+            value: s.permissionMode.isEmpty ? null : s.permissionMode,
+            tooltip: 'Controls how Claude handles tool permissions.\n'
+                'default: standard prompts · auto: minimal prompts · '
+                'bypassPermissions: no prompts (use with local dir) · '
+                'acceptEdits: auto-accept file edits · dontAsk: never ask.',
+            items: [
+              const DropdownMenuItem<String>(value: null, child: Text('Not set (CLI default)')),
+              ...CLIAgentConfig.permissionModeOptions.map(
+                  (v) => DropdownMenuItem(value: v, child: Text(v))),
+            ],
+            onChanged: (v) { setState(() => s.permissionMode = v ?? ''); widget.onChanged(s); },
+          )),
+        ]),
+        const SizedBox(height: 10),
+
+        // Toggles
+        Wrap(
+          spacing: 24,
+          runSpacing: 8,
+          children: [
+            _tipToggle(
+              label: '--bare',
+              value: s.bare,
+              tooltip: 'Minimal mode: disables auto-memory, hooks, LSP, plugins '
+                  'and CLAUDE.md discovery.\nFaster and more predictable for automated reviews.',
+              onChanged: (v) { setState(() => s.bare = v); widget.onChanged(s); },
+            ),
+            _tipToggle(
+              label: '--no-session-persistence',
+              value: s.noSessionPersistence,
+              tooltip: 'Disables saving sessions to disk.\n'
+                  'Keeps automated reviews clean and isolated — '
+                  'prevents session accumulation over time.',
+              onChanged: (v) { setState(() => s.noSessionPersistence = v); widget.onChanged(s); },
+            ),
+            _tipToggle(
+              label: '--dangerously-skip-permissions',
+              value: s.dangerouslySkipPerms,
+              tooltip: '⚠️ Bypasses ALL permission checks.\n'
+                  'Only use in sandboxed or trusted environments '
+                  'where security is handled externally.',
+              onChanged: (v) { setState(() => s.dangerouslySkipPerms = v); widget.onChanged(s); },
+              danger: true,
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _tipDropdown<T>({
+    required String label,
+    required T? value,
+    required String tooltip,
+    required List<DropdownMenuItem<T>> items,
+    required ValueChanged<T?> onChanged,
+  }) {
+    return Tooltip(
+      message: tooltip,
+      waitDuration: const Duration(milliseconds: 600),
+      child: DropdownButtonFormField<T>(
+        // ignore: deprecated_member_use
+        value: value,
+        decoration: InputDecoration(
+          labelText: label,
+          border: const OutlineInputBorder(),
+          suffixIcon: Icon(Icons.info_outline, size: 16, color: Colors.grey.shade500),
+        ),
+        items: items,
+        onChanged: onChanged,
+      ),
+    );
+  }
+
+  Widget _tipToggle({
+    required String label,
+    required bool value,
+    required String tooltip,
+    required ValueChanged<bool> onChanged,
+    bool danger = false,
+  }) {
+    return Tooltip(
+      message: tooltip,
+      waitDuration: const Duration(milliseconds: 600),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Switch(
+          value: value,
+          onChanged: onChanged,
+          // ignore: deprecated_member_use
+          activeColor: danger ? Colors.orange.shade700 : null,
+        ),
+        const SizedBox(width: 4),
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: 12,
+            fontFamily: 'monospace',
+            color: danger
+                ? (value ? Colors.orange.shade700 : Colors.grey.shade500)
+                : null,
+          ),
+        ),
+        const SizedBox(width: 4),
+        Icon(Icons.info_outline, size: 13, color: Colors.grey.shade500),
+      ]),
     );
   }
 

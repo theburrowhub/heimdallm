@@ -198,6 +198,11 @@ class FirstRunSetup {
         if (ac.approvalMode.isNotEmpty) buf.writeln('approval_mode = "${ac.approvalMode}"');
         if (ac.extraFlags.isNotEmpty) buf.writeln('extra_flags = "${ac.extraFlags}"');
         if (ac.promptId != null) buf.writeln('prompt = "${ac.promptId}"');
+        if (ac.effort.isNotEmpty) buf.writeln('effort = "${ac.effort}"');
+        if (ac.permissionMode.isNotEmpty) buf.writeln('permission_mode = "${ac.permissionMode}"');
+        if (ac.bare) buf.writeln('bare = true');
+        if (ac.dangerouslySkipPerms) buf.writeln('dangerously_skip_perms = true');
+        if (ac.noSessionPersistence) buf.writeln('no_session_persistence = true');
         buf.writeln();
       }
     }

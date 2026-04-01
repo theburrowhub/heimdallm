@@ -4,8 +4,15 @@ class CLIAgentConfig {
   final String model;         // --model value ('' = use CLI default)
   final int maxTurns;         // claude: --max-turns (0 = not set)
   final String approvalMode;  // codex: --approval-mode ('' = not set)
-  final String extraFlags;    // free-form additional CLI flags
+  final String extraFlags;    // free-form additional CLI flags (space-separated)
   final String? promptId;     // agent-level prompt override (null = use global default)
+
+  // Claude-specific flags
+  final String effort;              // '' | 'low' | 'medium' | 'high' | 'max'
+  final String permissionMode;      // '' | 'default' | 'auto' | 'bypassPermissions' | 'acceptEdits' | 'dontAsk'
+  final bool bare;                  // --bare
+  final bool dangerouslySkipPerms;  // --dangerously-skip-permissions
+  final bool noSessionPersistence;  // --no-session-persistence
 
   const CLIAgentConfig({
     this.model = '',
@@ -13,11 +20,18 @@ class CLIAgentConfig {
     this.approvalMode = '',
     this.extraFlags = '',
     this.promptId,
+    this.effort = '',
+    this.permissionMode = '',
+    this.bare = false,
+    this.dangerouslySkipPerms = false,
+    this.noSessionPersistence = false,
   });
 
   bool get hasConfig =>
       model.isNotEmpty || maxTurns > 0 || approvalMode.isNotEmpty ||
-      extraFlags.isNotEmpty || promptId != null;
+      extraFlags.isNotEmpty || promptId != null || effort.isNotEmpty ||
+      permissionMode.isNotEmpty || bare || dangerouslySkipPerms ||
+      noSessionPersistence;
 
   CLIAgentConfig copyWith({
     String? model,
@@ -25,23 +39,37 @@ class CLIAgentConfig {
     String? approvalMode,
     String? extraFlags,
     Object? promptId = _sentinel,
+    String? effort,
+    String? permissionMode,
+    bool? bare,
+    bool? dangerouslySkipPerms,
+    bool? noSessionPersistence,
   }) => CLIAgentConfig(
-    model:        model        ?? this.model,
-    maxTurns:     maxTurns     ?? this.maxTurns,
-    approvalMode: approvalMode ?? this.approvalMode,
-    extraFlags:   extraFlags   ?? this.extraFlags,
-    promptId:     promptId == _sentinel ? this.promptId : promptId as String?,
+    model:                model        ?? this.model,
+    maxTurns:             maxTurns     ?? this.maxTurns,
+    approvalMode:         approvalMode ?? this.approvalMode,
+    extraFlags:           extraFlags   ?? this.extraFlags,
+    promptId:             promptId == _sentinel ? this.promptId : promptId as String?,
+    effort:               effort              ?? this.effort,
+    permissionMode:       permissionMode      ?? this.permissionMode,
+    bare:                 bare                ?? this.bare,
+    dangerouslySkipPerms: dangerouslySkipPerms ?? this.dangerouslySkipPerms,
+    noSessionPersistence: noSessionPersistence ?? this.noSessionPersistence,
   );
 
   factory CLIAgentConfig.fromJson(Map<String, dynamic> json) => CLIAgentConfig(
-    model:        (json['model']         as String?) ?? '',
-    maxTurns:     (json['max_turns']     as int?)    ?? 0,
-    approvalMode: (json['approval_mode'] as String?) ?? '',
-    extraFlags:   (json['extra_flags']   as String?) ?? '',
-    promptId:     _nonEmpty(json['prompt']),
+    model:                (json['model']                  as String?) ?? '',
+    maxTurns:             (json['max_turns']              as int?)    ?? 0,
+    approvalMode:         (json['approval_mode']          as String?) ?? '',
+    extraFlags:           (json['extra_flags']            as String?) ?? '',
+    promptId:             _nonEmpty(json['prompt']),
+    effort:               (json['effort']                 as String?) ?? '',
+    permissionMode:       (json['permission_mode']        as String?) ?? '',
+    bare:                 (json['bare']                   as bool?)   ?? false,
+    dangerouslySkipPerms: (json['dangerously_skip_perms'] as bool?)   ?? false,
+    noSessionPersistence: (json['no_session_persistence'] as bool?)   ?? false,
   );
 
-  /// Available models per CLI name.
   static const modelOptions = <String, List<String>>{
     'claude': ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001'],
     'gemini': ['gemini-2.5-pro', 'gemini-2.0-flash', 'gemini-1.5-pro'],
@@ -49,6 +77,10 @@ class CLIAgentConfig {
   };
 
   static const approvalModeOptions = ['full-auto', 'auto-edit', 'suggest'];
+  static const effortOptions       = ['low', 'medium', 'high', 'max'];
+  static const permissionModeOptions = [
+    'default', 'auto', 'bypassPermissions', 'acceptEdits', 'dontAsk',
+  ];
 }
 
 /// Per-repo AI override. null fields mean "use global default".

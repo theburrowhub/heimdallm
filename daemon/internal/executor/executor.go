@@ -42,6 +42,13 @@ type ExecOptions struct {
 	// When set, the CLI runs inside the local repo directory, giving it
 	// access to all project files for deeper analysis (missing tests, side effects, etc.).
 	WorkDir string
+
+	// Claude-specific flags
+	Effort               string // --effort low|medium|high|max
+	PermissionMode       string // --permission-mode <value>
+	Bare                 bool   // --bare
+	DangerouslySkipPerms bool   // --dangerously-skip-permissions
+	NoSessionPersistence bool   // --no-session-persistence
 }
 
 // Executor runs AI CLI tools for code review.
@@ -108,8 +115,25 @@ func buildArgs(cli string, opts ExecOptions) []string {
 		if opts.Model != "" {
 			args = append(args, "--model", opts.Model)
 		}
-		if cli == "claude" && opts.MaxTurns > 0 {
-			args = append(args, "--max-turns", fmt.Sprintf("%d", opts.MaxTurns))
+		if cli == "claude" {
+			if opts.MaxTurns > 0 {
+				args = append(args, "--max-turns", fmt.Sprintf("%d", opts.MaxTurns))
+			}
+			if opts.Effort != "" {
+				args = append(args, "--effort", opts.Effort)
+			}
+			if opts.PermissionMode != "" {
+				args = append(args, "--permission-mode", opts.PermissionMode)
+			}
+			if opts.Bare {
+				args = append(args, "--bare")
+			}
+			if opts.DangerouslySkipPerms {
+				args = append(args, "--dangerously-skip-permissions")
+			}
+			if opts.NoSessionPersistence {
+				args = append(args, "--no-session-persistence")
+			}
 		}
 	}
 

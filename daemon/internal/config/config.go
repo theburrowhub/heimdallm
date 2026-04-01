@@ -34,11 +34,18 @@ type GitHubConfig struct {
 // CLIAgentConfig holds per-CLI execution settings (model, flags, prompt override).
 // Stored under [ai.agents.<cli-name>] in config.toml.
 type CLIAgentConfig struct {
-	Model        string `toml:"model"`         // e.g. "claude-opus-4-6"
-	MaxTurns     int    `toml:"max_turns"`      // claude: --max-turns (0 = not set)
-	ApprovalMode string `toml:"approval_mode"` // codex: --approval-mode
-	ExtraFlags   string `toml:"extra_flags"`    // free-form additional CLI flags
-	PromptID     string `toml:"prompt"`         // agent-level prompt override
+	Model        string `toml:"model"`          // e.g. "claude-opus-4-6"
+	MaxTurns     int    `toml:"max_turns"`       // claude: --max-turns (0 = not set)
+	ApprovalMode string `toml:"approval_mode"`  // codex: --approval-mode
+	ExtraFlags   string `toml:"extra_flags"`     // free-form additional CLI flags
+	PromptID     string `toml:"prompt"`          // agent-level prompt override
+
+	// Claude-specific flags
+	Effort               string `toml:"effort"`                  // low|medium|high|max
+	PermissionMode       string `toml:"permission_mode"`         // default|auto|bypassPermissions|acceptEdits|dontAsk
+	Bare                 bool   `toml:"bare"`                    // --bare
+	DangerouslySkipPerms bool   `toml:"dangerously_skip_perms"` // --dangerously-skip-permissions
+	NoSessionPersistence bool   `toml:"no_session_persistence"` // --no-session-persistence
 }
 
 type AIConfig struct {

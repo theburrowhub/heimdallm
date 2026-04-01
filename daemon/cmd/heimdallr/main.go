@@ -104,11 +104,16 @@ func main() {
 			AgentPromptID:  agentCfg.PromptID,
 			ReviewMode:     aiCfg.ReviewMode,
 			ExecOpts: executor.ExecOptions{
-				Model:        agentCfg.Model,
-				MaxTurns:     agentCfg.MaxTurns,
-				ApprovalMode: agentCfg.ApprovalMode,
-				ExtraFlags:   agentCfg.ExtraFlags,
-				WorkDir:      aiCfg.LocalDir,
+				Model:                agentCfg.Model,
+				MaxTurns:             agentCfg.MaxTurns,
+				ApprovalMode:         agentCfg.ApprovalMode,
+				ExtraFlags:           agentCfg.ExtraFlags,
+				WorkDir:              aiCfg.LocalDir,
+				Effort:               agentCfg.Effort,
+				PermissionMode:       agentCfg.PermissionMode,
+				Bare:                 agentCfg.Bare,
+				DangerouslySkipPerms: agentCfg.DangerouslySkipPerms,
+				NoSessionPersistence: agentCfg.NoSessionPersistence,
 			},
 		}
 	}
@@ -219,11 +224,16 @@ func main() {
 		agentConfigs := make(map[string]map[string]any)
 		for name, ac := range c.AI.Agents {
 			agentConfigs[name] = map[string]any{
-				"model":         ac.Model,
-				"max_turns":     ac.MaxTurns,
-				"approval_mode": ac.ApprovalMode,
-				"extra_flags":   ac.ExtraFlags,
-				"prompt":        ac.PromptID,
+				"model":                    ac.Model,
+				"max_turns":                ac.MaxTurns,
+				"approval_mode":            ac.ApprovalMode,
+				"extra_flags":              ac.ExtraFlags,
+				"prompt":                   ac.PromptID,
+				"effort":                   ac.Effort,
+				"permission_mode":          ac.PermissionMode,
+				"bare":                     ac.Bare,
+				"dangerously_skip_perms":   ac.DangerouslySkipPerms,
+				"no_session_persistence":   ac.NoSessionPersistence,
 			}
 		}
 		return map[string]any{
