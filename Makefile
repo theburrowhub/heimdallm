@@ -39,6 +39,12 @@ dev-daemon: build-daemon dev-stop
 
 dev-stop:
 	@pkill -f "$(DAEMON_BIN)" 2>/dev/null && echo "↓  Daemon parado" || true
+	@UI_PID_FILE="$$HOME/.local/share/heimdallr/ui.pid"; \
+	 if [ -f "$$UI_PID_FILE" ]; then \
+	   UI_PID=$$(cat "$$UI_PID_FILE"); \
+	   kill "$$UI_PID" 2>/dev/null && echo "↓  UI parada (PID $$UI_PID)" || true; \
+	   rm -f "$$UI_PID_FILE"; \
+	 fi
 
 # ── Local release (sign + notarize + DMG + GitHub release) ───────────────────
 #
