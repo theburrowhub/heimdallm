@@ -26,6 +26,8 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
   };
 
   bool _initialized = false;
+  bool _saved = false;   // true = no pending changes since last save
+  bool _saving = false;
 
   void _initFrom(AppConfig config) {
     if (_initialized) return;
@@ -39,7 +41,12 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
     }
   }
 
+  void _markDirty() {
+    if (_saved) setState(() => _saved = false);
+  }
+
   Future<void> _save(AppConfig current) async {
+    setState(() => _saving = true);
     final agentConfigs = <String, CLIAgentConfig>{
       for (final name in _cliNames)
         name: _agents[name]!.toConfig(),
@@ -52,9 +59,12 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
     );
     try {
       await ref.read(configNotifierProvider.notifier).save(updated);
-      if (mounted) showToast(context, 'Saved');
+      if (mounted) setState(() { _saved = true; _saving = false; });
     } catch (e) {
-      if (mounted) showToast(context, 'Error: $e', isError: true);
+      if (mounted) {
+        setState(() => _saving = false);
+        showToast(context, 'Error: $e', isError: true);
+      }
     }
   }
 
@@ -82,7 +92,7 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
                       label: 'Primary agent',
                       value: _aiPrimary,
                       items: _cliNames,
-                      onChanged: (v) => setState(() => _aiPrimary = v!),
+                      onChanged: (v) { setState(() => _aiPrimary = v!); _markDirty(); },
                     )),
                     const SizedBox(width: 12),
                     Expanded(child: DropdownButtonFormField<String?>(
@@ -97,7 +107,7 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
                         ..._cliNames.map((v) => DropdownMenuItem<String?>(
                           value: v, child: Text(v))),
                       ],
-                      onChanged: (v) => setState(() => _aiFallback = v ?? ''),
+                      onChanged: (v) { setState(() => _aiFallback = v ?? ''); _markDirty(); },
                     )),
                     const SizedBox(width: 12),
                     Expanded(child: DropdownButtonFormField<String>(
@@ -111,7 +121,7 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
                         DropdownMenuItem(value: 'single', child: Text('Single (consolidated)')),
                         DropdownMenuItem(value: 'multi',  child: Text('Multi (per issue)')),
                       ],
-                      onChanged: (v) => setState(() => _reviewMode = v!),
+                      onChanged: (v) { setState(() => _reviewMode = v!); _markDirty(); },
                     )),
                   ]),
                   const SizedBox(height: 24),
@@ -124,7 +134,7 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
                       name: name,
                       state: _agents[name]!,
                       prompts: prompts,
-                      onChanged: (s) => setState(() => _agents[name] = s),
+                      onChanged: (s) { setState(() => _agents[name] = s); _markDirty(); },
                     ),
                     const Divider(),
                   ],
@@ -135,9 +145,16 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
               child: SizedBox(
                 width: double.infinity,
-                child: FilledButton(
-                  onPressed: () => _save(config),
-                  child: const Text('Save'),
+                child: FilledButton.icon(
+                  style: _saved
+                      ? FilledButton.styleFrom(backgroundColor: Colors.green.shade700)
+                      : null,
+                  icon: _saving
+                      ? const SizedBox(width: 16, height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                      : Icon(_saved ? Icons.check : Icons.save_outlined, size: 18),
+                  label: Text(_saving ? 'Saving…' : (_saved ? 'Saved' : 'Save')),
+                  onPressed: _saving ? null : () => _save(config),
                 ),
               ),
             ),
@@ -214,73 +231,114 @@ class _AgentSection extends StatefulWidget {
 }
 
 class _AgentSectionState extends State<_AgentSection> {
-  late final TextEditingController _extraCtrl;
+  late List<String> _flags; // each element = one flag entry (may contain spaces)
+  final _newFlagCtrl = TextEditingController();
+  int? _editingIndex;       // index of chip being edited (null = none)
+  final _editCtrl = TextEditingController();
 
   @override
   void initState() {
     super.initState();
-    _extraCtrl = TextEditingController(text: widget.state.extraFlags);
+    _flags = _parseFlags(widget.state.extraFlags);
   }
 
   @override
   void dispose() {
-    _extraCtrl.dispose();
+    _newFlagCtrl.dispose();
+    _editCtrl.dispose();
     super.dispose();
   }
 
-  void _emit() => widget.onChanged(widget.state);
+  /// Parses "extraFlags" string into individual flag entries.
+  /// Groups `--flag [value]` together: splits on ` --` or ` -` boundaries.
+  static List<String> _parseFlags(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return [];
+    // Split before each flag that starts with - or --
+    final parts = trimmed.split(RegExp(r'\s+(?=--?[a-zA-Z])'));
+    return parts.where((p) => p.trim().isNotEmpty).toList();
+  }
+
+  void _commit() {
+    widget.state.extraFlags = _flags.join(' ');
+    widget.onChanged(widget.state);
+  }
+
+  void _addFlag() {
+    final flag = _newFlagCtrl.text.trim();
+    if (flag.isEmpty) return;
+    setState(() {
+      _flags.add(flag);
+      _newFlagCtrl.clear();
+    });
+    _commit();
+  }
+
+  void _removeFlag(int idx) {
+    setState(() => _flags.removeAt(idx));
+    _commit();
+  }
+
+  void _startEdit(int idx) {
+    setState(() {
+      _editingIndex = idx;
+      _editCtrl.text = _flags[idx];
+    });
+  }
+
+  void _confirmEdit() {
+    final val = _editCtrl.text.trim();
+    if (val.isNotEmpty && _editingIndex != null) {
+      setState(() {
+        _flags[_editingIndex!] = val;
+        _editingIndex = null;
+      });
+      _commit();
+    }
+  }
+
+  void _cancelEdit() => setState(() => _editingIndex = null);
 
   @override
   Widget build(BuildContext context) {
-    final name = widget.name;
-    final s    = widget.state;
+    final name   = widget.name;
+    final s      = widget.state;
     final models = CLIAgentConfig.modelOptions[name] ?? [];
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Header row with emoji + name
+        // Header
         Row(children: [
           Text(_cliEmoji(name), style: const TextStyle(fontSize: 20)),
           const SizedBox(width: 8),
-          Text(name,
-              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+          Text(name, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
         ]),
         const SizedBox(height: 12),
 
-        // Row 1: Model + (claude) max-turns or (codex) approval-mode
+        // Row 1: Model + CLI-specific field
         Row(children: [
           Expanded(child: DropdownButtonFormField<String>(
             // ignore: deprecated_member_use
             value: s.model.isEmpty ? null : s.model,
-            decoration: const InputDecoration(
-                labelText: 'Model', border: OutlineInputBorder()),
+            decoration: const InputDecoration(labelText: 'Model', border: OutlineInputBorder()),
             items: [
-              const DropdownMenuItem<String>(
-                  value: null, child: Text('CLI default')),
+              const DropdownMenuItem<String>(value: null, child: Text('CLI default')),
               ...models.map((m) => DropdownMenuItem(value: m, child: Text(m))),
             ],
-            onChanged: (v) {
-              setState(() => s.model = v ?? '');
-              _emit();
-            },
+            onChanged: (v) { setState(() => s.model = v ?? ''); widget.onChanged(s); },
           )),
           if (name == 'claude') ...[
             const SizedBox(width: 12),
             SizedBox(
-              width: 130,
+              width: 140,
               child: TextFormField(
                 initialValue: s.maxTurns > 0 ? '${s.maxTurns}' : '',
                 decoration: const InputDecoration(
-                  labelText: '--max-turns',
-                  hintText: 'default',
-                  border: OutlineInputBorder(),
-                ),
+                    labelText: '--max-turns', hintText: 'default',
+                    border: OutlineInputBorder()),
                 keyboardType: TextInputType.number,
-                onChanged: (v) {
-                  setState(() => s.maxTurns = int.tryParse(v) ?? 0);
-                  _emit();
-                },
+                onChanged: (v) { setState(() => s.maxTurns = int.tryParse(v) ?? 0); widget.onChanged(s); },
               ),
             ),
           ],
@@ -292,41 +350,102 @@ class _AgentSectionState extends State<_AgentSection> {
                 // ignore: deprecated_member_use
                 value: s.approvalMode.isEmpty ? null : s.approvalMode,
                 decoration: const InputDecoration(
-                    labelText: '--approval-mode',
-                    border: OutlineInputBorder()),
+                    labelText: '--approval-mode', border: OutlineInputBorder()),
                 items: [
-                  const DropdownMenuItem<String>(
-                      value: null, child: Text('CLI default')),
+                  const DropdownMenuItem<String>(value: null, child: Text('CLI default')),
                   ...CLIAgentConfig.approvalModeOptions.map(
                       (v) => DropdownMenuItem(value: v, child: Text(v))),
                 ],
-                onChanged: (v) {
-                  setState(() => s.approvalMode = v ?? '');
-                  _emit();
-                },
+                onChanged: (v) { setState(() => s.approvalMode = v ?? ''); widget.onChanged(s); },
               ),
             ),
           ],
         ]),
         const SizedBox(height: 10),
 
-        // Row 2: Default prompt + extra flags
+        // Row 2: Default prompt (full width)
+        _promptDropdown(s),
+        const SizedBox(height: 12),
+
+        // Row 3: Execution flags — chip list
+        Text('Execution flags',
+            style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
+        const SizedBox(height: 8),
+
+        // Chip list
+        if (_flags.isNotEmpty)
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: List.generate(_flags.length, (idx) {
+              if (_editingIndex == idx) {
+                // Inline edit
+                return SizedBox(
+                  width: 260,
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    Expanded(
+                      child: TextFormField(
+                        controller: _editCtrl,
+                        autofocus: true,
+                        decoration: const InputDecoration(
+                            border: OutlineInputBorder(), isDense: true,
+                            contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 6)),
+                        onFieldSubmitted: (_) => _confirmEdit(),
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    IconButton(
+                      icon: const Icon(Icons.check, size: 16),
+                      onPressed: _confirmEdit,
+                      visualDensity: VisualDensity.compact,
+                      padding: EdgeInsets.zero,
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close, size: 16),
+                      onPressed: _cancelEdit,
+                      visualDensity: VisualDensity.compact,
+                      padding: EdgeInsets.zero,
+                    ),
+                  ]),
+                );
+              }
+              return InputChip(
+                label: Text(_flags[idx],
+                    style: const TextStyle(fontSize: 12, fontFamily: 'monospace')),
+                deleteIcon: const Icon(Icons.close, size: 14),
+                onDeleted: () => _removeFlag(idx),
+                onPressed: () => _startEdit(idx),
+                labelPadding: const EdgeInsets.symmetric(horizontal: 4),
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                tooltip: 'Tap to edit',
+              );
+            }),
+          ),
+
+        if (_flags.isNotEmpty) const SizedBox(height: 8),
+
+        // Add new flag
         Row(children: [
-          Expanded(child: _promptDropdown(s)),
-          const SizedBox(width: 12),
-          Expanded(child: TextFormField(
-            controller: _extraCtrl,
-            decoration: InputDecoration(
-              labelText: 'Extra flags',
-              hintText: _extraFlagsHint(name),
-              border: const OutlineInputBorder(),
-              isDense: true,
+          Expanded(
+            child: TextFormField(
+              controller: _newFlagCtrl,
+              decoration: InputDecoration(
+                hintText: _extraFlagsHint(name),
+                border: const OutlineInputBorder(),
+                isDense: true,
+                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              ),
+              onFieldSubmitted: (_) => _addFlag(),
             ),
-            onChanged: (v) {
-              s.extraFlags = v;
-              _emit();
-            },
-          )),
+          ),
+          const SizedBox(width: 8),
+          FilledButton.tonal(
+            onPressed: _addFlag,
+            style: FilledButton.styleFrom(
+                minimumSize: const Size(0, 40),
+                padding: const EdgeInsets.symmetric(horizontal: 16)),
+            child: const Text('Add'),
+          ),
         ]),
         const SizedBox(height: 8),
       ],
@@ -341,7 +460,6 @@ class _AgentSectionState extends State<_AgentSection> {
         labelText: 'Default prompt',
         helperText: 'Overrides global; repo config overrides this',
         border: OutlineInputBorder(),
-        isDense: true,
       ),
       items: [
         const DropdownMenuItem<String?>(value: null, child: Text('Global active')),
@@ -350,10 +468,7 @@ class _AgentSectionState extends State<_AgentSection> {
           child: Text(p.name as String),
         )),
       ],
-      onChanged: (v) {
-        setState(() => s.promptId = v);
-        _emit();
-      },
+      onChanged: (v) { setState(() => s.promptId = v); widget.onChanged(s); },
     );
   }
 
@@ -371,7 +486,7 @@ class _AgentSectionState extends State<_AgentSection> {
       case 'claude': return '--allowedTools Bash,Read';
       case 'gemini': return '--all-files';
       case 'codex':  return '--full-auto';
-      default:       return '';
+      default:       return '--flag value';
     }
   }
 }
