@@ -36,6 +36,13 @@ class RepoConfig {
 
 const _sentinel = Object();
 
+/// Returns null for empty or null strings — prevents DropdownButtonFormField
+/// assertion errors when Go zero-value strings ("") arrive from the daemon.
+String? _nonEmpty(dynamic v) {
+  final s = v as String?;
+  return (s == null || s.isEmpty) ? null : s;
+}
+
 class AppConfig {
   final int serverPort;
   final String pollInterval;
@@ -101,16 +108,18 @@ class AppConfig {
     final configs = <String, RepoConfig>{
       for (final r in repos) r: const RepoConfig(monitored: true),
     };
-    // Apply per-repo overrides from repo_overrides field
+    // Apply per-repo overrides from repo_overrides field.
+    // Normalize empty strings to null — Go zero-value strings arrive as ""
+    // and would break DropdownButtonFormField (value not in items list).
     final overrides = json['repo_overrides'] as Map<String, dynamic>?;
     if (overrides != null) {
       for (final entry in overrides.entries) {
         final ov = entry.value as Map<String, dynamic>;
         configs[entry.key] = RepoConfig(
           monitored: configs.containsKey(entry.key),
-          aiPrimary: ov['primary'] as String?,
-          aiFallback: ov['fallback'] as String?,
-          reviewMode: ov['review_mode'] as String?,
+          aiPrimary:   _nonEmpty(ov['primary']),
+          aiFallback:  _nonEmpty(ov['fallback']),
+          reviewMode:  _nonEmpty(ov['review_mode']),
         );
       }
     }
