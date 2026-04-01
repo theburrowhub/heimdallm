@@ -18,9 +18,8 @@ final _appRouter = createRouter(initialLocation: '/');
 GoRouter get appRouter => _appRouter;
 
 /// Checks for a running instance using a PID file.
-/// Returns true if this is the only instance; returns false if another
-/// instance is already running (this process should exit).
-/// Skipped in debug mode — developers restart the app intentionally.
+/// If another instance is found, sends it SIGUSR1 (which shows its window)
+/// and returns false so this new process can exit cleanly.
 Future<bool> _ensureSingleInstance() async {
   final home = Platform.environment['HOME'] ?? '';
   final dir  = Directory('$home/.local/share/heimdallr');
@@ -30,20 +29,31 @@ Future<bool> _ensureSingleInstance() async {
   if (await pidFile.exists()) {
     final existing = int.tryParse((await pidFile.readAsString()).trim());
     if (existing != null && existing != pid) {
-      // Check if that process is still alive (kill -0 = existence check)
+      // kill -0 = existence check (no actual kill, just verifies the process is alive)
       final check = await Process.run('kill', ['-0', '$existing']);
       if (check.exitCode == 0) {
-        // Another instance is running — focus it and exit this one
-        debugPrint('Another Heimdallr instance is running (PID $existing), activating it.');
-        Process.run('open', ['-a', 'Heimdallr']).ignore();
+        // Another instance is running — signal it to show its window, then exit.
+        debugPrint('Another Heimdallr instance is running (PID $existing), signalling it.');
+        await Process.run('kill', ['-USR1', '$existing']);
         return false;
       }
-      // Stale PID — process no longer exists, continue
+      // Stale PID file — that process is gone, continue normally.
     }
   }
 
   await pidFile.writeAsString('$pid');
   return true;
+}
+
+/// Activates the window when the app receives SIGUSR1 from another
+/// instance that tried to start. Called once during main() setup.
+void _listenForActivationSignal() {
+  ProcessSignal.sigusr1.watch().listen((_) async {
+    try {
+      await windowManager.show();
+      await windowManager.focus();
+    } catch (_) {}
+  });
 }
 
 void main() async {
@@ -53,6 +63,9 @@ void main() async {
   if (!await _ensureSingleInstance()) {
     exit(0);
   }
+
+  // Listen for SIGUSR1 so that a second launch attempt activates this window.
+  _listenForActivationSignal();
 
   // Catch all init errors so a crash shows a window rather than silently dying.
   FlutterError.onError = (details) {

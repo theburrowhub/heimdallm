@@ -42,12 +42,9 @@ dev-stop:
 	@UI_PID_FILE="$$HOME/.local/share/heimdallr/ui.pid"; \
 	 if [ -f "$$UI_PID_FILE" ]; then \
 	   UI_PID=$$(cat "$$UI_PID_FILE"); \
-	   kill "$$UI_PID" 2>/dev/null && sleep 0.5 || true; \
+	   kill "$$UI_PID" 2>/dev/null && echo "↓  UI parada (PID $$UI_PID)" || true; \
 	   rm -f "$$UI_PID_FILE"; \
-	   echo "↓  UI parada (PID $$UI_PID)"; \
-	 fi; \
-	 pkill -9 -f "Heimdallr.app/Contents/MacOS/Heimdallr" 2>/dev/null || true; \
-	 sleep 0.3
+	 fi
 
 # ── Local release (sign + notarize + DMG + GitHub release) ───────────────────
 #
