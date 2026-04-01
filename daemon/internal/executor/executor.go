@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -99,21 +101,23 @@ func (e *Executor) Execute(cli, prompt string, opts ExecOptions) (*ReviewResult,
 	ctx, cancel := context.WithTimeout(context.Background(), executionTimeout)
 	defer cancel()
 
-	// Resolve full path so the process works even when the daemon's PATH
-	// doesn't include Homebrew or npm globals (common with GUI-launched processes).
+	// Resolve full path — uses login shell to find binaries in Homebrew/npm/etc.
 	cliPath := resolveCLIPath(cli)
 	if cliPath == "" {
-		cliPath = cli // best effort
+		cliPath = cli // best effort; execution will fail with a useful error
 	}
 
-	args := buildArgs(cli, opts) // use name for flag logic (switch cases)
-
-	// Run through a login shell so the CLI inherits the full user environment
-	// (API keys, PATH, etc.) even when the daemon was launched from a GUI app
-	// without inheriting the shell's environment variables.
-	shellCmd := shellJoin(append([]string{cliPath}, args...))
-	cmd := exec.CommandContext(ctx, "/bin/zsh", "-l", "-c", shellCmd)
+	args := buildArgs(cli, opts)
+	cmd := exec.CommandContext(ctx, cliPath, args...)
 	cmd.Stdin = strings.NewReader(prompt)
+
+	// Augment PATH with paths from the login shell so the CLI can find its own
+	// dependencies, without running stdin THROUGH the shell (which would cause
+	// shell startup scripts to consume our prompt).
+	enrichedEnv := enrichEnvWithLoginPath()
+	if enrichedEnv != nil {
+		cmd.Env = enrichedEnv
+	}
 	if opts.WorkDir != "" {
 		cmd.Dir = opts.WorkDir
 	}
@@ -177,14 +181,52 @@ func buildArgs(cli string, opts ExecOptions) []string {
 	return args
 }
 
-// shellJoin builds a shell command string from parts, single-quoting each
-// argument so that spaces and special characters are preserved correctly.
-func shellJoin(parts []string) string {
-	quoted := make([]string, len(parts))
-	for i, p := range parts {
-		quoted[i] = "'" + strings.ReplaceAll(p, "'", `'\''`) + "'"
-	}
-	return strings.Join(quoted, " ")
+var (
+	loginPathOnce sync.Once
+	loginPathEnv  []string // os.Environ() + enriched PATH from login shell
+)
+
+// enrichEnvWithLoginPath returns the process environment augmented with the PATH
+// from a login shell. Cached after the first call — cheap after startup.
+// Using a login shell ONLY for PATH (not for execution) avoids the stdin
+// consumption bug where shell startup scripts read our prompt.
+func enrichEnvWithLoginPath() []string {
+	loginPathOnce.Do(func() {
+		base := os.Environ()
+		// Ask the login shell for its PATH without providing any stdin
+		// (pass /dev/null so startup scripts cannot accidentally consume stdin)
+		cmd := exec.Command("/bin/zsh", "-l", "-c", "echo $PATH")
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		cmd = exec.CommandContext(ctx, "/bin/zsh", "-l", "-c", "echo $PATH")
+		cmd.Stdin, _ = os.Open(os.DevNull)
+		cmd.Stderr = nil
+		out, err := cmd.Output()
+		if err != nil {
+			loginPathEnv = base
+			return
+		}
+		loginShellPath := strings.TrimSpace(string(out))
+		if loginShellPath == "" {
+			loginPathEnv = base
+			return
+		}
+		// Merge: put login shell PATH first so Homebrew bins take precedence
+		currentPath := os.Getenv("PATH")
+		merged := loginShellPath
+		if currentPath != "" {
+			merged = loginShellPath + ":" + currentPath
+		}
+		result := make([]string, 0, len(base)+1)
+		for _, e := range base {
+			if !strings.HasPrefix(e, "PATH=") {
+				result = append(result, e)
+			}
+		}
+		result = append(result, "PATH="+merged)
+		loginPathEnv = result
+	})
+	return loginPathEnv
 }
 
 func parseResult(data []byte) (*ReviewResult, error) {
