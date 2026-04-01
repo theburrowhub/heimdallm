@@ -252,6 +252,13 @@ func (p *Pipeline) PublishPending() {
 		if err != nil {
 			continue
 		}
+		// Skip reviews for PRs with no repo — orphaned records that will never publish.
+		// Mark them as permanently published (fake ID -1) to stop retry noise.
+		if pr.Repo == "" {
+			_ = p.store.UpdateGitHubReviewID(rev.ID, -1)
+			slog.Info("pipeline: skipping pending review for PR with no repo", "review_id", rev.ID)
+			continue
+		}
 		// Rebuild a minimal result from stored JSON for the body
 		var issues []executor.Issue
 		json.Unmarshal([]byte(rev.Issues), &issues)

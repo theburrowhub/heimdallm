@@ -103,11 +103,16 @@ func (e *Executor) Execute(cli, prompt string, opts ExecOptions) (*ReviewResult,
 	// doesn't include Homebrew or npm globals (common with GUI-launched processes).
 	cliPath := resolveCLIPath(cli)
 	if cliPath == "" {
-		cliPath = cli // best effort; execution will fail with a useful error
+		cliPath = cli // best effort
 	}
 
-	args := buildArgs(cli, opts)         // use name for flag logic (switch cases)
-	cmd := exec.CommandContext(ctx, cliPath, args...) // use full path for execution
+	args := buildArgs(cli, opts) // use name for flag logic (switch cases)
+
+	// Run through a login shell so the CLI inherits the full user environment
+	// (API keys, PATH, etc.) even when the daemon was launched from a GUI app
+	// without inheriting the shell's environment variables.
+	shellCmd := shellJoin(append([]string{cliPath}, args...))
+	cmd := exec.CommandContext(ctx, "/bin/zsh", "-l", "-c", shellCmd)
 	cmd.Stdin = strings.NewReader(prompt)
 	if opts.WorkDir != "" {
 		cmd.Dir = opts.WorkDir
@@ -170,6 +175,16 @@ func buildArgs(cli string, opts ExecOptions) []string {
 	}
 
 	return args
+}
+
+// shellJoin builds a shell command string from parts, single-quoting each
+// argument so that spaces and special characters are preserved correctly.
+func shellJoin(parts []string) string {
+	quoted := make([]string, len(parts))
+	for i, p := range parts {
+		quoted[i] = "'" + strings.ReplaceAll(p, "'", `'\''`) + "'"
+	}
+	return strings.Join(quoted, " ")
 }
 
 func parseResult(data []byte) (*ReviewResult, error) {
