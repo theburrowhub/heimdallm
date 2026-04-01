@@ -53,6 +53,20 @@ class ApiClient {
     }
   }
 
+  Future<void> dismissPR(int prId) async {
+    final resp = await _client.post(_uri('/prs/$prId/dismiss'));
+    if (resp.statusCode != 200) {
+      throw ApiException('POST /prs/$prId/dismiss failed: ${resp.statusCode}');
+    }
+  }
+
+  Future<void> undismissPR(int prId) async {
+    final resp = await _client.post(_uri('/prs/$prId/undismiss'));
+    if (resp.statusCode != 200) {
+      throw ApiException('POST /prs/$prId/undismiss failed: ${resp.statusCode}');
+    }
+  }
+
   /// Tells the daemon to reload its config from disk and restart the poll scheduler.
   Future<void> reloadConfig() async {
     try {

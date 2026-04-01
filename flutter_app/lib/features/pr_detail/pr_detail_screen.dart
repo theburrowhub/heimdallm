@@ -43,6 +43,32 @@ class _PRDetailScreenState extends ConsumerState<PRDetailScreen> {
     if (mounted) setState(() => _reviewing = false);
   }
 
+  Future<void> _dismiss(BuildContext context) async {
+    final api = ref.read(apiClientProvider);
+    try {
+      await api.dismissPR(widget.prId);
+      ref.invalidate(prsProvider);
+      if (context.mounted) {
+        context.canPop() ? context.pop() : context.go('/');
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text('PR dismissed'),
+            action: SnackBarAction(
+              label: 'Undo',
+              onPressed: () async {
+                await api.undismissPR(widget.prId);
+                ref.invalidate(prsProvider);
+              },
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      if (!context.mounted) return;
+      showToast(context, 'Error: $e', isError: true);
+    }
+  }
+
   Future<void> _trigger() async {
     _startReviewing();
     final api = ref.read(apiClientProvider);
@@ -113,7 +139,7 @@ class _PRDetailScreenState extends ConsumerState<PRDetailScreen> {
                 child: CircularProgressIndicator(strokeWidth: 2),
               ),
             )
-          else
+          else ...[
             Tooltip(
               message: repoMissing
                   ? 'Repo unknown — wait for next poll or re-discover in Settings'
@@ -124,6 +150,13 @@ class _PRDetailScreenState extends ConsumerState<PRDetailScreen> {
                 onPressed: repoMissing ? null : _trigger,
               ),
             ),
+            const SizedBox(width: 8),
+            OutlinedButton.icon(
+              icon: const Icon(Icons.visibility_off_outlined, size: 16),
+              label: const Text('Dismiss'),
+              onPressed: () => _dismiss(context),
+            ),
+          ],
           const SizedBox(width: 12),
         ],
       ),

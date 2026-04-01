@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../core/models/pr.dart';
 import '../../shared/widgets/severity_badge.dart';
+import '../../shared/widgets/toast.dart';
 import '../agents/agents_screen.dart';
 import '../repositories/repos_screen.dart';
 import '../stats/stats_screen.dart';
@@ -270,11 +271,43 @@ class _PRTile extends StatelessWidget {
                   ),
                 ],
               ),
+              const SizedBox(width: 4),
+              IconButton(
+                icon: const Icon(Icons.close, size: 16),
+                tooltip: 'Dismiss PR',
+                color: Colors.grey.shade600,
+                visualDensity: VisualDensity.compact,
+                onPressed: () => _dismiss(context),
+              ),
             ],
           ),
         ),
       ),
     );
+  }
+
+  Future<void> _dismiss(BuildContext context) async {
+    final api = ref.read(apiClientProvider);
+    try {
+      await api.dismissPR(pr.id);
+      ref.invalidate(prsProvider);
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('PR #${pr.number} dismissed'),
+            action: SnackBarAction(
+              label: 'Undo',
+              onPressed: () async {
+                await api.undismissPR(pr.id);
+                ref.invalidate(prsProvider);
+              },
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) showToast(context, 'Error: $e', isError: true);
+    }
   }
 
   Widget _chip(String label, Color color) => Container(

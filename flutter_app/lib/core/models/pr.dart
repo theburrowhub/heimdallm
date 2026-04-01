@@ -17,6 +17,8 @@ class PR {
   final DateTime updatedAt;
   @JsonKey(name: 'latest_review', includeIfNull: false)
   final Review? latestReview;
+  @JsonKey(name: 'dismissed', defaultValue: false)
+  final bool dismissed;
 
   const PR({
     required this.id,
@@ -29,6 +31,7 @@ class PR {
     required this.state,
     required this.updatedAt,
     this.latestReview,
+    this.dismissed = false,
   });
 
   factory PR.fromJson(Map<String, dynamic> json) => _$PRFromJson(json);

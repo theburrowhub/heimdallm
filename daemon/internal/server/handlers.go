@@ -77,6 +77,8 @@ func (srv *Server) buildRouter() chi.Router {
 	r.Get("/prs", srv.handleListPRs)
 	r.Get("/prs/{id}", srv.handleGetPR)
 	r.Post("/prs/{id}/review", srv.handleTriggerReview)
+	r.Post("/prs/{id}/dismiss", srv.handleDismissPR)
+	r.Post("/prs/{id}/undismiss", srv.handleUndismissPR)
 	r.Get("/stats", srv.handleStats)
 	r.Get("/agents", srv.handleListAgents)
 	r.Post("/agents", srv.handleUpsertAgent)
@@ -129,6 +131,32 @@ func (srv *Server) handleGetPR(w http.ResponseWriter, r *http.Request) {
 	}
 	reviews, _ := srv.store.ListReviewsForPR(id)
 	writeJSON(w, http.StatusOK, map[string]any{"pr": pr, "reviews": reviews})
+}
+
+func (srv *Server) handleDismissPR(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if err := srv.store.DismissPR(id); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "dismissed"})
+}
+
+func (srv *Server) handleUndismissPR(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if err := srv.store.UndismissPR(id); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "undismissed"})
 }
 
 func (srv *Server) handleTriggerReview(w http.ResponseWriter, r *http.Request) {

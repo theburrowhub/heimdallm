@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS prs (
   url        TEXT NOT NULL,
   state      TEXT NOT NULL,
   updated_at DATETIME NOT NULL,
-  fetched_at DATETIME NOT NULL
+  fetched_at DATETIME NOT NULL,
+  dismissed  INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS reviews (
@@ -78,6 +79,7 @@ func Open(dsn string) (*Store, error) {
 	db.Exec("ALTER TABLE agents ADD COLUMN instructions TEXT NOT NULL DEFAULT ''")
 	db.Exec("ALTER TABLE agents ADD COLUMN cli_flags TEXT NOT NULL DEFAULT ''")
 	db.Exec("ALTER TABLE agents RENAME COLUMN prompt TO prompt") // no-op, ensures column exists
+	db.Exec("ALTER TABLE prs ADD COLUMN dismissed INTEGER NOT NULL DEFAULT 0")
 	return &Store{db: db}, nil
 }
 

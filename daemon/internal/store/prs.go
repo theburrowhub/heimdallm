@@ -17,9 +17,12 @@ type PR struct {
 	State     string    `json:"state"`
 	UpdatedAt time.Time `json:"updated_at"`
 	FetchedAt time.Time `json:"fetched_at"`
+	Dismissed bool      `json:"dismissed"`
 }
 
 // UpsertPR inserts or updates a PR record, keyed on github_id. Returns the row ID.
+// Note: dismissed is intentionally excluded from the UPDATE clause so a user's
+// dismiss choice is preserved even when the poll loop re-fetches the same PR.
 func (s *Store) UpsertPR(pr *PR) (int64, error) {
 	res, err := s.db.Exec(`
 		INSERT INTO prs (github_id, repo, number, title, author, url, state, updated_at, fetched_at)
@@ -49,7 +52,7 @@ func (s *Store) UpsertPR(pr *PR) (int64, error) {
 // GetPR retrieves a PR by its local row ID.
 func (s *Store) GetPR(id int64) (*PR, error) {
 	row := s.db.QueryRow(
-		"SELECT id, github_id, repo, number, title, author, url, state, updated_at, fetched_at FROM prs WHERE id = ?", id,
+		"SELECT id, github_id, repo, number, title, author, url, state, updated_at, fetched_at, dismissed FROM prs WHERE id = ?", id,
 	)
 	return scanPR(row)
 }
@@ -57,15 +60,15 @@ func (s *Store) GetPR(id int64) (*PR, error) {
 // GetPRByGithubID retrieves a PR by its GitHub PR ID.
 func (s *Store) GetPRByGithubID(githubID int64) (*PR, error) {
 	row := s.db.QueryRow(
-		"SELECT id, github_id, repo, number, title, author, url, state, updated_at, fetched_at FROM prs WHERE github_id = ?", githubID,
+		"SELECT id, github_id, repo, number, title, author, url, state, updated_at, fetched_at, dismissed FROM prs WHERE github_id = ?", githubID,
 	)
 	return scanPR(row)
 }
 
-// ListPRs returns all PRs ordered by updated_at descending.
+// ListPRs returns all non-dismissed PRs ordered by updated_at descending.
 func (s *Store) ListPRs() ([]*PR, error) {
 	rows, err := s.db.Query(
-		"SELECT id, github_id, repo, number, title, author, url, state, updated_at, fetched_at FROM prs ORDER BY updated_at DESC",
+		"SELECT id, github_id, repo, number, title, author, url, state, updated_at, fetched_at, dismissed FROM prs WHERE dismissed = 0 ORDER BY updated_at DESC",
 	)
 	if err != nil {
 		return nil, fmt.Errorf("store: list prs: %w", err)
@@ -82,6 +85,25 @@ func (s *Store) ListPRs() ([]*PR, error) {
 	return prs, rows.Err()
 }
 
+// DismissPR marks a PR as dismissed so it no longer appears in the dashboard
+// or triggers auto-reviews.
+func (s *Store) DismissPR(id int64) error {
+	_, err := s.db.Exec("UPDATE prs SET dismissed = 1 WHERE id = ?", id)
+	if err != nil {
+		return fmt.Errorf("store: dismiss pr %d: %w", id, err)
+	}
+	return nil
+}
+
+// UndismissPR restores a previously dismissed PR.
+func (s *Store) UndismissPR(id int64) error {
+	_, err := s.db.Exec("UPDATE prs SET dismissed = 0 WHERE id = ?", id)
+	if err != nil {
+		return fmt.Errorf("store: undismiss pr %d: %w", id, err)
+	}
+	return nil
+}
+
 // scanner is satisfied by both *sql.Row and *sql.Rows.
 type scanner interface {
 	Scan(dest ...any) error
@@ -90,9 +112,10 @@ type scanner interface {
 func scanPR(s scanner) (*PR, error) {
 	var pr PR
 	var updatedAt, fetchedAt string
+	var dismissed int
 	var err error
 	if err = s.Scan(&pr.ID, &pr.GithubID, &pr.Repo, &pr.Number, &pr.Title,
-		&pr.Author, &pr.URL, &pr.State, &updatedAt, &fetchedAt); err != nil {
+		&pr.Author, &pr.URL, &pr.State, &updatedAt, &fetchedAt, &dismissed); err != nil {
 		return nil, fmt.Errorf("store: scan pr: %w", err)
 	}
 	if pr.UpdatedAt, err = time.Parse(sqliteTimeFormat, updatedAt); err != nil {
@@ -101,5 +124,6 @@ func scanPR(s scanner) (*PR, error) {
 	if pr.FetchedAt, err = time.Parse(sqliteTimeFormat, fetchedAt); err != nil {
 		return nil, fmt.Errorf("store: parse fetched_at %q: %w", fetchedAt, err)
 	}
+	pr.Dismissed = dismissed != 0
 	return &pr, nil
 }

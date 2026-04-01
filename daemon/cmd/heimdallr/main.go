@@ -150,6 +150,10 @@ func main() {
 				cfgMu.Unlock()
 				existing, _ := s.GetPRByGithubID(pr.ID)
 				if existing != nil {
+					// Skip PRs the user has dismissed
+					if existing.Dismissed {
+						continue
+					}
 					if rev, err := s.LatestReviewForPR(existing.ID); err == nil && rev != nil {
 						// Skip if PR hasn't changed since our last review.
 						if !pr.UpdatedAt.After(rev.CreatedAt) {
