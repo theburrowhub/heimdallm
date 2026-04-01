@@ -14,6 +14,129 @@ permissions:
   contents: write   # required to create GitHub releases and upload assets
 
 jobs:
+  build-linux:
+    name: Build Heimdallr Linux (.tar.gz)
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── Toolchains ──────────────────────────────────────────────────────────
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: daemon/go.mod
+          cache-dependency-path: daemon/go.sum
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.x'
+          channel: stable
+          cache: true
+
+      # ── Linux system dependencies ────────────────────────────────────────────
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            clang cmake ninja-build pkg-config \
+            libgtk-3-dev liblzma-dev libstdc++-12-dev \
+            libayatana-appindicator3-dev \
+            libnotify-dev
+
+      # ── Dependencies ────────────────────────────────────────────────────────
+      - name: Flutter pub get
+        working-directory: flutter_app
+        run: flutter pub get
+
+      # ── Tests (gate before building) ────────────────────────────────────────
+      - name: Daemon tests
+        working-directory: daemon
+        run: go test ./... -timeout 60s
+
+      - name: Flutter tests
+        working-directory: flutter_app
+        run: flutter test
+
+      # ── Build ───────────────────────────────────────────────────────────────
+      - name: Build daemon (linux/amd64)
+        run: make build-daemon
+
+      - name: Build Flutter app (Linux release)
+        working-directory: flutter_app
+        run: |
+          flutter build linux --release \
+            --build-name="${GITHUB_REF_NAME#v}" \
+            --build-number="${GITHUB_RUN_NUMBER}"
+
+      # ── Bundle ──────────────────────────────────────────────────────────────
+      - name: Embed daemon and verify bundle
+        run: |
+          BUNDLE="flutter_app/build/linux/x64/release/bundle"
+
+          if [ ! -d "$BUNDLE" ]; then
+            echo "❌ Linux bundle not found at $BUNDLE"
+            ls -la flutter_app/build/linux/ || true
+            exit 1
+          fi
+
+          if [ ! -f "daemon/bin/heimdallr" ]; then
+            echo "❌ daemon/bin/heimdallr not found"
+            exit 1
+          fi
+
+          # Embed daemon alongside Flutter binary
+          cp "daemon/bin/heimdallr" "$BUNDLE/heimdalld"
+          chmod +x "$BUNDLE/heimdalld"
+
+          echo "Bundle contents:"
+          ls -lh "$BUNDLE"
+
+          FLUTTER_SIZE=$(stat -c%s "$BUNDLE/heimdallr" 2>/dev/null || stat -c%s "$BUNDLE/Heimdallr" 2>/dev/null || echo 0)
+          DAEMON_SIZE=$(stat -c%s "$BUNDLE/heimdalld")
+          echo "✓ Flutter binary: ${FLUTTER_SIZE} bytes"
+          echo "✓ Daemon binary:  ${DAEMON_SIZE} bytes"
+          echo "BUNDLE=$BUNDLE" >> "$GITHUB_ENV"
+
+      # ── Package ─────────────────────────────────────────────────────────────
+      - name: Create tar.gz
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          TAR="dist/Heimdallr-linux-${VERSION}.tar.gz"
+          mkdir -p dist
+
+          # Package bundle as Heimdallr/ directory inside the archive
+          cp -r "${BUNDLE}" dist/Heimdallr
+          tar -czf "$TAR" -C dist Heimdallr
+          rm -rf dist/Heimdallr
+
+          ls -lh "$TAR"
+          echo "TAR_PATH=$TAR"    >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION"  >> "$GITHUB_ENV"
+
+      # ── Publish ─────────────────────────────────────────────────────────────
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Heimdallr-linux-${{ env.VERSION }}
+          path: ${{ env.TAR_PATH }}
+          retention-days: 90
+
+      - name: Create/Update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Heimdallr ${{ env.VERSION }}
+          tag_name: ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: false   # macOS job owns the release notes
+          files: ${{ env.TAR_PATH }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   build:
     name: Build Heimdallr.dmg
     runs-on: macos-14
