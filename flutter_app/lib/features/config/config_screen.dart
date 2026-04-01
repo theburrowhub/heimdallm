@@ -390,7 +390,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
             border: OutlineInputBorder(),
           ),
           keyboardType: TextInputType.number,
-          onChanged: (v) => _retentionDays = int.tryParse(v) ?? 90,
+          onChanged: (v) => setState(() => _retentionDays = int.tryParse(v) ?? 90),
         ),
       ],
     );

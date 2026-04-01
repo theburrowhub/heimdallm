@@ -246,12 +246,13 @@ func main() {
 
 		// Construct github.PullRequest from stored data
 		ghPR := &gh.PullRequest{
-			ID:      pr.GithubID,
-			Number:  pr.Number,
-			Title:   pr.Title,
-			HTMLURL: pr.URL,
-			State:   pr.State,
-			Repo:    pr.Repo,
+			ID:        pr.GithubID,
+			Number:    pr.Number,
+			Title:     pr.Title,
+			HTMLURL:   pr.URL,
+			State:     pr.State,
+			Repo:      pr.Repo,
+			UpdatedAt: pr.UpdatedAt, // required so UpsertPR doesn't zero-out the timestamp
 		}
 		ghPR.User.Login = pr.Author
 
