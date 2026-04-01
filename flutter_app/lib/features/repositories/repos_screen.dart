@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -16,17 +17,36 @@ class ReposScreen extends ConsumerStatefulWidget {
   ConsumerState<ReposScreen> createState() => _ReposScreenState();
 }
 
+enum _SyncStatus { idle, saving, saved }
+
 class _ReposScreenState extends ConsumerState<ReposScreen> {
   Map<String, RepoConfig> _repoConfigs = {};
   bool _initialized = false;
   bool _discovering = false;
   String? _discoverError;
   String _search = '';
+  _SyncStatus _syncStatus = _SyncStatus.idle;
+  Timer? _debounce;
+  Timer? _savedResetTimer;
+
+  @override
+  void dispose() {
+    _debounce?.cancel();
+    _savedResetTimer?.cancel();
+    super.dispose();
+  }
 
   void _initFrom(AppConfig config) {
     if (_initialized) return;
     _initialized = true;
     _repoConfigs = Map.from(config.repoConfigs);
+  }
+
+  /// Called whenever a repo config changes — schedules an auto-save.
+  void _onChange(String repo, RepoConfig rc) {
+    setState(() => _repoConfigs[repo] = rc);
+    _debounce?.cancel();
+    _debounce = Timer(const Duration(milliseconds: 800), _autoSave);
   }
 
   Future<void> _discover() async {
@@ -42,19 +62,31 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
         _discovering = false;
         if (discovered.isEmpty) _discoverError = 'No active PRs found.';
       });
+      _debounce?.cancel();
+      _debounce = Timer(const Duration(milliseconds: 400), _autoSave);
     } catch (e) {
       if (!mounted) return;
       setState(() { _discovering = false; _discoverError = '$e'; });
     }
   }
 
-  Future<void> _save(AppConfig current) async {
+  Future<void> _autoSave() async {
+    final current = ref.read(configNotifierProvider).valueOrNull;
+    if (current == null) return;
+    if (mounted) setState(() => _syncStatus = _SyncStatus.saving);
     final updated = current.copyWith(repoConfigs: Map.from(_repoConfigs));
     try {
       await ref.read(configNotifierProvider.notifier).save(updated);
-      if (mounted) showToast(context, 'Saved');
+      if (!mounted) return;
+      setState(() => _syncStatus = _SyncStatus.saved);
+      _savedResetTimer?.cancel();
+      _savedResetTimer = Timer(const Duration(seconds: 2),
+          () { if (mounted) setState(() => _syncStatus = _SyncStatus.idle); });
     } catch (e) {
-      if (mounted) showToast(context, 'Error: $e', isError: true);
+      if (mounted) {
+        setState(() => _syncStatus = _SyncStatus.idle);
+        showToast(context, 'Error saving: $e', isError: true);
+      }
     }
   }
 
@@ -108,10 +140,16 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
                     label: const Text('Discover'),
                     onPressed: _discovering ? null : _discover,
                   ),
-                  const SizedBox(width: 8),
-                  FilledButton(
-                    onPressed: () => _save(config),
-                    child: const Text('Save'),
+                  const SizedBox(width: 12),
+                  // Auto-save status indicator
+                  SizedBox(
+                    width: 22, height: 22,
+                    child: switch (_syncStatus) {
+                      _SyncStatus.saving => const CircularProgressIndicator(strokeWidth: 2),
+                      _SyncStatus.saved  => Icon(Icons.cloud_done_outlined,
+                          size: 20, color: Colors.green.shade500),
+                      _SyncStatus.idle   => const SizedBox.shrink(),
+                    },
                   ),
                 ],
               ),
@@ -128,8 +166,7 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
                   : _RepoListWithSections(
                       repos: filtered,
                       configs: _repoConfigs,
-                      onChanged: (repo, rc) =>
-                          setState(() => _repoConfigs[repo] = rc),
+                      onChanged: _onChange,
                     ),
             ),
           ],

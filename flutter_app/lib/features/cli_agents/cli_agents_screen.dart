@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/models/config_model.dart';
@@ -26,8 +27,17 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
   };
 
   bool _initialized = false;
-  bool _saved = false;   // true = no pending changes since last save
+  bool _saved = false;
   bool _saving = false;
+  Timer? _debounce;
+  Timer? _savedResetTimer;
+
+  @override
+  void dispose() {
+    _debounce?.cancel();
+    _savedResetTimer?.cancel();
+    super.dispose();
+  }
 
   void _initFrom(AppConfig config) {
     if (_initialized) return;
@@ -43,10 +53,18 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
 
   void _markDirty() {
     if (_saved) setState(() => _saved = false);
+    _debounce?.cancel();
+    _debounce = Timer(const Duration(milliseconds: 800), _autoSave);
+  }
+
+  Future<void> _autoSave() async {
+    final current = ref.read(configNotifierProvider).valueOrNull;
+    if (current == null) return;
+    await _save(current);
   }
 
   Future<void> _save(AppConfig current) async {
-    setState(() => _saving = true);
+    if (mounted) setState(() { _saving = true; _saved = false; });
     final agentConfigs = <String, CLIAgentConfig>{
       for (final name in _cliNames)
         name: _agents[name]!.toConfig(),
@@ -59,7 +77,11 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
     );
     try {
       await ref.read(configNotifierProvider.notifier).save(updated);
-      if (mounted) setState(() { _saved = true; _saving = false; });
+      if (!mounted) return;
+      setState(() { _saved = true; _saving = false; });
+      _savedResetTimer?.cancel();
+      _savedResetTimer = Timer(const Duration(seconds: 3),
+          () { if (mounted) setState(() => _saved = false); });
     } catch (e) {
       if (mounted) {
         setState(() => _saving = false);
