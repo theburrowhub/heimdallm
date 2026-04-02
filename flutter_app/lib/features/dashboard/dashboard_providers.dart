@@ -77,9 +77,11 @@ final meProvider = FutureProvider<String>((ref) async {
 
 final prsProvider = FutureProvider<List<PR>>((ref) async {
   ref.watch(prListRefreshProvider);
+  // Watch meProvider so the tray is rebuilt (with correct author filter)
+  // as soon as the username loads after startup.
+  ref.watch(meProvider);
   final api = ref.watch(apiClientProvider);
   final prs = await api.fetchPRs();
-  // Rebuild tray menu with fresh data
   _rebuildTray(ref, prs);
   return prs;
 });
@@ -93,8 +95,12 @@ final statsProvider = FutureProvider<Map<String, dynamic>>((ref) async {
 void _rebuildTray(Ref ref, List<PR> prs) {
   Future(() async {
     try {
-      final me = ref.read(meProvider).valueOrNull ?? '';
+      final me = ref.read(meProvider).valueOrNull;
+      // Don't build tray until we know the username — without it the
+      // author filter falls back to '' and shows the user's own PRs.
+      if (me == null || me.isEmpty) return;
       await TrayMenuRef.rebuild(prs: prs, me: me);
     } catch (_) {}
   });
 }
+
