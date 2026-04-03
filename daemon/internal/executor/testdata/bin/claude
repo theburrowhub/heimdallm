@@ -1,0 +1,5 @@
+#!/bin/sh
+# Fake claude CLI — reads stdin, prints review JSON
+cat <<'EOF'
+{"summary":"Looks good overall","issues":[{"file":"main.go","line":10,"description":"possible nil dereference","severity":"medium"}],"suggestions":["add nil check before use"],"severity":"medium"}
+EOF

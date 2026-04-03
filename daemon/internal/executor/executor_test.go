@@ -17,11 +17,11 @@ func TestDetect(t *testing.T) {
 	defer os.Setenv("PATH", oldPath)
 
 	e := executor.New()
-	cli, err := e.Detect("fake_claude", "")
+	cli, err := e.Detect("claude", "")
 	if err != nil {
 		t.Fatalf("detect: %v", err)
 	}
-	if cli != "fake_claude" {
+	if cli != "claude" {
 		t.Errorf("expected fake_claude, got %q", cli)
 	}
 }
@@ -34,11 +34,11 @@ func TestDetect_Fallback(t *testing.T) {
 	defer os.Setenv("PATH", oldPath)
 
 	e := executor.New()
-	cli, err := e.Detect("nonexistent_cli", "fake_gemini")
+	cli, err := e.Detect("codex", "gemini")
 	if err != nil {
 		t.Fatalf("detect with fallback: %v", err)
 	}
-	if cli != "fake_gemini" {
+	if cli != "gemini" {
 		t.Errorf("expected fake_gemini fallback, got %q", cli)
 	}
 }
@@ -63,7 +63,7 @@ func TestExecute(t *testing.T) {
 	defer os.Setenv("PATH", oldPath)
 
 	e := executor.New()
-	result, err := e.Execute("fake_claude", "Review this diff", executor.ExecOptions{})
+	result, err := e.Execute("claude", "Review this diff", executor.ExecOptions{})
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}

@@ -65,27 +65,60 @@ func New() *Executor {
 // Also checks the user's login shell environment to handle cases where the
 // daemon is launched from a GUI app without inheriting the full shell PATH
 // (e.g., Homebrew tools at /opt/homebrew/bin not in process PATH).
+//
+// SECURITY: Detect validates each name against the CLI allowlist before
+// resolving it, preventing shell injection (issue #2).
 func (e *Executor) Detect(primary, fallback string) (string, error) {
 	for _, name := range []string{primary, fallback} {
-		if name != "" && resolveCLIPath(name) != "" {
+		if name == "" {
+			continue
+		}
+		if err := validateCLIName(name); err != nil {
+			return "", err // reject unknown / potentially-injected names early
+		}
+		if resolveCLIPath(name) != "" {
 			return name, nil
 		}
 	}
 	return "", fmt.Errorf("executor: no AI CLI available (tried %q, %q)", primary, fallback)
 }
 
+// allowedCLIs is the strict allowlist of AI CLI names Heimdallr supports.
+// Any value not in this set is rejected before reaching resolveCLIPath,
+// preventing shell injection via a crafted ai.primary / ai.fallback config value.
+var allowedCLIs = map[string]struct{}{
+	"claude": {},
+	"gemini": {},
+	"codex":  {},
+}
+
+// validateCLIName returns an error if name is not in the known-safe allowlist.
+// This must be called before any function that interpolates the name into a
+// shell command (e.g. resolveCLIPath).
+func validateCLIName(name string) error {
+	if _, ok := allowedCLIs[name]; !ok {
+		return fmt.Errorf("executor: unknown CLI %q — must be one of: claude, gemini, codex", name)
+	}
+	return nil
+}
+
 // resolveCLIPath returns the full path for a CLI tool, checking both the
 // current process PATH and the user's login shell (handles Homebrew, nvm, etc.).
 // Returns "" if not found anywhere.
+//
+// SECURITY: name MUST be validated with validateCLIName before calling this
+// function. resolveCLIPath passes the name into a shell command; an unvalidated
+// value would allow shell injection (CVE-equivalent: issue #2).
 func resolveCLIPath(name string) string {
 	// Fast path: already in the process PATH.
 	if path, err := exec.LookPath(name); err == nil && path != "" {
 		return path
 	}
 	// Try login shell — picks up ~/.zshrc, ~/.bashrc, Homebrew, nvm, etc.
-	// This is necessary when the daemon is launched by a macOS GUI app.
+	// Pass name as $1 (positional arg) so it is never shell-interpolated,
+	// even though validateCLIName already guarantees it is safe.
 	for _, shell := range []string{"/bin/zsh", "/bin/bash"} {
-		cmd := exec.Command(shell, "-l", "-c", "which "+name)
+		cmd := exec.Command(shell, "-l", "-c", `which "$1"`, "--", name)
 		out, err := cmd.Output()
 		if err == nil {
 			if path := strings.TrimSpace(string(out)); path != "" {
