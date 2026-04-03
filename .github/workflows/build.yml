@@ -47,7 +47,7 @@ jobs:
             libayatana-appindicator3-dev libnotify-dev \
             libsecret-1-dev \
             fakeroot rpm libfuse2
-          gem install fpm --no-document
+          sudo gem install fpm --no-document
 
       # ── App dependencies ─────────────────────────────────────────────────────
       - name: Flutter pub get
