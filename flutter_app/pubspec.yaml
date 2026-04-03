@@ -26,9 +26,20 @@ dev_dependencies:
   json_serializable: ^6.7.0
   build_runner: ^2.4.0
   mocktail: ^1.0.0
+  flutter_launcher_icons: ^0.14.4
+
+flutter_launcher_icons:
+  image_path: "assets/icon.png"
+  macos:
+    generate: true
+    image_path: "assets/icon.png"
+  linux:
+    generate: true
+    image_path: "assets/icon.png"
 
 flutter:
   uses-material-design: true
   assets:
     - assets/icon.png
     - assets/tray_icon.png
+    - assets/tray_icon@2x.png
