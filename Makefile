@@ -17,7 +17,7 @@ else
 endif
 
 .PHONY: build-daemon build-app test dev dev-daemon dev-stop \
-        release-local package-macos install-service verify-linux clean
+        release-local package-macos install-service verify-linux run-linux clean
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
@@ -219,6 +219,50 @@ verify-linux:
 	docker build -f Dockerfile.linux-verify -t heimdallr-verify .
 	@echo ""
 	@echo "✅  Linux build verification passed"
+
+# ── Run the Linux app from Docker (manual testing) ───────────────────────────
+#
+# Launches the release-built app from the heimdallr-verify Docker image,
+# forwarding X11, D-Bus, and GPU so it renders on your desktop.
+#
+# Requires:
+#   - heimdallr-verify image (run 'make verify-linux' first)
+#   - X11 display (DISPLAY env var set — XWayland counts)
+#   - Docker with access to /dev/dri (GPU)
+#
+# Config is persisted to ~/.config/heimdallr between runs.
+# Pass GITHUB_TOKEN to connect to GitHub:
+#   GITHUB_TOKEN=ghp_... make run-linux
+#
+# Usage:
+#   make run-linux
+
+LINUX_BUNDLE := /app/flutter_app/build/linux/x64/release/bundle
+
+run-linux:
+	@command -v docker >/dev/null || { echo "❌  Docker is required."; exit 1; }
+	@test -n "$$DISPLAY" || { echo "❌  No DISPLAY set — need X11 (or XWayland)."; exit 1; }
+	@docker image inspect heimdallr-verify >/dev/null 2>&1 || { echo "❌  Image 'heimdallr-verify' not found. Run 'make verify-linux' first."; exit 1; }
+	@mkdir -p "$$HOME/.config/heimdallr"
+	@echo "▶  Launching Heimdallr (Linux) via Docker..."
+	@echo "   Close the app window or press Ctrl-C to stop."
+	@xhost +local:docker 2>/dev/null || true
+	docker run --rm \
+	  --name heimdallr-run \
+	  -e DISPLAY=$$DISPLAY \
+	  -e HEIMDALLR_DAEMON_PATH=/app/daemon/bin/heimdallr \
+	  $(if $(GITHUB_TOKEN),-e GITHUB_TOKEN=$(GITHUB_TOKEN),) \
+	  -v /tmp/.X11-unix:/tmp/.X11-unix:ro \
+	  -v /run/dbus:/run/dbus:ro \
+	  -v /run/user/$$(id -u)/bus:/run/user/$$(id -u)/bus:ro \
+	  -e DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$$(id -u)/bus \
+	  -v "$$HOME/.config/heimdallr:/root/.config/heimdallr" \
+	  --device /dev/dri \
+	  --ipc=host \
+	  --net=host \
+	  heimdallr-verify \
+	  $(LINUX_BUNDLE)/heimdallr
+	@xhost -local:docker 2>/dev/null || true
 
 clean:
 	cd daemon && make clean

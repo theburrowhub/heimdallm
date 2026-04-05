@@ -6,6 +6,9 @@
 #   daemon tests → flutter pub get → flutter test →
 #   daemon build → flutter build linux --release → verify output artifacts
 #
+# The resulting image can also be used to run the app on the host desktop:
+#   make run-linux
+#
 # Usage:
 #   docker build -f Dockerfile.linux-verify -t heimdallr-verify .
 #   (or simply: make verify-linux)
@@ -15,12 +18,15 @@ FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # ── System dependencies (matches CI: build.yml → Install dependencies) ────────
+# Includes both build-time and runtime deps (for make run-linux).
 RUN apt-get update -y && apt-get install -y --no-install-recommends \
       clang cmake ninja-build pkg-config \
       libgtk-3-dev liblzma-dev libstdc++-12-dev \
       libayatana-appindicator3-dev libnotify-dev \
       libsecret-1-dev \
       git curl unzip xz-utils wget ca-certificates make \
+      libayatana-appindicator3-1 libnotify4 libsecret-1-0 \
+      dbus-x11 libcanberra-gtk3-module mesa-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Go 1.21 (matches daemon/go.mod) ──────────────────────────────────────────
