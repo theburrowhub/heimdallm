@@ -120,7 +120,9 @@ class TrayMenu with TrayListener {
     // TODO: swap icons when urgency assets are available.
     // For now a single icon is used; the pending count in the menu conveys urgency.
     try {
-      await trayManager.setIcon('assets/tray_icon.png');
+      await trayManager.setIcon(
+        Platform.isLinux ? 'assets/tray_icon@2x.png' : 'assets/tray_icon.png',
+      );
     } catch (_) {}
   }
 

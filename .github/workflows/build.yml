@@ -104,7 +104,6 @@ jobs:
           mkdir -p "$OPT"
           mkdir -p "$STAGING/usr/bin"
           mkdir -p "$STAGING/usr/share/applications"
-          mkdir -p "$STAGING/usr/share/icons/hicolor/256x256/apps"
           mkdir -p dist
 
           cp -r "$BUNDLE/." "$OPT/"
@@ -113,11 +112,14 @@ jobs:
           # /usr/bin/heimdallr → /opt/heimdallr/heimdallr
           ln -s /opt/heimdallr/heimdallr "$STAGING/usr/bin/heimdallr"
 
-          # Icon
-          cp flutter_app/assets/icon.png \
-            "$STAGING/usr/share/icons/hicolor/256x256/apps/heimdallr.png"
+          # Icons – install pre-generated sizes for proper taskbar/dock rendering
+          for SIZE in 48 128 256 512; do
+            ICON_DIR="$STAGING/usr/share/icons/hicolor/${SIZE}x${SIZE}/apps"
+            mkdir -p "$ICON_DIR"
+            cp "flutter_app/assets/icons/${SIZE}.png" "$ICON_DIR/heimdallr.png"
+          done
 
-          # Desktop entry (printf avoids heredoc content at column-0 breaking YAML)
+          # Desktop entry – filename must match APPLICATION_ID for GNOME taskbar mapping
           printf '%s\n' \
             '[Desktop Entry]' \
             'Name=Heimdallr' \
@@ -126,8 +128,9 @@ jobs:
             'Icon=heimdallr' \
             'Type=Application' \
             'Categories=Development;' \
+            'StartupWMClass=com.theburrowhub.heimdallr' \
             'StartupNotify=true' \
-            > "$STAGING/usr/share/applications/heimdallr.desktop"
+            > "$STAGING/usr/share/applications/com.theburrowhub.heimdallr.desktop"
 
           echo "BUNDLE=$BUNDLE"   >> "$GITHUB_ENV"
           echo "STAGING=$STAGING" >> "$GITHUB_ENV"
@@ -194,6 +197,8 @@ jobs:
           chmod +x "$APPDIR/AppRun"
 
           # Desktop entry (AppImage spec: Exec= is just the binary name)
+          # Note: AppImage .desktop filename must match the icon basename, so we
+          # keep 'heimdallr.desktop' here (not the reverse-DNS used for system installs).
           printf '%s\n' \
             '[Desktop Entry]' \
             'Name=Heimdallr' \
@@ -202,6 +207,7 @@ jobs:
             'Icon=heimdallr' \
             'Type=Application' \
             'Categories=Development;' \
+            'StartupWMClass=com.theburrowhub.heimdallr' \
             'StartupNotify=true' \
             > "$APPDIR/heimdallr.desktop"
 

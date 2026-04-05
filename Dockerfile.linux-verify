@@ -1,0 +1,65 @@
+# Dockerfile.linux-verify
+#
+# Replicates the CI environment (ubuntu-22.04, Go 1.21, Flutter 3.x stable)
+# and runs the full verification pipeline:
+#
+#   daemon tests → flutter pub get → flutter test →
+#   daemon build → flutter build linux --release → verify output artifacts
+#
+# Usage:
+#   docker build -f Dockerfile.linux-verify -t heimdallr-verify .
+#   (or simply: make verify-linux)
+
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# ── System dependencies (matches CI: build.yml → Install dependencies) ────────
+RUN apt-get update -y && apt-get install -y --no-install-recommends \
+      clang cmake ninja-build pkg-config \
+      libgtk-3-dev liblzma-dev libstdc++-12-dev \
+      libayatana-appindicator3-dev libnotify-dev \
+      libsecret-1-dev \
+      git curl unzip xz-utils wget ca-certificates make \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Go 1.21 (matches daemon/go.mod) ──────────────────────────────────────────
+RUN wget -q https://go.dev/dl/go1.21.13.linux-amd64.tar.gz -O /tmp/go.tar.gz \
+    && tar -C /usr/local -xzf /tmp/go.tar.gz \
+    && rm /tmp/go.tar.gz
+ENV PATH="/usr/local/go/bin:${PATH}"
+
+# ── Flutter 3.x stable ───────────────────────────────────────────────────────
+# Clone at a shallow depth for speed; precache only the linux desktop artifacts.
+RUN git clone --depth 1 -b stable https://github.com/flutter/flutter.git /opt/flutter
+ENV PATH="/opt/flutter/bin:/opt/flutter/bin/cache/dart-sdk/bin:${PATH}"
+RUN flutter precache --linux \
+    && flutter doctor -v
+
+# ── Copy project ──────────────────────────────────────────────────────────────
+WORKDIR /app
+COPY . .
+
+# ── Verification pipeline ────────────────────────────────────────────────────
+# Each RUN is a separate layer so failures are easy to pinpoint.
+
+# 1. Daemon tests
+RUN cd daemon && go test ./... -timeout 60s
+
+# 2. Flutter dependencies
+RUN cd flutter_app && flutter pub get
+
+# 3. Flutter tests
+RUN cd flutter_app && flutter test
+
+# 4. Build daemon
+RUN cd daemon && make build
+
+# 5. Build Flutter app (Linux release)
+RUN cd flutter_app && flutter build linux --release
+
+# 6. Verify output artifacts exist
+RUN test -f daemon/bin/heimdallr \
+    && test -d flutter_app/build/linux/x64/release/bundle \
+    && test -f flutter_app/build/linux/x64/release/bundle/heimdallr \
+    && echo "✓  All output artifacts verified"

@@ -1,0 +1,11 @@
+# Docker context exclusions for Dockerfile.linux-verify
+.git
+flutter_app/build
+daemon/bin
+dist
+staging
+AppDir
+*.dmg
+*.deb
+*.rpm
+*.AppImage

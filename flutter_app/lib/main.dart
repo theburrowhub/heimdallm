@@ -122,7 +122,9 @@ Future<void> _setupWindow() async {
 }
 
 Future<void> _setupTray() async {
-  await trayManager.setIcon('assets/tray_icon.png');
+  await trayManager.setIcon(
+    Platform.isLinux ? 'assets/tray_icon@2x.png' : 'assets/tray_icon.png',
+  );
   // Initial minimal menu until data loads
   await trayManager.setContextMenu(Menu(items: [
     MenuItem(key: 'open', label: 'Open Heimdallr'),

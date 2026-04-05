@@ -1,13 +1,23 @@
-DAEMON_BIN  := $(shell pwd)/daemon/bin/heimdallr
-FLUTTER_APP := flutter_app/build/macos/Build/Products
-APP_BUNDLE  := $(FLUTTER_APP)/Release/Heimdallr.app
+# ── Platform detection ─────────────────────────────────────────────────────────
+OS := $(shell uname -s)
 
-# Detect local Developer ID Application certificate automatically
-SIGNING_IDENTITY ?= $(shell security find-identity -v -p codesigning 2>/dev/null \
+DAEMON_BIN  := $(shell pwd)/daemon/bin/heimdallr
+
+ifeq ($(OS),Darwin)
+  FLUTTER_DEVICE   := macos
+  FLUTTER_BUILD    := flutter_app/build/macos/Build/Products
+  APP_BUNDLE       := $(FLUTTER_BUILD)/Release/Heimdallr.app
+  # Detect local Developer ID Application certificate automatically
+  SIGNING_IDENTITY ?= $(shell security find-identity -v -p codesigning 2>/dev/null \
 	| grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+else
+  FLUTTER_DEVICE   := linux
+  FLUTTER_BUILD    := flutter_app/build/linux/x64/release
+  APP_BUNDLE       := $(FLUTTER_BUILD)/bundle
+endif
 
 .PHONY: build-daemon build-app test dev dev-daemon dev-stop \
-        release-local package-local install-service clean
+        release-local package-macos install-service verify-linux clean
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
@@ -15,7 +25,7 @@ build-daemon:
 	cd daemon && make build
 
 build-app:
-	cd flutter_app && flutter build macos --release
+	cd flutter_app && flutter build $(FLUTTER_DEVICE) --release
 
 # ── Test ──────────────────────────────────────────────────────────────────────
 
@@ -31,7 +41,7 @@ test:
 
 dev: build-daemon dev-stop
 	@echo "▶  Lanzando Heimdallr..."
-	cd flutter_app && HEIMDALLR_DAEMON_PATH=$(DAEMON_BIN) flutter run -d macos
+	cd flutter_app && HEIMDALLR_DAEMON_PATH=$(DAEMON_BIN) flutter run -d $(FLUTTER_DEVICE)
 
 dev-daemon: build-daemon dev-stop
 	@echo "▶  Daemon en http://localhost:7842 (Ctrl-C para parar)"
@@ -46,7 +56,7 @@ dev-stop:
 	   rm -f "$$UI_PID_FILE"; \
 	 fi
 
-# ── Local release (sign + notarize + DMG + GitHub release) ───────────────────
+# ── Local release (macOS only: sign + notarize + DMG + GitHub release) ───────
 #
 # Builds a fully signed, notarized .dmg and creates a GitHub release.
 # Uses the Developer ID Application certificate from your local Keychain.
@@ -71,7 +81,7 @@ VERSION ?= $(shell \
 	PAT=$$(echo $$VER | cut -d. -f3); \
 	echo "v$$MAJ.$$MIN.$$((PAT+1))")
 
-release-local: _check-signing _check-gh build-daemon
+release-local: _check-macos _check-signing _check-gh build-daemon
 	@echo ""
 	@echo "╔══════════════════════════════════════════════╗"
 	@echo "║  Heimdallr local release                     ║"
@@ -150,6 +160,12 @@ release-local: _check-signing _check-gh build-daemon
 
 # ── Guards ────────────────────────────────────────────────────────────────────
 
+_check-macos:
+	@if [ "$$(uname -s)" != "Darwin" ]; then \
+	  echo "❌  This target requires macOS."; \
+	  exit 1; \
+	fi
+
 _check-signing:
 	@if [ -z "$(SIGNING_IDENTITY)" ]; then \
 	  echo ""; \
@@ -169,14 +185,14 @@ _check-gh:
 	fi
 	@echo "✓  gh CLI authenticated"
 
-# ── Install LaunchAgent service ───────────────────────────────────────────────
+# ── Install LaunchAgent service (macOS) ───────────────────────────────────────
 
 install-service: build-daemon
 	$(DAEMON_BIN) install
 
 # ── CI packaging (used by GitHub Actions) ─────────────────────────────────────
 
-package-macos: build-daemon build-app
+package-macos: _check-macos build-daemon build-app
 	cp $(DAEMON_BIN) "$(APP_BUNDLE)/Contents/MacOS/heimdalld"
 	codesign --force --deep --sign - "$(APP_BUNDLE)"
 	mkdir -p dist
@@ -185,6 +201,24 @@ package-macos: build-daemon build-app
 	  -srcfolder "$(APP_BUNDLE)" \
 	  -ov -format UDZO \
 	  "dist/Heimdallr.dmg"
+
+# ── Docker-based Linux build verification ─────────────────────────────────────
+#
+# Runs the full CI-equivalent pipeline inside a Docker container:
+# daemon tests → flutter pub get → flutter test →
+# daemon build → flutter build linux --release → verify output artifacts
+#
+# Works from any OS (macOS or Linux) as long as Docker is available.
+#
+# Usage:
+#   make verify-linux
+
+verify-linux:
+	@command -v docker >/dev/null || { echo "❌  Docker is required. Install it from https://docs.docker.com/get-docker/"; exit 1; }
+	@echo "▶  Building Linux verification image (this may take a few minutes on first run)..."
+	docker build -f Dockerfile.linux-verify -t heimdallr-verify .
+	@echo ""
+	@echo "✅  Linux build verification passed"
 
 clean:
 	cd daemon && make clean
