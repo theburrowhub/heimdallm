@@ -25,9 +25,9 @@ var plistTemplate = template.Must(template.New("plist").Parse(`<?xml version="1.
 	<key>KeepAlive</key>
 	<true/>
 	<key>StandardOutPath</key>
-	<string>{{.LogDir}}/auto-pr-daemon.log</string>
+	<string>{{.LogDir}}/heimdallr-daemon.log</string>
 	<key>StandardErrorPath</key>
-	<string>{{.LogDir}}/auto-pr-daemon-error.log</string>
+	<string>{{.LogDir}}/heimdallr-daemon-error.log</string>
 </dict>
 </plist>
 `))
@@ -46,7 +46,7 @@ func Install(binaryPath string) error {
 	if err != nil {
 		return err
 	}
-	logDir := filepath.Join(home, "Library", "Logs", "auto-pr")
+	logDir := filepath.Join(home, "Library", "Logs", "heimdallr")
 	if err := os.MkdirAll(logDir, 0700); err != nil {
 		return fmt.Errorf("launchagent: mkdir logs: %w", err)
 	}

@@ -425,7 +425,7 @@ func (srv *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 
 func (srv *Server) handleLogsStream(w http.ResponseWriter, r *http.Request) {
 	home, _ := os.UserHomeDir()
-	logPath := filepath.Join(home, "Library", "Logs", "auto-pr", "auto-pr-daemon-error.log")
+	logPath := filepath.Join(home, "Library", "Logs", "heimdallr", "heimdallr-daemon-error.log")
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
