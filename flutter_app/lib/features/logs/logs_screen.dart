@@ -4,6 +4,20 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../../core/api/sse_client.dart';
 
+// Terminal-style colors per log level
+Color _levelColor(String line) {
+  if (line.contains('level=ERROR') || line.contains('level=FATAL')) {
+    return const Color(0xFFFF6B6B);
+  }
+  if (line.contains('level=WARN')) {
+    return const Color(0xFFFFB347);
+  }
+  if (line.contains('level=DEBUG')) {
+    return const Color(0xFF888888);
+  }
+  return const Color(0xFFD4D4D4);
+}
+
 class LogsScreen extends StatefulWidget {
   const LogsScreen({super.key});
   @override
@@ -16,9 +30,12 @@ class _LogsScreenState extends State<LogsScreen> {
   SseClient? _sseClient;
   StreamSubscription<SseEvent>? _sub;
   bool _connected = false;
-  bool _atBottom = true; // tracks if user is at the bottom
+  bool _atBottom = true;
+  bool _wrap = false;
   static const _maxLines = 2000;
   static const _bottomThreshold = 20.0;
+  static const _bgColor = Color(0xFF0D1117);
+  static const _fontFamily = 'Courier New';
 
   @override
   void initState() {
@@ -30,9 +47,7 @@ class _LogsScreenState extends State<LogsScreen> {
   void _onScroll() {
     final pos = _scrollController.position;
     final atBottom = pos.pixels >= pos.maxScrollExtent - _bottomThreshold;
-    if (atBottom != _atBottom) {
-      setState(() => _atBottom = atBottom);
-    }
+    if (atBottom != _atBottom) setState(() => _atBottom = atBottom);
   }
 
   void _connect() {
@@ -42,8 +57,7 @@ class _LogsScreenState extends State<LogsScreen> {
         if (event.type == 'log_line') {
           try {
             final data = jsonDecode(event.data) as Map<String, dynamic>;
-            final line = data['line'] as String? ?? event.data;
-            _appendLine(line);
+            _appendLine(data['line'] as String? ?? event.data);
           } catch (_) {
             _appendLine(event.data);
           }
@@ -85,7 +99,7 @@ class _LogsScreenState extends State<LogsScreen> {
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-            content: Text('Logs copied to clipboard'),
+            content: Text('Logs copiados al portapapeles'),
             duration: Duration(seconds: 2)),
       );
     }
@@ -103,50 +117,91 @@ class _LogsScreenState extends State<LogsScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: _bgColor,
       appBar: AppBar(
+        backgroundColor: const Color(0xFF161B22),
+        foregroundColor: const Color(0xFFD4D4D4),
         title: Row(
           children: [
-            const Text('Daemon Logs'),
+            const Text('Daemon Logs',
+                style: TextStyle(fontFamily: _fontFamily, fontSize: 14)),
             const SizedBox(width: 8),
             Container(
-              width: 8,
-              height: 8,
+              width: 7, height: 7,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: _connected ? Colors.green : Colors.red,
+                color: _connected ? const Color(0xFF3FB950) : const Color(0xFFFF6B6B),
+                boxShadow: _connected
+                    ? [BoxShadow(color: const Color(0xFF3FB950).withValues(alpha: 0.5), blurRadius: 4)]
+                    : null,
               ),
             ),
           ],
         ),
         actions: [
           IconButton(
-            icon: const Icon(Icons.copy),
-            tooltip: 'Copy all',
+            icon: Icon(_wrap ? Icons.wrap_text : Icons.notes, size: 18),
+            tooltip: _wrap ? 'Desactivar wrap' : 'Activar wrap',
+            color: _wrap ? const Color(0xFF3FB950) : null,
+            onPressed: () => setState(() => _wrap = !_wrap),
+          ),
+          IconButton(
+            icon: const Icon(Icons.copy_outlined, size: 18),
+            tooltip: 'Copiar todo',
             onPressed: _lines.isEmpty ? null : _copyAll,
           ),
         ],
       ),
       body: _lines.isEmpty
-          ? const Center(child: CircularProgressIndicator())
-          : ListView.builder(
+          ? Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const CircularProgressIndicator(
+                      color: Color(0xFF3FB950), strokeWidth: 2),
+                  const SizedBox(height: 12),
+                  Text('Conectando...',
+                      style: TextStyle(
+                          fontFamily: _fontFamily,
+                          fontSize: 12,
+                          color: Colors.grey.shade600)),
+                ],
+              ),
+            )
+          : Scrollbar(
               controller: _scrollController,
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              itemCount: _lines.length,
-              itemBuilder: (_, i) => Text(
-                _lines[i],
-                style: const TextStyle(
-                  fontFamily: 'monospace',
-                  fontSize: 11,
-                  height: 1.4,
-                ),
+              child: ListView.builder(
+                controller: _scrollController,
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                itemCount: _lines.length,
+                itemBuilder: (_, i) {
+                  final line = _lines[i];
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 1),
+                    child: Text(
+                      line,
+                      softWrap: _wrap,
+                      overflow: _wrap ? TextOverflow.visible : TextOverflow.fade,
+                      style: TextStyle(
+                        fontFamily: _fontFamily,
+                        fontSize: 11.5,
+                        height: 1.5,
+                        color: _levelColor(line),
+                        letterSpacing: 0,
+                      ),
+                    ),
+                  );
+                },
               ),
             ),
       floatingActionButton: _atBottom
           ? null
           : FloatingActionButton.small(
               onPressed: _scrollToBottom,
-              tooltip: 'Jump to bottom',
-              child: const Icon(Icons.arrow_downward),
+              backgroundColor: const Color(0xFF21262D),
+              foregroundColor: const Color(0xFFD4D4D4),
+              tooltip: 'Ir al final',
+              child: const Icon(Icons.arrow_downward, size: 18),
             ),
     );
   }
