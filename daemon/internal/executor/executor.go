@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -91,6 +92,40 @@ var allowedCLIs = map[string]struct{}{
 	"claude": {},
 	"gemini": {},
 	"codex":  {},
+}
+
+// dangerousFlagPrefixes is the denylist for ValidateExtraFlags.
+var dangerousFlagPrefixes = []string{
+	"--dangerously-skip-permissions",
+	"--allow-dangerously",
+	"--danger",
+}
+
+// dangerousFlagValues are flag values that must never appear regardless of position.
+var dangerousFlagValues = []string{"bypassPermissions"}
+
+// ValidateExtraFlags rejects free-form flag strings that contain dangerous flags.
+// These flags are already modelled as explicit typed fields (DangerouslySkipPerms,
+// PermissionMode, etc.) — the free-form field must not be able to re-set them or
+// bypass the CLI agent config guards (security issue #5).
+func ValidateExtraFlags(flags string) error {
+	parts := strings.Fields(flags)
+	for _, part := range parts {
+		lower := strings.ToLower(part)
+		for _, bad := range dangerousFlagPrefixes {
+			if strings.HasPrefix(lower, bad) {
+				slog.Warn("executor: ExtraFlags validation failed",
+					"err", fmt.Sprintf("flag %q is forbidden in ExtraFlags/CLIFlags — use the dedicated config field instead", part))
+				return fmt.Errorf("executor: flag %q is forbidden in ExtraFlags/CLIFlags — use the dedicated config field instead", part)
+			}
+		}
+		for _, badVal := range dangerousFlagValues {
+			if strings.EqualFold(part, badVal) {
+				return fmt.Errorf("executor: value %q is forbidden in ExtraFlags/CLIFlags", part)
+			}
+		}
+	}
+	return nil
 }
 
 // validateCLIName returns an error if name is not in the known-safe allowlist.
