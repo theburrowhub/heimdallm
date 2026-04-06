@@ -75,6 +75,64 @@ func TestExecute(t *testing.T) {
 	}
 }
 
+func TestValidateWorkDir(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("cannot get home dir: %v", err)
+	}
+
+	// A safe subdirectory inside HOME for the "pass" test case.
+	safeDir := filepath.Join(home, "Documents")
+	// If ~/Documents doesn't exist on this machine, fall back to home itself.
+	if _, statErr := os.Stat(safeDir); statErr != nil {
+		safeDir = home
+	}
+
+	tests := []struct {
+		name    string
+		dir     string
+		wantErr bool
+	}{
+		{
+			name:    "empty dir — no validation",
+			dir:     "",
+			wantErr: false,
+		},
+		{
+			name:    "home subdir — allowed",
+			dir:     safeDir,
+			wantErr: false,
+		},
+		{
+			name:    "filesystem root — rejected",
+			dir:     "/",
+			wantErr: true,
+		},
+		{
+			name:    "ssh dir — rejected",
+			dir:     filepath.Join(home, ".ssh"),
+			wantErr: true,
+		},
+		{
+			name:    "/etc — rejected",
+			dir:     "/etc",
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := executor.ValidateWorkDir(tc.dir)
+			if tc.wantErr && err == nil {
+				t.Errorf("expected error for dir %q, got nil", tc.dir)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("unexpected error for dir %q: %v", tc.dir, err)
+			}
+		})
+	}
+}
+
 func TestBuildPrompt(t *testing.T) {
 	prompt := executor.BuildPrompt("Fix nil deref", "alice", "+foo\n-bar\n")
 	if len(prompt) == 0 {

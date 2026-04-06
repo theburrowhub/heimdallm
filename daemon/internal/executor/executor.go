@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -129,6 +130,88 @@ func resolveCLIPath(name string) string {
 	return ""
 }
 
+// dangerousPaths lists absolute filesystem paths that must never be used as a
+// working directory for the AI CLI. The CLI reads all files under the working
+// directory as context; exposing these paths would risk exfiltrating sensitive
+// system files or credentials to the AI provider.
+var dangerousPaths = []string{
+	"/",
+	"/etc",
+	"/usr",
+	"/var",
+	"/System",
+}
+
+// dangerousSegments lists path substrings that must never appear in a resolved
+// working directory. These directories commonly contain private keys, API tokens,
+// and other secrets that must not be sent to an AI provider.
+var dangerousSegments = []string{
+	"/.ssh",
+	"/.gnupg",
+	"/.aws",
+	"/.config/heimdallr",
+}
+
+// ValidateWorkDir checks that dir is a safe working directory for the AI CLI.
+// It rejects paths outside the user's home directory and /tmp, as well as
+// specific system paths and credential directories.
+//
+// SECURITY: This function uses filepath.Abs to resolve relative paths and
+// symlinks before any comparison, preventing traversal attacks via relative
+// paths or symlinked directories.
+func ValidateWorkDir(dir string) error {
+	if dir == "" {
+		return nil // no working directory override; safe
+	}
+
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("executor: workdir %q: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("executor: workdir %q is not a directory", dir)
+	}
+
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("executor: workdir %q: cannot resolve absolute path: %w", dir, err)
+	}
+
+	// Reject explicitly dangerous top-level paths.
+	for _, bad := range dangerousPaths {
+		if abs == bad {
+			return fmt.Errorf("executor: workdir %q is a restricted system path", abs)
+		}
+	}
+
+	// Reject paths containing sensitive credential directories.
+	for _, seg := range dangerousSegments {
+		if strings.Contains(abs, seg) {
+			return fmt.Errorf("executor: workdir %q contains a sensitive credential path (%s)", abs, seg)
+		}
+	}
+
+	// Allow /tmp and its subdirectories.
+	if abs == "/tmp" || strings.HasPrefix(abs, "/tmp/") {
+		return nil
+	}
+
+	// Allow paths under the user's home directory only.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("executor: cannot determine home directory: %w", err)
+	}
+	homeAbs, err := filepath.Abs(home)
+	if err != nil {
+		return fmt.Errorf("executor: cannot resolve home directory: %w", err)
+	}
+	if abs != homeAbs && !strings.HasPrefix(abs, homeAbs+"/") {
+		return fmt.Errorf("executor: workdir %q is outside the user home directory and /tmp — rejected for security", abs)
+	}
+
+	return nil
+}
+
 // Execute runs the AI CLI with the given prompt and options, returning the parsed result.
 func (e *Executor) Execute(cli, prompt string, opts ExecOptions) (*ReviewResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), executionTimeout)
@@ -152,6 +235,9 @@ func (e *Executor) Execute(cli, prompt string, opts ExecOptions) (*ReviewResult,
 		cmd.Env = enrichedEnv
 	}
 	if opts.WorkDir != "" {
+		if err := ValidateWorkDir(opts.WorkDir); err != nil {
+			return nil, err
+		}
 		cmd.Dir = opts.WorkDir
 	}
 
