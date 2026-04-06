@@ -36,14 +36,39 @@ type Server struct {
 	configFn func() map[string]any
 	// apiToken is required on all state-mutating requests (POST/PUT/DELETE).
 	// Empty string disables authentication (should not happen in production).
-	apiToken string
+	apiToken  string
+	reviewSem chan struct{} // counting semaphore for concurrent review triggers
 }
+
+// Options holds optional configuration for the Server.
+type Options struct {
+	// MaxConcurrentReviews limits how many POST /prs/{id}/review goroutines
+	// can run simultaneously. 0 means use the default (5).
+	MaxConcurrentReviews int
+}
+
+const defaultMaxConcurrentReviews = 5
 
 // New creates a new Server. p may be nil if the pipeline is not yet configured.
 // apiToken must be the value returned by LoadOrCreateAPIToken — it is required
 // on all mutating endpoints to prevent cross-process/browser config poisoning.
 func New(s *store.Store, broker *sse.Broker, p *pipeline.Pipeline, apiToken string) *Server {
-	srv := &Server{store: s, broker: broker, pipeline: p, apiToken: apiToken}
+	return NewWithOptions(s, broker, p, apiToken, Options{})
+}
+
+// NewWithOptions creates a Server with configurable options.
+func NewWithOptions(s *store.Store, broker *sse.Broker, p *pipeline.Pipeline, apiToken string, opts Options) *Server {
+	max := opts.MaxConcurrentReviews
+	if max <= 0 {
+		max = defaultMaxConcurrentReviews
+	}
+	srv := &Server{
+		store:     s,
+		broker:    broker,
+		pipeline:  p,
+		apiToken:  apiToken,
+		reviewSem: make(chan struct{}, max),
+	}
 	srv.router = srv.buildRouter()
 	return srv
 }
@@ -230,7 +255,15 @@ func (srv *Server) handleTriggerReview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "review trigger not configured", http.StatusServiceUnavailable)
 		return
 	}
+	// Acquire semaphore slot (non-blocking). Returns 429 if all slots are taken.
+	select {
+	case srv.reviewSem <- struct{}{}:
+	default:
+		http.Error(w, `{"error":"too many concurrent reviews — try again later"}`, http.StatusTooManyRequests)
+		return
+	}
 	go func() {
+		defer func() { <-srv.reviewSem }()
 		if err := srv.triggerReviewFn(id); err != nil {
 			slog.Error("trigger review failed", "pr_id", id, "err", err)
 		}

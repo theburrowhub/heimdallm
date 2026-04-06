@@ -143,3 +143,62 @@ func TestHandlerLogsStream_WithToken(t *testing.T) {
 		t.Errorf("expected Content-Type text/event-stream, got %q", ct)
 	}
 }
+
+func TestHandlerTriggerReviewRateLimit(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	broker := sse.NewBroker()
+	broker.Start()
+	defer broker.Stop()
+
+	// Server with max 2 concurrent reviews
+	srv := server.NewWithOptions(s, broker, nil, "test-token", server.Options{MaxConcurrentReviews: 2})
+
+	// Wire a review function that blocks until gate is closed
+	gate := make(chan struct{})
+	srv.SetTriggerReviewFn(func(prID int64) error {
+		<-gate
+		return nil
+	})
+
+	// Seed 3 PRs
+	now := time.Now()
+	for i := 1; i <= 3; i++ {
+		s.UpsertPR(&store.PR{
+			GithubID: int64(i), Repo: "org/r", Number: i,
+			Title: "t", Author: "a", URL: "u", State: "open",
+			UpdatedAt: now, FetchedAt: now,
+		})
+	}
+
+	token := "test-token"
+
+	// Fire 2 concurrent reviews — should succeed
+	for i := 1; i <= 2; i++ {
+		req := httptest.NewRequest("POST", fmt.Sprintf("/prs/%d/review", i), nil)
+		req.Header.Set("X-Heimdallr-Token", token)
+		w := httptest.NewRecorder()
+		srv.Router().ServeHTTP(w, req)
+		if w.Code != http.StatusAccepted {
+			t.Errorf("review %d: expected 202, got %d", i, w.Code)
+		}
+	}
+
+	// Brief wait for goroutines to acquire semaphore
+	time.Sleep(10 * time.Millisecond)
+
+	// Third review should be rejected with 429
+	req := httptest.NewRequest("POST", "/prs/3/review", nil)
+	req.Header.Set("X-Heimdallr-Token", token)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusTooManyRequests {
+		t.Errorf("expected 429 when semaphore full, got %d", w.Code)
+	}
+
+	// Release goroutines
+	close(gate)
+}
