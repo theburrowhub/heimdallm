@@ -2,6 +2,7 @@ import 'package:go_router/go_router.dart';
 import '../features/dashboard/dashboard_screen.dart';
 import '../features/pr_detail/pr_detail_screen.dart';
 import '../features/config/config_screen.dart';
+import '../features/logs/logs_screen.dart';
 
 GoRouter createRouter({String initialLocation = '/'}) => GoRouter(
   initialLocation: initialLocation,
@@ -20,6 +21,10 @@ GoRouter createRouter({String initialLocation = '/'}) => GoRouter(
     GoRoute(
       path: '/config',
       builder: (context, state) => const ConfigScreen(),
+    ),
+    GoRoute(
+      path: '/logs',
+      builder: (context, state) => const LogsScreen(),
     ),
   ],
 );

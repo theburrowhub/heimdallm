@@ -10,11 +10,12 @@ class SseEvent {
 
 class SseClient {
   final int port;
+  final String path;
   final http.Client _httpClient;
   StreamController<SseEvent>? _controller;
   StreamSubscription<String>? _subscription;
 
-  SseClient({this.port = 7842, http.Client? httpClient})
+  SseClient({this.port = 7842, this.path = '/events', http.Client? httpClient})
       : _httpClient = httpClient ?? http.Client();
 
   /// Parses SSE wire format into events. Static for testability.
@@ -54,7 +55,7 @@ class SseClient {
     try {
       final request = http.Request(
         'GET',
-        Uri.parse('http://127.0.0.1:$port/events'),
+        Uri.parse('http://127.0.0.1:$port$path'),
       );
       request.headers['Accept'] = 'text/event-stream';
       request.headers['Cache-Control'] = 'no-cache';

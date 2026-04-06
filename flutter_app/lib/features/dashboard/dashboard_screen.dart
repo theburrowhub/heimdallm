@@ -22,6 +22,11 @@ class DashboardScreen extends ConsumerWidget {
           title: const Text('Heimdallr'),
           actions: [
             IconButton(
+              icon: const Icon(Icons.article_outlined),
+              tooltip: 'Daemon logs',
+              onPressed: () => context.push('/logs'),
+            ),
+            IconButton(
               icon: const Icon(Icons.settings),
               onPressed: () => context.push('/config'),
             ),
