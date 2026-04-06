@@ -84,7 +84,8 @@ func main() {
 	// require this token in X-Heimdallr-Token (security issue #3).
 	apiToken, err := loadOrCreateAPIToken(dataDir())
 	if err != nil {
-		slog.Warn("could not create API token — mutating endpoints unprotected", "err", err)
+		slog.Error("could not create API token — refusing to start without authentication", "err", err)
+		os.Exit(1)
 	}
 
 	p := pipeline.New(s, ghClient, exec, &notifyWithSSE{notifier: notifier})
