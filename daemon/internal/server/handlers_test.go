@@ -226,3 +226,69 @@ func TestHandlerTriggerReviewRateLimit(t *testing.T) {
 	// Release goroutines
 	close(gate)
 }
+
+func TestHandlerPutConfigValueValidation(t *testing.T) {
+	srv := setupServerWithToken(t, "secret-token")
+
+	cases := []struct {
+		name       string
+		body       string
+		wantStatus int
+	}{
+		{
+			name:       "valid poll_interval 5m",
+			body:       `{"poll_interval":"5m"}`,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "invalid poll_interval 2m",
+			body:       `{"poll_interval":"2m"}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "valid retention_days 90",
+			body:       `{"retention_days":90}`,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "retention_days too high 9999",
+			body:       `{"retention_days":9999}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "valid server_port 8080",
+			body:       `{"server_port":8080}`,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "server_port too low 80",
+			body:       `{"server_port":80}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "valid review_mode single",
+			body:       `{"review_mode":"single"}`,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "invalid review_mode batch",
+			body:       `{"review_mode":"batch"}`,
+			wantStatus: http.StatusBadRequest,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest("PUT", "/config",
+				strings.NewReader(tc.body))
+			req.Header.Set("X-Heimdallr-Token", "secret-token")
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			srv.Router().ServeHTTP(w, req)
+			if w.Code != tc.wantStatus {
+				t.Errorf("%s: expected %d, got %d (body: %s)",
+					tc.name, tc.wantStatus, w.Code, w.Body.String())
+			}
+		})
+	}
+}

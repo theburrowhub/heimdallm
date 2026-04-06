@@ -299,6 +299,20 @@ var validConfigKeys = map[string]struct{}{
 	"retention_days": {},
 }
 
+// validPollIntervals is the allowlist of permitted poll_interval values.
+var validPollIntervals = map[string]struct{}{
+	"1m":  {},
+	"5m":  {},
+	"30m": {},
+	"1h":  {},
+}
+
+// validReviewModes is the allowlist of permitted review_mode values.
+var validReviewModes = map[string]struct{}{
+	"single": {},
+	"multi":  {},
+}
+
 func (srv *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB limit
 	var body map[string]any
@@ -312,6 +326,45 @@ func (srv *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
+	// Validate value formats per key.
+	if v, ok := body["poll_interval"]; ok {
+		s, isStr := v.(string)
+		if !isStr {
+			http.Error(w, "poll_interval must be a string", http.StatusBadRequest)
+			return
+		}
+		if _, valid := validPollIntervals[s]; !valid {
+			http.Error(w, "poll_interval must be one of: 1m, 5m, 30m, 1h", http.StatusBadRequest)
+			return
+		}
+	}
+	if v, ok := body["retention_days"]; ok {
+		n, isNum := v.(float64) // JSON numbers decode as float64
+		if !isNum || n < 1 || n > 3650 {
+			http.Error(w, "retention_days must be between 1 and 3650", http.StatusBadRequest)
+			return
+		}
+	}
+	if v, ok := body["server_port"]; ok {
+		n, isNum := v.(float64)
+		if !isNum || n < 1024 || n > 65535 {
+			http.Error(w, "server_port must be between 1024 and 65535", http.StatusBadRequest)
+			return
+		}
+	}
+	if v, ok := body["review_mode"]; ok {
+		s, isStr := v.(string)
+		if !isStr {
+			http.Error(w, "review_mode must be a string", http.StatusBadRequest)
+			return
+		}
+		if _, valid := validReviewModes[s]; !valid {
+			http.Error(w, "review_mode must be one of: single, multi", http.StatusBadRequest)
+			return
+		}
+	}
+
 	for k, v := range body {
 		var val string
 		switch typed := v.(type) {
