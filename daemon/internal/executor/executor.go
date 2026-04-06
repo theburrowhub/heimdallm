@@ -99,6 +99,7 @@ var dangerousFlagPrefixes = []string{
 	"--dangerously-skip-permissions",
 	"--allow-dangerously",
 	"--danger",
+	"--permission-mode", // has a dedicated typed field (PermissionMode); must not appear in free-form flags
 }
 
 // dangerousFlagValues are flag values that must never appear regardless of position.
@@ -122,6 +123,18 @@ func ValidateExtraFlags(flags string) error {
 		for _, badVal := range dangerousFlagValues {
 			if strings.EqualFold(part, badVal) {
 				return fmt.Errorf("executor: value %q is forbidden in ExtraFlags/CLIFlags", part)
+			}
+		}
+		// Also catch --flag=value form (e.g. --permission-mode=bypassPermissions).
+		// Without this check a single token like "--permission-mode=bypassPermissions"
+		// passes the prefix loop (which only matches the exact flag prefix, not the
+		// joined form) and passes the value loop (which only matches bare values).
+		if idx := strings.Index(lower, "="); idx >= 0 {
+			val := lower[idx+1:]
+			for _, badVal := range dangerousFlagValues {
+				if strings.EqualFold(val, badVal) {
+					return fmt.Errorf("executor: value %q is forbidden in ExtraFlags/CLIFlags", part)
+				}
 			}
 		}
 	}

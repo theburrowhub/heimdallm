@@ -133,6 +133,62 @@ func TestValidateWorkDir(t *testing.T) {
 	}
 }
 
+func TestValidateExtraFlags(t *testing.T) {
+	tests := []struct {
+		name    string
+		flags   string
+		wantErr bool
+	}{
+		{
+			name:    "empty flags — allowed",
+			flags:   "",
+			wantErr: false,
+		},
+		{
+			name:    "safe model flag — allowed",
+			flags:   "--model claude-opus-4-6",
+			wantErr: false,
+		},
+		{
+			name:    "--dangerously-skip-permissions — rejected",
+			flags:   "--dangerously-skip-permissions",
+			wantErr: true,
+		},
+		{
+			name:    "bare bypassPermissions value — rejected",
+			flags:   "--permission-mode bypassPermissions",
+			wantErr: true,
+		},
+		{
+			name:    "--permission-mode=bypassPermissions single token — rejected",
+			flags:   "--permission-mode=bypassPermissions",
+			wantErr: true,
+		},
+		{
+			name:    "--permission-mode flag alone — rejected (dedicated field exists)",
+			flags:   "--permission-mode",
+			wantErr: true,
+		},
+		{
+			name:    "mixed safe flags — allowed",
+			flags:   "--model claude-opus-4-6 --max-turns 5",
+			wantErr: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := executor.ValidateExtraFlags(tc.flags)
+			if tc.wantErr && err == nil {
+				t.Errorf("expected error for flags %q, got nil", tc.flags)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("unexpected error for flags %q: %v", tc.flags, err)
+			}
+		})
+	}
+}
+
 func TestBuildPrompt(t *testing.T) {
 	prompt := executor.BuildPrompt("Fix nil deref", "alice", "+foo\n-bar\n")
 	if len(prompt) == 0 {
