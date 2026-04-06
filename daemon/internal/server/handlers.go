@@ -75,10 +75,17 @@ func NewWithOptions(s *store.Store, broker *sse.Broker, p *pipeline.Pipeline, ap
 
 // sensitiveGETPaths lists GET paths that require authentication even though they
 // are read-only. This includes endpoints that expose internal config, agent
-// data, or activity metadata (SSE stream).
-// /health, /me, /prs, /prs/{id}, and /stats are considered safe to read without
-// a token as they expose only minimal public-facing information.
-var sensitiveGETPaths = []string{"/config", "/agents", "/events", "/logs/stream"}
+// data, activity metadata, GitHub username, PR list, and review stats.
+// Only /health remains public (used for health checks by the launcher).
+var sensitiveGETPaths = []string{
+	"/config",
+	"/agents",
+	"/events",
+	"/logs/stream",
+	"/me",    // exposes GitHub username
+	"/prs",   // exposes PR titles, repos, authors
+	"/stats", // exposes review activity metadata
+}
 
 // authMiddleware rejects:
 //   - POST/PUT/PATCH/DELETE requests without a valid X-Heimdallr-Token header.

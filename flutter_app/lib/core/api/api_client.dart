@@ -55,7 +55,7 @@ class ApiClient {
   }
 
   Future<List<PR>> fetchPRs() async {
-    final resp = await _client.get(_uri('/prs'));
+    final resp = await _client.get(_uri('/prs'), headers: await _authHeaders());
     if (resp.statusCode != 200) {
       throw ApiException('GET /prs failed: ${resp.statusCode}');
     }
@@ -64,7 +64,7 @@ class ApiClient {
   }
 
   Future<Map<String, dynamic>> fetchPR(int id) async {
-    final resp = await _client.get(_uri('/prs/$id'));
+    final resp = await _client.get(_uri('/prs/$id'), headers: await _authHeaders());
     if (resp.statusCode != 200) {
       throw ApiException('GET /prs/$id failed: ${resp.statusCode}');
     }
@@ -143,14 +143,14 @@ class ApiClient {
   }
 
   Future<String> fetchMe() async {
-    final resp = await _client.get(_uri('/me'));
+    final resp = await _client.get(_uri('/me'), headers: await _authHeaders());
     if (resp.statusCode != 200) throw ApiException('GET /me failed: ${resp.statusCode}');
     final body = jsonDecode(resp.body) as Map<String, dynamic>;
     return body['login'] as String? ?? '';
   }
 
   Future<Map<String, dynamic>> fetchStats() async {
-    final resp = await _client.get(_uri('/stats'));
+    final resp = await _client.get(_uri('/stats'), headers: await _authHeaders());
     if (resp.statusCode != 200) throw ApiException('GET /stats failed: ${resp.statusCode}');
     return jsonDecode(resp.body) as Map<String, dynamic>;
   }

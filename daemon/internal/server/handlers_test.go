@@ -144,6 +144,30 @@ func TestHandlerLogsStream_WithToken(t *testing.T) {
 	}
 }
 
+func TestPublicEndpointsRequireAuthWhenTokenSet(t *testing.T) {
+	srv := setupServerWithToken(t, "secret-token")
+
+	paths := []string{"/me", "/prs", "/stats"}
+	for _, path := range paths {
+		// Without token → 401
+		req := httptest.NewRequest("GET", path, nil)
+		w := httptest.NewRecorder()
+		srv.Router().ServeHTTP(w, req)
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("GET %s without token: expected 401, got %d", path, w.Code)
+		}
+
+		// With valid token → not 401
+		req2 := httptest.NewRequest("GET", path, nil)
+		req2.Header.Set("X-Heimdallr-Token", "secret-token")
+		w2 := httptest.NewRecorder()
+		srv.Router().ServeHTTP(w2, req2)
+		if w2.Code == http.StatusUnauthorized {
+			t.Errorf("GET %s with valid token: expected not-401, got 401", path)
+		}
+	}
+}
+
 func TestHandlerTriggerReviewRateLimit(t *testing.T) {
 	s, err := store.Open(":memory:")
 	if err != nil {
