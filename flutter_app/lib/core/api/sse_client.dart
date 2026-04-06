@@ -81,8 +81,22 @@ class SseClient {
             }
           }
         },
-        onError: (e) => _controller?.addError(e),
-        onDone: () => _controller?.close(),
+        onError: (e) {
+          // Reconnect after a delay instead of propagating the error permanently.
+          Future.delayed(const Duration(seconds: 5), () {
+            if (_controller != null && !_controller!.isClosed) {
+              _startListening();
+            }
+          });
+        },
+        onDone: () {
+          // Server closed the connection (e.g. idle timeout) — reconnect.
+          Future.delayed(const Duration(seconds: 3), () {
+            if (_controller != null && !_controller!.isClosed) {
+              _startListening();
+            }
+          });
+        },
       );
     } catch (e) {
       _controller?.addError(e);

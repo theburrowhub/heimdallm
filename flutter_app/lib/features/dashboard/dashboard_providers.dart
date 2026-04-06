@@ -20,9 +20,15 @@ final sseStreamProvider = StreamProvider<SseEvent>((ref) {
 /// Used to show spinners in the tile list and detail view.
 final reviewingPRsProvider = StateProvider<Set<String>>((ref) => const {});
 
-/// Increments only on review_completed — avoids flickering on every SSE event.
-final prListRefreshProvider = StateProvider<int>((ref) {
-  ref.listen(sseStreamProvider, (_, next) {
+/// Increments on review_completed and on SSE reconnects (to catch up on missed events).
+final StateProvider<int> prListRefreshProvider = StateProvider<int>((ref) {
+  ref.listen<AsyncValue<SseEvent>>(sseStreamProvider, (prev, next) {
+    // When SSE (re)connects after being disconnected, refresh the PR list
+    // to catch up on any events that arrived during the disconnection window.
+    if (!(prev?.hasValue ?? false) && next.hasValue) {
+      Future.microtask(
+          () => ref.read(prListRefreshProvider.notifier).update((s) => s + 1));
+    }
     next.whenData((event) => _handleSseEvent(ref, event));
   });
   return 0;

@@ -61,6 +61,9 @@ class DashboardScreen extends ConsumerWidget {
 
 enum _SortMode { priority, newest }
 
+/// Persists the user's sort selection across tab navigation.
+final _reviewsSortProvider = StateProvider<_SortMode>((ref) => _SortMode.priority);
+
 /// Sort by priority: pending → high → medium → low, then most recent first within group.
 int _prSortKey(PR p) {
   if (p.latestReview == null) return 0;
@@ -95,12 +98,12 @@ class _ReviewsTab extends ConsumerStatefulWidget {
 class _ReviewsTabState extends ConsumerState<_ReviewsTab> {
   bool _reviewsExpanded = true;
   bool _prsExpanded     = true;
-  _SortMode _sort       = _SortMode.priority;
 
   @override
   Widget build(BuildContext context) {
     final prsAsync = ref.watch(prsProvider);
     final meAsync  = ref.watch(meProvider);
+    final sort     = ref.watch(_reviewsSortProvider);
 
     return prsAsync.when(
       loading: () => const Center(child: CircularProgressIndicator()),
@@ -108,9 +111,9 @@ class _ReviewsTabState extends ConsumerState<_ReviewsTab> {
       data: (prs) {
         final me = meAsync.valueOrNull ?? '';
         final myReviews = _sortedPRs(prs.where((p) =>
-            p.repo.isNotEmpty && p.author.toLowerCase() != me.toLowerCase()).toList(), _sort);
+            p.repo.isNotEmpty && p.author.toLowerCase() != me.toLowerCase()).toList(), sort);
         final myPRs = _sortedPRs(prs.where((p) =>
-            p.repo.isNotEmpty && p.author.toLowerCase() == me.toLowerCase()).toList(), _sort);
+            p.repo.isNotEmpty && p.author.toLowerCase() == me.toLowerCase()).toList(), sort);
 
         if (prs.isEmpty) {
           return const Center(child: Text('No open PRs found'));
@@ -130,15 +133,15 @@ class _ReviewsTabState extends ConsumerState<_ReviewsTab> {
                   _SortButton(
                     label: 'Priority',
                     icon: Icons.sort,
-                    selected: _sort == _SortMode.priority,
-                    onTap: () => setState(() => _sort = _SortMode.priority),
+                    selected: sort == _SortMode.priority,
+                    onTap: () => ref.read(_reviewsSortProvider.notifier).state = _SortMode.priority,
                   ),
                   const SizedBox(width: 6),
                   _SortButton(
                     label: 'Newest',
                     icon: Icons.schedule,
-                    selected: _sort == _SortMode.newest,
-                    onTap: () => setState(() => _sort = _SortMode.newest),
+                    selected: sort == _SortMode.newest,
+                    onTap: () => ref.read(_reviewsSortProvider.notifier).state = _SortMode.newest,
                   ),
                 ],
               ),
