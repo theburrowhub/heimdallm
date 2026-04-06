@@ -35,12 +35,18 @@ type GitHubReviewer interface {
 	PostComment(repo string, number int, body string) error
 }
 
+// CommentFetcher retrieves PR comments for context injection into the AI prompt.
+type CommentFetcher interface {
+	FetchComments(repo string, number int) ([]github.Comment, error)
+}
+
 // Pipeline orchestrates the full PR review flow.
 type Pipeline struct {
 	store    *store.Store
 	gh       interface {
 		DiffFetcher
 		GitHubReviewer
+		CommentFetcher
 	}
 	executor CLIExecutor
 	notify   Notifier
@@ -50,6 +56,7 @@ type Pipeline struct {
 func New(s *store.Store, gh interface {
 	DiffFetcher
 	GitHubReviewer
+	CommentFetcher
 }, exec CLIExecutor, n Notifier) *Pipeline {
 	return &Pipeline{store: s, gh: gh, executor: exec, notify: n}
 }
@@ -144,18 +151,27 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		return nil, fmt.Errorf("pipeline: fetch diff: %w", err)
 	}
 
+	// 2b. Fetch PR comments for context (non-fatal: proceed without if unavailable)
+	prComments, err := p.gh.FetchComments(pr.Repo, pr.Number)
+	if err != nil {
+		slog.Warn("pipeline: failed to fetch PR comments, proceeding without", "err", err)
+		prComments = nil
+	}
+	commentsSection := formatComments(prComments, pr.User.Login)
+
 	// 3. Build prompt:
 	//    Priority: repo override > agent-level prompt > globally active default > built-in default
 	promptTemplate := executor.DefaultTemplate()
 	var cliFlags string
 	p.applyPrompt(promptOverride, opts.AgentPromptID, &promptTemplate, &cliFlags)
 	prompt := executor.BuildPromptFromTemplate(promptTemplate, executor.PRContext{
-		Title:  pr.Title,
-		Number: pr.Number,
-		Repo:   pr.Repo,
-		Author: pr.User.Login,
-		Link:   pr.HTMLURL,
-		Diff:   diff,
+		Title:    pr.Title,
+		Number:   pr.Number,
+		Repo:     pr.Repo,
+		Author:   pr.User.Login,
+		Link:     pr.HTMLURL,
+		Diff:     diff,
+		Comments: commentsSection,
 	})
 
 	// 4. Select CLI (profile can override the global primary/fallback)
@@ -383,4 +399,56 @@ func severityToEvent(severity string, _ int) string {
 		return "REQUEST_CHANGES"
 	}
 	return "APPROVE"
+}
+
+// maxCommentsBytes limits the total formatted PR comments included in the prompt.
+const maxCommentsBytes = 16 * 1024 // 16KB
+
+// formatComments formats a slice of GitHub comments into a prompt section string.
+// Returns empty string if comments is nil or empty.
+// If total formatted text exceeds maxCommentsBytes, trims comments before the
+// PR author's last message. If still too large, hard-truncates with a note.
+func formatComments(comments []github.Comment, prAuthor string) string {
+	if len(comments) == 0 {
+		return ""
+	}
+
+	lines := make([]string, len(comments))
+	for i, c := range comments {
+		if c.File != "" {
+			lines[i] = fmt.Sprintf("@%s (%s:%d): %s", c.Author, c.File, c.Line, c.Body)
+		} else {
+			lines[i] = fmt.Sprintf("@%s: %s", c.Author, c.Body)
+		}
+	}
+
+	formatted := strings.Join(lines, "\n---\n")
+	if len(formatted) <= maxCommentsBytes {
+		return wrapCommentsSection(formatted)
+	}
+
+	// Find the last comment by the PR author and trim everything before it
+	lastAuthorIdx := -1
+	for i := len(comments) - 1; i >= 0; i-- {
+		if comments[i].Author == prAuthor {
+			lastAuthorIdx = i
+			break
+		}
+	}
+
+	start := 0
+	if lastAuthorIdx > 0 {
+		start = lastAuthorIdx
+	}
+
+	trimmed := strings.Join(lines[start:], "\n---\n")
+	if len(trimmed) <= maxCommentsBytes {
+		return wrapCommentsSection(trimmed)
+	}
+
+	return wrapCommentsSection(trimmed[:maxCommentsBytes] + "\n... (truncated)")
+}
+
+func wrapCommentsSection(text string) string {
+	return "Existing PR discussion:\n<user_content>\n" + text + "\n</user_content>"
 }
