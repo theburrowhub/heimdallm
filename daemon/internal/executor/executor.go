@@ -191,9 +191,10 @@ var dangerousSegments = []string{
 // It rejects paths outside the user's home directory and /tmp, as well as
 // specific system paths and credential directories.
 //
-// SECURITY: This function uses filepath.Abs to resolve relative paths and
-// symlinks before any comparison, preventing traversal attacks via relative
-// paths or symlinked directories.
+// SECURITY: This function resolves symlinks with filepath.EvalSymlinks BEFORE
+// applying any denylist check. filepath.Abs alone does NOT resolve symlinks, so
+// without this step an attacker could create a symlink at an allowed path (e.g.
+// ~/projects/evil -> ~/.ssh) to bypass validation.
 func ValidateWorkDir(dir string) error {
 	if dir == "" {
 		return nil // no working directory override; safe
@@ -207,7 +208,14 @@ func ValidateWorkDir(dir string) error {
 		return fmt.Errorf("executor: workdir %q is not a directory", dir)
 	}
 
-	abs, err := filepath.Abs(dir)
+	// Resolve all symlinks before any path comparison so that a symlink
+	// pointing outside a safe zone (e.g. ~/proj -> ~/.ssh) is caught.
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return fmt.Errorf("executor: workdir %q: cannot resolve symlinks: %w", dir, err)
+	}
+
+	abs, err := filepath.Abs(resolved)
 	if err != nil {
 		return fmt.Errorf("executor: workdir %q: cannot resolve absolute path: %w", dir, err)
 	}
