@@ -107,6 +107,13 @@ func main() {
 		cfgMu.Lock()
 		agentCfg := cfg.AgentConfigFor(cli)
 		cfgMu.Unlock()
+		extraFlags := agentCfg.ExtraFlags
+		if extraFlags != "" {
+			if err := executor.ValidateExtraFlags(extraFlags); err != nil {
+				slog.Warn("buildRunOpts: extra_flags from config rejected", "err", err)
+				extraFlags = ""
+			}
+		}
 		return pipeline.RunOptions{
 			Primary:        aiCfg.Primary,
 			Fallback:       aiCfg.Fallback,
@@ -117,7 +124,7 @@ func main() {
 				Model:                agentCfg.Model,
 				MaxTurns:             agentCfg.MaxTurns,
 				ApprovalMode:         agentCfg.ApprovalMode,
-				ExtraFlags:           agentCfg.ExtraFlags,
+				ExtraFlags:           extraFlags,
 				WorkDir:              aiCfg.LocalDir,
 				Effort:               agentCfg.Effort,
 				PermissionMode:       agentCfg.PermissionMode,

@@ -105,7 +105,8 @@ class ApiClient {
   }
 
   Future<Map<String, dynamic>> fetchConfig() async {
-    final resp = await _client.get(_uri('/config'));
+    final resp = await _client.get(_uri('/config'),
+        headers: await _authHeaders());
     if (resp.statusCode != 200) {
       throw ApiException('GET /config failed: ${resp.statusCode}');
     }
@@ -115,7 +116,8 @@ class ApiClient {
   // ── Agents ──────────────────────────────────────────────────────────────
 
   Future<List<Map<String, dynamic>>> fetchAgents() async {
-    final resp = await _client.get(_uri('/agents'));
+    final resp = await _client.get(_uri('/agents'),
+        headers: await _authHeaders());
     if (resp.statusCode != 200) throw ApiException('GET /agents failed: ${resp.statusCode}');
     return (jsonDecode(resp.body) as List<dynamic>)
         .cast<Map<String, dynamic>>();

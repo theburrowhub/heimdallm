@@ -132,8 +132,12 @@ class FirstRunSetup {
   static Future<void> _writeTokenFile(String token) async {
     final path = _tokenFilePath();
     await Directory(path).parent.create(recursive: true);
-    await File(path).writeAsString(token);
-    await Process.run('chmod', ['600', path]);
+    // Write to a temp file first, chmod it, then rename atomically so the
+    // token is never world-readable even for a brief window (race condition).
+    final tmpPath = '$path.tmp';
+    await File(tmpPath).writeAsString(token);
+    await Process.run('chmod', ['600', tmpPath]);
+    await File(tmpPath).rename(path);
   }
 
   static Future<String?> _readTokenFile() async {
