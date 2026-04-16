@@ -8,14 +8,14 @@ import (
 	"text/template"
 )
 
-const plistName = "com.heimdallr.daemon.plist"
+const plistName = "com.heimdallm.daemon.plist"
 
 var plistTemplate = template.Must(template.New("plist").Parse(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>com.heimdallr.daemon</string>
+	<string>com.heimdallm.daemon</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>{{.BinaryPath}}</string>
@@ -25,9 +25,9 @@ var plistTemplate = template.Must(template.New("plist").Parse(`<?xml version="1.
 	<key>KeepAlive</key>
 	<true/>
 	<key>StandardOutPath</key>
-	<string>{{.LogDir}}/heimdallr-daemon.log</string>
+	<string>{{.LogDir}}/heimdallm-daemon.log</string>
 	<key>StandardErrorPath</key>
-	<string>{{.LogDir}}/heimdallr-daemon-error.log</string>
+	<string>{{.LogDir}}/heimdallm-daemon-error.log</string>
 </dict>
 </plist>
 `))
@@ -46,7 +46,7 @@ func Install(binaryPath string) error {
 	if err != nil {
 		return err
 	}
-	logDir := filepath.Join(home, "Library", "Logs", "heimdallr")
+	logDir := filepath.Join(home, "Library", "Logs", "heimdallm")
 	if err := os.MkdirAll(logDir, 0700); err != nil {
 		return fmt.Errorf("launchagent: mkdir logs: %w", err)
 	}

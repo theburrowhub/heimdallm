@@ -9,12 +9,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/heimdallr/daemon/internal/executor"
-	gh "github.com/heimdallr/daemon/internal/github"
-	"github.com/heimdallr/daemon/internal/pipeline"
-	"github.com/heimdallr/daemon/internal/server"
-	"github.com/heimdallr/daemon/internal/sse"
-	"github.com/heimdallr/daemon/internal/store"
+	"github.com/heimdallm/daemon/internal/executor"
+	gh "github.com/heimdallm/daemon/internal/github"
+	"github.com/heimdallm/daemon/internal/pipeline"
+	"github.com/heimdallm/daemon/internal/server"
+	"github.com/heimdallm/daemon/internal/sse"
+	"github.com/heimdallm/daemon/internal/store"
 )
 
 func fakeGHServer(t *testing.T) *httptest.Server {

@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/heimdallr/daemon/internal/executor"
-	"github.com/heimdallr/daemon/internal/github"
-	"github.com/heimdallr/daemon/internal/store"
+	"github.com/heimdallm/daemon/internal/executor"
+	"github.com/heimdallm/daemon/internal/github"
+	"github.com/heimdallm/daemon/internal/store"
 )
 
 // DiffFetcher retrieves the diff for a pull request.
@@ -330,7 +330,7 @@ func buildIssueComment(issue executor.Issue) string {
 			sb.WriteString(fmt.Sprintf(" line %d", issue.Line))
 		}
 	}
-	sb.WriteString("\n\n---\n*Posted by Heimdallr AI Review*")
+	sb.WriteString("\n\n---\n*Posted by Heimdallm AI Review*")
 	return sb.String()
 }
 
@@ -338,7 +338,7 @@ func buildIssueComment(issue executor.Issue) string {
 // Individual issues are already posted as separate comments; this is the formal review summary.
 func buildMultiSummaryBody(r *executor.ReviewResult) string {
 	var sb strings.Builder
-	sb.WriteString("## 🤖 Heimdallr AI Review — Summary\n\n")
+	sb.WriteString("## 🤖 Heimdallm AI Review — Summary\n\n")
 	sb.WriteString(r.Summary)
 	sb.WriteString("\n\n")
 	if len(r.Issues) > 0 {
@@ -351,7 +351,7 @@ func buildMultiSummaryBody(r *executor.ReviewResult) string {
 		}
 		sb.WriteString("\n")
 	}
-	sb.WriteString(fmt.Sprintf("---\n*Severity: **%s** · Reviewed by Heimdallr*",
+	sb.WriteString(fmt.Sprintf("---\n*Severity: **%s** · Reviewed by Heimdallm*",
 		strings.ToUpper(r.Severity)))
 	return sb.String()
 }
@@ -359,7 +359,7 @@ func buildMultiSummaryBody(r *executor.ReviewResult) string {
 // buildGitHubBody formats the AI review as a GitHub-flavored markdown review body.
 func buildGitHubBody(r *executor.ReviewResult) string {
 	var sb strings.Builder
-	sb.WriteString("## 🤖 Heimdallr AI Review\n\n")
+	sb.WriteString("## 🤖 Heimdallm AI Review\n\n")
 	sb.WriteString(r.Summary)
 	sb.WriteString("\n\n")
 
@@ -387,12 +387,12 @@ func buildGitHubBody(r *executor.ReviewResult) string {
 	}
 
 	sb.WriteString(fmt.Sprintf("---\n*Severity: **%s** · Reviewed by %s*",
-		strings.ToUpper(r.Severity), "Heimdallr"))
+		strings.ToUpper(r.Severity), "Heimdallm"))
 	return sb.String()
 }
 
 // severityToEvent maps severity to a GitHub review event type.
-// Only high-severity issues block a PR — Heimdallr must not be a blocker
+// Only high-severity issues block a PR — Heimdallm must not be a blocker
 // for medium/low issues. Those are left as informational comments with an APPROVE.
 func severityToEvent(severity string, _ int) string {
 	if severity == "high" {

@@ -62,14 +62,14 @@ func TestApplyEnvOverrides(t *testing.T) {
 	cfg := &Config{}
 	cfg.applyDefaults()
 
-	t.Setenv("HEIMDALLR_PORT", "8080")
-	t.Setenv("HEIMDALLR_BIND_ADDR", "0.0.0.0")
-	t.Setenv("HEIMDALLR_POLL_INTERVAL", "1m")
-	t.Setenv("HEIMDALLR_REPOSITORIES", "org/repo1, org/repo2, org/repo3")
-	t.Setenv("HEIMDALLR_AI_PRIMARY", "gemini")
-	t.Setenv("HEIMDALLR_AI_FALLBACK", "claude")
-	t.Setenv("HEIMDALLR_REVIEW_MODE", "multi")
-	t.Setenv("HEIMDALLR_RETENTION_DAYS", "30")
+	t.Setenv("HEIMDALLM_PORT", "8080")
+	t.Setenv("HEIMDALLM_BIND_ADDR", "0.0.0.0")
+	t.Setenv("HEIMDALLM_POLL_INTERVAL", "1m")
+	t.Setenv("HEIMDALLM_REPOSITORIES", "org/repo1, org/repo2, org/repo3")
+	t.Setenv("HEIMDALLM_AI_PRIMARY", "gemini")
+	t.Setenv("HEIMDALLM_AI_FALLBACK", "claude")
+	t.Setenv("HEIMDALLM_REVIEW_MODE", "multi")
+	t.Setenv("HEIMDALLM_RETENTION_DAYS", "30")
 
 	cfg.applyEnvOverrides()
 
@@ -106,7 +106,7 @@ func TestApplyEnvOverrides_InvalidPort(t *testing.T) {
 	cfg := &Config{}
 	cfg.applyDefaults()
 
-	t.Setenv("HEIMDALLR_PORT", "notanumber")
+	t.Setenv("HEIMDALLM_PORT", "notanumber")
 	cfg.applyEnvOverrides()
 
 	if cfg.Server.Port != 7842 {
@@ -118,7 +118,7 @@ func TestApplyEnvOverrides_EmptyRepositories(t *testing.T) {
 	cfg := &Config{}
 	cfg.GitHub.Repositories = []string{"existing/repo"}
 
-	t.Setenv("HEIMDALLR_REPOSITORIES", "  ,  ,  ")
+	t.Setenv("HEIMDALLM_REPOSITORIES", "  ,  ,  ")
 	cfg.applyEnvOverrides()
 
 	if len(cfg.GitHub.Repositories) != 1 {
@@ -326,7 +326,7 @@ primary = "claude"
 `
 	os.WriteFile(path, []byte(content), 0644)
 
-	t.Setenv("HEIMDALLR_AI_PRIMARY", "gemini")
+	t.Setenv("HEIMDALLM_AI_PRIMARY", "gemini")
 
 	cfg, err := Load(path)
 	if err != nil {
@@ -343,8 +343,8 @@ func TestLoadOrCreate_Creates(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
 
-	t.Setenv("HEIMDALLR_AI_PRIMARY", "claude")
-	t.Setenv("HEIMDALLR_REPOSITORIES", "org/repo")
+	t.Setenv("HEIMDALLM_AI_PRIMARY", "claude")
+	t.Setenv("HEIMDALLM_REPOSITORIES", "org/repo")
 
 	cfg, err := LoadOrCreate(path)
 	if err != nil {

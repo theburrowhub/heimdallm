@@ -14,17 +14,17 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/heimdallr/daemon/internal/config"
-	"github.com/heimdallr/daemon/internal/executor"
-	gh "github.com/heimdallr/daemon/internal/github"
-	"github.com/heimdallr/daemon/internal/keychain"
-	"github.com/heimdallr/daemon/internal/notify"
-	"github.com/heimdallr/daemon/internal/pipeline"
-	"github.com/heimdallr/daemon/internal/scheduler"
-	"github.com/heimdallr/daemon/internal/server"
-	"github.com/heimdallr/daemon/internal/sse"
-	"github.com/heimdallr/daemon/internal/store"
-	"github.com/heimdallr/daemon/launchagent"
+	"github.com/heimdallm/daemon/internal/config"
+	"github.com/heimdallm/daemon/internal/executor"
+	gh "github.com/heimdallm/daemon/internal/github"
+	"github.com/heimdallm/daemon/internal/keychain"
+	"github.com/heimdallm/daemon/internal/notify"
+	"github.com/heimdallm/daemon/internal/pipeline"
+	"github.com/heimdallm/daemon/internal/scheduler"
+	"github.com/heimdallm/daemon/internal/server"
+	"github.com/heimdallm/daemon/internal/sse"
+	"github.com/heimdallm/daemon/internal/store"
+	"github.com/heimdallm/daemon/launchagent"
 )
 
 func main() {
@@ -51,7 +51,7 @@ func main() {
 	cfgPath := configPath()
 	var cfg *config.Config
 	var err error
-	if os.Getenv("CI") == "true" || os.Getenv("HEIMDALLR_DATA_DIR") != "" {
+	if os.Getenv("CI") == "true" || os.Getenv("HEIMDALLM_DATA_DIR") != "" {
 		cfg, err = config.LoadOrCreate(cfgPath)
 	} else {
 		cfg, err = config.Load(cfgPath)
@@ -67,7 +67,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	dbPath := filepath.Join(dataDir(), "heimdallr.db")
+	dbPath := filepath.Join(dataDir(), "heimdallm.db")
 	s, err := store.Open(dbPath)
 	if err != nil {
 		slog.Error("store open failed", "err", err)
@@ -87,7 +87,7 @@ func main() {
 	exec := executor.New()
 
 	// Load or create the per-daemon API token.  All mutating HTTP endpoints
-	// require this token in X-Heimdallr-Token (security issue #3).
+	// require this token in X-Heimdallm-Token (security issue #3).
 	apiToken, err := loadOrCreateAPIToken(dataDir())
 	if err != nil {
 		slog.Warn("could not create API token — mutating endpoints unprotected", "err", err)
@@ -424,9 +424,9 @@ func setupLogging() {
 }
 
 // dataDir resolves the data directory.
-// Priority: HEIMDALLR_DATA_DIR env > /data (Docker) > ~/.local/share/heimdallr
+// Priority: HEIMDALLM_DATA_DIR env > /data (Docker) > ~/.local/share/heimdallm
 func dataDir() string {
-	if v := os.Getenv("HEIMDALLR_DATA_DIR"); v != "" {
+	if v := os.Getenv("HEIMDALLM_DATA_DIR"); v != "" {
 		os.MkdirAll(v, 0700)
 		return v
 	}
@@ -434,22 +434,22 @@ func dataDir() string {
 		return "/data"
 	}
 	home, _ := os.UserHomeDir()
-	dir := filepath.Join(home, ".local", "share", "heimdallr")
+	dir := filepath.Join(home, ".local", "share", "heimdallm")
 	os.MkdirAll(dir, 0700)
 	return dir
 }
 
 // configPath resolves the config file location.
-// Priority: HEIMDALLR_CONFIG_PATH env > /config/config.toml (Docker) > ~/.config/heimdallr/config.toml
+// Priority: HEIMDALLM_CONFIG_PATH env > /config/config.toml (Docker) > ~/.config/heimdallm/config.toml
 func configPath() string {
-	if v := os.Getenv("HEIMDALLR_CONFIG_PATH"); v != "" {
+	if v := os.Getenv("HEIMDALLM_CONFIG_PATH"); v != "" {
 		return v
 	}
 	if info, err := os.Stat("/config"); err == nil && info.IsDir() {
 		return "/config/config.toml"
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "heimdallr", "config.toml")
+	return filepath.Join(home, ".config", "heimdallm", "config.toml")
 }
 
 func parsePollInterval(s string) time.Duration {

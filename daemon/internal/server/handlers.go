@@ -16,10 +16,10 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/heimdallr/daemon/internal/executor"
-	"github.com/heimdallr/daemon/internal/pipeline"
-	"github.com/heimdallr/daemon/internal/sse"
-	"github.com/heimdallr/daemon/internal/store"
+	"github.com/heimdallm/daemon/internal/executor"
+	"github.com/heimdallm/daemon/internal/pipeline"
+	"github.com/heimdallm/daemon/internal/sse"
+	"github.com/heimdallm/daemon/internal/store"
 )
 
 // Server holds the HTTP router, SSE broker, store, and optional pipeline.
@@ -56,7 +56,7 @@ func New(s *store.Store, broker *sse.Broker, p *pipeline.Pipeline, apiToken stri
 var sensitiveGETPaths = []string{"/config", "/agents", "/events", "/logs/stream"}
 
 // authMiddleware rejects:
-//   - POST/PUT/PATCH/DELETE requests without a valid X-Heimdallr-Token header.
+//   - POST/PUT/PATCH/DELETE requests without a valid X-Heimdallm-Token header.
 //   - GET requests to /config or /agents without a valid token (these endpoints
 //     return local directory paths, CLI flags, and agent configs that should not
 //     be readable by arbitrary browser tabs — see security issue #3).
@@ -76,7 +76,7 @@ func (srv *Server) authMiddleware(next http.Handler) http.Handler {
 				}
 			}
 			if needsAuth {
-				token := r.Header.Get("X-Heimdallr-Token")
+				token := r.Header.Get("X-Heimdallm-Token")
 				// Constant-time comparison to prevent timing attacks.
 				if !hmac.Equal([]byte(token), []byte(srv.apiToken)) {
 					http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
@@ -425,7 +425,7 @@ func (srv *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 
 func (srv *Server) handleLogsStream(w http.ResponseWriter, r *http.Request) {
 	home, _ := os.UserHomeDir()
-	logPath := filepath.Join(home, "Library", "Logs", "heimdallr", "heimdallr-daemon-error.log")
+	logPath := filepath.Join(home, "Library", "Logs", "heimdallm", "heimdallm-daemon-error.log")
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")

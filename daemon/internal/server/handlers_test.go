@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/heimdallr/daemon/internal/server"
-	"github.com/heimdallr/daemon/internal/sse"
-	"github.com/heimdallr/daemon/internal/store"
+	"github.com/heimdallm/daemon/internal/server"
+	"github.com/heimdallm/daemon/internal/sse"
+	"github.com/heimdallm/daemon/internal/store"
 )
 
 func setupServer(t *testing.T) (*server.Server, *store.Store) {
@@ -130,7 +130,7 @@ func TestHandlerLogsStream_WithToken(t *testing.T) {
 	defer cancel()
 
 	req := httptest.NewRequest("GET", "/logs/stream", nil).WithContext(ctx)
-	req.Header.Set("X-Heimdallr-Token", "secret-token")
+	req.Header.Set("X-Heimdallm-Token", "secret-token")
 	w := httptest.NewRecorder()
 	srv.Router().ServeHTTP(w, req)
 

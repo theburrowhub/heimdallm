@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-const service = "heimdallr"
+const service = "heimdallm"
 const account = "github-token"
 
 // Get retrieves the GitHub token.
@@ -54,7 +54,7 @@ func tokenFilePaths() []string {
 	paths := []string{"/config/.token"}
 	home, err := os.UserHomeDir()
 	if err == nil {
-		paths = append(paths, filepath.Join(home, ".config", "heimdallr", ".token"))
+		paths = append(paths, filepath.Join(home, ".config", "heimdallm", ".token"))
 	}
 	return paths
 }

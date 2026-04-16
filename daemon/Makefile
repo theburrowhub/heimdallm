@@ -1,5 +1,5 @@
-BINARY = bin/heimdallr
-CMD    = ./cmd/heimdallr
+BINARY = bin/heimdallm
+CMD    = ./cmd/heimdallm
 
 .PHONY: build test test-race lint clean dev
 

@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
-	"github.com/heimdallr/daemon/internal/executor"
+	"github.com/heimdallm/daemon/internal/executor"
 )
 
 var validIntervals = map[string]bool{
@@ -123,21 +123,21 @@ func (c *Config) applyDefaults() {
 	}
 }
 
-// applyEnvOverrides applies HEIMDALLR_* environment variable overrides.
+// applyEnvOverrides applies HEIMDALLM_* environment variable overrides.
 // Environment variables take precedence over values loaded from the TOML file.
 func (c *Config) applyEnvOverrides() {
-	if v := os.Getenv("HEIMDALLR_PORT"); v != "" {
+	if v := os.Getenv("HEIMDALLM_PORT"); v != "" {
 		if p, err := strconv.Atoi(v); err == nil {
 			c.Server.Port = p
 		}
 	}
-	if v := os.Getenv("HEIMDALLR_BIND_ADDR"); v != "" {
+	if v := os.Getenv("HEIMDALLM_BIND_ADDR"); v != "" {
 		c.Server.BindAddr = v
 	}
-	if v := os.Getenv("HEIMDALLR_POLL_INTERVAL"); v != "" {
+	if v := os.Getenv("HEIMDALLM_POLL_INTERVAL"); v != "" {
 		c.GitHub.PollInterval = v
 	}
-	if v := os.Getenv("HEIMDALLR_REPOSITORIES"); v != "" {
+	if v := os.Getenv("HEIMDALLM_REPOSITORIES"); v != "" {
 		repos := strings.Split(v, ",")
 		cleaned := make([]string, 0, len(repos))
 		for _, r := range repos {
@@ -149,16 +149,16 @@ func (c *Config) applyEnvOverrides() {
 			c.GitHub.Repositories = cleaned
 		}
 	}
-	if v := os.Getenv("HEIMDALLR_AI_PRIMARY"); v != "" {
+	if v := os.Getenv("HEIMDALLM_AI_PRIMARY"); v != "" {
 		c.AI.Primary = v
 	}
-	if v := os.Getenv("HEIMDALLR_AI_FALLBACK"); v != "" {
+	if v := os.Getenv("HEIMDALLM_AI_FALLBACK"); v != "" {
 		c.AI.Fallback = v
 	}
-	if v := os.Getenv("HEIMDALLR_REVIEW_MODE"); v != "" {
+	if v := os.Getenv("HEIMDALLM_REVIEW_MODE"); v != "" {
 		c.AI.ReviewMode = v
 	}
-	if v := os.Getenv("HEIMDALLR_RETENTION_DAYS"); v != "" {
+	if v := os.Getenv("HEIMDALLM_RETENTION_DAYS"); v != "" {
 		if d, err := strconv.Atoi(v); err == nil {
 			c.Retention.MaxDays = d
 		}
@@ -228,7 +228,7 @@ func LoadOrCreate(path string) (*Config, error) {
 	cfg.applyDefaults()
 	cfg.applyEnvOverrides()
 	if cfg.AI.Primary == "" {
-		return nil, fmt.Errorf("no config file and HEIMDALLR_AI_PRIMARY not set")
+		return nil, fmt.Errorf("no config file and HEIMDALLM_AI_PRIMARY not set")
 	}
 	if err := writeConfigTOML(path, cfg); err != nil {
 		log.Printf("warning: could not persist generated config: %v", err)
@@ -239,8 +239,8 @@ func LoadOrCreate(path string) (*Config, error) {
 	return cfg, nil
 }
 
-// DefaultPath returns ~/.config/heimdallr/config.toml
+// DefaultPath returns ~/.config/heimdallm/config.toml
 func DefaultPath() string {
 	home, _ := os.UserHomeDir()
-	return home + "/.config/heimdallr/config.toml"
+	return home + "/.config/heimdallm/config.toml"
 }

@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	gh "github.com/heimdallr/daemon/internal/github"
+	gh "github.com/heimdallm/daemon/internal/github"
 )
 
 func TestFetchPRs(t *testing.T) {
