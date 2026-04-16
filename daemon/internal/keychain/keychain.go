@@ -2,36 +2,61 @@ package keychain
 
 import (
 	"fmt"
-	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 )
 
 const service = "heimdallr"
 const account = "github-token"
 
-// Get retrieves the GitHub token from macOS Keychain.
-// Falls back to GITHUB_TOKEN env var if not found in Keychain.
+// Get retrieves the GitHub token.
+// Priority: GITHUB_TOKEN env var > macOS Keychain > token files.
 func Get() (string, error) {
+	// 1. Environment variable (Docker / CI).
+	if tok := os.Getenv("GITHUB_TOKEN"); tok != "" {
+		return tok, nil
+	}
+
+	// 2. macOS Keychain (desktop).
+	if runtime.GOOS == "darwin" {
+		if tok, err := getFromKeychain(); err == nil && tok != "" {
+			return tok, nil
+		}
+	}
+
+	// 3. Token files (Docker mount or manual).
+	for _, p := range tokenFilePaths() {
+		if data, err := os.ReadFile(p); err == nil {
+			if tok := strings.TrimSpace(string(data)); tok != "" {
+				return tok, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("no GitHub token found: set GITHUB_TOKEN, use macOS Keychain, or mount a token file at /config/.token")
+}
+
+func getFromKeychain() (string, error) {
 	out, err := exec.Command(
 		"security", "find-generic-password",
 		"-s", service, "-a", account, "-w",
 	).Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func tokenFilePaths() []string {
+	paths := []string{"/config/.token"}
+	home, err := os.UserHomeDir()
 	if err == nil {
-		token := strings.TrimSpace(string(out))
-		if token != "" {
-			return token, nil
-		}
+		paths = append(paths, filepath.Join(home, ".config", "heimdallr", ".token"))
 	}
-	// Fallback to environment variable — less secure than Keychain because env
-	// vars can be read by other processes of the same user. Warn so the user
-	// knows to prefer Keychain storage.
-	if t := os.Getenv("GITHUB_TOKEN"); t != "" {
-		slog.Warn("keychain: using GITHUB_TOKEN env var as fallback — consider storing the token in macOS Keychain for better security")
-		return t, nil
-	}
-	return "", fmt.Errorf("keychain: GitHub token not found in Keychain or GITHUB_TOKEN env var")
+	return paths
 }
 
 // Set stores the GitHub token in macOS Keychain.
