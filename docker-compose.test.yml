@@ -1,19 +1,19 @@
 # Override for local testing.
 # Usage: docker compose -f docker-compose.yml -f docker-compose.test.yml up
 services:
-  heimdallr:
-    container_name: heimdallr-test
+  heimdallm:
+    container_name: heimdallm-test
     restart: "no"
     ports:
-      - "${HEIMDALLR_PORT:-7842}:${HEIMDALLR_PORT:-7842}"
+      - "${HEIMDALLM_PORT:-7842}:${HEIMDALLM_PORT:-7842}"
     environment:
-      - HEIMDALLR_POLL_INTERVAL=${HEIMDALLR_POLL_INTERVAL:-1m}
+      - HEIMDALLM_POLL_INTERVAL=${HEIMDALLM_POLL_INTERVAL:-1m}
     volumes:
-      - heimdallr-test-data:/data
+      - heimdallm-test-data:/data
       - ./config:/config
       # Gemini OAuth tokens from host (uncomment for Level 3 E2E test):
-      # - ~/.gemini:/home/heimdallr/.gemini:ro
+      # - ~/.gemini:/home/heimdallm/.gemini:ro
 
 volumes:
-  heimdallr-test-data:
+  heimdallm-test-data:
     driver: local

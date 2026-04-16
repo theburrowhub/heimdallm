@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Heimdallr Docker — Local Test Runner
+# Heimdallm Docker — Local Test Runner
 #
 # Usage:
 #   ./scripts/test-local.sh smoke    # Level 1: no credentials needed
@@ -12,8 +12,8 @@ set -euo pipefail
 # ─── Config ───────────────────────────────────────────────────────────────────
 
 COMPOSE_TEST="docker compose -f docker-compose.yml -f docker-compose.test.yml"
-SERVICE="heimdallr"
-BASE_URL="http://localhost:${HEIMDALLR_PORT:-7842}"
+SERVICE="heimdallm"
+BASE_URL="http://localhost:${HEIMDALLM_PORT:-7842}"
 HEALTH_TIMEOUT=60   # seconds to wait for /health
 HEALTH_INTERVAL=2   # seconds between retries
 
@@ -65,7 +65,7 @@ check_http() {
     local desc="$1" method="$2" path="$3" expected="$4" body_check="${5:-}"
     local extra_headers="${6:-}"
     local url="${BASE_URL}${path}"
-    local args=(-s -o /tmp/heimdallr_test_body -w "%{http_code}" -X "$method")
+    local args=(-s -o /tmp/heimdallm_test_body -w "%{http_code}" -X "$method")
 
     if [ -n "$extra_headers" ]; then
         args+=(-H "$extra_headers")
@@ -81,7 +81,7 @@ check_http() {
 
     if [ -n "$body_check" ]; then
         local result
-        result=$(jq -r "$body_check" /tmp/heimdallr_test_body 2>/dev/null) || result="false"
+        result=$(jq -r "$body_check" /tmp/heimdallm_test_body 2>/dev/null) || result="false"
         if [ "$result" != "true" ]; then
             fail "$desc" "body check failed: $body_check"
             return
@@ -149,8 +149,8 @@ test_smoke() {
     # Export dummy credentials for the entire smoke test session.
     # These are used by docker-compose.yml variable substitution.
     export GITHUB_TOKEN=dummy
-    export HEIMDALLR_AI_PRIMARY=gemini
-    export HEIMDALLR_REPOSITORIES=test/repo
+    export HEIMDALLM_AI_PRIMARY=gemini
+    export HEIMDALLM_REPOSITORIES=test/repo
 
     # Build
     info "Building Docker image..."
@@ -224,7 +224,7 @@ test_smoke() {
     if [ -n "$api_token" ]; then
         check_http "POST /reload with valid token returns 200" \
             POST /reload 200 '.status == "reloaded"' \
-            "X-Heimdallr-Token: ${api_token}"
+            "X-Heimdallm-Token: ${api_token}"
     else
         skip "POST /reload with valid token" "no API token available"
     fi
@@ -261,7 +261,7 @@ test_github() {
         echo -e "${RED}ERROR: .env file not found.${NC}"
         echo "Create it from .env.example:"
         echo "  cp .env.example .env"
-        echo "  # Edit .env — set GITHUB_TOKEN and HEIMDALLR_REPOSITORIES"
+        echo "  # Edit .env — set GITHUB_TOKEN and HEIMDALLM_REPOSITORIES"
         return 1
     fi
 
@@ -272,8 +272,8 @@ test_github() {
         echo -e "${RED}ERROR: GITHUB_TOKEN not set or still has placeholder value.${NC}"
         return 1
     fi
-    if [ -z "${HEIMDALLR_AI_PRIMARY:-}" ]; then
-        echo -e "${RED}ERROR: HEIMDALLR_AI_PRIMARY not set in .env.${NC}"
+    if [ -z "${HEIMDALLM_AI_PRIMARY:-}" ]; then
+        echo -e "${RED}ERROR: HEIMDALLM_AI_PRIMARY not set in .env.${NC}"
         return 1
     fi
 
@@ -326,7 +326,7 @@ test_github() {
     if [ "$repo_count" -gt 0 ]; then
         pass "Config has $repo_count monitored repositories"
     else
-        warn "No repositories configured — set HEIMDALLR_REPOSITORIES in .env"
+        warn "No repositories configured — set HEIMDALLM_REPOSITORIES in .env"
         skip "Config has monitored repositories" "none configured"
     fi
 
@@ -358,7 +358,7 @@ test_e2e() {
     info "Level 3: Full End-to-End Test"
     echo ""
     echo -e "${BOLD}Prerequisites:${NC}"
-    echo "  1. .env file with GITHUB_TOKEN, HEIMDALLR_AI_PRIMARY, HEIMDALLR_REPOSITORIES"
+    echo "  1. .env file with GITHUB_TOKEN, HEIMDALLM_AI_PRIMARY, HEIMDALLM_REPOSITORIES"
     echo "  2. AI CLI authentication:"
     echo "     - Gemini: GEMINI_API_KEY in .env, or mount ~/.gemini in docker-compose.test.yml"
     echo "     - Claude: ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN in .env"
@@ -427,14 +427,14 @@ test_e2e() {
     echo "  curl -N ${BASE_URL}/events"
     echo ""
     echo "  # Trigger manual review (replace <id> with PR ID from /prs)"
-    echo "  curl -X POST ${BASE_URL}/prs/<id>/review -H 'X-Heimdallr-Token: ${api_token}'"
+    echo "  curl -X POST ${BASE_URL}/prs/<id>/review -H 'X-Heimdallm-Token: ${api_token}'"
     echo ""
     echo "  # Dismiss / undismiss a PR"
-    echo "  curl -X POST ${BASE_URL}/prs/<id>/dismiss -H 'X-Heimdallr-Token: ${api_token}'"
-    echo "  curl -X POST ${BASE_URL}/prs/<id>/undismiss -H 'X-Heimdallr-Token: ${api_token}'"
+    echo "  curl -X POST ${BASE_URL}/prs/<id>/dismiss -H 'X-Heimdallm-Token: ${api_token}'"
+    echo "  curl -X POST ${BASE_URL}/prs/<id>/undismiss -H 'X-Heimdallm-Token: ${api_token}'"
     echo ""
     echo "  # Reload config"
-    echo "  curl -X POST ${BASE_URL}/reload -H 'X-Heimdallr-Token: ${api_token}'"
+    echo "  curl -X POST ${BASE_URL}/reload -H 'X-Heimdallm-Token: ${api_token}'"
     echo ""
     echo -e "${BOLD}Follow logs:${NC}"
     echo "  $COMPOSE_TEST logs -f"

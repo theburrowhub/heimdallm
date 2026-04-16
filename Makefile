@@ -1,12 +1,12 @@
 # ── Platform detection ─────────────────────────────────────────────────────────
 OS := $(shell uname -s)
 
-DAEMON_BIN  := $(shell pwd)/daemon/bin/heimdallr
+DAEMON_BIN  := $(shell pwd)/daemon/bin/heimdallm
 
 ifeq ($(OS),Darwin)
   FLUTTER_DEVICE   := macos
   FLUTTER_BUILD    := flutter_app/build/macos/Build/Products
-  APP_BUNDLE       := $(FLUTTER_BUILD)/Release/Heimdallr.app
+  APP_BUNDLE       := $(FLUTTER_BUILD)/Release/Heimdallm.app
   # Detect local Developer ID Application certificate automatically
   SIGNING_IDENTITY ?= $(shell security find-identity -v -p codesigning 2>/dev/null \
 	| grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)".*/\1/')
@@ -40,8 +40,8 @@ test:
 # make dev-stop    — stop the running daemon
 
 dev: build-daemon dev-stop
-	@echo "▶  Lanzando Heimdallr..."
-	cd flutter_app && HEIMDALLR_DAEMON_PATH=$(DAEMON_BIN) flutter run -d $(FLUTTER_DEVICE)
+	@echo "▶  Lanzando Heimdallm..."
+	cd flutter_app && HEIMDALLM_DAEMON_PATH=$(DAEMON_BIN) flutter run -d $(FLUTTER_DEVICE)
 
 dev-daemon: build-daemon dev-stop
 	@echo "▶  Daemon en http://localhost:7842 (Ctrl-C para parar)"
@@ -49,7 +49,7 @@ dev-daemon: build-daemon dev-stop
 
 dev-stop:
 	@pkill -f "$(DAEMON_BIN)" 2>/dev/null && echo "↓  Daemon parado" || true
-	@UI_PID_FILE="$$HOME/.local/share/heimdallr/ui.pid"; \
+	@UI_PID_FILE="$$HOME/.local/share/heimdallm/ui.pid"; \
 	 if [ -f "$$UI_PID_FILE" ]; then \
 	   UI_PID=$$(cat "$$UI_PID_FILE"); \
 	   kill "$$UI_PID" 2>/dev/null && echo "↓  UI parada (PID $$UI_PID)" || true; \
@@ -69,7 +69,7 @@ dev-stop:
 #   - Apple Developer Program membership
 #   - Developer ID Application certificate installed in Keychain
 #   - App-specific password stored in Keychain:
-#       xcrun notarytool store-credentials "heimdallr-notary" \
+#       xcrun notarytool store-credentials "heimdallm-notary" \
 #         --apple-id YOUR@EMAIL.COM --team-id TEAMID --password APP_SPECIFIC_PWD
 #   - gh CLI authenticated: gh auth login
 
@@ -84,7 +84,7 @@ VERSION ?= $(shell \
 release-local: _check-macos _check-signing _check-gh build-daemon
 	@echo ""
 	@echo "╔══════════════════════════════════════════════╗"
-	@echo "║  Heimdallr local release                     ║"
+	@echo "║  Heimdallm local release                     ║"
 	@echo "╠══════════════════════════════════════════════╣"
 	@echo "║  Version  : $(VERSION)"
 	@echo "║  Identity : $(SIGNING_IDENTITY)"
@@ -124,22 +124,22 @@ release-local: _check-macos _check-signing _check-gh build-daemon
 	@command -v create-dmg >/dev/null || (echo "Installing create-dmg..."; brew install create-dmg)
 	mkdir -p dist
 	$(eval DMG_ARGS := \
-	  --volname "Heimdallr $(VERSION)" \
+	  --volname "Heimdallm $(VERSION)" \
 	  --window-pos 200 120 --window-size 660 400 \
 	  --icon-size 128 \
-	  --icon "Heimdallr.app" 165 185 \
-	  --hide-extension "Heimdallr.app" \
+	  --icon "Heimdallm.app" 165 185 \
+	  --hide-extension "Heimdallm.app" \
 	  --app-drop-link 495 185)
 	$(if $(wildcard assets/dmg-background.png), \
 	  $(eval DMG_ARGS := --background assets/dmg-background.png $(DMG_ARGS)))
-	create-dmg $(DMG_ARGS) "dist/Heimdallr-$(VERSION).dmg" "$(APP_BUNDLE)"
+	create-dmg $(DMG_ARGS) "dist/Heimdallm-$(VERSION).dmg" "$(APP_BUNDLE)"
 
 	# ── 6. Notarize DMG ───────────────────────────────────────────────────────
 	@echo "▶  Submitting for notarization (this takes a few minutes)..."
-	xcrun notarytool submit "dist/Heimdallr-$(VERSION).dmg" \
-	  --keychain-profile "heimdallr-notary" \
+	xcrun notarytool submit "dist/Heimdallm-$(VERSION).dmg" \
+	  --keychain-profile "heimdallm-notary" \
 	  --wait
-	xcrun stapler staple "dist/Heimdallr-$(VERSION).dmg"
+	xcrun stapler staple "dist/Heimdallm-$(VERSION).dmg"
 	@echo "✓  Notarization complete"
 
 	# ── 7. Create git tag ─────────────────────────────────────────────────────
@@ -150,12 +150,12 @@ release-local: _check-macos _check-signing _check-gh build-daemon
 	# ── 8. Publish GitHub release ─────────────────────────────────────────────
 	@echo "▶  Publishing GitHub release..."
 	gh release create "$(VERSION)" \
-	  "dist/Heimdallr-$(VERSION).dmg" \
-	  --title "Heimdallr $(VERSION)" \
+	  "dist/Heimdallm-$(VERSION).dmg" \
+	  --title "Heimdallm $(VERSION)" \
 	  --generate-notes \
 	  --verify-tag
 	@echo ""
-	@echo "✅  Released Heimdallr $(VERSION)"
+	@echo "✅  Released Heimdallm $(VERSION)"
 	@echo "    https://github.com/$$(gh repo view --json nameWithOwner -q .nameWithOwner)/releases/tag/$(VERSION)"
 
 # ── Guards ────────────────────────────────────────────────────────────────────
@@ -197,10 +197,10 @@ package-macos: _check-macos build-daemon build-app
 	codesign --force --deep --sign - "$(APP_BUNDLE)"
 	mkdir -p dist
 	hdiutil create \
-	  -volname "Heimdallr" \
+	  -volname "Heimdallm" \
 	  -srcfolder "$(APP_BUNDLE)" \
 	  -ov -format UDZO \
-	  "dist/Heimdallr.dmg"
+	  "dist/Heimdallm.dmg"
 
 # ── Docker-based Linux build verification ─────────────────────────────────────
 #
@@ -216,7 +216,7 @@ package-macos: _check-macos build-daemon build-app
 verify-linux:
 	@command -v docker >/dev/null || { echo "❌  Docker is required. Install it from https://docs.docker.com/get-docker/"; exit 1; }
 	@echo "▶  Building Linux verification image (this may take a few minutes on first run)..."
-	docker build -f Dockerfile.linux-verify -t heimdallr-verify .
+	docker build -f Dockerfile.linux-verify -t heimdallm-verify .
 	@echo ""
 	@echo "✅  Linux build verification passed"
 

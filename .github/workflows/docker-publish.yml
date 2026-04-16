@@ -24,6 +24,6 @@ jobs:
           context: .
           push: false
           load: true
-          tags: heimdallr-docker:test
+          tags: heimdallm:test
           cache-from: type=gha
           cache-to: type=gha,mode=max

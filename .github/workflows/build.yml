@@ -2,6 +2,12 @@ name: Build & Release
 
 # Only triggered by version tags — never by branch pushes.
 # To create a release, use the "Tag release" workflow (tag.yml).
+#
+# NOTE: release-please (release.yml) also creates version tags. If both
+# tag.yml and release-please are active, this workflow may fire twice for
+# the same version. To prevent that, either disable tag.yml or add:
+#   if: "!contains(github.event.head_commit.message, 'chore(main): release')"
+# to each job below.
 on:
   push:
     tags: ['v[0-9]+.[0-9]+.[0-9]+']
@@ -15,7 +21,7 @@ permissions:
 
 jobs:
   build-linux:
-    name: Build Heimdallr Linux packages (.deb / .rpm / .AppImage)
+    name: Build Heimdallm Linux packages (.deb / .rpm / .AppImage)
     runs-on: ubuntu-22.04
 
     steps:
@@ -86,51 +92,51 @@ jobs:
             echo "❌ Bundle not found at $BUNDLE"
             exit 1
           fi
-          if [ ! -f "daemon/bin/heimdallr" ]; then
-            echo "❌ daemon/bin/heimdallr not found"
+          if [ ! -f "daemon/bin/heimdallm" ]; then
+            echo "❌ daemon/bin/heimdallm not found"
             exit 1
           fi
 
           # Embed daemon binary
-          cp "daemon/bin/heimdallr" "$BUNDLE/heimdalld"
-          chmod +x "$BUNDLE/heimdallr" "$BUNDLE/heimdalld"
+          cp "daemon/bin/heimdallm" "$BUNDLE/heimdalld"
+          chmod +x "$BUNDLE/heimdallm" "$BUNDLE/heimdalld"
 
           echo "Bundle contents:"
           ls -lh "$BUNDLE"
 
           # Build staging tree: mirrors installed filesystem
           STAGING="staging"
-          OPT="$STAGING/opt/heimdallr"
+          OPT="$STAGING/opt/heimdallm"
           mkdir -p "$OPT"
           mkdir -p "$STAGING/usr/bin"
           mkdir -p "$STAGING/usr/share/applications"
           mkdir -p dist
 
           cp -r "$BUNDLE/." "$OPT/"
-          chmod +x "$OPT/heimdallr" "$OPT/heimdalld"
+          chmod +x "$OPT/heimdallm" "$OPT/heimdalld"
 
-          # /usr/bin/heimdallr → /opt/heimdallr/heimdallr
-          ln -s /opt/heimdallr/heimdallr "$STAGING/usr/bin/heimdallr"
+          # /usr/bin/heimdallm → /opt/heimdallm/heimdallm
+          ln -s /opt/heimdallm/heimdallm "$STAGING/usr/bin/heimdallm"
 
           # Icons – install pre-generated sizes for proper taskbar/dock rendering
           for SIZE in 48 128 256 512; do
             ICON_DIR="$STAGING/usr/share/icons/hicolor/${SIZE}x${SIZE}/apps"
             mkdir -p "$ICON_DIR"
-            cp "flutter_app/assets/icons/${SIZE}.png" "$ICON_DIR/heimdallr.png"
+            cp "flutter_app/assets/icons/${SIZE}.png" "$ICON_DIR/heimdallm.png"
           done
 
           # Desktop entry – filename must match APPLICATION_ID for GNOME taskbar mapping
           printf '%s\n' \
             '[Desktop Entry]' \
-            'Name=Heimdallr' \
+            'Name=Heimdallm' \
             'Comment=AI-powered GitHub PR review agent' \
-            'Exec=/opt/heimdallr/heimdallr' \
-            'Icon=heimdallr' \
+            'Exec=/opt/heimdallm/heimdallm' \
+            'Icon=heimdallm' \
             'Type=Application' \
             'Categories=Development;' \
-            'StartupWMClass=com.theburrowhub.heimdallr' \
+            'StartupWMClass=com.theburrowhub.heimdallm' \
             'StartupNotify=true' \
-            > "$STAGING/usr/share/applications/com.theburrowhub.heimdallr.desktop"
+            > "$STAGING/usr/share/applications/com.theburrowhub.heimdallm.desktop"
 
           echo "BUNDLE=$BUNDLE"   >> "$GITHUB_ENV"
           echo "STAGING=$STAGING" >> "$GITHUB_ENV"
@@ -143,20 +149,20 @@ jobs:
           fpm \
             -s dir \
             -t deb \
-            -n heimdallr \
+            -n heimdallm \
             -v "$VERSION" \
             --architecture amd64 \
             --description "AI-powered GitHub PR review agent" \
-            --url "https://github.com/theburrowhub/heimdallr" \
+            --url "https://github.com/theburrowhub/heimdallm" \
             --depends "libgtk-3-0" \
             --depends "libayatana-appindicator3-1" \
             --depends "libnotify4" \
             --depends "libsecret-1-0" \
-            --package "dist/heimdallr_${VERSION}_amd64.deb" \
+            --package "dist/heimdallm_${VERSION}_amd64.deb" \
             -C "$STAGING" \
             .
-          ls -lh "dist/heimdallr_${VERSION}_amd64.deb"
-          echo "DEB_PATH=dist/heimdallr_${VERSION}_amd64.deb" >> "$GITHUB_ENV"
+          ls -lh "dist/heimdallm_${VERSION}_amd64.deb"
+          echo "DEB_PATH=dist/heimdallm_${VERSION}_amd64.deb" >> "$GITHUB_ENV"
 
       # ── .rpm (Fedora / RHEL / openSUSE) ──────────────────────────────────────
       - name: Build .rpm package
@@ -164,19 +170,19 @@ jobs:
           fpm \
             -s dir \
             -t rpm \
-            -n heimdallr \
+            -n heimdallm \
             -v "$VERSION" \
             --architecture x86_64 \
             --description "AI-powered GitHub PR review agent" \
-            --url "https://github.com/theburrowhub/heimdallr" \
+            --url "https://github.com/theburrowhub/heimdallm" \
             --depends "gtk3" \
             --depends "libnotify" \
             --depends "libsecret" \
-            --package "dist/heimdallr-${VERSION}-1.x86_64.rpm" \
+            --package "dist/heimdallm-${VERSION}-1.x86_64.rpm" \
             -C "$STAGING" \
             .
-          ls -lh "dist/heimdallr-${VERSION}-1.x86_64.rpm"
-          echo "RPM_PATH=dist/heimdallr-${VERSION}-1.x86_64.rpm" >> "$GITHUB_ENV"
+          ls -lh "dist/heimdallm-${VERSION}-1.x86_64.rpm"
+          echo "RPM_PATH=dist/heimdallm-${VERSION}-1.x86_64.rpm" >> "$GITHUB_ENV"
 
       # ── .AppImage (universal — Arch, NixOS, and any other distro) ────────────
       - name: Build AppImage
@@ -192,27 +198,27 @@ jobs:
             '#!/bin/bash' \
             'SELF="$(readlink -f "$0")"' \
             'HERE="${SELF%/*}"' \
-            'exec "$HERE/heimdallr" "$@"' \
+            'exec "$HERE/heimdallm" "$@"' \
             > "$APPDIR/AppRun"
           chmod +x "$APPDIR/AppRun"
 
           # Desktop entry (AppImage spec: Exec= is just the binary name)
           # Note: AppImage .desktop filename must match the icon basename, so we
-          # keep 'heimdallr.desktop' here (not the reverse-DNS used for system installs).
+          # keep 'heimdallm.desktop' here (not the reverse-DNS used for system installs).
           printf '%s\n' \
             '[Desktop Entry]' \
-            'Name=Heimdallr' \
+            'Name=Heimdallm' \
             'Comment=AI-powered GitHub PR review agent' \
-            'Exec=heimdallr' \
-            'Icon=heimdallr' \
+            'Exec=heimdallm' \
+            'Icon=heimdallm' \
             'Type=Application' \
             'Categories=Development;' \
-            'StartupWMClass=com.theburrowhub.heimdallr' \
+            'StartupWMClass=com.theburrowhub.heimdallm' \
             'StartupNotify=true' \
-            > "$APPDIR/heimdallr.desktop"
+            > "$APPDIR/heimdallm.desktop"
 
           # Icon named after the desktop file (required by AppImage spec)
-          cp flutter_app/assets/icon.png "$APPDIR/heimdallr.png"
+          cp flutter_app/assets/icon.png "$APPDIR/heimdallm.png"
 
           # Download appimagetool
           wget -q \
@@ -222,23 +228,23 @@ jobs:
 
           # Build (APPIMAGE_EXTRACT_AND_RUN=1 avoids FUSE requirement in CI)
           APPIMAGE_EXTRACT_AND_RUN=1 ARCH=x86_64 \
-            ./appimagetool "$APPDIR" "dist/Heimdallr-${VERSION}-x86_64.AppImage"
+            ./appimagetool "$APPDIR" "dist/Heimdallm-${VERSION}-x86_64.AppImage"
 
-          ls -lh "dist/Heimdallr-${VERSION}-x86_64.AppImage"
-          echo "APPIMAGE_PATH=dist/Heimdallr-${VERSION}-x86_64.AppImage" >> "$GITHUB_ENV"
+          ls -lh "dist/Heimdallm-${VERSION}-x86_64.AppImage"
+          echo "APPIMAGE_PATH=dist/Heimdallm-${VERSION}-x86_64.AppImage" >> "$GITHUB_ENV"
 
       # ── Publish ──────────────────────────────────────────────────────────────
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Heimdallr-linux-${{ env.VERSION }}
+          name: Heimdallm-linux-${{ env.VERSION }}
           path: dist/
           retention-days: 90
 
       - name: Create/Update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: Heimdallr v${{ env.VERSION }}
+          name: Heimdallm v${{ env.VERSION }}
           tag_name: ${{ github.ref_name }}
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
@@ -251,7 +257,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build:
-    name: Build Heimdallr.dmg
+    name: Build Heimdallm.dmg
     runs-on: macos-14
 
     steps:
@@ -314,33 +320,33 @@ jobs:
           echo "✓ Found bundle: $APP"
 
           # Verify daemon binary was compiled
-          if [ ! -f "daemon/bin/heimdallr" ]; then
-            echo "❌ daemon/bin/heimdallr not found"
+          if [ ! -f "daemon/bin/heimdallm" ]; then
+            echo "❌ daemon/bin/heimdallm not found"
             exit 1
           fi
 
-          # Embed daemon as 'heimdalld' — MUST differ from Flutter's 'Heimdallr'
-          # because macOS APFS is case-insensitive: heimdallr == Heimdallr,
+          # Embed daemon as 'heimdalld' — MUST differ from Flutter's 'Heimdallm'
+          # because macOS APFS is case-insensitive: heimdallm == Heimdallm,
           # which would silently overwrite the Flutter binary with the daemon.
-          cp "daemon/bin/heimdallr" "$APP/Contents/MacOS/heimdalld"
+          cp "daemon/bin/heimdallm" "$APP/Contents/MacOS/heimdalld"
           chmod +x "$APP/Contents/MacOS/heimdalld"
 
           echo "Bundle contents after embedding:"
           ls -lh "$APP/Contents/MacOS/"
 
           # Verify both binaries are present and distinct
-          if [ ! -f "$APP/Contents/MacOS/Heimdallr" ]; then
-            echo "❌ Flutter binary Heimdallr missing"
+          if [ ! -f "$APP/Contents/MacOS/Heimdallm" ]; then
+            echo "❌ Flutter binary Heimdallm missing"
             exit 1
           fi
           if [ ! -f "$APP/Contents/MacOS/heimdalld" ]; then
             echo "❌ Daemon binary heimdalld missing"
             exit 1
           fi
-          FLUTTER_SIZE=$(stat -f%z "$APP/Contents/MacOS/Heimdallr")
+          FLUTTER_SIZE=$(stat -f%z "$APP/Contents/MacOS/Heimdallm")
           DAEMON_SIZE=$(stat -f%z "$APP/Contents/MacOS/heimdalld")
           if [ "$FLUTTER_SIZE" -eq "$DAEMON_SIZE" ] && \
-             cmp -s "$APP/Contents/MacOS/Heimdallr" "$APP/Contents/MacOS/heimdalld"; then
+             cmp -s "$APP/Contents/MacOS/Heimdallm" "$APP/Contents/MacOS/heimdalld"; then
             echo "❌ Both binaries are identical — case collision detected!"
             exit 1
           fi
@@ -381,16 +387,16 @@ jobs:
         run: |
           APP="${APP}"
           VERSION="${GITHUB_REF_NAME}"
-          DMG="dist/Heimdallr-${VERSION}.dmg"
+          DMG="dist/Heimdallm-${VERSION}.dmg"
           mkdir -p dist
 
           CREATE_DMG_ARGS=(
-            --volname "Heimdallr ${VERSION}"
+            --volname "Heimdallm ${VERSION}"
             --window-pos 200 120
             --window-size 660 400
             --icon-size 128
-            --icon "Heimdallr.app" 165 185
-            --hide-extension "Heimdallr.app"
+            --icon "Heimdallm.app" 165 185
+            --hide-extension "Heimdallm.app"
             --app-drop-link 495 185
           )
 
@@ -409,14 +415,14 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Heimdallr-${{ env.VERSION }}
+          name: Heimdallm-${{ env.VERSION }}
           path: ${{ env.DMG_PATH }}
           retention-days: 90
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: Heimdallr ${{ env.VERSION }}
+          name: Heimdallm ${{ env.VERSION }}
           tag_name: ${{ github.ref_name }}
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}

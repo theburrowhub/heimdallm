@@ -1,6 +1,6 @@
 # End-to-End Test Guide
 
-This guide walks you through verifying the full Heimdallr review pipeline: daemon detects a PR, invokes an AI CLI, and publishes a review on GitHub.
+This guide walks you through verifying the full Heimdallm review pipeline: daemon detects a PR, invokes an AI CLI, and publishes a review on GitHub.
 
 ## Prerequisites
 
@@ -8,17 +8,17 @@ This guide walks you through verifying the full Heimdallr review pipeline: daemo
 |---|---|
 | **GitHub Token** | A `GITHUB_TOKEN` with `repo` scope for a user/bot account |
 | **AI Authentication** | At least one: `GEMINI_API_KEY`, `ANTHROPIC_API_KEY` (or `CLAUDE_CODE_OAUTH_TOKEN`), or `OPENAI_API_KEY` |
-| **Monitored Repo** | A repo listed in `HEIMDALLR_REPOSITORIES` where the token user has write access |
+| **Monitored Repo** | A repo listed in `HEIMDALLM_REPOSITORIES` where the token user has write access |
 | **Open PR** | The token user must be **explicitly requested as a reviewer** on the PR |
 | **Collaborator** | GitHub does not allow requesting yourself as reviewer — another account must do it |
 
 ## PR Selection Logic
 
-Heimdallr only reviews PRs matching ALL of these conditions:
+Heimdallm only reviews PRs matching ALL of these conditions:
 
 ```
 GitHub Search: is:pr is:open review-requested:<token-user>
-  → repo in HEIMDALLR_REPOSITORIES?
+  → repo in HEIMDALLM_REPOSITORIES?
   → not dismissed in local DB?
   → not already reviewed (or PR updated since last review + 30s)?
   → not already in-flight?
@@ -37,9 +37,9 @@ Edit `.env`:
 
 ```env
 GITHUB_TOKEN=ghp_your_real_token
-HEIMDALLR_AI_PRIMARY=gemini
-HEIMDALLR_REPOSITORIES=yourorg/yourrepo
-HEIMDALLR_POLL_INTERVAL=1m
+HEIMDALLM_AI_PRIMARY=gemini
+HEIMDALLM_REPOSITORIES=yourorg/yourrepo
+HEIMDALLM_POLL_INTERVAL=1m
 
 # Pick one (or more) AI API keys:
 GEMINI_API_KEY=your_gemini_key
@@ -53,11 +53,11 @@ GEMINI_API_KEY=your_gemini_key
 In one of your monitored repos:
 
 ```bash
-git checkout -b test/heimdallr-e2e
+git checkout -b test/heimdallm-e2e
 echo "// test change" >> some_file.go
-git add . && git commit -m "test: heimdallr e2e verification"
-git push -u origin test/heimdallr-e2e
-gh pr create --title "test: Heimdallr E2E verification" --body "This PR is for testing Heimdallr automated reviews. Will be closed after verification."
+git add . && git commit -m "test: heimdallm e2e verification"
+git push -u origin test/heimdallm-e2e
+gh pr create --title "test: Heimdallm E2E verification" --body "This PR is for testing Heimdallm automated reviews. Will be closed after verification."
 ```
 
 ### 3. Request Review
@@ -134,19 +134,19 @@ Check the PR on GitHub — you should see a review comment from the token user w
 Read the API token from the container:
 
 ```bash
-API_TOKEN=$(docker compose -f docker-compose.yml -f docker-compose.test.yml exec heimdallr cat /data/api_token)
+API_TOKEN=$(docker compose -f docker-compose.yml -f docker-compose.test.yml exec heimdallm cat /data/api_token)
 
 # Get PR ID from /prs
 PR_ID=$(curl -s $BASE/prs | jq '.[0].id')
 
 # Trigger manual review
-curl -X POST $BASE/prs/$PR_ID/review -H "X-Heimdallr-Token: $API_TOKEN"
+curl -X POST $BASE/prs/$PR_ID/review -H "X-Heimdallm-Token: $API_TOKEN"
 
 # Dismiss a PR (stop auto-reviewing)
-curl -X POST $BASE/prs/$PR_ID/dismiss -H "X-Heimdallr-Token: $API_TOKEN"
+curl -X POST $BASE/prs/$PR_ID/dismiss -H "X-Heimdallm-Token: $API_TOKEN"
 
 # Undismiss (re-enable auto-reviewing)
-curl -X POST $BASE/prs/$PR_ID/undismiss -H "X-Heimdallr-Token: $API_TOKEN"
+curl -X POST $BASE/prs/$PR_ID/undismiss -H "X-Heimdallm-Token: $API_TOKEN"
 ```
 
 ### 9. Clean Up
@@ -175,7 +175,7 @@ If you've already authenticated `gemini` on your host:
 2. Uncomment in `docker-compose.test.yml`:
    ```yaml
    volumes:
-     - ~/.gemini:/home/heimdallr/.gemini:ro
+     - ~/.gemini:/home/heimdallm/.gemini:ro
    ```
 
 ### Option C: Vertex AI + Service Account

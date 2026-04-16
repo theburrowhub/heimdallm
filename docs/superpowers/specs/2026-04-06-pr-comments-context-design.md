@@ -5,7 +5,7 @@
 
 ## Problem
 
-Heimdallr reviews PRs using only the diff, title, and author. It ignores existing comments from other reviewers and the PR author, which often contain critical context: questions, clarifications, decisions already made, and prior feedback. This leads to redundant or uninformed reviews.
+Heimdallm reviews PRs using only the diff, title, and author. It ignores existing comments from other reviewers and the PR author, which often contain critical context: questions, clarifications, decisions already made, and prior feedback. This leads to redundant or uninformed reviews.
 
 ## Goal
 

@@ -1,4 +1,4 @@
-# ─── Stage 1: Build Heimdallr daemon ──────────────────────────────────────────
+# ─── Stage 1: Build Heimdallm daemon ──────────────────────────────────────────
 FROM golang:1.21-alpine AS builder
 
 RUN apk add --no-cache git
@@ -8,7 +8,7 @@ COPY daemon/go.mod daemon/go.sum ./
 RUN go mod download
 
 COPY daemon/ .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /heimdallr ./cmd/heimdallr
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /heimdallm ./cmd/heimdallm
 
 # ─── Stage 2: Runtime with AI CLIs ───────────────────────────────────────────
 FROM node:20-alpine
@@ -37,27 +37,27 @@ RUN npm install -g opencode-ai opencode-linux-x64-musl 2>/dev/null || true \
 RUN npm cache clean --force 2>/dev/null || true
 
 # ── Create non-root user ─────────────────────────────────────────────────────
-RUN addgroup -S heimdallr && adduser -S heimdallr -G heimdallr
+RUN addgroup -S heimdallm && adduser -S heimdallm -G heimdallm
 
 # ── Create directories ───────────────────────────────────────────────────────
-# Heimdallr dirs
-RUN mkdir -p /config /data && chown -R heimdallr:heimdallr /config /data
+# Heimdallm dirs
+RUN mkdir -p /config /data && chown -R heimdallm:heimdallm /config /data
 
 # AI CLI config/cache directories (must be writable by the runtime user)
-RUN mkdir -p /home/heimdallr/.claude \
-             /home/heimdallr/.gemini \
-             /home/heimdallr/.codex \
-             /home/heimdallr/.config/opencode \
-             /home/heimdallr/.local/share/opencode \
-    && chown -R heimdallr:heimdallr /home/heimdallr
+RUN mkdir -p /home/heimdallm/.claude \
+             /home/heimdallm/.gemini \
+             /home/heimdallm/.codex \
+             /home/heimdallm/.config/opencode \
+             /home/heimdallm/.local/share/opencode \
+    && chown -R heimdallm:heimdallm /home/heimdallm
 
-# ── Copy Heimdallr binary ────────────────────────────────────────────────────
-COPY --from=builder /heimdallr /usr/local/bin/heimdallr
+# ── Copy Heimdallm binary ────────────────────────────────────────────────────
+COPY --from=builder /heimdallm /usr/local/bin/heimdallm
 
 # ── Default environment ──────────────────────────────────────────────────────
-ENV HEIMDALLR_DATA_DIR=/data
-ENV HEIMDALLR_CONFIG_PATH=/config/config.toml
-ENV HEIMDALLR_BIND_ADDR=0.0.0.0
+ENV HEIMDALLM_DATA_DIR=/data
+ENV HEIMDALLM_CONFIG_PATH=/config/config.toml
+ENV HEIMDALLM_BIND_ADDR=0.0.0.0
 # Ensure npm global binaries are in PATH
 ENV PATH="/usr/local/lib/node_modules/.bin:${PATH}"
 # Disable interactive prompts / auto-updates in AI CLIs
@@ -68,10 +68,10 @@ EXPOSE 7842
 
 VOLUME ["/data", "/config"]
 
-USER heimdallr
-WORKDIR /home/heimdallr
+USER heimdallm
+WORKDIR /home/heimdallm
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD wget -qO- http://localhost:7842/health || exit 1
 
-ENTRYPOINT ["/usr/local/bin/heimdallr"]
+ENTRYPOINT ["/usr/local/bin/heimdallm"]
