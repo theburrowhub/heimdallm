@@ -93,9 +93,10 @@ func (e *Executor) Detect(primary, fallback string) (string, error) {
 // Any value not in this set is rejected before reaching resolveCLIPath,
 // preventing shell injection via a crafted ai.primary / ai.fallback config value.
 var allowedCLIs = map[string]struct{}{
-	"claude": {},
-	"gemini": {},
-	"codex":  {},
+	"claude":   {},
+	"gemini":   {},
+	"codex":    {},
+	"opencode": {},
 }
 
 // allowedPermissionModes is the strict allowlist for the --permission-mode flag.
@@ -193,7 +194,7 @@ func ValidateExtraFlags(flags string) error {
 // shell command (e.g. resolveCLIPath).
 func ValidateCLIName(name string) error {
 	if _, ok := allowedCLIs[name]; !ok {
-		return fmt.Errorf("executor: unknown CLI %q — must be one of: claude, gemini, codex", name)
+		return fmt.Errorf("executor: unknown CLI %q — must be one of: claude, gemini, codex, opencode", name)
 	}
 	return nil
 }
