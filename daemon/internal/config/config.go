@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 	"github.com/heimdallr/daemon/internal/executor"
@@ -119,6 +121,46 @@ func (c *Config) applyDefaults() {
 	}
 }
 
+// applyEnvOverrides applies HEIMDALLR_* environment variable overrides.
+// Environment variables take precedence over values loaded from the TOML file.
+func (c *Config) applyEnvOverrides() {
+	if v := os.Getenv("HEIMDALLR_PORT"); v != "" {
+		if p, err := strconv.Atoi(v); err == nil {
+			c.Server.Port = p
+		}
+	}
+	if v := os.Getenv("HEIMDALLR_BIND_ADDR"); v != "" {
+		c.Server.BindAddr = v
+	}
+	if v := os.Getenv("HEIMDALLR_POLL_INTERVAL"); v != "" {
+		c.GitHub.PollInterval = v
+	}
+	if v := os.Getenv("HEIMDALLR_REPOSITORIES"); v != "" {
+		repos := strings.Split(v, ",")
+		cleaned := make([]string, 0, len(repos))
+		for _, r := range repos {
+			if s := strings.TrimSpace(r); s != "" {
+				cleaned = append(cleaned, s)
+			}
+		}
+		c.GitHub.Repositories = cleaned
+	}
+	if v := os.Getenv("HEIMDALLR_AI_PRIMARY"); v != "" {
+		c.AI.Primary = v
+	}
+	if v := os.Getenv("HEIMDALLR_AI_FALLBACK"); v != "" {
+		c.AI.Fallback = v
+	}
+	if v := os.Getenv("HEIMDALLR_REVIEW_MODE"); v != "" {
+		c.AI.ReviewMode = v
+	}
+	if v := os.Getenv("HEIMDALLR_RETENTION_DAYS"); v != "" {
+		if d, err := strconv.Atoi(v); err == nil {
+			c.Retention.MaxDays = d
+		}
+	}
+}
+
 // Validate checks that required fields are present and values are valid.
 func (c *Config) Validate() error {
 	if c.AI.Primary == "" {
@@ -150,6 +192,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config: parse %s: %w", path, err)
 	}
 	cfg.applyDefaults()
+	cfg.applyEnvOverrides()
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
