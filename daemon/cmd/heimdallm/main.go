@@ -51,7 +51,7 @@ func main() {
 	cfgPath := configPath()
 	var cfg *config.Config
 	var err error
-	if os.Getenv("CI") == "true" || os.Getenv("HEIMDALLM_DATA_DIR") != "" {
+	if os.Getenv("HEIMDALLM_DATA_DIR") != "" {
 		cfg, err = config.LoadOrCreate(cfgPath)
 	} else {
 		cfg, err = config.Load(cfgPath)
