@@ -22,7 +22,7 @@ GoRouter get appRouter => _appRouter;
 /// and returns false so this new process can exit cleanly.
 Future<bool> _ensureSingleInstance() async {
   final home = Platform.environment['HOME'] ?? '';
-  final dir  = Directory('$home/.local/share/heimdallr');
+  final dir  = Directory('$home/.local/share/heimdallm');
   await dir.create(recursive: true);
   final pidFile = File('${dir.path}/ui.pid');
 
@@ -33,7 +33,7 @@ Future<bool> _ensureSingleInstance() async {
       final check = await Process.run('kill', ['-0', '$existing']);
       if (check.exitCode == 0) {
         // Another instance is running — signal it to show its window, then exit.
-        debugPrint('Another Heimdallr instance is running (PID $existing), signalling it.');
+        debugPrint('Another Heimdallm instance is running (PID $existing), signalling it.');
         await Process.run('kill', ['-USR1', '$existing']);
         return false;
       }
@@ -87,7 +87,7 @@ void main() async {
   }
 
   try {
-    await localNotifier.setup(appName: 'Heimdallr');
+    await localNotifier.setup(appName: 'Heimdallm');
   } catch (e) {
     debugPrint('local_notifier init failed: $e');
   }
@@ -101,7 +101,7 @@ Future<void> _setupWindow() async {
   const options = WindowOptions(
     size: Size(1200, 720),
     minimumSize: Size(900, 520),
-    title: 'Heimdallr',
+    title: 'Heimdallm',
     titleBarStyle: TitleBarStyle.normal,
   );
 
@@ -110,7 +110,7 @@ Future<void> _setupWindow() async {
   // the callback as a belt-and-suspenders measure.
   await windowManager.setSize(const Size(1200, 720));
   await windowManager.setMinimumSize(const Size(900, 520));
-  await windowManager.setTitle('Heimdallr');
+  await windowManager.setTitle('Heimdallm');
   await windowManager.show();
   await windowManager.focus();
 
@@ -127,7 +127,7 @@ Future<void> _setupTray() async {
   );
   // Initial minimal menu until data loads
   await trayManager.setContextMenu(Menu(items: [
-    MenuItem(key: 'open', label: 'Open Heimdallr'),
+    MenuItem(key: 'open', label: 'Open Heimdallm'),
     MenuItem.separator(),
     MenuItem(key: 'quit', label: 'Quit'),
   ]));
@@ -234,17 +234,17 @@ class _BootstrapAppState extends State<_BootstrapApp> with WindowListener {
     if (binaryPath == null) {
       _setError(
         title: 'Daemon binary not found',
-        details: 'Heimdallr could not locate its background service.\n'
+        details: 'Heimdallm could not locate its background service.\n'
             'This usually means the installation is incomplete.',
         hint: 'If you installed from a DMG, open Terminal and run:\n'
-            'xattr -cr /Applications/Heimdallr.app\n'
+            'xattr -cr /Applications/Heimdallm.app\n'
             'then relaunch the app.',
       );
       return;
     }
 
     // ── 5. Launch daemon ──────────────────────────────────────────────────
-    _setStatus('Starting Heimdallr…');
+    _setStatus('Starting Heimdallm…');
     try {
       // Use detached mode so the daemon process outlives the Flutter process.
       // This ensures reviews in progress survive window hides and dev restarts.
@@ -253,14 +253,14 @@ class _BootstrapAppState extends State<_BootstrapApp> with WindowListener {
       _setError(
         title: 'Could not start daemon',
         details: e.toString(),
-        hint: 'Check that Heimdallr has permission to run sub-processes.\n'
-            'Try: xattr -cr /Applications/Heimdallr.app',
+        hint: 'Check that Heimdallm has permission to run sub-processes.\n'
+            'Try: xattr -cr /Applications/Heimdallm.app',
       );
       return;
     }
 
     // ── 6. Wait for daemon to become healthy ──────────────────────────────
-    _setStatus('Waiting for Heimdallr…');
+    _setStatus('Waiting for Heimdallm…');
     await _waitForHealth(api, retryBinary: binaryPath);
   }
 
@@ -279,9 +279,9 @@ class _BootstrapAppState extends State<_BootstrapApp> with WindowListener {
         if (daemonRestarts >= maxDaemonRestarts) {
           _setError(
             title: 'Daemon failed to start',
-            details: 'Heimdallr could not start after $maxDaemonRestarts attempts.',
+            details: 'Heimdallm could not start after $maxDaemonRestarts attempts.',
             hint: 'Try restarting the app. If the problem persists, check your installation:\n'
-                'xattr -cr /Applications/Heimdallr.app',
+                'xattr -cr /Applications/Heimdallm.app',
           );
           return;
         }
@@ -316,7 +316,7 @@ class _BootstrapAppState extends State<_BootstrapApp> with WindowListener {
   @override
   Widget build(BuildContext context) {
     if (_destination != null) {
-      return HeimdallrApp(router: widget.appRouter, initialLocation: _destination!);
+      return HeimdallmApp(router: widget.appRouter, initialLocation: _destination!);
     }
     if (_errorTitle != null) {
       return _ErrorApp(
@@ -360,7 +360,7 @@ class _SplashApp extends StatelessWidget {
               Image.asset('assets/icon.png', width: 96, height: 96,
                   errorBuilder: (_, __, ___) => const Icon(Icons.shield, size: 96)),
               const SizedBox(height: 24),
-              const Text('Heimdallr',
+              const Text('Heimdallm',
                   style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold)),
               const SizedBox(height: 20),
               const SizedBox(
@@ -466,15 +466,15 @@ class _ErrorApp extends StatelessWidget {
   }
 }
 
-class HeimdallrApp extends StatelessWidget {
+class HeimdallmApp extends StatelessWidget {
   final String initialLocation;
   final GoRouter? router;
-  const HeimdallrApp({super.key, this.initialLocation = '/', this.router});
+  const HeimdallmApp({super.key, this.initialLocation = '/', this.router});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp.router(
-      title: 'Heimdallr',
+      title: 'Heimdallm',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF0969DA)),

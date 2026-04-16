@@ -57,7 +57,7 @@ class ConfigNotifier extends AsyncNotifier<AppConfig> {
       // Invalidate the cached token so the ApiClient re-reads it on the next request.
       ref.read(apiClientProvider).clearTokenCache();
 
-      // 2. Write config to ~/.config/heimdallr/config.toml
+      // 2. Write config to ~/.config/heimdallm/config.toml
       await FirstRunSetup.writeConfig(config);
 
       // 3. Launch daemon
@@ -72,7 +72,7 @@ class ConfigNotifier extends AsyncNotifier<AppConfig> {
 
       if (!await api.checkHealth()) {
         throw Exception(
-          'Heimdallr could not start. Check the app installation.',
+          'Heimdallm could not start. Check the app installation.',
         );
       }
 

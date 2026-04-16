@@ -89,7 +89,7 @@ func (e *Executor) Detect(primary, fallback string) (string, error) {
 	return "", fmt.Errorf("executor: no AI CLI available (tried %q, %q)", primary, fallback)
 }
 
-// allowedCLIs is the strict allowlist of AI CLI names Heimdallr supports.
+// allowedCLIs is the strict allowlist of AI CLI names Heimdallm supports.
 // Any value not in this set is rejected before reaching resolveCLIPath,
 // preventing shell injection via a crafted ai.primary / ai.fallback config value.
 var allowedCLIs = map[string]struct{}{
@@ -100,7 +100,7 @@ var allowedCLIs = map[string]struct{}{
 
 // allowedPermissionModes is the strict allowlist for the --permission-mode flag.
 // "bypassPermissions" is intentionally excluded — it grants unrestricted filesystem
-// access and must never be passed to the claude CLI from Heimdallr config.
+// access and must never be passed to the claude CLI from Heimdallm config.
 var allowedPermissionModes = map[string]struct{}{
 	"default":     {},
 	"auto":        {},
@@ -249,7 +249,7 @@ var dangerousSegments = []string{
 	"/.ssh",            // SSH private keys, host keys, authorized_keys
 	"/.gnupg",          // GPG keys, trust database
 	"/.aws",            // AWS access keys, credentials files
-	"/.config/heimdallr", // Heimdallr daemon config (auth tokens, etc)
+	"/.config/heimdallm", // Heimdallm daemon config (auth tokens, etc)
 	"/.kube",           // Kubernetes credentials (service account tokens, certs)
 	"/.docker",         // Docker registry auth (config.json with credentials)
 	"/.netrc",          // FTP/HTTP plaintext credentials

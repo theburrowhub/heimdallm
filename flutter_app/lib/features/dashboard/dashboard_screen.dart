@@ -19,7 +19,7 @@ class DashboardScreen extends ConsumerWidget {
       length: 5,
       child: Scaffold(
         appBar: AppBar(
-          title: const Text('Heimdallr'),
+          title: const Text('Heimdallm'),
           actions: [
             IconButton(
               icon: const Icon(Icons.article_outlined),
@@ -184,7 +184,7 @@ class _ReviewsTabState extends ConsumerState<_ReviewsTab> {
         children: [
           const Icon(Icons.wifi_off, size: 48, color: Colors.grey),
           const SizedBox(height: 12),
-          const Text('Could not reach the Heimdallr daemon.',
+          const Text('Could not reach the Heimdallm daemon.',
               style: TextStyle(fontWeight: FontWeight.w600)),
           const SizedBox(height: 4),
           const Text('Go to Settings to configure and start it.',

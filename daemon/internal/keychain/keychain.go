@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-const service = "heimdallr"
+const service = "heimdallm"
 const account = "github-token"
 
 // Get retrieves the GitHub token from macOS Keychain.

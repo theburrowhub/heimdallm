@@ -1,4 +1,4 @@
-module github.com/heimdallr/daemon
+module github.com/heimdallm/daemon
 
 go 1.21
 

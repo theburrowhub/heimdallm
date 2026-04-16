@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/heimdallr/daemon/internal/config"
+	"github.com/heimdallm/daemon/internal/config"
 )
 
 func TestLoad_Defaults(t *testing.T) {

@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:heimdallr/shared/widgets/severity_badge.dart';
+import 'package:heimdallm/shared/widgets/severity_badge.dart';
 
 void main() {
   testWidgets('SeverityBadge shows correct color for high', (tester) async {

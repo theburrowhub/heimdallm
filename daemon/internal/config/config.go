@@ -5,7 +5,7 @@ import (
 	"os"
 
 	"github.com/BurntSushi/toml"
-	"github.com/heimdallr/daemon/internal/executor"
+	"github.com/heimdallm/daemon/internal/executor"
 )
 
 var validIntervals = map[string]bool{
@@ -152,8 +152,8 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// DefaultPath returns ~/.config/heimdallr/config.toml
+// DefaultPath returns ~/.config/heimdallm/config.toml
 func DefaultPath() string {
 	home, _ := os.UserHomeDir()
-	return home + "/.config/heimdallr/config.toml"
+	return home + "/.config/heimdallm/config.toml"
 }

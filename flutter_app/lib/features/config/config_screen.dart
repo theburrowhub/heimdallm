@@ -390,7 +390,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
             ? const SizedBox(width: 16, height: 16,
                 child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
             : const Icon(Icons.rocket_launch),
-        label: Text(isLoading ? 'Starting…' : 'Save and start Heimdallr'),
+        label: Text(isLoading ? 'Starting…' : 'Save and start Heimdallm'),
         onPressed: isLoading ? null : () async {
           final updated = _buildConfig(base);
           final token = _tokenController.text.trim();
@@ -440,7 +440,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
         Icon(Icons.info_outline, color: Colors.orange.shade700),
         const SizedBox(width: 8),
         const Expanded(
-          child: Text('Heimdallr is not running. Configure and tap "Save and start".'),
+          child: Text('Heimdallm is not running. Configure and tap "Save and start".'),
         ),
       ]),
     ),

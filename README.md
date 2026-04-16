@@ -1,14 +1,14 @@
-# Heimdallr
+# Heimdallm
 
 > AI-powered GitHub PR review agent for macOS and Linux — reviews your pull requests automatically using Claude, Gemini or Codex, posts the review directly to GitHub, and keeps you informed via native notifications.
 
-![Heimdallr dashboard](assets/icon.png)
+![Heimdallm dashboard](assets/icon.png)
 
 ---
 
 ## What it does
 
-Heimdallr runs silently in your menu bar. It watches the GitHub PRs where you're requested as a reviewer, runs an AI code review on each one, and submits the review back to GitHub — no copy-pasting, no manual prompting.
+Heimdallm runs silently in your menu bar. It watches the GitHub PRs where you're requested as a reviewer, runs an AI code review on each one, and submits the review back to GitHub — no copy-pasting, no manual prompting.
 
 - **Automatic reviews** — polls `review-requested:@me` on GitHub and submits reviews as your GitHub account
 - **Configurable prompts** — general review, security audit, performance, architecture, or your own custom instructions with `{diff}` `{title}` `{author}` placeholders
@@ -23,43 +23,43 @@ Heimdallr runs silently in your menu bar. It watches the GitHub PRs where you're
 
 ### macOS (DMG)
 
-1. Download `Heimdallr-vX.Y.Z.dmg` from [Releases](https://github.com/theburrowhub/heimdallr/releases)
-2. Open the DMG and drag **Heimdallr** to **Applications**
+1. Download `Heimdallm-vX.Y.Z.dmg` from [Releases](https://github.com/theburrowhub/heimdallm/releases)
+2. Open the DMG and drag **Heimdallm** to **Applications**
 3. Open Terminal and run once:
    ```bash
-   xattr -cr /Applications/Heimdallr.app
+   xattr -cr /Applications/Heimdallm.app
    ```
-4. Double-click Heimdallr in Applications
+4. Double-click Heimdallm in Applications
 
 > **Requires**: macOS 13+ (Apple Silicon or Intel), `gh` CLI authenticated (`gh auth login`).
 
 ### Linux
 
-Download from [Releases](https://github.com/theburrowhub/heimdallr/releases) and install for your distro:
+Download from [Releases](https://github.com/theburrowhub/heimdallm/releases) and install for your distro:
 
 | Package | Distros | Command |
 |---------|---------|---------|
-| `.deb` | Ubuntu, Debian, Mint, Pop!\_OS | `sudo dpkg -i heimdallr_X.Y.Z_amd64.deb` |
-| `.rpm` | Fedora, RHEL, openSUSE | `sudo rpm -i heimdallr-X.Y.Z-1.x86_64.rpm` |
-| `.AppImage` | Arch, NixOS, any distro | `chmod +x Heimdallr-X.Y.Z-x86_64.AppImage && ./Heimdallr-X.Y.Z-x86_64.AppImage` |
+| `.deb` | Ubuntu, Debian, Mint, Pop!\_OS | `sudo dpkg -i heimdallm_X.Y.Z_amd64.deb` |
+| `.rpm` | Fedora, RHEL, openSUSE | `sudo rpm -i heimdallm-X.Y.Z-1.x86_64.rpm` |
+| `.AppImage` | Arch, NixOS, any distro | `chmod +x Heimdallm-X.Y.Z-x86_64.AppImage && ./Heimdallm-X.Y.Z-x86_64.AppImage` |
 
-Installs to `/opt/heimdallr/` with a desktop entry and `/usr/bin/heimdallr` symlink.
+Installs to `/opt/heimdallm/` with a desktop entry and `/usr/bin/heimdallm` symlink.
 
-> **Requires**: `gh` CLI authenticated (`gh auth login`). Token stored via GNOME Keyring / KDE Wallet (`secret-tool`), or `~/.config/heimdallr/.token` as fallback.
+> **Requires**: `gh` CLI authenticated (`gh auth login`). Token stored via GNOME Keyring / KDE Wallet (`secret-tool`), or `~/.config/heimdallm/.token` as fallback.
 
 ### Automated install (for agents / scripts)
 
 See [LLM-HOW-TO-INSTALL.md](LLM-HOW-TO-INSTALL.md) for a step-by-step guide suitable for Claude Code, shell scripts, or any automation tool.
 
-On first launch Heimdallr detects your `gh` CLI token automatically and sets itself up.
+On first launch Heimdallm detects your `gh` CLI token automatically and sets itself up.
 
 ---
 
 ## Architecture
 
 ```
-Heimdallr.app/
-├── Heimdallr          ← Flutter macOS UI
+Heimdallm.app/
+├── Heimdallm          ← Flutter macOS UI
 └── heimdalld          ← Go daemon (background service)
 ```
 
@@ -86,13 +86,13 @@ Flutter app  ←→  HTTP/SSE  ←→  heimdalld  ←→  GitHub API
 
 ```bash
 # Clone
-git clone https://github.com/theburrowhub/heimdallr && cd heimdallr
+git clone https://github.com/theburrowhub/heimdallm && cd heimdallm
 
 # Run (builds daemon + launches app in debug mode)
 make dev
 ```
 
-`make dev` compiles the daemon, embeds it, and launches the Flutter app with `HEIMDALLR_DAEMON_PATH` pointing to the local binary. On first run the app detects your `gh` token and creates `~/.config/heimdallr/config.toml`.
+`make dev` compiles the daemon, embeds it, and launches the Flutter app with `HEIMDALLM_DAEMON_PATH` pointing to the local binary. On first run the app detects your `gh` token and creates `~/.config/heimdallm/config.toml`.
 
 ### Other targets
 
@@ -106,7 +106,7 @@ make release-local # Build signed + notarized DMG and publish GitHub release
 ### Project structure
 
 ```
-heimdallr/
+heimdallm/
 ├── daemon/                  Go background service
 │   └── internal/
 │       ├── github/          GitHub API client (PRs, diffs, submit reviews)

@@ -17,10 +17,10 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/heimdallr/daemon/internal/executor"
-	"github.com/heimdallr/daemon/internal/pipeline"
-	"github.com/heimdallr/daemon/internal/sse"
-	"github.com/heimdallr/daemon/internal/store"
+	"github.com/heimdallm/daemon/internal/executor"
+	"github.com/heimdallm/daemon/internal/pipeline"
+	"github.com/heimdallm/daemon/internal/sse"
+	"github.com/heimdallm/daemon/internal/store"
 )
 
 // Server holds the HTTP router, SSE broker, store, and optional pipeline.
@@ -89,7 +89,7 @@ var sensitiveGETPaths = []string{
 }
 
 // authMiddleware rejects:
-//   - POST/PUT/PATCH/DELETE requests without a valid X-Heimdallr-Token header.
+//   - POST/PUT/PATCH/DELETE requests without a valid X-Heimdallm-Token header.
 //   - GET requests to /config or /agents without a valid token (these endpoints
 //     return local directory paths, CLI flags, and agent configs that should not
 //     be readable by arbitrary browser tabs — see security issue #3).
@@ -109,7 +109,7 @@ func (srv *Server) authMiddleware(next http.Handler) http.Handler {
 				}
 			}
 			if needsAuth {
-				token := r.Header.Get("X-Heimdallr-Token")
+				token := r.Header.Get("X-Heimdallm-Token")
 				// Constant-time comparison to prevent timing attacks.
 				if !hmac.Equal([]byte(token), []byte(srv.apiToken)) {
 					http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
@@ -518,18 +518,18 @@ func (srv *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 }
 
 // daemonLogPath returns the platform-specific path to the daemon stderr log.
-// macOS: ~/Library/Logs/heimdallr/heimdallr-daemon-error.log (LaunchAgent convention)
-// Linux/other: $XDG_STATE_HOME/heimdallr/heimdallr.log (fallback ~/.local/share/heimdallr/heimdallr.log)
+// macOS: ~/Library/Logs/heimdallm/heimdallm-daemon-error.log (LaunchAgent convention)
+// Linux/other: $XDG_STATE_HOME/heimdallm/heimdallm.log (fallback ~/.local/share/heimdallm/heimdallm.log)
 func daemonLogPath() string {
 	home, _ := os.UserHomeDir()
 	switch runtime.GOOS {
 	case "darwin":
-		return filepath.Join(home, "Library", "Logs", "heimdallr", "heimdallr-daemon-error.log")
+		return filepath.Join(home, "Library", "Logs", "heimdallm", "heimdallm-daemon-error.log")
 	default:
 		if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" {
-			return filepath.Join(xdg, "heimdallr", "heimdallr.log")
+			return filepath.Join(xdg, "heimdallm", "heimdallm.log")
 		}
-		return filepath.Join(home, ".local", "share", "heimdallr", "heimdallr.log")
+		return filepath.Join(home, ".local", "share", "heimdallm", "heimdallm.log")
 	}
 }
 

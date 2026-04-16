@@ -7,7 +7,7 @@
 #   daemon build → flutter build linux --release → verify output artifacts
 #
 # Usage:
-#   docker build -f Dockerfile.linux-verify -t heimdallr-verify .
+#   docker build -f Dockerfile.linux-verify -t heimdallm-verify .
 #   (or simply: make verify-linux)
 
 FROM ubuntu:22.04
@@ -59,7 +59,7 @@ RUN cd daemon && make build
 RUN cd flutter_app && flutter build linux --release
 
 # 6. Verify output artifacts exist
-RUN test -f daemon/bin/heimdallr \
+RUN test -f daemon/bin/heimdallm \
     && test -d flutter_app/build/linux/x64/release/bundle \
-    && test -f flutter_app/build/linux/x64/release/bundle/heimdallr \
+    && test -f flutter_app/build/linux/x64/release/bundle/heimdallm \
     && echo "✓  All output artifacts verified"

@@ -3,9 +3,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
-import 'package:heimdallr/core/models/pr.dart';
-import 'package:heimdallr/features/dashboard/dashboard_providers.dart';
-import 'package:heimdallr/features/dashboard/dashboard_screen.dart';
+import 'package:heimdallm/core/models/pr.dart';
+import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
+import 'package:heimdallm/features/dashboard/dashboard_screen.dart';
 
 void main() {
   testWidgets('DashboardScreen shows PR title', (tester) async {

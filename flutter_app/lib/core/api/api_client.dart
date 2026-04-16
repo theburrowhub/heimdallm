@@ -26,7 +26,7 @@ class ApiClient {
     if (_cachedToken != null) return _cachedToken;
     final home = Platform.environment['HOME'] ?? '';
     if (home.isEmpty) return null;
-    final file = File('$home/.local/share/heimdallr/api_token');
+    final file = File('$home/.local/share/heimdallm/api_token');
     if (await file.exists()) {
       _cachedToken = (await file.readAsString()).trim();
     }
@@ -34,12 +34,12 @@ class ApiClient {
   }
 
   /// Headers for mutating requests (POST/PUT/DELETE).
-  /// Includes X-Heimdallr-Token to satisfy the auth middleware (issue #3).
+  /// Includes X-Heimdallm-Token to satisfy the auth middleware (issue #3).
   Future<Map<String, String>> _authHeaders() async {
     final token = await _apiToken();
     return {
       'Content-Type': 'application/json',
-      if (token != null && token.isNotEmpty) 'X-Heimdallr-Token': token,
+      if (token != null && token.isNotEmpty) 'X-Heimdallm-Token': token,
     };
   }
 

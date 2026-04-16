@@ -3,11 +3,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:mocktail/mocktail.dart';
-import 'package:heimdallr/core/api/api_client.dart';
-import 'package:heimdallr/core/models/config_model.dart';
-import 'package:heimdallr/features/config/config_providers.dart';
-import 'package:heimdallr/features/config/config_screen.dart';
-import 'package:heimdallr/features/dashboard/dashboard_providers.dart';
+import 'package:heimdallm/core/api/api_client.dart';
+import 'package:heimdallm/core/models/config_model.dart';
+import 'package:heimdallm/features/config/config_providers.dart';
+import 'package:heimdallm/features/config/config_screen.dart';
+import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 
 class MockApiClient extends Mock implements ApiClient {}
 

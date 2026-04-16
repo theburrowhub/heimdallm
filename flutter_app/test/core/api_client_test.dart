@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
-import 'package:heimdallr/core/api/api_client.dart';
+import 'package:heimdallm/core/api/api_client.dart';
 
 void main() {
   group('ApiClient', () {

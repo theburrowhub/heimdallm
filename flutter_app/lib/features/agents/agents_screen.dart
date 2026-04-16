@@ -447,7 +447,7 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         const Text(
-                          'Describe what to look for. Heimdallr will inject these '
+                          'Describe what to look for. Heimdallm will inject these '
                           'instructions into its default review template.',
                           style: TextStyle(fontSize: 12, color: Colors.grey),
                         ),

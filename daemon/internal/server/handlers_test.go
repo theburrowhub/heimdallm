@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/heimdallr/daemon/internal/server"
-	"github.com/heimdallr/daemon/internal/sse"
-	"github.com/heimdallr/daemon/internal/store"
+	"github.com/heimdallm/daemon/internal/server"
+	"github.com/heimdallm/daemon/internal/sse"
+	"github.com/heimdallm/daemon/internal/store"
 )
 
 func setupServer(t *testing.T) (*server.Server, *store.Store) {
@@ -130,7 +130,7 @@ func TestHandlerLogsStream_WithToken(t *testing.T) {
 	defer cancel()
 
 	req := httptest.NewRequest("GET", "/logs/stream", nil).WithContext(ctx)
-	req.Header.Set("X-Heimdallr-Token", "secret-token")
+	req.Header.Set("X-Heimdallm-Token", "secret-token")
 	w := httptest.NewRecorder()
 	srv.Router().ServeHTTP(w, req)
 
@@ -159,7 +159,7 @@ func TestPublicEndpointsRequireAuthWhenTokenSet(t *testing.T) {
 
 		// With valid token → not 401
 		req2 := httptest.NewRequest("GET", path, nil)
-		req2.Header.Set("X-Heimdallr-Token", "secret-token")
+		req2.Header.Set("X-Heimdallm-Token", "secret-token")
 		w2 := httptest.NewRecorder()
 		srv.Router().ServeHTTP(w2, req2)
 		if w2.Code == http.StatusUnauthorized {
@@ -203,7 +203,7 @@ func TestHandlerTriggerReviewRateLimit(t *testing.T) {
 	// Fire 2 concurrent reviews — should succeed
 	for i := 1; i <= 2; i++ {
 		req := httptest.NewRequest("POST", fmt.Sprintf("/prs/%d/review", i), nil)
-		req.Header.Set("X-Heimdallr-Token", token)
+		req.Header.Set("X-Heimdallm-Token", token)
 		w := httptest.NewRecorder()
 		srv.Router().ServeHTTP(w, req)
 		if w.Code != http.StatusAccepted {
@@ -216,7 +216,7 @@ func TestHandlerTriggerReviewRateLimit(t *testing.T) {
 
 	// Third review should be rejected with 429
 	req := httptest.NewRequest("POST", "/prs/3/review", nil)
-	req.Header.Set("X-Heimdallr-Token", token)
+	req.Header.Set("X-Heimdallm-Token", token)
 	w := httptest.NewRecorder()
 	srv.Router().ServeHTTP(w, req)
 	if w.Code != http.StatusTooManyRequests {
@@ -281,7 +281,7 @@ func TestHandlerPutConfigValueValidation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			req := httptest.NewRequest("PUT", "/config",
 				strings.NewReader(tc.body))
-			req.Header.Set("X-Heimdallr-Token", "secret-token")
+			req.Header.Set("X-Heimdallm-Token", "secret-token")
 			req.Header.Set("Content-Type", "application/json")
 			w := httptest.NewRecorder()
 			srv.Router().ServeHTTP(w, req)

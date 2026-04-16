@@ -5,14 +5,14 @@
 
 ## Visión
 
-Heimdallm (Heimdall + LLM) es la evolución del proyecto Heimdallr. Unifica el repo desktop (`auto-pr`) y el repo Docker (`heimdallr-docker`) en un único monorepo, añade tracking y procesamiento automático de issues con LLM, y ofrece una interfaz web como alternativa a la Flutter app.
+Heimdallm (Heimdall + LLM) es la evolución del proyecto Heimdallm. Unifica el repo desktop (`auto-pr`) y el repo Docker (`heimdallm-docker`) en un único monorepo, añade tracking y procesamiento automático de issues con LLM, y ofrece una interfaz web como alternativa a la Flutter app.
 
 ---
 
 ## Fase 1: Rename + Consolidación de Repos
 
 ### Objetivo
-Renombrar el repo existente `theburrowhub/auto-pr` → `theburrowhub/heimdallm` (GitHub preserva historial, issues, PRs y redirige URLs) y fusionar `heimdallr-docker` en él como subdirectorio `docker/`.
+Renombrar el repo existente `theburrowhub/auto-pr` → `theburrowhub/heimdallm` (GitHub preserva historial, issues, PRs y redirige URLs) y fusionar `heimdallm-docker` en él como subdirectorio `docker/`.
 
 ### Estructura del monorepo
 
@@ -21,7 +21,7 @@ heimdallm/
 ├── daemon/           # Go daemon — binario renombrado a heimdallm
 ├── flutter_app/      # Desktop UI (macOS/Linux) — sin cambios funcionales
 ├── web_ui/           # NUEVO: SvelteKit web dashboard
-├── docker/           # Contenido fusionado de heimdallr-docker
+├── docker/           # Contenido fusionado de heimdallm-docker
 │   ├── Dockerfile
 │   ├── docker-compose.yml
 │   └── .env.example
@@ -33,21 +33,21 @@ heimdallm/
 
 | Artefacto | Antes | Después |
 |-----------|-------|---------|
-| Módulo Go | `github.com/heimdallr/daemon` | `github.com/heimdallm/daemon` |
-| Binario | `heimdallr` | `heimdallm` |
-| Config dir | `~/.config/heimdallr/` | `~/.config/heimdallm/` |
-| Data dir | `~/.local/share/heimdallr/` | `~/.local/share/heimdallm/` |
-| LaunchAgent | `com.heimdallr.daemon.plist` | `com.heimdallm.daemon.plist` |
-| Token header HTTP | `X-Heimdallr-Token` | `X-Heimdallm-Token` |
-| Env vars | `HEIMDALLR_*` | `HEIMDALLM_*` |
-| Docker image | `heimdallr/daemon` | `heimdallm/daemon` |
+| Módulo Go | `github.com/heimdallm/daemon` | `github.com/heimdallm/daemon` |
+| Binario | `heimdallm` | `heimdallm` |
+| Config dir | `~/.config/heimdallm/` | `~/.config/heimdallm/` |
+| Data dir | `~/.local/share/heimdallm/` | `~/.local/share/heimdallm/` |
+| LaunchAgent | `com.heimdallm.daemon.plist` | `com.heimdallm.daemon.plist` |
+| Token header HTTP | `X-Heimdallm-Token` | `X-Heimdallm-Token` |
+| Env vars | `HEIMDALLM_*` | `HEIMDALLM_*` |
+| Docker image | `heimdallm/daemon` | `heimdallm/daemon` |
 | SSE broker events | sin cambio de formato | sin cambio de formato |
 
-### Migración de heimdallr-docker
+### Migración de heimdallm-docker
 - GitHub: `Settings → Rename` en `auto-pr` → `heimdallm`
-- El contenido de `heimdallr-docker` se incorpora en `docker/` vía `git subtree add` para preservar su historial de commits
+- El contenido de `heimdallm-docker` se incorpora en `docker/` vía `git subtree add` para preservar su historial de commits
 - Los paths de config, Dockerfile, docker-compose y `.env.example` se actualizan al nuevo naming
-- Una vez fusionado y verificado, `heimdallr-docker` se archiva (no se borra, para preservar historial de issues/PRs externos)
+- Una vez fusionado y verificado, `heimdallm-docker` se archiva (no se borra, para preservar historial de issues/PRs externos)
 
 ### Criterios de éxito
 - `go build ./...` y `go test ./...` pasan con el nuevo module path

@@ -5,7 +5,7 @@ import 'gh_cli.dart';
 /// Handles first-run setup: writes config file to disk and stores
 /// the GitHub token in macOS Keychain via the `security` CLI.
 class FirstRunSetup {
-  static const _keychainService = 'heimdallr';
+  static const _keychainService = 'heimdallm';
   static const _keychainAccount = 'github-token';
 
   // ── Token ────────────────────────────────────────────────────────────────
@@ -36,7 +36,7 @@ class FirstRunSetup {
   /// Stores the GitHub token in the platform credential store.
   /// macOS: Keychain via `security` CLI.
   /// Linux: GNOME/KDE secret service via `secret-tool`; falls back to
-  ///        `~/.config/heimdallr/.token` (chmod 600) when secret-tool is unavailable.
+  ///        `~/.config/heimdallm/.token` (chmod 600) when secret-tool is unavailable.
   static Future<void> storeToken(String token) async {
     if (Platform.isMacOS) {
       await _storeTokenMacOS(token);
@@ -88,7 +88,7 @@ class FirstRunSetup {
     try {
       final proc = await Process.start('secret-tool', [
         'store',
-        '--label=Heimdallr GitHub Token',
+        '--label=Heimdallm GitHub Token',
         'service', _keychainService,
         'account', _keychainAccount,
       ]);
@@ -122,11 +122,11 @@ class FirstRunSetup {
     return _readTokenFile();
   }
 
-  // ── Linux file fallback (~/.config/heimdallr/.token, chmod 600) ──────────
+  // ── Linux file fallback (~/.config/heimdallm/.token, chmod 600) ──────────
 
   static String _tokenFilePath() {
     final home = Platform.environment['HOME'] ?? '';
-    return '$home/.config/heimdallr/.token';
+    return '$home/.config/heimdallm/.token';
   }
 
   static Future<void> _writeTokenFile(String token) async {
@@ -149,16 +149,16 @@ class FirstRunSetup {
 
   // ── Config file ──────────────────────────────────────────────────────────
 
-  /// Writes the daemon config file to ~/.config/heimdallr/config.toml
+  /// Writes the daemon config file to ~/.config/heimdallm/config.toml
   static Future<void> writeConfig(AppConfig config) async {
     final home = Platform.environment['HOME'] ?? '';
     if (home.isEmpty) throw Exception('HOME environment variable not set');
 
-    final dir = Directory('$home/.config/heimdallr');
+    final dir = Directory('$home/.config/heimdallm');
     await dir.create(recursive: true);
 
     final content = _buildToml(config);
-    await File('$home/.config/heimdallr/config.toml').writeAsString(content);
+    await File('$home/.config/heimdallm/config.toml').writeAsString(content);
   }
 
   /// Escapes backslashes, double-quotes, and newline characters in a
@@ -248,6 +248,6 @@ class FirstRunSetup {
   /// Returns true if a config file already exists.
   static Future<bool> configExists() async {
     final home = Platform.environment['HOME'] ?? '';
-    return File('$home/.config/heimdallr/config.toml').exists();
+    return File('$home/.config/heimdallm/config.toml').exists();
   }
 }

@@ -88,7 +88,7 @@ class TrayMenu with TrayListener {
     }
 
     // ── App controls ────────────────────────────────────────────────────
-    items.add(MenuItem(key: 'open', label: 'Open Heimdallr'));
+    items.add(MenuItem(key: 'open', label: 'Open Heimdallm'));
     items.add(MenuItem.separator());
     items.add(MenuItem(key: 'quit', label: 'Quit'));
 
@@ -107,7 +107,7 @@ class TrayMenu with TrayListener {
         MenuItem(key: 'pr_title_${pr.id}', label: pr.title, disabled: true),
         _info(pr.repo),
         MenuItem.separator(),
-        MenuItem(key: 'open_pr_${pr.id}', label: 'Open in Heimdallr'),
+        MenuItem(key: 'open_pr_${pr.id}', label: 'Open in Heimdallm'),
         MenuItem(key: 'view_${pr.id}',    label: 'View on GitHub'),
         MenuItem.separator(),
         MenuItem(key: 'review_${pr.id}',  label: 'Review Now'),

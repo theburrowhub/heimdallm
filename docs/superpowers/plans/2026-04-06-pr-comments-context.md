@@ -297,7 +297,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/heimdallr/daemon/internal/executor"
+	"github.com/heimdallm/daemon/internal/executor"
 )
 
 func TestBuildPromptFromTemplate_CommentsSubstituted(t *testing.T) {

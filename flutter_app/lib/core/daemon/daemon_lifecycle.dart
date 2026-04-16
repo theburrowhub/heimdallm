@@ -40,15 +40,15 @@ class DaemonLifecycle {
   /// Returns the daemon binary path, or null if not found.
   ///
   /// Priority:
-  ///   1. HEIMDALLR_DAEMON_PATH env var  (set by `make dev`)
+  ///   1. HEIMDALLM_DAEMON_PATH env var  (set by `make dev`)
   ///   2. 'heimdalld' next to the Flutter binary  (production .app bundle)
   ///
-  /// IMPORTANT: 'heimdallr' is NOT used as a fallback because on macOS APFS
-  /// (case-insensitive) 'heimdallr' resolves to 'Heimdallr' — the Flutter app
+  /// IMPORTANT: 'heimdallm' is NOT used as a fallback because on macOS APFS
+  /// (case-insensitive) 'heimdallm' resolves to 'Heimdallm' — the Flutter app
   /// binary itself. Using it as a spawn target creates an infinite fork bomb.
   static String? defaultBinaryPath() {
     // 1. Explicit override (make dev)
-    final envPath = Platform.environment['HEIMDALLR_DAEMON_PATH'];
+    final envPath = Platform.environment['HEIMDALLM_DAEMON_PATH'];
     if (envPath != null && envPath.isNotEmpty) {
       return File(envPath).existsSync() ? envPath : null;
     }

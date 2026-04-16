@@ -55,7 +55,7 @@ class SseClient {
   Future<String?> _loadToken() async {
     try {
       final home = Platform.environment['HOME'] ?? '';
-      final file = File('$home/.local/share/heimdallr/api_token');
+      final file = File('$home/.local/share/heimdallm/api_token');
       if (await file.exists()) return (await file.readAsString()).trim();
     } catch (_) {}
     return null;
@@ -71,7 +71,7 @@ class SseClient {
       request.headers['Cache-Control'] = 'no-cache';
       final token = await _loadToken();
       if (token != null && token.isNotEmpty) {
-        request.headers['X-Heimdallr-Token'] = token;
+        request.headers['X-Heimdallm-Token'] = token;
       }
       final response = await _httpClient.send(request);
 
