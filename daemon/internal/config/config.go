@@ -2,7 +2,9 @@ package config
 
 import (
 	"fmt"
+	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -197,6 +199,42 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+func writeConfigTOML(path string, cfg *Config) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("create config file: %w", err)
+	}
+	defer f.Close()
+	return toml.NewEncoder(f).Encode(cfg)
+}
+
+// LoadOrCreate loads config from path, or creates a minimal config from
+// environment variables if the file does not exist. This is the preferred
+// entry point for Docker / headless deployments.
+func LoadOrCreate(path string) (*Config, error) {
+	if _, err := os.Stat(path); err == nil {
+		return Load(path)
+	}
+	// No config file — build from env vars.
+	cfg := &Config{}
+	cfg.applyDefaults()
+	cfg.applyEnvOverrides()
+	if cfg.AI.Primary == "" {
+		return nil, fmt.Errorf("no config file and HEIMDALLR_AI_PRIMARY not set")
+	}
+	if err := writeConfigTOML(path, cfg); err != nil {
+		log.Printf("warning: could not persist generated config: %v", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }
 
 // DefaultPath returns ~/.config/heimdallr/config.toml
