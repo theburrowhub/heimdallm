@@ -106,8 +106,8 @@ func (srv *Server) Router() http.Handler {
 }
 
 // Start binds the HTTP server to the given port and begins serving.
-func (srv *Server) Start(port int) error {
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
+func (srv *Server) Start(port int, bindAddr string) error {
+	addr := fmt.Sprintf("%s:%d", bindAddr, port)
 	srv.httpServer = &http.Server{
 		Addr:         addr,
 		Handler:      srv.router,

@@ -20,7 +20,8 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Port int `toml:"port"`
+	Port     int    `toml:"port"`
+	BindAddr string `toml:"bind_addr"`
 }
 
 type GitHubConfig struct {
@@ -103,6 +104,9 @@ func (c *Config) AgentConfigFor(cli string) CLIAgentConfig {
 func (c *Config) applyDefaults() {
 	if c.Server.Port == 0 {
 		c.Server.Port = 7842
+	}
+	if c.Server.BindAddr == "" {
+		c.Server.BindAddr = "127.0.0.1"
 	}
 	if c.GitHub.PollInterval == "" {
 		c.GitHub.PollInterval = "5m"

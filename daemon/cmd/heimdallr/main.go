@@ -395,8 +395,8 @@ func main() {
 	go makePollFn(cfg)()
 
 	go func() {
-		slog.Info("daemon started", "port", cfg.Server.Port)
-		if err := srv.Start(cfg.Server.Port); err != nil {
+		slog.Info("daemon started", "port", cfg.Server.Port, "bind", cfg.Server.BindAddr)
+		if err := srv.Start(cfg.Server.Port, cfg.Server.BindAddr); err != nil {
 			slog.Error("server stopped", "err", err)
 		}
 	}()
