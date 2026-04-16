@@ -2,7 +2,7 @@ package config
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -231,7 +231,7 @@ func LoadOrCreate(path string) (*Config, error) {
 		return nil, fmt.Errorf("no config file and HEIMDALLM_AI_PRIMARY not set")
 	}
 	if err := writeConfigTOML(path, cfg); err != nil {
-		log.Printf("warning: could not persist generated config: %v", err)
+		slog.Warn("config: could not persist generated config", "path", path, "err", err)
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err

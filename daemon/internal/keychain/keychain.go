@@ -13,18 +13,19 @@ const service = "heimdallm"
 const account = "github-token"
 
 // Get retrieves the GitHub token.
-// Priority: GITHUB_TOKEN env var > macOS Keychain > token files.
+// Priority on macOS: Keychain > GITHUB_TOKEN env > token files.
+// Priority elsewhere: GITHUB_TOKEN env > token files.
 func Get() (string, error) {
-	// 1. Environment variable (Docker / CI).
-	if tok := os.Getenv("GITHUB_TOKEN"); tok != "" {
-		return tok, nil
-	}
-
-	// 2. macOS Keychain (desktop).
+	// 1. macOS Keychain (desktop — most secure storage).
 	if runtime.GOOS == "darwin" {
 		if tok, err := getFromKeychain(); err == nil && tok != "" {
 			return tok, nil
 		}
+	}
+
+	// 2. Environment variable (Docker / CI).
+	if tok := os.Getenv("GITHUB_TOKEN"); tok != "" {
+		return tok, nil
 	}
 
 	// 3. Token files (Docker mount or manual).

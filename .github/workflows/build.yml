@@ -22,6 +22,7 @@ permissions:
 jobs:
   build-linux:
     name: Build Heimdallm Linux packages (.deb / .rpm / .AppImage)
+    if: "!contains(github.event.head_commit.message, 'chore(main): release')"
     runs-on: ubuntu-22.04
 
     steps:
@@ -258,6 +259,7 @@ jobs:
 
   build:
     name: Build Heimdallm.dmg
+    if: "!contains(github.event.head_commit.message, 'chore(main): release')"
     runs-on: macos-14
 
     steps:
