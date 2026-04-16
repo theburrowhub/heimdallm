@@ -1,5 +1,5 @@
 # Override for local testing.
-# Usage: docker compose -f docker-compose.yml -f docker-compose.test.yml up
+# Usage: docker compose -f docker/docker-compose.yml -f docker/docker-compose.test.yml up
 services:
   heimdallm:
     container_name: heimdallm-test

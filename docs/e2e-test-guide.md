@@ -30,10 +30,10 @@ GitHub Search: is:pr is:open review-requested:<token-user>
 ### 1. Prepare the Environment
 
 ```bash
-cp .env.example .env
+cp docker/.env.example docker/.env
 ```
 
-Edit `.env`:
+Edit `docker/.env`:
 
 ```env
 GITHUB_TOKEN=ghp_your_real_token
@@ -74,7 +74,7 @@ Or use CODEOWNERS/branch protection to auto-assign reviewers.
 
 ```bash
 # With test compose overlay (no auto-restart, mapped ports)
-docker compose -f docker-compose.yml -f docker-compose.test.yml up --build
+docker compose -f docker/docker-compose.yml -f docker/docker-compose.test.yml up --build
 ```
 
 Or use the Makefile shortcut:
@@ -134,7 +134,7 @@ Check the PR on GitHub — you should see a review comment from the token user w
 Read the API token from the container:
 
 ```bash
-API_TOKEN=$(docker compose -f docker-compose.yml -f docker-compose.test.yml exec heimdallm cat /data/api_token)
+API_TOKEN=$(docker compose -f docker/docker-compose.yml -f docker/docker-compose.test.yml exec heimdallm cat /data/api_token)
 
 # Get PR ID from /prs
 PR_ID=$(curl -s $BASE/prs | jq '.[0].id')
@@ -153,7 +153,7 @@ curl -X POST $BASE/prs/$PR_ID/undismiss -H "X-Heimdallm-Token: $API_TOKEN"
 
 ```bash
 # Stop the daemon
-docker compose -f docker-compose.yml -f docker-compose.test.yml down -v
+docker compose -f docker/docker-compose.yml -f docker/docker-compose.test.yml down -v
 
 # Close the test PR
 gh pr close <PR_NUMBER> -d  # -d deletes the branch too
@@ -165,14 +165,14 @@ Three options for authenticating the Gemini CLI inside Docker:
 
 ### Option A: API Key (Simplest)
 
-Set `GEMINI_API_KEY` in `.env`. Get a key from https://aistudio.google.com/apikey
+Set `GEMINI_API_KEY` in `docker/.env`. Get a key from https://aistudio.google.com/apikey
 
 ### Option B: OAuth Token Mount
 
 If you've already authenticated `gemini` on your host:
 
 1. Ensure `~/.gemini/` exists with OAuth tokens
-2. Uncomment in `docker-compose.test.yml`:
+2. Uncomment in `docker/docker-compose.test.yml`:
    ```yaml
    volumes:
      - ~/.gemini:/home/heimdallm/.gemini:ro
@@ -191,14 +191,14 @@ Two options for authenticating Claude Code inside Docker:
 
 ### Option A: API Key (Simplest)
 
-Set `ANTHROPIC_API_KEY` in `.env`. Get a key from https://console.anthropic.com/settings/keys
+Set `ANTHROPIC_API_KEY` in `docker/.env`. Get a key from https://console.anthropic.com/settings/keys
 
 ### Option B: OAuth Token (Subscription)
 
 For Max/Pro/Team subscription users:
 
 1. On your host, run `claude setup-token` to generate a long-lived token
-2. Set `CLAUDE_CODE_OAUTH_TOKEN` in `.env`
+2. Set `CLAUDE_CODE_OAUTH_TOKEN` in `docker/.env`
 
 > **Note:** Do not enable `bare = true` in `config.toml` when using OAuth tokens — bare mode disables OAuth and requires an API key.
 

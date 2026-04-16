@@ -1,6 +1,8 @@
 services:
   heimdallm:
-    build: .
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
     container_name: heimdallm
     restart: unless-stopped
     ports:

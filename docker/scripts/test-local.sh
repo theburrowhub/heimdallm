@@ -2,16 +2,21 @@
 #
 # Heimdallm Docker — Local Test Runner
 #
-# Usage:
-#   ./scripts/test-local.sh smoke    # Level 1: no credentials needed
-#   ./scripts/test-local.sh github   # Level 2: needs GITHUB_TOKEN in .env
-#   ./scripts/test-local.sh e2e      # Level 3: needs full .env + AI auth + PR
+# Usage (from repo root):
+#   ./docker/scripts/test-local.sh smoke    # Level 1: no credentials needed
+#   ./docker/scripts/test-local.sh github   # Level 2: needs GITHUB_TOKEN in .env
+#   ./docker/scripts/test-local.sh e2e      # Level 3: needs full .env + AI auth + PR
 #
 set -euo pipefail
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
-COMPOSE_TEST="docker compose -f docker-compose.yml -f docker-compose.test.yml"
+# Resolve repo root (two levels up from this script's location)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+cd "$REPO_ROOT"
+
+COMPOSE_TEST="docker compose -f docker/docker-compose.yml -f docker/docker-compose.test.yml"
 SERVICE="heimdallm"
 BASE_URL="http://localhost:${HEIMDALLM_PORT:-7842}"
 HEALTH_TIMEOUT=60   # seconds to wait for /health
@@ -257,17 +262,17 @@ test_github() {
     echo ""
 
     # Check .env exists
-    if [ ! -f .env ]; then
-        echo -e "${RED}ERROR: .env file not found.${NC}"
-        echo "Create it from .env.example:"
-        echo "  cp .env.example .env"
-        echo "  # Edit .env — set GITHUB_TOKEN and HEIMDALLM_REPOSITORIES"
+    if [ ! -f docker/.env ]; then
+        echo -e "${RED}ERROR: docker/.env file not found.${NC}"
+        echo "Create it from docker/.env.example:"
+        echo "  cp docker/.env.example docker/.env"
+        echo "  # Edit docker/.env — set GITHUB_TOKEN and HEIMDALLM_REPOSITORIES"
         return 1
     fi
 
     # Check required vars
     # shellcheck disable=SC1091
-    source .env 2>/dev/null || true
+    source docker/.env 2>/dev/null || true
     if [ -z "${GITHUB_TOKEN:-}" ] || [ "$GITHUB_TOKEN" = "ghp_your_token_here" ]; then
         echo -e "${RED}ERROR: GITHUB_TOKEN not set or still has placeholder value.${NC}"
         return 1
@@ -367,13 +372,13 @@ test_e2e() {
     echo ""
 
     # Check .env
-    if [ ! -f .env ]; then
-        echo -e "${RED}ERROR: .env file not found. See .env.example${NC}"
+    if [ ! -f docker/.env ]; then
+        echo -e "${RED}ERROR: docker/.env file not found. See docker/.env.example${NC}"
         return 1
     fi
 
     # shellcheck disable=SC1091
-    source .env 2>/dev/null || true
+    source docker/.env 2>/dev/null || true
 
     if [ -z "${GITHUB_TOKEN:-}" ] || [ "$GITHUB_TOKEN" = "ghp_your_token_here" ]; then
         echo -e "${RED}ERROR: GITHUB_TOKEN not configured.${NC}"
