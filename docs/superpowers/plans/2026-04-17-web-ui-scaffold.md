@@ -1476,6 +1476,7 @@ Top nav bar, login display, auth-error banner, SSE connection initiated on mount
         <li>
           <a
             href={item.href}
+            aria-current={$page.url.pathname === item.href ? 'page' : undefined}
             class="hover:text-indigo-600 {$page.url.pathname === item.href
               ? 'text-indigo-600 font-medium'
               : 'text-gray-600'}"
