@@ -99,6 +99,8 @@ describe('api.ts', () => {
         reviews_last_7_days: [],
         avg_issues_per_review: 1.5,
         review_timing: {
+          sample_count: 3,
+          avg_seconds: 50,
           median_seconds: 42,
           min_seconds: 10,
           max_seconds: 90,

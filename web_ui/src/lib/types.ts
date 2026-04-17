@@ -112,6 +112,8 @@ export interface DayCount {
 }
 
 export interface ReviewTimingStats {
+  sample_count: number;
+  avg_seconds: number;
   median_seconds: number;
   min_seconds: number;
   max_seconds: number;
