@@ -17,6 +17,9 @@
   $effect(() => {
     void $prListRefresh; // re-run on SSE-driven bump
     if (!browser || !Number.isFinite(id)) return;
+    pr = null;
+    reviews = [];
+    err = null;
     fetchPR(id)
       .then((d) => {
         pr = d.pr;
@@ -59,8 +62,8 @@
       } else {
         await dismissPR(id);
         // Dismissed PRs disappear from /prs; navigate back.
-        goto('/prs');
-        return;
+        // Let the `finally` block run so `busy` is reset even if goto rejects.
+        void goto('/prs');
       }
     } catch (e) {
       err = e instanceof Error ? e.message : String(e);
