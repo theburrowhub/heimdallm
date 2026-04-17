@@ -8,6 +8,14 @@ const KNOWN_EVENT_TYPES: SseEventType[] = [
   'review_error'
 ];
 
+// Native EventSource auto-reconnects only after a 200 response. Our proxy
+// can legitimately respond 502/503 (daemon unreachable / token missing),
+// and at that point the browser gives up permanently. This module adds a
+// manual retry loop with capped exponential backoff so the UI recovers
+// once the daemon comes back.
+const INITIAL_RETRY_MS = 2_000;
+const MAX_RETRY_MS = 60_000;
+
 export interface EventsHandle {
   events: Readable<SseEvent | null>;
   connected: Readable<boolean>;
@@ -32,23 +40,51 @@ export function connectEvents(path = '/events'): EventsHandle {
     };
   });
 
-  const source = new EventSource(path);
+  let source: EventSource | undefined;
+  let retryMs = INITIAL_RETRY_MS;
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  let closed = false;
 
-  source.onopen = () => connected.set(true);
-  source.onerror = () => connected.set(false);
+  const open = (): void => {
+    if (closed) return;
+    source = new EventSource(path);
 
-  for (const type of KNOWN_EVENT_TYPES) {
-    source.addEventListener(type, (ev) => {
-      const msg = ev as MessageEvent;
-      emit?.({ type, data: parse(msg.data) });
-    });
-  }
+    source.onopen = () => {
+      retryMs = INITIAL_RETRY_MS;
+      connected.set(true);
+    };
+
+    source.onerror = () => {
+      connected.set(false);
+      // EventSource will auto-reconnect on its own for 200-terminated streams.
+      // For non-200 initial responses the browser stops retrying and moves
+      // readyState to CLOSED. Detect that and retry manually with backoff.
+      if (source?.readyState === EventSource.CLOSED) {
+        source.close();
+        source = undefined;
+        retryTimer = setTimeout(open, retryMs);
+        retryMs = Math.min(retryMs * 2, MAX_RETRY_MS);
+      }
+    };
+
+    for (const type of KNOWN_EVENT_TYPES) {
+      source.addEventListener(type, (ev) => {
+        const msg = ev as MessageEvent;
+        emit?.({ type, data: parse(msg.data) });
+      });
+    }
+  };
+
+  open();
 
   return {
     events,
     connected,
     close: () => {
-      source.close();
+      closed = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      source?.close();
+      source = undefined;
       connected.set(false);
     }
   };

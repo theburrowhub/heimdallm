@@ -96,4 +96,20 @@ describe('connectEvents', () => {
     expect(es.closed).toBe(true);
     expect(get(handle.connected)).toBe(false);
   });
+
+  it('retries opening a new EventSource after a CLOSED error', () => {
+    vi.useFakeTimers();
+    try {
+      const handle = connectEvents();
+      const es = MockEventSource.instances[0];
+      es.readyState = MockEventSource.CLOSED;
+      es.fireError();
+      // initial retry scheduled at 2s
+      vi.advanceTimersByTime(2_000);
+      expect(MockEventSource.instances).toHaveLength(2);
+      handle.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
