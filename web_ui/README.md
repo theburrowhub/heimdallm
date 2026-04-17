@@ -37,3 +37,13 @@ Browser ── /api/* ── SvelteKit server ── daemon :7842
 ```
 
 The token lives in `src/lib/server/token.ts` and never ships to the browser. Same-origin SSE means we use native `EventSource` without polyfills.
+
+## Token rotation
+
+The server caches the daemon API token in memory after the first successful read. If the daemon rotates the token on disk at runtime, the web container keeps the old value until restart:
+
+```bash
+docker compose restart web
+```
+
+This is deliberate — reloading the token on every request would hit the filesystem unnecessarily. If token rotation becomes common, add a TTL to `src/lib/server/token.ts`.

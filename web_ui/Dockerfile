@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 # ─── Build stage ────────────────────────────────────────────────────────
-FROM node:22-alpine AS build
+FROM node:22-alpine@sha256:8ea2348b068a9544dae7317b4f3aafcdc032df1647bb7d768a05a5cad1a7683f AS build
 WORKDIR /app
 
 COPY package.json package-lock.json ./
@@ -11,7 +11,7 @@ COPY . .
 RUN npm run build && npm prune --omit=dev
 
 # ─── Runtime stage ──────────────────────────────────────────────────────
-FROM node:22-alpine AS runtime
+FROM node:22-alpine@sha256:8ea2348b068a9544dae7317b4f3aafcdc032df1647bb7d768a05a5cad1a7683f AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3000
