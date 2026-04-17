@@ -3,7 +3,7 @@ import { error, type RequestHandler } from '@sveltejs/kit';
 
 const DAEMON_URL = (process.env.HEIMDALLM_API_URL ?? 'http://127.0.0.1:7842').replace(/\/+$/, '');
 
-const handle: RequestHandler = async ({ params, request, url, fetch: _fetch }) => {
+const handle: RequestHandler = async ({ params, request, url }) => {
   const token = await loadToken();
   if (!token) {
     error(503, {

@@ -1,20 +1,17 @@
 <script lang="ts">
   import { browser } from '$app/environment';
   import { fetchStats } from '$lib/api.js';
-  import { connectEvents } from '$lib/sse.js';
   import type { Stats } from '$lib/types.js';
-  import { onDestroy, onMount } from 'svelte';
+  import { getContext, onMount } from 'svelte';
+  import type { Readable } from 'svelte/store';
+
+  const connected = getContext<Readable<boolean>>('sse-connected');
 
   let stats = $state<Stats | null>(null);
   let statsError = $state<string | null>(null);
-  let sseHandle = $state<ReturnType<typeof connectEvents> | null>(null);
-  let connected = $state(false);
-  let connUnsub: (() => void) | undefined;
 
   onMount(async () => {
     if (!browser) return;
-    sseHandle = connectEvents();
-    connUnsub = sseHandle.connected.subscribe((v) => (connected = v));
     try {
       stats = await fetchStats();
     } catch (e) {
@@ -22,15 +19,10 @@
     }
   });
 
-  onDestroy(() => {
-    connUnsub?.();
-    sseHandle?.close();
-  });
-
   const pillClass = $derived(
-    connected ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'
+    $connected ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'
   );
-  const pillLabel = $derived(connected ? 'connected' : 'disconnected');
+  const pillLabel = $derived($connected ? 'connected' : 'disconnected');
 </script>
 
 <section class="flex items-center gap-3">

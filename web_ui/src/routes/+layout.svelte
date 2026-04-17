@@ -4,17 +4,27 @@
   import { page } from '$app/stores';
   import { connectEvents, type EventsHandle } from '$lib/sse.js';
   import { auth } from '$lib/stores.js';
-  import { onDestroy, onMount } from 'svelte';
+  import { onDestroy, onMount, setContext } from 'svelte';
+  import { writable, type Readable } from 'svelte/store';
 
   let { children } = $props();
 
+  // Shared connection state. Populated by onMount; exposed to child pages
+  // via context so they don't open their own EventSource.
+  const connected = writable(false);
+  setContext<Readable<boolean>>('sse-connected', { subscribe: connected.subscribe });
+
   let sse: EventsHandle | undefined;
+  let connUnsub: (() => void) | undefined;
 
   onMount(() => {
-    if (browser) sse = connectEvents();
+    if (!browser) return;
+    sse = connectEvents();
+    connUnsub = sse.connected.subscribe((v) => connected.set(v));
   });
 
   onDestroy(() => {
+    connUnsub?.();
     sse?.close();
   });
 
