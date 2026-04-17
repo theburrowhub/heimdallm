@@ -16,7 +16,7 @@ else
   APP_BUNDLE       := $(FLUTTER_BUILD)/bundle
 endif
 
-.PHONY: build-daemon build-app test dev dev-daemon dev-stop \
+.PHONY: build-daemon build-app test test-docker dev dev-daemon dev-stop \
         release-local package-macos install-service verify-linux clean
 
 # ── Build ─────────────────────────────────────────────────────────────────────
@@ -32,6 +32,47 @@ build-app:
 test:
 	cd daemon && make test
 	cd flutter_app && flutter test
+
+# ── Sandboxed Go tests (EDR-safe) ─────────────────────────────────────────────
+#
+# Runs `go vet` + `go test` for the daemon inside an official Go container,
+# so corporate EDR agents (Elastic Security, CrowdStrike, SentinelOne, …)
+# never see ephemeral *.test binaries appearing in /var/folders/.../go-build/.
+#
+# Hardening (share with IT/Security if asked):
+#   - Image pinned by SHA256 digest (GO_DOCKER_IMAGE below)
+#   - Repo mounted READ-ONLY (:ro) — container cannot modify sources
+#   - Go cache redirected to /tmp/heimdallm-gocache on the host
+#     (never touches ~/.cache/go-build or ~/go/pkg/mod)
+#   - Runs as the invoking user (--user $(id -u):$(id -g)), no root in container
+#   - --rm → container and its tmpfs are destroyed on exit
+#   - No ports exposed, no host env vars forwarded
+#
+# AI AGENTS: this is the default for Go tests on this repo. Do not run
+# `go test` directly on the host unless explicitly asked. See AGENTS.md.
+#
+# Usage:
+#   make test-docker
+#   make test-docker GO_TEST_ARGS="-run TestFoo ./internal/config/..."
+
+GO_DOCKER_IMAGE ?= golang:1.21-alpine@sha256:2414035b086e3c42b99654c8b26e6f5b1b1598080d65fd03c7f499552ff4dc94
+GO_TEST_ARGS    ?= -timeout 60s -count=1 ./...
+
+test-docker:
+	@command -v docker >/dev/null || { echo "❌  Docker is required. Install from https://docs.docker.com/get-docker/"; exit 1; }
+	@mkdir -p /tmp/heimdallm-gocache /tmp/heimdallm-home
+	@echo "▶  Running Go vet + tests inside $(GO_DOCKER_IMAGE)"
+	docker run --rm \
+	  --user "$(shell id -u):$(shell id -g)" \
+	  -v "$(shell pwd):/src:ro" \
+	  -v "/tmp/heimdallm-gocache:/tmp/.cache" \
+	  -v "/tmp/heimdallm-home:/tmp/home" \
+	  -w /src/daemon \
+	  -e HOME=/tmp/home \
+	  -e GOCACHE=/tmp/.cache/go-build \
+	  -e GOMODCACHE=/tmp/.cache/gomod \
+	  $(GO_DOCKER_IMAGE) \
+	  sh -c "go vet ./... && go test $(GO_TEST_ARGS)"
 
 # ── Local development ─────────────────────────────────────────────────────────
 #

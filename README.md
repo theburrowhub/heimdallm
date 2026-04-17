@@ -68,6 +68,24 @@ curl http://localhost:7842/health
 
 The Docker image is published to `ghcr.io/theburrowhub/heimdallm:latest` on every release. See [`docker/.env.example`](docker/.env.example) for all configuration options.
 
+#### Auto-discover repositories by topic
+
+Instead of listing every repository in `HEIMDALLM_REPOSITORIES`, you can tag
+the repos you want Heimdallm to watch with a GitHub **topic** and let the
+daemon discover them:
+
+```bash
+HEIMDALLM_DISCOVERY_TOPIC=heimdallm-review
+HEIMDALLM_DISCOVERY_ORGS=your-org,your-other-org   # required
+HEIMDALLM_DISCOVERY_INTERVAL=15m                    # optional, defaults to 15m
+```
+
+Any non-archived repo inside one of the listed orgs that carries the topic is
+merged into the monitored set on each discovery cycle. Transient Search API
+errors fall back to the last known-good list, so an outage never empties the
+set silently. The static `HEIMDALLM_REPOSITORIES` list keeps working — the
+two sources are merged (deduplicated) at poll time.
+
 ### Automated install (for agents / scripts)
 
 See [LLM-HOW-TO-INSTALL.md](LLM-HOW-TO-INSTALL.md) for a step-by-step guide suitable for Claude Code, shell scripts, or any automation tool.
@@ -120,11 +138,19 @@ make dev
 ### Other targets
 
 ```bash
-make test          # Run Go + Flutter test suites
+make test          # Run Go + Flutter test suites on the host
+make test-docker   # Run Go tests inside a pinned Docker image (EDR-safe)
 make dev-daemon    # Run daemon only (debug API at localhost:7842)
 make dev-stop      # Stop the running daemon
 make release-local # Build signed + notarized DMG and publish GitHub release
 ```
+
+> **Working on a laptop with corporate EDR (Elastic Security, CrowdStrike, …)?**
+> Use `make test-docker` instead of `make test` for the Go suite. `go test`
+> compiles ephemeral `*.test` binaries that EDR heuristics flag as malware;
+> running inside Docker keeps those artefacts in the container's tmpfs.
+> See [`AGENTS.md`](AGENTS.md) for the full rationale and the hardening
+> details to share with your security team.
 
 ### Project structure
 

@@ -5,8 +5,10 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/heimdallm/daemon/internal/executor"
@@ -15,6 +17,18 @@ import (
 var validIntervals = map[string]bool{
 	"1m": true, "5m": true, "30m": true, "1h": true,
 }
+
+// githubTopicPattern enforces GitHub's topic rules: lowercase letters, digits
+// and hyphens, starting with a letter or digit, up to 50 characters total.
+// See https://docs.github.com/repositories/classifying-your-repository-with-topics
+var githubTopicPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,49}$`)
+
+// githubOrgPattern matches the GitHub org/user slug format: alphanumeric plus
+// internal hyphens, 1–39 characters, not starting or ending with a hyphen.
+// Validating this defensively prevents injection into the Search API query
+// (e.g. a value like "evil-org archived:false org:other" being interpolated
+// verbatim into the `q=` parameter).
+var githubOrgPattern = regexp.MustCompile(`^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$`)
 
 type Config struct {
 	Server    ServerConfig    `toml:"server"`
@@ -35,6 +49,19 @@ type GitHubConfig struct {
 	// The daemon never polls these; they are stored here only so the Flutter UI can
 	// remember and display them after a restart.
 	NonMonitored []string `toml:"non_monitored"`
+
+	// DiscoveryTopic, when set, enables automatic repository discovery based on
+	// a GitHub topic tag (e.g. "heimdallm-review"). Discovered repos are merged
+	// with Repositories at poll time. Empty = discovery disabled.
+	DiscoveryTopic string `toml:"discovery_topic"`
+	// DiscoveryOrgs limits topic-based discovery to specific organisations.
+	// Required when DiscoveryTopic is set (prevents scanning all of GitHub).
+	DiscoveryOrgs []string `toml:"discovery_orgs"`
+	// DiscoveryInterval controls how often the discovery query is refreshed.
+	// Independent from PollInterval because the Search API has a stricter
+	// rate limit (30 req/min authenticated). Defaults to "15m" when discovery
+	// is enabled. Accepts any Go time.ParseDuration value.
+	DiscoveryInterval string `toml:"discovery_interval"`
 }
 
 // CLIAgentConfig holds per-CLI execution settings (model, flags, prompt override).
@@ -115,6 +142,9 @@ func (c *Config) applyDefaults() {
 	if c.GitHub.PollInterval == "" {
 		c.GitHub.PollInterval = "5m"
 	}
+	if c.GitHub.DiscoveryTopic != "" && c.GitHub.DiscoveryInterval == "" {
+		c.GitHub.DiscoveryInterval = "15m"
+	}
 	if c.Retention.MaxDays == 0 {
 		c.Retention.MaxDays = 90
 	}
@@ -163,6 +193,24 @@ func (c *Config) applyEnvOverrides() {
 			c.Retention.MaxDays = d
 		}
 	}
+	if v := os.Getenv("HEIMDALLM_DISCOVERY_TOPIC"); v != "" {
+		c.GitHub.DiscoveryTopic = v
+	}
+	if v := os.Getenv("HEIMDALLM_DISCOVERY_ORGS"); v != "" {
+		orgs := strings.Split(v, ",")
+		cleaned := make([]string, 0, len(orgs))
+		for _, o := range orgs {
+			if s := strings.TrimSpace(o); s != "" {
+				cleaned = append(cleaned, s)
+			}
+		}
+		if len(cleaned) > 0 {
+			c.GitHub.DiscoveryOrgs = cleaned
+		}
+	}
+	if v := os.Getenv("HEIMDALLM_DISCOVERY_INTERVAL"); v != "" {
+		c.GitHub.DiscoveryInterval = v
+	}
 }
 
 // Validate checks that required fields are present and values are valid.
@@ -180,6 +228,40 @@ func (c *Config) Validate() error {
 		}
 		if err := executor.ValidateApprovalMode(a.ApprovalMode); err != nil {
 			return fmt.Errorf("config: agents[%s].approval_mode: %w", name, err)
+		}
+	}
+	if err := c.validateDiscovery(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateDiscovery enforces the rules for topic-based repository discovery.
+// Topic must follow GitHub's topic format, at least one org is required when
+// discovery is enabled (to bound the Search API scope), and the interval must
+// be parseable as a positive duration.
+func (c *Config) validateDiscovery() error {
+	if c.GitHub.DiscoveryTopic == "" {
+		return nil
+	}
+	if !githubTopicPattern.MatchString(c.GitHub.DiscoveryTopic) {
+		return fmt.Errorf("config: github.discovery_topic %q is invalid (must match GitHub topic format: lowercase letters, digits and hyphens, up to 50 chars)", c.GitHub.DiscoveryTopic)
+	}
+	if len(c.GitHub.DiscoveryOrgs) == 0 {
+		return fmt.Errorf("config: github.discovery_orgs must list at least one organisation when discovery_topic is set")
+	}
+	for _, org := range c.GitHub.DiscoveryOrgs {
+		if !githubOrgPattern.MatchString(org) {
+			return fmt.Errorf("config: github.discovery_orgs entry %q is invalid (must match GitHub org/user slug: 1–39 alphanumerics plus internal hyphens)", org)
+		}
+	}
+	if c.GitHub.DiscoveryInterval != "" {
+		d, err := time.ParseDuration(c.GitHub.DiscoveryInterval)
+		if err != nil {
+			return fmt.Errorf("config: github.discovery_interval %q is invalid: %w", c.GitHub.DiscoveryInterval, err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("config: github.discovery_interval %q must be positive", c.GitHub.DiscoveryInterval)
 		}
 	}
 	return nil

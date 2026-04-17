@@ -10,6 +10,15 @@ bind_addr = "0.0.0.0"
 poll_interval = "5m"
 repositories = ["org/repo1", "org/repo2"]
 
+# Topic-based auto-discovery (optional).
+# When discovery_topic is set, any repo inside discovery_orgs that carries the
+# topic is automatically monitored alongside the static list above. The merged
+# list is refreshed every discovery_interval. See:
+# https://docs.github.com/repositories/classifying-your-repository-with-topics
+# discovery_topic    = "heimdallm-review"
+# discovery_orgs     = ["your-org", "your-other-org"]   # required when discovery_topic is set
+# discovery_interval = "15m"                             # any Go duration; defaults to 15m
+
 [ai]
 # Available: claude, gemini, codex, opencode
 primary = "claude"
