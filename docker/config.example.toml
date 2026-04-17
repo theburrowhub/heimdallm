@@ -19,6 +19,24 @@ repositories = ["org/repo1", "org/repo2"]
 # discovery_orgs     = ["your-org", "your-other-org"]   # required when discovery_topic is set
 # discovery_interval = "15m"                             # any Go duration; defaults to 15m
 
+# Issue tracking pipeline (fase-2).
+# When enabled, the daemon fetches open issues from the monitored repos,
+# classifies them by label, and — depending on the mode — posts an AI
+# review comment (review_only) or opens an implementation PR
+# (auto_implement). Label classification precedence:
+#
+#   skip_labels  >  review_only_labels  >  develop_labels  >  default_action
+#
+# [github.issue_tracking]
+# enabled             = false
+# filter_mode         = "exclusive"              # "exclusive" (AND) | "inclusive" (OR)
+# default_action      = "ignore"                 # "ignore" | "review_only"
+# organizations       = ["your-org"]             # empty = any org in repositories
+# assignees           = ["your-username"]        # empty = any assignee (or unassigned)
+# develop_labels      = ["enhancement", "feature", "bug"]
+# review_only_labels  = ["question", "discussion", "analysis"]
+# skip_labels         = ["wontfix", "duplicate", "invalid"]
+
 [ai]
 # Available: claude, gemini, codex, opencode
 primary = "claude"

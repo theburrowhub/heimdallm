@@ -62,6 +62,38 @@ CREATE TABLE IF NOT EXISTS agents (
   is_default   INTEGER NOT NULL DEFAULT 0,
   created_at DATETIME NOT NULL
 );
+
+-- Issue tracking pipeline (#24). The assignees and labels columns hold JSON
+-- arrays of strings so we do not have to create a separate join table just
+-- for display; the issue_reviews downstream consumers treat the whole row
+-- as one record.
+CREATE TABLE IF NOT EXISTS issues (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  github_id   INTEGER UNIQUE NOT NULL,
+  repo        TEXT NOT NULL,
+  number      INTEGER NOT NULL,
+  title       TEXT NOT NULL,
+  body        TEXT NOT NULL DEFAULT '',
+  author      TEXT NOT NULL,
+  assignees   TEXT NOT NULL DEFAULT '[]',
+  labels      TEXT NOT NULL DEFAULT '[]',
+  state       TEXT NOT NULL,
+  created_at  DATETIME NOT NULL,
+  fetched_at  DATETIME NOT NULL,
+  dismissed   INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS issue_reviews (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  issue_id     INTEGER NOT NULL REFERENCES issues(id),
+  cli_used     TEXT NOT NULL,
+  summary      TEXT NOT NULL,
+  triage       TEXT NOT NULL,
+  suggestions  TEXT NOT NULL DEFAULT '[]',
+  action_taken TEXT NOT NULL DEFAULT 'review_only',
+  pr_created   INTEGER NOT NULL DEFAULT 0,
+  created_at   DATETIME NOT NULL
+);
 `
 
 // Open opens (or creates) a SQLite database at dsn and applies the schema.

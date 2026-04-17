@@ -383,6 +383,220 @@ func TestValidate_DiscoveryOrgsValid(t *testing.T) {
 	}
 }
 
+// ── Issue tracking ───────────────────────────────────────────────────────────
+
+func TestApplyDefaults_IssueTracking(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+
+	if cfg.GitHub.IssueTracking.FilterMode != FilterModeExclusive {
+		t.Errorf("FilterMode = %q, want default %q", cfg.GitHub.IssueTracking.FilterMode, FilterModeExclusive)
+	}
+	if cfg.GitHub.IssueTracking.DefaultAction != string(IssueModeIgnore) {
+		t.Errorf("DefaultAction = %q, want default %q", cfg.GitHub.IssueTracking.DefaultAction, IssueModeIgnore)
+	}
+	if cfg.GitHub.IssueTracking.Enabled {
+		t.Error("Enabled should default to false")
+	}
+}
+
+func TestApplyDefaults_IssueTrackingPreservesExisting(t *testing.T) {
+	cfg := &Config{}
+	cfg.GitHub.IssueTracking.FilterMode = FilterModeInclusive
+	cfg.GitHub.IssueTracking.DefaultAction = string(IssueModeReviewOnly)
+	cfg.applyDefaults()
+
+	if cfg.GitHub.IssueTracking.FilterMode != FilterModeInclusive {
+		t.Errorf("FilterMode overwritten: %q", cfg.GitHub.IssueTracking.FilterMode)
+	}
+	if cfg.GitHub.IssueTracking.DefaultAction != string(IssueModeReviewOnly) {
+		t.Errorf("DefaultAction overwritten: %q", cfg.GitHub.IssueTracking.DefaultAction)
+	}
+}
+
+func TestApplyEnvOverrides_IssueTracking(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+
+	t.Setenv("HEIMDALLM_ISSUE_TRACKING_ENABLED", "true")
+	t.Setenv("HEIMDALLM_ISSUE_FILTER_MODE", "inclusive")
+	t.Setenv("HEIMDALLM_ISSUE_DEFAULT_ACTION", "review_only")
+	t.Setenv("HEIMDALLM_ISSUE_ORGANIZATIONS", "freepik-company, theburrowhub")
+	t.Setenv("HEIMDALLM_ISSUE_ASSIGNEES", "sergiotejon")
+	t.Setenv("HEIMDALLM_ISSUE_DEVELOP_LABELS", "enhancement,feature, bug")
+	t.Setenv("HEIMDALLM_ISSUE_REVIEW_ONLY_LABELS", "question,discussion")
+	t.Setenv("HEIMDALLM_ISSUE_SKIP_LABELS", "wontfix")
+
+	cfg.applyEnvOverrides()
+
+	it := cfg.GitHub.IssueTracking
+	if !it.Enabled {
+		t.Error("Enabled should be true")
+	}
+	if it.FilterMode != FilterModeInclusive {
+		t.Errorf("FilterMode = %q", it.FilterMode)
+	}
+	if it.DefaultAction != string(IssueModeReviewOnly) {
+		t.Errorf("DefaultAction = %q", it.DefaultAction)
+	}
+	if len(it.Organizations) != 2 || it.Organizations[1] != "theburrowhub" {
+		t.Errorf("Organizations = %v", it.Organizations)
+	}
+	if len(it.Assignees) != 1 || it.Assignees[0] != "sergiotejon" {
+		t.Errorf("Assignees = %v", it.Assignees)
+	}
+	if len(it.DevelopLabels) != 3 || it.DevelopLabels[2] != "bug" {
+		t.Errorf("DevelopLabels = %v", it.DevelopLabels)
+	}
+	if len(it.ReviewOnlyLabels) != 2 {
+		t.Errorf("ReviewOnlyLabels = %v", it.ReviewOnlyLabels)
+	}
+	if len(it.SkipLabels) != 1 {
+		t.Errorf("SkipLabels = %v", it.SkipLabels)
+	}
+}
+
+func TestApplyEnvOverrides_IssueTracking_BlankCSVPreservesExisting(t *testing.T) {
+	cfg := &Config{}
+	cfg.GitHub.IssueTracking.DevelopLabels = []string{"existing"}
+
+	t.Setenv("HEIMDALLM_ISSUE_DEVELOP_LABELS", "  ,  ,  ")
+	cfg.applyEnvOverrides()
+
+	if len(cfg.GitHub.IssueTracking.DevelopLabels) != 1 || cfg.GitHub.IssueTracking.DevelopLabels[0] != "existing" {
+		t.Errorf("expected existing value to be preserved, got %v", cfg.GitHub.IssueTracking.DevelopLabels)
+	}
+}
+
+func TestValidate_IssueTrackingDisabledSkipsChecks(t *testing.T) {
+	cfg := &Config{
+		AI: AIConfig{Primary: "claude"},
+		GitHub: GitHubConfig{
+			IssueTracking: IssueTrackingConfig{
+				Enabled:       false,
+				FilterMode:    FilterMode("nonsense"),
+				DefaultAction: "also nonsense",
+			},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("disabled issue_tracking should skip validation, got: %v", err)
+	}
+}
+
+func TestValidate_IssueTrackingInvalidFilterMode(t *testing.T) {
+	cfg := &Config{
+		AI: AIConfig{Primary: "claude"},
+		GitHub: GitHubConfig{
+			IssueTracking: IssueTrackingConfig{
+				Enabled:       true,
+				FilterMode:    FilterMode("excluive"),
+				DefaultAction: string(IssueModeIgnore),
+			},
+		},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for invalid filter_mode")
+	}
+	if !strings.Contains(err.Error(), "filter_mode") {
+		t.Errorf("error should mention filter_mode, got: %v", err)
+	}
+}
+
+func TestValidate_IssueTrackingInvalidDefaultAction(t *testing.T) {
+	cfg := &Config{
+		AI: AIConfig{Primary: "claude"},
+		GitHub: GitHubConfig{
+			IssueTracking: IssueTrackingConfig{
+				Enabled:       true,
+				FilterMode:    FilterModeExclusive,
+				DefaultAction: "auto_implement",
+			},
+		},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for invalid default_action")
+	}
+	if !strings.Contains(err.Error(), "default_action") {
+		t.Errorf("error should mention default_action, got: %v", err)
+	}
+}
+
+func TestValidate_IssueTrackingEnabledDefaultsPassValidation(t *testing.T) {
+	cfg := &Config{AI: AIConfig{Primary: "claude"}}
+	cfg.GitHub.IssueTracking.Enabled = true
+	cfg.applyDefaults() // fills FilterMode + DefaultAction
+
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("applyDefaults + Enabled should pass validation, got: %v", err)
+	}
+}
+
+// ── Issue classification ─────────────────────────────────────────────────────
+
+func TestClassify_Precedence(t *testing.T) {
+	cfg := IssueTrackingConfig{
+		SkipLabels:       []string{"wontfix"},
+		ReviewOnlyLabels: []string{"question", "discussion"},
+		DevelopLabels:    []string{"bug", "enhancement"},
+		DefaultAction:    string(IssueModeIgnore),
+	}
+	cases := []struct {
+		name   string
+		labels []string
+		want   IssueMode
+	}{
+		{"skip wins over review_only + develop", []string{"wontfix", "question", "bug"}, IssueModeIgnore},
+		{"review_only wins over develop", []string{"question", "bug"}, IssueModeReviewOnly},
+		{"develop only", []string{"bug"}, IssueModeDevelop},
+		{"unrelated labels fall back to default_action=ignore", []string{"help-wanted"}, IssueModeIgnore},
+		{"no labels fall back to default_action=ignore", nil, IssueModeIgnore},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := cfg.Classify(tc.labels); got != tc.want {
+				t.Errorf("Classify(%v) = %q, want %q", tc.labels, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestClassify_CaseInsensitive(t *testing.T) {
+	cfg := IssueTrackingConfig{
+		ReviewOnlyLabels: []string{"Question"},
+		DevelopLabels:    []string{"BUG"},
+		DefaultAction:    string(IssueModeIgnore),
+	}
+	if got := cfg.Classify([]string{"bug"}); got != IssueModeDevelop {
+		t.Errorf("Classify(bug) = %q, want develop (case-insensitive)", got)
+	}
+	if got := cfg.Classify([]string{"QUESTION"}); got != IssueModeReviewOnly {
+		t.Errorf("Classify(QUESTION) = %q, want review_only", got)
+	}
+}
+
+func TestClassify_DefaultActionReviewOnly(t *testing.T) {
+	cfg := IssueTrackingConfig{
+		DevelopLabels: []string{"bug"},
+		DefaultAction: string(IssueModeReviewOnly),
+	}
+	if got := cfg.Classify([]string{"help-wanted"}); got != IssueModeReviewOnly {
+		t.Errorf("Classify unrelated label = %q, want review_only (default_action)", got)
+	}
+}
+
+func TestClassify_TrimsWhitespace(t *testing.T) {
+	cfg := IssueTrackingConfig{
+		DevelopLabels: []string{"  bug  "},
+		DefaultAction: string(IssueModeIgnore),
+	}
+	if got := cfg.Classify([]string{"bug"}); got != IssueModeDevelop {
+		t.Errorf("Classify should trim whitespace in configured labels, got %q", got)
+	}
+}
+
 // ── AIForRepo ────────────────────────────────────────────────────────────────
 
 func TestAIForRepo_GlobalFallback(t *testing.T) {

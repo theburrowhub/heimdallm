@@ -62,6 +62,110 @@ type GitHubConfig struct {
 	// rate limit (30 req/min authenticated). Defaults to "15m" when discovery
 	// is enabled. Accepts any Go time.ParseDuration value.
 	DiscoveryInterval string `toml:"discovery_interval"`
+
+	// IssueTracking turns the issue-tracking pipeline (fase-2) on and off and
+	// governs how issues are filtered and classified. The pipeline itself
+	// lives in downstream issues (#25 onward); this struct is the
+	// configuration surface only.
+	IssueTracking IssueTrackingConfig `toml:"issue_tracking"`
+}
+
+// IssueMode is the processing mode assigned to an issue after label
+// classification. Used by the pipeline (#26/#27) to pick review_only vs.
+// auto_implement vs. skip. Exported so downstream packages can reuse it.
+type IssueMode string
+
+const (
+	IssueModeIgnore     IssueMode = "ignore"
+	IssueModeDevelop    IssueMode = "develop"
+	IssueModeReviewOnly IssueMode = "review_only"
+)
+
+// FilterMode names how the org / assignee / label filters are combined.
+// Keeping it as a named type (mirrors IssueMode) lets validation surface type
+// mismatches at compile time rather than as a runtime string compare.
+type FilterMode string
+
+const (
+	FilterModeExclusive FilterMode = "exclusive" // AND
+	FilterModeInclusive FilterMode = "inclusive" // OR
+)
+
+// IssueTrackingConfig is the `[github.issue_tracking]` section.
+//
+// Classification precedence (applied in Classify):
+//
+//	skip_labels  >  review_only_labels  >  develop_labels  >  default_action
+//
+// An issue that carries a label present in multiple lists resolves to the
+// highest-precedence match. This is a fail-safe ordering: when in doubt,
+// review before developing, and skip before either.
+type IssueTrackingConfig struct {
+	Enabled bool `toml:"enabled"`
+
+	// FilterMode decides how the org / assignee / label dimensions are
+	// combined ("exclusive" = AND, "inclusive" = OR). Applied by the
+	// pipeline; not consulted by Classify itself.
+	FilterMode FilterMode `toml:"filter_mode"`
+
+	// Organizations limits processing to issues belonging to these orgs.
+	// Empty = no org filter.
+	Organizations []string `toml:"organizations"`
+
+	// Assignees limits processing to issues assigned to these GitHub users.
+	// Empty = no assignee filter.
+	Assignees []string `toml:"assignees"`
+
+	// DevelopLabels are labels that mark an issue as "please implement".
+	DevelopLabels []string `toml:"develop_labels"`
+
+	// ReviewOnlyLabels are labels that mark an issue as "please analyse and
+	// comment only". Takes precedence over DevelopLabels when both are
+	// present on the same issue — fail-safe default.
+	ReviewOnlyLabels []string `toml:"review_only_labels"`
+
+	// SkipLabels are labels that opt an issue out of processing entirely.
+	// Highest precedence.
+	SkipLabels []string `toml:"skip_labels"`
+
+	// DefaultAction is applied when an issue carries no label from any of
+	// the three lists above. Must be "ignore" or "review_only".
+	DefaultAction string `toml:"default_action"`
+}
+
+// Classify returns the processing mode for an issue given its labels.
+// Matching is case-insensitive to match the way GitHub displays labels; the
+// underlying labels API is case-preserving but the UI is not, so users
+// routinely mix "Bug" and "bug" in practice.
+func (c IssueTrackingConfig) Classify(labels []string) IssueMode {
+	set := make(map[string]struct{}, len(labels))
+	for _, l := range labels {
+		set[strings.ToLower(strings.TrimSpace(l))] = struct{}{}
+	}
+	if labelSetIntersects(set, c.SkipLabels) {
+		return IssueModeIgnore
+	}
+	if labelSetIntersects(set, c.ReviewOnlyLabels) {
+		return IssueModeReviewOnly
+	}
+	if labelSetIntersects(set, c.DevelopLabels) {
+		return IssueModeDevelop
+	}
+	switch strings.ToLower(c.DefaultAction) {
+	case "review_only":
+		return IssueModeReviewOnly
+	default:
+		return IssueModeIgnore
+	}
+}
+
+func labelSetIntersects(set map[string]struct{}, list []string) bool {
+	for _, l := range list {
+		if _, ok := set[strings.ToLower(strings.TrimSpace(l))]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // CLIAgentConfig holds per-CLI execution settings (model, flags, prompt override).
@@ -145,6 +249,12 @@ func (c *Config) applyDefaults() {
 	if c.GitHub.DiscoveryTopic != "" && c.GitHub.DiscoveryInterval == "" {
 		c.GitHub.DiscoveryInterval = "15m"
 	}
+	if c.GitHub.IssueTracking.FilterMode == "" {
+		c.GitHub.IssueTracking.FilterMode = FilterModeExclusive
+	}
+	if c.GitHub.IssueTracking.DefaultAction == "" {
+		c.GitHub.IssueTracking.DefaultAction = string(IssueModeIgnore)
+	}
 	if c.Retention.MaxDays == 0 {
 		c.Retention.MaxDays = 90
 	}
@@ -211,6 +321,61 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("HEIMDALLM_DISCOVERY_INTERVAL"); v != "" {
 		c.GitHub.DiscoveryInterval = v
 	}
+	c.applyIssueTrackingEnv()
+}
+
+// applyIssueTrackingEnv maps HEIMDALLM_ISSUE_* env vars into IssueTrackingConfig.
+// CSV lists only overwrite the TOML value when at least one non-blank entry is
+// present, matching the behaviour of HEIMDALLM_REPOSITORIES.
+func (c *Config) applyIssueTrackingEnv() {
+	if v := os.Getenv("HEIMDALLM_ISSUE_TRACKING_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.GitHub.IssueTracking.Enabled = b
+		}
+	}
+	if v := os.Getenv("HEIMDALLM_ISSUE_FILTER_MODE"); v != "" {
+		c.GitHub.IssueTracking.FilterMode = FilterMode(v)
+	}
+	if v := os.Getenv("HEIMDALLM_ISSUE_DEFAULT_ACTION"); v != "" {
+		c.GitHub.IssueTracking.DefaultAction = v
+	}
+	if list, ok := csvEnv("HEIMDALLM_ISSUE_ORGANIZATIONS"); ok {
+		c.GitHub.IssueTracking.Organizations = list
+	}
+	if list, ok := csvEnv("HEIMDALLM_ISSUE_ASSIGNEES"); ok {
+		c.GitHub.IssueTracking.Assignees = list
+	}
+	if list, ok := csvEnv("HEIMDALLM_ISSUE_DEVELOP_LABELS"); ok {
+		c.GitHub.IssueTracking.DevelopLabels = list
+	}
+	if list, ok := csvEnv("HEIMDALLM_ISSUE_REVIEW_ONLY_LABELS"); ok {
+		c.GitHub.IssueTracking.ReviewOnlyLabels = list
+	}
+	if list, ok := csvEnv("HEIMDALLM_ISSUE_SKIP_LABELS"); ok {
+		c.GitHub.IssueTracking.SkipLabels = list
+	}
+}
+
+// csvEnv parses a comma-separated env var into a trimmed, non-empty list.
+// Returns ok=false when the env var is unset OR contains only blanks, so the
+// caller can preserve any existing TOML value (same contract as the
+// HEIMDALLM_REPOSITORIES override).
+func csvEnv(name string) ([]string, bool) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return nil, false
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if s := strings.TrimSpace(p); s != "" {
+			out = append(out, s)
+		}
+	}
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, true
 }
 
 // Validate checks that required fields are present and values are valid.
@@ -232,6 +397,34 @@ func (c *Config) Validate() error {
 	}
 	if err := c.validateDiscovery(); err != nil {
 		return err
+	}
+	if err := c.validateIssueTracking(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateIssueTracking enforces the small set of invariants the pipeline
+// relies on: filter_mode and default_action must be from a known set. Labels
+// themselves are free-form strings — intentionally — because GitHub allows
+// almost anything in a label and we do not want to reject legitimate values.
+// Silent fallbacks in applyDefaults mean the user almost never sees these
+// errors; they exist so an explicit typo like filter_mode = "excluive" fails
+// fast instead of defaulting silently.
+func (c *Config) validateIssueTracking() error {
+	it := c.GitHub.IssueTracking
+	if !it.Enabled {
+		return nil
+	}
+	switch it.FilterMode {
+	case FilterModeExclusive, FilterModeInclusive:
+	default:
+		return fmt.Errorf("config: github.issue_tracking.filter_mode %q is invalid (must be %q or %q)", it.FilterMode, FilterModeExclusive, FilterModeInclusive)
+	}
+	switch IssueMode(it.DefaultAction) {
+	case IssueModeIgnore, IssueModeReviewOnly:
+	default:
+		return fmt.Errorf("config: github.issue_tracking.default_action %q is invalid (must be %q or %q)", it.DefaultAction, IssueModeIgnore, IssueModeReviewOnly)
 	}
 	return nil
 }
