@@ -112,6 +112,8 @@ func Open(dsn string) (*Store, error) {
 	db.Exec("ALTER TABLE agents ADD COLUMN cli_flags TEXT NOT NULL DEFAULT ''")
 	db.Exec("ALTER TABLE agents RENAME COLUMN prompt TO prompt") // no-op, ensures column exists
 	db.Exec("ALTER TABLE prs ADD COLUMN dismissed INTEGER NOT NULL DEFAULT 0")
+	db.Exec("ALTER TABLE agents ADD COLUMN issue_prompt TEXT NOT NULL DEFAULT ''")
+	db.Exec("ALTER TABLE agents ADD COLUMN issue_instructions TEXT NOT NULL DEFAULT ''")
 	return &Store{db: db}, nil
 }
 

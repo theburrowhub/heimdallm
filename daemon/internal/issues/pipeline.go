@@ -126,6 +126,11 @@ type RunOptions struct {
 	Fallback    string
 	ExecOpts    executor.ExecOptions
 	GitHubToken string
+
+	// Issue prompt customization (resolved by caller from agent profiles).
+	// Priority: IssuePromptOverride (repo-level) > IssueAgentPromptID (agent-level) > default template.
+	IssuePromptOverride string // full custom template from repo-level agent
+	IssueInstructions   string // plain text injected into default template
 }
 
 // Pipeline runs a single issue triage or implementation end-to-end.
@@ -247,16 +252,20 @@ func (p *Pipeline) runReviewOnly(ctx context.Context, issue *github.Issue, issue
 
 	// Build prompt + run the CLI. HasLocalDir mirrors workDir above so the
 	// LLM hears the same story as the mode-selection logic.
-	prompt := BuildPrompt(PromptContext{
+	// Agent profile customization: IssuePromptOverride replaces the entire
+	// template; IssueInstructions injects into the default template.
+	promptCtx := PromptContext{
 		Repo:        issue.Repo,
 		Number:      issue.Number,
 		Title:       issue.Title,
 		Author:      issue.User.Login,
 		Labels:      issue.LabelNames(),
+		Assignees:   issue.AssigneeLogins(),
 		Body:        issue.Body,
 		Comments:    comments,
 		HasLocalDir: workDir != "",
-	})
+	}
+	prompt := BuildPromptWithProfile(promptCtx, opts.IssuePromptOverride, opts.IssueInstructions)
 
 	cli, err := p.executor.Detect(opts.Primary, opts.Fallback)
 	if err != nil {

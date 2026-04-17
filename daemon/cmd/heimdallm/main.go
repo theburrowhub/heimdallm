@@ -293,6 +293,9 @@ func main() {
 							extraFlags = ""
 						}
 					}
+
+					issuePrompt, issueInstructions := resolveIssuePrompt(s, aiCfg.IssuePrompt, agentCfg.PromptID)
+
 					return issuepipeline.RunOptions{
 						Primary:  aiCfg.Primary,
 						Fallback: aiCfg.Fallback,
@@ -308,6 +311,8 @@ func main() {
 							DangerouslySkipPerms: agentCfg.DangerouslySkipPerms,
 							NoSessionPersistence: agentCfg.NoSessionPersistence,
 						},
+						IssuePromptOverride: issuePrompt,
+						IssueInstructions:   issueInstructions,
 					}
 				}
 
@@ -579,6 +584,8 @@ func main() {
 			}
 		}
 
+		issuePrompt, issueInstructions := resolveIssuePrompt(s, aiCfg.IssuePrompt, agentCfg.PromptID)
+
 		opts := issuepipeline.RunOptions{
 			Primary:  aiCfg.Primary,
 			Fallback: aiCfg.Fallback,
@@ -594,6 +601,8 @@ func main() {
 				DangerouslySkipPerms: agentCfg.DangerouslySkipPerms,
 				NoSessionPersistence: agentCfg.NoSessionPersistence,
 			},
+			IssuePromptOverride: issuePrompt,
+			IssueInstructions:   issueInstructions,
 		}
 
 		slog.Info("trigger issue review: running pipeline",
@@ -743,6 +752,56 @@ func loadOrCreateAPIToken(dir string) (string, error) {
 	}
 	slog.Info("api_token: created new token", "path", path)
 	return tok, nil
+}
+
+// resolveIssuePrompt looks up the Agent profile for issue triage using the
+// same 3-level priority as PR reviews:
+//  1. repoPromptID — repo-level override (from [ai.repos."org/repo"] issue_prompt)
+//  2. agentPromptID — agent-level override (from [ai.agents.<cli>] prompt)
+//  3. global default agent (is_default = true)
+//
+// Returns (customTemplate, customInstructions). Both empty = use built-in default.
+func resolveIssuePrompt(s *store.Store, repoPromptID, agentPromptID string) (string, string) {
+	agents, err := s.ListAgents()
+	if err != nil || len(agents) == 0 {
+		return "", ""
+	}
+
+	var a *store.Agent
+	// 1. Repo-level override
+	for _, ag := range agents {
+		if repoPromptID != "" && ag.ID == repoPromptID {
+			a = ag
+			break
+		}
+	}
+	// 2. Agent-level override
+	if a == nil {
+		for _, ag := range agents {
+			if agentPromptID != "" && ag.ID == agentPromptID {
+				a = ag
+				break
+			}
+		}
+	}
+	// 3. Global default
+	if a == nil {
+		for _, ag := range agents {
+			if ag.IsDefault {
+				a = ag
+				break
+			}
+		}
+	}
+	if a == nil {
+		return "", ""
+	}
+
+	// IssuePrompt takes precedence over IssueInstructions (same as Prompt vs Instructions for PRs)
+	if a.IssuePrompt != "" {
+		return a.IssuePrompt, ""
+	}
+	return "", a.IssueInstructions
 }
 
 // sseData serializes a map to a compact JSON string for SSE event Data fields.

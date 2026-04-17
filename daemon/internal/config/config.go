@@ -197,10 +197,13 @@ type RepoAI struct {
 	Primary    string `toml:"primary"`
 	// Prompt is the ID of a review prompt profile to use for this repo.
 	// Overrides agent-level and global default prompts.
-	Prompt     string `toml:"prompt"`
-	Fallback   string `toml:"fallback"`
-	ReviewMode string `toml:"review_mode"` // "" = inherit global
-	LocalDir   string `toml:"local_dir"`   // local repo path for full-repo analysis
+	Prompt      string `toml:"prompt"`
+	// IssuePrompt is the ID of an agent profile for issue triage.
+	// Overrides agent-level and global default issue prompts.
+	IssuePrompt string `toml:"issue_prompt"`
+	Fallback    string `toml:"fallback"`
+	ReviewMode  string `toml:"review_mode"` // "" = inherit global
+	LocalDir    string `toml:"local_dir"`   // local repo path for full-repo analysis
 }
 
 type RetentionConfig struct {
