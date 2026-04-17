@@ -6,6 +6,7 @@
 package issues
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -18,6 +19,35 @@ import (
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
 )
+
+// maxTitleBytes bounds the length of issue titles that get interpolated into
+// commit messages and PR title / body. Long titles turn into unwieldy
+// multi-line messages; more importantly, sanitizeTitle strips CR / LF so a
+// crafted title cannot inject fake git trailers (Co-Authored-By, etc.).
+const maxTitleBytes = 120
+
+// sanitizeTitle cleans issue.Title for interpolation into commit messages
+// and PR metadata: newlines and carriage returns are replaced with a space
+// (to defuse trailer injection) and the result is rune-truncated to
+// maxTitleBytes so a verbose title does not blow up the commit message.
+func sanitizeTitle(s string) string {
+	cleaned := strings.NewReplacer("\r", " ", "\n", " ").Replace(strings.TrimSpace(s))
+	if len(cleaned) <= maxTitleBytes {
+		return cleaned
+	}
+	// Walk back to the nearest rune start so we never split a multi-byte
+	// character when truncating.
+	i := maxTitleBytes
+	for i > 0 {
+		r := cleaned[i]
+		// UTF-8: bytes with high bits 10xxxxxx are continuation bytes.
+		if r < 0x80 || r >= 0xC0 {
+			break
+		}
+		i--
+	}
+	return cleaned[:i] + "…"
+}
 
 // IssueCommenter posts a comment on an issue. Same method GitHub exposes for
 // PR comments — both routes share `/repos/{owner}/{repo}/issues/{n}/comments`.
@@ -142,10 +172,15 @@ func New(s issueStore, gh issueGitHub, exec CLIExecutor, git GitOps, broker Publ
 // downgraded to review_only with an explanatory comment.
 //
 // Run is the single entry point; it decides the mode and delegates to
-// runReviewOnly or runAutoImplement so each flow stays readable.
-func (p *Pipeline) Run(issue *github.Issue, opts RunOptions) (*store.IssueReview, error) {
+// runReviewOnly or runAutoImplement so each flow stays readable. The caller
+// passes a context so long-running network operations (git fetch / push,
+// CLI invocation) can be cancelled on daemon shutdown.
+func (p *Pipeline) Run(ctx context.Context, issue *github.Issue, opts RunOptions) (*store.IssueReview, error) {
 	if issue == nil {
 		return nil, fmt.Errorf("issues pipeline: nil issue")
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
 	// Determine the effective mode. `ExecOpts.WorkDir` is the single source
@@ -180,17 +215,21 @@ func (p *Pipeline) Run(issue *github.Issue, opts RunOptions) (*store.IssueReview
 
 	switch effective {
 	case config.IssueModeReviewOnly:
-		return p.runReviewOnly(issue, issueID, workDir, opts)
+		return p.runReviewOnly(ctx, issue, issueID, workDir, opts)
 	case config.IssueModeDevelop:
-		return p.runAutoImplement(issue, issueID, workDir, opts)
+		return p.runAutoImplement(ctx, issue, issueID, workDir, opts)
 	default:
 		return nil, fmt.Errorf("issues pipeline: unknown effective mode %q", effective)
 	}
 }
 
 // runReviewOnly posts a triage comment and persists the review. Shared
-// upsert + issue_detected event have already been done by Run.
-func (p *Pipeline) runReviewOnly(issue *github.Issue, issueID int64, workDir string, opts RunOptions) (*store.IssueReview, error) {
+// upsert + issue_detected event have already been done by Run. The ctx
+// parameter is not yet passed through to executor/gh — those dependencies
+// don't accept one — but it is plumbed here so the method signature stays
+// in lockstep with runAutoImplement and ready for the day they do.
+func (p *Pipeline) runReviewOnly(ctx context.Context, issue *github.Issue, issueID int64, workDir string, opts RunOptions) (*store.IssueReview, error) {
+	_ = ctx // reserved for executor/gh cancellation when those deps accept one
 	p.publish(sse.EventIssueReviewStarted, map[string]any{
 		"issue_id": issueID, "number": issue.Number, "repo": issue.Repo, "mode": "review_only",
 	})
@@ -286,7 +325,9 @@ func (p *Pipeline) runReviewOnly(issue *github.Issue, issueID int64, workDir str
 // commits + pushes whatever it changed, opens a PR, and persists the review.
 // When the agent produces no changes the run silently degrades to
 // review_only with an explanatory comment rather than opening an empty PR.
-func (p *Pipeline) runAutoImplement(issue *github.Issue, issueID int64, workDir string, opts RunOptions) (*store.IssueReview, error) {
+// On a Push-succeeded-but-CreatePR-failed path the orphaned remote branch is
+// cleaned up so the re-run starts from a clean remote.
+func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, issueID int64, workDir string, opts RunOptions) (*store.IssueReview, error) {
 	if p.git == nil {
 		p.publishError(issueID, issue, fmt.Errorf("git dependency not wired"))
 		return nil, fmt.Errorf("issues pipeline: auto_implement requires a GitOps dep")
@@ -303,6 +344,11 @@ func (p *Pipeline) runAutoImplement(issue *github.Issue, issueID int64, workDir 
 		p.notify.Notify("Issue Auto-Implement Started", fmt.Sprintf("%s #%d", issue.Repo, issue.Number))
 	}
 
+	// Sanitize the title once at the top — every commit / PR string derives
+	// from this value. Keeps trailer-injection attempts and runaway-length
+	// titles out of git history and PR metadata.
+	safeTitle := sanitizeTitle(issue.Title)
+
 	// Resolve the default branch first so we fail fast on a bad token / repo
 	// name before the CLI burns a turn on the prompt.
 	base, err := p.gh.GetDefaultBranch(issue.Repo)
@@ -312,7 +358,7 @@ func (p *Pipeline) runAutoImplement(issue *github.Issue, issueID int64, workDir 
 	}
 
 	branch := fmt.Sprintf("heimdallm/issue-%d", issue.Number)
-	if err := p.git.CheckoutNewBranch(workDir, branch, base); err != nil {
+	if err := p.git.CheckoutNewBranch(ctx, workDir, branch, base); err != nil {
 		p.publishError(issueID, issue, fmt.Errorf("checkout: %w", err))
 		return nil, fmt.Errorf("issues pipeline: checkout: %w", err)
 	}
@@ -344,7 +390,7 @@ func (p *Pipeline) runAutoImplement(issue *github.Issue, issueID int64, workDir 
 
 	// If the agent produced no changes we do NOT open an empty PR. Fall back
 	// to a review_only-style comment so the issue still gets acknowledged.
-	changed, err := p.git.HasChanges(workDir)
+	changed, err := p.git.HasChanges(ctx, workDir)
 	if err != nil {
 		p.publishError(issueID, issue, fmt.Errorf("status: %w", err))
 		return nil, fmt.Errorf("issues pipeline: git status: %w", err)
@@ -354,23 +400,41 @@ func (p *Pipeline) runAutoImplement(issue *github.Issue, issueID int64, workDir 
 	}
 
 	commitMsg := fmt.Sprintf("feat: implement #%d — %s\n\nAuto-implemented by Heimdallm.\nCloses #%d",
-		issue.Number, issue.Title, issue.Number)
-	if err := p.git.CommitAll(workDir, commitMsg); err != nil {
+		issue.Number, safeTitle, issue.Number)
+	if err := p.git.CommitAll(ctx, workDir, commitMsg); err != nil {
 		p.publishError(issueID, issue, fmt.Errorf("commit: %w", err))
 		return nil, fmt.Errorf("issues pipeline: commit: %w", err)
 	}
-	if err := p.git.Push(workDir, issue.Repo, branch, opts.GitHubToken); err != nil {
+	if err := p.git.Push(ctx, workDir, issue.Repo, branch, opts.GitHubToken); err != nil {
 		p.publishError(issueID, issue, fmt.Errorf("push: %w", err))
 		return nil, fmt.Errorf("issues pipeline: push: %w", err)
 	}
 
-	prTitle := fmt.Sprintf("feat: implement #%d — %s", issue.Number, issue.Title)
+	prTitle := fmt.Sprintf("feat: implement #%d — %s", issue.Number, safeTitle)
 	prBody := fmt.Sprintf("Auto-generated by Heimdallm in response to #%d.\n\nCloses #%d",
 		issue.Number, issue.Number)
 	prNumber, err := p.gh.CreatePR(issue.Repo, prTitle, prBody, branch, base)
 	if err != nil {
+		// The branch is already live on the remote but has no PR attached.
+		// Best-effort delete so a re-run does not trip over the stale ref —
+		// a failure here is logged but not escalated (we are already on the
+		// error path; do not mask the real cause).
+		if delErr := p.git.DeleteRemoteBranch(ctx, workDir, issue.Repo, branch, opts.GitHubToken); delErr != nil {
+			slog.Warn("issues pipeline: could not clean up orphaned remote branch",
+				"repo", issue.Repo, "branch", branch, "err", delErr)
+		}
 		p.publishError(issueID, issue, fmt.Errorf("create pr: %w", err))
 		return nil, fmt.Errorf("issues pipeline: create pr: %w", err)
+	}
+
+	// Post a short "Implementation PR: #N" comment on the issue so watchers
+	// of the issue (who might not watch the repo) see the PR land. Non-fatal
+	// on failure — the PR is already public and the review row carries the
+	// number, so a missed comment does not lose information.
+	linkBackBody := fmt.Sprintf("Implementation PR: #%d", prNumber)
+	if err := p.gh.PostComment(issue.Repo, issue.Number, linkBackBody); err != nil {
+		slog.Warn("issues pipeline: link-back comment failed",
+			"repo", issue.Repo, "number", issue.Number, "err", err)
 	}
 
 	rev := &store.IssueReview{

@@ -1,11 +1,11 @@
 package github
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 )
 
 // GetDefaultBranch returns the `default_branch` field from the GitHub
@@ -26,10 +26,7 @@ func (c *Client) GetDefaultBranch(repo string) (string, error) {
 		return "", fmt.Errorf("github: read repo %s: %w", repo, readErr)
 	}
 	if resp.StatusCode != http.StatusOK {
-		errBody := string(body)
-		if len(errBody) > maxErrBodyLen {
-			errBody = errBody[:maxErrBodyLen]
-		}
+		errBody := safeTruncate(string(body), maxErrBodyLen)
 		return "", fmt.Errorf("github: get repo %s: status %d: %s", repo, resp.StatusCode, errBody)
 	}
 
@@ -49,6 +46,10 @@ func (c *Client) GetDefaultBranch(repo string) (string, error) {
 // head may be either "branch" (same repo) or "owner:branch" (cross-repo);
 // the auto_implement pipeline always pushes to the monitored repo, so "branch"
 // is the normal case.
+//
+// Uses the shared doWithBody helper so auth, Accept, and API-version headers
+// are set in one place. That also means any retry/rate-limit logic added to
+// the helper in the future applies uniformly to PR creation.
 func (c *Client) CreatePR(repo, title, body, head, base string) (int, error) {
 	if repo == "" || title == "" || head == "" || base == "" {
 		return 0, fmt.Errorf("github: CreatePR: repo/title/head/base are all required")
@@ -63,16 +64,8 @@ func (c *Client) CreatePR(repo, title, body, head, base string) (int, error) {
 		return 0, fmt.Errorf("github: marshal pr payload: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", c.baseURL+"/repos/"+repo+"/pulls", strings.NewReader(string(payload)))
-	if err != nil {
-		return 0, fmt.Errorf("github: create pr: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-
-	resp, err := c.http.Do(req)
+	resp, err := c.doWithBody("POST", "/repos/"+repo+"/pulls",
+		"application/vnd.github+json", "application/json", bytes.NewReader(payload))
 	if err != nil {
 		return 0, fmt.Errorf("github: create pr: %w", err)
 	}
@@ -83,10 +76,7 @@ func (c *Client) CreatePR(repo, title, body, head, base string) (int, error) {
 	}
 	// GitHub returns 201 Created on success; anything else is an error to surface.
 	if resp.StatusCode != http.StatusCreated {
-		errBody := string(respBody)
-		if len(errBody) > maxErrBodyLen {
-			errBody = errBody[:maxErrBodyLen]
-		}
+		errBody := safeTruncate(string(respBody), maxErrBodyLen)
 		return 0, fmt.Errorf("github: create pr %s: status %d: %s", repo, resp.StatusCode, errBody)
 	}
 

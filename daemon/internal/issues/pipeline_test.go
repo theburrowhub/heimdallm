@@ -1,6 +1,7 @@
 package issues_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -172,28 +173,34 @@ type fakeGit struct {
 	checkoutCalls []string // branch names checked out
 	commitCalls   []string // commit messages
 	pushCalls     []string // branches pushed
+	deleteCalls   []string // branches deleted from remote
 	hasChanges    bool
 
 	checkoutErr   error
 	hasChangesErr error
 	commitErr     error
 	pushErr       error
+	deleteErr     error
 }
 
-func (g *fakeGit) CheckoutNewBranch(dir, branch, base string) error {
+func (g *fakeGit) CheckoutNewBranch(ctx context.Context, dir, branch, base string) error {
 	g.checkoutCalls = append(g.checkoutCalls, branch)
 	return g.checkoutErr
 }
-func (g *fakeGit) HasChanges(dir string) (bool, error) {
+func (g *fakeGit) HasChanges(ctx context.Context, dir string) (bool, error) {
 	return g.hasChanges, g.hasChangesErr
 }
-func (g *fakeGit) CommitAll(dir, msg string) error {
+func (g *fakeGit) CommitAll(ctx context.Context, dir, msg string) error {
 	g.commitCalls = append(g.commitCalls, msg)
 	return g.commitErr
 }
-func (g *fakeGit) Push(dir, repo, branch, token string) error {
+func (g *fakeGit) Push(ctx context.Context, dir, repo, branch, token string) error {
 	g.pushCalls = append(g.pushCalls, branch)
 	return g.pushErr
+}
+func (g *fakeGit) DeleteRemoteBranch(ctx context.Context, dir, repo, branch, token string) error {
+	g.deleteCalls = append(g.deleteCalls, branch)
+	return g.deleteErr
 }
 
 // validResult is a sample JSON triage payload returned by the fake executor.
@@ -238,7 +245,7 @@ func TestPipeline_RunHappyPath(t *testing.T) {
 	p := issues.New(s, gh, exec, nil, broker, notify)
 
 	issue := newIssue(config.IssueModeReviewOnly)
-	rev, err := p.Run(issue, issues.RunOptions{Primary: "claude"})
+	rev, err := p.Run(context.Background(), issue, issues.RunOptions{Primary: "claude"})
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -310,7 +317,7 @@ func TestPipeline_DevelopFallsBackToReviewOnlyWithoutLocalDir(t *testing.T) {
 
 	issue := newIssue(config.IssueModeDevelop)
 	// WorkDir zero → no working tree → downgrade to review_only.
-	rev, err := p.Run(issue, issues.RunOptions{Primary: "claude"})
+	rev, err := p.Run(context.Background(), issue, issues.RunOptions{Primary: "claude"})
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -348,7 +355,7 @@ func TestPipeline_AutoImplementHappyPath(t *testing.T) {
 	p := issues.New(s, gh, exec, git, broker, notify)
 
 	issue := newIssue(config.IssueModeDevelop)
-	rev, err := p.Run(issue, autoImplementRunOptions())
+	rev, err := p.Run(context.Background(), issue, autoImplementRunOptions())
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -394,9 +401,14 @@ func TestPipeline_AutoImplementHappyPath(t *testing.T) {
 		t.Errorf("SSE sequence = %v, want %v", types, want)
 	}
 
-	// No PostComment (no fallback path).
-	if len(gh.postCalls) != 0 {
-		t.Errorf("auto_implement happy path should not post a review_only comment, got %v", gh.postCalls)
+	// Exactly one PostComment: the link-back note pointing watchers of the
+	// issue at the newly-opened PR. This is NOT the review_only fallback
+	// comment — that one only fires on the no-changes path.
+	if len(gh.postCalls) != 1 {
+		t.Fatalf("auto_implement happy path should post the link-back comment, got %d", len(gh.postCalls))
+	}
+	if !strings.Contains(gh.postCalls[0].Body, "Implementation PR: #123") {
+		t.Errorf("link-back comment body wrong: %q", gh.postCalls[0].Body)
 	}
 
 	// Prompt was the implement flavour, not the triage JSON instruction.
@@ -415,7 +427,7 @@ func TestPipeline_AutoImplementNoChangesFallsBackToReviewOnly(t *testing.T) {
 	broker := &fakeBroker{}
 	p := issues.New(s, gh, exec, git, broker, nil)
 
-	rev, err := p.Run(newIssue(config.IssueModeDevelop), autoImplementRunOptions())
+	rev, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions())
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -451,7 +463,7 @@ func TestPipeline_AutoImplementNoChangesFallsBackToReviewOnly(t *testing.T) {
 
 func TestPipeline_AutoImplementRequiresGitDep(t *testing.T) {
 	p := issues.New(&fakeStore{}, &fakeGH{}, &fakeExec{}, nil, &fakeBroker{}, nil)
-	_, err := p.Run(newIssue(config.IssueModeDevelop), autoImplementRunOptions())
+	_, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions())
 	if err == nil {
 		t.Fatal("expected error when GitOps is nil")
 	}
@@ -461,7 +473,7 @@ func TestPipeline_AutoImplementRequiresToken(t *testing.T) {
 	p := issues.New(&fakeStore{}, &fakeGH{}, &fakeExec{}, &fakeGit{}, &fakeBroker{}, nil)
 	opts := autoImplementRunOptions()
 	opts.GitHubToken = ""
-	_, err := p.Run(newIssue(config.IssueModeDevelop), opts)
+	_, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), opts)
 	if err == nil {
 		t.Fatal("expected error when GitHubToken is empty")
 	}
@@ -471,7 +483,7 @@ func TestPipeline_AutoImplementSurfacesDefaultBranchError(t *testing.T) {
 	gh := &fakeGH{defaultBranchErr: errors.New("repo not found")}
 	p := issues.New(&fakeStore{}, gh, &fakeExec{detectCLI: "claude", rawOutput: []byte("x")},
 		&fakeGit{hasChanges: true}, &fakeBroker{}, nil)
-	_, err := p.Run(newIssue(config.IssueModeDevelop), autoImplementRunOptions())
+	_, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions())
 	if err == nil {
 		t.Fatal("expected error on GetDefaultBranch failure")
 	}
@@ -484,7 +496,7 @@ func TestPipeline_AutoImplementSurfacesCheckoutError(t *testing.T) {
 	git := &fakeGit{checkoutErr: errors.New("fetch failed")}
 	p := issues.New(&fakeStore{}, &fakeGH{defaultBranch: "main"}, &fakeExec{},
 		git, &fakeBroker{}, nil)
-	_, err := p.Run(newIssue(config.IssueModeDevelop), autoImplementRunOptions())
+	_, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions())
 	if err == nil {
 		t.Fatal("expected error on checkout failure")
 	}
@@ -496,7 +508,7 @@ func TestPipeline_AutoImplementSurfacesPushError(t *testing.T) {
 	p := issues.New(&fakeStore{}, &fakeGH{defaultBranch: "main"},
 		&fakeExec{detectCLI: "claude", rawOutput: []byte("x")}, git, broker, nil)
 
-	_, err := p.Run(newIssue(config.IssueModeDevelop), autoImplementRunOptions())
+	_, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions())
 	if err == nil {
 		t.Fatal("expected push error to surface")
 	}
@@ -513,7 +525,7 @@ func TestPipeline_AutoImplementSurfacesCreatePRError(t *testing.T) {
 	p := issues.New(&fakeStore{}, gh,
 		&fakeExec{detectCLI: "claude", rawOutput: []byte("x")}, git, &fakeBroker{}, nil)
 
-	_, err := p.Run(newIssue(config.IssueModeDevelop), autoImplementRunOptions())
+	_, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions())
 	if err == nil {
 		t.Fatal("expected CreatePR error to surface")
 	}
@@ -532,7 +544,7 @@ func TestPipeline_AutoImplementTokenNeverLeaksIntoPushCall(t *testing.T) {
 	p := issues.New(&fakeStore{}, &fakeGH{defaultBranch: "main"},
 		&fakeExec{detectCLI: "claude", rawOutput: []byte("x")}, git, &fakeBroker{}, nil)
 
-	_, err := p.Run(newIssue(config.IssueModeDevelop), opts)
+	_, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), opts)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -542,16 +554,170 @@ func TestPipeline_AutoImplementTokenNeverLeaksIntoPushCall(t *testing.T) {
 	}
 }
 
+func TestPipeline_AutoImplementCleansOrphanBranchOnPRFailure(t *testing.T) {
+	// Regression guard: when CreatePR fails AFTER Push succeeded, the
+	// pipeline must DeleteRemoteBranch so a re-run does not collide with
+	// the stale ref.
+	gh := &fakeGH{defaultBranch: "main", createPRErr: errors.New("validation failed")}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(&fakeStore{}, gh,
+		&fakeExec{detectCLI: "claude", rawOutput: []byte("x")}, git, &fakeBroker{}, nil)
+
+	_, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions())
+	if err == nil {
+		t.Fatal("expected CreatePR error to surface")
+	}
+	if len(git.deleteCalls) != 1 || git.deleteCalls[0] != "heimdallm/issue-7" {
+		t.Errorf("expected DeleteRemoteBranch for heimdallm/issue-7 on orphan cleanup, got %v",
+			git.deleteCalls)
+	}
+}
+
+func TestPipeline_AutoImplementSurfacesCommitError(t *testing.T) {
+	// Gap between HasChanges=true and Push: a CommitAll failure must be
+	// surfaced with its own error and emit issue_review_error. Otherwise a
+	// partial-state bug could let a push fire over an empty tree.
+	git := &fakeGit{hasChanges: true, commitErr: errors.New("hook rejected")}
+	broker := &fakeBroker{}
+	p := issues.New(&fakeStore{}, &fakeGH{defaultBranch: "main"},
+		&fakeExec{detectCLI: "claude", rawOutput: []byte("x")}, git, broker, nil)
+
+	_, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions())
+	if err == nil {
+		t.Fatal("expected CommitAll error to surface")
+	}
+	if len(git.pushCalls) != 0 {
+		t.Errorf("push should not run after commit failure, got %d calls", len(git.pushCalls))
+	}
+	types := broker.types()
+	if types[len(types)-1] != sse.EventIssueReviewError {
+		t.Errorf("last event = %q, want issue_review_error", types[len(types)-1])
+	}
+}
+
+func TestPipeline_AutoImplementSanitizesIssueTitleInCommitAndPR(t *testing.T) {
+	// Newlines inside issue.Title are the trailer-injection vector: git only
+	// parses `Co-Authored-By:` / similar as a trailer when it sits on its
+	// OWN LINE at the end of the commit message. Collapsing CR/LF to spaces
+	// keeps the attacker-controlled fragment inside the subject line, where
+	// git ignores it. A very long title is an orthogonal readability issue
+	// that sanitizeTitle caps independently.
+	issue := newIssue(config.IssueModeDevelop)
+	issue.Title = "Login broken\nCo-Authored-By: Attacker <evil@example.com>\n" +
+		strings.Repeat("x", 200)
+
+	gh := &fakeGH{defaultBranch: "main", createPRNumber: 55}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(&fakeStore{}, gh,
+		&fakeExec{detectCLI: "claude", rawOutput: []byte("x")}, git, &fakeBroker{}, nil)
+
+	if _, err := p.Run(context.Background(), issue, autoImplementRunOptions()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if len(git.commitCalls) != 1 {
+		t.Fatalf("expected 1 commit, got %d", len(git.commitCalls))
+	}
+	commit := git.commitCalls[0]
+	// The subject line (everything up to the first blank line) must not
+	// contain a raw CR/LF from the attacker-controlled title, because that
+	// would let the attacker end the subject early and inject trailer-
+	// looking lines before the daemon's own footer.
+	subject := strings.SplitN(commit, "\n", 2)[0]
+	if strings.ContainsAny(subject, "\r\n") {
+		t.Errorf("commit subject contains raw CR/LF from title: %q", subject)
+	}
+
+	// No standalone trailer line with the attacker's "Co-Authored-By" may
+	// exist — only the benign substring embedded in the sanitized subject
+	// is permitted.
+	for _, line := range strings.Split(commit, "\n")[1:] {
+		if strings.HasPrefix(strings.TrimSpace(line), "Co-Authored-By: Attacker") {
+			t.Errorf("trailer injection: attacker's Co-Authored-By reached a trailer line: %q", line)
+		}
+	}
+
+	// sanitizeTitle caps at 120 bytes; the original hostile title was ~260.
+	// Give the assertion a little slack for the template prefix.
+	if len(subject) > 200 {
+		t.Errorf("commit subject not length-capped: len=%d", len(subject))
+	}
+
+	if len(gh.createPRCalls) != 1 {
+		t.Fatalf("expected 1 CreatePR call, got %d", len(gh.createPRCalls))
+	}
+	prTitle := gh.createPRCalls[0].Title
+	if strings.ContainsAny(prTitle, "\r\n") {
+		t.Errorf("PR title contains raw CR/LF from attacker title: %q", prTitle)
+	}
+}
+
+func TestPipeline_AutoImplementStopsWhenContextAlreadyCancelled(t *testing.T) {
+	// A cancelled context is surfaced by the fetcher today; this guards the
+	// pipeline-level plumbing: we pass ctx straight through to the git
+	// dependency so an already-cancelled context short-circuits the first
+	// git command. We use a stub git that blows up on Context.Done to avoid
+	// real git calls — the error bubbles up as the pipeline error.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ctxCheckingGit := &contextCheckingGit{expectCtx: ctx}
+	p := issues.New(&fakeStore{}, &fakeGH{defaultBranch: "main"},
+		&fakeExec{detectCLI: "claude", rawOutput: []byte("x")},
+		ctxCheckingGit, &fakeBroker{}, nil)
+
+	_, err := p.Run(ctx, newIssue(config.IssueModeDevelop), autoImplementRunOptions())
+	if err == nil {
+		t.Fatal("expected cancelled context to surface through git")
+	}
+	if !ctxCheckingGit.sawCancel {
+		t.Error("GitOps never observed the cancellation — ctx did not propagate")
+	}
+}
+
+// contextCheckingGit asserts the context reached the git layer and returns
+// the context's cancellation error when already done.
+type contextCheckingGit struct {
+	expectCtx context.Context
+	sawCancel bool
+}
+
+func (g *contextCheckingGit) CheckoutNewBranch(ctx context.Context, dir, branch, base string) error {
+	if ctx.Err() != nil {
+		g.sawCancel = true
+		return ctx.Err()
+	}
+	return nil
+}
+func (g *contextCheckingGit) HasChanges(ctx context.Context, dir string) (bool, error) {
+	return false, nil
+}
+func (g *contextCheckingGit) CommitAll(ctx context.Context, dir, msg string) error { return nil }
+func (g *contextCheckingGit) Push(ctx context.Context, dir, repo, branch, token string) error {
+	return nil
+}
+func (g *contextCheckingGit) DeleteRemoteBranch(ctx context.Context, dir, repo, branch, token string) error {
+	return nil
+}
+
+// ── sanitizeTitle unit tests ─────────────────────────────────────────────────
+
 // tokenSniffingGit is a GitOps that records the token it was pushed with.
 type tokenSniffingGit struct {
 	seenToken string
 }
 
-func (g *tokenSniffingGit) CheckoutNewBranch(dir, branch, base string) error { return nil }
-func (g *tokenSniffingGit) HasChanges(dir string) (bool, error)              { return true, nil }
-func (g *tokenSniffingGit) CommitAll(dir, msg string) error                  { return nil }
-func (g *tokenSniffingGit) Push(dir, repo, branch, token string) error {
+func (g *tokenSniffingGit) CheckoutNewBranch(ctx context.Context, dir, branch, base string) error {
+	return nil
+}
+func (g *tokenSniffingGit) HasChanges(ctx context.Context, dir string) (bool, error) {
+	return true, nil
+}
+func (g *tokenSniffingGit) CommitAll(ctx context.Context, dir, msg string) error { return nil }
+func (g *tokenSniffingGit) Push(ctx context.Context, dir, repo, branch, token string) error {
 	g.seenToken = token
+	return nil
+}
+func (g *tokenSniffingGit) DeleteRemoteBranch(ctx context.Context, dir, repo, branch, token string) error {
 	return nil
 }
 
@@ -563,7 +729,7 @@ func TestPipeline_IgnoreModeRejectedWithItsOwnError(t *testing.T) {
 	p := issues.New(s, &fakeGH{}, &fakeExec{}, nil, nil, nil)
 
 	issue := newIssue(config.IssueModeIgnore)
-	_, err := p.Run(issue, issues.RunOptions{Primary: "claude"})
+	_, err := p.Run(context.Background(), issue, issues.RunOptions{Primary: "claude"})
 	if err == nil {
 		t.Fatal("expected error for ignore-classified issue")
 	}
@@ -590,7 +756,7 @@ func TestPipeline_StripsLeadingAtInSuggestedAssignee(t *testing.T) {
 	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte(raw)}
 	p := issues.New(s, gh, exec, nil, nil, nil)
 
-	if _, err := p.Run(newIssue(config.IssueModeReviewOnly), issues.RunOptions{Primary: "claude"}); err != nil {
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeReviewOnly), issues.RunOptions{Primary: "claude"}); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if len(gh.postCalls) != 1 {
@@ -614,7 +780,7 @@ func TestPipeline_HandlesMarkdownWrappedJSON(t *testing.T) {
 	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte(wrapped)}
 	p := issues.New(s, gh, exec, nil, nil, nil)
 
-	rev, err := p.Run(newIssue(config.IssueModeReviewOnly), issues.RunOptions{Primary: "claude"})
+	rev, err := p.Run(context.Background(), newIssue(config.IssueModeReviewOnly), issues.RunOptions{Primary: "claude"})
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -635,7 +801,7 @@ func TestPipeline_MissingTopSeverityFallsBackToTriage(t *testing.T) {
 	broker := &fakeBroker{}
 	p := issues.New(s, gh, exec, nil, broker, nil)
 
-	_, err := p.Run(newIssue(config.IssueModeReviewOnly), issues.RunOptions{Primary: "claude"})
+	_, err := p.Run(context.Background(), newIssue(config.IssueModeReviewOnly), issues.RunOptions{Primary: "claude"})
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -657,7 +823,7 @@ func TestPipeline_PostCommentErrorDoesNotAbort(t *testing.T) {
 	broker := &fakeBroker{}
 	p := issues.New(s, gh, exec, nil, broker, nil)
 
-	_, err := p.Run(newIssue(config.IssueModeReviewOnly), issues.RunOptions{Primary: "claude"})
+	_, err := p.Run(context.Background(), newIssue(config.IssueModeReviewOnly), issues.RunOptions{Primary: "claude"})
 	if err != nil {
 		t.Fatalf("PostComment errors must not abort the pipeline, got: %v", err)
 	}
@@ -677,7 +843,7 @@ func TestPipeline_FetchCommentsErrorIsNonFatal(t *testing.T) {
 	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte(validResult)}
 	p := issues.New(s, gh, exec, nil, nil, nil)
 
-	if _, err := p.Run(newIssue(config.IssueModeReviewOnly), issues.RunOptions{Primary: "claude"}); err != nil {
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeReviewOnly), issues.RunOptions{Primary: "claude"}); err != nil {
 		t.Fatalf("comment fetch failure must not abort, got: %v", err)
 	}
 }
@@ -691,7 +857,7 @@ func TestPipeline_CLIDetectFailureEmitsErrorEvent(t *testing.T) {
 	broker := &fakeBroker{}
 	p := issues.New(s, gh, exec, nil, broker, nil)
 
-	_, err := p.Run(newIssue(config.IssueModeReviewOnly), issues.RunOptions{Primary: "claude"})
+	_, err := p.Run(context.Background(), newIssue(config.IssueModeReviewOnly), issues.RunOptions{Primary: "claude"})
 	if err == nil {
 		t.Fatal("expected error for CLI detect failure")
 	}
@@ -708,7 +874,7 @@ func TestPipeline_BadJSONEmitsErrorEvent(t *testing.T) {
 	broker := &fakeBroker{}
 	p := issues.New(s, gh, exec, nil, broker, nil)
 
-	_, err := p.Run(newIssue(config.IssueModeReviewOnly), issues.RunOptions{Primary: "claude"})
+	_, err := p.Run(context.Background(), newIssue(config.IssueModeReviewOnly), issues.RunOptions{Primary: "claude"})
 	if err == nil {
 		t.Fatal("expected parse error")
 	}
@@ -720,7 +886,7 @@ func TestPipeline_BadJSONEmitsErrorEvent(t *testing.T) {
 
 func TestPipeline_NilIssueIsRejected(t *testing.T) {
 	p := issues.New(&fakeStore{}, &fakeGH{}, &fakeExec{}, nil, nil, nil)
-	if _, err := p.Run(nil, issues.RunOptions{}); err == nil {
+	if _, err := p.Run(context.Background(), nil, issues.RunOptions{}); err == nil {
 		t.Fatal("expected error for nil issue")
 	}
 }

@@ -1,6 +1,7 @@
 package issues_test
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"testing"
@@ -65,7 +66,7 @@ type fakePipeline struct {
 	runErr error
 }
 
-func (f *fakePipeline) Run(issue *github.Issue, opts issues.RunOptions) (*store.IssueReview, error) {
+func (f *fakePipeline) Run(ctx context.Context, issue *github.Issue, opts issues.RunOptions) (*store.IssueReview, error) {
 	f.calls = append(f.calls, issue.Number)
 	if f.runErr != nil {
 		return nil, f.runErr
@@ -96,7 +97,7 @@ func TestFetcher_NoOpWhenDisabled(t *testing.T) {
 	p := &fakePipeline{}
 	f := issues.NewFetcher(client, &fakeDedup{}, p)
 
-	processed, err := f.ProcessRepo("org/repo", config.IssueTrackingConfig{Enabled: false}, "alice", noOpts)
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", config.IssueTrackingConfig{Enabled: false}, "alice", noOpts)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -107,7 +108,7 @@ func TestFetcher_NoOpWhenDisabled(t *testing.T) {
 
 func TestFetcher_NilOptionsFnIsError(t *testing.T) {
 	f := issues.NewFetcher(&fakeClient{}, &fakeDedup{}, &fakePipeline{})
-	_, err := f.ProcessRepo("org/repo", enabledCfg(), "alice", nil)
+	_, err := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", nil)
 	if err == nil {
 		t.Fatal("expected error for nil OptionsFn")
 	}
@@ -117,7 +118,7 @@ func TestFetcher_FetchErrorIsFatalForThisRun(t *testing.T) {
 	client := &fakeClient{err: errors.New("github down")}
 	f := issues.NewFetcher(client, &fakeDedup{}, &fakePipeline{})
 
-	_, err := f.ProcessRepo("org/repo", enabledCfg(), "alice", noOpts)
+	_, err := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
 	if err == nil {
 		t.Fatal("expected fetch error to surface")
 	}
@@ -128,7 +129,7 @@ func TestFetcher_DispatchesUnprocessedIssues(t *testing.T) {
 	p := &fakePipeline{}
 	f := issues.NewFetcher(client, &fakeDedup{byGithubID: map[int64]dedupEntry{}}, p)
 
-	processed, err := f.ProcessRepo("org/repo", enabledCfg(), "alice", noOpts)
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -146,7 +147,7 @@ func TestFetcher_SkipsDismissedIssues(t *testing.T) {
 	p := &fakePipeline{}
 	f := issues.NewFetcher(client, dedup, p)
 
-	processed, _ := f.ProcessRepo("org/repo", enabledCfg(), "alice", noOpts)
+	processed, _ := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
 	if processed != 0 || len(p.calls) != 0 {
 		t.Errorf("dismissed issue should be skipped, got processed=%d calls=%v", processed, p.calls)
 	}
@@ -163,7 +164,7 @@ func TestFetcher_SkipsIssueAlreadyReviewedWithoutNewActivity(t *testing.T) {
 	}}
 	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, dedup, &fakePipeline{})
 
-	processed, _ := f.ProcessRepo("org/repo", enabledCfg(), "alice", noOpts)
+	processed, _ := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
 	if processed != 0 {
 		t.Errorf("issue within grace window should be skipped, got processed=%d", processed)
 	}
@@ -181,7 +182,7 @@ func TestFetcher_RerunsIssueWithNewActivityAfterGrace(t *testing.T) {
 	p := &fakePipeline{}
 	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, dedup, p)
 
-	processed, _ := f.ProcessRepo("org/repo", enabledCfg(), "alice", noOpts)
+	processed, _ := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
 	if processed != 1 {
 		t.Errorf("new activity past grace should re-run, got processed=%d calls=%v", processed, p.calls)
 	}
@@ -195,7 +196,7 @@ func TestFetcher_RunsFirstTimeIssueKnownButNeverReviewed(t *testing.T) {
 	p := &fakePipeline{}
 	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, dedup, p)
 
-	processed, _ := f.ProcessRepo("org/repo", enabledCfg(), "alice", noOpts)
+	processed, _ := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
 	if processed != 1 {
 		t.Errorf("issue known but never reviewed must run, got processed=%d", processed)
 	}
@@ -210,7 +211,7 @@ func TestFetcher_PipelineErrorIsLoggedNotPropagated(t *testing.T) {
 	p := &fakePipeline{runErr: errors.New("LLM timeout")}
 	f := issues.NewFetcher(client, &fakeDedup{byGithubID: map[int64]dedupEntry{}}, p)
 
-	processed, err := f.ProcessRepo("org/repo", enabledCfg(), "alice", noOpts)
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
 	if err != nil {
 		t.Fatalf("per-issue failure must not abort ProcessRepo, got %v", err)
 	}
@@ -230,7 +231,7 @@ func TestFetcher_DedupLookupErrorTreatedAsUnprocessed(t *testing.T) {
 	p := &fakePipeline{}
 	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, dedup, p)
 
-	processed, _ := f.ProcessRepo("org/repo", enabledCfg(), "alice", noOpts)
+	processed, _ := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
 	if processed != 1 {
 		t.Errorf("flaky store must not block the pipeline, got processed=%d", processed)
 	}

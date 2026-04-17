@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const defaultBaseURL = "https://api.github.com"
@@ -26,6 +27,21 @@ const maxDiffBodyBytes = 10 * 1024 * 1024 // 10 MB for diffs
 // maxErrBodyLen limits the number of bytes included in error messages to avoid
 // leaking sensitive GitHub diagnostic information (e.g. token details).
 const maxErrBodyLen = 200
+
+// safeTruncate shortens s to at most max bytes, snapping on a rune boundary
+// so we never emit a split multi-byte UTF-8 character in an error message.
+// Returns s unchanged when it already fits.
+func safeTruncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	// Walk back from `max` until we hit the start of a rune.
+	i := max
+	for i > 0 && !utf8.RuneStart(s[i]) {
+		i--
+	}
+	return s[:i]
+}
 
 type Client struct {
 	token   string
@@ -61,10 +77,7 @@ func (c *Client) AuthenticatedUser() (string, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
-		errBody := string(body)
-		if len(errBody) > maxErrBodyLen {
-			errBody = errBody[:maxErrBodyLen]
-		}
+		errBody := safeTruncate(string(body), maxErrBodyLen)
 		return "", fmt.Errorf("github: get user: status %d: %s", resp.StatusCode, errBody)
 	}
 	var u struct {
@@ -77,13 +90,28 @@ func (c *Client) AuthenticatedUser() (string, error) {
 }
 
 func (c *Client) do(method, path string, accept string) (*http.Response, error) {
-	req, err := http.NewRequest(method, c.baseURL+path, nil)
+	return c.doWithBody(method, path, accept, "", nil)
+}
+
+// doWithBody is the POST/PUT/PATCH counterpart to do(). It accepts an
+// optional body (nil for GET-like calls) and a content-type that is only
+// set when a body is present. Every authenticated call should go through
+// this helper so auth, Accept headers, and the pinned API version stay in
+// one place.
+//
+// TODO: migrate SubmitReview and PostComment to doWithBody as well — they
+// still build their request inline, duplicating the header setup.
+func (c *Client) doWithBody(method, path, accept, contentType string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequest(method, c.baseURL+path, body)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Accept", accept)
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
 	return c.http.Do(req)
 }
 
@@ -152,10 +180,7 @@ func (c *Client) fetchByQualifier(username, qualifier string, repos []string) ([
 	resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		errBody := string(body)
-		if len(errBody) > maxErrBodyLen {
-			errBody = errBody[:maxErrBodyLen]
-		}
+		errBody := safeTruncate(string(body), maxErrBodyLen)
 		return nil, fmt.Errorf("github: search PRs (%s): status %d: %s", qualifier, resp.StatusCode, errBody)
 	}
 	var result struct {
@@ -195,10 +220,7 @@ func (c *Client) SubmitReview(repo string, number int, body, event string) (int6
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != 200 {
-		errBody := string(respBody)
-		if len(errBody) > maxErrBodyLen {
-			errBody = errBody[:maxErrBodyLen]
-		}
+		errBody := safeTruncate(string(respBody), maxErrBodyLen)
 		return 0, fmt.Errorf("github: submit review: status %d: %s", resp.StatusCode, errBody)
 	}
 
@@ -232,10 +254,7 @@ func (c *Client) PostComment(repo string, number int, body string) error {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
-		errBody := string(respBody)
-		if len(errBody) > maxErrBodyLen {
-			errBody = errBody[:maxErrBodyLen]
-		}
+		errBody := safeTruncate(string(respBody), maxErrBodyLen)
 		return fmt.Errorf("github: post comment: status %d: %s", resp.StatusCode, errBody)
 	}
 	return nil
@@ -308,10 +327,7 @@ func (c *Client) fetchReposForOrg(topic, org string) ([]string, error) {
 		resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			errBody := string(body)
-			if len(errBody) > maxErrBodyLen {
-				errBody = errBody[:maxErrBodyLen]
-			}
+			errBody := safeTruncate(string(body), maxErrBodyLen)
 			return nil, fmt.Errorf("search repositories: status %d: %s", resp.StatusCode, errBody)
 		}
 
@@ -356,10 +372,7 @@ func (c *Client) FetchDiff(repo string, number int) (string, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
-		errBody := string(body)
-		if len(errBody) > maxErrBodyLen {
-			errBody = errBody[:maxErrBodyLen]
-		}
+		errBody := safeTruncate(string(body), maxErrBodyLen)
 		return "", fmt.Errorf("github: fetch diff: status %d: %s", resp.StatusCode, errBody)
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxDiffBodyBytes))
@@ -417,10 +430,7 @@ func (c *Client) fetchReviewComments(repo string, number int) ([]Comment, error)
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	if resp.StatusCode != http.StatusOK {
-		errBody := string(body)
-		if len(errBody) > maxErrBodyLen {
-			errBody = errBody[:maxErrBodyLen]
-		}
+		errBody := safeTruncate(string(body), maxErrBodyLen)
 		return nil, fmt.Errorf("github: fetch review comments: status %d: %s", resp.StatusCode, errBody)
 	}
 	var raw []struct {
@@ -462,10 +472,7 @@ func (c *Client) fetchIssueComments(repo string, number int) ([]Comment, error) 
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	if resp.StatusCode != http.StatusOK {
-		errBody := string(body)
-		if len(errBody) > maxErrBodyLen {
-			errBody = errBody[:maxErrBodyLen]
-		}
+		errBody := safeTruncate(string(body), maxErrBodyLen)
 		return nil, fmt.Errorf("github: fetch issue comments: status %d: %s", resp.StatusCode, errBody)
 	}
 	var raw []struct {

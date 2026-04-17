@@ -10,6 +10,10 @@ import (
 // maxBodyBytes bounds the issue body we send to the LLM. Long issue bodies
 // mostly contain copy-pasted stack traces or log dumps that waste tokens; the
 // first few KB carry the signal the triage actually needs.
+//
+// NOTE: this is deliberately distinct from github.maxBodyBytes (1 MB) — the
+// GitHub one bounds API response reads, this one bounds prompt size. They
+// happen to share a name because of their shape, not their purpose.
 const maxBodyBytes = 8 * 1024
 
 // maxCommentsBytes caps the formatted comment thread so a chatty issue cannot
