@@ -2,6 +2,21 @@
 
 > **Note:** Versions 0.1.0–0.1.3 were originally published under [`theburrowhub/heimdallr-docker`](https://github.com/theburrowhub/heimdallr-docker) (now archived). The project was unified into this repository and renamed to Heimdallm in v0.1.1.
 
+## [0.1.2](https://github.com/theburrowhub/heimdallm/compare/v0.1.1...v0.1.2) (2026-04-17)
+
+
+### Features
+
+* **discovery:** auto-discover repos by GitHub topic tag ([#41](https://github.com/theburrowhub/heimdallm/issues/41)) ([17f91fc](https://github.com/theburrowhub/heimdallm/commit/17f91fcf5690c7446b0e07514ca775400e4e8633))
+* **issues:** GitHub client — FetchIssues with classification & priority sort ([#43](https://github.com/theburrowhub/heimdallm/issues/43)) ([4f9c574](https://github.com/theburrowhub/heimdallm/commit/4f9c574b76d8b20e910945d932220fe003f127d6))
+* **issues:** review_only triage pipeline + fetcher ([#44](https://github.com/theburrowhub/heimdallm/issues/44)) ([14c276f](https://github.com/theburrowhub/heimdallm/commit/14c276f7ba84e0dee55ba6502930248ebf78f4f2))
+* **issues:** SQLite schema + config surface for issue tracking ([#42](https://github.com/theburrowhub/heimdallm/issues/42)) ([cad4445](https://github.com/theburrowhub/heimdallm/commit/cad4445823defae6de89dd99eb37c45fe52d41e1))
+
+
+### Documentation
+
+* update documentation post-consolidation and rename to Heimdallm ([#37](https://github.com/theburrowhub/heimdallm/issues/37)) ([032398d](https://github.com/theburrowhub/heimdallm/commit/032398dfdd38583ef776eed2fbdee7a558fcfe0b))
+
 ## [0.1.1](https://github.com/theburrowhub/heimdallm/compare/v0.1.0...v0.1.1) (2026-04-16)
 
 
