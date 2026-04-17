@@ -23,6 +23,13 @@ var validIntervals = map[string]bool{
 // See https://docs.github.com/repositories/classifying-your-repository-with-topics
 var githubTopicPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,49}$`)
 
+// githubOrgPattern matches the GitHub org/user slug format: alphanumeric plus
+// internal hyphens, 1–39 characters, not starting or ending with a hyphen.
+// Validating this defensively prevents injection into the Search API query
+// (e.g. a value like "evil-org archived:false org:other" being interpolated
+// verbatim into the `q=` parameter).
+var githubOrgPattern = regexp.MustCompile(`^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$`)
+
 type Config struct {
 	Server    ServerConfig    `toml:"server"`
 	GitHub    GitHubConfig    `toml:"github"`
@@ -242,6 +249,11 @@ func (c *Config) validateDiscovery() error {
 	}
 	if len(c.GitHub.DiscoveryOrgs) == 0 {
 		return fmt.Errorf("config: github.discovery_orgs must list at least one organisation when discovery_topic is set")
+	}
+	for _, org := range c.GitHub.DiscoveryOrgs {
+		if !githubOrgPattern.MatchString(org) {
+			return fmt.Errorf("config: github.discovery_orgs entry %q is invalid (must match GitHub org/user slug: 1–39 alphanumerics plus internal hyphens)", org)
+		}
 	}
 	if c.GitHub.DiscoveryInterval != "" {
 		d, err := time.ParseDuration(c.GitHub.DiscoveryInterval)

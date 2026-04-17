@@ -21,8 +21,12 @@ type repoItem struct {
 }
 
 func searchResponse(items []repoItem) []byte {
+	return searchResponseWithTotal(items, len(items))
+}
+
+func searchResponseWithTotal(items []repoItem, total int) []byte {
 	body := map[string]any{
-		"total_count": len(items),
+		"total_count": total,
 		"items":       items,
 	}
 	data, _ := json.Marshal(body)
@@ -147,11 +151,12 @@ func TestFetchReposByTopic_Pagination(t *testing.T) {
 			for i := range items {
 				items[i] = repoItem{FullName: fmt.Sprintf("org/repo-%03d", i)}
 			}
-			w.Write(searchResponse(items))
+			// total_count=101 signals a second page upstream.
+			w.Write(searchResponseWithTotal(items, 101))
 		case 2:
-			w.Write(searchResponse([]repoItem{
+			w.Write(searchResponseWithTotal([]repoItem{
 				{FullName: "org/repo-final"},
-			}))
+			}, 101))
 		default:
 			http.NotFound(w, r)
 		}
@@ -168,6 +173,39 @@ func TestFetchReposByTopic_Pagination(t *testing.T) {
 	}
 	if atomic.LoadInt32(&calls) != 2 {
 		t.Errorf("expected 2 API calls for pagination, got %d", calls)
+	}
+}
+
+func TestFetchReposByTopic_PaginationStopsAtTotalCount(t *testing.T) {
+	// Regression: when total_count is an exact multiple of per_page (100),
+	// the loop used to make one extra request that returned 0 items.
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		if page != 1 {
+			t.Errorf("unexpected second request on page %d — loop should have stopped", page)
+			http.NotFound(w, r)
+			return
+		}
+		items := make([]repoItem, 100)
+		for i := range items {
+			items[i] = repoItem{FullName: fmt.Sprintf("org/repo-%03d", i)}
+		}
+		w.Write(searchResponse(items))
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	got, err := client.FetchReposByTopic("topic", []string{"org"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 100 {
+		t.Errorf("expected 100 repos, got %d", len(got))
+	}
+	if atomic.LoadInt32(&calls) != 1 {
+		t.Errorf("expected exactly 1 API call (total == 100 == per_page), got %d", calls)
 	}
 }
 

@@ -365,20 +365,29 @@ func main() {
 		if err != nil {
 			return fmt.Errorf("reload: %w", err)
 		}
+
 		cfgMu.Lock()
-		cfg = newCfg
 		oldSched := sched
 		oldDiscoveryCancel := discoveryCancel
+		cfgMu.Unlock()
+
+		// Stop the old discovery loop BEFORE starting the new one. The Search
+		// API rate limit (30 req/min) is tight enough that running two loops
+		// in parallel — even briefly during reload — risks throttling the
+		// daemon.
+		if oldDiscoveryCancel != nil {
+			oldDiscoveryCancel()
+		}
+
+		cfgMu.Lock()
+		cfg = newCfg
 		sched = startScheduler(newCfg)
 		discoveryCancel = startDiscovery(newCfg)
 		cfgMu.Unlock()
 
-		// Stop the old workers outside the lock to avoid holding the mutex
-		// during a potentially blocking Stop call.
+		// Scheduler overlap is pre-existing behaviour and tolerated; Stop is
+		// idempotent and safe to call outside the lock.
 		oldSched.Stop()
-		if oldDiscoveryCancel != nil {
-			oldDiscoveryCancel()
-		}
 
 		// Run first poll immediately with new config
 		go makePollFn(newCfg)()

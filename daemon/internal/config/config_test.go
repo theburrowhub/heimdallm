@@ -326,6 +326,63 @@ func TestValidate_DiscoveryIntervalInvalid(t *testing.T) {
 	}
 }
 
+func TestValidate_DiscoveryOrgsInvalid(t *testing.T) {
+	cases := []struct {
+		name string
+		org  string
+	}{
+		{"contains space", "freepik company"},
+		{"contains slash", "org/subpath"},
+		{"search qualifier injection", "evil archived:false org:other"},
+		{"starts with hyphen", "-freepik"},
+		{"ends with hyphen", "freepik-"},
+		{"contains underscore", "free_pik"},
+		{"too long", strings.Repeat("a", 40)},
+		{"empty", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{
+				AI: AIConfig{Primary: "claude"},
+				GitHub: GitHubConfig{
+					DiscoveryTopic: "heimdallm-review",
+					DiscoveryOrgs:  []string{"valid-org", tc.org},
+				},
+			}
+			err := cfg.Validate()
+			if err == nil {
+				t.Fatalf("Validate(org=%q) = nil, want error", tc.org)
+			}
+			if !strings.Contains(err.Error(), "discovery_orgs") {
+				t.Errorf("error should mention discovery_orgs, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidate_DiscoveryOrgsValid(t *testing.T) {
+	cases := []string{
+		"freepik-company",
+		"theburrowhub",
+		"a",
+		"A1",
+		"1a",
+		strings.Repeat("a", 39),
+	}
+	for _, org := range cases {
+		cfg := &Config{
+			AI: AIConfig{Primary: "claude"},
+			GitHub: GitHubConfig{
+				DiscoveryTopic: "heimdallm-review",
+				DiscoveryOrgs:  []string{org},
+			},
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("Validate(org=%q) = %v, want nil", org, err)
+		}
+	}
+}
+
 // ── AIForRepo ────────────────────────────────────────────────────────────────
 
 func TestAIForRepo_GlobalFallback(t *testing.T) {

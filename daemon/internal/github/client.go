@@ -2,6 +2,7 @@ package github
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -250,8 +251,9 @@ const maxDiscoveryPages = 10
 // return an empty slice without calling the API.
 //
 // Each org is queried independently so one failing org does not wipe the
-// others — a partial result is returned alongside a joined error describing
-// which orgs failed. Results are deduplicated across orgs.
+// others — a partial result is returned alongside a joined error (see
+// errors.Join) describing which orgs failed. Results are deduplicated across
+// orgs.
 func (c *Client) FetchReposByTopic(topic string, orgs []string) ([]string, error) {
 	if topic == "" || len(orgs) == 0 {
 		return nil, nil
@@ -259,12 +261,12 @@ func (c *Client) FetchReposByTopic(topic string, orgs []string) ([]string, error
 
 	seen := make(map[string]struct{})
 	var repos []string
-	var errs []string
+	var errs []error
 
 	for _, org := range orgs {
 		found, err := c.fetchReposForOrg(topic, org)
 		if err != nil {
-			errs = append(errs, fmt.Sprintf("%s: %v", org, err))
+			errs = append(errs, fmt.Errorf("%s: %w", org, err))
 			continue
 		}
 		for _, r := range found {
@@ -280,7 +282,7 @@ func (c *Client) FetchReposByTopic(topic string, orgs []string) ([]string, error
 	sort.Strings(repos)
 
 	if len(errs) > 0 {
-		return repos, fmt.Errorf("github: discovery errors: %s", strings.Join(errs, "; "))
+		return repos, fmt.Errorf("github: discovery errors: %w", errors.Join(errs...))
 	}
 	return repos, nil
 }
@@ -291,6 +293,7 @@ func (c *Client) fetchReposForOrg(topic, org string) ([]string, error) {
 	query := fmt.Sprintf("topic:%s org:%s archived:false", topic, org)
 
 	var repos []string
+	totalFetched := 0
 	for page := 1; page <= maxDiscoveryPages; page++ {
 		params := url.Values{}
 		params.Set("q", query)
@@ -330,9 +333,13 @@ func (c *Client) fetchReposForOrg(topic, org string) ([]string, error) {
 			}
 			repos = append(repos, it.FullName)
 		}
+		totalFetched += len(result.Items)
 
-		// Search API returns at most per_page items; fewer means we reached the end.
-		if len(result.Items) < 100 {
+		// Stop when the page is partial (no more items upstream) OR when we
+		// have already consumed the advertised total. The second check avoids
+		// an extra empty request when total_count is an exact multiple of
+		// per_page.
+		if len(result.Items) < 100 || totalFetched >= result.TotalCount {
 			break
 		}
 	}
