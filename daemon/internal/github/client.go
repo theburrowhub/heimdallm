@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -237,6 +238,105 @@ func (c *Client) PostComment(repo string, number int, body string) error {
 		return fmt.Errorf("github: post comment: status %d: %s", resp.StatusCode, errBody)
 	}
 	return nil
+}
+
+// maxDiscoveryPages bounds the number of Search API pages consumed per org.
+// GitHub caps search results at 1000 entries (10 pages × 100 per_page); we stop
+// there to avoid endless pagination in the unlikely event of a malformed response.
+const maxDiscoveryPages = 10
+
+// FetchReposByTopic returns the full_names of non-archived, non-disabled repos
+// that carry the given topic in any of the provided orgs. Empty topic or orgs
+// return an empty slice without calling the API.
+//
+// Each org is queried independently so one failing org does not wipe the
+// others — a partial result is returned alongside a joined error describing
+// which orgs failed. Results are deduplicated across orgs.
+func (c *Client) FetchReposByTopic(topic string, orgs []string) ([]string, error) {
+	if topic == "" || len(orgs) == 0 {
+		return nil, nil
+	}
+
+	seen := make(map[string]struct{})
+	var repos []string
+	var errs []string
+
+	for _, org := range orgs {
+		found, err := c.fetchReposForOrg(topic, org)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", org, err))
+			continue
+		}
+		for _, r := range found {
+			if _, dup := seen[r]; dup {
+				continue
+			}
+			seen[r] = struct{}{}
+			repos = append(repos, r)
+		}
+	}
+
+	// Deterministic order makes the result easy to compare in tests and logs.
+	sort.Strings(repos)
+
+	if len(errs) > 0 {
+		return repos, fmt.Errorf("github: discovery errors: %s", strings.Join(errs, "; "))
+	}
+	return repos, nil
+}
+
+func (c *Client) fetchReposForOrg(topic, org string) ([]string, error) {
+	// archived:false and fork filtering is handled post-fetch because Search API
+	// does not honour the `fork:` qualifier reliably alongside `topic:`.
+	query := fmt.Sprintf("topic:%s org:%s archived:false", topic, org)
+
+	var repos []string
+	for page := 1; page <= maxDiscoveryPages; page++ {
+		params := url.Values{}
+		params.Set("q", query)
+		params.Set("per_page", "100")
+		params.Set("page", strconv.Itoa(page))
+
+		resp, err := c.do("GET", "/search/repositories?"+params.Encode(), "application/vnd.github+json")
+		if err != nil {
+			return nil, fmt.Errorf("search repositories: %w", err)
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			errBody := string(body)
+			if len(errBody) > maxErrBodyLen {
+				errBody = errBody[:maxErrBodyLen]
+			}
+			return nil, fmt.Errorf("search repositories: status %d: %s", resp.StatusCode, errBody)
+		}
+
+		var result struct {
+			TotalCount int `json:"total_count"`
+			Items      []struct {
+				FullName string `json:"full_name"`
+				Archived bool   `json:"archived"`
+				Disabled bool   `json:"disabled"`
+			} `json:"items"`
+		}
+		if err := json.Unmarshal(body, &result); err != nil {
+			return nil, fmt.Errorf("decode repositories: %w", err)
+		}
+
+		for _, it := range result.Items {
+			if it.Archived || it.Disabled || it.FullName == "" {
+				continue
+			}
+			repos = append(repos, it.FullName)
+		}
+
+		// Search API returns at most per_page items; fewer means we reached the end.
+		if len(result.Items) < 100 {
+			break
+		}
+	}
+	return repos, nil
 }
 
 // FetchDiff returns the unified diff for a PR.

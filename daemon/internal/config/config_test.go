@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -162,6 +163,165 @@ func TestValidate_AllValidIntervals(t *testing.T) {
 		cfg := &Config{AI: AIConfig{Primary: "claude"}, GitHub: GitHubConfig{PollInterval: interval}}
 		if err := cfg.Validate(); err != nil {
 			t.Errorf("Validate() with interval %q = %v", interval, err)
+		}
+	}
+}
+
+// ── Topic-based discovery ────────────────────────────────────────────────────
+
+func TestApplyDefaults_DiscoveryIntervalWhenTopicSet(t *testing.T) {
+	cfg := &Config{}
+	cfg.GitHub.DiscoveryTopic = "heimdallm-review"
+	cfg.applyDefaults()
+
+	if cfg.GitHub.DiscoveryInterval != "15m" {
+		t.Errorf("DiscoveryInterval = %q, want default %q", cfg.GitHub.DiscoveryInterval, "15m")
+	}
+}
+
+func TestApplyDefaults_NoDiscoveryIntervalWhenTopicUnset(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+
+	if cfg.GitHub.DiscoveryInterval != "" {
+		t.Errorf("DiscoveryInterval = %q, want empty when topic unset", cfg.GitHub.DiscoveryInterval)
+	}
+}
+
+func TestApplyDefaults_PreservesDiscoveryInterval(t *testing.T) {
+	cfg := &Config{}
+	cfg.GitHub.DiscoveryTopic = "heimdallm-review"
+	cfg.GitHub.DiscoveryInterval = "30m"
+	cfg.applyDefaults()
+
+	if cfg.GitHub.DiscoveryInterval != "30m" {
+		t.Errorf("DiscoveryInterval overwritten: %q", cfg.GitHub.DiscoveryInterval)
+	}
+}
+
+func TestApplyEnvOverrides_Discovery(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+
+	t.Setenv("HEIMDALLM_DISCOVERY_TOPIC", "heimdallm-review")
+	t.Setenv("HEIMDALLM_DISCOVERY_ORGS", "freepik-company, theburrowhub ,  ")
+	t.Setenv("HEIMDALLM_DISCOVERY_INTERVAL", "10m")
+
+	cfg.applyEnvOverrides()
+
+	if cfg.GitHub.DiscoveryTopic != "heimdallm-review" {
+		t.Errorf("DiscoveryTopic = %q", cfg.GitHub.DiscoveryTopic)
+	}
+	if len(cfg.GitHub.DiscoveryOrgs) != 2 {
+		t.Fatalf("DiscoveryOrgs = %v, want 2 entries", cfg.GitHub.DiscoveryOrgs)
+	}
+	if cfg.GitHub.DiscoveryOrgs[0] != "freepik-company" || cfg.GitHub.DiscoveryOrgs[1] != "theburrowhub" {
+		t.Errorf("DiscoveryOrgs = %v", cfg.GitHub.DiscoveryOrgs)
+	}
+	if cfg.GitHub.DiscoveryInterval != "10m" {
+		t.Errorf("DiscoveryInterval = %q", cfg.GitHub.DiscoveryInterval)
+	}
+}
+
+func TestApplyEnvOverrides_DiscoveryOrgs_AllBlankPreservesExisting(t *testing.T) {
+	cfg := &Config{}
+	cfg.GitHub.DiscoveryOrgs = []string{"existing-org"}
+
+	t.Setenv("HEIMDALLM_DISCOVERY_ORGS", "  ,  ,  ")
+	cfg.applyEnvOverrides()
+
+	if len(cfg.GitHub.DiscoveryOrgs) != 1 || cfg.GitHub.DiscoveryOrgs[0] != "existing-org" {
+		t.Errorf("DiscoveryOrgs should keep the existing value when env is all blank, got %v", cfg.GitHub.DiscoveryOrgs)
+	}
+}
+
+func TestValidate_DiscoveryDisabled(t *testing.T) {
+	cfg := &Config{AI: AIConfig{Primary: "claude"}}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate() with no discovery = %v", err)
+	}
+}
+
+func TestValidate_DiscoveryTopicRequiresOrgs(t *testing.T) {
+	cfg := &Config{
+		AI:     AIConfig{Primary: "claude"},
+		GitHub: GitHubConfig{DiscoveryTopic: "heimdallm-review"},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() with discovery_topic but no orgs = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "discovery_orgs") {
+		t.Errorf("error should mention discovery_orgs, got: %v", err)
+	}
+}
+
+func TestValidate_DiscoveryTopicInvalidFormat(t *testing.T) {
+	cases := []struct {
+		name  string
+		topic string
+	}{
+		{"uppercase", "Heimdallm-Review"},
+		{"starts with hyphen", "-heimdallm"},
+		{"contains space", "heimdallm review"},
+		{"too long", strings.Repeat("a", 51)},
+		{"underscore", "heimdallm_review"},
+		{"empty after hyphen", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.topic == "" {
+				t.Skip("empty topic disables discovery; covered elsewhere")
+			}
+			cfg := &Config{
+				AI: AIConfig{Primary: "claude"},
+				GitHub: GitHubConfig{
+					DiscoveryTopic: tc.topic,
+					DiscoveryOrgs:  []string{"some-org"},
+				},
+			}
+			if err := cfg.Validate(); err == nil {
+				t.Errorf("Validate(topic=%q) = nil, want error", tc.topic)
+			}
+		})
+	}
+}
+
+func TestValidate_DiscoveryTopicValidFormats(t *testing.T) {
+	cases := []string{
+		"heimdallm-review",
+		"a",
+		"123",
+		"a-b-c-d",
+		strings.Repeat("a", 50),
+	}
+	for _, topic := range cases {
+		cfg := &Config{
+			AI: AIConfig{Primary: "claude"},
+			GitHub: GitHubConfig{
+				DiscoveryTopic: topic,
+				DiscoveryOrgs:  []string{"some-org"},
+			},
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("Validate(topic=%q) = %v, want nil", topic, err)
+		}
+	}
+}
+
+func TestValidate_DiscoveryIntervalInvalid(t *testing.T) {
+	cases := []string{"not-a-duration", "-5m", "0"}
+	for _, interval := range cases {
+		cfg := &Config{
+			AI: AIConfig{Primary: "claude"},
+			GitHub: GitHubConfig{
+				DiscoveryTopic:    "heimdallm-review",
+				DiscoveryOrgs:     []string{"some-org"},
+				DiscoveryInterval: interval,
+			},
+		}
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("Validate(interval=%q) = nil, want error", interval)
 		}
 	}
 }

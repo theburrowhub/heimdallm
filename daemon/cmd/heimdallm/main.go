@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/heimdallm/daemon/internal/config"
+	"github.com/heimdallm/daemon/internal/discovery"
 	"github.com/heimdallm/daemon/internal/executor"
 	gh "github.com/heimdallm/daemon/internal/github"
 	"github.com/heimdallm/daemon/internal/keychain"
@@ -98,9 +99,15 @@ func main() {
 	p := pipeline.New(s, ghClient, exec, &notifyWithSSE{notifier: notifier})
 	srv := server.New(s, broker, p, apiToken)
 
-	// cfgMu protects cfg and sched so reload is safe from any goroutine.
+	// cfgMu protects cfg, sched and the discovery loop so reload is safe from any goroutine.
 	var cfgMu sync.Mutex
 	var sched *scheduler.Scheduler
+
+	// discoverySvc holds the discovered repo cache; it is nil when topic-based
+	// discovery is disabled. discoveryCancel stops the background loop so reload
+	// can restart it with fresh config.
+	discoverySvc := discovery.NewService(ghClient)
+	var discoveryCancel context.CancelFunc
 
 	// reviewMu prevents concurrent pipeline runs for the same GitHub PR ID.
 	// Key: pr.ID (GitHub PR ID), Value: true while being reviewed.
@@ -185,8 +192,10 @@ func main() {
 	makePollFn := func(c *config.Config) func() {
 		return func() {
 			cfgMu.Lock()
-			repos := c.GitHub.Repositories
+			static := c.GitHub.Repositories
 			cfgMu.Unlock()
+			// Merge static list with repos discovered via topic tag (empty when disabled).
+			repos := discovery.MergeRepos(static, discoverySvc.Discovered())
 
 			// Fetch all review-requested PRs without a repo filter — adding many
 			// repo: terms to the Search API query can exceed its length limit and
@@ -247,8 +256,25 @@ func main() {
 		return sc
 	}
 
+	// startDiscovery spawns the discovery loop when discovery_topic is configured.
+	// It returns a cancel func for the running loop, or nil when discovery is off.
+	// Must be called with cfgMu held so the caller can swap cancel funcs atomically.
+	startDiscovery := func(c *config.Config) context.CancelFunc {
+		if c.GitHub.DiscoveryTopic == "" {
+			return nil
+		}
+		interval := parseDiscoveryInterval(c.GitHub.DiscoveryInterval)
+		ctx, cancel := context.WithCancel(context.Background())
+		topic := c.GitHub.DiscoveryTopic
+		orgs := append([]string(nil), c.GitHub.DiscoveryOrgs...)
+		go discoverySvc.Run(ctx, interval, topic, orgs)
+		slog.Info("discovery: loop started", "topic", topic, "orgs", orgs, "interval", interval)
+		return cancel
+	}
+
 	cfgMu.Lock()
 	sched = startScheduler(cfg)
+	discoveryCancel = startDiscovery(cfg)
 	cfgMu.Unlock()
 
 	// Capture the scheduler pointer under mutex so the deferred Stop is safe
@@ -256,8 +282,12 @@ func main() {
 	defer func() {
 		cfgMu.Lock()
 		sc := sched
+		dc := discoveryCancel
 		cfgMu.Unlock()
 		sc.Stop()
+		if dc != nil {
+			dc()
+		}
 	}()
 
 	// Expose live config for GET /config
@@ -327,7 +357,9 @@ func main() {
 		return login, err
 	})
 
-	// Wire the reload callback: re-read config from disk, restart scheduler.
+	// Wire the reload callback: re-read config from disk, restart scheduler
+	// and the discovery loop so changes to discovery_topic / orgs / interval
+	// take effect without a daemon restart.
 	srv.SetReloadFn(func() error {
 		newCfg, err := config.Load(cfgPath)
 		if err != nil {
@@ -336,12 +368,17 @@ func main() {
 		cfgMu.Lock()
 		cfg = newCfg
 		oldSched := sched
+		oldDiscoveryCancel := discoveryCancel
 		sched = startScheduler(newCfg)
+		discoveryCancel = startDiscovery(newCfg)
 		cfgMu.Unlock()
 
-		// Stop the old scheduler outside the lock to avoid holding the mutex
+		// Stop the old workers outside the lock to avoid holding the mutex
 		// during a potentially blocking Stop call.
 		oldSched.Stop()
+		if oldDiscoveryCancel != nil {
+			oldDiscoveryCancel()
+		}
 
 		// Run first poll immediately with new config
 		go makePollFn(newCfg)()
@@ -473,6 +510,17 @@ func parsePollInterval(s string) time.Duration {
 	d, err := time.ParseDuration(s)
 	if err != nil || d <= 0 {
 		return 5 * time.Minute
+	}
+	return d
+}
+
+// parseDiscoveryInterval falls back to 15m when the value is empty or invalid.
+// Config.Validate rejects invalid durations before we reach here, so the
+// fallback only covers the unset-in-TOML-but-topic-defaulted case.
+func parseDiscoveryInterval(s string) time.Duration {
+	d, err := time.ParseDuration(s)
+	if err != nil || d <= 0 {
+		return 15 * time.Minute
 	}
 	return d
 }
