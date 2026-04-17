@@ -910,8 +910,11 @@ describe('api.ts', () => {
   });
 
   it('triggerReview throws ApiError on 500', async () => {
-    fetchMock.mockResolvedValue(new Response('boom', { status: 500, statusText: 'Server Error' }));
+    const make500 = () =>
+      new Response('boom', { status: 500, statusText: 'Server Error' });
+    fetchMock.mockResolvedValueOnce(make500());
     await expect(triggerReview(7)).rejects.toBeInstanceOf(ApiError);
+    fetchMock.mockResolvedValueOnce(make500());
     await expect(triggerReview(7)).rejects.toMatchObject({
       status: 500,
       path: '/api/prs/7/review'
