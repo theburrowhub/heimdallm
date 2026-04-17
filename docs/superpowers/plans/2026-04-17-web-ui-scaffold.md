@@ -6,7 +6,7 @@
 
 **Architecture:** SvelteKit 2.x with `@sveltejs/adapter-node`. Browser talks only to same-origin SvelteKit endpoints; a catch-all proxy `/api/[...path]` and a dedicated `/events` SSE passthrough inject `X-Heimdallm-Token` when forwarding to the daemon. The token lives in `src/lib/server/` — never ships to the browser. Native `EventSource` handles SSE because the connection is same-origin.
 
-**Tech Stack:** SvelteKit 2.x, Svelte 5 (runes), TypeScript 5.x, Vite 5.x, TailwindCSS 4, `@sveltejs/adapter-node`, Vitest 2.x, Node 22 LTS.
+**Tech Stack:** SvelteKit 2.x, Svelte 5 (runes), TypeScript 5.x, Vite 6.x, TailwindCSS 4, `@sveltejs/adapter-node`, Vitest 3.x, Node 22 LTS.
 
 **Reference:** [Design spec](../specs/2026-04-17-web-ui-scaffold-design.md)
 
@@ -76,8 +76,8 @@
     "tailwindcss": "^4.0.0",
     "typescript": "^5.6.0",
     "typescript-eslint": "^8.15.0",
-    "vite": "^5.4.0",
-    "vitest": "^2.1.0"
+    "vite": "^6.0.0",
+    "vitest": "^3.0.0"
   }
 }
 ```
