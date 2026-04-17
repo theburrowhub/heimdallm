@@ -14,11 +14,17 @@ import (
 	"github.com/heimdallm/daemon/internal/config"
 )
 
+// issuesPerPage is the per_page query size used when walking the issues
+// endpoint. It is referenced both in the query string and in the "last
+// page" check so that changing one without the other cannot silently break
+// pagination.
+const issuesPerPage = 100
+
 // maxIssuePages bounds how many pages we consume per repo on a single
 // FetchIssues call — a hard safety net against runaway pagination. At
-// per_page=100 this caps the result at 1000 open issues per repo, which
-// is plenty for the review pipeline and prevents a malformed response
-// from looping forever.
+// issuesPerPage=100 this caps the result at 1000 open issues per repo,
+// which is plenty for the review pipeline and prevents a malformed
+// response from looping forever.
 const maxIssuePages = 10
 
 // FetchIssues returns the open issues for a repo after applying the filters
@@ -77,7 +83,7 @@ func (c *Client) FetchIssues(repo string, cfg config.IssueTrackingConfig, authen
 			kept = append(kept, issue)
 		}
 
-		if len(batch) < 100 {
+		if len(batch) < issuesPerPage {
 			break
 		}
 		if page == maxIssuePages {
@@ -92,7 +98,7 @@ func (c *Client) FetchIssues(repo string, cfg config.IssueTrackingConfig, authen
 func (c *Client) fetchIssuesPage(repo string, page int) ([]*Issue, error) {
 	params := url.Values{}
 	params.Set("state", "open")
-	params.Set("per_page", "100")
+	params.Set("per_page", strconv.Itoa(issuesPerPage))
 	params.Set("page", strconv.Itoa(page))
 
 	path := fmt.Sprintf("/repos/%s/issues?%s", repo, params.Encode())
@@ -100,8 +106,14 @@ func (c *Client) fetchIssuesPage(repo string, page int) ([]*Issue, error) {
 	if err != nil {
 		return nil, fmt.Errorf("github: fetch issues (%s page %d): %w", repo, page, err)
 	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+	// Surface I/O errors explicitly — a short read would otherwise slip into
+	// json.Unmarshal and produce a misleading "decode issues" error that
+	// masks the real network failure.
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	resp.Body.Close()
+	if readErr != nil {
+		return nil, fmt.Errorf("github: read issues body (%s page %d): %w", repo, page, readErr)
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		errBody := string(body)
@@ -163,7 +175,7 @@ func repoBelongsToOrg(repo string, orgs []string) bool {
 	if slash <= 0 {
 		return false
 	}
-	owner := strings.ToLower(repo[:slash])
+	owner := repo[:slash]
 	for _, o := range orgs {
 		if strings.EqualFold(strings.TrimSpace(o), owner) {
 			return true

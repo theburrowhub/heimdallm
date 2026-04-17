@@ -383,6 +383,43 @@ func TestFetchIssues_Pagination(t *testing.T) {
 	}
 }
 
+func TestFetchIssues_PaginationCapBounded(t *testing.T) {
+	// Server that always returns a full page of issues. FetchIssues should
+	// stop at its internal max-pages cap and return the accumulated results
+	// without error instead of looping forever.
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		// Each page returns 100 unique issues so IDs don't collide.
+		items := make([]map[string]any, 100)
+		for i := range items {
+			id := int64(page*100 + i)
+			items[i] = issueFixture{
+				ID: id, Number: int(id),
+				Labels:    []string{"bug"},
+				CreatedAt: time.Now(),
+			}.marshal()
+		}
+		_ = json.NewEncoder(w).Encode(items)
+	}))
+	defer srv.Close()
+	client := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+
+	got, err := client.FetchIssues("org/repo", baseCfg(), "")
+	if err != nil {
+		t.Fatalf("cap should not surface an error, got %v", err)
+	}
+	// Never exceed the cap × issuesPerPage.
+	if len(got) > 10*100 {
+		t.Errorf("result exceeded cap: got %d issues", len(got))
+	}
+	// Never issue more requests than the cap.
+	if c := atomic.LoadInt32(&calls); c > 10 {
+		t.Errorf("requests exceeded cap: got %d", c)
+	}
+}
+
 func TestFetchIssues_PaginationStopsAtPartialPage(t *testing.T) {
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
