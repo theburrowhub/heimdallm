@@ -16,13 +16,16 @@
   let stats: Stats | null = $state(null);
   let me: string = $state('');
   let err: string | null = $state(null);
+  let loading = $state(true);
 
   $effect(() => {
     void $prListRefresh;
     if (!browser) return;
+    loading = true;
     fetchPRs()
       .then((r) => (prs = r))
-      .catch((e: unknown) => (err = e instanceof Error ? e.message : String(e)));
+      .catch((e: unknown) => (err = e instanceof Error ? e.message : String(e)))
+      .finally(() => (loading = false));
     fetchStats()
       .then((r) => (stats = r))
       .catch(() => {});
@@ -70,7 +73,9 @@
   );
   const trackedIssues: Issue[] = $derived(issues.filter((i) => !i.dismissed));
 
-  const empty = $derived(prs.length === 0 && issues.length === 0);
+  const empty = $derived(
+    myReviews.length === 0 && myPRs.length === 0 && trackedIssues.length === 0
+  );
 </script>
 
 <section class="mb-6 flex items-center gap-3">
@@ -84,6 +89,7 @@
   <span class="text-xs text-gray-500">Sort:</span>
   <button
     type="button"
+    aria-pressed={$sort === 'priority'}
     class="rounded px-2 py-1 text-xs font-medium {$sort === 'priority'
       ? 'bg-indigo-100 text-indigo-700'
       : 'text-gray-600 hover:bg-gray-100'}"
@@ -93,6 +99,7 @@
   </button>
   <button
     type="button"
+    aria-pressed={$sort === 'newest'}
     class="rounded px-2 py-1 text-xs font-medium {$sort === 'newest'
       ? 'bg-indigo-100 text-indigo-700'
       : 'text-gray-600 hover:bg-gray-100'}"
@@ -103,7 +110,9 @@
 </section>
 
 {#if err}
-  <p class="text-sm text-red-600">Could not load: {err}</p>
+  <p class="text-sm text-red-600">Could not load PRs: {err}</p>
+{:else if loading && prs.length === 0 && issues.length === 0}
+  <p class="mt-6 text-center text-sm text-gray-500">Loading…</p>
 {:else if empty}
   <p class="mt-6 text-center text-sm text-gray-500">No activity yet.</p>
 {:else}
