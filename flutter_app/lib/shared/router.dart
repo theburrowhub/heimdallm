@@ -1,5 +1,6 @@
 import 'package:go_router/go_router.dart';
 import '../features/dashboard/dashboard_screen.dart';
+import '../features/issues/issue_detail_screen.dart';
 import '../features/pr_detail/pr_detail_screen.dart';
 import '../features/config/config_screen.dart';
 import '../features/logs/logs_screen.dart';
@@ -16,6 +17,13 @@ GoRouter createRouter({String initialLocation = '/'}) => GoRouter(
       builder: (context, state) {
         final id = int.parse(state.pathParameters['id']!);
         return PRDetailScreen(prId: id);
+      },
+    ),
+    GoRoute(
+      path: '/issues/:id',
+      builder: (context, state) {
+        final id = int.parse(state.pathParameters['id']!);
+        return IssueDetailScreen(issueId: id);
       },
     ),
     GoRoute(

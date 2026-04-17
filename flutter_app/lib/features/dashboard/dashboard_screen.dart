@@ -2,10 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../core/models/pr.dart';
+import '../../core/models/tracked_issue.dart';
 import '../../shared/widgets/severity_badge.dart';
 import '../../shared/widgets/toast.dart';
 import '../agents/agents_screen.dart';
 import '../cli_agents/cli_agents_screen.dart';
+import '../issues/issues_screen.dart';
+import '../issues/issues_providers.dart';
 import '../repositories/repos_screen.dart';
 import '../stats/stats_screen.dart';
 import 'dashboard_providers.dart';
@@ -16,7 +19,7 @@ class DashboardScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return DefaultTabController(
-      length: 5,
+      length: 6,
       child: Scaffold(
         appBar: AppBar(
           title: const Text('Heimdallm'),
@@ -34,13 +37,15 @@ class DashboardScreen extends ConsumerWidget {
               icon: const Icon(Icons.refresh),
               onPressed: () {
                 ref.invalidate(prsProvider);
+                ref.invalidate(issuesProvider);
                 ref.invalidate(statsProvider);
               },
             ),
           ],
           bottom: const TabBar(
             tabs: [
-              Tab(icon: Icon(Icons.rate_review),     text: 'Reviews'),
+              Tab(icon: Icon(Icons.dashboard),       text: 'Activity'),
+              Tab(icon: Icon(Icons.bug_report),      text: 'Issues'),
               Tab(icon: Icon(Icons.folder_outlined), text: 'Repositories'),
               Tab(icon: Icon(Icons.auto_awesome),    text: 'Prompts'),
               Tab(icon: Icon(Icons.smart_toy),       text: 'Agents'),
@@ -50,7 +55,8 @@ class DashboardScreen extends ConsumerWidget {
         ),
         body: const TabBarView(
           children: [
-            _ReviewsTab(),
+            _ActivityTab(),
+            IssuesScreen(),
             ReposScreen(),
             AgentsScreen(),
             CLIAgentsScreen(),
@@ -94,86 +100,103 @@ List<PR> _sortedPRs(List<PR> prs, _SortMode mode) {
   return list;
 }
 
-class _ReviewsTab extends ConsumerStatefulWidget {
-  const _ReviewsTab();
+class _ActivityTab extends ConsumerStatefulWidget {
+  const _ActivityTab();
   @override
-  ConsumerState<_ReviewsTab> createState() => _ReviewsTabState();
+  ConsumerState<_ActivityTab> createState() => _ActivityTabState();
 }
 
-class _ReviewsTabState extends ConsumerState<_ReviewsTab> {
+class _ActivityTabState extends ConsumerState<_ActivityTab> {
   bool _reviewsExpanded = true;
   bool _prsExpanded     = true;
+  bool _issuesExpanded  = true;
 
   @override
   Widget build(BuildContext context) {
-    final prsAsync = ref.watch(prsProvider);
-    final meAsync  = ref.watch(meProvider);
-    final sort     = ref.watch(_reviewsSortProvider);
+    final prsAsync    = ref.watch(prsProvider);
+    final issuesAsync = ref.watch(issuesProvider);
+    final meAsync     = ref.watch(meProvider);
+    final sort        = ref.watch(_reviewsSortProvider);
 
-    return prsAsync.when(
-      loading: () => const Center(child: CircularProgressIndicator()),
-      error: (e, _) => _errorView(context, e),
-      data: (prs) {
-        final me = meAsync.valueOrNull ?? '';
-        final myReviews = _sortedPRs(prs.where((p) =>
-            p.repo.isNotEmpty && p.author.toLowerCase() != me.toLowerCase()).toList(), sort);
-        final myPRs = _sortedPRs(prs.where((p) =>
-            p.repo.isNotEmpty && p.author.toLowerCase() == me.toLowerCase()).toList(), sort);
+    // Combine loading states
+    if (prsAsync.isLoading && issuesAsync.isLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (prsAsync.hasError && issuesAsync.hasError) {
+      return _errorView(context, prsAsync.error!);
+    }
 
-        if (prs.isEmpty) {
-          return const Center(child: Text('No open PRs found'));
-        }
+    final prs    = prsAsync.valueOrNull ?? [];
+    final issues = issuesAsync.valueOrNull ?? [];
+    final me     = meAsync.valueOrNull ?? '';
 
-        return ListView(
-          padding: const EdgeInsets.symmetric(vertical: 8),
-          children: [
-            // Sort selector
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
-              child: Row(
-                children: [
-                  Text('Sort:',
-                      style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
-                  const SizedBox(width: 8),
-                  _SortButton(
-                    label: 'Priority',
-                    icon: Icons.sort,
-                    selected: sort == _SortMode.priority,
-                    onTap: () => ref.read(_reviewsSortProvider.notifier).state = _SortMode.priority,
-                  ),
-                  const SizedBox(width: 6),
-                  _SortButton(
-                    label: 'Newest',
-                    icon: Icons.schedule,
-                    selected: sort == _SortMode.newest,
-                    onTap: () => ref.read(_reviewsSortProvider.notifier).state = _SortMode.newest,
-                  ),
-                ],
+    final myReviews = _sortedPRs(prs.where((p) =>
+        p.repo.isNotEmpty && p.author.toLowerCase() != me.toLowerCase()).toList(), sort);
+    final myPRs = _sortedPRs(prs.where((p) =>
+        p.repo.isNotEmpty && p.author.toLowerCase() == me.toLowerCase()).toList(), sort);
+
+    if (prs.isEmpty && issues.isEmpty) {
+      return const Center(child: Text('No activity yet'));
+    }
+
+    return ListView(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      children: [
+        // Sort selector
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+          child: Row(
+            children: [
+              Text('Sort:',
+                  style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
+              const SizedBox(width: 8),
+              _SortButton(
+                label: 'Priority',
+                icon: Icons.sort,
+                selected: sort == _SortMode.priority,
+                onTap: () => ref.read(_reviewsSortProvider.notifier).state = _SortMode.priority,
               ),
-            ),
-            if (myReviews.isNotEmpty) ...[
-              _CollapseHeader(
-                title: 'My Reviews',
-                count: myReviews.length,
-                expanded: _reviewsExpanded,
-                onToggle: () => setState(() => _reviewsExpanded = !_reviewsExpanded),
+              const SizedBox(width: 6),
+              _SortButton(
+                label: 'Newest',
+                icon: Icons.schedule,
+                selected: sort == _SortMode.newest,
+                onTap: () => ref.read(_reviewsSortProvider.notifier).state = _SortMode.newest,
               ),
-              if (_reviewsExpanded)
-                ...myReviews.map((pr) => _PRTile(pr: pr)),
             ],
-            if (myPRs.isNotEmpty) ...[
-              _CollapseHeader(
-                title: 'My PRs',
-                count: myPRs.length,
-                expanded: _prsExpanded,
-                onToggle: () => setState(() => _prsExpanded = !_prsExpanded),
-              ),
-              if (_prsExpanded)
-                ...myPRs.map((pr) => _PRTile(pr: pr)),
-            ],
-          ],
-        );
-      },
+          ),
+        ),
+        if (myReviews.isNotEmpty) ...[
+          _CollapseHeader(
+            title: 'My Reviews',
+            count: myReviews.length,
+            expanded: _reviewsExpanded,
+            onToggle: () => setState(() => _reviewsExpanded = !_reviewsExpanded),
+          ),
+          if (_reviewsExpanded)
+            ...myReviews.map((pr) => _PRTile(pr: pr)),
+        ],
+        if (myPRs.isNotEmpty) ...[
+          _CollapseHeader(
+            title: 'My PRs',
+            count: myPRs.length,
+            expanded: _prsExpanded,
+            onToggle: () => setState(() => _prsExpanded = !_prsExpanded),
+          ),
+          if (_prsExpanded)
+            ...myPRs.map((pr) => _PRTile(pr: pr)),
+        ],
+        if (issues.isNotEmpty) ...[
+          _CollapseHeader(
+            title: 'Tracked Issues',
+            count: issues.length,
+            expanded: _issuesExpanded,
+            onToggle: () => setState(() => _issuesExpanded = !_issuesExpanded),
+          ),
+          if (_issuesExpanded)
+            ...issues.map((issue) => _IssueActivityTile(issue: issue)),
+        ],
+      ],
     );
   }
 
@@ -194,7 +217,10 @@ class _ReviewsTabState extends ConsumerState<_ReviewsTab> {
             mainAxisSize: MainAxisSize.min,
             children: [
               TextButton(
-                  onPressed: () => ref.invalidate(prsProvider),
+                  onPressed: () {
+                    ref.invalidate(prsProvider);
+                    ref.invalidate(issuesProvider);
+                  },
                   child: const Text('Retry')),
               const SizedBox(width: 8),
               FilledButton.icon(
@@ -442,6 +468,78 @@ class _PRTileState extends ConsumerState<_PRTile> {
       case 'high':   return Colors.red.shade700;
       case 'medium': return Colors.orange.shade700;
       default:       return Colors.green.shade700;
+    }
+  }
+}
+
+class _IssueActivityTile extends StatelessWidget {
+  final TrackedIssue issue;
+  const _IssueActivityTile({required this.issue});
+
+  @override
+  Widget build(BuildContext context) {
+    final reviewed = issue.latestReview != null;
+    final severity = issue.latestReview?.severity ?? '';
+
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 3),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: () => context.push('/issues/${issue.id}'),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          child: Row(
+            children: [
+              Container(
+                width: 4, height: 48,
+                margin: const EdgeInsets.only(right: 12),
+                decoration: BoxDecoration(
+                  color: reviewed ? _severityColor(severity) : Colors.grey.shade600,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              Icon(Icons.bug_report, size: 16, color: Colors.grey.shade500),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(issue.title,
+                        style: const TextStyle(fontWeight: FontWeight.w600),
+                        maxLines: 1, overflow: TextOverflow.ellipsis),
+                    const SizedBox(height: 4),
+                    Text('${issue.repo} · #${issue.number} · ${issue.author}',
+                        style: Theme.of(context).textTheme.bodySmall,
+                        maxLines: 1, overflow: TextOverflow.ellipsis),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 12),
+              if (reviewed)
+                SeverityBadge(severity: severity)
+              else
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                      color: Colors.grey.shade700,
+                      borderRadius: BorderRadius.circular(4)),
+                  child: const Text('PENDING',
+                      style: TextStyle(
+                          color: Colors.white, fontSize: 11, fontWeight: FontWeight.w600)),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Color _severityColor(String s) {
+    switch (s.toLowerCase()) {
+      case 'critical': return Colors.red.shade900;
+      case 'high':     return Colors.red.shade700;
+      case 'medium':   return Colors.orange.shade700;
+      default:         return Colors.green.shade700;
     }
   }
 }
