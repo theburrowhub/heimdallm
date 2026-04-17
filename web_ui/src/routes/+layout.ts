@@ -7,7 +7,7 @@ export const ssr = false; // browser-only — auth state + SSE live in the clien
 export const load: LayoutLoad = async () => {
   try {
     const me = await fetchMe();
-    auth.set({ login: me.login ?? null, authError: null, ready: true });
+    auth.set({ login: me.login, authError: null, ready: true });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'daemon unreachable';
     auth.set({ login: null, authError: message, ready: true });
