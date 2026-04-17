@@ -55,12 +55,23 @@ type fakeGH struct {
 	commentsByKey map[string][]github.Comment
 	postErr       error
 	commentsErr   error
+
+	// auto_implement-specific knobs; review_only tests leave them zero.
+	defaultBranch    string
+	defaultBranchErr error
+	createPRCalls    []prCall
+	createPRNumber   int
+	createPRErr      error
 }
 
 type postCall struct {
 	Repo   string
 	Number int
 	Body   string
+}
+
+type prCall struct {
+	Repo, Title, Body, Head, Base string
 }
 
 func (f *fakeGH) PostComment(repo string, number int, body string) error {
@@ -73,6 +84,29 @@ func (f *fakeGH) FetchComments(repo string, number int) ([]github.Comment, error
 		return nil, f.commentsErr
 	}
 	return f.commentsByKey[fmt.Sprintf("%s#%d", repo, number)], nil
+}
+
+func (f *fakeGH) GetDefaultBranch(repo string) (string, error) {
+	if f.defaultBranchErr != nil {
+		return "", f.defaultBranchErr
+	}
+	if f.defaultBranch == "" {
+		return "main", nil
+	}
+	return f.defaultBranch, nil
+}
+
+func (f *fakeGH) CreatePR(repo, title, body, head, base string) (int, error) {
+	f.createPRCalls = append(f.createPRCalls, prCall{
+		Repo: repo, Title: title, Body: body, Head: head, Base: base,
+	})
+	if f.createPRErr != nil {
+		return 0, f.createPRErr
+	}
+	if f.createPRNumber == 0 {
+		return 999, nil
+	}
+	return f.createPRNumber, nil
 }
 
 type fakeExec struct {
@@ -134,6 +168,34 @@ func (n *fakeNotifier) Notify(title, message string) {
 	n.calls = append(n.calls, title+": "+message)
 }
 
+type fakeGit struct {
+	checkoutCalls []string // branch names checked out
+	commitCalls   []string // commit messages
+	pushCalls     []string // branches pushed
+	hasChanges    bool
+
+	checkoutErr   error
+	hasChangesErr error
+	commitErr     error
+	pushErr       error
+}
+
+func (g *fakeGit) CheckoutNewBranch(dir, branch, base string) error {
+	g.checkoutCalls = append(g.checkoutCalls, branch)
+	return g.checkoutErr
+}
+func (g *fakeGit) HasChanges(dir string) (bool, error) {
+	return g.hasChanges, g.hasChangesErr
+}
+func (g *fakeGit) CommitAll(dir, msg string) error {
+	g.commitCalls = append(g.commitCalls, msg)
+	return g.commitErr
+}
+func (g *fakeGit) Push(dir, repo, branch, token string) error {
+	g.pushCalls = append(g.pushCalls, branch)
+	return g.pushErr
+}
+
 // validResult is a sample JSON triage payload returned by the fake executor.
 const validResult = `
 {
@@ -173,7 +235,7 @@ func TestPipeline_RunHappyPath(t *testing.T) {
 	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte(validResult)}
 	broker := &fakeBroker{}
 	notify := &fakeNotifier{}
-	p := issues.New(s, gh, exec, broker, notify)
+	p := issues.New(s, gh, exec, nil, broker, notify)
 
 	issue := newIssue(config.IssueModeReviewOnly)
 	rev, err := p.Run(issue, issues.RunOptions{Primary: "claude"})
@@ -244,7 +306,7 @@ func TestPipeline_DevelopFallsBackToReviewOnlyWithoutLocalDir(t *testing.T) {
 	s := &fakeStore{}
 	gh := &fakeGH{}
 	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte(validResult)}
-	p := issues.New(s, gh, exec, &fakeBroker{}, nil)
+	p := issues.New(s, gh, exec, nil, &fakeBroker{}, nil)
 
 	issue := newIssue(config.IssueModeDevelop)
 	// WorkDir zero → no working tree → downgrade to review_only.
@@ -265,26 +327,232 @@ func TestPipeline_DevelopFallsBackToReviewOnlyWithoutLocalDir(t *testing.T) {
 	}
 }
 
-func TestPipeline_DevelopWithLocalDirIsNotYetSupportedHere(t *testing.T) {
-	// #27 owns the auto_implement path. Until that lands, the review_only
-	// pipeline must refuse rather than silently behaving like review_only when
-	// a working tree IS available.
+// ── auto_implement ───────────────────────────────────────────────────────────
+
+func autoImplementRunOptions() issues.RunOptions {
+	return issues.RunOptions{
+		Primary:     "claude",
+		ExecOpts:    executor.ExecOptions{WorkDir: "/tmp/repo"},
+		GitHubToken: "ghs_fake_token",
+	}
+}
+
+func TestPipeline_AutoImplementHappyPath(t *testing.T) {
 	s := &fakeStore{}
-	gh := &fakeGH{}
-	exec := &fakeExec{}
-	p := issues.New(s, gh, exec, nil, nil)
+	gh := &fakeGH{defaultBranch: "main", createPRNumber: 123}
+	// Agent output content is irrelevant in auto_implement — only HasChanges matters.
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("done")}
+	git := &fakeGit{hasChanges: true}
+	broker := &fakeBroker{}
+	notify := &fakeNotifier{}
+	p := issues.New(s, gh, exec, git, broker, notify)
 
 	issue := newIssue(config.IssueModeDevelop)
-	_, err := p.Run(issue, issues.RunOptions{
-		Primary:  "claude",
-		ExecOpts: executor.ExecOptions{WorkDir: "/tmp/repo"},
-	})
+	rev, err := p.Run(issue, autoImplementRunOptions())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	// Git ops ran in the expected order.
+	if len(git.checkoutCalls) != 1 || git.checkoutCalls[0] != "heimdallm/issue-7" {
+		t.Errorf("branch expected heimdallm/issue-7, got %v", git.checkoutCalls)
+	}
+	if len(git.commitCalls) != 1 {
+		t.Fatalf("expected 1 commit, got %d", len(git.commitCalls))
+	}
+	if !strings.Contains(git.commitCalls[0], "Closes #7") {
+		t.Errorf("commit msg should mention Closes #7, got %q", git.commitCalls[0])
+	}
+	if len(git.pushCalls) != 1 || git.pushCalls[0] != "heimdallm/issue-7" {
+		t.Errorf("expected push of heimdallm/issue-7, got %v", git.pushCalls)
+	}
+
+	// PR created against main with the work branch.
+	if len(gh.createPRCalls) != 1 {
+		t.Fatalf("expected 1 CreatePR, got %d", len(gh.createPRCalls))
+	}
+	call := gh.createPRCalls[0]
+	if call.Head != "heimdallm/issue-7" || call.Base != "main" {
+		t.Errorf("PR head/base wrong: %+v", call)
+	}
+	if !strings.Contains(call.Body, "Closes #7") {
+		t.Errorf("PR body missing Closes #7: %q", call.Body)
+	}
+
+	// Review persisted with action_taken=develop and pr_created=123.
+	if rev.ActionTaken != string(config.IssueModeDevelop) {
+		t.Errorf("ActionTaken=%q, want develop", rev.ActionTaken)
+	}
+	if rev.PRCreated != 123 {
+		t.Errorf("PRCreated=%d, want 123", rev.PRCreated)
+	}
+
+	// SSE: detected → started → implemented.
+	types := broker.types()
+	want := []string{sse.EventIssueDetected, sse.EventIssueReviewStarted, sse.EventIssueImplemented}
+	if !stringsEqual(types, want) {
+		t.Errorf("SSE sequence = %v, want %v", types, want)
+	}
+
+	// No PostComment (no fallback path).
+	if len(gh.postCalls) != 0 {
+		t.Errorf("auto_implement happy path should not post a review_only comment, got %v", gh.postCalls)
+	}
+
+	// Prompt was the implement flavour, not the triage JSON instruction.
+	if !strings.Contains(exec.lastPrompt, "Implement what the issue asks for") {
+		t.Errorf("prompt should be the implement flavour")
+	}
+}
+
+func TestPipeline_AutoImplementNoChangesFallsBackToReviewOnly(t *testing.T) {
+	// Agent escape hatch fired; the working tree is untouched. The pipeline
+	// must degrade to a review_only-style comment rather than open an empty PR.
+	s := &fakeStore{}
+	gh := &fakeGH{defaultBranch: "main"}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("nothing to do")}
+	git := &fakeGit{hasChanges: false}
+	broker := &fakeBroker{}
+	p := issues.New(s, gh, exec, git, broker, nil)
+
+	rev, err := p.Run(newIssue(config.IssueModeDevelop), autoImplementRunOptions())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	// No commit, no push, no PR.
+	if len(git.commitCalls) != 0 || len(git.pushCalls) != 0 || len(gh.createPRCalls) != 0 {
+		t.Errorf("no-changes path must not commit/push/createPR, got commits=%d pushes=%d prs=%d",
+			len(git.commitCalls), len(git.pushCalls), len(gh.createPRCalls))
+	}
+
+	// Comment explaining the skip is posted.
+	if len(gh.postCalls) != 1 {
+		t.Fatalf("expected 1 fallback PostComment, got %d", len(gh.postCalls))
+	}
+	if !strings.Contains(gh.postCalls[0].Body, "auto-implement skipped") {
+		t.Errorf("fallback body should explain the skip, got %q", gh.postCalls[0].Body)
+	}
+
+	// Review persisted reflects the actual mode that ran.
+	if rev.ActionTaken != string(config.IssueModeReviewOnly) {
+		t.Errorf("ActionTaken=%q, want review_only (audit-honest fallback)", rev.ActionTaken)
+	}
+	if rev.PRCreated != 0 {
+		t.Errorf("PRCreated=%d, want 0", rev.PRCreated)
+	}
+
+	// SSE completes with review_completed, not implemented.
+	types := broker.types()
+	if types[len(types)-1] != sse.EventIssueReviewCompleted {
+		t.Errorf("last event = %q, want issue_review_completed", types[len(types)-1])
+	}
+}
+
+func TestPipeline_AutoImplementRequiresGitDep(t *testing.T) {
+	p := issues.New(&fakeStore{}, &fakeGH{}, &fakeExec{}, nil, &fakeBroker{}, nil)
+	_, err := p.Run(newIssue(config.IssueModeDevelop), autoImplementRunOptions())
 	if err == nil {
-		t.Fatal("expected error for develop+local_dir until #27 lands")
+		t.Fatal("expected error when GitOps is nil")
 	}
-	if !strings.Contains(err.Error(), "auto_implement") {
-		t.Errorf("error should point at auto_implement/#27, got: %v", err)
+}
+
+func TestPipeline_AutoImplementRequiresToken(t *testing.T) {
+	p := issues.New(&fakeStore{}, &fakeGH{}, &fakeExec{}, &fakeGit{}, &fakeBroker{}, nil)
+	opts := autoImplementRunOptions()
+	opts.GitHubToken = ""
+	_, err := p.Run(newIssue(config.IssueModeDevelop), opts)
+	if err == nil {
+		t.Fatal("expected error when GitHubToken is empty")
 	}
+}
+
+func TestPipeline_AutoImplementSurfacesDefaultBranchError(t *testing.T) {
+	gh := &fakeGH{defaultBranchErr: errors.New("repo not found")}
+	p := issues.New(&fakeStore{}, gh, &fakeExec{detectCLI: "claude", rawOutput: []byte("x")},
+		&fakeGit{hasChanges: true}, &fakeBroker{}, nil)
+	_, err := p.Run(newIssue(config.IssueModeDevelop), autoImplementRunOptions())
+	if err == nil {
+		t.Fatal("expected error on GetDefaultBranch failure")
+	}
+	if !strings.Contains(err.Error(), "default branch") {
+		t.Errorf("error should mention default branch, got: %v", err)
+	}
+}
+
+func TestPipeline_AutoImplementSurfacesCheckoutError(t *testing.T) {
+	git := &fakeGit{checkoutErr: errors.New("fetch failed")}
+	p := issues.New(&fakeStore{}, &fakeGH{defaultBranch: "main"}, &fakeExec{},
+		git, &fakeBroker{}, nil)
+	_, err := p.Run(newIssue(config.IssueModeDevelop), autoImplementRunOptions())
+	if err == nil {
+		t.Fatal("expected error on checkout failure")
+	}
+}
+
+func TestPipeline_AutoImplementSurfacesPushError(t *testing.T) {
+	git := &fakeGit{hasChanges: true, pushErr: errors.New("remote rejected")}
+	broker := &fakeBroker{}
+	p := issues.New(&fakeStore{}, &fakeGH{defaultBranch: "main"},
+		&fakeExec{detectCLI: "claude", rawOutput: []byte("x")}, git, broker, nil)
+
+	_, err := p.Run(newIssue(config.IssueModeDevelop), autoImplementRunOptions())
+	if err == nil {
+		t.Fatal("expected push error to surface")
+	}
+	// An issue_review_error event is published so operators see the failure.
+	types := broker.types()
+	if types[len(types)-1] != sse.EventIssueReviewError {
+		t.Errorf("last event should be issue_review_error, got %v", types)
+	}
+}
+
+func TestPipeline_AutoImplementSurfacesCreatePRError(t *testing.T) {
+	gh := &fakeGH{defaultBranch: "main", createPRErr: errors.New("validation failed")}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(&fakeStore{}, gh,
+		&fakeExec{detectCLI: "claude", rawOutput: []byte("x")}, git, &fakeBroker{}, nil)
+
+	_, err := p.Run(newIssue(config.IssueModeDevelop), autoImplementRunOptions())
+	if err == nil {
+		t.Fatal("expected CreatePR error to surface")
+	}
+	// Commit+push ran before the PR step, so both should have been attempted.
+	if len(git.pushCalls) != 1 {
+		t.Errorf("push should have run before the failing CreatePR, got %d calls", len(git.pushCalls))
+	}
+}
+
+func TestPipeline_AutoImplementTokenNeverLeaksIntoPushCall(t *testing.T) {
+	// Regression guard: Push receives the token via an argument, not via
+	// global state. Fake Push must receive the token verbatim and the
+	// pipeline must not mutate RunOptions.GitHubToken along the way.
+	git := &tokenSniffingGit{}
+	opts := autoImplementRunOptions()
+	p := issues.New(&fakeStore{}, &fakeGH{defaultBranch: "main"},
+		&fakeExec{detectCLI: "claude", rawOutput: []byte("x")}, git, &fakeBroker{}, nil)
+
+	_, err := p.Run(newIssue(config.IssueModeDevelop), opts)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if git.seenToken != opts.GitHubToken {
+		t.Errorf("Push received a different token than RunOptions carried (%q vs %q)",
+			git.seenToken, opts.GitHubToken)
+	}
+}
+
+// tokenSniffingGit is a GitOps that records the token it was pushed with.
+type tokenSniffingGit struct {
+	seenToken string
+}
+
+func (g *tokenSniffingGit) CheckoutNewBranch(dir, branch, base string) error { return nil }
+func (g *tokenSniffingGit) HasChanges(dir string) (bool, error)              { return true, nil }
+func (g *tokenSniffingGit) CommitAll(dir, msg string) error                  { return nil }
+func (g *tokenSniffingGit) Push(dir, repo, branch, token string) error {
+	g.seenToken = token
+	return nil
 }
 
 func TestPipeline_IgnoreModeRejectedWithItsOwnError(t *testing.T) {
@@ -292,7 +560,7 @@ func TestPipeline_IgnoreModeRejectedWithItsOwnError(t *testing.T) {
 	// pipeline must surface a specific error (not the auto_implement one)
 	// if one ever sneaks in. Regression guard for Muriano's review feedback.
 	s := &fakeStore{}
-	p := issues.New(s, &fakeGH{}, &fakeExec{}, nil, nil)
+	p := issues.New(s, &fakeGH{}, &fakeExec{}, nil, nil, nil)
 
 	issue := newIssue(config.IssueModeIgnore)
 	_, err := p.Run(issue, issues.RunOptions{Primary: "claude"})
@@ -320,7 +588,7 @@ func TestPipeline_StripsLeadingAtInSuggestedAssignee(t *testing.T) {
 	s := &fakeStore{}
 	gh := &fakeGH{}
 	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte(raw)}
-	p := issues.New(s, gh, exec, nil, nil)
+	p := issues.New(s, gh, exec, nil, nil, nil)
 
 	if _, err := p.Run(newIssue(config.IssueModeReviewOnly), issues.RunOptions{Primary: "claude"}); err != nil {
 		t.Fatalf("run: %v", err)
@@ -344,7 +612,7 @@ func TestPipeline_HandlesMarkdownWrappedJSON(t *testing.T) {
 	s := &fakeStore{}
 	gh := &fakeGH{}
 	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte(wrapped)}
-	p := issues.New(s, gh, exec, nil, nil)
+	p := issues.New(s, gh, exec, nil, nil, nil)
 
 	rev, err := p.Run(newIssue(config.IssueModeReviewOnly), issues.RunOptions{Primary: "claude"})
 	if err != nil {
@@ -365,7 +633,7 @@ func TestPipeline_MissingTopSeverityFallsBackToTriage(t *testing.T) {
 	gh := &fakeGH{}
 	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte(noTopSeverity)}
 	broker := &fakeBroker{}
-	p := issues.New(s, gh, exec, broker, nil)
+	p := issues.New(s, gh, exec, nil, broker, nil)
 
 	_, err := p.Run(newIssue(config.IssueModeReviewOnly), issues.RunOptions{Primary: "claude"})
 	if err != nil {
@@ -387,7 +655,7 @@ func TestPipeline_PostCommentErrorDoesNotAbort(t *testing.T) {
 	gh := &fakeGH{postErr: errors.New("rate limited")}
 	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte(validResult)}
 	broker := &fakeBroker{}
-	p := issues.New(s, gh, exec, broker, nil)
+	p := issues.New(s, gh, exec, nil, broker, nil)
 
 	_, err := p.Run(newIssue(config.IssueModeReviewOnly), issues.RunOptions{Primary: "claude"})
 	if err != nil {
@@ -407,7 +675,7 @@ func TestPipeline_FetchCommentsErrorIsNonFatal(t *testing.T) {
 	s := &fakeStore{}
 	gh := &fakeGH{commentsErr: errors.New("comments API broken")}
 	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte(validResult)}
-	p := issues.New(s, gh, exec, nil, nil)
+	p := issues.New(s, gh, exec, nil, nil, nil)
 
 	if _, err := p.Run(newIssue(config.IssueModeReviewOnly), issues.RunOptions{Primary: "claude"}); err != nil {
 		t.Fatalf("comment fetch failure must not abort, got: %v", err)
@@ -421,7 +689,7 @@ func TestPipeline_CLIDetectFailureEmitsErrorEvent(t *testing.T) {
 	gh := &fakeGH{}
 	exec := &fakeExec{detectErr: errors.New("no CLI available")}
 	broker := &fakeBroker{}
-	p := issues.New(s, gh, exec, broker, nil)
+	p := issues.New(s, gh, exec, nil, broker, nil)
 
 	_, err := p.Run(newIssue(config.IssueModeReviewOnly), issues.RunOptions{Primary: "claude"})
 	if err == nil {
@@ -438,7 +706,7 @@ func TestPipeline_BadJSONEmitsErrorEvent(t *testing.T) {
 	gh := &fakeGH{}
 	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("not json at all")}
 	broker := &fakeBroker{}
-	p := issues.New(s, gh, exec, broker, nil)
+	p := issues.New(s, gh, exec, nil, broker, nil)
 
 	_, err := p.Run(newIssue(config.IssueModeReviewOnly), issues.RunOptions{Primary: "claude"})
 	if err == nil {
@@ -451,7 +719,7 @@ func TestPipeline_BadJSONEmitsErrorEvent(t *testing.T) {
 }
 
 func TestPipeline_NilIssueIsRejected(t *testing.T) {
-	p := issues.New(&fakeStore{}, &fakeGH{}, &fakeExec{}, nil, nil)
+	p := issues.New(&fakeStore{}, &fakeGH{}, &fakeExec{}, nil, nil, nil)
 	if _, err := p.Run(nil, issues.RunOptions{}); err == nil {
 		t.Fatal("expected error for nil issue")
 	}

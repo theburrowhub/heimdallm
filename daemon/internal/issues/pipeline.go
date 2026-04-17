@@ -31,6 +31,19 @@ type IssueCommentFetcher interface {
 	FetchComments(repo string, number int) ([]github.Comment, error)
 }
 
+// DefaultBrancher returns the GitHub repository's default branch. Used by
+// the auto_implement pipeline (#27) to base the work branch on the right
+// trunk.
+type DefaultBrancher interface {
+	GetDefaultBranch(repo string) (string, error)
+}
+
+// PRCreator opens a pull request — the last external step of the
+// auto_implement flow before the review is persisted.
+type PRCreator interface {
+	CreatePR(repo, title, body, head, base string) (int, error)
+}
+
 // CLIExecutor runs an AI CLI. The pipeline uses ExecuteRaw because the
 // triage schema (Triage object) differs from the PR-review schema.
 type CLIExecutor interface {
@@ -74,17 +87,23 @@ type IssueReviewResult struct {
 // assign it directly to `ExecOpts.WorkDir`; do not add a separate field
 // here (we had one in PR #44 review drafts — it caused exactly the
 // inconsistency the reviewers flagged).
+//
+// GitHubToken is required for the auto_implement path (git push). It is not
+// consulted in review_only runs, which is why it lives here rather than in
+// the Pipeline itself — the token belongs to the caller and may rotate.
 type RunOptions struct {
-	Primary  string
-	Fallback string
-	ExecOpts executor.ExecOptions
+	Primary     string
+	Fallback    string
+	ExecOpts    executor.ExecOptions
+	GitHubToken string
 }
 
-// Pipeline runs a single issue triage end-to-end.
+// Pipeline runs a single issue triage or implementation end-to-end.
 type Pipeline struct {
 	store    issueStore
 	gh       issueGitHub
 	executor CLIExecutor
+	git      GitOps
 	broker   Publisher
 	notify   Notifier
 }
@@ -96,31 +115,42 @@ type issueStore interface {
 	InsertIssueReview(r *store.IssueReview) (int64, error)
 }
 
+// issueGitHub groups every GitHub-facing method the pipeline uses. The
+// review_only flow only needs IssueCommenter + IssueCommentFetcher; the
+// auto_implement flow additionally needs DefaultBrancher + PRCreator. A
+// single fat interface is simpler than juggling two at the caller — the
+// real *github.Client implements all four trivially.
 type issueGitHub interface {
 	IssueCommenter
 	IssueCommentFetcher
+	DefaultBrancher
+	PRCreator
 }
 
 // New wires the pipeline. All dependencies are interfaces so tests can
-// inject fakes.
-func New(s issueStore, gh issueGitHub, exec CLIExecutor, broker Publisher, n Notifier) *Pipeline {
-	return &Pipeline{store: s, gh: gh, executor: exec, broker: broker, notify: n}
+// inject fakes. `git` may be nil when the caller is sure no auto_implement
+// run will happen (e.g. unit tests that only exercise review_only); the
+// pipeline guards the nil before any git operation.
+func New(s issueStore, gh issueGitHub, exec CLIExecutor, git GitOps, broker Publisher, n Notifier) *Pipeline {
+	return &Pipeline{store: s, gh: gh, executor: exec, git: git, broker: broker, notify: n}
 }
 
 // Run processes one classified issue and returns the persisted review. The
 // returned IssueReview's ActionTaken reflects the mode that actually ran —
-// in particular, a develop-classified issue that loses its local_dir is
-// persisted as "review_only" so the audit trail matches behaviour.
+// a develop-classified issue that loses its local_dir is persisted as
+// "review_only", and an auto_implement run whose agent made no changes is
+// downgraded to review_only with an explanatory comment.
+//
+// Run is the single entry point; it decides the mode and delegates to
+// runReviewOnly or runAutoImplement so each flow stays readable.
 func (p *Pipeline) Run(issue *github.Issue, opts RunOptions) (*store.IssueReview, error) {
 	if issue == nil {
 		return nil, fmt.Errorf("issues pipeline: nil issue")
 	}
 
-	// 1. Determine the effective mode. If the caller asked for develop but
-	// there is no working directory to hand the CLI, degrade to review_only
-	// instead of failing — safer for operators and matches the acceptance
-	// criterion in #26. `ExecOpts.WorkDir` is the single source of truth for
-	// "is there a local checkout"; Run does not consult any other field.
+	// Determine the effective mode. `ExecOpts.WorkDir` is the single source
+	// of truth for "is there a local checkout"; Run does not consult any
+	// other field.
 	workDir := strings.TrimSpace(opts.ExecOpts.WorkDir)
 	effective := issue.Mode
 	if effective == config.IssueModeDevelop && workDir == "" {
@@ -128,22 +158,14 @@ func (p *Pipeline) Run(issue *github.Issue, opts RunOptions) (*store.IssueReview
 			"repo", issue.Repo, "issue", issue.Number)
 		effective = config.IssueModeReviewOnly
 	}
-	// Reject anything that does not resolve to review_only with a specific
-	// message so the log tells operators exactly why the pipeline refused.
-	// `ignore` should never reach this code (the fetcher filters it out) —
-	// if it somehow does, surface that as its own error rather than the
-	// auto_implement one.
 	if effective == config.IssueModeIgnore {
 		return nil, fmt.Errorf("issues pipeline: refusing an ignore-classified issue (fetcher should have filtered it out)")
 	}
-	if effective != config.IssueModeReviewOnly {
-		// Only possibility left: develop mode WITH a working directory,
-		// which is the auto_implement path owned by #27.
-		return nil, fmt.Errorf("issues pipeline: develop mode with local_dir belongs to the auto_implement path in #27")
-	}
 
-	// 2. Persist the issue row (or update an existing one). Dismiss-preserving
-	// upsert semantics are already guaranteed by store.UpsertIssue.
+	// Upsert + initial SSE events are common to both flows so we do them
+	// here. issue_detected fires before the flow forks, issue_review_started
+	// fires after so the UI can show the correct "triaging" vs "implementing"
+	// copy — the runner sets the exact flavour it wants.
 	storeIssue, err := issueToStore(issue)
 	if err != nil {
 		return nil, err
@@ -152,27 +174,40 @@ func (p *Pipeline) Run(issue *github.Issue, opts RunOptions) (*store.IssueReview
 	if err != nil {
 		return nil, fmt.Errorf("issues pipeline: upsert issue: %w", err)
 	}
-
 	p.publish(sse.EventIssueDetected, map[string]any{
 		"issue_id": issueID, "number": issue.Number, "repo": issue.Repo,
 	})
+
+	switch effective {
+	case config.IssueModeReviewOnly:
+		return p.runReviewOnly(issue, issueID, workDir, opts)
+	case config.IssueModeDevelop:
+		return p.runAutoImplement(issue, issueID, workDir, opts)
+	default:
+		return nil, fmt.Errorf("issues pipeline: unknown effective mode %q", effective)
+	}
+}
+
+// runReviewOnly posts a triage comment and persists the review. Shared
+// upsert + issue_detected event have already been done by Run.
+func (p *Pipeline) runReviewOnly(issue *github.Issue, issueID int64, workDir string, opts RunOptions) (*store.IssueReview, error) {
 	p.publish(sse.EventIssueReviewStarted, map[string]any{
-		"issue_id": issueID, "number": issue.Number, "repo": issue.Repo,
+		"issue_id": issueID, "number": issue.Number, "repo": issue.Repo, "mode": "review_only",
 	})
 	if p.notify != nil {
 		p.notify.Notify("Issue Triage Started", fmt.Sprintf("%s #%d", issue.Repo, issue.Number))
 	}
 
-	// 3. Pull existing discussion as additional context. Failure is
-	// non-fatal — the triage still runs with title + body alone.
+	// Pull existing discussion as additional context. Failure is non-fatal —
+	// the triage still runs with title + body alone.
 	comments, err := p.gh.FetchComments(issue.Repo, issue.Number)
 	if err != nil {
 		slog.Warn("issues pipeline: failed to fetch comments, proceeding without", "err", err)
 		comments = nil
 	}
 
-	// 4. Build prompt + run the CLI. HasLocalDir mirrors workDir above so
-	// the LLM hears the same story as the mode-selection logic.
+	// Build prompt + run the CLI. HasLocalDir mirrors workDir above so the
+	// LLM hears the same story as the mode-selection logic.
 	prompt := BuildPrompt(PromptContext{
 		Repo:        issue.Repo,
 		Number:      issue.Number,
@@ -189,22 +224,20 @@ func (p *Pipeline) Run(issue *github.Issue, opts RunOptions) (*store.IssueReview
 		p.publishError(issueID, issue, fmt.Errorf("detect CLI: %w", err))
 		return nil, fmt.Errorf("issues pipeline: detect CLI: %w", err)
 	}
-
 	raw, err := p.executor.ExecuteRaw(cli, prompt, opts.ExecOpts)
 	if err != nil {
 		p.publishError(issueID, issue, fmt.Errorf("execute %s: %w", cli, err))
 		return nil, fmt.Errorf("issues pipeline: execute %s: %w", cli, err)
 	}
-
 	result, err := parseIssueResult(raw)
 	if err != nil {
 		p.publishError(issueID, issue, err)
 		return nil, fmt.Errorf("issues pipeline: parse result: %w", err)
 	}
 
-	// 5. Build + post the Markdown comment. PostComment failure is not
-	// fatal — the review is still persisted locally with a zero pr_created
-	// so operators can re-drive it manually without losing the LLM output.
+	// Build + post the Markdown comment. PostComment failure is not fatal —
+	// the review is still persisted locally with a zero pr_created so
+	// operators can re-drive it manually without losing the LLM output.
 	body := BuildMarkdownComment(result)
 	postErr := p.gh.PostComment(issue.Repo, issue.Number, body)
 	if postErr != nil {
@@ -212,7 +245,6 @@ func (p *Pipeline) Run(issue *github.Issue, opts RunOptions) (*store.IssueReview
 			"repo", issue.Repo, "number", issue.Number, "err", postErr)
 	}
 
-	// 6. Persist the review.
 	triageJSON, err := json.Marshal(result.Triage)
 	if err != nil {
 		return nil, fmt.Errorf("issues pipeline: marshal triage: %w", err)
@@ -244,11 +276,175 @@ func (p *Pipeline) Run(issue *github.Issue, opts RunOptions) (*store.IssueReview
 		p.notify.Notify("Issue Triage Complete",
 			fmt.Sprintf("%s #%d — severity: %s", issue.Repo, issue.Number, result.Severity))
 	}
-
 	slog.Info("issues pipeline: triage complete",
 		"repo", issue.Repo, "number", issue.Number,
 		"severity", result.Severity, "posted", postErr == nil)
+	return rev, nil
+}
 
+// runAutoImplement creates a branch, asks the agent to implement the issue,
+// commits + pushes whatever it changed, opens a PR, and persists the review.
+// When the agent produces no changes the run silently degrades to
+// review_only with an explanatory comment rather than opening an empty PR.
+func (p *Pipeline) runAutoImplement(issue *github.Issue, issueID int64, workDir string, opts RunOptions) (*store.IssueReview, error) {
+	if p.git == nil {
+		p.publishError(issueID, issue, fmt.Errorf("git dependency not wired"))
+		return nil, fmt.Errorf("issues pipeline: auto_implement requires a GitOps dep")
+	}
+	if opts.GitHubToken == "" {
+		p.publishError(issueID, issue, fmt.Errorf("auto_implement requires a GitHub token"))
+		return nil, fmt.Errorf("issues pipeline: auto_implement: empty GitHubToken")
+	}
+
+	p.publish(sse.EventIssueReviewStarted, map[string]any{
+		"issue_id": issueID, "number": issue.Number, "repo": issue.Repo, "mode": "auto_implement",
+	})
+	if p.notify != nil {
+		p.notify.Notify("Issue Auto-Implement Started", fmt.Sprintf("%s #%d", issue.Repo, issue.Number))
+	}
+
+	// Resolve the default branch first so we fail fast on a bad token / repo
+	// name before the CLI burns a turn on the prompt.
+	base, err := p.gh.GetDefaultBranch(issue.Repo)
+	if err != nil {
+		p.publishError(issueID, issue, fmt.Errorf("default branch: %w", err))
+		return nil, fmt.Errorf("issues pipeline: get default branch: %w", err)
+	}
+
+	branch := fmt.Sprintf("heimdallm/issue-%d", issue.Number)
+	if err := p.git.CheckoutNewBranch(workDir, branch, base); err != nil {
+		p.publishError(issueID, issue, fmt.Errorf("checkout: %w", err))
+		return nil, fmt.Errorf("issues pipeline: checkout: %w", err)
+	}
+
+	// Fetch comments once so the implement prompt carries the same context
+	// the triage path would see. Best-effort as before.
+	comments, err := p.gh.FetchComments(issue.Repo, issue.Number)
+	if err != nil {
+		slog.Warn("issues pipeline: failed to fetch comments, proceeding without", "err", err)
+		comments = nil
+	}
+
+	cli, err := p.executor.Detect(opts.Primary, opts.Fallback)
+	if err != nil {
+		p.publishError(issueID, issue, fmt.Errorf("detect CLI: %w", err))
+		return nil, fmt.Errorf("issues pipeline: detect CLI: %w", err)
+	}
+
+	prompt := BuildImplementPrompt(PromptContext{
+		Repo: issue.Repo, Number: issue.Number,
+		Title: issue.Title, Author: issue.User.Login,
+		Labels: issue.LabelNames(), Body: issue.Body,
+		Comments: comments, HasLocalDir: true,
+	})
+	if _, err := p.executor.ExecuteRaw(cli, prompt, opts.ExecOpts); err != nil {
+		p.publishError(issueID, issue, fmt.Errorf("execute %s: %w", cli, err))
+		return nil, fmt.Errorf("issues pipeline: execute %s: %w", cli, err)
+	}
+
+	// If the agent produced no changes we do NOT open an empty PR. Fall back
+	// to a review_only-style comment so the issue still gets acknowledged.
+	changed, err := p.git.HasChanges(workDir)
+	if err != nil {
+		p.publishError(issueID, issue, fmt.Errorf("status: %w", err))
+		return nil, fmt.Errorf("issues pipeline: git status: %w", err)
+	}
+	if !changed {
+		return p.autoImplementNoChangesFallback(issue, issueID, cli)
+	}
+
+	commitMsg := fmt.Sprintf("feat: implement #%d — %s\n\nAuto-implemented by Heimdallm.\nCloses #%d",
+		issue.Number, issue.Title, issue.Number)
+	if err := p.git.CommitAll(workDir, commitMsg); err != nil {
+		p.publishError(issueID, issue, fmt.Errorf("commit: %w", err))
+		return nil, fmt.Errorf("issues pipeline: commit: %w", err)
+	}
+	if err := p.git.Push(workDir, issue.Repo, branch, opts.GitHubToken); err != nil {
+		p.publishError(issueID, issue, fmt.Errorf("push: %w", err))
+		return nil, fmt.Errorf("issues pipeline: push: %w", err)
+	}
+
+	prTitle := fmt.Sprintf("feat: implement #%d — %s", issue.Number, issue.Title)
+	prBody := fmt.Sprintf("Auto-generated by Heimdallm in response to #%d.\n\nCloses #%d",
+		issue.Number, issue.Number)
+	prNumber, err := p.gh.CreatePR(issue.Repo, prTitle, prBody, branch, base)
+	if err != nil {
+		p.publishError(issueID, issue, fmt.Errorf("create pr: %w", err))
+		return nil, fmt.Errorf("issues pipeline: create pr: %w", err)
+	}
+
+	rev := &store.IssueReview{
+		IssueID:     issueID,
+		CLIUsed:     cli,
+		Summary:     fmt.Sprintf("Auto-implementation landed as PR #%d on branch %s.", prNumber, branch),
+		Triage:      "{}", // no triage block for implement runs
+		Suggestions: "[]",
+		ActionTaken: string(config.IssueModeDevelop),
+		PRCreated:   prNumber,
+		CreatedAt:   time.Now().UTC(),
+	}
+	revID, err := p.store.InsertIssueReview(rev)
+	if err != nil {
+		return nil, fmt.Errorf("issues pipeline: store review: %w", err)
+	}
+	rev.ID = revID
+
+	p.publish(sse.EventIssueImplemented, map[string]any{
+		"issue_id": issueID, "number": issue.Number, "repo": issue.Repo,
+		"pr_created": prNumber, "branch": branch,
+	})
+	if p.notify != nil {
+		p.notify.Notify("Issue Auto-Implemented",
+			fmt.Sprintf("%s #%d → PR #%d", issue.Repo, issue.Number, prNumber))
+	}
+	slog.Info("issues pipeline: auto_implement complete",
+		"repo", issue.Repo, "number", issue.Number,
+		"branch", branch, "pr", prNumber)
+	return rev, nil
+}
+
+// autoImplementNoChangesFallback runs when the agent left the working tree
+// untouched — usually because the prompt's "leave untouched if you cannot
+// implement" escape hatch fired. We post a review_only-style comment so the
+// issue still gets acknowledged and the user sees why no PR appeared.
+func (p *Pipeline) autoImplementNoChangesFallback(issue *github.Issue, issueID int64, cli string) (*store.IssueReview, error) {
+	body := fmt.Sprintf(
+		"## ⚠️ Heimdallm auto-implement skipped\n\n"+
+			"The agent looked at #%d but left the working tree unchanged — it likely needs a human decision or more context than the issue alone provides.\n\n"+
+			"Rerun manually with more details in the issue body, or remove the develop label to stop retries.\n\n"+
+			"---\n*auto_implement → review_only fallback · Heimdallm*",
+		issue.Number,
+	)
+	postErr := p.gh.PostComment(issue.Repo, issue.Number, body)
+	if postErr != nil {
+		slog.Warn("issues pipeline: auto_implement fallback PostComment failed",
+			"repo", issue.Repo, "number", issue.Number, "err", postErr)
+	}
+
+	rev := &store.IssueReview{
+		IssueID:     issueID,
+		CLIUsed:     cli,
+		Summary:     "auto_implement produced no changes; downgraded to review_only",
+		Triage:      "{}",
+		Suggestions: "[]",
+		// ActionTaken reflects what actually ran — keeps the audit trail
+		// honest per the same rule we established in #26 for the
+		// develop-without-local_dir fallback.
+		ActionTaken: string(config.IssueModeReviewOnly),
+		CreatedAt:   time.Now().UTC(),
+	}
+	revID, err := p.store.InsertIssueReview(rev)
+	if err != nil {
+		return nil, fmt.Errorf("issues pipeline: store fallback review: %w", err)
+	}
+	rev.ID = revID
+
+	p.publish(sse.EventIssueReviewCompleted, map[string]any{
+		"issue_id": issueID, "number": issue.Number, "repo": issue.Repo,
+		"mode": "auto_implement_no_changes", "post_ok": postErr == nil,
+	})
+	slog.Info("issues pipeline: auto_implement had no changes, posted fallback comment",
+		"repo", issue.Repo, "number", issue.Number, "posted", postErr == nil)
 	return rev, nil
 }
 
