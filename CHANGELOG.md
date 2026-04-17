@@ -2,6 +2,13 @@
 
 > **Note:** Versions 0.1.0–0.1.3 were originally published under [`theburrowhub/heimdallr-docker`](https://github.com/theburrowhub/heimdallr-docker) (now archived). The project was unified into this repository and renamed to Heimdallm in v0.1.1.
 
+## [0.1.4](https://github.com/theburrowhub/heimdallm/compare/v0.1.3...v0.1.4) (2026-04-17)
+
+
+### Features
+
+* **issues:** integrate issue polling into daemon cycle ([#28](https://github.com/theburrowhub/heimdallm/issues/28)) ([#50](https://github.com/theburrowhub/heimdallm/issues/50)) ([4acfc25](https://github.com/theburrowhub/heimdallm/commit/4acfc25ff141896f01fb760e6db30d26edf1bdb0))
+
 ## [0.1.3](https://github.com/theburrowhub/heimdallm/compare/v0.1.2...v0.1.3) (2026-04-17)
 
 
