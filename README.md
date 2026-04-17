@@ -68,6 +68,18 @@ curl http://localhost:7842/health
 
 The Docker image is published to `ghcr.io/theburrowhub/heimdallm:latest` on every release. See [`docker/.env.example`](docker/.env.example) for all configuration options.
 
+#### Auto-discovery by topic
+
+Instead of maintaining a static repo list, tag your repos with a GitHub topic and Heimdallm discovers them automatically:
+
+```bash
+# In docker/.env:
+HEIMDALLM_DISCOVERY_TOPIC=heimdallm-review
+HEIMDALLM_DISCOVERY_ORGS=your-org
+```
+
+Repos tagged with the topic are merged with `HEIMDALLM_REPOSITORIES`. Repos in `non_monitored` are always excluded. See [issue #39](https://github.com/theburrowhub/heimdallm/issues/39) for details.
+
 ### Automated install (for agents / scripts)
 
 See [LLM-HOW-TO-INSTALL.md](LLM-HOW-TO-INSTALL.md) for a step-by-step guide suitable for Claude Code, shell scripts, or any automation tool.

@@ -9,6 +9,11 @@ bind_addr = "0.0.0.0"
 [github]
 poll_interval = "5m"
 repositories = ["org/repo1", "org/repo2"]
+# Topic-based auto-discovery (optional)
+# Repos tagged with this topic are automatically monitored.
+# discovery_topic = "heimdallm-review"
+# discovery_orgs = ["freepik-company", "theburrowhub"]
+# discovery_interval = "15m"
 
 [ai]
 # Available: claude, gemini, codex, opencode
