@@ -8,6 +8,13 @@ const (
 	EventReviewStarted   = "review_started"
 	EventReviewCompleted = "review_completed"
 	EventReviewError     = "review_error"
+
+	// Issue tracking pipeline (#26 onward).
+	EventIssueDetected        = "issue_detected"
+	EventIssueReviewStarted   = "issue_review_started"
+	EventIssueReviewCompleted = "issue_review_completed"
+	EventIssueImplemented     = "issue_implemented" // reserved for #27 (auto_implement PR created)
+	EventIssueReviewError     = "issue_review_error"
 )
 
 // maxSubscribers limits the number of concurrent SSE connections to prevent
