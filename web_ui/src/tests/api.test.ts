@@ -23,10 +23,7 @@ describe('api.ts', () => {
   it('fetchPRs GETs /api/prs and returns a typed array', async () => {
     fetchMock.mockResolvedValue(okJson([{ id: 1, number: 42, title: 't' }]));
     const prs = await fetchPRs();
-    expect(fetchMock).toHaveBeenCalledWith(
-      '/api/prs',
-      expect.objectContaining({ method: 'GET' })
-    );
+    expect(fetchMock).toHaveBeenCalledWith('/api/prs', expect.objectContaining({ method: 'GET' }));
     expect(prs).toHaveLength(1);
     expect(prs[0].id).toBe(1);
   });
@@ -42,9 +39,7 @@ describe('api.ts', () => {
             suggestions: '["do the thing"]'
           }
         },
-        reviews: [
-          { id: 9, issues: '[]', suggestions: '[]' }
-        ]
+        reviews: [{ id: 9, issues: '[]', suggestions: '[]' }]
       })
     );
     const detail = await fetchPR(1);
@@ -66,8 +61,7 @@ describe('api.ts', () => {
   });
 
   it('triggerReview throws ApiError on 500', async () => {
-    const make500 = () =>
-      new Response('boom', { status: 500, statusText: 'Server Error' });
+    const make500 = () => new Response('boom', { status: 500, statusText: 'Server Error' });
     fetchMock.mockResolvedValueOnce(make500());
     await expect(triggerReview(7)).rejects.toBeInstanceOf(ApiError);
     fetchMock.mockResolvedValueOnce(make500());

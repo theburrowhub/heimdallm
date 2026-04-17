@@ -115,10 +115,10 @@ export interface ReviewTimingStats {
   median_seconds: number;
   min_seconds: number;
   max_seconds: number;
-  bucket_fast: number;       // < 30 s
-  bucket_medium: number;     // 30–120 s
-  bucket_slow: number;       // 120–300 s
-  bucket_very_slow: number;  // > 300 s
+  bucket_fast: number; // < 30 s
+  bucket_medium: number; // 30–120 s
+  bucket_slow: number; // 120–300 s
+  bucket_very_slow: number; // > 300 s
 }
 
 export interface Stats {
@@ -142,11 +142,7 @@ export type Config = Record<string, unknown>;
 // SSE event types emitted by the daemon's sse.Broker. Must match the
 // constants in daemon/internal/sse/broker.go exactly or listeners in
 // sse.ts won't fire.
-export type SseEventType =
-  | 'pr_detected'
-  | 'review_started'
-  | 'review_completed'
-  | 'review_error';
+export type SseEventType = 'pr_detected' | 'review_started' | 'review_completed' | 'review_error';
 
 export interface SseEvent<T = unknown> {
   type: SseEventType;
