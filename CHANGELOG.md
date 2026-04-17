@@ -2,6 +2,19 @@
 
 > **Note:** Versions 0.1.0–0.1.3 were originally published under [`theburrowhub/heimdallr-docker`](https://github.com/theburrowhub/heimdallr-docker) (now archived). The project was unified into this repository and renamed to Heimdallm in v0.1.1.
 
+## [0.1.3](https://github.com/theburrowhub/heimdallm/compare/v0.1.2...v0.1.3) (2026-04-17)
+
+
+### Features
+
+* add make run-linux target for Docker-based GUI testing ([#48](https://github.com/theburrowhub/heimdallm/issues/48)) ([6c3f66d](https://github.com/theburrowhub/heimdallm/commit/6c3f66dcb1ffec758c1033207f6836ff5f1bf3dd)), closes [#16](https://github.com/theburrowhub/heimdallm/issues/16)
+* **issues:** auto_implement pipeline — branch, commit, PR ([#45](https://github.com/theburrowhub/heimdallm/issues/45)) ([1186af4](https://github.com/theburrowhub/heimdallm/commit/1186af4e575bbe76c6b1d76feae5693e97fef4a7))
+
+
+### Bug Fixes
+
+* **discovery:** add non_monitored blacklist, org inference, and count drop warning ([#47](https://github.com/theburrowhub/heimdallm/issues/47)) ([320634d](https://github.com/theburrowhub/heimdallm/commit/320634dfc5a23f403b7dff671c02ffd531c2f35c)), closes [#39](https://github.com/theburrowhub/heimdallm/issues/39)
+
 ## [0.1.2](https://github.com/theburrowhub/heimdallm/compare/v0.1.1...v0.1.2) (2026-04-17)
 
 
