@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, fetchPR, fetchPRs, fetchStats, triggerReview, upsertAgent } from '../lib/api.js';
+import {
+  ApiError,
+  fetchIssue,
+  fetchPR,
+  fetchPRs,
+  fetchStats,
+  triggerReview,
+  upsertAgent
+} from '../lib/api.js';
 
 const fetchMock = vi.fn();
 
@@ -115,5 +123,36 @@ describe('api.ts', () => {
     expect(stats.total_reviews).toBe(3);
     expect(stats.avg_issues_per_review).toBe(1.5);
     expect(stats.review_timing.median_seconds).toBe(42);
+  });
+
+  it('fetchIssue parses stringified assignees/labels/triage/suggestions', async () => {
+    fetchMock.mockResolvedValue(
+      okJson({
+        issue: {
+          id: 5,
+          assignees: '["alice","bob"]',
+          labels: '["bug","p1"]',
+          latest_review: {
+            id: 9,
+            triage: '{"severity":"HIGH","category":"security"}',
+            suggestions: '["patch the thing"]'
+          }
+        },
+        reviews: [
+          {
+            id: 9,
+            triage: '{"severity":"LOW"}',
+            suggestions: '[]'
+          }
+        ]
+      })
+    );
+    const detail = await fetchIssue(5);
+    expect(detail.issue.assignees).toEqual(['alice', 'bob']);
+    expect(detail.issue.labels).toEqual(['bug', 'p1']);
+    expect(detail.issue.latest_review!.triage).toEqual({ severity: 'HIGH', category: 'security' });
+    expect(detail.issue.latest_review!.suggestions).toEqual(['patch the thing']);
+    expect(detail.reviews[0].triage).toEqual({ severity: 'LOW' });
+    expect(detail.reviews[0].suggestions).toEqual([]);
   });
 });

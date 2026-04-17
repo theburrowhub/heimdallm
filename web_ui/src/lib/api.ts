@@ -3,6 +3,8 @@ import type {
   Config,
   Issue,
   IssueDetail,
+  IssueReview,
+  IssueTriage,
   Me,
   PR,
   PRDetail,
@@ -81,6 +83,33 @@ function parsePR(raw: unknown): PR {
   return pr as unknown as PR;
 }
 
+function parseIssueReview(raw: unknown): IssueReview {
+  const r = { ...(raw as Record<string, unknown>) };
+  if (typeof r.triage === 'string') {
+    r.triage = r.triage ? safeParse<IssueTriage>(r.triage, {}) : {};
+  }
+  r.triage ??= {};
+  if (typeof r.suggestions === 'string') {
+    r.suggestions = r.suggestions ? safeParse<string[]>(r.suggestions, []) : [];
+  }
+  r.suggestions ??= [];
+  return r as unknown as IssueReview;
+}
+
+function parseIssue(raw: unknown): Issue {
+  const i = { ...(raw as Record<string, unknown>) };
+  if (typeof i.assignees === 'string') {
+    i.assignees = i.assignees ? safeParse<string[]>(i.assignees, []) : [];
+  }
+  i.assignees ??= [];
+  if (typeof i.labels === 'string') {
+    i.labels = i.labels ? safeParse<string[]>(i.labels, []) : [];
+  }
+  i.labels ??= [];
+  if (i.latest_review) i.latest_review = parseIssueReview(i.latest_review);
+  return i as unknown as Issue;
+}
+
 // ─── Health ─────────────────────────────────────────────────────────────
 export function checkHealth(): Promise<boolean> {
   return fetch('/api/health')
@@ -115,12 +144,17 @@ export function undismissPR(id: number): Promise<void> {
 }
 
 // ─── Issues (Fase 2 — daemon endpoints arrive in #25–#28) ───────────────
-export function fetchIssues(): Promise<Issue[]> {
-  return request<Issue[]>('GET', '/api/issues');
+export async function fetchIssues(): Promise<Issue[]> {
+  const raws = await request<unknown[]>('GET', '/api/issues');
+  return raws.map(parseIssue);
 }
 
-export function fetchIssue(id: number): Promise<IssueDetail> {
-  return request<IssueDetail>('GET', `/api/issues/${id}`);
+export async function fetchIssue(id: number): Promise<IssueDetail> {
+  const raw = await request<{ issue: unknown; reviews?: unknown[] }>('GET', `/api/issues/${id}`);
+  return {
+    issue: parseIssue(raw.issue),
+    reviews: (raw.reviews ?? []).map(parseIssueReview)
+  };
 }
 
 export function triggerIssueReview(id: number): Promise<void> {

@@ -5,7 +5,12 @@ const KNOWN_EVENT_TYPES: SseEventType[] = [
   'pr_detected',
   'review_started',
   'review_completed',
-  'review_error'
+  'review_error',
+  'issue_detected',
+  'issue_review_started',
+  'issue_review_completed',
+  'issue_review_error',
+  'issue_implemented'
 ];
 
 // Native EventSource auto-reconnects only after a 200 response. Our proxy

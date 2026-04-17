@@ -50,8 +50,9 @@ export interface PRDetail {
   reviews: Review[];
 }
 
-// Fase-2 GitHub issue tracking (daemon endpoints not yet implemented;
-// shape follows docs/superpowers/specs/2026-04-16-heimdallm-v2-design.md).
+// Fase-2 GitHub issue tracking. Shape mirrors daemon/internal/store/issues.go.
+// assignees/labels are JSON-encoded strings on the wire — api.ts parseIssue
+// decodes them into typed arrays (mirroring the parseReview pattern).
 export interface Issue {
   id: number;
   github_id: number;
@@ -69,13 +70,22 @@ export interface Issue {
   latest_review?: IssueReview | null;
 }
 
+// IssueReview mirrors daemon/internal/store/issues.go. triage and suggestions
+// arrive as JSON-encoded strings on the wire; api.ts parseIssueReview decodes
+// them before returning typed objects to callers.
+export interface IssueTriage {
+  severity?: string;
+  category?: string;
+  [key: string]: unknown;
+}
+
 export interface IssueReview {
   id: number;
   issue_id: number;
   cli_used: string;
   summary: string;
-  triage: unknown;
-  suggestions: unknown[];
+  triage: IssueTriage;
+  suggestions: string[];
   action_taken: 'review_only' | 'auto_implement';
   pr_created: number;
   created_at: string;
@@ -144,7 +154,16 @@ export type Config = Record<string, unknown>;
 // SSE event types emitted by the daemon's sse.Broker. Must match the
 // constants in daemon/internal/sse/broker.go exactly or listeners in
 // sse.ts won't fire.
-export type SseEventType = 'pr_detected' | 'review_started' | 'review_completed' | 'review_error';
+export type SseEventType =
+  | 'pr_detected'
+  | 'review_started'
+  | 'review_completed'
+  | 'review_error'
+  | 'issue_detected'
+  | 'issue_review_started'
+  | 'issue_review_completed'
+  | 'issue_review_error'
+  | 'issue_implemented';
 
 export interface SseEvent<T = unknown> {
   type: SseEventType;
