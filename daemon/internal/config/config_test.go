@@ -158,7 +158,7 @@ func TestValidate_InvalidPollInterval(t *testing.T) {
 }
 
 func TestValidate_AllValidIntervals(t *testing.T) {
-	for _, interval := range []string{"1m", "5m", "30m", "1h"} {
+	for _, interval := range []string{"1m", "5m", "15m", "30m", "1h"} {
 		cfg := &Config{AI: AIConfig{Primary: "claude"}, GitHub: GitHubConfig{PollInterval: interval}}
 		if err := cfg.Validate(); err != nil {
 			t.Errorf("Validate() with interval %q = %v", interval, err)
@@ -385,5 +385,90 @@ func TestLoadOrCreate_FailsWithoutPrimary(t *testing.T) {
 	_, err := LoadOrCreate(path)
 	if err == nil {
 		t.Error("LoadOrCreate without ai.primary should fail")
+	}
+}
+
+// ── Discovery config ────────────────────────────────────────────────────────
+
+func TestApplyDefaults_DiscoveryInterval(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+	if cfg.GitHub.DiscoveryInterval != "15m" {
+		t.Errorf("DiscoveryInterval = %q, want %q", cfg.GitHub.DiscoveryInterval, "15m")
+	}
+}
+
+func TestApplyEnvOverrides_Discovery(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+
+	t.Setenv("HEIMDALLM_DISCOVERY_TOPIC", "heimdallm-review")
+	t.Setenv("HEIMDALLM_DISCOVERY_ORGS", "freepik-company, theburrowhub")
+	t.Setenv("HEIMDALLM_DISCOVERY_INTERVAL", "30m")
+
+	cfg.applyEnvOverrides()
+
+	if cfg.GitHub.DiscoveryTopic != "heimdallm-review" {
+		t.Errorf("DiscoveryTopic = %q, want %q", cfg.GitHub.DiscoveryTopic, "heimdallm-review")
+	}
+	if len(cfg.GitHub.DiscoveryOrgs) != 2 {
+		t.Fatalf("DiscoveryOrgs = %v, want 2 items", cfg.GitHub.DiscoveryOrgs)
+	}
+	if cfg.GitHub.DiscoveryOrgs[0] != "freepik-company" {
+		t.Errorf("DiscoveryOrgs[0] = %q, want %q", cfg.GitHub.DiscoveryOrgs[0], "freepik-company")
+	}
+	if cfg.GitHub.DiscoveryInterval != "30m" {
+		t.Errorf("DiscoveryInterval = %q, want %q", cfg.GitHub.DiscoveryInterval, "30m")
+	}
+}
+
+func TestValidateTopic_Valid(t *testing.T) {
+	for _, topic := range []string{"heimdallm-review", "code-review", "a", "my-topic-123"} {
+		if err := ValidateTopic(topic); err != nil {
+			t.Errorf("ValidateTopic(%q) = %v, want nil", topic, err)
+		}
+	}
+}
+
+func TestValidateTopic_Invalid(t *testing.T) {
+	for _, topic := range []string{"", "UPPERCASE", "has spaces", "special!", "has_underscore", "-starts-with-hyphen"} {
+		if err := ValidateTopic(topic); err == nil {
+			t.Errorf("ValidateTopic(%q) = nil, want error", topic)
+		}
+	}
+}
+
+func TestValidate_DiscoveryTopicWithoutOrgsOrRepos(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+	cfg.AI.Primary = "claude"
+	cfg.GitHub.DiscoveryTopic = "heimdallm-review"
+	// No DiscoveryOrgs and no Repositories
+
+	if err := cfg.Validate(); err == nil {
+		t.Error("Validate() = nil, want error for discovery_topic without orgs or repos")
+	}
+}
+
+func TestValidate_DiscoveryTopicWithStaticRepos(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+	cfg.AI.Primary = "claude"
+	cfg.GitHub.DiscoveryTopic = "heimdallm-review"
+	cfg.GitHub.Repositories = []string{"freepik-company/some-repo"}
+
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate() = %v, want nil (orgs inferred from repos)", err)
+	}
+}
+
+func TestValidate_DiscoveryIntervalInvalid(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+	cfg.AI.Primary = "claude"
+	cfg.GitHub.DiscoveryInterval = "7m"
+
+	if err := cfg.Validate(); err == nil {
+		t.Error("Validate() = nil, want error for invalid discovery_interval")
 	}
 }

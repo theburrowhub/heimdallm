@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -13,7 +14,7 @@ import (
 )
 
 var validIntervals = map[string]bool{
-	"1m": true, "5m": true, "30m": true, "1h": true,
+	"1m": true, "5m": true, "15m": true, "30m": true, "1h": true,
 }
 
 type Config struct {
@@ -34,7 +35,10 @@ type GitHubConfig struct {
 	// NonMonitored tracks repos the user knows about but has disabled auto-review for.
 	// The daemon never polls these; they are stored here only so the Flutter UI can
 	// remember and display them after a restart.
-	NonMonitored []string `toml:"non_monitored"`
+	NonMonitored      []string `toml:"non_monitored"`
+	DiscoveryTopic    string   `toml:"discovery_topic"`    // GitHub topic tag for auto-discovery
+	DiscoveryOrgs     []string `toml:"discovery_orgs"`     // orgs to search (empty = infer from Repositories)
+	DiscoveryInterval string   `toml:"discovery_interval"` // how often to run discovery (default: 15m)
 }
 
 // CLIAgentConfig holds per-CLI execution settings (model, flags, prompt override).
@@ -121,6 +125,9 @@ func (c *Config) applyDefaults() {
 	if c.AI.ReviewMode == "" {
 		c.AI.ReviewMode = "single"
 	}
+	if c.GitHub.DiscoveryInterval == "" {
+		c.GitHub.DiscoveryInterval = "15m"
+	}
 }
 
 // applyEnvOverrides applies HEIMDALLM_* environment variable overrides.
@@ -163,6 +170,35 @@ func (c *Config) applyEnvOverrides() {
 			c.Retention.MaxDays = d
 		}
 	}
+	if v := os.Getenv("HEIMDALLM_DISCOVERY_TOPIC"); v != "" {
+		c.GitHub.DiscoveryTopic = v
+	}
+	if v := os.Getenv("HEIMDALLM_DISCOVERY_ORGS"); v != "" {
+		orgs := strings.Split(v, ",")
+		cleaned := make([]string, 0, len(orgs))
+		for _, o := range orgs {
+			if s := strings.TrimSpace(o); s != "" {
+				cleaned = append(cleaned, s)
+			}
+		}
+		if len(cleaned) > 0 {
+			c.GitHub.DiscoveryOrgs = cleaned
+		}
+	}
+	if v := os.Getenv("HEIMDALLM_DISCOVERY_INTERVAL"); v != "" {
+		c.GitHub.DiscoveryInterval = v
+	}
+}
+
+// topicPattern matches valid GitHub topic tags: lowercase alphanumeric and hyphens, max 50 chars.
+var topicPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,49}$`)
+
+// ValidateTopic checks that a GitHub topic tag is valid.
+func ValidateTopic(topic string) error {
+	if !topicPattern.MatchString(topic) {
+		return fmt.Errorf("invalid topic %q: must be lowercase alphanumeric/hyphens, 1-50 chars", topic)
+	}
+	return nil
 }
 
 // Validate checks that required fields are present and values are valid.
@@ -171,7 +207,19 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("config: ai.primary is required")
 	}
 	if c.GitHub.PollInterval != "" && !validIntervals[c.GitHub.PollInterval] {
-		return fmt.Errorf("config: invalid poll_interval %q (valid: 1m, 5m, 30m, 1h)", c.GitHub.PollInterval)
+		return fmt.Errorf("config: invalid poll_interval %q (valid: 1m, 5m, 15m, 30m, 1h)", c.GitHub.PollInterval)
+	}
+	// Validate discovery config.
+	if c.GitHub.DiscoveryTopic != "" {
+		if err := ValidateTopic(c.GitHub.DiscoveryTopic); err != nil {
+			return fmt.Errorf("config: discovery_topic: %w", err)
+		}
+		if len(c.GitHub.DiscoveryOrgs) == 0 && len(c.GitHub.Repositories) == 0 {
+			return fmt.Errorf("config: discovery_topic is set but no organizations can be inferred (set discovery_orgs or add at least one repo to repositories)")
+		}
+	}
+	if c.GitHub.DiscoveryInterval != "" && !validIntervals[c.GitHub.DiscoveryInterval] {
+		return fmt.Errorf("config: invalid discovery_interval %q (valid: 1m, 5m, 15m, 30m, 1h)", c.GitHub.DiscoveryInterval)
 	}
 	// Validate per-CLI agent configs: permission_mode and approval_mode must be in their allowlists.
 	for name, a := range c.AI.Agents {
