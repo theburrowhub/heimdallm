@@ -20,11 +20,17 @@ type Agent struct {
 	CLIFlags     string    `json:"cli_flags"`    // extra CLI args
 	IsDefault    bool      `json:"is_default"`
 	CreatedAt    time.Time `json:"created_at"`
+
+	// Issue triage prompt customization (mirrors Prompt/Instructions for PRs).
+	IssuePrompt       string `json:"issue_prompt"`       // full custom template for issue triage
+	IssueInstructions string `json:"issue_instructions"` // plain text injected into default issue template
 }
+
+const agentColumns = "id, name, cli, prompt, instructions, cli_flags, is_default, created_at, issue_prompt, issue_instructions"
 
 func (s *Store) ListAgents() ([]*Agent, error) {
 	rows, err := s.db.Query(
-		"SELECT id, name, cli, prompt, instructions, cli_flags, is_default, created_at FROM agents ORDER BY is_default DESC, name ASC",
+		"SELECT "+agentColumns+" FROM agents ORDER BY is_default DESC, name ASC",
 	)
 	if err != nil {
 		return nil, fmt.Errorf("store: list agents: %w", err)
@@ -47,14 +53,16 @@ func (s *Store) UpsertAgent(a *Agent) error {
 		a.CreatedAt = time.Now().UTC()
 	}
 	_, err := s.db.Exec(`
-		INSERT INTO agents (id, name, cli, prompt, instructions, cli_flags, is_default, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO agents (id, name, cli, prompt, instructions, cli_flags, is_default, created_at, issue_prompt, issue_instructions)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name=excluded.name, cli=excluded.cli, prompt=excluded.prompt,
 			instructions=excluded.instructions, cli_flags=excluded.cli_flags,
-			is_default=excluded.is_default
+			is_default=excluded.is_default,
+			issue_prompt=excluded.issue_prompt, issue_instructions=excluded.issue_instructions
 	`, a.ID, a.Name, a.CLI, a.Prompt, a.Instructions, a.CLIFlags,
 		boolToInt(a.IsDefault), a.CreatedAt.UTC().Format(time.RFC3339),
+		a.IssuePrompt, a.IssueInstructions,
 	)
 	if err != nil {
 		return fmt.Errorf("store: upsert agent: %w", err)
@@ -75,7 +83,7 @@ func (s *Store) DeleteAgent(id string) error {
 
 func (s *Store) DefaultAgent() (*Agent, error) {
 	row := s.db.QueryRow(
-		"SELECT id, name, cli, prompt, instructions, cli_flags, is_default, created_at FROM agents WHERE is_default=1 LIMIT 1",
+		"SELECT "+agentColumns+" FROM agents WHERE is_default=1 LIMIT 1",
 	)
 	return scanAgent(row)
 }
@@ -89,7 +97,8 @@ func scanAgent(s agentScanner) (*Agent, error) {
 	var isDefault int
 	var createdAt string
 	if err := s.Scan(&a.ID, &a.Name, &a.CLI, &a.Prompt, &a.Instructions,
-		&a.CLIFlags, &isDefault, &createdAt); err != nil {
+		&a.CLIFlags, &isDefault, &createdAt,
+		&a.IssuePrompt, &a.IssueInstructions); err != nil {
 		return nil, err
 	}
 	a.IsDefault = isDefault == 1

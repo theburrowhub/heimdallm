@@ -2,6 +2,7 @@ package issues
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/heimdallm/daemon/internal/github"
@@ -27,15 +28,79 @@ type PromptContext struct {
 	Title       string
 	Author      string
 	Labels      []string
+	Assignees   []string
 	Body        string
 	Comments    []github.Comment
 	HasLocalDir bool // when true, the LLM can read the repo for deeper context
 }
 
-// BuildPrompt formats the LLM prompt for a review_only triage run. The output
-// schema is fixed — the daemon parses it back into IssueReviewResult — so the
-// prompt ends with a strict JSON-only instruction.
+// BuildPromptWithProfile formats the LLM prompt for a review_only triage run,
+// applying customizations from Agent profiles when set:
+//   - customTemplate non-empty: replaces the entire default template with
+//     placeholder substitution ({repo}, {number}, {title}, {author}, {labels},
+//     {body}, {comments}, {assignees}). NOTE: the custom template is responsible
+//     for including the JSON output schema — the pipeline parses the LLM response
+//     as IssueReviewResult. Same contract as PR review custom prompts.
+//   - customInstructions non-empty: injects the text into the default template
+//     between the issue context and the JSON schema (safer — schema is preserved).
+//
+// When both are empty, falls back to the built-in default template.
+func BuildPromptWithProfile(ctx PromptContext, customTemplate, customInstructions string) string {
+	if customTemplate != "" {
+		return applyPlaceholders(customTemplate, ctx)
+	}
+	return buildDefaultPrompt(ctx, customInstructions)
+}
+
+// BuildPrompt is the zero-config entry point — no agent profile, no custom
+// instructions. Equivalent to BuildPromptWithProfile(ctx, "", "").
 func BuildPrompt(ctx PromptContext) string {
+	return buildDefaultPrompt(ctx, "")
+}
+
+func applyPlaceholders(tmpl string, ctx PromptContext) string {
+	labels := ""
+	if len(ctx.Labels) > 0 {
+		labels = strings.Join(ctx.Labels, ", ")
+	}
+	comments := ""
+	if formatted := formatComments(ctx.Comments); formatted != "" {
+		comments = formatted
+	}
+	assignees := ""
+	if len(ctx.Assignees) > 0 {
+		assignees = strings.Join(ctx.Assignees, ", ")
+	}
+
+	body := strings.TrimSpace(ctx.Body)
+	if len(body) > maxBodyBytes {
+		body = body[:maxBodyBytes] + "\n... (truncated)"
+	}
+
+	r := strings.NewReplacer(
+		"{repo}", ctx.Repo,
+		"{number}", fmt.Sprintf("%d", ctx.Number),
+		"{title}", ctx.Title,
+		"{author}", ctx.Author,
+		"{labels}", labels,
+		"{body}", body,
+		"{comments}", comments,
+		"{assignees}", assignees,
+	)
+	result := r.Replace(tmpl)
+
+	// Warn about unreplaced placeholders — helps debug typos in custom templates.
+	if idx := strings.Index(result, "{"); idx != -1 {
+		if end := strings.Index(result[idx:], "}"); end != -1 {
+			slog.Warn("issue prompt: unreplaced placeholder in custom template",
+				"placeholder", result[idx:idx+end+1])
+		}
+	}
+
+	return result
+}
+
+func buildDefaultPrompt(ctx PromptContext, customInstructions string) string {
 	var sb strings.Builder
 
 	sb.WriteString("You are Heimdallm, an engineering assistant triaging a GitHub issue.\n")
@@ -66,6 +131,12 @@ func BuildPrompt(ctx PromptContext) string {
 	if comments := formatComments(ctx.Comments); comments != "" {
 		sb.WriteString(comments)
 		sb.WriteString("\n")
+	}
+
+	if customInstructions != "" {
+		sb.WriteString("Additional triage instructions from the repository maintainer:\n")
+		sb.WriteString(strings.TrimSpace(customInstructions))
+		sb.WriteString("\n\n")
 	}
 
 	sb.WriteString("Return a single JSON object, and nothing else, with this exact shape:\n")
