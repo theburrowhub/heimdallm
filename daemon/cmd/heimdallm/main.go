@@ -197,7 +197,7 @@ func main() {
 			static := c.GitHub.Repositories
 			cfgMu.Unlock()
 			// Merge static list with repos discovered via topic tag (empty when disabled).
-			repos := discovery.MergeRepos(static, discoverySvc.Discovered())
+			repos := discovery.MergeRepos(static, discoverySvc.Discovered(), c.GitHub.NonMonitored)
 
 			// Fetch all review-requested PRs without a repo filter — adding many
 			// repo: terms to the Search API query can exceed its length limit and
@@ -269,6 +269,9 @@ func main() {
 		ctx, cancel := context.WithCancel(context.Background())
 		topic := c.GitHub.DiscoveryTopic
 		orgs := append([]string(nil), c.GitHub.DiscoveryOrgs...)
+		if len(orgs) == 0 {
+			orgs = discovery.InferOrgs(c.GitHub.Repositories)
+		}
 		go discoverySvc.Run(ctx, interval, topic, orgs)
 		slog.Info("discovery: loop started", "topic", topic, "orgs", orgs, "interval", interval)
 		return cancel
