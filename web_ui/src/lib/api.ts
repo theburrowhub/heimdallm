@@ -7,6 +7,7 @@ import type {
   PR,
   PRDetail,
   Review,
+  ReviewFinding,
   Stats
 } from './types.js';
 
@@ -43,7 +44,19 @@ async function request<T>(
   if (expectEmpty || resp.status === 202 || resp.status === 204) {
     return undefined as T;
   }
+  // Defensive: a 200 with empty body would throw on .json() — treat as undefined.
+  if (resp.headers.get('content-length') === '0') {
+    return undefined as T;
+  }
   return (await resp.json()) as T;
+}
+
+function safeParse<T>(raw: string, fallback: T): T {
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
 }
 
 // The daemon stores issues/suggestions as JSON-encoded strings; this helper
@@ -52,11 +65,11 @@ async function request<T>(
 function parseReview(raw: unknown): Review {
   const r = { ...(raw as Record<string, unknown>) };
   if (typeof r.issues === 'string') {
-    r.issues = r.issues ? JSON.parse(r.issues as string) : [];
+    r.issues = r.issues ? safeParse<ReviewFinding[]>(r.issues, []) : [];
   }
   r.issues ??= [];
   if (typeof r.suggestions === 'string') {
-    r.suggestions = r.suggestions ? JSON.parse(r.suggestions as string) : [];
+    r.suggestions = r.suggestions ? safeParse<string[]>(r.suggestions, []) : [];
   }
   r.suggestions ??= [];
   return r as unknown as Review;
