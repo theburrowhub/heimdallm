@@ -247,7 +247,8 @@ func TestPipeline_DevelopFallsBackToReviewOnlyWithoutLocalDir(t *testing.T) {
 	p := issues.New(s, gh, exec, &fakeBroker{}, nil)
 
 	issue := newIssue(config.IssueModeDevelop)
-	rev, err := p.Run(issue, issues.RunOptions{Primary: "claude", LocalDir: ""})
+	// WorkDir zero → no working tree → downgrade to review_only.
+	rev, err := p.Run(issue, issues.RunOptions{Primary: "claude"})
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -256,6 +257,11 @@ func TestPipeline_DevelopFallsBackToReviewOnlyWithoutLocalDir(t *testing.T) {
 	}
 	if len(gh.postCalls) != 1 {
 		t.Errorf("fallback should still post a review_only comment, got %d calls", len(gh.postCalls))
+	}
+	// Prompt context must match the mode-selection logic: no working
+	// directory means the LLM should not be told to read a repo.
+	if strings.Contains(exec.lastPrompt, "read access to the repository") {
+		t.Errorf("prompt leaks local-dir instruction when there is no WorkDir")
 	}
 }
 
@@ -269,12 +275,65 @@ func TestPipeline_DevelopWithLocalDirIsNotYetSupportedHere(t *testing.T) {
 	p := issues.New(s, gh, exec, nil, nil)
 
 	issue := newIssue(config.IssueModeDevelop)
-	_, err := p.Run(issue, issues.RunOptions{Primary: "claude", LocalDir: "/tmp/repo"})
+	_, err := p.Run(issue, issues.RunOptions{
+		Primary:  "claude",
+		ExecOpts: executor.ExecOptions{WorkDir: "/tmp/repo"},
+	})
 	if err == nil {
 		t.Fatal("expected error for develop+local_dir until #27 lands")
 	}
 	if !strings.Contains(err.Error(), "auto_implement") {
 		t.Errorf("error should point at auto_implement/#27, got: %v", err)
+	}
+}
+
+func TestPipeline_IgnoreModeRejectedWithItsOwnError(t *testing.T) {
+	// The fetcher normally filters ignore-classified issues out, but the
+	// pipeline must surface a specific error (not the auto_implement one)
+	// if one ever sneaks in. Regression guard for Muriano's review feedback.
+	s := &fakeStore{}
+	p := issues.New(s, &fakeGH{}, &fakeExec{}, nil, nil)
+
+	issue := newIssue(config.IssueModeIgnore)
+	_, err := p.Run(issue, issues.RunOptions{Primary: "claude"})
+	if err == nil {
+		t.Fatal("expected error for ignore-classified issue")
+	}
+	if strings.Contains(err.Error(), "auto_implement") {
+		t.Errorf("ignore-classified issue should not mention auto_implement, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "ignore") {
+		t.Errorf("error should mention the ignore mode, got: %v", err)
+	}
+}
+
+func TestPipeline_StripsLeadingAtInSuggestedAssignee(t *testing.T) {
+	// If the LLM happens to include '@' in SuggestedAssignee the Markdown
+	// template must still render a single '@alice', not '@@alice'.
+	raw := `
+	{
+	  "summary": "bug",
+	  "triage": {"severity":"low","category":"bug","suggested_assignee":"@alice"},
+	  "suggestions": [],
+	  "severity": "low"
+	}`
+	s := &fakeStore{}
+	gh := &fakeGH{}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte(raw)}
+	p := issues.New(s, gh, exec, nil, nil)
+
+	if _, err := p.Run(newIssue(config.IssueModeReviewOnly), issues.RunOptions{Primary: "claude"}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(gh.postCalls) != 1 {
+		t.Fatalf("expected 1 PostComment, got %d", len(gh.postCalls))
+	}
+	body := gh.postCalls[0].Body
+	if strings.Contains(body, "@@alice") {
+		t.Errorf("body has double @@alice: %q", body)
+	}
+	if !strings.Contains(body, "@alice") {
+		t.Errorf("body missing single @alice mention: %q", body)
 	}
 }
 

@@ -12,10 +12,15 @@ import (
 	"github.com/heimdallm/daemon/internal/store"
 )
 
-// recomputeGrace absorbs the small updated_at bump GitHub applies when the
+// RecomputeGrace absorbs the small updated_at bump GitHub applies when the
 // daemon posts its own comment. Without it, every triage would immediately
-// re-trigger itself on the next poll. Mirrors the 30 s grace used for PRs.
-const recomputeGrace = 30 * time.Second
+// re-trigger itself on the next poll.
+//
+// The PR pipeline in main.go currently duplicates this 30 s window inline.
+// When #28 wires issues into the poll cycle it should import this constant
+// and route the PR check through it too, so the two grace windows can't
+// drift apart unnoticed.
+const RecomputeGrace = 30 * time.Second
 
 // IssuesFetcher is the subset of github.Client that fetches classified
 // issues. Kept as an interface so the fetcher can be tested without an HTTP
@@ -77,13 +82,16 @@ func (f *Fetcher) ProcessRepo(repo string, cfg config.IssueTrackingConfig, authU
 
 	processed := 0
 	for _, issue := range issues {
+		// A dedup lookup error intentionally falls through to "treat as
+		// unprocessed" so a flaky store never stops the pipeline from running;
+		// the explicit if / else if makes that control flow obvious.
 		skip, reason, err := f.alreadyProcessed(issue)
 		if err != nil {
 			slog.Warn("issues fetcher: dedup check failed, treating as unprocessed",
 				"repo", repo, "number", issue.Number, "err", err)
-		}
-		if skip {
-			slog.Debug("issues fetcher: skipping issue", "repo", repo, "number", issue.Number, "reason", reason)
+		} else if skip {
+			slog.Debug("issues fetcher: skipping issue",
+				"repo", repo, "number", issue.Number, "reason", reason)
 			continue
 		}
 
@@ -127,7 +135,7 @@ func (f *Fetcher) alreadyProcessed(issue *github.Issue) (bool, string, error) {
 		return false, "", err
 	}
 
-	cutoff := latest.CreatedAt.Add(recomputeGrace)
+	cutoff := latest.CreatedAt.Add(RecomputeGrace)
 	if !issue.UpdatedAt.After(cutoff) {
 		return true, "no new activity since last review", nil
 	}

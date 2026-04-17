@@ -66,13 +66,17 @@ type IssueReviewResult struct {
 
 // RunOptions carries per-execution settings derived from global + repo +
 // agent config by the caller.
+//
+// The working directory — the repo-level `local_dir` in config.toml — is
+// passed as `ExecOpts.WorkDir`. That single field drives both the mode
+// downgrade (develop → review_only when absent) and the prompt context, so
+// they can never disagree. Callers mapping from `config.RepoAI.LocalDir`
+// assign it directly to `ExecOpts.WorkDir`; do not add a separate field
+// here (we had one in PR #44 review drafts — it caused exactly the
+// inconsistency the reviewers flagged).
 type RunOptions struct {
 	Primary  string
 	Fallback string
-	// LocalDir comes from the repo-level AI config. When empty, the develop
-	// mode is unsafe (no working tree to read) and the pipeline falls back to
-	// review_only — see the FetchIssues / config contract in #24 / #25.
-	LocalDir string
 	ExecOpts executor.ExecOptions
 }
 
@@ -113,20 +117,29 @@ func (p *Pipeline) Run(issue *github.Issue, opts RunOptions) (*store.IssueReview
 	}
 
 	// 1. Determine the effective mode. If the caller asked for develop but
-	// there is no local_dir to hand the CLI, degrade to review_only instead
-	// of failing — safer for operators and matches the acceptance criterion
-	// in #26.
+	// there is no working directory to hand the CLI, degrade to review_only
+	// instead of failing — safer for operators and matches the acceptance
+	// criterion in #26. `ExecOpts.WorkDir` is the single source of truth for
+	// "is there a local checkout"; Run does not consult any other field.
+	workDir := strings.TrimSpace(opts.ExecOpts.WorkDir)
 	effective := issue.Mode
-	if effective == config.IssueModeDevelop && strings.TrimSpace(opts.LocalDir) == "" {
+	if effective == config.IssueModeDevelop && workDir == "" {
 		slog.Warn("issues pipeline: develop mode requires local_dir, downgrading to review_only",
 			"repo", issue.Repo, "issue", issue.Number)
 		effective = config.IssueModeReviewOnly
 	}
-	// This pipeline implements review_only only. auto_implement (when
-	// effective == develop) is the subject of issue #27; protect against it
-	// being invoked here accidentally.
+	// Reject anything that does not resolve to review_only with a specific
+	// message so the log tells operators exactly why the pipeline refused.
+	// `ignore` should never reach this code (the fetcher filters it out) —
+	// if it somehow does, surface that as its own error rather than the
+	// auto_implement one.
+	if effective == config.IssueModeIgnore {
+		return nil, fmt.Errorf("issues pipeline: refusing an ignore-classified issue (fetcher should have filtered it out)")
+	}
 	if effective != config.IssueModeReviewOnly {
-		return nil, fmt.Errorf("issues pipeline: mode %q is not supported here (auto_implement lives in #27)", effective)
+		// Only possibility left: develop mode WITH a working directory,
+		// which is the auto_implement path owned by #27.
+		return nil, fmt.Errorf("issues pipeline: develop mode with local_dir belongs to the auto_implement path in #27")
 	}
 
 	// 2. Persist the issue row (or update an existing one). Dismiss-preserving
@@ -158,7 +171,8 @@ func (p *Pipeline) Run(issue *github.Issue, opts RunOptions) (*store.IssueReview
 		comments = nil
 	}
 
-	// 4. Build prompt + run the CLI.
+	// 4. Build prompt + run the CLI. HasLocalDir mirrors workDir above so
+	// the LLM hears the same story as the mode-selection logic.
 	prompt := BuildPrompt(PromptContext{
 		Repo:        issue.Repo,
 		Number:      issue.Number,
@@ -167,7 +181,7 @@ func (p *Pipeline) Run(issue *github.Issue, opts RunOptions) (*store.IssueReview
 		Labels:      issue.LabelNames(),
 		Body:        issue.Body,
 		Comments:    comments,
-		HasLocalDir: opts.ExecOpts.WorkDir != "",
+		HasLocalDir: workDir != "",
 	})
 
 	cli, err := p.executor.Detect(opts.Primary, opts.Fallback)
@@ -280,6 +294,13 @@ func parseIssueResult(data []byte) (*IssueReviewResult, error) {
 // issueToStore converts the github.Issue wire shape into the store row. The
 // store keeps assignees and labels as JSON arrays (`[]` when empty), matching
 // the schema introduced in #24.
+//
+// The issue's processing mode (review_only vs develop) is intentionally not
+// part of store.Issue — the issues table captures the issue itself, while
+// the mode of *each triage run* lives on issue_reviews.action_taken. That
+// separation lets a single issue accumulate multiple reviews across mode
+// changes (e.g. initial review_only → later auto_implement in #27) without
+// losing the history.
 func issueToStore(i *github.Issue) (*store.Issue, error) {
 	assignees := i.AssigneeLogins()
 	if assignees == nil {
@@ -342,7 +363,10 @@ func BuildMarkdownComment(r *IssueReviewResult) string {
 		sb.WriteString(fmt.Sprintf("- **Suggested severity:** %s\n", r.Triage.Severity))
 	}
 	if r.Triage.SuggestedAssignee != "" {
-		sb.WriteString(fmt.Sprintf("- **Suggested assignee:** @%s\n", r.Triage.SuggestedAssignee))
+		// Strip any leading '@' the LLM may have included so the template
+		// does not render a double '@@alice' that pings nobody.
+		assignee := strings.TrimLeft(r.Triage.SuggestedAssignee, "@")
+		sb.WriteString(fmt.Sprintf("- **Suggested assignee:** @%s\n", assignee))
 	}
 	sb.WriteString("\n")
 

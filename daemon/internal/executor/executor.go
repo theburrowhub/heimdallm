@@ -496,14 +496,38 @@ func enrichEnvWithLoginPath() []string {
 // markdown code fences, prose surrounding the JSON object) and returns the
 // inner JSON bytes. Exported so downstream pipelines (issue triage, etc.)
 // can reuse the same cleanup without duplicating it.
+//
+// Known limitation: the function scans from the first '{' to the last '}',
+// which is not a balanced-brace parser. If an LLM emits multiple top-level
+// JSON objects the result will not be valid JSON and the caller's
+// json.Unmarshal will surface the error. Our prompts explicitly ask for a
+// single JSON object, so this has not been a problem in practice — but
+// worth noting before somebody feeds this bytes from a different source.
 func StripToJSON(data []byte) []byte {
 	s := strings.TrimSpace(string(data))
+
+	// Peel a leading code fence if present. Look for an explicit closing
+	// fence rather than assuming the last line is the fence — if the LLM
+	// appends trailing prose after the fence, the naive approach would keep
+	// that prose inside the JSON slice.
 	if strings.HasPrefix(s, "```") {
 		lines := strings.Split(s, "\n")
-		if len(lines) > 2 {
-			s = strings.Join(lines[1:len(lines)-1], "\n")
+		closeIdx := -1
+		for i := 1; i < len(lines); i++ {
+			if strings.HasPrefix(lines[i], "```") {
+				closeIdx = i
+				break
+			}
+		}
+		switch {
+		case closeIdx > 0:
+			s = strings.Join(lines[1:closeIdx], "\n")
+		case len(lines) > 1:
+			// No closing fence at all — strip just the opening line.
+			s = strings.Join(lines[1:], "\n")
 		}
 	}
+
 	start := strings.Index(s, "{")
 	end := strings.LastIndex(s, "}")
 	if start >= 0 && end > start {
