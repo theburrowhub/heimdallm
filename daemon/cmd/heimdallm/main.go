@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/heimdallm/daemon/internal/config"
+	"github.com/heimdallm/daemon/internal/discovery"
 	"github.com/heimdallm/daemon/internal/executor"
 	gh "github.com/heimdallm/daemon/internal/github"
 	"github.com/heimdallm/daemon/internal/keychain"
@@ -98,9 +99,11 @@ func main() {
 	p := pipeline.New(s, ghClient, exec, &notifyWithSSE{notifier: notifier})
 	srv := server.New(s, broker, p, apiToken)
 
-	// cfgMu protects cfg and sched so reload is safe from any goroutine.
+	// cfgMu protects cfg, sched, disc, and discSched so reload is safe from any goroutine.
 	var cfgMu sync.Mutex
 	var sched *scheduler.Scheduler
+	var disc *discovery.Engine
+	var discSched *scheduler.Scheduler
 
 	// reviewMu prevents concurrent pipeline runs for the same GitHub PR ID.
 	// Key: pr.ID (GitHub PR ID), Value: true while being reviewed.
@@ -184,8 +187,13 @@ func main() {
 
 	makePollFn := func(c *config.Config) func() {
 		return func() {
+			var repos []string
 			cfgMu.Lock()
-			repos := c.GitHub.Repositories
+			if disc != nil {
+				repos = disc.Repos()
+			} else {
+				repos = c.GitHub.Repositories
+			}
 			cfgMu.Unlock()
 
 			// Fetch all review-requested PRs without a repo filter — adding many
@@ -249,6 +257,20 @@ func main() {
 
 	cfgMu.Lock()
 	sched = startScheduler(cfg)
+	// Start topic-based repo discovery if configured.
+	if cfg.GitHub.DiscoveryTopic != "" {
+		disc = discovery.New(
+			ghClient,
+			cfg.GitHub.DiscoveryTopic,
+			cfg.GitHub.DiscoveryOrgs,
+			cfg.GitHub.Repositories,
+			cfg.GitHub.NonMonitored,
+		)
+		// Run initial discovery synchronously so the first poll has discovered repos.
+		disc.Run()
+		discSched = scheduler.New(parsePollInterval(cfg.GitHub.DiscoveryInterval), disc.Run)
+		discSched.Start()
+	}
 	cfgMu.Unlock()
 
 	// Capture the scheduler pointer under mutex so the deferred Stop is safe
@@ -259,11 +281,20 @@ func main() {
 		cfgMu.Unlock()
 		sc.Stop()
 	}()
+	defer func() {
+		cfgMu.Lock()
+		ds := discSched
+		cfgMu.Unlock()
+		if ds != nil {
+			ds.Stop()
+		}
+	}()
 
 	// Expose live config for GET /config
 	srv.SetConfigFn(func() map[string]any {
 		cfgMu.Lock()
 		c := cfg
+		d := disc
 		cfgMu.Unlock()
 		repoOverrides := make(map[string]map[string]string)
 		for repo, ai := range c.AI.Repos {
@@ -289,18 +320,25 @@ func main() {
 				"no_session_persistence":   ac.NoSessionPersistence,
 			}
 		}
-		return map[string]any{
-			"server_port":    c.Server.Port,
-			"poll_interval":  c.GitHub.PollInterval,
-			"repositories":   c.GitHub.Repositories,
-			"non_monitored":  c.GitHub.NonMonitored,
-			"ai_primary":     c.AI.Primary,
-			"ai_fallback":    c.AI.Fallback,
-			"review_mode":    c.AI.ReviewMode,
-			"retention_days": c.Retention.MaxDays,
-			"repo_overrides": repoOverrides,
-			"agent_configs":  agentConfigs,
+		result := map[string]any{
+			"server_port":        c.Server.Port,
+			"poll_interval":      c.GitHub.PollInterval,
+			"repositories":       c.GitHub.Repositories,
+			"non_monitored":      c.GitHub.NonMonitored,
+			"discovery_topic":    c.GitHub.DiscoveryTopic,
+			"discovery_orgs":     c.GitHub.DiscoveryOrgs,
+			"discovery_interval": c.GitHub.DiscoveryInterval,
+			"ai_primary":         c.AI.Primary,
+			"ai_fallback":        c.AI.Fallback,
+			"review_mode":        c.AI.ReviewMode,
+			"retention_days":     c.Retention.MaxDays,
+			"repo_overrides":     repoOverrides,
+			"agent_configs":      agentConfigs,
 		}
+		if d != nil {
+			result["effective_repositories"] = d.Repos()
+		}
+		return result
 	})
 
 	// Cache authenticated username for GET /me.
@@ -336,12 +374,33 @@ func main() {
 		cfgMu.Lock()
 		cfg = newCfg
 		oldSched := sched
+		oldDiscSched := discSched
 		sched = startScheduler(newCfg)
+
+		// Recreate or stop discovery engine based on new config.
+		if newCfg.GitHub.DiscoveryTopic != "" {
+			disc = discovery.New(
+				ghClient,
+				newCfg.GitHub.DiscoveryTopic,
+				newCfg.GitHub.DiscoveryOrgs,
+				newCfg.GitHub.Repositories,
+				newCfg.GitHub.NonMonitored,
+			)
+			disc.Run()
+			discSched = scheduler.New(parsePollInterval(newCfg.GitHub.DiscoveryInterval), disc.Run)
+			discSched.Start()
+		} else {
+			disc = nil
+			discSched = nil
+		}
 		cfgMu.Unlock()
 
-		// Stop the old scheduler outside the lock to avoid holding the mutex
+		// Stop the old schedulers outside the lock to avoid holding the mutex
 		// during a potentially blocking Stop call.
 		oldSched.Stop()
+		if oldDiscSched != nil {
+			oldDiscSched.Stop()
+		}
 
 		// Run first poll immediately with new config
 		go makePollFn(newCfg)()
