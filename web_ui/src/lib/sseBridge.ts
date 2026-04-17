@@ -1,10 +1,5 @@
 import type { Readable } from 'svelte/store';
-import {
-  issueListRefresh,
-  prListRefresh,
-  reviewingIssues,
-  reviewingPRs
-} from './stores.js';
+import { issueListRefresh, prListRefresh, reviewingIssues, reviewingPRs } from './stores.js';
 import type { SseEvent } from './types.js';
 
 type SetStore = typeof reviewingPRs;

@@ -1,11 +1,6 @@
 import { get, writable } from 'svelte/store';
 import { beforeEach, describe, expect, it } from 'vitest';
-import {
-  issueListRefresh,
-  prListRefresh,
-  reviewingIssues,
-  reviewingPRs
-} from '../lib/stores.js';
+import { issueListRefresh, prListRefresh, reviewingIssues, reviewingPRs } from '../lib/stores.js';
 import { initSseBridge } from '../lib/sseBridge.js';
 import type { SseEvent } from '../lib/types.js';
 
