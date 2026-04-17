@@ -116,10 +116,7 @@ func (c *Client) fetchIssuesPage(repo string, page int) ([]*Issue, error) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		errBody := string(body)
-		if len(errBody) > maxErrBodyLen {
-			errBody = errBody[:maxErrBodyLen]
-		}
+		errBody := safeTruncate(string(body), maxErrBodyLen)
 		return nil, fmt.Errorf("github: fetch issues (%s page %d): status %d: %s", repo, page, resp.StatusCode, errBody)
 	}
 

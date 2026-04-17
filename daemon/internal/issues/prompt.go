@@ -10,6 +10,10 @@ import (
 // maxBodyBytes bounds the issue body we send to the LLM. Long issue bodies
 // mostly contain copy-pasted stack traces or log dumps that waste tokens; the
 // first few KB carry the signal the triage actually needs.
+//
+// NOTE: this is deliberately distinct from github.maxBodyBytes (1 MB) — the
+// GitHub one bounds API response reads, this one bounds prompt size. They
+// happen to share a name because of their shape, not their purpose.
 const maxBodyBytes = 8 * 1024
 
 // maxCommentsBytes caps the formatted comment thread so a chatty issue cannot
@@ -76,6 +80,53 @@ func BuildPrompt(ctx PromptContext) string {
 	sb.WriteString(`  "severity": "low|medium|high|critical"` + "\n")
 	sb.WriteString("}\n")
 	sb.WriteString("If unsure about a field, use a conservative default. Do not wrap the JSON in prose or code fences.\n")
+
+	return sb.String()
+}
+
+// BuildImplementPrompt formats the LLM prompt for an auto_implement run.
+// In this mode the agent is expected to modify files in the working tree
+// directly; the outer pipeline picks up whatever it leaves behind with
+// `git add -A && git commit`. There is no JSON schema for the output — the
+// filesystem state is the output.
+func BuildImplementPrompt(ctx PromptContext) string {
+	var sb strings.Builder
+
+	sb.WriteString("You are Heimdallm, an engineering agent implementing a GitHub issue.\n")
+	sb.WriteString("You have WRITE access to the working directory, which is a checkout of the repository.\n\n")
+
+	sb.WriteString(fmt.Sprintf("Repository: %s\n", ctx.Repo))
+	sb.WriteString(fmt.Sprintf("Issue: #%d — %s\n", ctx.Number, ctx.Title))
+	sb.WriteString(fmt.Sprintf("Author: @%s\n", ctx.Author))
+	if len(ctx.Labels) > 0 {
+		sb.WriteString("Labels: " + strings.Join(ctx.Labels, ", ") + "\n")
+	}
+	sb.WriteString("\n")
+
+	body := strings.TrimSpace(ctx.Body)
+	if body == "" {
+		body = "(empty issue body)"
+	}
+	if len(body) > maxBodyBytes {
+		body = body[:maxBodyBytes] + "\n... (truncated)"
+	}
+	sb.WriteString("<issue_body>\n")
+	sb.WriteString(body)
+	sb.WriteString("\n</issue_body>\n\n")
+
+	if comments := formatComments(ctx.Comments); comments != "" {
+		sb.WriteString(comments)
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("Implement what the issue asks for. Write real, working code.\n")
+	sb.WriteString("Rules:\n")
+	sb.WriteString("- Keep the change minimal and focused on the issue.\n")
+	sb.WriteString("- Follow the existing code style; do not reformat unrelated files.\n")
+	sb.WriteString("- If tests exist for the area you are changing, extend them.\n")
+	sb.WriteString("- Do not commit secrets, credentials, or files outside the repository.\n")
+	sb.WriteString("- Leave the working tree in the final state you want committed — the outer pipeline will run `git add -A && git commit` over whatever you change.\n")
+	sb.WriteString("- If you cannot implement the issue (insufficient information, risky change, requires a human decision), leave the tree untouched. A review-only comment will be posted instead.\n")
 
 	return sb.String()
 }

@@ -1,6 +1,7 @@
 package issues
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -29,9 +30,11 @@ type IssuesFetcher interface {
 	FetchIssues(repo string, cfg config.IssueTrackingConfig, authenticatedUser string) ([]*github.Issue, error)
 }
 
-// PipelineRunner is the subset of *Pipeline the fetcher uses.
+// PipelineRunner is the subset of *Pipeline the fetcher uses. Takes a
+// context so shutdown cancellation propagates through the whole dispatch
+// path down to the git / HTTP calls inside the pipeline.
 type PipelineRunner interface {
-	Run(issue *github.Issue, opts RunOptions) (*store.IssueReview, error)
+	Run(ctx context.Context, issue *github.Issue, opts RunOptions) (*store.IssueReview, error)
 }
 
 // issueDedupStore is the store slice needed to decide whether an issue has
@@ -66,13 +69,17 @@ func NewFetcher(client IssuesFetcher, s issueDedupStore, p PipelineRunner) *Fetc
 // failures are logged and counted but do not abort the run.
 //
 // When cfg.Enabled is false this is a no-op; the caller does not have to
-// guard the call.
-func (f *Fetcher) ProcessRepo(repo string, cfg config.IssueTrackingConfig, authUser string, optsFor OptionsFn) (int, error) {
+// guard the call. ctx is passed through to pipeline.Run so a daemon
+// shutdown cancels whatever issue is currently being processed.
+func (f *Fetcher) ProcessRepo(ctx context.Context, repo string, cfg config.IssueTrackingConfig, authUser string, optsFor OptionsFn) (int, error) {
 	if !cfg.Enabled {
 		return 0, nil
 	}
 	if optsFor == nil {
 		return 0, fmt.Errorf("issues fetcher: nil OptionsFn")
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
 	issues, err := f.client.FetchIssues(repo, cfg, authUser)
@@ -82,6 +89,12 @@ func (f *Fetcher) ProcessRepo(repo string, cfg config.IssueTrackingConfig, authU
 
 	processed := 0
 	for _, issue := range issues {
+		// Abort the loop cleanly on cancellation so a shutdown does not get
+		// stuck waiting for remaining issues when the caller already gave up.
+		if err := ctx.Err(); err != nil {
+			return processed, fmt.Errorf("issues fetcher: %s cancelled after %d processed: %w", repo, processed, err)
+		}
+
 		// A dedup lookup error intentionally falls through to "treat as
 		// unprocessed" so a flaky store never stops the pipeline from running;
 		// the explicit if / else if makes that control flow obvious.
@@ -95,7 +108,7 @@ func (f *Fetcher) ProcessRepo(repo string, cfg config.IssueTrackingConfig, authU
 			continue
 		}
 
-		if _, runErr := f.pipeline.Run(issue, optsFor(issue)); runErr != nil {
+		if _, runErr := f.pipeline.Run(ctx, issue, optsFor(issue)); runErr != nil {
 			slog.Error("issues fetcher: pipeline run failed",
 				"repo", repo, "number", issue.Number, "err", runErr)
 			continue

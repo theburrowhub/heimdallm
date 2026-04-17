@@ -1,6 +1,7 @@
 package issues_test
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -49,10 +50,11 @@ func TestIntegration_FetcherDrivesPipelineEndToEnd(t *testing.T) {
 	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte(validResult)}
 	broker := &fakeBroker{}
 
-	pipe := issues.New(s, gh, exec, broker, nil)
+	pipe := issues.New(s, gh, exec, nil, broker, nil)
 	fetcher := issues.NewFetcher(client, s, pipe)
 
 	processed, err := fetcher.ProcessRepo(
+		context.Background(),
 		"org/repo",
 		config.IssueTrackingConfig{Enabled: true},
 		"reporter",
@@ -91,6 +93,7 @@ func TestIntegration_FetcherDrivesPipelineEndToEnd(t *testing.T) {
 
 	// Second pass immediately after: the grace window should skip both.
 	processed2, err := fetcher.ProcessRepo(
+		context.Background(),
 		"org/repo",
 		config.IssueTrackingConfig{Enabled: true},
 		"reporter",
