@@ -357,15 +357,21 @@ git commit -m "chore(web_ui): integrate TailwindCSS v4"
 **Files:**
 - Create: `web_ui/src/lib/types.ts`
 
-The types below mirror the Dart models in `flutter_app/lib/core/models/`. Note:
-- The Dart codebase uses `Issue` for "code finding" (file/line/severity). In TS we rename that to **`ReviewFinding`** so `Issue` can mean "GitHub issue" per the Fase-2 design spec — a naming collision we resolve in favour of the Fase-2 semantic.
-- Field names keep the daemon's snake_case wire format. Callers convert to camelCase only at the UI layer.
+The types below mirror the **daemon's wire format** (Go structs in `daemon/internal/store/*.go` and `daemon/internal/sse/broker.go`), not the Dart models. Most fields match Dart's models, but a few don't — see inline comments. Specifically:
+- The Dart codebase uses `Issue` for "code finding" (file/line/severity). In TS we rename that to **`ReviewFinding`** so `Issue` can mean "GitHub issue" per the Fase-2 design spec.
+- `Review.issues` and `Review.suggestions` arrive from the daemon as **JSON-encoded strings** (stored in TEXT columns), not arrays. `api.ts` parses them — see Task 7.
+- Field names keep snake_case to match the wire format. UI components convert to camelCase only at display time if needed.
 
 - [ ] **Step 1: Create `web_ui/src/lib/types.ts`**
 
 ```ts
 // Wire-format types mirroring the daemon's JSON responses.
 // Field names intentionally use snake_case to match the wire format.
+//
+// The Dart code-finding type (file/line/severity) is called `Issue` in
+// flutter_app/lib/core/models/issue.dart. We rename it to `ReviewFinding`
+// here so `Issue` can denote the Fase-2 GitHub-issue domain type without
+// collision.
 
 export interface ReviewFinding {
   file: string;
@@ -374,6 +380,11 @@ export interface ReviewFinding {
   severity: string;
 }
 
+// The daemon stores issues/suggestions as JSON-encoded strings in TEXT
+// columns (see daemon/internal/store/reviews.go: `Issues string json:"issues"`),
+// so the wire format is `"[{...}]"` — a string, not an array. api.ts is
+// responsible for parsing these strings into typed arrays before returning
+// Reviews to callers. The Dart api_client does the same in _parseReviewMap.
 export interface Review {
   id: number;
   pr_id: number;
@@ -383,6 +394,7 @@ export interface Review {
   suggestions: string[];
   severity: string;
   created_at: string;
+  github_review_id: number; // 0 = not yet published to GitHub
 }
 
 export interface PR {
@@ -395,6 +407,7 @@ export interface PR {
   url: string;
   state: string;
   updated_at: string;
+  fetched_at: string;
   dismissed: boolean;
   latest_review?: Review | null;
 }
@@ -404,7 +417,8 @@ export interface PRDetail {
   reviews: Review[];
 }
 
-// Fase-2 GitHub issue tracking (daemon endpoints not yet implemented).
+// Fase-2 GitHub issue tracking (daemon endpoints not yet implemented;
+// shape follows docs/superpowers/specs/2026-04-16-heimdallm-v2-design.md).
 export interface Issue {
   id: number;
   github_id: number;
@@ -439,23 +453,49 @@ export interface IssueDetail {
   reviews: IssueReview[];
 }
 
-// Agent == ReviewPrompt in the Dart codebase.
+// Agent mirrors daemon/internal/store/agents.go. The daemon's Agent
+// includes `cli` (claude | gemini | codex) and `created_at` in addition
+// to the fields Dart's ReviewPrompt exposes.
 export interface Agent {
   id: string;
   name: string;
-  focus: string;
-  instructions: string;
+  cli: string;
   prompt: string;
+  instructions: string;
   cli_flags: string;
   is_default: boolean;
+  created_at: string;
+}
+
+// Stats mirrors daemon/internal/store/store.go Stats struct.
+export interface RepoCount {
+  repo: string;
+  count: number;
+}
+
+export interface DayCount {
+  day: string;
+  count: number;
+}
+
+export interface ReviewTimingStats {
+  median_seconds: number;
+  min_seconds: number;
+  max_seconds: number;
+  bucket_fast: number;       // < 30 s
+  bucket_medium: number;     // 30–120 s
+  bucket_slow: number;       // 120–300 s
+  bucket_very_slow: number;  // > 300 s
 }
 
 export interface Stats {
-  total_prs?: number;
-  open_issues?: number;
-  reviews_today?: number;
-  uptime_seconds?: number;
-  [key: string]: unknown;
+  total_reviews: number;
+  by_severity: Record<string, number>;
+  by_cli: Record<string, number>;
+  top_repos: RepoCount[];
+  reviews_last_7_days: DayCount[];
+  avg_issues_per_review: number;
+  review_timing: ReviewTimingStats;
 }
 
 export interface Me {
@@ -466,13 +506,14 @@ export interface Me {
 // validation. Typed access happens at the Config-page level in a later PR.
 export type Config = Record<string, unknown>;
 
-// SSE event types emitted by the daemon.
+// SSE event types emitted by the daemon's sse.Broker. Must match the
+// constants in daemon/internal/sse/broker.go exactly or listeners in
+// sse.ts won't fire.
 export type SseEventType =
-  | 'pr_updated'
-  | 'issue_updated'
-  | 'config_reloaded'
-  | 'log'
-  | 'message';
+  | 'pr_detected'
+  | 'review_started'
+  | 'review_completed'
+  | 'review_error';
 
 export interface SseEvent<T = unknown> {
   type: SseEventType;
@@ -803,11 +844,13 @@ git commit -m "feat(web_ui): add /events SSE passthrough to daemon"
 
 One `request()` helper does all HTTP work. Each typed method delegates with the right verb/path. `ApiError` exposes `{ status, statusText, path, message }`. All browser requests hit `/api/<daemon-path>` — same-origin, token injected by the proxy.
 
+The daemon serialises `Review.issues` / `Review.suggestions` as JSON-encoded strings (not arrays). `api.ts` parses them transparently via a private `parseReview` helper so callers always get typed arrays — same behaviour as Dart's `_parseReviewMap`.
+
 - [ ] **Step 1: Write failing tests at `web_ui/src/tests/api.test.ts`**
 
 ```ts
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, fetchPRs, fetchStats, triggerReview, upsertAgent } from '../lib/api.js';
+import { ApiError, fetchPR, fetchPRs, fetchStats, triggerReview, upsertAgent } from '../lib/api.js';
 
 const fetchMock = vi.fn();
 
@@ -839,6 +882,31 @@ describe('api.ts', () => {
     expect(prs[0].id).toBe(1);
   });
 
+  it('fetchPR parses stringified issues/suggestions in latest_review', async () => {
+    fetchMock.mockResolvedValue(
+      okJson({
+        pr: {
+          id: 1,
+          latest_review: {
+            id: 9,
+            issues: '[{"file":"a.go","line":1,"description":"x","severity":"LOW"}]',
+            suggestions: '["do the thing"]'
+          }
+        },
+        reviews: [
+          { id: 9, issues: '[]', suggestions: '[]' }
+        ]
+      })
+    );
+    const detail = await fetchPR(1);
+    expect(detail.pr.latest_review!.issues).toEqual([
+      { file: 'a.go', line: 1, description: 'x', severity: 'LOW' }
+    ]);
+    expect(detail.pr.latest_review!.suggestions).toEqual(['do the thing']);
+    expect(detail.reviews[0].issues).toEqual([]);
+    expect(detail.reviews[0].suggestions).toEqual([]);
+  });
+
   it('triggerReview POSTs and resolves on 202', async () => {
     fetchMock.mockResolvedValue(new Response(null, { status: 202 }));
     await expect(triggerReview(7)).resolves.toBeUndefined();
@@ -862,22 +930,43 @@ describe('api.ts', () => {
     await upsertAgent({
       id: 'a',
       name: 'A',
-      focus: 'general',
-      instructions: '',
+      cli: 'claude',
       prompt: '',
+      instructions: 'Review carefully.',
       cli_flags: '',
-      is_default: false
+      is_default: false,
+      created_at: '2026-04-17T00:00:00Z'
     });
     const [, init] = fetchMock.mock.calls[0];
     expect(init.method).toBe('POST');
     expect((init.headers as Record<string, string>)['Content-Type']).toBe('application/json');
-    expect(JSON.parse(init.body as string)).toMatchObject({ id: 'a', name: 'A' });
+    expect(JSON.parse(init.body as string)).toMatchObject({ id: 'a', name: 'A', cli: 'claude' });
   });
 
   it('fetchStats returns parsed JSON object', async () => {
-    fetchMock.mockResolvedValue(okJson({ total_prs: 3, uptime_seconds: 99 }));
+    fetchMock.mockResolvedValue(
+      okJson({
+        total_reviews: 3,
+        by_severity: { HIGH: 1 },
+        by_cli: {},
+        top_repos: [],
+        reviews_last_7_days: [],
+        avg_issues_per_review: 1.5,
+        review_timing: {
+          median_seconds: 42,
+          min_seconds: 10,
+          max_seconds: 90,
+          bucket_fast: 1,
+          bucket_medium: 1,
+          bucket_slow: 1,
+          bucket_very_slow: 0
+        }
+      })
+    );
     const stats = await fetchStats();
-    expect(stats.total_prs).toBe(3);
+    expect(stats.total_reviews).toBe(3);
+    expect(stats.avg_issues_per_review).toBe(1.5);
+    expect(stats.review_timing.median_seconds).toBe(42);
   });
 });
 ```
@@ -901,6 +990,7 @@ import type {
   Me,
   PR,
   PRDetail,
+  Review,
   Stats
 } from './types.js';
 
@@ -940,6 +1030,28 @@ async function request<T>(
   return (await resp.json()) as T;
 }
 
+// The daemon stores issues/suggestions as JSON-encoded strings; this helper
+// parses them so callers always get typed arrays. Mirrors Dart's
+// _parseReviewMap in flutter_app/lib/core/api/api_client.dart.
+function parseReview(raw: unknown): Review {
+  const r = { ...(raw as Record<string, unknown>) };
+  if (typeof r.issues === 'string') {
+    r.issues = r.issues ? JSON.parse(r.issues as string) : [];
+  }
+  r.issues ??= [];
+  if (typeof r.suggestions === 'string') {
+    r.suggestions = r.suggestions ? JSON.parse(r.suggestions as string) : [];
+  }
+  r.suggestions ??= [];
+  return r as unknown as Review;
+}
+
+function parsePR(raw: unknown): PR {
+  const pr = { ...(raw as Record<string, unknown>) };
+  if (pr.latest_review) pr.latest_review = parseReview(pr.latest_review);
+  return pr as unknown as PR;
+}
+
 // ─── Health ─────────────────────────────────────────────────────────────
 export function checkHealth(): Promise<boolean> {
   return fetch('/api/health')
@@ -948,12 +1060,17 @@ export function checkHealth(): Promise<boolean> {
 }
 
 // ─── PRs ────────────────────────────────────────────────────────────────
-export function fetchPRs(): Promise<PR[]> {
-  return request<PR[]>('GET', '/api/prs');
+export async function fetchPRs(): Promise<PR[]> {
+  const raws = await request<unknown[]>('GET', '/api/prs');
+  return raws.map(parsePR);
 }
 
-export function fetchPR(id: number): Promise<PRDetail> {
-  return request<PRDetail>('GET', `/api/prs/${id}`);
+export async function fetchPR(id: number): Promise<PRDetail> {
+  const raw = await request<{ pr: unknown; reviews?: unknown[] }>('GET', `/api/prs/${id}`);
+  return {
+    pr: parsePR(raw.pr),
+    reviews: (raw.reviews ?? []).map(parseReview)
+  };
 }
 
 export function triggerReview(id: number): Promise<void> {
@@ -1127,12 +1244,12 @@ describe('connectEvents', () => {
     const unsub = handle.events.subscribe((e) => {
       if (e) received.push(e);
     });
-    es.emit('pr_updated', JSON.stringify({ id: 1 }));
-    es.emit('log', '"hello"');
+    es.emit('pr_detected', JSON.stringify({ id: 1 }));
+    es.emit('review_completed', '{"pr_id":1}');
     unsub();
     expect(received).toEqual([
-      { type: 'pr_updated', data: { id: 1 } },
-      { type: 'log', data: 'hello' }
+      { type: 'pr_detected', data: { id: 1 } },
+      { type: 'review_completed', data: { pr_id: 1 } }
     ]);
   });
 
@@ -1170,11 +1287,10 @@ import { readable, writable, type Readable } from 'svelte/store';
 import type { SseEvent, SseEventType } from './types.js';
 
 const KNOWN_EVENT_TYPES: SseEventType[] = [
-  'pr_updated',
-  'issue_updated',
-  'config_reloaded',
-  'log',
-  'message'
+  'pr_detected',
+  'review_started',
+  'review_completed',
+  'review_error'
 ];
 
 export interface EventsHandle {
@@ -1477,10 +1593,10 @@ Demonstrates end-to-end wiring: hits `/api/stats` and shows the resulting key nu
 
 <section class="mt-8 grid grid-cols-2 gap-4 md:grid-cols-4">
   {#each [
-    { label: 'Total PRs', value: stats?.total_prs },
-    { label: 'Open issues', value: stats?.open_issues },
-    { label: 'Reviews today', value: stats?.reviews_today },
-    { label: 'Uptime (s)', value: stats?.uptime_seconds }
+    { label: 'Total reviews', value: stats?.total_reviews },
+    { label: 'Avg findings / review', value: stats?.avg_issues_per_review?.toFixed(1) },
+    { label: 'Median time (s)', value: stats?.review_timing?.median_seconds?.toFixed(1) },
+    { label: 'High-severity', value: stats?.by_severity?.HIGH ?? 0 }
   ] as cell (cell.label)}
     <div class="rounded-lg border border-gray-200 bg-white p-4">
       <dt class="text-xs uppercase tracking-wide text-gray-500">{cell.label}</dt>
@@ -1686,7 +1802,7 @@ cd web_ui && npm run check && npm test && npm run build
 
 Expected:
 - `svelte-check` reports 0 errors, 0 warnings.
-- Vitest: all tests pass (5 in `token.test.ts` + 5 in `api.test.ts` + 4 in `sse.test.ts` = 14).
+- Vitest: all tests pass (5 in `token.test.ts` + 6 in `api.test.ts` + 4 in `sse.test.ts` = 15).
 - Build succeeds and produces `build/`.
 
 - [ ] **Step 2: Confirm the dev server works end-to-end with a real daemon**
@@ -1743,7 +1859,7 @@ Closes #30. Implements the foundational scaffold from
 ## Test plan
 
 - [x] `npm run check` — 0 errors
-- [x] `npm test` — 14 passing
+- [x] `npm test` — 15 passing
 - [x] `npm run build` — produces `build/`
 - [x] `docker build` — succeeds
 - [ ] Manual: `/api/me` returns login with daemon running
