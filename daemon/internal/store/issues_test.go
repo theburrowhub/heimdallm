@@ -207,11 +207,12 @@ func TestIssueReview_InsertDefaults(t *testing.T) {
 	s := newTestStore(t)
 	issueID, _ := s.UpsertIssue(newIssue(210, 24))
 
+	// All JSON-typed fields left blank on purpose — the store should normalise
+	// them to valid-JSON defaults so json.Unmarshal downstream doesn't choke.
 	rev := &store.IssueReview{
 		IssueID:   issueID,
 		CLIUsed:   "claude",
 		Summary:   "no suggestions yet",
-		Triage:    `{}`,
 		CreatedAt: time.Now(),
 	}
 	_, err := s.InsertIssueReview(rev)
@@ -220,6 +221,9 @@ func TestIssueReview_InsertDefaults(t *testing.T) {
 	}
 
 	got, _ := s.LatestIssueReview(issueID)
+	if got.Triage != "{}" {
+		t.Errorf("triage default mismatch: %q", got.Triage)
+	}
 	if got.Suggestions != "[]" {
 		t.Errorf("suggestions default mismatch: %q", got.Suggestions)
 	}

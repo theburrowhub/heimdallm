@@ -38,8 +38,11 @@ func (s *Store) UpsertPR(pr *PR) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("store: upsert pr: %w", err)
 	}
+	// LastInsertId returns 0 on the UPDATE path with modernc.org/sqlite (the
+	// driver this project uses). Other SQLite drivers may report the existing
+	// row id instead — the fallback SELECT below handles either case so this
+	// code is portable if the driver ever changes.
 	id, err := res.LastInsertId()
-	// LastInsertId returns 0 on UPDATE (conflict path) — fall back to a SELECT.
 	if err != nil || id == 0 {
 		row := s.db.QueryRow("SELECT id FROM prs WHERE github_id = ?", pr.GithubID)
 		if scanErr := row.Scan(&id); scanErr != nil {

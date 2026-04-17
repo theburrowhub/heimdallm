@@ -67,9 +67,12 @@ func (s *Store) UpsertIssue(i *Issue) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("store: upsert issue: %w", err)
 	}
+	// LastInsertId returns 0 on the UPDATE path with modernc.org/sqlite (the
+	// driver this project uses). Other SQLite drivers may report the existing
+	// row id instead — the fallback SELECT below handles either case so this
+	// code is portable if the driver ever changes.
 	id, err := res.LastInsertId()
 	if err != nil || id == 0 {
-		// UPDATE path — resolve the row id via the natural key.
 		row := s.db.QueryRow("SELECT id FROM issues WHERE github_id = ?", i.GithubID)
 		if scanErr := row.Scan(&id); scanErr != nil {
 			return 0, fmt.Errorf("store: upsert issue fallback select: %w", scanErr)
@@ -138,7 +141,13 @@ func (s *Store) UndismissIssue(id int64) error {
 }
 
 // InsertIssueReview stores a single pipeline run's result.
+// Empty Triage / Suggestions are normalised to valid JSON (`{}` / `[]`) so
+// downstream consumers can `json.Unmarshal` them without guarding against
+// the empty-string case.
 func (s *Store) InsertIssueReview(r *IssueReview) (int64, error) {
+	if r.Triage == "" {
+		r.Triage = "{}"
+	}
 	if r.Suggestions == "" {
 		r.Suggestions = "[]"
 	}

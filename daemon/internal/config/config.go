@@ -81,10 +81,14 @@ const (
 	IssueModeReviewOnly IssueMode = "review_only"
 )
 
-// FilterMode combines the org / assignee / label filters.
+// FilterMode names how the org / assignee / label filters are combined.
+// Keeping it as a named type (mirrors IssueMode) lets validation surface type
+// mismatches at compile time rather than as a runtime string compare.
+type FilterMode string
+
 const (
-	FilterModeExclusive = "exclusive" // AND
-	FilterModeInclusive = "inclusive" // OR
+	FilterModeExclusive FilterMode = "exclusive" // AND
+	FilterModeInclusive FilterMode = "inclusive" // OR
 )
 
 // IssueTrackingConfig is the `[github.issue_tracking]` section.
@@ -102,7 +106,7 @@ type IssueTrackingConfig struct {
 	// FilterMode decides how the org / assignee / label dimensions are
 	// combined ("exclusive" = AND, "inclusive" = OR). Applied by the
 	// pipeline; not consulted by Classify itself.
-	FilterMode string `toml:"filter_mode"`
+	FilterMode FilterMode `toml:"filter_mode"`
 
 	// Organizations limits processing to issues belonging to these orgs.
 	// Empty = no org filter.
@@ -330,7 +334,7 @@ func (c *Config) applyIssueTrackingEnv() {
 		}
 	}
 	if v := os.Getenv("HEIMDALLM_ISSUE_FILTER_MODE"); v != "" {
-		c.GitHub.IssueTracking.FilterMode = v
+		c.GitHub.IssueTracking.FilterMode = FilterMode(v)
 	}
 	if v := os.Getenv("HEIMDALLM_ISSUE_DEFAULT_ACTION"); v != "" {
 		c.GitHub.IssueTracking.DefaultAction = v

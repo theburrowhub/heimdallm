@@ -474,7 +474,7 @@ func TestValidate_IssueTrackingDisabledSkipsChecks(t *testing.T) {
 		GitHub: GitHubConfig{
 			IssueTracking: IssueTrackingConfig{
 				Enabled:       false,
-				FilterMode:    "nonsense",
+				FilterMode:    FilterMode("nonsense"),
 				DefaultAction: "also nonsense",
 			},
 		},
@@ -490,7 +490,7 @@ func TestValidate_IssueTrackingInvalidFilterMode(t *testing.T) {
 		GitHub: GitHubConfig{
 			IssueTracking: IssueTrackingConfig{
 				Enabled:       true,
-				FilterMode:    "excluive",
+				FilterMode:    FilterMode("excluive"),
 				DefaultAction: string(IssueModeIgnore),
 			},
 		},
