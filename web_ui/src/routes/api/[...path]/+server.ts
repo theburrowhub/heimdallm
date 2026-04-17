@@ -30,7 +30,13 @@ const handle: RequestHandler = async ({ params, request, url, fetch: _fetch }) =
     init.body = request.body;
   }
 
-  const upstream = await fetch(target, init);
+  let upstream: Response;
+  try {
+    upstream = await fetch(target, init);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    error(502, { message: `daemon unreachable at ${DAEMON_URL}: ${msg}` });
+  }
 
   const respHeaders = new Headers();
   const upstreamCt = upstream.headers.get('content-type');
