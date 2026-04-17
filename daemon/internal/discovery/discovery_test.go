@@ -45,6 +45,7 @@ func TestMergeRepos_PreservesStaticOrderAndDeduplicates(t *testing.T) {
 	out := discovery.MergeRepos(
 		[]string{"org/static1", "org/shared"},
 		[]string{"org/shared", "org/discovered1", "org/discovered2"},
+		nil,
 	)
 	want := []string{"org/static1", "org/shared", "org/discovered1", "org/discovered2"}
 	if len(out) != len(want) {
@@ -58,29 +59,65 @@ func TestMergeRepos_PreservesStaticOrderAndDeduplicates(t *testing.T) {
 }
 
 func TestMergeRepos_BothEmpty(t *testing.T) {
-	if got := discovery.MergeRepos(nil, nil); got != nil {
-		t.Errorf("MergeRepos(nil, nil) = %v, want nil", got)
+	if got := discovery.MergeRepos(nil, nil, nil); got != nil {
+		t.Errorf("MergeRepos(nil, nil, nil) = %v, want nil", got)
 	}
 }
 
 func TestMergeRepos_OnlyStatic(t *testing.T) {
-	got := discovery.MergeRepos([]string{"a", "b"}, nil)
+	got := discovery.MergeRepos([]string{"a", "b"}, nil, nil)
 	if len(got) != 2 || got[0] != "a" || got[1] != "b" {
 		t.Errorf("got %v", got)
 	}
 }
 
 func TestMergeRepos_OnlyDiscovered(t *testing.T) {
-	got := discovery.MergeRepos(nil, []string{"a", "b"})
+	got := discovery.MergeRepos(nil, []string{"a", "b"}, nil)
 	if len(got) != 2 || got[0] != "a" || got[1] != "b" {
 		t.Errorf("got %v", got)
 	}
 }
 
 func TestMergeRepos_IgnoresEmptyStrings(t *testing.T) {
-	got := discovery.MergeRepos([]string{"", "a", ""}, []string{"", "b"})
+	got := discovery.MergeRepos([]string{"", "a", ""}, []string{"", "b"}, nil)
 	if len(got) != 2 || got[0] != "a" || got[1] != "b" {
 		t.Errorf("got %v", got)
+	}
+}
+
+func TestMergeRepos_NonMonitored(t *testing.T) {
+	got := discovery.MergeRepos(
+		[]string{"org/static1", "org/blocked"},
+		[]string{"org/discovered1", "org/blocked2"},
+		[]string{"org/blocked", "org/blocked2"},
+	)
+	want := []string{"org/static1", "org/discovered1"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("got[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// ── InferOrgs ───────────────────────────────────────────────────────────────
+
+func TestInferOrgs(t *testing.T) {
+	got := discovery.InferOrgs([]string{
+		"freepik-company/repo-a",
+		"theburrowhub/repo-b",
+		"freepik-company/repo-c",
+	})
+	want := []string{"freepik-company", "theburrowhub"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("got[%d] = %q, want %q", i, got[i], want[i])
+		}
 	}
 }
 

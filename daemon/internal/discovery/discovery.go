@@ -11,6 +11,8 @@ package discovery
 import (
 	"context"
 	"log/slog"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -27,10 +29,11 @@ type ReposFetcher interface {
 type Service struct {
 	fetcher ReposFetcher
 
-	mu      sync.RWMutex
-	cache   []string
-	lastErr error
-	lastAt  time.Time
+	mu        sync.RWMutex
+	cache     []string
+	lastErr   error
+	lastAt    time.Time
+	lastCount int
 }
 
 // NewService wires a fetcher into a discovery service.
@@ -75,7 +78,13 @@ func (s *Service) Refresh(topic string, orgs []string) error {
 	// previous list; a partial outage returns (some, err) and we update with
 	// what we have.
 	if len(repos) > 0 {
+		prev := s.lastCount
 		s.cache = repos
+		s.lastCount = len(repos)
+		if prev > 0 && len(repos) < prev {
+			slog.Warn("discovery: repo count decreased",
+				"previous", prev, "current", len(repos))
+		}
 	} else if err != nil {
 		slog.Warn("discovery: refresh failed, keeping previous cache",
 			"cached", len(s.cache), "err", err)
@@ -118,14 +127,24 @@ func (s *Service) Run(ctx context.Context, interval time.Duration, topic string,
 // MergeRepos returns the union of static and discovered repositories,
 // preserving the order of static entries (stable for config-driven overrides)
 // and appending discovered entries that are not already present.
-func MergeRepos(static, discovered []string) []string {
+// Repos listed in nonMonitored are excluded unconditionally (absolute blacklist).
+func MergeRepos(static, discovered, nonMonitored []string) []string {
 	if len(static) == 0 && len(discovered) == 0 {
 		return nil
+	}
+	blacklist := make(map[string]struct{}, len(nonMonitored))
+	for _, r := range nonMonitored {
+		if r != "" {
+			blacklist[r] = struct{}{}
+		}
 	}
 	seen := make(map[string]struct{}, len(static)+len(discovered))
 	out := make([]string, 0, len(static)+len(discovered))
 	for _, r := range static {
 		if r == "" {
+			continue
+		}
+		if _, blocked := blacklist[r]; blocked {
 			continue
 		}
 		if _, dup := seen[r]; dup {
@@ -138,11 +157,34 @@ func MergeRepos(static, discovered []string) []string {
 		if r == "" {
 			continue
 		}
+		if _, blocked := blacklist[r]; blocked {
+			continue
+		}
 		if _, dup := seen[r]; dup {
 			continue
 		}
 		seen[r] = struct{}{}
 		out = append(out, r)
 	}
+	if len(out) == 0 {
+		return nil
+	}
 	return out
+}
+
+// InferOrgs extracts unique organization prefixes from "org/repo" strings.
+// Returns sorted, deduplicated org names. Used when discovery_orgs is empty.
+func InferOrgs(repos []string) []string {
+	set := make(map[string]struct{})
+	for _, r := range repos {
+		if idx := strings.IndexByte(r, '/'); idx > 0 {
+			set[r[:idx]] = struct{}{}
+		}
+	}
+	orgs := make([]string, 0, len(set))
+	for o := range set {
+		orgs = append(orgs, o)
+	}
+	sort.Strings(orgs)
+	return orgs
 }
