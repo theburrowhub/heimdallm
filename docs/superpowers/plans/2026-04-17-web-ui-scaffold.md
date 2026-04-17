@@ -1175,7 +1175,7 @@ Wraps native `EventSource` into two Svelte stores: `events` (a readable of every
 
 ```ts
 import { get } from 'svelte/store';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { connectEvents } from '../lib/sse.js';
 
 type Listener = (e: MessageEvent) => void;
@@ -1226,6 +1226,10 @@ beforeEach(() => {
   vi.stubGlobal('EventSource', MockEventSource);
 });
 
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
 describe('connectEvents', () => {
   it('opens EventSource at /events', () => {
     connectEvents();
@@ -1259,11 +1263,14 @@ describe('connectEvents', () => {
     expect(get(handle.connected)).toBe(false);
   });
 
-  it('close() calls EventSource.close()', () => {
+  it('close() calls EventSource.close() and sets connected to false', () => {
     const handle = connectEvents();
     const es = MockEventSource.instances[0];
+    es.fireOpen();
+    expect(get(handle.connected)).toBe(true);
     handle.close();
     expect(es.closed).toBe(true);
+    expect(get(handle.connected)).toBe(false);
   });
 });
 ```
