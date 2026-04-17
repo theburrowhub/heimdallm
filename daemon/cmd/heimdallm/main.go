@@ -103,6 +103,7 @@ func main() {
 	// an issue that is classified as review_only, so this dep is harmless
 	// when auto_implement is not in use.
 	issuePipe := issuepipeline.New(s, ghClient, exec, issuepipeline.NewGitExec(), broker, &notifyWithSSE{notifier: notifier})
+	issueFetcher := issuepipeline.NewFetcher(ghClient, s, issuePipe)
 	srv := server.New(s, broker, p, apiToken)
 
 	// cfgMu protects cfg, sched and the discovery loop so reload is safe from any goroutine.
@@ -114,6 +115,11 @@ func main() {
 	// can restart it with fresh config.
 	discoverySvc := discovery.NewService(ghClient)
 	var discoveryCancel context.CancelFunc
+
+	// loginMu guards cachedLogin against concurrent reads/writes from the
+	// poll cycle and HTTP goroutines.
+	var loginMu sync.Mutex
+	var cachedLogin string
 
 	// reviewMu prevents concurrent pipeline runs for the same GitHub PR ID.
 	// Key: pr.ID (GitHub PR ID), Value: true while being reviewed.
@@ -253,6 +259,69 @@ func main() {
 			}
 			// Retry reviews stored locally but not yet published to GitHub
 			p.PublishPending()
+
+			// ── Issue tracking cycle ─────────────────────────────────────
+			cfgMu.Lock()
+			itCfg := c.GitHub.IssueTracking
+			cfgMu.Unlock()
+			if itCfg.Enabled {
+				loginMu.Lock()
+				authUser := cachedLogin
+				loginMu.Unlock()
+				if authUser == "" {
+					if u, err := ghClient.AuthenticatedUser(); err == nil {
+						authUser = u
+						loginMu.Lock()
+						cachedLogin = u
+						loginMu.Unlock()
+					}
+				}
+
+				optsFor := func(issue *gh.Issue) issuepipeline.RunOptions {
+					cfgMu.Lock()
+					aiCfg := c.AIForRepo(issue.Repo)
+					if aiCfg.Primary == "" {
+						aiCfg.Primary = c.AI.Primary
+					}
+					agentCfg := c.AgentConfigFor(aiCfg.Primary)
+					cfgMu.Unlock()
+
+					extraFlags := agentCfg.ExtraFlags
+					if extraFlags != "" {
+						if err := executor.ValidateExtraFlags(extraFlags); err != nil {
+							slog.Warn("issue poll: extra_flags rejected", "err", err)
+							extraFlags = ""
+						}
+					}
+					return issuepipeline.RunOptions{
+						Primary:  aiCfg.Primary,
+						Fallback: aiCfg.Fallback,
+						ExecOpts: executor.ExecOptions{
+							Model:                agentCfg.Model,
+							MaxTurns:             agentCfg.MaxTurns,
+							ApprovalMode:         agentCfg.ApprovalMode,
+							ExtraFlags:           extraFlags,
+							WorkDir:              aiCfg.LocalDir,
+							Effort:               agentCfg.Effort,
+							PermissionMode:       agentCfg.PermissionMode,
+							Bare:                 agentCfg.Bare,
+							DangerouslySkipPerms: agentCfg.DangerouslySkipPerms,
+							NoSessionPersistence: agentCfg.NoSessionPersistence,
+						},
+					}
+				}
+
+				for _, repo := range repos {
+					n, err := issueFetcher.ProcessRepo(context.Background(), repo, itCfg, authUser, optsFor)
+					if err != nil {
+						slog.Error("poll: issue fetch failed", "repo", repo, "err", err)
+						continue
+					}
+					if n > 0 {
+						slog.Info("poll: processed issues", "repo", repo, "count", n)
+					}
+				}
+			}
 		}
 	}
 
@@ -343,9 +412,6 @@ func main() {
 	})
 
 	// Cache authenticated username for GET /me.
-	// loginMu guards cachedLogin against concurrent reads/writes from HTTP goroutines.
-	var loginMu sync.Mutex
-	var cachedLogin string
 	srv.SetMeFn(func() (string, error) {
 		loginMu.Lock()
 		if cachedLogin != "" {
