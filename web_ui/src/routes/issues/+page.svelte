@@ -5,6 +5,7 @@
   import FilterBar from '$lib/components/FilterBar.svelte';
   import IssueTile from '$lib/components/IssueTile.svelte';
   import { fetchIssues } from '$lib/api.js';
+  import { desc } from '$lib/sort.js';
   import { issueListRefresh, reviewingIssues } from '$lib/stores.js';
   import type { Issue } from '$lib/types.js';
 
@@ -45,11 +46,7 @@
       }
       return true;
     });
-    return list.sort((a, b) => {
-      const ta = new Date(a.fetched_at).getTime();
-      const tb = new Date(b.fetched_at).getTime();
-      return tb - ta;
-    });
+    return list.sort(desc<Issue>('fetched_at'));
   });
 
   function applyFilters(next: { repo: string; severity: string; mode?: string }): void {

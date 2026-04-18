@@ -5,6 +5,7 @@
   import FilterBar from '$lib/components/FilterBar.svelte';
   import PRTile from '$lib/components/PRTile.svelte';
   import { fetchPRs } from '$lib/api.js';
+  import { byUpdated } from '$lib/sort.js';
   import { prListRefresh, reviewingPRs } from '$lib/stores.js';
   import type { PR } from '$lib/types.js';
 
@@ -43,9 +44,7 @@
       }
       return true;
     });
-    return list.sort(
-      (a: PR, b: PR) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
-    );
+    return list.sort(byUpdated);
   });
 
   function applyFilters(next: { repo: string; severity: string; state?: string }): void {

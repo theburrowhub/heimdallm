@@ -7,7 +7,7 @@
   import StatsCards from '$lib/components/StatsCards.svelte';
   import { fetchIssues, fetchPRs, fetchStats } from '$lib/api.js';
   import { persistedBoolean, persistedString } from '$lib/persisted.js';
-  import { severityOrder } from '$lib/severity.js';
+  import { byPriority, byUpdated } from '$lib/sort.js';
   import { auth, issueListRefresh, prListRefresh } from '$lib/stores.js';
   import type { Issue, PR, Stats } from '$lib/types.js';
 
@@ -42,16 +42,6 @@
   const reviewsExpanded = persistedBoolean('dashboard.reviewsExpanded', true);
   const prsExpanded = persistedBoolean('dashboard.prsExpanded', true);
   const issuesExpanded = persistedBoolean('dashboard.issuesExpanded', true);
-
-  function byUpdated(a: PR, b: PR): number {
-    return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
-  }
-  function byPriority(a: PR, b: PR): number {
-    const d =
-      severityOrder(b.latest_review?.severity ?? '') -
-      severityOrder(a.latest_review?.severity ?? '');
-    return d !== 0 ? d : byUpdated(a, b);
-  }
 
   const sorter: (a: PR, b: PR) => number = $derived($sort === 'priority' ? byPriority : byUpdated);
 
