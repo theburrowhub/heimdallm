@@ -1,5 +1,5 @@
 import { get } from 'svelte/store';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { persistedBoolean, persistedString } from '../lib/persisted.js';
 
 beforeEach(() => {
@@ -45,5 +45,14 @@ describe('persistedString', () => {
     const s = persistedString('sk2', 'newest');
     s.set('priority');
     expect(localStorage.getItem('sk2')).toBe('priority');
+  });
+});
+
+describe('subscribe behavior', () => {
+  it('does not re-write the initial value on cold start', () => {
+    const spy = vi.spyOn(Storage.prototype, 'setItem');
+    persistedBoolean('coldStartKey', true);
+    expect(spy).not.toHaveBeenCalledWith('coldStartKey', 'true');
+    spy.mockRestore();
   });
 });
