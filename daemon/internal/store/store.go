@@ -53,14 +53,18 @@ CREATE TABLE IF NOT EXISTS configs (
 );
 
 CREATE TABLE IF NOT EXISTS agents (
-  id           TEXT PRIMARY KEY,
-  name         TEXT NOT NULL,
-  cli          TEXT NOT NULL DEFAULT 'claude',
-  prompt       TEXT NOT NULL DEFAULT '',
-  instructions TEXT NOT NULL DEFAULT '',
-  cli_flags    TEXT NOT NULL DEFAULT '',
-  is_default   INTEGER NOT NULL DEFAULT 0,
-  created_at DATETIME NOT NULL
+  id                     TEXT PRIMARY KEY,
+  name                   TEXT NOT NULL,
+  cli                    TEXT NOT NULL DEFAULT 'claude',
+  prompt                 TEXT NOT NULL DEFAULT '',
+  instructions           TEXT NOT NULL DEFAULT '',
+  cli_flags              TEXT NOT NULL DEFAULT '',
+  is_default             INTEGER NOT NULL DEFAULT 0,
+  created_at             DATETIME NOT NULL,
+  issue_prompt           TEXT NOT NULL DEFAULT '',
+  issue_instructions     TEXT NOT NULL DEFAULT '',
+  implement_prompt       TEXT NOT NULL DEFAULT '',
+  implement_instructions TEXT NOT NULL DEFAULT ''
 );
 
 -- Issue tracking pipeline (#24). The assignees and labels columns hold JSON
@@ -114,6 +118,8 @@ func Open(dsn string) (*Store, error) {
 	db.Exec("ALTER TABLE prs ADD COLUMN dismissed INTEGER NOT NULL DEFAULT 0")
 	db.Exec("ALTER TABLE agents ADD COLUMN issue_prompt TEXT NOT NULL DEFAULT ''")
 	db.Exec("ALTER TABLE agents ADD COLUMN issue_instructions TEXT NOT NULL DEFAULT ''")
+	db.Exec("ALTER TABLE agents ADD COLUMN implement_prompt TEXT NOT NULL DEFAULT ''")
+	db.Exec("ALTER TABLE agents ADD COLUMN implement_instructions TEXT NOT NULL DEFAULT ''")
 	return &Store{db: db}, nil
 }
 

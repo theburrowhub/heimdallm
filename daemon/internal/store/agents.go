@@ -11,6 +11,12 @@ import (
 //   - Prompt: full custom template with {placeholders} (advanced mode)
 //
 // CLIFlags: optional extra flags passed to the AI binary (e.g. --model claude-opus-4-6)
+//
+// Issue triage (IssuePrompt / IssueInstructions) and auto_implement
+// (ImplementPrompt / ImplementInstructions) follow the same prompt-vs-
+// instructions split as the PR review fields above. A non-empty *Prompt
+// field fully replaces the built-in template; *Instructions is injected
+// into the default template instead.
 type Agent struct {
 	ID           string    `json:"id"`
 	Name         string    `json:"name"`
@@ -24,9 +30,13 @@ type Agent struct {
 	// Issue triage prompt customization (mirrors Prompt/Instructions for PRs).
 	IssuePrompt       string `json:"issue_prompt"`       // full custom template for issue triage
 	IssueInstructions string `json:"issue_instructions"` // plain text injected into default issue template
+
+	// Auto_implement prompt customization (mirrors IssuePrompt/IssueInstructions for triage).
+	ImplementPrompt       string `json:"implement_prompt"`       // full custom template for code generation
+	ImplementInstructions string `json:"implement_instructions"` // plain text injected into default implement template
 }
 
-const agentColumns = "id, name, cli, prompt, instructions, cli_flags, is_default, created_at, issue_prompt, issue_instructions"
+const agentColumns = "id, name, cli, prompt, instructions, cli_flags, is_default, created_at, issue_prompt, issue_instructions, implement_prompt, implement_instructions"
 
 func (s *Store) ListAgents() ([]*Agent, error) {
 	rows, err := s.db.Query(
@@ -53,16 +63,18 @@ func (s *Store) UpsertAgent(a *Agent) error {
 		a.CreatedAt = time.Now().UTC()
 	}
 	_, err := s.db.Exec(`
-		INSERT INTO agents (id, name, cli, prompt, instructions, cli_flags, is_default, created_at, issue_prompt, issue_instructions)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO agents (id, name, cli, prompt, instructions, cli_flags, is_default, created_at, issue_prompt, issue_instructions, implement_prompt, implement_instructions)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			name=excluded.name, cli=excluded.cli, prompt=excluded.prompt,
 			instructions=excluded.instructions, cli_flags=excluded.cli_flags,
 			is_default=excluded.is_default,
-			issue_prompt=excluded.issue_prompt, issue_instructions=excluded.issue_instructions
+			issue_prompt=excluded.issue_prompt, issue_instructions=excluded.issue_instructions,
+			implement_prompt=excluded.implement_prompt, implement_instructions=excluded.implement_instructions
 	`, a.ID, a.Name, a.CLI, a.Prompt, a.Instructions, a.CLIFlags,
 		boolToInt(a.IsDefault), a.CreatedAt.UTC().Format(time.RFC3339),
 		a.IssuePrompt, a.IssueInstructions,
+		a.ImplementPrompt, a.ImplementInstructions,
 	)
 	if err != nil {
 		return fmt.Errorf("store: upsert agent: %w", err)
@@ -98,7 +110,8 @@ func scanAgent(s agentScanner) (*Agent, error) {
 	var createdAt string
 	if err := s.Scan(&a.ID, &a.Name, &a.CLI, &a.Prompt, &a.Instructions,
 		&a.CLIFlags, &isDefault, &createdAt,
-		&a.IssuePrompt, &a.IssueInstructions); err != nil {
+		&a.IssuePrompt, &a.IssueInstructions,
+		&a.ImplementPrompt, &a.ImplementInstructions); err != nil {
 		return nil, err
 	}
 	a.IsDefault = isDefault == 1

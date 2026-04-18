@@ -111,3 +111,31 @@ func TestRetentionPurge(t *testing.T) {
 		t.Errorf("expected 0 reviews after purge, got %d", len(reviews))
 	}
 }
+
+func TestStore_AgentImplementFieldsRoundTrip(t *testing.T) {
+	s := newTestStore(t)
+
+	in := &store.Agent{
+		ID:                    "go-impl",
+		Name:                  "Go implementer",
+		CLI:                   "claude",
+		ImplementPrompt:       "custom full template for implementation",
+		ImplementInstructions: "use go 1.22 generics where helpful",
+	}
+	if err := s.UpsertAgent(in); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	got, err := s.ListAgents()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1 agent, got %d", len(got))
+	}
+	if got[0].ImplementPrompt != in.ImplementPrompt {
+		t.Errorf("ImplementPrompt = %q, want %q", got[0].ImplementPrompt, in.ImplementPrompt)
+	}
+	if got[0].ImplementInstructions != in.ImplementInstructions {
+		t.Errorf("ImplementInstructions = %q, want %q", got[0].ImplementInstructions, in.ImplementInstructions)
+	}
+}
