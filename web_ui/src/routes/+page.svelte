@@ -15,16 +15,17 @@
   let issues: Issue[] = $state([]);
   let stats: Stats | null = $state(null);
   let err: string | null = $state(null);
-  let loading = $state(true);
+  let prsLoading = $state(true);
+  let issuesLoading = $state(true);
 
   $effect(() => {
     void $prListRefresh;
     if (!browser) return;
-    loading = true;
+    prsLoading = true;
     fetchPRs()
       .then((r) => (prs = r))
       .catch((e: unknown) => (err = e instanceof Error ? e.message : String(e)))
-      .finally(() => (loading = false));
+      .finally(() => (prsLoading = false));
     fetchStats()
       .then((r) => (stats = r))
       .catch(() => {});
@@ -33,10 +34,14 @@
   $effect(() => {
     void $issueListRefresh;
     if (!browser) return;
+    issuesLoading = true;
     fetchIssues()
       .then((r) => (issues = r))
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => (issuesLoading = false));
   });
+
+  const loading = $derived(prsLoading || issuesLoading);
 
   const sort = persistedString('dashboard.sort', 'priority');
   const reviewsExpanded = persistedBoolean('dashboard.reviewsExpanded', true);
