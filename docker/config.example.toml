@@ -69,6 +69,9 @@ review_mode = "single"   # "single" or "multi"
 # primary = "codex"
 # review_mode = "multi"
 # local_dir = "/repos/repo1"    # mount from host via docker-compose volumes
+# prompt          = "pr-review-agent-id"    # Agent profile for PR reviews
+# issue_prompt    = "issue-triage-agent-id" # Agent profile for issue triage
+# implement_prompt = "impl-agent-id"        # Agent profile for auto_implement code-generation prompt
 
 [retention]
 max_days = 90
