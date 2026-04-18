@@ -2,7 +2,7 @@
   import { browser } from '$app/environment';
   import { goto } from '$app/navigation';
   import { page } from '$app/stores';
-  import ReviewCard from '$lib/components/ReviewCard.svelte';
+  import PRReviewCard from '$lib/components/PRReviewCard.svelte';
   import { dismissPR, fetchPR, triggerReview, undismissPR } from '$lib/api.js';
   import { prListRefresh, reviewingPRs } from '$lib/stores.js';
   import type { PR, Review } from '$lib/types.js';
@@ -124,7 +124,7 @@
         <p class="text-sm text-gray-500">No reviews yet.</p>
       {:else}
         {#each reviews as r (r.id)}
-          <ReviewCard review={r} variant="pr" />
+          <PRReviewCard review={r} />
         {/each}
       {/if}
     </section>

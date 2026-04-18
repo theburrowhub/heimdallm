@@ -2,7 +2,7 @@
   import { browser } from '$app/environment';
   import { goto } from '$app/navigation';
   import { page } from '$app/stores';
-  import ReviewCard from '$lib/components/ReviewCard.svelte';
+  import IssueReviewCard from '$lib/components/IssueReviewCard.svelte';
   import { dismissIssue, fetchIssue, triggerIssueReview, undismissIssue } from '$lib/api.js';
   import { issueListRefresh, reviewingIssues } from '$lib/stores.js';
   import type { Issue, IssueReview } from '$lib/types.js';
@@ -156,7 +156,7 @@
         <p class="text-sm text-gray-500">No reviews yet.</p>
       {:else}
         {#each reviews as r (r.id)}
-          <ReviewCard review={r} variant="issue" />
+          <IssueReviewCard review={r} />
         {/each}
       {/if}
     </section>
