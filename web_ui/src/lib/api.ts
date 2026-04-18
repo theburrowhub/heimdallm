@@ -9,7 +9,6 @@ import type {
   PR,
   PRDetail,
   Review,
-  ReviewFinding,
   Stats
 } from './types.js';
 
@@ -67,13 +66,13 @@ function safeParse<T>(raw: string, fallback: T): T {
 function parseReview(raw: unknown): Review {
   const r = { ...(raw as Record<string, unknown>) };
   if (typeof r.issues === 'string') {
-    r.issues = r.issues ? safeParse<ReviewFinding[]>(r.issues, []) : [];
+    r.issues = r.issues ? safeParse<unknown[]>(r.issues, []) : [];
   }
-  r.issues ??= [];
+  if (!Array.isArray(r.issues)) r.issues = [];
   if (typeof r.suggestions === 'string') {
-    r.suggestions = r.suggestions ? safeParse<string[]>(r.suggestions, []) : [];
+    r.suggestions = r.suggestions ? safeParse<unknown[]>(r.suggestions, []) : [];
   }
-  r.suggestions ??= [];
+  if (!Array.isArray(r.suggestions)) r.suggestions = [];
   return r as unknown as Review;
 }
 
@@ -88,11 +87,13 @@ function parseIssueReview(raw: unknown): IssueReview {
   if (typeof r.triage === 'string') {
     r.triage = r.triage ? safeParse<IssueTriage>(r.triage, {}) : {};
   }
-  r.triage ??= {};
-  if (typeof r.suggestions === 'string') {
-    r.suggestions = r.suggestions ? safeParse<string[]>(r.suggestions, []) : [];
+  if (r.triage == null || typeof r.triage !== 'object' || Array.isArray(r.triage)) {
+    r.triage = {};
   }
-  r.suggestions ??= [];
+  if (typeof r.suggestions === 'string') {
+    r.suggestions = r.suggestions ? safeParse<unknown[]>(r.suggestions, []) : [];
+  }
+  if (!Array.isArray(r.suggestions)) r.suggestions = [];
   return r as unknown as IssueReview;
 }
 
@@ -101,11 +102,11 @@ function parseIssue(raw: unknown): Issue {
   if (typeof i.assignees === 'string') {
     i.assignees = i.assignees ? safeParse<string[]>(i.assignees, []) : [];
   }
-  i.assignees ??= [];
+  if (!Array.isArray(i.assignees)) i.assignees = [];
   if (typeof i.labels === 'string') {
     i.labels = i.labels ? safeParse<string[]>(i.labels, []) : [];
   }
-  i.labels ??= [];
+  if (!Array.isArray(i.labels)) i.labels = [];
   if (i.latest_review) i.latest_review = parseIssueReview(i.latest_review);
   return i as unknown as Issue;
 }

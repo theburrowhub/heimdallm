@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   ApiError,
   fetchIssue,
+  fetchIssues,
   fetchPR,
   fetchPRs,
   fetchStats,
@@ -177,6 +178,51 @@ describe('api.ts', () => {
     );
     const stats = await fetchStats();
     expect(stats.by_severity.HIGH).toBe(4);
+  });
+
+  it('fetchIssues degrades gracefully when labels is not an array or string', async () => {
+    fetchMock.mockResolvedValue(
+      okJson([
+        { id: 1, labels: null, assignees: 42 },
+        { id: 2, labels: { not: 'an array' }, assignees: [] }
+      ])
+    );
+    const issues = await fetchIssues();
+    expect(issues[0].labels).toEqual([]);
+    expect(issues[0].assignees).toEqual([]);
+    expect(issues[1].labels).toEqual([]);
+    expect(issues[1].assignees).toEqual([]);
+  });
+
+  it('fetchIssue degrades gracefully when triage is not a plain object', async () => {
+    fetchMock.mockResolvedValue(
+      okJson({
+        issue: { id: 1, labels: [], assignees: [] },
+        reviews: [
+          { id: 9, triage: null, suggestions: null },
+          { id: 10, triage: ['array', 'not', 'object'], suggestions: 'not-json-or-array' }
+        ]
+      })
+    );
+    const detail = await fetchIssue(1);
+    expect(detail.reviews[0].triage).toEqual({});
+    expect(detail.reviews[0].suggestions).toEqual([]);
+    expect(detail.reviews[1].triage).toEqual({});
+    expect(detail.reviews[1].suggestions).toEqual([]);
+  });
+
+  it('fetchPR degrades gracefully when review issues/suggestions are malformed', async () => {
+    fetchMock.mockResolvedValue(
+      okJson({
+        pr: { id: 1, latest_review: { id: 9, issues: null, suggestions: 42 } },
+        reviews: [{ id: 9, issues: {}, suggestions: null }]
+      })
+    );
+    const detail = await fetchPR(1);
+    expect(detail.pr.latest_review!.issues).toEqual([]);
+    expect(detail.pr.latest_review!.suggestions).toEqual([]);
+    expect(detail.reviews[0].issues).toEqual([]);
+    expect(detail.reviews[0].suggestions).toEqual([]);
   });
 
   it('fetchIssue parses stringified assignees/labels/triage/suggestions', async () => {
