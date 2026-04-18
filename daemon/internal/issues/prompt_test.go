@@ -92,6 +92,19 @@ func TestBuildImplementPromptWithProfile_InstructionsInjectedIntoDefault(t *test
 	if !strings.Contains(got, "Never add new deps without justification") {
 		t.Errorf("custom instructions truncated: %q", got)
 	}
+
+	// Position guard: the injection must land BEFORE the "leave the tree
+	// untouched" escape hatch — that escape hatch is the no-op sentinel the
+	// outer pipeline relies on, and a maintainer's style nudge must not be
+	// able to move past it.
+	instrIdx := strings.Index(got, "Use go 1.22 generics")
+	escapeIdx := strings.Index(got, "leave the tree untouched")
+	if instrIdx == -1 || escapeIdx == -1 {
+		t.Fatalf("test markers missing — instrIdx=%d escapeIdx=%d", instrIdx, escapeIdx)
+	}
+	if instrIdx > escapeIdx {
+		t.Errorf("custom instructions (idx=%d) must appear before the escape hatch (idx=%d)", instrIdx, escapeIdx)
+	}
 }
 
 func TestBuildImplementPromptWithProfile_TemplateWinsOverInstructions(t *testing.T) {
