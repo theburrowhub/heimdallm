@@ -2,23 +2,19 @@
   interface Filters {
     repo: string;
     severity: string;
-    // One of state (PRs) or mode (issues).
-    state?: string;
-    mode?: string;
+    mode: string;
   }
 
   interface Props {
     filters: Filters;
-    repos: string[]; // unique repos available in current dataset
-    variant: 'pr' | 'issue';
+    repos: string[];
     onChange: (next: Filters) => void;
   }
 
-  let { filters, repos, variant, onChange }: Props = $props();
+  let { filters, repos, onChange }: Props = $props();
 
   const severities = ['any', 'critical', 'high', 'medium', 'low'];
-  const prStates = ['open', 'closed', 'all'];
-  const issueModes = ['all', 'auto_implement', 'review_only'];
+  const modes = ['all', 'auto_implement', 'review_only'];
 
   function update(field: keyof Filters, value: string): void {
     onChange({ ...filters, [field]: value });
@@ -55,31 +51,16 @@
     </select>
   </label>
 
-  {#if variant === 'pr'}
-    <label class="flex items-center gap-1 text-xs text-gray-600">
-      <span>State:</span>
-      <select
-        class="rounded border border-gray-300 bg-white px-2 py-1 text-xs"
-        value={filters.state ?? 'open'}
-        onchange={(e) => update('state', (e.currentTarget as HTMLSelectElement).value)}
-      >
-        {#each prStates as s (s)}
-          <option value={s}>{s}</option>
-        {/each}
-      </select>
-    </label>
-  {:else}
-    <label class="flex items-center gap-1 text-xs text-gray-600">
-      <span>Mode:</span>
-      <select
-        class="rounded border border-gray-300 bg-white px-2 py-1 text-xs"
-        value={filters.mode ?? 'all'}
-        onchange={(e) => update('mode', (e.currentTarget as HTMLSelectElement).value)}
-      >
-        {#each issueModes as m (m)}
-          <option value={m}>{m}</option>
-        {/each}
-      </select>
-    </label>
-  {/if}
+  <label class="flex items-center gap-1 text-xs text-gray-600">
+    <span>Mode:</span>
+    <select
+      class="rounded border border-gray-300 bg-white px-2 py-1 text-xs"
+      value={filters.mode ?? 'all'}
+      onchange={(e) => update('mode', (e.currentTarget as HTMLSelectElement).value)}
+    >
+      {#each modes as m (m)}
+        <option value={m}>{m}</option>
+      {/each}
+    </select>
+  </label>
 </div>

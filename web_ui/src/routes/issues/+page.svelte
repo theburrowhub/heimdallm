@@ -2,7 +2,7 @@
   import { browser } from '$app/environment';
   import { goto } from '$app/navigation';
   import { page } from '$app/stores';
-  import FilterBar from '$lib/components/FilterBar.svelte';
+  import IssueFilterBar from '$lib/components/IssueFilterBar.svelte';
   import IssueTile from '$lib/components/IssueTile.svelte';
   import { fetchIssues } from '$lib/api.js';
   import { filterIssues } from '$lib/filters.js';
@@ -54,7 +54,7 @@
   {/if}
 </section>
 
-<FilterBar filters={{ repo, severity, mode }} {repos} variant="issue" onChange={applyFilters} />
+<IssueFilterBar filters={{ repo, severity, mode }} {repos} onChange={applyFilters} />
 
 {#if err}
   <p class="text-sm text-red-600">Could not load issues: {err}</p>

@@ -2,7 +2,7 @@
   import { browser } from '$app/environment';
   import { goto } from '$app/navigation';
   import { page } from '$app/stores';
-  import FilterBar from '$lib/components/FilterBar.svelte';
+  import PRFilterBar from '$lib/components/PRFilterBar.svelte';
   import PRTile from '$lib/components/PRTile.svelte';
   import { fetchPRs } from '$lib/api.js';
   import { filterPRs } from '$lib/filters.js';
@@ -56,12 +56,7 @@
   {/if}
 </section>
 
-<FilterBar
-  filters={{ repo, severity, state: prState }}
-  {repos}
-  variant="pr"
-  onChange={applyFilters}
-/>
+<PRFilterBar filters={{ repo, severity, state: prState }} {repos} onChange={applyFilters} />
 
 {#if err}
   <p class="text-sm text-red-600">Could not load PRs: {err}</p>
