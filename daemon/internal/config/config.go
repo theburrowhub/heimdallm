@@ -191,6 +191,7 @@ type AIConfig struct {
 	ReviewMode string                      `toml:"review_mode"` // "single" | "multi"
 	Agents     map[string]CLIAgentConfig   `toml:"agents"`      // keyed by CLI name
 	Repos      map[string]RepoAI           `toml:"repos"`
+	PRMetadata PRMetadataConfig            `toml:"pr_metadata"` // global PR creation defaults
 }
 
 type RepoAI struct {
@@ -208,6 +209,22 @@ type RepoAI struct {
 	Fallback    string `toml:"fallback"`
 	ReviewMode  string `toml:"review_mode"` // "" = inherit global
 	LocalDir    string `toml:"local_dir"`   // local repo path for full-repo analysis
+
+	// PR creation metadata (applied by auto_implement after CreatePR).
+	PRReviewers []string `toml:"pr_reviewers"` // GitHub logins to request review from
+	PRAssignee  string   `toml:"pr_assignee"`  // GitHub login to assign the PR to
+	PRLabels    []string `toml:"pr_labels"`    // labels to add to the PR
+	PRDraft     bool     `toml:"pr_draft"`     // create as draft PR
+}
+
+// PRMetadataConfig holds global defaults for PR creation metadata,
+// used as fallback when per-repo config is not set.
+// Only Reviewers and Labels have global defaults — Assignee and Draft are
+// per-repo only because assignee is team-specific and draft mode depends
+// on the repo's workflow (some repos auto-merge non-drafts).
+type PRMetadataConfig struct {
+	Reviewers []string `toml:"reviewers"`
+	Labels    []string `toml:"labels"`
 }
 
 type RetentionConfig struct {
@@ -227,10 +244,20 @@ func (c *Config) AIForRepo(repo string) RepoAI {
 			if r.ReviewMode == "" {
 				r.ReviewMode = c.AI.ReviewMode
 			}
+			// Fallback PR metadata to global defaults when repo-level is empty
+			if len(r.PRReviewers) == 0 {
+				r.PRReviewers = c.AI.PRMetadata.Reviewers
+			}
+			if len(r.PRLabels) == 0 {
+				r.PRLabels = c.AI.PRMetadata.Labels
+			}
 			return r
 		}
 	}
-	return RepoAI{Primary: c.AI.Primary, Fallback: c.AI.Fallback, ReviewMode: c.AI.ReviewMode}
+	return RepoAI{
+		Primary: c.AI.Primary, Fallback: c.AI.Fallback, ReviewMode: c.AI.ReviewMode,
+		PRReviewers: c.AI.PRMetadata.Reviewers, PRLabels: c.AI.PRMetadata.Labels,
+	}
 }
 
 // AgentConfigFor returns the CLIAgentConfig for a given CLI name, or an empty struct.
@@ -329,6 +356,17 @@ func (c *Config) applyEnvOverrides() {
 		c.GitHub.DiscoveryInterval = v
 	}
 	c.applyIssueTrackingEnv()
+	c.applyPRMetadataEnv()
+}
+
+// applyPRMetadataEnv maps HEIMDALLM_PR_* env vars into PRMetadataConfig globals.
+func (c *Config) applyPRMetadataEnv() {
+	if list, ok := csvEnv("HEIMDALLM_PR_REVIEWERS"); ok {
+		c.AI.PRMetadata.Reviewers = list
+	}
+	if list, ok := csvEnv("HEIMDALLM_PR_LABELS"); ok {
+		c.AI.PRMetadata.Labels = list
+	}
 }
 
 // applyIssueTrackingEnv maps HEIMDALLM_ISSUE_* env vars into IssueTrackingConfig.

@@ -63,6 +63,11 @@ type fakeGH struct {
 	createPRCalls    []prCall
 	createPRNumber   int
 	createPRErr      error
+
+	// PR metadata tracking
+	reviewersCalls [][]string
+	labelsCalls    [][]string
+	assigneesCalls [][]string
 }
 
 type postCall struct {
@@ -73,6 +78,7 @@ type postCall struct {
 
 type prCall struct {
 	Repo, Title, Body, Head, Base string
+	Draft                         bool
 }
 
 func (f *fakeGH) PostComment(repo string, number int, body string) error {
@@ -97,9 +103,9 @@ func (f *fakeGH) GetDefaultBranch(repo string) (string, error) {
 	return f.defaultBranch, nil
 }
 
-func (f *fakeGH) CreatePR(repo, title, body, head, base string) (int, error) {
+func (f *fakeGH) CreatePR(repo, title, body, head, base string, draft bool) (int, error) {
 	f.createPRCalls = append(f.createPRCalls, prCall{
-		Repo: repo, Title: title, Body: body, Head: head, Base: base,
+		Repo: repo, Title: title, Body: body, Head: head, Base: base, Draft: draft,
 	})
 	if f.createPRErr != nil {
 		return 0, f.createPRErr
@@ -108,6 +114,19 @@ func (f *fakeGH) CreatePR(repo, title, body, head, base string) (int, error) {
 		return 999, nil
 	}
 	return f.createPRNumber, nil
+}
+
+func (f *fakeGH) SetPRReviewers(repo string, prNumber int, reviewers []string) error {
+	f.reviewersCalls = append(f.reviewersCalls, reviewers)
+	return nil
+}
+func (f *fakeGH) AddLabels(repo string, number int, labels []string) error {
+	f.labelsCalls = append(f.labelsCalls, labels)
+	return nil
+}
+func (f *fakeGH) SetAssignees(repo string, number int, assignees []string) error {
+	f.assigneesCalls = append(f.assigneesCalls, assignees)
+	return nil
 }
 
 type fakeExec struct {
@@ -936,6 +955,81 @@ func TestPipeline_NilIssueIsRejected(t *testing.T) {
 	p := issues.New(&fakeStore{}, &fakeGH{}, &fakeExec{}, nil, nil, nil)
 	if _, err := p.Run(context.Background(), nil, issues.RunOptions{}); err == nil {
 		t.Fatal("expected error for nil issue")
+	}
+}
+
+func TestAutoImplement_AppliesPRMetadata(t *testing.T) {
+	gh := &fakeGH{defaultBranch: "main", createPRNumber: 77}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("implement done")}
+	git := &fakeGit{hasChanges: true}
+	broker := &fakeBroker{}
+	p := issues.New(&fakeStore{}, gh, exec, git, broker, nil)
+
+	opts := issues.RunOptions{
+		Primary:     "claude",
+		ExecOpts:    executor.ExecOptions{WorkDir: "/tmp/repo"},
+		GitHubToken: "tok",
+		PRReviewers: []string{"alice", "bob"},
+		PRAssignee:  "charlie",
+		PRLabels:    []string{"auto-generated", "heimdallm"},
+		PRDraft:     true,
+	}
+
+	rev, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), opts)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rev.PRCreated != 77 {
+		t.Errorf("pr_created = %d, want 77", rev.PRCreated)
+	}
+
+	// Verify draft was forwarded to CreatePR
+	if len(gh.createPRCalls) != 1 {
+		t.Fatalf("expected 1 CreatePR call, got %d", len(gh.createPRCalls))
+	}
+	if !gh.createPRCalls[0].Draft {
+		t.Error("CreatePR draft should be true")
+	}
+
+	// Verify metadata was applied
+	if len(gh.reviewersCalls) != 1 || !stringsEqual(gh.reviewersCalls[0], []string{"alice", "bob"}) {
+		t.Errorf("reviewers = %v, want [alice bob]", gh.reviewersCalls)
+	}
+	if len(gh.labelsCalls) != 1 || !stringsEqual(gh.labelsCalls[0], []string{"auto-generated", "heimdallm"}) {
+		t.Errorf("labels = %v, want [auto-generated heimdallm]", gh.labelsCalls)
+	}
+	if len(gh.assigneesCalls) != 1 || !stringsEqual(gh.assigneesCalls[0], []string{"charlie"}) {
+		t.Errorf("assignees = %v, want [charlie]", gh.assigneesCalls)
+	}
+}
+
+func TestAutoImplement_SkipsEmptyMetadata(t *testing.T) {
+	gh := &fakeGH{defaultBranch: "main", createPRNumber: 88}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("implement done")}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(&fakeStore{}, gh, exec, git, &fakeBroker{}, nil)
+
+	opts := issues.RunOptions{
+		Primary:     "claude",
+		ExecOpts:    executor.ExecOptions{WorkDir: "/tmp/repo"},
+		GitHubToken: "tok",
+		// No PR metadata set
+	}
+
+	_, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), opts)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// No metadata calls should have been made
+	if len(gh.reviewersCalls) != 0 {
+		t.Errorf("expected 0 reviewers calls, got %d", len(gh.reviewersCalls))
+	}
+	if len(gh.labelsCalls) != 0 {
+		t.Errorf("expected 0 labels calls, got %d", len(gh.labelsCalls))
+	}
+	if len(gh.assigneesCalls) != 0 {
+		t.Errorf("expected 0 assignees calls, got %d", len(gh.assigneesCalls))
 	}
 }
 

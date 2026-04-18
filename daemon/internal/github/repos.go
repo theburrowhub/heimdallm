@@ -50,7 +50,7 @@ func (c *Client) GetDefaultBranch(repo string) (string, error) {
 // Uses the shared doWithBody helper so auth, Accept, and API-version headers
 // are set in one place. That also means any retry/rate-limit logic added to
 // the helper in the future applies uniformly to PR creation.
-func (c *Client) CreatePR(repo, title, body, head, base string) (int, error) {
+func (c *Client) CreatePR(repo, title, body, head, base string, draft bool) (int, error) {
 	if repo == "" || title == "" || head == "" || base == "" {
 		return 0, fmt.Errorf("github: CreatePR: repo/title/head/base are all required")
 	}
@@ -59,6 +59,7 @@ func (c *Client) CreatePR(repo, title, body, head, base string) (int, error) {
 		"body":  body,
 		"head":  head,
 		"base":  base,
+		"draft": draft,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("github: marshal pr payload: %w", err)
