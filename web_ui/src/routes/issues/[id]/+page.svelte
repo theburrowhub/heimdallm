@@ -33,7 +33,11 @@
   const reviewing = $derived($reviewingIssues.has(id));
 
   const autoImplementPR: number | undefined = $derived(
-    reviews.find((r) => r.action_taken === 'auto_implement' && r.pr_created > 0)?.pr_created
+    reviews
+      .filter((r) => r.action_taken === 'auto_implement' && r.pr_created > 0)
+      .slice()
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0]
+      ?.pr_created
   );
 
   async function onReview(): Promise<void> {
