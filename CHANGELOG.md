@@ -2,6 +2,19 @@
 
 > **Note:** Versions 0.1.0–0.1.3 were originally published under [`theburrowhub/heimdallr-docker`](https://github.com/theburrowhub/heimdallr-docker) (now archived). The project was unified into this repository and renamed to Heimdallm in v0.1.1.
 
+## [0.1.5](https://github.com/theburrowhub/heimdallm/compare/v0.1.4...v0.1.5) (2026-04-18)
+
+
+### Features
+
+* **issues:** configurable prompts for auto_implement ([#55](https://github.com/theburrowhub/heimdallm/issues/55)) ([#63](https://github.com/theburrowhub/heimdallm/issues/63)) ([28b6a60](https://github.com/theburrowhub/heimdallm/commit/28b6a6005404e8ab106552443c59f76720b3e90b))
+* **issues:** configurable prompts for issue triage ([#53](https://github.com/theburrowhub/heimdallm/issues/53)) ([#57](https://github.com/theburrowhub/heimdallm/issues/57)) ([ba2ea6d](https://github.com/theburrowhub/heimdallm/commit/ba2ea6d7e5bddc493810ccd72c1c8d1202a5f757))
+
+
+### Bug Fixes
+
+* **executor:** add opencode CLI support in buildArgs ([#62](https://github.com/theburrowhub/heimdallm/issues/62)) ([8ef0a7b](https://github.com/theburrowhub/heimdallm/commit/8ef0a7b90c72db15ffe544debea1bbd9b3081102))
+
 ## [0.1.4](https://github.com/theburrowhub/heimdallm/compare/v0.1.3...v0.1.4) (2026-04-17)
 
 
