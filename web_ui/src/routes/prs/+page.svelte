@@ -37,7 +37,7 @@
   const filtered = $derived.by(() => {
     const list = prs.filter((p: PR) => {
       if (repo && p.repo !== repo) return false;
-      if (prState !== 'all' && p.state !== prState) return false;
+      if (prState !== 'all' && p.state?.toLowerCase() !== prState) return false;
       if (severity !== 'any') {
         const s = p.latest_review?.severity?.toLowerCase() ?? '';
         if (s !== severity) return false;
