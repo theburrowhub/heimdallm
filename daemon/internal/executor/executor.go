@@ -48,15 +48,15 @@ type ExecOptions struct {
 	WorkDir string
 
 	// Claude-specific flags
-	Effort               string // --effort low|medium|high|max
-	PermissionMode       string // --permission-mode <value> — must pass ValidatePermissionMode (bypassPermissions is blocked)
-	Bare                 bool   // --bare
+	Effort         string // --effort low|medium|high|max
+	PermissionMode string // --permission-mode <value> — must pass ValidatePermissionMode (bypassPermissions is blocked)
+	Bare           bool   // --bare
 	// DangerouslySkipPerms enables --dangerously-skip-permissions.
 	// SECURITY (M-5): This field MUST NOT be exposed via the HTTP API or
 	// deserialized from agent JSON requests. It is only set from config.toml
 	// (CLIAgentConfig.DangerouslySkipPerms) which requires local file access.
-	DangerouslySkipPerms bool   // --dangerously-skip-permissions
-	NoSessionPersistence bool   // --no-session-persistence
+	DangerouslySkipPerms bool // --dangerously-skip-permissions
+	NoSessionPersistence bool // --no-session-persistence
 }
 
 // Executor runs AI CLI tools for code review.
@@ -111,9 +111,9 @@ var allowedPermissionModes = map[string]struct{}{
 
 // allowedApprovalModes is the allowlist for the codex --approval-mode flag.
 var allowedApprovalModes = map[string]struct{}{
-	"auto-edit":  {},
-	"full-auto":  {},
-	"suggest":    {},
+	"auto-edit": {},
+	"full-auto": {},
+	"suggest":   {},
 }
 
 // ValidatePermissionMode returns an error if mode is not in the allowlist.
@@ -247,17 +247,17 @@ var dangerousPaths = []string{
 // working directory. These directories commonly contain private keys, API tokens,
 // and other secrets that must not be sent to an AI provider.
 var dangerousSegments = []string{
-	"/.ssh",            // SSH private keys, host keys, authorized_keys
-	"/.gnupg",          // GPG keys, trust database
-	"/.aws",            // AWS access keys, credentials files
+	"/.ssh",              // SSH private keys, host keys, authorized_keys
+	"/.gnupg",            // GPG keys, trust database
+	"/.aws",              // AWS access keys, credentials files
 	"/.config/heimdallm", // Heimdallm daemon config (auth tokens, etc)
-	"/.kube",           // Kubernetes credentials (service account tokens, certs)
-	"/.docker",         // Docker registry auth (config.json with credentials)
-	"/.netrc",          // FTP/HTTP plaintext credentials
-	"/.npmrc",          // npm publish tokens
-	"/.pypirc",         // PyPI publish tokens
-	"/.gem",            // RubyGems credentials
-	"/.config/gcloud",  // Google Cloud credentials (service accounts, OAuth tokens)
+	"/.kube",             // Kubernetes credentials (service account tokens, certs)
+	"/.docker",           // Docker registry auth (config.json with credentials)
+	"/.netrc",            // FTP/HTTP plaintext credentials
+	"/.npmrc",            // npm publish tokens
+	"/.pypirc",           // PyPI publish tokens
+	"/.gem",              // RubyGems credentials
+	"/.config/gcloud",    // Google Cloud credentials (service accounts, OAuth tokens)
 }
 
 // ValidateWorkDir checks that dir is a safe working directory for the AI CLI.
@@ -393,6 +393,13 @@ func buildArgs(cli string, opts ExecOptions) []string {
 	var args []string
 
 	switch cli {
+	case "opencode":
+		// opencode uses "run" subcommand; reads prompt from stdin when no
+		// positional message args are given.
+		args = append(args, "run")
+		if opts.Model != "" {
+			args = append(args, "-m", opts.Model)
+		}
 	case "codex":
 		if opts.Model != "" {
 			args = append(args, "--model", opts.Model)
