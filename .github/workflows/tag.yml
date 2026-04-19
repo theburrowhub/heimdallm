@@ -2,7 +2,12 @@ name: Tag release
 
 # Manual trigger from the GitHub Actions UI.
 # Analyzes conventional commits since the last tag and bumps the version
-# accordingly, then pushes the new tag — which triggers build.yml.
+# accordingly, then pushes the new tag.
+#
+# NOTE: release-please (release.yml) is the primary release mechanism and
+# handles tags, builds, and publishing automatically. This workflow is a
+# manual escape hatch — the tag it creates will NOT trigger build jobs
+# (GITHUB_TOKEN limitation). Use only for emergency re-tags or testing.
 on:
   workflow_dispatch:
     inputs:
