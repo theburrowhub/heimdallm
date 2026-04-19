@@ -64,6 +64,11 @@ review_mode = "single"   # "single" or "multi"
 # [ai.agents.opencode]
 # model = "anthropic/claude-sonnet-4"
 
+# Global PR creation metadata defaults (used by auto_implement when per-repo is not set)
+# [ai.pr_metadata]
+# reviewers = ["muriano", "ivanmunozruiz"]
+# labels = ["auto-generated", "heimdallm"]
+
 # Per-repo AI overrides (optional)
 # [ai.repos."org/repo1"]
 # primary = "codex"
@@ -72,6 +77,10 @@ review_mode = "single"   # "single" or "multi"
 # prompt          = "pr-review-agent-id"    # Agent profile for PR reviews
 # issue_prompt    = "issue-triage-agent-id" # Agent profile for issue triage
 # implement_prompt = "impl-agent-id"        # Agent profile for auto_implement code-generation prompt
+# pr_reviewers = ["reviewer1"]  # override global for this repo
+# pr_assignee = "assignee1"
+# pr_labels = ["team-x"]
+# pr_draft = false
 
 [retention]
 max_days = 90

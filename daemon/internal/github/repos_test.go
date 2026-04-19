@@ -91,7 +91,7 @@ func TestCreatePR_Success(t *testing.T) {
 	defer srv.Close()
 
 	client := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
-	num, err := client.CreatePR("org/repo", "feat: fix", "Closes #7", "heimdallm/issue-7", "main")
+	num, err := client.CreatePR("org/repo", "feat: fix", "Closes #7", "heimdallm/issue-7", "main", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -114,6 +114,30 @@ func TestCreatePR_Success(t *testing.T) {
 	}
 }
 
+func TestCreatePR_Draft(t *testing.T) {
+	var capturedBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &capturedBody)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{"number": 99})
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	num, err := client.CreatePR("org/repo", "draft PR", "body", "branch", "main", true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if num != 99 {
+		t.Errorf("got %d, want 99", num)
+	}
+	draft, ok := capturedBody["draft"].(bool)
+	if !ok || !draft {
+		t.Errorf("expected draft=true in request body, got %v", capturedBody["draft"])
+	}
+}
+
 func TestCreatePR_MissingFields(t *testing.T) {
 	client := gh.NewClient("fake")
 	cases := []struct{ repo, title, head, base string }{
@@ -123,7 +147,7 @@ func TestCreatePR_MissingFields(t *testing.T) {
 		{"org/repo", "t", "h", ""},
 	}
 	for _, c := range cases {
-		if _, err := client.CreatePR(c.repo, c.title, "body", c.head, c.base); err == nil {
+		if _, err := client.CreatePR(c.repo, c.title, "body", c.head, c.base, false); err == nil {
 			t.Errorf("expected error for %+v", c)
 		}
 	}
@@ -136,7 +160,7 @@ func TestCreatePR_HTTPError(t *testing.T) {
 	defer srv.Close()
 
 	client := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
-	_, err := client.CreatePR("org/repo", "t", "b", "h", "m")
+	_, err := client.CreatePR("org/repo", "t", "b", "h", "m", false)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -155,7 +179,133 @@ func TestCreatePR_MissingNumberInResponse(t *testing.T) {
 	defer srv.Close()
 
 	client := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
-	if _, err := client.CreatePR("org/repo", "t", "b", "h", "m"); err == nil {
+	if _, err := client.CreatePR("org/repo", "t", "b", "h", "m", false); err == nil {
 		t.Fatal("expected error when response has no number")
+	}
+}
+
+// ── SetPRReviewers ────────────────────────────────────────────────────────────
+
+func TestSetPRReviewers(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/repos/org/repo/pulls/42/requested_reviewers" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		var body map[string][]string
+		json.NewDecoder(r.Body).Decode(&body)
+		if len(body["reviewers"]) != 2 {
+			t.Errorf("expected 2 reviewers, got %v", body["reviewers"])
+		}
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte("{}"))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	err := c.SetPRReviewers("org/repo", 42, []string{"user1", "user2"})
+	if err != nil {
+		t.Fatalf("SetPRReviewers: %v", err)
+	}
+}
+
+func TestSetPRReviewers_Noop(t *testing.T) {
+	c := gh.NewClient("fake-token")
+	// Should return nil without making any HTTP call
+	if err := c.SetPRReviewers("org/repo", 42, nil); err != nil {
+		t.Fatalf("expected nil for empty reviewers, got: %v", err)
+	}
+}
+
+func TestSetPRReviewers_Error(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		w.Write([]byte(`{"message":"Validation Failed"}`))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	err := c.SetPRReviewers("org/repo", 42, []string{"nonexistent"})
+	if err == nil {
+		t.Fatal("expected error for 422 response")
+	}
+}
+
+// ── AddLabels ─────────────────────────────────────────────────────────────────
+
+func TestAddLabels(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/repos/org/repo/issues/42/labels" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("[]"))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	err := c.AddLabels("org/repo", 42, []string{"bug", "auto-generated"})
+	if err != nil {
+		t.Fatalf("AddLabels: %v", err)
+	}
+}
+
+func TestAddLabels_Noop(t *testing.T) {
+	c := gh.NewClient("fake-token")
+	if err := c.AddLabels("org/repo", 42, nil); err != nil {
+		t.Fatalf("expected nil for empty labels, got: %v", err)
+	}
+}
+
+func TestAddLabels_Error(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"message":"Not Found"}`))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	err := c.AddLabels("org/repo", 42, []string{"nonexistent-label"})
+	if err == nil {
+		t.Fatal("expected error for 404 response")
+	}
+}
+
+// ── SetAssignees ──────────────────────────────────────────────────────────────
+
+func TestSetAssignees(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/repos/org/repo/issues/42/assignees" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte("{}"))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	err := c.SetAssignees("org/repo", 42, []string{"sergiotejon"})
+	if err != nil {
+		t.Fatalf("SetAssignees: %v", err)
+	}
+}
+
+func TestSetAssignees_Noop(t *testing.T) {
+	c := gh.NewClient("fake-token")
+	if err := c.SetAssignees("org/repo", 42, nil); err != nil {
+		t.Fatalf("expected nil for empty assignees, got: %v", err)
+	}
+}
+
+func TestSetAssignees_Error(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		w.Write([]byte(`{"message":"Validation Failed"}`))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	err := c.SetAssignees("org/repo", 42, []string{"nonexistent"})
+	if err == nil {
+		t.Fatal("expected error for 422 response")
 	}
 }
