@@ -3,6 +3,7 @@
   import { browser } from '$app/environment';
   import { page } from '$app/stores';
   import { connectEvents, type EventsHandle } from '$lib/sse.js';
+  import { initSseBridge, watchReconnectAndSweep } from '$lib/sseBridge.js';
   import { auth } from '$lib/stores.js';
   import { onDestroy, onMount, setContext } from 'svelte';
   import { writable, type Readable } from 'svelte/store';
@@ -16,14 +17,20 @@
 
   let sse: EventsHandle | undefined;
   let connUnsub: (() => void) | undefined;
+  let bridgeUnsub: (() => void) | undefined;
+  let reconnectUnsub: (() => void) | undefined;
 
   onMount(() => {
     if (!browser) return;
     sse = connectEvents();
     connUnsub = sse.connected.subscribe((v) => connected.set(v));
+    bridgeUnsub = initSseBridge(sse.events);
+    reconnectUnsub = watchReconnectAndSweep(sse.connected);
   });
 
   onDestroy(() => {
+    reconnectUnsub?.();
+    bridgeUnsub?.();
     connUnsub?.();
     sse?.close();
   });
