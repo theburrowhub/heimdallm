@@ -100,8 +100,7 @@ class _PRReviewTab extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    // All prompts show in PR Review tab (backwards compat: existing prompts only have PR fields)
-    final prPrompts = prompts;
+    final prPrompts = prompts.where((p) => p.hasPRReview).toList();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -206,6 +205,7 @@ class _CategoryTab extends ConsumerWidget {
                 return _PromptTile(
                   prompt: filtered[i],
                   subtitleOverride: subtitle,
+                  showActivate: false,
                   onEdit: () => _openEditor(context, ref, filtered[i], category),
                   onDelete: () => _delete(context, ref, filtered[i]),
                   onActivate: () => _setDefault(context, ref, filtered[i]),
@@ -337,8 +337,10 @@ class _PromptTile extends StatelessWidget {
   final ReviewPrompt prompt;
   final VoidCallback onEdit, onDelete, onActivate;
   final String? subtitleOverride;
+  final bool showActivate;
   const _PromptTile({required this.prompt, required this.onEdit,
-      required this.onDelete, required this.onActivate, this.subtitleOverride});
+      required this.onDelete, required this.onActivate, this.subtitleOverride,
+      this.showActivate = true});
 
   @override
   Widget build(BuildContext context) {
@@ -368,7 +370,7 @@ class _PromptTile extends StatelessWidget {
           style: const TextStyle(fontSize: 12),
         ),
         trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-          if (!prompt.isDefault)
+          if (showActivate && !prompt.isDefault)
             TextButton(onPressed: onActivate, child: const Text('Activate')),
           IconButton(icon: const Icon(Icons.edit, size: 18), onPressed: onEdit),
           IconButton(
@@ -547,7 +549,7 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
               'these instructions into the development pipeline.',
           templateDescription:
               'Override the entire development prompt. When set, Instructions are ignored.',
-          placeholders: ReviewPrompt.placeholders,
+          placeholders: ReviewPrompt.implementPlaceholders,
         );
       case _PromptCategory.prReview:
         return (
@@ -738,6 +740,21 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
                             : 'prompt-${DateTime.now().millisecondsSinceEpoch}'
                         : widget.prompt!.id;
                     if (_nameCtrl.text.isEmpty) return;
+                    // Validate non-empty content for the active category
+                    final hasContent = switch (widget.category) {
+                      _PromptCategory.prReview =>
+                        _instrCtrl.text.trim().isNotEmpty || _templateCtrl.text.trim().isNotEmpty,
+                      _PromptCategory.issueTriage =>
+                        _issueInstrCtrl.text.trim().isNotEmpty || _issueTemplateCtrl.text.trim().isNotEmpty,
+                      _PromptCategory.development =>
+                        _implInstrCtrl.text.trim().isNotEmpty || _implTemplateCtrl.text.trim().isNotEmpty,
+                    };
+                    if (!hasContent) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Please provide instructions or a template')),
+                      );
+                      return;
+                    }
                     Navigator.pop(context, ReviewPrompt(
                       id: id,
                       name: _nameCtrl.text.trim(),

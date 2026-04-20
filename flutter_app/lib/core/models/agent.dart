@@ -140,6 +140,10 @@ class ReviewPrompt {
   static const issuePlaceholders = [
     '{repo}', '{number}', '{title}', '{author}', '{labels}', '{body}', '{comments}',
   ];
+
+  static const implementPlaceholders = [
+    '{repo}', '{number}', '{title}', '{author}', '{labels}', '{body}', '{comments}',
+  ];
 }
 
 class PresetDef {
