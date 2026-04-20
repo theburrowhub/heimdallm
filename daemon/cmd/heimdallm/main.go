@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/heimdallm/daemon/internal/activity"
 	"github.com/heimdallm/daemon/internal/config"
 	"github.com/heimdallm/daemon/internal/discovery"
 	"github.com/heimdallm/daemon/internal/executor"
@@ -112,8 +113,39 @@ func main() {
 		slog.Warn("retention purge failed", "err", err)
 	}
 
+	if err := s.PurgeOldActivity(cfg.ActivityLog.RetentionDays); err != nil {
+		slog.Warn("activity retention purge failed", "err", err)
+	}
+
 	broker := sse.NewBroker()
 	broker.Start()
+
+	// ActivityRecorder subscribes to the broker and writes a row into
+	// activity_log for every significant event. Disabled → not constructed.
+	// A nil broker subscription (subscriber cap reached) is a warning, not
+	// a fatal — activity logging is optional.
+	if cfg.ActivityLog.Enabled != nil && *cfg.ActivityLog.Enabled {
+		rec := activity.New(s, broker)
+		if rec == nil {
+			slog.Warn("activity: broker subscriber cap reached; activity log will not record this session")
+		} else {
+			activityCtx, activityCancel := context.WithCancel(context.Background())
+			defer activityCancel()
+			go rec.Start(activityCtx)
+			slog.Info("activity recorder started")
+		}
+	}
+
+	// Activity retention ticker. The startup purge above runs once; this
+	// keeps the log bounded for long-running daemons without requiring a
+	// restart. Same 90-day default as reviews.
+	activityPurge := scheduler.New(24*time.Hour, func() {
+		if err := s.PurgeOldActivity(cfg.ActivityLog.RetentionDays); err != nil {
+			slog.Warn("activity retention purge failed", "err", err)
+		}
+	})
+	activityPurge.Start()
+	defer activityPurge.Stop()
 
 	notifier := notify.New()
 	ghClient := gh.NewClient(token)
