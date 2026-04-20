@@ -5,7 +5,9 @@ daemon/bin/
 
 # Local Docker runtime state
 # - docker/.env holds GITHUB_TOKEN + provider credentials; never commit.
-# - docker/config/ is the mounted config volume (config.toml auto-written
-#   by the daemon on first run).
+# - docker/config/ is a legacy directory from the pre-named-volume setup.
+#   The mount switched to a named volume; the directory is no longer created
+#   on fresh installs, but old checkouts may still have one sitting around
+#   — keeping the ignore entry prevents accidental commits.
 docker/.env
 docker/config/
