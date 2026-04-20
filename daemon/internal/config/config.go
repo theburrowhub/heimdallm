@@ -312,11 +312,16 @@ func (c *Config) IssueTrackingForRepo(repo string) IssueTrackingConfig {
 	}
 	ov := r.IssueTracking
 	merged := global
-	// Enabled is a bool — zero value (false) is meaningful when the per-repo
-	// override exists. If the per-repo section is present, its Enabled field
-	// wins unconditionally, allowing repos to enable issue tracking even when
-	// the global is off (or disable it when global is on).
-	merged.Enabled = ov.Enabled
+	// Enabled resolution: if the per-repo override explicitly sets Enabled=true,
+	// use that. If Enabled is false (zero value) but the override has labels
+	// configured, treat it as implicitly enabled — the user clearly intends
+	// this repo to be processed. This prevents the common mistake of configuring
+	// labels but forgetting the toggle.
+	if ov.Enabled {
+		merged.Enabled = true
+	} else if len(ov.DevelopLabels) > 0 || len(ov.ReviewOnlyLabels) > 0 {
+		merged.Enabled = true
+	}
 	if len(ov.DevelopLabels) > 0 {
 		merged.DevelopLabels = ov.DevelopLabels
 	}
