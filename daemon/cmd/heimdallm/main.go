@@ -93,13 +93,12 @@ func main() {
 	// Merge PUT /config values on top of TOML+env. This is the third and
 	// highest-precedence layer: UI saves win over env vars, env vars win
 	// over TOML. See daemon/internal/config/store.go for the key mapping.
-	if rows, lcErr := s.ListConfigs(); lcErr != nil {
-		slog.Warn("config: list store rows failed, continuing with TOML+env", "err", lcErr)
-	} else if asErr := cfg.ApplyStore(rows); asErr != nil {
-		slog.Warn("config: apply store failed, continuing with TOML+env", "err", asErr)
-	} else if vErr := cfg.Validate(); vErr != nil {
-		slog.Error("config invalid after applying store, refusing to start", "err", vErr)
-		os.Exit(1)
+	//
+	// Bootstrap treats any failure here as a warning: with no previous
+	// in-memory cfg to fall back to, rejecting a startup over a corrupted
+	// configs row would lock the operator out. Reload is stricter (below).
+	if err := cfg.MergeStoreLayer(s); err != nil {
+		slog.Warn("config: store layer not applied, continuing with TOML+env", "err", err)
 	}
 
 	if err := s.PurgeOldReviews(cfg.Retention.MaxDays); err != nil {
@@ -477,12 +476,12 @@ func main() {
 		if err != nil {
 			return fmt.Errorf("reload: %w", err)
 		}
-		if rows, lcErr := s.ListConfigs(); lcErr != nil {
-			slog.Warn("config: list store rows on reload failed", "err", lcErr)
-		} else if asErr := newCfg.ApplyStore(rows); asErr != nil {
-			return fmt.Errorf("reload: apply store: %w", asErr)
-		} else if vErr := newCfg.Validate(); vErr != nil {
-			return fmt.Errorf("reload: validate after store: %w", vErr)
+		// On reload we have a working cfg already — a transient DB error or
+		// a corrupted row must NOT silently revert the running daemon to
+		// TOML+env and wipe operator customisations. Propagate the error;
+		// handleReload returns 500 and the in-memory cfg is untouched.
+		if err := newCfg.MergeStoreLayer(s); err != nil {
+			return fmt.Errorf("reload: %w", err)
 		}
 
 		cfgMu.Lock()

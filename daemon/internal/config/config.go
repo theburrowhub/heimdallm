@@ -453,6 +453,13 @@ func (c *Config) Validate() error {
 // Used by the PUT /config handler to pre-check a standalone IssueTrackingConfig
 // without having to assemble a full Config (which would trip over other
 // required fields like ai.primary).
+//
+// COUPLING: this helper wraps the struct in a zero-valued Config. It stays
+// correct only as long as validateIssueTracking reads exclusively from
+// c.GitHub.IssueTracking. If you ever extend it to cross-check other Config
+// fields (e.g. assignees against GitHub.Repositories), this wrapper must
+// take the extra fields as parameters too or future validations will pass
+// silently against zero values.
 func ValidateIssueTracking(it IssueTrackingConfig) error {
 	c := &Config{}
 	c.GitHub.IssueTracking = it
