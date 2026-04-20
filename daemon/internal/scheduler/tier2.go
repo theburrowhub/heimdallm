@@ -1,0 +1,172 @@
+package scheduler
+
+import (
+	"context"
+	"log/slog"
+	"sync"
+	"time"
+)
+
+// Tier2PRFetcher fetches PRs for review.
+type Tier2PRFetcher interface {
+	FetchPRsToReview() ([]Tier2PR, error)
+}
+
+// Tier2PR is a minimal PR representation for Tier 2.
+type Tier2PR struct {
+	ID        int64
+	Number    int
+	Repo      string
+	UpdatedAt time.Time
+}
+
+// Tier2PRProcessor runs the PR review pipeline on a single PR.
+type Tier2PRProcessor interface {
+	ProcessPR(ctx context.Context, pr Tier2PR) error
+	PublishPending()
+}
+
+// Tier2IssueProcessor processes issues for a single repo.
+type Tier2IssueProcessor interface {
+	ProcessRepo(ctx context.Context, repo string) (int, error)
+}
+
+// Tier2Promoter runs the issue promotion pass.
+type Tier2Promoter interface {
+	PromoteReady(ctx context.Context, repos []string) (int, error)
+}
+
+// Tier2Store checks if a PR has already been reviewed recently.
+type Tier2Store interface {
+	PRAlreadyReviewed(githubID int64, updatedAt time.Time) bool
+}
+
+// Tier2Deps holds all dependencies for the per-repo tier.
+type Tier2Deps struct {
+	Limiter        *RateLimiter
+	WatchQueue     *WatchQueue
+	PRFetcher      Tier2PRFetcher
+	PRProcessor    Tier2PRProcessor
+	IssueProcessor Tier2IssueProcessor
+	Promoter       Tier2Promoter
+	Store          Tier2Store
+	ConfigFn       func() []string // returns monitored repos for PR filtering
+	Interval       time.Duration
+}
+
+// RunTier2 runs the per-repo processing tier. It consumes repos from
+// reposChan and runs PR + issue processing on each repo per tick.
+func RunTier2(ctx context.Context, deps Tier2Deps, reposChan <-chan []string) {
+	var (
+		mu    sync.Mutex
+		repos []string
+	)
+
+	// Goroutine to receive repo updates from Tier 1
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case r := <-reposChan:
+				mu.Lock()
+				repos = r
+				mu.Unlock()
+				slog.Info("tier2: received repo list", "count", len(r))
+			}
+		}
+	}()
+
+	// Brief delay for Tier 1 to send first batch
+	select {
+	case <-time.After(2 * time.Second):
+	case <-ctx.Done():
+		return
+	}
+
+	ticker := time.NewTicker(deps.Interval)
+	defer ticker.Stop()
+
+	processTick := func() {
+		mu.Lock()
+		currentRepos := append([]string(nil), repos...)
+		mu.Unlock()
+
+		if len(currentRepos) == 0 {
+			return
+		}
+
+		// PR processing
+		if err := deps.Limiter.Acquire(ctx, TierRepo); err != nil {
+			return
+		}
+		prs, err := deps.PRFetcher.FetchPRsToReview()
+		if err != nil {
+			slog.Error("tier2: fetch PRs", "err", err)
+		} else {
+			monitoredSet := make(map[string]struct{}, len(currentRepos))
+			for _, r := range currentRepos {
+				monitoredSet[r] = struct{}{}
+			}
+			for _, pr := range prs {
+				if _, ok := monitoredSet[pr.Repo]; !ok {
+					continue
+				}
+				if deps.Store.PRAlreadyReviewed(pr.ID, pr.UpdatedAt) {
+					continue
+				}
+				go func(p Tier2PR) {
+					if err := deps.PRProcessor.ProcessPR(ctx, p); err != nil {
+						slog.Error("tier2: PR pipeline", "repo", p.Repo, "pr", p.Number, "err", err)
+					}
+					// Enqueue to Tier 3 watch
+					deps.WatchQueue.Push(&WatchItem{
+						Type: "pr", Repo: p.Repo, Number: p.Number, GithubID: p.ID,
+					})
+				}(pr)
+			}
+		}
+
+		// Issue promotion
+		if deps.Promoter != nil {
+			if err := deps.Limiter.Acquire(ctx, TierRepo); err != nil {
+				return
+			}
+			if n, err := deps.Promoter.PromoteReady(ctx, currentRepos); err != nil {
+				slog.Error("tier2: promotion", "err", err)
+			} else if n > 0 {
+				slog.Info("tier2: promoted issues", "count", n)
+			}
+		}
+
+		// Issue processing per repo
+		for _, repo := range currentRepos {
+			if err := deps.Limiter.Acquire(ctx, TierRepo); err != nil {
+				return
+			}
+			n, err := deps.IssueProcessor.ProcessRepo(ctx, repo)
+			if err != nil {
+				slog.Error("tier2: issue processing", "repo", repo, "err", err)
+				continue
+			}
+			if n > 0 {
+				slog.Info("tier2: processed issues", "repo", repo, "count", n)
+			}
+		}
+
+		// Retry pending publishes
+		deps.PRProcessor.PublishPending()
+	}
+
+	// Run immediately
+	processTick()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			processTick()
+		}
+	}
+}
