@@ -250,6 +250,10 @@ install-service: build-daemon
 COMPOSE_FILE := docker/docker-compose.yml
 DOCKER_ENV   := docker/.env
 
+# The setup recipe writes the token into an mktemp'd file inside docker/
+# (same filesystem as the target) so the final `mv` is atomic, and chmod
+# 600's it before writing so an interrupted run leaves no world-readable
+# copy on disk. The trap cleans the temp up on any early exit.
 setup:
 	@command -v docker >/dev/null || { echo "❌  Docker is required."; exit 1; }
 	@test -f $(DOCKER_ENV) || { echo "❌  $(DOCKER_ENV) missing — copy docker/.env.example first."; exit 1; }
@@ -261,9 +265,13 @@ setup:
 	   echo "❌  /data/api_token is empty — wait for the daemon's first full startup and retry."; \
 	   exit 1; \
 	 fi; \
-	 grep -v '^HEIMDALLM_API_TOKEN=' $(DOCKER_ENV) > $(DOCKER_ENV).tmp || true; \
-	 echo "HEIMDALLM_API_TOKEN=$$TOKEN" >> $(DOCKER_ENV).tmp; \
-	 mv $(DOCKER_ENV).tmp $(DOCKER_ENV); \
+	 TMP=$$(mktemp "$(DOCKER_ENV).XXXXXX"); \
+	 trap 'rm -f "$$TMP"' EXIT; \
+	 chmod 600 "$$TMP"; \
+	 grep -v '^HEIMDALLM_API_TOKEN=' $(DOCKER_ENV) > "$$TMP" || true; \
+	 printf 'HEIMDALLM_API_TOKEN=%s\n' "$$TOKEN" >> "$$TMP"; \
+	 mv "$$TMP" $(DOCKER_ENV); \
+	 trap - EXIT; \
 	 echo "✓  HEIMDALLM_API_TOKEN written to $(DOCKER_ENV)"
 
 # ── CI packaging (used by GitHub Actions) ─────────────────────────────────────

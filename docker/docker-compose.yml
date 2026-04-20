@@ -59,6 +59,14 @@ services:
   # per-daemon API token from the shared heimdallm-data volume so operators
   # don't have to copy it into the environment by hand. `make setup`
   # provides a fallback path that writes the token into docker/.env.
+  #
+  # This service starts alongside the daemon by default (matches the
+  # acceptance criterion of #33: "`docker compose up` levanta daemon + web
+  # sin config manual de token"). If you want the pre-#33 behaviour
+  # (daemon only) name the service explicitly:
+  #     docker compose up -d heimdallm
+  # A `profiles: ["web"]` key was considered but rejected — it would turn
+  # the default command into a no-op for the web UI and break the AC.
   web:
     build:
       context: ..
@@ -83,6 +91,19 @@ services:
         # Wait until the daemon is healthy so the first UI request does
         # not race a still-initialising daemon and render a 502.
         condition: service_healthy
+    healthcheck:
+      # node:22-alpine does not ship curl or wget, but it does have node.
+      # A tiny http GET is enough to confirm the SvelteKit server responds
+      # without pulling an extra package into the image.
+      test:
+        - "CMD"
+        - "node"
+        - "-e"
+        - "require('http').get('http://localhost:3000/', r => process.exit(r.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
 
 volumes:
   heimdallm-data:

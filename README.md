@@ -71,14 +71,18 @@ The Docker image is published to `ghcr.io/theburrowhub/heimdallm:latest` on ever
 #### Web UI alongside the daemon (optional)
 
 The compose file ships a second service, `web`, that serves the SvelteKit
-admin UI on port `3000`:
+admin UI on port `3000`. It starts alongside the daemon by default; to keep
+the previous daemon-only behaviour, name the service explicitly
+(`docker compose up -d heimdallm`).
 
 ```bash
 # Start both services (web waits for the daemon's healthcheck)
 docker compose -f docker/docker-compose.yml up -d
 
-# Browse the UI
-open http://localhost:3000
+# Then open the UI in your browser of choice:
+#   macOS:   open http://localhost:3000
+#   Linux:   xdg-open http://localhost:3000
+#   Or just browse to http://localhost:3000 manually.
 ```
 
 The `web` container reads the daemon's API token from the shared
