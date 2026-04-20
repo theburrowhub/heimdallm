@@ -50,6 +50,7 @@ type Pipeline struct {
 	}
 	executor CLIExecutor
 	notify   Notifier
+	botLogin string
 }
 
 // New creates a new Pipeline with the provided dependencies.
@@ -60,6 +61,10 @@ func New(s *store.Store, gh interface {
 }, exec CLIExecutor, n Notifier) *Pipeline {
 	return &Pipeline{store: s, gh: gh, executor: exec, notify: n}
 }
+
+// SetBotLogin sets the GitHub login of the bot account. Used to filter
+// the bot's own comments from re-review discussion context.
+func (p *Pipeline) SetBotLogin(login string) { p.botLogin = login }
 
 // applyPrompt resolves a prompt with priority: repoPromptID > agentPromptID > global default.
 func (p *Pipeline) applyPrompt(repoPromptID, agentPromptID string, tmpl *string, flags *string) {
@@ -159,19 +164,32 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	}
 	commentsSection := formatComments(prComments, pr.User.Login)
 
+	// 2c. Build re-review context if a previous review exists for this PR.
+	var reviewCtx string
+	if prevReview, err := p.store.LatestReviewForPR(prID); err == nil && prevReview != nil {
+		reviewCtx = buildReviewContext(
+			prevReview.Issues,
+			prevReview.Severity,
+			prevReview.CreatedAt,
+			prComments,
+			p.botLogin,
+		)
+	}
+
 	// 3. Build prompt:
 	//    Priority: repo override > agent-level prompt > globally active default > built-in default
 	promptTemplate := executor.DefaultTemplate()
 	var cliFlags string
 	p.applyPrompt(promptOverride, opts.AgentPromptID, &promptTemplate, &cliFlags)
 	prompt := executor.BuildPromptFromTemplate(promptTemplate, executor.PRContext{
-		Title:    pr.Title,
-		Number:   pr.Number,
-		Repo:     pr.Repo,
-		Author:   pr.User.Login,
-		Link:     pr.HTMLURL,
-		Diff:     diff,
-		Comments: commentsSection,
+		Title:         pr.Title,
+		Number:        pr.Number,
+		Repo:          pr.Repo,
+		Author:        pr.User.Login,
+		Link:          pr.HTMLURL,
+		Diff:          diff,
+		Comments:      commentsSection,
+		ReviewContext: reviewCtx,
 	})
 
 	// 4. Select CLI (profile can override the global primary/fallback)
