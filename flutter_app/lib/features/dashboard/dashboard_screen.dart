@@ -76,7 +76,6 @@ enum _SortMode { priority, newest }
 const _sortPrefKey = 'activity_sort_mode';
 
 /// Notifier that owns both the sort state and its SharedPreferences persistence.
-/// Replaces the previous StateProvider + async .then() anti-pattern.
 class _SortNotifier extends Notifier<_SortMode> {
   @override
   _SortMode build() {
