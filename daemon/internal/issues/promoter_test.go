@@ -26,8 +26,13 @@ type fakePromoteClient struct {
 	getErr     error
 	subErr     error
 	addErr     error
-	removeErr  error
-	commentErr error
+	// addLabelsFn lets a test inject custom per-call behaviour (e.g.
+	// "fail the first call, succeed the second"). When set, addErr is
+	// ignored. A nil return falls through to the normal "record call"
+	// path so successful calls still show up in `added`.
+	addLabelsFn func(repo string, n int, labels []string) error
+	removeErr   error
+	commentErr  error
 }
 
 func (f *fakePromoteClient) ListOpenIssues(repo string) ([]*github.Issue, error) {
@@ -54,7 +59,11 @@ func (f *fakePromoteClient) ListSubIssues(repo string, number int) ([]*github.Is
 	return f.subIssues[key], nil
 }
 func (f *fakePromoteClient) AddLabels(repo string, n int, labels []string) error {
-	if f.addErr != nil {
+	if f.addLabelsFn != nil {
+		if err := f.addLabelsFn(repo, n, labels); err != nil {
+			return err
+		}
+	} else if f.addErr != nil {
 		return f.addErr
 	}
 	f.added = append(f.added, struct{ Repo string; N int; Labels []string }{repo, n, labels})
@@ -481,6 +490,88 @@ func (c *countingPromoteClient) RemoveLabels(repo string, n int, ls []string) er
 }
 func (c *countingPromoteClient) PostComment(repo string, n int, body string) error {
 	return c.inner.PostComment(repo, n, body)
+}
+
+// ── robustness (#94) ─────────────────────────────────────────────────────
+
+func TestPromoteReady_AddLabelsFailure_RestoresBlockedLabel(t *testing.T) {
+	// Scenario: RemoveLabels(blocked) succeeds, AddLabels(promoteTo)
+	// fails mid-flight (e.g. promote-to label missing in repo, transient
+	// 5xx). Without a compensating action the issue is orphaned: no
+	// blocked label (promotion pass skips it) AND no promote-to label
+	// (classification falls through to default_action=ignore).
+	//
+	// Contract: on AddLabels failure, applyPromotion must attempt to
+	// re-apply the blocked label(s) so the next cycle retries cleanly.
+	blocked := mkIssue("org/r", 10, "open", "## Depends on\n- #5\n", "blocked")
+	addCall := 0
+	fake := &fakePromoteClient{
+		open:  map[string][]*github.Issue{"org/r": {blocked}},
+		byRef: map[string]*github.Issue{"org/r#5": mkIssue("org/r", 5, "closed", "")},
+		addLabelsFn: func(repo string, n int, labels []string) error {
+			addCall++
+			if addCall == 1 {
+				// First call: the promote-to AddLabels. Fail it.
+				return errors.New("simulated AddLabels 5xx")
+			}
+			// Subsequent calls (the compensating one) succeed.
+			return nil
+		},
+	}
+
+	n, err := PromoteReady(context.Background(), fake, baseCfg(), []string{"org/r"})
+	if err != nil {
+		t.Fatalf("PromoteReady: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("n = %d, want 0 (AddLabels failure must abort the promotion)", n)
+	}
+	if addCall != 2 {
+		t.Errorf("AddLabels calls = %d, want 2 (one promote-to attempt + one compensating restore)", addCall)
+	}
+	// The successful call (the compensating one) must re-apply the
+	// blocked labels, not the promote-to.
+	if len(fake.added) != 1 {
+		t.Fatalf("expected 1 recorded successful AddLabels (the compensating one), got %d: %+v", len(fake.added), fake.added)
+	}
+	got := fake.added[0].Labels
+	if len(got) != 1 || got[0] != "blocked" {
+		t.Errorf("compensating AddLabels labels = %v, want [blocked] (blocked label restored)", got)
+	}
+}
+
+func TestCheckDeps_ContextCancellation_StopsLoop(t *testing.T) {
+	// Per-dep ctx check: with a cancelled context, checkDeps must exit
+	// before issuing any GetIssue HTTP call. Protects daemon shutdowns
+	// from 10-minute waits on issues with many deps + unresponsive
+	// GitHub.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancelled
+
+	client := &fakePromoteClient{
+		byRef: map[string]*github.Issue{
+			"org/r#1": mkIssue("org/r", 1, "closed", ""),
+			"org/r#2": mkIssue("org/r", 2, "closed", ""),
+		},
+	}
+	counting := &countingPromoteClient{inner: client}
+
+	deps := []IssueRef{
+		{Repo: "org/r", Number: 1},
+		{Repo: "org/r", Number: 2},
+	}
+	cache := make(map[string]*github.Issue)
+
+	_, err := checkDeps(ctx, counting, deps, cache)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled, got %v", err)
+	}
+	if counting.getIssueCalls > 0 {
+		t.Errorf("GetIssue called %d times, want 0 (ctx cancelled before any fetch)", counting.getIssueCalls)
+	}
 }
 
 func TestPromoteReady_MissingPromoteTarget_ReturnsError(t *testing.T) {

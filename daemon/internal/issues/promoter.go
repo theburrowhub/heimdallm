@@ -111,7 +111,7 @@ func PromoteReady(ctx context.Context, c PromoteIssueClient, cfg config.IssueTra
 				// manually.
 				continue
 			}
-			states, err := checkDeps(c, deps, issueCache)
+			states, err := checkDeps(ctx, c, deps, issueCache)
 			if err != nil {
 				slog.Warn("issues promote: dep check failed",
 					"repo", repo, "issue", issue.Number, "err", err)
@@ -150,11 +150,18 @@ type depState struct {
 // too (merged is a sub-state we don't need to inspect — "closed" covers
 // "this work has landed one way or another").
 //
+// `ctx` is consulted before every GetIssue fetch so a daemon shutdown
+// partway through a long dep chain exits promptly instead of blocking
+// on up to N × HTTP timeouts.
+//
 // On any GitHub call failure the function returns (nil, err) — the
 // caller logs and skips this issue, the next cycle retries.
-func checkDeps(c PromoteIssueClient, deps []IssueRef, cache map[string]*github.Issue) ([]depState, error) {
+func checkDeps(ctx context.Context, c PromoteIssueClient, deps []IssueRef, cache map[string]*github.Issue) ([]depState, error) {
 	out := make([]depState, 0, len(deps))
 	for _, d := range deps {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		key := fmt.Sprintf("%s#%d", d.Repo, d.Number)
 		got, ok := cache[key]
 		if !ok {
@@ -192,6 +199,18 @@ func applyPromotion(c PromoteIssueClient, issue *github.Issue, blockedLabels []s
 		return fmt.Errorf("remove blocked: %w", err)
 	}
 	if err := c.AddLabels(issue.Repo, issue.Number, []string{promoteTo}); err != nil {
+		// Compensating action: the blocked label is already removed, so
+		// if we return now the issue is orphaned — invisible to the
+		// promotion pass (no blocked label) AND to the normal pipeline
+		// (no promote-to label). Best-effort re-apply of the blocked
+		// label(s) keeps the issue in the queue so the next cycle
+		// retries. If that ALSO fails, we can only log loudly; the
+		// operator gets a paper trail in the logs.
+		if reErr := c.AddLabels(issue.Repo, issue.Number, blockedLabels); reErr != nil {
+			slog.Error("issues promote: could not restore blocked label after AddLabels failure; issue may be orphaned",
+				"repo", issue.Repo, "issue", issue.Number,
+				"original_err", err, "restore_err", reErr)
+		}
 		return fmt.Errorf("add promote-to: %w", err)
 	}
 	if err := c.PostComment(issue.Repo, issue.Number, auditCommentBody(promoteTo, states)); err != nil {
