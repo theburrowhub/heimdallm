@@ -108,8 +108,11 @@ make logs          # tail logs from daemon + web
 make logs-daemon   # daemon only
 make restart       # restart both containers
 make down          # stop and remove containers (data volume persists)
-make setup         # (optional) copy the daemon API token into docker/.env
-                   #  for scripts / CI / local curl from the host
+make setup         # (optional) copy the daemon API token into docker/.env.
+                   #  Only needed if you want to call the daemon's HTTP API
+                   #  from outside Docker (scripts, CI, `curl` from the host).
+                   #  The web UI does NOT need this — it reads the token from
+                   #  the shared volume automatically.
 ```
 
 The Docker image is published to `ghcr.io/theburrowhub/heimdallm:latest` on every release — `make up` pulls it automatically when the `build:` contexts haven't changed locally.
