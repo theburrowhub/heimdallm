@@ -178,7 +178,7 @@ int _itemPriorityKey(_ActivityItem item) => switch (item) {
         },
 };
 
-bool _matchesFilters(_ActivityItem item, ActivityFilters filters, String me) {
+bool _matchesFilters(_ActivityItem item, ActivityFilters filters) {
   // Type filter
   if (filters.types.isNotEmpty) {
     final type = _itemType(item);
@@ -232,7 +232,6 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
   Widget build(BuildContext context) {
     final prsAsync    = ref.watch(prsProvider);
     final issuesAsync = ref.watch(issuesProvider);
-    final meAsync     = ref.watch(meProvider);
     final sort        = ref.watch(_reviewsSortProvider);
     final filters     = ref.watch(activityFiltersProvider);
 
@@ -246,8 +245,6 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
 
     final prs    = prsAsync.valueOrNull ?? [];
     final issues = issuesAsync.valueOrNull ?? [];
-    final me     = meAsync.valueOrNull ?? '';
-
     // Collect all known repos for the filter bar.
     final allRepos = <String>{
       ...prs.map((p) => p.repo),
@@ -261,7 +258,7 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
     ];
 
     // Apply filters.
-    final filtered = items.where((item) => _matchesFilters(item, filters, me)).toList();
+    final filtered = items.where((item) => _matchesFilters(item, filters)).toList();
 
     // Sort.
     _sortItems(filtered, sort);
@@ -273,32 +270,15 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
     return ListView(
       padding: const EdgeInsets.symmetric(vertical: 8),
       children: [
-        // Sort selector
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
-          child: Row(
-            children: [
-              Text('Sort:',
-                  style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
-              const SizedBox(width: 8),
-              _SortButton(
-                label: 'Priority',
-                icon: Icons.sort,
-                selected: sort == _SortMode.priority,
-                onTap: () => ref.read(_reviewsSortProvider.notifier).set(_SortMode.priority),
-              ),
-              const SizedBox(width: 6),
-              _SortButton(
-                label: 'Newest',
-                icon: Icons.schedule,
-                selected: sort == _SortMode.newest,
-                onTap: () => ref.read(_reviewsSortProvider.notifier).set(_SortMode.newest),
-              ),
-            ],
-          ),
+        // Sort + Filter bar — single unified row
+        ActivityFilterBar(
+          allRepos: allRepos,
+          sort: sort == _SortMode.priority ? SortMode.priority : SortMode.newest,
+          onSortChanged: (mode) {
+            final internal = mode == SortMode.priority ? _SortMode.priority : _SortMode.newest;
+            ref.read(_reviewsSortProvider.notifier).set(internal);
+          },
         ),
-        // Filter bar
-        ActivityFilterBar(allRepos: allRepos),
         // Filtered count when filters are active
         if (filters.hasFilters)
           Padding(
@@ -353,43 +333,6 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
             ],
           ),
         ],
-      ),
-    );
-  }
-}
-
-// ── Sort button ───────────────────────────────────────────────────────────────
-
-class _SortButton extends StatelessWidget {
-  final String label;
-  final IconData icon;
-  final bool selected;
-  final VoidCallback onTap;
-  const _SortButton({required this.label, required this.icon,
-      required this.selected, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    final color = selected
-        ? Theme.of(context).colorScheme.primary
-        : Colors.grey.shade600;
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-        decoration: BoxDecoration(
-          color: selected
-              ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.15)
-              : Colors.transparent,
-          border: Border.all(color: color.withValues(alpha: 0.5)),
-          borderRadius: BorderRadius.circular(6),
-        ),
-        child: Row(mainAxisSize: MainAxisSize.min, children: [
-          Icon(icon, size: 13, color: color),
-          const SizedBox(width: 4),
-          Text(label, style: TextStyle(fontSize: 12, color: color,
-              fontWeight: selected ? FontWeight.w600 : FontWeight.normal)),
-        ]),
       ),
     );
   }
