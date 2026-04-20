@@ -34,11 +34,12 @@ class ConfigNotifier extends AsyncNotifier<AppConfig> {
   }
 
   /// Save config via daemon API (daemon already running).
+  /// Uses PUT /config for the keys the daemon supports, then reloads.
+  /// Does NOT rewrite the TOML file — that preserves hand-edited config
+  /// and fields the UI doesn't manage.
   Future<void> save(AppConfig config) async {
-    // Write TOML to disk so the daemon can reload it
-    await FirstRunSetup.writeConfig(config);
-    // Tell the running daemon to reload from disk
     final api = ref.read(apiClientProvider);
+    await api.updateConfig(config.toJson());
     await api.reloadConfig();
     state = AsyncValue.data(config);
   }

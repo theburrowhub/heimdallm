@@ -143,8 +143,14 @@ class RepoConfig {
   });
 
   /// True if any feature is actively enabled (per-repo or inherited).
-  /// Used by the repo list to classify monitored vs not-monitored.
-  bool get isMonitored => (prEnabled ?? false) || (itEnabled ?? false) || (devEnabled ?? false);
+  /// Used by the repo list to classify monitored vs not-monitored,
+  /// and by the TOML writer to decide which repos go in `repositories`.
+  bool get isMonitored =>
+      (prEnabled ?? false) ||
+      (itEnabled ?? false) ||
+      (devEnabled ?? false) ||
+      (reviewOnlyLabels != null && reviewOnlyLabels!.isNotEmpty) ||
+      (developLabels != null && developLabels!.isNotEmpty);
 
   /// Legacy getter — repos with any override need to be written to TOML.
   bool get hasAiOverride =>
