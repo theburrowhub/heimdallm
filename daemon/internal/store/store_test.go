@@ -112,6 +112,43 @@ func TestRetentionPurge(t *testing.T) {
 	}
 }
 
+func TestConfigs_ListReturnsAllRows(t *testing.T) {
+	s := newTestStore(t)
+
+	if _, err := s.SetConfig("poll_interval", "30m"); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if _, err := s.SetConfig("repositories", `["org/a","org/b"]`); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+
+	got, err := s.ListConfigs()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 rows, got %d: %v", len(got), got)
+	}
+	if got["poll_interval"] != "30m" {
+		t.Errorf("poll_interval = %q, want 30m", got["poll_interval"])
+	}
+	if got["repositories"] != `["org/a","org/b"]` {
+		t.Errorf("repositories = %q", got["repositories"])
+	}
+}
+
+func TestConfigs_ListOnEmptyTableReturnsEmptyMap(t *testing.T) {
+	s := newTestStore(t)
+
+	got, err := s.ListConfigs()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty map, got %v", got)
+	}
+}
+
 func TestStore_AgentImplementFieldsRoundTrip(t *testing.T) {
 	s := newTestStore(t)
 

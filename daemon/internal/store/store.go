@@ -147,6 +147,30 @@ func (s *Store) GetConfig(key string) (string, error) {
 	return value, err
 }
 
+// ListConfigs returns every row in the configs table as a key→value map.
+// Consumed by config.ApplyStore during reload so user edits made via
+// PUT /config actually reach the running Config struct.
+func (s *Store) ListConfigs() (map[string]string, error) {
+	rows, err := s.db.Query("SELECT key, value FROM configs")
+	if err != nil {
+		return nil, fmt.Errorf("store: list configs: %w", err)
+	}
+	defer rows.Close()
+
+	out := make(map[string]string)
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, fmt.Errorf("store: scan config row: %w", err)
+		}
+		out[k] = v
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate configs: %w", err)
+	}
+	return out, nil
+}
+
 // ReviewTimingStats contains metrics about how long reviews take.
 // Duration is measured from prs.fetched_at (pipeline start) to reviews.created_at (AI done).
 type ReviewTimingStats struct {

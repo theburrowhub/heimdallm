@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/heimdallm/daemon/internal/config"
 	"github.com/heimdallm/daemon/internal/executor"
 	"github.com/heimdallm/daemon/internal/pipeline"
 	"github.com/heimdallm/daemon/internal/sse"
@@ -310,6 +311,7 @@ var validConfigKeys = map[string]struct{}{
 	"ai_fallback":    {},
 	"review_mode":    {},
 	"retention_days": {},
+	"issue_tracking": {},
 }
 
 // validPollIntervals is the allowlist of permitted poll_interval values.
@@ -374,6 +376,26 @@ func (srv *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		if _, valid := validReviewModes[s]; !valid {
 			http.Error(w, "review_mode must be one of: single, multi", http.StatusBadRequest)
+			return
+		}
+	}
+	if v, ok := body["issue_tracking"]; ok {
+		// Round-trip through JSON to decode into the typed struct. This
+		// rejects malformed payloads (e.g. the client sent a string or
+		// array by mistake) before we ever hit the store, so a single bad
+		// request cannot persist a value that breaks the next reload.
+		raw, err := json.Marshal(v)
+		if err != nil {
+			http.Error(w, "issue_tracking must be a JSON object", http.StatusBadRequest)
+			return
+		}
+		var it config.IssueTrackingConfig
+		if err := json.Unmarshal(raw, &it); err != nil {
+			http.Error(w, fmt.Sprintf("issue_tracking: %v", err), http.StatusBadRequest)
+			return
+		}
+		if err := config.ValidateIssueTracking(it); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 	}

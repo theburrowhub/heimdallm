@@ -2,6 +2,32 @@
 
 > **Note:** Versions 0.1.0–0.1.3 were originally published under [`theburrowhub/heimdallr-docker`](https://github.com/theburrowhub/heimdallr-docker) (now archived). The project was unified into this repository and renamed to Heimdallm in v0.1.1.
 
+## [0.1.7](https://github.com/theburrowhub/heimdallm/compare/v0.1.6...v0.1.7) (2026-04-20)
+
+
+### Features
+
+* **daemon:** size-based rotation for heimdallm.log ([#78](https://github.com/theburrowhub/heimdallm/issues/78)) ([e24a488](https://github.com/theburrowhub/heimdallm/commit/e24a4880ec2471abe213ade0a2b705d4cad8df0d))
+* **docker:** web UI service in compose + make setup ([#68](https://github.com/theburrowhub/heimdallm/issues/68)) ([d81b7e8](https://github.com/theburrowhub/heimdallm/commit/d81b7e80c1ed26498c110ae7a07f7a0895d4c199))
+* **web_ui:** dark mode with system / light / dark toggle ([#74](https://github.com/theburrowhub/heimdallm/issues/74)) ([45cc987](https://github.com/theburrowhub/heimdallm/commit/45cc987caedbdbd08ccd94010ad4542d0d4562da))
+* **web-ui:** Config, Agents and Logs routes ([#66](https://github.com/theburrowhub/heimdallm/issues/66)) ([142f87f](https://github.com/theburrowhub/heimdallm/commit/142f87fd1a85154b7ebdd2af0646d99df249fe7d))
+
+
+### Bug Fixes
+
+* **daemon:** make /logs stream work under Docker ([#76](https://github.com/theburrowhub/heimdallm/issues/76)) ([6fbd26c](https://github.com/theburrowhub/heimdallm/commit/6fbd26c397f80adcfb297f20e7ae76edd8dc2af3))
+* **daemon:** make PUT /config persist — third precedence layer (store &gt; env &gt; TOML) ([#80](https://github.com/theburrowhub/heimdallm/issues/80)) ([61f8fa4](https://github.com/theburrowhub/heimdallm/commit/61f8fa4c3851fa9d7b5ac43f8119fb3f13361c18)), closes [#79](https://github.com/theburrowhub/heimdallm/issues/79)
+* **daemon:** write api_token with world-readable perms (0644) ([#72](https://github.com/theburrowhub/heimdallm/issues/72)) ([6f8efbe](https://github.com/theburrowhub/heimdallm/commit/6f8efbea00d3c0e9ff5526c269b5c45dfaa027e7)), closes [#71](https://github.com/theburrowhub/heimdallm/issues/71)
+* **docker:** correct web service build context ([5623c52](https://github.com/theburrowhub/heimdallm/commit/5623c52c99301ae6107ae1b6630e849e5d1d56f0))
+
+
+### Documentation
+
+* **readme:** cover three install gotchas that tripped a real user ([d8b16e9](https://github.com/theburrowhub/heimdallm/commit/d8b16e9eeb72d5d20348abf915f96f215118db75))
+* **readme:** document issue pipeline, web UI, and topic discovery ([e03f3cb](https://github.com/theburrowhub/heimdallm/commit/e03f3cb05c7747acb3a1f0fffba1d1d148d26fd4))
+* **readme:** document reusing host AI auth inside Docker ([f0bfe49](https://github.com/theburrowhub/heimdallm/commit/f0bfe49580990b2dfa4cf14cb0cbbc9230f151b6))
+* **readme:** promote Claude OAuth path to first-class instructions ([35ec2e5](https://github.com/theburrowhub/heimdallm/commit/35ec2e522dd722daa8e4635312edf174c23b9eff))
+
 ## [0.1.6](https://github.com/theburrowhub/heimdallm/compare/v0.1.5...v0.1.6) (2026-04-19)
 
 

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/heimdallm/daemon/internal/config"
 	"github.com/heimdallm/daemon/internal/server"
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
@@ -479,6 +480,91 @@ func TestIssueEndpointsRequireAuthWhenTokenSet(t *testing.T) {
 			t.Errorf("POST %s with valid token: unexpected 401", path)
 		}
 	}
+}
+
+func TestHandlerPutConfig_IssueTracking_Accepted(t *testing.T) {
+	srv, _ := setupServer(t)
+	body := `{"issue_tracking":{"enabled":true,"filter_mode":"exclusive","default_action":"ignore","develop_labels":["feature","bug"],"review_only_labels":["question"],"skip_labels":["wontfix"],"organizations":[],"assignees":[]}}`
+	req := httptest.NewRequest("PUT", "/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+func TestHandlerPutConfig_IssueTracking_InvalidFilterMode(t *testing.T) {
+	srv, _ := setupServer(t)
+	// filter_mode "weird" with enabled=true should trip validateIssueTracking.
+	body := `{"issue_tracking":{"enabled":true,"filter_mode":"weird","default_action":"ignore"}}`
+	req := httptest.NewRequest("PUT", "/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+func TestHandlerPutConfig_IssueTracking_InvalidDefaultAction(t *testing.T) {
+	srv, _ := setupServer(t)
+	body := `{"issue_tracking":{"enabled":true,"filter_mode":"exclusive","default_action":"delete_the_repo"}}`
+	req := httptest.NewRequest("PUT", "/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+func TestHandlerPutConfig_IssueTracking_PersistsAndIsReadable(t *testing.T) {
+	// End-to-end: PUT → ListConfigs → ApplyStore → cfg reflects the change.
+	// This is the scenario that is broken on main today and the reason the
+	// web UI's "Save & reload" silently loses values on refresh.
+	srv, s := setupServer(t)
+	body := `{"issue_tracking":{"enabled":true,"filter_mode":"inclusive","default_action":"review_only","develop_labels":["feature"]}}`
+	req := httptest.NewRequest("PUT", "/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT: expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	rows, err := s.ListConfigs()
+	if err != nil {
+		t.Fatalf("ListConfigs: %v", err)
+	}
+	raw, ok := rows["issue_tracking"]
+	if !ok {
+		t.Fatalf("store: expected issue_tracking row, got keys %v", rows)
+	}
+
+	cfg := newCfgWithPrimary()
+	cfg.GitHub.PollInterval = "5m"
+	if err := cfg.ApplyStore(map[string]string{"issue_tracking": raw}); err != nil {
+		t.Fatalf("ApplyStore: %v", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate after ApplyStore: %v", err)
+	}
+	it := cfg.GitHub.IssueTracking
+	if !it.Enabled || it.FilterMode != config.FilterModeInclusive || it.DefaultAction != "review_only" {
+		t.Errorf("round-trip: got %+v", it)
+	}
+	if len(it.DevelopLabels) != 1 || it.DevelopLabels[0] != "feature" {
+		t.Errorf("DevelopLabels = %v, want [feature]", it.DevelopLabels)
+	}
+}
+
+// newCfgWithPrimary builds a minimal valid Config for tests that want to run
+// cfg.Validate() after ApplyStore (Validate requires ai.primary).
+func newCfgWithPrimary() *config.Config {
+	c := &config.Config{}
+	c.AI.Primary = "claude"
+	return c
 }
 
 func TestHandlerPutConfigValueValidation(t *testing.T) {

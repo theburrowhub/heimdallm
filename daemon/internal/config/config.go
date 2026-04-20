@@ -101,36 +101,36 @@ const (
 // highest-precedence match. This is a fail-safe ordering: when in doubt,
 // review before developing, and skip before either.
 type IssueTrackingConfig struct {
-	Enabled bool `toml:"enabled"`
+	Enabled bool `toml:"enabled" json:"enabled"`
 
 	// FilterMode decides how the org / assignee / label dimensions are
 	// combined ("exclusive" = AND, "inclusive" = OR). Applied by the
 	// pipeline; not consulted by Classify itself.
-	FilterMode FilterMode `toml:"filter_mode"`
+	FilterMode FilterMode `toml:"filter_mode" json:"filter_mode"`
 
 	// Organizations limits processing to issues belonging to these orgs.
 	// Empty = no org filter.
-	Organizations []string `toml:"organizations"`
+	Organizations []string `toml:"organizations" json:"organizations"`
 
 	// Assignees limits processing to issues assigned to these GitHub users.
 	// Empty = no assignee filter.
-	Assignees []string `toml:"assignees"`
+	Assignees []string `toml:"assignees" json:"assignees"`
 
 	// DevelopLabels are labels that mark an issue as "please implement".
-	DevelopLabels []string `toml:"develop_labels"`
+	DevelopLabels []string `toml:"develop_labels" json:"develop_labels"`
 
 	// ReviewOnlyLabels are labels that mark an issue as "please analyse and
 	// comment only". Takes precedence over DevelopLabels when both are
 	// present on the same issue — fail-safe default.
-	ReviewOnlyLabels []string `toml:"review_only_labels"`
+	ReviewOnlyLabels []string `toml:"review_only_labels" json:"review_only_labels"`
 
 	// SkipLabels are labels that opt an issue out of processing entirely.
 	// Highest precedence.
-	SkipLabels []string `toml:"skip_labels"`
+	SkipLabels []string `toml:"skip_labels" json:"skip_labels"`
 
 	// DefaultAction is applied when an issue carries no label from any of
 	// the three lists above. Must be "ignore" or "review_only".
-	DefaultAction string `toml:"default_action"`
+	DefaultAction string `toml:"default_action" json:"default_action"`
 }
 
 // Classify returns the processing mode for an issue given its labels.
@@ -447,6 +447,23 @@ func (c *Config) Validate() error {
 		return err
 	}
 	return nil
+}
+
+// ValidateIssueTracking is the package-exported form of validateIssueTracking.
+// Used by the PUT /config handler to pre-check a standalone IssueTrackingConfig
+// without having to assemble a full Config (which would trip over other
+// required fields like ai.primary).
+//
+// COUPLING: this helper wraps the struct in a zero-valued Config. It stays
+// correct only as long as validateIssueTracking reads exclusively from
+// c.GitHub.IssueTracking. If you ever extend it to cross-check other Config
+// fields (e.g. assignees against GitHub.Repositories), this wrapper must
+// take the extra fields as parameters too or future validations will pass
+// silently against zero values.
+func ValidateIssueTracking(it IssueTrackingConfig) error {
+	c := &Config{}
+	c.GitHub.IssueTracking = it
+	return c.validateIssueTracking()
 }
 
 // validateIssueTracking enforces the small set of invariants the pipeline

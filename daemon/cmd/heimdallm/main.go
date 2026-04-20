@@ -90,6 +90,17 @@ func main() {
 	}
 	defer s.Close()
 
+	// Merge PUT /config values on top of TOML+env. This is the third and
+	// highest-precedence layer: UI saves win over env vars, env vars win
+	// over TOML. See daemon/internal/config/store.go for the key mapping.
+	//
+	// Bootstrap treats any failure here as a warning: with no previous
+	// in-memory cfg to fall back to, rejecting a startup over a corrupted
+	// configs row would lock the operator out. Reload is stricter (below).
+	if err := cfg.MergeStoreLayer(s); err != nil {
+		slog.Warn("config: store layer not applied, continuing with TOML+env", "err", err)
+	}
+
 	if err := s.PurgeOldReviews(cfg.Retention.MaxDays); err != nil {
 		slog.Warn("retention purge failed", "err", err)
 	}
@@ -430,6 +441,7 @@ func main() {
 			"ai_fallback":    c.AI.Fallback,
 			"review_mode":    c.AI.ReviewMode,
 			"retention_days": c.Retention.MaxDays,
+			"issue_tracking": c.GitHub.IssueTracking,
 			"repo_overrides": repoOverrides,
 			"agent_configs":  agentConfigs,
 		}
@@ -462,6 +474,13 @@ func main() {
 	srv.SetReloadFn(func() error {
 		newCfg, err := config.Load(cfgPath)
 		if err != nil {
+			return fmt.Errorf("reload: %w", err)
+		}
+		// On reload we have a working cfg already — a transient DB error or
+		// a corrupted row must NOT silently revert the running daemon to
+		// TOML+env and wipe operator customisations. Propagate the error;
+		// handleReload returns 500 and the in-memory cfg is untouched.
+		if err := newCfg.MergeStoreLayer(s); err != nil {
 			return fmt.Errorf("reload: %w", err)
 		}
 
