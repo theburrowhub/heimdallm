@@ -387,7 +387,7 @@ run-linux:
 	@test -n "$$DISPLAY" || { echo "❌  No DISPLAY set — need X11 (or XWayland)."; exit 1; }
 	@docker image inspect heimdallm-verify >/dev/null 2>&1 || \
 	  { echo "❌  Image 'heimdallm-verify' not found. Run 'make verify-linux' first."; exit 1; }
-	@mkdir -p "$$HOME/.config/heimdallm"
+	@mkdir -p "$$HOME/.config/heimdallm" "$$HOME/.local/share/heimdallm"
 	@docker rm -f heimdallm-run 2>/dev/null || true
 	@ENV_FILE=$$(mktemp) ; \
 	cleanup() { \
@@ -397,6 +397,7 @@ run-linux:
 	trap cleanup EXIT ; \
 	\
 	echo "DISPLAY=$$DISPLAY" > "$$ENV_FILE" ; \
+	echo "HOME=$$HOME" >> "$$ENV_FILE" ; \
 	echo "HEIMDALLM_DAEMON_PATH=/app/daemon/bin/heimdallm" >> "$$ENV_FILE" ; \
 	if [ -n "$$GITHUB_TOKEN" ]; then \
 	  echo "GITHUB_TOKEN=$$GITHUB_TOKEN" >> "$$ENV_FILE" ; \
@@ -427,6 +428,7 @@ run-linux:
 	  -v /run/dbus:/run/dbus:ro \
 	  $$DBUS_ARGS \
 	  -v "$$HOME/.config/heimdallm:$$HOME/.config/heimdallm" \
+	  -v "$$HOME/.local/share/heimdallm:$$HOME/.local/share/heimdallm" \
 	  $$GPU_ARGS \
 	  --ipc=host \
 	  --net=host \
