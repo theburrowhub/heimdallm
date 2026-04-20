@@ -144,8 +144,39 @@ func TestPurgeOldActivity_ZeroIsNoOp(t *testing.T) {
 	if err := s.PurgeOldActivity(0); err != nil {
 		t.Fatalf("purge: %v", err)
 	}
-	entries, _, _ := s.ListActivity(store.ActivityQuery{})
+	entries, _, err := s.ListActivity(store.ActivityQuery{})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
 	if len(entries) != 1 {
 		t.Fatalf("want 1 remaining (no-op), got %d", len(entries))
+	}
+}
+
+func TestListActivity_FilterByRepo(t *testing.T) {
+	s := newActivityStore(t)
+	base := time.Now().UTC().Truncate(time.Second)
+
+	must := func(repo string, n int) {
+		t.Helper()
+		if _, err := s.InsertActivity(base, "acme", repo, "pr", n, "t", "review", "", nil); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+	}
+	must("acme/api", 1)
+	must("acme/web", 2)
+	must("acme/api", 3)
+
+	entries, _, err := s.ListActivity(store.ActivityQuery{Repos: []string{"acme/api"}})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("want 2 entries, got %d", len(entries))
+	}
+	for _, e := range entries {
+		if e.Repo != "acme/api" {
+			t.Errorf("unexpected repo in result: %q", e.Repo)
+		}
 	}
 }

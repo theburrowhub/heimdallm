@@ -23,6 +23,8 @@ type Activity struct {
 }
 
 // ActivityQuery bounds a ListActivity call.
+// Zero values for From/To mean "no lower/upper bound" but the handler always
+// supplies a bounded window, so unbounded queries only happen in tests.
 type ActivityQuery struct {
 	From    time.Time
 	To      time.Time
@@ -121,25 +123,14 @@ func (s *Store) ListActivity(q ActivityQuery) ([]*Activity, bool, error) {
 
 	var out []*Activity
 	for rows.Next() {
-		var (
-			a                 Activity
-			tsStr, createdStr string
-		)
-		if err := rows.Scan(&a.ID, &tsStr, &a.Org, &a.Repo, &a.ItemType,
-			&a.ItemNumber, &a.ItemTitle, &a.Action, &a.Outcome,
-			&a.DetailsJSON, &createdStr); err != nil {
-			return nil, false, fmt.Errorf("store: scan activity: %w", err)
+		a, err := scanActivity(rows)
+		if err != nil {
+			return nil, false, err
 		}
-		if a.Timestamp, err = time.Parse(sqliteTimeFormat, tsStr); err != nil {
-			return nil, false, fmt.Errorf("store: parse ts %q: %w", tsStr, err)
-		}
-		if a.CreatedAt, err = time.Parse(sqliteTimeFormat, createdStr); err != nil {
-			return nil, false, fmt.Errorf("store: parse created_at %q: %w", createdStr, err)
-		}
-		out = append(out, &a)
+		out = append(out, a)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, false, err
+		return nil, false, fmt.Errorf("store: iterate activity: %w", err)
 	}
 
 	truncated := len(out) > limit
@@ -160,6 +151,24 @@ func (s *Store) PurgeOldActivity(maxDays int) error {
 		return fmt.Errorf("store: purge old activity: %w", err)
 	}
 	return nil
+}
+
+func scanActivity(s scanner) (*Activity, error) {
+	var a Activity
+	var tsStr, createdStr string
+	if err := s.Scan(&a.ID, &tsStr, &a.Org, &a.Repo, &a.ItemType,
+		&a.ItemNumber, &a.ItemTitle, &a.Action, &a.Outcome,
+		&a.DetailsJSON, &createdStr); err != nil {
+		return nil, fmt.Errorf("store: scan activity: %w", err)
+	}
+	var err error
+	if a.Timestamp, err = time.Parse(sqliteTimeFormat, tsStr); err != nil {
+		return nil, fmt.Errorf("store: parse ts %q: %w", tsStr, err)
+	}
+	if a.CreatedAt, err = time.Parse(sqliteTimeFormat, createdStr); err != nil {
+		return nil, fmt.Errorf("store: parse created_at %q: %w", createdStr, err)
+	}
+	return &a, nil
 }
 
 func placeholders(n int) string {
