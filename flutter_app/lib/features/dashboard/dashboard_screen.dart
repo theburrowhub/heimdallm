@@ -73,32 +73,41 @@ class DashboardScreen extends ConsumerWidget {
 
 enum _SortMode { priority, newest }
 
-/// Persists the user's sort selection across tab navigation AND across
-/// app restarts via SharedPreferences.
-final _reviewsSortProvider = StateProvider<_SortMode>((ref) {
-  // Load persisted value on first access
-  _loadSortPreference().then((mode) {
-    if (mode != null) {
-      ref.controller.state = mode;
-    }
-  });
-  return _SortMode.priority; // default until async load completes
-});
-
 const _sortPrefKey = 'activity_sort_mode';
 
-Future<_SortMode?> _loadSortPreference() async {
-  final prefs = await SharedPreferences.getInstance();
-  final value = prefs.getString(_sortPrefKey);
-  if (value == 'newest') return _SortMode.newest;
-  if (value == 'priority') return _SortMode.priority;
-  return null;
+/// Notifier that owns both the sort state and its SharedPreferences persistence.
+/// Replaces the previous StateProvider + async .then() anti-pattern.
+class _SortNotifier extends Notifier<_SortMode> {
+  @override
+  _SortMode build() {
+    _loadAsync();
+    return _SortMode.priority;
+  }
+
+  void _loadAsync() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final value = prefs.getString(_sortPrefKey);
+      if (value == 'newest') {
+        state = _SortMode.newest;
+      }
+    } catch (e) {
+      debugPrint('SortNotifier: failed to load preference: $e');
+    }
+  }
+
+  void set(_SortMode mode) {
+    state = mode;
+    SharedPreferences.getInstance().then((prefs) {
+      prefs.setString(_sortPrefKey, mode.name);
+    }).catchError((e) {
+      debugPrint('SortNotifier: failed to save preference: $e');
+    });
+  }
 }
 
-Future<void> _saveSortPreference(_SortMode mode) async {
-  final prefs = await SharedPreferences.getInstance();
-  await prefs.setString(_sortPrefKey, mode.name);
-}
+final _reviewsSortProvider =
+    NotifierProvider<_SortNotifier, _SortMode>(_SortNotifier.new);
 
 /// Sort by priority: pending → high → medium → low, then most recent first within group.
 int _prSortKey(PR p) {
@@ -179,20 +188,14 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
                 label: 'Priority',
                 icon: Icons.sort,
                 selected: sort == _SortMode.priority,
-                onTap: () {
-                  ref.read(_reviewsSortProvider.notifier).state = _SortMode.priority;
-                  _saveSortPreference(_SortMode.priority);
-                },
+                onTap: () => ref.read(_reviewsSortProvider.notifier).set(_SortMode.priority),
               ),
               const SizedBox(width: 6),
               _SortButton(
                 label: 'Newest',
                 icon: Icons.schedule,
                 selected: sort == _SortMode.newest,
-                onTap: () {
-                  ref.read(_reviewsSortProvider.notifier).state = _SortMode.newest;
-                  _saveSortPreference(_SortMode.newest);
-                },
+                onTap: () => ref.read(_reviewsSortProvider.notifier).set(_SortMode.newest),
               ),
             ],
           ),
