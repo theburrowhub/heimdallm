@@ -23,10 +23,13 @@ import (
 type fakeStore struct {
 	upserts      []*store.Issue
 	reviews      []*store.IssueReview
+	prs          []*store.PR
 	nextIssueID  int64
 	nextReviewID int64
+	nextPRID     int64
 	upsertErr    error
 	insertErr    error
+	upsertPRErr  error
 }
 
 func (f *fakeStore) UpsertIssue(i *store.Issue) (int64, error) {
@@ -51,6 +54,17 @@ func (f *fakeStore) InsertIssueReview(r *store.IssueReview) (int64, error) {
 	return f.nextReviewID, nil
 }
 
+func (f *fakeStore) UpsertPR(pr *store.PR) (int64, error) {
+	if f.upsertPRErr != nil {
+		return 0, f.upsertPRErr
+	}
+	f.nextPRID++
+	copy := *pr
+	copy.ID = f.nextPRID
+	f.prs = append(f.prs, &copy)
+	return f.nextPRID, nil
+}
+
 type fakeGH struct {
 	postCalls     []postCall
 	commentsByKey map[string][]github.Comment
@@ -62,6 +76,8 @@ type fakeGH struct {
 	defaultBranchErr error
 	createPRCalls    []prCall
 	createPRNumber   int
+	createPRID       int64
+	createPRHTMLURL  string
 	createPRErr      error
 
 	// PR metadata tracking
@@ -103,17 +119,26 @@ func (f *fakeGH) GetDefaultBranch(repo string) (string, error) {
 	return f.defaultBranch, nil
 }
 
-func (f *fakeGH) CreatePR(repo, title, body, head, base string, draft bool) (int, error) {
+func (f *fakeGH) CreatePR(repo, title, body, head, base string, draft bool) (*github.CreatedPR, error) {
 	f.createPRCalls = append(f.createPRCalls, prCall{
 		Repo: repo, Title: title, Body: body, Head: head, Base: base, Draft: draft,
 	})
 	if f.createPRErr != nil {
-		return 0, f.createPRErr
+		return nil, f.createPRErr
 	}
-	if f.createPRNumber == 0 {
-		return 999, nil
+	num := f.createPRNumber
+	if num == 0 {
+		num = 999
 	}
-	return f.createPRNumber, nil
+	id := f.createPRID
+	if id == 0 {
+		id = int64(num) * 100 // deterministic fake github_id
+	}
+	htmlURL := f.createPRHTMLURL
+	if htmlURL == "" {
+		htmlURL = fmt.Sprintf("https://github.com/%s/pull/%d", repo, num)
+	}
+	return &github.CreatedPR{Number: num, ID: id, HTMLURL: htmlURL}, nil
 }
 
 func (f *fakeGH) SetPRReviewers(repo string, prNumber int, reviewers []string) error {

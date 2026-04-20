@@ -9,6 +9,13 @@ import (
 	"net/url"
 )
 
+// CreatedPR holds the essential fields returned by GitHub when a PR is created.
+type CreatedPR struct {
+	Number  int
+	ID      int64
+	HTMLURL string
+}
+
 // GetDefaultBranch returns the `default_branch` field from the GitHub
 // repository metadata. Used by the auto_implement pipeline (#27) to base
 // the work branch on the right trunk — main, master, whatever the repo
@@ -51,9 +58,9 @@ func (c *Client) GetDefaultBranch(repo string) (string, error) {
 // Uses the shared doWithBody helper so auth, Accept, and API-version headers
 // are set in one place. That also means any retry/rate-limit logic added to
 // the helper in the future applies uniformly to PR creation.
-func (c *Client) CreatePR(repo, title, body, head, base string, draft bool) (int, error) {
+func (c *Client) CreatePR(repo, title, body, head, base string, draft bool) (*CreatedPR, error) {
 	if repo == "" || title == "" || head == "" || base == "" {
-		return 0, fmt.Errorf("github: CreatePR: repo/title/head/base are all required")
+		return nil, fmt.Errorf("github: CreatePR: repo/title/head/base are all required")
 	}
 	payload, err := json.Marshal(map[string]any{
 		"title": title,
@@ -63,35 +70,37 @@ func (c *Client) CreatePR(repo, title, body, head, base string, draft bool) (int
 		"draft": draft,
 	})
 	if err != nil {
-		return 0, fmt.Errorf("github: marshal pr payload: %w", err)
+		return nil, fmt.Errorf("github: marshal pr payload: %w", err)
 	}
 
 	resp, err := c.doWithBody("POST", "/repos/"+repo+"/pulls",
 		"application/vnd.github+json", "application/json", bytes.NewReader(payload))
 	if err != nil {
-		return 0, fmt.Errorf("github: create pr: %w", err)
+		return nil, fmt.Errorf("github: create pr: %w", err)
 	}
 	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	resp.Body.Close()
 	if readErr != nil {
-		return 0, fmt.Errorf("github: read pr response: %w", readErr)
+		return nil, fmt.Errorf("github: read pr response: %w", readErr)
 	}
 	// GitHub returns 201 Created on success; anything else is an error to surface.
 	if resp.StatusCode != http.StatusCreated {
 		errBody := safeTruncate(string(respBody), maxErrBodyLen)
-		return 0, fmt.Errorf("github: create pr %s: status %d: %s", repo, resp.StatusCode, errBody)
+		return nil, fmt.Errorf("github: create pr %s: status %d: %s", repo, resp.StatusCode, errBody)
 	}
 
 	var out struct {
-		Number int `json:"number"`
+		Number  int    `json:"number"`
+		ID      int64  `json:"id"`
+		HTMLURL string `json:"html_url"`
 	}
 	if err := json.Unmarshal(respBody, &out); err != nil {
-		return 0, fmt.Errorf("github: decode pr response: %w", err)
+		return nil, fmt.Errorf("github: decode pr response: %w", err)
 	}
 	if out.Number == 0 {
-		return 0, fmt.Errorf("github: create pr: response missing number (raw: %.200s)", respBody)
+		return nil, fmt.Errorf("github: create pr: response missing number (raw: %.200s)", respBody)
 	}
-	return out.Number, nil
+	return &CreatedPR{Number: out.Number, ID: out.ID, HTMLURL: out.HTMLURL}, nil
 }
 
 // SetPRReviewers requests reviewers on a pull request.

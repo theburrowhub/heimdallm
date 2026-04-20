@@ -86,17 +86,23 @@ func TestCreatePR_Success(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &capturedBody)
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42})
+		_ = json.NewEncoder(w).Encode(map[string]any{"number": 42, "id": 12345, "html_url": "https://github.com/org/repo/pull/42"})
 	}))
 	defer srv.Close()
 
 	client := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
-	num, err := client.CreatePR("org/repo", "feat: fix", "Closes #7", "heimdallm/issue-7", "main", false)
+	created, err := client.CreatePR("org/repo", "feat: fix", "Closes #7", "heimdallm/issue-7", "main", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if num != 42 {
-		t.Errorf("got %d, want 42", num)
+	if created.Number != 42 {
+		t.Errorf("Number = %d, want 42", created.Number)
+	}
+	if created.ID != 12345 {
+		t.Errorf("ID = %d, want 12345", created.ID)
+	}
+	if created.HTMLURL != "https://github.com/org/repo/pull/42" {
+		t.Errorf("HTMLURL = %q, want https://github.com/org/repo/pull/42", created.HTMLURL)
 	}
 
 	// Verify the wire payload is what the auto_implement pipeline expects.
@@ -125,12 +131,12 @@ func TestCreatePR_Draft(t *testing.T) {
 	defer srv.Close()
 
 	client := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
-	num, err := client.CreatePR("org/repo", "draft PR", "body", "branch", "main", true)
+	created, err := client.CreatePR("org/repo", "draft PR", "body", "branch", "main", true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if num != 99 {
-		t.Errorf("got %d, want 99", num)
+	if created.Number != 99 {
+		t.Errorf("Number = %d, want 99", created.Number)
 	}
 	draft, ok := capturedBody["draft"].(bool)
 	if !ok || !draft {
