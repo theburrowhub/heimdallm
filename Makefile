@@ -390,6 +390,10 @@ run-linux:
 	@mkdir -p "$$HOME/.config/heimdallm" "$$HOME/.local/share/heimdallm" \
 	          "$$HOME/.claude" "$$HOME/.gemini" "$$HOME/.codex" \
 	          "$$HOME/.config/opencode" "$$HOME/.local/share/opencode"
+	@# claude keeps its main config at $HOME/.claude.json (sibling to .claude/),
+	@# not inside .claude/. Docker bind-mounts need the source to exist before
+	@# start; touch is idempotent and preserves the file if it already exists.
+	@touch "$$HOME/.claude.json"
 	@docker rm -f heimdallm-run 2>/dev/null || true
 	@ENV_FILE=$$(mktemp) ; \
 	cleanup() { \
@@ -452,6 +456,7 @@ run-linux:
 	  -v "$$HOME/.config/heimdallm:$$HOME/.config/heimdallm" \
 	  -v "$$HOME/.local/share/heimdallm:$$HOME/.local/share/heimdallm" \
 	  -v "$$HOME/.claude:$$HOME/.claude" \
+	  -v "$$HOME/.claude.json:$$HOME/.claude.json" \
 	  -v "$$HOME/.gemini:$$HOME/.gemini" \
 	  -v "$$HOME/.codex:$$HOME/.codex" \
 	  -v "$$HOME/.config/opencode:$$HOME/.config/opencode" \
