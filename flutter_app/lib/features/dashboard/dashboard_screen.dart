@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/models/pr.dart';
 import '../../core/models/tracked_issue.dart';
 import '../../shared/widgets/severity_badge.dart';
@@ -72,8 +73,32 @@ class DashboardScreen extends ConsumerWidget {
 
 enum _SortMode { priority, newest }
 
-/// Persists the user's sort selection across tab navigation.
-final _reviewsSortProvider = StateProvider<_SortMode>((ref) => _SortMode.priority);
+/// Persists the user's sort selection across tab navigation AND across
+/// app restarts via SharedPreferences.
+final _reviewsSortProvider = StateProvider<_SortMode>((ref) {
+  // Load persisted value on first access
+  _loadSortPreference().then((mode) {
+    if (mode != null) {
+      ref.controller.state = mode;
+    }
+  });
+  return _SortMode.priority; // default until async load completes
+});
+
+const _sortPrefKey = 'activity_sort_mode';
+
+Future<_SortMode?> _loadSortPreference() async {
+  final prefs = await SharedPreferences.getInstance();
+  final value = prefs.getString(_sortPrefKey);
+  if (value == 'newest') return _SortMode.newest;
+  if (value == 'priority') return _SortMode.priority;
+  return null;
+}
+
+Future<void> _saveSortPreference(_SortMode mode) async {
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.setString(_sortPrefKey, mode.name);
+}
 
 /// Sort by priority: pending → high → medium → low, then most recent first within group.
 int _prSortKey(PR p) {
@@ -154,14 +179,20 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
                 label: 'Priority',
                 icon: Icons.sort,
                 selected: sort == _SortMode.priority,
-                onTap: () => ref.read(_reviewsSortProvider.notifier).state = _SortMode.priority,
+                onTap: () {
+                  ref.read(_reviewsSortProvider.notifier).state = _SortMode.priority;
+                  _saveSortPreference(_SortMode.priority);
+                },
               ),
               const SizedBox(width: 6),
               _SortButton(
                 label: 'Newest',
                 icon: Icons.schedule,
                 selected: sort == _SortMode.newest,
-                onTap: () => ref.read(_reviewsSortProvider.notifier).state = _SortMode.newest,
+                onTap: () {
+                  ref.read(_reviewsSortProvider.notifier).state = _SortMode.newest;
+                  _saveSortPreference(_SortMode.newest);
+                },
               ),
             ],
           ),
