@@ -28,6 +28,7 @@ class OverrideTextField extends StatefulWidget {
 
 class _OverrideTextFieldState extends State<OverrideTextField> {
   late TextEditingController _ctrl;
+  bool _selfEditing = false;
 
   @override
   void initState() {
@@ -38,6 +39,13 @@ class _OverrideTextFieldState extends State<OverrideTextField> {
   @override
   void didUpdateWidget(OverrideTextField old) {
     super.didUpdateWidget(old);
+    // Only update the controller from external changes (reset, config reload).
+    // Skip when the change originated from our own onChanged to avoid
+    // clobbering the user's in-progress typing.
+    if (_selfEditing) {
+      _selfEditing = false;
+      return;
+    }
     if (widget.overrideValue != old.overrideValue ||
         widget.globalValue != old.globalValue) {
       _ctrl.text = widget.overrideValue ?? widget.globalValue;
@@ -58,6 +66,7 @@ class _OverrideTextFieldState extends State<OverrideTextField> {
   }
 
   void _handleChange(String value) {
+    _selfEditing = true;
     final trimmed = value.trim();
     if (trimmed.isEmpty || trimmed == widget.globalValue) {
       widget.onChanged(null);
