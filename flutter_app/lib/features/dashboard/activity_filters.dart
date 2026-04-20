@@ -32,8 +32,6 @@ class ActivityFilters {
       orgs.isNotEmpty ||
       repos.isNotEmpty ||
       search.isNotEmpty;
-
-  ActivityFilters reset() => const ActivityFilters();
 }
 
 final activityFiltersProvider =

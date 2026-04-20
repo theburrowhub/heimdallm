@@ -40,8 +40,7 @@ class _ActivityFilterBarState extends ConsumerState<ActivityFilterBar> {
       .map((r) => r.contains('/') ? r.split('/').first : r)
       .toSet();
 
-  Set<String> get _filteredRepos {
-    final filters = ref.read(activityFiltersProvider);
+  Set<String> _filteredRepos(ActivityFilters filters) {
     if (filters.orgs.isEmpty) return widget.allRepos;
     return widget.allRepos.where((r) {
       final org = r.contains('/') ? r.split('/').first : r;
@@ -53,7 +52,9 @@ class _ActivityFilterBarState extends ConsumerState<ActivityFilterBar> {
   Widget build(BuildContext context) {
     final filters = ref.watch(activityFiltersProvider);
 
-    if (filters.search != _searchController.text) {
+    // Sync controller on external reset (e.g. Reset button) without
+    // clobbering cursor position during normal typing.
+    if (filters.search != _searchController.text && !_searchFocus.hasFocus) {
       _searchController.text = filters.search;
     }
 
@@ -105,7 +106,7 @@ class _ActivityFilterBarState extends ConsumerState<ActivityFilterBar> {
             _multiSelectPopup(
               label: 'Repo',
               icon: Icons.folder_outlined,
-              allValues: _filteredRepos.toList()..sort(),
+              allValues: _filteredRepos(filters).toList()..sort(),
               selected: filters.repos,
               displayFn: (v) => v.contains('/') ? v.split('/').last : v,
               onChanged: (repos) => ref

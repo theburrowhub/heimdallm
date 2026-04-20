@@ -245,6 +245,7 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
 
     final prs    = prsAsync.valueOrNull ?? [];
     final issues = issuesAsync.valueOrNull ?? [];
+
     // Collect all known repos for the filter bar.
     final allRepos = <String>{
       ...prs.map((p) => p.repo),
@@ -503,10 +504,7 @@ class _IssueActivityTile extends StatelessWidget {
   final TrackedIssue issue;
   const _IssueActivityTile({required this.issue});
 
-  String get _type =>
-      (issue.latestReview != null && issue.latestReview!.actionTaken == 'develop')
-          ? 'dev'
-          : 'it';
+  String get _type => _itemType(_IssueItem(issue));
 
   @override
   Widget build(BuildContext context) {
