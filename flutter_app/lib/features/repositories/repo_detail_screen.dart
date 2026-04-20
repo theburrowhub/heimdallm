@@ -141,7 +141,7 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
             padding: const EdgeInsets.all(16),
             child: Column(
               children: [
-                // ── General ──────────────────────────────────────────────
+                // ── Section 1: General ─────────────────────────────────
                 _sectionCard('General', [
                   const Text('Local directory',
                       style: TextStyle(fontSize: 12, color: Colors.grey)),
@@ -157,19 +157,20 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                     onChanged: (dir) => _update(_config.copyWith(
                         localDir: dir.isEmpty ? null : dir)),
                   ),
-                  const SizedBox(height: 12),
-                  OverrideDropdown(
-                    label: 'Review mode',
-                    globalValue: appConfig.reviewMode,
-                    overrideValue: _config.reviewMode,
-                    options: const ['single', 'multi'],
-                    onChanged: (v) =>
-                        _update(_config.copyWith(reviewMode: v)),
-                  ),
                 ]),
 
-                // ── AI Agent ─────────────────────────────────────────────
-                _sectionCard('AI Agent', [
+                // ── Section 2: PR Review ───────────────────────────────
+                _sectionCard('PR Review', [
+                  SwitchListTile(
+                    title: const Text('Auto-review PRs',
+                        style: TextStyle(fontSize: 13)),
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    value: _config.prEnabled ?? false,
+                    onChanged: (v) =>
+                        _update(_config.copyWith(prEnabled: v)),
+                  ),
+                  const SizedBox(height: 6),
                   OverrideDropdown(
                     label: 'Primary',
                     globalValue: appConfig.aiPrimary,
@@ -191,6 +192,15 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                   ),
                   const SizedBox(height: 10),
                   OverrideDropdown(
+                    label: 'Review mode',
+                    globalValue: appConfig.reviewMode,
+                    overrideValue: _config.reviewMode,
+                    options: const ['single', 'multi'],
+                    onChanged: (v) =>
+                        _update(_config.copyWith(reviewMode: v)),
+                  ),
+                  const SizedBox(height: 10),
+                  OverrideDropdown(
                     label: 'Prompt',
                     globalValue: 'default',
                     overrideValue: _config.promptId,
@@ -200,19 +210,18 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                   ),
                 ]),
 
-                // ── Issue Tracking ───────────────────────────────────────
+                // ── Section 3: Issue Tracking ──────────────────────────
                 _sectionCard('Issue Tracking', [
-                  AutocompleteChipField(
-                    label: 'Develop labels',
-                    helper: 'Issues with these labels get a branch + PR',
-                    selectedValues: _config.developLabels ?? appConfig.issueTracking.developLabels,
-                    availableOptions: _repoLabels,
-                    isOverridden: _config.developLabels != null,
-                    globalHint: _joinList(appConfig.issueTracking.developLabels),
-                    onChanged: (v) => _update(_config.copyWith(developLabels: v)),
-                    onReset: () => _update(_config.copyWith(developLabels: null)),
+                  SwitchListTile(
+                    title: const Text('Triage issues',
+                        style: TextStyle(fontSize: 13)),
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    value: _config.itEnabled ?? false,
+                    onChanged: (v) =>
+                        _update(_config.copyWith(itEnabled: v)),
                   ),
-                  const SizedBox(height: 10),
+                  const SizedBox(height: 6),
                   AutocompleteChipField(
                     label: 'Review-only labels',
                     helper: 'Issues with these labels get a review comment only',
@@ -274,12 +283,42 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                     onChanged: (v) => _update(_config.copyWith(issueAssignees: v)),
                     onReset: () => _update(_config.copyWith(issueAssignees: null)),
                   ),
+                  const SizedBox(height: 10),
+                  OverrideDropdown(
+                    label: 'Prompt',
+                    globalValue: 'default',
+                    overrideValue: _config.issuePromptId,
+                    options: prompts.map((p) => p.id).toList(),
+                    onChanged: (v) =>
+                        _update(_config.copyWith(issuePromptId: v)),
+                  ),
                 ]),
 
-                // ── PR Metadata ──────────────────────────────────────────
-                _sectionCard('PR Metadata', [
+                // ── Section 4: Develop ─────────────────────────────────
+                _sectionCard('Develop', [
+                  SwitchListTile(
+                    title: const Text('Auto-implement issues',
+                        style: TextStyle(fontSize: 13)),
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    value: _config.devEnabled ?? false,
+                    onChanged: (v) =>
+                        _update(_config.copyWith(devEnabled: v)),
+                  ),
+                  const SizedBox(height: 6),
                   AutocompleteChipField(
-                    label: 'Reviewers',
+                    label: 'Develop labels',
+                    helper: 'Issues with these labels get a branch + PR',
+                    selectedValues: _config.developLabels ?? appConfig.issueTracking.developLabels,
+                    availableOptions: _repoLabels,
+                    isOverridden: _config.developLabels != null,
+                    globalHint: _joinList(appConfig.issueTracking.developLabels),
+                    onChanged: (v) => _update(_config.copyWith(developLabels: v)),
+                    onReset: () => _update(_config.copyWith(developLabels: null)),
+                  ),
+                  const SizedBox(height: 10),
+                  AutocompleteChipField(
+                    label: 'PR Reviewers',
                     helper: 'GitHub usernames to request review',
                     selectedValues: _config.prReviewers ?? [],
                     availableOptions: _repoCollaborators,
@@ -289,7 +328,7 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                   ),
                   const SizedBox(height: 10),
                   AutocompleteChipField(
-                    label: 'Assignee',
+                    label: 'PR Assignee',
                     helper: 'GitHub username to assign to PRs',
                     selectedValues: _config.prAssignee != null ? [_config.prAssignee!] : [],
                     availableOptions: _repoCollaborators,
@@ -300,7 +339,7 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                   ),
                   const SizedBox(height: 10),
                   AutocompleteChipField(
-                    label: 'Labels',
+                    label: 'PR Labels',
                     helper: 'Labels to add to PRs',
                     selectedValues: _config.prLabels ?? [],
                     availableOptions: _repoLabels,
@@ -316,6 +355,15 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                     options: const ['true', 'false'],
                     onChanged: (v) => _update(_config.copyWith(
                         prDraft: v != null ? v == 'true' : null)),
+                  ),
+                  const SizedBox(height: 10),
+                  OverrideDropdown(
+                    label: 'Prompt',
+                    globalValue: 'default',
+                    overrideValue: _config.developPromptId,
+                    options: prompts.map((p) => p.id).toList(),
+                    onChanged: (v) =>
+                        _update(_config.copyWith(developPromptId: v)),
                   ),
                 ]),
               ],

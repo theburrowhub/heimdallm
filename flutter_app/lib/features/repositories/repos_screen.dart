@@ -164,6 +164,7 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
                   : _RepoListWithSections(
                       repos: filtered,
                       configs: _repoConfigs,
+                      appConfig: config,
                       onChanged: _onChange,
                     ),
             ),
@@ -179,11 +180,13 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
 class _RepoListWithSections extends ConsumerStatefulWidget {
   final List<String> repos;
   final Map<String, RepoConfig> configs;
+  final AppConfig appConfig;
   final void Function(String repo, RepoConfig rc) onChanged;
 
   const _RepoListWithSections({
     required this.repos,
     required this.configs,
+    required this.appConfig,
     required this.onChanged,
   });
 
@@ -274,7 +277,7 @@ class _RepoListWithSectionsState extends ConsumerState<_RepoListWithSections> {
           items.add(_RepoTile(
             repo: r,
             config: widget.configs[r]!,
-            onChanged: (rc) => widget.onChanged(r, rc),
+            appConfig: widget.appConfig,
           ));
         }
       }
@@ -331,23 +334,52 @@ class _RepoListWithSectionsState extends ConsumerState<_RepoListWithSections> {
   }
 }
 
+// ── LED indicator ────────────────────────────────────────────────────────────
+
+class _Led extends StatelessWidget {
+  final String status; // 'off', 'global', 'repo'
+  final String tooltip;
+  const _Led({required this.status, required this.tooltip});
+
+  @override
+  Widget build(BuildContext context) {
+    final color = switch (status) {
+      'repo'   => Colors.green.shade500,
+      'global' => Colors.blue.shade500,
+      _        => Colors.red.shade800,
+    };
+    return Tooltip(
+      message: '$tooltip: ${_label()}',
+      child: Container(
+        width: 8, height: 8,
+        decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+      ),
+    );
+  }
+
+  String _label() => switch (status) {
+    'repo'   => 'active (repo)',
+    'global' => 'active (global)',
+    _        => 'inactive',
+  };
+}
+
 // ── Repo tile ─────────────────────────────────────────────────────────────
 
 class _RepoTile extends StatelessWidget {
   final String repo;
   final RepoConfig config;
-  final ValueChanged<RepoConfig> onChanged;
+  final AppConfig appConfig;
 
   const _RepoTile({
     required this.repo,
     required this.config,
-    required this.onChanged,
+    required this.appConfig,
   });
 
   @override
   Widget build(BuildContext context) {
     final hasDirMapping = config.localDir != null && config.localDir!.isNotEmpty;
-    final hasOverrides = config.hasAiOverride;
 
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 3),
@@ -358,11 +390,22 @@ class _RepoTile extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
           child: Row(
             children: [
-              Switch(
-                value: config.isMonitored,
-                onChanged: (v) => onChanged(config.copyWith(prEnabled: v)),
+              _Led(
+                status: config.prLedStatus(appConfig.repositories.contains(repo)),
+                tooltip: 'PR Review',
               ),
-              const SizedBox(width: 8),
+              const SizedBox(width: 4),
+              _Led(
+                status: config.itLedStatus(appConfig.issueTracking.enabled),
+                tooltip: 'Issue Tracking',
+              ),
+              const SizedBox(width: 4),
+              _Led(
+                status: config.devLedStatus(
+                    appConfig.issueTracking.enabled, hasDirMapping),
+                tooltip: 'Develop',
+              ),
+              const SizedBox(width: 10),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -389,13 +432,6 @@ class _RepoTile extends StatelessWidget {
                           color: hasDirMapping ? Colors.green.shade500 : Colors.grey.shade600,
                         ),
                       ),
-                      if (hasOverrides) ...[
-                        const SizedBox(width: 8),
-                        Icon(Icons.tune, size: 12, color: Colors.blue.shade400),
-                        const SizedBox(width: 2),
-                        Text('overrides',
-                            style: TextStyle(fontSize: 10, color: Colors.blue.shade400)),
-                      ],
                     ]),
                   ],
                 ),
@@ -407,6 +443,4 @@ class _RepoTile extends StatelessWidget {
       ),
     );
   }
-
 }
-
