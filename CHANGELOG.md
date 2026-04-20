@@ -2,6 +2,26 @@
 
 > **Note:** Versions 0.1.0–0.1.3 were originally published under [`theburrowhub/heimdallr-docker`](https://github.com/theburrowhub/heimdallr-docker) (now archived). The project was unified into this repository and renamed to Heimdallm in v0.1.1.
 
+## [0.1.8](https://github.com/theburrowhub/heimdallm/compare/v0.1.7...v0.1.8) (2026-04-20)
+
+
+### Features
+
+* **issues:** issue dependencies + auto-promote when blockers close ([#93](https://github.com/theburrowhub/heimdallm/issues/93)) ([6823967](https://github.com/theburrowhub/heimdallm/commit/68239676ab31fdbbd1bcde53119add5a355b82b2))
+* **issues:** sub-issues support + promotion robustness (closes [#94](https://github.com/theburrowhub/heimdallm/issues/94), [#97](https://github.com/theburrowhub/heimdallm/issues/97)) ([#98](https://github.com/theburrowhub/heimdallm/issues/98)) ([6831393](https://github.com/theburrowhub/heimdallm/commit/6831393aa96063ba1757580e48bb3bdc8205c5c4))
+* **make:** add `make up-build` for local-source rebuild-and-start ([#89](https://github.com/theburrowhub/heimdallm/issues/89)) ([4b88603](https://github.com/theburrowhub/heimdallm/commit/4b886037145bc9c6ae8c535a29c929daa1cb6364))
+* show GitHub review decision badge on PR list + detail ([#101](https://github.com/theburrowhub/heimdallm/issues/101)) ([0ad6eec](https://github.com/theburrowhub/heimdallm/commit/0ad6eecb84b44c77c1b79500c33d0a6e6f9a26bf))
+* **web_ui:** reuse Heimdallm app icon in header + favicon ([#85](https://github.com/theburrowhub/heimdallm/issues/85)) ([53b439e](https://github.com/theburrowhub/heimdallm/commit/53b439e43335199c81d8b9eb81bdfc226c6bd652))
+
+
+### Bug Fixes
+
+* **ci:** consolidate build jobs into release.yml ([#65](https://github.com/theburrowhub/heimdallm/issues/65)) ([3c7d1ea](https://github.com/theburrowhub/heimdallm/commit/3c7d1ea653d56d254317021698828fd4afff4cc1))
+* **daemon:** accept read-only fields in PUT /config so web UI saves don't 400 ([#87](https://github.com/theburrowhub/heimdallm/issues/87)) ([4a49c96](https://github.com/theburrowhub/heimdallm/commit/4a49c9647f4298c4badcdb66e424473d28329f45)), closes [#86](https://github.com/theburrowhub/heimdallm/issues/86)
+* **daemon:** harden store-layer merge — atomic, strict reload, drop server_port ([#82](https://github.com/theburrowhub/heimdallm/issues/82)) ([4cec262](https://github.com/theburrowhub/heimdallm/commit/4cec2629f1c9a54b03d542752b5fce2b16ae8dc8))
+* **docker:** forward HEIMDALLM_ISSUE_* + HEIMDALLM_DISCOVERY_* env vars ([#96](https://github.com/theburrowhub/heimdallm/issues/96)) ([310c048](https://github.com/theburrowhub/heimdallm/commit/310c048deea31d4505c97545fafbc87637dece00))
+* re-reviews no longer repeat false positives — structured review cycle context ([#92](https://github.com/theburrowhub/heimdallm/issues/92)) ([1cc96b5](https://github.com/theburrowhub/heimdallm/commit/1cc96b5ac480fe6e0132db074a9b8534387dec78))
+
 ## [0.1.7](https://github.com/theburrowhub/heimdallm/compare/v0.1.6...v0.1.7) (2026-04-20)
 
 
