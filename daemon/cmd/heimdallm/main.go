@@ -301,9 +301,9 @@ func main() {
 
 			// ── Issue tracking cycle ─────────────────────────────────────
 			cfgMu.Lock()
-			itCfg := c.GitHub.IssueTracking
+			globalIT := c.GitHub.IssueTracking
 			cfgMu.Unlock()
-			if itCfg.Enabled {
+			if globalIT.Enabled {
 				loginMu.Lock()
 				authUser := cachedLogin
 				loginMu.Unlock()
@@ -378,7 +378,10 @@ func main() {
 				}
 
 				for _, repo := range repos {
-					n, err := issueFetcher.ProcessRepo(context.Background(), repo, itCfg, authUser, optsFor)
+					cfgMu.Lock()
+					repoIT := c.IssueTrackingForRepo(repo)
+					cfgMu.Unlock()
+					n, err := issueFetcher.ProcessRepo(context.Background(), repo, repoIT, authUser, optsFor)
 					if err != nil {
 						slog.Error("poll: issue fetch failed", "repo", repo, "err", err)
 						continue
@@ -439,14 +442,18 @@ func main() {
 		cfgMu.Lock()
 		c := cfg
 		cfgMu.Unlock()
-		repoOverrides := make(map[string]map[string]string)
+		repoOverrides := make(map[string]map[string]any)
 		for repo, ai := range c.AI.Repos {
-			repoOverrides[repo] = map[string]string{
+			ro := map[string]any{
 				"primary":     ai.Primary,
 				"fallback":    ai.Fallback,
 				"review_mode": ai.ReviewMode,
 				"local_dir":   ai.LocalDir,
 			}
+			if ai.IssueTracking != nil {
+				ro["issue_tracking"] = ai.IssueTracking
+			}
+			repoOverrides[repo] = ro
 		}
 		agentConfigs := make(map[string]map[string]any)
 		for name, ac := range c.AI.Agents {
