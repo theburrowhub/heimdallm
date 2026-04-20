@@ -14,6 +14,7 @@ import (
 // uses. Scoped to the minimum so tests can inject an in-memory fake.
 type PromoteIssueClient interface {
 	ListOpenIssues(repo string) ([]*github.Issue, error)
+	ListSubIssues(repo string, number int) ([]*github.Issue, error)
 	GetIssue(repo string, number int) (*github.Issue, error)
 	AddLabels(repo string, number int, labels []string) error
 	RemoveLabels(repo string, number int, labels []string) error
@@ -76,14 +77,41 @@ func PromoteReady(ctx context.Context, c PromoteIssueClient, cfg config.IssueTra
 			if len(blockedOnIssue) == 0 {
 				continue
 			}
+			// Collect deps from BOTH sources: the `## Depends on` body
+			// parser (cross-org-capable) AND GitHub's native sub-issues
+			// REST (same-owner-only). Unioned and deduped so operators
+			// can use either or both without double-counting.
 			deps := ParseDependencies(issue.Body, repo)
-			if len(deps) == 0 {
-				// Carries a blocked label but no structured deps declared.
-				// We can't know what "ready" means here, so stay out — the
-				// operator likely wants to unblock manually.
+			subIssues, err := c.ListSubIssues(repo, issue.Number)
+			if err != nil {
+				// Can't see native sub-issues this cycle: skip the whole
+				// issue rather than promote on incomplete information.
+				// Body-alone might say "ready" while a native sub-issue
+				// we can't read is still open — worst-case scenario.
+				slog.Warn("issues promote: sub-issues lookup failed, skipping issue this cycle",
+					"repo", repo, "issue", issue.Number, "err", err)
 				continue
 			}
-			states, err := checkDeps(c, deps, issueCache)
+			for _, si := range subIssues {
+				ref := IssueRef{Repo: si.Repo, Number: si.Number}
+				if !containsRef(deps, ref) {
+					deps = append(deps, ref)
+				}
+				// Pre-populate the cache with the sub-issue's state —
+				// the sub_issues endpoint returns full issue objects,
+				// saving a GetIssue round-trip during checkDeps.
+				cacheKey := fmt.Sprintf("%s#%d", ref.Repo, ref.Number)
+				if _, cached := issueCache[cacheKey]; !cached {
+					issueCache[cacheKey] = si
+				}
+			}
+			if len(deps) == 0 {
+				// Carries a blocked label but no deps declared in either
+				// source. Stay out — operator likely wants to unblock
+				// manually.
+				continue
+			}
+			states, err := checkDeps(ctx, c, deps, issueCache)
 			if err != nil {
 				slog.Warn("issues promote: dep check failed",
 					"repo", repo, "issue", issue.Number, "err", err)
@@ -122,11 +150,18 @@ type depState struct {
 // too (merged is a sub-state we don't need to inspect — "closed" covers
 // "this work has landed one way or another").
 //
+// `ctx` is consulted before every GetIssue fetch so a daemon shutdown
+// partway through a long dep chain exits promptly instead of blocking
+// on up to N × HTTP timeouts.
+//
 // On any GitHub call failure the function returns (nil, err) — the
 // caller logs and skips this issue, the next cycle retries.
-func checkDeps(c PromoteIssueClient, deps []IssueRef, cache map[string]*github.Issue) ([]depState, error) {
+func checkDeps(ctx context.Context, c PromoteIssueClient, deps []IssueRef, cache map[string]*github.Issue) ([]depState, error) {
 	out := make([]depState, 0, len(deps))
 	for _, d := range deps {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		key := fmt.Sprintf("%s#%d", d.Repo, d.Number)
 		got, ok := cache[key]
 		if !ok {
@@ -164,6 +199,18 @@ func applyPromotion(c PromoteIssueClient, issue *github.Issue, blockedLabels []s
 		return fmt.Errorf("remove blocked: %w", err)
 	}
 	if err := c.AddLabels(issue.Repo, issue.Number, []string{promoteTo}); err != nil {
+		// Compensating action: the blocked label is already removed, so
+		// if we return now the issue is orphaned — invisible to the
+		// promotion pass (no blocked label) AND to the normal pipeline
+		// (no promote-to label). Best-effort re-apply of the blocked
+		// label(s) keeps the issue in the queue so the next cycle
+		// retries. If that ALSO fails, we can only log loudly; the
+		// operator gets a paper trail in the logs.
+		if reErr := c.AddLabels(issue.Repo, issue.Number, blockedLabels); reErr != nil {
+			slog.Error("issues promote: could not restore blocked label after AddLabels failure; issue may be orphaned",
+				"repo", issue.Repo, "issue", issue.Number,
+				"original_err", err, "restore_err", reErr)
+		}
 		return fmt.Errorf("add promote-to: %w", err)
 	}
 	if err := c.PostComment(issue.Repo, issue.Number, auditCommentBody(promoteTo, states)); err != nil {
@@ -188,6 +235,18 @@ func auditCommentBody(promoteTo string, states []depState) string {
 	}
 	sb.WriteString("\n---\n*Promoted by Heimdallm*")
 	return sb.String()
+}
+
+// containsRef reports whether refs already includes target. Cheap linear
+// scan — dep lists are small (single digits in practice), so the map
+// allocation overhead of a set wouldn't pay off.
+func containsRef(refs []IssueRef, target IssueRef) bool {
+	for _, r := range refs {
+		if r.Repo == target.Repo && r.Number == target.Number {
+			return true
+		}
+	}
+	return false
 }
 
 func lowerSet(xs []string) map[string]struct{} {

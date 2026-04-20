@@ -192,6 +192,44 @@ func (c *Client) GetIssue(repo string, number int) (*Issue, error) {
 	return &issue, nil
 }
 
+// ListSubIssues returns the native GitHub sub-issues declared under a
+// parent issue. GitHub's sub-issues are same-owner only (the REST endpoint
+// refuses cross-owner children) but can span repos inside that owner, so
+// each returned *Issue has its Repo resolved from the embedded repository
+// object when present, falling back to the parent repo.
+//
+// Used by the dependency promotion pass to pick up deps declared via the
+// native UI/API instead of (or alongside) a `## Depends on` Markdown
+// section in the parent body. A 200 with an empty array is returned as a
+// nil slice and nil error — GitHub's semantics for "no sub-issues".
+func (c *Client) ListSubIssues(repo string, number int) ([]*Issue, error) {
+	if repo == "" {
+		return nil, fmt.Errorf("github: ListSubIssues: empty repo")
+	}
+	path := fmt.Sprintf("/repos/%s/issues/%d/sub_issues", repo, number)
+	resp, err := c.do("GET", path, "application/vnd.github+json")
+	if err != nil {
+		return nil, fmt.Errorf("github: list sub-issues %s#%d: %w", repo, number, err)
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("github: list sub-issues %s#%d: status %d: %s", repo, number, resp.StatusCode, safeTruncate(string(body), maxErrBodyLen))
+	}
+	var out []*Issue
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("github: decode sub-issues %s#%d: %w", repo, number, err)
+	}
+	for _, issue := range out {
+		if issue.Repository != nil && issue.Repository.FullName != "" {
+			issue.Repo = issue.Repository.FullName
+		} else {
+			issue.Repo = repo
+		}
+	}
+	return out, nil
+}
+
 // SetAssignees sets assignees on an issue or pull request.
 func (c *Client) SetAssignees(repo string, number int, assignees []string) error {
 	if repo == "" || number == 0 || len(assignees) == 0 {

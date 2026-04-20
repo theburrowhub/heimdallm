@@ -16,16 +16,23 @@ import (
 // every mutating call so tests can assert the exact side effects without
 // an HTTP server standing in.
 type fakePromoteClient struct {
-	open          map[string][]*github.Issue              // repo → open issues (listed)
-	byRef         map[string]*github.Issue                // "repo#N" → issue (for GetIssue)
-	added         []struct{ Repo string; N int; Labels []string }
-	removed       []struct{ Repo string; N int; Labels []string }
-	comments      []struct{ Repo string; N int; Body string }
-	listErr       error
-	getErr        error
-	addErr        error
-	removeErr     error
-	commentErr    error
+	open       map[string][]*github.Issue              // repo → open issues (listed)
+	byRef      map[string]*github.Issue                // "repo#N" → issue (for GetIssue)
+	subIssues  map[string][]*github.Issue              // "repo#N" → children (for ListSubIssues)
+	added      []struct{ Repo string; N int; Labels []string }
+	removed    []struct{ Repo string; N int; Labels []string }
+	comments   []struct{ Repo string; N int; Body string }
+	listErr    error
+	getErr     error
+	subErr     error
+	addErr     error
+	// addLabelsFn lets a test inject custom per-call behaviour (e.g.
+	// "fail the first call, succeed the second"). When set, addErr is
+	// ignored. A nil return falls through to the normal "record call"
+	// path so successful calls still show up in `added`.
+	addLabelsFn func(repo string, n int, labels []string) error
+	removeErr   error
+	commentErr  error
 }
 
 func (f *fakePromoteClient) ListOpenIssues(repo string) ([]*github.Issue, error) {
@@ -44,8 +51,19 @@ func (f *fakePromoteClient) GetIssue(repo string, number int) (*github.Issue, er
 	}
 	return nil, fmt.Errorf("fake: no issue for %s", key)
 }
+func (f *fakePromoteClient) ListSubIssues(repo string, number int) ([]*github.Issue, error) {
+	if f.subErr != nil {
+		return nil, f.subErr
+	}
+	key := fmt.Sprintf("%s#%d", repo, number)
+	return f.subIssues[key], nil
+}
 func (f *fakePromoteClient) AddLabels(repo string, n int, labels []string) error {
-	if f.addErr != nil {
+	if f.addLabelsFn != nil {
+		if err := f.addLabelsFn(repo, n, labels); err != nil {
+			return err
+		}
+	} else if f.addErr != nil {
 		return f.addErr
 	}
 	f.added = append(f.added, struct{ Repo string; N int; Labels []string }{repo, n, labels})
@@ -260,6 +278,9 @@ func (f *failingPromoteClient) ListOpenIssues(repo string) ([]*github.Issue, err
 	}
 	return f.inner.ListOpenIssues(repo)
 }
+func (f *failingPromoteClient) ListSubIssues(repo string, n int) ([]*github.Issue, error) {
+	return f.inner.ListSubIssues(repo, n)
+}
 func (f *failingPromoteClient) GetIssue(repo string, n int) (*github.Issue, error) {
 	return f.inner.GetIssue(repo, n)
 }
@@ -271,6 +292,124 @@ func (f *failingPromoteClient) RemoveLabels(repo string, n int, ls []string) err
 }
 func (f *failingPromoteClient) PostComment(repo string, n int, body string) error {
 	return f.inner.PostComment(repo, n, body)
+}
+
+// ── native sub-issues support ────────────────────────────────────────────
+
+func TestPromoteReady_MergesSubIssuesWithBodyParser(t *testing.T) {
+	// Body declares one dep, sub-issues endpoint returns a different one.
+	// Both closed → promote. Assert both sources were consulted.
+	blocked := mkIssue("org/r", 10, "open", "## Depends on\n- #5\n", "blocked")
+	fake := &fakePromoteClient{
+		open:  map[string][]*github.Issue{"org/r": {blocked}},
+		byRef: map[string]*github.Issue{"org/r#5": mkIssue("org/r", 5, "closed", "")},
+		subIssues: map[string][]*github.Issue{
+			"org/r#10": {mkIssue("org/r", 7, "closed", "")},
+		},
+	}
+	n, err := PromoteReady(context.Background(), fake, baseCfg(), []string{"org/r"})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("n = %d, want 1", n)
+	}
+	if len(fake.removed) != 1 {
+		t.Errorf("expected one label-remove call, got %d", len(fake.removed))
+	}
+}
+
+func TestPromoteReady_SubIssueStillOpen_NotPromoted(t *testing.T) {
+	// Body says "ready"; a native sub-issue is still open → must NOT promote.
+	// This is the safety case for "fall back to body would be unsafe" — the
+	// invariant we protect against sub-issues-API-failure.
+	blocked := mkIssue("org/r", 10, "open", "## Depends on\n- #5\n", "blocked")
+	fake := &fakePromoteClient{
+		open:  map[string][]*github.Issue{"org/r": {blocked}},
+		byRef: map[string]*github.Issue{"org/r#5": mkIssue("org/r", 5, "closed", "")},
+		subIssues: map[string][]*github.Issue{
+			"org/r#10": {mkIssue("org/r", 7, "open", "")},
+		},
+	}
+	n, err := PromoteReady(context.Background(), fake, baseCfg(), []string{"org/r"})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("n = %d, want 0 (open sub-issue blocks promotion)", n)
+	}
+}
+
+func TestPromoteReady_SubIssuesOnly_NoBodySection(t *testing.T) {
+	// Issue uses native sub-issues exclusively (no `## Depends on` section).
+	// Previously this would be skipped as "no deps declared". With native
+	// support, sub-issues themselves ARE declared deps.
+	blocked := mkIssue("org/r", 10, "open", "body with no deps section", "blocked")
+	fake := &fakePromoteClient{
+		open: map[string][]*github.Issue{"org/r": {blocked}},
+		subIssues: map[string][]*github.Issue{
+			"org/r#10": {mkIssue("org/r", 7, "closed", "")},
+		},
+	}
+	n, err := PromoteReady(context.Background(), fake, baseCfg(), []string{"org/r"})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("n = %d, want 1 (native sub-issue drives promotion)", n)
+	}
+}
+
+func TestPromoteReady_SubIssuesAPIFailure_SkipsIssue(t *testing.T) {
+	// Transient sub-issues API outage → skip this issue, don't fall back
+	// to body-only. Body could say "ready" while a native sub-issue we
+	// can't see is open, which would promote prematurely.
+	blocked := mkIssue("org/r", 10, "open", "## Depends on\n- #5\n", "blocked")
+	fake := &fakePromoteClient{
+		open:   map[string][]*github.Issue{"org/r": {blocked}},
+		byRef:  map[string]*github.Issue{"org/r#5": mkIssue("org/r", 5, "closed", "")},
+		subErr: errors.New("simulated 5xx"),
+	}
+	n, err := PromoteReady(context.Background(), fake, baseCfg(), []string{"org/r"})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("n = %d, want 0 (sub-issues API error must skip, not fall back)", n)
+	}
+	if len(fake.removed) != 0 {
+		t.Errorf("expected no label mutations on sub-issues failure, got %v", fake.removed)
+	}
+}
+
+func TestPromoteReady_SubIssuesDedupWithBodyRefs(t *testing.T) {
+	// Same dep listed in both the body section and as a native sub-issue.
+	// Must be deduped — we don't want to GetIssue the same ref twice or
+	// double-list it in the audit comment.
+	blocked := mkIssue("org/r", 10, "open", "## Depends on\n- #5\n", "blocked")
+	counting := &countingPromoteClient{
+		inner: &fakePromoteClient{
+			open: map[string][]*github.Issue{"org/r": {blocked}},
+			byRef: map[string]*github.Issue{
+				"org/r#5": mkIssue("org/r", 5, "closed", ""),
+			},
+			subIssues: map[string][]*github.Issue{
+				"org/r#10": {mkIssue("org/r", 5, "closed", "")}, // same #5 via native
+			},
+		},
+	}
+	n, err := PromoteReady(context.Background(), counting, baseCfg(), []string{"org/r"})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("n = %d, want 1", n)
+	}
+	// checkDeps consults the cache first; the sub-issue's state pre-populated
+	// it. So GetIssue for #5 should NOT be hit at all in this test.
+	if counting.getIssueCalls != 0 {
+		t.Errorf("GetIssue calls = %d, want 0 (sub-issue state should prime the cache and satisfy the body ref)", counting.getIssueCalls)
+	}
 }
 
 func TestPromoteReady_CachesGetIssueAcrossBlockedIssues(t *testing.T) {
@@ -336,6 +475,9 @@ type countingPromoteClient struct {
 func (c *countingPromoteClient) ListOpenIssues(repo string) ([]*github.Issue, error) {
 	return c.inner.ListOpenIssues(repo)
 }
+func (c *countingPromoteClient) ListSubIssues(repo string, n int) ([]*github.Issue, error) {
+	return c.inner.ListSubIssues(repo, n)
+}
 func (c *countingPromoteClient) GetIssue(repo string, n int) (*github.Issue, error) {
 	c.getIssueCalls++
 	return c.inner.GetIssue(repo, n)
@@ -348,6 +490,88 @@ func (c *countingPromoteClient) RemoveLabels(repo string, n int, ls []string) er
 }
 func (c *countingPromoteClient) PostComment(repo string, n int, body string) error {
 	return c.inner.PostComment(repo, n, body)
+}
+
+// ── robustness (#94) ─────────────────────────────────────────────────────
+
+func TestPromoteReady_AddLabelsFailure_RestoresBlockedLabel(t *testing.T) {
+	// Scenario: RemoveLabels(blocked) succeeds, AddLabels(promoteTo)
+	// fails mid-flight (e.g. promote-to label missing in repo, transient
+	// 5xx). Without a compensating action the issue is orphaned: no
+	// blocked label (promotion pass skips it) AND no promote-to label
+	// (classification falls through to default_action=ignore).
+	//
+	// Contract: on AddLabels failure, applyPromotion must attempt to
+	// re-apply the blocked label(s) so the next cycle retries cleanly.
+	blocked := mkIssue("org/r", 10, "open", "## Depends on\n- #5\n", "blocked")
+	addCall := 0
+	fake := &fakePromoteClient{
+		open:  map[string][]*github.Issue{"org/r": {blocked}},
+		byRef: map[string]*github.Issue{"org/r#5": mkIssue("org/r", 5, "closed", "")},
+		addLabelsFn: func(repo string, n int, labels []string) error {
+			addCall++
+			if addCall == 1 {
+				// First call: the promote-to AddLabels. Fail it.
+				return errors.New("simulated AddLabels 5xx")
+			}
+			// Subsequent calls (the compensating one) succeed.
+			return nil
+		},
+	}
+
+	n, err := PromoteReady(context.Background(), fake, baseCfg(), []string{"org/r"})
+	if err != nil {
+		t.Fatalf("PromoteReady: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("n = %d, want 0 (AddLabels failure must abort the promotion)", n)
+	}
+	if addCall != 2 {
+		t.Errorf("AddLabels calls = %d, want 2 (one promote-to attempt + one compensating restore)", addCall)
+	}
+	// The successful call (the compensating one) must re-apply the
+	// blocked labels, not the promote-to.
+	if len(fake.added) != 1 {
+		t.Fatalf("expected 1 recorded successful AddLabels (the compensating one), got %d: %+v", len(fake.added), fake.added)
+	}
+	got := fake.added[0].Labels
+	if len(got) != 1 || got[0] != "blocked" {
+		t.Errorf("compensating AddLabels labels = %v, want [blocked] (blocked label restored)", got)
+	}
+}
+
+func TestCheckDeps_ContextCancellation_StopsLoop(t *testing.T) {
+	// Per-dep ctx check: with a cancelled context, checkDeps must exit
+	// before issuing any GetIssue HTTP call. Protects daemon shutdowns
+	// from 10-minute waits on issues with many deps + unresponsive
+	// GitHub.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancelled
+
+	client := &fakePromoteClient{
+		byRef: map[string]*github.Issue{
+			"org/r#1": mkIssue("org/r", 1, "closed", ""),
+			"org/r#2": mkIssue("org/r", 2, "closed", ""),
+		},
+	}
+	counting := &countingPromoteClient{inner: client}
+
+	deps := []IssueRef{
+		{Repo: "org/r", Number: 1},
+		{Repo: "org/r", Number: 2},
+	}
+	cache := make(map[string]*github.Issue)
+
+	_, err := checkDeps(ctx, counting, deps, cache)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled, got %v", err)
+	}
+	if counting.getIssueCalls > 0 {
+		t.Errorf("GetIssue called %d times, want 0 (ctx cancelled before any fetch)", counting.getIssueCalls)
+	}
 }
 
 func TestPromoteReady_MissingPromoteTarget_ReturnsError(t *testing.T) {

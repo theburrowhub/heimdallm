@@ -372,6 +372,99 @@ func TestGetIssue_NotFound(t *testing.T) {
 	}
 }
 
+// ── ListSubIssues ─────────────────────────────────────────────────────────────
+
+func TestListSubIssues(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" || r.URL.Path != "/repos/org/repo/issues/10/sub_issues" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`[
+			{"number": 1, "state": "closed", "title": "first child"},
+			{"number": 2, "state": "open",   "title": "second child"}
+		]`))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	got, err := c.ListSubIssues("org/repo", 10)
+	if err != nil {
+		t.Fatalf("ListSubIssues: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2", len(got))
+	}
+	if got[0].Number != 1 || got[0].State != "closed" {
+		t.Errorf("child[0] = %+v, want number=1 state=closed", got[0])
+	}
+	if got[1].Number != 2 || got[1].State != "open" {
+		t.Errorf("child[1] = %+v, want number=2 state=open", got[1])
+	}
+	// Repo must be resolved so downstream consumers can use IssueRef keys.
+	if got[0].Repo != "org/repo" {
+		t.Errorf("Repo = %q, want org/repo", got[0].Repo)
+	}
+}
+
+func TestListSubIssues_Empty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("[]"))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	got, err := c.ListSubIssues("org/repo", 10)
+	if err != nil {
+		t.Fatalf("ListSubIssues: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %d, want 0", len(got))
+	}
+}
+
+func TestListSubIssues_NotFound(t *testing.T) {
+	// If the parent issue doesn't exist, the endpoint 404s. That's a real
+	// error, not an empty list — surface it so the caller logs and the
+	// next cycle retries.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	if _, err := c.ListSubIssues("org/repo", 10); err == nil {
+		t.Fatal("expected error on 404, got nil")
+	}
+}
+
+func TestListSubIssues_CrossRepoSameOwner(t *testing.T) {
+	// GitHub's sub-issues endpoint returns the child issue with a
+	// `repository.full_name` that may differ from the parent's repo (same
+	// owner, different repo). The client must resolve Repo to the actual
+	// child repo, not the parent's, so the promoter keys refs correctly.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`[
+			{"number": 5, "state": "closed", "repository": {"full_name": "org/other-repo"}}
+		]`))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	got, err := c.ListSubIssues("org/parent-repo", 10)
+	if err != nil {
+		t.Fatalf("ListSubIssues: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len = %d, want 1", len(got))
+	}
+	if got[0].Repo != "org/other-repo" {
+		t.Errorf("Repo = %q, want org/other-repo (cross-repo same-owner sub-issue)", got[0].Repo)
+	}
+}
+
 // ── SetAssignees ──────────────────────────────────────────────────────────────
 
 func TestSetAssignees(t *testing.T) {

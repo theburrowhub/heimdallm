@@ -39,8 +39,16 @@ type Issue struct {
 	CreatedAt   time.Time        `json:"created_at"`
 	UpdatedAt   time.Time        `json:"updated_at"`
 	PullRequest *struct{}        `json:"pull_request,omitempty"`
-	Repo        string           `json:"-"`
-	Mode        config.IssueMode `json:"-"`
+	// Repository is populated by GitHub on endpoints that can return issues
+	// from more than one repo in a single response (e.g. the sub-issues
+	// endpoint — same-owner, possibly cross-repo children). Kept as a
+	// pointer so the extra field is zero-cost when the endpoint doesn't
+	// include it. Consumers normally read Repo (below) — that's set by
+	// the client from this field when present, else from the parent
+	// context.
+	Repository *Repo            `json:"repository,omitempty"`
+	Repo       string           `json:"-"`
+	Mode       config.IssueMode `json:"-"`
 }
 
 // IsPullRequest reports whether the record returned by the issues endpoint is

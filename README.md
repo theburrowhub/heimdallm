@@ -23,7 +23,7 @@ A SvelteKit web dashboard (`:3000`) with Dashboard, PR list, Issue list, prompt/
 
 - **Automatic reviews** — polls `review-requested:@me` on GitHub and submits reviews as your account
 - **Issue pipeline** — label-driven triage + optional auto-implement with branch/commit/PR cycle
-- **Issue dependencies** — mark downstream work with a `blocked` label and a `## Depends on` body section; Heimdallm auto-promotes when blockers close
+- **Issue dependencies** — mark downstream work with a `blocked` label; declare deps via a `## Depends on` body section *or* GitHub's native sub-issues; Heimdallm auto-promotes when all blockers close
 - **Configurable prompts** — general review, security audit, performance, architecture, or your own with `{diff}` `{title}` `{author}` `{comments}` placeholders, managed from the web UI at `/agents`
 - **Two feedback modes** — *single* (one consolidated review) or *multi* (one GitHub comment per issue + summary), globally and per repo
 - **Per-repo overrides** — different AI agent, prompt, and feedback mode per repository
@@ -250,34 +250,52 @@ HEIMDALLM_ISSUE_BLOCKED_LABELS=blocked
 HEIMDALLM_ISSUE_PROMOTE_TO_LABEL=ready
 ```
 
-**Declare dependencies** in the issue body under a `## Depends on` heading:
+**Declare dependencies** in either (or both) of two ways — Heimdallm
+reads both on every poll and unions the results:
 
-```markdown
-## Depends on
-- #42
-- other-org/shared#57
-```
+1. **Markdown `## Depends on` section** in the issue body:
 
-- Same-repo refs use `#N`. Cross-repo refs use `owner/repo#N` — works with
-  any repo your `GITHUB_TOKEN` can read, whether or not it's in your
-  monitored list.
-- The heading is case-insensitive and accepts an optional trailing colon
-  (`## Depends On:`). Multiple refs per bullet are fine.
+    ```markdown
+    ## Depends on
+    - #42
+    - other-org/shared#57
+    ```
+
+    Same-repo refs use `#N`. Cross-repo refs use `owner/repo#N` — works
+    with any repo your `GITHUB_TOKEN` can read (cross-org included). The
+    heading is case-insensitive and accepts an optional trailing colon.
+    Multiple refs per bullet are fine.
+
+2. **GitHub native sub-issues** attached to the parent via the issue UI
+   or REST API. Available since the sub-issues GA; fully same-owner,
+   cross-repo supported (`org/repo-a#1` can have `org/repo-b#2` as a
+   sub-issue — but **not** `other-org/repo#3`, GitHub refuses that).
+   No extra declaration in the body needed.
+
+Either source alone is enough to mark an issue as having dependencies.
+Refs that appear in both are deduped, and the sub-issue's state
+pre-populates the dep cache so Heimdallm spends one fewer GitHub API
+call on shared refs.
 
 **How it runs.** Every poll cycle, for each issue carrying a blocked
 label:
 
-1. Parse the `## Depends on` bullets.
-2. Ask GitHub for each referenced issue/PR state.
-3. If all are `closed` (merged PRs count as closed), remove the blocked
+1. Parse the `## Depends on` bullets from the body.
+2. Call GitHub's sub-issues REST endpoint for the same issue.
+3. Union the refs from both sources; dedup.
+4. For each unique ref, fetch state via the GitHub API (cached within
+   the cycle).
+5. If all are `closed` (merged PRs count as closed), remove the blocked
    label(s), add `HEIMDALLM_ISSUE_PROMOTE_TO_LABEL`, and leave an audit
-   comment.
-4. The same poll cycle's fetch pass then classifies the promoted issue
+   comment listing each dep and its state at check time.
+6. The same poll cycle's fetch pass then classifies the promoted issue
    normally and dispatches it to triage or auto-implement.
 
-Issues with a blocked label but **no `## Depends on` section** stay
-blocked — the daemon won't guess when to unblock them. Remove the label
-manually to opt out.
+Issues with a blocked label but **no declared deps in either source**
+stay blocked — the daemon won't guess when to unblock them. Remove the
+label manually to opt out. If the sub-issues API errors transiently on
+a given issue, Heimdallm skips that issue for the current cycle rather
+than risk promoting on incomplete information.
 
 Classification precedence is
 `skip > blocked > review_only > develop > default_action`, so an issue
