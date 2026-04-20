@@ -567,6 +567,116 @@ func newCfgWithPrimary() *config.Config {
 	return c
 }
 
+// ── read-only round-tripping (#86) ─────────────────────────────────────────
+
+func putConfigRequest(body string) *http.Request {
+	req := httptest.NewRequest("PUT", "/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	return req
+}
+
+func TestHandlerPutConfig_ReadOnlyKeys_Accepted(t *testing.T) {
+	// The web UI round-trips these fields verbatim from GET /config as a
+	// forward-compat safeguard; the handler must accept them (no 400) even
+	// though it won't persist them.
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"non_monitored", `{"non_monitored":["org/archived"]}`},
+		{"repo_overrides", `{"repo_overrides":{"org/a":{"primary":"claude"}}}`},
+		{"agent_configs", `{"agent_configs":{"claude":{"model":"claude-opus-4-7"}}}`},
+		{"server_port", `{"server_port":7842}`},
+		{"all-at-once", `{"non_monitored":[],"repo_overrides":{},"agent_configs":{},"server_port":7842}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := setupServer(t)
+			w := httptest.NewRecorder()
+			srv.Router().ServeHTTP(w, putConfigRequest(tc.body))
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestHandlerPutConfig_ReadOnlyKeys_NotPersisted(t *testing.T) {
+	// Accepted but never written: the configs table must stay untouched so
+	// reload doesn't have to re-examine them and ApplyStore's
+	// "unknown/bootstrap-only" branches stay dormant.
+	srv, s := setupServer(t)
+	body := `{"non_monitored":["org/x"],"repo_overrides":{"org/a":{"primary":"claude"}},"agent_configs":{"claude":{"model":"x"}},"server_port":7842}`
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, putConfigRequest(body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT: expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	rows, err := s.ListConfigs()
+	if err != nil {
+		t.Fatalf("ListConfigs: %v", err)
+	}
+	for _, banned := range []string{"non_monitored", "repo_overrides", "agent_configs", "server_port"} {
+		if _, leaked := rows[banned]; leaked {
+			t.Errorf("read-only key %q was persisted (rows: %v)", banned, rows)
+		}
+	}
+}
+
+func TestHandlerPutConfig_WritableAndReadOnly_Mixed(t *testing.T) {
+	// A realistic save: the Svelte UI sends editable fields next to the
+	// round-tripped read-only ones. Only the editable fields land in the
+	// store — nothing else bleeds in.
+	srv, s := setupServer(t)
+	body := `{"poll_interval":"30m","agent_configs":{"claude":{"model":"x"}},"non_monitored":["org/x"]}`
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, putConfigRequest(body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	rows, err := s.ListConfigs()
+	if err != nil {
+		t.Fatalf("ListConfigs: %v", err)
+	}
+	if rows["poll_interval"] != "30m" {
+		t.Errorf("poll_interval = %q, want 30m", rows["poll_interval"])
+	}
+	if _, ok := rows["agent_configs"]; ok {
+		t.Errorf("agent_configs unexpectedly persisted")
+	}
+	if _, ok := rows["non_monitored"]; ok {
+		t.Errorf("non_monitored unexpectedly persisted")
+	}
+}
+
+func TestHandlerPutConfig_UnknownKey_StillRejected(t *testing.T) {
+	// Security regression guard: the read-only escape hatch must NOT become
+	// a catch-all. Keys that are neither writable nor read-only still 400.
+	srv, _ := setupServer(t)
+	body := `{"not_a_real_key":"whatever"}`
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, putConfigRequest(body))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unknown key, got %d (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+func TestHandlerPutConfig_ServerPort_RangeStillValidated(t *testing.T) {
+	// server_port moves from writable to read-only, but its numeric-range
+	// pre-check (handlers.go:362) still fires — a client sending a
+	// privileged port is still rejected so the bug-class "validate before
+	// accept" stays intact even for read-only keys.
+	srv, _ := setupServer(t)
+	body := `{"server_port":80}`
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, putConfigRequest(body))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for port 80, got %d (body: %s)", w.Code, w.Body.String())
+	}
+}
+
 func TestHandlerPutConfigValueValidation(t *testing.T) {
 	srv := setupServerWithToken(t, "secret-token")
 

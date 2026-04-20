@@ -300,11 +300,11 @@ func (srv *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{})
 }
 
-// validConfigKeys is the exhaustive allowlist of keys that callers are permitted
-// to write via PUT /config. Any key outside this set is rejected with HTTP 400
-// to prevent arbitrary data injection into the configs table (security issue #4).
+// validConfigKeys is the exhaustive allowlist of keys that callers are
+// permitted to PERSIST via PUT /config. Any key outside this set (and outside
+// readOnlyConfigKeys below) is rejected with HTTP 400 to prevent arbitrary
+// data injection into the configs table (security issue #4).
 var validConfigKeys = map[string]struct{}{
-	"server_port":    {},
 	"poll_interval":  {},
 	"repositories":   {},
 	"ai_primary":     {},
@@ -312,6 +312,30 @@ var validConfigKeys = map[string]struct{}{
 	"review_mode":    {},
 	"retention_days": {},
 	"issue_tracking": {},
+}
+
+// readOnlyConfigKeys are keys that GET /config returns (so the web UI can
+// render them) but that PUT /config must not persist. The SvelteKit page
+// round-trips the entire GET payload as a forward-compat safeguard, so
+// rejecting these would 400 every save. We accept them at the endpoint
+// boundary and drop them before SetConfig — still a strict allowlist, no
+// arbitrary keys permitted.
+//
+// Why each key is here:
+//   - non_monitored : Flutter-UI managed list of disabled repos, not a
+//     web-UI concern.
+//   - repo_overrides: per-repo AI config lives in [ai.repos.<name>] or
+//     the Flutter app; no write-path through this endpoint.
+//   - agent_configs : per-CLI agent tuning lives in [ai.agents.<name>]
+//     or /agents endpoints; no write-path here.
+//   - server_port   : bootstrap-only (changing the listening port mid-
+//     flight would drop every in-flight connection). Its numeric-range
+//     pre-check still runs so clients get feedback on bad values.
+var readOnlyConfigKeys = map[string]struct{}{
+	"non_monitored":  {},
+	"repo_overrides": {},
+	"agent_configs":  {},
+	"server_port":    {},
 }
 
 // validPollIntervals is the allowlist of permitted poll_interval values.
@@ -336,7 +360,9 @@ func (srv *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for k := range body {
-		if _, ok := validConfigKeys[k]; !ok {
+		_, writable := validConfigKeys[k]
+		_, readOnly := readOnlyConfigKeys[k]
+		if !writable && !readOnly {
 			http.Error(w, fmt.Sprintf("unknown config key: %q", k), http.StatusBadRequest)
 			return
 		}
@@ -401,6 +427,11 @@ func (srv *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for k, v := range body {
+		// Read-only keys were accepted above to avoid 400s on UI saves that
+		// round-trip the GET payload, but they must not land in the store.
+		if _, readOnly := readOnlyConfigKeys[k]; readOnly {
+			continue
+		}
 		var val string
 		switch typed := v.(type) {
 		case string:
