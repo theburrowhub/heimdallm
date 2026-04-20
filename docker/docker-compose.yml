@@ -19,6 +19,26 @@ services:
       - HEIMDALLM_PORT=${HEIMDALLM_PORT:-7842}
       - HEIMDALLM_BIND_ADDR=0.0.0.0
 
+      # ── Issue tracking pipeline ────────────────────────────────────────
+      # All optional. The daemon's applyIssueTrackingEnv reads these at
+      # startup; without forwarding them here the operator's docker/.env
+      # values stay outside the container and silently get defaults.
+      - HEIMDALLM_ISSUE_TRACKING_ENABLED=${HEIMDALLM_ISSUE_TRACKING_ENABLED:-}
+      - HEIMDALLM_ISSUE_FILTER_MODE=${HEIMDALLM_ISSUE_FILTER_MODE:-}
+      - HEIMDALLM_ISSUE_DEFAULT_ACTION=${HEIMDALLM_ISSUE_DEFAULT_ACTION:-}
+      - HEIMDALLM_ISSUE_ORGANIZATIONS=${HEIMDALLM_ISSUE_ORGANIZATIONS:-}
+      - HEIMDALLM_ISSUE_ASSIGNEES=${HEIMDALLM_ISSUE_ASSIGNEES:-}
+      - HEIMDALLM_ISSUE_DEVELOP_LABELS=${HEIMDALLM_ISSUE_DEVELOP_LABELS:-}
+      - HEIMDALLM_ISSUE_REVIEW_ONLY_LABELS=${HEIMDALLM_ISSUE_REVIEW_ONLY_LABELS:-}
+      - HEIMDALLM_ISSUE_SKIP_LABELS=${HEIMDALLM_ISSUE_SKIP_LABELS:-}
+      - HEIMDALLM_ISSUE_BLOCKED_LABELS=${HEIMDALLM_ISSUE_BLOCKED_LABELS:-}
+      - HEIMDALLM_ISSUE_PROMOTE_TO_LABEL=${HEIMDALLM_ISSUE_PROMOTE_TO_LABEL:-}
+
+      # ── Topic-based repository discovery ───────────────────────────────
+      - HEIMDALLM_DISCOVERY_TOPIC=${HEIMDALLM_DISCOVERY_TOPIC:-}
+      - HEIMDALLM_DISCOVERY_ORGS=${HEIMDALLM_DISCOVERY_ORGS:-}
+      - HEIMDALLM_DISCOVERY_INTERVAL=${HEIMDALLM_DISCOVERY_INTERVAL:-}
+
       # ── AI CLI authentication ──────────────────────────────────────────
       # Claude Code CLI (Anthropic)
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
