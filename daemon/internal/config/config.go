@@ -63,6 +63,11 @@ type GitHubConfig struct {
 	// is enabled. Accepts any Go time.ParseDuration value.
 	DiscoveryInterval string `toml:"discovery_interval"`
 
+	// WatchInterval controls Tier 3 per-item polling — how often active
+	// items (PRs/issues with recent activity) are re-checked for state
+	// changes (label updates, new comments, merge/close). Defaults to "1m".
+	WatchInterval string `toml:"watch_interval"`
+
 	// IssueTracking turns the issue-tracking pipeline (fase-2) on and off and
 	// governs how issues are filtered and classified. The pipeline itself
 	// lives in downstream issues (#25 onward); this struct is the
@@ -441,6 +446,9 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := os.Getenv("HEIMDALLM_DISCOVERY_INTERVAL"); v != "" {
 		c.GitHub.DiscoveryInterval = v
+	}
+	if v := os.Getenv("HEIMDALLM_WATCH_INTERVAL"); v != "" {
+		c.GitHub.WatchInterval = v
 	}
 	c.applyIssueTrackingEnv()
 	c.applyPRMetadataEnv()
