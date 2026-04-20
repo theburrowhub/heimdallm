@@ -68,6 +68,20 @@ services:
       # POST /reload return 500 whenever config.toml was missing. The
       # image already declares VOLUME ["/config"] and chowns the path to
       # heimdallm:heimdallm during build.
+      #
+      # Migration (pre-v0.1.8 -> this): if you had a customised
+      # docker/config/config.toml under the old bind mount, copy it into
+      # the new named volume BEFORE your first `docker compose up` with
+      # this version, otherwise the daemon will regenerate from env vars
+      # and your manual edits are lost silently:
+      #
+      #   docker compose up --no-start heimdallm     # create container
+      #   docker cp docker/config/config.toml heimdallm:/config/config.toml
+      #   docker compose up -d                        # start with the file in place
+      #
+      # Env-driven setups (HEIMDALLM_* in docker/.env) and saves you made
+      # via the web UI Configuration screen are unaffected; both flow
+      # through the store layer and survive the volume swap.
       - heimdallm-config:/config
       #
       # Gemini OAuth tokens from host (if using browser-based auth):
