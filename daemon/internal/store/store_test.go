@@ -80,6 +80,57 @@ func TestReview_InsertAndList(t *testing.T) {
 	}
 }
 
+func TestMarkReviewPublished_RoundTripsStateAndID(t *testing.T) {
+	// Locks in the behaviour the web UI relies on for the review-decision
+	// badge: after SubmitReview succeeds, the GitHub-returned state must
+	// survive a store round-trip so PRTile can render "Approved" vs
+	// "Changes requested" without re-deriving from severity.
+	s := newTestStore(t)
+	prID, _ := s.UpsertPR(&store.PR{
+		GithubID: 1, Repo: "org/r", Number: 1, Title: "t", Author: "a",
+		URL: "u", State: "open", UpdatedAt: time.Now(), FetchedAt: time.Now(),
+	})
+
+	rev := &store.Review{
+		PRID:      prID,
+		CLIUsed:   "claude",
+		Summary:   "ok",
+		Issues:    "[]",
+		Suggestions: "[]",
+		Severity:  "low",
+		CreatedAt: time.Now().UTC().Truncate(time.Second),
+	}
+	revID, err := s.InsertReview(rev)
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	// Freshly inserted rows have no published state.
+	latest, err := s.LatestReviewForPR(prID)
+	if err != nil {
+		t.Fatalf("latest: %v", err)
+	}
+	if latest.GitHubReviewID != 0 || latest.GitHubReviewState != "" {
+		t.Fatalf("pre-publish got (id=%d, state=%q), want (0, \"\")",
+			latest.GitHubReviewID, latest.GitHubReviewState)
+	}
+
+	if err := s.MarkReviewPublished(revID, 98765, "APPROVED"); err != nil {
+		t.Fatalf("mark published: %v", err)
+	}
+
+	got, err := s.LatestReviewForPR(prID)
+	if err != nil {
+		t.Fatalf("latest after publish: %v", err)
+	}
+	if got.GitHubReviewID != 98765 {
+		t.Errorf("GitHubReviewID = %d, want 98765", got.GitHubReviewID)
+	}
+	if got.GitHubReviewState != "APPROVED" {
+		t.Errorf("GitHubReviewState = %q, want %q", got.GitHubReviewState, "APPROVED")
+	}
+}
+
 func TestPR_ListAll(t *testing.T) {
 	s := newTestStore(t)
 	for i := 0; i < 3; i++ {

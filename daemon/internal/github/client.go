@@ -194,8 +194,12 @@ func (c *Client) fetchByQualifier(username, qualifier string, repos []string) ([
 
 // SubmitReview posts an AI-generated review to GitHub as a PR review.
 // event should be "REQUEST_CHANGES", "COMMENT", or "APPROVE".
-// Returns the GitHub review ID.
-func (c *Client) SubmitReview(repo string, number int, body, event string) (int64, error) {
+// Returns the GitHub review ID and the review state reported by the API —
+// typically "APPROVED", "CHANGES_REQUESTED", or "COMMENTED" depending on the
+// event and on GitHub's server-side rules. We pass the state through to the
+// store so the web UI can show a review-decision badge sourced from GitHub
+// rather than derived locally from severity.
+func (c *Client) SubmitReview(repo string, number int, body, event string) (int64, string, error) {
 	path := fmt.Sprintf("/repos/%s/pulls/%d/reviews", repo, number)
 
 	payload := map[string]any{
@@ -206,7 +210,7 @@ func (c *Client) SubmitReview(repo string, number int, body, event string) (int6
 	data, _ := json.Marshal(payload)
 	req, err := http.NewRequest("POST", c.baseURL+path, strings.NewReader(string(data)))
 	if err != nil {
-		return 0, fmt.Errorf("github: submit review: %w", err)
+		return 0, "", fmt.Errorf("github: submit review: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Accept", "application/vnd.github+json")
@@ -215,22 +219,23 @@ func (c *Client) SubmitReview(repo string, number int, body, event string) (int6
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return 0, fmt.Errorf("github: submit review: %w", err)
+		return 0, "", fmt.Errorf("github: submit review: %w", err)
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != 200 {
 		errBody := safeTruncate(string(respBody), maxErrBodyLen)
-		return 0, fmt.Errorf("github: submit review: status %d: %s", resp.StatusCode, errBody)
+		return 0, "", fmt.Errorf("github: submit review: status %d: %s", resp.StatusCode, errBody)
 	}
 
 	var result struct {
-		ID int64 `json:"id"`
+		ID    int64  `json:"id"`
+		State string `json:"state"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
-		return 0, fmt.Errorf("github: submit review: decode: %w", err)
+		return 0, "", fmt.Errorf("github: submit review: decode: %w", err)
 	}
-	return result.ID, nil
+	return result.ID, result.State, nil
 }
 
 // PostComment posts a general comment on a PR (issue comment).

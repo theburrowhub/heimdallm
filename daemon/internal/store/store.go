@@ -36,15 +36,16 @@ CREATE TABLE IF NOT EXISTS prs (
 );
 
 CREATE TABLE IF NOT EXISTS reviews (
-  id               INTEGER PRIMARY KEY AUTOINCREMENT,
-  pr_id            INTEGER NOT NULL REFERENCES prs(id),
-  cli_used         TEXT NOT NULL,
-  summary          TEXT NOT NULL,
-  issues           TEXT NOT NULL,
-  suggestions      TEXT NOT NULL,
-  severity         TEXT NOT NULL,
-  created_at       DATETIME NOT NULL,
-  github_review_id INTEGER NOT NULL DEFAULT 0
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  pr_id               INTEGER NOT NULL REFERENCES prs(id),
+  cli_used            TEXT NOT NULL,
+  summary             TEXT NOT NULL,
+  issues              TEXT NOT NULL,
+  suggestions         TEXT NOT NULL,
+  severity            TEXT NOT NULL,
+  created_at          DATETIME NOT NULL,
+  github_review_id    INTEGER NOT NULL DEFAULT 0,
+  github_review_state TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS configs (
@@ -112,6 +113,7 @@ func Open(dsn string) (*Store, error) {
 	}
 	// Migrate existing DBs (ALTER TABLE ignores "duplicate column" errors silently)
 	db.Exec("ALTER TABLE reviews ADD COLUMN github_review_id INTEGER NOT NULL DEFAULT 0")
+	db.Exec("ALTER TABLE reviews ADD COLUMN github_review_state TEXT NOT NULL DEFAULT ''")
 	db.Exec("ALTER TABLE agents ADD COLUMN instructions TEXT NOT NULL DEFAULT ''")
 	db.Exec("ALTER TABLE agents ADD COLUMN cli_flags TEXT NOT NULL DEFAULT ''")
 	db.Exec("ALTER TABLE agents RENAME COLUMN prompt TO prompt") // no-op, ensures column exists

@@ -30,7 +30,7 @@ type Notifier interface {
 
 // GitHubReviewer can submit a review and post issue comments to GitHub.
 type GitHubReviewer interface {
-	SubmitReview(repo string, number int, body, event string) (int64, error)
+	SubmitReview(repo string, number int, body, event string) (int64, string, error)
 	// PostComment posts a general PR comment (used in multi-feedback mode).
 	PostComment(repo string, number int, body string) error
 }
@@ -259,7 +259,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		reviewBody = buildGitHubBody(result)
 	}
 
-	ghReviewID, publishErr := p.gh.SubmitReview(
+	ghReviewID, ghReviewState, publishErr := p.gh.SubmitReview(
 		pr.Repo, pr.Number,
 		reviewBody,
 		severityToEvent(result.Severity, len(result.Issues)),
@@ -269,10 +269,13 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		slog.Warn("pipeline: failed to publish to GitHub, will retry",
 			"pr", pr.Number, "err", publishErr)
 	} else {
-		_ = p.store.UpdateGitHubReviewID(rev.ID, ghReviewID)
+		_ = p.store.MarkReviewPublished(rev.ID, ghReviewID, ghReviewState)
 		rev.GitHubReviewID = ghReviewID
+		rev.GitHubReviewState = ghReviewState
 		slog.Info("pipeline: review published to GitHub",
-			"pr", pr.Number, "github_review_id", ghReviewID)
+			"pr", pr.Number,
+			"github_review_id", ghReviewID,
+			"github_review_state", ghReviewState)
 	}
 
 	p.notify.Notify("PR Review Complete",
@@ -295,9 +298,9 @@ func (p *Pipeline) PublishPending() {
 			continue
 		}
 		// Skip reviews for PRs with no repo — orphaned records that will never publish.
-		// Mark them as permanently published (fake ID -1) to stop retry noise.
+		// Mark them as permanently published (fake ID -1, empty state) to stop retry noise.
 		if pr.Repo == "" {
-			_ = p.store.UpdateGitHubReviewID(rev.ID, -1)
+			_ = p.store.MarkReviewPublished(rev.ID, -1, "")
 			slog.Info("pipeline: skipping pending review for PR with no repo", "review_id", rev.ID)
 			continue
 		}
@@ -311,7 +314,7 @@ func (p *Pipeline) PublishPending() {
 		}
 		// PublishPending always uses single-mode body (individual comments were
 		// already posted when the review first ran; we only retry the formal review).
-		ghID, err := p.gh.SubmitReview(
+		ghID, ghState, err := p.gh.SubmitReview(
 			pr.Repo, pr.Number,
 			buildGitHubBody(result),
 			severityToEvent(rev.Severity, len(issues)),
@@ -320,8 +323,11 @@ func (p *Pipeline) PublishPending() {
 			slog.Warn("pipeline: retry publish failed", "review_id", rev.ID, "err", err)
 			continue
 		}
-		_ = p.store.UpdateGitHubReviewID(rev.ID, ghID)
-		slog.Info("pipeline: pending review published", "review_id", rev.ID, "github_review_id", ghID)
+		_ = p.store.MarkReviewPublished(rev.ID, ghID, ghState)
+		slog.Info("pipeline: pending review published",
+			"review_id", rev.ID,
+			"github_review_id", ghID,
+			"github_review_state", ghState)
 	}
 }
 

@@ -22,8 +22,18 @@ func (f *fakeGH) FetchDiff(repo string, number int) (string, error) {
 	return f.diff, nil
 }
 
-func (f *fakeGH) SubmitReview(repo string, number int, body, event string) (int64, error) {
-	return 12345, nil // fake GitHub review ID
+func (f *fakeGH) SubmitReview(repo string, number int, body, event string) (int64, string, error) {
+	// Mirror GitHub's actual mapping from the submitted event to the
+	// returned state so pipeline tests that inspect GitHubReviewState see
+	// something realistic rather than a hardcoded constant.
+	state := "COMMENTED"
+	switch event {
+	case "APPROVE":
+		state = "APPROVED"
+	case "REQUEST_CHANGES":
+		state = "CHANGES_REQUESTED"
+	}
+	return 12345, state, nil
 }
 
 func (f *fakeGH) PostComment(repo string, number int, body string) error {
@@ -120,8 +130,8 @@ func (f *fakeGHCommentsError) FetchDiff(repo string, number int) (string, error)
 	return f.diff, nil
 }
 
-func (f *fakeGHCommentsError) SubmitReview(repo string, number int, body, event string) (int64, error) {
-	return 1, nil
+func (f *fakeGHCommentsError) SubmitReview(repo string, number int, body, event string) (int64, string, error) {
+	return 1, "COMMENTED", nil
 }
 
 func (f *fakeGHCommentsError) PostComment(repo string, number int, body string) error {
