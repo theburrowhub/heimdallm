@@ -3,10 +3,11 @@
   import { fetchConfig, reloadConfig, updateConfig } from '$lib/api.js';
   import type { Config } from '$lib/types.js';
 
-  // Known primitive fields + the nested issue_tracking block. The daemon's
-  // Config is free-form (Record<string, unknown>), so we load the raw
-  // payload, only edit the fields we know about, and write the whole
-  // object back on save — unknown fields round-trip unchanged.
+  // Known primitive fields + the nested issue_tracking block. GET /config
+  // returns a larger payload (including server-returned read-only fields
+  // like repo_overrides and agent_configs), but we deliberately extract
+  // only the fields this screen edits — the save payload is enumerated
+  // explicitly below so nothing unknown round-trips back to the daemon.
   type IssueTracking = {
     enabled?: boolean;
     filter_mode?: string;
@@ -18,7 +19,6 @@
     skip_labels?: string[];
   };
 
-  let raw: Config = $state({});
   let pollInterval = $state('5m');
   let aiPrimary = $state('');
   let aiFallback = $state('');
@@ -68,7 +68,6 @@
     err = null;
     fetchConfig()
       .then((c) => {
-        raw = c;
         pollInterval = asString(c.poll_interval, '5m');
         aiPrimary = asString(c.ai_primary);
         aiFallback = asString(c.ai_fallback);
@@ -106,19 +105,32 @@
     savedFlash = null;
     try {
       // Compose payload with ONLY the keys the daemon's PUT /config accepts.
-      // `{ ...raw }` would round-trip server-returned read-only fields
-      // (repo_overrides, agent_configs, server_port, non_monitored) which
-      // the daemon rejects with 400 unless explicitly allowlisted — see
-      // daemon/internal/server/handlers.go validConfigKeys.
+      // Contract mirrors `validConfigKeys` in
+      // daemon/internal/server/handlers.go — when that allowlist gains or
+      // loses a field, this object must be updated in lockstep or the save
+      // will silently drop writes / hit an "unknown config key" 400. The
+      // earlier `{ ...raw }` spread made us tolerant to server-returned
+      // read-only fields (repo_overrides, agent_configs, server_port,
+      // non_monitored) but also hid that lockstep requirement, so dropping
+      // the spread is intentional.
+      //
+      // issue_tracking is enumerated explicitly too — no `...raw.issue_tracking`
+      // — so an unknown sub-key a newer daemon starts returning doesn't
+      // flow through as a sub-field the daemon then rejects.
       const payload: Config = {
         poll_interval: pollInterval,
         ai_primary: aiPrimary,
-        ai_fallback: aiFallback || undefined,
+        // `!== ''` rather than `|| undefined`: the user has explicitly
+        // picked "— (none)" in the dropdown when the value is the empty
+        // string, and we want to transmit "no fallback". Any other falsy
+        // string (e.g. a hypothetical "0") would previously have been
+        // silently dropped — not a concrete bug today but defensible to
+        // fix now alongside the other payload tightening.
+        ai_fallback: aiFallback !== '' ? aiFallback : undefined,
         review_mode: reviewMode,
         retention_days: retentionDays,
         repositories: parseLines(repositoriesText),
         issue_tracking: {
-          ...((raw.issue_tracking as Record<string, unknown> | undefined) ?? {}),
           enabled: Boolean(it.enabled),
           filter_mode: it.filter_mode || 'exclusive',
           default_action: it.default_action || 'ignore',
