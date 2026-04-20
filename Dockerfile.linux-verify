@@ -78,7 +78,7 @@ RUN apt-get update -y \
     && apt-get install -y --no-install-recommends \
        libayatana-appindicator3-1 libnotify4 libsecret-1-0 \
        dbus-x11 libcanberra-gtk3-module mesa-utils \
-       curl gnupg \
+       curl gnupg xdg-utils \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
        | tee /usr/share/keyrings/githubcli-archive-keyring.gpg > /dev/null \
     && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \

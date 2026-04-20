@@ -404,6 +404,9 @@ run-linux:
 	\
 	echo "DISPLAY=$$DISPLAY" > "$$ENV_FILE" ; \
 	echo "HOME=$$HOME" >> "$$ENV_FILE" ; \
+	if [ -n "$$XDG_CURRENT_DESKTOP" ]; then \
+	  echo "XDG_CURRENT_DESKTOP=$$XDG_CURRENT_DESKTOP" >> "$$ENV_FILE" ; \
+	fi ; \
 	echo "HEIMDALLM_DAEMON_PATH=/app/daemon/bin/heimdallm" >> "$$ENV_FILE" ; \
 	if [ -n "$$GITHUB_TOKEN" ]; then \
 	  echo "GITHUB_TOKEN=$$GITHUB_TOKEN" >> "$$ENV_FILE" ; \
