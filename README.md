@@ -117,6 +117,50 @@ make setup         # (optional) copy the daemon API token into docker/.env.
 
 The Docker image is published to `ghcr.io/theburrowhub/heimdallm:latest` on every release — `make up` pulls it automatically when the `build:` contexts haven't changed locally.
 
+#### Reusing your host's AI authentication
+
+If you already authenticate the AI CLIs on your host, you can reuse those
+credentials inside Docker instead of pasting an API key into `.env`. The
+daemon runs its **own** bundled CLIs inside the container — it never shells
+out to the binaries on your host — but the container can read the same
+OAuth tokens the host CLIs wrote.
+
+**Claude Code (Max / Pro / Team subscription):**
+
+1. On your host, run once:
+   ```bash
+   claude setup-token
+   ```
+   Copy the long-lived token it prints.
+2. Add it to `docker/.env`:
+   ```
+   CLAUDE_CODE_OAUTH_TOKEN=<paste token>
+   ```
+   Leave `ANTHROPIC_API_KEY` empty. `docker-compose.yml` already forwards
+   `CLAUDE_CODE_OAUTH_TOKEN` into the container.
+3. Do **not** set `bare = true` in `config.toml` — it disables OAuth and
+   forces API-key mode.
+
+**Gemini CLI (browser OAuth):**
+
+1. Authenticate `gemini` on your host the normal way. Credentials land in
+   `~/.gemini/`.
+2. In `docker/docker-compose.yml`, uncomment the line under the `heimdallm`
+   service's `volumes:` block:
+   ```yaml
+   - ~/.gemini:/home/heimdallm/.gemini:ro
+   ```
+   The mount is read-only, so the container cannot clobber your host
+   credentials.
+3. Leave `GEMINI_API_KEY` empty in `docker/.env`.
+
+**Codex / OpenCode:** host-auth reuse is not wired up yet — use API keys
+(`OPENAI_API_KEY`, `CODEX_API_KEY`, `OPENROUTER_API_KEY`) in `docker/.env`.
+
+`make up` picks up the changes on the next start. Full reference (including
+Vertex AI service-account mode for Gemini) in
+[`docs/e2e-test-guide.md`](docs/e2e-test-guide.md).
+
 #### Auto-discover repositories by topic
 
 Instead of listing every repository in `HEIMDALLM_REPOSITORIES`, you can tag
