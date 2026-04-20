@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -55,11 +56,11 @@ func main() {
 	// /logs stream reads that file; writing only to stderr (as we used
 	// to) left the stream empty under Docker — see #75.
 	logDir := dataDir()
-	logFile := setupLogging(logDir)
-	if logFile != nil {
+	logCloser := setupLogging(logDir)
+	if logCloser != nil {
 		// Flush buffered writes on shutdown so the last lines reach
 		// disk even when the daemon is killed mid-log.
-		defer logFile.Close()
+		defer logCloser.Close()
 	}
 
 	cfgPath := configPath()
@@ -668,14 +669,46 @@ func main() {
 	broker.Stop()
 }
 
+// logRotationConfig reads HEIMDALLM_LOG_MAX_MB and HEIMDALLM_LOG_KEEP from
+// the environment, falling back to the package defaults. Invalid values
+// fall back to the default *and* warn to stderr so operators notice typos
+// instead of silently losing the override they thought they had set.
+// Logging is non-critical enough that a bad env var should never take the
+// daemon down.
+func logRotationConfig() (maxBytes int64, keep int) {
+	maxBytes = server.DefaultLogMaxBytes
+	keep = server.DefaultLogKeep
+	if v := os.Getenv("HEIMDALLM_LOG_MAX_MB"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			maxBytes = int64(n) * 1024 * 1024
+		} else {
+			fmt.Fprintf(os.Stderr, "heimdallm: ignoring invalid HEIMDALLM_LOG_MAX_MB=%q (want positive integer, using default %d MiB)\n",
+				v, server.DefaultLogMaxBytes/(1024*1024))
+		}
+	}
+	if v := os.Getenv("HEIMDALLM_LOG_KEEP"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			keep = n
+		} else {
+			fmt.Fprintf(os.Stderr, "heimdallm: ignoring invalid HEIMDALLM_LOG_KEEP=%q (want positive integer, using default %d)\n",
+				v, server.DefaultLogKeep)
+		}
+	}
+	return
+}
+
 // setupLogging configures slog to write to stderr and, when possible, also
 // to <dataDir>/heimdallm.log — the file the web UI's /logs endpoint tails
-// (see #75). Returns the opened file handle so the caller can Close it on
-// shutdown; returns nil when we're running stderr-only (either dataDir is
-// empty or the file open failed). Either way the daemon never refuses to
-// start because logging to disk failed; `docker logs` / the host terminal
-// continue to work.
-func setupLogging(dataDir string) *os.File {
+// (see #75). Returns an io.Closer so the caller can flush on shutdown;
+// returns nil when we're running stderr-only (either dataDir is empty or
+// the file open failed). The daemon never refuses to start because
+// logging to disk failed; `docker logs` / the host terminal continue to
+// work.
+//
+// The log file is wrapped in a size-based rotator (see #77). MaxBytes
+// and Keep come from HEIMDALLM_LOG_MAX_MB / HEIMDALLM_LOG_KEEP with the
+// server package defaults.
+func setupLogging(dataDir string) io.Closer {
 	handlerOpts := &slog.HandlerOptions{Level: slog.LevelInfo}
 
 	if dataDir == "" {
@@ -683,14 +716,9 @@ func setupLogging(dataDir string) *os.File {
 		return nil
 	}
 
-	// O_APPEND so restarts extend the log rather than truncating it;
-	// 0640 so the web container (different UID, same data volume) could
-	// read via group membership, and the host user keeps full write
-	// access. The web container today reads this over HTTP via the
-	// daemon, not directly, but keeping the mode narrow is still the
-	// right posture.
 	logPath := filepath.Join(dataDir, server.DaemonLogFileName)
-	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0640)
+	maxBytes, keep := logRotationConfig()
+	w, err := server.NewRotatingWriter(logPath, maxBytes, keep)
 	if err != nil {
 		// Warn via a temporary logger that is visible on stderr even
 		// before SetDefault runs below.
@@ -701,8 +729,8 @@ func setupLogging(dataDir string) *os.File {
 		return nil
 	}
 
-	slog.SetDefault(slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, f), handlerOpts)))
-	return f
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, w), handlerOpts)))
+	return w
 }
 
 // dataDir resolves the data directory.

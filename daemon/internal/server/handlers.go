@@ -770,6 +770,14 @@ func (srv *Server) handleLogsStream(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				continue
 			}
+			// Detect rotation: if the on-disk file is now smaller than
+			// our saved offset, the rotator renamed the old file and
+			// re-created a fresh one. Reset to 0 so we stream the new
+			// content from the beginning rather than stalling at an
+			// offset that points past EOF. See #77.
+			if stat, err := f2.Stat(); err == nil && stat.Size() < offset {
+				offset = 0
+			}
 			f2.Seek(offset, io.SeekStart) //nolint:errcheck
 			scanner := bufio.NewScanner(f2)
 			for scanner.Scan() {
