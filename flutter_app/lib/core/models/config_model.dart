@@ -92,6 +92,21 @@ class RepoConfig {
   final String? reviewMode;  // null = use global ("single" | "multi")
   final String? localDir;    // local repo directory for full-repo analysis
 
+  // Issue tracking overrides (null = inherit global)
+  final List<String>? developLabels;
+  final List<String>? reviewOnlyLabels;
+  final List<String>? skipLabels;
+  final String? issueFilterMode;
+  final String? issueDefaultAction;
+  final List<String>? issueOrganizations;
+  final List<String>? issueAssignees;
+
+  // PR metadata (null = inherit global)
+  final List<String>? prReviewers;
+  final String? prAssignee;
+  final List<String>? prLabels;
+  final bool? prDraft;
+
   const RepoConfig({
     this.monitored = true,
     this.aiPrimary,
@@ -99,27 +114,63 @@ class RepoConfig {
     this.promptId,
     this.reviewMode,
     this.localDir,
+    this.developLabels,
+    this.reviewOnlyLabels,
+    this.skipLabels,
+    this.issueFilterMode,
+    this.issueDefaultAction,
+    this.issueOrganizations,
+    this.issueAssignees,
+    this.prReviewers,
+    this.prAssignee,
+    this.prLabels,
+    this.prDraft,
   });
 
   bool get hasAiOverride =>
       aiPrimary != null || aiFallback != null || promptId != null ||
-      reviewMode != null || (localDir != null && localDir!.isNotEmpty);
+      reviewMode != null || (localDir != null && localDir!.isNotEmpty) ||
+      developLabels != null || reviewOnlyLabels != null || skipLabels != null ||
+      issueFilterMode != null || issueDefaultAction != null ||
+      prReviewers != null || prAssignee != null || prLabels != null;
 
   RepoConfig copyWith({
     bool? monitored,
-    Object? aiPrimary  = _sentinel,
-    Object? aiFallback = _sentinel,
-    Object? promptId   = _sentinel,
-    Object? reviewMode = _sentinel,
-    Object? localDir   = _sentinel,
+    Object? aiPrimary         = _sentinel,
+    Object? aiFallback        = _sentinel,
+    Object? promptId          = _sentinel,
+    Object? reviewMode        = _sentinel,
+    Object? localDir          = _sentinel,
+    Object? developLabels     = _sentinel,
+    Object? reviewOnlyLabels  = _sentinel,
+    Object? skipLabels        = _sentinel,
+    Object? issueFilterMode   = _sentinel,
+    Object? issueDefaultAction = _sentinel,
+    Object? issueOrganizations = _sentinel,
+    Object? issueAssignees    = _sentinel,
+    Object? prReviewers       = _sentinel,
+    Object? prAssignee        = _sentinel,
+    Object? prLabels          = _sentinel,
+    Object? prDraft           = _sentinel,
   }) {
     return RepoConfig(
-      monitored:  monitored  ?? this.monitored,
-      aiPrimary:  aiPrimary  == _sentinel ? this.aiPrimary  : aiPrimary  as String?,
-      aiFallback: aiFallback == _sentinel ? this.aiFallback : aiFallback as String?,
-      promptId:   promptId   == _sentinel ? this.promptId   : promptId   as String?,
-      reviewMode: reviewMode == _sentinel ? this.reviewMode : reviewMode as String?,
-      localDir:   localDir   == _sentinel ? this.localDir   : localDir   as String?,
+      monitored:          monitored          ?? this.monitored,
+      aiPrimary:          aiPrimary          == _sentinel ? this.aiPrimary          : aiPrimary          as String?,
+      aiFallback:         aiFallback         == _sentinel ? this.aiFallback         : aiFallback         as String?,
+      promptId:           promptId           == _sentinel ? this.promptId           : promptId           as String?,
+      reviewMode:         reviewMode         == _sentinel ? this.reviewMode         : reviewMode         as String?,
+      localDir:           localDir           == _sentinel ? this.localDir           : localDir           as String?,
+      developLabels:      developLabels      == _sentinel ? this.developLabels      : developLabels      as List<String>?,
+      reviewOnlyLabels:   reviewOnlyLabels   == _sentinel ? this.reviewOnlyLabels   : reviewOnlyLabels   as List<String>?,
+      skipLabels:         skipLabels         == _sentinel ? this.skipLabels         : skipLabels         as List<String>?,
+      issueFilterMode:    issueFilterMode    == _sentinel ? this.issueFilterMode    : issueFilterMode    as String?,
+      issueDefaultAction: issueDefaultAction == _sentinel ? this.issueDefaultAction : issueDefaultAction as String?,
+      issueOrganizations: issueOrganizations == _sentinel ? this.issueOrganizations : issueOrganizations as List<String>?,
+      issueAssignees:     issueAssignees     == _sentinel ? this.issueAssignees     : issueAssignees     as List<String>?,
+      prReviewers:        prReviewers        == _sentinel ? this.prReviewers        : prReviewers        as List<String>?,
+      prAssignee:         prAssignee         == _sentinel ? this.prAssignee         : prAssignee         as String?,
+      prLabels:           prLabels           == _sentinel ? this.prLabels           : prLabels           as List<String>?,
+      prDraft:            prDraft            == _sentinel ? this.prDraft            : prDraft            as bool?,
     );
   }
 }
@@ -131,6 +182,12 @@ const _sentinel = Object();
 String? _nonEmpty(dynamic v) {
   final s = v as String?;
   return (s == null || s.isEmpty) ? null : s;
+}
+
+/// Returns null when the list is absent or empty, otherwise a non-empty String list.
+List<String>? _nullableStringList(dynamic v) {
+  final list = (v as List<dynamic>?)?.cast<String>().where((s) => s.isNotEmpty).toList();
+  return (list != null && list.isNotEmpty) ? list : null;
 }
 
 /// Issue tracking pipeline configuration.
@@ -283,12 +340,24 @@ class AppConfig {
       for (final entry in overrides.entries) {
         final ov = entry.value as Map<String, dynamic>;
         final existing = configs[entry.key];
+        final itRaw = ov['issue_tracking'] as Map<String, dynamic>?;
         configs[entry.key] = RepoConfig(
-          monitored:  existing?.monitored ?? configs.containsKey(entry.key),
-          aiPrimary:  _nonEmpty(ov['primary']),
-          aiFallback: _nonEmpty(ov['fallback']),
-          reviewMode: _nonEmpty(ov['review_mode']),
-          localDir:   _nonEmpty(ov['local_dir']),
+          monitored:          existing?.monitored ?? configs.containsKey(entry.key),
+          aiPrimary:          _nonEmpty(ov['primary']),
+          aiFallback:         _nonEmpty(ov['fallback']),
+          reviewMode:         _nonEmpty(ov['review_mode']),
+          localDir:           _nonEmpty(ov['local_dir']),
+          developLabels:      itRaw != null ? _nullableStringList(itRaw['develop_labels']) : null,
+          reviewOnlyLabels:   itRaw != null ? _nullableStringList(itRaw['review_only_labels']) : null,
+          skipLabels:         itRaw != null ? _nullableStringList(itRaw['skip_labels']) : null,
+          issueFilterMode:    itRaw != null ? _nonEmpty(itRaw['filter_mode']) : null,
+          issueDefaultAction: itRaw != null ? _nonEmpty(itRaw['default_action']) : null,
+          issueOrganizations: itRaw != null ? _nullableStringList(itRaw['organizations']) : null,
+          issueAssignees:     itRaw != null ? _nullableStringList(itRaw['assignees']) : null,
+          prReviewers:        _nullableStringList(ov['pr_reviewers']),
+          prAssignee:         _nonEmpty(ov['pr_assignee']),
+          prLabels:           _nullableStringList(ov['pr_labels']),
+          prDraft:            ov['pr_draft'] as bool?,
         );
       }
     }
