@@ -683,6 +683,12 @@ func (srv *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, stats)
 }
 
+// DaemonLogFileName is the name of the on-disk log file the daemon writes
+// alongside heimdallm.db inside the resolved data directory. Shared between
+// the writer (cmd/heimdallm setupLogging) and the reader (daemonLogPath
+// below) so the two sides cannot drift.
+const DaemonLogFileName = "heimdallm.log"
+
 // daemonLogPath returns the path to the daemon log file the /logs stream
 // tails. Priority (matches cmd/heimdallm/main.go's dataDir() ordering, which
 // is the directory setupLogging writes to):
@@ -701,10 +707,10 @@ func (srv *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 // `docker logs`, never to a file.
 func daemonLogPath() string {
 	if v := os.Getenv("HEIMDALLM_DATA_DIR"); v != "" {
-		return filepath.Join(v, "heimdallm.log")
+		return filepath.Join(v, DaemonLogFileName)
 	}
 	if info, err := os.Stat("/data"); err == nil && info.IsDir() {
-		return "/data/heimdallm.log"
+		return filepath.Join("/data", DaemonLogFileName)
 	}
 	home, _ := os.UserHomeDir()
 	switch runtime.GOOS {
@@ -712,9 +718,9 @@ func daemonLogPath() string {
 		return filepath.Join(home, "Library", "Logs", "heimdallm", "heimdallm-daemon-error.log")
 	default:
 		if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" {
-			return filepath.Join(xdg, "heimdallm", "heimdallm.log")
+			return filepath.Join(xdg, "heimdallm", DaemonLogFileName)
 		}
-		return filepath.Join(home, ".local", "share", "heimdallm", "heimdallm.log")
+		return filepath.Join(home, ".local", "share", "heimdallm", DaemonLogFileName)
 	}
 }
 

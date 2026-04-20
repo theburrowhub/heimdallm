@@ -39,7 +39,7 @@ func TestDaemonLogPath_HeimdallmDataDirWins(t *testing.T) {
 	withEnv(t, "XDG_STATE_HOME", "") // ensure we are not falling through to it
 
 	got := daemonLogPath()
-	want := filepath.Join(dir, "heimdallm.log")
+	want := filepath.Join(dir, DaemonLogFileName)
 	if got != want {
 		t.Fatalf("daemonLogPath() = %q, want %q", got, want)
 	}
@@ -58,9 +58,10 @@ func TestDaemonLogPath_FallsBackToNativeWhenDataDirUnset(t *testing.T) {
 		// macOS: ~/Library/Logs/heimdallm/heimdallm-daemon-error.log,
 		// unless /data happens to exist on the host (unusual on macOS
 		// dev machines but possible if something else mounted it).
+		dockerPath := filepath.Join("/data", DaemonLogFileName)
 		if _, err := os.Stat("/data"); err == nil {
-			if got != "/data/heimdallm.log" {
-				t.Fatalf("with /data present, daemonLogPath() = %q, want /data/heimdallm.log", got)
+			if got != dockerPath {
+				t.Fatalf("with /data present, daemonLogPath() = %q, want %q", got, dockerPath)
 			}
 			return
 		}
@@ -72,14 +73,15 @@ func TestDaemonLogPath_FallsBackToNativeWhenDataDirUnset(t *testing.T) {
 
 	// Linux: inside the test-docker sandbox there is no /data mount,
 	// and HOME points at /tmp/home. Assert we got the XDG/HOME path.
+	dockerPath := filepath.Join("/data", DaemonLogFileName)
 	if _, err := os.Stat("/data"); err == nil {
-		if got != "/data/heimdallm.log" {
-			t.Fatalf("with /data present, daemonLogPath() = %q, want /data/heimdallm.log", got)
+		if got != dockerPath {
+			t.Fatalf("with /data present, daemonLogPath() = %q, want %q", got, dockerPath)
 		}
 		return
 	}
-	if !strings.HasSuffix(got, filepath.Join("heimdallm", "heimdallm.log")) {
-		t.Fatalf("daemonLogPath() = %q, want to end in heimdallm/heimdallm.log", got)
+	if !strings.HasSuffix(got, filepath.Join("heimdallm", DaemonLogFileName)) {
+		t.Fatalf("daemonLogPath() = %q, want to end in heimdallm/%s", got, DaemonLogFileName)
 	}
 }
 
@@ -99,7 +101,7 @@ func TestDaemonLogPath_XDGStateHomeUsedWhenSet(t *testing.T) {
 	}
 
 	got := daemonLogPath()
-	want := filepath.Join(xdg, "heimdallm", "heimdallm.log")
+	want := filepath.Join(xdg, "heimdallm", DaemonLogFileName)
 	if got != want {
 		t.Fatalf("daemonLogPath() = %q, want %q", got, want)
 	}
