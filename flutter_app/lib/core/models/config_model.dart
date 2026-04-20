@@ -163,13 +163,18 @@ class RepoConfig {
     return globalMonitored ? 'global' : 'off';
   }
   String itLedStatus(bool globalITEnabled) {
+    // Explicit toggle wins
     if (itEnabled == true) return 'repo';
     if (itEnabled == false) return 'off';
+    // Labels configured = implicitly active (matches daemon behavior)
+    if (reviewOnlyLabels != null && reviewOnlyLabels!.isNotEmpty) return 'repo';
     return globalITEnabled ? 'global' : 'off';
   }
   String devLedStatus(bool globalITEnabled, bool hasLocalDir) {
-    if (devEnabled == true && hasLocalDir) return 'repo';
+    if (devEnabled == true) return 'repo';
     if (devEnabled == false) return 'off';
+    // Labels configured = implicitly active
+    if (developLabels != null && developLabels!.isNotEmpty && hasLocalDir) return 'repo';
     return (globalITEnabled && hasLocalDir) ? 'global' : 'off';
   }
 
