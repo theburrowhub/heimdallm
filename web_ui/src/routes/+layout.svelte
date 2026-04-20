@@ -53,10 +53,10 @@
     { href: '/logs', label: 'Logs' }
   ];
 
-  const themeOptions: { value: ThemeChoice; label: string; title: string }[] = [
-    { value: 'light', label: '☀', title: 'Light' },
-    { value: 'system', label: '🖥', title: 'System' },
-    { value: 'dark', label: '🌙', title: 'Dark' }
+  const themeOptions: { value: ThemeChoice; title: string }[] = [
+    { value: 'light', title: 'Light' },
+    { value: 'system', title: 'System' },
+    { value: 'dark', title: 'Dark' }
   ];
 </script>
 
@@ -94,11 +94,51 @@
             aria-checked={themeChoice === opt.value}
             title={opt.title}
             onclick={() => chooseTheme(opt.value)}
-            class="px-2 py-1 {themeChoice === opt.value
+            class="flex items-center justify-center px-2 py-1.5 {themeChoice === opt.value
               ? 'bg-indigo-600 text-white dark:bg-indigo-500'
               : 'bg-white text-gray-600 hover:bg-gray-50 dark:bg-gray-900 dark:text-gray-400 dark:hover:bg-gray-800'}"
           >
-            <span aria-hidden="true">{opt.label}</span>
+            {#if opt.value === 'light'}
+              <svg
+                class="h-4 w-4"
+                viewBox="0 0 20 20"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.6"
+                stroke-linecap="round"
+                aria-hidden="true"
+              >
+                <circle cx="10" cy="10" r="3.2" />
+                <path d="M10 2.5v1.8M10 15.7v1.8M3.5 10H1.7M18.3 10h-1.8" />
+                <path d="M5.2 5.2l1.3 1.3M13.5 13.5l1.3 1.3M5.2 14.8l1.3-1.3M13.5 6.5l1.3-1.3" />
+              </svg>
+            {:else if opt.value === 'system'}
+              <svg
+                class="h-4 w-4"
+                viewBox="0 0 20 20"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.6"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <rect x="2.5" y="3.5" width="15" height="10" rx="1.5" />
+                <path d="M7 17h6M10 13.5V17" stroke-linecap="round" />
+              </svg>
+            {:else}
+              <svg
+                class="h-4 w-4"
+                viewBox="0 0 20 20"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.6"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M16.5 12.3A7 7 0 1 1 7.7 3.5a5.6 5.6 0 0 0 8.8 8.8z" />
+              </svg>
+            {/if}
             <span class="sr-only">{opt.title}</span>
           </button>
         {/each}
