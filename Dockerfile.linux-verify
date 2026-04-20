@@ -67,7 +67,82 @@ RUN test -f daemon/bin/heimdallm \
 # ── Runtime deps for `make run-linux` GUI testing ────────────────────────────
 # These are NOT needed for CI build verification — only for displaying the app
 # on the host X11 display. Kept in a separate layer for clarity.
-RUN apt-get update -y && apt-get install -y --no-install-recommends \
-    libayatana-appindicator3-1 libnotify4 libsecret-1-0 \
-    dbus-x11 libcanberra-gtk3-module mesa-utils \
+#
+# gh is installed from GitHub's official apt repo so the Flutter desktop app's
+# FirstRunSetup.detectToken / RepoDiscovery paths (which shell out to
+# `gh auth token` and `gh search prs`) can resolve credentials and run repo
+# discovery inside the container. The user's ~/.config/gh is bind-mounted
+# read-only from the host by run-linux so the container picks up their
+# existing authentication without re-logging in.
+RUN apt-get update -y \
+    && apt-get install -y --no-install-recommends \
+       libayatana-appindicator3-1 libnotify4 libsecret-1-0 \
+       dbus-x11 libcanberra-gtk3-module mesa-utils \
+       curl gnupg xdg-utils libglib2.0-bin \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+       | tee /usr/share/keyrings/githubcli-archive-keyring.gpg > /dev/null \
+    && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+       > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update -y \
+    && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
+
+# Replace xdg-open with a tiny DBus portal shim. Stock xdg-open inside the
+# container has no browser to dispatch to; calling the host's
+# xdg-desktop-portal directly (via gdbus from libglib2.0-bin) opens URIs in
+# whatever browser the host user has configured, with no MIME database or
+# $BROWSER setup required inside the sandbox. Installed at /usr/local/bin so
+# it precedes Ubuntu's stock /usr/bin/xdg-open on PATH. Requires
+# --security-opt apparmor=unconfined on the container (set in run-linux) so
+# the session-bus call is allowed through.
+RUN { \
+      echo '#!/bin/sh'; \
+      echo 'exec gdbus call --session \'; \
+      echo '  --dest org.freedesktop.portal.Desktop \'; \
+      echo '  --object-path /org/freedesktop/portal/desktop \'; \
+      echo '  --method org.freedesktop.portal.OpenURI.OpenURI \'; \
+      echo '  "" "$1" "{}"'; \
+    } > /usr/local/bin/xdg-open \
+    && chmod +x /usr/local/bin/xdg-open
+
+# /.flatpak-info is glib's sandbox sentinel. If this file exists,
+# g_desktop_app_info_is_sandboxed() returns true and GTK's
+# gtk_show_uri_on_window (which url_launcher_linux calls internally) routes
+# URI opens through org.freedesktop.portal.OpenURI instead of the
+# in-sandbox MIME database. Without this the Flutter app's "Open in GitHub"
+# silently no-ops because glib can't find a handler for https inside the
+# container — the /usr/local/bin/xdg-open shim above only helps code paths
+# that shell out; url_launcher_linux doesn't. Minimal valid keyfile
+# content keeps any downstream parsers that also read this file happy.
+RUN printf '[Application]\nname=heimdallm\n' > /.flatpak-info
+
+# ── Node.js + AI CLIs ────────────────────────────────────────────────────────
+# The bundled daemon inside this image runs the review pipeline, which shells
+# out to whatever AI CLI the user configured as `ai.primary`. Without one on
+# PATH the pipeline fails fast at `detectCLI`:
+#
+#   pipeline: detect CLI: executor: no AI CLI available (tried "claude", "")
+#
+# The production docker/Dockerfile installs all four supported CLIs for exactly
+# this reason; mirror that set here so `make run-linux` is a faithful desktop
+# equivalent. Pinned Node version matches the production image at the time of
+# writing — bump both in lockstep when upgrading.
+RUN wget -q https://nodejs.org/dist/v20.18.0/node-v20.18.0-linux-x64.tar.xz -O /tmp/node.tar.xz \
+    && tar -C /usr/local --strip-components=1 -xJf /tmp/node.tar.xz \
+    && rm /tmp/node.tar.xz
+
+# Claude Code CLI (Anthropic) — auth via ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN
+RUN npm install -g @anthropic-ai/claude-code 2>/dev/null || true
+
+# Gemini CLI (Google) — auth via GEMINI_API_KEY
+RUN npm install -g @google/gemini-cli 2>/dev/null || true
+
+# Codex CLI (OpenAI) — auth via OPENAI_API_KEY or CODEX_API_KEY
+RUN npm install -g @openai/codex 2>/dev/null || true
+
+# OpenCode CLI — auth via any provider key above or OPENROUTER_API_KEY. Ubuntu
+# uses glibc so the musl-specific package the production (Alpine) image pulls
+# is not needed here; npm will pick the right binary from optionalDependencies.
+RUN npm install -g opencode-ai 2>/dev/null || true \
+    && npm cache clean --force 2>/dev/null || true

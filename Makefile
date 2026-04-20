@@ -387,7 +387,13 @@ run-linux:
 	@test -n "$$DISPLAY" || { echo "❌  No DISPLAY set — need X11 (or XWayland)."; exit 1; }
 	@docker image inspect heimdallm-verify >/dev/null 2>&1 || \
 	  { echo "❌  Image 'heimdallm-verify' not found. Run 'make verify-linux' first."; exit 1; }
-	@mkdir -p "$$HOME/.config/heimdallm"
+	@mkdir -p "$$HOME/.config/heimdallm" "$$HOME/.local/share/heimdallm" \
+	          "$$HOME/.claude" "$$HOME/.gemini" "$$HOME/.codex" \
+	          "$$HOME/.config/opencode" "$$HOME/.local/share/opencode"
+	@# claude keeps its main config at $HOME/.claude.json (sibling to .claude/),
+	@# not inside .claude/. Docker bind-mounts need the source to exist before
+	@# start; touch is idempotent and preserves the file if it already exists.
+	@touch "$$HOME/.claude.json"
 	@docker rm -f heimdallm-run 2>/dev/null || true
 	@ENV_FILE=$$(mktemp) ; \
 	cleanup() { \
@@ -397,10 +403,30 @@ run-linux:
 	trap cleanup EXIT ; \
 	\
 	echo "DISPLAY=$$DISPLAY" > "$$ENV_FILE" ; \
+	echo "HOME=$$HOME" >> "$$ENV_FILE" ; \
+	if [ -n "$$XDG_CURRENT_DESKTOP" ]; then \
+	  echo "XDG_CURRENT_DESKTOP=$$XDG_CURRENT_DESKTOP" >> "$$ENV_FILE" ; \
+	fi ; \
 	echo "HEIMDALLM_DAEMON_PATH=/app/daemon/bin/heimdallm" >> "$$ENV_FILE" ; \
 	if [ -n "$$GITHUB_TOKEN" ]; then \
 	  echo "GITHUB_TOKEN=$$GITHUB_TOKEN" >> "$$ENV_FILE" ; \
+	elif command -v gh >/dev/null 2>&1; then \
+	  GH_TOK=$$(gh auth token 2>/dev/null || true) ; \
+	  if [ -n "$$GH_TOK" ]; then \
+	    echo "GITHUB_TOKEN=$$GH_TOK" >> "$$ENV_FILE" ; \
+	  fi ; \
 	fi ; \
+	for var in ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN \
+	           OPENAI_API_KEY CODEX_API_KEY \
+	           GEMINI_API_KEY OPENROUTER_API_KEY ; do \
+	  val=$$(printenv "$$var" 2>/dev/null || true) ; \
+	  if [ -z "$$val" ] && [ -f docker/.env ]; then \
+	    val=$$(grep "^$$var=" docker/.env 2>/dev/null | head -1 | cut -d= -f2-) ; \
+	  fi ; \
+	  if [ -n "$$val" ]; then \
+	    echo "$$var=$$val" >> "$$ENV_FILE" ; \
+	  fi ; \
+	done ; \
 	UID_VAL=$$(id -u) ; \
 	GID_VAL=$$(id -g) ; \
 	DBUS_ARGS="" ; \
@@ -414,6 +440,10 @@ run-linux:
 	else \
 	  echo "⚠  /dev/dri not found — using software rendering (llvmpipe)." ; \
 	fi ; \
+	GH_CONFIG_ARGS="" ; \
+	if [ -d "$$HOME/.config/gh" ]; then \
+	  GH_CONFIG_ARGS="-v $$HOME/.config/gh:$$HOME/.config/gh:ro" ; \
+	fi ; \
 	\
 	echo "▶  Launching Heimdallm (Linux) via Docker..." ; \
 	echo "   Close the app window or press Ctrl-C to stop." ; \
@@ -423,10 +453,19 @@ run-linux:
 	  --name heimdallm-run \
 	  --env-file "$$ENV_FILE" \
 	  --user "$$UID_VAL:$$GID_VAL" \
+	  --security-opt apparmor=unconfined \
 	  -v /tmp/.X11-unix:/tmp/.X11-unix:ro \
 	  -v /run/dbus:/run/dbus:ro \
 	  $$DBUS_ARGS \
 	  -v "$$HOME/.config/heimdallm:$$HOME/.config/heimdallm" \
+	  -v "$$HOME/.local/share/heimdallm:$$HOME/.local/share/heimdallm" \
+	  -v "$$HOME/.claude:$$HOME/.claude" \
+	  -v "$$HOME/.claude.json:$$HOME/.claude.json" \
+	  -v "$$HOME/.gemini:$$HOME/.gemini" \
+	  -v "$$HOME/.codex:$$HOME/.codex" \
+	  -v "$$HOME/.config/opencode:$$HOME/.config/opencode" \
+	  -v "$$HOME/.local/share/opencode:$$HOME/.local/share/opencode" \
+	  $$GH_CONFIG_ARGS \
 	  $$GPU_ARGS \
 	  --ipc=host \
 	  --net=host \
