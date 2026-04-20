@@ -2,6 +2,17 @@
 
 > **Note:** Versions 0.1.0–0.1.3 were originally published under [`theburrowhub/heimdallr-docker`](https://github.com/theburrowhub/heimdallr-docker) (now archived). The project was unified into this repository and renamed to Heimdallm in v0.1.1.
 
+## [0.2.0](https://github.com/theburrowhub/heimdallm/compare/v0.1.8...v0.2.0) (2026-04-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* the `./config:/config` bind mount is replaced by a `heimdallm-config:/config` named volume. Operators with a customised `docker/config/config.toml` must copy it into the new volume before upgrading or the daemon will regenerate the file from env vars:
+
+### Bug Fixes
+
+* config save + reload resilience (three linked bugs) ([#100](https://github.com/theburrowhub/heimdallm/issues/100)) ([d018754](https://github.com/theburrowhub/heimdallm/commit/d018754fe15cccdbefde5aca45bcf1d43cae1cd1))
+
 ## [0.1.8](https://github.com/theburrowhub/heimdallm/compare/v0.1.7...v0.1.8) (2026-04-20)
 
 
