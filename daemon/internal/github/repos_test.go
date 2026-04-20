@@ -270,6 +270,108 @@ func TestAddLabels_Error(t *testing.T) {
 	}
 }
 
+// ── RemoveLabels ──────────────────────────────────────────────────────────────
+
+func TestRemoveLabels(t *testing.T) {
+	var calls []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("[]"))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	if err := c.RemoveLabels("org/repo", 42, []string{"blocked", "heimdallm-queued"}); err != nil {
+		t.Fatalf("RemoveLabels: %v", err)
+	}
+	// GitHub requires one DELETE per label (no bulk endpoint).
+	want := []string{
+		"DELETE /repos/org/repo/issues/42/labels/blocked",
+		"DELETE /repos/org/repo/issues/42/labels/heimdallm-queued",
+	}
+	if len(calls) != len(want) {
+		t.Fatalf("expected %d calls, got %d: %v", len(want), len(calls), calls)
+	}
+	for i, c := range calls {
+		if c != want[i] {
+			t.Errorf("call %d = %q, want %q", i, c, want[i])
+		}
+	}
+}
+
+func TestRemoveLabels_Noop(t *testing.T) {
+	c := gh.NewClient("fake-token")
+	if err := c.RemoveLabels("org/repo", 42, nil); err != nil {
+		t.Fatalf("expected nil for empty labels, got: %v", err)
+	}
+}
+
+func TestRemoveLabels_MissingLabelTolerated(t *testing.T) {
+	// GitHub returns 404 when the label is not on the issue. Trying to
+	// remove a label that was never applied should not fail the whole
+	// promotion — it's the desired end state.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"message":"Label does not exist"}`))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	if err := c.RemoveLabels("org/repo", 42, []string{"phantom"}); err != nil {
+		t.Errorf("expected nil on 404, got: %v", err)
+	}
+}
+
+func TestRemoveLabels_Error(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	if err := c.RemoveLabels("org/repo", 42, []string{"blocked"}); err == nil {
+		t.Fatal("expected error on 5xx, got nil")
+	}
+}
+
+// ── GetIssue ─────────────────────────────────────────────────────────────────
+
+func TestGetIssue(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" || r.URL.Path != "/repos/org/repo/issues/42" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"number":42,"state":"closed","pull_request":null}`))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	got, err := c.GetIssue("org/repo", 42)
+	if err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	if got.Number != 42 {
+		t.Errorf("Number = %d, want 42", got.Number)
+	}
+	if got.State != "closed" {
+		t.Errorf("State = %q, want closed", got.State)
+	}
+}
+
+func TestGetIssue_NotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	if _, err := c.GetIssue("org/repo", 42); err == nil {
+		t.Fatal("expected error on 404, got nil")
+	}
+}
+
 // ── SetAssignees ──────────────────────────────────────────────────────────────
 
 func TestSetAssignees(t *testing.T) {

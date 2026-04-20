@@ -14,7 +14,7 @@ Heimdallm runs in the background and does three things, in parallel, at your con
 Watches the PRs where you're requested as a reviewer, runs an AI code review, and submits it to GitHub as your account. No copy-pasting, no manual prompting.
 
 ### 2. Issue triage & auto-implement
-Fetches issues from monitored repos, classifies them by label (`review_only` vs `auto_implement` vs `skip`), and for the develop-track ones optionally **creates a branch, commits the change, and opens a PR** against your default branch — fully autonomous on the issues you mark for it.
+Fetches issues from monitored repos, classifies them by label (`review_only` vs `auto_implement` vs `skip` vs `blocked`), and for the develop-track ones optionally **creates a branch, commits the change, and opens a PR** against your default branch — fully autonomous on the issues you mark for it. Issues can declare dependencies on other issues/PRs; Heimdallm holds them in a `blocked` state until the prerequisites close, then promotes them automatically.
 
 ### 3. Self-monitoring UI
 A SvelteKit web dashboard (`:3000`) with Dashboard, PR list, Issue list, prompt/agent editor, live config editor, and a live log stream. Opens alongside the daemon in Docker mode.
@@ -23,6 +23,7 @@ A SvelteKit web dashboard (`:3000`) with Dashboard, PR list, Issue list, prompt/
 
 - **Automatic reviews** — polls `review-requested:@me` on GitHub and submits reviews as your account
 - **Issue pipeline** — label-driven triage + optional auto-implement with branch/commit/PR cycle
+- **Issue dependencies** — mark downstream work with a `blocked` label and a `## Depends on` body section; Heimdallm auto-promotes when blockers close
 - **Configurable prompts** — general review, security audit, performance, architecture, or your own with `{diff}` `{title}` `{author}` `{comments}` placeholders, managed from the web UI at `/agents`
 - **Two feedback modes** — *single* (one consolidated review) or *multi* (one GitHub comment per issue + summary), globally and per repo
 - **Per-repo overrides** — different AI agent, prompt, and feedback mode per repository
@@ -234,6 +235,55 @@ merged into the monitored set on each discovery cycle. Transient Search API
 errors fall back to the last known-good list, so an outage never empties the
 set silently. The static `HEIMDALLM_REPOSITORIES` list keeps working — the
 two sources are merged (deduplicated) at poll time.
+
+#### Dependency-based issue promotion
+
+For multi-step work that must land in order, Heimdallm can hold downstream
+issues out of the pipeline until their prerequisites close, then promote
+them automatically.
+
+**Enable it** by declaring one or more "blocked" labels:
+
+```bash
+HEIMDALLM_ISSUE_BLOCKED_LABELS=blocked
+# optional — defaults to the first HEIMDALLM_ISSUE_DEVELOP_LABELS entry:
+HEIMDALLM_ISSUE_PROMOTE_TO_LABEL=ready
+```
+
+**Declare dependencies** in the issue body under a `## Depends on` heading:
+
+```markdown
+## Depends on
+- #42
+- other-org/shared#57
+```
+
+- Same-repo refs use `#N`. Cross-repo refs use `owner/repo#N` — works with
+  any repo your `GITHUB_TOKEN` can read, whether or not it's in your
+  monitored list.
+- The heading is case-insensitive and accepts an optional trailing colon
+  (`## Depends On:`). Multiple refs per bullet are fine.
+
+**How it runs.** Every poll cycle, for each issue carrying a blocked
+label:
+
+1. Parse the `## Depends on` bullets.
+2. Ask GitHub for each referenced issue/PR state.
+3. If all are `closed` (merged PRs count as closed), remove the blocked
+   label(s), add `HEIMDALLM_ISSUE_PROMOTE_TO_LABEL`, and leave an audit
+   comment.
+4. The same poll cycle's fetch pass then classifies the promoted issue
+   normally and dispatches it to triage or auto-implement.
+
+Issues with a blocked label but **no `## Depends on` section** stay
+blocked — the daemon won't guess when to unblock them. Remove the label
+manually to opt out.
+
+Classification precedence is
+`skip > blocked > review_only > develop > default_action`, so an issue
+tagged with both a blocked and a develop label stays blocked until
+promotion. The feature is **opt-in**: leave `HEIMDALLM_ISSUE_BLOCKED_LABELS`
+empty and nothing about the existing pipeline changes.
 
 ### Automated install (for agents / scripts)
 

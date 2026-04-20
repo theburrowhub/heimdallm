@@ -73,7 +73,11 @@ func (c *Client) FetchIssues(repo string, cfg config.IssueTrackingConfig, authen
 				continue
 			}
 			mode := cfg.Classify(issue.LabelNames())
-			if mode == config.IssueModeIgnore {
+			if mode == config.IssueModeIgnore || mode == config.IssueModeBlocked {
+				// Blocked issues are handled by a separate promotion pass
+				// (see issues.PromoteReady). Keeping them out of the
+				// pipeline here avoids running auto_implement on work that
+				// still has open prerequisites.
 				continue
 			}
 			if !issueMatchesFilters(issue, repo, cfg) {
@@ -93,6 +97,33 @@ func (c *Client) FetchIssues(repo string, cfg config.IssueTrackingConfig, authen
 
 	sortIssuesByPriority(kept, authenticatedUser)
 	return kept, nil
+}
+
+// ListOpenIssues fetches every open issue (not PR) for a repo with no
+// classification or filtering. Used by the promotion orchestrator, which
+// needs access to blocked issues — those are dropped by FetchIssues.
+func (c *Client) ListOpenIssues(repo string) ([]*Issue, error) {
+	if repo == "" {
+		return nil, fmt.Errorf("github: ListOpenIssues: empty repo")
+	}
+	var out []*Issue
+	for page := 1; page <= maxIssuePages; page++ {
+		batch, err := c.fetchIssuesPage(repo, page)
+		if err != nil {
+			return nil, err
+		}
+		for _, issue := range batch {
+			issue.Repo = repo
+			if issue.IsPullRequest() {
+				continue
+			}
+			out = append(out, issue)
+		}
+		if len(batch) < issuesPerPage {
+			break
+		}
+	}
+	return out, nil
 }
 
 func (c *Client) fetchIssuesPage(repo string, page int) ([]*Issue, error) {

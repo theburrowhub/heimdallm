@@ -346,6 +346,21 @@ func main() {
 					}
 				}
 
+				// Dependency promotion pass: flip issues carrying a
+				// blocked label to the promote-to label once all their
+				// declared `## Depends on` targets have closed. Runs BEFORE
+				// the fetch so a freshly-promoted issue is picked up in the
+				// same poll cycle rather than waiting for the next one.
+				// No-op when BlockedLabels is unset, so default installs
+				// don't pay for the extra calls.
+				if len(itCfg.BlockedLabels) > 0 {
+					if n, err := issuepipeline.PromoteReady(context.Background(), ghClient, itCfg, repos); err != nil {
+						slog.Error("poll: issue promotion failed", "err", err)
+					} else if n > 0 {
+						slog.Info("poll: promoted issues", "count", n)
+					}
+				}
+
 				for _, repo := range repos {
 					n, err := issueFetcher.ProcessRepo(context.Background(), repo, itCfg, authUser, optsFor)
 					if err != nil {

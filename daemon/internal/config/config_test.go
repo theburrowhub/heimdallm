@@ -563,6 +563,118 @@ func TestClassify_Precedence(t *testing.T) {
 	}
 }
 
+func TestClassify_BlockedPrecedence(t *testing.T) {
+	// Precedence must be: skip > blocked > review_only > develop > default.
+	// Blocked slots in between skip (don't touch it) and review_only (blocked
+	// is cheaper than any processing — we haven't even confirmed we want to
+	// run it yet).
+	cfg := IssueTrackingConfig{
+		SkipLabels:       []string{"wontfix"},
+		BlockedLabels:    []string{"blocked"},
+		ReviewOnlyLabels: []string{"question"},
+		DevelopLabels:    []string{"bug"},
+		DefaultAction:    string(IssueModeIgnore),
+	}
+	cases := []struct {
+		name   string
+		labels []string
+		want   IssueMode
+	}{
+		{"skip wins over blocked", []string{"wontfix", "blocked", "bug"}, IssueModeIgnore},
+		{"blocked wins over review_only", []string{"blocked", "question"}, IssueModeBlocked},
+		{"blocked wins over develop", []string{"blocked", "bug"}, IssueModeBlocked},
+		{"blocked alone", []string{"blocked"}, IssueModeBlocked},
+		{"review_only still wins over develop without blocked", []string{"question", "bug"}, IssueModeReviewOnly},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := cfg.Classify(tc.labels); got != tc.want {
+				t.Errorf("Classify(%v) = %q, want %q", tc.labels, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResolvePromoteToLabel(t *testing.T) {
+	cases := []struct {
+		name          string
+		cfg           IssueTrackingConfig
+		wantLabel     string
+	}{
+		{
+			name:      "explicit target wins",
+			cfg:       IssueTrackingConfig{PromoteToLabel: "develop", DevelopLabels: []string{"feature"}},
+			wantLabel: "develop",
+		},
+		{
+			name:      "falls back to first develop label",
+			cfg:       IssueTrackingConfig{DevelopLabels: []string{"feature", "bug"}},
+			wantLabel: "feature",
+		},
+		{
+			name:      "empty when neither is set",
+			cfg:       IssueTrackingConfig{},
+			wantLabel: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.cfg.ResolvePromoteToLabel(); got != tc.wantLabel {
+				t.Errorf("ResolvePromoteToLabel = %q, want %q", got, tc.wantLabel)
+			}
+		})
+	}
+}
+
+func TestApplyEnvOverrides_IssueTracking_Blocked(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+
+	t.Setenv("HEIMDALLM_ISSUE_BLOCKED_LABELS", "blocked, heimdallm-queued")
+	t.Setenv("HEIMDALLM_ISSUE_PROMOTE_TO_LABEL", "ready")
+
+	cfg.applyEnvOverrides()
+
+	it := cfg.GitHub.IssueTracking
+	if len(it.BlockedLabels) != 2 || it.BlockedLabels[0] != "blocked" || it.BlockedLabels[1] != "heimdallm-queued" {
+		t.Errorf("BlockedLabels = %v, want [blocked heimdallm-queued]", it.BlockedLabels)
+	}
+	if it.PromoteToLabel != "ready" {
+		t.Errorf("PromoteToLabel = %q, want ready", it.PromoteToLabel)
+	}
+}
+
+func TestValidate_BlockedLabelsRequirePromoteTarget(t *testing.T) {
+	// A blocked label dimension without any way to resolve a promote-to
+	// label is a misconfiguration: issues would get stuck in blocked state
+	// forever with no target to promote them to.
+	cfg := &Config{AI: AIConfig{Primary: "claude"}}
+	cfg.GitHub.IssueTracking.Enabled = true
+	cfg.GitHub.IssueTracking.BlockedLabels = []string{"blocked"}
+	cfg.GitHub.IssueTracking.FilterMode = FilterModeExclusive
+	cfg.GitHub.IssueTracking.DefaultAction = string(IssueModeIgnore)
+	// No PromoteToLabel, no DevelopLabels → can't resolve a target.
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate with BlockedLabels and no promote target: expected error, got nil")
+	}
+}
+
+func TestValidate_BlockedLabelsOK_WhenDevelopLabelsSet(t *testing.T) {
+	// BlockedLabels + DevelopLabels is a valid combo — the first develop
+	// label is the implicit promote-to target.
+	cfg := &Config{AI: AIConfig{Primary: "claude"}}
+	cfg.GitHub.IssueTracking.Enabled = true
+	cfg.GitHub.IssueTracking.BlockedLabels = []string{"blocked"}
+	cfg.GitHub.IssueTracking.DevelopLabels = []string{"feature"}
+	cfg.GitHub.IssueTracking.FilterMode = FilterModeExclusive
+	cfg.GitHub.IssueTracking.DefaultAction = string(IssueModeIgnore)
+
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate(BlockedLabels + DevelopLabels) = %v, want nil", err)
+	}
+}
+
 func TestClassify_CaseInsensitive(t *testing.T) {
 	cfg := IssueTrackingConfig{
 		ReviewOnlyLabels: []string{"Question"},

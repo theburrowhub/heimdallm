@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 )
 
 // GetDefaultBranch returns the `default_branch` field from the GitHub
@@ -139,6 +140,56 @@ func (c *Client) AddLabels(repo string, number int, labels []string) error {
 		return fmt.Errorf("github: add labels %s#%d: status %d: %s", repo, number, resp.StatusCode, safeTruncate(string(body), maxErrBodyLen))
 	}
 	return nil
+}
+
+// RemoveLabels removes one or more labels from an issue. GitHub has no bulk
+// delete endpoint, so we issue one DELETE per label. A 404 (label not on the
+// issue) is tolerated — promotion code that removes "blocked, queued" on an
+// issue that only carries "blocked" should not fail just because "queued"
+// was missing: the desired end state is already reached.
+func (c *Client) RemoveLabels(repo string, number int, labels []string) error {
+	if repo == "" || number == 0 || len(labels) == 0 {
+		return nil
+	}
+	for _, label := range labels {
+		path := fmt.Sprintf("/repos/%s/issues/%d/labels/%s", repo, number, url.PathEscape(label))
+		resp, err := c.do("DELETE", path, "application/vnd.github+json")
+		if err != nil {
+			return fmt.Errorf("github: remove label %q: %w", label, err)
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusNotFound {
+			continue // already absent — desired state
+		}
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("github: remove label %s#%d %q: status %d: %s", repo, number, label, resp.StatusCode, safeTruncate(string(body), maxErrBodyLen))
+		}
+	}
+	return nil
+}
+
+// GetIssue fetches a single issue by repo + number. Used by the dependency
+// promotion pass to check whether a referenced issue has been closed. Works
+// across repos (same client credentials, REST `GET /repos/{owner}/{name}/
+// issues/{number}`).
+func (c *Client) GetIssue(repo string, number int) (*Issue, error) {
+	path := fmt.Sprintf("/repos/%s/issues/%d", repo, number)
+	resp, err := c.do("GET", path, "application/vnd.github+json")
+	if err != nil {
+		return nil, fmt.Errorf("github: get issue %s#%d: %w", repo, number, err)
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("github: get issue %s#%d: status %d: %s", repo, number, resp.StatusCode, safeTruncate(string(body), maxErrBodyLen))
+	}
+	var issue Issue
+	if err := json.Unmarshal(body, &issue); err != nil {
+		return nil, fmt.Errorf("github: decode issue %s#%d: %w", repo, number, err)
+	}
+	issue.Repo = repo
+	return &issue, nil
 }
 
 // SetAssignees sets assignees on an issue or pull request.
