@@ -258,7 +258,20 @@ class FirstRunSetup {
         if (rc.localDir != null && rc.localDir!.isNotEmpty) {
           buf.writeln('local_dir = "${_tomlEscapeString(rc.localDir!)}"');
         }
-        // Issue tracking overrides
+        // PR metadata (must be written BEFORE any sub-table headers)
+        if (rc.prReviewers != null && rc.prReviewers!.isNotEmpty) {
+          buf.writeln('pr_reviewers = [${rc.prReviewers!.map((r) => '"${_tomlEscapeString(r)}"').join(', ')}]');
+        }
+        if (rc.prAssignee != null && rc.prAssignee!.isNotEmpty) {
+          buf.writeln('pr_assignee = "${_tomlEscapeString(rc.prAssignee!)}"');
+        }
+        if (rc.prLabels != null && rc.prLabels!.isNotEmpty) {
+          buf.writeln('pr_labels = [${rc.prLabels!.map((l) => '"${_tomlEscapeString(l)}"').join(', ')}]');
+        }
+        if (rc.prDraft == true) {
+          buf.writeln('pr_draft = true');
+        }
+        // Issue tracking overrides (sub-table — must come after all repo-level keys)
         final hasIT = rc.developLabels != null || rc.reviewOnlyLabels != null ||
             rc.skipLabels != null || rc.issueFilterMode != null ||
             rc.issueDefaultAction != null || rc.issueOrganizations != null ||

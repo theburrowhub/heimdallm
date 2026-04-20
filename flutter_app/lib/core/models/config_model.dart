@@ -143,8 +143,14 @@ class RepoConfig {
   });
 
   /// True if any feature is actively enabled (per-repo or inherited).
-  /// Used by the repo list to classify monitored vs not-monitored.
-  bool get isMonitored => (prEnabled ?? false) || (itEnabled ?? false) || (devEnabled ?? false);
+  /// Used by the repo list to classify monitored vs not-monitored,
+  /// and by the TOML writer to decide which repos go in `repositories`.
+  bool get isMonitored =>
+      (prEnabled ?? false) ||
+      (itEnabled ?? false) ||
+      (devEnabled ?? false) ||
+      (reviewOnlyLabels != null && reviewOnlyLabels!.isNotEmpty) ||
+      (developLabels != null && developLabels!.isNotEmpty);
 
   /// Legacy getter — repos with any override need to be written to TOML.
   bool get hasAiOverride =>
@@ -163,13 +169,18 @@ class RepoConfig {
     return globalMonitored ? 'global' : 'off';
   }
   String itLedStatus(bool globalITEnabled) {
+    // Explicit toggle wins
     if (itEnabled == true) return 'repo';
     if (itEnabled == false) return 'off';
+    // Labels configured = implicitly active (matches daemon behavior)
+    if (reviewOnlyLabels != null && reviewOnlyLabels!.isNotEmpty) return 'repo';
     return globalITEnabled ? 'global' : 'off';
   }
   String devLedStatus(bool globalITEnabled, bool hasLocalDir) {
-    if (devEnabled == true && hasLocalDir) return 'repo';
+    if (devEnabled == true) return 'repo';
     if (devEnabled == false) return 'off';
+    // Labels configured = implicitly active
+    if (developLabels != null && developLabels!.isNotEmpty && hasLocalDir) return 'repo';
     return (globalITEnabled && hasLocalDir) ? 'global' : 'off';
   }
 
@@ -396,11 +407,15 @@ class AppConfig {
         final ov = entry.value as Map<String, dynamic>;
         final existing = configs[entry.key];
         final itRaw = ov['issue_tracking'] as Map<String, dynamic>?;
-        final itEnabled = itRaw?['enabled'] as bool?;
+        // Derive enabled flags from reality: explicit enabled OR labels configured
+        final hasReviewLabels = _nullableStringList(itRaw?['review_only_labels']) != null;
+        final hasDevLabels = _nullableStringList(itRaw?['develop_labels']) != null;
+        final itExplicit = itRaw?['enabled'] as bool? ?? false;
+        final devExplicit = itRaw?['develop_enabled'] as bool? ?? false;
         configs[entry.key] = RepoConfig(
           prEnabled:          existing?.prEnabled,
-          itEnabled:          itEnabled,
-          devEnabled:         itRaw?['develop_enabled'] as bool?,
+          itEnabled:          (itExplicit || hasReviewLabels) ? true : null,
+          devEnabled:         (devExplicit || hasDevLabels) ? true : null,
           localDir:           _nonEmpty(ov['local_dir']),
           aiPrimary:          _nonEmpty(ov['primary']),
           aiFallback:         _nonEmpty(ov['fallback']),

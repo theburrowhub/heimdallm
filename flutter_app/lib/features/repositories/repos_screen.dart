@@ -390,20 +390,25 @@ class _RepoTile extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
           child: Row(
             children: [
-              _Led(
-                status: config.prLedStatus(appConfig.repositories.contains(repo)),
-                tooltip: 'PR Review',
-              ),
-              const SizedBox(width: 4),
-              _Led(
-                status: config.itLedStatus(appConfig.issueTracking.enabled),
-                tooltip: 'Issue Tracking',
-              ),
-              const SizedBox(width: 4),
-              _Led(
-                status: config.devLedStatus(
-                    appConfig.issueTracking.enabled, hasDirMapping),
-                tooltip: 'Develop',
+              Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _Led(
+                    status: config.prLedStatus(appConfig.repositories.contains(repo)),
+                    tooltip: 'PR Review',
+                  ),
+                  const SizedBox(height: 3),
+                  _Led(
+                    status: config.itLedStatus(appConfig.issueTracking.enabled),
+                    tooltip: 'Issue Tracking',
+                  ),
+                  const SizedBox(height: 3),
+                  _Led(
+                    status: config.devLedStatus(
+                        appConfig.issueTracking.enabled, hasDirMapping),
+                    tooltip: 'Develop',
+                  ),
+                ],
               ),
               const SizedBox(width: 10),
               Expanded(

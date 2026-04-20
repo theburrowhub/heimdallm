@@ -873,6 +873,47 @@ func TestIssueTrackingForRepo_PerRepoEnablesWhenGlobalOff(t *testing.T) {
 	}
 }
 
+func TestIssueTrackingForRepo_LabelsImplyEnabled(t *testing.T) {
+	c := &Config{}
+	c.GitHub.IssueTracking = IssueTrackingConfig{Enabled: false}
+	c.AI.Repos = map[string]RepoAI{
+		"org/labels-only": {
+			IssueTracking: &IssueTrackingConfig{
+				// Enabled not set (false), but labels configured
+				DevelopLabels:    []string{"heimdallm-auto-implement"},
+				ReviewOnlyLabels: []string{"heimdallm-auto-refine"},
+			},
+		},
+	}
+	got := c.IssueTrackingForRepo("org/labels-only")
+	if !got.Enabled {
+		t.Error("repo with labels should be implicitly enabled")
+	}
+}
+
+func TestIssueTrackingForRepo_NoLabelsNoOverride(t *testing.T) {
+	c := &Config{}
+	c.GitHub.IssueTracking = IssueTrackingConfig{Enabled: false}
+	c.AI.Repos = map[string]RepoAI{
+		"org/empty-override": {
+			IssueTracking: &IssueTrackingConfig{},
+		},
+	}
+	got := c.IssueTrackingForRepo("org/empty-override")
+	if got.Enabled {
+		t.Error("repo with empty override and global off should be disabled")
+	}
+}
+
+func TestIssueTrackingForRepo_GlobalOnNoOverride(t *testing.T) {
+	c := &Config{}
+	c.GitHub.IssueTracking = IssueTrackingConfig{Enabled: true, DevelopLabels: []string{"bug"}}
+	got := c.IssueTrackingForRepo("org/no-override")
+	if !got.Enabled {
+		t.Error("repo without override should inherit global enabled")
+	}
+}
+
 // ── AgentConfigFor ───────────────────────────────────────────────────────────
 
 func TestAgentConfigFor_Found(t *testing.T) {
