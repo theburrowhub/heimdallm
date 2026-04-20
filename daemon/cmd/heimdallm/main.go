@@ -300,10 +300,20 @@ func main() {
 			p.PublishPending()
 
 			// ── Issue tracking cycle ─────────────────────────────────────
+			// Check if ANY repo has issue tracking enabled (global or per-repo).
 			cfgMu.Lock()
 			globalIT := c.GitHub.IssueTracking
+			anyITEnabled := globalIT.Enabled
+			if !anyITEnabled {
+				for _, r := range c.AI.Repos {
+					if r.IssueTracking != nil && r.IssueTracking.Enabled {
+						anyITEnabled = true
+						break
+					}
+				}
+			}
 			cfgMu.Unlock()
-			if globalIT.Enabled {
+			if anyITEnabled {
 				loginMu.Lock()
 				authUser := cachedLogin
 				loginMu.Unlock()
@@ -381,6 +391,9 @@ func main() {
 					cfgMu.Lock()
 					repoIT := c.IssueTrackingForRepo(repo)
 					cfgMu.Unlock()
+					if !repoIT.Enabled {
+						continue
+					}
 					n, err := issueFetcher.ProcessRepo(context.Background(), repo, repoIT, authUser, optsFor)
 					if err != nil {
 						slog.Error("poll: issue fetch failed", "repo", repo, "err", err)
