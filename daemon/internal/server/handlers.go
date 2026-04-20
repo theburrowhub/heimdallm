@@ -85,6 +85,7 @@ func NewWithOptions(s *store.Store, broker *sse.Broker, p *pipeline.Pipeline, ap
 // data, activity metadata, GitHub username, PR list, and review stats.
 // Only /health remains public (used for health checks by the launcher).
 var sensitiveGETPaths = []string{
+	"/activity",
 	"/config",
 	"/agents",
 	"/events",
@@ -195,6 +196,7 @@ func (srv *Server) buildRouter() chi.Router {
 	r.Post("/issues/{id}/undismiss", srv.handleUndismissIssue)
 	r.Get("/repos/{name}/labels", srv.handleRepoLabels)
 	r.Get("/repos/{name}/collaborators", srv.handleRepoCollaborators)
+	r.Get("/activity", srv.handleActivity)
 	r.Get("/stats", srv.handleStats)
 	r.Get("/agents", srv.handleListAgents)
 	r.Post("/agents", srv.handleUpsertAgent)
@@ -783,6 +785,155 @@ func (srv *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, stats)
+}
+
+// handleActivity returns rows from activity_log matching the query.
+// Query params (all optional, combined with AND):
+//
+//	date=YYYY-MM-DD                  — single day in daemon local TZ
+//	from=YYYY-MM-DD & to=YYYY-MM-DD  — inclusive range in daemon local TZ
+//	org=... (repeatable)             — org filter
+//	repo=... (repeatable)            — repo filter (full slug "org/name")
+//	action=review|triage|implement|promote|error (repeatable)
+//	limit=N (default 500, max 5000)
+//
+// Default when neither date nor from/to is supplied: today in daemon local TZ.
+// Returns 503 when activity_log.enabled = false.
+func (srv *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
+	// 503 when explicitly disabled. When configFn is unset (tests that
+	// don't set one) we assume enabled.
+	if srv.configFn != nil {
+		m := srv.configFn()
+		if v, ok := m["activity_log_enabled"]; ok {
+			if enabled, ok := v.(bool); ok && !enabled {
+				httpJSONErr(w, http.StatusServiceUnavailable, "activity log disabled")
+				return
+			}
+		}
+	}
+
+	q := r.URL.Query()
+
+	date := q.Get("date")
+	from := q.Get("from")
+	to := q.Get("to")
+	if date != "" && (from != "" || to != "") {
+		httpJSONErr(w, http.StatusBadRequest, "date cannot be combined with from/to")
+		return
+	}
+	if (from == "") != (to == "") {
+		httpJSONErr(w, http.StatusBadRequest, "from and to must be supplied together")
+		return
+	}
+
+	loc := time.Now().Location() // daemon local TZ
+	parseDay := func(s string) (time.Time, error) {
+		return time.ParseInLocation("2006-01-02", s, loc)
+	}
+
+	var start, end time.Time
+	switch {
+	case date != "":
+		d, err := parseDay(date)
+		if err != nil {
+			httpJSONErr(w, http.StatusBadRequest, "date must be YYYY-MM-DD")
+			return
+		}
+		start = d
+		end = d.Add(24*time.Hour - time.Second)
+	case from != "":
+		f, err := parseDay(from)
+		if err != nil {
+			httpJSONErr(w, http.StatusBadRequest, "from must be YYYY-MM-DD")
+			return
+		}
+		t2, err := parseDay(to)
+		if err != nil {
+			httpJSONErr(w, http.StatusBadRequest, "to must be YYYY-MM-DD")
+			return
+		}
+		if t2.Before(f) {
+			httpJSONErr(w, http.StatusBadRequest, "to must not be before from")
+			return
+		}
+		start = f
+		end = t2.Add(24*time.Hour - time.Second)
+	default:
+		now := time.Now()
+		start = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+		end = start.Add(24*time.Hour - time.Second)
+	}
+
+	limit := 500
+	if ls := q.Get("limit"); ls != "" {
+		n, err := strconv.Atoi(ls)
+		if err != nil || n < 1 || n > 5000 {
+			httpJSONErr(w, http.StatusBadRequest, "limit must be 1..5000")
+			return
+		}
+		limit = n
+	}
+
+	entries, truncated, err := srv.store.ListActivity(store.ActivityQuery{
+		From:    start,
+		To:      end,
+		Orgs:    q["org"],
+		Repos:   q["repo"],
+		Actions: q["action"],
+		Limit:   limit,
+	})
+	if err != nil {
+		slog.Error("activity: list failed", "err", err)
+		httpJSONErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	type entryOut struct {
+		ID         int64          `json:"id"`
+		TS         string         `json:"ts"`
+		Org        string         `json:"org"`
+		Repo       string         `json:"repo"`
+		ItemType   string         `json:"item_type"`
+		ItemNumber int            `json:"item_number"`
+		ItemTitle  string         `json:"item_title"`
+		Action     string         `json:"action"`
+		Outcome    string         `json:"outcome"`
+		Details    map[string]any `json:"details"`
+	}
+	out := make([]entryOut, 0, len(entries))
+	for _, a := range entries {
+		var details map[string]any
+		if a.DetailsJSON != "" {
+			_ = json.Unmarshal([]byte(a.DetailsJSON), &details)
+		}
+		if details == nil {
+			details = map[string]any{}
+		}
+		out = append(out, entryOut{
+			ID:         a.ID,
+			TS:         a.Timestamp.In(loc).Format(time.RFC3339),
+			Org:        a.Org,
+			Repo:       a.Repo,
+			ItemType:   a.ItemType,
+			ItemNumber: a.ItemNumber,
+			ItemTitle:  a.ItemTitle,
+			Action:     a.Action,
+			Outcome:    a.Outcome,
+			Details:    details,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"entries":   out,
+		"count":     len(out),
+		"truncated": truncated,
+	})
+}
+
+// httpJSONErr writes a JSON {"error": msg} body with the given HTTP status.
+func httpJSONErr(w http.ResponseWriter, code int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
 // DaemonLogFileName is the name of the on-disk log file the daemon writes

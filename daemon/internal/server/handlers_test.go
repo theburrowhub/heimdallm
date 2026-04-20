@@ -677,6 +677,173 @@ func TestHandlerPutConfig_ServerPort_RangeStillValidated(t *testing.T) {
 	}
 }
 
+func TestHandleActivity_DefaultsToToday(t *testing.T) {
+	srv, s := setupServer(t)
+	now := time.Now()
+	yesterday := now.Add(-26 * time.Hour)
+	if _, err := s.InsertActivity(yesterday, "acme", "acme/api", "pr", 1, "Old", "review", "minor", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.InsertActivity(now, "acme", "acme/api", "pr", 2, "New", "review", "major", map[string]any{"cli_used": "claude"}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("GET", "/activity", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Entries []struct {
+			Repo    string         `json:"repo"`
+			Action  string         `json:"action"`
+			Outcome string         `json:"outcome"`
+			Details map[string]any `json:"details"`
+		} `json:"entries"`
+		Count     int  `json:"count"`
+		Truncated bool `json:"truncated"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Entries) != 1 {
+		t.Fatalf("want 1 entry (today only), got %d", len(resp.Entries))
+	}
+	if resp.Entries[0].Outcome != "major" {
+		t.Errorf("outcome = %q", resp.Entries[0].Outcome)
+	}
+	if resp.Entries[0].Details["cli_used"] != "claude" {
+		t.Errorf("details: %+v", resp.Entries[0].Details)
+	}
+}
+
+func TestHandleActivity_ExplicitDate(t *testing.T) {
+	srv, s := setupServer(t)
+	loc := time.Now().Location()
+	day := time.Date(2026, 4, 18, 12, 0, 0, 0, loc)
+	if _, err := s.InsertActivity(day, "acme", "acme/api", "pr", 1, "Old", "review", "minor", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("GET", "/activity?date=2026-04-18", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d", w.Code)
+	}
+	var resp struct {
+		Count int `json:"count"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Count != 1 {
+		t.Errorf("count = %d, want 1", resp.Count)
+	}
+}
+
+func TestHandleActivity_BadDateFormat(t *testing.T) {
+	srv, _ := setupServer(t)
+	req := httptest.NewRequest("GET", "/activity?date=2026/04/20", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestHandleActivity_DateAndRangeMutuallyExclusive(t *testing.T) {
+	srv, _ := setupServer(t)
+	req := httptest.NewRequest("GET", "/activity?date=2026-04-20&from=2026-04-19&to=2026-04-20", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestHandleActivity_FromWithoutTo(t *testing.T) {
+	srv, _ := setupServer(t)
+	req := httptest.NewRequest("GET", "/activity?from=2026-04-19", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestHandleActivity_ToBeforeFrom(t *testing.T) {
+	srv, _ := setupServer(t)
+	req := httptest.NewRequest("GET", "/activity?from=2026-04-20&to=2026-04-18", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestHandleActivity_LimitOutOfRange(t *testing.T) {
+	srv, _ := setupServer(t)
+	for _, v := range []string{"0", "-1", "5001", "abc"} {
+		req := httptest.NewRequest("GET", "/activity?limit="+v, nil)
+		w := httptest.NewRecorder()
+		srv.Router().ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("limit=%q: status = %d, want 400", v, w.Code)
+		}
+	}
+}
+
+func TestHandleActivity_DisabledReturns503(t *testing.T) {
+	srv, _ := setupServer(t)
+	srv.SetConfigFn(func() map[string]any {
+		return map[string]any{"activity_log_enabled": false}
+	})
+	req := httptest.NewRequest("GET", "/activity", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", w.Code)
+	}
+}
+
+func TestHandleActivity_RequiresAuth(t *testing.T) {
+	srv := setupServerWithToken(t, "secret-token")
+	req := httptest.NewRequest("GET", "/activity", nil)
+	// no token
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", w.Code)
+	}
+}
+
+func TestHandleActivity_FilterByRepoAndAction(t *testing.T) {
+	srv, s := setupServer(t)
+	now := time.Now()
+	_, _ = s.InsertActivity(now, "acme",   "acme/api", "pr",    1, "t", "review", "minor", nil)
+	_, _ = s.InsertActivity(now, "acme",   "acme/api", "issue", 2, "t", "triage", "major", nil)
+	_, _ = s.InsertActivity(now, "globex", "globex/w", "pr",    3, "t", "review", "minor", nil)
+
+	req := httptest.NewRequest("GET", "/activity?repo=acme/api&action=review", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Entries []struct{ Repo, Action string } `json:"entries"`
+		Count   int                             `json:"count"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Count != 1 {
+		t.Fatalf("count = %d, want 1", resp.Count)
+	}
+	if resp.Entries[0].Repo != "acme/api" || resp.Entries[0].Action != "review" {
+		t.Errorf("wrong entry: %+v", resp.Entries[0])
+	}
+}
+
 func TestHandlerPutConfigValueValidation(t *testing.T) {
 	srv := setupServerWithToken(t, "secret-token")
 
