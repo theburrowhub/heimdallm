@@ -62,9 +62,13 @@
 
 <header class="border-b border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-900">
   <nav class="mx-auto flex max-w-6xl items-center justify-between gap-4 px-6 py-3">
-    <a href="/" class="text-lg font-semibold tracking-tight text-gray-900 dark:text-gray-100"
-      >Heimdallm</a
+    <a
+      href="/"
+      class="flex items-center gap-2 text-lg font-semibold tracking-tight text-gray-900 dark:text-gray-100"
     >
+      <img src="/icon.png" alt="" width="24" height="24" class="h-6 w-6 shrink-0" />
+      Heimdallm
+    </a>
     <ul class="flex items-center gap-4 text-sm">
       {#each navItems as item (item.href)}
         <li>
