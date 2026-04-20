@@ -258,6 +258,35 @@ class FirstRunSetup {
         if (rc.localDir != null && rc.localDir!.isNotEmpty) {
           buf.writeln('local_dir = "${_tomlEscapeString(rc.localDir!)}"');
         }
+        // Issue tracking overrides
+        final hasIT = rc.developLabels != null || rc.reviewOnlyLabels != null ||
+            rc.skipLabels != null || rc.issueFilterMode != null ||
+            rc.issueDefaultAction != null || rc.issueOrganizations != null ||
+            rc.issueAssignees != null;
+        if (hasIT) {
+          buf.writeln('[ai.repos."${_tomlEscapeString(repo)}".issue_tracking]');
+          if (rc.developLabels != null && rc.developLabels!.isNotEmpty) {
+            buf.writeln('develop_labels = [${rc.developLabels!.map((l) => '"${_tomlEscapeString(l)}"').join(', ')}]');
+          }
+          if (rc.reviewOnlyLabels != null && rc.reviewOnlyLabels!.isNotEmpty) {
+            buf.writeln('review_only_labels = [${rc.reviewOnlyLabels!.map((l) => '"${_tomlEscapeString(l)}"').join(', ')}]');
+          }
+          if (rc.skipLabels != null && rc.skipLabels!.isNotEmpty) {
+            buf.writeln('skip_labels = [${rc.skipLabels!.map((l) => '"${_tomlEscapeString(l)}"').join(', ')}]');
+          }
+          if (rc.issueFilterMode != null) {
+            buf.writeln('filter_mode = "${_tomlEscapeString(rc.issueFilterMode!)}"');
+          }
+          if (rc.issueDefaultAction != null) {
+            buf.writeln('default_action = "${_tomlEscapeString(rc.issueDefaultAction!)}"');
+          }
+          if (rc.issueOrganizations != null && rc.issueOrganizations!.isNotEmpty) {
+            buf.writeln('organizations = [${rc.issueOrganizations!.map((o) => '"${_tomlEscapeString(o)}"').join(', ')}]');
+          }
+          if (rc.issueAssignees != null && rc.issueAssignees!.isNotEmpty) {
+            buf.writeln('assignees = [${rc.issueAssignees!.map((a) => '"${_tomlEscapeString(a)}"').join(', ')}]');
+          }
+        }
         buf.writeln();
       }
     }
