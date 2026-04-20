@@ -407,6 +407,17 @@ run-linux:
 	    echo "GITHUB_TOKEN=$$GH_TOK" >> "$$ENV_FILE" ; \
 	  fi ; \
 	fi ; \
+	for var in ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN \
+	           OPENAI_API_KEY CODEX_API_KEY \
+	           GEMINI_API_KEY OPENROUTER_API_KEY ; do \
+	  val=$$(printenv "$$var" 2>/dev/null || true) ; \
+	  if [ -z "$$val" ] && [ -f docker/.env ]; then \
+	    val=$$(grep "^$$var=" docker/.env 2>/dev/null | head -1 | cut -d= -f2-) ; \
+	  fi ; \
+	  if [ -n "$$val" ]; then \
+	    echo "$$var=$$val" >> "$$ENV_FILE" ; \
+	  fi ; \
+	done ; \
 	UID_VAL=$$(id -u) ; \
 	GID_VAL=$$(id -g) ; \
 	DBUS_ARGS="" ; \

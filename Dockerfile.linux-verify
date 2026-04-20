@@ -87,3 +87,33 @@ RUN apt-get update -y \
     && apt-get update -y \
     && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
+
+# ── Node.js + AI CLIs ────────────────────────────────────────────────────────
+# The bundled daemon inside this image runs the review pipeline, which shells
+# out to whatever AI CLI the user configured as `ai.primary`. Without one on
+# PATH the pipeline fails fast at `detectCLI`:
+#
+#   pipeline: detect CLI: executor: no AI CLI available (tried "claude", "")
+#
+# The production docker/Dockerfile installs all four supported CLIs for exactly
+# this reason; mirror that set here so `make run-linux` is a faithful desktop
+# equivalent. Pinned Node version matches the production image at the time of
+# writing — bump both in lockstep when upgrading.
+RUN wget -q https://nodejs.org/dist/v20.18.0/node-v20.18.0-linux-x64.tar.xz -O /tmp/node.tar.xz \
+    && tar -C /usr/local --strip-components=1 -xJf /tmp/node.tar.xz \
+    && rm /tmp/node.tar.xz
+
+# Claude Code CLI (Anthropic) — auth via ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN
+RUN npm install -g @anthropic-ai/claude-code 2>/dev/null || true
+
+# Gemini CLI (Google) — auth via GEMINI_API_KEY
+RUN npm install -g @google/gemini-cli 2>/dev/null || true
+
+# Codex CLI (OpenAI) — auth via OPENAI_API_KEY or CODEX_API_KEY
+RUN npm install -g @openai/codex 2>/dev/null || true
+
+# OpenCode CLI — auth via any provider key above or OPENROUTER_API_KEY. Ubuntu
+# uses glibc so the musl-specific package the production (Alpine) image pulls
+# is not needed here; npm will pick the right binary from optionalDependencies.
+RUN npm install -g opencode-ai 2>/dev/null || true \
+    && npm cache clean --force 2>/dev/null || true
