@@ -223,6 +223,71 @@ func TestApplyStore_ServerPort_IsIgnored(t *testing.T) {
 	}
 }
 
+func TestApplyStore_IssueTracking_PreservesFieldsAbsentFromStoredJSON(t *testing.T) {
+	// Real-world scenario: a user saved issue_tracking via the UI with an
+	// older build that didn't know about BlockedLabels/PromoteToLabel. The
+	// row in `configs` only carries the eight fields the old build knew
+	// about. After upgrading the daemon, HEIMDALLM_ISSUE_BLOCKED_LABELS
+	// env var fills those new fields in applyEnvOverrides — and then
+	// ApplyStore must NOT clobber them back to zero just because the
+	// stored JSON doesn't mention them.
+	//
+	// Implementation contract: json.Unmarshal into the existing struct
+	// (not into a fresh zero value) so absent keys preserve the incoming
+	// value.
+	cfg := &Config{}
+	cfg.applyDefaults()
+	// Simulate applyEnvOverrides having populated the "new" fields.
+	cfg.GitHub.IssueTracking.BlockedLabels = []string{"heimdallm-queued"}
+	cfg.GitHub.IssueTracking.PromoteToLabel = "develop"
+	cfg.GitHub.IssueTracking.Enabled = true
+
+	// Stored JSON from an older UI save — no blocked_labels / promote_to_label.
+	rows := map[string]string{
+		"issue_tracking": `{"enabled":true,"filter_mode":"exclusive","default_action":"ignore","develop_labels":["develop"],"skip_labels":["wontfix"],"organizations":[],"assignees":[],"review_only_labels":[]}`,
+	}
+
+	if err := cfg.ApplyStore(rows); err != nil {
+		t.Fatalf("ApplyStore: %v", err)
+	}
+
+	it := cfg.GitHub.IssueTracking
+	// Fields the stored JSON DID set must have landed:
+	if len(it.DevelopLabels) != 1 || it.DevelopLabels[0] != "develop" {
+		t.Errorf("DevelopLabels = %v, want [develop]", it.DevelopLabels)
+	}
+	if len(it.SkipLabels) != 1 || it.SkipLabels[0] != "wontfix" {
+		t.Errorf("SkipLabels = %v, want [wontfix]", it.SkipLabels)
+	}
+	// Fields the stored JSON did NOT set must survive from the env layer:
+	if len(it.BlockedLabels) != 1 || it.BlockedLabels[0] != "heimdallm-queued" {
+		t.Errorf("BlockedLabels = %v, want [heimdallm-queued] — stored JSON had no blocked_labels key, env value should survive", it.BlockedLabels)
+	}
+	if it.PromoteToLabel != "develop" {
+		t.Errorf("PromoteToLabel = %q, want develop — stored JSON had no promote_to_label key, env value should survive", it.PromoteToLabel)
+	}
+}
+
+func TestApplyStore_IssueTracking_ExplicitEmptyListStillClears(t *testing.T) {
+	// Symmetric contract: when the stored JSON DOES include a field and
+	// its value is an empty list, that IS a meaningful signal ("operator
+	// cleared this via UI") and must overwrite env. The fix for stale-
+	// JSON preservation cannot silently turn explicit `[]` into "no-op".
+	cfg := &Config{}
+	cfg.applyDefaults()
+	cfg.GitHub.IssueTracking.DevelopLabels = []string{"from-env"}
+
+	rows := map[string]string{
+		"issue_tracking": `{"enabled":false,"filter_mode":"exclusive","default_action":"ignore","develop_labels":[]}`,
+	}
+	if err := cfg.ApplyStore(rows); err != nil {
+		t.Fatalf("ApplyStore: %v", err)
+	}
+	if len(cfg.GitHub.IssueTracking.DevelopLabels) != 0 {
+		t.Errorf("DevelopLabels = %v, want empty — explicit [] in stored JSON must override env", cfg.GitHub.IssueTracking.DevelopLabels)
+	}
+}
+
 func TestApplyStore_UnknownKey_IsIgnored(t *testing.T) {
 	// Forward-compat: if an older daemon sees a key written by a newer
 	// handler, we skip it rather than fail the whole reload.

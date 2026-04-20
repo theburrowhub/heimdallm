@@ -84,11 +84,16 @@ func (c *Config) ApplyStore(rows map[string]string) error {
 			}
 			shadow.Retention.MaxDays = days
 		case "issue_tracking":
-			var it IssueTrackingConfig
-			if err := json.Unmarshal([]byte(raw), &it); err != nil {
+			// Unmarshal INTO the existing struct (not a fresh zero value).
+			// Go's encoding/json only overwrites fields the JSON mentions,
+			// so fields absent from the stored payload keep whatever the
+			// TOML+env layers already put there. Without this, a row
+			// written by an older build that predates a field (e.g. pre-#93
+			// save lacks blocked_labels) would silently zero-out the
+			// env-supplied value on every reload.
+			if err := json.Unmarshal([]byte(raw), &shadow.GitHub.IssueTracking); err != nil {
 				return fmt.Errorf("config: apply store key %q: %w", key, err)
 			}
-			shadow.GitHub.IssueTracking = it
 		case "server_port":
 			// Explicitly unsupported (not unknown): mutating the listening
 			// port at runtime would invalidate every in-flight connection
