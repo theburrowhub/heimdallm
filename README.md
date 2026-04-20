@@ -50,48 +50,72 @@ Installs to `/opt/heimdallm/` with a desktop entry and `/usr/bin/heimdallm` syml
 
 ### Docker
 
-For headless/server deployment, Heimdallm runs as a Docker container with all four AI CLIs bundled.
+For headless/server deployment, Heimdallm runs as a Docker container with all four AI CLIs bundled. The repository ships Make wrappers around `docker compose` so you don't have to remember the compose path.
+
+#### 1. Prerequisites
+
+- **Docker Desktop** (or Docker Engine + compose plugin) running.
+- A **GitHub personal access token** with `repo` scope (or `public_repo` for public-only). Create one at https://github.com/settings/tokens.
+- An **API key for your chosen AI provider** — at least one of:
+  - Claude: https://console.anthropic.com/settings/keys (or `CLAUDE_CODE_OAUTH_TOKEN` via `claude setup-token`)
+  - Gemini: https://aistudio.google.com/apikey
+  - OpenAI / Codex: https://platform.openai.com/api-keys
+  - OpenRouter (for OpenCode): https://openrouter.ai/keys
+
+#### 2. Configure
 
 ```bash
-# 1. Set up configuration
-cd docker
-cp .env.example .env
-# Edit .env — set GITHUB_TOKEN, HEIMDALLM_REPOSITORIES, and AI API key(s)
-
-# 2. Start the service
-docker compose up -d
-
-# 3. Verify
-curl http://localhost:7842/health
-# {"status":"ok"}
+cp docker/.env.example docker/.env
+# Edit docker/.env — at minimum fill in:
+#   GITHUB_TOKEN
+#   HEIMDALLM_AI_PRIMARY      (claude | gemini | codex | opencode)
+#   <provider>_API_KEY        (matching your primary)
+#   HEIMDALLM_REPOSITORIES    (owner/repo1,owner/repo2 — or leave empty if
+#                              using HEIMDALLM_DISCOVERY_TOPIC)
 ```
 
-The Docker image is published to `ghcr.io/theburrowhub/heimdallm:latest` on every release. See [`docker/.env.example`](docker/.env.example) for all configuration options.
+See [`docker/.env.example`](docker/.env.example) for every supported variable including issue-tracking, topic-based discovery, and web UI settings.
 
-#### Web UI alongside the daemon (optional)
-
-The compose file ships a second service, `web`, that serves the SvelteKit
-admin UI on port `3000`. It starts alongside the daemon by default; to keep
-the previous daemon-only behaviour, name the service explicitly
-(`docker compose up -d heimdallm`).
+#### 3. Start the stack
 
 ```bash
-# Start both services (web waits for the daemon's healthcheck)
-docker compose -f docker/docker-compose.yml up -d
-
-# Then open the UI in your browser of choice:
-#   macOS:   open http://localhost:3000
-#   Linux:   xdg-open http://localhost:3000
-#   Or just browse to http://localhost:3000 manually.
+make up            # daemon + web UI (recommended)
+# or:
+make up-daemon     # daemon only, no web UI
 ```
 
-The `web` container reads the daemon's API token from the shared
-`heimdallm-data` volume automatically — no manual copy needed. If you prefer
-to pin it explicitly (for scripting, CI, or running `curl` against the daemon
-from your host), run `make setup` once the daemon is up and it will extract
-the token into `docker/.env` as `HEIMDALLM_API_TOKEN`. Rerunning the target
-replaces the line instead of appending, so it's safe to call again after a
-daemon reset.
+`make up` refuses to start if `docker/.env` is missing and prints the exact copy-from-template command. The web container waits for the daemon's healthcheck before accepting traffic, so the first UI request never races a half-initialised daemon.
+
+#### 4. Verify
+
+```bash
+make ps                          # show container status
+curl http://localhost:7842/health  # -> {"status":"ok"}
+```
+
+Then open the web UI:
+
+- macOS: `open http://localhost:3000`
+- Linux: `xdg-open http://localhost:3000`
+- Or browse to `http://localhost:3000` manually.
+
+The `web` container reads the daemon's API token from the shared `heimdallm-data` volume automatically — no manual copy needed.
+
+#### 5. Day-to-day commands
+
+```bash
+make logs          # tail logs from daemon + web
+make logs-daemon   # daemon only
+make restart       # restart both containers
+make down          # stop and remove containers (data volume persists)
+make setup         # (optional) copy the daemon API token into docker/.env.
+                   #  Only needed if you want to call the daemon's HTTP API
+                   #  from outside Docker (scripts, CI, `curl` from the host).
+                   #  The web UI does NOT need this — it reads the token from
+                   #  the shared volume automatically.
+```
+
+The Docker image is published to `ghcr.io/theburrowhub/heimdallm:latest` on every release — `make up` pulls it automatically when the `build:` contexts haven't changed locally.
 
 #### Auto-discover repositories by topic
 

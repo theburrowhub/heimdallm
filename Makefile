@@ -18,7 +18,8 @@ endif
 
 .PHONY: build-daemon build-app test test-docker dev dev-daemon dev-stop \
         release-local package-macos install-service verify-linux run-linux \
-        setup clean
+        setup up up-daemon down logs logs-daemon ps restart clean \
+        _check-docker _check-env
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
@@ -241,8 +242,7 @@ install-service: build-daemon
 # value without digging into the volume.
 #
 # Usage:
-#   docker compose -f docker/docker-compose.yml up -d heimdallm
-#   make setup
+#   make up-daemon && make setup
 #
 # Replaces any existing HEIMDALLM_API_TOKEN line rather than appending, so
 # rerunning the target after a daemon reset does not leave stale duplicates.
@@ -259,7 +259,7 @@ setup:
 	@test -f $(DOCKER_ENV) || { echo "❌  $(DOCKER_ENV) missing — copy docker/.env.example first."; exit 1; }
 	@docker compose -f $(COMPOSE_FILE) ps --status running --services 2>/dev/null | grep -q '^heimdallm$$' \
 	  || { echo "❌  heimdallm container is not running. Start it with:"; \
-	       echo "     docker compose -f $(COMPOSE_FILE) up -d heimdallm"; exit 1; }
+	       echo "     make up-daemon"; exit 1; }
 	@TOKEN=$$(docker compose -f $(COMPOSE_FILE) exec -T heimdallm cat /data/api_token 2>/dev/null | tr -d '\r\n'); \
 	 if [ -z "$$TOKEN" ]; then \
 	   echo "❌  /data/api_token is empty — wait for the daemon's first full startup and retry."; \
@@ -273,6 +273,51 @@ setup:
 	 mv "$$TMP" $(DOCKER_ENV); \
 	 trap - EXIT; \
 	 echo "✓  HEIMDALLM_API_TOKEN written to $(DOCKER_ENV)"
+
+# ── Docker compose wrappers ───────────────────────────────────────────────────
+#
+# Thin shortcuts around `docker compose -f $(COMPOSE_FILE)`. They exist so the
+# README can point newcomers at `make up` / `make logs` / `make down` instead
+# of the longer compose invocation — and so the invocation stays in one place
+# if the compose path changes.
+#
+# `up` brings both services (daemon + web) online. `up-daemon` is the escape
+# hatch for operators who do not want the web UI.
+#
+# `make up` also validates `docker/.env` exists — the most common first-run
+# mistake is forgetting to copy `.env.example`.
+
+_check-docker:
+	@command -v docker >/dev/null || { echo "❌  Docker is required. Install from https://docs.docker.com/get-docker/"; exit 1; }
+
+_check-env: _check-docker
+	@test -f $(DOCKER_ENV) || { \
+	  echo "❌  $(DOCKER_ENV) missing."; \
+	  echo "    Copy the template and fill in GITHUB_TOKEN + your AI API key:"; \
+	  echo "    cp docker/.env.example $(DOCKER_ENV)"; \
+	  exit 1; \
+	}
+
+up: _check-env
+	docker compose -f $(COMPOSE_FILE) up -d
+
+up-daemon: _check-env
+	docker compose -f $(COMPOSE_FILE) up -d heimdallm
+
+down: _check-docker
+	docker compose -f $(COMPOSE_FILE) down
+
+logs: _check-docker
+	docker compose -f $(COMPOSE_FILE) logs -f
+
+logs-daemon: _check-docker
+	docker compose -f $(COMPOSE_FILE) logs -f heimdallm
+
+ps: _check-docker
+	docker compose -f $(COMPOSE_FILE) ps
+
+restart: _check-docker
+	docker compose -f $(COMPOSE_FILE) restart
 
 # ── CI packaging (used by GitHub Actions) ─────────────────────────────────────
 
