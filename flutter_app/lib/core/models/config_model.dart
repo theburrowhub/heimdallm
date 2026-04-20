@@ -407,11 +407,15 @@ class AppConfig {
         final ov = entry.value as Map<String, dynamic>;
         final existing = configs[entry.key];
         final itRaw = ov['issue_tracking'] as Map<String, dynamic>?;
-        final itEnabled = itRaw?['enabled'] as bool?;
+        // Derive enabled flags from reality: explicit enabled OR labels configured
+        final hasReviewLabels = _nullableStringList(itRaw?['review_only_labels']) != null;
+        final hasDevLabels = _nullableStringList(itRaw?['develop_labels']) != null;
+        final itExplicit = itRaw?['enabled'] as bool? ?? false;
+        final devExplicit = itRaw?['develop_enabled'] as bool? ?? false;
         configs[entry.key] = RepoConfig(
           prEnabled:          existing?.prEnabled,
-          itEnabled:          itEnabled,
-          devEnabled:         itRaw?['develop_enabled'] as bool?,
+          itEnabled:          (itExplicit || hasReviewLabels) ? true : null,
+          devEnabled:         (devExplicit || hasDevLabels) ? true : null,
           localDir:           _nonEmpty(ov['local_dir']),
           aiPrimary:          _nonEmpty(ov['primary']),
           aiFallback:         _nonEmpty(ov['fallback']),
