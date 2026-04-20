@@ -105,24 +105,29 @@
     err = null;
     savedFlash = null;
     try {
-      // Compose payload: raw keeps unknown fields, we override what we own.
-      const payload: Config = { ...raw };
-      payload.poll_interval = pollInterval;
-      payload.ai_primary = aiPrimary;
-      payload.ai_fallback = aiFallback || undefined;
-      payload.review_mode = reviewMode;
-      payload.retention_days = retentionDays;
-      payload.repositories = parseLines(repositoriesText);
-      payload.issue_tracking = {
-        ...((raw.issue_tracking as Record<string, unknown> | undefined) ?? {}),
-        enabled: Boolean(it.enabled),
-        filter_mode: it.filter_mode || 'exclusive',
-        default_action: it.default_action || 'ignore',
-        organizations: it.organizations ?? [],
-        assignees: it.assignees ?? [],
-        develop_labels: it.develop_labels ?? [],
-        review_only_labels: it.review_only_labels ?? [],
-        skip_labels: it.skip_labels ?? []
+      // Compose payload with ONLY the keys the daemon's PUT /config accepts.
+      // `{ ...raw }` would round-trip server-returned read-only fields
+      // (repo_overrides, agent_configs, server_port, non_monitored) which
+      // the daemon rejects with 400 unless explicitly allowlisted — see
+      // daemon/internal/server/handlers.go validConfigKeys.
+      const payload: Config = {
+        poll_interval: pollInterval,
+        ai_primary: aiPrimary,
+        ai_fallback: aiFallback || undefined,
+        review_mode: reviewMode,
+        retention_days: retentionDays,
+        repositories: parseLines(repositoriesText),
+        issue_tracking: {
+          ...((raw.issue_tracking as Record<string, unknown> | undefined) ?? {}),
+          enabled: Boolean(it.enabled),
+          filter_mode: it.filter_mode || 'exclusive',
+          default_action: it.default_action || 'ignore',
+          organizations: it.organizations ?? [],
+          assignees: it.assignees ?? [],
+          develop_labels: it.develop_labels ?? [],
+          review_only_labels: it.review_only_labels ?? [],
+          skip_labels: it.skip_labels ?? []
+        }
       };
 
       await updateConfig(payload);
