@@ -68,6 +68,27 @@ curl http://localhost:7842/health
 
 The Docker image is published to `ghcr.io/theburrowhub/heimdallm:latest` on every release. See [`docker/.env.example`](docker/.env.example) for all configuration options.
 
+#### Web UI alongside the daemon (optional)
+
+The compose file ships a second service, `web`, that serves the SvelteKit
+admin UI on port `3000`:
+
+```bash
+# Start both services (web waits for the daemon's healthcheck)
+docker compose -f docker/docker-compose.yml up -d
+
+# Browse the UI
+open http://localhost:3000
+```
+
+The `web` container reads the daemon's API token from the shared
+`heimdallm-data` volume automatically — no manual copy needed. If you prefer
+to pin it explicitly (for scripting, CI, or running `curl` against the daemon
+from your host), run `make setup` once the daemon is up and it will extract
+the token into `docker/.env` as `HEIMDALLM_API_TOKEN`. Rerunning the target
+replaces the line instead of appending, so it's safe to call again after a
+daemon reset.
+
 #### Auto-discover repositories by topic
 
 Instead of listing every repository in `HEIMDALLM_REPOSITORIES`, you can tag

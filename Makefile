@@ -17,7 +17,8 @@ else
 endif
 
 .PHONY: build-daemon build-app test test-docker dev dev-daemon dev-stop \
-        release-local package-macos install-service verify-linux run-linux clean
+        release-local package-macos install-service verify-linux run-linux \
+        setup clean
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
@@ -230,6 +231,40 @@ _check-gh:
 
 install-service: build-daemon
 	$(DAEMON_BIN) install
+
+# ── Docker compose setup (seed HEIMDALLM_API_TOKEN) ───────────────────────────
+#
+# The web service reads /data/api_token from the shared volume at startup, so
+# most of the time no env var is needed. This target is the escape hatch: it
+# pulls the token out of the running daemon container and writes it into
+# docker/.env so other tooling (scripts, CI, local curl) can reuse the same
+# value without digging into the volume.
+#
+# Usage:
+#   docker compose -f docker/docker-compose.yml up -d heimdallm
+#   make setup
+#
+# Replaces any existing HEIMDALLM_API_TOKEN line rather than appending, so
+# rerunning the target after a daemon reset does not leave stale duplicates.
+
+COMPOSE_FILE := docker/docker-compose.yml
+DOCKER_ENV   := docker/.env
+
+setup:
+	@command -v docker >/dev/null || { echo "❌  Docker is required."; exit 1; }
+	@test -f $(DOCKER_ENV) || { echo "❌  $(DOCKER_ENV) missing — copy docker/.env.example first."; exit 1; }
+	@docker compose -f $(COMPOSE_FILE) ps --status running --services 2>/dev/null | grep -q '^heimdallm$$' \
+	  || { echo "❌  heimdallm container is not running. Start it with:"; \
+	       echo "     docker compose -f $(COMPOSE_FILE) up -d heimdallm"; exit 1; }
+	@TOKEN=$$(docker compose -f $(COMPOSE_FILE) exec -T heimdallm cat /data/api_token 2>/dev/null | tr -d '\r\n'); \
+	 if [ -z "$$TOKEN" ]; then \
+	   echo "❌  /data/api_token is empty — wait for the daemon's first full startup and retry."; \
+	   exit 1; \
+	 fi; \
+	 grep -v '^HEIMDALLM_API_TOKEN=' $(DOCKER_ENV) > $(DOCKER_ENV).tmp || true; \
+	 echo "HEIMDALLM_API_TOKEN=$$TOKEN" >> $(DOCKER_ENV).tmp; \
+	 mv $(DOCKER_ENV).tmp $(DOCKER_ENV); \
+	 echo "✓  HEIMDALLM_API_TOKEN written to $(DOCKER_ENV)"
 
 # ── CI packaging (used by GitHub Actions) ─────────────────────────────────────
 

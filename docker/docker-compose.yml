@@ -55,6 +55,35 @@ services:
       start_period: 10s
       retries: 3
 
+  # SvelteKit web UI. Talks to the daemon over its HTTP API; reads the
+  # per-daemon API token from the shared heimdallm-data volume so operators
+  # don't have to copy it into the environment by hand. `make setup`
+  # provides a fallback path that writes the token into docker/.env.
+  web:
+    build:
+      context: ..
+      dockerfile: web_ui/Dockerfile
+    container_name: heimdallm-web
+    restart: unless-stopped
+    ports:
+      - "${HEIMDALLM_WEB_PORT:-3000}:3000"
+    environment:
+      # Where the daemon lives inside the compose network. Host + port line
+      # up with the heimdallm service above.
+      - HEIMDALLM_API_URL=http://heimdallm:${HEIMDALLM_PORT:-7842}
+      # Optional: set HEIMDALLM_API_TOKEN to skip reading the token from
+      # the shared volume. Left empty on purpose in the example.
+      - HEIMDALLM_API_TOKEN=${HEIMDALLM_API_TOKEN:-}
+    volumes:
+      # Read-only mount so the web container can load /data/api_token but
+      # cannot mutate the daemon's SQLite DB or config.
+      - heimdallm-data:/data:ro
+    depends_on:
+      heimdallm:
+        # Wait until the daemon is healthy so the first UI request does
+        # not race a still-initialising daemon and render a 502.
+        condition: service_healthy
+
 volumes:
   heimdallm-data:
     driver: local
