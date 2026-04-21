@@ -66,4 +66,28 @@ void main() {
 
     expect(find.byType(BulkActionsBar), findsNothing);
   });
+
+  testWidgets('selecting Monitored hides non-monitored repos',
+      (tester) async {
+    final cfg = const AppConfig(
+      serverPort: 1, pollInterval: '60s', retentionDays: 30,
+      aiPrimary: 'claude', aiFallback: '', reviewMode: 'single',
+      repoConfigs: {
+        'a/one': RepoConfig(prEnabled: true),
+        'a/two': RepoConfig(prEnabled: false),
+      },
+      issueTracking: IssueTrackingConfig(),
+    );
+    await tester.pumpWidget(_host(cfg));
+    await tester.pumpAndSettle();
+
+    expect(find.text('a/one'), findsOneWidget);
+    expect(find.text('a/two'), findsOneWidget);
+
+    await tester.tap(find.text('Monitored'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('a/one'), findsOneWidget);
+    expect(find.text('a/two'), findsNothing);
+  });
 }

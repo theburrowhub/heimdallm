@@ -3,11 +3,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../core/models/config_model.dart';
-import '../../core/platform/platform_services_provider.dart';
 import '../../shared/widgets/toast.dart';
 import '../config/config_providers.dart';
 import 'widgets/bulk_actions_bar.dart';
 import 'widgets/feature_palette.dart';
+import 'widgets/filter_chips.dart';
 import 'widgets/repo_list_tile.dart';
 
 class ReposScreen extends ConsumerStatefulWidget {
@@ -22,9 +22,8 @@ enum _SyncStatus { idle, saving, saved }
 class _ReposScreenState extends ConsumerState<ReposScreen> {
   Map<String, RepoConfig> _repoConfigs = {};
   bool _initialized = false;
-  bool _discovering = false;
-  String? _discoverError;
   String _search = '';
+  String _filter = 'all'; // 'all' | 'monitored' | 'not_monitored'
   _SyncStatus _syncStatus = _SyncStatus.idle;
   Timer? _debounce;
   Timer? _savedResetTimer;
@@ -105,27 +104,6 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
     _debounce = Timer(const Duration(milliseconds: 800), _autoSave);
   }
 
-  Future<void> _discover() async {
-    setState(() { _discovering = true; _discoverError = null; });
-    try {
-      final token = await ref.read(platformServicesProvider).detectGitHubToken();
-      final discovered = await ref.read(platformServicesProvider).discoverReposFromPRs(token ?? '');
-      if (!mounted) return;
-      setState(() {
-        for (final repo in discovered) {
-          _repoConfigs.putIfAbsent(repo, () => const RepoConfig(prEnabled: true));
-        }
-        _discovering = false;
-        if (discovered.isEmpty) _discoverError = 'No active PRs found.';
-      });
-      _debounce?.cancel();
-      _debounce = Timer(const Duration(milliseconds: 400), _autoSave);
-    } catch (e) {
-      if (!mounted) return;
-      setState(() { _discovering = false; _discoverError = '$e'; });
-    }
-  }
-
   Future<void> _autoSave() async {
     final current = ref.read(configNotifierProvider).valueOrNull;
     if (current == null) return;
@@ -164,9 +142,14 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
             if (ma != mb) return ma.compareTo(mb);
             return a.compareTo(b);
           });
-        final filtered = _search.isEmpty
-            ? allRepos
-            : allRepos.where((r) => r.toLowerCase().contains(_search.toLowerCase())).toList();
+        final filtered = allRepos.where((r) {
+          if (_search.isNotEmpty &&
+              !r.toLowerCase().contains(_search.toLowerCase())) return false;
+          final c = _repoConfigs[r]!;
+          if (_filter == 'monitored' && !c.isMonitored) return false;
+          if (_filter == 'not_monitored' && c.isMonitored) return false;
+          return true;
+        }).toList();
 
         return Column(
           children: [
@@ -188,13 +171,18 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
                     ),
                   ),
                   const SizedBox(width: 8),
-                  FilledButton.tonalIcon(
-                    icon: _discovering
-                        ? const SizedBox(width: 14, height: 14,
-                            child: CircularProgressIndicator(strokeWidth: 2))
-                        : const Icon(Icons.sync, size: 16),
-                    label: const Text('Discover'),
-                    onPressed: _discovering ? null : _discover,
+                  RepoFilterChips(
+                    counts: {
+                      'all': _repoConfigs.length,
+                      'monitored': _repoConfigs.values
+                          .where((c) => c.isMonitored)
+                          .length,
+                      'not_monitored': _repoConfigs.values
+                          .where((c) => !c.isMonitored)
+                          .length,
+                    },
+                    current: _filter,
+                    onChanged: (v) => setState(() => _filter = v),
                   ),
                   const SizedBox(width: 12),
                   // Auto-save status indicator
@@ -210,11 +198,6 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
                 ],
               ),
             ),
-            if (_discoverError != null)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                child: Text(_discoverError!, style: const TextStyle(color: Colors.orange)),
-              ),
             if (_selected.isNotEmpty)
               BulkActionsBar(
                 selectedCount: _selected.length,
