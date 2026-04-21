@@ -14,6 +14,10 @@ services:
       # Gemini OAuth tokens from host (uncomment for Level 3 E2E test):
       # - ~/.gemini:/home/heimdallm/.gemini:ro
 
+  web:
+    container_name: heimdallm-web-test
+    restart: "no"
+
 volumes:
   heimdallm-test-data:
     driver: local
