@@ -25,6 +25,9 @@ type Activity struct {
 // ActivityQuery bounds a ListActivity call.
 // Zero values for From/To mean "no lower/upper bound" but the handler always
 // supplies a bounded window, so unbounded queries only happen in tests.
+//
+// To is an EXCLUSIVE upper bound (ts < To). Pass the start of the day
+// AFTER your intended last day, not 23:59:59 on the last day.
 type ActivityQuery struct {
 	From    time.Time
 	To      time.Time
@@ -82,7 +85,7 @@ func (s *Store) ListActivity(q ActivityQuery) ([]*Activity, bool, error) {
 		args = append(args, q.From.UTC().Format(sqliteTimeFormat))
 	}
 	if !q.To.IsZero() {
-		where = append(where, "ts <= ?")
+		where = append(where, "ts < ?") // exclusive upper bound
 		args = append(args, q.To.UTC().Format(sqliteTimeFormat))
 	}
 	if len(q.Orgs) > 0 {
@@ -169,6 +172,17 @@ func scanActivity(s scanner) (*Activity, error) {
 		return nil, fmt.Errorf("store: parse created_at %q: %w", createdStr, err)
 	}
 	return &a, nil
+}
+
+// CountActivitySince returns the number of activity_log rows with ts >= cutoff.
+func (s *Store) CountActivitySince(cutoff time.Time) (int, error) {
+	var n int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM activity_log WHERE ts >= ?",
+		cutoff.UTC().Format(sqliteTimeFormat)).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("store: count activity: %w", err)
+	}
+	return n, nil
 }
 
 func placeholders(n int) string {

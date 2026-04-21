@@ -83,6 +83,18 @@ func (c *Config) ApplyStore(rows map[string]string) error {
 				return fmt.Errorf("config: apply store key %q: %w", key, err)
 			}
 			shadow.Retention.MaxDays = days
+		case "activity_log_enabled":
+			var enabled bool
+			if err := json.Unmarshal([]byte(raw), &enabled); err != nil {
+				return fmt.Errorf("config: apply store key %q: %w", key, err)
+			}
+			shadow.ActivityLog.Enabled = &enabled
+		case "activity_log_retention_days":
+			var days int
+			if err := json.Unmarshal([]byte(raw), &days); err != nil {
+				return fmt.Errorf("config: apply store key %q: %w", key, err)
+			}
+			shadow.ActivityLog.RetentionDays = &days
 		case "issue_tracking":
 			// Unmarshal INTO the existing struct (not a fresh zero value).
 			// Go's encoding/json only overwrites fields the JSON mentions,

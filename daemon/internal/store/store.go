@@ -212,6 +212,7 @@ type Stats struct {
 	ReviewsLast7Days   []DayCount        `json:"reviews_last_7_days"`
 	AvgIssuesPerReview float64           `json:"avg_issues_per_review"`
 	ReviewTiming       ReviewTimingStats `json:"review_timing"`
+	ActivityCount24h   int               `json:"activity_count_24h"`
 }
 
 type RepoCount struct {
@@ -357,6 +358,12 @@ func (s *Store) ComputeStats() (*Stats, error) {
 				t.MedianSeconds = sorted[n/2]
 			}
 		}
+	}
+
+	// Activity log counter (last 24h). Non-fatal: a failing query leaves the
+	// field zero rather than breaking /stats entirely.
+	if n, err := s.CountActivitySince(time.Now().Add(-24 * time.Hour)); err == nil {
+		stats.ActivityCount24h = n
 	}
 
 	return stats, nil
