@@ -1,11 +1,8 @@
-import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import '../../core/daemon/daemon_lifecycle.dart';
 import '../../core/models/config_model.dart';
-import '../../core/setup/first_run_setup.dart';
-import '../../core/setup/gh_cli.dart';
+import '../../core/platform/platform_services_provider.dart';
 import '../../core/setup/repo_discovery.dart';
 import '../../shared/widgets/toast.dart';
 import '../dashboard/dashboard_providers.dart';
@@ -49,25 +46,25 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   }
 
   Future<void> _detectToken() async {
-    // 1. Try gh CLI first — if it works, show the chip (no manual entry needed)
-    final ghToken = await _getGhCliToken();
+    final platform = ref.read(platformServicesProvider);
+
+    // 1. Try the full platform detection first (gh CLI on desktop, nothing on web).
+    final detected = await platform.detectGitHubToken();
     if (!mounted) return;
-    if (ghToken != null) {
+    if (detected != null && detected.isNotEmpty) {
       setState(() {
-        _tokenController.text = ghToken;
-        _tokenFromGh = true;
+        _tokenController.text = detected;
+        _tokenFromGh = true; // detectGitHubToken prefers gh CLI
       });
       return;
     }
 
-    // 2. Fall back to Keychain / GITHUB_TOKEN env var
-    final stored = await FirstRunSetup.getToken()
-        ?? Platform.environment['GITHUB_TOKEN'];
+    // 2. Fall back to stored token / env var
+    final stored = await platform.getStoredGitHubToken()
+        ?? platform.readEnv('GITHUB_TOKEN');
     if (!mounted || stored == null || stored.isEmpty) return;
     setState(() => _tokenController.text = stored);
   }
-
-  Future<String?> _getGhCliToken() => GhCli.authToken();
 
   void _initFromConfig(AppConfig config) {
     if (_initialized) return;
@@ -508,7 +505,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
             try {
               final token = _tokenController.text.trim();
               if (token.isNotEmpty && !_tokenFromGh) {
-                await FirstRunSetup.storeToken(token);
+                await ref.read(platformServicesProvider).storeGitHubToken(token);
                 // Invalidate the cached token so the ApiClient re-reads it on the next request.
                 ref.read(apiClientProvider).clearTokenCache();
               }
@@ -541,7 +538,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
           await ref.read(configNotifierProvider.notifier).saveAndStartDaemon(
             token: _tokenFromGh ? (_tokenController.text.trim()) : token,
             config: updated,
-            daemonBinaryPath: DaemonLifecycle.defaultBinaryPath() ?? '',
+            daemonBinaryPath: ref.read(platformServicesProvider).defaultDaemonBinaryPath() ?? '',
           );
           if (context.mounted) {
             final state = ref.read(configNotifierProvider);

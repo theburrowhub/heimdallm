@@ -1,10 +1,8 @@
-import 'dart:io';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/models/config_model.dart';
-import '../../core/setup/first_run_setup.dart';
+import '../../core/platform/platform_services_provider.dart';
 import '../dashboard/dashboard_providers.dart';
 
-/// Whether the daemon is currently reachable.
 final daemonHealthProvider = FutureProvider<bool>((ref) async {
   final api = ref.watch(apiClientProvider);
   return api.checkHealth();
@@ -28,7 +26,6 @@ class ConfigNotifier extends AsyncNotifier<AppConfig> {
       final json = await api.fetchConfig();
       return AppConfig.fromJson(json);
     } catch (_) {
-      // Daemon not running — return defaults so the setup form can display
       return const AppConfig();
     }
   }
@@ -37,7 +34,7 @@ class ConfigNotifier extends AsyncNotifier<AppConfig> {
   /// The TOML file is the single source of truth for per-repo overrides
   /// (the daemon's PUT /config only supports a subset of global keys).
   Future<void> save(AppConfig config) async {
-    await FirstRunSetup.writeConfig(config);
+    await ref.read(platformServicesProvider).writeDaemonConfig(config);
     final api = ref.read(apiClientProvider);
     await api.reloadConfig();
     state = AsyncValue.data(config);
@@ -52,37 +49,34 @@ class ConfigNotifier extends AsyncNotifier<AppConfig> {
   }) async {
     state = const AsyncLoading();
     state = await AsyncValue.guard(() async {
-      // 1. Store token in Keychain
-      await FirstRunSetup.storeToken(token);
-      // Invalidate the cached token so the ApiClient re-reads it on the next request.
+      final platform = ref.read(platformServicesProvider);
+      // 1. Store token
+      await platform.storeGitHubToken(token);
+      // Invalidate the cached token so the ApiClient re-reads it.
       ref.read(apiClientProvider).clearTokenCache();
 
-      // 2. Write config to ~/.config/heimdallm/config.toml
-      await FirstRunSetup.writeConfig(config);
+      // 2. Write config
+      await platform.writeDaemonConfig(config);
 
       // 3. Launch daemon
-      await Process.start(daemonBinaryPath, []);
+      await platform.spawnDaemon(daemonBinaryPath);
 
-      // 4. Wait up to 8 seconds for daemon to become healthy
+      // 4. Wait up to 8 seconds for the daemon to become healthy
       final api = ref.read(apiClientProvider);
       for (var i = 0; i < 80; i++) {
         await Future.delayed(const Duration(milliseconds: 100));
         if (await api.checkHealth()) break;
       }
-
       if (!await api.checkHealth()) {
         throw Exception(
           'Heimdallm could not start. Check the app installation.',
         );
       }
-
-      // 5. Refresh health provider
       ref.invalidate(daemonHealthProvider);
       return config;
     });
   }
 }
 
-final configNotifierProvider = AsyncNotifierProvider<ConfigNotifier, AppConfig>(
-  ConfigNotifier.new,
-);
+final configNotifierProvider =
+    AsyncNotifierProvider<ConfigNotifier, AppConfig>(ConfigNotifier.new);
