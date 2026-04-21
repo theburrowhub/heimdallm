@@ -1,9 +1,10 @@
 import 'dart:async';
 import 'dart:js_interop';
+import 'dart:ui' show VoidCallback;
 
 import 'package:flutter/painting.dart' show Size;
 import 'package:web/web.dart' as web;
-import 'dart:ui' show VoidCallback;
+
 import '../api/api_client.dart';
 import '../models/config_model.dart';
 import '../models/pr.dart';
@@ -84,9 +85,20 @@ class WebPlatformServices implements PlatformServices {
 
       // Use the same 192x192 icon we ship to the web bundle so the OS
       // notification matches the tab favicon and PWA icon.
+      //
+      // `tag` groups repeat notifications for the same entity so a
+      // rapid-fire sequence (Review Started → Review Complete → …) for
+      // one PR replaces the previous OS notification instead of
+      // stacking. The body is already "<repo> #<number>" in every
+      // caller, which uniquely identifies a PR without threading a
+      // separate id through the interface.
       final n = web.Notification(
         title,
-        web.NotificationOptions(body: body, icon: '/icons/Icon-192.png'),
+        web.NotificationOptions(
+          body: body,
+          icon: '/icons/Icon-192.png',
+          tag: body,
+        ),
       );
       // onclick fires when the user clicks the notification in the OS
       // notification center. window.focus() brings the tab back to the
