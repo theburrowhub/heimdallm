@@ -380,7 +380,7 @@ func main() {
 				// No-op when BlockedLabels is unset, so default installs
 				// don't pay for the extra calls.
 				if len(globalIT.BlockedLabels) > 0 {
-					if n, err := issuepipeline.PromoteReady(context.Background(), ghClient, globalIT, repos); err != nil {
+					if n, err := issuepipeline.PromoteReady(context.Background(), ghClient, globalIT, repos, broker); err != nil {
 						slog.Error("poll: issue promotion failed", "err", err)
 					} else if n > 0 {
 						slog.Info("poll: promoted issues", "count", n)

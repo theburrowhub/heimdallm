@@ -15,6 +15,7 @@ const (
 	EventIssueReviewCompleted = "issue_review_completed"
 	EventIssueImplemented     = "issue_implemented" // reserved for #27 (auto_implement PR created)
 	EventIssueReviewError     = "issue_review_error"
+	EventIssuePromoted        = "issue_promoted" // #113: promoter flipped blocked → promote-to label
 )
 
 // maxSubscribers limits the number of concurrent SSE connections to prevent

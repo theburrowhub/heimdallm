@@ -2,12 +2,14 @@ package issues
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
 
 	"github.com/heimdallm/daemon/internal/config"
 	"github.com/heimdallm/daemon/internal/github"
+	"github.com/heimdallm/daemon/internal/sse"
 )
 
 // PromoteIssueClient is the subset of *github.Client that PromoteReady
@@ -35,7 +37,7 @@ type PromoteIssueClient interface {
 // The call is a no-op when issue tracking is disabled, when no blocked
 // labels are configured, or when every repo in the list is empty — keeps
 // default installs unaffected.
-func PromoteReady(ctx context.Context, c PromoteIssueClient, cfg config.IssueTrackingConfig, repos []string) (int, error) {
+func PromoteReady(ctx context.Context, c PromoteIssueClient, cfg config.IssueTrackingConfig, repos []string, broker Publisher) (int, error) {
 	if !cfg.Enabled || len(cfg.BlockedLabels) == 0 {
 		return 0, nil
 	}
@@ -129,6 +131,19 @@ func PromoteReady(ctx context.Context, c PromoteIssueClient, cfg config.IssueTra
 			slog.Info("issues promote: promoted issue",
 				"repo", repo, "issue", issue.Number,
 				"from", blockedOnIssue, "to", promoteTo)
+			if broker != nil {
+				payload := map[string]any{
+					"repo":         repo,
+					"issue_number": issue.Number,
+					"issue_title":  issue.Title,
+					"from_label":   strings.Join(blockedOnIssue, ","),
+					"to_label":     promoteTo,
+					"reason":       "dependencies closed",
+				}
+				if b, err := json.Marshal(payload); err == nil {
+					broker.Publish(sse.Event{Type: sse.EventIssuePromoted, Data: string(b)})
+				}
+			}
 		}
 	}
 	return promoted, nil

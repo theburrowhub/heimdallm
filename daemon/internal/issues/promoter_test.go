@@ -2,6 +2,7 @@ package issues
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/heimdallm/daemon/internal/config"
 	"github.com/heimdallm/daemon/internal/github"
+	"github.com/heimdallm/daemon/internal/sse"
 )
 
 // fakePromoteClient is a minimal in-memory PromoteIssueClient. Records
@@ -109,7 +111,7 @@ func TestPromoteReady_Disabled_Noop(t *testing.T) {
 	cfg := baseCfg()
 	cfg.Enabled = false
 
-	n, err := PromoteReady(context.Background(), fake, cfg, []string{"org/r"})
+	n, err := PromoteReady(context.Background(), fake, cfg, []string{"org/r"}, nil)
 	if err != nil || n != 0 {
 		t.Errorf("got n=%d err=%v, want 0, nil", n, err)
 	}
@@ -123,7 +125,7 @@ func TestPromoteReady_NoBlockedLabels_Noop(t *testing.T) {
 	cfg := baseCfg()
 	cfg.BlockedLabels = nil
 
-	n, err := PromoteReady(context.Background(), fake, cfg, []string{"org/r"})
+	n, err := PromoteReady(context.Background(), fake, cfg, []string{"org/r"}, nil)
 	if err != nil || n != 0 {
 		t.Errorf("got n=%d err=%v, want 0, nil", n, err)
 	}
@@ -135,7 +137,7 @@ func TestPromoteReady_BlockedIssueWithOpenDep_NotPromoted(t *testing.T) {
 		open:  map[string][]*github.Issue{"org/r": {blocked}},
 		byRef: map[string]*github.Issue{"org/r#5": mkIssue("org/r", 5, "open", "")},
 	}
-	n, err := PromoteReady(context.Background(), fake, baseCfg(), []string{"org/r"})
+	n, err := PromoteReady(context.Background(), fake, baseCfg(), []string{"org/r"}, nil)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -156,7 +158,7 @@ func TestPromoteReady_AllDepsClosed_Promoted(t *testing.T) {
 			"org/r#6": mkIssue("org/r", 6, "closed", ""),
 		},
 	}
-	n, err := PromoteReady(context.Background(), fake, baseCfg(), []string{"org/r"})
+	n, err := PromoteReady(context.Background(), fake, baseCfg(), []string{"org/r"}, nil)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -182,7 +184,7 @@ func TestPromoteReady_NoDepsDeclared_NotPromoted(t *testing.T) {
 	fake := &fakePromoteClient{
 		open: map[string][]*github.Issue{"org/r": {blocked}},
 	}
-	n, err := PromoteReady(context.Background(), fake, baseCfg(), []string{"org/r"})
+	n, err := PromoteReady(context.Background(), fake, baseCfg(), []string{"org/r"}, nil)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -199,7 +201,7 @@ func TestPromoteReady_CrossRepoDep_QueriedAndRespected(t *testing.T) {
 			"other-org/shared#42": mkIssue("other-org/shared", 42, "closed", ""),
 		},
 	}
-	n, err := PromoteReady(context.Background(), fake, baseCfg(), []string{"org/r"})
+	n, err := PromoteReady(context.Background(), fake, baseCfg(), []string{"org/r"}, nil)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -219,7 +221,7 @@ func TestPromoteReady_MultipleBlockedLabels_AllRemoved(t *testing.T) {
 			"org/r#5": mkIssue("org/r", 5, "closed", ""),
 		},
 	}
-	n, err := PromoteReady(context.Background(), fake, cfg, []string{"org/r"})
+	n, err := PromoteReady(context.Background(), fake, cfg, []string{"org/r"}, nil)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -256,7 +258,7 @@ func TestPromoteReady_ListErrorPerRepo_ContinuesOtherRepos(t *testing.T) {
 		inner: fake,
 		failOnRepo: "org/a",
 	}
-	n, err := PromoteReady(context.Background(), failFake, baseCfg(), []string{"org/a", "org/b"})
+	n, err := PromoteReady(context.Background(), failFake, baseCfg(), []string{"org/a", "org/b"}, nil)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -307,7 +309,7 @@ func TestPromoteReady_MergesSubIssuesWithBodyParser(t *testing.T) {
 			"org/r#10": {mkIssue("org/r", 7, "closed", "")},
 		},
 	}
-	n, err := PromoteReady(context.Background(), fake, baseCfg(), []string{"org/r"})
+	n, err := PromoteReady(context.Background(), fake, baseCfg(), []string{"org/r"}, nil)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -331,7 +333,7 @@ func TestPromoteReady_SubIssueStillOpen_NotPromoted(t *testing.T) {
 			"org/r#10": {mkIssue("org/r", 7, "open", "")},
 		},
 	}
-	n, err := PromoteReady(context.Background(), fake, baseCfg(), []string{"org/r"})
+	n, err := PromoteReady(context.Background(), fake, baseCfg(), []string{"org/r"}, nil)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -351,7 +353,7 @@ func TestPromoteReady_SubIssuesOnly_NoBodySection(t *testing.T) {
 			"org/r#10": {mkIssue("org/r", 7, "closed", "")},
 		},
 	}
-	n, err := PromoteReady(context.Background(), fake, baseCfg(), []string{"org/r"})
+	n, err := PromoteReady(context.Background(), fake, baseCfg(), []string{"org/r"}, nil)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -370,7 +372,7 @@ func TestPromoteReady_SubIssuesAPIFailure_SkipsIssue(t *testing.T) {
 		byRef:  map[string]*github.Issue{"org/r#5": mkIssue("org/r", 5, "closed", "")},
 		subErr: errors.New("simulated 5xx"),
 	}
-	n, err := PromoteReady(context.Background(), fake, baseCfg(), []string{"org/r"})
+	n, err := PromoteReady(context.Background(), fake, baseCfg(), []string{"org/r"}, nil)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -398,7 +400,7 @@ func TestPromoteReady_SubIssuesDedupWithBodyRefs(t *testing.T) {
 			},
 		},
 	}
-	n, err := PromoteReady(context.Background(), counting, baseCfg(), []string{"org/r"})
+	n, err := PromoteReady(context.Background(), counting, baseCfg(), []string{"org/r"}, nil)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -428,7 +430,7 @@ func TestPromoteReady_CachesGetIssueAcrossBlockedIssues(t *testing.T) {
 		},
 	}
 
-	n, err := PromoteReady(context.Background(), counting, baseCfg(), []string{"org/r"})
+	n, err := PromoteReady(context.Background(), counting, baseCfg(), []string{"org/r"}, nil)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -451,7 +453,7 @@ func TestPromoteReady_AuditCommentIncludesDepStates(t *testing.T) {
 			"other/r#9": mkIssue("other/r", 9, "closed", ""),
 		},
 	}
-	if _, err := PromoteReady(context.Background(), fake, baseCfg(), []string{"org/r"}); err != nil {
+	if _, err := PromoteReady(context.Background(), fake, baseCfg(), []string{"org/r"}, nil); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	if len(fake.comments) != 1 {
@@ -519,7 +521,7 @@ func TestPromoteReady_AddLabelsFailure_RestoresBlockedLabel(t *testing.T) {
 		},
 	}
 
-	n, err := PromoteReady(context.Background(), fake, baseCfg(), []string{"org/r"})
+	n, err := PromoteReady(context.Background(), fake, baseCfg(), []string{"org/r"}, nil)
 	if err != nil {
 		t.Fatalf("PromoteReady: %v", err)
 	}
@@ -579,7 +581,7 @@ func TestPromoteReady_MissingPromoteTarget_ReturnsError(t *testing.T) {
 	cfg.DevelopLabels = nil // no promote target anywhere
 	cfg.PromoteToLabel = ""
 
-	_, err := PromoteReady(context.Background(), &fakePromoteClient{}, cfg, []string{"org/r"})
+	_, err := PromoteReady(context.Background(), &fakePromoteClient{}, cfg, []string{"org/r"}, nil)
 	if err == nil {
 		t.Fatal("expected error when promote target unresolved, got nil")
 	}
@@ -599,4 +601,58 @@ func equalSorted(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// fakePromoteBroker is a minimal in-memory SSE broker for testing promotion
+// event emission.
+type fakePromoteBroker struct {
+	events []sse.Event
+}
+
+func (f *fakePromoteBroker) Publish(e sse.Event) {
+	f.events = append(f.events, e)
+}
+
+func TestPromoteReady_AllDepsClosed_EmitsPromotedEvent(t *testing.T) {
+	blocked := mkIssue("org/r", 10, "open", "## Depends on\n- #5\n", "blocked")
+	fake := &fakePromoteClient{
+		open:  map[string][]*github.Issue{"org/r": {blocked}},
+		byRef: map[string]*github.Issue{"org/r#5": mkIssue("org/r", 5, "closed", "")},
+	}
+	broker := &fakePromoteBroker{}
+
+	n, err := PromoteReady(context.Background(), fake, baseCfg(), []string{"org/r"}, broker)
+	if err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("n = %d, want 1", n)
+	}
+	if len(broker.events) != 1 {
+		t.Fatalf("want 1 event, got %d", len(broker.events))
+	}
+	ev := broker.events[0]
+	if ev.Type != sse.EventIssuePromoted {
+		t.Errorf("event type = %q, want %q", ev.Type, sse.EventIssuePromoted)
+	}
+	var payload struct {
+		Repo        string `json:"repo"`
+		IssueNumber int    `json:"issue_number"`
+		IssueTitle  string `json:"issue_title"`
+		FromLabel   string `json:"from_label"`
+		ToLabel     string `json:"to_label"`
+		Reason      string `json:"reason"`
+	}
+	if err := json.Unmarshal([]byte(ev.Data), &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if payload.Repo != "org/r" || payload.IssueNumber != 10 {
+		t.Errorf("payload repo/number wrong: %+v", payload)
+	}
+	if payload.FromLabel != "blocked" || payload.ToLabel != "ready" {
+		t.Errorf("payload labels: %+v", payload)
+	}
+	if payload.Reason == "" {
+		t.Errorf("payload reason should be non-empty")
+	}
 }

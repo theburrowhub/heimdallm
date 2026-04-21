@@ -99,6 +99,22 @@ CREATE TABLE IF NOT EXISTS issue_reviews (
   pr_created   INTEGER NOT NULL DEFAULT 0,
   created_at   DATETIME NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS activity_log (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts          DATETIME NOT NULL,
+  org         TEXT NOT NULL,
+  repo        TEXT NOT NULL,
+  item_type   TEXT NOT NULL,
+  item_number INTEGER NOT NULL,
+  item_title  TEXT NOT NULL,
+  action      TEXT NOT NULL,
+  outcome     TEXT NOT NULL DEFAULT '',
+  details     TEXT NOT NULL DEFAULT '{}',
+  created_at  DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_activity_ts      ON activity_log(ts DESC);
+CREATE INDEX IF NOT EXISTS idx_activity_repo_ts ON activity_log(repo, ts DESC);
 `
 
 // Open opens (or creates) a SQLite database at dsn and applies the schema.
