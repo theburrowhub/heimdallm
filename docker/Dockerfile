@@ -13,7 +13,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /heimdallm ./cmd/heimd
 # ─── Stage 2: Runtime with AI CLIs ───────────────────────────────────────────
 FROM node:20-alpine
 
-RUN apk add --no-cache ca-certificates tzdata bash curl coreutils git
+RUN apk add --no-cache ca-certificates tzdata bash curl coreutils git openssh-client
 
 # ── Install AI CLI tools ──────────────────────────────────────────────────────
 # Claude Code CLI (Anthropic) — requires ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN at runtime
@@ -50,6 +50,15 @@ RUN mkdir -p /home/heimdallm/.claude \
              /home/heimdallm/.config/opencode \
              /home/heimdallm/.local/share/opencode \
     && chown -R heimdallm:heimdallm /home/heimdallm
+
+# ── SSH setup for git operations (auto_implement) ───────────────────────────
+# Pre-seed GitHub's host key so git fetch/push over SSH never prompts.
+# The host's SSH agent socket is forwarded at runtime via docker-compose.
+RUN mkdir -p /home/heimdallm/.ssh \
+    && ssh-keyscan github.com >> /home/heimdallm/.ssh/known_hosts 2>/dev/null \
+    && chmod 700 /home/heimdallm/.ssh \
+    && chmod 644 /home/heimdallm/.ssh/known_hosts \
+    && chown -R heimdallm:heimdallm /home/heimdallm/.ssh
 
 # ── Copy Heimdallm binary ────────────────────────────────────────────────────
 COPY --from=builder /heimdallm /usr/local/bin/heimdallm

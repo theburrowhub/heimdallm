@@ -57,6 +57,9 @@ services:
       # ── Headless / non-interactive mode ────────────────────────────────
       - CI=true
       - OPENCODE_DISABLE_AUTOUPDATE=true
+
+      # ── SSH agent forwarding for git operations (auto_implement) ──────
+      - SSH_AUTH_SOCK=/ssh-agent
     volumes:
       # Persistent data (SQLite DB + API token)
       - heimdallm-data:/data
@@ -95,6 +98,11 @@ services:
       # feature just returns "directory not found" in the UI — i.e.
       # the feature is opt-in without breaking the default `make up-build`.
       - ${HEIMDALLM_REPOS_DIR:-./repos-placeholder}:/repos:ro
+      #
+      # SSH agent forwarding for git operations (auto_implement).
+      # macOS: Docker Desktop exposes the host agent at a fixed path.
+      # Linux: set SSH_AUTH_SOCK in docker/.env.
+      - ${HEIMDALLM_SSH_AUTH_SOCK:-/run/host-services/ssh-auth.sock}:/ssh-agent:ro
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:7842/health"]
       interval: 30s
