@@ -77,6 +77,17 @@ func (c *Config) ApplyStore(rows map[string]string) error {
 				return fmt.Errorf("config: apply store key %q: %w", key, err)
 			}
 			shadow.GitHub.Repositories = repos
+		case "non_monitored":
+			var nm []string
+			if err := json.Unmarshal([]byte(raw), &nm); err != nil {
+				return fmt.Errorf("config: apply store key %q: %w", key, err)
+			}
+			shadow.GitHub.NonMonitored = nm
+		case "repo_first_seen":
+			// Auxiliary data read directly from the store by the HTTP
+			// config handler (to render NEW badges) — not applied to the
+			// Config struct. Acknowledged here so ApplyStore doesn't emit
+			// a noisy "unknown store key" warning on every reload.
 		case "retention_days":
 			var days int
 			if err := json.Unmarshal([]byte(raw), &days); err != nil {

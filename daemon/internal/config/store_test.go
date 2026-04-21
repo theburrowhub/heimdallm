@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -52,6 +53,48 @@ func TestApplyStore_MergesRepositoriesAndIssueTracking(t *testing.T) {
 	}
 	if it.DefaultAction != "review_only" {
 		t.Errorf("DefaultAction = %q, want review_only", it.DefaultAction)
+	}
+}
+
+func TestApplyStore_MergesNonMonitored(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+	cfg.GitHub.NonMonitored = []string{"toml/skip"}
+
+	rows := map[string]string{
+		"non_monitored": `["store/a","store/b"]`,
+	}
+
+	if err := cfg.ApplyStore(rows); err != nil {
+		t.Fatalf("ApplyStore: %v", err)
+	}
+
+	got := cfg.GitHub.NonMonitored
+	if len(got) != 2 || got[0] != "store/a" || got[1] != "store/b" {
+		t.Errorf("NonMonitored = %v, want [store/a store/b]", got)
+	}
+}
+
+func TestApplyStore_RepoFirstSeen_IsAcknowledged(t *testing.T) {
+	// repo_first_seen is auxiliary data consumed by the HTTP config handler,
+	// not applied to the Config struct. ApplyStore must accept it silently
+	// (no error, no state change) so the store key doesn't trip the
+	// "unknown key" warning on every reload.
+	cfg := &Config{}
+	cfg.applyDefaults()
+	before := cfg.GitHub.Repositories
+
+	rows := map[string]string{
+		"repo_first_seen": `{"a/b":1234567890,"c/d":1234567891}`,
+	}
+
+	if err := cfg.ApplyStore(rows); err != nil {
+		t.Fatalf("ApplyStore: %v", err)
+	}
+
+	if fmt.Sprintf("%v", cfg.GitHub.Repositories) != fmt.Sprintf("%v", before) {
+		t.Errorf("Repositories changed after ApplyStore with repo_first_seen: before=%v after=%v",
+			before, cfg.GitHub.Repositories)
 	}
 }
 
