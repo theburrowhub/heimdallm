@@ -341,8 +341,17 @@ func main() {
 	srv.SetRepoMetaFns(ghClient.FetchLabels, ghClient.FetchCollaborators)
 
 	srv.SetConfigFn(func() map[string]any {
+		// Snapshot the mutable slice fields under cfgMu. The poll-cycle
+		// auto-discovery path (upsertDiscoveredRepos) appends to
+		// GitHub.Repositories / GitHub.NonMonitored while holding the same
+		// mutex — without this snapshot, reading those slices after the
+		// unlock would race with concurrent header writes. Cloning into a
+		// fresh backing array also means the returned map never shares
+		// state with the live Config after we release the lock.
 		cfgMu.Lock()
 		c := cfg
+		reposList := append([]string(nil), c.GitHub.Repositories...)
+		nonMonList := append([]string(nil), c.GitHub.NonMonitored...)
 		cfgMu.Unlock()
 		repoOverrides := make(map[string]map[string]any)
 		for repo, ai := range c.AI.Repos {
@@ -375,10 +384,10 @@ func main() {
 				localDirsDetected[repo] = d
 			}
 		}
-		for _, r := range c.GitHub.Repositories {
+		for _, r := range reposList {
 			addDetection(r)
 		}
-		for _, r := range c.GitHub.NonMonitored {
+		for _, r := range nonMonList {
 			addDetection(r)
 		}
 		for r := range c.AI.Repos {
@@ -399,23 +408,31 @@ func main() {
 				"no_session_persistence":   ac.NoSessionPersistence,
 			}
 		}
-		// Expose first-seen timestamps so the Flutter app can show NEW badges
-		// on auto-discovered repos. Read-only; populated by the poll cycle.
-		rows, _ := s.ListConfigs()
-		fsMap, _ := config.ParseFirstSeen(rows["repo_first_seen"])
-		for repo, ts := range fsMap {
-			ro := repoOverrides[repo]
-			if ro == nil {
-				ro = map[string]any{}
+		// Expose first-seen timestamps so the Flutter app can show NEW
+		// badges on auto-discovered repos. Read-only; populated by the
+		// poll cycle. Errors are logged (not propagated) so a transient
+		// store failure degrades gracefully — the response goes out
+		// without first_seen_at, NEW badges disappear, and the operator
+		// sees a Warn entry instead of silent UI breakage.
+		if rows, err := s.ListConfigs(); err != nil {
+			slog.Warn("config: list configs for repo_first_seen failed", "err", err)
+		} else if fsMap, err := config.ParseFirstSeen(rows["repo_first_seen"]); err != nil {
+			slog.Warn("config: parse repo_first_seen failed", "err", err)
+		} else {
+			for repo, ts := range fsMap {
+				ro := repoOverrides[repo]
+				if ro == nil {
+					ro = map[string]any{}
+				}
+				ro["first_seen_at"] = ts.Unix()
+				repoOverrides[repo] = ro
 			}
-			ro["first_seen_at"] = ts.Unix()
-			repoOverrides[repo] = ro
 		}
 		return map[string]any{
 			"server_port":                 c.Server.Port,
 			"poll_interval":               c.GitHub.PollInterval,
-			"repositories":                c.GitHub.Repositories,
-			"non_monitored":               c.GitHub.NonMonitored,
+			"repositories":                reposList,
+			"non_monitored":               nonMonList,
 			"ai_primary":                  c.AI.Primary,
 			"ai_fallback":                 c.AI.Fallback,
 			"review_mode":                 c.AI.ReviewMode,
@@ -887,29 +904,46 @@ func processDiscoveredRepos(
 		return
 	}
 	// Persist the updated monitored/non-monitored lists via the K/V store
-	// so the Flutter app's cached view survives a daemon restart.
-	reposJSON, _ := json.Marshal(reposSnap)
-	if _, err := st.SetConfig("repositories", string(reposJSON)); err != nil {
+	// so the Flutter app's cached view survives a daemon restart. On
+	// json.Marshal failure (theoretical — []string can't fail today, but
+	// belt-and-braces against future type changes) skip the write so we
+	// never persist "" into the store, which would break ApplyStore on
+	// next reload.
+	if reposJSON, err := json.Marshal(reposSnap); err != nil {
+		slog.Warn("poll: marshal repositories failed", "err", err)
+	} else if _, err := st.SetConfig("repositories", string(reposJSON)); err != nil {
 		slog.Warn("poll: persist repositories failed", "err", err)
 	}
-	nmJSON, _ := json.Marshal(nonMonSnap)
-	if _, err := st.SetConfig("non_monitored", string(nmJSON)); err != nil {
+	if nmJSON, err := json.Marshal(nonMonSnap); err != nil {
+		slog.Warn("poll: marshal non_monitored failed", "err", err)
+	} else if _, err := st.SetConfig("non_monitored", string(nmJSON)); err != nil {
 		slog.Warn("poll: persist non_monitored failed", "err", err)
 	}
 
 	// Update first-seen map in the same store so GET /config can expose
 	// repo_overrides[repo].first_seen_at to the UI (NEW badge).
-	rows, _ := st.ListConfigs()
-	fs, _ := config.ParseFirstSeen(rows["repo_first_seen"])
-	for _, r := range added {
-		fs.Mark(r, now)
-	}
-	if fsStr, err := fs.Marshal(); err == nil {
-		if _, err := st.SetConfig("repo_first_seen", fsStr); err != nil {
-			slog.Warn("poll: persist repo_first_seen failed", "err", err)
-		}
+	//
+	// Guard both reads: if either fails, bail out without writing.
+	// Writing a partial FirstSeenMap back would permanently erase every
+	// previously-stored timestamp — the UI would lose NEW badges for all
+	// historical repos the next time a single new repo is discovered.
+	rows, err := st.ListConfigs()
+	if err != nil {
+		slog.Warn("poll: list configs for repo_first_seen failed — skipping update", "err", err)
 	} else {
-		slog.Warn("poll: marshal repo_first_seen failed", "err", err)
+		fs, err := config.ParseFirstSeen(rows["repo_first_seen"])
+		if err != nil {
+			slog.Warn("poll: parse repo_first_seen failed — skipping update to preserve stored data", "err", err)
+		} else {
+			for _, r := range added {
+				fs.Mark(r, now)
+			}
+			if fsStr, err := fs.Marshal(); err != nil {
+				slog.Warn("poll: marshal repo_first_seen failed", "err", err)
+			} else if _, err := st.SetConfig("repo_first_seen", fsStr); err != nil {
+				slog.Warn("poll: persist repo_first_seen failed", "err", err)
+			}
+		}
 	}
 
 	for _, r := range added {
@@ -952,6 +986,14 @@ func (a *tier2Adapter) FetchPRsToReview() ([]scheduler.Tier2PR, error) {
 	nonMonSnap := append([]string(nil), cfg.GitHub.NonMonitored...)
 	a.cfgMu.Unlock()
 
+	// Benign race window: between the Unlock above and the SetConfig calls
+	// inside processDiscoveredRepos, a config reload can swap *a.cfg to a
+	// fresh Config that does not contain the just-appended repos. On the
+	// next poll cycle they look new again, triggering one burst of
+	// duplicate repo_discovered SSE events. Self-heals via the store (the
+	// reloaded Config picks up "repositories"/"non_monitored" from it),
+	// so we accept the duplicate rather than hold cfgMu across the
+	// blocking store I/O below.
 	processDiscoveredRepos(added, reposSnap, nonMonSnap, a.store, a.broker, time.Now())
 
 	out := make([]scheduler.Tier2PR, 0, len(prs))
