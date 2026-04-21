@@ -3,11 +3,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/api/api_client.dart';
 import '../../core/api/sse_client.dart';
 import '../../core/models/pr.dart';
+import '../../core/platform/platform_services_provider.dart';
 import '../../core/tray/tray_menu.dart' show TrayMenuRef;
 import '../../main.dart' show sendPRNotification;
 import '../issues/issues_providers.dart';
 
-final apiClientProvider = Provider<ApiClient>((ref) => ApiClient());
+final apiClientProvider = Provider<ApiClient>((ref) {
+  return ApiClient(platform: ref.watch(platformServicesProvider));
+});
 
 final sseClientProvider = Provider<SseClient>((ref) => SseClient());
 

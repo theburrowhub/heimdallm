@@ -7,6 +7,7 @@ import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
 import 'core/api/api_client.dart';
 import 'core/daemon/daemon_lifecycle.dart';
+import 'core/platform/platform_services.dart';
 import 'core/setup/first_run_setup.dart';
 import 'core/setup/repo_discovery.dart';
 import 'core/models/config_model.dart';
@@ -16,6 +17,10 @@ import 'shared/router.dart';
 /// Global router — accessible by tray menu and notification handlers.
 final _appRouter = createRouter(initialLocation: '/');
 GoRouter get appRouter => _appRouter;
+
+/// Platform services singleton — initialised once in main() before any
+/// ApiClient is created. Task 10 will fully refactor this into the widget tree.
+late final PlatformServices _bootPlatform;
 
 /// Checks for a running instance using a PID file.
 /// If another instance is found, sends it SIGUSR1 (which shows its window)
@@ -58,6 +63,10 @@ void _listenForActivationSignal() {
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Platform abstraction — used by ApiClient and DaemonLifecycle below.
+  // Task 10 will move this into the widget tree properly.
+  _bootPlatform = PlatformServices.create();
 
   // Single-instance guard: works even outside the .app bundle (debug / direct binary).
   if (!await _ensureSingleInstance()) {
@@ -133,7 +142,7 @@ Future<void> _setupTray() async {
   ]));
   // Pass the shared ApiClient so TrayMenu uses the same token cache
   // as the rest of the app — avoids stale-token issues after rotation.
-  TrayMenu.instance.init(apiClient: ApiClient());
+  TrayMenu.instance.init(apiClient: ApiClient(platform: _bootPlatform));
 }
 
 /// Send a macOS notification from the Flutter app (correct icon, clickable).
@@ -196,7 +205,7 @@ class _BootstrapAppState extends State<_BootstrapApp> with WindowListener {
   }
 
   Future<void> _boot() async {
-    final api = ApiClient();
+    final api = ApiClient(platform: _bootPlatform);
 
     // ── 1. Daemon already healthy? ───────────────────────────────────────
     if (await api.checkHealth()) {

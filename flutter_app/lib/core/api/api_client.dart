@@ -1,43 +1,30 @@
 import 'dart:convert';
-import 'dart:io';
 import 'package:http/http.dart' as http;
 import '../models/pr.dart';
 import '../models/review.dart';
 import '../models/tracked_issue.dart';
+import '../platform/platform_services.dart';
 
 class ApiClient {
   final http.Client _client;
-  final int port;
-  String? _cachedToken;
+  final PlatformServices _platform;
 
-  ApiClient({http.Client? httpClient, this.port = 7842})
-      : _client = httpClient ?? http.Client();
+  ApiClient({http.Client? httpClient, required PlatformServices platform})
+      : _client = httpClient ?? http.Client(),
+        _platform = platform;
 
-  Uri _uri(String path) => Uri.parse('http://127.0.0.1:$port$path');
+  Uri _uri(String path) => Uri.parse('${_platform.apiBaseUrl}$path');
 
-  /// Clears the cached API token, forcing the next request to re-read it from disk.
-  /// Call this after storing a new token (e.g. on token rotation).
+  /// Clears the cached API token, forcing the next request to re-read it.
   void clearTokenCache() {
-    _cachedToken = null;
+    _platform.clearApiTokenCache();
   }
 
-  /// Returns the API token read from the daemon's token file, or null if not found.
-  /// Cached after first successful read.
-  Future<String?> _apiToken() async {
-    if (_cachedToken != null) return _cachedToken;
-    final home = Platform.environment['HOME'] ?? '';
-    if (home.isEmpty) return null;
-    final file = File('$home/.local/share/heimdallm/api_token');
-    if (await file.exists()) {
-      _cachedToken = (await file.readAsString()).trim();
-    }
-    return _cachedToken;
-  }
-
-  /// Headers for mutating requests (POST/PUT/DELETE).
-  /// Includes X-Heimdallm-Token to satisfy the auth middleware (issue #3).
+  /// Headers for mutating requests (POST/PUT/DELETE). Adds
+  /// X-Heimdallm-Token when the platform provides one (desktop). On web
+  /// the token is null and the header is omitted — Nginx injects it.
   Future<Map<String, String>> _authHeaders() async {
-    final token = await _apiToken();
+    final token = await _platform.loadApiToken();
     return {
       'Content-Type': 'application/json',
       if (token != null && token.isNotEmpty) 'X-Heimdallm-Token': token,

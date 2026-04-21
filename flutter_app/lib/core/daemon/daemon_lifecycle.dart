@@ -1,5 +1,6 @@
 import 'dart:io';
 import '../api/api_client.dart';
+import '../platform/platform_services.dart';
 
 class DaemonLifecycle {
   final int port;
@@ -11,7 +12,8 @@ class DaemonLifecycle {
     this.port = 7842,
     required this.daemonBinaryPath,
     ApiClient? client,
-  }) : _client = client ?? ApiClient(port: port);
+    required PlatformServices platform,
+  }) : _client = client ?? ApiClient(platform: platform);
 
   Future<bool> isRunning() => _client.checkHealth();
 

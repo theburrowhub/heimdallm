@@ -20,7 +20,7 @@ class TrayMenu with TrayListener {
   static TrayMenu get instance => _instance;
   TrayMenu._();
 
-  ApiClient _api = ApiClient();
+  ApiClient? _api;
   List<PR> _prs = [];
 
   /// Initialises the tray listener.
@@ -177,7 +177,7 @@ class TrayMenu with TrayListener {
     if (key.startsWith('review_')) {
       final prId = int.tryParse(key.substring(7));
       if (prId != null) {
-        _api.triggerReview(prId).catchError((_) => null);
+        _api?.triggerReview(prId).catchError((_) => null);
       }
       return;
     }
