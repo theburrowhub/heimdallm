@@ -57,14 +57,14 @@ class _PromptsView extends ConsumerWidget {
           const SizedBox(height: 8),
 
           // Category tabs
-          TabBar(
-            tabs: const [
+          const TabBar(
+            tabs: [
               Tab(icon: Icon(Icons.rate_review, size: 18), text: 'PR Review'),
               Tab(icon: Icon(Icons.bug_report, size: 18), text: 'Issue Triage'),
               Tab(icon: Icon(Icons.code, size: 18), text: 'Development'),
             ],
-            labelStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
-            unselectedLabelStyle: const TextStyle(fontSize: 12),
+            labelStyle: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+            unselectedLabelStyle: TextStyle(fontSize: 12),
             indicatorSize: TabBarIndicatorSize.label,
           ),
 
