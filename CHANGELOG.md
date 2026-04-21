@@ -2,6 +2,13 @@
 
 > **Note:** Versions 0.1.0–0.1.3 were originally published under [`theburrowhub/heimdallr-docker`](https://github.com/theburrowhub/heimdallr-docker) (now archived). The project was unified into this repository and renamed to Heimdallm in v0.1.1.
 
+## [0.4.10](https://github.com/theburrowhub/heimdallm/compare/v0.4.9...v0.4.10) (2026-04-21)
+
+
+### Features
+
+* implement [#159](https://github.com/theburrowhub/heimdallm/issues/159) — feat: default PR metadata + per-org group overrides ([#161](https://github.com/theburrowhub/heimdallm/issues/161)) ([b46607d](https://github.com/theburrowhub/heimdallm/commit/b46607d3462c5fafcbbb13383efadc3ec32953b4))
+
 ## [0.4.9](https://github.com/theburrowhub/heimdallm/compare/v0.4.8...v0.4.9) (2026-04-21)
 
 
