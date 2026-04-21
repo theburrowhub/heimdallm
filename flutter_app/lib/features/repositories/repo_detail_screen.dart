@@ -367,7 +367,7 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                     isOverridden: _config.reviewOnlyLabels != null,
                     globalHint: _joinList(appConfig.issueTracking.reviewOnlyLabels),
                     onChanged: (v) => _update(_config.copyWith(reviewOnlyLabels: v)),
-                    onReset: () => _update(_config.copyWith(reviewOnlyLabels: null)),
+                    onReset: () => _resetField('issue_tracking/review_only_labels'),
                   ),
                   const SizedBox(height: 10),
                   AutocompleteChipField(
@@ -378,7 +378,7 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                     isOverridden: _config.skipLabels != null,
                     globalHint: _joinList(appConfig.issueTracking.skipLabels),
                     onChanged: (v) => _update(_config.copyWith(skipLabels: v)),
-                    onReset: () => _update(_config.copyWith(skipLabels: null)),
+                    onReset: () => _resetField('issue_tracking/skip_labels'),
                   ),
                   const SizedBox(height: 10),
                   OverrideDropdown(
@@ -420,7 +420,7 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                     isOverridden: _config.issueAssignees != null,
                     globalHint: _joinList(appConfig.issueTracking.assignees),
                     onChanged: (v) => _update(_config.copyWith(issueAssignees: v)),
-                    onReset: () => _update(_config.copyWith(issueAssignees: null)),
+                    onReset: () => _resetField('issue_tracking/assignees'),
                   ),
                   const SizedBox(height: 10),
                   OverrideDropdown(
@@ -457,7 +457,7 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                     isOverridden: _config.developLabels != null,
                     globalHint: _joinList(appConfig.issueTracking.developLabels),
                     onChanged: (v) => _update(_config.copyWith(developLabels: v)),
-                    onReset: () => _update(_config.copyWith(developLabels: null)),
+                    onReset: () => _resetField('issue_tracking/develop_labels'),
                   ),
                   const SizedBox(height: 10),
                   AutocompleteChipField(
@@ -467,7 +467,7 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                     availableOptions: _repoCollaborators,
                     isOverridden: _config.prReviewers != null,
                     onChanged: (v) => _update(_config.copyWith(prReviewers: v)),
-                    onReset: () => _update(_config.copyWith(prReviewers: null)),
+                    onReset: () => _resetField('pr_reviewers'),
                   ),
                   const SizedBox(height: 10),
                   AutocompleteChipField(
@@ -478,7 +478,7 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                     isOverridden: _config.prAssignee != null,
                     onChanged: (v) => _update(_config.copyWith(
                         prAssignee: v != null && v.isNotEmpty ? v.first : null)),
-                    onReset: () => _update(_config.copyWith(prAssignee: null)),
+                    onReset: () => _resetField('pr_assignee'),
                   ),
                   const SizedBox(height: 10),
                   AutocompleteChipField(
@@ -488,7 +488,7 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                     availableOptions: _repoLabels,
                     isOverridden: _config.prLabels != null,
                     onChanged: (v) => _update(_config.copyWith(prLabels: v)),
-                    onReset: () => _update(_config.copyWith(prLabels: null)),
+                    onReset: () => _resetField('pr_labels'),
                   ),
                   const SizedBox(height: 10),
                   OverrideDropdown(
@@ -498,6 +498,7 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                     options: const ['true', 'false'],
                     onChanged: (v) => _update(_config.copyWith(
                         prDraft: v != null ? v == 'true' : null)),
+                    onReset: () => _resetField('pr_draft'),
                   ),
                   const SizedBox(height: 10),
                   OverrideDropdown(
