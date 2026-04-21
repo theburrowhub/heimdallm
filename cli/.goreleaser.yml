@@ -41,6 +41,7 @@ brews:
   - repository:
       owner: theburrowhub
       name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     homepage: https://github.com/theburrowhub/heimdallm
     description: "CLI client for Heimdallm — monitor PRs, issues, and activity from the terminal"
     license: MIT
