@@ -18,8 +18,9 @@ endif
 
 .PHONY: build-daemon build-app test test-docker dev dev-daemon dev-stop \
         release-local package-macos install-service verify-linux run-linux \
+        install-linux uninstall-linux \
         setup up up-build up-daemon up-build-daemon down logs logs-daemon \
-        ps restart clean _check-docker _check-env
+        ps restart clean _check-docker _check-env _check-linux
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
@@ -206,6 +207,13 @@ release-local: _check-macos _check-signing _check-gh build-daemon
 _check-macos:
 	@if [ "$$(uname -s)" != "Darwin" ]; then \
 	  echo "❌  This target requires macOS."; \
+	  exit 1; \
+	fi
+
+_check-linux:
+	@if [ "$$(uname -s)" != "Linux" ]; then \
+	  echo "❌  This target requires Linux."; \
+	  echo "    On macOS, use 'make release-local' or 'make run-linux'."; \
 	  exit 1; \
 	fi
 
