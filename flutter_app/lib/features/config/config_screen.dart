@@ -127,7 +127,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(24),
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 680),
+        constraints: const BoxConstraints(maxWidth: double.infinity),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
