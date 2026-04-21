@@ -87,8 +87,14 @@ services:
       # Gemini OAuth tokens from host (if using browser-based auth):
       # - ~/.gemini:/home/heimdallm/.gemini:ro
       #
-      # Local repos for full-repo analysis (optional):
-      # - /path/to/repos:/repos:ro
+      # Local repos for full-repo analysis. The agent runs with its CWD
+      # set to the Local Directory the operator picked in the UI, e.g.
+      # `/repos/api-specs`. Set HEIMDALLM_REPOS_DIR in docker/.env to
+      # your host's repos root (e.g. /Users/you/projects). When unset
+      # we mount an empty placeholder so compose doesn't error and the
+      # feature just returns "directory not found" in the UI — i.e.
+      # the feature is opt-in without breaking the default `make up-build`.
+      - ${HEIMDALLM_REPOS_DIR:-./repos-placeholder}:/repos:ro
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:7842/health"]
       interval: 30s
