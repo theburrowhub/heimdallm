@@ -29,6 +29,10 @@ class AgentsScreen extends ConsumerWidget {
   }
 }
 
+// ── Category enum ────────────────────────────────────────────────────────────
+
+enum _PromptCategory { prReview, issueTriage, development }
+
 // ── Main view ─────────────────────────────────────────────────────────────────
 
 class _PromptsView extends ConsumerWidget {
@@ -39,22 +43,75 @@ class _PromptsView extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final activePrompt = prompts.where((p) => p.isDefault).firstOrNull;
 
+    return DefaultTabController(
+      length: 3,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Active prompt banner (above tabs)
+          if (activePrompt != null)
+            _ActiveBanner(prompt: activePrompt)
+          else
+            const _InfoBanner('No active prompt. Select one to customise review behaviour.'),
+
+          const SizedBox(height: 8),
+
+          // Category tabs
+          TabBar(
+            tabs: const [
+              Tab(icon: Icon(Icons.rate_review, size: 18), text: 'PR Review'),
+              Tab(icon: Icon(Icons.bug_report, size: 18), text: 'Issue Triage'),
+              Tab(icon: Icon(Icons.code, size: 18), text: 'Development'),
+            ],
+            labelStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+            unselectedLabelStyle: const TextStyle(fontSize: 12),
+            indicatorSize: TabBarIndicatorSize.label,
+          ),
+
+          // Tab content
+          Expanded(
+            child: TabBarView(
+              children: [
+                _PRReviewTab(prompts: prompts),
+                _CategoryTab(
+                  category: _PromptCategory.issueTriage,
+                  prompts: prompts,
+                  emptyMessage: 'No issue triage prompts yet. Create one to customise how issues are analysed.',
+                ),
+                _CategoryTab(
+                  category: _PromptCategory.development,
+                  prompts: prompts,
+                  emptyMessage: 'No development prompts yet. Create one to customise auto-implementation.',
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── PR Review tab (with presets) ─────────────────────────────────────────────
+
+class _PRReviewTab extends ConsumerWidget {
+  final List<ReviewPrompt> prompts;
+  const _PRReviewTab({required this.prompts});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final prPrompts = prompts.where((p) => p.hasPRReview).toList();
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Active prompt banner
-        if (activePrompt != null)
-          _ActiveBanner(prompt: activePrompt)
-        else
-          const _InfoBanner('No active prompt. Select one to customise review behaviour.'),
-
-        // Section: Presets
+        // Presets
         _SectionHeader(
           title: 'Presets',
           trailing: TextButton.icon(
             icon: const Icon(Icons.add, size: 16),
             label: const Text('Custom'),
-            onPressed: () => _openEditor(context, ref, null),
+            onPressed: () => _openEditor(context, ref, null, _PromptCategory.prReview),
           ),
         ),
         SizedBox(
@@ -78,18 +135,18 @@ class _PromptsView extends ConsumerWidget {
 
         const SizedBox(height: 8),
 
-        // Section: My Prompts
-        if (prompts.isNotEmpty) ...[
+        // My Prompts
+        if (prPrompts.isNotEmpty) ...[
           const _SectionHeader(title: 'My Prompts'),
           Expanded(
             child: ListView.builder(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-              itemCount: prompts.length,
+              itemCount: prPrompts.length,
               itemBuilder: (_, i) => _PromptTile(
-                prompt: prompts[i],
-                onEdit: () => _openEditor(context, ref, prompts[i]),
-                onDelete: () => _delete(context, ref, prompts[i]),
-                onActivate: () => _setDefault(context, ref, prompts[i]),
+                prompt: prPrompts[i],
+                onEdit: () => _openEditor(context, ref, prPrompts[i], _PromptCategory.prReview),
+                onDelete: () => _delete(context, ref, prPrompts[i]),
+                onActivate: () => _setDefault(context, ref, prPrompts[i]),
               ),
             ),
           ),
@@ -103,62 +160,126 @@ class _PromptsView extends ConsumerWidget {
       ],
     );
   }
+}
 
-  Future<void> _addPreset(BuildContext context, WidgetRef ref, PresetDef preset) async {
-    final p = ReviewPrompt.fromPreset(preset);
-    try {
-      await ref.read(apiClientProvider).upsertAgent(p.toJson());
-      ref.invalidate(agentsProvider);
-    } catch (e) {
-      if (context.mounted) showToast(context, 'Error: $e', isError: true);
-    }
-  }
+// ── Generic category tab (Issue Triage / Development) ────────────────────────
 
-  Future<void> _setDefault(BuildContext context, WidgetRef ref, ReviewPrompt p) async {
-    try {
-      await ref.read(apiClientProvider).upsertAgent(p.copyWith(isDefault: true).toJson());
-      ref.invalidate(agentsProvider);
-      if (context.mounted) showToast(context, '"${p.name}" is now active');
-    } catch (e) {
-      if (context.mounted) showToast(context, 'Error: $e', isError: true);
-    }
-  }
+class _CategoryTab extends ConsumerWidget {
+  final _PromptCategory category;
+  final List<ReviewPrompt> prompts;
+  final String emptyMessage;
+  const _CategoryTab({required this.category, required this.prompts, required this.emptyMessage});
 
-  Future<void> _delete(BuildContext context, WidgetRef ref, ReviewPrompt p) async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Remove prompt?'),
-        content: Text('Remove "${p.name}"?'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Remove')),
-        ],
-      ),
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final filtered = prompts.where((p) {
+      if (category == _PromptCategory.issueTriage) return p.hasIssueTriage;
+      if (category == _PromptCategory.development) return p.hasDevelopment;
+      return true;
+    }).toList();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _SectionHeader(
+          title: category == _PromptCategory.issueTriage ? 'Issue Triage Prompts' : 'Development Prompts',
+          trailing: TextButton.icon(
+            icon: const Icon(Icons.add, size: 16),
+            label: const Text('Add'),
+            onPressed: () => _openEditor(context, ref, null, category),
+          ),
+        ),
+        if (filtered.isNotEmpty)
+          Expanded(
+            child: ListView.builder(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+              itemCount: filtered.length,
+              itemBuilder: (_, i) {
+                final subtitle = category == _PromptCategory.issueTriage
+                    ? (filtered[i].issueInstructions.isNotEmpty
+                        ? filtered[i].issueInstructions
+                        : 'Custom issue triage template')
+                    : (filtered[i].implementInstructions.isNotEmpty
+                        ? filtered[i].implementInstructions
+                        : 'Custom development template');
+                return _PromptTile(
+                  prompt: filtered[i],
+                  subtitleOverride: subtitle,
+                  showActivate: false,
+                  onEdit: () => _openEditor(context, ref, filtered[i], category),
+                  onDelete: () => _delete(context, ref, filtered[i]),
+                  onActivate: () => _setDefault(context, ref, filtered[i]),
+                );
+              },
+            ),
+          )
+        else
+          Expanded(
+            child: Center(
+              child: Text(emptyMessage, style: const TextStyle(color: Colors.grey)),
+            ),
+          ),
+      ],
     );
-    if (ok != true) return;
-    try {
-      await ref.read(apiClientProvider).deleteAgent(p.id);
-      ref.invalidate(agentsProvider);
-    } catch (e) {
-      if (context.mounted) showToast(context, 'Error: $e', isError: true);
-    }
   }
+}
 
-  Future<void> _openEditor(BuildContext context, WidgetRef ref, ReviewPrompt? existing) async {
-    final saved = await showDialog<ReviewPrompt>(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => _PromptEditorDialog(prompt: existing),
-    );
-    if (saved == null) return;
-    try {
-      await ref.read(apiClientProvider).upsertAgent(saved.toJson());
-      ref.invalidate(agentsProvider);
-      if (context.mounted) showToast(context, 'Prompt saved');
-    } catch (e) {
-      if (context.mounted) showToast(context, 'Error: $e', isError: true);
-    }
+// ── Shared actions ───────────────────────────────────────────────────────────
+
+Future<void> _addPreset(BuildContext context, WidgetRef ref, PresetDef preset) async {
+  final p = ReviewPrompt.fromPreset(preset);
+  try {
+    await ref.read(apiClientProvider).upsertAgent(p.toJson());
+    ref.invalidate(agentsProvider);
+  } catch (e) {
+    if (context.mounted) showToast(context, 'Error: $e', isError: true);
+  }
+}
+
+Future<void> _setDefault(BuildContext context, WidgetRef ref, ReviewPrompt p) async {
+  try {
+    await ref.read(apiClientProvider).upsertAgent(p.copyWith(isDefault: true).toJson());
+    ref.invalidate(agentsProvider);
+    if (context.mounted) showToast(context, '"${p.name}" is now active');
+  } catch (e) {
+    if (context.mounted) showToast(context, 'Error: $e', isError: true);
+  }
+}
+
+Future<void> _delete(BuildContext context, WidgetRef ref, ReviewPrompt p) async {
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (_) => AlertDialog(
+      title: const Text('Remove prompt?'),
+      content: Text('Remove "${p.name}"?'),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+        FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Remove')),
+      ],
+    ),
+  );
+  if (ok != true) return;
+  try {
+    await ref.read(apiClientProvider).deleteAgent(p.id);
+    ref.invalidate(agentsProvider);
+  } catch (e) {
+    if (context.mounted) showToast(context, 'Error: $e', isError: true);
+  }
+}
+
+Future<void> _openEditor(BuildContext context, WidgetRef ref, ReviewPrompt? existing, _PromptCategory category) async {
+  final saved = await showDialog<ReviewPrompt>(
+    context: context,
+    barrierDismissible: false,
+    builder: (_) => _PromptEditorDialog(prompt: existing, category: category),
+  );
+  if (saved == null) return;
+  try {
+    await ref.read(apiClientProvider).upsertAgent(saved.toJson());
+    ref.invalidate(agentsProvider);
+    if (context.mounted) showToast(context, 'Prompt saved');
+  } catch (e) {
+    if (context.mounted) showToast(context, 'Error: $e', isError: true);
   }
 }
 
@@ -215,8 +336,11 @@ class _PresetCard extends StatelessWidget {
 class _PromptTile extends StatelessWidget {
   final ReviewPrompt prompt;
   final VoidCallback onEdit, onDelete, onActivate;
+  final String? subtitleOverride;
+  final bool showActivate;
   const _PromptTile({required this.prompt, required this.onEdit,
-      required this.onDelete, required this.onActivate});
+      required this.onDelete, required this.onActivate, this.subtitleOverride,
+      this.showActivate = true});
 
   @override
   Widget build(BuildContext context) {
@@ -241,12 +365,12 @@ class _PromptTile extends StatelessWidget {
           ],
         ]),
         subtitle: Text(
-          prompt.instructions.isNotEmpty ? prompt.instructions : 'Custom template',
+          subtitleOverride ?? (prompt.instructions.isNotEmpty ? prompt.instructions : 'Custom template'),
           maxLines: 1, overflow: TextOverflow.ellipsis,
           style: const TextStyle(fontSize: 12),
         ),
         trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-          if (!prompt.isDefault)
+          if (showActivate && !prompt.isDefault)
             TextButton(onPressed: onActivate, child: const Text('Activate')),
           IconButton(icon: const Icon(Icons.edit, size: 18), onPressed: onEdit),
           IconButton(
@@ -332,7 +456,8 @@ class _SectionHeader extends StatelessWidget {
 
 class _PromptEditorDialog extends StatefulWidget {
   final ReviewPrompt? prompt;
-  const _PromptEditorDialog({this.prompt});
+  final _PromptCategory category;
+  const _PromptEditorDialog({this.prompt, required this.category});
 
   @override
   State<_PromptEditorDialog> createState() => _PromptEditorDialogState();
@@ -342,9 +467,17 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
     with SingleTickerProviderStateMixin {
   final _idCtrl = TextEditingController();
   final _nameCtrl = TextEditingController();
+  // PR Review fields
   final _instrCtrl = TextEditingController();
   final _templateCtrl = TextEditingController();
   final _flagsCtrl = TextEditingController();
+  // Issue Triage fields
+  final _issueInstrCtrl = TextEditingController();
+  final _issueTemplateCtrl = TextEditingController();
+  // Development fields
+  final _implInstrCtrl = TextEditingController();
+  final _implTemplateCtrl = TextEditingController();
+
   String _focus = 'general';
   bool _isDefault = false;
   late final TabController _tabCtrl;
@@ -360,6 +493,10 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
       _instrCtrl.text = p.instructions;
       _templateCtrl.text = p.prompt;
       _flagsCtrl.text = p.cliFlags;
+      _issueInstrCtrl.text = p.issueInstructions;
+      _issueTemplateCtrl.text = p.issuePrompt;
+      _implInstrCtrl.text = p.implementInstructions;
+      _implTemplateCtrl.text = p.implementPrompt;
       _focus = p.focus;
       _isDefault = p.isDefault;
     }
@@ -373,12 +510,75 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
     _instrCtrl.dispose();
     _templateCtrl.dispose();
     _flagsCtrl.dispose();
+    _issueInstrCtrl.dispose();
+    _issueTemplateCtrl.dispose();
+    _implInstrCtrl.dispose();
+    _implTemplateCtrl.dispose();
     super.dispose();
+  }
+
+  /// Returns the relevant instructions/template controllers and labels for the current category.
+  ({
+    TextEditingController instrCtrl,
+    TextEditingController templateCtrl,
+    String instrHint,
+    String instrDescription,
+    String templateDescription,
+    List<String> placeholders,
+  }) _categoryFields() {
+    switch (widget.category) {
+      case _PromptCategory.issueTriage:
+        return (
+          instrCtrl: _issueInstrCtrl,
+          templateCtrl: _issueTemplateCtrl,
+          instrHint: 'e.g. Categorise by severity, suggest labels, identify duplicates...',
+          instrDescription:
+              'Describe how issues should be triaged. Heimdallm will inject '
+              'these instructions into the issue triage pipeline.',
+          templateDescription:
+              'Override the entire issue triage prompt. When set, Instructions are ignored.',
+          placeholders: ReviewPrompt.issuePlaceholders,
+        );
+      case _PromptCategory.development:
+        return (
+          instrCtrl: _implInstrCtrl,
+          templateCtrl: _implTemplateCtrl,
+          instrHint: 'e.g. Follow TDD, write tests first, keep functions under 30 lines...',
+          instrDescription:
+              'Describe how code should be implemented. Heimdallm will inject '
+              'these instructions into the development pipeline.',
+          templateDescription:
+              'Override the entire development prompt. When set, Instructions are ignored.',
+          placeholders: ReviewPrompt.implementPlaceholders,
+        );
+      case _PromptCategory.prReview:
+        return (
+          instrCtrl: _instrCtrl,
+          templateCtrl: _templateCtrl,
+          instrHint: 'e.g. Focus on security vulnerabilities and potential injection attacks...',
+          instrDescription:
+              'Describe what to look for. Heimdallm will inject these '
+              'instructions into its default review template.',
+          templateDescription:
+              'Override the entire prompt. When set, Instructions are ignored.',
+          placeholders: ReviewPrompt.placeholders,
+        );
+    }
+  }
+
+  String get _categoryLabel {
+    switch (widget.category) {
+      case _PromptCategory.prReview: return 'PR Review';
+      case _PromptCategory.issueTriage: return 'Issue Triage';
+      case _PromptCategory.development: return 'Development';
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     final isNew = widget.prompt == null;
+    final fields = _categoryFields();
+
     return Dialog(
       child: SizedBox(
         width: 720,
@@ -390,7 +590,7 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
             children: [
               // Header
               Row(children: [
-                Text(isNew ? 'New Prompt' : 'Edit Prompt',
+                Text(isNew ? 'New $_categoryLabel Prompt' : 'Edit $_categoryLabel Prompt',
                     style: Theme.of(context).textTheme.titleLarge),
                 const Spacer(),
                 IconButton(icon: const Icon(Icons.close),
@@ -414,12 +614,12 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
                     decoration: const InputDecoration(
                         labelText: 'Focus', border: OutlineInputBorder()),
                     items: const [
-                      DropdownMenuItem(value: 'general',      child: Text('🔍  General')),
-                      DropdownMenuItem(value: 'security',     child: Text('🔒  Security')),
-                      DropdownMenuItem(value: 'performance',  child: Text('⚡  Performance')),
-                      DropdownMenuItem(value: 'architecture', child: Text('🏛️  Architecture')),
-                      DropdownMenuItem(value: 'docs',         child: Text('📝  Docs & Style')),
-                      DropdownMenuItem(value: 'custom',       child: Text('✨  Custom')),
+                      DropdownMenuItem(value: 'general',      child: Text('General')),
+                      DropdownMenuItem(value: 'security',     child: Text('Security')),
+                      DropdownMenuItem(value: 'performance',  child: Text('Performance')),
+                      DropdownMenuItem(value: 'architecture', child: Text('Architecture')),
+                      DropdownMenuItem(value: 'docs',         child: Text('Docs & Style')),
+                      DropdownMenuItem(value: 'custom',       child: Text('Custom')),
                     ],
                     onChanged: (v) => setState(() => _focus = v!),
                   ),
@@ -446,36 +646,36 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
                     Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Text(
-                          'Describe what to look for. Heimdallm will inject these '
-                          'instructions into its default review template.',
-                          style: TextStyle(fontSize: 12, color: Colors.grey),
+                        Text(
+                          fields.instrDescription,
+                          style: const TextStyle(fontSize: 12, color: Colors.grey),
                         ),
                         const SizedBox(height: 8),
                         Expanded(
                           child: TextFormField(
-                            controller: _instrCtrl,
+                            controller: fields.instrCtrl,
                             maxLines: null, expands: true,
-                            decoration: const InputDecoration(
-                              hintText: 'e.g. Focus on security vulnerabilities and '
-                                  'potential injection attacks...',
-                              border: OutlineInputBorder(),
+                            decoration: InputDecoration(
+                              hintText: fields.instrHint,
+                              border: const OutlineInputBorder(),
                               alignLabelWithHint: true,
                             ),
                           ),
                         ),
-                        const SizedBox(height: 8),
-                        TextFormField(
-                          controller: _flagsCtrl,
-                          decoration: const InputDecoration(
-                            labelText: 'Extra CLI flags (optional)',
-                            hintText: '--model claude-opus-4-6',
-                            border: OutlineInputBorder(),
-                            isDense: true,
-                            helperText:
-                                'Passed directly to the AI binary (claude, gemini, codex)',
+                        if (widget.category == _PromptCategory.prReview) ...[
+                          const SizedBox(height: 8),
+                          TextFormField(
+                            controller: _flagsCtrl,
+                            decoration: const InputDecoration(
+                              labelText: 'Extra CLI flags (optional)',
+                              hintText: '--model claude-opus-4-6',
+                              border: OutlineInputBorder(),
+                              isDense: true,
+                              helperText:
+                                  'Passed directly to the AI binary (claude, gemini, codex)',
+                            ),
                           ),
-                        ),
+                        ],
                       ],
                     ),
 
@@ -483,24 +683,24 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
                     Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Text(
-                          'Override the entire prompt. When set, Instructions are ignored.',
-                          style: TextStyle(fontSize: 12, color: Colors.grey),
+                        Text(
+                          fields.templateDescription,
+                          style: const TextStyle(fontSize: 12, color: Colors.grey),
                         ),
                         const SizedBox(height: 4),
                         Wrap(
                           spacing: 6, runSpacing: 4,
-                          children: ReviewPrompt.placeholders.map((p) => ActionChip(
+                          children: fields.placeholders.map((p) => ActionChip(
                             label: Text(p, style: const TextStyle(
                                 fontSize: 11, fontFamily: 'monospace')),
                             padding: EdgeInsets.zero,
                             onPressed: () {
-                              final sel = _templateCtrl.selection;
-                              final text = _templateCtrl.text;
+                              final sel = fields.templateCtrl.selection;
+                              final text = fields.templateCtrl.text;
                               final pos = sel.isValid ? sel.baseOffset : text.length;
-                              _templateCtrl.text =
+                              fields.templateCtrl.text =
                                   text.substring(0, pos) + p + text.substring(pos);
-                              _templateCtrl.selection =
+                              fields.templateCtrl.selection =
                                   TextSelection.collapsed(offset: pos + p.length);
                             },
                           )).toList(),
@@ -508,7 +708,7 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
                         const SizedBox(height: 6),
                         Expanded(
                           child: TextFormField(
-                            controller: _templateCtrl,
+                            controller: fields.templateCtrl,
                             maxLines: null, expands: true,
                             style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
                             decoration: const InputDecoration(
@@ -540,6 +740,21 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
                             : 'prompt-${DateTime.now().millisecondsSinceEpoch}'
                         : widget.prompt!.id;
                     if (_nameCtrl.text.isEmpty) return;
+                    // Validate non-empty content for the active category
+                    final hasContent = switch (widget.category) {
+                      _PromptCategory.prReview =>
+                        _instrCtrl.text.trim().isNotEmpty || _templateCtrl.text.trim().isNotEmpty,
+                      _PromptCategory.issueTriage =>
+                        _issueInstrCtrl.text.trim().isNotEmpty || _issueTemplateCtrl.text.trim().isNotEmpty,
+                      _PromptCategory.development =>
+                        _implInstrCtrl.text.trim().isNotEmpty || _implTemplateCtrl.text.trim().isNotEmpty,
+                    };
+                    if (!hasContent) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Please provide instructions or a template')),
+                      );
+                      return;
+                    }
                     Navigator.pop(context, ReviewPrompt(
                       id: id,
                       name: _nameCtrl.text.trim(),
@@ -548,6 +763,10 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
                       prompt: _templateCtrl.text.trim(),
                       cliFlags: _flagsCtrl.text.trim(),
                       isDefault: _isDefault,
+                      issuePrompt: _issueTemplateCtrl.text.trim(),
+                      issueInstructions: _issueInstrCtrl.text.trim(),
+                      implementPrompt: _implTemplateCtrl.text.trim(),
+                      implementInstructions: _implInstrCtrl.text.trim(),
                     ));
                   },
                   child: const Text('Save'),
