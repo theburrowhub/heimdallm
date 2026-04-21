@@ -20,4 +20,5 @@ docker/.env.swp
 docker/.env.swo
 docker/config/
 daemon/heimdallm
+cli/heimdallm-cli
 .superpowers/

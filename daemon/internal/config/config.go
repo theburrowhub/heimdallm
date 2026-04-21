@@ -273,10 +273,10 @@ type RepoAI struct {
 	LocalDir    string `toml:"local_dir"`   // local repo path for full-repo analysis
 
 	// PR creation metadata (applied by auto_implement after CreatePR).
-	PRReviewers []string `toml:"pr_reviewers"` // GitHub logins to request review from
-	PRAssignee  string   `toml:"pr_assignee"`  // GitHub login to assign the PR to
-	PRLabels    []string `toml:"pr_labels"`    // labels to add to the PR
-	PRDraft     bool     `toml:"pr_draft"`     // create as draft PR
+	PRReviewers []string `toml:"pr_reviewers"`       // GitHub logins to request review from
+	PRAssignee  string   `toml:"pr_assignee"`         // GitHub login to assign the PR to
+	PRLabels    []string `toml:"pr_labels"`           // labels to add to the PR
+	PRDraft     *bool    `toml:"pr_draft,omitempty"`  // create as draft PR
 
 	// Per-repo issue tracking override. When set, non-zero fields replace
 	// the global [github.issue_tracking] values for this repo only.
@@ -396,12 +396,12 @@ func repoOrg(repo string) string {
 // flat [ai] fields on top of [ai.pr_metadata]. Flat fields win when set,
 // matching the contract that HEIMDALLM_PR_* env vars populate the flat
 // fields and should override the nested section.
-func (c *Config) resolvedPRMetadata() (reviewers, labels []string, assignee string, draft bool) {
+func (c *Config) resolvedPRMetadata() (reviewers, labels []string, assignee string, draft *bool) {
 	reviewers = c.AI.PRMetadata.Reviewers
 	labels = c.AI.PRMetadata.Labels
 	assignee = c.AI.PRMetadata.Assignee
 	if c.AI.PRMetadata.Draft != nil {
-		draft = *c.AI.PRMetadata.Draft
+		draft = c.AI.PRMetadata.Draft
 	}
 	if len(c.AI.PRReviewers) > 0 {
 		reviewers = c.AI.PRReviewers
@@ -413,7 +413,7 @@ func (c *Config) resolvedPRMetadata() (reviewers, labels []string, assignee stri
 		assignee = c.AI.PRAssignee
 	}
 	if c.AI.PRDraft != nil {
-		draft = *c.AI.PRDraft
+		draft = c.AI.PRDraft
 	}
 	return
 }
@@ -438,7 +438,7 @@ func (c *Config) AIForRepo(repo string) RepoAI {
 				orgAssignee = o.PRAssignee
 			}
 			if o.PRDraft != nil {
-				orgDraft = *o.PRDraft
+				orgDraft = o.PRDraft
 			}
 		}
 	}
@@ -463,7 +463,7 @@ func (c *Config) AIForRepo(repo string) RepoAI {
 			if r.PRAssignee == "" {
 				r.PRAssignee = orgAssignee
 			}
-			if !r.PRDraft {
+			if r.PRDraft == nil {
 				r.PRDraft = orgDraft
 			}
 			return r

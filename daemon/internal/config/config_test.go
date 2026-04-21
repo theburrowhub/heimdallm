@@ -799,7 +799,7 @@ func TestAIForRepo_GlobalPRMetadata(t *testing.T) {
 	if r.PRAssignee != "charlie" {
 		t.Errorf("PRAssignee = %q, want charlie", r.PRAssignee)
 	}
-	if !r.PRDraft {
+	if r.PRDraft == nil || !*r.PRDraft {
 		t.Error("PRDraft should be true from global")
 	}
 }
@@ -828,7 +828,7 @@ func TestAIForRepo_GlobalPRMetadataFromNestedSection(t *testing.T) {
 	if r.PRAssignee != "nested-assignee" {
 		t.Errorf("PRAssignee = %q, want nested-assignee", r.PRAssignee)
 	}
-	if !r.PRDraft {
+	if r.PRDraft == nil || !*r.PRDraft {
 		t.Error("PRDraft should be true from nested section")
 	}
 }
@@ -862,7 +862,7 @@ func TestAIForRepo_FlatFieldsWinOverNestedSection(t *testing.T) {
 	if r.PRAssignee != "flat-assignee" {
 		t.Errorf("PRAssignee = %q, want flat-assignee", r.PRAssignee)
 	}
-	if r.PRDraft {
+	if r.PRDraft != nil && *r.PRDraft {
 		t.Error("PRDraft should be false (flat wins over nested)")
 	}
 }
@@ -1010,12 +1010,12 @@ func TestAIForRepo_OrgDraftOverride(t *testing.T) {
 	}
 
 	r := cfg.AIForRepo("myorg/repo")
-	if !r.PRDraft {
+	if r.PRDraft == nil || !*r.PRDraft {
 		t.Error("PRDraft should be true (org override)")
 	}
 
 	r2 := cfg.AIForRepo("other/repo")
-	if r2.PRDraft {
+	if r2.PRDraft != nil && *r2.PRDraft {
 		t.Error("PRDraft should be false for repo in different org (global)")
 	}
 }
@@ -1116,7 +1116,7 @@ func TestAIForRepo_EnvPRMetadataFlowsToRepo(t *testing.T) {
 	if r.PRAssignee != "env-assignee" {
 		t.Errorf("PRAssignee = %q, want env-assignee", r.PRAssignee)
 	}
-	if !r.PRDraft {
+	if r.PRDraft == nil || !*r.PRDraft {
 		t.Error("PRDraft should be true from env")
 	}
 }

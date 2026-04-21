@@ -373,8 +373,8 @@ func main() {
 			if len(ai.PRLabels) > 0 {
 				ro["pr_labels"] = ai.PRLabels
 			}
-			if ai.PRDraft {
-				ro["pr_draft"] = ai.PRDraft
+			if ai.PRDraft != nil && *ai.PRDraft {
+				ro["pr_draft"] = *ai.PRDraft
 			}
 			if ai.IssueTracking != nil {
 				ro["issue_tracking"] = ai.IssueTracking
@@ -692,7 +692,7 @@ func main() {
 			PRReviewers: aiCfg.PRReviewers,
 			PRAssignee:  aiCfg.PRAssignee,
 			PRLabels:    aiCfg.PRLabels,
-			PRDraft:     aiCfg.PRDraft,
+			PRDraft:     aiCfg.PRDraft != nil && *aiCfg.PRDraft,
 		}
 
 		slog.Info("trigger issue review: running pipeline",
@@ -1182,7 +1182,7 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 			PRReviewers:             aiCfg.PRReviewers,
 			PRAssignee:              aiCfg.PRAssignee,
 			PRLabels:                aiCfg.PRLabels,
-			PRDraft:                 aiCfg.PRDraft,
+			PRDraft:                 aiCfg.PRDraft != nil && *aiCfg.PRDraft,
 		}
 	}
 
