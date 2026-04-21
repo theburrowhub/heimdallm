@@ -1,0 +1,36 @@
+# Rendered by /docker-entrypoint.d/10-heimdallm-token.sh via envsubst.
+# Variables: ${DAEMON_URL}, ${API_TOKEN}.
+server {
+  listen 3000;
+  server_name _;
+  resolver 127.0.0.11 valid=30s ipv6=off;  # Docker DNS for upstream name
+
+  root /usr/share/nginx/html;
+  index index.html;
+
+  # Single SPA entry — let go_router handle every route that isn't an asset.
+  location / {
+    try_files $uri $uri/ /index.html;
+  }
+
+  # One proxy to rule them all: HTTP + SSE share this block.
+  # proxy_buffering off keeps /api/events + /api/logs/stream streaming
+  # in real time; the cost on regular GETs is negligible.
+  location /api/ {
+    proxy_pass ${DAEMON_URL}/;
+    proxy_set_header X-Heimdallm-Token "${API_TOKEN}";
+    proxy_set_header Host $host;
+    proxy_http_version 1.1;
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 24h;
+    chunked_transfer_encoding on;
+  }
+
+  # Cheap healthcheck for the compose healthcheck — doesn't touch the daemon.
+  location = /healthz {
+    access_log off;
+    return 200 "ok\n";
+    default_type text/plain;
+  }
+}
