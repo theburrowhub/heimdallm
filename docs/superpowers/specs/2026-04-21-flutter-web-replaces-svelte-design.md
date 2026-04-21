@@ -60,7 +60,7 @@ The interface covers exactly what `main.dart` and the shared code actually need 
 | `ensureDaemonRunning(config)` | health-check loop + `Process.start` if needed | no-op (daemon is the neighboring container) |
 | `apiBaseUrl()` | `http://127.0.0.1:7842` | `/api` (relative; browser origin + Nginx `/api/*` location) |
 | `apiToken()` | reads `~/.local/share/heimdallm/api_token` | `null` (Nginx injects) |
-| `ssePath()` | `/events` (absolute against `apiBaseUrl` host) | `/events` (relative; Nginx `/events` location — **not** under `/api`) |
+| `ssePath()` | _not needed_ — `SseClient` takes its path (`/events`, `/logs/stream`) from its constructor and prepends `apiBaseUrl`. On web that naturally resolves to `/api/events`, `/api/logs/stream` without any extra routing. |
 | `quit()` | `exit(0)` | no-op (browser tab close) |
 
 Features consume `PlatformServices` via a Riverpod provider. Tests override the provider with a fake.
@@ -73,7 +73,7 @@ Both already use `package:http`, so the code changes are minimal:
 - URL building becomes `Uri.parse('$apiBaseUrl$path')`, where `path` is daemon-relative (e.g., `/health`, `/prs`).
   - Desktop: `apiBaseUrl = "http://127.0.0.1:7842"` → final URL `http://127.0.0.1:7842/health` (unchanged from today).
   - Web: `apiBaseUrl = "/api"` → final URL `/api/health` (resolved against the browser origin); Nginx's `/api/` location strips the prefix before forwarding to the daemon.
-- SSE uses a separate path (`/events`) that is **not** under `/api` in the SvelteKit app today, and we preserve that: on web the SseClient hits `/events` directly (Nginx has a dedicated `/events` location), not `/api/events`.
+- SSE follows the same rule. `SseClient` takes its path from the constructor (the dashboard uses `/events`, the logs screen uses `/logs/stream`); on web both naturally become `/api/events` and `/api/logs/stream`. Nginx's `/api/` location strips the prefix and forwards to the daemon. This is a small deviation from the SvelteKit setup (which had a dedicated `/events` route) but it means one Nginx location covers every daemon path, and the `/logs/stream` SSE endpoint — which the SvelteKit app only reaches through its `/api/[...path]` catch-all anyway — works the same way.
 - On web, `apiToken` is `null` → header omitted by the client; Nginx injects it.
 - On desktop, the behavior is byte-for-byte identical to today.
 
@@ -122,17 +122,11 @@ server {
     try_files $uri $uri/ /index.html;
   }
 
-  # API proxy with server-side token injection
+  # Single proxy for all daemon traffic (HTTP + SSE).
+  # proxy_buffering off is mandatory for SSE (/events, /logs/stream); the tiny
+  # cost on regular GETs is negligible.
   location /api/ {
     proxy_pass ${DAEMON_URL}/;
-    proxy_set_header X-Heimdallm-Token "${API_TOKEN}";
-    proxy_set_header Host $host;
-    proxy_http_version 1.1;
-  }
-
-  # SSE proxy — no buffering, long timeouts
-  location = /events {
-    proxy_pass ${DAEMON_URL}/events;
     proxy_set_header X-Heimdallm-Token "${API_TOKEN}";
     proxy_set_header Host $host;
     proxy_http_version 1.1;
@@ -229,7 +223,7 @@ Everything else (volumes, daemon service, network) stays exactly as today. The h
   - `GET /` → 200 + `Content-Type: text/html` (Flutter shell).
   - `GET /main.dart.js` → 200 + `application/javascript`.
   - `GET /api/health` → 200 (daemon health through the proxy, confirms token injection works).
-  - `GET /events` with `Accept: text/event-stream` → 200 + `Content-Type: text/event-stream` within 2 s.
+  - `GET /api/events` with `Accept: text/event-stream` → 200 + `Content-Type: text/event-stream` within 2 s.
   - `GET /prs/123` (unknown path) → 200 + HTML (SPA fallback works).
   - `GET /healthz` → 200 `ok`.
 - Extends `docker-compose.test.yml` with an override for the new `web` service so the script can target it in isolation.
