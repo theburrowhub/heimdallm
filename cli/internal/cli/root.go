@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 
 	"github.com/theburrowhub/heimdallm/cli/internal/api"
@@ -31,12 +32,42 @@ func NewRootCmd() *cobra.Command {
 		Short: "CLI client for the Heimdallm daemon",
 		Long:  "Monitor and interact with the Heimdallm daemon from the terminal.",
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+			// Resolution priority:
+			// 1. --token / --host flags (already in flagToken/flagHost)
+			// 2. Environment variables
 			if flagHost == "" {
 				flagHost = os.Getenv("HEIMDALLM_HOST")
 			}
 			if flagToken == "" {
 				flagToken = os.Getenv("HEIMDALLM_TOKEN")
 			}
+
+			// 3. Config file (~/.config/heimdallm/cli.toml)
+			if flagHost == "" || flagToken == "" {
+				if cfg, err := loadCLIConfig(); err == nil {
+					if flagHost == "" && cfg.Host != "" {
+						flagHost = cfg.Host
+					}
+					if flagToken == "" && cfg.Token != "" {
+						flagToken = cfg.Token
+					}
+				}
+			}
+
+			// 4. Auto-discover from Docker (if localhost and no token yet).
+			//    Skipped for the configure command to avoid unnecessary latency.
+			if flagToken == "" && cmd.Name() != "configure" {
+				host := flagHost
+				if host == "" {
+					host = api.DefaultHost
+				}
+				if isLocalhost(host) {
+					if token, err := discoverDockerToken(); err == nil {
+						flagToken = token
+					}
+				}
+			}
+
 			c := api.New(flagHost, flagToken)
 			cmd.SetContext(context.WithValue(cmd.Context(), clientKey, c))
 		},
@@ -56,7 +87,17 @@ func NewRootCmd() *cobra.Command {
 		newConfigCmd(),
 		newStatsCmd(),
 		newDashboardCmd(),
+		newConfigureCmd(),
 	)
 
 	return root
+}
+
+func isLocalhost(host string) bool {
+	u, err := url.Parse(host)
+	if err != nil {
+		return false
+	}
+	h := u.Hostname()
+	return h == "localhost" || h == "127.0.0.1" || h == "::1"
 }
