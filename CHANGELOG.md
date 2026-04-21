@@ -2,6 +2,13 @@
 
 > **Note:** Versions 0.1.0–0.1.3 were originally published under [`theburrowhub/heimdallr-docker`](https://github.com/theburrowhub/heimdallr-docker) (now archived). The project was unified into this repository and renamed to Heimdallm in v0.1.1.
 
+## [0.4.9](https://github.com/theburrowhub/heimdallm/compare/v0.4.8...v0.4.9) (2026-04-21)
+
+
+### Features
+
+* implement [#137](https://github.com/theburrowhub/heimdallm/issues/137) — feat: heimdallm-cli — CLI client to monitor and interact with the daemon ([#157](https://github.com/theburrowhub/heimdallm/issues/157)) ([8c5a2cf](https://github.com/theburrowhub/heimdallm/commit/8c5a2cf137e8226503eb182e2fe7f23bf27ca4a6))
+
 ## [0.4.8](https://github.com/theburrowhub/heimdallm/compare/v0.4.7...v0.4.8) (2026-04-21)
 
 
