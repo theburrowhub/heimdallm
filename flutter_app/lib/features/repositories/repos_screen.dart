@@ -6,6 +6,8 @@ import '../../core/models/config_model.dart';
 import '../../core/platform/platform_services_provider.dart';
 import '../../shared/widgets/toast.dart';
 import '../config/config_providers.dart';
+import 'widgets/bulk_actions_bar.dart';
+import 'widgets/feature_palette.dart';
 import 'widgets/repo_list_tile.dart';
 
 class ReposScreen extends ConsumerStatefulWidget {
@@ -34,6 +36,54 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
       if (!_selected.add(repo)) _selected.remove(repo);
     });
   }
+
+  /// Aggregate per-feature state across the current selection.
+  /// Returns `true` when every selected repo has the feature on,
+  /// `false` when every selected repo has it off, and `null` when
+  /// repos disagree (mixed state).
+  Map<Feature, bool?> _aggregate() {
+    bool? agg(bool Function(RepoConfig) pick) {
+      bool? result;
+      for (final r in _selected) {
+        final c = _repoConfigs[r];
+        if (c == null) continue;
+        final v = pick(c);
+        if (result == null) {
+          result = v;
+        } else if (result != v) {
+          return null;
+        }
+      }
+      return result ?? false;
+    }
+
+    bool hasDir(RepoConfig c) =>
+        c.localDir != null && c.localDir!.isNotEmpty;
+
+    return {
+      Feature.prReview:      agg((c) => c.prEnabled ?? false),
+      Feature.issueTracking: agg((c) => c.itEnabled ?? false),
+      Feature.develop:       agg((c) => (c.devEnabled ?? false) && hasDir(c)),
+    };
+  }
+
+  void _applyBulk(Feature f, bool enable) {
+    setState(() {
+      for (final r in _selected) {
+        final c = _repoConfigs[r];
+        if (c == null) continue;
+        _repoConfigs[r] = switch (f) {
+          Feature.prReview      => c.copyWith(prEnabled: enable),
+          Feature.issueTracking => c.copyWith(itEnabled: enable),
+          Feature.develop       => c.copyWith(devEnabled: enable),
+        };
+      }
+    });
+    _debounce?.cancel();
+    _debounce = Timer(const Duration(milliseconds: 400), _autoSave);
+  }
+
+  void _clearSelection() => setState(_selected.clear);
 
   @override
   void dispose() {
@@ -164,6 +214,13 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
                 child: Text(_discoverError!, style: const TextStyle(color: Colors.orange)),
+              ),
+            if (_selected.isNotEmpty)
+              BulkActionsBar(
+                selectedCount: _selected.length,
+                aggregates: _aggregate(),
+                onApply: _applyBulk,
+                onClear: _clearSelection,
               ),
             // Repo list with section dividers
             Expanded(
