@@ -254,12 +254,14 @@ func (s *Store) ComputeStats(repos []string, orgs []string) (*Stats, error) {
 		repoFilterJoined = " AND p.repo IN (" + inClause + ")"
 	} else if len(orgs) > 0 {
 		// Org filter: match repos starting with "org/" using LIKE.
-		// Both clauses use the same args (org + "/%") so repoArgs is shared.
+		// Escape SQL LIKE wildcards in org names to prevent unintended matches
+		// (e.g. org "my_team" matching "myXteam/repo" via unescaped _).
+		likeEscaper := strings.NewReplacer("%", "\\%", "_", "\\_")
 		var conditions, conditionsJ []string
 		for _, org := range orgs {
-			conditions = append(conditions, "repo LIKE ?")
-			conditionsJ = append(conditionsJ, "p.repo LIKE ?")
-			repoArgs = append(repoArgs, org+"/%")
+			conditions = append(conditions, "repo LIKE ? ESCAPE '\\'")
+			conditionsJ = append(conditionsJ, "p.repo LIKE ? ESCAPE '\\'")
+			repoArgs = append(repoArgs, likeEscaper.Replace(org)+"/%")
 		}
 		repoFilter = " AND r.pr_id IN (SELECT id FROM prs WHERE " + strings.Join(conditions, " OR ") + ")"
 		repoFilterJoined = " AND (" + strings.Join(conditionsJ, " OR ") + ")"

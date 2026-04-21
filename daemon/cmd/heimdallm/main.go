@@ -837,36 +837,35 @@ func (a *tier2Adapter) FetchPRsToReview() ([]scheduler.Tier2PR, error) {
 		})
 	}
 
-	// Auto-discovery: add repos seen in PRs that aren't in the config yet.
+	// Auto-discovery: check + append under a single lock to avoid TOCTOU.
+	var updated []string
+	var newRepos []string
 	a.cfgMu.Lock()
 	c := *a.cfg
-	known := make(map[string]struct{}, len(c.GitHub.Repositories))
+	known := make(map[string]struct{}, len(c.GitHub.Repositories)+len(c.GitHub.NonMonitored))
 	for _, r := range c.GitHub.Repositories {
 		known[r] = struct{}{}
 	}
-	// Also consider non-monitored repos as "known" — don't re-add blacklisted repos.
 	for _, r := range c.GitHub.NonMonitored {
 		known[r] = struct{}{}
 	}
-	a.cfgMu.Unlock()
-
-	var newRepos []string
 	for repo := range seenRepos {
 		if _, ok := known[repo]; !ok {
 			newRepos = append(newRepos, repo)
 		}
 	}
 	if len(newRepos) > 0 {
-		a.cfgMu.Lock()
-		c = *a.cfg
-		updated := append(append([]string(nil), c.GitHub.Repositories...), newRepos...)
+		updated = append(append([]string(nil), c.GitHub.Repositories...), newRepos...)
 		c.GitHub.Repositories = updated
 		*a.cfg = c
-		a.cfgMu.Unlock()
+	}
+	a.cfgMu.Unlock()
 
-		// Persist to store so the repos survive a daemon restart.
-		reposJSON, _ := json.Marshal(updated)
-		if _, err := a.store.SetConfig("repositories", string(reposJSON)); err != nil {
+	if len(newRepos) > 0 {
+		reposJSON, err := json.Marshal(updated)
+		if err != nil {
+			slog.Error("auto-discovery: failed to marshal repos", "err", err)
+		} else if _, err := a.store.SetConfig("repositories", string(reposJSON)); err != nil {
 			slog.Warn("auto-discovery: failed to persist repos", "err", err)
 		} else {
 			slog.Info("auto-discovery: added repos from PRs", "repos", newRepos)
