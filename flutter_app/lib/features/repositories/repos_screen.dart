@@ -22,7 +22,7 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
   Map<String, RepoConfig> _repoConfigs = {};
   bool _initialized = false;
   String _search = '';
-  String _orgFilter = ''; // empty = all orgs
+  Set<String> _orgFilter = {}; // empty = all orgs
   _SyncStatus _syncStatus = _SyncStatus.idle;
   _FilterMode _filterMode = _FilterMode.all;
   _ViewMode _viewMode = _ViewMode.list;
@@ -123,7 +123,7 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
         if (_orgFilter.isNotEmpty) {
           filtered = filtered.where((r) {
             final org = r.contains('/') ? r.split('/').first : r;
-            return org == _orgFilter;
+            return _orgFilter.contains(org);
           }).toList();
         }
 
@@ -167,23 +167,48 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
                   const SizedBox(width: 4),
                   _filterChip('Not mon.', notMonitoredCount, _FilterMode.notMonitored),
                   const SizedBox(width: 8),
-                  // Org dropdown
+                  // Org multi-select (dialog, same UX as Activity)
                   if (allOrgs.length > 1)
-                    SizedBox(
-                      height: 32,
-                      child: DropdownButton<String>(
-                        value: _orgFilter.isEmpty ? null : _orgFilter,
-                        hint: const Text('Org', style: TextStyle(fontSize: 12)),
-                        style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurface),
-                        isDense: true,
-                        underline: const SizedBox.shrink(),
-                        items: [
-                          const DropdownMenuItem(value: '', child: Text('All orgs')),
-                          ...allOrgs.map((o) => DropdownMenuItem(value: o, child: Text(o))),
-                        ],
-                        onChanged: (v) => setState(() => _orgFilter = v ?? ''),
+                    GestureDetector(
+                      onTap: () async {
+                        final result = await showDialog<Set<String>>(
+                          context: context,
+                          builder: (_) => _MultiSelectDialog(
+                            title: 'Filter by Org',
+                            items: allOrgs,
+                            selected: _orgFilter,
+                          ),
+                        );
+                        if (result != null) setState(() => _orgFilter = result);
+                      },
+                      child: Chip(
+                        avatar: Icon(Icons.business, size: 14,
+                            color: _orgFilter.isNotEmpty
+                                ? Theme.of(context).colorScheme.primary
+                                : Colors.grey),
+                        label: Text(
+                          _orgFilter.isNotEmpty ? 'Org (${_orgFilter.length})' : 'Org',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: _orgFilter.isNotEmpty
+                                ? Theme.of(context).colorScheme.primary
+                                : null,
+                          ),
+                        ),
+                        visualDensity: VisualDensity.compact,
+                        side: _orgFilter.isNotEmpty
+                            ? BorderSide(color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.5))
+                            : const BorderSide(color: Colors.transparent),
                       ),
                     ),
+                  // Reset org filter
+                  if (_orgFilter.isNotEmpty) ...[
+                    const SizedBox(width: 4),
+                    GestureDetector(
+                      onTap: () => setState(() => _orgFilter = {}),
+                      child: const Icon(Icons.clear, size: 16, color: Colors.grey),
+                    ),
+                  ],
                   const Spacer(),
                   // View toggle
                   SegmentedButton<_ViewMode>(
@@ -625,6 +650,75 @@ class _RepoTile extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+// ── Multi-select dialog (same pattern as Stats filter) ───────────────────
+
+class _MultiSelectDialog extends StatefulWidget {
+  final String title;
+  final List<String> items;
+  final Set<String> selected;
+
+  const _MultiSelectDialog({
+    required this.title,
+    required this.items,
+    required this.selected,
+  });
+
+  @override
+  State<_MultiSelectDialog> createState() => _MultiSelectDialogState();
+}
+
+class _MultiSelectDialogState extends State<_MultiSelectDialog> {
+  late Set<String> _selected;
+
+  @override
+  void initState() {
+    super.initState();
+    _selected = Set<String>.from(widget.selected);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(widget.title, style: const TextStyle(fontSize: 16)),
+      contentPadding: const EdgeInsets.only(top: 12),
+      content: SizedBox(
+        width: 300,
+        child: ListView.builder(
+          shrinkWrap: true,
+          itemCount: widget.items.length,
+          itemBuilder: (_, i) {
+            final item = widget.items[i];
+            return CheckboxListTile(
+              dense: true,
+              title: Text(item, style: const TextStyle(fontSize: 13)),
+              value: _selected.contains(item),
+              onChanged: (val) {
+                setState(() {
+                  if (val == true) {
+                    _selected.add(item);
+                  } else {
+                    _selected.remove(item);
+                  }
+                });
+              },
+            );
+          },
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, null),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, _selected),
+          child: const Text('Apply'),
+        ),
+      ],
     );
   }
 }
