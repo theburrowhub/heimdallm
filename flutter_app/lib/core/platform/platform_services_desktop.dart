@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'dart:ui' show VoidCallback;
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter/painting.dart' show Size;
 import '../api/api_client.dart';
 import '../models/config_model.dart';
@@ -14,16 +15,23 @@ class DesktopPlatformServices implements PlatformServices {
   DesktopPlatformServices({
     int apiPort = 7842,
     String? tokenPath,
+    String? pidFilePath,
   })  : _apiPort = apiPort,
-        _tokenPath = tokenPath;
+        _tokenPath = tokenPath,
+        _pidFilePath = pidFilePath;
 
   final int _apiPort;
   final String? _tokenPath;
+  final String? _pidFilePath;
   String? _cachedToken;
 
   String get _resolvedTokenPath =>
       _tokenPath ??
       '${Platform.environment['HOME'] ?? ''}/.local/share/heimdallm/api_token';
+
+  String get _resolvedPidFilePath =>
+      _pidFilePath ??
+      '${Platform.environment['HOME'] ?? ''}/.local/share/heimdallm/ui.pid';
 
   @override
   String get apiBaseUrl => 'http://127.0.0.1:$_apiPort';
@@ -48,9 +56,30 @@ class DesktopPlatformServices implements PlatformServices {
   @override
   String? readEnv(String name) => Platform.environment[name];
   @override
-  Future<bool> ensureSingleInstance() => throw UnimplementedError();
+  Future<bool> ensureSingleInstance() async {
+    final pidFile = File(_resolvedPidFilePath);
+    await pidFile.parent.create(recursive: true);
+
+    if (await pidFile.exists()) {
+      final existing = int.tryParse((await pidFile.readAsString()).trim());
+      if (existing != null && existing != pid) {
+        final check = await Process.run('kill', ['-0', '$existing']);
+        if (check.exitCode == 0) {
+          debugPrint('Another Heimdallm instance is running (PID $existing), signalling it.');
+          await Process.run('kill', ['-USR1', '$existing']);
+          return false;
+        }
+      }
+    }
+
+    await pidFile.writeAsString('$pid');
+    return true;
+  }
+
   @override
-  void listenForActivationSignal(VoidCallback onActivate) => throw UnimplementedError();
+  void listenForActivationSignal(VoidCallback onActivate) {
+    ProcessSignal.sigusr1.watch().listen((_) => onActivate());
+  }
   @override
   Future<void> setupWindow({
     required String title,

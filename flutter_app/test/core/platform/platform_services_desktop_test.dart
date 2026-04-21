@@ -56,5 +56,22 @@ void main() {
       final services = DesktopPlatformServices(apiPort: 9999);
       expect(services.apiBaseUrl, 'http://127.0.0.1:9999');
     });
+
+    test('ensureSingleInstance writes a PID file and returns true on fresh start', () async {
+      final pidFile = File('${tempDir.path}/ui.pid');
+      final services = DesktopPlatformServices(pidFilePath: pidFile.path);
+      expect(await services.ensureSingleInstance(), isTrue);
+      expect(pidFile.existsSync(), isTrue);
+      expect(int.parse(pidFile.readAsStringSync().trim()), pid);
+    });
+
+    test('ensureSingleInstance overwrites a stale PID file (process gone)', () async {
+      final pidFile = File('${tempDir.path}/ui.pid')
+        // Use an impossible high PID that is extremely unlikely to exist.
+        ..writeAsStringSync('999999999');
+      final services = DesktopPlatformServices(pidFilePath: pidFile.path);
+      expect(await services.ensureSingleInstance(), isTrue);
+      expect(int.parse(pidFile.readAsStringSync().trim()), pid);
+    });
   });
 }
