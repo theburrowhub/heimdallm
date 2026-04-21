@@ -55,6 +55,7 @@ Key properties:
 
 - **Layout mirrors CI's `/opt/heimdallm/`.** `DaemonLifecycle.defaultBinaryPath()` in `daemon_lifecycle.dart` resolves the daemon as `heimdalld` next to the Flutter binary — the CI `.deb` satisfies this, and so does this user-local install. No app-code change required.
 - **`~/.local/share/heimdallm/` is reserved** as the daemon's runtime data directory (created by `make run-linux`, written to by the daemon at runtime). The install target must not place anything there; the uninstall target must not remove it except under `PURGE=1`.
+- **`~/.config/heimdallm/.token` is seeded at install time** if absent, from `$GITHUB_TOKEN` or `gh auth token`. Needed because the daemon (when spawned by a GUI-launched Flutter app) does not inherit a shell `$GITHUB_TOKEN` and otherwise fails at first run with "token not found". See §2 step 11 for the precedence and safety details; the token file itself lives under `~/.config/heimdallm/` alongside `config.toml`, and is removed by `uninstall-linux PURGE=1`.
 - **Desktop entry `Exec=` is absolute** (the expanded value of `$HOME/.local/opt/heimdallm/heimdallm`). `%h` is not a standard Desktop Entry field code and not all launchers expand it.
 
 ---
@@ -96,11 +97,20 @@ Steps (all idempotent — every rerun leaves the same end state):
     StartupWMClass=com.theburrowhub.heimdallm
     StartupNotify=true
     ```
-11. **Refresh caches (best-effort).**
+11. **Seed GitHub token (idempotent, non-fatal).** Gate the entire step behind `[ ! -f "$$HOME/.config/heimdallm/.token" ]` — never overwrite an existing token file, even if `$GITHUB_TOKEN` or `gh auth token` would produce a different value. If the file is absent, try two sources in order:
+    1. `$GITHUB_TOKEN` env var (whatever was exported in the shell that ran `make install-linux`).
+    2. `gh auth token` (only if `gh` is on `$PATH`, authenticated, and the command exits 0 with non-empty stdout).
+
+    On success, `mkdir -p ~/.config/heimdallm` and write the token to `~/.config/heimdallm/.token` with mode **600**. Use `umask 077` *before* the redirect (or `install -m 600` if available) so there is no window where the file sits world-readable — a subsequent `chmod 600` alone is a TOCTOU race on a shared machine. Print `    Seeded ~/.config/heimdallm/.token from <source>` to the terminal.
+
+    On failure (neither source returns a token): print a multi-line warning telling the user how to supply one (`$GITHUB_TOKEN` export / `gh auth login` / manual `.token` write) and **do not fail the install**. The Makefile recipe exits 0. First launch will show the app's own "daemon failed to start" dialog until the user provides a token; re-running `make install-linux` after `gh auth login` seeds the token.
+
+    Motivation: when the Flutter app is launched from the OS app launcher (GNOME overview, KDE menu), its environment is sanitized and does *not* inherit `$GITHUB_TOKEN` from the user's shell. The daemon it spawns reads only two sources on Linux — `$GITHUB_TOKEN` (unset in that sanitized env) and `~/.config/heimdallm/.token` (nonexistent until seeded). Without this step, first launch always fails with "token not found", indistinguishable (to the user) from a broken install.
+12. **Refresh caches (best-effort).**
     - `command -v update-desktop-database >/dev/null && update-desktop-database ~/.local/share/applications/ 2>/dev/null || true`
     - `command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q -t ~/.local/share/icons/hicolor/ 2>/dev/null || true`
     - Silent no-op if the tools aren't installed. The app appears in the launcher either way after a re-login; the refresh just makes it immediate.
-12. **Final report.** Print:
+13. **Final report.** Print:
     - The four path groups written (bundle, bin symlink, desktop entry, icons).
     - A "Launch with: `heimdallm` (or from your app launcher)" hint.
     - **If `~/.local/bin` is not on `$PATH`**, a warning plus the snippet `export PATH="$HOME/.local/bin:$PATH"` and a reminder to add it to `~/.bashrc` / `~/.zshrc`. Detection: `case ":$$PATH:" in *":$$HOME/.local/bin:"*) ;; *) warn ;; esac`.
@@ -164,6 +174,8 @@ Key safety properties:
 - **Already installed.** `install-linux` overwrites cleanly: `rm -rf` on the bundle dir, `ln -sf` on the symlink, fresh desktop entry / icons. No version-check logic — source installs always reflect whatever the current `heimdallm-verify` image was built from.
 - **Daemon running at install time.** `rm -rf ~/.local/opt/heimdallm/` while the daemon is running is safe on Linux (unlinks the directory entry; the running process continues on its now-unlinked inode until it exits normally). The install target does *not* stop running processes — a rebuild-reinstall during active use won't interrupt a review in progress. Stopping processes is the `uninstall-linux` job.
 - **Host glibc too old for the Ubuntu-22.04-built binaries.** Surfaces as a missing-symbol error at first launch (not at install). Out of scope for automatic detection; documented as a caveat in §2 "Binary compatibility".
+- **No GitHub token available at install time** (neither `$GITHUB_TOKEN` exported nor `gh` authenticated). Warning, not an error — `install-linux` still exits 0. The user sees a multi-line hint immediately above the `✅ Heimdallm installed:` banner telling them how to supply a token, and the first launch will fail with the app's own "daemon failed to start" dialog until one exists at `~/.config/heimdallm/.token`. Rerunning `make install-linux` after `gh auth login` (or exporting `GITHUB_TOKEN`) seeds the token, because the recipe's `[ ! -f ... ]` guard only writes when the file is absent.
+- **Existing `~/.config/heimdallm/.token` with a different token.** Left untouched — the seeding step's guard skips the write entirely. A user who manually set a token, or who uses a different GitHub account than `gh auth token` would return, is not overridden. To force a re-seed, they delete the file themselves and rerun `install-linux`.
 
 ---
 

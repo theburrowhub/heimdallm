@@ -641,13 +641,192 @@ Do not introduce "manual-testing" commits — nothing changed in the tree.
 
 ---
 
+## Task 5: Seed `~/.config/heimdallm/.token` at install time
+
+**Files:**
+- Modify: `Makefile` — extend the `install-linux` recipe with a new step placed between the desktop-entry write and the launcher-cache refresh.
+
+**Motivation:** Discovered during Task 4 manual launch from the GNOME app launcher (not from a terminal): the Flutter app inherits a sanitized env with no `$GITHUB_TOKEN`, the daemon it spawns cannot find a token at either Linux fallback location (`$GITHUB_TOKEN` env or `~/.config/heimdallm/.token` file), and the app shows "Daemon failed to start after 3 attempts." `install-linux` seeds the token at install time so the GUI-launch path succeeds on first run.
+
+**Design recap** (mirrors spec §2 step 11):
+- Source precedence: `$GITHUB_TOKEN` env var first, then `gh auth token` — same order as `run-linux` uses (Makefile lines 411–418).
+- Skipped entirely if `~/.config/heimdallm/.token` already exists — never overwrite a manually-set token.
+- Non-fatal when no source is available: prints a warning with remediation hints, install still exits 0.
+- Mode **600** enforced via `umask 077` subshell *before* the file is created — avoids the TOCTOU window a trailing `chmod 600` would leave on a multi-user host.
+
+- [ ] **Step 1: Insert the seeding step in the `install-linux` recipe**
+
+Open `Makefile` and locate the closing line of the desktop-entry `printf` block (inside the `install-linux` recipe):
+
+```
+	  > "$$DESKTOP_DIR/com.theburrowhub.heimdallm.desktop"
+```
+
+Directly after this line, and immediately before the existing `@# Best-effort launcher cache refresh` comment, insert:
+
+```make
+	@# Seed ~/.config/heimdallm/.token so the daemon can start when the app is
+	@# launched from the OS app launcher (which does not inherit $$GITHUB_TOKEN
+	@# from the user's shell). Skipped if the file already exists — respects
+	@# manual overrides. Non-fatal if no token source is available.
+	@if [ ! -f "$$HOME/.config/heimdallm/.token" ]; then \
+	  TOK="" ; SRC="" ; \
+	  if [ -n "$$GITHUB_TOKEN" ]; then \
+	    TOK="$$GITHUB_TOKEN" ; SRC='$$GITHUB_TOKEN env' ; \
+	  elif command -v gh >/dev/null 2>&1 ; then \
+	    GH_TOK=$$(gh auth token 2>/dev/null || true) ; \
+	    if [ -n "$$GH_TOK" ]; then \
+	      TOK="$$GH_TOK" ; SRC='gh auth token' ; \
+	    fi ; \
+	  fi ; \
+	  if [ -n "$$TOK" ]; then \
+	    mkdir -p "$$HOME/.config/heimdallm" ; \
+	    ( umask 077 && printf '%s\n' "$$TOK" > "$$HOME/.config/heimdallm/.token" ) ; \
+	    echo "    Seeded $$HOME/.config/heimdallm/.token from $$SRC" ; \
+	  else \
+	    echo "" ; \
+	    echo "⚠  No GitHub token found — first launch will fail until you provide one." ; \
+	    echo "   Set GITHUB_TOKEN in your shell, run 'gh auth login', or write" ; \
+	    echo "   the token to ~/.config/heimdallm/.token (mode 600) manually." ; \
+	  fi ; \
+	fi
+```
+
+Same TAB-indentation and `$$`-escaping rules as Task 2. Key idioms worth calling out:
+
+- `SRC='$$GITHUB_TOKEN env'` — Make converts `$$` to `$`, shell sees `'$GITHUB_TOKEN env'` in single quotes (no expansion), so `SRC` holds the literal string `$GITHUB_TOKEN env`. When later echoed inside double quotes, the variable's value — the literal string including the dollar sign — is what prints. Result: the output says `Seeded … from $GITHUB_TOKEN env`, which is the UX we want.
+- `( umask 077 && printf '%s\n' "$$TOK" > "…/.token" )` — subshell. `umask 077` applies only to the subshell; any file created inside is born with mode 600. No `chmod` afterward, no TOCTOU window.
+- The `elif command -v gh … ; then GH_TOK=$$(gh auth token …) ; …` split rather than a one-liner is intentional: `gh auth token` can return 0 with empty stdout in some misconfigured states, and we must treat empty as "no token". The separate `[ -n "$$GH_TOK" ]` check handles that.
+- The outer `@if [ ! -f "$$HOME/.config/heimdallm/.token" ]; then … fi` is the non-negotiable overwrite guard.
+
+- [ ] **Step 2: Dry-run**
+
+```bash
+make -n install-linux 2>&1 | grep -A10 "Seed ~/.config"
+```
+
+Expected: shows the `if [ ! -f ... ]` structure with the env → gh → warn chain. No `*** missing separator` errors anywhere in the full dry-run output.
+
+- [ ] **Step 3: Runtime — token is seeded on fresh install**
+
+Remove any prior token, run install:
+
+```bash
+rm -f ~/.config/heimdallm/.token
+make install-linux 2>&1 | tail -20
+```
+
+Expected (on a host where `gh auth token` works):
+```
+    Seeded /home/<user>/.config/heimdallm/.token from gh auth token
+
+✅  Heimdallm installed:
+    ...
+```
+
+Or, on a host where `GITHUB_TOKEN` is exported in the invoking shell:
+```
+    Seeded /home/<user>/.config/heimdallm/.token from $GITHUB_TOKEN env
+
+✅  Heimdallm installed:
+    ...
+```
+
+Verify the file:
+```bash
+ls -la ~/.config/heimdallm/.token
+```
+Expected: `-rw-------` (mode 600), non-zero size (roughly 40–100 bytes for a GitHub PAT or OAuth token).
+
+- [ ] **Step 4: Runtime — idempotence (file already exists)**
+
+```bash
+# .token is present from step 3
+make install-linux 2>&1 | grep -E "(Seeded|No GitHub token|Token already)" || echo "(no token-step output — guard skipped, as expected)"
+```
+
+Expected: no matching output — the outer guard saw the existing file and skipped the step entirely. The overall install still succeeds.
+
+- [ ] **Step 5: Runtime — no-token fallback (optional)**
+
+Constructing a token-less environment is awkward (have to unset `GITHUB_TOKEN` AND remove `gh` from PATH for the Make recipe's shell only). If the host's `gh` is authenticated, a cheap way is to rename its binary temporarily:
+
+```bash
+rm -f ~/.config/heimdallm/.token
+sudo mv "$(command -v gh)" "$(command -v gh).bak"   # careful — rename!
+env -u GITHUB_TOKEN make install-linux 2>&1 | tail -15
+sudo mv "$(command -v gh).bak" "$(command -v gh)"   # restore
+```
+
+Expected:
+```
+⚠  No GitHub token found — first launch will fail until you provide one.
+   Set GITHUB_TOKEN in your shell, run 'gh auth login', or write
+   the token to ~/.config/heimdallm/.token (mode 600) manually.
+
+✅  Heimdallm installed:
+    ...
+```
+
+`echo $?` should be `0`. `ls ~/.config/heimdallm/.token` should return "No such file" (warning branch did not create it).
+
+Skip this step if you do not want to temporarily rename `gh`. The logic is straightforward enough that the dry-run and step 3 already exercise the important paths.
+
+- [ ] **Step 6: End-to-end — app actually launches**
+
+The fastest way to verify the GUI-launcher env scenario without navigating GNOME:
+
+```bash
+rm -f ~/.config/heimdallm/.token
+make install-linux
+
+# Simulate the sanitized env a .desktop Exec= line gets — NO GITHUB_TOKEN,
+# PATH does not include anything that could provide one.
+env -i HOME="$HOME" PATH="/usr/bin:/bin" DISPLAY="$DISPLAY" \
+  ~/.local/opt/heimdallm/heimdallm &
+APP_PID=$!
+sleep 6
+curl -s http://localhost:7842/health
+pkill -f ~/.local/opt/heimdallm 2>/dev/null || true
+wait "$APP_PID" 2>/dev/null || true
+```
+
+Expected: `curl` returns `{"status":"ok"}` (or similar) — the daemon came up because it read the seeded `.token` file even though `$GITHUB_TOKEN` is absent in this minimal env. This is the scenario that was broken before Task 5.
+
+If you do not have a `$DISPLAY` available, the Flutter UI will not render, but the daemon subprocess should still start and the health endpoint respond.
+
+- [ ] **Step 7: Commit (new commit on `feat/install-linux`, NOT amend)**
+
+```bash
+git branch --show-current   # must print: feat/install-linux
+git add Makefile
+git commit -m "$(cat <<'EOF'
+feat(make): seed ~/.config/heimdallm/.token at install-linux time
+
+Source precedence: $GITHUB_TOKEN env var, then `gh auth token`.
+Skipped if ~/.config/heimdallm/.token already exists. Non-fatal if
+neither source is available — prints a warning with remediation hints
+and still exits 0.
+
+Fixes first-launch-from-OS-launcher failure: when the Flutter app is
+started from GNOME/KDE, its sanitized env lacks $GITHUB_TOKEN, and
+the daemon it spawns had no way to find a token on Linux. Seeding
+.token at install time (mode 600 via `umask 077`) closes the gap.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+EOF
+)"
+```
+
+---
+
 ## Self-review checklist — completed
 
 - **Spec coverage.**
-  - §1 layout → covered by Task 2's recipe (bundle, symlink, desktop entry, icon paths all match).
-  - §2 install steps 1–12 (including the new Docker-extract steps 2–3 and the extraction-dir cleanup at step 7) → covered by Task 2 step 1 recipe body, in order.
+  - §1 layout → covered by Task 2's recipe (bundle, symlink, desktop entry, icon paths all match). The `.token` callout added in §1 is covered by Task 5.
+  - §2 install steps 1–13 (Docker-extract 2–3, extraction-dir cleanup 7, token seeding 11) → Task 2 covers steps 1–10 and 12–13; Task 5 adds step 11 as a distinct commit layered on top.
   - §3 uninstall steps 1–8 (+ PURGE) → covered by Task 3 step 1 recipe body.
-  - §4 error handling → `_check-linux` (Task 1), Docker preflight (Task 2 recipe), `verify-linux` failure surface (inherited from that target), trap-based container cleanup (Task 2 recipe), case-collision guard (Task 2 recipe), PATH warning (Task 2 recipe), symlink-only removal (Task 3 recipe).
+  - §4 error handling → `_check-linux` (Task 1), Docker preflight (Task 2 recipe), `verify-linux` failure surface (inherited from that target), trap-based container cleanup (Task 2 recipe), case-collision guard (Task 2 recipe), PATH warning (Task 2 recipe), symlink-only removal (Task 3 recipe), no-token warning + existing-`.token` non-overwrite (Task 5 recipe).
   - §5 manual test plan → covered step-by-step by Task 4.
 - **Placeholder scan.** No TBD/TODO/"implement later". Every recipe body is complete code, every verification step names the expected output.
 - **Type / name consistency.**
