@@ -6,6 +6,7 @@ import '../../core/models/config_model.dart';
 import '../../core/platform/platform_services_provider.dart';
 import '../../shared/widgets/toast.dart';
 import '../config/config_providers.dart';
+import 'widgets/repo_list_tile.dart';
 
 class ReposScreen extends ConsumerStatefulWidget {
   const ReposScreen({super.key});
@@ -25,6 +26,14 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
   _SyncStatus _syncStatus = _SyncStatus.idle;
   Timer? _debounce;
   Timer? _savedResetTimer;
+
+  final Set<String> _selected = {};
+
+  void _toggleSelection(String repo) {
+    setState(() {
+      if (!_selected.add(repo)) _selected.remove(repo);
+    });
+  }
 
   @override
   void dispose() {
@@ -165,6 +174,8 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
                       configs: _repoConfigs,
                       appConfig: config,
                       onChanged: _onChange,
+                      selected: _selected,
+                      onSelectionToggle: _toggleSelection,
                     ),
             ),
           ],
@@ -181,12 +192,16 @@ class _RepoListWithSections extends ConsumerStatefulWidget {
   final Map<String, RepoConfig> configs;
   final AppConfig appConfig;
   final void Function(String repo, RepoConfig rc) onChanged;
+  final Set<String> selected;
+  final ValueChanged<String> onSelectionToggle;
 
   const _RepoListWithSections({
     required this.repos,
     required this.configs,
     required this.appConfig,
     required this.onChanged,
+    required this.selected,
+    required this.onSelectionToggle,
   });
 
   @override
@@ -273,10 +288,13 @@ class _RepoListWithSectionsState extends ConsumerState<_RepoListWithSections> {
       items.add(_orgHeader(org, orgRepos.length, expanded, () => _toggle(key)));
       if (expanded) {
         for (final r in orgRepos) {
-          items.add(_RepoTile(
+          items.add(RepoListTile(
             repo: r,
             config: widget.configs[r]!,
             appConfig: widget.appConfig,
+            selected: widget.selected.contains(r),
+            onSelectionToggle: () => widget.onSelectionToggle(r),
+            onTap: () => context.push('/repos/${Uri.encodeComponent(r)}'),
           ));
         }
       }
@@ -333,137 +351,3 @@ class _RepoListWithSectionsState extends ConsumerState<_RepoListWithSections> {
   }
 }
 
-// ── LED indicator ────────────────────────────────────────────────────────────
-
-class _Led extends StatelessWidget {
-  final String status; // 'off', 'global', 'repo'
-  final String tooltip;
-  const _Led({required this.status, required this.tooltip});
-
-  @override
-  Widget build(BuildContext context) {
-    final color = switch (status) {
-      'repo'   => Colors.green.shade500,
-      'global' => Colors.blue.shade500,
-      _        => Colors.red.shade800,
-    };
-    return Tooltip(
-      message: '$tooltip: ${_label()}',
-      child: Container(
-        width: 8, height: 8,
-        decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-      ),
-    );
-  }
-
-  String _label() => switch (status) {
-    'repo'   => 'active (repo)',
-    'global' => 'active (global)',
-    _        => 'inactive',
-  };
-}
-
-// ── Repo tile ─────────────────────────────────────────────────────────────
-
-class _RepoTile extends StatelessWidget {
-  final String repo;
-  final RepoConfig config;
-  final AppConfig appConfig;
-
-  const _RepoTile({
-    required this.repo,
-    required this.config,
-    required this.appConfig,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final configuredDir = (config.localDir ?? '').isNotEmpty ? config.localDir : null;
-    final detectedDir = appConfig.localDirsDetected[repo];
-    final effectiveDir = configuredDir ?? detectedDir;
-    // Full-repo analysis is available as long as *either* the user
-    // configured a path *or* the daemon detected one under /repos.
-    final hasDirMapping = effectiveDir != null && effectiveDir.isNotEmpty;
-    // Distinguish configured vs auto-detected in the label/colour so the
-    // operator can tell at a glance whether they set it themselves or the
-    // bind-mount convention kicked in.
-    final isAutoDetected = configuredDir == null && detectedDir != null;
-
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 3),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(12),
-        onTap: () => context.push('/repos/${Uri.encodeComponent(repo)}'),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          child: Row(
-            children: [
-              Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _Led(
-                    status: config.prLedStatus(appConfig.repositories.contains(repo)),
-                    tooltip: 'PR Review',
-                  ),
-                  const SizedBox(height: 3),
-                  _Led(
-                    status: config.itLedStatus(appConfig.issueTracking.enabled),
-                    tooltip: 'Issue Tracking',
-                  ),
-                  const SizedBox(height: 3),
-                  _Led(
-                    status: config.devLedStatus(
-                        appConfig.issueTracking.enabled, hasDirMapping),
-                    tooltip: 'Develop',
-                  ),
-                ],
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(repo,
-                        style: TextStyle(
-                          fontWeight: config.isMonitored ? FontWeight.w600 : FontWeight.normal,
-                          color: config.isMonitored ? null : Colors.grey,
-                        )),
-                    const SizedBox(height: 2),
-                    Row(children: [
-                      Icon(
-                        hasDirMapping ? Icons.folder : Icons.folder_off_outlined,
-                        size: 13,
-                        color: hasDirMapping
-                            ? (isAutoDetected
-                                ? Colors.blue.shade400
-                                : Colors.green.shade500)
-                            : Colors.grey.shade600,
-                      ),
-                      const SizedBox(width: 4),
-                      Text(
-                        hasDirMapping
-                            ? (isAutoDetected
-                                ? 'Auto: ${effectiveDir.split('/').last}'
-                                : effectiveDir.split('/').last)
-                            : 'No local dir',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: hasDirMapping
-                              ? (isAutoDetected
-                                  ? Colors.blue.shade400
-                                  : Colors.green.shade500)
-                              : Colors.grey.shade600,
-                        ),
-                      ),
-                    ]),
-                  ],
-                ),
-              ),
-              Icon(Icons.chevron_right, size: 18, color: Colors.grey.shade600),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
