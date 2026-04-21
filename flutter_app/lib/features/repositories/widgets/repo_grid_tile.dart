@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../../../core/models/config_model.dart';
 import 'feature_led.dart';
 import 'feature_palette.dart';
+import 'led_source.dart';
 
 class RepoGridTile extends StatelessWidget {
   final String repo;
@@ -69,22 +70,52 @@ class RepoGridTile extends StatelessWidget {
               const Spacer(),
               FeatureLed(
                 feature: Feature.prReview,
-                isOn: _isOn(Feature.prReview),
-                sourceLine: _sourceLine(Feature.prReview),
+                isOn: featureIsOn(
+                  feature: Feature.prReview,
+                  repo: repo,
+                  config: config,
+                  appConfig: appConfig,
+                ),
+                sourceLine: featureSourceLine(
+                  feature: Feature.prReview,
+                  repo: repo,
+                  config: config,
+                  appConfig: appConfig,
+                ),
                 size: 9,
               ),
               const SizedBox(width: 4),
               FeatureLed(
                 feature: Feature.issueTracking,
-                isOn: _isOn(Feature.issueTracking),
-                sourceLine: _sourceLine(Feature.issueTracking),
+                isOn: featureIsOn(
+                  feature: Feature.issueTracking,
+                  repo: repo,
+                  config: config,
+                  appConfig: appConfig,
+                ),
+                sourceLine: featureSourceLine(
+                  feature: Feature.issueTracking,
+                  repo: repo,
+                  config: config,
+                  appConfig: appConfig,
+                ),
                 size: 9,
               ),
               const SizedBox(width: 4),
               FeatureLed(
                 feature: Feature.develop,
-                isOn: _isOn(Feature.develop),
-                sourceLine: _sourceLine(Feature.develop),
+                isOn: featureIsOn(
+                  feature: Feature.develop,
+                  repo: repo,
+                  config: config,
+                  appConfig: appConfig,
+                ),
+                sourceLine: featureSourceLine(
+                  feature: Feature.develop,
+                  repo: repo,
+                  config: config,
+                  appConfig: appConfig,
+                ),
                 size: 9,
               ),
             ]),
@@ -138,53 +169,6 @@ class RepoGridTile extends StatelessWidget {
     );
   }
 
-  bool _isOn(Feature f) {
-    final inGlobalList = appConfig.repositories.contains(repo);
-    final globalIt = appConfig.issueTracking.enabled;
-    final hasDir = config.localDir != null && config.localDir!.isNotEmpty;
-    final status = switch (f) {
-      Feature.prReview      => config.prLedStatus(inGlobalList),
-      Feature.issueTracking => config.itLedStatus(globalIt),
-      Feature.develop       => config.devLedStatus(globalIt, hasDir),
-    };
-    return status != 'off';
-  }
-
-  String _sourceLine(Feature f) {
-    // Same logic as RepoListTile — duplicated here to keep the widget
-    // self-contained. Kept intentionally: a shared helper would add an
-    // awkward import dependency between siblings.
-    final inGlobalList = appConfig.repositories.contains(repo);
-    final globalIt = appConfig.issueTracking.enabled;
-    final hasDir = config.localDir != null && config.localDir!.isNotEmpty;
-    switch (f) {
-      case Feature.prReview:
-        if (config.prEnabled == true) return 'Source: repo-level (prEnabled = true)';
-        if (config.prEnabled == false) return 'Source: disabled per-repo (prEnabled = false)';
-        return inGlobalList
-            ? 'Source: inherited from global monitored list'
-            : 'Source: not in monitored list';
-      case Feature.issueTracking:
-        if (config.itEnabled == true) return 'Source: repo-level (itEnabled = true)';
-        if (config.itEnabled == false) return 'Source: disabled per-repo (itEnabled = false)';
-        if ((config.reviewOnlyLabels ?? const []).isNotEmpty) {
-          return 'Source: implied by per-repo labels';
-        }
-        return globalIt
-            ? 'Source: inherited from global issue tracking'
-            : 'Source: globally disabled';
-      case Feature.develop:
-        if (config.devEnabled == true && hasDir) return 'Source: repo-level (devEnabled = true)';
-        if (config.devEnabled == false) return 'Source: disabled per-repo (devEnabled = false)';
-        if (!hasDir) return 'Reason: no local directory configured (Develop requires one)';
-        if ((config.developLabels ?? const []).isNotEmpty) {
-          return 'Source: implied by per-repo develop labels';
-        }
-        return globalIt
-            ? 'Source: inherited from global issue tracking'
-            : 'Source: globally disabled';
-    }
-  }
 }
 
 class _NewBadge extends StatelessWidget {
