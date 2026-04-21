@@ -371,7 +371,7 @@ func main() {
 				return
 			}
 			seenRepo[repo] = true
-			if d := config.ResolveLocalDir("", repo); d != "" {
+			if d := config.ResolveLocalDir("", repo, c.GitHub.LocalDirBase); d != "" {
 				localDirsDetected[repo] = d
 			}
 		}
@@ -507,10 +507,11 @@ func main() {
 		}
 		cfgMu.Lock()
 		aiCfg := cfg.AIForRepo(pr.Repo)
+		localDirBase := cfg.GitHub.LocalDirBase
 		cfgMu.Unlock()
 		// /repos/<short-name> fallback when local_dir is unset (stat-based,
 		// keep outside the mutex).
-		aiCfg.LocalDir = config.ResolveLocalDir(aiCfg.LocalDir, pr.Repo)
+		aiCfg.LocalDir = config.ResolveLocalDir(aiCfg.LocalDir, pr.Repo, localDirBase)
 
 		// Construct github.PullRequest from stored data
 		ghPR := &gh.PullRequest{
@@ -576,10 +577,11 @@ func main() {
 			aiCfg.Primary = cfg.AI.Primary
 		}
 		agentCfg := cfg.AgentConfigFor(aiCfg.Primary)
+		localDirBase := cfg.GitHub.LocalDirBase
 		cfgMu.Unlock()
 		// /repos/<short-name> fallback when local_dir is unset (stat-based,
 		// keep outside the mutex).
-		aiCfg.LocalDir = config.ResolveLocalDir(aiCfg.LocalDir, iss.Repo)
+		aiCfg.LocalDir = config.ResolveLocalDir(aiCfg.LocalDir, iss.Repo, localDirBase)
 
 		// Reconstruct github.Issue from store data for the pipeline
 		ghIssue := &gh.Issue{
@@ -842,7 +844,7 @@ func (a *tier2Adapter) ProcessPR(ctx context.Context, pr scheduler.Tier2PR) erro
 	// /repos/<short-name> fallback when local_dir is unset (stat-based,
 	// keep outside the mutex). Lets HEIMDALLM_REPOS_DIR give every
 	// monitored repo full-repo context without a per-repo override.
-	aiCfg.LocalDir = config.ResolveLocalDir(aiCfg.LocalDir, pr.Repo)
+	aiCfg.LocalDir = config.ResolveLocalDir(aiCfg.LocalDir, pr.Repo, c.GitHub.LocalDirBase)
 
 	ghPR := &gh.PullRequest{
 		ID:        pr.ID,
@@ -908,7 +910,7 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 		a.cfgMu.Unlock()
 		// /repos/<short-name> fallback when local_dir is unset (stat-based,
 		// keep outside the mutex).
-		aiCfg.LocalDir = config.ResolveLocalDir(aiCfg.LocalDir, issue.Repo)
+		aiCfg.LocalDir = config.ResolveLocalDir(aiCfg.LocalDir, issue.Repo, c.GitHub.LocalDirBase)
 
 		extraFlags := agentCfg.ExtraFlags
 		if extraFlags != "" {

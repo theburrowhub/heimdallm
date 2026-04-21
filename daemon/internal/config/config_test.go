@@ -1102,7 +1102,7 @@ func TestResolveLocalDir_PrefersConfigured(t *testing.T) {
 	DefaultReposMountPath = tmp
 	t.Cleanup(func() { DefaultReposMountPath = old })
 
-	if got := ResolveLocalDir("/explicit/path", "org/name"); got != "/explicit/path" {
+	if got := ResolveLocalDir("/explicit/path", "org/name", nil); got != "/explicit/path" {
 		t.Errorf("got %q, want /explicit/path", got)
 	}
 }
@@ -1117,7 +1117,7 @@ func TestResolveLocalDir_AutoDetectFromMount(t *testing.T) {
 	DefaultReposMountPath = tmp
 	t.Cleanup(func() { DefaultReposMountPath = old })
 
-	if got := ResolveLocalDir("", "org/name"); got != repoDir {
+	if got := ResolveLocalDir("", "org/name", nil); got != repoDir {
 		t.Errorf("got %q, want %q", got, repoDir)
 	}
 }
@@ -1130,7 +1130,7 @@ func TestResolveLocalDir_NoFallbackWhenDirMissing(t *testing.T) {
 	DefaultReposMountPath = tmp
 	t.Cleanup(func() { DefaultReposMountPath = old })
 
-	if got := ResolveLocalDir("", "org/name"); got != "" {
+	if got := ResolveLocalDir("", "org/name", nil); got != "" {
 		t.Errorf("got %q, want empty", got)
 	}
 }
@@ -1145,7 +1145,7 @@ func TestResolveLocalDir_IgnoresFiles(t *testing.T) {
 	DefaultReposMountPath = tmp
 	t.Cleanup(func() { DefaultReposMountPath = old })
 
-	if got := ResolveLocalDir("", "org/name"); got != "" {
+	if got := ResolveLocalDir("", "org/name", nil); got != "" {
 		t.Errorf("got %q, want empty (file, not dir)", got)
 	}
 }
@@ -1155,7 +1155,7 @@ func TestResolveLocalDir_EmptyReposMountPath(t *testing.T) {
 	DefaultReposMountPath = ""
 	t.Cleanup(func() { DefaultReposMountPath = old })
 
-	if got := ResolveLocalDir("", "org/name"); got != "" {
+	if got := ResolveLocalDir("", "org/name", nil); got != "" {
 		t.Errorf("got %q, want empty (mount path disabled)", got)
 	}
 }
@@ -1169,8 +1169,102 @@ func TestResolveLocalDir_EmptyRepo(t *testing.T) {
 	DefaultReposMountPath = tmp
 	t.Cleanup(func() { DefaultReposMountPath = old })
 
-	if got := ResolveLocalDir("", ""); got != "" {
+	if got := ResolveLocalDir("", "", nil); got != "" {
 		t.Errorf("got %q, want empty", got)
+	}
+}
+
+// ── ResolveLocalDir with LocalDirBase ────────────────────────────────────────
+
+func TestResolveLocalDir_LocalDirBase(t *testing.T) {
+	// Create temp dirs simulating workspace
+	base := t.TempDir()
+	repoDir := filepath.Join(base, "my-repo")
+	os.MkdirAll(repoDir, 0755)
+
+	got := ResolveLocalDir("", "org/my-repo", []string{base})
+	if got != repoDir {
+		t.Errorf("ResolveLocalDir = %q, want %q", got, repoDir)
+	}
+}
+
+func TestResolveLocalDir_OverrideTakesPrecedence(t *testing.T) {
+	got := ResolveLocalDir("/custom/path", "org/repo", []string{"/some/base"})
+	if got != "/custom/path" {
+		t.Errorf("ResolveLocalDir = %q, want /custom/path", got)
+	}
+}
+
+func TestResolveLocalDir_BaseBeforeDefault(t *testing.T) {
+	base := t.TempDir()
+	defaultPath := t.TempDir()
+	repoDir := filepath.Join(base, "repo")
+	os.MkdirAll(repoDir, 0755)
+	defaultRepoDir := filepath.Join(defaultPath, "repo")
+	os.MkdirAll(defaultRepoDir, 0755)
+
+	old := DefaultReposMountPath
+	DefaultReposMountPath = defaultPath
+	defer func() { DefaultReposMountPath = old }()
+
+	got := ResolveLocalDir("", "org/repo", []string{base})
+	if got != repoDir {
+		t.Errorf("ResolveLocalDir = %q, want base path %q (not default)", got, repoDir)
+	}
+}
+
+func TestResolveLocalDir_FallbackToDefault(t *testing.T) {
+	defaultPath := t.TempDir()
+	repoDir := filepath.Join(defaultPath, "repo")
+	os.MkdirAll(repoDir, 0755)
+
+	old := DefaultReposMountPath
+	DefaultReposMountPath = defaultPath
+	defer func() { DefaultReposMountPath = old }()
+
+	got := ResolveLocalDir("", "org/repo", nil) // empty base
+	if got != repoDir {
+		t.Errorf("ResolveLocalDir = %q, want default %q", got, repoDir)
+	}
+}
+
+func TestApplyEnvOverrides_LocalDirBase(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+	t.Setenv("HEIMDALLM_LOCAL_DIR_BASE", "/workspace/group1, /workspace/group2")
+	cfg.applyEnvOverrides()
+	if len(cfg.GitHub.LocalDirBase) != 2 {
+		t.Fatalf("LocalDirBase = %v, want 2 items", cfg.GitHub.LocalDirBase)
+	}
+	if cfg.GitHub.LocalDirBase[0] != "/workspace/group1" {
+		t.Errorf("LocalDirBase[0] = %q, want /workspace/group1", cfg.GitHub.LocalDirBase[0])
+	}
+	if cfg.GitHub.LocalDirBase[1] != "/workspace/group2" {
+		t.Errorf("LocalDirBase[1] = %q, want /workspace/group2", cfg.GitHub.LocalDirBase[1])
+	}
+}
+
+func TestResolveLocalDir_MultipleBases(t *testing.T) {
+	group1 := t.TempDir()
+	group2 := t.TempDir()
+	// repo-a only in group1
+	os.MkdirAll(filepath.Join(group1, "repo-a"), 0755)
+	// repo-b only in group2
+	os.MkdirAll(filepath.Join(group2, "repo-b"), 0755)
+
+	bases := []string{group1, group2}
+
+	gotA := ResolveLocalDir("", "org/repo-a", bases)
+	if gotA != filepath.Join(group1, "repo-a") {
+		t.Errorf("repo-a = %q, want %q", gotA, filepath.Join(group1, "repo-a"))
+	}
+	gotB := ResolveLocalDir("", "org/repo-b", bases)
+	if gotB != filepath.Join(group2, "repo-b") {
+		t.Errorf("repo-b = %q, want %q", gotB, filepath.Join(group2, "repo-b"))
+	}
+	gotC := ResolveLocalDir("", "org/repo-c", bases)
+	if gotC != "" {
+		t.Errorf("repo-c = %q, want empty (not in any base)", gotC)
 	}
 }
 
