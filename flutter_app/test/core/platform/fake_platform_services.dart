@@ -2,6 +2,7 @@ import 'dart:ui' show VoidCallback;
 import 'package:flutter/painting.dart' show Size;
 import 'package:heimdallm/core/api/api_client.dart';
 import 'package:heimdallm/core/models/config_model.dart';
+import 'package:heimdallm/core/models/pr.dart';
 import 'package:heimdallm/core/platform/platform_services.dart';
 
 /// In-memory fake used by every non-platform-specific test. Every method
@@ -138,6 +139,19 @@ class FakePlatformServices implements PlatformServices {
   Future<void> spawnDaemon(String binaryPath) async {
     spawnedDaemons.add(binaryPath);
   }
+
+  final List<({List<PR> prs, String me})> trayRebuilds = [];
+
+  @override
+  Future<void> rebuildTrayMenu({required List<PR> prs, required String me}) async {
+    trayRebuilds.add((prs: prs, me: me));
+  }
+
+  List<String> discoveredRepos = const [];
+
+  @override
+  Future<List<String>> discoverReposFromPRs(String token) async =>
+      discoveredRepos;
 }
 
 /// Thrown by [FakePlatformServices.quitApp] to replace `exit(0)` in tests.

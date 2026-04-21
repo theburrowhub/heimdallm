@@ -5,7 +5,6 @@ import 'core/api/api_client.dart';
 import 'core/models/config_model.dart';
 import 'core/platform/platform_services.dart';
 import 'core/platform/platform_services_provider.dart';
-import 'core/setup/repo_discovery.dart';
 import 'shared/router.dart';
 
 /// Global router — accessible via the container so the tray menu +
@@ -131,7 +130,7 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
 
     if (!await _platform.daemonConfigExists()) {
       _setStatus('Discovering repositories…');
-      final repos = await RepoDiscovery.discoverFromPRs(token);
+      final repos = await _platform.discoverReposFromPRs(token);
 
       _setStatus('Setting up…');
       final config = AppConfig(

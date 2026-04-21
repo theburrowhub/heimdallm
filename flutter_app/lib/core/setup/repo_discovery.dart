@@ -1,63 +1,35 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
-import 'gh_cli.dart';
 
 /// Discovers GitHub repos from the user's open PRs
 /// (review-requested, assignee, or author).
 ///
 /// This mirrors exactly what the daemon polls, so the repos
 /// discovered here are the ones that matter.
+///
+/// Web-safe: no dart:io imports. Desktop-only gh CLI logic lives in
+/// [DesktopRepoDiscovery] and is injected via the [localSearch] callback.
 class RepoDiscovery {
   static const _searchQuery =
       'is:pr is:open (review-requested:@me OR assignee:@me OR author:@me)';
 
   /// Returns repos as "org/repo" strings, sorted alphabetically.
-  /// Tries gh CLI first, falls back to GitHub API.
-  static Future<List<String>> discoverFromPRs(String token) async {
-    // Try gh CLI first (uses GhCli which handles Homebrew PATH)
-    final ghPath = await GhCli.findPath();
-    if (ghPath != null) {
-      final repos = await _viaGhCli(ghPath);
-      if (repos.isNotEmpty) return repos;
+  /// If [localSearch] is provided (desktop only — wraps gh CLI),
+  /// try it first and fall through to the HTTP Search API on null/empty.
+  static Future<List<String>> discoverFromPRs(
+    String token, {
+    Future<List<String>?> Function()? localSearch,
+  }) async {
+    if (localSearch != null) {
+      final repos = await localSearch();
+      if (repos != null && repos.isNotEmpty) return repos;
     }
-
-    // Fall back to GitHub Search API
-    return _viaApi(token);
+    return viaApi(token);
   }
 
-  static Future<List<String>> _viaGhCli(String ghPath) async {
-    final all = <String>{};
-    // review-requested
-    final r1 = await GhCli.searchPRs(['--review-requested=@me', '--limit', '200', '--json', 'repository']);
-    if (r1 != null) all.addAll(_parseGhSearchOutput(r1));
-    // assignee
-    final r2 = await GhCli.searchPRs(['--assignee=@me', '--limit', '200', '--json', 'repository']);
-    if (r2 != null) all.addAll(_parseGhSearchOutput(r2));
-    // authored (state:open is default)
-    final r3 = await GhCli.searchPRs(['--author=@me', '--state=open', '--limit', '200', '--json', 'repository']);
-    if (r3 != null) all.addAll(_parseGhSearchOutput(r3));
-    return all.toList()..sort();
-  }
-
-  static List<String> _parseGhSearchOutput(String output) {
-    try {
-      final list = jsonDecode(output) as List<dynamic>;
-      final repos = <String>{};
-      for (final item in list) {
-        final repo = item['repository'];
-        if (repo is Map) {
-          final name = repo['nameWithOwner'] as String?;
-          if (name != null) repos.add(name);
-        }
-      }
-      return repos.toList()..sort();
-    } catch (_) {
-      return [];
-    }
-  }
-
-  // Uses GitHub Search API — extracts repo from repository_url field
-  static Future<List<String>> _viaApi(String token) async {
+  /// Uses GitHub Search API to list repos from the user's open PRs.
+  /// Web-safe — pure `package:http`.
+  static Future<List<String>> viaApi(String token) async {
     final repos = <String>{};
     final client = http.Client();
     try {

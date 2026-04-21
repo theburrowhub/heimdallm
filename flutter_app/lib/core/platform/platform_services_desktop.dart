@@ -8,7 +8,10 @@ import 'package:window_manager/window_manager.dart';
 import '../api/api_client.dart';
 import '../daemon/daemon_lifecycle.dart';
 import '../models/config_model.dart';
+import '../models/pr.dart';
+import '../setup/desktop_repo_discovery.dart';
 import '../setup/first_run_setup.dart';
+import '../setup/repo_discovery.dart';
 import '../tray/tray_menu.dart';
 import 'platform_services.dart';
 
@@ -206,6 +209,17 @@ class DesktopPlatformServices with WindowListener implements PlatformServices {
     // survive window hides and dev restarts.
     await Process.start(binaryPath, [], mode: ProcessStartMode.detached);
   }
+
+  @override
+  Future<void> rebuildTrayMenu({required List<PR> prs, required String me}) =>
+      TrayMenu.instance.rebuild(prs: prs, me: me);
+
+  @override
+  Future<List<String>> discoverReposFromPRs(String token) =>
+      RepoDiscovery.discoverFromPRs(
+        token,
+        localSearch: DesktopRepoDiscovery.viaGhCli,
+      );
 }
 
 /// Alias used by the conditional export in `platform_services.dart`.

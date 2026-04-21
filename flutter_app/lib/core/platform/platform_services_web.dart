@@ -2,6 +2,8 @@ import 'dart:ui' show VoidCallback;
 import 'package:flutter/painting.dart' show Size;
 import '../api/api_client.dart';
 import '../models/config_model.dart';
+import '../models/pr.dart';
+import '../setup/repo_discovery.dart';
 import 'platform_services.dart';
 
 /// Web implementation of [PlatformServices]. Everything that would touch
@@ -89,6 +91,13 @@ class WebPlatformServices implements PlatformServices {
   Future<void> spawnDaemon(String binaryPath) async {
     throw UnsupportedError('spawnDaemon is not supported on web');
   }
+
+  @override
+  Future<void> rebuildTrayMenu({required List<PR> prs, required String me}) async {}
+
+  @override
+  Future<List<String>> discoverReposFromPRs(String token) =>
+      RepoDiscovery.viaApi(token);
 }
 
 /// Alias used by the conditional export in `platform_services.dart`.

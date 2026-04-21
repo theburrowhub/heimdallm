@@ -3,7 +3,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../core/models/config_model.dart';
 import '../../core/platform/platform_services_provider.dart';
-import '../../core/setup/repo_discovery.dart';
 import '../../shared/widgets/toast.dart';
 import '../dashboard/dashboard_providers.dart';
 import 'config_providers.dart';
@@ -82,7 +81,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     if (!mounted) return;
     setState(() { _discovering = true; _discoverError = null; });
     try {
-      final discovered = await RepoDiscovery.discoverFromPRs(token);
+      final discovered = await ref.read(platformServicesProvider).discoverReposFromPRs(token);
       if (!mounted) return;
       setState(() {
         for (final repo in discovered) {

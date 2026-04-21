@@ -3,8 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../core/models/config_model.dart';
-import '../../core/setup/first_run_setup.dart';
-import '../../core/setup/repo_discovery.dart';
+import '../../core/platform/platform_services_provider.dart';
 import '../../shared/widgets/toast.dart';
 import '../config/config_providers.dart';
 
@@ -50,8 +49,8 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
   Future<void> _discover() async {
     setState(() { _discovering = true; _discoverError = null; });
     try {
-      final token = await FirstRunSetup.detectToken();
-      final discovered = await RepoDiscovery.discoverFromPRs(token ?? '');
+      final token = await ref.read(platformServicesProvider).detectGitHubToken();
+      final discovered = await ref.read(platformServicesProvider).discoverReposFromPRs(token ?? '');
       if (!mounted) return;
       setState(() {
         for (final repo in discovered) {

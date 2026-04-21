@@ -4,7 +4,6 @@ import '../../core/api/api_client.dart';
 import '../../core/api/sse_client.dart';
 import '../../core/models/pr.dart';
 import '../../core/platform/platform_services_provider.dart';
-import '../../core/tray/tray_menu.dart' show TrayMenuRef;
 import '../../main.dart' show sendPRNotification;
 import '../issues/issues_providers.dart';
 
@@ -153,7 +152,7 @@ void _rebuildTray(Ref ref, List<PR> prs) {
       // Don't build tray until we know the username — without it the
       // author filter falls back to '' and shows the user's own PRs.
       if (me == null || me.isEmpty) return;
-      await TrayMenuRef.rebuild(prs: prs, me: me);
+      await ref.read(platformServicesProvider).rebuildTrayMenu(prs: prs, me: me);
     } catch (_) {}
   });
 }

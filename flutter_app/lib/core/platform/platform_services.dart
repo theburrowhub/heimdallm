@@ -2,6 +2,7 @@ import 'dart:ui' show VoidCallback;
 import 'package:flutter/painting.dart' show Size;
 import '../api/api_client.dart';
 import '../models/config_model.dart';
+import '../models/pr.dart';
 
 import 'platform_services_stub.dart'
     if (dart.library.io) 'platform_services_desktop.dart'
@@ -113,4 +114,13 @@ abstract class PlatformServices {
 
   /// Launches the daemon binary (detached). Throws `UnsupportedError` on web.
   Future<void> spawnDaemon(String binaryPath);
+
+  /// Rebuilds the system tray context menu with current PR data.
+  /// No-op on web. Takes [me] (the user's login) so the desktop impl
+  /// can distinguish reviewer / author for urgency counts.
+  Future<void> rebuildTrayMenu({required List<PR> prs, required String me});
+
+  /// Returns user's repos, with gh CLI preferred on desktop and HTTP API
+  /// fallback. Safe to call from shared code; on web it's HTTP-only.
+  Future<List<String>> discoverReposFromPRs(String token);
 }
