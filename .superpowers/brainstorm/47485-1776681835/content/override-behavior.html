@@ -1,0 +1,80 @@
+<h2>Issue tracking override: how does per-repo relate to global?</h2>
+<p class="subtitle">The global issue tracking config is set in Settings. Each repo can override it. How?</p>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Toggle: "Use global" / "Custom for this repo"</h3>
+      <p>By default the section shows <em>"Using global issue tracking settings"</em> with a summary of the inherited values. A toggle switches to custom mode, where the repo gets its own copy of all fields (pre-filled from global). Changes only affect this repo.</p>
+
+      <div class="mockup">
+        <div class="mockup-header">Default state (inheriting)</div>
+        <div class="mockup-body" style="font-size:13px; padding:12px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+            <span style="font-weight:600;">Issue Tracking</span>
+            <div style="display:flex; align-items:center; gap:6px;">
+              <span style="font-size:11px; color:#888;">Custom</span>
+              <div style="width:36px; height:20px; background:#555; border-radius:10px; position:relative;">
+                <div style="width:16px; height:16px; background:#aaa; border-radius:50%; position:absolute; top:2px; left:2px;"></div>
+              </div>
+            </div>
+          </div>
+          <div style="background:#252540; padding:10px; border-radius:6px; color:#888; font-size:12px;">
+            Inheriting global: enabled, exclusive, develop=[enhancement, bug], skip=[wontfix]
+          </div>
+        </div>
+      </div>
+
+      <div class="mockup" style="margin-top:8px;">
+        <div class="mockup-header">Custom mode (override active)</div>
+        <div class="mockup-body" style="font-size:13px; padding:12px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+            <span style="font-weight:600;">Issue Tracking</span>
+            <div style="display:flex; align-items:center; gap:6px;">
+              <span style="font-size:11px; color:#6fbf6f;">Custom</span>
+              <div style="width:36px; height:20px; background:#2d5a2d; border-radius:10px; position:relative;">
+                <div style="width:16px; height:16px; background:#6fbf6f; border-radius:50%; position:absolute; top:2px; right:2px;"></div>
+              </div>
+            </div>
+          </div>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <div style="flex:1; min-width:180px; background:#252540; padding:8px; border-radius:4px;">
+              <div style="font-size:11px; color:#888;">Develop labels</div>
+              <input style="width:95%; background:#1a1a2e; border:1px solid #444; color:#ccc; padding:4px; border-radius:3px; margin-top:4px; font-size:12px;" value="security-fix, critical-bug">
+            </div>
+            <div style="flex:1; min-width:180px; background:#252540; padding:8px; border-radius:4px;">
+              <div style="font-size:11px; color:#888;">Review-only labels</div>
+              <input style="width:95%; background:#1a1a2e; border:1px solid #444; color:#ccc; padding:4px; border-radius:3px; margin-top:4px; font-size:12px;" value="audit, compliance">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="pros-cons">
+        <div class="pros"><h4>Pros</h4><ul>
+          <li>Clear — you see exactly what's inherited vs custom</li>
+          <li>Can't accidentally break global config from a repo page</li>
+          <li>Pre-fills from global = easy to start customizing</li>
+        </ul></div>
+        <div class="cons"><h4>Cons</h4><ul><li>All-or-nothing — can't override just one label list</li></ul></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Per-field override (each field has its own "inherit/custom" toggle)</h3>
+      <p>Each label list has a small toggle: inherit from global or set custom. Allows overriding just <code>develop_labels</code> while keeping global <code>skip_labels</code>.</p>
+      <div class="pros-cons">
+        <div class="pros"><h4>Pros</h4><ul><li>Granular — override only what's different</li></ul></div>
+        <div class="cons"><h4>Cons</h4><ul>
+          <li>Complex UI — 8 toggles in the issue tracking section alone</li>
+          <li>Hard to see at a glance what's inherited vs custom</li>
+          <li>Daemon config doesn't support partial override (it's all-or-nothing per repo)</li>
+        </ul></div>
+      </div>
+    </div>
+  </div>
+</div>
