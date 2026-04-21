@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -226,17 +227,34 @@ type DayCount struct {
 }
 
 // ComputeStats aggregates statistics from the reviews and prs tables.
-func (s *Store) ComputeStats() (*Stats, error) {
+// When repos is non-empty, results are scoped to reviews of PRs in those repos.
+func (s *Store) ComputeStats(repos []string) (*Stats, error) {
 	stats := &Stats{
 		BySeverity: make(map[string]int),
 		ByCLI:      make(map[string]int),
 	}
 
+	// Build reusable filter clauses for the given repos.
+	// repoFilter: for queries on reviews only (uses subquery on prs table).
+	// repoFilterJoined: for queries that already JOIN prs p (direct p.repo IN).
+	var repoFilter, repoFilterJoined string
+	var repoArgs []any
+	if len(repos) > 0 {
+		placeholders := make([]string, len(repos))
+		for i, r := range repos {
+			placeholders[i] = "?"
+			repoArgs = append(repoArgs, r)
+		}
+		inClause := strings.Join(placeholders, ",")
+		repoFilter = " AND r.pr_id IN (SELECT id FROM prs WHERE repo IN (" + inClause + "))"
+		repoFilterJoined = " AND p.repo IN (" + inClause + ")"
+	}
+
 	// Total reviews
-	s.db.QueryRow("SELECT COUNT(*) FROM reviews").Scan(&stats.TotalReviews)
+	s.db.QueryRow("SELECT COUNT(*) FROM reviews r WHERE 1=1"+repoFilter, repoArgs...).Scan(&stats.TotalReviews)
 
 	// By severity
-	rows, _ := s.db.Query("SELECT severity, COUNT(*) FROM reviews GROUP BY severity")
+	rows, _ := s.db.Query("SELECT severity, COUNT(*) FROM reviews r WHERE 1=1"+repoFilter+" GROUP BY severity", repoArgs...)
 	if rows != nil {
 		defer rows.Close()
 		for rows.Next() {
@@ -248,7 +266,7 @@ func (s *Store) ComputeStats() (*Stats, error) {
 	}
 
 	// By CLI
-	rows2, _ := s.db.Query("SELECT cli_used, COUNT(*) FROM reviews GROUP BY cli_used")
+	rows2, _ := s.db.Query("SELECT cli_used, COUNT(*) FROM reviews r WHERE 1=1"+repoFilter+" GROUP BY cli_used", repoArgs...)
 	if rows2 != nil {
 		defer rows2.Close()
 		for rows2.Next() {
@@ -260,12 +278,12 @@ func (s *Store) ComputeStats() (*Stats, error) {
 	}
 
 	// Top repos by review count
-	rows3, _ := s.db.Query(`
+	topRepoQuery := `
 		SELECT p.repo, COUNT(r.id) as cnt
 		FROM reviews r JOIN prs p ON p.id = r.pr_id
-		WHERE p.repo != ''
-		GROUP BY p.repo ORDER BY cnt DESC LIMIT 8
-	`)
+		WHERE p.repo != ''` + repoFilterJoined + `
+		GROUP BY p.repo ORDER BY cnt DESC LIMIT 8`
+	rows3, _ := s.db.Query(topRepoQuery, repoArgs...)
 	if rows3 != nil {
 		defer rows3.Close()
 		for rows3.Next() {
@@ -276,12 +294,12 @@ func (s *Store) ComputeStats() (*Stats, error) {
 	}
 
 	// Reviews per day last 7 days
-	rows4, _ := s.db.Query(`
-		SELECT DATE(created_at) as day, COUNT(*) as cnt
-		FROM reviews
-		WHERE created_at >= datetime('now', '-7 days')
-		GROUP BY day ORDER BY day ASC
-	`)
+	last7Query := `
+		SELECT DATE(r.created_at) as day, COUNT(*) as cnt
+		FROM reviews r
+		WHERE r.created_at >= datetime('now', '-7 days')` + repoFilter + `
+		GROUP BY day ORDER BY day ASC`
+	rows4, _ := s.db.Query(last7Query, repoArgs...)
 	if rows4 != nil {
 		defer rows4.Close()
 		for rows4.Next() {
@@ -293,27 +311,25 @@ func (s *Store) ComputeStats() (*Stats, error) {
 
 	// Avg issues per review (issues is a JSON array stored as text)
 	var totalIssues, reviewsWithIssues int
-	s.db.QueryRow(`SELECT COUNT(*) FROM reviews WHERE issues != '[]' AND issues != 'null'`).Scan(&reviewsWithIssues)
+	s.db.QueryRow("SELECT COUNT(*) FROM reviews r WHERE issues != '[]' AND issues != 'null'"+repoFilter, repoArgs...).Scan(&reviewsWithIssues)
 	if reviewsWithIssues > 0 {
-		// Approximate: count total issue objects via json_array_length
-		s.db.QueryRow(`SELECT COALESCE(SUM(json_array_length(issues)),0) FROM reviews WHERE issues IS NOT NULL`).Scan(&totalIssues)
+		s.db.QueryRow("SELECT COALESCE(SUM(json_array_length(issues)),0) FROM reviews r WHERE issues IS NOT NULL"+repoFilter, repoArgs...).Scan(&totalIssues)
 		if stats.TotalReviews > 0 {
 			stats.AvgIssuesPerReview = float64(totalIssues) / float64(stats.TotalReviews)
 		}
 	}
 
 	// Review timing: duration from pipeline start (prs.fetched_at) to AI done (reviews.created_at).
-	// Fetch last 200 published reviews and compute stats in Go for accuracy.
-	timingRows, _ := s.db.Query(`
+	timingQuery := `
 		SELECT (julianday(r.created_at) - julianday(p.fetched_at)) * 86400.0
 		FROM reviews r
 		JOIN prs p ON p.id = r.pr_id
 		WHERE r.github_review_id > 0
 		  AND p.fetched_at IS NOT NULL
-		  AND p.fetched_at != ''
+		  AND p.fetched_at != ''` + repoFilterJoined + `
 		ORDER BY r.created_at DESC
-		LIMIT 200
-	`)
+		LIMIT 200`
+	timingRows, _ := s.db.Query(timingQuery, repoArgs...)
 	if timingRows != nil {
 		var durations []float64
 		for timingRows.Next() {

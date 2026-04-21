@@ -778,7 +778,15 @@ func (srv *Server) handleRepoCollaborators(w http.ResponseWriter, r *http.Reques
 }
 
 func (srv *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	stats, err := srv.store.ComputeStats()
+	var repos []string
+	if raw := r.URL.Query().Get("repos"); raw != "" {
+		for _, s := range strings.Split(raw, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				repos = append(repos, s)
+			}
+		}
+	}
+	stats, err := srv.store.ComputeStats(repos)
 	if err != nil {
 		slog.Error("handleStats: store error", "err", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)

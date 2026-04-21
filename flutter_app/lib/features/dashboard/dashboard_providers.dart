@@ -6,6 +6,7 @@ import '../../core/models/pr.dart';
 import '../../core/platform/platform_services_provider.dart';
 import '../../main.dart' show sendPRNotification;
 import '../issues/issues_providers.dart';
+import '../stats/stats_filters.dart';
 
 final apiClientProvider = Provider<ApiClient>((ref) {
   return ApiClient(platform: ref.watch(platformServicesProvider));
@@ -141,8 +142,30 @@ final prsProvider = FutureProvider<List<PR>>((ref) async {
 
 final statsProvider = FutureProvider<Map<String, dynamic>>((ref) async {
   ref.watch(prListRefreshProvider); // refresh stats when reviews complete
+  final filters = ref.watch(statsFiltersProvider);
   final api = ref.watch(apiClientProvider);
-  return api.fetchStats();
+
+  // Effective repos: explicit repo selection takes priority. If only orgs
+  // are selected, derive the repo list from known PRs + issues so the
+  // org filter actually scopes the stats.
+  List<String> repos;
+  if (filters.repos.isNotEmpty) {
+    repos = filters.repos.toList();
+  } else if (filters.orgs.isNotEmpty) {
+    final prs = ref.watch(prsProvider).valueOrNull ?? [];
+    final issues = ref.watch(issuesProvider).valueOrNull ?? [];
+    final allRepos = <String>{
+      ...prs.map((p) => p.repo),
+      ...issues.map((i) => i.repo),
+    }..remove('');
+    repos = allRepos.where((r) {
+      final org = r.contains('/') ? r.split('/').first : r;
+      return filters.orgs.contains(org);
+    }).toList();
+  } else {
+    repos = [];
+  }
+  return api.fetchStats(repos: repos);
 });
 
 void _rebuildTray(Ref ref, List<PR> prs) {

@@ -155,8 +155,12 @@ class ApiClient {
     return body['login'] as String? ?? '';
   }
 
-  Future<Map<String, dynamic>> fetchStats() async {
-    final resp = await _client.get(_uri('/stats'), headers: await _authHeaders());
+  Future<Map<String, dynamic>> fetchStats({List<String> repos = const []}) async {
+    var path = '/stats';
+    if (repos.isNotEmpty) {
+      path += '?repos=${Uri.encodeQueryComponent(repos.join(','))}';
+    }
+    final resp = await _client.get(_uri(path), headers: await _authHeaders());
     if (resp.statusCode != 200) throw ApiException('GET /stats failed: ${resp.statusCode}');
     return jsonDecode(resp.body) as Map<String, dynamic>;
   }

@@ -1,6 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/models/pr.dart';
+import '../../core/models/tracked_issue.dart';
 import '../dashboard/dashboard_providers.dart';
+import '../issues/issues_providers.dart';
+import 'stats_filter_bar.dart';
 
 class StatsScreen extends ConsumerWidget {
   const StatsScreen({super.key});
@@ -8,11 +12,25 @@ class StatsScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final statsAsync = ref.watch(statsProvider);
+    final prs = ref.watch(prsProvider).valueOrNull ?? <PR>[];
+    final issues = ref.watch(issuesProvider).valueOrNull ?? <TrackedIssue>[];
 
-    return statsAsync.when(
-      loading: () => const Center(child: CircularProgressIndicator()),
-      error: (e, _) => Center(child: Text('Error loading stats: $e')),
-      data: (stats) => _StatsBody(stats: stats),
+    final allRepos = <String>{
+      ...prs.map((p) => p.repo),
+      ...issues.map((i) => i.repo),
+    }..remove('');
+
+    return Column(
+      children: [
+        StatsFilterBar(allRepos: allRepos),
+        Expanded(
+          child: statsAsync.when(
+            loading: () => const Center(child: CircularProgressIndicator()),
+            error: (e, _) => Center(child: Text('Error loading stats: $e')),
+            data: (stats) => _StatsBody(stats: stats),
+          ),
+        ),
+      ],
     );
   }
 }
