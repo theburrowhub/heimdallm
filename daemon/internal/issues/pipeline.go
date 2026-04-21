@@ -388,7 +388,7 @@ func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, is
 	}
 
 	branch := fmt.Sprintf("heimdallm/issue-%d", issue.Number)
-	if err := p.git.CheckoutNewBranch(ctx, workDir, branch, base); err != nil {
+	if err := p.git.CheckoutNewBranch(ctx, workDir, issue.Repo, branch, base, opts.GitHubToken); err != nil {
 		p.publishError(issueID, issue, fmt.Errorf("checkout: %w", err))
 		return nil, fmt.Errorf("issues pipeline: checkout: %w", err)
 	}

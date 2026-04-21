@@ -227,7 +227,7 @@ type fakeGit struct {
 	deleteErr     error
 }
 
-func (g *fakeGit) CheckoutNewBranch(ctx context.Context, dir, branch, base string) error {
+func (g *fakeGit) CheckoutNewBranch(ctx context.Context, dir, repo, branch, base, token string) error {
 	g.checkoutCalls = append(g.checkoutCalls, branch)
 	return g.checkoutErr
 }
@@ -725,7 +725,7 @@ type contextCheckingGit struct {
 	sawCancel bool
 }
 
-func (g *contextCheckingGit) CheckoutNewBranch(ctx context.Context, dir, branch, base string) error {
+func (g *contextCheckingGit) CheckoutNewBranch(ctx context.Context, dir, repo, branch, base, token string) error {
 	if ctx.Err() != nil {
 		g.sawCancel = true
 		return ctx.Err()
@@ -798,7 +798,7 @@ type tokenSniffingGit struct {
 	seenToken string
 }
 
-func (g *tokenSniffingGit) CheckoutNewBranch(ctx context.Context, dir, branch, base string) error {
+func (g *tokenSniffingGit) CheckoutNewBranch(ctx context.Context, dir, repo, branch, base, token string) error {
 	return nil
 }
 func (g *tokenSniffingGit) HasChanges(ctx context.Context, dir string) (bool, error) {

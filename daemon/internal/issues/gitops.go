@@ -36,10 +36,10 @@ const maxGitStderrBytes = 16 * 1024 // 16 KiB
 // shutdown (or per-request) through long-running network operations —
 // `git fetch` and `git push` in particular.
 type GitOps interface {
-	// CheckoutNewBranch fetches baseBranch from origin and checks out branch
-	// from that tip, overwriting any previous attempt at the same branch so
-	// a re-run starts clean.
-	CheckoutNewBranch(ctx context.Context, dir, branch, baseBranch string) error
+	// CheckoutNewBranch fetches baseBranch and checks out branch from that
+	// tip, overwriting any previous attempt so a re-run starts clean.
+	// Uses HTTPS with token for fetch (avoids SSH dependency in Docker).
+	CheckoutNewBranch(ctx context.Context, dir, repo, branch, baseBranch, token string) error
 	// HasChanges reports whether the working tree has modified or untracked
 	// files — both are in scope for the commit because the agent may create
 	// new files as well as edit existing ones.
@@ -65,16 +65,31 @@ type GitExec struct{}
 // NewGitExec returns a ready-to-use GitExec. Zero configuration required.
 func NewGitExec() *GitExec { return &GitExec{} }
 
-// CheckoutNewBranch fetches the base branch and creates (or resets) the
-// work branch from it. `-B` is deliberate: on a re-run we want the branch
-// to match the latest base rather than pick up stale state from a previous
-// failed attempt.
-func (g *GitExec) CheckoutNewBranch(ctx context.Context, dir, branch, baseBranch string) error {
-	if err := runGit(ctx, dir, nil, "fetch", "origin", baseBranch); err != nil {
-		return fmt.Errorf("gitops: fetch origin/%s: %w", baseBranch, err)
+// CheckoutNewBranch fetches the base branch via HTTPS (using the same
+// GIT_ASKPASS mechanism as Push) and creates (or resets) the work branch
+// from it. `-B` is deliberate: on a re-run we want the branch to match
+// the latest base rather than pick up stale state from a previous attempt.
+//
+// Using an explicit HTTPS URL instead of `git fetch origin` avoids relying
+// on the clone's remote configuration, which may point at an SSH URL that
+// requires keys/agent not available inside the Docker container.
+func (g *GitExec) CheckoutNewBranch(ctx context.Context, dir, repo, branch, baseBranch, token string) error {
+	if token == "" {
+		return fmt.Errorf("gitops: checkout requires a non-empty token")
 	}
-	if err := runGit(ctx, dir, nil, "checkout", "-B", branch, "origin/"+baseBranch); err != nil {
-		return fmt.Errorf("gitops: checkout -B %s origin/%s: %w", branch, baseBranch, err)
+	env, cleanup, err := buildAskPassEnv(token)
+	if err != nil {
+		return fmt.Errorf("gitops: setup askpass for fetch: %w", err)
+	}
+	defer cleanup()
+
+	url := fmt.Sprintf("https://x-access-token@github.com/%s.git", repo)
+	if err := runGit(ctx, dir, env, "fetch", url, baseBranch); err != nil {
+		return fmt.Errorf("gitops: fetch %s/%s: %w", repo, baseBranch, err)
+	}
+	// FETCH_HEAD points to the tip of what we just fetched.
+	if err := runGit(ctx, dir, nil, "checkout", "-B", branch, "FETCH_HEAD"); err != nil {
+		return fmt.Errorf("gitops: checkout -B %s: %w", branch, err)
 	}
 	return nil
 }
