@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../core/models/config_model.dart';
 import '../../core/platform/platform_services_provider.dart';
+import '../../shared/widgets/autocomplete_chip_field.dart';
 import '../../shared/widgets/toast.dart';
 import '../dashboard/dashboard_providers.dart';
 import 'config_providers.dart';
@@ -126,7 +127,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(24),
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 680),
+        constraints: const BoxConstraints(maxWidth: double.infinity),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -139,6 +140,8 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
             _retentionSection(),
             const SizedBox(height: 20),
             _issueTrackingSection(),
+            const SizedBox(height: 20),
+            _developSection(config),
             const SizedBox(height: 28),
             _saveButton(context, config, daemonRunning),
           ],
@@ -354,136 +357,181 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   // ── Issue tracking ──────────────────────────────────────────────────────
 
   Widget _issueTrackingSection() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
+    return _settingsCard('Issue Tracking', [
+      SwitchListTile(
+        title: const Text('Triage issues',
+            style: TextStyle(fontSize: 13)),
+        subtitle: const Text('AI reviews and triages GitHub issues',
+            style: TextStyle(fontSize: 11)),
+        dense: true,
+        contentPadding: EdgeInsets.zero,
+        value: _issueTracking.enabled,
+        onChanged: (v) => setState(() {
+          _issueTracking = _issueTracking.copyWith(enabled: v);
+        }),
+      ),
+      if (_issueTracking.enabled) ...[
+        const SizedBox(height: 8),
+        AutocompleteChipField(
+          label: 'Review-only labels',
+          helper: 'Issues with these labels get an AI triage comment',
+          selectedValues: _issueTracking.reviewOnlyLabels,
+          availableOptions: const [],
+          onChanged: (v) => setState(() {
+            _issueTracking = _issueTracking.copyWith(reviewOnlyLabels: v ?? []);
+          }),
+        ),
+        const SizedBox(height: 10),
+        AutocompleteChipField(
+          label: 'Skip labels',
+          helper: 'Issues with these labels are ignored (highest priority)',
+          selectedValues: _issueTracking.skipLabels,
+          availableOptions: const [],
+          onChanged: (v) => setState(() {
+            _issueTracking = _issueTracking.copyWith(skipLabels: v ?? []);
+          }),
+        ),
+        const SizedBox(height: 10),
         Row(
           children: [
-            _sectionHeaderInline('Issue Tracking'),
-            const Spacer(),
-            Switch(
-              value: _issueTracking.enabled,
-              onChanged: (v) => setState(() {
-                _issueTracking = _issueTracking.copyWith(enabled: v);
-              }),
+            Expanded(
+              child: DropdownButtonFormField<String>(
+                initialValue: _issueTracking.filterMode,
+                decoration: const InputDecoration(
+                  labelText: 'Filter mode',
+                  helperText: 'exclusive = AND, inclusive = OR',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+                items: ['exclusive', 'inclusive']
+                    .map((v) => DropdownMenuItem(value: v, child: Text(v)))
+                    .toList(),
+                onChanged: (v) => setState(() {
+                  _issueTracking = _issueTracking.copyWith(filterMode: v);
+                }),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: DropdownButtonFormField<String>(
+                initialValue: _issueTracking.defaultAction,
+                decoration: const InputDecoration(
+                  labelText: 'Default action',
+                  helperText: 'When no label matches',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+                items: ['ignore', 'review_only']
+                    .map((v) => DropdownMenuItem(value: v, child: Text(v)))
+                    .toList(),
+                onChanged: (v) => setState(() {
+                  _issueTracking = _issueTracking.copyWith(defaultAction: v);
+                }),
+              ),
             ),
           ],
         ),
-        if (_issueTracking.enabled) ...[
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              Expanded(
-                child: DropdownButtonFormField<String>(
-                  initialValue: _issueTracking.filterMode,
-                  decoration: const InputDecoration(
-                    labelText: 'Filter mode',
-                    helperText: 'exclusive = AND, inclusive = OR',
-                    border: OutlineInputBorder(),
-                    isDense: true,
-                  ),
-                  items: ['exclusive', 'inclusive']
-                      .map((v) => DropdownMenuItem(value: v, child: Text(v)))
-                      .toList(),
-                  onChanged: (v) => setState(() {
-                    _issueTracking = _issueTracking.copyWith(filterMode: v);
-                  }),
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: DropdownButtonFormField<String>(
-                  initialValue: _issueTracking.defaultAction,
-                  decoration: const InputDecoration(
-                    labelText: 'Default action',
-                    helperText: 'When no label matches',
-                    border: OutlineInputBorder(),
-                    isDense: true,
-                  ),
-                  items: ['ignore', 'review_only']
-                      .map((v) => DropdownMenuItem(value: v, child: Text(v)))
-                      .toList(),
-                  onChanged: (v) => setState(() {
-                    _issueTracking = _issueTracking.copyWith(defaultAction: v);
-                  }),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          _labelListField(
-            label: 'Develop labels (auto_implement)',
-            helper: 'Issues with these labels get a branch + PR',
-            values: _issueTracking.developLabels,
-            onChanged: (v) => setState(() {
-              _issueTracking = _issueTracking.copyWith(developLabels: v);
-            }),
-          ),
-          const SizedBox(height: 12),
-          _labelListField(
-            label: 'Review-only labels',
-            helper: 'Issues with these labels get an AI triage comment',
-            values: _issueTracking.reviewOnlyLabels,
-            onChanged: (v) => setState(() {
-              _issueTracking = _issueTracking.copyWith(reviewOnlyLabels: v);
-            }),
-          ),
-          const SizedBox(height: 12),
-          _labelListField(
-            label: 'Skip labels',
-            helper: 'Issues with these labels are ignored (highest priority)',
-            values: _issueTracking.skipLabels,
-            onChanged: (v) => setState(() {
-              _issueTracking = _issueTracking.copyWith(skipLabels: v);
-            }),
-          ),
-          const SizedBox(height: 12),
-          _labelListField(
-            label: 'Organizations',
-            helper: 'Limit to issues from these orgs (empty = all monitored)',
-            values: _issueTracking.organizations,
-            onChanged: (v) => setState(() {
-              _issueTracking = _issueTracking.copyWith(organizations: v);
-            }),
-          ),
-          const SizedBox(height: 12),
-          _labelListField(
-            label: 'Assignees',
-            helper: 'Only process issues assigned to these users (empty = any)',
-            values: _issueTracking.assignees,
-            onChanged: (v) => setState(() {
-              _issueTracking = _issueTracking.copyWith(assignees: v);
-            }),
-          ),
-        ],
+        const SizedBox(height: 10),
+        AutocompleteChipField(
+          label: 'Organizations',
+          helper: 'Limit to issues from these orgs (empty = all monitored)',
+          selectedValues: _issueTracking.organizations,
+          availableOptions: const [],
+          onChanged: (v) => setState(() {
+            _issueTracking = _issueTracking.copyWith(organizations: v ?? []);
+          }),
+        ),
+        const SizedBox(height: 10),
+        AutocompleteChipField(
+          label: 'Assignees',
+          helper: 'Only process issues assigned to these users (empty = any)',
+          selectedValues: _issueTracking.assignees,
+          availableOptions: const [],
+          onChanged: (v) => setState(() {
+            _issueTracking = _issueTracking.copyWith(assignees: v ?? []);
+          }),
+        ),
       ],
-    );
+    ]);
   }
 
-  Widget _labelListField({
-    required String label,
-    required String helper,
-    required List<String> values,
-    required ValueChanged<List<String>> onChanged,
-  }) {
-    return TextFormField(
-      key: ValueKey('$label:${values.join(',')}'),
-      initialValue: values.join(', '),
-      decoration: InputDecoration(
-        labelText: label,
-        helperText: helper,
-        helperMaxLines: 2,
-        border: const OutlineInputBorder(),
-        isDense: true,
+  List<String> _globalPRReviewers = [];
+  List<String> _globalPRLabels = [];
+  bool _developInitialized = false;
+
+  void _initDevelopFromConfig(AppConfig config) {
+    if (_developInitialized) return;
+    _developInitialized = true;
+    _globalPRReviewers = List.from(config.globalPRReviewers);
+    _globalPRLabels = List.from(config.globalPRLabels);
+  }
+
+  Widget _developSection(AppConfig config) {
+    _initDevelopFromConfig(config);
+    final hasLabels = _issueTracking.developLabels.isNotEmpty;
+    return _settingsCard('Develop', [
+      SwitchListTile(
+        title: const Text('Auto-implement issues',
+            style: TextStyle(fontSize: 13)),
+        subtitle: const Text('Issues with develop labels get a branch + PR',
+            style: TextStyle(fontSize: 11)),
+        dense: true,
+        contentPadding: EdgeInsets.zero,
+        value: hasLabels,
+        onChanged: (v) => setState(() {
+          if (!v) {
+            _issueTracking = _issueTracking.copyWith(developLabels: []);
+          }
+        }),
       ),
-      onChanged: (text) {
-        final parsed = text
-            .split(',')
-            .map((s) => s.trim())
-            .where((s) => s.isNotEmpty)
-            .toList();
-        onChanged(parsed);
-      },
+      const SizedBox(height: 6),
+      AutocompleteChipField(
+        label: 'Develop labels',
+        helper: 'Issues with these labels get a branch + PR',
+        selectedValues: _issueTracking.developLabels,
+        availableOptions: const [],
+        onChanged: (v) => setState(() {
+          _issueTracking = _issueTracking.copyWith(developLabels: v ?? []);
+        }),
+      ),
+      const SizedBox(height: 10),
+      AutocompleteChipField(
+        label: 'PR Reviewers',
+        helper: 'GitHub usernames to request review',
+        selectedValues: _globalPRReviewers,
+        availableOptions: const [],
+        onChanged: (v) => setState(() {
+          _globalPRReviewers = v ?? [];
+        }),
+      ),
+      const SizedBox(height: 10),
+      AutocompleteChipField(
+        label: 'PR Labels',
+        helper: 'Labels to add to PRs',
+        selectedValues: _globalPRLabels,
+        availableOptions: const [],
+        onChanged: (v) => setState(() {
+          _globalPRLabels = v ?? [];
+        }),
+      ),
+    ]);
+  }
+
+  Widget _settingsCard(String title, List<Widget> children) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(title, style: const TextStyle(
+                fontWeight: FontWeight.w600, fontSize: 15)),
+            const SizedBox(height: 12),
+            ...children,
+          ],
+        ),
+      ),
     );
   }
 
@@ -558,6 +606,8 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     retentionDays: _retentionDays,
     repoConfigs: Map.from(_repoConfigs),
     issueTracking: _issueTracking,
+    globalPRReviewers: _globalPRReviewers,
+    globalPRLabels: _globalPRLabels,
     // aiPrimary, aiFallback, reviewMode, agentConfigs managed in Agents tab
   );
 
