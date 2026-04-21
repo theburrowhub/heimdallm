@@ -634,6 +634,7 @@ func main() {
 		agentCfg := cfg.AgentConfigFor(aiCfg.Primary)
 		localDirBase := cfg.GitHub.LocalDirBase
 		globalTimeout := cfg.AI.ExecutionTimeout
+		generatePRDesc := cfg.AI.GeneratePRDescription
 		cfgMu.Unlock()
 		// /repos/<short-name> fallback when local_dir is unset (stat-based,
 		// keep outside the mutex).
@@ -689,6 +690,7 @@ func main() {
 			IssueInstructions:       issueInstructions,
 			ImplementPromptOverride: implPrompt,
 			ImplementInstructions:   implInstructions,
+			GeneratePRDescription:   generatePRDesc,
 			PRReviewers: aiCfg.PRReviewers,
 			PRAssignee:  aiCfg.PRAssignee,
 			PRLabels:    aiCfg.PRLabels,
@@ -1142,6 +1144,7 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 		agentCfg := c.AgentConfigFor(aiCfg.Primary)
 		localDirBase := c.GitHub.LocalDirBase
 		globalTimeout := c.AI.ExecutionTimeout
+		generatePRDesc := c.AI.GeneratePRDescription
 		a.cfgMu.Unlock()
 		// /repos/<short-name> fallback when local_dir is unset (stat-based,
 		// keep outside the mutex).
@@ -1179,6 +1182,7 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 			IssueInstructions:       issueInstructions,
 			ImplementPromptOverride: implPrompt,
 			ImplementInstructions:   implInstructions,
+			GeneratePRDescription:   generatePRDesc,
 			PRReviewers:             aiCfg.PRReviewers,
 			PRAssignee:              aiCfg.PRAssignee,
 			PRLabels:                aiCfg.PRLabels,

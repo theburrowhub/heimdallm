@@ -232,6 +232,19 @@ execution_timeout = "20m"
 
 The per-agent override takes precedence when set (see [AI Agents](#7-ai-agents)).
 
+### LLM-generated PR descriptions
+
+When `generate_pr_description` is enabled, the auto_implement pipeline makes a second (cheap) LLM call after committing to produce a richer PR title and body from the diff. Falls back to the static template on any failure.
+
+```bash
+HEIMDALLM_GENERATE_PR_DESCRIPTION=true   # default: false
+```
+
+```toml
+[ai]
+generate_pr_description = true
+```
+
 ---
 
 ## 6. Issue Tracking
@@ -810,7 +823,7 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # execution_timeout = "20m"   # default: 5m — env: HEIMDALLM_EXECUTION_TIMEOUT
 
 # Generate LLM-produced PR titles and descriptions for auto_implement PRs.
-# generate_pr_description = false
+# generate_pr_description = false   # env: HEIMDALLM_GENERATE_PR_DESCRIPTION
 
 # ── Per-CLI settings (optional) ──────────────────────────────────────────────
 

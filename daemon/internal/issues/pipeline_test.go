@@ -162,6 +162,13 @@ type fakeExec struct {
 	lastPrompt string
 	lastOpts   executor.ExecOptions
 	lastCLI    string
+
+	// Per-call outputs for multi-call tests (e.g. implement + PR description).
+	// When set, ExecuteRaw returns rawOutputs[callCount] (clamped to last).
+	rawOutputs [][]byte
+	rawErrs    []error
+	callCount  int
+	prompts    []string
 }
 
 func (f *fakeExec) Detect(primary, fallback string) (string, error) {
@@ -175,9 +182,30 @@ func (f *fakeExec) Detect(primary, fallback string) (string, error) {
 }
 
 func (f *fakeExec) ExecuteRaw(cli, prompt string, opts executor.ExecOptions) ([]byte, error) {
+	idx := f.callCount
+	f.callCount++
 	f.lastCLI = cli
 	f.lastPrompt = prompt
 	f.lastOpts = opts
+	f.prompts = append(f.prompts, prompt)
+
+	if len(f.rawOutputs) > 0 {
+		i := idx
+		if i >= len(f.rawOutputs) {
+			i = len(f.rawOutputs) - 1
+		}
+		var err error
+		if len(f.rawErrs) > idx {
+			err = f.rawErrs[idx]
+		} else if len(f.rawErrs) > 0 {
+			err = f.rawErrs[len(f.rawErrs)-1]
+		}
+		if err != nil {
+			return nil, err
+		}
+		return f.rawOutputs[i], nil
+	}
+
 	if f.rawErr != nil {
 		return nil, f.rawErr
 	}
@@ -225,6 +253,9 @@ type fakeGit struct {
 	commitErr     error
 	pushErr       error
 	deleteErr     error
+
+	diffOutput []byte
+	diffErr    error
 }
 
 func (g *fakeGit) CheckoutNewBranch(ctx context.Context, dir, repo, branch, base, token string) error {
@@ -245,6 +276,9 @@ func (g *fakeGit) Push(ctx context.Context, dir, repo, branch, token string) err
 func (g *fakeGit) DeleteRemoteBranch(ctx context.Context, dir, repo, branch, token string) error {
 	g.deleteCalls = append(g.deleteCalls, branch)
 	return g.deleteErr
+}
+func (g *fakeGit) DiffHead(ctx context.Context, dir string) ([]byte, error) {
+	return g.diffOutput, g.diffErr
 }
 
 // validResult is a sample JSON triage payload returned by the fake executor.
@@ -742,6 +776,9 @@ func (g *contextCheckingGit) Push(ctx context.Context, dir, repo, branch, token 
 func (g *contextCheckingGit) DeleteRemoteBranch(ctx context.Context, dir, repo, branch, token string) error {
 	return nil
 }
+func (g *contextCheckingGit) DiffHead(ctx context.Context, dir string) ([]byte, error) {
+	return nil, nil
+}
 
 func TestPipeline_AutoImplementUsesCustomPromptOverride(t *testing.T) {
 	gh := &fakeGH{defaultBranch: "main", createPRNumber: 123}
@@ -811,6 +848,9 @@ func (g *tokenSniffingGit) Push(ctx context.Context, dir, repo, branch, token st
 }
 func (g *tokenSniffingGit) DeleteRemoteBranch(ctx context.Context, dir, repo, branch, token string) error {
 	return nil
+}
+func (g *tokenSniffingGit) DiffHead(ctx context.Context, dir string) ([]byte, error) {
+	return nil, nil
 }
 
 func TestPipeline_IgnoreModeRejectedWithItsOwnError(t *testing.T) {
@@ -1055,6 +1095,215 @@ func TestAutoImplement_SkipsEmptyMetadata(t *testing.T) {
 	}
 	if len(gh.assigneesCalls) != 0 {
 		t.Errorf("expected 0 assignees calls, got %d", len(gh.assigneesCalls))
+	}
+}
+
+// ── LLM-generated PR description tests ──────────────────────────────────────
+
+func TestAutoImplement_GeneratePRDescription_HappyPath(t *testing.T) {
+	descJSON := `{"title":"feat: add widget factory with validation","body":"## Summary\nAdded widget factory.\n\n## Changes\n- pkg/widget.go: new factory\n\n## Test plan\nRun go test ./..."}`
+
+	gh := &fakeGH{defaultBranch: "main", createPRNumber: 42}
+	exec := &fakeExec{
+		detectCLI:  "claude",
+		rawOutputs: [][]byte{[]byte("done"), []byte(descJSON)},
+	}
+	git := &fakeGit{
+		hasChanges: true,
+		diffOutput: []byte("diff --git a/pkg/widget.go b/pkg/widget.go\n+package pkg\n"),
+	}
+	broker := &fakeBroker{}
+	p := issues.New(&fakeStore{}, gh, exec, git, broker, nil)
+
+	opts := autoImplementRunOptions()
+	opts.GeneratePRDescription = true
+
+	rev, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), opts)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rev.PRCreated != 42 {
+		t.Errorf("PRCreated = %d, want 42", rev.PRCreated)
+	}
+
+	// The LLM was called twice: implement + description.
+	if exec.callCount != 2 {
+		t.Fatalf("expected 2 ExecuteRaw calls, got %d", exec.callCount)
+	}
+
+	// Second prompt should be the PR description prompt.
+	if len(exec.prompts) < 2 {
+		t.Fatalf("expected 2 prompts, got %d", len(exec.prompts))
+	}
+	if !strings.Contains(exec.prompts[1], "Write a pull request title") {
+		t.Errorf("second prompt should be PR description prompt, got: %.100s", exec.prompts[1])
+	}
+	if !strings.Contains(exec.prompts[1], "diff --git") {
+		t.Errorf("PR description prompt should contain the diff")
+	}
+
+	// PR was created with the LLM-generated title and body.
+	if len(gh.createPRCalls) != 1 {
+		t.Fatalf("expected 1 CreatePR, got %d", len(gh.createPRCalls))
+	}
+	call := gh.createPRCalls[0]
+	if call.Title != "feat: add widget factory with validation" {
+		t.Errorf("PR title = %q, want LLM-generated title", call.Title)
+	}
+	if !strings.Contains(call.Body, "## Summary") {
+		t.Errorf("PR body should contain LLM-generated content, got: %q", call.Body)
+	}
+	// Closes #N must always be appended.
+	if !strings.Contains(call.Body, "Closes #7") {
+		t.Errorf("PR body should contain Closes #7, got: %q", call.Body)
+	}
+}
+
+func TestAutoImplement_GeneratePRDescription_FallsBackOnLLMError(t *testing.T) {
+	gh := &fakeGH{defaultBranch: "main", createPRNumber: 55}
+	exec := &fakeExec{
+		detectCLI:  "claude",
+		rawOutputs: [][]byte{[]byte("done")},
+		rawErrs:    []error{nil, errors.New("LLM timeout")},
+	}
+	git := &fakeGit{
+		hasChanges: true,
+		diffOutput: []byte("some diff"),
+	}
+	p := issues.New(&fakeStore{}, gh, exec, git, &fakeBroker{}, nil)
+
+	opts := autoImplementRunOptions()
+	opts.GeneratePRDescription = true
+
+	rev, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), opts)
+	if err != nil {
+		t.Fatalf("Run should succeed with fallback: %v", err)
+	}
+	if rev.PRCreated != 55 {
+		t.Errorf("PRCreated = %d, want 55", rev.PRCreated)
+	}
+
+	// Falls back to template title.
+	if len(gh.createPRCalls) != 1 {
+		t.Fatalf("expected 1 CreatePR, got %d", len(gh.createPRCalls))
+	}
+	call := gh.createPRCalls[0]
+	if !strings.Contains(call.Title, "feat: implement #7") {
+		t.Errorf("PR title should be template fallback, got: %q", call.Title)
+	}
+	if !strings.Contains(call.Body, "Auto-generated by Heimdallm") {
+		t.Errorf("PR body should be template fallback, got: %q", call.Body)
+	}
+}
+
+func TestAutoImplement_GeneratePRDescription_FallsBackOnDiffError(t *testing.T) {
+	gh := &fakeGH{defaultBranch: "main", createPRNumber: 56}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("done")}
+	git := &fakeGit{
+		hasChanges: true,
+		diffErr:    errors.New("git diff failed"),
+	}
+	p := issues.New(&fakeStore{}, gh, exec, git, &fakeBroker{}, nil)
+
+	opts := autoImplementRunOptions()
+	opts.GeneratePRDescription = true
+
+	rev, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), opts)
+	if err != nil {
+		t.Fatalf("Run should succeed with fallback: %v", err)
+	}
+	if rev.PRCreated != 56 {
+		t.Errorf("PRCreated = %d, want 56", rev.PRCreated)
+	}
+
+	// Only 1 ExecuteRaw call (implement); no second call because diff failed.
+	if exec.callCount != 1 {
+		t.Errorf("expected 1 ExecuteRaw call (no description call), got %d", exec.callCount)
+	}
+
+	call := gh.createPRCalls[0]
+	if !strings.Contains(call.Title, "feat: implement #7") {
+		t.Errorf("PR title should be template fallback, got: %q", call.Title)
+	}
+}
+
+func TestAutoImplement_GeneratePRDescription_FallsBackOnBadJSON(t *testing.T) {
+	gh := &fakeGH{defaultBranch: "main", createPRNumber: 57}
+	exec := &fakeExec{
+		detectCLI:  "claude",
+		rawOutputs: [][]byte{[]byte("done"), []byte("not valid json at all")},
+	}
+	git := &fakeGit{
+		hasChanges: true,
+		diffOutput: []byte("some diff"),
+	}
+	p := issues.New(&fakeStore{}, gh, exec, git, &fakeBroker{}, nil)
+
+	opts := autoImplementRunOptions()
+	opts.GeneratePRDescription = true
+
+	_, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), opts)
+	if err != nil {
+		t.Fatalf("Run should succeed with fallback: %v", err)
+	}
+
+	call := gh.createPRCalls[0]
+	if !strings.Contains(call.Title, "feat: implement #7") {
+		t.Errorf("PR title should be template fallback, got: %q", call.Title)
+	}
+}
+
+func TestAutoImplement_GeneratePRDescription_SkippedWhenDisabled(t *testing.T) {
+	// Default: GeneratePRDescription is false. Only 1 ExecuteRaw call.
+	gh := &fakeGH{defaultBranch: "main", createPRNumber: 58}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("done")}
+	git := &fakeGit{hasChanges: true, diffOutput: []byte("some diff")}
+	p := issues.New(&fakeStore{}, gh, exec, git, &fakeBroker{}, nil)
+
+	opts := autoImplementRunOptions()
+	// GeneratePRDescription defaults to false — no explicit set.
+
+	_, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), opts)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if exec.callCount != 1 {
+		t.Errorf("expected 1 ExecuteRaw call (no description), got %d", exec.callCount)
+	}
+	call := gh.createPRCalls[0]
+	if !strings.Contains(call.Title, "feat: implement #7") {
+		t.Errorf("PR title should be static template, got: %q", call.Title)
+	}
+}
+
+func TestAutoImplement_GeneratePRDescription_SanitizesLLMTitle(t *testing.T) {
+	// An LLM could return a title with newlines or excessive length.
+	longTitle := "feat: " + strings.Repeat("x", 200)
+	descJSON := fmt.Sprintf(`{"title":"malicious\nCo-Authored-By: evil@example.com\n%s","body":"body text"}`, longTitle)
+
+	gh := &fakeGH{defaultBranch: "main", createPRNumber: 59}
+	exec := &fakeExec{
+		detectCLI:  "claude",
+		rawOutputs: [][]byte{[]byte("done"), []byte(descJSON)},
+	}
+	git := &fakeGit{hasChanges: true, diffOutput: []byte("diff")}
+	p := issues.New(&fakeStore{}, gh, exec, git, &fakeBroker{}, nil)
+
+	opts := autoImplementRunOptions()
+	opts.GeneratePRDescription = true
+
+	_, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), opts)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	call := gh.createPRCalls[0]
+	if strings.ContainsAny(call.Title, "\r\n") {
+		t.Errorf("LLM-generated PR title should be sanitized, got: %q", call.Title)
+	}
+	if len(call.Title) > 200 {
+		t.Errorf("LLM-generated PR title should be length-capped, len=%d", len(call.Title))
 	}
 }
 

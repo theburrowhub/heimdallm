@@ -47,6 +47,7 @@ primary = "claude"
 # fallback = "gemini"
 review_mode = "single"   # "single" or "multi"
 # execution_timeout = "20m"   # default: 5m; increase for complex auto_implement
+# generate_pr_description = false   # LLM-generated PR titles/descriptions for auto_implement
 
 # Per-CLI settings (optional)
 # [ai.agents.claude]

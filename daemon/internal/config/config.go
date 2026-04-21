@@ -239,14 +239,15 @@ type CLIAgentConfig struct {
 }
 
 type AIConfig struct {
-	Primary          string                    `toml:"primary"`
-	Fallback         string                    `toml:"fallback"`
-	ReviewMode       string                    `toml:"review_mode"`        // "single" | "multi"
-	ExecutionTimeout string                    `toml:"execution_timeout"`  // e.g. "20m", "1h"
-	Agents           map[string]CLIAgentConfig `toml:"agents"`             // keyed by CLI name
-	Repos            map[string]RepoAI         `toml:"repos"`
-	Orgs             map[string]OrgAI          `toml:"orgs"`               // per-org PR metadata overrides
-	PRMetadata       PRMetadataConfig          `toml:"pr_metadata"`        // global PR creation defaults
+	Primary                string                    `toml:"primary"`
+	Fallback               string                    `toml:"fallback"`
+	ReviewMode             string                    `toml:"review_mode"`                // "single" | "multi"
+	ExecutionTimeout       string                    `toml:"execution_timeout"`          // e.g. "20m", "1h"
+	GeneratePRDescription  bool                      `toml:"generate_pr_description"`    // LLM-generated PR title/body for auto_implement
+	Agents                 map[string]CLIAgentConfig `toml:"agents"`                     // keyed by CLI name
+	Repos                  map[string]RepoAI         `toml:"repos"`
+	Orgs                   map[string]OrgAI          `toml:"orgs"`                       // per-org PR metadata overrides
+	PRMetadata             PRMetadataConfig          `toml:"pr_metadata"`                // global PR creation defaults
 
 	// Top-level PR metadata fields — flat alternatives to [ai.pr_metadata].
 	// Populated from HEIMDALLM_PR_* env vars or TOML keys directly under [ai].
@@ -614,6 +615,11 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := os.Getenv("HEIMDALLM_EXECUTION_TIMEOUT"); v != "" {
 		c.AI.ExecutionTimeout = v
+	}
+	if v := os.Getenv("HEIMDALLM_GENERATE_PR_DESCRIPTION"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.AI.GeneratePRDescription = b
+		}
 	}
 	if v := os.Getenv("HEIMDALLM_RETENTION_DAYS"); v != "" {
 		if d, err := strconv.Atoi(v); err == nil {

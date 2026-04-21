@@ -123,3 +123,38 @@ func TestBuildImplementPromptWithProfile_TemplateWinsOverInstructions(t *testing
 		t.Errorf("custom template not applied first: %q", got)
 	}
 }
+
+func TestBuildPRDescriptionPrompt_ContainsRequiredElements(t *testing.T) {
+	diff := []byte("diff --git a/main.go b/main.go\n+func NewWidget() {}\n")
+	got := issues.BuildPRDescriptionPrompt(42, "Add widget factory", diff)
+
+	for _, want := range []string{
+		"Issue: #42",
+		"Add widget factory",
+		"diff --git a/main.go",
+		"Write a pull request title",
+		"conventional commit",
+		`"title"`,
+		`"body"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("PR description prompt missing %q", want)
+		}
+	}
+}
+
+func TestBuildPRDescriptionPrompt_TruncatesLargeDiff(t *testing.T) {
+	largeDiff := make([]byte, 64*1024)
+	for i := range largeDiff {
+		largeDiff[i] = 'x'
+	}
+	got := issues.BuildPRDescriptionPrompt(1, "big change", largeDiff)
+
+	if !strings.Contains(got, "... (diff truncated)") {
+		t.Error("large diff should be truncated")
+	}
+	// The prompt should not contain the full 64KB diff.
+	if len(got) > 40*1024 {
+		t.Errorf("prompt too large: %d bytes", len(got))
+	}
+}
