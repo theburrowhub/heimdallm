@@ -348,14 +348,22 @@ func main() {
 		repoOverrides := make(map[string]map[string]any)
 		for repo, ai := range c.AI.Repos {
 			ro := map[string]any{
-				"primary":      ai.Primary,
-				"fallback":     ai.Fallback,
-				"review_mode":  ai.ReviewMode,
-				"local_dir":    ai.LocalDir,
-				"pr_reviewers": ai.PRReviewers,
-				"pr_assignee":  ai.PRAssignee,
-				"pr_labels":    ai.PRLabels,
-				"pr_draft":     ai.PRDraft,
+				"primary":     ai.Primary,
+				"fallback":    ai.Fallback,
+				"review_mode": ai.ReviewMode,
+				"local_dir":   ai.LocalDir,
+			}
+			if len(ai.PRReviewers) > 0 {
+				ro["pr_reviewers"] = ai.PRReviewers
+			}
+			if ai.PRAssignee != "" {
+				ro["pr_assignee"] = ai.PRAssignee
+			}
+			if len(ai.PRLabels) > 0 {
+				ro["pr_labels"] = ai.PRLabels
+			}
+			if ai.PRDraft {
+				ro["pr_draft"] = ai.PRDraft
 			}
 			if ai.IssueTracking != nil {
 				ro["issue_tracking"] = ai.IssueTracking
@@ -404,7 +412,7 @@ func main() {
 				"no_session_persistence":   ac.NoSessionPersistence,
 			}
 		}
-		return map[string]any{
+		result := map[string]any{
 			"server_port":                 c.Server.Port,
 			"poll_interval":               c.GitHub.PollInterval,
 			"repositories":                c.GitHub.Repositories,
@@ -414,16 +422,23 @@ func main() {
 			"review_mode":                 c.AI.ReviewMode,
 			"retention_days":              c.Retention.MaxDays,
 			"issue_tracking":              c.GitHub.IssueTracking,
-			"pr_metadata": map[string]any{
-				"reviewers": c.AI.PRMetadata.Reviewers,
-				"labels":    c.AI.PRMetadata.Labels,
-			},
 			"repo_overrides":              repoOverrides,
 			"agent_configs":               agentConfigs,
 			"local_dirs_detected":         localDirsDetected,
 			"activity_log_enabled":        ptrBoolOrTrue(c.ActivityLog.Enabled),
 			"activity_log_retention_days": ptrIntOr(c.ActivityLog.RetentionDays, 90),
 		}
+		if len(c.AI.PRMetadata.Reviewers) > 0 || len(c.AI.PRMetadata.Labels) > 0 {
+			pm := map[string]any{}
+			if len(c.AI.PRMetadata.Reviewers) > 0 {
+				pm["reviewers"] = c.AI.PRMetadata.Reviewers
+			}
+			if len(c.AI.PRMetadata.Labels) > 0 {
+				pm["labels"] = c.AI.PRMetadata.Labels
+			}
+			result["pr_metadata"] = pm
+		}
+		return result
 	})
 
 	// Cache authenticated username for GET /me.
