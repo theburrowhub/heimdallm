@@ -6,6 +6,8 @@ import 'package:heimdallm/core/platform/platform_services_provider.dart';
 import 'package:heimdallm/features/config/config_providers.dart';
 import 'package:heimdallm/features/repositories/repos_screen.dart';
 import 'package:heimdallm/features/repositories/widgets/bulk_actions_bar.dart';
+import 'package:heimdallm/features/repositories/widgets/repo_grid_tile.dart';
+import 'package:heimdallm/features/repositories/widgets/repo_list_tile.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/platform/fake_platform_services.dart';
 
@@ -103,5 +105,15 @@ void main() {
 
     final prefs = await SharedPreferences.getInstance();
     expect(prefs.getString('repos_view'), 'grid');
+  });
+
+  testWidgets('grid view renders RepoGridTile instead of RepoListTile',
+      (tester) async {
+    SharedPreferences.setMockInitialValues({'repos_view': 'grid'});
+    await tester.pumpWidget(_host(_cfg()));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(RepoGridTile), findsWidgets);
+    expect(find.byType(RepoListTile), findsNothing);
   });
 }

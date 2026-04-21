@@ -9,6 +9,7 @@ import '../config/config_providers.dart';
 import 'widgets/bulk_actions_bar.dart';
 import 'widgets/feature_palette.dart';
 import 'widgets/filter_chips.dart';
+import 'widgets/repo_grid_tile.dart';
 import 'widgets/repo_list_tile.dart';
 
 class ReposScreen extends ConsumerStatefulWidget {
@@ -239,15 +240,23 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
             // Repo list with section dividers
             Expanded(
               child: filtered.isEmpty
-                  ? const Center(child: Text('No repos yet. Tap Discover.'))
-                  : _RepoListWithSections(
-                      repos: filtered,
-                      configs: _repoConfigs,
-                      appConfig: config,
-                      onChanged: _onChange,
-                      selected: _selected,
-                      onSelectionToggle: _toggleSelection,
-                    ),
+                  ? const Center(child: Text('No repos to show.'))
+                  : _viewMode == 'grid'
+                      ? _ReposGrid(
+                          repos: filtered,
+                          configs: _repoConfigs,
+                          appConfig: config,
+                          selected: _selected,
+                          onSelectionToggle: _toggleSelection,
+                        )
+                      : _RepoListWithSections(
+                          repos: filtered,
+                          configs: _repoConfigs,
+                          appConfig: config,
+                          onChanged: _onChange,
+                          selected: _selected,
+                          onSelectionToggle: _toggleSelection,
+                        ),
             ),
           ],
         );
@@ -445,6 +454,115 @@ class _ViewToggleButton extends StatelessWidget {
         child: Icon(icon,
             size: 18, color: active ? primary : Colors.grey.shade500),
       ),
+    );
+  }
+}
+
+class _ReposGrid extends StatelessWidget {
+  final List<String> repos;
+  final Map<String, RepoConfig> configs;
+  final AppConfig appConfig;
+  final Set<String> selected;
+  final ValueChanged<String> onSelectionToggle;
+
+  const _ReposGrid({
+    required this.repos,
+    required this.configs,
+    required this.appConfig,
+    required this.selected,
+    required this.onSelectionToggle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final monitored = repos.where((r) => configs[r]!.isMonitored).toList();
+    final disabled = repos.where((r) => !configs[r]!.isMonitored).toList();
+
+    return CustomScrollView(
+      slivers: [
+        if (monitored.isNotEmpty) ...[
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 4),
+              child: Row(children: [
+                Container(
+                  width: 8, height: 8,
+                  decoration: const BoxDecoration(color: Color(0xFF3FB950), shape: BoxShape.circle),
+                ),
+                const SizedBox(width: 6),
+                Text('MONITORED · ${monitored.length}',
+                    style: TextStyle(fontSize: 11.5, color: Colors.grey.shade400, fontWeight: FontWeight.w600)),
+              ]),
+            ),
+          ),
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+            sliver: SliverGrid(
+              gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                maxCrossAxisExtent: 200,
+                mainAxisSpacing: 10,
+                crossAxisSpacing: 10,
+                childAspectRatio: 1.0,
+              ),
+              delegate: SliverChildBuilderDelegate(
+                (ctx, i) {
+                  final r = monitored[i];
+                  return RepoGridTile(
+                    repo: r,
+                    config: configs[r]!,
+                    appConfig: appConfig,
+                    selected: selected.contains(r),
+                    onSelectionToggle: () => onSelectionToggle(r),
+                    onTap: () => ctx.push('/repos/${Uri.encodeComponent(r)}'),
+                  );
+                },
+                childCount: monitored.length,
+              ),
+            ),
+          ),
+        ],
+        if (disabled.isNotEmpty) ...[
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+              child: Row(children: [
+                Container(
+                  width: 8, height: 8,
+                  decoration: BoxDecoration(color: Colors.grey.shade600, shape: BoxShape.circle),
+                ),
+                const SizedBox(width: 6),
+                Text('NOT MONITORED · ${disabled.length}',
+                    style: TextStyle(fontSize: 11.5, color: Colors.grey.shade400, fontWeight: FontWeight.w600)),
+              ]),
+            ),
+          ),
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 20),
+            sliver: SliverGrid(
+              gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                maxCrossAxisExtent: 200,
+                mainAxisSpacing: 10,
+                crossAxisSpacing: 10,
+                childAspectRatio: 1.0,
+              ),
+              delegate: SliverChildBuilderDelegate(
+                (ctx, i) {
+                  final r = disabled[i];
+                  return RepoGridTile(
+                    repo: r,
+                    config: configs[r]!,
+                    appConfig: appConfig,
+                    selected: selected.contains(r),
+                    onSelectionToggle: () => onSelectionToggle(r),
+                    onTap: () => ctx.push('/repos/${Uri.encodeComponent(r)}'),
+                  );
+                },
+                childCount: disabled.length,
+              ),
+            ),
+          ),
+        ],
+      ],
     );
   }
 }
