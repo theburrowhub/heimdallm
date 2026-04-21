@@ -2,6 +2,13 @@
 
 > **Note:** Versions 0.1.0–0.1.3 were originally published under [`theburrowhub/heimdallr-docker`](https://github.com/theburrowhub/heimdallr-docker) (now archived). The project was unified into this repository and renamed to Heimdallm in v0.1.1.
 
+## [0.4.11](https://github.com/theburrowhub/heimdallm/compare/v0.4.10...v0.4.11) (2026-04-21)
+
+
+### Features
+
+* implement [#162](https://github.com/theburrowhub/heimdallm/issues/162) — feat: integrate GoReleaser for CLI binaries in release workflow ([#164](https://github.com/theburrowhub/heimdallm/issues/164)) ([caf0a3e](https://github.com/theburrowhub/heimdallm/commit/caf0a3eabce457bada2eeefd7e1f69c2bd9a6411))
+
 ## [0.4.10](https://github.com/theburrowhub/heimdallm/compare/v0.4.9...v0.4.10) (2026-04-21)
 
 
