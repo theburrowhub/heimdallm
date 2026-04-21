@@ -1,245 +1,147 @@
-import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:local_notifier/local_notifier.dart';
-import 'package:tray_manager/tray_manager.dart';
-import 'package:window_manager/window_manager.dart';
 import 'core/api/api_client.dart';
-import 'core/daemon/daemon_lifecycle.dart';
-import 'core/platform/platform_services.dart';
-import 'core/setup/first_run_setup.dart';
-import 'core/setup/repo_discovery.dart';
 import 'core/models/config_model.dart';
-import 'core/tray/tray_menu.dart';
+import 'core/platform/platform_services.dart';
+import 'core/platform/platform_services_provider.dart';
+import 'core/setup/repo_discovery.dart';
 import 'shared/router.dart';
 
-/// Global router — accessible by tray menu and notification handlers.
+/// Global router — accessible via the container so the tray menu +
+/// notification handlers can push routes without a BuildContext.
 final _appRouter = createRouter(initialLocation: '/');
 GoRouter get appRouter => _appRouter;
 
-/// Platform services singleton — initialised once in main() before any
-/// ApiClient is created. Task 10 will fully refactor this into the widget tree.
-late final PlatformServices _bootPlatform;
-
-/// Checks for a running instance using a PID file.
-/// If another instance is found, sends it SIGUSR1 (which shows its window)
-/// and returns false so this new process can exit cleanly.
-Future<bool> _ensureSingleInstance() async {
-  final home = Platform.environment['HOME'] ?? '';
-  final dir  = Directory('$home/.local/share/heimdallm');
-  await dir.create(recursive: true);
-  final pidFile = File('${dir.path}/ui.pid');
-
-  if (await pidFile.exists()) {
-    final existing = int.tryParse((await pidFile.readAsString()).trim());
-    if (existing != null && existing != pid) {
-      // kill -0 = existence check (no actual kill, just verifies the process is alive)
-      final check = await Process.run('kill', ['-0', '$existing']);
-      if (check.exitCode == 0) {
-        // Another instance is running — signal it to show its window, then exit.
-        debugPrint('Another Heimdallm instance is running (PID $existing), signalling it.');
-        await Process.run('kill', ['-USR1', '$existing']);
-        return false;
-      }
-      // Stale PID file — that process is gone, continue normally.
-    }
-  }
-
-  await pidFile.writeAsString('$pid');
-  return true;
-}
-
-/// Activates the window when the app receives SIGUSR1 from another
-/// instance that tried to start. Called once during main() setup.
-void _listenForActivationSignal() {
-  ProcessSignal.sigusr1.watch().listen((_) async {
-    try {
-      await windowManager.show();
-      await windowManager.focus();
-    } catch (_) {}
-  });
-}
-
-void main() async {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Platform abstraction — used by ApiClient and DaemonLifecycle below.
-  // Task 10 will move this into the widget tree properly.
-  _bootPlatform = PlatformServices.create();
+  final platform = PlatformServices.create();
 
-  // Single-instance guard: works even outside the .app bundle (debug / direct binary).
-  if (!await _ensureSingleInstance()) {
-    exit(0);
+  if (!await platform.ensureSingleInstance()) {
+    platform.quitApp();
   }
 
-  // Listen for SIGUSR1 so that a second launch attempt activates this window.
-  _listenForActivationSignal();
+  platform.listenForActivationSignal(() async {
+    await platform.showAndFocusWindow();
+  });
 
-  // Catch all init errors so a crash shows a window rather than silently dying.
   FlutterError.onError = (details) {
     debugPrint('Flutter error: ${details.exceptionAsString()}');
     FlutterError.presentError(details);
   };
 
   try {
-    await _setupWindow();
+    await platform.setupWindow(
+      title: 'Heimdallm',
+      size: const Size(1200, 720),
+      minimumSize: const Size(900, 520),
+    );
   } catch (e) {
-    debugPrint('window_manager init failed: $e');
-    // Continue without custom window options — better than a blank crash
+    debugPrint('window init failed: $e');
+  }
+
+  // Tray needs the shared ApiClient so the token cache is consistent.
+  final trayApiClient = ApiClient(platform: platform);
+  try {
+    await platform.setupTray(apiClient: trayApiClient);
+    platform.setTrayNavigationHandler((location) async {
+      await platform.showAndFocusWindow();
+      // Small delay so the window is visible before we navigate.
+      Future.delayed(const Duration(milliseconds: 200), () {
+        _appRouter.push(location);
+      });
+    });
+  } catch (e) {
+    debugPrint('tray init failed: $e');
   }
 
   try {
-    await _setupTray();
+    await platform.setupNotifier(appName: 'Heimdallm');
   } catch (e) {
-    debugPrint('tray_manager init failed: $e');
+    debugPrint('notifier init failed: $e');
   }
 
-  try {
-    await localNotifier.setup(appName: 'Heimdallm');
-  } catch (e) {
-    debugPrint('local_notifier init failed: $e');
-  }
-
-  runApp(ProviderScope(child: _BootstrapApp(appRouter: _appRouter)));
+  runApp(ProviderScope(
+    overrides: [
+      platformServicesProvider.overrideWithValue(platform),
+    ],
+    child: _BootstrapApp(appRouter: _appRouter),
+  ));
 }
 
-Future<void> _setupWindow() async {
-  await windowManager.ensureInitialized();
-
-  const options = WindowOptions(
-    size: Size(1200, 720),
-    minimumSize: Size(900, 520),
-    title: 'Heimdallm',
-    titleBarStyle: TitleBarStyle.normal,
-  );
-
-  // waitUntilReadyToShow may not fire in production bundles launched
-  // outside of 'flutter run'. We call show() directly and also hook
-  // the callback as a belt-and-suspenders measure.
-  await windowManager.setSize(const Size(1200, 720));
-  await windowManager.setMinimumSize(const Size(900, 520));
-  await windowManager.setTitle('Heimdallm');
-  await windowManager.show();
-  await windowManager.focus();
-
-  // Also register the callback in case the above calls happen too early
-  windowManager.waitUntilReadyToShow(options, () async {
-    await windowManager.show();
-    await windowManager.focus();
-  });
-}
-
-Future<void> _setupTray() async {
-  await trayManager.setIcon(
-    Platform.isLinux ? 'assets/tray_icon@2x.png' : 'assets/tray_icon.png',
-  );
-  // Initial minimal menu until data loads
-  await trayManager.setContextMenu(Menu(items: [
-    MenuItem(key: 'open', label: 'Open Heimdallm'),
-    MenuItem.separator(),
-    MenuItem(key: 'quit', label: 'Quit'),
-  ]));
-  // Pass the shared ApiClient so TrayMenu uses the same token cache
-  // as the rest of the app — avoids stale-token issues after rotation.
-  TrayMenu.instance.init(apiClient: ApiClient(platform: _bootPlatform), onNavigate: (_) {});
-}
-
-/// Send a macOS notification from the Flutter app (correct icon, clickable).
-/// [prId] is the store PR id to navigate to on click; null = just open the app.
+/// Public entry point for features to fire notifications.
+/// Takes the [PlatformServices] (from a `ref.read(platformServicesProvider)`)
+/// so the caller controls platform availability.
 void sendPRNotification({
+  required PlatformServices platform,
   required String title,
   required String body,
   int? prId,
 }) {
-  final n = LocalNotification(title: title, body: body);
-  n.onShow = () {};
-  n.onClick = () {
-    windowManager.show();
-    windowManager.focus();
-    if (prId != null) {
-      _appRouter.go('/prs/$prId');
-    }
-  };
-  n.show();
+  platform.showNotification(
+    title: title,
+    body: body,
+    onClick: () async {
+      await platform.showAndFocusWindow();
+      if (prId != null) _appRouter.go('/prs/$prId');
+    },
+  );
 }
 
-class _BootstrapApp extends StatefulWidget {
+class _BootstrapApp extends ConsumerStatefulWidget {
   final GoRouter appRouter;
   const _BootstrapApp({required this.appRouter});
   @override
-  State<_BootstrapApp> createState() => _BootstrapAppState();
+  ConsumerState<_BootstrapApp> createState() => _BootstrapAppState();
 }
 
-class _BootstrapAppState extends State<_BootstrapApp> with WindowListener {
+class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
   String? _destination;
   String _status = 'Starting…';
-  String? _errorTitle;   // non-null = show error screen instead of spinner
+  String? _errorTitle;
   String? _errorDetails;
   String? _errorHint;
+
+  PlatformServices get _platform => ref.read(platformServicesProvider);
 
   @override
   void initState() {
     super.initState();
-    windowManager.addListener(this);
-    // setPreventClose must be called after the first frame so the window is ready.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      windowManager.setPreventClose(true);
+      _platform.setPreventWindowClose(true);
     });
     _boot();
   }
 
-  @override
-  void dispose() {
-    windowManager.removeListener(this);
-    super.dispose();
-  }
-
-  /// When the user clicks the window's close (✕) button, hide to tray instead
-  /// of quitting. The daemon keeps running. Use "Quit" in the tray menu to exit.
-  @override
-  void onWindowClose() async {
-    if (await windowManager.isPreventClose()) {
-      await windowManager.hide();
-    }
-  }
-
   Future<void> _boot() async {
-    final api = ApiClient(platform: _bootPlatform);
+    final api = ApiClient(platform: _platform);
 
-    // ── 1. Daemon already healthy? ───────────────────────────────────────
     if (await api.checkHealth()) {
       _go('/');
       return;
     }
 
-    // ── 2. Get token ─────────────────────────────────────────────────────
     _setStatus('Detecting credentials…');
-    final token = await FirstRunSetup.detectToken();
-
+    final token = await _platform.detectGitHubToken();
     if (token == null) {
-      // No token anywhere → user must configure manually
       _go('/config');
       return;
     }
 
-    // ── 3. Write config if it doesn't exist yet ──────────────────────────
-    if (!await FirstRunSetup.configExists()) {
+    if (!await _platform.daemonConfigExists()) {
       _setStatus('Discovering repositories…');
       final repos = await RepoDiscovery.discoverFromPRs(token);
 
       _setStatus('Setting up…');
       final config = AppConfig(
-        repoConfigs: {
-          for (final r in repos) r: const RepoConfig(prEnabled: true),
-        },
+        repoConfigs: {for (final r in repos) r: const RepoConfig(prEnabled: true)},
       );
-      await FirstRunSetup.storeToken(token);
-      await FirstRunSetup.writeConfig(config);
+      await _platform.storeGitHubToken(token);
+      await _platform.writeDaemonConfig(config);
     }
 
-    // ── 4. Locate daemon binary ───────────────────────────────────────────
-    final binaryPath = _daemonBinaryPath();
+    final binaryPath = _platform.defaultDaemonBinaryPath();
     if (binaryPath == null) {
       _setError(
         title: 'Daemon binary not found',
@@ -252,12 +154,9 @@ class _BootstrapAppState extends State<_BootstrapApp> with WindowListener {
       return;
     }
 
-    // ── 5. Launch daemon ──────────────────────────────────────────────────
     _setStatus('Starting Heimdallm…');
     try {
-      // Use detached mode so the daemon process outlives the Flutter process.
-      // This ensures reviews in progress survive window hides and dev restarts.
-      await Process.start(binaryPath, [], mode: ProcessStartMode.detached);
+      await _platform.spawnDaemon(binaryPath);
     } catch (e) {
       _setError(
         title: 'Could not start daemon',
@@ -268,7 +167,6 @@ class _BootstrapAppState extends State<_BootstrapApp> with WindowListener {
       return;
     }
 
-    // ── 6. Wait for daemon to become healthy ──────────────────────────────
     _setStatus('Waiting for Heimdallm…');
     await _waitForHealth(api, retryBinary: binaryPath);
   }
@@ -282,8 +180,6 @@ class _BootstrapAppState extends State<_BootstrapApp> with WindowListener {
         _go('/');
         return;
       }
-      // Re-launch every 10 seconds in case the daemon crashed at startup,
-      // but only up to maxDaemonRestarts times to avoid accumulating zombies.
       if (attempt > 0 && attempt % 25 == 0 && retryBinary != null) {
         if (daemonRestarts >= maxDaemonRestarts) {
           _setError(
@@ -295,32 +191,18 @@ class _BootstrapAppState extends State<_BootstrapApp> with WindowListener {
           return;
         }
         daemonRestarts++;
-        try { await Process.start(retryBinary, [], mode: ProcessStartMode.detached); } catch (_) {}
+        try { await _platform.spawnDaemon(retryBinary); } catch (_) {}
       }
     }
   }
 
-  /// Returns the daemon binary path, or null if not found.
-  /// Delegates to DaemonLifecycle.defaultBinaryPath() — single source of truth.
-  String? _daemonBinaryPath() => DaemonLifecycle.defaultBinaryPath();
-
-  void _setStatus(String s) {
-    if (mounted) setState(() => _status = s);
-  }
-
+  void _setStatus(String s) { if (mounted) setState(() => _status = s); }
   void _setError({required String title, required String details, String? hint}) {
     if (mounted) {
-      setState(() {
-        _errorTitle   = title;
-        _errorDetails = details;
-        _errorHint    = hint;
-      });
+      setState(() { _errorTitle = title; _errorDetails = details; _errorHint = hint; });
     }
   }
-
-  void _go(String location) {
-    if (mounted) setState(() => _destination = location);
-  }
+  void _go(String location) { if (mounted) setState(() => _destination = location); }
 
   @override
   Widget build(BuildContext context) {
@@ -336,6 +218,7 @@ class _BootstrapAppState extends State<_BootstrapApp> with WindowListener {
           setState(() { _errorTitle = null; _errorDetails = null; _errorHint = null; });
           _boot();
         },
+        onQuit: _platform.quitApp,
       );
     }
     return _SplashApp(status: _status);
@@ -391,12 +274,14 @@ class _ErrorApp extends StatelessWidget {
   final String details;
   final String? hint;
   final VoidCallback onRetry;
+  final VoidCallback onQuit;
 
   const _ErrorApp({
     required this.title,
     required this.details,
     this.hint,
     required this.onRetry,
+    required this.onQuit,
   });
 
   @override
@@ -426,8 +311,7 @@ class _ErrorApp extends StatelessWidget {
                   const Icon(Icons.error_outline, size: 56, color: Colors.red),
                   const SizedBox(height: 20),
                   Text(title,
-                      style: const TextStyle(
-                          fontSize: 20, fontWeight: FontWeight.bold),
+                      style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
                       textAlign: TextAlign.center),
                   const SizedBox(height: 12),
                   Text(details,
@@ -444,8 +328,7 @@ class _ErrorApp extends StatelessWidget {
                         borderRadius: BorderRadius.circular(8),
                       ),
                       child: Text(hint!,
-                          style: const TextStyle(
-                              fontSize: 12, fontFamily: 'monospace'),
+                          style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
                           textAlign: TextAlign.left),
                     ),
                   ],
@@ -454,7 +337,7 @@ class _ErrorApp extends StatelessWidget {
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       OutlinedButton(
-                        onPressed: () => exit(0),
+                        onPressed: onQuit,
                         child: const Text('Quit'),
                       ),
                       const SizedBox(width: 12),

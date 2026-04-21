@@ -53,7 +53,12 @@ void _handleSseEvent(Ref ref, SseEvent event) {
         if (key != null) {
           ref.read(reviewingPRsProvider.notifier).update((s) => {...s, key});
         }
-        sendPRNotification(title: 'Review Started', body: '$repo #$prNumber', prId: prId);
+        sendPRNotification(
+          platform: ref.read(platformServicesProvider),
+          title: 'Review Started',
+          body: '$repo #$prNumber',
+          prId: prId,
+        );
 
       case 'review_completed':
         // Remove from in-progress
@@ -61,7 +66,12 @@ void _handleSseEvent(Ref ref, SseEvent event) {
           ref.read(reviewingPRsProvider.notifier).update((s) => s.difference({key}));
         }
         final severity = data['severity'] as String? ?? '';
-        sendPRNotification(title: 'Review Complete — $severity', body: '$repo #$prNumber', prId: prId);
+        sendPRNotification(
+          platform: ref.read(platformServicesProvider),
+          title: 'Review Complete — $severity',
+          body: '$repo #$prNumber',
+          prId: prId,
+        );
         ref.read(prListRefreshProvider.notifier).update((s) => s + 1);
 
       case 'review_error':
