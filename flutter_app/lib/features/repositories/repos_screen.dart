@@ -22,6 +22,7 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
   Map<String, RepoConfig> _repoConfigs = {};
   bool _initialized = false;
   String _search = '';
+  String _orgFilter = ''; // empty = all orgs
   _SyncStatus _syncStatus = _SyncStatus.idle;
   _FilterMode _filterMode = _FilterMode.all;
   _ViewMode _viewMode = _ViewMode.list;
@@ -107,10 +108,24 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
             return a.compareTo(b);
           });
 
+        // Derive all orgs for the org filter dropdown
+        final allOrgs = _repoConfigs.keys
+            .map((r) => r.contains('/') ? r.split('/').first : r)
+            .toSet()
+            .toList()..sort();
+
         // Apply text search
         var filtered = _search.isEmpty
             ? allRepos
             : allRepos.where((r) => r.toLowerCase().contains(_search.toLowerCase())).toList();
+
+        // Apply org filter
+        if (_orgFilter.isNotEmpty) {
+          filtered = filtered.where((r) {
+            final org = r.contains('/') ? r.split('/').first : r;
+            return org == _orgFilter;
+          }).toList();
+        }
 
         // Apply monitored/not-monitored filter
         if (_filterMode == _FilterMode.monitored) {
@@ -124,24 +139,52 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
 
         return Column(
           children: [
-            // Toolbar
+            // Single-line toolbar: search + filters + view toggle + status
             Padding(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+              padding: const EdgeInsets.fromLTRB(16, 10, 16, 6),
               child: Row(
                 children: [
-                  Expanded(
+                  // Compact search
+                  SizedBox(
+                    width: 160,
                     child: TextField(
                       decoration: const InputDecoration(
-                        hintText: 'Filter repos…',
-                        prefixIcon: Icon(Icons.search, size: 18),
+                        hintText: 'Search…',
+                        prefixIcon: Icon(Icons.search, size: 16),
                         isDense: true,
                         border: OutlineInputBorder(),
-                        contentPadding: EdgeInsets.symmetric(vertical: 8),
+                        contentPadding: EdgeInsets.symmetric(vertical: 6),
                       ),
+                      style: const TextStyle(fontSize: 13),
                       onChanged: (v) => setState(() => _search = v),
                     ),
                   ),
                   const SizedBox(width: 8),
+                  // Monitored filter chips
+                  _filterChip('All', _repoConfigs.length, _FilterMode.all),
+                  const SizedBox(width: 4),
+                  _filterChip('Monitored', monitoredCount, _FilterMode.monitored),
+                  const SizedBox(width: 4),
+                  _filterChip('Not mon.', notMonitoredCount, _FilterMode.notMonitored),
+                  const SizedBox(width: 8),
+                  // Org dropdown
+                  if (allOrgs.length > 1)
+                    SizedBox(
+                      height: 32,
+                      child: DropdownButton<String>(
+                        value: _orgFilter.isEmpty ? null : _orgFilter,
+                        hint: const Text('Org', style: TextStyle(fontSize: 12)),
+                        style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurface),
+                        isDense: true,
+                        underline: const SizedBox.shrink(),
+                        items: [
+                          const DropdownMenuItem(value: '', child: Text('All orgs')),
+                          ...allOrgs.map((o) => DropdownMenuItem(value: o, child: Text(o))),
+                        ],
+                        onChanged: (v) => setState(() => _orgFilter = v ?? ''),
+                      ),
+                    ),
+                  const Spacer(),
                   // View toggle
                   SegmentedButton<_ViewMode>(
                     segments: const [
@@ -156,7 +199,7 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
                       tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                     ),
                   ),
-                  const SizedBox(width: 8),
+                  const SizedBox(width: 6),
                   // Auto-save status
                   SizedBox(
                     width: 22, height: 22,
@@ -167,19 +210,6 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
                       _SyncStatus.idle   => const SizedBox.shrink(),
                     },
                   ),
-                ],
-              ),
-            ),
-            // Filter chips
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
-              child: Row(
-                children: [
-                  _filterChip('All', _repoConfigs.length, _FilterMode.all),
-                  const SizedBox(width: 6),
-                  _filterChip('Monitored', monitoredCount, _FilterMode.monitored),
-                  const SizedBox(width: 6),
-                  _filterChip('Not monitored', notMonitoredCount, _FilterMode.notMonitored),
                 ],
               ),
             ),
@@ -249,7 +279,7 @@ class _RepoGrid extends StatelessWidget {
             crossAxisCount: crossCount,
             mainAxisSpacing: 8,
             crossAxisSpacing: 8,
-            childAspectRatio: 2.2,
+            childAspectRatio: 2.0,
           ),
           itemCount: repos.length,
           itemBuilder: (context, i) {
@@ -257,6 +287,11 @@ class _RepoGrid extends StatelessWidget {
             final config = configs[repo]!;
             final shortName = repo.contains('/') ? repo.split('/').last : repo;
             final org = repo.contains('/') ? repo.split('/').first : '';
+            final configuredDir = (config.localDir ?? '').isNotEmpty ? config.localDir : null;
+            final detectedDir = appConfig.localDirsDetected[repo];
+            final effectiveDir = configuredDir ?? detectedDir;
+            final hasDirMapping = effectiveDir != null && effectiveDir.isNotEmpty;
+            final isAutoDetected = configuredDir == null && detectedDir != null;
 
             return Card(
               child: InkWell(
@@ -281,7 +316,7 @@ class _RepoGrid extends StatelessWidget {
                           ),
                           const SizedBox(width: 3),
                           _Led(
-                            status: config.devLedStatus(appConfig.issueTracking.enabled, false),
+                            status: config.devLedStatus(appConfig.issueTracking.enabled, hasDirMapping),
                             tooltip: 'Dev',
                           ),
                           const Spacer(),
@@ -302,6 +337,34 @@ class _RepoGrid extends StatelessWidget {
                             style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis),
+                      const SizedBox(height: 2),
+                      Row(children: [
+                        Icon(
+                          hasDirMapping ? Icons.folder : Icons.folder_off_outlined,
+                          size: 11,
+                          color: hasDirMapping
+                              ? (isAutoDetected ? Colors.blue.shade400 : Colors.green.shade500)
+                              : Colors.grey.shade600,
+                        ),
+                        const SizedBox(width: 3),
+                        Expanded(
+                          child: Text(
+                            hasDirMapping
+                                ? (isAutoDetected
+                                    ? 'Auto: ${effectiveDir.split('/').last}'
+                                    : effectiveDir.split('/').last)
+                                : 'No local dir',
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: hasDirMapping
+                                  ? (isAutoDetected ? Colors.blue.shade400 : Colors.green.shade500)
+                                  : Colors.grey.shade600,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ]),
                     ],
                   ),
                 ),
