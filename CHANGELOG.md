@@ -2,6 +2,19 @@
 
 > **Note:** Versions 0.1.0–0.1.3 were originally published under [`theburrowhub/heimdallr-docker`](https://github.com/theburrowhub/heimdallr-docker) (now archived). The project was unified into this repository and renamed to Heimdallm in v0.1.1.
 
+## [0.4.8](https://github.com/theburrowhub/heimdallm/compare/v0.4.7...v0.4.8) (2026-04-21)
+
+
+### Features
+
+* **config:** make AI CLI execution timeout configurable ([#156](https://github.com/theburrowhub/heimdallm/issues/156)) ([ae1ed9f](https://github.com/theburrowhub/heimdallm/commit/ae1ed9fcbfa14dd8bdefd52290cfd4d60b7360e6)), closes [#155](https://github.com/theburrowhub/heimdallm/issues/155)
+* repos tab — filters, grid view, bulk bar, auto-discovery ([#112](https://github.com/theburrowhub/heimdallm/issues/112)) ([#139](https://github.com/theburrowhub/heimdallm/issues/139)) ([e17a6bf](https://github.com/theburrowhub/heimdallm/commit/e17a6bf32136e551e71d08425b9db6b3b079f432))
+
+
+### Bug Fixes
+
+* dedup PR reviews by HEAD commit SHA ([#151](https://github.com/theburrowhub/heimdallm/issues/151)) ([d16e51e](https://github.com/theburrowhub/heimdallm/commit/d16e51e5992c707124c0aa911414882a855dde03))
+
 ## [0.4.7](https://github.com/theburrowhub/heimdallm/compare/v0.4.6...v0.4.7) (2026-04-21)
 
 
