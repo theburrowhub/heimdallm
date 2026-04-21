@@ -113,7 +113,7 @@ func main() {
 		slog.Warn("retention purge failed", "err", err)
 	}
 
-	if err := s.PurgeOldActivity(cfg.ActivityLog.RetentionDays); err != nil {
+	if err := s.PurgeOldActivity(*cfg.ActivityLog.RetentionDays); err != nil {
 		slog.Warn("activity retention purge failed", "err", err)
 	}
 
@@ -124,7 +124,8 @@ func main() {
 	// activity_log for every significant event. Disabled → not constructed.
 	// A nil broker subscription (subscriber cap reached) is a warning, not
 	// a fatal — activity logging is optional.
-	if cfg.ActivityLog.Enabled != nil && *cfg.ActivityLog.Enabled {
+	// applyDefaults guarantees Enabled is non-nil before we reach here.
+	if *cfg.ActivityLog.Enabled {
 		rec := activity.New(s, broker)
 		if rec == nil {
 			slog.Warn("activity: broker subscriber cap reached; activity log will not record this session")
@@ -134,18 +135,19 @@ func main() {
 			go rec.Start(activityCtx)
 			slog.Info("activity recorder started")
 		}
-	}
 
-	// Activity retention ticker. The startup purge above runs once; this
-	// keeps the log bounded for long-running daemons without requiring a
-	// restart. Same 90-day default as reviews.
-	activityPurge := scheduler.New(24*time.Hour, func() {
-		if err := s.PurgeOldActivity(cfg.ActivityLog.RetentionDays); err != nil {
-			slog.Warn("activity retention purge failed", "err", err)
-		}
-	})
-	activityPurge.Start()
-	defer activityPurge.Stop()
+		// Activity retention ticker. The startup purge above runs once; this
+		// keeps the log bounded for long-running daemons. Only ticks when
+		// activity recording is enabled — a disabled session has nothing new
+		// to prune beyond what startup already handled.
+		activityPurge := scheduler.New(24*time.Hour, func() {
+			if err := s.PurgeOldActivity(*cfg.ActivityLog.RetentionDays); err != nil {
+				slog.Warn("activity retention purge failed", "err", err)
+			}
+		})
+		activityPurge.Start()
+		defer activityPurge.Stop()
+	}
 
 	notifier := notify.New()
 	ghClient := gh.NewClient(token)
@@ -530,7 +532,7 @@ func main() {
 			"repo_overrides":              repoOverrides,
 			"agent_configs":               agentConfigs,
 			"activity_log_enabled":        ptrBoolOrTrue(c.ActivityLog.Enabled),
-			"activity_log_retention_days": c.ActivityLog.RetentionDays,
+			"activity_log_retention_days": ptrIntOr(c.ActivityLog.RetentionDays, 90),
 		}
 	})
 
@@ -1064,6 +1066,15 @@ func sseData(v map[string]any) string {
 func ptrBoolOrTrue(p *bool) bool {
 	if p == nil {
 		return true
+	}
+	return *p
+}
+
+// ptrIntOr returns the dereferenced value of p, or defaultV if p is nil.
+// Used to serialize *int config fields where nil means "use the built-in default".
+func ptrIntOr(p *int, defaultV int) int {
+	if p == nil {
+		return defaultV
 	}
 	return *p
 }

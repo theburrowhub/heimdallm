@@ -397,8 +397,8 @@ func (srv *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if v, ok := body["retention_days"]; ok {
 		n, isNum := v.(float64) // JSON numbers decode as float64
-		if !isNum || n < 1 || n > 3650 {
-			http.Error(w, "retention_days must be between 1 and 3650", http.StatusBadRequest)
+		if !isNum || n < 0 || n > 3650 {
+			http.Error(w, "retention_days must be between 0 and 3650", http.StatusBadRequest)
 			return
 		}
 	}
@@ -840,7 +840,7 @@ func (srv *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		start = d
-		end = d.Add(24*time.Hour - time.Second)
+		end = d.Add(24 * time.Hour) // exclusive upper bound: start of next day
 	case from != "":
 		f, err := parseDay(from)
 		if err != nil {
@@ -857,11 +857,11 @@ func (srv *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		start = f
-		end = t2.Add(24*time.Hour - time.Second)
+		end = t2.Add(24 * time.Hour) // exclusive upper bound: start of day after `to`
 	default:
 		now := time.Now()
 		start = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
-		end = start.Add(24*time.Hour - time.Second)
+		end = start.Add(24 * time.Hour) // exclusive upper bound: start of tomorrow
 	}
 
 	limit := 500

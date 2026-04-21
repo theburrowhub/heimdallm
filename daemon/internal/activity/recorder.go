@@ -173,7 +173,7 @@ func (r *Recorder) recordIssueImplemented(ev sse.Event) error {
 		IssueNumber int    `json:"issue_number"`
 		IssueTitle  string `json:"issue_title"`
 		CLIUsed     string `json:"cli_used"`
-		PRNumber    float64 `json:"pr_number"`
+		PRNumber    int    `json:"pr_number"`
 		PRURL       string `json:"pr_url"`
 	}
 	if err := decode(ev.Data, &p); err != nil {

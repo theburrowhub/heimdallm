@@ -3,6 +3,7 @@ package activity_test
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,6 +21,7 @@ type recordedInsert struct {
 }
 
 type fakeStore struct {
+	mu       sync.Mutex
 	inserts  []recordedInsert
 	failNext bool
 }
@@ -28,12 +30,32 @@ func (f *fakeStore) InsertActivity(
 	ts time.Time, org, repo, itemType string, itemNumber int,
 	itemTitle, action, outcome string, details map[string]any,
 ) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.failNext {
 		f.failNext = false
 		return 0, assertErr("store full")
 	}
 	f.inserts = append(f.inserts, recordedInsert{ts, org, repo, itemType, itemNumber, itemTitle, action, outcome, details})
 	return int64(len(f.inserts)), nil
+}
+
+func (f *fakeStore) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.inserts)
+}
+
+func (f *fakeStore) at(i int) recordedInsert {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.inserts[i]
+}
+
+func (f *fakeStore) setFailNext(v bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failNext = v
 }
 
 type assertErr string
@@ -80,9 +102,9 @@ func TestRecorder_ReviewCompleted(t *testing.T) {
 	})
 	events <- sse.Event{Type: sse.EventReviewCompleted, Data: string(payload)}
 
-	waitFor(t, func() bool { return len(fs.inserts) == 1 })
+	waitFor(t, func() bool { return fs.count() == 1 })
 
-	got := fs.inserts[0]
+	got := fs.at(0)
 	if got.repo != "acme/api" || got.itemType != "pr" || got.itemNumber != 42 {
 		t.Errorf("row basics: %+v", got)
 	}
@@ -107,9 +129,9 @@ func TestRecorder_ReviewError(t *testing.T) {
 		"error":     "cli_not_found",
 	})
 	events <- sse.Event{Type: sse.EventReviewError, Data: string(payload)}
-	waitFor(t, func() bool { return len(fs.inserts) == 1 })
+	waitFor(t, func() bool { return fs.count() == 1 })
 
-	got := fs.inserts[0]
+	got := fs.at(0)
 	if got.action != "error" || got.outcome != "cli_not_found" {
 		t.Errorf("action/outcome: %s/%s", got.action, got.outcome)
 	}
@@ -133,9 +155,9 @@ func TestRecorder_IssueReviewCompleted(t *testing.T) {
 		"chosen_action": "auto_implement",
 	})
 	events <- sse.Event{Type: sse.EventIssueReviewCompleted, Data: string(payload)}
-	waitFor(t, func() bool { return len(fs.inserts) == 1 })
+	waitFor(t, func() bool { return fs.count() == 1 })
 
-	got := fs.inserts[0]
+	got := fs.at(0)
 	if got.itemType != "issue" || got.itemNumber != 12 {
 		t.Errorf("row basics: %+v", got)
 	}
@@ -159,10 +181,10 @@ func TestRecorder_IssueTriage_EmptySeverityOutcomeIsIgnored(t *testing.T) {
 		"chosen_action": "ignore",
 	})
 	events <- sse.Event{Type: sse.EventIssueReviewCompleted, Data: string(payload)}
-	waitFor(t, func() bool { return len(fs.inserts) == 1 })
+	waitFor(t, func() bool { return fs.count() == 1 })
 
-	if fs.inserts[0].outcome != "ignored" {
-		t.Errorf("outcome = %q, want ignored", fs.inserts[0].outcome)
+	if fs.at(0).outcome != "ignored" {
+		t.Errorf("outcome = %q, want ignored", fs.at(0).outcome)
 	}
 }
 
@@ -177,13 +199,13 @@ func TestRecorder_IssueImplemented(t *testing.T) {
 		"pr_url":       "https://github.com/acme/api/pull/99",
 	})
 	events <- sse.Event{Type: sse.EventIssueImplemented, Data: string(payload)}
-	waitFor(t, func() bool { return len(fs.inserts) == 1 })
+	waitFor(t, func() bool { return fs.count() == 1 })
 
-	got := fs.inserts[0]
+	got := fs.at(0)
 	if got.action != "implement" || got.outcome != "pr_opened" {
 		t.Errorf("action/outcome: %s/%s", got.action, got.outcome)
 	}
-	if got.details["pr_number"] != float64(99) {
+	if got.details["pr_number"] != 99 {
 		t.Errorf("details pr_number: %v", got.details["pr_number"])
 	}
 }
@@ -198,10 +220,10 @@ func TestRecorder_IssueImplemented_Failed(t *testing.T) {
 		"pr_number":    0,
 	})
 	events <- sse.Event{Type: sse.EventIssueImplemented, Data: string(payload)}
-	waitFor(t, func() bool { return len(fs.inserts) == 1 })
+	waitFor(t, func() bool { return fs.count() == 1 })
 
-	if fs.inserts[0].outcome != "pr_failed" {
-		t.Errorf("outcome = %q, want pr_failed", fs.inserts[0].outcome)
+	if fs.at(0).outcome != "pr_failed" {
+		t.Errorf("outcome = %q, want pr_failed", fs.at(0).outcome)
 	}
 }
 
@@ -215,9 +237,9 @@ func TestRecorder_IssueReviewError(t *testing.T) {
 		"error":        "parse_failed",
 	})
 	events <- sse.Event{Type: sse.EventIssueReviewError, Data: string(payload)}
-	waitFor(t, func() bool { return len(fs.inserts) == 1 })
+	waitFor(t, func() bool { return fs.count() == 1 })
 
-	got := fs.inserts[0]
+	got := fs.at(0)
 	if got.action != "error" || got.outcome != "parse_failed" {
 		t.Errorf("action/outcome: %s/%s", got.action, got.outcome)
 	}
@@ -237,9 +259,9 @@ func TestRecorder_IssuePromoted(t *testing.T) {
 		"reason":       "dependencies closed",
 	})
 	events <- sse.Event{Type: sse.EventIssuePromoted, Data: string(payload)}
-	waitFor(t, func() bool { return len(fs.inserts) == 1 })
+	waitFor(t, func() bool { return fs.count() == 1 })
 
-	got := fs.inserts[0]
+	got := fs.at(0)
 	if got.action != "promote" || got.outcome != "blocked → develop" {
 		t.Errorf("action/outcome: %s/%s", got.action, got.outcome)
 	}
@@ -252,14 +274,14 @@ func TestRecorder_UnknownEventIsIgnored(t *testing.T) {
 	_, fs, events := newTestRecorder(t)
 	events <- sse.Event{Type: "review_started", Data: "{}"}
 	time.Sleep(50 * time.Millisecond)
-	if len(fs.inserts) != 0 {
-		t.Errorf("expected 0 inserts, got %d", len(fs.inserts))
+	if fs.count() != 0 {
+		t.Errorf("expected 0 inserts, got %d", fs.count())
 	}
 }
 
 func TestRecorder_StoreFailureIsLoggedAndDropped(t *testing.T) {
 	_, fs, events := newTestRecorder(t)
-	fs.failNext = true
+	fs.setFailNext(true)
 
 	payload, _ := json.Marshal(map[string]any{
 		"repo": "acme/api", "pr_number": 1, "pr_title": "t",
@@ -269,5 +291,5 @@ func TestRecorder_StoreFailureIsLoggedAndDropped(t *testing.T) {
 
 	time.Sleep(30 * time.Millisecond)
 	events <- sse.Event{Type: sse.EventReviewCompleted, Data: string(payload)}
-	waitFor(t, func() bool { return len(fs.inserts) == 1 })
+	waitFor(t, func() bool { return fs.count() == 1 })
 }

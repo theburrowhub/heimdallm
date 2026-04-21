@@ -279,7 +279,7 @@ type RetentionConfig struct {
 // applyDefaults it is always non-nil.
 type ActivityLogConfig struct {
 	Enabled       *bool `toml:"enabled"`
-	RetentionDays int   `toml:"retention_days"`
+	RetentionDays *int  `toml:"retention_days"`
 }
 
 // AIForRepo returns the AI config for a specific repo, falling back to global.
@@ -399,8 +399,9 @@ func (c *Config) applyDefaults() {
 		v := true
 		c.ActivityLog.Enabled = &v
 	}
-	if c.ActivityLog.RetentionDays == 0 {
-		c.ActivityLog.RetentionDays = 90
+	if c.ActivityLog.RetentionDays == nil {
+		v := 90
+		c.ActivityLog.RetentionDays = &v
 	}
 }
 
@@ -559,8 +560,11 @@ func (c *Config) Validate() error {
 	if err := c.validateIssueTracking(); err != nil {
 		return err
 	}
-	if c.ActivityLog.RetentionDays < 0 || c.ActivityLog.RetentionDays > 3650 {
-		return fmt.Errorf("config: activity_log.retention_days must be between 0 and 3650, got %d", c.ActivityLog.RetentionDays)
+	if c.ActivityLog.RetentionDays != nil {
+		d := *c.ActivityLog.RetentionDays
+		if d < 0 || d > 3650 {
+			return fmt.Errorf("config: activity_log.retention_days must be between 0 and 3650, got %d", d)
+		}
 	}
 	return nil
 }

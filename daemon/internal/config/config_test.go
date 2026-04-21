@@ -1093,8 +1093,11 @@ primary = "claude"
 	if !*c.ActivityLog.Enabled {
 		t.Error("Enabled should default to true")
 	}
-	if c.ActivityLog.RetentionDays != 90 {
-		t.Errorf("RetentionDays = %d, want 90", c.ActivityLog.RetentionDays)
+	if c.ActivityLog.RetentionDays == nil {
+		t.Fatal("RetentionDays pointer should be set after applyDefaults")
+	}
+	if *c.ActivityLog.RetentionDays != 90 {
+		t.Errorf("RetentionDays = %d, want 90", *c.ActivityLog.RetentionDays)
 	}
 }
 
@@ -1119,8 +1122,12 @@ retention_days = 30
 	if c.ActivityLog.Enabled == nil || *c.ActivityLog.Enabled {
 		t.Error("Enabled should be false (explicitly set)")
 	}
-	if c.ActivityLog.RetentionDays != 30 {
-		t.Errorf("RetentionDays = %d, want 30", c.ActivityLog.RetentionDays)
+	if c.ActivityLog.RetentionDays == nil || *c.ActivityLog.RetentionDays != 30 {
+		days := 0
+		if c.ActivityLog.RetentionDays != nil {
+			days = *c.ActivityLog.RetentionDays
+		}
+		t.Errorf("RetentionDays = %d, want 30", days)
 	}
 }
 
@@ -1128,7 +1135,8 @@ func TestActivityLogConfig_StoreLayer(t *testing.T) {
 	c := &Config{}
 	enabledTrue := true
 	c.ActivityLog.Enabled = &enabledTrue
-	c.ActivityLog.RetentionDays = 90
+	v := 90
+	c.ActivityLog.RetentionDays = &v
 	c.AI.Primary = "claude" // prevent unrelated validation failure
 
 	if err := c.ApplyStore(map[string]string{
@@ -1140,8 +1148,12 @@ func TestActivityLogConfig_StoreLayer(t *testing.T) {
 	if c.ActivityLog.Enabled == nil || *c.ActivityLog.Enabled {
 		t.Error("Enabled should be false after store override")
 	}
-	if c.ActivityLog.RetentionDays != 45 {
-		t.Errorf("retention_days = %d, want 45", c.ActivityLog.RetentionDays)
+	if c.ActivityLog.RetentionDays == nil || *c.ActivityLog.RetentionDays != 45 {
+		days := 0
+		if c.ActivityLog.RetentionDays != nil {
+			days = *c.ActivityLog.RetentionDays
+		}
+		t.Errorf("retention_days = %d, want 45", days)
 	}
 }
 
@@ -1160,11 +1172,37 @@ func TestActivityLogConfig_RetentionValidation(t *testing.T) {
 	for _, tt := range tests {
 		c := &Config{}
 		c.AI.Primary = "claude" // avoid unrelated validation failures
-		c.ActivityLog.RetentionDays = tt.days
+		days := tt.days
+		c.ActivityLog.RetentionDays = &days
 		// Enabled=nil is fine; Validate should not require a pointer deref.
 		err := c.Validate()
 		if (err != nil) != tt.wantErr {
 			t.Errorf("days=%d: err=%v wantErr=%v", tt.days, err, tt.wantErr)
 		}
+	}
+}
+
+func TestActivityLogConfig_ExplicitZeroRetentionIsKept(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	content := `
+[ai]
+primary = "claude"
+[activity_log]
+retention_days = 0
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if c.ActivityLog.RetentionDays == nil {
+		t.Fatal("RetentionDays should be non-nil after applyDefaults")
+	}
+	if *c.ActivityLog.RetentionDays != 0 {
+		t.Errorf("RetentionDays = %d, want 0 (explicit)", *c.ActivityLog.RetentionDays)
 	}
 }
