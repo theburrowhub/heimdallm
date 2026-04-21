@@ -63,6 +63,20 @@ Installs to `/opt/heimdallm/` with a desktop entry and `/usr/bin/heimdallm` syml
 
 > **Requires**: `gh` CLI authenticated (`gh auth login`). Token stored via GNOME Keyring / KDE Wallet (`secret-tool`), or `~/.config/heimdallm/.token` as fallback.
 
+### Linux (from source, Docker-built)
+
+Developers with a clone of this repo who want a native install without the full Flutter toolchain on the host:
+
+```bash
+make install-linux           # build via Docker, install to ~/.local/
+make uninstall-linux         # remove app, keep config + data
+make uninstall-linux PURGE=1 # also wipe ~/.config + ~/.local/share state
+```
+
+`make install-linux` runs `verify-linux` (which builds the `heimdallm-verify` Docker image), extracts the Flutter bundle + Go daemon from the image, and stages them into `~/.local/opt/heimdallm/` with a `~/.local/bin/heimdallm` symlink, a desktop entry, and four icon sizes under `~/.local/share/icons/hicolor/`. No sudo. No host Flutter SDK. The first install also seeds `~/.config/heimdallm/.token` from `$GITHUB_TOKEN` or `gh auth token` so the app launches cleanly from the OS app launcher on first run.
+
+> **Requires**: Docker running, `gh` CLI authenticated (or `$GITHUB_TOKEN` exported), Ubuntu 22.04 / Debian 12+ / Fedora / Arch or similarly current distro. Same binary-compatibility envelope as the CI-built `.deb`.
+
 ### Docker
 
 For headless/server deployment, Heimdallm runs as a Docker container with all four AI CLIs bundled. The repository ships Make wrappers around `docker compose` so you don't have to remember the compose path.
@@ -387,6 +401,10 @@ make restart       # Docker: bounce both containers
 make ps            # Docker: container status
 make setup         # Docker: copy daemon API token into docker/.env (optional)
 make release-local # Build signed + notarized DMG and publish GitHub release
+make verify-linux      # Linux: build the heimdallm-verify Docker image (full CI pipeline inside)
+make run-linux         # Linux: launch the Flutter bundle from inside the Docker image (X11)
+make install-linux     # Linux: native install to ~/.local/ (no sudo, Docker-built)
+make uninstall-linux   # Linux: remove the native install (add PURGE=1 to wipe config+data)
 ```
 
 > **Working on a laptop with corporate EDR (Elastic Security, CrowdStrike, …)?**

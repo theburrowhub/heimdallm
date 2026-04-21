@@ -616,8 +616,22 @@ install-linux: _check-linux verify-linux
 
 uninstall-linux: _check-linux
 	@echo "▶  Uninstalling Heimdallm from $$HOME/.local/..."
-	@# Stop running instances (best-effort — ignored if nothing is running,
-	@# prevents "Text file busy" on the bundle on step 5).
+	@# Stop running instances (best-effort — ignored if nothing is running).
+	@#
+	@# Coverage caveat: pkill -f matches against /proc/<pid>/cmdline. This
+	@# catches:
+	@#   - launcher-launched Flutter apps (desktop entry Exec= is absolute,
+	@#     so argv[0] = $$HOME/.local/opt/heimdallm/heimdallm — matches)
+	@#   - any daemon spawned by DaemonLifecycle (always uses the absolute
+	@#     path "heimdalld next to my binary" — matches)
+	@#
+	@# It does NOT catch terminal-launched Flutter apps invoked as just
+	@# `heimdallm` on PATH — those have argv[0] = "heimdallm" and slip
+	@# through. That is safe: Linux's unlink-while-running semantics mean
+	@# the subsequent rm -rf of the bundle directory does not affect a
+	@# running process, and the user can close the window whenever. We
+	@# intentionally avoid a broader `-f 'heimdallm'` match to prevent
+	@# hitting unrelated dev processes (e.g. `flutter run` of this repo).
 	@pkill -f "$$HOME/.local/opt/heimdallm/heimdallm" 2>/dev/null || true
 	@pkill -f "$$HOME/.local/opt/heimdallm/heimdalld" 2>/dev/null || true
 	@rm -f "$$HOME/.local/share/heimdallm/ui.pid"

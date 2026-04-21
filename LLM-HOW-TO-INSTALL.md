@@ -132,6 +132,17 @@ curl -L "$APPIMAGE_URL" -o ~/bin/Heimdallm.AppImage
 chmod +x ~/bin/Heimdallm.AppImage
 ```
 
+**From a clone of this repo (Docker-built, no release download):**
+
+If the agent already has the repo cloned and Docker available, skip the release download entirely and build from source inside the `heimdallm-verify` Docker image:
+
+```bash
+cd /path/to/heimdallm      # must be the repo root
+make install-linux         # verify-linux (Docker build) → docker cp → ~/.local/ staging
+```
+
+Installs to `~/.local/opt/heimdallm/`, adds a `~/.local/bin/heimdallm` symlink, a desktop entry, and four icon sizes under `~/.local/share/icons/hicolor/`. Seeds `~/.config/heimdallm/.token` from `$GITHUB_TOKEN` or `gh auth token` so the GUI-launched app finds the token on first run. No host Flutter SDK needed; Docker does the build. To remove: `make uninstall-linux` (add `PURGE=1` to wipe `~/.config/heimdallm` and `~/.local/share/heimdallm` too).
+
 ### 3. Launch
 
 ```bash
