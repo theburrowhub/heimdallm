@@ -41,4 +41,5 @@ release:
   github:
     owner: theburrowhub
     name: heimdallm
+  mode: keep-existing
   extra_files: []
