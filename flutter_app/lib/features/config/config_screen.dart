@@ -141,7 +141,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
             const SizedBox(height: 20),
             _issueTrackingSection(),
             const SizedBox(height: 20),
-            _developSection(),
+            _developSection(config),
             const SizedBox(height: 28),
             _saveButton(context, config, daemonRunning),
           ],
@@ -455,7 +455,19 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     ]);
   }
 
-  Widget _developSection() {
+  List<String> _globalPRReviewers = [];
+  List<String> _globalPRLabels = [];
+  bool _developInitialized = false;
+
+  void _initDevelopFromConfig(AppConfig config) {
+    if (_developInitialized) return;
+    _developInitialized = true;
+    _globalPRReviewers = List.from(config.globalPRReviewers);
+    _globalPRLabels = List.from(config.globalPRLabels);
+  }
+
+  Widget _developSection(AppConfig config) {
+    _initDevelopFromConfig(config);
     final hasLabels = _issueTracking.developLabels.isNotEmpty;
     return _settingsCard('Develop', [
       SwitchListTile(
@@ -480,6 +492,26 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
         availableOptions: const [],
         onChanged: (v) => setState(() {
           _issueTracking = _issueTracking.copyWith(developLabels: v ?? []);
+        }),
+      ),
+      const SizedBox(height: 10),
+      AutocompleteChipField(
+        label: 'PR Reviewers',
+        helper: 'GitHub usernames to request review',
+        selectedValues: _globalPRReviewers,
+        availableOptions: const [],
+        onChanged: (v) => setState(() {
+          _globalPRReviewers = v ?? [];
+        }),
+      ),
+      const SizedBox(height: 10),
+      AutocompleteChipField(
+        label: 'PR Labels',
+        helper: 'Labels to add to PRs',
+        selectedValues: _globalPRLabels,
+        availableOptions: const [],
+        onChanged: (v) => setState(() {
+          _globalPRLabels = v ?? [];
         }),
       ),
     ]);
@@ -574,6 +606,8 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     retentionDays: _retentionDays,
     repoConfigs: Map.from(_repoConfigs),
     issueTracking: _issueTracking,
+    globalPRReviewers: _globalPRReviewers,
+    globalPRLabels: _globalPRLabels,
     // aiPrimary, aiFallback, reviewMode, agentConfigs managed in Agents tab
   );
 

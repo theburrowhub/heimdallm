@@ -414,6 +414,10 @@ func main() {
 			"review_mode":                 c.AI.ReviewMode,
 			"retention_days":              c.Retention.MaxDays,
 			"issue_tracking":              c.GitHub.IssueTracking,
+			"pr_metadata": map[string]any{
+				"reviewers": c.AI.PRMetadata.Reviewers,
+				"labels":    c.AI.PRMetadata.Labels,
+			},
 			"repo_overrides":              repoOverrides,
 			"agent_configs":               agentConfigs,
 			"local_dirs_detected":         localDirsDetected,

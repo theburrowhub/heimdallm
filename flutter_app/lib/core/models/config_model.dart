@@ -333,6 +333,8 @@ class AppConfig {
   final Map<String, CLIAgentConfig> agentConfigs; // keyed by CLI name
   final Map<String, RepoConfig> repoConfigs;      // keyed by "org/repo"
   final IssueTrackingConfig issueTracking;
+  final List<String> globalPRReviewers;
+  final List<String> globalPRLabels;
   /// Auto-detected `local_dir` per repo, populated by the daemon when the
   /// repo is visible at `/repos/<short-name>` in the container (i.e. the
   /// operator set HEIMDALLM_REPOS_DIR). The daemon falls back to this
@@ -351,6 +353,8 @@ class AppConfig {
     this.agentConfigs = const {},
     this.repoConfigs = const {},
     this.issueTracking = const IssueTrackingConfig(),
+    this.globalPRReviewers = const [],
+    this.globalPRLabels = const [],
     this.localDirsDetected = const {},
   });
 
@@ -372,6 +376,8 @@ class AppConfig {
     Map<String, CLIAgentConfig>? agentConfigs,
     Map<String, RepoConfig>? repoConfigs,
     IssueTrackingConfig? issueTracking,
+    List<String>? globalPRReviewers,
+    List<String>? globalPRLabels,
     Map<String, String>? localDirsDetected,
   }) {
     return AppConfig(
@@ -384,6 +390,8 @@ class AppConfig {
       agentConfigs:      agentConfigs      ?? this.agentConfigs,
       repoConfigs:       repoConfigs       ?? this.repoConfigs,
       issueTracking:     issueTracking     ?? this.issueTracking,
+      globalPRReviewers: globalPRReviewers ?? this.globalPRReviewers,
+      globalPRLabels:    globalPRLabels    ?? this.globalPRLabels,
       localDirsDetected: localDirsDetected ?? this.localDirsDetected,
     );
   }
@@ -481,7 +489,14 @@ class AppConfig {
       agentConfigs:      agentConfigs,
       repoConfigs:       configs,
       issueTracking:     issueTracking,
+      globalPRReviewers: _parseStringList((json['pr_metadata'] as Map<String, dynamic>?)?['reviewers']),
+      globalPRLabels:    _parseStringList((json['pr_metadata'] as Map<String, dynamic>?)?['labels']),
       localDirsDetected: localDirsDetected,
     );
+  }
+
+  static List<String> _parseStringList(dynamic v) {
+    if (v is List) return v.cast<String>();
+    return const [];
   }
 }
