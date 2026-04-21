@@ -179,6 +179,57 @@ class ApiClient {
     }
   }
 
+  // ── Patch-based config (TOML merge) ─────────────────────────────────
+
+  /// Sends a partial config update. The daemon deep-merges the patch into
+  /// its TOML file. Only keys present in [patch] are updated; absent keys
+  /// are left untouched. Returns the full config after the merge.
+  Future<Map<String, dynamic>> patchConfig(Map<String, dynamic> patch) async {
+    final resp = await _client.patch(
+      _uri('/config'),
+      headers: await _authHeaders(),
+      body: jsonEncode(patch),
+    );
+    if (resp.statusCode != 200) {
+      throw ApiException('PATCH /config failed: ${resp.statusCode} ${resp.body}');
+    }
+    return jsonDecode(resp.body) as Map<String, dynamic>;
+  }
+
+  /// Sends a partial per-repo override update. The daemon deep-merges the
+  /// patch into [ai.repos."<repo>"] in the TOML file. Returns the full
+  /// config after the merge.
+  Future<Map<String, dynamic>> patchRepoConfig(
+      String repo, Map<String, dynamic> patch) async {
+    final resp = await _client.patch(
+      _uri('/config/repos/${Uri.encodeComponent(repo)}'),
+      headers: await _authHeaders(),
+      body: jsonEncode(patch),
+    );
+    if (resp.statusCode != 200) {
+      throw ApiException(
+          'PATCH /config/repos failed: ${resp.statusCode} ${resp.body}');
+    }
+    return jsonDecode(resp.body) as Map<String, dynamic>;
+  }
+
+  /// Resets a per-repo override field back to the global default by
+  /// removing it from the TOML file. [fieldPath] uses "/" for nested
+  /// fields (e.g. "issue_tracking/develop_labels"). Returns the full
+  /// config after the deletion.
+  Future<Map<String, dynamic>> deleteRepoField(
+      String repo, String fieldPath) async {
+    final resp = await _client.delete(
+      _uri('/config/repos/${Uri.encodeComponent(repo)}/$fieldPath'),
+      headers: await _authHeaders(),
+    );
+    if (resp.statusCode != 200) {
+      throw ApiException(
+          'DELETE /config/repos field failed: ${resp.statusCode} ${resp.body}');
+    }
+    return jsonDecode(resp.body) as Map<String, dynamic>;
+  }
+
   // ── Repo metadata (autocomplete) ─────────────────────────────────────
 
   Future<List<String>> fetchRepoLabels(String repo) async {
