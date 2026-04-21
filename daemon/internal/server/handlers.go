@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -45,6 +46,11 @@ type Server struct {
 	// Empty string disables authentication (should not happen in production).
 	apiToken  string
 	reviewSem chan struct{} // counting semaphore for concurrent review triggers
+	// configPath is the path to config.toml. Required for PATCH/DELETE
+	// endpoints that read-merge-write the TOML file.
+	configPath string
+	// tomlMu serialises TOML read-merge-write operations.
+	tomlMu sync.Mutex
 }
 
 // Options holds optional configuration for the Server.
@@ -153,6 +159,41 @@ func (srv *Server) SetRepoMetaFns(labels func(string) ([]string, error), collabs
 	srv.fetchCollaboratorsFn = collabs
 }
 
+// SetConfigPath sets the path to config.toml for PATCH/DELETE handlers.
+func (srv *Server) SetConfigPath(path string) { srv.configPath = path }
+
+// patchTOML is the shared read-merge-write pipeline for all TOML-mutating
+// endpoints. mutateFn receives the current TOML as a map and must apply
+// its changes in-place. On success, returns the full live config for the
+// response body.
+func (srv *Server) patchTOML(mutateFn func(m map[string]any) error) (map[string]any, error) {
+	srv.tomlMu.Lock()
+	defer srv.tomlMu.Unlock()
+
+	m, err := config.ReadTOMLMap(srv.configPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := mutateFn(m); err != nil {
+		return nil, err
+	}
+	if err := config.ValidateMap(m); err != nil {
+		return nil, err
+	}
+	if err := config.AtomicWriteTOML(srv.configPath, m); err != nil {
+		return nil, err
+	}
+	if srv.reloadFn != nil {
+		if err := srv.reloadFn(); err != nil {
+			return nil, fmt.Errorf("config reload after write: %w", err)
+		}
+	}
+	if srv.configFn != nil {
+		return srv.configFn(), nil
+	}
+	return m, nil
+}
+
 // Router returns the underlying http.Handler for use in tests or embedding.
 func (srv *Server) Router() http.Handler {
 	return srv.router
@@ -203,6 +244,7 @@ func (srv *Server) buildRouter() chi.Router {
 	r.Delete("/agents/{id}", srv.handleDeleteAgent)
 	r.Get("/config", srv.handleGetConfig)
 	r.Put("/config", srv.handlePutConfig)
+	r.Patch("/config", srv.handlePatchConfig)
 	r.Post("/reload", srv.handleReload)
 	r.Get("/events", srv.handleSSE)
 	r.Get("/logs/stream", srv.handleLogsStream)
@@ -467,6 +509,49 @@ func (srv *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (srv *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
+	if srv.configPath == "" {
+		http.Error(w, `{"error":"PATCH not available — configPath not set"}`, http.StatusServiceUnavailable)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var patch map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+		return
+	}
+	if err := config.ContainsNull(patch); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "null values not allowed in PATCH — use DELETE to remove fields",
+		})
+		return
+	}
+	config.NormalizeNumbers(patch)
+
+	result, err := srv.patchTOML(func(m map[string]any) error {
+		merged := config.DeepMerge(m, patch)
+		for k, v := range merged {
+			m[k] = v
+		}
+		for k := range m {
+			if _, ok := merged[k]; !ok {
+				delete(m, k)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		slog.Error("PATCH /config failed", "err", err)
+		if strings.Contains(err.Error(), "config:") {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+		} else {
+			http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (srv *Server) handleReload(w http.ResponseWriter, r *http.Request) {

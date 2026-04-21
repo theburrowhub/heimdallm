@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -986,5 +988,73 @@ func TestHandleStats_IncludesActivityCount24h(t *testing.T) {
 	got, ok := v.(float64)
 	if !ok || got != 1 {
 		t.Errorf("activity_count_24h = %v, want 1", v)
+	}
+}
+
+// writeTempTOML creates a temp config.toml with the given content and returns
+// its path. The file is cleaned up by t.Cleanup.
+func writeTempTOML(t *testing.T, content string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write temp TOML: %v", err)
+	}
+	return path
+}
+
+func TestHandlePatchConfig(t *testing.T) {
+	// Valid TOML with ai.primary set (required by Config.Validate).
+	tomlContent := "[ai]\nprimary = \"claude\"\nfallback = \"gemini\"\n"
+	tomlPath := writeTempTOML(t, tomlContent)
+
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+
+	body := `{"ai":{"primary":"openai"}}`
+	req := httptest.NewRequest("PATCH", "/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	// Read the TOML back and verify primary was updated but fallback preserved.
+	m, err := config.ReadTOMLMap(tomlPath)
+	if err != nil {
+		t.Fatalf("read TOML after PATCH: %v", err)
+	}
+	ai, ok := m["ai"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected [ai] section in TOML, got %v", m)
+	}
+	if ai["primary"] != "openai" {
+		t.Errorf("primary = %v, want openai", ai["primary"])
+	}
+	if ai["fallback"] != "gemini" {
+		t.Errorf("fallback = %v, want gemini (should be preserved)", ai["fallback"])
+	}
+}
+
+func TestHandlePatchConfig_RejectsNull(t *testing.T) {
+	tomlContent := "[ai]\nprimary = \"claude\"\n"
+	tomlPath := writeTempTOML(t, tomlContent)
+
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+
+	// Sending null for a field should be rejected with 400.
+	body := `{"ai":{"primary":null}}`
+	req := httptest.NewRequest("PATCH", "/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for null value, got %d (body: %s)", w.Code, w.Body.String())
 	}
 }
