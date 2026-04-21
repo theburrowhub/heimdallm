@@ -148,6 +148,14 @@ func (f *Fetcher) alreadyProcessed(issue *github.Issue) (bool, string, error) {
 		return false, "", err
 	}
 
+	// If a previous run already created a PR via auto_implement, skip
+	// unconditionally — re-running would fail with non-fast-forward or
+	// create a duplicate PR.  The user should close the issue or dismiss
+	// it to stop the pipeline from picking it up again.
+	if latest.ActionTaken == "auto_implement" && latest.PRCreated > 0 {
+		return true, "already implemented (PR created)", nil
+	}
+
 	cutoff := latest.CreatedAt.Add(RecomputeGrace)
 	if !issue.UpdatedAt.After(cutoff) {
 		return true, "no new activity since last review", nil

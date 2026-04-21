@@ -107,7 +107,7 @@ The conditional `export` in `platform_services.dart` picks the right impl at com
 
 ### Full-repo analysis (Docker only)
 
-The daemon can run the AI agent with a CWD set to a local directory (full-repo analysis vs diff-only review). On desktop this is automatic. In Docker the daemon is containerised, so the operator bind-mounts host repos via `HEIMDALLM_REPOS_DIR` in `docker/.env`; `docker-compose.yml` resolves it to `/repos:ro` inside the container. In the UI the path to enter is `/repos/<name>`, not the host path. Keep this in mind when writing user-visible copy about paths.
+The daemon can run the AI agent with a CWD set to a local directory (full-repo analysis vs diff-only review). On desktop this is automatic. In Docker the daemon is containerised, so the operator bind-mounts host repos via `HEIMDALLM_REPOS_DIR` in `docker/.env`; `docker-compose.yml` resolves it to `/home/heimdallm/repos:ro` inside the container. In the UI the path to enter is `/home/heimdallm/repos/<name>`, not the host path. Keep this in mind when writing user-visible copy about paths. **Important:** the mount target must be under `/home/heimdallm/` — the executor rejects workdirs outside the heimdallm user's home and `/tmp`.
 
 ### Nginx + compose
 

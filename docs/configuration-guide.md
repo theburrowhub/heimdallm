@@ -144,8 +144,10 @@ By default the AI agent reviews a PR using only the diff from the GitHub API. Gi
 The daemon resolves a local directory for each repo using this precedence:
 
 ```
-per-repo local_dir  >  local_dir_base list  >  /repos/{repo-name}  >  empty (diff-only)
+per-repo local_dir  >  local_dir_base list  >  /home/heimdallm/repos/{repo-name}  >  empty (diff-only)
 ```
+
+> **Security constraint:** The daemon's executor rejects any `workdir` outside the `heimdallm` user's home directory (`/home/heimdallm`) and `/tmp`. All repo mounts **must** target a path under `/home/heimdallm/` — using `/repos` at the filesystem root will fail with `workdir … is outside the user home directory and /tmp — rejected for security`.
 
 ### `local_dir_base` — base path list
 
@@ -153,19 +155,19 @@ Set one or more base directories. The daemon checks `{base}/{repo-name}` in orde
 
 ```bash
 # docker/.env
-HEIMDALLM_LOCAL_DIR_BASE=/repos/ai-platform,/repos
+HEIMDALLM_LOCAL_DIR_BASE=/home/heimdallm/repos/ai-platform,/home/heimdallm/repos
 ```
 
 ```toml
 # config.toml
 [github]
-local_dir_base = ["/repos/ai-platform", "/repos"]
+local_dir_base = ["/home/heimdallm/repos/ai-platform", "/home/heimdallm/repos"]
 ```
 
-Put more-specific paths first. For example, if `ai-api-specs` lives under a monorepo workspace and everything else lives under `/repos`:
+Put more-specific paths first. For example, if `ai-api-specs` lives under a monorepo workspace and everything else lives under `/home/heimdallm/repos`:
 
 ```toml
-local_dir_base = ["/repos/ai-platform-workspace/workspace", "/repos"]
+local_dir_base = ["/home/heimdallm/repos/ai-platform-workspace/workspace", "/home/heimdallm/repos"]
 ```
 
 ### Per-repo `local_dir` override
@@ -174,19 +176,26 @@ Set a specific path for a single repo in `config.toml` or the web UI:
 
 ```toml
 [ai.repos."myorg/api"]
-local_dir = "/repos/api"
+local_dir = "/home/heimdallm/repos/api"
 ```
 
-### Default `/repos/{repo-name}` fallback
+### Default `/home/heimdallm/repos/{repo-name}` fallback
 
-When `HEIMDALLM_REPOS_DIR` is set in `docker/.env`, the compose file bind-mounts your host's repos root to `/repos` inside the container (read-only). The daemon then falls back to `/repos/{short-repo-name}` for any repo that doesn't match the base list.
+When `HEIMDALLM_REPOS_DIR` is set in `docker/.env`, the compose file bind-mounts your host's repos root to `/home/heimdallm/repos` inside the container (read-only). The daemon then falls back to `/home/heimdallm/repos/{short-repo-name}` for any repo that doesn't match the base list.
 
 ```bash
 # docker/.env — mount your host repos root
 HEIMDALLM_REPOS_DIR=/Users/you/projects
 ```
 
-After `make down && make up`, any repo at `/Users/you/projects/api` is automatically accessible at `/repos/api` inside the container.
+The corresponding volume mount in `docker-compose.yml`:
+
+```yaml
+volumes:
+  - ${HEIMDALLM_REPOS_DIR}:/home/heimdallm/repos:ro
+```
+
+After `make down && make up`, any repo at `/Users/you/projects/api` is automatically accessible at `/home/heimdallm/repos/api` inside the container.
 
 ---
 
@@ -591,7 +600,7 @@ The `web` service depends on the daemon's healthcheck (`/health`) before accepti
 |---|---|---|
 | `heimdallm-data` (named) | `/data` | SQLite database and API token |
 | `heimdallm-config` (named) | `/config` | `config.toml` (daemon-owned, web UI edits here) |
-| `$HEIMDALLM_REPOS_DIR` | `/repos` (read-only) | Host repos root for full-repo analysis |
+| `$HEIMDALLM_REPOS_DIR` | `/home/heimdallm/repos` (read-only) | Host repos root for full-repo analysis |
 | SSH agent socket | `/ssh-agent` (read-only) | SSH agent for git operations in `auto_implement` |
 
 The config volume is a **named volume** (not a bind mount). This is intentional — a bind mount would be owned by root on the host, which blocked the daemon from writing `config.toml`. The image chowns `/config` to the `heimdallm` user during build.
@@ -774,7 +783,7 @@ non_monitored = []
 # Base directories for auto-resolving local_dir per repo.
 # Checks {base}/{repo-name} in order; first match wins.
 # env: HEIMDALLM_LOCAL_DIR_BASE (comma-separated)
-# local_dir_base = ["/repos/ai-platform/workspace", "/repos"]
+# local_dir_base = ["/home/heimdallm/repos/ai-platform/workspace", "/home/heimdallm/repos"]
 
 # ── Issue tracking ───────────────────────────────────────────────────────────
 
@@ -864,7 +873,7 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # primary          = "claude"
 # fallback         = "gemini"
 # review_mode      = "multi"
-# local_dir        = "/repos/api"         # container path; mount via HEIMDALLM_REPOS_DIR
+# local_dir        = "/home/heimdallm/repos/api"  # container path; mount via HEIMDALLM_REPOS_DIR
 # prompt           = "security-profile"   # agent profile for PR reviews
 # issue_prompt     = "triage-profile"     # agent profile for issue triage
 # implement_prompt = "impl-profile"       # agent profile for auto_implement
