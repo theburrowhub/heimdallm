@@ -1,6 +1,6 @@
 # Heimdallm
 
-> AI-powered GitHub automation for macOS and Linux — reviews your pull requests, triages your issues, and can even open implementation PRs for you. Uses Claude, Gemini, Codex, or OpenCode under the hood, posts everything back as your GitHub account, and keeps you informed via a native menu-bar app or a SvelteKit web UI.
+> AI-powered GitHub automation for macOS and Linux — reviews your pull requests, triages your issues, and can even open implementation PRs for you. Uses Claude, Gemini, Codex, or OpenCode under the hood, posts everything back as your GitHub account, and keeps you informed via a native menu-bar app or a Flutter Web UI.
 
 ![Heimdallm dashboard](assets/icon.png)
 
@@ -17,7 +17,7 @@ Watches the PRs where you're requested as a reviewer, runs an AI code review, an
 Fetches issues from monitored repos, classifies them by label (`review_only` vs `auto_implement` vs `skip` vs `blocked`), and for the develop-track ones optionally **creates a branch, commits the change, and opens a PR** against your default branch — fully autonomous on the issues you mark for it. Issues can declare dependencies on other issues/PRs; Heimdallm holds them in a `blocked` state until the prerequisites close, then promotes them automatically.
 
 ### 3. Self-monitoring UI
-A SvelteKit web dashboard (`:3000`) with Dashboard, PR list, Issue list, prompt/agent editor, live config editor, and a live log stream. Opens alongside the daemon in Docker mode.
+A Flutter Web dashboard (`:3000`) with Dashboard, PR list, Issue list, prompt/agent editor, live config editor, and a live log stream. Opens alongside the daemon in Docker mode.
 
 ### Headline features
 
@@ -30,7 +30,7 @@ A SvelteKit web dashboard (`:3000`) with Dashboard, PR list, Issue list, prompt/
 - **Topic-based auto-discovery** — tag repos with a GitHub topic and Heimdallm monitors them without editing config
 - **Severity gating** — only `high` severity triggers `REQUEST_CHANGES`; everything else approves with informational notes
 - **Native desktop** — macOS menu-bar app, system notifications, dark mode, no Electron
-- **Web UI** — SvelteKit dashboard with system / light / dark theme toggle, live SSE updates
+- **Web UI** — Flutter Web dashboard served by Nginx with system / light / dark theme toggle, live SSE updates
 - **Docker mode** — single `make up` spins up daemon + web UI for server/team deployments
 
 ---
@@ -318,7 +318,7 @@ The **Go daemon** (`heimdalld`, port `7842`) is the engine. It polls GitHub for 
 Two first-party UIs talk to it over HTTP:
 
 - **Flutter desktop app** — macOS menu-bar + dashboard, system notifications. Ships inside the `.dmg` / Linux packages.
-- **SvelteKit web UI** — browser dashboard on port `3000`, ships as a second Docker container alongside the daemon.
+- **Flutter Web UI** — browser dashboard on port `3000`, served by Nginx, ships as a second Docker container alongside the daemon.
 
 ```
 Flutter app ─┐
@@ -361,13 +361,9 @@ cp docker/.env.example docker/.env    # fill in GITHUB_TOKEN + provider key
 make up                                # daemon + web UI
 make logs                              # follow both services
 ```
-For iterating on the SvelteKit code with HMR against a running daemon:
+For iterating on the Flutter Web bundle against a running daemon:
 ```bash
-cd web_ui
-npm install
-HEIMDALLM_API_URL=http://localhost:7842 \
-HEIMDALLM_API_TOKEN=$(docker compose -f ../docker/docker-compose.yml exec -T heimdallm cat /data/api_token) \
-npm run dev
+make build-web    # compile Flutter → web/; then `make up-build` to bake into the Nginx image
 ```
 
 ### Other targets
@@ -411,24 +407,17 @@ heimdallm/
 │       ├── scheduler/       Poll loop, grace windows
 │       ├── server/          HTTP + SSE API
 │       └── keychain/        Host credential storage
-├── flutter_app/             macOS / Linux desktop UI
-│   └── lib/
-│       ├── features/
-│       │   ├── dashboard/   Reviews tab (My Reviews / My PRs)
-│       │   ├── repositories/Repo management + per-repo config
-│       │   ├── agents/      Review prompt library
-│       │   └── stats/       Review statistics
-│       └── core/
-│           ├── api/         HTTP + SSE client
-│           └── setup/       First-run setup, token detection
-├── web_ui/                  SvelteKit web dashboard (port 3000)
-│   ├── src/
-│   │   ├── routes/          /, /prs, /prs/[id], /issues, /issues/[id],
-│   │   │                    /agents, /config, /logs
-│   │   ├── lib/components/  PRTile, IssueTile, SeverityBadge, FilterBar…
-│   │   └── lib/             api client, SSE client, theme helper
-│   ├── Dockerfile           Node 22-alpine, multi-stage
-│   └── package.json         Svelte 5 + Tailwind v4 + Vitest
+├── flutter_app/             macOS / Linux / Web UI
+│   ├── lib/
+│   │   ├── features/
+│   │   │   ├── dashboard/   Reviews tab (My Reviews / My PRs)
+│   │   │   ├── repositories/Repo management + per-repo config
+│   │   │   ├── agents/      Review prompt library
+│   │   │   └── stats/       Review statistics
+│   │   └── core/
+│   │       ├── api/         HTTP + SSE client
+│   │       └── setup/       First-run setup, token detection
+│   └── web/                 Flutter Web build output (served by Nginx on port 3000)
 ├── docker/                  Docker deployment
 │   ├── Dockerfile           Daemon image (Go + Node + 4 AI CLIs)
 │   ├── docker-compose.yml   daemon + web UI services
