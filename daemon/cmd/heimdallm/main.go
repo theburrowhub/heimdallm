@@ -373,7 +373,7 @@ func main() {
 			if len(ai.PRLabels) > 0 {
 				ro["pr_labels"] = ai.PRLabels
 			}
-			if ai.PRDraft != nil && *ai.PRDraft {
+			if ai.PRDraft != nil {
 				ro["pr_draft"] = *ai.PRDraft
 			}
 			if ai.IssueTracking != nil {
