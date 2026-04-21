@@ -2,6 +2,48 @@
 
 > **Note:** Versions 0.1.0–0.1.3 were originally published under [`theburrowhub/heimdallr-docker`](https://github.com/theburrowhub/heimdallr-docker) (now archived). The project was unified into this repository and renamed to Heimdallm in v0.1.1.
 
+## [0.4.2](https://github.com/theburrowhub/heimdallm/compare/v0.4.1...v0.4.2) (2026-04-21)
+
+
+### Features
+
+* activity log foundation (store + issue_promoted event) ([#120](https://github.com/theburrowhub/heimdallm/issues/120)) ([1ce71e7](https://github.com/theburrowhub/heimdallm/commit/1ce71e7cced305558ef2fd82ff345ba9f7f901de))
+* activity log recorder, config, HTTP endpoint + /stats counter ([#123](https://github.com/theburrowhub/heimdallm/issues/123)) ([bd81df5](https://github.com/theburrowhub/heimdallm/commit/bd81df500da75a36eede9620598f00313d984400))
+* **config:** add watch_interval for Tier 3 per-item polling ([b4f9755](https://github.com/theburrowhub/heimdallm/commit/b4f975598a675059ca896df8b9356cfa8075850a))
+* **daemon:** replace monolithic poll cycle with multi-tier pipeline ([#107](https://github.com/theburrowhub/heimdallm/issues/107)) ([01f32bf](https://github.com/theburrowhub/heimdallm/commit/01f32bfe8ea8019de76626316bdd18326ac3509f))
+* Flutter Web replaces SvelteKit web_ui ([#125](https://github.com/theburrowhub/heimdallm/issues/125)) ([#126](https://github.com/theburrowhub/heimdallm/issues/126)) ([c226e97](https://github.com/theburrowhub/heimdallm/commit/c226e97a980db50a1af1efbc1083ba2a5400a1ec))
+* **flutter:** Activity log tab with timeline, filters, and date picker ([#124](https://github.com/theburrowhub/heimdallm/issues/124)) ([7f2f47c](https://github.com/theburrowhub/heimdallm/commit/7f2f47c4f2de3d8a7661bf9605953394d766bbc0))
+* **flutter:** categorize prompts into PR Review, Issue Triage, Development ([#122](https://github.com/theburrowhub/heimdallm/issues/122)) ([ea96303](https://github.com/theburrowhub/heimdallm/commit/ea963034c064263667eea332e8b25663040c6b32))
+* **flutter:** unified Activity view with advanced filters ([#109](https://github.com/theburrowhub/heimdallm/issues/109)) ([93aa0a4](https://github.com/theburrowhub/heimdallm/commit/93aa0a4a419d5049d7f65429cffec5da78697291))
+* **scheduler:** add Pipeline orchestrator wiring 3 tiers ([c9692af](https://github.com/theburrowhub/heimdallm/commit/c9692af309907deea3233b4c2a999e42edabc24c))
+* **scheduler:** add priority queue with exponential backoff ([b67a7b5](https://github.com/theburrowhub/heimdallm/commit/b67a7b52a37b2044c03313e23e718c3ad21896fc))
+* **scheduler:** add shared rate limiter with tier priorities ([0641b8a](https://github.com/theburrowhub/heimdallm/commit/0641b8a5f3f445cfa71c85c0f7d5d349c3c950db))
+* **scheduler:** add Tier 1 discovery goroutine ([5ca7342](https://github.com/theburrowhub/heimdallm/commit/5ca7342681a3d066d847c09a7cda58a346a9e9ac))
+* **scheduler:** add Tier 2 per-repo processing goroutine ([6f608c4](https://github.com/theburrowhub/heimdallm/commit/6f608c4f098535e008be1fd0f2c3edaa9f681fbe))
+* **scheduler:** add Tier 3 per-item watch with backoff ([6ac4203](https://github.com/theburrowhub/heimdallm/commit/6ac4203f798ae66d643c72134985879d458d79cd))
+* Stats filters — org and repo multi-select ([#110](https://github.com/theburrowhub/heimdallm/issues/110)) ([#127](https://github.com/theburrowhub/heimdallm/issues/127)) ([eb0fc78](https://github.com/theburrowhub/heimdallm/commit/eb0fc7849054dde9fd9d958208b01bfdce6f3a2d))
+* **web:** native browser notifications for review events ([#129](https://github.com/theburrowhub/heimdallm/issues/129)) ([87e63f9](https://github.com/theburrowhub/heimdallm/commit/87e63f94b3162d420f99a631171ef2ef929ecc38))
+
+
+### Bug Fixes
+
+* address round-2 reviews — deduplicate SortMode, document TOCTOU + queue concurrency ([f930248](https://github.com/theburrowhub/heimdallm/commit/f93024836c455a184a52da38a2c3b6ea7732d3a4))
+* **daemon:** address all review feedback on multi-tier pipeline ([32c58f8](https://github.com/theburrowhub/heimdallm/commit/32c58f88f5faee14790f6fb3420c5d497b19a617))
+* **daemon:** serialise reloads, floor watch interval, log issue changes ([7606831](https://github.com/theburrowhub/heimdallm/commit/760683176743bfb2decc6814b8b58dade2367a5b))
+* **flutter:** address review — dead params, dedup, cursor, ref.read ([0342ad7](https://github.com/theburrowhub/heimdallm/commit/0342ad720c018a31f0b8473c169e1884d14d7f7a))
+* **flutter:** inline sort+filters bar, fix popup width, remove unused _SortButton ([b1142fb](https://github.com/theburrowhub/heimdallm/commit/b1142fb17d9b480bf39fbd50e405585acf57d7cb))
+* **flutter:** persist Activity sort preference across sessions ([#108](https://github.com/theburrowhub/heimdallm/issues/108)) ([87162cf](https://github.com/theburrowhub/heimdallm/commit/87162cfecfc5c6fa89e20b2bd4b71453ba6abeb8))
+* **flutter:** replace popup menu with styled dialog for org/repo filters ([bd995a6](https://github.com/theburrowhub/heimdallm/commit/bd995a6d1ece93c07ac419df82cee3090da1c08e))
+* **flutter:** replace StateProvider with Notifier for sort persistence ([66064b5](https://github.com/theburrowhub/heimdallm/commit/66064b546a1e0295345690da144e25091cd53d24))
+* **flutter:** use Notifier for sort persistence (review feedback [#115](https://github.com/theburrowhub/heimdallm/issues/115)) ([c9fe717](https://github.com/theburrowhub/heimdallm/commit/c9fe717e53972a62846cedb980503830d1d3ff36))
+
+
+### Documentation
+
+* add design spec for Flutter Web replacing SvelteKit web_ui ([af7a6f4](https://github.com/theburrowhub/heimdallm/commit/af7a6f44422fffce26572301ddd4b23ade28d309))
+* design spec for multi-tier polling pipeline ([#107](https://github.com/theburrowhub/heimdallm/issues/107)) ([d28550a](https://github.com/theburrowhub/heimdallm/commit/d28550a2e630e9f67f8a4f947499c6179063b9e8))
+* implementation plan for multi-tier polling pipeline ([60147a9](https://github.com/theburrowhub/heimdallm/commit/60147a97f825d2a2e4129b0419572a49dcb8e60c))
+
 ## [0.4.1](https://github.com/theburrowhub/heimdallm/compare/v0.4.0...v0.4.1) (2026-04-20)
 
 
