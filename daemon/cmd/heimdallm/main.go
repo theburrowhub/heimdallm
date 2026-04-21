@@ -178,6 +178,7 @@ func main() {
 	issuePipe := issuepipeline.New(s, ghClient, exec, issuepipeline.NewGitExec(), broker, &notifyWithSSE{notifier: notifier})
 	issueFetcher := issuepipeline.NewFetcher(ghClient, s, issuePipe)
 	srv := server.New(s, broker, p, apiToken)
+	srv.SetConfigPath(cfgPath)
 
 	// cfgMu protects cfg and the pipeline so reload is safe from any goroutine.
 	var cfgMu   sync.Mutex
