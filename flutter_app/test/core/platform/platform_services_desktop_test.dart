@@ -73,5 +73,20 @@ void main() {
       expect(await services.ensureSingleInstance(), isTrue);
       expect(int.parse(pidFile.readAsStringSync().trim()), pid);
     });
+
+    test('defaultDaemonBinaryPath returns null when HEIMDALLM_DAEMON_PATH is unset and no bundled binary', () {
+      // This matches the default test environment (no bundled binary next to
+      // the Flutter test runner). Covers the "not found" path.
+      final services = DesktopPlatformServices();
+      expect(services.defaultDaemonBinaryPath(), isNull);
+    });
+
+    test('spawnDaemon rejects when the binary does not exist', () async {
+      final services = DesktopPlatformServices();
+      expect(
+        services.spawnDaemon('${tempDir.path}/does-not-exist'),
+        throwsA(isA<Exception>()),
+      );
+    });
   });
 }

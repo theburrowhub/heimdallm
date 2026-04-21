@@ -6,7 +6,9 @@ import 'package:local_notifier/local_notifier.dart';
 import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
 import '../api/api_client.dart';
+import '../daemon/daemon_lifecycle.dart';
 import '../models/config_model.dart';
+import '../setup/first_run_setup.dart';
 import '../tray/tray_menu.dart';
 import 'platform_services.dart';
 
@@ -162,20 +164,36 @@ class DesktopPlatformServices implements PlatformServices {
   Future<void> hideWindow() => windowManager.hide();
   @override
   Never quitApp() => exit(0);
+
   @override
-  Future<String?> detectGitHubToken() => throw UnimplementedError();
+  Future<String?> detectGitHubToken() => FirstRunSetup.detectToken();
+
   @override
-  Future<String?> getStoredGitHubToken() => throw UnimplementedError();
+  Future<String?> getStoredGitHubToken() => FirstRunSetup.getToken();
+
   @override
-  Future<void> storeGitHubToken(String token) => throw UnimplementedError();
+  Future<void> storeGitHubToken(String token) => FirstRunSetup.storeToken(token);
+
   @override
-  Future<void> writeDaemonConfig(AppConfig config) => throw UnimplementedError();
+  Future<void> writeDaemonConfig(AppConfig config) =>
+      FirstRunSetup.writeConfig(config);
+
   @override
-  Future<bool> daemonConfigExists() => throw UnimplementedError();
+  Future<bool> daemonConfigExists() => FirstRunSetup.configExists();
+
   @override
-  String? defaultDaemonBinaryPath() => throw UnimplementedError();
+  String? defaultDaemonBinaryPath() => DaemonLifecycle.defaultBinaryPath();
+
   @override
-  Future<void> spawnDaemon(String binaryPath) => throw UnimplementedError();
+  Future<void> spawnDaemon(String binaryPath) async {
+    final binary = File(binaryPath);
+    if (!binary.existsSync()) {
+      throw DaemonException('Daemon binary not found: $binaryPath');
+    }
+    // Detached: daemon outlives the Flutter process so in-flight reviews
+    // survive window hides and dev restarts.
+    await Process.start(binaryPath, [], mode: ProcessStartMode.detached);
+  }
 }
 
 /// Alias used by the conditional export in `platform_services.dart`.
