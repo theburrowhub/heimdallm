@@ -75,4 +75,43 @@ void main() {
     expect(find.textContaining('Showing'), findsOneWidget);
     expect(find.textContaining('Narrow filters'), findsOneWidget);
   });
+
+  testWidgets('emits a date header per day in multi-day ranges', (tester) async {
+    await tester.pumpWidget(_scope(
+      value: AsyncData(ActivityPage(
+        entries: [
+          _mk(1, DateTime(2026, 4, 18, 9, 5)),
+          _mk(2, DateTime(2026, 4, 19, 9, 30)),
+          _mk(3, DateTime(2026, 4, 19, 10, 0)),
+        ],
+        truncated: false,
+        count: 3,
+      )),
+    ));
+    await tester.pumpAndSettle();
+    expect(find.text('Apr 18, 2026'), findsOneWidget);
+    expect(find.text('Apr 19, 2026'), findsOneWidget);
+    // '09:00' appears twice — once per day — which was the pre-fix bug
+    expect(find.text('09:00'), findsNWidgets(2));
+    expect(find.text('10:00'), findsOneWidget);
+  });
+
+  testWidgets('ActivityDisabledException renders friendly empty state',
+      (tester) async {
+    await tester.pumpWidget(ProviderScope(
+      overrides: [
+        activityEntriesProvider.overrideWith(
+          (ref) => Future<ActivityPage>.error(ActivityDisabledException()),
+        ),
+        activityOptionsProvider.overrideWith(
+          (ref) => Future<ActivityPage>.error(ActivityDisabledException()),
+        ),
+      ],
+      child: const MaterialApp(home: Scaffold(body: ActivityScreen())),
+    ));
+    await tester.pumpAndSettle();
+    expect(find.text('Activity log is disabled'), findsOneWidget);
+    expect(find.textContaining('Enable activity_log'), findsOneWidget);
+    expect(find.textContaining('Error:'), findsNothing);
+  });
 }

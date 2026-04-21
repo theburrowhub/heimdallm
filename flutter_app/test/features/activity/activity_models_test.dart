@@ -137,4 +137,49 @@ void main() {
       );
     });
   });
+
+  group('ActivityQuery constructor', () {
+    test('asserts on partial range (from only)', () {
+      expect(
+        () => ActivityQuery(from: DateTime(2026, 4, 18)),
+        throwsA(isA<AssertionError>()),
+      );
+    });
+
+    test('asserts on partial range (to only)', () {
+      expect(
+        () => ActivityQuery(to: DateTime(2026, 4, 18)),
+        throwsA(isA<AssertionError>()),
+      );
+    });
+
+    test('both null is fine', () {
+      expect(() => const ActivityQuery(), returnsNormally);
+    });
+  });
+
+  group('ActivityQuery.copyWith', () {
+    test('keeps unspecified date/from/to', () {
+      final q = ActivityQuery(date: DateTime(2026, 4, 20));
+      final c = q.copyWith(orgs: {'a'});
+      expect(c.date, DateTime(2026, 4, 20));
+      expect(c.orgs, {'a'});
+    });
+
+    test('explicit null clears date', () {
+      final q = ActivityQuery(date: DateTime(2026, 4, 20));
+      final c = q.copyWith(date: null);
+      expect(c.date, isNull);
+    });
+
+    test('explicit from/to both null clears range', () {
+      final q = ActivityQuery(
+        from: DateTime(2026, 4, 18),
+        to: DateTime(2026, 4, 20),
+      );
+      final c = q.copyWith(from: null, to: null);
+      expect(c.from, isNull);
+      expect(c.to, isNull);
+    });
+  });
 }

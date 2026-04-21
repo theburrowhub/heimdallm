@@ -69,6 +69,18 @@ void main() {
       expect(c.read(activityQueryProvider).actions, {ActivityAction.triage});
     });
 
+    test('setRange swaps from/to when inverted', () {
+      final c = ProviderContainer();
+      addTearDown(c.dispose);
+      final n = c.read(activityQueryProvider.notifier);
+
+      n.setRange(DateTime(2026, 4, 20), DateTime(2026, 4, 18));
+
+      final q = c.read(activityQueryProvider);
+      expect(q.from, DateTime(2026, 4, 18));
+      expect(q.to,   DateTime(2026, 4, 20));
+    });
+
     test('clearFilters resets only filter sets', () {
       final c = ProviderContainer();
       addTearDown(c.dispose);

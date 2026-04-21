@@ -42,15 +42,47 @@ class ActivityScreen extends ConsumerWidget {
           child: async.when(
             data: (page) => _Timeline(page: page),
             loading: () => const Center(child: CircularProgressIndicator()),
-            error: (err, _) => Center(
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Text('Error: $err'),
-              ),
-            ),
+            error: (err, _) => _ErrorView(error: err),
           ),
         ),
       ],
+    );
+  }
+}
+
+class _ErrorView extends StatelessWidget {
+  final Object error;
+  const _ErrorView({required this.error});
+
+  @override
+  Widget build(BuildContext context) {
+    if (error is ActivityDisabledException) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.toggle_off_outlined, size: 48, color: Colors.grey),
+              SizedBox(height: 12),
+              Text('Activity log is disabled',
+                  style: TextStyle(fontWeight: FontWeight.w600)),
+              SizedBox(height: 4),
+              Text(
+                'Enable activity_log in the daemon config to start recording activity.',
+                style: TextStyle(color: Colors.grey),
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Text('Could not load activity: $error'),
+      ),
     );
   }
 }
@@ -106,6 +138,9 @@ class _DatePickerBar extends ConsumerWidget {
               context: context,
               firstDate: today.subtract(const Duration(days: 365)),
               lastDate: today,
+              initialDateRange: (query.from != null && query.to != null)
+                  ? DateTimeRange(start: query.from!, end: query.to!)
+                  : null,
             );
             if (picked != null) notifier.setRange(picked.start, picked.end);
           },
@@ -115,9 +150,63 @@ class _DatePickerBar extends ConsumerWidget {
   }
 }
 
+/// An item in the timeline: either a date/hour header or an entry tile.
+/// Pre-flattening the sequence lets us render with ListView.builder so tiles
+/// are built lazily and rebuilds don't allocate the full widget tree.
+sealed class _TimelineItem {
+  const _TimelineItem();
+}
+
+class _TruncationBanner extends _TimelineItem {
+  final int shown;
+  const _TruncationBanner(this.shown);
+}
+
+class _DateHeader extends _TimelineItem {
+  final DateTime day;
+  const _DateHeader(this.day);
+}
+
+class _HourHeader extends _TimelineItem {
+  final int hour;
+  const _HourHeader(this.hour);
+}
+
+class _EntryItem extends _TimelineItem {
+  final ActivityEntry entry;
+  const _EntryItem(this.entry);
+}
+
 class _Timeline extends StatelessWidget {
   final ActivityPage page;
   const _Timeline({required this.page});
+
+  static bool _sameDay(DateTime a, DateTime b) =>
+      a.year == b.year && a.month == b.month && a.day == b.day;
+
+  List<_TimelineItem> _buildItems() {
+    final items = <_TimelineItem>[];
+    if (page.truncated) {
+      items.add(_TruncationBanner(page.entries.length));
+    }
+
+    DateTime? currentDay;
+    int? currentHour;
+    for (final e in page.entries) {
+      final ts = e.timestamp;
+      if (currentDay == null || !_sameDay(currentDay, ts)) {
+        items.add(_DateHeader(DateTime(ts.year, ts.month, ts.day)));
+        currentDay = ts;
+        currentHour = null;
+      }
+      if (ts.hour != currentHour) {
+        items.add(_HourHeader(ts.hour));
+        currentHour = ts.hour;
+      }
+      items.add(_EntryItem(e));
+    }
+    return items;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -125,47 +214,68 @@ class _Timeline extends StatelessWidget {
       return const Center(child: Text('No activity for this period.'));
     }
 
-    final items = <Widget>[];
-    if (page.truncated) {
-      items.add(Container(
-        width: double.infinity,
-        padding: const EdgeInsets.all(12),
-        color: Theme.of(context).colorScheme.surfaceContainerHighest,
-        child: Text(
-          'Showing ${page.entries.length} most recent entries. Narrow filters to see more.',
-        ),
-      ));
-    }
+    final items = _buildItems();
+    return ListView.builder(
+      itemCount: items.length,
+      itemBuilder: (context, i) => _renderItem(context, items[i]),
+    );
+  }
 
-    int? currentHour;
-    for (final e in page.entries) {
-      if (e.timestamp.hour != currentHour) {
-        currentHour = e.timestamp.hour;
-        items.add(Padding(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+  Widget _renderItem(BuildContext context, _TimelineItem item) {
+    switch (item) {
+      case _TruncationBanner(:final shown):
+        return Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(12),
+          color: Theme.of(context).colorScheme.surfaceContainerHighest,
           child: Text(
-            '${currentHour.toString().padLeft(2, '0')}:00',
+            'Showing $shown most recent entries. Narrow filters to see more.',
+          ),
+        );
+      case _DateHeader(:final day):
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+          child: Text(
+            _formatDay(day),
+            style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.bold,
+                ),
+          ),
+        );
+      case _HourHeader(:final hour):
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+          child: Text(
+            '${hour.toString().padLeft(2, '0')}:00',
             style: Theme.of(context).textTheme.titleSmall,
           ),
-        ));
-      }
-      items.add(ActivityEntryTile(
-        entry: e,
-        onTap: () {
-          // Tap → detail navigation is deferred: the activity_log row knows
-          // repo + number but not the PR/issue store ID the /prs/:id and
-          // /issues/:id routes expect. Follow-up spec (AI report generation)
-          // will add a by-number lookup endpoint.
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('${e.repo} #${e.itemNumber}'),
-              duration: const Duration(seconds: 2),
-            ),
-          );
-        },
-      ));
+        );
+      case _EntryItem(:final entry):
+        return ActivityEntryTile(
+          entry: entry,
+          onTap: () {
+            // Tap → detail navigation is deferred: the activity_log row knows
+            // repo + number but not the PR/issue store ID the /prs/:id and
+            // /issues/:id routes expect. Follow-up spec (AI report generation)
+            // will add a by-number lookup endpoint.
+            final messenger = ScaffoldMessenger.of(context);
+            messenger.hideCurrentSnackBar();
+            messenger.showSnackBar(
+              SnackBar(
+                content: Text('${entry.repo} #${entry.itemNumber}'),
+                duration: const Duration(seconds: 2),
+              ),
+            );
+          },
+        );
     }
+  }
 
-    return ListView(children: items);
+  static String _formatDay(DateTime d) {
+    const months = [
+      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+    ];
+    return '${months[d.month - 1]} ${d.day}, ${d.year}';
   }
 }

@@ -22,11 +22,10 @@ class ActivityQueryNotifier extends StateNotifier<ActivityQuery> {
   }
 
   void setRange(DateTime from, DateTime to) {
-    state = state.copyWith(
-      date: null,
-      from: DateTime(from.year, from.month, from.day),
-      to:   DateTime(to.year,   to.month,   to.day),
-    );
+    final start = DateTime(from.year, from.month, from.day);
+    final end   = DateTime(to.year,   to.month,   to.day);
+    final (a, b) = start.isAfter(end) ? (end, start) : (start, end);
+    state = state.copyWith(date: null, from: a, to: b);
   }
 
   void toggleOrg(String org) =>
@@ -67,13 +66,17 @@ final activityEntriesProvider = FutureProvider<ActivityPage>((ref) async {
 /// window as the main query but drops org/repo/action filters — so the
 /// option lists show the full universe for the window instead of shrinking
 /// to the already-filtered slice.
+/// Oversized so the distinct org/repo lists reflect the full window even when
+/// the main entries view is truncated. A dedicated facets endpoint would be
+/// the proper long-term fix.
+const int _activityOptionsLimit = 10000;
+
 final activityOptionsProvider = FutureProvider<ActivityPage>((ref) async {
-  final date  = ref.watch(activityQueryProvider.select((q) => q.date));
-  final from  = ref.watch(activityQueryProvider.select((q) => q.from));
-  final to    = ref.watch(activityQueryProvider.select((q) => q.to));
-  final limit = ref.watch(activityQueryProvider.select((q) => q.limit));
+  final date = ref.watch(activityQueryProvider.select((q) => q.date));
+  final from = ref.watch(activityQueryProvider.select((q) => q.from));
+  final to   = ref.watch(activityQueryProvider.select((q) => q.to));
   final api = ref.watch(apiClientProvider);
   return api.fetchActivity(
-    ActivityQuery(date: date, from: from, to: to, limit: limit),
+    ActivityQuery(date: date, from: from, to: to, limit: _activityOptionsLimit),
   );
 });

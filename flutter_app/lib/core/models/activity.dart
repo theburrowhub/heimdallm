@@ -68,7 +68,10 @@ class ActivityQuery {
     this.repos = const {},
     this.actions = const {},
     this.limit = 500,
-  });
+  }) : assert(
+          (from == null) == (to == null),
+          'from and to must both be set or both null',
+        );
 
   /// Returns a copy with the given fields overridden. `date`, `from`, `to`
   /// use a sentinel to distinguish "not passed" (keep current) from
