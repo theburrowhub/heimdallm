@@ -5,6 +5,8 @@ import '../../core/models/pr.dart';
 import '../../core/models/tracked_issue.dart';
 import '../../shared/widgets/severity_badge.dart';
 import '../../shared/widgets/toast.dart';
+import '../activity/activity_screen.dart';
+import '../activity/activity_providers.dart';
 import '../agents/agents_screen.dart';
 import '../cli_agents/cli_agents_screen.dart';
 import '../issues/issues_screen.dart';
@@ -19,7 +21,7 @@ class DashboardScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return DefaultTabController(
-      length: 6,
+      length: 7,
       child: Scaffold(
         appBar: AppBar(
           title: const Text('Heimdallm'),
@@ -39,6 +41,8 @@ class DashboardScreen extends ConsumerWidget {
                 ref.invalidate(prsProvider);
                 ref.invalidate(issuesProvider);
                 ref.invalidate(statsProvider);
+                ref.invalidate(activityEntriesProvider);
+                ref.invalidate(activityOptionsProvider);
               },
             ),
           ],
@@ -46,6 +50,7 @@ class DashboardScreen extends ConsumerWidget {
             tabs: [
               Tab(icon: Icon(Icons.dashboard),       text: 'Activity'),
               Tab(icon: Icon(Icons.bug_report),      text: 'Issues'),
+              Tab(icon: Icon(Icons.timeline),        text: 'Activity log'),
               Tab(icon: Icon(Icons.folder_outlined), text: 'Repositories'),
               Tab(icon: Icon(Icons.auto_awesome),    text: 'Prompts'),
               Tab(icon: Icon(Icons.smart_toy),       text: 'Agents'),
@@ -57,6 +62,7 @@ class DashboardScreen extends ConsumerWidget {
           children: [
             _ActivityTab(),
             IssuesScreen(),
+            ActivityScreen(),
             ReposScreen(),
             AgentsScreen(),
             CLIAgentsScreen(),

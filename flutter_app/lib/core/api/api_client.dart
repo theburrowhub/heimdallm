@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:http/http.dart' as http;
+import '../models/activity.dart';
 import '../models/pr.dart';
 import '../models/review.dart';
 import '../models/tracked_issue.dart';
@@ -76,6 +77,21 @@ class ApiClient {
         .map((r) => _parseReview(r as Map<String, dynamic>))
         .toList();
     return {'pr': pr, 'reviews': reviews};
+  }
+
+  Future<ActivityPage> fetchActivity(ActivityQuery q) async {
+    final headers = await _authHeaders();
+    final uri = Uri.parse('http://127.0.0.1:$port/activity')
+        .replace(queryParameters: q.toQueryParameters());
+    final resp = await _client.get(uri, headers: headers);
+    if (resp.statusCode == 503) {
+      throw ActivityDisabledException();
+    }
+    if (resp.statusCode != 200) {
+      throw ApiException('GET /activity failed: ${resp.statusCode}');
+    }
+    final body = jsonDecode(resp.body) as Map<String, dynamic>;
+    return ActivityPage.fromJson(body);
   }
 
   Future<void> triggerReview(int prId) async {
