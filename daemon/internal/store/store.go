@@ -227,16 +227,20 @@ type DayCount struct {
 }
 
 // ComputeStats aggregates statistics from the reviews and prs tables.
-// When repos is non-empty, results are scoped to reviews of PRs in those repos.
-func (s *Store) ComputeStats(repos []string) (*Stats, error) {
+// When repos is non-empty, results are scoped to PRs in those repos.
+// When orgs is non-empty, results are scoped to PRs whose repo starts
+// with "org/" (i.e. belongs to one of the given GitHub organizations).
+// repos takes precedence over orgs; both empty = global stats.
+func (s *Store) ComputeStats(repos []string, orgs []string) (*Stats, error) {
 	stats := &Stats{
 		BySeverity: make(map[string]int),
 		ByCLI:      make(map[string]int),
 	}
 
-	// Build reusable filter clauses for the given repos.
+	// Build reusable filter clauses.
 	// repoFilter: for queries on reviews only (uses subquery on prs table).
-	// repoFilterJoined: for queries that already JOIN prs p (direct p.repo IN).
+	// repoFilterJoined: for queries that already JOIN prs p.
+	// Both use the same repoArgs since the placeholder count matches.
 	var repoFilter, repoFilterJoined string
 	var repoArgs []any
 	if len(repos) > 0 {
@@ -248,6 +252,17 @@ func (s *Store) ComputeStats(repos []string) (*Stats, error) {
 		inClause := strings.Join(placeholders, ",")
 		repoFilter = " AND r.pr_id IN (SELECT id FROM prs WHERE repo IN (" + inClause + "))"
 		repoFilterJoined = " AND p.repo IN (" + inClause + ")"
+	} else if len(orgs) > 0 {
+		// Org filter: match repos starting with "org/" using LIKE.
+		// Both clauses use the same args (org + "/%") so repoArgs is shared.
+		var conditions, conditionsJ []string
+		for _, org := range orgs {
+			conditions = append(conditions, "repo LIKE ?")
+			conditionsJ = append(conditionsJ, "p.repo LIKE ?")
+			repoArgs = append(repoArgs, org+"/%")
+		}
+		repoFilter = " AND r.pr_id IN (SELECT id FROM prs WHERE " + strings.Join(conditions, " OR ") + ")"
+		repoFilterJoined = " AND (" + strings.Join(conditionsJ, " OR ") + ")"
 	}
 
 	// Total reviews
