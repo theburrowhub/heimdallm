@@ -2,6 +2,18 @@
 
 > **Note:** Versions 0.1.0–0.1.3 were originally published under [`theburrowhub/heimdallr-docker`](https://github.com/theburrowhub/heimdallr-docker) (now archived). The project was unified into this repository and renamed to Heimdallm in v0.1.1.
 
+## [0.4.13](https://github.com/theburrowhub/heimdallm/compare/v0.4.12...v0.4.13) (2026-04-21)
+
+
+### Features
+
+* implement [#158](https://github.com/theburrowhub/heimdallm/issues/158) — feat: auto_implement PRs should have LLM-generated descriptions ([#171](https://github.com/theburrowhub/heimdallm/issues/171)) ([e8930e0](https://github.com/theburrowhub/heimdallm/commit/e8930e09f4cfacdc85887eca08cb087f725c16ab))
+
+
+### Bug Fixes
+
+* skip re-processing issues that already have an auto_implement PR ([#177](https://github.com/theburrowhub/heimdallm/issues/177)) ([a320640](https://github.com/theburrowhub/heimdallm/commit/a32064076e62568ee87a2701071aa79536876071))
+
 ## [0.4.12](https://github.com/theburrowhub/heimdallm/compare/v0.4.11...v0.4.12) (2026-04-21)
 
 
