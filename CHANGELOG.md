@@ -2,6 +2,18 @@
 
 > **Note:** Versions 0.1.0–0.1.3 were originally published under [`theburrowhub/heimdallr-docker`](https://github.com/theburrowhub/heimdallr-docker) (now archived). The project was unified into this repository and renamed to Heimdallm in v0.1.1.
 
+## [0.4.4](https://github.com/theburrowhub/heimdallm/compare/v0.4.3...v0.4.4) (2026-04-21)
+
+
+### Features
+
+* Repositories view — filters, auto-discover, grid toggle ([#112](https://github.com/theburrowhub/heimdallm/issues/112)) ([#133](https://github.com/theburrowhub/heimdallm/issues/133)) ([5e6790a](https://github.com/theburrowhub/heimdallm/commit/5e6790a85a3707d3adf334218b86d13712ff4465))
+
+
+### Bug Fixes
+
+* pass GitHubToken to issue pipeline RunOptions ([#142](https://github.com/theburrowhub/heimdallm/issues/142)) ([2a4126b](https://github.com/theburrowhub/heimdallm/commit/2a4126bdc0680b4e6b3a9320abd4c02df98ce8da)), closes [#141](https://github.com/theburrowhub/heimdallm/issues/141)
+
 ## [0.4.3](https://github.com/theburrowhub/heimdallm/compare/v0.4.2...v0.4.3) (2026-04-21)
 
 
