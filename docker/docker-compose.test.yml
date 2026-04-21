@@ -17,6 +17,16 @@ services:
   web:
     container_name: heimdallm-web-test
     restart: "no"
+    # Unset HEIMDALLM_API_TOKEN so the entrypoint reads the token the
+    # daemon just wrote into the shared test volume instead of whatever
+    # stale value the operator has in docker/.env from a prior run.
+    environment:
+      - HEIMDALLM_API_TOKEN=
+    volumes:
+      # Mount the same test-data volume the daemon uses, so /data/api_token
+      # is the one this daemon generated — not the main heimdallm-data
+      # volume which belongs to a different (possibly non-existent) daemon.
+      - heimdallm-test-data:/data:ro
 
 volumes:
   heimdallm-test-data:
