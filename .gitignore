@@ -10,4 +10,12 @@ daemon/bin/
 #   on fresh installs, but old checkouts may still have one sitting around
 #   — keeping the ignore entry prevents accidental commits.
 docker/.env
+# Backups, swap files, and local-only variants — never commit. `sed -i.bak`
+# and similar one-liners leave a *.bak behind that often still contains
+# secrets (GITHUB_TOKEN, HEIMDALLM_API_TOKEN, etc.); ignore them eagerly.
+docker/.env.bak
+docker/.env.*.bak
+docker/.env.local
+docker/.env.swp
+docker/.env.swo
 docker/config/

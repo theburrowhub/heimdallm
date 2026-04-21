@@ -19,7 +19,7 @@ endif
 .PHONY: build-daemon build-app build-web test test-docker dev dev-daemon dev-stop \
         release-local package-macos install-service verify-linux run-linux \
         setup up up-build up-daemon up-build-daemon down logs logs-daemon \
-        ps restart clean _check-docker _check-env
+        ps restart clean _check-docker _check-env _post-up-hints
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
@@ -303,12 +303,51 @@ _check-env: _check-docker
 	  exit 1; \
 	}
 
+# Prints a short post-up summary: the web URL, which AI keys are set, and
+# hints for the opt-in knobs operators most often miss (full-repo analysis,
+# topic discovery, issue tracking). Called after `up` / `up-build`.
+_post-up-hints:
+	@echo ""
+	@echo "✅  Heimdallm is up at http://localhost:$${HEIMDALLM_WEB_PORT:-3000}"
+	@echo "    Daemon API at http://localhost:$${HEIMDALLM_PORT:-7842} (token in /data/api_token)"
+	@echo ""
+	@set -a; . $(DOCKER_ENV); set +a; \
+	 _set=; _unset=; \
+	 for k in ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN OPENAI_API_KEY CODEX_API_KEY GEMINI_API_KEY OPENROUTER_API_KEY; do \
+	   v=$$(eval "printf %s \"\$${$$k:-}\""); \
+	   if [ -n "$$v" ]; then _set="$$_set $$k"; fi; \
+	 done; \
+	 if [ -n "$$_set" ]; then echo "AI credentials present:$$_set"; \
+	 else echo "⚠  No AI credentials set — reviews will fail. Set one in $(DOCKER_ENV):"; \
+	      echo "     ANTHROPIC_API_KEY  CLAUDE_CODE_OAUTH_TOKEN  OPENAI_API_KEY  GEMINI_API_KEY"; fi
+	@echo ""
+	@set -a; . $(DOCKER_ENV); set +a; \
+	 if [ -z "$${HEIMDALLM_REPOS_DIR:-}" ]; then \
+	   echo "ℹ  Full-repo analysis is OFF (agent only sees the PR diff)."; \
+	   echo "   To enable, add to $(DOCKER_ENV):"; \
+	   echo "       HEIMDALLM_REPOS_DIR=/absolute/path/to/your/projects"; \
+	   echo "   Then \`make down && make up\`. In the UI use /repos/<name> as Local Directory."; \
+	 else \
+	   echo "✓  Full-repo analysis enabled: $${HEIMDALLM_REPOS_DIR} → /repos (read-only)"; \
+	 fi
+	@echo ""
+	@set -a; . $(DOCKER_ENV); set +a; \
+	 if [ -z "$${HEIMDALLM_DISCOVERY_TOPIC:-}" ]; then \
+	   echo "ℹ  Topic discovery is OFF. Add HEIMDALLM_DISCOVERY_TOPIC=<topic>"; \
+	   echo "   + HEIMDALLM_DISCOVERY_ORGS=<org,org> in $(DOCKER_ENV) to auto-track repos"; \
+	   echo "   that carry a GitHub topic. (Optional; skip if HEIMDALLM_REPOSITORIES is enough.)"; \
+	 fi
+	@echo ""
+	@echo "Next: open http://localhost:$${HEIMDALLM_WEB_PORT:-3000}  ·  logs: \`make logs\`  ·  stop: \`make down\`"
+
 up: _check-env
 	docker compose -f $(COMPOSE_FILE) up -d
+	@$(MAKE) --no-print-directory _post-up-hints
 
 # Like `up` but rebuilds images from local source (use after `git pull` on main).
 up-build: _check-env
 	docker compose -f $(COMPOSE_FILE) up -d --build --pull always
+	@$(MAKE) --no-print-directory _post-up-hints
 
 up-daemon: _check-env
 	docker compose -f $(COMPOSE_FILE) up -d heimdallm

@@ -158,6 +158,31 @@ Then open the web UI:
 
 The `web` container reads the daemon's API token from the shared `heimdallm-data` volume automatically — no manual copy needed.
 
+After `make up` completes, the target prints a summary of which AI credentials were picked up from `docker/.env` and flags the optional knobs (full-repo analysis, topic discovery) that are currently off. Use it as a checklist before opening the UI.
+
+#### 4b. Opt-in: full-repo analysis
+
+By default the AI agent reviews a PR using only the diff it gets from the GitHub API. That's enough for most reviews. If you want the agent to explore the surrounding code (grep sibling files, read the call graph, check imports, etc.), you need to give it a directory on the daemon's side to `cd` into.
+
+On Docker the daemon is containerised, so "a directory on the daemon's side" means a path inside that container. Mount your host repos root into the container as `/repos` via an env var:
+
+```bash
+# In docker/.env
+HEIMDALLM_REPOS_DIR=/Users/you/projects       # macOS / Linux
+# or
+HEIMDALLM_REPOS_DIR=/home/you/code
+```
+
+```bash
+make down && make up
+```
+
+Then in the web UI, go to a repo's detail screen and under **Local directory** enter the path inside the container — typically `/repos/<repo-name>` (matching the sub-directory of your host's projects root). When unset, the compose file mounts an empty placeholder at `/repos` so the feature is a silent no-op and doesn't break anything.
+
+The mount is read-only. The agent can read every file under that directory but cannot modify your working tree.
+
+On the desktop app this is automatic: the `Browse` button opens the native picker and stores the host path directly — no mount needed.
+
 #### 5. Day-to-day commands
 
 ```bash

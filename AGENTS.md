@@ -77,6 +77,42 @@ make test
 **Prefer `make test-docker && cd flutter_app && flutter test`** over
 `make test` on EDR-protected endpoints.
 
+## Flutter platform abstraction layer
+
+The Flutter app builds three ways: **macOS desktop**, **Linux desktop**, and **web** (served by Nginx in the Docker deployment). Shared code under `lib/features/` and `lib/shared/` must compile for all three — which means **no `dart:io`, no `tray_manager`, no `window_manager`, no `local_notifier`, no `Process`, no `Platform.environment`, no `File` / `Directory` / `ProcessSignal`** in shared code.
+
+Every OS-touching capability goes through `lib/core/platform/platform_services.dart`:
+
+```
+lib/core/platform/
+├── platform_services.dart              # abstract interface + conditional export
+├── platform_services_stub.dart         # noSuchMethod-forwarding fallback (compile time only)
+├── platform_services_desktop.dart      # dart:io, tray, window, notifier, Process — selected when dart.library.io is available
+├── platform_services_web.dart          # no-ops + `/api` base URL — selected when dart.library.html is available
+└── platform_services_provider.dart     # Riverpod provider for the factory
+```
+
+The conditional `export` in `platform_services.dart` picks the right impl at compile time, so the web bundle never ships tray/window/notifier code. Shared code gets the implementation via `ref.watch(platformServicesProvider)` or `PlatformServices.create()`.
+
+### Rules for adding code
+
+1. **Any new capability that might touch the OS goes on `PlatformServices` first**, with implementations in both `platform_services_desktop.dart` and `platform_services_web.dart` (web is usually a no-op or the relative-URL variant). Add a matching field / capture to `test/core/platform/fake_platform_services.dart` so tests can observe it.
+2. **Never import `dart:io`, `Process`, `Platform`, `File`, `Directory`, `ProcessSignal`, or the desktop-only plugins (`tray_manager`, `window_manager`, `local_notifier`, `file_picker`'s `getDirectoryPath`) from anywhere under `lib/features/` or `lib/shared/`.** These are only reachable from `lib/core/platform/platform_services_desktop.dart` and the handful of helpers it imports (`core/daemon/`, `core/setup/`, `core/tray/`).
+3. **Run `make build-web` before committing** any change that touches shared code. It's the canary that catches dart:io leaks before they reach the Dockerfile build stage. The full gate is:
+   ```bash
+   cd flutter_app && flutter test && flutter analyze
+   make build-web
+   ```
+4. **For UI bits that only make sense on one platform** (e.g., the "Browse for directory" button in the repo detail screen): gate the widget on `kIsWeb` from `package:flutter/foundation.dart` locally rather than adding another method to `PlatformServices`. Reserve the interface for capabilities, not for widget-tree conditionals.
+
+### Full-repo analysis (Docker only)
+
+The daemon can run the AI agent with a CWD set to a local directory (full-repo analysis vs diff-only review). On desktop this is automatic. In Docker the daemon is containerised, so the operator bind-mounts host repos via `HEIMDALLM_REPOS_DIR` in `docker/.env`; `docker-compose.yml` resolves it to `/repos:ro` inside the container. In the UI the path to enter is `/repos/<name>`, not the host path. Keep this in mind when writing user-visible copy about paths.
+
+### Nginx + compose
+
+The web service (`docker/docker-compose.yml`) builds from `flutter_app/Dockerfile.web` — a multi-stage image that produces the Flutter Web bundle inside `ghcr.io/cirruslabs/flutter:stable` and serves it from `nginx:1.27-alpine`. The entrypoint at `flutter_app/docker-entrypoint.d/10-heimdallm-token.sh` reads the daemon's API token from `/data/api_token` (shared volume) and injects it as `X-Heimdallm-Token` on every `/api/*` call. A stale `HEIMDALLM_API_TOKEN` in `docker/.env` used to shadow this behavior; that env var is no longer passed through. If you need to override the token for a test, use `docker compose -e HEIMDALLM_API_TOKEN=... up web`.
+
 ## Conventional commits
 
 `release-please` reads commit prefixes to bump semver and generate the
