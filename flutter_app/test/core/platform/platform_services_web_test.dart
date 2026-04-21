@@ -1,5 +1,12 @@
-// The web impl must be safe to instantiate and exercise on the Dart VM
-// too — the tests drive it directly, with no browser required.
+// Web impl requires the browser runtime now that it uses package:web /
+// dart:js_interop to drive the Notification API. `flutter test` on the
+// VM skips this file; run `flutter test --platform chrome
+// test/core/platform/platform_services_web_test.dart` when exercising
+// it, or rely on the integration smoke (docker/scripts/test-web.sh)
+// to cover end-to-end behaviour.
+@TestOn('browser')
+library;
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/core/platform/platform_services_web.dart';
 
