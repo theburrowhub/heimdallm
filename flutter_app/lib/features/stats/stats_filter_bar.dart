@@ -22,6 +22,8 @@ class StatsFilterBar extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final filters = ref.watch(statsFiltersProvider);
+    final orgs = _allOrgs;
+    final visibleRepos = _filteredRepos(filters);
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
@@ -33,30 +35,30 @@ class StatsFilterBar extends ConsumerWidget {
           Text('Filter:', style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
 
           // Org multi-select
-          if (_allOrgs.isNotEmpty)
+          if (orgs.isNotEmpty)
             _filterChip(
               context: context,
               label: 'Org',
               icon: Icons.business,
-              allItems: _allOrgs.toList()..sort(),
+              allItems: orgs.toList()..sort(),
               selected: filters.orgs,
-              onChanged: (orgs) {
+              onChanged: (selectedOrgs) {
                 final validRepos = filters.repos.where((r) {
                   final org = r.contains('/') ? r.split('/').first : r;
-                  return orgs.isEmpty || orgs.contains(org);
+                  return selectedOrgs.isEmpty || selectedOrgs.contains(org);
                 }).toSet();
                 ref.read(statsFiltersProvider.notifier).state =
-                    filters.copyWith(orgs: orgs, repos: validRepos);
+                    filters.copyWith(orgs: selectedOrgs, repos: validRepos);
               },
             ),
 
           // Repo multi-select
-          if (_filteredRepos(filters).isNotEmpty)
+          if (visibleRepos.isNotEmpty)
             _filterChip(
               context: context,
               label: 'Repo',
               icon: Icons.folder_outlined,
-              allItems: _filteredRepos(filters).toList()..sort(),
+              allItems: visibleRepos.toList()..sort(),
               selected: filters.repos,
               onChanged: (repos) {
                 ref.read(statsFiltersProvider.notifier).state =

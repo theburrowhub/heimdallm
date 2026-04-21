@@ -152,8 +152,8 @@ final statsProvider = FutureProvider<Map<String, dynamic>>((ref) async {
   if (filters.repos.isNotEmpty) {
     repos = filters.repos.toList();
   } else if (filters.orgs.isNotEmpty) {
-    final prs = ref.read(prsProvider).valueOrNull ?? [];
-    final issues = ref.read(issuesProvider).valueOrNull ?? [];
+    final prs = ref.watch(prsProvider).valueOrNull ?? [];
+    final issues = ref.watch(issuesProvider).valueOrNull ?? [];
     final allRepos = <String>{
       ...prs.map((p) => p.repo),
       ...issues.map((i) => i.repo),
