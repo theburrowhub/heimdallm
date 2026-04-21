@@ -2,8 +2,12 @@ import 'dart:io';
 import 'dart:ui' show VoidCallback;
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter/painting.dart' show Size;
+import 'package:local_notifier/local_notifier.dart';
+import 'package:tray_manager/tray_manager.dart';
+import 'package:window_manager/window_manager.dart';
 import '../api/api_client.dart';
 import '../models/config_model.dart';
+import '../tray/tray_menu.dart';
 import 'platform_services.dart';
 
 /// Desktop implementation of [PlatformServices].
@@ -24,6 +28,7 @@ class DesktopPlatformServices implements PlatformServices {
   final String? _tokenPath;
   final String? _pidFilePath;
   String? _cachedToken;
+  void Function(String location)? _onTrayNavigate;
 
   String get _resolvedTokenPath =>
       _tokenPath ??
@@ -35,8 +40,6 @@ class DesktopPlatformServices implements PlatformServices {
 
   @override
   String get apiBaseUrl => 'http://127.0.0.1:$_apiPort';
-
-  // ── The rest is stubbed to throw for now — later tasks fill them in. ─────
 
   @override
   Future<String?> loadApiToken() async {
@@ -85,25 +88,78 @@ class DesktopPlatformServices implements PlatformServices {
     required String title,
     required Size size,
     required Size minimumSize,
-  }) => throw UnimplementedError();
+  }) async {
+    await windowManager.ensureInitialized();
+    final options = WindowOptions(
+      size: size,
+      minimumSize: minimumSize,
+      title: title,
+      titleBarStyle: TitleBarStyle.normal,
+    );
+    await windowManager.setSize(size);
+    await windowManager.setMinimumSize(minimumSize);
+    await windowManager.setTitle(title);
+    await windowManager.show();
+    await windowManager.focus();
+    windowManager.waitUntilReadyToShow(options, () async {
+      await windowManager.show();
+      await windowManager.focus();
+    });
+  }
+
   @override
-  Future<void> setupTray({required ApiClient apiClient}) => throw UnimplementedError();
+  Future<void> setupTray({required ApiClient apiClient}) async {
+    await trayManager.setIcon(
+      Platform.isLinux ? 'assets/tray_icon@2x.png' : 'assets/tray_icon.png',
+    );
+    await trayManager.setContextMenu(Menu(items: [
+      MenuItem(key: 'open', label: 'Open Heimdallm'),
+      MenuItem.separator(),
+      MenuItem(key: 'quit', label: 'Quit'),
+    ]));
+    // At this point the router isn't created yet, so we pass a no-op
+    // navigation handler. main.dart calls setTrayNavigationHandler() later
+    // with the real handler, which is forwarded into TrayMenu via rebind.
+    TrayMenu.instance.init(
+      apiClient: apiClient,
+      onNavigate: _onTrayNavigate ?? (_) {},
+    );
+  }
+
   @override
-  void setTrayNavigationHandler(void Function(String location) handler) => throw UnimplementedError();
+  void setTrayNavigationHandler(void Function(String location) handler) {
+    _onTrayNavigate = handler;
+    TrayMenu.instance.rebindNavigation(handler);
+  }
+
   @override
-  Future<void> setupNotifier({required String appName}) => throw UnimplementedError();
+  Future<void> setupNotifier({required String appName}) async {
+    await localNotifier.setup(appName: appName);
+  }
+
   @override
   void showNotification({
     required String title,
     required String body,
     VoidCallback? onClick,
-  }) => throw UnimplementedError();
+  }) {
+    final n = LocalNotification(title: title, body: body);
+    n.onClick = () => onClick?.call();
+    n.show();
+  }
+
   @override
-  Future<void> setPreventWindowClose(bool enable) => throw UnimplementedError();
+  Future<void> setPreventWindowClose(bool enable) =>
+      windowManager.setPreventClose(enable);
+
   @override
-  Future<void> showAndFocusWindow() => throw UnimplementedError();
+  Future<void> showAndFocusWindow() async {
+    await windowManager.show();
+    await windowManager.focus();
+  }
+
   @override
-  Future<void> hideWindow() => throw UnimplementedError();
+  Future<void> hideWindow() => windowManager.hide();
   @override
   Never quitApp() => exit(0);
   @override

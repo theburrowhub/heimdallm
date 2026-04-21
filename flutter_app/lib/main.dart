@@ -142,7 +142,7 @@ Future<void> _setupTray() async {
   ]));
   // Pass the shared ApiClient so TrayMenu uses the same token cache
   // as the rest of the app — avoids stale-token issues after rotation.
-  TrayMenu.instance.init(apiClient: ApiClient(platform: _bootPlatform));
+  TrayMenu.instance.init(apiClient: ApiClient(platform: _bootPlatform), onNavigate: (_) {});
 }
 
 /// Send a macOS notification from the Flutter app (correct icon, clickable).

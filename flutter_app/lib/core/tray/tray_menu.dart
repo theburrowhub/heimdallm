@@ -4,7 +4,6 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:window_manager/window_manager.dart';
 import '../api/api_client.dart';
 import '../models/pr.dart';
-import '../../main.dart' show appRouter;
 
 /// Convenience accessor for rebuilding the tray from providers.
 class TrayMenuRef {
@@ -22,13 +21,26 @@ class TrayMenu with TrayListener {
 
   ApiClient? _api;
   List<PR> _prs = [];
+  void Function(String location)? _onNavigate;
 
   /// Initialises the tray listener.
   /// [apiClient] must be the shared instance from the app's provider so that
   /// token cache invalidations (clearTokenCache) propagate correctly.
-  void init({required ApiClient apiClient}) {
+  /// [onNavigate] is called when the user picks a tray menu item that
+  /// should open a specific route (e.g. `/prs/42`).
+  void init({
+    required ApiClient apiClient,
+    required void Function(String location) onNavigate,
+  }) {
     _api = apiClient;
+    _onNavigate = onNavigate;
     trayManager.addListener(this);
+  }
+
+  /// Lets the platform layer replace the navigation callback after the
+  /// router is initialized.
+  void rebindNavigation(void Function(String location) handler) {
+    _onNavigate = handler;
   }
 
   /// Rebuilds the tray context menu with current data.
@@ -168,7 +180,7 @@ class TrayMenu with TrayListener {
       if (prId != null) {
         _showApp();
         Future.delayed(const Duration(milliseconds: 200), () {
-          appRouter.push('/prs/$prId');
+          _onNavigate?.call('/prs/$prId');
         });
       }
       return;
