@@ -18,8 +18,9 @@ endif
 
 .PHONY: build-daemon build-app build-web test test-docker dev dev-daemon dev-stop \
         release-local package-macos install-service verify-linux run-linux \
+        install-linux uninstall-linux \
         setup up up-build up-daemon up-build-daemon down logs logs-daemon \
-        ps restart clean _check-docker _check-env _post-up-hints
+        ps restart clean _check-docker _check-env _check-linux _post-up-hints
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
@@ -211,6 +212,13 @@ release-local: _check-macos _check-signing _check-gh build-daemon
 _check-macos:
 	@if [ "$$(uname -s)" != "Darwin" ]; then \
 	  echo "❌  This target requires macOS."; \
+	  exit 1; \
+	fi
+
+_check-linux:
+	@if [ "$$(uname -s)" != "Linux" ]; then \
+	  echo "❌  This target requires Linux."; \
+	  echo "    On macOS, use 'make release-local' or 'make run-linux'."; \
 	  exit 1; \
 	fi
 
@@ -515,6 +523,208 @@ run-linux:
 	  --net=host \
 	  heimdallm-verify \
 	  $(LINUX_BUNDLE)/heimdallm
+
+# ── Native Linux install / uninstall (user-local, no sudo) ────────────────────
+#
+# Extracts the Flutter bundle and Go daemon from the heimdallm-verify Docker
+# image (built by `make verify-linux`) and stages them into ~/.local/ so the
+# app launches like any other desktop Linux application. No host Flutter
+# toolchain required; Docker does the build.
+#
+# Layout written:
+#   ~/.local/opt/heimdallm/                  # bundle root (matches CI .deb)
+#     heimdallm                              # Flutter binary
+#     heimdalld                              # Go daemon (copied from /app/daemon/bin/heimdallm in image, renamed)
+#   ~/.local/bin/heimdallm                   # → symlink into the bundle
+#   ~/.local/share/applications/com.theburrowhub.heimdallm.desktop
+#   ~/.local/share/icons/hicolor/{48,128,256,512}x{same}/apps/heimdallm.png
+#
+# The Flutter app (DaemonLifecycle.defaultBinaryPath in
+# flutter_app/lib/core/daemon/daemon_lifecycle.dart) resolves the daemon as
+# "heimdalld" next to its own binary, so the rename at install time is what
+# makes the spawn work without any env var override.
+#
+# Binary compatibility: the heimdallm-verify image is ubuntu:22.04, so the
+# binaries link dynamically against that distro's glibc/gtk versions. Works
+# on any reasonably current Debian/Ubuntu/Fedora/Arch; hosts with a much
+# older libc may see missing-symbol errors at first launch.
+#
+# Usage:
+#   make install-linux
+#
+# To remove: see `uninstall-linux` below.
+
+EXTRACT_DIR := /tmp/heimdallm-install-extract
+
+install-linux: _check-linux verify-linux
+	@command -v docker >/dev/null 2>&1 || { echo "❌  Docker is required. Install from https://docs.docker.com/get-docker/"; exit 1; }
+	@echo "▶  Extracting Heimdallm artifacts from heimdallm-verify image..."
+	@rm -rf "$(EXTRACT_DIR)"
+	@mkdir -p "$(EXTRACT_DIR)"
+	@CID=$$(docker create heimdallm-verify) ; \
+	 trap 'docker rm "$$CID" >/dev/null 2>&1 || true' EXIT ; \
+	 docker cp "$$CID:/app/flutter_app/build/linux/x64/release/bundle/." "$(EXTRACT_DIR)/bundle/" && \
+	 docker cp "$$CID:/app/daemon/bin/heimdallm" "$(EXTRACT_DIR)/daemon"
+	@echo "▶  Staging Heimdallm into $$HOME/.local/opt/heimdallm..."
+	rm -rf "$$HOME/.local/opt/heimdallm"
+	mkdir -p "$$HOME/.local/opt/heimdallm"
+	cp -r "$(EXTRACT_DIR)/bundle/." "$$HOME/.local/opt/heimdallm/"
+	cp "$(EXTRACT_DIR)/daemon" "$$HOME/.local/opt/heimdallm/heimdalld"
+	chmod +x "$$HOME/.local/opt/heimdallm/heimdalld"
+	@# Fork-bomb guard: same check CI's release pipeline runs.
+	@# If both binaries are byte-identical, the "spawn heimdalld" call from
+	@# DaemonLifecycle would re-exec the Flutter app and hundreds of instances
+	@# would spawn on first launch.
+	@if cmp -s "$$HOME/.local/opt/heimdallm/heimdallm" "$$HOME/.local/opt/heimdallm/heimdalld"; then \
+	  echo "❌  Both binaries are identical — case-collision fork-bomb state. Aborting."; \
+	  exit 1; \
+	fi
+	rm -rf "$(EXTRACT_DIR)"
+	mkdir -p "$$HOME/.local/bin"
+	ln -sf "$$HOME/.local/opt/heimdallm/heimdallm" "$$HOME/.local/bin/heimdallm"
+	@for SIZE in 48 128 256 512; do \
+	  ICON_DIR="$$HOME/.local/share/icons/hicolor/$${SIZE}x$${SIZE}/apps"; \
+	  mkdir -p "$$ICON_DIR"; \
+	  cp "flutter_app/assets/icons/$${SIZE}.png" "$$ICON_DIR/heimdallm.png"; \
+	done
+	@DESKTOP_DIR="$$HOME/.local/share/applications"; \
+	mkdir -p "$$DESKTOP_DIR"; \
+	printf '%s\n' \
+	  '[Desktop Entry]' \
+	  'Name=Heimdallm' \
+	  'Comment=AI-powered GitHub PR review agent' \
+	  "Exec=$$HOME/.local/opt/heimdallm/heimdallm" \
+	  'Icon=heimdallm' \
+	  'Type=Application' \
+	  'Categories=Development;' \
+	  'StartupWMClass=com.theburrowhub.heimdallm' \
+	  'StartupNotify=true' \
+	  > "$$DESKTOP_DIR/com.theburrowhub.heimdallm.desktop"
+	@# Seed ~/.config/heimdallm/.token so the daemon can start when the app is
+	@# launched from the OS app launcher (which does not inherit $$GITHUB_TOKEN
+	@# from the user's shell). Skipped if the file already exists — respects
+	@# manual overrides. Non-fatal if no token source is available.
+	@if [ ! -s "$$HOME/.config/heimdallm/.token" ]; then \
+	  TOK="" ; SRC="" ; \
+	  if [ -n "$$GITHUB_TOKEN" ]; then \
+	    TOK="$$GITHUB_TOKEN" ; SRC='$$GITHUB_TOKEN env' ; \
+	  elif command -v gh >/dev/null 2>&1 ; then \
+	    GH_TOK=$$(gh auth token 2>/dev/null || true) ; \
+	    if [ -n "$$GH_TOK" ]; then \
+	      TOK="$$GH_TOK" ; SRC='gh auth token' ; \
+	    fi ; \
+	  fi ; \
+	  if [ -n "$$TOK" ]; then \
+	    mkdir -p "$$HOME/.config/heimdallm" && \
+	    ( umask 077 && printf '%s\n' "$$TOK" > "$$HOME/.config/heimdallm/.token" ) && \
+	    echo "    Seeded $$HOME/.config/heimdallm/.token from $$SRC" ; \
+	  else \
+	    echo "" ; \
+	    echo "⚠  No GitHub token found — first launch will fail until you provide one." ; \
+	    echo "   Set GITHUB_TOKEN in your shell, run 'gh auth login', or write" ; \
+	    echo "   the token to ~/.config/heimdallm/.token (mode 600) manually." ; \
+	  fi ; \
+	fi
+	@# Best-effort launcher cache refresh (silent no-op if tools missing).
+	@command -v update-desktop-database >/dev/null 2>&1 && \
+	  update-desktop-database "$$HOME/.local/share/applications/" 2>/dev/null || true
+	@command -v gtk-update-icon-cache >/dev/null 2>&1 && \
+	  gtk-update-icon-cache -q -t "$$HOME/.local/share/icons/hicolor/" 2>/dev/null || true
+	@echo ""
+	@echo "✅  Heimdallm installed:"
+	@echo "    Bundle:  $$HOME/.local/opt/heimdallm/"
+	@echo "    Symlink: $$HOME/.local/bin/heimdallm"
+	@echo "    Desktop: $$HOME/.local/share/applications/com.theburrowhub.heimdallm.desktop"
+	@echo "    Icons:   $$HOME/.local/share/icons/hicolor/<size>x<size>/apps/heimdallm.png"
+	@echo ""
+	@echo "    Launch with: heimdallm  (or via your app launcher)"
+	@case ":$$PATH:" in \
+	  *":$$HOME/.local/bin:"*) ;; \
+	  *) echo ""; \
+	     echo "⚠  $$HOME/.local/bin is not on your PATH."; \
+	     echo "   Add this to ~/.bashrc or ~/.zshrc:"; \
+	     echo "     export PATH=\"\$$HOME/.local/bin:\$$PATH\"" ;; \
+	esac
+
+# ── Native Linux uninstall ────────────────────────────────────────────────────
+#
+# Removes everything install-linux created under ~/.local/, but preserves
+# user configuration (~/.config/heimdallm) and runtime data
+# (~/.local/share/heimdallm) by default.
+#
+# Usage:
+#   make uninstall-linux              # app only — config and data preserved
+#   make uninstall-linux PURGE=1      # also wipes ~/.config + ~/.local/share state
+#
+# The PURGE flag mirrors Debian's `apt remove` vs. `apt purge` distinction.
+
+uninstall-linux: _check-linux
+	@echo "▶  Uninstalling Heimdallm from $$HOME/.local/..."
+	@# Stop running instances (best-effort — ignored if nothing is running).
+	@#
+	@# Coverage caveat: pkill -f matches against /proc/<pid>/cmdline. This
+	@# catches:
+	@#   - launcher-launched Flutter apps (desktop entry Exec= is absolute,
+	@#     so argv[0] = $$HOME/.local/opt/heimdallm/heimdallm — matches)
+	@#   - any daemon spawned by DaemonLifecycle (always uses the absolute
+	@#     path "heimdalld next to my binary" — matches)
+	@#
+	@# It does NOT catch terminal-launched Flutter apps invoked as just
+	@# `heimdallm` on PATH — those have argv[0] = "heimdallm" and slip
+	@# through. That is safe: Linux's unlink-while-running semantics mean
+	@# the subsequent rm -rf of the bundle directory does not affect a
+	@# running process, and the user can close the window whenever. We
+	@# intentionally avoid a broader `-f 'heimdallm'` match to prevent
+	@# hitting unrelated dev processes (e.g. `flutter run` of this repo).
+	@pkill -f "$$HOME/.local/opt/heimdallm/heimdallm" 2>/dev/null || true
+	@pkill -f "$$HOME/.local/opt/heimdallm/heimdalld" 2>/dev/null || true
+	@rm -f "$$HOME/.local/share/heimdallm/ui.pid"
+	rm -f "$$HOME/.local/share/applications/com.theburrowhub.heimdallm.desktop"
+	@for SIZE in 48 128 256 512; do \
+	  rm -f "$$HOME/.local/share/icons/hicolor/$${SIZE}x$${SIZE}/apps/heimdallm.png"; \
+	done
+	@# Only remove the PATH shim if it's our symlink — never clobber an
+	@# unrelated file that happens to share the name.
+	@if [ -L "$$HOME/.local/bin/heimdallm" ]; then \
+	  TARGET=$$(readlink "$$HOME/.local/bin/heimdallm"); \
+	  case "$$TARGET" in \
+	    "$$HOME/.local/opt/heimdallm/"*) \
+	      rm -f "$$HOME/.local/bin/heimdallm"; \
+	      echo "↓  Removed $$HOME/.local/bin/heimdallm" ;; \
+	    *) \
+	      echo "⚠  $$HOME/.local/bin/heimdallm points to $$TARGET — leaving it alone." ;; \
+	  esac; \
+	elif [ -e "$$HOME/.local/bin/heimdallm" ]; then \
+	  echo "⚠  $$HOME/.local/bin/heimdallm exists but is not a symlink — leaving it alone."; \
+	fi
+	rm -rf "$$HOME/.local/opt/heimdallm"
+	@# Refresh launcher caches so the stale entry disappears from menus.
+	@command -v update-desktop-database >/dev/null 2>&1 && \
+	  update-desktop-database "$$HOME/.local/share/applications/" 2>/dev/null || true
+	@command -v gtk-update-icon-cache >/dev/null 2>&1 && \
+	  gtk-update-icon-cache -q -t "$$HOME/.local/share/icons/hicolor/" 2>/dev/null || true
+	@if [ "$(PURGE)" = "1" ]; then \
+	  echo ""; \
+	  echo "⚠  PURGE=1 — wiping user config and runtime data..."; \
+	  if [ -d "$$HOME/.config/heimdallm" ]; then \
+	    rm -rf "$$HOME/.config/heimdallm"; \
+	    echo "    Removed $$HOME/.config/heimdallm"; \
+	  fi; \
+	  if [ -d "$$HOME/.local/share/heimdallm" ]; then \
+	    rm -rf "$$HOME/.local/share/heimdallm"; \
+	    echo "    Removed $$HOME/.local/share/heimdallm"; \
+	  fi; \
+	  echo ""; \
+	  echo "✅  Heimdallm fully uninstalled (config and data wiped)."; \
+	else \
+	  echo ""; \
+	  echo "✅  Heimdallm uninstalled (config and data preserved)."; \
+	  echo ""; \
+	  echo "    Config: $$HOME/.config/heimdallm/"; \
+	  echo "    Data:   $$HOME/.local/share/heimdallm/"; \
+	  echo ""; \
+	  echo "    To wipe these too: make uninstall-linux PURGE=1"; \
+	fi
 
 clean:
 	cd daemon && make clean

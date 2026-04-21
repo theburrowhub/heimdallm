@@ -2,6 +2,13 @@
 
 > **Note:** Versions 0.1.0–0.1.3 were originally published under [`theburrowhub/heimdallr-docker`](https://github.com/theburrowhub/heimdallr-docker) (now archived). The project was unified into this repository and renamed to Heimdallm in v0.1.1.
 
+## [0.4.3](https://github.com/theburrowhub/heimdallm/compare/v0.4.2...v0.4.3) (2026-04-21)
+
+
+### Features
+
+* **config:** add local_dir_base as list for multi-group workspace support ([#132](https://github.com/theburrowhub/heimdallm/issues/132)) ([aaef09a](https://github.com/theburrowhub/heimdallm/commit/aaef09a36e9ddade82e1aaf43d8c79425cf22d39))
+
 ## [0.4.2](https://github.com/theburrowhub/heimdallm/compare/v0.4.1...v0.4.2) (2026-04-21)
 
 

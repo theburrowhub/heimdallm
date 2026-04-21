@@ -144,28 +144,10 @@ final statsProvider = FutureProvider<Map<String, dynamic>>((ref) async {
   ref.watch(prListRefreshProvider); // refresh stats when reviews complete
   final filters = ref.watch(statsFiltersProvider);
   final api = ref.watch(apiClientProvider);
-
-  // Effective repos: explicit repo selection takes priority. If only orgs
-  // are selected, derive the repo list from known PRs + issues so the
-  // org filter actually scopes the stats.
-  List<String> repos;
-  if (filters.repos.isNotEmpty) {
-    repos = filters.repos.toList();
-  } else if (filters.orgs.isNotEmpty) {
-    final prs = ref.watch(prsProvider).valueOrNull ?? [];
-    final issues = ref.watch(issuesProvider).valueOrNull ?? [];
-    final allRepos = <String>{
-      ...prs.map((p) => p.repo),
-      ...issues.map((i) => i.repo),
-    }..remove('');
-    repos = allRepos.where((r) {
-      final org = r.contains('/') ? r.split('/').first : r;
-      return filters.orgs.contains(org);
-    }).toList();
-  } else {
-    repos = [];
-  }
-  return api.fetchStats(repos: repos);
+  return api.fetchStats(
+    repos: filters.repos.toList(),
+    orgs: filters.orgs.toList(),
+  );
 });
 
 void _rebuildTray(Ref ref, List<PR> prs) {

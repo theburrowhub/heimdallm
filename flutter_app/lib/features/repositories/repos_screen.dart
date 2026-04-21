@@ -27,6 +27,7 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
   String _search = '';
   String _filter = 'all'; // 'all' | 'monitored' | 'not_monitored'
   String _viewMode = 'list'; // 'list' | 'grid'
+  Set<String> _orgFilter = {}; // empty = all orgs
   _SyncStatus _syncStatus = _SyncStatus.idle;
   Timer? _debounce;
   Timer? _savedResetTimer;
@@ -194,9 +195,21 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
             if (ma != mb) return ma.compareTo(mb);
             return a.compareTo(b);
           });
+        // Derive all orgs for the org filter dropdown. Only shown when more
+        // than one org has at least one repo.
+        final allOrgs = _repoConfigs.keys
+            .map((r) => r.contains('/') ? r.split('/').first : r)
+            .toSet()
+            .toList()
+          ..sort();
+
         final filtered = allRepos.where((r) {
           if (_search.isNotEmpty &&
               !r.toLowerCase().contains(_search.toLowerCase())) return false;
+          if (_orgFilter.isNotEmpty) {
+            final org = r.contains('/') ? r.split('/').first : r;
+            if (!_orgFilter.contains(org)) return false;
+          }
           final c = _repoConfigs[r]!;
           if (_filter == 'monitored' && !c.isMonitored) return false;
           if (_filter == 'not_monitored' && c.isMonitored) return false;
@@ -237,6 +250,22 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
                     onChanged: (v) => setState(() => _filter = v),
                   ),
                   const SizedBox(width: 8),
+                  // Org multi-select (hidden when there's only one org).
+                  if (allOrgs.length > 1) ...[
+                    _OrgFilterChip(
+                      orgs: allOrgs,
+                      selected: _orgFilter,
+                      onChanged: (s) => setState(() => _orgFilter = s),
+                    ),
+                    if (_orgFilter.isNotEmpty) ...[
+                      const SizedBox(width: 4),
+                      GestureDetector(
+                        onTap: () => setState(() => _orgFilter = {}),
+                        child: const Icon(Icons.clear, size: 16, color: Colors.grey),
+                      ),
+                    ],
+                    const SizedBox(width: 8),
+                  ],
                   Row(children: [
                     _ViewToggleButton(
                       icon: Icons.view_list,
@@ -626,3 +655,116 @@ class _ReposGrid extends StatelessWidget {
   }
 }
 
+
+/// Multi-select org filter chip. Opens a checkbox dialog when tapped.
+/// Matches the Activity screen's org filter UX (issue #112 / PR #133).
+class _OrgFilterChip extends StatelessWidget {
+  final List<String> orgs;
+  final Set<String> selected;
+  final ValueChanged<Set<String>> onChanged;
+
+  const _OrgFilterChip({
+    required this.orgs,
+    required this.selected,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final primary = Theme.of(context).colorScheme.primary;
+    final isActive = selected.isNotEmpty;
+    return GestureDetector(
+      onTap: () async {
+        final result = await showDialog<Set<String>>(
+          context: context,
+          builder: (_) => _MultiSelectDialog(
+            title: 'Filter by Org',
+            items: orgs,
+            selected: selected,
+          ),
+        );
+        if (result != null) onChanged(result);
+      },
+      child: Chip(
+        avatar: Icon(Icons.business, size: 14, color: isActive ? primary : Colors.grey),
+        label: Text(
+          isActive ? 'Org (${selected.length})' : 'Org',
+          style: TextStyle(fontSize: 12, color: isActive ? primary : null),
+        ),
+        visualDensity: VisualDensity.compact,
+        side: isActive
+            ? BorderSide(color: primary.withOpacity(0.5))
+            : const BorderSide(color: Colors.transparent),
+      ),
+    );
+  }
+}
+
+/// Simple checkbox-list dialog. Reused from #133; kept here rather than in
+/// a shared location because the only caller is the org filter above.
+class _MultiSelectDialog extends StatefulWidget {
+  final String title;
+  final List<String> items;
+  final Set<String> selected;
+
+  const _MultiSelectDialog({
+    required this.title,
+    required this.items,
+    required this.selected,
+  });
+
+  @override
+  State<_MultiSelectDialog> createState() => _MultiSelectDialogState();
+}
+
+class _MultiSelectDialogState extends State<_MultiSelectDialog> {
+  late Set<String> _selected;
+
+  @override
+  void initState() {
+    super.initState();
+    _selected = Set<String>.from(widget.selected);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(widget.title, style: const TextStyle(fontSize: 16)),
+      contentPadding: const EdgeInsets.only(top: 12),
+      content: SizedBox(
+        width: 300,
+        child: ListView.builder(
+          shrinkWrap: true,
+          itemCount: widget.items.length,
+          itemBuilder: (_, i) {
+            final item = widget.items[i];
+            return CheckboxListTile(
+              dense: true,
+              title: Text(item, style: const TextStyle(fontSize: 13)),
+              value: _selected.contains(item),
+              onChanged: (val) {
+                setState(() {
+                  if (val == true) {
+                    _selected.add(item);
+                  } else {
+                    _selected.remove(item);
+                  }
+                });
+              },
+            );
+          },
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, null),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, _selected),
+          child: const Text('Apply'),
+        ),
+      ],
+    );
+  }
+}

@@ -19,6 +19,10 @@ repositories = ["org/repo1", "org/repo2"]
 # discovery_orgs     = ["your-org", "your-other-org"]   # required when discovery_topic is set
 # discovery_interval = "15m"                             # any Go duration; defaults to 15m
 
+# Base directories for auto-resolving local_dir per repo (list).
+# Each {base}/{repo-name} is checked in order. Supports multiple workspace groups.
+# local_dir_base = ["/repos/ai-platform-workspace/workspace", "/repos"]
+
 # Issue tracking pipeline (fase-2).
 # When enabled, the daemon fetches open issues from the monitored repos,
 # classifies them by label, and — depending on the mode — posts an AI

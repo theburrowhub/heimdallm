@@ -74,6 +74,13 @@ type GitHubConfig struct {
 	// changes (label updates, new comments, merge/close). Defaults to "1m".
 	WatchInterval string `toml:"watch_interval"`
 
+	// LocalDirBase is a list of base directories for auto-resolving local_dir
+	// per repo. ResolveLocalDir checks each path in order, looking for
+	// {base}/{repo-name}, before falling back to /repos/{repo-name}.
+	// This supports multiple workspace groups (e.g. ai-platform in one dir,
+	// another team's repos in another). Put more specific paths first.
+	LocalDirBase []string `toml:"local_dir_base"`
+
 	// IssueTracking turns the issue-tracking pipeline (fase-2) on and off and
 	// governs how issues are filtered and classified. The pipeline itself
 	// lives in downstream issues (#25 onward); this struct is the
@@ -317,29 +324,42 @@ func ShortRepoName(repo string) string {
 // should run in for a given repo, using this precedence:
 //
 //  1. The explicit `local_dir` from config (the `configured` argument).
-//  2. `DefaultReposMountPath/<short-name>` when that directory exists —
+//  2. Each path in `localDirBases` checked in order — first match wins.
+//     Supports multiple workspace groups (e.g. ai-platform repos in one
+//     dir, another team in another) without per-repo local_dir entries.
+//  3. `DefaultReposMountPath/<short-name>` when that directory exists —
 //     lets an operator drop a single HEIMDALLM_REPOS_DIR into
 //     docker/.env and have every monitored repo picked up without also
 //     touching the per-repo override in the UI.
-//  3. Empty string — the agent runs in its default CWD (diff-only mode).
+//  4. Empty string — the agent runs in its default CWD (diff-only mode).
 //
 // Calls `os.Stat` on the candidate path, so callers should invoke it
 // outside any config-mutex critical section. The result is not cached;
 // re-invocation picks up newly-mounted repos on the next review cycle.
-func ResolveLocalDir(configured, repo string) string {
+func ResolveLocalDir(configured, repo string, localDirBases []string) string {
 	if configured != "" {
 		return configured
-	}
-	if DefaultReposMountPath == "" {
-		return ""
 	}
 	short := ShortRepoName(repo)
 	if short == "" {
 		return ""
 	}
-	candidate := filepath.Join(DefaultReposMountPath, short)
-	if info, err := os.Stat(candidate); err == nil && info.IsDir() {
-		return candidate
+	// 1. Check each local_dir_base in order (first match wins)
+	for _, base := range localDirBases {
+		if base == "" {
+			continue
+		}
+		candidate := filepath.Join(base, short)
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return candidate
+		}
+	}
+	// 2. Fallback to default mount path (/repos/{short-name})
+	if DefaultReposMountPath != "" {
+		candidate := filepath.Join(DefaultReposMountPath, short)
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return candidate
+		}
 	}
 	return ""
 }
@@ -535,6 +555,18 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := os.Getenv("HEIMDALLM_WATCH_INTERVAL"); v != "" {
 		c.GitHub.WatchInterval = v
+	}
+	if v := os.Getenv("HEIMDALLM_LOCAL_DIR_BASE"); v != "" {
+		paths := strings.Split(v, ",")
+		cleaned := make([]string, 0, len(paths))
+		for _, p := range paths {
+			if s := strings.TrimSpace(p); s != "" {
+				cleaned = append(cleaned, s)
+			}
+		}
+		if len(cleaned) > 0 {
+			c.GitHub.LocalDirBase = cleaned
+		}
 	}
 	c.applyIssueTrackingEnv()
 	c.applyPRMetadataEnv()

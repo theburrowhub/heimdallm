@@ -19,3 +19,4 @@ docker/.env.local
 docker/.env.swp
 docker/.env.swo
 docker/config/
+daemon/heimdallm

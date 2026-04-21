@@ -778,7 +778,7 @@ func (srv *Server) handleRepoCollaborators(w http.ResponseWriter, r *http.Reques
 }
 
 func (srv *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	var repos []string
+	var repos, orgs []string
 	if raw := r.URL.Query().Get("repos"); raw != "" {
 		for _, s := range strings.Split(raw, ",") {
 			if s = strings.TrimSpace(s); s != "" {
@@ -786,7 +786,14 @@ func (srv *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	stats, err := srv.store.ComputeStats(repos)
+	if raw := r.URL.Query().Get("orgs"); raw != "" {
+		for _, s := range strings.Split(raw, ",") {
+			if s = strings.TrimSpace(s); s != "" {
+				orgs = append(orgs, s)
+			}
+		}
+	}
+	stats, err := srv.store.ComputeStats(repos, orgs)
 	if err != nil {
 		slog.Error("handleStats: store error", "err", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)

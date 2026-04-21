@@ -371,7 +371,7 @@ func main() {
 				return
 			}
 			seenRepo[repo] = true
-			if d := config.ResolveLocalDir("", repo); d != "" {
+			if d := config.ResolveLocalDir("", repo, c.GitHub.LocalDirBase); d != "" {
 				localDirsDetected[repo] = d
 			}
 		}
@@ -519,10 +519,11 @@ func main() {
 		}
 		cfgMu.Lock()
 		aiCfg := cfg.AIForRepo(pr.Repo)
+		localDirBase := cfg.GitHub.LocalDirBase
 		cfgMu.Unlock()
 		// /repos/<short-name> fallback when local_dir is unset (stat-based,
 		// keep outside the mutex).
-		aiCfg.LocalDir = config.ResolveLocalDir(aiCfg.LocalDir, pr.Repo)
+		aiCfg.LocalDir = config.ResolveLocalDir(aiCfg.LocalDir, pr.Repo, localDirBase)
 
 		// Construct github.PullRequest from stored data
 		ghPR := &gh.PullRequest{
@@ -588,10 +589,11 @@ func main() {
 			aiCfg.Primary = cfg.AI.Primary
 		}
 		agentCfg := cfg.AgentConfigFor(aiCfg.Primary)
+		localDirBase := cfg.GitHub.LocalDirBase
 		cfgMu.Unlock()
 		// /repos/<short-name> fallback when local_dir is unset (stat-based,
 		// keep outside the mutex).
-		aiCfg.LocalDir = config.ResolveLocalDir(aiCfg.LocalDir, iss.Repo)
+		aiCfg.LocalDir = config.ResolveLocalDir(aiCfg.LocalDir, iss.Repo, localDirBase)
 
 		// Reconstruct github.Issue from store data for the pipeline
 		ghIssue := &gh.Issue{
@@ -920,6 +922,8 @@ func processDiscoveredRepos(
 }
 
 // FetchPRsToReview implements scheduler.Tier2PRFetcher.
+// After fetching, any repos not yet in the config are auto-discovered and
+// persisted — the daemon never silently skips unknown repos again.
 func (a *tier2Adapter) FetchPRsToReview() ([]scheduler.Tier2PR, error) {
 	prs, err := a.ghClient.FetchPRsToReview()
 	if err != nil {
@@ -967,6 +971,7 @@ func (a *tier2Adapter) FetchPRsToReview() ([]scheduler.Tier2PR, error) {
 			UpdatedAt: pr.UpdatedAt,
 		})
 	}
+
 	return out, nil
 }
 
@@ -975,11 +980,12 @@ func (a *tier2Adapter) ProcessPR(ctx context.Context, pr scheduler.Tier2PR) erro
 	a.cfgMu.Lock()
 	c := *a.cfg
 	aiCfg := c.AIForRepo(pr.Repo)
+	localDirBase := c.GitHub.LocalDirBase
 	a.cfgMu.Unlock()
 	// /repos/<short-name> fallback when local_dir is unset (stat-based,
 	// keep outside the mutex). Lets HEIMDALLM_REPOS_DIR give every
 	// monitored repo full-repo context without a per-repo override.
-	aiCfg.LocalDir = config.ResolveLocalDir(aiCfg.LocalDir, pr.Repo)
+	aiCfg.LocalDir = config.ResolveLocalDir(aiCfg.LocalDir, pr.Repo, localDirBase)
 
 	ghPR := &gh.PullRequest{
 		ID:        pr.ID,
@@ -1042,10 +1048,11 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 			aiCfg.Primary = c.AI.Primary
 		}
 		agentCfg := c.AgentConfigFor(aiCfg.Primary)
+		localDirBase := c.GitHub.LocalDirBase
 		a.cfgMu.Unlock()
 		// /repos/<short-name> fallback when local_dir is unset (stat-based,
 		// keep outside the mutex).
-		aiCfg.LocalDir = config.ResolveLocalDir(aiCfg.LocalDir, issue.Repo)
+		aiCfg.LocalDir = config.ResolveLocalDir(aiCfg.LocalDir, issue.Repo, localDirBase)
 
 		extraFlags := agentCfg.ExtraFlags
 		if extraFlags != "" {
