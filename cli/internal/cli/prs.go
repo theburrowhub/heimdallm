@@ -20,6 +20,15 @@ func newPRsCmd() *cobra.Command {
 				return fmt.Errorf("fetching PRs: %w", err)
 			}
 
+			n := 0
+			for _, pr := range prs {
+				if pr.LatestReview != nil {
+					prs[n] = pr
+					n++
+				}
+			}
+			prs = prs[:n]
+
 			if len(prs) == 0 {
 				fmt.Println("No PRs found.")
 				return nil
