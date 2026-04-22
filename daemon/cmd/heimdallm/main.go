@@ -1077,7 +1077,7 @@ func (a *tier2Adapter) ProcessPR(ctx context.Context, pr scheduler.Tier2PR) erro
 	localDirBase := c.GitHub.LocalDirBase
 	a.cfgMu.Unlock()
 	// /repos/<short-name> fallback when local_dir is unset (stat-based,
-	// keep outside the mutex). Lets HEIMDALLM_REPOS_DIR give every
+	// keep outside the mutex). Lets HEIMDALLM_LOCAL_DIR_BASE give every
 	// monitored repo full-repo context without a per-repo override.
 	aiCfg.LocalDir = config.ResolveLocalDir(aiCfg.LocalDir, pr.Repo, localDirBase)
 

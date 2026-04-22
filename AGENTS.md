@@ -105,9 +105,13 @@ The conditional `export` in `platform_services.dart` picks the right impl at com
    ```
 4. **For UI bits that only make sense on one platform** (e.g., the "Browse for directory" button in the repo detail screen): gate the widget on `kIsWeb` from `package:flutter/foundation.dart` locally rather than adding another method to `PlatformServices`. Reserve the interface for capabilities, not for widget-tree conditionals.
 
-### Full-repo analysis (Docker only)
+### Full-repo analysis
 
-The daemon can run the AI agent with a CWD set to a local directory (full-repo analysis vs diff-only review). On desktop this is automatic. In Docker the daemon is containerised, so the operator bind-mounts host repos via `HEIMDALLM_REPOS_DIR` in `docker/.env`; `docker-compose.yml` resolves it to `/home/heimdallm/repos:ro` inside the container. In the UI the path to enter is `/home/heimdallm/repos/<name>`, not the host path. Keep this in mind when writing user-visible copy about paths. **Important:** the mount target must be under `/home/heimdallm/` — the executor rejects workdirs outside the heimdallm user's home and `/tmp`.
+The daemon can run the AI agent with a CWD set to a local directory (full-repo analysis vs diff-only review). The operator sets a single env var — `HEIMDALLM_LOCAL_DIR_BASE` — which both targets consume:
+- **Desktop**: the daemon reads it directly; supports a comma-separated list of host paths (`/Users/you/projects,/Users/you/other-org`) so multi-workspace setups work without per-repo overrides.
+- **Docker**: `docker-compose.yml` uses the same env var as the bind-mount source and maps it to `/repos:ro` inside the container. Only the first path is mounted (compose volumes take a single source); for a second workspace add another `- path:/more-repos:ro` entry manually.
+
+In the UI the path to enter is the container-side path (`/repos/<name>` on Docker) or the real host path (on desktop). Keep this in mind when writing user-visible copy about paths.
 
 ### Nginx + compose
 

@@ -330,7 +330,7 @@ type ActivityLogConfig struct {
 
 // DefaultReposMountPath is the conventional location inside the daemon's
 // container where an operator's repos root is bind-mounted (e.g. via
-// HEIMDALLM_REPOS_DIR=/Users/you/projects → /repos). Exposed as a
+// HEIMDALLM_LOCAL_DIR_BASE=/Users/you/projects → /repos). Exposed as a
 // package variable so tests can redirect auto-detection at a temp dir
 // without also having to mock the filesystem. On desktop installs it
 // is still "/repos" but nothing is mounted there, so detection simply
@@ -357,7 +357,7 @@ func ShortRepoName(repo string) string {
 //     Supports multiple workspace groups (e.g. ai-platform repos in one
 //     dir, another team in another) without per-repo local_dir entries.
 //  3. `DefaultReposMountPath/<short-name>` when that directory exists —
-//     lets an operator drop a single HEIMDALLM_REPOS_DIR into
+//     lets an operator drop a single HEIMDALLM_LOCAL_DIR_BASE into
 //     docker/.env and have every monitored repo picked up without also
 //     touching the per-repo override in the UI.
 //  4. Empty string — the agent runs in its default CWD (diff-only mode).

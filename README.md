@@ -182,9 +182,16 @@ On Docker the daemon is containerised, so "a directory on the daemon's side" mea
 
 ```bash
 # In docker/.env
-HEIMDALLM_REPOS_DIR=/Users/you/projects       # macOS / Linux
+HEIMDALLM_LOCAL_DIR_BASE=/Users/you/projects       # macOS / Linux
 # or
-HEIMDALLM_REPOS_DIR=/home/you/code
+HEIMDALLM_LOCAL_DIR_BASE=/home/you/code
+```
+
+On desktop the daemon reads the same env var directly (no mount involved) and supports a comma-separated list for multi-workspace setups:
+
+```bash
+export HEIMDALLM_LOCAL_DIR_BASE=/Users/you/projects,/Users/you/other-org
+make dev
 ```
 
 ```bash

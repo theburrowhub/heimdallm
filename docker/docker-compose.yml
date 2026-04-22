@@ -92,12 +92,15 @@ services:
       #
       # Local repos for full-repo analysis. The agent runs with its CWD
       # set to the Local Directory the operator picked in the UI, e.g.
-      # `/repos/api-specs`. Set HEIMDALLM_REPOS_DIR in docker/.env to
-      # your host's repos root (e.g. /Users/you/projects). When unset
-      # we mount an empty placeholder so compose doesn't error and the
-      # feature just returns "directory not found" in the UI — i.e.
-      # the feature is opt-in without breaking the default `make up-build`.
-      - ${HEIMDALLM_REPOS_DIR:-./repos-placeholder}:/repos:ro
+      # `/repos/api-specs`. Set HEIMDALLM_LOCAL_DIR_BASE in docker/.env
+      # to your host's repos root (e.g. /Users/you/projects). Same env
+      # var the daemon reads on desktop (multi-workspace comma-list), so
+      # operators only remember one name; on Docker only the first path
+      # gets bind-mounted because `docker run -v` takes a single source.
+      # When unset we mount an empty placeholder so compose doesn't error
+      # and the feature just returns "directory not found" in the UI —
+      # opt-in without breaking the default `make up-build`.
+      - ${HEIMDALLM_LOCAL_DIR_BASE:-./repos-placeholder}:/repos:ro
       #
       # SSH agent forwarding for git operations (auto_implement).
       # macOS: Docker Desktop exposes the host agent at a fixed path.

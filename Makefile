@@ -330,13 +330,13 @@ _post-up-hints:
 	      echo "     ANTHROPIC_API_KEY  CLAUDE_CODE_OAUTH_TOKEN  OPENAI_API_KEY  GEMINI_API_KEY"; fi
 	@echo ""
 	@set -a; . $(DOCKER_ENV); set +a; \
-	 if [ -z "$${HEIMDALLM_REPOS_DIR:-}" ]; then \
+	 if [ -z "$${HEIMDALLM_LOCAL_DIR_BASE:-}" ]; then \
 	   echo "ℹ  Full-repo analysis is OFF (agent only sees the PR diff)."; \
 	   echo "   To enable, add to $(DOCKER_ENV):"; \
-	   echo "       HEIMDALLM_REPOS_DIR=/absolute/path/to/your/projects"; \
+	   echo "       HEIMDALLM_LOCAL_DIR_BASE=/absolute/path/to/your/projects"; \
 	   echo "   Then \`make down && make up\`. In the UI use /repos/<name> as Local Directory."; \
 	 else \
-	   echo "✓  Full-repo analysis enabled: $${HEIMDALLM_REPOS_DIR} → /repos (read-only)"; \
+	   echo "✓  Full-repo analysis enabled: $${HEIMDALLM_LOCAL_DIR_BASE} → /repos (read-only)"; \
 	 fi
 	@echo ""
 	@set -a; . $(DOCKER_ENV); set +a; \

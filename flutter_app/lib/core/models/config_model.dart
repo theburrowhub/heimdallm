@@ -341,7 +341,7 @@ class AppConfig {
   final List<String> globalPRLabels;
   /// Auto-detected `local_dir` per repo, populated by the daemon when the
   /// repo is visible at `/repos/<short-name>` in the container (i.e. the
-  /// operator set HEIMDALLM_REPOS_DIR). The daemon falls back to this
+  /// operator set HEIMDALLM_LOCAL_DIR_BASE). The daemon falls back to this
   /// value at review time when the per-repo `local_dir` is empty; the UI
   /// surfaces it next to the repo so the user knows full-repo analysis
   /// will kick in without configuring anything. Keyed by "org/repo".

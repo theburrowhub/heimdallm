@@ -179,23 +179,23 @@ Set a specific path for a single repo in `config.toml` or the web UI:
 local_dir = "/home/heimdallm/repos/api"
 ```
 
-### Default `/home/heimdallm/repos/{repo-name}` fallback
+### Default `/repos/{repo-name}` fallback
 
-When `HEIMDALLM_REPOS_DIR` is set in `docker/.env`, the compose file bind-mounts your host's repos root to `/home/heimdallm/repos` inside the container (read-only). The daemon then falls back to `/home/heimdallm/repos/{short-repo-name}` for any repo that doesn't match the base list.
+When `HEIMDALLM_LOCAL_DIR_BASE` is set in `docker/.env`, the compose file bind-mounts your host's repos root to `/repos` inside the container (read-only). The daemon then falls back to `/repos/{short-repo-name}` for any repo that doesn't match the base list.
 
 ```bash
 # docker/.env — mount your host repos root
-HEIMDALLM_REPOS_DIR=/Users/you/projects
+HEIMDALLM_LOCAL_DIR_BASE=/Users/you/projects
 ```
 
 The corresponding volume mount in `docker-compose.yml`:
 
 ```yaml
 volumes:
-  - ${HEIMDALLM_REPOS_DIR}:/home/heimdallm/repos:ro
+  - ${HEIMDALLM_LOCAL_DIR_BASE}:/repos:ro
 ```
 
-After `make down && make up`, any repo at `/Users/you/projects/api` is automatically accessible at `/home/heimdallm/repos/api` inside the container.
+After `make down && make up`, any repo at `/Users/you/projects/api` is automatically accessible at `/repos/api` inside the container. On Docker the env var must be a single path (compose volumes take one source); on desktop the daemon reads the same env var and accepts a comma-separated list of paths for multi-workspace setups.
 
 ---
 
@@ -600,7 +600,7 @@ The `web` service depends on the daemon's healthcheck (`/health`) before accepti
 |---|---|---|
 | `heimdallm-data` (named) | `/data` | SQLite database and API token |
 | `heimdallm-config` (named) | `/config` | `config.toml` (daemon-owned, web UI edits here) |
-| `$HEIMDALLM_REPOS_DIR` | `/home/heimdallm/repos` (read-only) | Host repos root for full-repo analysis |
+| `$HEIMDALLM_LOCAL_DIR_BASE` | `/repos` (read-only) | Host repos root for full-repo analysis |
 | SSH agent socket | `/ssh-agent` (read-only) | SSH agent for git operations in `auto_implement` |
 
 The config volume is a **named volume** (not a bind mount). This is intentional — a bind mount would be owned by root on the host, which blocked the daemon from writing `config.toml`. The image chowns `/config` to the `heimdallm` user during build.
@@ -873,7 +873,7 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # primary          = "claude"
 # fallback         = "gemini"
 # review_mode      = "multi"
-# local_dir        = "/home/heimdallm/repos/api"  # container path; mount via HEIMDALLM_REPOS_DIR
+# local_dir        = "/repos/api"  # container path; mount via HEIMDALLM_LOCAL_DIR_BASE
 # prompt           = "security-profile"   # agent profile for PR reviews
 # issue_prompt     = "triage-profile"     # agent profile for issue triage
 # implement_prompt = "impl-profile"       # agent profile for auto_implement

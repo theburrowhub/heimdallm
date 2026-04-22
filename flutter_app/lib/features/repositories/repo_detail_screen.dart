@@ -526,7 +526,7 @@ class _LocalDirField extends StatefulWidget {
   final String value;
   final ValueChanged<String> onChanged;
   /// Non-null when the daemon detected a `/repos/<name>` path for this repo
-  /// (HEIMDALLM_REPOS_DIR is mounted and the repo is visible there). Shown
+  /// (HEIMDALLM_LOCAL_DIR_BASE is mounted and the repo is visible there). Shown
   /// as the field's placeholder + a small hint below the row so the operator
   /// knows the fallback will kick in if they leave the field empty.
   final String? detectedDir;
