@@ -292,12 +292,16 @@ func (p *Pipeline) runReviewOnly(ctx context.Context, issue *github.Issue, issue
 	var triageCtx string
 	prevReview, _ := p.store.LatestIssueReview(issueID)
 	if prevReview != nil {
+		lastTriageRef := prevReview.CommentedAt
+		if lastTriageRef.IsZero() {
+			lastTriageRef = prevReview.CreatedAt
+		}
 		triageCtx = buildTriageContext(
 			prevReview.Triage,
 			prevReview.Suggestions,
 			prevReview.Summary,
 			extractSeverity(prevReview.Triage),
-			prevReview.CreatedAt,
+			lastTriageRef,
 			comments,
 			p.botLogin,
 		)
@@ -445,12 +449,16 @@ func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, is
 	var triageCtx string
 	prevReview, _ := p.store.LatestIssueReview(issueID)
 	if prevReview != nil {
+		lastTriageRef := prevReview.CommentedAt
+		if lastTriageRef.IsZero() {
+			lastTriageRef = prevReview.CreatedAt
+		}
 		triageCtx = buildTriageContext(
 			prevReview.Triage,
 			prevReview.Suggestions,
 			prevReview.Summary,
 			extractSeverity(prevReview.Triage),
-			prevReview.CreatedAt,
+			lastTriageRef,
 			comments,
 			p.botLogin,
 		)

@@ -111,6 +111,7 @@ type IssueReview struct {
 	ActionTaken string          `json:"action_taken"`
 	PRCreated   int             `json:"pr_created"`
 	CreatedAt   time.Time       `json:"created_at"`
+	CommentedAt time.Time       `json:"commented_at"`
 }
 
 type Issue struct {
