@@ -255,6 +255,13 @@ type AIConfig struct {
 	PRAssignee  string   `toml:"pr_assignee"`
 	PRDraft     *bool    `toml:"pr_draft,omitempty"`
 
+	// IssuePrompt is the global default agent profile ID for issue triage.
+	// Per-repo overrides in [ai.repos.<name>] take precedence.
+	IssuePrompt string `toml:"issue_prompt"`
+	// ImplementPrompt is the global default agent profile ID for auto-implement.
+	// Per-repo overrides in [ai.repos.<name>] take precedence.
+	ImplementPrompt string `toml:"implement_prompt"`
+
 	// GeneratePRDescription enables LLM-generated PR titles and descriptions
 	// for auto_implement PRs. When true, after the implementation commit,
 	// a second LLM call generates a rich PR description from the diff.
@@ -409,7 +416,7 @@ func repoOrg(repo string) string {
 // flat [ai] fields on top of [ai.pr_metadata]. Flat fields win when set,
 // matching the contract that HEIMDALLM_PR_* env vars populate the flat
 // fields and should override the nested section.
-func (c *Config) resolvedPRMetadata() (reviewers, labels []string, assignee string, draft *bool) {
+func (c *Config) ResolvedPRMetadata() (reviewers, labels []string, assignee string, draft *bool) {
 	reviewers = c.AI.PRMetadata.Reviewers
 	labels = c.AI.PRMetadata.Labels
 	assignee = c.AI.PRMetadata.Assignee
@@ -435,7 +442,7 @@ func (c *Config) resolvedPRMetadata() (reviewers, labels []string, assignee stri
 // three levels: per-repo > per-org > global defaults. Each PR metadata
 // field resolves independently.
 func (c *Config) AIForRepo(repo string) RepoAI {
-	gReviewers, gLabels, gAssignee, gDraft := c.resolvedPRMetadata()
+	gReviewers, gLabels, gAssignee, gDraft := c.ResolvedPRMetadata()
 
 	// Org-level layer: start from global, overlay org-level fields.
 	orgReviewers, orgLabels, orgAssignee, orgDraft := gReviewers, gLabels, gAssignee, gDraft

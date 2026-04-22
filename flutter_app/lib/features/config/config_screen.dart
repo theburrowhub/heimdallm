@@ -5,6 +5,7 @@ import '../../core/models/config_model.dart';
 import '../../core/platform/platform_services_provider.dart';
 import '../../shared/widgets/autocomplete_chip_field.dart';
 import '../../shared/widgets/toast.dart';
+import '../agents/agents_screen.dart' show agentsProvider;
 import '../dashboard/dashboard_providers.dart';
 import 'config_providers.dart';
 
@@ -25,6 +26,8 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   String _pollInterval = '5m';
   int _retentionDays = 90;
   IssueTrackingConfig _issueTracking = const IssueTrackingConfig();
+  String? _issuePromptId;
+  String? _developPromptId;
 
   // All known repos. Key = "org/repo", Value = per-repo settings.
   Map<String, RepoConfig> _repoConfigs = {};
@@ -73,6 +76,8 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     _retentionDays = config.retentionDays;
     _repoConfigs = Map.from(config.repoConfigs);
     _issueTracking = config.issueTracking;
+    _issuePromptId = config.globalIssuePrompt.isEmpty ? null : config.globalIssuePrompt;
+    _developPromptId = config.globalImplementPrompt.isEmpty ? null : config.globalImplementPrompt;
   }
 
   /// Auto-discovers repos from the user's PRs. Runs silently on init.
@@ -451,12 +456,21 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
             _issueTracking = _issueTracking.copyWith(assignees: v ?? []);
           }),
         ),
+        const SizedBox(height: 10),
+        _agentDropdown(
+          label: 'Issue Prompt',
+          helper: 'Agent profile for issue triage',
+          value: _issuePromptId,
+          onChanged: (v) => setState(() => _issuePromptId = v),
+        ),
       ],
     ]);
   }
 
   List<String> _globalPRReviewers = [];
   List<String> _globalPRLabels = [];
+  String _globalPRAssignee = '';
+  bool _globalPRDraft = false;
   bool _developInitialized = false;
 
   void _initDevelopFromConfig(AppConfig config) {
@@ -464,6 +478,8 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     _developInitialized = true;
     _globalPRReviewers = List.from(config.globalPRReviewers);
     _globalPRLabels = List.from(config.globalPRLabels);
+    _globalPRAssignee = config.globalPRAssignee;
+    _globalPRDraft = config.globalPRDraft;
   }
 
   Widget _developSection(AppConfig config) {
@@ -479,42 +495,108 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
         contentPadding: EdgeInsets.zero,
         value: hasLabels,
         onChanged: (v) => setState(() {
-          if (!v) {
+          if (v) {
+            // Give it a default label so the section stays enabled
+            if (_issueTracking.developLabels.isEmpty) {
+              _issueTracking = _issueTracking.copyWith(developLabels: ['develop']);
+            }
+          } else {
             _issueTracking = _issueTracking.copyWith(developLabels: []);
           }
         }),
       ),
-      const SizedBox(height: 6),
-      AutocompleteChipField(
-        label: 'Develop labels',
-        helper: 'Issues with these labels get a branch + PR',
-        selectedValues: _issueTracking.developLabels,
-        availableOptions: const [],
-        onChanged: (v) => setState(() {
-          _issueTracking = _issueTracking.copyWith(developLabels: v ?? []);
-        }),
-      ),
-      const SizedBox(height: 10),
-      AutocompleteChipField(
-        label: 'PR Reviewers',
-        helper: 'GitHub usernames to request review',
-        selectedValues: _globalPRReviewers,
-        availableOptions: const [],
-        onChanged: (v) => setState(() {
-          _globalPRReviewers = v ?? [];
-        }),
-      ),
-      const SizedBox(height: 10),
-      AutocompleteChipField(
-        label: 'PR Labels',
-        helper: 'Labels to add to PRs',
-        selectedValues: _globalPRLabels,
-        availableOptions: const [],
-        onChanged: (v) => setState(() {
-          _globalPRLabels = v ?? [];
-        }),
-      ),
+      if (hasLabels) ...[
+        const SizedBox(height: 6),
+        AutocompleteChipField(
+          label: 'Develop labels',
+          helper: 'Issues with these labels get a branch + PR',
+          selectedValues: _issueTracking.developLabels,
+          availableOptions: const [],
+          onChanged: (v) => setState(() {
+            _issueTracking = _issueTracking.copyWith(developLabels: v ?? []);
+          }),
+        ),
+        const SizedBox(height: 10),
+        AutocompleteChipField(
+          label: 'PR Reviewers',
+          helper: 'GitHub usernames to request review',
+          selectedValues: _globalPRReviewers,
+          availableOptions: const [],
+          onChanged: (v) => setState(() {
+            _globalPRReviewers = v ?? [];
+          }),
+        ),
+        const SizedBox(height: 10),
+        AutocompleteChipField(
+          label: 'PR Assignee',
+          helper: 'GitHub username to assign PRs to',
+          selectedValues: _globalPRAssignee.isEmpty ? [] : [_globalPRAssignee],
+          availableOptions: const [],
+          onChanged: (v) => setState(() {
+            _globalPRAssignee = (v != null && v.isNotEmpty) ? v.first : '';
+          }),
+        ),
+        const SizedBox(height: 10),
+        AutocompleteChipField(
+          label: 'PR Labels',
+          helper: 'Labels to add to PRs',
+          selectedValues: _globalPRLabels,
+          availableOptions: const [],
+          onChanged: (v) => setState(() {
+            _globalPRLabels = v ?? [];
+          }),
+        ),
+        const SizedBox(height: 10),
+        SwitchListTile(
+          title: const Text('Create as draft', style: TextStyle(fontSize: 13)),
+          subtitle: const Text('PRs are created as drafts by default',
+              style: TextStyle(fontSize: 11)),
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+          value: _globalPRDraft,
+          onChanged: (v) => setState(() => _globalPRDraft = v),
+        ),
+        const SizedBox(height: 10),
+        _agentDropdown(
+          label: 'Develop Prompt',
+          helper: 'Agent profile for auto-implementation',
+          value: _developPromptId,
+          onChanged: (v) => setState(() => _developPromptId = v),
+        ),
+      ],
     ]);
+  }
+
+  Widget _agentDropdown({
+    required String label,
+    required String helper,
+    required String? value,
+    required ValueChanged<String?> onChanged,
+  }) {
+    final agents = ref.watch(agentsProvider).valueOrNull ?? [];
+    final options = agents.map((a) => a.id).toList();
+    final effective = (value != null && options.contains(value)) ? value : null;
+    return DropdownButtonFormField<String?>(
+      key: ValueKey('$label-$effective'),
+      initialValue: effective,
+      decoration: InputDecoration(
+        labelText: label,
+        helperText: helper,
+        border: const OutlineInputBorder(),
+        isDense: true,
+      ),
+      items: [
+        const DropdownMenuItem<String?>(
+          value: null,
+          child: Text('default', style: TextStyle(fontSize: 12)),
+        ),
+        ...options.map((id) => DropdownMenuItem<String?>(
+              value: id,
+              child: Text(id, style: const TextStyle(fontSize: 12)),
+            )),
+      ],
+      onChanged: onChanged,
+    );
   }
 
   Widget _settingsCard(String title, List<Widget> children) {
@@ -611,6 +693,10 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     issueTracking: _issueTracking,
     globalPRReviewers: _globalPRReviewers,
     globalPRLabels: _globalPRLabels,
+    globalPRAssignee: _globalPRAssignee,
+    globalPRDraft: _globalPRDraft,
+    globalIssuePrompt: _issuePromptId ?? '',
+    globalImplementPrompt: _developPromptId ?? '',
     // aiPrimary, aiFallback, reviewMode, agentConfigs managed in Agents tab
   );
 
