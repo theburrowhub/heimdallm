@@ -43,8 +43,12 @@ class ApiClient {
     }
   }
 
-  Future<List<PR>> fetchPRs() async {
-    final resp = await _client.get(_uri('/prs'), headers: await _authHeaders());
+  Future<List<PR>> fetchPRs({List<String> states = const []}) async {
+    var path = '/prs';
+    if (states.isNotEmpty) {
+      path += '?state=${states.join(',')}';
+    }
+    final resp = await _client.get(_uri(path), headers: await _authHeaders());
     if (resp.statusCode != 200) {
       throw ApiException('GET /prs failed: ${resp.statusCode}');
     }
@@ -250,8 +254,12 @@ class ApiClient {
 
   // ── Issues ────────────────────────────────────────────────────────────
 
-  Future<List<TrackedIssue>> fetchIssues() async {
-    final resp = await _client.get(_uri('/issues'), headers: await _authHeaders());
+  Future<List<TrackedIssue>> fetchIssues({List<String> states = const []}) async {
+    var path = '/issues';
+    if (states.isNotEmpty) {
+      path += '?state=${states.join(',')}';
+    }
+    final resp = await _client.get(_uri(path), headers: await _authHeaders());
     if (resp.statusCode != 200) {
       throw ApiException('GET /issues failed: ${resp.statusCode}');
     }
