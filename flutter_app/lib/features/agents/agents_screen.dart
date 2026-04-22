@@ -72,16 +72,25 @@ class _PromptsView extends ConsumerWidget {
           Expanded(
             child: TabBarView(
               children: [
-                _PRReviewTab(prompts: prompts),
+                _CategoryTab(
+                  category: _PromptCategory.prReview,
+                  prompts: prompts,
+                  presets: ReviewPrompt.presets,
+                  emptyMessage: 'Add a preset or create a custom prompt.',
+                ),
                 _CategoryTab(
                   category: _PromptCategory.issueTriage,
                   prompts: prompts,
-                  emptyMessage: 'No issue triage prompts yet. Create one to customise how issues are analysed.',
+                  presets: ReviewPrompt.issueTriagePresets,
+                  emptyMessage:
+                      'Tap a preset above or create a custom prompt to customise how issues are analysed.',
                 ),
                 _CategoryTab(
                   category: _PromptCategory.development,
                   prompts: prompts,
-                  emptyMessage: 'No development prompts yet. Create one to customise auto-implementation.',
+                  presets: ReviewPrompt.developmentPresets,
+                  emptyMessage:
+                      'Tap a preset above or create a custom prompt to customise auto-implementation.',
                 ),
               ],
             ),
@@ -92,26 +101,49 @@ class _PromptsView extends ConsumerWidget {
   }
 }
 
-// ── PR Review tab (with presets) ─────────────────────────────────────────────
+// ── Category tab (shared between PR Review, Issue Triage, Development) ───────
 
-class _PRReviewTab extends ConsumerWidget {
+/// Renders a horizontal preset row at the top + the list of already-added
+/// prompts below it. The per-category differences (which agents filter into
+/// the list, which subtitle to render on each tile, whether the Activate
+/// button appears on the tile trailing row) are parameterised off the
+/// category enum — otherwise the three tabs were ~130 lines of near-duplicate
+/// scaffolding.
+class _CategoryTab extends ConsumerWidget {
+  final _PromptCategory category;
   final List<ReviewPrompt> prompts;
-  const _PRReviewTab({required this.prompts});
+  final List<PresetDef> presets;
+  final String emptyMessage;
+  const _CategoryTab({
+    required this.category,
+    required this.prompts,
+    required this.presets,
+    required this.emptyMessage,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final prPrompts = prompts.where((p) => p.hasPRReview).toList();
+    final filtered = prompts.where((p) => switch (category) {
+          _PromptCategory.prReview => p.hasPRReview,
+          _PromptCategory.issueTriage => p.hasIssueTriage,
+          _PromptCategory.development => p.hasDevelopment,
+        }).toList();
+
+    // Only PR Review surfaces the Activate button on the tile trailing row —
+    // for Issue Triage / Development activation flows through the editor's
+    // "Set as active" toggle (the agent record carries all three categories
+    // and activating it wires all of them simultaneously).
+    final showActivateOnTile = category == _PromptCategory.prReview;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Presets
         _SectionHeader(
           title: 'Presets',
           trailing: TextButton.icon(
             icon: const Icon(Icons.add, size: 16),
             label: const Text('Custom'),
-            onPressed: () => _openEditor(context, ref, null, _PromptCategory.prReview),
+            onPressed: () => _openEditor(context, ref, null, category),
           ),
         ),
         SizedBox(
@@ -119,101 +151,41 @@ class _PRReviewTab extends ConsumerWidget {
           child: ListView(
             scrollDirection: Axis.horizontal,
             padding: const EdgeInsets.symmetric(horizontal: 16),
-            children: ReviewPrompt.presets.map((preset) {
+            children: presets.map((preset) {
               final already = prompts.any((p) => p.id == preset.id);
               return _PresetCard(
                 preset: preset,
                 added: already,
                 onAdd: already ? null : () => _addPreset(context, ref, preset),
                 onActivate: already
-                    ? () => _setDefault(context, ref, prompts.firstWhere((p) => p.id == preset.id))
+                    ? () => _setDefault(context, ref,
+                        prompts.firstWhere((p) => p.id == preset.id))
                     : null,
               );
             }).toList(),
           ),
         ),
-
         const SizedBox(height: 8),
-
-        // My Prompts
-        if (prPrompts.isNotEmpty) ...[
+        if (filtered.isNotEmpty) ...[
           const _SectionHeader(title: 'My Prompts'),
-          Expanded(
-            child: ListView.builder(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-              itemCount: prPrompts.length,
-              itemBuilder: (_, i) => _PromptTile(
-                prompt: prPrompts[i],
-                onEdit: () => _openEditor(context, ref, prPrompts[i], _PromptCategory.prReview),
-                onDelete: () => _delete(context, ref, prPrompts[i]),
-                onActivate: () => _setDefault(context, ref, prPrompts[i]),
-              ),
-            ),
-          ),
-        ] else
-          const Expanded(
-            child: Center(
-              child: Text('Add a preset or create a custom prompt.',
-                  style: TextStyle(color: Colors.grey)),
-            ),
-          ),
-      ],
-    );
-  }
-}
-
-// ── Generic category tab (Issue Triage / Development) ────────────────────────
-
-class _CategoryTab extends ConsumerWidget {
-  final _PromptCategory category;
-  final List<ReviewPrompt> prompts;
-  final String emptyMessage;
-  const _CategoryTab({required this.category, required this.prompts, required this.emptyMessage});
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final filtered = prompts.where((p) {
-      if (category == _PromptCategory.issueTriage) return p.hasIssueTriage;
-      if (category == _PromptCategory.development) return p.hasDevelopment;
-      return true;
-    }).toList();
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _SectionHeader(
-          title: category == _PromptCategory.issueTriage ? 'Issue Triage Prompts' : 'Development Prompts',
-          trailing: TextButton.icon(
-            icon: const Icon(Icons.add, size: 16),
-            label: const Text('Add'),
-            onPressed: () => _openEditor(context, ref, null, category),
-          ),
-        ),
-        if (filtered.isNotEmpty)
           Expanded(
             child: ListView.builder(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
               itemCount: filtered.length,
               itemBuilder: (_, i) {
-                final subtitle = category == _PromptCategory.issueTriage
-                    ? (filtered[i].issueInstructions.isNotEmpty
-                        ? filtered[i].issueInstructions
-                        : 'Custom issue triage template')
-                    : (filtered[i].implementInstructions.isNotEmpty
-                        ? filtered[i].implementInstructions
-                        : 'Custom development template');
+                final subtitle = _tileSubtitle(filtered[i]);
                 return _PromptTile(
                   prompt: filtered[i],
                   subtitleOverride: subtitle,
-                  showActivate: false,
+                  showActivate: showActivateOnTile,
                   onEdit: () => _openEditor(context, ref, filtered[i], category),
                   onDelete: () => _delete(context, ref, filtered[i]),
                   onActivate: () => _setDefault(context, ref, filtered[i]),
                 );
               },
             ),
-          )
-        else
+          ),
+        ] else
           Expanded(
             child: Center(
               child: Text(emptyMessage, style: const TextStyle(color: Colors.grey)),
@@ -221,6 +193,21 @@ class _CategoryTab extends ConsumerWidget {
           ),
       ],
     );
+  }
+
+  String _tileSubtitle(ReviewPrompt p) {
+    switch (category) {
+      case _PromptCategory.prReview:
+        return p.instructions.isNotEmpty ? p.instructions : 'Custom template';
+      case _PromptCategory.issueTriage:
+        return p.issueInstructions.isNotEmpty
+            ? p.issueInstructions
+            : 'Custom issue triage template';
+      case _PromptCategory.development:
+        return p.implementInstructions.isNotEmpty
+            ? p.implementInstructions
+            : 'Custom development template';
+    }
   }
 }
 
