@@ -79,6 +79,10 @@ func (c AgentCategory) defaultColumn() string {
 const agentColumns = "id, name, cli, prompt, instructions, cli_flags, is_default_pr, is_default_issue, is_default_dev, created_at, issue_prompt, issue_instructions, implement_prompt, implement_instructions"
 
 func (s *Store) ListAgents() ([]*Agent, error) {
+	// Sort "most-active first": agents active in more categories appear
+	// higher than single-category ones, inactive ones last. Matches how
+	// the UI wants to present them (the currently-most-impactful agent at
+	// the top of the list).
 	rows, err := s.db.Query(
 		"SELECT " + agentColumns + " FROM agents " +
 			"ORDER BY (is_default_pr + is_default_issue + is_default_dev) DESC, name ASC",
@@ -103,7 +107,16 @@ func (s *Store) UpsertAgent(a *Agent) error {
 	if a.CreatedAt.IsZero() {
 		a.CreatedAt = time.Now().UTC()
 	}
-	_, err := s.db.Exec(`
+	// INSERT + up to three clear-other-actives UPDATEs must be atomic —
+	// a crash partway through would leave multiple agents marked active
+	// for the same category, violating the "at most one active per
+	// category" invariant the rest of the daemon relies on.
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("store: begin upsert agent: %w", err)
+	}
+	defer tx.Rollback() // no-op after successful Commit
+	if _, err := tx.Exec(`
 		INSERT INTO agents (id, name, cli, prompt, instructions, cli_flags, is_default_pr, is_default_issue, is_default_dev, created_at, issue_prompt, issue_instructions, implement_prompt, implement_instructions)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
@@ -119,28 +132,29 @@ func (s *Store) UpsertAgent(a *Agent) error {
 		a.CreatedAt.UTC().Format(time.RFC3339),
 		a.IssuePrompt, a.IssueInstructions,
 		a.ImplementPrompt, a.ImplementInstructions,
-	)
-	if err != nil {
+	); err != nil {
 		return fmt.Errorf("store: upsert agent: %w", err)
 	}
-	// Each category holds an independent invariant "at most one active
-	// agent per category" — clear the flag only on the categories this
-	// upsert claimed, so activating a triage-only preset doesn't nuke the
-	// user's PR-review active agent as a side effect.
+	// Clear the flag only on the categories this upsert claimed, so
+	// activating a triage-only preset doesn't nuke the user's PR-review
+	// active agent as a side effect.
 	if a.IsDefaultPR {
-		if _, err := s.db.Exec("UPDATE agents SET is_default_pr=0 WHERE id != ?", a.ID); err != nil {
+		if _, err := tx.Exec("UPDATE agents SET is_default_pr=0 WHERE id != ?", a.ID); err != nil {
 			return fmt.Errorf("store: clear default pr: %w", err)
 		}
 	}
 	if a.IsDefaultIssue {
-		if _, err := s.db.Exec("UPDATE agents SET is_default_issue=0 WHERE id != ?", a.ID); err != nil {
+		if _, err := tx.Exec("UPDATE agents SET is_default_issue=0 WHERE id != ?", a.ID); err != nil {
 			return fmt.Errorf("store: clear default issue: %w", err)
 		}
 	}
 	if a.IsDefaultDev {
-		if _, err := s.db.Exec("UPDATE agents SET is_default_dev=0 WHERE id != ?", a.ID); err != nil {
+		if _, err := tx.Exec("UPDATE agents SET is_default_dev=0 WHERE id != ?", a.ID); err != nil {
 			return fmt.Errorf("store: clear default dev: %w", err)
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit upsert agent: %w", err)
 	}
 	return nil
 }

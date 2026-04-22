@@ -62,6 +62,9 @@ CREATE TABLE IF NOT EXISTS agents (
   prompt                 TEXT NOT NULL DEFAULT '',
   instructions           TEXT NOT NULL DEFAULT '',
   cli_flags              TEXT NOT NULL DEFAULT '',
+  -- Legacy column, kept so the migration seed below can read from it on
+  -- existing DBs. No code writes to it after this release; the three
+  -- per-category flags below are the source of truth.
   is_default             INTEGER NOT NULL DEFAULT 0,
   is_default_pr          INTEGER NOT NULL DEFAULT 0,
   is_default_issue       INTEGER NOT NULL DEFAULT 0,

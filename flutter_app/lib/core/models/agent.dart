@@ -98,7 +98,9 @@ class ReviewPrompt {
     // flag. When only the legacy key is present (e.g. first load after
     // upgrade, before any save has happened), seed all three — preserves
     // the "one agent drove all three pipelines" behaviour the user had
-    // pre-migration.
+    // pre-migration. Per-category keys always win, so `is_default: true`
+    // + `is_default_pr: false` yields isDefaultPr=false, not a fallback
+    // to true.
     isDefaultPr: _parseBool(json['is_default_pr']) ??
         _parseBool(json['is_default']) ??
         false,

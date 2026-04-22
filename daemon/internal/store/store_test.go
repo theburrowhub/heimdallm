@@ -1,6 +1,8 @@
 package store_test
 
 import (
+	"database/sql"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -325,6 +327,78 @@ func TestStore_UpsertAgent_ActivationReplacesWithinCategory(t *testing.T) {
 	}
 	if active != 1 {
 		t.Errorf("want exactly 1 IsDefaultPR agent, got %d", active)
+	}
+}
+
+// Legacy rows with the old single `is_default=1` flag must seed all three
+// per-category flags the first time the new code opens the DB — otherwise
+// an upgrade would silently deactivate the user's only active agent.
+func TestStore_Migration_SeedsPerCategoryFlagsFromLegacyIsDefault(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy.db")
+
+	// Simulate the old schema: CREATE TABLE without the per-category
+	// columns, then INSERT a row where only the legacy `is_default` is on.
+	legacy, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open legacy: %v", err)
+	}
+	if _, err := legacy.Exec(`
+		CREATE TABLE agents (
+			id                     TEXT PRIMARY KEY,
+			name                   TEXT NOT NULL,
+			cli                    TEXT NOT NULL DEFAULT 'claude',
+			prompt                 TEXT NOT NULL DEFAULT '',
+			instructions           TEXT NOT NULL DEFAULT '',
+			cli_flags              TEXT NOT NULL DEFAULT '',
+			is_default             INTEGER NOT NULL DEFAULT 0,
+			created_at             DATETIME NOT NULL,
+			issue_prompt           TEXT NOT NULL DEFAULT '',
+			issue_instructions     TEXT NOT NULL DEFAULT '',
+			implement_prompt       TEXT NOT NULL DEFAULT '',
+			implement_instructions TEXT NOT NULL DEFAULT ''
+		)
+	`); err != nil {
+		t.Fatalf("create legacy table: %v", err)
+	}
+	if _, err := legacy.Exec(
+		`INSERT INTO agents (id, name, is_default, created_at) VALUES ('legacy', 'L', 1, ?)`,
+		time.Now().UTC().Format(time.RFC3339),
+	); err != nil {
+		t.Fatalf("insert legacy row: %v", err)
+	}
+	// Also insert a non-active legacy row to verify it doesn't get activated.
+	if _, err := legacy.Exec(
+		`INSERT INTO agents (id, name, is_default, created_at) VALUES ('other', 'O', 0, ?)`,
+		time.Now().UTC().Format(time.RFC3339),
+	); err != nil {
+		t.Fatalf("insert other row: %v", err)
+	}
+	legacy.Close()
+
+	// Re-open with the current migration code — ALTER TABLE adds the three
+	// new columns and seeds each from `is_default`.
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	agents, err := s.ListAgents()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	byID := map[string]*store.Agent{}
+	for _, a := range agents {
+		byID[a.ID] = a
+	}
+
+	if !byID["legacy"].IsDefaultPR || !byID["legacy"].IsDefaultIssue || !byID["legacy"].IsDefaultDev {
+		t.Errorf("legacy agent: got (pr=%v issue=%v dev=%v), want (true true true) after seed",
+			byID["legacy"].IsDefaultPR, byID["legacy"].IsDefaultIssue, byID["legacy"].IsDefaultDev)
+	}
+	if byID["other"].IsDefaultPR || byID["other"].IsDefaultIssue || byID["other"].IsDefaultDev {
+		t.Errorf("other agent: got (pr=%v issue=%v dev=%v), want all false (was legacy is_default=0)",
+			byID["other"].IsDefaultPR, byID["other"].IsDefaultIssue, byID["other"].IsDefaultDev)
 	}
 }
 
