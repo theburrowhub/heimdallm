@@ -262,6 +262,34 @@ func main() {
 			reviewMu.Unlock()
 		}()
 
+		// Caller-side gate: evaluate review guards BEFORE announcing the review.
+		// This prevents review_started from being emitted for PRs that will be
+		// rejected, which would leave the Flutter dashboard spinner stuck forever.
+		loginMu.Lock()
+		botLogin := cachedLogin
+		loginMu.Unlock()
+		cfgMu.Lock()
+		guards := pipeline.GateConfig(cfg.ReviewGuards(botLogin))
+		cfgMu.Unlock()
+		if reason := pipeline.Evaluate(pipeline.PRGate{
+			State:  pr.State,
+			Draft:  pr.Draft,
+			Author: pr.User.Login,
+		}, guards); reason != pipeline.SkipReasonNone {
+			broker.Publish(sse.Event{
+				Type: sse.EventReviewSkipped,
+				Data: sseData(map[string]any{
+					"repo":      pr.Repo,
+					"pr_number": pr.Number,
+					"pr_title":  pr.Title,
+					"reason":    string(reason),
+				}),
+			})
+			slog.Info("runReview: skipping PR",
+				"repo", pr.Repo, "pr", pr.Number, "reason", string(reason))
+			return
+		}
+
 		// Safety check: log exactly what we're about to review
 		slog.Info("pipeline: reviewing PR",
 			"repo", pr.Repo, "number", pr.Number, "github_id", pr.ID, "title", pr.Title)
@@ -295,18 +323,19 @@ func main() {
 	// tier2Adapter bridges main.go's concrete types to the Pipeline's
 	// Tier 2 / Tier 3 interfaces.
 	adapter := &tier2Adapter{
-		ghClient:  ghClient,
-		ghToken:   token,
-		pipeline:  p,
-		issuePipe: issuePipe,
-		fetcher:   issueFetcher,
-		store:     s,
-		broker:    broker,
-		cfgMu:     &cfgMu,
-		cfg:       &cfg,
-		loginMu:   &loginMu,
-		login:     &cachedLogin,
-		runReview: runReview,
+		ghClient:             ghClient,
+		ghToken:              token,
+		pipeline:             p,
+		issuePipe:            issuePipe,
+		fetcher:              issueFetcher,
+		store:                s,
+		broker:               broker,
+		cfgMu:                &cfgMu,
+		cfg:                  &cfg,
+		loginMu:              &loginMu,
+		login:                &cachedLogin,
+		runReview:            runReview,
+		lastSkippedUpdatedAt: make(map[int64]time.Time),
 	}
 
 	buildPipeline := func(c *config.Config) *scheduler.Pipeline {
@@ -1047,6 +1076,13 @@ type tier2Adapter struct {
 	loginMu   *sync.Mutex
 	login     *string
 	runReview func(pr *gh.PullRequest, aiCfg config.RepoAI)
+
+	// skipMu protects lastSkippedUpdatedAt, which deduplicates review_skipped
+	// SSE events across consecutive poll cycles for the same (PR ID, updated_at)
+	// pair. Entries are pruned at the end of each FetchPRsToReview cycle so the
+	// map stays bounded to the current set of review-requested PRs.
+	skipMu                sync.Mutex
+	lastSkippedUpdatedAt  map[int64]time.Time
 }
 
 // discoveryStore is the subset of *store.Store that processDiscoveredRepos
@@ -1214,30 +1250,53 @@ func (a *tier2Adapter) FetchPRsToReview() ([]scheduler.Tier2PR, error) {
 	a.cfgMu.Unlock()
 
 	out := make([]scheduler.Tier2PR, 0, len(prs))
+	// seenIDs tracks every PR GitHub ID encountered this cycle so we can prune
+	// the skip-dedup map to only live PRs after the loop.
+	seenIDs := make(map[int64]struct{}, len(prs))
 	for _, pr := range prs {
 		if pr.Repo == "" {
 			slog.Warn("adapter: skipping PR with empty repo", "pr_number", pr.Number)
 			continue
 		}
+		seenIDs[pr.ID] = struct{}{}
 		reason := pipeline.Evaluate(pipeline.PRGate{
 			State:  pr.State,
 			Draft:  pr.Draft,
 			Author: pr.User.Login,
 		}, guards)
 		if reason != pipeline.SkipReasonNone {
-			a.broker.Publish(sse.Event{
-				Type: sse.EventReviewSkipped,
-				Data: sseData(map[string]any{
-					"repo":      pr.Repo,
-					"pr_number": pr.Number,
-					"pr_title":  pr.Title,
-					"reason":    string(reason),
-				}),
-			})
-			slog.Info("tier2: skipping PR",
-				"repo", pr.Repo, "pr", pr.Number, "reason", string(reason))
+			// Dedup: only emit review_skipped once per (PR ID, updated_at). A
+			// long-lived draft PR stays in the search results every cycle, but
+			// its updated_at doesn't change, so we suppress the repeat events.
+			a.skipMu.Lock()
+			prev, seen := a.lastSkippedUpdatedAt[pr.ID]
+			alreadyEmitted := seen && !pr.UpdatedAt.After(prev)
+			if !alreadyEmitted {
+				a.lastSkippedUpdatedAt[pr.ID] = pr.UpdatedAt
+			}
+			a.skipMu.Unlock()
+
+			if !alreadyEmitted {
+				a.broker.Publish(sse.Event{
+					Type: sse.EventReviewSkipped,
+					Data: sseData(map[string]any{
+						"repo":      pr.Repo,
+						"pr_number": pr.Number,
+						"pr_title":  pr.Title,
+						"reason":    string(reason),
+					}),
+				})
+				slog.Info("tier2: skipping PR",
+					"repo", pr.Repo, "pr", pr.Number, "reason", string(reason))
+			}
 			continue
 		}
+		// PR passed the gate — clear any prior skip record so if it is later
+		// re-skipped (e.g. converted to draft) we emit the event again.
+		a.skipMu.Lock()
+		delete(a.lastSkippedUpdatedAt, pr.ID)
+		a.skipMu.Unlock()
+
 		out = append(out, scheduler.Tier2PR{
 			ID:        pr.ID,
 			Number:    pr.Number,
@@ -1250,6 +1309,16 @@ func (a *tier2Adapter) FetchPRsToReview() ([]scheduler.Tier2PR, error) {
 			UpdatedAt: pr.UpdatedAt,
 		})
 	}
+
+	// Prune skip-dedup entries for PRs that left the review-requested set
+	// (closed, review request removed, etc.) so the map stays bounded.
+	a.skipMu.Lock()
+	for id := range a.lastSkippedUpdatedAt {
+		if _, inCurrentBatch := seenIDs[id]; !inCurrentBatch {
+			delete(a.lastSkippedUpdatedAt, id)
+		}
+	}
+	a.skipMu.Unlock()
 
 	return out, nil
 }

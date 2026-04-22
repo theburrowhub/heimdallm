@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -94,5 +96,98 @@ func TestTier3Adapter_HandleChange_SkipsClosedPR(t *testing.T) {
 		}
 	case <-time.After(1 * time.Second):
 		t.Fatal("no SSE event emitted within 1s")
+	}
+}
+
+// TestTier2Adapter_FetchPRsToReview_DedupsSkipEvents verifies that when a
+// draft PR appears in consecutive GitHub search results with the same
+// updated_at, FetchPRsToReview emits EventReviewSkipped only ONCE (on the
+// first poll cycle), not on every subsequent cycle.
+func TestTier2Adapter_FetchPRsToReview_DedupsSkipEvents(t *testing.T) {
+	updatedAt := time.Date(2024, 1, 15, 10, 0, 0, 0, time.UTC)
+
+	// The mock server returns the same draft PR on every request.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/user":
+			json.NewEncoder(w).Encode(map[string]string{"login": "heimdallm-bot"})
+		case "/search/issues":
+			result := struct {
+				Items []gh.PullRequest `json:"items"`
+			}{Items: []gh.PullRequest{
+				{
+					ID:     101,
+					Number: 7,
+					Title:  "WIP: draft PR",
+					Draft:  true,
+					State:  "open",
+					User:   gh.User{Login: "alice"},
+					Head: gh.Branch{
+						Repo: gh.Repo{FullName: "org/repo"},
+					},
+					UpdatedAt: updatedAt,
+				},
+			}}
+			json.NewEncoder(w).Encode(result)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	s := newMemStore(t)
+	broker := sse.NewBroker()
+	broker.Start()
+	defer broker.Stop()
+
+	events := broker.Subscribe()
+	defer broker.Unsubscribe(events)
+
+	var (
+		loginMu sync.Mutex
+		login   = "heimdallm-bot"
+		cfgMu   sync.Mutex
+		cfg     = &config.Config{}
+	)
+
+	ghClient := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+
+	a := &tier2Adapter{
+		ghClient:             ghClient,
+		store:                s,
+		broker:               broker,
+		cfgMu:                &cfgMu,
+		cfg:                  &cfg,
+		loginMu:              &loginMu,
+		login:                &login,
+		lastSkippedUpdatedAt: make(map[int64]time.Time),
+	}
+
+	// First cycle: draft PR must trigger exactly one EventReviewSkipped.
+	if _, err := a.FetchPRsToReview(); err != nil {
+		t.Fatalf("cycle 1 FetchPRsToReview: %v", err)
+	}
+
+	// Second cycle: same PR, same updated_at — no new event should be emitted.
+	if _, err := a.FetchPRsToReview(); err != nil {
+		t.Fatalf("cycle 2 FetchPRsToReview: %v", err)
+	}
+
+	// Drain the channel with a short timeout to count events.
+	skipCount := 0
+drain:
+	for {
+		select {
+		case ev := <-events:
+			if ev.Type == sse.EventReviewSkipped {
+				skipCount++
+			}
+		case <-time.After(100 * time.Millisecond):
+			break drain
+		}
+	}
+
+	if skipCount != 1 {
+		t.Errorf("EventReviewSkipped emitted %d time(s); want exactly 1 (dedup across cycles)", skipCount)
 	}
 }
