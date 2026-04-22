@@ -605,8 +605,8 @@ func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, is
 	// Non-fatal on failure — the PR is already public and the review row
 	// carries the number, so a missed comment does not lose information.
 	linkBackBody := fmt.Sprintf(
-		"%s\n✅ Implementation complete — PR #%d created on branch `%s`.\nThis issue will not be reprocessed unless `%s` is added.",
-		MarkerDone, prNumber, branch, MarkerRetry,
+		"%s\n✅ Implementation complete — PR #%d created on branch `%s`.\nThis issue will not be reprocessed unless a retry marker is added.",
+		MarkerDone, prNumber, branch,
 	)
 	commentedAt, linkErr := p.gh.PostComment(issue.Repo, issue.Number, linkBackBody)
 	if linkErr != nil {
