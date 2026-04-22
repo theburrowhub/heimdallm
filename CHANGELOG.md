@@ -2,6 +2,21 @@
 
 > **Note:** Versions 0.1.0–0.1.3 were originally published under [`theburrowhub/heimdallr-docker`](https://github.com/theburrowhub/heimdallr-docker) (now archived). The project was unified into this repository and renamed to Heimdallm in v0.1.1.
 
+## [0.4.14](https://github.com/theburrowhub/heimdallm/compare/v0.4.13...v0.4.14) (2026-04-22)
+
+
+### Features
+
+* implement [#169](https://github.com/theburrowhub/heimdallm/issues/169) — bug: GoReleaser fails to publish Homebrew formula to homebrew-tap ([#174](https://github.com/theburrowhub/heimdallm/issues/174)) ([e474a4b](https://github.com/theburrowhub/heimdallm/commit/e474a4bedeb9b53893e2f495c01f982d73a7634e))
+* implement [#170](https://github.com/theburrowhub/heimdallm/issues/170) — feat: heimdallm-cli should auto-discover daemon token and support config file ([#186](https://github.com/theburrowhub/heimdallm/issues/186)) ([3918c9f](https://github.com/theburrowhub/heimdallm/commit/3918c9f4681d4299cdf639e6703fb18f292f47d5))
+
+
+### Bug Fixes
+
+* **daemon:** stop processDiscoveredRepos clobbering non_monitored ([#183](https://github.com/theburrowhub/heimdallm/issues/183)) ([#184](https://github.com/theburrowhub/heimdallm/issues/184)) ([072d2ee](https://github.com/theburrowhub/heimdallm/commit/072d2eedbc78870d9b94dc11407ec4f2354160f8))
+* **flutter:** show auto-detected local_dir badge in grid and list tiles ([#182](https://github.com/theburrowhub/heimdallm/issues/182)) ([77063e2](https://github.com/theburrowhub/heimdallm/commit/77063e2f46e6c3efeeaf4f6cab0921860b8d6dbc))
+* patch-based config saves — eliminate silent data loss ([#144](https://github.com/theburrowhub/heimdallm/issues/144)) ([#178](https://github.com/theburrowhub/heimdallm/issues/178)) ([8836979](https://github.com/theburrowhub/heimdallm/commit/883697909a55fbdf2a87210275770f8b519d130a))
+
 ## [0.4.13](https://github.com/theburrowhub/heimdallm/compare/v0.4.12...v0.4.13) (2026-04-21)
 
 
