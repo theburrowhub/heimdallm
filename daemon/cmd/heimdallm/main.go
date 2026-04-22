@@ -1325,12 +1325,17 @@ func (a *tier2Adapter) CheckItem(ctx context.Context, item *scheduler.WatchItem)
 			return false, err
 		}
 		if prState != "open" {
+			// Only publish SSE on the first detection — check stored state first.
+			existing, _ := a.store.GetPRByGithubID(item.GithubID)
+			wasOpen := existing != nil && existing.State == "open"
 			a.store.UpdatePRStateByGithubID(item.GithubID, "closed")
-			a.broker.Publish(sse.Event{
-				Type: sse.EventPRStateChanged,
-				Data: fmt.Sprintf(`{"pr_id":%d,"state":"closed"}`, item.GithubID),
-			})
-			slog.Info("tier3: PR closed/merged", "repo", item.Repo, "number", item.Number)
+			if wasOpen {
+				a.broker.Publish(sse.Event{
+					Type: sse.EventPRStateChanged,
+					Data: fmt.Sprintf(`{"pr_id":%d,"state":"closed"}`, item.GithubID),
+				})
+				slog.Info("tier3: PR closed/merged", "repo", item.Repo, "number", item.Number)
+			}
 			return false, nil // closed — don't trigger HandleChange
 		}
 		return updatedAt.After(item.LastSeen), nil
@@ -1342,12 +1347,16 @@ func (a *tier2Adapter) CheckItem(ctx context.Context, item *scheduler.WatchItem)
 		return false, err
 	}
 	if issue.State != "open" {
+		existing, _ := a.store.GetIssueByGithubID(item.GithubID)
+		wasOpen := existing != nil && existing.State == "open"
 		a.store.UpdateIssueStateByGithubID(item.GithubID, "closed")
-		a.broker.Publish(sse.Event{
-			Type: sse.EventIssueStateChanged,
-			Data: fmt.Sprintf(`{"issue_id":%d,"state":"closed"}`, item.GithubID),
-		})
-		slog.Info("tier3: issue closed", "repo", item.Repo, "number", item.Number)
+		if wasOpen {
+			a.broker.Publish(sse.Event{
+				Type: sse.EventIssueStateChanged,
+				Data: fmt.Sprintf(`{"issue_id":%d,"state":"closed"}`, item.GithubID),
+			})
+			slog.Info("tier3: issue closed", "repo", item.Repo, "number", item.Number)
+		}
 		return false, nil // closed — don't trigger HandleChange
 	}
 	return issue.UpdatedAt.After(item.LastSeen), nil
