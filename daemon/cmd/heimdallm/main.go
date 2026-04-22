@@ -274,6 +274,12 @@ func main() {
 			broker.Publish(sse.Event{Type: sse.EventReviewError, Data: sseData(map[string]any{"pr_number": pr.Number, "repo": pr.Repo, "error": err.Error()})})
 			return
 		}
+		if rev == nil {
+			// Defense-in-depth gate in pipeline.Run rejected this PR. Callers are
+			// expected to filter upstream, so this is the safety net — exit quietly
+			// without emitting a completed/error event.
+			return
+		}
 		slog.Info("pipeline: review done",
 			"repo", pr.Repo, "number", pr.Number, "severity", rev.Severity,
 			"github_review_id", rev.GitHubReviewID)
