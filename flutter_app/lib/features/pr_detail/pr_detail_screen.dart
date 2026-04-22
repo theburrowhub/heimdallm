@@ -50,7 +50,13 @@ class _PRDetailScreenState extends ConsumerState<PRDetailScreen> {
       ref.invalidate(prsProvider);
       if (context.mounted) {
         context.canPop() ? context.pop() : context.go('/');
-        showToast(context, 'PR dismissed', duration: const Duration(seconds: 5));
+        showToast(context, 'PR dismissed',
+            duration: const Duration(seconds: 5),
+            actionLabel: 'Undo',
+            onAction: () async {
+              await api.undismissPR(widget.prId);
+              ref.invalidate(prsProvider);
+            });
       }
     } catch (e) {
       if (!context.mounted) return;

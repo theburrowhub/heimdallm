@@ -4,8 +4,17 @@ import 'package:flutter/material.dart';
 /// Shows a temporary toast notification that auto-dismisses.
 /// Uses Overlay instead of SnackBar to avoid macOS desktop SnackBar
 /// persistence bugs.
-void showToast(BuildContext context, String message,
-    {bool isError = false, Duration duration = const Duration(seconds: 3)}) {
+///
+/// Optional [actionLabel] and [onAction] add a tappable button (e.g. "Undo")
+/// that fires [onAction] and immediately dismisses the toast.
+void showToast(
+  BuildContext context,
+  String message, {
+  bool isError = false,
+  Duration duration = const Duration(seconds: 3),
+  String? actionLabel,
+  VoidCallback? onAction,
+}) {
   final overlay = Overlay.of(context, rootOverlay: true);
   late OverlayEntry entry;
   entry = OverlayEntry(
@@ -13,7 +22,11 @@ void showToast(BuildContext context, String message,
       message: message,
       isError: isError,
       duration: duration,
-      onDismiss: () => entry.remove(),
+      actionLabel: actionLabel,
+      onAction: onAction,
+      onDismiss: () {
+        try { entry.remove(); } catch (_) {}
+      },
     ),
   );
   overlay.insert(entry);
@@ -23,12 +36,16 @@ class _ToastWidget extends StatefulWidget {
   final String message;
   final bool isError;
   final Duration duration;
+  final String? actionLabel;
+  final VoidCallback? onAction;
   final VoidCallback onDismiss;
 
   const _ToastWidget({
     required this.message,
     required this.isError,
     required this.duration,
+    this.actionLabel,
+    this.onAction,
     required this.onDismiss,
   });
 
@@ -52,9 +69,16 @@ class _ToastWidgetState extends State<_ToastWidget>
   }
 
   void _fadeOut() {
+    if (!mounted) return;
     _anim.reverse().then((_) {
       if (mounted) widget.onDismiss();
     });
+  }
+
+  void _onActionTap() {
+    _dismissTimer?.cancel();
+    widget.onAction?.call();
+    _fadeOut();
   }
 
   @override
@@ -90,9 +114,31 @@ class _ToastWidgetState extends State<_ToastWidget>
                   ),
                 ],
               ),
-              child: Text(
-                widget.message,
-                style: const TextStyle(color: Colors.white, fontSize: 13),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Flexible(
+                    child: Text(
+                      widget.message,
+                      style: const TextStyle(color: Colors.white, fontSize: 13),
+                    ),
+                  ),
+                  if (widget.actionLabel != null) ...[
+                    const SizedBox(width: 12),
+                    GestureDetector(
+                      onTap: _onActionTap,
+                      child: Text(
+                        widget.actionLabel!,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 13,
+                          fontWeight: FontWeight.bold,
+                          decoration: TextDecoration.underline,
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
               ),
             ),
           ),

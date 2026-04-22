@@ -378,7 +378,12 @@ class _PRTileState extends ConsumerState<_PRTile> {
       ref.invalidate(prsProvider);
       if (mounted) {
         showToast(context, 'PR #${widget.pr.number} dismissed',
-            duration: const Duration(seconds: 5));
+            duration: const Duration(seconds: 5),
+            actionLabel: 'Undo',
+            onAction: () async {
+              await api.undismissPR(widget.pr.id);
+              ref.invalidate(prsProvider);
+            });
       }
     } catch (e) {
       if (mounted) showToast(context, 'Error: $e', isError: true);

@@ -129,7 +129,12 @@ class _IssueTileState extends ConsumerState<_IssueTile> {
       ref.invalidate(issuesProvider);
       if (mounted) {
         showToast(context, 'Issue #${widget.issue.number} dismissed',
-            duration: const Duration(seconds: 5));
+            duration: const Duration(seconds: 5),
+            actionLabel: 'Undo',
+            onAction: () async {
+              await api.undismissIssue(widget.issue.id);
+              ref.invalidate(issuesProvider);
+            });
       }
     } catch (e) {
       if (mounted) showToast(context, 'Error: $e', isError: true);

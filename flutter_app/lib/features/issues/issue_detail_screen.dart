@@ -48,7 +48,13 @@ class _IssueDetailScreenState extends ConsumerState<IssueDetailScreen> {
       ref.invalidate(issuesProvider);
       if (context.mounted) {
         context.canPop() ? context.pop() : context.go('/');
-        showToast(context, 'Issue dismissed', duration: const Duration(seconds: 5));
+        showToast(context, 'Issue dismissed',
+            duration: const Duration(seconds: 5),
+            actionLabel: 'Undo',
+            onAction: () async {
+              await api.undismissIssue(widget.issueId);
+              ref.invalidate(issuesProvider);
+            });
       }
     } catch (e) {
       if (!context.mounted) return;
