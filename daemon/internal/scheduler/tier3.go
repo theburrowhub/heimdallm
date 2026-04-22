@@ -6,12 +6,30 @@ import (
 	"time"
 )
 
+// ItemSnapshot is the freshly-fetched subset of a watched item's state that
+// HandleChange needs to decide whether to run the review. Tier 3 returns it
+// from CheckItem so HandleChange does not re-fetch from GitHub.
+//
+// Fields are optional — only those relevant to the item's type are populated
+// (e.g. Draft is always false for issues). A nil snapshot signals "no change
+// detected" and is ignored by HandleChange.
+type ItemSnapshot struct {
+	State     string
+	Draft     bool
+	Author    string
+	UpdatedAt time.Time
+}
+
 // Tier3ItemChecker checks a single item for state changes.
 type Tier3ItemChecker interface {
-	// CheckItem returns true if the item has changed since LastSeen.
-	CheckItem(ctx context.Context, item *WatchItem) (changed bool, err error)
-	// HandleChange processes a detected change (re-review, re-triage, etc).
-	HandleChange(ctx context.Context, item *WatchItem) error
+	// CheckItem returns whether the item changed since LastSeen and, when
+	// changed, a fresh snapshot of the item's state. An unchanged item
+	// returns (false, nil, nil).
+	CheckItem(ctx context.Context, item *WatchItem) (changed bool, snap *ItemSnapshot, err error)
+	// HandleChange processes a detected change. snap is the snapshot returned
+	// by CheckItem on the same tick; callers can rely on it being non-nil
+	// because RunTier3 only invokes HandleChange when changed == true.
+	HandleChange(ctx context.Context, item *WatchItem, snap *ItemSnapshot) error
 }
 
 // Tier3Deps holds all dependencies for the per-item watch tier.
@@ -52,7 +70,7 @@ func RunTier3(ctx context.Context, deps Tier3Deps) {
 					return
 				}
 
-				changed, err := deps.Checker.CheckItem(ctx, item)
+				changed, snap, err := deps.Checker.CheckItem(ctx, item)
 				if err != nil {
 					slog.Warn("tier3: check failed", "type", item.Type,
 						"repo", item.Repo, "number", item.Number, "err", err)
@@ -63,7 +81,7 @@ func RunTier3(ctx context.Context, deps Tier3Deps) {
 				if changed {
 					slog.Info("tier3: change detected",
 						"type", item.Type, "repo", item.Repo, "number", item.Number)
-					if err := deps.Checker.HandleChange(ctx, item); err != nil {
+					if err := deps.Checker.HandleChange(ctx, item, snap); err != nil {
 						slog.Error("tier3: handle change", "err", err)
 					}
 					deps.Queue.ResetBackoff(item)

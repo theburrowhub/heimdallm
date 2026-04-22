@@ -1399,57 +1399,107 @@ func (a *tier2Adapter) PRAlreadyReviewed(githubID int64, updatedAt time.Time) bo
 }
 
 // CheckItem implements scheduler.Tier3ItemChecker.
-func (a *tier2Adapter) CheckItem(ctx context.Context, item *scheduler.WatchItem) (bool, error) {
-	// Use the GitHub Issues API — works for both issues and PRs.
+func (a *tier2Adapter) CheckItem(ctx context.Context, item *scheduler.WatchItem) (bool, *scheduler.ItemSnapshot, error) {
+	if item.Type == "pr" {
+		snap, err := a.ghClient.GetPRSnapshot(item.Repo, item.Number)
+		if err != nil {
+			return false, nil, err
+		}
+		if !snap.UpdatedAt.After(item.LastSeen) {
+			return false, nil, nil
+		}
+		return true, &scheduler.ItemSnapshot{
+			State:     snap.State,
+			Draft:     snap.Draft,
+			Author:    snap.Author,
+			UpdatedAt: snap.UpdatedAt,
+		}, nil
+	}
+	// Issues still use the Issues API; draft is always false.
 	issue, err := a.ghClient.GetIssue(item.Repo, item.Number)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
-	changed := issue.UpdatedAt.After(item.LastSeen)
-	return changed, nil
+	if !issue.UpdatedAt.After(item.LastSeen) {
+		return false, nil, nil
+	}
+	return true, &scheduler.ItemSnapshot{
+		State:     issue.State,
+		Author:    issue.User.Login,
+		UpdatedAt: issue.UpdatedAt,
+	}, nil
 }
 
 // HandleChange implements scheduler.Tier3ItemChecker.
-func (a *tier2Adapter) HandleChange(ctx context.Context, item *scheduler.WatchItem) error {
+func (a *tier2Adapter) HandleChange(ctx context.Context, item *scheduler.WatchItem, snap *scheduler.ItemSnapshot) error {
 	if item.Type == "pr" {
-		// Dedup: skip if the PR was already reviewed at or after the last
-		// detected change — mirrors the same check Tier 2 performs.
-		// NOTE (TOCTOU): between this check and the runReview call below, another
-		// goroutine could complete the same review. The impact is a rare harmless
-		// duplicate review; the in-flight guard in runReview prevents concurrent
-		// reviews of the same PR.
+		if snap == nil {
+			return nil
+		}
+
+		// Guard: apply review guards against the FRESH state from snap, not
+		// the stale store copy. This closes the closed/merged-PR hole —
+		// Tier 3 previously reviewed PRs that had merged between cycles.
+		a.loginMu.Lock()
+		botLogin := *a.login
+		a.loginMu.Unlock()
+
+		a.cfgMu.Lock()
+		// Convert config.ResolvedReviewGuards to pipeline.GateConfig via same-shape
+		// cast (config cannot import pipeline — import cycle).
+		guards := pipeline.GateConfig((*a.cfg).ReviewGuards(botLogin))
+		c := *a.cfg
+		aiCfg := c.AIForRepo(item.Repo)
+		a.cfgMu.Unlock()
+
+		stored, _ := a.store.GetPRByGithubID(item.GithubID)
+		title := ""
+		if stored != nil {
+			title = stored.Title
+		}
+
+		reason := pipeline.Evaluate(pipeline.PRGate{
+			State:  snap.State,
+			Draft:  snap.Draft,
+			Author: snap.Author,
+		}, guards)
+		if reason != pipeline.SkipReasonNone {
+			a.broker.Publish(sse.Event{
+				Type: sse.EventReviewSkipped,
+				Data: sseData(map[string]any{
+					"repo":      item.Repo,
+					"pr_number": item.Number,
+					"pr_title":  title,
+					"reason":    string(reason),
+				}),
+			})
+			slog.Info("tier3: skipping PR",
+				"repo", item.Repo, "pr", item.Number, "reason", string(reason))
+			return nil
+		}
+
+		// Mirror the existing Tier 2 updated_at dedup.
 		if a.PRAlreadyReviewed(item.GithubID, item.LastSeen) {
 			slog.Debug("tier3: PR already reviewed, skipping", "pr", item.Number, "repo", item.Repo)
 			return nil
 		}
 
-		a.cfgMu.Lock()
-		c := *a.cfg
-		aiCfg := c.AIForRepo(item.Repo)
-		a.cfgMu.Unlock()
-
-		// Fetch the full PR from the store so runReview receives all
-		// fields (Title, Author, URL, etc.) instead of a sparse struct.
-		stored, _ := a.store.GetPRByGithubID(item.GithubID)
 		ghPR := &gh.PullRequest{
-			ID:     item.GithubID,
-			Number: item.Number,
-			Repo:   item.Repo,
+			ID:        item.GithubID,
+			Number:    item.Number,
+			Repo:      item.Repo,
+			State:     snap.State,
+			Draft:     snap.Draft,
+			UpdatedAt: snap.UpdatedAt,
 		}
 		if stored != nil {
 			ghPR.Title = stored.Title
 			ghPR.HTMLURL = stored.URL
-			ghPR.User = gh.User{Login: stored.Author}
-			ghPR.State = stored.State
-			ghPR.UpdatedAt = stored.UpdatedAt
+			ghPR.User = gh.User{Login: snap.Author}
 		}
 		a.runReview(ghPR, aiCfg)
+		return nil
 	}
-	// For issues we cannot trigger an immediate re-triage from Tier 3,
-	// but returning nil signals the caller (RunTier3) to call
-	// queue.ResetBackoff — which resets the item's backoff to 1m so it
-	// gets re-checked quickly rather than waiting at a potentially 15m
-	// backoff for Tier 2's next full cycle.
 	if item.Type == "issue" {
 		slog.Info("tier3: issue change detected, backoff will reset",
 			"repo", item.Repo, "number", item.Number)
