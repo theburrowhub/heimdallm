@@ -15,7 +15,7 @@ func newDashboardCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := clientFromContext(cmd.Context())
 			m := tui.NewDashboard(c.Host, c.Token)
-			p := tea.NewProgram(m, tea.WithAltScreen())
+			p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 			if _, err := p.Run(); err != nil {
 				return fmt.Errorf("dashboard error: %w", err)
 			}
