@@ -376,3 +376,43 @@ func TestPipeline_Run_SkipsReviewOnSameHeadSHA(t *testing.T) {
 		t.Errorf("SubmitReview not invoked on new SHA: submits=%d", gh.submits)
 	}
 }
+
+// TestPipeline_Run_GateSkipsReview: when the guard evaluator returns a skip
+// reason (here: state != "open"), the pipeline must not call the executor or
+// submit a review. Proves the defense-in-depth layer protects future callers
+// that forget the caller-side Evaluate.
+func TestPipeline_Run_GateSkipsReview(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	exec := &fakeExecCounter{}
+	gh := &fakeGHCounter{diff: "+line"}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+
+	pr := &github.PullRequest{
+		ID: 100, Number: 100, Title: "t", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "closed",
+		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/100",
+		Head: github.Branch{SHA: "abc"},
+	}
+	opts := pipeline.RunOptions{
+		Primary: "claude", Fallback: "gemini",
+		Guards: pipeline.GateConfig{SkipDrafts: true, SkipSelfAuthor: true, BotLogin: "heimdallm-bot"},
+	}
+	rev, err := p.Run(pr, opts)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if exec.calls != 0 {
+		t.Errorf("executor called on gate-skipped PR: calls=%d", exec.calls)
+	}
+	if gh.submits != 0 {
+		t.Errorf("SubmitReview called on gate-skipped PR: submits=%d", gh.submits)
+	}
+	if rev != nil {
+		t.Errorf("expected nil review on gate skip, got %+v", rev)
+	}
+}

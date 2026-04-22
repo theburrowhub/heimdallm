@@ -122,12 +122,17 @@ func (p *Pipeline) applyPrompt(repoPromptID, agentPromptID string, tmpl *string,
 
 // RunOptions carries per-execution settings derived from global + repo + agent config.
 type RunOptions struct {
-	Primary       string
-	Fallback      string
+	Primary        string
+	Fallback       string
 	PromptOverride string // repo-level prompt (highest priority)
-	AgentPromptID string  // agent-level prompt (used if no repo-level override)
-	ReviewMode    string
-	ExecOpts      executor.ExecOptions // model, flags, workdir
+	AgentPromptID  string // agent-level prompt (used if no repo-level override)
+	ReviewMode     string
+	ExecOpts       executor.ExecOptions // model, flags, workdir
+	// Guards are evaluated at the top of Run as defense-in-depth. Callers
+	// (Tier 2 / Tier 3) should have already filtered with pipeline.Evaluate
+	// before pushing PRs into the pipeline; this layer prevents regressions
+	// if a new caller forgets.
+	Guards GateConfig
 }
 
 // Run executes the full review pipeline for one PR and publishes the review to GitHub.
@@ -156,6 +161,19 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	prID, err := p.store.UpsertPR(prRow)
 	if err != nil {
 		return nil, fmt.Errorf("pipeline: upsert PR: %w", err)
+	}
+
+	// Defense-in-depth: refuse to run the CLI if the gate rejects this PR.
+	// Callers publish the skip event themselves — we only log here so a
+	// missed caller-side check is visible in daemon logs.
+	if reason := Evaluate(PRGate{
+		State:  pr.State,
+		Draft:  pr.Draft,
+		Author: pr.User.Login,
+	}, opts.Guards); reason != SkipReasonNone {
+		slog.Warn("pipeline: gate skip (caller did not filter)",
+			"repo", pr.Repo, "pr", pr.Number, "reason", string(reason))
+		return nil, nil
 	}
 
 	p.notify.Notify("PR Review Started", fmt.Sprintf("%s #%d", pr.Repo, pr.Number))
