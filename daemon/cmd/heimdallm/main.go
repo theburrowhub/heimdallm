@@ -660,6 +660,22 @@ func main() {
 			broker.Publish(sse.Event{Type: sse.EventReviewError, Data: sseData(map[string]any{"pr_id": prID, "error": err.Error()})})
 			return err
 		}
+		if rev == nil {
+			// pipeline.Run's defense-in-depth gate rejected this PR (e.g. an
+			// operator triggered a re-review on a closed/merged PR). Emit a
+			// review_skipped event so the UI can surface the reason instead of
+			// leaving the request hanging silently.
+			broker.Publish(sse.Event{
+				Type: sse.EventReviewSkipped,
+				Data: sseData(map[string]any{
+					"repo":      pr.Repo,
+					"pr_number": pr.Number,
+					"pr_title":  pr.Title,
+					"reason":    string(pipeline.SkipReasonNotOpen),
+				}),
+			})
+			return nil
+		}
 		broker.Publish(sse.Event{Type: sse.EventReviewCompleted, Data: sseData(map[string]any{
 			"pr_number": pr.Number,
 			"repo":      pr.Repo,
@@ -1198,6 +1214,10 @@ func (a *tier2Adapter) FetchPRsToReview() ([]scheduler.Tier2PR, error) {
 			a.loginMu.Lock()
 			*a.login = u
 			a.loginMu.Unlock()
+		} else {
+			// Empty botLogin silently disables the self-author guard for this
+			// cycle; log so operators can diagnose why it's not firing.
+			slog.Warn("adapter: failed to resolve bot login, self-author guard disabled this cycle", "err", err)
 		}
 	}
 

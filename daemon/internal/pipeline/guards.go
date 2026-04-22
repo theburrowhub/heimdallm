@@ -20,9 +20,14 @@ type PRGate struct {
 	Author string
 }
 
-// GateConfig controls which guards apply. Fields default to false; callers are
-// expected to build this via config.ReviewGuards so defaults are applied once
-// at the config edge.
+// GateConfig controls which *policy* guards apply. Fields default to false;
+// callers are expected to build this via config.ReviewGuards so defaults are
+// applied once at the config edge.
+//
+// There is deliberately no SkipNotOpen toggle: closed/merged PRs are ALWAYS
+// skipped because reviewing them cannot be a valid configuration — the review
+// API rejects them and any AI tokens spent would be wasted. not_open is the
+// correctness guard; the policy toggles below govern draft and self-author.
 type GateConfig struct {
 	SkipDrafts     bool
 	SkipSelfAuthor bool
@@ -34,7 +39,8 @@ type GateConfig struct {
 
 // Evaluate returns the first applicable skip reason, or SkipReasonNone.
 // Priority order: not_open > draft > self_authored. not_open wins because it
-// is the correctness guard — the other two are policy.
+// is the correctness guard — the other two are policy (configurable via
+// GateConfig) while not_open is unconditional.
 func Evaluate(pr PRGate, cfg GateConfig) SkipReason {
 	if pr.State != "open" {
 		return SkipReasonNotOpen

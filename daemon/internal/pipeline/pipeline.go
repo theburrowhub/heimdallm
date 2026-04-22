@@ -139,6 +139,16 @@ type RunOptions struct {
 // Config priority: repo-level > agent-level > global default.
 // SQLite is the source of truth: review is stored first, then published.
 // If publishing fails, it is retried on the next call (when GitHubReviewID == 0).
+//
+// Return contract:
+//   - (review, nil)  — normal success path; review has been stored (and
+//     published unless GitHub was unreachable, in which case GitHubReviewID==0
+//     and PublishPending will retry).
+//   - (nil, err)     — a non-recoverable error before the review was stored.
+//   - (nil, nil)     — the defense-in-depth gate (opts.Guards) rejected the
+//     PR. Callers MUST nil-check the returned review before dereferencing it.
+//     Skip-event publication is the caller's responsibility; the pipeline
+//     only logs on this path so missed caller-side filtering is diagnosable.
 func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, error) {
 	primary := opts.Primary
 	fallback := opts.Fallback
