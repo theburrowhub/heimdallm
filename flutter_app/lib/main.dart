@@ -133,8 +133,20 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
       final repos = await _platform.discoverReposFromPRs(token);
 
       _setStatus('Setting up…');
+      // Seed local_dir_base from HEIMDALLM_LOCAL_DIR_BASE when the
+      // operator has it set — otherwise a wipe + first-run loses the
+      // full-repo-analysis base path and every repo falls back to
+      // diff-only until the operator re-adds it by hand. Comma-
+      // separated list, matches the daemon's env parsing.
+      final reposDirEnv = _platform.readEnv('HEIMDALLM_LOCAL_DIR_BASE') ?? '';
+      final localDirBase = reposDirEnv
+          .split(',')
+          .map((p) => p.trim())
+          .where((p) => p.isNotEmpty)
+          .toList();
       final config = AppConfig(
         repoConfigs: {for (final r in repos) r: const RepoConfig(prEnabled: true)},
+        localDirBase: localDirBase,
       );
       await _platform.storeGitHubToken(token);
       await _platform.writeDaemonConfig(config);

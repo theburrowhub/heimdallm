@@ -192,6 +192,18 @@ class FirstRunSetup {
       final nonMon = nonMonitored.map((r) => '"${_tomlEscapeString(r)}"').join(', ');
       buf.writeln('non_monitored = [$nonMon]');
     }
+    // Persist local_dir_base so a Flutter-side save doesn't silently drop
+    // the operator's full-repo-analysis base path list. The daemon reads
+    // it on startup (TOML) + on each review (ResolveLocalDir).
+    if (config.localDirBase.isNotEmpty) {
+      final bases = config.localDirBase
+          .where((p) => p.isNotEmpty)
+          .map((p) => '"${_tomlEscapeString(p)}"')
+          .join(', ');
+      if (bases.isNotEmpty) {
+        buf.writeln('local_dir_base = [$bases]');
+      }
+    }
     buf.writeln();
 
     // Issue tracking

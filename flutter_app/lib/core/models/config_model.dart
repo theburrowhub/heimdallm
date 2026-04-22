@@ -339,6 +339,12 @@ class AppConfig {
   final IssueTrackingConfig issueTracking;
   final List<String> globalPRReviewers;
   final List<String> globalPRLabels;
+  /// Host paths the daemon scans (in order) when a repo has no explicit
+  /// `local_dir` set — first match at `{base}/{short-repo-name}` wins.
+  /// Written to the `[github].local_dir_base` TOML key. Unknown to early
+  /// `writeConfig` revisions; fielded here so a Flutter save preserves
+  /// the value instead of silently dropping it on the floor.
+  final List<String> localDirBase;
   /// Auto-detected `local_dir` per repo, populated by the daemon when the
   /// repo is visible at `/home/heimdallm/repos/<short-name>` in the
   /// container (i.e. the operator set HEIMDALLM_LOCAL_DIR_BASE). The
@@ -360,6 +366,7 @@ class AppConfig {
     this.issueTracking = const IssueTrackingConfig(),
     this.globalPRReviewers = const [],
     this.globalPRLabels = const [],
+    this.localDirBase = const [],
     this.localDirsDetected = const {},
   });
 
@@ -383,6 +390,7 @@ class AppConfig {
     IssueTrackingConfig? issueTracking,
     List<String>? globalPRReviewers,
     List<String>? globalPRLabels,
+    List<String>? localDirBase,
     Map<String, String>? localDirsDetected,
   }) {
     return AppConfig(
@@ -397,6 +405,7 @@ class AppConfig {
       issueTracking:     issueTracking     ?? this.issueTracking,
       globalPRReviewers: globalPRReviewers ?? this.globalPRReviewers,
       globalPRLabels:    globalPRLabels    ?? this.globalPRLabels,
+      localDirBase:      localDirBase      ?? this.localDirBase,
       localDirsDetected: localDirsDetected ?? this.localDirsDetected,
     );
   }
@@ -501,6 +510,7 @@ class AppConfig {
       issueTracking:     issueTracking,
       globalPRReviewers: _parseStringList((json['pr_metadata'] as Map<String, dynamic>?)?['reviewers']),
       globalPRLabels:    _parseStringList((json['pr_metadata'] as Map<String, dynamic>?)?['labels']),
+      localDirBase:      _parseStringList(json['local_dir_base']),
       localDirsDetected: localDirsDetected,
     );
   }
