@@ -46,9 +46,10 @@ type Dashboard struct {
 }
 
 type activityLine struct {
-	Time  string
-	Event string
-	Info  string
+	Time     string
+	Event    string
+	Info     string
+	ItemType string // "pr" or "issue"
 }
 
 type tickMsg time.Time
@@ -173,9 +174,10 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				d.activity = make([]activityLine, 0, len(msg.activity.Entries))
 				for _, e := range msg.activity.Entries {
 					d.activity = append(d.activity, activityLine{
-						Time:  formatActivityTime(e.TS),
-						Event: e.Action,
-						Info:  fmt.Sprintf("%s #%d", e.Repo, e.ItemNumber),
+						Time:     formatActivityTime(e.TS),
+						Event:    e.Action,
+						Info:     formatActivityInfo(e.Repo, e.ItemType, e.ItemNumber),
+						ItemType: e.ItemType,
 					})
 				}
 			}
@@ -183,10 +185,12 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return d, nil
 
 	case sseMsg:
+		itemType, info := formatSSEData(msg.Data)
 		line := activityLine{
-			Time:  time.Now().Format("15:04"),
-			Event: msg.Type,
-			Info:  formatSSEData(msg.Data),
+			Time:     time.Now().Format("15:04"),
+			Event:    msg.Type,
+			Info:     info,
+			ItemType: itemType,
 		}
 		d.activity = append([]activityLine{line}, d.activity...)
 		if len(d.activity) > 100 {
@@ -368,7 +372,8 @@ func (d *Dashboard) renderActivity(height int) string {
 	}
 
 	for i, a := range visible {
-		line := fmt.Sprintf("  %-7s %-25s %s", a.Time, a.Event, a.Info)
+		info := itemTypeStyle(a.ItemType).Render(a.Info)
+		line := fmt.Sprintf("  %-7s %-25s %s", a.Time, a.Event, info)
 		if i == d.cursor {
 			b.WriteString(selectedRowStyle.Render(line))
 		} else {
@@ -527,10 +532,10 @@ func formatActivityTime(ts string) string {
 	return t.Format("15:04")
 }
 
-func formatSSEData(data string) string {
+func formatSSEData(data string) (itemType string, info string) {
 	var m map[string]any
 	if err := json.Unmarshal([]byte(data), &m); err != nil {
-		return data
+		return "", data
 	}
 
 	parts := make([]string, 0)
@@ -538,19 +543,65 @@ func formatSSEData(data string) string {
 		parts = append(parts, fmt.Sprintf("%v", repo))
 	}
 	if num, ok := m["pr_number"]; ok {
-		parts = append(parts, fmt.Sprintf("#%v", num))
+		itemType = "pr"
+		n := toInt(num)
+		if n != 0 {
+			parts = append(parts, fmt.Sprintf("PR #%d", n))
+		}
 	}
 	if num, ok := m["issue_number"]; ok {
-		parts = append(parts, fmt.Sprintf("#%v", num))
+		itemType = "issue"
+		n := toInt(num)
+		if n != 0 {
+			parts = append(parts, fmt.Sprintf("Issue #%d", n))
+		}
 	}
 	if sev, ok := m["severity"]; ok {
 		parts = append(parts, fmt.Sprintf("[%v]", sev))
 	}
 
 	if len(parts) > 0 {
-		return strings.Join(parts, " ")
+		return itemType, strings.Join(parts, " ")
 	}
-	return data
+	return itemType, data
+}
+
+func formatActivityInfo(repo, itemType string, itemNumber int) string {
+	if itemNumber == 0 {
+		return repo
+	}
+	switch itemType {
+	case "pr":
+		return fmt.Sprintf("%s PR #%d", repo, itemNumber)
+	case "issue":
+		return fmt.Sprintf("%s Issue #%d", repo, itemNumber)
+	default:
+		return fmt.Sprintf("%s #%d", repo, itemNumber)
+	}
+}
+
+func itemTypeStyle(itemType string) lipgloss.Style {
+	switch itemType {
+	case "pr":
+		return lipgloss.NewStyle().Foreground(colorPR)
+	case "issue":
+		return lipgloss.NewStyle().Foreground(colorIssue)
+	default:
+		return lipgloss.NewStyle()
+	}
+}
+
+func toInt(v any) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case int64:
+		return int(n)
+	default:
+		return 0
+	}
 }
 
 func extractSeverity(triage json.RawMessage) string {
