@@ -1395,8 +1395,8 @@ func TestPipeline_AutoImplementPostsDoneMarkerComment(t *testing.T) {
 	if !strings.Contains(body, "heimdallm/issue-7") {
 		t.Errorf("comment should reference branch name, got: %q", body)
 	}
-	if !strings.Contains(body, issues.MarkerRetry) {
-		t.Errorf("comment should mention retry marker for human reference, got: %q", body)
+	if !strings.Contains(body, "retry marker") {
+		t.Errorf("comment should mention retry for human reference, got: %q", body)
 	}
 }
 
