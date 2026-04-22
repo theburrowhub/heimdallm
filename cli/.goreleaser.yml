@@ -37,6 +37,22 @@ changelog:
       - "^test:"
       - "^chore:"
 
+brews:
+  - name: heimdallm-cli
+    repository:
+      owner: theburrowhub
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    skip_upload: auto
+    directory: Formula
+    homepage: https://github.com/theburrowhub/heimdallm
+    description: "CLI client for Heimdallm — monitor PRs, issues, and activity from the terminal"
+    license: MIT
+    install: |
+      bin.install "heimdallm-cli"
+    test: |
+      system "#{bin}/heimdallm-cli", "--help"
+
 release:
   github:
     owner: theburrowhub
