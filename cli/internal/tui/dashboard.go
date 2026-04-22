@@ -43,11 +43,13 @@ type Dashboard struct {
 	logOffset int
 	logSeeded bool
 
-	err       error
-	connected bool
-	startTime time.Time
+	err        error
+	connected  bool
+	refreshing bool
+	startTime  time.Time
 
 	sseEvents chan api.SSEEvent
+	sseCtx    context.Context
 	sseCancel context.CancelFunc
 }
 
@@ -68,13 +70,18 @@ type dataMsg struct {
 	err      error
 }
 type sseMsg api.SSEEvent
+type sseDisconnectMsg struct{ err error }
+type sseReconnectMsg struct{}
 
 func NewDashboard(host, token string) *Dashboard {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Dashboard{
 		client:    api.New(host, token),
 		startTime: time.Now(),
 		sseEvents: make(chan api.SSEEvent, 32),
 		logFollow: true,
+		sseCtx:    ctx,
+		sseCancel: cancel,
 	}
 }
 
@@ -135,21 +142,24 @@ func (d *Dashboard) fetchData() tea.Msg {
 }
 
 func (d *Dashboard) connectSSE() tea.Msg {
-	ctx, cancel := context.WithCancel(context.Background())
-	d.sseCancel = cancel
-	go func() {
-		_ = d.client.StreamEvents(ctx, d.sseEvents)
-	}()
-	return nil
+	err := d.client.StreamEvents(d.sseCtx, d.sseEvents)
+	if d.sseCtx.Err() != nil {
+		return nil
+	}
+	return sseDisconnectMsg{err: err}
 }
 
 func (d *Dashboard) listenSSE() tea.Cmd {
 	return func() tea.Msg {
-		event, ok := <-d.sseEvents
-		if !ok {
+		select {
+		case event, ok := <-d.sseEvents:
+			if !ok {
+				return nil
+			}
+			return sseMsg(event)
+		case <-d.sseCtx.Done():
 			return nil
 		}
-		return sseMsg(event)
 	}
 }
 
@@ -193,6 +203,7 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return d, tea.Batch(d.fetchData, tickCmd())
 
 	case dataMsg:
+		d.refreshing = false
 		if msg.err != nil {
 			d.err = msg.err
 			d.connected = false
@@ -258,7 +269,16 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+		d.connected = true
 		return d, d.listenSSE()
+
+	case sseDisconnectMsg:
+		return d, tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
+			return sseReconnectMsg{}
+		})
+
+	case sseReconnectMsg:
+		return d, d.connectSSE
 	}
 
 	return d, nil
@@ -331,8 +351,14 @@ func (d *Dashboard) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "G":
 		if d.activeTab == tabLogs {
 			d.logFollow = true
+		} else {
+			max := d.tabItemCount()
+			if max > 0 {
+				d.cursor = max - 1
+			}
 		}
 	case "r":
+		d.refreshing = true
 		return d, d.fetchData
 	case "1":
 		d.activeTab = tabActivity
@@ -396,6 +422,9 @@ func (d *Dashboard) View() string {
 }
 
 func (d *Dashboard) renderStatus() string {
+	if d.refreshing {
+		return lipgloss.NewStyle().Foreground(colorWarning).Bold(true).Render("● refreshing...")
+	}
 	if d.connected {
 		return statusOnline.Render("● online")
 	}
