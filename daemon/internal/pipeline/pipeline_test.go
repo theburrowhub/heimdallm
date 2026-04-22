@@ -36,8 +36,8 @@ func (f *fakeGH) SubmitReview(repo string, number int, body, event string) (int6
 	return 12345, state, nil
 }
 
-func (f *fakeGH) PostComment(repo string, number int, body string) error {
-	return nil
+func (f *fakeGH) PostComment(repo string, number int, body string) (time.Time, error) {
+	return time.Now().UTC(), nil
 }
 
 func (f *fakeGH) FetchComments(repo string, number int) ([]github.Comment, error) {
@@ -136,8 +136,8 @@ func (f *fakeGHCommentsError) SubmitReview(repo string, number int, body, event 
 	return 1, "COMMENTED", nil
 }
 
-func (f *fakeGHCommentsError) PostComment(repo string, number int, body string) error {
-	return nil
+func (f *fakeGHCommentsError) PostComment(repo string, number int, body string) (time.Time, error) {
+	return time.Now().UTC(), nil
 }
 
 func (f *fakeGHCommentsError) FetchComments(repo string, number int) ([]github.Comment, error) {
@@ -218,7 +218,7 @@ func (f *fakeGHWithHeadSHA) SubmitReview(repo string, number int, body, event st
 	f.submits++
 	return 1, "COMMENTED", nil
 }
-func (f *fakeGHWithHeadSHA) PostComment(repo string, number int, body string) error { return nil }
+func (f *fakeGHWithHeadSHA) PostComment(repo string, number int, body string) (time.Time, error) { return time.Now().UTC(), nil }
 func (f *fakeGHWithHeadSHA) FetchComments(repo string, number int) ([]github.Comment, error) {
 	return nil, nil
 }
@@ -300,7 +300,7 @@ func (f *fakeGHCounter) SubmitReview(repo string, number int, body, event string
 	f.submits++
 	return 1, "COMMENTED", nil
 }
-func (f *fakeGHCounter) PostComment(repo string, number int, body string) error { return nil }
+func (f *fakeGHCounter) PostComment(repo string, number int, body string) (time.Time, error) { return time.Now().UTC(), nil }
 func (f *fakeGHCounter) FetchComments(repo string, number int) ([]github.Comment, error) { return nil, nil }
 func (f *fakeGHCounter) GetPRHeadSHA(repo string, number int) (string, error)            { return "", nil }
 

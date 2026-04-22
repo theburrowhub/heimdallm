@@ -156,7 +156,11 @@ func (f *Fetcher) alreadyProcessed(issue *github.Issue) (bool, string, error) {
 		return true, "already implemented (PR created)", nil
 	}
 
-	cutoff := latest.CreatedAt.Add(RecomputeGrace)
+	ref := latest.CommentedAt
+	if ref.IsZero() {
+		ref = latest.CreatedAt
+	}
+	cutoff := ref.Add(RecomputeGrace)
 	if !issue.UpdatedAt.After(cutoff) {
 		return true, "no new activity since last review", nil
 	}

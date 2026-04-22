@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/heimdallm/daemon/internal/config"
 	"github.com/heimdallm/daemon/internal/github"
@@ -78,12 +79,12 @@ func (f *fakePromoteClient) RemoveLabels(repo string, n int, labels []string) er
 	f.removed = append(f.removed, struct{ Repo string; N int; Labels []string }{repo, n, labels})
 	return nil
 }
-func (f *fakePromoteClient) PostComment(repo string, n int, body string) error {
+func (f *fakePromoteClient) PostComment(repo string, n int, body string) (time.Time, error) {
 	if f.commentErr != nil {
-		return f.commentErr
+		return time.Time{}, f.commentErr
 	}
 	f.comments = append(f.comments, struct{ Repo string; N int; Body string }{repo, n, body})
-	return nil
+	return time.Now().UTC(), nil
 }
 
 func mkIssue(repo string, number int, state, body string, labels ...string) *github.Issue {
@@ -292,7 +293,7 @@ func (f *failingPromoteClient) AddLabels(repo string, n int, ls []string) error 
 func (f *failingPromoteClient) RemoveLabels(repo string, n int, ls []string) error {
 	return f.inner.RemoveLabels(repo, n, ls)
 }
-func (f *failingPromoteClient) PostComment(repo string, n int, body string) error {
+func (f *failingPromoteClient) PostComment(repo string, n int, body string) (time.Time, error) {
 	return f.inner.PostComment(repo, n, body)
 }
 
@@ -490,7 +491,7 @@ func (c *countingPromoteClient) AddLabels(repo string, n int, ls []string) error
 func (c *countingPromoteClient) RemoveLabels(repo string, n int, ls []string) error {
 	return c.inner.RemoveLabels(repo, n, ls)
 }
-func (c *countingPromoteClient) PostComment(repo string, n int, body string) error {
+func (c *countingPromoteClient) PostComment(repo string, n int, body string) (time.Time, error) {
 	return c.inner.PostComment(repo, n, body)
 }
 

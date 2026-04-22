@@ -40,6 +40,7 @@ type IssueReview struct {
 	ActionTaken string    `json:"action_taken"`
 	PRCreated   int       `json:"pr_created"`
 	CreatedAt   time.Time `json:"created_at"`
+	CommentedAt time.Time `json:"commented_at"`
 }
 
 // UpsertIssue inserts or updates an issue keyed on github_id. The dismissed
@@ -154,11 +155,16 @@ func (s *Store) InsertIssueReview(r *IssueReview) (int64, error) {
 	if r.ActionTaken == "" {
 		r.ActionTaken = "review_only"
 	}
+	commentedAt := ""
+	if !r.CommentedAt.IsZero() {
+		commentedAt = r.CommentedAt.UTC().Format(sqliteTimeFormat)
+	}
 	res, err := s.db.Exec(`
-		INSERT INTO issue_reviews (issue_id, cli_used, summary, triage, suggestions, action_taken, pr_created, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO issue_reviews (issue_id, cli_used, summary, triage, suggestions, action_taken, pr_created, created_at, commented_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, r.IssueID, r.CLIUsed, r.Summary, r.Triage, r.Suggestions, r.ActionTaken, r.PRCreated,
 		r.CreatedAt.UTC().Format(sqliteTimeFormat),
+		commentedAt,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("store: insert issue review: %w", err)
@@ -169,7 +175,7 @@ func (s *Store) InsertIssueReview(r *IssueReview) (int64, error) {
 // ListIssueReviews returns every review for an issue, newest first.
 func (s *Store) ListIssueReviews(issueID int64) ([]*IssueReview, error) {
 	rows, err := s.db.Query(
-		`SELECT id, issue_id, cli_used, summary, triage, suggestions, action_taken, pr_created, created_at
+		`SELECT id, issue_id, cli_used, summary, triage, suggestions, action_taken, pr_created, created_at, COALESCE(commented_at,'')
 		 FROM issue_reviews WHERE issue_id = ? ORDER BY created_at DESC`,
 		issueID,
 	)
@@ -192,7 +198,7 @@ func (s *Store) ListIssueReviews(issueID int64) ([]*IssueReview, error) {
 // sql.ErrNoRows if none exists yet.
 func (s *Store) LatestIssueReview(issueID int64) (*IssueReview, error) {
 	row := s.db.QueryRow(
-		`SELECT id, issue_id, cli_used, summary, triage, suggestions, action_taken, pr_created, created_at
+		`SELECT id, issue_id, cli_used, summary, triage, suggestions, action_taken, pr_created, created_at, COALESCE(commented_at,'')
 		 FROM issue_reviews WHERE issue_id = ? ORDER BY created_at DESC LIMIT 1`,
 		issueID,
 	)
@@ -220,14 +226,19 @@ func scanIssue(s scanner) (*Issue, error) {
 
 func scanIssueReview(s scanner) (*IssueReview, error) {
 	var r IssueReview
-	var createdAt string
+	var createdAt, commentedAt string
 	if err := s.Scan(&r.ID, &r.IssueID, &r.CLIUsed, &r.Summary, &r.Triage,
-		&r.Suggestions, &r.ActionTaken, &r.PRCreated, &createdAt); err != nil {
+		&r.Suggestions, &r.ActionTaken, &r.PRCreated, &createdAt, &commentedAt); err != nil {
 		return nil, fmt.Errorf("store: scan issue review: %w", err)
 	}
 	var err error
 	if r.CreatedAt, err = time.Parse(sqliteTimeFormat, createdAt); err != nil {
 		return nil, fmt.Errorf("store: parse issue review created_at %q: %w", createdAt, err)
+	}
+	if commentedAt != "" {
+		if r.CommentedAt, err = time.Parse(sqliteTimeFormat, commentedAt); err != nil {
+			return nil, fmt.Errorf("store: parse issue review commented_at %q: %w", commentedAt, err)
+		}
 	}
 	return &r, nil
 }

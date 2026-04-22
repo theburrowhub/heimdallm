@@ -155,11 +155,12 @@ func TestFetcher_SkipsDismissedIssues(t *testing.T) {
 
 func TestFetcher_SkipsIssueAlreadyReviewedWithoutNewActivity(t *testing.T) {
 	reviewedAt := time.Now().Add(-1 * time.Hour)
-	issue := fixture(1, reviewedAt.Add(5*time.Second)) // within 30s grace
+	commentedAt := reviewedAt.Add(10 * time.Second)
+	issue := fixture(1, commentedAt.Add(5*time.Second)) // within 30s grace of commentedAt
 	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
 		issue.ID: {
 			row:    &store.Issue{ID: 10, GithubID: issue.ID},
-			review: &store.IssueReview{IssueID: 10, CreatedAt: reviewedAt},
+			review: &store.IssueReview{IssueID: 10, CreatedAt: reviewedAt, CommentedAt: commentedAt},
 		},
 	}}
 	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, dedup, &fakePipeline{})
@@ -172,11 +173,12 @@ func TestFetcher_SkipsIssueAlreadyReviewedWithoutNewActivity(t *testing.T) {
 
 func TestFetcher_RerunsIssueWithNewActivityAfterGrace(t *testing.T) {
 	reviewedAt := time.Now().Add(-1 * time.Hour)
-	issue := fixture(1, reviewedAt.Add(5*time.Minute)) // well past the 30s grace
+	commentedAt := reviewedAt.Add(10 * time.Second)
+	issue := fixture(1, commentedAt.Add(5*time.Minute)) // well past the 30s grace
 	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
 		issue.ID: {
 			row:    &store.Issue{ID: 10, GithubID: issue.ID},
-			review: &store.IssueReview{IssueID: 10, CreatedAt: reviewedAt},
+			review: &store.IssueReview{IssueID: 10, CreatedAt: reviewedAt, CommentedAt: commentedAt},
 		},
 	}}
 	p := &fakePipeline{}
@@ -185,6 +187,42 @@ func TestFetcher_RerunsIssueWithNewActivityAfterGrace(t *testing.T) {
 	processed, _ := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
 	if processed != 1 {
 		t.Errorf("new activity past grace should re-run, got processed=%d calls=%v", processed, p.calls)
+	}
+}
+
+func TestFetcher_SlowTriageDoesNotReloop(t *testing.T) {
+	createdAt := time.Now().Add(-2 * time.Minute)
+	commentedAt := createdAt.Add(45 * time.Second) // triage took 45s
+	// UpdatedAt is after createdAt+30s (old cutoff) but before commentedAt+30s (new cutoff).
+	issue := fixture(1, commentedAt.Add(5*time.Second))
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {
+			row:    &store.Issue{ID: 10, GithubID: issue.ID},
+			review: &store.IssueReview{IssueID: 10, CreatedAt: createdAt, CommentedAt: commentedAt},
+		},
+	}}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, dedup, &fakePipeline{})
+
+	processed, _ := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
+	if processed != 0 {
+		t.Errorf("slow triage should not re-loop, got processed=%d", processed)
+	}
+}
+
+func TestFetcher_FallsBackToCreatedAtWhenCommentedAtZero(t *testing.T) {
+	reviewedAt := time.Now().Add(-1 * time.Hour)
+	issue := fixture(1, reviewedAt.Add(5*time.Second)) // within 30s grace of createdAt
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {
+			row:    &store.Issue{ID: 10, GithubID: issue.ID},
+			review: &store.IssueReview{IssueID: 10, CreatedAt: reviewedAt}, // CommentedAt zero
+		},
+	}}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, dedup, &fakePipeline{})
+
+	processed, _ := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
+	if processed != 0 {
+		t.Errorf("zero CommentedAt should fall back to CreatedAt, got processed=%d", processed)
 	}
 }
 

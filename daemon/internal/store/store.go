@@ -162,6 +162,7 @@ func Open(dsn string) (*Store, error) {
 	if _, err := db.Exec("ALTER TABLE agents ADD COLUMN is_default_dev INTEGER NOT NULL DEFAULT 0"); err == nil {
 		db.Exec("UPDATE agents SET is_default_dev = is_default")
 	}
+	db.Exec("ALTER TABLE issue_reviews ADD COLUMN commented_at DATETIME NOT NULL DEFAULT ''")
 	return &Store{db: db}, nil
 }
 

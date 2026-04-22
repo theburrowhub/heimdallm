@@ -240,13 +240,15 @@ func (c *Client) SubmitReview(repo string, number int, body, event string) (int6
 
 // PostComment posts a general comment on a PR (issue comment).
 // Used in multi-feedback mode to post one comment per issue before the formal review.
-func (c *Client) PostComment(repo string, number int, body string) error {
+// Returns the comment's creation timestamp as reported by GitHub so callers
+// can record when the comment actually landed (see issue #222).
+func (c *Client) PostComment(repo string, number int, body string) (time.Time, error) {
 	path := fmt.Sprintf("/repos/%s/issues/%d/comments", repo, number)
 	payload := map[string]any{"body": body}
 	data, _ := json.Marshal(payload)
 	req, err := http.NewRequest("POST", c.baseURL+path, strings.NewReader(string(data)))
 	if err != nil {
-		return fmt.Errorf("github: post comment: %w", err)
+		return time.Time{}, fmt.Errorf("github: post comment: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Accept", "application/vnd.github+json")
@@ -254,15 +256,21 @@ func (c *Client) PostComment(repo string, number int, body string) error {
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("github: post comment: %w", err)
+		return time.Time{}, fmt.Errorf("github: post comment: %w", err)
 	}
 	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	if resp.StatusCode != http.StatusCreated {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 		errBody := safeTruncate(string(respBody), maxErrBodyLen)
-		return fmt.Errorf("github: post comment: status %d: %s", resp.StatusCode, errBody)
+		return time.Time{}, fmt.Errorf("github: post comment: status %d: %s", resp.StatusCode, errBody)
 	}
-	return nil
+	var result struct {
+		CreatedAt time.Time `json:"created_at"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return time.Now().UTC(), nil
+	}
+	return result.CreatedAt, nil
 }
 
 // maxDiscoveryPages bounds the number of Search API pages consumed per org.

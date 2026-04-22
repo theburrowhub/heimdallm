@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/heimdallm/daemon/internal/config"
 	"github.com/heimdallm/daemon/internal/github"
@@ -20,7 +21,7 @@ type PromoteIssueClient interface {
 	GetIssue(repo string, number int) (*github.Issue, error)
 	AddLabels(repo string, number int, labels []string) error
 	RemoveLabels(repo string, number int, labels []string) error
-	PostComment(repo string, number int, body string) error
+	PostComment(repo string, number int, body string) (time.Time, error)
 }
 
 // PromoteReady scans every monitored repo for open issues carrying a
@@ -228,7 +229,7 @@ func applyPromotion(c PromoteIssueClient, issue *github.Issue, blockedLabels []s
 		}
 		return fmt.Errorf("add promote-to: %w", err)
 	}
-	if err := c.PostComment(issue.Repo, issue.Number, auditCommentBody(promoteTo, states)); err != nil {
+	if _, err := c.PostComment(issue.Repo, issue.Number, auditCommentBody(promoteTo, states)); err != nil {
 		// Comment failure is non-fatal — labels already flipped, the
 		// next poll cycle will process the issue normally. Log only.
 		slog.Warn("issues promote: audit comment failed (labels already flipped)",

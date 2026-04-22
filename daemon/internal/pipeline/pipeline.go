@@ -39,7 +39,7 @@ type Notifier interface {
 type GitHubReviewer interface {
 	SubmitReview(repo string, number int, body, event string) (int64, string, error)
 	// PostComment posts a general PR comment (used in multi-feedback mode).
-	PostComment(repo string, number int, body string) error
+	PostComment(repo string, number int, body string) (time.Time, error)
 }
 
 // CommentFetcher retrieves PR comments for context injection into the AI prompt.
@@ -285,7 +285,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	if reviewMode == "multi" && len(result.Issues) > 0 {
 		// Post one comment per issue (best-effort — failures are logged but don't abort)
 		for _, issue := range result.Issues {
-			if err := p.gh.PostComment(pr.Repo, pr.Number, buildIssueComment(issue)); err != nil {
+			if _, err := p.gh.PostComment(pr.Repo, pr.Number, buildIssueComment(issue)); err != nil {
 				slog.Warn("pipeline: failed to post issue comment", "pr", pr.Number, "err", err)
 			}
 		}

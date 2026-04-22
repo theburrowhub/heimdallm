@@ -107,9 +107,9 @@ type prCall struct {
 	Draft                         bool
 }
 
-func (f *fakeGH) PostComment(repo string, number int, body string) error {
+func (f *fakeGH) PostComment(repo string, number int, body string) (time.Time, error) {
 	f.postCalls = append(f.postCalls, postCall{Repo: repo, Number: number, Body: body})
-	return f.postErr
+	return time.Now().UTC(), f.postErr
 }
 
 func (f *fakeGH) FetchComments(repo string, number int) ([]github.Comment, error) {
