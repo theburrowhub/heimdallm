@@ -738,79 +738,37 @@ func main() {
 			return fmt.Errorf("promote issue: get issue %d: %w", issueID, err)
 		}
 
+		// Read the issue tracking config to know which labels to add/remove.
 		cfgMu.Lock()
-		aiCfg := cfg.AIForRepo(iss.Repo)
-		if aiCfg.Primary == "" {
-			aiCfg.Primary = cfg.AI.Primary
-		}
-		agentCfg := cfg.AgentConfigFor(aiCfg.Primary)
-		localDirBase := cfg.GitHub.LocalDirBase
-		globalTimeout := cfg.AI.ExecutionTimeout
+		it := cfg.GitHub.IssueTracking
 		cfgMu.Unlock()
-		aiCfg.LocalDir = config.ResolveLocalDir(aiCfg.LocalDir, iss.Repo, localDirBase)
 
-		// Reconstruct github.Issue from store data and force develop mode.
-		ghIssue := &gh.Issue{
-			ID:      iss.GithubID,
-			Number:  iss.Number,
-			Title:   iss.Title,
-			Body:    iss.Body,
-			State:   iss.State,
-			Repo:    iss.Repo,
-			HTMLURL: fmt.Sprintf("https://github.com/%s/issues/%d", iss.Repo, iss.Number),
+		if len(it.DevelopLabels) == 0 {
+			publishIssueErr("No develop labels configured — cannot promote")
+			return fmt.Errorf("promote issue: no develop labels configured")
 		}
-		ghIssue.User.Login = iss.Author
-		ghIssue.Mode = config.IssueModeDevelop // promote: always run auto_implement
 
-		extraFlags := agentCfg.ExtraFlags
-		if extraFlags != "" {
-			if err := executor.ValidateExtraFlags(extraFlags); err != nil {
-				slog.Warn("promoteIssue: extra_flags rejected", "err", err)
-				extraFlags = ""
+		slog.Info("promote issue: updating labels on GitHub",
+			"store_issue_id", issueID, "repo", iss.Repo, "number", iss.Number,
+			"add", it.DevelopLabels[0], "remove", it.ReviewOnlyLabels)
+
+		// Add the first develop label so the polling pipeline classifies as DEV.
+		if err := ghClient.AddIssueLabel(iss.Repo, iss.Number, it.DevelopLabels[0]); err != nil {
+			publishIssueErr(fmt.Sprintf("Failed to add develop label: %v", err))
+			return fmt.Errorf("promote issue: add label: %w", err)
+		}
+
+		// Remove review_only labels so classification is unambiguous.
+		for _, label := range it.ReviewOnlyLabels {
+			if err := ghClient.RemoveIssueLabel(iss.Repo, iss.Number, label); err != nil {
+				slog.Warn("promote issue: could not remove review_only label",
+					"label", label, "repo", iss.Repo, "number", iss.Number, "err", err)
+				// Non-fatal — the develop label is already set, classification will still prefer DEV.
 			}
 		}
 
-		issuePrompt, issueInstructions := resolveIssuePrompt(s, aiCfg.IssuePrompt, agentCfg.PromptID)
-		implPrompt, implInstructions := resolveImplementPrompt(s, aiCfg.ImplementPrompt, agentCfg.PromptID)
-
-		opts := issuepipeline.RunOptions{
-			GitHubToken: token,
-			Primary:     aiCfg.Primary,
-			Fallback:    aiCfg.Fallback,
-			ExecOpts: executor.ExecOptions{
-				Model:                agentCfg.Model,
-				MaxTurns:             agentCfg.MaxTurns,
-				ApprovalMode:         agentCfg.ApprovalMode,
-				ExtraFlags:           extraFlags,
-				WorkDir:              aiCfg.LocalDir,
-				Effort:               agentCfg.Effort,
-				PermissionMode:       agentCfg.PermissionMode,
-				Bare:                 agentCfg.Bare,
-				DangerouslySkipPerms: agentCfg.DangerouslySkipPerms,
-				NoSessionPersistence: agentCfg.NoSessionPersistence,
-				Timeout:              resolveExecutionTimeout(globalTimeout, agentCfg.ExecutionTimeout),
-			},
-			IssuePromptOverride:     issuePrompt,
-			IssueInstructions:       issueInstructions,
-			ImplementPromptOverride: implPrompt,
-			ImplementInstructions:   implInstructions,
-			PRReviewers:           aiCfg.PRReviewers,
-			PRAssignee:            aiCfg.PRAssignee,
-			PRLabels:              aiCfg.PRLabels,
-			PRDraft:               aiCfg.PRDraft != nil && *aiCfg.PRDraft,
-			GeneratePRDescription: aiCfg.GeneratePRDescription != nil && *aiCfg.GeneratePRDescription,
-		}
-
-		slog.Info("promote issue: running auto_implement pipeline",
+		slog.Info("promote issue: labels updated, polling will pick it up as DEV",
 			"store_issue_id", issueID, "repo", iss.Repo, "number", iss.Number)
-
-		_, err = issuePipe.Run(context.Background(), ghIssue, opts)
-		if err != nil {
-			broker.Publish(sse.Event{Type: sse.EventIssueReviewError, Data: sseData(map[string]any{
-				"issue_id": issueID, "repo": iss.Repo, "error": err.Error(),
-			})})
-			return err
-		}
 		return nil
 	})
 

@@ -559,6 +559,41 @@ func (c *Client) FetchLabels(repo string) ([]string, error) {
 	return names, nil
 }
 
+// AddIssueLabel adds a label to an issue. No-op if the label is already present.
+func (c *Client) AddIssueLabel(repo string, number int, label string) error {
+	body := fmt.Sprintf(`{"labels":[%q]}`, label)
+	resp, err := c.doWithBody("POST",
+		fmt.Sprintf("/repos/%s/issues/%d/labels", repo, number),
+		"application/vnd.github+json", "application/json",
+		strings.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("github: add label: %w", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("github: add label %q to %s#%d: status %d", label, repo, number, resp.StatusCode)
+	}
+	return nil
+}
+
+// RemoveIssueLabel removes a label from an issue. No-op if the label is not present (404 ignored).
+func (c *Client) RemoveIssueLabel(repo string, number int, label string) error {
+	resp, err := c.do("DELETE",
+		fmt.Sprintf("/repos/%s/issues/%d/labels/%s", repo, number, url.PathEscape(label)),
+		"application/vnd.github+json")
+	if err != nil {
+		return fmt.Errorf("github: remove label: %w", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil // label not present — no-op
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("github: remove label %q from %s#%d: status %d", label, repo, number, resp.StatusCode)
+	}
+	return nil
+}
+
 // FetchCollaborators returns the login names of repository collaborators.
 func (c *Client) FetchCollaborators(repo string) ([]string, error) {
 	if repo == "" {
