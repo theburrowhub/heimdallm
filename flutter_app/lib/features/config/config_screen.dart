@@ -119,7 +119,20 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
       ),
       body: configAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
-        error: (_, __) => _buildForm(context, const AppConfig(), daemonRunning),
+        error: (e, __) => Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text('Could not load config: $e',
+                  style: TextStyle(color: Colors.red.shade400, fontSize: 13)),
+              const SizedBox(height: 12),
+              ElevatedButton(
+                onPressed: () => ref.invalidate(configNotifierProvider),
+                child: const Text('Retry'),
+              ),
+            ],
+          ),
+        ),
         data: (config) {
           _initFromConfig(config);
           return _buildForm(context, config, daemonRunning);
@@ -547,14 +560,21 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
           }),
         ),
         const SizedBox(height: 10),
-        SwitchListTile(
-          title: const Text('Create as draft', style: TextStyle(fontSize: 13)),
-          subtitle: const Text('PRs are created as drafts by default',
-              style: TextStyle(fontSize: 11)),
-          dense: true,
-          contentPadding: EdgeInsets.zero,
-          value: _globalPRDraft,
-          onChanged: (v) => setState(() => _globalPRDraft = v),
+        Container(
+          decoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
+            borderRadius: BorderRadius.circular(6),
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+          child: SwitchListTile(
+            title: const Text('Create as draft', style: TextStyle(fontSize: 11)),
+            subtitle: Text('PRs are created as drafts by default',
+                style: TextStyle(fontSize: 10, color: Colors.grey.shade600)),
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            value: _globalPRDraft,
+            onChanged: (v) => setState(() => _globalPRDraft = v),
+          ),
         ),
         const SizedBox(height: 10),
         _agentDropdown(
@@ -574,28 +594,53 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     required ValueChanged<String?> onChanged,
   }) {
     final agents = ref.watch(agentsProvider).valueOrNull ?? [];
-    final options = agents.map((a) => a.id).toList();
-    final effective = (value != null && options.contains(value)) ? value : null;
-    return DropdownButtonFormField<String?>(
-      key: ValueKey('$label-$effective'),
-      initialValue: effective,
-      decoration: InputDecoration(
-        labelText: label,
-        helperText: helper,
-        border: const OutlineInputBorder(),
-        isDense: true,
+    final effective = (value != null && agents.any((a) => a.id == value)) ? value : null;
+    return Container(
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
+        borderRadius: BorderRadius.circular(6),
       ),
-      items: [
-        const DropdownMenuItem<String?>(
-          value: null,
-          child: Text('default', style: TextStyle(fontSize: 12)),
-        ),
-        ...options.map((id) => DropdownMenuItem<String?>(
-              value: id,
-              child: Text(id, style: const TextStyle(fontSize: 12)),
-            )),
-      ],
-      onChanged: onChanged,
+      padding: const EdgeInsets.all(10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text(label, style: TextStyle(fontSize: 11, color: Colors.grey.shade500)),
+              const Spacer(),
+              Text('global', style: TextStyle(fontSize: 10, color: Colors.grey.shade600)),
+            ],
+          ),
+          const SizedBox(height: 6),
+          DropdownButtonFormField<String?>(
+            key: ValueKey('$label-$effective'),
+            initialValue: effective,
+            decoration: const InputDecoration(
+              isDense: true,
+              border: OutlineInputBorder(),
+              contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+            ),
+            style: const TextStyle(fontSize: 12),
+            items: [
+              const DropdownMenuItem<String?>(
+                value: null,
+                child: Text('default', style: TextStyle(fontSize: 12)),
+              ),
+              ...agents.map((a) => DropdownMenuItem<String?>(
+                    value: a.id,
+                    child: Text(a.name.isNotEmpty ? a.name : a.id,
+                        style: const TextStyle(fontSize: 12)),
+                  )),
+            ],
+            onChanged: onChanged,
+          ),
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(helper,
+                style: TextStyle(fontSize: 10, color: Colors.grey.shade600)),
+          ),
+        ],
+      ),
     );
   }
 

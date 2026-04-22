@@ -10,24 +10,16 @@ final daemonHealthProvider = FutureProvider<bool>((ref) async {
 
 final configProvider = FutureProvider<AppConfig>((ref) async {
   final api = ref.watch(apiClientProvider);
-  try {
-    final json = await api.fetchConfig();
-    return AppConfig.fromJson(json);
-  } catch (_) {
-    return const AppConfig();
-  }
+  final json = await api.fetchConfig();
+  return AppConfig.fromJson(json);
 });
 
 class ConfigNotifier extends AsyncNotifier<AppConfig> {
   @override
   Future<AppConfig> build() async {
     final api = ref.watch(apiClientProvider);
-    try {
-      final json = await api.fetchConfig();
-      return AppConfig.fromJson(json);
-    } catch (_) {
-      return const AppConfig();
-    }
+    final json = await api.fetchConfig();
+    return AppConfig.fromJson(json);
   }
 
   /// Replaces local state with fresh config from the daemon. Called after
@@ -38,6 +30,8 @@ class ConfigNotifier extends AsyncNotifier<AppConfig> {
 
   /// Save global config changes by computing the diff and sending only
   /// changed fields to the daemon via PATCH.
+  /// Optimistic: updates UI state immediately, sends PATCH in background,
+  /// then reconciles with the daemon's authoritative response.
   Future<void> save(AppConfig updated) async {
     final current = state.valueOrNull;
     if (current == null) return;
@@ -47,6 +41,9 @@ class ConfigNotifier extends AsyncNotifier<AppConfig> {
       state = AsyncValue.data(updated);
       return;
     }
+    // Optimistic update — UI reflects the change immediately
+    state = AsyncValue.data(updated);
+    // Reconcile with daemon response in background
     final freshJson = await api.patchConfig(diff);
     state = AsyncValue.data(AppConfig.fromJson(freshJson));
   }
