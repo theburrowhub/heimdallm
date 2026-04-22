@@ -2,6 +2,20 @@
 
 > **Note:** Versions 0.1.0–0.1.3 were originally published under [`theburrowhub/heimdallr-docker`](https://github.com/theburrowhub/heimdallr-docker) (now archived). The project was unified into this repository and renamed to Heimdallm in v0.1.1.
 
+## [0.4.15](https://github.com/theburrowhub/heimdallm/compare/v0.4.14...v0.4.15) (2026-04-22)
+
+
+### Features
+
+* implement [#188](https://github.com/theburrowhub/heimdallm/issues/188) — fix(cli): activity feed should clarify event type (PR/Issue) and hide [#0](https://github.com/theburrowhub/heimdallm/issues/0) ([#193](https://github.com/theburrowhub/heimdallm/issues/193)) ([c5d7047](https://github.com/theburrowhub/heimdallm/commit/c5d7047ccbaea7636293318d863efa0c929687c9))
+* implement [#189](https://github.com/theburrowhub/heimdallm/issues/189) — fix(cli): PRs tab should only show Heimdallm-reviewed PRs ([#195](https://github.com/theburrowhub/heimdallm/issues/195)) ([a259ce3](https://github.com/theburrowhub/heimdallm/commit/a259ce3c67e83e17354ced85a91a7ea003dad0d5))
+* implement [#191](https://github.com/theburrowhub/heimdallm/issues/191) — feat(cli): add Logs tab to dashboard with structured process view ([#199](https://github.com/theburrowhub/heimdallm/issues/199)) ([b58b6e4](https://github.com/theburrowhub/heimdallm/commit/b58b6e45b6f2da57d8ccd31806275c4329d79398))
+
+
+### Bug Fixes
+
+* **flutter:** reconcile reviewing-PR spinner against PR list ([#198](https://github.com/theburrowhub/heimdallm/issues/198)) ([66ecea4](https://github.com/theburrowhub/heimdallm/commit/66ecea44236bee1ba89d39a33e42790ec14fc7af))
+
 ## [0.4.14](https://github.com/theburrowhub/heimdallm/compare/v0.4.13...v0.4.14) (2026-04-22)
 
 
