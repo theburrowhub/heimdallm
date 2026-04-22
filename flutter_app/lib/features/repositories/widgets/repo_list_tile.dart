@@ -3,6 +3,7 @@ import '../../../core/models/config_model.dart';
 import 'feature_led.dart';
 import 'feature_palette.dart';
 import 'led_source.dart';
+import 'local_dir_resolution.dart';
 
 /// One row in the repos list. Stateless; all state flows via parameters
 /// and callbacks.
@@ -28,7 +29,9 @@ class RepoListTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final hasDir = config.localDir != null && config.localDir!.isNotEmpty;
+    final localDir = LocalDirResolution.resolve(
+      repo: repo, config: config, appConfig: appConfig,
+    );
     final theme = Theme.of(context);
     final selectedBg = theme.colorScheme.primary.withValues(alpha:0.12);
 
@@ -133,21 +136,7 @@ class RepoListTile extends StatelessWidget {
                       ],
                     ]),
                     const SizedBox(height: 2),
-                    Row(children: [
-                      Icon(
-                        hasDir ? Icons.folder : Icons.folder_off_outlined,
-                        size: 13,
-                        color: hasDir ? Colors.green.shade500 : Colors.grey.shade600,
-                      ),
-                      const SizedBox(width: 4),
-                      Text(
-                        hasDir ? config.localDir!.split('/').last : 'No local dir',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: hasDir ? Colors.green.shade500 : Colors.grey.shade600,
-                        ),
-                      ),
-                    ]),
+                    LocalDirBadge(resolution: localDir, fontSize: 11, iconSize: 13),
                   ],
                 ),
               ),

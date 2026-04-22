@@ -3,6 +3,7 @@ import '../../../core/models/config_model.dart';
 import 'feature_led.dart';
 import 'feature_palette.dart';
 import 'led_source.dart';
+import 'local_dir_resolution.dart';
 
 class RepoGridTile extends StatelessWidget {
   final String repo;
@@ -29,7 +30,9 @@ class RepoGridTile extends StatelessWidget {
     final parts = repo.split('/');
     final org = parts.length > 1 ? parts[0] : '';
     final name = parts.length > 1 ? parts.sublist(1).join('/') : repo;
-    final hasDir = config.localDir != null && config.localDir!.isNotEmpty;
+    final localDir = LocalDirResolution.resolve(
+      repo: repo, config: config, appConfig: appConfig,
+    );
     final primary = Theme.of(context).colorScheme.primary;
 
     return InkWell(
@@ -146,23 +149,7 @@ class RepoGridTile extends StatelessWidget {
               maxLines: 1, overflow: TextOverflow.ellipsis,
             ),
             const Spacer(),
-            Row(children: [
-              Icon(
-                hasDir ? Icons.folder : Icons.folder_off_outlined,
-                size: 12, color: hasDir ? Colors.green.shade500 : Colors.grey.shade600,
-              ),
-              const SizedBox(width: 4),
-              Flexible(
-                child: Text(
-                  hasDir ? config.localDir!.split('/').last : 'No local dir',
-                  style: TextStyle(
-                    fontSize: 10.5,
-                    color: hasDir ? Colors.green.shade500 : Colors.grey.shade600,
-                  ),
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-            ]),
+            LocalDirBadge(resolution: localDir, fontSize: 10.5, iconSize: 12),
           ],
         ),
       ),
