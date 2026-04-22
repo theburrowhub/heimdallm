@@ -21,16 +21,17 @@ func clientFromContext(ctx context.Context) *api.Client {
 	return ctx.Value(clientKey).(*api.Client)
 }
 
-func NewRootCmd() *cobra.Command {
+func NewRootCmd(version string) *cobra.Command {
 	var (
 		flagHost  string
 		flagToken string
 	)
 
 	root := &cobra.Command{
-		Use:   "heimdallm-cli",
-		Short: "CLI client for the Heimdallm daemon",
-		Long:  "Monitor and interact with the Heimdallm daemon from the terminal.",
+		Use:     "heimdallm-cli",
+		Version: version,
+		Short:   "CLI client for the Heimdallm daemon",
+		Long:    "Monitor and interact with the Heimdallm daemon from the terminal.",
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
 			// Resolution priority:
 			// 1. --token / --host flags (already in flagToken/flagHost)

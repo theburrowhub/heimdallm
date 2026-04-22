@@ -705,10 +705,10 @@ func formatConfigValue(v any) string {
 		for i, item := range val {
 			parts[i] = fmt.Sprintf("%v", item)
 		}
-		return strings.Join(parts, ", ")
+		return truncateRunes(strings.Join(parts, ", "), 60)
 	case map[string]any:
-		b, _ := json.MarshalIndent(val, "                      ", "  ")
-		return string(b)
+		b, _ := json.Marshal(val)
+		return truncateRunes(string(b), 60)
 	default:
 		return fmt.Sprintf("%v", v)
 	}
