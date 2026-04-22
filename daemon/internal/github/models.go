@@ -93,6 +93,7 @@ type PullRequest struct {
 	HTMLURL   string    `json:"html_url"`
 	User      User      `json:"user"`
 	State     string    `json:"state"`
+	Draft     bool      `json:"draft"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Head      Branch    `json:"head"`
 	// repository_url is returned by the Search Issues API: "https://api.github.com/repos/org/repo"
