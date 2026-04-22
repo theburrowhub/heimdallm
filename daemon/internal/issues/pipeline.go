@@ -81,6 +81,13 @@ type PRMetadataApplier interface {
 	SetAssignees(repo string, number int, assignees []string) error
 }
 
+// IssueGetter fetches a single issue by repo + number. Used by the
+// auto_implement pre-push state check to verify the issue is still open
+// before creating a PR (#238).
+type IssueGetter interface {
+	GetIssue(repo string, number int) (*github.Issue, error)
+}
+
 // CLIExecutor runs an AI CLI. The pipeline uses ExecuteRaw because the
 // triage schema (Triage object) differs from the PR-review schema.
 type CLIExecutor interface {
@@ -198,6 +205,7 @@ type issueGitHub interface {
 	DefaultBrancher
 	PRCreator
 	PRMetadataApplier
+	IssueGetter
 }
 
 // New wires the pipeline. All dependencies are interfaces so tests can
@@ -501,6 +509,21 @@ func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, is
 		p.publishError(issueID, issue, fmt.Errorf("commit: %w", err))
 		return nil, fmt.Errorf("issues pipeline: commit: %w", err)
 	}
+
+	// Pre-push state check (#238): verify the issue is still open. If it
+	// was closed during implementation (e.g. another PR merged), abort to
+	// avoid creating a duplicate PR. Non-fatal on API error — we proceed
+	// with the push rather than block on a transient failure.
+	freshIssue, stateErr := p.gh.GetIssue(issue.Repo, issue.Number)
+	if stateErr != nil {
+		slog.Warn("issues pipeline: pre-push state check failed, proceeding with push",
+			"repo", issue.Repo, "number", issue.Number, "err", stateErr)
+	} else if freshIssue.State != "open" {
+		slog.Info("issues pipeline: issue closed during implementation, aborting",
+			"repo", issue.Repo, "number", issue.Number, "state", freshIssue.State)
+		return nil, nil
+	}
+
 	if err := p.git.Push(ctx, workDir, issue.Repo, branch, opts.GitHubToken); err != nil {
 		// Record the push failure so the fetcher can enforce the
 		// MaxAutoImplementFailures retry cap (#223). Without this row the
@@ -577,11 +600,14 @@ func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, is
 	// a metadata failure does not roll back the PR, which is already public.
 	applyPRMetadata(p.gh, issue.Repo, prNumber, opts)
 
-	// Post a short "Implementation PR: #N" comment on the issue so watchers
-	// of the issue (who might not watch the repo) see the PR land. Non-fatal
-	// on failure — the PR is already public and the review row carries the
-	// number, so a missed comment does not lose information.
-	linkBackBody := fmt.Sprintf("Implementation PR: #%d", prNumber)
+	// Post a done-marker comment on the issue so watchers see the PR land
+	// and the fetcher's marker scan skips the issue on future polls (#238).
+	// Non-fatal on failure — the PR is already public and the review row
+	// carries the number, so a missed comment does not lose information.
+	linkBackBody := fmt.Sprintf(
+		"%s\n✅ Implementation complete — PR #%d created on branch `%s`.\nThis issue will not be reprocessed unless a retry marker is added.",
+		MarkerDone, prNumber, branch,
+	)
 	commentedAt, linkErr := p.gh.PostComment(issue.Repo, issue.Number, linkBackBody)
 	if linkErr != nil {
 		slog.Warn("issues pipeline: link-back comment failed",
