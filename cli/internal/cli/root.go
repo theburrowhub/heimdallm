@@ -85,6 +85,8 @@ func NewRootCmd(version string) *cobra.Command {
 		newFollowCmd(),
 		newReviewPRCmd(),
 		newReviewIssueCmd(),
+		newDismissIssueCmd(),
+		newUndismissIssueCmd(),
 		newConfigCmd(),
 		newStatsCmd(),
 		newDashboardCmd(),

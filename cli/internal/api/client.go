@@ -264,6 +264,18 @@ func (c *Client) TriggerIssueReview(id int64) error {
 	return err
 }
 
+// DismissIssue hides an issue from the pipeline, stopping retries until undismissed.
+func (c *Client) DismissIssue(id int64) error {
+	_, err := c.do("POST", fmt.Sprintf("/issues/%d/dismiss", id))
+	return err
+}
+
+// UndismissIssue restores a previously dismissed issue, allowing the pipeline to retry it.
+func (c *Client) UndismissIssue(id int64) error {
+	_, err := c.do("POST", fmt.Sprintf("/issues/%d/undismiss", id))
+	return err
+}
+
 // StreamEvents opens an SSE connection and sends events to the provided channel.
 // It blocks until the context is cancelled, the connection is closed, or an error occurs.
 func (c *Client) StreamEvents(ctx context.Context, events chan<- SSEEvent) error {
