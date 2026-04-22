@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/api/api_client.dart';
 import '../../core/api/sse_client.dart';
@@ -22,9 +23,19 @@ final sseStreamProvider = StreamProvider<SseEvent>((ref) {
   return client.connect();
 });
 
-/// Tracks PRs currently being reviewed, keyed by "repo:prNumber".
-/// Used to show spinners in the tile list and detail view.
-final reviewingPRsProvider = StateProvider<Set<String>>((ref) => const {});
+/// Tracks PRs currently being reviewed, keyed by "repo:prNumber". Used to
+/// show spinners in the tile list and detail view.
+///
+/// The value is the baseline `latestReview.id` (or 0 if the PR had no
+/// prior review) captured when the review started. Reconciliation compares
+/// this against the PR's current `latestReview.id` on every list refresh:
+/// if they differ, a *new* review has landed and the entry is stale. This
+/// is the recovery path for missed SSE events — the broker drops events
+/// silently on subscriber back-pressure, so we can't rely on
+/// `review_completed` always arriving to clear the spinner.
+final reviewingPRsProvider = StateProvider<Map<String, int>>(
+  (ref) => const <String, int>{},
+);
 
 /// Increments on review_completed and on SSE reconnects (to catch up on missed events).
 final StateProvider<int> prListRefreshProvider = StateProvider<int>((ref) {
@@ -51,7 +62,10 @@ void _handleSseEvent(Ref ref, SseEvent event) {
     switch (event.type) {
       case 'review_started':
         if (key != null) {
-          ref.read(reviewingPRsProvider.notifier).update((s) => {...s, key});
+          final baseline = _baselineReviewId(ref, repo: repo, prNumber: prNumber!);
+          ref
+              .read(reviewingPRsProvider.notifier)
+              .update((s) => {...s, key: baseline});
         }
         sendPRNotification(
           platform: ref.read(platformServicesProvider),
@@ -63,7 +77,9 @@ void _handleSseEvent(Ref ref, SseEvent event) {
       case 'review_completed':
         // Remove from in-progress
         if (key != null) {
-          ref.read(reviewingPRsProvider.notifier).update((s) => s.difference({key}));
+          ref
+              .read(reviewingPRsProvider.notifier)
+              .update((s) => {...s}..remove(key));
         }
         final severity = data['severity'] as String? ?? '';
         sendPRNotification(
@@ -77,14 +93,18 @@ void _handleSseEvent(Ref ref, SseEvent event) {
       case 'review_error':
         // key may be null for trigger early-fail events (only have pr_id)
         if (key != null) {
-          ref.read(reviewingPRsProvider.notifier).update((s) => s.difference({key}));
+          ref
+              .read(reviewingPRsProvider.notifier)
+              .update((s) => {...s}..remove(key));
         } else if (prId != null) {
           // Look up by store ID from cached PR list
           final prs = ref.read(prsProvider).valueOrNull ?? [];
           final pr = prs.where((p) => p.id == prId).firstOrNull;
           if (pr != null) {
             final k = '${pr.repo}:${pr.number}';
-            ref.read(reviewingPRsProvider.notifier).update((s) => s.difference({k}));
+            ref
+                .read(reviewingPRsProvider.notifier)
+                .update((s) => {...s}..remove(k));
           }
         }
 
@@ -137,8 +157,57 @@ final prsProvider = FutureProvider<List<PR>>((ref) async {
   final api = ref.watch(apiClientProvider);
   final prs = await api.fetchPRs();
   _rebuildTray(ref, prs);
+  _reconcileReviewingPRs(ref, prs);
   return prs;
 });
+
+int _baselineReviewId(Ref ref, {required String repo, required int prNumber}) {
+  final prs = ref.read(prsProvider).valueOrNull ?? const <PR>[];
+  final pr = prs
+      .where((p) => p.repo == repo && p.number == prNumber)
+      .firstOrNull;
+  return pr?.latestReview?.id ?? 0;
+}
+
+/// Drops entries from `reviewingPRsProvider` whose PR's current
+/// `latestReview.id` no longer matches the baseline captured at review
+/// start. Runs after every PR list refresh as a recovery path for missed
+/// `review_completed` / `review_error` SSE events.
+void _reconcileReviewingPRs(Ref ref, List<PR> prs) {
+  final current = ref.read(reviewingPRsProvider);
+  if (current.isEmpty) return;
+  final next = reconcileReviewing(current, prs);
+  if (next.length != current.length) {
+    ref.read(reviewingPRsProvider.notifier).state = next;
+  }
+}
+
+/// Pure helper: given the current reviewing map and the latest PR list,
+/// returns the map with stale entries removed. An entry is stale when the
+/// PR's current `latestReview.id` differs from the baseline stored at
+/// review start (a new review has landed). PRs not present in `prs` keep
+/// their entry — a missing PR may just mean the list is filtered, and
+/// dropping the key would flicker the spinner off prematurely.
+@visibleForTesting
+Map<String, int> reconcileReviewing(Map<String, int> current, List<PR> prs) {
+  if (current.isEmpty) return current;
+  final byKey = <String, PR>{
+    for (final pr in prs) '${pr.repo}:${pr.number}': pr,
+  };
+  final next = <String, int>{};
+  for (final entry in current.entries) {
+    final pr = byKey[entry.key];
+    if (pr == null) {
+      next[entry.key] = entry.value;
+      continue;
+    }
+    final currentId = pr.latestReview?.id ?? 0;
+    if (currentId == entry.value) {
+      next[entry.key] = entry.value;
+    }
+  }
+  return next;
+}
 
 final statsProvider = FutureProvider<Map<String, dynamic>>((ref) async {
   ref.watch(prListRefreshProvider); // refresh stats when reviews complete

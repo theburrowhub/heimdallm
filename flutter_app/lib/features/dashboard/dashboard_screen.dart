@@ -354,12 +354,19 @@ class _PRTileState extends ConsumerState<_PRTile> {
   String get _reviewKey => '${widget.pr.repo}:${widget.pr.number}';
 
   Future<void> _triggerReview() async {
-    // Optimistically mark as reviewing before the SSE event arrives
-    ref.read(reviewingPRsProvider.notifier).update((s) => {...s, _reviewKey});
+    // Optimistically mark as reviewing before the SSE event arrives.
+    // Baseline = current latestReview.id (0 if none) so reconciliation can
+    // later distinguish a stuck key from an in-progress re-review.
+    final baseline = widget.pr.latestReview?.id ?? 0;
+    ref
+        .read(reviewingPRsProvider.notifier)
+        .update((s) => {...s, _reviewKey: baseline});
     try {
       await ref.read(apiClientProvider).triggerReview(widget.pr.id);
     } catch (e) {
-      ref.read(reviewingPRsProvider.notifier).update((s) => s.difference({_reviewKey}));
+      ref
+          .read(reviewingPRsProvider.notifier)
+          .update((s) => {...s}..remove(_reviewKey));
       if (mounted) showToast(context, 'Error: $e', isError: true);
     }
   }
@@ -392,7 +399,7 @@ class _PRTileState extends ConsumerState<_PRTile> {
   Widget build(BuildContext context) {
     final pr = widget.pr;
     final reviewed = pr.latestReview != null;
-    final isReviewing = ref.watch(reviewingPRsProvider).contains(_reviewKey);
+    final isReviewing = ref.watch(reviewingPRsProvider).containsKey(_reviewKey);
 
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 3),

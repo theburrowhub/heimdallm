@@ -130,7 +130,7 @@ class _PRDetailScreenState extends ConsumerState<PRDetailScreen> {
     // Derive review key from loaded PR for shared in-progress state
     final reviewKey = pr != null ? '${pr.repo}:${pr.number}' : null;
     final isReviewingShared = reviewKey != null &&
-        ref.watch(reviewingPRsProvider).contains(reviewKey);
+        ref.watch(reviewingPRsProvider).containsKey(reviewKey);
     // Combine local trigger state with shared provider
     final reviewing = _reviewing || isReviewingShared;
 
