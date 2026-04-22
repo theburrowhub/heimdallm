@@ -2,6 +2,13 @@
 
 > **Note:** Versions 0.1.0–0.1.3 were originally published under [`theburrowhub/heimdallr-docker`](https://github.com/theburrowhub/heimdallr-docker) (now archived). The project was unified into this repository and renamed to Heimdallm in v0.1.1.
 
+## [0.4.16](https://github.com/theburrowhub/heimdallm/compare/v0.4.15...v0.4.16) (2026-04-22)
+
+
+### Bug Fixes
+
+* remove broken test files referencing unimplemented multi-token API ([#207](https://github.com/theburrowhub/heimdallm/issues/207)) ([493e0ea](https://github.com/theburrowhub/heimdallm/commit/493e0ead1dab72f51c9a12c4e7c6d0ce0e65a312))
+
 ## [0.4.15](https://github.com/theburrowhub/heimdallm/compare/v0.4.14...v0.4.15) (2026-04-22)
 
 
