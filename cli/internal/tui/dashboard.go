@@ -19,9 +19,10 @@ const (
 	tabPRs
 	tabIssues
 	tabConfig
+	tabLogs
 )
 
-var tabNames = []string{"Activity", "PRs", "Issues", "Config"}
+var tabNames = []string{"Activity", "PRs", "Issues", "Config", "Logs"}
 
 type Dashboard struct {
 	client *api.Client
@@ -37,6 +38,11 @@ type Dashboard struct {
 	stats    *api.Stats
 	activity []activityLine
 
+	logLines  []logLine
+	logFollow bool
+	logOffset int
+	logSeeded bool
+
 	err       error
 	connected bool
 	startTime time.Time
@@ -46,9 +52,10 @@ type Dashboard struct {
 }
 
 type activityLine struct {
-	Time  string
-	Event string
-	Info  string
+	Time     string
+	Event    string
+	Info     string
+	ItemType string // "pr" or "issue"
 }
 
 type tickMsg time.Time
@@ -67,6 +74,7 @@ func NewDashboard(host, token string) *Dashboard {
 		client:    api.New(host, token),
 		startTime: time.Now(),
 		sseEvents: make(chan api.SSEEvent, 32),
+		logFollow: true,
 	}
 }
 
@@ -165,7 +173,12 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			d.err = nil
 			d.connected = true
-			d.prs = msg.prs
+			d.prs = nil
+			for _, pr := range msg.prs {
+				if pr.LatestReview != nil {
+					d.prs = append(d.prs, pr)
+				}
+			}
 			d.issues = msg.issues
 			d.config = msg.config
 			d.stats = msg.stats
@@ -173,24 +186,46 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				d.activity = make([]activityLine, 0, len(msg.activity.Entries))
 				for _, e := range msg.activity.Entries {
 					d.activity = append(d.activity, activityLine{
-						Time:  formatActivityTime(e.TS),
-						Event: e.Action,
-						Info:  fmt.Sprintf("%s #%d", e.Repo, e.ItemNumber),
+						Time:     formatActivityTime(e.TS),
+						Event:    e.Action,
+						Info:     formatActivityInfo(e.Repo, e.ItemType, e.ItemNumber),
+						ItemType: e.ItemType,
 					})
+				}
+				if !d.logSeeded {
+					entries := msg.activity.Entries
+					d.logLines = make([]logLine, 0, len(entries))
+					for i := len(entries) - 1; i >= 0; i-- {
+						d.logLines = append(d.logLines, activityToLogLine(entries[i]))
+					}
+					d.logSeeded = true
 				}
 			}
 		}
 		return d, nil
 
 	case sseMsg:
+		itemType, info := formatSSEData(msg.Data)
 		line := activityLine{
-			Time:  time.Now().Format("15:04"),
-			Event: msg.Type,
-			Info:  formatSSEData(msg.Data),
+			Time:     time.Now().Format("15:04"),
+			Event:    msg.Type,
+			Info:     info,
+			ItemType: itemType,
 		}
 		d.activity = append([]activityLine{line}, d.activity...)
 		if len(d.activity) > 100 {
 			d.activity = d.activity[:100]
+		}
+		d.logLines = append(d.logLines, sseToLogLine(api.SSEEvent(msg)))
+		if len(d.logLines) > 1000 {
+			excess := len(d.logLines) - 1000
+			d.logLines = d.logLines[excess:]
+			if !d.logFollow {
+				d.logOffset -= excess
+				if d.logOffset < 0 {
+					d.logOffset = 0
+				}
+			}
 		}
 		return d, d.listenSSE()
 	}
@@ -212,11 +247,23 @@ func (d *Dashboard) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		d.activeTab = (d.activeTab - 1 + tab(len(tabNames))) % tab(len(tabNames))
 		d.cursor = 0
 	case "j", "down":
-		d.cursor++
-		d.clampCursor()
+		if d.activeTab == tabLogs {
+			d.scrollLogsDown()
+		} else {
+			d.cursor++
+			d.clampCursor()
+		}
 	case "k", "up":
-		if d.cursor > 0 {
-			d.cursor--
+		if d.activeTab == tabLogs {
+			d.scrollLogsUp()
+		} else {
+			if d.cursor > 0 {
+				d.cursor--
+			}
+		}
+	case "G":
+		if d.activeTab == tabLogs {
+			d.logFollow = true
 		}
 	case "r":
 		return d, d.fetchData
@@ -232,6 +279,9 @@ func (d *Dashboard) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "4":
 		d.activeTab = tabConfig
 		d.cursor = 0
+	case "5":
+		d.activeTab = tabLogs
+		d.cursor = 0
 	}
 	return d, nil
 }
@@ -245,6 +295,8 @@ func (d *Dashboard) clampCursor() {
 		max = len(d.prs)
 	case tabIssues:
 		max = len(d.issues)
+	case tabLogs:
+		return // logs tab uses logOffset/logFollow, not cursor
 	}
 	if max > 0 && d.cursor >= max {
 		d.cursor = max - 1
@@ -346,6 +398,8 @@ func (d *Dashboard) renderContent(height int) string {
 		return d.renderIssues(height)
 	case tabConfig:
 		return d.renderConfig(height)
+	case tabLogs:
+		return d.renderLogs(height)
 	}
 	return ""
 }
@@ -368,7 +422,8 @@ func (d *Dashboard) renderActivity(height int) string {
 	}
 
 	for i, a := range visible {
-		line := fmt.Sprintf("  %-7s %-25s %s", a.Time, a.Event, a.Info)
+		info := itemTypeStyle(a.ItemType).Render(a.Info)
+		line := fmt.Sprintf("  %-7s %-25s %s", a.Time, a.Event, info)
 		if i == d.cursor {
 			b.WriteString(selectedRowStyle.Render(line))
 		} else {
@@ -497,7 +552,7 @@ func (d *Dashboard) renderConfig(height int) string {
 }
 
 func (d *Dashboard) renderHelp() string {
-	return helpStyle.Render("[q]uit  [r]efresh  [tab]switch  [j/k]navigate  [1-4]jump to tab")
+	return helpStyle.Render("[q]uit  [r]efresh  [tab]switch  [j/k]scroll  [1-5]jump to tab  [G]follow")
 }
 
 func formatConfigValue(v any) string {
@@ -527,10 +582,10 @@ func formatActivityTime(ts string) string {
 	return t.Format("15:04")
 }
 
-func formatSSEData(data string) string {
+func formatSSEData(data string) (itemType string, info string) {
 	var m map[string]any
 	if err := json.Unmarshal([]byte(data), &m); err != nil {
-		return data
+		return "", data
 	}
 
 	parts := make([]string, 0)
@@ -538,19 +593,65 @@ func formatSSEData(data string) string {
 		parts = append(parts, fmt.Sprintf("%v", repo))
 	}
 	if num, ok := m["pr_number"]; ok {
-		parts = append(parts, fmt.Sprintf("#%v", num))
+		itemType = "pr"
+		n := toInt(num)
+		if n != 0 {
+			parts = append(parts, fmt.Sprintf("PR #%d", n))
+		}
 	}
 	if num, ok := m["issue_number"]; ok {
-		parts = append(parts, fmt.Sprintf("#%v", num))
+		itemType = "issue"
+		n := toInt(num)
+		if n != 0 {
+			parts = append(parts, fmt.Sprintf("Issue #%d", n))
+		}
 	}
 	if sev, ok := m["severity"]; ok {
 		parts = append(parts, fmt.Sprintf("[%v]", sev))
 	}
 
 	if len(parts) > 0 {
-		return strings.Join(parts, " ")
+		return itemType, strings.Join(parts, " ")
 	}
-	return data
+	return itemType, data
+}
+
+func formatActivityInfo(repo, itemType string, itemNumber int) string {
+	if itemNumber == 0 {
+		return repo
+	}
+	switch itemType {
+	case "pr":
+		return fmt.Sprintf("%s PR #%d", repo, itemNumber)
+	case "issue":
+		return fmt.Sprintf("%s Issue #%d", repo, itemNumber)
+	default:
+		return fmt.Sprintf("%s #%d", repo, itemNumber)
+	}
+}
+
+func itemTypeStyle(itemType string) lipgloss.Style {
+	switch itemType {
+	case "pr":
+		return lipgloss.NewStyle().Foreground(colorPR)
+	case "issue":
+		return lipgloss.NewStyle().Foreground(colorIssue)
+	default:
+		return lipgloss.NewStyle()
+	}
+}
+
+func toInt(v any) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case int64:
+		return int(n)
+	default:
+		return 0
+	}
 }
 
 func extractSeverity(triage json.RawMessage) string {

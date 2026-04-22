@@ -77,10 +77,14 @@ func formatEventData(data string) string {
 		parts = append(parts, fmt.Sprintf("%v", repo))
 	}
 	if num, ok := m["pr_number"]; ok {
-		parts = append(parts, fmt.Sprintf("#%v", num))
+		if n := toInt(num); n != 0 {
+			parts = append(parts, fmt.Sprintf("PR #%d", n))
+		}
 	}
 	if num, ok := m["issue_number"]; ok {
-		parts = append(parts, fmt.Sprintf("#%v", num))
+		if n := toInt(num); n != 0 {
+			parts = append(parts, fmt.Sprintf("Issue #%d", n))
+		}
 	}
 	if sev, ok := m["severity"]; ok {
 		parts = append(parts, fmt.Sprintf("[%v]", sev))
@@ -97,4 +101,17 @@ func formatEventData(data string) string {
 		return result
 	}
 	return data
+}
+
+func toInt(v any) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case int64:
+		return int(n)
+	default:
+		return 0
+	}
 }
