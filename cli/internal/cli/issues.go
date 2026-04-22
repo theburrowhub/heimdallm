@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/theburrowhub/heimdallm/cli/internal/api"
 )
 
 func newIssuesCmd() *cobra.Command {
@@ -21,20 +22,25 @@ func newIssuesCmd() *cobra.Command {
 				return fmt.Errorf("fetching issues: %w", err)
 			}
 
-			if len(issues) == 0 {
+			var reviewed []api.Issue
+			for _, iss := range issues {
+				if iss.LatestReview != nil {
+					reviewed = append(reviewed, iss)
+				}
+			}
+
+			if len(reviewed) == 0 {
 				fmt.Println("No issues found.")
 				return nil
 			}
 
-			filtered := issues
+			filtered := reviewed
 			if severity != "" {
 				filtered = nil
-				for _, iss := range issues {
-					if iss.LatestReview != nil {
-						sev := extractTriageSeverity(iss.LatestReview.Triage)
-						if strings.EqualFold(sev, severity) {
-							filtered = append(filtered, iss)
-						}
+				for _, iss := range reviewed {
+					sev := extractTriageSeverity(iss.LatestReview.Triage)
+					if strings.EqualFold(sev, severity) {
+						filtered = append(filtered, iss)
 					}
 				}
 			}

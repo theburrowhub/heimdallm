@@ -179,7 +179,12 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					d.prs = append(d.prs, pr)
 				}
 			}
-			d.issues = msg.issues
+			d.issues = nil
+			for _, iss := range msg.issues {
+				if iss.LatestReview != nil {
+					d.issues = append(d.issues, iss)
+				}
+			}
 			d.config = msg.config
 			d.stats = msg.stats
 			if msg.activity != nil {
