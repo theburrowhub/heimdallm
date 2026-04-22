@@ -182,9 +182,18 @@ type ReviewGuardsConfig struct {
 	SkipSelfAuthor *bool `toml:"skip_self_author"`
 }
 
-// ResolvedReviewGuards is the ready-to-use form of ReviewGuardsConfig after
-// defaults have been applied. Callers (e.g. the poller) convert this to
-// pipeline.GateConfig to keep config free of the pipeline import cycle.
+// ResolvedReviewGuards is a shadow of pipeline.GateConfig that exists to break
+// an import cycle: config cannot import pipeline because pipeline imports
+// github, and github imports config (for IssueMode). This type has identical
+// field names, types, and order to pipeline.GateConfig — callers convert via
+// Go's same-shape struct cast:
+//
+//	resolved := cfg.ReviewGuards(botLogin)
+//	gc := pipeline.GateConfig(resolved)
+//
+// If you add a field to pipeline.GateConfig, add it here in the same position
+// and type; the drift-prevention test in config_guards_drift_test.go will fail
+// if the two types diverge.
 type ResolvedReviewGuards struct {
 	SkipDrafts     bool
 	SkipSelfAuthor bool
@@ -967,6 +976,12 @@ func LoadOrCreate(path string) (*Config, error) {
 //
 // Callers convert the result to pipeline.GateConfig to avoid an import cycle
 // (pipeline transitively imports config via the github package).
+//
+// Callers convert the returned value to pipeline.GateConfig via struct cast:
+//
+//	gc := pipeline.GateConfig(cfg.ReviewGuards(botLogin))
+//
+// See the comment on ResolvedReviewGuards for why this shadow type exists.
 func (c *Config) ReviewGuards(botLogin string) ResolvedReviewGuards {
 	g := ResolvedReviewGuards{
 		SkipDrafts:     true,
