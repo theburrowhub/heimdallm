@@ -427,3 +427,200 @@ func TestStore_DefaultAgentFor_ReturnsPerCategoryAgent(t *testing.T) {
 		t.Errorf("DefaultAgentFor(dev) = %+v, want error for no-match", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// State-filter tests for PRs
+// ---------------------------------------------------------------------------
+
+func TestListPRs_StateFilter(t *testing.T) {
+	s := newTestStore(t)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	_, err := s.UpsertPR(&store.PR{GithubID: 301, Repo: "org/r", Number: 301, Title: "open PR", Author: "a", URL: "u", State: "open", UpdatedAt: now, FetchedAt: now})
+	if err != nil {
+		t.Fatalf("upsert open: %v", err)
+	}
+	_, err = s.UpsertPR(&store.PR{GithubID: 302, Repo: "org/r", Number: 302, Title: "closed PR", Author: "a", URL: "u", State: "closed", UpdatedAt: now, FetchedAt: now})
+	if err != nil {
+		t.Fatalf("upsert closed: %v", err)
+	}
+
+	all, err := s.ListPRs()
+	if err != nil {
+		t.Fatalf("ListPRs() all: %v", err)
+	}
+	if len(all) != 2 {
+		t.Errorf("ListPRs() = %d, want 2", len(all))
+	}
+
+	open, err := s.ListPRs("open")
+	if err != nil {
+		t.Fatalf("ListPRs(open): %v", err)
+	}
+	if len(open) != 1 {
+		t.Errorf("ListPRs(open) = %d, want 1", len(open))
+	}
+	if open[0].State != "open" {
+		t.Errorf("ListPRs(open)[0].State = %q, want open", open[0].State)
+	}
+
+	closed, err := s.ListPRs("closed")
+	if err != nil {
+		t.Fatalf("ListPRs(closed): %v", err)
+	}
+	if len(closed) != 1 {
+		t.Errorf("ListPRs(closed) = %d, want 1", len(closed))
+	}
+	if closed[0].State != "closed" {
+		t.Errorf("ListPRs(closed)[0].State = %q, want closed", closed[0].State)
+	}
+}
+
+func TestUpdatePRState(t *testing.T) {
+	s := newTestStore(t)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	id, err := s.UpsertPR(&store.PR{GithubID: 303, Repo: "org/r", Number: 303, Title: "t", Author: "a", URL: "u", State: "open", UpdatedAt: now, FetchedAt: now})
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	if err := s.UpdatePRState(id, "closed"); err != nil {
+		t.Fatalf("UpdatePRState: %v", err)
+	}
+
+	closed, err := s.ListPRs("closed")
+	if err != nil {
+		t.Fatalf("ListPRs(closed): %v", err)
+	}
+	if len(closed) != 1 || closed[0].ID != id {
+		t.Errorf("expected 1 closed PR with id=%d, got %v", id, closed)
+	}
+	if closed[0].State != "closed" {
+		t.Errorf("State = %q, want closed", closed[0].State)
+	}
+}
+
+func TestUpdatePRStateByGithubID(t *testing.T) {
+	s := newTestStore(t)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	id, err := s.UpsertPR(&store.PR{GithubID: 304, Repo: "org/r", Number: 304, Title: "t", Author: "a", URL: "u", State: "open", UpdatedAt: now, FetchedAt: now})
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	if err := s.UpdatePRStateByGithubID(304, "closed"); err != nil {
+		t.Fatalf("UpdatePRStateByGithubID: %v", err)
+	}
+
+	closed, err := s.ListPRs("closed")
+	if err != nil {
+		t.Fatalf("ListPRs(closed): %v", err)
+	}
+	if len(closed) != 1 || closed[0].ID != id {
+		t.Errorf("expected 1 closed PR with id=%d, got %v", id, closed)
+	}
+	if closed[0].GithubID != 304 {
+		t.Errorf("GithubID = %d, want 304", closed[0].GithubID)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// State-filter tests for Issues
+// ---------------------------------------------------------------------------
+
+func TestListIssues_StateFilter(t *testing.T) {
+	s := newTestStore(t)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	openIssue := &store.Issue{GithubID: 401, Repo: "org/r", Number: 401, Title: "open issue", Author: "a", State: "open", CreatedAt: now, FetchedAt: now}
+	closedIssue := &store.Issue{GithubID: 402, Repo: "org/r", Number: 402, Title: "closed issue", Author: "a", State: "closed", CreatedAt: now, FetchedAt: now}
+
+	if _, err := s.UpsertIssue(openIssue); err != nil {
+		t.Fatalf("upsert open: %v", err)
+	}
+	if _, err := s.UpsertIssue(closedIssue); err != nil {
+		t.Fatalf("upsert closed: %v", err)
+	}
+
+	all, err := s.ListIssues()
+	if err != nil {
+		t.Fatalf("ListIssues() all: %v", err)
+	}
+	if len(all) != 2 {
+		t.Errorf("ListIssues() = %d, want 2", len(all))
+	}
+
+	open, err := s.ListIssues("open")
+	if err != nil {
+		t.Fatalf("ListIssues(open): %v", err)
+	}
+	if len(open) != 1 {
+		t.Errorf("ListIssues(open) = %d, want 1", len(open))
+	}
+	if open[0].State != "open" {
+		t.Errorf("ListIssues(open)[0].State = %q, want open", open[0].State)
+	}
+
+	closed, err := s.ListIssues("closed")
+	if err != nil {
+		t.Fatalf("ListIssues(closed): %v", err)
+	}
+	if len(closed) != 1 {
+		t.Errorf("ListIssues(closed) = %d, want 1", len(closed))
+	}
+	if closed[0].State != "closed" {
+		t.Errorf("ListIssues(closed)[0].State = %q, want closed", closed[0].State)
+	}
+}
+
+func TestUpdateIssueState(t *testing.T) {
+	s := newTestStore(t)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	id, err := s.UpsertIssue(&store.Issue{GithubID: 403, Repo: "org/r", Number: 403, Title: "t", Author: "a", State: "open", CreatedAt: now, FetchedAt: now})
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	if err := s.UpdateIssueState(id, "closed"); err != nil {
+		t.Fatalf("UpdateIssueState: %v", err)
+	}
+
+	closed, err := s.ListIssues("closed")
+	if err != nil {
+		t.Fatalf("ListIssues(closed): %v", err)
+	}
+	if len(closed) != 1 || closed[0].ID != id {
+		t.Errorf("expected 1 closed issue with id=%d, got %v", id, closed)
+	}
+	if closed[0].State != "closed" {
+		t.Errorf("State = %q, want closed", closed[0].State)
+	}
+}
+
+func TestUpdateIssueStateByGithubID(t *testing.T) {
+	s := newTestStore(t)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	id, err := s.UpsertIssue(&store.Issue{GithubID: 404, Repo: "org/r", Number: 404, Title: "t", Author: "a", State: "open", CreatedAt: now, FetchedAt: now})
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	if err := s.UpdateIssueStateByGithubID(404, "closed"); err != nil {
+		t.Fatalf("UpdateIssueStateByGithubID: %v", err)
+	}
+
+	closed, err := s.ListIssues("closed")
+	if err != nil {
+		t.Fatalf("ListIssues(closed): %v", err)
+	}
+	if len(closed) != 1 || closed[0].ID != id {
+		t.Errorf("expected 1 closed issue with id=%d, got %v", id, closed)
+	}
+	if closed[0].GithubID != 404 {
+		t.Errorf("GithubID = %d, want 404", closed[0].GithubID)
+	}
+}

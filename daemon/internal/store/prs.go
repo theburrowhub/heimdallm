@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -69,10 +70,21 @@ func (s *Store) GetPRByGithubID(githubID int64) (*PR, error) {
 }
 
 // ListPRs returns all non-dismissed PRs ordered by updated_at descending.
-func (s *Store) ListPRs() ([]*PR, error) {
-	rows, err := s.db.Query(
-		"SELECT id, github_id, repo, number, title, author, url, state, updated_at, fetched_at, dismissed FROM prs WHERE dismissed = 0 ORDER BY updated_at DESC",
-	)
+// An optional list of states (e.g. "open", "closed") filters the result;
+// when no states are provided all non-dismissed PRs are returned.
+func (s *Store) ListPRs(states ...string) ([]*PR, error) {
+	query := "SELECT id, github_id, repo, number, title, author, url, state, updated_at, fetched_at, dismissed FROM prs WHERE dismissed = 0"
+	var args []any
+	if len(states) > 0 {
+		placeholders := strings.Repeat("?,", len(states))
+		placeholders = placeholders[:len(placeholders)-1] // trim trailing comma
+		query += " AND state IN (" + placeholders + ")"
+		for _, st := range states {
+			args = append(args, st)
+		}
+	}
+	query += " ORDER BY updated_at DESC"
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: list prs: %w", err)
 	}
@@ -86,6 +98,31 @@ func (s *Store) ListPRs() ([]*PR, error) {
 		prs = append(prs, pr)
 	}
 	return prs, rows.Err()
+}
+
+// ListOpenPRs is a convenience wrapper that returns only non-dismissed PRs
+// with state "open".
+func (s *Store) ListOpenPRs() ([]*PR, error) {
+	return s.ListPRs("open")
+}
+
+// UpdatePRState updates the state of a PR by its local row ID.
+func (s *Store) UpdatePRState(id int64, state string) error {
+	_, err := s.db.Exec("UPDATE prs SET state = ? WHERE id = ?", state, id)
+	if err != nil {
+		return fmt.Errorf("store: update pr state %d: %w", id, err)
+	}
+	return nil
+}
+
+// UpdatePRStateByGithubID updates the state of a PR by its GitHub PR ID.
+// This is used by Tier 3 which supplies a github_id rather than the local id.
+func (s *Store) UpdatePRStateByGithubID(githubID int64, state string) error {
+	_, err := s.db.Exec("UPDATE prs SET state = ? WHERE github_id = ?", state, githubID)
+	if err != nil {
+		return fmt.Errorf("store: update pr state by github_id %d: %w", githubID, err)
+	}
+	return nil
 }
 
 // DismissPR marks a PR as dismissed so it no longer appears in the dashboard

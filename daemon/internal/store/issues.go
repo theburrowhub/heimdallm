@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -101,12 +102,22 @@ func (s *Store) GetIssueByGithubID(githubID int64) (*Issue, error) {
 }
 
 // ListIssues returns all non-dismissed issues ordered by fetched_at descending.
-func (s *Store) ListIssues() ([]*Issue, error) {
-	rows, err := s.db.Query(
-		`SELECT id, github_id, repo, number, title, body, author, assignees, labels,
-		        state, created_at, fetched_at, dismissed FROM issues
-		 WHERE dismissed = 0 ORDER BY fetched_at DESC`,
-	)
+// An optional list of states (e.g. "open", "closed") filters the result;
+// when no states are provided all non-dismissed issues are returned.
+func (s *Store) ListIssues(states ...string) ([]*Issue, error) {
+	query := `SELECT id, github_id, repo, number, title, body, author, assignees, labels,
+		        state, created_at, fetched_at, dismissed FROM issues WHERE dismissed = 0`
+	var args []any
+	if len(states) > 0 {
+		placeholders := strings.Repeat("?,", len(states))
+		placeholders = placeholders[:len(placeholders)-1] // trim trailing comma
+		query += " AND state IN (" + placeholders + ")"
+		for _, st := range states {
+			args = append(args, st)
+		}
+	}
+	query += " ORDER BY fetched_at DESC"
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: list issues: %w", err)
 	}
@@ -120,6 +131,31 @@ func (s *Store) ListIssues() ([]*Issue, error) {
 		issues = append(issues, i)
 	}
 	return issues, rows.Err()
+}
+
+// ListOpenIssues is a convenience wrapper that returns only non-dismissed
+// issues with state "open".
+func (s *Store) ListOpenIssues() ([]*Issue, error) {
+	return s.ListIssues("open")
+}
+
+// UpdateIssueState updates the state of an issue by its local row ID.
+func (s *Store) UpdateIssueState(id int64, state string) error {
+	_, err := s.db.Exec("UPDATE issues SET state = ? WHERE id = ?", state, id)
+	if err != nil {
+		return fmt.Errorf("store: update issue state %d: %w", id, err)
+	}
+	return nil
+}
+
+// UpdateIssueStateByGithubID updates the state of an issue by its GitHub ID.
+// This is used by Tier 3 which supplies a github_id rather than the local id.
+func (s *Store) UpdateIssueStateByGithubID(githubID int64, state string) error {
+	_, err := s.db.Exec("UPDATE issues SET state = ? WHERE github_id = ?", state, githubID)
+	if err != nil {
+		return fmt.Errorf("store: update issue state by github_id %d: %w", githubID, err)
+	}
+	return nil
 }
 
 // DismissIssue hides an issue from the dashboard and opts it out of future
