@@ -8,6 +8,7 @@ import '../../core/platform/platform_services_provider.dart';
 import '../../main.dart' show sendPRNotification;
 import '../issues/issues_providers.dart';
 import '../stats/stats_filters.dart';
+import 'activity_filters.dart';
 
 final apiClientProvider = Provider<ApiClient>((ref) {
   return ApiClient(platform: ref.watch(platformServicesProvider));
@@ -154,8 +155,9 @@ final prsProvider = FutureProvider<List<PR>>((ref) async {
   // Watch meProvider so the tray is rebuilt (with correct author filter)
   // as soon as the username loads after startup.
   ref.watch(meProvider);
+  final filters = ref.watch(activityFiltersProvider);
   final api = ref.watch(apiClientProvider);
-  final prs = await api.fetchPRs();
+  final prs = await api.fetchPRs(states: filters.states.toList());
   _rebuildTray(ref, prs);
   _reconcileReviewingPRs(ref, prs);
   return prs;

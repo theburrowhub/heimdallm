@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/models/tracked_issue.dart';
+import '../dashboard/activity_filters.dart';
 import '../dashboard/dashboard_providers.dart';
 
 /// Counter incremented by SSE events to trigger issue list refresh.
@@ -13,8 +14,9 @@ final promotingIssuesProvider = StateProvider<Set<String>>((ref) => const {});
 
 final issuesProvider = FutureProvider<List<TrackedIssue>>((ref) async {
   ref.watch(issueListRefreshProvider);
+  final filters = ref.watch(activityFiltersProvider);
   final api = ref.watch(apiClientProvider);
-  return api.fetchIssues();
+  return api.fetchIssues(states: filters.states.toList());
 });
 
 final issueDetailProvider =

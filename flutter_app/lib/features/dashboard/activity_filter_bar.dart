@@ -92,7 +92,7 @@ class _ActivityFilterBarState extends ConsumerState<ActivityFilterBar> {
                     return orgs.contains(org);
                   }).toSet();
                 }
-                notifier.state = filters.copyWith(orgs: orgs, repos: repos);
+                notifier.update(filters.copyWith(orgs: orgs, repos: repos));
               },
             ),
 
@@ -106,7 +106,7 @@ class _ActivityFilterBarState extends ConsumerState<ActivityFilterBar> {
               displayFn: (v) => v.contains('/') ? v.split('/').last : v,
               onChanged: (repos) => ref
                   .read(activityFiltersProvider.notifier)
-                  .state = filters.copyWith(repos: repos),
+                  .update(filters.copyWith(repos: repos)),
             ),
 
           // ── Search field ────────────────────────────────────────────
@@ -136,7 +136,7 @@ class _ActivityFilterBarState extends ConsumerState<ActivityFilterBar> {
               ),
               onChanged: (v) => ref
                   .read(activityFiltersProvider.notifier)
-                  .state = filters.copyWith(search: v),
+                  .update(filters.copyWith(search: v)),
             ),
           ),
 
@@ -144,8 +144,8 @@ class _ActivityFilterBarState extends ConsumerState<ActivityFilterBar> {
           if (filters.hasFilters)
             GestureDetector(
               onTap: () {
-                ref.read(activityFiltersProvider.notifier).state =
-                    const ActivityFilters();
+                ref.read(activityFiltersProvider.notifier).update(
+                    const ActivityFilters());
                 _searchController.clear();
               },
               child: Chip(
@@ -212,8 +212,8 @@ class _ActivityFilterBarState extends ConsumerState<ActivityFilterBar> {
       onSelected: (_) {
         final types = Set<String>.from(filters.types);
         selected ? types.remove(type) : types.add(type);
-        ref.read(activityFiltersProvider.notifier).state =
-            filters.copyWith(types: types);
+        ref.read(activityFiltersProvider.notifier).update(
+            filters.copyWith(types: types));
       },
     );
   }
