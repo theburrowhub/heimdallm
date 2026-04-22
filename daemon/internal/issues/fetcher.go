@@ -56,6 +56,12 @@ type issueDedupStore interface {
 	CountFailedAutoImplement(issueID int64) (int, error)
 }
 
+// issueMarkerFetcher fetches comments for an issue so the fetcher can scan
+// for control markers (done/skip/retry) during the dedup check.
+type issueMarkerFetcher interface {
+	FetchComments(repo string, number int) ([]github.Comment, error)
+}
+
 // OptionsFn lets the caller map each classified issue to its RunOptions.
 // In production main.go resolves per-repo AI config here; tests can return a
 // constant.
@@ -65,14 +71,17 @@ type OptionsFn func(issue *github.Issue) RunOptions
 // without new activity, dispatch the rest to the pipeline.
 type Fetcher struct {
 	client   IssuesFetcher
+	comments issueMarkerFetcher
 	store    issueDedupStore
 	pipeline PipelineRunner
 }
 
 // NewFetcher wires the orchestrator. All dependencies are interfaces so
-// tests inject lightweight fakes.
-func NewFetcher(client IssuesFetcher, s issueDedupStore, p PipelineRunner) *Fetcher {
-	return &Fetcher{client: client, store: s, pipeline: p}
+// tests inject lightweight fakes. The comments parameter provides comment
+// fetching for control-marker scanning (#238); pass the same *github.Client
+// used for issue fetching.
+func NewFetcher(client IssuesFetcher, comments issueMarkerFetcher, s issueDedupStore, p PipelineRunner) *Fetcher {
+	return &Fetcher{client: client, comments: comments, store: s, pipeline: p}
 }
 
 // ProcessRepo fetches every eligible issue for one repo and dispatches it to
@@ -150,6 +159,28 @@ func (f *Fetcher) alreadyProcessed(issue *github.Issue) (bool, string, error) {
 		}
 		return false, "", err
 	}
+
+	// Comment-based control markers (#238). Checked before the dismiss and
+	// dedup gates so a retry marker can override all of them. The API call
+	// is skipped when the comment fetcher is nil (legacy callers / tests
+	// that pre-date marker support).
+	if f.comments != nil {
+		comments, cmErr := f.comments.FetchComments(issue.Repo, issue.Number)
+		if cmErr != nil {
+			slog.Warn("issues fetcher: marker scan failed, falling through to dedup checks",
+				"repo", issue.Repo, "number", issue.Number, "err", cmErr)
+		} else {
+			switch ScanMarkers(comments) {
+			case MarkerResultRetry:
+				return false, "", nil // force reprocess
+			case MarkerResultSkip:
+				return true, "skip marker", nil
+			case MarkerResultDone:
+				return true, "done marker", nil
+			}
+		}
+	}
+
 	if row.Dismissed {
 		return true, "dismissed", nil
 	}

@@ -51,7 +51,7 @@ func TestIntegration_FetcherDrivesPipelineEndToEnd(t *testing.T) {
 	broker := &fakeBroker{}
 
 	pipe := issues.New(s, gh, exec, nil, broker, nil)
-	fetcher := issues.NewFetcher(client, s, pipe)
+	fetcher := issues.NewFetcher(client, gh, s, pipe)
 
 	processed, err := fetcher.ProcessRepo(
 		context.Background(),

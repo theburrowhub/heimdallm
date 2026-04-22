@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -18,6 +19,19 @@ import (
 type fakeClient struct {
 	issues []*github.Issue
 	err    error
+}
+
+type fakeMarkerFetcher struct {
+	commentsByKey map[string][]github.Comment
+	err           error
+}
+
+func (f *fakeMarkerFetcher) FetchComments(repo string, number int) ([]github.Comment, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	key := fmt.Sprintf("%s#%d", repo, number)
+	return f.commentsByKey[key], nil
 }
 
 func (c *fakeClient) FetchIssues(repo string, cfg config.IssueTrackingConfig, authenticatedUser string) ([]*github.Issue, error) {
@@ -109,7 +123,7 @@ func enabledCfg() config.IssueTrackingConfig {
 func TestFetcher_NoOpWhenDisabled(t *testing.T) {
 	client := &fakeClient{issues: []*github.Issue{fixture(1, time.Now())}}
 	p := &fakePipeline{}
-	f := issues.NewFetcher(client, &fakeDedup{}, p)
+	f := issues.NewFetcher(client, nil, &fakeDedup{}, p)
 
 	processed, err := f.ProcessRepo(context.Background(), "org/repo", config.IssueTrackingConfig{Enabled: false}, "alice", noOpts)
 	if err != nil {
@@ -121,7 +135,7 @@ func TestFetcher_NoOpWhenDisabled(t *testing.T) {
 }
 
 func TestFetcher_NilOptionsFnIsError(t *testing.T) {
-	f := issues.NewFetcher(&fakeClient{}, &fakeDedup{}, &fakePipeline{})
+	f := issues.NewFetcher(&fakeClient{}, nil, &fakeDedup{}, &fakePipeline{})
 	_, err := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", nil)
 	if err == nil {
 		t.Fatal("expected error for nil OptionsFn")
@@ -130,7 +144,7 @@ func TestFetcher_NilOptionsFnIsError(t *testing.T) {
 
 func TestFetcher_FetchErrorIsFatalForThisRun(t *testing.T) {
 	client := &fakeClient{err: errors.New("github down")}
-	f := issues.NewFetcher(client, &fakeDedup{}, &fakePipeline{})
+	f := issues.NewFetcher(client, nil, &fakeDedup{}, &fakePipeline{})
 
 	_, err := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
 	if err == nil {
@@ -141,7 +155,7 @@ func TestFetcher_FetchErrorIsFatalForThisRun(t *testing.T) {
 func TestFetcher_DispatchesUnprocessedIssues(t *testing.T) {
 	client := &fakeClient{issues: []*github.Issue{fixture(1, time.Now()), fixture(2, time.Now())}}
 	p := &fakePipeline{}
-	f := issues.NewFetcher(client, &fakeDedup{byGithubID: map[int64]dedupEntry{}}, p)
+	f := issues.NewFetcher(client, nil, &fakeDedup{byGithubID: map[int64]dedupEntry{}}, p)
 
 	processed, err := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
 	if err != nil {
@@ -159,7 +173,7 @@ func TestFetcher_SkipsDismissedIssues(t *testing.T) {
 	}}
 	client := &fakeClient{issues: []*github.Issue{issue}}
 	p := &fakePipeline{}
-	f := issues.NewFetcher(client, dedup, p)
+	f := issues.NewFetcher(client, nil, dedup, p)
 
 	processed, _ := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
 	if processed != 0 || len(p.calls) != 0 {
@@ -177,7 +191,7 @@ func TestFetcher_SkipsIssueAlreadyReviewedWithoutNewActivity(t *testing.T) {
 			review: &store.IssueReview{IssueID: 10, CreatedAt: reviewedAt, CommentedAt: commentedAt},
 		},
 	}}
-	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, dedup, &fakePipeline{})
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, nil, dedup, &fakePipeline{})
 
 	processed, _ := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
 	if processed != 0 {
@@ -196,7 +210,7 @@ func TestFetcher_RerunsIssueWithNewActivityAfterGrace(t *testing.T) {
 		},
 	}}
 	p := &fakePipeline{}
-	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, dedup, p)
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, nil, dedup, p)
 
 	processed, _ := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
 	if processed != 1 {
@@ -215,7 +229,7 @@ func TestFetcher_SlowTriageDoesNotReloop(t *testing.T) {
 			review: &store.IssueReview{IssueID: 10, CreatedAt: createdAt, CommentedAt: commentedAt},
 		},
 	}}
-	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, dedup, &fakePipeline{})
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, nil, dedup, &fakePipeline{})
 
 	processed, _ := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
 	if processed != 0 {
@@ -232,7 +246,7 @@ func TestFetcher_FallsBackToCreatedAtWhenCommentedAtZero(t *testing.T) {
 			review: &store.IssueReview{IssueID: 10, CreatedAt: reviewedAt}, // CommentedAt zero
 		},
 	}}
-	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, dedup, &fakePipeline{})
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, nil, dedup, &fakePipeline{})
 
 	processed, _ := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
 	if processed != 0 {
@@ -246,7 +260,7 @@ func TestFetcher_RunsFirstTimeIssueKnownButNeverReviewed(t *testing.T) {
 		issue.ID: {row: &store.Issue{ID: 10, GithubID: issue.ID}}, // no review yet
 	}}
 	p := &fakePipeline{}
-	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, dedup, p)
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, nil, dedup, p)
 
 	processed, _ := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
 	if processed != 1 {
@@ -261,7 +275,7 @@ func TestFetcher_PipelineErrorIsLoggedNotPropagated(t *testing.T) {
 	issue2 := fixture(2, time.Now())
 	client := &fakeClient{issues: []*github.Issue{issue1, issue2}}
 	p := &fakePipeline{runErr: errors.New("LLM timeout")}
-	f := issues.NewFetcher(client, &fakeDedup{byGithubID: map[int64]dedupEntry{}}, p)
+	f := issues.NewFetcher(client, nil, &fakeDedup{byGithubID: map[int64]dedupEntry{}}, p)
 
 	processed, err := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
 	if err != nil {
@@ -281,7 +295,7 @@ func TestFetcher_DedupLookupErrorTreatedAsUnprocessed(t *testing.T) {
 		issue.ID: {rowErr: errors.New("store unavailable")},
 	}}
 	p := &fakePipeline{}
-	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, dedup, p)
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, nil, dedup, p)
 
 	processed, _ := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
 	if processed != 1 {
@@ -307,7 +321,7 @@ func TestFetcher_SkipsIssueAfterMaxAutoImplementFailures(t *testing.T) {
 		},
 	}}
 	p := &fakePipeline{}
-	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, dedup, p)
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, nil, dedup, p)
 
 	processed, err := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
 	if err != nil {
@@ -331,7 +345,7 @@ func TestFetcher_DoesNotSkipBelowMaxAutoImplementFailures(t *testing.T) {
 		},
 	}}
 	p := &fakePipeline{}
-	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, dedup, p)
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, nil, dedup, p)
 
 	processed, _ := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
 	if processed != 1 {
@@ -352,10 +366,112 @@ func TestFetcher_CountFailedAutoImplErrDoesNotSkip(t *testing.T) {
 		},
 	}}
 	p := &fakePipeline{}
-	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, dedup, p)
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, nil, dedup, p)
 
 	processed, _ := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
 	if processed != 1 {
 		t.Errorf("count error must not block the pipeline, got processed=%d", processed)
+	}
+}
+
+// ── comment-based control markers (#238) ────────────────────────────────────
+
+func TestFetcher_SkipsDoneMarker(t *testing.T) {
+	issue := fixture(1, time.Now())
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {row: &store.Issue{ID: 10, GithubID: issue.ID}},
+	}}
+	mf := &fakeMarkerFetcher{commentsByKey: map[string][]github.Comment{
+		"org/repo#1": {{Body: "<!-- heimdallm:done -->\n✅ done", CreatedAt: time.Now()}},
+	}}
+	p := &fakePipeline{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, mf, dedup, p)
+
+	processed, _ := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
+	if processed != 0 || len(p.calls) != 0 {
+		t.Errorf("done marker should skip issue, got processed=%d calls=%v", processed, p.calls)
+	}
+}
+
+func TestFetcher_SkipsSkipMarker(t *testing.T) {
+	issue := fixture(1, time.Now())
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {row: &store.Issue{ID: 10, GithubID: issue.ID}},
+	}}
+	mf := &fakeMarkerFetcher{commentsByKey: map[string][]github.Comment{
+		"org/repo#1": {{Body: "<!-- heimdallm:skip -->", CreatedAt: time.Now()}},
+	}}
+	p := &fakePipeline{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, mf, dedup, p)
+
+	processed, _ := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
+	if processed != 0 || len(p.calls) != 0 {
+		t.Errorf("skip marker should skip issue, got processed=%d calls=%v", processed, p.calls)
+	}
+}
+
+func TestFetcher_RetryMarkerOverridesDone(t *testing.T) {
+	issue := fixture(1, time.Now())
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {row: &store.Issue{ID: 10, GithubID: issue.ID}},
+	}}
+	mf := &fakeMarkerFetcher{commentsByKey: map[string][]github.Comment{
+		"org/repo#1": {
+			{Body: "<!-- heimdallm:done -->\n✅ done", CreatedAt: time.Now().Add(-10 * time.Minute)},
+			{Body: "<!-- heimdallm:retry -->", CreatedAt: time.Now()},
+		},
+	}}
+	p := &fakePipeline{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, mf, dedup, p)
+
+	processed, _ := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
+	if processed != 1 || len(p.calls) != 1 {
+		t.Errorf("retry marker should force reprocess, got processed=%d calls=%v", processed, p.calls)
+	}
+}
+
+func TestFetcher_RetryMarkerOverridesDismissed(t *testing.T) {
+	issue := fixture(1, time.Now())
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {row: &store.Issue{ID: 10, GithubID: issue.ID, Dismissed: true}},
+	}}
+	mf := &fakeMarkerFetcher{commentsByKey: map[string][]github.Comment{
+		"org/repo#1": {{Body: "<!-- heimdallm:retry -->", CreatedAt: time.Now()}},
+	}}
+	p := &fakePipeline{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, mf, dedup, p)
+
+	processed, _ := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
+	if processed != 1 {
+		t.Errorf("retry marker should override dismiss, got processed=%d", processed)
+	}
+}
+
+func TestFetcher_MarkerFetchErrorFallsThrough(t *testing.T) {
+	issue := fixture(1, time.Now())
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {row: &store.Issue{ID: 10, GithubID: issue.ID}},
+	}}
+	mf := &fakeMarkerFetcher{err: errors.New("comments API broken")}
+	p := &fakePipeline{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, mf, dedup, p)
+
+	processed, _ := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
+	if processed != 1 {
+		t.Errorf("marker fetch error should fall through to pipeline, got processed=%d", processed)
+	}
+}
+
+func TestFetcher_NilMarkerFetcherSkipsMarkerCheck(t *testing.T) {
+	issue := fixture(1, time.Now())
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {row: &store.Issue{ID: 10, GithubID: issue.ID}},
+	}}
+	p := &fakePipeline{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, nil, dedup, p)
+
+	processed, _ := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
+	if processed != 1 {
+		t.Errorf("nil marker fetcher should skip marker check and process, got processed=%d", processed)
 	}
 }

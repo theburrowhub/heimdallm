@@ -177,7 +177,7 @@ func main() {
 	} else {
 		slog.Warn("could not resolve bot login for re-review context", "err", err)
 	}
-	issueFetcher := issuepipeline.NewFetcher(ghClient, s, issuePipe)
+	issueFetcher := issuepipeline.NewFetcher(ghClient, ghClient, s, issuePipe)
 	srv := server.New(s, broker, p, apiToken)
 	srv.SetConfigPath(cfgPath)
 

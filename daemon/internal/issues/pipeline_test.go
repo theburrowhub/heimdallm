@@ -94,6 +94,10 @@ type fakeGH struct {
 	reviewersCalls [][]string
 	labelsCalls    [][]string
 	assigneesCalls [][]string
+
+	// GetIssue stub for pre-push state check (#238).
+	getIssueState string // returned state; defaults to "open"
+	getIssueErr   error
 }
 
 type postCall struct {
@@ -149,6 +153,17 @@ func (f *fakeGH) CreatePR(repo, title, body, head, base string, draft bool) (*gi
 		htmlURL = fmt.Sprintf("https://github.com/%s/pull/%d", repo, num)
 	}
 	return &github.CreatedPR{Number: num, ID: id, HTMLURL: htmlURL}, nil
+}
+
+func (f *fakeGH) GetIssue(repo string, number int) (*github.Issue, error) {
+	if f.getIssueErr != nil {
+		return nil, f.getIssueErr
+	}
+	state := f.getIssueState
+	if state == "" {
+		state = "open"
+	}
+	return &github.Issue{Repo: repo, Number: number, State: state}, nil
 }
 
 func (f *fakeGH) SetPRReviewers(repo string, prNumber int, reviewers []string) error {
@@ -557,14 +572,16 @@ func TestPipeline_AutoImplementHappyPath(t *testing.T) {
 		t.Errorf("SSE sequence = %v, want %v", types, want)
 	}
 
-	// Exactly one PostComment: the link-back note pointing watchers of the
-	// issue at the newly-opened PR. This is NOT the review_only fallback
-	// comment — that one only fires on the no-changes path.
+	// Exactly one PostComment: the done-marker comment pointing watchers of
+	// the issue at the newly-opened PR and marking it processed (#238).
 	if len(gh.postCalls) != 1 {
-		t.Fatalf("auto_implement happy path should post the link-back comment, got %d", len(gh.postCalls))
+		t.Fatalf("auto_implement happy path should post the done-marker comment, got %d", len(gh.postCalls))
 	}
-	if !strings.Contains(gh.postCalls[0].Body, "Implementation PR: #123") {
-		t.Errorf("link-back comment body wrong: %q", gh.postCalls[0].Body)
+	if !strings.Contains(gh.postCalls[0].Body, issues.MarkerDone) {
+		t.Errorf("comment should contain done marker: %q", gh.postCalls[0].Body)
+	}
+	if !strings.Contains(gh.postCalls[0].Body, "PR #123") {
+		t.Errorf("comment should reference PR: %q", gh.postCalls[0].Body)
 	}
 
 	// Prompt was the implement flavour, not the triage JSON instruction.
@@ -1302,6 +1319,84 @@ func TestPipeline_AutoImplementDescriptionNotCalledWhenDisabled(t *testing.T) {
 	// No diff call.
 	if len(git.diffCalls) != 0 {
 		t.Errorf("Diff should not be called when disabled, got %v", git.diffCalls)
+	}
+}
+
+// ── pre-push state check (#238) ─────────────────────────────────────────────
+
+func TestPipeline_AutoImplementAbortsWhenIssueClosedDuringImplementation(t *testing.T) {
+	gh := &fakeGH{defaultBranch: "main", createPRNumber: 42, getIssueState: "closed"}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("done")}
+	git := &fakeGit{hasChanges: true}
+	broker := &fakeBroker{}
+	p := issues.New(&fakeStore{}, gh, exec, git, broker, nil)
+
+	rev, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions())
+	if err != nil {
+		t.Fatalf("expected nil error on closed-issue abort, got: %v", err)
+	}
+	if rev != nil {
+		t.Errorf("expected nil review on closed-issue abort, got: %+v", rev)
+	}
+	// Commit ran but push and PR must NOT have run.
+	if len(git.commitCalls) != 1 {
+		t.Errorf("commit should have run, got %d calls", len(git.commitCalls))
+	}
+	if len(git.pushCalls) != 0 {
+		t.Errorf("push must not run when issue is closed, got %d calls", len(git.pushCalls))
+	}
+	if len(gh.createPRCalls) != 0 {
+		t.Errorf("CreatePR must not run when issue is closed, got %d calls", len(gh.createPRCalls))
+	}
+}
+
+func TestPipeline_AutoImplementProceedsWhenStateCheckFails(t *testing.T) {
+	gh := &fakeGH{
+		defaultBranch: "main",
+		createPRNumber: 55,
+		getIssueErr:   errors.New("API timeout"),
+	}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("done")}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(&fakeStore{}, gh, exec, git, &fakeBroker{}, nil)
+
+	rev, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions())
+	if err != nil {
+		t.Fatalf("state check failure must not abort the pipeline: %v", err)
+	}
+	if rev == nil || rev.PRCreated != 55 {
+		t.Errorf("pipeline should proceed when state check fails, got rev=%+v", rev)
+	}
+}
+
+// ── done marker comment (#238) ──────────────────────────────────────────────
+
+func TestPipeline_AutoImplementPostsDoneMarkerComment(t *testing.T) {
+	gh := &fakeGH{defaultBranch: "main", createPRNumber: 157}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("done")}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(&fakeStore{}, gh, exec, git, &fakeBroker{}, nil)
+
+	_, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions())
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if len(gh.postCalls) != 1 {
+		t.Fatalf("expected 1 PostComment (done marker), got %d", len(gh.postCalls))
+	}
+	body := gh.postCalls[0].Body
+	if !strings.Contains(body, issues.MarkerDone) {
+		t.Errorf("comment should contain done marker, got: %q", body)
+	}
+	if !strings.Contains(body, "PR #157") {
+		t.Errorf("comment should reference PR number, got: %q", body)
+	}
+	if !strings.Contains(body, "heimdallm/issue-7") {
+		t.Errorf("comment should reference branch name, got: %q", body)
+	}
+	if !strings.Contains(body, issues.MarkerRetry) {
+		t.Errorf("comment should mention retry marker for human reference, got: %q", body)
 	}
 }
 
