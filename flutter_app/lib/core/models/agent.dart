@@ -126,11 +126,118 @@ class ReviewPrompt {
     ),
   ];
 
+  static const issueTriagePresets = [
+    PresetDef(
+      id: 'preset-triage-bug',
+      name: 'Bug Triage',
+      focus: 'general',
+      issueInstructions:
+          'Treat this as a bug report. Verify whether the body and comments describe '
+          'a reproducible failure (steps, expected vs actual, environment). Identify the '
+          'affected component, estimate severity (crash / data-loss / functional / cosmetic), '
+          'and suggest a priority. Recommend labels (e.g. bug, high-priority, needs-repro) '
+          'and flag if a minimal repro is missing.',
+    ),
+    PresetDef(
+      id: 'preset-triage-feature',
+      name: 'Feature Request',
+      focus: 'architecture',
+      issueInstructions:
+          'Evaluate this as a feature request. Assess fit with the existing architecture, '
+          'sketch one or two alternative approaches, and estimate implementation effort '
+          '(S / M / L). Flag unclear scope or missing acceptance criteria. Recommend labels '
+          '(e.g. feature, discussion-needed) and note whether a design doc is warranted '
+          'before implementation.',
+    ),
+    PresetDef(
+      id: 'preset-triage-duplicate',
+      name: 'Duplicate Detection',
+      focus: 'general',
+      issueInstructions:
+          'Check whether this issue duplicates an existing one. Scan titles, bodies, error '
+          'messages, and referenced files for overlap with other open or recently closed '
+          'issues. If a likely duplicate exists, recommend closing with a link to the '
+          'original. Otherwise, flag the issue as unique and ready for normal triage.',
+    ),
+    PresetDef(
+      id: 'preset-triage-security',
+      name: 'Security Triage',
+      focus: 'security',
+      issueInstructions:
+          'Treat this as a security report. Identify the attack vector, estimate a '
+          'CVSS-style severity, and flag whether sensitive details appear in the public '
+          'body (if so, recommend moving to a private disclosure channel). Suggest urgency '
+          'labels. Never post exploit details or reproduction steps in public comments.',
+    ),
+    PresetDef(
+      id: 'preset-triage-quick-win',
+      name: 'Quick Win',
+      focus: 'general',
+      issueInstructions:
+          'Identify whether this issue is trivially closeable: typos, broken links, '
+          'one-line config changes, or obvious docs fixes. If so, estimate the size in LOC '
+          'and recommend labels (good-first-issue, quick-win). Otherwise, flag it for '
+          'normal triage with a one-line reason.',
+    ),
+  ];
+
+  static const developmentPresets = [
+    PresetDef(
+      id: 'preset-dev-plan-first',
+      name: 'Plan First',
+      focus: 'architecture',
+      implementInstructions:
+          'Before writing code, produce a short plan in the PR description: files to '
+          'touch, approach, and risks. Implement only after the plan is clear. Keep the '
+          'diff aligned with the plan — out-of-scope changes belong in a follow-up PR.',
+    ),
+    PresetDef(
+      id: 'preset-dev-tdd',
+      name: 'Test-Driven',
+      focus: 'general',
+      implementInstructions:
+          'Follow the TDD cycle. Write a failing test that captures the expected '
+          'behaviour, then the minimal implementation to make it pass, then refactor if '
+          'something obvious emerges. Every behavioural change must have a test. Do not '
+          'commit without a green test run.',
+    ),
+    PresetDef(
+      id: 'preset-dev-minimal',
+      name: 'Minimal Patch',
+      focus: 'general',
+      implementInstructions:
+          'Produce the smallest possible diff that resolves the issue. No refactoring of '
+          'surrounding code, no style cleanups, no new abstractions. If neighbouring code '
+          'has problems, leave it alone — call the smell out in the PR body instead.',
+    ),
+    PresetDef(
+      id: 'preset-dev-refactor-safe',
+      name: 'Refactor-Safe',
+      focus: 'performance',
+      implementInstructions:
+          'When the fix requires touching surrounding code, preserve existing behaviour '
+          'exactly. If coverage is thin, add characterisation tests first. Keep the '
+          'behavioural change and the refactor in separate commits so they can be reviewed '
+          'independently.',
+    ),
+    PresetDef(
+      id: 'preset-dev-docs-only',
+      name: 'Docs Only',
+      focus: 'docs',
+      implementInstructions:
+          'This is a documentation-only change. Do not modify executable code, configs, '
+          'or tests. Update only markdown files, comments, or docstrings. Verify that '
+          'markdown renders correctly (no broken links, valid code fences).',
+    ),
+  ];
+
   static ReviewPrompt fromPreset(PresetDef p) => ReviewPrompt(
     id: p.id,
     name: p.name,
     focus: p.focus,
     instructions: p.instructions,
+    issueInstructions: p.issueInstructions,
+    implementInstructions: p.implementInstructions,
   );
 
   static const placeholders = [
@@ -147,8 +254,24 @@ class ReviewPrompt {
 }
 
 class PresetDef {
-  final String id, name, focus, instructions;
-  const PresetDef({required this.id, required this.name, required this.focus, required this.instructions});
+  final String id, name, focus;
+  // At most one of these three should be set per preset — a preset belongs
+  // to exactly one category (PR review, issue triage, or development) and
+  // `fromPreset` propagates whichever is non-empty into the corresponding
+  // `ReviewPrompt` field. Keeping them on a single class avoids having to
+  // juggle three near-identical types and mirrors the data shape the
+  // daemon already stores on the agent record.
+  final String instructions;
+  final String issueInstructions;
+  final String implementInstructions;
+  const PresetDef({
+    required this.id,
+    required this.name,
+    required this.focus,
+    this.instructions = '',
+    this.issueInstructions = '',
+    this.implementInstructions = '',
+  });
 }
 
 // Backwards compat alias
