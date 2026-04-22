@@ -305,8 +305,8 @@ type RepoAI struct {
 type PRMetadataConfig struct {
 	Reviewers []string `toml:"reviewers"`
 	Labels    []string `toml:"labels"`
-	Assignee  string   `toml:"assignee"`
-	Draft     *bool    `toml:"draft,omitempty"`
+	Assignee  string   `toml:"pr_assignee"`
+	Draft     *bool    `toml:"pr_draft,omitempty"`
 }
 
 // OrgAI holds per-organisation PR metadata overrides, applied to all repos
