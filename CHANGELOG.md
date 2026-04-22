@@ -2,6 +2,28 @@
 
 > **Note:** Versions 0.1.0–0.1.3 were originally published under [`theburrowhub/heimdallr-docker`](https://github.com/theburrowhub/heimdallr-docker) (now archived). The project was unified into this repository and renamed to Heimdallm in v0.1.1.
 
+## [0.6.1](https://github.com/theburrowhub/heimdallm/compare/v0.6.0...v0.6.1) (2026-04-22)
+
+
+### Features
+
+* **flutter:** toast with Undo action for dismiss operations ([2c6e7a0](https://github.com/theburrowhub/heimdallm/commit/2c6e7a0cb6cc5f0412b2fb955a50c7671cec37d4))
+* implement [#234](https://github.com/theburrowhub/heimdallm/issues/234) — bug: release pipeline state corrupted — tags without assets, release-please out of sync ([#235](https://github.com/theburrowhub/heimdallm/issues/235)) ([56541d1](https://github.com/theburrowhub/heimdallm/commit/56541d12db2e7e570c7001f6a567e413093b2069))
+* implement [#238](https://github.com/theburrowhub/heimdallm/issues/238) — feat: comment-based control markers + pre-push state check to prevent duplicate processing ([#240](https://github.com/theburrowhub/heimdallm/issues/240)) ([f722a78](https://github.com/theburrowhub/heimdallm/commit/f722a782d9d8a4f9077affd9cbb9244565a9d774))
+* implement [#239](https://github.com/theburrowhub/heimdallm/issues/239) — bug(cli): dashboard doesn't refresh — r key and auto-tick don't update display ([#241](https://github.com/theburrowhub/heimdallm/issues/241)) ([7510e7e](https://github.com/theburrowhub/heimdallm/commit/7510e7e14ccc2cfb01ba7877a44521cfe9a3c886))
+* PR review guards (skip closed/merged/draft/self-authored) ([#237](https://github.com/theburrowhub/heimdallm/issues/237)) ([9513cc4](https://github.com/theburrowhub/heimdallm/commit/9513cc40cb7f69cd26c007de9094155c5ad96ac2))
+* PR/issue state tracking, persistent filters, grid view ([#236](https://github.com/theburrowhub/heimdallm/issues/236)) ([123925e](https://github.com/theburrowhub/heimdallm/commit/123925eccb2663d021eff8de1536871c1b3a460a))
+
+
+### Bug Fixes
+
+* **daemon:** evaluate review guards in runReview before emitting review_started ([9513cc4](https://github.com/theburrowhub/heimdallm/commit/9513cc40cb7f69cd26c007de9094155c5ad96ac2))
+* **flutter:** add Promote to Dev button to issue detail screen ([c9677af](https://github.com/theburrowhub/heimdallm/commit/c9677afa3b36d50cc57b50a13b960c76a3d4341b))
+* **flutter:** remove showCloseIcon from SnackBars — auto-dismiss at 5s ([59fbb98](https://github.com/theburrowhub/heimdallm/commit/59fbb987d1aa25caac900c0a46933e87741ed63c))
+* **flutter:** replace all SnackBars with overlay-based toast — fixes macOS persistence bug ([ca61de8](https://github.com/theburrowhub/heimdallm/commit/ca61de8aa96d0a1e2ff5cfc14140e69bc78f64f9))
+* **issues:** develop labels win over review_only; add push-failure retry cap ([#223](https://github.com/theburrowhub/heimdallm/issues/223)) ([#230](https://github.com/theburrowhub/heimdallm/issues/230)) ([b57d67e](https://github.com/theburrowhub/heimdallm/commit/b57d67e2d7ac3ce0dfe8c4f6126dd4eec0219933))
+* promote IT→DEV changes labels on GitHub instead of running pipeline directly ([65f5200](https://github.com/theburrowhub/heimdallm/commit/65f52006f3766b73978a903105c6fbed4ad06b28))
+
 ## [0.6.0](https://github.com/theburrowhub/heimdallm/compare/v0.5.0...v0.6.0) (2026-04-22)
 
 
