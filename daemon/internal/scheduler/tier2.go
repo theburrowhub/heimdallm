@@ -16,6 +16,17 @@ type Tier2PRFetcher interface {
 // FetchPRsToReview already fetches these from the GitHub Search API;
 // passing them through avoids a per-PR re-fetch and prevents silent
 // zero-value bugs in the pipeline's UpsertPR call.
+//
+// HeadSHA is resolved by the adapter after the review-guard filter (the
+// Search Issues API does not populate head.sha, so it costs one extra
+// /pulls/N lookup per PR that passed the gate). Carrying it through this
+// struct is load-bearing: the persistent in-flight claim (#258) is keyed
+// on (pr_id, head_sha), and an empty SHA silently bypasses the claim —
+// which is exactly how theburrowhub/heimdallm#264 reproduced the #243
+// double-review pattern. An empty HeadSHA here means the resolve failed;
+// the downstream claim will log and fall back to the other layered
+// defenses (fail-closed SHA in pipeline.Run, circuit breaker, PublishedAt
+// grace) rather than block a review.
 type Tier2PR struct {
 	ID        int64
 	Number    int
@@ -26,6 +37,7 @@ type Tier2PR struct {
 	State     string
 	Draft     bool
 	UpdatedAt time.Time
+	HeadSHA   string
 }
 
 // Tier2PRProcessor runs the PR review pipeline on a single PR.
