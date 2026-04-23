@@ -2,6 +2,32 @@
 
 > **Note:** Versions 0.1.0–0.1.3 were originally published under [`theburrowhub/heimdallr-docker`](https://github.com/theburrowhub/heimdallr-docker) (now archived). The project was unified into this repository and renamed to Heimdallm in v0.1.1.
 
+## [0.6.2](https://github.com/theburrowhub/heimdallm/compare/v0.6.1...v0.6.2) (2026-04-23)
+
+
+### Features
+
+* **daemon:** SQLite-backed circuit breaker caps review loops ([#246](https://github.com/theburrowhub/heimdallm/issues/246)) ([a49943e](https://github.com/theburrowhub/heimdallm/commit/a49943e4d8c9e8c446cacb382d7debc2f615d118))
+* **heimdallm:** persist in-flight reviews + reload delay + multi-instance regression test + breaker banner ([#258](https://github.com/theburrowhub/heimdallm/issues/258)) ([65557eb](https://github.com/theburrowhub/heimdallm/commit/65557eb646710ed3826bd73dd520d89ed0c21b9c))
+* implement [#248](https://github.com/theburrowhub/heimdallm/issues/248) — feat(cli): improve prs/issues output — more fields, filters, colors ([#254](https://github.com/theburrowhub/heimdallm/issues/254)) ([33767bb](https://github.com/theburrowhub/heimdallm/commit/33767bb9feb73ac8d73e0bc9d7bea9fc27204dd8))
+* implement [#249](https://github.com/theburrowhub/heimdallm/issues/249) — feat(cli): add pr &lt;id&gt; and issue &lt;id&gt; detail commands ([#256](https://github.com/theburrowhub/heimdallm/issues/256)) ([95d7e66](https://github.com/theburrowhub/heimdallm/commit/95d7e66bdb4bbe230bf47136eb9358651f7e656e))
+* implement [#250](https://github.com/theburrowhub/heimdallm/issues/250) — feat(cli): improve follow — filters by repo and event type, colors ([#257](https://github.com/theburrowhub/heimdallm/issues/257)) ([8d90e79](https://github.com/theburrowhub/heimdallm/commit/8d90e79c79fab30d00da6bed469761f2dce02f93))
+* implement [#251](https://github.com/theburrowhub/heimdallm/issues/251) — feat(cli): human-readable config output instead of raw JSON ([#259](https://github.com/theburrowhub/heimdallm/issues/259)) ([b8e9262](https://github.com/theburrowhub/heimdallm/commit/b8e92623cddb7ced37aa432bee55b8ab3cb230a7))
+* implement [#252](https://github.com/theburrowhub/heimdallm/issues/252) — feat(cli): dashboard UX — status bar, detail view, help, stats tab ([#260](https://github.com/theburrowhub/heimdallm/issues/260)) ([541b76e](https://github.com/theburrowhub/heimdallm/commit/541b76e08950ed35e99ef9ea03b660805a5b11ac))
+* implement [#253](https://github.com/theburrowhub/heimdallm/issues/253) — feat(cli): add repos, review-pr, review-issue commands ([#261](https://github.com/theburrowhub/heimdallm/issues/261)) ([237c946](https://github.com/theburrowhub/heimdallm/commit/237c94689fb5e021bd4cf9e6c3af7d568c2602b9))
+
+
+### Bug Fixes
+
+* **daemon:** anchor PR dedup on PublishedAt with 2-minute grace ([#247](https://github.com/theburrowhub/heimdallm/issues/247)) ([fa5e7cb](https://github.com/theburrowhub/heimdallm/commit/fa5e7cbce04f39455aa1b62f2913752e117cff4c))
+* **daemon:** fail-closed on HEAD SHA lookup for PR dedup ([#245](https://github.com/theburrowhub/heimdallm/issues/245)) ([39d58c1](https://github.com/theburrowhub/heimdallm/commit/39d58c1f1e900d110751fedbb55a8591c02352ab))
+* **daemon:** ResetBackoff stores observed updated_at, not wall clock ([#255](https://github.com/theburrowhub/heimdallm/issues/255)) ([6929059](https://github.com/theburrowhub/heimdallm/commit/6929059264fff386f93109fb1fff5bc4d47fd630))
+
+
+### Documentation
+
+* implementation plan for [#243](https://github.com/theburrowhub/heimdallm/issues/243) cost-runaway fix ([dc84c1d](https://github.com/theburrowhub/heimdallm/commit/dc84c1dd94789e3185ab1a7bc49c818e7079cb08))
+
 ## [0.6.1](https://github.com/theburrowhub/heimdallm/compare/v0.6.0...v0.6.1) (2026-04-22)
 
 
