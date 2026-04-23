@@ -62,6 +62,13 @@ type issueMarkerFetcher interface {
 	FetchComments(repo string, number int) ([]github.Comment, error)
 }
 
+// IssuePublisher dispatches classified issues to NATS. When set on the
+// Fetcher, ProcessRepo publishes to NATS instead of calling pipeline.Run.
+type IssuePublisher interface {
+	PublishIssueTriage(ctx context.Context, repo string, number int, githubID int64) error
+	PublishIssueImplement(ctx context.Context, repo string, number int, githubID int64) error
+}
+
 // OptionsFn lets the caller map each classified issue to its RunOptions.
 // In production main.go resolves per-repo AI config here; tests can return a
 // constant.
@@ -70,10 +77,11 @@ type OptionsFn func(issue *github.Issue) RunOptions
 // Fetcher orchestrates: fetch issues for a repo, skip those already processed
 // without new activity, dispatch the rest to the pipeline.
 type Fetcher struct {
-	client   IssuesFetcher
-	comments issueMarkerFetcher
-	store    issueDedupStore
-	pipeline PipelineRunner
+	client    IssuesFetcher
+	comments  issueMarkerFetcher
+	store     issueDedupStore
+	pipeline  PipelineRunner
+	publisher IssuePublisher // optional — when set, publishes to NATS instead of running pipeline
 }
 
 // NewFetcher wires the orchestrator. All dependencies are interfaces so
@@ -82,6 +90,12 @@ type Fetcher struct {
 // used for issue fetching.
 func NewFetcher(client IssuesFetcher, comments issueMarkerFetcher, s issueDedupStore, p PipelineRunner) *Fetcher {
 	return &Fetcher{client: client, comments: comments, store: s, pipeline: p}
+}
+
+// SetPublisher enables NATS-based dispatch. When set, ProcessRepo publishes
+// classified issues to NATS instead of calling pipeline.Run directly.
+func (f *Fetcher) SetPublisher(p IssuePublisher) {
+	f.publisher = p
 }
 
 // ProcessRepo fetches every eligible issue for one repo and dispatches it to
@@ -129,10 +143,29 @@ func (f *Fetcher) ProcessRepo(ctx context.Context, repo string, cfg config.Issue
 			continue
 		}
 
-		if _, runErr := f.pipeline.Run(ctx, issue, optsFor(issue)); runErr != nil {
-			slog.Error("issues fetcher: pipeline run failed",
-				"repo", repo, "number", issue.Number, "err", runErr)
-			continue
+		if f.publisher != nil {
+			var pubErr error
+			switch issue.Mode {
+			case config.IssueModeReviewOnly:
+				pubErr = f.publisher.PublishIssueTriage(ctx, issue.Repo, issue.Number, issue.ID)
+			case config.IssueModeDevelop:
+				pubErr = f.publisher.PublishIssueImplement(ctx, issue.Repo, issue.Number, issue.ID)
+			default:
+				slog.Debug("issues fetcher: skipping issue with unhandled mode",
+					"repo", repo, "number", issue.Number, "mode", string(issue.Mode))
+				continue
+			}
+			if pubErr != nil {
+				slog.Error("issues fetcher: publish failed",
+					"repo", repo, "number", issue.Number, "err", pubErr)
+				continue
+			}
+		} else {
+			if _, runErr := f.pipeline.Run(ctx, issue, optsFor(issue)); runErr != nil {
+				slog.Error("issues fetcher: pipeline run failed",
+					"repo", repo, "number", issue.Number, "err", runErr)
+				continue
+			}
 		}
 		processed++
 	}
