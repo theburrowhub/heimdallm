@@ -64,7 +64,7 @@ func (c *Client) GetPR(repo string, number int) (*PullRequest, error) {
 - [ ] **Step 2: Verify it compiles**
 
 ```bash
-cd /Users/jamuriano/personal-workspace/auto-pr/daemon
+cd daemon
 go build ./internal/github/
 ```
 
@@ -73,7 +73,7 @@ Expected: Clean build.
 - [ ] **Step 3: Commit**
 
 ```bash
-cd /Users/jamuriano/personal-workspace/auto-pr/daemon
+cd daemon
 git add internal/github/client.go
 git commit -m "feat(github): add GetPR method for full PR fetch (#304)"
 ```
@@ -296,7 +296,7 @@ func TestReviewWorker_AcksOnHandlerError(t *testing.T) {
 - [ ] **Step 3: Verify it compiles and tests pass**
 
 ```bash
-cd /Users/jamuriano/personal-workspace/auto-pr/daemon
+cd daemon
 go test ./internal/worker/ -v -count=1
 ```
 
@@ -305,7 +305,7 @@ Expected: Both tests PASS.
 - [ ] **Step 4: Commit**
 
 ```bash
-cd /Users/jamuriano/personal-workspace/auto-pr/daemon
+cd daemon
 git add internal/worker/review.go internal/worker/review_test.go
 git commit -m "feat(worker): add ReviewWorker NATS consumer (#304)"
 ```
@@ -413,7 +413,7 @@ So `pipe` assignment IS protected by `cfgMu` in the reload path. For the handler
 - [ ] **Step 3: Verify build**
 
 ```bash
-cd /Users/jamuriano/personal-workspace/auto-pr/daemon
+cd daemon
 go build ./cmd/heimdallm/
 ```
 
@@ -422,7 +422,7 @@ Expected: Clean build.
 - [ ] **Step 4: Run full test suite**
 
 ```bash
-cd /Users/jamuriano/personal-workspace/auto-pr/daemon
+cd daemon
 go test ./... -count=1
 ```
 
@@ -431,7 +431,7 @@ Expected: All tests pass.
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/jamuriano/personal-workspace/auto-pr/daemon
+cd daemon
 git add cmd/heimdallm/main.go
 git commit -m "feat: wire PR review NATS worker into daemon startup (#304)"
 ```
@@ -443,7 +443,7 @@ git commit -m "feat: wire PR review NATS worker into daemon startup (#304)"
 - [ ] **Step 1: Run affected packages with race detector**
 
 ```bash
-cd /Users/jamuriano/personal-workspace/auto-pr/daemon
+cd daemon
 go test ./internal/worker/ ./internal/bus/ ./internal/github/ ./cmd/heimdallm/ -race -count=1
 ```
 
@@ -452,14 +452,14 @@ Expected: All pass.
 - [ ] **Step 2: Build binary**
 
 ```bash
-cd /Users/jamuriano/personal-workspace/auto-pr/daemon
+cd daemon
 go build -o bin/heimdallm ./cmd/heimdallm/
 ```
 
 - [ ] **Step 3: Smoke test**
 
 ```bash
-cd /Users/jamuriano/personal-workspace/auto-pr/daemon
+cd daemon
 HEIMDALLM_DATA_DIR=$(mktemp -d) HEIMDALLM_AI_PRIMARY=claude-code timeout 8 ./bin/heimdallm 2>&1 | head -20
 ```
 

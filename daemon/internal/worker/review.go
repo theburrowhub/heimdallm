@@ -3,6 +3,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"runtime/debug"
@@ -48,7 +49,7 @@ func (w *ReviewWorker) Start(ctx context.Context) error {
 	for {
 		msg, err := iter.Next()
 		if err != nil {
-			if ctx.Err() != nil {
+			if ctx.Err() != nil || errors.Is(err, jetstream.ErrMsgIteratorClosed) {
 				return nil // clean shutdown
 			}
 			return fmt.Errorf("review-worker: iter.Next: %w", err)
