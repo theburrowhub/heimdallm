@@ -90,3 +90,41 @@ func (p *PRPublishPublisher) PublishPRPublish(ctx context.Context, reviewID int6
 	}
 	return nil
 }
+
+// NATSIssuePublisher publishes classified issues to NATS JetStream.
+type NATSIssuePublisher struct {
+	js jetstream.JetStream
+}
+
+// NewIssuePublisher creates a publisher for issue triage and implement subjects.
+func NewIssuePublisher(js jetstream.JetStream) *NATSIssuePublisher {
+	return &NATSIssuePublisher{js: js}
+}
+
+// PublishIssueTriage publishes a review_only issue to the triage subject.
+func (p *NATSIssuePublisher) PublishIssueTriage(ctx context.Context, repo string, number int, githubID int64) error {
+	data, err := Encode(IssueMsg{Repo: repo, Number: number, GithubID: githubID})
+	if err != nil {
+		return fmt.Errorf("bus: encode issue triage: %w", err)
+	}
+	msgID := fmt.Sprintf("issue-triage:%d", githubID)
+	_, err = p.js.Publish(ctx, SubjIssueTriage, data, jetstream.WithMsgID(msgID))
+	if err != nil {
+		return fmt.Errorf("bus: publish issue triage: %w", err)
+	}
+	return nil
+}
+
+// PublishIssueImplement publishes a develop issue to the implement subject.
+func (p *NATSIssuePublisher) PublishIssueImplement(ctx context.Context, repo string, number int, githubID int64) error {
+	data, err := Encode(IssueMsg{Repo: repo, Number: number, GithubID: githubID})
+	if err != nil {
+		return fmt.Errorf("bus: encode issue implement: %w", err)
+	}
+	msgID := fmt.Sprintf("issue-impl:%d", githubID)
+	_, err = p.js.Publish(ctx, SubjIssueImplement, data, jetstream.WithMsgID(msgID))
+	if err != nil {
+		return fmt.Errorf("bus: publish issue implement: %w", err)
+	}
+	return nil
+}

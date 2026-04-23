@@ -166,3 +166,61 @@ func TestPRPublishPublisher_Dedup(t *testing.T) {
 		t.Errorf("expected 1 (dedup), got %d", count)
 	}
 }
+
+func TestIssuePublisher_Triage(t *testing.T) {
+	b := newTestBus(t)
+	ctx := context.Background()
+
+	pub := bus.NewIssuePublisher(b.JetStream())
+	if err := pub.PublishIssueTriage(ctx, "org/repo", 10, 555); err != nil {
+		t.Fatalf("PublishIssueTriage: %v", err)
+	}
+
+	cons, err := b.JetStream().Consumer(ctx, bus.StreamWork, bus.ConsumerTriage)
+	if err != nil {
+		t.Fatalf("consumer: %v", err)
+	}
+	msgs, err := cons.Fetch(1, jetstream.FetchMaxWait(2*time.Second))
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	var got bus.IssueMsg
+	for m := range msgs.Messages() {
+		if err := bus.Decode(m.Data(), &got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		m.Ack()
+	}
+	if got.Repo != "org/repo" || got.Number != 10 || got.GithubID != 555 {
+		t.Errorf("unexpected: %+v", got)
+	}
+}
+
+func TestIssuePublisher_Implement(t *testing.T) {
+	b := newTestBus(t)
+	ctx := context.Background()
+
+	pub := bus.NewIssuePublisher(b.JetStream())
+	if err := pub.PublishIssueImplement(ctx, "org/repo", 20, 666); err != nil {
+		t.Fatalf("PublishIssueImplement: %v", err)
+	}
+
+	cons, err := b.JetStream().Consumer(ctx, bus.StreamWork, bus.ConsumerImplement)
+	if err != nil {
+		t.Fatalf("consumer: %v", err)
+	}
+	msgs, err := cons.Fetch(1, jetstream.FetchMaxWait(2*time.Second))
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	var got bus.IssueMsg
+	for m := range msgs.Messages() {
+		if err := bus.Decode(m.Data(), &got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		m.Ack()
+	}
+	if got.Repo != "org/repo" || got.Number != 20 || got.GithubID != 666 {
+		t.Errorf("unexpected: %+v", got)
+	}
+}

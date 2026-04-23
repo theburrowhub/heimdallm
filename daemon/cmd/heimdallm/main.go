@@ -433,6 +433,8 @@ func main() {
 	// ── Multi-tier Pipeline ──────────────────────────────────────────────
 	js := eventBus.JetStream()
 	publishPub := bus.NewPRPublishPublisher(js)
+	issuePublisher := bus.NewIssuePublisher(js)
+	issueFetcher.SetPublisher(issuePublisher)
 
 	// tier2Adapter bridges main.go's concrete types to the Pipeline's
 	// Tier 2 / Tier 3 interfaces.
@@ -632,6 +634,85 @@ func main() {
 	go func() {
 		if err := publishW.Start(publishWCtx); err != nil {
 			slog.Error("publish worker stopped", "err", err)
+		}
+	}()
+
+	// ── NATS issue triage worker ────────────────────────────────────────
+	// Consumes triage requests published by the Fetcher when it classifies
+	// an issue as review_only. Fetches the issue from GitHub for fresh data,
+	// resolves per-repo config, and runs the issue pipeline.
+	triageHandler := func(ctx context.Context, msg bus.IssueMsg) {
+		ghIssue, err := ghClient.GetIssue(msg.Repo, msg.Number)
+		if err != nil {
+			slog.Error("triage-worker: fetch issue from GitHub",
+				"repo", msg.Repo, "number", msg.Number, "err", err)
+			return
+		}
+		ghIssue.Mode = config.IssueModeReviewOnly
+
+		cfgMu.Lock()
+		c := *cfg
+		aiCfg := c.AIForRepo(msg.Repo)
+		if aiCfg.Primary == "" {
+			aiCfg.Primary = c.AI.Primary
+		}
+		agentCfg := c.AgentConfigFor(aiCfg.Primary)
+		localDirBase := c.GitHub.LocalDirBase
+		globalTimeout := c.AI.ExecutionTimeout
+		cfgMu.Unlock()
+		aiCfg.LocalDir = config.ResolveLocalDir(aiCfg.LocalDir, msg.Repo, localDirBase)
+
+		extraFlags := agentCfg.ExtraFlags
+		if extraFlags != "" {
+			if err := executor.ValidateExtraFlags(extraFlags); err != nil {
+				slog.Warn("triage-worker: extra_flags rejected", "err", err)
+				extraFlags = ""
+			}
+		}
+
+		issuePrompt, issueInstructions := resolveIssuePrompt(s, aiCfg.IssuePrompt, agentCfg.PromptID)
+		implPrompt, implInstructions := resolveImplementPrompt(s, aiCfg.ImplementPrompt, agentCfg.PromptID)
+
+		opts := issuepipeline.RunOptions{
+			GitHubToken: token,
+			Primary:     aiCfg.Primary,
+			Fallback:    aiCfg.Fallback,
+			ExecOpts: executor.ExecOptions{
+				Model:                agentCfg.Model,
+				MaxTurns:             agentCfg.MaxTurns,
+				ApprovalMode:         agentCfg.ApprovalMode,
+				ExtraFlags:           extraFlags,
+				WorkDir:              aiCfg.LocalDir,
+				Effort:               agentCfg.Effort,
+				PermissionMode:       agentCfg.PermissionMode,
+				Bare:                 agentCfg.Bare,
+				DangerouslySkipPerms: agentCfg.DangerouslySkipPerms,
+				NoSessionPersistence: agentCfg.NoSessionPersistence,
+				Timeout:              resolveExecutionTimeout(globalTimeout, agentCfg.ExecutionTimeout),
+			},
+			IssuePromptOverride:     issuePrompt,
+			IssueInstructions:       issueInstructions,
+			ImplementPromptOverride: implPrompt,
+			ImplementInstructions:   implInstructions,
+			PRReviewers:             aiCfg.PRReviewers,
+			PRAssignee:              aiCfg.PRAssignee,
+			PRLabels:                aiCfg.PRLabels,
+			PRDraft:                 aiCfg.PRDraft != nil && *aiCfg.PRDraft,
+			GeneratePRDescription:   aiCfg.GeneratePRDescription != nil && *aiCfg.GeneratePRDescription,
+		}
+
+		if _, err := issuePipe.Run(ctx, ghIssue, opts); err != nil {
+			slog.Error("triage-worker: pipeline run failed",
+				"repo", msg.Repo, "number", msg.Number, "err", err)
+		}
+	}
+
+	triageW := worker.NewTriageWorker(js, triageHandler)
+	triageWCtx, triageWCancel := context.WithCancel(context.Background())
+	defer triageWCancel()
+	go func() {
+		if err := triageW.Start(triageWCtx); err != nil {
+			slog.Error("triage worker stopped", "err", err)
 		}
 	}()
 
