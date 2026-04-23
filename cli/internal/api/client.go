@@ -276,6 +276,44 @@ func (c *Client) UndismissIssue(id int64) error {
 	return err
 }
 
+// PRDetail is the response from GET /prs/{id}.
+type PRDetail struct {
+	PR      PR       `json:"pr"`
+	Reviews []Review `json:"reviews"`
+}
+
+// IssueDetail is the response from GET /issues/{id}.
+type IssueDetail struct {
+	Issue   Issue         `json:"issue"`
+	Reviews []IssueReview `json:"reviews"`
+}
+
+// GetPR fetches a single PR with all its reviews.
+func (c *Client) GetPR(id int64) (*PRDetail, error) {
+	data, err := c.do("GET", fmt.Sprintf("/prs/%d", id))
+	if err != nil {
+		return nil, err
+	}
+	var detail PRDetail
+	if err := json.Unmarshal(data, &detail); err != nil {
+		return nil, fmt.Errorf("parsing PR detail: %w", err)
+	}
+	return &detail, nil
+}
+
+// GetIssue fetches a single issue with all its reviews.
+func (c *Client) GetIssue(id int64) (*IssueDetail, error) {
+	data, err := c.do("GET", fmt.Sprintf("/issues/%d", id))
+	if err != nil {
+		return nil, err
+	}
+	var detail IssueDetail
+	if err := json.Unmarshal(data, &detail); err != nil {
+		return nil, fmt.Errorf("parsing issue detail: %w", err)
+	}
+	return &detail, nil
+}
+
 // StreamEvents opens an SSE connection and sends events to the provided channel.
 // It blocks until the context is cancelled, the connection is closed, or an error occurs.
 func (c *Client) StreamEvents(ctx context.Context, events chan<- SSEEvent) error {
