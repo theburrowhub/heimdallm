@@ -1,0 +1,110 @@
+version: 2
+
+project_name: heimdallm
+
+builds:
+  - id: heimdallm-cli
+    dir: cli
+    main: ./cmd/heimdallm-cli
+    binary: heimdallm-cli
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+  - id: heimdallm-daemon
+    dir: daemon
+    main: ./cmd/heimdallm
+    binary: heimdallm
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+    ldflags:
+      - -s -w
+
+archives:
+  - id: cli-archives
+    builds:
+      - heimdallm-cli
+    format: tar.gz
+    name_template: "heimdallm-cli_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        format: zip
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+dockers:
+  - ids:
+      - heimdallm-daemon
+    image_templates:
+      - "ghcr.io/theburrowhub/heimdallm:{{ .Version }}"
+      - "ghcr.io/theburrowhub/heimdallm:{{ .Major }}.{{ .Minor }}"
+      - "ghcr.io/theburrowhub/heimdallm:{{ .Major }}"
+      - "ghcr.io/theburrowhub/heimdallm:latest"
+    dockerfile: docker/Dockerfile.goreleaser
+    build_flag_templates:
+      - --label=org.opencontainers.image.version={{ .Version }}
+      - --label=org.opencontainers.image.source=https://github.com/theburrowhub/heimdallm
+      - --label=org.opencontainers.image.title=heimdallm
+
+nfpms:
+  - id: heimdallm
+    builds:
+      - heimdallm-daemon
+    package_name: heimdallm
+    formats:
+      - deb
+      - rpm
+    homepage: https://github.com/theburrowhub/heimdallm
+    description: "AI-powered GitHub PR review agent"
+    license: MIT
+    dependencies:
+      - libgtk-3-0
+      - libayatana-appindicator3-1
+    overrides:
+      rpm:
+        dependencies:
+          - gtk3
+          - libayatana-appindicator3-1
+
+brews:
+  - ids:
+      - heimdallm-cli
+    repository:
+      owner: theburrowhub
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: https://github.com/theburrowhub/heimdallm
+    description: "CLI client for Heimdallm — monitor PRs, issues, and activity from the terminal"
+    license: MIT
+    install: |
+      bin.install "heimdallm-cli"
+    test: |
+      system "#{bin}/heimdallm-cli", "--help"
+
+release:
+  github:
+    owner: theburrowhub
+    name: heimdallm
+  mode: keep-existing
+  extra_files: []
