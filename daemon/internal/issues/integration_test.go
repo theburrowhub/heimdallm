@@ -2,10 +2,13 @@ package issues_test
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/heimdallm/daemon/internal/config"
+	"github.com/heimdallm/daemon/internal/executor"
 	"github.com/heimdallm/daemon/internal/github"
 	"github.com/heimdallm/daemon/internal/issues"
 	"github.com/heimdallm/daemon/internal/store"
@@ -108,6 +111,125 @@ func TestIntegration_FetcherDrivesPipelineEndToEnd(t *testing.T) {
 	if len(gh.postCalls) != 2 {
 		t.Errorf("dedup: expected no new PostComment calls, got %d total", len(gh.postCalls))
 	}
+}
+
+// TestIntegration_ConcurrentPipelineRunsCollapseToOneDispatch locks in
+// the persistent in-flight claim behaviour from #292: two concurrent
+// Run calls on the same (github_issue_id, updated_at) snapshot must
+// reach the LLM executor exactly once. The second call is expected to
+// see the claim already taken and return (nil, nil) immediately.
+//
+// The coordination is deterministic: goroutine A runs first and blocks
+// inside ExecuteRaw (holding the claim); the test waits for that block
+// via a channel before launching goroutine B, so B is guaranteed to
+// contend on the claim. A 2-second timeout on each wait keeps a
+// regression from deadlocking the suite.
+func TestIntegration_ConcurrentPipelineRunsCollapseToOneDispatch(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	now := time.Now().UTC().Truncate(time.Second)
+	issue := &github.Issue{
+		ID: 2001, Number: 7, Repo: "org/repo",
+		Title: "Concurrent triage", Body: ".",
+		State: "open", User: github.User{Login: "reporter"},
+		Labels: []github.Label{}, Assignees: []github.User{},
+		CreatedAt: now, UpdatedAt: now,
+		Mode: config.IssueModeReviewOnly,
+	}
+
+	holdingClaim := make(chan struct{})
+	release := make(chan struct{})
+	var claimSignaler sync.Once
+	var execCount int32
+	bexec := &blockingExec{
+		cli: "claude",
+		out: []byte(validResult),
+		onCall: func() {
+			atomic.AddInt32(&execCount, 1)
+			claimSignaler.Do(func() { close(holdingClaim) })
+			<-release
+		},
+	}
+
+	gh := &fakeGH{}
+	broker := &fakeBroker{}
+	pipe := issues.New(s, gh, bexec, nil, broker, nil)
+
+	opts := issues.RunOptions{Primary: "claude"}
+
+	// Goroutine A: will claim and block in ExecuteRaw until release.
+	doneA := make(chan error, 1)
+	go func() {
+		_, err := pipe.Run(context.Background(), issue, opts)
+		doneA <- err
+	}()
+
+	// Wait up to 2 s for A to be inside ExecuteRaw holding the claim.
+	select {
+	case <-holdingClaim:
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("goroutine A never reached ExecuteRaw; claim path is broken")
+	}
+
+	// Goroutine B: guaranteed to see the claim already taken. Should
+	// return (nil, nil) immediately without hitting the executor.
+	doneB := make(chan error, 1)
+	go func() {
+		_, err := pipe.Run(context.Background(), issue, opts)
+		doneB <- err
+	}()
+
+	select {
+	case err := <-doneB:
+		if err != nil {
+			t.Fatalf("goroutine B should return (nil, nil) when claim is taken, got err=%v", err)
+		}
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("goroutine B blocked; claim is not short-circuiting Run")
+	}
+
+	// Now release A so the test can finish cleanly.
+	close(release)
+	select {
+	case err := <-doneA:
+		if err != nil {
+			t.Fatalf("goroutine A returned err=%v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("goroutine A never completed after release")
+	}
+
+	if n := atomic.LoadInt32(&execCount); n != 1 {
+		t.Errorf("expected exactly 1 ExecuteRaw call (concurrent dispatches must collapse), got %d", n)
+	}
+	if len(gh.postCalls) != 1 {
+		t.Errorf("expected 1 PostComment call (one triage landed), got %d", len(gh.postCalls))
+	}
+}
+
+// blockingExec is a CLIExecutor whose ExecuteRaw invokes `onCall` (if
+// set) before returning. Tests use it to insert a sync primitive between
+// "pipeline took the claim" and "pipeline releases the claim", so two
+// goroutines can deterministically contend on the claim.
+type blockingExec struct {
+	cli    string
+	out    []byte
+	onCall func()
+}
+
+func (e *blockingExec) Detect(_, _ string) (string, error) { return e.cli, nil }
+
+func (e *blockingExec) ExecuteRaw(_, _ string, _ executor.ExecOptions) ([]byte, error) {
+	if e.onCall != nil {
+		e.onCall()
+	}
+	return e.out, nil
 }
 
 func TestIntegration_RecomputeGraceIsExportedForMainPipeline(t *testing.T) {

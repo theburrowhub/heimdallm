@@ -193,11 +193,18 @@ func (p *Pipeline) SetBotLogin(login string) { p.botLogin = login }
 
 // issueStore is the subset of *store.Store the pipeline needs. Kept narrow
 // so tests can substitute a fake without bringing in SQLite.
+//
+// ClaimIssueTriageInFlight / ReleaseIssueTriageInFlight gate Run on the
+// persistent (github_issue_id, updated_at) key so two concurrent fetcher
+// ticks on the same snapshot collapse to one Claude dispatch — mirroring
+// the PR-side claim (#258). See theburrowhub/heimdallm#292.
 type issueStore interface {
 	UpsertIssue(i *store.Issue) (int64, error)
 	InsertIssueReview(r *store.IssueReview) (int64, error)
 	LatestIssueReview(issueID int64) (*store.IssueReview, error)
 	UpsertPR(pr *store.PR) (int64, error)
+	ClaimIssueTriageInFlight(issueID int64, updatedAt string) (bool, error)
+	ReleaseIssueTriageInFlight(issueID int64, updatedAt string) error
 }
 
 // issueGitHub groups every GitHub-facing method the pipeline uses. The
@@ -239,6 +246,40 @@ func (p *Pipeline) Run(ctx context.Context, issue *github.Issue, opts RunOptions
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
+	// Persistent in-flight claim keyed on (github_issue_id, updated_at).
+	// Two concurrent fetcher ticks observing the same snapshot collapse to
+	// one Claude dispatch. Fail-open on any claim error — the downstream
+	// circuit breaker and marker-scan dedup still cap cost. Empty key is
+	// treated as "no claim possible"; the scheduler should have prevented
+	// that but the guard is cheap. See theburrowhub/heimdallm#292.
+	var (
+		claimed      bool
+		claimKey     string
+		claimIssueID = issue.ID
+	)
+	if !issue.UpdatedAt.IsZero() && claimIssueID != 0 {
+		claimKey = issue.UpdatedAt.UTC().Format(time.RFC3339)
+		ok, err := p.store.ClaimIssueTriageInFlight(claimIssueID, claimKey)
+		if err != nil {
+			slog.Warn("issues pipeline: claim inflight failed, proceeding",
+				"repo", issue.Repo, "number", issue.Number, "err", err)
+		} else if !ok {
+			slog.Info("issues pipeline: already in flight, skipping",
+				"repo", issue.Repo, "number", issue.Number, "updated_at", claimKey)
+			return nil, nil
+		} else {
+			claimed = true
+		}
+	}
+	defer func() {
+		if claimed {
+			if err := p.store.ReleaseIssueTriageInFlight(claimIssueID, claimKey); err != nil {
+				slog.Warn("issues pipeline: release inflight failed",
+					"issue_id", claimIssueID, "updated_at", claimKey, "err", err)
+			}
+		}
+	}()
 
 	// Determine the effective mode. `ExecOpts.WorkDir` is the single source
 	// of truth for "is there a local checkout"; Run does not consult any

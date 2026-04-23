@@ -20,3 +20,17 @@ func (s *Store) InsertStaleInFlight(prID int64, headSHA string, startedAt time.T
 	}
 	return nil
 }
+
+// InsertStaleIssueTriageInFlight is the issue-side mirror of
+// InsertStaleInFlight so TestIssueInflight_StaleEntriesAreCleared can
+// exercise ClearStaleIssueTriageInFlight deterministically.
+func (s *Store) InsertStaleIssueTriageInFlight(issueID int64, updatedAt string, startedAt time.Time) error {
+	_, err := s.db.Exec(
+		"INSERT INTO issue_triage_in_flight (issue_id, updated_at, started_at) VALUES (?, ?, ?)",
+		issueID, updatedAt, startedAt.UTC().Format(sqliteTimeFormat),
+	)
+	if err != nil {
+		return fmt.Errorf("store: insert stale issue triage inflight: %w", err)
+	}
+	return nil
+}

@@ -129,6 +129,13 @@ func main() {
 		slog.Info("startup: cleared stale inflight rows", "count", n)
 	}
 
+	// Mirror of the PR-side sweep above for issue-triage claims (#292).
+	if n, err := s.ClearStaleIssueTriageInFlight(30 * time.Minute); err != nil {
+		slog.Warn("startup: clear stale issue triage inflight failed", "err", err)
+	} else if n > 0 {
+		slog.Info("startup: cleared stale issue triage inflight rows", "count", n)
+	}
+
 	broker := sse.NewBroker()
 	broker.Start()
 
