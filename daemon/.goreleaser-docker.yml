@@ -1,0 +1,49 @@
+version: 2
+
+project_name: heimdallm
+
+builds:
+  - id: daemon
+    main: ./cmd/heimdallm
+    binary: heimdalld
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+    ldflags:
+      - -s -w
+
+# ── Docker image — pushed to GHCR ────────────────────────────────────────────
+# Used by: goreleaser-daemon job (release.yml)
+dockers:
+  - ids:
+      - daemon
+    image_templates:
+      - "ghcr.io/theburrowhub/heimdallm:{{ .Version }}"
+      - "ghcr.io/theburrowhub/heimdallm:{{ .Major }}.{{ .Minor }}"
+      - "ghcr.io/theburrowhub/heimdallm:{{ .Major }}"
+      - "ghcr.io/theburrowhub/heimdallm:latest"
+      - "ghcr.io/theburrowhub/heimdallm:{{ .ShortCommit }}"
+    dockerfile: ../docker/Dockerfile.goreleaser
+    use: buildx
+    build_flag_templates:
+      - "--pull"
+      - "--cache-from=type=gha"
+      - "--cache-to=type=gha,mode=max"
+      - "--label=org.opencontainers.image.created={{.Date}}"
+      - "--label=org.opencontainers.image.title={{.ProjectName}}"
+      - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+      - "--label=org.opencontainers.image.version={{.Version}}"
+      - "--label=org.opencontainers.image.source=https://github.com/theburrowhub/heimdallm"
+
+changelog:
+  disable: true
+
+release:
+  github:
+    owner: theburrowhub
+    name: heimdallm
+  mode: keep-existing
+  extra_files: []
