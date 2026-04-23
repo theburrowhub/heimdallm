@@ -11,6 +11,11 @@ type Tier1Discovery interface {
 	Discovered() []string
 }
 
+// Tier1Publisher publishes the discovered repo list.
+type Tier1Publisher interface {
+	PublishRepos(ctx context.Context, repos []string) error
+}
+
 // Tier1Config provides the repo lists for merging.
 type Tier1Config struct {
 	StaticRepos    []string
@@ -23,15 +28,15 @@ type Tier1Config struct {
 type Tier1Deps struct {
 	Discovery Tier1Discovery
 	Limiter   *RateLimiter
-	ReposChan chan<- []string
+	Publisher Tier1Publisher
 	ConfigFn  func() Tier1Config
 	Interval  time.Duration
 }
 
 // RunTier1 runs the discovery tier. It periodically merges static repos
-// with discovered repos and sends the full list to reposChan.
+// with discovered repos and publishes the full list to NATS.
 func RunTier1(ctx context.Context, deps Tier1Deps) {
-	// Send initial repos immediately
+	// Publish initial repos immediately
 	sendRepos(ctx, deps)
 
 	ticker := time.NewTicker(deps.Interval)
@@ -83,8 +88,7 @@ func sendRepos(ctx context.Context, deps Tier1Deps) {
 	}
 
 	slog.Info("tier1: discovery complete", "repos", len(repos))
-	select {
-	case deps.ReposChan <- repos:
-	case <-ctx.Done():
+	if err := deps.Publisher.PublishRepos(ctx, repos); err != nil {
+		slog.Error("tier1: publish repos failed", "err", err)
 	}
 }

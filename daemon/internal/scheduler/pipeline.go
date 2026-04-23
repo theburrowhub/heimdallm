@@ -2,9 +2,13 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/heimdallm/daemon/internal/bus"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 // PipelineConfig holds the interval configuration for each tier.
@@ -20,6 +24,10 @@ type PipelineDeps struct {
 	// Tier 1
 	Discovery     Tier1Discovery
 	Tier1ConfigFn func() Tier1Config
+	Publisher     Tier1Publisher // publishes discovery results to NATS
+
+	// NATS bridge (interim — Task 4 removes when Tier 2 consumes directly)
+	JS jetstream.JetStream
 
 	// Tier 2
 	PRFetcher      Tier2PRFetcher
@@ -69,12 +77,6 @@ func NewPipeline(cfg PipelineConfig, deps PipelineDeps) *Pipeline {
 }
 
 // Start launches all 3 tiers and the rate limiter refill goroutine.
-//
-// coldStart controls whether Tier 2 runs its first processTick immediately.
-// Pass true on initial daemon startup, false on a pipeline reload triggered
-// by config change. See RunTier2 for the rationale — in short, a config
-// reload can come from a UI PATCH and firing Tier 2 before backoff state
-// settles would amplify any in-flight review loop.
 func (p *Pipeline) Start(parentCtx context.Context, coldStart bool) {
 	ctx, cancel := context.WithCancel(parentCtx)
 	p.cancel = cancel
@@ -98,18 +100,27 @@ func (p *Pipeline) Start(parentCtx context.Context, coldStart bool) {
 		}
 	}()
 
-	// Tier 1: Discovery
+	// Tier 1: Discovery — publishes to NATS
 	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
 		RunTier1(ctx, Tier1Deps{
 			Discovery: p.deps.Discovery,
 			Limiter:   p.limiter,
-			ReposChan: reposChan,
+			Publisher: p.deps.Publisher,
 			ConfigFn:  p.deps.Tier1ConfigFn,
 			Interval:  p.cfg.DiscoveryInterval,
 		})
 	}()
+
+	// Bridge: NATS discovery-consumer → reposChan (interim, Task 4 removes)
+	if p.deps.JS != nil {
+		p.wg.Add(1)
+		go func() {
+			defer p.wg.Done()
+			p.bridgeDiscovery(ctx, reposChan)
+		}()
+	}
 
 	// Tier 2: Per-repo
 	p.wg.Add(1)
@@ -149,10 +160,78 @@ func (p *Pipeline) Start(parentCtx context.Context, coldStart bool) {
 		"rate_limit", p.cfg.RateLimitPerHour)
 }
 
+// bridgeDiscovery consumes from the NATS discovery-consumer and forwards
+// repo lists to the reposChan that Tier 2 reads. This is a transitional
+// bridge — Task 4 will have Tier 2 consume from NATS directly.
+func (p *Pipeline) bridgeDiscovery(ctx context.Context, out chan<- []string) {
+	backoff := 1 * time.Second
+	maxBackoff := 30 * time.Second
+
+	for {
+		if err := p.runBridgeConsumer(ctx, out); err != nil {
+			slog.Error("bridge: consumer failed, retrying", "err", err, "backoff", backoff)
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		if backoff < maxBackoff {
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
+	}
+}
+
+func (p *Pipeline) runBridgeConsumer(ctx context.Context, out chan<- []string) error {
+	cons, err := p.deps.JS.Consumer(ctx, bus.StreamDiscovery, bus.ConsumerDiscovery)
+	if err != nil {
+		return fmt.Errorf("get discovery consumer: %w", err)
+	}
+	iter, err := cons.Messages(jetstream.PullMaxMessages(1))
+	if err != nil {
+		return fmt.Errorf("start message iterator: %w", err)
+	}
+	defer iter.Stop()
+
+	// Stop the iterator when context is cancelled so iter.Next() unblocks.
+	go func() {
+		<-ctx.Done()
+		iter.Stop()
+	}()
+
+	for {
+		msg, err := iter.Next()
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil // clean shutdown
+			}
+			return fmt.Errorf("iter.Next: %w", err)
+		}
+
+		var dm bus.DiscoveryMsg
+		if err := bus.Decode(msg.Data(), &dm); err != nil {
+			slog.Error("bridge: decode discovery msg", "err", err)
+			msg.Ack()
+			continue
+		}
+
+		// Ack after channel send. If the process crashes before Tier 2
+		// processes the repos, the next discovery cycle will re-publish
+		// the list — acceptable trade-off for simplicity.
+		select {
+		case out <- dm.Repos:
+		case <-ctx.Done():
+			return nil
+		}
+		msg.Ack()
+	}
+}
+
 // Stop cancels all goroutines and waits for them to finish.
-// It is idempotent — calling Stop multiple times is safe (e.g. the reload
-// path stops the old pipeline, and the deferred shutdown may also call Stop
-// if it reads a stale pointer).
 func (p *Pipeline) Stop() {
 	p.stopOnce.Do(func() {
 		if p.cancel != nil {
