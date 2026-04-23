@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -308,13 +309,14 @@ func main() {
 		rev, err := p.Run(pr, buildRunOpts(pr, aiCfg))
 		if err != nil {
 			slog.Error("pipeline run failed", "repo", pr.Repo, "pr", pr.Number, "err", err)
-			if strings.Contains(err.Error(), "circuit breaker tripped") {
+			var cbErr *pipeline.CircuitBreakerError
+			if errors.As(err, &cbErr) {
 				broker.Publish(sse.Event{
 					Type: sse.EventCircuitBreakerTripped,
 					Data: sseData(map[string]any{
 						"pr_number": pr.Number,
 						"repo":      pr.Repo,
-						"reason":    strings.TrimPrefix(err.Error(), "pipeline: circuit breaker tripped: "),
+						"reason":    cbErr.Reason,
 					}),
 				})
 				return
@@ -677,13 +679,14 @@ func main() {
 
 		rev, err := p.Run(ghPR, buildRunOpts(ghPR, aiCfg))
 		if err != nil {
-			if strings.Contains(err.Error(), "circuit breaker tripped") {
+			var cbErr *pipeline.CircuitBreakerError
+			if errors.As(err, &cbErr) {
 				broker.Publish(sse.Event{
 					Type: sse.EventCircuitBreakerTripped,
 					Data: sseData(map[string]any{
 						"pr_number": pr.Number,
 						"repo":      pr.Repo,
-						"reason":    strings.TrimPrefix(err.Error(), "pipeline: circuit breaker tripped: "),
+						"reason":    cbErr.Reason,
 					}),
 				})
 				return err

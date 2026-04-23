@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -11,6 +12,26 @@ import (
 	"github.com/heimdallm/daemon/internal/github"
 	"github.com/heimdallm/daemon/internal/store"
 )
+
+// ErrCircuitBreakerTripped is returned by Run when a review was skipped
+// because the per-PR or per-repo cap was exceeded. Callers detect it via
+// errors.As on a *CircuitBreakerError value to extract the human-readable
+// reason for telemetry/UI, or via errors.Is(err, ErrCircuitBreakerTripped)
+// when the reason is not needed.
+var ErrCircuitBreakerTripped = errors.New("pipeline: circuit breaker tripped")
+
+// CircuitBreakerError wraps ErrCircuitBreakerTripped with the specific
+// reason the breaker returned ("per-PR cap reached: ...", etc). Use
+// errors.As on this type to read Reason without parsing the error string.
+type CircuitBreakerError struct {
+	Reason string
+}
+
+func (e *CircuitBreakerError) Error() string {
+	return ErrCircuitBreakerTripped.Error() + ": " + e.Reason
+}
+
+func (e *CircuitBreakerError) Unwrap() error { return ErrCircuitBreakerTripped }
 
 // DiffFetcher retrieves the diff for a pull request.
 type DiffFetcher interface {
@@ -79,9 +100,10 @@ func New(s *store.Store, gh interface {
 // the bot's own comments from re-review discussion context.
 func (p *Pipeline) SetBotLogin(login string) { p.botLogin = login }
 
-// SetCircuitBreakerLimits enables the per-PR and per-repo caps. Nil disables
-// all caps (equivalent to the pre-issue-243 behaviour). Must be called before
-// Run; typically once at daemon startup.
+// SetCircuitBreakerLimits enables the per-PR and per-repo caps. Nil
+// disables all caps. Captured by pointer at wiring time — config reloads
+// do NOT re-read this; see theburrowhub/heimdallm#243 for the rationale
+// and the follow-up ticket for re-plumbing via a getter.
 func (p *Pipeline) SetCircuitBreakerLimits(limits *store.CircuitBreakerLimits) {
 	p.breaker = limits
 }
@@ -286,7 +308,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 				"repo", pr.Repo, "pr", pr.Number, "reason", reason)
 			p.notify.Notify("Heimdallm circuit breaker",
 				fmt.Sprintf("%s #%d: %s", pr.Repo, pr.Number, reason))
-			return nil, fmt.Errorf("pipeline: circuit breaker tripped: %s", reason)
+			return nil, &CircuitBreakerError{Reason: reason}
 		}
 	}
 

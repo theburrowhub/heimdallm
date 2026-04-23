@@ -111,3 +111,30 @@ func TestCircuitBreaker_AllowsUnderCap(t *testing.T) {
 		t.Errorf("expected allowed, got tripped")
 	}
 }
+
+// TestCircuitBreaker_ZeroCapMeansUnlimited locks in the contract documented
+// on CircuitBreakerLimits: a cap of 0 disables that axis entirely. Without
+// this test the "0 = unlimited" behaviour could silently regress to "0 means
+// trip immediately" via an off-by-one in CheckCircuitBreaker.
+func TestCircuitBreaker_ZeroCapMeansUnlimited(t *testing.T) {
+	s := newTestStore(t)
+	prID, _ := s.UpsertPR(&store.PR{GithubID: 1, Repo: "org/r", Number: 1,
+		Title: "t", State: "open", UpdatedAt: time.Now()})
+	// Seed 100 reviews; unlimited cap means no trip.
+	for i := 0; i < 100; i++ {
+		if _, err := s.InsertReview(&store.Review{
+			PRID: prID, CLIUsed: "claude", Issues: "[]", Suggestions: "[]",
+			Severity: "low", CreatedAt: time.Now().Add(time.Duration(-i) * time.Minute),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := store.CircuitBreakerLimits{PerPR24h: 0, PerRepoHr: 0}
+	tripped, _, err := s.CheckCircuitBreaker(prID, "org/r", cfg)
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	if tripped {
+		t.Errorf("PerPR24h=0 must be unlimited, got tripped")
+	}
+}

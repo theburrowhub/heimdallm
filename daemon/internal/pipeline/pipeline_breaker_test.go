@@ -1,7 +1,7 @@
 package pipeline_test
 
 import (
-	"strings"
+	"errors"
 	"testing"
 	"time"
 
@@ -106,8 +106,19 @@ func TestRun_CircuitBreakerTripStopsExecute(t *testing.T) {
 		Head: gh.Branch{SHA: "sha4"},
 	}
 	_, err = p.Run(pr, pipeline.RunOptions{Primary: "claude", Fallback: "gemini"})
-	if err == nil || !strings.Contains(err.Error(), "circuit breaker tripped") {
-		t.Fatalf("expected circuit breaker error, got %v", err)
+	// Verify both the typed-error contract and the sentinel: callers in main.go
+	// rely on errors.As(&CircuitBreakerError) to emit the SSE event with the
+	// specific reason, and anyone who just cares "was this a breaker trip?"
+	// can use errors.Is against the sentinel.
+	var cbErr *pipeline.CircuitBreakerError
+	if err == nil || !errors.As(err, &cbErr) {
+		t.Fatalf("expected *pipeline.CircuitBreakerError, got %v", err)
+	}
+	if !errors.Is(err, pipeline.ErrCircuitBreakerTripped) {
+		t.Errorf("errors.Is(err, ErrCircuitBreakerTripped) = false, want true")
+	}
+	if cbErr.Reason == "" {
+		t.Errorf("CircuitBreakerError.Reason is empty; callers need it for telemetry")
 	}
 	if fexec.calls != before {
 		t.Errorf("executor must not be called when breaker trips (calls=%d before=%d)", fexec.calls, before)
