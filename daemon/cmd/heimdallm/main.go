@@ -716,6 +716,84 @@ func main() {
 		}
 	}()
 
+	// ── NATS issue implement worker ─────────────────────────────────────
+	// Consumes implement requests published by the Fetcher when it classifies
+	// an issue as develop. Same config resolution as triage, different mode.
+	implementHandler := func(ctx context.Context, msg bus.IssueMsg) {
+		ghIssue, err := ghClient.GetIssue(msg.Repo, msg.Number)
+		if err != nil {
+			slog.Error("implement-worker: fetch issue from GitHub",
+				"repo", msg.Repo, "number", msg.Number, "err", err)
+			return
+		}
+		ghIssue.Mode = config.IssueModeDevelop
+
+		cfgMu.Lock()
+		c := *cfg
+		aiCfg := c.AIForRepo(msg.Repo)
+		if aiCfg.Primary == "" {
+			aiCfg.Primary = c.AI.Primary
+		}
+		agentCfg := c.AgentConfigFor(aiCfg.Primary)
+		localDirBase := c.GitHub.LocalDirBase
+		globalTimeout := c.AI.ExecutionTimeout
+		cfgMu.Unlock()
+		aiCfg.LocalDir = config.ResolveLocalDir(aiCfg.LocalDir, msg.Repo, localDirBase)
+
+		extraFlags := agentCfg.ExtraFlags
+		if extraFlags != "" {
+			if err := executor.ValidateExtraFlags(extraFlags); err != nil {
+				slog.Warn("implement-worker: extra_flags rejected", "err", err)
+				extraFlags = ""
+			}
+		}
+
+		issuePrompt, issueInstructions := resolveIssuePrompt(s, aiCfg.IssuePrompt, agentCfg.PromptID)
+		implPrompt, implInstructions := resolveImplementPrompt(s, aiCfg.ImplementPrompt, agentCfg.PromptID)
+
+		opts := issuepipeline.RunOptions{
+			GitHubToken: token,
+			Primary:     aiCfg.Primary,
+			Fallback:    aiCfg.Fallback,
+			ExecOpts: executor.ExecOptions{
+				Model:                agentCfg.Model,
+				MaxTurns:             agentCfg.MaxTurns,
+				ApprovalMode:         agentCfg.ApprovalMode,
+				ExtraFlags:           extraFlags,
+				WorkDir:              aiCfg.LocalDir,
+				Effort:               agentCfg.Effort,
+				PermissionMode:       agentCfg.PermissionMode,
+				Bare:                 agentCfg.Bare,
+				DangerouslySkipPerms: agentCfg.DangerouslySkipPerms,
+				NoSessionPersistence: agentCfg.NoSessionPersistence,
+				Timeout:              resolveExecutionTimeout(globalTimeout, agentCfg.ExecutionTimeout),
+			},
+			IssuePromptOverride:     issuePrompt,
+			IssueInstructions:       issueInstructions,
+			ImplementPromptOverride: implPrompt,
+			ImplementInstructions:   implInstructions,
+			PRReviewers:             aiCfg.PRReviewers,
+			PRAssignee:              aiCfg.PRAssignee,
+			PRLabels:                aiCfg.PRLabels,
+			PRDraft:                 aiCfg.PRDraft != nil && *aiCfg.PRDraft,
+			GeneratePRDescription:   aiCfg.GeneratePRDescription != nil && *aiCfg.GeneratePRDescription,
+		}
+
+		if _, err := issuePipe.Run(ctx, ghIssue, opts); err != nil {
+			slog.Error("implement-worker: pipeline run failed",
+				"repo", msg.Repo, "number", msg.Number, "err", err)
+		}
+	}
+
+	implementW := worker.NewImplementWorker(js, implementHandler)
+	implementWCtx, implementWCancel := context.WithCancel(context.Background())
+	defer implementWCancel()
+	go func() {
+		if err := implementW.Start(implementWCtx); err != nil {
+			slog.Error("implement worker stopped", "err", err)
+		}
+	}()
+
 	// Use a closure so the defer reads the current pipe variable at shutdown
 	// time, not the initial pointer captured at defer-statement time. After a
 	// reload, pipe points to a new pipeline — the bare defer would stop the
