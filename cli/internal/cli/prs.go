@@ -66,7 +66,14 @@ func newPRsCmd() *cobra.Command {
 			}
 
 			sort.Slice(filtered, func(i, j int) bool {
-				return filtered[i].LatestReview.CreatedAt.After(filtered[j].LatestReview.CreatedAt)
+				ri, rj := filtered[i].LatestReview, filtered[j].LatestReview
+				if ri == nil {
+					return false
+				}
+				if rj == nil {
+					return true
+				}
+				return ri.CreatedAt.After(rj.CreatedAt)
 			})
 
 			if jsonOutput {
