@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -271,7 +272,29 @@ func main() {
 		// where the HEAD SHA is not yet known, skip the claim — the
 		// downstream SHA dedup in pipeline.Run (already fail-closed per
 		// Task 1) handles those paths.
-		stored, _ := s.GetPRByGithubID(pr.ID)
+		//
+		// On Claim error (transient SQLite blip, disk pressure), we log and
+		// proceed fail-open. This is safe because the downstream defenses
+		// ALREADY bound the worst-case cost of a slipped review:
+		//   1. pipeline.Run's HEAD-SHA guard is fail-closed (Task 1 / PR #245) —
+		//      a second daemon running the same SHA is rejected.
+		//   2. The SQLite-backed circuit breaker caps reviews at
+		//      3/PR/24h + 20/repo/hour (Task 2 / PR #246) — worst case is
+		//      a handful of reviews, not the €1,300 incident.
+		//   3. PRAlreadyReviewed uses PublishedAt + 2-min grace (Task 3 / PR #247) —
+		//      the common "bot bumped updated_at" case is still dedup'd even
+		//      without the persistent claim.
+		// Fail-closed here would block legitimate reviews on a transient DB
+		// error; the layered defenses make fail-open the right trade.
+		//
+		// sql.ErrNoRows is expected for PRs not yet upserted (early-stage);
+		// any other error is a real problem worth surfacing in logs.
+		stored, err := s.GetPRByGithubID(pr.ID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			slog.Warn("runReview: GetPRByGithubID failed, proceeding without persistent claim",
+				"pr_id", pr.ID, "repo", pr.Repo, "err", err)
+		}
+		// stored may be nil either way — downstream Claim guard handles that.
 		var claimed bool
 		var claimPRID int64
 		var claimSHA string
@@ -703,6 +726,11 @@ func main() {
 		// prevent duplicate work. When the head SHA is known, claim/release
 		// using the same mechanism as the poll loop so both paths share the
 		// same persistent guard across daemon restart / config reload.
+		//
+		// Fail-open on Claim error here for the same reason as the poll path —
+		// see runReview above for the full layered-defense rationale
+		// (HEAD-SHA guard + circuit breaker + PublishedAt dedup cap the
+		// worst case at <€30/PR).
 		var triggerClaimed bool
 		if ghPR.Head.SHA != "" {
 			ok, err := s.ClaimInFlightReview(pr.ID, ghPR.Head.SHA)

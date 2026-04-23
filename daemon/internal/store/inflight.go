@@ -59,16 +59,3 @@ func (s *Store) ClearStaleInFlight(maxAge time.Duration) (int, error) {
 	}
 	return int(n), nil
 }
-
-// InsertStaleInFlight is test-only: seeds an in-flight row with a custom
-// started_at so ClearStaleInFlight can be exercised deterministically.
-func (s *Store) InsertStaleInFlight(prID int64, headSHA string, startedAt time.Time) error {
-	_, err := s.db.Exec(
-		"INSERT INTO reviews_in_flight (pr_id, head_sha, started_at) VALUES (?, ?, ?)",
-		prID, headSHA, startedAt.UTC().Format(sqliteTimeFormat),
-	)
-	if err != nil {
-		return fmt.Errorf("store: insert stale inflight: %w", err)
-	}
-	return nil
-}
