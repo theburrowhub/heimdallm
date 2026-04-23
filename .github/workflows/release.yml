@@ -367,15 +367,12 @@ jobs:
           echo "VERSION=$VERSION"  >> "$GITHUB_ENV"
 
       # ── .deb + .rpm (GoReleaser nfpms) ──────────────────────────────────────
-      - name: Reset worktree for GoReleaser (Flutter build dirties tree)
-        run: git checkout -- .
-
       - name: GoReleaser — build .deb + .rpm
         uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
           version: '~> v2'
-          args: release --clean --skip=archive
+          args: release --clean --skip=archive,validate
           workdir: daemon
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
