@@ -24,6 +24,13 @@ final sseStreamProvider = StreamProvider<SseEvent>((ref) {
   return client.connect();
 });
 
+/// Latest circuit-breaker-tripped payload from the daemon. Null until the
+/// breaker fires or after the user dismisses the banner. Set by the
+/// `circuit_breaker_tripped` SSE handler and cleared by the dashboard's
+/// dismiss button — the user must acknowledge the event so cost spikes
+/// can't slip by silently (regression guard for the 2026-04-22 runaway).
+final circuitBreakerProvider = StateProvider<String?>((ref) => null);
+
 /// Tracks PRs currently being reviewed, keyed by "repo:prNumber". Used to
 /// show spinners in the tile list and detail view.
 ///
@@ -45,7 +52,8 @@ final StateProvider<int> prListRefreshProvider = StateProvider<int>((ref) {
     // to catch up on any events that arrived during the disconnection window.
     if (!(prev?.hasValue ?? false) && next.hasValue) {
       Future.microtask(
-          () => ref.read(prListRefreshProvider.notifier).update((s) => s + 1));
+        () => ref.read(prListRefreshProvider.notifier).update((s) => s + 1),
+      );
     }
     next.whenData((event) => _handleSseEvent(ref, event));
   });
@@ -58,12 +66,18 @@ void _handleSseEvent(Ref ref, SseEvent event) {
     final repo = data['repo'] as String? ?? '';
     final prNumber = (data['pr_number'] as num?)?.toInt();
     final prId = (data['pr_id'] as num?)?.toInt();
-    final key = (repo.isNotEmpty && prNumber != null) ? '$repo:$prNumber' : null;
+    final key = (repo.isNotEmpty && prNumber != null)
+        ? '$repo:$prNumber'
+        : null;
 
     switch (event.type) {
       case 'review_started':
         if (key != null) {
-          final baseline = _baselineReviewId(ref, repo: repo, prNumber: prNumber!);
+          final baseline = _baselineReviewId(
+            ref,
+            repo: repo,
+            prNumber: prNumber!,
+          );
           ref
               .read(reviewingPRsProvider.notifier)
               .update((s) => {...s, key: baseline});
@@ -119,7 +133,9 @@ void _handleSseEvent(Ref ref, SseEvent event) {
             ? '$repo:$issueNumber'
             : null;
         if (issueKey != null) {
-          ref.read(reviewingIssuesProvider.notifier).update((s) => {...s, issueKey});
+          ref
+              .read(reviewingIssuesProvider.notifier)
+              .update((s) => {...s, issueKey});
         }
 
       case 'issue_review_completed':
@@ -128,7 +144,9 @@ void _handleSseEvent(Ref ref, SseEvent event) {
             ? '$repo:$issueNumber'
             : null;
         if (issueKey != null) {
-          ref.read(reviewingIssuesProvider.notifier).update((s) => s.difference({issueKey}));
+          ref
+              .read(reviewingIssuesProvider.notifier)
+              .update((s) => s.difference({issueKey}));
         }
         ref.read(issueListRefreshProvider.notifier).update((s) => s + 1);
 
@@ -138,8 +156,18 @@ void _handleSseEvent(Ref ref, SseEvent event) {
             ? '$repo:$issueNumber'
             : null;
         if (issueKey != null) {
-          ref.read(reviewingIssuesProvider.notifier).update((s) => s.difference({issueKey}));
+          ref
+              .read(reviewingIssuesProvider.notifier)
+              .update((s) => s.difference({issueKey}));
         }
+
+      // ── Circuit breaker ────────────────────────────────────────────────
+      case 'circuit_breaker_tripped':
+        final repo = data['repo'] as String? ?? 'unknown';
+        final prNumber = (data['pr_number'] as num?)?.toInt() ?? 0;
+        final reason = data['reason'] as String? ?? '';
+        ref.read(circuitBreakerProvider.notifier).state =
+            '$repo #$prNumber — $reason';
     }
   } catch (_) {}
 }
@@ -242,8 +270,9 @@ void _rebuildTray(Ref ref, List<PR> prs) {
       // Don't build tray until we know the username — without it the
       // author filter falls back to '' and shows the user's own PRs.
       if (me == null || me.isEmpty) return;
-      await ref.read(platformServicesProvider).rebuildTrayMenu(prs: prs, me: me);
+      await ref
+          .read(platformServicesProvider)
+          .rebuildTrayMenu(prs: prs, me: me);
     } catch (_) {}
   });
 }
-

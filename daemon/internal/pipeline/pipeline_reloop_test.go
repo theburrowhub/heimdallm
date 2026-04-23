@@ -264,6 +264,51 @@ func TestPRAlreadyReviewed_FallsBackToCreatedAtWhenPublishedAtZero(t *testing.T)
 	}
 }
 
+// TestRun_TwoInstancesSharingStoreDoNotDoubleReview simulates two team
+// members running Heimdallm daemons against the same repo and the same
+// SQLite store (e.g. a shared cache, a Dropbox-mounted .db, or two
+// daemons on the same machine). Instance A runs the review first and
+// persists the row; Instance B's next poll must see A's PublishedAt and
+// dedup against it rather than re-running Claude on the same commit.
+//
+// This is the "cannot recur" seal for the 2026-04-22 cost-runaway
+// (theburrowhub/heimdallm#243). Before Fix 3 the dedup was per-process,
+// so two daemons could each burn Claude credits on the same PR despite
+// sharing a store. The fix lives in PRAlreadyReviewed (anchored on
+// PublishedAt, which is persisted) — this test locks it in across
+// adapter instances.
+func TestRun_TwoInstancesSharingStoreDoNotDoubleReview(t *testing.T) {
+	// Two tier2Adapters sharing the same SQLite simulates two team members'
+	// daemons on the same repo. Instance A runs the review, persists the
+	// row. Instance B immediately checks PRAlreadyReviewed; the shared
+	// PublishedAt must dedup it.
+	s := newMemStore(t)
+	prRow := &store.PR{GithubID: 1234, Repo: "org/r", Number: 1234,
+		Title: "t", State: "open", UpdatedAt: time.Now()}
+	prID, err := s.UpsertPR(prRow)
+	if err != nil {
+		t.Fatalf("upsert pr: %v", err)
+	}
+
+	publishedAt := time.Now()
+	if _, err := s.InsertReview(&store.Review{
+		PRID: prID, CLIUsed: "claude", Issues: "[]", Suggestions: "[]",
+		Severity: "low", CreatedAt: publishedAt.Add(-2 * time.Minute),
+		PublishedAt: publishedAt, HeadSHA: "abc",
+	}); err != nil {
+		t.Fatalf("insert review: %v", err)
+	}
+
+	// Simulate GitHub's updated_at bump from A's review submission.
+	updatedAt := publishedAt.Add(5 * time.Second)
+
+	// B is a fresh adapter instance on the same store.
+	adapterB := pipeline.NewTestAdapter(s)
+	if !adapterB.PRAlreadyReviewed(1234, updatedAt) {
+		t.Errorf("Instance B must dedup against Instance A's PublishedAt in the shared store")
+	}
+}
+
 // TestPRAlreadyReviewed_AllowsReviewAfterGraceWindow locks in the upper
 // bound: a 2-minute grace is deliberate, not "effectively infinite". A push
 // 5 minutes after the review must be treated as a genuine change.

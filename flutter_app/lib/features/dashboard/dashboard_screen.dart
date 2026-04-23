@@ -11,6 +11,7 @@ import '../../shared/widgets/type_badge.dart';
 import '../activity/activity_screen.dart';
 import '../activity/activity_providers.dart';
 import '../agents/agents_screen.dart';
+import '../circuit_breaker/circuit_breaker_banner.dart';
 import '../cli_agents/cli_agents_screen.dart';
 import '../issues/issues_providers.dart';
 import '../repositories/repos_screen.dart';
@@ -24,6 +25,7 @@ class DashboardScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final cbMessage = ref.watch(circuitBreakerProvider);
     return DefaultTabController(
       length: 6,
       child: Scaffold(
@@ -52,23 +54,35 @@ class DashboardScreen extends ConsumerWidget {
           ],
           bottom: const TabBar(
             tabs: [
-              Tab(icon: Icon(Icons.dashboard),       text: 'Activity'),
-              Tab(icon: Icon(Icons.timeline),        text: 'Activity log'),
+              Tab(icon: Icon(Icons.dashboard), text: 'Activity'),
+              Tab(icon: Icon(Icons.timeline), text: 'Activity log'),
               Tab(icon: Icon(Icons.folder_outlined), text: 'Repositories'),
-              Tab(icon: Icon(Icons.auto_awesome),    text: 'Prompts'),
-              Tab(icon: Icon(Icons.smart_toy),       text: 'Agents'),
-              Tab(icon: Icon(Icons.bar_chart),       text: 'Stats'),
+              Tab(icon: Icon(Icons.auto_awesome), text: 'Prompts'),
+              Tab(icon: Icon(Icons.smart_toy), text: 'Agents'),
+              Tab(icon: Icon(Icons.bar_chart), text: 'Stats'),
             ],
           ),
         ),
-        body: const TabBarView(
+        body: Column(
           children: [
-            _ActivityTab(),
-            ActivityScreen(),
-            ReposScreen(),
-            AgentsScreen(),
-            CLIAgentsScreen(),
-            StatsScreen(),
+            if (cbMessage != null)
+              CircuitBreakerBanner(
+                message: cbMessage,
+                onDismiss: () =>
+                    ref.read(circuitBreakerProvider.notifier).state = null,
+              ),
+            const Expanded(
+              child: TabBarView(
+                children: [
+                  _ActivityTab(),
+                  ActivityScreen(),
+                  ReposScreen(),
+                  AgentsScreen(),
+                  CLIAgentsScreen(),
+                  StatsScreen(),
+                ],
+              ),
+            ),
           ],
         ),
       ),
@@ -82,8 +96,9 @@ class DashboardScreen extends ConsumerWidget {
 
 const _sortPrefKey = 'activity_sort_mode';
 
-final reviewsSortProvider =
-    NotifierProvider<SortNotifier, SortMode>(SortNotifier.new);
+final reviewsSortProvider = NotifierProvider<SortNotifier, SortMode>(
+  SortNotifier.new,
+);
 
 class SortNotifier extends Notifier<SortMode> {
   @override
@@ -106,11 +121,13 @@ class SortNotifier extends Notifier<SortMode> {
 
   void set(SortMode mode) {
     state = mode;
-    SharedPreferences.getInstance().then((prefs) {
-      prefs.setString(_sortPrefKey, mode.name);
-    }).catchError((e) {
-      debugPrint('SortNotifier: failed to save preference: $e');
-    });
+    SharedPreferences.getInstance()
+        .then((prefs) {
+          prefs.setString(_sortPrefKey, mode.name);
+        })
+        .catchError((e) {
+          debugPrint('SortNotifier: failed to save preference: $e');
+        });
   }
 }
 
@@ -135,56 +152,58 @@ class _IssueItem extends _ActivityItem {
 String _itemType(_ActivityItem item) => switch (item) {
   _PRItem() => 'pr',
   _IssueItem(:final issue) =>
-      (issue.latestReview != null && issue.latestReview!.actionTaken == 'develop')
-          ? 'dev'
-          : 'it',
+    (issue.latestReview != null && issue.latestReview!.actionTaken == 'develop')
+        ? 'dev'
+        : 'it',
 };
 
 String _itemRepo(_ActivityItem item) => switch (item) {
-  _PRItem(:final pr)       => pr.repo,
+  _PRItem(:final pr) => pr.repo,
   _IssueItem(:final issue) => issue.repo,
 };
 
 String _itemTitle(_ActivityItem item) => switch (item) {
-  _PRItem(:final pr)       => pr.title,
+  _PRItem(:final pr) => pr.title,
   _IssueItem(:final issue) => issue.title,
 };
 
 int _itemNumber(_ActivityItem item) => switch (item) {
-  _PRItem(:final pr)       => pr.number,
+  _PRItem(:final pr) => pr.number,
   _IssueItem(:final issue) => issue.number,
 };
 
 String _itemAuthor(_ActivityItem item) => switch (item) {
-  _PRItem(:final pr)       => pr.author,
+  _PRItem(:final pr) => pr.author,
   _IssueItem(:final issue) => issue.author,
 };
 
 DateTime _itemDate(_ActivityItem item) => switch (item) {
-  _PRItem(:final pr)       => pr.updatedAt,
+  _PRItem(:final pr) => pr.updatedAt,
   _IssueItem(:final issue) => issue.latestReview?.createdAt ?? issue.fetchedAt,
 };
 
 int _itemPriorityKey(_ActivityItem item) => switch (item) {
-  _PRItem(:final pr) => pr.latestReview == null
-      ? 0
-      : switch (pr.latestReview!.severity.toLowerCase()) {
-          'high'   => 1,
-          'medium' => 2,
-          _        => 3,
-        },
-  _IssueItem(:final issue) => issue.latestReview == null
-      ? 0
-      : switch (issue.latestReview!.severity.toLowerCase()) {
-          'critical' => 0,
-          'high'     => 1,
-          'medium'   => 2,
-          _          => 3,
-        },
+  _PRItem(:final pr) =>
+    pr.latestReview == null
+        ? 0
+        : switch (pr.latestReview!.severity.toLowerCase()) {
+            'high' => 1,
+            'medium' => 2,
+            _ => 3,
+          },
+  _IssueItem(:final issue) =>
+    issue.latestReview == null
+        ? 0
+        : switch (issue.latestReview!.severity.toLowerCase()) {
+            'critical' => 0,
+            'high' => 1,
+            'medium' => 2,
+            _ => 3,
+          },
 };
 
 String _itemState(_ActivityItem item) => switch (item) {
-  _PRItem(:final pr)       => pr.state,
+  _PRItem(:final pr) => pr.state,
   _IssueItem(:final issue) => issue.state,
 };
 
@@ -211,11 +230,14 @@ bool _matchesFilters(_ActivityItem item, ActivityFilters filters) {
   // Search
   if (filters.search.isNotEmpty) {
     final q = filters.search.toLowerCase();
-    final title  = _itemTitle(item).toLowerCase();
-    final repo   = _itemRepo(item).toLowerCase();
+    final title = _itemTitle(item).toLowerCase();
+    final repo = _itemRepo(item).toLowerCase();
     final number = _itemNumber(item).toString();
     final author = _itemAuthor(item).toLowerCase();
-    if (!title.contains(q) && !repo.contains(q) && !number.contains(q) && !author.contains(q)) {
+    if (!title.contains(q) &&
+        !repo.contains(q) &&
+        !number.contains(q) &&
+        !author.contains(q)) {
       return false;
     }
   }
@@ -247,17 +269,18 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
     // SSE listener for state changes (open/closed transitions)
     ref.listen(sseStreamProvider, (_, next) {
       next.whenData((event) {
-        if (event.type == 'pr_state_changed' || event.type == 'issue_state_changed') {
+        if (event.type == 'pr_state_changed' ||
+            event.type == 'issue_state_changed') {
           ref.invalidate(prsProvider);
           ref.invalidate(issuesProvider);
         }
       });
     });
 
-    final prsAsync    = ref.watch(prsProvider);
+    final prsAsync = ref.watch(prsProvider);
     final issuesAsync = ref.watch(issuesProvider);
-    final sort        = ref.watch(reviewsSortProvider);
-    final filters     = ref.watch(activityFiltersProvider);
+    final sort = ref.watch(reviewsSortProvider);
+    final filters = ref.watch(activityFiltersProvider);
 
     // Combine loading states
     if (prsAsync.isLoading && issuesAsync.isLoading) {
@@ -267,7 +290,7 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
       return _errorView(context, prsAsync.error!);
     }
 
-    final prs    = prsAsync.valueOrNull ?? [];
+    final prs = prsAsync.valueOrNull ?? [];
     final issues = issuesAsync.valueOrNull ?? [];
 
     // Collect all known repos for the filter bar.
@@ -283,7 +306,9 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
     ];
 
     // Apply filters.
-    final filtered = items.where((item) => _matchesFilters(item, filters)).toList();
+    final filtered = items
+        .where((item) => _matchesFilters(item, filters))
+        .toList();
 
     // Sort.
     _sortItems(filtered, sort);
@@ -299,7 +324,8 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
       ActivityFilterBar(
         allRepos: allRepos,
         sort: sort,
-        onSortChanged: (mode) => ref.read(reviewsSortProvider.notifier).set(mode),
+        onSortChanged: (mode) =>
+            ref.read(reviewsSortProvider.notifier).set(mode),
       ),
       if (filters.hasFilters)
         Padding(
@@ -348,10 +374,12 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
       padding: const EdgeInsets.symmetric(vertical: 8),
       children: [
         ...header,
-        ...filtered.map((item) => switch (item) {
-          _PRItem(:final pr) => _PRTile(pr: pr),
-          _IssueItem(:final issue) => _IssueActivityTile(issue: issue),
-        }),
+        ...filtered.map(
+          (item) => switch (item) {
+            _PRItem(:final pr) => _PRTile(pr: pr),
+            _IssueItem(:final issue) => _IssueActivityTile(issue: issue),
+          },
+        ),
       ],
     );
   }
@@ -363,21 +391,26 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
         children: [
           const Icon(Icons.wifi_off, size: 48, color: Colors.grey),
           const SizedBox(height: 12),
-          const Text('Could not reach the Heimdallm daemon.',
-              style: TextStyle(fontWeight: FontWeight.w600)),
+          const Text(
+            'Could not reach the Heimdallm daemon.',
+            style: TextStyle(fontWeight: FontWeight.w600),
+          ),
           const SizedBox(height: 4),
-          const Text('Go to Settings to configure and start it.',
-              style: TextStyle(color: Colors.grey)),
+          const Text(
+            'Go to Settings to configure and start it.',
+            style: TextStyle(color: Colors.grey),
+          ),
           const SizedBox(height: 16),
           Row(
             mainAxisSize: MainAxisSize.min,
             children: [
               TextButton(
-                  onPressed: () {
-                    ref.invalidate(prsProvider);
-                    ref.invalidate(issuesProvider);
-                  },
-                  child: const Text('Retry')),
+                onPressed: () {
+                  ref.invalidate(prsProvider);
+                  ref.invalidate(issuesProvider);
+                },
+                child: const Text('Retry'),
+              ),
               const SizedBox(width: 8),
               FilledButton.icon(
                 icon: const Icon(Icons.settings, size: 16),
@@ -429,13 +462,16 @@ class _PRTileState extends ConsumerState<_PRTile> {
       await api.dismissPR(widget.pr.id);
       ref.invalidate(prsProvider);
       if (mounted) {
-        showToast(context, 'PR #${widget.pr.number} dismissed',
-            duration: const Duration(seconds: 5),
-            actionLabel: 'Undo',
-            onAction: () async {
-              await api.undismissPR(widget.pr.id);
-              ref.invalidate(prsProvider);
-            });
+        showToast(
+          context,
+          'PR #${widget.pr.number} dismissed',
+          duration: const Duration(seconds: 5),
+          actionLabel: 'Undo',
+          onAction: () async {
+            await api.undismissPR(widget.pr.id);
+            ref.invalidate(prsProvider);
+          },
+        );
       }
     } catch (e) {
       if (mounted) showToast(context, 'Error: $e', isError: true);
@@ -451,112 +487,132 @@ class _PRTileState extends ConsumerState<_PRTile> {
     return Opacity(
       opacity: pr.state == 'open' ? 1.0 : 0.6,
       child: Card(
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 3),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(12),
-        onTap: () => context.push('/prs/${pr.id}'),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-          child: Row(
-            children: [
-              // Severity bar on the left
-              Container(
-                width: 4, height: 48,
-                margin: const EdgeInsets.only(right: 12),
-                decoration: BoxDecoration(
-                  color: isReviewing
-                      ? Theme.of(context).colorScheme.primary
-                      : reviewed
-                          ? _severityColor(pr.latestReview!.severity)
-                          : Colors.grey.shade600,
-                  borderRadius: BorderRadius.circular(2),
+        margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 3),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: () => context.push('/prs/${pr.id}'),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            child: Row(
+              children: [
+                // Severity bar on the left
+                Container(
+                  width: 4,
+                  height: 48,
+                  margin: const EdgeInsets.only(right: 12),
+                  decoration: BoxDecoration(
+                    color: isReviewing
+                        ? Theme.of(context).colorScheme.primary
+                        : reviewed
+                        ? _severityColor(pr.latestReview!.severity)
+                        : Colors.grey.shade600,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
                 ),
-              ),
-              // Type badge + state badge
-              const Padding(
-                padding: EdgeInsets.only(right: 6),
-                child: TypeBadge(type: 'pr'),
-              ),
-              const SizedBox(width: 4),
-              StateBadge(state: pr.state),
-              const SizedBox(width: 4),
-              // Title + subtitle
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(pr.title,
+                // Type badge + state badge
+                const Padding(
+                  padding: EdgeInsets.only(right: 6),
+                  child: TypeBadge(type: 'pr'),
+                ),
+                const SizedBox(width: 4),
+                StateBadge(state: pr.state),
+                const SizedBox(width: 4),
+                // Title + subtitle
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        pr.title,
                         style: const TextStyle(fontWeight: FontWeight.w600),
-                        maxLines: 1, overflow: TextOverflow.ellipsis),
-                    const SizedBox(height: 4),
-                    Text('${pr.repo} · #${pr.number} · ${pr.author}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        '${pr.repo} · #${pr.number} · ${pr.author}',
                         style: Theme.of(context).textTheme.bodySmall,
-                        maxLines: 1, overflow: TextOverflow.ellipsis),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 12),
+                // Trailing: badge/spinner + Review + dismiss — all in one row
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // Status indicator
+                    if (isReviewing)
+                      SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Theme.of(context).colorScheme.primary,
+                        ),
+                      )
+                    else if (reviewed)
+                      SeverityBadge(severity: pr.latestReview!.severity)
+                    else
+                      _chip('PENDING', Colors.grey.shade700),
+                    const SizedBox(width: 8),
+                    // Review button (hidden while reviewing)
+                    if (!isReviewing)
+                      SizedBox(
+                        height: 28,
+                        child: ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(horizontal: 10),
+                            textStyle: const TextStyle(fontSize: 12),
+                          ),
+                          onPressed: _triggerReview,
+                          child: const Text('Review'),
+                        ),
+                      ),
+                    // Dismiss
+                    IconButton(
+                      icon: const Icon(Icons.close, size: 14),
+                      tooltip: 'Dismiss PR',
+                      color: Colors.grey.shade600,
+                      visualDensity: VisualDensity.compact,
+                      onPressed: _dismiss,
+                    ),
                   ],
                 ),
-              ),
-              const SizedBox(width: 12),
-              // Trailing: badge/spinner + Review + dismiss — all in one row
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  // Status indicator
-                  if (isReviewing)
-                    SizedBox(
-                      width: 18, height: 18,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: Theme.of(context).colorScheme.primary,
-                      ),
-                    )
-                  else if (reviewed)
-                    SeverityBadge(severity: pr.latestReview!.severity)
-                  else
-                    _chip('PENDING', Colors.grey.shade700),
-                  const SizedBox(width: 8),
-                  // Review button (hidden while reviewing)
-                  if (!isReviewing)
-                    SizedBox(
-                      height: 28,
-                      child: ElevatedButton(
-                        style: ElevatedButton.styleFrom(
-                            padding: const EdgeInsets.symmetric(horizontal: 10),
-                            textStyle: const TextStyle(fontSize: 12)),
-                        onPressed: _triggerReview,
-                        child: const Text('Review'),
-                      ),
-                    ),
-                  // Dismiss
-                  IconButton(
-                    icon: const Icon(Icons.close, size: 14),
-                    tooltip: 'Dismiss PR',
-                    color: Colors.grey.shade600,
-                    visualDensity: VisualDensity.compact,
-                    onPressed: _dismiss,
-                  ),
-                ],
-              ),
-            ],
+              ],
+            ),
           ),
         ),
-      ),
       ),
     );
   }
 
   Widget _chip(String label, Color color) => Container(
     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-    decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(4)),
-    child: Text(label,
-        style: const TextStyle(
-            color: Colors.white, fontSize: 11, fontWeight: FontWeight.w600)),
+    decoration: BoxDecoration(
+      color: color,
+      borderRadius: BorderRadius.circular(4),
+    ),
+    child: Text(
+      label,
+      style: const TextStyle(
+        color: Colors.white,
+        fontSize: 11,
+        fontWeight: FontWeight.w600,
+      ),
+    ),
   );
 
   Color _severityColor(String s) {
     switch (s.toLowerCase()) {
-      case 'high':   return Colors.red.shade700;
-      case 'medium': return Colors.orange.shade700;
-      default:       return Colors.green.shade700;
+      case 'high':
+        return Colors.red.shade700;
+      case 'medium':
+        return Colors.orange.shade700;
+      default:
+        return Colors.green.shade700;
     }
   }
 }
@@ -575,71 +631,93 @@ class _IssueActivityTile extends StatelessWidget {
     return Opacity(
       opacity: issue.state == 'open' ? 1.0 : 0.6,
       child: Card(
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 3),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(12),
-        onTap: () => context.push('/issues/${issue.id}'),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-          child: Row(
-            children: [
-              Container(
-                width: 4, height: 48,
-                margin: const EdgeInsets.only(right: 12),
-                decoration: BoxDecoration(
-                  color: reviewed ? _severityColor(severity) : Colors.grey.shade600,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-              // Type badge + state badge
-              Padding(
-                padding: const EdgeInsets.only(right: 6),
-                child: TypeBadge(type: _type),
-              ),
-              const SizedBox(width: 4),
-              StateBadge(state: issue.state),
-              const SizedBox(width: 4),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(issue.title,
-                        style: const TextStyle(fontWeight: FontWeight.w600),
-                        maxLines: 1, overflow: TextOverflow.ellipsis),
-                    const SizedBox(height: 4),
-                    Text('${issue.repo} · #${issue.number} · ${issue.author}',
-                        style: Theme.of(context).textTheme.bodySmall,
-                        maxLines: 1, overflow: TextOverflow.ellipsis),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 12),
-              if (reviewed)
-                SeverityBadge(severity: severity)
-              else
+        margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 3),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: () => context.push('/issues/${issue.id}'),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            child: Row(
+              children: [
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  width: 4,
+                  height: 48,
+                  margin: const EdgeInsets.only(right: 12),
                   decoration: BoxDecoration(
-                      color: Colors.grey.shade700,
-                      borderRadius: BorderRadius.circular(4)),
-                  child: const Text('PENDING',
-                      style: TextStyle(
-                          color: Colors.white, fontSize: 11, fontWeight: FontWeight.w600)),
+                    color: reviewed
+                        ? _severityColor(severity)
+                        : Colors.grey.shade600,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
                 ),
-            ],
+                // Type badge + state badge
+                Padding(
+                  padding: const EdgeInsets.only(right: 6),
+                  child: TypeBadge(type: _type),
+                ),
+                const SizedBox(width: 4),
+                StateBadge(state: issue.state),
+                const SizedBox(width: 4),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        issue.title,
+                        style: const TextStyle(fontWeight: FontWeight.w600),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        '${issue.repo} · #${issue.number} · ${issue.author}',
+                        style: Theme.of(context).textTheme.bodySmall,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 12),
+                if (reviewed)
+                  SeverityBadge(severity: severity)
+                else
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 3,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade700,
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: const Text(
+                      'PENDING',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
           ),
         ),
-      ),
       ),
     );
   }
 
   Color _severityColor(String s) {
     switch (s.toLowerCase()) {
-      case 'critical': return Colors.red.shade900;
-      case 'high':     return Colors.red.shade700;
-      case 'medium':   return Colors.orange.shade700;
-      default:         return Colors.green.shade700;
+      case 'critical':
+        return Colors.red.shade900;
+      case 'high':
+        return Colors.red.shade700;
+      case 'medium':
+        return Colors.orange.shade700;
+      default:
+        return Colors.green.shade700;
     }
   }
 }
@@ -688,28 +766,58 @@ class _ActivityGridTile extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Row(children: [
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-                  decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(3)),
-                  child: Text(type, style: const TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.bold)),
-                ),
-                const Spacer(),
-                StateBadge(state: state),
-              ]),
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 5,
+                      vertical: 1,
+                    ),
+                    decoration: BoxDecoration(
+                      color: color,
+                      borderRadius: BorderRadius.circular(3),
+                    ),
+                    child: Text(
+                      type,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 9,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  const Spacer(),
+                  StateBadge(state: state),
+                ],
+              ),
               const SizedBox(height: 6),
-              Text(title, maxLines: 2, overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+              Text(
+                title,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
               const SizedBox(height: 4),
-              Text(subtitle, style: TextStyle(fontSize: 10, color: Colors.grey.shade500),
-                  maxLines: 1, overflow: TextOverflow.ellipsis),
+              Text(
+                subtitle,
+                style: TextStyle(fontSize: 10, color: Colors.grey.shade500),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
               const Spacer(),
-              Row(children: [
-                if (severity != null)
-                  SeverityBadge(severity: severity),
-                const Spacer(),
-                Text(_timeAgo(timestamp), style: TextStyle(fontSize: 10, color: Colors.grey.shade600)),
-              ]),
+              Row(
+                children: [
+                  if (severity != null) SeverityBadge(severity: severity),
+                  const Spacer(),
+                  Text(
+                    _timeAgo(timestamp),
+                    style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+                  ),
+                ],
+              ),
             ],
           ),
         ),

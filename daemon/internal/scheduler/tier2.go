@@ -62,9 +62,16 @@ type Tier2Deps struct {
 	Interval       time.Duration
 }
 
-// RunTier2 runs the per-repo processing tier. It consumes repos from
-// reposChan and runs PR + issue processing on each repo per tick.
-func RunTier2(ctx context.Context, deps Tier2Deps, reposChan <-chan []string) {
+// RunTier2 runs the review-requested polling tier.
+//
+// coldStart controls the behaviour of the very first tick:
+//   - true (initial daemon startup): fire processTick() immediately so the
+//     UI sees activity without waiting PollInterval.
+//   - false (pipeline reload): skip the immediate tick. A reload is often
+//     triggered by a UI config PATCH and firing the tick immediately would
+//     re-poll every repo before backoff state has settled, amplifying any
+//     in-flight review loop. See theburrowhub/heimdallm#243.
+func RunTier2(ctx context.Context, deps Tier2Deps, reposChan <-chan []string, coldStart bool) {
 	var (
 		mu    sync.Mutex
 		repos []string
@@ -166,8 +173,12 @@ func RunTier2(ctx context.Context, deps Tier2Deps, reposChan <-chan []string) {
 		deps.PRProcessor.PublishPending()
 	}
 
-	// Run immediately
-	processTick()
+	// Run immediately only on a cold start. On pipeline reload (coldStart
+	// == false) wait one full PollInterval before the first tick so a UI
+	// config PATCH cannot fan out to every repo the instant it lands.
+	if coldStart {
+		processTick()
+	}
 
 	for {
 		select {
