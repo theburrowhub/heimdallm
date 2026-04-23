@@ -413,13 +413,20 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		// Stamp PublishedAt immediately after the API returned success — this
 		// is the anchor the dedup window uses. Anchoring on CreatedAt (set
 		// before Claude ran) is what let #243 loop repeatedly.
+		//
+		// Only mirror the successful write onto the in-memory *Review when
+		// MarkReviewPublished actually persisted — otherwise a future caller
+		// that trusts rev.PublishedAt for a persistence decision would make
+		// a choice inconsistent with SQLite. Today no caller does that, but
+		// keeping the two views in lockstep closes the latent trap.
 		publishedAt := time.Now().UTC()
 		if err := p.store.MarkReviewPublished(rev.ID, ghReviewID, ghReviewState, publishedAt); err != nil {
 			slog.Warn("pipeline: failed to mark review published", "review_id", rev.ID, "err", err)
+		} else {
+			rev.PublishedAt = publishedAt
+			rev.GitHubReviewID = ghReviewID
+			rev.GitHubReviewState = ghReviewState
 		}
-		rev.PublishedAt = publishedAt
-		rev.GitHubReviewID = ghReviewID
-		rev.GitHubReviewState = ghReviewState
 		slog.Info("pipeline: review published to GitHub",
 			"pr", pr.Number,
 			"github_review_id", ghReviewID,

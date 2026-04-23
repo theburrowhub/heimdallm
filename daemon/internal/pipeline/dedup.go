@@ -23,6 +23,11 @@ const GraceDefault = 2 * time.Minute
 // anchor.IsZero() is treated as "no fresh anchor, cannot dedup" — the
 // caller decides whether to fall back to an older anchor (e.g. CreatedAt
 // for legacy rows) or allow the review to run.
+//
+// The boundary is inclusive: observed == anchor + grace returns true
+// (still fresh). Inclusivity matches the intent — a review posted at
+// exactly the grace-window edge should still dedup. Do not "fix" to an
+// exclusive comparison without revisiting this contract.
 func ReviewFreshEnough(anchor, observed time.Time, grace time.Duration) bool {
 	if anchor.IsZero() {
 		return false
