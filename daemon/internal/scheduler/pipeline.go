@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -163,20 +164,40 @@ func (p *Pipeline) Start(parentCtx context.Context, coldStart bool) {
 // repo lists to the reposChan that Tier 2 reads. This is a transitional
 // bridge — Task 4 will have Tier 2 consume from NATS directly.
 func (p *Pipeline) bridgeDiscovery(ctx context.Context, out chan<- []string) {
+	backoff := 1 * time.Second
+	maxBackoff := 30 * time.Second
+
+	for {
+		if err := p.runBridgeConsumer(ctx, out); err != nil {
+			slog.Error("bridge: consumer failed, retrying", "err", err, "backoff", backoff)
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		if backoff < maxBackoff {
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
+	}
+}
+
+func (p *Pipeline) runBridgeConsumer(ctx context.Context, out chan<- []string) error {
 	cons, err := p.deps.JS.Consumer(ctx, bus.StreamDiscovery, bus.ConsumerDiscovery)
 	if err != nil {
-		slog.Error("bridge: get discovery consumer", "err", err)
-		return
+		return fmt.Errorf("get discovery consumer: %w", err)
 	}
 	iter, err := cons.Messages(jetstream.PullMaxMessages(1))
 	if err != nil {
-		slog.Error("bridge: start message iterator", "err", err)
-		return
+		return fmt.Errorf("start message iterator: %w", err)
 	}
+	defer iter.Stop()
 
-	// Stop the iterator when context is cancelled so that iter.Next()
-	// unblocks. We cannot rely on the deferred Stop alone because
-	// iter.Next() blocks the goroutine and would never reach the defer.
+	// Stop the iterator when context is cancelled so iter.Next() unblocks.
 	go func() {
 		<-ctx.Done()
 		iter.Stop()
@@ -185,7 +206,10 @@ func (p *Pipeline) bridgeDiscovery(ctx context.Context, out chan<- []string) {
 	for {
 		msg, err := iter.Next()
 		if err != nil {
-			return
+			if ctx.Err() != nil {
+				return nil // clean shutdown
+			}
+			return fmt.Errorf("iter.Next: %w", err)
 		}
 
 		var dm bus.DiscoveryMsg
@@ -195,10 +219,13 @@ func (p *Pipeline) bridgeDiscovery(ctx context.Context, out chan<- []string) {
 			continue
 		}
 
+		// Ack after channel send. If the process crashes before Tier 2
+		// processes the repos, the next discovery cycle will re-publish
+		// the list — acceptable trade-off for simplicity.
 		select {
 		case out <- dm.Repos:
 		case <-ctx.Done():
-			return
+			return nil
 		}
 		msg.Ack()
 	}

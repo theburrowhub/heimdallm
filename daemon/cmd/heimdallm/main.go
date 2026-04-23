@@ -447,6 +447,8 @@ func main() {
 		lastSkippedUpdatedAt: make(map[int64]time.Time),
 	}
 
+	js := eventBus.JetStream()
+
 	buildPipeline := func(c *config.Config) *scheduler.Pipeline {
 		return scheduler.NewPipeline(scheduler.PipelineConfig{
 			DiscoveryInterval: parseDiscoveryInterval(c.GitHub.DiscoveryInterval),
@@ -469,8 +471,8 @@ func main() {
 					DiscoveryOrgs:  orgs,
 				}
 			},
-			Publisher:      bus.NewRepoPublisher(eventBus.JetStream()),
-			JS:             eventBus.JetStream(),
+			Publisher:      bus.NewRepoPublisher(js),
+			JS:             js,
 			PRFetcher:      adapter,
 			PRProcessor:    adapter,
 			IssueProcessor: adapter,
