@@ -15,13 +15,19 @@ push to main / workflow_dispatch
         ▼
       tests               (daemon + Flutter unit tests — gate for all builds)
         │
-   ┌────┼──────────┬──────────────┐
-   ▼    ▼          ▼              ▼
- Docker  Linux     macOS         CLI
- image   packages  DMG           binaries
+   ┌────┼──────┬───────────┬──────────────┐
+   ▼    ▼      ▼           ▼              ▼
+ Docker Docker Linux       macOS         CLI
+ (GR)  (old)  packages    DMG           binaries
 ```
 
 All build jobs run in parallel after the test gate passes.
+
+**Docker transition (issue #269):** Two Docker image jobs run during the
+verification period. `goreleaser-daemon` builds via GoReleaser's `dockers:`
+section (new). `docker-build-push` is the legacy `build-push-action` approach
+kept as a safety net. Remove `docker-build-push` once the GoReleaser build is
+verified in production.
 
 ## Artifacts and tooling
 
