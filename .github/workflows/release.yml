@@ -367,8 +367,8 @@ jobs:
           echo "VERSION=$VERSION"  >> "$GITHUB_ENV"
 
       # ── .deb + .rpm (GoReleaser nfpms) ──────────────────────────────────────
-      - name: Reset Flutter lockfile changes
-        run: git checkout -- flutter_app/pubspec.lock
+      - name: Reset worktree for GoReleaser (Flutter build dirties tree)
+        run: git checkout -- .
 
       - name: GoReleaser — build .deb + .rpm
         uses: goreleaser/goreleaser-action@v6
