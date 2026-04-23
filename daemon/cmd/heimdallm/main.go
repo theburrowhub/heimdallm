@@ -32,6 +32,7 @@ import (
 	"github.com/heimdallm/daemon/internal/scheduler"
 	"github.com/heimdallm/daemon/internal/server"
 	"github.com/heimdallm/daemon/internal/sse"
+	"github.com/heimdallm/daemon/internal/worker"
 	"github.com/heimdallm/daemon/internal/store"
 	"github.com/heimdallm/daemon/launchagent"
 )
@@ -493,6 +494,52 @@ func main() {
 	// immediately; operators see polling activity without waiting an entire
 	// PollInterval. The reload path below passes false.
 	pipe.Start(context.Background(), true)
+
+	// ── NATS PR review worker ───────────────────────────────────────────
+	// Consumes PR review requests published by Tier 2 and runs the
+	// existing review pipeline. This replaces the goroutine-per-PR
+	// pattern that Tier 2 used to use.
+	reviewHandler := func(ctx context.Context, msg bus.PRReviewMsg) {
+		pr, err := ghClient.GetPR(msg.Repo, msg.Number)
+		if err != nil {
+			slog.Error("review-worker: fetch PR from GitHub",
+				"repo", msg.Repo, "pr", msg.Number, "err", err)
+			return
+		}
+		// Stale message guard: if HEAD SHA changed since publish, skip.
+		// The next poll cycle will publish a new message with the updated SHA.
+		if msg.HeadSHA != "" && pr.Head.SHA != msg.HeadSHA {
+			slog.Info("review-worker: stale message (HEAD SHA changed), skipping",
+				"repo", msg.Repo, "pr", msg.Number,
+				"msg_sha", msg.HeadSHA, "current_sha", pr.Head.SHA)
+			return
+		}
+
+		cfgMu.Lock()
+		c := *cfg
+		aiCfg := c.AIForRepo(pr.Repo)
+		localDirBase := c.GitHub.LocalDirBase
+		cfgMu.Unlock()
+		aiCfg.LocalDir = config.ResolveLocalDir(aiCfg.LocalDir, pr.Repo, localDirBase)
+
+		runReview(pr, aiCfg)
+
+		// Maintain Tier 3 watching (Task 9 replaces WatchQueue entirely).
+		cfgMu.Lock()
+		q := pipe.Queue()
+		cfgMu.Unlock()
+		q.Push(&scheduler.WatchItem{
+			Type: "pr", Repo: pr.Repo, Number: pr.Number, GithubID: pr.ID,
+		})
+	}
+
+	reviewWorker := worker.NewReviewWorker(eventBus.JetStream(), reviewHandler)
+	go func() {
+		if err := reviewWorker.Start(context.Background()); err != nil {
+			slog.Error("review worker stopped", "err", err)
+		}
+	}()
+
 	// Use a closure so the defer reads the current pipe variable at shutdown
 	// time, not the initial pointer captured at defer-statement time. After a
 	// reload, pipe points to a new pipeline — the bare defer would stop the
