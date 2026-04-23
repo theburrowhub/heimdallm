@@ -3,6 +3,8 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -11,6 +13,8 @@ import (
 
 func newIssuesCmd() *cobra.Command {
 	var severity string
+	var repo string
+	var jsonOutput bool
 
 	cmd := &cobra.Command{
 		Use:   "issues",
@@ -45,24 +49,51 @@ func newIssuesCmd() *cobra.Command {
 				}
 			}
 
+			if repo != "" {
+				n := 0
+				for _, iss := range filtered {
+					if strings.EqualFold(iss.Repo, repo) {
+						filtered[n] = iss
+						n++
+					}
+				}
+				filtered = filtered[:n]
+			}
+
 			if len(filtered) == 0 {
-				fmt.Printf("No issues matching severity %q.\n", severity)
+				fmt.Println("No issues matching the given filters.")
 				return nil
 			}
 
-			fmt.Printf("%-6s %-30s %-40s %-8s %-12s\n", "ID", "REPO", "TITLE", "SEVERITY", "ACTION")
-			fmt.Println(strings.Repeat("─", 100))
+			sort.Slice(filtered, func(i, j int) bool {
+				return filtered[i].LatestReview.CreatedAt.After(filtered[j].LatestReview.CreatedAt)
+			})
+
+			if jsonOutput {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				return enc.Encode(filtered)
+			}
+
+			fmt.Printf("%-6s %-28s %-34s %-14s %-8s %-12s %-10s\n",
+				"ID", "REPO", "TITLE", "AUTHOR", "SEVERITY", "ACTION", "DATE")
+			fmt.Println(strings.Repeat("─", 118))
 
 			for _, iss := range filtered {
 				sev := "---"
 				action := "---"
+				date := "---"
 				if iss.LatestReview != nil {
 					sev = extractTriageSeverity(iss.LatestReview.Triage)
 					action = iss.LatestReview.ActionTaken
+					date = iss.LatestReview.CreatedAt.Format("2006-01-02")
 				}
-				title := truncate(iss.Title, 38)
-				repo := truncate(iss.Repo, 28)
-				fmt.Printf("%-6d %-30s %-40s %-8s %-12s\n", iss.ID, repo, title, sev, action)
+				title := truncate(iss.Title, 32)
+				repoStr := truncate(iss.Repo, 26)
+				author := truncate(iss.Author, 12)
+				sevCol := colorSeverity(sev, 8)
+				fmt.Printf("%-6d %-28s %-34s %-14s %s %-12s %-10s\n",
+					iss.ID, repoStr, title, author, sevCol, action, date)
 			}
 
 			fmt.Printf("\n%d issues listed.\n", len(filtered))
@@ -71,6 +102,8 @@ func newIssuesCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&severity, "severity", "", "filter by severity (info, low, medium, high)")
+	cmd.Flags().StringVar(&repo, "repo", "", "filter by repository (org/repo)")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "output as JSON")
 
 	return cmd
 }
