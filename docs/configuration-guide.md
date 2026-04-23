@@ -18,7 +18,8 @@ Full reference for all settings, environment variables, and deployment options.
 10. [Docker Deployment](#10-docker-deployment)
 11. [Retention](#11-retention)
 12. [CLI](#12-cli)
-13. [Full config.toml Reference](#13-full-configtoml-reference)
+13. [Distribution Formats](#13-distribution-formats)
+14. [Full config.toml Reference](#14-full-configtoml-reference)
 
 ---
 
@@ -746,7 +747,39 @@ docker exec heimdallm cat /data/api_token
 
 ---
 
-## 13. Full config.toml Reference
+## 13. Distribution Formats
+
+Heimdallm ships as several artifact types, each built by the tooling best
+suited for it:
+
+| Format | Platform | Built with |
+|---|---|---|
+| Docker image (GHCR) | Linux | GoReleaser |
+| `.deb` / `.rpm` | Linux | GoReleaser nfpms |
+| `.AppImage` | Linux | appimagetool |
+| CLI binaries + Homebrew | Linux, macOS, Windows | GoReleaser |
+| `.dmg` | macOS | create-dmg |
+
+### macOS DMG
+
+The macOS `.dmg` is built in its own CI job (`build-macos`) on a `macos-14`
+runner, separate from GoReleaser. GoReleaser cannot handle this artifact
+because the build requires:
+
+- A **macOS runner** (GoReleaser runs on Linux)
+- A **Flutter build** targeting macOS (not a standalone Go binary)
+- **Ad-hoc code signing** with Apple entitlements
+- **`create-dmg`** for the installer image with a custom window layout
+
+The DMG is published to the GitHub release on every tagged version alongside
+all other artifacts.
+
+See [docs/release-pipeline.md](release-pipeline.md) for the full pipeline
+architecture.
+
+---
+
+## 14. Full config.toml Reference
 
 ```toml
 # Heimdallm configuration
