@@ -84,7 +84,14 @@ func RunTier3(ctx context.Context, deps Tier3Deps) {
 					if err := deps.Checker.HandleChange(ctx, item, snap); err != nil {
 						slog.Error("tier3: handle change", "err", err)
 					}
-					deps.Queue.ResetBackoff(item)
+					// Pass the observed timestamp so LastSeen matches
+					// GitHub-side time, not wall clock — see
+					// theburrowhub/heimdallm#243.
+					observed := time.Time{}
+					if snap != nil {
+						observed = snap.UpdatedAt
+					}
+					deps.Queue.ResetBackoff(item, observed)
 				} else {
 					deps.Queue.ReEnqueue(item)
 				}

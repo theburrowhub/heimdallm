@@ -14,7 +14,7 @@ const (
 
 // WatchItem represents a PR or issue being actively watched for changes.
 type WatchItem struct {
-	Type      string        // "pr" | "issue"
+	Type      string // "pr" | "issue"
 	Repo      string
 	Number    int
 	GithubID  int64
@@ -103,17 +103,23 @@ func (q *WatchQueue) ReEnqueue(item *WatchItem) {
 	heap.Push(&q.items, item)
 }
 
-// ResetBackoff resets an item's backoff to initial and re-enqueues it.
-// Called when activity is detected on the item. Same concurrency contract
-// as ReEnqueue — caller must own the item exclusively.
-func (q *WatchQueue) ResetBackoff(item *WatchItem) {
+// ResetBackoff resets an item's backoff to initial and records the observed
+// GitHub updated_at as LastSeen. Called when activity is detected on the
+// item. Using observed (not time.Now()) is critical: if a Tier 3 check
+// discovered the change via GitHub's updated_at, storing time.Now() as
+// LastSeen would drift ahead of GitHub's clock and make subsequent ticks
+// spuriously re-detect the same change. See theburrowhub/heimdallm#243.
+//
+// Same concurrency contract as ReEnqueue — caller must own the item
+// exclusively.
+func (q *WatchQueue) ResetBackoff(item *WatchItem, observedUpdatedAt time.Time) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.seen[item.GithubID] {
 		return
 	}
 	item.Backoff = initialBackoff
-	item.LastSeen = time.Now()
+	item.LastSeen = observedUpdatedAt
 	item.NextCheck = time.Now().Add(initialBackoff)
 	q.seen[item.GithubID] = true
 	heap.Push(&q.items, item)
