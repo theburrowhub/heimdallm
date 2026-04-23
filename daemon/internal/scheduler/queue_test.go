@@ -98,9 +98,22 @@ func TestWatchQueue_BackoffCapped(t *testing.T) {
 func TestWatchQueue_ResetBackoff(t *testing.T) {
 	q := NewWatchQueue()
 	item := &WatchItem{Type: "pr", GithubID: 100, Backoff: 8 * time.Minute}
-	q.ResetBackoff(item)
+	q.ResetBackoff(item, time.Now())
 	if item.Backoff != initialBackoff {
 		t.Errorf("backoff = %v, want %v", item.Backoff, initialBackoff)
+	}
+}
+
+func TestWatchQueue_ResetBackoff_StoresObservedUpdatedAt(t *testing.T) {
+	q := NewWatchQueue()
+	observed := time.Now().Add(-5 * time.Minute)
+	item := &WatchItem{Type: "pr", GithubID: 100, Backoff: 8 * time.Minute}
+	q.ResetBackoff(item, observed)
+	if !item.LastSeen.Equal(observed) {
+		t.Errorf("LastSeen = %v, want observed = %v", item.LastSeen, observed)
+	}
+	if item.Backoff != initialBackoff {
+		t.Errorf("Backoff = %v, want initial = %v", item.Backoff, initialBackoff)
 	}
 }
 

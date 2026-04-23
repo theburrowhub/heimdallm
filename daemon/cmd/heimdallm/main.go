@@ -1618,8 +1618,12 @@ func (a *tier2Adapter) HandleChange(ctx context.Context, item *scheduler.WatchIt
 			return nil
 		}
 
-		// Mirror the existing Tier 2 updated_at dedup.
-		if a.PRAlreadyReviewed(item.GithubID, item.LastSeen) {
+		// Mirror the Tier 2 updated_at dedup against the freshly-observed
+		// GitHub snapshot timestamp, NOT item.LastSeen — the queue's
+		// LastSeen has already been overwritten by ResetBackoff on earlier
+		// ticks and is no longer a faithful representation of the PR's
+		// current updated_at.
+		if a.PRAlreadyReviewed(item.GithubID, snap.UpdatedAt) {
 			slog.Debug("tier3: PR already reviewed, skipping", "pr", item.Number, "repo", item.Repo)
 			return nil
 		}
