@@ -32,6 +32,7 @@ func TestBridgeDiscovery_ForwardsRepos(t *testing.T) {
 		JS:             b.JetStream(),
 		PRFetcher:      &noopPRFetcher{},
 		PRProcessor:    &noopPRProcessor{},
+		PRPublisher:    &noopPRPublisher{},
 		IssueProcessor: &noopIssueProcessor{},
 		Store:          &noopStore{},
 		Tier2ConfigFn:  func() []string { return nil },
@@ -79,6 +80,12 @@ func (n *noopPRProcessor) PublishPending()                                      
 type noopIssueProcessor struct{}
 
 func (n *noopIssueProcessor) ProcessRepo(_ context.Context, _ string) (int, error) { return 0, nil }
+
+type noopPRPublisher struct{}
+
+func (n *noopPRPublisher) PublishPRReview(_ context.Context, _ string, _ int, _ int64, _ string) error {
+	return nil
+}
 
 type noopStore struct{}
 

@@ -32,6 +32,7 @@ type PipelineDeps struct {
 	// Tier 2
 	PRFetcher      Tier2PRFetcher
 	PRProcessor    Tier2PRProcessor
+	PRPublisher    Tier2PRPublisher // publishes PR review requests to NATS
 	IssueProcessor Tier2IssueProcessor
 	Promoter       Tier2Promoter
 	Store          Tier2Store
@@ -131,6 +132,7 @@ func (p *Pipeline) Start(parentCtx context.Context, coldStart bool) {
 			WatchQueue:     p.queue,
 			PRFetcher:      p.deps.PRFetcher,
 			PRProcessor:    p.deps.PRProcessor,
+			PRPublisher:    p.deps.PRPublisher,
 			IssueProcessor: p.deps.IssueProcessor,
 			Promoter:       p.deps.Promoter,
 			Store:          p.deps.Store,

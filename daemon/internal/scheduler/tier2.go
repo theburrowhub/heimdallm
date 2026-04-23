@@ -56,6 +56,11 @@ type Tier2Promoter interface {
 	PromoteReady(ctx context.Context, repos []string) (int, error)
 }
 
+// Tier2PRPublisher publishes PR review requests to NATS.
+type Tier2PRPublisher interface {
+	PublishPRReview(ctx context.Context, repo string, number int, githubID int64, headSHA string) error
+}
+
 // Tier2Store checks if a PR has already been reviewed recently.
 type Tier2Store interface {
 	PRAlreadyReviewed(githubID int64, updatedAt time.Time) bool
@@ -67,6 +72,7 @@ type Tier2Deps struct {
 	WatchQueue     *WatchQueue
 	PRFetcher      Tier2PRFetcher
 	PRProcessor    Tier2PRProcessor
+	PRPublisher    Tier2PRPublisher
 	IssueProcessor Tier2IssueProcessor
 	Promoter       Tier2Promoter
 	Store          Tier2Store
@@ -142,15 +148,9 @@ func RunTier2(ctx context.Context, deps Tier2Deps, reposChan <-chan []string, co
 				if deps.Store.PRAlreadyReviewed(pr.ID, pr.UpdatedAt) {
 					continue
 				}
-				go func(p Tier2PR) {
-					if err := deps.PRProcessor.ProcessPR(ctx, p); err != nil {
-						slog.Error("tier2: PR pipeline", "repo", p.Repo, "pr", p.Number, "err", err)
-					}
-					// Enqueue to Tier 3 watch
-					deps.WatchQueue.Push(&WatchItem{
-						Type: "pr", Repo: p.Repo, Number: p.Number, GithubID: p.ID,
-					})
-				}(pr)
+				if err := deps.PRPublisher.PublishPRReview(ctx, pr.Repo, pr.Number, pr.ID, pr.HeadSHA); err != nil {
+					slog.Error("tier2: publish PR review", "repo", pr.Repo, "pr", pr.Number, "err", err)
+				}
 			}
 		}
 
