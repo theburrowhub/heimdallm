@@ -116,7 +116,7 @@ func (f *fakeGH) PostComment(repo string, number int, body string) (time.Time, e
 	return time.Now().UTC(), f.postErr
 }
 
-func (f *fakeGH) FetchComments(repo string, number int) ([]github.Comment, error) {
+func (f *fakeGH) FetchIssueCommentsOnly(repo string, number int) ([]github.Comment, error) {
 	if f.commentsErr != nil {
 		return nil, f.commentsErr
 	}

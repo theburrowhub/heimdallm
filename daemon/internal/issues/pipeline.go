@@ -57,8 +57,14 @@ type IssueCommenter interface {
 
 // IssueCommentFetcher fetches the existing discussion for an issue so the
 // triage LLM can take prior context into account.
+//
+// The method is `FetchIssueCommentsOnly`, not the generic `FetchComments`
+// that PR callers use — on an issue number, FetchComments hits the
+// PR-only `/pulls/:n/comments` endpoint and always 404s, which caused
+// every issue triage to silently run without prior comment context (bug
+// #292).
 type IssueCommentFetcher interface {
-	FetchComments(repo string, number int) ([]github.Comment, error)
+	FetchIssueCommentsOnly(repo string, number int) ([]github.Comment, error)
 }
 
 // DefaultBrancher returns the GitHub repository's default branch. Used by
@@ -290,7 +296,7 @@ func (p *Pipeline) runReviewOnly(ctx context.Context, issue *github.Issue, issue
 
 	// Pull existing discussion as additional context. Failure is non-fatal —
 	// the triage still runs with title + body alone.
-	comments, err := p.gh.FetchComments(issue.Repo, issue.Number)
+	comments, err := p.gh.FetchIssueCommentsOnly(issue.Repo, issue.Number)
 	if err != nil {
 		slog.Warn("issues pipeline: failed to fetch comments, proceeding without", "err", err)
 		comments = nil
@@ -447,7 +453,7 @@ func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, is
 
 	// Fetch comments once so the implement prompt carries the same context
 	// the triage path would see. Best-effort as before.
-	comments, err := p.gh.FetchComments(issue.Repo, issue.Number)
+	comments, err := p.gh.FetchIssueCommentsOnly(issue.Repo, issue.Number)
 	if err != nil {
 		slog.Warn("issues pipeline: failed to fetch comments, proceeding without", "err", err)
 		comments = nil

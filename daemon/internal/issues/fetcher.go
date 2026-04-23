@@ -58,8 +58,15 @@ type issueDedupStore interface {
 
 // issueMarkerFetcher fetches comments for an issue so the fetcher can scan
 // for control markers (done/skip/retry) during the dedup check.
+//
+// The method is `FetchIssueCommentsOnly`, not the generic `FetchComments`,
+// because the latter also calls the PR-only `/pulls/:n/comments` endpoint
+// and fails with 404 on any issue number. That 404 cascade was the root
+// cause of theburrowhub/heimdallm#292 — the marker scan silently fell
+// through to the time-based dedup window for every tick, producing a
+// re-triage loop.
 type issueMarkerFetcher interface {
-	FetchComments(repo string, number int) ([]github.Comment, error)
+	FetchIssueCommentsOnly(repo string, number int) ([]github.Comment, error)
 }
 
 // OptionsFn lets the caller map each classified issue to its RunOptions.
@@ -165,7 +172,7 @@ func (f *Fetcher) alreadyProcessed(issue *github.Issue) (bool, string, error) {
 	// is skipped when the comment fetcher is nil (legacy callers / tests
 	// that pre-date marker support).
 	if f.comments != nil {
-		comments, cmErr := f.comments.FetchComments(issue.Repo, issue.Number)
+		comments, cmErr := f.comments.FetchIssueCommentsOnly(issue.Repo, issue.Number)
 		if cmErr != nil {
 			slog.Warn("issues fetcher: marker scan failed, falling through to dedup checks",
 				"repo", issue.Repo, "number", issue.Number, "err", cmErr)
