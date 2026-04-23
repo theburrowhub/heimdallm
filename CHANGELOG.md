@@ -2,6 +2,13 @@
 
 > **Note:** Versions 0.1.0–0.1.3 were originally published under [`theburrowhub/heimdallr-docker`](https://github.com/theburrowhub/heimdallr-docker) (now archived). The project was unified into this repository and renamed to Heimdallm in v0.1.1.
 
+## [0.6.7](https://github.com/theburrowhub/heimdallm/compare/v0.6.6...v0.6.7) (2026-04-23)
+
+
+### Bug Fixes
+
+* skip GoReleaser validate for Linux packages ([4a89f74](https://github.com/theburrowhub/heimdallm/commit/4a89f74399700f0e9cc11a1ed622d9af71620b8d)), closes [#293](https://github.com/theburrowhub/heimdallm/issues/293)
+
 ## [0.6.6](https://github.com/theburrowhub/heimdallm/compare/v0.6.5...v0.6.6) (2026-04-23)
 
 
