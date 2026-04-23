@@ -475,6 +475,7 @@ func main() {
 			JS:             js,
 			PRFetcher:      adapter,
 			PRProcessor:    adapter,
+			PRPublisher:    bus.NewPRReviewPublisher(eventBus.JetStream()),
 			IssueProcessor: adapter,
 			Promoter:       adapter,
 			Store:          adapter,
