@@ -18,7 +18,8 @@ Full reference for all settings, environment variables, and deployment options.
 10. [Docker Deployment](#10-docker-deployment)
 11. [Retention](#11-retention)
 12. [CLI](#12-cli)
-13. [Full config.toml Reference](#13-full-configtoml-reference)
+13. [Release Artifacts](#13-release-artifacts)
+14. [Full config.toml Reference](#14-full-configtoml-reference)
 
 ---
 
@@ -746,7 +747,34 @@ docker exec heimdallm cat /data/api_token
 
 ---
 
-## 13. Full config.toml Reference
+## 13. Release Artifacts
+
+Every tagged release produces these artifacts automatically via GitHub Actions:
+
+| Artifact | Builder | Contents |
+|---|---|---|
+| `.deb` (Ubuntu / Debian) | `fpm` in CI | Flutter desktop app + daemon + icons + desktop entry |
+| `.rpm` (Fedora / RHEL) | `fpm` in CI | Same as `.deb` |
+| `.AppImage` (universal Linux) | `appimagetool` in CI | Same app bundle, self-contained |
+| `.dmg` (macOS) | `create-dmg` in CI | Flutter desktop app + daemon |
+| CLI binaries (cross-platform) | GoReleaser | Pure-Go `heimdallm-cli` for Linux, macOS, Windows (amd64/arm64) |
+| Docker image | Docker Build | Daemon + AI CLIs + web UI, pushed to GHCR |
+
+### Why AppImage is not built by GoReleaser
+
+GoReleaser does not support AppImage as a native packaging format. AppImage bundles the full Flutter desktop app, the embedded Go daemon, icons, and a desktop entry — a fundamentally different artifact from the pure-Go CLI binaries that GoReleaser produces. The AppImage build is grouped with `.deb` and `.rpm` in the same CI job because all three share the Flutter build output and staging directory, avoiding a duplicate Flutter build.
+
+### Homebrew
+
+The CLI is published to the [Homebrew tap](https://github.com/theburrowhub/homebrew-tap) automatically by GoReleaser on each release:
+
+```bash
+brew install theburrowhub/tap/heimdallm-cli
+```
+
+---
+
+## 14. Full config.toml Reference
 
 ```toml
 # Heimdallm configuration

@@ -98,6 +98,15 @@ jobs:
 
   # ═══════════════════════════════════════════════════════════════════════════
   # Linux packages — .deb, .rpm, .AppImage
+  #
+  # AppImage is built here (not via GoReleaser) because GoReleaser does not
+  # support AppImage as a native packaging format. AppImage bundles the full
+  # Flutter desktop app + embedded daemon + icons + desktop entry — a
+  # fundamentally different artifact from the pure-Go CLI binaries that
+  # GoReleaser produces. All three Linux package formats (.deb, .rpm,
+  # .AppImage) share the same Flutter build output and staging directory,
+  # so grouping them in a single job avoids duplicating the Flutter build.
+  # See: https://github.com/theburrowhub/heimdallm/issues/266
   # ═══════════════════════════════════════════════════════════════════════════
   build-linux:
     name: Build Linux packages (.deb / .rpm / .AppImage)
@@ -268,6 +277,9 @@ jobs:
           echo "RPM_PATH=dist/heimdallm-${VERSION}-1.x86_64.rpm" >> "$GITHUB_ENV"
 
       # ── .AppImage (universal — Arch, NixOS, and any other distro) ────────────
+      # GoReleaser does not support AppImage natively, so this remains a
+      # manual build step. It reuses the same Flutter bundle and staging
+      # tree prepared above for .deb and .rpm.
       - name: Build AppImage
         run: |
           APPDIR="AppDir"
