@@ -1,0 +1,92 @@
+version: 2
+
+project_name: heimdallm
+
+builds:
+  - id: daemon
+    main: ./cmd/heimdallm
+    binary: heimdalld
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+    ldflags:
+      - -s -w
+
+# ── Docker image — pushed to GHCR ────────────────────────────────────────────
+# Used by: goreleaser-daemon job (release.yml --skip=nfpm,archive)
+dockers:
+  - ids:
+      - daemon
+    image_templates:
+      - "ghcr.io/theburrowhub/heimdallm:{{ .Version }}"
+      - "ghcr.io/theburrowhub/heimdallm:{{ .Major }}.{{ .Minor }}"
+      - "ghcr.io/theburrowhub/heimdallm:{{ .Major }}"
+      - "ghcr.io/theburrowhub/heimdallm:latest"
+      - "ghcr.io/theburrowhub/heimdallm:{{ .ShortCommit }}"
+    dockerfile: ../docker/Dockerfile.goreleaser
+    use: buildx
+    build_flag_templates:
+      - "--pull"
+      - "--cache-from=type=gha"
+      - "--cache-to=type=gha,mode=max"
+      - "--label=org.opencontainers.image.created={{.Date}}"
+      - "--label=org.opencontainers.image.title={{.ProjectName}}"
+      - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+      - "--label=org.opencontainers.image.version={{.Version}}"
+      - "--label=org.opencontainers.image.source=https://github.com/theburrowhub/heimdallm"
+
+# ── Linux packages — .deb + .rpm ─────────────────────────────────────────────
+# Used by: build-linux job (release.yml --skip=docker,archive)
+# Requires: staging/ prepared by the workflow (Flutter bundle + icons + desktop entry)
+nfpms:
+  - id: linux-packages
+    builds:
+      - daemon
+    bindir: /opt/heimdallm
+    package_name: heimdallm
+    file_name_template: "{{ .PackageName }}_{{ .Version }}_{{ .Arch }}"
+    vendor: The Burrow Hub
+    homepage: https://github.com/theburrowhub/heimdallm
+    description: "AI-powered GitHub PR review agent"
+    license: MIT
+    release: "1"
+    formats:
+      - deb
+      - rpm
+    overrides:
+      deb:
+        dependencies:
+          - libgtk-3-0
+          - libayatana-appindicator3-1
+          - libnotify4
+          - libsecret-1-0
+      rpm:
+        dependencies:
+          - gtk3
+          - libnotify
+          - libsecret
+    contents:
+      - src: ../staging/opt/heimdallm
+        dst: /opt/heimdallm
+        type: tree
+      - dst: /usr/bin/heimdallm
+        src: /opt/heimdallm/heimdallm
+        type: symlink
+      - src: ../staging/usr/share/applications/com.theburrowhub.heimdallm.desktop
+        dst: /usr/share/applications/com.theburrowhub.heimdallm.desktop
+      - src: ../staging/usr/share/icons
+        dst: /usr/share/icons
+        type: tree
+
+changelog:
+  disable: true
+
+release:
+  github:
+    owner: theburrowhub
+    name: heimdallm
+  mode: keep-existing
+  extra_files: []
