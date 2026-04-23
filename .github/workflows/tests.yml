@@ -31,6 +31,26 @@ jobs:
         working-directory: daemon
         run: go vet ./...
 
+  cli:
+    name: CLI (Go)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.sum
+
+      - name: Test
+        working-directory: cli
+        run: go test ./... -timeout 60s
+
+      - name: Vet
+        working-directory: cli
+        run: go vet ./...
+
   flutter:
     name: Flutter
     runs-on: macos-14

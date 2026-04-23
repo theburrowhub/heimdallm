@@ -52,7 +52,9 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: daemon/go.mod
-          cache-dependency-path: daemon/go.sum
+          cache-dependency-path: |
+            daemon/go.sum
+            cli/go.sum
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
@@ -75,12 +77,48 @@ jobs:
         run: flutter pub get
 
       - name: Daemon tests
+        id: daemon-tests
         working-directory: daemon
         run: go test ./... -timeout 60s
 
+      - name: Daemon vet
+        id: daemon-vet
+        working-directory: daemon
+        run: go vet ./...
+
+      - name: CLI tests
+        id: cli-tests
+        working-directory: cli
+        run: go test ./... -timeout 60s
+
+      - name: CLI vet
+        id: cli-vet
+        working-directory: cli
+        run: go vet ./...
+
+      - name: Flutter analyze
+        id: flutter-analyze
+        working-directory: flutter_app
+        run: flutter analyze
+
       - name: Flutter tests
+        id: flutter-tests
         working-directory: flutter_app
         run: flutter test
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Test Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Suite | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Daemon (go test) | ${{ steps.daemon-tests.outcome || '—' }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Daemon (go vet)  | ${{ steps.daemon-vet.outcome || '—' }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| CLI (go test)    | ${{ steps.cli-tests.outcome || '—' }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| CLI (go vet)     | ${{ steps.cli-vet.outcome || '—' }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Flutter analyze  | ${{ steps.flutter-analyze.outcome || '—' }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Flutter test     | ${{ steps.flutter-tests.outcome || '—' }} |" >> "$GITHUB_STEP_SUMMARY"
 
   # ═══════════════════════════════════════════════════════════════════════════
   # Docker image — GoReleaser → GHCR
