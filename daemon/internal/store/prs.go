@@ -25,7 +25,7 @@ type PR struct {
 // Note: dismissed is intentionally excluded from the UPDATE clause so a user's
 // dismiss choice is preserved even when the poll loop re-fetches the same PR.
 func (s *Store) UpsertPR(pr *PR) (int64, error) {
-	res, err := s.db.Exec(`
+	_, err := s.db.Exec(`
 		INSERT INTO prs (github_id, repo, number, title, author, url, state, updated_at, fetched_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(github_id) DO UPDATE SET
@@ -39,16 +39,15 @@ func (s *Store) UpsertPR(pr *PR) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("store: upsert pr: %w", err)
 	}
-	// LastInsertId returns 0 on the UPDATE path with modernc.org/sqlite (the
-	// driver this project uses). Other SQLite drivers may report the existing
-	// row id instead — the fallback SELECT below handles either case so this
-	// code is portable if the driver ever changes.
-	id, err := res.LastInsertId()
-	if err != nil || id == 0 {
-		row := s.db.QueryRow("SELECT id FROM prs WHERE github_id = ?", pr.GithubID)
-		if scanErr := row.Scan(&id); scanErr != nil {
-			return 0, fmt.Errorf("store: upsert pr fallback select: %w", scanErr)
-		}
+	// Always look up the row by github_id rather than trusting LastInsertId:
+	// modernc.org/sqlite returns the database-wide last inserted rowid, which
+	// on the UPDATE path can be the id of a row in a different table (e.g.
+	// reviews) — returning that value corrupted the circuit-breaker counts in
+	// issue #243. The unique index on github_id makes this SELECT cheap.
+	var id int64
+	row := s.db.QueryRow("SELECT id FROM prs WHERE github_id = ?", pr.GithubID)
+	if err := row.Scan(&id); err != nil {
+		return 0, fmt.Errorf("store: upsert pr select: %w", err)
 	}
 	return id, nil
 }

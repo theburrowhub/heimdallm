@@ -4,11 +4,12 @@ import "fmt"
 
 // Event type constants
 const (
-	EventPRDetected      = "pr_detected"
-	EventReviewStarted   = "review_started"
-	EventReviewCompleted = "review_completed"
-	EventReviewError     = "review_error"
-	EventReviewSkipped   = "review_skipped"
+	EventPRDetected            = "pr_detected"
+	EventReviewStarted         = "review_started"
+	EventReviewCompleted       = "review_completed"
+	EventReviewError           = "review_error"
+	EventReviewSkipped         = "review_skipped"
+	EventCircuitBreakerTripped = "circuit_breaker_tripped"
 
 	// Issue tracking pipeline (#26 onward).
 	EventIssueDetected        = "issue_detected"

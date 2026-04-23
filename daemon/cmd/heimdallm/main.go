@@ -163,6 +163,15 @@ func main() {
 
 	p := pipeline.New(s, ghClient, exec, &notifyWithSSE{notifier: notifier})
 
+	// Circuit-breaker caps (see theburrowhub/heimdallm#243). The defaults are
+	// populated by config.applyDefaults so the caps are always set; nil disables
+	// them only if a downstream test wants unbounded behaviour.
+	cbLimits := store.CircuitBreakerLimits{
+		PerPR24h:  cfg.CircuitBreaker.PerPR24h,
+		PerRepoHr: cfg.CircuitBreaker.PerRepoHr,
+	}
+	p.SetCircuitBreakerLimits(&cbLimits)
+
 	// GitExec drives the auto_implement flow (#27): branch, commit, push, PR.
 	// Wired unconditionally — the pipeline guards against running git ops on
 	// an issue that is classified as review_only, so this dep is harmless
@@ -182,7 +191,7 @@ func main() {
 	srv.SetConfigPath(cfgPath)
 
 	// cfgMu protects cfg and the pipeline so reload is safe from any goroutine.
-	var cfgMu   sync.Mutex
+	var cfgMu sync.Mutex
 	var reloadMu sync.Mutex // serialises config reloads to prevent duplicate pipelines
 
 	// discoverySvc holds the discovered repo cache.
@@ -299,6 +308,17 @@ func main() {
 		rev, err := p.Run(pr, buildRunOpts(pr, aiCfg))
 		if err != nil {
 			slog.Error("pipeline run failed", "repo", pr.Repo, "pr", pr.Number, "err", err)
+			if strings.Contains(err.Error(), "circuit breaker tripped") {
+				broker.Publish(sse.Event{
+					Type: sse.EventCircuitBreakerTripped,
+					Data: sseData(map[string]any{
+						"pr_number": pr.Number,
+						"repo":      pr.Repo,
+						"reason":    strings.TrimPrefix(err.Error(), "pipeline: circuit breaker tripped: "),
+					}),
+				})
+				return
+			}
 			broker.Publish(sse.Event{Type: sse.EventReviewError, Data: sseData(map[string]any{"pr_number": pr.Number, "repo": pr.Repo, "error": err.Error()})})
 			return
 		}
@@ -459,16 +479,16 @@ func main() {
 		agentConfigs := make(map[string]map[string]any)
 		for name, ac := range c.AI.Agents {
 			agentConfigs[name] = map[string]any{
-				"model":                    ac.Model,
-				"max_turns":                ac.MaxTurns,
-				"approval_mode":            ac.ApprovalMode,
-				"extra_flags":              ac.ExtraFlags,
-				"prompt":                   ac.PromptID,
-				"effort":                   ac.Effort,
-				"permission_mode":          ac.PermissionMode,
-				"bare":                     ac.Bare,
-				"dangerously_skip_perms":   ac.DangerouslySkipPerms,
-				"no_session_persistence":   ac.NoSessionPersistence,
+				"model":                  ac.Model,
+				"max_turns":              ac.MaxTurns,
+				"approval_mode":          ac.ApprovalMode,
+				"extra_flags":            ac.ExtraFlags,
+				"prompt":                 ac.PromptID,
+				"effort":                 ac.Effort,
+				"permission_mode":        ac.PermissionMode,
+				"bare":                   ac.Bare,
+				"dangerously_skip_perms": ac.DangerouslySkipPerms,
+				"no_session_persistence": ac.NoSessionPersistence,
 			}
 		}
 		// Expose first-seen timestamps so the Flutter app can show NEW
@@ -507,8 +527,8 @@ func main() {
 			"local_dirs_detected":         localDirsDetected,
 			"activity_log_enabled":        ptrBoolOrTrue(c.ActivityLog.Enabled),
 			"activity_log_retention_days": ptrIntOr(c.ActivityLog.RetentionDays, 90),
-			"issue_prompt":               c.AI.IssuePrompt,
-			"implement_prompt":           c.AI.ImplementPrompt,
+			"issue_prompt":                c.AI.IssuePrompt,
+			"implement_prompt":            c.AI.ImplementPrompt,
 		}
 		reviewers, labels, assignee, draft := c.ResolvedPRMetadata()
 		pm := map[string]any{}
@@ -657,6 +677,17 @@ func main() {
 
 		rev, err := p.Run(ghPR, buildRunOpts(ghPR, aiCfg))
 		if err != nil {
+			if strings.Contains(err.Error(), "circuit breaker tripped") {
+				broker.Publish(sse.Event{
+					Type: sse.EventCircuitBreakerTripped,
+					Data: sseData(map[string]any{
+						"pr_number": pr.Number,
+						"repo":      pr.Repo,
+						"reason":    strings.TrimPrefix(err.Error(), "pipeline: circuit breaker tripped: "),
+					}),
+				})
+				return err
+			}
 			broker.Publish(sse.Event{Type: sse.EventReviewError, Data: sseData(map[string]any{"pr_id": prID, "error": err.Error()})})
 			return err
 		}
@@ -763,11 +794,11 @@ func main() {
 			IssueInstructions:       issueInstructions,
 			ImplementPromptOverride: implPrompt,
 			ImplementInstructions:   implInstructions,
-			PRReviewers:           aiCfg.PRReviewers,
-			PRAssignee:            aiCfg.PRAssignee,
-			PRLabels:              aiCfg.PRLabels,
-			PRDraft:               aiCfg.PRDraft != nil && *aiCfg.PRDraft,
-			GeneratePRDescription: aiCfg.GeneratePRDescription != nil && *aiCfg.GeneratePRDescription,
+			PRReviewers:             aiCfg.PRReviewers,
+			PRAssignee:              aiCfg.PRAssignee,
+			PRLabels:                aiCfg.PRLabels,
+			PRDraft:                 aiCfg.PRDraft != nil && *aiCfg.PRDraft,
+			GeneratePRDescription:   aiCfg.GeneratePRDescription != nil && *aiCfg.GeneratePRDescription,
 		}
 
 		slog.Info("trigger issue review: running pipeline",
@@ -1055,8 +1086,8 @@ type tier2Adapter struct {
 	// SSE events across consecutive poll cycles for the same (PR ID, updated_at)
 	// pair. Entries are pruned at the end of each FetchPRsToReview cycle so the
 	// map stays bounded to the current set of review-requested PRs.
-	skipMu                sync.Mutex
-	lastSkippedUpdatedAt  map[int64]time.Time
+	skipMu               sync.Mutex
+	lastSkippedUpdatedAt map[int64]time.Time
 }
 
 // discoveryStore is the subset of *store.Store that processDiscoveredRepos

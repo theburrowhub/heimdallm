@@ -31,11 +31,12 @@ var githubTopicPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,49}$`)
 var githubOrgPattern = regexp.MustCompile(`^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$`)
 
 type Config struct {
-	Server      ServerConfig      `toml:"server"`
-	GitHub      GitHubConfig      `toml:"github"`
-	AI          AIConfig          `toml:"ai"`
-	Retention   RetentionConfig   `toml:"retention"`
-	ActivityLog ActivityLogConfig `toml:"activity_log"`
+	Server         ServerConfig         `toml:"server"`
+	GitHub         GitHubConfig         `toml:"github"`
+	AI             AIConfig             `toml:"ai"`
+	Retention      RetentionConfig      `toml:"retention"`
+	ActivityLog    ActivityLogConfig    `toml:"activity_log"`
+	CircuitBreaker CircuitBreakerConfig `toml:"circuit_breaker"`
 }
 
 type ServerConfig struct {
@@ -264,16 +265,16 @@ func labelSetIntersects(set map[string]struct{}, list []string) bool {
 // CLIAgentConfig holds per-CLI execution settings (model, flags, prompt override).
 // Stored under [ai.agents.<cli-name>] in config.toml.
 type CLIAgentConfig struct {
-	Model        string `toml:"model"`          // e.g. "claude-opus-4-6"
-	MaxTurns     int    `toml:"max_turns"`       // claude: --max-turns (0 = not set)
-	ApprovalMode string `toml:"approval_mode"`  // codex: --approval-mode
-	ExtraFlags   string `toml:"extra_flags"`     // free-form additional CLI flags
-	PromptID     string `toml:"prompt"`          // agent-level prompt override
+	Model        string `toml:"model"`         // e.g. "claude-opus-4-6"
+	MaxTurns     int    `toml:"max_turns"`     // claude: --max-turns (0 = not set)
+	ApprovalMode string `toml:"approval_mode"` // codex: --approval-mode
+	ExtraFlags   string `toml:"extra_flags"`   // free-form additional CLI flags
+	PromptID     string `toml:"prompt"`        // agent-level prompt override
 
 	// Claude-specific flags
-	Effort               string `toml:"effort"`                  // low|medium|high|max
-	PermissionMode       string `toml:"permission_mode"`         // default|auto|acceptEdits|dontAsk (bypassPermissions is explicitly forbidden)
-	Bare                 bool   `toml:"bare"`                    // --bare
+	Effort               string `toml:"effort"`                 // low|medium|high|max
+	PermissionMode       string `toml:"permission_mode"`        // default|auto|acceptEdits|dontAsk (bypassPermissions is explicitly forbidden)
+	Bare                 bool   `toml:"bare"`                   // --bare
 	DangerouslySkipPerms bool   `toml:"dangerously_skip_perms"` // --dangerously-skip-permissions (cannot be set via HTTP API, see M-5)
 	NoSessionPersistence bool   `toml:"no_session_persistence"` // --no-session-persistence
 	ExecutionTimeout     string `toml:"execution_timeout"`      // per-agent override, e.g. "20m"
@@ -282,12 +283,12 @@ type CLIAgentConfig struct {
 type AIConfig struct {
 	Primary          string                    `toml:"primary"`
 	Fallback         string                    `toml:"fallback"`
-	ReviewMode       string                    `toml:"review_mode"`        // "single" | "multi"
-	ExecutionTimeout string                    `toml:"execution_timeout"`  // e.g. "20m", "1h"
-	Agents           map[string]CLIAgentConfig `toml:"agents"`             // keyed by CLI name
+	ReviewMode       string                    `toml:"review_mode"`       // "single" | "multi"
+	ExecutionTimeout string                    `toml:"execution_timeout"` // e.g. "20m", "1h"
+	Agents           map[string]CLIAgentConfig `toml:"agents"`            // keyed by CLI name
 	Repos            map[string]RepoAI         `toml:"repos"`
-	Orgs             map[string]OrgAI          `toml:"orgs"`               // per-org PR metadata overrides
-	PRMetadata       PRMetadataConfig          `toml:"pr_metadata"`        // global PR creation defaults
+	Orgs             map[string]OrgAI          `toml:"orgs"`        // per-org PR metadata overrides
+	PRMetadata       PRMetadataConfig          `toml:"pr_metadata"` // global PR creation defaults
 
 	// Top-level PR metadata fields — flat alternatives to [ai.pr_metadata].
 	// Populated from HEIMDALLM_PR_* env vars or TOML keys directly under [ai].
@@ -311,10 +312,10 @@ type AIConfig struct {
 }
 
 type RepoAI struct {
-	Primary    string `toml:"primary"`
+	Primary string `toml:"primary"`
 	// Prompt is the ID of a review prompt profile to use for this repo.
 	// Overrides agent-level and global default prompts.
-	Prompt      string `toml:"prompt"`
+	Prompt string `toml:"prompt"`
 	// IssuePrompt is the ID of an agent profile for issue triage.
 	// Overrides agent-level and global default issue prompts.
 	IssuePrompt string `toml:"issue_prompt"`
@@ -322,15 +323,15 @@ type RepoAI struct {
 	// ImplementInstructions fields drive the auto_implement code-generation
 	// prompt for this repo. Overrides agent-level and global default.
 	ImplementPrompt string `toml:"implement_prompt"`
-	Fallback    string `toml:"fallback"`
-	ReviewMode  string `toml:"review_mode"` // "" = inherit global
-	LocalDir    string `toml:"local_dir"`   // local repo path for full-repo analysis
+	Fallback        string `toml:"fallback"`
+	ReviewMode      string `toml:"review_mode"` // "" = inherit global
+	LocalDir        string `toml:"local_dir"`   // local repo path for full-repo analysis
 
 	// PR creation metadata (applied by auto_implement after CreatePR).
 	PRReviewers []string `toml:"pr_reviewers"`       // GitHub logins to request review from
-	PRAssignee  string   `toml:"pr_assignee"`         // GitHub login to assign the PR to
-	PRLabels    []string `toml:"pr_labels"`           // labels to add to the PR
-	PRDraft     *bool    `toml:"pr_draft,omitempty"`  // create as draft PR
+	PRAssignee  string   `toml:"pr_assignee"`        // GitHub login to assign the PR to
+	PRLabels    []string `toml:"pr_labels"`          // labels to add to the PR
+	PRDraft     *bool    `toml:"pr_draft,omitempty"` // create as draft PR
 
 	// GeneratePRDescription overrides the global ai.generate_pr_description
 	// for this repo. nil = inherit from global.
@@ -641,6 +642,12 @@ func (c *Config) applyDefaults() {
 	if c.ActivityLog.RetentionDays == nil {
 		v := 90
 		c.ActivityLog.RetentionDays = &v
+	}
+	if c.CircuitBreaker.PerPR24h == 0 {
+		c.CircuitBreaker.PerPR24h = 3
+	}
+	if c.CircuitBreaker.PerRepoHr == 0 {
+		c.CircuitBreaker.PerRepoHr = 20
 	}
 }
 
@@ -968,7 +975,6 @@ func LoadOrCreate(path string) (*Config, error) {
 	}
 	return cfg, nil
 }
-
 
 // ReviewGuards resolves configured guard toggles against their defaults and
 // returns a ResolvedReviewGuards ready for use by the poller. Both booleans
