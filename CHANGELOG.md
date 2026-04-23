@@ -2,6 +2,18 @@
 
 > **Note:** Versions 0.1.0–0.1.3 were originally published under [`theburrowhub/heimdallr-docker`](https://github.com/theburrowhub/heimdallr-docker) (now archived). The project was unified into this repository and renamed to Heimdallm in v0.1.1.
 
+## [0.6.3](https://github.com/theburrowhub/heimdallm/compare/v0.6.2...v0.6.3) (2026-04-23)
+
+
+### Features
+
+* implement [#265](https://github.com/theburrowhub/heimdallm/issues/265) — epic: unify release pipeline under GoReleaser (phased migration) ([#273](https://github.com/theburrowhub/heimdallm/issues/273)) ([b1c9dcd](https://github.com/theburrowhub/heimdallm/commit/b1c9dcd898a1db5b1a6ac998980a5b65f3ab70d8))
+* implement [#267](https://github.com/theburrowhub/heimdallm/issues/267) — step 5: document macOS DMG stays as separate build step ([#276](https://github.com/theburrowhub/heimdallm/issues/276)) ([bb34e7e](https://github.com/theburrowhub/heimdallm/commit/bb34e7e17a43c75cf63d58d0ac5800c7365caf14))
+* implement [#268](https://github.com/theburrowhub/heimdallm/issues/268) — step 1: fix Homebrew tap auto-update with org secret ([#277](https://github.com/theburrowhub/heimdallm/issues/277)) ([692daa0](https://github.com/theburrowhub/heimdallm/commit/692daa00645ef6e3c7e2685b112e2b9b2efa3bad))
+* implement [#269](https://github.com/theburrowhub/heimdallm/issues/269) — step 2: move Docker image build to GoReleaser ([#278](https://github.com/theburrowhub/heimdallm/issues/278)) ([a4ba5c2](https://github.com/theburrowhub/heimdallm/commit/a4ba5c22c03d656051ee4d4e2210265e71e6169e))
+* implement [#270](https://github.com/theburrowhub/heimdallm/issues/270) — step 3: move .deb/.rpm to GoReleaser nfpms ([#279](https://github.com/theburrowhub/heimdallm/issues/279)) ([d6ea6c5](https://github.com/theburrowhub/heimdallm/commit/d6ea6c547895948b7099cccb76e5d1a38a59607a))
+* implement [#272](https://github.com/theburrowhub/heimdallm/issues/272) — step 7: add test gate before all build jobs ([#280](https://github.com/theburrowhub/heimdallm/issues/280)) ([1414a2a](https://github.com/theburrowhub/heimdallm/commit/1414a2afbf4f2fe5801cc19a26762e85974bd12f))
+
 ## [0.6.2](https://github.com/theburrowhub/heimdallm/compare/v0.6.1...v0.6.2) (2026-04-23)
 
 
