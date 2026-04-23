@@ -163,6 +163,14 @@ func Open(dsn string) (*Store, error) {
 		db.Exec("UPDATE agents SET is_default_dev = is_default")
 	}
 	db.Exec("ALTER TABLE issue_reviews ADD COLUMN commented_at DATETIME NOT NULL DEFAULT ''")
+	// Covering index for the circuit-breaker counters (see issue #243).
+	// CREATE INDEX IF NOT EXISTS is idempotent; safe on every startup.
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_reviews_pr_created ON reviews(pr_id, created_at)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_reviews_created ON reviews(created_at)")
+	// Hot path for CountReviewsForRepo (see issue #243). Without this the
+	// JOIN drives from prs.repo with no index and table-scans on every
+	// poll-cycle breaker check.
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_prs_repo ON prs(repo)")
 	return &Store{db: db}, nil
 }
 
@@ -388,13 +396,21 @@ func (s *Store) ComputeStats(repos []string, orgs []string) (*Stats, error) {
 			sum, minD, maxD := 0.0, durations[0], durations[0]
 			for _, d := range durations {
 				sum += d
-				if d < minD { minD = d }
-				if d > maxD { maxD = d }
+				if d < minD {
+					minD = d
+				}
+				if d > maxD {
+					maxD = d
+				}
 				switch {
-				case d < 30:   t.BucketFast++
-				case d < 120:  t.BucketMedium++
-				case d < 300:  t.BucketSlow++
-				default:       t.BucketVerySlow++
+				case d < 30:
+					t.BucketFast++
+				case d < 120:
+					t.BucketMedium++
+				case d < 300:
+					t.BucketSlow++
+				default:
+					t.BucketVerySlow++
 				}
 			}
 			t.AvgSeconds = sum / float64(n)

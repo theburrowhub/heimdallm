@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -11,6 +12,26 @@ import (
 	"github.com/heimdallm/daemon/internal/github"
 	"github.com/heimdallm/daemon/internal/store"
 )
+
+// ErrCircuitBreakerTripped is returned by Run when a review was skipped
+// because the per-PR or per-repo cap was exceeded. Callers detect it via
+// errors.As on a *CircuitBreakerError value to extract the human-readable
+// reason for telemetry/UI, or via errors.Is(err, ErrCircuitBreakerTripped)
+// when the reason is not needed.
+var ErrCircuitBreakerTripped = errors.New("pipeline: circuit breaker tripped")
+
+// CircuitBreakerError wraps ErrCircuitBreakerTripped with the specific
+// reason the breaker returned ("per-PR cap reached: ...", etc). Use
+// errors.As on this type to read Reason without parsing the error string.
+type CircuitBreakerError struct {
+	Reason string
+}
+
+func (e *CircuitBreakerError) Error() string {
+	return ErrCircuitBreakerTripped.Error() + ": " + e.Reason
+}
+
+func (e *CircuitBreakerError) Unwrap() error { return ErrCircuitBreakerTripped }
 
 // DiffFetcher retrieves the diff for a pull request.
 type DiffFetcher interface {
@@ -49,8 +70,8 @@ type CommentFetcher interface {
 
 // Pipeline orchestrates the full PR review flow.
 type Pipeline struct {
-	store    *store.Store
-	gh       interface {
+	store *store.Store
+	gh    interface {
 		DiffFetcher
 		GitHubReviewer
 		CommentFetcher
@@ -59,6 +80,10 @@ type Pipeline struct {
 	executor CLIExecutor
 	notify   Notifier
 	botLogin string
+	// breaker caps the number of reviews per PR and per repo. Nil disables
+	// all caps (the pre-issue-243 behaviour). Populated at daemon startup via
+	// SetCircuitBreakerLimits.
+	breaker *store.CircuitBreakerLimits
 }
 
 // New creates a new Pipeline with the provided dependencies.
@@ -74,6 +99,14 @@ func New(s *store.Store, gh interface {
 // SetBotLogin sets the GitHub login of the bot account. Used to filter
 // the bot's own comments from re-review discussion context.
 func (p *Pipeline) SetBotLogin(login string) { p.botLogin = login }
+
+// SetCircuitBreakerLimits enables the per-PR and per-repo caps. Nil
+// disables all caps. Captured by pointer at wiring time — config reloads
+// do NOT re-read this; see theburrowhub/heimdallm#243 for the rationale
+// and the follow-up ticket for re-plumbing via a getter.
+func (p *Pipeline) SetCircuitBreakerLimits(limits *store.CircuitBreakerLimits) {
+	p.breaker = limits
+}
 
 // applyPrompt resolves a prompt with priority: repoPromptID > agentPromptID > global default.
 func (p *Pipeline) applyPrompt(repoPromptID, agentPromptID string, tmpl *string, flags *string) {
@@ -289,6 +322,23 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		return nil, fmt.Errorf("pipeline: detect CLI: %w", err)
 	}
 	slog.Info("pipeline: using CLI", "cli", cli)
+
+	// 4b. Circuit breaker: hard cap on review count per PR / per repo. Runs
+	// AFTER all dedup layers so it only fires when the dedup failed but the
+	// caller is about to spend Claude credits anyway. See
+	// theburrowhub/heimdallm#243.
+	if p.breaker != nil {
+		tripped, reason, err := p.store.CheckCircuitBreaker(prID, pr.Repo, *p.breaker)
+		if err != nil {
+			slog.Warn("pipeline: circuit breaker check failed, proceeding", "err", err)
+		} else if tripped {
+			slog.Error("pipeline: CIRCUIT BREAKER TRIPPED — skipping review",
+				"repo", pr.Repo, "pr", pr.Number, "reason", reason)
+			p.notify.Notify("Heimdallm circuit breaker",
+				fmt.Sprintf("%s #%d: %s", pr.Repo, pr.Number, reason))
+			return nil, &CircuitBreakerError{Reason: reason}
+		}
+	}
 
 	// 5. Execute review (merge cliFlags from prompt into ExecOptions.ExtraFlags)
 	// Validate cliFlags from the prompt profile against the same denylist as
