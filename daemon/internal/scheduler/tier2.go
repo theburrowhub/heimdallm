@@ -148,6 +148,8 @@ func RunTier2(ctx context.Context, deps Tier2Deps, reposChan <-chan []string, co
 				if deps.Store.PRAlreadyReviewed(pr.ID, pr.UpdatedAt) {
 					continue
 				}
+				// On publish failure the PR is not marked reviewed in the store,
+				// so the next poll cycle will re-detect and retry it.
 				if err := deps.PRPublisher.PublishPRReview(ctx, pr.Repo, pr.Number, pr.ID, pr.HeadSHA); err != nil {
 					slog.Error("tier2: publish PR review", "repo", pr.Repo, "pr", pr.Number, "err", err)
 				}

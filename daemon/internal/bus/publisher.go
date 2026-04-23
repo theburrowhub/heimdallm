@@ -43,7 +43,11 @@ func NewPRReviewPublisher(js jetstream.JetStream) *PRReviewPublisher {
 }
 
 // PublishPRReview publishes a single PR review request with dedup via Nats-Msg-Id.
+// Returns an error if headSHA is empty to prevent dedup key collisions.
 func (p *PRReviewPublisher) PublishPRReview(ctx context.Context, repo string, number int, githubID int64, headSHA string) error {
+	if headSHA == "" {
+		return fmt.Errorf("bus: publish pr review: empty headSHA for %s #%d", repo, number)
+	}
 	data, err := Encode(PRReviewMsg{
 		Repo:     repo,
 		Number:   number,

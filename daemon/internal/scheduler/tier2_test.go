@@ -55,6 +55,11 @@ func (m *mockStore) PRAlreadyReviewed(githubID int64, _ time.Time) bool {
 	return m.reviewed[githubID]
 }
 
+// noopPromoter satisfies Tier2Promoter for tests that don't exercise promotion.
+type noopPromoter struct{}
+
+func (n *noopPromoter) PromoteReady(_ context.Context, _ []string) (int, error) { return 0, nil }
+
 func TestRunTier2_PublishesPRsToNATS(t *testing.T) {
 	prPub := &mockPRPublisher{}
 	fetcher := &mockPRFetcher{prs: []scheduler.Tier2PR{
@@ -67,7 +72,7 @@ func TestRunTier2_PublishesPRsToNATS(t *testing.T) {
 	reposChan := make(chan []string, 1)
 	reposChan <- []string{"org/repo1", "org/repo2"}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	go scheduler.RunTier2(ctx, scheduler.Tier2Deps{
@@ -77,21 +82,30 @@ func TestRunTier2_PublishesPRsToNATS(t *testing.T) {
 		PRProcessor:    &noopPRProcessor{},
 		PRPublisher:    prPub,
 		IssueProcessor: &noopIssueProcessor{},
+		Promoter:       &noopPromoter{},
 		Store:          store,
 		ConfigFn:       func() []string { return nil },
-		Interval:       10 * time.Second, // long interval so only the cold-start tick fires
+		Interval:       10 * time.Second,
 	}, reposChan, true)
 
-	// RunTier2 waits 2s for Tier 1's first batch before firing processTick,
-	// so we need to wait >2s for the cold-start tick to execute.
-	time.Sleep(3 * time.Second)
-	cancel()
-
-	calls := prPub.getCalls()
-	if len(calls) != 1 {
-		t.Fatalf("expected 1 published PR, got %d: %+v", len(calls), calls)
-	}
-	if calls[0].GithubID != 1 || calls[0].HeadSHA != "sha1" {
-		t.Errorf("unexpected PR published: %+v", calls[0])
+	// Poll until the cold-start processTick publishes (RunTier2 waits 2s
+	// for Tier 1's first batch before firing). Bounded by ctx timeout.
+	deadline := time.After(5 * time.Second)
+	for {
+		calls := prPub.getCalls()
+		if len(calls) > 0 {
+			if len(calls) != 1 {
+				t.Fatalf("expected 1 published PR, got %d: %+v", len(calls), calls)
+			}
+			if calls[0].GithubID != 1 || calls[0].HeadSHA != "sha1" {
+				t.Errorf("unexpected PR published: %+v", calls[0])
+			}
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for PublishPRReview call")
+		case <-time.After(100 * time.Millisecond):
+		}
 	}
 }
