@@ -21,10 +21,11 @@ type Config struct {
 
 // Bus wraps an embedded NATS server with a JetStream-enabled client.
 type Bus struct {
-	server *natsserver.Server
-	conn   *nats.Conn
-	js     jetstream.JetStream
-	cfg    Config
+	server  *natsserver.Server
+	conn    *nats.Conn
+	js      jetstream.JetStream
+	cfg     Config
+	watchKV *WatchKV
 
 	stopOnce sync.Once
 }
@@ -87,6 +88,16 @@ func (b *Bus) Start(ctx context.Context) error {
 		return err
 	}
 
+	kv, err := b.js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
+		Bucket: kvBucketWatch,
+	})
+	if err != nil {
+		conn.Close()
+		srv.Shutdown()
+		return fmt.Errorf("bus: create KV bucket %s: %w", kvBucketWatch, err)
+	}
+	b.watchKV = NewWatchKV(kv)
+
 	slog.Info("bus: NATS started", "store_dir", b.cfg.DataDir, "workers", b.cfg.MaxConcurrentWorkers)
 	return nil
 }
@@ -124,4 +135,9 @@ func (b *Bus) Conn() *nats.Conn {
 // JetStream returns the JetStream context. Use for stream/consumer operations.
 func (b *Bus) JetStream() jetstream.JetStream {
 	return b.js
+}
+
+// WatchKV returns the durable watch-state KV store.
+func (b *Bus) WatchKV() *WatchKV {
+	return b.watchKV
 }
