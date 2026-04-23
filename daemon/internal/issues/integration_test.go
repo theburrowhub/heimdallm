@@ -2,6 +2,7 @@ package issues_test
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -216,20 +217,100 @@ func TestIntegration_ConcurrentPipelineRunsCollapseToOneDispatch(t *testing.T) {
 // blockingExec is a CLIExecutor whose ExecuteRaw invokes `onCall` (if
 // set) before returning. Tests use it to insert a sync primitive between
 // "pipeline took the claim" and "pipeline releases the claim", so two
-// goroutines can deterministically contend on the claim.
+// goroutines can deterministically contend on the claim. `called` is a
+// simple flag other tests use to assert the executor was or was not
+// reached at all (circuit-breaker short-circuit).
 type blockingExec struct {
 	cli    string
 	out    []byte
 	onCall func()
+	called bool
 }
 
 func (e *blockingExec) Detect(_, _ string) (string, error) { return e.cli, nil }
 
 func (e *blockingExec) ExecuteRaw(_, _ string, _ executor.ExecOptions) ([]byte, error) {
+	e.called = true
 	if e.onCall != nil {
 		e.onCall()
 	}
 	return e.out, nil
+}
+
+// TestIntegration_IssueCircuitBreakerTripsAfterCap locks in the Fix 3
+// behaviour from #292: after PerIssue24h successful triages on the same
+// issue, the next Run must short-circuit with a *CircuitBreakerError
+// and MUST NOT call the LLM executor. Uses a real store (so row counts
+// are authoritative) and pre-seeds issue_reviews to reach the cap.
+func TestIntegration_IssueCircuitBreakerTripsAfterCap(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	now := time.Now().UTC().Truncate(time.Second)
+	gh := &github.Issue{
+		ID: 3001, Number: 11, Repo: "org/repo",
+		Title: "Cost runaway candidate", Body: ".",
+		State: "open", User: github.User{Login: "reporter"},
+		Labels: []github.Label{}, Assignees: []github.User{},
+		CreatedAt: now, UpdatedAt: now,
+		Mode: config.IssueModeReviewOnly,
+	}
+
+	// Upsert the issue so we can seed reviews keyed on its store ID.
+	storeIssue := &store.Issue{
+		GithubID: gh.ID, Repo: gh.Repo, Number: gh.Number,
+		Title: gh.Title, Body: gh.Body, Author: gh.User.Login,
+		State:     gh.State,
+		CreatedAt: gh.CreatedAt, FetchedAt: now,
+	}
+	storeID, err := s.UpsertIssue(storeIssue)
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	// Seed 3 triages within the 24h window — at the cap.
+	for i := 0; i < 3; i++ {
+		if _, err := s.InsertIssueReview(&store.IssueReview{
+			IssueID: storeID, CLIUsed: "claude",
+			Summary:     "prior",
+			Triage:      "{}",
+			Suggestions: "[]",
+			ActionTaken: string(config.IssueModeReviewOnly),
+			CreatedAt:   time.Now().Add(time.Duration(-i) * time.Minute),
+		}); err != nil {
+			t.Fatalf("seed review %d: %v", i, err)
+		}
+	}
+
+	bexec := &blockingExec{cli: "claude", out: []byte(validResult)}
+	pipe := issues.New(s, &fakeGH{}, bexec, nil, &fakeBroker{}, nil)
+	pipe.SetCircuitBreakerLimits(&store.IssueCircuitBreakerLimits{
+		PerIssue24h: 3,
+		PerRepoHr:   10,
+	})
+
+	// But wait — the pipeline checks the claim on `gh.ID` (the GitHub ID,
+	// not the store ID) while CheckIssueCircuitBreaker wants the store ID.
+	// Verify: the pipeline resolves the store ID internally before the
+	// breaker check. That's the contract the fix relies on.
+	_, runErr := pipe.Run(context.Background(), gh, issues.RunOptions{Primary: "claude"})
+
+	var cbErr *issues.CircuitBreakerError
+	if !errors.As(runErr, &cbErr) {
+		t.Fatalf("expected *issues.CircuitBreakerError, got %v", runErr)
+	}
+	if cbErr.Reason == "" {
+		t.Errorf("CircuitBreakerError.Reason empty; telemetry relies on it")
+	}
+	if !errors.Is(runErr, issues.ErrCircuitBreakerTripped) {
+		t.Errorf("expected errors.Is match on ErrCircuitBreakerTripped, got nope")
+	}
+	// LLM must not have been called.
+	if bexec.called {
+		t.Errorf("circuit breaker should short-circuit BEFORE ExecuteRaw; executor was called")
+	}
 }
 
 func TestIntegration_RecomputeGraceIsExportedForMainPipeline(t *testing.T) {

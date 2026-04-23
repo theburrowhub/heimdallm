@@ -8,6 +8,7 @@ package issues
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -19,6 +20,27 @@ import (
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
 )
+
+// ErrCircuitBreakerTripped is returned by Run when a triage was skipped
+// because the per-issue or per-repo cap was exceeded. Mirrors the PR-side
+// error in the pipeline package; callers detect it via errors.As on a
+// *CircuitBreakerError value to extract the human-readable reason, or via
+// errors.Is(err, ErrCircuitBreakerTripped) when the reason is not needed.
+// See theburrowhub/heimdallm#292.
+var ErrCircuitBreakerTripped = errors.New("issues pipeline: circuit breaker tripped")
+
+// CircuitBreakerError wraps ErrCircuitBreakerTripped with the specific
+// reason the breaker returned. Use errors.As on this type to read Reason
+// without parsing the error string.
+type CircuitBreakerError struct {
+	Reason string
+}
+
+func (e *CircuitBreakerError) Error() string {
+	return ErrCircuitBreakerTripped.Error() + ": " + e.Reason
+}
+
+func (e *CircuitBreakerError) Unwrap() error { return ErrCircuitBreakerTripped }
 
 // maxTitleBytes bounds the length of issue titles that get interpolated into
 // commit messages and PR title / body. Long titles turn into unwieldy
@@ -185,11 +207,23 @@ type Pipeline struct {
 	broker   Publisher
 	notify   Notifier
 	botLogin string
+
+	// breaker caps the number of triages per issue and per repo. Nil
+	// disables both axes (no limit). Configure at startup via
+	// SetCircuitBreakerLimits.
+	breaker *store.IssueCircuitBreakerLimits
 }
 
 // SetBotLogin sets the GitHub login of the bot account. Used to filter
 // the bot's own comments from the "new discussion" section in re-triages.
 func (p *Pipeline) SetBotLogin(login string) { p.botLogin = login }
+
+// SetCircuitBreakerLimits enables the per-issue and per-repo triage
+// caps. Nil disables both axes; zero values within a non-nil struct
+// disable only that axis.
+func (p *Pipeline) SetCircuitBreakerLimits(limits *store.IssueCircuitBreakerLimits) {
+	p.breaker = limits
+}
 
 // issueStore is the subset of *store.Store the pipeline needs. Kept narrow
 // so tests can substitute a fake without bringing in SQLite.
@@ -205,6 +239,7 @@ type issueStore interface {
 	UpsertPR(pr *store.PR) (int64, error)
 	ClaimIssueTriageInFlight(issueID int64, updatedAt string) (bool, error)
 	ReleaseIssueTriageInFlight(issueID int64, updatedAt string) error
+	CheckIssueCircuitBreaker(issueID int64, repo string, cfg store.IssueCircuitBreakerLimits) (bool, string, error)
 }
 
 // issueGitHub groups every GitHub-facing method the pipeline uses. The
@@ -299,6 +334,12 @@ func (p *Pipeline) Run(ctx context.Context, issue *github.Issue, opts RunOptions
 	// here. issue_detected fires before the flow forks, issue_review_started
 	// fires after so the UI can show the correct "triaging" vs "implementing"
 	// copy — the runner sets the exact flavour it wants.
+	//
+	// Upsert runs BEFORE the circuit breaker so the breaker's per-issue
+	// count (which keys on the internal store ID via issue_reviews.issue_id)
+	// sees the correct row. The upsert is idempotent — on a breaker-trip
+	// the issue row stays but no issue_reviews row is written for this
+	// attempt, which matches the PR-side behaviour.
 	storeIssue, err := issueToStore(issue)
 	if err != nil {
 		return nil, err
@@ -307,6 +348,28 @@ func (p *Pipeline) Run(ctx context.Context, issue *github.Issue, opts RunOptions
 	if err != nil {
 		return nil, fmt.Errorf("issues pipeline: upsert issue: %w", err)
 	}
+
+	// Circuit breaker: hard cap on triage count per issue / per repo.
+	// Runs AFTER the in-flight claim and upsert so it only fires when
+	// both dedup layers missed; returns *CircuitBreakerError so the
+	// caller (fetcher) can distinguish it from a genuine pipeline
+	// failure. See theburrowhub/heimdallm#292.
+	if p.breaker != nil {
+		tripped, reason, err := p.store.CheckIssueCircuitBreaker(issueID, issue.Repo, *p.breaker)
+		if err != nil {
+			slog.Warn("issues pipeline: circuit breaker check failed, proceeding",
+				"repo", issue.Repo, "number", issue.Number, "err", err)
+		} else if tripped {
+			slog.Error("issues pipeline: CIRCUIT BREAKER TRIPPED — skipping triage",
+				"repo", issue.Repo, "number", issue.Number, "reason", reason)
+			if p.notify != nil {
+				p.notify.Notify("Heimdallm issue circuit breaker",
+					fmt.Sprintf("%s #%d: %s", issue.Repo, issue.Number, reason))
+			}
+			return nil, &CircuitBreakerError{Reason: reason}
+		}
+	}
+
 	p.publish(sse.EventIssueDetected, map[string]any{
 		"issue_id": issueID, "number": issue.Number, "repo": issue.Repo,
 	})

@@ -191,11 +191,19 @@ func main() {
 	}
 	p.SetCircuitBreakerLimits(&cbLimits)
 
+	// Issue-side circuit-breaker caps (theburrowhub/heimdallm#292) — mirrors
+	// the PR-side defenses against runaway triage loops.
+	issueCBLimits := store.IssueCircuitBreakerLimits{
+		PerIssue24h: cfg.CircuitBreaker.PerIssue24h,
+		PerRepoHr:   cfg.CircuitBreaker.PerIssueRepoHr,
+	}
+
 	// GitExec drives the auto_implement flow (#27): branch, commit, push, PR.
 	// Wired unconditionally — the pipeline guards against running git ops on
 	// an issue that is classified as review_only, so this dep is harmless
 	// when auto_implement is not in use.
 	issuePipe := issuepipeline.New(s, ghClient, exec, issuepipeline.NewGitExec(), broker, &notifyWithSSE{notifier: notifier})
+	issuePipe.SetCircuitBreakerLimits(&issueCBLimits)
 
 	// Resolve bot login for re-review / re-triage context filtering.
 	if login, err := ghClient.AuthenticatedUser(); err == nil {

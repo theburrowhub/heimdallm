@@ -40,6 +40,12 @@ type fakeStore struct {
 	claims     map[string]struct{}
 	claimErr   error
 	releaseErr error
+
+	// circuit-breaker knobs (#292). breakerTripped forces the next check
+	// to return tripped=true; breakerErr makes it return an error.
+	breakerTripped bool
+	breakerReason  string
+	breakerErr     error
 }
 
 func (f *fakeStore) UpsertIssue(i *store.Issue) (int64, error) {
@@ -107,6 +113,20 @@ func (f *fakeStore) ReleaseIssueTriageInFlight(issueID int64, updatedAt string) 
 	defer f.claimsMu.Unlock()
 	delete(f.claims, fmt.Sprintf("%d|%s", issueID, updatedAt))
 	return nil
+}
+
+func (f *fakeStore) CheckIssueCircuitBreaker(issueID int64, repo string, cfg store.IssueCircuitBreakerLimits) (bool, string, error) {
+	if f.breakerErr != nil {
+		return false, "", f.breakerErr
+	}
+	if f.breakerTripped {
+		reason := f.breakerReason
+		if reason == "" {
+			reason = "test breaker tripped"
+		}
+		return true, reason, nil
+	}
+	return false, "", nil
 }
 
 type fakeGH struct {
