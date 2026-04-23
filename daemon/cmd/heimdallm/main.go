@@ -311,6 +311,32 @@ func main() {
 				claimPRID = stored.ID
 				claimSHA = pr.Head.SHA
 			}
+		} else {
+			// Defensive log: the claim guard was short-circuited. Surfaces
+			// the wiring regression theburrowhub/heimdallm#264 (empty SHA)
+			// and the early-stage "PR not yet upserted" path; downstream
+			// defenses (fail-closed SHA in pipeline.Run, circuit breaker,
+			// PublishedAt grace) still cap cost in both cases.
+			//
+			// The reason string is computed from the actual predicates
+			// rather than an else-branch nil check, so a future edit to
+			// the outer guard doesn't silently mislead operators — the
+			// log stays truthful no matter what combination of conditions
+			// steered us into this branch.
+			var reason string
+			switch {
+			case stored == nil:
+				reason = "stored PR not found"
+			case pr.Head.SHA == "":
+				reason = "empty Head.SHA from caller"
+			default:
+				// Unreachable under today's guard (stored != nil && SHA != "")
+				// but kept so a future added clause still yields a
+				// non-misleading message.
+				reason = "claim precondition failed"
+			}
+			slog.Info("runReview: in-flight claim skipped (defenses still apply)",
+				"pr", pr.Number, "repo", pr.Repo, "reason", reason)
 		}
 		defer func() {
 			if claimed {
@@ -1383,6 +1409,26 @@ func (a *tier2Adapter) FetchPRsToReview() ([]scheduler.Tier2PR, error) {
 		delete(a.lastSkippedUpdatedAt, pr.ID)
 		a.skipMu.Unlock()
 
+		// Resolve the HEAD SHA so the persistent in-flight claim (#258) can
+		// key on (pr_id, head_sha) downstream. The Search Issues API does
+		// NOT populate head.sha, so this is an extra /pulls/N call per PR
+		// that cleared the review guards — bounded by the small number of
+		// review-requested PRs per cycle. See theburrowhub/heimdallm#264
+		// for the bug this closes: before this lookup the SHA was empty,
+		// and runReview silently skipped the claim guard on every tick.
+		//
+		// Fail-open on resolver error: empty HeadSHA makes runReview fall
+		// back to the other layered defenses (fail-closed SHA in
+		// pipeline.Run, circuit breaker, PublishedAt grace). Blocking a
+		// review on a transient SHA-lookup blip would be worse than
+		// leaning on those defenses for one cycle.
+		headSHA, shaErr := a.ghClient.GetPRHeadSHA(pr.Repo, pr.Number)
+		if shaErr != nil {
+			slog.Warn("tier2: HEAD SHA lookup failed, in-flight claim will be skipped for this tick",
+				"repo", pr.Repo, "pr", pr.Number, "err", shaErr)
+			headSHA = ""
+		}
+
 		out = append(out, scheduler.Tier2PR{
 			ID:        pr.ID,
 			Number:    pr.Number,
@@ -1393,6 +1439,7 @@ func (a *tier2Adapter) FetchPRsToReview() ([]scheduler.Tier2PR, error) {
 			State:     pr.State,
 			Draft:     pr.Draft,
 			UpdatedAt: pr.UpdatedAt,
+			HeadSHA:   headSHA,
 		})
 	}
 
@@ -1431,6 +1478,12 @@ func (a *tier2Adapter) ProcessPR(ctx context.Context, pr scheduler.Tier2PR) erro
 		State:     pr.State,
 		Draft:     pr.Draft,
 		UpdatedAt: pr.UpdatedAt,
+		// Head.SHA is populated by FetchPRsToReview (after the review-guard
+		// filter). Passing it here is what lets runReview's persistent
+		// in-flight claim actually fire; before theburrowhub/heimdallm#264
+		// this field was zero-valued and the claim guard silently skipped,
+		// allowing two concurrent reviews on the same PR (#243 pattern).
+		Head: gh.Branch{SHA: pr.HeadSHA},
 	}
 	a.runReview(ghPR, aiCfg)
 	return nil
@@ -1608,11 +1661,16 @@ func (a *tier2Adapter) CheckItem(ctx context.Context, item *scheduler.WatchItem)
 		if !snap.UpdatedAt.After(item.LastSeen) {
 			return false, nil, nil
 		}
+		// Forward HeadSHA so HandleChange can feed it into runReview's
+		// persistent in-flight claim (#258, theburrowhub/heimdallm#264).
+		// GetPRSnapshot already fetches head.sha in the same /pulls/N call —
+		// this is a free copy, no extra GitHub API cost.
 		return true, &scheduler.ItemSnapshot{
 			State:     snap.State,
 			Draft:     snap.Draft,
 			Author:    snap.Author,
 			UpdatedAt: snap.UpdatedAt,
+			HeadSHA:   snap.HeadSHA,
 		}, nil
 	}
 	// Issues: GetIssue returns state + updated_at in one call. Draft is always
@@ -1709,6 +1767,13 @@ func (a *tier2Adapter) HandleChange(ctx context.Context, item *scheduler.WatchIt
 			State:     snap.State,
 			Draft:     snap.Draft,
 			UpdatedAt: snap.UpdatedAt,
+			// Head.SHA is carried through ItemSnapshot from GetPRSnapshot
+			// (same /pulls/N call that already populated State/Draft). The
+			// persistent in-flight claim (#258) needs it to key on
+			// (pr_id, head_sha); without it we reproduce the Tier 3 half of
+			// theburrowhub/heimdallm#264 — a second tick on the same watched
+			// PR silently bypasses the claim and runs a concurrent review.
+			Head: gh.Branch{SHA: snap.HeadSHA},
 		}
 		if stored != nil {
 			ghPR.Title = stored.Title

@@ -11,13 +11,20 @@ import (
 // from CheckItem so HandleChange does not re-fetch from GitHub.
 //
 // Fields are optional — only those relevant to the item's type are populated
-// (e.g. Draft is always false for issues). A nil snapshot signals "no change
-// detected" and is ignored by HandleChange.
+// (e.g. Draft is always false for issues, HeadSHA is empty for issues).
+// A nil snapshot signals "no change detected" and is ignored by HandleChange.
+//
+// HeadSHA is populated for PR snapshots and is load-bearing for the
+// persistent in-flight claim (#258): the Tier 3 path was one of the two
+// call sites that passed an empty SHA to runReview in #264, bypassing the
+// claim and re-opening the #243 double-review pattern for PRs that had
+// already been pushed into the watch queue.
 type ItemSnapshot struct {
 	State     string
 	Draft     bool
 	Author    string
 	UpdatedAt time.Time
+	HeadSHA   string
 }
 
 // Tier3ItemChecker checks a single item for state changes.
