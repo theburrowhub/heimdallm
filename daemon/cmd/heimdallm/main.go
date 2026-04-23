@@ -118,6 +118,16 @@ func main() {
 		slog.Warn("activity retention purge failed", "err", err)
 	}
 
+	// Clear in-flight review claims leaked by a daemon that crashed between
+	// claim and release. The 30-minute cutoff gives normal reviews (which
+	// finish in seconds-minutes) plenty of headroom while still cleaning up
+	// anything stuck from a previous process. See theburrowhub/heimdallm#243.
+	if n, err := s.ClearStaleInFlight(30 * time.Minute); err != nil {
+		slog.Warn("startup: clear stale inflight failed", "err", err)
+	} else if n > 0 {
+		slog.Info("startup: cleared stale inflight rows", "count", n)
+	}
+
 	broker := sse.NewBroker()
 	broker.Start()
 
@@ -203,11 +213,6 @@ func main() {
 	var loginMu sync.Mutex
 	var cachedLogin string
 
-	// reviewMu prevents concurrent pipeline runs for the same GitHub PR ID.
-	// Key: pr.ID (GitHub PR ID), Value: true while being reviewed.
-	var reviewMu sync.Mutex
-	inFlight := make(map[int64]bool)
-
 	buildRunOpts := func(pr *gh.PullRequest, aiCfg config.RepoAI) pipeline.RunOptions {
 		cli := aiCfg.Primary
 		if cli == "" {
@@ -257,19 +262,40 @@ func main() {
 	}
 
 	runReview := func(pr *gh.PullRequest, aiCfg config.RepoAI) {
-		// Guard: skip if already being reviewed
-		reviewMu.Lock()
-		if inFlight[pr.ID] {
-			reviewMu.Unlock()
-			slog.Info("review already in flight, skipping", "pr", pr.Number, "repo", pr.Repo)
-			return
+		// Persistent in-flight claim: survives daemon restart and config reload.
+		// Keyed on (pr_id, head_sha) so a new commit on the same PR is not
+		// gated by a stale in-flight row from a prior HEAD. See
+		// theburrowhub/heimdallm#243.
+		//
+		// For early-stage PRs that have not yet been upserted, OR for PRs
+		// where the HEAD SHA is not yet known, skip the claim — the
+		// downstream SHA dedup in pipeline.Run (already fail-closed per
+		// Task 1) handles those paths.
+		stored, _ := s.GetPRByGithubID(pr.ID)
+		var claimed bool
+		var claimPRID int64
+		var claimSHA string
+		if stored != nil && pr.Head.SHA != "" {
+			ok, err := s.ClaimInFlightReview(stored.ID, pr.Head.SHA)
+			if err != nil {
+				slog.Warn("runReview: claim inflight failed, proceeding", "err", err)
+			} else if !ok {
+				slog.Info("runReview: already in flight (persistent), skipping",
+					"pr", pr.Number, "repo", pr.Repo, "head_sha", pr.Head.SHA)
+				return
+			} else {
+				claimed = true
+				claimPRID = stored.ID
+				claimSHA = pr.Head.SHA
+			}
 		}
-		inFlight[pr.ID] = true
-		reviewMu.Unlock()
 		defer func() {
-			reviewMu.Lock()
-			delete(inFlight, pr.ID)
-			reviewMu.Unlock()
+			if claimed {
+				if err := s.ReleaseInFlightReview(claimPRID, claimSHA); err != nil {
+					slog.Warn("runReview: release inflight failed", "err", err,
+						"pr_id", claimPRID, "head_sha", claimSHA)
+				}
+			}
 		}()
 
 		// Caller-side gate: evaluate review guards BEFORE announcing the review.
@@ -397,7 +423,10 @@ func main() {
 	}
 
 	pipe := buildPipeline(cfg)
-	pipe.Start(context.Background())
+	// Initial daemon start → coldStart=true so Tier 2 fires its first tick
+	// immediately; operators see polling activity without waiting an entire
+	// PollInterval. The reload path below passes false.
+	pipe.Start(context.Background(), true)
 	// Use a closure so the defer reads the current pipe variable at shutdown
 	// time, not the initial pointer captured at defer-statement time. After a
 	// reload, pipe points to a new pipeline — the bare defer would stop the
@@ -617,7 +646,11 @@ func main() {
 		pipe = newPipe
 		cfgMu.Unlock()
 
-		newPipe.Start(context.Background())
+		// Reload path → coldStart=false so Tier 2 waits one full PollInterval
+		// before its first tick. A UI config PATCH triggers this path; firing
+		// an immediate tick on every PATCH would fan out reviews across the
+		// whole fleet and amplify the cost-runaway loop #243 closed.
+		newPipe.Start(context.Background(), false)
 		return nil
 	})
 
@@ -663,18 +696,31 @@ func main() {
 		slog.Info("trigger review: running pipeline",
 			"store_pr_id", prID, "repo", pr.Repo, "number", pr.Number, "github_id", pr.GithubID)
 
-		// Use the same in-flight guard as the poll loop
-		reviewMu.Lock()
-		if inFlight[ghPR.ID] {
-			reviewMu.Unlock()
-			return fmt.Errorf("review already in progress for PR %d", ghPR.Number)
+		// Persistent in-flight claim: keyed on (store pr_id, head_sha).
+		// Triggered reviews are reconstructed from stored PR data which has no
+		// HEAD SHA populated; in that case we skip the claim and rely on the
+		// downstream SHA dedup inside pipeline.Run (Task 1, fail-closed) to
+		// prevent duplicate work. When the head SHA is known, claim/release
+		// using the same mechanism as the poll loop so both paths share the
+		// same persistent guard across daemon restart / config reload.
+		var triggerClaimed bool
+		if ghPR.Head.SHA != "" {
+			ok, err := s.ClaimInFlightReview(pr.ID, ghPR.Head.SHA)
+			if err != nil {
+				slog.Warn("trigger review: claim inflight failed, proceeding", "err", err)
+			} else if !ok {
+				return fmt.Errorf("review already in progress for PR %d", ghPR.Number)
+			} else {
+				triggerClaimed = true
+			}
 		}
-		inFlight[ghPR.ID] = true
-		reviewMu.Unlock()
 		defer func() {
-			reviewMu.Lock()
-			delete(inFlight, ghPR.ID)
-			reviewMu.Unlock()
+			if triggerClaimed {
+				if err := s.ReleaseInFlightReview(pr.ID, ghPR.Head.SHA); err != nil {
+					slog.Warn("trigger review: release inflight failed", "err", err,
+						"pr_id", pr.ID, "head_sha", ghPR.Head.SHA)
+				}
+			}
 		}()
 
 		rev, err := p.Run(ghPR, buildRunOpts(ghPR, aiCfg))

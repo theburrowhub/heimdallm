@@ -124,6 +124,13 @@ CREATE TABLE IF NOT EXISTS activity_log (
 );
 CREATE INDEX IF NOT EXISTS idx_activity_ts      ON activity_log(ts DESC);
 CREATE INDEX IF NOT EXISTS idx_activity_repo_ts ON activity_log(repo, ts DESC);
+
+CREATE TABLE IF NOT EXISTS reviews_in_flight (
+  pr_id       INTEGER NOT NULL,
+  head_sha    TEXT    NOT NULL,
+  started_at  DATETIME NOT NULL,
+  PRIMARY KEY (pr_id, head_sha)
+);
 `
 
 // Open opens (or creates) a SQLite database at dsn and applies the schema.
@@ -178,6 +185,14 @@ func Open(dsn string) (*Store, error) {
 	// JOIN drives from prs.repo with no index and table-scans on every
 	// poll-cycle breaker check.
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_prs_repo ON prs(repo)")
+	// Idempotent migration for existing DBs — new installs get the table
+	// from the schema constant above. Safe on every startup.
+	db.Exec(`CREATE TABLE IF NOT EXISTS reviews_in_flight (
+		pr_id       INTEGER NOT NULL,
+		head_sha    TEXT    NOT NULL,
+		started_at  DATETIME NOT NULL,
+		PRIMARY KEY (pr_id, head_sha)
+	)`)
 	return &Store{db: db}, nil
 }
 

@@ -69,7 +69,13 @@ func NewPipeline(cfg PipelineConfig, deps PipelineDeps) *Pipeline {
 }
 
 // Start launches all 3 tiers and the rate limiter refill goroutine.
-func (p *Pipeline) Start(parentCtx context.Context) {
+//
+// coldStart controls whether Tier 2 runs its first processTick immediately.
+// Pass true on initial daemon startup, false on a pipeline reload triggered
+// by config change. See RunTier2 for the rationale — in short, a config
+// reload can come from a UI PATCH and firing Tier 2 before backoff state
+// settles would amplify any in-flight review loop.
+func (p *Pipeline) Start(parentCtx context.Context, coldStart bool) {
 	ctx, cancel := context.WithCancel(parentCtx)
 	p.cancel = cancel
 
@@ -119,7 +125,7 @@ func (p *Pipeline) Start(parentCtx context.Context) {
 			Store:          p.deps.Store,
 			ConfigFn:       p.deps.Tier2ConfigFn,
 			Interval:       p.cfg.PollInterval,
-		}, reposChan)
+		}, reposChan, coldStart)
 	}()
 
 	// Tier 3: Per-item watch
