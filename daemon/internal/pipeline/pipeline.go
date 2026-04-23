@@ -208,8 +208,11 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	if pr.Head.SHA == "" {
 		sha, err := p.gh.GetPRHeadSHA(pr.Repo, pr.Number)
 		if err != nil {
-			// One short retry absorbs rate-limit blips without turning the
-			// fail-closed stance into a permanent outage.
+			// Short backoff before the single retry — 0ms back-to-back retries
+			// are useless against 429s (the rate window is still active).
+			// #243's specific failure mode was rate-limit 429s, so the retry
+			// needs at least a small gap to have any chance of succeeding.
+			time.Sleep(500 * time.Millisecond)
 			sha, err = p.gh.GetPRHeadSHA(pr.Repo, pr.Number)
 		}
 		if err != nil {

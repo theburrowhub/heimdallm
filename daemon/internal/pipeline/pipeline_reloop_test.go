@@ -33,7 +33,6 @@ type fakeGHReloop struct {
 	headSHACalls int
 	submitted    bool
 	diffCalled   bool
-	execCalled   bool
 }
 
 func (f *fakeGHReloop) GetPRHeadSHA(_ string, _ int) (string, error) {
@@ -96,6 +95,13 @@ func TestRun_FailClosedWhenHeadSHALookupFails(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected fail-closed error, got nil")
 	}
+	// Cost-boundary contract: FetchDiff IS allowed to run (it happens before
+	// the SHA check at pipeline.go:192) — it's a cheap GitHub API call. What
+	// must NOT run is the Claude executor or the review submission, because
+	// those are the expensive steps that burned €1,300 in #243.
+	if !fgh.diffCalled {
+		t.Errorf("expected FetchDiff to run before the SHA check (documents cost boundary)")
+	}
 	if fexec.calls != 0 {
 		t.Errorf("executor must not be called when HEAD SHA resolver fails (calls=%d)", fexec.calls)
 	}
@@ -133,14 +139,14 @@ func TestRun_LegacyRowWithEmptyHeadSHAIsBackfilledAndSkipped(t *testing.T) {
 		t.Fatalf("upsert pr: %v", err)
 	}
 	_, err = s.InsertReview(&store.Review{
-		PRID:      prID,
-		CLIUsed:   "claude",
-		Summary:   "",
-		Issues:    "[]",
+		PRID:        prID,
+		CLIUsed:     "claude",
+		Summary:     "",
+		Issues:      "[]",
 		Suggestions: "[]",
-		Severity:  "low",
-		CreatedAt: time.Now().Add(-1 * time.Hour),
-		HeadSHA:   "",
+		Severity:    "low",
+		CreatedAt:   time.Now().Add(-1 * time.Hour),
+		HeadSHA:     "",
 	})
 	if err != nil {
 		t.Fatalf("insert legacy review: %v", err)
