@@ -1,7 +1,10 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -9,6 +12,8 @@ import (
 
 func newPRsCmd() *cobra.Command {
 	var severity string
+	var repo string
+	var jsonOutput bool
 
 	cmd := &cobra.Command{
 		Use:   "prs",
@@ -44,22 +49,56 @@ func newPRsCmd() *cobra.Command {
 				}
 			}
 
+			if repo != "" {
+				n := 0
+				for _, pr := range filtered {
+					if strings.EqualFold(pr.Repo, repo) {
+						filtered[n] = pr
+						n++
+					}
+				}
+				filtered = filtered[:n]
+			}
+
 			if len(filtered) == 0 {
-				fmt.Printf("No PRs matching severity %q.\n", severity)
+				fmt.Println("No PRs matching the given filters.")
 				return nil
 			}
 
-			fmt.Printf("%-6s %-30s %-40s %-8s %-8s\n", "ID", "REPO", "TITLE", "SEVERITY", "STATE")
-			fmt.Println(strings.Repeat("─", 96))
+			sort.Slice(filtered, func(i, j int) bool {
+				ri, rj := filtered[i].LatestReview, filtered[j].LatestReview
+				if ri == nil {
+					return false
+				}
+				if rj == nil {
+					return true
+				}
+				return ri.CreatedAt.After(rj.CreatedAt)
+			})
+
+			if jsonOutput {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				return enc.Encode(filtered)
+			}
+
+			fmt.Printf("%-6s %-28s %-34s %-14s %-8s %-8s %-10s\n",
+				"ID", "REPO", "TITLE", "AUTHOR", "SEVERITY", "STATE", "DATE")
+			fmt.Println(strings.Repeat("─", 114))
 
 			for _, pr := range filtered {
 				sev := "---"
+				date := "---"
 				if pr.LatestReview != nil {
 					sev = pr.LatestReview.Severity
+					date = pr.LatestReview.CreatedAt.Format("2006-01-02")
 				}
-				title := truncate(pr.Title, 38)
-				repo := truncate(pr.Repo, 28)
-				fmt.Printf("%-6d %-30s %-40s %-8s %-8s\n", pr.ID, repo, title, sev, pr.State)
+				title := truncate(pr.Title, 32)
+				repoStr := truncate(pr.Repo, 26)
+				author := truncate(pr.Author, 12)
+				sevCol := colorSeverity(sev, 8)
+				fmt.Printf("%-6d %-28s %-34s %-14s %s %-8s %-10s\n",
+					pr.ID, repoStr, title, author, sevCol, pr.State, date)
 			}
 
 			fmt.Printf("\n%d PRs listed.\n", len(filtered))
@@ -68,6 +107,8 @@ func newPRsCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&severity, "severity", "", "filter by severity (info, low, medium, high)")
+	cmd.Flags().StringVar(&repo, "repo", "", "filter by repository (org/repo)")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "output as JSON")
 
 	return cmd
 }
