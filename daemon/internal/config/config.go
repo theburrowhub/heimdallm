@@ -40,8 +40,9 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Port     int    `toml:"port"`
-	BindAddr string `toml:"bind_addr"`
+	Port                 int    `toml:"port"`
+	BindAddr             string `toml:"bind_addr"`
+	MaxConcurrentWorkers int    `toml:"max_concurrent_workers"`
 }
 
 type GitHubConfig struct {
@@ -617,6 +618,9 @@ func (c *Config) applyDefaults() {
 	if c.Server.BindAddr == "" {
 		c.Server.BindAddr = "127.0.0.1"
 	}
+	if c.Server.MaxConcurrentWorkers == 0 {
+		c.Server.MaxConcurrentWorkers = 5
+	}
 	if c.GitHub.PollInterval == "" {
 		c.GitHub.PollInterval = "5m"
 	}
@@ -661,6 +665,11 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := os.Getenv("HEIMDALLM_BIND_ADDR"); v != "" {
 		c.Server.BindAddr = v
+	}
+	if v := os.Getenv("HEIMDALLM_MAX_CONCURRENT_WORKERS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.Server.MaxConcurrentWorkers = n
+		}
 	}
 	if v := os.Getenv("HEIMDALLM_POLL_INTERVAL"); v != "" {
 		c.GitHub.PollInterval = v

@@ -59,6 +59,33 @@ func TestApplyDefaults_PreservesExisting(t *testing.T) {
 
 // ── applyEnvOverrides ────────────────────────────────────────────────────────
 
+func TestApplyDefaults_MaxConcurrentWorkers(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+	if cfg.Server.MaxConcurrentWorkers != 5 {
+		t.Errorf("MaxConcurrentWorkers = %d, want 5", cfg.Server.MaxConcurrentWorkers)
+	}
+}
+
+func TestApplyDefaults_MaxConcurrentWorkers_PreservesExisting(t *testing.T) {
+	cfg := &Config{}
+	cfg.Server.MaxConcurrentWorkers = 10
+	cfg.applyDefaults()
+	if cfg.Server.MaxConcurrentWorkers != 10 {
+		t.Errorf("MaxConcurrentWorkers overwritten: %d", cfg.Server.MaxConcurrentWorkers)
+	}
+}
+
+func TestEnvOverride_MaxConcurrentWorkers(t *testing.T) {
+	t.Setenv("HEIMDALLM_MAX_CONCURRENT_WORKERS", "8")
+	cfg := &Config{}
+	cfg.applyDefaults()
+	cfg.applyEnvOverrides()
+	if cfg.Server.MaxConcurrentWorkers != 8 {
+		t.Errorf("MaxConcurrentWorkers = %d, want 8", cfg.Server.MaxConcurrentWorkers)
+	}
+}
+
 func TestApplyEnvOverrides(t *testing.T) {
 	cfg := &Config{}
 	cfg.applyDefaults()
