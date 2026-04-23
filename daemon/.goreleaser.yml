@@ -15,31 +15,8 @@ builds:
     ldflags:
       - -s -w
 
-# ── Docker image — pushed to GHCR ────────────────────────────────────────────
-# Used by: goreleaser-daemon job (release.yml --skip=nfpm,archive)
-dockers:
-  - ids:
-      - daemon
-    image_templates:
-      - "ghcr.io/theburrowhub/heimdallm:{{ .Version }}"
-      - "ghcr.io/theburrowhub/heimdallm:{{ .Major }}.{{ .Minor }}"
-      - "ghcr.io/theburrowhub/heimdallm:{{ .Major }}"
-      - "ghcr.io/theburrowhub/heimdallm:latest"
-      - "ghcr.io/theburrowhub/heimdallm:{{ .ShortCommit }}"
-    dockerfile: ../docker/Dockerfile.goreleaser
-    use: buildx
-    build_flag_templates:
-      - "--pull"
-      - "--cache-from=type=gha"
-      - "--cache-to=type=gha,mode=max"
-      - "--label=org.opencontainers.image.created={{.Date}}"
-      - "--label=org.opencontainers.image.title={{.ProjectName}}"
-      - "--label=org.opencontainers.image.revision={{.FullCommit}}"
-      - "--label=org.opencontainers.image.version={{.Version}}"
-      - "--label=org.opencontainers.image.source=https://github.com/theburrowhub/heimdallm"
-
 # ── Linux packages — .deb + .rpm ─────────────────────────────────────────────
-# Used by: build-linux job (release.yml --skip=docker,archive)
+# Used by: build-linux job (release.yml)
 # Requires: staging/ prepared by the workflow (Flutter bundle + icons + desktop entry)
 nfpms:
   - id: linux-packages

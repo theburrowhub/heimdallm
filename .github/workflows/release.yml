@@ -162,7 +162,7 @@ jobs:
         with:
           distribution: goreleaser
           version: '~> v2'
-          args: release --clean --skip=nfpm,archive
+          args: release --clean --config .goreleaser-docker.yml --skip=archive
           workdir: daemon
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -372,7 +372,7 @@ jobs:
         with:
           distribution: goreleaser
           version: '~> v2'
-          args: release --clean --skip=docker,archive
+          args: release --clean --skip=archive
           workdir: daemon
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

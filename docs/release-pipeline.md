@@ -35,8 +35,8 @@ verified in production.
 |----------|---------|-------------|
 | CLI binaries (linux, macOS, Windows) | GoReleaser `cli/.goreleaser.yml` | Yes |
 | Homebrew formula | GoReleaser brews (same config) | Yes |
-| Docker image (GHCR) | GoReleaser `daemon/.goreleaser.yml` | Yes |
-| Linux `.deb` / `.rpm` | GoReleaser nfpms (same config) | Yes |
+| Docker image (GHCR) | GoReleaser `daemon/.goreleaser-docker.yml` | Yes |
+| Linux `.deb` / `.rpm` | GoReleaser nfpms `daemon/.goreleaser.yml` | Yes |
 | Linux `.AppImage` | appimagetool (manual) | No |
 | macOS `.dmg` | create-dmg (manual) | No |
 
