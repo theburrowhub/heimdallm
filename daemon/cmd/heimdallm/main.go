@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/heimdallm/daemon/internal/activity"
+	"github.com/heimdallm/daemon/internal/bus"
 	"github.com/heimdallm/daemon/internal/config"
 	"github.com/heimdallm/daemon/internal/discovery"
 	"github.com/heimdallm/daemon/internal/executor"
@@ -128,6 +129,17 @@ func main() {
 	} else if n > 0 {
 		slog.Info("startup: cleared stale inflight rows", "count", n)
 	}
+
+	// ── NATS event bus ──────────────────────────────────────────────────
+	eventBus := bus.New(bus.Config{
+		DataDir:              filepath.Join(dataDir(), "nats"),
+		MaxConcurrentWorkers: cfg.Server.MaxConcurrentWorkers,
+	})
+	if err := eventBus.Start(context.Background()); err != nil {
+		slog.Error("nats bus failed to start", "err", err)
+		os.Exit(1)
+	}
+	defer eventBus.Stop()
 
 	broker := sse.NewBroker()
 	broker.Start()
