@@ -512,6 +512,7 @@ func main() {
 		login:                &cachedLogin,
 		runReview:            runReview,
 		publishPub:           publishPub,
+		watchStore:           watchStore,
 		lastSkippedUpdatedAt: make(map[int64]time.Time),
 	}
 
@@ -836,6 +837,12 @@ func main() {
 			slog.Error("triage-worker: pipeline run failed",
 				"repo", msg.Repo, "number", msg.Number, "err", err)
 		}
+
+		// Enroll for state watching so closed/resolved issues update in the UI.
+		if err := watchStore.Enroll(ctx, "issue", msg.Repo, msg.Number, msg.GithubID); err != nil {
+			slog.Warn("triage-worker: failed to enroll watch",
+				"repo", msg.Repo, "number", msg.Number, "err", err)
+		}
 	}
 
 	triageW := worker.NewTriageWorker(conn, maxWorkers, triageHandler)
@@ -912,6 +919,12 @@ func main() {
 
 		if _, err := issuePipe.Run(ctx, ghIssue, opts); err != nil {
 			slog.Error("implement-worker: pipeline run failed",
+				"repo", msg.Repo, "number", msg.Number, "err", err)
+		}
+
+		// Enroll for state watching so closed/resolved issues update in the UI.
+		if err := watchStore.Enroll(ctx, "issue", msg.Repo, msg.Number, msg.GithubID); err != nil {
+			slog.Warn("implement-worker: failed to enroll watch",
 				"repo", msg.Repo, "number", msg.Number, "err", err)
 		}
 	}
@@ -1904,6 +1917,7 @@ type tier2Adapter struct {
 	login     *string
 	runReview  func(pr *gh.PullRequest, aiCfg config.RepoAI) *store.Review
 	publishPub *bus.PRPublishPublisher
+	watchStore *bus.WatchStore
 
 	// skipMu protects lastSkippedUpdatedAt, which deduplicates review_skipped
 	// SSE events across consecutive poll cycles for the same (PR ID, updated_at)
@@ -2210,6 +2224,9 @@ func (a *tier2Adapter) ProcessPR(ctx context.Context, pr scheduler.Tier2PR) erro
 		if err := a.publishPub.PublishPRPublish(context.Background(), rev.ID); err != nil {
 			slog.Warn("ProcessPR: failed to enqueue publish", "review_id", rev.ID, "err", err)
 		}
+	}
+	if a.watchStore != nil {
+		a.watchStore.Enroll(context.Background(), "pr", pr.Repo, pr.Number, pr.ID)
 	}
 	return nil
 }
@@ -2518,6 +2535,9 @@ func (a *tier2Adapter) HandleChange(ctx context.Context, item *scheduler.WatchIt
 			if err := a.publishPub.PublishPRPublish(context.Background(), rev.ID); err != nil {
 				slog.Warn("HandleChange: failed to enqueue publish", "review_id", rev.ID, "err", err)
 			}
+		}
+		if a.watchStore != nil {
+			a.watchStore.Enroll(context.Background(), "pr", item.Repo, item.Number, item.GithubID)
 		}
 		return nil
 	}
