@@ -156,15 +156,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Enroll any open PRs/issues not yet in watch_state so the state
-	// poller picks them up. Covers items processed before the NATS
-	// migration that were never enrolled.
-	if enrolled, err := enrollOpenItems(s, watchStore); err != nil {
-		slog.Warn("startup: enroll open items failed", "err", err)
-	} else if enrolled > 0 {
-		slog.Info("startup: enrolled open items into watch_state", "count", enrolled)
-	}
-
 	broker := sse.NewBroker()
 	broker.Start()
 
@@ -965,6 +956,10 @@ func main() {
 			case <-statePollerCtx.Done():
 				return
 			case <-ticker.C:
+				// Gradually enroll one open item not yet in watch_state per tick.
+				// Backfills items from before the NATS migration without blocking startup.
+				enrollOneOpenItem(s, watchStore)
+
 				if evicted, err := watchStore.EvictStale(statePollerCtx); err != nil {
 					slog.Warn("state-poller: evict failed", "err", err)
 				} else if evicted > 0 {
@@ -2765,66 +2760,35 @@ func ptrIntOr(p *int, defaultV int) int {
 	return *p
 }
 
-// enrollOpenItems scans all open PRs and issues in the store and enrolls
-// them in watch_state if not already present. This backfills items that
-// were processed before the NATS migration introduced watch_state.
-func enrollOpenItems(s *store.Store, ws *bus.WatchStore) (int, error) {
+// enrollOneOpenItem finds one open PR or issue not yet in watch_state and
+// enrolls it. Called once per state-poller tick (every 30s) to gradually
+// backfill items from before the NATS migration without blocking startup.
+// Uses a single query with LEFT JOIN to avoid holding a read lock while writing.
+func enrollOneOpenItem(s *store.Store, ws *bus.WatchStore) {
 	ctx := context.Background()
-	enrolled := 0
-
-	// Open PRs
-	rows, err := s.DB().Query("SELECT github_id, repo, number FROM prs WHERE state='open'")
-	if err != nil {
-		return 0, fmt.Errorf("query open prs: %w", err)
-	}
-	for rows.Next() {
+	for _, q := range []struct {
+		typ   string
+		query string
+	}{
+		{"pr", `SELECT p.github_id, p.repo, p.number FROM prs p
+			LEFT JOIN watch_state w ON w.key = 'pr.' || p.github_id
+			WHERE p.state='open' AND w.key IS NULL LIMIT 1`},
+		{"issue", `SELECT i.github_id, i.repo, i.number FROM issues i
+			LEFT JOIN watch_state w ON w.key = 'issue.' || i.github_id
+			WHERE i.state='open' AND w.key IS NULL LIMIT 1`},
+	} {
 		var ghID int64
 		var repo string
 		var number int
-		if err := rows.Scan(&ghID, &repo, &number); err != nil {
-			slog.Warn("startup-enroll: scan PR failed", "err", err)
-			continue
-		}
-		added, err := ws.EnrollIfAbsent(ctx, "pr", repo, number, ghID)
+		err := s.DB().QueryRow(q.query).Scan(&ghID, &repo, &number)
 		if err != nil {
-			slog.Warn("startup-enroll: enroll PR failed", "repo", repo, "number", number, "err", err)
-			continue
+			continue // no rows or error — try next type
 		}
-		if added {
-			enrolled++
+		if err := ws.Enroll(ctx, q.typ, repo, number, ghID); err != nil {
+			slog.Warn("state-poller: backfill enroll failed", "type", q.typ, "repo", repo, "number", number, "err", err)
+			return
 		}
+		slog.Debug("state-poller: backfill enrolled", "type", q.typ, "repo", repo, "number", number)
+		return
 	}
-	if err := rows.Err(); err != nil {
-		slog.Warn("startup-enroll: PR iteration error", "err", err)
-	}
-	rows.Close()
-
-	// Open issues
-	rows2, err := s.DB().Query("SELECT github_id, repo, number FROM issues WHERE state='open'")
-	if err != nil {
-		return enrolled, fmt.Errorf("query open issues: %w", err)
-	}
-	for rows2.Next() {
-		var ghID int64
-		var repo string
-		var number int
-		if err := rows2.Scan(&ghID, &repo, &number); err != nil {
-			slog.Warn("startup-enroll: scan issue failed", "err", err)
-			continue
-		}
-		added, err := ws.EnrollIfAbsent(ctx, "issue", repo, number, ghID)
-		if err != nil {
-			slog.Warn("startup-enroll: enroll issue failed", "repo", repo, "number", number, "err", err)
-			continue
-		}
-		if added {
-			enrolled++
-		}
-	}
-	if err := rows2.Err(); err != nil {
-		slog.Warn("startup-enroll: issue iteration error", "err", err)
-	}
-	rows2.Close()
-
-	return enrolled, nil
 }
