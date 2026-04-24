@@ -958,7 +958,7 @@ func main() {
 			case <-ticker.C:
 				// Gradually enroll one open item not yet in watch_state per tick.
 				// Backfills items from before the NATS migration without blocking startup.
-				enrollOneOpenItem(s, watchStore)
+				enrollOpenItems(statePollerCtx, s, watchStore)
 
 				if evicted, err := watchStore.EvictStale(statePollerCtx); err != nil {
 					slog.Warn("state-poller: evict failed", "err", err)
@@ -985,6 +985,17 @@ func main() {
 	// Consumes state check requests, calls GitHub API, updates KV backoff.
 	// Reuses the existing CheckItem/HandleChange logic from tier2Adapter.
 	stateHandler := func(ctx context.Context, msg bus.StateCheckMsg) (bool, error) {
+		// Auto-dismiss legacy items with missing data — they can never be checked.
+		if msg.Repo == "" {
+			key := fmt.Sprintf("%s.%d", msg.Type, msg.GithubID)
+			if err := watchStore.Delete(ctx, key); err != nil {
+				slog.Warn("state-handler: failed to delete legacy item", "key", key, "err", err)
+			}
+			slog.Info("state-handler: auto-dismissed legacy item with empty repo",
+				"type", msg.Type, "number", msg.Number, "github_id", msg.GithubID)
+			return false, nil
+		}
+
 		// Rate limit before any GitHub API call. TierWatch (50ms) matches
 		// the old Tier 3 priority — state checks are lightweight and high-priority.
 		if err := limiter.Acquire(ctx, scheduler.TierWatch); err != nil {
@@ -999,7 +1010,6 @@ func main() {
 		}
 
 		// Read LastSeen from KV for the dedup check inside CheckItem.
-		// Key separator is "." (NATS KV doesn't allow ":").
 		key := fmt.Sprintf("%s.%d", msg.Type, msg.GithubID)
 		entry, err := watchStore.Get(ctx, key)
 		if err == nil {
@@ -1011,6 +1021,17 @@ func main() {
 
 		changed, snap, err := adapter.CheckItem(ctx, item)
 		if err != nil {
+			// 404 means the repo/PR was deleted or we don't have access.
+			// Remove from watch to stop retrying.
+			var apiErr *gh.APIError
+			if errors.As(err, &apiErr) && apiErr.StatusCode == 404 {
+				if delErr := watchStore.Delete(ctx, key); delErr != nil {
+					slog.Warn("state-handler: failed to delete unreachable item", "key", key, "err", delErr)
+				}
+				slog.Info("state-handler: removed unreachable item from watch",
+					"type", msg.Type, "repo", msg.Repo, "number", msg.Number)
+				return false, nil
+			}
 			return false, err
 		}
 		if !changed {
@@ -2760,35 +2781,53 @@ func ptrIntOr(p *int, defaultV int) int {
 	return *p
 }
 
-// enrollOneOpenItem finds one open PR or issue not yet in watch_state and
-// enrolls it. Called once per state-poller tick (every 30s) to gradually
-// backfill items from before the NATS migration without blocking startup.
-// Uses a single query with LEFT JOIN to avoid holding a read lock while writing.
-func enrollOneOpenItem(s *store.Store, ws *bus.WatchStore) {
-	ctx := context.Background()
+// enrollOpenItems enrolls up to 10 open PRs/issues not yet in watch_state.
+// Called once per state-poller tick (every 30s) to gradually backfill items
+// from before the NATS migration. Uses a batch query with LEFT JOIN to find
+// unenrolled items without holding a read lock during writes.
+func enrollOpenItems(ctx context.Context, s *store.Store, ws *bus.WatchStore) {
 	for _, q := range []struct {
 		typ   string
 		query string
 	}{
 		{"pr", `SELECT p.github_id, p.repo, p.number FROM prs p
 			LEFT JOIN watch_state w ON w.key = 'pr.' || p.github_id
-			WHERE p.state='open' AND w.key IS NULL LIMIT 1`},
+			WHERE p.state='open' AND p.repo != '' AND w.key IS NULL LIMIT 10`},
 		{"issue", `SELECT i.github_id, i.repo, i.number FROM issues i
 			LEFT JOIN watch_state w ON w.key = 'issue.' || i.github_id
-			WHERE i.state='open' AND w.key IS NULL LIMIT 1`},
+			WHERE i.state='open' AND i.repo != '' AND w.key IS NULL LIMIT 10`},
 	} {
-		var ghID int64
-		var repo string
-		var number int
-		err := s.DB().QueryRow(q.query).Scan(&ghID, &repo, &number)
+		rows, err := s.DB().Query(q.query)
 		if err != nil {
-			continue // no rows or error — try next type
+			continue
 		}
-		if err := ws.Enroll(ctx, q.typ, repo, number, ghID); err != nil {
-			slog.Warn("state-poller: backfill enroll failed", "type", q.typ, "repo", repo, "number", number, "err", err)
-			return
+		type item struct {
+			ghID   int64
+			repo   string
+			number int
 		}
-		slog.Debug("state-poller: backfill enrolled", "type", q.typ, "repo", repo, "number", number)
-		return
+		var batch []item
+		for rows.Next() {
+			var it item
+			if err := rows.Scan(&it.ghID, &it.repo, &it.number); err != nil {
+				slog.Warn("state-poller: backfill scan failed", "type", q.typ, "err", err)
+				continue
+			}
+			batch = append(batch, it)
+		}
+		if err := rows.Err(); err != nil {
+			slog.Warn("state-poller: backfill iteration error", "type", q.typ, "err", err)
+		}
+		rows.Close() // close before writing to avoid SQLite lock contention
+
+		for _, it := range batch {
+			if err := ws.Enroll(ctx, q.typ, it.repo, it.number, it.ghID); err != nil {
+				slog.Warn("state-poller: backfill enroll failed", "type", q.typ, "repo", it.repo, "number", it.number, "err", err)
+				break // skip rest of this type, try next type
+			}
+		}
+		if len(batch) > 0 {
+			slog.Debug("state-poller: backfill enrolled", "type", q.typ, "count", len(batch))
+		}
 	}
 }

@@ -192,6 +192,17 @@ func (c *Client) fetchByQualifier(username, qualifier string, repos []string) ([
 	return result.Items, nil
 }
 
+// APIError is an HTTP error from the GitHub API with a typed StatusCode.
+// Used by callers to detect specific error classes (e.g. 404 Not Found).
+type APIError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("github: API error (status %d): %s", e.StatusCode, e.Body)
+}
+
 // PermanentSubmitError signals that SubmitReview hit a state from
 // which no retry will recover — e.g. the PR's conversation is locked,
 // the PR has been deleted, or the repo was archived. Callers should
@@ -486,7 +497,7 @@ func (c *Client) GetPRSnapshot(repo string, number int) (*PRSnapshot, error) {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	if resp.StatusCode != http.StatusOK {
 		errBody := safeTruncate(string(body), maxErrBodyLen)
-		return nil, fmt.Errorf("github: get PR snapshot (%s #%d): status %d: %s", repo, number, resp.StatusCode, errBody)
+		return nil, &APIError{StatusCode: resp.StatusCode, Body: errBody}
 	}
 	var pr PullRequest
 	if err := json.Unmarshal(body, &pr); err != nil {

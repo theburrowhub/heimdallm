@@ -191,7 +191,7 @@ func (c *Client) GetIssue(repo string, number int) (*Issue, error) {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("github: get issue %s#%d: status %d: %s", repo, number, resp.StatusCode, safeTruncate(string(body), maxErrBodyLen))
+		return nil, &APIError{StatusCode: resp.StatusCode, Body: safeTruncate(string(body), maxErrBodyLen)}
 	}
 	var issue Issue
 	if err := json.Unmarshal(body, &issue); err != nil {
