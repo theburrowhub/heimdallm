@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/heimdallm/daemon/internal/executor"
 	"github.com/heimdallm/daemon/internal/github"
 	"github.com/heimdallm/daemon/internal/pipeline"
+	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
 )
 
@@ -99,6 +101,42 @@ func (f *fakeTimeline) GetPRTimelineEventsForReviewer(_ string, _ int, _ string)
 		return nil, f.err
 	}
 	return f.events, nil
+}
+
+// fakePublisher records every SSE event the pipeline emits so lifecycle
+// tests can assert the exact (event_type, payload) pairs that hit the
+// broker. Mirrors the *sse.Broker contract via duck-typing — no need to
+// stand up a real broker for assertions. See #322 Bugs 3+4.
+type fakePublisher struct {
+	mu     sync.Mutex
+	events []sse.Event
+}
+
+func (f *fakePublisher) Publish(e sse.Event) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.events = append(f.events, e)
+}
+
+func (f *fakePublisher) types() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.events))
+	for i, e := range f.events {
+		out[i] = e.Type
+	}
+	return out
+}
+
+func (f *fakePublisher) firstOf(eventType string) (sse.Event, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, e := range f.events {
+		if e.Type == eventType {
+			return e, true
+		}
+	}
+	return sse.Event{}, false
 }
 
 func TestPipeline_Run(t *testing.T) {
@@ -706,4 +744,186 @@ func TestPipeline_Run_TimelineErrorKeepsSkip(t *testing.T) {
 	if tl.calls == 0 {
 		t.Errorf("timeline was not consulted")
 	}
+}
+
+// ── #322 Bugs 3+4: pipeline-owned lifecycle SSEs ──────────────────────
+
+// TestPipeline_Run_SHASkipEmitsReviewSkipped is the regression guard
+// for the spinner-colgado UI bug from #322 Bug 3+4 review feedback:
+// when Run short-circuits on an unchanged HEAD SHA, the publisher
+// must receive a single review_skipped event (with reason
+// sha_unchanged) and NOTHING ELSE — no review_started, no
+// review_completed. The Flutter dashboard relies on review_skipped to
+// stop the spinner and remove the PR from reviewingPRsProvider.
+func TestPipeline_Run_SHASkipEmitsReviewSkipped(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	exec := &fakeExecCounter{}
+	gh := &fakeGHCounter{diff: "+line"}
+	pub := &fakePublisher{}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	p.SetPublisher(pub)
+
+	pr := &github.PullRequest{
+		ID: 42, Number: 42, Title: "t", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/42",
+		Head: github.Branch{SHA: "deadbeef"},
+	}
+	// First run: real review. Pipeline should emit pr_detected,
+	// review_started, review_completed (in that order).
+	if _, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"}); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	wantFirst := []string{"pr_detected", "review_started", "review_completed"}
+	if got := pub.types(); !equalStringSlices(got, wantFirst) {
+		t.Fatalf("first run events: got %v, want %v", got, wantFirst)
+	}
+
+	// Second run: same SHA → skip path. Pipeline must emit ONE
+	// review_skipped event (with reason sha_unchanged) and nothing
+	// else. No review_started → no phantom Flutter spinner.
+	pub.events = nil
+	pr.UpdatedAt = time.Now().Add(5 * time.Minute)
+	if _, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"}); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if got := pub.types(); !equalStringSlices(got, []string{"review_skipped"}) {
+		t.Fatalf("second-run events: got %v, want exactly [review_skipped]", got)
+	}
+	ev, _ := pub.firstOf("review_skipped")
+	wantReason := `"reason":"sha_unchanged"`
+	if !strings.Contains(ev.Data, wantReason) {
+		t.Errorf("review_skipped payload missing %s, got %q", wantReason, ev.Data)
+	}
+}
+
+// TestPipeline_Run_LegacyBackfillEmitsReviewSkipped covers the
+// legacy-row backfill branch: a previous review row with empty
+// HeadSHA is backfilled and the run skips. Must emit
+// review_skipped(legacy_backfill), nothing else.
+func TestPipeline_Run_LegacyBackfillEmitsReviewSkipped(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	prRow := &store.PR{
+		GithubID: 100, Repo: "org/repo", Number: 2, Title: "t",
+		Author: "alice", State: "open",
+		UpdatedAt: time.Now(), FetchedAt: time.Now(),
+	}
+	prID, _ := s.UpsertPR(prRow)
+	if _, err := s.InsertReview(&store.Review{
+		PRID: prID, CLIUsed: "claude", Issues: "[]", Suggestions: "[]",
+		Severity: "low", CreatedAt: time.Now().Add(-1 * time.Hour),
+		HeadSHA: "", // legacy row
+	}); err != nil {
+		t.Fatalf("seed legacy: %v", err)
+	}
+
+	pub := &fakePublisher{}
+	p := pipeline.New(s, &fakeGHCounter{diff: "+line"}, &fakeExecCounter{}, &fakeNotify{})
+	p.SetPublisher(pub)
+
+	pr := &github.PullRequest{
+		ID: 100, Number: 2, Title: "t", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/2",
+		Head: github.Branch{SHA: "abc123"},
+	}
+	if _, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := pub.types(); !equalStringSlices(got, []string{"review_skipped"}) {
+		t.Fatalf("events: got %v, want [review_skipped]", got)
+	}
+	ev, _ := pub.firstOf("review_skipped")
+	if !strings.Contains(ev.Data, `"reason":"legacy_backfill"`) {
+		t.Errorf("review_skipped payload missing legacy_backfill reason, got %q", ev.Data)
+	}
+}
+
+// TestPipeline_Run_GateSkipEmitsReviewSkipped covers the
+// defense-in-depth Evaluate skip: a closed/draft/self-authored PR
+// must surface a review_skipped event with the actual reason from
+// the gate, not a fabricated one. Pre-#322 the trigger handler
+// invented "not_open" for every nil return — now the pipeline owns
+// the truth.
+func TestPipeline_Run_GateSkipEmitsReviewSkipped(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	pub := &fakePublisher{}
+	p := pipeline.New(s, &fakeGHCounter{diff: "+line"}, &fakeExecCounter{}, &fakeNotify{})
+	p.SetPublisher(pub)
+
+	pr := &github.PullRequest{
+		ID: 200, Number: 200, Title: "t", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "closed", // not_open
+		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/200",
+		Head: github.Branch{SHA: "abc"},
+	}
+	opts := pipeline.RunOptions{
+		Primary: "claude",
+		Guards:  pipeline.GateConfig{SkipDrafts: true, SkipSelfAuthor: true, BotLogin: "heimdallm-bot"},
+	}
+	if _, err := p.Run(pr, opts); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := pub.types(); !equalStringSlices(got, []string{"review_skipped"}) {
+		t.Fatalf("events: got %v, want [review_skipped]", got)
+	}
+	ev, _ := pub.firstOf("review_skipped")
+	if !strings.Contains(ev.Data, `"reason":"not_open"`) {
+		t.Errorf("review_skipped payload missing not_open reason, got %q", ev.Data)
+	}
+}
+
+// TestPipeline_Run_NilPublisherIsNoop guards the legacy contract: a
+// pipeline with no publisher wired (every existing test that doesn't
+// care about SSEs) must not panic on emit. Quietly drops events.
+func TestPipeline_Run_NilPublisherIsNoop(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	p := pipeline.New(s, &fakeGHCounter{diff: "+line"}, &fakeExecCounter{}, &fakeNotify{})
+	// No SetPublisher call — publisher stays nil.
+
+	pr := &github.PullRequest{
+		ID: 300, Number: 300, Title: "t", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/300",
+		Head: github.Branch{SHA: "abc"},
+	}
+	if _, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"}); err != nil {
+		t.Fatalf("run with nil publisher: %v", err)
+	}
+}
+
+// equalStringSlices is a tiny helper for ordered slice equality used by
+// the lifecycle SSE tests above. Keeps the assertions readable without
+// pulling in reflect.DeepEqual (which obscures element-level mismatches
+// on failure).
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

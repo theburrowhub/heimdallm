@@ -198,6 +198,14 @@ func main() {
 	// p.timeline or p.botLogin is unset.
 	p.SetTimelineFetcher(ghClient)
 
+	// Wire the SSE broker as the lifecycle publisher so Run emits
+	// pr_detected / review_started / review_completed / review_skipped
+	// at the correct semantic point (after the SHA-skip + gate
+	// decisions). The caller used to publish these blindly at function
+	// entry, leaving Flutter spinners colgados on every SHA-skip and
+	// firing phantom desktop notifications. See #322 Bugs 3+4.
+	p.SetPublisher(broker)
+
 	// Issue-side circuit-breaker caps (theburrowhub/heimdallm#292) — mirrors
 	// the PR-side defenses against runaway triage loops.
 	issueCBLimits := store.IssueCircuitBreakerLimits{
@@ -401,8 +409,13 @@ func main() {
 		slog.Info("pipeline: reviewing PR",
 			"repo", pr.Repo, "number", pr.Number, "github_id", pr.ID, "title", pr.Title)
 
-		broker.Publish(sse.Event{Type: sse.EventPRDetected, Data: sseData(map[string]any{"pr_number": pr.Number, "repo": pr.Repo})})
-		broker.Publish(sse.Event{Type: sse.EventReviewStarted, Data: sseData(map[string]any{"pr_number": pr.Number, "repo": pr.Repo})})
+		// Lifecycle SSEs (pr_detected, review_started, review_completed,
+		// review_skipped) are published from within p.Run via its
+		// Publisher dependency — this caller only handles the error
+		// paths because they need contextual error data the pipeline
+		// doesn't pre-shape (the err.Error() string and the
+		// CircuitBreakerError discriminant). See theburrowhub/heimdallm#322
+		// Bugs 3+4 for the regression that made emitting from here unsafe.
 		rev, err := p.Run(pr, buildRunOpts(pr, aiCfg))
 		if err != nil {
 			slog.Error("pipeline run failed", "repo", pr.Repo, "pr", pr.Number, "err", err)
@@ -422,20 +435,15 @@ func main() {
 			return
 		}
 		if rev == nil {
-			// Defense-in-depth gate in pipeline.Run rejected this PR. Callers are
-			// expected to filter upstream, so this is the safety net — exit quietly
-			// without emitting a completed/error event.
+			// Pipeline took a skip path and already emitted
+			// EventReviewSkipped with the correct reason
+			// (sha_unchanged / legacy_backfill / not_open / draft /
+			// self_authored). Nothing else to do.
 			return
 		}
 		slog.Info("pipeline: review done",
 			"repo", pr.Repo, "number", pr.Number, "severity", rev.Severity,
 			"github_review_id", rev.GitHubReviewID)
-		broker.Publish(sse.Event{Type: sse.EventReviewCompleted, Data: sseData(map[string]any{
-			"pr_number": pr.Number,
-			"repo":      pr.Repo,
-			"pr_id":     rev.PRID,
-			"severity":  rev.Severity,
-		})})
 	}
 
 	// ── Multi-tier Pipeline ──────────────────────────────────────────────
@@ -799,6 +807,13 @@ func main() {
 			}
 		}()
 
+		// Lifecycle SSEs (pr_detected, review_started, review_completed,
+		// review_skipped with the actual reason) are published by p.Run
+		// via its Publisher dependency. Trigger only owns error paths so
+		// it can attach the err.Error() string the caller surfaces.
+		// Pre-#322 the trigger fabricated review_skipped(not_open) on
+		// every nil return — that lied for SHA-skip / legacy-backfill
+		// paths added in #322 Bug 4.
 		rev, err := p.Run(ghPR, buildRunOpts(ghPR, aiCfg))
 		if err != nil {
 			var cbErr *pipeline.CircuitBreakerError
@@ -816,28 +831,10 @@ func main() {
 			broker.Publish(sse.Event{Type: sse.EventReviewError, Data: sseData(map[string]any{"pr_id": prID, "error": err.Error()})})
 			return err
 		}
-		if rev == nil {
-			// pipeline.Run's defense-in-depth gate rejected this PR (e.g. an
-			// operator triggered a re-review on a closed/merged PR). Emit a
-			// review_skipped event so the UI can surface the reason instead of
-			// leaving the request hanging silently.
-			broker.Publish(sse.Event{
-				Type: sse.EventReviewSkipped,
-				Data: sseData(map[string]any{
-					"repo":      pr.Repo,
-					"pr_number": pr.Number,
-					"pr_title":  pr.Title,
-					"reason":    string(pipeline.SkipReasonNotOpen),
-				}),
-			})
-			return nil
-		}
-		broker.Publish(sse.Event{Type: sse.EventReviewCompleted, Data: sseData(map[string]any{
-			"pr_number": pr.Number,
-			"repo":      pr.Repo,
-			"pr_id":     prID,
-			"severity":  rev.Severity,
-		})})
+		// rev == nil → pipeline already emitted EventReviewSkipped with
+		// the actual reason. rev != nil → pipeline already emitted
+		// EventReviewCompleted. Either way, nothing else to do here.
+		_ = rev
 		return nil
 	})
 
