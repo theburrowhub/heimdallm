@@ -308,6 +308,34 @@ skip_labels        = ["wontfix", "duplicate", "invalid"]
 default_action     = "ignore"
 ```
 
+> **Warning — `default_action = "review_only"` can cause re-processing loops and excessive API costs.**
+>
+> When `default_action` is set to `review_only`, **any issue that passes scope filters but does not match any label list** will be triaged by the AI on every poll cycle. The triage posts a comment, which bumps the issue's `updated_at` timestamp on GitHub, which in turn causes the daemon to consider the issue "updated" on the next cycle — creating an infinite loop.
+>
+> **Recommended:** Set `default_action = "ignore"` and use **explicit labels** to control which issues are processed:
+>
+> | Label | Action |
+> |---|---|
+> | A dedicated develop label (e.g. `heimdallm-develop`) | Auto-implement: creates branch + PR |
+> | A dedicated triage label (e.g. `heimdallm-triage`) | Review only: AI analyses and comments once |
+> | No matching label | Ignored (safe default) |
+>
+> This ensures issues are only processed when you explicitly opt them in, preventing runaway costs from repeated AI invocations. Using generic labels like `bug` or `enhancement` in `develop_labels` or `review_only_labels` is discouraged because these are commonly assigned to many issues and can trigger unintended mass processing.
+>
+> **Example of a safe, explicit configuration:**
+>
+> ```toml
+> [github.issue_tracking]
+> enabled        = true
+> filter_mode    = "exclusive"
+> default_action = "ignore"
+> organizations  = ["myorg"]
+> assignees      = ["myusername"]
+> develop_labels     = ["heimdallm-develop"]
+> review_only_labels = ["heimdallm-triage"]
+> skip_labels        = ["wontfix", "duplicate", "invalid"]
+> ```
+
 ### Scope filters
 
 Restrict which issues the pipeline processes:
@@ -826,6 +854,8 @@ non_monitored = []
 #                                       # env: HEIMDALLM_ISSUE_FILTER_MODE
 # default_action = "ignore"             # "ignore" | "review_only"
 #                                       # env: HEIMDALLM_ISSUE_DEFAULT_ACTION
+#                                       # WARNING: "review_only" causes re-processing loops
+#                                       # (see §6 Issue Tracking). Use "ignore" + explicit labels.
 # organizations  = ["myorg"]            # env: HEIMDALLM_ISSUE_ORGANIZATIONS
 # assignees      = ["myusername"]       # env: HEIMDALLM_ISSUE_ASSIGNEES
 # develop_labels     = ["enhancement", "feature", "bug"]
