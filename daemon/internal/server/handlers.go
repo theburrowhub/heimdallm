@@ -741,16 +741,18 @@ func (srv *Server) handleSSEViaNATS(w http.ResponseWriter, r *http.Request, flus
 	fmt.Fprintf(w, ": connected\n\n")
 	flusher.Flush()
 
+	// Keep-alive ticker prevents proxies/load balancers from closing idle connections.
+	keepAlive := time.NewTicker(20 * time.Second)
+	defer keepAlive.Stop()
+
 	for {
 		select {
 		case msg := <-ch:
-			// Extract event type from subject: "heimdallm.events.review_completed" → "review_completed"
-			eventType := msg.Subject
-			if idx := len("heimdallm.events."); idx < len(eventType) {
-				eventType = eventType[idx:]
-			}
-			// Format as SSE: the message data is the JSON payload
+			eventType := strings.TrimPrefix(msg.Subject, "heimdallm.events.")
 			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, string(msg.Data))
+			flusher.Flush()
+		case <-keepAlive.C:
+			fmt.Fprintf(w, ": ping\n\n")
 			flusher.Flush()
 		case <-r.Context().Done():
 			return
