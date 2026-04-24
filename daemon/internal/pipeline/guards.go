@@ -9,6 +9,18 @@ const (
 	SkipReasonNotOpen      SkipReason = "not_open"
 	SkipReasonDraft        SkipReason = "draft"
 	SkipReasonSelfAuthored SkipReason = "self_authored"
+	// SkipReasonSHAUnchanged is emitted when pipeline.Run short-circuits
+	// because the previous review row already covers the current HEAD
+	// commit (the #245 fail-closed dedup) and no explicit re-request was
+	// detected (#322 Bug 5). Surfaced via EventReviewSkipped so the UI
+	// can stop the spinner and the activity log can record a real
+	// reason rather than fabricating "not_open".
+	SkipReasonSHAUnchanged SkipReason = "sha_unchanged"
+	// SkipReasonLegacyBackfill is emitted when pipeline.Run skips a
+	// review on a legacy row that had no head_sha column populated and
+	// is now backfilled from the current snapshot. The user must trigger
+	// a re-review manually to score that exact commit.
+	SkipReasonLegacyBackfill SkipReason = "legacy_backfill"
 )
 
 // PRGate is the minimal PR view the guard evaluator needs. Callers synthesize
