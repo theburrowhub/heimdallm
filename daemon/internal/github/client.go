@@ -601,6 +601,13 @@ func (c *Client) GetPRTimelineEventsForReviewer(repo string, number int, login s
 			break
 		}
 	}
+	// Defensive re-sort: GitHub's timeline API documents ascending
+	// chronological order, but the contract is not load-bearing for us
+	// — pipeline.shouldBypassSHASkipForReReview relies on the slice
+	// being sorted to walk it backward in O(1) for the common case.
+	// A single sort here is cheap (events is filtered down to just
+	// review_requested / review_dismissed for one login) and immunises
+	// the caller against an undocumented re-ordering on GitHub's side.
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].CreatedAt.Before(out[j].CreatedAt)
 	})

@@ -89,18 +89,31 @@ func countNotify(events []string, title string) int {
 // fakeTimeline is a TimelineFetcher stub that returns a canned event
 // slice (or an error) so SHA-skip-bypass tests can drive the
 // re-request decision deterministically. Used by tests for #322 Bug 5.
+//
+// `calls` is guarded by callsMu because future parallel-test usage (or a
+// regression that lets two goroutines reach Run concurrently) would
+// otherwise race on the increment — same posture as fakePublisher.
 type fakeTimeline struct {
-	events []github.TimelineEvent
-	err    error
-	calls  int
+	events  []github.TimelineEvent
+	err     error
+	callsMu sync.Mutex
+	calls   int
 }
 
 func (f *fakeTimeline) GetPRTimelineEventsForReviewer(_ string, _ int, _ string) ([]github.TimelineEvent, error) {
+	f.callsMu.Lock()
 	f.calls++
+	f.callsMu.Unlock()
 	if f.err != nil {
 		return nil, f.err
 	}
 	return f.events, nil
+}
+
+func (f *fakeTimeline) callCount() int {
+	f.callsMu.Lock()
+	defer f.callsMu.Unlock()
+	return f.calls
 }
 
 // fakePublisher records every SSE event the pipeline emits so lifecycle
@@ -621,7 +634,7 @@ func TestPipeline_Run_RespectsExplicitReReviewOnSameSHA(t *testing.T) {
 	if gh.submits != 2 {
 		t.Errorf("re-request: expected gh.submits=2, got %d", gh.submits)
 	}
-	if tl.calls == 0 {
+	if tl.callCount() == 0 {
 		t.Errorf("timeline was not consulted on SHA-skip path")
 	}
 }
@@ -741,7 +754,7 @@ func TestPipeline_Run_TimelineErrorKeepsSkip(t *testing.T) {
 	if exec.calls != 1 {
 		t.Errorf("timeline error must keep the skip (fail-closed), got exec.calls=%d", exec.calls)
 	}
-	if tl.calls == 0 {
+	if tl.callCount() == 0 {
 		t.Errorf("timeline was not consulted")
 	}
 }

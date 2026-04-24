@@ -833,7 +833,10 @@ func main() {
 		}
 		// rev == nil → pipeline already emitted EventReviewSkipped with
 		// the actual reason. rev != nil → pipeline already emitted
-		// EventReviewCompleted. Either way, nothing else to do here.
+		// EventReviewCompleted. Either way the trigger callback only
+		// has to report success/failure (its signature is
+		// `func(prID int64) error`, see SetTriggerReviewFn) so the
+		// review payload itself is not needed here.
 		_ = rev
 		return nil
 	})

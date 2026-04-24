@@ -167,14 +167,19 @@ func (p *Pipeline) SetPublisher(pub Publisher) {
 }
 
 // publish emits an SSE lifecycle event with the given payload. No-op
-// when no publisher is wired or the payload fails to marshal — these
-// events are observability, not load-bearing for correctness.
+// when no publisher is wired. A marshal failure on a map[string]any
+// of basic types should not happen in practice (every payload site
+// uses string / int / int64 / float64), but if it ever does we log
+// at Warn level rather than swallow silently — debugging a missing
+// SSE event without that breadcrumb is painful.
 func (p *Pipeline) publish(eventType string, data map[string]any) {
 	if p.publisher == nil {
 		return
 	}
 	b, err := json.Marshal(data)
 	if err != nil {
+		slog.Warn("pipeline: failed to marshal SSE payload, dropping event",
+			"event", eventType, "err", err)
 		return
 	}
 	p.publisher.Publish(sse.Event{Type: eventType, Data: string(b)})
@@ -211,24 +216,23 @@ func (p *Pipeline) shouldBypassSHASkipForReReview(pr *github.PullRequest, prevRe
 			"repo", pr.Repo, "pr", pr.Number, "err", err)
 		return false
 	}
-	// events is sorted ascending by CreatedAt. Walk it to find the most
-	// recent event whose timestamp is strictly newer than prevReview.CreatedAt.
-	// If that event is a review_requested → bypass; if it's a
-	// review_dismissed (or none qualify) → keep the skip. We only honour
-	// events that came AFTER the existing review because earlier
-	// requests are by definition already satisfied.
-	var latestRelevant *github.TimelineEvent
-	for i := range events {
+	// events is sorted ascending by CreatedAt. We need the LAST event
+	// whose timestamp is strictly newer than prevReview.CreatedAt — by
+	// definition the tail of the slice — so iterate backward and stop
+	// at the first qualifying entry. Marginally faster than a forward
+	// walk for active PRs (which is exactly when this runs hot) and
+	// reads more clearly: "is the most recent re-review-relevant event
+	// still a request?".
+	for i := len(events) - 1; i >= 0; i-- {
 		ev := &events[i]
 		if !ev.CreatedAt.After(prevReview.CreatedAt) {
-			continue
+			// Past the cutoff: everything earlier is already-satisfied
+			// (events are sorted ascending), so no need to continue.
+			return false
 		}
-		latestRelevant = ev
+		return ev.Event == "review_requested"
 	}
-	if latestRelevant == nil {
-		return false
-	}
-	return latestRelevant.Event == "review_requested"
+	return false
 }
 
 // applyPrompt resolves a prompt with priority: repoPromptID > agentPromptID > global default.
@@ -432,26 +436,6 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		}
 	}
 
-	// All early-exit paths above are exhausted: from this point we are
-	// committed to running the CLI and posting a real review. Both the
-	// desktop notification AND the lifecycle SSEs (pr_detected /
-	// review_started) fire here, NOT at the top of Run, because the UI
-	// stack consumes review_started the instant it lands — the Flutter
-	// dashboard marks the PR as "reviewing" and triggers a desktop
-	// notification of its own (see #322 Bug 3). Emitting at function
-	// entry on a SHA-skipped PR would leave a phantom spinner forever
-	// (no terminal event ever follows) and spam notifications once per
-	// poll cycle.
-	p.notify.Notify("PR Review Started", fmt.Sprintf("%s #%d", pr.Repo, pr.Number))
-	p.publish(sse.EventPRDetected, map[string]any{
-		"pr_number": pr.Number,
-		"repo":      pr.Repo,
-	})
-	p.publish(sse.EventReviewStarted, map[string]any{
-		"pr_number": pr.Number,
-		"repo":      pr.Repo,
-	})
-
 	// 2b. Fetch PR comments for context (non-fatal: proceed without if unavailable)
 	prComments, err := p.gh.FetchComments(pr.Repo, pr.Number)
 	if err != nil {
@@ -512,6 +496,29 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 			return nil, &CircuitBreakerError{Reason: reason}
 		}
 	}
+
+	// All early-exit paths above are exhausted (gate, SHA-skip,
+	// legacy-backfill, circuit breaker): from this point we are committed
+	// to running the CLI and posting a real review. Both the desktop
+	// notification AND the lifecycle SSEs (pr_detected / review_started)
+	// fire here, NOT at the top of Run and NOT before the breaker check,
+	// because the UI stack consumes review_started the instant it lands
+	// — the Flutter dashboard marks the PR as "reviewing" and triggers a
+	// desktop notification of its own (see #322 Bugs 3+4). Emitting on
+	// any path that does NOT proceed to Execute would leave a phantom
+	// spinner and a phantom desktop notification per poll cycle. Caller
+	// already wraps the CircuitBreakerError into its own SSE event, so
+	// the breaker-trip path remains observable without a bogus
+	// review_started preceding it.
+	p.notify.Notify("PR Review Started", fmt.Sprintf("%s #%d", pr.Repo, pr.Number))
+	p.publish(sse.EventPRDetected, map[string]any{
+		"pr_number": pr.Number,
+		"repo":      pr.Repo,
+	})
+	p.publish(sse.EventReviewStarted, map[string]any{
+		"pr_number": pr.Number,
+		"repo":      pr.Repo,
+	})
 
 	// 5. Execute review (merge cliFlags from prompt into ExecOptions.ExtraFlags)
 	// Validate cliFlags from the prompt profile against the same denylist as

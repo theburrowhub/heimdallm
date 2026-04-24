@@ -214,6 +214,20 @@ func (r *Recorder) recordIssueReviewError(ev sse.Event) error {
 	return err
 }
 
+// dedupSkipReasons are review_skipped reasons that fire on routine
+// poll cycles rather than user-visible policy decisions, and therefore
+// should NOT produce activity_log rows. Recording them would spam the
+// activity feed with one row per poll for every stable PR — exactly the
+// regression theburrowhub/heimdallm#322 Bug 4 was meant to close (the
+// pre-fix path emitted EventReviewCompleted on those skips, which was
+// then routed here). Keep policy skips (not_open / draft /
+// self_authored) recorded — those reflect the bot deciding not to
+// review and are useful in the audit trail.
+var dedupSkipReasons = map[string]bool{
+	"sha_unchanged":   true,
+	"legacy_backfill": true,
+}
+
 func (r *Recorder) recordReviewSkipped(ev sse.Event) error {
 	var p struct {
 		Repo     string `json:"repo"`
@@ -223,6 +237,11 @@ func (r *Recorder) recordReviewSkipped(ev sse.Event) error {
 	}
 	if err := decode(ev.Data, &p); err != nil {
 		return err
+	}
+	if dedupSkipReasons[p.Reason] {
+		// Routine dedup skip — UI still gets the SSE so the spinner can
+		// clear, but the activity log stays free of poll-cycle noise.
+		return nil
 	}
 	_, err := r.store.InsertActivity(time.Now(), orgOf(p.Repo), p.Repo, "pr",
 		p.PRNumber, p.PRTitle, "review_skipped", p.Reason, map[string]any{
