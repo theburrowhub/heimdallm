@@ -3,17 +3,33 @@ package bus_test
 
 import (
 	"context"
-	"errors"
+	"database/sql"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/heimdallm/daemon/internal/bus"
-	"github.com/nats-io/nats.go/jetstream"
+	_ "modernc.org/sqlite"
 )
 
-func TestWatchKV_EnrollAndGet(t *testing.T) {
-	b := newTestBus(t)
-	w := b.WatchKV()
+func newTestWatch(t *testing.T) *bus.WatchStore {
+	t.Helper()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { db.Close() })
+
+	w, err := bus.NewWatchStore(db)
+	if err != nil {
+		t.Fatalf("NewWatchStore: %v", err)
+	}
+	return w
+}
+
+func TestWatchStore_EnrollAndGet(t *testing.T) {
+	w := newTestWatch(t)
 	ctx := context.Background()
 
 	err := w.Enroll(ctx, "pr", "owner/repo", 42, 999)
@@ -45,9 +61,8 @@ func TestWatchKV_EnrollAndGet(t *testing.T) {
 	}
 }
 
-func TestWatchKV_ResetBackoff(t *testing.T) {
-	b := newTestBus(t)
-	w := b.WatchKV()
+func TestWatchStore_ResetBackoff(t *testing.T) {
+	w := newTestWatch(t)
 	ctx := context.Background()
 
 	if err := w.Enroll(ctx, "pr", "owner/repo", 1, 100); err != nil {
@@ -87,9 +102,8 @@ func TestWatchKV_ResetBackoff(t *testing.T) {
 	}
 }
 
-func TestWatchKV_IncreaseBackoff_CapsAtMax(t *testing.T) {
-	b := newTestBus(t)
-	w := b.WatchKV()
+func TestWatchStore_IncreaseBackoff_CapsAtMax(t *testing.T) {
+	w := newTestWatch(t)
 	ctx := context.Background()
 
 	if err := w.Enroll(ctx, "issue", "org/repo", 7, 200); err != nil {
@@ -114,9 +128,8 @@ func TestWatchKV_IncreaseBackoff_CapsAtMax(t *testing.T) {
 	}
 }
 
-func TestWatchKV_ScanReady(t *testing.T) {
-	b := newTestBus(t)
-	w := b.WatchKV()
+func TestWatchStore_ScanReady(t *testing.T) {
+	w := newTestWatch(t)
 	ctx := context.Background()
 
 	// Enroll an item — its NextCheck is in the future, so not ready.
@@ -154,9 +167,8 @@ func TestWatchKV_ScanReady(t *testing.T) {
 	}
 }
 
-func TestWatchKV_EvictStale(t *testing.T) {
-	b := newTestBus(t)
-	w := b.WatchKV()
+func TestWatchStore_EvictStale(t *testing.T) {
+	w := newTestWatch(t)
 	ctx := context.Background()
 
 	if err := w.Enroll(ctx, "pr", "owner/repo", 20, 400); err != nil {
@@ -186,14 +198,13 @@ func TestWatchKV_EvictStale(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error after eviction, got nil")
 	}
-	if !errors.Is(err, jetstream.ErrKeyNotFound) {
-		t.Errorf("expected ErrKeyNotFound, got %v", err)
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected 'not found' error, got %v", err)
 	}
 }
 
-func TestWatchKV_Delete(t *testing.T) {
-	b := newTestBus(t)
-	w := b.WatchKV()
+func TestWatchStore_Delete(t *testing.T) {
+	w := newTestWatch(t)
 	ctx := context.Background()
 
 	if err := w.Enroll(ctx, "issue", "org/repo", 5, 500); err != nil {
@@ -214,7 +225,7 @@ func TestWatchKV_Delete(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error after Delete, got nil")
 	}
-	if !errors.Is(err, jetstream.ErrKeyNotFound) {
-		t.Errorf("expected ErrKeyNotFound, got %v", err)
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected 'not found' error, got %v", err)
 	}
 }

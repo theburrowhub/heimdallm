@@ -10,11 +10,11 @@ import (
 
 	"github.com/heimdallm/daemon/internal/bus"
 	"github.com/heimdallm/daemon/internal/worker"
-	"github.com/nats-io/nats.go/jetstream"
 )
 
-func TestPublishWorker_AcksOnSuccess(t *testing.T) {
+func TestPublishWorker_CallsHandlerOnSuccess(t *testing.T) {
 	b := newTestBus(t)
+	conn := b.Conn()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -24,11 +24,11 @@ func TestPublishWorker_AcksOnSuccess(t *testing.T) {
 		return nil
 	}
 
-	w := worker.NewPublishWorker(b.JetStream(), handler)
+	w := worker.NewPublishWorker(conn, 3, handler)
 	go func() { w.Start(ctx) }()
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
-	pub := bus.NewPRPublishPublisher(b.JetStream())
+	pub := bus.NewPRPublishPublisher(conn)
 	if err := pub.PublishPRPublish(ctx, 42); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
@@ -41,61 +41,47 @@ func TestPublishWorker_AcksOnSuccess(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("handler not called")
 	}
-
-	time.Sleep(200 * time.Millisecond)
-	cancel()
-
-	cons, err := b.JetStream().Consumer(context.Background(), bus.StreamWork, bus.ConsumerPublish)
-	if err != nil {
-		t.Fatalf("get consumer: %v", err)
-	}
-	info, err := cons.Info(context.Background())
-	if err != nil {
-		t.Fatalf("consumer info: %v", err)
-	}
-	if info.NumAckPending > 0 {
-		t.Errorf("expected 0 ack-pending, got %d", info.NumAckPending)
-	}
 }
 
-func TestPublishWorker_NaksOnError(t *testing.T) {
+func TestPublishWorker_HandlerErrorLogged(t *testing.T) {
 	b := newTestBus(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	conn := b.Conn()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	var mu sync.Mutex
 	callCount := 0
-	handler := func(_ context.Context, msg bus.PRPublishMsg) error {
+	handler := func(_ context.Context, _ bus.PRPublishMsg) error {
 		mu.Lock()
 		callCount++
 		mu.Unlock()
 		return errors.New("transient error")
 	}
 
-	w := worker.NewPublishWorker(b.JetStream(), handler)
+	w := worker.NewPublishWorker(conn, 3, handler)
 	go func() { w.Start(ctx) }()
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	data, _ := bus.Encode(bus.PRPublishMsg{ReviewID: 99})
-	_, err := b.JetStream().Publish(ctx, bus.SubjPRPublish, data, jetstream.WithMsgID("rev:99"))
-	if err != nil {
-		t.Fatalf("publish: %v", err)
-	}
+	conn.Publish(bus.SubjPRPublish, data)
+	conn.Flush()
 
-	// Wait for at least the first call
-	time.Sleep(1 * time.Second)
+	// Wait for the handler to be called.
+	time.Sleep(500 * time.Millisecond)
 	cancel()
 
 	mu.Lock()
 	n := callCount
 	mu.Unlock()
-	if n < 1 {
-		t.Fatalf("expected handler to be called at least once, got %d", n)
+	// With core NATS, no retry — handler called exactly once.
+	if n != 1 {
+		t.Fatalf("expected handler called 1 time, got %d", n)
 	}
 }
 
-func TestPublishWorker_NaksOnPanic(t *testing.T) {
+func TestPublishWorker_PanicDoesNotCrash(t *testing.T) {
 	b := newTestBus(t)
+	conn := b.Conn()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -105,23 +91,18 @@ func TestPublishWorker_NaksOnPanic(t *testing.T) {
 		panic("simulated publish panic")
 	}
 
-	w := worker.NewPublishWorker(b.JetStream(), handler)
+	w := worker.NewPublishWorker(conn, 3, handler)
 	go func() { w.Start(ctx) }()
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	data, _ := bus.Encode(bus.PRPublishMsg{ReviewID: 77})
-	_, err := b.JetStream().Publish(ctx, bus.SubjPRPublish, data, jetstream.WithMsgID("rev:77"))
-	if err != nil {
-		t.Fatalf("publish: %v", err)
-	}
+	conn.Publish(bus.SubjPRPublish, data)
+	conn.Flush()
 
 	select {
 	case <-panicked:
+		// Worker survived panic.
 	case <-time.After(2 * time.Second):
 		t.Fatal("handler not called")
 	}
-
-	// Panic → safeHandle returns error → NakWithDelay (not ack)
-	time.Sleep(300 * time.Millisecond)
-	cancel()
 }

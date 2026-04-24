@@ -35,7 +35,7 @@ import (
 	"github.com/heimdallm/daemon/internal/store"
 	"github.com/heimdallm/daemon/internal/worker"
 	"github.com/heimdallm/daemon/launchagent"
-	"github.com/nats-io/nats.go/jetstream"
+	"github.com/nats-io/nats.go"
 )
 
 func main() {
@@ -139,9 +139,8 @@ func main() {
 		slog.Info("startup: cleared stale issue triage inflight rows", "count", n)
 	}
 
-	// ── NATS event bus ──────────────────────────────────────────────────
+	// ── NATS event bus (core only, no JetStream) ───────────────────────
 	eventBus := bus.New(bus.Config{
-		DataDir:              filepath.Join(dataDir(), "nats"),
 		MaxConcurrentWorkers: cfg.Server.MaxConcurrentWorkers,
 	})
 	if err := eventBus.Start(context.Background()); err != nil {
@@ -149,6 +148,13 @@ func main() {
 		os.Exit(1)
 	}
 	defer eventBus.Stop()
+
+	// ── Watch store (SQLite, replaces JetStream KV) ─────────────────
+	watchStore, err := bus.NewWatchStore(s.DB())
+	if err != nil {
+		slog.Error("watch store failed to initialize", "err", err)
+		os.Exit(1)
+	}
 
 	broker := sse.NewBroker()
 	broker.Start()
@@ -482,9 +488,10 @@ func main() {
 	}
 
 	// ── Standalone pollers (replaced the Pipeline orchestrator) ─────────
-	js := eventBus.JetStream()
-	publishPub := bus.NewPRPublishPublisher(js)
-	issuePublisher := bus.NewIssuePublisher(js)
+	conn := eventBus.Conn()
+	maxWorkers := eventBus.MaxConcurrentWorkers()
+	publishPub := bus.NewPRPublishPublisher(conn)
+	issuePublisher := bus.NewIssuePublisher(conn)
 	issueFetcher.SetPublisher(issuePublisher)
 
 	// Shared rate limiter (was Pipeline.limiter).
@@ -508,8 +515,8 @@ func main() {
 		lastSkippedUpdatedAt: make(map[int64]time.Time),
 	}
 
-	repoPublisher := bus.NewRepoPublisher(js)
-	prReviewPublisher := bus.NewPRReviewPublisher(js)
+	repoPublisher := bus.NewRepoPublisher(conn)
+	prReviewPublisher := bus.NewPRReviewPublisher(conn)
 
 	// reposChan bridges Tier 1 (discovery) → Tier 2 (per-repo polling) via
 	// the NATS discovery stream. Tier 1 publishes to NATS, the bridge
@@ -580,11 +587,11 @@ func main() {
 			}
 		}()
 
-		// Bridge: NATS discovery-consumer → reposChan
+		// Bridge: NATS discovery subscription → reposChan
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			bridgeDiscovery(ctx, js, reposChan)
+			bridgeDiscovery(ctx, conn, reposChan)
 		}()
 
 		// Tier 2: PR / issue polling
@@ -659,14 +666,14 @@ func main() {
 			}
 		}
 
-		// Enroll for state watching via NATS KV.
-		if err := eventBus.WatchKV().Enroll(ctx, "pr", pr.Repo, pr.Number, pr.ID); err != nil {
+		// Enroll for state watching via SQLite watch store.
+		if err := watchStore.Enroll(ctx, "pr", pr.Repo, pr.Number, pr.ID); err != nil {
 			slog.Warn("review-worker: failed to enroll watch",
 				"repo", pr.Repo, "pr", pr.Number, "err", err)
 		}
 	}
 
-	reviewWorker := worker.NewReviewWorker(eventBus.JetStream(), reviewHandler)
+	reviewWorker := worker.NewReviewWorker(conn, maxWorkers, reviewHandler)
 	workerCtx, workerCancel := context.WithCancel(context.Background())
 	defer workerCancel()
 	go func() {
@@ -752,7 +759,7 @@ func main() {
 		return nil // success — ack
 	}
 
-	publishW := worker.NewPublishWorker(js, publishHandler)
+	publishW := worker.NewPublishWorker(conn, maxWorkers, publishHandler)
 	publishWCtx, publishWCancel := context.WithCancel(context.Background())
 	defer publishWCancel()
 	go func() {
@@ -831,7 +838,7 @@ func main() {
 		}
 	}
 
-	triageW := worker.NewTriageWorker(js, triageHandler)
+	triageW := worker.NewTriageWorker(conn, maxWorkers, triageHandler)
 	triageWCtx, triageWCancel := context.WithCancel(context.Background())
 	defer triageWCancel()
 	go func() {
@@ -909,7 +916,7 @@ func main() {
 		}
 	}
 
-	implementW := worker.NewImplementWorker(js, implementHandler)
+	implementW := worker.NewImplementWorker(conn, maxWorkers, implementHandler)
 	implementWCtx, implementWCancel := context.WithCancel(context.Background())
 	defer implementWCancel()
 	go func() {
@@ -921,7 +928,7 @@ func main() {
 	// ── State check poller ──────────────────────────────────────────────
 	// Scans the NATS KV watch bucket every 30s and publishes StateCheckMsg
 	// for items due for a state check. Replaces the in-memory WatchQueue.
-	stateCheckPub := bus.NewStateCheckPublisher(js)
+	stateCheckPub := bus.NewStateCheckPublisher(conn)
 	statePollerCtx, statePollerCancel := context.WithCancel(context.Background())
 	defer statePollerCancel()
 	go func() {
@@ -932,14 +939,13 @@ func main() {
 			case <-statePollerCtx.Done():
 				return
 			case <-ticker.C:
-				watchKV := eventBus.WatchKV()
-				if evicted, err := watchKV.EvictStale(statePollerCtx); err != nil {
+				if evicted, err := watchStore.EvictStale(statePollerCtx); err != nil {
 					slog.Warn("state-poller: evict failed", "err", err)
 				} else if evicted > 0 {
 					slog.Debug("state-poller: evicted stale items", "count", evicted)
 				}
 
-				ready, err := watchKV.ScanReady(statePollerCtx)
+				ready, err := watchStore.ScanReady(statePollerCtx)
 				if err != nil {
 					slog.Warn("state-poller: scan failed", "err", err)
 					continue
@@ -974,7 +980,7 @@ func main() {
 		// Read LastSeen from KV for the dedup check inside CheckItem.
 		// Key separator is "." (NATS KV doesn't allow ":").
 		key := fmt.Sprintf("%s.%d", msg.Type, msg.GithubID)
-		entry, err := eventBus.WatchKV().Get(ctx, key)
+		entry, err := watchStore.Get(ctx, key)
 		if err == nil {
 			item.LastSeen = entry.LastSeen
 		} else {
@@ -995,7 +1001,7 @@ func main() {
 		return true, nil
 	}
 
-	stateW := worker.NewStateWorker(js, eventBus.WatchKV(), stateHandler)
+	stateW := worker.NewStateWorker(conn, maxWorkers*2, watchStore, stateHandler)
 	stateWCtx, stateWCancel := context.WithCancel(context.Background())
 	defer stateWCancel()
 	go func() {
@@ -1693,71 +1699,33 @@ func sendDiscoveryRepos(
 	}
 }
 
-// bridgeDiscovery consumes from the NATS discovery-consumer and forwards
-// repo lists to the reposChan that Tier 2 reads. Retries with exponential
-// backoff on consumer errors.
-func bridgeDiscovery(ctx context.Context, js jetstream.JetStream, out chan<- []string) {
-	backoff := 1 * time.Second
-	maxBackoff := 30 * time.Second
+// bridgeDiscovery subscribes to the NATS discovery subject and forwards
+// repo lists to the reposChan that Tier 2 reads. Uses core NATS (no JetStream).
+func bridgeDiscovery(ctx context.Context, conn *nats.Conn, out chan<- []string) {
+	ch := make(chan *nats.Msg, 8)
+	sub, err := conn.ChanSubscribe(bus.SubjDiscoveryRepos, ch)
+	if err != nil {
+		slog.Error("bridge: subscribe to discovery subject failed", "err", err)
+		return
+	}
+	defer sub.Unsubscribe()
 
 	for {
-		if err := runBridgeConsumer(ctx, js, out); err != nil {
-			slog.Error("bridge: consumer failed, retrying", "err", err, "backoff", backoff)
-		}
-
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(backoff):
-		}
-		if backoff < maxBackoff {
-			backoff *= 2
-			if backoff > maxBackoff {
-				backoff = maxBackoff
+		case msg := <-ch:
+			var dm bus.DiscoveryMsg
+			if err := bus.Decode(msg.Data, &dm); err != nil {
+				slog.Error("bridge: decode discovery msg", "err", err)
+				continue
+			}
+			select {
+			case out <- dm.Repos:
+			case <-ctx.Done():
+				return
 			}
 		}
-	}
-}
-
-func runBridgeConsumer(ctx context.Context, js jetstream.JetStream, out chan<- []string) error {
-	cons, err := js.Consumer(ctx, bus.StreamDiscovery, bus.ConsumerDiscovery)
-	if err != nil {
-		return fmt.Errorf("get discovery consumer: %w", err)
-	}
-	iter, err := cons.Messages(jetstream.PullMaxMessages(1))
-	if err != nil {
-		return fmt.Errorf("start message iterator: %w", err)
-	}
-	defer iter.Stop()
-
-	// Stop the iterator when context is cancelled so iter.Next() unblocks.
-	go func() {
-		<-ctx.Done()
-		iter.Stop()
-	}()
-
-	for {
-		msg, err := iter.Next()
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil // clean shutdown
-			}
-			return fmt.Errorf("iter.Next: %w", err)
-		}
-
-		var dm bus.DiscoveryMsg
-		if err := bus.Decode(msg.Data(), &dm); err != nil {
-			slog.Error("bridge: decode discovery msg", "err", err)
-			msg.Ack()
-			continue
-		}
-
-		select {
-		case out <- dm.Repos:
-		case <-ctx.Done():
-			return nil
-		}
-		msg.Ack()
 	}
 }
 

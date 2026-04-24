@@ -3,14 +3,13 @@ package worker
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"runtime/debug"
 	"time"
 
 	"github.com/heimdallm/daemon/internal/bus"
-	"github.com/nats-io/nats.go/jetstream"
+	"github.com/nats-io/nats.go"
 )
 
 // StateHandler is invoked for each state check message. Returns whether
@@ -20,81 +19,80 @@ type StateHandler func(ctx context.Context, msg bus.StateCheckMsg) (changed bool
 
 // StateWorker consumes state check requests from NATS.
 type StateWorker struct {
-	js      jetstream.JetStream
-	watchKV *bus.WatchKV
-	handler StateHandler
+	conn      *nats.Conn
+	watchKV   *bus.WatchStore
+	handler   StateHandler
+	semaphore chan struct{}
 }
 
-// NewStateWorker creates a worker that consumes from the state-worker
-// durable consumer. After each handler call, it updates the KV backoff
-// state: reset on change, increase on no change.
-func NewStateWorker(js jetstream.JetStream, watchKV *bus.WatchKV, handler StateHandler) *StateWorker {
-	return &StateWorker{js: js, watchKV: watchKV, handler: handler}
+// NewStateWorker creates a worker that subscribes to the state check subject.
+// After each handler call, it updates the SQLite backoff state: reset on
+// change, increase on no change or error.
+func NewStateWorker(conn *nats.Conn, maxConcurrent int, watchKV *bus.WatchStore, handler StateHandler) *StateWorker {
+	if maxConcurrent <= 0 {
+		maxConcurrent = 1
+	}
+	return &StateWorker{
+		conn:      conn,
+		watchKV:   watchKV,
+		handler:   handler,
+		semaphore: make(chan struct{}, maxConcurrent),
+	}
 }
 
-// Start begins consuming. Blocks until ctx is cancelled.
+// Start subscribes and blocks until ctx is cancelled.
 func (w *StateWorker) Start(ctx context.Context) error {
-	cons, err := w.js.Consumer(ctx, bus.StreamWork, bus.ConsumerState)
-	if err != nil {
-		return err
-	}
-
-	iter, err := cons.Messages(jetstream.PullMaxMessages(1))
-	if err != nil {
-		return err
-	}
-
-	go func() {
-		<-ctx.Done()
-		iter.Stop()
-	}()
-
-	for {
-		msg, err := iter.Next()
-		if err != nil {
-			if ctx.Err() != nil || errors.Is(err, jetstream.ErrMsgIteratorClosed) {
-				return nil
-			}
-			return fmt.Errorf("state-worker: iter.Next: %w", err)
-		}
-
+	sub, err := w.conn.Subscribe(bus.SubjStateCheck, func(msg *nats.Msg) {
 		var checkMsg bus.StateCheckMsg
-		if err := bus.Decode(msg.Data(), &checkMsg); err != nil {
+		if err := bus.Decode(msg.Data, &checkMsg); err != nil {
 			slog.Error("state-worker: decode message", "err", err)
-			msg.Ack()
-			continue
+			return
 		}
 
-		slog.Debug("state-worker: checking",
-			"type", checkMsg.Type, "repo", checkMsg.Repo,
-			"number", checkMsg.Number, "github_id", checkMsg.GithubID)
-
-		changed, handlerErr := w.safeHandle(ctx, checkMsg)
-
-		// Key format uses "." separator (NATS KV doesn't allow ":")
-		key := fmt.Sprintf("%s.%d", checkMsg.Type, checkMsg.GithubID)
-		if handlerErr != nil {
-			slog.Warn("state-worker: check failed",
-				"type", checkMsg.Type, "repo", checkMsg.Repo,
-				"number", checkMsg.Number, "err", handlerErr)
-			if kvErr := w.watchKV.IncreaseBackoff(ctx, key); kvErr != nil {
-				slog.Warn("state-worker: KV increase backoff failed", "key", key, "err", kvErr)
-			}
-		} else if changed {
-			slog.Info("state-worker: change detected",
-				"type", checkMsg.Type, "repo", checkMsg.Repo,
-				"number", checkMsg.Number)
-			if kvErr := w.watchKV.ResetBackoff(ctx, key, time.Now()); kvErr != nil {
-				slog.Warn("state-worker: KV reset backoff failed", "key", key, "err", kvErr)
-			}
-		} else {
-			if kvErr := w.watchKV.IncreaseBackoff(ctx, key); kvErr != nil {
-				slog.Warn("state-worker: KV increase backoff failed", "key", key, "err", kvErr)
-			}
+		select {
+		case w.semaphore <- struct{}{}:
+		case <-ctx.Done():
+			return
 		}
 
-		msg.Ack()
+		go func() {
+			defer func() { <-w.semaphore }()
+
+			slog.Debug("state-worker: checking",
+				"type", checkMsg.Type, "repo", checkMsg.Repo,
+				"number", checkMsg.Number, "github_id", checkMsg.GithubID)
+
+			changed, handlerErr := w.safeHandle(ctx, checkMsg)
+
+			key := fmt.Sprintf("%s.%d", checkMsg.Type, checkMsg.GithubID)
+			if handlerErr != nil {
+				slog.Warn("state-worker: check failed",
+					"type", checkMsg.Type, "repo", checkMsg.Repo,
+					"number", checkMsg.Number, "err", handlerErr)
+				if kvErr := w.watchKV.IncreaseBackoff(ctx, key); kvErr != nil {
+					slog.Warn("state-worker: increase backoff failed", "key", key, "err", kvErr)
+				}
+			} else if changed {
+				slog.Info("state-worker: change detected",
+					"type", checkMsg.Type, "repo", checkMsg.Repo,
+					"number", checkMsg.Number)
+				if kvErr := w.watchKV.ResetBackoff(ctx, key, time.Now()); kvErr != nil {
+					slog.Warn("state-worker: reset backoff failed", "key", key, "err", kvErr)
+				}
+			} else {
+				if kvErr := w.watchKV.IncreaseBackoff(ctx, key); kvErr != nil {
+					slog.Warn("state-worker: increase backoff failed", "key", key, "err", kvErr)
+				}
+			}
+		}()
+	})
+	if err != nil {
+		return err
 	}
+	defer sub.Unsubscribe()
+
+	<-ctx.Done()
+	return nil
 }
 
 func (w *StateWorker) safeHandle(ctx context.Context, msg bus.StateCheckMsg) (changed bool, err error) {

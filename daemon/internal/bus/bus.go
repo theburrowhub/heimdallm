@@ -10,22 +10,19 @@ import (
 
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
-	"github.com/nats-io/nats.go/jetstream"
 )
 
 // Config holds the parameters for the embedded NATS bus.
 type Config struct {
-	DataDir              string // JetStream file storage directory
-	MaxConcurrentWorkers int    // maps to MaxAckPending on consumers
+	MaxConcurrentWorkers int // semaphore size for worker backpressure
 }
 
-// Bus wraps an embedded NATS server with a JetStream-enabled client.
+// Bus wraps an embedded NATS server with a core pub/sub client.
+// JetStream is NOT enabled — the server uses ~20-30 MB instead of 500-750 MB.
 type Bus struct {
-	server  *natsserver.Server
-	conn    *nats.Conn
-	js      jetstream.JetStream
-	cfg     Config
-	watchKV *WatchKV
+	server *natsserver.Server
+	conn   *nats.Conn
+	cfg    Config
 
 	stopOnce sync.Once
 }
@@ -39,18 +36,14 @@ func New(cfg Config) *Bus {
 	return &Bus{cfg: cfg}
 }
 
-// Start launches the embedded NATS server, connects an in-process client,
-// and creates all JetStream streams and consumers.
-func (b *Bus) Start(ctx context.Context) error {
+// Start launches the embedded NATS server and connects an in-process client.
+// No JetStream, no streams, no consumers — just core pub/sub.
+func (b *Bus) Start(_ context.Context) error {
 	opts := &natsserver.Options{
-		ServerName:          "heimdallm-bus",
-		DontListen:          true,
-		JetStream:           true,
-		StoreDir:            b.cfg.DataDir,
-		JetStreamMaxMemory:  64 * 1024 * 1024,  // 64 MB — sufficient for <100 concurrent items
-		JetStreamMaxStore:   256 * 1024 * 1024,  // 256 MB — caps disk usage
-		NoLog:               true,
-		NoSigs:              true,
+		ServerName: "heimdallm-bus",
+		DontListen: true,
+		NoLog:      true,
+		NoSigs:     true,
 	}
 
 	srv, err := natsserver.NewServer(opts)
@@ -71,36 +64,7 @@ func (b *Bus) Start(ctx context.Context) error {
 	}
 	b.conn = conn
 
-	js, err := jetstream.New(conn)
-	if err != nil {
-		conn.Close()
-		srv.Shutdown()
-		return fmt.Errorf("bus: jetstream: %w", err)
-	}
-	b.js = js
-
-	if err := b.ensureStreams(ctx); err != nil {
-		conn.Close()
-		srv.Shutdown()
-		return err
-	}
-	if err := b.ensureConsumers(ctx); err != nil {
-		conn.Close()
-		srv.Shutdown()
-		return err
-	}
-
-	kv, err := b.js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
-		Bucket: kvBucketWatch,
-	})
-	if err != nil {
-		conn.Close()
-		srv.Shutdown()
-		return fmt.Errorf("bus: create KV bucket %s: %w", kvBucketWatch, err)
-	}
-	b.watchKV = NewWatchKV(kv)
-
-	slog.Info("bus: NATS started", "store_dir", b.cfg.DataDir, "workers", b.cfg.MaxConcurrentWorkers)
+	slog.Info("bus: NATS started (core only, no JetStream)", "workers", b.cfg.MaxConcurrentWorkers)
 	return nil
 }
 
@@ -109,11 +73,6 @@ func (b *Bus) Start(ctx context.Context) error {
 func (b *Bus) Stop() {
 	b.stopOnce.Do(func() {
 		if b.conn != nil {
-			// Drain() initiates a graceful drain asynchronously: it
-			// unsubscribes, processes pending messages, flushes, and then
-			// closes the connection. Wait for the connection to reach
-			// CLOSED state before shutting down the embedded server so
-			// in-flight JetStream acks are not truncated.
 			if err := b.conn.Drain(); err != nil {
 				slog.Warn("bus: drain failed", "err", err)
 			}
@@ -134,12 +93,7 @@ func (b *Bus) Conn() *nats.Conn {
 	return b.conn
 }
 
-// JetStream returns the JetStream context. Use for stream/consumer operations.
-func (b *Bus) JetStream() jetstream.JetStream {
-	return b.js
-}
-
-// WatchKV returns the durable watch-state KV store.
-func (b *Bus) WatchKV() *WatchKV {
-	return b.watchKV
+// MaxConcurrentWorkers returns the configured concurrency limit for workers.
+func (b *Bus) MaxConcurrentWorkers() int {
+	return b.cfg.MaxConcurrentWorkers
 }

@@ -13,6 +13,7 @@ import (
 
 func TestTriageWorker_ConsumesAndCallsHandler(t *testing.T) {
 	b := newTestBus(t)
+	conn := b.Conn()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -26,11 +27,11 @@ func TestTriageWorker_ConsumesAndCallsHandler(t *testing.T) {
 		received = append(received, msg)
 	}
 
-	w := worker.NewTriageWorker(b.JetStream(), handler)
+	w := worker.NewTriageWorker(conn, 3, handler)
 	go func() { w.Start(ctx) }()
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
-	pub := bus.NewIssuePublisher(b.JetStream())
+	pub := bus.NewIssuePublisher(conn)
 	if err := pub.PublishIssueTriage(ctx, "org/repo", 42, 12345); err != nil {
 		t.Fatalf("publish: %v", err)
 	}

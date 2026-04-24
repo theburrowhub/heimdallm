@@ -9,13 +9,11 @@ import (
 
 	"github.com/heimdallm/daemon/internal/bus"
 	"github.com/heimdallm/daemon/internal/worker"
-	"github.com/nats-io/nats.go/jetstream"
 )
 
 func newTestBus(t *testing.T) *bus.Bus {
 	t.Helper()
-	dir := t.TempDir()
-	b := bus.New(bus.Config{DataDir: dir, MaxConcurrentWorkers: 3})
+	b := bus.New(bus.Config{MaxConcurrentWorkers: 3})
 	if err := b.Start(context.Background()); err != nil {
 		t.Fatalf("bus start: %v", err)
 	}
@@ -25,6 +23,7 @@ func newTestBus(t *testing.T) *bus.Bus {
 
 func TestReviewWorker_ConsumesAndCallsHandler(t *testing.T) {
 	b := newTestBus(t)
+	conn := b.Conn()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -38,17 +37,15 @@ func TestReviewWorker_ConsumesAndCallsHandler(t *testing.T) {
 		received = append(received, msg)
 	}
 
-	w := worker.NewReviewWorker(b.JetStream(), handler)
-
+	w := worker.NewReviewWorker(conn, 3, handler)
 	go func() {
 		if err := w.Start(ctx); err != nil {
 			t.Errorf("worker start: %v", err)
 		}
 	}()
+	time.Sleep(100 * time.Millisecond)
 
-	time.Sleep(200 * time.Millisecond)
-
-	pub := bus.NewPRReviewPublisher(b.JetStream())
+	pub := bus.NewPRReviewPublisher(conn)
 	if err := pub.PublishPRReview(ctx, "org/repo", 42, 12345, "abc123"); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
@@ -65,64 +62,11 @@ func TestReviewWorker_ConsumesAndCallsHandler(t *testing.T) {
 	if msg.Repo != "org/repo" || msg.Number != 42 || msg.GithubID != 12345 || msg.HeadSHA != "abc123" {
 		t.Errorf("unexpected message: %+v", msg)
 	}
-
-	cons, err := b.JetStream().Consumer(context.Background(), bus.StreamWork, bus.ConsumerReview)
-	if err != nil {
-		t.Fatalf("get consumer: %v", err)
-	}
-	info, err := cons.Info(context.Background())
-	if err != nil {
-		t.Fatalf("consumer info: %v", err)
-	}
-	if info.NumAckPending > 0 {
-		t.Errorf("expected 0 ack-pending, got %d", info.NumAckPending)
-	}
 }
 
-func TestReviewWorker_AcksAfterHandler(t *testing.T) {
+func TestReviewWorker_HandlerPanicDoesNotCrash(t *testing.T) {
 	b := newTestBus(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	called := make(chan struct{}, 1)
-	handler := func(_ context.Context, _ bus.PRReviewMsg) {
-		called <- struct{}{}
-	}
-
-	w := worker.NewReviewWorker(b.JetStream(), handler)
-	go func() { w.Start(ctx) }()
-	time.Sleep(200 * time.Millisecond)
-
-	data, _ := bus.Encode(bus.PRReviewMsg{Repo: "a/b", Number: 1, GithubID: 1, HeadSHA: "s1"})
-	_, err := b.JetStream().Publish(ctx, bus.SubjPRReview, data, jetstream.WithMsgID("1:s1"))
-	if err != nil {
-		t.Fatalf("publish: %v", err)
-	}
-
-	select {
-	case <-called:
-	case <-time.After(2 * time.Second):
-		t.Fatal("handler not called within timeout")
-	}
-
-	time.Sleep(200 * time.Millisecond)
-	cancel()
-
-	cons, err := b.JetStream().Consumer(context.Background(), bus.StreamWork, bus.ConsumerReview)
-	if err != nil {
-		t.Fatalf("get consumer: %v", err)
-	}
-	info, err := cons.Info(context.Background())
-	if err != nil {
-		t.Fatalf("consumer info: %v", err)
-	}
-	if info.NumAckPending > 0 {
-		t.Errorf("message not acked after handler returned: ack-pending=%d", info.NumAckPending)
-	}
-}
-
-func TestReviewWorker_AcksAfterHandlerPanic(t *testing.T) {
-	b := newTestBus(t)
+	conn := b.Conn()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -132,34 +76,18 @@ func TestReviewWorker_AcksAfterHandlerPanic(t *testing.T) {
 		panic("simulated handler panic")
 	}
 
-	w := worker.NewReviewWorker(b.JetStream(), handler)
+	w := worker.NewReviewWorker(conn, 3, handler)
 	go func() { w.Start(ctx) }()
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	data, _ := bus.Encode(bus.PRReviewMsg{Repo: "a/b", Number: 1, GithubID: 1, HeadSHA: "p1"})
-	_, err := b.JetStream().Publish(ctx, bus.SubjPRReview, data, jetstream.WithMsgID("1:p1"))
-	if err != nil {
-		t.Fatalf("publish: %v", err)
-	}
+	conn.Publish(bus.SubjPRReview, data)
+	conn.Flush()
 
 	select {
 	case <-panicked:
+		// Worker survived panic — test passes.
 	case <-time.After(2 * time.Second):
 		t.Fatal("handler not called within timeout")
-	}
-
-	time.Sleep(300 * time.Millisecond)
-
-	// Message should still be acked despite handler panic
-	cons, err := b.JetStream().Consumer(context.Background(), bus.StreamWork, bus.ConsumerReview)
-	if err != nil {
-		t.Fatalf("get consumer: %v", err)
-	}
-	info, err := cons.Info(context.Background())
-	if err != nil {
-		t.Fatalf("consumer info: %v", err)
-	}
-	if info.NumAckPending > 0 {
-		t.Errorf("message not acked after handler panic: ack-pending=%d", info.NumAckPending)
 	}
 }

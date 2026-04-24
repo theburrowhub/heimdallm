@@ -3,71 +3,67 @@ package worker
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"log/slog"
 	"runtime/debug"
 
 	"github.com/heimdallm/daemon/internal/bus"
-	"github.com/nats-io/nats.go/jetstream"
+	"github.com/nats-io/nats.go"
 )
 
 // ReviewWorker consumes PR review requests from NATS and delegates
 // to a handler function that runs the actual review pipeline.
 type ReviewWorker struct {
-	js      jetstream.JetStream
-	handler func(ctx context.Context, msg bus.PRReviewMsg)
+	conn      *nats.Conn
+	handler   func(ctx context.Context, msg bus.PRReviewMsg)
+	semaphore chan struct{}
 }
 
-// NewReviewWorker creates a worker that consumes from the review-worker
-// durable consumer. The handler is called for each message and should
-// contain the full review logic (fetch PR, run pipeline, push to watch queue).
-func NewReviewWorker(js jetstream.JetStream, handler func(context.Context, bus.PRReviewMsg)) *ReviewWorker {
-	return &ReviewWorker{js: js, handler: handler}
+// NewReviewWorker creates a worker that subscribes to the PR review subject.
+// maxConcurrent controls how many messages are processed simultaneously.
+func NewReviewWorker(conn *nats.Conn, maxConcurrent int, handler func(context.Context, bus.PRReviewMsg)) *ReviewWorker {
+	if maxConcurrent <= 0 {
+		maxConcurrent = 1
+	}
+	return &ReviewWorker{
+		conn:      conn,
+		handler:   handler,
+		semaphore: make(chan struct{}, maxConcurrent),
+	}
 }
 
-// Start begins consuming from the NATS review-worker consumer.
-// Blocks until ctx is cancelled. Always acks messages — errors are
-// logged inside the handler, not retried via NATS redelivery.
+// Start subscribes to the NATS PR review subject and blocks until ctx
+// is cancelled. Core NATS is fire-and-forget — no ack/nak.
 func (w *ReviewWorker) Start(ctx context.Context) error {
-	cons, err := w.js.Consumer(ctx, bus.StreamWork, bus.ConsumerReview)
-	if err != nil {
-		return err
-	}
-
-	iter, err := cons.Messages(jetstream.PullMaxMessages(1))
-	if err != nil {
-		return err
-	}
-
-	// Stop the iterator when context is cancelled so iter.Next() unblocks.
-	go func() {
-		<-ctx.Done()
-		iter.Stop()
-	}()
-
-	for {
-		msg, err := iter.Next()
-		if err != nil {
-			if ctx.Err() != nil || errors.Is(err, jetstream.ErrMsgIteratorClosed) {
-				return nil // clean shutdown
-			}
-			return fmt.Errorf("review-worker: iter.Next: %w", err)
-		}
-
+	sub, err := w.conn.Subscribe(bus.SubjPRReview, func(msg *nats.Msg) {
 		var prMsg bus.PRReviewMsg
-		if err := bus.Decode(msg.Data(), &prMsg); err != nil {
+		if err := bus.Decode(msg.Data, &prMsg); err != nil {
 			slog.Error("review-worker: decode message", "err", err)
-			msg.Ack()
-			continue
+			return
 		}
 
-		slog.Info("review-worker: processing",
-			"repo", prMsg.Repo, "pr", prMsg.Number, "github_id", prMsg.GithubID)
+		// Acquire semaphore for backpressure.
+		select {
+		case w.semaphore <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
 
-		w.safeHandle(ctx, prMsg)
-		msg.Ack()
+		go func() {
+			defer func() { <-w.semaphore }()
+
+			slog.Info("review-worker: processing",
+				"repo", prMsg.Repo, "pr", prMsg.Number, "github_id", prMsg.GithubID)
+
+			w.safeHandle(ctx, prMsg)
+		}()
+	})
+	if err != nil {
+		return err
 	}
+	defer sub.Unsubscribe()
+
+	<-ctx.Done()
+	return nil
 }
 
 // safeHandle calls the handler with panic recovery so a single bad PR

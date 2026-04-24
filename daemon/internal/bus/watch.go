@@ -3,22 +3,32 @@ package bus
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
+	"database/sql"
 	"fmt"
 	"time"
-
-	"github.com/nats-io/nats.go/jetstream"
 )
 
 const (
-	kvBucketWatch  = "HEIMDALLM_WATCH"
 	InitialBackoff = 1 * time.Minute
 	MaxBackoff     = 15 * time.Minute
 	EvictAfter     = 1 * time.Hour
 )
 
-// WatchEntry represents a monitored PR or issue tracked in the KV store.
+// watchStateSchema is applied on construction to create the table if needed.
+const watchStateSchema = `
+CREATE TABLE IF NOT EXISTS watch_state (
+    key        TEXT PRIMARY KEY,
+    type       TEXT NOT NULL,
+    repo       TEXT NOT NULL,
+    number     INTEGER NOT NULL,
+    github_id  INTEGER NOT NULL,
+    next_check TEXT NOT NULL,
+    backoff_ns INTEGER NOT NULL,
+    last_seen  TEXT NOT NULL
+);
+`
+
+// WatchEntry represents a monitored PR or issue tracked in the watch_state table.
 type WatchEntry struct {
 	Type      string    `json:"type"`
 	Repo      string    `json:"repo"`
@@ -32,69 +42,92 @@ type WatchEntry struct {
 // Backoff returns the current backoff duration.
 func (e WatchEntry) Backoff() time.Duration { return time.Duration(e.BackoffNs) }
 
-// Key returns the KV key for this entry (e.g. "pr.12345").
+// Key returns the key for this entry (e.g. "pr.12345").
 func (e WatchEntry) Key() string { return fmt.Sprintf("%s.%d", e.Type, e.GithubID) }
 
-// WatchKV wraps a NATS JetStream KeyValue bucket to store watch state durably.
-type WatchKV struct {
-	kv jetstream.KeyValue
+// WatchStore wraps a SQLite table to store watch state durably.
+// Replaces the JetStream KV bucket that was used previously.
+type WatchStore struct {
+	db *sql.DB
 }
 
-// NewWatchKV creates a WatchKV from an existing KeyValue bucket.
-func NewWatchKV(kv jetstream.KeyValue) *WatchKV { return &WatchKV{kv: kv} }
+// NewWatchStore creates a WatchStore, ensuring the watch_state table exists.
+func NewWatchStore(db *sql.DB) (*WatchStore, error) {
+	if _, err := db.Exec(watchStateSchema); err != nil {
+		return nil, fmt.Errorf("watch: create table: %w", err)
+	}
+	return &WatchStore{db: db}, nil
+}
+
+const timeFormat = time.RFC3339Nano
 
 // Enroll adds a new item to the watch list with the initial backoff.
-func (w *WatchKV) Enroll(ctx context.Context, typ, repo string, number int, githubID int64) error {
-	entry := WatchEntry{
-		Type: typ, Repo: repo, Number: number, GithubID: githubID,
-		NextCheck: time.Now().Add(InitialBackoff),
-		BackoffNs: int64(InitialBackoff),
-		LastSeen:  time.Now(),
-	}
-	data, err := json.Marshal(entry)
+func (w *WatchStore) Enroll(_ context.Context, typ, repo string, number int, githubID int64) error {
+	key := fmt.Sprintf("%s.%d", typ, githubID)
+	now := time.Now()
+	nextCheck := now.Add(InitialBackoff)
+	_, err := w.db.Exec(`
+		INSERT INTO watch_state (key, type, repo, number, github_id, next_check, backoff_ns, last_seen)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(key) DO UPDATE SET
+			repo = excluded.repo,
+			number = excluded.number,
+			next_check = excluded.next_check,
+			backoff_ns = excluded.backoff_ns,
+			last_seen = excluded.last_seen`,
+		key, typ, repo, number, githubID,
+		nextCheck.Format(timeFormat), int64(InitialBackoff), now.Format(timeFormat),
+	)
 	if err != nil {
-		return fmt.Errorf("watch: marshal: %w", err)
-	}
-	_, err = w.kv.Put(ctx, entry.Key(), data)
-	if err != nil {
-		return fmt.Errorf("watch: put %s: %w", entry.Key(), err)
+		return fmt.Errorf("watch: enroll %s: %w", key, err)
 	}
 	return nil
 }
 
 // Get retrieves a single watch entry by key.
-func (w *WatchKV) Get(ctx context.Context, key string) (*WatchEntry, error) {
-	kve, err := w.kv.Get(ctx, key)
-	if err != nil {
-		return nil, err
-	}
+func (w *WatchStore) Get(_ context.Context, key string) (*WatchEntry, error) {
 	var entry WatchEntry
-	if err := json.Unmarshal(kve.Value(), &entry); err != nil {
-		return nil, fmt.Errorf("watch: unmarshal %s: %w", key, err)
+	var nextCheckStr, lastSeenStr string
+	err := w.db.QueryRow(`
+		SELECT type, repo, number, github_id, next_check, backoff_ns, last_seen
+		FROM watch_state WHERE key = ?`, key,
+	).Scan(&entry.Type, &entry.Repo, &entry.Number, &entry.GithubID,
+		&nextCheckStr, &entry.BackoffNs, &lastSeenStr)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("watch: key %s not found", key)
+		}
+		return nil, fmt.Errorf("watch: get %s: %w", key, err)
 	}
+	entry.NextCheck, _ = time.Parse(timeFormat, nextCheckStr)
+	entry.LastSeen, _ = time.Parse(timeFormat, lastSeenStr)
 	return &entry, nil
 }
 
 // ResetBackoff resets an entry's backoff to InitialBackoff and updates LastSeen.
-func (w *WatchKV) ResetBackoff(ctx context.Context, key string, observedAt time.Time) error {
-	entry, err := w.Get(ctx, key)
+func (w *WatchStore) ResetBackoff(_ context.Context, key string, observedAt time.Time) error {
+	nextCheck := time.Now().Add(InitialBackoff)
+	res, err := w.db.Exec(`
+		UPDATE watch_state SET
+			backoff_ns = ?,
+			next_check = ?,
+			last_seen = ?
+		WHERE key = ?`,
+		int64(InitialBackoff), nextCheck.Format(timeFormat), observedAt.Format(timeFormat), key,
+	)
 	if err != nil {
-		return err
+		return fmt.Errorf("watch: reset %s: %w", key, err)
 	}
-	entry.BackoffNs = int64(InitialBackoff)
-	entry.NextCheck = time.Now().Add(InitialBackoff)
-	entry.LastSeen = observedAt
-	data, err := json.Marshal(entry)
-	if err != nil {
-		return fmt.Errorf("watch: marshal reset: %w", err)
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("watch: key %s not found", key)
 	}
-	_, err = w.kv.Put(ctx, key, data)
-	return err
+	return nil
 }
 
 // IncreaseBackoff doubles the entry's backoff, capping at MaxBackoff.
-func (w *WatchKV) IncreaseBackoff(ctx context.Context, key string) error {
-	entry, err := w.Get(ctx, key)
+func (w *WatchStore) IncreaseBackoff(_ context.Context, key string) error {
+	entry, err := w.Get(context.Background(), key)
 	if err != nil {
 		return err
 	}
@@ -102,76 +135,80 @@ func (w *WatchKV) IncreaseBackoff(ctx context.Context, key string) error {
 	if newBackoff > MaxBackoff {
 		newBackoff = MaxBackoff
 	}
-	entry.BackoffNs = int64(newBackoff)
-	entry.NextCheck = time.Now().Add(newBackoff)
-	data, err := json.Marshal(entry)
+	nextCheck := time.Now().Add(newBackoff)
+	_, err = w.db.Exec(`
+		UPDATE watch_state SET backoff_ns = ?, next_check = ? WHERE key = ?`,
+		int64(newBackoff), nextCheck.Format(timeFormat), key,
+	)
 	if err != nil {
-		return fmt.Errorf("watch: marshal increase: %w", err)
+		return fmt.Errorf("watch: increase %s: %w", key, err)
 	}
-	_, err = w.kv.Put(ctx, key, data)
-	return err
+	return nil
 }
 
 // Delete removes an entry from the watch list.
-func (w *WatchKV) Delete(ctx context.Context, key string) error {
-	return w.kv.Delete(ctx, key)
-}
-
-// ForceUpdate writes the entry directly (used in tests to set arbitrary state).
-func (w *WatchKV) ForceUpdate(ctx context.Context, entry *WatchEntry) error {
-	data, err := json.Marshal(entry)
-	if err != nil {
-		return fmt.Errorf("watch: marshal force: %w", err)
-	}
-	_, err = w.kv.Put(ctx, entry.Key(), data)
+func (w *WatchStore) Delete(_ context.Context, key string) error {
+	_, err := w.db.Exec(`DELETE FROM watch_state WHERE key = ?`, key)
 	return err
 }
 
-// ScanReady returns all entries whose NextCheck is at or before now.
-func (w *WatchKV) ScanReady(ctx context.Context) ([]WatchEntry, error) {
-	keys, err := w.kv.Keys(ctx)
+// ForceUpdate writes the entry directly (used in tests to set arbitrary state).
+func (w *WatchStore) ForceUpdate(_ context.Context, entry *WatchEntry) error {
+	_, err := w.db.Exec(`
+		INSERT INTO watch_state (key, type, repo, number, github_id, next_check, backoff_ns, last_seen)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(key) DO UPDATE SET
+			type = excluded.type,
+			repo = excluded.repo,
+			number = excluded.number,
+			github_id = excluded.github_id,
+			next_check = excluded.next_check,
+			backoff_ns = excluded.backoff_ns,
+			last_seen = excluded.last_seen`,
+		entry.Key(), entry.Type, entry.Repo, entry.Number, entry.GithubID,
+		entry.NextCheck.Format(timeFormat), entry.BackoffNs, entry.LastSeen.Format(timeFormat),
+	)
 	if err != nil {
-		if errors.Is(err, jetstream.ErrNoKeysFound) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("watch: keys: %w", err)
+		return fmt.Errorf("watch: force update %s: %w", entry.Key(), err)
 	}
-	now := time.Now()
+	return nil
+}
+
+// ScanReady returns all entries whose NextCheck is at or before now.
+func (w *WatchStore) ScanReady(_ context.Context) ([]WatchEntry, error) {
+	now := time.Now().Format(timeFormat)
+	rows, err := w.db.Query(`
+		SELECT type, repo, number, github_id, next_check, backoff_ns, last_seen
+		FROM watch_state WHERE next_check <= ?`, now,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("watch: scan ready: %w", err)
+	}
+	defer rows.Close()
+
 	var ready []WatchEntry
-	for _, key := range keys {
-		entry, err := w.Get(ctx, key)
-		if err != nil {
+	for rows.Next() {
+		var entry WatchEntry
+		var nextCheckStr, lastSeenStr string
+		if err := rows.Scan(&entry.Type, &entry.Repo, &entry.Number, &entry.GithubID,
+			&nextCheckStr, &entry.BackoffNs, &lastSeenStr); err != nil {
 			continue
 		}
-		if !entry.NextCheck.After(now) {
-			ready = append(ready, *entry)
-		}
+		entry.NextCheck, _ = time.Parse(timeFormat, nextCheckStr)
+		entry.LastSeen, _ = time.Parse(timeFormat, lastSeenStr)
+		ready = append(ready, entry)
 	}
-	return ready, nil
+	return ready, rows.Err()
 }
 
 // EvictStale removes entries whose LastSeen is older than EvictAfter.
 // Returns the number of entries evicted.
-func (w *WatchKV) EvictStale(ctx context.Context) (int, error) {
-	keys, err := w.kv.Keys(ctx)
+func (w *WatchStore) EvictStale(_ context.Context) (int, error) {
+	cutoff := time.Now().Add(-EvictAfter).Format(timeFormat)
+	res, err := w.db.Exec(`DELETE FROM watch_state WHERE last_seen < ?`, cutoff)
 	if err != nil {
-		if errors.Is(err, jetstream.ErrNoKeysFound) {
-			return 0, nil
-		}
-		return 0, fmt.Errorf("watch: keys: %w", err)
+		return 0, fmt.Errorf("watch: evict stale: %w", err)
 	}
-	cutoff := time.Now().Add(-EvictAfter)
-	evicted := 0
-	for _, key := range keys {
-		entry, err := w.Get(ctx, key)
-		if err != nil {
-			continue
-		}
-		if entry.LastSeen.Before(cutoff) {
-			if err := w.kv.Delete(ctx, key); err == nil {
-				evicted++
-			}
-		}
-	}
-	return evicted, nil
+	n, _ := res.RowsAffected()
+	return int(n), nil
 }

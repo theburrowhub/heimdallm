@@ -221,6 +221,12 @@ func Open(dsn string) (*Store, error) {
 	return &Store{db: db}, nil
 }
 
+// DB returns the underlying *sql.DB for shared use by subsystems that need
+// direct database access (e.g. the watch_state table used by bus.WatchStore).
+func (s *Store) DB() *sql.DB {
+	return s.db
+}
+
 // Close closes the underlying database connection.
 func (s *Store) Close() error {
 	return s.db.Close()

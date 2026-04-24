@@ -35,20 +35,3 @@ const (
 	SubjEventIssueState      = "heimdallm.events.issue_state_changed"
 	SubjEventRepoDiscovered  = "heimdallm.events.repo_discovered"
 )
-
-// Stream names
-const (
-	StreamWork      = "HEIMDALLM_WORK"
-	StreamDiscovery = "HEIMDALLM_DISCOVERY"
-	StreamEvents    = "HEIMDALLM_EVENTS"
-)
-
-// Consumer names
-const (
-	ConsumerReview    = "review-worker"
-	ConsumerPublish   = "publish-worker"
-	ConsumerTriage    = "triage-worker"
-	ConsumerImplement = "implement-worker"
-	ConsumerState     = "state-worker"
-	ConsumerDiscovery = "discovery-consumer"
-)
