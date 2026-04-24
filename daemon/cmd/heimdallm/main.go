@@ -956,6 +956,10 @@ func main() {
 			case <-statePollerCtx.Done():
 				return
 			case <-ticker.C:
+				// Gradually enroll one open item not yet in watch_state per tick.
+				// Backfills items from before the NATS migration without blocking startup.
+				enrollOneOpenItem(s, watchStore)
+
 				if evicted, err := watchStore.EvictStale(statePollerCtx); err != nil {
 					slog.Warn("state-poller: evict failed", "err", err)
 				} else if evicted > 0 {
@@ -2754,4 +2758,44 @@ func ptrIntOr(p *int, defaultV int) int {
 		return defaultV
 	}
 	return *p
+}
+
+// enrollOneOpenItem finds one open PR or issue not yet in watch_state and
+// enrolls it. Called once per state-poller tick (every 30s) to gradually
+// backfill items from before the NATS migration without blocking startup.
+func enrollOneOpenItem(s *store.Store, ws *bus.WatchStore) {
+	ctx := context.Background()
+
+	// Try a PR first, then an issue.
+	for _, q := range []struct {
+		typ   string
+		query string
+	}{
+		{"pr", "SELECT github_id, repo, number FROM prs WHERE state='open'"},
+		{"issue", "SELECT github_id, repo, number FROM issues WHERE state='open'"},
+	} {
+		rows, err := s.DB().Query(q.query)
+		if err != nil {
+			continue
+		}
+		for rows.Next() {
+			var ghID int64
+			var repo string
+			var number int
+			if err := rows.Scan(&ghID, &repo, &number); err != nil {
+				continue
+			}
+			added, err := ws.EnrollIfAbsent(ctx, q.typ, repo, number, ghID)
+			if err != nil {
+				rows.Close()
+				return
+			}
+			if added {
+				slog.Debug("state-poller: backfill enrolled", "type", q.typ, "repo", repo, "number", number)
+				rows.Close()
+				return
+			}
+		}
+		rows.Close()
+	}
 }

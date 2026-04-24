@@ -84,6 +84,25 @@ func (w *WatchStore) Enroll(_ context.Context, typ, repo string, number int, git
 	return nil
 }
 
+// EnrollIfAbsent adds an item only if it's not already in the watch list.
+// Returns true if enrolled, false if already present.
+func (w *WatchStore) EnrollIfAbsent(_ context.Context, typ, repo string, number int, githubID int64) (bool, error) {
+	key := fmt.Sprintf("%s.%d", typ, githubID)
+	now := time.Now()
+	nextCheck := now.Add(InitialBackoff)
+	res, err := w.db.Exec(`
+		INSERT OR IGNORE INTO watch_state (key, type, repo, number, github_id, next_check, backoff_ns, last_seen)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		key, typ, repo, number, githubID,
+		nextCheck.Format(timeFormat), int64(InitialBackoff), now.Format(timeFormat),
+	)
+	if err != nil {
+		return false, fmt.Errorf("watch: enroll-if-absent %s: %w", key, err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
 // Get retrieves a single watch entry by key.
 func (w *WatchStore) Get(_ context.Context, key string) (*WatchEntry, error) {
 	var entry WatchEntry
