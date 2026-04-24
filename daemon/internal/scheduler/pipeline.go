@@ -248,3 +248,8 @@ func (p *Pipeline) Stop() {
 func (p *Pipeline) Queue() *WatchQueue {
 	return p.queue
 }
+
+// Limiter returns the shared rate limiter for external callers (e.g. NATS workers).
+func (p *Pipeline) Limiter() *RateLimiter {
+	return p.limiter
+}

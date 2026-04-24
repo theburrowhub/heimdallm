@@ -540,6 +540,16 @@ func main() {
 	// existing review pipeline. This replaces the goroutine-per-PR
 	// pattern that Tier 2 used to use.
 	reviewHandler := func(ctx context.Context, msg bus.PRReviewMsg) {
+		cfgMu.Lock()
+		limiter := pipe.Limiter()
+		cfgMu.Unlock()
+		// Acquire returns only ctx.Err() (shutdown). On cancellation the
+		// message is acked without processing — acceptable because the
+		// daemon is shutting down and the PR will be re-detected next startup.
+		if err := limiter.Acquire(ctx, scheduler.TierRepo); err != nil {
+			return
+		}
+
 		pr, err := ghClient.GetPR(msg.Repo, msg.Number)
 		if err != nil {
 			slog.Error("review-worker: fetch PR from GitHub",
@@ -631,6 +641,13 @@ func main() {
 			Summary:  rev.Summary,
 			Issues:   issues,
 			Severity: rev.Severity,
+		}
+
+		cfgMu.Lock()
+		limiter := pipe.Limiter()
+		cfgMu.Unlock()
+		if err := limiter.Acquire(ctx, scheduler.TierRepo); err != nil {
+			return fmt.Errorf("rate limit cancelled: %w", err)
 		}
 
 		ghID, ghState, err := ghClient.SubmitReview(
@@ -867,6 +884,15 @@ func main() {
 	// Consumes state check requests, calls GitHub API, updates KV backoff.
 	// Reuses the existing CheckItem/HandleChange logic from tier2Adapter.
 	stateHandler := func(ctx context.Context, msg bus.StateCheckMsg) (bool, error) {
+		// Rate limit before any GitHub API call. TierWatch (50ms) matches
+		// the old Tier 3 priority — state checks are lightweight and high-priority.
+		cfgMu.Lock()
+		limiter := pipe.Limiter()
+		cfgMu.Unlock()
+		if err := limiter.Acquire(ctx, scheduler.TierWatch); err != nil {
+			return false, fmt.Errorf("rate limit cancelled: %w", err)
+		}
+
 		item := &scheduler.WatchItem{
 			Type:     msg.Type,
 			Repo:     msg.Repo,
