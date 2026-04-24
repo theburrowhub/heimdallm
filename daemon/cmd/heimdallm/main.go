@@ -2763,39 +2763,32 @@ func ptrIntOr(p *int, defaultV int) int {
 // enrollOneOpenItem finds one open PR or issue not yet in watch_state and
 // enrolls it. Called once per state-poller tick (every 30s) to gradually
 // backfill items from before the NATS migration without blocking startup.
+// Uses a single query with LEFT JOIN to avoid holding a read lock while writing.
 func enrollOneOpenItem(s *store.Store, ws *bus.WatchStore) {
 	ctx := context.Background()
-
-	// Try a PR first, then an issue.
 	for _, q := range []struct {
 		typ   string
 		query string
 	}{
-		{"pr", "SELECT github_id, repo, number FROM prs WHERE state='open'"},
-		{"issue", "SELECT github_id, repo, number FROM issues WHERE state='open'"},
+		{"pr", `SELECT p.github_id, p.repo, p.number FROM prs p
+			LEFT JOIN watch_state w ON w.key = 'pr.' || p.github_id
+			WHERE p.state='open' AND w.key IS NULL LIMIT 1`},
+		{"issue", `SELECT i.github_id, i.repo, i.number FROM issues i
+			LEFT JOIN watch_state w ON w.key = 'issue.' || i.github_id
+			WHERE i.state='open' AND w.key IS NULL LIMIT 1`},
 	} {
-		rows, err := s.DB().Query(q.query)
+		var ghID int64
+		var repo string
+		var number int
+		err := s.DB().QueryRow(q.query).Scan(&ghID, &repo, &number)
 		if err != nil {
-			continue
+			continue // no rows or error — try next type
 		}
-		for rows.Next() {
-			var ghID int64
-			var repo string
-			var number int
-			if err := rows.Scan(&ghID, &repo, &number); err != nil {
-				continue
-			}
-			added, err := ws.EnrollIfAbsent(ctx, q.typ, repo, number, ghID)
-			if err != nil {
-				rows.Close()
-				return
-			}
-			if added {
-				slog.Debug("state-poller: backfill enrolled", "type", q.typ, "repo", repo, "number", number)
-				rows.Close()
-				return
-			}
+		if err := ws.Enroll(ctx, q.typ, repo, number, ghID); err != nil {
+			slog.Warn("state-poller: backfill enroll failed", "type", q.typ, "repo", repo, "number", number, "err", err)
+			return
 		}
-		rows.Close()
+		slog.Debug("state-poller: backfill enrolled", "type", q.typ, "repo", repo, "number", number)
+		return
 	}
 }
