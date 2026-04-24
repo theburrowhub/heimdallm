@@ -653,6 +653,12 @@ func (c *Config) applyDefaults() {
 	if c.CircuitBreaker.PerRepoHr == 0 {
 		c.CircuitBreaker.PerRepoHr = 20
 	}
+	if c.CircuitBreaker.PerIssue24h == 0 {
+		c.CircuitBreaker.PerIssue24h = 3
+	}
+	if c.CircuitBreaker.PerIssueRepoHr == 0 {
+		c.CircuitBreaker.PerIssueRepoHr = 10
+	}
 }
 
 // applyEnvOverrides applies HEIMDALLM_* environment variable overrides.

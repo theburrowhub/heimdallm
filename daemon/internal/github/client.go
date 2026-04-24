@@ -527,6 +527,16 @@ func (c *Client) FetchComments(repo string, number int) ([]Comment, error) {
 	return all, nil
 }
 
+// FetchIssueCommentsOnly retrieves the issue comments for an issue or PR
+// number WITHOUT also calling /pulls/:n/comments. Callers that operate on
+// issue numbers MUST use this method: /pulls/:n/comments always 404s on
+// issues, and FetchComments treats that as a hard error. See
+// theburrowhub/heimdallm#292 — the 404 cascade broke the marker-scan
+// idempotency check and produced a re-triage loop.
+func (c *Client) FetchIssueCommentsOnly(repo string, number int) ([]Comment, error) {
+	return c.fetchIssueComments(repo, number)
+}
+
 func (c *Client) fetchReviewComments(repo string, number int) ([]Comment, error) {
 	path := fmt.Sprintf("/repos/%s/pulls/%d/comments", repo, number)
 	resp, err := c.do("GET", path, "application/vnd.github+json")

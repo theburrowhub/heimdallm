@@ -33,6 +33,19 @@ type fakeStore struct {
 
 	latestReview    *store.IssueReview
 	latestReviewErr error
+
+	// in-flight claim state (#292). claims is keyed on "issueID|updatedAt"
+	// so tests can assert claims / releases without racing the map.
+	claimsMu   sync.Mutex
+	claims     map[string]struct{}
+	claimErr   error
+	releaseErr error
+
+	// circuit-breaker knobs (#292). breakerTripped forces the next check
+	// to return tripped=true; breakerErr makes it return an error.
+	breakerTripped bool
+	breakerReason  string
+	breakerErr     error
 }
 
 func (f *fakeStore) UpsertIssue(i *store.Issue) (int64, error) {
@@ -73,6 +86,47 @@ func (f *fakeStore) UpsertPR(pr *store.PR) (int64, error) {
 	copy.ID = f.nextPRID
 	f.prs = append(f.prs, &copy)
 	return f.nextPRID, nil
+}
+
+func (f *fakeStore) ClaimIssueTriageInFlight(issueID int64, updatedAt string) (bool, error) {
+	if f.claimErr != nil {
+		return false, f.claimErr
+	}
+	f.claimsMu.Lock()
+	defer f.claimsMu.Unlock()
+	if f.claims == nil {
+		f.claims = make(map[string]struct{})
+	}
+	key := fmt.Sprintf("%d|%s", issueID, updatedAt)
+	if _, ok := f.claims[key]; ok {
+		return false, nil
+	}
+	f.claims[key] = struct{}{}
+	return true, nil
+}
+
+func (f *fakeStore) ReleaseIssueTriageInFlight(issueID int64, updatedAt string) error {
+	if f.releaseErr != nil {
+		return f.releaseErr
+	}
+	f.claimsMu.Lock()
+	defer f.claimsMu.Unlock()
+	delete(f.claims, fmt.Sprintf("%d|%s", issueID, updatedAt))
+	return nil
+}
+
+func (f *fakeStore) CheckIssueCircuitBreaker(issueID int64, repo string, cfg store.IssueCircuitBreakerLimits) (bool, string, error) {
+	if f.breakerErr != nil {
+		return false, "", f.breakerErr
+	}
+	if f.breakerTripped {
+		reason := f.breakerReason
+		if reason == "" {
+			reason = "test breaker tripped"
+		}
+		return true, reason, nil
+	}
+	return false, "", nil
 }
 
 type fakeGH struct {
@@ -116,7 +170,7 @@ func (f *fakeGH) PostComment(repo string, number int, body string) (time.Time, e
 	return time.Now().UTC(), f.postErr
 }
 
-func (f *fakeGH) FetchComments(repo string, number int) ([]github.Comment, error) {
+func (f *fakeGH) FetchIssueCommentsOnly(repo string, number int) ([]github.Comment, error) {
 	if f.commentsErr != nil {
 		return nil, f.commentsErr
 	}

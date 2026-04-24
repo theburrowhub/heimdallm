@@ -140,3 +140,63 @@ func TestFetchComments_APIError(t *testing.T) {
 		t.Fatal("expected error for 404 response, got nil")
 	}
 }
+
+// TestFetchIssueCommentsOnly_IgnoresPREndpoint locks in the fix for #292:
+// the issue-triage path must NOT call /pulls/:n/comments on an issue
+// number. A 404 from the PR endpoint used to abort the whole FetchComments
+// call, which cascaded into the marker-scan fallthrough that produced 47
+// re-triages on #264 in 46 minutes. FetchIssueCommentsOnly sidesteps the
+// PR endpoint entirely, so even when /pulls/:n/comments would 404 the
+// issue comments still come back.
+func TestFetchIssueCommentsOnly_IgnoresPREndpoint(t *testing.T) {
+	pullsHit := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/org/repo/pulls/1/comments":
+			pullsHit = true
+			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+		case "/repos/org/repo/issues/1/comments":
+			json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"user":       map[string]string{"login": "alice"},
+					"body":       "<!-- heimdallm:done -->\nfinished",
+					"created_at": "2024-01-01T00:00:00Z",
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	comments, err := client.FetchIssueCommentsOnly("org/repo", 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pullsHit {
+		t.Errorf("FetchIssueCommentsOnly must NOT call /pulls/:n/comments")
+	}
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(comments))
+	}
+	if comments[0].Author != "alice" {
+		t.Errorf("author mismatch: got %q", comments[0].Author)
+	}
+}
+
+// TestFetchIssueCommentsOnly_PropagatesRealErrors makes sure we don't
+// over-rotate: a genuine 5xx from /issues/:n/comments still surfaces so
+// callers can log/retry. Only the PR-endpoint leg is bypassed.
+func TestFetchIssueCommentsOnly_PropagatesRealErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message":"upstream"}`, http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	_, err := client.FetchIssueCommentsOnly("org/repo", 1)
+	if err == nil {
+		t.Fatal("expected error for 500 from issues endpoint, got nil")
+	}
+}

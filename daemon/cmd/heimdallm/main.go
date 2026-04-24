@@ -131,6 +131,13 @@ func main() {
 		slog.Info("startup: cleared stale inflight rows", "count", n)
 	}
 
+	// Mirror of the PR-side sweep above for issue-triage claims (#292).
+	if n, err := s.ClearStaleIssueTriageInFlight(30 * time.Minute); err != nil {
+		slog.Warn("startup: clear stale issue triage inflight failed", "err", err)
+	} else if n > 0 {
+		slog.Info("startup: cleared stale issue triage inflight rows", "count", n)
+	}
+
 	// ── NATS event bus ──────────────────────────────────────────────────
 	eventBus := bus.New(bus.Config{
 		DataDir:              filepath.Join(dataDir(), "nats"),
@@ -216,11 +223,19 @@ func main() {
 	}
 	p.SetCircuitBreakerLimits(&cbLimits)
 
+	// Issue-side circuit-breaker caps (theburrowhub/heimdallm#292) — mirrors
+	// the PR-side defenses against runaway triage loops.
+	issueCBLimits := store.IssueCircuitBreakerLimits{
+		PerIssue24h: cfg.CircuitBreaker.PerIssue24h,
+		PerRepoHr:   cfg.CircuitBreaker.PerIssueRepoHr,
+	}
+
 	// GitExec drives the auto_implement flow (#27): branch, commit, push, PR.
 	// Wired unconditionally — the pipeline guards against running git ops on
 	// an issue that is classified as review_only, so this dep is harmless
 	// when auto_implement is not in use.
 	issuePipe := issuepipeline.New(s, ghClient, exec, issuepipeline.NewGitExec(), broker, &notifyWithSSE{notifier: notifier})
+	issuePipe.SetCircuitBreakerLimits(&issueCBLimits)
 
 	// Resolve bot login for re-review / re-triage context filtering.
 	if login, err := ghClient.AuthenticatedUser(); err == nil {

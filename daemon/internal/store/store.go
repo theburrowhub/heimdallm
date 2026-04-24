@@ -131,6 +131,17 @@ CREATE TABLE IF NOT EXISTS reviews_in_flight (
   started_at  DATETIME NOT NULL,
   PRIMARY KEY (pr_id, head_sha)
 );
+
+-- Mirror of reviews_in_flight for the issue-triage pipeline. The updated_at
+-- column stores the issue's UpdatedAt truncated to an ISO-seconds string so
+-- two fetcher ticks observing the same snapshot collapse onto the same row.
+-- See theburrowhub/heimdallm#292.
+CREATE TABLE IF NOT EXISTS issue_triage_in_flight (
+  issue_id    INTEGER NOT NULL,
+  updated_at  TEXT    NOT NULL,
+  started_at  DATETIME NOT NULL,
+  PRIMARY KEY (issue_id, updated_at)
+);
 `
 
 // Open opens (or creates) a SQLite database at dsn and applies the schema.
@@ -185,6 +196,13 @@ func Open(dsn string) (*Store, error) {
 	// JOIN drives from prs.repo with no index and table-scans on every
 	// poll-cycle breaker check.
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_prs_repo ON prs(repo)")
+	// Mirrors of the above for the issue-side circuit breaker added in
+	// theburrowhub/heimdallm#292. Without these, CountIssueReviewsForIssue
+	// and CountIssueTriagesForRepo table-scan issue_reviews on every
+	// triage attempt.
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_issue_reviews_issue_created ON issue_reviews(issue_id, created_at)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_issue_reviews_created ON issue_reviews(created_at)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_issues_repo ON issues(repo)")
 	// Idempotent migration for existing DBs — new installs get the table
 	// from the schema constant above. Safe on every startup.
 	db.Exec(`CREATE TABLE IF NOT EXISTS reviews_in_flight (
@@ -192,6 +210,13 @@ func Open(dsn string) (*Store, error) {
 		head_sha    TEXT    NOT NULL,
 		started_at  DATETIME NOT NULL,
 		PRIMARY KEY (pr_id, head_sha)
+	)`)
+	// Same pattern for the issue-triage claim table added in #292.
+	db.Exec(`CREATE TABLE IF NOT EXISTS issue_triage_in_flight (
+		issue_id    INTEGER NOT NULL,
+		updated_at  TEXT    NOT NULL,
+		started_at  DATETIME NOT NULL,
+		PRIMARY KEY (issue_id, updated_at)
 	)`)
 	return &Store{db: db}, nil
 }

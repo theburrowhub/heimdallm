@@ -8,6 +8,7 @@ package issues
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -19,6 +20,27 @@ import (
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
 )
+
+// ErrCircuitBreakerTripped is returned by Run when a triage was skipped
+// because the per-issue or per-repo cap was exceeded. Mirrors the PR-side
+// error in the pipeline package; callers detect it via errors.As on a
+// *CircuitBreakerError value to extract the human-readable reason, or via
+// errors.Is(err, ErrCircuitBreakerTripped) when the reason is not needed.
+// See theburrowhub/heimdallm#292.
+var ErrCircuitBreakerTripped = errors.New("issues pipeline: circuit breaker tripped")
+
+// CircuitBreakerError wraps ErrCircuitBreakerTripped with the specific
+// reason the breaker returned. Use errors.As on this type to read Reason
+// without parsing the error string.
+type CircuitBreakerError struct {
+	Reason string
+}
+
+func (e *CircuitBreakerError) Error() string {
+	return ErrCircuitBreakerTripped.Error() + ": " + e.Reason
+}
+
+func (e *CircuitBreakerError) Unwrap() error { return ErrCircuitBreakerTripped }
 
 // maxTitleBytes bounds the length of issue titles that get interpolated into
 // commit messages and PR title / body. Long titles turn into unwieldy
@@ -57,8 +79,14 @@ type IssueCommenter interface {
 
 // IssueCommentFetcher fetches the existing discussion for an issue so the
 // triage LLM can take prior context into account.
+//
+// The method is `FetchIssueCommentsOnly`, not the generic `FetchComments`
+// that PR callers use — on an issue number, FetchComments hits the
+// PR-only `/pulls/:n/comments` endpoint and always 404s, which caused
+// every issue triage to silently run without prior comment context (bug
+// #292).
 type IssueCommentFetcher interface {
-	FetchComments(repo string, number int) ([]github.Comment, error)
+	FetchIssueCommentsOnly(repo string, number int) ([]github.Comment, error)
 }
 
 // DefaultBrancher returns the GitHub repository's default branch. Used by
@@ -179,19 +207,39 @@ type Pipeline struct {
 	broker   Publisher
 	notify   Notifier
 	botLogin string
+
+	// breaker caps the number of triages per issue and per repo. Nil
+	// disables both axes (no limit). Configure at startup via
+	// SetCircuitBreakerLimits.
+	breaker *store.IssueCircuitBreakerLimits
 }
 
 // SetBotLogin sets the GitHub login of the bot account. Used to filter
 // the bot's own comments from the "new discussion" section in re-triages.
 func (p *Pipeline) SetBotLogin(login string) { p.botLogin = login }
 
+// SetCircuitBreakerLimits enables the per-issue and per-repo triage
+// caps. Nil disables both axes; zero values within a non-nil struct
+// disable only that axis.
+func (p *Pipeline) SetCircuitBreakerLimits(limits *store.IssueCircuitBreakerLimits) {
+	p.breaker = limits
+}
+
 // issueStore is the subset of *store.Store the pipeline needs. Kept narrow
 // so tests can substitute a fake without bringing in SQLite.
+//
+// ClaimIssueTriageInFlight / ReleaseIssueTriageInFlight gate Run on the
+// persistent (github_issue_id, updated_at) key so two concurrent fetcher
+// ticks on the same snapshot collapse to one Claude dispatch — mirroring
+// the PR-side claim (#258). See theburrowhub/heimdallm#292.
 type issueStore interface {
 	UpsertIssue(i *store.Issue) (int64, error)
 	InsertIssueReview(r *store.IssueReview) (int64, error)
 	LatestIssueReview(issueID int64) (*store.IssueReview, error)
 	UpsertPR(pr *store.PR) (int64, error)
+	ClaimIssueTriageInFlight(issueID int64, updatedAt string) (bool, error)
+	ReleaseIssueTriageInFlight(issueID int64, updatedAt string) error
+	CheckIssueCircuitBreaker(issueID int64, repo string, cfg store.IssueCircuitBreakerLimits) (bool, string, error)
 }
 
 // issueGitHub groups every GitHub-facing method the pipeline uses. The
@@ -234,6 +282,63 @@ func (p *Pipeline) Run(ctx context.Context, issue *github.Issue, opts RunOptions
 		ctx = context.Background()
 	}
 
+	// Persistent in-flight claim keyed on (github_issue_id, updated_at).
+	// Two concurrent fetcher ticks observing the same snapshot collapse to
+	// one Claude dispatch. Fail-open on any claim error — the downstream
+	// circuit breaker and marker-scan dedup still cap cost. Empty key is
+	// treated as "no claim possible"; the scheduler should have prevented
+	// that but the guard is cheap. See theburrowhub/heimdallm#292.
+	//
+	// Key-space note: the claim uses issue.ID (the GitHub-assigned ID,
+	// stable and known before any DB write) so we can gate Run before
+	// the upsert. The circuit breaker further down uses the internal
+	// store ID returned by UpsertIssue because issue_reviews.issue_id
+	// references issues.id. The two key spaces serve different purposes
+	// (snapshot dedup vs historical count) and are intentionally
+	// distinct — do not "unify" them without revisiting the
+	// claim-before-upsert ordering that gives Run an early exit.
+	var (
+		claimed       bool
+		breakerHeld   bool // when true, defer must NOT release the claim
+		claimKey      string
+		claimIssueID  = issue.ID
+	)
+	if !issue.UpdatedAt.IsZero() && claimIssueID != 0 {
+		claimKey = issue.UpdatedAt.UTC().Format(time.RFC3339)
+		ok, err := p.store.ClaimIssueTriageInFlight(claimIssueID, claimKey)
+		if err != nil {
+			// Fail-open: if the INSERT actually landed but the driver
+			// surfaced an error reading RowsAffected, the row will leak
+			// until ClearStaleIssueTriageInFlight (30 min sweep) reclaims
+			// it. Acceptable: the alternative (assume it landed and
+			// release in defer) risks releasing a row another daemon
+			// process holds.
+			slog.Warn("issues pipeline: claim inflight failed, proceeding",
+				"repo", issue.Repo, "number", issue.Number, "err", err)
+		} else if !ok {
+			slog.Info("issues pipeline: already in flight, skipping",
+				"repo", issue.Repo, "number", issue.Number, "updated_at", claimKey)
+			return nil, nil
+		} else {
+			claimed = true
+		}
+	}
+	defer func() {
+		// Release on every path EXCEPT a circuit-breaker trip. Holding
+		// the claim across a trip prevents the next fetcher tick on the
+		// same (issue, updated_at) snapshot from re-acquiring, re-hitting
+		// the breaker, and re-firing the operator notification once per
+		// poll. The 30-min stale sweep eventually reclaims the row, or a
+		// genuine activity bump (new updated_at) produces a new claim
+		// key that bypasses the held one.
+		if claimed && !breakerHeld {
+			if err := p.store.ReleaseIssueTriageInFlight(claimIssueID, claimKey); err != nil {
+				slog.Warn("issues pipeline: release inflight failed",
+					"issue_id", claimIssueID, "updated_at", claimKey, "err", err)
+			}
+		}
+	}()
+
 	// Determine the effective mode. `ExecOpts.WorkDir` is the single source
 	// of truth for "is there a local checkout"; Run does not consult any
 	// other field.
@@ -252,6 +357,12 @@ func (p *Pipeline) Run(ctx context.Context, issue *github.Issue, opts RunOptions
 	// here. issue_detected fires before the flow forks, issue_review_started
 	// fires after so the UI can show the correct "triaging" vs "implementing"
 	// copy — the runner sets the exact flavour it wants.
+	//
+	// Upsert runs BEFORE the circuit breaker so the breaker's per-issue
+	// count (which keys on the internal store ID via issue_reviews.issue_id)
+	// sees the correct row. The upsert is idempotent — on a breaker-trip
+	// the issue row stays but no issue_reviews row is written for this
+	// attempt, which matches the PR-side behaviour.
 	storeIssue, err := issueToStore(issue)
 	if err != nil {
 		return nil, err
@@ -260,6 +371,31 @@ func (p *Pipeline) Run(ctx context.Context, issue *github.Issue, opts RunOptions
 	if err != nil {
 		return nil, fmt.Errorf("issues pipeline: upsert issue: %w", err)
 	}
+
+	// Circuit breaker: hard cap on triage count per issue / per repo.
+	// Runs AFTER the in-flight claim and upsert so it only fires when
+	// both dedup layers missed; returns *CircuitBreakerError so the
+	// caller (fetcher) can distinguish it from a genuine pipeline
+	// failure. See theburrowhub/heimdallm#292.
+	if p.breaker != nil {
+		tripped, reason, err := p.store.CheckIssueCircuitBreaker(issueID, issue.Repo, *p.breaker)
+		if err != nil {
+			slog.Warn("issues pipeline: circuit breaker check failed, proceeding",
+				"repo", issue.Repo, "number", issue.Number, "err", err)
+		} else if tripped {
+			slog.Error("issues pipeline: CIRCUIT BREAKER TRIPPED — skipping triage",
+				"repo", issue.Repo, "number", issue.Number, "reason", reason)
+			if p.notify != nil {
+				p.notify.Notify("Heimdallm issue circuit breaker",
+					fmt.Sprintf("%s #%d: %s", issue.Repo, issue.Number, reason))
+			}
+			// Hold the claim so the operator notification is not
+			// repeated on every subsequent poll for the same snapshot.
+			breakerHeld = true
+			return nil, &CircuitBreakerError{Reason: reason}
+		}
+	}
+
 	p.publish(sse.EventIssueDetected, map[string]any{
 		"issue_id": issueID, "number": issue.Number, "repo": issue.Repo,
 	})
@@ -290,7 +426,7 @@ func (p *Pipeline) runReviewOnly(ctx context.Context, issue *github.Issue, issue
 
 	// Pull existing discussion as additional context. Failure is non-fatal —
 	// the triage still runs with title + body alone.
-	comments, err := p.gh.FetchComments(issue.Repo, issue.Number)
+	comments, err := p.gh.FetchIssueCommentsOnly(issue.Repo, issue.Number)
 	if err != nil {
 		slog.Warn("issues pipeline: failed to fetch comments, proceeding without", "err", err)
 		comments = nil
@@ -447,7 +583,7 @@ func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, is
 
 	// Fetch comments once so the implement prompt carries the same context
 	// the triage path would see. Best-effort as before.
-	comments, err := p.gh.FetchComments(issue.Repo, issue.Number)
+	comments, err := p.gh.FetchIssueCommentsOnly(issue.Repo, issue.Number)
 	if err != nil {
 		slog.Warn("issues pipeline: failed to fetch comments, proceeding without", "err", err)
 		comments = nil

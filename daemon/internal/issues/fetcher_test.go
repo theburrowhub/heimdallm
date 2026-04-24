@@ -26,7 +26,7 @@ type fakeMarkerFetcher struct {
 	err           error
 }
 
-func (f *fakeMarkerFetcher) FetchComments(repo string, number int) ([]github.Comment, error) {
+func (f *fakeMarkerFetcher) FetchIssueCommentsOnly(repo string, number int) ([]github.Comment, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
