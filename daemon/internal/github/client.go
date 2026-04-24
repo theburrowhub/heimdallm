@@ -192,6 +192,49 @@ func (c *Client) fetchByQualifier(username, qualifier string, repos []string) ([
 	return result.Items, nil
 }
 
+// PermanentSubmitError signals that SubmitReview hit a state from
+// which no retry will recover — e.g. the PR's conversation is locked,
+// the PR has been deleted, or the repo was archived. Callers should
+// mark the local review row as orphaned (via the same sentinel as
+// the no-repo path in pipeline.PublishPending) instead of retrying
+// every poll cycle. See theburrowhub/heimdallm#325.
+type PermanentSubmitError struct {
+	StatusCode int    // HTTP status code returned by GitHub (always 422 today)
+	Reason     string // short human-readable label, e.g. "pr_locked"
+	Body       string // safe-truncated response body for diagnostics
+}
+
+func (e *PermanentSubmitError) Error() string {
+	return fmt.Sprintf("github: submit review permanent failure (status %d, reason %s): %s",
+		e.StatusCode, e.Reason, e.Body)
+}
+
+// classifyPermanentSubmit422 inspects an HTTP 422 response body and
+// returns (reason, true) when the failure is known to be permanent for
+// the daemon — i.e. no future retry can succeed without operator
+// intervention. Returns ("", false) for transient or unknown 422s so
+// the caller falls back to the existing retry path.
+//
+// Currently classified as permanent:
+//   - "lock prevents review" — PR conversation is locked. Unlocking
+//     requires the operator to use the GitHub UI; the daemon cannot
+//     recover on its own.
+//
+// Extend with care: a false positive here marks a recoverable review
+// as orphan and loses it permanently. When in doubt, leave the case
+// out and let the retry loop run — it is rate-limited by the poll
+// interval and only burns 1 GitHub API call per cycle.
+func classifyPermanentSubmit422(status int, body []byte) (string, bool) {
+	if status != http.StatusUnprocessableEntity {
+		return "", false
+	}
+	lower := strings.ToLower(string(body))
+	if strings.Contains(lower, "lock prevents review") || strings.Contains(lower, "pull request is locked") {
+		return "pr_locked", true
+	}
+	return "", false
+}
+
 // SubmitReview posts an AI-generated review to GitHub as a PR review.
 // event should be "REQUEST_CHANGES", "COMMENT", or "APPROVE".
 // Returns the GitHub review ID and the review state reported by the API —
@@ -199,6 +242,12 @@ func (c *Client) fetchByQualifier(username, qualifier string, repos []string) ([
 // event and on GitHub's server-side rules. We pass the state through to the
 // store so the web UI can show a review-decision badge sourced from GitHub
 // rather than derived locally from severity.
+//
+// On HTTP 422 with a body that indicates the PR is in a state from which
+// no retry can recover (e.g. the conversation has been locked), returns
+// a *PermanentSubmitError so the caller can mark the local review row
+// as orphaned instead of retrying every poll cycle. See
+// theburrowhub/heimdallm#325.
 func (c *Client) SubmitReview(repo string, number int, body, event string) (int64, string, error) {
 	path := fmt.Sprintf("/repos/%s/pulls/%d/reviews", repo, number)
 
@@ -225,6 +274,17 @@ func (c *Client) SubmitReview(repo string, number int, body, event string) (int6
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != 200 {
 		errBody := safeTruncate(string(respBody), maxErrBodyLen)
+		if reason, ok := classifyPermanentSubmit422(resp.StatusCode, respBody); ok {
+			// Body carries the FULL response (not safe-truncated) so an
+			// operator inspecting *PermanentSubmitError can see the full
+			// GitHub error payload — the reason substring may live past
+			// the maxErrBodyLen cutoff that the generic-error path uses.
+			return 0, "", &PermanentSubmitError{
+				StatusCode: resp.StatusCode,
+				Reason:     reason,
+				Body:       string(respBody),
+			}
+		}
 		return 0, "", fmt.Errorf("github: submit review: status %d: %s", resp.StatusCode, errBody)
 	}
 

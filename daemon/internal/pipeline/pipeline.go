@@ -586,9 +586,18 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		severityToEvent(result.Severity, len(result.Issues)),
 	)
 	if publishErr != nil {
-		// Review saved locally; will retry on next poll (GitHubReviewID == 0 check)
-		slog.Warn("pipeline: failed to publish to GitHub, will retry",
-			"pr", pr.Number, "err", publishErr)
+		// Permanent submit failure (PR locked etc.): mark the freshly
+		// stored row as orphaned right now so it never enters the
+		// PublishPending retry loop. Transient errors fall through to
+		// the existing retry path. The orphan-marking pattern is
+		// shared with PublishPending via markOrphanIfPermanent so
+		// both sites stay in sync if the sentinel convention or
+		// logging shape ever changes. See theburrowhub/heimdallm#325.
+		if !p.markOrphanIfPermanent(rev.ID, publishErr, "initial publish") {
+			// Transient — review saved locally; will retry on next poll (GitHubReviewID == 0 check)
+			slog.Warn("pipeline: failed to publish to GitHub, will retry",
+				"pr", pr.Number, "err", publishErr)
+		}
 	} else {
 		// Stamp PublishedAt immediately after the API returned success — this
 		// is the anchor the dedup window uses. Anchoring on CreatedAt (set
@@ -626,6 +635,34 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	return rev, nil
 }
 
+// markOrphanIfPermanent inspects the error returned by SubmitReview and,
+// when it is a *github.PermanentSubmitError, marks the local review row
+// as orphaned via the (-1, "") sentinel that PublishPending also uses
+// for PRs with no repo. Returns true when the error was permanent and
+// the orphan-marking attempt was made (regardless of whether
+// MarkReviewPublished itself succeeded — a store failure here is logged
+// at Warn so the retry loop can re-attempt next tick).
+//
+// Returns false for transient or unknown errors so the caller falls
+// back to its existing retry logging. Centralising this keeps the Run
+// and PublishPending paths in lockstep — without the helper a future
+// edit to the sentinel convention or log shape would silently drift
+// between the two sites. See theburrowhub/heimdallm#325 review.
+func (p *Pipeline) markOrphanIfPermanent(reviewID int64, submitErr error, source string) bool {
+	var permErr *github.PermanentSubmitError
+	if !errors.As(submitErr, &permErr) {
+		return false
+	}
+	if mErr := p.store.MarkReviewPublished(reviewID, -1, "", time.Now().UTC()); mErr != nil {
+		slog.Warn("pipeline: failed to mark orphaned review, will retry next tick",
+			"review_id", reviewID, "source", source, "reason", permErr.Reason, "err", mErr)
+		return true
+	}
+	slog.Info("pipeline: review marked orphan (permanent submit failure, will not retry)",
+		"review_id", reviewID, "source", source, "reason", permErr.Reason, "status", permErr.StatusCode)
+	return true
+}
+
 // PublishPending re-submits locally stored reviews that failed to publish to GitHub.
 // Call this on scheduler ticks to retry failed publications.
 func (p *Pipeline) PublishPending() {
@@ -661,6 +698,14 @@ func (p *Pipeline) PublishPending() {
 			severityToEvent(rev.Severity, len(issues)),
 		)
 		if err != nil {
+			// Permanent submit failures (currently HTTP 422 "lock
+			// prevents review") are routed through the shared helper so
+			// both the Run path and this retry path apply the same
+			// orphan-marker, sentinel value and log shape. See
+			// theburrowhub/heimdallm#325.
+			if p.markOrphanIfPermanent(rev.ID, err, "retry publish") {
+				continue
+			}
 			slog.Warn("pipeline: retry publish failed", "review_id", rev.ID, "err", err)
 			continue
 		}
