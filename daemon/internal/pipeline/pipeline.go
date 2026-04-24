@@ -10,6 +10,7 @@ import (
 
 	"github.com/heimdallm/daemon/internal/executor"
 	"github.com/heimdallm/daemon/internal/github"
+	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
 )
 
@@ -68,6 +69,39 @@ type CommentFetcher interface {
 	FetchComments(repo string, number int) ([]github.Comment, error)
 }
 
+// TimelineFetcher returns the review_requested / review_dismissed events
+// targeting a specific reviewer login on a PR. Used by the SHA-skip
+// path to detect explicit re-request review actions that the user
+// performed via the GitHub UI even though the HEAD SHA is unchanged.
+// See theburrowhub/heimdallm#322 Bug 5.
+//
+// Optional dependency: when not set (nil), the pipeline falls back to
+// the previous behaviour (skip on SHA match regardless of timeline).
+type TimelineFetcher interface {
+	GetPRTimelineEventsForReviewer(repo string, number int, login string) ([]github.TimelineEvent, error)
+}
+
+// Publisher is the broker subset the pipeline uses to emit lifecycle
+// events. *sse.Broker satisfies it directly so main.go can wire the
+// production broker as the publisher with no adapter.
+//
+// Why the pipeline (not the caller) emits these events: the caller
+// cannot know which path Run will take (real review, SHA-skip,
+// legacy-backfill, gate-skip) until Run returns, but the UI/notify
+// stack consumes review_started the instant it lands. Emitting from
+// the caller before Run produced phantom "reviewing" spinners in
+// Flutter and a desktop notification per poll cycle on stable PRs —
+// exactly the regression Bug 3 was supposed to fix. Centralising the
+// emission inside Run keeps the lifecycle SSEs honest. See
+// theburrowhub/heimdallm#322 Bugs 3 and 4.
+//
+// Optional dependency: when not set (nil), the pipeline emits no
+// lifecycle events and the caller is responsible (legacy contract,
+// preserved so existing tests don't need a stub publisher each).
+type Publisher interface {
+	Publish(e sse.Event)
+}
+
 // Pipeline orchestrates the full PR review flow.
 type Pipeline struct {
 	store *store.Store
@@ -84,6 +118,14 @@ type Pipeline struct {
 	// all caps (the pre-issue-243 behaviour). Populated at daemon startup via
 	// SetCircuitBreakerLimits.
 	breaker *store.CircuitBreakerLimits
+	// timeline is the optional event-history fetcher used to bypass the
+	// SHA-skip path on explicit re-request review actions. Nil keeps the
+	// pre-#322 behaviour (skip on SHA match regardless of user intent).
+	timeline TimelineFetcher
+	// publisher emits lifecycle SSE events (pr_detected, review_started,
+	// review_completed, review_skipped) at the same semantic point Run
+	// makes the actual decision. Nil disables emission (legacy contract).
+	publisher Publisher
 }
 
 // New creates a new Pipeline with the provided dependencies.
@@ -106,6 +148,91 @@ func (p *Pipeline) SetBotLogin(login string) { p.botLogin = login }
 // and the follow-up ticket for re-plumbing via a getter.
 func (p *Pipeline) SetCircuitBreakerLimits(limits *store.CircuitBreakerLimits) {
 	p.breaker = limits
+}
+
+// SetTimelineFetcher enables the explicit-re-request-review bypass for
+// the SHA-skip path. Nil keeps the pre-#322 behaviour (skip on SHA
+// match regardless of user intent). Production wires the *github.Client
+// here at daemon startup.
+func (p *Pipeline) SetTimelineFetcher(t TimelineFetcher) {
+	p.timeline = t
+}
+
+// SetPublisher wires the SSE broker so Run can emit lifecycle events
+// at the correct semantic point (after the SHA-skip / gate decisions
+// rather than blindly at function entry). Nil disables emission and
+// callers must handle lifecycle themselves — legacy contract.
+func (p *Pipeline) SetPublisher(pub Publisher) {
+	p.publisher = pub
+}
+
+// publish emits an SSE lifecycle event with the given payload. No-op
+// when no publisher is wired. A marshal failure on a map[string]any
+// of basic types should not happen in practice (every payload site
+// uses string / int / int64 / float64), but if it ever does we log
+// at Warn level rather than swallow silently — debugging a missing
+// SSE event without that breadcrumb is painful.
+func (p *Pipeline) publish(eventType string, data map[string]any) {
+	if p.publisher == nil {
+		return
+	}
+	b, err := json.Marshal(data)
+	if err != nil {
+		slog.Warn("pipeline: failed to marshal SSE payload, dropping event",
+			"event", eventType, "err", err)
+		return
+	}
+	p.publisher.Publish(sse.Event{Type: eventType, Data: string(b)})
+}
+
+// publishSkipped is a small helper for the four skip paths in Run that
+// need to emit EventReviewSkipped with the same shape: repo, pr_number,
+// pr_title, reason. Centralised so changes to the payload schema only
+// touch one site.
+func (p *Pipeline) publishSkipped(pr *github.PullRequest, reason SkipReason) {
+	p.publish(sse.EventReviewSkipped, map[string]any{
+		"repo":      pr.Repo,
+		"pr_number": pr.Number,
+		"pr_title":  pr.Title,
+		"reason":    string(reason),
+	})
+}
+
+// shouldBypassSHASkipForReReview returns true iff the operator
+// explicitly re-requested a review on this PR after the previous
+// review's CreatedAt and that re-request is still in effect (not
+// superseded by a later dismissal). All preconditions fail closed:
+// missing dependencies (nil timeline / empty bot login / nil
+// prevReview) or a timeline API error keep the SHA skip in place so a
+// transient outage cannot widen the cost surface. See
+// theburrowhub/heimdallm#322 Bug 5.
+func (p *Pipeline) shouldBypassSHASkipForReReview(pr *github.PullRequest, prevReview *store.Review) bool {
+	if p.timeline == nil || p.botLogin == "" || prevReview == nil {
+		return false
+	}
+	events, err := p.timeline.GetPRTimelineEventsForReviewer(pr.Repo, pr.Number, p.botLogin)
+	if err != nil {
+		slog.Warn("pipeline: re-request timeline lookup failed, keeping SHA skip (fail-closed)",
+			"repo", pr.Repo, "pr", pr.Number, "err", err)
+		return false
+	}
+	// events is sorted ascending by CreatedAt. We need the LAST event
+	// whose timestamp is strictly newer than prevReview.CreatedAt — by
+	// definition the tail of the slice — so iterate backward and stop
+	// at the first qualifying entry. Marginally faster than a forward
+	// walk for active PRs (which is exactly when this runs hot) and
+	// reads more clearly: "is the most recent re-review-relevant event
+	// still a request?".
+	for i := len(events) - 1; i >= 0; i-- {
+		ev := &events[i]
+		if !ev.CreatedAt.After(prevReview.CreatedAt) {
+			// Past the cutoff: everything earlier is already-satisfied
+			// (events are sorted ascending), so no need to continue.
+			return false
+		}
+		return ev.Event == "review_requested"
+	}
+	return false
 }
 
 // applyPrompt resolves a prompt with priority: repoPromptID > agentPromptID > global default.
@@ -207,8 +334,10 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	}
 
 	// Defense-in-depth: refuse to run the CLI if the gate rejects this PR.
-	// Callers publish the skip event themselves — we only log here so a
-	// missed caller-side check is visible in daemon logs.
+	// Callers usually pre-filter with pipeline.Evaluate; the warn log on
+	// reaching this branch flags missed caller-side checks. Emit the skip
+	// SSE here too (with the actual reason, not a fabricated one) so the
+	// UI lifecycle stays honest if a caller forgets to publish its own.
 	if reason := Evaluate(PRGate{
 		State:  pr.State,
 		Draft:  pr.Draft,
@@ -216,10 +345,9 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	}, opts.Guards); reason != SkipReasonNone {
 		slog.Warn("pipeline: gate skip (caller did not filter)",
 			"repo", pr.Repo, "pr", pr.Number, "reason", string(reason))
+		p.publishSkipped(pr, reason)
 		return nil, nil
 	}
-
-	p.notify.Notify("PR Review Started", fmt.Sprintf("%s #%d", pr.Repo, pr.Number))
 
 	// 2. Fetch diff
 	diff, err := p.gh.FetchDiff(pr.Repo, pr.Number)
@@ -262,21 +390,50 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	// current snapshot and skip. The user can trigger a re-review manually if
 	// they want one, but we never spend Claude credits on a legacy row whose
 	// dedup state is ambiguous.
+	// Both skip paths return (nil, nil) — the same contract the gate-skip
+	// branch above uses. Returning prevReview here was the source of the
+	// activity-log spam observed in #322 (Bug 4): the caller in
+	// cmd/heimdallm/main.go has a defensive `if rev == nil { return }` that
+	// suppresses the EventReviewCompleted SSE / "review done" log /
+	// activity_log row when Run does not produce a fresh review. Returning a
+	// non-nil prevReview bypassed that filter and made every poll cycle on a
+	// stable PR look like a brand-new review in every UI surface, even though
+	// no Claude credits were spent.
 	if prevReview != nil && prevReview.HeadSHA == "" && pr.Head.SHA != "" {
 		slog.Info("pipeline: backfilling empty HeadSHA on legacy review row, skipping re-review",
 			"repo", pr.Repo, "pr", pr.Number, "review_id", prevReview.ID, "head_sha", pr.Head.SHA)
 		if err := p.store.UpdateReviewHeadSHA(prevReview.ID, pr.Head.SHA); err != nil {
 			slog.Warn("pipeline: failed to backfill HeadSHA",
 				"review_id", prevReview.ID, "err", err)
-		} else {
-			prevReview.HeadSHA = pr.Head.SHA
 		}
-		return prevReview, nil
+		p.publishSkipped(pr, SkipReasonLegacyBackfill)
+		return nil, nil
 	}
 	if prevReview != nil && pr.Head.SHA != "" && prevReview.HeadSHA == pr.Head.SHA {
-		slog.Info("pipeline: skipping re-review, HEAD SHA unchanged",
-			"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA)
-		return prevReview, nil
+		// Before honouring the SHA-skip, check whether the operator
+		// explicitly re-requested a review via the GitHub UI on this same
+		// commit. The fail-closed SHA dedup (#245) was designed to ignore
+		// updated_at bumps from CI bots and cross-references, but it
+		// should NOT swallow a deliberate human action. See
+		// theburrowhub/heimdallm#322 Bug 5.
+		//
+		// Decision rule: bypass the skip iff the most recent
+		// review_requested or review_dismissed event for the bot login is
+		// a review_requested newer than prevReview.CreatedAt. A later
+		// review_dismissed (or any other state) cancels the bypass —
+		// dismiss-then-no-new-request means the operator no longer wants
+		// our review. Same fail-closed posture as #245: a timeline API
+		// error keeps the original skip in place rather than widening
+		// the cost surface on a transient outage.
+		if p.shouldBypassSHASkipForReReview(pr, prevReview) {
+			slog.Info("pipeline: SHA unchanged but explicit re-request detected — proceeding with review",
+				"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA)
+		} else {
+			slog.Info("pipeline: skipping re-review, HEAD SHA unchanged",
+				"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA)
+			p.publishSkipped(pr, SkipReasonSHAUnchanged)
+			return nil, nil
+		}
 	}
 
 	// 2b. Fetch PR comments for context (non-fatal: proceed without if unavailable)
@@ -339,6 +496,29 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 			return nil, &CircuitBreakerError{Reason: reason}
 		}
 	}
+
+	// All early-exit paths above are exhausted (gate, SHA-skip,
+	// legacy-backfill, circuit breaker): from this point we are committed
+	// to running the CLI and posting a real review. Both the desktop
+	// notification AND the lifecycle SSEs (pr_detected / review_started)
+	// fire here, NOT at the top of Run and NOT before the breaker check,
+	// because the UI stack consumes review_started the instant it lands
+	// — the Flutter dashboard marks the PR as "reviewing" and triggers a
+	// desktop notification of its own (see #322 Bugs 3+4). Emitting on
+	// any path that does NOT proceed to Execute would leave a phantom
+	// spinner and a phantom desktop notification per poll cycle. Caller
+	// already wraps the CircuitBreakerError into its own SSE event, so
+	// the breaker-trip path remains observable without a bogus
+	// review_started preceding it.
+	p.notify.Notify("PR Review Started", fmt.Sprintf("%s #%d", pr.Repo, pr.Number))
+	p.publish(sse.EventPRDetected, map[string]any{
+		"pr_number": pr.Number,
+		"repo":      pr.Repo,
+	})
+	p.publish(sse.EventReviewStarted, map[string]any{
+		"pr_number": pr.Number,
+		"repo":      pr.Repo,
+	})
 
 	// 5. Execute review (merge cliFlags from prompt into ExecOptions.ExtraFlags)
 	// Validate cliFlags from the prompt profile against the same denylist as
@@ -446,6 +626,12 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		fmt.Sprintf("%s #%d — severity: %s", pr.Repo, pr.Number, result.Severity))
 
 	slog.Info("pipeline: review complete", "pr", pr.Number, "severity", result.Severity)
+	p.publish(sse.EventReviewCompleted, map[string]any{
+		"pr_number": pr.Number,
+		"repo":      pr.Repo,
+		"pr_id":     rev.PRID,
+		"severity":  rev.Severity,
+	})
 	return rev, nil
 }
 

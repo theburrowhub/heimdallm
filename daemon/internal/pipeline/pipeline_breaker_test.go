@@ -71,7 +71,10 @@ func TestRun_CircuitBreakerTripStopsExecute(t *testing.T) {
 
 	fgh := &fakeGHBreaker{}
 	fexec := &fakeExecBreaker{}
-	p := pipeline.New(s, fgh, fexec, &fakeNotify{})
+	notify := &fakeNotify{}
+	pub := &fakePublisher{}
+	p := pipeline.New(s, fgh, fexec, notify)
+	p.SetPublisher(pub)
 	// Cap at 3 per PR so the 4th review is the one that must trip.
 	p.SetCircuitBreakerLimits(&store.CircuitBreakerLimits{PerPR24h: 3, PerRepoHr: 999})
 
@@ -125,5 +128,24 @@ func TestRun_CircuitBreakerTripStopsExecute(t *testing.T) {
 	}
 	if fgh.submitted {
 		t.Errorf("SubmitReview must not be called when breaker trips")
+	}
+
+	// #322 review feedback: notify "PR Review Started" and the
+	// EventReviewStarted SSE must NOT fire on a breaker-trip path.
+	// Pre-fix, both lived above the breaker check, leaving Flutter with a
+	// phantom spinner and the operator with a phantom desktop notification
+	// every time the cap clamped down.
+	startedNotifies := countNotify(notify.events, "PR Review Started")
+	if startedNotifies != 3 {
+		t.Errorf("notify(\"PR Review Started\"): got %d, want 3 (one per real review, none on breaker trip)", startedNotifies)
+	}
+	startedSSEs := 0
+	for _, ev := range pub.types() {
+		if ev == "review_started" {
+			startedSSEs++
+		}
+	}
+	if startedSSEs != 3 {
+		t.Errorf("EventReviewStarted: got %d, want 3 (one per real review, none on breaker trip)", startedSSEs)
 	}
 }

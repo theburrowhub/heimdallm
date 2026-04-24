@@ -204,6 +204,78 @@ func TestFetchIssueCommentsOnly_PropagatesRealErrors(t *testing.T) {
 	}
 }
 
+// TestGetPRTimelineEventsForReviewer_FiltersByLogin locks in the
+// behaviour the SHA-skip bypass in #322 Bug 5 depends on: the method
+// must only return events that target the given reviewer login. Mixed
+// payload exercises (a) a review_requested for the bot, (b) a
+// review_requested for a different user (must be ignored), (c) a
+// review_dismissed for the bot, and (d) an unrelated event type
+// (commented).
+func TestGetPRTimelineEventsForReviewer_FiltersByLogin(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/org/repo/issues/7/timeline" {
+			http.NotFound(w, r)
+			return
+		}
+		json.NewEncoder(w).Encode([]map[string]any{
+			{
+				"event":      "review_requested",
+				"created_at": "2026-04-24T07:00:00Z",
+				"actor":      map[string]string{"login": "alice"},
+				"requested_reviewer": map[string]string{"login": "heimdallm-bot"},
+			},
+			{
+				"event":      "review_requested",
+				"created_at": "2026-04-24T07:01:00Z",
+				"actor":      map[string]string{"login": "alice"},
+				"requested_reviewer": map[string]string{"login": "someone-else"},
+			},
+			{
+				"event":      "review_dismissed",
+				"created_at": "2026-04-24T07:02:00Z",
+				"actor":      map[string]string{"login": "alice"},
+				"dismissed_review": map[string]any{
+					"user": map[string]string{"login": "heimdallm-bot"},
+				},
+			},
+			{
+				"event":      "commented",
+				"created_at": "2026-04-24T07:03:00Z",
+				"actor":      map[string]string{"login": "alice"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	events, err := client.GetPRTimelineEventsForReviewer("org/repo", 7, "heimdallm-bot")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events for heimdallm-bot, got %d: %+v", len(events), events)
+	}
+	if events[0].Event != "review_requested" || !events[0].CreatedAt.Equal(mustTime("2026-04-24T07:00:00Z")) {
+		t.Errorf("event[0] mismatch: %+v", events[0])
+	}
+	if events[1].Event != "review_dismissed" || !events[1].CreatedAt.Equal(mustTime("2026-04-24T07:02:00Z")) {
+		t.Errorf("event[1] mismatch: %+v", events[1])
+	}
+}
+
+// TestGetPRTimelineEventsForReviewer_RejectsEmptyLogin guards against
+// callers that forget to set the bot login: without a target login the
+// filter would let through every review_requested / review_dismissed in
+// the timeline, defeating the point.
+func TestGetPRTimelineEventsForReviewer_RejectsEmptyLogin(t *testing.T) {
+	client := gh.NewClient("fake-token", gh.WithBaseURL("http://invalid"))
+	_, err := client.GetPRTimelineEventsForReviewer("org/repo", 7, "")
+	if err == nil {
+		t.Fatal("expected error on empty login, got nil")
+	}
+}
+
+
 func mustTime(s string) time.Time {
 	t, err := time.Parse(time.RFC3339, s)
 	if err != nil {

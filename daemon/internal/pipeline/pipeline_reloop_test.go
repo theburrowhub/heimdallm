@@ -166,11 +166,13 @@ func TestRun_LegacyRowWithEmptyHeadSHAIsBackfilledAndSkipped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if rev == nil {
-		t.Fatalf("expected returned review, got nil")
-	}
-	if rev.HeadSHA != "abc123" {
-		t.Errorf("expected legacy row backfilled to abc123, got %q", rev.HeadSHA)
+	// Contract change for #322 Bug 4: legacy-backfill is now a silent skip
+	// (returns nil) — same shape as the gate-skip and SHA-skip paths — so
+	// the caller's defensive `if rev == nil { return }` filter suppresses
+	// the false EventReviewCompleted / activity_log row. The backfill side
+	// effect on the reviews table still happens; assert it via the store below.
+	if rev != nil {
+		t.Errorf("expected nil review on legacy-backfill skip, got %+v", rev)
 	}
 	if fexec.calls != 0 {
 		t.Errorf("executor must not be called when backfilling legacy row (calls=%d)", fexec.calls)

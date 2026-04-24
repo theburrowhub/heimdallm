@@ -597,6 +597,111 @@ func (c *Client) FetchIssueCommentsOnly(repo string, number int) ([]Comment, err
 	return c.fetchIssueComments(repo, number)
 }
 
+// TimelineEvent is a slim view of a GitHub PR timeline entry. Only the
+// two events the pipeline needs are surfaced: review_requested (someone
+// asked the reviewer for a review) and review_dismissed (someone
+// dismissed the reviewer's prior review). Other event types in the
+// timeline (commits, labels, comments, assignments…) are filtered out
+// at fetch time so callers don't have to reason about them.
+type TimelineEvent struct {
+	Event     string    // "review_requested" or "review_dismissed"
+	Actor     string    // login of the user who triggered the event
+	CreatedAt time.Time
+}
+
+// GetPRTimelineEventsForReviewer returns the review_requested and
+// review_dismissed events on a PR that target the given reviewer login,
+// sorted ascending by created_at. Used by the pipeline to detect
+// explicit re-request review actions on PRs whose HEAD SHA hasn't
+// changed (theburrowhub/heimdallm#322 Bug 5): a re-request bumps
+// updated_at and re-adds the bot to requested_reviewers, but the SHA
+// fail-closed dedup (#245) would otherwise silently skip the review
+// regardless of the user's explicit intent.
+//
+// Returns an empty slice (not nil) when no relevant events exist —
+// callers can range over the result without a nil guard.
+func (c *Client) GetPRTimelineEventsForReviewer(repo string, number int, login string) ([]TimelineEvent, error) {
+	if login == "" {
+		return nil, fmt.Errorf("github: GetPRTimelineEventsForReviewer: empty login")
+	}
+	out := []TimelineEvent{}
+	page := 1
+	for {
+		path := fmt.Sprintf("/repos/%s/issues/%d/timeline?per_page=100&page=%d", repo, number, page)
+		resp, err := c.do("GET", path, "application/vnd.github+json")
+		if err != nil {
+			return nil, fmt.Errorf("github: fetch timeline: %w", err)
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			errBody := safeTruncate(string(body), maxErrBodyLen)
+			return nil, fmt.Errorf("github: fetch timeline: status %d: %s", resp.StatusCode, errBody)
+		}
+		var raw []struct {
+			Event     string    `json:"event"`
+			CreatedAt time.Time `json:"created_at"`
+			Actor     struct {
+				Login string `json:"login"`
+			} `json:"actor"`
+			RequestedReviewer *struct {
+				Login string `json:"login"`
+			} `json:"requested_reviewer,omitempty"`
+			DismissedReview *struct {
+				User struct {
+					Login string `json:"login"`
+				} `json:"user"`
+			} `json:"dismissed_review,omitempty"`
+		}
+		if err := json.Unmarshal(body, &raw); err != nil {
+			return nil, fmt.Errorf("github: decode timeline: %w", err)
+		}
+		for _, ev := range raw {
+			switch ev.Event {
+			case "review_requested":
+				if ev.RequestedReviewer != nil && strings.EqualFold(ev.RequestedReviewer.Login, login) {
+					out = append(out, TimelineEvent{
+						Event:     ev.Event,
+						Actor:     ev.Actor.Login,
+						CreatedAt: ev.CreatedAt,
+					})
+				}
+			case "review_dismissed":
+				if ev.DismissedReview != nil && strings.EqualFold(ev.DismissedReview.User.Login, login) {
+					out = append(out, TimelineEvent{
+						Event:     ev.Event,
+						Actor:     ev.Actor.Login,
+						CreatedAt: ev.CreatedAt,
+					})
+				}
+			}
+		}
+		// Stop paging when we get a short page (under per_page=100).
+		if len(raw) < 100 {
+			break
+		}
+		page++
+		// Hard cap so a misbehaving server can't make us iterate forever.
+		if page > 50 {
+			slog.Warn("github: timeline pagination cap hit, returning partial results",
+				"repo", repo, "pr", number, "pages", page)
+			break
+		}
+	}
+	// Defensive re-sort: GitHub's timeline API documents ascending
+	// chronological order, but the contract is not load-bearing for us
+	// — pipeline.shouldBypassSHASkipForReReview relies on the slice
+	// being sorted to walk it backward in O(1) for the common case.
+	// A single sort here is cheap (events is filtered down to just
+	// review_requested / review_dismissed for one login) and immunises
+	// the caller against an undocumented re-ordering on GitHub's side.
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].CreatedAt.Before(out[j].CreatedAt)
+	})
+	return out, nil
+}
+
+
 func (c *Client) fetchReviewComments(repo string, number int) ([]Comment, error) {
 	path := fmt.Sprintf("/repos/%s/pulls/%d/comments", repo, number)
 	resp, err := c.do("GET", path, "application/vnd.github+json")

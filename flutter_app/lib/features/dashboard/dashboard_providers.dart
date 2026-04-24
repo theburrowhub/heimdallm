@@ -123,6 +123,19 @@ void _handleSseEvent(Ref ref, SseEvent event) {
           }
         }
 
+      case 'review_skipped':
+        // Manual trigger on a PR with unchanged HEAD SHA (re-request,
+        // legacy backfill, or any policy gate) returns no real review,
+        // so the optimistic spinner that dashboard_screen sets must be
+        // cleared explicitly. Without this case the spinner stayed
+        // colgado after every trigger that hit a dedup branch — the
+        // regression flagged on theburrowhub/heimdallm#322.
+        if (key != null) {
+          ref
+              .read(reviewingPRsProvider.notifier)
+              .update((s) => Map.of(s)..remove(key));
+        }
+
       // ── Issue tracking events ──────────────────────────────────────────
       case 'issue_detected':
         ref.read(issueListRefreshProvider.notifier).update((s) => s + 1);
