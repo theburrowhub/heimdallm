@@ -25,12 +25,14 @@ import (
 	"github.com/heimdallm/daemon/internal/pipeline"
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
+	"github.com/nats-io/nats.go"
 )
 
 // Server holds the HTTP router, SSE broker, store, and optional pipeline.
 type Server struct {
 	store           *store.Store
 	broker          *sse.Broker
+	natsConn        *nats.Conn // when set, handleSSE reads from NATS instead of broker
 	pipeline        *pipeline.Pipeline
 	router          chi.Router
 	httpServer      *http.Server
@@ -86,6 +88,12 @@ func NewWithOptions(s *store.Store, broker *sse.Broker, p *pipeline.Pipeline, ap
 	}
 	srv.router = srv.buildRouter()
 	return srv
+}
+
+// SetNATSConn enables NATS-based SSE. When set, handleSSE subscribes to
+// NATS events instead of the in-memory broker, removing the 10-subscriber limit.
+func (srv *Server) SetNATSConn(conn *nats.Conn) {
+	srv.natsConn = conn
 }
 
 // sensitiveGETPaths lists GET paths that require authentication even though they
@@ -688,6 +696,13 @@ func (srv *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
+	// When NATS is available, subscribe directly — no subscriber limit.
+	if srv.natsConn != nil {
+		srv.handleSSEViaNATS(w, r, flusher)
+		return
+	}
+
+	// Fallback: use the in-memory broker (legacy path, max 10 subscribers).
 	ch := srv.broker.Subscribe()
 	if ch == nil {
 		http.Error(w, "too many SSE connections", http.StatusServiceUnavailable)
@@ -705,6 +720,39 @@ func (srv *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			fmt.Fprint(w, event.Format())
+			flusher.Flush()
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+
+func (srv *Server) handleSSEViaNATS(w http.ResponseWriter, r *http.Request, flusher http.Flusher) {
+	// Core NATS subscription (not JetStream) — ephemeral fan-out, no persistence.
+	ch := make(chan *nats.Msg, 64)
+	sub, err := srv.natsConn.ChanSubscribe("heimdallm.events.>", ch)
+	if err != nil {
+		slog.Error("SSE: NATS subscribe failed", "err", err)
+		http.Error(w, "SSE subscription failed", http.StatusInternalServerError)
+		return
+	}
+	defer sub.Unsubscribe()
+
+	fmt.Fprintf(w, ": connected\n\n")
+	flusher.Flush()
+
+	// Keep-alive ticker prevents proxies/load balancers from closing idle connections.
+	keepAlive := time.NewTicker(20 * time.Second)
+	defer keepAlive.Stop()
+
+	for {
+		select {
+		case msg := <-ch:
+			eventType := strings.TrimPrefix(msg.Subject, "heimdallm.events.")
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, string(msg.Data))
+			flusher.Flush()
+		case <-keepAlive.C:
+			fmt.Fprintf(w, ": ping\n\n")
 			flusher.Flush()
 		case <-r.Context().Done():
 			return

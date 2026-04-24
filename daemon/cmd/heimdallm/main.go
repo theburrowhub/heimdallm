@@ -145,6 +145,25 @@ func main() {
 	broker := sse.NewBroker()
 	broker.Start()
 
+	// ── Bridge: SSE broker → NATS events ────────────────────────────────
+	// Re-publishes every broker event to NATS so the SSE handler (which
+	// now reads from NATS) receives events from all existing publishers.
+	// This bridge is interim — Task 12 will have workers publish directly
+	// to NATS events subjects, removing the need for the broker entirely.
+	bridgeCh := broker.Subscribe()
+	if bridgeCh != nil {
+		go func() {
+			for event := range bridgeCh {
+				subj := "heimdallm.events." + event.Type
+				if err := eventBus.Conn().Publish(subj, []byte(event.Data)); err != nil {
+					slog.Warn("sse-bridge: publish to NATS failed", "type", event.Type, "err", err)
+				}
+			}
+		}()
+	} else {
+		slog.Warn("sse-bridge: broker subscriber cap reached, SSE bridge disabled")
+	}
+
 	// ActivityRecorder subscribes to the broker and writes a row into
 	// activity_log for every significant event. Disabled → not constructed.
 	// A nil broker subscription (subscriber cap reached) is a warning, not
@@ -213,6 +232,7 @@ func main() {
 	}
 	issueFetcher := issuepipeline.NewFetcher(ghClient, ghClient, s, issuePipe)
 	srv := server.New(s, broker, p, apiToken)
+	srv.SetNATSConn(eventBus.Conn())
 	srv.SetConfigPath(cfgPath)
 
 	// cfgMu protects cfg and the pipeline so reload is safe from any goroutine.
