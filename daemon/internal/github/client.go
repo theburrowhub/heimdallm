@@ -513,14 +513,20 @@ func (c *Client) FetchComments(repo string, number int) ([]Comment, error) {
 
 	r1 := <-reviewCh
 	r2 := <-issueCh
-	if r1.err != nil {
+	// Review comments (pulls API) return 404 for issues — this is expected.
+	// Treat as empty rather than fatal so issue marker scanning works.
+	if r1.err != nil && !strings.Contains(r1.err.Error(), "status 404") {
 		return nil, r1.err
 	}
 	if r2.err != nil {
 		return nil, r2.err
 	}
 
-	all := append(r1.comments, r2.comments...)
+	var all []Comment
+	if r1.err == nil {
+		all = append(all, r1.comments...)
+	}
+	all = append(all, r2.comments...)
 	sort.Slice(all, func(i, j int) bool {
 		return all[i].CreatedAt.Before(all[j].CreatedAt)
 	})

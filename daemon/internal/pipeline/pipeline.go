@@ -475,6 +475,15 @@ func (p *Pipeline) PublishPending() {
 			SeverityToEvent(rev.Severity, len(issues)),
 		)
 		if err != nil {
+			errStr := err.Error()
+			// 422 "lock prevents review" and other 4xx (except 429 rate limit)
+			// are permanent — mark as orphaned to stop infinite retry.
+			if strings.Contains(errStr, "status 4") && !strings.Contains(errStr, "status 429") {
+				slog.Warn("pipeline: permanent publish failure, marking orphaned",
+					"review_id", rev.ID, "err", err)
+				_ = p.store.MarkReviewPublished(rev.ID, -1, "", time.Now().UTC())
+				continue
+			}
 			slog.Warn("pipeline: retry publish failed", "review_id", rev.ID, "err", err)
 			continue
 		}
