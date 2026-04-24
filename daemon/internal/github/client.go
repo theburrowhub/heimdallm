@@ -701,7 +701,6 @@ func (c *Client) GetPRTimelineEventsForReviewer(repo string, number int, login s
 	return out, nil
 }
 
-
 func (c *Client) fetchReviewComments(repo string, number int) ([]Comment, error) {
 	path := fmt.Sprintf("/repos/%s/pulls/%d/comments", repo, number)
 	resp, err := c.do("GET", path, "application/vnd.github+json")

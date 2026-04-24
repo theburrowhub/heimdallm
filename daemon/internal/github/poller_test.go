@@ -275,7 +275,6 @@ func TestGetPRTimelineEventsForReviewer_RejectsEmptyLogin(t *testing.T) {
 	}
 }
 
-
 func mustTime(s string) time.Time {
 	t, err := time.Parse(time.RFC3339, s)
 	if err != nil {

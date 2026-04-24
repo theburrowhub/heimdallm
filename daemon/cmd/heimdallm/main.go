@@ -150,7 +150,6 @@ func main() {
 	}
 	defer eventBus.Stop()
 
-
 	broker := sse.NewBroker()
 	broker.Start()
 
@@ -239,7 +238,6 @@ func main() {
 	// entry, leaving Flutter spinners colgados on every SHA-skip and
 	// firing phantom desktop notifications. See #322 Bugs 3+4.
 	p.SetPublisher(broker)
-
 
 	// Issue-side circuit-breaker caps (theburrowhub/heimdallm#292) — mirrors
 	// the PR-side defenses against runaway triage loops.
