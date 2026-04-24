@@ -839,6 +839,8 @@ func main() {
 		}
 
 		// Enroll for state watching so closed/resolved issues update in the UI.
+		// Runs even after pipeline failure — state tracking is independent of
+		// pipeline success, and we want the UI to reflect closures regardless.
 		if err := watchStore.Enroll(ctx, "issue", msg.Repo, msg.Number, msg.GithubID); err != nil {
 			slog.Warn("triage-worker: failed to enroll watch",
 				"repo", msg.Repo, "number", msg.Number, "err", err)
@@ -923,6 +925,8 @@ func main() {
 		}
 
 		// Enroll for state watching so closed/resolved issues update in the UI.
+		// Runs even after pipeline failure — state tracking is independent of
+		// pipeline success, and we want the UI to reflect closures regardless.
 		if err := watchStore.Enroll(ctx, "issue", msg.Repo, msg.Number, msg.GithubID); err != nil {
 			slog.Warn("implement-worker: failed to enroll watch",
 				"repo", msg.Repo, "number", msg.Number, "err", err)
