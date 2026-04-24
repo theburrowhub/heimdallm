@@ -217,20 +217,22 @@ func TestIntegration_ConcurrentPipelineRunsCollapseToOneDispatch(t *testing.T) {
 // blockingExec is a CLIExecutor whose ExecuteRaw invokes `onCall` (if
 // set) before returning. Tests use it to insert a sync primitive between
 // "pipeline took the claim" and "pipeline releases the claim", so two
-// goroutines can deterministically contend on the claim. `called` is a
-// simple flag other tests use to assert the executor was or was not
-// reached at all (circuit-breaker short-circuit).
+// goroutines can deterministically contend on the claim. `called` is an
+// atomic.Bool other tests use to assert the executor was or was not
+// reached at all (circuit-breaker short-circuit) — kept atomic so the
+// test stays clean under -race even if a future regression in claim
+// dedup lets two goroutines reach ExecuteRaw concurrently.
 type blockingExec struct {
 	cli    string
 	out    []byte
 	onCall func()
-	called bool
+	called atomic.Bool
 }
 
 func (e *blockingExec) Detect(_, _ string) (string, error) { return e.cli, nil }
 
 func (e *blockingExec) ExecuteRaw(_, _ string, _ executor.ExecOptions) ([]byte, error) {
-	e.called = true
+	e.called.Store(true)
 	if e.onCall != nil {
 		e.onCall()
 	}
@@ -250,7 +252,7 @@ func TestIntegration_IssueCircuitBreakerTripsAfterCap(t *testing.T) {
 	t.Cleanup(func() { s.Close() })
 
 	now := time.Now().UTC().Truncate(time.Second)
-	gh := &github.Issue{
+	ghIssue := &github.Issue{
 		ID: 3001, Number: 11, Repo: "org/repo",
 		Title: "Cost runaway candidate", Body: ".",
 		State: "open", User: github.User{Login: "reporter"},
@@ -261,10 +263,10 @@ func TestIntegration_IssueCircuitBreakerTripsAfterCap(t *testing.T) {
 
 	// Upsert the issue so we can seed reviews keyed on its store ID.
 	storeIssue := &store.Issue{
-		GithubID: gh.ID, Repo: gh.Repo, Number: gh.Number,
-		Title: gh.Title, Body: gh.Body, Author: gh.User.Login,
-		State:     gh.State,
-		CreatedAt: gh.CreatedAt, FetchedAt: now,
+		GithubID: ghIssue.ID, Repo: ghIssue.Repo, Number: ghIssue.Number,
+		Title: ghIssue.Title, Body: ghIssue.Body, Author: ghIssue.User.Login,
+		State:     ghIssue.State,
+		CreatedAt: ghIssue.CreatedAt, FetchedAt: now,
 	}
 	storeID, err := s.UpsertIssue(storeIssue)
 	if err != nil {
@@ -291,11 +293,13 @@ func TestIntegration_IssueCircuitBreakerTripsAfterCap(t *testing.T) {
 		PerRepoHr:   10,
 	})
 
-	// But wait — the pipeline checks the claim on `gh.ID` (the GitHub ID,
-	// not the store ID) while CheckIssueCircuitBreaker wants the store ID.
-	// Verify: the pipeline resolves the store ID internally before the
-	// breaker check. That's the contract the fix relies on.
-	_, runErr := pipe.Run(context.Background(), gh, issues.RunOptions{Primary: "claude"})
+	// Contract: the pipeline takes the in-flight claim on issue.ID
+	// (GitHub ID), then upserts the issue, and only THEN calls
+	// CheckIssueCircuitBreaker with the internal store ID. This test
+	// exercises that ordering — if the breaker call ever moved before
+	// the upsert, it would receive a zero issue_id and the count would
+	// always come back 0, silently disarming the breaker.
+	_, runErr := pipe.Run(context.Background(), ghIssue, issues.RunOptions{Primary: "claude"})
 
 	var cbErr *issues.CircuitBreakerError
 	if !errors.As(runErr, &cbErr) {
@@ -308,9 +312,52 @@ func TestIntegration_IssueCircuitBreakerTripsAfterCap(t *testing.T) {
 		t.Errorf("expected errors.Is match on ErrCircuitBreakerTripped, got nope")
 	}
 	// LLM must not have been called.
-	if bexec.called {
+	if bexec.called.Load() {
 		t.Errorf("circuit breaker should short-circuit BEFORE ExecuteRaw; executor was called")
 	}
+
+	// A second Run on the same (issue, updated_at) MUST short-circuit
+	// silently (return nil, nil) because the in-flight claim is held
+	// across breaker trips. This is the regression guard for the
+	// notification-spam concern raised in code review on PR #296: if the
+	// defer released the claim on trip, the next tick would re-acquire,
+	// re-trip, and re-fire the operator notification.
+	notifier := &countingNotifier{}
+	pipe2 := issues.New(s, &fakeGH{}, &blockingExec{cli: "claude", out: []byte(validResult)},
+		nil, &fakeBroker{}, notifier)
+	pipe2.SetCircuitBreakerLimits(&store.IssueCircuitBreakerLimits{
+		PerIssue24h: 3,
+		PerRepoHr:   10,
+	})
+	rev2, runErr2 := pipe2.Run(context.Background(), ghIssue, issues.RunOptions{Primary: "claude"})
+	if runErr2 != nil {
+		t.Fatalf("second Run on held claim should return (nil, nil), got err=%v", runErr2)
+	}
+	if rev2 != nil {
+		t.Errorf("second Run should return nil review, got %+v", rev2)
+	}
+	if notifier.count() != 0 {
+		t.Errorf("held claim must suppress re-notify on the same snapshot, got %d notify calls", notifier.count())
+	}
+}
+
+// countingNotifier records how many times Notify was called so tests can
+// assert breaker-trip notifications are not repeated on the same snapshot.
+type countingNotifier struct {
+	mu  sync.Mutex
+	n   int
+}
+
+func (c *countingNotifier) Notify(_, _ string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.n++
+}
+
+func (c *countingNotifier) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.n
 }
 
 func TestIntegration_RecomputeGraceIsExportedForMainPipeline(t *testing.T) {

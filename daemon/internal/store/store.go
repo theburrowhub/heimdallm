@@ -196,6 +196,13 @@ func Open(dsn string) (*Store, error) {
 	// JOIN drives from prs.repo with no index and table-scans on every
 	// poll-cycle breaker check.
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_prs_repo ON prs(repo)")
+	// Mirrors of the above for the issue-side circuit breaker added in
+	// theburrowhub/heimdallm#292. Without these, CountIssueReviewsForIssue
+	// and CountIssueTriagesForRepo table-scan issue_reviews on every
+	// triage attempt.
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_issue_reviews_issue_created ON issue_reviews(issue_id, created_at)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_issue_reviews_created ON issue_reviews(created_at)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_issues_repo ON issues(repo)")
 	// Idempotent migration for existing DBs — new installs get the table
 	// from the schema constant above. Safe on every startup.
 	db.Exec(`CREATE TABLE IF NOT EXISTS reviews_in_flight (

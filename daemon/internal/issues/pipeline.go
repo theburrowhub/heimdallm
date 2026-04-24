@@ -288,15 +288,31 @@ func (p *Pipeline) Run(ctx context.Context, issue *github.Issue, opts RunOptions
 	// circuit breaker and marker-scan dedup still cap cost. Empty key is
 	// treated as "no claim possible"; the scheduler should have prevented
 	// that but the guard is cheap. See theburrowhub/heimdallm#292.
+	//
+	// Key-space note: the claim uses issue.ID (the GitHub-assigned ID,
+	// stable and known before any DB write) so we can gate Run before
+	// the upsert. The circuit breaker further down uses the internal
+	// store ID returned by UpsertIssue because issue_reviews.issue_id
+	// references issues.id. The two key spaces serve different purposes
+	// (snapshot dedup vs historical count) and are intentionally
+	// distinct — do not "unify" them without revisiting the
+	// claim-before-upsert ordering that gives Run an early exit.
 	var (
-		claimed      bool
-		claimKey     string
-		claimIssueID = issue.ID
+		claimed       bool
+		breakerHeld   bool // when true, defer must NOT release the claim
+		claimKey      string
+		claimIssueID  = issue.ID
 	)
 	if !issue.UpdatedAt.IsZero() && claimIssueID != 0 {
 		claimKey = issue.UpdatedAt.UTC().Format(time.RFC3339)
 		ok, err := p.store.ClaimIssueTriageInFlight(claimIssueID, claimKey)
 		if err != nil {
+			// Fail-open: if the INSERT actually landed but the driver
+			// surfaced an error reading RowsAffected, the row will leak
+			// until ClearStaleIssueTriageInFlight (30 min sweep) reclaims
+			// it. Acceptable: the alternative (assume it landed and
+			// release in defer) risks releasing a row another daemon
+			// process holds.
 			slog.Warn("issues pipeline: claim inflight failed, proceeding",
 				"repo", issue.Repo, "number", issue.Number, "err", err)
 		} else if !ok {
@@ -308,7 +324,14 @@ func (p *Pipeline) Run(ctx context.Context, issue *github.Issue, opts RunOptions
 		}
 	}
 	defer func() {
-		if claimed {
+		// Release on every path EXCEPT a circuit-breaker trip. Holding
+		// the claim across a trip prevents the next fetcher tick on the
+		// same (issue, updated_at) snapshot from re-acquiring, re-hitting
+		// the breaker, and re-firing the operator notification once per
+		// poll. The 30-min stale sweep eventually reclaims the row, or a
+		// genuine activity bump (new updated_at) produces a new claim
+		// key that bypasses the held one.
+		if claimed && !breakerHeld {
 			if err := p.store.ReleaseIssueTriageInFlight(claimIssueID, claimKey); err != nil {
 				slog.Warn("issues pipeline: release inflight failed",
 					"issue_id", claimIssueID, "updated_at", claimKey, "err", err)
@@ -366,6 +389,9 @@ func (p *Pipeline) Run(ctx context.Context, issue *github.Issue, opts RunOptions
 				p.notify.Notify("Heimdallm issue circuit breaker",
 					fmt.Sprintf("%s #%d: %s", issue.Repo, issue.Number, reason))
 			}
+			// Hold the claim so the operator notification is not
+			// repeated on every subsequent poll for the same snapshot.
+			breakerHeld = true
 			return nil, &CircuitBreakerError{Reason: reason}
 		}
 	}
