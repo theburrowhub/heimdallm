@@ -2,6 +2,23 @@
 
 > **Note:** Versions 0.1.0–0.1.3 were originally published under [`theburrowhub/heimdallr-docker`](https://github.com/theburrowhub/heimdallr-docker) (now archived). The project was unified into this repository and renamed to Heimdallm in v0.1.1.
 
+## [0.6.8](https://github.com/theburrowhub/heimdallm/compare/v0.6.7...v0.6.8) (2026-04-25)
+
+
+### Bug Fixes
+
+* auto-dismiss legacy items with empty repo from watch_state ([#357](https://github.com/theburrowhub/heimdallm/issues/357)) ([df733ca](https://github.com/theburrowhub/heimdallm/commit/df733ca36caa093b1350725c1eb26fcbb370f861))
+* **daemon:** mark review orphan on permanent submit failure (closes [#325](https://github.com/theburrowhub/heimdallm/issues/325)) ([#326](https://github.com/theburrowhub/heimdallm/issues/326)) ([9002737](https://github.com/theburrowhub/heimdallm/commit/9002737df6c7e9c4c2604d2e15625721f630a299))
+* **daemon:** silence PR SHA-skip side effects + respect re-request review (closes [#322](https://github.com/theburrowhub/heimdallm/issues/322) bugs 3-5) ([#324](https://github.com/theburrowhub/heimdallm/issues/324)) ([da81a0e](https://github.com/theburrowhub/heimdallm/commit/da81a0ec45ba6d7bef3ffd495ac6bb29986a903a))
+* **daemon:** stop issue-triage cost-runaway (closes [#292](https://github.com/theburrowhub/heimdallm/issues/292)) ([#296](https://github.com/theburrowhub/heimdallm/issues/296)) ([38669ba](https://github.com/theburrowhub/heimdallm/commit/38669ba8c15fff4f6b1d31a55258695ce8d4e63b))
+* **daemon:** use GitHub ID for PR in-flight claim on cold-start (closes [#359](https://github.com/theburrowhub/heimdallm/issues/359)) ([#360](https://github.com/theburrowhub/heimdallm/issues/360)) ([35a5aa3](https://github.com/theburrowhub/heimdallm/commit/35a5aa3296e283a13b25c87e6d151d5a5ed0f6dc))
+* **issues:** break re-triage loop by detecting bot own comments (closes [#362](https://github.com/theburrowhub/heimdallm/issues/362)) ([#363](https://github.com/theburrowhub/heimdallm/issues/363)) ([da19183](https://github.com/theburrowhub/heimdallm/commit/da1918398e4b1bcc00f334a747a73e14bbd32fc8))
+
+
+### Documentation
+
+* **config:** warn about review_only re-processing loop and excessive API costs ([#347](https://github.com/theburrowhub/heimdallm/issues/347)) ([a894160](https://github.com/theburrowhub/heimdallm/commit/a894160d495d6d5c13f9cfea8534cbed2e1743f5)), closes [#346](https://github.com/theburrowhub/heimdallm/issues/346)
+
 ## [0.6.7](https://github.com/theburrowhub/heimdallm/compare/v0.6.6...v0.6.7) (2026-04-23)
 
 
