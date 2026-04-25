@@ -483,14 +483,14 @@ func TestFetcher_BotCommentSkipsReprocess(t *testing.T) {
 	now := time.Now()
 	issue := fixture(1, now)
 
-	// The issue has a previous review with CommentedAt 2 minutes ago.
+	// The issue has a previous review_only review with CommentedAt 2 minutes ago.
 	// updated_at (now) is well past the 30s grace window, so without the
 	// bot-comment check it would be reprocessed.
 	commentedAt := now.Add(-2 * time.Minute)
 	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
 		issue.ID: {
 			row:    &store.Issue{ID: 10, GithubID: issue.ID},
-			review: &store.IssueReview{CommentedAt: commentedAt},
+			review: &store.IssueReview{CommentedAt: commentedAt, ActionTaken: "review_only"},
 		},
 	}}
 
@@ -554,5 +554,51 @@ func TestFetcher_HumanCommentAfterBotAllowsReprocess(t *testing.T) {
 	}
 	if processed != 1 {
 		t.Errorf("human comment after bot should allow reprocessing, got processed=%d", processed)
+	}
+}
+
+// TestFetcher_ModeChangeBypassesBotCommentCheck verifies that when the issue
+// mode changed (e.g. label swapped from heimdallm-triage to heimdallm-develop),
+// the bot-comment check does NOT block reprocessing — even if the last comment
+// is from the bot (#362).
+func TestFetcher_ModeChangeBypassesBotCommentCheck(t *testing.T) {
+	now := time.Now()
+	// Issue now has develop mode (label changed).
+	issue := &github.Issue{
+		ID:        int64(1001),
+		Number:    1,
+		Repo:      "org/repo",
+		UpdatedAt: now,
+		Mode:      config.IssueModeDevelop,
+	}
+
+	// Previous review was review_only — mode has changed.
+	commentedAt := now.Add(-2 * time.Minute)
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {
+			row:    &store.Issue{ID: 10, GithubID: issue.ID},
+			review: &store.IssueReview{CommentedAt: commentedAt, ActionTaken: "review_only"},
+		},
+	}}
+
+	// Last comment is from the bot (triage comment).
+	mf := &fakeMarkerFetcher{
+		commentsByKey: map[string][]github.Comment{
+			"org/repo#1": {
+				{Author: "heimdallm-bot", Body: "## Triage\n..."},
+			},
+		},
+	}
+
+	p := &fakePipeline{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, mf, dedup, p)
+	f.SetBotLogin("heimdallm-bot")
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 1 {
+		t.Errorf("mode change should bypass bot-comment check, got processed=%d", processed)
 	}
 }

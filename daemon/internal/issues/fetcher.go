@@ -213,12 +213,17 @@ func (f *Fetcher) alreadyProcessed(issue *github.Issue) (bool, string, error) {
 	// dedup gates so a retry marker can override all of them. The API call
 	// is skipped when the comment fetcher is nil (legacy callers / tests
 	// that pre-date marker support).
+	// cachedComments holds the comments fetched during marker scanning,
+	// reused later for the bot-comment check to avoid a second API call.
+	var cachedComments []github.Comment
+
 	if f.comments != nil {
 		comments, cmErr := f.comments.FetchIssueCommentsOnly(issue.Repo, issue.Number)
 		if cmErr != nil {
 			slog.Warn("issues fetcher: marker scan failed, falling through to dedup checks",
 				"repo", issue.Repo, "number", issue.Number, "err", cmErr)
 		} else {
+			cachedComments = comments
 			switch ScanMarkers(comments) {
 			case MarkerResultRetry:
 				return false, "", nil // force reprocess
@@ -226,17 +231,6 @@ func (f *Fetcher) alreadyProcessed(issue *github.Issue) (bool, string, error) {
 				return true, "skip marker", nil
 			case MarkerResultDone:
 				return true, "done marker", nil
-			}
-
-			// If the most recent comment is from the bot itself, the
-			// updated_at bump was self-triggered and does not represent
-			// genuine new activity. Skip reprocessing regardless of the
-			// grace window. This breaks the re-triage loop (#362).
-			if f.botLogin != "" && len(comments) > 0 {
-				last := comments[len(comments)-1]
-				if strings.EqualFold(last.Author, f.botLogin) {
-					return true, "last comment is from bot (self-triggered update)", nil
-				}
 			}
 		}
 	}
@@ -260,6 +254,19 @@ func (f *Fetcher) alreadyProcessed(issue *github.Issue) (bool, string, error) {
 	// it to stop the pipeline from picking it up again.
 	if latest.ActionTaken == "auto_implement" && latest.PRCreated > 0 {
 		return true, "already implemented (PR created)", nil
+	}
+
+	// Bot-comment dedup: if the most recent comment is from the bot AND the
+	// issue's current mode matches what was already done (ActionTaken), the
+	// updated_at bump was self-triggered — skip. When the mode changed
+	// (e.g. review_only → develop after a label swap), reprocess even if
+	// the last comment is from the bot. This breaks the re-triage loop
+	// (#362) without blocking mode transitions.
+	if f.botLogin != "" && len(cachedComments) > 0 {
+		last := cachedComments[len(cachedComments)-1]
+		if strings.EqualFold(last.Author, f.botLogin) && latest.ActionTaken == string(issue.Mode) {
+			return true, "last comment is from bot, same mode (self-triggered update)", nil
+		}
 	}
 
 	// If the auto_implement push has failed too many times, stop retrying.
