@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -298,10 +297,9 @@ func main() {
 		// gated by a stale in-flight row from a prior HEAD. See
 		// theburrowhub/heimdallm#243.
 		//
-		// For early-stage PRs that have not yet been upserted, OR for PRs
-		// where the HEAD SHA is not yet known, skip the claim — the
-		// downstream SHA dedup in pipeline.Run (already fail-closed per
-		// Task 1) handles those paths.
+		// For PRs where the HEAD SHA is not yet known, skip the claim —
+		// the downstream SHA dedup in pipeline.Run (already fail-closed per
+		// Task 1) handles that path.
 		//
 		// On Claim error (transient SQLite blip, disk pressure), we log and
 		// proceed fail-open. This is safe because the downstream defenses
@@ -317,28 +315,12 @@ func main() {
 		// Fail-closed here would block legitimate reviews on a transient DB
 		// error; the layered defenses make fail-open the right trade.
 		//
-		// sql.ErrNoRows is expected for PRs not yet upserted (early-stage);
-		// any other error is a real problem worth surfacing in logs.
-		stored, err := s.GetPRByGithubID(pr.ID)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			slog.Warn("runReview: GetPRByGithubID failed, proceeding without persistent claim",
-				"pr_id", pr.ID, "repo", pr.Repo, "err", err)
-		}
-		// Resolve the claim key: prefer the internal store ID when available,
-		// fall back to the GitHub-assigned ID on cold-start (PR not yet
-		// upserted). Both are stable int64 identifiers; the composite PK
-		// (pr_id, head_sha) stays unique either way because GitHub IDs are
-		// globally unique and internal IDs are repo-scoped sequences that
-		// never collide with GitHub's range.
-		//
-		// This fixes the cold-start duplicate-review bug where stored==nil
-		// caused the claim to be skipped entirely (#359).
-		var claimPRID int64
-		if stored != nil {
-			claimPRID = stored.ID
-		} else {
-			claimPRID = pr.ID // GitHub-assigned ID — always available
-		}
+		// Always use the GitHub-assigned ID for the in-flight claim key.
+		// This avoids mixing two ID namespaces (internal SQLite autoincrement
+		// vs GitHub global ID) in the same reviews_in_flight.pr_id column,
+		// which would let a cold-start claim and a post-upsert retry both
+		// succeed for the same (PR, SHA) pair (#359).
+		claimPRID := pr.ID
 
 		var claimed bool
 		var claimSHA string
