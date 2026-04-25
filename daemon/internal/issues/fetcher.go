@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/heimdallm/daemon/internal/config"
@@ -89,6 +90,7 @@ type Fetcher struct {
 	store     issueDedupStore
 	pipeline  PipelineRunner
 	publisher IssuePublisher // optional — when set, publishes to NATS instead of running pipeline
+	botLogin  string         // GitHub login of the bot — used to ignore self-triggered updated_at bumps
 }
 
 // NewFetcher wires the orchestrator. All dependencies are interfaces so
@@ -103,6 +105,13 @@ func NewFetcher(client IssuesFetcher, comments issueMarkerFetcher, s issueDedupS
 // classified issues to NATS instead of calling pipeline.Run directly.
 func (f *Fetcher) SetPublisher(p IssuePublisher) {
 	f.publisher = p
+}
+
+// SetBotLogin sets the GitHub login of the bot account. When set, the
+// dedup check ignores updated_at bumps caused by the bot's own comments,
+// breaking the re-triage loop described in #362.
+func (f *Fetcher) SetBotLogin(login string) {
+	f.botLogin = login
 }
 
 // ProcessRepo fetches every eligible issue for one repo and dispatches it to
@@ -217,6 +226,17 @@ func (f *Fetcher) alreadyProcessed(issue *github.Issue) (bool, string, error) {
 				return true, "skip marker", nil
 			case MarkerResultDone:
 				return true, "done marker", nil
+			}
+
+			// If the most recent comment is from the bot itself, the
+			// updated_at bump was self-triggered and does not represent
+			// genuine new activity. Skip reprocessing regardless of the
+			// grace window. This breaks the re-triage loop (#362).
+			if f.botLogin != "" && len(comments) > 0 {
+				last := comments[len(comments)-1]
+				if strings.EqualFold(last.Author, f.botLogin) {
+					return true, "last comment is from bot (self-triggered update)", nil
+				}
 			}
 		}
 	}

@@ -260,7 +260,9 @@ func main() {
 	issuePipe.SetCircuitBreakerLimits(&issueCBLimits)
 
 	// Resolve bot login for re-review / re-triage context filtering.
+	var resolvedBotLogin string
 	if login, err := ghClient.AuthenticatedUser(); err == nil {
+		resolvedBotLogin = login
 		p.SetBotLogin(login)
 		issuePipe.SetBotLogin(login)
 		slog.Info("bot login resolved", "login", login)
@@ -268,6 +270,7 @@ func main() {
 		slog.Warn("could not resolve bot login for re-review context", "err", err)
 	}
 	issueFetcher := issuepipeline.NewFetcher(ghClient, ghClient, s, issuePipe)
+	issueFetcher.SetBotLogin(resolvedBotLogin) // break re-triage loop (#362)
 	srv := server.New(s, broker, p, apiToken)
 	srv.SetNATSConn(eventBus.Conn())
 	srv.SetConfigPath(cfgPath)

@@ -475,3 +475,84 @@ func TestFetcher_NilMarkerFetcherSkipsMarkerCheck(t *testing.T) {
 		t.Errorf("nil marker fetcher should skip marker check and process, got processed=%d", processed)
 	}
 }
+
+// TestFetcher_BotCommentSkipsReprocess verifies that when the most recent
+// comment on an issue is from the bot itself, the fetcher skips reprocessing
+// — breaking the re-triage loop described in #362.
+func TestFetcher_BotCommentSkipsReprocess(t *testing.T) {
+	now := time.Now()
+	issue := fixture(1, now)
+
+	// The issue has a previous review with CommentedAt 2 minutes ago.
+	// updated_at (now) is well past the 30s grace window, so without the
+	// bot-comment check it would be reprocessed.
+	commentedAt := now.Add(-2 * time.Minute)
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {
+			row:    &store.Issue{ID: 10, GithubID: issue.ID},
+			review: &store.IssueReview{CommentedAt: commentedAt},
+		},
+	}}
+
+	// The latest comment is from the bot.
+	mf := &fakeMarkerFetcher{
+		commentsByKey: map[string][]github.Comment{
+			"org/repo#1": {
+				{Author: "some-user", Body: "please triage this"},
+				{Author: "heimdallm-bot", Body: "## Triage\n..."},
+			},
+		},
+	}
+
+	p := &fakePipeline{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, mf, dedup, p)
+	f.SetBotLogin("heimdallm-bot")
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 0 {
+		t.Errorf("bot's own comment should prevent reprocessing, got processed=%d", processed)
+	}
+	if len(p.calls) != 0 {
+		t.Errorf("pipeline should not have been called, got %d calls", len(p.calls))
+	}
+}
+
+// TestFetcher_HumanCommentAfterBotAllowsReprocess verifies that when a
+// human comments after the bot, the issue IS reprocessed.
+func TestFetcher_HumanCommentAfterBotAllowsReprocess(t *testing.T) {
+	now := time.Now()
+	issue := fixture(1, now)
+
+	commentedAt := now.Add(-2 * time.Minute)
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {
+			row:    &store.Issue{ID: 10, GithubID: issue.ID},
+			review: &store.IssueReview{CommentedAt: commentedAt},
+		},
+	}}
+
+	// Bot commented, then a human replied — should reprocess.
+	mf := &fakeMarkerFetcher{
+		commentsByKey: map[string][]github.Comment{
+			"org/repo#1": {
+				{Author: "heimdallm-bot", Body: "## Triage\n..."},
+				{Author: "some-user", Body: "I disagree with this analysis"},
+			},
+		},
+	}
+
+	p := &fakePipeline{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, mf, dedup, p)
+	f.SetBotLogin("heimdallm-bot")
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 1 {
+		t.Errorf("human comment after bot should allow reprocessing, got processed=%d", processed)
+	}
+}
