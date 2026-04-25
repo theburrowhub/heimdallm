@@ -324,12 +324,26 @@ func main() {
 			slog.Warn("runReview: GetPRByGithubID failed, proceeding without persistent claim",
 				"pr_id", pr.ID, "repo", pr.Repo, "err", err)
 		}
-		// stored may be nil either way — downstream Claim guard handles that.
-		var claimed bool
+		// Resolve the claim key: prefer the internal store ID when available,
+		// fall back to the GitHub-assigned ID on cold-start (PR not yet
+		// upserted). Both are stable int64 identifiers; the composite PK
+		// (pr_id, head_sha) stays unique either way because GitHub IDs are
+		// globally unique and internal IDs are repo-scoped sequences that
+		// never collide with GitHub's range.
+		//
+		// This fixes the cold-start duplicate-review bug where stored==nil
+		// caused the claim to be skipped entirely (#359).
 		var claimPRID int64
+		if stored != nil {
+			claimPRID = stored.ID
+		} else {
+			claimPRID = pr.ID // GitHub-assigned ID — always available
+		}
+
+		var claimed bool
 		var claimSHA string
-		if stored != nil && pr.Head.SHA != "" {
-			ok, err := s.ClaimInFlightReview(stored.ID, pr.Head.SHA)
+		if pr.Head.SHA != "" {
+			ok, err := s.ClaimInFlightReview(claimPRID, pr.Head.SHA)
 			if err != nil {
 				slog.Warn("runReview: claim inflight failed, proceeding", "err", err)
 			} else if !ok {
@@ -338,35 +352,11 @@ func main() {
 				return
 			} else {
 				claimed = true
-				claimPRID = stored.ID
 				claimSHA = pr.Head.SHA
 			}
 		} else {
-			// Defensive log: the claim guard was short-circuited. Surfaces
-			// the wiring regression theburrowhub/heimdallm#264 (empty SHA)
-			// and the early-stage "PR not yet upserted" path; downstream
-			// defenses (fail-closed SHA in pipeline.Run, circuit breaker,
-			// PublishedAt grace) still cap cost in both cases.
-			//
-			// The reason string is computed from the actual predicates
-			// rather than an else-branch nil check, so a future edit to
-			// the outer guard doesn't silently mislead operators — the
-			// log stays truthful no matter what combination of conditions
-			// steered us into this branch.
-			var reason string
-			switch {
-			case stored == nil:
-				reason = "stored PR not found"
-			case pr.Head.SHA == "":
-				reason = "empty Head.SHA from caller"
-			default:
-				// Unreachable under today's guard (stored != nil && SHA != "")
-				// but kept so a future added clause still yields a
-				// non-misleading message.
-				reason = "claim precondition failed"
-			}
 			slog.Info("runReview: in-flight claim skipped (defenses still apply)",
-				"pr", pr.Number, "repo", pr.Repo, "reason", reason)
+				"pr", pr.Number, "repo", pr.Repo, "reason", "empty Head.SHA from caller")
 		}
 		defer func() {
 			if claimed {
