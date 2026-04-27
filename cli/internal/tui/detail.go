@@ -84,6 +84,12 @@ func buildIssueDetailLines(issue api.Issue, width int) []string {
 	lines = append(lines, fmt.Sprintf("  %-12s %s", "Author:", issue.Author))
 	lines = append(lines, fmt.Sprintf("  %-12s %s", "State:", issue.State))
 	lines = append(lines, fmt.Sprintf("  %-12s %s", "Created:", issue.CreatedAt.Format("2006-01-02 15:04")))
+	if issue.Dismissed {
+		lines = append(lines, fmt.Sprintf("  %-12s %s", "Status:", "Dismissed"))
+	}
+	if labels := parseIssueLabels(issue.Labels); labels != "" {
+		lines = append(lines, fmt.Sprintf("  %-12s %s", "Labels:", labels))
+	}
 
 	if issue.Body != "" {
 		lines = append(lines, "")
@@ -102,7 +108,7 @@ func buildIssueDetailLines(issue api.Issue, width int) []string {
 		lines = append(lines, "")
 		lines = append(lines, headerStyle.Render("  Latest Review"))
 		lines = append(lines, "  "+sep)
-		lines = append(lines, fmt.Sprintf("  %-12s %s", "Action:", r.ActionTaken))
+		lines = append(lines, fmt.Sprintf("  %-12s %s", "Action:", humanizeIssueAction(r)))
 		lines = append(lines, fmt.Sprintf("  %-12s %s", "Reviewed:", r.CreatedAt.Format("2006-01-02 15:04")))
 		lines = append(lines, fmt.Sprintf("  %-12s %s", "CLI:", r.CLIUsed))
 

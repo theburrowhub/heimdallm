@@ -38,6 +38,10 @@ type Dashboard struct {
 	issues   []api.Issue
 	config   map[string]any
 	stats    *api.Stats
+
+	issueFilterRepo   string
+	issueFilterAction string
+
 	activity []activityLine
 
 	logLines  []logLine
@@ -236,6 +240,16 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					d.issues = append(d.issues, iss)
 				}
 			}
+			sort.Slice(d.issues, func(i, j int) bool {
+				ri, rj := d.issues[i].LatestReview, d.issues[j].LatestReview
+				if ri == nil {
+					return false
+				}
+				if rj == nil {
+					return true
+				}
+				return ri.CreatedAt.After(rj.CreatedAt)
+			})
 			d.config = msg.config
 			d.stats = msg.stats
 			if msg.activity != nil {
@@ -377,8 +391,18 @@ func (d *Dashboard) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		if d.activeTab == tabPRs && d.cursor < len(d.prs) {
 			d.openDetail()
-		} else if d.activeTab == tabIssues && d.cursor < len(d.issues) {
+		} else if d.activeTab == tabIssues && d.cursor < len(d.visibleIssues()) {
 			d.openDetail()
+		}
+	case "f":
+		if d.activeTab == tabIssues {
+			d.issueFilterRepo = cycleFilter(d.issueFilterRepo, d.uniqueIssueRepos())
+			d.cursor = 0
+		}
+	case "F":
+		if d.activeTab == tabIssues {
+			d.issueFilterAction = cycleFilter(d.issueFilterAction, d.uniqueIssueActions())
+			d.cursor = 0
 		}
 	case "r":
 		d.refreshing = true
@@ -444,7 +468,10 @@ func (d *Dashboard) openDetail() {
 	case tabPRs:
 		d.detailLines = buildPRDetailLines(d.prs[d.cursor], d.width)
 	case tabIssues:
-		d.detailLines = buildIssueDetailLines(d.issues[d.cursor], d.width)
+		vis := d.visibleIssues()
+		if d.cursor < len(vis) {
+			d.detailLines = buildIssueDetailLines(vis[d.cursor], d.width)
+		}
 	}
 }
 
@@ -695,35 +722,67 @@ func (d *Dashboard) renderPRs(height int) string {
 }
 
 func (d *Dashboard) renderIssues(height int) string {
-	if len(d.issues) == 0 {
+	issues := d.visibleIssues()
+	if len(issues) == 0 {
+		if d.issueFilterRepo != "" || d.issueFilterAction != "" {
+			return lipgloss.NewStyle().Foreground(colorMuted).Render("  No issues matching filter. Press f/F to change.")
+		}
 		return lipgloss.NewStyle().Foreground(colorMuted).Render("  No issues found.")
 	}
 
 	var b strings.Builder
-	header := fmt.Sprintf("  %-6s %-25s %-35s %-8s %-12s", "ID", "REPO", "TITLE", "SEVERITY", "ACTION")
+	header := fmt.Sprintf("  %-8s %-18s %-22s %-10s %-8s %-14s %-10s %s",
+		"#", "REPO", "TITLE", "AUTHOR", "SEVERITY", "ACTION", "DATE", "LABELS")
 	b.WriteString(headerStyle.Render(header))
 	b.WriteString("\n")
-	b.WriteString("  " + strings.Repeat("─", 90))
+	b.WriteString("  " + strings.Repeat("─", 106))
 	b.WriteString("\n")
 
-	maxVisible := height - 2
+	overhead := 2
+	if d.issueFilterRepo != "" || d.issueFilterAction != "" {
+		var parts []string
+		if d.issueFilterRepo != "" {
+			parts = append(parts, "repo:"+d.issueFilterRepo)
+		}
+		if d.issueFilterAction != "" {
+			parts = append(parts, "action:"+d.issueFilterAction)
+		}
+		filterLine := fmt.Sprintf("  Filter: %s  (%d/%d)", strings.Join(parts, "  "), len(issues), len(d.issues))
+		b.WriteString(lipgloss.NewStyle().Foreground(colorWarning).Render(filterLine))
+		b.WriteString("\n")
+		overhead++
+	}
+
+	maxVisible := height - overhead
 	if maxVisible < 1 {
 		maxVisible = 1
 	}
-	start, end := visibleRange(d.cursor, len(d.issues), maxVisible)
+	start, end := visibleRange(d.cursor, len(issues), maxVisible)
 
 	for i := start; i < end; i++ {
-		iss := d.issues[i]
+		iss := issues[i]
 		sev := "---"
 		action := "---"
+		date := "---"
 		if iss.LatestReview != nil {
 			sev = extractSeverity(iss.LatestReview.Triage)
-			action = iss.LatestReview.ActionTaken
+			action = humanizeIssueAction(iss.LatestReview)
+			date = iss.LatestReview.CreatedAt.Format("2006-01-02")
 		}
-		title := truncateRunes(iss.Title, 33)
-		repo := truncateRunes(iss.Repo, 23)
+
+		num := fmt.Sprintf("#%d", iss.Number)
+		if iss.Dismissed {
+			num += " D"
+		}
+		num = truncateRunes(num, 7)
+		repo := truncateRunes(iss.Repo, 16)
+		title := truncateRunes(iss.Title, 20)
+		author := truncateRunes(iss.Author, 9)
+		action = truncateRunes(action, 13)
+		labels := truncateRunes(parseIssueLabels(iss.Labels), 14)
 		sevRendered := severityStyle(sev).Render(fmt.Sprintf("%-8s", sev))
-		line := fmt.Sprintf("  %-6d %-25s %-35s %s %-12s", iss.ID, repo, title, sevRendered, action)
+		line := fmt.Sprintf("  %-8s %-18s %-22s %-10s %s %-14s %-10s %s",
+			num, repo, title, author, sevRendered, action, date, labels)
 
 		if i == d.cursor {
 			b.WriteString(selectedRowStyle.Render(line))
@@ -733,7 +792,7 @@ func (d *Dashboard) renderIssues(height int) string {
 		b.WriteString("\n")
 	}
 
-	if ind := scrollIndicator(start, end, len(d.issues)); ind != "" {
+	if ind := scrollIndicator(start, end, len(issues)); ind != "" {
 		b.WriteString(lipgloss.NewStyle().Foreground(colorMuted).Render(ind))
 	}
 	return b.String()
@@ -880,7 +939,10 @@ func (d *Dashboard) renderHelp() string {
 	if d.showDetail {
 		return helpStyle.Render("[esc]close  [j/k]scroll  [pgup/pgdn]page  [q]uit")
 	}
-	if d.activeTab == tabPRs || d.activeTab == tabIssues {
+	if d.activeTab == tabIssues {
+		return helpStyle.Render("[q]uit  [r]efresh  [enter]detail  [tab]switch  [j/k]scroll  [f]ilter repo  [F]ilter action  [1-6]jump")
+	}
+	if d.activeTab == tabPRs {
 		return helpStyle.Render("[q]uit  [r]efresh  [enter]detail  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-6]jump")
 	}
 	return helpStyle.Render("[q]uit  [r]efresh  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-6]jump  [G]follow")
@@ -901,7 +963,7 @@ func (d *Dashboard) tabItemCount() int {
 	case tabPRs:
 		return len(d.prs)
 	case tabIssues:
-		return len(d.issues)
+		return len(d.visibleIssues())
 	case tabConfig:
 		return len(d.buildConfigLines())
 	case tabStats:
@@ -1095,4 +1157,105 @@ func truncateRunes(s string, maxLen int) string {
 		return s
 	}
 	return string(runes[:maxLen-1]) + "…"
+}
+
+func humanizeIssueAction(r *api.IssueReview) string {
+	if r == nil {
+		return "---"
+	}
+	switch r.ActionTaken {
+	case "auto_implement":
+		if r.PRCreated > 0 {
+			return fmt.Sprintf("→ PR #%d", r.PRCreated)
+		}
+		return "Implemented"
+	case "review_only":
+		return "Triaged"
+	default:
+		return r.ActionTaken
+	}
+}
+
+func issueActionCategory(r *api.IssueReview) string {
+	if r == nil {
+		return "---"
+	}
+	switch r.ActionTaken {
+	case "auto_implement":
+		return "Implemented"
+	case "review_only":
+		return "Triaged"
+	default:
+		return r.ActionTaken
+	}
+}
+
+func parseIssueLabels(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var labels []string
+	if json.Unmarshal(raw, &labels) != nil {
+		return ""
+	}
+	return strings.Join(labels, ", ")
+}
+
+func (d *Dashboard) visibleIssues() []api.Issue {
+	if d.issueFilterRepo == "" && d.issueFilterAction == "" {
+		return d.issues
+	}
+	var filtered []api.Issue
+	for _, iss := range d.issues {
+		if d.issueFilterRepo != "" && !strings.EqualFold(iss.Repo, d.issueFilterRepo) {
+			continue
+		}
+		if d.issueFilterAction != "" && !strings.EqualFold(issueActionCategory(iss.LatestReview), d.issueFilterAction) {
+			continue
+		}
+		filtered = append(filtered, iss)
+	}
+	return filtered
+}
+
+func (d *Dashboard) uniqueIssueRepos() []string {
+	seen := make(map[string]bool)
+	var repos []string
+	for _, iss := range d.issues {
+		if !seen[iss.Repo] {
+			seen[iss.Repo] = true
+			repos = append(repos, iss.Repo)
+		}
+	}
+	sort.Strings(repos)
+	return repos
+}
+
+func (d *Dashboard) uniqueIssueActions() []string {
+	seen := make(map[string]bool)
+	var actions []string
+	for _, iss := range d.issues {
+		a := issueActionCategory(iss.LatestReview)
+		if !seen[a] {
+			seen[a] = true
+			actions = append(actions, a)
+		}
+	}
+	sort.Strings(actions)
+	return actions
+}
+
+func cycleFilter(current string, options []string) string {
+	if current == "" && len(options) > 0 {
+		return options[0]
+	}
+	for i, o := range options {
+		if strings.EqualFold(o, current) {
+			if i+1 < len(options) {
+				return options[i+1]
+			}
+			return ""
+		}
+	}
+	return ""
 }
