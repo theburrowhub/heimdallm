@@ -61,9 +61,9 @@ type GitHubConfig struct {
 	// Required when DiscoveryTopic is set (prevents scanning all of GitHub).
 	DiscoveryOrgs []string `toml:"discovery_orgs"`
 	// DiscoveryInterval controls how often the discovery query is refreshed.
-	// Independent from PollInterval because the Search API has a stricter
-	// rate limit (30 req/min authenticated). Defaults to "15m" when discovery
-	// is enabled. Accepts any Go time.ParseDuration value.
+	// When empty, discovery follows PollInterval; set this when discovery
+	// should run on its own cadence, for example to preserve Search API budget
+	// across many discovery_orgs. Accepts any Go time.ParseDuration value.
 	DiscoveryInterval string `toml:"discovery_interval"`
 
 	// AutoEnablePROnDiscovery controls the initial prEnabled value for repos
@@ -623,9 +623,6 @@ func (c *Config) applyDefaults() {
 	}
 	if c.GitHub.PollInterval == "" {
 		c.GitHub.PollInterval = "5m"
-	}
-	if c.GitHub.DiscoveryTopic != "" && c.GitHub.DiscoveryInterval == "" {
-		c.GitHub.DiscoveryInterval = "15m"
 	}
 	if c.GitHub.IssueTracking.FilterMode == "" {
 		c.GitHub.IssueTracking.FilterMode = FilterModeExclusive

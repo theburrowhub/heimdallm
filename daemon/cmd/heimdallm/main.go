@@ -527,7 +527,10 @@ func main() {
 
 		// Tier 1: Discovery — publishes to NATS
 		cfgMu.Lock()
-		discoveryInterval := parseDiscoveryInterval(cfg.GitHub.DiscoveryInterval)
+		discoveryInterval := parseDiscoveryInterval(
+			cfg.GitHub.DiscoveryInterval,
+			cfg.GitHub.PollInterval,
+		)
 		cfgMu.Unlock()
 		wg.Add(1)
 		go func() {
@@ -1652,13 +1655,14 @@ func parsePollInterval(s string) time.Duration {
 	return d
 }
 
-// parseDiscoveryInterval falls back to 15m when the value is empty or invalid.
+// parseDiscoveryInterval falls back to pollInterval when the discovery-specific
+// value is empty or invalid.
 // Config.Validate rejects invalid durations before we reach here, so the
-// fallback only covers the unset-in-TOML-but-topic-defaulted case.
-func parseDiscoveryInterval(s string) time.Duration {
-	d, err := time.ParseDuration(s)
+// fallback normally covers the unset discovery_interval case.
+func parseDiscoveryInterval(discoveryInterval, pollInterval string) time.Duration {
+	d, err := time.ParseDuration(discoveryInterval)
 	if err != nil || d <= 0 {
-		return 15 * time.Minute
+		return parsePollInterval(pollInterval)
 	}
 	return d
 }

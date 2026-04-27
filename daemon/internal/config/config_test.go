@@ -196,13 +196,13 @@ func TestValidate_AllValidIntervals(t *testing.T) {
 
 // ── Topic-based discovery ────────────────────────────────────────────────────
 
-func TestApplyDefaults_DiscoveryIntervalWhenTopicSet(t *testing.T) {
+func TestApplyDefaults_DiscoveryIntervalUnsetWhenTopicSet(t *testing.T) {
 	cfg := &Config{}
 	cfg.GitHub.DiscoveryTopic = "heimdallm-review"
 	cfg.applyDefaults()
 
-	if cfg.GitHub.DiscoveryInterval != "15m" {
-		t.Errorf("DiscoveryInterval = %q, want default %q", cfg.GitHub.DiscoveryInterval, "15m")
+	if cfg.GitHub.DiscoveryInterval != "" {
+		t.Errorf("DiscoveryInterval = %q, want empty runtime fallback", cfg.GitHub.DiscoveryInterval)
 	}
 }
 
