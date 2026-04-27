@@ -126,6 +126,27 @@ Map<String, dynamic> _computeGlobalDiff(AppConfig old, AppConfig updated) {
     aiDiff['implement_prompt'] = updated.globalImplementPrompt;
   }
 
+  // Agent configs — diff each CLI agent's settings individually.
+  final agentsDiff = <String, dynamic>{};
+  final allAgentNames = {...old.agentConfigs.keys, ...updated.agentConfigs.keys};
+  for (final name in allAgentNames) {
+    final o = old.agentConfigs[name] ?? const CLIAgentConfig();
+    final n = updated.agentConfigs[name] ?? const CLIAgentConfig();
+    final ad = <String, dynamic>{};
+    if (o.model != n.model) ad['model'] = n.model;
+    if (o.maxTurns != n.maxTurns) ad['max_turns'] = n.maxTurns;
+    if (o.approvalMode != n.approvalMode) ad['approval_mode'] = n.approvalMode;
+    if (o.extraFlags != n.extraFlags) ad['extra_flags'] = n.extraFlags;
+    if (o.promptId != n.promptId) ad['prompt'] = n.promptId ?? '';
+    if (o.effort != n.effort) ad['effort'] = n.effort;
+    if (o.permissionMode != n.permissionMode) ad['permission_mode'] = n.permissionMode;
+    if (o.bare != n.bare) ad['bare'] = n.bare;
+    if (o.dangerouslySkipPerms != n.dangerouslySkipPerms) ad['dangerously_skip_perms'] = n.dangerouslySkipPerms;
+    if (o.noSessionPersistence != n.noSessionPersistence) ad['no_session_persistence'] = n.noSessionPersistence;
+    if (ad.isNotEmpty) agentsDiff[name] = ad;
+  }
+  if (agentsDiff.isNotEmpty) aiDiff['agents'] = agentsDiff;
+
   if (aiDiff.isNotEmpty) diff['ai'] = aiDiff;
 
   // GitHub section
