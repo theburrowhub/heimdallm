@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/models/pr.dart';
 import '../../core/models/tracked_issue.dart';
+import '../../core/platform/platform_services_provider.dart';
 import '../../shared/widgets/severity_badge.dart';
 import '../../shared/widgets/state_badge.dart';
 import '../../shared/widgets/toast.dart';
@@ -28,6 +29,7 @@ class DashboardScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final cbMessage = ref.watch(circuitBreakerProvider);
     final daemonRunning = ref.watch(daemonHealthProvider).valueOrNull ?? false;
+    final daemonStarting = ref.watch(daemonStartingProvider);
     return DefaultTabController(
       length: 6,
       child: Scaffold(
@@ -35,11 +37,23 @@ class DashboardScreen extends ConsumerWidget {
           title: const Text('Heimdallm'),
           actions: [
             IconButton(
-              icon: const Icon(Icons.power_settings_new),
-              tooltip: daemonRunning ? 'Stop Server' : 'Server offline',
-              onPressed: daemonRunning
+              icon: daemonStarting
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : Icon(
+                      daemonRunning
+                          ? Icons.power_settings_new
+                          : Icons.play_arrow,
+                    ),
+              tooltip: daemonRunning ? 'Stop Server' : 'Start Server',
+              onPressed: daemonStarting
+                  ? null
+                  : daemonRunning
                   ? () => _confirmShutdown(context, ref)
-                  : null,
+                  : () => _startDaemon(context, ref),
             ),
             IconButton(
               icon: const Icon(Icons.article_outlined),
@@ -99,6 +113,9 @@ class DashboardScreen extends ConsumerWidget {
   }
 }
 
+const _daemonStartHealthMaxAttempts = 80;
+const _daemonStartHealthInterval = Duration(milliseconds: 100);
+
 Future<void> _confirmShutdown(BuildContext context, WidgetRef ref) async {
   final confirmed = await showDialog<bool>(
     context: context,
@@ -131,6 +148,44 @@ Future<void> _confirmShutdown(BuildContext context, WidgetRef ref) async {
   }
 }
 
+Future<void> _startDaemon(BuildContext context, WidgetRef ref) async {
+  if (ref.read(daemonStartingProvider)) return;
+
+  final platform = ref.read(platformServicesProvider);
+  final binaryPath = platform.defaultDaemonBinaryPath();
+  if (binaryPath == null || binaryPath.isEmpty) {
+    showToast(context, 'Daemon binary not found', isError: true);
+    return;
+  }
+
+  ref.read(daemonStartingProvider.notifier).state = true;
+  try {
+    await platform.spawnDaemon(binaryPath);
+    final api = ref.read(apiClientProvider);
+    var healthy = false;
+    for (var i = 0; i < _daemonStartHealthMaxAttempts; i++) {
+      await Future<void>.delayed(_daemonStartHealthInterval);
+      healthy = await api.checkHealth();
+      if (healthy) break;
+    }
+    _invalidateDashboardData(ref);
+    if (!context.mounted) return;
+    if (healthy) {
+      showToast(context, 'Server started');
+    } else {
+      showToast(
+        context,
+        'Heimdallm could not start. Check the app installation.',
+        isError: true,
+      );
+    }
+  } catch (e) {
+    if (context.mounted) showToast(context, 'Error: $e', isError: true);
+  } finally {
+    ref.read(daemonStartingProvider.notifier).state = false;
+  }
+}
+
 Future<void> _refreshWhenDaemonStops(
   BuildContext context,
   WidgetRef ref,
@@ -155,6 +210,12 @@ Future<void> _refreshWhenDaemonStops(
   }
 
   if (!context.mounted) return;
+  _invalidateDashboardData(ref);
+}
+
+void _invalidateDashboardData(WidgetRef ref) {
+  ref.invalidate(sseStreamProvider);
+  ref.invalidate(daemonHealthProvider);
   ref.invalidate(prsProvider);
   ref.invalidate(issuesProvider);
   ref.invalidate(statsProvider);
@@ -457,6 +518,7 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
   }
 
   Widget _errorView(BuildContext context, Object e) {
+    final daemonStarting = ref.watch(daemonStartingProvider);
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -469,12 +531,14 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
           ),
           const SizedBox(height: 4),
           const Text(
-            'Go to Settings to configure and start it.',
+            'Start it here or open Settings to adjust configuration.',
             style: TextStyle(color: Colors.grey),
           ),
           const SizedBox(height: 16),
-          Row(
-            mainAxisSize: MainAxisSize.min,
+          Wrap(
+            alignment: WrapAlignment.center,
+            spacing: 8,
+            runSpacing: 8,
             children: [
               TextButton(
                 onPressed: () {
@@ -483,7 +547,22 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
                 },
                 child: const Text('Retry'),
               ),
-              const SizedBox(width: 8),
+              FilledButton.icon(
+                icon: daemonStarting
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Icon(Icons.play_arrow, size: 16),
+                label: Text(daemonStarting ? 'Starting...' : 'Start Server'),
+                onPressed: daemonStarting
+                    ? null
+                    : () => _startDaemon(context, ref),
+              ),
               FilledButton.icon(
                 icon: const Icon(Icons.settings, size: 16),
                 label: const Text('Settings'),

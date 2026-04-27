@@ -31,6 +31,9 @@ final sseStreamProvider = StreamProvider<SseEvent>((ref) {
 /// can't slip by silently (regression guard for the 2026-04-22 runaway).
 final circuitBreakerProvider = StateProvider<String?>((ref) => null);
 
+/// Tracks whether the desktop app is trying to spawn the daemon.
+final daemonStartingProvider = StateProvider<bool>((ref) => false);
+
 /// Tracks PRs currently being reviewed, keyed by "repo:prNumber". Used to
 /// show spinners in the tile list and detail view.
 ///
