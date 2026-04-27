@@ -755,11 +755,12 @@ func TestHandlerPutConfig_ReadOnlyKeys_Accepted(t *testing.T) {
 		name string
 		body string
 	}{
+		{"repositories", `{"repositories":["org/monitored"]}`},
 		{"non_monitored", `{"non_monitored":["org/archived"]}`},
 		{"repo_overrides", `{"repo_overrides":{"org/a":{"primary":"claude"}}}`},
 		{"agent_configs", `{"agent_configs":{"claude":{"model":"claude-opus-4-7"}}}`},
 		{"server_port", `{"server_port":7842}`},
-		{"all-at-once", `{"non_monitored":[],"repo_overrides":{},"agent_configs":{},"server_port":7842}`},
+		{"all-at-once", `{"repositories":[],"non_monitored":[],"repo_overrides":{},"agent_configs":{},"server_port":7842}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -778,7 +779,7 @@ func TestHandlerPutConfig_ReadOnlyKeys_NotPersisted(t *testing.T) {
 	// reload doesn't have to re-examine them and ApplyStore's
 	// "unknown/bootstrap-only" branches stay dormant.
 	srv, s := setupServer(t)
-	body := `{"non_monitored":["org/x"],"repo_overrides":{"org/a":{"primary":"claude"}},"agent_configs":{"claude":{"model":"x"}},"server_port":7842}`
+	body := `{"repositories":["org/y"],"non_monitored":["org/x"],"repo_overrides":{"org/a":{"primary":"claude"}},"agent_configs":{"claude":{"model":"x"}},"server_port":7842}`
 	w := httptest.NewRecorder()
 	srv.Router().ServeHTTP(w, putConfigRequest(body))
 	if w.Code != http.StatusOK {
@@ -789,7 +790,7 @@ func TestHandlerPutConfig_ReadOnlyKeys_NotPersisted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListConfigs: %v", err)
 	}
-	for _, banned := range []string{"non_monitored", "repo_overrides", "agent_configs", "server_port"} {
+	for _, banned := range []string{"repositories", "non_monitored", "repo_overrides", "agent_configs", "server_port"} {
 		if _, leaked := rows[banned]; leaked {
 			t.Errorf("read-only key %q was persisted (rows: %v)", banned, rows)
 		}
@@ -801,7 +802,7 @@ func TestHandlerPutConfig_WritableAndReadOnly_Mixed(t *testing.T) {
 	// round-tripped read-only ones. Only the editable fields land in the
 	// store — nothing else bleeds in.
 	srv, s := setupServer(t)
-	body := `{"poll_interval":"30m","agent_configs":{"claude":{"model":"x"}},"non_monitored":["org/x"]}`
+	body := `{"poll_interval":"30m","agent_configs":{"claude":{"model":"x"}},"repositories":["org/y"],"non_monitored":["org/x"]}`
 	w := httptest.NewRecorder()
 	srv.Router().ServeHTTP(w, putConfigRequest(body))
 	if w.Code != http.StatusOK {
@@ -817,6 +818,9 @@ func TestHandlerPutConfig_WritableAndReadOnly_Mixed(t *testing.T) {
 	}
 	if _, ok := rows["agent_configs"]; ok {
 		t.Errorf("agent_configs unexpectedly persisted")
+	}
+	if _, ok := rows["repositories"]; ok {
+		t.Errorf("repositories unexpectedly persisted")
 	}
 	if _, ok := rows["non_monitored"]; ok {
 		t.Errorf("non_monitored unexpectedly persisted")
@@ -1157,6 +1161,42 @@ func TestHandlePatchConfig(t *testing.T) {
 	}
 	if ai["fallback"] != "gemini" {
 		t.Errorf("fallback = %v, want gemini (should be preserved)", ai["fallback"])
+	}
+}
+
+func TestHandlePatchConfig_RepoListsWriteTOML(t *testing.T) {
+	tomlContent := "[ai]\nprimary = \"claude\"\n"
+	tomlPath := writeTempTOML(t, tomlContent)
+
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+
+	body := `{"github":{"repositories":["org/monitored"],"non_monitored":["org/disabled"]}}`
+	req := httptest.NewRequest("PATCH", "/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	m, err := config.ReadTOMLMap(tomlPath)
+	if err != nil {
+		t.Fatalf("read TOML after PATCH: %v", err)
+	}
+	gh, ok := m["github"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected [github] section in TOML, got %v", m)
+	}
+	repos, ok := gh["repositories"].([]any)
+	if !ok || len(repos) != 1 || repos[0] != "org/monitored" {
+		t.Fatalf("repositories = %v, want [org/monitored]", gh["repositories"])
+	}
+	nonMonitored, ok := gh["non_monitored"].([]any)
+	if !ok || len(nonMonitored) != 1 || nonMonitored[0] != "org/disabled" {
+		t.Fatalf("non_monitored = %v, want [org/disabled]", gh["non_monitored"])
 	}
 }
 
