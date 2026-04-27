@@ -2,6 +2,22 @@
 
 > **Note:** Versions 0.1.0–0.1.3 were originally published under [`theburrowhub/heimdallr-docker`](https://github.com/theburrowhub/heimdallr-docker) (now archived). The project was unified into this repository and renamed to Heimdallm in v0.1.1.
 
+## [0.6.10](https://github.com/theburrowhub/heimdallm/compare/v0.6.9...v0.6.10) (2026-04-27)
+
+
+### Features
+
+* add daemon shutdown controls ([#367](https://github.com/theburrowhub/heimdallm/issues/367)) ([ff7efed](https://github.com/theburrowhub/heimdallm/commit/ff7efedbc3c499e141a6f879a3e86eeba196f8c9))
+
+
+### Bug Fixes
+
+* allow starting daemon from offline dashboard ([#369](https://github.com/theburrowhub/heimdallm/issues/369)) ([5b9ede7](https://github.com/theburrowhub/heimdallm/commit/5b9ede7c1fdcde4828c6156ed5c8102b23fde1ab))
+* keep toml repo lists above store state ([#374](https://github.com/theburrowhub/heimdallm/issues/374)) ([671cce6](https://github.com/theburrowhub/heimdallm/commit/671cce624a1bf8e0b4f772818090f3b3600c2f9a))
+* make discovery interval follow poll interval ([#370](https://github.com/theburrowhub/heimdallm/issues/370)) ([4554ab1](https://github.com/theburrowhub/heimdallm/commit/4554ab1305377075674264b739f80a3074d77db3))
+* refresh topic discovery before publishing repos ([#373](https://github.com/theburrowhub/heimdallm/issues/373)) ([92ecb4c](https://github.com/theburrowhub/heimdallm/commit/92ecb4c7c67057c23e7b476af03449193313239f))
+* restore docker go test gate ([#372](https://github.com/theburrowhub/heimdallm/issues/372)) ([d9d5cf8](https://github.com/theburrowhub/heimdallm/commit/d9d5cf8689c78afbc94cf2611e41727bf00655c6))
+
 ## [0.6.9](https://github.com/theburrowhub/heimdallm/compare/v0.6.8...v0.6.9) (2026-04-25)
 
 
