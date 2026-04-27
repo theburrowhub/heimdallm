@@ -385,7 +385,7 @@ In **Docker mode** the daemon runs standalone with the web UI container as an op
 
 ### Prerequisites
 
-- Go 1.21+
+- Go 1.25+
 - Flutter 3.x (stable)
 - `gh` CLI authenticated
 - macOS 13+ with Xcode **or** Linux with GTK 3 dev libraries

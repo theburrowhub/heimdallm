@@ -63,7 +63,7 @@ test:
 #   make test-docker
 #   make test-docker GO_TEST_ARGS="-run TestFoo ./internal/config/..."
 
-GO_DOCKER_IMAGE ?= golang:1.21-alpine@sha256:2414035b086e3c42b99654c8b26e6f5b1b1598080d65fd03c7f499552ff4dc94
+GO_DOCKER_IMAGE ?= golang:1.25-alpine@sha256:f6751d823c26342f9506c03797d2527668d095b0a15f1862cddb4d927a7a4ced
 GO_TEST_ARGS    ?= -timeout 60s -count=1 ./...
 
 test-docker:
