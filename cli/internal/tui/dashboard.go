@@ -744,18 +744,13 @@ func (d *Dashboard) renderConfig(height int) string {
 		return lipgloss.NewStyle().Foreground(colorMuted).Render("  No configuration loaded.")
 	}
 
-	var b strings.Builder
-	b.WriteString(headerStyle.Render("  Configuration"))
-	b.WriteString("\n")
-	b.WriteString("  " + strings.Repeat("─", 60))
-	b.WriteString("\n")
-
 	lines := d.buildConfigLines()
 	if len(lines) == 0 {
-		return b.String()
+		return lipgloss.NewStyle().Foreground(colorMuted).Render("  No configuration loaded.")
 	}
 
-	maxVisible := height - 2
+	var b strings.Builder
+	maxVisible := height
 	if maxVisible < 1 {
 		maxVisible = 1
 	}
@@ -915,21 +910,265 @@ func (d *Dashboard) buildConfigLines() []string {
 	if d.config == nil {
 		return nil
 	}
-	keys := []string{
-		"poll_interval", "repositories", "ai_primary", "ai_fallback",
-		"review_mode", "retention_days", "issue_tracking",
+
+	keyStyle := lipgloss.NewStyle().Foreground(colorMuted)
+	boldStyle := lipgloss.NewStyle().Bold(true)
+
+	str := func(key string) string {
+		v, ok := d.config[key]
+		if !ok || v == nil {
+			return ""
+		}
+		return fmt.Sprintf("%v", v)
 	}
-	var lines []string
-	for _, key := range keys {
-		val, ok := d.config[key]
+	strSlice := func(key string) []string {
+		v, ok := d.config[key]
+		if !ok || v == nil {
+			return nil
+		}
+		arr, ok := v.([]any)
 		if !ok {
-			continue
+			return nil
 		}
-		valStr := formatConfigValue(val)
-		for _, part := range strings.Split(fmt.Sprintf("  %-20s %s", key+":", valStr), "\n") {
-			lines = append(lines, part)
+		out := make([]string, 0, len(arr))
+		for _, item := range arr {
+			out = append(out, fmt.Sprintf("%v", item))
+		}
+		return out
+	}
+	mapVal := func(key string) map[string]any {
+		v, ok := d.config[key]
+		if !ok || v == nil {
+			return nil
+		}
+		m, _ := v.(map[string]any)
+		return m
+	}
+	fmtVal := func(v any) string {
+		if v == nil {
+			return ""
+		}
+		switch val := v.(type) {
+		case []any:
+			if len(val) == 0 {
+				return ""
+			}
+			parts := make([]string, len(val))
+			for i, item := range val {
+				parts[i] = fmt.Sprintf("%v", item)
+			}
+			return strings.Join(parts, ", ")
+		case map[string]any:
+			b, _ := json.Marshal(val)
+			return string(b)
+		default:
+			return fmt.Sprintf("%v", v)
 		}
 	}
+	section := func(name string) string {
+		label := fmt.Sprintf("── %s ", name)
+		pad := 40 - len([]rune(label))
+		if pad > 0 {
+			label += strings.Repeat("─", pad)
+		}
+		return "  " + headerStyle.Render(label)
+	}
+	kv := func(key, value string) string {
+		if value == "" {
+			value = "—"
+		}
+		return fmt.Sprintf("    %s %s", keyStyle.Render(fmt.Sprintf("%-18s", key+":")), value)
+	}
+	kvWide := func(key, value string) string {
+		if value == "" {
+			value = "—"
+		}
+		return fmt.Sprintf("      %s %s", keyStyle.Render(fmt.Sprintf("%-24s", key+":")), value)
+	}
+
+	var lines []string
+
+	// ── Server ──
+	lines = append(lines, section("Server"))
+	lines = append(lines, kv("Port", str("server_port")))
+	lines = append(lines, kv("Bind", str("bind_addr")))
+	lines = append(lines, kv("Poll interval", str("poll_interval")))
+	lines = append(lines, "")
+
+	// ── Repositories ──
+	repos := strSlice("repositories")
+	lines = append(lines, section(fmt.Sprintf("Repositories (%d)", len(repos))))
+	if len(repos) == 0 {
+		lines = append(lines, "    (none)")
+	} else {
+		for _, r := range repos {
+			lines = append(lines, "    • "+r)
+		}
+	}
+	lines = append(lines, "")
+
+	// ── Non-Monitored ──
+	nonMon := strSlice("non_monitored")
+	if len(nonMon) > 0 {
+		lines = append(lines, section(fmt.Sprintf("Non-Monitored (%d)", len(nonMon))))
+		for _, r := range nonMon {
+			lines = append(lines, "    • "+r)
+		}
+		lines = append(lines, "")
+	}
+
+	// ── Discovery ──
+	lines = append(lines, section("Discovery"))
+	lines = append(lines, kv("Topic", str("discovery_topic")))
+	orgs := strSlice("discovery_orgs")
+	lines = append(lines, kv("Orgs", strings.Join(orgs, ", ")))
+	lines = append(lines, kv("Interval", str("discovery_interval")))
+	lines = append(lines, "")
+
+	// ── AI ──
+	lines = append(lines, section("AI"))
+	lines = append(lines, kv("Primary", str("ai_primary")))
+	lines = append(lines, kv("Fallback", str("ai_fallback")))
+	lines = append(lines, kv("Mode", str("review_mode")))
+	lines = append(lines, kv("Timeout", str("execution_timeout")))
+	lines = append(lines, kv("Issue prompt", str("issue_prompt")))
+	lines = append(lines, kv("Impl prompt", str("implement_prompt")))
+	lines = append(lines, "")
+
+	// ── Issue Tracking ──
+	lines = append(lines, section("Issue Tracking"))
+	if it := mapVal("issue_tracking"); it != nil {
+		lines = append(lines, kv("Enabled", fmtVal(it["enabled"])))
+		lines = append(lines, kv("Filter mode", fmtVal(it["filter_mode"])))
+		if s := fmtVal(it["develop_labels"]); s != "" {
+			lines = append(lines, kv("Develop", s))
+		}
+		if s := fmtVal(it["review_only_labels"]); s != "" {
+			lines = append(lines, kv("Review only", s))
+		}
+		if s := fmtVal(it["skip_labels"]); s != "" {
+			lines = append(lines, kv("Skip", s))
+		}
+		if s := fmtVal(it["blocked_labels"]); s != "" {
+			lines = append(lines, kv("Blocked", s))
+		}
+		if s := fmtVal(it["default_action"]); s != "" {
+			lines = append(lines, kv("Default action", s))
+		}
+		if s := fmtVal(it["promote_to_label"]); s != "" {
+			lines = append(lines, kv("Promote to", s))
+		}
+	} else {
+		lines = append(lines, "    (not configured)")
+	}
+	lines = append(lines, "")
+
+	// ── PR Metadata ──
+	pm := mapVal("pr_metadata")
+	lines = append(lines, section("PR Metadata (defaults)"))
+	if pm != nil {
+		lines = append(lines, kv("Reviewers", fmtVal(pm["reviewers"])))
+		lines = append(lines, kv("Labels", fmtVal(pm["labels"])))
+		lines = append(lines, kv("Assignee", fmtVal(pm["pr_assignee"])))
+		if _, ok := pm["pr_draft"]; ok {
+			lines = append(lines, kv("Draft", fmtVal(pm["pr_draft"])))
+		}
+	} else {
+		lines = append(lines, "    (not configured)")
+	}
+	lines = append(lines, "")
+
+	// ── Retention ──
+	lines = append(lines, section("Retention"))
+	lines = append(lines, kv("Max days", str("retention_days")))
+	lines = append(lines, kv("Activity log", str("activity_log_enabled")))
+	logRet := str("activity_log_retention_days")
+	if logRet != "" {
+		logRet += " days"
+	}
+	lines = append(lines, kv("Log retention", logRet))
+	lines = append(lines, "")
+
+	// ── Local Directories ──
+	localBase := strSlice("local_dir_base")
+	localDetected := mapVal("local_dirs_detected")
+	if len(localBase) > 0 || len(localDetected) > 0 {
+		lines = append(lines, section("Local Directories"))
+		if len(localBase) > 0 {
+			lines = append(lines, kv("Base paths", strings.Join(localBase, ", ")))
+		}
+		if len(localDetected) > 0 {
+			lines = append(lines, "    Detected:")
+			names := make([]string, 0, len(localDetected))
+			for name := range localDetected {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
+				lines = append(lines, fmt.Sprintf("      %s → %v", name, localDetected[name]))
+			}
+		}
+		lines = append(lines, "")
+	}
+
+	// ── Agent Configs ──
+	agentConfigs := mapVal("agent_configs")
+	if len(agentConfigs) > 0 {
+		lines = append(lines, section(fmt.Sprintf("Agent Configs (%d)", len(agentConfigs))))
+		names := make([]string, 0, len(agentConfigs))
+		for name := range agentConfigs {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			lines = append(lines, "    "+boldStyle.Render(name))
+			if ac, ok := agentConfigs[name].(map[string]any); ok {
+				keys := make([]string, 0, len(ac))
+				for k := range ac {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys)
+				for _, k := range keys {
+					vs := fmtVal(ac[k])
+					if vs == "" {
+						continue
+					}
+					lines = append(lines, kvWide(k, vs))
+				}
+			}
+		}
+		lines = append(lines, "")
+	}
+
+	// ── Repo Overrides ──
+	repoOverrides := mapVal("repo_overrides")
+	if len(repoOverrides) > 0 {
+		lines = append(lines, section(fmt.Sprintf("Repo Overrides (%d)", len(repoOverrides))))
+		names := make([]string, 0, len(repoOverrides))
+		for name := range repoOverrides {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			lines = append(lines, "    "+boldStyle.Render(name))
+			if ro, ok := repoOverrides[name].(map[string]any); ok {
+				keys := make([]string, 0, len(ro))
+				for k := range ro {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys)
+				for _, k := range keys {
+					vs := fmtVal(ro[k])
+					if vs == "" {
+						continue
+					}
+					lines = append(lines, kvWide(k, vs))
+				}
+			}
+		}
+		lines = append(lines, "")
+	}
+
 	return lines
 }
 
@@ -973,10 +1212,10 @@ func formatConfigValue(v any) string {
 		for i, item := range val {
 			parts[i] = fmt.Sprintf("%v", item)
 		}
-		return truncateRunes(strings.Join(parts, ", "), 60)
+		return strings.Join(parts, ", ")
 	case map[string]any:
 		b, _ := json.Marshal(val)
-		return truncateRunes(string(b), 60)
+		return string(b)
 	default:
 		return fmt.Sprintf("%v", v)
 	}

@@ -1058,6 +1058,7 @@ func main() {
 		reposList := append([]string(nil), c.GitHub.Repositories...)
 		nonMonList := append([]string(nil), c.GitHub.NonMonitored...)
 		localDirBaseList := append([]string(nil), c.GitHub.LocalDirBase...)
+		discoveryOrgsList := append([]string(nil), c.GitHub.DiscoveryOrgs...)
 		cfgMu.Unlock()
 		repoOverrides := make(map[string]map[string]any)
 		for repo, ai := range c.AI.Repos {
@@ -1148,13 +1149,18 @@ func main() {
 		}
 		result := map[string]any{
 			"server_port":                 c.Server.Port,
+			"bind_addr":                   c.Server.BindAddr,
 			"poll_interval":               c.GitHub.PollInterval,
 			"repositories":                reposList,
 			"non_monitored":               nonMonList,
 			"local_dir_base":              localDirBaseList,
+			"discovery_topic":             c.GitHub.DiscoveryTopic,
+			"discovery_orgs":              discoveryOrgsList,
+			"discovery_interval":          c.GitHub.DiscoveryInterval,
 			"ai_primary":                  c.AI.Primary,
 			"ai_fallback":                 c.AI.Fallback,
 			"review_mode":                 c.AI.ReviewMode,
+			"execution_timeout":           c.AI.ExecutionTimeout,
 			"retention_days":              c.Retention.MaxDays,
 			"issue_tracking":              c.GitHub.IssueTracking,
 			"repo_overrides":              repoOverrides,
