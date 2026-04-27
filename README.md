@@ -507,6 +507,34 @@ Alternatively, **release-please** (via `release.yml`) automates this: it reads c
 
 ---
 
+## Troubleshooting
+
+### macOS asks for permission to access Music, Downloads, or other folders
+
+On macOS, the daemon's `local_dir_base` feature calls `os.Stat()` on
+candidate paths for each monitored repository (to auto-detect local
+clones). If `HEIMDALLM_LOCAL_DIR_BASE` is set to a broad path like `$HOME`,
+the stat probes can touch TCC-protected directories (`~/Music`,
+`~/Downloads`, `~/Pictures`, etc.), causing macOS to show permission
+dialogs — even though Heimdallm has no interest in those folders.
+
+**Fix:** set `HEIMDALLM_LOCAL_DIR_BASE` to the specific directory (or
+directories) where your repos actually live:
+
+```bash
+# Good — scoped to your actual code directories
+export HEIMDALLM_LOCAL_DIR_BASE=~/projects,~/work
+
+# Bad — triggers TCC prompts for every protected subfolder of $HOME
+export HEIMDALLM_LOCAL_DIR_BASE=~
+```
+
+The native file picker (`Browse` button in repo settings) may also
+trigger similar prompts when macOS enumerates recent/default locations.
+This is standard `NSOpenPanel` behavior and not specific to Heimdallm.
+
+---
+
 ## License
 
 MIT
