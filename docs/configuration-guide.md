@@ -91,6 +91,10 @@ HEIMDALLM_REPOSITORIES=myorg/api,myorg/backend,myorg/frontend
 repositories = ["myorg/api", "myorg/backend", "myorg/frontend"]
 ```
 
+Explicit repo lists in `config.toml` or `HEIMDALLM_REPOSITORIES` win over
+runtime discovery state saved in SQLite. A repo explicitly listed as monitored
+will not be disabled by an older `non_monitored` store row.
+
 ### Topic-based discovery
 
 Instead of (or in addition to) a static list, tag GitHub repositories with a topic and let the daemon discover them automatically.

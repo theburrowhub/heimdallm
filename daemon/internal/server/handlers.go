@@ -392,7 +392,6 @@ func (srv *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 // data injection into the configs table (security issue #4).
 var validConfigKeys = map[string]struct{}{
 	"poll_interval":  {},
-	"repositories":   {},
 	"ai_primary":     {},
 	"ai_fallback":    {},
 	"review_mode":    {},
@@ -408,6 +407,9 @@ var validConfigKeys = map[string]struct{}{
 // arbitrary keys permitted.
 //
 // Why each key is here:
+//   - repositories  : repo-list changes belong in config.toml via PATCH
+//     /config. Persisting this key in SQLite lets runtime discovery override
+//     explicit TOML/env repo choices.
 //   - non_monitored : Flutter-UI managed list of disabled repos, not a
 //     web-UI concern.
 //   - repo_overrides: per-repo AI config lives in [ai.repos.<name>] or
@@ -418,6 +420,7 @@ var validConfigKeys = map[string]struct{}{
 //     flight would drop every in-flight connection). Its numeric-range
 //     pre-check still runs so clients get feedback on bad values.
 var readOnlyConfigKeys = map[string]struct{}{
+	"repositories":   {},
 	"non_monitored":  {},
 	"repo_overrides": {},
 	"agent_configs":  {},

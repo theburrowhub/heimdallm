@@ -15,15 +15,16 @@ func (f *fakeStoreLister) ListConfigs() (map[string]string, error) {
 	return f.rows, f.err
 }
 
-// ApplyStore is the third layer of config precedence: TOML < env < store.
-// It receives the `configs` table rows (key → raw value string) that the
-// PUT /config handler writes, and merges them onto an already-loaded cfg.
+// ApplyStore receives the `configs` table rows (key → raw value string) that
+// the legacy PUT /config handler writes, and merges them onto an already-loaded
+// cfg. Most keys use TOML < env < store precedence; repository lists are lower
+// priority runtime-discovery state, so explicit TOML/env entries win conflicts.
 //
 // Values stored as bare strings (e.g. "5m" for poll_interval) are assigned
 // as-is; everything else was json.Marshal'd by the handler, so we unmarshal
 // here symmetrically.
 
-func TestApplyStore_MergesRepositoriesAndIssueTracking(t *testing.T) {
+func TestApplyStore_MergesStoreOnlyRepositoriesAndIssueTracking(t *testing.T) {
 	cfg := &Config{}
 	cfg.applyDefaults()
 	cfg.GitHub.Repositories = []string{"toml/one"}
@@ -37,9 +38,9 @@ func TestApplyStore_MergesRepositoriesAndIssueTracking(t *testing.T) {
 		t.Fatalf("ApplyStore: %v", err)
 	}
 
-	got := cfg.GitHub.Repositories
-	if len(got) != 2 || got[0] != "store/a" || got[1] != "store/b" {
-		t.Errorf("Repositories = %v, want [store/a store/b]", got)
+	wantRepos := []string{"toml/one", "store/a", "store/b"}
+	if fmt.Sprintf("%v", cfg.GitHub.Repositories) != fmt.Sprintf("%v", wantRepos) {
+		t.Errorf("Repositories = %v, want %v", cfg.GitHub.Repositories, wantRepos)
 	}
 	it := cfg.GitHub.IssueTracking
 	if !it.Enabled {
@@ -56,7 +57,7 @@ func TestApplyStore_MergesRepositoriesAndIssueTracking(t *testing.T) {
 	}
 }
 
-func TestApplyStore_MergesNonMonitored(t *testing.T) {
+func TestApplyStore_MergesStoreOnlyNonMonitored(t *testing.T) {
 	cfg := &Config{}
 	cfg.applyDefaults()
 	cfg.GitHub.NonMonitored = []string{"toml/skip"}
@@ -69,9 +70,81 @@ func TestApplyStore_MergesNonMonitored(t *testing.T) {
 		t.Fatalf("ApplyStore: %v", err)
 	}
 
-	got := cfg.GitHub.NonMonitored
-	if len(got) != 2 || got[0] != "store/a" || got[1] != "store/b" {
-		t.Errorf("NonMonitored = %v, want [store/a store/b]", got)
+	want := []string{"toml/skip", "store/a", "store/b"}
+	if fmt.Sprintf("%v", cfg.GitHub.NonMonitored) != fmt.Sprintf("%v", want) {
+		t.Errorf("NonMonitored = %v, want %v", cfg.GitHub.NonMonitored, want)
+	}
+}
+
+func TestApplyStore_RepoLists_TOMLRepositoriesWinStoreNonMonitored(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+	cfg.GitHub.Repositories = []string{"toml/monitored"}
+
+	rows := map[string]string{
+		"non_monitored": `["toml/monitored","store/disabled"]`,
+	}
+
+	if err := cfg.ApplyStore(rows); err != nil {
+		t.Fatalf("ApplyStore: %v", err)
+	}
+
+	wantRepos := []string{"toml/monitored"}
+	wantNonMonitored := []string{"store/disabled"}
+	if fmt.Sprintf("%v", cfg.GitHub.Repositories) != fmt.Sprintf("%v", wantRepos) {
+		t.Errorf("Repositories = %v, want %v", cfg.GitHub.Repositories, wantRepos)
+	}
+	if fmt.Sprintf("%v", cfg.GitHub.NonMonitored) != fmt.Sprintf("%v", wantNonMonitored) {
+		t.Errorf("NonMonitored = %v, want %v", cfg.GitHub.NonMonitored, wantNonMonitored)
+	}
+}
+
+func TestApplyStore_RepoLists_TOMLNonMonitoredWinsStoreRepositories(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+	cfg.GitHub.NonMonitored = []string{"toml/disabled"}
+
+	rows := map[string]string{
+		"repositories": `["toml/disabled","store/monitored"]`,
+	}
+
+	if err := cfg.ApplyStore(rows); err != nil {
+		t.Fatalf("ApplyStore: %v", err)
+	}
+
+	wantRepos := []string{"store/monitored"}
+	wantNonMonitored := []string{"toml/disabled"}
+	if fmt.Sprintf("%v", cfg.GitHub.Repositories) != fmt.Sprintf("%v", wantRepos) {
+		t.Errorf("Repositories = %v, want %v", cfg.GitHub.Repositories, wantRepos)
+	}
+	if fmt.Sprintf("%v", cfg.GitHub.NonMonitored) != fmt.Sprintf("%v", wantNonMonitored) {
+		t.Errorf("NonMonitored = %v, want %v", cfg.GitHub.NonMonitored, wantNonMonitored)
+	}
+}
+
+func TestApplyStore_RepoLists_EnvRepositoriesIgnoreStoreAdditions(t *testing.T) {
+	t.Setenv("HEIMDALLM_REPOSITORIES", "env/one,env/two")
+
+	cfg := &Config{}
+	cfg.applyDefaults()
+	cfg.applyEnvOverrides()
+
+	rows := map[string]string{
+		"repositories":  `["store/monitored"]`,
+		"non_monitored": `["env/one","store/disabled"]`,
+	}
+
+	if err := cfg.ApplyStore(rows); err != nil {
+		t.Fatalf("ApplyStore: %v", err)
+	}
+
+	wantRepos := []string{"env/one", "env/two"}
+	wantNonMonitored := []string{"store/disabled"}
+	if fmt.Sprintf("%v", cfg.GitHub.Repositories) != fmt.Sprintf("%v", wantRepos) {
+		t.Errorf("Repositories = %v, want %v", cfg.GitHub.Repositories, wantRepos)
+	}
+	if fmt.Sprintf("%v", cfg.GitHub.NonMonitored) != fmt.Sprintf("%v", wantNonMonitored) {
+		t.Errorf("NonMonitored = %v, want %v", cfg.GitHub.NonMonitored, wantNonMonitored)
 	}
 }
 
@@ -233,8 +306,8 @@ func TestApplyStore_PartialFailure_LeavesCfgUnchanged(t *testing.T) {
 	cfg.AI.Primary = "claude"
 
 	rows := map[string]string{
-		"poll_interval": "30m",             // valid — would apply on its own
-		"repositories":  "not valid json",  // bad — should poison the whole batch
+		"poll_interval": "30m",            // valid — would apply on its own
+		"repositories":  "not valid json", // bad — should poison the whole batch
 	}
 
 	err := cfg.ApplyStore(rows)
