@@ -83,7 +83,7 @@ type Tier2PRPublisher interface {
 
 // Tier2Store checks if a PR has already been reviewed recently.
 type Tier2Store interface {
-	PRAlreadyReviewed(githubID int64, updatedAt time.Time) bool
+	PRAlreadyReviewed(githubID int64, repo string, number int, updatedAt time.Time) bool
 }
 
 // ── Tier 3 / Watch types (formerly in tier3.go + queue.go) ──────────────

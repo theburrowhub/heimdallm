@@ -1813,7 +1813,7 @@ func runTier2(
 				if _, ok := monitoredSet[pr.Repo]; !ok {
 					continue
 				}
-				if adapter.PRAlreadyReviewed(pr.ID, pr.UpdatedAt) {
+				if adapter.PRAlreadyReviewed(pr.ID, pr.Repo, pr.Number, pr.UpdatedAt) {
 					continue
 				}
 				if err := prPublisher.PublishPRReview(ctx, pr.Repo, pr.Number, pr.ID, pr.HeadSHA); err != nil {
@@ -1908,17 +1908,17 @@ func upsertDiscoveredRepos(c *config.Config, prs []*gh.PullRequest) []string {
 // ── tier2Adapter bridges main.go's concrete types to Pipeline interfaces ──
 
 type tier2Adapter struct {
-	ghClient  *gh.Client
-	ghToken   string
-	pipeline  *pipeline.Pipeline
-	issuePipe *issuepipeline.Pipeline
-	fetcher   *issuepipeline.Fetcher
-	store     *store.Store
-	broker    *sse.Broker
-	cfgMu     *sync.Mutex
-	cfg       **config.Config
-	loginMu   *sync.Mutex
-	login     *string
+	ghClient   *gh.Client
+	ghToken    string
+	pipeline   *pipeline.Pipeline
+	issuePipe  *issuepipeline.Pipeline
+	fetcher    *issuepipeline.Fetcher
+	store      *store.Store
+	broker     *sse.Broker
+	cfgMu      *sync.Mutex
+	cfg        **config.Config
+	loginMu    *sync.Mutex
+	login      *string
 	runReview  func(pr *gh.PullRequest, aiCfg config.RepoAI) *store.Review
 	publishPub *bus.PRPublishPublisher
 	watchStore *bus.WatchStore
@@ -2360,8 +2360,15 @@ func (a *tier2Adapter) PromoteReady(ctx context.Context, repos []string) (int, e
 }
 
 // PRAlreadyReviewed implements scheduler.Tier2Store.
-func (a *tier2Adapter) PRAlreadyReviewed(githubID int64, updatedAt time.Time) bool {
+func (a *tier2Adapter) PRAlreadyReviewed(githubID int64, repo string, number int, updatedAt time.Time) bool {
 	existing, _ := a.store.GetPRByGithubID(githubID)
+	if existing == nil && repo != "" && number > 0 {
+		existing, _ = a.store.GetPRByRepoNumber(repo, number)
+		if existing != nil {
+			slog.Debug("pr dedup: matched stored PR by repo/number after github_id miss",
+				"repo", repo, "pr", number, "incoming_github_id", githubID, "stored_github_id", existing.GithubID)
+		}
+	}
 	if existing == nil {
 		return false
 	}
@@ -2511,7 +2518,7 @@ func (a *tier2Adapter) HandleChange(ctx context.Context, item *scheduler.WatchIt
 		// LastSeen has already been overwritten by ResetBackoff on earlier
 		// ticks and is no longer a faithful representation of the PR's
 		// current updated_at.
-		if a.PRAlreadyReviewed(item.GithubID, snap.UpdatedAt) {
+		if a.PRAlreadyReviewed(item.GithubID, item.Repo, item.Number, snap.UpdatedAt) {
 			slog.Debug("tier3: PR already reviewed, skipping", "pr", item.Number, "repo", item.Repo)
 			return nil
 		}

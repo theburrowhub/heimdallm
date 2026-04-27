@@ -27,8 +27,11 @@ func NewTestAdapter(s *store.Store) *testAdapter {
 // cmd/heimdallm/main.go. Keep the two in sync — the external reloop tests
 // exercise this copy, but production traffic flows through the main.go
 // version. See theburrowhub/heimdallm#243.
-func (a *testAdapter) PRAlreadyReviewed(githubID int64, updatedAt time.Time) bool {
+func (a *testAdapter) PRAlreadyReviewed(githubID int64, repo string, number int, updatedAt time.Time) bool {
 	existing, _ := a.store.GetPRByGithubID(githubID)
+	if existing == nil && repo != "" && number > 0 {
+		existing, _ = a.store.GetPRByRepoNumber(repo, number)
+	}
 	if existing == nil {
 		return false
 	}

@@ -196,6 +196,9 @@ func Open(dsn string) (*Store, error) {
 	// JOIN drives from prs.repo with no index and table-scans on every
 	// poll-cycle breaker check.
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_prs_repo ON prs(repo)")
+	// Hot path for PR identity fallback when GitHub's Search Issues API and
+	// Pulls API disagree on github_id for the same repo/number (#351).
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_prs_repo_number ON prs(repo, number)")
 	// Mirrors of the above for the issue-side circuit breaker added in
 	// theburrowhub/heimdallm#292. Without these, CountIssueReviewsForIssue
 	// and CountIssueTriagesForRepo table-scan issue_reviews on every

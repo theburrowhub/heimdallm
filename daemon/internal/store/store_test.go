@@ -48,6 +48,43 @@ func TestPR_UpsertAndGet(t *testing.T) {
 	}
 }
 
+func TestPR_GetByRepoNumberPrefersReviewedRow(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	reviewedID, err := s.UpsertPR(&store.PR{
+		GithubID: 101, Repo: "org/repo", Number: 42, Title: "reviewed",
+		Author: "alice", URL: "https://github.com/org/repo/pull/42",
+		State: "open", UpdatedAt: now.Add(-2 * time.Minute), FetchedAt: now.Add(-2 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("upsert reviewed pr: %v", err)
+	}
+	if _, err := s.InsertReview(&store.Review{
+		PRID: reviewedID, CLIUsed: "claude", Summary: "ok",
+		Issues: "[]", Suggestions: "[]", Severity: "low",
+		CreatedAt: now.Add(-time.Minute), PublishedAt: now.Add(-time.Minute),
+		HeadSHA: "abc",
+	}); err != nil {
+		t.Fatalf("insert review: %v", err)
+	}
+	if _, err := s.UpsertPR(&store.PR{
+		GithubID: 202, Repo: "org/repo", Number: 42, Title: "unreviewed duplicate",
+		Author: "alice", URL: "https://github.com/org/repo/pull/42",
+		State: "open", UpdatedAt: now, FetchedAt: now,
+	}); err != nil {
+		t.Fatalf("upsert duplicate pr: %v", err)
+	}
+
+	got, err := s.GetPRByRepoNumber("org/repo", 42)
+	if err != nil {
+		t.Fatalf("get by repo number: %v", err)
+	}
+	if got.ID != reviewedID {
+		t.Errorf("GetPRByRepoNumber picked row %d, want reviewed row %d", got.ID, reviewedID)
+	}
+}
+
 func TestReview_InsertAndList(t *testing.T) {
 	s := newTestStore(t)
 	pr := &store.PR{GithubID: 1, Repo: "org/r", Number: 1, Title: "t", Author: "a", URL: "u", State: "open", UpdatedAt: time.Now(), FetchedAt: time.Now()}
