@@ -68,6 +68,27 @@ func (s *Store) GetPRByGithubID(githubID int64) (*PR, error) {
 	return scanPR(row)
 }
 
+// GetPRByRepoNumber retrieves a PR by its stable repository-local identity.
+// GitHub's Search Issues API and Pulls API can return different global IDs for
+// the same PR, so scheduler-side dedup needs this fallback after github_id
+// misses. If duplicate rows exist from an older bug, prefer the row that
+// already has review history so we dedup against the real prior work.
+func (s *Store) GetPRByRepoNumber(repo string, number int) (*PR, error) {
+	row := s.db.QueryRow(`
+		SELECT p.id, p.github_id, p.repo, p.number, p.title, p.author, p.url,
+		       p.state, p.updated_at, p.fetched_at, p.dismissed
+		FROM prs p
+		WHERE p.repo = ? AND p.number = ?
+		ORDER BY (
+			SELECT COALESCE(MAX(r.created_at), '')
+			FROM reviews r
+			WHERE r.pr_id = p.id
+		) DESC, p.fetched_at DESC, p.id DESC
+		LIMIT 1
+	`, repo, number)
+	return scanPR(row)
+}
+
 // ListPRs returns all non-dismissed PRs ordered by updated_at descending.
 // An optional list of states (e.g. "open", "closed") filters the result;
 // when no states are provided all non-dismissed PRs are returned.

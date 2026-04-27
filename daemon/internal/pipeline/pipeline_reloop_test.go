@@ -199,7 +199,7 @@ func TestRun_LegacyRowWithEmptyHeadSHAIsBackfilledAndSkipped(t *testing.T) {
 // PRAlreadyReviewed for the test. Mirrors the real adapter in main.go but
 // without the Flutter/scheduler/config deps we don't need here.
 func newTestAdapter(s *store.Store) interface {
-	PRAlreadyReviewed(githubID int64, updatedAt time.Time) bool
+	PRAlreadyReviewed(githubID int64, repo string, number int, updatedAt time.Time) bool
 } {
 	return pipeline.NewTestAdapter(s)
 }
@@ -233,7 +233,7 @@ func TestPRAlreadyReviewed_SlowReviewDoesNotReloop(t *testing.T) {
 	// the 2-minute grace. Should be treated as "already reviewed".
 	updatedAt := publishedAt.Add(15 * time.Second)
 	adapter := newTestAdapter(s)
-	if !adapter.PRAlreadyReviewed(99, updatedAt) {
+	if !adapter.PRAlreadyReviewed(99, "org/r", 99, updatedAt) {
 		t.Errorf("slow review (3 min) must not re-loop when updated_at is within 2m grace of PublishedAt")
 	}
 }
@@ -261,8 +261,51 @@ func TestPRAlreadyReviewed_FallsBackToCreatedAtWhenPublishedAtZero(t *testing.T)
 
 	updatedAt := createdAt.Add(10 * time.Second)
 	adapter := newTestAdapter(s)
-	if !adapter.PRAlreadyReviewed(100, updatedAt) {
+	if !adapter.PRAlreadyReviewed(100, "org/r", 100, updatedAt) {
 		t.Errorf("legacy row (PublishedAt zero) must fall back to CreatedAt and still dedup")
+	}
+}
+
+// TestPRAlreadyReviewed_FallsBackToRepoNumberWhenGithubIDDiffers covers the
+// Search Issues API vs Pulls API id mismatch from theburrowhub/heimdallm#351.
+// The stored row came from the Pulls API after a successful review, while the
+// next Tier 2 poll checks the Search API id before deciding whether to publish
+// another review job. The stable repo/number identity must bridge that gap.
+func TestPRAlreadyReviewed_FallsBackToRepoNumberWhenGithubIDDiffers(t *testing.T) {
+	s := newMemStore(t)
+	const pullsAPIID int64 = 3578062677
+	const searchAPIID int64 = 4321703389
+
+	publishedAt := time.Now().UTC().Add(-30 * time.Second)
+	prRow := &store.PR{
+		GithubID:  pullsAPIID,
+		Repo:      "org/r",
+		Number:    337,
+		Title:     "t",
+		State:     "open",
+		UpdatedAt: publishedAt.Add(-time.Minute),
+	}
+	prID, err := s.UpsertPR(prRow)
+	if err != nil {
+		t.Fatalf("upsert pr: %v", err)
+	}
+	if _, err := s.InsertReview(&store.Review{
+		PRID:        prID,
+		CLIUsed:     "claude",
+		Issues:      "[]",
+		Suggestions: "[]",
+		Severity:    "low",
+		CreatedAt:   publishedAt.Add(-2 * time.Minute),
+		PublishedAt: publishedAt,
+		HeadSHA:     "abc",
+	}); err != nil {
+		t.Fatalf("insert review: %v", err)
+	}
+
+	updatedAt := publishedAt.Add(15 * time.Second)
+	adapter := newTestAdapter(s)
+	if !adapter.PRAlreadyReviewed(searchAPIID, "org/r", 337, updatedAt) {
+		t.Errorf("Search API github_id miss must dedup via repo/number fallback")
 	}
 }
 
@@ -306,7 +349,7 @@ func TestRun_TwoInstancesSharingStoreDoNotDoubleReview(t *testing.T) {
 
 	// B is a fresh adapter instance on the same store.
 	adapterB := pipeline.NewTestAdapter(s)
-	if !adapterB.PRAlreadyReviewed(1234, updatedAt) {
+	if !adapterB.PRAlreadyReviewed(1234, "org/r", 1234, updatedAt) {
 		t.Errorf("Instance B must dedup against Instance A's PublishedAt in the shared store")
 	}
 }
@@ -333,7 +376,7 @@ func TestPRAlreadyReviewed_AllowsReviewAfterGraceWindow(t *testing.T) {
 
 	updatedAt := time.Now()
 	adapter := newTestAdapter(s)
-	if adapter.PRAlreadyReviewed(101, updatedAt) {
+	if adapter.PRAlreadyReviewed(101, "org/r", 101, updatedAt) {
 		t.Errorf("activity 5 min after publish must be treated as new change (grace only 2m)")
 	}
 }
