@@ -560,9 +560,6 @@ func main() {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					if err := limiter.Acquire(ctx, scheduler.TierDiscovery); err != nil {
-						return
-					}
 					sendDiscoveryRepos(ctx, discoverySvc, limiter, repoPublisher, tier1ConfigFn)
 				}
 			}
@@ -585,7 +582,11 @@ func main() {
 			tier2ConfigFn := func() []string {
 				cfgMu.Lock()
 				defer cfgMu.Unlock()
-				return discovery.MergeRepos(cfg.GitHub.Repositories, discoverySvc.Discovered(), cfg.GitHub.NonMonitored)
+				var discovered []string
+				if cfg.GitHub.DiscoveryTopic != "" {
+					discovered = discoverySvc.Discovered()
+				}
+				return discovery.MergeRepos(cfg.GitHub.Repositories, discovered, cfg.GitHub.NonMonitored)
 			}
 			runTier2(ctx, adapter, limiter, prReviewPublisher, tier2ConfigFn, reposChan, pollInterval, coldStart)
 		}()
@@ -1699,36 +1700,21 @@ func sendDiscoveryRepos(
 	configFn func() scheduler.Tier1Config,
 ) {
 	cfg := configFn()
-	discovered := disc.Discovered()
-
-	// Merge static + discovered, exclude non-monitored
-	nonMon := make(map[string]struct{}, len(cfg.NonMonitored))
-	for _, r := range cfg.NonMonitored {
-		nonMon[r] = struct{}{}
-	}
-	seen := make(map[string]struct{})
-	var repos []string
-	for _, r := range cfg.StaticRepos {
-		if _, skip := nonMon[r]; skip {
-			continue
+	var discovered []string
+	if cfg.DiscoveryTopic != "" {
+		if limiter != nil {
+			if err := limiter.Acquire(ctx, scheduler.TierDiscovery); err != nil {
+				slog.Warn("tier1: acquire discovery rate-limit token failed", "err", err)
+				return
+			}
 		}
-		if _, dup := seen[r]; dup {
-			continue
+		if err := disc.Refresh(cfg.DiscoveryTopic, cfg.DiscoveryOrgs); err != nil {
+			slog.Warn("tier1: discovery refresh failed, using cached discovered repos", "err", err)
 		}
-		seen[r] = struct{}{}
-		repos = append(repos, r)
-	}
-	for _, r := range discovered {
-		if _, skip := nonMon[r]; skip {
-			continue
-		}
-		if _, dup := seen[r]; dup {
-			continue
-		}
-		seen[r] = struct{}{}
-		repos = append(repos, r)
+		discovered = disc.Discovered()
 	}
 
+	repos := discovery.MergeRepos(cfg.StaticRepos, discovered, cfg.NonMonitored)
 	slog.Info("tier1: discovery complete", "repos", len(repos))
 	if err := pub.PublishRepos(ctx, repos); err != nil {
 		slog.Error("tier1: publish repos failed", "err", err)

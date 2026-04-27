@@ -10,6 +10,7 @@ import (
 // Tier1Discovery is the interface the discovery tier needs.
 type Tier1Discovery interface {
 	Discovered() []string
+	Refresh(topic string, orgs []string) error
 }
 
 // Tier1Publisher publishes the discovered repo list.
