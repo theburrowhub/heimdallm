@@ -148,6 +148,71 @@ func TestHandlerPutConfig(t *testing.T) {
 	}
 }
 
+func TestHandlerShutdown(t *testing.T) {
+	srv, _ := setupServer(t)
+	shutdown := make(chan struct{}, 1)
+	srv.SetShutdownFn(func() {
+		shutdown <- struct{}{}
+	})
+
+	req := httptest.NewRequest("POST", "/shutdown", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("shutdown: status %d, body: %s", w.Code, w.Body.String())
+	}
+	var body map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body["status"] != "shutdown queued" {
+		t.Fatalf("status = %q, want shutdown queued", body["status"])
+	}
+	select {
+	case <-shutdown:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown callback was not called")
+	}
+}
+
+func TestHandlerShutdownNotConfigured(t *testing.T) {
+	srv, _ := setupServer(t)
+	req := httptest.NewRequest("POST", "/shutdown", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", w.Code)
+	}
+}
+
+func TestHandlerShutdownRequiresAuthWhenTokenSet(t *testing.T) {
+	srv := setupServerWithToken(t, "secret-token")
+	shutdown := make(chan struct{}, 1)
+	srv.SetShutdownFn(func() {
+		shutdown <- struct{}{}
+	})
+
+	req := httptest.NewRequest("POST", "/shutdown", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("POST /shutdown without token: status = %d, want 401", w.Code)
+	}
+
+	req = httptest.NewRequest("POST", "/shutdown", nil)
+	req.Header.Set("X-Heimdallm-Token", "secret-token")
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("POST /shutdown with token: status = %d, want 202", w.Code)
+	}
+	select {
+	case <-shutdown:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown callback was not called")
+	}
+}
+
 func itoa(n int64) string {
 	return fmt.Sprintf("%d", n)
 }
@@ -928,9 +993,9 @@ func TestHandleActivity_RequiresAuth(t *testing.T) {
 func TestHandleActivity_FilterByRepoAndAction(t *testing.T) {
 	srv, s := setupServer(t)
 	now := time.Now()
-	_, _ = s.InsertActivity(now, "acme",   "acme/api", "pr",    1, "t", "review", "minor", nil)
-	_, _ = s.InsertActivity(now, "acme",   "acme/api", "issue", 2, "t", "triage", "major", nil)
-	_, _ = s.InsertActivity(now, "globex", "globex/w", "pr",    3, "t", "review", "minor", nil)
+	_, _ = s.InsertActivity(now, "acme", "acme/api", "pr", 1, "t", "review", "minor", nil)
+	_, _ = s.InsertActivity(now, "acme", "acme/api", "issue", 2, "t", "triage", "major", nil)
+	_, _ = s.InsertActivity(now, "globex", "globex/w", "pr", 3, "t", "review", "minor", nil)
 
 	req := httptest.NewRequest("GET", "/activity?repo=acme/api&action=review", nil)
 	w := httptest.NewRecorder()

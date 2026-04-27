@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -273,6 +274,7 @@ func main() {
 	srv := server.New(s, broker, p, apiToken)
 	srv.SetNATSConn(eventBus.Conn())
 	srv.SetConfigPath(cfgPath)
+	shutdownReq := make(chan struct{}, 1)
 
 	// cfgMu protects cfg and the pipeline so reload is safe from any goroutine.
 	var cfgMu sync.Mutex
@@ -1206,6 +1208,13 @@ func main() {
 		return login, err
 	})
 
+	srv.SetShutdownFn(func() {
+		select {
+		case shutdownReq <- struct{}{}:
+		default:
+		}
+	})
+
 	// Wire the reload callback: re-read config from disk, restart the
 	// pipeline so changes to discovery_topic / orgs / intervals take effect
 	// without a daemon restart. Reuses the `loadConfig` closure captured at
@@ -1521,18 +1530,24 @@ func main() {
 
 	go func() {
 		slog.Info("daemon started", "port", cfg.Server.Port, "bind", cfg.Server.BindAddr)
-		if err := srv.Start(cfg.Server.Port, cfg.Server.BindAddr); err != nil {
+		if err := srv.Start(cfg.Server.Port, cfg.Server.BindAddr); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("server stopped", "err", err)
 		}
 	}()
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	<-sig
-	slog.Info("shutting down")
+	select {
+	case received := <-sig:
+		slog.Info("shutting down", "signal", received.String())
+	case <-shutdownReq:
+		slog.Info("shutting down via API")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	srv.Shutdown(ctx)
+	if err := srv.Shutdown(ctx); err != nil {
+		slog.Warn("server shutdown failed", "err", err)
+	}
 	broker.Stop()
 }
 

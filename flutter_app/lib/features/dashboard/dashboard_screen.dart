@@ -13,6 +13,7 @@ import '../activity/activity_providers.dart';
 import '../agents/agents_screen.dart';
 import '../circuit_breaker/circuit_breaker_banner.dart';
 import '../cli_agents/cli_agents_screen.dart';
+import '../config/config_providers.dart';
 import '../issues/issues_providers.dart';
 import '../repositories/repos_screen.dart';
 import '../stats/stats_screen.dart';
@@ -26,12 +27,20 @@ class DashboardScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final cbMessage = ref.watch(circuitBreakerProvider);
+    final daemonRunning = ref.watch(daemonHealthProvider).valueOrNull ?? false;
     return DefaultTabController(
       length: 6,
       child: Scaffold(
         appBar: AppBar(
           title: const Text('Heimdallm'),
           actions: [
+            IconButton(
+              icon: const Icon(Icons.power_settings_new),
+              tooltip: daemonRunning ? 'Stop Server' : 'Server offline',
+              onPressed: daemonRunning
+                  ? () => _confirmShutdown(context, ref)
+                  : null,
+            ),
             IconButton(
               icon: const Icon(Icons.article_outlined),
               tooltip: 'Daemon logs',
@@ -88,6 +97,69 @@ class DashboardScreen extends ConsumerWidget {
       ),
     );
   }
+}
+
+Future<void> _confirmShutdown(BuildContext context, WidgetRef ref) async {
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('Stop Server?'),
+      content: const Text('Active reviews may be interrupted.'),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(true),
+          child: const Text('Stop Server'),
+        ),
+      ],
+    ),
+  );
+  if (confirmed != true || !context.mounted) return;
+
+  try {
+    await ref.read(apiClientProvider).shutdownDaemon();
+    if (!context.mounted) return;
+    showToast(context, 'Shutdown requested');
+    ref.invalidate(sseStreamProvider);
+    ref.invalidate(daemonHealthProvider);
+    await _refreshWhenDaemonStops(context, ref);
+  } catch (e) {
+    if (context.mounted) showToast(context, 'Error: $e', isError: true);
+  }
+}
+
+Future<void> _refreshWhenDaemonStops(
+  BuildContext context,
+  WidgetRef ref,
+) async {
+  final api = ref.read(apiClientProvider);
+  const delays = [
+    Duration(milliseconds: 200),
+    Duration(milliseconds: 300),
+    Duration(milliseconds: 500),
+    Duration(milliseconds: 800),
+    Duration(milliseconds: 1200),
+    Duration(seconds: 2),
+  ];
+
+  for (final delay in delays) {
+    await Future<void>.delayed(delay);
+    if (!context.mounted) return;
+    final healthy = await api.checkHealth();
+    if (!context.mounted) return;
+    ref.invalidate(daemonHealthProvider);
+    if (!healthy) break;
+  }
+
+  if (!context.mounted) return;
+  ref.invalidate(prsProvider);
+  ref.invalidate(issuesProvider);
+  ref.invalidate(statsProvider);
+  ref.invalidate(activityEntriesProvider);
+  ref.invalidate(activityOptionsProvider);
 }
 
 // ── Reviews tab ──────────────────────────────────────────────────────────────

@@ -45,12 +45,15 @@ type Dashboard struct {
 	logOffset int
 	logSeeded bool
 
-	err        error
-	connected  bool
-	refreshing bool
-	startTime  time.Time
-	lastUpdate time.Time
-	version    string
+	err              error
+	connected        bool
+	refreshing       bool
+	confirmShutdown  bool
+	shutdownInFlight bool
+	shutdownMessage  string
+	startTime        time.Time
+	lastUpdate       time.Time
+	version          string
 
 	sseEvents chan api.SSEEvent
 	sseCtx    context.Context
@@ -80,6 +83,7 @@ type dataMsg struct {
 type sseMsg api.SSEEvent
 type sseDisconnectMsg struct{ err error }
 type sseReconnectMsg struct{}
+type shutdownMsg struct{ err error }
 
 func NewDashboard(host, token, version string) *Dashboard {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -169,6 +173,12 @@ func (d *Dashboard) listenSSE() tea.Cmd {
 		case <-d.sseCtx.Done():
 			return nil
 		}
+	}
+}
+
+func (d *Dashboard) shutdownDaemon() tea.Cmd {
+	return func() tea.Msg {
+		return shutdownMsg{err: d.client.Shutdown()}
 	}
 }
 
@@ -293,6 +303,23 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sseReconnectMsg:
 		return d, d.connectSSE
+
+	case shutdownMsg:
+		d.shutdownInFlight = false
+		d.confirmShutdown = false
+		if msg.err != nil {
+			d.err = msg.err
+			d.connected = false
+			d.shutdownMessage = fmt.Sprintf("Shutdown failed: %v", msg.err)
+			return d, nil
+		}
+		d.connected = false
+		d.err = fmt.Errorf("daemon shutdown requested")
+		d.shutdownMessage = "Shutdown requested"
+		if d.sseCancel != nil {
+			d.sseCancel()
+		}
+		return d, nil
 	}
 
 	return d, nil
@@ -301,6 +328,25 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (d *Dashboard) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if d.showDetail {
 		return d.handleDetailKey(msg)
+	}
+	if d.confirmShutdown {
+		switch msg.String() {
+		case "y", "Y":
+			d.shutdownInFlight = true
+			d.shutdownMessage = "Requesting shutdown..."
+			return d, d.shutdownDaemon()
+		case "n", "N", "esc":
+			d.confirmShutdown = false
+			d.shutdownMessage = ""
+			return d, nil
+		case "q", "ctrl+c":
+			if d.sseCancel != nil {
+				d.sseCancel()
+			}
+			return d, tea.Quit
+		default:
+			return d, nil
+		}
 	}
 	switch msg.String() {
 	case "q", "ctrl+c":
@@ -383,6 +429,11 @@ func (d *Dashboard) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		d.refreshing = true
 		return d, d.fetchData
+	case "s", "S":
+		if !d.shutdownInFlight {
+			d.confirmShutdown = true
+			d.shutdownMessage = "Stop daemon? y/n"
+		}
 	case "1":
 		d.activeTab = tabActivity
 		d.cursor = 0
@@ -536,6 +587,9 @@ func (d *Dashboard) View() string {
 }
 
 func (d *Dashboard) renderStatus() string {
+	if d.shutdownInFlight {
+		return lipgloss.NewStyle().Foreground(colorWarning).Bold(true).Render("● stopping...")
+	}
 	if d.refreshing {
 		return lipgloss.NewStyle().Foreground(colorWarning).Bold(true).Render("● refreshing...")
 	}
@@ -588,6 +642,11 @@ func (d *Dashboard) renderStatusBar() string {
 	}
 	if d.version != "" {
 		parts = append(parts, "v"+d.version)
+	}
+	if d.confirmShutdown {
+		parts = append(parts, "Confirm stop: y/n")
+	} else if d.shutdownMessage != "" {
+		parts = append(parts, truncateRunes(d.shutdownMessage, 80))
 	}
 
 	return headerStyle.Render(strings.Join(parts, "  │  "))
@@ -877,13 +936,19 @@ func (d *Dashboard) buildStatsLines() []string {
 }
 
 func (d *Dashboard) renderHelp() string {
+	if d.confirmShutdown {
+		return helpStyle.Render("Stop daemon and disconnect clients?  [y]es  [n/esc]cancel")
+	}
+	if d.shutdownInFlight {
+		return helpStyle.Render("Stopping daemon...")
+	}
 	if d.showDetail {
 		return helpStyle.Render("[esc]close  [j/k]scroll  [pgup/pgdn]page  [q]uit")
 	}
 	if d.activeTab == tabPRs || d.activeTab == tabIssues {
-		return helpStyle.Render("[q]uit  [r]efresh  [enter]detail  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-6]jump")
+		return helpStyle.Render("[q]uit  [r]efresh  [s]top  [enter]detail  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-6]jump")
 	}
-	return helpStyle.Render("[q]uit  [r]efresh  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-6]jump  [G]follow")
+	return helpStyle.Render("[q]uit  [r]efresh  [s]top  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-6]jump  [G]follow")
 }
 
 func (d *Dashboard) contentHeight() int {

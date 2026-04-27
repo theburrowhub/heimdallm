@@ -120,6 +120,14 @@ class ApiClient {
     }
   }
 
+  Future<void> shutdownDaemon() async {
+    final resp = await _client.post(_uri('/shutdown'),
+        headers: await _authHeaders());
+    if (resp.statusCode != 202) {
+      throw ApiException('POST /shutdown failed: ${resp.statusCode}');
+    }
+  }
+
   Future<Map<String, dynamic>> fetchConfig() async {
     final resp = await _client.get(_uri('/config'),
         headers: await _authHeaders());

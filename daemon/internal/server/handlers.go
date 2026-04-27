@@ -30,13 +30,14 @@ import (
 
 // Server holds the HTTP router, SSE broker, store, and optional pipeline.
 type Server struct {
-	store           *store.Store
-	broker          *sse.Broker
-	natsConn        *nats.Conn // when set, handleSSE reads from NATS instead of broker
-	pipeline        *pipeline.Pipeline
-	router          chi.Router
-	httpServer      *http.Server
-	reloadFn        func() error
+	store                *store.Store
+	broker               *sse.Broker
+	natsConn             *nats.Conn // when set, handleSSE reads from NATS instead of broker
+	pipeline             *pipeline.Pipeline
+	router               chi.Router
+	httpServer           *http.Server
+	reloadFn             func() error
+	shutdownFn           func()
 	triggerReviewFn      func(prID int64) error
 	triggerIssueReviewFn func(issueID int64) error
 	triggerPromoteFn     func(issueID int64) error
@@ -106,7 +107,7 @@ var sensitiveGETPaths = []string{
 	"/agents",
 	"/events",
 	"/logs/stream",
-	"/me",    // exposes GitHub username
+	"/me",     // exposes GitHub username
 	"/prs",    // exposes PR titles, repos, authors
 	"/stats",  // exposes review activity metadata
 	"/issues", // covers /issues and /issues/{id}
@@ -148,6 +149,9 @@ func (srv *Server) authMiddleware(next http.Handler) http.Handler {
 
 // SetReloadFn wires the config-reload callback called by POST /reload.
 func (srv *Server) SetReloadFn(fn func() error) { srv.reloadFn = fn }
+
+// SetShutdownFn wires the daemon shutdown callback called by POST /shutdown.
+func (srv *Server) SetShutdownFn(fn func()) { srv.shutdownFn = fn }
 
 // SetTriggerReviewFn wires the review-trigger callback called by POST /prs/{id}/review.
 func (srv *Server) SetTriggerReviewFn(fn func(prID int64) error) { srv.triggerReviewFn = fn }
@@ -266,6 +270,7 @@ func (srv *Server) buildRouter() chi.Router {
 	r.Patch("/config/repos/{repo}", srv.handlePatchRepoConfig)
 	r.Delete("/config/repos/{repo}/*", srv.handleDeleteRepoField)
 	r.Post("/reload", srv.handleReload)
+	r.Post("/shutdown", srv.handleShutdown)
 	r.Get("/events", srv.handleSSE)
 	r.Get("/logs/stream", srv.handleLogsStream)
 	return r
@@ -686,6 +691,19 @@ func (srv *Server) handleReload(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "reloaded"})
 }
 
+func (srv *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
+	if srv.shutdownFn == nil {
+		http.Error(w, `{"error":"shutdown not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+	slog.Info("shutdown requested via API")
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "shutdown queued"})
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	go srv.shutdownFn()
+}
+
 func (srv *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -885,7 +903,7 @@ func toIssueResponse(iss *store.Issue, rev *store.IssueReview) issueResponse {
 func toIssueReviewResponse(r *store.IssueReview) *issueReviewResponse {
 	return &issueReviewResponse{
 		ID: r.ID, IssueID: r.IssueID, CLIUsed: r.CLIUsed,
-		Summary: r.Summary,
+		Summary:     r.Summary,
 		Triage:      json.RawMessage(r.Triage),
 		Suggestions: json.RawMessage(r.Suggestions),
 		ActionTaken: r.ActionTaken, PRCreated: r.PRCreated,
