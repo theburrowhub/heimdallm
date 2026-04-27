@@ -243,8 +243,8 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				for _, e := range msg.activity.Entries {
 					d.activity = append(d.activity, activityLine{
 						Time:     formatActivityTime(e.TS),
-						Event:    e.Action,
-						Info:     formatActivityInfo(e.Repo, e.ItemType, e.ItemNumber),
+						Event:    humanizeEvent(e.Action),
+						Info:     formatActivityInfo(e.Repo, e.ItemType, e.ItemNumber, e.ItemTitle),
 						ItemType: e.ItemType,
 					})
 				}
@@ -264,7 +264,7 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		itemType, info := formatSSEData(msg.Data)
 		line := activityLine{
 			Time:     time.Now().Format("15:04"),
-			Event:    msg.Type,
+			Event:    humanizeEvent(msg.Type),
 			Info:     info,
 			ItemType: itemType,
 		}
@@ -1014,6 +1014,11 @@ func formatSSEData(data string) (itemType string, info string) {
 			parts = append(parts, fmt.Sprintf("Issue #%d", n))
 		}
 	}
+	if title, ok := m["pr_title"].(string); ok && title != "" {
+		parts = append(parts, "— "+title)
+	} else if title, ok := m["issue_title"].(string); ok && title != "" {
+		parts = append(parts, "— "+title)
+	}
 	if sev, ok := m["severity"]; ok {
 		parts = append(parts, fmt.Sprintf("[%v]", sev))
 	}
@@ -1024,18 +1029,23 @@ func formatSSEData(data string) (itemType string, info string) {
 	return itemType, data
 }
 
-func formatActivityInfo(repo, itemType string, itemNumber int) string {
+func formatActivityInfo(repo, itemType string, itemNumber int, itemTitle string) string {
 	if itemNumber == 0 {
 		return repo
 	}
+	var info string
 	switch itemType {
 	case "pr":
-		return fmt.Sprintf("%s PR #%d", repo, itemNumber)
+		info = fmt.Sprintf("%s PR #%d", repo, itemNumber)
 	case "issue":
-		return fmt.Sprintf("%s Issue #%d", repo, itemNumber)
+		info = fmt.Sprintf("%s Issue #%d", repo, itemNumber)
 	default:
-		return fmt.Sprintf("%s #%d", repo, itemNumber)
+		info = fmt.Sprintf("%s #%d", repo, itemNumber)
 	}
+	if itemTitle != "" {
+		info += " — " + itemTitle
+	}
+	return info
 }
 
 func activityBadge(itemType string) string {
@@ -1085,6 +1095,37 @@ func extractSeverity(triage json.RawMessage) string {
 		return fmt.Sprintf("%v", sev)
 	}
 	return "---"
+}
+
+var eventLabels = map[string]string{
+	"review":                  "Review",
+	"triage":                  "Triage",
+	"implement":               "Implement",
+	"error":                   "Error",
+	"promote":                 "Promote",
+	"review_skipped":          "Review skipped",
+	"review_completed":        "Review completed",
+	"review_started":          "Review started",
+	"review_error":            "Review error",
+	"pr_detected":             "PR detected",
+	"issue_detected":          "Issue detected",
+	"issue_review_started":    "Issue review started",
+	"issue_review_completed":  "Issue review completed",
+	"issue_implemented":       "Issue implemented",
+	"issue_review_error":      "Issue review error",
+	"issue_promoted":          "Issue promoted",
+	"repo_discovered":         "Repo discovered",
+}
+
+func humanizeEvent(s string) string {
+	if label, ok := eventLabels[s]; ok {
+		return label
+	}
+	s = strings.ReplaceAll(s, "_", " ")
+	if len(s) > 0 {
+		return strings.ToUpper(s[:1]) + s[1:]
+	}
+	return s
 }
 
 // truncateRunes returns s truncated to at most maxLen runes, appending an
