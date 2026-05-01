@@ -10,8 +10,6 @@ var (
 	colorDanger    = lipgloss.Color("#EF4444")
 	colorMuted     = lipgloss.Color("#6B7280")
 	colorBorder    = lipgloss.Color("#4B5563")
-	colorPR        = lipgloss.Color("#3B82F6")
-	colorIssue     = lipgloss.Color("#F59E0B")
 
 	titleStyle = lipgloss.NewStyle().
 			Bold(true).

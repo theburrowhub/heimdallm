@@ -264,7 +264,7 @@ var (
 
 func (d *Dashboard) renderLogs(height int) string {
 	if len(d.logLines) == 0 {
-		return lipgloss.NewStyle().Foreground(colorMuted).Render("  No log entries yet. Events will appear here in real-time.")
+		return lipgloss.NewStyle().Foreground(colorMuted).Render("  No activity yet. Events will appear here in real-time.")
 	}
 
 	var b strings.Builder
