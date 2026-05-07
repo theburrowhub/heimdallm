@@ -117,9 +117,7 @@ func TestExecuteRawAddsDetectedWorkDirFlags(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read captured cwd: %v", err)
 			}
-			if got := strings.TrimSpace(string(cwdBytes)); got != workDir {
-				t.Fatalf("cwd = %q, want %q", got, workDir)
-			}
+			requireSameDir(t, strings.TrimSpace(string(cwdBytes)), workDir)
 		})
 	}
 }
@@ -151,9 +149,7 @@ func TestExecuteRawFallsBackToCWDWhenWorkDirFlagUnsupported(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read captured cwd: %v", err)
 	}
-	if got := strings.TrimSpace(string(cwdBytes)); got != workDir {
-		t.Fatalf("cwd = %q, want %q", got, workDir)
-	}
+	requireSameDir(t, strings.TrimSpace(string(cwdBytes)), workDir)
 }
 
 func containsInOrder(args []string, first, second string) bool {
@@ -178,6 +174,22 @@ func fakeCLIScript(help, captureArgs, captureCWD string) string {
 
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+}
+
+func requireSameDir(t *testing.T, got, want string) {
+	t.Helper()
+	got = cleanResolvedPath(got)
+	want = cleanResolvedPath(want)
+	if got != want {
+		t.Fatalf("cwd = %q, want %q", got, want)
+	}
+}
+
+func cleanResolvedPath(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	return filepath.Clean(path)
 }
 
 func TestValidateWorkDir(t *testing.T) {
