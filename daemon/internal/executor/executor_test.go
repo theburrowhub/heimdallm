@@ -87,6 +87,11 @@ func TestValidateWorkDir(t *testing.T) {
 	if _, statErr := os.Stat(safeDir); statErr != nil {
 		safeDir = home
 	}
+	osTempDir, err := os.MkdirTemp("", "heimdallm-workdir-*")
+	if err != nil {
+		t.Fatalf("create os temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(osTempDir) })
 
 	tests := []struct {
 		name    string
@@ -101,6 +106,11 @@ func TestValidateWorkDir(t *testing.T) {
 		{
 			name:    "home subdir — allowed",
 			dir:     safeDir,
+			wantErr: false,
+		},
+		{
+			name:    "os temp dir — allowed",
+			dir:     osTempDir,
 			wantErr: false,
 		},
 		{

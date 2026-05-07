@@ -316,6 +316,16 @@ func ValidateWorkDir(dir string) error {
 		return nil
 	}
 
+	// Allow the OS temp directory too. On Linux this is usually /tmp, but on
+	// macOS os.TempDir() commonly resolves under /private/var/folders/...; the
+	// repo-context manager uses that location for managed auto-clones by
+	// default.
+	if tempAbs, err := resolvedAbs(os.TempDir()); err == nil {
+		if abs == tempAbs || strings.HasPrefix(abs, tempAbs+"/") {
+			return nil
+		}
+	}
+
 	// Allow paths under the user's home directory only.
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -330,6 +340,14 @@ func ValidateWorkDir(dir string) error {
 	}
 
 	return nil
+}
+
+func resolvedAbs(path string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Abs(resolved)
 }
 
 // Execute runs the AI CLI with the given prompt and options, returning the

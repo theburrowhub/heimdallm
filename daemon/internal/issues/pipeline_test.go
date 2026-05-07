@@ -559,6 +559,24 @@ func TestPipeline_DevelopFallsBackToReviewOnlyWithoutLocalDir(t *testing.T) {
 	}
 }
 
+func TestPipeline_DevelopRequiresWorkDirWhenConfigured(t *testing.T) {
+	s := &fakeStore{}
+	gh := &fakeGH{}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte(validResult)}
+	p := issues.New(s, gh, exec, nil, &fakeBroker{}, nil)
+
+	_, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), issues.RunOptions{
+		Primary:                  "claude",
+		RequireWorkDirForDevelop: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "requires local repo context") {
+		t.Fatalf("err = %v, want local repo context error", err)
+	}
+	if len(gh.postCalls) != 0 {
+		t.Fatalf("pipeline should not degrade to review_only, got %d comments", len(gh.postCalls))
+	}
+}
+
 // ── auto_implement ───────────────────────────────────────────────────────────
 
 func autoImplementRunOptions() issues.RunOptions {
@@ -1406,9 +1424,9 @@ func TestPipeline_AutoImplementAbortsWhenIssueClosedDuringImplementation(t *test
 
 func TestPipeline_AutoImplementProceedsWhenStateCheckFails(t *testing.T) {
 	gh := &fakeGH{
-		defaultBranch: "main",
+		defaultBranch:  "main",
 		createPRNumber: 55,
-		getIssueErr:   errors.New("API timeout"),
+		getIssueErr:    errors.New("API timeout"),
 	}
 	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("done")}
 	git := &fakeGit{hasChanges: true}

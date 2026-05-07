@@ -41,6 +41,7 @@ type Server struct {
 	triggerReviewFn      func(prID int64) error
 	triggerIssueReviewFn func(issueID int64) error
 	triggerPromoteFn     func(issueID int64) error
+	cleanCloneFn         func(repo string) error
 	meFn                 func() (string, error)
 	// configFn returns the current running config as a JSON-serializable map.
 	configFn func() map[string]any
@@ -168,6 +169,9 @@ func (srv *Server) SetTriggerPromoteFn(fn func(issueID int64) error) {
 	srv.triggerPromoteFn = fn
 }
 
+// SetCleanCloneFn wires the manual managed-clone cleanup callback.
+func (srv *Server) SetCleanCloneFn(fn func(repo string) error) { srv.cleanCloneFn = fn }
+
 // SetMeFn wires the authenticated-user callback called by GET /me.
 func (srv *Server) SetMeFn(fn func() (string, error)) { srv.meFn = fn }
 
@@ -271,6 +275,7 @@ func (srv *Server) buildRouter() chi.Router {
 	r.Delete("/config/repos/{repo}/*", srv.handleDeleteRepoField)
 	r.Patch("/config/orgs/{org}", srv.handlePatchOrgConfig)
 	r.Delete("/config/orgs/{org}/*", srv.handleDeleteOrgField)
+	r.Delete("/config/clones/{repo}", srv.handleDeleteManagedClone)
 	r.Post("/reload", srv.handleReload)
 	r.Post("/shutdown", srv.handleShutdown)
 	r.Get("/events", srv.handleSSE)
@@ -782,6 +787,24 @@ func (srv *Server) handleDeleteOrgField(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (srv *Server) handleDeleteManagedClone(w http.ResponseWriter, r *http.Request) {
+	if srv.cleanCloneFn == nil {
+		http.Error(w, `{"error":"clone cleanup not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+	repo, err := url.PathUnescape(chi.URLParam(r, "repo"))
+	if err != nil || repo == "" {
+		http.Error(w, `{"error":"invalid repo parameter"}`, http.StatusBadRequest)
+		return
+	}
+	if err := srv.cleanCloneFn(repo); err != nil {
+		slog.Error("DELETE /config/clones failed", "repo", repo, "err", err)
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "repo": repo})
 }
 
 func (srv *Server) handleReload(w http.ResponseWriter, r *http.Request) {

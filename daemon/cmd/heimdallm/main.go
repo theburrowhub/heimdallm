@@ -29,6 +29,7 @@ import (
 	"github.com/heimdallm/daemon/internal/keychain"
 	"github.com/heimdallm/daemon/internal/notify"
 	"github.com/heimdallm/daemon/internal/pipeline"
+	"github.com/heimdallm/daemon/internal/repoctx"
 	"github.com/heimdallm/daemon/internal/scheduler"
 	"github.com/heimdallm/daemon/internal/server"
 	"github.com/heimdallm/daemon/internal/sse"
@@ -210,6 +211,7 @@ func main() {
 	notifier := notify.New()
 	ghClient := gh.NewClient(token)
 	exec := executor.New()
+	repoCtx := repoctx.NewManager()
 
 	// Load or create the per-daemon API token.  All mutating HTTP endpoints
 	// require this token in X-Heimdallm-Token (security issue #3).
@@ -271,14 +273,20 @@ func main() {
 	}
 	issueFetcher := issuepipeline.NewFetcher(ghClient, ghClient, s, issuePipe)
 	issueFetcher.SetBotLogin(resolvedBotLogin) // break re-triage loop (#362)
-	srv := server.New(s, broker, p, apiToken)
-	srv.SetNATSConn(eventBus.Conn())
-	srv.SetConfigPath(cfgPath)
-	shutdownReq := make(chan struct{}, 1)
-
 	// cfgMu protects cfg and the pipeline so reload is safe from any goroutine.
 	var cfgMu sync.Mutex
 	var reloadMu sync.Mutex // serialises config reloads to prevent duplicate pipelines
+
+	srv := server.New(s, broker, p, apiToken)
+	srv.SetNATSConn(eventBus.Conn())
+	srv.SetConfigPath(cfgPath)
+	srv.SetCleanCloneFn(func(repo string) error {
+		cfgMu.Lock()
+		aiCfg := cfg.AIForRepo(repo)
+		cfgMu.Unlock()
+		return repoCtx.Purge(context.Background(), repo, aiCfg.CloneDir)
+	})
+	shutdownReq := make(chan struct{}, 1)
 
 	// discoverySvc holds the discovered repo cache.
 	discoverySvc := discovery.NewService(ghClient)
@@ -481,6 +489,7 @@ func main() {
 		pipeline:             p,
 		issuePipe:            issuePipe,
 		fetcher:              issueFetcher,
+		repoCtx:              repoCtx,
 		store:                s,
 		broker:               broker,
 		cfgMu:                &cfgMu,
@@ -636,7 +645,14 @@ func main() {
 		aiCfg := c.AIForRepo(pr.Repo)
 		localDirBase := c.GitHub.LocalDirBase
 		cfgMu.Unlock()
-		aiCfg.LocalDir = config.ResolveLocalDir(aiCfg.LocalDir, pr.Repo, localDirBase)
+		repoHandle, err := acquireRepoContext(ctx, repoCtx, pr.Repo, &aiCfg, localDirBase, token, repoctx.ModeRead)
+		if err != nil {
+			logRepoContextFallback("review-worker", pr.Repo, err)
+			aiCfg.LocalDir = ""
+		}
+		if repoHandle != nil {
+			defer repoHandle.Release()
+		}
 
 		rev := runReview(pr, aiCfg)
 
@@ -783,7 +799,14 @@ func main() {
 		localDirBase := c.GitHub.LocalDirBase
 		globalTimeout := c.AI.ExecutionTimeout
 		cfgMu.Unlock()
-		aiCfg.LocalDir = config.ResolveLocalDir(aiCfg.LocalDir, msg.Repo, localDirBase)
+		repoHandle, err := acquireRepoContext(ctx, repoCtx, msg.Repo, &aiCfg, localDirBase, token, repoctx.ModeRead)
+		if err != nil {
+			logRepoContextFallback("triage-worker", msg.Repo, err)
+			aiCfg.LocalDir = ""
+		}
+		if repoHandle != nil {
+			defer repoHandle.Release()
+		}
 
 		extraFlags := agentCfg.ExtraFlags
 		if extraFlags != "" {
@@ -869,7 +892,21 @@ func main() {
 		localDirBase := c.GitHub.LocalDirBase
 		globalTimeout := c.AI.ExecutionTimeout
 		cfgMu.Unlock()
-		aiCfg.LocalDir = config.ResolveLocalDir(aiCfg.LocalDir, msg.Repo, localDirBase)
+		repoHandle, err := acquireRepoContext(ctx, repoCtx, msg.Repo, &aiCfg, localDirBase, token, repoctx.ModeWrite)
+		if err != nil {
+			slog.Error("implement-worker: prepare repo context failed",
+				"repo", msg.Repo, "number", msg.Number, "err", err)
+			broker.Publish(sse.Event{
+				Type: sse.EventIssueReviewError,
+				Data: sseData(map[string]any{
+					"repo": msg.Repo, "number": msg.Number, "error": err.Error(),
+				}),
+			})
+			return
+		}
+		if repoHandle != nil {
+			defer repoHandle.Release()
+		}
 
 		extraFlags := agentCfg.ExtraFlags
 		if extraFlags != "" {
@@ -899,15 +936,16 @@ func main() {
 				NoSessionPersistence: agentCfg.NoSessionPersistence,
 				Timeout:              resolveExecutionTimeout(globalTimeout, agentCfg.ExecutionTimeout),
 			},
-			IssuePromptOverride:     issuePrompt,
-			IssueInstructions:       issueInstructions,
-			ImplementPromptOverride: implPrompt,
-			ImplementInstructions:   implInstructions,
-			PRReviewers:             aiCfg.PRReviewers,
-			PRAssignee:              aiCfg.PRAssignee,
-			PRLabels:                aiCfg.PRLabels,
-			PRDraft:                 aiCfg.PRDraft != nil && *aiCfg.PRDraft,
-			GeneratePRDescription:   aiCfg.GeneratePRDescription != nil && *aiCfg.GeneratePRDescription,
+			IssuePromptOverride:      issuePrompt,
+			IssueInstructions:        issueInstructions,
+			ImplementPromptOverride:  implPrompt,
+			ImplementInstructions:    implInstructions,
+			PRReviewers:              aiCfg.PRReviewers,
+			PRAssignee:               aiCfg.PRAssignee,
+			PRLabels:                 aiCfg.PRLabels,
+			PRDraft:                  aiCfg.PRDraft != nil && *aiCfg.PRDraft,
+			GeneratePRDescription:    aiCfg.GeneratePRDescription != nil && *aiCfg.GeneratePRDescription,
+			RequireWorkDirForDevelop: true,
 		}
 
 		if _, err := issuePipe.Run(ctx, ghIssue, opts); err != nil {
@@ -1302,9 +1340,14 @@ func main() {
 		aiCfg := cfg.AIForRepo(pr.Repo)
 		localDirBase := cfg.GitHub.LocalDirBase
 		cfgMu.Unlock()
-		// /home/heimdallm/repos/<short-name> fallback when local_dir is unset (stat-based,
-		// keep outside the mutex).
-		aiCfg.LocalDir = config.ResolveLocalDir(aiCfg.LocalDir, pr.Repo, localDirBase)
+		repoHandle, err := acquireRepoContext(context.Background(), repoCtx, pr.Repo, &aiCfg, localDirBase, token, repoctx.ModeRead)
+		if err != nil {
+			logRepoContextFallback("trigger review", pr.Repo, err)
+			aiCfg.LocalDir = ""
+		}
+		if repoHandle != nil {
+			defer repoHandle.Release()
+		}
 
 		// Construct github.PullRequest from stored data
 		ghPR := &gh.PullRequest{
@@ -1411,9 +1454,14 @@ func main() {
 		localDirBase := cfg.GitHub.LocalDirBase
 		globalTimeout := cfg.AI.ExecutionTimeout
 		cfgMu.Unlock()
-		// /home/heimdallm/repos/<short-name> fallback when local_dir is unset (stat-based,
-		// keep outside the mutex).
-		aiCfg.LocalDir = config.ResolveLocalDir(aiCfg.LocalDir, iss.Repo, localDirBase)
+		repoHandle, err := acquireRepoContext(context.Background(), repoCtx, iss.Repo, &aiCfg, localDirBase, token, repoctx.ModeRead)
+		if err != nil {
+			logRepoContextFallback("trigger issue review", iss.Repo, err)
+			aiCfg.LocalDir = ""
+		}
+		if repoHandle != nil {
+			defer repoHandle.Release()
+		}
 
 		// Reconstruct github.Issue from store data for the pipeline
 		ghIssue := &gh.Issue{
@@ -1944,6 +1992,7 @@ type tier2Adapter struct {
 	pipeline   *pipeline.Pipeline
 	issuePipe  *issuepipeline.Pipeline
 	fetcher    *issuepipeline.Fetcher
+	repoCtx    *repoctx.Manager
 	store      *store.Store
 	broker     *sse.Broker
 	cfgMu      *sync.Mutex
@@ -2274,10 +2323,14 @@ func (a *tier2Adapter) ProcessPR(ctx context.Context, pr scheduler.Tier2PR) erro
 	aiCfg := c.AIForRepo(pr.Repo)
 	localDirBase := c.GitHub.LocalDirBase
 	a.cfgMu.Unlock()
-	// /home/heimdallm/repos/<short-name> fallback when local_dir is unset (stat-based,
-	// keep outside the mutex). Lets HEIMDALLM_LOCAL_DIR_BASE give every
-	// monitored repo full-repo context without a per-repo override.
-	aiCfg.LocalDir = config.ResolveLocalDir(aiCfg.LocalDir, pr.Repo, localDirBase)
+	repoHandle, err := acquireRepoContext(ctx, a.repoCtx, pr.Repo, &aiCfg, localDirBase, a.ghToken, repoctx.ModeRead)
+	if err != nil {
+		logRepoContextFallback("tier2 PR", pr.Repo, err)
+		aiCfg.LocalDir = ""
+	}
+	if repoHandle != nil {
+		defer repoHandle.Release()
+	}
 
 	ghPR := &gh.PullRequest{
 		ID:        pr.ID,
@@ -2385,9 +2438,33 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 		localDirBase := c.GitHub.LocalDirBase
 		globalTimeout := c.AI.ExecutionTimeout
 		a.cfgMu.Unlock()
-		// /home/heimdallm/repos/<short-name> fallback when local_dir is unset (stat-based,
-		// keep outside the mutex).
-		aiCfg.LocalDir = config.ResolveLocalDir(aiCfg.LocalDir, issue.Repo, localDirBase)
+		mode := repoctx.ModeRead
+		requireWorkDir := false
+		if issue.Mode == config.IssueModeDevelop {
+			mode = repoctx.ModeWrite
+			requireWorkDir = true
+		}
+		var releaseRepoContext func()
+		repoHandle, err := acquireRepoContext(ctx, a.repoCtx, issue.Repo, &aiCfg, localDirBase, a.ghToken, mode)
+		if err != nil {
+			if issue.Mode == config.IssueModeDevelop {
+				slog.Error("issue poll: prepare repo context failed",
+					"repo", issue.Repo, "number", issue.Number, "err", err)
+				if a.broker != nil {
+					a.broker.Publish(sse.Event{
+						Type: sse.EventIssueReviewError,
+						Data: sseData(map[string]any{
+							"repo": issue.Repo, "number": issue.Number, "error": err.Error(),
+						}),
+					})
+				}
+			} else {
+				logRepoContextFallback("issue poll", issue.Repo, err)
+			}
+			aiCfg.LocalDir = ""
+		} else if repoHandle != nil {
+			releaseRepoContext = repoHandle.Release
+		}
 
 		extraFlags := agentCfg.ExtraFlags
 		if extraFlags != "" {
@@ -2417,15 +2494,17 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 				NoSessionPersistence: agentCfg.NoSessionPersistence,
 				Timeout:              resolveExecutionTimeout(globalTimeout, agentCfg.ExecutionTimeout),
 			},
-			IssuePromptOverride:     issuePrompt,
-			IssueInstructions:       issueInstructions,
-			ImplementPromptOverride: implPrompt,
-			ImplementInstructions:   implInstructions,
-			PRReviewers:             aiCfg.PRReviewers,
-			PRAssignee:              aiCfg.PRAssignee,
-			PRLabels:                aiCfg.PRLabels,
-			PRDraft:                 aiCfg.PRDraft != nil && *aiCfg.PRDraft,
-			GeneratePRDescription:   aiCfg.GeneratePRDescription != nil && *aiCfg.GeneratePRDescription,
+			IssuePromptOverride:      issuePrompt,
+			IssueInstructions:        issueInstructions,
+			ImplementPromptOverride:  implPrompt,
+			ImplementInstructions:    implInstructions,
+			PRReviewers:              aiCfg.PRReviewers,
+			PRAssignee:               aiCfg.PRAssignee,
+			PRLabels:                 aiCfg.PRLabels,
+			PRDraft:                  aiCfg.PRDraft != nil && *aiCfg.PRDraft,
+			GeneratePRDescription:    aiCfg.GeneratePRDescription != nil && *aiCfg.GeneratePRDescription,
+			RequireWorkDirForDevelop: requireWorkDir,
+			ReleaseRepoContext:       releaseRepoContext,
 		}
 	}
 
@@ -2974,6 +3053,38 @@ func sseData(v map[string]any) string {
 		return "{}"
 	}
 	return string(b)
+}
+
+func acquireRepoContext(
+	ctx context.Context,
+	manager *repoctx.Manager,
+	repo string,
+	aiCfg *config.RepoAI,
+	localDirBase []string,
+	token string,
+	mode repoctx.Mode,
+) (*repoctx.Handle, error) {
+	if manager == nil {
+		manager = repoctx.NewManager()
+	}
+	h, err := manager.Acquire(ctx, repoctx.Request{
+		Repo:               repo,
+		ConfiguredLocalDir: aiCfg.LocalDir,
+		LocalDirBases:      localDirBase,
+		CloneDir:           aiCfg.CloneDir,
+		Token:              token,
+		Mode:               mode,
+	})
+	if err != nil {
+		return nil, err
+	}
+	aiCfg.LocalDir = h.Path()
+	return h, nil
+}
+
+func logRepoContextFallback(scope, repo string, err error) {
+	slog.Warn(scope+": repo context unavailable; continuing without local checkout",
+		"repo", repo, "err", err)
 }
 
 // ptrBoolOrTrue returns the dereferenced value of p, or true if p is nil.

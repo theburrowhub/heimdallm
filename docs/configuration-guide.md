@@ -931,6 +931,14 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # Generate LLM-produced PR titles and descriptions for auto_implement PRs.
 # generate_pr_description = false
 
+# When local_dir is unset, Heimdallm prepares a managed shallow clone for agent
+# context under clone_dir. If clone_dir is also unset, the default is
+# os.TempDir()/heimdallm/<org>/<repo>. Existing directories are mutated only
+# when they contain Heimdallm's .heimdallm-managed marker; local_dir and
+# local_dir_base checkouts are treated as operator-owned.
+# Manual cleanup is available through the authenticated API:
+# DELETE /config/clones/<url-escaped org/repo>
+
 # ── Per-CLI settings (optional) ──────────────────────────────────────────────
 
 # [ai.agents.claude]
