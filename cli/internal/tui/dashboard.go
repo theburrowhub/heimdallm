@@ -335,7 +335,6 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		d.refreshing = false
 		if msg.err != nil {
 			d.err = msg.err
-			d.connected = false
 			d.shutdownMessage = fmt.Sprintf("Promotion failed: %v", msg.err)
 			return d, nil
 		}
@@ -448,11 +447,8 @@ func (d *Dashboard) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			d.openDetail()
 		}
 	case "p", "P":
-		if d.activeTab == tabIssues && d.cursor < len(d.issues) && canPromoteIssue(d.issues[d.cursor]) {
-			issue := d.issues[d.cursor]
-			d.refreshing = true
-			d.shutdownMessage = fmt.Sprintf("Promoting issue #%d...", issue.Number)
-			return d, d.promoteIssue(issue.ID)
+		if cmd := d.promoteSelectedIssue(); cmd != nil {
+			return d, cmd
 		}
 	case "r":
 		d.refreshing = true
@@ -494,11 +490,8 @@ func (d *Dashboard) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc", "enter":
 		d.showDetail = false
 	case "p", "P":
-		if d.activeTab == tabIssues && d.cursor < len(d.issues) && canPromoteIssue(d.issues[d.cursor]) {
-			issue := d.issues[d.cursor]
-			d.refreshing = true
-			d.shutdownMessage = fmt.Sprintf("Promoting issue #%d...", issue.Number)
-			return d, d.promoteIssue(issue.ID)
+		if cmd := d.promoteSelectedIssue(); cmd != nil {
+			return d, cmd
 		}
 	case "j", "down":
 		d.scrollDetailDown()
@@ -521,6 +514,19 @@ func (d *Dashboard) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return d, nil
+}
+
+func (d *Dashboard) promoteSelectedIssue() tea.Cmd {
+	if d.activeTab != tabIssues || d.cursor >= len(d.issues) {
+		return nil
+	}
+	issue := d.issues[d.cursor]
+	if !canPromoteIssue(issue) {
+		return nil
+	}
+	d.refreshing = true
+	d.shutdownMessage = fmt.Sprintf("Promoting issue #%d...", issue.Number)
+	return d.promoteIssue(issue.ID)
 }
 
 func (d *Dashboard) openDetail() {

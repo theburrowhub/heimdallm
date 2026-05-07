@@ -349,6 +349,8 @@ tagged with both a blocked and a develop label stays blocked until
 promotion. Stage promotion updates labels only; the next poll executes the newly visible stage. The feature is **opt-in**: leave `HEIMDALLM_ISSUE_BLOCKED_LABELS`
 empty and nothing about the existing pipeline changes.
 
+**Upgrade note for staged issues:** earlier-stage labels now win over later-stage labels. If you previously used overlapping triage/develop labels to force direct development, split them into dedicated labels or remove the triage label before applying the develop label. `auto_promote_triage` defaults on only when `refinement_labels` is configured; set it to `false` to keep refinement promotion manual.
+
 ### Automated install (for agents / scripts)
 
 See [LLM-HOW-TO-INSTALL.md](LLM-HOW-TO-INSTALL.md) for a step-by-step guide suitable for Claude Code, shell scripts, or any automation tool.

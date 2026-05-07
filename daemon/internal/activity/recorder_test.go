@@ -290,6 +290,35 @@ func TestRecorder_IssueStagePromoted(t *testing.T) {
 	if got.details["trigger"] != "manual API" {
 		t.Errorf("details: %+v", got.details)
 	}
+	if _, ok := got.details["from_label"]; ok {
+		t.Errorf("stage event should not persist empty legacy label details: %+v", got.details)
+	}
+}
+
+func TestRecorder_IssueStagePromotedPrefersStageDetailsOverLegacyLabels(t *testing.T) {
+	_, fs, events := newTestRecorder(t)
+	payload, _ := json.Marshal(map[string]any{
+		"repo":         "acme/api",
+		"issue_number": 44,
+		"issue_title":  "Plan implementation",
+		"from_label":   "blocked",
+		"to_label":     "ready",
+		"from_stage":   "triage",
+		"to_stage":     "refinement",
+	})
+	events <- sse.Event{Type: sse.EventIssuePromoted, Data: string(payload)}
+	waitFor(t, func() bool { return fs.count() == 1 })
+
+	got := fs.at(0)
+	if got.outcome != "triage → refinement" {
+		t.Errorf("outcome: %s", got.outcome)
+	}
+	if got.details["from_stage"] != "triage" || got.details["to_stage"] != "refinement" {
+		t.Errorf("stage details: %+v", got.details)
+	}
+	if _, ok := got.details["from_label"]; ok {
+		t.Errorf("stage event should omit legacy label details even when payload has them: %+v", got.details)
+	}
 }
 
 func TestRecorder_UnknownEventIsIgnored(t *testing.T) {

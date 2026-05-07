@@ -15,6 +15,7 @@ import (
 	"github.com/heimdallm/daemon/internal/bus"
 	"github.com/heimdallm/daemon/internal/config"
 	gh "github.com/heimdallm/daemon/internal/github"
+	issuepipeline "github.com/heimdallm/daemon/internal/issues"
 	"github.com/heimdallm/daemon/internal/repoctx"
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
@@ -41,6 +42,25 @@ func TestAcquireRepoContextNilManagerIsError(t *testing.T) {
 	_, err := acquireRepoContext(context.Background(), nil, "org/repo", &aiCfg, nil, "secret", repoctx.ModeRead)
 	if err == nil || !strings.Contains(err.Error(), "nil manager") {
 		t.Fatalf("err = %v, want nil manager error", err)
+	}
+}
+
+func TestAutoPromoteTriageSmartDefaultRequiresRefinementLabel(t *testing.T) {
+	aiCfg := config.RepoAI{}
+	it := config.IssueTrackingConfig{}
+	if autoPromoteStageEnabled(aiCfg, it, issuepipeline.IssueStageTriage) {
+		t.Fatal("unset auto_promote_triage without refinement labels should preserve legacy manual behavior")
+	}
+
+	it.RefinementLabels = []string{"heimdallm-refine"}
+	if !autoPromoteStageEnabled(aiCfg, it, issuepipeline.IssueStageTriage) {
+		t.Fatal("unset auto_promote_triage with refinement labels should adopt the staged default")
+	}
+
+	disabled := false
+	aiCfg.AutoPromoteTriage = &disabled
+	if autoPromoteStageEnabled(aiCfg, it, issuepipeline.IssueStageTriage) {
+		t.Fatal("explicit auto_promote_triage=false should win over refinement labels")
 	}
 }
 

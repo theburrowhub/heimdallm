@@ -3377,6 +3377,10 @@ func issueStageStillCurrent(scope string, issue *gh.Issue, it config.IssueTracki
 			"repo", issue.Repo, "number", issue.Number)
 		return false
 	}
+	// Best-effort stale-job guard: workers fetch the issue immediately before
+	// this check, so queued jobs whose labels changed since dispatch skip
+	// before running AI. A label edit after this fetch is handled by the next
+	// poll rather than adding another GitHub round-trip here.
 	got := it.Classify(issue.LabelNames())
 	if got == want {
 		return true
@@ -3397,7 +3401,7 @@ func autoPromoteAfterStage(
 	from issuepipeline.IssueStage,
 	scope string,
 ) {
-	if !autoPromoteStageEnabled(aiCfg, from) {
+	if !autoPromoteStageEnabled(aiCfg, it, from) {
 		return
 	}
 	to, err := issuepipeline.NextStage(from, it, false)
@@ -3433,11 +3437,14 @@ func autoPromoteAfterStage(
 	}
 }
 
-func autoPromoteStageEnabled(aiCfg config.RepoAI, stage issuepipeline.IssueStage) bool {
+func autoPromoteStageEnabled(aiCfg config.RepoAI, it config.IssueTrackingConfig, stage issuepipeline.IssueStage) bool {
 	switch stage {
 	case issuepipeline.IssueStageTriage:
 		if aiCfg.AutoPromoteTriage == nil {
-			return true
+			// Default-on only after the operator has configured a refinement
+			// target. Legacy review_only-only deployments keep their prior
+			// behavior instead of gaining autonomous label transitions.
+			return hasConfiguredLabel(it.RefinementLabels)
 		}
 		return *aiCfg.AutoPromoteTriage
 	case issuepipeline.IssueStageRefinement:
@@ -3448,6 +3455,15 @@ func autoPromoteStageEnabled(aiCfg config.RepoAI, stage issuepipeline.IssueStage
 	default:
 		return false
 	}
+}
+
+func hasConfiguredLabel(labels []string) bool {
+	for _, label := range labels {
+		if strings.TrimSpace(label) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func acquireRepoContext(

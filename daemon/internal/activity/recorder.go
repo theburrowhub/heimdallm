@@ -271,15 +271,22 @@ func (r *Recorder) recordIssuePromoted(ev sse.Event) error {
 		from = p.FromStage
 		to = p.ToStage
 	}
+	details := map[string]any{}
+	if p.FromStage != "" || p.ToStage != "" {
+		details["from_stage"] = p.FromStage
+		details["to_stage"] = p.ToStage
+	} else {
+		details["from_label"] = p.FromLabel
+		details["to_label"] = p.ToLabel
+	}
+	if p.Trigger != "" {
+		details["trigger"] = p.Trigger
+	}
+	if p.Reason != "" {
+		details["reason"] = p.Reason
+	}
 	_, err := r.store.InsertActivity(time.Now(), orgOf(p.Repo), p.Repo, "issue",
 		p.IssueNumber, p.IssueTitle, "promote",
-		from+" → "+to, map[string]any{
-			"from_label": p.FromLabel,
-			"to_label":   p.ToLabel,
-			"from_stage": p.FromStage,
-			"to_stage":   p.ToStage,
-			"trigger":    p.Trigger,
-			"reason":     p.Reason,
-		})
+		from+" → "+to, details)
 	return err
 }

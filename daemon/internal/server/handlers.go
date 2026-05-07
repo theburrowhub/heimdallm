@@ -175,7 +175,8 @@ func (srv *Server) SetTriggerIssueRefineFn(fn func(issueID int64, force bool) er
 }
 
 // SetTriggerPromoteFn wires the promote callback called by POST /issues/{id}/promote.
-// The callback moves stage labels only; the poll cycle executes the new stage.
+// The callback validates and applies a stage-label transition only. The poll
+// cycle executes the new stage after it observes the updated GitHub labels.
 func (srv *Server) SetTriggerPromoteFn(fn func(issueID int64) error) {
 	srv.triggerPromoteFn = fn
 }
