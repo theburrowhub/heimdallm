@@ -85,14 +85,23 @@ void main() {
       'ai_primary': 'claude',
       'ai_fallback': '',
       'review_mode': 'single',
+      'triage_owner': 'global-owner',
+      'clone_dir': '/work/global',
+      'auto_promote_triage': true,
+      'auto_promote_refinement': false,
+      'generate_pr_description': true,
       'issue_tracking': {'enabled': false},
       'org_overrides': {
         'acme': {
           'primary': 'gemini',
           'issue_prompt': 'org-issue',
+          'triage_owner': 'alice',
+          'clone_dir': '/work/acme',
+          'auto_promote_triage': false,
+          'auto_promote_refinement': true,
+          'generate_pr_description': false,
           'pr_reviewers': ['alice'],
           'issue_tracking': {
-            'enabled': true,
             'develop_labels': ['ready'],
           },
         },
@@ -103,9 +112,20 @@ void main() {
     final org = cfg.orgConfigs['acme']!;
     expect(org.aiPrimary, 'gemini');
     expect(org.issuePromptId, 'org-issue');
+    expect(org.triageOwner, 'alice');
+    expect(org.cloneDir, '/work/acme');
+    expect(org.autoPromoteTriage, isFalse);
+    expect(org.autoPromoteRefinement, isTrue);
+    expect(org.generatePRDescription, isFalse);
     expect(org.prReviewers, ['alice']);
-    expect(org.itEnabled, isTrue);
+    expect(org.itEnabled, isNull);
+    expect(org.devEnabled, isTrue);
     expect(org.developLabels, ['ready']);
+    expect(cfg.globalTriageOwner, 'global-owner');
+    expect(cfg.globalCloneDir, '/work/global');
+    expect(cfg.globalAutoPromoteTriage, isTrue);
+    expect(cfg.globalAutoPromoteRefinement, isFalse);
+    expect(cfg.globalGeneratePRDescription, isTrue);
   });
 
   test('AppConfig preserves scoped false and empty-list overrides', () {
@@ -125,6 +145,11 @@ void main() {
       'repo_overrides': {
         'acme/api': {
           'implement_prompt': 'repo-impl',
+          'triage_owner': 'repo-owner',
+          'clone_dir': '/work/repo',
+          'auto_promote_triage': false,
+          'auto_promote_refinement': true,
+          'generate_pr_description': true,
           'issue_tracking': {
             'enabled': false,
             'review_only_labels': <String>[],
@@ -143,11 +168,41 @@ void main() {
     expect(repo.itEnabled, isFalse);
     expect(repo.reviewOnlyLabels, isEmpty);
     expect(repo.developPromptId, 'repo-impl');
+    expect(repo.triageOwner, 'repo-owner');
+    expect(repo.cloneDir, '/work/repo');
+    expect(repo.autoPromoteTriage, isFalse);
+    expect(repo.autoPromoteRefinement, isTrue);
+    expect(repo.generatePRDescription, isTrue);
     expect(repo.isMonitored, isFalse);
 
     final org = cfg.orgConfigs['acme']!;
     expect(org.itEnabled, isFalse);
     expect(org.developLabels, isEmpty);
+  });
+
+  test('OrgConfig derives enabled switches from label overrides', () {
+    final cfg = AppConfig.fromJson({
+      'repositories': <String>[],
+      'server_port': 1,
+      'poll_interval': '60s',
+      'retention_days': 30,
+      'ai_primary': 'claude',
+      'ai_fallback': '',
+      'review_mode': 'single',
+      'issue_tracking': {'enabled': false},
+      'org_overrides': {
+        'acme': {
+          'issue_tracking': {
+            'review_only_labels': ['needs-triage'],
+            'develop_labels': ['ready'],
+          },
+        },
+      },
+    });
+
+    final org = cfg.orgConfigs['acme']!;
+    expect(org.itEnabled, isTrue);
+    expect(org.devEnabled, isTrue);
   });
 
   testWidgets('saveAndStartDaemon calls platform.spawnDaemon', (tester) async {

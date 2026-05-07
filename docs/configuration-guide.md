@@ -508,6 +508,11 @@ review_mode  = "multi"
 prompt       = "org-pr-review-profile"
 issue_prompt = "org-issue-triage-profile"
 implement_prompt = "org-implementation-profile"
+triage_owner = "alice"
+clone_dir = "/home/heimdallm/repos/myorg-worktrees"
+auto_promote_triage = true
+auto_promote_refinement = false
+generate_pr_description = true
 
 pr_reviewers = ["alice", "bob", "carol"]
 pr_labels    = ["auto-generated", "ai-platform"]
@@ -525,6 +530,10 @@ primary = "codex"
 pr_reviewers = ["dave"]
 pr_labels    = ["auto-generated"]
 ```
+
+`local_dir` is also accepted at org scope because org overrides share the same
+resolution path as repo overrides, but prefer `local_dir_base` or per-repo
+`local_dir` unless every repo in the org should use the same checkout path.
 
 ### Per-repo overrides
 
@@ -901,6 +910,12 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # Global execution timeout for AI CLI calls.
 # execution_timeout = "20m"   # default: 5m — env: HEIMDALLM_EXECUTION_TIMEOUT
 
+# Issue pipeline ownership and promotion defaults.
+# triage_owner = "alice"
+# clone_dir = "/home/heimdallm/repos/worktrees"
+# auto_promote_triage = true
+# auto_promote_refinement = false
+
 # Generate LLM-produced PR titles and descriptions for auto_implement PRs.
 # generate_pr_description = false
 
@@ -948,6 +963,11 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # prompt = "org-pr-review-profile"
 # issue_prompt = "org-issue-triage-profile"
 # implement_prompt = "org-implementation-profile"
+# triage_owner = "alice"
+# clone_dir = "/home/heimdallm/repos/myorg-worktrees"
+# auto_promote_triage = true
+# auto_promote_refinement = false
+# generate_pr_description = true
 # pr_reviewers = ["alice", "bob"]
 # pr_labels    = ["auto-generated", "myorg-team"]
 # pr_assignee  = "myusername"

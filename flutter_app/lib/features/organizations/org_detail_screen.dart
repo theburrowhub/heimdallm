@@ -97,6 +97,24 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
     if (old.localDir != updated.localDir) {
       diff['local_dir'] = updated.localDir ?? '';
     }
+    if (old.triageOwner != updated.triageOwner) {
+      diff['triage_owner'] = updated.triageOwner ?? '';
+    }
+    if (old.cloneDir != updated.cloneDir) {
+      diff['clone_dir'] = updated.cloneDir ?? '';
+    }
+    if (old.autoPromoteTriage != updated.autoPromoteTriage &&
+        updated.autoPromoteTriage != null) {
+      diff['auto_promote_triage'] = updated.autoPromoteTriage!;
+    }
+    if (old.autoPromoteRefinement != updated.autoPromoteRefinement &&
+        updated.autoPromoteRefinement != null) {
+      diff['auto_promote_refinement'] = updated.autoPromoteRefinement!;
+    }
+    if (old.generatePRDescription != updated.generatePRDescription &&
+        updated.generatePRDescription != null) {
+      diff['generate_pr_description'] = updated.generatePRDescription!;
+    }
     if (old.issuePromptId != updated.issuePromptId) {
       diff['issue_prompt'] = updated.issuePromptId ?? '';
     }
@@ -312,6 +330,66 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
                     onReset: () => _resetField('issue_prompt'),
                   ),
                 ], accent: FeaturePalette.issueTracking),
+                _sectionCard('Pipeline', [
+                  OverrideTextField(
+                    label: 'Triage owner',
+                    globalValue: appConfig.globalTriageOwner,
+                    overrideValue: _config.triageOwner,
+                    onChanged: (v) => _update(_config.copyWith(triageOwner: v)),
+                    onReset: () => _resetField('triage_owner'),
+                  ),
+                  const SizedBox(height: 10),
+                  OverrideTextField(
+                    label: 'Clone directory',
+                    globalValue: appConfig.globalCloneDir,
+                    overrideValue: _config.cloneDir,
+                    onChanged: (v) => _update(_config.copyWith(cloneDir: v)),
+                    onReset: () => _resetField('clone_dir'),
+                  ),
+                  const SizedBox(height: 10),
+                  OverrideDropdown(
+                    label: 'Auto-promote triage',
+                    globalValue: (appConfig.globalAutoPromoteTriage ?? false)
+                        .toString(),
+                    overrideValue: _config.autoPromoteTriage?.toString(),
+                    options: const ['true', 'false'],
+                    onChanged: (v) => _update(
+                      _config.copyWith(
+                        autoPromoteTriage: v != null ? v == 'true' : null,
+                      ),
+                    ),
+                    onReset: () => _resetField('auto_promote_triage'),
+                  ),
+                  const SizedBox(height: 10),
+                  OverrideDropdown(
+                    label: 'Auto-promote refinement',
+                    globalValue:
+                        (appConfig.globalAutoPromoteRefinement ?? false)
+                            .toString(),
+                    overrideValue: _config.autoPromoteRefinement?.toString(),
+                    options: const ['true', 'false'],
+                    onChanged: (v) => _update(
+                      _config.copyWith(
+                        autoPromoteRefinement: v != null ? v == 'true' : null,
+                      ),
+                    ),
+                    onReset: () => _resetField('auto_promote_refinement'),
+                  ),
+                  const SizedBox(height: 10),
+                  OverrideDropdown(
+                    label: 'Generate PR description',
+                    globalValue: appConfig.globalGeneratePRDescription
+                        .toString(),
+                    overrideValue: _config.generatePRDescription?.toString(),
+                    options: const ['true', 'false'],
+                    onChanged: (v) => _update(
+                      _config.copyWith(
+                        generatePRDescription: v != null ? v == 'true' : null,
+                      ),
+                    ),
+                    onReset: () => _resetField('generate_pr_description'),
+                  ),
+                ]),
                 _sectionCard('Develop', [
                   Row(
                     children: [

@@ -1164,6 +1164,15 @@ func main() {
 			"activity_log_retention_days": ptrIntOr(c.ActivityLog.RetentionDays, 90),
 			"issue_prompt":                c.AI.IssuePrompt,
 			"implement_prompt":            c.AI.ImplementPrompt,
+			"triage_owner":                c.AI.TriageOwner,
+			"clone_dir":                   c.AI.CloneDir,
+			"generate_pr_description":     c.AI.GeneratePRDescription,
+		}
+		if c.AI.AutoPromoteTriage != nil {
+			result["auto_promote_triage"] = *c.AI.AutoPromoteTriage
+		}
+		if c.AI.AutoPromoteRefinement != nil {
+			result["auto_promote_refinement"] = *c.AI.AutoPromoteRefinement
 		}
 		reviewers, labels, assignee, draft := c.ResolvedPRMetadata()
 		pm := map[string]any{}

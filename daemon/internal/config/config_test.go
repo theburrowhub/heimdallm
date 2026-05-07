@@ -1644,6 +1644,41 @@ func TestIssueTrackingForRepo_LabelsImplyEnabled(t *testing.T) {
 	}
 }
 
+func TestIssueTrackingForRepo_OrgLabelsImplyEnabled(t *testing.T) {
+	c := &Config{}
+	c.GitHub.IssueTracking = IssueTrackingConfig{Enabled: false}
+	c.AI.Orgs = map[string]OrgAI{
+		"org": {
+			IssueTracking: &IssueTrackingOverride{
+				DevelopLabels:    []string{"heimdallm-auto-implement"},
+				ReviewOnlyLabels: []string{"heimdallm-auto-refine"},
+			},
+		},
+	}
+	got := c.IssueTrackingForRepo("org/labels-only")
+	if !got.Enabled {
+		t.Error("org with labels should be implicitly enabled")
+	}
+}
+
+func TestIssueTrackingForRepo_ExplicitFalseWinsOverOrgLabels(t *testing.T) {
+	c := &Config{}
+	c.GitHub.IssueTracking = IssueTrackingConfig{Enabled: true}
+	c.AI.Orgs = map[string]OrgAI{
+		"org": {
+			IssueTracking: &IssueTrackingOverride{
+				Enabled:          testBoolPtr(false),
+				DevelopLabels:    []string{"heimdallm-auto-implement"},
+				ReviewOnlyLabels: []string{"heimdallm-auto-refine"},
+			},
+		},
+	}
+	got := c.IssueTrackingForRepo("org/labels-only")
+	if got.Enabled {
+		t.Error("explicit org enabled=false should win over labels")
+	}
+}
+
 func TestIssueTrackingForRepo_NoLabelsNoOverride(t *testing.T) {
 	c := &Config{}
 	c.GitHub.IssueTracking = IssueTrackingConfig{Enabled: false}

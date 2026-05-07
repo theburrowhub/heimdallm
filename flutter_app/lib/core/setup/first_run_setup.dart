@@ -280,6 +280,25 @@ class FirstRunSetup {
         'implement_prompt = "${_tomlEscapeString(config.globalImplementPrompt)}"',
       );
     }
+    if (config.globalTriageOwner.isNotEmpty) {
+      buf.writeln(
+        'triage_owner = "${_tomlEscapeString(config.globalTriageOwner)}"',
+      );
+    }
+    if (config.globalCloneDir.isNotEmpty) {
+      buf.writeln('clone_dir = "${_tomlEscapeString(config.globalCloneDir)}"');
+    }
+    if (config.globalAutoPromoteTriage != null) {
+      buf.writeln('auto_promote_triage = ${config.globalAutoPromoteTriage}');
+    }
+    if (config.globalAutoPromoteRefinement != null) {
+      buf.writeln(
+        'auto_promote_refinement = ${config.globalAutoPromoteRefinement}',
+      );
+    }
+    if (config.globalGeneratePRDescription) {
+      buf.writeln('generate_pr_description = true');
+    }
     buf.writeln();
 
     // Global PR metadata defaults
@@ -380,6 +399,21 @@ class FirstRunSetup {
         if (oc.localDir != null && oc.localDir!.isNotEmpty) {
           buf.writeln('local_dir = "${_tomlEscapeString(oc.localDir!)}"');
         }
+        if (oc.triageOwner != null && oc.triageOwner!.isNotEmpty) {
+          buf.writeln('triage_owner = "${_tomlEscapeString(oc.triageOwner!)}"');
+        }
+        if (oc.cloneDir != null && oc.cloneDir!.isNotEmpty) {
+          buf.writeln('clone_dir = "${_tomlEscapeString(oc.cloneDir!)}"');
+        }
+        if (oc.autoPromoteTriage != null) {
+          buf.writeln('auto_promote_triage = ${oc.autoPromoteTriage}');
+        }
+        if (oc.autoPromoteRefinement != null) {
+          buf.writeln('auto_promote_refinement = ${oc.autoPromoteRefinement}');
+        }
+        if (oc.generatePRDescription != null) {
+          buf.writeln('generate_pr_description = ${oc.generatePRDescription}');
+        }
         if (oc.prReviewers != null) {
           buf.writeln('pr_reviewers = ${_tomlStringArray(oc.prReviewers!)}');
         }
@@ -474,6 +508,21 @@ class FirstRunSetup {
         }
         if (rc.localDir != null && rc.localDir!.isNotEmpty) {
           buf.writeln('local_dir = "${_tomlEscapeString(rc.localDir!)}"');
+        }
+        if (rc.triageOwner != null && rc.triageOwner!.isNotEmpty) {
+          buf.writeln('triage_owner = "${_tomlEscapeString(rc.triageOwner!)}"');
+        }
+        if (rc.cloneDir != null && rc.cloneDir!.isNotEmpty) {
+          buf.writeln('clone_dir = "${_tomlEscapeString(rc.cloneDir!)}"');
+        }
+        if (rc.autoPromoteTriage != null) {
+          buf.writeln('auto_promote_triage = ${rc.autoPromoteTriage}');
+        }
+        if (rc.autoPromoteRefinement != null) {
+          buf.writeln('auto_promote_refinement = ${rc.autoPromoteRefinement}');
+        }
+        if (rc.generatePRDescription != null) {
+          buf.writeln('generate_pr_description = ${rc.generatePRDescription}');
         }
         // PR metadata (must be written BEFORE any sub-table headers)
         if (rc.prReviewers != null) {

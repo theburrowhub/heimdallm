@@ -108,6 +108,11 @@ class RepoConfig {
 
   // General
   final String? localDir; // local repo directory for full-repo analysis
+  final String? triageOwner;
+  final String? cloneDir;
+  final bool? autoPromoteTriage;
+  final bool? autoPromoteRefinement;
+  final bool? generatePRDescription;
   final DateTime?
   firstSeenAt; // when the daemon first discovered this repo (null = unknown)
 
@@ -141,6 +146,11 @@ class RepoConfig {
     this.itEnabled,
     this.devEnabled,
     this.localDir,
+    this.triageOwner,
+    this.cloneDir,
+    this.autoPromoteTriage,
+    this.autoPromoteRefinement,
+    this.generatePRDescription,
     this.aiPrimary,
     this.aiFallback,
     this.promptId,
@@ -188,6 +198,11 @@ class RepoConfig {
       promptId != null ||
       reviewMode != null ||
       (localDir != null && localDir!.isNotEmpty) ||
+      triageOwner != null ||
+      cloneDir != null ||
+      autoPromoteTriage != null ||
+      autoPromoteRefinement != null ||
+      generatePRDescription != null ||
       developLabels != null ||
       reviewOnlyLabels != null ||
       skipLabels != null ||
@@ -233,6 +248,11 @@ class RepoConfig {
     Object? itEnabled = _sentinel,
     Object? devEnabled = _sentinel,
     Object? localDir = _sentinel,
+    Object? triageOwner = _sentinel,
+    Object? cloneDir = _sentinel,
+    Object? autoPromoteTriage = _sentinel,
+    Object? autoPromoteRefinement = _sentinel,
+    Object? generatePRDescription = _sentinel,
     Object? aiPrimary = _sentinel,
     Object? aiFallback = _sentinel,
     Object? promptId = _sentinel,
@@ -259,6 +279,19 @@ class RepoConfig {
           ? this.devEnabled
           : devEnabled as bool?,
       localDir: localDir == _sentinel ? this.localDir : localDir as String?,
+      triageOwner: triageOwner == _sentinel
+          ? this.triageOwner
+          : triageOwner as String?,
+      cloneDir: cloneDir == _sentinel ? this.cloneDir : cloneDir as String?,
+      autoPromoteTriage: autoPromoteTriage == _sentinel
+          ? this.autoPromoteTriage
+          : autoPromoteTriage as bool?,
+      autoPromoteRefinement: autoPromoteRefinement == _sentinel
+          ? this.autoPromoteRefinement
+          : autoPromoteRefinement as bool?,
+      generatePRDescription: generatePRDescription == _sentinel
+          ? this.generatePRDescription
+          : generatePRDescription as bool?,
       aiPrimary: aiPrimary == _sentinel ? this.aiPrimary : aiPrimary as String?,
       aiFallback: aiFallback == _sentinel
           ? this.aiFallback
@@ -318,6 +351,11 @@ class OrgConfig {
   final String? promptId;
   final String? reviewMode;
   final String? localDir;
+  final String? triageOwner;
+  final String? cloneDir;
+  final bool? autoPromoteTriage;
+  final bool? autoPromoteRefinement;
+  final bool? generatePRDescription;
   final String? issuePromptId;
   final String? developPromptId;
   final bool? itEnabled;
@@ -340,6 +378,11 @@ class OrgConfig {
     this.promptId,
     this.reviewMode,
     this.localDir,
+    this.triageOwner,
+    this.cloneDir,
+    this.autoPromoteTriage,
+    this.autoPromoteRefinement,
+    this.generatePRDescription,
     this.issuePromptId,
     this.developPromptId,
     this.itEnabled,
@@ -363,6 +406,11 @@ class OrgConfig {
       promptId != null ||
       reviewMode != null ||
       localDir != null ||
+      triageOwner != null ||
+      cloneDir != null ||
+      autoPromoteTriage != null ||
+      autoPromoteRefinement != null ||
+      generatePRDescription != null ||
       issuePromptId != null ||
       developPromptId != null ||
       itEnabled != null ||
@@ -385,6 +433,11 @@ class OrgConfig {
     Object? promptId = _sentinel,
     Object? reviewMode = _sentinel,
     Object? localDir = _sentinel,
+    Object? triageOwner = _sentinel,
+    Object? cloneDir = _sentinel,
+    Object? autoPromoteTriage = _sentinel,
+    Object? autoPromoteRefinement = _sentinel,
+    Object? generatePRDescription = _sentinel,
     Object? issuePromptId = _sentinel,
     Object? developPromptId = _sentinel,
     Object? itEnabled = _sentinel,
@@ -410,6 +463,19 @@ class OrgConfig {
         ? this.reviewMode
         : reviewMode as String?,
     localDir: localDir == _sentinel ? this.localDir : localDir as String?,
+    triageOwner: triageOwner == _sentinel
+        ? this.triageOwner
+        : triageOwner as String?,
+    cloneDir: cloneDir == _sentinel ? this.cloneDir : cloneDir as String?,
+    autoPromoteTriage: autoPromoteTriage == _sentinel
+        ? this.autoPromoteTriage
+        : autoPromoteTriage as bool?,
+    autoPromoteRefinement: autoPromoteRefinement == _sentinel
+        ? this.autoPromoteRefinement
+        : autoPromoteRefinement as bool?,
+    generatePRDescription: generatePRDescription == _sentinel
+        ? this.generatePRDescription
+        : generatePRDescription as bool?,
     issuePromptId: issuePromptId == _sentinel
         ? this.issuePromptId
         : issuePromptId as String?,
@@ -451,18 +517,32 @@ class OrgConfig {
 
   factory OrgConfig.fromJson(Map<String, dynamic> json) {
     final itRaw = json['issue_tracking'] as Map<String, dynamic>?;
+    final hasReviewLabels =
+        _nullableStringList(itRaw?['review_only_labels']) != null;
+    final hasDevLabels = _nullableStringList(itRaw?['develop_labels']) != null;
+    final itExplicit = itRaw != null && itRaw.containsKey('enabled')
+        ? itRaw['enabled'] as bool?
+        : null;
+    final devExplicit = itRaw != null && itRaw.containsKey('develop_enabled')
+        ? itRaw['develop_enabled'] as bool?
+        : null;
     return OrgConfig(
       aiPrimary: _nonEmpty(json['primary']),
       aiFallback: _nonEmpty(json['fallback']),
       promptId: _nonEmpty(json['prompt']),
       reviewMode: _nonEmpty(json['review_mode']),
       localDir: _nonEmpty(json['local_dir']),
+      triageOwner: _nonEmpty(json['triage_owner']),
+      cloneDir: _nonEmpty(json['clone_dir']),
+      autoPromoteTriage: json['auto_promote_triage'] as bool?,
+      autoPromoteRefinement: json['auto_promote_refinement'] as bool?,
+      generatePRDescription: json['generate_pr_description'] as bool?,
       issuePromptId:
           _nonEmpty(json['issue_prompt']) ??
           (itRaw != null ? _nonEmpty(itRaw['issue_prompt']) : null),
       developPromptId: _nonEmpty(json['implement_prompt']),
-      itEnabled: itRaw?['enabled'] as bool?,
-      devEnabled: itRaw?['develop_enabled'] as bool?,
+      itEnabled: itExplicit ?? (hasReviewLabels ? true : null),
+      devEnabled: devExplicit ?? (hasDevLabels ? true : null),
       reviewOnlyLabels: itRaw != null
           ? _nullableStringListAllowEmpty(itRaw['review_only_labels'])
           : null,
@@ -613,6 +693,11 @@ class AppConfig {
   final bool globalPRDraft;
   final String globalIssuePrompt;
   final String globalImplementPrompt;
+  final String globalTriageOwner;
+  final String globalCloneDir;
+  final bool? globalAutoPromoteTriage;
+  final bool? globalAutoPromoteRefinement;
+  final bool globalGeneratePRDescription;
 
   /// Host paths the daemon scans (in order) when a repo has no explicit
   /// `local_dir` set — first match at `{base}/{short-repo-name}` wins.
@@ -644,6 +729,11 @@ class AppConfig {
     this.globalPRDraft = false,
     this.globalIssuePrompt = '',
     this.globalImplementPrompt = '',
+    this.globalTriageOwner = '',
+    this.globalCloneDir = '',
+    this.globalAutoPromoteTriage,
+    this.globalAutoPromoteRefinement,
+    this.globalGeneratePRDescription = false,
     this.localDirBase = const [],
     this.localDirsDetected = const {},
   });
@@ -674,6 +764,11 @@ class AppConfig {
     bool? globalPRDraft,
     String? globalIssuePrompt,
     String? globalImplementPrompt,
+    String? globalTriageOwner,
+    String? globalCloneDir,
+    Object? globalAutoPromoteTriage = _sentinel,
+    Object? globalAutoPromoteRefinement = _sentinel,
+    bool? globalGeneratePRDescription,
     List<String>? localDirBase,
     Map<String, String>? localDirsDetected,
   }) {
@@ -695,6 +790,16 @@ class AppConfig {
       globalIssuePrompt: globalIssuePrompt ?? this.globalIssuePrompt,
       globalImplementPrompt:
           globalImplementPrompt ?? this.globalImplementPrompt,
+      globalTriageOwner: globalTriageOwner ?? this.globalTriageOwner,
+      globalCloneDir: globalCloneDir ?? this.globalCloneDir,
+      globalAutoPromoteTriage: globalAutoPromoteTriage == _sentinel
+          ? this.globalAutoPromoteTriage
+          : globalAutoPromoteTriage as bool?,
+      globalAutoPromoteRefinement: globalAutoPromoteRefinement == _sentinel
+          ? this.globalAutoPromoteRefinement
+          : globalAutoPromoteRefinement as bool?,
+      globalGeneratePRDescription:
+          globalGeneratePRDescription ?? this.globalGeneratePRDescription,
       localDirBase: localDirBase ?? this.localDirBase,
       localDirsDetected: localDirsDetected ?? this.localDirsDetected,
     );
@@ -709,6 +814,11 @@ class AppConfig {
     'review_mode': reviewMode,
     'retention_days': retentionDays,
     'issue_tracking': issueTracking.toJson(),
+    'triage_owner': globalTriageOwner,
+    'clone_dir': globalCloneDir,
+    'auto_promote_triage': globalAutoPromoteTriage,
+    'auto_promote_refinement': globalAutoPromoteRefinement,
+    'generate_pr_description': globalGeneratePRDescription,
   };
 
   factory AppConfig.fromJson(Map<String, dynamic> json) {
@@ -752,6 +862,11 @@ class AppConfig {
           itEnabled: itExplicit ?? (hasReviewLabels ? true : null),
           devEnabled: devExplicit ?? (hasDevLabels ? true : null),
           localDir: _nonEmpty(ov['local_dir']),
+          triageOwner: _nonEmpty(ov['triage_owner']),
+          cloneDir: _nonEmpty(ov['clone_dir']),
+          autoPromoteTriage: ov['auto_promote_triage'] as bool?,
+          autoPromoteRefinement: ov['auto_promote_refinement'] as bool?,
+          generatePRDescription: ov['generate_pr_description'] as bool?,
           aiPrimary: _nonEmpty(ov['primary']),
           aiFallback: _nonEmpty(ov['fallback']),
           reviewMode: _nonEmpty(ov['review_mode']),
@@ -852,6 +967,12 @@ class AppConfig {
           false,
       globalIssuePrompt: (json['issue_prompt'] as String?) ?? '',
       globalImplementPrompt: (json['implement_prompt'] as String?) ?? '',
+      globalTriageOwner: (json['triage_owner'] as String?) ?? '',
+      globalCloneDir: (json['clone_dir'] as String?) ?? '',
+      globalAutoPromoteTriage: json['auto_promote_triage'] as bool?,
+      globalAutoPromoteRefinement: json['auto_promote_refinement'] as bool?,
+      globalGeneratePRDescription:
+          (json['generate_pr_description'] as bool?) ?? false,
       localDirBase: _parseStringList(json['local_dir_base']),
       localDirsDetected: localDirsDetected,
     );
