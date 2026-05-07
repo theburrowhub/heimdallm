@@ -276,6 +276,63 @@ func TestAddLabels_Error(t *testing.T) {
 	}
 }
 
+// ── CreateLabel ──────────────────────────────────────────────────────────────
+
+func TestCreateLabel(t *testing.T) {
+	var captured map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/repos/org/repo/labels" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &captured)
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{"name":"priority: high"}`))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	if err := c.CreateLabel("org/repo", "priority: high", "#D93F0B", "desc"); err != nil {
+		t.Fatalf("CreateLabel: %v", err)
+	}
+	if captured["color"] != "D93F0B" {
+		t.Errorf("color = %q, want D93F0B", captured["color"])
+	}
+}
+
+func TestCreateLabel_InvalidColor(t *testing.T) {
+	c := gh.NewClient("fake-token")
+	if err := c.CreateLabel("org/repo", "priority: high", "not-hex", "desc"); err == nil {
+		t.Fatal("expected invalid color error")
+	}
+}
+
+func TestCreateLabel_AlreadyExists422IsNoop(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		w.Write([]byte(`{"errors":[{"code":"already_exists","field":"name"}]}`))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	if err := c.CreateLabel("org/repo", "priority: high", "D93F0B", "desc"); err != nil {
+		t.Fatalf("already_exists should be nil, got: %v", err)
+	}
+}
+
+func TestCreateLabel_InvalidPayload422Surfaces(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		w.Write([]byte(`{"errors":[{"code":"invalid","field":"name"}]}`))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	if err := c.CreateLabel("org/repo", "priority: high", "D93F0B", "desc"); err == nil {
+		t.Fatal("expected invalid 422 to surface")
+	}
+}
+
 // ── RemoveLabels ──────────────────────────────────────────────────────────────
 
 func TestRemoveLabels(t *testing.T) {

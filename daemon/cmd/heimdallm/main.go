@@ -1467,6 +1467,13 @@ func main() {
 
 	// Wire the issue-review trigger callback: re-run issue pipeline on a stored issue.
 	srv.SetTriggerIssueReviewFn(func(issueID int64) error {
+		// The HTTP handler queues this work in a goroutine and returns 202, so
+		// r.Context() would be cancelled as soon as the response is written.
+		// Use an explicit operation timeout instead of an unbounded background
+		// context so repo-context git operations remain cancellable.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
+
 		publishIssueErr := func(msg string) {
 			broker.Publish(sse.Event{
 				Type: sse.EventIssueReviewError,
@@ -1489,14 +1496,14 @@ func main() {
 		localDirBase := cfg.GitHub.LocalDirBase
 		globalTimeout := cfg.AI.ExecutionTimeout
 		cfgMu.Unlock()
-		repoHandle, err := acquireRepoContext(context.Background(), repoCtx, iss.Repo, &aiCfg, localDirBase, token, repoctx.ModeRead)
+		repoHandle, err := acquireRepoContext(ctx, repoCtx, iss.Repo, &aiCfg, localDirBase, token, repoctx.ModeRead)
 		if err != nil {
 			logRepoContextFallback("trigger issue review", iss.Repo, err)
 			aiCfg.LocalDir = ""
 		}
 		if repoHandle != nil {
 			defer repoHandle.Release()
-			ensureRepoContextFullHistory(context.Background(), repoCtx, repoHandle, token, "trigger issue review", iss.Repo)
+			ensureRepoContextFullHistory(ctx, repoCtx, repoHandle, token, "trigger issue review", iss.Repo)
 		}
 
 		// Reconstruct github.Issue from store data for the pipeline
@@ -1560,7 +1567,7 @@ func main() {
 		slog.Info("trigger issue review: running pipeline",
 			"store_issue_id", issueID, "repo", iss.Repo, "number", iss.Number)
 
-		_, err = issuePipe.Run(context.Background(), ghIssue, opts)
+		_, err = issuePipe.Run(ctx, ghIssue, opts)
 		if err != nil {
 			broker.Publish(sse.Event{Type: sse.EventIssueReviewError, Data: sseData(map[string]any{
 				"issue_id": issueID, "repo": iss.Repo, "error": err.Error(),

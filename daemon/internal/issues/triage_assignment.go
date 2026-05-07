@@ -10,7 +10,10 @@ import (
 	"strings"
 )
 
-const maxAffectedPaths = 20
+const (
+	maxAffectedPaths       = 20
+	maxContributorLogCount = 500
+)
 
 var (
 	githubLoginRE                = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$`)
@@ -50,7 +53,7 @@ func enrichTriageResult(ctx context.Context, r *IssueReviewResult, workDir, tria
 	r.Triage.Category = strings.ToLower(strings.TrimSpace(r.Triage.Category))
 	r.Triage.PriorityLabel = normalizePriorityLabel(r.Triage.PriorityLabel, r.Severity)
 	r.Triage.SuggestedAssignee = normalizeGitHubLogin(r.Triage.SuggestedAssignee)
-	r.Triage.TentativeAssignee = r.Triage.SuggestedAssignee
+	r.Triage.TentativeAssignee = normalizeGitHubLogin(firstNonEmpty(r.Triage.TentativeAssignee, r.Triage.SuggestedAssignee))
 	r.Triage.AssigneeConfidence = normalizeAssigneeConfidence(r.Triage.AssigneeConfidence)
 	r.Triage.AffectedPaths = sanitizeAffectedPaths(r.Triage.AffectedPaths)
 
@@ -127,7 +130,7 @@ func contributorsForPaths(ctx context.Context, runner gitHistoryRunner, workDir 
 		return nil, errShallowHistory
 	}
 
-	args := []string{"log", "--format=%ae%x00%an", "--all", "--"}
+	args := []string{"log", fmt.Sprintf("--max-count=%d", maxContributorLogCount), "--no-merges", "--format=%ae%x00%an", "--"}
 	args = append(args, affectedPaths...)
 	out, err := runner.Output(ctx, workDir, args...)
 	if err != nil {
@@ -172,15 +175,7 @@ func contributorLoginsFromEmail(email string) []string {
 	if m := githubNoreplyRE.FindStringSubmatch(email); len(m) == 2 {
 		return []string{m[1]}
 	}
-	local, _, ok := strings.Cut(email, "@")
-	if !ok {
-		return nil
-	}
-	local = strings.TrimSpace(local)
-	if normalizeGitHubLogin(local) == "" || strings.EqualFold(local, "noreply") {
-		return nil
-	}
-	return []string{local}
+	return nil
 }
 
 func contributorEvidence(contributors []contributorHit) []string {
@@ -203,11 +198,11 @@ func sanitizeAffectedPaths(paths []string) []string {
 	out := make([]string, 0, len(paths))
 	for _, p := range paths {
 		p = strings.TrimSpace(strings.ReplaceAll(p, "\\", "/"))
-		if p == "" || strings.HasPrefix(p, "/") {
+		if p == "" || strings.HasPrefix(p, "/") || strings.HasPrefix(p, "-") {
 			continue
 		}
 		clean := path.Clean(p)
-		if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || clean == ".git" || strings.HasPrefix(clean, ".git/") {
+		if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.HasPrefix(clean, "-") || clean == ".git" || strings.HasPrefix(clean, ".git/") {
 			continue
 		}
 		if _, ok := seen[clean]; ok {

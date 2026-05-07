@@ -928,12 +928,6 @@ func parseIssueResult(data []byte) (*IssueReviewResult, error) {
 	if r.Severity == "" {
 		r.Severity = "low"
 	}
-	r.Severity = normalizeSeverity(r.Severity)
-	if r.Triage.Severity == "" {
-		r.Triage.Severity = r.Severity
-	} else {
-		r.Triage.Severity = normalizeSeverity(r.Triage.Severity)
-	}
 	return &r, nil
 }
 
@@ -1002,6 +996,8 @@ func applyIssueTriageMetadata(gh issueGitHub, repo string, number int, r *IssueR
 func ensureIssueLabel(gh issueGitHub, repo, label, severity string) string {
 	catalog, ok := gh.(IssueLabelCatalog)
 	if !ok {
+		slog.Warn("issues pipeline: label catalog unavailable; trying priority label directly",
+			"repo", repo, "label", label)
 		return label
 	}
 	labels, err := catalog.FetchLabels(repo)

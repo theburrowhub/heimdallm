@@ -29,8 +29,8 @@ func historyKey(args ...string) string {
 
 func TestResolveTriageAssignee_VerifiesSuggestedAssigneeInHistory(t *testing.T) {
 	runner := &fakeHistoryRunner{outByCmd: map[string]string{
-		historyKey("rev-parse", "--is-shallow-repository"):                            "false\n",
-		historyKey("log", "--format=%ae%x00%an", "--all", "--", "daemon/pipeline.go"): "123+alice@users.noreply.github.com\x00Alice\nbob@users.noreply.github.com\x00Bob\nalice@users.noreply.github.com\x00Alice\n",
+		historyKey("rev-parse", "--is-shallow-repository"):                                                     "false\n",
+		historyKey("log", "--max-count=500", "--no-merges", "--format=%ae%x00%an", "--", "daemon/pipeline.go"): "123+alice@users.noreply.github.com\x00Alice\nbob@users.noreply.github.com\x00Bob\nalice@users.noreply.github.com\x00Alice\n",
 	}}
 	triage := Triage{
 		AffectedPaths:      []string{"daemon/pipeline.go"},
@@ -49,8 +49,8 @@ func TestResolveTriageAssignee_VerifiesSuggestedAssigneeInHistory(t *testing.T) 
 
 func TestResolveTriageAssignee_ReplacesHallucinatedSuggestedWithTopContributor(t *testing.T) {
 	runner := &fakeHistoryRunner{outByCmd: map[string]string{
-		historyKey("rev-parse", "--is-shallow-repository"):                            "false\n",
-		historyKey("log", "--format=%ae%x00%an", "--all", "--", "daemon/pipeline.go"): "alice@users.noreply.github.com\x00Alice\nbob@users.noreply.github.com\x00Bob\nalice@users.noreply.github.com\x00Alice\n",
+		historyKey("rev-parse", "--is-shallow-repository"):                                                     "false\n",
+		historyKey("log", "--max-count=500", "--no-merges", "--format=%ae%x00%an", "--", "daemon/pipeline.go"): "alice@users.noreply.github.com\x00Alice\nbob@users.noreply.github.com\x00Bob\nalice@users.noreply.github.com\x00Alice\n",
 	}}
 	triage := Triage{
 		AffectedPaths:      []string{"daemon/pipeline.go"},
@@ -85,6 +85,26 @@ func TestResolveTriageAssignee_LowConfidenceFallsBackToTriageOwner(t *testing.T)
 	}
 }
 
+func TestEnrichTriageResult_PreservesTentativeAssignee(t *testing.T) {
+	result := &IssueReviewResult{
+		Severity: "medium",
+		Triage: Triage{
+			Severity:           "medium",
+			SuggestedAssignee:  "alice",
+			TentativeAssignee:  "@bob",
+			AssigneeConfidence: "low",
+		},
+	}
+
+	enrichTriageResult(context.Background(), result, "", "owner", nil)
+	if result.Triage.TentativeAssignee != "bob" {
+		t.Fatalf("tentative assignee = %q, want bob", result.Triage.TentativeAssignee)
+	}
+	if result.Triage.AssignedAssignee != "owner" {
+		t.Fatalf("assigned assignee = %q, want owner fallback", result.Triage.AssignedAssignee)
+	}
+}
+
 func TestResolveTriageAssignee_ShallowHistoryFallsBackToTriageOwner(t *testing.T) {
 	runner := &fakeHistoryRunner{outByCmd: map[string]string{
 		historyKey("rev-parse", "--is-shallow-repository"): "true\n",
@@ -115,11 +135,27 @@ func TestContributorsForPaths_GitFailureReturnsError(t *testing.T) {
 	}
 }
 
+func TestContributorsForPaths_IgnoresPlainEmailLocalParts(t *testing.T) {
+	runner := &fakeHistoryRunner{outByCmd: map[string]string{
+		historyKey("rev-parse", "--is-shallow-repository"):                                       "false\n",
+		historyKey("log", "--max-count=500", "--no-merges", "--format=%ae%x00%an", "--", "x.go"): "victim@example.com\x00Victim\n123+alice@users.noreply.github.com\x00Alice\n",
+	}}
+
+	got, err := contributorsForPaths(context.Background(), runner, "/repo", []string{"x.go"})
+	if err != nil {
+		t.Fatalf("contributorsForPaths: %v", err)
+	}
+	if len(got) != 1 || got[0].login != "alice" {
+		t.Fatalf("contributors = %+v, want only alice from GitHub noreply email", got)
+	}
+}
+
 func TestSanitizeAffectedPaths(t *testing.T) {
 	got := sanitizeAffectedPaths([]string{
 		" daemon/internal/issues/pipeline.go ",
 		"../secret",
 		"/abs/path",
+		"-n",
 		".git/config",
 		"daemon/internal/issues/pipeline.go",
 		`flutter_app\lib\main.dart`,
