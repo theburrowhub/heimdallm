@@ -7,6 +7,7 @@ import '../../../shared/widgets/toast.dart';
 import '../../config/config_providers.dart';
 import '../../dashboard/dashboard_providers.dart';
 import '../server_actions.dart' as server_actions;
+import '../server_providers.dart';
 
 class StatusTab extends ConsumerStatefulWidget {
   const StatusTab({super.key});
@@ -78,6 +79,10 @@ class _StatusTabState extends ConsumerState<StatusTab> {
                   onRestart: () => server_actions.restartDaemon(context, ref),
                 ),
               ],
+              const SizedBox(height: 16),
+              const Divider(),
+              const SizedBox(height: 8),
+              _HealthSummary(),
             ],
           ),
         ),
@@ -284,4 +289,31 @@ class _StartStopButton extends ConsumerWidget {
           : () => server_actions.startDaemon(context, ref),
     );
   }
+}
+
+class _HealthSummary extends ConsumerWidget {
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final detail = ref.watch(serverHealthDetailProvider).valueOrNull;
+    if (detail == null) return const SizedBox.shrink();
+    final parts = <String>[];
+    if (detail.version != null && detail.version!.isNotEmpty) {
+      parts.add('Heimdallm ${detail.version}');
+    }
+    if (detail.startedAt != null) {
+      parts.add('running for ${_formatUptime(DateTime.now().difference(detail.startedAt!))}');
+    }
+    if (parts.isEmpty) return const SizedBox.shrink();
+    return Text(
+      parts.join(' — '),
+      style: const TextStyle(fontSize: 12, color: Colors.grey),
+    );
+  }
+}
+
+String _formatUptime(Duration d) {
+  if (d.inDays > 0) return '${d.inDays}d ${d.inHours % 24}h';
+  if (d.inHours > 0) return '${d.inHours}h ${d.inMinutes % 60}m';
+  if (d.inMinutes > 0) return '${d.inMinutes}m';
+  return '${d.inSeconds}s';
 }

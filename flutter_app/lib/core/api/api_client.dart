@@ -43,6 +43,18 @@ class ApiClient {
     }
   }
 
+  /// Returns the full /health payload, or null if the daemon is unreachable.
+  /// Includes status, version (optional), started_at (optional, RFC3339).
+  Future<Map<String, dynamic>?> fetchHealth() async {
+    try {
+      final resp = await _client.get(_uri('/health'), headers: await _authHeaders());
+      if (resp.statusCode != 200) return null;
+      return jsonDecode(resp.body) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<List<PR>> fetchPRs({List<String> states = const []}) async {
     var path = '/prs';
     if (states.isNotEmpty) {
