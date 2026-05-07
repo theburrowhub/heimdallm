@@ -739,7 +739,10 @@ HEIMDALLM_RETENTION_DAYS=90
 max_days = 90
 ```
 
-The purge runs on each poll cycle. Records older than `max_days` are deleted. Set to `0` to disable purging.
+Review/activity records older than `max_days` are deleted. Managed auto-clones
+for repos that are no longer monitored are also purged after `max_days`, but
+only when their `.heimdallm-managed` marker is present. Set to `0` to disable
+purging.
 
 ### Log rotation
 
@@ -936,8 +939,14 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # os.TempDir()/heimdallm/<org>/<repo>. Existing directories are mutated only
 # when they contain Heimdallm's .heimdallm-managed marker; local_dir and
 # local_dir_base checkouts are treated as operator-owned.
-# Manual cleanup is available through the authenticated API:
+# AI CLIs always run with this directory as their process cwd. When the
+# installed CLI advertises a supported repo-context flag in --help, Heimdallm
+# also passes that flag (for example Claude --add-dir, Gemini
+# --include-directories, Codex --cd); otherwise it safely falls back to cwd.
+# Managed clone cleanup is marker-protected and authenticated:
+# DELETE /config/clones                         # all managed clones in configured clone dirs
 # DELETE /config/clones/<url-escaped org/repo>
+# make clean-clones                            # calls DELETE /config/clones
 
 # ── Per-CLI settings (optional) ──────────────────────────────────────────────
 

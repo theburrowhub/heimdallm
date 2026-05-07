@@ -378,6 +378,117 @@ func TestPurgeOnlyRemovesManagedClone(t *testing.T) {
 	}
 }
 
+func TestPurgeAllRemovesOnlyManagedClones(t *testing.T) {
+	m, _, base := newTestManager(t)
+	managed := filepath.Join(base, "heimdallm", "org", "repo")
+	alsoManaged := filepath.Join(base, "heimdallm", "other", "repo")
+	unmanaged := filepath.Join(base, "heimdallm", "org", "unmanaged")
+	mismatchedMarker := filepath.Join(base, "heimdallm", "org", "mismatch")
+	for _, dir := range []string{managed, alsoManaged, unmanaged, mismatchedMarker} {
+		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writeMarker(managed, "org/repo"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMarker(alsoManaged, "other/repo"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMarker(mismatchedMarker, "other/repo"); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := m.PurgeAll(context.Background(), "")
+	if err != nil {
+		t.Fatalf("PurgeAll: %v", err)
+	}
+	if report.Removed != 2 {
+		t.Fatalf("PurgeAll removed = %d, want 2", report.Removed)
+	}
+	for _, dir := range []string{managed, alsoManaged} {
+		if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("managed clone %q still exists or stat failed unexpectedly: %v", dir, err)
+		}
+	}
+	if _, err := os.Stat(unmanaged); err != nil {
+		t.Fatalf("unmanaged clone should remain: %v", err)
+	}
+	if _, err := os.Stat(mismatchedMarker); err != nil {
+		t.Fatalf("mismatched marker clone should remain: %v", err)
+	}
+}
+
+func TestPurgeStaleRemovesOnlyOldUnmonitoredManagedClones(t *testing.T) {
+	m, _, base := newTestManager(t)
+	oldUnmonitored := filepath.Join(base, "heimdallm", "org", "old")
+	oldMonitored := filepath.Join(base, "heimdallm", "org", "keep")
+	recentUnmonitored := filepath.Join(base, "heimdallm", "org", "recent")
+	unmanaged := filepath.Join(base, "heimdallm", "org", "unmanaged")
+	for _, dir := range []string{oldUnmonitored, oldMonitored, recentUnmonitored, unmanaged} {
+		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for repo, dir := range map[string]string{
+		"org/old":    oldUnmonitored,
+		"org/keep":   oldMonitored,
+		"org/recent": recentUnmonitored,
+	} {
+		if err := writeMarker(dir, repo); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	for _, dir := range []string{oldUnmonitored, oldMonitored} {
+		if err := os.Chtimes(filepath.Join(dir, MarkerFile), old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	report, err := m.PurgeStale(context.Background(), "", map[string]struct{}{"org/keep": {}}, 1)
+	if err != nil {
+		t.Fatalf("PurgeStale: %v", err)
+	}
+	if report.Removed != 1 {
+		t.Fatalf("PurgeStale removed = %d, want 1", report.Removed)
+	}
+	if _, err := os.Stat(oldUnmonitored); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old unmonitored clone still exists or stat failed unexpectedly: %v", err)
+	}
+	for _, dir := range []string{oldMonitored, recentUnmonitored, unmanaged} {
+		if _, err := os.Stat(dir); err != nil {
+			t.Fatalf("clone %q should remain: %v", dir, err)
+		}
+	}
+}
+
+func TestPurgeStaleDisabledWhenMaxDaysZero(t *testing.T) {
+	m, _, base := newTestManager(t)
+	managed := filepath.Join(base, "heimdallm", "org", "repo")
+	if err := os.MkdirAll(filepath.Join(managed, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMarker(managed, "org/repo"); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(filepath.Join(managed, MarkerFile), old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := m.PurgeStale(context.Background(), "", nil, 0)
+	if err != nil {
+		t.Fatalf("PurgeStale disabled: %v", err)
+	}
+	if report.Removed != 0 {
+		t.Fatalf("PurgeStale disabled removed = %d, want 0", report.Removed)
+	}
+	if _, err := os.Stat(managed); err != nil {
+		t.Fatalf("managed clone should remain: %v", err)
+	}
+}
+
 func TestPurgeNilManagerIsError(t *testing.T) {
 	var m *Manager
 	err := m.Purge(context.Background(), "org/repo", "")

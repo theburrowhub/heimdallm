@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -280,16 +281,47 @@ func main() {
 	srv := server.New(s, broker, p, apiToken)
 	srv.SetNATSConn(eventBus.Conn())
 	srv.SetConfigPath(cfgPath)
-	srv.SetCleanCloneFn(func(repo string) error {
-		cfgMu.Lock()
-		aiCfg := cfg.AIForRepo(repo)
-		cfgMu.Unlock()
-		return repoCtx.Purge(context.Background(), repo, aiCfg.CloneDir)
-	})
 	shutdownReq := make(chan struct{}, 1)
 
 	// discoverySvc holds the discovered repo cache.
 	discoverySvc := discovery.NewService(ghClient)
+
+	srv.SetCleanCloneFn(func(ctx context.Context, repo string) error {
+		cfgMu.Lock()
+		aiCfg := cfg.AIForRepo(repo)
+		cfgMu.Unlock()
+		return repoCtx.Purge(ctx, repo, aiCfg.CloneDir)
+	})
+	srv.SetCleanClonesFn(func(ctx context.Context) (int, error) {
+		cfgMu.Lock()
+		cfgSnap := cfg
+		cfgMu.Unlock()
+		return purgeAllManagedClones(ctx, repoCtx, cfgSnap)
+	})
+
+	runCloneRetention := func(reason string) {
+		cfgMu.Lock()
+		cfgSnap := cfg
+		var discovered []string
+		if cfg.GitHub.DiscoveryTopic != "" {
+			discovered = discoverySvc.Discovered()
+		}
+		cfgMu.Unlock()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		removed, err := purgeStaleManagedClones(ctx, repoCtx, cfgSnap, discovered)
+		if err != nil {
+			slog.Warn("clone retention purge failed", "reason", reason, "err", err)
+			return
+		}
+		if removed > 0 {
+			slog.Info("clone retention purge removed managed clones", "reason", reason, "removed", removed)
+		}
+	}
+	runCloneRetention("startup")
+	clonePurge := scheduler.New(24*time.Hour, func() { runCloneRetention("periodic") })
+	clonePurge.Start()
+	defer clonePurge.Stop()
 
 	// loginMu guards cachedLogin against concurrent reads/writes from the
 	// poll cycle and HTTP goroutines.
@@ -3266,6 +3298,80 @@ func issueTrackingOverrideMap(ov *config.IssueTrackingOverride) map[string]any {
 	}
 	if ov.Assignees != nil {
 		out["assignees"] = ov.Assignees
+	}
+	return out
+}
+
+func purgeAllManagedClones(ctx context.Context, manager *repoctx.Manager, cfg *config.Config) (int, error) {
+	if manager == nil {
+		return 0, fmt.Errorf("repoctx: nil manager")
+	}
+	var total int
+	var errs []error
+	for _, cloneDir := range managedCloneDirs(cfg) {
+		report, err := manager.PurgeAll(ctx, cloneDir)
+		total += report.Removed
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return total, errors.Join(errs...)
+}
+
+func purgeStaleManagedClones(ctx context.Context, manager *repoctx.Manager, cfg *config.Config, discovered []string) (int, error) {
+	if manager == nil {
+		return 0, fmt.Errorf("repoctx: nil manager")
+	}
+	if cfg == nil || cfg.Retention.MaxDays <= 0 {
+		return 0, nil
+	}
+	monitored := monitoredRepoSet(cfg, discovered)
+	var total int
+	var errs []error
+	for _, cloneDir := range managedCloneDirs(cfg) {
+		report, err := manager.PurgeStale(ctx, cloneDir, monitored, cfg.Retention.MaxDays)
+		total += report.Removed
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return total, errors.Join(errs...)
+}
+
+func managedCloneDirs(cfg *config.Config) []string {
+	seen := map[string]struct{}{}
+	add := func(path string) {
+		seen[strings.TrimSpace(path)] = struct{}{}
+	}
+	add("")
+	if cfg != nil {
+		add(cfg.AI.CloneDir)
+		for _, org := range cfg.AI.Orgs {
+			add(org.CloneDir)
+		}
+		for _, repo := range cfg.AI.Repos {
+			add(repo.CloneDir)
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for path := range seen {
+		out = append(out, path)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func monitoredRepoSet(cfg *config.Config, discovered []string) map[string]struct{} {
+	out := map[string]struct{}{}
+	if cfg == nil {
+		return out
+	}
+	repos := discovery.MergeRepos(cfg.GitHub.Repositories, discovered, cfg.GitHub.NonMonitored)
+	for _, repo := range repos {
+		repo = strings.TrimSpace(repo)
+		if repo != "" {
+			out[repo] = struct{}{}
+		}
 	}
 	return out
 }

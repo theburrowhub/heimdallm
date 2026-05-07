@@ -15,6 +15,7 @@ import (
 )
 
 const executionTimeout = 5 * time.Minute
+const cliHelpTimeout = 2 * time.Second
 
 // ReviewResult is the parsed JSON response from the AI CLI.
 type ReviewResult struct {
@@ -389,7 +390,15 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 		cliPath = cli // best effort; execution will fail with a useful error
 	}
 
-	args := buildArgs(cli, opts)
+	var workDirFlags []string
+	if opts.WorkDir != "" {
+		if err := ValidateWorkDir(opts.WorkDir); err != nil {
+			return nil, err
+		}
+		workDirFlags = detectWorkDirFlags(cli, cliPath, opts.WorkDir)
+	}
+
+	args := buildArgs(cli, opts, workDirFlags)
 	cmd := exec.CommandContext(ctx, cliPath, args...)
 	cmd.Stdin = strings.NewReader(prompt)
 
@@ -401,9 +410,6 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 		cmd.Env = enrichedEnv
 	}
 	if opts.WorkDir != "" {
-		if err := ValidateWorkDir(opts.WorkDir); err != nil {
-			return nil, err
-		}
 		cmd.Dir = opts.WorkDir
 	}
 
@@ -424,7 +430,7 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 }
 
 // buildArgs constructs the CLI argument list based on the CLI name and options.
-func buildArgs(cli string, opts ExecOptions) []string {
+func buildArgs(cli string, opts ExecOptions, workDirFlags []string) []string {
 	var args []string
 
 	switch cli {
@@ -448,7 +454,11 @@ func buildArgs(cli string, opts ExecOptions) []string {
 		}
 	default:
 		// claude, gemini: stdin mode
-		args = append(args, "-p", "-")
+		if cli == "claude" && len(workDirFlags) > 0 {
+			args = append(args, "-p")
+		} else {
+			args = append(args, "-p", "-")
+		}
 		if opts.Model != "" {
 			args = append(args, "--model", opts.Model)
 		}
@@ -478,9 +488,14 @@ func buildArgs(cli string, opts ExecOptions) []string {
 		}
 	}
 
+	args = append(args, workDirFlags...)
+
 	// Append free-form extra flags (split on whitespace)
 	if opts.ExtraFlags != "" {
 		args = append(args, strings.Fields(opts.ExtraFlags)...)
+	}
+	if cli == "claude" && len(workDirFlags) > 0 {
+		args = append(args, "-")
 	}
 
 	return args
@@ -489,7 +504,66 @@ func buildArgs(cli string, opts ExecOptions) []string {
 var (
 	loginPathOnce sync.Once
 	loginPathEnv  []string // os.Environ() + enriched PATH from login shell
+	cliHelpCache  sync.Map // map[string]string, keyed by resolved CLI path
 )
+
+func detectWorkDirFlags(cli, cliPath, workDir string) []string {
+	if workDir == "" || cliPath == "" {
+		return nil
+	}
+	switch cli {
+	case "claude":
+		if cliHelpSupports(cliPath, "--add-dir") {
+			return []string{"--add-dir", workDir}
+		}
+		if cliHelpSupports(cliPath, "--directory") {
+			return []string{"--directory", workDir}
+		}
+	case "gemini":
+		if cliHelpSupports(cliPath, "--include-directories") {
+			return []string{"--include-directories", workDir}
+		}
+		if cliHelpSupports(cliPath, "--include-directory") {
+			return []string{"--include-directory", workDir}
+		}
+		if cliHelpSupports(cliPath, "--cwd") {
+			return []string{"--cwd", workDir}
+		}
+	case "codex":
+		if cliHelpSupports(cliPath, "--cd") {
+			return []string{"--cd", workDir}
+		}
+		if cliHelpSupports(cliPath, "--cwd") {
+			return []string{"--cwd", workDir}
+		}
+	}
+	return nil
+}
+
+func cliHelpSupports(cliPath, flag string) bool {
+	help, ok := cliHelp(cliPath)
+	return ok && strings.Contains(help, flag)
+}
+
+func cliHelp(cliPath string) (string, bool) {
+	if cached, ok := cliHelpCache.Load(cliPath); ok {
+		return cached.(string), true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), cliHelpTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, cliPath, "--help")
+	if env := enrichEnvWithLoginPath(); env != nil {
+		cmd.Env = env
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		slog.Debug("executor: CLI help unavailable; using cwd-only repo context", "cli", cliPath, "err", err)
+		return "", false
+	}
+	help := string(out)
+	cliHelpCache.Store(cliPath, help)
+	return help, true
+}
 
 // enrichEnvWithLoginPath returns the process environment augmented with the PATH
 // from a login shell. Cached after the first call — cheap after startup.

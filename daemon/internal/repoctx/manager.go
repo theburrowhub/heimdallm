@@ -96,6 +96,19 @@ type gitRunner interface {
 	Run(ctx context.Context, dir string, env []string, args ...string) error
 }
 
+// PurgeReport summarizes managed clone cleanup without exposing local paths to
+// HTTP callers.
+type PurgeReport struct {
+	Scanned int
+	Removed int
+}
+
+type managedClone struct {
+	repo          string
+	path          string
+	markerModTime time.Time
+}
+
 // Manager resolves and prepares repository working directories for AI runs.
 // It intentionally uses one exclusive lock per repo for both ModeRead and
 // ModeWrite in v1: managed clones are shared checkouts, and a concurrent
@@ -161,7 +174,7 @@ func (m *Manager) Acquire(ctx context.Context, req Request) (*Handle, error) {
 	h := &Handle{path: path, managed: true, release: release}
 	if req.Mode == ModeWrite {
 		if err = m.EnsureFullHistory(ctx, h, req.Token); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%w; retry after fixing Git access or purge the managed clone via DELETE /config/clones/{repo}", err)
 		}
 	}
 	return h, nil
@@ -195,6 +208,9 @@ func (m *Manager) EnsureFullHistory(ctx context.Context, h *Handle, token string
 	defer cleanup()
 	if err := m.runner().Run(ctx, h.Path(), env, "fetch", "--unshallow", "--prune", "origin"); err != nil {
 		return fmt.Errorf("repoctx: unshallow %s: %w", h.Path(), err)
+	}
+	if err := touchMarker(h.Path()); err != nil {
+		return err
 	}
 	return nil
 }
@@ -236,6 +252,69 @@ func (m *Manager) Purge(ctx context.Context, repo, cloneDir string) error {
 	return nil
 }
 
+// PurgeAll removes every valid Heimdallm-managed clone under cloneDir. It
+// ignores unmanaged directories and invalid markers so operator-owned paths are
+// never removed by a broad cleanup.
+func (m *Manager) PurgeAll(ctx context.Context, cloneDir string) (PurgeReport, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if m == nil {
+		return PurgeReport{}, fmt.Errorf("repoctx: nil manager")
+	}
+	clones, err := m.managedClones(cloneDir)
+	if err != nil {
+		return PurgeReport{}, err
+	}
+	var report PurgeReport
+	var errs []error
+	for _, clone := range clones {
+		report.Scanned++
+		if err := m.purgeTarget(ctx, clone.repo, clone.path); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		report.Removed++
+	}
+	return report, errors.Join(errs...)
+}
+
+// PurgeStale removes managed clones for repos that are no longer monitored and
+// have not been prepared within maxDays. maxDays <= 0 disables cleanup.
+func (m *Manager) PurgeStale(ctx context.Context, cloneDir string, monitored map[string]struct{}, maxDays int) (PurgeReport, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if m == nil {
+		return PurgeReport{}, fmt.Errorf("repoctx: nil manager")
+	}
+	if maxDays <= 0 {
+		return PurgeReport{}, nil
+	}
+	clones, err := m.managedClones(cloneDir)
+	if err != nil {
+		return PurgeReport{}, err
+	}
+	cutoff := time.Now().AddDate(0, 0, -maxDays)
+	var report PurgeReport
+	var errs []error
+	for _, clone := range clones {
+		report.Scanned++
+		if _, ok := monitored[clone.repo]; ok {
+			continue
+		}
+		if clone.markerModTime.After(cutoff) {
+			continue
+		}
+		if err := m.purgeTarget(ctx, clone.repo, clone.path); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		report.Removed++
+	}
+	return report, errors.Join(errs...)
+}
+
 func resolveLocal(req Request) string {
 	configured := strings.TrimSpace(req.ConfiguredLocalDir)
 	if configured != "" {
@@ -268,6 +347,9 @@ func (m *Manager) ensureManagedClone(ctx context.Context, owner, name string, re
 			return "", err
 		}
 		if err := m.updateManagedClone(ctx, target, req.Repo, req.Token); err != nil {
+			return "", err
+		}
+		if err := writeMarker(target, req.Repo); err != nil {
 			return "", err
 		}
 		return target, nil
@@ -329,7 +411,7 @@ func (m *Manager) updateManagedClone(ctx context.Context, target, repo, token st
 	return nil
 }
 
-func (m *Manager) cloneTarget(cloneDir, owner, name string) (string, error) {
+func (m *Manager) cloneBase(cloneDir string) (string, error) {
 	base := strings.TrimSpace(cloneDir)
 	if base == "" {
 		if m != nil && m.tempDir != nil {
@@ -342,6 +424,14 @@ func (m *Manager) cloneTarget(cloneDir, owner, name string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("repoctx: resolve clone_dir %q: %w", base, err)
 	}
+	return baseAbs, nil
+}
+
+func (m *Manager) cloneTarget(cloneDir, owner, name string) (string, error) {
+	baseAbs, err := m.cloneBase(cloneDir)
+	if err != nil {
+		return "", err
+	}
 	target := filepath.Join(baseAbs, owner, name)
 	targetAbs, err := filepath.Abs(target)
 	if err != nil {
@@ -351,6 +441,81 @@ func (m *Manager) cloneTarget(cloneDir, owner, name string) (string, error) {
 		return "", fmt.Errorf("repoctx: clone target %q escapes clone_dir %q", targetAbs, baseAbs)
 	}
 	return targetAbs, nil
+}
+
+func (m *Manager) managedClones(cloneDir string) ([]managedClone, error) {
+	baseAbs, err := m.cloneBase(cloneDir)
+	if err != nil {
+		return nil, err
+	}
+	orgEntries, err := os.ReadDir(baseAbs)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("repoctx: list clone_dir %q: %w", baseAbs, err)
+	}
+
+	var clones []managedClone
+	for _, orgEntry := range orgEntries {
+		if !orgEntry.IsDir() {
+			continue
+		}
+		orgPath := filepath.Join(baseAbs, orgEntry.Name())
+		repoEntries, err := os.ReadDir(orgPath)
+		if err != nil {
+			return nil, fmt.Errorf("repoctx: list clone org %q: %w", orgPath, err)
+		}
+		for _, repoEntry := range repoEntries {
+			if !repoEntry.IsDir() {
+				continue
+			}
+			target := filepath.Join(orgPath, repoEntry.Name())
+			targetAbs, err := filepath.Abs(target)
+			if err != nil || !pathWithin(baseAbs, targetAbs) {
+				continue
+			}
+			marker, info, err := readMarkerInfo(targetAbs)
+			if err != nil || marker.Version != 1 || marker.ManagedBy != "heimdallm" {
+				continue
+			}
+			owner, name, err := splitRepo(marker.Repo)
+			if err != nil {
+				continue
+			}
+			expected, err := m.cloneTarget(cloneDir, owner, name)
+			if err != nil || expected != targetAbs {
+				continue
+			}
+			clones = append(clones, managedClone{
+				repo:          marker.Repo,
+				path:          targetAbs,
+				markerModTime: info.ModTime(),
+			})
+		}
+	}
+	return clones, nil
+}
+
+func (m *Manager) purgeTarget(ctx context.Context, repo, target string) error {
+	unlock, err := m.acquireRepoLock(ctx, repo)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	if _, err := os.Stat(target); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("repoctx: stat clone target %q: %w", target, err)
+	}
+	if err := validateMarker(target, repo); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(target); err != nil {
+		return fmt.Errorf("repoctx: purge %q: %w", target, err)
+	}
+	return nil
 }
 
 func (m *Manager) runner() gitRunner {
@@ -436,21 +601,45 @@ func writeMarker(dir, repo string) error {
 }
 
 func validateMarker(dir, repo string) error {
-	data, err := os.ReadFile(filepath.Join(dir, MarkerFile))
+	marker, _, err := readMarkerInfo(dir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("repoctx: clone target %q exists but is not managed by Heimdallm", dir)
 		}
-		return fmt.Errorf("repoctx: read marker: %w", err)
+		return err
 	}
-	var m marker
-	if err := json.Unmarshal(data, &m); err != nil {
-		return fmt.Errorf("repoctx: invalid marker in %q: %w", dir, err)
-	}
-	if m.Version != 1 || m.ManagedBy != "heimdallm" || m.Repo != repo {
+	if marker.Version != 1 || marker.ManagedBy != "heimdallm" || marker.Repo != repo {
 		return fmt.Errorf("repoctx: marker in %q does not match repo %s", dir, repo)
 	}
 	return nil
+}
+
+func readMarkerInfo(dir string) (marker, os.FileInfo, error) {
+	path := filepath.Join(dir, MarkerFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return marker{}, nil, err
+	}
+	var m marker
+	if err := json.Unmarshal(data, &m); err != nil {
+		return marker{}, nil, fmt.Errorf("repoctx: invalid marker in %q: %w", dir, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return marker{}, nil, fmt.Errorf("repoctx: stat marker in %q: %w", dir, err)
+	}
+	return m, info, nil
+}
+
+func touchMarker(dir string) error {
+	marker, _, err := readMarkerInfo(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return writeMarker(dir, marker.Repo)
 }
 
 func requireGitDir(dir string) error {

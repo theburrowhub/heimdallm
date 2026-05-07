@@ -41,7 +41,8 @@ type Server struct {
 	triggerReviewFn      func(prID int64) error
 	triggerIssueReviewFn func(issueID int64) error
 	triggerPromoteFn     func(issueID int64) error
-	cleanCloneFn         func(repo string) error
+	cleanCloneFn         func(ctx context.Context, repo string) error
+	cleanClonesFn        func(ctx context.Context) (int, error)
 	meFn                 func() (string, error)
 	// configFn returns the current running config as a JSON-serializable map.
 	configFn func() map[string]any
@@ -67,6 +68,7 @@ type Options struct {
 }
 
 const defaultMaxConcurrentReviews = 5
+const cloneCleanupTimeout = 30 * time.Second
 
 // New creates a new Server. p may be nil if the pipeline is not yet configured.
 // apiToken must be the value returned by LoadOrCreateAPIToken — it is required
@@ -169,8 +171,15 @@ func (srv *Server) SetTriggerPromoteFn(fn func(issueID int64) error) {
 	srv.triggerPromoteFn = fn
 }
 
-// SetCleanCloneFn wires the manual managed-clone cleanup callback.
-func (srv *Server) SetCleanCloneFn(fn func(repo string) error) { srv.cleanCloneFn = fn }
+// SetCleanCloneFn wires the manual single-repo managed-clone cleanup callback.
+func (srv *Server) SetCleanCloneFn(fn func(ctx context.Context, repo string) error) {
+	srv.cleanCloneFn = fn
+}
+
+// SetCleanClonesFn wires the manual all-managed-clones cleanup callback.
+func (srv *Server) SetCleanClonesFn(fn func(ctx context.Context) (int, error)) {
+	srv.cleanClonesFn = fn
+}
 
 // SetMeFn wires the authenticated-user callback called by GET /me.
 func (srv *Server) SetMeFn(fn func() (string, error)) { srv.meFn = fn }
@@ -275,6 +284,7 @@ func (srv *Server) buildRouter() chi.Router {
 	r.Delete("/config/repos/{repo}/*", srv.handleDeleteRepoField)
 	r.Patch("/config/orgs/{org}", srv.handlePatchOrgConfig)
 	r.Delete("/config/orgs/{org}/*", srv.handleDeleteOrgField)
+	r.Delete("/config/clones", srv.handleDeleteManagedClones)
 	r.Delete("/config/clones/{repo}", srv.handleDeleteManagedClone)
 	r.Post("/reload", srv.handleReload)
 	r.Post("/shutdown", srv.handleShutdown)
@@ -799,12 +809,38 @@ func (srv *Server) handleDeleteManagedClone(w http.ResponseWriter, r *http.Reque
 		http.Error(w, `{"error":"invalid repo parameter"}`, http.StatusBadRequest)
 		return
 	}
-	if err := srv.cleanCloneFn(repo); err != nil {
+	ctx, cancel := context.WithTimeout(r.Context(), cloneCleanupTimeout)
+	defer cancel()
+	if err := srv.cleanCloneFn(ctx, repo); err != nil {
 		slog.Error("DELETE /config/clones failed", "repo", repo, "err", err)
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			http.Error(w, `{"error":"clone cleanup timed out"}`, http.StatusGatewayTimeout)
+			return
+		}
 		http.Error(w, `{"error":"clone cleanup failed"}`, http.StatusBadRequest)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "repo": repo})
+}
+
+func (srv *Server) handleDeleteManagedClones(w http.ResponseWriter, r *http.Request) {
+	if srv.cleanClonesFn == nil {
+		http.Error(w, `{"error":"clone cleanup not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), cloneCleanupTimeout)
+	defer cancel()
+	removed, err := srv.cleanClonesFn(ctx)
+	if err != nil {
+		slog.Error("DELETE /config/clones failed", "err", err)
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			http.Error(w, `{"error":"clone cleanup timed out"}`, http.StatusGatewayTimeout)
+			return
+		}
+		http.Error(w, `{"error":"clone cleanup failed"}`, http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "removed": removed})
 }
 
 func (srv *Server) handleReload(w http.ResponseWriter, r *http.Request) {

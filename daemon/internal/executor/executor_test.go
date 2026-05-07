@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/heimdallm/daemon/internal/executor"
@@ -73,6 +74,110 @@ func TestExecute(t *testing.T) {
 	if result.Severity == "" {
 		t.Error("expected non-empty severity")
 	}
+}
+
+func TestExecuteRawAddsDetectedWorkDirFlags(t *testing.T) {
+	tests := []struct {
+		cli      string
+		help     string
+		wantFlag string
+	}{
+		{cli: "claude", help: "Usage: claude\n  --add-dir <directories...>\n", wantFlag: "--add-dir"},
+		{cli: "gemini", help: "Usage: gemini\n  --include-directories <dirs>\n", wantFlag: "--include-directories"},
+		{cli: "codex", help: "Usage: codex\n  -C, --cd <DIR>\n", wantFlag: "--cd"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.cli, func(t *testing.T) {
+			binDir := t.TempDir()
+			captureArgs := filepath.Join(t.TempDir(), "args.txt")
+			captureCWD := filepath.Join(t.TempDir(), "cwd.txt")
+			script := fakeCLIScript(tc.help, captureArgs, captureCWD)
+			path := filepath.Join(binDir, tc.cli)
+			if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+				t.Fatalf("write fake CLI: %v", err)
+			}
+			t.Setenv("PATH", binDir)
+
+			workDir := t.TempDir()
+			e := executor.New()
+			if _, err := e.ExecuteRaw(tc.cli, "prompt", executor.ExecOptions{WorkDir: workDir}); err != nil {
+				t.Fatalf("ExecuteRaw: %v", err)
+			}
+
+			argsBytes, err := os.ReadFile(captureArgs)
+			if err != nil {
+				t.Fatalf("read captured args: %v", err)
+			}
+			args := strings.Fields(string(argsBytes))
+			if !containsInOrder(args, tc.wantFlag, workDir) {
+				t.Fatalf("args = %v, want %s %s", args, tc.wantFlag, workDir)
+			}
+			cwdBytes, err := os.ReadFile(captureCWD)
+			if err != nil {
+				t.Fatalf("read captured cwd: %v", err)
+			}
+			if got := strings.TrimSpace(string(cwdBytes)); got != workDir {
+				t.Fatalf("cwd = %q, want %q", got, workDir)
+			}
+		})
+	}
+}
+
+func TestExecuteRawFallsBackToCWDWhenWorkDirFlagUnsupported(t *testing.T) {
+	binDir := t.TempDir()
+	captureArgs := filepath.Join(t.TempDir(), "args.txt")
+	captureCWD := filepath.Join(t.TempDir(), "cwd.txt")
+	script := fakeCLIScript("Usage: claude\n", captureArgs, captureCWD)
+	path := filepath.Join(binDir, "claude")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake CLI: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	workDir := t.TempDir()
+	e := executor.New()
+	if _, err := e.ExecuteRaw("claude", "prompt", executor.ExecOptions{WorkDir: workDir}); err != nil {
+		t.Fatalf("ExecuteRaw: %v", err)
+	}
+	argsBytes, err := os.ReadFile(captureArgs)
+	if err != nil {
+		t.Fatalf("read captured args: %v", err)
+	}
+	if strings.Contains(string(argsBytes), workDir) {
+		t.Fatalf("args = %q, workdir should only be passed via cwd when no supported flag is advertised", string(argsBytes))
+	}
+	cwdBytes, err := os.ReadFile(captureCWD)
+	if err != nil {
+		t.Fatalf("read captured cwd: %v", err)
+	}
+	if got := strings.TrimSpace(string(cwdBytes)); got != workDir {
+		t.Fatalf("cwd = %q, want %q", got, workDir)
+	}
+}
+
+func containsInOrder(args []string, first, second string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == first && args[i+1] == second {
+			return true
+		}
+	}
+	return false
+}
+
+func fakeCLIScript(help, captureArgs, captureCWD string) string {
+	return "#!/bin/sh\n" +
+		"if [ \"$1\" = \"--help\" ]; then\n" +
+		"  printf '%s\\n' " + shellQuote(help) + "\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"printf '%s\\n' \"$*\" > " + shellQuote(captureArgs) + "\n" +
+		"printf '%s\\n' \"$PWD\" > " + shellQuote(captureCWD) + "\n" +
+		"printf '{\"ok\":true}\\n'\n"
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 }
 
 func TestValidateWorkDir(t *testing.T) {

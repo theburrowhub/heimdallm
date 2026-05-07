@@ -44,6 +44,88 @@ func TestAcquireRepoContextNilManagerIsError(t *testing.T) {
 	}
 }
 
+func TestManagedCloneDirsIncludesDefaultAndScopedOverrides(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.AI.CloneDir = "/global"
+	cfg.AI.Orgs = map[string]config.OrgAI{
+		"org": {CloneDir: "/org"},
+	}
+	cfg.AI.Repos = map[string]config.RepoAI{
+		"org/repo":  {CloneDir: "/repo"},
+		"org/other": {CloneDir: "/org"},
+	}
+
+	got := managedCloneDirs(cfg)
+	want := []string{"", "/global", "/org", "/repo"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("managedCloneDirs = %v, want %v", got, want)
+	}
+}
+
+func TestMonitoredRepoSetMergesDiscoveredAndExcludesNonMonitored(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.GitHub.Repositories = []string{"org/static"}
+	cfg.GitHub.NonMonitored = []string{"org/disabled"}
+
+	got := monitoredRepoSet(cfg, []string{"org/discovered", "org/disabled"})
+	for _, repo := range []string{"org/static", "org/discovered"} {
+		if _, ok := got[repo]; !ok {
+			t.Fatalf("monitoredRepoSet missing %s: %v", repo, got)
+		}
+	}
+	if _, ok := got["org/disabled"]; ok {
+		t.Fatalf("monitoredRepoSet includes non-monitored repo: %v", got)
+	}
+}
+
+func TestPurgeStaleManagedClonesUsesRetentionAndConfiguredDirs(t *testing.T) {
+	base := t.TempDir()
+	oldRepo := filepath.Join(base, "org", "old")
+	keepRepo := filepath.Join(base, "org", "keep")
+	for repo, dir := range map[string]string{
+		"org/old":  oldRepo,
+		"org/keep": keepRepo,
+	} {
+		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeManagedMarkerForTest(t, dir, repo)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	for _, dir := range []string{oldRepo, keepRepo} {
+		if err := os.Chtimes(filepath.Join(dir, repoctx.MarkerFile), old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := &config.Config{}
+	cfg.AI.CloneDir = base
+	cfg.GitHub.Repositories = []string{"org/keep"}
+	cfg.Retention.MaxDays = 1
+
+	removed, err := purgeStaleManagedClones(context.Background(), repoctx.NewManager(), cfg, nil)
+	if err != nil {
+		t.Fatalf("purgeStaleManagedClones: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+	if _, err := os.Stat(oldRepo); !os.IsNotExist(err) {
+		t.Fatalf("old unmonitored clone still exists or stat failed unexpectedly: %v", err)
+	}
+	if _, err := os.Stat(keepRepo); err != nil {
+		t.Fatalf("monitored clone should remain: %v", err)
+	}
+}
+
+func writeManagedMarkerForTest(t *testing.T, dir, repo string) {
+	t.Helper()
+	data := []byte(`{"version":1,"repo":"` + repo + `","managed_by":"heimdallm"}` + "\n")
+	if err := os.WriteFile(filepath.Join(dir, repoctx.MarkerFile), data, 0o600); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+}
+
 func seedAgent(t *testing.T, s *store.Store, a store.Agent) {
 	t.Helper()
 	if err := s.UpsertAgent(&a); err != nil {
