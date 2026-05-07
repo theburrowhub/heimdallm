@@ -43,6 +43,38 @@ func TestBuildImplementPrompt_DefaultTemplateContainsSafetyRules(t *testing.T) {
 	}
 }
 
+func TestBuildPrompt_DefaultTemplateContainsLightweightTriageHeuristics(t *testing.T) {
+	ctx := baseCtx()
+	ctx.HasLocalDir = true
+	ctx.TriageOwner = "@maintainer"
+
+	got := issues.BuildPrompt(ctx)
+	for _, want := range []string{
+		"Keep triage lightweight",
+		"git log/blame/shortlog",
+		"Fallback triage owner: @maintainer",
+		`"affected_area"`,
+		`"affected_paths"`,
+		`"priority_label"`,
+		`"assignee_confidence"`,
+		`"assignee_evidence"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("default triage prompt missing %q", want)
+		}
+	}
+}
+
+func TestBuildPromptWithProfile_TriageOwnerPlaceholder(t *testing.T) {
+	ctx := baseCtx()
+	ctx.TriageOwner = "maintainer"
+
+	got := issues.BuildPromptWithProfile(ctx, "owner={triage_owner}", "")
+	if got != "owner=maintainer" {
+		t.Errorf("triage_owner placeholder = %q, want owner=maintainer", got)
+	}
+}
+
 func TestBuildImplementPrompt_ExistingSignatureUnchanged(t *testing.T) {
 	// Guard against accidentally dropping the zero-arg entry point — the
 	// runAutoImplement fallback still calls it when no agent profile is

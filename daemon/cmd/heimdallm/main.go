@@ -838,6 +838,7 @@ func main() {
 		}
 		if repoHandle != nil {
 			defer repoHandle.Release()
+			ensureRepoContextFullHistory(ctx, repoCtx, repoHandle, token, "triage-worker", msg.Repo)
 		}
 
 		extraFlags := agentCfg.ExtraFlags
@@ -870,6 +871,7 @@ func main() {
 			},
 			IssuePromptOverride:     issuePrompt,
 			IssueInstructions:       issueInstructions,
+			TriageOwner:             aiCfg.TriageOwner,
 			ImplementPromptOverride: implPrompt,
 			ImplementInstructions:   implInstructions,
 			PRReviewers:             aiCfg.PRReviewers,
@@ -970,6 +972,7 @@ func main() {
 			},
 			IssuePromptOverride:      issuePrompt,
 			IssueInstructions:        issueInstructions,
+			TriageOwner:              aiCfg.TriageOwner,
 			ImplementPromptOverride:  implPrompt,
 			ImplementInstructions:    implInstructions,
 			PRReviewers:              aiCfg.PRReviewers,
@@ -1493,6 +1496,7 @@ func main() {
 		}
 		if repoHandle != nil {
 			defer repoHandle.Release()
+			ensureRepoContextFullHistory(context.Background(), repoCtx, repoHandle, token, "trigger issue review", iss.Repo)
 		}
 
 		// Reconstruct github.Issue from store data for the pipeline
@@ -1543,6 +1547,7 @@ func main() {
 			},
 			IssuePromptOverride:     issuePrompt,
 			IssueInstructions:       issueInstructions,
+			TriageOwner:             aiCfg.TriageOwner,
 			ImplementPromptOverride: implPrompt,
 			ImplementInstructions:   implInstructions,
 			PRReviewers:             aiCfg.PRReviewers,
@@ -2502,6 +2507,9 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 			}
 			aiCfg.LocalDir = ""
 		} else if repoHandle != nil {
+			if issue.Mode == config.IssueModeReviewOnly {
+				ensureRepoContextFullHistory(ctx, a.repoCtx, repoHandle, a.ghToken, "issue poll", issue.Repo)
+			}
 			releaseRepoContext = repoHandle.Release
 		}
 
@@ -2535,6 +2543,7 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 			},
 			IssuePromptOverride:      issuePrompt,
 			IssueInstructions:        issueInstructions,
+			TriageOwner:              aiCfg.TriageOwner,
 			ImplementPromptOverride:  implPrompt,
 			ImplementInstructions:    implInstructions,
 			PRReviewers:              aiCfg.PRReviewers,
@@ -3124,6 +3133,16 @@ func acquireRepoContext(
 	// path.
 	aiCfg.LocalDir = h.Path()
 	return h, nil
+}
+
+func ensureRepoContextFullHistory(ctx context.Context, manager *repoctx.Manager, h *repoctx.Handle, token, scope, repo string) {
+	if manager == nil || h == nil {
+		return
+	}
+	if err := manager.EnsureFullHistory(ctx, h, token); err != nil {
+		slog.Warn(scope+": full git history unavailable; triage owner verification may fall back",
+			"repo", repo, "err", err)
+	}
 }
 
 func logRepoContextFallback(scope, repo string, err error) {

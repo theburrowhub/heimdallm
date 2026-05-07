@@ -664,8 +664,8 @@ func (c *Client) FetchIssueCommentsOnly(repo string, number int) ([]Comment, err
 // timeline (commits, labels, comments, assignments…) are filtered out
 // at fetch time so callers don't have to reason about them.
 type TimelineEvent struct {
-	Event     string    // "review_requested" or "review_dismissed"
-	Actor     string    // login of the user who triggered the event
+	Event     string // "review_requested" or "review_dismissed"
+	Actor     string // login of the user who triggered the event
 	CreatedAt time.Time
 }
 
@@ -861,6 +861,38 @@ func (c *Client) FetchLabels(repo string) ([]string, error) {
 		names[i] = l.Name
 	}
 	return names, nil
+}
+
+// CreateLabel creates a repository label. A 422 is tolerated because GitHub
+// returns it when a racing process created the label after FetchLabels.
+func (c *Client) CreateLabel(repo, name, color, description string) error {
+	if repo == "" || name == "" {
+		return nil
+	}
+	payload, err := json.Marshal(map[string]string{
+		"name":        name,
+		"color":       strings.TrimPrefix(color, "#"),
+		"description": description,
+	})
+	if err != nil {
+		return fmt.Errorf("github: marshal label: %w", err)
+	}
+	resp, err := c.doWithBody("POST",
+		fmt.Sprintf("/repos/%s/labels", repo),
+		"application/vnd.github+json", "application/json",
+		strings.NewReader(string(payload)))
+	if err != nil {
+		return fmt.Errorf("github: create label: %w", err)
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusUnprocessableEntity {
+		return nil
+	}
+	if resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("github: create label %q in %s: status %d: %s", name, repo, resp.StatusCode, safeTruncate(string(body), maxErrBodyLen))
+	}
+	return nil
 }
 
 // AddIssueLabel adds a label to an issue. No-op if the label is already present.

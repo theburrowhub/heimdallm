@@ -135,9 +135,19 @@ type Notifier interface {
 
 // Triage is the structured triage block returned by the LLM.
 type Triage struct {
-	Severity          string `json:"severity"`
-	Category          string `json:"category"`
-	SuggestedAssignee string `json:"suggested_assignee"`
+	Severity             string   `json:"severity"`
+	Category             string   `json:"category"`
+	AffectedArea         string   `json:"affected_area,omitempty"`
+	AffectedPaths        []string `json:"affected_paths,omitempty"`
+	PriorityLabel        string   `json:"priority_label,omitempty"`
+	SuggestedAssignee    string   `json:"suggested_assignee"`
+	AssignedAssignee     string   `json:"assigned_assignee,omitempty"`
+	AssigneeReason       string   `json:"assignee_reason,omitempty"`
+	AssigneeConfidence   string   `json:"assignee_confidence,omitempty"`
+	AssigneeEvidence     []string `json:"assignee_evidence,omitempty"`
+	AssignmentSource     string   `json:"assignment_source,omitempty"`
+	TentativeAssignee    string   `json:"tentative_assignee,omitempty"`
+	AssignmentDiagnostic string   `json:"assignment_diagnostic,omitempty"`
 }
 
 // IssueReviewResult is the parsed LLM output for a triage run. Mirrors the
@@ -179,6 +189,7 @@ type RunOptions struct {
 	// Priority: IssuePromptOverride (full template) > IssueInstructions (injected into default) > built-in default.
 	IssuePromptOverride string // full custom template from repo-level agent
 	IssueInstructions   string // plain text injected into default template
+	TriageOwner         string // fallback issue assignee resolved repo > org > global
 
 	// Auto_implement prompt customization (same resolution shape as the
 	// triage pair above, but consulted only on the runAutoImplement path).
@@ -488,6 +499,7 @@ func (p *Pipeline) runReviewOnly(ctx context.Context, issue *github.Issue, issue
 		Comments:      humanComments,
 		HasLocalDir:   workDir != "",
 		TriageContext: triageCtx,
+		TriageOwner:   opts.TriageOwner,
 	}
 	prompt := BuildPromptWithProfile(promptCtx, opts.IssuePromptOverride, opts.IssueInstructions)
 
@@ -506,6 +518,7 @@ func (p *Pipeline) runReviewOnly(ctx context.Context, issue *github.Issue, issue
 		p.publishError(issueID, issue, err)
 		return nil, fmt.Errorf("issues pipeline: parse result: %w", err)
 	}
+	enrichTriageResult(ctx, result, workDir, opts.TriageOwner, defaultGitHistoryRunner{})
 
 	// Build + post the Markdown comment. PostComment failure is not fatal —
 	// the review is still persisted locally with a zero pr_created so
@@ -516,6 +529,7 @@ func (p *Pipeline) runReviewOnly(ctx context.Context, issue *github.Issue, issue
 		slog.Warn("issues pipeline: PostComment failed, review will be stored locally only",
 			"repo", issue.Repo, "number", issue.Number, "err", postErr)
 	}
+	applyIssueTriageMetadata(p.gh, issue.Repo, issue.Number, result)
 
 	triageJSON, err := json.Marshal(result.Triage)
 	if err != nil {
@@ -914,6 +928,12 @@ func parseIssueResult(data []byte) (*IssueReviewResult, error) {
 	if r.Severity == "" {
 		r.Severity = "low"
 	}
+	r.Severity = normalizeSeverity(r.Severity)
+	if r.Triage.Severity == "" {
+		r.Triage.Severity = r.Severity
+	} else {
+		r.Triage.Severity = normalizeSeverity(r.Triage.Severity)
+	}
 	return &r, nil
 }
 
@@ -950,6 +970,56 @@ func applyPRMetadata(gh PRMetadataApplier, repo string, prNumber int, opts RunOp
 				"repo", repo, "pr", prNumber, "err", err)
 		}
 	}
+}
+
+// IssueLabelCatalog is optionally implemented by GitHub clients that can
+// inspect/create repository labels. Tests and custom clients can omit it; the
+// pipeline still attempts AddLabels and treats failures as non-fatal.
+type IssueLabelCatalog interface {
+	FetchLabels(repo string) ([]string, error)
+	CreateLabel(repo, name, color, description string) error
+}
+
+func applyIssueTriageMetadata(gh issueGitHub, repo string, number int, r *IssueReviewResult) {
+	if r == nil {
+		return
+	}
+	if label := strings.TrimSpace(r.Triage.PriorityLabel); label != "" {
+		label = ensureIssueLabel(gh, repo, label, r.Severity)
+		if err := gh.AddLabels(repo, number, []string{label}); err != nil {
+			slog.Warn("issues pipeline: add priority label failed",
+				"repo", repo, "issue", number, "label", label, "err", err)
+		}
+	}
+	if assignee := strings.TrimSpace(r.Triage.AssignedAssignee); assignee != "" {
+		if err := gh.SetAssignees(repo, number, []string{assignee}); err != nil {
+			slog.Warn("issues pipeline: set issue assignee failed",
+				"repo", repo, "issue", number, "assignee", assignee, "err", err)
+		}
+	}
+}
+
+func ensureIssueLabel(gh issueGitHub, repo, label, severity string) string {
+	catalog, ok := gh.(IssueLabelCatalog)
+	if !ok {
+		return label
+	}
+	labels, err := catalog.FetchLabels(repo)
+	if err != nil {
+		slog.Warn("issues pipeline: fetch labels failed; trying priority label directly",
+			"repo", repo, "label", label, "err", err)
+		return label
+	}
+	for _, existing := range labels {
+		if strings.EqualFold(existing, label) {
+			return existing
+		}
+	}
+	if err := catalog.CreateLabel(repo, label, priorityLabelColor(severity), "Heimdallm triage priority"); err != nil {
+		slog.Warn("issues pipeline: create priority label failed; trying to apply anyway",
+			"repo", repo, "label", label, "err", err)
+	}
+	return label
 }
 
 // extractSeverity pulls the severity string from a triage JSON blob.
@@ -1026,11 +1096,37 @@ func BuildMarkdownComment(r *IssueReviewResult) string {
 	if r.Triage.Severity != "" {
 		sb.WriteString(fmt.Sprintf("- **Suggested severity:** %s\n", r.Triage.Severity))
 	}
+	if r.Triage.PriorityLabel != "" {
+		sb.WriteString(fmt.Sprintf("- **Priority label:** %s\n", r.Triage.PriorityLabel))
+	}
+	if r.Triage.AffectedArea != "" {
+		sb.WriteString(fmt.Sprintf("- **Likely affected area:** %s\n", r.Triage.AffectedArea))
+	}
+	if len(r.Triage.AffectedPaths) > 0 {
+		sb.WriteString(fmt.Sprintf("- **Affected paths:** %s\n", strings.Join(r.Triage.AffectedPaths, ", ")))
+	}
+	if r.Triage.AssignedAssignee != "" {
+		sb.WriteString(fmt.Sprintf("- **Assigned owner:** @%s\n", strings.TrimLeft(r.Triage.AssignedAssignee, "@")))
+	} else if r.Triage.TentativeAssignee != "" {
+		sb.WriteString(fmt.Sprintf("- **Tentative owner:** @%s\n", strings.TrimLeft(r.Triage.TentativeAssignee, "@")))
+	}
 	if r.Triage.SuggestedAssignee != "" {
 		// Strip any leading '@' the LLM may have included so the template
 		// does not render a double '@@alice' that pings nobody.
 		assignee := strings.TrimLeft(r.Triage.SuggestedAssignee, "@")
 		sb.WriteString(fmt.Sprintf("- **Suggested assignee:** @%s\n", assignee))
+	}
+	if r.Triage.AssigneeReason != "" {
+		sb.WriteString(fmt.Sprintf("- **Owner rationale:** %s\n", r.Triage.AssigneeReason))
+	}
+	if r.Triage.AssigneeConfidence != "" {
+		sb.WriteString(fmt.Sprintf("- **Owner confidence:** %s\n", r.Triage.AssigneeConfidence))
+	}
+	if len(r.Triage.AssigneeEvidence) > 0 {
+		sb.WriteString("- **Owner evidence:**\n")
+		for _, ev := range r.Triage.AssigneeEvidence {
+			sb.WriteString(fmt.Sprintf("  - %s\n", ev))
+		}
 	}
 	sb.WriteString("\n")
 
