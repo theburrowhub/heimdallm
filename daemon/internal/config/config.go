@@ -341,6 +341,8 @@ type RepoAI struct {
 	AutoPromoteRefinement *bool  `toml:"auto_promote_refinement,omitempty"`
 
 	// PR creation metadata (applied by auto_implement after CreatePR).
+	// Nil slices inherit from org/global; non-nil empty slices explicitly
+	// clear inherited values for this repo.
 	PRReviewers []string `toml:"pr_reviewers"`       // GitHub logins to request review from
 	PRAssignee  string   `toml:"pr_assignee"`        // GitHub login to assign the PR to
 	PRLabels    []string `toml:"pr_labels"`          // labels to add to the PR
@@ -397,6 +399,8 @@ type OrgAI struct {
 	AutoPromoteTriage     *bool  `toml:"auto_promote_triage,omitempty"`
 	AutoPromoteRefinement *bool  `toml:"auto_promote_refinement,omitempty"`
 
+	// Nil slices inherit from global; non-nil empty slices explicitly clear
+	// inherited values for every repo in this org.
 	PRReviewers []string `toml:"pr_reviewers"`
 	PRAssignee  string   `toml:"pr_assignee"`
 	PRLabels    []string `toml:"pr_labels"`
@@ -561,104 +565,114 @@ func (c *Config) AIForRepo(repo string) RepoAI {
 }
 
 func applyOrgAI(out *RepoAI, o OrgAI) {
-	if o.Primary != "" {
-		out.Primary = o.Primary
-	}
-	if o.Fallback != "" {
-		out.Fallback = o.Fallback
-	}
-	if o.ReviewMode != "" {
-		out.ReviewMode = o.ReviewMode
-	}
-	if o.Prompt != "" {
-		out.Prompt = o.Prompt
-	}
-	if o.IssuePrompt != "" {
-		out.IssuePrompt = o.IssuePrompt
-	}
-	if o.ImplementPrompt != "" {
-		out.ImplementPrompt = o.ImplementPrompt
-	}
-	if o.LocalDir != "" {
-		out.LocalDir = o.LocalDir
-	}
-	if o.TriageOwner != "" {
-		out.TriageOwner = o.TriageOwner
-	}
-	if o.CloneDir != "" {
-		out.CloneDir = o.CloneDir
-	}
-	if o.AutoPromoteTriage != nil {
-		out.AutoPromoteTriage = o.AutoPromoteTriage
-	}
-	if o.AutoPromoteRefinement != nil {
-		out.AutoPromoteRefinement = o.AutoPromoteRefinement
-	}
-	if o.PRReviewers != nil {
-		out.PRReviewers = o.PRReviewers
-	}
-	if o.PRLabels != nil {
-		out.PRLabels = o.PRLabels
-	}
-	if o.PRAssignee != "" {
-		out.PRAssignee = o.PRAssignee
-	}
-	if o.PRDraft != nil {
-		out.PRDraft = o.PRDraft
-	}
-	if o.GeneratePRDescription != nil {
-		out.GeneratePRDescription = o.GeneratePRDescription
-	}
+	applyScopedAI(out, scopedAIFields{
+		Primary:               o.Primary,
+		Fallback:              o.Fallback,
+		ReviewMode:            o.ReviewMode,
+		Prompt:                o.Prompt,
+		IssuePrompt:           o.IssuePrompt,
+		ImplementPrompt:       o.ImplementPrompt,
+		LocalDir:              o.LocalDir,
+		TriageOwner:           o.TriageOwner,
+		CloneDir:              o.CloneDir,
+		AutoPromoteTriage:     o.AutoPromoteTriage,
+		AutoPromoteRefinement: o.AutoPromoteRefinement,
+		PRReviewers:           o.PRReviewers,
+		PRLabels:              o.PRLabels,
+		PRAssignee:            o.PRAssignee,
+		PRDraft:               o.PRDraft,
+		GeneratePRDescription: o.GeneratePRDescription,
+	})
 }
 
 func applyRepoAI(out *RepoAI, r RepoAI) {
-	if r.Primary != "" {
-		out.Primary = r.Primary
+	applyScopedAI(out, scopedAIFields{
+		Primary:               r.Primary,
+		Fallback:              r.Fallback,
+		ReviewMode:            r.ReviewMode,
+		Prompt:                r.Prompt,
+		IssuePrompt:           r.IssuePrompt,
+		ImplementPrompt:       r.ImplementPrompt,
+		LocalDir:              r.LocalDir,
+		TriageOwner:           r.TriageOwner,
+		CloneDir:              r.CloneDir,
+		AutoPromoteTriage:     r.AutoPromoteTriage,
+		AutoPromoteRefinement: r.AutoPromoteRefinement,
+		PRReviewers:           r.PRReviewers,
+		PRLabels:              r.PRLabels,
+		PRAssignee:            r.PRAssignee,
+		PRDraft:               r.PRDraft,
+		GeneratePRDescription: r.GeneratePRDescription,
+	})
+}
+
+type scopedAIFields struct {
+	Primary               string
+	Fallback              string
+	ReviewMode            string
+	Prompt                string
+	IssuePrompt           string
+	ImplementPrompt       string
+	LocalDir              string
+	TriageOwner           string
+	CloneDir              string
+	AutoPromoteTriage     *bool
+	AutoPromoteRefinement *bool
+	PRReviewers           []string
+	PRLabels              []string
+	PRAssignee            string
+	PRDraft               *bool
+	GeneratePRDescription *bool
+}
+
+func applyScopedAI(out *RepoAI, fields scopedAIFields) {
+	if fields.Primary != "" {
+		out.Primary = fields.Primary
 	}
-	if r.Fallback != "" {
-		out.Fallback = r.Fallback
+	if fields.Fallback != "" {
+		out.Fallback = fields.Fallback
 	}
-	if r.ReviewMode != "" {
-		out.ReviewMode = r.ReviewMode
+	if fields.ReviewMode != "" {
+		out.ReviewMode = fields.ReviewMode
 	}
-	if r.Prompt != "" {
-		out.Prompt = r.Prompt
+	if fields.Prompt != "" {
+		out.Prompt = fields.Prompt
 	}
-	if r.IssuePrompt != "" {
-		out.IssuePrompt = r.IssuePrompt
+	if fields.IssuePrompt != "" {
+		out.IssuePrompt = fields.IssuePrompt
 	}
-	if r.ImplementPrompt != "" {
-		out.ImplementPrompt = r.ImplementPrompt
+	if fields.ImplementPrompt != "" {
+		out.ImplementPrompt = fields.ImplementPrompt
 	}
-	if r.LocalDir != "" {
-		out.LocalDir = r.LocalDir
+	if fields.LocalDir != "" {
+		out.LocalDir = fields.LocalDir
 	}
-	if r.TriageOwner != "" {
-		out.TriageOwner = r.TriageOwner
+	if fields.TriageOwner != "" {
+		out.TriageOwner = fields.TriageOwner
 	}
-	if r.CloneDir != "" {
-		out.CloneDir = r.CloneDir
+	if fields.CloneDir != "" {
+		out.CloneDir = fields.CloneDir
 	}
-	if r.AutoPromoteTriage != nil {
-		out.AutoPromoteTriage = r.AutoPromoteTriage
+	if fields.AutoPromoteTriage != nil {
+		out.AutoPromoteTriage = fields.AutoPromoteTriage
 	}
-	if r.AutoPromoteRefinement != nil {
-		out.AutoPromoteRefinement = r.AutoPromoteRefinement
+	if fields.AutoPromoteRefinement != nil {
+		out.AutoPromoteRefinement = fields.AutoPromoteRefinement
 	}
-	if r.PRReviewers != nil {
-		out.PRReviewers = r.PRReviewers
+	if fields.PRReviewers != nil {
+		out.PRReviewers = fields.PRReviewers
 	}
-	if r.PRLabels != nil {
-		out.PRLabels = r.PRLabels
+	if fields.PRLabels != nil {
+		out.PRLabels = fields.PRLabels
 	}
-	if r.PRAssignee != "" {
-		out.PRAssignee = r.PRAssignee
+	if fields.PRAssignee != "" {
+		out.PRAssignee = fields.PRAssignee
 	}
-	if r.PRDraft != nil {
-		out.PRDraft = r.PRDraft
+	if fields.PRDraft != nil {
+		out.PRDraft = fields.PRDraft
 	}
-	if r.GeneratePRDescription != nil {
-		out.GeneratePRDescription = r.GeneratePRDescription
+	if fields.GeneratePRDescription != nil {
+		out.GeneratePRDescription = fields.GeneratePRDescription
 	}
 }
 

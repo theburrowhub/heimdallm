@@ -535,6 +535,18 @@ pr_labels    = ["auto-generated"]
 resolution path as repo overrides, but prefer `local_dir_base` or per-repo
 `local_dir` unless every repo in the org should use the same checkout path.
 
+Scoped overrides distinguish "unset" from "set to empty/false":
+
+- Omit `enabled` under `ai.orgs.*.issue_tracking` or
+  `ai.repos.*.issue_tracking` to inherit. If labels are present and `enabled`
+  is omitted, Heimdallm still treats that scope as enabled, preserving the
+  historical labels-imply-enabled behaviour.
+- Set `enabled = false` to explicitly disable issue tracking at that scope,
+  even when labels are also present.
+- Omit list fields such as `pr_reviewers`, `pr_labels`, `develop_labels`, or
+  `review_only_labels` to inherit. Set them to `[]` to explicitly clear the
+  inherited list.
+
 ### Per-repo overrides
 
 ```toml

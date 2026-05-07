@@ -96,6 +96,8 @@ review_mode = "single"   # "single" or "multi"
 
 # Per-org overrides (optional)
 # Applied to all repos in the org unless overridden per-repo.
+# Omit fields to inherit. Empty arrays such as pr_reviewers = [] explicitly
+# clear inherited lists; enabled = false explicitly disables issue tracking.
 # [ai.orgs."freepik-company"]
 # primary = "gemini"
 # fallback = "claude"

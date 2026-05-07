@@ -197,20 +197,44 @@ func cfgOrgLines(cfg map[string]any) []string {
 		sub = cfgSubList(sub, "PR labels", ov["pr_labels"])
 		sub = cfgSubKV(sub, "PR draft", ov["pr_draft"])
 		if it, ok := ov["issue_tracking"].(map[string]any); ok {
-			sub = cfgSubKV(sub, "Issue tracking enabled", it["enabled"])
-			sub = cfgSubKV(sub, "Issue filter mode", it["filter_mode"])
-			sub = cfgSubKV(sub, "Issue default action", it["default_action"])
-			sub = cfgSubList(sub, "Develop labels", it["develop_labels"])
-			sub = cfgSubList(sub, "Review only labels", it["review_only_labels"])
-			sub = cfgSubList(sub, "Skip labels", it["skip_labels"])
-			sub = cfgSubList(sub, "Blocked labels", it["blocked_labels"])
-			sub = cfgSubKV(sub, "Promote to label", it["promote_to_label"])
-			sub = cfgSubList(sub, "Issue organizations", it["organizations"])
-			sub = cfgSubList(sub, "Issue assignees", it["assignees"])
+			sub = cfgIssueTrackingSubLines(sub, it)
 		}
 		if len(sub) > 0 {
 			out = append(out, fmt.Sprintf("  %s", cfgKeyStyle.Render(org)))
 			out = append(out, sub...)
+		}
+	}
+	return out
+}
+
+type cfgIssueTrackingLine struct {
+	label string
+	key   string
+	list  bool
+}
+
+var cfgIssueTrackingLineSpecs = []cfgIssueTrackingLine{
+	{label: "Enabled", key: "enabled"},
+	{label: "Develop enabled", key: "develop_enabled"},
+	{label: "Filter mode", key: "filter_mode"},
+	{label: "Default action", key: "default_action"},
+	{label: "Organizations", key: "organizations", list: true},
+	{label: "Assignees", key: "assignees", list: true},
+	{label: "Develop labels", key: "develop_labels", list: true},
+	{label: "Review only labels", key: "review_only_labels", list: true},
+	{label: "Skip labels", key: "skip_labels", list: true},
+	{label: "Blocked labels", key: "blocked_labels", list: true},
+	{label: "Promote to label", key: "promote_to_label"},
+}
+
+func cfgIssueTrackingSubLines(out []string, m map[string]any) []string {
+	for _, spec := range cfgIssueTrackingLineSpecs {
+		if spec.list {
+			out = cfgSubList(out, spec.label, m[spec.key])
+		} else if _, ok := m[spec.key]; ok {
+			out = cfgSubKVPresent(out, spec.label, m[spec.key])
+		} else {
+			out = cfgSubKV(out, spec.label, m[spec.key])
 		}
 	}
 	return out
@@ -222,16 +246,13 @@ func cfgIssueTrackingLines(cfg map[string]any) []string {
 		return nil
 	}
 	var out []string
-	out = cfgKV(out, "Enabled", m["enabled"])
-	out = cfgKV(out, "Filter mode", m["filter_mode"])
-	out = cfgKV(out, "Default action", m["default_action"])
-	out = cfgStringList(out, "Organizations", m["organizations"])
-	out = cfgStringList(out, "Assignees", m["assignees"])
-	out = cfgStringList(out, "Develop labels", m["develop_labels"])
-	out = cfgStringList(out, "Review only labels", m["review_only_labels"])
-	out = cfgStringList(out, "Skip labels", m["skip_labels"])
-	out = cfgStringList(out, "Blocked labels", m["blocked_labels"])
-	out = cfgKV(out, "Promote to label", m["promote_to_label"])
+	for _, spec := range cfgIssueTrackingLineSpecs {
+		if spec.list {
+			out = cfgStringList(out, spec.label, m[spec.key])
+		} else {
+			out = cfgKV(out, spec.label, m[spec.key])
+		}
+	}
 	return out
 }
 
@@ -279,6 +300,17 @@ func cfgKV(lines []string, key string, val any) []string {
 
 func cfgSubKV(lines []string, key string, val any) []string {
 	if cfgEmpty(val) {
+		return lines
+	}
+	padded := fmt.Sprintf("%-20s", key+":")
+	return append(lines, fmt.Sprintf("    %s %s", cfgKeyStyle.Render(padded), cfgFmtVal(val)))
+}
+
+func cfgSubKVPresent(lines []string, key string, val any) []string {
+	if val == nil {
+		return lines
+	}
+	if s, ok := val.(string); ok && s == "" {
 		return lines
 	}
 	padded := fmt.Sprintf("%-20s", key+":")

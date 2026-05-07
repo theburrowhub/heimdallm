@@ -2434,32 +2434,68 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 
 // PromoteReady implements scheduler.Tier2Promoter.
 func (a *tier2Adapter) PromoteReady(ctx context.Context, repos []string) (int, error) {
-	type scopedPromoteConfig struct {
-		repo string
-		it   config.IssueTrackingConfig
+	type promoteGroup struct {
+		it    config.IssueTrackingConfig
+		repos []string
 	}
 
 	a.cfgMu.Lock()
 	c := *a.cfg
-	scoped := make([]scopedPromoteConfig, 0, len(repos))
+	groupOrder := make([]string, 0, len(repos))
+	groups := make(map[string]*promoteGroup)
 	for _, repo := range repos {
 		it := c.IssueTrackingForRepo(repo)
 		if it.Enabled && len(it.BlockedLabels) > 0 {
-			scoped = append(scoped, scopedPromoteConfig{repo: repo, it: it})
+			key := promoteIssueTrackingKey(it)
+			group := groups[key]
+			if group == nil {
+				group = &promoteGroup{it: it}
+				groups[key] = group
+				groupOrder = append(groupOrder, key)
+			}
+			group.repos = append(group.repos, repo)
 		}
 	}
 	a.cfgMu.Unlock()
 
 	total := 0
-	var firstErr error
-	for _, item := range scoped {
-		n, err := issuepipeline.PromoteReady(ctx, a.ghClient, item.it, []string{item.repo}, a.broker)
+	var promoteErr error
+	for _, key := range groupOrder {
+		item := groups[key]
+		n, err := issuepipeline.PromoteReady(ctx, a.ghClient, item.it, item.repos, a.broker)
 		total += n
-		if err != nil && firstErr == nil {
-			firstErr = err
+		if err != nil {
+			promoteErr = errors.Join(promoteErr, fmt.Errorf("issues promote for %s: %w", strings.Join(item.repos, ","), err))
 		}
 	}
-	return total, firstErr
+	return total, promoteErr
+}
+
+func promoteIssueTrackingKey(it config.IssueTrackingConfig) string {
+	b, _ := json.Marshal(struct {
+		Enabled          bool              `json:"enabled"`
+		FilterMode       config.FilterMode `json:"filter_mode"`
+		Organizations    []string          `json:"organizations"`
+		Assignees        []string          `json:"assignees"`
+		DevelopLabels    []string          `json:"develop_labels"`
+		ReviewOnlyLabels []string          `json:"review_only_labels"`
+		SkipLabels       []string          `json:"skip_labels"`
+		BlockedLabels    []string          `json:"blocked_labels"`
+		PromoteToLabel   string            `json:"promote_to_label"`
+		DefaultAction    string            `json:"default_action"`
+	}{
+		Enabled:          it.Enabled,
+		FilterMode:       it.FilterMode,
+		Organizations:    it.Organizations,
+		Assignees:        it.Assignees,
+		DevelopLabels:    it.DevelopLabels,
+		ReviewOnlyLabels: it.ReviewOnlyLabels,
+		SkipLabels:       it.SkipLabels,
+		BlockedLabels:    it.BlockedLabels,
+		PromoteToLabel:   it.PromoteToLabel,
+		DefaultAction:    it.DefaultAction,
+	})
+	return string(b)
 }
 
 // PRAlreadyReviewed implements scheduler.Tier2Store.
@@ -2965,9 +3001,20 @@ func repoAIOverrideMap(ai config.RepoAI) map[string]any {
 		"review_mode": ai.ReviewMode,
 		"local_dir":   ai.LocalDir,
 	}
-	addCommonAIOverrideFields(out, ai.Prompt, ai.IssuePrompt, ai.ImplementPrompt,
-		ai.TriageOwner, ai.CloneDir, ai.AutoPromoteTriage, ai.AutoPromoteRefinement,
-		ai.PRReviewers, ai.PRAssignee, ai.PRLabels, ai.PRDraft, ai.GeneratePRDescription)
+	addCommonAIOverrideFields(out, aiOverrideFields{
+		Prompt:                ai.Prompt,
+		IssuePrompt:           ai.IssuePrompt,
+		ImplementPrompt:       ai.ImplementPrompt,
+		TriageOwner:           ai.TriageOwner,
+		CloneDir:              ai.CloneDir,
+		AutoPromoteTriage:     ai.AutoPromoteTriage,
+		AutoPromoteRefinement: ai.AutoPromoteRefinement,
+		PRReviewers:           ai.PRReviewers,
+		PRAssignee:            ai.PRAssignee,
+		PRLabels:              ai.PRLabels,
+		PRDraft:               ai.PRDraft,
+		GeneratePRDescription: ai.GeneratePRDescription,
+	})
 	if ai.IssueTracking != nil {
 		out["issue_tracking"] = issueTrackingOverrideMap(ai.IssueTracking)
 	}
@@ -2988,53 +3035,77 @@ func orgAIOverrideMap(ai config.OrgAI) map[string]any {
 	if ai.LocalDir != "" {
 		out["local_dir"] = ai.LocalDir
 	}
-	addCommonAIOverrideFields(out, ai.Prompt, ai.IssuePrompt, ai.ImplementPrompt,
-		ai.TriageOwner, ai.CloneDir, ai.AutoPromoteTriage, ai.AutoPromoteRefinement,
-		ai.PRReviewers, ai.PRAssignee, ai.PRLabels, ai.PRDraft, ai.GeneratePRDescription)
+	addCommonAIOverrideFields(out, aiOverrideFields{
+		Prompt:                ai.Prompt,
+		IssuePrompt:           ai.IssuePrompt,
+		ImplementPrompt:       ai.ImplementPrompt,
+		TriageOwner:           ai.TriageOwner,
+		CloneDir:              ai.CloneDir,
+		AutoPromoteTriage:     ai.AutoPromoteTriage,
+		AutoPromoteRefinement: ai.AutoPromoteRefinement,
+		PRReviewers:           ai.PRReviewers,
+		PRAssignee:            ai.PRAssignee,
+		PRLabels:              ai.PRLabels,
+		PRDraft:               ai.PRDraft,
+		GeneratePRDescription: ai.GeneratePRDescription,
+	})
 	if ai.IssueTracking != nil {
 		out["issue_tracking"] = issueTrackingOverrideMap(ai.IssueTracking)
 	}
 	return out
 }
 
-func addCommonAIOverrideFields(out map[string]any, prompt, issuePrompt, implementPrompt, triageOwner, cloneDir string,
-	autoPromoteTriage, autoPromoteRefinement *bool, prReviewers []string, prAssignee string, prLabels []string,
-	prDraft, generatePRDescription *bool) {
-	if prompt != "" {
-		out["prompt"] = prompt
+type aiOverrideFields struct {
+	Prompt                string
+	IssuePrompt           string
+	ImplementPrompt       string
+	TriageOwner           string
+	CloneDir              string
+	AutoPromoteTriage     *bool
+	AutoPromoteRefinement *bool
+	PRReviewers           []string
+	PRAssignee            string
+	PRLabels              []string
+	PRDraft               *bool
+	GeneratePRDescription *bool
+}
+
+func addCommonAIOverrideFields(out map[string]any, fields aiOverrideFields) {
+	if fields.Prompt != "" {
+		out["prompt"] = fields.Prompt
 	}
-	if issuePrompt != "" {
-		out["issue_prompt"] = issuePrompt
+	if fields.IssuePrompt != "" {
+		out["issue_prompt"] = fields.IssuePrompt
 	}
-	if implementPrompt != "" {
-		out["implement_prompt"] = implementPrompt
+	if fields.ImplementPrompt != "" {
+		out["implement_prompt"] = fields.ImplementPrompt
 	}
-	if triageOwner != "" {
-		out["triage_owner"] = triageOwner
+	if fields.TriageOwner != "" {
+		out["triage_owner"] = fields.TriageOwner
 	}
-	if cloneDir != "" {
-		out["clone_dir"] = cloneDir
+	if fields.CloneDir != "" {
+		out["clone_dir"] = fields.CloneDir
 	}
-	if autoPromoteTriage != nil {
-		out["auto_promote_triage"] = *autoPromoteTriage
+	if fields.AutoPromoteTriage != nil {
+		out["auto_promote_triage"] = *fields.AutoPromoteTriage
 	}
-	if autoPromoteRefinement != nil {
-		out["auto_promote_refinement"] = *autoPromoteRefinement
+	if fields.AutoPromoteRefinement != nil {
+		out["auto_promote_refinement"] = *fields.AutoPromoteRefinement
 	}
-	if prReviewers != nil {
-		out["pr_reviewers"] = prReviewers
+	if fields.PRReviewers != nil {
+		out["pr_reviewers"] = fields.PRReviewers
 	}
-	if prAssignee != "" {
-		out["pr_assignee"] = prAssignee
+	if fields.PRAssignee != "" {
+		out["pr_assignee"] = fields.PRAssignee
 	}
-	if prLabels != nil {
-		out["pr_labels"] = prLabels
+	if fields.PRLabels != nil {
+		out["pr_labels"] = fields.PRLabels
 	}
-	if prDraft != nil {
-		out["pr_draft"] = *prDraft
+	if fields.PRDraft != nil {
+		out["pr_draft"] = *fields.PRDraft
 	}
-	if generatePRDescription != nil {
-		out["generate_pr_description"] = *generatePRDescription
+	if fields.GeneratePRDescription != nil {
+		out["generate_pr_description"] = *fields.GeneratePRDescription
 	}
 }
 

@@ -300,6 +300,121 @@ func TestTier2AdapterPromoteReadyUsesOrgScopedIssueTracking(t *testing.T) {
 	}
 }
 
+func TestTier2AdapterPromoteReadyBatchesReposWithSameIssueTracking(t *testing.T) {
+	sharedGets := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/org/a/issues":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"number": 10,
+					"title":  "blocked a",
+					"state":  "open",
+					"body":   "## Depends on\n- org/shared#5\n",
+					"labels": []map[string]string{{"name": "blocked"}},
+				},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/org/b/issues":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"number": 20,
+					"title":  "blocked b",
+					"state":  "open",
+					"body":   "## Depends on\n- org/shared#5\n",
+					"labels": []map[string]string{{"name": "blocked"}},
+				},
+			})
+		case r.Method == http.MethodGet && (r.URL.Path == "/repos/org/a/issues/10/sub_issues" || r.URL.Path == "/repos/org/b/issues/20/sub_issues"):
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/org/shared/issues/5":
+			sharedGets++
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"number": 5,
+				"title":  "shared dependency",
+				"state":  "closed",
+				"labels": []map[string]string{},
+			})
+		case r.Method == http.MethodDelete && (r.URL.Path == "/repos/org/a/issues/10/labels/blocked" || r.URL.Path == "/repos/org/b/issues/20/labels/blocked"):
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode([]map[string]string{})
+		case r.Method == http.MethodPost && (r.URL.Path == "/repos/org/a/issues/10/labels" || r.URL.Path == "/repos/org/b/issues/20/labels"):
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode([]map[string]string{{"name": "ready"}})
+		case r.Method == http.MethodPost && (r.URL.Path == "/repos/org/a/issues/10/comments" || r.URL.Path == "/repos/org/b/issues/20/comments"):
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"created_at": time.Now().UTC().Format(time.RFC3339),
+			})
+		default:
+			t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.String())
+			http.Error(w, "unexpected request", http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{}
+	cfg.GitHub.IssueTracking = config.IssueTrackingConfig{
+		Enabled:       true,
+		FilterMode:    config.FilterModeExclusive,
+		DefaultAction: string(config.IssueModeIgnore),
+		BlockedLabels: []string{"blocked"},
+		DevelopLabels: []string{"ready"},
+	}
+	cfgRef := cfg
+	var cfgMu sync.Mutex
+	a := &tier2Adapter{
+		ghClient: gh.NewClient("token", gh.WithBaseURL(srv.URL)),
+		cfgMu:    &cfgMu,
+		cfg:      &cfgRef,
+		broker:   sse.NewBroker(),
+	}
+
+	n, err := a.PromoteReady(t.Context(), []string{"org/a", "org/b"})
+	if err != nil {
+		t.Fatalf("PromoteReady: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("promotions = %d, want 2", n)
+	}
+	if sharedGets != 1 {
+		t.Fatalf("shared dependency fetches = %d, want 1", sharedGets)
+	}
+}
+
+func TestTier2AdapterPromoteReadyReportsAllGroupErrors(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.GitHub.IssueTracking = config.IssueTrackingConfig{
+		Enabled:       true,
+		BlockedLabels: []string{"blocked"},
+	}
+	cfg.AI.Repos = map[string]config.RepoAI{
+		"org/b": {
+			IssueTracking: &config.IssueTrackingOverride{
+				Assignees: []string{"bob"},
+			},
+		},
+	}
+	cfgRef := cfg
+	var cfgMu sync.Mutex
+	a := &tier2Adapter{
+		cfgMu:  &cfgMu,
+		cfg:    &cfgRef,
+		broker: sse.NewBroker(),
+	}
+
+	n, err := a.PromoteReady(t.Context(), []string{"org/a", "org/b"})
+	if n != 0 {
+		t.Fatalf("promotions = %d, want 0", n)
+	}
+	if err == nil {
+		t.Fatal("PromoteReady error = nil, want config group errors")
+	}
+	if got := err.Error(); !strings.Contains(got, "org/a") || !strings.Contains(got, "org/b") {
+		t.Fatalf("joined error = %q, want both repo groups", got)
+	}
+}
+
 func TestPRAlreadyReviewedCircuitBreakerSuppressesRepeatedEnqueue(t *testing.T) {
 	s := newMemStore(t)
 	now := time.Now().UTC().Truncate(time.Second)

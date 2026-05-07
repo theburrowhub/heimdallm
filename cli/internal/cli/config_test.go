@@ -213,8 +213,9 @@ func TestCfgOrgLines(t *testing.T) {
 				"review_mode":  "multi",
 				"pr_reviewers": []any{"alice"},
 				"issue_tracking": map[string]any{
-					"enabled":        true,
-					"develop_labels": []any{"ready"},
+					"enabled":         true,
+					"develop_enabled": false,
+					"develop_labels":  []any{"ready"},
 				},
 			},
 		},
@@ -229,6 +230,9 @@ func TestCfgOrgLines(t *testing.T) {
 	}
 	if !strings.Contains(joined, "ready") {
 		t.Error("missing org issue tracking labels")
+	}
+	if !strings.Contains(joined, "Develop enabled") || !strings.Contains(joined, "false") {
+		t.Error("missing org issue tracking develop_enabled=false")
 	}
 }
 
