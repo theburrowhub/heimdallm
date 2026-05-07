@@ -21,6 +21,9 @@ class _EventsTabState extends ConsumerState<EventsTab> {
   StreamSubscription<SseEvent>? _sub;
   final _scroll = ScrollController();
   final _expanded = <int>{};
+  bool _autoScroll = true;
+  final Set<String> _enabledGroups = {'pr', 'issue', 'polling', 'state', 'circuit_breaker'};
+  String _searchQuery = '';
 
   @override
   void initState() {
@@ -36,6 +39,15 @@ class _EventsTabState extends ConsumerState<EventsTab> {
     _client?.disconnect();
     _scroll.dispose();
     super.dispose();
+  }
+
+  String _groupOf(String type) {
+    if (type.startsWith('pr_')) return 'pr';
+    if (type.startsWith('issue_')) return 'issue';
+    if (type.startsWith('polling_')) return 'polling';
+    if (type.contains('state_changed')) return 'state';
+    if (type == 'circuit_breaker_tripped') return 'circuit_breaker';
+    return 'other';
   }
 
   void _onEvent(SseEvent ev) {
@@ -58,7 +70,7 @@ class _EventsTabState extends ConsumerState<EventsTab> {
       }
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scroll.hasClients) {
+      if (_autoScroll && _scroll.hasClients) {
         _scroll.jumpTo(_scroll.position.maxScrollExtent);
       }
     });
@@ -66,25 +78,53 @@ class _EventsTabState extends ConsumerState<EventsTab> {
 
   @override
   Widget build(BuildContext context) {
-    if (_events.isEmpty) {
-      return const Center(
-        child: Text(
-          'Waiting for events. Polling cycle runs every 60 s by default.',
-          style: TextStyle(color: Colors.grey),
+    final visible = _events.where(_isVisible).toList(growable: false);
+    return Column(
+      children: [
+        _Toolbar(
+          autoScroll: _autoScroll,
+          enabledGroups: _enabledGroups,
+          searchQuery: _searchQuery,
+          eventCount: _events.length,
+          onAutoScrollChanged: (v) => setState(() => _autoScroll = v),
+          onGroupToggled: (g) => setState(() {
+            _enabledGroups.contains(g) ? _enabledGroups.remove(g) : _enabledGroups.add(g);
+          }),
+          onSearchChanged: (q) => setState(() => _searchQuery = q),
+          onClear: () => setState(() {
+            _events.clear();
+            _expanded.clear();
+          }),
         ),
-      );
-    }
-    return ListView.builder(
-      controller: _scroll,
-      itemCount: _events.length,
-      itemBuilder: (context, i) => _Row(
-        row: _events[i],
-        expanded: _expanded.contains(i),
-        onTap: () => setState(() {
-          _expanded.contains(i) ? _expanded.remove(i) : _expanded.add(i);
-        }),
-      ),
+        Expanded(
+          child: visible.isEmpty
+              ? const Center(
+                  child: Text(
+                    'Waiting for events. Polling cycle runs every 60 s by default.',
+                    style: TextStyle(color: Colors.grey),
+                  ),
+                )
+              : ListView.builder(
+                  controller: _scroll,
+                  itemCount: visible.length,
+                  itemBuilder: (context, i) => _Row(
+                    row: visible[i],
+                    expanded: _expanded.contains(i),
+                    onTap: () => setState(() {
+                      _expanded.contains(i) ? _expanded.remove(i) : _expanded.add(i);
+                    }),
+                  ),
+                ),
+        ),
+      ],
     );
+  }
+
+  bool _isVisible(_EventRow row) {
+    if (!_enabledGroups.contains(_groupOf(row.type))) return false;
+    if (_searchQuery.isEmpty) return true;
+    final summary = summarize(row.type, row.payload).toLowerCase();
+    return summary.contains(_searchQuery.toLowerCase());
   }
 }
 
@@ -161,5 +201,81 @@ class _Row extends StatelessWidget {
     } catch (_) {
       return raw;
     }
+  }
+}
+
+class _Toolbar extends StatelessWidget {
+  const _Toolbar({
+    required this.autoScroll,
+    required this.enabledGroups,
+    required this.searchQuery,
+    required this.eventCount,
+    required this.onAutoScrollChanged,
+    required this.onGroupToggled,
+    required this.onSearchChanged,
+    required this.onClear,
+  });
+
+  final bool autoScroll;
+  final Set<String> enabledGroups;
+  final String searchQuery;
+  final int eventCount;
+  final ValueChanged<bool> onAutoScrollChanged;
+  final ValueChanged<String> onGroupToggled;
+  final ValueChanged<String> onSearchChanged;
+  final VoidCallback onClear;
+
+  static const _groups = {
+    'pr': 'PR',
+    'issue': 'Issue',
+    'polling': 'Polling',
+    'state': 'State',
+    'circuit_breaker': 'Circuit',
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: Color(0xFFE0E0E0))),
+      ),
+      child: Wrap(
+        spacing: 8,
+        runSpacing: 4,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          IconButton(
+            tooltip: autoScroll ? 'Pause auto-scroll' : 'Resume auto-scroll',
+            icon: Icon(autoScroll ? Icons.pause : Icons.play_arrow),
+            onPressed: () => onAutoScrollChanged(!autoScroll),
+            visualDensity: VisualDensity.compact,
+          ),
+          ..._groups.entries.map((e) => FilterChip(
+                label: Text(e.value),
+                selected: enabledGroups.contains(e.key),
+                onSelected: (_) => onGroupToggled(e.key),
+              )),
+          SizedBox(
+            width: 200,
+            child: TextField(
+              decoration: const InputDecoration(
+                hintText: 'Search',
+                isDense: true,
+                prefixIcon: Icon(Icons.search, size: 16),
+                border: OutlineInputBorder(),
+              ),
+              style: const TextStyle(fontSize: 12),
+              onChanged: onSearchChanged,
+            ),
+          ),
+          TextButton.icon(
+            onPressed: onClear,
+            icon: const Icon(Icons.clear_all, size: 16),
+            label: Text('Clear ($eventCount)'),
+          ),
+        ],
+      ),
+    );
   }
 }
