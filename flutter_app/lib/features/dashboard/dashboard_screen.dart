@@ -56,9 +56,9 @@ class DashboardScreen extends ConsumerWidget {
                   : () => _startDaemon(context, ref),
             ),
             IconButton(
-              icon: const Icon(Icons.article_outlined),
-              tooltip: 'Daemon logs',
-              onPressed: () => context.push('/logs'),
+              icon: const Icon(Icons.dns_outlined),
+              tooltip: 'Server',
+              onPressed: () => context.push('/server'),
             ),
             IconButton(
               icon: const Icon(Icons.settings),
