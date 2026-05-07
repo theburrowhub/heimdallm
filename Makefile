@@ -20,7 +20,7 @@ endif
         release-local package-macos install-service verify-linux run-linux \
         install-linux uninstall-linux \
         setup up up-build up-daemon up-build-daemon down logs logs-daemon \
-        ps restart clean _check-docker _check-env _check-linux _post-up-hints
+        ps restart clean clean-clones _check-docker _check-env _check-linux _post-up-hints
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
@@ -104,6 +104,14 @@ dev-stop:
 	   kill "$$UI_PID" 2>/dev/null && echo "↓  UI parada (PID $$UI_PID)" || true; \
 	   rm -f "$$UI_PID_FILE"; \
 	 fi
+
+clean-clones:
+	@: "$${HEIMDALLM_API_TOKEN:?set HEIMDALLM_API_TOKEN to the daemon API token}"
+	@HEIMDALLM_SERVER_URL="$${HEIMDALLM_SERVER_URL:-http://localhost:7842}"; \
+	  curl -fsS -X DELETE \
+	    -H "X-Heimdallm-Token: $$HEIMDALLM_API_TOKEN" \
+	    "$$HEIMDALLM_SERVER_URL/config/clones"; \
+	  echo
 
 # ── Local release (macOS only: sign + notarize + DMG + GitHub release) ───────
 #

@@ -1605,6 +1605,81 @@ func TestHandleDeleteRepoField_Idempotent(t *testing.T) {
 	}
 }
 
+func TestHandleDeleteManagedCloneRequiresAuthAndCallsCallback(t *testing.T) {
+	srv := setupServerWithToken(t, "test-token")
+	var gotRepo string
+	srv.SetCleanCloneFn(func(ctx context.Context, repo string) error {
+		gotRepo = repo
+		return nil
+	})
+	path := "/config/clones/" + url.PathEscape("org/repo")
+
+	req := httptest.NewRequest("DELETE", path, nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("DELETE without token status = %d, want 401", w.Code)
+	}
+
+	req = httptest.NewRequest("DELETE", path, nil)
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("DELETE with token status = %d, body: %s", w.Code, w.Body.String())
+	}
+	if gotRepo != "org/repo" {
+		t.Fatalf("callback repo = %q, want org/repo", gotRepo)
+	}
+}
+
+func TestHandleDeleteManagedCloneSurfacesCallbackError(t *testing.T) {
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetCleanCloneFn(func(ctx context.Context, repo string) error {
+		return fmt.Errorf("repoctx: clone target %q exists but is not managed", "/tmp/heimdallm/org/repo")
+	})
+	req := httptest.NewRequest("DELETE", "/config/clones/"+url.PathEscape("org/repo"), nil)
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+	if strings.Contains(w.Body.String(), "/tmp/heimdallm") {
+		t.Fatalf("response leaked clone path: %s", w.Body.String())
+	}
+}
+
+func TestHandleDeleteManagedClonesRequiresAuthAndCallsCallback(t *testing.T) {
+	srv := setupServerWithToken(t, "test-token")
+	called := false
+	srv.SetCleanClonesFn(func(ctx context.Context) (int, error) {
+		called = true
+		return 3, nil
+	})
+
+	req := httptest.NewRequest("DELETE", "/config/clones", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("DELETE without token status = %d, want 401", w.Code)
+	}
+
+	req = httptest.NewRequest("DELETE", "/config/clones", nil)
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("DELETE with token status = %d, body: %s", w.Code, w.Body.String())
+	}
+	if !called {
+		t.Fatal("expected cleanup callback to be called")
+	}
+	if !strings.Contains(w.Body.String(), `"removed":3`) {
+		t.Fatalf("body = %s, want removed count", w.Body.String())
+	}
+}
+
 func TestHandleListPRs_StateFilter(t *testing.T) {
 	s, err := store.Open(":memory:")
 	if err != nil {

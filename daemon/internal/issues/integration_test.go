@@ -62,7 +62,9 @@ func TestIntegration_FetcherDrivesPipelineEndToEnd(t *testing.T) {
 		"org/repo",
 		config.IssueTrackingConfig{Enabled: true},
 		"reporter",
-		func(_ *github.Issue) issues.RunOptions { return issues.RunOptions{Primary: "claude"} },
+		func(_ *github.Issue) (issues.RunOptions, bool) {
+			return issues.RunOptions{Primary: "claude"}, true
+		},
 	)
 	if err != nil {
 		t.Fatalf("ProcessRepo: %v", err)
@@ -101,7 +103,9 @@ func TestIntegration_FetcherDrivesPipelineEndToEnd(t *testing.T) {
 		"org/repo",
 		config.IssueTrackingConfig{Enabled: true},
 		"reporter",
-		func(_ *github.Issue) issues.RunOptions { return issues.RunOptions{Primary: "claude"} },
+		func(_ *github.Issue) (issues.RunOptions, bool) {
+			return issues.RunOptions{Primary: "claude"}, true
+		},
 	)
 	if err != nil {
 		t.Fatalf("second ProcessRepo: %v", err)
@@ -344,8 +348,8 @@ func TestIntegration_IssueCircuitBreakerTripsAfterCap(t *testing.T) {
 // countingNotifier records how many times Notify was called so tests can
 // assert breaker-trip notifications are not repeated on the same snapshot.
 type countingNotifier struct {
-	mu  sync.Mutex
-	n   int
+	mu sync.Mutex
+	n  int
 }
 
 func (c *countingNotifier) Notify(_, _ string) {

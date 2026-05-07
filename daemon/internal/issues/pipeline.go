@@ -196,6 +196,16 @@ type RunOptions struct {
 	// produce a rich PR title and description from the implementation diff.
 	// When false (default), the pipeline uses the template strings.
 	GeneratePRDescription bool
+
+	// RequireWorkDirForDevelop turns the historical develop→review_only
+	// fallback into a hard error. Production auto-clone callers set this so
+	// an auto_implement run never silently proceeds without a writable checkout.
+	RequireWorkDirForDevelop bool
+
+	// ReleaseRepoContext releases a checkout handle acquired by the caller.
+	// It is intentionally a one-shot cleanup hook rather than another source
+	// of path truth; ExecOpts.WorkDir remains authoritative.
+	ReleaseRepoContext func()
 }
 
 // Pipeline runs a single issue triage or implementation end-to-end.
@@ -275,6 +285,9 @@ func New(s issueStore, gh issueGitHub, exec CLIExecutor, git GitOps, broker Publ
 // passes a context so long-running network operations (git fetch / push,
 // CLI invocation) can be cancelled on daemon shutdown.
 func (p *Pipeline) Run(ctx context.Context, issue *github.Issue, opts RunOptions) (*store.IssueReview, error) {
+	if opts.ReleaseRepoContext != nil {
+		defer opts.ReleaseRepoContext()
+	}
 	if issue == nil {
 		return nil, fmt.Errorf("issues pipeline: nil issue")
 	}
@@ -298,10 +311,10 @@ func (p *Pipeline) Run(ctx context.Context, issue *github.Issue, opts RunOptions
 	// distinct — do not "unify" them without revisiting the
 	// claim-before-upsert ordering that gives Run an early exit.
 	var (
-		claimed       bool
-		breakerHeld   bool // when true, defer must NOT release the claim
-		claimKey      string
-		claimIssueID  = issue.ID
+		claimed      bool
+		breakerHeld  bool // when true, defer must NOT release the claim
+		claimKey     string
+		claimIssueID = issue.ID
 	)
 	if !issue.UpdatedAt.IsZero() && claimIssueID != 0 {
 		claimKey = issue.UpdatedAt.UTC().Format(time.RFC3339)
@@ -345,6 +358,9 @@ func (p *Pipeline) Run(ctx context.Context, issue *github.Issue, opts RunOptions
 	workDir := strings.TrimSpace(opts.ExecOpts.WorkDir)
 	effective := issue.Mode
 	if effective == config.IssueModeDevelop && workDir == "" {
+		if opts.RequireWorkDirForDevelop {
+			return nil, fmt.Errorf("issues pipeline: develop mode requires local repo context")
+		}
 		slog.Warn("issues pipeline: develop mode requires local_dir, downgrading to review_only",
 			"repo", issue.Repo, "issue", issue.Number)
 		effective = config.IssueModeReviewOnly

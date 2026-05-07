@@ -102,7 +102,7 @@ func (f *fakePipeline) Run(ctx context.Context, issue *github.Issue, opts issues
 	return &store.IssueReview{IssueID: int64(issue.Number), ActionTaken: string(config.IssueModeReviewOnly)}, nil
 }
 
-func noOpts(_ *github.Issue) issues.RunOptions { return issues.RunOptions{} }
+func noOpts(_ *github.Issue) (issues.RunOptions, bool) { return issues.RunOptions{}, true }
 
 func fixture(number int, updated time.Time) *github.Issue {
 	return &github.Issue{
@@ -163,6 +163,26 @@ func TestFetcher_DispatchesUnprocessedIssues(t *testing.T) {
 	}
 	if processed != 2 || len(p.calls) != 2 {
 		t.Errorf("expected 2 dispatches, got processed=%d calls=%v", processed, p.calls)
+	}
+}
+
+func TestFetcher_SkipsWhenOptionsFnReturnsFalse(t *testing.T) {
+	client := &fakeClient{issues: []*github.Issue{fixture(1, time.Now()), fixture(2, time.Now())}}
+	p := &fakePipeline{}
+	f := issues.NewFetcher(client, nil, &fakeDedup{byGithubID: map[int64]dedupEntry{}}, p)
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice",
+		func(issue *github.Issue) (issues.RunOptions, bool) {
+			if issue.Number == 1 {
+				return issues.RunOptions{}, false
+			}
+			return issues.RunOptions{}, true
+		})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 1 || len(p.calls) != 1 || p.calls[0] != 2 {
+		t.Errorf("expected only issue 2 dispatched, got processed=%d calls=%v", processed, p.calls)
 	}
 }
 
