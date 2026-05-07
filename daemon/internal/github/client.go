@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,6 +28,8 @@ const maxDiffBodyBytes = 10 * 1024 * 1024 // 10 MB for diffs
 // maxErrBodyLen limits the number of bytes included in error messages to avoid
 // leaking sensitive GitHub diagnostic information (e.g. token details).
 const maxErrBodyLen = 200
+
+var labelColorRE = regexp.MustCompile(`^[0-9A-Fa-f]{6}$`)
 
 // safeTruncate shortens s to at most max bytes, snapping on a rune boundary
 // so we never emit a split multi-byte UTF-8 character in an error message.
@@ -664,8 +667,8 @@ func (c *Client) FetchIssueCommentsOnly(repo string, number int) ([]Comment, err
 // timeline (commits, labels, comments, assignments…) are filtered out
 // at fetch time so callers don't have to reason about them.
 type TimelineEvent struct {
-	Event     string    // "review_requested" or "review_dismissed"
-	Actor     string    // login of the user who triggered the event
+	Event     string // "review_requested" or "review_dismissed"
+	Actor     string // login of the user who triggered the event
 	CreatedAt time.Time
 }
 
@@ -861,6 +864,48 @@ func (c *Client) FetchLabels(repo string) ([]string, error) {
 		names[i] = l.Name
 	}
 	return names, nil
+}
+
+// CreateLabel creates a repository label. A 422 is tolerated only when GitHub
+// reports an already-existing label, which can happen if another process wins
+// the race after FetchLabels.
+func (c *Client) CreateLabel(repo, name, color, description string) error {
+	if repo == "" || name == "" {
+		return nil
+	}
+	color = strings.TrimPrefix(color, "#")
+	if !labelColorRE.MatchString(color) {
+		return fmt.Errorf("github: invalid label color %q", color)
+	}
+	payload, err := json.Marshal(map[string]string{
+		"name":        name,
+		"color":       color,
+		"description": description,
+	})
+	if err != nil {
+		return fmt.Errorf("github: marshal label: %w", err)
+	}
+	resp, err := c.doWithBody("POST",
+		fmt.Sprintf("/repos/%s/labels", repo),
+		"application/vnd.github+json", "application/json",
+		strings.NewReader(string(payload)))
+	if err != nil {
+		return fmt.Errorf("github: create label: %w", err)
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		if resp.StatusCode == http.StatusUnprocessableEntity && labelAlreadyExistsBody(body) {
+			return nil
+		}
+		return fmt.Errorf("github: create label %q in %s: status %d: %s", name, repo, resp.StatusCode, safeTruncate(string(body), maxErrBodyLen))
+	}
+	return nil
+}
+
+func labelAlreadyExistsBody(body []byte) bool {
+	s := strings.ToLower(string(body))
+	return strings.Contains(s, "already_exists") || strings.Contains(s, "already exists")
 }
 
 // AddIssueLabel adds a label to an issue. No-op if the label is already present.

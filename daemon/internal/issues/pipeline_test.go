@@ -145,13 +145,24 @@ type fakeGH struct {
 	createPRErr      error
 
 	// PR metadata tracking
-	reviewersCalls [][]string
-	labelsCalls    [][]string
-	assigneesCalls [][]string
+	reviewersCalls  [][]string
+	labelsCalls     [][]string
+	assigneesCalls  [][]string
+	addLabelsErr    error
+	setAssigneesErr error
+
+	labelCatalog   []string
+	fetchLabelsErr error
+	createLabelErr error
+	createdLabels  []labelCall
 
 	// GetIssue stub for pre-push state check (#238).
 	getIssueState string // returned state; defaults to "open"
 	getIssueErr   error
+}
+
+type labelCall struct {
+	Repo, Name, Color, Description string
 }
 
 type postCall struct {
@@ -226,10 +237,24 @@ func (f *fakeGH) SetPRReviewers(repo string, prNumber int, reviewers []string) e
 }
 func (f *fakeGH) AddLabels(repo string, number int, labels []string) error {
 	f.labelsCalls = append(f.labelsCalls, labels)
-	return nil
+	return f.addLabelsErr
 }
 func (f *fakeGH) SetAssignees(repo string, number int, assignees []string) error {
 	f.assigneesCalls = append(f.assigneesCalls, assignees)
+	return f.setAssigneesErr
+}
+func (f *fakeGH) FetchLabels(repo string) ([]string, error) {
+	if f.fetchLabelsErr != nil {
+		return nil, f.fetchLabelsErr
+	}
+	return append([]string(nil), f.labelCatalog...), nil
+}
+func (f *fakeGH) CreateLabel(repo, name, color, description string) error {
+	f.createdLabels = append(f.createdLabels, labelCall{Repo: repo, Name: name, Color: color, Description: description})
+	if f.createLabelErr != nil {
+		return f.createLabelErr
+	}
+	f.labelCatalog = append(f.labelCatalog, name)
 	return nil
 }
 
@@ -1067,6 +1092,121 @@ func TestPipeline_StripsLeadingAtInSuggestedAssignee(t *testing.T) {
 	}
 	if !strings.Contains(body, "@alice") {
 		t.Errorf("body missing single @alice mention: %q", body)
+	}
+}
+
+func TestPipeline_ReviewOnlyAppliesPriorityLabelAndTriageOwnerFallback(t *testing.T) {
+	raw := `
+	{
+	  "summary": "new payment export",
+	  "triage": {
+	    "severity": "high",
+	    "category": "feature",
+	    "affected_area": "billing exports",
+	    "affected_paths": ["daemon/internal/billing/export.go"],
+	    "suggested_assignee": "",
+	    "assignee_reason": "no clear contributor without repo context",
+	    "assignee_confidence": "high"
+	  },
+	  "suggestions": ["identify export format"],
+	  "severity": "high"
+	}`
+	s := &fakeStore{}
+	gh := &fakeGH{labelCatalog: []string{"priority: high"}}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte(raw)}
+	p := issues.New(s, gh, exec, nil, nil, nil)
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeReviewOnly), issues.RunOptions{Primary: "claude", TriageOwner: "@maintainer"}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(gh.labelsCalls) != 1 || !stringsEqual(gh.labelsCalls[0], []string{"priority: high"}) {
+		t.Fatalf("priority labels = %v, want [[priority: high]]", gh.labelsCalls)
+	}
+	if len(gh.createdLabels) != 0 {
+		t.Fatalf("existing priority label should not be recreated: %+v", gh.createdLabels)
+	}
+	if len(gh.assigneesCalls) != 1 || !stringsEqual(gh.assigneesCalls[0], []string{"maintainer"}) {
+		t.Fatalf("assignees = %v, want [[maintainer]]", gh.assigneesCalls)
+	}
+	if len(s.reviews) != 1 {
+		t.Fatalf("reviews = %d, want 1", len(s.reviews))
+	}
+	var triage issues.Triage
+	if err := json.Unmarshal([]byte(s.reviews[0].Triage), &triage); err != nil {
+		t.Fatalf("triage JSON: %v", err)
+	}
+	if triage.AssignedAssignee != "maintainer" || triage.AssignmentSource != "triage_owner" {
+		t.Errorf("assigned/source = %q/%q, want maintainer/triage_owner", triage.AssignedAssignee, triage.AssignmentSource)
+	}
+	if triage.PriorityLabel != "priority: high" {
+		t.Errorf("priority label = %q, want priority: high", triage.PriorityLabel)
+	}
+	if body := gh.postCalls[0].Body; !strings.Contains(body, "Assigned owner:** @maintainer") {
+		t.Errorf("comment missing assigned owner: %s", body)
+	}
+}
+
+func TestPipeline_ReviewOnlyCreatesMissingPriorityLabelBestEffort(t *testing.T) {
+	raw := `
+	{
+	  "summary": "outage",
+	  "triage": {"severity":"critical","category":"bug","assignee_confidence":"low"},
+	  "suggestions": [],
+	  "severity": "critical"
+	}`
+	s := &fakeStore{}
+	gh := &fakeGH{}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte(raw)}
+	p := issues.New(s, gh, exec, nil, nil, nil)
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeReviewOnly), issues.RunOptions{Primary: "claude"}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(gh.createdLabels) != 1 || gh.createdLabels[0].Name != "priority: critical" {
+		t.Fatalf("created labels = %+v, want priority: critical", gh.createdLabels)
+	}
+	if len(gh.labelsCalls) != 1 || !stringsEqual(gh.labelsCalls[0], []string{"priority: critical"}) {
+		t.Fatalf("labels = %v, want [[priority: critical]]", gh.labelsCalls)
+	}
+}
+
+func TestPipeline_MetadataFailuresDoNotAbortTriage(t *testing.T) {
+	s := &fakeStore{}
+	gh := &fakeGH{
+		addLabelsErr:    errors.New("missing label"),
+		setAssigneesErr: errors.New("not assignable"),
+	}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte(validResult)}
+	p := issues.New(s, gh, exec, nil, nil, nil)
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeReviewOnly), issues.RunOptions{Primary: "claude", TriageOwner: "maintainer"}); err != nil {
+		t.Fatalf("metadata failures must not abort triage, got: %v", err)
+	}
+	if len(s.reviews) != 1 {
+		t.Fatalf("review should still be persisted, got %d", len(s.reviews))
+	}
+}
+
+func TestPipeline_BackCompatOldIssueResultWithoutTriageBlock(t *testing.T) {
+	raw := `{"summary":"legacy result","suggestions":["look"],"severity":"medium"}`
+	s := &fakeStore{}
+	gh := &fakeGH{labelCatalog: []string{"priority: medium"}}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte(raw)}
+	p := issues.New(s, gh, exec, nil, nil, nil)
+
+	rev, err := p.Run(context.Background(), newIssue(config.IssueModeReviewOnly), issues.RunOptions{Primary: "claude"})
+	if err != nil {
+		t.Fatalf("legacy result should still parse: %v", err)
+	}
+	var triage issues.Triage
+	if err := json.Unmarshal([]byte(rev.Triage), &triage); err != nil {
+		t.Fatalf("triage JSON: %v", err)
+	}
+	if triage.Severity != "medium" || triage.PriorityLabel != "priority: medium" {
+		t.Errorf("triage severity/priority = %q/%q, want medium/priority: medium", triage.Severity, triage.PriorityLabel)
+	}
+	if len(gh.assigneesCalls) != 0 {
+		t.Errorf("legacy result without confidence should not assign, got %v", gh.assigneesCalls)
 	}
 }
 

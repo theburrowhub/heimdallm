@@ -33,15 +33,17 @@ type PromptContext struct {
 	Comments      []github.Comment
 	HasLocalDir   bool   // when true, the LLM can read the repo for deeper context
 	TriageContext string // structured re-triage context; empty on first triage
+	TriageOwner   string // fallback GitHub login when ownership is unclear
 }
 
 // BuildPromptWithProfile formats the LLM prompt for a review_only triage run,
 // applying customizations from Agent profiles when set:
 //   - customTemplate non-empty: replaces the entire default template with
 //     placeholder substitution ({repo}, {number}, {title}, {author}, {labels},
-//     {body}, {comments}, {assignees}). NOTE: the custom template is responsible
-//     for including the JSON output schema — the pipeline parses the LLM response
-//     as IssueReviewResult. Same contract as PR review custom prompts.
+//     {body}, {comments}, {assignees}, {triage_owner}). NOTE: the custom
+//     template is responsible for including the JSON output schema — the
+//     pipeline parses the LLM response as IssueReviewResult. Same contract as
+//     PR review custom prompts.
 //   - customInstructions non-empty: injects the text into the default template
 //     between the issue context and the JSON schema (safer — schema is preserved).
 //
@@ -90,6 +92,7 @@ func applyPlaceholders(tmpl string, ctx PromptContext) string {
 		"{comments}", comments,
 		"{assignees}", assignees,
 		"{triage_context}", ctx.TriageContext,
+		"{triage_owner}", ctx.TriageOwner,
 	)
 	result := r.Replace(tmpl)
 
@@ -127,7 +130,11 @@ func buildDefaultPrompt(ctx PromptContext, customInstructions string) string {
 		sb.WriteString("Labels: " + strings.Join(ctx.Labels, ", ") + "\n")
 	}
 	if ctx.HasLocalDir {
-		sb.WriteString("You have read access to the repository checked out at the working directory — consult the code when it helps the triage.\n")
+		sb.WriteString("You have read access to the repository checked out at the working directory. Keep triage lightweight, but inspect likely files and git history when it helps identify ownership.\n")
+		sb.WriteString("For bugs, prefer the person who recently touched or introduced the likely affected area. For feature requests, prefer the person with the most relevant changes in that area. Use git log/blame/shortlog evidence when available.\n")
+	}
+	if owner := strings.TrimSpace(ctx.TriageOwner); owner != "" {
+		sb.WriteString(fmt.Sprintf("Fallback triage owner: @%s. Use this only when the affected owner cannot be determined from repository evidence.\n", strings.TrimLeft(owner, "@")))
 	}
 	sb.WriteString("\n")
 
@@ -164,7 +171,13 @@ func buildDefaultPrompt(ctx PromptContext, customInstructions string) string {
 	sb.WriteString(`  "triage": {` + "\n")
 	sb.WriteString(`    "severity": "low|medium|high|critical",` + "\n")
 	sb.WriteString(`    "category": "one of: bug, feature, question, docs, infra, other",` + "\n")
-	sb.WriteString(`    "suggested_assignee": "github-login or empty string"` + "\n")
+	sb.WriteString(`    "affected_area": "short likely root-cause area, or empty string",` + "\n")
+	sb.WriteString(`    "affected_paths": ["relative/path.go"],` + "\n")
+	sb.WriteString(`    "priority_label": "priority: low|priority: medium|priority: high|priority: critical",` + "\n")
+	sb.WriteString(`    "suggested_assignee": "github-login or empty string",` + "\n")
+	sb.WriteString(`    "assignee_reason": "why this owner has the most relevant context, or why fallback was used",` + "\n")
+	sb.WriteString(`    "assignee_confidence": "low|medium|high",` + "\n")
+	sb.WriteString(`    "assignee_evidence": ["git log/blame/shortlog evidence or fallback reason"]` + "\n")
 	sb.WriteString("  },\n")
 	sb.WriteString(`  "suggestions": ["concrete next step", "another one"],` + "\n")
 	sb.WriteString(`  "severity": "low|medium|high|critical"` + "\n")
