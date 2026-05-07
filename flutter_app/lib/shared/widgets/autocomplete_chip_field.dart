@@ -174,7 +174,9 @@ class _AutocompleteChipFieldState extends State<AutocompleteChipField> {
           // Text input + suggestions
           Focus(
             onFocusChange: (focused) {
-              if (!focused) {
+              if (focused) {
+                setState(() => _showSuggestions = true);
+              } else {
                 // Delay hiding so tap on suggestion registers first
                 Future.delayed(const Duration(milliseconds: 200), () {
                   if (mounted) setState(() => _showSuggestions = false);
@@ -200,6 +202,7 @@ class _AutocompleteChipFieldState extends State<AutocompleteChipField> {
                     ),
                   ),
                   onChanged: (_) => setState(() => _showSuggestions = true),
+                  onTap: () => setState(() => _showSuggestions = true),
                   onFieldSubmitted: _handleSubmit,
                 ),
                 if (_showSuggestions && _filteredSuggestions.isNotEmpty)
