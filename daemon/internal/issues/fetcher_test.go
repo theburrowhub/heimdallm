@@ -102,6 +102,27 @@ func (f *fakePipeline) Run(ctx context.Context, issue *github.Issue, opts issues
 	return &store.IssueReview{IssueID: int64(issue.Number), ActionTaken: string(config.IssueModeReviewOnly)}, nil
 }
 
+type fakeIssuePublisher struct {
+	triage     []int
+	refinement []int
+	implement  []int
+}
+
+func (f *fakeIssuePublisher) PublishIssueTriage(ctx context.Context, repo string, number int, githubID int64) error {
+	f.triage = append(f.triage, number)
+	return nil
+}
+
+func (f *fakeIssuePublisher) PublishIssueRefinement(ctx context.Context, repo string, number int, githubID int64) error {
+	f.refinement = append(f.refinement, number)
+	return nil
+}
+
+func (f *fakeIssuePublisher) PublishIssueImplement(ctx context.Context, repo string, number int, githubID int64) error {
+	f.implement = append(f.implement, number)
+	return nil
+}
+
 func noOpts(_ *github.Issue) (issues.RunOptions, bool) { return issues.RunOptions{}, true }
 
 func fixture(number int, updated time.Time) *github.Issue {
@@ -620,5 +641,28 @@ func TestFetcher_ModeChangeBypassesBotCommentCheck(t *testing.T) {
 	}
 	if processed != 1 {
 		t.Errorf("mode change should bypass bot-comment check, got processed=%d", processed)
+	}
+}
+
+func TestFetcher_PublishesRefinementMode(t *testing.T) {
+	now := time.Now()
+	issue := fixture(9, now)
+	issue.Mode = config.IssueModeRefinement
+	pub := &fakeIssuePublisher{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, nil, &fakeDedup{}, &fakePipeline{})
+	f.SetPublisher(pub)
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 1 {
+		t.Fatalf("processed = %d, want 1", processed)
+	}
+	if len(pub.refinement) != 1 || pub.refinement[0] != 9 {
+		t.Fatalf("refinement publishes = %v, want [9]", pub.refinement)
+	}
+	if len(pub.triage) != 0 || len(pub.implement) != 0 {
+		t.Fatalf("unexpected publishes triage=%v implement=%v", pub.triage, pub.implement)
 	}
 }

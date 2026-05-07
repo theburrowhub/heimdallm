@@ -2,6 +2,7 @@ package issues_test
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,6 +34,7 @@ type fakeStore struct {
 
 	latestReview    *store.IssueReview
 	latestReviewErr error
+	latestByAction  map[string]*store.IssueReview
 
 	// in-flight claim state (#292). claims is keyed on "issueID|updatedAt"
 	// so tests can assert claims / releases without racing the map.
@@ -75,6 +77,15 @@ func (f *fakeStore) LatestIssueReview(issueID int64) (*store.IssueReview, error)
 		return nil, f.latestReviewErr
 	}
 	return f.latestReview, nil
+}
+
+func (f *fakeStore) LatestIssueReviewByAction(issueID int64, action string) (*store.IssueReview, error) {
+	if f.latestByAction != nil {
+		if rev, ok := f.latestByAction[action]; ok {
+			return rev, nil
+		}
+	}
+	return nil, sql.ErrNoRows
 }
 
 func (f *fakeStore) UpsertPR(pr *store.PR) (int64, error) {
@@ -386,6 +397,40 @@ const validResult = `
 }
 `
 
+const validRefinementResult = `
+{
+  "analysis_summary": "Login failures route through the auth middleware and session store. The implementation should add a regression test, then adjust the middleware error handling so storage failures return a controlled response.",
+  "affected_areas": [
+    {"path": "daemon/internal/auth/middleware.go", "symbols": ["Authenticate"], "reason": "request authentication lives here"}
+  ],
+  "subtasks": [
+    {
+      "id": "task-1",
+      "description": "Add a failing regression test for the login error path.",
+      "affected_files": ["daemon/internal/auth/middleware_test.go"],
+      "symbols": ["TestAuthenticateStorageFailure"],
+      "expected_change": "test captures the 500 regression",
+      "complexity": "low",
+      "dependencies": []
+    },
+    {
+      "id": "task-2",
+      "description": "Handle session store failures without panicking.",
+      "affected_files": ["daemon/internal/auth/middleware.go"],
+      "symbols": ["Authenticate"],
+      "expected_change": "return a controlled error response",
+      "complexity": "medium",
+      "dependencies": ["task-1"]
+    }
+  ],
+  "implementation_order": ["task-1", "task-2"],
+  "assumptions": ["auth middleware owns login validation"],
+  "open_questions": [],
+  "risks": ["session behavior may differ across storage backends"],
+  "test_plan": ["make test-docker GO_TEST_ARGS=\"./internal/auth/...\""]
+}
+`
+
 func newIssue(mode config.IssueMode) *github.Issue {
 	return &github.Issue{
 		ID:        12345,
@@ -540,6 +585,65 @@ func TestPipeline_FirstTriageHasNoReTriageContext(t *testing.T) {
 	}
 }
 
+func TestPipeline_RunRefinementHappyPath(t *testing.T) {
+	s := &fakeStore{}
+	gh := &fakeGH{}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte(validRefinementResult)}
+	broker := &fakeBroker{}
+	p := issues.New(s, gh, exec, nil, broker, nil)
+
+	issue := newIssue(config.IssueModeRefinement)
+	rev, err := p.Run(context.Background(), issue, issues.RunOptions{
+		Primary:                     "claude",
+		ExecOpts:                    executor.ExecOptions{WorkDir: "/tmp/repo"},
+		RequireWorkDirForRefinement: true,
+	})
+	if err != nil {
+		t.Fatalf("run refinement: %v", err)
+	}
+	if rev == nil {
+		t.Fatal("nil refinement review returned")
+	}
+	if len(gh.postCalls) != 1 {
+		t.Fatalf("expected 1 refinement comment, got %d", len(gh.postCalls))
+	}
+	if !strings.Contains(gh.postCalls[0].Body, "Heimdallm refinement") {
+		t.Errorf("refinement comment missing heading: %q", gh.postCalls[0].Body)
+	}
+	if !strings.Contains(gh.postCalls[0].Body, "task-2") {
+		t.Errorf("refinement comment missing subtask: %q", gh.postCalls[0].Body)
+	}
+	if len(s.reviews) != 1 {
+		t.Fatalf("expected 1 review stored, got %d", len(s.reviews))
+	}
+	stored := s.reviews[0]
+	if stored.ActionTaken != string(config.IssueModeRefinement) {
+		t.Errorf("action_taken=%q, want refinement", stored.ActionTaken)
+	}
+	if !strings.Contains(stored.RefinementData, `"analysis_summary"`) {
+		t.Errorf("refinement_data not persisted: %q", stored.RefinementData)
+	}
+	if stored.Triage != "{}" {
+		t.Errorf("triage for refinement = %q, want {}", stored.Triage)
+	}
+	types := broker.types()
+	want := []string{sse.EventIssueDetected, sse.EventIssueReviewStarted, sse.EventIssueRefinementDone}
+	if !stringsEqual(types, want) {
+		t.Errorf("SSE sequence = %v, want %v", types, want)
+	}
+}
+
+func TestPipeline_RefinementRequiresWorkDir(t *testing.T) {
+	p := issues.New(&fakeStore{}, &fakeGH{}, &fakeExec{}, nil, &fakeBroker{}, nil)
+	_, err := p.Run(context.Background(), newIssue(config.IssueModeRefinement), issues.RunOptions{Primary: "claude"})
+	if err == nil {
+		t.Fatal("expected refinement without WorkDir to fail")
+	}
+	if !strings.Contains(err.Error(), "refinement mode requires local repo context") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestPipeline_ReTriageLatestReviewErrorIsNonFatal(t *testing.T) {
 	s := &fakeStore{
 		latestReviewErr: errors.New("database locked"),
@@ -609,6 +713,51 @@ func autoImplementRunOptions() issues.RunOptions {
 		Primary:     "claude",
 		ExecOpts:    executor.ExecOptions{WorkDir: "/tmp/repo"},
 		GitHubToken: "ghs_fake_token",
+	}
+}
+
+func TestPipeline_AutoImplementInjectsPreviousRefinement(t *testing.T) {
+	s := &fakeStore{
+		latestByAction: map[string]*store.IssueReview{
+			string(config.IssueModeRefinement): {
+				Summary:        "plan exists",
+				RefinementData: validRefinementResult,
+				ActionTaken:    string(config.IssueModeRefinement),
+				CreatedAt:      time.Now().Add(-1 * time.Hour),
+			},
+		},
+	}
+	gh := &fakeGH{defaultBranch: "main", createPRNumber: 123}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("done")}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(s, gh, exec, git, &fakeBroker{}, nil)
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(exec.lastPrompt, "Previous refinement plan") {
+		t.Fatalf("implement prompt should include previous refinement plan, got: %s", exec.lastPrompt)
+	}
+	if !strings.Contains(exec.lastPrompt, "task-2") {
+		t.Errorf("implement prompt should include refinement subtasks, got: %s", exec.lastPrompt)
+	}
+}
+
+func TestPipeline_AutoImplementWithoutRefinementKeepsPromptCompatible(t *testing.T) {
+	s := &fakeStore{}
+	gh := &fakeGH{defaultBranch: "main", createPRNumber: 123}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("done")}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(s, gh, exec, git, &fakeBroker{}, nil)
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if strings.Contains(exec.lastPrompt, "Previous refinement plan") {
+		t.Fatalf("implement prompt unexpectedly includes refinement context: %s", exec.lastPrompt)
+	}
+	if !strings.Contains(exec.lastPrompt, "Implement what the issue asks for") {
+		t.Errorf("implement prompt lost default instructions: %s", exec.lastPrompt)
 	}
 }
 

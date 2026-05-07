@@ -38,6 +38,7 @@ repositories = ["org/repo1", "org/repo2"]
 # organizations       = ["your-org"]             # empty = any org in repositories
 # assignees           = ["your-username"]        # empty = any assignee (or unassigned)
 # develop_labels      = ["enhancement", "feature", "bug"]
+# refinement_labels   = ["refine", "needs-plan"]
 # review_only_labels  = ["question", "discussion", "analysis"]
 # skip_labels         = ["wontfix", "duplicate", "invalid"]
 
@@ -47,6 +48,7 @@ primary = "claude"
 # fallback = "gemini"
 review_mode = "single"   # "single" or "multi"
 # execution_timeout = "20m"   # default: 5m; increase for complex auto_implement
+# refinement_timeout = "30m"  # deep issue refinement
 # triage_owner = "muriano"
 # clone_dir = "/repos/worktrees"
 # auto_promote_triage = true
@@ -105,6 +107,7 @@ review_mode = "single"   # "single" or "multi"
 # prompt = "org-pr-review-profile"
 # issue_prompt = "org-issue-triage-profile"
 # implement_prompt = "org-implementation-profile"
+# refinement_timeout = "30m"
 # triage_owner = "muriano"
 # clone_dir = "/repos/freepik-worktrees"
 # auto_promote_triage = true
@@ -118,6 +121,7 @@ review_mode = "single"   # "single" or "multi"
 # [ai.orgs."freepik-company".issue_tracking]
 # enabled = true
 # develop_labels = ["heimdallm-develop"]
+# refinement_labels = ["heimdallm-refine"]
 # review_only_labels = ["heimdallm-triage"]
 # skip_labels = ["wontfix"]
 

@@ -218,6 +218,77 @@ func BuildImplementPrompt(ctx PromptContext) string {
 	return buildDefaultImplementPrompt(ctx, "")
 }
 
+// BuildRefinementPrompt formats the prompt for the deep unattended
+// investigation stage. It deliberately has no custom-template variant yet:
+// the output schema is a contract consumed by downstream auto_implement.
+func BuildRefinementPrompt(ctx PromptContext) string {
+	var sb strings.Builder
+
+	sb.WriteString("You are Heimdallm, a senior engineering agent performing deep unattended refinement for a GitHub issue.\n")
+	sb.WriteString("You have READ access to the repository in the current working directory. Investigate the codebase before answering.\n")
+	sb.WriteString("Your job is to turn the issue into a concrete, auditable implementation plan for a later developer or agent.\n")
+	sb.WriteString("Do not modify files. Do not ask the user questions. Resolve ambiguity from code, docs, tests, and git history when possible.\n")
+	sb.WriteString("Only list open_questions for information you actively looked for and could not determine from the repository.\n\n")
+
+	sb.WriteString(fmt.Sprintf("Repository: %s\n", ctx.Repo))
+	sb.WriteString(fmt.Sprintf("Issue: #%d — %s\n", ctx.Number, ctx.Title))
+	sb.WriteString(fmt.Sprintf("Author: @%s\n", ctx.Author))
+	if len(ctx.Labels) > 0 {
+		sb.WriteString("Labels: " + strings.Join(ctx.Labels, ", ") + "\n")
+	}
+	if len(ctx.Assignees) > 0 {
+		sb.WriteString("Assignees: " + strings.Join(ctx.Assignees, ", ") + "\n")
+	}
+	sb.WriteString("\n")
+
+	body := strings.TrimSpace(ctx.Body)
+	if body == "" {
+		body = "(empty issue body)"
+	}
+	if len(body) > maxBodyBytes {
+		body = body[:maxBodyBytes] + "\n... (truncated)"
+	}
+	sb.WriteString("<issue_body>\n")
+	sb.WriteString(body)
+	sb.WriteString("\n</issue_body>\n\n")
+
+	if comments := formatComments(ctx.Comments); comments != "" {
+		sb.WriteString(comments)
+		sb.WriteString("\n")
+	}
+
+	if ctx.TriageContext != "" {
+		sb.WriteString(ctx.TriageContext)
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("Investigate these sources before producing the plan:\n")
+	sb.WriteString("- Relevant source files, tests, package/module boundaries, and local architecture.\n")
+	sb.WriteString("- README/docs/configuration files when they explain expected behavior.\n")
+	sb.WriteString("- Git history for likely affected paths when ownership or intent is unclear.\n")
+	sb.WriteString("- Existing patterns in nearby code; prefer extending them over inventing new abstractions.\n\n")
+
+	sb.WriteString("Return a single JSON object, and nothing else, with this exact shape:\n")
+	sb.WriteString("{\n")
+	sb.WriteString(`  "analysis_summary": "3-6 sentence technical summary of what must change and why",` + "\n")
+	sb.WriteString(`  "affected_areas": [` + "\n")
+	sb.WriteString(`    {"path": "relative/path.go", "symbols": ["FunctionName"], "reason": "why this area matters"}` + "\n")
+	sb.WriteString("  ],\n")
+	sb.WriteString(`  "subtasks": [` + "\n")
+	sb.WriteString(`    {"id": "task-1", "description": "concrete task", "affected_files": ["relative/path.go"], "symbols": ["FunctionName"], "expected_change": "specific expected change", "complexity": "low|medium|high", "dependencies": []}` + "\n")
+	sb.WriteString("  ],\n")
+	sb.WriteString(`  "implementation_order": ["task-1"],` + "\n")
+	sb.WriteString(`  "assumptions": ["assumption grounded in code evidence"],` + "\n")
+	sb.WriteString(`  "open_questions": ["question only if repository evidence was insufficient"],` + "\n")
+	sb.WriteString(`  "risks": ["risk area and why"],` + "\n")
+	sb.WriteString(`  "test_plan": ["specific test or verification step"]` + "\n")
+	sb.WriteString("}\n")
+	sb.WriteString("Every subtask id must be stable, unique, and referenced by dependencies/implementation_order when needed. Do not include files outside this repository as subtasks; mention cross-repo needs as open_questions.\n")
+	sb.WriteString("Do not wrap the JSON in prose or code fences.\n")
+
+	return sb.String()
+}
+
 func buildDefaultImplementPrompt(ctx PromptContext, customInstructions string) string {
 	var sb strings.Builder
 

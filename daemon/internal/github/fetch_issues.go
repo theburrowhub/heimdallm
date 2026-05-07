@@ -161,7 +161,7 @@ func (c *Client) fetchIssuesPage(repo string, page int) ([]*Issue, error) {
 // issueMatchesFilters applies organizations + assignees + filter_mode.
 // The label dimension is handled up-stream (cfg.Classify + ignore short-
 // circuit), so by the time we get here the issue is known to be
-// review_only or develop.
+// review_only, refinement, or develop.
 func issueMatchesFilters(issue *Issue, repo string, cfg config.IssueTrackingConfig) bool {
 	orgActive := len(cfg.Organizations) > 0
 	assigneeActive := len(cfg.Assignees) > 0
@@ -233,9 +233,9 @@ func hasAnyAssignee(got, want []string) bool {
 
 // sortIssuesByPriority applies the ordering described in FetchIssues:
 //
-//	1) assigned-to-authenticatedUser before everyone else
-//	2) review_only before develop (review is cheap, clears the queue faster)
-//	3) oldest first
+//  1. assigned-to-authenticatedUser before everyone else
+//  2. non-develop modes before develop (review/refinement are read-only)
+//  3. oldest first
 //
 // sort.SliceStable keeps the GitHub response order within otherwise-equal
 // issues (GitHub returns newest-updated first), making the tertiary

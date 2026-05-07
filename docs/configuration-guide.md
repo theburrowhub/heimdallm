@@ -508,6 +508,7 @@ review_mode  = "multi"
 prompt       = "org-pr-review-profile"
 issue_prompt = "org-issue-triage-profile"
 implement_prompt = "org-implementation-profile"
+refinement_timeout = "30m"
 triage_owner = "alice"
 clone_dir = "/home/heimdallm/repos/myorg-worktrees"
 auto_promote_triage = true
@@ -522,6 +523,7 @@ pr_draft     = false
 [ai.orgs."myorg".issue_tracking]
 enabled            = true
 develop_labels     = ["heimdallm-develop"]
+refinement_labels  = ["heimdallm-refine"]
 review_only_labels = ["heimdallm-triage"]
 skip_labels        = ["wontfix"]
 
@@ -904,6 +906,8 @@ non_monitored = []
 # assignees      = ["myusername"]       # env: HEIMDALLM_ISSUE_ASSIGNEES
 # develop_labels     = ["enhancement", "feature", "bug"]
 #                                       # env: HEIMDALLM_ISSUE_DEVELOP_LABELS
+# refinement_labels  = ["refine"]
+#                                       # env: HEIMDALLM_ISSUE_REFINEMENT_LABELS
 # review_only_labels = ["question", "discussion", "analysis"]
 #                                       # env: HEIMDALLM_ISSUE_REVIEW_ONLY_LABELS
 # skip_labels        = ["wontfix", "duplicate", "invalid"]
@@ -924,6 +928,7 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 
 # Global execution timeout for AI CLI calls.
 # execution_timeout = "20m"   # default: 5m — env: HEIMDALLM_EXECUTION_TIMEOUT
+# refinement_timeout = "30m"  # deep issue refinement — env: HEIMDALLM_REFINEMENT_TIMEOUT
 
 # Issue pipeline ownership and promotion defaults.
 # triage_owner = "alice"
@@ -992,6 +997,7 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # prompt = "org-pr-review-profile"
 # issue_prompt = "org-issue-triage-profile"
 # implement_prompt = "org-implementation-profile"
+# refinement_timeout = "30m"
 # triage_owner = "alice"
 # clone_dir = "/home/heimdallm/repos/myorg-worktrees"
 # auto_promote_triage = true
@@ -1005,6 +1011,7 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # [ai.orgs."myorg".issue_tracking]
 # enabled = true
 # develop_labels = ["heimdallm-develop"]
+# refinement_labels = ["heimdallm-refine"]
 # review_only_labels = ["heimdallm-triage"]
 # skip_labels = ["wontfix"]
 

@@ -15,6 +15,7 @@ const (
 	EventIssueDetected        = "issue_detected"
 	EventIssueReviewStarted   = "issue_review_started"
 	EventIssueReviewCompleted = "issue_review_completed"
+	EventIssueRefinementDone  = "issue_refinement_done"
 	EventIssueImplemented     = "issue_implemented" // reserved for #27 (auto_implement PR created)
 	EventIssueReviewError     = "issue_review_error"
 	EventIssuePromoted        = "issue_promoted" // #113: promoter flipped blocked → promote-to label

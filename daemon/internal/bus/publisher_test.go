@@ -185,6 +185,38 @@ func TestIssuePublisher_Implement(t *testing.T) {
 	}
 }
 
+func TestIssuePublisher_Refinement(t *testing.T) {
+	env := newTestEnv(t)
+	conn := env.bus.Conn()
+	ctx := context.Background()
+
+	ch := make(chan *nats.Msg, 1)
+	sub, err := conn.ChanSubscribe(bus.SubjIssueRefinement, ch)
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	defer sub.Unsubscribe()
+
+	pub := bus.NewIssuePublisher(conn)
+	if err := pub.PublishIssueRefinement(ctx, "org/repo", 30, 777); err != nil {
+		t.Fatalf("PublishIssueRefinement: %v", err)
+	}
+	conn.Flush()
+
+	select {
+	case m := <-ch:
+		var got bus.IssueMsg
+		if err := bus.Decode(m.Data, &got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if got.Repo != "org/repo" || got.Number != 30 || got.GithubID != 777 {
+			t.Errorf("unexpected: %+v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout")
+	}
+}
+
 func TestStateCheckPublisher_Publish(t *testing.T) {
 	env := newTestEnv(t)
 	conn := env.bus.Conn()

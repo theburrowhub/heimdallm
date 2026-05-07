@@ -165,6 +165,35 @@ type PRDescription struct {
 	Body  string `json:"body"`
 }
 
+// RefinementResult is the structured deep-investigation output produced by
+// the refinement stage before development.
+type RefinementResult struct {
+	AnalysisSummary     string              `json:"analysis_summary"`
+	AffectedAreas       []RefinementArea    `json:"affected_areas"`
+	Subtasks            []RefinementSubtask `json:"subtasks"`
+	ImplementationOrder []string            `json:"implementation_order"`
+	Assumptions         []string            `json:"assumptions"`
+	OpenQuestions       []string            `json:"open_questions"`
+	Risks               []string            `json:"risks"`
+	TestPlan            []string            `json:"test_plan"`
+}
+
+type RefinementArea struct {
+	Path    string   `json:"path"`
+	Symbols []string `json:"symbols"`
+	Reason  string   `json:"reason"`
+}
+
+type RefinementSubtask struct {
+	ID             string   `json:"id"`
+	Description    string   `json:"description"`
+	AffectedFiles  []string `json:"affected_files"`
+	Symbols        []string `json:"symbols"`
+	ExpectedChange string   `json:"expected_change"`
+	Complexity     string   `json:"complexity"`
+	Dependencies   []string `json:"dependencies"`
+}
+
 // RunOptions carries per-execution settings derived from global + repo +
 // agent config by the caller.
 //
@@ -208,10 +237,17 @@ type RunOptions struct {
 	// When false (default), the pipeline uses the template strings.
 	GeneratePRDescription bool
 
+	// Force bypasses refinement idempotency for manual reruns.
+	Force bool
+
 	// RequireWorkDirForDevelop turns the historical develop→review_only
 	// fallback into a hard error. Production auto-clone callers set this so
 	// an auto_implement run never silently proceeds without a writable checkout.
 	RequireWorkDirForDevelop bool
+
+	// RequireWorkDirForRefinement records the production contract explicitly:
+	// refinement needs full repository context and must not degrade to issue-only.
+	RequireWorkDirForRefinement bool
 
 	// ReleaseRepoContext releases a checkout handle acquired by the caller.
 	// It is intentionally a one-shot cleanup hook rather than another source
@@ -257,6 +293,7 @@ type issueStore interface {
 	UpsertIssue(i *store.Issue) (int64, error)
 	InsertIssueReview(r *store.IssueReview) (int64, error)
 	LatestIssueReview(issueID int64) (*store.IssueReview, error)
+	LatestIssueReviewByAction(issueID int64, action string) (*store.IssueReview, error)
 	UpsertPR(pr *store.PR) (int64, error)
 	ClaimIssueTriageInFlight(issueID int64, updatedAt string) (bool, error)
 	ReleaseIssueTriageInFlight(issueID int64, updatedAt string) error
@@ -376,6 +413,9 @@ func (p *Pipeline) Run(ctx context.Context, issue *github.Issue, opts RunOptions
 			"repo", issue.Repo, "issue", issue.Number)
 		effective = config.IssueModeReviewOnly
 	}
+	if effective == config.IssueModeRefinement && workDir == "" {
+		return nil, fmt.Errorf("issues pipeline: refinement mode requires local repo context")
+	}
 	if effective == config.IssueModeIgnore {
 		return nil, fmt.Errorf("issues pipeline: refusing an ignore-classified issue (fetcher should have filtered it out)")
 	}
@@ -430,6 +470,8 @@ func (p *Pipeline) Run(ctx context.Context, issue *github.Issue, opts RunOptions
 	switch effective {
 	case config.IssueModeReviewOnly:
 		return p.runReviewOnly(ctx, issue, issueID, workDir, opts)
+	case config.IssueModeRefinement:
+		return p.runRefinement(ctx, issue, issueID, workDir, opts)
 	case config.IssueModeDevelop:
 		return p.runAutoImplement(ctx, issue, issueID, workDir, opts)
 	default:
@@ -625,19 +667,15 @@ func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, is
 		return nil, fmt.Errorf("issues pipeline: detect CLI: %w", err)
 	}
 
-	// Build re-triage context if a previous review exists for this issue.
+	// Build prior-issue context. Prefer the latest refinement plan when it
+	// exists so auto_implement can execute the researched plan; otherwise fall
+	// back to the historical triage context.
 	var triageCtx string
-	prevReview, _ := p.store.LatestIssueReview(issueID)
-	if prevReview != nil {
-		triageCtx = buildTriageContext(
-			prevReview.Triage,
-			prevReview.Suggestions,
-			prevReview.Summary,
-			extractSeverity(prevReview.Triage),
-			prevReview.CreatedAt,
-			comments,
-			p.botLogin,
-		)
+	prevRefinement, _ := p.store.LatestIssueReviewByAction(issueID, string(config.IssueModeRefinement))
+	if prevRefinement != nil {
+		triageCtx = buildIssueRunContext(prevRefinement, comments, p.botLogin)
+	} else if prevReview, _ := p.store.LatestIssueReview(issueID); prevReview != nil {
+		triageCtx = buildIssueRunContext(prevReview, comments, p.botLogin)
 	}
 
 	// Agent profile customization: ImplementPromptOverride replaces the entire
@@ -935,9 +973,9 @@ func parseIssueResult(data []byte) (*IssueReviewResult, error) {
 // store keeps assignees and labels as JSON arrays (`[]` when empty), matching
 // the schema introduced in #24.
 //
-// The issue's processing mode (review_only vs develop) is intentionally not
-// part of store.Issue — the issues table captures the issue itself, while
-// the mode of *each triage run* lives on issue_reviews.action_taken. That
+// The issue's processing mode is intentionally not part of store.Issue — the
+// issues table captures the issue itself, while the mode of *each pipeline
+// run* lives on issue_reviews.action_taken. That
 // separation lets a single issue accumulate multiple reviews across mode
 // changes (e.g. initial review_only → later auto_implement in #27) without
 // losing the history.
