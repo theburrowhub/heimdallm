@@ -57,13 +57,20 @@ class FirstRunSetup {
 
   static Future<void> _storeTokenMacOS(String token) async {
     await Process.run('security', [
-      'delete-generic-password', '-s', _keychainService, '-a', _keychainAccount,
+      'delete-generic-password',
+      '-s',
+      _keychainService,
+      '-a',
+      _keychainAccount,
     ]);
     final result = await Process.run('security', [
       'add-generic-password',
-      '-s', _keychainService,
-      '-a', _keychainAccount,
-      '-w', token,
+      '-s',
+      _keychainService,
+      '-a',
+      _keychainAccount,
+      '-w',
+      token,
     ]);
     if (result.exitCode != 0) {
       throw Exception('Failed to store token in Keychain: ${result.stderr}');
@@ -72,7 +79,12 @@ class FirstRunSetup {
 
   static Future<String?> _getTokenMacOS() async {
     final result = await Process.run('security', [
-      'find-generic-password', '-s', _keychainService, '-a', _keychainAccount, '-w',
+      'find-generic-password',
+      '-s',
+      _keychainService,
+      '-a',
+      _keychainAccount,
+      '-w',
     ]);
     if (result.exitCode == 0) {
       final token = (result.stdout as String).trim();
@@ -89,8 +101,10 @@ class FirstRunSetup {
       final proc = await Process.start('secret-tool', [
         'store',
         '--label=Heimdallm GitHub Token',
-        'service', _keychainService,
-        'account', _keychainAccount,
+        'service',
+        _keychainService,
+        'account',
+        _keychainAccount,
       ]);
       // secret-tool reads the secret from stdin
       proc.stdin.write(token);
@@ -108,8 +122,10 @@ class FirstRunSetup {
     try {
       final result = await Process.run('secret-tool', [
         'lookup',
-        'service', _keychainService,
-        'account', _keychainAccount,
+        'service',
+        _keychainService,
+        'account',
+        _keychainAccount,
       ]);
       if (result.exitCode == 0) {
         final token = (result.stdout as String).trim();
@@ -172,6 +188,9 @@ class FirstRunSetup {
       .replaceAll('\n', r'\n')
       .replaceAll('\r', r'\r');
 
+  static String _tomlStringArray(List<String> values) =>
+      '[${values.map((v) => '"${_tomlEscapeString(v)}"').join(', ')}]';
+
   static String _buildToml(AppConfig config) {
     final buf = StringBuffer();
 
@@ -181,15 +200,21 @@ class FirstRunSetup {
 
     buf.writeln('[github]');
     buf.writeln('poll_interval = "${_tomlEscapeString(config.pollInterval)}"');
-    final repos = config.repositories.map((r) => '"${_tomlEscapeString(r)}"').join(', ');
+    final repos = config.repositories
+        .map((r) => '"${_tomlEscapeString(r)}"')
+        .join(', ');
     buf.writeln('repositories = [$repos]');
     // Persist non-monitored repos so the UI can display and re-enable them after restart.
-    final nonMonitored = config.repoConfigs.entries
-        .where((e) => !e.value.isMonitored)
-        .map((e) => e.key)
-        .toList()..sort();
+    final nonMonitored =
+        config.repoConfigs.entries
+            .where((e) => !e.value.isMonitored)
+            .map((e) => e.key)
+            .toList()
+          ..sort();
     if (nonMonitored.isNotEmpty) {
-      final nonMon = nonMonitored.map((r) => '"${_tomlEscapeString(r)}"').join(', ');
+      final nonMon = nonMonitored
+          .map((r) => '"${_tomlEscapeString(r)}"')
+          .join(', ');
       buf.writeln('non_monitored = [$nonMon]');
     }
     // Persist local_dir_base so a Flutter-side save doesn't silently drop
@@ -213,19 +238,29 @@ class FirstRunSetup {
     buf.writeln('filter_mode = "${_tomlEscapeString(it.filterMode)}"');
     buf.writeln('default_action = "${_tomlEscapeString(it.defaultAction)}"');
     if (it.developLabels.isNotEmpty) {
-      buf.writeln('develop_labels = [${it.developLabels.map((l) => '"${_tomlEscapeString(l)}"').join(', ')}]');
+      buf.writeln(
+        'develop_labels = [${it.developLabels.map((l) => '"${_tomlEscapeString(l)}"').join(', ')}]',
+      );
     }
     if (it.reviewOnlyLabels.isNotEmpty) {
-      buf.writeln('review_only_labels = [${it.reviewOnlyLabels.map((l) => '"${_tomlEscapeString(l)}"').join(', ')}]');
+      buf.writeln(
+        'review_only_labels = [${it.reviewOnlyLabels.map((l) => '"${_tomlEscapeString(l)}"').join(', ')}]',
+      );
     }
     if (it.skipLabels.isNotEmpty) {
-      buf.writeln('skip_labels = [${it.skipLabels.map((l) => '"${_tomlEscapeString(l)}"').join(', ')}]');
+      buf.writeln(
+        'skip_labels = [${it.skipLabels.map((l) => '"${_tomlEscapeString(l)}"').join(', ')}]',
+      );
     }
     if (it.organizations.isNotEmpty) {
-      buf.writeln('organizations = [${it.organizations.map((o) => '"${_tomlEscapeString(o)}"').join(', ')}]');
+      buf.writeln(
+        'organizations = [${it.organizations.map((o) => '"${_tomlEscapeString(o)}"').join(', ')}]',
+      );
     }
     if (it.assignees.isNotEmpty) {
-      buf.writeln('assignees = [${it.assignees.map((a) => '"${_tomlEscapeString(a)}"').join(', ')}]');
+      buf.writeln(
+        'assignees = [${it.assignees.map((a) => '"${_tomlEscapeString(a)}"').join(', ')}]',
+      );
     }
     buf.writeln();
 
@@ -236,25 +271,56 @@ class FirstRunSetup {
     }
     buf.writeln('review_mode = "${_tomlEscapeString(config.reviewMode)}"');
     if (config.globalIssuePrompt.isNotEmpty) {
-      buf.writeln('issue_prompt = "${_tomlEscapeString(config.globalIssuePrompt)}"');
+      buf.writeln(
+        'issue_prompt = "${_tomlEscapeString(config.globalIssuePrompt)}"',
+      );
     }
     if (config.globalImplementPrompt.isNotEmpty) {
-      buf.writeln('implement_prompt = "${_tomlEscapeString(config.globalImplementPrompt)}"');
+      buf.writeln(
+        'implement_prompt = "${_tomlEscapeString(config.globalImplementPrompt)}"',
+      );
+    }
+    if (config.globalTriageOwner.isNotEmpty) {
+      buf.writeln(
+        'triage_owner = "${_tomlEscapeString(config.globalTriageOwner)}"',
+      );
+    }
+    if (config.globalCloneDir.isNotEmpty) {
+      buf.writeln('clone_dir = "${_tomlEscapeString(config.globalCloneDir)}"');
+    }
+    if (config.globalAutoPromoteTriage != null) {
+      buf.writeln('auto_promote_triage = ${config.globalAutoPromoteTriage}');
+    }
+    if (config.globalAutoPromoteRefinement != null) {
+      buf.writeln(
+        'auto_promote_refinement = ${config.globalAutoPromoteRefinement}',
+      );
+    }
+    if (config.globalGeneratePRDescription) {
+      buf.writeln('generate_pr_description = true');
     }
     buf.writeln();
 
     // Global PR metadata defaults
-    if (config.globalPRReviewers.isNotEmpty || config.globalPRLabels.isNotEmpty ||
-        config.globalPRAssignee.isNotEmpty || config.globalPRDraft) {
+    if (config.globalPRReviewers.isNotEmpty ||
+        config.globalPRLabels.isNotEmpty ||
+        config.globalPRAssignee.isNotEmpty ||
+        config.globalPRDraft) {
       buf.writeln('[ai.pr_metadata]');
       if (config.globalPRReviewers.isNotEmpty) {
-        buf.writeln('reviewers = [${config.globalPRReviewers.map((r) => '"${_tomlEscapeString(r)}"').join(', ')}]');
+        buf.writeln(
+          'reviewers = [${config.globalPRReviewers.map((r) => '"${_tomlEscapeString(r)}"').join(', ')}]',
+        );
       }
       if (config.globalPRLabels.isNotEmpty) {
-        buf.writeln('labels = [${config.globalPRLabels.map((l) => '"${_tomlEscapeString(l)}"').join(', ')}]');
+        buf.writeln(
+          'labels = [${config.globalPRLabels.map((l) => '"${_tomlEscapeString(l)}"').join(', ')}]',
+        );
       }
       if (config.globalPRAssignee.isNotEmpty) {
-        buf.writeln('pr_assignee = "${_tomlEscapeString(config.globalPRAssignee)}"');
+        buf.writeln(
+          'pr_assignee = "${_tomlEscapeString(config.globalPRAssignee)}"',
+        );
       }
       if (config.globalPRDraft) {
         buf.writeln('pr_draft = true');
@@ -268,16 +334,146 @@ class FirstRunSetup {
       final ac = entry.value;
       if (ac.hasConfig) {
         buf.writeln('[ai.agents.$name]');
-        if (ac.model.isNotEmpty) buf.writeln('model = "${_tomlEscapeString(ac.model)}"');
+        if (ac.model.isNotEmpty) {
+          buf.writeln('model = "${_tomlEscapeString(ac.model)}"');
+        }
         if (ac.maxTurns > 0) buf.writeln('max_turns = ${ac.maxTurns}');
-        if (ac.approvalMode.isNotEmpty) buf.writeln('approval_mode = "${_tomlEscapeString(ac.approvalMode)}"');
-        if (ac.extraFlags.isNotEmpty) buf.writeln('extra_flags = "${_tomlEscapeString(ac.extraFlags)}"');
-        if (ac.promptId != null) buf.writeln('prompt = "${_tomlEscapeString(ac.promptId!)}"');
-        if (ac.effort.isNotEmpty) buf.writeln('effort = "${_tomlEscapeString(ac.effort)}"');
-        if (ac.permissionMode.isNotEmpty) buf.writeln('permission_mode = "${_tomlEscapeString(ac.permissionMode)}"');
+        if (ac.approvalMode.isNotEmpty) {
+          buf.writeln(
+            'approval_mode = "${_tomlEscapeString(ac.approvalMode)}"',
+          );
+        }
+        if (ac.extraFlags.isNotEmpty) {
+          buf.writeln('extra_flags = "${_tomlEscapeString(ac.extraFlags)}"');
+        }
+        if (ac.promptId != null) {
+          buf.writeln('prompt = "${_tomlEscapeString(ac.promptId!)}"');
+        }
+        if (ac.effort.isNotEmpty) {
+          buf.writeln('effort = "${_tomlEscapeString(ac.effort)}"');
+        }
+        if (ac.permissionMode.isNotEmpty) {
+          buf.writeln(
+            'permission_mode = "${_tomlEscapeString(ac.permissionMode)}"',
+          );
+        }
         if (ac.bare) buf.writeln('bare = true');
-        if (ac.dangerouslySkipPerms) buf.writeln('dangerously_skip_perms = true');
-        if (ac.noSessionPersistence) buf.writeln('no_session_persistence = true');
+        if (ac.dangerouslySkipPerms) {
+          buf.writeln('dangerously_skip_perms = true');
+        }
+        if (ac.noSessionPersistence) {
+          buf.writeln('no_session_persistence = true');
+        }
+        buf.writeln();
+      }
+    }
+
+    // Per-org overrides.
+    for (final entry in config.orgConfigs.entries) {
+      final org = entry.key;
+      final oc = entry.value;
+      if (oc.hasOverride) {
+        buf.writeln('[ai.orgs."${_tomlEscapeString(org)}"]');
+        if (oc.aiPrimary != null) {
+          buf.writeln('primary = "${_tomlEscapeString(oc.aiPrimary!)}"');
+        }
+        if (oc.aiFallback != null) {
+          buf.writeln('fallback = "${_tomlEscapeString(oc.aiFallback!)}"');
+        }
+        if (oc.promptId != null) {
+          buf.writeln('prompt = "${_tomlEscapeString(oc.promptId!)}"');
+        }
+        if (oc.issuePromptId != null) {
+          buf.writeln(
+            'issue_prompt = "${_tomlEscapeString(oc.issuePromptId!)}"',
+          );
+        }
+        if (oc.developPromptId != null) {
+          buf.writeln(
+            'implement_prompt = "${_tomlEscapeString(oc.developPromptId!)}"',
+          );
+        }
+        if (oc.reviewMode != null) {
+          buf.writeln('review_mode = "${_tomlEscapeString(oc.reviewMode!)}"');
+        }
+        if (oc.localDir != null && oc.localDir!.isNotEmpty) {
+          buf.writeln('local_dir = "${_tomlEscapeString(oc.localDir!)}"');
+        }
+        if (oc.triageOwner != null && oc.triageOwner!.isNotEmpty) {
+          buf.writeln('triage_owner = "${_tomlEscapeString(oc.triageOwner!)}"');
+        }
+        if (oc.cloneDir != null && oc.cloneDir!.isNotEmpty) {
+          buf.writeln('clone_dir = "${_tomlEscapeString(oc.cloneDir!)}"');
+        }
+        if (oc.autoPromoteTriage != null) {
+          buf.writeln('auto_promote_triage = ${oc.autoPromoteTriage}');
+        }
+        if (oc.autoPromoteRefinement != null) {
+          buf.writeln('auto_promote_refinement = ${oc.autoPromoteRefinement}');
+        }
+        if (oc.generatePRDescription != null) {
+          buf.writeln('generate_pr_description = ${oc.generatePRDescription}');
+        }
+        if (oc.prReviewers != null) {
+          buf.writeln('pr_reviewers = ${_tomlStringArray(oc.prReviewers!)}');
+        }
+        if (oc.prAssignee != null && oc.prAssignee!.isNotEmpty) {
+          buf.writeln('pr_assignee = "${_tomlEscapeString(oc.prAssignee!)}"');
+        }
+        if (oc.prLabels != null) {
+          buf.writeln('pr_labels = ${_tomlStringArray(oc.prLabels!)}');
+        }
+        if (oc.prDraft != null) {
+          buf.writeln('pr_draft = ${oc.prDraft}');
+        }
+        final hasIT =
+            oc.developLabels != null ||
+            oc.reviewOnlyLabels != null ||
+            oc.skipLabels != null ||
+            oc.issueFilterMode != null ||
+            oc.issueDefaultAction != null ||
+            oc.issueOrganizations != null ||
+            oc.issueAssignees != null ||
+            oc.itEnabled != null ||
+            oc.devEnabled != null;
+        if (hasIT) {
+          buf.writeln('[ai.orgs."${_tomlEscapeString(org)}".issue_tracking]');
+          if (oc.itEnabled != null) buf.writeln('enabled = ${oc.itEnabled}');
+          if (oc.devEnabled != null) {
+            buf.writeln('develop_enabled = ${oc.devEnabled}');
+          }
+          if (oc.developLabels != null) {
+            buf.writeln(
+              'develop_labels = ${_tomlStringArray(oc.developLabels!)}',
+            );
+          }
+          if (oc.reviewOnlyLabels != null) {
+            buf.writeln(
+              'review_only_labels = ${_tomlStringArray(oc.reviewOnlyLabels!)}',
+            );
+          }
+          if (oc.skipLabels != null) {
+            buf.writeln('skip_labels = ${_tomlStringArray(oc.skipLabels!)}');
+          }
+          if (oc.issueFilterMode != null) {
+            buf.writeln(
+              'filter_mode = "${_tomlEscapeString(oc.issueFilterMode!)}"',
+            );
+          }
+          if (oc.issueDefaultAction != null) {
+            buf.writeln(
+              'default_action = "${_tomlEscapeString(oc.issueDefaultAction!)}"',
+            );
+          }
+          if (oc.issueOrganizations != null) {
+            buf.writeln(
+              'organizations = ${_tomlStringArray(oc.issueOrganizations!)}',
+            );
+          }
+          if (oc.issueAssignees != null) {
+            buf.writeln('assignees = ${_tomlStringArray(oc.issueAssignees!)}');
+          }
+        }
         buf.writeln();
       }
     }
@@ -288,53 +484,106 @@ class FirstRunSetup {
       final rc = entry.value;
       if (rc.hasAiOverride) {
         buf.writeln('[ai.repos."${_tomlEscapeString(repo)}"]');
-        if (rc.aiPrimary != null) buf.writeln('primary = "${_tomlEscapeString(rc.aiPrimary!)}"');
-        if (rc.aiFallback != null) buf.writeln('fallback = "${_tomlEscapeString(rc.aiFallback!)}"');
-        if (rc.promptId != null) buf.writeln('prompt = "${_tomlEscapeString(rc.promptId!)}"');
-        if (rc.reviewMode != null) buf.writeln('review_mode = "${_tomlEscapeString(rc.reviewMode!)}"');
+        if (rc.aiPrimary != null) {
+          buf.writeln('primary = "${_tomlEscapeString(rc.aiPrimary!)}"');
+        }
+        if (rc.aiFallback != null) {
+          buf.writeln('fallback = "${_tomlEscapeString(rc.aiFallback!)}"');
+        }
+        if (rc.promptId != null) {
+          buf.writeln('prompt = "${_tomlEscapeString(rc.promptId!)}"');
+        }
+        if (rc.issuePromptId != null) {
+          buf.writeln(
+            'issue_prompt = "${_tomlEscapeString(rc.issuePromptId!)}"',
+          );
+        }
+        if (rc.developPromptId != null) {
+          buf.writeln(
+            'implement_prompt = "${_tomlEscapeString(rc.developPromptId!)}"',
+          );
+        }
+        if (rc.reviewMode != null) {
+          buf.writeln('review_mode = "${_tomlEscapeString(rc.reviewMode!)}"');
+        }
         if (rc.localDir != null && rc.localDir!.isNotEmpty) {
           buf.writeln('local_dir = "${_tomlEscapeString(rc.localDir!)}"');
         }
+        if (rc.triageOwner != null && rc.triageOwner!.isNotEmpty) {
+          buf.writeln('triage_owner = "${_tomlEscapeString(rc.triageOwner!)}"');
+        }
+        if (rc.cloneDir != null && rc.cloneDir!.isNotEmpty) {
+          buf.writeln('clone_dir = "${_tomlEscapeString(rc.cloneDir!)}"');
+        }
+        if (rc.autoPromoteTriage != null) {
+          buf.writeln('auto_promote_triage = ${rc.autoPromoteTriage}');
+        }
+        if (rc.autoPromoteRefinement != null) {
+          buf.writeln('auto_promote_refinement = ${rc.autoPromoteRefinement}');
+        }
+        if (rc.generatePRDescription != null) {
+          buf.writeln('generate_pr_description = ${rc.generatePRDescription}');
+        }
         // PR metadata (must be written BEFORE any sub-table headers)
-        if (rc.prReviewers != null && rc.prReviewers!.isNotEmpty) {
-          buf.writeln('pr_reviewers = [${rc.prReviewers!.map((r) => '"${_tomlEscapeString(r)}"').join(', ')}]');
+        if (rc.prReviewers != null) {
+          buf.writeln('pr_reviewers = ${_tomlStringArray(rc.prReviewers!)}');
         }
         if (rc.prAssignee != null && rc.prAssignee!.isNotEmpty) {
           buf.writeln('pr_assignee = "${_tomlEscapeString(rc.prAssignee!)}"');
         }
-        if (rc.prLabels != null && rc.prLabels!.isNotEmpty) {
-          buf.writeln('pr_labels = [${rc.prLabels!.map((l) => '"${_tomlEscapeString(l)}"').join(', ')}]');
+        if (rc.prLabels != null) {
+          buf.writeln('pr_labels = ${_tomlStringArray(rc.prLabels!)}');
         }
-        if (rc.prDraft == true) {
-          buf.writeln('pr_draft = true');
+        if (rc.prDraft != null) {
+          buf.writeln('pr_draft = ${rc.prDraft}');
         }
         // Issue tracking overrides (sub-table — must come after all repo-level keys)
-        final hasIT = rc.developLabels != null || rc.reviewOnlyLabels != null ||
-            rc.skipLabels != null || rc.issueFilterMode != null ||
-            rc.issueDefaultAction != null || rc.issueOrganizations != null ||
+        final hasIT =
+            rc.developLabels != null ||
+            rc.reviewOnlyLabels != null ||
+            rc.skipLabels != null ||
+            rc.issueFilterMode != null ||
+            rc.issueDefaultAction != null ||
+            rc.itEnabled != null ||
+            rc.devEnabled != null ||
+            rc.issueOrganizations != null ||
             rc.issueAssignees != null;
         if (hasIT) {
           buf.writeln('[ai.repos."${_tomlEscapeString(repo)}".issue_tracking]');
-          if (rc.developLabels != null && rc.developLabels!.isNotEmpty) {
-            buf.writeln('develop_labels = [${rc.developLabels!.map((l) => '"${_tomlEscapeString(l)}"').join(', ')}]');
+          if (rc.itEnabled != null) buf.writeln('enabled = ${rc.itEnabled}');
+          if (rc.devEnabled != null) {
+            buf.writeln('develop_enabled = ${rc.devEnabled}');
           }
-          if (rc.reviewOnlyLabels != null && rc.reviewOnlyLabels!.isNotEmpty) {
-            buf.writeln('review_only_labels = [${rc.reviewOnlyLabels!.map((l) => '"${_tomlEscapeString(l)}"').join(', ')}]');
+          if (rc.developLabels != null) {
+            buf.writeln(
+              'develop_labels = ${_tomlStringArray(rc.developLabels!)}',
+            );
           }
-          if (rc.skipLabels != null && rc.skipLabels!.isNotEmpty) {
-            buf.writeln('skip_labels = [${rc.skipLabels!.map((l) => '"${_tomlEscapeString(l)}"').join(', ')}]');
+          if (rc.reviewOnlyLabels != null) {
+            buf.writeln(
+              'review_only_labels = ${_tomlStringArray(rc.reviewOnlyLabels!)}',
+            );
+          }
+          if (rc.skipLabels != null) {
+            buf.writeln('skip_labels = ${_tomlStringArray(rc.skipLabels!)}');
           }
           if (rc.issueFilterMode != null) {
-            buf.writeln('filter_mode = "${_tomlEscapeString(rc.issueFilterMode!)}"');
+            buf.writeln(
+              'filter_mode = "${_tomlEscapeString(rc.issueFilterMode!)}"',
+            );
           }
           if (rc.issueDefaultAction != null) {
-            buf.writeln('default_action = "${_tomlEscapeString(rc.issueDefaultAction!)}"');
+            buf.writeln(
+              'default_action = "${_tomlEscapeString(rc.issueDefaultAction!)}"',
+            );
           }
-          if (rc.issueOrganizations != null && rc.issueOrganizations!.isNotEmpty) {
-            buf.writeln('organizations = [${rc.issueOrganizations!.map((o) => '"${_tomlEscapeString(o)}"').join(', ')}]');
+          if (rc.issueOrganizations != null) {
+            buf.writeln(
+              'organizations = ${_tomlStringArray(rc.issueOrganizations!)}',
+            );
           }
-          if (rc.issueAssignees != null && rc.issueAssignees!.isNotEmpty) {
-            buf.writeln('assignees = [${rc.issueAssignees!.map((a) => '"${_tomlEscapeString(a)}"').join(', ')}]');
+          if (rc.issueAssignees != null) {
+            buf.writeln('assignees = ${_tomlStringArray(rc.issueAssignees!)}');
           }
         }
         buf.writeln();

@@ -47,6 +47,10 @@ primary = "claude"
 # fallback = "gemini"
 review_mode = "single"   # "single" or "multi"
 # execution_timeout = "20m"   # default: 5m; increase for complex auto_implement
+# triage_owner = "muriano"
+# clone_dir = "/repos/worktrees"
+# auto_promote_triage = true
+# auto_promote_refinement = false
 
 # When true, auto_implement PRs get an LLM-generated title and description
 # instead of the default template. A second (cheap) LLM call analyses the
@@ -90,15 +94,35 @@ review_mode = "single"   # "single" or "multi"
 # assignee = "sergiotejon"
 # draft = false
 
-# Per-org PR metadata overrides (optional)
+# Per-org overrides (optional)
 # Applied to all repos in the org unless overridden per-repo.
+# Omit fields to inherit. Empty arrays such as pr_reviewers = [] explicitly
+# clear inherited lists; enabled = false explicitly disables issue tracking.
 # [ai.orgs."freepik-company"]
+# primary = "gemini"
+# fallback = "claude"
+# review_mode = "multi"
+# prompt = "org-pr-review-profile"
+# issue_prompt = "org-issue-triage-profile"
+# implement_prompt = "org-implementation-profile"
+# triage_owner = "muriano"
+# clone_dir = "/repos/freepik-worktrees"
+# auto_promote_triage = true
+# auto_promote_refinement = false
+# generate_pr_description = true
 # pr_reviewers = ["muriano", "ivanmunozruiz"]
 # pr_labels = ["auto-generated", "ai-platform"]
 # pr_assignee = "sergiotejon"
 # pr_draft = false
+#
+# [ai.orgs."freepik-company".issue_tracking]
+# enabled = true
+# develop_labels = ["heimdallm-develop"]
+# review_only_labels = ["heimdallm-triage"]
+# skip_labels = ["wontfix"]
 
 # [ai.orgs."theburrowhub"]
+# primary = "codex"
 # pr_reviewers = ["muriano", "ivanmunozruiz", "vbuenog"]
 # pr_labels = ["auto-generated"]
 

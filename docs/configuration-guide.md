@@ -496,19 +496,56 @@ draft     = false
 
 ### Per-org overrides
 
-Applied to all repos in the org unless a per-repo override exists:
+Applied to all repos in the org unless a per-repo override exists. Resolution is
+field-by-field: `ai.repos."org/repo"` wins over `ai.orgs."org"`, which wins
+over global defaults.
 
 ```toml
 [ai.orgs."myorg"]
+primary      = "gemini"
+fallback     = "claude"
+review_mode  = "multi"
+prompt       = "org-pr-review-profile"
+issue_prompt = "org-issue-triage-profile"
+implement_prompt = "org-implementation-profile"
+triage_owner = "alice"
+clone_dir = "/home/heimdallm/repos/myorg-worktrees"
+auto_promote_triage = true
+auto_promote_refinement = false
+generate_pr_description = true
+
 pr_reviewers = ["alice", "bob", "carol"]
 pr_labels    = ["auto-generated", "ai-platform"]
 pr_assignee  = "myusername"
 pr_draft     = false
 
+[ai.orgs."myorg".issue_tracking]
+enabled            = true
+develop_labels     = ["heimdallm-develop"]
+review_only_labels = ["heimdallm-triage"]
+skip_labels        = ["wontfix"]
+
 [ai.orgs."other-org"]
+primary = "codex"
 pr_reviewers = ["dave"]
 pr_labels    = ["auto-generated"]
 ```
+
+`local_dir` is also accepted at org scope because org overrides share the same
+resolution path as repo overrides, but prefer `local_dir_base` or per-repo
+`local_dir` unless every repo in the org should use the same checkout path.
+
+Scoped overrides distinguish "unset" from "set to empty/false":
+
+- Omit `enabled` under `ai.orgs.*.issue_tracking` or
+  `ai.repos.*.issue_tracking` to inherit. If labels are present and `enabled`
+  is omitted, Heimdallm still treats that scope as enabled, preserving the
+  historical labels-imply-enabled behaviour.
+- Set `enabled = false` to explicitly disable issue tracking at that scope,
+  even when labels are also present.
+- Omit list fields such as `pr_reviewers`, `pr_labels`, `develop_labels`, or
+  `review_only_labels` to inherit. Set them to `[]` to explicitly clear the
+  inherited list.
 
 ### Per-repo overrides
 
@@ -885,6 +922,12 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # Global execution timeout for AI CLI calls.
 # execution_timeout = "20m"   # default: 5m — env: HEIMDALLM_EXECUTION_TIMEOUT
 
+# Issue pipeline ownership and promotion defaults.
+# triage_owner = "alice"
+# clone_dir = "/home/heimdallm/repos/worktrees"
+# auto_promote_triage = true
+# auto_promote_refinement = false
+
 # Generate LLM-produced PR titles and descriptions for auto_implement PRs.
 # generate_pr_description = false
 
@@ -921,16 +964,35 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # pr_assignee  = "myusername"
 # pr_draft     = false
 
-# ── Per-org PR metadata overrides ────────────────────────────────────────────
+# ── Per-org overrides ────────────────────────────────────────────────────────
 # Applied to all repos in the org unless overridden per-repo.
+# Each field is optional and inherits from global defaults when absent.
 
 # [ai.orgs."myorg"]
+# primary = "gemini"
+# fallback = "claude"
+# review_mode = "multi"
+# prompt = "org-pr-review-profile"
+# issue_prompt = "org-issue-triage-profile"
+# implement_prompt = "org-implementation-profile"
+# triage_owner = "alice"
+# clone_dir = "/home/heimdallm/repos/myorg-worktrees"
+# auto_promote_triage = true
+# auto_promote_refinement = false
+# generate_pr_description = true
 # pr_reviewers = ["alice", "bob"]
 # pr_labels    = ["auto-generated", "myorg-team"]
 # pr_assignee  = "myusername"
 # pr_draft     = false
+#
+# [ai.orgs."myorg".issue_tracking]
+# enabled = true
+# develop_labels = ["heimdallm-develop"]
+# review_only_labels = ["heimdallm-triage"]
+# skip_labels = ["wontfix"]
 
 # [ai.orgs."other-org"]
+# primary = "codex"
 # pr_reviewers = ["carol"]
 
 # ── Per-repo AI overrides ─────────────────────────────────────────────────────

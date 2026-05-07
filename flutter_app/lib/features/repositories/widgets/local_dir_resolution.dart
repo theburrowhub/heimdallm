@@ -42,8 +42,12 @@ class LocalDirResolution {
     required RepoConfig config,
     required AppConfig appConfig,
   }) {
-    final configured =
-        (config.localDir ?? '').isNotEmpty ? config.localDir : null;
+    final org = repo.contains('/') ? repo.split('/').first : null;
+    final orgConfig = org != null ? appConfig.orgConfigs[org] : null;
+    final orgLocalDir = orgConfig?.localDir;
+    final configured = (config.localDir ?? '').isNotEmpty
+        ? config.localDir
+        : ((orgLocalDir ?? '').isNotEmpty ? orgLocalDir : null);
     return LocalDirResolution(
       configured: configured,
       detected: appConfig.localDirsDetected[repo],
@@ -75,7 +79,9 @@ class LocalDirBadge extends StatelessWidget {
     // local (not spread through callers) makes the narrowing explicit
     // for linters that don't promote through getters.
     final color = resolution.hasDir
-        ? (resolution.isAutoDetected ? Colors.blue.shade400 : Colors.green.shade500)
+        ? (resolution.isAutoDetected
+              ? Colors.blue.shade400
+              : Colors.green.shade500)
         : Colors.grey.shade600;
     final String label;
     if (!resolution.hasDir) {
@@ -84,20 +90,22 @@ class LocalDirBadge extends StatelessWidget {
       final dirName = resolution.effective!.split('/').last;
       label = resolution.isAutoDetected ? 'Auto: $dirName' : dirName;
     }
-    return Row(children: [
-      Icon(
-        resolution.hasDir ? Icons.folder : Icons.folder_off_outlined,
-        size: iconSize,
-        color: color,
-      ),
-      const SizedBox(width: 4),
-      Flexible(
-        child: Text(
-          label,
-          style: TextStyle(fontSize: fontSize, color: color),
-          overflow: TextOverflow.ellipsis,
+    return Row(
+      children: [
+        Icon(
+          resolution.hasDir ? Icons.folder : Icons.folder_off_outlined,
+          size: iconSize,
+          color: color,
         ),
-      ),
-    ]);
+        const SizedBox(width: 4),
+        Flexible(
+          child: Text(
+            label,
+            style: TextStyle(fontSize: fontSize, color: color),
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+      ],
+    );
   }
 }

@@ -288,7 +288,7 @@ type AIConfig struct {
 	ExecutionTimeout string                    `toml:"execution_timeout"` // e.g. "20m", "1h"
 	Agents           map[string]CLIAgentConfig `toml:"agents"`            // keyed by CLI name
 	Repos            map[string]RepoAI         `toml:"repos"`
-	Orgs             map[string]OrgAI          `toml:"orgs"`        // per-org PR metadata overrides
+	Orgs             map[string]OrgAI          `toml:"orgs"`        // per-org AI/issue/PR metadata overrides
 	PRMetadata       PRMetadataConfig          `toml:"pr_metadata"` // global PR creation defaults
 
 	// Top-level PR metadata fields — flat alternatives to [ai.pr_metadata].
@@ -304,6 +304,14 @@ type AIConfig struct {
 	// ImplementPrompt is the global default agent profile ID for auto-implement.
 	// Per-repo overrides in [ai.repos.<name>] take precedence.
 	ImplementPrompt string `toml:"implement_prompt"`
+
+	// Future issue pipeline fields. They are parsed and resolved through the
+	// same repo > org > global hierarchy so follow-up pipeline work can consume
+	// them without changing the config contract again.
+	TriageOwner           string `toml:"triage_owner"`
+	CloneDir              string `toml:"clone_dir"`
+	AutoPromoteTriage     *bool  `toml:"auto_promote_triage,omitempty"`
+	AutoPromoteRefinement *bool  `toml:"auto_promote_refinement,omitempty"`
 
 	// GeneratePRDescription enables LLM-generated PR titles and descriptions
 	// for auto_implement PRs. When true, after the implementation commit,
@@ -323,12 +331,18 @@ type RepoAI struct {
 	// ImplementPrompt is the ID of an agent profile whose ImplementPrompt /
 	// ImplementInstructions fields drive the auto_implement code-generation
 	// prompt for this repo. Overrides agent-level and global default.
-	ImplementPrompt string `toml:"implement_prompt"`
-	Fallback        string `toml:"fallback"`
-	ReviewMode      string `toml:"review_mode"` // "" = inherit global
-	LocalDir        string `toml:"local_dir"`   // local repo path for full-repo analysis
+	ImplementPrompt       string `toml:"implement_prompt"`
+	Fallback              string `toml:"fallback"`
+	ReviewMode            string `toml:"review_mode"` // "" = inherit global
+	LocalDir              string `toml:"local_dir"`   // local repo path for full-repo analysis
+	TriageOwner           string `toml:"triage_owner"`
+	CloneDir              string `toml:"clone_dir"`
+	AutoPromoteTriage     *bool  `toml:"auto_promote_triage,omitempty"`
+	AutoPromoteRefinement *bool  `toml:"auto_promote_refinement,omitempty"`
 
 	// PR creation metadata (applied by auto_implement after CreatePR).
+	// Nil slices inherit from org/global; non-nil empty slices explicitly
+	// clear inherited values for this repo.
 	PRReviewers []string `toml:"pr_reviewers"`       // GitHub logins to request review from
 	PRAssignee  string   `toml:"pr_assignee"`        // GitHub login to assign the PR to
 	PRLabels    []string `toml:"pr_labels"`          // labels to add to the PR
@@ -338,9 +352,8 @@ type RepoAI struct {
 	// for this repo. nil = inherit from global.
 	GeneratePRDescription *bool `toml:"generate_pr_description,omitempty"`
 
-	// Per-repo issue tracking override. When set, non-zero fields replace
-	// the global [github.issue_tracking] values for this repo only.
-	IssueTracking *IssueTrackingConfig `toml:"issue_tracking,omitempty" json:"issue_tracking,omitempty"`
+	// Per-repo issue tracking override. Nil fields inherit from org/global.
+	IssueTracking *IssueTrackingOverride `toml:"issue_tracking,omitempty" json:"issue_tracking,omitempty"`
 }
 
 // PRMetadataConfig holds global defaults for PR creation metadata,
@@ -352,14 +365,49 @@ type PRMetadataConfig struct {
 	Draft     *bool    `toml:"pr_draft,omitempty"`
 }
 
-// OrgAI holds per-organisation PR metadata overrides, applied to all repos
-// in the org unless overridden per-repo. Keyed by GitHub org slug under
-// [ai.orgs."org-name"].
+// IssueTrackingOverride holds repo/org scoped issue-tracking overrides.
+//
+// Pointer bools and nil slices mean "inherit". Non-nil slices, including
+// empty slices, are explicit overrides. That distinction matters for org scope:
+// an org must be able to intentionally clear a global label list for all repos.
+type IssueTrackingOverride struct {
+	Enabled          *bool      `toml:"enabled,omitempty" json:"enabled,omitempty"`
+	DevelopEnabled   *bool      `toml:"develop_enabled,omitempty" json:"develop_enabled,omitempty"`
+	FilterMode       FilterMode `toml:"filter_mode,omitempty" json:"filter_mode,omitempty"`
+	Organizations    []string   `toml:"organizations,omitempty" json:"organizations,omitempty"`
+	Assignees        []string   `toml:"assignees,omitempty" json:"assignees,omitempty"`
+	DevelopLabels    []string   `toml:"develop_labels,omitempty" json:"develop_labels,omitempty"`
+	ReviewOnlyLabels []string   `toml:"review_only_labels,omitempty" json:"review_only_labels,omitempty"`
+	SkipLabels       []string   `toml:"skip_labels,omitempty" json:"skip_labels,omitempty"`
+	BlockedLabels    []string   `toml:"blocked_labels,omitempty" json:"blocked_labels,omitempty"`
+	PromoteToLabel   string     `toml:"promote_to_label,omitempty" json:"promote_to_label,omitempty"`
+	DefaultAction    string     `toml:"default_action,omitempty" json:"default_action,omitempty"`
+}
+
+// OrgAI holds per-organisation overrides, applied to all repos in the org
+// unless overridden per-repo. Keyed by GitHub org slug under [ai.orgs."org-name"].
 type OrgAI struct {
+	Primary               string `toml:"primary"`
+	Prompt                string `toml:"prompt"`
+	IssuePrompt           string `toml:"issue_prompt"`
+	ImplementPrompt       string `toml:"implement_prompt"`
+	Fallback              string `toml:"fallback"`
+	ReviewMode            string `toml:"review_mode"`
+	LocalDir              string `toml:"local_dir"`
+	TriageOwner           string `toml:"triage_owner"`
+	CloneDir              string `toml:"clone_dir"`
+	AutoPromoteTriage     *bool  `toml:"auto_promote_triage,omitempty"`
+	AutoPromoteRefinement *bool  `toml:"auto_promote_refinement,omitempty"`
+
+	// Nil slices inherit from global; non-nil empty slices explicitly clear
+	// inherited values for every repo in this org.
 	PRReviewers []string `toml:"pr_reviewers"`
 	PRAssignee  string   `toml:"pr_assignee"`
 	PRLabels    []string `toml:"pr_labels"`
 	PRDraft     *bool    `toml:"pr_draft,omitempty"`
+
+	GeneratePRDescription *bool                  `toml:"generate_pr_description,omitempty"`
+	IssueTracking         *IssueTrackingOverride `toml:"issue_tracking,omitempty" json:"issue_tracking,omitempty"`
 }
 
 type RetentionConfig struct {
@@ -486,97 +534,180 @@ func (c *Config) ResolvedPRMetadata() (reviewers, labels []string, assignee stri
 // field resolves independently.
 func (c *Config) AIForRepo(repo string) RepoAI {
 	gReviewers, gLabels, gAssignee, gDraft := c.ResolvedPRMetadata()
-
-	// Org-level layer: start from global, overlay org-level fields.
-	orgReviewers, orgLabels, orgAssignee, orgDraft := gReviewers, gLabels, gAssignee, gDraft
+	gGenDesc := c.AI.GeneratePRDescription
+	out := RepoAI{
+		Primary:               c.AI.Primary,
+		Fallback:              c.AI.Fallback,
+		ReviewMode:            c.AI.ReviewMode,
+		IssuePrompt:           c.AI.IssuePrompt,
+		ImplementPrompt:       c.AI.ImplementPrompt,
+		PRReviewers:           gReviewers,
+		PRLabels:              gLabels,
+		PRAssignee:            gAssignee,
+		PRDraft:               gDraft,
+		GeneratePRDescription: &gGenDesc,
+		TriageOwner:           c.AI.TriageOwner,
+		CloneDir:              c.AI.CloneDir,
+		AutoPromoteTriage:     c.AI.AutoPromoteTriage,
+		AutoPromoteRefinement: c.AI.AutoPromoteRefinement,
+	}
 	if org := repoOrg(repo); org != "" && c.AI.Orgs != nil {
 		if o, ok := c.AI.Orgs[org]; ok {
-			if len(o.PRReviewers) > 0 {
-				orgReviewers = o.PRReviewers
-			}
-			if len(o.PRLabels) > 0 {
-				orgLabels = o.PRLabels
-			}
-			if o.PRAssignee != "" {
-				orgAssignee = o.PRAssignee
-			}
-			if o.PRDraft != nil {
-				orgDraft = o.PRDraft
-			}
+			applyOrgAI(&out, o)
 		}
 	}
-
 	if c.AI.Repos != nil {
 		if r, ok := c.AI.Repos[repo]; ok {
-			if r.Primary == "" {
-				r.Primary = c.AI.Primary
-			}
-			if r.Fallback == "" {
-				r.Fallback = c.AI.Fallback
-			}
-			if r.ReviewMode == "" {
-				r.ReviewMode = c.AI.ReviewMode
-			}
-			if len(r.PRReviewers) == 0 {
-				r.PRReviewers = orgReviewers
-			}
-			if len(r.PRLabels) == 0 {
-				r.PRLabels = orgLabels
-			}
-			if r.PRAssignee == "" {
-				r.PRAssignee = orgAssignee
-			}
-			if r.PRDraft == nil {
-				r.PRDraft = orgDraft
-			}
-			if r.GeneratePRDescription == nil {
-				v := c.AI.GeneratePRDescription
-				r.GeneratePRDescription = &v
-			}
-			return r
+			applyRepoAI(&out, r)
 		}
 	}
-	gGenDesc := c.AI.GeneratePRDescription
-	return RepoAI{
-		Primary: c.AI.Primary, Fallback: c.AI.Fallback, ReviewMode: c.AI.ReviewMode,
-		PRReviewers: orgReviewers, PRLabels: orgLabels, PRAssignee: orgAssignee, PRDraft: orgDraft,
-		GeneratePRDescription: &gGenDesc,
+	return out
+}
+
+func applyOrgAI(out *RepoAI, o OrgAI) {
+	applyScopedAI(out, scopedAIFields{
+		Primary:               o.Primary,
+		Fallback:              o.Fallback,
+		ReviewMode:            o.ReviewMode,
+		Prompt:                o.Prompt,
+		IssuePrompt:           o.IssuePrompt,
+		ImplementPrompt:       o.ImplementPrompt,
+		LocalDir:              o.LocalDir,
+		TriageOwner:           o.TriageOwner,
+		CloneDir:              o.CloneDir,
+		AutoPromoteTriage:     o.AutoPromoteTriage,
+		AutoPromoteRefinement: o.AutoPromoteRefinement,
+		PRReviewers:           o.PRReviewers,
+		PRLabels:              o.PRLabels,
+		PRAssignee:            o.PRAssignee,
+		PRDraft:               o.PRDraft,
+		GeneratePRDescription: o.GeneratePRDescription,
+	})
+}
+
+func applyRepoAI(out *RepoAI, r RepoAI) {
+	applyScopedAI(out, scopedAIFields{
+		Primary:               r.Primary,
+		Fallback:              r.Fallback,
+		ReviewMode:            r.ReviewMode,
+		Prompt:                r.Prompt,
+		IssuePrompt:           r.IssuePrompt,
+		ImplementPrompt:       r.ImplementPrompt,
+		LocalDir:              r.LocalDir,
+		TriageOwner:           r.TriageOwner,
+		CloneDir:              r.CloneDir,
+		AutoPromoteTriage:     r.AutoPromoteTriage,
+		AutoPromoteRefinement: r.AutoPromoteRefinement,
+		PRReviewers:           r.PRReviewers,
+		PRLabels:              r.PRLabels,
+		PRAssignee:            r.PRAssignee,
+		PRDraft:               r.PRDraft,
+		GeneratePRDescription: r.GeneratePRDescription,
+	})
+}
+
+type scopedAIFields struct {
+	Primary               string
+	Fallback              string
+	ReviewMode            string
+	Prompt                string
+	IssuePrompt           string
+	ImplementPrompt       string
+	LocalDir              string
+	TriageOwner           string
+	CloneDir              string
+	AutoPromoteTriage     *bool
+	AutoPromoteRefinement *bool
+	PRReviewers           []string
+	PRLabels              []string
+	PRAssignee            string
+	PRDraft               *bool
+	GeneratePRDescription *bool
+}
+
+func applyScopedAI(out *RepoAI, fields scopedAIFields) {
+	if fields.Primary != "" {
+		out.Primary = fields.Primary
+	}
+	if fields.Fallback != "" {
+		out.Fallback = fields.Fallback
+	}
+	if fields.ReviewMode != "" {
+		out.ReviewMode = fields.ReviewMode
+	}
+	if fields.Prompt != "" {
+		out.Prompt = fields.Prompt
+	}
+	if fields.IssuePrompt != "" {
+		out.IssuePrompt = fields.IssuePrompt
+	}
+	if fields.ImplementPrompt != "" {
+		out.ImplementPrompt = fields.ImplementPrompt
+	}
+	if fields.LocalDir != "" {
+		out.LocalDir = fields.LocalDir
+	}
+	if fields.TriageOwner != "" {
+		out.TriageOwner = fields.TriageOwner
+	}
+	if fields.CloneDir != "" {
+		out.CloneDir = fields.CloneDir
+	}
+	if fields.AutoPromoteTriage != nil {
+		out.AutoPromoteTriage = fields.AutoPromoteTriage
+	}
+	if fields.AutoPromoteRefinement != nil {
+		out.AutoPromoteRefinement = fields.AutoPromoteRefinement
+	}
+	if fields.PRReviewers != nil {
+		out.PRReviewers = fields.PRReviewers
+	}
+	if fields.PRLabels != nil {
+		out.PRLabels = fields.PRLabels
+	}
+	if fields.PRAssignee != "" {
+		out.PRAssignee = fields.PRAssignee
+	}
+	if fields.PRDraft != nil {
+		out.PRDraft = fields.PRDraft
+	}
+	if fields.GeneratePRDescription != nil {
+		out.GeneratePRDescription = fields.GeneratePRDescription
 	}
 }
 
 // IssueTrackingForRepo returns the issue tracking config for a specific repo,
-// merging per-repo overrides (field-level) with the global config.
-// Non-zero per-repo fields win; zero/nil fields inherit from global.
+// merging repo > org > global overrides field-by-field.
 func (c *Config) IssueTrackingForRepo(repo string) IssueTrackingConfig {
-	global := c.GitHub.IssueTracking
-	if c.AI.Repos == nil {
-		return global
+	merged := c.GitHub.IssueTracking
+	if org := repoOrg(repo); org != "" && c.AI.Orgs != nil {
+		if o, ok := c.AI.Orgs[org]; ok {
+			applyIssueTrackingOverride(&merged, o.IssueTracking)
+		}
 	}
-	r, ok := c.AI.Repos[repo]
-	if !ok || r.IssueTracking == nil {
-		return global
+	if c.AI.Repos != nil {
+		if r, ok := c.AI.Repos[repo]; ok {
+			applyIssueTrackingOverride(&merged, r.IssueTracking)
+		}
 	}
-	ov := r.IssueTracking
-	merged := global
-	// Enabled resolution: the per-repo override enables IT if Enabled is
-	// explicitly true OR if labels are configured (implicit intent). This
-	// prevents the common mistake of configuring labels but forgetting the
-	// toggle.
-	//
-	// Limitation: a per-repo override cannot explicitly disable IT when the
-	// global is on, because Enabled=false is indistinguishable from "not set"
-	// (bool zero value). A *bool refactor would fix this if needed.
-	if ov.Enabled || len(ov.DevelopLabels) > 0 || len(ov.ReviewOnlyLabels) > 0 {
-		merged.Enabled = true
+	return merged
+}
+
+func applyIssueTrackingOverride(merged *IssueTrackingConfig, ov *IssueTrackingOverride) {
+	if ov == nil {
+		return
 	}
-	if len(ov.DevelopLabels) > 0 {
+	if ov.DevelopLabels != nil {
 		merged.DevelopLabels = ov.DevelopLabels
 	}
-	if len(ov.ReviewOnlyLabels) > 0 {
+	if ov.ReviewOnlyLabels != nil {
 		merged.ReviewOnlyLabels = ov.ReviewOnlyLabels
 	}
-	if len(ov.SkipLabels) > 0 {
+	if ov.SkipLabels != nil {
 		merged.SkipLabels = ov.SkipLabels
+	}
+	if ov.BlockedLabels != nil {
+		merged.BlockedLabels = ov.BlockedLabels
 	}
 	if ov.FilterMode != "" {
 		merged.FilterMode = ov.FilterMode
@@ -584,13 +715,21 @@ func (c *Config) IssueTrackingForRepo(repo string) IssueTrackingConfig {
 	if ov.DefaultAction != "" {
 		merged.DefaultAction = ov.DefaultAction
 	}
-	if len(ov.Organizations) > 0 {
+	if ov.PromoteToLabel != "" {
+		merged.PromoteToLabel = ov.PromoteToLabel
+	}
+	if ov.Organizations != nil {
 		merged.Organizations = ov.Organizations
 	}
-	if len(ov.Assignees) > 0 {
+	if ov.Assignees != nil {
 		merged.Assignees = ov.Assignees
 	}
-	return merged
+	if ov.Enabled == nil && (len(ov.DevelopLabels) > 0 || len(ov.ReviewOnlyLabels) > 0) {
+		merged.Enabled = true
+	}
+	if ov.Enabled != nil {
+		merged.Enabled = *ov.Enabled
+	}
 }
 
 // AutoEnablePRForDiscovery returns the effective boolean value.
@@ -846,7 +985,13 @@ func (c *Config) Validate() error {
 	if err := c.validateDiscovery(); err != nil {
 		return err
 	}
+	if err := c.validateOrgKeys(); err != nil {
+		return err
+	}
 	if err := c.validateIssueTracking(); err != nil {
+		return err
+	}
+	if err := c.validateScopedIssueTracking(); err != nil {
 		return err
 	}
 	if c.ActivityLog.RetentionDays != nil {
@@ -870,9 +1015,7 @@ func (c *Config) Validate() error {
 // take the extra fields as parameters too or future validations will pass
 // silently against zero values.
 func ValidateIssueTracking(it IssueTrackingConfig) error {
-	c := &Config{}
-	c.GitHub.IssueTracking = it
-	return c.validateIssueTracking()
+	return validateIssueTrackingConfig("github.issue_tracking", it)
 }
 
 // validateIssueTracking enforces the small set of invariants the pipeline
@@ -883,22 +1026,68 @@ func ValidateIssueTracking(it IssueTrackingConfig) error {
 // errors; they exist so an explicit typo like filter_mode = "excluive" fails
 // fast instead of defaulting silently.
 func (c *Config) validateIssueTracking() error {
-	it := c.GitHub.IssueTracking
+	return validateIssueTrackingConfig("github.issue_tracking", c.GitHub.IssueTracking)
+}
+
+func validateIssueTrackingConfig(path string, it IssueTrackingConfig) error {
 	if !it.Enabled {
 		return nil
 	}
 	switch it.FilterMode {
 	case FilterModeExclusive, FilterModeInclusive:
 	default:
-		return fmt.Errorf("config: github.issue_tracking.filter_mode %q is invalid (must be %q or %q)", it.FilterMode, FilterModeExclusive, FilterModeInclusive)
+		return fmt.Errorf("config: %s.filter_mode %q is invalid (must be %q or %q)", path, it.FilterMode, FilterModeExclusive, FilterModeInclusive)
 	}
 	switch IssueMode(it.DefaultAction) {
 	case IssueModeIgnore, IssueModeReviewOnly:
 	default:
-		return fmt.Errorf("config: github.issue_tracking.default_action %q is invalid (must be %q or %q)", it.DefaultAction, IssueModeIgnore, IssueModeReviewOnly)
+		return fmt.Errorf("config: %s.default_action %q is invalid (must be %q or %q)", path, it.DefaultAction, IssueModeIgnore, IssueModeReviewOnly)
 	}
 	if len(it.BlockedLabels) > 0 && it.ResolvePromoteToLabel() == "" {
-		return fmt.Errorf("config: github.issue_tracking.blocked_labels set but no promote target — set promote_to_label or populate develop_labels")
+		return fmt.Errorf("config: %s.blocked_labels set but no promote target — set promote_to_label or populate develop_labels", path)
+	}
+	return nil
+}
+
+func (c *Config) validateScopedIssueTracking() error {
+	for org, o := range c.AI.Orgs {
+		if o.IssueTracking == nil {
+			continue
+		}
+		it := c.GitHub.IssueTracking
+		applyIssueTrackingOverride(&it, o.IssueTracking)
+		if err := validateIssueTrackingConfig(fmt.Sprintf("ai.orgs.%q.issue_tracking", org), it); err != nil {
+			return err
+		}
+	}
+	for repo, r := range c.AI.Repos {
+		it := c.GitHub.IssueTracking
+		if org := repoOrg(repo); org != "" && c.AI.Orgs != nil {
+			if o, ok := c.AI.Orgs[org]; ok {
+				applyIssueTrackingOverride(&it, o.IssueTracking)
+			}
+		}
+		applyIssueTrackingOverride(&it, r.IssueTracking)
+		if err := validateIssueTrackingConfig(fmt.Sprintf("ai.repos.%q.issue_tracking", repo), it); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ValidateOrgSlug validates a GitHub org/user slug used as an [ai.orgs] key.
+func ValidateOrgSlug(org string) error {
+	if !githubOrgPattern.MatchString(org) {
+		return fmt.Errorf("config: org %q is invalid (must match GitHub org/user slug: 1-39 alphanumerics plus internal hyphens)", org)
+	}
+	return nil
+}
+
+func (c *Config) validateOrgKeys() error {
+	for org := range c.AI.Orgs {
+		if err := ValidateOrgSlug(org); err != nil {
+			return err
+		}
 	}
 	return nil
 }

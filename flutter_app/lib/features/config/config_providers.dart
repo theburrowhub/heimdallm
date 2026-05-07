@@ -86,8 +86,9 @@ class ConfigNotifier extends AsyncNotifier<AppConfig> {
   }
 }
 
-final configNotifierProvider =
-    AsyncNotifierProvider<ConfigNotifier, AppConfig>(ConfigNotifier.new);
+final configNotifierProvider = AsyncNotifierProvider<ConfigNotifier, AppConfig>(
+  ConfigNotifier.new,
+);
 
 /// Computes a nested diff between two AppConfig instances, returning only
 /// the fields that changed in the structure expected by PATCH /config
@@ -99,9 +100,15 @@ Map<String, dynamic> _computeGlobalDiff(AppConfig old, AppConfig updated) {
   final retentionDiff = <String, dynamic>{};
 
   // AI section
-  if (old.aiPrimary != updated.aiPrimary) aiDiff['primary'] = updated.aiPrimary;
-  if (old.aiFallback != updated.aiFallback) aiDiff['fallback'] = updated.aiFallback;
-  if (old.reviewMode != updated.reviewMode) aiDiff['review_mode'] = updated.reviewMode;
+  if (old.aiPrimary != updated.aiPrimary) {
+    aiDiff['primary'] = updated.aiPrimary;
+  }
+  if (old.aiFallback != updated.aiFallback) {
+    aiDiff['fallback'] = updated.aiFallback;
+  }
+  if (old.reviewMode != updated.reviewMode) {
+    aiDiff['review_mode'] = updated.reviewMode;
+  }
 
   // PR metadata
   final prMeta = <String, dynamic>{};
@@ -125,8 +132,27 @@ Map<String, dynamic> _computeGlobalDiff(AppConfig old, AppConfig updated) {
   if (old.globalImplementPrompt != updated.globalImplementPrompt) {
     aiDiff['implement_prompt'] = updated.globalImplementPrompt;
   }
+  if (old.globalTriageOwner != updated.globalTriageOwner) {
+    aiDiff['triage_owner'] = updated.globalTriageOwner;
+  }
+  if (old.globalCloneDir != updated.globalCloneDir) {
+    aiDiff['clone_dir'] = updated.globalCloneDir;
+  }
+  if (old.globalAutoPromoteTriage != updated.globalAutoPromoteTriage &&
+      updated.globalAutoPromoteTriage != null) {
+    aiDiff['auto_promote_triage'] = updated.globalAutoPromoteTriage;
+  }
+  if (old.globalAutoPromoteRefinement != updated.globalAutoPromoteRefinement &&
+      updated.globalAutoPromoteRefinement != null) {
+    aiDiff['auto_promote_refinement'] = updated.globalAutoPromoteRefinement;
+  }
+  if (old.globalGeneratePRDescription != updated.globalGeneratePRDescription) {
+    aiDiff['generate_pr_description'] = updated.globalGeneratePRDescription;
+  }
 
-  if (aiDiff.isNotEmpty) diff['ai'] = aiDiff;
+  if (aiDiff.isNotEmpty) {
+    diff['ai'] = aiDiff;
+  }
 
   // GitHub section
   if (old.pollInterval != updated.pollInterval) {
@@ -135,40 +161,75 @@ Map<String, dynamic> _computeGlobalDiff(AppConfig old, AppConfig updated) {
   if (_listsDiffer(old.repositories, updated.repositories)) {
     githubDiff['repositories'] = updated.repositories;
   }
-  final oldNonMon = old.repoConfigs.entries
-      .where((e) => !e.value.isMonitored).map((e) => e.key).toList()..sort();
-  final newNonMon = updated.repoConfigs.entries
-      .where((e) => !e.value.isMonitored).map((e) => e.key).toList()..sort();
+  final oldNonMon =
+      old.repoConfigs.entries
+          .where((e) => !e.value.isMonitored)
+          .map((e) => e.key)
+          .toList()
+        ..sort();
+  final newNonMon =
+      updated.repoConfigs.entries
+          .where((e) => !e.value.isMonitored)
+          .map((e) => e.key)
+          .toList()
+        ..sort();
   if (_listsDiffer(oldNonMon, newNonMon)) {
     githubDiff['non_monitored'] = newNonMon;
   }
 
   // Issue tracking (global)
-  final itDiff = _computeIssueTrackingDiff(old.issueTracking, updated.issueTracking);
-  if (itDiff.isNotEmpty) githubDiff['issue_tracking'] = itDiff;
+  final itDiff = _computeIssueTrackingDiff(
+    old.issueTracking,
+    updated.issueTracking,
+  );
+  if (itDiff.isNotEmpty) {
+    githubDiff['issue_tracking'] = itDiff;
+  }
 
-  if (githubDiff.isNotEmpty) diff['github'] = githubDiff;
+  if (githubDiff.isNotEmpty) {
+    diff['github'] = githubDiff;
+  }
 
   // Retention
   if (old.retentionDays != updated.retentionDays) {
     retentionDiff['max_days'] = updated.retentionDays;
   }
-  if (retentionDiff.isNotEmpty) diff['retention'] = retentionDiff;
+  if (retentionDiff.isNotEmpty) {
+    diff['retention'] = retentionDiff;
+  }
 
   return diff;
 }
 
 Map<String, dynamic> _computeIssueTrackingDiff(
-    IssueTrackingConfig old, IssueTrackingConfig updated) {
+  IssueTrackingConfig old,
+  IssueTrackingConfig updated,
+) {
   final diff = <String, dynamic>{};
-  if (old.enabled != updated.enabled) diff['enabled'] = updated.enabled;
-  if (old.filterMode != updated.filterMode) diff['filter_mode'] = updated.filterMode;
-  if (old.defaultAction != updated.defaultAction) diff['default_action'] = updated.defaultAction;
-  if (_listsDiffer(old.developLabels, updated.developLabels)) diff['develop_labels'] = updated.developLabels;
-  if (_listsDiffer(old.reviewOnlyLabels, updated.reviewOnlyLabels)) diff['review_only_labels'] = updated.reviewOnlyLabels;
-  if (_listsDiffer(old.skipLabels, updated.skipLabels)) diff['skip_labels'] = updated.skipLabels;
-  if (_listsDiffer(old.organizations, updated.organizations)) diff['organizations'] = updated.organizations;
-  if (_listsDiffer(old.assignees, updated.assignees)) diff['assignees'] = updated.assignees;
+  if (old.enabled != updated.enabled) {
+    diff['enabled'] = updated.enabled;
+  }
+  if (old.filterMode != updated.filterMode) {
+    diff['filter_mode'] = updated.filterMode;
+  }
+  if (old.defaultAction != updated.defaultAction) {
+    diff['default_action'] = updated.defaultAction;
+  }
+  if (_listsDiffer(old.developLabels, updated.developLabels)) {
+    diff['develop_labels'] = updated.developLabels;
+  }
+  if (_listsDiffer(old.reviewOnlyLabels, updated.reviewOnlyLabels)) {
+    diff['review_only_labels'] = updated.reviewOnlyLabels;
+  }
+  if (_listsDiffer(old.skipLabels, updated.skipLabels)) {
+    diff['skip_labels'] = updated.skipLabels;
+  }
+  if (_listsDiffer(old.organizations, updated.organizations)) {
+    diff['organizations'] = updated.organizations;
+  }
+  if (_listsDiffer(old.assignees, updated.assignees)) {
+    diff['assignees'] = updated.assignees;
+  }
   return diff;
 }
 

@@ -758,9 +758,10 @@ func TestHandlerPutConfig_ReadOnlyKeys_Accepted(t *testing.T) {
 		{"repositories", `{"repositories":["org/monitored"]}`},
 		{"non_monitored", `{"non_monitored":["org/archived"]}`},
 		{"repo_overrides", `{"repo_overrides":{"org/a":{"primary":"claude"}}}`},
+		{"org_overrides", `{"org_overrides":{"org":{"primary":"claude"}}}`},
 		{"agent_configs", `{"agent_configs":{"claude":{"model":"claude-opus-4-7"}}}`},
 		{"server_port", `{"server_port":7842}`},
-		{"all-at-once", `{"repositories":[],"non_monitored":[],"repo_overrides":{},"agent_configs":{},"server_port":7842}`},
+		{"all-at-once", `{"repositories":[],"non_monitored":[],"repo_overrides":{},"org_overrides":{},"agent_configs":{},"server_port":7842}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -779,7 +780,7 @@ func TestHandlerPutConfig_ReadOnlyKeys_NotPersisted(t *testing.T) {
 	// reload doesn't have to re-examine them and ApplyStore's
 	// "unknown/bootstrap-only" branches stay dormant.
 	srv, s := setupServer(t)
-	body := `{"repositories":["org/y"],"non_monitored":["org/x"],"repo_overrides":{"org/a":{"primary":"claude"}},"agent_configs":{"claude":{"model":"x"}},"server_port":7842}`
+	body := `{"repositories":["org/y"],"non_monitored":["org/x"],"repo_overrides":{"org/a":{"primary":"claude"}},"org_overrides":{"org":{"primary":"gemini"}},"agent_configs":{"claude":{"model":"x"}},"server_port":7842}`
 	w := httptest.NewRecorder()
 	srv.Router().ServeHTTP(w, putConfigRequest(body))
 	if w.Code != http.StatusOK {
@@ -790,7 +791,7 @@ func TestHandlerPutConfig_ReadOnlyKeys_NotPersisted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListConfigs: %v", err)
 	}
-	for _, banned := range []string{"repositories", "non_monitored", "repo_overrides", "agent_configs", "server_port"} {
+	for _, banned := range []string{"repositories", "non_monitored", "repo_overrides", "org_overrides", "agent_configs", "server_port"} {
 		if _, leaked := rows[banned]; leaked {
 			t.Errorf("read-only key %q was persisted (rows: %v)", banned, rows)
 		}
@@ -1391,6 +1392,73 @@ func TestHandlePatchRepoConfig_CreatesNewSection(t *testing.T) {
 	}
 }
 
+func TestHandlePatchOrgConfig(t *testing.T) {
+	tomlContent := "[ai]\nprimary = \"claude\"\n\n[ai.orgs.\"org\"]\nprimary = \"gemini\"\nfallback = \"openai\"\n"
+	tomlPath := writeTempTOML(t, tomlContent)
+
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+
+	body := `{"primary":"codex","issue_tracking":{"enabled":true,"develop_labels":["ready"]}}`
+	req := httptest.NewRequest("PATCH", "/config/orgs/"+url.PathEscape("org"), strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	m, err := config.ReadTOMLMap(tomlPath)
+	if err != nil {
+		t.Fatalf("read TOML after PATCH: %v", err)
+	}
+	ai, ok := m["ai"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected [ai] section, got %v", m)
+	}
+	orgs, ok := ai["orgs"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected [ai.orgs] section, got %v", ai)
+	}
+	org, ok := orgs["org"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected [ai.orgs.org] section, got %v", orgs)
+	}
+	if org["primary"] != "codex" {
+		t.Errorf("primary = %v, want codex", org["primary"])
+	}
+	if org["fallback"] != "openai" {
+		t.Errorf("fallback = %v, want openai (should be preserved)", org["fallback"])
+	}
+	it, ok := org["issue_tracking"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected issue_tracking section, got %v", org)
+	}
+	labels, ok := it["develop_labels"].([]any)
+	if !ok || len(labels) != 1 || labels[0] != "ready" {
+		t.Fatalf("develop_labels = %v, want [ready]", it["develop_labels"])
+	}
+}
+
+func TestHandlePatchOrgConfig_RejectsInvalidOrg(t *testing.T) {
+	tomlPath := writeTempTOML(t, "[ai]\nprimary = \"claude\"\n")
+
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+
+	req := httptest.NewRequest("PATCH", "/config/orgs/"+url.PathEscape("bad org"), strings.NewReader(`{"primary":"codex"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (body: %s)", w.Code, w.Body.String())
+	}
+}
+
 func TestHandleDeleteRepoField_TopLevel(t *testing.T) {
 	tomlContent := "[ai]\nprimary = \"claude\"\n\n[ai.repos.\"org/repo1\"]\nprimary = \"gemini\"\npr_draft = true\n"
 	tomlPath := writeTempTOML(t, tomlContent)
@@ -1466,6 +1534,50 @@ func TestHandleDeleteRepoField_NestedPath(t *testing.T) {
 	issueTracking, ok := repo1["issue_tracking"].(map[string]any)
 	if !ok {
 		t.Fatalf("expected issue_tracking section, got %v", repo1)
+	}
+	if _, found := issueTracking["develop_labels"]; found {
+		t.Errorf("develop_labels should have been deleted, still present: %v", issueTracking)
+	}
+	if issueTracking["filter_mode"] != "exclusive" {
+		t.Errorf("filter_mode = %v, want exclusive (should be preserved)", issueTracking["filter_mode"])
+	}
+}
+
+func TestHandleDeleteOrgField_NestedPath(t *testing.T) {
+	tomlContent := "[ai]\nprimary = \"claude\"\n\n[ai.orgs.\"org\".issue_tracking]\ndevelop_labels = [\"ready\"]\nfilter_mode = \"exclusive\"\n"
+	tomlPath := writeTempTOML(t, tomlContent)
+
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+
+	req := httptest.NewRequest("DELETE", "/config/orgs/"+url.PathEscape("org")+"/issue_tracking/develop_labels", nil)
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	m, err := config.ReadTOMLMap(tomlPath)
+	if err != nil {
+		t.Fatalf("read TOML after DELETE: %v", err)
+	}
+	ai, ok := m["ai"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected [ai] section, got %v", m)
+	}
+	orgs, ok := ai["orgs"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected [ai.orgs] section, got %v", ai)
+	}
+	org, ok := orgs["org"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected [ai.orgs.org] section, got %v", orgs)
+	}
+	issueTracking, ok := org["issue_tracking"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected issue_tracking section, got %v", org)
 	}
 	if _, found := issueTracking["develop_labels"]; found {
 		t.Errorf("develop_labels should have been deleted, still present: %v", issueTracking)

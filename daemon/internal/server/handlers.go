@@ -269,6 +269,8 @@ func (srv *Server) buildRouter() chi.Router {
 	r.Patch("/config", srv.handlePatchConfig)
 	r.Patch("/config/repos/{repo}", srv.handlePatchRepoConfig)
 	r.Delete("/config/repos/{repo}/*", srv.handleDeleteRepoField)
+	r.Patch("/config/orgs/{org}", srv.handlePatchOrgConfig)
+	r.Delete("/config/orgs/{org}/*", srv.handleDeleteOrgField)
 	r.Post("/reload", srv.handleReload)
 	r.Post("/shutdown", srv.handleShutdown)
 	r.Get("/events", srv.handleSSE)
@@ -414,6 +416,8 @@ var validConfigKeys = map[string]struct{}{
 //     web-UI concern.
 //   - repo_overrides: per-repo AI config lives in [ai.repos.<name>] or
 //     the Flutter app; no write-path through this endpoint.
+//   - org_overrides : per-org AI config lives in [ai.orgs.<name>] and is
+//     patched through /config/orgs/{org}.
 //   - agent_configs : per-CLI agent tuning lives in [ai.agents.<name>]
 //     or /agents endpoints; no write-path here.
 //   - server_port   : bootstrap-only (changing the listening port mid-
@@ -423,6 +427,7 @@ var readOnlyConfigKeys = map[string]struct{}{
 	"repositories":   {},
 	"non_monitored":  {},
 	"repo_overrides": {},
+	"org_overrides":  {},
 	"agent_configs":  {},
 	"server_port":    {},
 }
@@ -644,6 +649,67 @@ func (srv *Server) handlePatchRepoConfig(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, result)
 }
 
+func (srv *Server) handlePatchOrgConfig(w http.ResponseWriter, r *http.Request) {
+	if srv.configPath == "" {
+		http.Error(w, `{"error":"PATCH not available — configPath not set"}`, http.StatusServiceUnavailable)
+		return
+	}
+	org, err := url.PathUnescape(chi.URLParam(r, "org"))
+	if err != nil || org == "" {
+		http.Error(w, `{"error":"invalid org parameter"}`, http.StatusBadRequest)
+		return
+	}
+	if err := config.ValidateOrgSlug(org); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var patch map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+		return
+	}
+	if err := config.ContainsNull(patch); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "null values not allowed in PATCH — use DELETE to remove fields",
+		})
+		return
+	}
+	config.NormalizeNumbers(patch)
+
+	globalPatch := map[string]any{
+		"ai": map[string]any{
+			"orgs": map[string]any{
+				org: patch,
+			},
+		},
+	}
+
+	result, err := srv.patchTOML(func(m map[string]any) error {
+		merged := config.DeepMerge(m, globalPatch)
+		for k, v := range merged {
+			m[k] = v
+		}
+		for k := range m {
+			if _, ok := merged[k]; !ok {
+				delete(m, k)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		slog.Error("PATCH /config/orgs failed", "org", org, "err", err)
+		var ve *config.ValidationError
+		if errors.As(err, &ve) {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+		} else {
+			http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (srv *Server) handleDeleteRepoField(w http.ResponseWriter, r *http.Request) {
 	if srv.configPath == "" {
 		http.Error(w, `{"error":"DELETE not available — configPath not set"}`, http.StatusServiceUnavailable)
@@ -669,6 +735,44 @@ func (srv *Server) handleDeleteRepoField(w http.ResponseWriter, r *http.Request)
 	})
 	if err != nil {
 		slog.Error("DELETE /config/repos field failed", "repo", repo, "field", field, "err", err)
+		var ve *config.ValidationError
+		if errors.As(err, &ve) {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+		} else {
+			http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (srv *Server) handleDeleteOrgField(w http.ResponseWriter, r *http.Request) {
+	if srv.configPath == "" {
+		http.Error(w, `{"error":"DELETE not available — configPath not set"}`, http.StatusServiceUnavailable)
+		return
+	}
+	org, err := url.PathUnescape(chi.URLParam(r, "org"))
+	if err != nil || org == "" {
+		http.Error(w, `{"error":"invalid org parameter"}`, http.StatusBadRequest)
+		return
+	}
+	if err := config.ValidateOrgSlug(org); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+	field := chi.URLParam(r, "*")
+	if field == "" {
+		http.Error(w, `{"error":"field path required"}`, http.StatusBadRequest)
+		return
+	}
+	segments := append([]string{"ai", "orgs", org}, strings.Split(field, "/")...)
+
+	result, err := srv.patchTOML(func(m map[string]any) error {
+		config.DeleteNestedKey(m, segments)
+		return nil
+	})
+	if err != nil {
+		slog.Error("DELETE /config/orgs field failed", "org", org, "field", field, "err", err)
 		var ve *config.ValidationError
 		if errors.As(err, &ve) {
 			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)

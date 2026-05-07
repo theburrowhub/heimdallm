@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/heimdallm/daemon/internal/bus"
 	"github.com/heimdallm/daemon/internal/config"
+	gh "github.com/heimdallm/daemon/internal/github"
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
 	natsserver "github.com/nats-io/nats-server/v2/server"
@@ -202,6 +205,213 @@ func TestTier2AdapterPublishPendingDefersInFlightReviews(t *testing.T) {
 		_ = bus.Decode(msg.Data, &got)
 		t.Fatalf("unexpected extra publish message: %+v", got)
 	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+func TestTier2AdapterPromoteReadyUsesOrgScopedIssueTracking(t *testing.T) {
+	var addedLabels [][]string
+	removedLabels := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/org/repo/issues":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"number": 10,
+					"title":  "blocked",
+					"state":  "open",
+					"body":   "## Depends on\n- #5\n",
+					"labels": []map[string]string{{"name": "blocked"}},
+				},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/org/repo/issues/10/sub_issues":
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/org/repo/issues/5":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"number": 5,
+				"title":  "dependency",
+				"state":  "closed",
+				"labels": []map[string]string{},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/org/repo/issues/10/labels":
+			var payload struct {
+				Labels []string `json:"labels"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Errorf("decode labels payload: %v", err)
+			}
+			addedLabels = append(addedLabels, payload.Labels)
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode([]map[string]string{{"name": "org-ready"}})
+		case r.Method == http.MethodDelete && r.URL.Path == "/repos/org/repo/issues/10/labels/blocked":
+			removedLabels++
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode([]map[string]string{})
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/org/repo/issues/10/comments":
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"created_at": time.Now().UTC().Format(time.RFC3339),
+			})
+		default:
+			t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.String())
+			http.Error(w, "unexpected request", http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	enabled := true
+	cfg := &config.Config{}
+	cfg.GitHub.IssueTracking = config.IssueTrackingConfig{
+		Enabled:       false,
+		FilterMode:    config.FilterModeExclusive,
+		DefaultAction: string(config.IssueModeIgnore),
+		BlockedLabels: []string{"blocked"},
+		DevelopLabels: []string{"global-ready"},
+	}
+	cfg.AI.Orgs = map[string]config.OrgAI{
+		"org": {
+			IssueTracking: &config.IssueTrackingOverride{
+				Enabled:        &enabled,
+				PromoteToLabel: "org-ready",
+			},
+		},
+	}
+	cfgRef := cfg
+	var cfgMu sync.Mutex
+	a := &tier2Adapter{
+		ghClient: gh.NewClient("token", gh.WithBaseURL(srv.URL)),
+		cfgMu:    &cfgMu,
+		cfg:      &cfgRef,
+		broker:   sse.NewBroker(),
+	}
+
+	n, err := a.PromoteReady(t.Context(), []string{"org/repo"})
+	if err != nil {
+		t.Fatalf("PromoteReady: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("promotions = %d, want 1", n)
+	}
+	if len(addedLabels) != 1 || len(addedLabels[0]) != 1 || addedLabels[0][0] != "org-ready" {
+		t.Fatalf("added labels = %#v, want [[org-ready]]", addedLabels)
+	}
+	if removedLabels != 1 {
+		t.Fatalf("removed labels = %d, want 1", removedLabels)
+	}
+}
+
+func TestTier2AdapterPromoteReadyBatchesReposWithSameIssueTracking(t *testing.T) {
+	sharedGets := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/org/a/issues":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"number": 10,
+					"title":  "blocked a",
+					"state":  "open",
+					"body":   "## Depends on\n- org/shared#5\n",
+					"labels": []map[string]string{{"name": "blocked"}},
+				},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/org/b/issues":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"number": 20,
+					"title":  "blocked b",
+					"state":  "open",
+					"body":   "## Depends on\n- org/shared#5\n",
+					"labels": []map[string]string{{"name": "blocked"}},
+				},
+			})
+		case r.Method == http.MethodGet && (r.URL.Path == "/repos/org/a/issues/10/sub_issues" || r.URL.Path == "/repos/org/b/issues/20/sub_issues"):
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/org/shared/issues/5":
+			sharedGets++
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"number": 5,
+				"title":  "shared dependency",
+				"state":  "closed",
+				"labels": []map[string]string{},
+			})
+		case r.Method == http.MethodDelete && (r.URL.Path == "/repos/org/a/issues/10/labels/blocked" || r.URL.Path == "/repos/org/b/issues/20/labels/blocked"):
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode([]map[string]string{})
+		case r.Method == http.MethodPost && (r.URL.Path == "/repos/org/a/issues/10/labels" || r.URL.Path == "/repos/org/b/issues/20/labels"):
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode([]map[string]string{{"name": "ready"}})
+		case r.Method == http.MethodPost && (r.URL.Path == "/repos/org/a/issues/10/comments" || r.URL.Path == "/repos/org/b/issues/20/comments"):
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"created_at": time.Now().UTC().Format(time.RFC3339),
+			})
+		default:
+			t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.String())
+			http.Error(w, "unexpected request", http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{}
+	cfg.GitHub.IssueTracking = config.IssueTrackingConfig{
+		Enabled:       true,
+		FilterMode:    config.FilterModeExclusive,
+		DefaultAction: string(config.IssueModeIgnore),
+		BlockedLabels: []string{"blocked"},
+		DevelopLabels: []string{"ready"},
+	}
+	cfgRef := cfg
+	var cfgMu sync.Mutex
+	a := &tier2Adapter{
+		ghClient: gh.NewClient("token", gh.WithBaseURL(srv.URL)),
+		cfgMu:    &cfgMu,
+		cfg:      &cfgRef,
+		broker:   sse.NewBroker(),
+	}
+
+	n, err := a.PromoteReady(t.Context(), []string{"org/a", "org/b"})
+	if err != nil {
+		t.Fatalf("PromoteReady: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("promotions = %d, want 2", n)
+	}
+	if sharedGets != 1 {
+		t.Fatalf("shared dependency fetches = %d, want 1", sharedGets)
+	}
+}
+
+func TestTier2AdapterPromoteReadyReportsAllGroupErrors(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.GitHub.IssueTracking = config.IssueTrackingConfig{
+		Enabled:       true,
+		BlockedLabels: []string{"blocked"},
+	}
+	cfg.AI.Repos = map[string]config.RepoAI{
+		"org/b": {
+			IssueTracking: &config.IssueTrackingOverride{
+				Assignees: []string{"bob"},
+			},
+		},
+	}
+	cfgRef := cfg
+	var cfgMu sync.Mutex
+	a := &tier2Adapter{
+		cfgMu:  &cfgMu,
+		cfg:    &cfgRef,
+		broker: sse.NewBroker(),
+	}
+
+	n, err := a.PromoteReady(t.Context(), []string{"org/a", "org/b"})
+	if n != 0 {
+		t.Fatalf("promotions = %d, want 0", n)
+	}
+	if err == nil {
+		t.Fatal("PromoteReady error = nil, want config group errors")
+	}
+	if got := err.Error(); !strings.Contains(got, "org/a") || !strings.Contains(got, "org/b") {
+		t.Fatalf("joined error = %q, want both repo groups", got)
 	}
 }
 
