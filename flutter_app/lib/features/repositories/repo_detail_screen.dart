@@ -200,9 +200,6 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
     if (!_listsEqual(old.developLabels, updated.developLabels)) {
       itDiff['develop_labels'] = updated.developLabels ?? <String>[];
     }
-    if (!_listsEqual(old.issueOrganizations, updated.issueOrganizations)) {
-      itDiff['organizations'] = updated.issueOrganizations ?? <String>[];
-    }
     if (!_listsEqual(old.issueAssignees, updated.issueAssignees)) {
       itDiff['assignees'] = updated.issueAssignees ?? <String>[];
     }
@@ -467,27 +464,6 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                     onChanged: (v) =>
                         _update(_config.copyWith(issueDefaultAction: v)),
                     onReset: () => _resetField('issue_tracking/default_action'),
-                  ),
-                  const SizedBox(height: 10),
-                  AutocompleteChipField(
-                    label: 'Organizations',
-                    helper: 'GitHub org names to filter issues',
-                    selectedValues:
-                        _config.issueOrganizations ??
-                        orgConfig?.issueOrganizations ??
-                        appConfig.issueTracking.organizations,
-                    availableOptions: appConfig.knownOrganizations,
-                    isOverridden: _config.issueOrganizations != null,
-                    inheritedLabel: source(
-                      orgConfig?.issueOrganizations != null,
-                    ),
-                    globalHint: _joinList(
-                      orgConfig?.issueOrganizations ??
-                          appConfig.issueTracking.organizations,
-                    ),
-                    onChanged: (v) =>
-                        _update(_config.copyWith(issueOrganizations: v)),
-                    onReset: () => _resetField('issue_tracking/organizations'),
                   ),
                   const SizedBox(height: 10),
                   AutocompleteChipField(
