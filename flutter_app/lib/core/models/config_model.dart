@@ -677,6 +677,7 @@ class IssueTrackingConfig {
 }
 
 class AppConfig {
+  final String? bindAddr;
   final int serverPort;
   final String pollInterval;
   final String aiPrimary;
@@ -713,6 +714,7 @@ class AppConfig {
   final Map<String, String> localDirsDetected;
 
   const AppConfig({
+    this.bindAddr,
     this.serverPort = 7842,
     this.pollInterval = '5m',
     this.aiPrimary = 'claude',
@@ -786,6 +788,7 @@ class AppConfig {
   }
 
   AppConfig copyWith({
+    Object? bindAddr = _sentinel,
     int? serverPort,
     String? pollInterval,
     String? aiPrimary,
@@ -811,6 +814,7 @@ class AppConfig {
     Map<String, String>? localDirsDetected,
   }) {
     return AppConfig(
+      bindAddr: bindAddr == _sentinel ? this.bindAddr : bindAddr as String?,
       serverPort: serverPort ?? this.serverPort,
       pollInterval: pollInterval ?? this.pollInterval,
       aiPrimary: aiPrimary ?? this.aiPrimary,
@@ -844,6 +848,7 @@ class AppConfig {
   }
 
   Map<String, dynamic> toJson() => {
+    if (bindAddr != null) 'bind_addr': bindAddr,
     'server_port': serverPort,
     'poll_interval': pollInterval,
     'repositories': repositories,
@@ -979,6 +984,7 @@ class AppConfig {
     }
 
     return AppConfig(
+      bindAddr: json['bind_addr'] as String?,
       serverPort: (json['server_port'] as int?) ?? 7842,
       pollInterval: (json['poll_interval'] as String?) ?? '5m',
       aiPrimary: (json['ai_primary'] as String?) ?? 'claude',

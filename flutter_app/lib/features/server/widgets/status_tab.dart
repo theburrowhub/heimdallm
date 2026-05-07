@@ -1,17 +1,49 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../shared/widgets/toast.dart';
 import '../../config/config_providers.dart';
 import '../../dashboard/dashboard_providers.dart';
 import '../server_actions.dart' as server_actions;
 
-class StatusTab extends ConsumerWidget {
+class StatusTab extends ConsumerStatefulWidget {
   const StatusTab({super.key});
+  @override
+  ConsumerState<StatusTab> createState() => _StatusTabState();
+}
+
+class _StatusTabState extends ConsumerState<StatusTab> {
+  String? _initialBindAddr;
+  int? _initialPort;
+  String? _editedBindAddr;
+  int? _editedPort;
+  Timer? _saveDebounce;
+
+  bool get _bindAddrChanged =>
+      _editedBindAddr != null && _editedBindAddr != _initialBindAddr;
+  bool get _portChanged =>
+      _editedPort != null && _editedPort != _initialPort;
+  bool get _showBanner => _bindAddrChanged || _portChanged;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  void dispose() {
+    _saveDebounce?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final config = ref.watch(configNotifierProvider).valueOrNull;
+    if (config == null) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    _initialBindAddr ??= config.bindAddr ?? '127.0.0.1';
+    _initialPort ??= config.serverPort;
     final daemonRunning = ref.watch(daemonHealthProvider).valueOrNull ?? false;
     final daemonStarting = ref.watch(daemonStartingProvider);
+
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
       child: Card(
@@ -29,9 +61,175 @@ class StatusTab extends ConsumerWidget {
                 running: daemonRunning,
                 starting: daemonStarting,
               ),
+              const Divider(height: 32),
+              const Text('Listen URL',
+                  style: TextStyle(fontWeight: FontWeight.w600)),
+              const SizedBox(height: 8),
+              _ListenUrlEditor(
+                initialBindAddr: _initialBindAddr!,
+                initialPort: _initialPort!,
+                onBindAddrChanged: _onBindAddrChanged,
+                onPortChanged: _onPortChanged,
+              ),
+              if (_showBanner) ...[
+                const SizedBox(height: 16),
+                _RestartBanner(
+                  portChanged: _portChanged,
+                  onRestart: () => server_actions.restartDaemon(context, ref),
+                ),
+              ],
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  void _onBindAddrChanged(String v) {
+    setState(() => _editedBindAddr = v);
+    _scheduleSave();
+  }
+
+  void _onPortChanged(int v) {
+    setState(() => _editedPort = v);
+    _scheduleSave();
+  }
+
+  void _scheduleSave() {
+    _saveDebounce?.cancel();
+    _saveDebounce = Timer(const Duration(milliseconds: 800), _save);
+  }
+
+  Future<void> _save() async {
+    final api = ref.read(apiClientProvider);
+    try {
+      final patch = <String, dynamic>{};
+      if (_bindAddrChanged) patch['bind_addr'] = _editedBindAddr;
+      if (_portChanged) patch['server_port'] = _editedPort;
+      if (patch.isEmpty) return;
+      await api.patchConfig(patch);
+      if (!mounted) return;
+      showToast(context, 'Saved (restart required)');
+    } catch (e) {
+      if (mounted) showToast(context, 'Error: $e', isError: true);
+    }
+  }
+}
+
+class _ListenUrlEditor extends StatefulWidget {
+  const _ListenUrlEditor({
+    required this.initialBindAddr,
+    required this.initialPort,
+    required this.onBindAddrChanged,
+    required this.onPortChanged,
+  });
+  final String initialBindAddr;
+  final int initialPort;
+  final ValueChanged<String> onBindAddrChanged;
+  final ValueChanged<int> onPortChanged;
+
+  @override
+  State<_ListenUrlEditor> createState() => _ListenUrlEditorState();
+}
+
+class _ListenUrlEditorState extends State<_ListenUrlEditor> {
+  late final TextEditingController _bindCtrl;
+  late final TextEditingController _portCtrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _bindCtrl = TextEditingController(text: widget.initialBindAddr);
+    _portCtrl = TextEditingController(text: widget.initialPort.toString());
+  }
+
+  @override
+  void dispose() {
+    _bindCtrl.dispose();
+    _portCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Expanded(
+          flex: 3,
+          child: TextField(
+            controller: _bindCtrl,
+            decoration: const InputDecoration(
+              labelText: 'Bind address',
+              helperText: 'e.g. 127.0.0.1, 0.0.0.0',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+            onChanged: widget.onBindAddrChanged,
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          flex: 1,
+          child: TextField(
+            controller: _portCtrl,
+            decoration: const InputDecoration(
+              labelText: 'Port',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+            keyboardType: TextInputType.number,
+            onChanged: (v) {
+              final n = int.tryParse(v);
+              if (n != null) widget.onPortChanged(n);
+            },
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _RestartBanner extends StatelessWidget {
+  const _RestartBanner({required this.portChanged, required this.onRestart});
+  final bool portChanged;
+  final VoidCallback onRestart;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFF4D6),
+        border: Border.all(color: const Color(0xFFE8C547)),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.warning_amber, size: 18),
+              const SizedBox(width: 8),
+              const Expanded(
+                child: Text(
+                  'Listen URL changed. Restart the server for it to take effect.',
+                  style: TextStyle(fontSize: 13),
+                ),
+              ),
+              FilledButton(
+                onPressed: onRestart,
+                child: const Text('Restart server'),
+              ),
+            ],
+          ),
+          if (portChanged) ...[
+            const SizedBox(height: 6),
+            const Text(
+              'Port change also requires restarting the desktop app for the GUI to reconnect.',
+              style: TextStyle(fontSize: 12),
+            ),
+          ],
+        ],
       ),
     );
   }
