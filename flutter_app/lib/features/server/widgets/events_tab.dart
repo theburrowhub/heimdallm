@@ -42,6 +42,7 @@ class _EventsTabState extends ConsumerState<EventsTab> {
   }
 
   String _groupOf(String type) {
+    if (type == 'repo_discovered') return 'pr';
     if (type.startsWith('pr_')) return 'pr';
     if (type.startsWith('issue_')) return 'issue';
     if (type.startsWith('polling_')) return 'polling';
@@ -89,8 +90,12 @@ class _EventsTabState extends ConsumerState<EventsTab> {
           onAutoScrollChanged: (v) => setState(() => _autoScroll = v),
           onGroupToggled: (g) => setState(() {
             _enabledGroups.contains(g) ? _enabledGroups.remove(g) : _enabledGroups.add(g);
+            _expanded.clear();
           }),
-          onSearchChanged: (q) => setState(() => _searchQuery = q),
+          onSearchChanged: (q) => setState(() {
+            _searchQuery = q;
+            _expanded.clear();
+          }),
           onClear: () => setState(() {
             _events.clear();
             _expanded.clear();

@@ -77,6 +77,7 @@ class _StatusTabState extends ConsumerState<StatusTab> {
                 _RestartBanner(
                   portChanged: _portChanged,
                   onRestart: () => server_actions.restartDaemon(context, ref),
+                  starting: daemonStarting,
                 ),
               ],
               const SizedBox(height: 16),
@@ -195,9 +196,10 @@ class _ListenUrlEditorState extends State<_ListenUrlEditor> {
 }
 
 class _RestartBanner extends StatelessWidget {
-  const _RestartBanner({required this.portChanged, required this.onRestart});
+  const _RestartBanner({required this.portChanged, required this.onRestart, required this.starting});
   final bool portChanged;
   final VoidCallback onRestart;
+  final bool starting;
 
   @override
   Widget build(BuildContext context) {
@@ -222,7 +224,7 @@ class _RestartBanner extends StatelessWidget {
                 ),
               ),
               FilledButton(
-                onPressed: onRestart,
+                onPressed: starting ? null : onRestart,
                 child: const Text('Restart server'),
               ),
             ],
