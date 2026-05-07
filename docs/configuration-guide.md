@@ -496,16 +496,32 @@ draft     = false
 
 ### Per-org overrides
 
-Applied to all repos in the org unless a per-repo override exists:
+Applied to all repos in the org unless a per-repo override exists. Resolution is
+field-by-field: `ai.repos."org/repo"` wins over `ai.orgs."org"`, which wins
+over global defaults.
 
 ```toml
 [ai.orgs."myorg"]
+primary      = "gemini"
+fallback     = "claude"
+review_mode  = "multi"
+prompt       = "org-pr-review-profile"
+issue_prompt = "org-issue-triage-profile"
+implement_prompt = "org-implementation-profile"
+
 pr_reviewers = ["alice", "bob", "carol"]
 pr_labels    = ["auto-generated", "ai-platform"]
 pr_assignee  = "myusername"
 pr_draft     = false
 
+[ai.orgs."myorg".issue_tracking]
+enabled            = true
+develop_labels     = ["heimdallm-develop"]
+review_only_labels = ["heimdallm-triage"]
+skip_labels        = ["wontfix"]
+
 [ai.orgs."other-org"]
+primary = "codex"
 pr_reviewers = ["dave"]
 pr_labels    = ["auto-generated"]
 ```
@@ -921,16 +937,30 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # pr_assignee  = "myusername"
 # pr_draft     = false
 
-# ── Per-org PR metadata overrides ────────────────────────────────────────────
+# ── Per-org overrides ────────────────────────────────────────────────────────
 # Applied to all repos in the org unless overridden per-repo.
+# Each field is optional and inherits from global defaults when absent.
 
 # [ai.orgs."myorg"]
+# primary = "gemini"
+# fallback = "claude"
+# review_mode = "multi"
+# prompt = "org-pr-review-profile"
+# issue_prompt = "org-issue-triage-profile"
+# implement_prompt = "org-implementation-profile"
 # pr_reviewers = ["alice", "bob"]
 # pr_labels    = ["auto-generated", "myorg-team"]
 # pr_assignee  = "myusername"
 # pr_draft     = false
+#
+# [ai.orgs."myorg".issue_tracking]
+# enabled = true
+# develop_labels = ["heimdallm-develop"]
+# review_only_labels = ["heimdallm-triage"]
+# skip_labels = ["wontfix"]
 
 # [ai.orgs."other-org"]
+# primary = "codex"
 # pr_reviewers = ["carol"]
 
 # ── Per-repo AI overrides ─────────────────────────────────────────────────────

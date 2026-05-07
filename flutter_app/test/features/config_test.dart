@@ -36,14 +36,14 @@ void main() {
         overrides: [
           apiClientProvider.overrideWithValue(mockApi),
           configNotifierProvider.overrideWith(ConfigNotifier.new),
-          platformServicesProvider.overrideWithValue(
-            FakePlatformServices(),
-          ),
+          platformServicesProvider.overrideWithValue(FakePlatformServices()),
         ],
         child: MaterialApp.router(
-          routerConfig: GoRouter(routes: [
-            GoRoute(path: '/', builder: (_, __) => const ConfigScreen()),
-          ]),
+          routerConfig: GoRouter(
+            routes: [
+              GoRoute(path: '/', builder: (_, __) => const ConfigScreen()),
+            ],
+          ),
         ),
       ),
     );
@@ -60,8 +60,12 @@ void main() {
       'repo_overrides': {
         'a/b': {'first_seen_at': 1234567890},
       },
-      'server_port': 1, 'poll_interval': '60s', 'retention_days': 30,
-      'ai_primary': 'claude', 'ai_fallback': '', 'review_mode': 'single',
+      'server_port': 1,
+      'poll_interval': '60s',
+      'retention_days': 30,
+      'ai_primary': 'claude',
+      'ai_fallback': '',
+      'review_mode': 'single',
       'issue_tracking': {'enabled': false},
     };
     final cfg = AppConfig.fromJson(json);
@@ -71,14 +75,89 @@ void main() {
     );
   });
 
+  test('AppConfig parses organization overrides', () {
+    final json = {
+      'repositories': <String>[],
+      'non_monitored': ['acme/api'],
+      'server_port': 1,
+      'poll_interval': '60s',
+      'retention_days': 30,
+      'ai_primary': 'claude',
+      'ai_fallback': '',
+      'review_mode': 'single',
+      'issue_tracking': {'enabled': false},
+      'org_overrides': {
+        'acme': {
+          'primary': 'gemini',
+          'issue_prompt': 'org-issue',
+          'pr_reviewers': ['alice'],
+          'issue_tracking': {
+            'enabled': true,
+            'develop_labels': ['ready'],
+          },
+        },
+      },
+    };
+
+    final cfg = AppConfig.fromJson(json);
+    final org = cfg.orgConfigs['acme']!;
+    expect(org.aiPrimary, 'gemini');
+    expect(org.issuePromptId, 'org-issue');
+    expect(org.prReviewers, ['alice']);
+    expect(org.itEnabled, isTrue);
+    expect(org.developLabels, ['ready']);
+  });
+
+  test('AppConfig preserves scoped false and empty-list overrides', () {
+    final json = {
+      'repositories': <String>[],
+      'non_monitored': ['acme/api'],
+      'server_port': 1,
+      'poll_interval': '60s',
+      'retention_days': 30,
+      'ai_primary': 'claude',
+      'ai_fallback': '',
+      'review_mode': 'single',
+      'issue_tracking': {
+        'enabled': true,
+        'review_only_labels': ['global-review'],
+      },
+      'repo_overrides': {
+        'acme/api': {
+          'implement_prompt': 'repo-impl',
+          'issue_tracking': {
+            'enabled': false,
+            'review_only_labels': <String>[],
+          },
+        },
+      },
+      'org_overrides': {
+        'acme': {
+          'issue_tracking': {'enabled': false, 'develop_labels': <String>[]},
+        },
+      },
+    };
+
+    final cfg = AppConfig.fromJson(json);
+    final repo = cfg.repoConfigs['acme/api']!;
+    expect(repo.itEnabled, isFalse);
+    expect(repo.reviewOnlyLabels, isEmpty);
+    expect(repo.developPromptId, 'repo-impl');
+    expect(repo.isMonitored, isFalse);
+
+    final org = cfg.orgConfigs['acme']!;
+    expect(org.itEnabled, isFalse);
+    expect(org.developLabels, isEmpty);
+  });
+
   testWidgets('saveAndStartDaemon calls platform.spawnDaemon', (tester) async {
     final platform = FakePlatformServices(
       daemonBinaryPath: '/fake/bin/heimdalld',
       githubToken: 'fake-token',
     );
-    final container = ProviderContainer(overrides: [
-      platformServicesProvider.overrideWithValue(platform),
-    ]);
+    final container = ProviderContainer(
+      overrides: [platformServicesProvider.overrideWithValue(platform)],
+    );
     addTearDown(container.dispose);
 
     // Call saveAndStartDaemon via the notifier. We don't verify daemon health
@@ -88,11 +167,13 @@ void main() {
 
     // Run in real-async mode so Future.delayed works without fake-async leaks.
     await tester.runAsync(() async {
-      unawaited(notifier.saveAndStartDaemon(
-        token: 'fake-gh-token',
-        config: const AppConfig(),
-        daemonBinaryPath: '/fake/bin/heimdalld',
-      ));
+      unawaited(
+        notifier.saveAndStartDaemon(
+          token: 'fake-gh-token',
+          config: const AppConfig(),
+          daemonBinaryPath: '/fake/bin/heimdalld',
+        ),
+      );
       // Allow the microtasks that lead to the first spawnDaemon to run.
       await Future.delayed(const Duration(milliseconds: 50));
     });
@@ -100,32 +181,37 @@ void main() {
     expect(platform.spawnedDaemons, contains('/fake/bin/heimdalld'));
   });
 
-  testWidgets('saveAndStartDaemon routes daemon spawn through PlatformServices', (tester) async {
-    final platform = FakePlatformServices(
-      daemonBinaryPath: '/fake/bin/heimdalld',
-      githubToken: 'fake-token',
-    );
-    final container = ProviderContainer(overrides: [
-      platformServicesProvider.overrideWithValue(platform),
-    ]);
-    addTearDown(container.dispose);
-
-    // Call saveAndStartDaemon via the notifier. We don't verify daemon health
-    // (the fake's ApiClient isn't wired), but we do verify the spawn reached
-    // the platform layer at least once before the health-check loop timed out.
-    final notifier = container.read(configNotifierProvider.notifier);
-    // Kick off the call but ignore its completion — we only care about the
-    // side-effect of calling spawnDaemon.
-    await tester.runAsync(() async {
-      unawaited(notifier.saveAndStartDaemon(
-        token: 'fake-gh-token',
-        config: const AppConfig(),
+  testWidgets(
+    'saveAndStartDaemon routes daemon spawn through PlatformServices',
+    (tester) async {
+      final platform = FakePlatformServices(
         daemonBinaryPath: '/fake/bin/heimdalld',
-      ));
-      // Allow the microtasks that lead to the first spawnDaemon to run.
-      await Future.delayed(const Duration(milliseconds: 50));
-    });
+        githubToken: 'fake-token',
+      );
+      final container = ProviderContainer(
+        overrides: [platformServicesProvider.overrideWithValue(platform)],
+      );
+      addTearDown(container.dispose);
 
-    expect(platform.spawnedDaemons, contains('/fake/bin/heimdalld'));
-  });
+      // Call saveAndStartDaemon via the notifier. We don't verify daemon health
+      // (the fake's ApiClient isn't wired), but we do verify the spawn reached
+      // the platform layer at least once before the health-check loop timed out.
+      final notifier = container.read(configNotifierProvider.notifier);
+      // Kick off the call but ignore its completion — we only care about the
+      // side-effect of calling spawnDaemon.
+      await tester.runAsync(() async {
+        unawaited(
+          notifier.saveAndStartDaemon(
+            token: 'fake-gh-token',
+            config: const AppConfig(),
+            daemonBinaryPath: '/fake/bin/heimdalld',
+          ),
+        );
+        // Allow the microtasks that lead to the first spawnDaemon to run.
+        await Future.delayed(const Duration(milliseconds: 50));
+      });
+
+      expect(platform.spawnedDaemons, contains('/fake/bin/heimdalld'));
+    },
+  );
 }

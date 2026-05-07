@@ -1075,30 +1075,13 @@ func main() {
 		nonMonList := append([]string(nil), c.GitHub.NonMonitored...)
 		localDirBaseList := append([]string(nil), c.GitHub.LocalDirBase...)
 		cfgMu.Unlock()
+		orgOverrides := make(map[string]map[string]any)
+		for org, ai := range c.AI.Orgs {
+			orgOverrides[org] = orgAIOverrideMap(ai)
+		}
 		repoOverrides := make(map[string]map[string]any)
 		for repo, ai := range c.AI.Repos {
-			ro := map[string]any{
-				"primary":     ai.Primary,
-				"fallback":    ai.Fallback,
-				"review_mode": ai.ReviewMode,
-				"local_dir":   ai.LocalDir,
-			}
-			if len(ai.PRReviewers) > 0 {
-				ro["pr_reviewers"] = ai.PRReviewers
-			}
-			if ai.PRAssignee != "" {
-				ro["pr_assignee"] = ai.PRAssignee
-			}
-			if len(ai.PRLabels) > 0 {
-				ro["pr_labels"] = ai.PRLabels
-			}
-			if ai.PRDraft != nil {
-				ro["pr_draft"] = *ai.PRDraft
-			}
-			if ai.IssueTracking != nil {
-				ro["issue_tracking"] = ai.IssueTracking
-			}
-			repoOverrides[repo] = ro
+			repoOverrides[repo] = repoAIOverrideMap(ai)
 		}
 		// Auto-detected local_dir for every repo the UI may render. Populated
 		// only when config.ResolveLocalDir() finds a matching directory under
@@ -1174,6 +1157,7 @@ func main() {
 			"retention_days":              c.Retention.MaxDays,
 			"issue_tracking":              c.GitHub.IssueTracking,
 			"repo_overrides":              repoOverrides,
+			"org_overrides":               orgOverrides,
 			"agent_configs":               agentConfigs,
 			"local_dirs_detected":         localDirsDetected,
 			"activity_log_enabled":        ptrBoolOrTrue(c.ActivityLog.Enabled),
@@ -1508,9 +1492,11 @@ func main() {
 			return fmt.Errorf("promote issue: get issue %d: %w", issueID, err)
 		}
 
-		// Read the issue tracking config to know which labels to add/remove.
+		// Read the repo-scoped issue tracking config to know which labels to
+		// add/remove. Org-level labels must behave the same as repo-level
+		// labels here, otherwise manual promotion would silently use globals.
 		cfgMu.Lock()
-		it := cfg.GitHub.IssueTracking
+		it := cfg.IssueTrackingForRepo(iss.Repo)
 		cfgMu.Unlock()
 
 		if len(it.DevelopLabels) == 0 {
@@ -2360,19 +2346,9 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 	a.cfgMu.Lock()
 	c := *a.cfg
 	repoIT := c.IssueTrackingForRepo(repo)
-	globalIT := c.GitHub.IssueTracking
-	anyITEnabled := globalIT.Enabled
-	if !anyITEnabled {
-		for _, r := range c.AI.Repos {
-			if r.IssueTracking != nil && r.IssueTracking.Enabled {
-				anyITEnabled = true
-				break
-			}
-		}
-	}
 	a.cfgMu.Unlock()
 
-	if !anyITEnabled || !repoIT.Enabled {
+	if !repoIT.Enabled {
 		return 0, nil
 	}
 
@@ -2449,19 +2425,32 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 
 // PromoteReady implements scheduler.Tier2Promoter.
 func (a *tier2Adapter) PromoteReady(ctx context.Context, repos []string) (int, error) {
+	type scopedPromoteConfig struct {
+		repo string
+		it   config.IssueTrackingConfig
+	}
+
 	a.cfgMu.Lock()
 	c := *a.cfg
-	globalIT := c.GitHub.IssueTracking
+	scoped := make([]scopedPromoteConfig, 0, len(repos))
+	for _, repo := range repos {
+		it := c.IssueTrackingForRepo(repo)
+		if it.Enabled && len(it.BlockedLabels) > 0 {
+			scoped = append(scoped, scopedPromoteConfig{repo: repo, it: it})
+		}
+	}
 	a.cfgMu.Unlock()
 
-	// Promotion only makes sense when blocked labels are configured.
-	// Intentionally NOT gated on globalIT.Enabled — per-repo IT configs
-	// can enable issue tracking independently while global is disabled.
-	// Gating on Enabled here would silently regress promotion for those users.
-	if len(globalIT.BlockedLabels) == 0 {
-		return 0, nil
+	total := 0
+	var firstErr error
+	for _, item := range scoped {
+		n, err := issuepipeline.PromoteReady(ctx, a.ghClient, item.it, []string{item.repo}, a.broker)
+		total += n
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
-	return issuepipeline.PromoteReady(ctx, a.ghClient, globalIT, repos, a.broker)
+	return total, firstErr
 }
 
 // PRAlreadyReviewed implements scheduler.Tier2Store.
@@ -2958,6 +2947,124 @@ func ptrIntOr(p *int, defaultV int) int {
 		return defaultV
 	}
 	return *p
+}
+
+func repoAIOverrideMap(ai config.RepoAI) map[string]any {
+	out := map[string]any{
+		"primary":     ai.Primary,
+		"fallback":    ai.Fallback,
+		"review_mode": ai.ReviewMode,
+		"local_dir":   ai.LocalDir,
+	}
+	addCommonAIOverrideFields(out, ai.Prompt, ai.IssuePrompt, ai.ImplementPrompt,
+		ai.TriageOwner, ai.CloneDir, ai.AutoPromoteTriage, ai.AutoPromoteRefinement,
+		ai.PRReviewers, ai.PRAssignee, ai.PRLabels, ai.PRDraft, ai.GeneratePRDescription)
+	if ai.IssueTracking != nil {
+		out["issue_tracking"] = issueTrackingOverrideMap(ai.IssueTracking)
+	}
+	return out
+}
+
+func orgAIOverrideMap(ai config.OrgAI) map[string]any {
+	out := map[string]any{}
+	if ai.Primary != "" {
+		out["primary"] = ai.Primary
+	}
+	if ai.Fallback != "" {
+		out["fallback"] = ai.Fallback
+	}
+	if ai.ReviewMode != "" {
+		out["review_mode"] = ai.ReviewMode
+	}
+	if ai.LocalDir != "" {
+		out["local_dir"] = ai.LocalDir
+	}
+	addCommonAIOverrideFields(out, ai.Prompt, ai.IssuePrompt, ai.ImplementPrompt,
+		ai.TriageOwner, ai.CloneDir, ai.AutoPromoteTriage, ai.AutoPromoteRefinement,
+		ai.PRReviewers, ai.PRAssignee, ai.PRLabels, ai.PRDraft, ai.GeneratePRDescription)
+	if ai.IssueTracking != nil {
+		out["issue_tracking"] = issueTrackingOverrideMap(ai.IssueTracking)
+	}
+	return out
+}
+
+func addCommonAIOverrideFields(out map[string]any, prompt, issuePrompt, implementPrompt, triageOwner, cloneDir string,
+	autoPromoteTriage, autoPromoteRefinement *bool, prReviewers []string, prAssignee string, prLabels []string,
+	prDraft, generatePRDescription *bool) {
+	if prompt != "" {
+		out["prompt"] = prompt
+	}
+	if issuePrompt != "" {
+		out["issue_prompt"] = issuePrompt
+	}
+	if implementPrompt != "" {
+		out["implement_prompt"] = implementPrompt
+	}
+	if triageOwner != "" {
+		out["triage_owner"] = triageOwner
+	}
+	if cloneDir != "" {
+		out["clone_dir"] = cloneDir
+	}
+	if autoPromoteTriage != nil {
+		out["auto_promote_triage"] = *autoPromoteTriage
+	}
+	if autoPromoteRefinement != nil {
+		out["auto_promote_refinement"] = *autoPromoteRefinement
+	}
+	if prReviewers != nil {
+		out["pr_reviewers"] = prReviewers
+	}
+	if prAssignee != "" {
+		out["pr_assignee"] = prAssignee
+	}
+	if prLabels != nil {
+		out["pr_labels"] = prLabels
+	}
+	if prDraft != nil {
+		out["pr_draft"] = *prDraft
+	}
+	if generatePRDescription != nil {
+		out["generate_pr_description"] = *generatePRDescription
+	}
+}
+
+func issueTrackingOverrideMap(ov *config.IssueTrackingOverride) map[string]any {
+	out := map[string]any{}
+	if ov.Enabled != nil {
+		out["enabled"] = *ov.Enabled
+	}
+	if ov.DevelopEnabled != nil {
+		out["develop_enabled"] = *ov.DevelopEnabled
+	}
+	if ov.FilterMode != "" {
+		out["filter_mode"] = ov.FilterMode
+	}
+	if ov.DefaultAction != "" {
+		out["default_action"] = ov.DefaultAction
+	}
+	if ov.DevelopLabels != nil {
+		out["develop_labels"] = ov.DevelopLabels
+	}
+	if ov.ReviewOnlyLabels != nil {
+		out["review_only_labels"] = ov.ReviewOnlyLabels
+	}
+	if ov.SkipLabels != nil {
+		out["skip_labels"] = ov.SkipLabels
+	}
+	if ov.BlockedLabels != nil {
+		out["blocked_labels"] = ov.BlockedLabels
+	}
+	if ov.PromoteToLabel != "" {
+		out["promote_to_label"] = ov.PromoteToLabel
+	}
+	if ov.Organizations != nil {
+		out["organizations"] = ov.Organizations
+	}
+	if ov.Assignees != nil {
+		out["assignees"] = ov.Assignees
+	}
+	return out
 }
 
 // enrollOpenItems enrolls up to 10 open PRs/issues not yet in watch_state.

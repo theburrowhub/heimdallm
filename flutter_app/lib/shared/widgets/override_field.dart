@@ -10,6 +10,7 @@ class OverrideTextField extends StatefulWidget {
   final String label;
   final String? helper;
   final String globalValue;
+  final String inheritedLabel;
   final String? overrideValue;
   final ValueChanged<String?> onChanged;
   final VoidCallback? onReset;
@@ -19,6 +20,7 @@ class OverrideTextField extends StatefulWidget {
     required this.label,
     this.helper,
     required this.globalValue,
+    this.inheritedLabel = 'global',
     required this.overrideValue,
     required this.onChanged,
     this.onReset,
@@ -35,7 +37,9 @@ class _OverrideTextFieldState extends State<OverrideTextField> {
   @override
   void initState() {
     super.initState();
-    _ctrl = TextEditingController(text: widget.overrideValue ?? widget.globalValue);
+    _ctrl = TextEditingController(
+      text: widget.overrideValue ?? widget.globalValue,
+    );
   }
 
   @override
@@ -85,7 +89,9 @@ class _OverrideTextFieldState extends State<OverrideTextField> {
   Widget build(BuildContext context) {
     return Container(
       decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
+        color: Theme.of(
+          context,
+        ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
         borderRadius: BorderRadius.circular(6),
         border: Border(
           left: BorderSide(
@@ -100,35 +106,55 @@ class _OverrideTextFieldState extends State<OverrideTextField> {
         children: [
           Row(
             children: [
-              Text(widget.label,
-                  style: TextStyle(fontSize: 11, color: Colors.grey.shade500)),
+              Text(
+                widget.label,
+                style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+              ),
               const Spacer(),
               if (_isOverridden) ...[
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 6,
+                    vertical: 1,
+                  ),
                   decoration: BoxDecoration(
                     color: Colors.green.shade900.withValues(alpha: 0.4),
                     borderRadius: BorderRadius.circular(3),
                   ),
-                  child: Text('overridden',
-                      style: TextStyle(fontSize: 10, color: Colors.green.shade400)),
+                  child: Text(
+                    'overridden',
+                    style: TextStyle(
+                      fontSize: 10,
+                      color: Colors.green.shade400,
+                    ),
+                  ),
                 ),
                 const SizedBox(width: 6),
                 GestureDetector(
                   onTap: _reset,
                   child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 1,
+                    ),
                     decoration: BoxDecoration(
                       border: Border.all(color: Colors.grey.shade700),
                       borderRadius: BorderRadius.circular(3),
                     ),
-                    child: Text('\u00d7 reset',
-                        style: TextStyle(fontSize: 10, color: Colors.grey.shade500)),
+                    child: Text(
+                      '\u00d7 reset',
+                      style: TextStyle(
+                        fontSize: 10,
+                        color: Colors.grey.shade500,
+                      ),
+                    ),
                   ),
                 ),
               ] else
-                Text('global',
-                    style: TextStyle(fontSize: 10, color: Colors.grey.shade600)),
+                Text(
+                  widget.inheritedLabel,
+                  style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+                ),
             ],
           ),
           const SizedBox(height: 6),
@@ -143,15 +169,20 @@ class _OverrideTextFieldState extends State<OverrideTextField> {
               border: const OutlineInputBorder(),
               helperText: widget.helper,
               helperMaxLines: 2,
-              contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 8,
+                vertical: 8,
+              ),
             ),
             onChanged: _handleChange,
           ),
           if (_isOverridden)
             Padding(
               padding: const EdgeInsets.only(top: 4),
-              child: Text('Global: ${widget.globalValue}',
-                  style: TextStyle(fontSize: 10, color: Colors.grey.shade700)),
+              child: Text(
+                '${widget.inheritedLabel}: ${widget.globalValue}',
+                style: TextStyle(fontSize: 10, color: Colors.grey.shade700),
+              ),
             ),
         ],
       ),
@@ -163,6 +194,7 @@ class _OverrideTextFieldState extends State<OverrideTextField> {
 class OverrideDropdown extends StatelessWidget {
   final String label;
   final String globalValue;
+  final String inheritedLabel;
   final String? overrideValue;
   final List<String> options;
   final ValueChanged<String?> onChanged;
@@ -172,6 +204,7 @@ class OverrideDropdown extends StatelessWidget {
     super.key,
     required this.label,
     required this.globalValue,
+    this.inheritedLabel = 'global',
     required this.overrideValue,
     required this.options,
     required this.onChanged,
@@ -184,7 +217,9 @@ class OverrideDropdown extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
+        color: Theme.of(
+          context,
+        ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
         borderRadius: BorderRadius.circular(6),
         border: Border(
           left: BorderSide(
@@ -199,18 +234,28 @@ class OverrideDropdown extends StatelessWidget {
         children: [
           Row(
             children: [
-              Text(label,
-                  style: TextStyle(fontSize: 11, color: Colors.grey.shade500)),
+              Text(
+                label,
+                style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+              ),
               const Spacer(),
               if (_isOverridden) ...[
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 6,
+                    vertical: 1,
+                  ),
                   decoration: BoxDecoration(
                     color: Colors.green.shade900.withValues(alpha: 0.4),
                     borderRadius: BorderRadius.circular(3),
                   ),
-                  child: Text('overridden',
-                      style: TextStyle(fontSize: 10, color: Colors.green.shade400)),
+                  child: Text(
+                    'overridden',
+                    style: TextStyle(
+                      fontSize: 10,
+                      color: Colors.green.shade400,
+                    ),
+                  ),
                 ),
                 const SizedBox(width: 6),
                 GestureDetector(
@@ -222,18 +267,28 @@ class OverrideDropdown extends StatelessWidget {
                     }
                   },
                   child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 1,
+                    ),
                     decoration: BoxDecoration(
                       border: Border.all(color: Colors.grey.shade700),
                       borderRadius: BorderRadius.circular(3),
                     ),
-                    child: Text('\u00d7 reset',
-                        style: TextStyle(fontSize: 10, color: Colors.grey.shade500)),
+                    child: Text(
+                      '\u00d7 reset',
+                      style: TextStyle(
+                        fontSize: 10,
+                        color: Colors.grey.shade500,
+                      ),
+                    ),
                   ),
                 ),
               ] else
-                Text('global',
-                    style: TextStyle(fontSize: 10, color: Colors.grey.shade600)),
+                Text(
+                  inheritedLabel,
+                  style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+                ),
             ],
           ),
           const SizedBox(height: 6),
@@ -247,13 +302,17 @@ class OverrideDropdown extends StatelessWidget {
             items: [
               DropdownMenuItem<String?>(
                 value: null,
-                child: Text('Global ($globalValue)',
-                    style: TextStyle(color: Colors.grey.shade600, fontSize: 12)),
+                child: Text(
+                  '${_capitalize(inheritedLabel)} ($globalValue)',
+                  style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
+                ),
               ),
-              ...options.map((v) => DropdownMenuItem<String?>(
-                    value: v,
-                    child: Text(v, style: const TextStyle(fontSize: 12)),
-                  )),
+              ...options.map(
+                (v) => DropdownMenuItem<String?>(
+                  value: v,
+                  child: Text(v, style: const TextStyle(fontSize: 12)),
+                ),
+              ),
             ],
             onChanged: onChanged,
           ),
@@ -261,4 +320,9 @@ class OverrideDropdown extends StatelessWidget {
       ),
     );
   }
+}
+
+String _capitalize(String s) {
+  if (s.isEmpty) return s;
+  return s[0].toUpperCase() + s.substring(1);
 }

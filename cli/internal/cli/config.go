@@ -53,6 +53,7 @@ func printHumanConfig(cfg map[string]any) {
 		{"Server", cfgServerLines(cfg)},
 		{"Repositories", cfgRepoLines(cfg)},
 		{"AI", cfgAILines(cfg)},
+		{"Organizations", cfgOrgLines(cfg)},
 		{"Issue Tracking", cfgIssueTrackingLines(cfg)},
 		{"Discovery", cfgDiscoveryLines(cfg)},
 	}
@@ -161,6 +162,54 @@ func cfgAILines(cfg map[string]any) []string {
 		sub = cfgSubKV(sub, "Permission mode", ac["permission_mode"])
 		if len(sub) > 0 {
 			out = append(out, fmt.Sprintf("  %s", cfgKeyStyle.Render("Agent: "+name)))
+			out = append(out, sub...)
+		}
+	}
+	return out
+}
+
+func cfgOrgLines(cfg map[string]any) []string {
+	overrides, _ := cfg["org_overrides"].(map[string]any)
+	if len(overrides) == 0 {
+		return nil
+	}
+	var out []string
+	for _, org := range cfgSortedKeys(overrides) {
+		ov, ok := overrides[org].(map[string]any)
+		if !ok {
+			continue
+		}
+		var sub []string
+		sub = cfgSubKV(sub, "Primary", ov["primary"])
+		sub = cfgSubKV(sub, "Fallback", ov["fallback"])
+		sub = cfgSubKV(sub, "Review mode", ov["review_mode"])
+		sub = cfgSubKV(sub, "Prompt", ov["prompt"])
+		sub = cfgSubKV(sub, "Issue prompt", ov["issue_prompt"])
+		sub = cfgSubKV(sub, "Implement prompt", ov["implement_prompt"])
+		sub = cfgSubKV(sub, "Local dir", ov["local_dir"])
+		sub = cfgSubKV(sub, "Triage owner", ov["triage_owner"])
+		sub = cfgSubKV(sub, "Clone dir", ov["clone_dir"])
+		sub = cfgSubKV(sub, "Auto-promote triage", ov["auto_promote_triage"])
+		sub = cfgSubKV(sub, "Auto-promote refinement", ov["auto_promote_refinement"])
+		sub = cfgSubKV(sub, "Generate PR description", ov["generate_pr_description"])
+		sub = cfgSubList(sub, "PR reviewers", ov["pr_reviewers"])
+		sub = cfgSubKV(sub, "PR assignee", ov["pr_assignee"])
+		sub = cfgSubList(sub, "PR labels", ov["pr_labels"])
+		sub = cfgSubKV(sub, "PR draft", ov["pr_draft"])
+		if it, ok := ov["issue_tracking"].(map[string]any); ok {
+			sub = cfgSubKV(sub, "Issue tracking enabled", it["enabled"])
+			sub = cfgSubKV(sub, "Issue filter mode", it["filter_mode"])
+			sub = cfgSubKV(sub, "Issue default action", it["default_action"])
+			sub = cfgSubList(sub, "Develop labels", it["develop_labels"])
+			sub = cfgSubList(sub, "Review only labels", it["review_only_labels"])
+			sub = cfgSubList(sub, "Skip labels", it["skip_labels"])
+			sub = cfgSubList(sub, "Blocked labels", it["blocked_labels"])
+			sub = cfgSubKV(sub, "Promote to label", it["promote_to_label"])
+			sub = cfgSubList(sub, "Issue organizations", it["organizations"])
+			sub = cfgSubList(sub, "Issue assignees", it["assignees"])
+		}
+		if len(sub) > 0 {
+			out = append(out, fmt.Sprintf("  %s", cfgKeyStyle.Render(org)))
 			out = append(out, sub...)
 		}
 	}

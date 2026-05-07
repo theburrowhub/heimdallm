@@ -9,6 +9,7 @@ class AutocompleteChipField extends StatefulWidget {
   final List<String> selectedValues;
   final List<String> availableOptions;
   final String? globalHint;
+  final String inheritedLabel;
   final bool isOverridden;
   final ValueChanged<List<String>?> onChanged;
   final VoidCallback? onReset;
@@ -20,6 +21,7 @@ class AutocompleteChipField extends StatefulWidget {
     required this.selectedValues,
     required this.availableOptions,
     this.globalHint,
+    this.inheritedLabel = 'global',
     this.isOverridden = false,
     required this.onChanged,
     this.onReset,
@@ -46,7 +48,7 @@ class _AutocompleteChipFieldState extends State<AutocompleteChipField> {
 
   void _addValue(String value) {
     final updated = [...widget.selectedValues, value];
-    widget.onChanged(updated.isEmpty ? null : updated);
+    widget.onChanged(updated);
     _ctrl.clear();
     setState(() => _showSuggestions = false);
     _focusNode.requestFocus();
@@ -54,7 +56,7 @@ class _AutocompleteChipFieldState extends State<AutocompleteChipField> {
 
   void _removeValue(String value) {
     final updated = widget.selectedValues.where((v) => v != value).toList();
-    widget.onChanged(updated.isEmpty ? null : updated);
+    widget.onChanged(updated);
   }
 
   void _handleSubmit(String text) {
@@ -75,12 +77,16 @@ class _AutocompleteChipFieldState extends State<AutocompleteChipField> {
   Widget build(BuildContext context) {
     return Container(
       decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
+        color: Theme.of(
+          context,
+        ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
         borderRadius: BorderRadius.circular(6),
         border: Border(
           left: BorderSide(
             width: 3,
-            color: widget.isOverridden ? Colors.green.shade600 : Colors.transparent,
+            color: widget.isOverridden
+                ? Colors.green.shade600
+                : Colors.transparent,
           ),
         ),
       ),
@@ -91,37 +97,57 @@ class _AutocompleteChipFieldState extends State<AutocompleteChipField> {
           // Header with label + override badge
           Row(
             children: [
-              Text(widget.label,
-                  style: TextStyle(fontSize: 11, color: Colors.grey.shade500)),
+              Text(
+                widget.label,
+                style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+              ),
               const Spacer(),
               if (widget.isOverridden) ...[
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 6,
+                    vertical: 1,
+                  ),
                   decoration: BoxDecoration(
                     color: Colors.green.shade900.withValues(alpha: 0.4),
                     borderRadius: BorderRadius.circular(3),
                   ),
-                  child: Text('overridden',
-                      style: TextStyle(fontSize: 10, color: Colors.green.shade400)),
+                  child: Text(
+                    'overridden',
+                    style: TextStyle(
+                      fontSize: 10,
+                      color: Colors.green.shade400,
+                    ),
+                  ),
                 ),
                 if (widget.onReset != null) ...[
                   const SizedBox(width: 6),
                   GestureDetector(
                     onTap: widget.onReset,
                     child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 6,
+                        vertical: 1,
+                      ),
                       decoration: BoxDecoration(
                         border: Border.all(color: Colors.grey.shade700),
                         borderRadius: BorderRadius.circular(3),
                       ),
-                      child: Text('\u00d7 reset',
-                          style: TextStyle(fontSize: 10, color: Colors.grey.shade500)),
+                      child: Text(
+                        '\u00d7 reset',
+                        style: TextStyle(
+                          fontSize: 10,
+                          color: Colors.grey.shade500,
+                        ),
+                      ),
                     ),
                   ),
                 ],
               ] else
-                Text('global',
-                    style: TextStyle(fontSize: 10, color: Colors.grey.shade600)),
+                Text(
+                  widget.inheritedLabel,
+                  style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+                ),
             ],
           ),
           const SizedBox(height: 6),
@@ -132,13 +158,17 @@ class _AutocompleteChipFieldState extends State<AutocompleteChipField> {
               child: Wrap(
                 spacing: 4,
                 runSpacing: 4,
-                children: widget.selectedValues.map((v) => Chip(
-                  label: Text(v, style: const TextStyle(fontSize: 11)),
-                  deleteIcon: const Icon(Icons.close, size: 14),
-                  onDeleted: () => _removeValue(v),
-                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  visualDensity: VisualDensity.compact,
-                )).toList(),
+                children: widget.selectedValues
+                    .map(
+                      (v) => Chip(
+                        label: Text(v, style: const TextStyle(fontSize: 11)),
+                        deleteIcon: const Icon(Icons.close, size: 14),
+                        onDeleted: () => _removeValue(v),
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        visualDensity: VisualDensity.compact,
+                      ),
+                    )
+                    .toList(),
               ),
             ),
           // Text input + suggestions
@@ -164,7 +194,10 @@ class _AutocompleteChipFieldState extends State<AutocompleteChipField> {
                     hintText: 'Type to add...',
                     helperText: widget.helper,
                     helperMaxLines: 2,
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 8,
+                    ),
                   ),
                   onChanged: (_) => setState(() => _showSuggestions = true),
                   onFieldSubmitted: _handleSubmit,
@@ -174,20 +207,32 @@ class _AutocompleteChipFieldState extends State<AutocompleteChipField> {
                     margin: const EdgeInsets.only(top: 2),
                     constraints: const BoxConstraints(maxHeight: 160),
                     decoration: BoxDecoration(
-                      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                      color: Theme.of(
+                        context,
+                      ).colorScheme.surfaceContainerHighest,
                       borderRadius: BorderRadius.circular(4),
                       border: Border.all(color: Colors.grey.shade700),
                     ),
                     child: ListView(
                       shrinkWrap: true,
                       padding: EdgeInsets.zero,
-                      children: _filteredSuggestions.map((s) => InkWell(
-                        onTap: () => _addValue(s),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                          child: Text(s, style: const TextStyle(fontSize: 12)),
-                        ),
-                      )).toList(),
+                      children: _filteredSuggestions
+                          .map(
+                            (s) => InkWell(
+                              onTap: () => _addValue(s),
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 6,
+                                ),
+                                child: Text(
+                                  s,
+                                  style: const TextStyle(fontSize: 12),
+                                ),
+                              ),
+                            ),
+                          )
+                          .toList(),
                     ),
                   ),
               ],
@@ -196,8 +241,10 @@ class _AutocompleteChipFieldState extends State<AutocompleteChipField> {
           if (widget.isOverridden && widget.globalHint != null)
             Padding(
               padding: const EdgeInsets.only(top: 4),
-              child: Text('Global: ${widget.globalHint}',
-                  style: TextStyle(fontSize: 10, color: Colors.grey.shade700)),
+              child: Text(
+                '${widget.inheritedLabel}: ${widget.globalHint}',
+                style: TextStyle(fontSize: 10, color: Colors.grey.shade700),
+              ),
             ),
         ],
       ),
