@@ -40,6 +40,7 @@ type Server struct {
 	shutdownFn           func()
 	triggerReviewFn      func(prID int64) error
 	triggerIssueReviewFn func(issueID int64) error
+	triggerIssueRefineFn func(issueID int64, force bool) error
 	triggerPromoteFn     func(issueID int64) error
 	cleanCloneFn         func(ctx context.Context, repo string) error
 	cleanClonesFn        func(ctx context.Context) (int, error)
@@ -164,6 +165,11 @@ func (srv *Server) SetTriggerIssueReviewFn(fn func(issueID int64) error) {
 	srv.triggerIssueReviewFn = fn
 }
 
+// SetTriggerIssueRefineFn wires the refinement trigger called by POST /issues/{id}/refine.
+func (srv *Server) SetTriggerIssueRefineFn(fn func(issueID int64, force bool) error) {
+	srv.triggerIssueRefineFn = fn
+}
+
 // SetTriggerPromoteFn wires the promote callback called by POST /issues/{id}/promote.
 // The callback must run the auto_implement pipeline for the given issue regardless
 // of its current classification (review_only → develop promotion).
@@ -267,6 +273,7 @@ func (srv *Server) buildRouter() chi.Router {
 	r.Get("/issues", srv.handleListIssues)
 	r.Get("/issues/{id}", srv.handleGetIssue)
 	r.Post("/issues/{id}/review", srv.handleTriggerIssueReview)
+	r.Post("/issues/{id}/refine", srv.handleTriggerIssueRefine)
 	r.Post("/issues/{id}/promote", srv.handlePromoteIssue)
 	r.Post("/issues/{id}/dismiss", srv.handleDismissIssue)
 	r.Post("/issues/{id}/undismiss", srv.handleUndismissIssue)
@@ -408,12 +415,13 @@ func (srv *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 // readOnlyConfigKeys below) is rejected with HTTP 400 to prevent arbitrary
 // data injection into the configs table (security issue #4).
 var validConfigKeys = map[string]struct{}{
-	"poll_interval":  {},
-	"ai_primary":     {},
-	"ai_fallback":    {},
-	"review_mode":    {},
-	"retention_days": {},
-	"issue_tracking": {},
+	"poll_interval":      {},
+	"ai_primary":         {},
+	"ai_fallback":        {},
+	"review_mode":        {},
+	"refinement_timeout": {},
+	"retention_days":     {},
+	"issue_tracking":     {},
 }
 
 // readOnlyConfigKeys are keys that GET /config returns (so the web UI can
@@ -511,6 +519,17 @@ func (srv *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		if _, valid := validReviewModes[s]; !valid {
 			http.Error(w, "review_mode must be one of: single, multi", http.StatusBadRequest)
+			return
+		}
+	}
+	if v, ok := body["refinement_timeout"]; ok {
+		s, isStr := v.(string)
+		if !isStr {
+			http.Error(w, "refinement_timeout must be a string", http.StatusBadRequest)
+			return
+		}
+		if d, err := time.ParseDuration(s); err != nil || d <= 0 {
+			http.Error(w, "refinement_timeout must be a positive duration, e.g. 30m", http.StatusBadRequest)
 			return
 		}
 	}
@@ -1039,15 +1058,16 @@ type issueResponse struct {
 // issueReviewResponse wraps a store.IssueReview, parsing Triage/Suggestions
 // JSON strings into structured objects.
 type issueReviewResponse struct {
-	ID          int64           `json:"id"`
-	IssueID     int64           `json:"issue_id"`
-	CLIUsed     string          `json:"cli_used"`
-	Summary     string          `json:"summary"`
-	Triage      json.RawMessage `json:"triage"`
-	Suggestions json.RawMessage `json:"suggestions"`
-	ActionTaken string          `json:"action_taken"`
-	PRCreated   int             `json:"pr_created"`
-	CreatedAt   time.Time       `json:"created_at"`
+	ID             int64           `json:"id"`
+	IssueID        int64           `json:"issue_id"`
+	CLIUsed        string          `json:"cli_used"`
+	Summary        string          `json:"summary"`
+	Triage         json.RawMessage `json:"triage"`
+	RefinementData json.RawMessage `json:"refinement_data,omitempty"`
+	Suggestions    json.RawMessage `json:"suggestions"`
+	ActionTaken    string          `json:"action_taken"`
+	PRCreated      int             `json:"pr_created"`
+	CreatedAt      time.Time       `json:"created_at"`
 }
 
 func toIssueResponse(iss *store.Issue, rev *store.IssueReview) issueResponse {
@@ -1067,7 +1087,7 @@ func toIssueResponse(iss *store.Issue, rev *store.IssueReview) issueResponse {
 }
 
 func toIssueReviewResponse(r *store.IssueReview) *issueReviewResponse {
-	return &issueReviewResponse{
+	resp := &issueReviewResponse{
 		ID: r.ID, IssueID: r.IssueID, CLIUsed: r.CLIUsed,
 		Summary:     r.Summary,
 		Triage:      json.RawMessage(r.Triage),
@@ -1075,6 +1095,10 @@ func toIssueReviewResponse(r *store.IssueReview) *issueReviewResponse {
 		ActionTaken: r.ActionTaken, PRCreated: r.PRCreated,
 		CreatedAt: r.CreatedAt,
 	}
+	if r.RefinementData != "" {
+		resp.RefinementData = json.RawMessage(r.RefinementData)
+	}
+	return resp
 }
 
 func (srv *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
@@ -1170,6 +1194,38 @@ func (srv *Server) handleTriggerIssueReview(w http.ResponseWriter, r *http.Reque
 		}
 	}()
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "review queued"})
+}
+
+func (srv *Server) handleTriggerIssueRefine(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if srv.triggerIssueRefineFn == nil {
+		http.Error(w, "issue refinement trigger not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if _, err := srv.store.GetIssue(id); err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	force := strings.EqualFold(r.URL.Query().Get("force"), "true") || r.URL.Query().Get("force") == "1"
+	// Shared semaphore with PR reviews and issue triage because refinement
+	// also launches an AI CLI process.
+	select {
+	case srv.reviewSem <- struct{}{}:
+	default:
+		http.Error(w, `{"error":"too many concurrent reviews — try again later"}`, http.StatusTooManyRequests)
+		return
+	}
+	go func() {
+		defer func() { <-srv.reviewSem }()
+		if err := srv.triggerIssueRefineFn(id, force); err != nil {
+			slog.Error("trigger issue refinement failed", "issue_id", id, "force", force, "err", err)
+		}
+	}()
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "refinement queued"})
 }
 
 // handlePromoteIssue promotes a review_only-classified issue to auto_implement,

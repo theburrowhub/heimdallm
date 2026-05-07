@@ -904,6 +904,107 @@ func main() {
 		}
 	}()
 
+	// ── NATS issue refinement worker ────────────────────────────────────
+	// Consumes refinement requests published by the Fetcher when it classifies
+	// an issue as refinement. Refinement is read-only but requires a full local
+	// checkout so the agent can inspect code and git history.
+	refinementHandler := func(ctx context.Context, msg bus.IssueMsg) {
+		ghIssue, err := ghClient.GetIssue(msg.Repo, msg.Number)
+		if err != nil {
+			slog.Error("refinement-worker: fetch issue from GitHub",
+				"repo", msg.Repo, "number", msg.Number, "err", err)
+			return
+		}
+		ghIssue.Mode = config.IssueModeRefinement
+
+		cfgMu.Lock()
+		c := *cfg
+		aiCfg := c.AIForRepo(msg.Repo)
+		if aiCfg.Primary == "" {
+			aiCfg.Primary = c.AI.Primary
+		}
+		agentCfg := c.AgentConfigFor(aiCfg.Primary)
+		localDirBase := c.GitHub.LocalDirBase
+		globalTimeout := c.AI.ExecutionTimeout
+		cfgMu.Unlock()
+		repoHandle, err := acquireRepoContext(ctx, repoCtx, msg.Repo, &aiCfg, localDirBase, token, repoctx.ModeRead)
+		if err != nil {
+			slog.Error("refinement-worker: prepare repo context failed",
+				"repo", msg.Repo, "number", msg.Number, "err", err)
+			broker.Publish(sse.Event{
+				Type: sse.EventIssueReviewError,
+				Data: sseData(map[string]any{
+					"repo": msg.Repo, "number": msg.Number, "error": err.Error(),
+				}),
+			})
+			return
+		}
+		if repoHandle != nil {
+			defer repoHandle.Release()
+			ensureRepoContextFullHistory(ctx, repoCtx, repoHandle, token, "refinement-worker", msg.Repo)
+		}
+
+		extraFlags := agentCfg.ExtraFlags
+		if extraFlags != "" {
+			if err := executor.ValidateExtraFlags(extraFlags); err != nil {
+				slog.Warn("refinement-worker: extra_flags rejected", "err", err)
+				extraFlags = ""
+			}
+		}
+
+		issuePrompt, issueInstructions := resolveIssuePrompt(s, aiCfg.IssuePrompt, agentCfg.PromptID)
+		implPrompt, implInstructions := resolveImplementPrompt(s, aiCfg.ImplementPrompt, agentCfg.PromptID)
+
+		opts := issuepipeline.RunOptions{
+			GitHubToken: token,
+			Primary:     aiCfg.Primary,
+			Fallback:    aiCfg.Fallback,
+			ExecOpts: executor.ExecOptions{
+				Model:                agentCfg.Model,
+				MaxTurns:             agentCfg.MaxTurns,
+				ApprovalMode:         agentCfg.ApprovalMode,
+				ExtraFlags:           extraFlags,
+				WorkDir:              aiCfg.LocalDir,
+				Effort:               agentCfg.Effort,
+				PermissionMode:       agentCfg.PermissionMode,
+				Bare:                 agentCfg.Bare,
+				DangerouslySkipPerms: agentCfg.DangerouslySkipPerms,
+				NoSessionPersistence: agentCfg.NoSessionPersistence,
+				Timeout:              resolveRefinementTimeout(aiCfg.RefinementTimeout, globalTimeout, agentCfg.ExecutionTimeout),
+			},
+			IssuePromptOverride:         issuePrompt,
+			IssueInstructions:           issueInstructions,
+			TriageOwner:                 aiCfg.TriageOwner,
+			ImplementPromptOverride:     implPrompt,
+			ImplementInstructions:       implInstructions,
+			PRReviewers:                 aiCfg.PRReviewers,
+			PRAssignee:                  aiCfg.PRAssignee,
+			PRLabels:                    aiCfg.PRLabels,
+			PRDraft:                     aiCfg.PRDraft != nil && *aiCfg.PRDraft,
+			GeneratePRDescription:       aiCfg.GeneratePRDescription != nil && *aiCfg.GeneratePRDescription,
+			RequireWorkDirForRefinement: true,
+		}
+
+		if _, err := issuePipe.Run(ctx, ghIssue, opts); err != nil {
+			slog.Error("refinement-worker: pipeline run failed",
+				"repo", msg.Repo, "number", msg.Number, "err", err)
+		}
+
+		if err := watchStore.Enroll(ctx, "issue", msg.Repo, msg.Number, msg.GithubID); err != nil {
+			slog.Warn("refinement-worker: failed to enroll watch",
+				"repo", msg.Repo, "number", msg.Number, "err", err)
+		}
+	}
+
+	refinementW := worker.NewRefinementWorker(conn, maxWorkers, refinementHandler)
+	refinementWCtx, refinementWCancel := context.WithCancel(context.Background())
+	defer refinementWCancel()
+	go func() {
+		if err := refinementW.Start(refinementWCtx); err != nil {
+			slog.Error("refinement worker stopped", "err", err)
+		}
+	}()
+
 	// ── NATS issue implement worker ─────────────────────────────────────
 	// Consumes implement requests published by the Fetcher when it classifies
 	// an issue as develop. Same config resolution as triage, different mode.
@@ -1237,6 +1338,7 @@ func main() {
 			"activity_log_retention_days": ptrIntOr(c.ActivityLog.RetentionDays, 90),
 			"issue_prompt":                c.AI.IssuePrompt,
 			"implement_prompt":            c.AI.ImplementPrompt,
+			"refinement_timeout":          c.AI.RefinementTimeout,
 			"triage_owner":                c.AI.TriageOwner,
 			"clone_dir":                   c.AI.CloneDir,
 			"generate_pr_description":     c.AI.GeneratePRDescription,
@@ -1577,6 +1679,105 @@ func main() {
 		return nil
 	})
 
+	// Wire the issue-refinement trigger callback: run deep repo investigation on a stored issue.
+	srv.SetTriggerIssueRefineFn(func(issueID int64, force bool) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
+
+		publishIssueErr := func(msg string) {
+			broker.Publish(sse.Event{
+				Type: sse.EventIssueReviewError,
+				Data: sseData(map[string]any{"issue_id": issueID, "error": msg}),
+			})
+		}
+
+		iss, err := s.GetIssue(issueID)
+		if err != nil {
+			publishIssueErr(fmt.Sprintf("Issue not found: %v", err))
+			return fmt.Errorf("trigger issue refinement: get issue %d: %w", issueID, err)
+		}
+
+		ghIssue, err := ghClient.GetIssue(iss.Repo, iss.Number)
+		if err != nil {
+			publishIssueErr(fmt.Sprintf("Failed to fetch issue from GitHub: %v", err))
+			return fmt.Errorf("trigger issue refinement: fetch GitHub issue %s #%d: %w", iss.Repo, iss.Number, err)
+		}
+		ghIssue.Mode = config.IssueModeRefinement
+
+		cfgMu.Lock()
+		aiCfg := cfg.AIForRepo(iss.Repo)
+		if aiCfg.Primary == "" {
+			aiCfg.Primary = cfg.AI.Primary
+		}
+		agentCfg := cfg.AgentConfigFor(aiCfg.Primary)
+		localDirBase := cfg.GitHub.LocalDirBase
+		globalTimeout := cfg.AI.ExecutionTimeout
+		cfgMu.Unlock()
+		repoHandle, err := acquireRepoContext(ctx, repoCtx, iss.Repo, &aiCfg, localDirBase, token, repoctx.ModeRead)
+		if err != nil {
+			publishIssueErr(fmt.Sprintf("Failed to prepare repo context: %v", err))
+			return fmt.Errorf("trigger issue refinement: prepare repo context: %w", err)
+		}
+		if repoHandle != nil {
+			defer repoHandle.Release()
+			ensureRepoContextFullHistory(ctx, repoCtx, repoHandle, token, "trigger issue refinement", iss.Repo)
+		}
+
+		extraFlags := agentCfg.ExtraFlags
+		if extraFlags != "" {
+			if err := executor.ValidateExtraFlags(extraFlags); err != nil {
+				slog.Warn("triggerIssueRefine: extra_flags rejected", "err", err)
+				extraFlags = ""
+			}
+		}
+
+		issuePrompt, issueInstructions := resolveIssuePrompt(s, aiCfg.IssuePrompt, agentCfg.PromptID)
+		implPrompt, implInstructions := resolveImplementPrompt(s, aiCfg.ImplementPrompt, agentCfg.PromptID)
+
+		opts := issuepipeline.RunOptions{
+			GitHubToken: token,
+			Primary:     aiCfg.Primary,
+			Fallback:    aiCfg.Fallback,
+			ExecOpts: executor.ExecOptions{
+				Model:                agentCfg.Model,
+				MaxTurns:             agentCfg.MaxTurns,
+				ApprovalMode:         agentCfg.ApprovalMode,
+				ExtraFlags:           extraFlags,
+				WorkDir:              aiCfg.LocalDir,
+				Effort:               agentCfg.Effort,
+				PermissionMode:       agentCfg.PermissionMode,
+				Bare:                 agentCfg.Bare,
+				DangerouslySkipPerms: agentCfg.DangerouslySkipPerms,
+				NoSessionPersistence: agentCfg.NoSessionPersistence,
+				Timeout:              resolveRefinementTimeout(aiCfg.RefinementTimeout, globalTimeout, agentCfg.ExecutionTimeout),
+			},
+			IssuePromptOverride:         issuePrompt,
+			IssueInstructions:           issueInstructions,
+			TriageOwner:                 aiCfg.TriageOwner,
+			ImplementPromptOverride:     implPrompt,
+			ImplementInstructions:       implInstructions,
+			PRReviewers:                 aiCfg.PRReviewers,
+			PRAssignee:                  aiCfg.PRAssignee,
+			PRLabels:                    aiCfg.PRLabels,
+			PRDraft:                     aiCfg.PRDraft != nil && *aiCfg.PRDraft,
+			GeneratePRDescription:       aiCfg.GeneratePRDescription != nil && *aiCfg.GeneratePRDescription,
+			Force:                       force,
+			RequireWorkDirForRefinement: true,
+		}
+
+		slog.Info("trigger issue refinement: running pipeline",
+			"store_issue_id", issueID, "repo", iss.Repo, "number", iss.Number, "force", force)
+
+		_, err = issuePipe.Run(ctx, ghIssue, opts)
+		if err != nil {
+			broker.Publish(sse.Event{Type: sse.EventIssueReviewError, Data: sseData(map[string]any{
+				"issue_id": issueID, "repo": iss.Repo, "error": err.Error(),
+			})})
+			return err
+		}
+		return nil
+	})
+
 	// Wire the promote callback: runs the auto_implement pipeline for a review_only issue,
 	// effectively reclassifying it to develop from the UI without needing a GitHub label change.
 	srv.SetTriggerPromoteFn(func(issueID int64) error {
@@ -1783,6 +1984,23 @@ func resolveExecutionTimeout(globalTimeout, agentTimeout string) time.Duration {
 	}
 	// Zero = executor uses its default (5m)
 	return 0
+}
+
+// resolveRefinementTimeout uses the same per-agent override semantics as the
+// other CLI runs, with a stage-specific fallback that defaults higher than the
+// executor's 5m process cap.
+func resolveRefinementTimeout(refinementTimeout, globalTimeout, agentTimeout string) time.Duration {
+	if agentTimeout != "" {
+		if d, err := time.ParseDuration(agentTimeout); err == nil && d > 0 {
+			return d
+		}
+	}
+	if refinementTimeout != "" {
+		if d, err := time.ParseDuration(refinementTimeout); err == nil && d > 0 {
+			return d
+		}
+	}
+	return resolveExecutionTimeout(globalTimeout, "")
 }
 
 // ── Standalone poller functions (replaced Pipeline goroutines) ───────────
@@ -2484,9 +2702,12 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 		a.cfgMu.Unlock()
 		mode := repoctx.ModeRead
 		requireWorkDir := false
+		requireRefinementWorkDir := false
 		if issue.Mode == config.IssueModeDevelop {
 			mode = repoctx.ModeWrite
 			requireWorkDir = true
+		} else if issue.Mode == config.IssueModeRefinement {
+			requireRefinementWorkDir = true
 		}
 		var releaseRepoContext func()
 		releaseOnReturn := true
@@ -2497,7 +2718,7 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 			}
 		}()
 		if err != nil {
-			if issue.Mode == config.IssueModeDevelop {
+			if issue.Mode == config.IssueModeDevelop || issue.Mode == config.IssueModeRefinement {
 				slog.Error("issue poll: prepare repo context failed",
 					"repo", issue.Repo, "number", issue.Number, "err", err)
 				if a.broker != nil {
@@ -2514,7 +2735,7 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 			}
 			aiCfg.LocalDir = ""
 		} else if repoHandle != nil {
-			if issue.Mode == config.IssueModeReviewOnly {
+			if issue.Mode == config.IssueModeReviewOnly || issue.Mode == config.IssueModeRefinement {
 				ensureRepoContextFullHistory(ctx, a.repoCtx, repoHandle, a.ghToken, "issue poll", issue.Repo)
 			}
 			releaseRepoContext = repoHandle.Release
@@ -2548,18 +2769,22 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 				NoSessionPersistence: agentCfg.NoSessionPersistence,
 				Timeout:              resolveExecutionTimeout(globalTimeout, agentCfg.ExecutionTimeout),
 			},
-			IssuePromptOverride:      issuePrompt,
-			IssueInstructions:        issueInstructions,
-			TriageOwner:              aiCfg.TriageOwner,
-			ImplementPromptOverride:  implPrompt,
-			ImplementInstructions:    implInstructions,
-			PRReviewers:              aiCfg.PRReviewers,
-			PRAssignee:               aiCfg.PRAssignee,
-			PRLabels:                 aiCfg.PRLabels,
-			PRDraft:                  aiCfg.PRDraft != nil && *aiCfg.PRDraft,
-			GeneratePRDescription:    aiCfg.GeneratePRDescription != nil && *aiCfg.GeneratePRDescription,
-			RequireWorkDirForDevelop: requireWorkDir,
-			ReleaseRepoContext:       releaseRepoContext,
+			IssuePromptOverride:         issuePrompt,
+			IssueInstructions:           issueInstructions,
+			TriageOwner:                 aiCfg.TriageOwner,
+			ImplementPromptOverride:     implPrompt,
+			ImplementInstructions:       implInstructions,
+			PRReviewers:                 aiCfg.PRReviewers,
+			PRAssignee:                  aiCfg.PRAssignee,
+			PRLabels:                    aiCfg.PRLabels,
+			PRDraft:                     aiCfg.PRDraft != nil && *aiCfg.PRDraft,
+			GeneratePRDescription:       aiCfg.GeneratePRDescription != nil && *aiCfg.GeneratePRDescription,
+			RequireWorkDirForDevelop:    requireWorkDir,
+			RequireWorkDirForRefinement: requireRefinementWorkDir,
+			ReleaseRepoContext:          releaseRepoContext,
+		}
+		if issue.Mode == config.IssueModeRefinement {
+			opts.ExecOpts.Timeout = resolveRefinementTimeout(aiCfg.RefinementTimeout, globalTimeout, agentCfg.ExecutionTimeout)
 		}
 		releaseOnReturn = false
 		return opts, true
@@ -3186,6 +3411,7 @@ func repoAIOverrideMap(ai config.RepoAI) map[string]any {
 		Prompt:                ai.Prompt,
 		IssuePrompt:           ai.IssuePrompt,
 		ImplementPrompt:       ai.ImplementPrompt,
+		RefinementTimeout:     ai.RefinementTimeout,
 		TriageOwner:           ai.TriageOwner,
 		CloneDir:              ai.CloneDir,
 		AutoPromoteTriage:     ai.AutoPromoteTriage,
@@ -3220,6 +3446,7 @@ func orgAIOverrideMap(ai config.OrgAI) map[string]any {
 		Prompt:                ai.Prompt,
 		IssuePrompt:           ai.IssuePrompt,
 		ImplementPrompt:       ai.ImplementPrompt,
+		RefinementTimeout:     ai.RefinementTimeout,
 		TriageOwner:           ai.TriageOwner,
 		CloneDir:              ai.CloneDir,
 		AutoPromoteTriage:     ai.AutoPromoteTriage,
@@ -3240,6 +3467,7 @@ type aiOverrideFields struct {
 	Prompt                string
 	IssuePrompt           string
 	ImplementPrompt       string
+	RefinementTimeout     string
 	TriageOwner           string
 	CloneDir              string
 	AutoPromoteTriage     *bool
@@ -3260,6 +3488,9 @@ func addCommonAIOverrideFields(out map[string]any, fields aiOverrideFields) {
 	}
 	if fields.ImplementPrompt != "" {
 		out["implement_prompt"] = fields.ImplementPrompt
+	}
+	if fields.RefinementTimeout != "" {
+		out["refinement_timeout"] = fields.RefinementTimeout
 	}
 	if fields.TriageOwner != "" {
 		out["triage_owner"] = fields.TriageOwner
@@ -3306,6 +3537,9 @@ func issueTrackingOverrideMap(ov *config.IssueTrackingOverride) map[string]any {
 	}
 	if ov.DevelopLabels != nil {
 		out["develop_labels"] = ov.DevelopLabels
+	}
+	if ov.RefinementLabels != nil {
+		out["refinement_labels"] = ov.RefinementLabels
 	}
 	if ov.ReviewOnlyLabels != nil {
 		out["review_only_labels"] = ov.ReviewOnlyLabels

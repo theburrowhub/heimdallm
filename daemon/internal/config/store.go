@@ -80,6 +80,8 @@ func (c *Config) ApplyStore(rows map[string]string) error {
 			shadow.AI.Fallback = raw
 		case "review_mode":
 			shadow.AI.ReviewMode = raw
+		case "refinement_timeout":
+			shadow.AI.RefinementTimeout = raw
 		case "repositories":
 			var repos []string
 			if err := json.Unmarshal([]byte(raw), &repos); err != nil {

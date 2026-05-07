@@ -178,6 +178,48 @@ func TestIntegration_IssueImplementFlow(t *testing.T) {
 	}
 }
 
+// TestIntegration_IssueRefinementFlow publishes an IssueMsg to the refinement
+// subject and verifies the RefinementWorker handler receives the correct data.
+func TestIntegration_IssueRefinementFlow(t *testing.T) {
+	env := newTestEnv(t)
+	conn := env.bus.Conn()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	received := make(chan bus.IssueMsg, 1)
+	handler := func(_ context.Context, msg bus.IssueMsg) {
+		received <- msg
+	}
+
+	w := worker.NewRefinementWorker(conn, 3, handler)
+	go func() {
+		if err := w.Start(ctx); err != nil {
+			t.Errorf("refinement-worker start: %v", err)
+		}
+	}()
+	time.Sleep(100 * time.Millisecond)
+
+	pub := bus.NewIssuePublisher(conn)
+	if err := pub.PublishIssueRefinement(ctx, "org/refine-repo", 88, 11111); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	select {
+	case msg := <-received:
+		if msg.Repo != "org/refine-repo" {
+			t.Errorf("Repo = %q, want %q", msg.Repo, "org/refine-repo")
+		}
+		if msg.Number != 88 {
+			t.Errorf("Number = %d, want 88", msg.Number)
+		}
+		if msg.GithubID != 11111 {
+			t.Errorf("GithubID = %d, want 11111", msg.GithubID)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("handler not called within timeout")
+	}
+}
+
 // TestIntegration_StateCheckFlow enrolls an item in WatchStore, publishes a
 // StateCheckMsg, starts a StateWorker with a handler returning changed=false,
 // and verifies the backoff is increased.

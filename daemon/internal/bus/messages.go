@@ -22,8 +22,8 @@ type PRPublishMsg struct {
 	ReviewID int64 `json:"review_id"`
 }
 
-// IssueMsg is published on SubjIssueTriage or SubjIssueImplement.
-// The subject distinguishes the workflow; the payload is the same.
+// IssueMsg is published on issue workflow subjects. The subject distinguishes
+// triage, refinement, and implement; the payload is the same.
 type IssueMsg struct {
 	Repo     string `json:"repo"`
 	Number   int    `json:"number"`

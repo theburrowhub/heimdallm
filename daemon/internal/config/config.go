@@ -103,6 +103,7 @@ const (
 	IssueModeIgnore     IssueMode = "ignore"
 	IssueModeBlocked    IssueMode = "blocked"
 	IssueModeDevelop    IssueMode = "develop"
+	IssueModeRefinement IssueMode = "refinement"
 	IssueModeReviewOnly IssueMode = "review_only"
 )
 
@@ -120,7 +121,7 @@ const (
 //
 // Classification precedence (applied in Classify):
 //
-//	skip_labels  >  blocked_labels  >  develop_labels  >  review_only_labels  >  default_action
+//	skip_labels  >  blocked_labels  >  develop_labels  >  refinement_labels  >  review_only_labels  >  default_action
 //
 // develop_labels intentionally takes precedence over review_only_labels: when
 // an issue carries both a "please implement" label and a "please review only"
@@ -147,6 +148,12 @@ type IssueTrackingConfig struct {
 	// DevelopLabels are labels that mark an issue as "please implement".
 	DevelopLabels []string `toml:"develop_labels" json:"develop_labels"`
 
+	// RefinementLabels are labels that mark an issue as "deeply investigate
+	// and produce an implementation plan". This is the v1 trigger for the
+	// refinement stage; automatic triage -> refinement promotion is owned by
+	// the issue state machine work.
+	RefinementLabels []string `toml:"refinement_labels" json:"refinement_labels"`
+
 	// ReviewOnlyLabels are labels that mark an issue as "please analyse and
 	// comment only". DevelopLabels take precedence over ReviewOnlyLabels when
 	// both are present on the same issue — the operator explicitly tagged it
@@ -171,8 +178,8 @@ type IssueTrackingConfig struct {
 	// promotion has no target and blocked issues would stick forever.
 	PromoteToLabel string `toml:"promote_to_label" json:"promote_to_label"`
 
-	// DefaultAction is applied when an issue carries no label from any of
-	// the three lists above. Must be "ignore" or "review_only".
+	// DefaultAction is applied when an issue carries no label from any
+	// configured mode list above. Must be "ignore" or "review_only".
 	DefaultAction string `toml:"default_action" json:"default_action"`
 }
 
@@ -223,7 +230,7 @@ func (c IssueTrackingConfig) ResolvePromoteToLabel() string {
 // underlying labels API is case-preserving but the UI is not, so users
 // routinely mix "Bug" and "bug" in practice.
 //
-// Precedence: skip > blocked > develop > review_only > default_action.
+// Precedence: skip > blocked > develop > refinement > review_only > default_action.
 // develop beats review_only so that an issue tagged with both a DEV label and
 // an IT label is always auto-implemented, never silently downgraded to
 // review_only. This prevents the infinite retry loop described in issue #223.
@@ -242,6 +249,9 @@ func (c IssueTrackingConfig) Classify(labels []string) IssueMode {
 	// operator wants auto_implement (the stronger action). See issue #223.
 	if labelSetIntersects(set, c.DevelopLabels) {
 		return IssueModeDevelop
+	}
+	if labelSetIntersects(set, c.RefinementLabels) {
+		return IssueModeRefinement
 	}
 	if labelSetIntersects(set, c.ReviewOnlyLabels) {
 		return IssueModeReviewOnly
@@ -304,6 +314,10 @@ type AIConfig struct {
 	// ImplementPrompt is the global default agent profile ID for auto-implement.
 	// Per-repo overrides in [ai.repos.<name>] take precedence.
 	ImplementPrompt string `toml:"implement_prompt"`
+	// RefinementTimeout caps the deep-investigation stage. It defaults higher
+	// than the general executor timeout because refinement is expected to read
+	// the repository and build an implementation plan.
+	RefinementTimeout string `toml:"refinement_timeout"`
 
 	// Future issue pipeline fields. They are parsed and resolved through the
 	// same repo > org > global hierarchy so follow-up pipeline work can consume
@@ -332,6 +346,7 @@ type RepoAI struct {
 	// ImplementInstructions fields drive the auto_implement code-generation
 	// prompt for this repo. Overrides agent-level and global default.
 	ImplementPrompt       string `toml:"implement_prompt"`
+	RefinementTimeout     string `toml:"refinement_timeout"`
 	Fallback              string `toml:"fallback"`
 	ReviewMode            string `toml:"review_mode"` // "" = inherit global
 	LocalDir              string `toml:"local_dir"`   // local repo path for full-repo analysis
@@ -377,6 +392,7 @@ type IssueTrackingOverride struct {
 	Organizations    []string   `toml:"organizations,omitempty" json:"organizations,omitempty"`
 	Assignees        []string   `toml:"assignees,omitempty" json:"assignees,omitempty"`
 	DevelopLabels    []string   `toml:"develop_labels,omitempty" json:"develop_labels,omitempty"`
+	RefinementLabels []string   `toml:"refinement_labels,omitempty" json:"refinement_labels,omitempty"`
 	ReviewOnlyLabels []string   `toml:"review_only_labels,omitempty" json:"review_only_labels,omitempty"`
 	SkipLabels       []string   `toml:"skip_labels,omitempty" json:"skip_labels,omitempty"`
 	BlockedLabels    []string   `toml:"blocked_labels,omitempty" json:"blocked_labels,omitempty"`
@@ -391,6 +407,7 @@ type OrgAI struct {
 	Prompt                string `toml:"prompt"`
 	IssuePrompt           string `toml:"issue_prompt"`
 	ImplementPrompt       string `toml:"implement_prompt"`
+	RefinementTimeout     string `toml:"refinement_timeout"`
 	Fallback              string `toml:"fallback"`
 	ReviewMode            string `toml:"review_mode"`
 	LocalDir              string `toml:"local_dir"`
@@ -541,6 +558,7 @@ func (c *Config) AIForRepo(repo string) RepoAI {
 		ReviewMode:            c.AI.ReviewMode,
 		IssuePrompt:           c.AI.IssuePrompt,
 		ImplementPrompt:       c.AI.ImplementPrompt,
+		RefinementTimeout:     c.AI.RefinementTimeout,
 		PRReviewers:           gReviewers,
 		PRLabels:              gLabels,
 		PRAssignee:            gAssignee,
@@ -572,6 +590,7 @@ func applyOrgAI(out *RepoAI, o OrgAI) {
 		Prompt:                o.Prompt,
 		IssuePrompt:           o.IssuePrompt,
 		ImplementPrompt:       o.ImplementPrompt,
+		RefinementTimeout:     o.RefinementTimeout,
 		LocalDir:              o.LocalDir,
 		TriageOwner:           o.TriageOwner,
 		CloneDir:              o.CloneDir,
@@ -593,6 +612,7 @@ func applyRepoAI(out *RepoAI, r RepoAI) {
 		Prompt:                r.Prompt,
 		IssuePrompt:           r.IssuePrompt,
 		ImplementPrompt:       r.ImplementPrompt,
+		RefinementTimeout:     r.RefinementTimeout,
 		LocalDir:              r.LocalDir,
 		TriageOwner:           r.TriageOwner,
 		CloneDir:              r.CloneDir,
@@ -613,6 +633,7 @@ type scopedAIFields struct {
 	Prompt                string
 	IssuePrompt           string
 	ImplementPrompt       string
+	RefinementTimeout     string
 	LocalDir              string
 	TriageOwner           string
 	CloneDir              string
@@ -643,6 +664,9 @@ func applyScopedAI(out *RepoAI, fields scopedAIFields) {
 	}
 	if fields.ImplementPrompt != "" {
 		out.ImplementPrompt = fields.ImplementPrompt
+	}
+	if fields.RefinementTimeout != "" {
+		out.RefinementTimeout = fields.RefinementTimeout
 	}
 	if fields.LocalDir != "" {
 		out.LocalDir = fields.LocalDir
@@ -700,6 +724,9 @@ func applyIssueTrackingOverride(merged *IssueTrackingConfig, ov *IssueTrackingOv
 	if ov.DevelopLabels != nil {
 		merged.DevelopLabels = ov.DevelopLabels
 	}
+	if ov.RefinementLabels != nil {
+		merged.RefinementLabels = ov.RefinementLabels
+	}
 	if ov.ReviewOnlyLabels != nil {
 		merged.ReviewOnlyLabels = ov.ReviewOnlyLabels
 	}
@@ -724,7 +751,7 @@ func applyIssueTrackingOverride(merged *IssueTrackingConfig, ov *IssueTrackingOv
 	if ov.Assignees != nil {
 		merged.Assignees = ov.Assignees
 	}
-	if ov.Enabled == nil && (len(ov.DevelopLabels) > 0 || len(ov.ReviewOnlyLabels) > 0) {
+	if ov.Enabled == nil && (len(ov.DevelopLabels) > 0 || len(ov.RefinementLabels) > 0 || len(ov.ReviewOnlyLabels) > 0) {
 		merged.Enabled = true
 	}
 	if ov.Enabled != nil {
@@ -774,6 +801,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.AI.ReviewMode == "" {
 		c.AI.ReviewMode = "single"
+	}
+	if c.AI.RefinementTimeout == "" {
+		c.AI.RefinementTimeout = "30m"
 	}
 	if c.ActivityLog.Enabled == nil {
 		v := true
@@ -839,6 +869,9 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := os.Getenv("HEIMDALLM_EXECUTION_TIMEOUT"); v != "" {
 		c.AI.ExecutionTimeout = v
+	}
+	if v := os.Getenv("HEIMDALLM_REFINEMENT_TIMEOUT"); v != "" {
+		c.AI.RefinementTimeout = v
 	}
 	if v := os.Getenv("HEIMDALLM_RETENTION_DAYS"); v != "" {
 		if d, err := strconv.Atoi(v); err == nil {
@@ -928,6 +961,9 @@ func (c *Config) applyIssueTrackingEnv() {
 	}
 	if list, ok := csvEnv("HEIMDALLM_ISSUE_DEVELOP_LABELS"); ok {
 		c.GitHub.IssueTracking.DevelopLabels = list
+	}
+	if list, ok := csvEnv("HEIMDALLM_ISSUE_REFINEMENT_LABELS"); ok {
+		c.GitHub.IssueTracking.RefinementLabels = list
 	}
 	if list, ok := csvEnv("HEIMDALLM_ISSUE_REVIEW_ONLY_LABELS"); ok {
 		c.GitHub.IssueTracking.ReviewOnlyLabels = list

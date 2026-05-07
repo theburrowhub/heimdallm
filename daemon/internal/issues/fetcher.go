@@ -74,6 +74,7 @@ type issueMarkerFetcher interface {
 // Fetcher, ProcessRepo publishes to NATS instead of calling pipeline.Run.
 type IssuePublisher interface {
 	PublishIssueTriage(ctx context.Context, repo string, number int, githubID int64) error
+	PublishIssueRefinement(ctx context.Context, repo string, number int, githubID int64) error
 	PublishIssueImplement(ctx context.Context, repo string, number int, githubID int64) error
 }
 
@@ -166,6 +167,8 @@ func (f *Fetcher) ProcessRepo(ctx context.Context, repo string, cfg config.Issue
 			switch issue.Mode {
 			case config.IssueModeReviewOnly:
 				pubErr = f.publisher.PublishIssueTriage(ctx, issue.Repo, issue.Number, issue.ID)
+			case config.IssueModeRefinement:
+				pubErr = f.publisher.PublishIssueRefinement(ctx, issue.Repo, issue.Number, issue.ID)
 			case config.IssueModeDevelop:
 				pubErr = f.publisher.PublishIssueImplement(ctx, issue.Repo, issue.Number, issue.ID)
 			default:

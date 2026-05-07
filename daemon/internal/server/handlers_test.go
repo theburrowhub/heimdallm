@@ -537,6 +537,74 @@ func TestHandlerTriggerIssueReview_NotConfigured(t *testing.T) {
 	}
 }
 
+func TestHandlerTriggerIssueRefine(t *testing.T) {
+	srv, s := setupServer(t)
+	now := time.Now()
+	id, _ := s.UpsertIssue(&store.Issue{
+		GithubID: 610, Repo: "org/r", Number: 15, Title: "t",
+		Body: "b", Author: "a", Assignees: `[]`, Labels: `[]`,
+		State: "open", CreatedAt: now, FetchedAt: now,
+	})
+
+	type call struct {
+		id    int64
+		force bool
+	}
+	triggered := make(chan call, 1)
+	srv.SetTriggerIssueRefineFn(func(issueID int64, force bool) error {
+		triggered <- call{id: issueID, force: force}
+		return nil
+	})
+
+	req := httptest.NewRequest("POST", "/issues/"+itoa(id)+"/refine?force=true", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("trigger issue refine: status %d, body: %s", w.Code, w.Body.String())
+	}
+
+	select {
+	case got := <-triggered:
+		if got.id != id || !got.force {
+			t.Errorf("triggered with %+v, expected id=%d force=true", got, id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("refine callback not called within 2s")
+	}
+}
+
+func TestHandlerTriggerIssueRefine_NotConfigured(t *testing.T) {
+	srv, s := setupServer(t)
+	now := time.Now()
+	id, _ := s.UpsertIssue(&store.Issue{
+		GithubID: 611, Repo: "org/r", Number: 16, Title: "t",
+		Body: "b", Author: "a", Assignees: `[]`, Labels: `[]`,
+		State: "open", CreatedAt: now, FetchedAt: now,
+	})
+
+	req := httptest.NewRequest("POST", "/issues/"+itoa(id)+"/refine", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 when refine not configured, got %d", w.Code)
+	}
+}
+
+func TestHandlerTriggerIssueRefine_NotFound(t *testing.T) {
+	srv, _ := setupServer(t)
+	srv.SetTriggerIssueRefineFn(func(issueID int64, force bool) error {
+		t.Fatalf("callback should not be called for unknown issue")
+		return nil
+	})
+
+	req := httptest.NewRequest("POST", "/issues/999/refine", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for unknown issue, got %d", w.Code)
+	}
+}
+
 func TestHandlerPromoteIssue(t *testing.T) {
 	srv, s := setupServer(t)
 	now := time.Now()
@@ -632,6 +700,7 @@ func TestIssueEndpointsRequireAuthWhenTokenSet(t *testing.T) {
 	// POST endpoints — protected via method-based auth (all POST requires token)
 	postPaths := []string{
 		"/issues/" + issueID + "/review",
+		"/issues/" + issueID + "/refine",
 		"/issues/" + issueID + "/promote",
 		"/issues/" + issueID + "/dismiss",
 		"/issues/" + issueID + "/undismiss",

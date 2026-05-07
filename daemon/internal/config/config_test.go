@@ -427,6 +427,9 @@ func TestApplyDefaults_IssueTracking(t *testing.T) {
 	if cfg.GitHub.IssueTracking.Enabled {
 		t.Error("Enabled should default to false")
 	}
+	if cfg.AI.RefinementTimeout != "30m" {
+		t.Errorf("RefinementTimeout = %q, want 30m", cfg.AI.RefinementTimeout)
+	}
 }
 
 func TestApplyDefaults_IssueTrackingPreservesExisting(t *testing.T) {
@@ -453,8 +456,10 @@ func TestApplyEnvOverrides_IssueTracking(t *testing.T) {
 	t.Setenv("HEIMDALLM_ISSUE_ORGANIZATIONS", "freepik-company, theburrowhub")
 	t.Setenv("HEIMDALLM_ISSUE_ASSIGNEES", "sergiotejon")
 	t.Setenv("HEIMDALLM_ISSUE_DEVELOP_LABELS", "enhancement,feature, bug")
+	t.Setenv("HEIMDALLM_ISSUE_REFINEMENT_LABELS", "refine,needs-plan")
 	t.Setenv("HEIMDALLM_ISSUE_REVIEW_ONLY_LABELS", "question,discussion")
 	t.Setenv("HEIMDALLM_ISSUE_SKIP_LABELS", "wontfix")
+	t.Setenv("HEIMDALLM_REFINEMENT_TIMEOUT", "45m")
 
 	cfg.applyEnvOverrides()
 
@@ -477,11 +482,17 @@ func TestApplyEnvOverrides_IssueTracking(t *testing.T) {
 	if len(it.DevelopLabels) != 3 || it.DevelopLabels[2] != "bug" {
 		t.Errorf("DevelopLabels = %v", it.DevelopLabels)
 	}
+	if len(it.RefinementLabels) != 2 || it.RefinementLabels[1] != "needs-plan" {
+		t.Errorf("RefinementLabels = %v", it.RefinementLabels)
+	}
 	if len(it.ReviewOnlyLabels) != 2 {
 		t.Errorf("ReviewOnlyLabels = %v", it.ReviewOnlyLabels)
 	}
 	if len(it.SkipLabels) != 1 {
 		t.Errorf("SkipLabels = %v", it.SkipLabels)
+	}
+	if cfg.AI.RefinementTimeout != "45m" {
+		t.Errorf("RefinementTimeout = %q, want 45m", cfg.AI.RefinementTimeout)
 	}
 }
 
@@ -611,6 +622,7 @@ func TestClassify_Precedence(t *testing.T) {
 	cfg := IssueTrackingConfig{
 		SkipLabels:       []string{"wontfix"},
 		ReviewOnlyLabels: []string{"question", "discussion"},
+		RefinementLabels: []string{"refine"},
 		DevelopLabels:    []string{"bug", "enhancement"},
 		DefaultAction:    string(IssueModeIgnore),
 	}
@@ -623,7 +635,10 @@ func TestClassify_Precedence(t *testing.T) {
 		// develop beats review_only when both are present (#223): the operator
 		// tagged with a DEV label, so auto_implement is the intended action.
 		{"develop wins over review_only when both present", []string{"question", "bug"}, IssueModeDevelop},
+		{"develop wins over refinement when both present", []string{"refine", "bug"}, IssueModeDevelop},
+		{"refinement wins over review_only when both present", []string{"refine", "question"}, IssueModeRefinement},
 		{"develop only", []string{"bug"}, IssueModeDevelop},
+		{"refinement only", []string{"refine"}, IssueModeRefinement},
 		{"review_only only", []string{"question"}, IssueModeReviewOnly},
 		{"unrelated labels fall back to default_action=ignore", []string{"help-wanted"}, IssueModeIgnore},
 		{"no labels fall back to default_action=ignore", nil, IssueModeIgnore},
@@ -638,13 +653,14 @@ func TestClassify_Precedence(t *testing.T) {
 }
 
 func TestClassify_BlockedPrecedence(t *testing.T) {
-	// Precedence must be: skip > blocked > develop > review_only > default.
+	// Precedence must be: skip > blocked > develop > refinement > review_only > default.
 	// Blocked slots in between skip (don't touch it) and develop/review_only
 	// (blocked is cheaper than any processing — we haven't even confirmed we
 	// want to run it yet). develop beats review_only per issue #223.
 	cfg := IssueTrackingConfig{
 		SkipLabels:       []string{"wontfix"},
 		BlockedLabels:    []string{"blocked"},
+		RefinementLabels: []string{"refine"},
 		ReviewOnlyLabels: []string{"question"},
 		DevelopLabels:    []string{"bug"},
 		DefaultAction:    string(IssueModeIgnore),
@@ -656,6 +672,7 @@ func TestClassify_BlockedPrecedence(t *testing.T) {
 	}{
 		{"skip wins over blocked", []string{"wontfix", "blocked", "bug"}, IssueModeIgnore},
 		{"blocked wins over review_only", []string{"blocked", "question"}, IssueModeBlocked},
+		{"blocked wins over refinement", []string{"blocked", "refine"}, IssueModeBlocked},
 		{"blocked wins over develop", []string{"blocked", "bug"}, IssueModeBlocked},
 		{"blocked alone", []string{"blocked"}, IssueModeBlocked},
 		// develop beats review_only when both present (#223)
@@ -1570,6 +1587,7 @@ func TestIssueTrackingForRepo_OrgOverride(t *testing.T) {
 		Enabled:          true,
 		FilterMode:       FilterModeExclusive,
 		DevelopLabels:    []string{"global-dev"},
+		RefinementLabels: []string{"global-refine"},
 		ReviewOnlyLabels: []string{"global-review"},
 		SkipLabels:       []string{"global-skip"},
 		BlockedLabels:    []string{"global-blocked"},
@@ -1581,6 +1599,7 @@ func TestIssueTrackingForRepo_OrgOverride(t *testing.T) {
 			IssueTracking: &IssueTrackingOverride{
 				FilterMode:       FilterModeInclusive,
 				DevelopLabels:    []string{"org-dev"},
+				RefinementLabels: []string{"org-refine"},
 				ReviewOnlyLabels: []string{"org-review"},
 				BlockedLabels:    []string{"org-blocked"},
 				PromoteToLabel:   "org-ready",
@@ -1597,6 +1616,9 @@ func TestIssueTrackingForRepo_OrgOverride(t *testing.T) {
 	}
 	if len(got.DevelopLabels) != 1 || got.DevelopLabels[0] != "org-dev" {
 		t.Errorf("develop_labels = %v, want org override", got.DevelopLabels)
+	}
+	if len(got.RefinementLabels) != 1 || got.RefinementLabels[0] != "org-refine" {
+		t.Errorf("refinement_labels = %v, want org override", got.RefinementLabels)
 	}
 	if len(got.SkipLabels) != 1 || got.SkipLabels[0] != "global-skip" {
 		t.Errorf("skip_labels = %v, want inherited global skip label", got.SkipLabels)
