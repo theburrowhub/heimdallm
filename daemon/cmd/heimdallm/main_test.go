@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	"github.com/heimdallm/daemon/internal/bus"
 	"github.com/heimdallm/daemon/internal/config"
 	gh "github.com/heimdallm/daemon/internal/github"
+	"github.com/heimdallm/daemon/internal/repoctx"
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
 	natsserver "github.com/nats-io/nats-server/v2/server"
@@ -32,6 +34,14 @@ func newMemStore(t *testing.T) *store.Store {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	return s
+}
+
+func TestAcquireRepoContextNilManagerIsError(t *testing.T) {
+	aiCfg := config.RepoAI{}
+	_, err := acquireRepoContext(context.Background(), nil, "org/repo", &aiCfg, nil, "secret", repoctx.ModeRead)
+	if err == nil || !strings.Contains(err.Error(), "nil manager") {
+		t.Fatalf("err = %v, want nil manager error", err)
+	}
 }
 
 func seedAgent(t *testing.T, s *store.Store, a store.Agent) {

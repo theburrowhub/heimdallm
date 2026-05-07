@@ -97,6 +97,9 @@ type gitRunner interface {
 }
 
 // Manager resolves and prepares repository working directories for AI runs.
+// It intentionally uses one exclusive lock per repo for both ModeRead and
+// ModeWrite in v1: managed clones are shared checkouts, and a concurrent
+// fetch/reset/clean can invalidate files while an AI CLI is reading them.
 type Manager struct {
 	mu      sync.Mutex
 	locks   map[string]*repoLock
@@ -124,7 +127,7 @@ func (m *Manager) Acquire(ctx context.Context, req Request) (*Handle, error) {
 		ctx = context.Background()
 	}
 	if m == nil {
-		m = NewManager()
+		return nil, fmt.Errorf("repoctx: nil manager")
 	}
 	owner, name, err := splitRepo(req.Repo)
 	if err != nil {
@@ -155,12 +158,21 @@ func (m *Manager) Acquire(ctx context.Context, req Request) (*Handle, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Handle{path: path, managed: true, release: release}, nil
+	h := &Handle{path: path, managed: true, release: release}
+	if req.Mode == ModeWrite {
+		if err = m.EnsureFullHistory(ctx, h, req.Token); err != nil {
+			return nil, err
+		}
+	}
+	return h, nil
 }
 
 // EnsureFullHistory upgrades a managed shallow clone in-place. It assumes the
 // caller still owns the handle lock returned by Acquire.
 func (m *Manager) EnsureFullHistory(ctx context.Context, h *Handle, token string) error {
+	if m == nil {
+		return fmt.Errorf("repoctx: nil manager")
+	}
 	if h == nil || h.Path() == "" || !h.Managed() {
 		return nil
 	}
@@ -194,7 +206,7 @@ func (m *Manager) Purge(ctx context.Context, repo, cloneDir string) error {
 		ctx = context.Background()
 	}
 	if m == nil {
-		m = NewManager()
+		return fmt.Errorf("repoctx: nil manager")
 	}
 	owner, name, err := splitRepo(repo)
 	if err != nil {
@@ -300,6 +312,8 @@ func (m *Manager) updateManagedClone(ctx context.Context, target, repo, token st
 	}
 	defer cleanup()
 	url := fmt.Sprintf("https://x-access-token@github.com/%s.git", repo)
+	// set-url writes an opaque username-only URL and does not need
+	// credentials; keep the askpass env scoped to network operations.
 	if err := m.runner().Run(ctx, target, nil, "remote", "set-url", "origin", url); err != nil {
 		return fmt.Errorf("repoctx: set remote url: %w", err)
 	}
@@ -415,7 +429,7 @@ func writeMarker(dir, repo string) error {
 	if err != nil {
 		return fmt.Errorf("repoctx: marshal marker: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, MarkerFile), append(data, '\n'), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, MarkerFile), append(data, '\n'), 0o600); err != nil {
 		return fmt.Errorf("repoctx: write marker: %w", err)
 	}
 	return nil
@@ -479,6 +493,7 @@ func (execGit) Run(ctx context.Context, dir string, env []string, args ...string
 	defer cancel()
 	cmd := exec.CommandContext(runCtx, "git", args...)
 	cmd.Dir = dir
+	cmd.Env = os.Environ()
 	if env != nil {
 		cmd.Env = env
 	}

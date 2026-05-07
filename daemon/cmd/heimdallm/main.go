@@ -2427,7 +2427,7 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 		}
 	}
 
-	optsFor := func(issue *gh.Issue) issuepipeline.RunOptions {
+	optsFor := func(issue *gh.Issue) (issuepipeline.RunOptions, bool) {
 		a.cfgMu.Lock()
 		c := *a.cfg
 		aiCfg := c.AIForRepo(issue.Repo)
@@ -2445,7 +2445,13 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 			requireWorkDir = true
 		}
 		var releaseRepoContext func()
+		releaseOnReturn := true
 		repoHandle, err := acquireRepoContext(ctx, a.repoCtx, issue.Repo, &aiCfg, localDirBase, a.ghToken, mode)
+		defer func() {
+			if releaseOnReturn && repoHandle != nil {
+				repoHandle.Release()
+			}
+		}()
 		if err != nil {
 			if issue.Mode == config.IssueModeDevelop {
 				slog.Error("issue poll: prepare repo context failed",
@@ -2458,6 +2464,7 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 						}),
 					})
 				}
+				return issuepipeline.RunOptions{}, false
 			} else {
 				logRepoContextFallback("issue poll", issue.Repo, err)
 			}
@@ -2477,7 +2484,7 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 		issuePrompt, issueInstructions := resolveIssuePrompt(a.store, aiCfg.IssuePrompt, agentCfg.PromptID)
 		implPrompt, implInstructions := resolveImplementPrompt(a.store, aiCfg.ImplementPrompt, agentCfg.PromptID)
 
-		return issuepipeline.RunOptions{
+		opts := issuepipeline.RunOptions{
 			GitHubToken: a.ghToken,
 			Primary:     aiCfg.Primary,
 			Fallback:    aiCfg.Fallback,
@@ -2506,6 +2513,8 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 			RequireWorkDirForDevelop: requireWorkDir,
 			ReleaseRepoContext:       releaseRepoContext,
 		}
+		releaseOnReturn = false
+		return opts, true
 	}
 
 	return a.fetcher.ProcessRepo(ctx, repo, repoIT, authUser, optsFor)
@@ -3065,7 +3074,7 @@ func acquireRepoContext(
 	mode repoctx.Mode,
 ) (*repoctx.Handle, error) {
 	if manager == nil {
-		manager = repoctx.NewManager()
+		return nil, fmt.Errorf("repoctx: nil manager")
 	}
 	h, err := manager.Acquire(ctx, repoctx.Request{
 		Repo:               repo,
@@ -3078,6 +3087,9 @@ func acquireRepoContext(
 	if err != nil {
 		return nil, err
 	}
+	// aiCfg.LocalDir is valid only while the returned handle is held. Callers
+	// must release the handle after the pipeline/executor has finished with the
+	// path.
 	aiCfg.LocalDir = h.Path()
 	return h, nil
 }

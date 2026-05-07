@@ -1636,7 +1636,7 @@ func TestHandleDeleteManagedCloneRequiresAuthAndCallsCallback(t *testing.T) {
 func TestHandleDeleteManagedCloneSurfacesCallbackError(t *testing.T) {
 	srv := setupServerWithToken(t, "test-token")
 	srv.SetCleanCloneFn(func(repo string) error {
-		return fmt.Errorf("not managed")
+		return fmt.Errorf("repoctx: clone target %q exists but is not managed", "/tmp/heimdallm/org/repo")
 	})
 	req := httptest.NewRequest("DELETE", "/config/clones/"+url.PathEscape("org/repo"), nil)
 	req.Header.Set("X-Heimdallm-Token", "test-token")
@@ -1644,6 +1644,9 @@ func TestHandleDeleteManagedCloneSurfacesCallbackError(t *testing.T) {
 	srv.Router().ServeHTTP(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", w.Code)
+	}
+	if strings.Contains(w.Body.String(), "/tmp/heimdallm") {
+		t.Fatalf("response leaked clone path: %s", w.Body.String())
 	}
 }
 

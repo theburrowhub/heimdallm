@@ -49,6 +49,9 @@ func (f *fakeGit) Run(ctx context.Context, dir string, env []string, args ...str
 		if err := os.MkdirAll(filepath.Join(target, ".git"), 0o755); err != nil {
 			return err
 		}
+		if err := os.WriteFile(filepath.Join(target, ".git", "shallow"), []byte("x"), 0o644); err != nil {
+			return err
+		}
 	}
 	return f.runErr
 }
@@ -91,6 +94,14 @@ func TestAcquireUsesExplicitLocalDirWithoutGit(t *testing.T) {
 	}
 }
 
+func TestAcquireNilManagerIsError(t *testing.T) {
+	var m *Manager
+	_, err := m.Acquire(context.Background(), Request{Repo: "org/repo", Token: "secret"})
+	if err == nil || !strings.Contains(err.Error(), "nil manager") {
+		t.Fatalf("Acquire err = %v, want nil manager error", err)
+	}
+}
+
 func TestAcquireUsesLocalDirBaseOnlyForReadMode(t *testing.T) {
 	m, git, cloneBase := newTestManager(t)
 	localBase := t.TempDir()
@@ -128,8 +139,9 @@ func TestAcquireUsesLocalDirBaseOnlyForReadMode(t *testing.T) {
 	if writeHandle.Path() != wantManaged || !writeHandle.Managed() {
 		t.Fatalf("write handle = (%q, managed=%v), want managed clone %q", writeHandle.Path(), writeHandle.Managed(), wantManaged)
 	}
-	if calls := git.snapshot(); len(calls) != 1 || calls[0].Args[0] != "clone" {
-		t.Fatalf("git calls = %v, want one clone", calls)
+	calls := git.snapshot()
+	if len(calls) != 2 || calls[0].Args[0] != "clone" || strings.Join(calls[1].Args, " ") != "fetch --unshallow --prune origin" {
+		t.Fatalf("git calls = %v, want clone then unshallow", calls)
 	}
 }
 
@@ -153,6 +165,11 @@ func TestAcquireClonesShallowWithOwnershipMarker(t *testing.T) {
 	if err := validateMarker(wantPath, "org/repo"); err != nil {
 		t.Fatalf("marker not valid: %v", err)
 	}
+	if info, err := os.Stat(filepath.Join(wantPath, MarkerFile)); err != nil {
+		t.Fatalf("stat marker: %v", err)
+	} else if info.Mode().Perm() != 0o600 {
+		t.Fatalf("marker mode = %o, want 600", info.Mode().Perm())
+	}
 	calls := git.snapshot()
 	if len(calls) != 1 {
 		t.Fatalf("git calls = %v, want one clone", calls)
@@ -164,6 +181,39 @@ func TestAcquireClonesShallowWithOwnershipMarker(t *testing.T) {
 		if strings.Contains(arg, "top-secret-token") {
 			t.Fatalf("token leaked in git args: %v", calls[0].Args)
 		}
+	}
+}
+
+func TestAcquireModeWriteEnsuresFullHistory(t *testing.T) {
+	m, git, base := newTestManager(t)
+	target := filepath.Join(base, "heimdallm", "org", "repo")
+	if err := os.MkdirAll(filepath.Join(target, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, ".git", "shallow"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMarker(target, "org/repo"); err != nil {
+		t.Fatal(err)
+	}
+
+	h, err := m.Acquire(context.Background(), Request{
+		Repo:  "org/repo",
+		Token: "secret",
+		Mode:  ModeWrite,
+	})
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	h.Release()
+
+	calls := git.snapshot()
+	got := make([]string, 0, len(calls))
+	for _, c := range calls {
+		got = append(got, strings.Join(c.Args, " "))
+	}
+	if got[len(got)-1] != "fetch --unshallow --prune origin" {
+		t.Fatalf("last git call = %q, want unshallow; all calls = %v", got[len(got)-1], got)
 	}
 }
 
@@ -207,6 +257,19 @@ func TestAcquireRefusesExistingUnmanagedTarget(t *testing.T) {
 	}
 	if _, statErr := os.Stat(target); statErr != nil {
 		t.Fatalf("unmanaged target was removed: %v", statErr)
+	}
+}
+
+func TestAcquireInvalidRepoDoesNotCreateLock(t *testing.T) {
+	m, _, _ := newTestManager(t)
+	_, err := m.Acquire(context.Background(), Request{Repo: "bad org/repo", Token: "secret"})
+	if err == nil {
+		t.Fatal("expected invalid repo error")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.locks) != 0 {
+		t.Fatalf("locks = %d, want 0 after pre-lock validation failure", len(m.locks))
 	}
 }
 
@@ -312,6 +375,14 @@ func TestPurgeOnlyRemovesManagedClone(t *testing.T) {
 	}
 	if _, statErr := os.Stat(unmanaged); statErr != nil {
 		t.Fatalf("unmanaged clone was removed: %v", statErr)
+	}
+}
+
+func TestPurgeNilManagerIsError(t *testing.T) {
+	var m *Manager
+	err := m.Purge(context.Background(), "org/repo", "")
+	if err == nil || !strings.Contains(err.Error(), "nil manager") {
+		t.Fatalf("Purge err = %v, want nil manager error", err)
 	}
 }
 

@@ -801,7 +801,7 @@ func (srv *Server) handleDeleteManagedClone(w http.ResponseWriter, r *http.Reque
 	}
 	if err := srv.cleanCloneFn(repo); err != nil {
 		slog.Error("DELETE /config/clones failed", "repo", repo, "err", err)
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+		http.Error(w, `{"error":"clone cleanup failed"}`, http.StatusBadRequest)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "repo": repo})

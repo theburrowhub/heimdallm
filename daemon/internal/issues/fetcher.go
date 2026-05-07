@@ -79,8 +79,10 @@ type IssuePublisher interface {
 
 // OptionsFn lets the caller map each classified issue to its RunOptions.
 // In production main.go resolves per-repo AI config here; tests can return a
-// constant.
-type OptionsFn func(issue *github.Issue) RunOptions
+// constant. ok=false skips this issue after classification; use it when the
+// caller cannot prepare required execution context and has already surfaced
+// the failure.
+type OptionsFn func(issue *github.Issue) (opts RunOptions, ok bool)
 
 // Fetcher orchestrates: fetch issues for a repo, skip those already processed
 // without new activity, dispatch the rest to the pipeline.
@@ -177,7 +179,11 @@ func (f *Fetcher) ProcessRepo(ctx context.Context, repo string, cfg config.Issue
 				continue
 			}
 		} else {
-			if _, runErr := f.pipeline.Run(ctx, issue, optsFor(issue)); runErr != nil {
+			opts, ok := optsFor(issue)
+			if !ok {
+				continue
+			}
+			if _, runErr := f.pipeline.Run(ctx, issue, opts); runErr != nil {
 				slog.Error("issues fetcher: pipeline run failed",
 					"repo", repo, "number", issue.Number, "err", runErr)
 				continue
