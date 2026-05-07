@@ -28,6 +28,10 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
+// ErrPromoteConflict is returned by the promote callback when the request is
+// syntactically valid but the issue is not currently in a promotable stage.
+var ErrPromoteConflict = errors.New("issue promotion conflict")
+
 // Server holds the HTTP router, SSE broker, store, and optional pipeline.
 type Server struct {
 	store                *store.Store
@@ -171,8 +175,7 @@ func (srv *Server) SetTriggerIssueRefineFn(fn func(issueID int64, force bool) er
 }
 
 // SetTriggerPromoteFn wires the promote callback called by POST /issues/{id}/promote.
-// The callback must run the auto_implement pipeline for the given issue regardless
-// of its current classification (review_only → develop promotion).
+// The callback moves stage labels only; the poll cycle executes the new stage.
 func (srv *Server) SetTriggerPromoteFn(fn func(issueID int64) error) {
 	srv.triggerPromoteFn = fn
 }
@@ -1228,10 +1231,9 @@ func (srv *Server) handleTriggerIssueRefine(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "refinement queued"})
 }
 
-// handlePromoteIssue promotes a review_only-classified issue to auto_implement,
-// triggering the full develop pipeline immediately without waiting for a label
-// change on GitHub. It shares the same semaphore as review and triage so total
-// concurrent AI processes stay bounded.
+// handlePromoteIssue moves an issue to its next configured stage by updating
+// GitHub labels. It does not run AI work directly; the next poll sees the new
+// labels and dispatches refinement/development through the normal workers.
 func (srv *Server) handlePromoteIssue(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
@@ -1242,19 +1244,20 @@ func (srv *Server) handlePromoteIssue(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "promote trigger not configured", http.StatusServiceUnavailable)
 		return
 	}
-	select {
-	case srv.reviewSem <- struct{}{}:
-	default:
-		http.Error(w, `{"error":"too many concurrent reviews — try again later"}`, http.StatusTooManyRequests)
+	if _, err := srv.store.GetIssue(id); err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	go func() {
-		defer func() { <-srv.reviewSem }()
-		if err := srv.triggerPromoteFn(id); err != nil {
-			slog.Error("promote issue failed", "issue_id", id, "err", err)
+	if err := srv.triggerPromoteFn(id); err != nil {
+		slog.Error("promote issue failed", "issue_id", id, "err", err)
+		if errors.Is(err, ErrPromoteConflict) {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
 		}
-	}()
-	writeJSON(w, http.StatusAccepted, map[string]string{"status": "promote queued"})
+		http.Error(w, "promote failed", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "promotion applied"})
 }
 
 func (srv *Server) handleRepoLabels(w http.ResponseWriter, r *http.Request) {

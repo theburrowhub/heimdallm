@@ -84,6 +84,10 @@ type sseMsg api.SSEEvent
 type sseDisconnectMsg struct{ err error }
 type sseReconnectMsg struct{}
 type shutdownMsg struct{ err error }
+type promoteIssueMsg struct {
+	id  int64
+	err error
+}
 
 func NewDashboard(host, token, version string) *Dashboard {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -179,6 +183,12 @@ func (d *Dashboard) listenSSE() tea.Cmd {
 func (d *Dashboard) shutdownDaemon() tea.Cmd {
 	return func() tea.Msg {
 		return shutdownMsg{err: d.client.Shutdown()}
+	}
+}
+
+func (d *Dashboard) promoteIssue(id int64) tea.Cmd {
+	return func() tea.Msg {
+		return promoteIssueMsg{id: id, err: d.client.PromoteIssue(id)}
 	}
 }
 
@@ -320,6 +330,17 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			d.sseCancel()
 		}
 		return d, nil
+
+	case promoteIssueMsg:
+		d.refreshing = false
+		if msg.err != nil {
+			d.err = msg.err
+			d.connected = false
+			d.shutdownMessage = fmt.Sprintf("Promotion failed: %v", msg.err)
+			return d, nil
+		}
+		d.shutdownMessage = "Promotion requested"
+		return d, d.fetchData
 	}
 
 	return d, nil
@@ -426,6 +447,13 @@ func (d *Dashboard) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else if d.activeTab == tabIssues && d.cursor < len(d.issues) {
 			d.openDetail()
 		}
+	case "p", "P":
+		if d.activeTab == tabIssues && d.cursor < len(d.issues) && canPromoteIssue(d.issues[d.cursor]) {
+			issue := d.issues[d.cursor]
+			d.refreshing = true
+			d.shutdownMessage = fmt.Sprintf("Promoting issue #%d...", issue.Number)
+			return d, d.promoteIssue(issue.ID)
+		}
 	case "r":
 		d.refreshing = true
 		return d, d.fetchData
@@ -465,6 +493,13 @@ func (d *Dashboard) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return d, tea.Quit
 	case "esc", "enter":
 		d.showDetail = false
+	case "p", "P":
+		if d.activeTab == tabIssues && d.cursor < len(d.issues) && canPromoteIssue(d.issues[d.cursor]) {
+			issue := d.issues[d.cursor]
+			d.refreshing = true
+			d.shutdownMessage = fmt.Sprintf("Promoting issue #%d...", issue.Number)
+			return d, d.promoteIssue(issue.ID)
+		}
 	case "j", "down":
 		d.scrollDetailDown()
 	case "k", "up":
@@ -996,9 +1031,15 @@ func (d *Dashboard) renderHelp() string {
 		return helpStyle.Render("Stopping daemon...")
 	}
 	if d.showDetail {
+		if d.activeTab == tabIssues && d.cursor < len(d.issues) && canPromoteIssue(d.issues[d.cursor]) {
+			return helpStyle.Render("[esc]close  [p]romote  [j/k]scroll  [pgup/pgdn]page  [q]uit")
+		}
 		return helpStyle.Render("[esc]close  [j/k]scroll  [pgup/pgdn]page  [q]uit")
 	}
-	if d.activeTab == tabPRs || d.activeTab == tabIssues {
+	if d.activeTab == tabIssues {
+		return helpStyle.Render("[q]uit  [r]efresh  [s]top  [enter]detail  [p]romote  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-6]jump")
+	}
+	if d.activeTab == tabPRs {
 		return helpStyle.Render("[q]uit  [r]efresh  [s]top  [enter]detail  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-6]jump")
 	}
 	return helpStyle.Render("[q]uit  [r]efresh  [s]top  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-6]jump  [G]follow")
@@ -1175,6 +1216,18 @@ func itemTypeStyle(itemType string) lipgloss.Style {
 		return lipgloss.NewStyle().Foreground(colorIssue)
 	default:
 		return lipgloss.NewStyle()
+	}
+}
+
+func canPromoteIssue(issue api.Issue) bool {
+	if issue.LatestReview == nil {
+		return false
+	}
+	switch issue.LatestReview.ActionTaken {
+	case "review_only", "refinement":
+		return true
+	default:
+		return false
 	}
 }
 

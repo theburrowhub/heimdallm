@@ -257,16 +257,28 @@ func (r *Recorder) recordIssuePromoted(ev sse.Event) error {
 		IssueTitle  string `json:"issue_title"`
 		FromLabel   string `json:"from_label"`
 		ToLabel     string `json:"to_label"`
+		FromStage   string `json:"from_stage"`
+		ToStage     string `json:"to_stage"`
+		Trigger     string `json:"trigger"`
 		Reason      string `json:"reason"`
 	}
 	if err := decode(ev.Data, &p); err != nil {
 		return err
 	}
+	from := p.FromLabel
+	to := p.ToLabel
+	if p.FromStage != "" || p.ToStage != "" {
+		from = p.FromStage
+		to = p.ToStage
+	}
 	_, err := r.store.InsertActivity(time.Now(), orgOf(p.Repo), p.Repo, "issue",
 		p.IssueNumber, p.IssueTitle, "promote",
-		p.FromLabel+" → "+p.ToLabel, map[string]any{
+		from+" → "+to, map[string]any{
 			"from_label": p.FromLabel,
 			"to_label":   p.ToLabel,
+			"from_stage": p.FromStage,
+			"to_stage":   p.ToStage,
+			"trigger":    p.Trigger,
 			"reason":     p.Reason,
 		})
 	return err

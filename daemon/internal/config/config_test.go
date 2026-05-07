@@ -683,11 +683,9 @@ func TestClassify_Precedence(t *testing.T) {
 		want   IssueMode
 	}{
 		{"skip wins over review_only + develop", []string{"wontfix", "question", "bug"}, IssueModeIgnore},
-		// develop beats review_only when both are present (#223): the operator
-		// tagged with a DEV label, so auto_implement is the intended action.
-		{"develop wins over review_only when both present", []string{"question", "bug"}, IssueModeDevelop},
-		{"develop wins over refinement when both present", []string{"refine", "bug"}, IssueModeDevelop},
-		{"refinement wins over review_only when both present", []string{"refine", "question"}, IssueModeRefinement},
+		{"review_only wins over refinement + develop", []string{"question", "refine", "bug"}, IssueModeReviewOnly},
+		{"review_only wins over develop when both present", []string{"question", "bug"}, IssueModeReviewOnly},
+		{"refinement wins over develop when both present", []string{"refine", "bug"}, IssueModeRefinement},
 		{"develop only", []string{"bug"}, IssueModeDevelop},
 		{"refinement only", []string{"refine"}, IssueModeRefinement},
 		{"review_only only", []string{"question"}, IssueModeReviewOnly},
@@ -704,10 +702,10 @@ func TestClassify_Precedence(t *testing.T) {
 }
 
 func TestClassify_BlockedPrecedence(t *testing.T) {
-	// Precedence must be: skip > blocked > develop > refinement > review_only > default.
+	// Precedence must be: skip > blocked > review_only > refinement > develop > default.
 	// Blocked slots in between skip (don't touch it) and develop/review_only
 	// (blocked is cheaper than any processing — we haven't even confirmed we
-	// want to run it yet). develop beats review_only per issue #223.
+	// want to run it yet). Stage labels then prefer the earliest state.
 	cfg := IssueTrackingConfig{
 		SkipLabels:       []string{"wontfix"},
 		BlockedLabels:    []string{"blocked"},
@@ -726,8 +724,7 @@ func TestClassify_BlockedPrecedence(t *testing.T) {
 		{"blocked wins over refinement", []string{"blocked", "refine"}, IssueModeBlocked},
 		{"blocked wins over develop", []string{"blocked", "bug"}, IssueModeBlocked},
 		{"blocked alone", []string{"blocked"}, IssueModeBlocked},
-		// develop beats review_only when both present (#223)
-		{"develop wins over review_only without blocked", []string{"question", "bug"}, IssueModeDevelop},
+		{"review_only wins over develop without blocked", []string{"question", "bug"}, IssueModeReviewOnly},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

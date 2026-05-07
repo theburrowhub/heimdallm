@@ -6,8 +6,8 @@ import (
 	"net/url"
 	"os"
 
-	"github.com/theburrowhub/heimdallm/cli/internal/api"
 	"github.com/spf13/cobra"
+	"github.com/theburrowhub/heimdallm/cli/internal/api"
 )
 
 // contextKey is an unexported type for context keys in this package.
@@ -88,6 +88,7 @@ func NewRootCmd(version string) *cobra.Command {
 		newFollowCmd(),
 		newReviewPRCmd(),
 		newReviewIssueCmd(),
+		newPromoteIssueCmd(),
 		newDismissIssueCmd(),
 		newUndismissIssueCmd(),
 		newConfigCmd(),

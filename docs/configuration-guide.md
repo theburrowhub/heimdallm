@@ -250,7 +250,7 @@ The per-agent override takes precedence when set (see [AI Agents](#7-ai-agents))
 
 ## 6. Issue Tracking
 
-The issue tracking pipeline fetches open GitHub issues from monitored repos, classifies them by label, and — depending on the classification — posts an AI analysis comment (`review_only`) or creates a branch, commits the fix, and opens a PR (`develop` / `auto_implement`).
+The issue tracking pipeline fetches open GitHub issues from monitored repos, classifies them by label, and moves them through the stage sequence `triage` (`review_only`) -> `refinement` -> `development` (`develop` / `auto_implement`).
 
 ### Enabling
 
@@ -286,7 +286,7 @@ filter_mode = "exclusive"
 Labels are matched case-insensitively. Precedence from highest to lowest:
 
 ```
-skip_labels  >  blocked_labels  >  review_only_labels  >  develop_labels  >  default_action
+skip_labels  >  blocked_labels  >  review_only_labels  >  refinement_labels  >  develop_labels  >  default_action
 ```
 
 | Field | Env var | Description |
@@ -294,11 +294,13 @@ skip_labels  >  blocked_labels  >  review_only_labels  >  develop_labels  >  def
 | `skip_labels` | `HEIMDALLM_ISSUE_SKIP_LABELS` | Issues with these labels are ignored entirely |
 | `blocked_labels` | `HEIMDALLM_ISSUE_BLOCKED_LABELS` | Issues held until all dependencies close, then promoted |
 | `review_only_labels` | `HEIMDALLM_ISSUE_REVIEW_ONLY_LABELS` | AI posts a triage comment, no implementation |
+| `refinement_labels` | `HEIMDALLM_ISSUE_REFINEMENT_LABELS` | AI reads the repo and posts a structured implementation plan |
 | `develop_labels` | `HEIMDALLM_ISSUE_DEVELOP_LABELS` | AI implements the issue (branch + commit + PR) |
 | `default_action` | `HEIMDALLM_ISSUE_DEFAULT_ACTION` | Applied when no label matches; `ignore` or `review_only` |
 
 ```bash
 HEIMDALLM_ISSUE_DEVELOP_LABELS=enhancement,feature,bug
+HEIMDALLM_ISSUE_REFINEMENT_LABELS=needs-plan
 HEIMDALLM_ISSUE_REVIEW_ONLY_LABELS=question,discussion,analysis
 HEIMDALLM_ISSUE_SKIP_LABELS=wontfix,duplicate,invalid
 HEIMDALLM_ISSUE_DEFAULT_ACTION=ignore
@@ -307,9 +309,27 @@ HEIMDALLM_ISSUE_DEFAULT_ACTION=ignore
 ```toml
 [github.issue_tracking]
 develop_labels     = ["enhancement", "feature", "bug"]
+refinement_labels  = ["needs-plan"]
 review_only_labels = ["question", "discussion", "analysis"]
 skip_labels        = ["wontfix", "duplicate", "invalid"]
 default_action     = "ignore"
+```
+
+### Stage promotion
+
+Promotion changes only GitHub labels; the next poll cycle executes the newly visible stage. This keeps manual API/UI/CLI promotion, auto-promotion, and manual label swaps on GitHub on the same path.
+
+| From | To | Trigger |
+|---|---|---|
+| `triage` / `review_only` | `refinement` | Manual Promote, `auto_promote_triage = true`, or replacing the label on GitHub |
+| `refinement` | `development` | Manual Promote, `auto_promote_refinement = true`, or replacing the label on GitHub |
+
+Manual promotion from triage falls back to `develop_labels` only for legacy configs that have no `refinement_labels`. Auto-promotion does not skip refinement: if `auto_promote_triage = true` but no refinement label is configured, the daemon logs a warning and leaves the issue in triage.
+
+```toml
+[ai]
+auto_promote_triage = true       # default when unset
+auto_promote_refinement = false  # default when unset
 ```
 
 > **Warning — `default_action = "review_only"` can cause re-processing loops and excessive API costs.**
@@ -321,6 +341,7 @@ default_action     = "ignore"
 > | Label | Action |
 > |---|---|
 > | A dedicated develop label (e.g. `heimdallm-develop`) | Auto-implement: creates branch + PR |
+> | A dedicated refinement label (e.g. `heimdallm-refine`) | Deep planning: AI reads the repo and posts subtasks |
 > | A dedicated triage label (e.g. `heimdallm-triage`) | Review only: AI analyses and comments once |
 > | No matching label | Ignored (safe default) |
 >
@@ -336,6 +357,7 @@ default_action     = "ignore"
 > organizations  = ["myorg"]
 > assignees      = ["myusername"]
 > develop_labels     = ["heimdallm-develop"]
+> refinement_labels  = ["heimdallm-refine"]
 > review_only_labels = ["heimdallm-triage"]
 > skip_labels        = ["wontfix", "duplicate", "invalid"]
 > ```

@@ -166,6 +166,24 @@ void _handleSseEvent(Ref ref, SseEvent event) {
         }
         ref.read(issueListRefreshProvider.notifier).update((s) => s + 1);
 
+      case 'issue_refinement_done':
+      case 'issue_implemented':
+      case 'issue_promoted':
+        final rawNumber = data['number'] ?? data['issue_number'];
+        final issueNumber = (rawNumber as num?)?.toInt();
+        final issueKey = (repo.isNotEmpty && issueNumber != null)
+            ? '$repo:$issueNumber'
+            : null;
+        if (issueKey != null) {
+          ref
+              .read(reviewingIssuesProvider.notifier)
+              .update((s) => s.difference({issueKey}));
+          ref
+              .read(promotingIssuesProvider.notifier)
+              .update((s) => s.difference({issueKey}));
+        }
+        ref.read(issueListRefreshProvider.notifier).update((s) => s + 1);
+
       case 'issue_review_error':
         final issueNumber = (data['number'] as num?)?.toInt();
         final issueKey = (repo.isNotEmpty && issueNumber != null)

@@ -510,6 +510,7 @@ func main() {
 	publishPub := bus.NewPRPublishPublisher(conn)
 	issuePublisher := bus.NewIssuePublisher(conn)
 	issueFetcher.SetPublisher(issuePublisher)
+	issueFetcher.SetStageTransitioner(ghClient, broker)
 
 	// Shared rate limiter (was Pipeline.limiter).
 	limiter := scheduler.NewRateLimiter(4500)
@@ -819,7 +820,6 @@ func main() {
 				"repo", msg.Repo, "number", msg.Number, "err", err)
 			return
 		}
-		ghIssue.Mode = config.IssueModeReviewOnly
 
 		cfgMu.Lock()
 		c := *cfg
@@ -827,10 +827,16 @@ func main() {
 		if aiCfg.Primary == "" {
 			aiCfg.Primary = c.AI.Primary
 		}
+		repoIT := c.IssueTrackingForRepo(msg.Repo)
 		agentCfg := c.AgentConfigFor(aiCfg.Primary)
 		localDirBase := c.GitHub.LocalDirBase
 		globalTimeout := c.AI.ExecutionTimeout
 		cfgMu.Unlock()
+		if !issueStageStillCurrent("triage-worker", ghIssue, repoIT, config.IssueModeReviewOnly) {
+			return
+		}
+		ghIssue.Mode = config.IssueModeReviewOnly
+
 		repoHandle, err := acquireRepoContext(ctx, repoCtx, msg.Repo, &aiCfg, localDirBase, token, repoctx.ModeRead)
 		if err != nil {
 			logRepoContextFallback("triage-worker", msg.Repo, err)
@@ -881,9 +887,12 @@ func main() {
 			GeneratePRDescription:   aiCfg.GeneratePRDescription != nil && *aiCfg.GeneratePRDescription,
 		}
 
-		if _, err := issuePipe.Run(ctx, ghIssue, opts); err != nil {
+		rev, err := issuePipe.Run(ctx, ghIssue, opts)
+		if err != nil {
 			slog.Error("triage-worker: pipeline run failed",
 				"repo", msg.Repo, "number", msg.Number, "err", err)
+		} else if rev != nil && rev.ActionTaken == string(config.IssueModeReviewOnly) {
+			autoPromoteAfterStage(ctx, ghClient, broker, ghIssue, rev.IssueID, repoIT, aiCfg, issuepipeline.IssueStageTriage, "triage-worker")
 		}
 
 		// Enroll for state watching so closed/resolved issues update in the UI.
@@ -915,7 +924,6 @@ func main() {
 				"repo", msg.Repo, "number", msg.Number, "err", err)
 			return
 		}
-		ghIssue.Mode = config.IssueModeRefinement
 
 		cfgMu.Lock()
 		c := *cfg
@@ -923,10 +931,16 @@ func main() {
 		if aiCfg.Primary == "" {
 			aiCfg.Primary = c.AI.Primary
 		}
+		repoIT := c.IssueTrackingForRepo(msg.Repo)
 		agentCfg := c.AgentConfigFor(aiCfg.Primary)
 		localDirBase := c.GitHub.LocalDirBase
 		globalTimeout := c.AI.ExecutionTimeout
 		cfgMu.Unlock()
+		if !issueStageStillCurrent("refinement-worker", ghIssue, repoIT, config.IssueModeRefinement) {
+			return
+		}
+		ghIssue.Mode = config.IssueModeRefinement
+
 		opts, releaseRepoContext, err := buildRefinementRunOptions(ctx, s, repoCtx, msg.Repo, token, aiCfg, agentCfg, localDirBase, globalTimeout, false, "refinement-worker")
 		if err != nil {
 			slog.Error("refinement-worker: prepare repo context failed",
@@ -943,9 +957,12 @@ func main() {
 			defer releaseRepoContext()
 		}
 
-		if _, err := issuePipe.Run(ctx, ghIssue, opts); err != nil {
+		rev, err := issuePipe.Run(ctx, ghIssue, opts)
+		if err != nil {
 			slog.Error("refinement-worker: pipeline run failed",
 				"repo", msg.Repo, "number", msg.Number, "err", err)
+		} else if rev != nil && rev.ActionTaken == string(config.IssueModeRefinement) {
+			autoPromoteAfterStage(ctx, ghClient, broker, ghIssue, rev.IssueID, repoIT, aiCfg, issuepipeline.IssueStageRefinement, "refinement-worker")
 		}
 
 		// Enroll for state watching so closed/resolved issues update in the UI.
@@ -976,7 +993,6 @@ func main() {
 				"repo", msg.Repo, "number", msg.Number, "err", err)
 			return
 		}
-		ghIssue.Mode = config.IssueModeDevelop
 
 		cfgMu.Lock()
 		c := *cfg
@@ -984,10 +1000,16 @@ func main() {
 		if aiCfg.Primary == "" {
 			aiCfg.Primary = c.AI.Primary
 		}
+		repoIT := c.IssueTrackingForRepo(msg.Repo)
 		agentCfg := c.AgentConfigFor(aiCfg.Primary)
 		localDirBase := c.GitHub.LocalDirBase
 		globalTimeout := c.AI.ExecutionTimeout
 		cfgMu.Unlock()
+		if !issueStageStillCurrent("implement-worker", ghIssue, repoIT, config.IssueModeDevelop) {
+			return
+		}
+		ghIssue.Mode = config.IssueModeDevelop
+
 		repoHandle, err := acquireRepoContext(ctx, repoCtx, msg.Repo, &aiCfg, localDirBase, token, repoctx.ModeWrite)
 		if err != nil {
 			slog.Error("implement-worker: prepare repo context failed",
@@ -1697,9 +1719,12 @@ func main() {
 		return nil
 	})
 
-	// Wire the promote callback: runs the auto_implement pipeline for a review_only issue,
-	// effectively reclassifying it to develop from the UI without needing a GitHub label change.
+	// Wire the promote callback. Promotion only changes GitHub stage labels and
+	// records an audit comment; the next poll executes the newly-visible stage.
 	srv.SetTriggerPromoteFn(func(issueID int64) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
 		publishIssueErr := func(msg string) {
 			broker.Publish(sse.Event{
 				Type: sse.EventIssueReviewError,
@@ -1713,39 +1738,57 @@ func main() {
 			return fmt.Errorf("promote issue: get issue %d: %w", issueID, err)
 		}
 
-		// Read the repo-scoped issue tracking config to know which labels to
-		// add/remove. Org-level labels must behave the same as repo-level
-		// labels here, otherwise manual promotion would silently use globals.
+		ghIssue, err := ghClient.GetIssue(iss.Repo, iss.Number)
+		if err != nil {
+			publishIssueErr(fmt.Sprintf("Failed to fetch issue from GitHub: %v", err))
+			return fmt.Errorf("promote issue: fetch GitHub issue %s #%d: %w", iss.Repo, iss.Number, err)
+		}
+
 		cfgMu.Lock()
 		it := cfg.IssueTrackingForRepo(iss.Repo)
 		cfgMu.Unlock()
 
-		if len(it.DevelopLabels) == 0 {
-			publishIssueErr("No develop labels configured — cannot promote")
-			return fmt.Errorf("promote issue: no develop labels configured")
+		mode := it.Classify(ghIssue.LabelNames())
+		from, ok := issuepipeline.StageFromMode(mode)
+		if !ok {
+			msg := fmt.Sprintf("Issue is in %q mode and cannot be promoted", mode)
+			publishIssueErr(msg)
+			return fmt.Errorf("%w: %s", server.ErrPromoteConflict, msg)
 		}
-
-		slog.Info("promote issue: updating labels on GitHub",
-			"store_issue_id", issueID, "repo", iss.Repo, "number", iss.Number,
-			"add", it.DevelopLabels[0], "remove", it.ReviewOnlyLabels)
-
-		// Add the first develop label so the polling pipeline classifies as DEV.
-		if err := ghClient.AddIssueLabel(iss.Repo, iss.Number, it.DevelopLabels[0]); err != nil {
-			publishIssueErr(fmt.Sprintf("Failed to add develop label: %v", err))
-			return fmt.Errorf("promote issue: add label: %w", err)
-		}
-
-		// Remove review_only labels so classification is unambiguous.
-		for _, label := range it.ReviewOnlyLabels {
-			if err := ghClient.RemoveIssueLabel(iss.Repo, iss.Number, label); err != nil {
-				slog.Warn("promote issue: could not remove review_only label",
-					"label", label, "repo", iss.Repo, "number", iss.Number, "err", err)
-				// Non-fatal — the develop label is already set, classification will still prefer DEV.
+		to, err := issuepipeline.NextStage(from, it, true)
+		if err != nil {
+			publishIssueErr(fmt.Sprintf("Cannot promote issue: %v", err))
+			if errors.Is(err, issuepipeline.ErrStageTargetLabelMissing) || errors.Is(err, issuepipeline.ErrNoNextStage) {
+				return fmt.Errorf("%w: %v", server.ErrPromoteConflict, err)
 			}
+			return fmt.Errorf("promote issue: resolve next stage: %w", err)
 		}
 
-		slog.Info("promote issue: labels updated, polling will pick it up as DEV",
-			"store_issue_id", issueID, "repo", iss.Repo, "number", iss.Number)
+		comments, commentErr := ghClient.FetchIssueCommentsOnly(iss.Repo, iss.Number)
+		if commentErr != nil {
+			slog.Warn("promote issue: comment fetch failed, continuing without audit dedup context",
+				"repo", iss.Repo, "number", iss.Number, "err", commentErr)
+		}
+
+		slog.Info("promote issue: moving issue stage labels",
+			"store_issue_id", issueID, "repo", iss.Repo, "number", iss.Number, "from", from, "to", to)
+		if err := issuepipeline.TransitionIssueStage(ctx, ghClient, issuepipeline.StageTransition{
+			Issue:          ghIssue,
+			StoreIssueID:   issueID,
+			Config:         it,
+			From:           from,
+			To:             to,
+			Trigger:        issuepipeline.StagePromotionManualAPI,
+			Time:           time.Now().UTC(),
+			RecentComments: comments,
+			Broker:         broker,
+		}); err != nil {
+			publishIssueErr(fmt.Sprintf("Failed to promote issue: %v", err))
+			return fmt.Errorf("promote issue: transition stage: %w", err)
+		}
+
+		slog.Info("promote issue: labels updated; poll will execute the next stage",
+			"store_issue_id", issueID, "repo", iss.Repo, "number", iss.Number, "from", from, "to", to)
 		return nil
 	})
 
@@ -3323,6 +3366,88 @@ func sseData(v map[string]any) string {
 		return "{}"
 	}
 	return string(b)
+}
+
+func issueStageStillCurrent(scope string, issue *gh.Issue, it config.IssueTrackingConfig, want config.IssueMode) bool {
+	if issue == nil {
+		return false
+	}
+	if !it.Enabled {
+		slog.Info(scope+": issue tracking disabled before worker run, skipping stale job",
+			"repo", issue.Repo, "number", issue.Number)
+		return false
+	}
+	got := it.Classify(issue.LabelNames())
+	if got == want {
+		return true
+	}
+	slog.Info(scope+": issue stage changed before worker run, skipping stale job",
+		"repo", issue.Repo, "number", issue.Number, "want", want, "got", got, "labels", issue.LabelNames())
+	return false
+}
+
+func autoPromoteAfterStage(
+	ctx context.Context,
+	client *gh.Client,
+	broker issuepipeline.Publisher,
+	issue *gh.Issue,
+	storeIssueID int64,
+	it config.IssueTrackingConfig,
+	aiCfg config.RepoAI,
+	from issuepipeline.IssueStage,
+	scope string,
+) {
+	if !autoPromoteStageEnabled(aiCfg, from) {
+		return
+	}
+	to, err := issuepipeline.NextStage(from, it, false)
+	if err != nil {
+		if errors.Is(err, issuepipeline.ErrStageTargetLabelMissing) {
+			slog.Warn(scope+": auto-promote target label missing; leaving issue in current stage",
+				"repo", issue.Repo, "number", issue.Number, "from", from, "err", err)
+			return
+		}
+		slog.Warn(scope+": auto-promote skipped",
+			"repo", issue.Repo, "number", issue.Number, "from", from, "err", err)
+		return
+	}
+
+	comments, err := client.FetchIssueCommentsOnly(issue.Repo, issue.Number)
+	if err != nil {
+		slog.Warn(scope+": auto-promote comment fetch failed, continuing without audit dedup context",
+			"repo", issue.Repo, "number", issue.Number, "err", err)
+	}
+	if err := issuepipeline.TransitionIssueStage(ctx, client, issuepipeline.StageTransition{
+		Issue:          issue,
+		StoreIssueID:   storeIssueID,
+		Config:         it,
+		From:           from,
+		To:             to,
+		Trigger:        issuepipeline.StagePromotionAuto,
+		Time:           time.Now().UTC(),
+		RecentComments: comments,
+		Broker:         broker,
+	}); err != nil {
+		slog.Warn(scope+": auto-promote failed",
+			"repo", issue.Repo, "number", issue.Number, "from", from, "to", to, "err", err)
+	}
+}
+
+func autoPromoteStageEnabled(aiCfg config.RepoAI, stage issuepipeline.IssueStage) bool {
+	switch stage {
+	case issuepipeline.IssueStageTriage:
+		if aiCfg.AutoPromoteTriage == nil {
+			return true
+		}
+		return *aiCfg.AutoPromoteTriage
+	case issuepipeline.IssueStageRefinement:
+		if aiCfg.AutoPromoteRefinement == nil {
+			return false
+		}
+		return *aiCfg.AutoPromoteRefinement
+	default:
+		return false
+	}
 }
 
 func acquireRepoContext(

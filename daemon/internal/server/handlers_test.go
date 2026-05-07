@@ -628,7 +628,7 @@ func TestHandlerPromoteIssue(t *testing.T) {
 	}
 	var body map[string]string
 	json.NewDecoder(w.Body).Decode(&body)
-	if body["status"] != "promote queued" {
+	if body["status"] != "promotion applied" {
 		t.Errorf("promote issue: unexpected body %v", body)
 	}
 
@@ -639,6 +639,27 @@ func TestHandlerPromoteIssue(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Error("promote callback not called within 2s")
+	}
+}
+
+func TestHandlerPromoteIssue_Conflict(t *testing.T) {
+	srv, s := setupServer(t)
+	now := time.Now()
+	id, _ := s.UpsertIssue(&store.Issue{
+		GithubID: 802, Repo: "org/r", Number: 22, Title: "t",
+		Body: "b", Author: "a", Assignees: `[]`, Labels: `[]`,
+		State: "open", CreatedAt: now, FetchedAt: now,
+	})
+
+	srv.SetTriggerPromoteFn(func(issueID int64) error {
+		return fmt.Errorf("%w: already in development", server.ErrPromoteConflict)
+	})
+
+	req := httptest.NewRequest("POST", "/issues/"+itoa(id)+"/promote", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("promote issue: status %d, want 409; body: %s", w.Code, w.Body.String())
 	}
 }
 
