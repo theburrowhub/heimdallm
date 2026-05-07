@@ -48,6 +48,42 @@ func TestHandlerHealth(t *testing.T) {
 	}
 }
 
+func TestHealth_ReturnsVersionAndStartedAt(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+	broker := sse.NewBroker()
+	broker.Start()
+	t.Cleanup(broker.Stop)
+	srv := server.NewWithOptions(s, broker, nil, "", server.Options{
+		Version:   "v1.2.3-test",
+		StartedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+	})
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/health", nil)
+	srv.Router().ServeHTTP(rr, req)
+
+	if rr.Code != 200 {
+		t.Fatalf("status: got %d want 200", rr.Code)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got["status"] != "ok" {
+		t.Errorf("status field: got %v", got["status"])
+	}
+	if got["version"] != "v1.2.3-test" {
+		t.Errorf("version: got %v", got["version"])
+	}
+	if got["started_at"] != "2026-01-02T03:04:05Z" {
+		t.Errorf("started_at: got %v", got["started_at"])
+	}
+}
+
 func TestHandlerListPRs(t *testing.T) {
 	srv, s := setupServer(t)
 	s.UpsertPR(&store.PR{GithubID: 1, Repo: "org/r", Number: 1, Title: "t", Author: "a", URL: "u", State: "open", UpdatedAt: time.Now(), FetchedAt: time.Now()})

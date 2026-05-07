@@ -40,6 +40,11 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
+// version is overridden via -ldflags "-X main.version=..." at build time.
+var version = "dev"
+
+func versionString() string { return version }
+
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
@@ -278,7 +283,10 @@ func main() {
 	var cfgMu sync.Mutex
 	var reloadMu sync.Mutex // serialises config reloads to prevent duplicate pipelines
 
-	srv := server.New(s, broker, p, apiToken)
+	srv := server.NewWithOptions(s, broker, p, apiToken, server.Options{
+		Version:   versionString(),
+		StartedAt: time.Now(),
+	})
 	srv.SetNATSConn(eventBus.Conn())
 	srv.SetConfigPath(cfgPath)
 	shutdownReq := make(chan struct{}, 1)
