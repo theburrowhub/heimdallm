@@ -205,6 +205,52 @@ void main() {
     expect(org.devEnabled, isTrue);
   });
 
+  test('AppConfig exposes known autocomplete options', () {
+    const cfg = AppConfig(
+      repoConfigs: {
+        'acme/api': RepoConfig(
+          issueOrganizations: ['security'],
+          issueAssignees: ['repo-assignee'],
+          prReviewers: ['repo-reviewer'],
+          prAssignee: 'repo-owner',
+        ),
+      },
+      orgConfigs: {
+        'platform': OrgConfig(
+          issueOrganizations: ['external'],
+          issueAssignees: ['org-assignee'],
+          prReviewers: ['org-reviewer'],
+          prAssignee: 'org-owner',
+        ),
+      },
+      issueTracking: IssueTrackingConfig(
+        organizations: ['global-org'],
+        assignees: ['global-assignee'],
+      ),
+      globalPRReviewers: ['global-reviewer'],
+      globalPRAssignee: 'global-owner',
+    );
+
+    expect(cfg.knownOrganizations, [
+      'acme',
+      'external',
+      'global-org',
+      'platform',
+      'security',
+    ]);
+    expect(cfg.knownGitHubUsers, [
+      'global-assignee',
+      'global-owner',
+      'global-reviewer',
+      'org-assignee',
+      'org-owner',
+      'org-reviewer',
+      'repo-assignee',
+      'repo-owner',
+      'repo-reviewer',
+    ]);
+  });
+
   testWidgets('saveAndStartDaemon calls platform.spawnDaemon', (tester) async {
     final platform = FakePlatformServices(
       daemonBinaryPath: '/fake/bin/heimdalld',

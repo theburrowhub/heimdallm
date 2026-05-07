@@ -747,6 +747,44 @@ class AppConfig {
           .toList()
         ..sort());
 
+  List<String> get knownOrganizations {
+    final orgs = <String>{...orgConfigs.keys, ...issueTracking.organizations};
+    for (final repo in repoConfigs.keys) {
+      final slash = repo.indexOf('/');
+      if (slash > 0) orgs.add(repo.substring(0, slash));
+    }
+    for (final org in orgConfigs.values) {
+      final issueOrgs = org.issueOrganizations;
+      if (issueOrgs != null) orgs.addAll(issueOrgs);
+    }
+    for (final repo in repoConfigs.values) {
+      final issueOrgs = repo.issueOrganizations;
+      if (issueOrgs != null) orgs.addAll(issueOrgs);
+    }
+    return orgs.where((o) => o.trim().isNotEmpty).toList()..sort();
+  }
+
+  List<String> get knownGitHubUsers {
+    final users = <String>{
+      ...globalPRReviewers,
+      ...issueTracking.assignees,
+      if (globalPRAssignee.trim().isNotEmpty) globalPRAssignee,
+    };
+    for (final org in orgConfigs.values) {
+      users.addAll(org.prReviewers ?? const <String>[]);
+      users.addAll(org.issueAssignees ?? const <String>[]);
+      final assignee = org.prAssignee;
+      if (assignee != null && assignee.trim().isNotEmpty) users.add(assignee);
+    }
+    for (final repo in repoConfigs.values) {
+      users.addAll(repo.prReviewers ?? const <String>[]);
+      users.addAll(repo.issueAssignees ?? const <String>[]);
+      final assignee = repo.prAssignee;
+      if (assignee != null && assignee.trim().isNotEmpty) users.add(assignee);
+    }
+    return users.where((u) => u.trim().isNotEmpty).toList()..sort();
+  }
+
   AppConfig copyWith({
     int? serverPort,
     String? pollInterval,

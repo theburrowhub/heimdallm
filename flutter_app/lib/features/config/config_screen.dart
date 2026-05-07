@@ -63,8 +63,9 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     }
 
     // 2. Fall back to stored token / env var
-    final stored = await platform.getStoredGitHubToken()
-        ?? platform.readEnv('GITHUB_TOKEN');
+    final stored =
+        await platform.getStoredGitHubToken() ??
+        platform.readEnv('GITHUB_TOKEN');
     if (!mounted || stored == null || stored.isEmpty) return;
     setState(() => _tokenController.text = stored);
   }
@@ -76,8 +77,12 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     _retentionDays = config.retentionDays;
     _repoConfigs = Map.from(config.repoConfigs);
     _issueTracking = config.issueTracking;
-    _issuePromptId = config.globalIssuePrompt.isEmpty ? null : config.globalIssuePrompt;
-    _developPromptId = config.globalImplementPrompt.isEmpty ? null : config.globalImplementPrompt;
+    _issuePromptId = config.globalIssuePrompt.isEmpty
+        ? null
+        : config.globalIssuePrompt;
+    _developPromptId = config.globalImplementPrompt.isEmpty
+        ? null
+        : config.globalImplementPrompt;
   }
 
   /// Auto-discovers repos from the user's PRs. Runs silently on init.
@@ -85,14 +90,22 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     final token = _tokenController.text.trim();
     if (token.isEmpty) return;
     if (!mounted) return;
-    setState(() { _discovering = true; _discoverError = null; });
+    setState(() {
+      _discovering = true;
+      _discoverError = null;
+    });
     try {
-      final discovered = await ref.read(platformServicesProvider).discoverReposFromPRs(token);
+      final discovered = await ref
+          .read(platformServicesProvider)
+          .discoverReposFromPRs(token);
       if (!mounted) return;
       setState(() {
         for (final repo in discovered) {
           // Keep existing toggle state; default new ones to monitored
-          _repoConfigs.putIfAbsent(repo, () => const RepoConfig(prEnabled: true));
+          _repoConfigs.putIfAbsent(
+            repo,
+            () => const RepoConfig(prEnabled: true),
+          );
         }
         _discovering = false;
       });
@@ -114,8 +127,9 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
       appBar: AppBar(
         title: const Text('Settings'),
         leading: IconButton(
-            icon: const Icon(Icons.arrow_back),
-            onPressed: () => context.canPop() ? context.pop() : context.go('/')),
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () => context.canPop() ? context.pop() : context.go('/'),
+        ),
       ),
       body: configAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
@@ -123,8 +137,10 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text('Could not load config: $e',
-                  style: TextStyle(color: Colors.red.shade400, fontSize: 13)),
+              Text(
+                'Could not load config: $e',
+                style: TextStyle(color: Colors.red.shade400, fontSize: 13),
+              ),
               const SizedBox(height: 12),
               ElevatedButton(
                 onPressed: () => ref.invalidate(configNotifierProvider),
@@ -141,7 +157,11 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     );
   }
 
-  Widget _buildForm(BuildContext context, AppConfig config, bool daemonRunning) {
+  Widget _buildForm(
+    BuildContext context,
+    AppConfig config,
+    bool daemonRunning,
+  ) {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(24),
       child: ConstrainedBox(
@@ -157,7 +177,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
             const SizedBox(height: 20),
             _retentionSection(),
             const SizedBox(height: 20),
-            _issueTrackingSection(),
+            _issueTrackingSection(config),
             const SizedBox(height: 20),
             _developSection(config),
             const SizedBox(height: 28),
@@ -191,7 +211,9 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
               helperText: 'Required scopes: repo, read:org',
               border: const OutlineInputBorder(),
               suffixIcon: IconButton(
-                icon: Icon(_obscureToken ? Icons.visibility : Icons.visibility_off),
+                icon: Icon(
+                  _obscureToken ? Icons.visibility : Icons.visibility_off,
+                ),
                 onPressed: () => setState(() => _obscureToken = !_obscureToken),
               ),
             ),
@@ -221,7 +243,8 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
             if (_discovering) ...[
               const SizedBox(width: 10),
               const SizedBox(
-                width: 14, height: 14,
+                width: 14,
+                height: 14,
                 child: CircularProgressIndicator(strokeWidth: 2),
               ),
             ],
@@ -248,9 +271,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
 
   Widget _repoList() {
     final sorted = _repoConfigs.keys.toList()..sort();
-    return Column(
-      children: sorted.map((repo) => _repoTile(repo)).toList(),
-    );
+    return Column(children: sorted.map((repo) => _repoTile(repo)).toList());
   }
 
   Widget _repoTile(String repo) {
@@ -264,20 +285,27 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
             _repoConfigs[repo] = rc.copyWith(prEnabled: v);
           }),
         ),
-        title: Text(repo,
-            style: TextStyle(
-              color: rc.isMonitored ? null : Colors.grey,
-              fontWeight: rc.isMonitored ? FontWeight.w600 : FontWeight.normal,
-            )),
+        title: Text(
+          repo,
+          style: TextStyle(
+            color: rc.isMonitored ? null : Colors.grey,
+            fontWeight: rc.isMonitored ? FontWeight.w600 : FontWeight.normal,
+          ),
+        ),
         subtitle: rc.hasAiOverride
-            ? Text('AI: ${rc.aiPrimary ?? "global"}', style: const TextStyle(fontSize: 12))
+            ? Text(
+                'AI: ${rc.aiPrimary ?? "global"}',
+                style: const TextStyle(fontSize: 12),
+              )
             : null,
         childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
         children: [
           const Divider(height: 1),
           const SizedBox(height: 10),
-          const Text('AI overrides for this repo',
-              style: TextStyle(fontSize: 12, color: Colors.grey)),
+          const Text(
+            'AI overrides for this repo',
+            style: TextStyle(fontSize: 12, color: Colors.grey),
+          ),
           const SizedBox(height: 8),
           Row(
             children: [
@@ -321,8 +349,13 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
         isDense: true,
       ),
       items: [
-        const DropdownMenuItem<String?>(value: null, child: Text('Global (no override)')),
-        ..._aiOptions.map((v) => DropdownMenuItem<String?>(value: v, child: Text(v))),
+        const DropdownMenuItem<String?>(
+          value: null,
+          child: Text('Global (no override)'),
+        ),
+        ..._aiOptions.map(
+          (v) => DropdownMenuItem<String?>(value: v, child: Text(v)),
+        ),
       ],
       onChanged: onChanged,
     );
@@ -343,9 +376,12 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
             helperText: 'How often to check GitHub for new review requests',
             border: OutlineInputBorder(),
           ),
-          items: ['1m', '5m', '30m', '1h']
-              .map((v) => DropdownMenuItem(value: v, child: Text(v)))
-              .toList(),
+          items: [
+            '1m',
+            '5m',
+            '30m',
+            '1h',
+          ].map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(),
           onChanged: (v) => setState(() => _pollInterval = v!),
         ),
       ],
@@ -366,7 +402,8 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
             border: OutlineInputBorder(),
           ),
           keyboardType: TextInputType.number,
-          onChanged: (v) => setState(() => _retentionDays = int.tryParse(v) ?? 90),
+          onChanged: (v) =>
+              setState(() => _retentionDays = int.tryParse(v) ?? 90),
         ),
       ],
     );
@@ -374,13 +411,14 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
 
   // ── Issue tracking ──────────────────────────────────────────────────────
 
-  Widget _issueTrackingSection() {
+  Widget _issueTrackingSection(AppConfig config) {
     return _settingsCard('Issue Tracking', [
       SwitchListTile(
-        title: const Text('Triage issues',
-            style: TextStyle(fontSize: 13)),
-        subtitle: const Text('AI reviews and triages GitHub issues',
-            style: TextStyle(fontSize: 11)),
+        title: const Text('Triage issues', style: TextStyle(fontSize: 13)),
+        subtitle: const Text(
+          'AI reviews and triages GitHub issues',
+          style: TextStyle(fontSize: 11),
+        ),
         dense: true,
         contentPadding: EdgeInsets.zero,
         value: _issueTracking.enabled,
@@ -454,7 +492,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
           label: 'Organizations',
           helper: 'Limit to issues from these orgs (empty = all monitored)',
           selectedValues: _issueTracking.organizations,
-          availableOptions: const [],
+          availableOptions: _knownOrganizationOptions(config),
           onChanged: (v) => setState(() {
             _issueTracking = _issueTracking.copyWith(organizations: v ?? []);
           }),
@@ -464,7 +502,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
           label: 'Assignees',
           helper: 'Only process issues assigned to these users (empty = any)',
           selectedValues: _issueTracking.assignees,
-          availableOptions: const [],
+          availableOptions: config.knownGitHubUsers,
           onChanged: (v) => setState(() {
             _issueTracking = _issueTracking.copyWith(assignees: v ?? []);
           }),
@@ -478,6 +516,15 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
         ),
       ],
     ]);
+  }
+
+  List<String> _knownOrganizationOptions(AppConfig config) {
+    final orgs = <String>{...config.knownOrganizations};
+    for (final repo in _repoConfigs.keys) {
+      final slash = repo.indexOf('/');
+      if (slash > 0) orgs.add(repo.substring(0, slash));
+    }
+    return orgs.where((o) => o.trim().isNotEmpty).toList()..sort();
   }
 
   List<String> _globalPRReviewers = [];
@@ -500,10 +547,14 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     final hasLabels = _issueTracking.developLabels.isNotEmpty;
     return _settingsCard('Develop', [
       SwitchListTile(
-        title: const Text('Auto-implement issues',
-            style: TextStyle(fontSize: 13)),
-        subtitle: const Text('Issues with develop labels get a branch + PR',
-            style: TextStyle(fontSize: 11)),
+        title: const Text(
+          'Auto-implement issues',
+          style: TextStyle(fontSize: 13),
+        ),
+        subtitle: const Text(
+          'Issues with develop labels get a branch + PR',
+          style: TextStyle(fontSize: 11),
+        ),
         dense: true,
         contentPadding: EdgeInsets.zero,
         value: hasLabels,
@@ -511,7 +562,9 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
           if (v) {
             // Give it a default label so the section stays enabled
             if (_issueTracking.developLabels.isEmpty) {
-              _issueTracking = _issueTracking.copyWith(developLabels: ['develop']);
+              _issueTracking = _issueTracking.copyWith(
+                developLabels: ['develop'],
+              );
             }
           } else {
             _issueTracking = _issueTracking.copyWith(developLabels: []);
@@ -562,14 +615,21 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
         const SizedBox(height: 10),
         Container(
           decoration: BoxDecoration(
-            color: Theme.of(context).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
+            color: Theme.of(
+              context,
+            ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
             borderRadius: BorderRadius.circular(6),
           ),
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
           child: SwitchListTile(
-            title: const Text('Create as draft', style: TextStyle(fontSize: 11)),
-            subtitle: Text('PRs are created as drafts by default',
-                style: TextStyle(fontSize: 10, color: Colors.grey.shade600)),
+            title: const Text(
+              'Create as draft',
+              style: TextStyle(fontSize: 11),
+            ),
+            subtitle: Text(
+              'PRs are created as drafts by default',
+              style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+            ),
             dense: true,
             contentPadding: EdgeInsets.zero,
             value: _globalPRDraft,
@@ -594,10 +654,14 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     required ValueChanged<String?> onChanged,
   }) {
     final agents = ref.watch(agentsProvider).valueOrNull ?? [];
-    final effective = (value != null && agents.any((a) => a.id == value)) ? value : null;
+    final effective = (value != null && agents.any((a) => a.id == value))
+        ? value
+        : null;
     return Container(
       decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
+        color: Theme.of(
+          context,
+        ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
         borderRadius: BorderRadius.circular(6),
       ),
       padding: const EdgeInsets.all(10),
@@ -606,9 +670,15 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
         children: [
           Row(
             children: [
-              Text(label, style: TextStyle(fontSize: 11, color: Colors.grey.shade500)),
+              Text(
+                label,
+                style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+              ),
               const Spacer(),
-              Text('global', style: TextStyle(fontSize: 10, color: Colors.grey.shade600)),
+              Text(
+                'global',
+                style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+              ),
             ],
           ),
           const SizedBox(height: 6),
@@ -626,18 +696,24 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
                 value: null,
                 child: Text('default', style: TextStyle(fontSize: 12)),
               ),
-              ...agents.map((a) => DropdownMenuItem<String?>(
-                    value: a.id,
-                    child: Text(a.name.isNotEmpty ? a.name : a.id,
-                        style: const TextStyle(fontSize: 12)),
-                  )),
+              ...agents.map(
+                (a) => DropdownMenuItem<String?>(
+                  value: a.id,
+                  child: Text(
+                    a.name.isNotEmpty ? a.name : a.id,
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                ),
+              ),
             ],
             onChanged: onChanged,
           ),
           Padding(
             padding: const EdgeInsets.only(top: 4),
-            child: Text(helper,
-                style: TextStyle(fontSize: 10, color: Colors.grey.shade600)),
+            child: Text(
+              helper,
+              style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+            ),
           ),
         ],
       ),
@@ -654,8 +730,13 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(title, style: const TextStyle(
-                  fontWeight: FontWeight.w600, fontSize: 15)),
+              Text(
+                title,
+                style: const TextStyle(
+                  fontWeight: FontWeight.w600,
+                  fontSize: 15,
+                ),
+              ),
               const SizedBox(height: 12),
               ...children,
             ],
@@ -682,14 +763,18 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
             try {
               final token = _tokenController.text.trim();
               if (token.isNotEmpty && !_tokenFromGh) {
-                await ref.read(platformServicesProvider).storeGitHubToken(token);
+                await ref
+                    .read(platformServicesProvider)
+                    .storeGitHubToken(token);
                 // Invalidate the cached token so the ApiClient re-reads it on the next request.
                 ref.read(apiClientProvider).clearTokenCache();
               }
               await ref.read(configNotifierProvider.notifier).save(updated);
               if (context.mounted) showToast(context, 'Settings saved');
             } catch (e) {
-              if (context.mounted) showToast(context, 'Error: $e', isError: true);
+              if (context.mounted) {
+                showToast(context, 'Error: $e', isError: true);
+              }
             }
           },
           child: const Text('Save'),
@@ -701,32 +786,48 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
       width: double.infinity,
       child: FilledButton.icon(
         icon: isLoading
-            ? const SizedBox(width: 16, height: 16,
-                child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+            ? const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: Colors.white,
+                ),
+              )
             : const Icon(Icons.rocket_launch),
         label: Text(isLoading ? 'Starting…' : 'Save and start Heimdallm'),
-        onPressed: isLoading ? null : () async {
-          final updated = _buildConfig(base);
-          final token = _tokenController.text.trim();
-          if (!_tokenFromGh && token.isEmpty) {
-            showToast(context, 'GitHub token is required', isError: true);
-            return;
-          }
-          await ref.read(configNotifierProvider.notifier).saveAndStartDaemon(
-            token: _tokenFromGh ? (_tokenController.text.trim()) : token,
-            config: updated,
-            daemonBinaryPath: ref.read(platformServicesProvider).defaultDaemonBinaryPath() ?? '',
-          );
-          if (context.mounted) {
-            final state = ref.read(configNotifierProvider);
-            if (state.hasError) {
-              showToast(context, '${state.error}', isError: true);
-            } else {
-              ref.invalidate(daemonHealthProvider);
-              context.canPop() ? context.pop() : context.go('/');
-            }
-          }
-        },
+        onPressed: isLoading
+            ? null
+            : () async {
+                final updated = _buildConfig(base);
+                final token = _tokenController.text.trim();
+                if (!_tokenFromGh && token.isEmpty) {
+                  showToast(context, 'GitHub token is required', isError: true);
+                  return;
+                }
+                await ref
+                    .read(configNotifierProvider.notifier)
+                    .saveAndStartDaemon(
+                      token: _tokenFromGh
+                          ? (_tokenController.text.trim())
+                          : token,
+                      config: updated,
+                      daemonBinaryPath:
+                          ref
+                              .read(platformServicesProvider)
+                              .defaultDaemonBinaryPath() ??
+                          '',
+                    );
+                if (context.mounted) {
+                  final state = ref.read(configNotifierProvider);
+                  if (state.hasError) {
+                    showToast(context, '${state.error}', isError: true);
+                  } else {
+                    ref.invalidate(daemonHealthProvider);
+                    context.canPop() ? context.pop() : context.go('/');
+                  }
+                }
+              },
       ),
     );
   }
@@ -757,13 +858,17 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
         border: Border.all(color: Colors.orange.shade700),
         borderRadius: BorderRadius.circular(8),
       ),
-      child: Row(children: [
-        Icon(Icons.info_outline, color: Colors.orange.shade700),
-        const SizedBox(width: 8),
-        const Expanded(
-          child: Text('Heimdallm is not running. Configure and tap "Save and start".'),
-        ),
-      ]),
+      child: Row(
+        children: [
+          Icon(Icons.info_outline, color: Colors.orange.shade700),
+          const SizedBox(width: 8),
+          const Expanded(
+            child: Text(
+              'Heimdallm is not running. Configure and tap "Save and start".',
+            ),
+          ),
+        ],
+      ),
     ),
   );
 
@@ -775,19 +880,27 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
       border: Border.all(color: color.withValues(alpha: 0.4)),
       borderRadius: BorderRadius.circular(6),
     ),
-    child: Row(children: [
-      Icon(icon, size: 16, color: color),
-      const SizedBox(width: 6),
-      Expanded(child: Text(text, style: TextStyle(fontSize: 13, color: color))),
-    ]),
+    child: Row(
+      children: [
+        Icon(icon, size: 16, color: color),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Text(text, style: TextStyle(fontSize: 13, color: color)),
+        ),
+      ],
+    ),
   );
 
   Widget _sectionHeader(String title) => Padding(
     padding: const EdgeInsets.only(bottom: 10),
-    child: Text(title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+    child: Text(
+      title,
+      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+    ),
   );
 
   Widget _sectionHeaderInline(String title) => Text(
-    title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+    title,
+    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
   );
 }

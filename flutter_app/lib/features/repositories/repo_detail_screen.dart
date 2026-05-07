@@ -225,15 +225,9 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
 
   String _joinList(List<String>? list) => list?.join(', ') ?? '';
 
-  List<String>? _parseList(String? value) {
-    if (value == null) return null;
-    final parsed = value
-        .split(',')
-        .map((s) => s.trim())
-        .where((s) => s.isNotEmpty)
-        .toList();
-    return parsed.isEmpty ? null : parsed;
-  }
+  List<String> _mergeOptions(List<String> first, List<String> second) =>
+      ({...first, ...second}.where((v) => v.trim().isNotEmpty).toList()
+        ..sort());
 
   // ── Section card ─────────────────────────────────────────────────────────────
 
@@ -475,22 +469,25 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                     onReset: () => _resetField('issue_tracking/default_action'),
                   ),
                   const SizedBox(height: 10),
-                  OverrideTextField(
+                  AutocompleteChipField(
                     label: 'Organizations',
                     helper: 'GitHub org names to filter issues',
-                    globalValue: _joinList(
-                      orgConfig?.issueOrganizations ??
-                          appConfig.issueTracking.organizations,
-                    ),
+                    selectedValues:
+                        _config.issueOrganizations ??
+                        orgConfig?.issueOrganizations ??
+                        appConfig.issueTracking.organizations,
+                    availableOptions: appConfig.knownOrganizations,
+                    isOverridden: _config.issueOrganizations != null,
                     inheritedLabel: source(
                       orgConfig?.issueOrganizations != null,
                     ),
-                    overrideValue: _config.issueOrganizations?.join(', '),
-                    onChanged: (v) => _update(
-                      _config.copyWith(
-                        issueOrganizations: v != null ? _parseList(v) : null,
-                      ),
+                    globalHint: _joinList(
+                      orgConfig?.issueOrganizations ??
+                          appConfig.issueTracking.organizations,
                     ),
+                    onChanged: (v) =>
+                        _update(_config.copyWith(issueOrganizations: v)),
+                    onReset: () => _resetField('issue_tracking/organizations'),
                   ),
                   const SizedBox(height: 10),
                   AutocompleteChipField(
@@ -500,7 +497,10 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                         _config.issueAssignees ??
                         orgConfig?.issueAssignees ??
                         appConfig.issueTracking.assignees,
-                    availableOptions: _repoCollaborators,
+                    availableOptions: _mergeOptions(
+                      _repoCollaborators,
+                      appConfig.knownGitHubUsers,
+                    ),
                     isOverridden: _config.issueAssignees != null,
                     inheritedLabel: source(orgConfig?.issueAssignees != null),
                     globalHint: _joinList(

@@ -318,6 +318,36 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
                     onReset: () => _resetField('issue_tracking/default_action'),
                   ),
                   const SizedBox(height: 10),
+                  AutocompleteChipField(
+                    label: 'Organizations',
+                    helper: 'GitHub org names to filter issues',
+                    selectedValues:
+                        _config.issueOrganizations ??
+                        appConfig.issueTracking.organizations,
+                    availableOptions: appConfig.knownOrganizations,
+                    isOverridden: _config.issueOrganizations != null,
+                    globalHint: _joinList(
+                      appConfig.issueTracking.organizations,
+                    ),
+                    onChanged: (v) =>
+                        _update(_config.copyWith(issueOrganizations: v)),
+                    onReset: () => _resetField('issue_tracking/organizations'),
+                  ),
+                  const SizedBox(height: 10),
+                  AutocompleteChipField(
+                    label: 'Assignees',
+                    helper: 'Only process issues assigned to these users',
+                    selectedValues:
+                        _config.issueAssignees ??
+                        appConfig.issueTracking.assignees,
+                    availableOptions: appConfig.knownGitHubUsers,
+                    isOverridden: _config.issueAssignees != null,
+                    globalHint: _joinList(appConfig.issueTracking.assignees),
+                    onChanged: (v) =>
+                        _update(_config.copyWith(issueAssignees: v)),
+                    onReset: () => _resetField('issue_tracking/assignees'),
+                  ),
+                  const SizedBox(height: 10),
                   OverrideDropdown(
                     label: 'Prompt',
                     globalValue: appConfig.globalIssuePrompt.isEmpty
