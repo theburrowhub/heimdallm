@@ -18,7 +18,7 @@ const (
 	EventIssueRefinementDone  = "issue_refinement_done"
 	EventIssueImplemented     = "issue_implemented" // reserved for #27 (auto_implement PR created)
 	EventIssueReviewError     = "issue_review_error"
-	EventIssuePromoted        = "issue_promoted" // #113: promoter flipped blocked → promote-to label
+	EventIssuePromoted        = "issue_promoted" // issue stage/dependency label promotion
 
 	// EventRepoDiscovered fires when the poll cycle sees a PR whose repo
 	// is not yet in monitored or non-monitored. Payload: {"repo": "org/name"}.

@@ -9,7 +9,7 @@ final issueListRefreshProvider = StateProvider<int>((ref) => 0);
 /// Tracks issues currently being reviewed, keyed by "repo:issueNumber".
 final reviewingIssuesProvider = StateProvider<Set<String>>((ref) => const {});
 
-/// Tracks issues currently being promoted to develop, keyed by "repo:issueNumber".
+/// Tracks issues currently being promoted to their next stage, keyed by "repo:issueNumber".
 final promotingIssuesProvider = StateProvider<Set<String>>((ref) => const {});
 
 final issuesProvider = FutureProvider<List<TrackedIssue>>((ref) async {
@@ -19,8 +19,10 @@ final issuesProvider = FutureProvider<List<TrackedIssue>>((ref) async {
   return api.fetchIssues(states: filters.states.toList());
 });
 
-final issueDetailProvider =
-    FutureProvider.family<Map<String, dynamic>, int>((ref, issueId) async {
+final issueDetailProvider = FutureProvider.family<Map<String, dynamic>, int>((
+  ref,
+  issueId,
+) async {
   ref.watch(sseStreamProvider);
   final api = ref.watch(apiClientProvider);
   return api.fetchIssue(issueId);

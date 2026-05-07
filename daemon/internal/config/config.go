@@ -121,14 +121,12 @@ const (
 //
 // Classification precedence (applied in Classify):
 //
-//	skip_labels  >  blocked_labels  >  develop_labels  >  refinement_labels  >  review_only_labels  >  default_action
+//	skip_labels  >  blocked_labels  >  review_only_labels  >  refinement_labels  >  develop_labels  >  default_action
 //
-// develop_labels intentionally takes precedence over review_only_labels: when
-// an issue carries both a "please implement" label and a "please review only"
-// label, the operator intent is auto_implement (the stronger action). This
-// prevents misclassification as IT (review_only) when labels overlap, which
-// would otherwise cause an infinite retry loop if the daemon later tried to
-// auto-implement an issue that was already classified as IT. See issue #223.
+// The stage labels intentionally prefer the earliest configured state. If an
+// issue is temporarily double-labelled during a transition, triage wins over
+// refinement, and refinement wins over development, so Heimdallm never skips
+// ahead silently.
 type IssueTrackingConfig struct {
 	Enabled bool `toml:"enabled" json:"enabled"`
 
@@ -149,15 +147,12 @@ type IssueTrackingConfig struct {
 	DevelopLabels []string `toml:"develop_labels" json:"develop_labels"`
 
 	// RefinementLabels are labels that mark an issue as "deeply investigate
-	// and produce an implementation plan". This is the v1 trigger for the
-	// refinement stage; automatic triage -> refinement promotion is owned by
-	// the issue state machine work.
+	// and produce an implementation plan". This is the trigger for the
+	// refinement stage and the target for triage -> refinement promotion.
 	RefinementLabels []string `toml:"refinement_labels" json:"refinement_labels"`
 
 	// ReviewOnlyLabels are labels that mark an issue as "please analyse and
-	// comment only". DevelopLabels take precedence over ReviewOnlyLabels when
-	// both are present on the same issue — the operator explicitly tagged it
-	// for implementation, which is the stronger intent. See issue #223.
+	// comment only". In the issue state machine this is the triage stage.
 	ReviewOnlyLabels []string `toml:"review_only_labels" json:"review_only_labels"`
 
 	// SkipLabels are labels that opt an issue out of processing entirely.
@@ -230,10 +225,10 @@ func (c IssueTrackingConfig) ResolvePromoteToLabel() string {
 // underlying labels API is case-preserving but the UI is not, so users
 // routinely mix "Bug" and "bug" in practice.
 //
-// Precedence: skip > blocked > develop > refinement > review_only > default_action.
-// develop beats review_only so that an issue tagged with both a DEV label and
-// an IT label is always auto-implemented, never silently downgraded to
-// review_only. This prevents the infinite retry loop described in issue #223.
+// Precedence: skip > blocked > review_only > refinement > develop > default_action.
+// The stage order follows the state machine: triage (review_only) comes before
+// refinement, which comes before development. This keeps messy multi-label
+// states recoverable by choosing the earliest stage instead of jumping ahead.
 func (c IssueTrackingConfig) Classify(labels []string) IssueMode {
 	set := make(map[string]struct{}, len(labels))
 	for _, l := range labels {
@@ -245,16 +240,14 @@ func (c IssueTrackingConfig) Classify(labels []string) IssueMode {
 	if labelSetIntersects(set, c.BlockedLabels) {
 		return IssueModeBlocked
 	}
-	// develop takes precedence over review_only: when both are present the
-	// operator wants auto_implement (the stronger action). See issue #223.
-	if labelSetIntersects(set, c.DevelopLabels) {
-		return IssueModeDevelop
+	if labelSetIntersects(set, c.ReviewOnlyLabels) {
+		return IssueModeReviewOnly
 	}
 	if labelSetIntersects(set, c.RefinementLabels) {
 		return IssueModeRefinement
 	}
-	if labelSetIntersects(set, c.ReviewOnlyLabels) {
-		return IssueModeReviewOnly
+	if labelSetIntersects(set, c.DevelopLabels) {
+		return IssueModeDevelop
 	}
 	switch strings.ToLower(c.DefaultAction) {
 	case "review_only":

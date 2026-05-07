@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -106,6 +107,33 @@ type fakeIssuePublisher struct {
 	triage     []int
 	refinement []int
 	implement  []int
+}
+
+type fakeStageTransitionClient struct {
+	created  []string
+	added    []string
+	removed  []string
+	comments []string
+}
+
+func (f *fakeStageTransitionClient) CreateLabel(repo, name, color, description string) error {
+	f.created = append(f.created, name)
+	return nil
+}
+
+func (f *fakeStageTransitionClient) AddLabels(repo string, number int, labels []string) error {
+	f.added = append(f.added, strings.Join(labels, ","))
+	return nil
+}
+
+func (f *fakeStageTransitionClient) RemoveLabels(repo string, number int, labels []string) error {
+	f.removed = append(f.removed, strings.Join(labels, ","))
+	return nil
+}
+
+func (f *fakeStageTransitionClient) PostComment(repo string, number int, body string) (time.Time, error) {
+	f.comments = append(f.comments, body)
+	return time.Now().UTC(), nil
 }
 
 func (f *fakeIssuePublisher) PublishIssueTriage(ctx context.Context, repo string, number int, githubID int64) error {
@@ -641,6 +669,56 @@ func TestFetcher_ModeChangeBypassesBotCommentCheck(t *testing.T) {
 	}
 	if processed != 1 {
 		t.Errorf("mode change should bypass bot-comment check, got processed=%d", processed)
+	}
+}
+
+func TestFetcher_ManualStageLabelChangeAuditsAndDispatchesNewStage(t *testing.T) {
+	now := time.Now()
+	issue := &github.Issue{
+		ID:        int64(1002),
+		Number:    2,
+		Repo:      "org/repo",
+		Title:     "Needs plan",
+		UpdatedAt: now,
+		Mode:      config.IssueModeRefinement,
+	}
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {
+			row: &store.Issue{ID: 11, GithubID: issue.ID},
+			review: &store.IssueReview{
+				IssueID:     11,
+				CommentedAt: now.Add(-2 * time.Minute),
+				ActionTaken: string(config.IssueModeReviewOnly),
+			},
+		},
+	}}
+	mf := &fakeMarkerFetcher{commentsByKey: map[string][]github.Comment{"org/repo#2": {}}}
+	pub := &fakeIssuePublisher{}
+	stage := &fakeStageTransitionClient{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, mf, dedup, &fakePipeline{})
+	f.SetPublisher(pub)
+	f.SetStageTransitioner(stage, nil)
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", config.IssueTrackingConfig{
+		Enabled:          true,
+		ReviewOnlyLabels: []string{"triage"},
+		RefinementLabels: []string{"refine"},
+		DevelopLabels:    []string{"develop"},
+	}, "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 1 || len(pub.refinement) != 1 || pub.refinement[0] != 2 {
+		t.Fatalf("expected refinement dispatch, processed=%d pub=%v", processed, pub.refinement)
+	}
+	if len(stage.added) != 1 || stage.added[0] != "refine" {
+		t.Fatalf("stage added = %v, want [refine]", stage.added)
+	}
+	if len(stage.removed) != 1 || stage.removed[0] != "triage,develop" {
+		t.Fatalf("stage removed = %v, want [triage,develop]", stage.removed)
+	}
+	if len(stage.comments) != 1 || !strings.Contains(stage.comments[0], "manual GitHub label change") {
+		t.Fatalf("stage audit comment = %q, want manual GitHub trigger", stage.comments)
 	}
 }
 

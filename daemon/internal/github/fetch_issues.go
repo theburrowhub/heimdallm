@@ -48,9 +48,8 @@ const maxIssuePages = 10
 //     dimension is "active" only when its configured list is non-empty.
 //
 //  4. Sorts: issues assigned to authenticatedUser first, then the rest;
-//     within each group review_only before develop (review is cheap, develop
-//     is expensive, so it clears the queue faster); within each mode oldest
-//     first so long-pending issues move forward.
+//     within each group triage (review_only) before refinement before develop;
+//     within each mode oldest first so long-pending issues move forward.
 //
 // The store-level "skip already processed without new activity" check is
 // intentionally not here — it needs the local store and belongs to the
@@ -259,11 +258,23 @@ func sortIssuesByPriority(issues []*Issue, authenticatedUser string) {
 		if am != bm {
 			return am // mine first
 		}
-		aDev := a.Mode == config.IssueModeDevelop
-		bDev := b.Mode == config.IssueModeDevelop
-		if aDev != bDev {
-			return !aDev // review_only (develop=false) first
+		ar, br := issueModeRank(a.Mode), issueModeRank(b.Mode)
+		if ar != br {
+			return ar < br
 		}
 		return a.CreatedAt.Before(b.CreatedAt) // older first
 	})
+}
+
+func issueModeRank(mode config.IssueMode) int {
+	switch mode {
+	case config.IssueModeReviewOnly:
+		return 0
+	case config.IssueModeRefinement:
+		return 1
+	case config.IssueModeDevelop:
+		return 2
+	default:
+		return 3
+	}
 }

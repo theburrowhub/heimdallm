@@ -48,13 +48,16 @@ class _IssueDetailScreenState extends ConsumerState<IssueDetailScreen> {
       ref.invalidate(issuesProvider);
       if (context.mounted) {
         context.canPop() ? context.pop() : context.go('/');
-        showToast(context, 'Issue dismissed',
-            duration: const Duration(seconds: 5),
-            actionLabel: 'Undo',
-            onAction: () async {
-              await api.undismissIssue(widget.issueId);
-              ref.invalidate(issuesProvider);
-            });
+        showToast(
+          context,
+          'Issue dismissed',
+          duration: const Duration(seconds: 5),
+          actionLabel: 'Undo',
+          onAction: () async {
+            await api.undismissIssue(widget.issueId);
+            ref.invalidate(issuesProvider);
+          },
+        );
       }
     } catch (e) {
       if (!context.mounted) return;
@@ -68,7 +71,7 @@ class _IssueDetailScreenState extends ConsumerState<IssueDetailScreen> {
     try {
       await api.promoteIssue(widget.issueId);
       ref.invalidate(issueDetailProvider(widget.issueId));
-      if (mounted) showToast(context, 'Promoted to auto-implement');
+      if (mounted) showToast(context, 'Stage promotion requested');
     } catch (e) {
       _stopReviewing();
       if (mounted) showToast(context, 'Error: $e', isError: true);
@@ -108,11 +111,29 @@ class _IssueDetailScreenState extends ConsumerState<IssueDetailScreen> {
                 _stopReviewing();
                 ref.invalidate(issueDetailProvider(widget.issueId));
               }
+            case 'issue_refinement_done':
+              if (issueId == widget.issueId) {
+                _stopReviewing();
+                ref.invalidate(issueDetailProvider(widget.issueId));
+              }
+            case 'issue_implemented':
+              if (issueId == widget.issueId) {
+                _stopReviewing();
+                ref.invalidate(issueDetailProvider(widget.issueId));
+              }
+            case 'issue_promoted':
+              if (issueId == widget.issueId) {
+                _stopReviewing();
+                ref.invalidate(issueDetailProvider(widget.issueId));
+                ref.invalidate(issuesProvider);
+              }
             case 'issue_review_error':
               if (issueId == widget.issueId) {
                 _stopReviewing();
                 final error = data['error'] as String? ?? 'Unknown error';
-                if (mounted) showToast(context, 'Review failed: $error', isError: true);
+                if (mounted) {
+                  showToast(context, 'Review failed: $error', isError: true);
+                }
               }
           }
         } catch (_) {}
@@ -126,7 +147,8 @@ class _IssueDetailScreenState extends ConsumerState<IssueDetailScreen> {
 
     final reviewKey = issue != null ? '${issue.repo}:${issue.number}' : null;
     final isReviewingShared =
-        reviewKey != null && ref.watch(reviewingIssuesProvider).contains(reviewKey);
+        reviewKey != null &&
+        ref.watch(reviewingIssuesProvider).contains(reviewKey);
     final reviewing = _reviewing || isReviewingShared;
 
     return Scaffold(
@@ -141,8 +163,10 @@ class _IssueDetailScreenState extends ConsumerState<IssueDetailScreen> {
             const Padding(
               padding: EdgeInsets.symmetric(horizontal: 16),
               child: SizedBox(
-                  width: 20, height: 20,
-                  child: CircularProgressIndicator(strokeWidth: 2)),
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
             )
           else ...[
             ElevatedButton.icon(
@@ -150,11 +174,11 @@ class _IssueDetailScreenState extends ConsumerState<IssueDetailScreen> {
               label: Text(hasReviews ? 'Re-review' : 'Review'),
               onPressed: _trigger,
             ),
-            if (hasReviews && reviews.last.actionTaken == 'review_only') ...[
+            if (hasReviews && _canPromoteAction(reviews.last.actionTaken)) ...[
               const SizedBox(width: 8),
               ElevatedButton.icon(
                 icon: const Icon(Icons.rocket_launch, size: 16),
-                label: const Text('Promote to Dev'),
+                label: Text(_promoteLabel(reviews.last.actionTaken)),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Theme.of(context).colorScheme.secondary,
                   foregroundColor: Theme.of(context).colorScheme.onSecondary,
@@ -177,7 +201,9 @@ class _IssueDetailScreenState extends ConsumerState<IssueDetailScreen> {
           if (reviewing)
             LinearProgressIndicator(
               minHeight: 3,
-              backgroundColor: Theme.of(context).colorScheme.surfaceContainerHighest,
+              backgroundColor: Theme.of(
+                context,
+              ).colorScheme.surfaceContainerHighest,
             ),
           Expanded(
             child: detailAsync.when(
@@ -188,7 +214,10 @@ class _IssueDetailScreenState extends ConsumerState<IssueDetailScreen> {
                 final reviews = data['reviews'] as List<TrackedIssueReview>;
                 return Row(
                   children: [
-                    Expanded(flex: 2, child: _ReviewPanel(issue: issue, reviews: reviews)),
+                    Expanded(
+                      flex: 2,
+                      child: _ReviewPanel(issue: issue, reviews: reviews),
+                    ),
                     const VerticalDivider(width: 1),
                     Expanded(flex: 1, child: _IssueMetaPanel(issue: issue)),
                   ],
@@ -201,6 +230,12 @@ class _IssueDetailScreenState extends ConsumerState<IssueDetailScreen> {
     );
   }
 }
+
+bool _canPromoteAction(String action) =>
+    action == 'review_only' || action == 'refinement';
+
+String _promoteLabel(String action) =>
+    action == 'refinement' ? 'Promote to Dev' : 'Promote Stage';
 
 class _ReviewPanel extends StatelessWidget {
   final TrackedIssue issue;
@@ -215,8 +250,10 @@ class _ReviewPanel extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(issue.title, style: Theme.of(context).textTheme.headlineSmall),
-          Text('${issue.repo} #${issue.number} by ${issue.author}',
-              style: Theme.of(context).textTheme.bodySmall),
+          Text(
+            '${issue.repo} #${issue.number} by ${issue.author}',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
           const SizedBox(height: 16),
           if (reviews.isEmpty)
             const Text('No reviews yet.')
@@ -243,17 +280,26 @@ class _IssueReviewCard extends StatelessWidget {
           children: [
             Row(
               children: [
-                Text('Reviewed by ${review.cliUsed}',
-                    style: Theme.of(context).textTheme.labelSmall),
+                Text(
+                  'Reviewed by ${review.cliUsed}',
+                  style: Theme.of(context).textTheme.labelSmall,
+                ),
                 const SizedBox(width: 8),
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 6,
+                    vertical: 2,
+                  ),
                   decoration: BoxDecoration(
-                    color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                    color: Theme.of(
+                      context,
+                    ).colorScheme.surfaceContainerHighest,
                     borderRadius: BorderRadius.circular(4),
                   ),
-                  child: Text(review.actionTaken,
-                      style: const TextStyle(fontSize: 10)),
+                  child: Text(
+                    review.actionTaken,
+                    style: const TextStyle(fontSize: 10),
+                  ),
                 ),
                 const Spacer(),
                 SeverityBadge(severity: review.severity),
@@ -263,7 +309,10 @@ class _IssueReviewCard extends StatelessWidget {
             Text(review.summary),
             if (review.category.isNotEmpty) ...[
               const SizedBox(height: 8),
-              Text('Classification', style: Theme.of(context).textTheme.labelMedium),
+              Text(
+                'Classification',
+                style: Theme.of(context).textTheme.labelMedium,
+              ),
               Padding(
                 padding: const EdgeInsets.only(top: 4, left: 8),
                 child: Text('Category: ${review.category}'),
@@ -271,18 +320,23 @@ class _IssueReviewCard extends StatelessWidget {
             ],
             if (review.suggestions.isNotEmpty) ...[
               const SizedBox(height: 8),
-              Text('Suggestions', style: Theme.of(context).textTheme.labelMedium),
-              ...review.suggestions.map((s) => Padding(
-                    padding: const EdgeInsets.only(top: 4, left: 8),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Icon(Icons.lightbulb_outline, size: 14),
-                        const SizedBox(width: 4),
-                        Expanded(child: Text(s.toString())),
-                      ],
-                    ),
-                  )),
+              Text(
+                'Suggestions',
+                style: Theme.of(context).textTheme.labelMedium,
+              ),
+              ...review.suggestions.map(
+                (s) => Padding(
+                  padding: const EdgeInsets.only(top: 4, left: 8),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Icon(Icons.lightbulb_outline, size: 14),
+                      const SizedBox(width: 4),
+                      Expanded(child: Text(s.toString())),
+                    ],
+                  ),
+                ),
+              ),
             ],
           ],
         ),
@@ -308,8 +362,11 @@ class _IssueMetaPanel extends StatelessWidget {
           _row(context, 'Number', '#${issue.number}'),
           _row(context, 'Author', issue.author),
           _row(context, 'State', issue.state),
-          _row(context, 'Created',
-              issue.createdAt.toLocal().toString().substring(0, 16)),
+          _row(
+            context,
+            'Created',
+            issue.createdAt.toLocal().toString().substring(0, 16),
+          ),
           if (issue.assignees.isNotEmpty)
             _row(context, 'Assignees', issue.assignees.join(', ')),
           if (issue.labels.isNotEmpty) ...[
@@ -318,11 +375,16 @@ class _IssueMetaPanel extends StatelessWidget {
               spacing: 4,
               runSpacing: 4,
               children: issue.labels
-                  .map((l) => Chip(
-                        label: Text(l.toString(), style: const TextStyle(fontSize: 11)),
-                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                        visualDensity: VisualDensity.compact,
-                      ))
+                  .map(
+                    (l) => Chip(
+                      label: Text(
+                        l.toString(),
+                        style: const TextStyle(fontSize: 11),
+                      ),
+                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      visualDensity: VisualDensity.compact,
+                    ),
+                  )
                   .toList(),
             ),
           ],
@@ -332,7 +394,8 @@ class _IssueMetaPanel extends StatelessWidget {
             label: const Text('Open on GitHub'),
             onPressed: () {
               final uri = Uri.tryParse(
-                  'https://github.com/${issue.repo}/issues/${issue.number}');
+                'https://github.com/${issue.repo}/issues/${issue.number}',
+              );
               if (uri != null) launchUrl(uri);
             },
           ),
@@ -347,9 +410,12 @@ class _IssueMetaPanel extends StatelessWidget {
       child: Row(
         children: [
           SizedBox(
-              width: 72,
-              child: Text('$label:',
-                  style: const TextStyle(fontWeight: FontWeight.w600))),
+            width: 72,
+            child: Text(
+              '$label:',
+              style: const TextStyle(fontWeight: FontWeight.w600),
+            ),
+          ),
           Expanded(child: Text(value)),
         ],
       ),

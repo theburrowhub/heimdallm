@@ -402,8 +402,8 @@ class ApiClient {
     }
   }
 
-  /// Promotes a review_only-classified issue to auto_implement, triggering the
-  /// full develop pipeline without requiring a GitHub label change.
+  /// Moves an issue to the next configured stage by updating GitHub labels.
+  /// The daemon poller executes the new stage after it observes the label swap.
   Future<void> promoteIssue(int issueId) async {
     final resp = await _client.post(
       _uri('/issues/$issueId/promote'),

@@ -14,7 +14,7 @@ Heimdallm runs in the background and does three things, in parallel, at your con
 Watches the PRs where you're requested as a reviewer, runs an AI code review, and submits it to GitHub as your account. No copy-pasting, no manual prompting.
 
 ### 2. Issue triage & auto-implement
-Fetches issues from monitored repos, classifies them by label (`review_only` vs `auto_implement` vs `skip` vs `blocked`), and for the develop-track ones optionally **creates a branch, commits the change, and opens a PR** against your default branch — fully autonomous on the issues you mark for it. Issues can declare dependencies on other issues/PRs; Heimdallm holds them in a `blocked` state until the prerequisites close, then promotes them automatically.
+Fetches issues from monitored repos, classifies them by label (`review_only` triage, `refinement`, `develop` / `auto_implement`, `skip`, `blocked`), and can move issues through triage -> refinement -> development. Develop-track issues optionally **create a branch, commit the change, and open a PR** against your default branch. Issues can declare dependencies on other issues/PRs; Heimdallm holds them in a `blocked` state until the prerequisites close, then promotes them automatically.
 
 ### 3. Self-monitoring UI
 A Flutter Web dashboard (`:3000`) with Dashboard, PR list, Issue list, prompt/agent editor, live config editor, and a live log stream. Opens alongside the daemon in Docker mode.
@@ -22,7 +22,7 @@ A Flutter Web dashboard (`:3000`) with Dashboard, PR list, Issue list, prompt/ag
 ### Headline features
 
 - **Automatic reviews** — polls `review-requested:@me` on GitHub and submits reviews as your account
-- **Issue pipeline** — label-driven triage + optional auto-implement with branch/commit/PR cycle
+- **Issue pipeline** — label-driven triage, refinement planning, and optional auto-implement with branch/commit/PR cycle
 - **Issue dependencies** — mark downstream work with a `blocked` label; declare deps via a `## Depends on` body section *or* GitHub's native sub-issues; Heimdallm auto-promotes when all blockers close
 - **Configurable prompts** — general review, security audit, performance, architecture, or your own with `{diff}` `{title}` `{author}` `{comments}` placeholders, managed from the web UI at `/agents`
 - **Two feedback modes** — *single* (one consolidated review) or *multi* (one GitHub comment per issue + summary), globally and per repo
@@ -335,7 +335,7 @@ label:
    label(s), add `HEIMDALLM_ISSUE_PROMOTE_TO_LABEL`, and leave an audit
    comment listing each dep and its state at check time.
 6. The same poll cycle's fetch pass then classifies the promoted issue
-   normally and dispatches it to triage or auto-implement.
+   normally and dispatches it to triage, refinement, or auto-implement.
 
 Issues with a blocked label but **no declared deps in either source**
 stay blocked — the daemon won't guess when to unblock them. Remove the
@@ -344,10 +344,12 @@ a given issue, Heimdallm skips that issue for the current cycle rather
 than risk promoting on incomplete information.
 
 Classification precedence is
-`skip > blocked > review_only > develop > default_action`, so an issue
+`skip > blocked > review_only > refinement > develop > default_action`, so an issue
 tagged with both a blocked and a develop label stays blocked until
-promotion. The feature is **opt-in**: leave `HEIMDALLM_ISSUE_BLOCKED_LABELS`
+promotion. Stage promotion updates labels only; the next poll executes the newly visible stage. The feature is **opt-in**: leave `HEIMDALLM_ISSUE_BLOCKED_LABELS`
 empty and nothing about the existing pipeline changes.
+
+**Upgrade note for staged issues:** earlier-stage labels now win over later-stage labels. If you previously used overlapping triage/develop labels to force direct development, split them into dedicated labels or remove the triage label before applying the develop label. `auto_promote_triage` defaults on only when `refinement_labels` is configured; set it to `false` to keep refinement promotion manual.
 
 ### Automated install (for agents / scripts)
 

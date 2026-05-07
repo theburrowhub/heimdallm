@@ -94,6 +94,9 @@ type Fetcher struct {
 	pipeline  PipelineRunner
 	publisher IssuePublisher // optional — when set, publishes to NATS instead of running pipeline
 	botLogin  string         // GitHub login of the bot — used to ignore self-triggered updated_at bumps
+
+	stageClient StageTransitionClient
+	stageBroker Publisher
 }
 
 // NewFetcher wires the orchestrator. All dependencies are interfaces so
@@ -115,6 +118,14 @@ func (f *Fetcher) SetPublisher(p IssuePublisher) {
 // breaking the re-triage loop described in #362.
 func (f *Fetcher) SetBotLogin(login string) {
 	f.botLogin = login
+}
+
+// SetStageTransitioner enables audit + normalization when a user manually
+// changes stage labels on GitHub. The next poll sees the new classification,
+// records the transition, and then dispatches the new stage normally.
+func (f *Fetcher) SetStageTransitioner(client StageTransitionClient, broker Publisher) {
+	f.stageClient = client
+	f.stageBroker = broker
 }
 
 // ProcessRepo fetches every eligible issue for one repo and dispatches it to
@@ -160,6 +171,10 @@ func (f *Fetcher) ProcessRepo(ctx context.Context, repo string, cfg config.Issue
 			slog.Debug("issues fetcher: skipping issue",
 				"repo", repo, "number", issue.Number, "reason", reason)
 			continue
+		}
+		if err := f.auditManualStageChange(ctx, issue, cfg); err != nil {
+			slog.Warn("issues fetcher: manual stage transition audit failed",
+				"repo", repo, "number", issue.Number, "err", err)
 		}
 
 		if f.publisher != nil {
@@ -296,4 +311,55 @@ func (f *Fetcher) alreadyProcessed(issue *github.Issue) (bool, string, error) {
 		return true, "no new activity since last review", nil
 	}
 	return false, "", nil
+}
+
+func (f *Fetcher) auditManualStageChange(ctx context.Context, issue *github.Issue, cfg config.IssueTrackingConfig) error {
+	if f.stageClient == nil || issue == nil {
+		return nil
+	}
+	to, ok := StageFromMode(issue.Mode)
+	if !ok {
+		return nil
+	}
+	row, err := f.store.GetIssueByGithubID(issue.ID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	latest, err := f.store.LatestIssueReview(row.ID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	from, ok := StageFromAction(latest.ActionTaken)
+	if !ok || from == to {
+		return nil
+	}
+
+	var comments []github.Comment
+	if f.comments != nil {
+		got, err := f.comments.FetchIssueCommentsOnly(issue.Repo, issue.Number)
+		if err != nil {
+			slog.Warn("issues fetcher: manual stage audit comment fetch failed, continuing without dedup context",
+				"repo", issue.Repo, "number", issue.Number, "err", err)
+		} else {
+			comments = got
+		}
+	}
+
+	return TransitionIssueStage(ctx, f.stageClient, StageTransition{
+		Issue:          issue,
+		StoreIssueID:   row.ID,
+		Config:         cfg,
+		From:           from,
+		To:             to,
+		Trigger:        StagePromotionManualGitHub,
+		Time:           time.Now().UTC(),
+		RecentComments: comments,
+		Broker:         f.stageBroker,
+	})
 }
