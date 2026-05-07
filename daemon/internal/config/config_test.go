@@ -196,6 +196,57 @@ func TestValidate_AllValidIntervals(t *testing.T) {
 	}
 }
 
+func TestValidate_InvalidRefinementTimeout(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{
+			name: "global",
+			cfg: Config{
+				AI: AIConfig{Primary: "claude", RefinementTimeout: "30 m"},
+			},
+			want: "ai.refinement_timeout",
+		},
+		{
+			name: "org",
+			cfg: Config{
+				AI: AIConfig{
+					Primary: "claude",
+					Orgs: map[string]OrgAI{
+						"org": {RefinementTimeout: "-1m"},
+					},
+				},
+			},
+			want: `ai.orgs."org".refinement_timeout`,
+		},
+		{
+			name: "repo",
+			cfg: Config{
+				AI: AIConfig{
+					Primary: "claude",
+					Repos: map[string]RepoAI{
+						"org/repo": {RefinementTimeout: "0s"},
+					},
+				},
+			},
+			want: `ai.repos."org/repo".refinement_timeout`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.cfg.Validate()
+			if err == nil {
+				t.Fatal("Validate() = nil, want error")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Validate() error = %v, want path %q", err, tc.want)
+			}
+		})
+	}
+}
+
 // ── Topic-based discovery ────────────────────────────────────────────────────
 
 func TestApplyDefaults_DiscoveryIntervalUnsetWhenTopicSet(t *testing.T) {

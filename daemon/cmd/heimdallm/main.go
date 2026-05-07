@@ -927,7 +927,7 @@ func main() {
 		localDirBase := c.GitHub.LocalDirBase
 		globalTimeout := c.AI.ExecutionTimeout
 		cfgMu.Unlock()
-		repoHandle, err := acquireRepoContext(ctx, repoCtx, msg.Repo, &aiCfg, localDirBase, token, repoctx.ModeRead)
+		opts, releaseRepoContext, err := buildRefinementRunOptions(ctx, s, repoCtx, msg.Repo, token, aiCfg, agentCfg, localDirBase, globalTimeout, false, "refinement-worker")
 		if err != nil {
 			slog.Error("refinement-worker: prepare repo context failed",
 				"repo", msg.Repo, "number", msg.Number, "err", err)
@@ -939,50 +939,8 @@ func main() {
 			})
 			return
 		}
-		if repoHandle != nil {
-			defer repoHandle.Release()
-			ensureRepoContextFullHistory(ctx, repoCtx, repoHandle, token, "refinement-worker", msg.Repo)
-		}
-
-		extraFlags := agentCfg.ExtraFlags
-		if extraFlags != "" {
-			if err := executor.ValidateExtraFlags(extraFlags); err != nil {
-				slog.Warn("refinement-worker: extra_flags rejected", "err", err)
-				extraFlags = ""
-			}
-		}
-
-		issuePrompt, issueInstructions := resolveIssuePrompt(s, aiCfg.IssuePrompt, agentCfg.PromptID)
-		implPrompt, implInstructions := resolveImplementPrompt(s, aiCfg.ImplementPrompt, agentCfg.PromptID)
-
-		opts := issuepipeline.RunOptions{
-			GitHubToken: token,
-			Primary:     aiCfg.Primary,
-			Fallback:    aiCfg.Fallback,
-			ExecOpts: executor.ExecOptions{
-				Model:                agentCfg.Model,
-				MaxTurns:             agentCfg.MaxTurns,
-				ApprovalMode:         agentCfg.ApprovalMode,
-				ExtraFlags:           extraFlags,
-				WorkDir:              aiCfg.LocalDir,
-				Effort:               agentCfg.Effort,
-				PermissionMode:       agentCfg.PermissionMode,
-				Bare:                 agentCfg.Bare,
-				DangerouslySkipPerms: agentCfg.DangerouslySkipPerms,
-				NoSessionPersistence: agentCfg.NoSessionPersistence,
-				Timeout:              resolveRefinementTimeout(aiCfg.RefinementTimeout, globalTimeout, agentCfg.ExecutionTimeout),
-			},
-			IssuePromptOverride:         issuePrompt,
-			IssueInstructions:           issueInstructions,
-			TriageOwner:                 aiCfg.TriageOwner,
-			ImplementPromptOverride:     implPrompt,
-			ImplementInstructions:       implInstructions,
-			PRReviewers:                 aiCfg.PRReviewers,
-			PRAssignee:                  aiCfg.PRAssignee,
-			PRLabels:                    aiCfg.PRLabels,
-			PRDraft:                     aiCfg.PRDraft != nil && *aiCfg.PRDraft,
-			GeneratePRDescription:       aiCfg.GeneratePRDescription != nil && *aiCfg.GeneratePRDescription,
-			RequireWorkDirForRefinement: true,
+		if releaseRepoContext != nil {
+			defer releaseRepoContext()
 		}
 
 		if _, err := issuePipe.Run(ctx, ghIssue, opts); err != nil {
@@ -990,6 +948,9 @@ func main() {
 				"repo", msg.Repo, "number", msg.Number, "err", err)
 		}
 
+		// Enroll for state watching so closed/resolved issues update in the UI.
+		// Runs even after pipeline failure, matching triage/implement: state
+		// tracking is independent of whether the refinement artifact completed.
 		if err := watchStore.Enroll(ctx, "issue", msg.Repo, msg.Number, msg.GithubID); err != nil {
 			slog.Warn("refinement-worker: failed to enroll watch",
 				"repo", msg.Repo, "number", msg.Number, "err", err)
@@ -1681,7 +1642,7 @@ func main() {
 
 	// Wire the issue-refinement trigger callback: run deep repo investigation on a stored issue.
 	srv.SetTriggerIssueRefineFn(func(issueID int64, force bool) error {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
 		publishIssueErr := func(msg string) {
@@ -1705,64 +1666,22 @@ func main() {
 		ghIssue.Mode = config.IssueModeRefinement
 
 		cfgMu.Lock()
-		aiCfg := cfg.AIForRepo(iss.Repo)
+		c := *cfg
+		aiCfg := c.AIForRepo(iss.Repo)
 		if aiCfg.Primary == "" {
-			aiCfg.Primary = cfg.AI.Primary
+			aiCfg.Primary = c.AI.Primary
 		}
-		agentCfg := cfg.AgentConfigFor(aiCfg.Primary)
-		localDirBase := cfg.GitHub.LocalDirBase
-		globalTimeout := cfg.AI.ExecutionTimeout
+		agentCfg := c.AgentConfigFor(aiCfg.Primary)
+		localDirBase := c.GitHub.LocalDirBase
+		globalTimeout := c.AI.ExecutionTimeout
 		cfgMu.Unlock()
-		repoHandle, err := acquireRepoContext(ctx, repoCtx, iss.Repo, &aiCfg, localDirBase, token, repoctx.ModeRead)
+		opts, releaseRepoContext, err := buildRefinementRunOptions(ctx, s, repoCtx, iss.Repo, token, aiCfg, agentCfg, localDirBase, globalTimeout, force, "trigger issue refinement")
 		if err != nil {
 			publishIssueErr(fmt.Sprintf("Failed to prepare repo context: %v", err))
 			return fmt.Errorf("trigger issue refinement: prepare repo context: %w", err)
 		}
-		if repoHandle != nil {
-			defer repoHandle.Release()
-			ensureRepoContextFullHistory(ctx, repoCtx, repoHandle, token, "trigger issue refinement", iss.Repo)
-		}
-
-		extraFlags := agentCfg.ExtraFlags
-		if extraFlags != "" {
-			if err := executor.ValidateExtraFlags(extraFlags); err != nil {
-				slog.Warn("triggerIssueRefine: extra_flags rejected", "err", err)
-				extraFlags = ""
-			}
-		}
-
-		issuePrompt, issueInstructions := resolveIssuePrompt(s, aiCfg.IssuePrompt, agentCfg.PromptID)
-		implPrompt, implInstructions := resolveImplementPrompt(s, aiCfg.ImplementPrompt, agentCfg.PromptID)
-
-		opts := issuepipeline.RunOptions{
-			GitHubToken: token,
-			Primary:     aiCfg.Primary,
-			Fallback:    aiCfg.Fallback,
-			ExecOpts: executor.ExecOptions{
-				Model:                agentCfg.Model,
-				MaxTurns:             agentCfg.MaxTurns,
-				ApprovalMode:         agentCfg.ApprovalMode,
-				ExtraFlags:           extraFlags,
-				WorkDir:              aiCfg.LocalDir,
-				Effort:               agentCfg.Effort,
-				PermissionMode:       agentCfg.PermissionMode,
-				Bare:                 agentCfg.Bare,
-				DangerouslySkipPerms: agentCfg.DangerouslySkipPerms,
-				NoSessionPersistence: agentCfg.NoSessionPersistence,
-				Timeout:              resolveRefinementTimeout(aiCfg.RefinementTimeout, globalTimeout, agentCfg.ExecutionTimeout),
-			},
-			IssuePromptOverride:         issuePrompt,
-			IssueInstructions:           issueInstructions,
-			TriageOwner:                 aiCfg.TriageOwner,
-			ImplementPromptOverride:     implPrompt,
-			ImplementInstructions:       implInstructions,
-			PRReviewers:                 aiCfg.PRReviewers,
-			PRAssignee:                  aiCfg.PRAssignee,
-			PRLabels:                    aiCfg.PRLabels,
-			PRDraft:                     aiCfg.PRDraft != nil && *aiCfg.PRDraft,
-			GeneratePRDescription:       aiCfg.GeneratePRDescription != nil && *aiCfg.GeneratePRDescription,
-			Force:                       force,
-			RequireWorkDirForRefinement: true,
+		if releaseRepoContext != nil {
+			defer releaseRepoContext()
 		}
 
 		slog.Info("trigger issue refinement: running pipeline",
@@ -1986,17 +1905,18 @@ func resolveExecutionTimeout(globalTimeout, agentTimeout string) time.Duration {
 	return 0
 }
 
-// resolveRefinementTimeout uses the same per-agent override semantics as the
-// other CLI runs, with a stage-specific fallback that defaults higher than the
-// executor's 5m process cap.
+// resolveRefinementTimeout lets the stage-specific cap win over generic
+// per-agent/global execution timeouts. Refinement is expected to inspect the
+// repo and git history, so the default intentionally runs longer than normal
+// review/develop executor calls.
 func resolveRefinementTimeout(refinementTimeout, globalTimeout, agentTimeout string) time.Duration {
-	if agentTimeout != "" {
-		if d, err := time.ParseDuration(agentTimeout); err == nil && d > 0 {
+	if refinementTimeout != "" {
+		if d, err := time.ParseDuration(refinementTimeout); err == nil && d > 0 {
 			return d
 		}
 	}
-	if refinementTimeout != "" {
-		if d, err := time.ParseDuration(refinementTimeout); err == nil && d > 0 {
+	if agentTimeout != "" {
+		if d, err := time.ParseDuration(agentTimeout); err == nil && d > 0 {
 			return d
 		}
 	}
@@ -2751,6 +2671,10 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 
 		issuePrompt, issueInstructions := resolveIssuePrompt(a.store, aiCfg.IssuePrompt, agentCfg.PromptID)
 		implPrompt, implInstructions := resolveImplementPrompt(a.store, aiCfg.ImplementPrompt, agentCfg.PromptID)
+		execTimeout := resolveExecutionTimeout(globalTimeout, agentCfg.ExecutionTimeout)
+		if issue.Mode == config.IssueModeRefinement {
+			execTimeout = resolveRefinementTimeout(aiCfg.RefinementTimeout, globalTimeout, agentCfg.ExecutionTimeout)
+		}
 
 		opts := issuepipeline.RunOptions{
 			GitHubToken: a.ghToken,
@@ -2767,7 +2691,7 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 				Bare:                 agentCfg.Bare,
 				DangerouslySkipPerms: agentCfg.DangerouslySkipPerms,
 				NoSessionPersistence: agentCfg.NoSessionPersistence,
-				Timeout:              resolveExecutionTimeout(globalTimeout, agentCfg.ExecutionTimeout),
+				Timeout:              execTimeout,
 			},
 			IssuePromptOverride:         issuePrompt,
 			IssueInstructions:           issueInstructions,
@@ -2782,9 +2706,6 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 			RequireWorkDirForDevelop:    requireWorkDir,
 			RequireWorkDirForRefinement: requireRefinementWorkDir,
 			ReleaseRepoContext:          releaseRepoContext,
-		}
-		if issue.Mode == config.IssueModeRefinement {
-			opts.ExecOpts.Timeout = resolveRefinementTimeout(aiCfg.RefinementTimeout, globalTimeout, agentCfg.ExecutionTimeout)
 		}
 		releaseOnReturn = false
 		return opts, true
@@ -3324,6 +3245,73 @@ func resolveImplementPrompt(s *store.Store, repoPromptID, agentPromptID string) 
 		return a.ImplementPrompt, ""
 	}
 	return "", a.ImplementInstructions
+}
+
+func buildRefinementRunOptions(
+	ctx context.Context,
+	s *store.Store,
+	manager *repoctx.Manager,
+	repo string,
+	token string,
+	aiCfg config.RepoAI,
+	agentCfg config.CLIAgentConfig,
+	localDirBase []string,
+	globalTimeout string,
+	force bool,
+	scope string,
+) (issuepipeline.RunOptions, func(), error) {
+	repoHandle, err := acquireRepoContext(ctx, manager, repo, &aiCfg, localDirBase, token, repoctx.ModeRead)
+	if err != nil {
+		return issuepipeline.RunOptions{}, nil, err
+	}
+	var releaseRepoContext func()
+	if repoHandle != nil {
+		releaseRepoContext = repoHandle.Release
+		ensureRepoContextFullHistory(ctx, manager, repoHandle, token, scope, repo)
+	}
+
+	extraFlags := agentCfg.ExtraFlags
+	if extraFlags != "" {
+		if err := executor.ValidateExtraFlags(extraFlags); err != nil {
+			slog.Warn(scope+": extra_flags rejected", "err", err)
+			extraFlags = ""
+		}
+	}
+
+	issuePrompt, issueInstructions := resolveIssuePrompt(s, aiCfg.IssuePrompt, agentCfg.PromptID)
+	implPrompt, implInstructions := resolveImplementPrompt(s, aiCfg.ImplementPrompt, agentCfg.PromptID)
+
+	opts := issuepipeline.RunOptions{
+		GitHubToken: token,
+		Primary:     aiCfg.Primary,
+		Fallback:    aiCfg.Fallback,
+		ExecOpts: executor.ExecOptions{
+			Model:                agentCfg.Model,
+			MaxTurns:             agentCfg.MaxTurns,
+			ApprovalMode:         agentCfg.ApprovalMode,
+			ExtraFlags:           extraFlags,
+			WorkDir:              aiCfg.LocalDir,
+			Effort:               agentCfg.Effort,
+			PermissionMode:       agentCfg.PermissionMode,
+			Bare:                 agentCfg.Bare,
+			DangerouslySkipPerms: agentCfg.DangerouslySkipPerms,
+			NoSessionPersistence: agentCfg.NoSessionPersistence,
+			Timeout:              resolveRefinementTimeout(aiCfg.RefinementTimeout, globalTimeout, agentCfg.ExecutionTimeout),
+		},
+		IssuePromptOverride:         issuePrompt,
+		IssueInstructions:           issueInstructions,
+		TriageOwner:                 aiCfg.TriageOwner,
+		ImplementPromptOverride:     implPrompt,
+		ImplementInstructions:       implInstructions,
+		PRReviewers:                 aiCfg.PRReviewers,
+		PRAssignee:                  aiCfg.PRAssignee,
+		PRLabels:                    aiCfg.PRLabels,
+		PRDraft:                     aiCfg.PRDraft != nil && *aiCfg.PRDraft,
+		GeneratePRDescription:       aiCfg.GeneratePRDescription != nil && *aiCfg.GeneratePRDescription,
+		Force:                       force,
+		RequireWorkDirForRefinement: true,
+	}
+	return opts, releaseRepoContext, nil
 }
 
 // sseData serializes a map to a compact JSON string for SSE event Data fields.

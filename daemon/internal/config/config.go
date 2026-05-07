@@ -1018,6 +1018,9 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("config: agents[%s].approval_mode: %w", name, err)
 		}
 	}
+	if err := c.validateRefinementTimeouts(); err != nil {
+		return err
+	}
 	if err := c.validateDiscovery(); err != nil {
 		return err
 	}
@@ -1124,6 +1127,39 @@ func (c *Config) validateOrgKeys() error {
 		if err := ValidateOrgSlug(org); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func (c *Config) validateRefinementTimeouts() error {
+	if err := validatePositiveDuration("ai.refinement_timeout", c.AI.RefinementTimeout); err != nil {
+		return err
+	}
+	for org, ai := range c.AI.Orgs {
+		path := fmt.Sprintf(`ai.orgs.%q.refinement_timeout`, org)
+		if err := validatePositiveDuration(path, ai.RefinementTimeout); err != nil {
+			return err
+		}
+	}
+	for repo, ai := range c.AI.Repos {
+		path := fmt.Sprintf(`ai.repos.%q.refinement_timeout`, repo)
+		if err := validatePositiveDuration(path, ai.RefinementTimeout); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validatePositiveDuration(path, raw string) error {
+	if raw == "" {
+		return nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return fmt.Errorf("config: %s %q is invalid: %w", path, raw, err)
+	}
+	if d <= 0 {
+		return fmt.Errorf("config: %s %q must be positive", path, raw)
 	}
 	return nil
 }
