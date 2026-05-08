@@ -2,6 +2,7 @@ package issues
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/heimdallm/daemon/internal/config"
 	"github.com/heimdallm/daemon/internal/github"
+	"github.com/heimdallm/daemon/internal/sse"
 )
 
 type fakeStageClient struct {
@@ -38,6 +40,14 @@ func (f *fakeStageClient) PostComment(repo string, number int, body string) (tim
 	f.ops = append(f.ops, "comment")
 	f.comments = append(f.comments, body)
 	return time.Now().UTC(), nil
+}
+
+type fakeStageBroker struct {
+	events []sse.Event
+}
+
+func (f *fakeStageBroker) Publish(e sse.Event) {
+	f.events = append(f.events, e)
 }
 
 func stageCfg() config.IssueTrackingConfig {
@@ -99,6 +109,43 @@ func TestTransitionIssueStage_AddsBeforeRemovingAndAudits(t *testing.T) {
 	}
 	if len(fake.comments) != 1 || !strings.Contains(fake.comments[0], "- From: `triage`") || !strings.Contains(fake.comments[0], "- To: `refinement`") {
 		t.Fatalf("audit comment not rendered as expected: %q", fake.comments)
+	}
+}
+
+func TestTransitionIssueStage_SuppressAuditReportsAuditPresent(t *testing.T) {
+	now := time.Date(2026, 5, 7, 12, 43, 0, 0, time.UTC)
+	fake := &fakeStageClient{}
+	broker := &fakeStageBroker{}
+	err := TransitionIssueStage(context.Background(), fake, StageTransition{
+		Issue:         stageIssue(),
+		StoreIssueID:  12,
+		Config:        stageCfg(),
+		From:          IssueStageTriage,
+		To:            IssueStageRefinement,
+		Trigger:       StagePromotionManualGitHub,
+		Time:          now,
+		SuppressAudit: true,
+		Broker:        broker,
+	})
+	if err != nil {
+		t.Fatalf("TransitionIssueStage: %v", err)
+	}
+	for _, op := range fake.ops {
+		if op == "comment" {
+			t.Fatalf("SuppressAudit should skip posting a duplicate comment, ops=%v", fake.ops)
+		}
+	}
+	if len(broker.events) != 1 {
+		t.Fatalf("events = %v, want one promotion event", broker.events)
+	}
+	var payload struct {
+		AuditComment bool `json:"audit_comment"`
+	}
+	if err := json.Unmarshal([]byte(broker.events[0].Data), &payload); err != nil {
+		t.Fatalf("event payload json: %v", err)
+	}
+	if !payload.AuditComment {
+		t.Fatalf("audit_comment = false, want true when SuppressAudit means an audit already exists")
 	}
 }
 

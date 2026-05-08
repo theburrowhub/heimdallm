@@ -59,6 +59,7 @@ type StageTransition struct {
 	Trigger        StagePromotionTrigger
 	Time           time.Time
 	RecentComments []github.Comment
+	SuppressAudit  bool
 	Broker         Publisher
 }
 
@@ -154,7 +155,7 @@ func TransitionIssueStage(ctx context.Context, client StageTransitionClient, tr 
 	}
 
 	commented := false
-	if !hasRecentStagePromotionComment(tr.RecentComments, tr.To, now) {
+	if !tr.SuppressAudit && !hasRecentStagePromotionComment(tr.RecentComments, tr.To, now) {
 		body := StagePromotionAuditComment(tr.From, tr.To, tr.Trigger, now)
 		if _, err := client.PostComment(tr.Issue.Repo, tr.Issue.Number, body); err != nil {
 			slog.Warn("stage promotion: audit comment failed",
@@ -165,7 +166,7 @@ func TransitionIssueStage(ctx context.Context, client StageTransitionClient, tr 
 	}
 
 	if tr.Broker != nil {
-		publishStagePromotionEvent(tr.Broker, tr.Issue, tr.StoreIssueID, tr.From, tr.To, tr.Trigger, now, commented)
+		publishStagePromotionEvent(tr.Broker, tr.Issue, tr.StoreIssueID, tr.From, tr.To, tr.Trigger, now, commented || tr.SuppressAudit)
 	}
 	return nil
 }
@@ -232,6 +233,26 @@ func stageLabels(cfg config.IssueTrackingConfig, stage IssueStage) []string {
 	}
 }
 
+func stageTransitionApplied(issue *github.Issue, cfg config.IssueTrackingConfig, to IssueStage) bool {
+	if issue == nil {
+		return false
+	}
+	targetLabel := stageTargetLabel(cfg, to)
+	if targetLabel == "" {
+		return false
+	}
+	have := lowerSet(issue.LabelNames())
+	if _, ok := have[strings.ToLower(strings.TrimSpace(targetLabel))]; !ok {
+		return false
+	}
+	for _, label := range stageLabelsExcept(cfg, to, targetLabel) {
+		if _, ok := have[strings.ToLower(strings.TrimSpace(label))]; ok {
+			return false
+		}
+	}
+	return true
+}
+
 func firstNonBlank(labels []string) string {
 	for _, label := range labels {
 		if clean := strings.TrimSpace(label); clean != "" {
@@ -269,16 +290,46 @@ func hasRecentStagePromotionComment(comments []github.Comment, to IssueStage, no
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	toLine := fmt.Sprintf("- To: `%s`", to)
 	for _, c := range comments {
 		if c.CreatedAt.IsZero() || now.Sub(c.CreatedAt) > stagePromotionWindow || c.CreatedAt.After(now.Add(stagePromotionWindow)) {
 			continue
 		}
-		if strings.Contains(c.Body, stagePromotionHeading) && strings.Contains(c.Body, toLine) {
+		if stagePromotionCommentMatches(c.Body, "", to) {
 			return true
 		}
 	}
 	return false
+}
+
+func hasStagePromotionCommentSince(comments []github.Comment, from, to IssueStage, since time.Time) bool {
+	if since.IsZero() {
+		return false
+	}
+	for _, c := range comments {
+		if c.CreatedAt.IsZero() || c.CreatedAt.Before(since) {
+			continue
+		}
+		if stagePromotionCommentMatches(c.Body, from, to) {
+			return true
+		}
+	}
+	return false
+}
+
+// stagePromotionCommentMatches treats an empty from/to stage as "do not filter
+// on that field". This keeps recent-comment dedup compatible with older audit
+// comments that only need to prove the target stage was already recorded.
+func stagePromotionCommentMatches(body string, from, to IssueStage) bool {
+	if !strings.Contains(body, stagePromotionHeading) {
+		return false
+	}
+	if from != "" && !strings.Contains(body, fmt.Sprintf("- From: `%s`", from)) {
+		return false
+	}
+	if to != "" && !strings.Contains(body, fmt.Sprintf("- To: `%s`", to)) {
+		return false
+	}
+	return true
 }
 
 func publishStagePromotionEvent(broker Publisher, issue *github.Issue, storeIssueID int64, from, to IssueStage, trigger StagePromotionTrigger, ts time.Time, commented bool) {
