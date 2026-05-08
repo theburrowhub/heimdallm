@@ -112,3 +112,33 @@ func TestFetchCollaborators_RunawayCap(t *testing.T) {
 		t.Errorf("expected error mentioning 'pagination', got: %v", err)
 	}
 }
+
+// TestFetchCollaborators_MidPaginationError verifies that an HTTP 500 on a
+// later page causes FetchCollaborators to return an error and not a partial
+// (silently truncated) slice.
+func TestFetchCollaborators_MidPaginationError(t *testing.T) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := 1
+		if p := r.URL.Query().Get("page"); p != "" {
+			fmt.Sscanf(p, "%d", &page)
+		}
+		if page == 1 {
+			w.Header().Set("Link",
+				fmt.Sprintf(`<%s/repos/org/repo/collaborators?per_page=100&page=2>; rel="next"`, srv.URL))
+			_ = json.NewEncoder(w).Encode([]map[string]string{{"login": "alice"}})
+			return
+		}
+		http.Error(w, `{"message":"boom"}`, http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	got, err := client.FetchCollaborators("org/repo")
+	if err == nil {
+		t.Fatalf("expected error from mid-pagination 500, got nil and logins=%v", got)
+	}
+	if got != nil {
+		t.Errorf("expected nil logins on error, got %v", got)
+	}
+}
