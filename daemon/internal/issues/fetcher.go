@@ -280,18 +280,6 @@ func (f *Fetcher) alreadyProcessed(issue *github.Issue) (bool, string, error) {
 		return true, "already implemented (PR created)", nil
 	}
 
-	// A state-machine label promotion is real new work even when the label/comment
-	// update was produced by the bot inside RecomputeGrace. Without this adjacent
-	// stage check, an auto-promoted triage result can get stuck in refinement
-	// until a human makes another GitHub update. Non-adjacent mode differences
-	// still use the normal grace window, which preserves the develop-without-
-	// WorkDir downgrade dedup path.
-	if latestStage, latestOK := StageFromAction(latest.ActionTaken); latestOK {
-		if currentStage, currentOK := StageFromMode(issue.Mode); currentOK && isForwardStageAdvance(latestStage, currentStage) {
-			return false, "", nil
-		}
-	}
-
 	// Bot-comment dedup: if the most recent comment is from the bot AND the
 	// issue's current mode matches what was already done (ActionTaken), the
 	// updated_at bump was self-triggered — skip. When the mode changed
@@ -312,6 +300,15 @@ func (f *Fetcher) alreadyProcessed(issue *github.Issue) (bool, string, error) {
 			"repo", issue.Repo, "number", issue.Number, "err", fcErr)
 	} else if failCount >= MaxAutoImplementFailures {
 		return true, fmt.Sprintf("auto_implement failed %d times (cap %d), requires human intervention", failCount, MaxAutoImplementFailures), nil
+	}
+
+	// Any adjacent forward stage promotion is real new work, regardless of
+	// whether the bot or a human changed labels. Do not let RecomputeGrace hide
+	// triage -> refinement or refinement -> development.
+	if latestStage, latestOK := StageFromAction(latest.ActionTaken); latestOK {
+		if currentStage, currentOK := StageFromMode(issue.Mode); currentOK && isForwardStageAdvance(latestStage, currentStage) {
+			return false, "", nil
+		}
 	}
 
 	ref := latest.CommentedAt
@@ -394,7 +391,23 @@ func (f *Fetcher) auditManualStageChange(ctx context.Context, issue *github.Issu
 	})
 }
 
+var issueStageOrder = []IssueStage{
+	IssueStageTriage,
+	IssueStageRefinement,
+	IssueStageDevelopment,
+}
+
 func isForwardStageAdvance(from, to IssueStage) bool {
-	return (from == IssueStageTriage && to == IssueStageRefinement) ||
-		(from == IssueStageRefinement && to == IssueStageDevelopment)
+	fromIdx, fromOK := issueStageOrdinal(from)
+	toIdx, toOK := issueStageOrdinal(to)
+	return fromOK && toOK && toIdx == fromIdx+1
+}
+
+func issueStageOrdinal(stage IssueStage) (int, bool) {
+	for idx, candidate := range issueStageOrder {
+		if candidate == stage {
+			return idx, true
+		}
+	}
+	return 0, false
 }
