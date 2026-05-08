@@ -952,8 +952,8 @@ func (d *Dashboard) renderServer(height int) string {
 	b.WriteString(fmt.Sprintf("  %-10s %s\n", "Uptime", uptime))
 
 	// Bind addr / port — sourced from d.config (last successful /config fetch)
-	bindAddr := "(unavailable)"
-	port := "(unavailable)"
+	bindAddr := mutedNote.Render("(unavailable)")
+	port := mutedNote.Render("(unavailable)")
 	if d.config != nil {
 		if v, ok := d.config["bind_addr"].(string); ok && v != "" {
 			bindAddr = v
