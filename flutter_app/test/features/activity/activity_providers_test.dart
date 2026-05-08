@@ -208,9 +208,18 @@ void main() {
           data: '{"repo":"acme/api","issue_number":12}',
         ),
       );
-      await Future<void>.delayed(const Duration(milliseconds: 850));
+      await _waitFor(() => calls > 1);
 
       expect(calls, greaterThan(1));
     });
   });
+}
+
+Future<void> _waitFor(bool Function() condition) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 2));
+  while (DateTime.now().isBefore(deadline)) {
+    if (condition()) return;
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+  }
+  fail('condition was not met before timeout');
 }

@@ -186,14 +186,8 @@ func (r *Recorder) recordIssueImplemented(ev sse.Event) error {
 	if err := decode(ev.Data, &p); err != nil {
 		return err
 	}
-	issueNumber := p.IssueNumber
-	if issueNumber == 0 {
-		issueNumber = p.Number
-	}
-	prNumber := p.PRNumber
-	if prNumber == 0 {
-		prNumber = p.PRCreated
-	}
+	issueNumber := firstNonZero(p.IssueNumber, p.Number)
+	prNumber := firstNonZero(p.PRNumber, p.PRCreated)
 	outcome := "pr_opened"
 	if prNumber == 0 {
 		outcome = "pr_failed"
@@ -222,25 +216,31 @@ func (r *Recorder) recordIssueRefinementDone(ev sse.Event) error {
 	if err := decode(ev.Data, &p); err != nil {
 		return err
 	}
-	issueNumber := p.IssueNumber
-	if issueNumber == 0 {
-		issueNumber = p.Number
+	issueNumber := firstNonZero(p.IssueNumber, p.Number)
+	postOK := true
+	if p.PostOK != nil {
+		postOK = *p.PostOK
 	}
 	outcome := "completed"
-	if p.PostOK != nil && !*p.PostOK {
+	if !postOK {
 		outcome = "stored_locally"
 	}
 	details := map[string]any{
 		"cli_used":  p.CLIUsed,
 		"review_id": p.ReviewID,
+		"post_ok":   postOK,
 		"truncated": p.Truncated,
-	}
-	if p.PostOK != nil {
-		details["post_ok"] = *p.PostOK
 	}
 	_, err := r.store.InsertActivity(time.Now(), orgOf(p.Repo), p.Repo, "issue",
 		issueNumber, p.IssueTitle, "refinement", outcome, details)
 	return err
+}
+
+func firstNonZero(primary, fallback int) int {
+	if primary != 0 {
+		return primary
+	}
+	return fallback
 }
 
 func (r *Recorder) recordIssueReviewError(ev sse.Event) error {
