@@ -123,7 +123,8 @@ func (p *Pipeline) runRefinement(ctx context.Context, issue *github.Issue, issue
 	rev.ID = revID
 
 	p.publish(sse.EventIssueRefinementDone, map[string]any{
-		"issue_id": issueID, "number": issue.Number, "repo": issue.Repo,
+		"issue_id": issueID, "number": issue.Number, "issue_number": issue.Number, "repo": issue.Repo,
+		"issue_title": issue.Title, "cli_used": cli, "review_id": revID,
 		"post_ok": postErr == nil, "truncated": truncated,
 	})
 	if p.notify != nil {

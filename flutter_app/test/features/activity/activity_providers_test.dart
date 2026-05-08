@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:heimdallm/core/api/api_client.dart';
+import 'package:heimdallm/core/api/sse_client.dart';
 import 'package:heimdallm/core/models/activity.dart';
 import 'package:heimdallm/features/activity/activity_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
@@ -171,6 +174,43 @@ void main() {
       await c.read(activityOptionsProvider.future);
 
       expect(captured?.limit, 5000);
+    });
+  });
+
+  group('activityLiveRefreshProvider', () {
+    test('refreshes persisted activity when refinement completes', () async {
+      final api = MockApiClient();
+      var calls = 0;
+      when(() => api.fetchActivity(any())).thenAnswer((_) async {
+        calls++;
+        return const ActivityPage(entries: [], truncated: false, count: 0);
+      });
+      final events = StreamController<SseEvent>.broadcast();
+      final c = ProviderContainer(
+        overrides: [
+          apiClientProvider.overrideWithValue(api),
+          sseStreamProvider.overrideWith((ref) => events.stream),
+        ],
+      );
+      addTearDown(() async {
+        await events.close();
+        c.dispose();
+      });
+
+      c.read(activityLiveUpdatesProvider.notifier).state = true;
+      c.read(activityLiveRefreshProvider);
+      await c.read(activityEntriesProvider.future);
+      expect(calls, 1);
+
+      events.add(
+        const SseEvent(
+          type: 'issue_refinement_done',
+          data: '{"repo":"acme/api","issue_number":12}',
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 850));
+
+      expect(calls, greaterThan(1));
     });
   });
 }

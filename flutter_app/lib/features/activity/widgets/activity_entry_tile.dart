@@ -208,6 +208,7 @@ IconData activityIconFor(ActivityAction action) => switch (action) {
   ActivityAction.review => Icons.rate_review,
   ActivityAction.reviewSkipped => Icons.visibility_off_outlined,
   ActivityAction.triage => Icons.label,
+  ActivityAction.refinement => Icons.fact_check,
   ActivityAction.implement => Icons.build,
   ActivityAction.promote => Icons.swap_horiz,
   ActivityAction.error => Icons.error_outline,
@@ -218,6 +219,7 @@ String activityActionLabel(ActivityAction action) => switch (action) {
   ActivityAction.review => 'Review',
   ActivityAction.reviewSkipped => 'Skipped',
   ActivityAction.triage => 'Triage',
+  ActivityAction.refinement => 'Refinement',
   ActivityAction.implement => 'Implement',
   ActivityAction.promote => 'Promote',
   ActivityAction.error => 'Error',
@@ -229,6 +231,7 @@ Color activityActionColor(ColorScheme scheme, ActivityAction action) =>
       ActivityAction.error => scheme.error,
       ActivityAction.reviewSkipped => scheme.outline,
       ActivityAction.triage => scheme.tertiary,
+      ActivityAction.refinement => scheme.tertiary,
       ActivityAction.implement => scheme.secondary,
       ActivityAction.promote => scheme.primary,
       ActivityAction.review => scheme.primary,
@@ -245,6 +248,7 @@ String activityOutcomeText(ActivityEntry entry) => switch (entry.action) {
   ActivityAction.review => _reviewOutcome(entry),
   ActivityAction.reviewSkipped => _skippedOutcome(entry),
   ActivityAction.triage => _triageOutcome(entry),
+  ActivityAction.refinement => _refinementOutcome(entry),
   ActivityAction.implement => _implementOutcome(entry),
   ActivityAction.promote => 'Promoted: ${entry.outcome}',
   ActivityAction.error => entry.outcome.isEmpty ? 'Error' : entry.outcome,
@@ -274,6 +278,14 @@ String _triageOutcome(ActivityEntry entry) {
   final cat = entry.details['category'];
   final catStr = (cat is String && cat.isNotEmpty) ? ' ($cat)' : '';
   return 'Triaged${entry.outcome.isEmpty ? '' : ': ${entry.outcome}'}$catStr';
+}
+
+String _refinementOutcome(ActivityEntry entry) {
+  final posted = entry.details['post_ok'];
+  final base = posted == false
+      ? 'Refinement stored locally'
+      : 'Refinement completed';
+  return entry.details['truncated'] == true ? '$base (truncated)' : base;
 }
 
 String _implementOutcome(ActivityEntry entry) {

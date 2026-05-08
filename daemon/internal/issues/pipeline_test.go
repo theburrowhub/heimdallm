@@ -331,6 +331,12 @@ func (b *fakeBroker) types() []string {
 	return out
 }
 
+func (b *fakeBroker) event(i int) sse.Event {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.events[i]
+}
+
 type fakeNotifier struct {
 	calls []string
 }
@@ -631,6 +637,23 @@ func TestPipeline_RunRefinementHappyPath(t *testing.T) {
 	if !stringsEqual(types, want) {
 		t.Errorf("SSE sequence = %v, want %v", types, want)
 	}
+	var donePayload struct {
+		Repo        string `json:"repo"`
+		IssueNumber int    `json:"issue_number"`
+		IssueTitle  string `json:"issue_title"`
+		CLIUsed     string `json:"cli_used"`
+		ReviewID    int64  `json:"review_id"`
+		PostOK      bool   `json:"post_ok"`
+	}
+	if err := json.Unmarshal([]byte(broker.event(2).Data), &donePayload); err != nil {
+		t.Fatalf("decode refinement done payload: %v", err)
+	}
+	if donePayload.Repo != issue.Repo || donePayload.IssueNumber != issue.Number || donePayload.IssueTitle != issue.Title {
+		t.Errorf("refinement done issue payload = %+v", donePayload)
+	}
+	if donePayload.CLIUsed != "claude" || donePayload.ReviewID != rev.ID || !donePayload.PostOK {
+		t.Errorf("refinement done details = %+v, review ID %d", donePayload, rev.ID)
+	}
 }
 
 func TestPipeline_CircuitBreakerDoesNotGateRefinement(t *testing.T) {
@@ -839,6 +862,24 @@ func TestPipeline_AutoImplementHappyPath(t *testing.T) {
 	want := []string{sse.EventIssueDetected, sse.EventIssueReviewStarted, sse.EventIssueImplemented}
 	if !stringsEqual(types, want) {
 		t.Errorf("SSE sequence = %v, want %v", types, want)
+	}
+	var implementedPayload struct {
+		Repo        string `json:"repo"`
+		IssueNumber int    `json:"issue_number"`
+		IssueTitle  string `json:"issue_title"`
+		CLIUsed     string `json:"cli_used"`
+		PRNumber    int    `json:"pr_number"`
+		PRURL       string `json:"pr_url"`
+		Branch      string `json:"branch"`
+	}
+	if err := json.Unmarshal([]byte(broker.event(2).Data), &implementedPayload); err != nil {
+		t.Fatalf("decode implemented payload: %v", err)
+	}
+	if implementedPayload.Repo != issue.Repo || implementedPayload.IssueNumber != issue.Number || implementedPayload.IssueTitle != issue.Title {
+		t.Errorf("implemented issue payload = %+v", implementedPayload)
+	}
+	if implementedPayload.CLIUsed != "claude" || implementedPayload.PRNumber != 123 || implementedPayload.PRURL == "" || implementedPayload.Branch != "heimdallm/issue-7" {
+		t.Errorf("implemented details = %+v", implementedPayload)
 	}
 
 	// Exactly one PostComment: the done-marker comment pointing watchers of

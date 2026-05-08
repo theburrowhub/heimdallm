@@ -101,6 +101,7 @@ const _activityLogEventTypes = {
   'review_error',
   'review_skipped',
   'issue_review_completed',
+  'issue_refinement_done',
   'issue_implemented',
   'issue_review_error',
   'issue_promoted',

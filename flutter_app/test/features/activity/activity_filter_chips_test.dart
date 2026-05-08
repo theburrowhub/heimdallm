@@ -64,6 +64,8 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(tester.widget<CheckboxListTile>(reviewTile).value, isTrue);
+
+    expect(find.text('Refinement'), findsOneWidget);
   });
 
   testWidgets('string picker shows an empty state instead of a blank sheet', (

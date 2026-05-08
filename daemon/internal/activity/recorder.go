@@ -75,6 +75,8 @@ func (r *Recorder) handle(ev sse.Event) error {
 		return r.recordIssueTriage(ev)
 	case sse.EventIssueImplemented:
 		return r.recordIssueImplemented(ev)
+	case sse.EventIssueRefinementDone:
+		return r.recordIssueRefinementDone(ev)
 	case sse.EventIssueReviewError:
 		return r.recordIssueReviewError(ev)
 	case sse.EventIssuePromoted:
@@ -173,24 +175,71 @@ func (r *Recorder) recordIssueImplemented(ev sse.Event) error {
 	var p struct {
 		Repo        string `json:"repo"`
 		IssueNumber int    `json:"issue_number"`
+		Number      int    `json:"number"`
 		IssueTitle  string `json:"issue_title"`
 		CLIUsed     string `json:"cli_used"`
 		PRNumber    int    `json:"pr_number"`
+		PRCreated   int    `json:"pr_created"`
 		PRURL       string `json:"pr_url"`
+		Branch      string `json:"branch"`
 	}
 	if err := decode(ev.Data, &p); err != nil {
 		return err
 	}
+	issueNumber := p.IssueNumber
+	if issueNumber == 0 {
+		issueNumber = p.Number
+	}
+	prNumber := p.PRNumber
+	if prNumber == 0 {
+		prNumber = p.PRCreated
+	}
 	outcome := "pr_opened"
-	if p.PRNumber == 0 {
+	if prNumber == 0 {
 		outcome = "pr_failed"
 	}
 	_, err := r.store.InsertActivity(time.Now(), orgOf(p.Repo), p.Repo, "issue",
-		p.IssueNumber, p.IssueTitle, "implement", outcome, map[string]any{
+		issueNumber, p.IssueTitle, "implement", outcome, map[string]any{
 			"cli_used":  p.CLIUsed,
-			"pr_number": p.PRNumber,
+			"pr_number": prNumber,
 			"pr_url":    p.PRURL,
+			"branch":    p.Branch,
 		})
+	return err
+}
+
+func (r *Recorder) recordIssueRefinementDone(ev sse.Event) error {
+	var p struct {
+		Repo        string `json:"repo"`
+		IssueNumber int    `json:"issue_number"`
+		Number      int    `json:"number"`
+		IssueTitle  string `json:"issue_title"`
+		CLIUsed     string `json:"cli_used"`
+		ReviewID    int64  `json:"review_id"`
+		PostOK      *bool  `json:"post_ok"`
+		Truncated   bool   `json:"truncated"`
+	}
+	if err := decode(ev.Data, &p); err != nil {
+		return err
+	}
+	issueNumber := p.IssueNumber
+	if issueNumber == 0 {
+		issueNumber = p.Number
+	}
+	outcome := "completed"
+	if p.PostOK != nil && !*p.PostOK {
+		outcome = "stored_locally"
+	}
+	details := map[string]any{
+		"cli_used":  p.CLIUsed,
+		"review_id": p.ReviewID,
+		"truncated": p.Truncated,
+	}
+	if p.PostOK != nil {
+		details["post_ok"] = *p.PostOK
+	}
+	_, err := r.store.InsertActivity(time.Now(), orgOf(p.Repo), p.Repo, "issue",
+		issueNumber, p.IssueTitle, "refinement", outcome, details)
 	return err
 }
 
