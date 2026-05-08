@@ -420,12 +420,12 @@ func (p *Pipeline) Run(ctx context.Context, issue *github.Issue, opts RunOptions
 		return nil, fmt.Errorf("issues pipeline: refusing an ignore-classified issue (fetcher should have filtered it out)")
 	}
 
-	// Upsert + initial SSE events are common to both flows so we do them
+	// Upsert + initial SSE events are common to all flows so we do them
 	// here. issue_detected fires before the flow forks, issue_review_started
 	// fires after so the UI can show the correct "triaging" vs "implementing"
 	// copy — the runner sets the exact flavour it wants.
 	//
-	// Upsert runs BEFORE the circuit breaker so the breaker's per-issue
+	// For triage runs, upsert runs BEFORE the circuit breaker so its per-issue
 	// count (which keys on the internal store ID via issue_reviews.issue_id)
 	// sees the correct row. The upsert is idempotent — on a breaker-trip
 	// the issue row stays but no issue_reviews row is written for this
@@ -439,12 +439,14 @@ func (p *Pipeline) Run(ctx context.Context, issue *github.Issue, opts RunOptions
 		return nil, fmt.Errorf("issues pipeline: upsert issue: %w", err)
 	}
 
-	// Circuit breaker: hard cap on triage count per issue / per repo.
+	// Circuit breaker: hard cap on triage count per issue / per repo. It must
+	// not gate refinement or develop, otherwise a correctly promoted issue can
+	// get stuck after earlier triage/refinement activity.
 	// Runs AFTER the in-flight claim and upsert so it only fires when
 	// both dedup layers missed; returns *CircuitBreakerError so the
 	// caller (fetcher) can distinguish it from a genuine pipeline
 	// failure. See theburrowhub/heimdallm#292.
-	if p.breaker != nil {
+	if p.breaker != nil && effective == config.IssueModeReviewOnly {
 		tripped, reason, err := p.store.CheckIssueCircuitBreaker(issueID, issue.Repo, *p.breaker)
 		if err != nil {
 			slog.Warn("issues pipeline: circuit breaker check failed, proceeding",

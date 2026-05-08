@@ -633,6 +633,29 @@ func TestPipeline_RunRefinementHappyPath(t *testing.T) {
 	}
 }
 
+func TestPipeline_CircuitBreakerDoesNotGateRefinement(t *testing.T) {
+	s := &fakeStore{
+		breakerTripped: true,
+		breakerReason:  "triage cap reached",
+	}
+	gh := &fakeGH{}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte(validRefinementResult)}
+	p := issues.New(s, gh, exec, nil, &fakeBroker{}, nil)
+	p.SetCircuitBreakerLimits(&store.IssueCircuitBreakerLimits{PerIssue24h: 3, PerRepoHr: 10})
+
+	rev, err := p.Run(context.Background(), newIssue(config.IssueModeRefinement), issues.RunOptions{
+		Primary:                     "claude",
+		ExecOpts:                    executor.ExecOptions{WorkDir: "/tmp/repo"},
+		RequireWorkDirForRefinement: true,
+	})
+	if err != nil {
+		t.Fatalf("refinement should not be blocked by the triage circuit breaker: %v", err)
+	}
+	if rev == nil || rev.ActionTaken != string(config.IssueModeRefinement) {
+		t.Fatalf("review = %+v, want refinement review", rev)
+	}
+}
+
 func TestPipeline_RefinementRequiresWorkDir(t *testing.T) {
 	p := issues.New(&fakeStore{}, &fakeGH{}, &fakeExec{}, nil, &fakeBroker{}, nil)
 	_, err := p.Run(context.Background(), newIssue(config.IssueModeRefinement), issues.RunOptions{Primary: "claude"})
@@ -833,6 +856,26 @@ func TestPipeline_AutoImplementHappyPath(t *testing.T) {
 	// Prompt was the implement flavour, not the triage JSON instruction.
 	if !strings.Contains(exec.lastPrompt, "Implement what the issue asks for") {
 		t.Errorf("prompt should be the implement flavour")
+	}
+}
+
+func TestPipeline_CircuitBreakerDoesNotGateDevelop(t *testing.T) {
+	s := &fakeStore{
+		breakerTripped: true,
+		breakerReason:  "triage cap reached",
+	}
+	gh := &fakeGH{defaultBranch: "main", createPRNumber: 123}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("done")}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(s, gh, exec, git, &fakeBroker{}, nil)
+	p.SetCircuitBreakerLimits(&store.IssueCircuitBreakerLimits{PerIssue24h: 3, PerRepoHr: 10})
+
+	rev, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions())
+	if err != nil {
+		t.Fatalf("develop should not be blocked by the triage circuit breaker: %v", err)
+	}
+	if rev == nil || rev.ActionTaken != string(config.IssueModeDevelop) {
+		t.Fatalf("review = %+v, want develop review", rev)
 	}
 }
 
