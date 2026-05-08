@@ -392,3 +392,23 @@ func TestRecorder_StoreFailureIsLoggedAndDropped(t *testing.T) {
 	events <- sse.Event{Type: sse.EventReviewCompleted, Data: string(payload)}
 	waitFor(t, func() bool { return fs.count() == 1 })
 }
+
+func TestRecorder_PollingEventsAreIgnored(t *testing.T) {
+	_, fs, events := newTestRecorder(t)
+
+	// Feed both polling event types through the event channel that
+	// the recorder's Start loop consumes.
+	for _, ev := range []sse.Event{
+		{Type: sse.EventPollingStarted, Data: `{"kind":"prs","repos":["acme/foo"]}`},
+		{Type: sse.EventPollingCompleted, Data: `{"kind":"issues","count":3,"duration_ms":42}`},
+	} {
+		events <- ev
+	}
+
+	// Give the recorder a beat to process any rows it might have inserted.
+	time.Sleep(50 * time.Millisecond)
+
+	if got := fs.count(); got != 0 {
+		t.Errorf("polling events should not produce rows; got %d", got)
+	}
+}

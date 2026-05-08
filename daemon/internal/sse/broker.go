@@ -24,6 +24,16 @@ const (
 	// is not yet in monitored or non-monitored. Payload: {"repo": "org/name"}.
 	EventRepoDiscovered = "repo_discovered"
 
+	// EventPollingStarted fires once per poll cycle, before any repo work,
+	// to give the GUI Server screen a "what's happening now" signal.
+	// Payload: {"kind": "prs"|"issues", "repos": [...]}.
+	EventPollingStarted = "polling_started"
+
+	// EventPollingCompleted fires once per poll cycle, after all repos in
+	// the cycle have been processed (or skipped). Payload: {"kind", "count",
+	// "duration_ms"}. Not emitted when the cycle is cancelled mid-flight.
+	EventPollingCompleted = "polling_completed"
+
 	EventPRStateChanged    = "pr_state_changed"
 	EventIssueStateChanged = "issue_state_changed"
 )
