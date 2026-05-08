@@ -239,12 +239,14 @@ func (c IssueTrackingConfig) WithDefaultAssignee(login string) IssueTrackingConf
 
 // MatchesAssignees reports whether the current assignee filter permits an
 // issue assigned to the provided GitHub logins. An inactive filter permits all;
-// an active filter never matches an unassigned issue.
+// an active filter only matches issues with exactly one assignee in scope.
+// That single-owner invariant prevents two Heimdallm instances from processing
+// the same staged issue when GitHub temporarily shows multiple assignees.
 func (c IssueTrackingConfig) MatchesAssignees(assignees []string) bool {
 	if len(c.Assignees) == 0 {
 		return true
 	}
-	if len(assignees) == 0 {
+	if len(assignees) != 1 {
 		return false
 	}
 	want := make(map[string]struct{}, len(c.Assignees))
@@ -257,13 +259,9 @@ func (c IssueTrackingConfig) MatchesAssignees(assignees []string) bool {
 	if len(want) == 0 {
 		return false
 	}
-	for _, a := range assignees {
-		a = strings.ToLower(strings.TrimSpace(strings.TrimLeft(a, "@")))
-		if _, ok := want[a]; ok {
-			return true
-		}
-	}
-	return false
+	a := strings.ToLower(strings.TrimSpace(strings.TrimLeft(assignees[0], "@")))
+	_, ok := want[a]
+	return ok
 }
 
 // Classify returns the processing mode for an issue given its labels.

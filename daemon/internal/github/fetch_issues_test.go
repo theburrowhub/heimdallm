@@ -234,6 +234,7 @@ func TestFetchIssues_AssigneesFilter(t *testing.T) {
 			{ID: 60, Number: 60, Title: "alice's", Assignees: []string{"alice"}, Labels: []string{"bug"}, CreatedAt: time.Now()},
 			{ID: 61, Number: 61, Title: "bob's", Assignees: []string{"bob"}, Labels: []string{"bug"}, CreatedAt: time.Now()},
 			{ID: 62, Number: 62, Title: "unassigned", Labels: []string{"bug"}, CreatedAt: time.Now()},
+			{ID: 63, Number: 63, Title: "shared", Assignees: []string{"alice", "bob"}, Labels: []string{"bug"}, CreatedAt: time.Now()},
 		},
 	})
 	defer srv.Close()
@@ -306,7 +307,7 @@ func TestFetchIssues_FilterModeExclusive_AllMustPass(t *testing.T) {
 	}
 }
 
-func TestFetchIssues_FilterModeInclusive_AtLeastOneDimensionPasses(t *testing.T) {
+func TestFetchIssues_FilterModeInclusive_AssigneeScopeRemainsMandatory(t *testing.T) {
 	cfg := baseCfg()
 	cfg.FilterMode = config.FilterModeInclusive
 	cfg.Organizations = []string{"wanted-org"}
@@ -315,15 +316,17 @@ func TestFetchIssues_FilterModeInclusive_AtLeastOneDimensionPasses(t *testing.T)
 		1: {
 			{ID: 80, Number: 80, Assignees: []string{"bob"}, Labels: []string{"bug"}, CreatedAt: time.Now()},   // org matches (we'll fetch via wanted-org)
 			{ID: 81, Number: 81, Assignees: []string{"alice"}, Labels: []string{"bug"}, CreatedAt: time.Now()}, // assignee matches even in other-org
+			{ID: 82, Number: 82, Assignees: []string{"alice", "bob"}, Labels: []string{"bug"}, CreatedAt: time.Now()},
 		},
 	})
 	defer srv.Close()
 	client := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
 
-	// Fetched from wanted-org — org passes, so both issues are kept.
+	// Fetched from wanted-org — org passes, but assignee scope is still a hard
+	// ownership boundary for staged issues.
 	got, _ := client.FetchIssues("wanted-org/repo", cfg, "")
-	if len(got) != 2 {
-		t.Errorf("inclusive + org matches: expected 2 issues, got %d", len(got))
+	if len(got) != 1 || got[0].Number != 81 {
+		t.Errorf("inclusive + org matches: expected only #81, got %+v", got)
 	}
 
 	// Fetched from other-org — org fails, assignee decides.

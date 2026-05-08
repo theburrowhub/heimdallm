@@ -472,11 +472,40 @@ func buildRefinementContext(refinementJSON, summary string, createdAt time.Time)
 		b.WriteString("Subtasks:\n")
 		for _, st := range r.Subtasks {
 			b.WriteString(fmt.Sprintf("- %s: %s\n", st.ID, st.Description))
+			if len(st.AffectedFiles) > 0 {
+				b.WriteString("  - Affected files: " + strings.Join(st.AffectedFiles, ", ") + "\n")
+			}
+			if len(st.Symbols) > 0 {
+				b.WriteString("  - Symbols: " + strings.Join(st.Symbols, ", ") + "\n")
+			}
+			if st.ExpectedChange != "" {
+				b.WriteString("  - Expected change: " + st.ExpectedChange + "\n")
+			}
+			if st.Complexity != "" {
+				b.WriteString("  - Complexity: " + st.Complexity + "\n")
+			}
+			if len(st.Dependencies) > 0 {
+				b.WriteString("  - Depends on: " + strings.Join(st.Dependencies, ", ") + "\n")
+			}
 		}
 		b.WriteString("\n")
 	}
 	if len(r.ImplementationOrder) > 0 {
 		b.WriteString("Implementation order: " + strings.Join(r.ImplementationOrder, ", ") + "\n\n")
+	}
+	if len(r.Assumptions) > 0 {
+		b.WriteString("Assumptions:\n")
+		for _, assumption := range r.Assumptions {
+			b.WriteString("- " + assumption + "\n")
+		}
+		b.WriteString("\n")
+	}
+	if len(r.OpenQuestions) > 0 {
+		b.WriteString("Open questions:\n")
+		for _, question := range r.OpenQuestions {
+			b.WriteString("- " + question + "\n")
+		}
+		b.WriteString("\n")
 	}
 	if len(r.Risks) > 0 {
 		b.WriteString("Risks:\n")

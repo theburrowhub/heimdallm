@@ -42,10 +42,10 @@ const maxIssuePages = 10
 //     ignore". The label dimension is therefore filtered before filter_mode
 //     is applied to the remaining dimensions (org + assignee).
 //
-//  3. Applies organizations and assignees filters. filter_mode decides how
-//     they combine: "exclusive" = all active dimensions must pass (AND);
-//     "inclusive" = at least one active dimension must pass (OR). A
-//     dimension is "active" only when its configured list is non-empty.
+//  3. Applies organizations and assignees filters. Assignee scope is always a
+//     hard owner check when configured: exactly one issue assignee must match.
+//     filter_mode only decides how the remaining active dimensions combine
+//     once assignee ownership has passed.
 //
 //  4. Sorts: issues assigned to authenticatedUser first, then the rest;
 //     within each group triage (review_only) before refinement before develop;
@@ -168,6 +168,16 @@ func issueMatchesFilters(issue *Issue, repo string, cfg config.IssueTrackingConf
 	orgPass := !orgActive || repoBelongsToOrg(repo, cfg.Organizations)
 	assigneePass := cfg.MatchesAssignees(issue.AssigneeLogins())
 
+	// Assignee scope is a hard ownership boundary even in inclusive mode.
+	// A staged issue with zero, multiple, or out-of-scope assignees must not be
+	// picked up just because the repository also matches an organization filter.
+	if assigneeActive && !assigneePass {
+		slog.Info("github: issue skipped by assignee scope",
+			"repo", repo, "number", issue.Number,
+			"assignees", issue.AssigneeLogins(), "allowed_assignees", cfg.Assignees)
+		return false
+	}
+
 	// No active filters → include.
 	if !orgActive && !assigneeActive {
 		return true
@@ -186,9 +196,6 @@ func issueMatchesFilters(issue *Issue, repo string, cfg config.IssueTrackingConf
 
 	// Default / exclusive: AND across active dimensions.
 	if orgActive && !orgPass {
-		return false
-	}
-	if assigneeActive && !assigneePass {
 		return false
 	}
 	return true

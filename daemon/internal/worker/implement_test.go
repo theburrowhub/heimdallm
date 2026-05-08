@@ -49,3 +49,45 @@ func TestImplementWorker_ConsumesAndCallsHandler(t *testing.T) {
 		t.Errorf("unexpected: %+v", msg)
 	}
 }
+
+func TestImplementWorker_ProcessesMessagesConcurrently(t *testing.T) {
+	b := newTestBus(t)
+	conn := b.Conn()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	started := make(chan int, 2)
+	release := make(chan struct{})
+	handler := func(_ context.Context, msg bus.IssueMsg) {
+		started <- msg.Number
+		<-release
+	}
+
+	w := worker.NewImplementWorker(conn, 2, handler)
+	go func() { w.Start(ctx) }()
+	time.Sleep(100 * time.Millisecond)
+
+	pub := bus.NewIssuePublisher(conn)
+	if err := pub.PublishIssueImplement(ctx, "org/repo", 101, 100101); err != nil {
+		t.Fatalf("publish first issue: %v", err)
+	}
+	if err := pub.PublishIssueImplement(ctx, "org/repo", 102, 100102); err != nil {
+		t.Fatalf("publish second issue: %v", err)
+	}
+
+	seen := map[int]bool{}
+	for len(seen) < 2 {
+		select {
+		case number := <-started:
+			seen[number] = true
+		case <-time.After(3 * time.Second):
+			close(release)
+			t.Fatalf("timed out waiting for concurrent implement handlers, seen=%v", seen)
+		}
+	}
+	close(release)
+
+	if !seen[101] || !seen[102] {
+		t.Fatalf("expected both issue handlers to start, seen=%v", seen)
+	}
+}

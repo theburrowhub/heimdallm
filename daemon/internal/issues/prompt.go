@@ -325,6 +325,12 @@ func buildDefaultImplementPrompt(ctx PromptContext, customInstructions string) s
 	if ctx.TriageContext != "" {
 		sb.WriteString(ctx.TriageContext)
 		sb.WriteString("\n")
+		sb.WriteString("If a previous refinement plan is present above, treat it as the implementation contract for this run, not as a complete file list.\n")
+		sb.WriteString("- Execute the subtasks in implementation_order when provided, using affected_files, symbols, and expected_change as concrete guidance.\n")
+		sb.WriteString("- If the refinement omits files or symbols, inspect the repository, identify the right implementation points, and make the smallest correct change.\n")
+		sb.WriteString("- If repository evidence shows the plan is stale, implement the equivalent fix that satisfies the issue and keep the change focused.\n")
+		sb.WriteString("- Add or update focused tests when the changed area has test coverage or the behavior is testable.\n")
+		sb.WriteString("- If open_questions still block a safe implementation after inspecting the repository, leave the tree untouched.\n\n")
 	}
 
 	sb.WriteString("Implement what the issue asks for. Write real, working code.\n")

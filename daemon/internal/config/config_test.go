@@ -518,8 +518,11 @@ func TestIssueTrackingWithDefaultAssigneePreservesExplicitList(t *testing.T) {
 
 func TestIssueTrackingMatchesAssignees(t *testing.T) {
 	cfg := IssueTrackingConfig{Assignees: []string{"Alice"}}
-	if !cfg.MatchesAssignees([]string{"bob", "alice"}) {
+	if !cfg.MatchesAssignees([]string{"alice"}) {
 		t.Fatal("expected case-insensitive assignee match")
+	}
+	if cfg.MatchesAssignees([]string{"bob", "alice"}) {
+		t.Fatal("multi-assignee issue must not match active assignee filter")
 	}
 	if cfg.MatchesAssignees([]string{"bob"}) {
 		t.Fatal("unexpected assignee match")

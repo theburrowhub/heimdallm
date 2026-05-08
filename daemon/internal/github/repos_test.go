@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -532,10 +533,19 @@ func TestListSubIssues_CrossRepoSameOwner(t *testing.T) {
 
 func TestSetAssignees(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" || r.URL.Path != "/repos/org/repo/issues/42/assignees" {
+		if r.Method != "PATCH" || r.URL.Path != "/repos/org/repo/issues/42" {
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
-		w.WriteHeader(http.StatusCreated)
+		var payload struct {
+			Assignees []string `json:"assignees"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if !reflect.DeepEqual(payload.Assignees, []string{"sergiotejon"}) {
+			t.Fatalf("assignees payload = %v, want [sergiotejon]", payload.Assignees)
+		}
+		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("{}"))
 	}))
 	defer srv.Close()
