@@ -1125,12 +1125,12 @@ func (d *Dashboard) renderHelp() string {
 		return helpStyle.Render("[esc]close  [j/k]scroll  [pgup/pgdn]page  [q]uit")
 	}
 	if d.activeTab == tabIssues {
-		return helpStyle.Render("[q]uit  [r]efresh  [s]top  [enter]detail  [p]romote  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-6]jump")
+		return helpStyle.Render("[q]uit  [r]efresh  [s]top  [enter]detail  [p]romote  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-7]jump")
 	}
 	if d.activeTab == tabPRs {
-		return helpStyle.Render("[q]uit  [r]efresh  [s]top  [enter]detail  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-6]jump")
+		return helpStyle.Render("[q]uit  [r]efresh  [s]top  [enter]detail  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-7]jump")
 	}
-	return helpStyle.Render("[q]uit  [r]efresh  [s]top  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-6]jump  [G]follow")
+	return helpStyle.Render("[q]uit  [r]efresh  [s]top  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-7]jump  [G]follow")
 }
 
 func (d *Dashboard) contentHeight() int {
