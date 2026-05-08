@@ -61,6 +61,36 @@ func TestApplyStore_AgentConfigs_MergesOverTOML(t *testing.T) {
 	}
 }
 
+func TestApplyStore_AgentConfigs_FalseBoolOverridesTOMLTrue(t *testing.T) {
+	// Regression for the omitempty foot-gun the bot review flagged on #432:
+	// an operator who flips bare=false in the UI must override a TOML
+	// bare=true. With omitempty on the bool tag, a direct Marshal of
+	// CLIAgentConfig would drop the false and ApplyStore's merge-into-
+	// existing-struct path would preserve the TOML true.
+	cfg := &Config{}
+	cfg.applyDefaults()
+	cfg.AI.Agents = map[string]CLIAgentConfig{
+		"claude": {Bare: true, DangerouslySkipPerms: true, NoSessionPersistence: true},
+	}
+
+	rows := map[string]string{
+		"agent_configs": `{"claude":{"bare":false,"dangerously_skip_perms":false,"no_session_persistence":false}}`,
+	}
+	if err := cfg.ApplyStore(rows); err != nil {
+		t.Fatalf("ApplyStore: %v", err)
+	}
+	got := cfg.AI.Agents["claude"]
+	if got.Bare {
+		t.Errorf("Bare: stored false did not override TOML true")
+	}
+	if got.DangerouslySkipPerms {
+		t.Errorf("DangerouslySkipPerms: stored false did not override TOML true")
+	}
+	if got.NoSessionPersistence {
+		t.Errorf("NoSessionPersistence: stored false did not override TOML true")
+	}
+}
+
 func TestApplyStore_AgentConfigs_PartialFailureLeavesCfgUntouched(t *testing.T) {
 	// A malformed agent_configs payload must roll back the whole merge so
 	// the receiver keeps its TOML+env state. Mirrors the atomicity guarantee

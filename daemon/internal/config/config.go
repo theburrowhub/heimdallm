@@ -316,6 +316,13 @@ func labelSetIntersects(set map[string]struct{}, list []string) bool {
 // JSON tags must match the snake_case keys written by the PUT /config handler
 // (handlers.go:normalizeAgentConfigsForPut) so ApplyStore can unmarshal a
 // stored row back into this struct symmetrically.
+//
+// Boolean fields deliberately do NOT use `omitempty`. With omitempty a future
+// caller that marshals this struct directly (instead of the current map[string]any
+// path in the handler) would silently drop a `false` value, and ApplyStore's
+// "unmarshal into the existing struct" merge would then preserve a TOML `true`
+// the operator was trying to override. Keeping the zero value in the JSON
+// guarantees the override semantic regardless of how the JSON is produced.
 type CLIAgentConfig struct {
 	Model        string `toml:"model" json:"model,omitempty"`                 // e.g. "claude-opus-4-6"
 	MaxTurns     int    `toml:"max_turns" json:"max_turns,omitempty"`         // claude: --max-turns (0 = not set)
@@ -324,12 +331,12 @@ type CLIAgentConfig struct {
 	PromptID     string `toml:"prompt" json:"prompt,omitempty"`               // agent-level prompt override
 
 	// Claude-specific flags
-	Effort               string `toml:"effort" json:"effort,omitempty"`                                 // low|medium|high|max
-	PermissionMode       string `toml:"permission_mode" json:"permission_mode,omitempty"`               // default|auto|acceptEdits|dontAsk (bypassPermissions is explicitly forbidden)
-	Bare                 bool   `toml:"bare" json:"bare,omitempty"`                                     // --bare
-	DangerouslySkipPerms bool   `toml:"dangerously_skip_perms" json:"dangerously_skip_perms,omitempty"` // --dangerously-skip-permissions (cannot be set via HTTP API, see M-5)
-	NoSessionPersistence bool   `toml:"no_session_persistence" json:"no_session_persistence,omitempty"` // --no-session-persistence
-	ExecutionTimeout     string `toml:"execution_timeout" json:"execution_timeout,omitempty"`           // per-agent override, e.g. "20m"
+	Effort               string `toml:"effort" json:"effort,omitempty"`                       // low|medium|high|max
+	PermissionMode       string `toml:"permission_mode" json:"permission_mode,omitempty"`     // default|auto|acceptEdits|dontAsk (bypassPermissions is explicitly forbidden)
+	Bare                 bool   `toml:"bare" json:"bare"`                                     // --bare
+	DangerouslySkipPerms bool   `toml:"dangerously_skip_perms" json:"dangerously_skip_perms"` // --dangerously-skip-permissions (cannot be set via HTTP API, see M-5)
+	NoSessionPersistence bool   `toml:"no_session_persistence" json:"no_session_persistence"` // --no-session-persistence
+	ExecutionTimeout     string `toml:"execution_timeout" json:"execution_timeout,omitempty"` // per-agent override, e.g. "20m"
 }
 
 type AIConfig struct {
