@@ -407,6 +407,15 @@ Or use GitHub's native sub-issues feature. Heimdallm reads both sources and unio
 
 When all dependencies are `closed`, the daemon removes the blocked label, adds the promote-to label, and leaves an audit comment.
 
+### Operator smoke test
+
+To verify the staged issue flow end-to-end against a real repository, walk a throwaway issue through `triage` → `refinement` → `development`:
+
+1. Assign the test issue to exactly one user — the current Heimdallm operator — before adding any stage label. `assignees` is owner scope (see above), so the daemon will only pick up issues assigned to its operator.
+2. Add the configured triage label (e.g. `heimdallm-triage`) to enter the flow.
+3. Let Heimdallm promote through `triage` → `refinement` → `development` using the configured stage labels. If `auto_promote_triage` or `auto_promote_refinement` is disabled in your config, promote manually between stages.
+4. If the resulting auto-implement PR is only a smoke-test artifact, close it without merging.
+
 ---
 
 ## 7. AI Agents
