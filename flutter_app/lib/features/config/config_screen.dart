@@ -510,7 +510,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
         const SizedBox(height: 10),
         AutocompleteChipField(
           label: 'Assignees',
-          helper: 'Only process issues assigned to these users (empty = any)',
+          helper: 'Only process issues assigned to these users',
           selectedValues: _issueTracking.assignees,
           availableOptions: config.knownGitHubUsers,
           onChanged: (v) => setState(() {

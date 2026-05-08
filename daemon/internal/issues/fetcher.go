@@ -140,6 +140,12 @@ func (f *Fetcher) ProcessRepo(ctx context.Context, repo string, cfg config.Issue
 	if !cfg.Enabled {
 		return 0, nil
 	}
+	cfg = cfg.WithDefaultAssignee(authUser)
+	if len(cfg.Assignees) == 0 {
+		slog.Warn("issues fetcher: issue tracking has no assignee scope, skipping repo",
+			"repo", repo)
+		return 0, nil
+	}
 	if optsFor == nil {
 		return 0, fmt.Errorf("issues fetcher: nil OptionsFn")
 	}

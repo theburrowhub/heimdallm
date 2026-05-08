@@ -18,8 +18,11 @@ import (
 // ── fetcher-only fakes ───────────────────────────────────────────────────────
 
 type fakeClient struct {
-	issues []*github.Issue
-	err    error
+	issues       []*github.Issue
+	err          error
+	calls        int
+	lastCfg      config.IssueTrackingConfig
+	lastAuthUser string
 }
 
 type fakeMarkerFetcher struct {
@@ -36,6 +39,9 @@ func (f *fakeMarkerFetcher) FetchIssueCommentsOnly(repo string, number int) ([]g
 }
 
 func (c *fakeClient) FetchIssues(repo string, cfg config.IssueTrackingConfig, authenticatedUser string) ([]*github.Issue, error) {
+	c.calls++
+	c.lastCfg = cfg
+	c.lastAuthUser = authenticatedUser
 	return c.issues, c.err
 }
 
@@ -215,6 +221,41 @@ func TestFetcher_FetchErrorIsFatalForThisRun(t *testing.T) {
 	_, err := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
 	if err == nil {
 		t.Fatal("expected fetch error to surface")
+	}
+}
+
+func TestFetcher_DefaultsAssigneeScopeToAuthenticatedUser(t *testing.T) {
+	client := &fakeClient{issues: []*github.Issue{fixture(1, time.Now())}}
+	f := issues.NewFetcher(client, nil, &fakeDedup{byGithubID: map[int64]dedupEntry{}}, &fakePipeline{})
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 1 {
+		t.Fatalf("processed = %d, want 1", processed)
+	}
+	if len(client.lastCfg.Assignees) != 1 || client.lastCfg.Assignees[0] != "alice" {
+		t.Fatalf("FetchIssues cfg.Assignees = %v, want [alice]", client.lastCfg.Assignees)
+	}
+	if client.lastAuthUser != "alice" {
+		t.Fatalf("authenticatedUser = %q, want alice", client.lastAuthUser)
+	}
+}
+
+func TestFetcher_SkipsWhenAssigneeScopeUnavailable(t *testing.T) {
+	client := &fakeClient{issues: []*github.Issue{fixture(1, time.Now())}}
+	f := issues.NewFetcher(client, nil, &fakeDedup{byGithubID: map[int64]dedupEntry{}}, &fakePipeline{})
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 0 {
+		t.Fatalf("processed = %d, want 0", processed)
+	}
+	if client.calls != 0 {
+		t.Fatalf("FetchIssues calls = %d, want 0 when scope is unavailable", client.calls)
 	}
 }
 

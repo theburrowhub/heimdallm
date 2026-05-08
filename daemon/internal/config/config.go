@@ -140,7 +140,9 @@ type IssueTrackingConfig struct {
 	Organizations []string `toml:"organizations" json:"organizations"`
 
 	// Assignees limits processing to issues assigned to these GitHub users.
-	// Empty = no assignee filter.
+	// Empty in raw config means "use the authenticated GitHub login" at
+	// runtime. A deliberately shared queue must be introduced explicitly; the
+	// issue pipeline must not treat an absent assignee filter as "anyone".
 	Assignees []string `toml:"assignees" json:"assignees"`
 
 	// DevelopLabels are labels that mark an issue as "please implement".
@@ -218,6 +220,50 @@ func (c IssueTrackingConfig) ResolvePromoteToLabel() string {
 		return c.DevelopLabels[0]
 	}
 	return ""
+}
+
+// WithDefaultAssignee returns a copy whose assignee scope falls back to the
+// authenticated GitHub login. This keeps issue processing single-owner by
+// default while preserving explicitly configured assignee lists.
+func (c IssueTrackingConfig) WithDefaultAssignee(login string) IssueTrackingConfig {
+	if len(c.Assignees) > 0 {
+		return c
+	}
+	login = strings.TrimSpace(strings.TrimLeft(login, "@"))
+	if login == "" {
+		return c
+	}
+	c.Assignees = []string{login}
+	return c
+}
+
+// MatchesAssignees reports whether the current assignee filter permits an
+// issue assigned to the provided GitHub logins. An inactive filter permits all;
+// an active filter never matches an unassigned issue.
+func (c IssueTrackingConfig) MatchesAssignees(assignees []string) bool {
+	if len(c.Assignees) == 0 {
+		return true
+	}
+	if len(assignees) == 0 {
+		return false
+	}
+	want := make(map[string]struct{}, len(c.Assignees))
+	for _, a := range c.Assignees {
+		a = strings.ToLower(strings.TrimSpace(strings.TrimLeft(a, "@")))
+		if a != "" {
+			want[a] = struct{}{}
+		}
+	}
+	if len(want) == 0 {
+		return false
+	}
+	for _, a := range assignees {
+		a = strings.ToLower(strings.TrimSpace(strings.TrimLeft(a, "@")))
+		if _, ok := want[a]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // Classify returns the processing mode for an issue given its labels.

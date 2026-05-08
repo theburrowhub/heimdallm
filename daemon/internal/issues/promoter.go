@@ -76,6 +76,12 @@ func PromoteReady(ctx context.Context, c PromoteIssueClient, cfg config.IssueTra
 			if err := ctx.Err(); err != nil {
 				return promoted, err
 			}
+			if !cfg.MatchesAssignees(issue.AssigneeLogins()) {
+				slog.Debug("issues promote: skipping issue outside assignee scope",
+					"repo", repo, "issue", issue.Number,
+					"assignees", issue.AssigneeLogins(), "allowed_assignees", cfg.Assignees)
+				continue
+			}
 			blockedOnIssue := intersectLabels(issue.LabelNames(), blockedSet)
 			if len(blockedOnIssue) == 0 {
 				continue

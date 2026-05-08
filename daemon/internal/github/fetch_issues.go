@@ -166,7 +166,7 @@ func issueMatchesFilters(issue *Issue, repo string, cfg config.IssueTrackingConf
 	assigneeActive := len(cfg.Assignees) > 0
 
 	orgPass := !orgActive || repoBelongsToOrg(repo, cfg.Organizations)
-	assigneePass := !assigneeActive || hasAnyAssignee(issue.AssigneeLogins(), cfg.Assignees)
+	assigneePass := cfg.MatchesAssignees(issue.AssigneeLogins())
 
 	// No active filters → include.
 	if !orgActive && !assigneeActive {
@@ -205,25 +205,6 @@ func repoBelongsToOrg(repo string, orgs []string) bool {
 	owner := repo[:slash]
 	for _, o := range orgs {
 		if strings.EqualFold(strings.TrimSpace(o), owner) {
-			return true
-		}
-	}
-	return false
-}
-
-// hasAnyAssignee reports whether any entry in got is also in want. Empty
-// got never matches — an issue with no assignees never satisfies an active
-// assignee filter.
-func hasAnyAssignee(got, want []string) bool {
-	if len(got) == 0 || len(want) == 0 {
-		return false
-	}
-	wantSet := make(map[string]struct{}, len(want))
-	for _, w := range want {
-		wantSet[strings.ToLower(strings.TrimSpace(w))] = struct{}{}
-	}
-	for _, g := range got {
-		if _, ok := wantSet[strings.ToLower(strings.TrimSpace(g))]; ok {
 			return true
 		}
 	}
