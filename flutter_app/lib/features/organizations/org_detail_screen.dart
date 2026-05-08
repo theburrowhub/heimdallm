@@ -291,7 +291,8 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
                   const SizedBox(height: 10),
                   AutocompleteChipField(
                     label: 'Refinement labels',
-                    helper: 'Issues with these labels get a deep plan',
+                    helper:
+                        'Issues with these labels get a deep implementation plan',
                     selectedValues:
                         _config.refinementLabels ??
                         appConfig.issueTracking.refinementLabels,

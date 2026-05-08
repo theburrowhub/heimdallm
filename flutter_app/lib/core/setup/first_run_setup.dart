@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import '../models/config_model.dart';
 import 'gh_cli.dart';
 
@@ -191,6 +192,7 @@ class FirstRunSetup {
   static String _tomlStringArray(List<String> values) =>
       '[${values.map((v) => '"${_tomlEscapeString(v)}"').join(', ')}]';
 
+  @visibleForTesting
   static String buildTomlForTesting(AppConfig config) => _buildToml(config);
 
   static String _buildToml(AppConfig config) {
