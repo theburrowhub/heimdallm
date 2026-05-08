@@ -166,7 +166,7 @@ func TransitionIssueStage(ctx context.Context, client StageTransitionClient, tr 
 	}
 
 	if tr.Broker != nil {
-		publishStagePromotionEvent(tr.Broker, tr.Issue, tr.StoreIssueID, tr.From, tr.To, tr.Trigger, now, commented)
+		publishStagePromotionEvent(tr.Broker, tr.Issue, tr.StoreIssueID, tr.From, tr.To, tr.Trigger, now, commented || tr.SuppressAudit)
 	}
 	return nil
 }
@@ -316,6 +316,9 @@ func hasStagePromotionCommentSince(comments []github.Comment, from, to IssueStag
 	return false
 }
 
+// stagePromotionCommentMatches treats an empty from/to stage as "do not filter
+// on that field". This keeps recent-comment dedup compatible with older audit
+// comments that only need to prove the target stage was already recorded.
 func stagePromotionCommentMatches(body string, from, to IssueStage) bool {
 	if !strings.Contains(body, stagePromotionHeading) {
 		return false

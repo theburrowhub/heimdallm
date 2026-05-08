@@ -335,6 +335,9 @@ func (f *Fetcher) auditManualStageChange(ctx context.Context, issue *github.Issu
 		}
 		return err
 	}
+	if latest == nil {
+		return nil
+	}
 	from, ok := StageFromAction(latest.ActionTaken)
 	if !ok || from == to {
 		return nil
