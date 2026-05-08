@@ -15,10 +15,11 @@ const (
 	EventIssueDetected        = "issue_detected"
 	EventIssueReviewStarted   = "issue_review_started"
 	EventIssueReviewCompleted = "issue_review_completed"
-	EventIssueRefinementDone  = "issue_refinement_done"
-	EventIssueImplemented     = "issue_implemented" // reserved for #27 (auto_implement PR created)
-	EventIssueReviewError     = "issue_review_error"
-	EventIssuePromoted        = "issue_promoted" // issue stage/dependency label promotion
+	// Emitted after the refinement stage stores its plan and posts the GitHub comment.
+	EventIssueRefinementDone = "issue_refinement_done"
+	EventIssueImplemented    = "issue_implemented" // reserved for #27 (auto_implement PR created)
+	EventIssueReviewError    = "issue_review_error"
+	EventIssuePromoted       = "issue_promoted" // issue stage/dependency label promotion
 
 	// EventRepoDiscovered fires when the poll cycle sees a PR whose repo
 	// is not yet in monitored or non-monitored. Payload: {"repo": "org/name"}.

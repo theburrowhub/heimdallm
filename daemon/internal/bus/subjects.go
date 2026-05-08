@@ -32,6 +32,7 @@ const (
 	SubjEventPRDetected      = "heimdallm.events.pr_detected"
 	SubjEventIssueDetected   = "heimdallm.events.issue_detected"
 	SubjEventIssueTriage     = "heimdallm.events.issue_review_completed"
+	// Mirrors sse.EventIssueRefinementDone for activity/SSE bridge consumers.
 	SubjEventIssueRefinement = "heimdallm.events.issue_refinement_done"
 	SubjEventIssueImplement  = "heimdallm.events.issue_implemented"
 	SubjEventIssueState      = "heimdallm.events.issue_state_changed"
