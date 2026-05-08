@@ -22,9 +22,10 @@ const (
 	tabConfig
 	tabStats
 	tabLogs
+	tabServer
 )
 
-var tabNames = []string{"Activity", "PRs", "Issues", "Config", "Stats", "Logs"}
+var tabNames = []string{"Activity", "PRs", "Issues", "Config", "Stats", "Logs", "Server"}
 
 type Dashboard struct {
 	client *api.Client
@@ -476,6 +477,9 @@ func (d *Dashboard) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "6":
 		d.activeTab = tabLogs
 		d.cursor = 0
+	case "7":
+		d.activeTab = tabServer
+		d.cursor = 0
 	}
 	return d, nil
 }
@@ -737,6 +741,8 @@ func (d *Dashboard) renderContent(height int) string {
 		return d.renderStats(height)
 	case tabLogs:
 		return d.renderLogs(height)
+	case tabServer:
+		return d.renderServer(height)
 	}
 	return ""
 }
@@ -908,6 +914,82 @@ func (d *Dashboard) renderConfig(height int) string {
 	if ind := scrollIndicator(start, end, len(lines)); ind != "" {
 		b.WriteString(lipgloss.NewStyle().Foreground(colorMuted).Render(ind))
 	}
+	return b.String()
+}
+
+func (d *Dashboard) serverStatusBadge() string {
+	if d.shutdownInFlight {
+		return lipgloss.NewStyle().Foreground(colorWarning).Bold(true).Render("● stopping...")
+	}
+	if !d.connected {
+		return lipgloss.NewStyle().Foreground(colorMuted).Render("● stopped")
+	}
+	return lipgloss.NewStyle().Foreground(colorSuccess).Bold(true).Render("● running")
+}
+
+func (d *Dashboard) renderServer(height int) string {
+	var b strings.Builder
+
+	b.WriteString(headerStyle.Render("  Server"))
+	b.WriteString("\n")
+	b.WriteString("  " + strings.Repeat("─", 64))
+	b.WriteString("\n")
+
+	mutedNote := lipgloss.NewStyle().Foreground(colorMuted)
+
+	// Status row
+	b.WriteString(fmt.Sprintf("  %-10s %s\n", "Status", d.serverStatusBadge()))
+
+	// Version row — d.version is the build-time version passed into NewDashboard
+	version := d.version
+	if version == "" {
+		version = mutedNote.Render("(unknown)")
+	}
+	b.WriteString(fmt.Sprintf("  %-10s %s\n", "Version", version))
+
+	// Uptime row
+	uptime := time.Since(d.startTime).Truncate(time.Second).String()
+	b.WriteString(fmt.Sprintf("  %-10s %s\n", "Uptime", uptime))
+
+	// Bind addr / port — sourced from d.config (last successful /config fetch)
+	bindAddr := "(unavailable)"
+	port := "(unavailable)"
+	if d.config != nil {
+		if v, ok := d.config["bind_addr"].(string); ok && v != "" {
+			bindAddr = v
+		} else {
+			bindAddr = mutedNote.Render("(default: 127.0.0.1)")
+		}
+		if n := toInt(d.config["server_port"]); n != 0 {
+			port = fmt.Sprintf("%d", n)
+		}
+	}
+
+	b.WriteString(fmt.Sprintf("  %-10s %s   %s\n", "Bind addr", bindAddr,
+		mutedNote.Render("(read-only — edit ~/.config/heimdallm/config.toml)")))
+	b.WriteString(fmt.Sprintf("  %-10s %s   %s\n", "Port", port,
+		mutedNote.Render("(read-only)")))
+
+	b.WriteString("\n")
+
+	// Help line — only show Stop hint when daemon is up.
+	if d.connected && !d.shutdownInFlight {
+		b.WriteString("  " + helpStyle.Render("[s] Stop daemon   [r] Refresh"))
+	} else if d.shutdownInFlight {
+		b.WriteString("  " + helpStyle.Render("[r] Refresh"))
+	} else {
+		b.WriteString("  " + helpStyle.Render("[r] Refresh   (start the daemon from your shell)"))
+	}
+	b.WriteString("\n\n")
+
+	b.WriteString("  ")
+	b.WriteString(mutedNote.Render(
+		"Restarting requires running heimdalld again from your shell"))
+	b.WriteString("\n  ")
+	b.WriteString(mutedNote.Render(
+		"or service manager (TUI cannot spawn the daemon)."))
+	b.WriteString("\n")
+
 	return b.String()
 }
 
