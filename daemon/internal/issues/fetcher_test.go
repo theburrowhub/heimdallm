@@ -1010,6 +1010,60 @@ func TestFetcher_ManualStageLabelChangeRetriesLabelsWhenAuditExistsButLabelsAreS
 	}
 }
 
+func TestFetcher_ManualStageLabelChangeSkipsStaleFromWhenTargetAlreadyAudited(t *testing.T) {
+	now := time.Now()
+	issue := &github.Issue{
+		ID:        int64(1008),
+		Number:    8,
+		Repo:      "org/repo",
+		Title:     "Ready to build",
+		UpdatedAt: now,
+		Mode:      config.IssueModeDevelop,
+		Labels:    issueLabels("develop"),
+	}
+	latestReviewAt := now.Add(-5 * time.Minute)
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {
+			row: &store.Issue{ID: 17, GithubID: issue.ID},
+			review: &store.IssueReview{
+				IssueID:     17,
+				CommentedAt: latestReviewAt,
+				ActionTaken: string(config.IssueModeReviewOnly),
+			},
+		},
+	}}
+	auditAt := latestReviewAt.Add(time.Minute)
+	mf := &fakeMarkerFetcher{commentsByKey: map[string][]github.Comment{
+		"org/repo#8": {{
+			Author:    "heimdallm-bot",
+			CreatedAt: auditAt,
+			Body: issues.StagePromotionAuditComment(
+				issues.IssueStageRefinement,
+				issues.IssueStageDevelopment,
+				issues.StagePromotionAuto,
+				auditAt,
+			),
+		}},
+	}}
+	pub := &fakeIssuePublisher{}
+	stage := &fakeStageTransitionClient{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, mf, dedup, &fakePipeline{})
+	f.SetPublisher(pub)
+	f.SetStageTransitioner(stage, nil)
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", stagePipelineCfg(), "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 1 || len(pub.implement) != 1 || pub.implement[0] != 8 {
+		t.Fatalf("expected implement dispatch, processed=%d pub=%v", processed, pub.implement)
+	}
+	if len(stage.added) != 0 || len(stage.removed) != 0 || len(stage.comments) != 0 {
+		t.Fatalf("target-stage audit should suppress stale-from transition, added=%v removed=%v comments=%v",
+			stage.added, stage.removed, stage.comments)
+	}
+}
+
 func TestFetcher_ManualStageLabelChangeAuditsWhenExistingAuditIsDifferentTransition(t *testing.T) {
 	now := time.Now()
 	issue := &github.Issue{

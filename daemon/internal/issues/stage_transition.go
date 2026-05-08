@@ -316,6 +316,21 @@ func hasStagePromotionCommentSince(comments []github.Comment, from, to IssueStag
 	return false
 }
 
+func hasStagePromotionTargetCommentSince(comments []github.Comment, to IssueStage, since time.Time) bool {
+	if since.IsZero() {
+		return false
+	}
+	for _, c := range comments {
+		if c.CreatedAt.IsZero() || c.CreatedAt.Before(since) {
+			continue
+		}
+		if stagePromotionCommentMatches(c.Body, "", to) {
+			return true
+		}
+	}
+	return false
+}
+
 // stagePromotionCommentMatches treats an empty from/to stage as "do not filter
 // on that field". This keeps recent-comment dedup compatible with older audit
 // comments that only need to prove the target stage was already recorded.
