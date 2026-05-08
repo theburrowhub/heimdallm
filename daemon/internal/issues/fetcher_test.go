@@ -689,6 +689,163 @@ func TestFetcher_ModeChangeBypassesBotCommentCheck(t *testing.T) {
 	}
 }
 
+func TestFetcher_StageChangeBypassesGraceWindowToRunRefinement(t *testing.T) {
+	reviewedAt := time.Now().Add(-2 * time.Minute)
+	commentedAt := reviewedAt.Add(10 * time.Second)
+	issue := fixture(1, commentedAt.Add(5*time.Second))
+	issue.Mode = config.IssueModeRefinement
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {
+			row: &store.Issue{ID: 10, GithubID: issue.ID},
+			review: &store.IssueReview{
+				IssueID:     10,
+				CreatedAt:   reviewedAt,
+				CommentedAt: commentedAt,
+				ActionTaken: string(config.IssueModeReviewOnly),
+			},
+		},
+	}}
+	pub := &fakeIssuePublisher{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, nil, dedup, &fakePipeline{})
+	f.SetPublisher(pub)
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", stagePipelineCfg(), "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 1 || len(pub.refinement) != 1 || pub.refinement[0] != 1 {
+		t.Fatalf("stage change should run refinement despite grace window, processed=%d pub=%v", processed, pub.refinement)
+	}
+}
+
+func TestFetcher_StageChangeBypassesGraceWindowToRunDevelop(t *testing.T) {
+	reviewedAt := time.Now().Add(-2 * time.Minute)
+	commentedAt := reviewedAt.Add(10 * time.Second)
+	issue := &github.Issue{
+		ID:        2002,
+		Number:    2,
+		Repo:      "org/repo",
+		UpdatedAt: commentedAt.Add(5 * time.Second),
+		Mode:      config.IssueModeDevelop,
+	}
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {
+			row: &store.Issue{ID: 20, GithubID: issue.ID},
+			review: &store.IssueReview{
+				IssueID:     20,
+				CreatedAt:   reviewedAt,
+				CommentedAt: commentedAt,
+				ActionTaken: string(config.IssueModeRefinement),
+			},
+		},
+	}}
+	pub := &fakeIssuePublisher{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, nil, dedup, &fakePipeline{})
+	f.SetPublisher(pub)
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", stagePipelineCfg(), "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 1 || len(pub.implement) != 1 || pub.implement[0] != 2 {
+		t.Fatalf("stage change should run develop despite grace window, processed=%d pub=%v", processed, pub.implement)
+	}
+}
+
+func TestFetcher_NonForwardStageChangesStillUseGraceWindow(t *testing.T) {
+	reviewedAt := time.Now().Add(-2 * time.Minute)
+	commentedAt := reviewedAt.Add(10 * time.Second)
+	cases := []struct {
+		name        string
+		number      int
+		actionTaken string
+		mode        config.IssueMode
+	}{
+		{
+			name:        "triage to development is non-adjacent",
+			number:      3,
+			actionTaken: string(config.IssueModeReviewOnly),
+			mode:        config.IssueModeDevelop,
+		},
+		{
+			name:        "development to refinement is backward",
+			number:      4,
+			actionTaken: string(config.IssueModeDevelop),
+			mode:        config.IssueModeRefinement,
+		},
+		{
+			name:        "refinement to refinement is same stage",
+			number:      5,
+			actionTaken: string(config.IssueModeRefinement),
+			mode:        config.IssueModeRefinement,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			issue := fixture(tc.number, commentedAt.Add(5*time.Second))
+			issue.Mode = tc.mode
+			dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+				issue.ID: {
+					row: &store.Issue{ID: int64(tc.number), GithubID: issue.ID},
+					review: &store.IssueReview{
+						IssueID:     int64(tc.number),
+						CreatedAt:   reviewedAt,
+						CommentedAt: commentedAt,
+						ActionTaken: tc.actionTaken,
+					},
+				},
+			}}
+			pub := &fakeIssuePublisher{}
+			f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, nil, dedup, &fakePipeline{})
+			f.SetPublisher(pub)
+
+			processed, err := f.ProcessRepo(context.Background(), "org/repo", stagePipelineCfg(), "alice", noOpts)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if processed != 0 || len(pub.triage) != 0 || len(pub.refinement) != 0 || len(pub.implement) != 0 {
+				t.Fatalf("non-forward stage change should stay deduped within grace, processed=%d pub=%+v", processed, pub)
+			}
+		})
+	}
+}
+
+func TestFetcher_StageChangeDoesNotBypassAutoImplementFailureCap(t *testing.T) {
+	reviewedAt := time.Now().Add(-2 * time.Minute)
+	commentedAt := reviewedAt.Add(10 * time.Second)
+	issue := &github.Issue{
+		ID:        2006,
+		Number:    6,
+		Repo:      "org/repo",
+		UpdatedAt: commentedAt.Add(5 * time.Second),
+		Mode:      config.IssueModeDevelop,
+	}
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {
+			row: &store.Issue{ID: 60, GithubID: issue.ID},
+			review: &store.IssueReview{
+				IssueID:     60,
+				CreatedAt:   reviewedAt,
+				CommentedAt: commentedAt,
+				ActionTaken: string(config.IssueModeRefinement),
+			},
+			failedAutoImpl: issues.MaxAutoImplementFailures,
+		},
+	}}
+	pub := &fakeIssuePublisher{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, nil, dedup, &fakePipeline{})
+	f.SetPublisher(pub)
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", stagePipelineCfg(), "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 0 || len(pub.implement) != 0 {
+		t.Fatalf("failure cap should block develop even on stage advance, processed=%d pub=%v", processed, pub.implement)
+	}
+}
+
 func TestFetcher_ManualStageLabelChangeAuditsAndDispatchesNewStage(t *testing.T) {
 	now := time.Now()
 	issue := &github.Issue{

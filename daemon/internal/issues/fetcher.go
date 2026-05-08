@@ -302,6 +302,15 @@ func (f *Fetcher) alreadyProcessed(issue *github.Issue) (bool, string, error) {
 		return true, fmt.Sprintf("auto_implement failed %d times (cap %d), requires human intervention", failCount, MaxAutoImplementFailures), nil
 	}
 
+	// Any adjacent forward stage promotion is real new work, regardless of
+	// whether the bot or a human changed labels. Do not let RecomputeGrace hide
+	// triage -> refinement or refinement -> development.
+	if latestStage, latestOK := StageFromAction(latest.ActionTaken); latestOK {
+		if currentStage, currentOK := StageFromMode(issue.Mode); currentOK && isForwardStageAdvance(latestStage, currentStage) {
+			return false, "", nil
+		}
+	}
+
 	ref := latest.CommentedAt
 	if ref.IsZero() {
 		ref = latest.CreatedAt
@@ -380,4 +389,25 @@ func (f *Fetcher) auditManualStageChange(ctx context.Context, issue *github.Issu
 		SuppressAudit:  alreadyAudited,
 		Broker:         f.stageBroker,
 	})
+}
+
+var issueStageOrder = []IssueStage{
+	IssueStageTriage,
+	IssueStageRefinement,
+	IssueStageDevelopment,
+}
+
+func isForwardStageAdvance(from, to IssueStage) bool {
+	fromIdx, fromOK := issueStageOrdinal(from)
+	toIdx, toOK := issueStageOrdinal(to)
+	return fromOK && toOK && toIdx == fromIdx+1
+}
+
+func issueStageOrdinal(stage IssueStage) (int, bool) {
+	for idx, candidate := range issueStageOrder {
+		if candidate == stage {
+			return idx, true
+		}
+	}
+	return 0, false
 }
