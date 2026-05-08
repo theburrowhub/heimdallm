@@ -943,29 +943,71 @@ func (c *Client) RemoveIssueLabel(repo string, number int, label string) error {
 	return nil
 }
 
-// FetchCollaborators returns the login names of repository collaborators.
+// parseNextLink extracts the URL whose rel parameter is "next" from a GitHub
+// Link header. Returns "" when no such URL exists. The header format is:
+//
+//	<https://api.github.com/...&page=2>; rel="next", <...>; rel="last"
+//
+// We do not pull in a parser dependency; a small string scan is sufficient.
+func parseNextLink(header string) string {
+	for _, part := range strings.Split(header, ",") {
+		segs := strings.Split(strings.TrimSpace(part), ";")
+		if len(segs) < 2 {
+			continue
+		}
+		urlPart := strings.TrimSpace(segs[0])
+		if !strings.HasPrefix(urlPart, "<") || !strings.HasSuffix(urlPart, ">") {
+			continue
+		}
+		linkURL := urlPart[1 : len(urlPart)-1]
+		for _, s := range segs[1:] {
+			s = strings.TrimSpace(s)
+			if s == `rel="next"` || s == "rel=next" {
+				return linkURL
+			}
+		}
+	}
+	return ""
+}
+
+// FetchCollaborators returns the login names of repository collaborators,
+// following GitHub's Link: rel="next" header to walk every page.
 func (c *Client) FetchCollaborators(repo string) ([]string, error) {
 	if repo == "" {
 		return nil, nil
 	}
-	resp, err := c.do("GET", fmt.Sprintf("/repos/%s/collaborators?per_page=100", repo), "application/vnd.github+json")
-	if err != nil {
-		return nil, fmt.Errorf("github: fetch collaborators: %w", err)
+	const maxPages = 100
+	path := fmt.Sprintf("/repos/%s/collaborators?per_page=100", repo)
+	var logins []string
+	for page := 0; page < maxPages; page++ {
+		resp, err := c.do("GET", path, "application/vnd.github+json")
+		if err != nil {
+			return nil, fmt.Errorf("github: fetch collaborators: %w", err)
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+		linkHeader := resp.Header.Get("Link")
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("github: fetch collaborators %s: status %d", repo, resp.StatusCode)
+		}
+		var raw []struct {
+			Login string `json:"login"`
+		}
+		if err := json.Unmarshal(body, &raw); err != nil {
+			return nil, fmt.Errorf("github: decode collaborators: %w", err)
+		}
+		for _, u := range raw {
+			logins = append(logins, u.Login)
+		}
+		next := parseNextLink(linkHeader)
+		if next == "" {
+			return logins, nil
+		}
+		nextURL, err := url.Parse(next)
+		if err != nil {
+			return nil, fmt.Errorf("github: parse next link %q: %w", next, err)
+		}
+		path = nextURL.RequestURI()
 	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("github: fetch collaborators %s: status %d", repo, resp.StatusCode)
-	}
-	var raw []struct {
-		Login string `json:"login"`
-	}
-	if err := json.Unmarshal(body, &raw); err != nil {
-		return nil, fmt.Errorf("github: decode collaborators: %w", err)
-	}
-	logins := make([]string, len(raw))
-	for i, u := range raw {
-		logins[i] = u.Login
-	}
-	return logins, nil
+	return nil, fmt.Errorf("github: fetch collaborators %s: pagination exceeded %d pages", repo, maxPages)
 }
