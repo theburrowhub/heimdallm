@@ -497,6 +497,38 @@ func TestApplyDefaults_IssueTrackingPreservesExisting(t *testing.T) {
 	}
 }
 
+func TestIssueTrackingWithDefaultAssignee(t *testing.T) {
+	cfg := IssueTrackingConfig{Enabled: true}
+	got := cfg.WithDefaultAssignee("@alice")
+	if len(got.Assignees) != 1 || got.Assignees[0] != "alice" {
+		t.Fatalf("Assignees = %v, want [alice]", got.Assignees)
+	}
+	if len(cfg.Assignees) != 0 {
+		t.Fatalf("WithDefaultAssignee mutated receiver: %v", cfg.Assignees)
+	}
+}
+
+func TestIssueTrackingWithDefaultAssigneePreservesExplicitList(t *testing.T) {
+	cfg := IssueTrackingConfig{Enabled: true, Assignees: []string{"bob"}}
+	got := cfg.WithDefaultAssignee("alice")
+	if len(got.Assignees) != 1 || got.Assignees[0] != "bob" {
+		t.Fatalf("Assignees = %v, want explicit [bob]", got.Assignees)
+	}
+}
+
+func TestIssueTrackingMatchesAssignees(t *testing.T) {
+	cfg := IssueTrackingConfig{Assignees: []string{"Alice"}}
+	if !cfg.MatchesAssignees([]string{"bob", "alice"}) {
+		t.Fatal("expected case-insensitive assignee match")
+	}
+	if cfg.MatchesAssignees([]string{"bob"}) {
+		t.Fatal("unexpected assignee match")
+	}
+	if cfg.MatchesAssignees(nil) {
+		t.Fatal("unassigned issue must not match active assignee filter")
+	}
+}
+
 func TestApplyEnvOverrides_IssueTracking(t *testing.T) {
 	cfg := &Config{}
 	cfg.applyDefaults()

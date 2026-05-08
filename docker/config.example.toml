@@ -29,14 +29,14 @@ repositories = ["org/repo1", "org/repo2"]
 # review comment (review_only) or opens an implementation PR
 # (auto_implement). Label classification precedence:
 #
-#   skip_labels  >  review_only_labels  >  develop_labels  >  default_action
+#   skip_labels  >  blocked_labels  >  review_only_labels  >  refinement_labels  >  develop_labels  >  default_action
 #
 # [github.issue_tracking]
 # enabled             = false
 # filter_mode         = "exclusive"              # "exclusive" (AND) | "inclusive" (OR)
 # default_action      = "ignore"                 # "ignore" | "review_only"
 # organizations       = ["your-org"]             # empty = any org in repositories
-# assignees           = ["your-username"]        # empty = any assignee (or unassigned)
+# assignees           = ["your-username"]        # empty defaults to authenticated GitHub login
 # develop_labels      = ["enhancement", "feature", "bug"]
 # refinement_labels   = ["refine", "needs-plan"]
 # review_only_labels  = ["question", "discussion", "analysis"]

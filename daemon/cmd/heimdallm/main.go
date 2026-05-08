@@ -334,7 +334,7 @@ func main() {
 	// loginMu guards cachedLogin against concurrent reads/writes from the
 	// poll cycle and HTTP goroutines.
 	var loginMu sync.Mutex
-	var cachedLogin string
+	var cachedLogin = resolvedBotLogin
 
 	buildRunOpts := func(pr *gh.PullRequest, aiCfg config.RepoAI) pipeline.RunOptions {
 		cli := aiCfg.Primary
@@ -840,6 +840,14 @@ func main() {
 		localDirBase := c.GitHub.LocalDirBase
 		globalTimeout := c.AI.ExecutionTimeout
 		cfgMu.Unlock()
+		loginMu.Lock()
+		authUser := cachedLogin
+		loginMu.Unlock()
+		var ok bool
+		repoIT, ok = issueTrackingWithAssigneeScope("triage-worker", msg.Repo, repoIT, authUser)
+		if !ok {
+			return
+		}
 		if !issueStageStillCurrent("triage-worker", ghIssue, repoIT, config.IssueModeReviewOnly) {
 			return
 		}
@@ -944,6 +952,14 @@ func main() {
 		localDirBase := c.GitHub.LocalDirBase
 		globalTimeout := c.AI.ExecutionTimeout
 		cfgMu.Unlock()
+		loginMu.Lock()
+		authUser := cachedLogin
+		loginMu.Unlock()
+		var ok bool
+		repoIT, ok = issueTrackingWithAssigneeScope("refinement-worker", msg.Repo, repoIT, authUser)
+		if !ok {
+			return
+		}
 		if !issueStageStillCurrent("refinement-worker", ghIssue, repoIT, config.IssueModeRefinement) {
 			return
 		}
@@ -1013,6 +1029,14 @@ func main() {
 		localDirBase := c.GitHub.LocalDirBase
 		globalTimeout := c.AI.ExecutionTimeout
 		cfgMu.Unlock()
+		loginMu.Lock()
+		authUser := cachedLogin
+		loginMu.Unlock()
+		var ok bool
+		repoIT, ok = issueTrackingWithAssigneeScope("implement-worker", msg.Repo, repoIT, authUser)
+		if !ok {
+			return
+		}
 		if !issueStageStillCurrent("implement-worker", ghIssue, repoIT, config.IssueModeDevelop) {
 			return
 		}
@@ -1240,6 +1264,10 @@ func main() {
 		nonMonList := append([]string(nil), c.GitHub.NonMonitored...)
 		localDirBaseList := append([]string(nil), c.GitHub.LocalDirBase...)
 		cfgMu.Unlock()
+		loginMu.Lock()
+		authUser := cachedLogin
+		loginMu.Unlock()
+		issueTracking := c.GitHub.IssueTracking.WithDefaultAssignee(authUser)
 		orgOverrides := make(map[string]map[string]any)
 		for org, ai := range c.AI.Orgs {
 			orgOverrides[org] = orgAIOverrideMap(ai)
@@ -1320,7 +1348,7 @@ func main() {
 			"ai_fallback":                 c.AI.Fallback,
 			"review_mode":                 c.AI.ReviewMode,
 			"retention_days":              c.Retention.MaxDays,
-			"issue_tracking":              c.GitHub.IssueTracking,
+			"issue_tracking":              issueTracking,
 			"repo_overrides":              repoOverrides,
 			"org_overrides":               orgOverrides,
 			"agent_configs":               agentConfigs,
@@ -2258,6 +2286,41 @@ type tier2Adapter struct {
 
 const breakerTripDedupTTL = 24 * time.Hour
 
+func (a *tier2Adapter) cachedAuthenticatedUser() string {
+	if a == nil || a.login == nil {
+		return ""
+	}
+	if a.loginMu == nil {
+		return *a.login
+	}
+	a.loginMu.Lock()
+	defer a.loginMu.Unlock()
+	return *a.login
+}
+
+func (a *tier2Adapter) resolveAuthenticatedUser() string {
+	if authUser := a.cachedAuthenticatedUser(); authUser != "" {
+		return authUser
+	}
+	if a == nil || a.ghClient == nil {
+		return ""
+	}
+	u, err := a.ghClient.AuthenticatedUser()
+	if err != nil {
+		return ""
+	}
+	if a.login != nil {
+		if a.loginMu == nil {
+			*a.login = u
+		} else {
+			a.loginMu.Lock()
+			*a.login = u
+			a.loginMu.Unlock()
+		}
+	}
+	return u
+}
+
 type breakerTripKey struct {
 	Repo    string
 	Number  int
@@ -2661,17 +2724,14 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 		return 0, nil
 	}
 
-	// Resolve authenticated user
-	a.loginMu.Lock()
-	authUser := *a.login
-	a.loginMu.Unlock()
-	if authUser == "" {
-		if u, err := a.ghClient.AuthenticatedUser(); err == nil {
-			authUser = u
-			a.loginMu.Lock()
-			*a.login = u
-			a.loginMu.Unlock()
-		}
+	// Resolve authenticated user before applying issue tracking defaults: an
+	// empty assignee list means "this daemon's user", not a shared queue.
+	authUser := a.resolveAuthenticatedUser()
+
+	var ok bool
+	repoIT, ok = issueTrackingWithAssigneeScope("tier2 issue processing", repo, repoIT, authUser)
+	if !ok {
+		return 0, nil
 	}
 
 	optsFor := func(issue *gh.Issue) (issuepipeline.RunOptions, bool) {
@@ -2786,12 +2846,21 @@ func (a *tier2Adapter) PromoteReady(ctx context.Context, repos []string) (int, e
 		repos []string
 	}
 
+	authUser := a.cachedAuthenticatedUser()
+
 	a.cfgMu.Lock()
 	c := *a.cfg
 	groupOrder := make([]string, 0, len(repos))
 	groups := make(map[string]*promoteGroup)
 	for _, repo := range repos {
 		it := c.IssueTrackingForRepo(repo)
+		if it.Enabled && len(it.BlockedLabels) > 0 && len(it.Assignees) == 0 && authUser == "" {
+			authUser = a.resolveAuthenticatedUser()
+		}
+		it, ok := issueTrackingWithAssigneeScope("tier2 issue promotion", repo, it, authUser)
+		if !ok {
+			continue
+		}
 		if it.Enabled && len(it.BlockedLabels) > 0 {
 			key := promoteIssueTrackingKey(it)
 			group := groups[key]
@@ -3399,6 +3468,12 @@ func issueStageStillCurrent(scope string, issue *gh.Issue, it config.IssueTracki
 			"repo", issue.Repo, "number", issue.Number)
 		return false
 	}
+	if !it.MatchesAssignees(issue.AssigneeLogins()) {
+		slog.Info(scope+": issue assigned outside this daemon scope, skipping stale job",
+			"repo", issue.Repo, "number", issue.Number,
+			"assignees", issue.AssigneeLogins(), "allowed_assignees", it.Assignees)
+		return false
+	}
 	// Best-effort stale-job guard: workers fetch the issue immediately before
 	// this check, so queued jobs whose labels changed since dispatch skip
 	// before running AI. A label edit after this fetch is handled by the next
@@ -3410,6 +3485,16 @@ func issueStageStillCurrent(scope string, issue *gh.Issue, it config.IssueTracki
 	slog.Info(scope+": issue stage changed before worker run, skipping stale job",
 		"repo", issue.Repo, "number", issue.Number, "want", want, "got", got, "labels", issue.LabelNames())
 	return false
+}
+
+func issueTrackingWithAssigneeScope(scope, repo string, it config.IssueTrackingConfig, defaultAssignee string) (config.IssueTrackingConfig, bool) {
+	it = it.WithDefaultAssignee(defaultAssignee)
+	if it.Enabled && len(it.Assignees) == 0 {
+		slog.Warn(scope+": issue tracking has no assignee scope; skipping issues for this repo",
+			"repo", repo)
+		return it, false
+	}
+	return it, true
 }
 
 func autoPromoteAfterStage(

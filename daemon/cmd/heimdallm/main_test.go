@@ -348,11 +348,12 @@ func TestTier2AdapterPromoteReadyUsesOrgScopedIssueTracking(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/org/repo/issues":
 			_ = json.NewEncoder(w).Encode([]map[string]any{
 				{
-					"number": 10,
-					"title":  "blocked",
-					"state":  "open",
-					"body":   "## Depends on\n- #5\n",
-					"labels": []map[string]string{{"name": "blocked"}},
+					"number":    10,
+					"title":     "blocked",
+					"state":     "open",
+					"body":      "## Depends on\n- #5\n",
+					"assignees": []map[string]string{{"login": "bot"}},
+					"labels":    []map[string]string{{"name": "blocked"}},
 				},
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/org/repo/issues/10/sub_issues":
@@ -396,6 +397,7 @@ func TestTier2AdapterPromoteReadyUsesOrgScopedIssueTracking(t *testing.T) {
 		Enabled:       false,
 		FilterMode:    config.FilterModeExclusive,
 		DefaultAction: string(config.IssueModeIgnore),
+		Assignees:     []string{"bot"},
 		BlockedLabels: []string{"blocked"},
 		DevelopLabels: []string{"global-ready"},
 	}
@@ -439,21 +441,23 @@ func TestTier2AdapterPromoteReadyBatchesReposWithSameIssueTracking(t *testing.T)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/org/a/issues":
 			_ = json.NewEncoder(w).Encode([]map[string]any{
 				{
-					"number": 10,
-					"title":  "blocked a",
-					"state":  "open",
-					"body":   "## Depends on\n- org/shared#5\n",
-					"labels": []map[string]string{{"name": "blocked"}},
+					"number":    10,
+					"title":     "blocked a",
+					"state":     "open",
+					"body":      "## Depends on\n- org/shared#5\n",
+					"assignees": []map[string]string{{"login": "bot"}},
+					"labels":    []map[string]string{{"name": "blocked"}},
 				},
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/org/b/issues":
 			_ = json.NewEncoder(w).Encode([]map[string]any{
 				{
-					"number": 20,
-					"title":  "blocked b",
-					"state":  "open",
-					"body":   "## Depends on\n- org/shared#5\n",
-					"labels": []map[string]string{{"name": "blocked"}},
+					"number":    20,
+					"title":     "blocked b",
+					"state":     "open",
+					"body":      "## Depends on\n- org/shared#5\n",
+					"assignees": []map[string]string{{"login": "bot"}},
+					"labels":    []map[string]string{{"name": "blocked"}},
 				},
 			})
 		case r.Method == http.MethodGet && (r.URL.Path == "/repos/org/a/issues/10/sub_issues" || r.URL.Path == "/repos/org/b/issues/20/sub_issues"):
@@ -489,6 +493,7 @@ func TestTier2AdapterPromoteReadyBatchesReposWithSameIssueTracking(t *testing.T)
 		Enabled:       true,
 		FilterMode:    config.FilterModeExclusive,
 		DefaultAction: string(config.IssueModeIgnore),
+		Assignees:     []string{"bot"},
 		BlockedLabels: []string{"blocked"},
 		DevelopLabels: []string{"ready"},
 	}
@@ -517,6 +522,7 @@ func TestTier2AdapterPromoteReadyReportsAllGroupErrors(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.GitHub.IssueTracking = config.IssueTrackingConfig{
 		Enabled:       true,
+		Assignees:     []string{"alice"},
 		BlockedLabels: []string{"blocked"},
 	}
 	cfg.AI.Repos = map[string]config.RepoAI{

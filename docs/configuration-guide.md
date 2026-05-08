@@ -377,6 +377,15 @@ organizations = ["myorg"]
 assignees     = ["myusername"]
 ```
 
+`assignees` is owner scope, not just a sort hint. When issue tracking is
+enabled and no assignees are configured, Heimdallm uses the authenticated
+GitHub login for that machine. That means each daemon processes only issues
+assigned to its operator by default; unassigned issues are ignored even if they
+carry a Heimdallm stage label. To hand work to another operator, triage can
+assign the issue to that user and move it to `refinement`; that user's
+Heimdallm can then continue directly from `refinement` without repeating
+triage.
+
 ### Dependency-based issue promotion
 
 Mark downstream issues `blocked` until their prerequisites close, then promote them automatically.
@@ -926,6 +935,7 @@ non_monitored = []
 #                                       # (see §6 Issue Tracking). Use "ignore" + explicit labels.
 # organizations  = ["myorg"]            # env: HEIMDALLM_ISSUE_ORGANIZATIONS
 # assignees      = ["myusername"]       # env: HEIMDALLM_ISSUE_ASSIGNEES
+#                                       # empty defaults to the authenticated GitHub login
 # develop_labels     = ["enhancement", "feature", "bug"]
 #                                       # env: HEIMDALLM_ISSUE_DEVELOP_LABELS
 # refinement_labels  = ["refine"]
