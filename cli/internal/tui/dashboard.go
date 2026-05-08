@@ -281,7 +281,7 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return d, nil
 
 	case sseMsg:
-		itemType, info := formatSSEData(msg.Data)
+		itemType, info := formatSSEData(msg.Type, msg.Data)
 		line := activityLine{
 			Time:     time.Now().Format("15:04"),
 			Event:    msg.Type,
@@ -1155,10 +1155,22 @@ func formatActivityTime(ts string) string {
 	return t.Format("15:04")
 }
 
-func formatSSEData(data string) (itemType string, info string) {
+func formatSSEData(eventType, data string) (itemType string, info string) {
 	var m map[string]any
 	if err := json.Unmarshal([]byte(data), &m); err != nil {
 		return "", data
+	}
+
+	switch eventType {
+	case "polling_started":
+		kind, _ := m["kind"].(string)
+		repos, _ := m["repos"].([]any)
+		return "", fmt.Sprintf("%s (%d repos)", kind, len(repos))
+	case "polling_completed":
+		kind, _ := m["kind"].(string)
+		count := toInt(m["count"])
+		ms := toInt(m["duration_ms"])
+		return "", fmt.Sprintf("%s %d items in %dms", kind, count, ms)
 	}
 
 	parts := make([]string, 0)
