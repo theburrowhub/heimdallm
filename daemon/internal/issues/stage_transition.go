@@ -22,6 +22,8 @@ const (
 	IssueStageDevelopment IssueStage = "development"
 )
 
+const ActionAutoImplementNoChanges = "auto_implement_no_changes"
+
 type StagePromotionTrigger string
 
 const (
@@ -82,7 +84,7 @@ func StageFromAction(action string) (IssueStage, bool) {
 		return IssueStageTriage, true
 	case string(config.IssueModeRefinement):
 		return IssueStageRefinement, true
-	case string(config.IssueModeDevelop), "auto_implement":
+	case string(config.IssueModeDevelop), "auto_implement", ActionAutoImplementNoChanges:
 		return IssueStageDevelopment, true
 	default:
 		return "", false

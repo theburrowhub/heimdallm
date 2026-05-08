@@ -239,7 +239,7 @@ func (c *Client) ListSubIssues(repo string, number int) ([]*Issue, error) {
 	return out, nil
 }
 
-// SetAssignees sets assignees on an issue or pull request.
+// SetAssignees replaces assignees on an issue or pull request.
 func (c *Client) SetAssignees(repo string, number int, assignees []string) error {
 	if repo == "" || number == 0 || len(assignees) == 0 {
 		return nil
@@ -250,14 +250,14 @@ func (c *Client) SetAssignees(repo string, number int, assignees []string) error
 	if err != nil {
 		return fmt.Errorf("github: marshal assignees: %w", err)
 	}
-	path := fmt.Sprintf("/repos/%s/issues/%d/assignees", repo, number)
-	resp, err := c.doWithBody("POST", path, "application/vnd.github+json", "application/json", bytes.NewReader(payload))
+	path := fmt.Sprintf("/repos/%s/issues/%d", repo, number)
+	resp, err := c.doWithBody("PATCH", path, "application/vnd.github+json", "application/json", bytes.NewReader(payload))
 	if err != nil {
 		return fmt.Errorf("github: set assignees: %w", err)
 	}
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusCreated {
+	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("github: set assignees %s#%d: status %d: %s", repo, number, resp.StatusCode, safeTruncate(string(body), maxErrBodyLen))
 	}
 	return nil

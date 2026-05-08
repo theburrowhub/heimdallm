@@ -32,6 +32,14 @@ const RecomputeGrace = 30 * time.Second
 // See issue #223.
 const MaxAutoImplementFailures = 3
 
+// MaxAutoImplementNoChanges caps how many auto_implement_no_changes runs we
+// allow on a single issue before the fetcher permanently skips it. After the
+// agent has produced an empty diff this many times in a row, retrying is
+// almost certainly burning tokens for nothing — the issue needs more context,
+// a different agent, or a human. The retry marker / dismiss / mode change
+// path still unblocks the issue manually. See issue #433.
+const MaxAutoImplementNoChanges = 1
+
 // IssuesFetcher is the subset of github.Client that fetches classified
 // issues. Kept as an interface so the fetcher can be tested without an HTTP
 // server standing in.
@@ -55,6 +63,10 @@ type issueDedupStore interface {
 	// "auto_implement_failed" review rows for the issue. Used to enforce
 	// MaxAutoImplementFailures; see issue #223.
 	CountFailedAutoImplement(issueID int64) (int, error)
+	// CountAutoImplementNoChanges returns the number of stored
+	// "auto_implement_no_changes" review rows for the issue. Used to enforce
+	// MaxAutoImplementNoChanges; see issue #433.
+	CountAutoImplementNoChanges(issueID int64) (int, error)
 }
 
 // issueMarkerFetcher fetches comments for an issue so the fetcher can scan
@@ -284,6 +296,24 @@ func (f *Fetcher) alreadyProcessed(issue *github.Issue) (bool, string, error) {
 	// it to stop the pipeline from picking it up again.
 	if latest.ActionTaken == "auto_implement" && latest.PRCreated > 0 {
 		return true, "already implemented (PR created)", nil
+	}
+	if latest.ActionTaken == ActionAutoImplementNoChanges && issue.Mode == config.IssueModeDevelop {
+		// If the agent has produced an empty diff at or above the cap, stop
+		// retrying. Manual unblock paths: a retry marker (handled above
+		// before we reach this point), dismiss, or moving the issue back
+		// to a different stage label. See issue #433.
+		noChangesCount, ncErr := f.store.CountAutoImplementNoChanges(row.ID)
+		if ncErr != nil {
+			slog.Warn("issues fetcher: could not count no-changes auto_implement, falling through to legacy block",
+				"repo", issue.Repo, "number", issue.Number, "err", ncErr)
+			return true, "auto_implement produced no changes; waiting for manual retry", nil
+		}
+		if noChangesCount >= MaxAutoImplementNoChanges {
+			return true, fmt.Sprintf(
+				"auto_implement produced no changes %d times (cap %d); requires human intervention or retry marker",
+				noChangesCount, MaxAutoImplementNoChanges), nil
+		}
+		return true, "auto_implement produced no changes; waiting for manual retry", nil
 	}
 
 	// Bot-comment dedup: if the most recent comment is from the bot AND the

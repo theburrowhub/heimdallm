@@ -24,6 +24,92 @@ func (f *fakeStoreLister) ListConfigs() (map[string]string, error) {
 // as-is; everything else was json.Marshal'd by the handler, so we unmarshal
 // here symmetrically.
 
+func TestApplyStore_AgentConfigs_MergesOverTOML(t *testing.T) {
+	// Symmetric to handlers.go: PUT /config writes a JSON object keyed by CLI
+	// name. Each CLI gets a partial config; missing fields keep their TOML
+	// value. The receiver's existing agents map must be preserved for CLIs
+	// the store row doesn't mention (gemini below).
+	cfg := &Config{}
+	cfg.applyDefaults()
+	cfg.AI.Agents = map[string]CLIAgentConfig{
+		"claude": {Model: "claude-from-toml", Effort: "low", DangerouslySkipPerms: true},
+		"gemini": {Model: "gemini-from-toml"},
+	}
+
+	rows := map[string]string{
+		"agent_configs": `{"claude":{"permission_mode":"acceptEdits","model":"claude-from-store"}}`,
+	}
+	if err := cfg.ApplyStore(rows); err != nil {
+		t.Fatalf("ApplyStore: %v", err)
+	}
+
+	got := cfg.AI.Agents["claude"]
+	if got.PermissionMode != "acceptEdits" {
+		t.Errorf("PermissionMode = %q, want acceptEdits", got.PermissionMode)
+	}
+	if got.Model != "claude-from-store" {
+		t.Errorf("Model = %q, want claude-from-store", got.Model)
+	}
+	if got.Effort != "low" {
+		t.Errorf("Effort lost: got %q, want low (must come from TOML when JSON omits it)", got.Effort)
+	}
+	if !got.DangerouslySkipPerms {
+		t.Errorf("DangerouslySkipPerms cleared by store merge — TOML value must survive")
+	}
+	if cfg.AI.Agents["gemini"].Model != "gemini-from-toml" {
+		t.Errorf("unrelated agent zeroed: %v", cfg.AI.Agents["gemini"])
+	}
+}
+
+func TestApplyStore_AgentConfigs_FalseBoolOverridesTOMLTrue(t *testing.T) {
+	// Regression for the omitempty foot-gun the bot review flagged on #432:
+	// an operator who flips bare=false in the UI must override a TOML
+	// bare=true. With omitempty on the bool tag, a direct Marshal of
+	// CLIAgentConfig would drop the false and ApplyStore's merge-into-
+	// existing-struct path would preserve the TOML true.
+	cfg := &Config{}
+	cfg.applyDefaults()
+	cfg.AI.Agents = map[string]CLIAgentConfig{
+		"claude": {Bare: true, DangerouslySkipPerms: true, NoSessionPersistence: true},
+	}
+
+	rows := map[string]string{
+		"agent_configs": `{"claude":{"bare":false,"dangerously_skip_perms":false,"no_session_persistence":false}}`,
+	}
+	if err := cfg.ApplyStore(rows); err != nil {
+		t.Fatalf("ApplyStore: %v", err)
+	}
+	got := cfg.AI.Agents["claude"]
+	if got.Bare {
+		t.Errorf("Bare: stored false did not override TOML true")
+	}
+	if got.DangerouslySkipPerms {
+		t.Errorf("DangerouslySkipPerms: stored false did not override TOML true")
+	}
+	if got.NoSessionPersistence {
+		t.Errorf("NoSessionPersistence: stored false did not override TOML true")
+	}
+}
+
+func TestApplyStore_AgentConfigs_PartialFailureLeavesCfgUntouched(t *testing.T) {
+	// A malformed agent_configs payload must roll back the whole merge so
+	// the receiver keeps its TOML+env state. Mirrors the atomicity guarantee
+	// the INVARIANT comment in store.go relies on.
+	cfg := &Config{}
+	cfg.applyDefaults()
+	cfg.AI.Agents = map[string]CLIAgentConfig{"claude": {Model: "keep"}}
+
+	rows := map[string]string{
+		"agent_configs": `not-json`,
+	}
+	if err := cfg.ApplyStore(rows); err == nil {
+		t.Fatalf("expected error from malformed agent_configs")
+	}
+	if cfg.AI.Agents["claude"].Model != "keep" {
+		t.Errorf("partial failure leaked into receiver: %v", cfg.AI.Agents["claude"])
+	}
+}
+
 func TestApplyStore_MergesStoreOnlyRepositoriesAndIssueTracking(t *testing.T) {
 	cfg := &Config{}
 	cfg.applyDefaults()

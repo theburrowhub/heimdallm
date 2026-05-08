@@ -787,6 +787,15 @@ func TestPipeline_AutoImplementInjectsPreviousRefinement(t *testing.T) {
 	if !strings.Contains(exec.lastPrompt, "task-2") {
 		t.Errorf("implement prompt should include refinement subtasks, got: %s", exec.lastPrompt)
 	}
+	if !strings.Contains(exec.lastPrompt, "treat it as the implementation contract") {
+		t.Errorf("implement prompt should make refinement mandatory context, got: %s", exec.lastPrompt)
+	}
+	if !strings.Contains(exec.lastPrompt, "Affected files: daemon/internal/auth/middleware.go") {
+		t.Errorf("implement prompt should include affected files from refinement, got: %s", exec.lastPrompt)
+	}
+	if !strings.Contains(exec.lastPrompt, "Expected change: return a controlled error response") {
+		t.Errorf("implement prompt should include expected changes from refinement, got: %s", exec.lastPrompt)
+	}
 }
 
 func TestPipeline_AutoImplementWithoutRefinementKeepsPromptCompatible(t *testing.T) {
@@ -920,7 +929,64 @@ func TestPipeline_CircuitBreakerDoesNotGateDevelop(t *testing.T) {
 	}
 }
 
-func TestPipeline_AutoImplementNoChangesFallsBackToReviewOnly(t *testing.T) {
+func TestPipeline_AutoImplementDefaultsClaudePermissionMode(t *testing.T) {
+	// Without this default, claude in -p mode silently no-ops every Edit/Write
+	// tool call, so HasChanges always reports clean and every issue degrades
+	// to the no-changes fallback (#433). The default applies only when the
+	// operator left both knobs unset.
+	s := &fakeStore{}
+	gh := &fakeGH{defaultBranch: "main"}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("ok")}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(s, gh, exec, git, &fakeBroker{}, nil)
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if exec.lastOpts.PermissionMode != "acceptEdits" {
+		t.Errorf("PermissionMode = %q, want acceptEdits (default for claude auto_implement)", exec.lastOpts.PermissionMode)
+	}
+}
+
+func TestPipeline_AutoImplementRespectsExplicitDangerouslySkipPerms(t *testing.T) {
+	// When the operator has flipped DangerouslySkipPerms in TOML, the default
+	// must NOT shadow that choice with acceptEdits — the operator's explicit
+	// permission posture wins.
+	s := &fakeStore{}
+	gh := &fakeGH{defaultBranch: "main"}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("ok")}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(s, gh, exec, git, &fakeBroker{}, nil)
+
+	opts := autoImplementRunOptions()
+	opts.ExecOpts.DangerouslySkipPerms = true
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), opts); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if exec.lastOpts.PermissionMode != "" {
+		t.Errorf("PermissionMode = %q, want empty (operator chose DangerouslySkipPerms)", exec.lastOpts.PermissionMode)
+	}
+	if !exec.lastOpts.DangerouslySkipPerms {
+		t.Errorf("DangerouslySkipPerms cleared by default helper")
+	}
+}
+
+func TestPipeline_AutoImplementDefaultsCodexApprovalMode(t *testing.T) {
+	s := &fakeStore{}
+	gh := &fakeGH{defaultBranch: "main"}
+	exec := &fakeExec{detectCLI: "codex", rawOutput: []byte("ok")}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(s, gh, exec, git, &fakeBroker{}, nil)
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if exec.lastOpts.ApprovalMode != "full-auto" {
+		t.Errorf("ApprovalMode = %q, want full-auto (default for codex auto_implement)", exec.lastOpts.ApprovalMode)
+	}
+}
+
+func TestPipeline_AutoImplementNoChangesRecordsTerminalNoChanges(t *testing.T) {
 	// Agent escape hatch fired; the working tree is untouched. The pipeline
 	// must degrade to a review_only-style comment rather than open an empty PR.
 	s := &fakeStore{}
@@ -949,9 +1015,8 @@ func TestPipeline_AutoImplementNoChangesFallsBackToReviewOnly(t *testing.T) {
 		t.Errorf("fallback body should explain the skip, got %q", gh.postCalls[0].Body)
 	}
 
-	// Review persisted reflects the actual mode that ran.
-	if rev.ActionTaken != string(config.IssueModeReviewOnly) {
-		t.Errorf("ActionTaken=%q, want review_only (audit-honest fallback)", rev.ActionTaken)
+	if rev.ActionTaken != issues.ActionAutoImplementNoChanges {
+		t.Errorf("ActionTaken=%q, want %s", rev.ActionTaken, issues.ActionAutoImplementNoChanges)
 	}
 	if rev.PRCreated != 0 {
 		t.Errorf("PRCreated=%d, want 0", rev.PRCreated)
@@ -1008,14 +1073,44 @@ func TestPipeline_AutoImplementSurfacesCheckoutError(t *testing.T) {
 func TestPipeline_AutoImplementSurfacesPushError(t *testing.T) {
 	git := &fakeGit{hasChanges: true, pushErr: errors.New("remote rejected")}
 	broker := &fakeBroker{}
-	p := issues.New(&fakeStore{}, &fakeGH{defaultBranch: "main"},
+	s := &fakeStore{}
+	p := issues.New(s, &fakeGH{defaultBranch: "main"},
 		&fakeExec{detectCLI: "claude", rawOutput: []byte("x")}, git, broker, nil)
 
 	_, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions())
 	if err == nil {
 		t.Fatal("expected push error to surface")
 	}
+	if len(s.reviews) != 1 || s.reviews[0].ActionTaken != "auto_implement_failed" {
+		t.Fatalf("push failure review = %+v, want one auto_implement_failed row", s.reviews)
+	}
 	// An issue_review_error event is published so operators see the failure.
+	types := broker.types()
+	if types[len(types)-1] != sse.EventIssueReviewError {
+		t.Errorf("last event should be issue_review_error, got %v", types)
+	}
+}
+
+func TestPipeline_AutoImplementRecordsExecuteFailure(t *testing.T) {
+	s := &fakeStore{}
+	broker := &fakeBroker{}
+	p := issues.New(s, &fakeGH{defaultBranch: "main"},
+		&fakeExec{detectCLI: "claude", rawErr: errors.New("signal: killed")}, &fakeGit{}, broker, nil)
+
+	_, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions())
+	if err == nil {
+		t.Fatal("expected execute error to surface")
+	}
+	if len(s.reviews) != 1 {
+		t.Fatalf("reviews = %d, want 1", len(s.reviews))
+	}
+	rev := s.reviews[0]
+	if rev.ActionTaken != "auto_implement_failed" {
+		t.Fatalf("ActionTaken = %q, want auto_implement_failed", rev.ActionTaken)
+	}
+	if !strings.Contains(rev.Summary, "execute claude") || !strings.Contains(rev.Summary, "signal: killed") {
+		t.Fatalf("failure summary = %q, want execute context", rev.Summary)
+	}
 	types := broker.types()
 	if types[len(types)-1] != sse.EventIssueReviewError {
 		t.Errorf("last event should be issue_review_error, got %v", types)
@@ -1608,6 +1703,28 @@ func TestAutoImplement_AppliesPRMetadata(t *testing.T) {
 	}
 }
 
+func TestAutoImplement_DefaultsPRAssigneeToSingleIssueAssignee(t *testing.T) {
+	gh := &fakeGH{defaultBranch: "main", createPRNumber: 77}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("implement done")}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(&fakeStore{}, gh, exec, git, &fakeBroker{}, nil)
+
+	issue := newIssue(config.IssueModeDevelop)
+	issue.Assignees = []github.User{{Login: "ivanmunozruiz"}}
+
+	_, err := p.Run(context.Background(), issue, issues.RunOptions{
+		Primary:     "claude",
+		ExecOpts:    executor.ExecOptions{WorkDir: "/tmp/repo"},
+		GitHubToken: "tok",
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gh.assigneesCalls) != 1 || !stringsEqual(gh.assigneesCalls[0], []string{"ivanmunozruiz"}) {
+		t.Errorf("assignees = %v, want [ivanmunozruiz]", gh.assigneesCalls)
+	}
+}
+
 func TestAutoImplement_SkipsEmptyMetadata(t *testing.T) {
 	gh := &fakeGH{defaultBranch: "main", createPRNumber: 88}
 	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("implement done")}
@@ -1621,7 +1738,9 @@ func TestAutoImplement_SkipsEmptyMetadata(t *testing.T) {
 		// No PR metadata set
 	}
 
-	_, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), opts)
+	issue := newIssue(config.IssueModeDevelop)
+	issue.Assignees = nil
+	_, err := p.Run(context.Background(), issue, opts)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}

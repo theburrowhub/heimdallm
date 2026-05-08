@@ -615,8 +615,8 @@ func (p *Pipeline) runReviewOnly(ctx context.Context, issue *github.Issue, issue
 
 // runAutoImplement creates a branch, asks the agent to implement the issue,
 // commits + pushes whatever it changed, opens a PR, and persists the review.
-// When the agent produces no changes the run silently degrades to
-// review_only with an explanatory comment rather than opening an empty PR.
+// When the agent produces no changes the run degrades to review_only with an
+// explanatory comment rather than opening an empty PR.
 // On a Push-succeeded-but-CreatePR-failed path the orphaned remote branch is
 // cleaned up so the re-run starts from a clean remote.
 func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, issueID int64, workDir string, opts RunOptions) (*store.IssueReview, error) {
@@ -669,6 +669,13 @@ func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, is
 		return nil, fmt.Errorf("issues pipeline: detect CLI: %w", err)
 	}
 
+	// Auto_implement requires the CLI to be allowed to write files. When the
+	// operator has not configured a permission/approval flag explicitly, fall
+	// back to the safest mode that still permits edits — otherwise the agent
+	// silently completes without touching the tree and every run degrades to
+	// the no-changes fallback (#433).
+	opts.ExecOpts = ensureAutoImplementWritePerms(cli, opts.ExecOpts)
+
 	// Build prior-issue context. Prefer the latest refinement plan when it
 	// exists so auto_implement can execute the researched plan; otherwise fall
 	// back to the historical triage context.
@@ -694,8 +701,10 @@ func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, is
 		opts.ImplementInstructions,
 	)
 	if _, err := p.executor.ExecuteRaw(cli, prompt, opts.ExecOpts); err != nil {
-		p.publishError(issueID, issue, fmt.Errorf("execute %s: %w", cli, err))
-		return nil, fmt.Errorf("issues pipeline: execute %s: %w", cli, err)
+		execErr := fmt.Errorf("execute %s: %w", cli, err)
+		p.recordAutoImplementFailure(issueID, cli, fmt.Sprintf("auto_implement %s", execErr))
+		p.publishError(issueID, issue, execErr)
+		return nil, fmt.Errorf("issues pipeline: %w", execErr)
 	}
 
 	// If the agent produced no changes we do NOT open an empty PR. Fall back
@@ -735,19 +744,7 @@ func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, is
 		// MaxAutoImplementFailures retry cap (#223). Without this row the
 		// dedup logic would have no visibility into failed attempts and the
 		// daemon would retry forever on non-fast-forward errors.
-		failedRev := &store.IssueReview{
-			IssueID:     issueID,
-			CLIUsed:     cli,
-			Summary:     fmt.Sprintf("auto_implement push failed: %v", err),
-			Triage:      "{}",
-			Suggestions: "[]",
-			ActionTaken: "auto_implement_failed",
-			CreatedAt:   time.Now().UTC(),
-		}
-		if _, storeErr := p.store.InsertIssueReview(failedRev); storeErr != nil {
-			slog.Warn("issues pipeline: could not record push failure in store",
-				"repo", issue.Repo, "number", issue.Number, "err", storeErr)
-		}
+		p.recordAutoImplementFailure(issueID, cli, fmt.Sprintf("auto_implement push failed: %v", err))
 		p.publishError(issueID, issue, fmt.Errorf("push: %w", err))
 		return nil, fmt.Errorf("issues pipeline: push: %w", err)
 	}
@@ -804,7 +801,9 @@ func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, is
 
 	// Apply PR metadata (reviewers, labels, assignees). All best-effort —
 	// a metadata failure does not roll back the PR, which is already public.
-	applyPRMetadata(p.gh, issue.Repo, prNumber, opts)
+	metadataOpts := opts
+	metadataOpts.PRAssignee = resolveAutoImplementPRAssignee(issue, opts)
+	applyPRMetadata(p.gh, issue.Repo, prNumber, metadataOpts)
 
 	// Post a done-marker comment on the issue so watchers see the PR land
 	// and the fetcher's marker scan skips the issue on future polls (#238).
@@ -862,7 +861,7 @@ func (p *Pipeline) autoImplementNoChangesFallback(issue *github.Issue, issueID i
 	body := fmt.Sprintf(
 		"## ⚠️ Heimdallm auto-implement skipped\n\n"+
 			"The agent looked at #%d but left the working tree unchanged — it likely needs a human decision or more context than the issue alone provides.\n\n"+
-			"Rerun manually with more details in the issue body, or remove the develop label to stop retries.\n\n"+
+			"Add more details and a retry marker to run auto-implementation again, or remove the develop label to stop here.\n\n"+
 			"---\n*auto_implement → review_only fallback · Heimdallm*",
 		issue.Number,
 	)
@@ -878,10 +877,7 @@ func (p *Pipeline) autoImplementNoChangesFallback(issue *github.Issue, issueID i
 		Summary:     "auto_implement produced no changes; downgraded to review_only",
 		Triage:      "{}",
 		Suggestions: "[]",
-		// ActionTaken reflects what actually ran — keeps the audit trail
-		// honest per the same rule we established in #26 for the
-		// develop-without-local_dir fallback.
-		ActionTaken: string(config.IssueModeReviewOnly),
+		ActionTaken: ActionAutoImplementNoChanges,
 		CreatedAt:   time.Now().UTC(),
 		CommentedAt: commentedAt,
 	}
@@ -898,6 +894,62 @@ func (p *Pipeline) autoImplementNoChangesFallback(issue *github.Issue, issueID i
 	slog.Info("issues pipeline: auto_implement had no changes, posted fallback comment",
 		"repo", issue.Repo, "number", issue.Number, "posted", postErr == nil)
 	return rev, nil
+}
+
+// ensureAutoImplementWritePerms returns opts with a sane default permission /
+// approval flag for the auto_implement path when the operator has not set one.
+// Without this, the daemon spawns the CLI in a mode where Edit/Write tool
+// calls require a human prompt — in non-interactive `-p` mode they simply
+// don't fire, the CLI exits cleanly, and `git status` shows a clean tree, so
+// every issue degrades to the no-changes fallback comment (#433). Any
+// explicit operator setting wins; this only fills the gap when *nothing* is
+// configured.
+//
+// gemini has no equivalent non-interactive write flag today: callers must
+// configure --include-directories plus an approval bypass in extra_flags
+// themselves. We log a warn so the operator sees why writes are no-op.
+func ensureAutoImplementWritePerms(cli string, opts executor.ExecOptions) executor.ExecOptions {
+	switch cli {
+	case "claude":
+		if strings.TrimSpace(opts.PermissionMode) == "" && !opts.DangerouslySkipPerms {
+			opts.PermissionMode = "acceptEdits"
+			slog.Info("issues pipeline: defaulting claude permission_mode to acceptEdits for auto_implement",
+				"cli", cli)
+		}
+	case "codex":
+		if strings.TrimSpace(opts.ApprovalMode) == "" {
+			opts.ApprovalMode = "full-auto"
+			slog.Info("issues pipeline: defaulting codex approval_mode to full-auto for auto_implement",
+				"cli", cli)
+		}
+	case "gemini":
+		slog.Warn("issues pipeline: gemini has no built-in write-permission default; "+
+			"configure approval bypass via extra_flags or expect no-changes runs",
+			"cli", cli)
+	}
+	return opts
+}
+
+func (p *Pipeline) recordAutoImplementFailure(issueID int64, cli, summary string) {
+	if p == nil || p.store == nil {
+		return
+	}
+	if strings.TrimSpace(cli) == "" {
+		cli = "unknown"
+	}
+	failedRev := &store.IssueReview{
+		IssueID:     issueID,
+		CLIUsed:     cli,
+		Summary:     summary,
+		Triage:      "{}",
+		Suggestions: "[]",
+		ActionTaken: "auto_implement_failed",
+		CreatedAt:   time.Now().UTC(),
+	}
+	if _, storeErr := p.store.InsertIssueReview(failedRev); storeErr != nil {
+		slog.Warn("issues pipeline: could not record auto_implement failure in store",
+			"issue_id", issueID, "err", storeErr)
+	}
 }
 
 // generatePRDescription invokes the LLM with the implementation diff to
@@ -1007,6 +1059,20 @@ func applyPRMetadata(gh PRMetadataApplier, repo string, prNumber int, opts RunOp
 				"repo", repo, "pr", prNumber, "err", err)
 		}
 	}
+}
+
+func resolveAutoImplementPRAssignee(issue *github.Issue, opts RunOptions) string {
+	if assignee := normalizeGitHubLogin(opts.PRAssignee); assignee != "" {
+		return assignee
+	}
+	if issue == nil {
+		return ""
+	}
+	assignees := issue.AssigneeLogins()
+	if len(assignees) != 1 {
+		return ""
+	}
+	return normalizeGitHubLogin(assignees[0])
 }
 
 // IssueLabelCatalog is optionally implemented by GitHub clients that can

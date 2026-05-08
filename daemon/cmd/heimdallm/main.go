@@ -897,7 +897,7 @@ func main() {
 			ImplementPromptOverride: implPrompt,
 			ImplementInstructions:   implInstructions,
 			PRReviewers:             aiCfg.PRReviewers,
-			PRAssignee:              aiCfg.PRAssignee,
+			PRAssignee:              defaultAutoImplementPRAssignee(aiCfg.PRAssignee, authUser),
 			PRLabels:                aiCfg.PRLabels,
 			PRDraft:                 aiCfg.PRDraft != nil && *aiCfg.PRDraft,
 			GeneratePRDescription:   aiCfg.GeneratePRDescription != nil && *aiCfg.GeneratePRDescription,
@@ -1092,7 +1092,7 @@ func main() {
 			ImplementPromptOverride:  implPrompt,
 			ImplementInstructions:    implInstructions,
 			PRReviewers:              aiCfg.PRReviewers,
-			PRAssignee:               aiCfg.PRAssignee,
+			PRAssignee:               defaultAutoImplementPRAssignee(aiCfg.PRAssignee, authUser),
 			PRLabels:                 aiCfg.PRLabels,
 			PRDraft:                  aiCfg.PRDraft != nil && *aiCfg.PRDraft,
 			GeneratePRDescription:    aiCfg.GeneratePRDescription != nil && *aiCfg.GeneratePRDescription,
@@ -2824,7 +2824,7 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 			ImplementPromptOverride:     implPrompt,
 			ImplementInstructions:       implInstructions,
 			PRReviewers:                 aiCfg.PRReviewers,
-			PRAssignee:                  aiCfg.PRAssignee,
+			PRAssignee:                  defaultAutoImplementPRAssignee(aiCfg.PRAssignee, authUser),
 			PRLabels:                    aiCfg.PRLabels,
 			PRDraft:                     aiCfg.PRDraft != nil && *aiCfg.PRDraft,
 			GeneratePRDescription:       aiCfg.GeneratePRDescription != nil && *aiCfg.GeneratePRDescription,
@@ -3495,6 +3495,13 @@ func issueTrackingWithAssigneeScope(scope, repo string, it config.IssueTrackingC
 		return it, false
 	}
 	return it, true
+}
+
+func defaultAutoImplementPRAssignee(configured, authUser string) string {
+	if assignee := strings.TrimSpace(configured); assignee != "" {
+		return assignee
+	}
+	return strings.TrimSpace(strings.TrimLeft(authUser, "@"))
 }
 
 func autoPromoteAfterStage(

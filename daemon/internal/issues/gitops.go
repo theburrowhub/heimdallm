@@ -31,6 +31,12 @@ const (
 // toward OOM.
 const maxGitStderrBytes = 16 * 1024 // 16 KiB
 
+// managedCloneMarkerFile is written by repoctx into Heimdallm-managed clones.
+// It is operational metadata, not implementation output, so auto_implement
+// must ignore it when deciding whether the agent changed code and when
+// staging commits.
+const managedCloneMarkerFile = ".heimdallm-managed"
+
 // GitOps is the subset of `git` plumbing the auto_implement pipeline needs.
 // Every method takes a context so the daemon can propagate cancellation at
 // shutdown (or per-request) through long-running network operations —
@@ -102,7 +108,7 @@ func (g *GitExec) CheckoutNewBranch(ctx context.Context, dir, repo, branch, base
 // non-empty line means there is a modified, added, deleted, or untracked
 // file to commit.
 func (g *GitExec) HasChanges(ctx context.Context, dir string) (bool, error) {
-	out, err := captureGit(ctx, dir, nil, "status", "--porcelain")
+	out, err := captureGit(ctx, dir, nil, "status", "--porcelain", "--", ".", ":(exclude)"+managedCloneMarkerFile)
 	if err != nil {
 		return false, fmt.Errorf("gitops: status: %w", err)
 	}
@@ -112,7 +118,7 @@ func (g *GitExec) HasChanges(ctx context.Context, dir string) (bool, error) {
 // CommitAll stages every change and commits with the Heimdallm identity.
 // Uses `-c` flags so the repo-level and global git config are never touched.
 func (g *GitExec) CommitAll(ctx context.Context, dir, message string) error {
-	if err := runGit(ctx, dir, nil, "add", "-A"); err != nil {
+	if err := runGit(ctx, dir, nil, "add", "-A", "--", ".", ":(exclude)"+managedCloneMarkerFile); err != nil {
 		return fmt.Errorf("gitops: add: %w", err)
 	}
 	if err := runGit(ctx, dir, nil,

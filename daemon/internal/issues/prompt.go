@@ -325,12 +325,20 @@ func buildDefaultImplementPrompt(ctx PromptContext, customInstructions string) s
 	if ctx.TriageContext != "" {
 		sb.WriteString(ctx.TriageContext)
 		sb.WriteString("\n")
+		sb.WriteString("If a previous refinement plan is present above, treat it as the implementation contract for this run, not as a complete file list.\n")
+		sb.WriteString("- Execute the subtasks in implementation_order when provided, using affected_files, symbols, and expected_change as concrete guidance.\n")
+		sb.WriteString("- If the refinement omits files or symbols, inspect the repository, identify the right implementation points, and make the smallest correct change.\n")
+		sb.WriteString("- If the refinement contains concrete subtasks and no blocking open_questions, you are expected to edit the repository. Do not choose a no-op outcome just because the issue is documentation-only or configuration-only.\n")
+		sb.WriteString("- If repository evidence shows the plan is stale, implement the equivalent fix that satisfies the issue and keep the change focused.\n")
+		sb.WriteString("- Add or update focused tests when the changed area has test coverage or the behavior is testable.\n")
+		sb.WriteString("- If open_questions still block a safe implementation after inspecting the repository, leave the tree untouched.\n\n")
 	}
 
-	sb.WriteString("Implement what the issue asks for. Write real, working code.\n")
+	sb.WriteString("Implement what the issue asks for. Make real repository changes: code, tests, docs, configuration, or scripts depending on the issue.\n")
 	sb.WriteString("Rules:\n")
 	sb.WriteString("- Keep the change minimal and focused on the issue.\n")
 	sb.WriteString("- Follow the existing code style; do not reformat unrelated files.\n")
+	sb.WriteString("- Documentation-only issues still require editing the relevant documentation file.\n")
 	sb.WriteString("- If tests exist for the area you are changing, extend them.\n")
 	sb.WriteString("- Do not commit secrets, credentials, or files outside the repository.\n")
 

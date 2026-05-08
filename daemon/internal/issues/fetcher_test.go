@@ -52,6 +52,8 @@ type dedupEntry struct {
 	revErr            error
 	failedAutoImpl    int // stub for CountFailedAutoImplement
 	failedAutoImplErr error
+	noChangesCount    int // stub for CountAutoImplementNoChanges
+	noChangesErr      error
 }
 
 type fakeDedup struct {
@@ -91,6 +93,18 @@ func (d *fakeDedup) CountFailedAutoImplement(issueID int64) (int, error) {
 				return 0, e.failedAutoImplErr
 			}
 			return e.failedAutoImpl, nil
+		}
+	}
+	return 0, nil
+}
+
+func (d *fakeDedup) CountAutoImplementNoChanges(issueID int64) (int, error) {
+	for _, e := range d.byGithubID {
+		if e.row != nil && e.row.ID == issueID {
+			if e.noChangesErr != nil {
+				return 0, e.noChangesErr
+			}
+			return e.noChangesCount, nil
 		}
 	}
 	return 0, nil
@@ -477,6 +491,97 @@ func TestFetcher_DoesNotSkipBelowMaxAutoImplementFailures(t *testing.T) {
 	processed, _ := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
 	if processed != 1 {
 		t.Errorf("issue below failure cap must still run, got processed=%d calls=%v", processed, p.calls)
+	}
+}
+
+func TestFetcher_SkipsAutoImplementNoChangesUntilManualRetry(t *testing.T) {
+	reviewedAt := time.Now().Add(-10 * time.Minute)
+	issue := fixture(1, time.Now())
+	issue.Mode = config.IssueModeDevelop
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {
+			row: &store.Issue{ID: 10, GithubID: issue.ID},
+			review: &store.IssueReview{
+				IssueID:     10,
+				ActionTaken: issues.ActionAutoImplementNoChanges,
+				CreatedAt:   reviewedAt,
+				CommentedAt: reviewedAt,
+			},
+			noChangesCount: 1, // at the cap (MaxAutoImplementNoChanges = 1)
+		},
+	}}
+	p := &fakePipeline{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, nil, dedup, p)
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 0 || len(p.calls) != 0 {
+		t.Fatalf("no-changes auto_implement should wait for retry marker, processed=%d calls=%v", processed, p.calls)
+	}
+}
+
+func TestFetcher_AutoImplementNoChangesCapStopsLoop(t *testing.T) {
+	// Symmetric to MaxAutoImplementFailures: once the agent has produced
+	// an empty diff at or above MaxAutoImplementNoChanges, the fetcher must
+	// stop dispatching the issue regardless of updated_at bumps. Manual retry
+	// marker still bypasses this (handled before the cap check).
+	reviewedAt := time.Now().Add(-10 * time.Minute)
+	issue := fixture(1, time.Now())
+	issue.Mode = config.IssueModeDevelop
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {
+			row: &store.Issue{ID: 10, GithubID: issue.ID},
+			review: &store.IssueReview{
+				IssueID:     10,
+				ActionTaken: issues.ActionAutoImplementNoChanges,
+				CreatedAt:   reviewedAt,
+				CommentedAt: reviewedAt,
+			},
+			noChangesCount: issues.MaxAutoImplementNoChanges + 5, // well over the cap
+		},
+	}}
+	p := &fakePipeline{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, nil, dedup, p)
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 0 || len(p.calls) != 0 {
+		t.Fatalf("over-cap issue must not be processed, processed=%d calls=%v", processed, p.calls)
+	}
+}
+
+func TestFetcher_AutoImplementNoChangesCountErrFallsThrough(t *testing.T) {
+	// A flaky CountAutoImplementNoChanges must not block the existing
+	// "wait for manual retry" skip — degrade gracefully like the failure cap
+	// does (TestFetcher_CountFailedAutoImplErrDoesNotSkip).
+	reviewedAt := time.Now().Add(-10 * time.Minute)
+	issue := fixture(1, time.Now())
+	issue.Mode = config.IssueModeDevelop
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {
+			row: &store.Issue{ID: 10, GithubID: issue.ID},
+			review: &store.IssueReview{
+				IssueID:     10,
+				ActionTaken: issues.ActionAutoImplementNoChanges,
+				CreatedAt:   reviewedAt,
+				CommentedAt: reviewedAt,
+			},
+			noChangesErr: errors.New("db timeout"),
+		},
+	}}
+	p := &fakePipeline{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, nil, dedup, p)
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 0 || len(p.calls) != 0 {
+		t.Fatalf("count error must still skip, processed=%d calls=%v", processed, p.calls)
 	}
 }
 

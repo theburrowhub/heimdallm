@@ -45,6 +45,15 @@ func TestAcquireRepoContextNilManagerIsError(t *testing.T) {
 	}
 }
 
+func TestDefaultAutoImplementPRAssignee(t *testing.T) {
+	if got := defaultAutoImplementPRAssignee("", "@ivanmunozruiz"); got != "ivanmunozruiz" {
+		t.Fatalf("default assignee = %q, want ivanmunozruiz", got)
+	}
+	if got := defaultAutoImplementPRAssignee("configured", "ivanmunozruiz"); got != "configured" {
+		t.Fatalf("configured assignee = %q, want configured", got)
+	}
+}
+
 func TestAutoPromoteTriageSmartDefaultRequiresRefinementLabel(t *testing.T) {
 	aiCfg := config.RepoAI{}
 	it := config.IssueTrackingConfig{}

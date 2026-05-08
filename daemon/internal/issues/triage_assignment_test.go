@@ -47,7 +47,7 @@ func TestResolveTriageAssignee_VerifiesSuggestedAssigneeInHistory(t *testing.T) 
 	}
 }
 
-func TestResolveTriageAssignee_ReplacesHallucinatedSuggestedWithTopContributor(t *testing.T) {
+func TestResolveTriageAssignee_UsesTopContributorWhenNoFallbackOwner(t *testing.T) {
 	runner := &fakeHistoryRunner{outByCmd: map[string]string{
 		historyKey("rev-parse", "--is-shallow-repository"):                                                     "false\n",
 		historyKey("log", "--max-count=500", "--no-merges", "--format=%ae%x00%an", "--", "daemon/pipeline.go"): "alice@users.noreply.github.com\x00Alice\nbob@users.noreply.github.com\x00Bob\nalice@users.noreply.github.com\x00Alice\n",
@@ -58,12 +58,35 @@ func TestResolveTriageAssignee_ReplacesHallucinatedSuggestedWithTopContributor(t
 		AssigneeConfidence: "medium",
 	}
 
-	assignee, source, diagnostic, _ := resolveTriageAssignee(context.Background(), "/repo", "owner", triage, runner)
+	assignee, source, diagnostic, _ := resolveTriageAssignee(context.Background(), "/repo", "", triage, runner)
 	if assignee != "alice" || source != "history_top_contributor" {
 		t.Fatalf("assignee/source = %q/%q, want alice/history_top_contributor", assignee, source)
 	}
 	if !strings.Contains(diagnostic, "ghost") {
 		t.Fatalf("diagnostic should mention rejected suggestion, got %q", diagnostic)
+	}
+}
+
+func TestResolveTriageAssignee_KeepsFallbackWhenSuggestedMissingFromHistory(t *testing.T) {
+	runner := &fakeHistoryRunner{outByCmd: map[string]string{
+		historyKey("rev-parse", "--is-shallow-repository"):                                                 "false\n",
+		historyKey("log", "--max-count=500", "--no-merges", "--format=%ae%x00%an", "--", "docs/config.md"): "vbuenog@users.noreply.github.com\x00V Bueno\n",
+	}}
+	triage := Triage{
+		AffectedPaths:      []string{"docs/config.md"},
+		SuggestedAssignee:  "ivanmunozruiz",
+		AssigneeConfidence: "high",
+	}
+
+	assignee, source, diagnostic, evidence := resolveTriageAssignee(context.Background(), "/repo", "ivanmunozruiz", triage, runner)
+	if assignee != "ivanmunozruiz" || source != "triage_owner" {
+		t.Fatalf("assignee/source = %q/%q, want ivanmunozruiz/triage_owner", assignee, source)
+	}
+	if !strings.Contains(diagnostic, "ivanmunozruiz") {
+		t.Fatalf("diagnostic should mention rejected suggestion, got %q", diagnostic)
+	}
+	if len(evidence) == 0 || !strings.Contains(evidence[0], "triage_owner") {
+		t.Fatalf("expected fallback evidence, got %v", evidence)
 	}
 }
 

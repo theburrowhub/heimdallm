@@ -108,6 +108,9 @@ func resolveTriageAssignee(ctx context.Context, workDir, triageOwner string, tri
 				return c.login, "suggested_assignee_verified", "suggested_assignee appears in affected path history", contributorEvidence(contributors)
 			}
 		}
+		if fallback != "" {
+			return fallbackResult(fmt.Sprintf("model suggested @%s, but that login was not found in affected path history", suggested))
+		}
 	}
 
 	top := contributors[0]
