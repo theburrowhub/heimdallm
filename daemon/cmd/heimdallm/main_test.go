@@ -64,6 +64,25 @@ func TestAutoPromoteTriageSmartDefaultRequiresRefinementLabel(t *testing.T) {
 	}
 }
 
+func TestAutoPromoteRefinementSmartDefaultRequiresDevelopLabel(t *testing.T) {
+	aiCfg := config.RepoAI{}
+	it := config.IssueTrackingConfig{}
+	if autoPromoteStageEnabled(aiCfg, it, issuepipeline.IssueStageRefinement) {
+		t.Fatal("unset auto_promote_refinement without develop labels should preserve manual behavior")
+	}
+
+	it.DevelopLabels = []string{"heimdallm-develop"}
+	if !autoPromoteStageEnabled(aiCfg, it, issuepipeline.IssueStageRefinement) {
+		t.Fatal("unset auto_promote_refinement with develop labels should adopt the staged default")
+	}
+
+	disabled := false
+	aiCfg.AutoPromoteRefinement = &disabled
+	if autoPromoteStageEnabled(aiCfg, it, issuepipeline.IssueStageRefinement) {
+		t.Fatal("explicit auto_promote_refinement=false should win over develop labels")
+	}
+}
+
 func TestManagedCloneDirsIncludesDefaultAndScopedOverrides(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.AI.CloneDir = "/global"

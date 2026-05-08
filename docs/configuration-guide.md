@@ -324,12 +324,12 @@ Promotion changes only GitHub labels; the next poll cycle executes the newly vis
 | `triage` / `review_only` | `refinement` | Manual Promote, `auto_promote_triage = true`, or replacing the label on GitHub |
 | `refinement` | `development` | Manual Promote, `auto_promote_refinement = true`, or replacing the label on GitHub |
 
-Manual promotion from triage falls back to `develop_labels` only for legacy configs that have no `refinement_labels`. Auto-promotion does not skip refinement: when `auto_promote_triage` is unset, it defaults on only if `refinement_labels` is configured. If `auto_promote_triage = true` but no refinement label is configured, the daemon logs a warning and leaves the issue in triage.
+Manual promotion from triage falls back to `develop_labels` only for legacy configs that have no `refinement_labels`. Auto-promotion does not skip stages: when `auto_promote_triage` is unset, it defaults on only if `refinement_labels` is configured; when `auto_promote_refinement` is unset, it defaults on only if `develop_labels` is configured. If an auto-promote flag is `true` but the target label is not configured, the daemon logs a warning and leaves the issue in its current stage.
 
 ```toml
 [ai]
 auto_promote_triage = true       # unset = true only when refinement_labels is configured
-auto_promote_refinement = false  # unset = false
+auto_promote_refinement = true   # unset = true only when develop_labels is configured
 ```
 
 > **Warning — `default_action = "review_only"` can cause re-processing loops and excessive API costs.**
@@ -956,7 +956,7 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # triage_owner = "alice"
 # clone_dir = "/home/heimdallm/repos/worktrees"
 # auto_promote_triage = true      # unset = true only when refinement_labels is configured
-# auto_promote_refinement = false
+# auto_promote_refinement = true  # unset = true only when develop_labels is configured
 
 # Generate LLM-produced PR titles and descriptions for auto_implement PRs.
 # generate_pr_description = false

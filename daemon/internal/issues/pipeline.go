@@ -837,9 +837,12 @@ func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, is
 	}
 	rev.ID = revID
 
+	// issue_number/pr_number are canonical for activity-log consumers; number
+	// and pr_created remain legacy SSE aliases for older UI/session consumers.
 	p.publish(sse.EventIssueImplemented, map[string]any{
-		"issue_id": issueID, "number": issue.Number, "repo": issue.Repo,
-		"pr_created": prNumber, "branch": branch,
+		"issue_id": issueID, "number": issue.Number, "issue_number": issue.Number, "repo": issue.Repo,
+		"issue_title": issue.Title, "cli_used": cli,
+		"pr_created": prNumber, "pr_number": prNumber, "pr_url": createdPR.HTMLURL, "branch": branch,
 	})
 	if p.notify != nil {
 		p.notify.Notify("Issue Auto-Implemented",

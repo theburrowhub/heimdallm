@@ -7,13 +7,14 @@ ActivityEntry _mk({
   required ActivityAction action,
   String outcome = '',
   Map<String, dynamic> details = const {},
+  String itemType = 'pr',
   DateTime? ts,
 }) => ActivityEntry(
   id: 1,
   timestamp: ts ?? DateTime(2026, 4, 20, 9, 34, 12),
   org: 'acme',
   repo: 'acme/api',
-  itemType: 'pr',
+  itemType: itemType,
   itemNumber: 42,
   itemTitle: 'Fix rate limiter race',
   action: action,
@@ -115,6 +116,25 @@ void main() {
     expect(find.byIcon(Icons.label), findsOneWidget);
     expect(find.textContaining('major'), findsOneWidget);
     expect(find.textContaining('(develop)'), findsOneWidget);
+  });
+
+  testWidgets('refinement shows completion state', (tester) async {
+    final entry = _mk(
+      action: ActivityAction.refinement,
+      itemType: 'issue',
+      details: {'post_ok': true, 'truncated': true},
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: ActivityEntryTile(entry: entry)),
+      ),
+    );
+    expect(find.byIcon(Icons.fact_check), findsOneWidget);
+    expect(find.text('Refinement'), findsOneWidget);
+    expect(
+      find.textContaining('Refinement completed (truncated)'),
+      findsOneWidget,
+    );
   });
 
   testWidgets('review_skipped shows skipped badge and draft reason', (

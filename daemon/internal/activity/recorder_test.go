@@ -202,11 +202,46 @@ func TestRecorder_IssueImplemented(t *testing.T) {
 	waitFor(t, func() bool { return fs.count() == 1 })
 
 	got := fs.at(0)
+	if got.itemType != "issue" || got.itemNumber != 12 || got.itemTitle != "Refactor auth" {
+		t.Errorf("row basics: %+v", got)
+	}
 	if got.action != "implement" || got.outcome != "pr_opened" {
 		t.Errorf("action/outcome: %s/%s", got.action, got.outcome)
 	}
+	if got.details["cli_used"] != "claude" {
+		t.Errorf("details cli_used: %v", got.details["cli_used"])
+	}
 	if got.details["pr_number"] != 99 {
 		t.Errorf("details pr_number: %v", got.details["pr_number"])
+	}
+}
+
+func TestRecorder_IssueRefinementDone(t *testing.T) {
+	_, fs, events := newTestRecorder(t)
+	payload, _ := json.Marshal(map[string]any{
+		"repo":         "acme/api",
+		"issue_number": 12,
+		"issue_title":  "Refactor auth",
+		"cli_used":     "claude",
+		"review_id":    321,
+		"post_ok":      true,
+		"truncated":    false,
+	})
+	events <- sse.Event{Type: sse.EventIssueRefinementDone, Data: string(payload)}
+	waitFor(t, func() bool { return fs.count() == 1 })
+
+	got := fs.at(0)
+	if got.itemType != "issue" || got.itemNumber != 12 || got.itemTitle != "Refactor auth" {
+		t.Errorf("row basics: %+v", got)
+	}
+	if got.action != "refinement" || got.outcome != "completed" {
+		t.Errorf("action/outcome: %s/%s", got.action, got.outcome)
+	}
+	if got.details["cli_used"] != "claude" || got.details["review_id"] != int64(321) {
+		t.Errorf("details: %+v", got.details)
+	}
+	if got.details["post_ok"] != true || got.details["truncated"] != false {
+		t.Errorf("post/truncation details: %+v", got.details)
 	}
 }
 

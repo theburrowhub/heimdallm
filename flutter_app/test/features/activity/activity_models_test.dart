@@ -58,6 +58,23 @@ void main() {
       expect(e.outcome, 'draft');
     });
 
+    test('parses refinement action', () {
+      final e = ActivityEntry.fromJson({
+        'id': 1,
+        'ts': '2026-04-20T09:34:12+02:00',
+        'org': 'a',
+        'repo': 'a/b',
+        'item_type': 'issue',
+        'item_number': 1,
+        'item_title': 't',
+        'action': 'refinement',
+        'outcome': 'completed',
+        'details': {'post_ok': true},
+      });
+      expect(e.action, ActivityAction.refinement);
+      expect(e.outcome, 'completed');
+    });
+
     test('missing outcome defaults to empty string', () {
       final e = ActivityEntry.fromJson({
         'id': 1,

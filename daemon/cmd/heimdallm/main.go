@@ -3471,7 +3471,10 @@ func autoPromoteStageEnabled(aiCfg config.RepoAI, it config.IssueTrackingConfig,
 		return *aiCfg.AutoPromoteTriage
 	case issuepipeline.IssueStageRefinement:
 		if aiCfg.AutoPromoteRefinement == nil {
-			return false
+			// Same staged-default rule as triage: once a development target
+			// label exists, refinement can safely advance to develop unless the
+			// operator explicitly disables it.
+			return hasConfiguredLabel(it.DevelopLabels)
 		}
 		return *aiCfg.AutoPromoteRefinement
 	default:
