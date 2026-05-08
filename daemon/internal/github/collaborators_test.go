@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -88,5 +89,26 @@ func TestFetchCollaborators_SinglePage(t *testing.T) {
 	}
 	if c := atomic.LoadInt32(&calls); c != 1 {
 		t.Errorf("expected 1 HTTP call, got %d", c)
+	}
+}
+
+// TestFetchCollaborators_RunawayCap verifies that an infinite Link: rel="next"
+// chain returns an error mentioning "pagination" rather than hanging.
+func TestFetchCollaborators_RunawayCap(t *testing.T) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Link",
+			fmt.Sprintf(`<%s/repos/org/repo/collaborators?per_page=100&page=2>; rel="next"`, srv.URL))
+		_ = json.NewEncoder(w).Encode([]map[string]string{{"login": "alice"}})
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	_, err := client.FetchCollaborators("org/repo")
+	if err == nil {
+		t.Fatal("expected error from runaway pagination, got nil")
+	}
+	if !strings.Contains(err.Error(), "pagination") {
+		t.Errorf("expected error mentioning 'pagination', got: %v", err)
 	}
 }
