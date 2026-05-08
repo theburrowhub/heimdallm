@@ -158,14 +158,6 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
     if (old.localDir != updated.localDir) {
       diff['local_dir'] = updated.localDir ?? '';
     }
-    if (old.autoPromoteTriage != updated.autoPromoteTriage &&
-        updated.autoPromoteTriage != null) {
-      diff['auto_promote_triage'] = updated.autoPromoteTriage!;
-    }
-    if (old.autoPromoteRefinement != updated.autoPromoteRefinement &&
-        updated.autoPromoteRefinement != null) {
-      diff['auto_promote_refinement'] = updated.autoPromoteRefinement!;
-    }
     if (old.prAssignee != updated.prAssignee) {
       diff['pr_assignee'] = updated.prAssignee ?? '';
     }
@@ -296,10 +288,6 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
           final orgConfig = appConfig.orgConfigs[orgName];
           String source(bool hasOrgValue) =>
               hasOrgValue ? 'org: $orgName' : 'global';
-          final effectiveRefinementLabels =
-              _config.refinementLabels ??
-              orgConfig?.refinementLabels ??
-              appConfig.issueTracking.refinementLabels;
 
           return SingleChildScrollView(
             padding: const EdgeInsets.all(16),
@@ -454,46 +442,6 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                         _update(_config.copyWith(refinementLabels: v)),
                     onReset: () =>
                         _resetField('issue_tracking/refinement_labels'),
-                  ),
-                  const SizedBox(height: 10),
-                  OverrideDropdown(
-                    label: 'Auto-promote triage',
-                    globalValue:
-                        (orgConfig?.autoPromoteTriage ??
-                                appConfig.globalAutoPromoteTriage ??
-                                effectiveRefinementLabels.isNotEmpty)
-                            .toString(),
-                    inheritedLabel: source(
-                      orgConfig?.autoPromoteTriage != null,
-                    ),
-                    overrideValue: _config.autoPromoteTriage?.toString(),
-                    options: const ['true', 'false'],
-                    onChanged: (v) => _update(
-                      _config.copyWith(
-                        autoPromoteTriage: v != null ? v == 'true' : null,
-                      ),
-                    ),
-                    onReset: () => _resetField('auto_promote_triage'),
-                  ),
-                  const SizedBox(height: 10),
-                  OverrideDropdown(
-                    label: 'Auto-promote refinement',
-                    globalValue:
-                        (orgConfig?.autoPromoteRefinement ??
-                                appConfig.globalAutoPromoteRefinement ??
-                                false)
-                            .toString(),
-                    inheritedLabel: source(
-                      orgConfig?.autoPromoteRefinement != null,
-                    ),
-                    overrideValue: _config.autoPromoteRefinement?.toString(),
-                    options: const ['true', 'false'],
-                    onChanged: (v) => _update(
-                      _config.copyWith(
-                        autoPromoteRefinement: v != null ? v == 'true' : null,
-                      ),
-                    ),
-                    onReset: () => _resetField('auto_promote_refinement'),
                   ),
                   const SizedBox(height: 10),
                   AutocompleteChipField(

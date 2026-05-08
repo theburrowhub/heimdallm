@@ -28,8 +28,6 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   IssueTrackingConfig _issueTracking = const IssueTrackingConfig();
   String? _issuePromptId;
   String? _developPromptId;
-  bool? _globalAutoPromoteTriage;
-  bool? _globalAutoPromoteRefinement;
 
   // All known repos. Key = "org/repo", Value = per-repo settings.
   Map<String, RepoConfig> _repoConfigs = {};
@@ -85,8 +83,6 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     _developPromptId = config.globalImplementPrompt.isEmpty
         ? null
         : config.globalImplementPrompt;
-    _globalAutoPromoteTriage = config.globalAutoPromoteTriage;
-    _globalAutoPromoteRefinement = config.globalAutoPromoteRefinement;
   }
 
   /// Auto-discovers repos from the user's PRs. Runs silently on init.
@@ -450,37 +446,6 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
           onChanged: (v) => setState(() {
             _issueTracking = _issueTracking.copyWith(refinementLabels: v ?? []);
           }),
-        ),
-        const SizedBox(height: 10),
-        SwitchListTile(
-          title: const Text(
-            'Auto-promote triage',
-            style: TextStyle(fontSize: 13),
-          ),
-          subtitle: const Text(
-            'Move triaged issues to refinement',
-            style: TextStyle(fontSize: 11),
-          ),
-          dense: true,
-          contentPadding: EdgeInsets.zero,
-          value:
-              _globalAutoPromoteTriage ??
-              _issueTracking.refinementLabels.isNotEmpty,
-          onChanged: (v) => setState(() => _globalAutoPromoteTriage = v),
-        ),
-        SwitchListTile(
-          title: const Text(
-            'Auto-promote refinement',
-            style: TextStyle(fontSize: 13),
-          ),
-          subtitle: const Text(
-            'Move refined issues to develop',
-            style: TextStyle(fontSize: 11),
-          ),
-          dense: true,
-          contentPadding: EdgeInsets.zero,
-          value: _globalAutoPromoteRefinement ?? false,
-          onChanged: (v) => setState(() => _globalAutoPromoteRefinement = v),
         ),
         const SizedBox(height: 10),
         AutocompleteChipField(
@@ -888,8 +853,6 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     globalPRDraft: _globalPRDraft,
     globalIssuePrompt: _issuePromptId ?? '',
     globalImplementPrompt: _developPromptId ?? '',
-    globalAutoPromoteTriage: _globalAutoPromoteTriage,
-    globalAutoPromoteRefinement: _globalAutoPromoteRefinement,
     // aiPrimary, aiFallback, reviewMode, agentConfigs managed in Agents tab
   );
 
