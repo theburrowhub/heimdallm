@@ -443,6 +443,7 @@ var validConfigKeys = map[string]struct{}{
 	"refinement_timeout": {},
 	"retention_days":     {},
 	"issue_tracking":     {},
+	"agent_configs":      {},
 }
 
 // readOnlyConfigKeys are keys that GET /config returns (so the web UI can
@@ -462,8 +463,6 @@ var validConfigKeys = map[string]struct{}{
 //     the Flutter app; no write-path through this endpoint.
 //   - org_overrides : per-org AI config lives in [ai.orgs.<name>] and is
 //     patched through /config/orgs/{org}.
-//   - agent_configs : per-CLI agent tuning lives in [ai.agents.<name>]
-//     or /agents endpoints; no write-path here.
 //   - server_port   : bootstrap-only (changing the listening port mid-
 //     flight would drop every in-flight connection). Its numeric-range
 //     pre-check still runs so clients get feedback on bad values.
@@ -472,8 +471,25 @@ var readOnlyConfigKeys = map[string]struct{}{
 	"non_monitored":  {},
 	"repo_overrides": {},
 	"org_overrides":  {},
-	"agent_configs":  {},
 	"server_port":    {},
+}
+
+// allowedAgentConfigSubkeys is the per-agent allowlist for PUT /config.
+// Mirrors CLIAgentConfig fields exposed via the Flutter UI. Note the deliberate
+// omission of dangerously_skip_perms (M-5): toggling --dangerously-skip-permissions
+// at runtime over HTTP would let an attacker with API access escalate the
+// agent's effective permissions. That field stays TOML/env-only.
+var allowedAgentConfigSubkeys = map[string]struct{}{
+	"model":                  {},
+	"max_turns":              {},
+	"approval_mode":          {},
+	"extra_flags":            {},
+	"prompt":                 {},
+	"effort":                 {},
+	"permission_mode":        {},
+	"bare":                   {},
+	"no_session_persistence": {},
+	"execution_timeout":      {},
 }
 
 // validPollIntervals is the allowlist of permitted poll_interval values.
@@ -573,6 +589,16 @@ func (srv *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+	}
+	if v, ok := body["agent_configs"]; ok {
+		normalized, err := normalizeAgentConfigsForPut(v)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		// Replace with normalized form so the JSON we persist below carries
+		// the validated/coerced types (numbers as int, etc.).
+		body["agent_configs"] = normalized
 	}
 
 	for k, v := range body {
@@ -1705,4 +1731,98 @@ func tailLines(f *os.File, n int) []string {
 	// Seek file to end of last line read.
 	f.Seek(size, io.SeekStart) //nolint:errcheck
 	return lines
+}
+
+// normalizeAgentConfigsForPut validates the agent_configs payload from PUT
+// /config. The payload must be a JSON object keyed by CLI name (claude, gemini,
+// codex, opencode), where each value is itself an object whose keys are in
+// allowedAgentConfigSubkeys. Subkeys outside that set — including the
+// security-gated dangerously_skip_perms — return a 400 with a descriptive
+// message. permission_mode / approval_mode / extra_flags get value validation
+// against the executor allowlists.
+//
+// The returned map is shaped for json.Marshal so the persisted row deserializes
+// cleanly into map[string]CLIAgentConfig in ApplyStore.
+func normalizeAgentConfigsForPut(v any) (map[string]map[string]any, error) {
+	outer, ok := v.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("agent_configs must be an object keyed by CLI name")
+	}
+	out := make(map[string]map[string]any, len(outer))
+	for cli, raw := range outer {
+		if err := executor.ValidateCLIName(cli); err != nil {
+			return nil, fmt.Errorf("agent_configs: %v", err)
+		}
+		inner, ok := raw.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("agent_configs[%q] must be an object", cli)
+		}
+		normalized := make(map[string]any, len(inner))
+		for k, val := range inner {
+			if k == "dangerously_skip_perms" {
+				return nil, fmt.Errorf(
+					"agent_configs[%q].dangerously_skip_perms cannot be set via HTTP API; "+
+						"configure it in config.toml under [ai.agents.%s] (security gate M-5)",
+					cli, cli)
+			}
+			if _, allowed := allowedAgentConfigSubkeys[k]; !allowed {
+				return nil, fmt.Errorf("agent_configs[%q]: unknown key %q", cli, k)
+			}
+			switch k {
+			case "model", "extra_flags", "prompt", "effort", "execution_timeout":
+				s, isStr := val.(string)
+				if !isStr {
+					return nil, fmt.Errorf("agent_configs[%q].%s must be a string", cli, k)
+				}
+				if k == "extra_flags" && s != "" {
+					if err := executor.ValidateExtraFlags(s); err != nil {
+						return nil, fmt.Errorf("agent_configs[%q].extra_flags: %v", cli, err)
+					}
+				}
+				if k == "execution_timeout" && s != "" {
+					if d, err := time.ParseDuration(s); err != nil || d <= 0 {
+						return nil, fmt.Errorf("agent_configs[%q].execution_timeout must be a positive duration, e.g. 20m", cli)
+					}
+				}
+				normalized[k] = s
+			case "permission_mode":
+				s, isStr := val.(string)
+				if !isStr {
+					return nil, fmt.Errorf("agent_configs[%q].permission_mode must be a string", cli)
+				}
+				if err := executor.ValidatePermissionMode(s); err != nil {
+					return nil, fmt.Errorf("agent_configs[%q].permission_mode: %v", cli, err)
+				}
+				normalized[k] = s
+			case "approval_mode":
+				s, isStr := val.(string)
+				if !isStr {
+					return nil, fmt.Errorf("agent_configs[%q].approval_mode must be a string", cli)
+				}
+				if err := executor.ValidateApprovalMode(s); err != nil {
+					return nil, fmt.Errorf("agent_configs[%q].approval_mode: %v", cli, err)
+				}
+				normalized[k] = s
+			case "max_turns":
+				n, isNum := val.(float64) // JSON numbers decode as float64
+				if !isNum || n < 0 || n != float64(int(n)) {
+					return nil, fmt.Errorf("agent_configs[%q].max_turns must be a non-negative integer", cli)
+				}
+				normalized[k] = int(n)
+			case "bare", "no_session_persistence":
+				b, isBool := val.(bool)
+				if !isBool {
+					return nil, fmt.Errorf("agent_configs[%q].%s must be a boolean", cli, k)
+				}
+				normalized[k] = b
+			default:
+				// Defensive: subkey passed the allowlist check but no parser
+				// branch above. Reject loudly so a future allowlist addition
+				// can't silently land an untyped value in the store.
+				return nil, fmt.Errorf("agent_configs[%q]: %q is allowed but has no validator (please open an issue)", cli, k)
+			}
+		}
+		out[cli] = normalized
+	}
+	return out, nil
 }

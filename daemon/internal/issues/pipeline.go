@@ -669,6 +669,13 @@ func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, is
 		return nil, fmt.Errorf("issues pipeline: detect CLI: %w", err)
 	}
 
+	// Auto_implement requires the CLI to be allowed to write files. When the
+	// operator has not configured a permission/approval flag explicitly, fall
+	// back to the safest mode that still permits edits — otherwise the agent
+	// silently completes without touching the tree and every run degrades to
+	// the no-changes fallback (#433).
+	opts.ExecOpts = ensureAutoImplementWritePerms(cli, opts.ExecOpts)
+
 	// Build prior-issue context. Prefer the latest refinement plan when it
 	// exists so auto_implement can execute the researched plan; otherwise fall
 	// back to the historical triage context.
@@ -887,6 +894,40 @@ func (p *Pipeline) autoImplementNoChangesFallback(issue *github.Issue, issueID i
 	slog.Info("issues pipeline: auto_implement had no changes, posted fallback comment",
 		"repo", issue.Repo, "number", issue.Number, "posted", postErr == nil)
 	return rev, nil
+}
+
+// ensureAutoImplementWritePerms returns opts with a sane default permission /
+// approval flag for the auto_implement path when the operator has not set one.
+// Without this, the daemon spawns the CLI in a mode where Edit/Write tool
+// calls require a human prompt — in non-interactive `-p` mode they simply
+// don't fire, the CLI exits cleanly, and `git status` shows a clean tree, so
+// every issue degrades to the no-changes fallback comment (#433). Any
+// explicit operator setting wins; this only fills the gap when *nothing* is
+// configured.
+//
+// gemini has no equivalent non-interactive write flag today: callers must
+// configure --include-directories plus an approval bypass in extra_flags
+// themselves. We log a warn so the operator sees why writes are no-op.
+func ensureAutoImplementWritePerms(cli string, opts executor.ExecOptions) executor.ExecOptions {
+	switch cli {
+	case "claude":
+		if strings.TrimSpace(opts.PermissionMode) == "" && !opts.DangerouslySkipPerms {
+			opts.PermissionMode = "acceptEdits"
+			slog.Info("issues pipeline: defaulting claude permission_mode to acceptEdits for auto_implement",
+				"cli", cli)
+		}
+	case "codex":
+		if strings.TrimSpace(opts.ApprovalMode) == "" {
+			opts.ApprovalMode = "full-auto"
+			slog.Info("issues pipeline: defaulting codex approval_mode to full-auto for auto_implement",
+				"cli", cli)
+		}
+	case "gemini":
+		slog.Warn("issues pipeline: gemini has no built-in write-permission default; "+
+			"configure approval bypass via extra_flags or expect no-changes runs",
+			"cli", cli)
+	}
+	return opts
 }
 
 func (p *Pipeline) recordAutoImplementFailure(issueID int64, cli, summary string) {

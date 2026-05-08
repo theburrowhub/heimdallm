@@ -929,6 +929,63 @@ func TestPipeline_CircuitBreakerDoesNotGateDevelop(t *testing.T) {
 	}
 }
 
+func TestPipeline_AutoImplementDefaultsClaudePermissionMode(t *testing.T) {
+	// Without this default, claude in -p mode silently no-ops every Edit/Write
+	// tool call, so HasChanges always reports clean and every issue degrades
+	// to the no-changes fallback (#433). The default applies only when the
+	// operator left both knobs unset.
+	s := &fakeStore{}
+	gh := &fakeGH{defaultBranch: "main"}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("ok")}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(s, gh, exec, git, &fakeBroker{}, nil)
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if exec.lastOpts.PermissionMode != "acceptEdits" {
+		t.Errorf("PermissionMode = %q, want acceptEdits (default for claude auto_implement)", exec.lastOpts.PermissionMode)
+	}
+}
+
+func TestPipeline_AutoImplementRespectsExplicitDangerouslySkipPerms(t *testing.T) {
+	// When the operator has flipped DangerouslySkipPerms in TOML, the default
+	// must NOT shadow that choice with acceptEdits — the operator's explicit
+	// permission posture wins.
+	s := &fakeStore{}
+	gh := &fakeGH{defaultBranch: "main"}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("ok")}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(s, gh, exec, git, &fakeBroker{}, nil)
+
+	opts := autoImplementRunOptions()
+	opts.ExecOpts.DangerouslySkipPerms = true
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), opts); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if exec.lastOpts.PermissionMode != "" {
+		t.Errorf("PermissionMode = %q, want empty (operator chose DangerouslySkipPerms)", exec.lastOpts.PermissionMode)
+	}
+	if !exec.lastOpts.DangerouslySkipPerms {
+		t.Errorf("DangerouslySkipPerms cleared by default helper")
+	}
+}
+
+func TestPipeline_AutoImplementDefaultsCodexApprovalMode(t *testing.T) {
+	s := &fakeStore{}
+	gh := &fakeGH{defaultBranch: "main"}
+	exec := &fakeExec{detectCLI: "codex", rawOutput: []byte("ok")}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(s, gh, exec, git, &fakeBroker{}, nil)
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if exec.lastOpts.ApprovalMode != "full-auto" {
+		t.Errorf("ApprovalMode = %q, want full-auto (default for codex auto_implement)", exec.lastOpts.ApprovalMode)
+	}
+}
+
 func TestPipeline_AutoImplementNoChangesRecordsTerminalNoChanges(t *testing.T) {
 	// Agent escape hatch fired; the working tree is untouched. The pipeline
 	// must degrade to a review_only-style comment rather than open an empty PR.

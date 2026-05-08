@@ -130,6 +130,33 @@ func (c *Config) ApplyStore(rows map[string]string) error {
 			if err := json.Unmarshal([]byte(raw), &shadow.GitHub.IssueTracking); err != nil {
 				return fmt.Errorf("config: apply store key %q: %w", key, err)
 			}
+		case "agent_configs":
+			// Per-CLI agent overrides written by the Flutter Agents tab
+			// (PUT /config). Each named CLI gets a partial JSON object;
+			// fields the JSON omits keep their TOML/env values. Unmarshal
+			// INTO a copy of the existing CLIAgentConfig so partial
+			// payloads don't zero out fields the operator left untouched.
+			//
+			// Deep-copy the Agents map onto the shadow first: the outer
+			// `shadow := *c` is a shallow copy, so without this branch's
+			// own copy a per-key write would leak through to the receiver
+			// even when a later row fails (see INVARIANT comment above).
+			var perCLI map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(raw), &perCLI); err != nil {
+				return fmt.Errorf("config: apply store key %q: %w", key, err)
+			}
+			merged := make(map[string]CLIAgentConfig, len(shadow.AI.Agents)+len(perCLI))
+			for k, v := range shadow.AI.Agents {
+				merged[k] = v
+			}
+			for cli, payload := range perCLI {
+				existing := merged[cli]
+				if err := json.Unmarshal(payload, &existing); err != nil {
+					return fmt.Errorf("config: apply store key %q: agent %q: %w", key, cli, err)
+				}
+				merged[cli] = existing
+			}
+			shadow.AI.Agents = merged
 		case "server_port":
 			// Explicitly unsupported (not unknown): mutating the listening
 			// port at runtime would invalidate every in-flight connection

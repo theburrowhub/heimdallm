@@ -885,9 +885,8 @@ func TestHandlerPutConfig_ReadOnlyKeys_Accepted(t *testing.T) {
 		{"non_monitored", `{"non_monitored":["org/archived"]}`},
 		{"repo_overrides", `{"repo_overrides":{"org/a":{"primary":"claude"}}}`},
 		{"org_overrides", `{"org_overrides":{"org":{"primary":"claude"}}}`},
-		{"agent_configs", `{"agent_configs":{"claude":{"model":"claude-opus-4-7"}}}`},
 		{"server_port", `{"server_port":7842}`},
-		{"all-at-once", `{"repositories":[],"non_monitored":[],"repo_overrides":{},"org_overrides":{},"agent_configs":{},"server_port":7842}`},
+		{"all-at-once", `{"repositories":[],"non_monitored":[],"repo_overrides":{},"org_overrides":{},"server_port":7842}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -906,7 +905,7 @@ func TestHandlerPutConfig_ReadOnlyKeys_NotPersisted(t *testing.T) {
 	// reload doesn't have to re-examine them and ApplyStore's
 	// "unknown/bootstrap-only" branches stay dormant.
 	srv, s := setupServer(t)
-	body := `{"repositories":["org/y"],"non_monitored":["org/x"],"repo_overrides":{"org/a":{"primary":"claude"}},"org_overrides":{"org":{"primary":"gemini"}},"agent_configs":{"claude":{"model":"x"}},"server_port":7842}`
+	body := `{"repositories":["org/y"],"non_monitored":["org/x"],"repo_overrides":{"org/a":{"primary":"claude"}},"org_overrides":{"org":{"primary":"gemini"}},"server_port":7842}`
 	w := httptest.NewRecorder()
 	srv.Router().ServeHTTP(w, putConfigRequest(body))
 	if w.Code != http.StatusOK {
@@ -917,7 +916,7 @@ func TestHandlerPutConfig_ReadOnlyKeys_NotPersisted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListConfigs: %v", err)
 	}
-	for _, banned := range []string{"repositories", "non_monitored", "repo_overrides", "org_overrides", "agent_configs", "server_port"} {
+	for _, banned := range []string{"repositories", "non_monitored", "repo_overrides", "org_overrides", "server_port"} {
 		if _, leaked := rows[banned]; leaked {
 			t.Errorf("read-only key %q was persisted (rows: %v)", banned, rows)
 		}
@@ -925,11 +924,12 @@ func TestHandlerPutConfig_ReadOnlyKeys_NotPersisted(t *testing.T) {
 }
 
 func TestHandlerPutConfig_WritableAndReadOnly_Mixed(t *testing.T) {
-	// A realistic save: the Svelte UI sends editable fields next to the
-	// round-tripped read-only ones. Only the editable fields land in the
-	// store — nothing else bleeds in.
+	// A realistic save: the Flutter UI sends writable fields (poll_interval,
+	// agent_configs) next to the round-tripped read-only ones (repositories,
+	// non_monitored). Writables land in the store; read-only keys are
+	// silently dropped.
 	srv, s := setupServer(t)
-	body := `{"poll_interval":"30m","agent_configs":{"claude":{"model":"x"}},"repositories":["org/y"],"non_monitored":["org/x"]}`
+	body := `{"poll_interval":"30m","agent_configs":{"claude":{"model":"x","permission_mode":"acceptEdits"}},"repositories":["org/y"],"non_monitored":["org/x"]}`
 	w := httptest.NewRecorder()
 	srv.Router().ServeHTTP(w, putConfigRequest(body))
 	if w.Code != http.StatusOK {
@@ -943,14 +943,62 @@ func TestHandlerPutConfig_WritableAndReadOnly_Mixed(t *testing.T) {
 	if rows["poll_interval"] != "30m" {
 		t.Errorf("poll_interval = %q, want 30m", rows["poll_interval"])
 	}
-	if _, ok := rows["agent_configs"]; ok {
-		t.Errorf("agent_configs unexpectedly persisted")
+	if got := rows["agent_configs"]; got == "" {
+		t.Errorf("agent_configs was not persisted (rows: %v)", rows)
+	} else if !strings.Contains(got, `"permission_mode":"acceptEdits"`) || !strings.Contains(got, `"model":"x"`) {
+		t.Errorf("agent_configs payload missing fields: %s", got)
 	}
 	if _, ok := rows["repositories"]; ok {
 		t.Errorf("repositories unexpectedly persisted")
 	}
 	if _, ok := rows["non_monitored"]; ok {
 		t.Errorf("non_monitored unexpectedly persisted")
+	}
+}
+
+func TestHandlerPutConfig_AgentConfigs_RejectsDangerouslySkipPerms(t *testing.T) {
+	// Security gate M-5: --dangerously-skip-permissions cannot be flipped
+	// over HTTP. The handler must 400 with a message that points the
+	// operator at config.toml so the toggle never lands in sqlite.
+	srv, _ := setupServer(t)
+	body := `{"agent_configs":{"claude":{"dangerously_skip_perms":true}}}`
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, putConfigRequest(body))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (body: %s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "dangerously_skip_perms") {
+		t.Errorf("error message must name the rejected key, got: %s", w.Body.String())
+	}
+}
+
+func TestHandlerPutConfig_AgentConfigs_RejectsBadPermissionMode(t *testing.T) {
+	srv, _ := setupServer(t)
+	body := `{"agent_configs":{"claude":{"permission_mode":"bypassPermissions"}}}`
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, putConfigRequest(body))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+func TestHandlerPutConfig_AgentConfigs_RejectsUnknownSubkey(t *testing.T) {
+	srv, _ := setupServer(t)
+	body := `{"agent_configs":{"claude":{"new_secret_field":true}}}`
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, putConfigRequest(body))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+func TestHandlerPutConfig_AgentConfigs_RejectsUnknownCLI(t *testing.T) {
+	srv, _ := setupServer(t)
+	body := `{"agent_configs":{"not-a-cli":{"model":"x"}}}`
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, putConfigRequest(body))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (body: %s)", w.Code, w.Body.String())
 	}
 }
 
