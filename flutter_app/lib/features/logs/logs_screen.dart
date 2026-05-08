@@ -21,13 +21,13 @@ Color _levelColor(String line) {
   return const Color(0xFFD4D4D4);
 }
 
-class LogsScreen extends ConsumerStatefulWidget {
-  const LogsScreen({super.key});
+class LogsView extends ConsumerStatefulWidget {
+  const LogsView({super.key});
   @override
-  ConsumerState<LogsScreen> createState() => _LogsScreenState();
+  ConsumerState<LogsView> createState() => _LogsViewState();
 }
 
-class _LogsScreenState extends ConsumerState<LogsScreen> {
+class _LogsViewState extends ConsumerState<LogsView> {
   final _lines = <String>[];
   final _scrollController = ScrollController();
   SseClient? _sseClient;
@@ -119,93 +119,140 @@ class _LogsScreenState extends ConsumerState<LogsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    return Container(
+      color: _bgColor,
+      child: Stack(
+        children: [
+          Column(
+            children: [
+              // Toolbar row: connection status + wrap toggle + copy
+              Container(
+                color: const Color(0xFF161B22),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 7,
+                      height: 7,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: _connected
+                            ? const Color(0xFF3FB950)
+                            : const Color(0xFFFF6B6B),
+                        boxShadow: _connected
+                            ? [
+                                BoxShadow(
+                                    color: const Color(0xFF3FB950)
+                                        .withValues(alpha: 0.5),
+                                    blurRadius: 4)
+                              ]
+                            : null,
+                      ),
+                    ),
+                    const Spacer(),
+                    IconButton(
+                      icon: Icon(_wrap ? Icons.wrap_text : Icons.notes,
+                          size: 18),
+                      tooltip: _wrap ? 'Desactivar wrap' : 'Activar wrap',
+                      color: _wrap ? const Color(0xFF3FB950) : const Color(0xFFD4D4D4),
+                      onPressed: () => setState(() => _wrap = !_wrap),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.copy_outlined,
+                          size: 18, color: Color(0xFFD4D4D4)),
+                      tooltip: 'Copiar todo',
+                      onPressed: _lines.isEmpty ? null : _copyAll,
+                    ),
+                  ],
+                ),
+              ),
+              // Log lines
+              Expanded(
+                child: _lines.isEmpty
+                    ? Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const CircularProgressIndicator(
+                                color: Color(0xFF3FB950), strokeWidth: 2),
+                            const SizedBox(height: 12),
+                            Text('Conectando...',
+                                style: TextStyle(
+                                    fontFamily: _fontFamily,
+                                    fontSize: 12,
+                                    color: Colors.grey.shade600)),
+                          ],
+                        ),
+                      )
+                    : Scrollbar(
+                        controller: _scrollController,
+                        child: ListView.builder(
+                          controller: _scrollController,
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 16, vertical: 8),
+                          itemCount: _lines.length,
+                          itemBuilder: (_, i) {
+                            final line = _lines[i];
+                            return Padding(
+                              padding: const EdgeInsets.only(bottom: 1),
+                              child: Text(
+                                line,
+                                softWrap: _wrap,
+                                overflow: _wrap
+                                    ? TextOverflow.visible
+                                    : TextOverflow.fade,
+                                style: TextStyle(
+                                  fontFamily: _fontFamily,
+                                  fontSize: 11.5,
+                                  height: 1.5,
+                                  color: _levelColor(line),
+                                  letterSpacing: 0,
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+              ),
+            ],
+          ),
+          // Scroll-to-bottom FAB
+          if (!_atBottom)
+            Positioned(
+              right: 16,
+              bottom: 16,
+              child: FloatingActionButton.small(
+                onPressed: _scrollToBottom,
+                backgroundColor: const Color(0xFF21262D),
+                foregroundColor: const Color(0xFFD4D4D4),
+                tooltip: 'Ir al final',
+                child: const Icon(Icons.arrow_downward, size: 18),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class LogsScreen extends StatelessWidget {
+  const LogsScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: _bgColor,
       appBar: AppBar(
         backgroundColor: const Color(0xFF161B22),
         foregroundColor: const Color(0xFFD4D4D4),
-        title: Row(
-          children: [
-            const Text('Daemon Logs',
-                style: TextStyle(fontFamily: _fontFamily, fontSize: 14)),
-            const SizedBox(width: 8),
-            Container(
-              width: 7, height: 7,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: _connected ? const Color(0xFF3FB950) : const Color(0xFFFF6B6B),
-                boxShadow: _connected
-                    ? [BoxShadow(color: const Color(0xFF3FB950).withValues(alpha: 0.5), blurRadius: 4)]
-                    : null,
-              ),
-            ),
-          ],
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () => Navigator.of(context).maybePop(),
         ),
-        actions: [
-          IconButton(
-            icon: Icon(_wrap ? Icons.wrap_text : Icons.notes, size: 18),
-            tooltip: _wrap ? 'Desactivar wrap' : 'Activar wrap',
-            color: _wrap ? const Color(0xFF3FB950) : null,
-            onPressed: () => setState(() => _wrap = !_wrap),
-          ),
-          IconButton(
-            icon: const Icon(Icons.copy_outlined, size: 18),
-            tooltip: 'Copiar todo',
-            onPressed: _lines.isEmpty ? null : _copyAll,
-          ),
-        ],
+        title: const Text('Daemon Logs',
+            style: TextStyle(fontFamily: 'Courier New', fontSize: 14)),
       ),
-      body: _lines.isEmpty
-          ? Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const CircularProgressIndicator(
-                      color: Color(0xFF3FB950), strokeWidth: 2),
-                  const SizedBox(height: 12),
-                  Text('Conectando...',
-                      style: TextStyle(
-                          fontFamily: _fontFamily,
-                          fontSize: 12,
-                          color: Colors.grey.shade600)),
-                ],
-              ),
-            )
-          : Scrollbar(
-              controller: _scrollController,
-              child: ListView.builder(
-                controller: _scrollController,
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                itemCount: _lines.length,
-                itemBuilder: (_, i) {
-                  final line = _lines[i];
-                  return Padding(
-                    padding: const EdgeInsets.only(bottom: 1),
-                    child: Text(
-                      line,
-                      softWrap: _wrap,
-                      overflow: _wrap ? TextOverflow.visible : TextOverflow.fade,
-                      style: TextStyle(
-                        fontFamily: _fontFamily,
-                        fontSize: 11.5,
-                        height: 1.5,
-                        color: _levelColor(line),
-                        letterSpacing: 0,
-                      ),
-                    ),
-                  );
-                },
-              ),
-            ),
-      floatingActionButton: _atBottom
-          ? null
-          : FloatingActionButton.small(
-              onPressed: _scrollToBottom,
-              backgroundColor: const Color(0xFF21262D),
-              foregroundColor: const Color(0xFFD4D4D4),
-              tooltip: 'Ir al final',
-              child: const Icon(Icons.arrow_downward, size: 18),
-            ),
+      body: const LogsView(),
     );
   }
 }

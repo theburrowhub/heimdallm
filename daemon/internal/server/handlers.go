@@ -58,6 +58,8 @@ type Server struct {
 	// Empty string disables authentication (should not happen in production).
 	apiToken  string
 	reviewSem chan struct{} // counting semaphore for concurrent review triggers
+	version   string
+	startedAt time.Time
 	// configPath is the path to config.toml. Required for PATCH/DELETE
 	// endpoints that read-merge-write the TOML file.
 	configPath string
@@ -70,6 +72,10 @@ type Options struct {
 	// MaxConcurrentReviews limits how many POST /prs/{id}/review goroutines
 	// can run simultaneously. 0 means use the default (5).
 	MaxConcurrentReviews int
+	// Version is the build-time version string (e.g. "v1.2.3"). Optional.
+	Version string
+	// StartedAt is the time the server process started. Optional.
+	StartedAt time.Time
 }
 
 const defaultMaxConcurrentReviews = 5
@@ -94,6 +100,10 @@ func NewWithOptions(s *store.Store, broker *sse.Broker, p *pipeline.Pipeline, ap
 		pipeline:  p,
 		apiToken:  apiToken,
 		reviewSem: make(chan struct{}, max),
+	}
+	srv.version = opts.Version
+	if !opts.StartedAt.IsZero() {
+		srv.startedAt = opts.StartedAt
 	}
 	srv.router = srv.buildRouter()
 	return srv
@@ -311,7 +321,14 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func (srv *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	resp := map[string]any{"status": "ok"}
+	if srv.version != "" {
+		resp["version"] = srv.version
+	}
+	if !srv.startedAt.IsZero() {
+		resp["started_at"] = srv.startedAt.UTC().Format(time.RFC3339)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (srv *Server) handleListPRs(w http.ResponseWriter, r *http.Request) {

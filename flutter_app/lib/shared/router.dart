@@ -3,9 +3,9 @@ import '../features/dashboard/dashboard_screen.dart';
 import '../features/issues/issue_detail_screen.dart';
 import '../features/pr_detail/pr_detail_screen.dart';
 import '../features/config/config_screen.dart';
-import '../features/logs/logs_screen.dart';
 import '../features/organizations/org_detail_screen.dart';
 import '../features/repositories/repo_detail_screen.dart';
+import '../features/server/server_screen.dart';
 
 GoRouter createRouter({String initialLocation = '/'}) => GoRouter(
   initialLocation: initialLocation,
@@ -40,7 +40,17 @@ GoRouter createRouter({String initialLocation = '/'}) => GoRouter(
       },
     ),
     GoRoute(path: '/config', builder: (context, state) => const ConfigScreen()),
-    GoRoute(path: '/logs', builder: (context, state) => const LogsScreen()),
+    GoRoute(
+      path: '/server',
+      builder: (context, state) {
+        final tab = state.uri.queryParameters['tab'] ?? 'status';
+        return ServerScreen(initialTab: tab);
+      },
+    ),
+    GoRoute(
+      path: '/logs',
+      redirect: (context, state) => '/server?tab=logs',
+    ),
   ],
 );
 

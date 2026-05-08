@@ -40,6 +40,11 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
+// version is overridden via -ldflags "-X main.version=..." at build time.
+var version = "dev"
+
+func versionString() string { return version }
+
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
@@ -278,7 +283,10 @@ func main() {
 	var cfgMu sync.Mutex
 	var reloadMu sync.Mutex // serialises config reloads to prevent duplicate pipelines
 
-	srv := server.New(s, broker, p, apiToken)
+	srv := server.NewWithOptions(s, broker, p, apiToken, server.Options{
+		Version:   versionString(),
+		StartedAt: time.Now(),
+	})
 	srv.SetNATSConn(eventBus.Conn())
 	srv.SetConfigPath(cfgPath)
 	shutdownReq := make(chan struct{}, 1)
@@ -631,7 +639,7 @@ func main() {
 				}
 				return discovery.MergeRepos(cfg.GitHub.Repositories, discovered, cfg.GitHub.NonMonitored)
 			}
-			runTier2(ctx, adapter, limiter, prReviewPublisher, tier2ConfigFn, reposChan, pollInterval, coldStart)
+			runTier2(ctx, adapter, limiter, prReviewPublisher, broker, tier2ConfigFn, reposChan, pollInterval, coldStart)
 		}()
 
 		slog.Info("pollers: started",
@@ -2036,6 +2044,7 @@ func runTier2(
 	adapter *tier2Adapter,
 	limiter *scheduler.RateLimiter,
 	prPublisher scheduler.Tier2PRPublisher,
+	ssePub sse.Publisher,
 	configFn func() []string,
 	reposChan <-chan []string,
 	interval time.Duration,
@@ -2081,7 +2090,11 @@ func runTier2(
 		}
 
 		// PR processing
+		sse.EmitPollingStarted(ssePub, "prs", currentRepos)
+		prStart := time.Now()
+		prCount := 0
 		if err := limiter.Acquire(ctx, scheduler.TierRepo); err != nil {
+			sse.EmitPollingCompleted(ssePub, "prs", prCount, time.Since(prStart))
 			return
 		}
 		prs, err := adapter.FetchPRsToReview()
@@ -2099,14 +2112,20 @@ func runTier2(
 				if adapter.PRAlreadyReviewed(pr.ID, pr.Repo, pr.Number, pr.UpdatedAt, pr.HeadSHA) {
 					continue
 				}
+				prCount++
 				if err := prPublisher.PublishPRReview(ctx, pr.Repo, pr.Number, pr.ID, pr.HeadSHA); err != nil {
 					slog.Error("tier2: publish PR review", "repo", pr.Repo, "pr", pr.Number, "err", err)
 				}
 			}
 		}
+		sse.EmitPollingCompleted(ssePub, "prs", prCount, time.Since(prStart))
 
-		// Issue promotion
+		// Issue processing
+		sse.EmitPollingStarted(ssePub, "issues", currentRepos)
+		issueStart := time.Now()
+		issueCount := 0
 		if err := limiter.Acquire(ctx, scheduler.TierRepo); err != nil {
+			sse.EmitPollingCompleted(ssePub, "issues", issueCount, time.Since(issueStart))
 			return
 		}
 		if n, err := adapter.PromoteReady(ctx, currentRepos); err != nil {
@@ -2118,6 +2137,7 @@ func runTier2(
 		// Issue processing per repo
 		for _, repo := range currentRepos {
 			if err := limiter.Acquire(ctx, scheduler.TierRepo); err != nil {
+				sse.EmitPollingCompleted(ssePub, "issues", issueCount, time.Since(issueStart))
 				return
 			}
 			n, err := adapter.ProcessRepo(ctx, repo)
@@ -2125,10 +2145,12 @@ func runTier2(
 				slog.Error("tier2: issue processing", "repo", repo, "err", err)
 				continue
 			}
+			issueCount += n
 			if n > 0 {
 				slog.Info("tier2: processed issues", "repo", repo, "count", n)
 			}
 		}
+		sse.EmitPollingCompleted(ssePub, "issues", issueCount, time.Since(issueStart))
 
 		// Retry pending publishes
 		adapter.PublishPending()
