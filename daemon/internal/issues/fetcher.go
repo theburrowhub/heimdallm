@@ -367,12 +367,13 @@ func (f *Fetcher) auditManualStageChange(ctx context.Context, issue *github.Issu
 		ref = latest.CreatedAt
 	}
 	alreadyAudited := hasStagePromotionCommentSince(comments, from, to, ref)
-	if alreadyAudited && stageTransitionApplied(issue, cfg, to) {
+	targetAudited := alreadyAudited || hasStagePromotionTargetCommentSince(comments, to, ref)
+	if targetAudited && stageTransitionApplied(issue, cfg, to) {
 		slog.Debug("issues fetcher: stage transition already audited since latest review",
 			"repo", issue.Repo, "number", issue.Number, "from", from, "to", to)
 		return nil
 	}
-	if alreadyAudited {
+	if targetAudited {
 		slog.Debug("issues fetcher: stage transition audit exists but labels need normalization",
 			"repo", issue.Repo, "number", issue.Number, "from", from, "to", to)
 	}
@@ -386,7 +387,7 @@ func (f *Fetcher) auditManualStageChange(ctx context.Context, issue *github.Issu
 		Trigger:        StagePromotionManualGitHub,
 		Time:           time.Now().UTC(),
 		RecentComments: comments,
-		SuppressAudit:  alreadyAudited,
+		SuppressAudit:  targetAudited,
 		Broker:         f.stageBroker,
 	})
 }
