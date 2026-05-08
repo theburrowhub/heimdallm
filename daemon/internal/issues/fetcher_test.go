@@ -480,6 +480,33 @@ func TestFetcher_DoesNotSkipBelowMaxAutoImplementFailures(t *testing.T) {
 	}
 }
 
+func TestFetcher_SkipsAutoImplementNoChangesUntilManualRetry(t *testing.T) {
+	reviewedAt := time.Now().Add(-10 * time.Minute)
+	issue := fixture(1, time.Now())
+	issue.Mode = config.IssueModeDevelop
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {
+			row: &store.Issue{ID: 10, GithubID: issue.ID},
+			review: &store.IssueReview{
+				IssueID:     10,
+				ActionTaken: issues.ActionAutoImplementNoChanges,
+				CreatedAt:   reviewedAt,
+				CommentedAt: reviewedAt,
+			},
+		},
+	}}
+	p := &fakePipeline{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, nil, dedup, p)
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 0 || len(p.calls) != 0 {
+		t.Fatalf("no-changes auto_implement should wait for retry marker, processed=%d calls=%v", processed, p.calls)
+	}
+}
+
 func TestFetcher_CountFailedAutoImplErrDoesNotSkip(t *testing.T) {
 	// When CountFailedAutoImplement returns an error, the fetcher must log
 	// and proceed (fail-safe: never block an issue due to a flaky store).

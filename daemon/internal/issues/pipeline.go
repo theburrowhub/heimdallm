@@ -854,7 +854,7 @@ func (p *Pipeline) autoImplementNoChangesFallback(issue *github.Issue, issueID i
 	body := fmt.Sprintf(
 		"## ⚠️ Heimdallm auto-implement skipped\n\n"+
 			"The agent looked at #%d but left the working tree unchanged — it likely needs a human decision or more context than the issue alone provides.\n\n"+
-			"Rerun manually with more details in the issue body, or remove the develop label to stop retries.\n\n"+
+			"Add more details and a retry marker to run auto-implementation again, or remove the develop label to stop here.\n\n"+
 			"---\n*auto_implement → review_only fallback · Heimdallm*",
 		issue.Number,
 	)
@@ -870,10 +870,7 @@ func (p *Pipeline) autoImplementNoChangesFallback(issue *github.Issue, issueID i
 		Summary:     "auto_implement produced no changes; downgraded to review_only",
 		Triage:      "{}",
 		Suggestions: "[]",
-		// ActionTaken reflects what actually ran — keeps the audit trail
-		// honest per the same rule we established in #26 for the
-		// develop-without-local_dir fallback.
-		ActionTaken: string(config.IssueModeReviewOnly),
+		ActionTaken: ActionAutoImplementNoChanges,
 		CreatedAt:   time.Now().UTC(),
 		CommentedAt: commentedAt,
 	}

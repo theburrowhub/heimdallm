@@ -285,6 +285,9 @@ func (f *Fetcher) alreadyProcessed(issue *github.Issue) (bool, string, error) {
 	if latest.ActionTaken == "auto_implement" && latest.PRCreated > 0 {
 		return true, "already implemented (PR created)", nil
 	}
+	if latest.ActionTaken == ActionAutoImplementNoChanges && issue.Mode == config.IssueModeDevelop {
+		return true, "auto_implement produced no changes; waiting for manual retry", nil
+	}
 
 	// Bot-comment dedup: if the most recent comment is from the bot AND the
 	// issue's current mode matches what was already done (ActionTaken), the

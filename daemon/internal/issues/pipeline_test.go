@@ -929,7 +929,7 @@ func TestPipeline_CircuitBreakerDoesNotGateDevelop(t *testing.T) {
 	}
 }
 
-func TestPipeline_AutoImplementNoChangesFallsBackToReviewOnly(t *testing.T) {
+func TestPipeline_AutoImplementNoChangesRecordsTerminalNoChanges(t *testing.T) {
 	// Agent escape hatch fired; the working tree is untouched. The pipeline
 	// must degrade to a review_only-style comment rather than open an empty PR.
 	s := &fakeStore{}
@@ -958,9 +958,8 @@ func TestPipeline_AutoImplementNoChangesFallsBackToReviewOnly(t *testing.T) {
 		t.Errorf("fallback body should explain the skip, got %q", gh.postCalls[0].Body)
 	}
 
-	// Review persisted reflects the actual mode that ran.
-	if rev.ActionTaken != string(config.IssueModeReviewOnly) {
-		t.Errorf("ActionTaken=%q, want review_only (audit-honest fallback)", rev.ActionTaken)
+	if rev.ActionTaken != issues.ActionAutoImplementNoChanges {
+		t.Errorf("ActionTaken=%q, want %s", rev.ActionTaken, issues.ActionAutoImplementNoChanges)
 	}
 	if rev.PRCreated != 0 {
 		t.Errorf("PRCreated=%d, want 0", rev.PRCreated)

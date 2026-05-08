@@ -34,11 +34,31 @@ func TestBuildImplementPrompt_DefaultTemplateContainsSafetyRules(t *testing.T) {
 		"Labels: bug, regression",
 		"Assignees: bob",
 		"Implement what the issue asks for",
+		"code, tests, docs, configuration, or scripts",
+		"Documentation-only issues still require editing",
 		"Keep the change minimal",
 		"leave the tree untouched",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("default implement prompt missing %q", want)
+		}
+	}
+}
+
+func TestBuildImplementPrompt_PreviousRefinementRequiresConcreteEdits(t *testing.T) {
+	ctx := baseCtx()
+	ctx.TriageContext = "## Previous refinement plan\n\nSubtasks:\n- task-1: Add a docs subsection.\n  - Affected files: docs/configuration-guide.md\n  - Expected change: document the smoke-test flow.\n\nImplementation order: task-1\n"
+
+	got := issues.BuildImplementPrompt(ctx)
+
+	for _, want := range []string{
+		"treat it as the implementation contract",
+		"you are expected to edit the repository",
+		"Do not choose a no-op outcome just because the issue is documentation-only",
+		"docs/configuration-guide.md",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("implement prompt missing %q, got: %s", want, got)
 		}
 	}
 }
