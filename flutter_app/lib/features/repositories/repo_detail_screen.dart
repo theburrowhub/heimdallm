@@ -194,6 +194,9 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
     if (!_listsEqual(old.reviewOnlyLabels, updated.reviewOnlyLabels)) {
       itDiff['review_only_labels'] = updated.reviewOnlyLabels ?? <String>[];
     }
+    if (!_listsEqual(old.refinementLabels, updated.refinementLabels)) {
+      itDiff['refinement_labels'] = updated.refinementLabels ?? <String>[];
+    }
     if (!_listsEqual(old.skipLabels, updated.skipLabels)) {
       itDiff['skip_labels'] = updated.skipLabels ?? <String>[];
     }
@@ -418,6 +421,27 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                         _update(_config.copyWith(reviewOnlyLabels: v)),
                     onReset: () =>
                         _resetField('issue_tracking/review_only_labels'),
+                  ),
+                  const SizedBox(height: 10),
+                  AutocompleteChipField(
+                    label: 'Refinement labels',
+                    helper:
+                        'Issues with these labels get a deep implementation plan',
+                    selectedValues:
+                        _config.refinementLabels ??
+                        orgConfig?.refinementLabels ??
+                        appConfig.issueTracking.refinementLabels,
+                    availableOptions: _repoLabels,
+                    isOverridden: _config.refinementLabels != null,
+                    inheritedLabel: source(orgConfig?.refinementLabels != null),
+                    globalHint: _joinList(
+                      orgConfig?.refinementLabels ??
+                          appConfig.issueTracking.refinementLabels,
+                    ),
+                    onChanged: (v) =>
+                        _update(_config.copyWith(refinementLabels: v)),
+                    onReset: () =>
+                        _resetField('issue_tracking/refinement_labels'),
                   ),
                   const SizedBox(height: 10),
                   AutocompleteChipField(

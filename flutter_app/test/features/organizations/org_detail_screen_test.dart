@@ -62,6 +62,7 @@ void main() {
     expect(find.text('Clone directory'), findsOneWidget);
     expect(find.text('Auto-promote triage'), findsOneWidget);
     expect(find.text('Auto-promote refinement'), findsOneWidget);
+    expect(find.text('Refinement labels'), findsOneWidget);
     expect(find.text('Generate PR description'), findsOneWidget);
     expect(find.text('Organizations'), findsOneWidget);
     expect(find.text('Assignees'), findsOneWidget);

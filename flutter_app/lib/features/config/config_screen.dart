@@ -439,6 +439,16 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
         ),
         const SizedBox(height: 10),
         AutocompleteChipField(
+          label: 'Refinement labels',
+          helper: 'Issues with these labels get a deep implementation plan',
+          selectedValues: _issueTracking.refinementLabels,
+          availableOptions: const [],
+          onChanged: (v) => setState(() {
+            _issueTracking = _issueTracking.copyWith(refinementLabels: v ?? []);
+          }),
+        ),
+        const SizedBox(height: 10),
+        AutocompleteChipField(
           label: 'Skip labels',
           helper: 'Issues with these labels are ignored (highest priority)',
           selectedValues: _issueTracking.skipLabels,
