@@ -142,3 +142,94 @@ func TestFetchCollaborators_MidPaginationError(t *testing.T) {
 		t.Errorf("expected nil logins on error, got %v", got)
 	}
 }
+
+// TestFetchCollaborators_LinkHeaderVariants exercises parseNextLink through
+// FetchCollaborators by stubbing several Link header shapes and verifying
+// pagination terminates correctly when "next" is absent.
+func TestFetchCollaborators_LinkHeaderVariants(t *testing.T) {
+	cases := []struct {
+		name       string
+		linkHeader string
+		wantPages  int // how many pages we expect FetchCollaborators to fetch
+	}{
+		{
+			name:       "only_last_no_next",
+			linkHeader: `<https://example/api?page=5>; rel="last"`,
+			wantPages:  1,
+		},
+		{
+			name:       "empty_header",
+			linkHeader: ``,
+			wantPages:  1,
+		},
+		{
+			name:       "malformed_no_brackets",
+			linkHeader: `https://example/api?page=2; rel="next"`,
+			wantPages:  1,
+		},
+		{
+			name:       "malformed_no_rel",
+			linkHeader: `<https://example/api?page=2>`,
+			wantPages:  1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				atomic.AddInt32(&calls, 1)
+				if tc.linkHeader != "" {
+					w.Header().Set("Link", tc.linkHeader)
+				}
+				_ = json.NewEncoder(w).Encode([]map[string]string{{"login": "alice"}})
+			}))
+			defer srv.Close()
+
+			client := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+			if _, err := client.FetchCollaborators("org/repo"); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got := atomic.LoadInt32(&calls); int(got) != tc.wantPages {
+				t.Errorf("expected %d HTTP calls, got %d", tc.wantPages, got)
+			}
+		})
+	}
+
+	// Sanity case: a Link header containing both "next" and "last" must be
+	// followed for the "next" leg.
+	t.Run("next_and_last", func(t *testing.T) {
+		var srv *httptest.Server
+		var calls int32
+		srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			atomic.AddInt32(&calls, 1)
+			page := 1
+			if p := r.URL.Query().Get("page"); p != "" {
+				fmt.Sscanf(p, "%d", &page)
+			}
+			if page == 1 {
+				link := fmt.Sprintf(
+					`<%s/repos/org/repo/collaborators?per_page=100&page=2>; rel="next", `+
+						`<%s/repos/org/repo/collaborators?per_page=100&page=2>; rel="last"`,
+					srv.URL, srv.URL)
+				w.Header().Set("Link", link)
+				_ = json.NewEncoder(w).Encode([]map[string]string{{"login": "alice"}})
+				return
+			}
+			_ = json.NewEncoder(w).Encode([]map[string]string{{"login": "bob"}})
+		}))
+		defer srv.Close()
+
+		client := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+		got, err := client.FetchCollaborators("org/repo")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := []string{"alice", "bob"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("logins mismatch: got=%v, want=%v", got, want)
+		}
+		if c := atomic.LoadInt32(&calls); c != 2 {
+			t.Errorf("expected 2 HTTP calls, got %d", c)
+		}
+	})
+}
