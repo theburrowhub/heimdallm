@@ -150,6 +150,9 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
     if (!_listsEqual(old.reviewOnlyLabels, updated.reviewOnlyLabels)) {
       itDiff['review_only_labels'] = updated.reviewOnlyLabels ?? <String>[];
     }
+    if (!_listsEqual(old.refinementLabels, updated.refinementLabels)) {
+      itDiff['refinement_labels'] = updated.refinementLabels ?? <String>[];
+    }
     if (!_listsEqual(old.developLabels, updated.developLabels)) {
       itDiff['develop_labels'] = updated.developLabels ?? <String>[];
     }
@@ -284,6 +287,23 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
                         _update(_config.copyWith(reviewOnlyLabels: v)),
                     onReset: () =>
                         _resetField('issue_tracking/review_only_labels'),
+                  ),
+                  const SizedBox(height: 10),
+                  AutocompleteChipField(
+                    label: 'Refinement labels',
+                    helper: 'Issues with these labels get a deep plan',
+                    selectedValues:
+                        _config.refinementLabels ??
+                        appConfig.issueTracking.refinementLabels,
+                    availableOptions: const <String>[],
+                    isOverridden: _config.refinementLabels != null,
+                    globalHint: _joinList(
+                      appConfig.issueTracking.refinementLabels,
+                    ),
+                    onChanged: (v) =>
+                        _update(_config.copyWith(refinementLabels: v)),
+                    onReset: () =>
+                        _resetField('issue_tracking/refinement_labels'),
                   ),
                   const SizedBox(height: 10),
                   AutocompleteChipField(

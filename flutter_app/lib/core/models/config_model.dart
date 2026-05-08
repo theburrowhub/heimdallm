@@ -124,6 +124,7 @@ class RepoConfig {
 
   // Issue tracking overrides (null = inherit global)
   final List<String>? reviewOnlyLabels;
+  final List<String>? refinementLabels;
   final List<String>? skipLabels;
   final String? issueFilterMode;
   final String? issueDefaultAction;
@@ -156,6 +157,7 @@ class RepoConfig {
     this.promptId,
     this.reviewMode,
     this.reviewOnlyLabels,
+    this.refinementLabels,
     this.skipLabels,
     this.issueFilterMode,
     this.issueDefaultAction,
@@ -178,8 +180,8 @@ class RepoConfig {
     final issueActive =
         itEnabled == true ||
         (itEnabled != false &&
-            reviewOnlyLabels != null &&
-            reviewOnlyLabels!.isNotEmpty);
+            ((reviewOnlyLabels != null && reviewOnlyLabels!.isNotEmpty) ||
+                (refinementLabels != null && refinementLabels!.isNotEmpty)));
     final developActive =
         devEnabled == true ||
         (devEnabled != false &&
@@ -205,6 +207,7 @@ class RepoConfig {
       generatePRDescription != null ||
       developLabels != null ||
       reviewOnlyLabels != null ||
+      refinementLabels != null ||
       skipLabels != null ||
       issueFilterMode != null ||
       issueDefaultAction != null ||
@@ -230,6 +233,9 @@ class RepoConfig {
     if (itEnabled == false) return 'off';
     // Labels configured = implicitly active (matches daemon behavior)
     if (reviewOnlyLabels != null && reviewOnlyLabels!.isNotEmpty) return 'repo';
+    if (refinementLabels != null && refinementLabels!.isNotEmpty) {
+      return 'repo';
+    }
     return globalITEnabled ? 'global' : 'off';
   }
 
@@ -258,6 +264,7 @@ class RepoConfig {
     Object? promptId = _sentinel,
     Object? reviewMode = _sentinel,
     Object? reviewOnlyLabels = _sentinel,
+    Object? refinementLabels = _sentinel,
     Object? skipLabels = _sentinel,
     Object? issueFilterMode = _sentinel,
     Object? issueDefaultAction = _sentinel,
@@ -303,6 +310,9 @@ class RepoConfig {
       reviewOnlyLabels: reviewOnlyLabels == _sentinel
           ? this.reviewOnlyLabels
           : reviewOnlyLabels as List<String>?,
+      refinementLabels: refinementLabels == _sentinel
+          ? this.refinementLabels
+          : refinementLabels as List<String>?,
       skipLabels: skipLabels == _sentinel
           ? this.skipLabels
           : skipLabels as List<String>?,
@@ -361,6 +371,7 @@ class OrgConfig {
   final bool? itEnabled;
   final bool? devEnabled;
   final List<String>? reviewOnlyLabels;
+  final List<String>? refinementLabels;
   final List<String>? developLabels;
   final List<String>? skipLabels;
   final String? issueFilterMode;
@@ -388,6 +399,7 @@ class OrgConfig {
     this.itEnabled,
     this.devEnabled,
     this.reviewOnlyLabels,
+    this.refinementLabels,
     this.developLabels,
     this.skipLabels,
     this.issueFilterMode,
@@ -416,6 +428,7 @@ class OrgConfig {
       itEnabled != null ||
       devEnabled != null ||
       reviewOnlyLabels != null ||
+      refinementLabels != null ||
       developLabels != null ||
       skipLabels != null ||
       issueFilterMode != null ||
@@ -443,6 +456,7 @@ class OrgConfig {
     Object? itEnabled = _sentinel,
     Object? devEnabled = _sentinel,
     Object? reviewOnlyLabels = _sentinel,
+    Object? refinementLabels = _sentinel,
     Object? developLabels = _sentinel,
     Object? skipLabels = _sentinel,
     Object? issueFilterMode = _sentinel,
@@ -487,6 +501,9 @@ class OrgConfig {
     reviewOnlyLabels: reviewOnlyLabels == _sentinel
         ? this.reviewOnlyLabels
         : reviewOnlyLabels as List<String>?,
+    refinementLabels: refinementLabels == _sentinel
+        ? this.refinementLabels
+        : refinementLabels as List<String>?,
     developLabels: developLabels == _sentinel
         ? this.developLabels
         : developLabels as List<String>?,
@@ -519,6 +536,8 @@ class OrgConfig {
     final itRaw = json['issue_tracking'] as Map<String, dynamic>?;
     final hasReviewLabels =
         _nullableStringList(itRaw?['review_only_labels']) != null;
+    final hasRefinementLabels =
+        _nullableStringList(itRaw?['refinement_labels']) != null;
     final hasDevLabels = _nullableStringList(itRaw?['develop_labels']) != null;
     final itExplicit = itRaw != null && itRaw.containsKey('enabled')
         ? itRaw['enabled'] as bool?
@@ -541,10 +560,14 @@ class OrgConfig {
           _nonEmpty(json['issue_prompt']) ??
           (itRaw != null ? _nonEmpty(itRaw['issue_prompt']) : null),
       developPromptId: _nonEmpty(json['implement_prompt']),
-      itEnabled: itExplicit ?? (hasReviewLabels ? true : null),
+      itEnabled:
+          itExplicit ?? (hasReviewLabels || hasRefinementLabels ? true : null),
       devEnabled: devExplicit ?? (hasDevLabels ? true : null),
       reviewOnlyLabels: itRaw != null
           ? _nullableStringListAllowEmpty(itRaw['review_only_labels'])
+          : null,
+      refinementLabels: itRaw != null
+          ? _nullableStringListAllowEmpty(itRaw['refinement_labels'])
           : null,
       developLabels: itRaw != null
           ? _nullableStringListAllowEmpty(itRaw['develop_labels'])
@@ -603,6 +626,7 @@ class IssueTrackingConfig {
   final String filterMode; // "exclusive" | "inclusive"
   final String defaultAction; // "ignore" | "review_only"
   final List<String> developLabels;
+  final List<String> refinementLabels;
   final List<String> reviewOnlyLabels;
   final List<String> skipLabels;
   final List<String> organizations;
@@ -613,6 +637,7 @@ class IssueTrackingConfig {
     this.filterMode = 'exclusive',
     this.defaultAction = 'ignore',
     this.developLabels = const [],
+    this.refinementLabels = const [],
     this.reviewOnlyLabels = const [],
     this.skipLabels = const [],
     this.organizations = const [],
@@ -624,6 +649,7 @@ class IssueTrackingConfig {
     String? filterMode,
     String? defaultAction,
     List<String>? developLabels,
+    List<String>? refinementLabels,
     List<String>? reviewOnlyLabels,
     List<String>? skipLabels,
     List<String>? organizations,
@@ -633,6 +659,7 @@ class IssueTrackingConfig {
     filterMode: filterMode ?? this.filterMode,
     defaultAction: defaultAction ?? this.defaultAction,
     developLabels: developLabels ?? this.developLabels,
+    refinementLabels: refinementLabels ?? this.refinementLabels,
     reviewOnlyLabels: reviewOnlyLabels ?? this.reviewOnlyLabels,
     skipLabels: skipLabels ?? this.skipLabels,
     organizations: organizations ?? this.organizations,
@@ -644,6 +671,7 @@ class IssueTrackingConfig {
     'filter_mode': filterMode,
     'default_action': defaultAction,
     'develop_labels': developLabels,
+    'refinement_labels': refinementLabels,
     'review_only_labels': reviewOnlyLabels,
     'skip_labels': skipLabels,
     'organizations': organizations,
@@ -665,6 +693,7 @@ class IssueTrackingConfig {
           ? rawDefaultAction
           : 'ignore',
       developLabels: _stringList(json['develop_labels']),
+      refinementLabels: _stringList(json['refinement_labels']),
       reviewOnlyLabels: _stringList(json['review_only_labels']),
       skipLabels: _stringList(json['skip_labels']),
       organizations: _stringList(json['organizations']),
@@ -882,6 +911,8 @@ class AppConfig {
         // Derive enabled flags from reality: explicit enabled OR labels configured
         final hasReviewLabels =
             _nullableStringList(itRaw?['review_only_labels']) != null;
+        final hasRefinementLabels =
+            _nullableStringList(itRaw?['refinement_labels']) != null;
         final hasDevLabels =
             _nullableStringList(itRaw?['develop_labels']) != null;
         final itExplicit = itRaw != null && itRaw.containsKey('enabled')
@@ -897,7 +928,9 @@ class AppConfig {
             : null;
         configs[entry.key] = RepoConfig(
           prEnabled: existing?.prEnabled,
-          itEnabled: itExplicit ?? (hasReviewLabels ? true : null),
+          itEnabled:
+              itExplicit ??
+              (hasReviewLabels || hasRefinementLabels ? true : null),
           devEnabled: devExplicit ?? (hasDevLabels ? true : null),
           localDir: _nonEmpty(ov['local_dir']),
           triageOwner: _nonEmpty(ov['triage_owner']),
@@ -911,6 +944,9 @@ class AppConfig {
           promptId: _nonEmpty(ov['prompt']),
           reviewOnlyLabels: itRaw != null
               ? _nullableStringListAllowEmpty(itRaw['review_only_labels'])
+              : null,
+          refinementLabels: itRaw != null
+              ? _nullableStringListAllowEmpty(itRaw['refinement_labels'])
               : null,
           skipLabels: itRaw != null
               ? _nullableStringListAllowEmpty(itRaw['skip_labels'])

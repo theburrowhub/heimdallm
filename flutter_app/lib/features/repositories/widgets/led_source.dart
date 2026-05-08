@@ -67,7 +67,8 @@ String featureSourceLine({
       if (config.itEnabled == false) {
         return 'Source: disabled per-repo (itEnabled = false)';
       }
-      if ((config.reviewOnlyLabels ?? const []).isNotEmpty) {
+      if ((config.reviewOnlyLabels ?? const []).isNotEmpty ||
+          (config.refinementLabels ?? const []).isNotEmpty) {
         return 'Source: implied by per-repo labels';
       }
       if (orgConfig?.itEnabled == true) {
@@ -75,6 +76,7 @@ String featureSourceLine({
       }
       if (orgConfig?.itEnabled == false) return 'Source: disabled at org level';
       if ((orgConfig?.reviewOnlyLabels ?? const []).isNotEmpty ||
+          (orgConfig?.refinementLabels ?? const []).isNotEmpty ||
           (orgConfig?.developLabels ?? const []).isNotEmpty) {
         return 'Source: implied by org labels';
       }
@@ -123,12 +125,14 @@ bool _issueTrackingOn(
   if (config.itEnabled == true) return true;
   if (config.itEnabled == false) return false;
   if ((config.reviewOnlyLabels ?? const []).isNotEmpty ||
+      (config.refinementLabels ?? const []).isNotEmpty ||
       (config.developLabels ?? const []).isNotEmpty) {
     return true;
   }
   if (orgConfig?.itEnabled == true) return true;
   if (orgConfig?.itEnabled == false) return false;
   if ((orgConfig?.reviewOnlyLabels ?? const []).isNotEmpty ||
+      (orgConfig?.refinementLabels ?? const []).isNotEmpty ||
       (orgConfig?.developLabels ?? const []).isNotEmpty) {
     return true;
   }

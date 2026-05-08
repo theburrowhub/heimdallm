@@ -191,6 +191,8 @@ class FirstRunSetup {
   static String _tomlStringArray(List<String> values) =>
       '[${values.map((v) => '"${_tomlEscapeString(v)}"').join(', ')}]';
 
+  static String buildTomlForTesting(AppConfig config) => _buildToml(config);
+
   static String _buildToml(AppConfig config) {
     final buf = StringBuffer();
 
@@ -240,6 +242,11 @@ class FirstRunSetup {
     if (it.developLabels.isNotEmpty) {
       buf.writeln(
         'develop_labels = [${it.developLabels.map((l) => '"${_tomlEscapeString(l)}"').join(', ')}]',
+      );
+    }
+    if (it.refinementLabels.isNotEmpty) {
+      buf.writeln(
+        'refinement_labels = [${it.refinementLabels.map((l) => '"${_tomlEscapeString(l)}"').join(', ')}]',
       );
     }
     if (it.reviewOnlyLabels.isNotEmpty) {
@@ -428,6 +435,7 @@ class FirstRunSetup {
         }
         final hasIT =
             oc.developLabels != null ||
+            oc.refinementLabels != null ||
             oc.reviewOnlyLabels != null ||
             oc.skipLabels != null ||
             oc.issueFilterMode != null ||
@@ -445,6 +453,11 @@ class FirstRunSetup {
           if (oc.developLabels != null) {
             buf.writeln(
               'develop_labels = ${_tomlStringArray(oc.developLabels!)}',
+            );
+          }
+          if (oc.refinementLabels != null) {
+            buf.writeln(
+              'refinement_labels = ${_tomlStringArray(oc.refinementLabels!)}',
             );
           }
           if (oc.reviewOnlyLabels != null) {
@@ -540,6 +553,7 @@ class FirstRunSetup {
         // Issue tracking overrides (sub-table — must come after all repo-level keys)
         final hasIT =
             rc.developLabels != null ||
+            rc.refinementLabels != null ||
             rc.reviewOnlyLabels != null ||
             rc.skipLabels != null ||
             rc.issueFilterMode != null ||
@@ -557,6 +571,11 @@ class FirstRunSetup {
           if (rc.developLabels != null) {
             buf.writeln(
               'develop_labels = ${_tomlStringArray(rc.developLabels!)}',
+            );
+          }
+          if (rc.refinementLabels != null) {
+            buf.writeln(
+              'refinement_labels = ${_tomlStringArray(rc.refinementLabels!)}',
             );
           }
           if (rc.reviewOnlyLabels != null) {

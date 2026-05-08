@@ -218,6 +218,9 @@ Map<String, dynamic> _computeIssueTrackingDiff(
   if (_listsDiffer(old.developLabels, updated.developLabels)) {
     diff['develop_labels'] = updated.developLabels;
   }
+  if (_listsDiffer(old.refinementLabels, updated.refinementLabels)) {
+    diff['refinement_labels'] = updated.refinementLabels;
+  }
   if (_listsDiffer(old.reviewOnlyLabels, updated.reviewOnlyLabels)) {
     diff['review_only_labels'] = updated.reviewOnlyLabels;
   }

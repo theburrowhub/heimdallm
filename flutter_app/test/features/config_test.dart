@@ -7,6 +7,7 @@ import 'package:mocktail/mocktail.dart';
 import 'package:heimdallm/core/api/api_client.dart';
 import 'package:heimdallm/core/models/config_model.dart';
 import 'package:heimdallm/core/platform/platform_services_provider.dart';
+import 'package:heimdallm/core/setup/first_run_setup.dart';
 import 'package:heimdallm/features/config/config_providers.dart';
 import 'package:heimdallm/features/config/config_screen.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
@@ -103,6 +104,7 @@ void main() {
           'pr_reviewers': ['alice'],
           'issue_tracking': {
             'develop_labels': ['ready'],
+            'refinement_labels': ['needs-plan'],
           },
         },
       },
@@ -118,9 +120,10 @@ void main() {
     expect(org.autoPromoteRefinement, isTrue);
     expect(org.generatePRDescription, isFalse);
     expect(org.prReviewers, ['alice']);
-    expect(org.itEnabled, isNull);
+    expect(org.itEnabled, isTrue);
     expect(org.devEnabled, isTrue);
     expect(org.developLabels, ['ready']);
+    expect(org.refinementLabels, ['needs-plan']);
     expect(cfg.globalTriageOwner, 'global-owner');
     expect(cfg.globalCloneDir, '/work/global');
     expect(cfg.globalAutoPromoteTriage, isTrue);
@@ -153,12 +156,17 @@ void main() {
           'issue_tracking': {
             'enabled': false,
             'review_only_labels': <String>[],
+            'refinement_labels': <String>[],
           },
         },
       },
       'org_overrides': {
         'acme': {
-          'issue_tracking': {'enabled': false, 'develop_labels': <String>[]},
+          'issue_tracking': {
+            'enabled': false,
+            'develop_labels': <String>[],
+            'refinement_labels': <String>[],
+          },
         },
       },
     };
@@ -167,6 +175,7 @@ void main() {
     final repo = cfg.repoConfigs['acme/api']!;
     expect(repo.itEnabled, isFalse);
     expect(repo.reviewOnlyLabels, isEmpty);
+    expect(repo.refinementLabels, isEmpty);
     expect(repo.developPromptId, 'repo-impl');
     expect(repo.triageOwner, 'repo-owner');
     expect(repo.cloneDir, '/work/repo');
@@ -178,6 +187,71 @@ void main() {
     final org = cfg.orgConfigs['acme']!;
     expect(org.itEnabled, isFalse);
     expect(org.developLabels, isEmpty);
+    expect(org.refinementLabels, isEmpty);
+  });
+
+  test('AppConfig parses refinement labels at global, org, and repo scope', () {
+    final cfg = AppConfig.fromJson({
+      'repositories': <String>[],
+      'non_monitored': ['acme/api'],
+      'server_port': 1,
+      'poll_interval': '60s',
+      'retention_days': 30,
+      'ai_primary': 'claude',
+      'ai_fallback': '',
+      'review_mode': 'single',
+      'issue_tracking': {
+        'enabled': true,
+        'review_only_labels': ['global-triage'],
+        'refinement_labels': ['global-refine'],
+        'develop_labels': ['global-dev'],
+      },
+      'org_overrides': {
+        'acme': {
+          'issue_tracking': {
+            'refinement_labels': ['org-refine'],
+          },
+        },
+      },
+      'repo_overrides': {
+        'acme/api': {
+          'issue_tracking': {
+            'refinement_labels': ['repo-refine'],
+          },
+        },
+      },
+    });
+
+    expect(cfg.issueTracking.refinementLabels, ['global-refine']);
+    expect(cfg.issueTracking.toJson()['refinement_labels'], ['global-refine']);
+    expect(cfg.orgConfigs['acme']!.refinementLabels, ['org-refine']);
+    expect(cfg.orgConfigs['acme']!.itEnabled, isTrue);
+    expect(cfg.repoConfigs['acme/api']!.refinementLabels, ['repo-refine']);
+    expect(cfg.repoConfigs['acme/api']!.itEnabled, isTrue);
+    expect(cfg.repoConfigs['acme/api']!.isMonitored, isTrue);
+  });
+
+  test('FirstRunSetup serializes refinement labels in all scopes', () {
+    final toml = FirstRunSetup.buildTomlForTesting(
+      const AppConfig(
+        issueTracking: IssueTrackingConfig(
+          enabled: true,
+          refinementLabels: ['global-refine'],
+        ),
+        orgConfigs: {
+          'acme': OrgConfig(refinementLabels: ['org-refine']),
+        },
+        repoConfigs: {
+          'acme/api': RepoConfig(refinementLabels: ['repo-refine']),
+        },
+      ),
+    );
+
+    expect(toml, contains('refinement_labels = ["global-refine"]'));
+    expect(toml, contains('[ai.orgs."acme".issue_tracking]'));
+    expect(toml, contains('refinement_labels = ["org-refine"]'));
+    expect(toml, contains('[ai.repos."acme/api".issue_tracking]'));
+    expect(toml, contains('refinement_labels = ["repo-refine"]'));
   });
 
   test('OrgConfig derives enabled switches from label overrides', () {
@@ -194,6 +268,7 @@ void main() {
         'acme': {
           'issue_tracking': {
             'review_only_labels': ['needs-triage'],
+            'refinement_labels': ['needs-plan'],
             'develop_labels': ['ready'],
           },
         },
@@ -203,6 +278,40 @@ void main() {
     final org = cfg.orgConfigs['acme']!;
     expect(org.itEnabled, isTrue);
     expect(org.devEnabled, isTrue);
+    expect(org.refinementLabels, ['needs-plan']);
+  });
+
+  testWidgets('ConfigScreen exposes global refinement labels', (tester) async {
+    final mockApi = MockApiClient();
+    when(() => mockApi.fetchConfig()).thenAnswer(
+      (_) async => const AppConfig(
+        issueTracking: IssueTrackingConfig(enabled: true),
+      ).toJson(),
+    );
+    when(() => mockApi.updateConfig(any())).thenAnswer((_) async {});
+    when(() => mockApi.checkHealth()).thenAnswer((_) async => false);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          apiClientProvider.overrideWithValue(mockApi),
+          configNotifierProvider.overrideWith(ConfigNotifier.new),
+          platformServicesProvider.overrideWithValue(FakePlatformServices()),
+        ],
+        child: MaterialApp.router(
+          routerConfig: GoRouter(
+            routes: [
+              GoRoute(path: '/', builder: (_, __) => const ConfigScreen()),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Review-only labels'), findsOneWidget);
+    expect(find.text('Refinement labels'), findsOneWidget);
+    expect(find.text('Develop labels'), findsNothing);
   });
 
   test('AppConfig exposes known autocomplete options', () {

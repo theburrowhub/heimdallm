@@ -5,38 +5,65 @@ import 'package:heimdallm/features/repositories/widgets/led_source.dart';
 
 void main() {
   const appConfig = AppConfig(
-    serverPort: 1, pollInterval: '60s', retentionDays: 30,
-    aiPrimary: 'claude', aiFallback: '', reviewMode: 'single',
+    serverPort: 1,
+    pollInterval: '60s',
+    retentionDays: 30,
+    aiPrimary: 'claude',
+    aiFallback: '',
+    reviewMode: 'single',
     repoConfigs: {'a/b': RepoConfig(prEnabled: true)},
     issueTracking: IssueTrackingConfig(enabled: true),
   );
 
   group('featureIsOn', () {
     test('PR explicit true → on', () {
-      expect(featureIsOn(
-        feature: Feature.prReview,
-        repo: 'a/b',
-        config: const RepoConfig(prEnabled: true),
-        appConfig: appConfig,
-      ), isTrue);
+      expect(
+        featureIsOn(
+          feature: Feature.prReview,
+          repo: 'a/b',
+          config: const RepoConfig(prEnabled: true),
+          appConfig: appConfig,
+        ),
+        isTrue,
+      );
     });
 
     test('Develop off when no local dir and no explicit devEnabled', () {
-      expect(featureIsOn(
-        feature: Feature.develop,
-        repo: 'a/b',
-        config: const RepoConfig(),  // no localDir, no devEnabled
-        appConfig: appConfig,
-      ), isFalse);
+      expect(
+        featureIsOn(
+          feature: Feature.develop,
+          repo: 'a/b',
+          config: const RepoConfig(), // no localDir, no devEnabled
+          appConfig: appConfig,
+        ),
+        isFalse,
+      );
     });
 
     test('Develop active with both devEnabled + local dir', () {
-      expect(featureIsOn(
-        feature: Feature.develop,
-        repo: 'a/b',
-        config: const RepoConfig(devEnabled: true, localDir: '/tmp/x'),
-        appConfig: appConfig,
-      ), isTrue);
+      expect(
+        featureIsOn(
+          feature: Feature.develop,
+          repo: 'a/b',
+          config: const RepoConfig(devEnabled: true, localDir: '/tmp/x'),
+          appConfig: appConfig,
+        ),
+        isTrue,
+      );
+    });
+
+    test('Issue tracking active with refinement labels only', () {
+      expect(
+        featureIsOn(
+          feature: Feature.issueTracking,
+          repo: 'a/b',
+          config: const RepoConfig(refinementLabels: ['needs-plan']),
+          appConfig: appConfig.copyWith(
+            issueTracking: const IssueTrackingConfig(enabled: false),
+          ),
+        ),
+        isTrue,
+      );
     });
   });
 
