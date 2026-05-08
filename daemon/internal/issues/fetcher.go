@@ -280,6 +280,18 @@ func (f *Fetcher) alreadyProcessed(issue *github.Issue) (bool, string, error) {
 		return true, "already implemented (PR created)", nil
 	}
 
+	// A state-machine label promotion is real new work even when the label/comment
+	// update was produced by the bot inside RecomputeGrace. Without this adjacent
+	// stage check, an auto-promoted triage result can get stuck in refinement
+	// until a human makes another GitHub update. Non-adjacent mode differences
+	// still use the normal grace window, which preserves the develop-without-
+	// WorkDir downgrade dedup path.
+	if latestStage, latestOK := StageFromAction(latest.ActionTaken); latestOK {
+		if currentStage, currentOK := StageFromMode(issue.Mode); currentOK && isForwardStageAdvance(latestStage, currentStage) {
+			return false, "", nil
+		}
+	}
+
 	// Bot-comment dedup: if the most recent comment is from the bot AND the
 	// issue's current mode matches what was already done (ActionTaken), the
 	// updated_at bump was self-triggered — skip. When the mode changed
@@ -380,4 +392,9 @@ func (f *Fetcher) auditManualStageChange(ctx context.Context, issue *github.Issu
 		SuppressAudit:  alreadyAudited,
 		Broker:         f.stageBroker,
 	})
+}
+
+func isForwardStageAdvance(from, to IssueStage) bool {
+	return (from == IssueStageTriage && to == IssueStageRefinement) ||
+		(from == IssueStageRefinement && to == IssueStageDevelopment)
 }

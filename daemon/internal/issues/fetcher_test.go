@@ -689,6 +689,65 @@ func TestFetcher_ModeChangeBypassesBotCommentCheck(t *testing.T) {
 	}
 }
 
+func TestFetcher_StageChangeBypassesGraceWindowToRunRefinement(t *testing.T) {
+	reviewedAt := time.Now().Add(-2 * time.Minute)
+	commentedAt := reviewedAt.Add(10 * time.Second)
+	issue := fixture(1, commentedAt.Add(5*time.Second))
+	issue.Mode = config.IssueModeRefinement
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {
+			row: &store.Issue{ID: 10, GithubID: issue.ID},
+			review: &store.IssueReview{
+				IssueID:     10,
+				CreatedAt:   reviewedAt,
+				CommentedAt: commentedAt,
+				ActionTaken: string(config.IssueModeReviewOnly),
+			},
+		},
+	}}
+	pub := &fakeIssuePublisher{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, nil, dedup, &fakePipeline{})
+	f.SetPublisher(pub)
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", stagePipelineCfg(), "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 1 || len(pub.refinement) != 1 || pub.refinement[0] != 1 {
+		t.Fatalf("stage change should run refinement despite grace window, processed=%d pub=%v", processed, pub.refinement)
+	}
+}
+
+func TestFetcher_StageChangeBypassesGraceWindowToRunDevelop(t *testing.T) {
+	reviewedAt := time.Now().Add(-2 * time.Minute)
+	commentedAt := reviewedAt.Add(10 * time.Second)
+	issue := fixture(2, commentedAt.Add(5*time.Second))
+	issue.ID = int64(2002)
+	issue.Mode = config.IssueModeDevelop
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {
+			row: &store.Issue{ID: 20, GithubID: issue.ID},
+			review: &store.IssueReview{
+				IssueID:     20,
+				CreatedAt:   reviewedAt,
+				CommentedAt: commentedAt,
+				ActionTaken: string(config.IssueModeRefinement),
+			},
+		},
+	}}
+	pub := &fakeIssuePublisher{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, nil, dedup, &fakePipeline{})
+	f.SetPublisher(pub)
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", stagePipelineCfg(), "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 1 || len(pub.implement) != 1 || pub.implement[0] != 2 {
+		t.Fatalf("stage change should run develop despite grace window, processed=%d pub=%v", processed, pub.implement)
+	}
+}
+
 func TestFetcher_ManualStageLabelChangeAuditsAndDispatchesNewStage(t *testing.T) {
 	now := time.Now()
 	issue := &github.Issue{
