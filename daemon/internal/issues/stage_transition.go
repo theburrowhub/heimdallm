@@ -281,6 +281,25 @@ func hasRecentStagePromotionComment(comments []github.Comment, to IssueStage, no
 	return false
 }
 
+func hasStagePromotionCommentSince(comments []github.Comment, from, to IssueStage, since time.Time) bool {
+	if since.IsZero() {
+		return false
+	}
+	fromLine := fmt.Sprintf("- From: `%s`", from)
+	toLine := fmt.Sprintf("- To: `%s`", to)
+	for _, c := range comments {
+		if c.CreatedAt.IsZero() || c.CreatedAt.Before(since) {
+			continue
+		}
+		if strings.Contains(c.Body, stagePromotionHeading) &&
+			strings.Contains(c.Body, fromLine) &&
+			strings.Contains(c.Body, toLine) {
+			return true
+		}
+	}
+	return false
+}
+
 func publishStagePromotionEvent(broker Publisher, issue *github.Issue, storeIssueID int64, from, to IssueStage, trigger StagePromotionTrigger, ts time.Time, commented bool) {
 	payload := map[string]any{
 		"repo":            issue.Repo,

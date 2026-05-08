@@ -722,6 +722,65 @@ func TestFetcher_ManualStageLabelChangeAuditsAndDispatchesNewStage(t *testing.T)
 	}
 }
 
+func TestFetcher_ManualStageLabelChangeSkipsAlreadyAuditedTransition(t *testing.T) {
+	now := time.Now()
+	issue := &github.Issue{
+		ID:        int64(1003),
+		Number:    3,
+		Repo:      "org/repo",
+		Title:     "Needs plan",
+		UpdatedAt: now,
+		Mode:      config.IssueModeRefinement,
+	}
+	latestReviewAt := now.Add(-5 * time.Minute)
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {
+			row: &store.Issue{ID: 12, GithubID: issue.ID},
+			review: &store.IssueReview{
+				IssueID:     12,
+				CommentedAt: latestReviewAt,
+				ActionTaken: string(config.IssueModeReviewOnly),
+			},
+		},
+	}}
+	mf := &fakeMarkerFetcher{commentsByKey: map[string][]github.Comment{
+		"org/repo#3": {
+			{
+				Author:    "heimdallm-bot",
+				CreatedAt: latestReviewAt.Add(time.Minute),
+				Body: issues.StagePromotionAuditComment(
+					issues.IssueStageTriage,
+					issues.IssueStageRefinement,
+					issues.StagePromotionAuto,
+					latestReviewAt.Add(time.Minute),
+				),
+			},
+		},
+	}}
+	pub := &fakeIssuePublisher{}
+	stage := &fakeStageTransitionClient{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, mf, dedup, &fakePipeline{})
+	f.SetPublisher(pub)
+	f.SetStageTransitioner(stage, nil)
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", config.IssueTrackingConfig{
+		Enabled:          true,
+		ReviewOnlyLabels: []string{"triage"},
+		RefinementLabels: []string{"refine"},
+		DevelopLabels:    []string{"develop"},
+	}, "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 1 || len(pub.refinement) != 1 || pub.refinement[0] != 3 {
+		t.Fatalf("expected refinement dispatch, processed=%d pub=%v", processed, pub.refinement)
+	}
+	if len(stage.added) != 0 || len(stage.removed) != 0 || len(stage.comments) != 0 {
+		t.Fatalf("already-audited transition should not mutate labels or comment, added=%v removed=%v comments=%v",
+			stage.added, stage.removed, stage.comments)
+	}
+}
+
 func TestFetcher_PublishesRefinementMode(t *testing.T) {
 	now := time.Now()
 	issue := fixture(9, now)

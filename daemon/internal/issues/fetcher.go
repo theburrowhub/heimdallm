@@ -350,6 +350,15 @@ func (f *Fetcher) auditManualStageChange(ctx context.Context, issue *github.Issu
 			comments = got
 		}
 	}
+	ref := latest.CommentedAt
+	if ref.IsZero() {
+		ref = latest.CreatedAt
+	}
+	if hasStagePromotionCommentSince(comments, from, to, ref) {
+		slog.Debug("issues fetcher: stage transition already audited since latest review",
+			"repo", issue.Repo, "number", issue.Number, "from", from, "to", to)
+		return nil
+	}
 
 	return TransitionIssueStage(ctx, f.stageClient, StageTransition{
 		Issue:          issue,
