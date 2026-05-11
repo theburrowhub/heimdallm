@@ -58,7 +58,7 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
   }
 
   Future<void> _autoSave() async {
-    final current = ref.read(configNotifierProvider).valueOrNull;
+    final current = ref.read(configNotifierProvider).value;
     if (current == null) return;
     await _save(current);
   }
@@ -93,7 +93,7 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
   @override
   Widget build(BuildContext context) {
     final configAsync = ref.watch(configNotifierProvider);
-    final prompts = ref.watch(agentsProvider).valueOrNull ?? [];
+    final prompts = ref.watch(agentsProvider).value ?? [];
 
     return configAsync.when(
       loading: () => const Center(child: CircularProgressIndicator()),

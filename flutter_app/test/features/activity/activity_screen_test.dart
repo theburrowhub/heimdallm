@@ -30,7 +30,7 @@ ProviderScope _scope({required AsyncValue<ActivityPage> value}) {
     if (value is AsyncError) {
       throw (value as AsyncError).error;
     }
-    return (value.valueOrNull)!;
+    return (value.value)!;
   }
 
   return ProviderScope(

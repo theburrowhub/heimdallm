@@ -25,11 +25,11 @@ class ActivityScreen extends ConsumerWidget {
     final optionsAsync = ref.watch(activityOptionsProvider);
 
     final optionEntries =
-        optionsAsync.valueOrNull?.entries ??
-        async.valueOrNull?.entries ??
+        optionsAsync.value?.entries ??
+        async.value?.entries ??
         const <ActivityEntry>[];
     final usingFallbackOptions =
-        optionsAsync.valueOrNull == null && async.valueOrNull != null;
+        optionsAsync.value == null && async.value != null;
     final orgs = _sortedDistinct(optionEntries.map((e) => e.org));
     final repos = _sortedDistinct(optionEntries.map((e) => e.repo));
     final outcomes = _sortedDistinct(optionEntries.map((e) => e.outcome));
@@ -169,7 +169,7 @@ class _DatePickerBar extends ConsumerWidget {
             label: const Text('Live'),
             selected: live,
             onSelected: (v) =>
-                ref.read(activityLiveUpdatesProvider.notifier).state = v,
+                ref.read(activityLiveUpdatesProvider.notifier).set(v),
           ),
           const SizedBox(width: 4),
           IconButton(

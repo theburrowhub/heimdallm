@@ -140,7 +140,7 @@ class _IssueDetailScreenState extends ConsumerState<IssueDetailScreen> {
       });
     });
 
-    final detailData = detailAsync.valueOrNull;
+    final detailData = detailAsync.value;
     final reviews = detailData?['reviews'] as List<TrackedIssueReview>? ?? [];
     final hasReviews = reviews.isNotEmpty;
     final issue = detailData?['issue'] as TrackedIssue?;

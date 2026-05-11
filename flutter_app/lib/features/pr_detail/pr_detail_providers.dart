@@ -7,7 +7,7 @@ final prDetailProvider = FutureProvider.family<Map<String, dynamic>, int>((ref, 
   return api.fetchPR(prId);
 });
 
-class ReviewTriggerNotifier extends AutoDisposeAsyncNotifier<void> {
+class ReviewTriggerNotifier extends AsyncNotifier<void> {
   @override
   Future<void> build() async {}
 

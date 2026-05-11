@@ -56,7 +56,7 @@ Future<void> startDaemon(BuildContext context, WidgetRef ref) async {
     return;
   }
 
-  ref.read(daemonStartingProvider.notifier).state = true;
+  ref.read(daemonStartingProvider.notifier).set(true);
   try {
     await platform.spawnDaemon(binaryPath);
     final api = ref.read(apiClientProvider);
@@ -80,7 +80,7 @@ Future<void> startDaemon(BuildContext context, WidgetRef ref) async {
   } catch (e) {
     if (context.mounted) showToast(context, 'Error: $e', isError: true);
   } finally {
-    ref.read(daemonStartingProvider.notifier).state = false;
+    ref.read(daemonStartingProvider.notifier).set(false);
   }
 }
 
@@ -115,7 +115,7 @@ Future<void> refreshWhenDaemonStops(
 /// Restart banner after a Listen URL change.
 Future<void> restartDaemon(BuildContext context, WidgetRef ref) async {
   final api = ref.read(apiClientProvider);
-  ref.read(daemonStartingProvider.notifier).state = true;
+  ref.read(daemonStartingProvider.notifier).set(true);
   try {
     await api.shutdownDaemon();
     if (!context.mounted) return;
@@ -142,7 +142,7 @@ Future<void> restartDaemon(BuildContext context, WidgetRef ref) async {
   } catch (e) {
     if (context.mounted) showToast(context, 'Error: $e', isError: true);
   } finally {
-    ref.read(daemonStartingProvider.notifier).state = false;
+    ref.read(daemonStartingProvider.notifier).set(false);
   }
 }
 

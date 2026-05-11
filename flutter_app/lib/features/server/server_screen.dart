@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../shared/widgets/keep_alive_tab.dart';
 import '../config/config_providers.dart';
 import '../logs/logs_screen.dart' show LogsView;
 import 'widgets/events_tab.dart';
@@ -38,7 +39,7 @@ class _ServerScreenState extends ConsumerState<ServerScreen>
 
   @override
   Widget build(BuildContext context) {
-    final daemonRunning = ref.watch(daemonHealthProvider).valueOrNull ?? false;
+    final daemonRunning = ref.watch(daemonHealthProvider).value ?? false;
     return Scaffold(
       appBar: AppBar(
         title: const Text('Server'),
@@ -58,13 +59,17 @@ class _ServerScreenState extends ConsumerState<ServerScreen>
       body: TabBarView(
         controller: _controller,
         children: [
-          const StatusTab(),
-          daemonRunning
-              ? const EventsTab()
-              : const _DaemonStoppedPlaceholder(label: 'live events'),
-          daemonRunning
-              ? const LogsView()
-              : const _DaemonStoppedPlaceholder(label: 'logs'),
+          const KeepAliveTab(child: StatusTab()),
+          KeepAliveTab(
+            child: daemonRunning
+                ? const EventsTab()
+                : const _DaemonStoppedPlaceholder(label: 'live events'),
+          ),
+          KeepAliveTab(
+            child: daemonRunning
+                ? const LogsView()
+                : const _DaemonStoppedPlaceholder(label: 'logs'),
+          ),
         ],
       ),
     );

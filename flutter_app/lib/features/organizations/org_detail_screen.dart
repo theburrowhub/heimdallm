@@ -198,7 +198,7 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
         data: (appConfig) {
           _initFrom(appConfig);
           final prompts =
-              ref.watch(agentsProvider).valueOrNull ?? <ReviewPrompt>[];
+              ref.watch(agentsProvider).value ?? <ReviewPrompt>[];
           final promptOptions = prompts.map((p) => p.id).toList();
 
           return SingleChildScrollView(

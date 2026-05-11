@@ -3,13 +3,15 @@ import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/models/activity.dart';
+import '../../core/state/local_state_notifier.dart';
 import '../dashboard/dashboard_providers.dart'
     show apiClientProvider, sseStreamProvider;
 
 /// Notifier managing the current query (date, range, filter sets).
 /// Widgets read & mutate this; the entries provider watches it.
-class ActivityQueryNotifier extends StateNotifier<ActivityQuery> {
-  ActivityQueryNotifier() : super(_today());
+class ActivityQueryNotifier extends Notifier<ActivityQuery> {
+  @override
+  ActivityQuery build() => _today();
 
   static ActivityQuery _today() {
     final now = DateTime.now();
@@ -88,11 +90,14 @@ class ActivityQueryNotifier extends StateNotifier<ActivityQuery> {
 
 /// Current query state.
 final activityQueryProvider =
-    StateNotifierProvider<ActivityQueryNotifier, ActivityQuery>(
-      (ref) => ActivityQueryNotifier(),
+    NotifierProvider<ActivityQueryNotifier, ActivityQuery>(
+      ActivityQueryNotifier.new,
     );
 
-final activityLiveUpdatesProvider = StateProvider<bool>((ref) => false);
+final activityLiveUpdatesProvider =
+    NotifierProvider<LocalStateNotifier<bool>, bool>(
+      () => LocalStateNotifier<bool>(false),
+    );
 
 const _activityLiveRefreshDelay = Duration(milliseconds: 750);
 
@@ -109,26 +114,42 @@ const _activityLogEventTypes = {
 
 /// Installs the live-mode SSE listener for ActivityScreen.
 ///
-/// This provider is intentionally side-effectful: the screen must watch it so
+/// This notifier is intentionally side-effectful: the screen must watch it so
 /// live mode refreshes the persisted activity query when activity-log events
 /// arrive. Events that are not recorded in `activity_log` are ignored.
-final activityLiveRefreshProvider = Provider<void>((ref) {
-  if (!ref.watch(activityLiveUpdatesProvider)) return;
+///
+/// Implemented as a Notifier (not `Provider<void>`) so it integrates cleanly with
+/// Riverpod 3's lifecycle: when the screen watches it, the notifier stays
+/// alive, and the nested `ref.listen(sseStreamProvider, ...)` stays subscribed.
+/// The provider is declared without `.autoDispose`, so it relies on v3's
+/// default keep-alive semantics — adding `.autoDispose` here would re-introduce
+/// the "paused while between watchers" behaviour this notifier was created to
+/// avoid.
+class ActivityLiveRefreshNotifier extends Notifier<void> {
+  @override
+  void build() {
+    if (!ref.watch(activityLiveUpdatesProvider)) return;
 
-  Timer? debounce;
-  ref.onDispose(() => debounce?.cancel());
+    Timer? debounce;
+    ref.onDispose(() => debounce?.cancel());
 
-  ref.listen(sseStreamProvider, (previous, next) {
-    next.whenData((event) {
-      if (!_activityLogEventTypes.contains(event.type)) return;
-      debounce?.cancel();
-      debounce = Timer(_activityLiveRefreshDelay, () {
-        ref.invalidate(activityEntriesProvider);
-        ref.invalidate(activityOptionsProvider);
+    ref.listen(sseStreamProvider, (previous, next) {
+      next.whenData((event) {
+        if (!_activityLogEventTypes.contains(event.type)) return;
+        debounce?.cancel();
+        debounce = Timer(_activityLiveRefreshDelay, () {
+          ref.invalidate(activityEntriesProvider);
+          ref.invalidate(activityOptionsProvider);
+        });
       });
     });
-  });
-});
+  }
+}
+
+final activityLiveRefreshProvider =
+    NotifierProvider<ActivityLiveRefreshNotifier, void>(
+      ActivityLiveRefreshNotifier.new,
+    );
 
 /// Entries for the current query. Watches the query so filter changes
 /// trigger a refetch automatically.
