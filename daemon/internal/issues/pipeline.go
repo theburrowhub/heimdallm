@@ -792,6 +792,14 @@ func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, is
 	if prAuthor == "" {
 		prAuthor = strings.TrimSpace(strings.TrimLeft(opts.AuthUser, "@"))
 	}
+	if prAuthor == "" {
+		// The PR row's author column is NOT NULL; the upsert will surface
+		// the constraint. Warn so the missing identity is observable in
+		// logs rather than mysteriously truncating Activity rows.
+		slog.Warn("issues pipeline: auto-created PR has no recoverable author identity",
+			"repo", issue.Repo, "pr", createdPR.Number,
+			"created_pr_author", createdPR.Author, "auth_user", opts.AuthUser)
+	}
 	prRow := &store.PR{
 		GithubID:  createdPR.ID,
 		Repo:      issue.Repo,

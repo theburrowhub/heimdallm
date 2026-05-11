@@ -3536,15 +3536,15 @@ func autoPromoteAfterStage(
 	// Refetch the issue so the scope check sees post-pipeline assignees:
 	// triage / refinement may have reassigned it to another user ("passed
 	// the ball"), and the worker's cached copy still reflects the old
-	// owner. A refetch failure falls back to the cached copy — preferable
-	// to fail-open with no assignee data when the issue has, e.g., a
-	// transient GitHub outage.
-	fresh := issue
-	if updated, err := client.GetIssue(issue.Repo, issue.Number); err != nil {
-		slog.Warn(scope+": auto-promote refetch failed, using cached issue for scope check",
+	// owner. Refetch failure is fail-closed: falling back to the cached
+	// copy would reintroduce the exact race this gate is closing (a stale
+	// in-scope snapshot during a transient outage could auto-promote past
+	// a handoff). Skip the promotion; the next pipeline event will retry.
+	fresh, err := client.GetIssue(issue.Repo, issue.Number)
+	if err != nil {
+		slog.Warn(scope+": auto-promote skipped — issue refetch failed; will retry on next pipeline event",
 			"repo", issue.Repo, "number", issue.Number, "err", err)
-	} else if updated != nil {
-		fresh = updated
+		return
 	}
 
 	if !it.MatchesAssignees(fresh.AssigneeLogins()) {
@@ -3559,18 +3559,18 @@ func autoPromoteAfterStage(
 	if err != nil {
 		if errors.Is(err, issuepipeline.ErrStageTargetLabelMissing) {
 			slog.Warn(scope+": auto-promote target label missing; leaving issue in current stage",
-				"repo", fresh.Repo, "number", fresh.Number, "from", from, "err", err)
+				"repo", issue.Repo, "number", issue.Number, "from", from, "err", err)
 			return
 		}
 		slog.Warn(scope+": auto-promote skipped",
-			"repo", fresh.Repo, "number", fresh.Number, "from", from, "err", err)
+			"repo", issue.Repo, "number", issue.Number, "from", from, "err", err)
 		return
 	}
 
-	comments, err := client.FetchIssueCommentsOnly(fresh.Repo, fresh.Number)
+	comments, err := client.FetchIssueCommentsOnly(issue.Repo, issue.Number)
 	if err != nil {
 		slog.Warn(scope+": auto-promote comment fetch failed, continuing without audit dedup context",
-			"repo", fresh.Repo, "number", fresh.Number, "err", err)
+			"repo", issue.Repo, "number", issue.Number, "err", err)
 	}
 	if err := issuepipeline.TransitionIssueStage(ctx, client, issuepipeline.StageTransition{
 		Issue:          fresh,
@@ -3584,7 +3584,7 @@ func autoPromoteAfterStage(
 		Broker:         broker,
 	}); err != nil {
 		slog.Warn(scope+": auto-promote failed",
-			"repo", fresh.Repo, "number", fresh.Number, "from", from, "to", to, "err", err)
+			"repo", issue.Repo, "number", issue.Number, "from", from, "to", to, "err", err)
 	}
 }
 

@@ -67,7 +67,7 @@ type autoPromoteFakeGH struct {
 	getIssueCalls int
 
 	addLabelsCalls    [][]string
-	removeLabelsCalls []string
+	removeLabelsCalls [][]string
 	postCommentCalls  []string
 }
 
@@ -89,7 +89,7 @@ func (f *autoPromoteFakeGH) AddLabels(repo string, number int, labels []string) 
 }
 
 func (f *autoPromoteFakeGH) RemoveLabels(repo string, number int, labels []string) error {
-	f.removeLabelsCalls = append(f.removeLabelsCalls, labels...)
+	f.removeLabelsCalls = append(f.removeLabelsCalls, labels)
 	return nil
 }
 
@@ -162,11 +162,11 @@ func TestAutoPromoteProceedsWhenAssigneeInScope(t *testing.T) {
 	}
 }
 
-func TestAutoPromoteRefetchFailureFallsBackToCachedIssue(t *testing.T) {
-	// Refetch fails (transient GitHub error). We must not silently auto-
-	// promote on an empty assignee list; the gate falls back to the cached
-	// issue, which still reflects the daemon's scope here, so the
-	// transition proceeds.
+func TestAutoPromoteSkippedWhenRefetchFails(t *testing.T) {
+	// Refetch failure is fail-closed: falling back to the cached issue
+	// would reintroduce the same race the gate is closing (a stale
+	// in-scope snapshot during a transient outage could promote past a
+	// handoff). Skip; the next pipeline event retries.
 	fake := &autoPromoteFakeGH{getIssueErr: errors.New("transient")}
 	it, aiCfg := newAutoPromoteCfg()
 
@@ -174,8 +174,27 @@ func TestAutoPromoteRefetchFailureFallsBackToCachedIssue(t *testing.T) {
 		autoPromoteIssue("userA"),
 		42, it, aiCfg, issuepipeline.IssueStageTriage, "test")
 
-	if len(fake.addLabelsCalls) == 0 {
-		t.Errorf("expected transition to proceed using stale-but-in-scope issue, got no AddLabels")
+	if len(fake.addLabelsCalls) != 0 || len(fake.removeLabelsCalls) != 0 {
+		t.Errorf("expected no label mutations on refetch failure, got add=%v remove=%v",
+			fake.addLabelsCalls, fake.removeLabelsCalls)
+	}
+}
+
+func TestAutoPromoteSkippedWhenRefetchFailsEvenIfCachedOutOfScope(t *testing.T) {
+	// Regression pin for the worst case: refetch fails AND the cached
+	// copy already shows a different assignee. The skip-on-refetch-error
+	// branch fires before the scope check, so behavior is the same
+	// regardless of what the cached assignee was — no label mutation.
+	fake := &autoPromoteFakeGH{getIssueErr: errors.New("transient")}
+	it, aiCfg := newAutoPromoteCfg()
+
+	autoPromoteAfterStage(context.Background(), fake, nil,
+		autoPromoteIssue("userB"),
+		42, it, aiCfg, issuepipeline.IssueStageTriage, "test")
+
+	if len(fake.addLabelsCalls) != 0 || len(fake.removeLabelsCalls) != 0 {
+		t.Errorf("expected no label mutations, got add=%v remove=%v",
+			fake.addLabelsCalls, fake.removeLabelsCalls)
 	}
 }
 
