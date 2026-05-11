@@ -665,14 +665,43 @@ class _PRTileState extends ConsumerState<_PRTile> {
   }
 }
 
-class _IssueActivityTile extends StatelessWidget {
+class _IssueActivityTile extends ConsumerStatefulWidget {
   final TrackedIssue issue;
   const _IssueActivityTile({required this.issue});
 
-  String get _type => _itemType(_IssueItem(issue));
+  @override
+  ConsumerState<_IssueActivityTile> createState() =>
+      _IssueActivityTileState();
+}
+
+class _IssueActivityTileState extends ConsumerState<_IssueActivityTile> {
+  String get _type => _itemType(_IssueItem(widget.issue));
+
+  Future<void> _dismiss() async {
+    final api = ref.read(apiClientProvider);
+    try {
+      await api.dismissIssue(widget.issue.id);
+      ref.invalidate(issuesProvider);
+      if (mounted) {
+        showToast(
+          context,
+          'Issue #${widget.issue.number} dismissed',
+          duration: const Duration(seconds: 5),
+          actionLabel: 'Undo',
+          onAction: () async {
+            await api.undismissIssue(widget.issue.id);
+            ref.invalidate(issuesProvider);
+          },
+        );
+      }
+    } catch (e) {
+      if (mounted) showToast(context, 'Error: $e', isError: true);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    final issue = widget.issue;
     final reviewed = issue.latestReview != null;
     final severity = issue.latestReview?.severity ?? '';
 
@@ -727,27 +756,40 @@ class _IssueActivityTile extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: 12),
-                if (reviewed)
-                  SeverityBadge(severity: severity)
-                else
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 3,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Colors.grey.shade700,
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                    child: const Text(
-                      'PENDING',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
+                // Trailing: severity/PENDING badge + dismiss — mirrors _PRTile.
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (reviewed)
+                      SeverityBadge(severity: severity)
+                    else
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 3,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.grey.shade700,
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: const Text(
+                          'PENDING',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
                       ),
+                    IconButton(
+                      icon: const Icon(Icons.close, size: 14),
+                      tooltip: 'Dismiss issue',
+                      color: Colors.grey.shade600,
+                      visualDensity: VisualDensity.compact,
+                      onPressed: _dismiss,
                     ),
-                  ),
+                  ],
+                ),
               ],
             ),
           ),
