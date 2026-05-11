@@ -133,7 +133,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
       ),
       body: configAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
-        error: (e, __) => Center(
+        error: (e, _) => Center(
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [

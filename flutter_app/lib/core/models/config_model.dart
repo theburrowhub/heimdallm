@@ -1,5 +1,5 @@
 /// Per-agent CLI execution settings.
-/// Stored under ai.agents.<name> in config.toml.
+/// Stored under `ai.agents.<name>` in config.toml.
 class CLIAgentConfig {
   final String model; // --model value ('' = use CLI default)
   final int maxTurns; // claude: --max-turns (0 = not set)

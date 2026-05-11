@@ -80,7 +80,7 @@ Future<void> _pumpOfflineDashboard(
       child: MaterialApp.router(
         routerConfig: GoRouter(
           routes: [
-            GoRoute(path: '/', builder: (_, __) => const DashboardScreen()),
+            GoRoute(path: '/', builder: (_, _) => const DashboardScreen()),
           ],
         ),
       ),
@@ -167,7 +167,7 @@ void main() {
         child: MaterialApp.router(
           routerConfig: GoRouter(
             routes: [
-              GoRoute(path: '/', builder: (_, __) => const DashboardScreen()),
+              GoRoute(path: '/', builder: (_, _) => const DashboardScreen()),
             ],
           ),
         ),
@@ -192,7 +192,7 @@ void main() {
         child: MaterialApp.router(
           routerConfig: GoRouter(
             routes: [
-              GoRoute(path: '/', builder: (_, __) => const DashboardScreen()),
+              GoRoute(path: '/', builder: (_, _) => const DashboardScreen()),
             ],
           ),
         ),
