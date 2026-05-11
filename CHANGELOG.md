@@ -9,6 +9,13 @@
 * **issues:** issue classification now follows the state-machine order `skip > blocked > review_only > refinement > develop > default_action`. If a repo intentionally double-labels issues with triage/review and develop labels, the earlier stage now wins so Heimdallm does not skip triage or refinement during promotion.
 * **issues:** `auto_promote_triage` defaults on only when `refinement_labels` is configured. Repos without a refinement target keep their previous review-only behavior; set `auto_promote_triage = false` explicitly to keep refinement manual even when refinement labels exist.
 
+## [0.6.14](https://github.com/theburrowhub/heimdallm/compare/v0.6.13...v0.6.14) (2026-05-11)
+
+
+### Bug Fixes
+
+* **notifications:** migrate from local_notifier to flutter_local_notifications ([#448](https://github.com/theburrowhub/heimdallm/issues/448)) ([0c78da1](https://github.com/theburrowhub/heimdallm/commit/0c78da11c0e6082c141116c4e3158c369bf97f44))
+
 ## [0.6.13](https://github.com/theburrowhub/heimdallm/compare/v0.6.12...v0.6.13) (2026-05-11)
 
 
