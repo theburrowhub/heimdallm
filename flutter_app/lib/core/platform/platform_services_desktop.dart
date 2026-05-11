@@ -2,7 +2,7 @@ import 'dart:io';
 import 'dart:ui' show VoidCallback;
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter/painting.dart' show Size;
-import 'package:local_notifier/local_notifier.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
 import '../api/api_client.dart';
@@ -17,9 +17,9 @@ import 'platform_services.dart';
 
 /// Desktop implementation of [PlatformServices].
 ///
-/// Wraps dart:io, tray_manager, window_manager, local_notifier, and the
-/// existing FirstRunSetup / DaemonLifecycle helpers so that shared code
-/// never has to import them directly.
+/// Wraps dart:io, tray_manager, window_manager, flutter_local_notifications,
+/// and the existing FirstRunSetup / DaemonLifecycle helpers so that shared
+/// code never has to import them directly.
 class DesktopPlatformServices with WindowListener implements PlatformServices {
   DesktopPlatformServices({
     int apiPort = 7842,
@@ -141,9 +141,39 @@ class DesktopPlatformServices with WindowListener implements PlatformServices {
     TrayMenu.instance.rebindNavigation(handler);
   }
 
+  // Notification plumbing. flutter_local_notifications wires onClick through
+  // a single global callback (per payload) instead of per-instance handlers,
+  // so we keep a small id → callback map here and use the id as payload.
+  final FlutterLocalNotificationsPlugin _notifier =
+      FlutterLocalNotificationsPlugin();
+  final Map<int, VoidCallback> _notifierHandlers = {};
+  int _nextNotifierId = 0;
+
   @override
   Future<void> setupNotifier({required String appName}) async {
-    await localNotifier.setup(appName: appName);
+    // appName is unused — the bundle's CFBundleName/Info.plist drives the
+    // notification source label on every platform. Kept in the signature so
+    // the abstract API stays platform-neutral.
+    await _notifier.initialize(
+      settings: const InitializationSettings(
+        macOS: DarwinInitializationSettings(
+          // Triggers UNUserNotificationCenter.requestAuthorization on first
+          // run — the modern Notification Center prompt, replacing the
+          // deprecated NSUserNotification path that silently failed on
+          // recent macOS (see issue #438).
+          requestAlertPermission: true,
+          requestSoundPermission: true,
+          requestBadgePermission: true,
+        ),
+        linux: LinuxInitializationSettings(defaultActionName: 'Open'),
+      ),
+      onDidReceiveNotificationResponse: (response) {
+        final id = int.tryParse(response.payload ?? '');
+        if (id == null) return;
+        final handler = _notifierHandlers.remove(id);
+        handler?.call();
+      },
+    );
   }
 
   @override
@@ -152,9 +182,18 @@ class DesktopPlatformServices with WindowListener implements PlatformServices {
     required String body,
     VoidCallback? onClick,
   }) {
-    final n = LocalNotification(title: title, body: body);
-    n.onClick = () => onClick?.call();
-    n.show();
+    final id = _nextNotifierId++;
+    if (onClick != null) _notifierHandlers[id] = onClick;
+    _notifier.show(
+      id: id,
+      title: title,
+      body: body,
+      notificationDetails: const NotificationDetails(
+        macOS: DarwinNotificationDetails(),
+        linux: LinuxNotificationDetails(),
+      ),
+      payload: id.toString(),
+    );
   }
 
   @override
