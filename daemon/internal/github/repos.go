@@ -10,10 +10,15 @@ import (
 )
 
 // CreatedPR holds the essential fields returned by GitHub when a PR is created.
+// Author is the `user.login` of the identity that opened the PR — the
+// authenticated bot. Callers persist it so the Activity view does not
+// mis-credit the issue reporter (#456). May be empty when the API response
+// omits `user`; callers should fall back to the daemon's cached login.
 type CreatedPR struct {
 	Number  int
 	ID      int64
 	HTMLURL string
+	Author  string
 }
 
 // GetDefaultBranch returns the `default_branch` field from the GitHub
@@ -93,6 +98,9 @@ func (c *Client) CreatePR(repo, title, body, head, base string, draft bool) (*Cr
 		Number  int    `json:"number"`
 		ID      int64  `json:"id"`
 		HTMLURL string `json:"html_url"`
+		User    struct {
+			Login string `json:"login"`
+		} `json:"user"`
 	}
 	if err := json.Unmarshal(respBody, &out); err != nil {
 		return nil, fmt.Errorf("github: decode pr response: %w", err)
@@ -100,7 +108,12 @@ func (c *Client) CreatePR(repo, title, body, head, base string, draft bool) (*Cr
 	if out.Number == 0 {
 		return nil, fmt.Errorf("github: create pr: response missing number (raw: %.200s)", respBody)
 	}
-	return &CreatedPR{Number: out.Number, ID: out.ID, HTMLURL: out.HTMLURL}, nil
+	return &CreatedPR{
+		Number:  out.Number,
+		ID:      out.ID,
+		HTMLURL: out.HTMLURL,
+		Author:  out.User.Login,
+	}, nil
 }
 
 // SetPRReviewers requests reviewers on a pull request.

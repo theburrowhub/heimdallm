@@ -153,6 +153,7 @@ type fakeGH struct {
 	createPRNumber   int
 	createPRID       int64
 	createPRHTMLURL  string
+	createPRAuthor   string
 	createPRErr      error
 
 	// PR metadata tracking
@@ -228,7 +229,7 @@ func (f *fakeGH) CreatePR(repo, title, body, head, base string, draft bool) (*gi
 	if htmlURL == "" {
 		htmlURL = fmt.Sprintf("https://github.com/%s/pull/%d", repo, num)
 	}
-	return &github.CreatedPR{Number: num, ID: id, HTMLURL: htmlURL}, nil
+	return &github.CreatedPR{Number: num, ID: id, HTMLURL: htmlURL, Author: f.createPRAuthor}, nil
 }
 
 func (f *fakeGH) GetIssue(repo string, number int) (*github.Issue, error) {
@@ -1754,6 +1755,60 @@ func TestAutoImplement_SkipsEmptyMetadata(t *testing.T) {
 	}
 	if len(gh.assigneesCalls) != 0 {
 		t.Errorf("expected 0 assignees calls, got %d", len(gh.assigneesCalls))
+	}
+}
+
+// ── Auto-created PR author recording (#456) ─────────────────────────────────
+
+func TestAutoImplement_StoresCreatedPRAuthorFromGitHubResponse(t *testing.T) {
+	// The PR row must credit the GitHub identity that opened the PR (the
+	// bot), not the issue reporter — fixes #456 bug #2.
+	s := &fakeStore{}
+	gh := &fakeGH{
+		defaultBranch:  "main",
+		createPRNumber: 77,
+		createPRAuthor: "heimdallm-bot",
+	}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("implement done")}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(s, gh, exec, git, &fakeBroker{}, nil)
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(s.prs) != 1 {
+		t.Fatalf("expected 1 PR stored, got %d", len(s.prs))
+	}
+	if s.prs[0].Author != "heimdallm-bot" {
+		t.Errorf("PR.Author = %q, want heimdallm-bot (not the issue reporter)", s.prs[0].Author)
+	}
+}
+
+func TestAutoImplement_FallsBackToAuthUserWhenCreatedPRAuthorEmpty(t *testing.T) {
+	// Defensive: when the GitHub create-PR response omits user.login, the
+	// pipeline must fall back to RunOptions.AuthUser (the daemon's cached
+	// login) so the PR row is never credited to the issue reporter.
+	s := &fakeStore{}
+	gh := &fakeGH{
+		defaultBranch:  "main",
+		createPRNumber: 78,
+		createPRAuthor: "", // simulate missing user in API response
+	}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("implement done")}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(s, gh, exec, git, &fakeBroker{}, nil)
+
+	opts := autoImplementRunOptions()
+	opts.AuthUser = "heimdallm-bot"
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), opts); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(s.prs) != 1 {
+		t.Fatalf("expected 1 PR stored, got %d", len(s.prs))
+	}
+	if s.prs[0].Author != "heimdallm-bot" {
+		t.Errorf("PR.Author = %q, want heimdallm-bot fallback", s.prs[0].Author)
 	}
 }
 

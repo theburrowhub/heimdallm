@@ -232,6 +232,11 @@ type RunOptions struct {
 	PRLabels    []string
 	PRDraft     bool
 
+	// AuthUser is the daemon's cached GitHub login. It is used as the
+	// PR author fallback when the create-PR response omits user.login so
+	// the stored row never falls back to the issue reporter (#456).
+	AuthUser string
+
 	// GeneratePRDescription enables a second LLM call after commit to
 	// produce a rich PR title and description from the implementation diff.
 	// When false (default), the pipeline uses the template strings.
@@ -783,12 +788,24 @@ func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, is
 	// Store the auto-created PR in SQLite so the Activity view shows
 	// it immediately with the correct title (fixes #117).
 	now := time.Now().UTC()
+	prAuthor := strings.TrimSpace(createdPR.Author)
+	if prAuthor == "" {
+		prAuthor = strings.TrimSpace(strings.TrimLeft(opts.AuthUser, "@"))
+	}
+	if prAuthor == "" {
+		// The PR row's author column is NOT NULL; the upsert will surface
+		// the constraint. Warn so the missing identity is observable in
+		// logs rather than mysteriously truncating Activity rows.
+		slog.Warn("issues pipeline: auto-created PR has no recoverable author identity",
+			"repo", issue.Repo, "pr", createdPR.Number,
+			"created_pr_author", createdPR.Author, "auth_user", opts.AuthUser)
+	}
 	prRow := &store.PR{
 		GithubID:  createdPR.ID,
 		Repo:      issue.Repo,
 		Number:    createdPR.Number,
 		Title:     prTitle,
-		Author:    issue.User.Login,
+		Author:    prAuthor,
 		URL:       createdPR.HTMLURL,
 		State:     "open",
 		UpdatedAt: now,
