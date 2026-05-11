@@ -176,6 +176,51 @@ func TestCreatePR_HTTPError(t *testing.T) {
 	}
 }
 
+func TestCreatePR_CapturesAuthorFromResponse(t *testing.T) {
+	// GitHub returns `user.login` on the created PR — the bot identity that
+	// opened it. Heimdallm must record that login as the PR's author so the
+	// Activity view does not mis-credit the issue reporter (issue #456).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"number":   42,
+			"id":       12345,
+			"html_url": "https://github.com/org/repo/pull/42",
+			"user":     map[string]any{"login": "heimdallm-bot"},
+		})
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	created, err := client.CreatePR("org/repo", "t", "b", "h", "m", false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if created.Author != "heimdallm-bot" {
+		t.Errorf("Author = %q, want heimdallm-bot", created.Author)
+	}
+}
+
+func TestCreatePR_AuthorEmptyWhenMissing(t *testing.T) {
+	// Defensive: if the API response omits `user` (or it is malformed),
+	// CreatedPR.Author is empty so the caller can fall back to a sensible
+	// default rather than crashing on a partial payload.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{"number": 99})
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	created, err := client.CreatePR("org/repo", "t", "b", "h", "m", false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if created.Author != "" {
+		t.Errorf("Author = %q, want empty", created.Author)
+	}
+}
+
 func TestCreatePR_MissingNumberInResponse(t *testing.T) {
 	// If the API returns 201 but no `number`, the caller cannot persist
 	// pr_created — treat as an error rather than pretending PR #0 exists.

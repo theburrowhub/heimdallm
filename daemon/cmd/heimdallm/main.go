@@ -901,6 +901,7 @@ func main() {
 			PRLabels:                aiCfg.PRLabels,
 			PRDraft:                 aiCfg.PRDraft != nil && *aiCfg.PRDraft,
 			GeneratePRDescription:   aiCfg.GeneratePRDescription != nil && *aiCfg.GeneratePRDescription,
+			AuthUser:                authUser,
 		}
 
 		rev, err := issuePipe.Run(ctx, ghIssue, opts)
@@ -1096,6 +1097,7 @@ func main() {
 			PRLabels:                 aiCfg.PRLabels,
 			PRDraft:                  aiCfg.PRDraft != nil && *aiCfg.PRDraft,
 			GeneratePRDescription:    aiCfg.GeneratePRDescription != nil && *aiCfg.GeneratePRDescription,
+			AuthUser:                 authUser,
 			RequireWorkDirForDevelop: true,
 		}
 
@@ -2828,6 +2830,7 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 			PRLabels:                    aiCfg.PRLabels,
 			PRDraft:                     aiCfg.PRDraft != nil && *aiCfg.PRDraft,
 			GeneratePRDescription:       aiCfg.GeneratePRDescription != nil && *aiCfg.GeneratePRDescription,
+			AuthUser:                    authUser,
 			RequireWorkDirForDevelop:    requireWorkDir,
 			RequireWorkDirForRefinement: requireRefinementWorkDir,
 			ReleaseRepoContext:          releaseRepoContext,
@@ -3504,9 +3507,20 @@ func defaultAutoImplementPRAssignee(configured, authUser string) string {
 	return strings.TrimSpace(strings.TrimLeft(authUser, "@"))
 }
 
+// autoPromoteGitHub is the narrow GitHub surface that autoPromoteAfterStage
+// touches: the refetch (#456 fix), the comment lookup used for audit dedup,
+// and the label / comment mutations driven by TransitionIssueStage. Defined
+// here — rather than in the github or issues package — because it is purely
+// a testability seam for this one call site; *gh.Client satisfies it.
+type autoPromoteGitHub interface {
+	issuepipeline.StageTransitionClient
+	GetIssue(repo string, number int) (*gh.Issue, error)
+	FetchIssueCommentsOnly(repo string, number int) ([]gh.Comment, error)
+}
+
 func autoPromoteAfterStage(
 	ctx context.Context,
-	client *gh.Client,
+	client autoPromoteGitHub,
 	broker issuepipeline.Publisher,
 	issue *gh.Issue,
 	storeIssueID int64,
@@ -3518,25 +3532,48 @@ func autoPromoteAfterStage(
 	if !autoPromoteStageEnabled(aiCfg, it, from) {
 		return
 	}
+
+	// Refetch the issue so the scope check sees post-pipeline assignees:
+	// triage / refinement may have reassigned it to another user ("passed
+	// the ball"), and the worker's cached copy still reflects the old
+	// owner. A refetch failure falls back to the cached copy — preferable
+	// to fail-open with no assignee data when the issue has, e.g., a
+	// transient GitHub outage.
+	fresh := issue
+	if updated, err := client.GetIssue(issue.Repo, issue.Number); err != nil {
+		slog.Warn(scope+": auto-promote refetch failed, using cached issue for scope check",
+			"repo", issue.Repo, "number", issue.Number, "err", err)
+	} else if updated != nil {
+		fresh = updated
+	}
+
+	if !it.MatchesAssignees(fresh.AssigneeLogins()) {
+		slog.Info(scope+": auto-promote skipped — issue assignee out of scope (handoff to another operator)",
+			"repo", issue.Repo, "number", issue.Number,
+			"issue_assignees", fresh.AssigneeLogins(),
+			"scope_assignees", it.Assignees)
+		return
+	}
+
 	to, err := issuepipeline.NextStage(from, it, false)
 	if err != nil {
 		if errors.Is(err, issuepipeline.ErrStageTargetLabelMissing) {
 			slog.Warn(scope+": auto-promote target label missing; leaving issue in current stage",
-				"repo", issue.Repo, "number", issue.Number, "from", from, "err", err)
+				"repo", fresh.Repo, "number", fresh.Number, "from", from, "err", err)
 			return
 		}
 		slog.Warn(scope+": auto-promote skipped",
-			"repo", issue.Repo, "number", issue.Number, "from", from, "err", err)
+			"repo", fresh.Repo, "number", fresh.Number, "from", from, "err", err)
 		return
 	}
 
-	comments, err := client.FetchIssueCommentsOnly(issue.Repo, issue.Number)
+	comments, err := client.FetchIssueCommentsOnly(fresh.Repo, fresh.Number)
 	if err != nil {
 		slog.Warn(scope+": auto-promote comment fetch failed, continuing without audit dedup context",
-			"repo", issue.Repo, "number", issue.Number, "err", err)
+			"repo", fresh.Repo, "number", fresh.Number, "err", err)
 	}
 	if err := issuepipeline.TransitionIssueStage(ctx, client, issuepipeline.StageTransition{
-		Issue:          issue,
+		Issue:          fresh,
 		StoreIssueID:   storeIssueID,
 		Config:         it,
 		From:           from,
@@ -3547,7 +3584,7 @@ func autoPromoteAfterStage(
 		Broker:         broker,
 	}); err != nil {
 		slog.Warn(scope+": auto-promote failed",
-			"repo", issue.Repo, "number", issue.Number, "from", from, "to", to, "err", err)
+			"repo", fresh.Repo, "number", fresh.Number, "from", from, "to", to, "err", err)
 	}
 }
 
