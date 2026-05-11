@@ -183,7 +183,7 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
 
     return configAsync.when(
       loading: () => const Center(child: CircularProgressIndicator()),
-      error: (_, __) => const Center(child: Text('Could not load config')),
+      error: (_, _) => const Center(child: Text('Could not load config')),
       data: (config) {
         _initFrom(config);
 

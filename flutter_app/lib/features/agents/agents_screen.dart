@@ -509,7 +509,7 @@ class _SectionHeader extends StatelessWidget {
         Text(title, style: Theme.of(context).textTheme.titleSmall
             ?.copyWith(fontWeight: FontWeight.bold)),
         const Spacer(),
-        if (trailing != null) trailing!,
+        ?trailing,
       ]),
     );
   }

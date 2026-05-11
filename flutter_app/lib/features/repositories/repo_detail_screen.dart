@@ -277,7 +277,7 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
       ),
       body: configAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
-        error: (_, __) => const Center(child: Text('Could not load config')),
+        error: (_, _) => const Center(child: Text('Could not load config')),
         data: (appConfig) {
           _initFrom(appConfig);
           final prompts =

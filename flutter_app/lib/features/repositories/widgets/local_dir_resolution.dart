@@ -18,7 +18,7 @@ class LocalDirResolution {
   /// Daemon-detected path (from `localDirsDetected` on AppConfig). Only
   /// meaningful when `configured` is null — when both exist, `effective`
   /// resolves to `configured`. When detection is the only source, the UI
-  /// paints it blue ("Auto: <name>").
+  /// paints it blue (`"Auto: <name>"`).
   final String? detected;
 
   const LocalDirResolution({this.configured, this.detected});
@@ -31,7 +31,7 @@ class LocalDirResolution {
   /// icon + text off this.
   bool get hasDir => (effective ?? '').isNotEmpty;
 
-  /// True when the UI should label the badge "Auto: <name>" in blue —
+  /// True when the UI should label the badge `"Auto: <name>"` in blue —
   /// i.e. no explicit configuration, only the bind-mount fallback kicked in.
   bool get isAutoDetected => configured == null && (detected ?? '').isNotEmpty;
 

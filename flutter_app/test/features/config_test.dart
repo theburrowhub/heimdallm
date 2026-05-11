@@ -42,7 +42,7 @@ void main() {
         child: MaterialApp.router(
           routerConfig: GoRouter(
             routes: [
-              GoRoute(path: '/', builder: (_, __) => const ConfigScreen()),
+              GoRoute(path: '/', builder: (_, _) => const ConfigScreen()),
             ],
           ),
         ),
@@ -301,7 +301,7 @@ void main() {
         child: MaterialApp.router(
           routerConfig: GoRouter(
             routes: [
-              GoRoute(path: '/', builder: (_, __) => const ConfigScreen()),
+              GoRoute(path: '/', builder: (_, _) => const ConfigScreen()),
             ],
           ),
         ),
