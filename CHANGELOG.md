@@ -9,6 +9,33 @@
 * **issues:** issue classification now follows the state-machine order `skip > blocked > review_only > refinement > develop > default_action`. If a repo intentionally double-labels issues with triage/review and develop labels, the earlier stage now wins so Heimdallm does not skip triage or refinement during promotion.
 * **issues:** `auto_promote_triage` defaults on only when `refinement_labels` is configured. Repos without a refinement target keep their previous review-only behavior; set `auto_promote_triage = false` explicitly to keep refinement manual even when refinement labels exist.
 
+## [0.6.13](https://github.com/theburrowhub/heimdallm/compare/v0.6.12...v0.6.13) (2026-05-11)
+
+
+### Features
+
+* add issue refinement stage ([#402](https://github.com/theburrowhub/heimdallm/issues/402)) ([4305ea0](https://github.com/theburrowhub/heimdallm/commit/4305ea06b917e8c67dffc30437fd8e09971e167c))
+* add lightweight issue triage heuristics ([#401](https://github.com/theburrowhub/heimdallm/issues/401)) ([23635ae](https://github.com/theburrowhub/heimdallm/commit/23635aedbce179a94d6949a7a41867c4ddb8fd17))
+* add organization config scope ([#398](https://github.com/theburrowhub/heimdallm/issues/398)) ([fd6e609](https://github.com/theburrowhub/heimdallm/commit/fd6e60987331deb8aa2c373a1eed179599ce77f2))
+* **app:** expose refinement labels config ([#409](https://github.com/theburrowhub/heimdallm/issues/409)) ([53d0b98](https://github.com/theburrowhub/heimdallm/commit/53d0b98ccbd10a99531d689584b78ae94c9a3173))
+* auto-clone repo context for agents ([302ea3f](https://github.com/theburrowhub/heimdallm/commit/302ea3f1c03c2f9b272698e88ca37202a1ccf604))
+* implement [#433](https://github.com/theburrowhub/heimdallm/issues/433) — docs: add staged issue flow smoke-test note ([#434](https://github.com/theburrowhub/heimdallm/issues/434)) ([951d755](https://github.com/theburrowhub/heimdallm/commit/951d755166a88090a8d4cc78f7c63922ec6e80ee))
+* **issues:** add issue stage promotion state machine ([#404](https://github.com/theburrowhub/heimdallm/issues/404)) ([2a124de](https://github.com/theburrowhub/heimdallm/commit/2a124de8ad3a612a874e9d737395276d7431d068))
+* **issues:** smart-promote refinement and record activity ([#421](https://github.com/theburrowhub/heimdallm/issues/421)) ([2b1a9f4](https://github.com/theburrowhub/heimdallm/commit/2b1a9f4449003b4d52b372e46f9214e6c48b621c))
+* **server:** GUI Server section ([#397](https://github.com/theburrowhub/heimdallm/issues/397), PR 1/2) ([#406](https://github.com/theburrowhub/heimdallm/issues/406)) ([6e09c83](https://github.com/theburrowhub/heimdallm/commit/6e09c83036361ddf0533921da7260b6d8a5851b0))
+* **tui:** Server tab ([#397](https://github.com/theburrowhub/heimdallm/issues/397), PR 2/2) ([#415](https://github.com/theburrowhub/heimdallm/issues/415)) ([0aff057](https://github.com/theburrowhub/heimdallm/commit/0aff05709e8c35966ad37accf835aa4e237792d8))
+
+
+### Bug Fixes
+
+* **issues:** dedupe stage promotion audits ([#412](https://github.com/theburrowhub/heimdallm/issues/412)) ([590a328](https://github.com/theburrowhub/heimdallm/commit/590a32803852da283089938184cc5d0fb0829ed4))
+* **issues:** dedupe stale stage promotion audits ([#425](https://github.com/theburrowhub/heimdallm/issues/425)) ([a0e0fe8](https://github.com/theburrowhub/heimdallm/commit/a0e0fe8c50f5c54859cb5441562f0ede41c832b1))
+* **issues:** enforce scoped auto-implementation changes ([#432](https://github.com/theburrowhub/heimdallm/issues/432)) ([2c04848](https://github.com/theburrowhub/heimdallm/commit/2c04848e12381333c141e7ecc7b3e2ed545dbb1d))
+* **issues:** process promoted stages within grace ([#417](https://github.com/theburrowhub/heimdallm/issues/417)) ([c12908d](https://github.com/theburrowhub/heimdallm/commit/c12908d14ba093399594decc84c07573e6b9a2dc))
+* **issues:** scope staged pipeline by assignee ([#429](https://github.com/theburrowhub/heimdallm/issues/429)) ([deb741a](https://github.com/theburrowhub/heimdallm/commit/deb741afe43efdca0a93f2cdcf3972feb83a9a93))
+* **issues:** scope triage breaker to triage runs ([#419](https://github.com/theburrowhub/heimdallm/issues/419)) ([0a30d14](https://github.com/theburrowhub/heimdallm/commit/0a30d14cdf2ab12b5e11730e8a46cb225e9a4df0))
+* **ui:** hide Organizations filter at repo scope ([#403](https://github.com/theburrowhub/heimdallm/issues/403)) ([#405](https://github.com/theburrowhub/heimdallm/issues/405)) ([48b07e9](https://github.com/theburrowhub/heimdallm/commit/48b07e9db3f862d000ec29dd827745f7102d2cb8))
+
 ## [0.6.12](https://github.com/theburrowhub/heimdallm/compare/v0.6.11...v0.6.12) (2026-05-01)
 
 
