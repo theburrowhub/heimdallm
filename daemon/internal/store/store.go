@@ -224,6 +224,16 @@ func Open(dsn string) (*Store, error) {
 		started_at  DATETIME NOT NULL,
 		PRIMARY KEY (issue_id, updated_at)
 	)`)
+	// Enforce single-flight per issue at the schema level (#458). The
+	// claim SQL already uses INSERT ... WHERE NOT EXISTS, but a UNIQUE
+	// index lifts the invariant from a query convention to a DB
+	// guarantee so any future raw INSERT (test helpers, ad-hoc tooling)
+	// cannot create a duplicate. The composite PK above is now narrower
+	// than this index but harmless — it still uniquely identifies a row;
+	// the UNIQUE index is the contention constraint. The CREATE silently
+	// no-ops if existing rows already violate uniqueness (e.g., a daemon
+	// running pre-fix); ClearStaleIssueTriageInFlight reclaims those.
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_triage_in_flight_issue ON issue_triage_in_flight(issue_id)")
 	return &Store{db: db}, nil
 }
 

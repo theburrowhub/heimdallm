@@ -108,7 +108,11 @@ func (f *fakeStore) ClaimIssueTriageInFlight(issueID int64, updatedAt string) (b
 	if f.claims == nil {
 		f.claims = make(map[string]struct{})
 	}
-	key := fmt.Sprintf("%d|%s", issueID, updatedAt)
+	// Single-flight per issue (#458): drop updated_at from the contention
+	// key so the fake mirrors the real store's INSERT … WHERE NOT EXISTS
+	// semantics. _ keeps the parameter alive for API symmetry.
+	_ = updatedAt
+	key := fmt.Sprintf("%d", issueID)
 	if _, ok := f.claims[key]; ok {
 		return false, nil
 	}
@@ -116,13 +120,13 @@ func (f *fakeStore) ClaimIssueTriageInFlight(issueID int64, updatedAt string) (b
 	return true, nil
 }
 
-func (f *fakeStore) ReleaseIssueTriageInFlight(issueID int64, updatedAt string) error {
+func (f *fakeStore) ReleaseIssueTriageInFlight(issueID int64, _ string) error {
 	if f.releaseErr != nil {
 		return f.releaseErr
 	}
 	f.claimsMu.Lock()
 	defer f.claimsMu.Unlock()
-	delete(f.claims, fmt.Sprintf("%d|%s", issueID, updatedAt))
+	delete(f.claims, fmt.Sprintf("%d", issueID))
 	return nil
 }
 

@@ -39,13 +39,19 @@ func (s *Store) ClaimIssueTriageInFlight(issueID int64, updatedAt string) (bool,
 	return n == 1, nil
 }
 
-// ReleaseIssueTriageInFlight removes the (issueID, updatedAt) row so the
-// pair can be re-claimed. Always call in a defer from the caller that
-// successfully claimed; no-op if the row doesn't exist.
+// ReleaseIssueTriageInFlight removes any in-flight row for the issue so a
+// future tick can claim again. Aligned with the single-flight-per-issue
+// claim semantics (#458): we drop the updated_at predicate so the release
+// never strands a row when the caller's view of updated_at diverged from
+// what the claim recorded. The updatedAt argument is accepted for API
+// symmetry and is logged at call sites but is intentionally not part of
+// the WHERE clause. Always call in a defer from the caller that
+// successfully claimed; no-op if no row exists.
 func (s *Store) ReleaseIssueTriageInFlight(issueID int64, updatedAt string) error {
+	_ = updatedAt // kept for API symmetry; release is single-flight-per-issue
 	_, err := s.db.Exec(
-		"DELETE FROM issue_triage_in_flight WHERE issue_id = ? AND updated_at = ?",
-		issueID, updatedAt,
+		"DELETE FROM issue_triage_in_flight WHERE issue_id = ?",
+		issueID,
 	)
 	if err != nil {
 		return fmt.Errorf("store: release issue triage inflight: %w", err)
