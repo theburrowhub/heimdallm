@@ -9,6 +9,13 @@
 * **issues:** issue classification now follows the state-machine order `skip > blocked > review_only > refinement > develop > default_action`. If a repo intentionally double-labels issues with triage/review and develop labels, the earlier stage now wins so Heimdallm does not skip triage or refinement during promotion.
 * **issues:** `auto_promote_triage` defaults on only when `refinement_labels` is configured. Repos without a refinement target keep their previous review-only behavior; set `auto_promote_triage = false` explicitly to keep refinement manual even when refinement labels exist.
 
+## [0.6.15](https://github.com/theburrowhub/heimdallm/compare/v0.6.14...v0.6.15) (2026-05-11)
+
+
+### Bug Fixes
+
+* **issues:** add Dismiss button to dashboard activity list tiles ([#450](https://github.com/theburrowhub/heimdallm/issues/450)) ([c11485e](https://github.com/theburrowhub/heimdallm/commit/c11485e2f1b13a2ecabca61aed969b7ed081df47))
+
 ## [0.6.14](https://github.com/theburrowhub/heimdallm/compare/v0.6.13...v0.6.14) (2026-05-11)
 
 
