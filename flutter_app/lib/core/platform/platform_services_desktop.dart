@@ -144,6 +144,12 @@ class DesktopPlatformServices with WindowListener implements PlatformServices {
   // Notification plumbing. flutter_local_notifications wires onClick through
   // a single global callback (per payload) instead of per-instance handlers,
   // so we keep a small id → callback map here and use the id as payload.
+  //
+  // The map is bounded by `_maxNotifierHandlers` with FIFO eviction (Dart's
+  // default Map preserves insertion order). Without this, notifications that
+  // are dismissed or expire without being clicked would leak their closures
+  // indefinitely in a long-running tray app.
+  static const int _maxNotifierHandlers = 128;
   final FlutterLocalNotificationsPlugin _notifier =
       FlutterLocalNotificationsPlugin();
   final Map<int, VoidCallback> _notifierHandlers = {};
@@ -182,8 +188,18 @@ class DesktopPlatformServices with WindowListener implements PlatformServices {
     required String body,
     VoidCallback? onClick,
   }) {
-    final id = _nextNotifierId++;
-    if (onClick != null) _notifierHandlers[id] = onClick;
+    // Bitmask keeps the id in 32-bit positive range; some platform notifier
+    // backends use 32-bit ids internally, so we avoid relying on Dart's
+    // 64-bit ints surviving the boundary.
+    final id = _nextNotifierId = (_nextNotifierId + 1) & 0x7FFFFFFF;
+    if (onClick != null) {
+      _notifierHandlers[id] = onClick;
+      if (_notifierHandlers.length > _maxNotifierHandlers) {
+        // Drop the oldest handler. Map preserves insertion order, so the
+        // first key is the eldest entry.
+        _notifierHandlers.remove(_notifierHandlers.keys.first);
+      }
+    }
     _notifier.show(
       id: id,
       title: title,
