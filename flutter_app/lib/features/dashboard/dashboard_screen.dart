@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/models/pr.dart';
 import '../../core/models/tracked_issue.dart';
+import '../../shared/widgets/keep_alive_tab.dart';
 import '../../shared/widgets/severity_badge.dart';
 import '../../shared/widgets/state_badge.dart';
 import '../../shared/widgets/toast.dart';
@@ -97,12 +98,12 @@ class DashboardScreen extends ConsumerWidget {
             const Expanded(
               child: TabBarView(
                 children: [
-                  _ActivityTab(),
-                  ActivityScreen(),
-                  ReposScreen(),
-                  AgentsScreen(),
-                  CLIAgentsScreen(),
-                  StatsScreen(),
+                  KeepAliveTab(child: _ActivityTab()),
+                  KeepAliveTab(child: ActivityScreen()),
+                  KeepAliveTab(child: ReposScreen()),
+                  KeepAliveTab(child: AgentsScreen()),
+                  KeepAliveTab(child: CLIAgentsScreen()),
+                  KeepAliveTab(child: StatsScreen()),
                 ],
               ),
             ),
