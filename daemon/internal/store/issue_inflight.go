@@ -5,24 +5,29 @@ import (
 	"time"
 )
 
-// ClaimIssueTriageInFlight inserts a row marking (issueID, updatedAt) as
-// currently being triaged. Returns (true, nil) on successful claim,
-// (false, nil) if another daemon (or this one, pre-restart) already
-// claimed the same snapshot. Errors surface real SQLite problems, not
-// contention.
+// ClaimIssueTriageInFlight inserts a row marking the issue as currently
+// being triaged. Returns (true, nil) on successful claim, (false, nil)
+// when any claim already exists for this issue_id — single-flight per
+// issue regardless of updated_at. Errors surface real SQLite problems.
 //
-// updatedAt is part of the composite key so a genuinely new activity on
-// the issue (new updated_at) produces a new claim, but two fetcher ticks
-// observing the same snapshot collapse. The caller is expected to pass
-// issue.UpdatedAt.UTC().Format(time.RFC3339) so the key is stable.
+// updatedAt is kept as a stored column for diagnostics (which snapshot
+// kicked off the run) but is intentionally NOT part of the contention
+// key any more. The previous (issue_id, updated_at) composite let the
+// bot's own triage comment — which bumps the issue's updated_at — slip
+// past the claim and spawn a duplicate triage on the next poller tick
+// (#458, re-emergence of the failure mode #362 fixed for a sibling
+// path). The atomic INSERT … WHERE NOT EXISTS replaces a two-step
+// "check then insert" so concurrent claims still collapse race-free.
 //
 // See theburrowhub/heimdallm#292 — this mirrors the PR-side claim
-// (#258) for the issue-triage path so concurrent dispatches within a
-// single snapshot cannot each spend a Claude run.
+// (#258) for the issue-triage path so concurrent dispatches cannot
+// each spend a Claude run.
 func (s *Store) ClaimIssueTriageInFlight(issueID int64, updatedAt string) (bool, error) {
 	res, err := s.db.Exec(
-		"INSERT OR IGNORE INTO issue_triage_in_flight (issue_id, updated_at, started_at) VALUES (?, ?, ?)",
-		issueID, updatedAt, time.Now().UTC().Format(sqliteTimeFormat),
+		`INSERT INTO issue_triage_in_flight (issue_id, updated_at, started_at)
+		 SELECT ?, ?, ?
+		 WHERE NOT EXISTS (SELECT 1 FROM issue_triage_in_flight WHERE issue_id = ?)`,
+		issueID, updatedAt, time.Now().UTC().Format(sqliteTimeFormat), issueID,
 	)
 	if err != nil {
 		return false, fmt.Errorf("store: claim issue triage inflight: %w", err)
