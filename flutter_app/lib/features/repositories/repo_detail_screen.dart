@@ -711,7 +711,7 @@ class _LocalDirFieldState extends State<_LocalDirField> {
   }
 
   Future<void> _pick() async {
-    final dir = await FilePicker.platform.getDirectoryPath(
+    final dir = await FilePicker.getDirectoryPath(
       dialogTitle: 'Select local repository directory',
       lockParentWindow: true,
     );

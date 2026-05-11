@@ -17,7 +17,7 @@ dependencies:
   window_manager: ^0.5.1
   local_notifier: ^0.1.6
   url_launcher: ^6.3.2
-  file_picker: ^8.0.0
+  file_picker: ^11.0.0
   # package:web gives us typed bindings to Notification / window for the
   # web build's platform_services_web.dart. Already pulled in transitively
   # by flutter; declare it explicitly so the analyzer is happy.
