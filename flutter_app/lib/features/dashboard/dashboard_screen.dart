@@ -28,7 +28,7 @@ class DashboardScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final cbMessage = ref.watch(circuitBreakerProvider);
-    final daemonRunning = ref.watch(daemonHealthProvider).valueOrNull ?? false;
+    final daemonRunning = ref.watch(daemonHealthProvider).value ?? false;
     final daemonStarting = ref.watch(daemonStartingProvider);
     return DefaultTabController(
       length: 6,
@@ -92,7 +92,7 @@ class DashboardScreen extends ConsumerWidget {
               CircuitBreakerBanner(
                 message: cbMessage,
                 onDismiss: () =>
-                    ref.read(circuitBreakerProvider.notifier).state = null,
+                    ref.read(circuitBreakerProvider.notifier).set(null),
               ),
             const Expanded(
               child: TabBarView(
@@ -319,8 +319,8 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
       return _errorView(context, prsAsync.error!);
     }
 
-    final prs = prsAsync.valueOrNull ?? [];
-    final issues = issuesAsync.valueOrNull ?? [];
+    final prs = prsAsync.value ?? [];
+    final issues = issuesAsync.value ?? [];
 
     // Collect all known repos for the filter bar.
     final allRepos = <String>{

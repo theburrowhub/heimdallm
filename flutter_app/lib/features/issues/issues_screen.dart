@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../core/models/tracked_issue.dart';
+import '../../core/state/local_state_notifier.dart';
 import '../../shared/widgets/severity_badge.dart';
 import '../../shared/widgets/toast.dart';
 import '../dashboard/dashboard_providers.dart';
@@ -11,7 +12,10 @@ const _actionReviewOnly = 'review_only';
 const _actionRefinement = 'refinement';
 
 /// Filter state for the issues list.
-final _repoFilterProvider = StateProvider<String?>((ref) => null);
+final _repoFilterProvider =
+    NotifierProvider<LocalStateNotifier<String?>, String?>(
+      () => LocalStateNotifier<String?>(null),
+    );
 
 class IssuesScreen extends ConsumerWidget {
   const IssuesScreen({super.key});
@@ -75,7 +79,7 @@ class IssuesScreen extends ConsumerWidget {
                       ),
                     ],
                     onChanged: (v) =>
-                        ref.read(_repoFilterProvider.notifier).state = v,
+                        ref.read(_repoFilterProvider.notifier).set(v),
                   ),
                   const Spacer(),
                   Text(

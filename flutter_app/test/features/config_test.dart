@@ -366,6 +366,10 @@ void main() {
       githubToken: 'fake-token',
     );
     final container = ProviderContainer(
+      // Riverpod 3 retries failed providers by default; saveAndStartDaemon's
+      // health check is expected to fail in this test, so disable retries to
+      // avoid pending timers after the test body returns.
+      retry: (_, _) => null,
       overrides: [platformServicesProvider.overrideWithValue(platform)],
     );
     addTearDown(container.dispose);
@@ -399,6 +403,10 @@ void main() {
         githubToken: 'fake-token',
       );
       final container = ProviderContainer(
+        // Riverpod 3 retries failed providers by default; saveAndStartDaemon's
+        // health check is expected to fail in this test, so disable retries to
+        // avoid pending timers after the test body returns.
+        retry: (_, _) => null,
         overrides: [platformServicesProvider.overrideWithValue(platform)],
       );
       addTearDown(container.dispose);

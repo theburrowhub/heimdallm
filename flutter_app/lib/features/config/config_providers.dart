@@ -33,7 +33,7 @@ class ConfigNotifier extends AsyncNotifier<AppConfig> {
   /// Optimistic: updates UI state immediately, sends PATCH in background,
   /// then reconciles with the daemon's authoritative response.
   Future<void> save(AppConfig updated) async {
-    final current = state.valueOrNull;
+    final current = state.value;
     if (current == null) return;
     final api = ref.read(apiClientProvider);
     final diff = _computeGlobalDiff(current, updated);

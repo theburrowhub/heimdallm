@@ -5,6 +5,7 @@ import '../../core/api/api_client.dart';
 import '../../core/api/sse_client.dart';
 import '../../core/models/pr.dart';
 import '../../core/platform/platform_services_provider.dart';
+import '../../core/state/local_state_notifier.dart';
 import '../../main.dart' show sendPRNotification;
 import '../issues/issues_providers.dart';
 import '../stats/stats_filters.dart';
@@ -29,10 +30,16 @@ final sseStreamProvider = StreamProvider<SseEvent>((ref) {
 /// `circuit_breaker_tripped` SSE handler and cleared by the dashboard's
 /// dismiss button — the user must acknowledge the event so cost spikes
 /// can't slip by silently (regression guard for the 2026-04-22 runaway).
-final circuitBreakerProvider = StateProvider<String?>((ref) => null);
+final circuitBreakerProvider =
+    NotifierProvider<LocalStateNotifier<String?>, String?>(
+      () => LocalStateNotifier<String?>(null),
+    );
 
 /// Tracks whether the desktop app is trying to spawn the daemon.
-final daemonStartingProvider = StateProvider<bool>((ref) => false);
+final daemonStartingProvider =
+    NotifierProvider<LocalStateNotifier<bool>, bool>(
+      () => LocalStateNotifier<bool>(false),
+    );
 
 /// Tracks PRs currently being reviewed, keyed by "repo:prNumber". Used to
 /// show spinners in the tile list and detail view.
@@ -44,24 +51,32 @@ final daemonStartingProvider = StateProvider<bool>((ref) => false);
 /// is the recovery path for missed SSE events — the broker drops events
 /// silently on subscriber back-pressure, so we can't rely on
 /// `review_completed` always arriving to clear the spinner.
-final reviewingPRsProvider = StateProvider<Map<String, int>>(
-  (ref) => const <String, int>{},
-);
+final reviewingPRsProvider =
+    NotifierProvider<LocalStateNotifier<Map<String, int>>, Map<String, int>>(
+      () => LocalStateNotifier<Map<String, int>>(const <String, int>{}),
+    );
 
 /// Increments on review_completed and on SSE reconnects (to catch up on missed events).
-final StateProvider<int> prListRefreshProvider = StateProvider<int>((ref) {
-  ref.listen<AsyncValue<SseEvent>>(sseStreamProvider, (prev, next) {
-    // When SSE (re)connects after being disconnected, refresh the PR list
-    // to catch up on any events that arrived during the disconnection window.
-    if (!(prev?.hasValue ?? false) && next.hasValue) {
-      Future.microtask(
-        () => ref.read(prListRefreshProvider.notifier).update((s) => s + 1),
-      );
-    }
-    next.whenData((event) => _handleSseEvent(ref, event));
-  });
-  return 0;
-});
+class PrListRefreshNotifier extends Notifier<int> {
+  @override
+  int build() {
+    ref.listen<AsyncValue<SseEvent>>(sseStreamProvider, (prev, next) {
+      // When SSE (re)connects after being disconnected, refresh the PR list
+      // to catch up on any events that arrived during the disconnection window.
+      if (!(prev?.hasValue ?? false) && next.hasValue) {
+        Future.microtask(() => state++);
+      }
+      next.whenData((event) => _handleSseEvent(ref, event));
+    });
+    return 0;
+  }
+
+  void bump() => state++;
+  void update(int Function(int) updater) => state = updater(state);
+}
+
+final prListRefreshProvider =
+    NotifierProvider<PrListRefreshNotifier, int>(PrListRefreshNotifier.new);
 
 void _handleSseEvent(Ref ref, SseEvent event) {
   try {
@@ -116,7 +131,7 @@ void _handleSseEvent(Ref ref, SseEvent event) {
               .update((s) => Map.of(s)..remove(key));
         } else if (prId != null) {
           // Look up by store ID from cached PR list
-          final prs = ref.read(prsProvider).valueOrNull ?? [];
+          final prs = ref.read(prsProvider).value ?? [];
           final pr = prs.where((p) => p.id == prId).firstOrNull;
           if (pr != null) {
             final k = '${pr.repo}:${pr.number}';
@@ -200,8 +215,8 @@ void _handleSseEvent(Ref ref, SseEvent event) {
         final repo = data['repo'] as String? ?? 'unknown';
         final prNumber = (data['pr_number'] as num?)?.toInt() ?? 0;
         final reason = data['reason'] as String? ?? '';
-        ref.read(circuitBreakerProvider.notifier).state =
-            '$repo #$prNumber — $reason';
+        ref.read(circuitBreakerProvider.notifier).set(
+            '$repo #$prNumber — $reason');
     }
   } catch (_) {}
 }
@@ -230,7 +245,7 @@ int _baselineReviewId(Ref ref, {required String repo, required int prNumber}) {
   // arrives before the initial /prs fetch). 0 is the same baseline used
   // for a first-review: as soon as the PR list populates with a non-zero
   // latestReview.id, reconciliation will clear the stale entry.
-  final prs = ref.read(prsProvider).valueOrNull ?? const <PR>[];
+  final prs = ref.read(prsProvider).value ?? const <PR>[];
   final pr = prs
       .where((p) => p.repo == repo && p.number == prNumber)
       .firstOrNull;
@@ -250,7 +265,7 @@ void _reconcileReviewingPRs(Ref ref, List<PR> prs) {
       if (current.isEmpty) return;
       final next = reconcileReviewing(current, prs);
       if (next.length != current.length) {
-        ref.read(reviewingPRsProvider.notifier).state = next;
+        ref.read(reviewingPRsProvider.notifier).set(next);
       }
     } catch (_) {
       // ref may be disposed if the provider was rebuilt between scheduling
@@ -300,7 +315,7 @@ final statsProvider = FutureProvider<Map<String, dynamic>>((ref) async {
 void _rebuildTray(Ref ref, List<PR> prs) {
   Future(() async {
     try {
-      final me = ref.read(meProvider).valueOrNull;
+      final me = ref.read(meProvider).value;
       // Don't build tray until we know the username — without it the
       // author filter falls back to '' and shows the user's own PRs.
       if (me == null || me.isEmpty) return;

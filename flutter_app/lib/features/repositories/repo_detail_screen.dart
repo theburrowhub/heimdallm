@@ -85,7 +85,7 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
 
       final monitoringChanged = previous.isMonitored != _config.isMonitored;
       if (monitoringChanged) {
-        final current = ref.read(configNotifierProvider).valueOrNull;
+        final current = ref.read(configNotifierProvider).value;
         if (current != null) {
           final updatedRepos = Map<String, RepoConfig>.from(
             current.repoConfigs,
@@ -281,7 +281,7 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
         data: (appConfig) {
           _initFrom(appConfig);
           final prompts =
-              ref.watch(agentsProvider).valueOrNull ?? <ReviewPrompt>[];
+              ref.watch(agentsProvider).value ?? <ReviewPrompt>[];
           final orgName = widget.repoName.contains('/')
               ? widget.repoName.split('/').first
               : widget.repoName;

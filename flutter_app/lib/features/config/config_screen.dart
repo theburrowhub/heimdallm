@@ -121,7 +121,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   @override
   Widget build(BuildContext context) {
     final configAsync = ref.watch(configNotifierProvider);
-    final daemonRunning = ref.watch(daemonHealthProvider).valueOrNull ?? false;
+    final daemonRunning = ref.watch(daemonHealthProvider).value ?? false;
 
     return Scaffold(
       appBar: AppBar(
@@ -663,7 +663,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     required String? value,
     required ValueChanged<String?> onChanged,
   }) {
-    final agents = ref.watch(agentsProvider).valueOrNull ?? [];
+    final agents = ref.watch(agentsProvider).value ?? [];
     final effective = (value != null && agents.any((a) => a.id == value))
         ? value
         : null;

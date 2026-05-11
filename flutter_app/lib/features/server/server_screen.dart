@@ -38,7 +38,7 @@ class _ServerScreenState extends ConsumerState<ServerScreen>
 
   @override
   Widget build(BuildContext context) {
-    final daemonRunning = ref.watch(daemonHealthProvider).valueOrNull ?? false;
+    final daemonRunning = ref.watch(daemonHealthProvider).value ?? false;
     return Scaffold(
       appBar: AppBar(
         title: const Text('Server'),

@@ -197,8 +197,13 @@ void main() {
         c.dispose();
       });
 
-      c.read(activityLiveUpdatesProvider.notifier).state = true;
-      c.read(activityLiveRefreshProvider);
+      c.read(activityLiveUpdatesProvider.notifier).set(true);
+      // Riverpod 3: providers without active listeners get paused and
+      // ref.invalidate no longer forces an immediate rebuild. The screen
+      // would ref.watch the refresh + entries providers; in tests we have
+      // to attach explicit listeners so the chain stays awake.
+      c.listen(activityLiveRefreshProvider, (_, _) {});
+      c.listen(activityEntriesProvider, (_, _) {});
       await c.read(activityEntriesProvider.future);
       expect(calls, 1);
 

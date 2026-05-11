@@ -1,5 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/state/local_state_notifier.dart';
+
 /// Filter state for the Stats view — org and repo multi-select.
 class StatsFilters {
   final Set<String> orgs;
@@ -17,4 +19,6 @@ class StatsFilters {
 }
 
 final statsFiltersProvider =
-    StateProvider<StatsFilters>((ref) => const StatsFilters());
+    NotifierProvider<LocalStateNotifier<StatsFilters>, StatsFilters>(
+      () => LocalStateNotifier<StatsFilters>(const StatsFilters()),
+    );

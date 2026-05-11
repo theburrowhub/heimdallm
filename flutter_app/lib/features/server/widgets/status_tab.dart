@@ -36,13 +36,13 @@ class _StatusTabState extends ConsumerState<StatusTab> {
 
   @override
   Widget build(BuildContext context) {
-    final config = ref.watch(configNotifierProvider).valueOrNull;
+    final config = ref.watch(configNotifierProvider).value;
     if (config == null) {
       return const Center(child: CircularProgressIndicator());
     }
     _initialBindAddr ??= config.bindAddr ?? '127.0.0.1';
     _initialPort ??= config.serverPort;
-    final daemonRunning = ref.watch(daemonHealthProvider).valueOrNull ?? false;
+    final daemonRunning = ref.watch(daemonHealthProvider).value ?? false;
     final daemonStarting = ref.watch(daemonStartingProvider);
 
     return SingleChildScrollView(
@@ -296,7 +296,7 @@ class _StartStopButton extends ConsumerWidget {
 class _HealthSummary extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final detail = ref.watch(serverHealthDetailProvider).valueOrNull;
+    final detail = ref.watch(serverHealthDetailProvider).value;
     if (detail == null) return const SizedBox.shrink();
     final parts = <String>[];
     if (detail.version != null && detail.version!.isNotEmpty) {

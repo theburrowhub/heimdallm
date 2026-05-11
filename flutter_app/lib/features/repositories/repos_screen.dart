@@ -157,7 +157,7 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
   }
 
   Future<void> _autoSave() async {
-    final current = ref.read(configNotifierProvider).valueOrNull;
+    final current = ref.read(configNotifierProvider).value;
     if (current == null) return;
     if (mounted) setState(() => _syncStatus = _SyncStatus.saving);
     final updated = current.copyWith(repoConfigs: Map.from(_repoConfigs));
