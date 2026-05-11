@@ -64,14 +64,19 @@ class PrListRefreshNotifier extends Notifier<int> {
       // When SSE (re)connects after being disconnected, refresh the PR list
       // to catch up on any events that arrived during the disconnection window.
       if (!(prev?.hasValue ?? false) && next.hasValue) {
-        Future.microtask(() => state++);
+        Future.microtask(() {
+          // Guard against the notifier being disposed between scheduling and
+          // running the microtask — e.g. provider rebuild on SSE reconnect.
+          // Riverpod 3 exposes `ref.mounted` for exactly this race.
+          if (!ref.mounted) return;
+          state++;
+        });
       }
       next.whenData((event) => _handleSseEvent(ref, event));
     });
     return 0;
   }
 
-  void bump() => state++;
   void update(int Function(int) updater) => state = updater(state);
 }
 

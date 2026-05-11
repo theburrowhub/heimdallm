@@ -121,6 +121,10 @@ const _activityLogEventTypes = {
 /// Implemented as a Notifier (not `Provider<void>`) so it integrates cleanly with
 /// Riverpod 3's lifecycle: when the screen watches it, the notifier stays
 /// alive, and the nested `ref.listen(sseStreamProvider, ...)` stays subscribed.
+/// The provider is declared without `.autoDispose`, so it relies on v3's
+/// default keep-alive semantics — adding `.autoDispose` here would re-introduce
+/// the "paused while between watchers" behaviour this notifier was created to
+/// avoid.
 class ActivityLiveRefreshNotifier extends Notifier<void> {
   @override
   void build() {
