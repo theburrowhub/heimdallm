@@ -497,6 +497,63 @@ func TestPurgeNilManagerIsError(t *testing.T) {
 	}
 }
 
+func TestAcquireRejectsInvalidWorktreeToken(t *testing.T) {
+	// The WorktreeToken becomes a subdirectory under `<clone>/.worktrees/`,
+	// so anything that could escape the clone root or confuse git's
+	// porcelain output must be rejected before we touch the filesystem.
+	bad := []string{
+		"..",
+		"../escape",
+		"foo/bar",
+		"foo\\bar",
+		".hidden",
+		"with space",
+		"semi;colon",
+		"a*b",
+	}
+	for _, tok := range bad {
+		t.Run(tok, func(t *testing.T) {
+			m, git, _ := newTestManager(t)
+			_, err := m.Acquire(context.Background(), Request{
+				Repo:          "org/repo",
+				Token:         "secret",
+				Mode:          ModeRead,
+				WorktreeToken: tok,
+			})
+			if err == nil {
+				t.Fatalf("Acquire with WorktreeToken=%q: want error, got nil", tok)
+			}
+			if !strings.Contains(err.Error(), "worktree token") {
+				t.Fatalf("Acquire err = %v, want 'worktree token' error", err)
+			}
+			if calls := git.snapshot(); len(calls) != 0 {
+				t.Fatalf("git ran %d calls for invalid token %q; want none", len(calls), tok)
+			}
+		})
+	}
+}
+
+func TestAcquireAcceptsValidWorktreeToken(t *testing.T) {
+	// Valid tokens cover the patterns the callsites use:
+	// stage-<n> (triage-42), <purpose>-<random> (inspect-deadbeef),
+	// dotted decorations (pr-review-1234.retry).
+	good := []string{
+		"triage-42",
+		"pr-review-1234",
+		"develop-7",
+		"inspect-deadbeef",
+		"a",
+		"a_b-c.d",
+	}
+	for _, tok := range good {
+		t.Run(tok, func(t *testing.T) {
+			if err := validateWorktreeToken(tok); err != nil {
+				t.Fatalf("validateWorktreeToken(%q) = %v, want nil", tok, err)
+			}
+		})
+	}
+}
+
 func TestEnsureFullHistoryUnshallowsManagedClone(t *testing.T) {
 	m, git, base := newTestManager(t)
 	target := filepath.Join(base, "heimdallm", "org", "repo")

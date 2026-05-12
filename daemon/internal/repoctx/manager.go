@@ -27,6 +27,12 @@ const (
 
 var repoNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
+// worktreeTokenPattern restricts WorktreeToken to characters that are safe
+// as a directory name on every supported platform and cannot collide with
+// git porcelain field separators. The leading character must be
+// alphanumeric so we never produce hidden directories under `.worktrees/`.
+var worktreeTokenPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
 // Mode describes how the caller will use the resolved checkout.
 type Mode int
 
@@ -49,6 +55,29 @@ type Request struct {
 	CloneDir           string
 	Token              string
 	Mode               Mode
+
+	// WorktreeToken identifies the execution and becomes the subdirectory
+	// name under `<clone>/.worktrees/<WorktreeToken>/`. Callers are
+	// expected to derive a deterministic value (e.g. `triage-42`,
+	// `pr-review-1234`) so that retries land on the same path and
+	// concurrent operations on different keys never collide. Sanitised
+	// against path traversal and unsafe characters.
+	WorktreeToken string
+
+	// WorktreeBaseRef, when set, becomes the ref the worktree is
+	// created at (`git worktree add <path> --detach <ref>`). Empty
+	// means HEAD of the clone.
+	WorktreeBaseRef string
+
+	// Branch, when non-empty, creates the worktree with a fresh local
+	// branch (`git worktree add <path> -b <Branch> <BaseRef>`). Only
+	// meaningful for ModeWrite executions that need to push to GitHub.
+	Branch string
+
+	// Inspect skips worktree creation and returns a handle pointing at
+	// the clone root. Used by the read-only `/config/clones` endpoint
+	// where worktree overhead would be pure waste.
+	Inspect bool
 }
 
 // Handle owns a repo-context lock until Release is called.
@@ -145,6 +174,14 @@ func (m *Manager) Acquire(ctx context.Context, req Request) (*Handle, error) {
 	owner, name, err := splitRepo(req.Repo)
 	if err != nil {
 		return nil, err
+	}
+	if req.WorktreeToken != "" {
+		// Validate eagerly so callers see a deterministic error before
+		// any locks or filesystem work happens. An empty token still
+		// works during the rollout — callsites are migrated stepwise.
+		if err := validateWorktreeToken(req.WorktreeToken); err != nil {
+			return nil, err
+		}
 	}
 	unlock, err := m.acquireRepoLock(ctx, req.Repo)
 	if err != nil {
@@ -558,6 +595,22 @@ func (m *Manager) releaseRepoRef(repo string, l *repoLock) {
 	if l.refs == 0 && m.locks[repo] == l {
 		delete(m.locks, repo)
 	}
+}
+
+// validateWorktreeToken rejects any token that could escape the
+// `.worktrees/` namespace or collide with git's reserved names. Path
+// separators, parent-dir hops, and leading dots are forbidden.
+func validateWorktreeToken(token string) error {
+	if token == "" {
+		return fmt.Errorf("repoctx: worktree token is required")
+	}
+	if token == "." || token == ".." {
+		return fmt.Errorf("repoctx: worktree token %q is reserved", token)
+	}
+	if !worktreeTokenPattern.MatchString(token) {
+		return fmt.Errorf("repoctx: worktree token %q must match [A-Za-z0-9][A-Za-z0-9._-]*", token)
+	}
+	return nil
 }
 
 func splitRepo(repo string) (string, string, error) {
