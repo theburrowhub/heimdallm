@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/api/sse_client.dart';
 import '../../../core/platform/platform_services_provider.dart';
 import '../event_summary.dart';
+import 'event_row.dart';
 
 /// Server > Events tab — operational dashboard of live SSE events.
 ///
@@ -131,8 +132,11 @@ class _EventsTabState extends ConsumerState<EventsTab> {
                   itemCount: visible.length,
                   itemBuilder: (context, i) {
                     final row = visible[i];
-                    return _Row(
-                      row: row,
+                    return EventRow(
+                      timestamp: row.timestamp,
+                      type: row.type,
+                      payload: row.payload,
+                      rawData: row.rawData,
                       expanded: _expanded.contains(row.id),
                       onTap: () => setState(() {
                         _expanded.contains(row.id) ? _expanded.remove(row.id) : _expanded.add(row.id);
@@ -175,136 +179,6 @@ class _EventRow {
     required this.payload,
     required this.rawData,
   });
-}
-
-class _Row extends StatelessWidget {
-  const _Row({required this.row, required this.expanded, required this.onTap});
-  final _EventRow row;
-  final bool expanded;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final ev = format(row.type, row.payload);
-    final ts = _formatTimestamp(row.timestamp);
-    // Pull surface + secondary-text colours from the theme so the row
-    // renders correctly in both light and dark mode. The previous
-    // hardcoded #F5F5F5 / #555555 left the JSON expand and detail chips
-    // washed out and unreadable on dark backgrounds (#453).
-    final scheme = Theme.of(context).colorScheme;
-
-    return InkWell(
-      onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                Icon(ev.icon, color: ev.color, size: 18),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    ev.label,
-                    style: const TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-                Text(
-                  ts,
-                  style: TextStyle(
-                    fontFamily: 'monospace',
-                    fontSize: 11,
-                    color: scheme.onSurfaceVariant,
-                  ),
-                ),
-              ],
-            ),
-            if (ev.target.isNotEmpty || ev.details.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(left: 28, top: 2),
-                child: Wrap(
-                  spacing: 8,
-                  runSpacing: 2,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: [
-                    if (ev.target.isNotEmpty)
-                      Text(
-                        ev.target,
-                        style: TextStyle(
-                          fontFamily: 'monospace',
-                          fontSize: 12,
-                          color: scheme.onSurfaceVariant,
-                        ),
-                      ),
-                    for (final d in ev.details) _DetailChip(text: d),
-                  ],
-                ),
-              ),
-            if (expanded)
-              Container(
-                margin: const EdgeInsets.only(left: 28, top: 6),
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: scheme.surfaceContainerHighest,
-                  borderRadius: BorderRadius.circular(4),
-                ),
-                child: SelectableText(
-                  _pretty(row.rawData),
-                  style: TextStyle(
-                    fontFamily: 'monospace',
-                    fontSize: 11,
-                    color: scheme.onSurface,
-                  ),
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  static String _formatTimestamp(DateTime t) {
-    final hh = t.hour.toString().padLeft(2, '0');
-    final mm = t.minute.toString().padLeft(2, '0');
-    final ss = t.second.toString().padLeft(2, '0');
-    return '$hh:$mm:$ss';
-  }
-
-  String _pretty(String raw) {
-    try {
-      return const JsonEncoder.withIndent('  ').convert(jsonDecode(raw));
-    } catch (_) {
-      return raw;
-    }
-  }
-}
-
-/// Subtle pill-style chip for one detail span (agent, duration, …).
-/// Kept light-weight (no Material Chip) so dozens of rows stay snappy.
-/// Colours pulled from the theme so the chip stays legible in dark mode.
-class _DetailChip extends StatelessWidget {
-  const _DetailChip({required this.text});
-  final String text;
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(3),
-      ),
-      child: Text(
-        text,
-        style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
-      ),
-    );
-  }
 }
 
 class _Toolbar extends StatelessWidget {

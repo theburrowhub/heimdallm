@@ -71,17 +71,18 @@ class FormattedEvent {
 
 /// Palette tied to [EventStatus]. Hex values match the prior glyphFor()
 /// choices so the visual continuity carries over from the old one-line
-/// renderer.
-const _statusColors = <EventStatus, Color>{
-  EventStatus.started: Color(0xFFFFB347), // orange
-  EventStatus.succeeded: Color(0xFF6CCA6C), // green
-  EventStatus.failed: Color(0xFFFF6B6B), // red
-  EventStatus.skipped: Color(0xFF888888), // gray
-  EventStatus.info: Color(0xFF6CA0FF), // blue
-  EventStatus.warning: Color(0xFFB070FF), // purple
-};
-
-Color _color(EventStatus s) => _statusColors[s]!;
+/// renderer. A switch expression — rather than a map + `!` — keeps the
+/// match exhaustive at compile time so adding a new [EventStatus] won't
+/// silently regress to a runtime null when the enum drifts ahead of the
+/// palette.
+Color _color(EventStatus s) => switch (s) {
+      EventStatus.started => const Color(0xFFFFB347), // orange
+      EventStatus.succeeded => const Color(0xFF6CCA6C), // green
+      EventStatus.failed => const Color(0xFFFF6B6B), // red
+      EventStatus.skipped => const Color(0xFF888888), // gray
+      EventStatus.info => const Color(0xFF6CA0FF), // blue
+      EventStatus.warning => const Color(0xFFB070FF), // purple
+    };
 
 /// Build a [FormattedEvent] from the raw SSE wire payload. Each branch
 /// owns its label + status + icon + which payload keys feed the target
