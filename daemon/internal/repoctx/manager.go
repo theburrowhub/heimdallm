@@ -551,7 +551,7 @@ func (m *Manager) ensureManagedClone(ctx context.Context, owner, name string, re
 		if err := writeMarker(target, req.Repo); err != nil {
 			return "", err
 		}
-		if err := ensureWorktreeGitignore(target); err != nil {
+		if err := ensureWorktreeExclude(target); err != nil {
 			return "", err
 		}
 		return target, nil
@@ -567,7 +567,7 @@ func (m *Manager) ensureManagedClone(ctx context.Context, owner, name string, re
 			_ = os.RemoveAll(target)
 			return "", err
 		}
-		if err := ensureWorktreeGitignore(target); err != nil {
+		if err := ensureWorktreeExclude(target); err != nil {
 			_ = os.RemoveAll(target)
 			return "", err
 		}
@@ -622,18 +622,24 @@ func (m *Manager) updateManagedClone(ctx context.Context, target, repo, token st
 // in-flight executions aren't nuked by a concurrent repo update.
 const worktreesDir = ".worktrees"
 
-// ensureWorktreeGitignore makes sure `<dir>/.gitignore` lists the
-// worktrees subdirectory so `git status` and `git clean` ignore it.
-// The function is idempotent: an existing entry is left untouched.
-func ensureWorktreeGitignore(dir string) error {
+// ensureWorktreeExclude makes sure `<dir>/.git/info/exclude` lists
+// the worktrees subdirectory. info/exclude is the per-clone analogue
+// of .gitignore: it is never tracked by upstream, so `git reset
+// --hard FETCH_HEAD` cannot revert our entry. Idempotent — an
+// existing entry is left untouched.
+func ensureWorktreeExclude(dir string) error {
 	const entry = ".worktrees/"
-	path := filepath.Join(dir, ".gitignore")
+	info := filepath.Join(dir, ".git", "info")
+	if err := os.MkdirAll(info, 0o755); err != nil {
+		return fmt.Errorf("repoctx: create %q: %w", info, err)
+	}
+	path := filepath.Join(info, "exclude")
 	data, err := os.ReadFile(path)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		return os.WriteFile(path, []byte(entry+"\n"), 0o644)
 	case err != nil:
-		return fmt.Errorf("repoctx: read gitignore %q: %w", path, err)
+		return fmt.Errorf("repoctx: read exclude %q: %w", path, err)
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -646,7 +652,7 @@ func ensureWorktreeGitignore(dir string) error {
 	}
 	data = append(data, []byte(entry+"\n")...)
 	if err := os.WriteFile(path, data, 0o644); err != nil {
-		return fmt.Errorf("repoctx: write gitignore %q: %w", path, err)
+		return fmt.Errorf("repoctx: write exclude %q: %w", path, err)
 	}
 	return nil
 }

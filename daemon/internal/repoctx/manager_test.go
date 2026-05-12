@@ -581,7 +581,7 @@ func TestPruneStaleWorktreesNoWorktreesDir(t *testing.T) {
 	}
 }
 
-func TestBootstrapAddsWorktreesToGitignore(t *testing.T) {
+func TestBootstrapAddsWorktreesToInfoExclude(t *testing.T) {
 	m, _, base := newTestManager(t)
 
 	// Fresh clone path — ensureManagedClone takes the bootstrap branch.
@@ -596,12 +596,13 @@ func TestBootstrapAddsWorktreesToGitignore(t *testing.T) {
 	h.Release()
 
 	target := filepath.Join(base, "heimdallm", "org", "repo")
-	data, err := os.ReadFile(filepath.Join(target, ".gitignore"))
+	excludePath := filepath.Join(target, ".git", "info", "exclude")
+	data, err := os.ReadFile(excludePath)
 	if err != nil {
-		t.Fatalf("read .gitignore: %v", err)
+		t.Fatalf("read info/exclude: %v", err)
 	}
 	if !strings.Contains(string(data), ".worktrees/") {
-		t.Fatalf(".gitignore missing .worktrees/ entry; got %q", string(data))
+		t.Fatalf("info/exclude missing .worktrees/ entry; got %q", string(data))
 	}
 
 	// Second Acquire takes the update-existing branch. The entry
@@ -616,27 +617,36 @@ func TestBootstrapAddsWorktreesToGitignore(t *testing.T) {
 	}
 	h2.Release()
 
-	data2, err := os.ReadFile(filepath.Join(target, ".gitignore"))
+	data2, err := os.ReadFile(excludePath)
 	if err != nil {
-		t.Fatalf("re-read .gitignore: %v", err)
+		t.Fatalf("re-read info/exclude: %v", err)
 	}
 	if got := strings.Count(string(data2), ".worktrees/"); got != 1 {
-		t.Fatalf(".gitignore has %d occurrences of .worktrees/, want 1; content=%q", got, string(data2))
+		t.Fatalf("info/exclude has %d occurrences of .worktrees/, want 1; content=%q", got, string(data2))
+	}
+
+	// Critically, the user's tracked .gitignore must be untouched.
+	// info/exclude is the per-clone, never-tracked location.
+	if _, err := os.Stat(filepath.Join(target, ".gitignore")); !os.IsNotExist(err) {
+		t.Fatalf(".gitignore should not be created by manager: err=%v", err)
 	}
 }
 
-func TestBootstrapPreservesExistingGitignore(t *testing.T) {
-	// Upstream may ship its own .gitignore; we must append, not replace.
+func TestBootstrapPreservesExistingInfoExclude(t *testing.T) {
+	// info/exclude may already contain repo-local entries; we must
+	// append, not replace.
 	m, _, base := newTestManager(t)
 	target := filepath.Join(base, "heimdallm", "org", "repo")
-	if err := os.MkdirAll(filepath.Join(target, ".git"), 0o755); err != nil {
+	infoDir := filepath.Join(target, ".git", "info")
+	if err := os.MkdirAll(infoDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := writeMarker(target, "org/repo"); err != nil {
 		t.Fatal(err)
 	}
 	existing := "node_modules/\n*.log\n"
-	if err := os.WriteFile(filepath.Join(target, ".gitignore"), []byte(existing), 0o644); err != nil {
+	excludePath := filepath.Join(infoDir, "exclude")
+	if err := os.WriteFile(excludePath, []byte(existing), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -650,7 +660,7 @@ func TestBootstrapPreservesExistingGitignore(t *testing.T) {
 	}
 	h.Release()
 
-	data, err := os.ReadFile(filepath.Join(target, ".gitignore"))
+	data, err := os.ReadFile(excludePath)
 	if err != nil {
 		t.Fatal(err)
 	}
