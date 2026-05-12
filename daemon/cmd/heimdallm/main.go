@@ -217,7 +217,24 @@ func main() {
 	notifier := notify.New()
 	ghClient := gh.NewClient(token)
 	exec := executor.New()
-	repoCtx := repoctx.NewManager()
+	repoCtx := repoctx.NewManagerWithOptions(repoctx.ManagerOptions{
+		MaxWorktreesPerRepo: cfg.AI.MaxWorktreesPerRepo,
+	})
+
+	// Sweep worktrees left behind by a previous daemon process. At
+	// startup the manager has no active worktrees, so every directory
+	// under `<clone>/.worktrees/` is by definition stale and safe to
+	// remove. Mirrors the in-flight DB sweeps above. (#461)
+	{
+		ctx := context.Background()
+		for _, cloneDir := range managedCloneDirs(cfg) {
+			if n, err := repoCtx.PruneStaleWorktreesUnder(ctx, cloneDir); err != nil {
+				slog.Warn("startup: prune stale worktrees", "dir", cloneDir, "err", err)
+			} else if n > 0 {
+				slog.Info("startup: pruned stale worktrees", "dir", cloneDir, "count", n)
+			}
+		}
+	}
 
 	// Load or create the per-daemon API token.  All mutating HTTP endpoints
 	// require this token in X-Heimdallm-Token (security issue #3).
@@ -686,7 +703,7 @@ func main() {
 		aiCfg := c.AIForRepo(pr.Repo)
 		localDirBase := c.GitHub.LocalDirBase
 		cfgMu.Unlock()
-		repoHandle, err := acquireRepoContext(ctx, repoCtx, pr.Repo, &aiCfg, localDirBase, token, repoctx.ModeRead)
+		repoHandle, err := acquireRepoContext(ctx, repoCtx, pr.Repo, &aiCfg, localDirBase, token, repoctx.ModeRead, wtTokenFor("pr-review", pr.Number), "", "")
 		if err != nil {
 			logRepoContextFallback("review-worker", pr.Repo, err)
 			aiCfg.LocalDir = ""
@@ -853,7 +870,7 @@ func main() {
 		}
 		ghIssue.Mode = config.IssueModeReviewOnly
 
-		repoHandle, err := acquireRepoContext(ctx, repoCtx, msg.Repo, &aiCfg, localDirBase, token, repoctx.ModeRead)
+		repoHandle, err := acquireRepoContext(ctx, repoCtx, msg.Repo, &aiCfg, localDirBase, token, repoctx.ModeRead, wtTokenFor("triage", msg.Number), "", "")
 		if err != nil {
 			logRepoContextFallback("triage-worker", msg.Repo, err)
 			aiCfg.LocalDir = ""
@@ -966,7 +983,7 @@ func main() {
 		}
 		ghIssue.Mode = config.IssueModeRefinement
 
-		opts, releaseRepoContext, err := buildRefinementRunOptions(ctx, s, repoCtx, msg.Repo, token, aiCfg, agentCfg, localDirBase, globalTimeout, false, "refinement-worker")
+		opts, releaseRepoContext, err := buildRefinementRunOptions(ctx, s, repoCtx, msg.Repo, msg.Number, token, aiCfg, agentCfg, localDirBase, globalTimeout, false, "refinement-worker")
 		if err != nil {
 			slog.Error("refinement-worker: prepare repo context failed",
 				"repo", msg.Repo, "number", msg.Number, "err", err)
@@ -1043,7 +1060,7 @@ func main() {
 		}
 		ghIssue.Mode = config.IssueModeDevelop
 
-		repoHandle, err := acquireRepoContext(ctx, repoCtx, msg.Repo, &aiCfg, localDirBase, token, repoctx.ModeWrite)
+		repoHandle, err := acquireRepoContext(ctx, repoCtx, msg.Repo, &aiCfg, localDirBase, token, repoctx.ModeWrite, wtTokenFor("develop", msg.Number), "", "")
 		if err != nil {
 			slog.Error("implement-worker: prepare repo context failed",
 				"repo", msg.Repo, "number", msg.Number, "err", err)
@@ -1498,7 +1515,7 @@ func main() {
 		aiCfg := cfg.AIForRepo(pr.Repo)
 		localDirBase := cfg.GitHub.LocalDirBase
 		cfgMu.Unlock()
-		repoHandle, err := acquireRepoContext(context.Background(), repoCtx, pr.Repo, &aiCfg, localDirBase, token, repoctx.ModeRead)
+		repoHandle, err := acquireRepoContext(context.Background(), repoCtx, pr.Repo, &aiCfg, localDirBase, token, repoctx.ModeRead, wtTokenFor("pr-review", pr.Number), "", "")
 		if err != nil {
 			logRepoContextFallback("trigger review", pr.Repo, err)
 			aiCfg.LocalDir = ""
@@ -1688,7 +1705,7 @@ func main() {
 		localDirBase := c.GitHub.LocalDirBase
 		globalTimeout := c.AI.ExecutionTimeout
 		cfgMu.Unlock()
-		opts, releaseRepoContext, err := buildRefinementRunOptions(ctx, s, repoCtx, iss.Repo, token, aiCfg, agentCfg, localDirBase, globalTimeout, force, "trigger issue refinement")
+		opts, releaseRepoContext, err := buildRefinementRunOptions(ctx, s, repoCtx, iss.Repo, iss.Number, token, aiCfg, agentCfg, localDirBase, globalTimeout, force, "trigger issue refinement")
 		if err != nil {
 			publishIssueErr(fmt.Sprintf("Failed to prepare repo context: %v", err))
 			return fmt.Errorf("trigger issue refinement: prepare repo context: %w", err)
@@ -2588,7 +2605,7 @@ func (a *tier2Adapter) ProcessPR(ctx context.Context, pr scheduler.Tier2PR) erro
 	aiCfg := c.AIForRepo(pr.Repo)
 	localDirBase := c.GitHub.LocalDirBase
 	a.cfgMu.Unlock()
-	repoHandle, err := acquireRepoContext(ctx, a.repoCtx, pr.Repo, &aiCfg, localDirBase, a.ghToken, repoctx.ModeRead)
+	repoHandle, err := acquireRepoContext(ctx, a.repoCtx, pr.Repo, &aiCfg, localDirBase, a.ghToken, repoctx.ModeRead, wtTokenFor("pr-tier2", pr.Number), "", "")
 	if err != nil {
 		logRepoContextFallback("tier2 PR", pr.Repo, err)
 		aiCfg.LocalDir = ""
@@ -2711,7 +2728,16 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 		}
 		var releaseRepoContext func()
 		releaseOnReturn := true
-		repoHandle, err := acquireRepoContext(ctx, a.repoCtx, issue.Repo, &aiCfg, localDirBase, a.ghToken, mode)
+		wtPrefix := "stage"
+		switch issue.Mode {
+		case config.IssueModeDevelop:
+			wtPrefix = "develop"
+		case config.IssueModeRefinement:
+			wtPrefix = "refinement"
+		case config.IssueModeReviewOnly:
+			wtPrefix = "triage"
+		}
+		repoHandle, err := acquireRepoContext(ctx, a.repoCtx, issue.Repo, &aiCfg, localDirBase, a.ghToken, mode, wtTokenFor(wtPrefix, issue.Number), "", "")
 		defer func() {
 			if releaseOnReturn && repoHandle != nil {
 				repoHandle.Release()
@@ -3342,6 +3368,7 @@ func buildRefinementRunOptions(
 	s *store.Store,
 	manager *repoctx.Manager,
 	repo string,
+	issueNumber int,
 	token string,
 	aiCfg config.RepoAI,
 	agentCfg config.CLIAgentConfig,
@@ -3350,7 +3377,7 @@ func buildRefinementRunOptions(
 	force bool,
 	scope string,
 ) (issuepipeline.RunOptions, func(), error) {
-	repoHandle, err := acquireRepoContext(ctx, manager, repo, &aiCfg, localDirBase, token, repoctx.ModeRead)
+	repoHandle, err := acquireRepoContext(ctx, manager, repo, &aiCfg, localDirBase, token, repoctx.ModeRead, wtTokenFor("refinement", issueNumber), "", "")
 	if err != nil {
 		return issuepipeline.RunOptions{}, nil, err
 	}
@@ -3621,6 +3648,9 @@ func acquireRepoContext(
 	localDirBase []string,
 	token string,
 	mode repoctx.Mode,
+	wtToken string,
+	wtBaseRef string,
+	branch string,
 ) (*repoctx.Handle, error) {
 	if manager == nil {
 		return nil, fmt.Errorf("repoctx: nil manager")
@@ -3632,6 +3662,9 @@ func acquireRepoContext(
 		CloneDir:           aiCfg.CloneDir,
 		Token:              token,
 		Mode:               mode,
+		WorktreeToken:      wtToken,
+		WorktreeBaseRef:    wtBaseRef,
+		Branch:             branch,
 	})
 	if err != nil {
 		return nil, err
@@ -3641,6 +3674,14 @@ func acquireRepoContext(
 	// path.
 	aiCfg.LocalDir = h.Path()
 	return h, nil
+}
+
+// wtTokenFor produces a sanitisation-safe worktree token for a
+// pipeline stage. The prefix names the stage (`pr-review`, `triage`,
+// `develop`, `refinement`, `pr-tier2`) so operators can correlate
+// `<clone>/.worktrees/<token>/` with the running execution.
+func wtTokenFor(prefix string, n int) string {
+	return fmt.Sprintf("%s-%d", prefix, n)
 }
 
 func ensureRepoContextFullHistory(ctx context.Context, manager *repoctx.Manager, h *repoctx.Handle, token, scope, repo string) {

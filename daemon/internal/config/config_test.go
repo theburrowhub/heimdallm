@@ -59,6 +59,23 @@ func TestApplyDefaults_PreservesExisting(t *testing.T) {
 	}
 }
 
+func TestApplyDefaults_MaxWorktreesPerRepo(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+	if cfg.AI.MaxWorktreesPerRepo != 5 {
+		t.Errorf("MaxWorktreesPerRepo = %d, want 5", cfg.AI.MaxWorktreesPerRepo)
+	}
+}
+
+func TestApplyDefaults_MaxWorktreesPerRepo_PreservesExisting(t *testing.T) {
+	cfg := &Config{}
+	cfg.AI.MaxWorktreesPerRepo = 12
+	cfg.applyDefaults()
+	if cfg.AI.MaxWorktreesPerRepo != 12 {
+		t.Errorf("MaxWorktreesPerRepo overwritten: %d", cfg.AI.MaxWorktreesPerRepo)
+	}
+}
+
 // ── applyEnvOverrides ────────────────────────────────────────────────────────
 
 func TestApplyDefaults_MaxConcurrentWorkers(t *testing.T) {

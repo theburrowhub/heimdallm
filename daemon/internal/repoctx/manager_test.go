@@ -298,7 +298,7 @@ func TestAcquireUpdatesExistingManagedClone(t *testing.T) {
 		"remote set-url origin https://x-access-token@github.com/org/repo.git",
 		"fetch --depth=1 --prune origin HEAD",
 		"reset --hard FETCH_HEAD",
-		"clean -fd -e .heimdallm-managed",
+		"clean -fd -e .heimdallm-managed -e .worktrees",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("git calls = %v, want %v", got, want)
@@ -494,6 +494,593 @@ func TestPurgeNilManagerIsError(t *testing.T) {
 	err := m.Purge(context.Background(), "org/repo", "")
 	if err == nil || !strings.Contains(err.Error(), "nil manager") {
 		t.Fatalf("Purge err = %v, want nil manager error", err)
+	}
+}
+
+func newTestManagerWithCap(t *testing.T, cap int) (*Manager, *fakeGit, string) {
+	t.Helper()
+	base := t.TempDir()
+	git := &fakeGit{
+		// Materialise worktree dirs so post-conditions hold under real
+		// filesystem checks.
+		onRun: func(call gitCall) error {
+			if len(call.Args) >= 3 && call.Args[0] == "worktree" && call.Args[1] == "add" {
+				return os.MkdirAll(call.Args[2], 0o755)
+			}
+			if len(call.Args) >= 2 && call.Args[0] == "worktree" && call.Args[1] == "remove" {
+				// Real `git worktree remove --force <path>` deletes
+				// the worktree directory.
+				path := call.Args[len(call.Args)-1]
+				return os.RemoveAll(path)
+			}
+			return nil
+		},
+	}
+	m := NewManagerWithOptions(ManagerOptions{MaxWorktreesPerRepo: cap})
+	m.git = git
+	m.tempDir = func() string { return base }
+	return m, git, base
+}
+
+func setupManagedClone(t *testing.T, base string) string {
+	t.Helper()
+	target := filepath.Join(base, "heimdallm", "org", "repo")
+	if err := os.MkdirAll(filepath.Join(target, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMarker(target, "org/repo"); err != nil {
+		t.Fatal(err)
+	}
+	return target
+}
+
+func TestPruneStaleWorktreesRemovesOrphans(t *testing.T) {
+	m, _, base := newTestManagerWithCap(t, 0)
+	target := setupManagedClone(t, base)
+
+	// Live worktree the manager tracks as active.
+	h, err := m.Acquire(context.Background(), Request{
+		Repo: "org/repo", Token: "secret", WorktreeToken: "live",
+	})
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	defer h.Release()
+
+	// Orphan worktree left behind by a hypothetical crashed daemon.
+	orphan := filepath.Join(target, ".worktrees", "orphan")
+	if err := os.MkdirAll(orphan, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := m.PruneStaleWorktrees(context.Background(), target)
+	if err != nil {
+		t.Fatalf("PruneStaleWorktrees: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("pruned = %d, want 1", n)
+	}
+	if _, err := os.Stat(orphan); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("orphan still present or stat failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(target, ".worktrees", "live.1")); err != nil {
+		t.Fatalf("live worktree should remain: %v", err)
+	}
+}
+
+func TestPruneStaleWorktreesNoWorktreesDir(t *testing.T) {
+	m, _, base := newTestManagerWithCap(t, 0)
+	target := setupManagedClone(t, base)
+
+	n, err := m.PruneStaleWorktrees(context.Background(), target)
+	if err != nil {
+		t.Fatalf("PruneStaleWorktrees on missing dir: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("pruned = %d on missing dir, want 0", n)
+	}
+}
+
+func TestBootstrapAddsWorktreesToInfoExclude(t *testing.T) {
+	m, _, base := newTestManager(t)
+
+	// Fresh clone path — ensureManagedClone takes the bootstrap branch.
+	h, err := m.Acquire(context.Background(), Request{
+		Repo:  "org/repo",
+		Token: "secret",
+		Mode:  ModeRead,
+	})
+	if err != nil {
+		t.Fatalf("Acquire bootstrap: %v", err)
+	}
+	h.Release()
+
+	target := filepath.Join(base, "heimdallm", "org", "repo")
+	excludePath := filepath.Join(target, ".git", "info", "exclude")
+	data, err := os.ReadFile(excludePath)
+	if err != nil {
+		t.Fatalf("read info/exclude: %v", err)
+	}
+	if !strings.Contains(string(data), ".worktrees/") {
+		t.Fatalf("info/exclude missing .worktrees/ entry; got %q", string(data))
+	}
+
+	// Second Acquire takes the update-existing branch. The entry
+	// must not be duplicated.
+	h2, err := m.Acquire(context.Background(), Request{
+		Repo:  "org/repo",
+		Token: "secret",
+		Mode:  ModeRead,
+	})
+	if err != nil {
+		t.Fatalf("Acquire update: %v", err)
+	}
+	h2.Release()
+
+	data2, err := os.ReadFile(excludePath)
+	if err != nil {
+		t.Fatalf("re-read info/exclude: %v", err)
+	}
+	if got := strings.Count(string(data2), ".worktrees/"); got != 1 {
+		t.Fatalf("info/exclude has %d occurrences of .worktrees/, want 1; content=%q", got, string(data2))
+	}
+
+	// Critically, the user's tracked .gitignore must be untouched.
+	// info/exclude is the per-clone, never-tracked location.
+	if _, err := os.Stat(filepath.Join(target, ".gitignore")); !os.IsNotExist(err) {
+		t.Fatalf(".gitignore should not be created by manager: err=%v", err)
+	}
+}
+
+func TestBootstrapPreservesExistingInfoExclude(t *testing.T) {
+	// info/exclude may already contain repo-local entries; we must
+	// append, not replace.
+	m, _, base := newTestManager(t)
+	target := filepath.Join(base, "heimdallm", "org", "repo")
+	infoDir := filepath.Join(target, ".git", "info")
+	if err := os.MkdirAll(infoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMarker(target, "org/repo"); err != nil {
+		t.Fatal(err)
+	}
+	existing := "node_modules/\n*.log\n"
+	excludePath := filepath.Join(infoDir, "exclude")
+	if err := os.WriteFile(excludePath, []byte(existing), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	h, err := m.Acquire(context.Background(), Request{
+		Repo:  "org/repo",
+		Token: "secret",
+		Mode:  ModeRead,
+	})
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	h.Release()
+
+	data, err := os.ReadFile(excludePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "node_modules/") || !strings.Contains(got, "*.log") {
+		t.Fatalf("existing entries lost: %q", got)
+	}
+	if !strings.Contains(got, ".worktrees/") {
+		t.Fatalf(".worktrees/ entry missing after append: %q", got)
+	}
+}
+
+func TestAcquireWorktreeWithBaseRefDetaches(t *testing.T) {
+	m, git, base := newTestManagerWithCap(t, 0)
+	target := setupManagedClone(t, base)
+	_ = target
+
+	h, err := m.Acquire(context.Background(), Request{
+		Repo:            "org/repo",
+		Token:           "secret",
+		WorktreeToken:   "pr-review-1234",
+		WorktreeBaseRef: "abcdef1234567890",
+	})
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	defer h.Release()
+
+	var addArgs []string
+	for _, c := range git.snapshot() {
+		if len(c.Args) >= 2 && c.Args[0] == "worktree" && c.Args[1] == "add" {
+			addArgs = c.Args
+			break
+		}
+	}
+	if addArgs == nil {
+		t.Fatalf("expected worktree add call; got %v", git.snapshot())
+	}
+	want := []string{"worktree", "add", filepath.Join(target, ".worktrees", "pr-review-1234.1"), "--detach", "abcdef1234567890"}
+	if !reflect.DeepEqual(addArgs, want) {
+		t.Fatalf("worktree add args = %v, want %v", addArgs, want)
+	}
+}
+
+func TestAcquireWorktreeWithBranchCreatesAndChecksOut(t *testing.T) {
+	m, git, base := newTestManagerWithCap(t, 0)
+	target := setupManagedClone(t, base)
+
+	h, err := m.Acquire(context.Background(), Request{
+		Repo:            "org/repo",
+		Token:           "secret",
+		WorktreeToken:   "develop-7",
+		WorktreeBaseRef: "main",
+		Branch:          "heimdallm/issue-7",
+	})
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	defer h.Release()
+
+	var addArgs []string
+	for _, c := range git.snapshot() {
+		if len(c.Args) >= 2 && c.Args[0] == "worktree" && c.Args[1] == "add" {
+			addArgs = c.Args
+			break
+		}
+	}
+	want := []string{"worktree", "add", filepath.Join(target, ".worktrees", "develop-7.1"), "-b", "heimdallm/issue-7", "main"}
+	if !reflect.DeepEqual(addArgs, want) {
+		t.Fatalf("worktree add args = %v, want %v", addArgs, want)
+	}
+}
+
+func TestAcquireInspectSkipsWorktreeAndCap(t *testing.T) {
+	// Inspect callers (HTTP /config/clones) want the clone path only.
+	// They must not take a cap slot — otherwise a single inspection
+	// can starve real pipeline executions — and they must not create
+	// a worktree.
+	m, git, base := newTestManagerWithCap(t, 1)
+	target := setupManagedClone(t, base)
+
+	h1, err := m.Acquire(context.Background(), Request{
+		Repo: "org/repo", Token: "secret", WorktreeToken: "wt-1",
+	})
+	if err != nil {
+		t.Fatalf("Acquire (worktree): %v", err)
+	}
+	defer h1.Release()
+
+	preInspectCalls := len(git.snapshot())
+
+	h2, err := m.Acquire(context.Background(), Request{
+		Repo: "org/repo", Token: "secret", Inspect: true,
+	})
+	if err != nil {
+		t.Fatalf("Inspect Acquire: %v", err)
+	}
+	if h2.Path() != target {
+		t.Fatalf("Inspect path = %q, want clone root %q", h2.Path(), target)
+	}
+	for _, c := range git.snapshot()[preInspectCalls:] {
+		if len(c.Args) >= 2 && c.Args[0] == "worktree" {
+			t.Fatalf("Inspect triggered worktree op: %v", c.Args)
+		}
+	}
+	h2.Release() // Must not panic or block.
+}
+
+func TestReleaseClearsBookkeepingEvenWhenLockTimesOut(t *testing.T) {
+	// Reproduces the failure mode flagged in PR review: if the
+	// release closure can't reacquire the crit lock (e.g. another
+	// caller is stuck), the in-memory active set and the cap
+	// semaphore must still clear. Otherwise the path is pinned in
+	// m.active forever and PruneStaleWorktrees treats the orphan as
+	// live.
+	m, _, base := newTestManagerWithCap(t, 1)
+	m.releaseTimeout = 50 * time.Millisecond
+	target := setupManagedClone(t, base)
+
+	h, err := m.Acquire(context.Background(), Request{
+		Repo: "org/repo", Token: "secret", WorktreeToken: "stuck",
+	})
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+
+	// Hijack the per-repo crit lock from a separate goroutine so the
+	// release closure cannot reacquire it within releaseTimeout.
+	holderCtx, holderCancel := context.WithCancel(context.Background())
+	defer holderCancel()
+	unlock, err := m.acquireRepoLock(holderCtx, "org/repo")
+	if err != nil {
+		t.Fatalf("hijack lock: %v", err)
+	}
+
+	wtPath := h.Path()
+	h.Release()
+
+	// Active set must be empty so a follow-up Acquire isn't blocked
+	// by the seq-counter or a pinned path.
+	m.mu.Lock()
+	live := len(m.active)
+	m.mu.Unlock()
+	if live != 0 {
+		t.Fatalf("active set leaks after release-with-failed-lock: %d entries", live)
+	}
+
+	// Cap slot must be free — verify a fresh Acquire (with the
+	// hijacked lock still held → no crit work expected, but the cap
+	// path itself must be unblocked) is not gated by a permanently
+	// held slot. To avoid waiting on the hijacked crit lock, this
+	// follow-up Acquire happens after we release the hijack.
+	holderCancel()
+	unlock()
+
+	h2, err := m.Acquire(context.Background(), Request{
+		Repo: "org/repo", Token: "secret", WorktreeToken: "next",
+	})
+	if err != nil {
+		t.Fatalf("follow-up Acquire: %v", err)
+	}
+	h2.Release()
+
+	// Best-effort filesystem cleanup ran since git wasn't reachable.
+	if _, err := os.Stat(wtPath); err == nil {
+		t.Fatalf("worktree dir %q still on disk after release-with-failed-lock", wtPath)
+	}
+	_ = target
+}
+
+func TestAcquireSameTokenProducesDistinctWorktrees(t *testing.T) {
+	// Two pipeline entry points (e.g. poll review-worker + manual
+	// trigger-review) can fire concurrently for the same PR. They
+	// pass the same WorktreeToken; the manager must give each its
+	// own path so `git worktree add` does not collide.
+	m, _, base := newTestManagerWithCap(t, 0)
+	setupManagedClone(t, base)
+
+	h1, err := m.Acquire(context.Background(), Request{
+		Repo: "org/repo", Token: "secret", WorktreeToken: "pr-review-99",
+	})
+	if err != nil {
+		t.Fatalf("Acquire 1: %v", err)
+	}
+	defer h1.Release()
+
+	h2, err := m.Acquire(context.Background(), Request{
+		Repo: "org/repo", Token: "secret", WorktreeToken: "pr-review-99",
+	})
+	if err != nil {
+		t.Fatalf("Acquire 2: %v", err)
+	}
+	defer h2.Release()
+
+	if h1.Path() == h2.Path() {
+		t.Fatalf("same-token acquires resolved to same path %q", h1.Path())
+	}
+	if !strings.HasPrefix(filepath.Base(h1.Path()), "pr-review-99.") ||
+		!strings.HasPrefix(filepath.Base(h2.Path()), "pr-review-99.") {
+		t.Fatalf("paths lost the token prefix: %q, %q", h1.Path(), h2.Path())
+	}
+}
+
+func TestAcquireBlocksWhenAtMaxWorktreesPerRepo(t *testing.T) {
+	m, _, base := newTestManagerWithCap(t, 2)
+	setupManagedClone(t, base)
+
+	h1, err := m.Acquire(context.Background(), Request{
+		Repo: "org/repo", Token: "secret", WorktreeToken: "wt-1",
+	})
+	if err != nil {
+		t.Fatalf("Acquire 1: %v", err)
+	}
+	h2, err := m.Acquire(context.Background(), Request{
+		Repo: "org/repo", Token: "secret", WorktreeToken: "wt-2",
+	})
+	if err != nil {
+		t.Fatalf("Acquire 2: %v", err)
+	}
+
+	acquired := make(chan *Handle, 1)
+	go func() {
+		h3, err := m.Acquire(context.Background(), Request{
+			Repo: "org/repo", Token: "secret", WorktreeToken: "wt-3",
+		})
+		if err != nil {
+			t.Errorf("Acquire 3: %v", err)
+			return
+		}
+		acquired <- h3
+	}()
+
+	select {
+	case <-acquired:
+		t.Fatal("3rd Acquire returned before any worktree was released; cap not enforced")
+	case <-time.After(80 * time.Millisecond):
+	}
+
+	h1.Release()
+
+	select {
+	case h3 := <-acquired:
+		h3.Release()
+	case <-time.After(time.Second):
+		t.Fatal("3rd Acquire did not proceed after h1.Release")
+	}
+	h2.Release()
+}
+
+func TestAcquireCancelDuringCapQueueReturnsCtxErr(t *testing.T) {
+	m, _, base := newTestManagerWithCap(t, 1)
+	setupManagedClone(t, base)
+
+	h1, err := m.Acquire(context.Background(), Request{
+		Repo: "org/repo", Token: "secret", WorktreeToken: "wt-1",
+	})
+	if err != nil {
+		t.Fatalf("Acquire 1: %v", err)
+	}
+	defer h1.Release()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := m.Acquire(ctx, Request{
+			Repo: "org/repo", Token: "secret", WorktreeToken: "wt-2",
+		})
+		done <- err
+	}()
+
+	// Give the goroutine time to start queuing.
+	time.Sleep(30 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("queued Acquire err = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled Acquire did not return")
+	}
+
+	// Cap slot must be freed — a follow-up Acquire should not deadlock
+	// after h1.Release.
+	h1.Release()
+	h3, err := m.Acquire(context.Background(), Request{
+		Repo: "org/repo", Token: "secret", WorktreeToken: "wt-3",
+	})
+	if err != nil {
+		t.Fatalf("follow-up Acquire: %v", err)
+	}
+	h3.Release()
+}
+
+func TestAcquireCreatesWorktreeForManagedClone(t *testing.T) {
+	m, git, base := newTestManager(t)
+	target := filepath.Join(base, "heimdallm", "org", "repo")
+	if err := os.MkdirAll(filepath.Join(target, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMarker(target, "org/repo"); err != nil {
+		t.Fatal(err)
+	}
+	git.onRun = func(call gitCall) error {
+		// Pretend `git worktree add <path>` materialises the worktree
+		// directory so the manager's post-conditions hold.
+		if len(call.Args) >= 3 && call.Args[0] == "worktree" && call.Args[1] == "add" {
+			return os.MkdirAll(call.Args[2], 0o755)
+		}
+		return nil
+	}
+
+	h, err := m.Acquire(context.Background(), Request{
+		Repo:          "org/repo",
+		Token:         "secret",
+		Mode:          ModeRead,
+		WorktreeToken: "triage-42",
+	})
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+
+	// The manager appends a monotonic seq to disambiguate concurrent
+	// same-token acquires; the first acquire on a fresh manager is .1.
+	wantWT := filepath.Join(target, ".worktrees", "triage-42.1")
+	if h.Path() != wantWT {
+		t.Fatalf("handle path = %q, want %q", h.Path(), wantWT)
+	}
+	if info, err := os.Stat(wantWT); err != nil {
+		t.Fatalf("worktree dir missing: %v", err)
+	} else if !info.IsDir() {
+		t.Fatalf("worktree path is not a directory")
+	}
+
+	var addCall *gitCall
+	for i, c := range git.snapshot() {
+		if len(c.Args) >= 2 && c.Args[0] == "worktree" && c.Args[1] == "add" {
+			calls := git.snapshot()
+			addCall = &calls[i]
+			break
+		}
+	}
+	if addCall == nil {
+		t.Fatalf("expected `git worktree add` call; calls = %v", git.snapshot())
+	}
+	if addCall.Dir != target {
+		t.Fatalf("worktree add run from %q, want clone root %q", addCall.Dir, target)
+	}
+
+	h.Release()
+
+	foundRemove := false
+	for _, c := range git.snapshot() {
+		if len(c.Args) >= 2 && c.Args[0] == "worktree" && c.Args[1] == "remove" {
+			foundRemove = true
+			if c.Dir != target {
+				t.Fatalf("worktree remove run from %q, want clone root %q", c.Dir, target)
+			}
+		}
+	}
+	if !foundRemove {
+		t.Fatalf("expected `git worktree remove` on release; calls = %v", git.snapshot())
+	}
+}
+
+func TestAcquireRejectsInvalidWorktreeToken(t *testing.T) {
+	// The WorktreeToken becomes a subdirectory under `<clone>/.worktrees/`,
+	// so anything that could escape the clone root or confuse git's
+	// porcelain output must be rejected before we touch the filesystem.
+	bad := []string{
+		"..",
+		"../escape",
+		"foo/bar",
+		"foo\\bar",
+		".hidden",
+		"with space",
+		"semi;colon",
+		"a*b",
+	}
+	for _, tok := range bad {
+		t.Run(tok, func(t *testing.T) {
+			m, git, _ := newTestManager(t)
+			_, err := m.Acquire(context.Background(), Request{
+				Repo:          "org/repo",
+				Token:         "secret",
+				Mode:          ModeRead,
+				WorktreeToken: tok,
+			})
+			if err == nil {
+				t.Fatalf("Acquire with WorktreeToken=%q: want error, got nil", tok)
+			}
+			if !strings.Contains(err.Error(), "worktree token") {
+				t.Fatalf("Acquire err = %v, want 'worktree token' error", err)
+			}
+			if calls := git.snapshot(); len(calls) != 0 {
+				t.Fatalf("git ran %d calls for invalid token %q; want none", len(calls), tok)
+			}
+		})
+	}
+}
+
+func TestAcquireAcceptsValidWorktreeToken(t *testing.T) {
+	// Valid tokens cover the patterns the callsites use:
+	// stage-<n> (triage-42), <purpose>-<random> (inspect-deadbeef),
+	// dotted decorations (pr-review-1234.retry).
+	good := []string{
+		"triage-42",
+		"pr-review-1234",
+		"develop-7",
+		"inspect-deadbeef",
+		"a",
+		"a_b-c.d",
+	}
+	for _, tok := range good {
+		t.Run(tok, func(t *testing.T) {
+			if err := validateWorktreeToken(tok); err != nil {
+				t.Fatalf("validateWorktreeToken(%q) = %v, want nil", tok, err)
+			}
+		})
 	}
 }
 

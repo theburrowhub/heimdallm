@@ -375,6 +375,13 @@ type AIConfig struct {
 	AutoPromoteTriage     *bool  `toml:"auto_promote_triage,omitempty"`
 	AutoPromoteRefinement *bool  `toml:"auto_promote_refinement,omitempty"`
 
+	// MaxWorktreesPerRepo caps how many per-execution git worktrees the
+	// daemon will hold concurrently for a single repository (#461). A
+	// fresh value of 0 inherits the daemon default (5). Set higher if
+	// the repo has many independent stages running in parallel; lower
+	// if disk pressure dominates.
+	MaxWorktreesPerRepo int `toml:"max_worktrees_per_repo"`
+
 	// GeneratePRDescription enables LLM-generated PR titles and descriptions
 	// for auto_implement PRs. When true, after the implementation commit,
 	// a second LLM call generates a rich PR description from the diff.
@@ -852,6 +859,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.AI.RefinementTimeout == "" {
 		c.AI.RefinementTimeout = "30m"
+	}
+	if c.AI.MaxWorktreesPerRepo == 0 {
+		c.AI.MaxWorktreesPerRepo = 5
 	}
 	if c.ActivityLog.Enabled == nil {
 		v := true
