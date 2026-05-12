@@ -769,6 +769,68 @@ func TestAcquireInspectSkipsWorktreeAndCap(t *testing.T) {
 	h2.Release() // Must not panic or block.
 }
 
+func TestReleaseClearsBookkeepingEvenWhenLockTimesOut(t *testing.T) {
+	// Reproduces the failure mode flagged in PR review: if the
+	// release closure can't reacquire the crit lock (e.g. another
+	// caller is stuck), the in-memory active set and the cap
+	// semaphore must still clear. Otherwise the path is pinned in
+	// m.active forever and PruneStaleWorktrees treats the orphan as
+	// live.
+	m, _, base := newTestManagerWithCap(t, 1)
+	m.releaseTimeout = 50 * time.Millisecond
+	target := setupManagedClone(t, base)
+
+	h, err := m.Acquire(context.Background(), Request{
+		Repo: "org/repo", Token: "secret", WorktreeToken: "stuck",
+	})
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+
+	// Hijack the per-repo crit lock from a separate goroutine so the
+	// release closure cannot reacquire it within releaseTimeout.
+	holderCtx, holderCancel := context.WithCancel(context.Background())
+	defer holderCancel()
+	unlock, err := m.acquireRepoLock(holderCtx, "org/repo")
+	if err != nil {
+		t.Fatalf("hijack lock: %v", err)
+	}
+
+	wtPath := h.Path()
+	h.Release()
+
+	// Active set must be empty so a follow-up Acquire isn't blocked
+	// by the seq-counter or a pinned path.
+	m.mu.Lock()
+	live := len(m.active)
+	m.mu.Unlock()
+	if live != 0 {
+		t.Fatalf("active set leaks after release-with-failed-lock: %d entries", live)
+	}
+
+	// Cap slot must be free — verify a fresh Acquire (with the
+	// hijacked lock still held → no crit work expected, but the cap
+	// path itself must be unblocked) is not gated by a permanently
+	// held slot. To avoid waiting on the hijacked crit lock, this
+	// follow-up Acquire happens after we release the hijack.
+	holderCancel()
+	unlock()
+
+	h2, err := m.Acquire(context.Background(), Request{
+		Repo: "org/repo", Token: "secret", WorktreeToken: "next",
+	})
+	if err != nil {
+		t.Fatalf("follow-up Acquire: %v", err)
+	}
+	h2.Release()
+
+	// Best-effort filesystem cleanup ran since git wasn't reachable.
+	if _, err := os.Stat(wtPath); err == nil {
+		t.Fatalf("worktree dir %q still on disk after release-with-failed-lock", wtPath)
+	}
+	_ = target
+}
+
 func TestAcquireSameTokenProducesDistinctWorktrees(t *testing.T) {
 	// Two pipeline entry points (e.g. poll review-worker + manual
 	// trigger-review) can fire concurrently for the same PR. They

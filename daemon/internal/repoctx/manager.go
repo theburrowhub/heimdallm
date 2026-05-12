@@ -174,6 +174,13 @@ type Manager struct {
 	// across the manager's lifetime so paths stay stable for the
 	// duration of a single execution.
 	wtSeq atomic.Uint64
+
+	// releaseTimeout caps how long a Handle.Release will wait for the
+	// critical-section lock when running `git worktree remove`. Beyond
+	// this, release falls back to a filesystem-only cleanup so the cap
+	// semaphore is never held hostage by a stuck lock. Tests override
+	// this; production keeps the default at gitTimeout.
+	releaseTimeout time.Duration
 }
 
 // ManagerOptions configures a Manager at construction.
@@ -194,12 +201,13 @@ func NewManager() *Manager {
 // NewManagerWithOptions returns a Manager configured per opts.
 func NewManagerWithOptions(opts ManagerOptions) *Manager {
 	return &Manager{
-		locks:        make(map[string]*repoLock),
-		caps:         make(map[string]*repoCap),
-		active:       make(map[string]struct{}),
-		git:          execGit{},
-		tempDir:      os.TempDir,
-		maxWorktrees: opts.MaxWorktreesPerRepo,
+		locks:          make(map[string]*repoLock),
+		caps:           make(map[string]*repoCap),
+		active:         make(map[string]struct{}),
+		git:            execGit{},
+		tempDir:        os.TempDir,
+		maxWorktrees:   opts.MaxWorktreesPerRepo,
+		releaseTimeout: gitTimeout,
 	}
 }
 
@@ -378,20 +386,36 @@ func (m *Manager) acquireWorktree(ctx context.Context, req Request, owner, name 
 		// Re-acquire the critical-section lock briefly to serialise
 		// the worktree-registry mutation. Use a fresh background ctx
 		// so a cancelled caller ctx never leaves a worktree on disk.
-		bgCtx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+		bgCtx, cancel := context.WithTimeout(context.Background(), m.releaseTimeout)
 		defer cancel()
-		unlockRm, err := m.acquireRepoLock(bgCtx, req.Repo)
-		if err != nil {
-			slog.Warn("repoctx: worktree release lock", "repo", req.Repo, "err", err)
-		} else {
-			if rmErr := m.runner().Run(bgCtx, cloneRoot, nil, "worktree", "remove", "--force", wtPath); rmErr != nil {
-				slog.Warn("repoctx: worktree remove failed", "path", wtPath, "err", rmErr)
+		// In-memory bookkeeping must clear regardless of whether the
+		// git/filesystem cleanup succeeded — otherwise a single
+		// lock-acquire timeout would pin an orphan in m.active
+		// forever and PruneStaleWorktrees would never remove it.
+		defer releaseCap()
+		defer m.unmarkActive(wtPath)
+		unlockRm, lockErr := m.acquireRepoLock(bgCtx, req.Repo)
+		if lockErr != nil {
+			slog.Warn("repoctx: worktree release lock unavailable; falling back to filesystem cleanup",
+				"repo", req.Repo, "path", wtPath, "err", lockErr)
+			// Git's worktree registry entry survives in `.git/worktrees/`,
+			// but the next `git worktree prune` (issued by
+			// PruneStaleWorktrees on startup) reaps it. Removing the
+			// on-disk directory here is enough to keep `.worktrees/`
+			// tidy and prevent collisions with a re-issued seq.
+			if rmErr := os.RemoveAll(wtPath); rmErr != nil {
+				slog.Warn("repoctx: worktree filesystem remove failed",
+					"path", wtPath, "err", rmErr)
 			}
-			m.unmarkActive(wtPath)
-			unlockRm()
+			return
 		}
-		releaseCap()
+		defer unlockRm()
+		if rmErr := m.runner().Run(bgCtx, cloneRoot, nil, "worktree", "remove", "--force", wtPath); rmErr != nil {
+			slog.Warn("repoctx: worktree remove failed", "path", wtPath, "err", rmErr)
+		}
 	}
+	slog.Info("repoctx: worktree acquired",
+		"repo", req.Repo, "token", req.WorktreeToken, "seq", seq, "path", wtPath)
 	return &Handle{path: wtPath, managed: true, release: release}, nil
 }
 
