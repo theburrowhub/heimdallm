@@ -146,3 +146,58 @@ func TestUpsertDiscoveredRepos_OrgFilterCaseInsensitive(t *testing.T) {
 		t.Fatalf("org filter should be case-insensitive, got %v", added)
 	}
 }
+
+// A repo with an explicit [ai.repos.*] entry must NEVER be added to
+// NonMonitored — even when AutoEnablePRForDiscovery is off. Otherwise the next
+// MergeRepos call would blacklist a repo the operator just configured, which
+// is exactly the regression described in theburrowhub/heimdallm#281.
+func TestUpsertDiscoveredRepos_ExplicitAIConfigOverridesAutoEnableOff(t *testing.T) {
+	f := false
+	cfg := &config.Config{}
+	cfg.GitHub.AutoEnablePROnDiscovery = &f
+	cfg.AI.Repos = map[string]config.RepoAI{
+		"a/wired-up": {},
+	}
+
+	prs := []*gh.PullRequest{
+		{RepositoryURL: "https://api.github.com/repos/a/wired-up", Number: 1},
+		{RepositoryURL: "https://api.github.com/repos/a/no-config", Number: 2},
+	}
+	for _, pr := range prs {
+		pr.ResolveRepo()
+	}
+
+	added := upsertDiscoveredRepos(cfg, prs)
+	if len(added) != 2 {
+		t.Fatalf("both repos should be added, got %v", added)
+	}
+
+	// The wired-up repo must land in Repositories despite AutoEnable being off.
+	foundWired := false
+	for _, r := range cfg.GitHub.Repositories {
+		if r == "a/wired-up" {
+			foundWired = true
+		}
+	}
+	if !foundWired {
+		t.Fatalf("a/wired-up must be in Repositories (explicit [ai.repos.*] config), got %v", cfg.GitHub.Repositories)
+	}
+
+	// The wired-up repo must NOT be in NonMonitored — that would let MergeRepos blacklist it.
+	for _, r := range cfg.GitHub.NonMonitored {
+		if r == "a/wired-up" {
+			t.Fatalf("a/wired-up must NOT be in NonMonitored — explicit TOML config wins over auto-enable=false")
+		}
+	}
+
+	// The repo without explicit AI config still follows AutoEnablePRForDiscovery.
+	foundUnwired := false
+	for _, r := range cfg.GitHub.NonMonitored {
+		if r == "a/no-config" {
+			foundUnwired = true
+		}
+	}
+	if !foundUnwired {
+		t.Fatalf("a/no-config should be in NonMonitored (no explicit config + auto-enable off), got %v", cfg.GitHub.NonMonitored)
+	}
+}
