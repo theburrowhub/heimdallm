@@ -507,6 +507,12 @@ func newTestManagerWithCap(t *testing.T, cap int) (*Manager, *fakeGit, string) {
 			if len(call.Args) >= 3 && call.Args[0] == "worktree" && call.Args[1] == "add" {
 				return os.MkdirAll(call.Args[2], 0o755)
 			}
+			if len(call.Args) >= 2 && call.Args[0] == "worktree" && call.Args[1] == "remove" {
+				// Real `git worktree remove --force <path>` deletes
+				// the worktree directory.
+				path := call.Args[len(call.Args)-1]
+				return os.RemoveAll(path)
+			}
 			return nil
 		},
 	}
@@ -526,6 +532,53 @@ func setupManagedClone(t *testing.T, base string) string {
 		t.Fatal(err)
 	}
 	return target
+}
+
+func TestPruneStaleWorktreesRemovesOrphans(t *testing.T) {
+	m, _, base := newTestManagerWithCap(t, 0)
+	target := setupManagedClone(t, base)
+
+	// Live worktree the manager tracks as active.
+	h, err := m.Acquire(context.Background(), Request{
+		Repo: "org/repo", Token: "secret", WorktreeToken: "live",
+	})
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	defer h.Release()
+
+	// Orphan worktree left behind by a hypothetical crashed daemon.
+	orphan := filepath.Join(target, ".worktrees", "orphan")
+	if err := os.MkdirAll(orphan, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := m.PruneStaleWorktrees(context.Background(), target)
+	if err != nil {
+		t.Fatalf("PruneStaleWorktrees: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("pruned = %d, want 1", n)
+	}
+	if _, err := os.Stat(orphan); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("orphan still present or stat failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(target, ".worktrees", "live")); err != nil {
+		t.Fatalf("live worktree should remain: %v", err)
+	}
+}
+
+func TestPruneStaleWorktreesNoWorktreesDir(t *testing.T) {
+	m, _, base := newTestManagerWithCap(t, 0)
+	target := setupManagedClone(t, base)
+
+	n, err := m.PruneStaleWorktrees(context.Background(), target)
+	if err != nil {
+		t.Fatalf("PruneStaleWorktrees on missing dir: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("pruned = %d on missing dir, want 0", n)
+	}
 }
 
 func TestBootstrapAddsWorktreesToGitignore(t *testing.T) {

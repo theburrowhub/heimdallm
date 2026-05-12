@@ -161,6 +161,7 @@ type Manager struct {
 	mu      sync.Mutex
 	locks   map[string]*repoLock
 	caps    map[string]*repoCap
+	active  map[string]struct{} // absolute worktree paths currently held
 	git     gitRunner
 	tempDir func() string
 
@@ -187,6 +188,7 @@ func NewManagerWithOptions(opts ManagerOptions) *Manager {
 	return &Manager{
 		locks:        make(map[string]*repoLock),
 		caps:         make(map[string]*repoCap),
+		active:       make(map[string]struct{}),
 		git:          execGit{},
 		tempDir:      os.TempDir,
 		maxWorktrees: opts.MaxWorktreesPerRepo,
@@ -352,6 +354,7 @@ func (m *Manager) acquireWorktree(ctx context.Context, req Request, owner, name 
 	if err = m.runner().Run(ctx, cloneRoot, nil, addArgs...); err != nil {
 		return nil, fmt.Errorf("repoctx: worktree add %s: %w", wtPath, err)
 	}
+	m.markActive(wtPath)
 
 	releaseCrit()
 
@@ -368,6 +371,7 @@ func (m *Manager) acquireWorktree(ctx context.Context, req Request, owner, name 
 			if rmErr := m.runner().Run(bgCtx, cloneRoot, nil, "worktree", "remove", "--force", wtPath); rmErr != nil {
 				slog.Warn("repoctx: worktree remove failed", "path", wtPath, "err", rmErr)
 			}
+			m.unmarkActive(wtPath)
 			unlockRm()
 		}
 		releaseCap()
@@ -826,6 +830,94 @@ func (m *Manager) acquireWorktreeCap(ctx context.Context, repo string) (func(), 
 		<-c.ch
 		m.releaseCapRef(repo, c)
 	}, nil
+}
+
+func (m *Manager) markActive(path string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.active == nil {
+		m.active = make(map[string]struct{})
+	}
+	m.active[path] = struct{}{}
+}
+
+func (m *Manager) unmarkActive(path string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.active, path)
+}
+
+// PruneStaleWorktreesUnder discovers every managed clone beneath
+// cloneBase and prunes stale worktrees for each. Used at startup so a
+// single call covers all configured clone roots.
+func (m *Manager) PruneStaleWorktreesUnder(ctx context.Context, cloneBase string) (int, error) {
+	if m == nil {
+		return 0, fmt.Errorf("repoctx: nil manager")
+	}
+	clones, err := m.managedClones(cloneBase)
+	if err != nil {
+		return 0, err
+	}
+	var total int
+	var errs []error
+	for _, c := range clones {
+		n, err := m.PruneStaleWorktrees(ctx, c.path)
+		total += n
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return total, errors.Join(errs...)
+}
+
+// PruneStaleWorktrees removes any subdirectory under
+// `<cloneDir>/.worktrees/` that the manager does not currently track
+// as active and then runs `git worktree prune` so git's own registry
+// matches the on-disk state. Intended for daemon startup (where any
+// leftover worktree is by definition stale) and for periodic sweeps
+// that catch leaks from crashed releases.
+func (m *Manager) PruneStaleWorktrees(ctx context.Context, cloneDir string) (int, error) {
+	if m == nil {
+		return 0, fmt.Errorf("repoctx: nil manager")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	root := filepath.Join(cloneDir, worktreesDir)
+	entries, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("repoctx: list worktrees %q: %w", root, err)
+	}
+	pruned := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		path := filepath.Join(root, entry.Name())
+		m.mu.Lock()
+		_, live := m.active[path]
+		m.mu.Unlock()
+		if live {
+			continue
+		}
+		// Try git's tooling first so the registry stays consistent;
+		// fall back to filesystem removal if git refuses (e.g., the
+		// registry entry already vanished).
+		if err := m.runner().Run(ctx, cloneDir, nil, "worktree", "remove", "--force", path); err != nil {
+			slog.Warn("repoctx: prune worktree via git failed, falling back to rm", "path", path, "err", err)
+			if rmErr := os.RemoveAll(path); rmErr != nil {
+				return pruned, fmt.Errorf("repoctx: prune worktree %q: %w", path, rmErr)
+			}
+		}
+		pruned++
+	}
+	if err := m.runner().Run(ctx, cloneDir, nil, "worktree", "prune"); err != nil {
+		slog.Warn("repoctx: git worktree prune", "dir", cloneDir, "err", err)
+	}
+	return pruned, nil
 }
 
 func (m *Manager) releaseCapRef(repo string, c *repoCap) {

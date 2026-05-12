@@ -219,6 +219,21 @@ func main() {
 	exec := executor.New()
 	repoCtx := repoctx.NewManager()
 
+	// Sweep worktrees left behind by a previous daemon process. At
+	// startup the manager has no active worktrees, so every directory
+	// under `<clone>/.worktrees/` is by definition stale and safe to
+	// remove. Mirrors the in-flight DB sweeps above. (#461)
+	{
+		ctx := context.Background()
+		for _, cloneDir := range managedCloneDirs(cfg) {
+			if n, err := repoCtx.PruneStaleWorktreesUnder(ctx, cloneDir); err != nil {
+				slog.Warn("startup: prune stale worktrees", "dir", cloneDir, "err", err)
+			} else if n > 0 {
+				slog.Info("startup: pruned stale worktrees", "dir", cloneDir, "count", n)
+			}
+		}
+	}
+
 	// Load or create the per-daemon API token.  All mutating HTTP endpoints
 	// require this token in X-Heimdallm-Token (security issue #3).
 	apiToken, err := loadOrCreateAPIToken(dataDir())
