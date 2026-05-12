@@ -844,19 +844,35 @@ func (m *Manager) acquireWorktreeCap(ctx context.Context, repo string) (func(), 
 	}, nil
 }
 
+// canonicalWorktreePath returns the absolute, symlink-resolved form
+// of path. EvalSymlinks errors fall back to filepath.Abs so callers
+// always get a comparable string even if intermediate components
+// don't exist yet (e.g. brand-new worktree paths).
+func canonicalWorktreePath(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		return abs
+	}
+	return filepath.Clean(path)
+}
+
 func (m *Manager) markActive(path string) {
+	canon := canonicalWorktreePath(path)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.active == nil {
 		m.active = make(map[string]struct{})
 	}
-	m.active[path] = struct{}{}
+	m.active[canon] = struct{}{}
 }
 
 func (m *Manager) unmarkActive(path string) {
+	canon := canonicalWorktreePath(path)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.active, path)
+	delete(m.active, canon)
 }
 
 // PruneStaleWorktreesUnder discovers every managed clone beneath
@@ -909,8 +925,9 @@ func (m *Manager) PruneStaleWorktrees(ctx context.Context, cloneDir string) (int
 			continue
 		}
 		path := filepath.Join(root, entry.Name())
+		canon := canonicalWorktreePath(path)
 		m.mu.Lock()
-		_, live := m.active[path]
+		_, live := m.active[canon]
 		m.mu.Unlock()
 		if live {
 			continue
