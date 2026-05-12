@@ -231,6 +231,13 @@ func (srv *Server) patchTOML(mutateFn func(m map[string]any) error) (map[string]
 	if err := mutateFn(m); err != nil {
 		return nil, err
 	}
+	// Defense-in-depth (security gate M-5): every PATCH path that
+	// touches ai.agents.* must drop dangerously_skip_perms before the
+	// merged map is validated and persisted. PUT rejects the key with
+	// a 400 via normalizeAgentConfigsForPut, but PATCH deep-merges
+	// arbitrary JSON, so the gate has to be enforced here regardless
+	// of which handler invoked patchTOML.
+	stripDangerousAgentFlags(m)
 	if err := config.ValidateMap(m); err != nil {
 		return nil, err
 	}
@@ -1731,6 +1738,33 @@ func tailLines(f *os.File, n int) []string {
 	// Seek file to end of last line read.
 	f.Seek(size, io.SeekStart) //nolint:errcheck
 	return lines
+}
+
+// stripDangerousAgentFlags removes the HTTP-forbidden
+// dangerously_skip_perms flag from every agent under ai.agents in a
+// merged config map. The flag is still settable via direct edits to
+// config.toml (security gate M-5: only filesystem-trusted inputs can
+// grant the AI permission-sandbox bypass), but never via the HTTP API.
+//
+// Invoked from patchTOML so every PATCH endpoint (global, per-repo,
+// per-org) inherits the gate without each handler having to remember
+// to call it.
+func stripDangerousAgentFlags(m map[string]any) {
+	ai, ok := m["ai"].(map[string]any)
+	if !ok {
+		return
+	}
+	agents, ok := ai["agents"].(map[string]any)
+	if !ok {
+		return
+	}
+	for _, raw := range agents {
+		inner, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		delete(inner, "dangerously_skip_perms")
+	}
 }
 
 // normalizeAgentConfigsForPut validates the agent_configs payload from PUT
