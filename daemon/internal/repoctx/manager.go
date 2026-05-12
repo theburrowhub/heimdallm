@@ -879,17 +879,30 @@ func (m *Manager) acquireWorktreeCap(ctx context.Context, repo string) (func(), 
 }
 
 // canonicalWorktreePath returns the absolute, symlink-resolved form
-// of path. EvalSymlinks errors fall back to filepath.Abs so callers
-// always get a comparable string even if intermediate components
-// don't exist yet (e.g. brand-new worktree paths).
+// of path. Symlink resolution targets the parent directory rather
+// than the path itself so the function returns the same key for a
+// path that does not yet exist (or has just been removed) and for
+// the same path while the worktree directory is on disk. The parent
+// (`<clone>/.worktrees/`) is created by Acquire before any mark /
+// unmark, so resolving it is always possible.
+//
+// Without this, on platforms where the temp/clone root sits under a
+// symlink (e.g. macOS `/var` → `/private/var`), markActive would
+// store the resolved form while unmarkActive (after `os.RemoveAll`)
+// fell back to the literal form, leaking the entry in m.active and
+// pinning the worktree as "live" forever from PruneStaleWorktrees'
+// perspective.
 func canonicalWorktreePath(path string) string {
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		return resolved
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return filepath.Clean(path)
 	}
-	if abs, err := filepath.Abs(path); err == nil {
-		return abs
+	parent := filepath.Dir(abs)
+	leaf := filepath.Base(abs)
+	if resolvedParent, err := filepath.EvalSymlinks(parent); err == nil {
+		return filepath.Join(resolvedParent, leaf)
 	}
-	return filepath.Clean(path)
+	return abs
 }
 
 func (m *Manager) markActive(path string) {
