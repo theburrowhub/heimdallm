@@ -298,7 +298,7 @@ func TestAcquireUpdatesExistingManagedClone(t *testing.T) {
 		"remote set-url origin https://x-access-token@github.com/org/repo.git",
 		"fetch --depth=1 --prune origin HEAD",
 		"reset --hard FETCH_HEAD",
-		"clean -fd -e .heimdallm-managed",
+		"clean -fd -e .heimdallm-managed -e .worktrees",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("git calls = %v, want %v", got, want)
@@ -526,6 +526,88 @@ func setupManagedClone(t *testing.T, base string) string {
 		t.Fatal(err)
 	}
 	return target
+}
+
+func TestBootstrapAddsWorktreesToGitignore(t *testing.T) {
+	m, _, base := newTestManager(t)
+
+	// Fresh clone path — ensureManagedClone takes the bootstrap branch.
+	h, err := m.Acquire(context.Background(), Request{
+		Repo:  "org/repo",
+		Token: "secret",
+		Mode:  ModeRead,
+	})
+	if err != nil {
+		t.Fatalf("Acquire bootstrap: %v", err)
+	}
+	h.Release()
+
+	target := filepath.Join(base, "heimdallm", "org", "repo")
+	data, err := os.ReadFile(filepath.Join(target, ".gitignore"))
+	if err != nil {
+		t.Fatalf("read .gitignore: %v", err)
+	}
+	if !strings.Contains(string(data), ".worktrees/") {
+		t.Fatalf(".gitignore missing .worktrees/ entry; got %q", string(data))
+	}
+
+	// Second Acquire takes the update-existing branch. The entry
+	// must not be duplicated.
+	h2, err := m.Acquire(context.Background(), Request{
+		Repo:  "org/repo",
+		Token: "secret",
+		Mode:  ModeRead,
+	})
+	if err != nil {
+		t.Fatalf("Acquire update: %v", err)
+	}
+	h2.Release()
+
+	data2, err := os.ReadFile(filepath.Join(target, ".gitignore"))
+	if err != nil {
+		t.Fatalf("re-read .gitignore: %v", err)
+	}
+	if got := strings.Count(string(data2), ".worktrees/"); got != 1 {
+		t.Fatalf(".gitignore has %d occurrences of .worktrees/, want 1; content=%q", got, string(data2))
+	}
+}
+
+func TestBootstrapPreservesExistingGitignore(t *testing.T) {
+	// Upstream may ship its own .gitignore; we must append, not replace.
+	m, _, base := newTestManager(t)
+	target := filepath.Join(base, "heimdallm", "org", "repo")
+	if err := os.MkdirAll(filepath.Join(target, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMarker(target, "org/repo"); err != nil {
+		t.Fatal(err)
+	}
+	existing := "node_modules/\n*.log\n"
+	if err := os.WriteFile(filepath.Join(target, ".gitignore"), []byte(existing), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	h, err := m.Acquire(context.Background(), Request{
+		Repo:  "org/repo",
+		Token: "secret",
+		Mode:  ModeRead,
+	})
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	h.Release()
+
+	data, err := os.ReadFile(filepath.Join(target, ".gitignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "node_modules/") || !strings.Contains(got, "*.log") {
+		t.Fatalf("existing entries lost: %q", got)
+	}
+	if !strings.Contains(got, ".worktrees/") {
+		t.Fatalf(".worktrees/ entry missing after append: %q", got)
+	}
 }
 
 func TestAcquireWorktreeWithBaseRefDetaches(t *testing.T) {

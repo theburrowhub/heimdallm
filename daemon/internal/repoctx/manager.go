@@ -547,6 +547,9 @@ func (m *Manager) ensureManagedClone(ctx context.Context, owner, name string, re
 		if err := writeMarker(target, req.Repo); err != nil {
 			return "", err
 		}
+		if err := ensureWorktreeGitignore(target); err != nil {
+			return "", err
+		}
 		return target, nil
 	case errors.Is(err, os.ErrNotExist):
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
@@ -557,6 +560,10 @@ func (m *Manager) ensureManagedClone(ctx context.Context, owner, name string, re
 			return "", err
 		}
 		if err := writeMarker(target, req.Repo); err != nil {
+			_ = os.RemoveAll(target)
+			return "", err
+		}
+		if err := ensureWorktreeGitignore(target); err != nil {
 			_ = os.RemoveAll(target)
 			return "", err
 		}
@@ -600,8 +607,42 @@ func (m *Manager) updateManagedClone(ctx context.Context, target, repo, token st
 	if err := m.runner().Run(ctx, target, nil, "reset", "--hard", "FETCH_HEAD"); err != nil {
 		return fmt.Errorf("repoctx: reset %s: %w", repo, err)
 	}
-	if err := m.runner().Run(ctx, target, nil, "clean", "-fd", "-e", MarkerFile); err != nil {
+	if err := m.runner().Run(ctx, target, nil, "clean", "-fd", "-e", MarkerFile, "-e", worktreesDir); err != nil {
 		return fmt.Errorf("repoctx: clean %s: %w", repo, err)
+	}
+	return nil
+}
+
+// worktreesDir is the relative path under each clone where Heimdallm
+// materialises per-execution worktrees. Excluded from `git clean` so
+// in-flight executions aren't nuked by a concurrent repo update.
+const worktreesDir = ".worktrees"
+
+// ensureWorktreeGitignore makes sure `<dir>/.gitignore` lists the
+// worktrees subdirectory so `git status` and `git clean` ignore it.
+// The function is idempotent: an existing entry is left untouched.
+func ensureWorktreeGitignore(dir string) error {
+	const entry = ".worktrees/"
+	path := filepath.Join(dir, ".gitignore")
+	data, err := os.ReadFile(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return os.WriteFile(path, []byte(entry+"\n"), 0o644)
+	case err != nil:
+		return fmt.Errorf("repoctx: read gitignore %q: %w", path, err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == entry || trimmed == ".worktrees" || trimmed == "/.worktrees/" || trimmed == "/.worktrees" {
+			return nil
+		}
+	}
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		data = append(data, '\n')
+	}
+	data = append(data, []byte(entry+"\n")...)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("repoctx: write gitignore %q: %w", path, err)
 	}
 	return nil
 }
