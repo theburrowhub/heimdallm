@@ -1632,10 +1632,19 @@ func main() {
 		cfgMu.Lock()
 		repoIT := cfg.IssueTrackingForRepo(iss.Repo)
 		cfgMu.Unlock()
+		loginMu.Lock()
+		authUser := cachedLogin
+		loginMu.Unlock()
+		// Default the scope to the daemon's own login when the config
+		// leaves Assignees empty, mirroring the worker entries. Without
+		// this, MatchesAssignees would pass vacuously and a manual
+		// trigger from one operator could be dispatched against an
+		// issue assigned to a completely different operator.
+		repoIT = repoIT.WithDefaultAssignee(authUser)
 
 		slog.Info("trigger issue review: dispatching by current stage",
 			"store_issue_id", issueID, "repo", iss.Repo, "number", iss.Number,
-			"labels", ghIssue.LabelNames())
+			"labels", ghIssue.LabelNames(), "scope", repoIT.Assignees)
 
 		if err := dispatchIssueRunByCurrentMode(ctx, issuePublisher, repoIT, ghIssue); err != nil {
 			publishIssueErr(err.Error())
@@ -3470,9 +3479,19 @@ type issueRunPublisher interface {
 // (IssueTrackingConfig.Classify); keeping a single source of truth means
 // future stage additions only need a new publisher + a switch case here.
 //
-// Blocked / Ignore classifications return an error without publishing so
-// the GUI's "Re-review" surfaces a clear reason rather than queuing work
-// that the worker would silently drop.
+// Two gates produce a clear error instead of publishing:
+//   - Out-of-scope assignees: the worker entries silently drop work whose
+//     assignees fall outside the daemon's scope (see
+//     issueTrackingWithAssigneeScope + issueStageStillCurrent). For a
+//     fetcher tick that is fine — log spam at most. For a manual click it
+//     looks like the GUI is broken (spinner + silence), so reject here
+//     with the assignees + scope spelled out in the error message.
+//   - Blocked / Ignore classifications: nothing to re-run; surface a
+//     reason instead of queuing work the worker would discard.
+//
+// Callers are expected to populate cfg.Assignees (e.g., via
+// WithDefaultAssignee) before invoking — an empty scope means
+// MatchesAssignees is vacuously true and the gate is a no-op.
 func dispatchIssueRunByCurrentMode(
 	ctx context.Context,
 	pub issueRunPublisher,
@@ -3481,6 +3500,10 @@ func dispatchIssueRunByCurrentMode(
 ) error {
 	if issue == nil {
 		return fmt.Errorf("dispatch issue run: nil issue")
+	}
+	if !cfg.MatchesAssignees(issue.AssigneeLogins()) {
+		return fmt.Errorf("dispatch issue run: %s#%d assignees %v are outside this daemon's scope %v; re-run from the assignee's operator",
+			issue.Repo, issue.Number, issue.AssigneeLogins(), cfg.Assignees)
 	}
 	mode := cfg.Classify(issue.LabelNames())
 	switch mode {
@@ -3494,7 +3517,7 @@ func dispatchIssueRunByCurrentMode(
 		return fmt.Errorf("dispatch issue run: %s#%d is blocked by current labels; cannot re-run",
 			issue.Repo, issue.Number)
 	case config.IssueModeIgnore:
-		return fmt.Errorf("dispatch issue run: %s#%d has no stage label and is not covered by default_action; nothing to re-run",
+		return fmt.Errorf("dispatch issue run: %s#%d is ignored by current label configuration; cannot re-run",
 			issue.Repo, issue.Number)
 	default:
 		return fmt.Errorf("dispatch issue run: unsupported mode %q for %s#%d",

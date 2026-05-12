@@ -238,8 +238,8 @@ func TestDispatchIssueRunByCurrentMode_Develop(t *testing.T) {
 func TestDispatchIssueRunByCurrentMode_BlockedReturnsErrorWithoutPublishing(t *testing.T) {
 	pub := &fakeIssueRunPublisher{}
 	cfg := config.IssueTrackingConfig{
-		BlockedLabels:    []string{"blocked"},
-		DevelopLabels:    []string{"heimdallm-develop"},
+		BlockedLabels: []string{"blocked"},
+		DevelopLabels: []string{"heimdallm-develop"},
 	}
 
 	err := dispatchIssueRunByCurrentMode(context.Background(), pub, cfg, dispatchIssue("blocked"))
@@ -257,13 +257,19 @@ func TestDispatchIssueRunByCurrentMode_BlockedReturnsErrorWithoutPublishing(t *t
 func TestDispatchIssueRunByCurrentMode_SkipLabelReturnsErrorWithoutPublishing(t *testing.T) {
 	pub := &fakeIssueRunPublisher{}
 	cfg := config.IssueTrackingConfig{
-		SkipLabels:       []string{"wontfix"},
-		DevelopLabels:    []string{"heimdallm-develop"},
+		SkipLabels:    []string{"wontfix"},
+		DevelopLabels: []string{"heimdallm-develop"},
 	}
 
 	err := dispatchIssueRunByCurrentMode(context.Background(), pub, cfg, dispatchIssue("wontfix"))
 	if err == nil {
 		t.Fatal("expected error for skip-labelled issue, got nil")
+	}
+	// The error must be label-aware so the operator sees WHY the manual
+	// re-review was rejected — generic "nothing to run" hid the skip label
+	// case behind the no-stage-label phrasing.
+	if !strings.Contains(err.Error(), "ignored by current label") {
+		t.Errorf("error should mention current label configuration, got: %v", err)
 	}
 	if len(pub.calls) != 0 {
 		t.Errorf("expected no publish for skip-labelled issue, got %#v", pub.calls)
@@ -296,8 +302,74 @@ func TestDispatchIssueRunByCurrentMode_DefaultsToIgnoreReturnsError(t *testing.T
 	if err == nil {
 		t.Fatal("expected error when issue has no stage label and no default_action, got nil")
 	}
+	if !strings.Contains(err.Error(), "ignored by current label") {
+		t.Errorf("error should mention current label configuration, got: %v", err)
+	}
 	if len(pub.calls) != 0 {
 		t.Errorf("expected no publish, got %#v", pub.calls)
+	}
+}
+
+func TestDispatchIssueRunByCurrentMode_NilIssueReturnsError(t *testing.T) {
+	pub := &fakeIssueRunPublisher{}
+	err := dispatchIssueRunByCurrentMode(context.Background(), pub, config.IssueTrackingConfig{}, nil)
+	if err == nil {
+		t.Fatal("expected error for nil issue, got nil")
+	}
+	if len(pub.calls) != 0 {
+		t.Errorf("expected no publish on nil issue, got %#v", pub.calls)
+	}
+}
+
+func TestDispatchIssueRunByCurrentMode_AssigneeOutOfScopeReturnsErrorWithoutPublishing(t *testing.T) {
+	// The worker entries (issueStageStillCurrent) silently skip when the
+	// issue's assignees fall outside the daemon's scope, which makes a
+	// manual Re-review click look like the GUI is broken: spinner +
+	// silence. Gate at the dispatcher so the operator sees a clear error
+	// instead.
+	pub := &fakeIssueRunPublisher{}
+	cfg := config.IssueTrackingConfig{
+		Assignees:     []string{"userA"},
+		DevelopLabels: []string{"heimdallm-develop"},
+	}
+	issue := &gh.Issue{
+		ID: 4242, Repo: "org/repo", Number: 7,
+		Labels:    []gh.Label{{Name: "heimdallm-develop"}},
+		Assignees: []gh.User{{Login: "userB"}},
+	}
+
+	err := dispatchIssueRunByCurrentMode(context.Background(), pub, cfg, issue)
+	if err == nil {
+		t.Fatal("expected error when issue is outside daemon scope, got nil")
+	}
+	if !strings.Contains(err.Error(), "scope") {
+		t.Errorf("error should mention scope, got: %v", err)
+	}
+	if len(pub.calls) != 0 {
+		t.Errorf("expected no publish for out-of-scope issue, got %#v", pub.calls)
+	}
+}
+
+func TestDispatchIssueRunByCurrentMode_InScopeAssigneeProceeds(t *testing.T) {
+	// Mirror image of the out-of-scope test: when the issue's assignee
+	// matches the daemon scope, dispatch proceeds. Pins both branches of
+	// the scope gate.
+	pub := &fakeIssueRunPublisher{}
+	cfg := config.IssueTrackingConfig{
+		Assignees:     []string{"userA"},
+		DevelopLabels: []string{"heimdallm-develop"},
+	}
+	issue := &gh.Issue{
+		ID: 4242, Repo: "org/repo", Number: 7,
+		Labels:    []gh.Label{{Name: "heimdallm-develop"}},
+		Assignees: []gh.User{{Login: "userA"}},
+	}
+
+	if err := dispatchIssueRunByCurrentMode(context.Background(), pub, cfg, issue); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if len(pub.calls) != 1 || pub.calls[0].Subject != "implement" {
+		t.Fatalf("calls = %#v, want one implement (assignee in scope)", pub.calls)
 	}
 }
 
