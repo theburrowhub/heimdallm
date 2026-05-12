@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -122,26 +123,38 @@ func (g *GitExec) HasChanges(ctx context.Context, dir string) (bool, error) {
 // then be pushed to GitHub via the PR. The patterns target common
 // secret shapes; legitimate repository content rarely matches.
 //
-// Match is performed against the basename of the staged path with
-// filepath.Match, so e.g. `secret.pem` matches `*.pem` regardless
-// of which directory it lives under. config.toml is denied because
-// Heimdallm reads its operator config from a TOML file by that name.
+// Match is performed against the lowercased basename of the staged
+// path with filepath.Match, so e.g. `secret.pem`, `Secret.PEM`, and
+// `subdir/secret.pem` all match `*.pem`. Lowercasing closes a
+// case-insensitive-filesystem bypass (macOS / Windows default).
+// config.toml is denied because Heimdallm reads its operator config
+// from a TOML file by that name; legitimate documentation copies
+// living under `docs/` are also caught — an acceptable trade-off for
+// the security gain.
 var sensitivePathPatterns = []string{
 	".env", ".env.*",
-	"*.pem", "*.key", "*.crt", "*.p12", "*.pfx",
+	"*.pem", "*.key", "*.crt", "*.cer", "*.p12", "*.pfx",
+	"*.gpg", "*.asc",
+	"*.jks", "*.keystore", "*.kdbx",
 	"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
 	"id_rsa.pub", "id_dsa.pub", "id_ecdsa.pub", "id_ed25519.pub",
 	"credentials", "credentials.*",
+	"kubeconfig", ".kubeconfig",
+	".npmrc", ".netrc", ".pypirc",
+	".bash_history", ".zsh_history",
+	"service-account*.json",
 	"config.toml",
 	".heimdallm-managed",
 }
 
 // matchesSensitivePattern reports whether the basename of path
-// matches any pattern in sensitivePathPatterns. Match errors are
-// treated as non-matches: a bad pattern is a programmer bug, not a
-// reason to silently let through every commit.
+// matches any pattern in sensitivePathPatterns. The basename is
+// lowercased before matching to defeat case-variant bypasses on
+// case-insensitive filesystems. Match errors are treated as
+// non-matches: a bad pattern is a programmer bug, not a reason to
+// silently let through every commit.
 func matchesSensitivePattern(path string) (string, bool) {
-	base := filepath.Base(path)
+	base := strings.ToLower(filepath.Base(path))
 	for _, pat := range sensitivePathPatterns {
 		ok, err := filepath.Match(pat, base)
 		if err == nil && ok {
@@ -163,20 +176,38 @@ func (g *GitExec) CommitAll(ctx context.Context, dir, message string) error {
 	if err := runGit(ctx, dir, nil, "add", "-A", "--", ".", ":(exclude)"+managedCloneMarkerFile); err != nil {
 		return fmt.Errorf("gitops: add: %w", err)
 	}
-	staged, err := captureGit(ctx, dir, nil, "diff", "--cached", "--name-only")
+	// `-z` + NUL split: defeats core.quotepath=on (the git default)
+	// which would escape non-ASCII paths like `weird\303\251.pem` and
+	// make filepath.Match miss them. `-c core.quotepath=off` is
+	// redundant when -z is used but kept as belt-and-suspenders.
+	staged, err := captureGit(ctx, dir, nil, "-c", "core.quotepath=off", "diff", "--cached", "--name-only", "-z")
 	if err != nil {
 		return fmt.Errorf("gitops: list staged: %w", err)
 	}
-	for _, line := range strings.Split(strings.TrimSpace(string(staged)), "\n") {
-		path := strings.TrimSpace(line)
+	var refused []string
+	for _, path := range strings.Split(strings.TrimRight(string(staged), "\x00"), "\x00") {
+		path = strings.TrimSpace(path)
 		if path == "" {
 			continue
 		}
 		if pat, hit := matchesSensitivePattern(path); hit {
-			// Leave the index clean so a follow-up run starts fresh.
-			_ = runGit(ctx, dir, nil, "reset", "--", ".")
-			return fmt.Errorf("gitops: refusing commit — staged %q matches sensitive-path pattern %q (prompt-injection defense)", path, pat)
+			slog.Warn("gitops: sensitive-path denylist hit (prompt-injection defense)",
+				"path", path, "pattern", pat)
+			refused = append(refused, path)
 		}
+	}
+	if len(refused) > 0 {
+		// Reset the index AND remove the offending paths from disk —
+		// otherwise the worktree state would still trip the next
+		// `git add -A` and the pipeline would loop. We only remove
+		// the matched files; the rest of the worktree (which contains
+		// legitimate edits) stays intact for triage.
+		_ = runGit(ctx, dir, nil, "reset", "--", ".")
+		for _, p := range refused {
+			_ = os.Remove(filepath.Join(dir, p))
+		}
+		return fmt.Errorf("gitops: refusing commit — staged %d file(s) matched sensitive-path denylist (e.g. %q); prompt-injection defense aborted the auto-implement run",
+			len(refused), refused[0])
 	}
 	if err := runGit(ctx, dir, nil,
 		"-c", "user.name="+CommitAuthorName,

@@ -299,40 +299,76 @@ const (
 	untrustedBodyFenceClose = "── END UNTRUSTED USER ISSUE BODY ──"
 )
 
-// sanitiseUntrustedFreeText neutralises any literal occurrence of the
-// untrusted-body fence markers so user input cannot close the fence
-// and inject instructions into the system region of the prompt. The
-// transform is case-insensitive and matches partial-prefix forms so
-// attackers cannot use clever spacing or casing to bypass it. We
-// preserve the surrounding characters so the body still reads as
-// natural text — only the matched substring is collapsed to a
-// neutral marker.
+// untrustedFenceKeywords are ASCII phrases that mark every Heimdallm
+// "this region is untrusted" fence. We sanitise against the keywords
+// rather than the full decorated fence so an attacker cannot bypass
+// the strip with homoglyph dashes (── vs ── vs -- vs ══) or quirky
+// spacing. The keywords are intentionally all-ASCII so case-folding
+// is byte-length preserving — strings.ToLower never reshapes byte
+// offsets for ASCII content, which removes the Unicode-length hazard
+// (e.g. Turkish dotted-I → "i̇" growing from 2→3 bytes) that a
+// general case-fold scan would trip on.
+var untrustedFenceKeywords = []string{
+	"untrusted user issue body",
+	"untrusted user comments",
+}
+
+// sanitiseUntrustedFreeText neutralises any occurrence of the
+// untrusted-region keywords inside user-controlled text so an
+// attacker cannot forge a fence terminator and re-open the system
+// region of the prompt. Match is case-insensitive over ASCII; the
+// decorative dashes / spacing around the keyword are irrelevant
+// because we only collapse the keyword itself.
 func sanitiseUntrustedFreeText(s string) string {
 	if s == "" {
 		return s
 	}
 	out := s
-	for _, marker := range []string{untrustedBodyFenceOpen, untrustedBodyFenceClose} {
-		// Case-insensitive replacement. strings.Replace is
-		// case-sensitive, so iterate while a case-fold match exists.
+	for _, kw := range untrustedFenceKeywords {
 		for {
-			idx := caseInsensitiveIndex(out, marker)
+			idx := indexCaseInsensitiveASCII(out, kw)
 			if idx < 0 {
 				break
 			}
-			out = out[:idx] + "[fence redacted]" + out[idx+len(marker):]
+			out = out[:idx] + "[fence redacted]" + out[idx+len(kw):]
 		}
 	}
 	return out
 }
 
-func caseInsensitiveIndex(haystack, needle string) int {
+// indexCaseInsensitiveASCII returns the byte offset of the first
+// case-insensitive match of needle inside haystack. The needle MUST
+// be ASCII-only — the function folds A-Z to a-z byte-wise so byte
+// offsets in haystack stay valid regardless of multibyte runes that
+// appear before or after the match.
+func indexCaseInsensitiveASCII(haystack, needle string) int {
 	if needle == "" {
 		return 0
 	}
-	lh := strings.ToLower(haystack)
-	ln := strings.ToLower(needle)
-	return strings.Index(lh, ln)
+	if len(haystack) < len(needle) {
+		return -1
+	}
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		match := true
+		for j := 0; j < len(needle); j++ {
+			h := haystack[i+j]
+			if h >= 'A' && h <= 'Z' {
+				h += 'a' - 'A'
+			}
+			n := needle[j]
+			if n >= 'A' && n <= 'Z' {
+				n += 'a' - 'A'
+			}
+			if h != n {
+				match = false
+				break
+			}
+		}
+		if match {
+			return i
+		}
+	}
+	return -1
 }
 
 func buildDefaultImplementPrompt(ctx PromptContext, customInstructions string) string {
@@ -449,20 +485,31 @@ func BuildPRDescriptionPrompt(issueNumber int, issueTitle, diff string) string {
 	return sb.String()
 }
 
-// formatComments renders the comment thread as a prompt section, trimming to
-// the configured byte cap. Empty input returns empty string so the prompt
-// does not show an empty "Existing discussion:" header.
+const (
+	untrustedCommentsFenceOpen  = "── BEGIN UNTRUSTED USER COMMENTS ──"
+	untrustedCommentsFenceClose = "── END UNTRUSTED USER COMMENTS ──"
+)
+
+// formatComments renders the comment thread as a prompt section,
+// trimming to the configured byte cap. Each comment body is run
+// through sanitiseUntrustedFreeText (GitHub comments are
+// user-submitted text — same trust model as the issue body) and the
+// whole block is wrapped in its own fence so the AI cannot be
+// tricked into treating embedded comment text as system instructions.
+// Empty input returns empty string so the prompt does not show an
+// empty "Existing discussion:" header.
 func formatComments(comments []github.Comment) string {
 	if len(comments) == 0 {
 		return ""
 	}
 	lines := make([]string, 0, len(comments))
 	for _, c := range comments {
-		lines = append(lines, fmt.Sprintf("@%s: %s", c.Author, strings.TrimSpace(c.Body)))
+		safeBody := sanitiseUntrustedFreeText(strings.TrimSpace(c.Body))
+		lines = append(lines, fmt.Sprintf("@%s: %s", c.Author, safeBody))
 	}
 	joined := strings.Join(lines, "\n---\n")
 	if len(joined) > maxCommentsBytes {
 		joined = joined[:maxCommentsBytes] + "\n... (truncated)"
 	}
-	return "Existing discussion:\n<issue_comments>\n" + joined + "\n</issue_comments>"
+	return "Existing discussion:\n" + untrustedCommentsFenceOpen + "\n" + joined + "\n" + untrustedCommentsFenceClose
 }

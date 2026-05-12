@@ -118,6 +118,115 @@ func TestCommitAll_RefusesSensitivePaths(t *testing.T) {
 	}
 }
 
+func TestCommitAll_RefusesSensitivePathsCaseInsensitive(t *testing.T) {
+	// macOS/Windows default to case-insensitive filesystems, where
+	// `.ENV` resolves to the same file as `.env`. Lowercasing the
+	// basename before matching closes that bypass.
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git binary not available")
+	}
+	for _, filename := range []string{".ENV", "Secret.PEM", "ID_RSA", "Config.TOML"} {
+		t.Run(filename, func(t *testing.T) {
+			dir := t.TempDir()
+			runGitForTest(t, dir, "init")
+			runGitForTest(t, dir, "config", "user.name", "Test User")
+			runGitForTest(t, dir, "config", "user.email", "test@example.com")
+			if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# init\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			runGitForTest(t, dir, "add", "README.md")
+			runGitForTest(t, dir, "commit", "-m", "initial")
+
+			if err := os.WriteFile(filepath.Join(dir, filename), []byte("EXFIL=\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			err := issues.NewGitExec().CommitAll(context.Background(), dir, "fix")
+			if err == nil {
+				t.Fatalf("CommitAll accepted case-variant %q (case-insensitive bypass)", filename)
+			}
+		})
+	}
+}
+
+func TestCommitAll_RefusesSensitivePathsNested(t *testing.T) {
+	// Nested paths under arbitrary subdirectories must still be
+	// caught — match is on basename so directory depth is irrelevant.
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git binary not available")
+	}
+	dir := t.TempDir()
+	runGitForTest(t, dir, "init")
+	runGitForTest(t, dir, "config", "user.name", "Test User")
+	runGitForTest(t, dir, "config", "user.email", "test@example.com")
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# init\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitForTest(t, dir, "add", "README.md")
+	runGitForTest(t, dir, "commit", "-m", "initial")
+
+	subdir := filepath.Join(dir, "deep", "nested", "dir")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(subdir, "secret.pem"), []byte("-----BEGIN-----\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := issues.NewGitExec().CommitAll(context.Background(), dir, "fix")
+	if err == nil {
+		t.Fatalf("CommitAll accepted nested sensitive path")
+	}
+	if !strings.Contains(err.Error(), "sensitive-path") {
+		t.Errorf("error should mention denylist, got: %v", err)
+	}
+}
+
+func TestCommitAll_RetryAfterDenylistDoesNotLoop(t *testing.T) {
+	// On a denylist hit we reset the index AND remove the offending
+	// file from disk so a subsequent `git add -A` does not re-stage
+	// the same secret. Without disk cleanup, the auto-implement
+	// pipeline would loop forever on the same content.
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git binary not available")
+	}
+	dir := t.TempDir()
+	runGitForTest(t, dir, "init")
+	runGitForTest(t, dir, "config", "user.name", "Test User")
+	runGitForTest(t, dir, "config", "user.email", "test@example.com")
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# init\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitForTest(t, dir, "add", "README.md")
+	runGitForTest(t, dir, "commit", "-m", "initial")
+
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# fixed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("X=y\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	git := issues.NewGitExec()
+	if err := git.CommitAll(context.Background(), dir, "fix"); err == nil {
+		t.Fatal("first CommitAll should refuse")
+	}
+	// The sensitive file must be gone from disk so the next
+	// add-stage cycle starts clean.
+	if _, err := os.Stat(filepath.Join(dir, ".env")); !os.IsNotExist(err) {
+		t.Fatalf(".env still on disk after denylist hit: %v", err)
+	}
+	// README.md must survive — legitimate edits stay in the worktree.
+	data, err := os.ReadFile(filepath.Join(dir, "README.md"))
+	if err != nil || string(data) != "# fixed\n" {
+		t.Fatalf("legitimate edit was wiped or not preserved: data=%q err=%v", string(data), err)
+	}
+	// And a retry without the sensitive file must succeed.
+	if err := git.CommitAll(context.Background(), dir, "fix"); err != nil {
+		t.Fatalf("retry CommitAll: %v", err)
+	}
+}
+
 func TestCommitAll_AllowsLegitimateChanges(t *testing.T) {
 	// Sanity: denylist must not block normal repo edits.
 	if _, err := exec.LookPath("git"); err != nil {
