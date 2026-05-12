@@ -1503,6 +1503,128 @@ func TestHandlePatchConfig_StripsDangerouslySkipPerms(t *testing.T) {
 	}
 }
 
+func TestHandlePatchConfig_StripsDangerouslySkipPermsCaseInsensitive(t *testing.T) {
+	// JSON preserves key casing; the merged map then feeds into a
+	// Go struct via mapstructure/koanf, which is case-insensitive
+	// by default — so a payload using mixed/upper casing would
+	// otherwise bypass an exact-match strip.
+	tomlContent := "[ai]\nprimary = \"claude\"\n"
+	tomlPath := writeTempTOML(t, tomlContent)
+
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+
+	body := `{"ai":{"agents":{` +
+		`"claude":{"Dangerously_Skip_Perms":true},` +
+		`"gemini":{"DANGEROUSLY_SKIP_PERMS":true},` +
+		`"codex":{"dANGEROUSLY_skip_perms":true}` +
+		`}}}`
+	req := httptest.NewRequest("PATCH", "/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("PATCH should succeed, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	m, _ := config.ReadTOMLMap(tomlPath)
+	ai, _ := m["ai"].(map[string]any)
+	agents, _ := ai["agents"].(map[string]any)
+	for _, name := range []string{"claude", "gemini", "codex"} {
+		inner, ok := agents[name].(map[string]any)
+		if !ok {
+			continue
+		}
+		for k := range inner {
+			if strings.EqualFold(k, "dangerously_skip_perms") {
+				t.Errorf("case-variant %q persisted for %s (M-5 bypass)", k, name)
+			}
+		}
+	}
+}
+
+func TestHandlePatchConfig_StripsDangerouslySkipPermsInRepoOverride(t *testing.T) {
+	// Per-repo overrides land at ai.repos.<repo>.agents.<cli>.* in
+	// the merged map. The scrubber must walk those too so a buggy
+	// future schema or a koanf-style alias can't grant the flag via
+	// a non-top-level path.
+	tomlContent := "[ai]\nprimary = \"claude\"\n"
+	tomlPath := writeTempTOML(t, tomlContent)
+
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+
+	body := `{"ai":{"repos":{"org/repo":{"agents":{"claude":{"dangerously_skip_perms":true}}}}}}`
+	req := httptest.NewRequest("PATCH", "/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("PATCH should succeed, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	m, _ := config.ReadTOMLMap(tomlPath)
+	ai, _ := m["ai"].(map[string]any)
+	repos, _ := ai["repos"].(map[string]any)
+	repo, ok := repos["org/repo"].(map[string]any)
+	if !ok {
+		return
+	}
+	agents, ok := repo["agents"].(map[string]any)
+	if !ok {
+		return
+	}
+	claude, ok := agents["claude"].(map[string]any)
+	if !ok {
+		return
+	}
+	if _, present := claude["dangerously_skip_perms"]; present {
+		t.Fatalf("repo-level dangerously_skip_perms persisted (M-5 bypass): %v", claude)
+	}
+}
+
+func TestHandlePatchConfig_StripsDangerouslySkipPermsInOrgOverride(t *testing.T) {
+	tomlContent := "[ai]\nprimary = \"claude\"\n"
+	tomlPath := writeTempTOML(t, tomlContent)
+
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+
+	body := `{"ai":{"orgs":{"org":{"agents":{"claude":{"dangerously_skip_perms":true}}}}}}`
+	req := httptest.NewRequest("PATCH", "/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("PATCH should succeed, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	m, _ := config.ReadTOMLMap(tomlPath)
+	ai, _ := m["ai"].(map[string]any)
+	orgs, _ := ai["orgs"].(map[string]any)
+	org, ok := orgs["org"].(map[string]any)
+	if !ok {
+		return
+	}
+	agents, ok := org["agents"].(map[string]any)
+	if !ok {
+		return
+	}
+	claude, ok := agents["claude"].(map[string]any)
+	if !ok {
+		return
+	}
+	if _, present := claude["dangerously_skip_perms"]; present {
+		t.Fatalf("org-level dangerously_skip_perms persisted (M-5 bypass): %v", claude)
+	}
+}
+
 func TestHandlePatchConfig_StripsDangerouslySkipPermsAcrossAllAgents(t *testing.T) {
 	// Same gate applied to every CLI under ai.agents — an attacker may
 	// try flipping the flag on a less-watched agent.
