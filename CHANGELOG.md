@@ -9,6 +9,13 @@
 * **issues:** issue classification now follows the state-machine order `skip > blocked > review_only > refinement > develop > default_action`. If a repo intentionally double-labels issues with triage/review and develop labels, the earlier stage now wins so Heimdallm does not skip triage or refinement during promotion.
 * **issues:** `auto_promote_triage` defaults on only when `refinement_labels` is configured. Repos without a refinement target keep their previous review-only behavior; set `auto_promote_triage = false` explicitly to keep refinement manual even when refinement labels exist.
 
+## [0.6.18](https://github.com/theburrowhub/heimdallm/compare/v0.6.17...v0.6.18) (2026-05-12)
+
+
+### Documentation
+
+* explain macOS TCC permission dialogs for Music/Downloads ([#371](https://github.com/theburrowhub/heimdallm/issues/371)) ([8ed3fef](https://github.com/theburrowhub/heimdallm/commit/8ed3fefe392411d0d7e8f14dcd36dfa409381386))
+
 ## [0.6.17](https://github.com/theburrowhub/heimdallm/compare/v0.6.16...v0.6.17) (2026-05-12)
 
 
