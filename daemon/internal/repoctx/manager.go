@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -201,6 +202,8 @@ func (m *Manager) Acquire(ctx context.Context, req Request) (*Handle, error) {
 	}()
 
 	if local := resolveLocal(req); local != "" {
+		// User-mapped paths are returned as-is for now; worktrees only
+		// run inside managed clones until the bootstrap step lands.
 		return &Handle{path: local, managed: false, release: release}, nil
 	}
 
@@ -208,13 +211,38 @@ func (m *Manager) Acquire(ctx context.Context, req Request) (*Handle, error) {
 	if err != nil {
 		return nil, err
 	}
-	h := &Handle{path: path, managed: true, release: release}
+	// Unshallow up front so the worktree (which shares this clone's
+	// object database) inherits a full history before checkout.
 	if req.Mode == ModeWrite {
-		if err = m.EnsureFullHistory(ctx, h, req.Token); err != nil {
+		cloneHandle := &Handle{path: path, managed: true}
+		if err = m.EnsureFullHistory(ctx, cloneHandle, req.Token); err != nil {
 			return nil, fmt.Errorf("%w; retry after fixing Git access or purge the managed clone via DELETE /config/clones/{repo}", err)
 		}
 	}
-	return h, nil
+	if req.WorktreeToken == "" {
+		return &Handle{path: path, managed: true, release: release}, nil
+	}
+	wtPath := filepath.Join(path, ".worktrees", req.WorktreeToken)
+	if err = os.MkdirAll(filepath.Dir(wtPath), 0o755); err != nil {
+		return nil, fmt.Errorf("repoctx: create worktrees root: %w", err)
+	}
+	if err = m.runner().Run(ctx, path, nil, "worktree", "add", wtPath, "--detach"); err != nil {
+		return nil, fmt.Errorf("repoctx: worktree add %s: %w", wtPath, err)
+	}
+	cloneRoot := path
+	innerRelease := release
+	release = func() {
+		// Release runs outside the caller's ctx so a cancelled context
+		// doesn't leave a worktree on disk; we still want a timeout so
+		// the lock is released promptly on git misbehaviour.
+		ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+		defer cancel()
+		if err := m.runner().Run(ctx, cloneRoot, nil, "worktree", "remove", "--force", wtPath); err != nil {
+			slog.Warn("repoctx: worktree remove failed", "path", wtPath, "err", err)
+		}
+		innerRelease()
+	}
+	return &Handle{path: wtPath, managed: true, release: release}, nil
 }
 
 // EnsureFullHistory upgrades a managed shallow clone in-place. It assumes the

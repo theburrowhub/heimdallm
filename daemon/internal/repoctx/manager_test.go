@@ -497,6 +497,75 @@ func TestPurgeNilManagerIsError(t *testing.T) {
 	}
 }
 
+func TestAcquireCreatesWorktreeForManagedClone(t *testing.T) {
+	m, git, base := newTestManager(t)
+	target := filepath.Join(base, "heimdallm", "org", "repo")
+	if err := os.MkdirAll(filepath.Join(target, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMarker(target, "org/repo"); err != nil {
+		t.Fatal(err)
+	}
+	git.onRun = func(call gitCall) error {
+		// Pretend `git worktree add <path>` materialises the worktree
+		// directory so the manager's post-conditions hold.
+		if len(call.Args) >= 3 && call.Args[0] == "worktree" && call.Args[1] == "add" {
+			return os.MkdirAll(call.Args[2], 0o755)
+		}
+		return nil
+	}
+
+	h, err := m.Acquire(context.Background(), Request{
+		Repo:          "org/repo",
+		Token:         "secret",
+		Mode:          ModeRead,
+		WorktreeToken: "triage-42",
+	})
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+
+	wantWT := filepath.Join(target, ".worktrees", "triage-42")
+	if h.Path() != wantWT {
+		t.Fatalf("handle path = %q, want %q", h.Path(), wantWT)
+	}
+	if info, err := os.Stat(wantWT); err != nil {
+		t.Fatalf("worktree dir missing: %v", err)
+	} else if !info.IsDir() {
+		t.Fatalf("worktree path is not a directory")
+	}
+
+	var addCall *gitCall
+	for i, c := range git.snapshot() {
+		if len(c.Args) >= 2 && c.Args[0] == "worktree" && c.Args[1] == "add" {
+			calls := git.snapshot()
+			addCall = &calls[i]
+			break
+		}
+	}
+	if addCall == nil {
+		t.Fatalf("expected `git worktree add` call; calls = %v", git.snapshot())
+	}
+	if addCall.Dir != target {
+		t.Fatalf("worktree add run from %q, want clone root %q", addCall.Dir, target)
+	}
+
+	h.Release()
+
+	foundRemove := false
+	for _, c := range git.snapshot() {
+		if len(c.Args) >= 2 && c.Args[0] == "worktree" && c.Args[1] == "remove" {
+			foundRemove = true
+			if c.Dir != target {
+				t.Fatalf("worktree remove run from %q, want clone root %q", c.Dir, target)
+			}
+		}
+	}
+	if !foundRemove {
+		t.Fatalf("expected `git worktree remove` on release; calls = %v", git.snapshot())
+	}
+}
+
 func TestAcquireRejectsInvalidWorktreeToken(t *testing.T) {
 	// The WorktreeToken becomes a subdirectory under `<clone>/.worktrees/`,
 	// so anything that could escape the clone root or confuse git's
