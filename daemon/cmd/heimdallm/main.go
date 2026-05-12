@@ -1588,13 +1588,26 @@ func main() {
 		return nil
 	})
 
-	// Wire the issue-review trigger callback: re-run issue pipeline on a stored issue.
+	// Wire the issue-review trigger callback: re-run the issue at its
+	// CURRENT stage. Triggered by POST /issues/{id}/review (the GUI's
+	// "Re-review" button). The endpoint path is historical — when it was
+	// added only review_only existed; today it dispatches to whichever
+	// stage the issue is in (triage / refinement / develop) based on the
+	// fresh GitHub labels. See #462.
+	//
+	// We refetch the issue from GitHub before classifying so an auto-
+	// promote that happened since the last poll is reflected in the
+	// dispatched mode; the previously stored ActionTaken lagged behind
+	// and re-review always fell back to triage. Dispatch via NATS reuses
+	// the existing triage / refinement / implement workers end-to-end
+	// (repo context, opts, single-flight claim, auto-promote) instead of
+	// duplicating that wiring in-process here.
 	srv.SetTriggerIssueReviewFn(func(issueID int64) error {
-		// The HTTP handler queues this work in a goroutine and returns 202, so
-		// r.Context() would be cancelled as soon as the response is written.
-		// Use an explicit operation timeout instead of an unbounded background
-		// context so repo-context git operations remain cancellable.
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		// The HTTP handler queues this work in a goroutine and returns 202,
+		// so r.Context() would be cancelled as soon as the response is
+		// written. Use an explicit operation timeout instead so the
+		// GitHub refetch and NATS publish remain bounded.
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
 		defer cancel()
 
 		publishIssueErr := func(msg string) {
@@ -1610,91 +1623,31 @@ func main() {
 			return fmt.Errorf("trigger issue review: get issue %d: %w", issueID, err)
 		}
 
+		ghIssue, err := ghClient.GetIssue(iss.Repo, iss.Number)
+		if err != nil {
+			publishIssueErr(fmt.Sprintf("Failed to fetch issue from GitHub: %v", err))
+			return fmt.Errorf("trigger issue review: fetch %s#%d: %w", iss.Repo, iss.Number, err)
+		}
+
 		cfgMu.Lock()
-		aiCfg := cfg.AIForRepo(iss.Repo)
-		if aiCfg.Primary == "" {
-			aiCfg.Primary = cfg.AI.Primary
-		}
-		agentCfg := cfg.AgentConfigFor(aiCfg.Primary)
-		localDirBase := cfg.GitHub.LocalDirBase
-		globalTimeout := cfg.AI.ExecutionTimeout
+		repoIT := cfg.IssueTrackingForRepo(iss.Repo)
 		cfgMu.Unlock()
-		repoHandle, err := acquireRepoContext(ctx, repoCtx, iss.Repo, &aiCfg, localDirBase, token, repoctx.ModeRead)
-		if err != nil {
-			logRepoContextFallback("trigger issue review", iss.Repo, err)
-			aiCfg.LocalDir = ""
-		}
-		if repoHandle != nil {
-			defer repoHandle.Release()
-			ensureRepoContextFullHistory(ctx, repoCtx, repoHandle, token, "trigger issue review", iss.Repo)
-		}
+		loginMu.Lock()
+		authUser := cachedLogin
+		loginMu.Unlock()
+		// Default the scope to the daemon's own login when the config
+		// leaves Assignees empty, mirroring the worker entries. Without
+		// this, MatchesAssignees would pass vacuously and a manual
+		// trigger from one operator could be dispatched against an
+		// issue assigned to a completely different operator.
+		repoIT = repoIT.WithDefaultAssignee(authUser)
 
-		// Reconstruct github.Issue from store data for the pipeline
-		ghIssue := &gh.Issue{
-			ID:      iss.GithubID,
-			Number:  iss.Number,
-			Title:   iss.Title,
-			Body:    iss.Body,
-			State:   iss.State,
-			Repo:    iss.Repo,
-			HTMLURL: fmt.Sprintf("https://github.com/%s/issues/%d", iss.Repo, iss.Number),
-		}
-		ghIssue.User.Login = iss.Author
-		ghIssue.Mode = config.IssueModeReviewOnly
+		slog.Info("trigger issue review: dispatching by current stage",
+			"store_issue_id", issueID, "repo", iss.Repo, "number", iss.Number,
+			"labels", ghIssue.LabelNames(), "scope", repoIT.Assignees)
 
-		extraFlags := agentCfg.ExtraFlags
-		if extraFlags != "" {
-			if err := executor.ValidateExtraFlags(extraFlags); err != nil {
-				slog.Warn("triggerIssueReview: extra_flags rejected", "err", err)
-				extraFlags = ""
-			}
-		}
-
-		issuePrompt, issueInstructions := resolveIssuePrompt(s, aiCfg.IssuePrompt, agentCfg.PromptID)
-		// ImplementPrompt/ImplementInstructions are populated for completeness
-		// but are ignored by this path: ghIssue.Mode is forced to review_only
-		// above, so runReviewOnly runs and never consults the Implement* fields.
-		// Kept in sync with the poll path so the two RunOptions literals stay
-		// visually identical and future changes propagate without skew.
-		implPrompt, implInstructions := resolveImplementPrompt(s, aiCfg.ImplementPrompt, agentCfg.PromptID)
-
-		opts := issuepipeline.RunOptions{
-			GitHubToken: token,
-			Primary:     aiCfg.Primary,
-			Fallback:    aiCfg.Fallback,
-			ExecOpts: executor.ExecOptions{
-				Model:                agentCfg.Model,
-				MaxTurns:             agentCfg.MaxTurns,
-				ApprovalMode:         agentCfg.ApprovalMode,
-				ExtraFlags:           extraFlags,
-				WorkDir:              aiCfg.LocalDir,
-				Effort:               agentCfg.Effort,
-				PermissionMode:       agentCfg.PermissionMode,
-				Bare:                 agentCfg.Bare,
-				DangerouslySkipPerms: agentCfg.DangerouslySkipPerms,
-				NoSessionPersistence: agentCfg.NoSessionPersistence,
-				Timeout:              resolveExecutionTimeout(globalTimeout, agentCfg.ExecutionTimeout),
-			},
-			IssuePromptOverride:     issuePrompt,
-			IssueInstructions:       issueInstructions,
-			TriageOwner:             aiCfg.TriageOwner,
-			ImplementPromptOverride: implPrompt,
-			ImplementInstructions:   implInstructions,
-			PRReviewers:             aiCfg.PRReviewers,
-			PRAssignee:              aiCfg.PRAssignee,
-			PRLabels:                aiCfg.PRLabels,
-			PRDraft:                 aiCfg.PRDraft != nil && *aiCfg.PRDraft,
-			GeneratePRDescription:   aiCfg.GeneratePRDescription != nil && *aiCfg.GeneratePRDescription,
-		}
-
-		slog.Info("trigger issue review: running pipeline",
-			"store_issue_id", issueID, "repo", iss.Repo, "number", iss.Number)
-
-		_, err = issuePipe.Run(ctx, ghIssue, opts)
-		if err != nil {
-			broker.Publish(sse.Event{Type: sse.EventIssueReviewError, Data: sseData(map[string]any{
-				"issue_id": issueID, "repo": iss.Repo, "error": err.Error(),
-			})})
+		if err := dispatchIssueRunByCurrentMode(ctx, issuePublisher, repoIT, ghIssue); err != nil {
+			publishIssueErr(err.Error())
 			return err
 		}
 		return nil
@@ -3505,6 +3458,71 @@ func defaultAutoImplementPRAssignee(configured, authUser string) string {
 		return assignee
 	}
 	return strings.TrimSpace(strings.TrimLeft(authUser, "@"))
+}
+
+// issueRunPublisher is the narrow NATS surface dispatchIssueRunByCurrentMode
+// needs. Defined here as a local seam so unit tests can fake it without
+// standing up a NATS server; *bus.NATSIssuePublisher satisfies it.
+type issueRunPublisher interface {
+	PublishIssueTriage(ctx context.Context, repo string, number int, githubID int64) error
+	PublishIssueRefinement(ctx context.Context, repo string, number int, githubID int64) error
+	PublishIssueImplement(ctx context.Context, repo string, number int, githubID int64) error
+}
+
+// dispatchIssueRunByCurrentMode publishes the issue to the NATS subject
+// matching its label-derived stage. Used by the manual re-review endpoint
+// (POST /issues/{id}/review) so an operator who clicked "Re-review" after
+// an auto-promote runs the *current* stage instead of falling back to a
+// stored classification that lagged behind the labels — see #462.
+//
+// The label-driven classification mirrors the fetcher's path
+// (IssueTrackingConfig.Classify); keeping a single source of truth means
+// future stage additions only need a new publisher + a switch case here.
+//
+// Two gates produce a clear error instead of publishing:
+//   - Out-of-scope assignees: the worker entries silently drop work whose
+//     assignees fall outside the daemon's scope (see
+//     issueTrackingWithAssigneeScope + issueStageStillCurrent). For a
+//     fetcher tick that is fine — log spam at most. For a manual click it
+//     looks like the GUI is broken (spinner + silence), so reject here
+//     with the assignees + scope spelled out in the error message.
+//   - Blocked / Ignore classifications: nothing to re-run; surface a
+//     reason instead of queuing work the worker would discard.
+//
+// Callers are expected to populate cfg.Assignees (e.g., via
+// WithDefaultAssignee) before invoking — an empty scope means
+// MatchesAssignees is vacuously true and the gate is a no-op.
+func dispatchIssueRunByCurrentMode(
+	ctx context.Context,
+	pub issueRunPublisher,
+	cfg config.IssueTrackingConfig,
+	issue *gh.Issue,
+) error {
+	if issue == nil {
+		return fmt.Errorf("dispatch issue run: nil issue")
+	}
+	if !cfg.MatchesAssignees(issue.AssigneeLogins()) {
+		return fmt.Errorf("dispatch issue run: %s#%d assignees %v are outside this daemon's scope %v; re-run from the assignee's operator",
+			issue.Repo, issue.Number, issue.AssigneeLogins(), cfg.Assignees)
+	}
+	mode := cfg.Classify(issue.LabelNames())
+	switch mode {
+	case config.IssueModeReviewOnly:
+		return pub.PublishIssueTriage(ctx, issue.Repo, issue.Number, issue.ID)
+	case config.IssueModeRefinement:
+		return pub.PublishIssueRefinement(ctx, issue.Repo, issue.Number, issue.ID)
+	case config.IssueModeDevelop:
+		return pub.PublishIssueImplement(ctx, issue.Repo, issue.Number, issue.ID)
+	case config.IssueModeBlocked:
+		return fmt.Errorf("dispatch issue run: %s#%d is blocked by current labels; cannot re-run",
+			issue.Repo, issue.Number)
+	case config.IssueModeIgnore:
+		return fmt.Errorf("dispatch issue run: %s#%d is ignored by current label configuration; cannot re-run",
+			issue.Repo, issue.Number)
+	default:
+		return fmt.Errorf("dispatch issue run: unsupported mode %q for %s#%d",
+			mode, issue.Repo, issue.Number)
+	}
 }
 
 func autoPromoteAfterStage(
