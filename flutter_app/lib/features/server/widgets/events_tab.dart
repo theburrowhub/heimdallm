@@ -118,10 +118,12 @@ class _EventsTabState extends ConsumerState<EventsTab> {
         ),
         Expanded(
           child: visible.isEmpty
-              ? const Center(
+              ? Center(
                   child: Text(
                     'Waiting for events. Polling cycle runs every 60 s by default.',
-                    style: TextStyle(color: Colors.grey),
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
                   ),
                 )
               : ListView.builder(
@@ -185,6 +187,11 @@ class _Row extends StatelessWidget {
   Widget build(BuildContext context) {
     final ev = format(row.type, row.payload);
     final ts = _formatTimestamp(row.timestamp);
+    // Pull surface + secondary-text colours from the theme so the row
+    // renders correctly in both light and dark mode. The previous
+    // hardcoded #F5F5F5 / #555555 left the JSON expand and detail chips
+    // washed out and unreadable on dark backgrounds (#453).
+    final scheme = Theme.of(context).colorScheme;
 
     return InkWell(
       onTap: onTap,
@@ -209,10 +216,10 @@ class _Row extends StatelessWidget {
                 ),
                 Text(
                   ts,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontFamily: 'monospace',
                     fontSize: 11,
-                    color: Colors.grey,
+                    color: scheme.onSurfaceVariant,
                   ),
                 ),
               ],
@@ -228,10 +235,10 @@ class _Row extends StatelessWidget {
                     if (ev.target.isNotEmpty)
                       Text(
                         ev.target,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontFamily: 'monospace',
                           fontSize: 12,
-                          color: Color(0xFF555555),
+                          color: scheme.onSurfaceVariant,
                         ),
                       ),
                     for (final d in ev.details) _DetailChip(text: d),
@@ -243,12 +250,16 @@ class _Row extends StatelessWidget {
                 margin: const EdgeInsets.only(left: 28, top: 6),
                 padding: const EdgeInsets.all(8),
                 decoration: BoxDecoration(
-                  color: const Color(0xFFF5F5F5),
+                  color: scheme.surfaceContainerHighest,
                   borderRadius: BorderRadius.circular(4),
                 ),
                 child: SelectableText(
                   _pretty(row.rawData),
-                  style: const TextStyle(fontFamily: 'monospace', fontSize: 11),
+                  style: TextStyle(
+                    fontFamily: 'monospace',
+                    fontSize: 11,
+                    color: scheme.onSurface,
+                  ),
                 ),
               ),
           ],
@@ -275,20 +286,22 @@ class _Row extends StatelessWidget {
 
 /// Subtle pill-style chip for one detail span (agent, duration, …).
 /// Kept light-weight (no Material Chip) so dozens of rows stay snappy.
+/// Colours pulled from the theme so the chip stays legible in dark mode.
 class _DetailChip extends StatelessWidget {
   const _DetailChip({required this.text});
   final String text;
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
       decoration: BoxDecoration(
-        color: const Color(0xFFEFEFEF),
+        color: scheme.surfaceContainerHighest,
         borderRadius: BorderRadius.circular(3),
       ),
       child: Text(
         text,
-        style: const TextStyle(fontSize: 11, color: Color(0xFF333333)),
+        style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
       ),
     );
   }
@@ -327,8 +340,10 @@ class _Toolbar extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-      decoration: const BoxDecoration(
-        border: Border(bottom: BorderSide(color: Color(0xFFE0E0E0))),
+      decoration: BoxDecoration(
+        border: Border(
+          bottom: BorderSide(color: Theme.of(context).dividerColor),
+        ),
       ),
       child: Wrap(
         spacing: 8,
