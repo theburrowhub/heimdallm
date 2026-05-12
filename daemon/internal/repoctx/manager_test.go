@@ -497,6 +497,129 @@ func TestPurgeNilManagerIsError(t *testing.T) {
 	}
 }
 
+func newTestManagerWithCap(t *testing.T, cap int) (*Manager, *fakeGit, string) {
+	t.Helper()
+	base := t.TempDir()
+	git := &fakeGit{
+		// Materialise worktree dirs so post-conditions hold under real
+		// filesystem checks.
+		onRun: func(call gitCall) error {
+			if len(call.Args) >= 3 && call.Args[0] == "worktree" && call.Args[1] == "add" {
+				return os.MkdirAll(call.Args[2], 0o755)
+			}
+			return nil
+		},
+	}
+	m := NewManagerWithOptions(ManagerOptions{MaxWorktreesPerRepo: cap})
+	m.git = git
+	m.tempDir = func() string { return base }
+	return m, git, base
+}
+
+func setupManagedClone(t *testing.T, base string) string {
+	t.Helper()
+	target := filepath.Join(base, "heimdallm", "org", "repo")
+	if err := os.MkdirAll(filepath.Join(target, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMarker(target, "org/repo"); err != nil {
+		t.Fatal(err)
+	}
+	return target
+}
+
+func TestAcquireBlocksWhenAtMaxWorktreesPerRepo(t *testing.T) {
+	m, _, base := newTestManagerWithCap(t, 2)
+	setupManagedClone(t, base)
+
+	h1, err := m.Acquire(context.Background(), Request{
+		Repo: "org/repo", Token: "secret", WorktreeToken: "wt-1",
+	})
+	if err != nil {
+		t.Fatalf("Acquire 1: %v", err)
+	}
+	h2, err := m.Acquire(context.Background(), Request{
+		Repo: "org/repo", Token: "secret", WorktreeToken: "wt-2",
+	})
+	if err != nil {
+		t.Fatalf("Acquire 2: %v", err)
+	}
+
+	acquired := make(chan *Handle, 1)
+	go func() {
+		h3, err := m.Acquire(context.Background(), Request{
+			Repo: "org/repo", Token: "secret", WorktreeToken: "wt-3",
+		})
+		if err != nil {
+			t.Errorf("Acquire 3: %v", err)
+			return
+		}
+		acquired <- h3
+	}()
+
+	select {
+	case <-acquired:
+		t.Fatal("3rd Acquire returned before any worktree was released; cap not enforced")
+	case <-time.After(80 * time.Millisecond):
+	}
+
+	h1.Release()
+
+	select {
+	case h3 := <-acquired:
+		h3.Release()
+	case <-time.After(time.Second):
+		t.Fatal("3rd Acquire did not proceed after h1.Release")
+	}
+	h2.Release()
+}
+
+func TestAcquireCancelDuringCapQueueReturnsCtxErr(t *testing.T) {
+	m, _, base := newTestManagerWithCap(t, 1)
+	setupManagedClone(t, base)
+
+	h1, err := m.Acquire(context.Background(), Request{
+		Repo: "org/repo", Token: "secret", WorktreeToken: "wt-1",
+	})
+	if err != nil {
+		t.Fatalf("Acquire 1: %v", err)
+	}
+	defer h1.Release()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := m.Acquire(ctx, Request{
+			Repo: "org/repo", Token: "secret", WorktreeToken: "wt-2",
+		})
+		done <- err
+	}()
+
+	// Give the goroutine time to start queuing.
+	time.Sleep(30 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("queued Acquire err = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled Acquire did not return")
+	}
+
+	// Cap slot must be freed — a follow-up Acquire should not deadlock
+	// after h1.Release.
+	h1.Release()
+	h3, err := m.Acquire(context.Background(), Request{
+		Repo: "org/repo", Token: "secret", WorktreeToken: "wt-3",
+	})
+	if err != nil {
+		t.Fatalf("follow-up Acquire: %v", err)
+	}
+	h3.Release()
+}
+
 func TestAcquireCreatesWorktreeForManagedClone(t *testing.T) {
 	m, git, base := newTestManager(t)
 	target := filepath.Join(base, "heimdallm", "org", "repo")

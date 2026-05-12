@@ -122,6 +122,14 @@ type repoLock struct {
 	refs int
 }
 
+// repoCap is a long-lived counting semaphore that bounds the number of
+// concurrent worktrees per repo. Refcount tracks waiters so the map
+// entry can be GC'd once the last release runs.
+type repoCap struct {
+	ch   chan struct{}
+	refs int
+}
+
 type gitRunner interface {
 	Run(ctx context.Context, dir string, env []string, args ...string) error
 }
@@ -139,23 +147,49 @@ type managedClone struct {
 	markerModTime time.Time
 }
 
-// Manager resolves and prepares repository working directories for AI runs.
-// It intentionally uses one exclusive lock per repo for both ModeRead and
-// ModeWrite in v1: managed clones are shared checkouts, and a concurrent
-// fetch/reset/clean can invalidate files while an AI CLI is reading them.
+// Manager resolves and prepares repository working directories for AI
+// runs. Concurrency uses a two-tier lock model:
+//   - A binary critical-section lock per repo (`locks`) is held while
+//     mutating the shared clone — fetch/reset/clean and worktree
+//     add/remove. It is short-lived for worktree callers (released
+//     once the worktree exists) and long-lived for legacy callers
+//     that operate directly on the clone.
+//   - A counting semaphore per repo (`caps`) bounds the number of
+//     concurrent worktrees per repo to MaxWorktreesPerRepo. It is held
+//     across the entire AI run and released after `worktree remove`.
 type Manager struct {
 	mu      sync.Mutex
 	locks   map[string]*repoLock
+	caps    map[string]*repoCap
 	git     gitRunner
 	tempDir func() string
+
+	maxWorktrees int
 }
 
-// NewManager returns a Manager backed by the local git binary.
+// ManagerOptions configures a Manager at construction.
+type ManagerOptions struct {
+	// MaxWorktreesPerRepo bounds the number of concurrent worktrees
+	// per repo. Zero (or negative) disables the cap entirely — useful
+	// in tests and legacy deployments. The daemon resolves the
+	// effective default from configuration.
+	MaxWorktreesPerRepo int
+}
+
+// NewManager returns a Manager backed by the local git binary with
+// worktree capping disabled.
 func NewManager() *Manager {
+	return NewManagerWithOptions(ManagerOptions{})
+}
+
+// NewManagerWithOptions returns a Manager configured per opts.
+func NewManagerWithOptions(opts ManagerOptions) *Manager {
 	return &Manager{
-		locks:   make(map[string]*repoLock),
-		git:     execGit{},
-		tempDir: os.TempDir,
+		locks:        make(map[string]*repoLock),
+		caps:         make(map[string]*repoCap),
+		git:          execGit{},
+		tempDir:      os.TempDir,
+		maxWorktrees: opts.MaxWorktreesPerRepo,
 	}
 }
 
@@ -184,6 +218,16 @@ func (m *Manager) Acquire(ctx context.Context, req Request) (*Handle, error) {
 			return nil, err
 		}
 	}
+	if req.WorktreeToken == "" {
+		return m.acquireClone(ctx, req, owner, name)
+	}
+	return m.acquireWorktree(ctx, req, owner, name)
+}
+
+// acquireClone is the legacy single-lock path used by callers that did
+// not opt into worktrees yet. It mirrors the pre-#461 behaviour: hold
+// the per-repo critical-section lock for the duration of the handle.
+func (m *Manager) acquireClone(ctx context.Context, req Request, owner, name string) (*Handle, error) {
 	unlock, err := m.acquireRepoLock(ctx, req.Repo)
 	if err != nil {
 		return nil, err
@@ -202,8 +246,6 @@ func (m *Manager) Acquire(ctx context.Context, req Request) (*Handle, error) {
 	}()
 
 	if local := resolveLocal(req); local != "" {
-		// User-mapped paths are returned as-is for now; worktrees only
-		// run inside managed clones until the bootstrap step lands.
 		return &Handle{path: local, managed: false, release: release}, nil
 	}
 
@@ -211,36 +253,99 @@ func (m *Manager) Acquire(ctx context.Context, req Request) (*Handle, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Unshallow up front so the worktree (which shares this clone's
-	// object database) inherits a full history before checkout.
 	if req.Mode == ModeWrite {
 		cloneHandle := &Handle{path: path, managed: true}
 		if err = m.EnsureFullHistory(ctx, cloneHandle, req.Token); err != nil {
 			return nil, fmt.Errorf("%w; retry after fixing Git access or purge the managed clone via DELETE /config/clones/{repo}", err)
 		}
 	}
-	if req.WorktreeToken == "" {
-		return &Handle{path: path, managed: true, release: release}, nil
+	return &Handle{path: path, managed: true, release: release}, nil
+}
+
+// acquireWorktree creates a per-execution worktree under the managed
+// clone. The cap semaphore is held across the entire AI run; the
+// critical-section lock is only held while mutating shared state
+// (clone prep + `git worktree add` / `worktree remove`).
+func (m *Manager) acquireWorktree(ctx context.Context, req Request, owner, name string) (*Handle, error) {
+	capRel, err := m.acquireWorktreeCap(ctx, req.Repo)
+	if err != nil {
+		return nil, err
 	}
-	wtPath := filepath.Join(path, ".worktrees", req.WorktreeToken)
+	capReleased := false
+	releaseCap := func() {
+		if !capReleased {
+			capReleased = true
+			capRel()
+		}
+	}
+	defer func() {
+		if !capReleased && err != nil {
+			releaseCap()
+		}
+	}()
+
+	unlock, err := m.acquireRepoLock(ctx, req.Repo)
+	if err != nil {
+		return nil, err
+	}
+	critReleased := false
+	releaseCrit := func() {
+		if !critReleased {
+			critReleased = true
+			unlock()
+		}
+	}
+	defer func() {
+		if !critReleased && err != nil {
+			releaseCrit()
+		}
+	}()
+
+	if local := resolveLocal(req); local != "" {
+		// User-mapped repos sidestep worktree creation until the
+		// gitignore bootstrap step lands; release the crit lock now
+		// and keep the cap so concurrency is still bounded.
+		releaseCrit()
+		return &Handle{path: local, managed: false, release: releaseCap}, nil
+	}
+
+	cloneRoot, err := m.ensureManagedClone(ctx, owner, name, req)
+	if err != nil {
+		return nil, err
+	}
+	if req.Mode == ModeWrite {
+		cloneHandle := &Handle{path: cloneRoot, managed: true}
+		if err = m.EnsureFullHistory(ctx, cloneHandle, req.Token); err != nil {
+			return nil, fmt.Errorf("%w; retry after fixing Git access or purge the managed clone via DELETE /config/clones/{repo}", err)
+		}
+	}
+
+	wtPath := filepath.Join(cloneRoot, ".worktrees", req.WorktreeToken)
 	if err = os.MkdirAll(filepath.Dir(wtPath), 0o755); err != nil {
 		return nil, fmt.Errorf("repoctx: create worktrees root: %w", err)
 	}
-	if err = m.runner().Run(ctx, path, nil, "worktree", "add", wtPath, "--detach"); err != nil {
+	if err = m.runner().Run(ctx, cloneRoot, nil, "worktree", "add", wtPath, "--detach"); err != nil {
 		return nil, fmt.Errorf("repoctx: worktree add %s: %w", wtPath, err)
 	}
-	cloneRoot := path
-	innerRelease := release
-	release = func() {
-		// Release runs outside the caller's ctx so a cancelled context
-		// doesn't leave a worktree on disk; we still want a timeout so
-		// the lock is released promptly on git misbehaviour.
-		ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+
+	releaseCrit()
+
+	release := func() {
+		// Re-acquire the critical-section lock briefly to serialise
+		// the worktree-registry mutation. Use a fresh background ctx
+		// so a cancelled caller ctx never leaves a worktree on disk.
+		bgCtx, cancel := context.WithTimeout(context.Background(), gitTimeout)
 		defer cancel()
-		if err := m.runner().Run(ctx, cloneRoot, nil, "worktree", "remove", "--force", wtPath); err != nil {
-			slog.Warn("repoctx: worktree remove failed", "path", wtPath, "err", err)
+		unlockRm, err := m.acquireRepoLock(bgCtx, req.Repo)
+		if err != nil {
+			slog.Warn("repoctx: worktree release lock", "repo", req.Repo, "err", err)
+		} else {
+			if rmErr := m.runner().Run(bgCtx, cloneRoot, nil, "worktree", "remove", "--force", wtPath); rmErr != nil {
+				slog.Warn("repoctx: worktree remove failed", "path", wtPath, "err", rmErr)
+			}
+			unlockRm()
 		}
-		innerRelease()
+		releaseCap()
 	}
 	return &Handle{path: wtPath, managed: true, release: release}, nil
 }
@@ -622,6 +727,47 @@ func (m *Manager) releaseRepoRef(repo string, l *repoLock) {
 	l.refs--
 	if l.refs == 0 && m.locks[repo] == l {
 		delete(m.locks, repo)
+	}
+}
+
+// acquireWorktreeCap takes one slot of the per-repo worktree
+// semaphore. When MaxWorktreesPerRepo is non-positive the cap is
+// effectively disabled and the returned release is a no-op.
+func (m *Manager) acquireWorktreeCap(ctx context.Context, repo string) (func(), error) {
+	if m.maxWorktrees <= 0 {
+		return func() {}, nil
+	}
+	m.mu.Lock()
+	if m.caps == nil {
+		m.caps = make(map[string]*repoCap)
+	}
+	c := m.caps[repo]
+	if c == nil {
+		c = &repoCap{ch: make(chan struct{}, m.maxWorktrees)}
+		m.caps[repo] = c
+	}
+	c.refs++
+	m.mu.Unlock()
+
+	select {
+	case c.ch <- struct{}{}:
+	case <-ctx.Done():
+		m.releaseCapRef(repo, c)
+		return nil, ctx.Err()
+	}
+
+	return func() {
+		<-c.ch
+		m.releaseCapRef(repo, c)
+	}, nil
+}
+
+func (m *Manager) releaseCapRef(repo string, c *repoCap) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c.refs--
+	if c.refs == 0 && m.caps[repo] == c {
+		delete(m.caps, repo)
 	}
 }
 
