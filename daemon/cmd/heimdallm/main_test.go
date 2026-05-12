@@ -126,6 +126,181 @@ func TestAutoPromoteTransitionsLabelEvenWhenAssigneeOutOfScope(t *testing.T) {
 	}
 }
 
+// ── manual re-review dispatch by current stage (#462) ───────────────────────
+
+// dispatchCall records which Publish* method the dispatcher called and with
+// what arguments. Tests assert the (subject, repo, number, githubID) tuple
+// rather than the raw bus.IssueMsg encoding so a future field addition to
+// IssueMsg does not silently break these assertions.
+type dispatchCall struct {
+	Subject  string
+	Repo     string
+	Number   int
+	GithubID int64
+}
+
+type fakeIssueRunPublisher struct {
+	calls []dispatchCall
+	err   error
+}
+
+func (f *fakeIssueRunPublisher) PublishIssueTriage(_ context.Context, repo string, number int, githubID int64) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.calls = append(f.calls, dispatchCall{"triage", repo, number, githubID})
+	return nil
+}
+
+func (f *fakeIssueRunPublisher) PublishIssueRefinement(_ context.Context, repo string, number int, githubID int64) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.calls = append(f.calls, dispatchCall{"refinement", repo, number, githubID})
+	return nil
+}
+
+func (f *fakeIssueRunPublisher) PublishIssueImplement(_ context.Context, repo string, number int, githubID int64) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.calls = append(f.calls, dispatchCall{"implement", repo, number, githubID})
+	return nil
+}
+
+func dispatchIssue(labels ...string) *gh.Issue {
+	ghLabels := make([]gh.Label, 0, len(labels))
+	for _, l := range labels {
+		ghLabels = append(ghLabels, gh.Label{Name: l})
+	}
+	return &gh.Issue{
+		ID:     4242,
+		Repo:   "org/repo",
+		Number: 7,
+		Labels: ghLabels,
+	}
+}
+
+func TestDispatchIssueRunByCurrentMode_Triage(t *testing.T) {
+	pub := &fakeIssueRunPublisher{}
+	cfg := config.IssueTrackingConfig{
+		ReviewOnlyLabels: []string{"heimdallm-triage"},
+		RefinementLabels: []string{"heimdallm-refine"},
+		DevelopLabels:    []string{"heimdallm-develop"},
+	}
+
+	if err := dispatchIssueRunByCurrentMode(context.Background(), pub, cfg, dispatchIssue("heimdallm-triage")); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if len(pub.calls) != 1 || pub.calls[0].Subject != "triage" {
+		t.Fatalf("calls = %#v, want one triage", pub.calls)
+	}
+	if pub.calls[0].Repo != "org/repo" || pub.calls[0].Number != 7 || pub.calls[0].GithubID != 4242 {
+		t.Errorf("call args = %#v, want repo/number/id propagated from issue", pub.calls[0])
+	}
+}
+
+func TestDispatchIssueRunByCurrentMode_Refinement(t *testing.T) {
+	pub := &fakeIssueRunPublisher{}
+	cfg := config.IssueTrackingConfig{
+		ReviewOnlyLabels: []string{"heimdallm-triage"},
+		RefinementLabels: []string{"heimdallm-refine"},
+		DevelopLabels:    []string{"heimdallm-develop"},
+	}
+
+	if err := dispatchIssueRunByCurrentMode(context.Background(), pub, cfg, dispatchIssue("heimdallm-refine")); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if len(pub.calls) != 1 || pub.calls[0].Subject != "refinement" {
+		t.Fatalf("calls = %#v, want one refinement", pub.calls)
+	}
+}
+
+func TestDispatchIssueRunByCurrentMode_Develop(t *testing.T) {
+	// Pins the #462 fix: an issue auto-promoted to develop re-dispatches
+	// to the implement worker, not back to triage as the previous stored-
+	// classification path did.
+	pub := &fakeIssueRunPublisher{}
+	cfg := config.IssueTrackingConfig{
+		ReviewOnlyLabels: []string{"heimdallm-triage"},
+		RefinementLabels: []string{"heimdallm-refine"},
+		DevelopLabels:    []string{"heimdallm-develop"},
+	}
+
+	if err := dispatchIssueRunByCurrentMode(context.Background(), pub, cfg, dispatchIssue("heimdallm-develop")); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if len(pub.calls) != 1 || pub.calls[0].Subject != "implement" {
+		t.Fatalf("calls = %#v, want one implement (post-auto-promote re-review must hit develop, #462)", pub.calls)
+	}
+}
+
+func TestDispatchIssueRunByCurrentMode_BlockedReturnsErrorWithoutPublishing(t *testing.T) {
+	pub := &fakeIssueRunPublisher{}
+	cfg := config.IssueTrackingConfig{
+		BlockedLabels:    []string{"blocked"},
+		DevelopLabels:    []string{"heimdallm-develop"},
+	}
+
+	err := dispatchIssueRunByCurrentMode(context.Background(), pub, cfg, dispatchIssue("blocked"))
+	if err == nil {
+		t.Fatal("expected error for blocked issue, got nil")
+	}
+	if !strings.Contains(err.Error(), "blocked") {
+		t.Errorf("error should mention blocked state, got: %v", err)
+	}
+	if len(pub.calls) != 0 {
+		t.Errorf("expected no publish for blocked issue, got %#v", pub.calls)
+	}
+}
+
+func TestDispatchIssueRunByCurrentMode_SkipLabelReturnsErrorWithoutPublishing(t *testing.T) {
+	pub := &fakeIssueRunPublisher{}
+	cfg := config.IssueTrackingConfig{
+		SkipLabels:       []string{"wontfix"},
+		DevelopLabels:    []string{"heimdallm-develop"},
+	}
+
+	err := dispatchIssueRunByCurrentMode(context.Background(), pub, cfg, dispatchIssue("wontfix"))
+	if err == nil {
+		t.Fatal("expected error for skip-labelled issue, got nil")
+	}
+	if len(pub.calls) != 0 {
+		t.Errorf("expected no publish for skip-labelled issue, got %#v", pub.calls)
+	}
+}
+
+func TestDispatchIssueRunByCurrentMode_DefaultsToTriageWhenConfigured(t *testing.T) {
+	// No stage labels on the issue, but default_action = review_only →
+	// dispatch to triage. Matches the fetcher's classification fallback.
+	pub := &fakeIssueRunPublisher{}
+	cfg := config.IssueTrackingConfig{
+		DefaultAction: "review_only",
+	}
+
+	if err := dispatchIssueRunByCurrentMode(context.Background(), pub, cfg, dispatchIssue("user-tag")); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if len(pub.calls) != 1 || pub.calls[0].Subject != "triage" {
+		t.Fatalf("calls = %#v, want one triage from default_action fallback", pub.calls)
+	}
+}
+
+func TestDispatchIssueRunByCurrentMode_DefaultsToIgnoreReturnsError(t *testing.T) {
+	// No stage labels, no default_action — same as the fetcher: ignore.
+	// Re-review on such an issue is meaningless; surface a clear error.
+	pub := &fakeIssueRunPublisher{}
+	cfg := config.IssueTrackingConfig{}
+
+	err := dispatchIssueRunByCurrentMode(context.Background(), pub, cfg, dispatchIssue("user-tag"))
+	if err == nil {
+		t.Fatal("expected error when issue has no stage label and no default_action, got nil")
+	}
+	if len(pub.calls) != 0 {
+		t.Errorf("expected no publish, got %#v", pub.calls)
+	}
+}
+
 func TestAutoPromoteTriageSmartDefaultRequiresRefinementLabel(t *testing.T) {
 	aiCfg := config.RepoAI{}
 	it := config.IssueTrackingConfig{}
