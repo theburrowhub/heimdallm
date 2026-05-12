@@ -54,6 +54,78 @@ func TestDefaultAutoImplementPRAssignee(t *testing.T) {
 	}
 }
 
+// TestAutoPromoteTransitionsLabelEvenWhenAssigneeOutOfScope pins the #458
+// contract: auto-promote moves the stage label unconditionally when enabled.
+// Handoff to another operator happens at the *next* stage's worker entry,
+// which already gates by assignee scope (see issueTrackingWithAssigneeScope +
+// issueStageStillCurrent in this file). Re-introducing a scope gate inside
+// autoPromoteAfterStage — as #457 did — strands the issue at the current
+// stage label and the new assignee's daemon never picks it up.
+func TestAutoPromoteTransitionsLabelEvenWhenAssigneeOutOfScope(t *testing.T) {
+	var (
+		addedLabels   [][]string
+		removedLabels []string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/org/repo/issues/7/comments":
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/org/repo/labels":
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/org/repo/issues/7/labels":
+			var payload struct {
+				Labels []string `json:"labels"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			addedLabels = append(addedLabels, payload.Labels)
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode([]map[string]string{})
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/repos/org/repo/issues/7/labels/"):
+			removedLabels = append(removedLabels, strings.TrimPrefix(r.URL.Path, "/repos/org/repo/issues/7/labels/"))
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode([]map[string]string{})
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/org/repo/issues/7/comments":
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"created_at": time.Now().UTC().Format(time.RFC3339),
+			})
+		default:
+			t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.String())
+			http.Error(w, "unexpected request", http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("tok", gh.WithBaseURL(srv.URL))
+	it := config.IssueTrackingConfig{
+		Assignees:        []string{"userA"},
+		ReviewOnlyLabels: []string{"heimdallm-triage"},
+		RefinementLabels: []string{"heimdallm-refine"},
+	}
+	// The issue's GitHub assignee is userB (handoff target); the daemon's
+	// scope is userA. Auto-promote must still transition the label so
+	// userB's daemon picks up refinement on its next poll.
+	issue := &gh.Issue{
+		Repo:      "org/repo",
+		Number:    7,
+		State:     "open",
+		Assignees: []gh.User{{Login: "userB"}},
+		Labels:    []gh.Label{{Name: "heimdallm-triage"}},
+	}
+
+	autoPromoteAfterStage(context.Background(), client, nil, issue, 42, it, config.RepoAI{},
+		issuepipeline.IssueStageTriage, "test")
+
+	if len(addedLabels) != 1 || len(addedLabels[0]) != 1 || addedLabels[0][0] != "heimdallm-refine" {
+		t.Fatalf("AddLabels = %#v, want one call with [heimdallm-refine] (label transition is unconditional under #458)", addedLabels)
+	}
+	if len(removedLabels) != 1 || removedLabels[0] != "heimdallm-triage" {
+		t.Fatalf("RemoveLabels = %#v, want one DELETE for heimdallm-triage", removedLabels)
+	}
+}
+
 func TestAutoPromoteTriageSmartDefaultRequiresRefinementLabel(t *testing.T) {
 	aiCfg := config.RepoAI{}
 	it := config.IssueTrackingConfig{}
