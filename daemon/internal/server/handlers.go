@@ -231,6 +231,18 @@ func (srv *Server) patchTOML(mutateFn func(m map[string]any) error) (map[string]
 	if err := mutateFn(m); err != nil {
 		return nil, err
 	}
+	// Defense-in-depth (security gate M-5): every PATCH path that
+	// touches ai.agents.* must drop dangerously_skip_perms before the
+	// merged map is validated and persisted. PUT rejects the key with
+	// a 400 via normalizeAgentConfigsForPut, but PATCH deep-merges
+	// arbitrary JSON, so the gate has to be enforced here regardless
+	// of which handler invoked patchTOML. Audit-log non-zero strips so
+	// operators can detect bypass attempts even though they're now
+	// neutralized.
+	if stripped := stripDangerousAgentFlags(m); stripped > 0 {
+		slog.Warn("config: PATCH attempted to set dangerously_skip_perms; stripped (M-5 gate)",
+			"count", stripped)
+	}
 	if err := config.ValidateMap(m); err != nil {
 		return nil, err
 	}
@@ -1733,6 +1745,81 @@ func tailLines(f *os.File, n int) []string {
 	return lines
 }
 
+// dangerousAgentFlagKey names the security-gated flag that grants
+// `--dangerously-skip-permissions` to the AI CLI. Both
+// normalizeAgentConfigsForPut and stripDangerousAgentFlags reference
+// this constant so the M-5 denylist has a single source of truth.
+const dangerousAgentFlagKey = "dangerously_skip_perms"
+
+// stripDangerousAgentFlags removes the HTTP-forbidden
+// dangerously_skip_perms flag from every agent map reachable in the
+// merged config: top-level ai.agents.<cli>, per-repo
+// ai.repos.<repo>.agents.<cli>, and per-org ai.orgs.<org>.agents.<cli>.
+// The flag is still settable via direct edits to config.toml
+// (security gate M-5: only filesystem-trusted inputs can grant the
+// permission-sandbox bypass), but never via the HTTP API.
+//
+// Returns the number of entries stripped so callers can audit-log
+// bypass attempts. Key comparison is case-insensitive because the
+// downstream koanf/mapstructure decoder is case-insensitive when
+// mapping into CLIAgentConfig.DangerouslySkipPerms — an exact-case
+// match would leave Dangerously_Skip_Perms / DANGEROUSLY_SKIP_PERMS
+// shaped payloads as a live bypass.
+//
+// Invoked from patchTOML so every PATCH endpoint (global, per-repo,
+// per-org) inherits the gate without each handler having to remember
+// to call it.
+func stripDangerousAgentFlags(m map[string]any) int {
+	if m == nil {
+		return 0
+	}
+	stripped := 0
+	scrub := func(agents map[string]any) {
+		for _, raw := range agents {
+			inner, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			for k := range inner {
+				if strings.EqualFold(k, dangerousAgentFlagKey) {
+					delete(inner, k)
+					stripped++
+				}
+			}
+		}
+	}
+	ai, ok := m["ai"].(map[string]any)
+	if !ok {
+		return 0
+	}
+	if agents, ok := ai["agents"].(map[string]any); ok {
+		scrub(agents)
+	}
+	if repos, ok := ai["repos"].(map[string]any); ok {
+		for _, raw := range repos {
+			repo, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if agents, ok := repo["agents"].(map[string]any); ok {
+				scrub(agents)
+			}
+		}
+	}
+	if orgs, ok := ai["orgs"].(map[string]any); ok {
+		for _, raw := range orgs {
+			org, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if agents, ok := org["agents"].(map[string]any); ok {
+				scrub(agents)
+			}
+		}
+	}
+	return stripped
+}
+
 // normalizeAgentConfigsForPut validates the agent_configs payload from PUT
 // /config. The payload must be a JSON object keyed by CLI name (claude, gemini,
 // codex, opencode), where each value is itself an object whose keys are in
@@ -1759,11 +1846,11 @@ func normalizeAgentConfigsForPut(v any) (map[string]map[string]any, error) {
 		}
 		normalized := make(map[string]any, len(inner))
 		for k, val := range inner {
-			if k == "dangerously_skip_perms" {
+			if strings.EqualFold(k, dangerousAgentFlagKey) {
 				return nil, fmt.Errorf(
-					"agent_configs[%q].dangerously_skip_perms cannot be set via HTTP API; "+
+					"agent_configs[%q].%s cannot be set via HTTP API; "+
 						"configure it in config.toml under [ai.agents.%s] (security gate M-5)",
-					cli, cli)
+					cli, dangerousAgentFlagKey, cli)
 			}
 			if _, allowed := allowedAgentConfigSubkeys[k]; !allowed {
 				return nil, fmt.Errorf("agent_configs[%q]: unknown key %q", cli, k)

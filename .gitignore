@@ -22,3 +22,4 @@ docker/config/
 daemon/heimdallm
 cli/heimdallm-cli
 .superpowers/
+.claude/scheduled_tasks.lock

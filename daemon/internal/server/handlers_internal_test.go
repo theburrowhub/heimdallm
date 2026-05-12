@@ -85,6 +85,67 @@ func TestDaemonLogPath_FallsBackToNativeWhenDataDirUnset(t *testing.T) {
 	}
 }
 
+// TestStripDangerousAgentFlags_HandlesUnexpectedShapes pins the
+// type-assertion guards: callers feed the scrubber a merged config
+// map whose interior types come from JSON decoding plus a TOML round
+// trip, and weird shapes (nil, scalars where maps are expected)
+// must never panic. PATCH validation enforces shape strictly today,
+// but the scrubber must remain safe even if a future ValidateMap
+// becomes more permissive.
+func TestStripDangerousAgentFlags_HandlesUnexpectedShapes(t *testing.T) {
+	cases := []map[string]any{
+		nil,
+		{},
+		{"ai": "not a map"},
+		{"ai": map[string]any{"agents": nil}},
+		{"ai": map[string]any{"agents": "string"}},
+		{"ai": map[string]any{"agents": map[string]any{"claude": nil}}},
+		{"ai": map[string]any{"agents": map[string]any{"claude": "string"}}},
+		{"ai": map[string]any{"repos": "string"}},
+		{"ai": map[string]any{"repos": map[string]any{"org/r": "string"}}},
+		{"ai": map[string]any{"repos": map[string]any{"org/r": map[string]any{"agents": "string"}}}},
+		{"ai": map[string]any{"orgs": map[string]any{"org": map[string]any{"agents": map[string]any{"claude": nil}}}}},
+	}
+	for _, m := range cases {
+		stripDangerousAgentFlags(m) // must not panic
+	}
+}
+
+func TestStripDangerousAgentFlags_ReportsCount(t *testing.T) {
+	m := map[string]any{
+		"ai": map[string]any{
+			"agents": map[string]any{
+				"claude": map[string]any{"dangerously_skip_perms": true, "permission_mode": "acceptEdits"},
+				"gemini": map[string]any{"DANGEROUSLY_SKIP_PERMS": true},
+			},
+			"repos": map[string]any{
+				"org/r": map[string]any{
+					"agents": map[string]any{
+						"claude": map[string]any{"Dangerously_Skip_Perms": true},
+					},
+				},
+			},
+			"orgs": map[string]any{
+				"org": map[string]any{
+					"agents": map[string]any{
+						"claude": map[string]any{"dangerously_skip_perms": true},
+					},
+				},
+			},
+		},
+	}
+	n := stripDangerousAgentFlags(m)
+	if n != 4 {
+		t.Fatalf("stripped count = %d, want 4 (global x2 + repo + org)", n)
+	}
+	ai := m["ai"].(map[string]any)
+	agents := ai["agents"].(map[string]any)
+	claude := agents["claude"].(map[string]any)
+	if claude["permission_mode"] != "acceptEdits" {
+		t.Errorf("permission_mode lost: %v", claude)
+	}
+}
+
 func TestDaemonLogPath_XDGStateHomeUsedWhenSet(t *testing.T) {
 	if runtime.GOOS == "darwin" {
 		t.Skip("XDG path only used on non-darwin when HEIMDALLM_DATA_DIR is unset")
