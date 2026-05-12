@@ -9,6 +9,15 @@
 * **issues:** issue classification now follows the state-machine order `skip > blocked > review_only > refinement > develop > default_action`. If a repo intentionally double-labels issues with triage/review and develop labels, the earlier stage now wins so Heimdallm does not skip triage or refinement during promotion.
 * **issues:** `auto_promote_triage` defaults on only when `refinement_labels` is configured. Repos without a refinement target keep their previous review-only behavior; set `auto_promote_triage = false` explicitly to keep refinement manual even when refinement labels exist.
 
+## [0.6.16](https://github.com/theburrowhub/heimdallm/compare/v0.6.15...v0.6.16) (2026-05-12)
+
+
+### Bug Fixes
+
+* **github:** paginate FetchCollaborators via Link header ([#435](https://github.com/theburrowhub/heimdallm/issues/435)) ([9878454](https://github.com/theburrowhub/heimdallm/commit/98784547b2a0e3d5221e672d3ca9802942e473c9))
+* **issues:** restore handoff flow + single-flight triage claim per issue ([#458](https://github.com/theburrowhub/heimdallm/issues/458)) ([#459](https://github.com/theburrowhub/heimdallm/issues/459)) ([e838e4a](https://github.com/theburrowhub/heimdallm/commit/e838e4abf2caa909adfb37c60a0793677d81f4ea))
+* **issues:** scope auto-promote to daemon assignee + record real PR author ([#456](https://github.com/theburrowhub/heimdallm/issues/456)) ([#457](https://github.com/theburrowhub/heimdallm/issues/457)) ([cbdabf3](https://github.com/theburrowhub/heimdallm/commit/cbdabf37f93eee3240ba14f772296d7c9f064b1b))
+
 ## [0.6.15](https://github.com/theburrowhub/heimdallm/compare/v0.6.14...v0.6.15) (2026-05-11)
 
 
