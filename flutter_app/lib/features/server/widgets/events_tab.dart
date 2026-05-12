@@ -8,6 +8,17 @@ import '../../../core/api/sse_client.dart';
 import '../../../core/platform/platform_services_provider.dart';
 import '../event_summary.dart';
 
+/// Server > Events tab — operational dashboard of live SSE events.
+///
+/// Each event is rendered through [format] (see event_summary.dart) so
+/// the row shows a human title (e.g. "Review completed"), the target
+/// repo/PR/issue, and chip-style details (agent, duration, reason)
+/// instead of the raw event type name plus a JSON dump (#453). The full
+/// JSON payload is still accessible by clicking a row to expand.
+///
+/// Newest events appear at the top so the operator can read top-down
+/// without chasing the scroll; auto-scroll keeps the view pinned to the
+/// freshest row until paused.
 class EventsTab extends ConsumerStatefulWidget {
   const EventsTab({super.key});
   @override
@@ -16,11 +27,15 @@ class EventsTab extends ConsumerStatefulWidget {
 
 class _EventsTabState extends ConsumerState<EventsTab> {
   static const _maxEvents = 500;
+  // Newest at index 0. Render order matches insertion order.
   final _events = <_EventRow>[];
   SseClient? _client;
   StreamSubscription<SseEvent>? _sub;
   final _scroll = ScrollController();
+  // Expanded rows are keyed by the row's monotonic id (set on insert) so
+  // a prepend doesn't shift previously-expanded indices.
   final _expanded = <int>{};
+  int _nextRowId = 0;
   bool _autoScroll = true;
   final Set<String> _enabledGroups = {'pr', 'issue', 'polling', 'state', 'circuit_breaker'};
   String _searchQuery = '';
@@ -60,19 +75,23 @@ class _EventsTabState extends ConsumerState<EventsTab> {
       payload = const {};
     }
     setState(() {
-      _events.add(_EventRow(
+      final row = _EventRow(
+        id: _nextRowId++,
         timestamp: DateTime.now(),
         type: ev.type,
         payload: payload,
         rawData: ev.data,
-      ));
+      );
+      _events.insert(0, row);
       while (_events.length > _maxEvents) {
-        _events.removeAt(0);
+        final dropped = _events.removeLast();
+        _expanded.remove(dropped.id);
       }
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_autoScroll && _scroll.hasClients) {
-        _scroll.jumpTo(_scroll.position.maxScrollExtent);
+        // Newest is at the top — pin to 0.
+        _scroll.jumpTo(0);
       }
     });
   }
@@ -90,12 +109,8 @@ class _EventsTabState extends ConsumerState<EventsTab> {
           onAutoScrollChanged: (v) => setState(() => _autoScroll = v),
           onGroupToggled: (g) => setState(() {
             _enabledGroups.contains(g) ? _enabledGroups.remove(g) : _enabledGroups.add(g);
-            _expanded.clear();
           }),
-          onSearchChanged: (q) => setState(() {
-            _searchQuery = q;
-            _expanded.clear();
-          }),
+          onSearchChanged: (q) => setState(() => _searchQuery = q),
           onClear: () => setState(() {
             _events.clear();
             _expanded.clear();
@@ -112,13 +127,16 @@ class _EventsTabState extends ConsumerState<EventsTab> {
               : ListView.builder(
                   controller: _scroll,
                   itemCount: visible.length,
-                  itemBuilder: (context, i) => _Row(
-                    row: visible[i],
-                    expanded: _expanded.contains(i),
-                    onTap: () => setState(() {
-                      _expanded.contains(i) ? _expanded.remove(i) : _expanded.add(i);
-                    }),
-                  ),
+                  itemBuilder: (context, i) {
+                    final row = visible[i];
+                    return _Row(
+                      row: row,
+                      expanded: _expanded.contains(row.id),
+                      onTap: () => setState(() {
+                        _expanded.contains(row.id) ? _expanded.remove(row.id) : _expanded.add(row.id);
+                      }),
+                    );
+                  },
                 ),
         ),
       ],
@@ -128,17 +146,28 @@ class _EventsTabState extends ConsumerState<EventsTab> {
   bool _isVisible(_EventRow row) {
     if (!_enabledGroups.contains(_groupOf(row.type))) return false;
     if (_searchQuery.isEmpty) return true;
-    final summary = summarize(row.type, row.payload).toLowerCase();
-    return summary.contains(_searchQuery.toLowerCase());
+    final q = _searchQuery.toLowerCase();
+    final ev = format(row.type, row.payload);
+    if (ev.label.toLowerCase().contains(q)) return true;
+    if (ev.target.toLowerCase().contains(q)) return true;
+    for (final d in ev.details) {
+      if (d.toLowerCase().contains(q)) return true;
+    }
+    if (row.type.toLowerCase().contains(q)) return true;
+    return false;
   }
 }
 
 class _EventRow {
+  /// Stable id assigned on insert; survives the FIFO trim so expand
+  /// state doesn't latch onto the wrong row when older entries drop off.
+  final int id;
   final DateTime timestamp;
   final String type;
   final Map<String, dynamic> payload;
   final String rawData;
   const _EventRow({
+    required this.id,
     required this.timestamp,
     required this.type,
     required this.payload,
@@ -154,36 +183,64 @@ class _Row extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final glyph = glyphFor(row.type);
-    final hh = row.timestamp.hour.toString().padLeft(2, '0');
-    final mm = row.timestamp.minute.toString().padLeft(2, '0');
-    final ss = row.timestamp.second.toString().padLeft(2, '0');
+    final ev = format(row.type, row.payload);
+    final ts = _formatTimestamp(row.timestamp);
+
     return InkWell(
       onTap: onTap,
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                Text('$hh:$mm:$ss',
-                    style: const TextStyle(
-                        fontFamily: 'monospace', fontSize: 12, color: Colors.grey)),
-                const SizedBox(width: 12),
-                Icon(glyph.icon, color: glyph.color, size: 16),
-                const SizedBox(width: 8),
+                Icon(ev.icon, color: ev.color, size: 18),
+                const SizedBox(width: 10),
                 Expanded(
                   child: Text(
-                    summarize(row.type, row.payload),
-                    style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+                    ev.label,
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                Text(
+                  ts,
+                  style: const TextStyle(
+                    fontFamily: 'monospace',
+                    fontSize: 11,
+                    color: Colors.grey,
                   ),
                 ),
               ],
             ),
+            if (ev.target.isNotEmpty || ev.details.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(left: 28, top: 2),
+                child: Wrap(
+                  spacing: 8,
+                  runSpacing: 2,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    if (ev.target.isNotEmpty)
+                      Text(
+                        ev.target,
+                        style: const TextStyle(
+                          fontFamily: 'monospace',
+                          fontSize: 12,
+                          color: Color(0xFF555555),
+                        ),
+                      ),
+                    for (final d in ev.details) _DetailChip(text: d),
+                  ],
+                ),
+              ),
             if (expanded)
               Container(
-                margin: const EdgeInsets.only(left: 60, top: 4),
+                margin: const EdgeInsets.only(left: 28, top: 6),
                 padding: const EdgeInsets.all(8),
                 decoration: BoxDecoration(
                   color: const Color(0xFFF5F5F5),
@@ -191,7 +248,7 @@ class _Row extends StatelessWidget {
                 ),
                 child: SelectableText(
                   _pretty(row.rawData),
-                  style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+                  style: const TextStyle(fontFamily: 'monospace', fontSize: 11),
                 ),
               ),
           ],
@@ -200,12 +257,40 @@ class _Row extends StatelessWidget {
     );
   }
 
+  static String _formatTimestamp(DateTime t) {
+    final hh = t.hour.toString().padLeft(2, '0');
+    final mm = t.minute.toString().padLeft(2, '0');
+    final ss = t.second.toString().padLeft(2, '0');
+    return '$hh:$mm:$ss';
+  }
+
   String _pretty(String raw) {
     try {
       return const JsonEncoder.withIndent('  ').convert(jsonDecode(raw));
     } catch (_) {
       return raw;
     }
+  }
+}
+
+/// Subtle pill-style chip for one detail span (agent, duration, …).
+/// Kept light-weight (no Material Chip) so dozens of rows stay snappy.
+class _DetailChip extends StatelessWidget {
+  const _DetailChip({required this.text});
+  final String text;
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+      decoration: BoxDecoration(
+        color: const Color(0xFFEFEFEF),
+        borderRadius: BorderRadius.circular(3),
+      ),
+      child: Text(
+        text,
+        style: const TextStyle(fontSize: 11, color: Color(0xFF333333)),
+      ),
+    );
   }
 }
 
