@@ -9,6 +9,21 @@
 * **issues:** issue classification now follows the state-machine order `skip > blocked > review_only > refinement > develop > default_action`. If a repo intentionally double-labels issues with triage/review and develop labels, the earlier stage now wins so Heimdallm does not skip triage or refinement during promotion.
 * **issues:** `auto_promote_triage` defaults on only when `refinement_labels` is configured. Repos without a refinement target keep their previous review-only behavior; set `auto_promote_triage = false` explicitly to keep refinement manual even when refinement labels exist.
 
+## [0.6.17](https://github.com/theburrowhub/heimdallm/compare/v0.6.16...v0.6.17) (2026-05-12)
+
+
+### Features
+
+* **repoctx:** per-execution git worktrees for concurrent pipelines ([#461](https://github.com/theburrowhub/heimdallm/issues/461)) ([#476](https://github.com/theburrowhub/heimdallm/issues/476)) ([d98b914](https://github.com/theburrowhub/heimdallm/commit/d98b914509ecf8bee1be37d137230250ac222b12))
+
+
+### Bug Fixes
+
+* **issues:** dispatch re-review by current GitHub labels, not stored action ([#462](https://github.com/theburrowhub/heimdallm/issues/462)) ([#473](https://github.com/theburrowhub/heimdallm/issues/473)) ([82b0f1d](https://github.com/theburrowhub/heimdallm/commit/82b0f1dd4a10728b60f32576e9d62e304aadb537))
+* **security:** harden auto_implement against prompt injection ([#478](https://github.com/theburrowhub/heimdallm/issues/478)) ([#480](https://github.com/theburrowhub/heimdallm/issues/480)) ([21f87d5](https://github.com/theburrowhub/heimdallm/commit/21f87d5588a96f9a3b17c84cd14c2b4cba52271f))
+* **server:** strip dangerously_skip_perms from PATCH bodies ([#477](https://github.com/theburrowhub/heimdallm/issues/477)) ([#479](https://github.com/theburrowhub/heimdallm/issues/479)) ([0a1e58c](https://github.com/theburrowhub/heimdallm/commit/0a1e58c51a809c522e612f045ed33be6fb280080))
+* **server:** structured event cards in Events tab ([#453](https://github.com/theburrowhub/heimdallm/issues/453)) ([#475](https://github.com/theburrowhub/heimdallm/issues/475)) ([3228854](https://github.com/theburrowhub/heimdallm/commit/3228854e7b907144b57f8f550d5c68fcf5bf0823))
+
 ## [0.6.16](https://github.com/theburrowhub/heimdallm/compare/v0.6.15...v0.6.16) (2026-05-12)
 
 
