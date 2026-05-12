@@ -3507,20 +3507,9 @@ func defaultAutoImplementPRAssignee(configured, authUser string) string {
 	return strings.TrimSpace(strings.TrimLeft(authUser, "@"))
 }
 
-// autoPromoteGitHub is the narrow GitHub surface that autoPromoteAfterStage
-// touches: the refetch (#456 fix), the comment lookup used for audit dedup,
-// and the label / comment mutations driven by TransitionIssueStage. Defined
-// here — rather than in the github or issues package — because it is purely
-// a testability seam for this one call site; *gh.Client satisfies it.
-type autoPromoteGitHub interface {
-	issuepipeline.StageTransitionClient
-	GetIssue(repo string, number int) (*gh.Issue, error)
-	FetchIssueCommentsOnly(repo string, number int) ([]gh.Comment, error)
-}
-
 func autoPromoteAfterStage(
 	ctx context.Context,
-	client autoPromoteGitHub,
+	client *gh.Client,
 	broker issuepipeline.Publisher,
 	issue *gh.Issue,
 	storeIssueID int64,
@@ -3532,29 +3521,15 @@ func autoPromoteAfterStage(
 	if !autoPromoteStageEnabled(aiCfg, it, from) {
 		return
 	}
-
-	// Refetch the issue so the scope check sees post-pipeline assignees:
-	// triage / refinement may have reassigned it to another user ("passed
-	// the ball"), and the worker's cached copy still reflects the old
-	// owner. Refetch failure is fail-closed: falling back to the cached
-	// copy would reintroduce the exact race this gate is closing (a stale
-	// in-scope snapshot during a transient outage could auto-promote past
-	// a handoff). Skip the promotion; the next pipeline event will retry.
-	fresh, err := client.GetIssue(issue.Repo, issue.Number)
-	if err != nil {
-		slog.Warn(scope+": auto-promote skipped — issue refetch failed; will retry on next pipeline event",
-			"repo", issue.Repo, "number", issue.Number, "err", err)
-		return
-	}
-
-	if !it.MatchesAssignees(fresh.AssigneeLogins()) {
-		slog.Info(scope+": auto-promote skipped — issue assignee out of scope (handoff to another operator)",
-			"repo", issue.Repo, "number", issue.Number,
-			"issue_assignees", fresh.AssigneeLogins(),
-			"scope_assignees", it.Assignees)
-		return
-	}
-
+	// Auto-promote moves the stage label unconditionally when enabled.
+	// The handoff to a different operator (issue reassigned during
+	// triage / refinement) is enforced by the *next* stage's worker
+	// entry — `issueTrackingWithAssigneeScope` + `issueStageStillCurrent`
+	// already skip work whose assignees fall outside the daemon's
+	// scope. Gating the label transition here too (as #457 did) double-
+	// gated the flow and left issues stuck at the current stage so the
+	// new assignee's daemon never picked them up at the next stage. See
+	// #458 for the regression report.
 	to, err := issuepipeline.NextStage(from, it, false)
 	if err != nil {
 		if errors.Is(err, issuepipeline.ErrStageTargetLabelMissing) {
@@ -3573,7 +3548,7 @@ func autoPromoteAfterStage(
 			"repo", issue.Repo, "number", issue.Number, "err", err)
 	}
 	if err := issuepipeline.TransitionIssueStage(ctx, client, issuepipeline.StageTransition{
-		Issue:          fresh,
+		Issue:          issue,
 		StoreIssueID:   storeIssueID,
 		Config:         it,
 		From:           from,

@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -55,146 +54,75 @@ func TestDefaultAutoImplementPRAssignee(t *testing.T) {
 	}
 }
 
-// ── auto-promote assignee scope (#456) ──────────────────────────────────────
+// TestAutoPromoteTransitionsLabelEvenWhenAssigneeOutOfScope pins the #458
+// contract: auto-promote moves the stage label unconditionally when enabled.
+// Handoff to another operator happens at the *next* stage's worker entry,
+// which already gates by assignee scope (see issueTrackingWithAssigneeScope +
+// issueStageStillCurrent in this file). Re-introducing a scope gate inside
+// autoPromoteAfterStage — as #457 did — strands the issue at the current
+// stage label and the new assignee's daemon never picks it up.
+func TestAutoPromoteTransitionsLabelEvenWhenAssigneeOutOfScope(t *testing.T) {
+	var (
+		addedLabels   [][]string
+		removedLabels []string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/org/repo/issues/7/comments":
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/org/repo/labels":
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/org/repo/issues/7/labels":
+			var payload struct {
+				Labels []string `json:"labels"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			addedLabels = append(addedLabels, payload.Labels)
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode([]map[string]string{})
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/repos/org/repo/issues/7/labels/"):
+			removedLabels = append(removedLabels, strings.TrimPrefix(r.URL.Path, "/repos/org/repo/issues/7/labels/"))
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode([]map[string]string{})
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/org/repo/issues/7/comments":
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"created_at": time.Now().UTC().Format(time.RFC3339),
+			})
+		default:
+			t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.String())
+			http.Error(w, "unexpected request", http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
 
-// autoPromoteFakeGH implements the small GitHub surface autoPromoteAfterStage
-// needs: GetIssue + FetchIssueCommentsOnly + StageTransitionClient (labels +
-// PostComment). The flags let each test inject the post-pipeline issue state
-// and observe whether the transition mutated GitHub.
-type autoPromoteFakeGH struct {
-	freshIssue    *gh.Issue
-	getIssueErr   error
-	getIssueCalls int
-
-	addLabelsCalls    [][]string
-	removeLabelsCalls [][]string
-	postCommentCalls  []string
-}
-
-func (f *autoPromoteFakeGH) GetIssue(repo string, number int) (*gh.Issue, error) {
-	f.getIssueCalls++
-	if f.getIssueErr != nil {
-		return nil, f.getIssueErr
-	}
-	return f.freshIssue, nil
-}
-
-func (f *autoPromoteFakeGH) FetchIssueCommentsOnly(repo string, number int) ([]gh.Comment, error) {
-	return nil, nil
-}
-
-func (f *autoPromoteFakeGH) AddLabels(repo string, number int, labels []string) error {
-	f.addLabelsCalls = append(f.addLabelsCalls, labels)
-	return nil
-}
-
-func (f *autoPromoteFakeGH) RemoveLabels(repo string, number int, labels []string) error {
-	f.removeLabelsCalls = append(f.removeLabelsCalls, labels)
-	return nil
-}
-
-func (f *autoPromoteFakeGH) CreateLabel(repo, name, color, description string) error {
-	return nil
-}
-
-func (f *autoPromoteFakeGH) PostComment(repo string, number int, body string) (time.Time, error) {
-	f.postCommentCalls = append(f.postCommentCalls, body)
-	return time.Now().UTC(), nil
-}
-
-func newAutoPromoteCfg() (config.IssueTrackingConfig, config.RepoAI) {
+	client := gh.NewClient("tok", gh.WithBaseURL(srv.URL))
 	it := config.IssueTrackingConfig{
 		Assignees:        []string{"userA"},
+		ReviewOnlyLabels: []string{"heimdallm-triage"},
 		RefinementLabels: []string{"heimdallm-refine"},
 	}
-	aiCfg := config.RepoAI{}
-	return it, aiCfg
-}
-
-func autoPromoteIssue(assignees ...string) *gh.Issue {
-	logins := make([]gh.User, 0, len(assignees))
-	for _, a := range assignees {
-		logins = append(logins, gh.User{Login: a})
-	}
-	return &gh.Issue{
+	// The issue's GitHub assignee is userB (handoff target); the daemon's
+	// scope is userA. Auto-promote must still transition the label so
+	// userB's daemon picks up refinement on its next poll.
+	issue := &gh.Issue{
 		Repo:      "org/repo",
 		Number:    7,
 		State:     "open",
-		Assignees: logins,
+		Assignees: []gh.User{{Login: "userB"}},
+		Labels:    []gh.Label{{Name: "heimdallm-triage"}},
 	}
-}
 
-func TestAutoPromoteSkippedWhenAssigneeOutOfScope(t *testing.T) {
-	// Triage reassigned the issue to userB; the daemon (configured for
-	// userA) must NOT auto-promote. The "ball" has been passed to userB's
-	// daemon, which will pick up the next stage by its own scope check.
-	fake := &autoPromoteFakeGH{freshIssue: autoPromoteIssue("userB")}
-	it, aiCfg := newAutoPromoteCfg()
+	autoPromoteAfterStage(context.Background(), client, nil, issue, 42, it, config.RepoAI{},
+		issuepipeline.IssueStageTriage, "test")
 
-	autoPromoteAfterStage(context.Background(), fake, nil,
-		autoPromoteIssue("userA"), // stale local copy, pre-pipeline
-		42, it, aiCfg, issuepipeline.IssueStageTriage, "test")
-
-	if fake.getIssueCalls != 1 {
-		t.Errorf("expected one GetIssue refetch, got %d", fake.getIssueCalls)
+	if len(addedLabels) != 1 || len(addedLabels[0]) != 1 || addedLabels[0][0] != "heimdallm-refine" {
+		t.Fatalf("AddLabels = %#v, want one call with [heimdallm-refine] (label transition is unconditional under #458)", addedLabels)
 	}
-	if len(fake.addLabelsCalls) != 0 || len(fake.removeLabelsCalls) != 0 {
-		t.Errorf("expected no label mutations when assignee out of scope, got add=%v remove=%v",
-			fake.addLabelsCalls, fake.removeLabelsCalls)
-	}
-}
-
-func TestAutoPromoteProceedsWhenAssigneeInScope(t *testing.T) {
-	// Triage kept the assignee on userA (the daemon's owner); auto-promote
-	// must run end-to-end: refinement label added, triage label removed.
-	fake := &autoPromoteFakeGH{freshIssue: autoPromoteIssue("userA")}
-	it, aiCfg := newAutoPromoteCfg()
-
-	autoPromoteAfterStage(context.Background(), fake, nil,
-		autoPromoteIssue("userA"),
-		42, it, aiCfg, issuepipeline.IssueStageTriage, "test")
-
-	if fake.getIssueCalls != 1 {
-		t.Errorf("expected one GetIssue refetch, got %d", fake.getIssueCalls)
-	}
-	if len(fake.addLabelsCalls) == 0 {
-		t.Errorf("expected AddLabels call for refinement label, got none")
-	}
-}
-
-func TestAutoPromoteSkippedWhenRefetchFails(t *testing.T) {
-	// Refetch failure is fail-closed: falling back to the cached issue
-	// would reintroduce the same race the gate is closing (a stale
-	// in-scope snapshot during a transient outage could promote past a
-	// handoff). Skip; the next pipeline event retries.
-	fake := &autoPromoteFakeGH{getIssueErr: errors.New("transient")}
-	it, aiCfg := newAutoPromoteCfg()
-
-	autoPromoteAfterStage(context.Background(), fake, nil,
-		autoPromoteIssue("userA"),
-		42, it, aiCfg, issuepipeline.IssueStageTriage, "test")
-
-	if len(fake.addLabelsCalls) != 0 || len(fake.removeLabelsCalls) != 0 {
-		t.Errorf("expected no label mutations on refetch failure, got add=%v remove=%v",
-			fake.addLabelsCalls, fake.removeLabelsCalls)
-	}
-}
-
-func TestAutoPromoteSkippedWhenRefetchFailsEvenIfCachedOutOfScope(t *testing.T) {
-	// Regression pin for the worst case: refetch fails AND the cached
-	// copy already shows a different assignee. The skip-on-refetch-error
-	// branch fires before the scope check, so behavior is the same
-	// regardless of what the cached assignee was — no label mutation.
-	fake := &autoPromoteFakeGH{getIssueErr: errors.New("transient")}
-	it, aiCfg := newAutoPromoteCfg()
-
-	autoPromoteAfterStage(context.Background(), fake, nil,
-		autoPromoteIssue("userB"),
-		42, it, aiCfg, issuepipeline.IssueStageTriage, "test")
-
-	if len(fake.addLabelsCalls) != 0 || len(fake.removeLabelsCalls) != 0 {
-		t.Errorf("expected no label mutations, got add=%v remove=%v",
-			fake.addLabelsCalls, fake.removeLabelsCalls)
+	if len(removedLabels) != 1 || removedLabels[0] != "heimdallm-triage" {
+		t.Fatalf("RemoveLabels = %#v, want one DELETE for heimdallm-triage", removedLabels)
 	}
 }
 

@@ -290,10 +290,12 @@ func (p *Pipeline) SetCircuitBreakerLimits(limits *store.IssueCircuitBreakerLimi
 // issueStore is the subset of *store.Store the pipeline needs. Kept narrow
 // so tests can substitute a fake without bringing in SQLite.
 //
-// ClaimIssueTriageInFlight / ReleaseIssueTriageInFlight gate Run on the
-// persistent (github_issue_id, updated_at) key so two concurrent fetcher
-// ticks on the same snapshot collapse to one Claude dispatch — mirroring
-// the PR-side claim (#258). See theburrowhub/heimdallm#292.
+// ClaimIssueTriageInFlight / ReleaseIssueTriageInFlight gate Run on a
+// single-flight-per-issue key (github_issue_id only). updated_at is
+// passed for diagnostics but is not part of the contention key — that
+// design was relaxed in #458 because the bot's own triage comment bumps
+// updated_at, which previously let a second snapshot pass the claim and
+// spawn a duplicate run. Mirrors the PR-side claim (#258); see #292.
 type issueStore interface {
 	UpsertIssue(i *store.Issue) (int64, error)
 	InsertIssueReview(r *store.IssueReview) (int64, error)
@@ -348,12 +350,14 @@ func (p *Pipeline) Run(ctx context.Context, issue *github.Issue, opts RunOptions
 		ctx = context.Background()
 	}
 
-	// Persistent in-flight claim keyed on (github_issue_id, updated_at).
-	// Two concurrent fetcher ticks observing the same snapshot collapse to
-	// one Claude dispatch. Fail-open on any claim error — the downstream
-	// circuit breaker and marker-scan dedup still cap cost. Empty key is
-	// treated as "no claim possible"; the scheduler should have prevented
-	// that but the guard is cheap. See theburrowhub/heimdallm#292.
+	// Single-flight in-flight claim keyed on github_issue_id (#458). Any
+	// poller tick that arrives while a run is in progress collapses to a
+	// no-op, regardless of whether the issue's updated_at changed mid-
+	// flight (which the bot's own PostComment does at the tail of the
+	// run). Fail-open on any claim error — the downstream circuit breaker
+	// and marker-scan dedup still cap cost. Empty key is treated as "no
+	// claim possible"; the scheduler should have prevented that but the
+	// guard is cheap. See theburrowhub/heimdallm#292.
 	//
 	// Key-space note: the claim uses issue.ID (the GitHub-assigned ID,
 	// stable and known before any DB write) so we can gate Run before
@@ -391,12 +395,20 @@ func (p *Pipeline) Run(ctx context.Context, issue *github.Issue, opts RunOptions
 	}
 	defer func() {
 		// Release on every path EXCEPT a circuit-breaker trip. Holding
-		// the claim across a trip prevents the next fetcher tick on the
-		// same (issue, updated_at) snapshot from re-acquiring, re-hitting
-		// the breaker, and re-firing the operator notification once per
-		// poll. The 30-min stale sweep eventually reclaims the row, or a
-		// genuine activity bump (new updated_at) produces a new claim
-		// key that bypasses the held one.
+		// the claim across a trip prevents the next fetcher tick from
+		// re-acquiring, re-hitting the breaker, and re-firing the
+		// operator notification once per poll.
+		//
+		// Behavior change under single-flight-per-issue (#458): the hold
+		// is now sticky for the full ClearStaleIssueTriageInFlight sweep
+		// window (~30 min) — the previous "new updated_at bypasses the
+		// held claim" path is gone. This is intentional and conservative
+		// for cost-runaway protection: the previous bypass let the same
+		// issue re-trip the breaker on every new activity. Operator-
+		// driven retries (retry-marker comments, label flips) take effect
+		// after the sweep clears the held row. If a tighter manual
+		// unblock is needed, file a follow-up — possibly an explicit
+		// force-release path for retry markers.
 		if claimed && !breakerHeld {
 			if err := p.store.ReleaseIssueTriageInFlight(claimIssueID, claimKey); err != nil {
 				slog.Warn("issues pipeline: release inflight failed",

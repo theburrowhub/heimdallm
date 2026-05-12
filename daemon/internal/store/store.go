@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -224,6 +225,32 @@ func Open(dsn string) (*Store, error) {
 		started_at  DATETIME NOT NULL,
 		PRIMARY KEY (issue_id, updated_at)
 	)`)
+	// Enforce single-flight per issue at the schema level (#458). The
+	// claim SQL already uses INSERT ... WHERE NOT EXISTS, but a UNIQUE
+	// index lifts the invariant from a query convention to a DB
+	// guarantee so any future raw INSERT (test helpers, ad-hoc tooling)
+	// cannot create a duplicate. The composite PK above is strictly
+	// weaker than this index — it allows multiple rows per issue_id when
+	// updated_at differs — so the index supersedes it as the contention
+	// constraint; the PK remains as a row-identity convention.
+	//
+	// On daemons upgrading from pre-#458 the table may contain rows
+	// like (42, T0), (42, T1) for the same issue. CREATE UNIQUE INDEX
+	// returns "UNIQUE constraint failed" in that case (IF NOT EXISTS
+	// only suppresses the "already exists" case, not constraint
+	// failures). Dedupe first — keep the most recent claim per issue —
+	// then create the index, then log if either step still errors so
+	// silent failures are observable in operator logs.
+	if _, err := db.Exec(`DELETE FROM issue_triage_in_flight
+		WHERE rowid NOT IN (SELECT MAX(rowid) FROM issue_triage_in_flight GROUP BY issue_id)`); err != nil {
+		slog.Warn("store: dedupe issue_triage_in_flight before unique index failed",
+			"err", err)
+	}
+	if _, err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_triage_in_flight_issue ON issue_triage_in_flight(issue_id)"); err != nil {
+		slog.Warn("store: create unique index on issue_triage_in_flight(issue_id) failed; "+
+			"single-flight invariant rests on the INSERT … WHERE NOT EXISTS guard only",
+			"err", err)
+	}
 	return &Store{db: db}, nil
 }
 
