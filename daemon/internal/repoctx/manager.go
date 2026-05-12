@@ -292,7 +292,11 @@ func (m *Manager) acquireClone(ctx context.Context, req Request, owner, name str
 // clone. The cap semaphore is held across the entire AI run; the
 // critical-section lock is only held while mutating shared state
 // (clone prep + `git worktree add` / `worktree remove`).
-func (m *Manager) acquireWorktree(ctx context.Context, req Request, owner, name string) (*Handle, error) {
+//
+// Named returns make the deferred rollback explicit: the cleanup
+// closures read the outer `err` directly, so a future refactor that
+// introduces a shadowing `err` cannot silently disable the rollback.
+func (m *Manager) acquireWorktree(ctx context.Context, req Request, owner, name string) (h *Handle, err error) {
 	capRel, err := m.acquireWorktreeCap(ctx, req.Repo)
 	if err != nil {
 		return nil, err
@@ -310,7 +314,8 @@ func (m *Manager) acquireWorktree(ctx context.Context, req Request, owner, name 
 		}
 	}()
 
-	unlock, err := m.acquireRepoLock(ctx, req.Repo)
+	var unlock func()
+	unlock, err = m.acquireRepoLock(ctx, req.Repo)
 	if err != nil {
 		return nil, err
 	}
@@ -335,7 +340,8 @@ func (m *Manager) acquireWorktree(ctx context.Context, req Request, owner, name 
 		return &Handle{path: local, managed: false, release: releaseCap}, nil
 	}
 
-	cloneRoot, err := m.ensureManagedClone(ctx, owner, name, req)
+	var cloneRoot string
+	cloneRoot, err = m.ensureManagedClone(ctx, owner, name, req)
 	if err != nil {
 		return nil, err
 	}
