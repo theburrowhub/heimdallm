@@ -362,6 +362,20 @@ auto_promote_refinement = true   # unset = true only when develop_labels is conf
 > skip_labels        = ["wontfix", "duplicate", "invalid"]
 > ```
 
+> **Security — `auto_implement` and untrusted issue authors**
+>
+> The body, title, and quoted comments of every processed issue are user-submitted input. When `auto_implement` is enabled, that input becomes part of the prompt sent to an AI CLI with **write access** to the repository checkout. A maliciously crafted issue (the classic "prompt injection" attack) could try to instruct the AI to read sensitive files from the worktree and embed them in the resulting commit.
+>
+> Heimdallm applies layered defenses:
+>
+> - The prompt now declares a **trust boundary**: issue title/body/comments are tagged as untrusted, wrapped in fenced regions, and the AI is told explicitly not to follow instructions found inside them. Any attempt to inject a forged closing fence is neutralised before the prompt is sent.
+> - Before pushing, `CommitAll` scans the staged file list against a **sensitive-path denylist** (`.env`, `.env.*`, `*.pem`, `*.key`, `*.crt`, `*.p12`, `*.pfx`, `id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519` + `.pub` siblings, `credentials*`, `config.toml`, `.heimdallm-managed`). A matching path aborts the commit and resets the index — the branch is not pushed and no PR is opened.
+>
+> These defenses reduce blast radius but do not eliminate it. Two operational guidelines still apply:
+>
+> 1. Restrict `auto_implement` (the `develop` stage) to repositories where **all issue authors are trusted collaborators**. Public repositories accepting issues from anonymous reporters should keep `develop` disabled and rely on `triage` / `refinement` for visibility instead.
+> 2. The daemon's worktree contains only the cloned repository, so the AI cannot read files outside it. Keep operator secrets (HEIMDALLM token, GitHub PAT, etc.) outside any monitored clone.
+
 ### Scope filters
 
 Restrict which issues the pipeline processes:

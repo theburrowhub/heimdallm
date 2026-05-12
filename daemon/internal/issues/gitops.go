@@ -115,11 +115,68 @@ func (g *GitExec) HasChanges(ctx context.Context, dir string) (bool, error) {
 	return strings.TrimSpace(string(out)) != "", nil
 }
 
+// sensitivePathPatterns lists basename globs that the auto_implement
+// pipeline refuses to commit. Prompt-injection on the issue body
+// could otherwise coerce the AI into writing exfiltration files
+// (credentials, private keys, the daemon's own config) which would
+// then be pushed to GitHub via the PR. The patterns target common
+// secret shapes; legitimate repository content rarely matches.
+//
+// Match is performed against the basename of the staged path with
+// filepath.Match, so e.g. `secret.pem` matches `*.pem` regardless
+// of which directory it lives under. config.toml is denied because
+// Heimdallm reads its operator config from a TOML file by that name.
+var sensitivePathPatterns = []string{
+	".env", ".env.*",
+	"*.pem", "*.key", "*.crt", "*.p12", "*.pfx",
+	"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
+	"id_rsa.pub", "id_dsa.pub", "id_ecdsa.pub", "id_ed25519.pub",
+	"credentials", "credentials.*",
+	"config.toml",
+	".heimdallm-managed",
+}
+
+// matchesSensitivePattern reports whether the basename of path
+// matches any pattern in sensitivePathPatterns. Match errors are
+// treated as non-matches: a bad pattern is a programmer bug, not a
+// reason to silently let through every commit.
+func matchesSensitivePattern(path string) (string, bool) {
+	base := filepath.Base(path)
+	for _, pat := range sensitivePathPatterns {
+		ok, err := filepath.Match(pat, base)
+		if err == nil && ok {
+			return pat, true
+		}
+	}
+	return "", false
+}
+
 // CommitAll stages every change and commits with the Heimdallm identity.
 // Uses `-c` flags so the repo-level and global git config are never touched.
+//
+// Before committing, the staged file list is scanned against
+// sensitivePathPatterns: if a prompt-injected AI run tried to write
+// secrets (private keys, .env, the daemon's config.toml) into the
+// worktree to exfiltrate them via the PR, the commit is refused and
+// the index is reset so a retry from scratch is not poisoned.
 func (g *GitExec) CommitAll(ctx context.Context, dir, message string) error {
 	if err := runGit(ctx, dir, nil, "add", "-A", "--", ".", ":(exclude)"+managedCloneMarkerFile); err != nil {
 		return fmt.Errorf("gitops: add: %w", err)
+	}
+	staged, err := captureGit(ctx, dir, nil, "diff", "--cached", "--name-only")
+	if err != nil {
+		return fmt.Errorf("gitops: list staged: %w", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(staged)), "\n") {
+		path := strings.TrimSpace(line)
+		if path == "" {
+			continue
+		}
+		if pat, hit := matchesSensitivePattern(path); hit {
+			// Leave the index clean so a follow-up run starts fresh.
+			_ = runGit(ctx, dir, nil, "reset", "--", ".")
+			return fmt.Errorf("gitops: refusing commit — staged %q matches sensitive-path pattern %q (prompt-injection defense)", path, pat)
+		}
 	}
 	if err := runGit(ctx, dir, nil,
 		"-c", "user.name="+CommitAuthorName,

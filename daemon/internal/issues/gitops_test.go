@@ -66,6 +66,83 @@ func TestGitExecIgnoresManagedCloneMarker(t *testing.T) {
 	}
 }
 
+func TestCommitAll_RefusesSensitivePaths(t *testing.T) {
+	// Prompt-injection defense: a compromised AI run could write
+	// secrets (.env, *.pem, config.toml) into the worktree to
+	// exfiltrate via the PR diff. CommitAll must scan staged files
+	// against a denylist and refuse the commit before push.
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git binary not available")
+	}
+
+	for _, filename := range []string{".env", "secret.pem", "id_rsa", "config.toml", "credentials.json"} {
+		t.Run(filename, func(t *testing.T) {
+			dir := t.TempDir()
+			runGitForTest(t, dir, "init")
+			runGitForTest(t, dir, "config", "user.name", "Test User")
+			runGitForTest(t, dir, "config", "user.email", "test@example.com")
+			if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# init\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			runGitForTest(t, dir, "add", "README.md")
+			runGitForTest(t, dir, "commit", "-m", "initial")
+
+			// Attacker payload: legitimate edit alongside a sensitive file.
+			if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# fixed\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, filename), []byte("EXFILTRATED=secret\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			git := issues.NewGitExec()
+			err := git.CommitAll(context.Background(), dir, "fix: legit")
+			if err == nil {
+				t.Fatalf("CommitAll accepted sensitive path %q (M-? bypass)", filename)
+			}
+			if !strings.Contains(err.Error(), "sensitive") {
+				t.Errorf("error should mention sensitive denylist, got: %v", err)
+			}
+			// Nothing should have been committed.
+			out := runGitForTest(t, dir, "log", "--oneline")
+			if strings.Count(out, "\n") > 1 {
+				t.Fatalf("commit landed despite sensitive-path veto:\n%s", out)
+			}
+			// The index must be left clean (unstaged) so a retry from
+			// scratch isn't poisoned by the previous stage.
+			status := runGitForTest(t, dir, "diff", "--cached", "--name-only")
+			if strings.TrimSpace(status) != "" {
+				t.Errorf("index not reset after veto; cached files:\n%s", status)
+			}
+		})
+	}
+}
+
+func TestCommitAll_AllowsLegitimateChanges(t *testing.T) {
+	// Sanity: denylist must not block normal repo edits.
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git binary not available")
+	}
+	dir := t.TempDir()
+	runGitForTest(t, dir, "init")
+	runGitForTest(t, dir, "config", "user.name", "Test User")
+	runGitForTest(t, dir, "config", "user.email", "test@example.com")
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# init\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitForTest(t, dir, "add", "README.md")
+	runGitForTest(t, dir, "commit", "-m", "initial")
+
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	git := issues.NewGitExec()
+	if err := git.CommitAll(context.Background(), dir, "feat: add main"); err != nil {
+		t.Fatalf("CommitAll rejected a legitimate edit: %v", err)
+	}
+}
+
 func runGitForTest(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)
