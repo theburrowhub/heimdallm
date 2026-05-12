@@ -313,12 +313,19 @@ var untrustedFenceKeywords = []string{
 	"untrusted user comments",
 }
 
-// sanitiseUntrustedFreeText neutralises any occurrence of the
-// untrusted-region keywords inside user-controlled text so an
-// attacker cannot forge a fence terminator and re-open the system
-// region of the prompt. Match is case-insensitive over ASCII; the
-// decorative dashes / spacing around the keyword are irrelevant
-// because we only collapse the keyword itself.
+// sanitiseUntrustedFreeText is a fence-terminator defense, not a
+// general prompt-injection prevention. It only neutralises the
+// keyword phrases that the builder uses to delimit untrusted regions;
+// other adversarial techniques (forged </system> tags, markdown
+// fences, "ignore previous instructions" prose) are NOT covered here
+// — they are addressed by the trust-boundary preamble at the top of
+// the prompt instead. The combination of (1) preamble + (2) fence
+// sanitisation + (3) post-data reaffirmation is what makes the
+// region-trust contract robust; removing any layer reopens a vector.
+//
+// Match is case-insensitive over ASCII; the decorative dashes /
+// spacing around the keyword are irrelevant because we only collapse
+// the keyword itself.
 func sanitiseUntrustedFreeText(s string) string {
 	if s == "" {
 		return s
@@ -431,7 +438,8 @@ func buildDefaultImplementPrompt(ctx PromptContext, customInstructions string) s
 	sb.WriteString("- Documentation-only issues still require editing the relevant documentation file.\n")
 	sb.WriteString("- If tests exist for the area you are changing, extend them.\n")
 	sb.WriteString("- Do not commit secrets, credentials, or files outside the repository.\n")
-	sb.WriteString("- The pipeline refuses to commit files matching a sensitive-path denylist (.env, *.pem, *.key, *.crt, id_rsa, credentials*, config.toml, .heimdallm-managed). Do not create or modify such files; if the issue genuinely requires it, skip the implementation and leave a comment instead.\n")
+	sb.WriteString("- The pipeline refuses to commit files matching a sensitive-path denylist (private keys, credentials, secret stores, shell history, the operator's own config) — see the README for the canonical list. Do not create or modify such files; if the issue genuinely requires it, skip the implementation and leave a comment instead.\n")
+	sb.WriteString("- Symlinks in the worktree are refused by the same gate. Use regular files for new contributions.\n")
 
 	if customInstructions != "" {
 		sb.WriteString("\nAdditional implementation instructions from the repository maintainer:\n")
@@ -504,8 +512,13 @@ func formatComments(comments []github.Comment) string {
 	}
 	lines := make([]string, 0, len(comments))
 	for _, c := range comments {
+		// Author flows from the GitHub API, which constrains username
+		// shape, but we sanitise as belt-and-suspenders so a future
+		// schema change cannot quietly open a bypass through @-prefixed
+		// strings.
+		safeAuthor := sanitiseUntrustedFreeText(c.Author)
 		safeBody := sanitiseUntrustedFreeText(strings.TrimSpace(c.Body))
-		lines = append(lines, fmt.Sprintf("@%s: %s", c.Author, safeBody))
+		lines = append(lines, fmt.Sprintf("@%s: %s", safeAuthor, safeBody))
 	}
 	joined := strings.Join(lines, "\n---\n")
 	if len(joined) > maxCommentsBytes {

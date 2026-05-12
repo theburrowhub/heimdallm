@@ -227,6 +227,92 @@ func TestCommitAll_RetryAfterDenylistDoesNotLoop(t *testing.T) {
 	}
 }
 
+func TestCommitAll_RefusesSymlinkEvenWithInnocentBasename(t *testing.T) {
+	// Defense-in-depth: a symlink with an innocent basename can still
+	// signal an AI run trying to reach outside the worktree. Reject
+	// it so the intent never leaves the daemon.
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git binary not available")
+	}
+	dir := t.TempDir()
+	runGitForTest(t, dir, "init")
+	runGitForTest(t, dir, "config", "user.name", "Test User")
+	runGitForTest(t, dir, "config", "user.email", "test@example.com")
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# init\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitForTest(t, dir, "add", "README.md")
+	runGitForTest(t, dir, "commit", "-m", "initial")
+
+	// Symlink with an innocent basename, target points outside the worktree.
+	if err := os.Symlink("/etc/passwd", filepath.Join(dir, "helpers.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := issues.NewGitExec().CommitAll(context.Background(), dir, "fix")
+	if err == nil {
+		t.Fatal("CommitAll accepted symlink with innocent basename")
+	}
+	if !strings.Contains(err.Error(), "denylist") {
+		t.Errorf("error should mention denylist, got: %v", err)
+	}
+}
+
+func TestCommitAll_AllowsConfigTomlInSubdir(t *testing.T) {
+	// config.toml is denied at the repo root (Heimdallm's operator
+	// config) but allowed in subdirectories where projects often
+	// keep example fixtures.
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git binary not available")
+	}
+	dir := t.TempDir()
+	runGitForTest(t, dir, "init")
+	runGitForTest(t, dir, "config", "user.name", "Test User")
+	runGitForTest(t, dir, "config", "user.email", "test@example.com")
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# init\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitForTest(t, dir, "add", "README.md")
+	runGitForTest(t, dir, "commit", "-m", "initial")
+
+	subdir := filepath.Join(dir, "docs", "examples")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(subdir, "config.toml"), []byte("[example]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := issues.NewGitExec().CommitAll(context.Background(), dir, "docs: add example"); err != nil {
+		t.Fatalf("CommitAll rejected docs/examples/config.toml: %v", err)
+	}
+}
+
+func TestCommitAll_AllowsPublicSSHKeys(t *testing.T) {
+	// Public SSH keys are not secrets and projects legitimately
+	// ship them (deploy-key docs, ssh tutorials, etc.).
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git binary not available")
+	}
+	dir := t.TempDir()
+	runGitForTest(t, dir, "init")
+	runGitForTest(t, dir, "config", "user.name", "Test User")
+	runGitForTest(t, dir, "config", "user.email", "test@example.com")
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# init\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitForTest(t, dir, "add", "README.md")
+	runGitForTest(t, dir, "commit", "-m", "initial")
+
+	if err := os.WriteFile(filepath.Join(dir, "id_rsa.pub"), []byte("ssh-rsa AAAA...\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := issues.NewGitExec().CommitAll(context.Background(), dir, "docs: deploy key"); err != nil {
+		t.Fatalf("CommitAll rejected public key: %v", err)
+	}
+}
+
 func TestCommitAll_AllowsLegitimateChanges(t *testing.T) {
 	// Sanity: denylist must not block normal repo edits.
 	if _, err := exec.LookPath("git"); err != nil {
