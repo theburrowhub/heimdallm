@@ -563,7 +563,7 @@ func TestPruneStaleWorktreesRemovesOrphans(t *testing.T) {
 	if _, err := os.Stat(orphan); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("orphan still present or stat failed: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(target, ".worktrees", "live")); err != nil {
+	if _, err := os.Stat(filepath.Join(target, ".worktrees", "live.1")); err != nil {
 		t.Fatalf("live worktree should remain: %v", err)
 	}
 }
@@ -699,7 +699,7 @@ func TestAcquireWorktreeWithBaseRefDetaches(t *testing.T) {
 	if addArgs == nil {
 		t.Fatalf("expected worktree add call; got %v", git.snapshot())
 	}
-	want := []string{"worktree", "add", filepath.Join(target, ".worktrees", "pr-review-1234"), "--detach", "abcdef1234567890"}
+	want := []string{"worktree", "add", filepath.Join(target, ".worktrees", "pr-review-1234.1"), "--detach", "abcdef1234567890"}
 	if !reflect.DeepEqual(addArgs, want) {
 		t.Fatalf("worktree add args = %v, want %v", addArgs, want)
 	}
@@ -728,7 +728,7 @@ func TestAcquireWorktreeWithBranchCreatesAndChecksOut(t *testing.T) {
 			break
 		}
 	}
-	want := []string{"worktree", "add", filepath.Join(target, ".worktrees", "develop-7"), "-b", "heimdallm/issue-7", "main"}
+	want := []string{"worktree", "add", filepath.Join(target, ".worktrees", "develop-7.1"), "-b", "heimdallm/issue-7", "main"}
 	if !reflect.DeepEqual(addArgs, want) {
 		t.Fatalf("worktree add args = %v, want %v", addArgs, want)
 	}
@@ -767,6 +767,39 @@ func TestAcquireInspectSkipsWorktreeAndCap(t *testing.T) {
 		}
 	}
 	h2.Release() // Must not panic or block.
+}
+
+func TestAcquireSameTokenProducesDistinctWorktrees(t *testing.T) {
+	// Two pipeline entry points (e.g. poll review-worker + manual
+	// trigger-review) can fire concurrently for the same PR. They
+	// pass the same WorktreeToken; the manager must give each its
+	// own path so `git worktree add` does not collide.
+	m, _, base := newTestManagerWithCap(t, 0)
+	setupManagedClone(t, base)
+
+	h1, err := m.Acquire(context.Background(), Request{
+		Repo: "org/repo", Token: "secret", WorktreeToken: "pr-review-99",
+	})
+	if err != nil {
+		t.Fatalf("Acquire 1: %v", err)
+	}
+	defer h1.Release()
+
+	h2, err := m.Acquire(context.Background(), Request{
+		Repo: "org/repo", Token: "secret", WorktreeToken: "pr-review-99",
+	})
+	if err != nil {
+		t.Fatalf("Acquire 2: %v", err)
+	}
+	defer h2.Release()
+
+	if h1.Path() == h2.Path() {
+		t.Fatalf("same-token acquires resolved to same path %q", h1.Path())
+	}
+	if !strings.HasPrefix(filepath.Base(h1.Path()), "pr-review-99.") ||
+		!strings.HasPrefix(filepath.Base(h2.Path()), "pr-review-99.") {
+		t.Fatalf("paths lost the token prefix: %q, %q", h1.Path(), h2.Path())
+	}
 }
 
 func TestAcquireBlocksWhenAtMaxWorktreesPerRepo(t *testing.T) {
@@ -889,7 +922,9 @@ func TestAcquireCreatesWorktreeForManagedClone(t *testing.T) {
 		t.Fatalf("Acquire: %v", err)
 	}
 
-	wantWT := filepath.Join(target, ".worktrees", "triage-42")
+	// The manager appends a monotonic seq to disambiguate concurrent
+	// same-token acquires; the first acquire on a fresh manager is .1.
+	wantWT := filepath.Join(target, ".worktrees", "triage-42.1")
 	if h.Path() != wantWT {
 		t.Fatalf("handle path = %q, want %q", h.Path(), wantWT)
 	}

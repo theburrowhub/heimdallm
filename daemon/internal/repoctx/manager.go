@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/heimdallm/daemon/internal/config"
@@ -166,6 +167,13 @@ type Manager struct {
 	tempDir func() string
 
 	maxWorktrees int
+
+	// wtSeq disambiguates concurrent worktrees that share the same
+	// caller-supplied WorktreeToken (e.g. when poll review-worker and
+	// manual trigger-review fire for the same PR). It is monotonic
+	// across the manager's lifetime so paths stay stable for the
+	// duration of a single execution.
+	wtSeq atomic.Uint64
 }
 
 // ManagerOptions configures a Manager at construction.
@@ -352,7 +360,9 @@ func (m *Manager) acquireWorktree(ctx context.Context, req Request, owner, name 
 		}
 	}
 
-	wtPath := filepath.Join(cloneRoot, ".worktrees", req.WorktreeToken)
+	seq := m.wtSeq.Add(1)
+	wtName := fmt.Sprintf("%s.%d", req.WorktreeToken, seq)
+	wtPath := filepath.Join(cloneRoot, ".worktrees", wtName)
 	if err = os.MkdirAll(filepath.Dir(wtPath), 0o755); err != nil {
 		return nil, fmt.Errorf("repoctx: create worktrees root: %w", err)
 	}
