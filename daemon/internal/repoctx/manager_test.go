@@ -528,6 +528,67 @@ func setupManagedClone(t *testing.T, base string) string {
 	return target
 }
 
+func TestAcquireWorktreeWithBaseRefDetaches(t *testing.T) {
+	m, git, base := newTestManagerWithCap(t, 0)
+	target := setupManagedClone(t, base)
+	_ = target
+
+	h, err := m.Acquire(context.Background(), Request{
+		Repo:            "org/repo",
+		Token:           "secret",
+		WorktreeToken:   "pr-review-1234",
+		WorktreeBaseRef: "abcdef1234567890",
+	})
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	defer h.Release()
+
+	var addArgs []string
+	for _, c := range git.snapshot() {
+		if len(c.Args) >= 2 && c.Args[0] == "worktree" && c.Args[1] == "add" {
+			addArgs = c.Args
+			break
+		}
+	}
+	if addArgs == nil {
+		t.Fatalf("expected worktree add call; got %v", git.snapshot())
+	}
+	want := []string{"worktree", "add", filepath.Join(target, ".worktrees", "pr-review-1234"), "--detach", "abcdef1234567890"}
+	if !reflect.DeepEqual(addArgs, want) {
+		t.Fatalf("worktree add args = %v, want %v", addArgs, want)
+	}
+}
+
+func TestAcquireWorktreeWithBranchCreatesAndChecksOut(t *testing.T) {
+	m, git, base := newTestManagerWithCap(t, 0)
+	target := setupManagedClone(t, base)
+
+	h, err := m.Acquire(context.Background(), Request{
+		Repo:            "org/repo",
+		Token:           "secret",
+		WorktreeToken:   "develop-7",
+		WorktreeBaseRef: "main",
+		Branch:          "heimdallm/issue-7",
+	})
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	defer h.Release()
+
+	var addArgs []string
+	for _, c := range git.snapshot() {
+		if len(c.Args) >= 2 && c.Args[0] == "worktree" && c.Args[1] == "add" {
+			addArgs = c.Args
+			break
+		}
+	}
+	want := []string{"worktree", "add", filepath.Join(target, ".worktrees", "develop-7"), "-b", "heimdallm/issue-7", "main"}
+	if !reflect.DeepEqual(addArgs, want) {
+		t.Fatalf("worktree add args = %v, want %v", addArgs, want)
+	}
+}
+
 func TestAcquireInspectSkipsWorktreeAndCap(t *testing.T) {
 	// Inspect callers (HTTP /config/clones) want the clone path only.
 	// They must not take a cap slot — otherwise a single inspection

@@ -348,7 +348,8 @@ func (m *Manager) acquireWorktree(ctx context.Context, req Request, owner, name 
 	if err = os.MkdirAll(filepath.Dir(wtPath), 0o755); err != nil {
 		return nil, fmt.Errorf("repoctx: create worktrees root: %w", err)
 	}
-	if err = m.runner().Run(ctx, cloneRoot, nil, "worktree", "add", wtPath, "--detach"); err != nil {
+	addArgs := buildWorktreeAddArgs(wtPath, req.Branch, req.WorktreeBaseRef)
+	if err = m.runner().Run(ctx, cloneRoot, nil, addArgs...); err != nil {
 		return nil, fmt.Errorf("repoctx: worktree add %s: %w", wtPath, err)
 	}
 
@@ -793,6 +794,24 @@ func (m *Manager) releaseCapRef(repo string, c *repoCap) {
 	if c.refs == 0 && m.caps[repo] == c {
 		delete(m.caps, repo)
 	}
+}
+
+// buildWorktreeAddArgs assembles `git worktree add` args. When branch
+// is non-empty a fresh local branch is created with `-b`; otherwise
+// the worktree is created detached. A non-empty baseRef is appended
+// as the final positional argument so git resolves it as the start
+// point. Empty baseRef leaves git to default to HEAD.
+func buildWorktreeAddArgs(path, branch, baseRef string) []string {
+	args := []string{"worktree", "add", path}
+	if branch != "" {
+		args = append(args, "-b", branch)
+	} else {
+		args = append(args, "--detach")
+	}
+	if baseRef != "" {
+		args = append(args, baseRef)
+	}
+	return args
 }
 
 // validateWorktreeToken rejects any token that could escape the
