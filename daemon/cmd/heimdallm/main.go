@@ -217,7 +217,9 @@ func main() {
 	notifier := notify.New()
 	ghClient := gh.NewClient(token)
 	exec := executor.New()
-	repoCtx := repoctx.NewManager()
+	repoCtx := repoctx.NewManagerWithOptions(repoctx.ManagerOptions{
+		MaxWorktreesPerRepo: cfg.AI.MaxWorktreesPerRepo,
+	})
 
 	// Sweep worktrees left behind by a previous daemon process. At
 	// startup the manager has no active worktrees, so every directory
