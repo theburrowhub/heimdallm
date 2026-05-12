@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -115,11 +116,142 @@ func (g *GitExec) HasChanges(ctx context.Context, dir string) (bool, error) {
 	return strings.TrimSpace(string(out)) != "", nil
 }
 
+// sensitivePathPatterns lists basename globs that the auto_implement
+// pipeline refuses to commit. Prompt-injection on the issue body
+// could otherwise coerce the AI into writing exfiltration files
+// (credentials, private keys) which would then be pushed to GitHub
+// via the PR. The patterns target common secret shapes; legitimate
+// repository content rarely matches.
+//
+// Match is performed against the lowercased basename of the staged
+// path with filepath.Match, so e.g. `secret.pem`, `Secret.PEM`, and
+// `subdir/secret.pem` all match `*.pem`. Lowercasing closes a
+// case-insensitive-filesystem bypass (macOS / Windows default).
+//
+// Notes on intentional exclusions:
+//   - `.heimdallm-managed` is already excluded from staging by the
+//     `:(exclude)` pathspec in CommitAll, so it does not need to
+//     appear here.
+//   - SSH public keys (id_*.pub) are not secrets — projects
+//     legitimately ship example/deploy public keys, so they stay
+//     allow-listed.
+//   - `config.toml` is handled separately (rootOnlySensitiveNames)
+//     because many Go/Rust/Hugo projects use the name for harmless
+//     subdirectory configuration; we only refuse it at the repo
+//     root, where it would collide with Heimdallm's own operator
+//     config.
+var sensitivePathPatterns = []string{
+	".env", ".env.*",
+	"*.pem", "*.key", "*.crt", "*.cer", "*.p12", "*.pfx",
+	"*.gpg", "*.asc",
+	"*.jks", "*.keystore", "*.kdbx",
+	"*.ovpn",
+	"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
+	"credentials", "credentials.*",
+	".git-credentials",
+	"kubeconfig", ".kubeconfig",
+	".npmrc", ".netrc", ".pypirc",
+	".bash_history", ".zsh_history",
+	"service-account*.json",
+	"terraform.tfvars", "terraform.tfvars.*",
+	"wallet.dat",
+}
+
+// rootOnlySensitiveNames lists basenames that are refused only when
+// they appear at the repository root. Same-named files nested under
+// a subdirectory (e.g. `docs/config.toml` as an example fixture) are
+// allowed because the legitimate-use rate is high.
+var rootOnlySensitiveNames = map[string]bool{
+	"config.toml": true,
+}
+
+// matchesSensitivePattern reports whether the staged path is
+// considered sensitive. Returns the matched pattern and true on hit.
+// The basename is lowercased before matching to defeat case-variant
+// bypasses on case-insensitive filesystems. Match errors are treated
+// as non-matches: a bad pattern is a programmer bug, not a reason to
+// silently let through every commit.
+func matchesSensitivePattern(path string) (string, bool) {
+	clean := filepath.Clean(path)
+	base := strings.ToLower(filepath.Base(clean))
+	// Root-only allowlist: refuse `config.toml` at depth 0 but allow
+	// `anywhere/else/config.toml`.
+	if !strings.Contains(clean, string(filepath.Separator)) {
+		if rootOnlySensitiveNames[base] {
+			return base, true
+		}
+	}
+	for _, pat := range sensitivePathPatterns {
+		ok, err := filepath.Match(pat, base)
+		if err == nil && ok {
+			return pat, true
+		}
+	}
+	return "", false
+}
+
 // CommitAll stages every change and commits with the Heimdallm identity.
 // Uses `-c` flags so the repo-level and global git config are never touched.
+//
+// Before committing, the staged file list is scanned against
+// sensitivePathPatterns: if a prompt-injected AI run tried to write
+// secrets (private keys, .env, the daemon's config.toml) into the
+// worktree to exfiltrate them via the PR, the commit is refused and
+// the index is reset so a retry from scratch is not poisoned.
 func (g *GitExec) CommitAll(ctx context.Context, dir, message string) error {
 	if err := runGit(ctx, dir, nil, "add", "-A", "--", ".", ":(exclude)"+managedCloneMarkerFile); err != nil {
 		return fmt.Errorf("gitops: add: %w", err)
+	}
+	// `-z` + NUL split: defeats core.quotepath=on (the git default)
+	// which would escape non-ASCII paths like `weird\303\251.pem` and
+	// make filepath.Match miss them. `-c core.quotepath=off` is
+	// redundant when -z is used but kept as belt-and-suspenders.
+	staged, err := captureGit(ctx, dir, nil, "-c", "core.quotepath=off", "diff", "--cached", "--name-only", "-z")
+	if err != nil {
+		return fmt.Errorf("gitops: list staged: %w", err)
+	}
+	var refused []string
+	for _, path := range strings.Split(strings.TrimRight(string(staged), "\x00"), "\x00") {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		if pat, hit := matchesSensitivePattern(path); hit {
+			slog.Warn("gitops: sensitive-path denylist hit (prompt-injection defense)",
+				"path", path, "pattern", pat)
+			refused = append(refused, path)
+			continue
+		}
+		// Defense-in-depth: even if the basename looks innocuous, a
+		// symlink can carry intent (target path embedded in the blob)
+		// and signals an AI run trying to reach outside the worktree.
+		// Refuse outright. The cleanup path is the same so we batch
+		// the refusal list together.
+		if info, statErr := os.Lstat(filepath.Join(dir, path)); statErr == nil && info.Mode()&os.ModeSymlink != 0 {
+			slog.Warn("gitops: symlink in staged tree refused (prompt-injection defense)",
+				"path", path)
+			refused = append(refused, path)
+		}
+	}
+	if len(refused) > 0 {
+		// Reset the index AND remove the offending paths from disk —
+		// otherwise the worktree state would still trip the next
+		// `git add -A` and the pipeline would loop. We only remove
+		// the matched files; the rest of the worktree (which contains
+		// legitimate edits) stays intact for triage. Cleanup errors
+		// are surfaced via slog so a stuck worktree (read-only FS,
+		// missing perms) is diagnosable.
+		if resetErr := runGit(ctx, dir, nil, "reset", "--", "."); resetErr != nil {
+			slog.Error("gitops: failed to reset index after denylist hit", "err", resetErr)
+		}
+		for _, p := range refused {
+			if rmErr := os.Remove(filepath.Join(dir, p)); rmErr != nil && !os.IsNotExist(rmErr) {
+				slog.Error("gitops: failed to remove refused path; retry may loop",
+					"path", p, "err", rmErr)
+			}
+		}
+		return fmt.Errorf("gitops: refusing commit — staged %d file(s) matched sensitive-path denylist (e.g. %q); prompt-injection defense aborted the auto-implement run",
+			len(refused), refused[0])
 	}
 	if err := runGit(ctx, dir, nil,
 		"-c", "user.name="+CommitAuthorName,
