@@ -528,6 +528,41 @@ func setupManagedClone(t *testing.T, base string) string {
 	return target
 }
 
+func TestAcquireInspectSkipsWorktreeAndCap(t *testing.T) {
+	// Inspect callers (HTTP /config/clones) want the clone path only.
+	// They must not take a cap slot — otherwise a single inspection
+	// can starve real pipeline executions — and they must not create
+	// a worktree.
+	m, git, base := newTestManagerWithCap(t, 1)
+	target := setupManagedClone(t, base)
+
+	h1, err := m.Acquire(context.Background(), Request{
+		Repo: "org/repo", Token: "secret", WorktreeToken: "wt-1",
+	})
+	if err != nil {
+		t.Fatalf("Acquire (worktree): %v", err)
+	}
+	defer h1.Release()
+
+	preInspectCalls := len(git.snapshot())
+
+	h2, err := m.Acquire(context.Background(), Request{
+		Repo: "org/repo", Token: "secret", Inspect: true,
+	})
+	if err != nil {
+		t.Fatalf("Inspect Acquire: %v", err)
+	}
+	if h2.Path() != target {
+		t.Fatalf("Inspect path = %q, want clone root %q", h2.Path(), target)
+	}
+	for _, c := range git.snapshot()[preInspectCalls:] {
+		if len(c.Args) >= 2 && c.Args[0] == "worktree" {
+			t.Fatalf("Inspect triggered worktree op: %v", c.Args)
+		}
+	}
+	h2.Release() // Must not panic or block.
+}
+
 func TestAcquireBlocksWhenAtMaxWorktreesPerRepo(t *testing.T) {
 	m, _, base := newTestManagerWithCap(t, 2)
 	setupManagedClone(t, base)

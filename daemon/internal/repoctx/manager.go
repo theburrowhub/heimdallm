@@ -218,10 +218,34 @@ func (m *Manager) Acquire(ctx context.Context, req Request) (*Handle, error) {
 			return nil, err
 		}
 	}
+	if req.Inspect {
+		return m.acquireInspect(ctx, req, owner, name)
+	}
 	if req.WorktreeToken == "" {
 		return m.acquireClone(ctx, req, owner, name)
 	}
 	return m.acquireWorktree(ctx, req, owner, name)
+}
+
+// acquireInspect returns the clone root path without taking a cap
+// slot or creating a worktree. Used by the HTTP /config/clones
+// inspection endpoint where forcing a worktree allocation would
+// inflate disk usage and serialise reads behind real pipeline runs.
+func (m *Manager) acquireInspect(ctx context.Context, req Request, owner, name string) (*Handle, error) {
+	unlock, err := m.acquireRepoLock(ctx, req.Repo)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+
+	if local := resolveLocal(req); local != "" {
+		return &Handle{path: local, managed: false, release: func() {}}, nil
+	}
+	path, err := m.ensureManagedClone(ctx, owner, name, req)
+	if err != nil {
+		return nil, err
+	}
+	return &Handle{path: path, managed: true, release: func() {}}, nil
 }
 
 // acquireClone is the legacy single-lock path used by callers that did
