@@ -39,7 +39,7 @@ func newMemStore(t *testing.T) *store.Store {
 
 func TestAcquireRepoContextNilManagerIsError(t *testing.T) {
 	aiCfg := config.RepoAI{}
-	_, err := acquireRepoContext(context.Background(), nil, "org/repo", &aiCfg, nil, "secret", repoctx.ModeRead)
+	_, err := acquireRepoContext(context.Background(), nil, "org/repo", &aiCfg, nil, "secret", repoctx.ModeRead, "", "", "")
 	if err == nil || !strings.Contains(err.Error(), "nil manager") {
 		t.Fatalf("err = %v, want nil manager error", err)
 	}
