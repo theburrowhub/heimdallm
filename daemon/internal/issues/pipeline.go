@@ -897,7 +897,7 @@ func (p *Pipeline) autoImplementNoChangesFallback(issue *github.Issue, issueID i
 	body := fmt.Sprintf(
 		"%s\n## ⚠️ Heimdallm auto-implement skipped\n\n"+
 			"The agent looked at #%d but left the working tree unchanged — it likely needs a human decision or more context than the issue alone provides.\n\n"+
-			"To retry auto-implementation, post a new comment containing a Heimdallm `heimdallm:retry` marker (see the configuration guide's issue-tracking section for the exact syntax). To stop here, remove the develop label.\n\n"+
+			"To retry auto-implementation, post a new comment containing a Heimdallm `heimdallm:retry` marker (see the configuration guide's `auto_implement` section for the exact syntax). To stop here, remove the develop label.\n\n"+
 			"---\n*auto_implement → review_only fallback · Heimdallm*",
 		MarkerDone, issue.Number,
 	)
