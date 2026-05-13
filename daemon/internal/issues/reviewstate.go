@@ -1,7 +1,6 @@
 package issues
 
 import (
-	"strings"
 	"time"
 
 	"github.com/heimdallm/daemon/internal/github"
@@ -30,74 +29,53 @@ const (
 //     out so the daemon never reacts to its own posted reviews.
 //   - DISMISSED reviews drop the reviewer's previous decision; they
 //     do not themselves count as a state.
-//   - For each remaining reviewer, only their latest non-COMMENTED
+//   - For each remaining reviewer, only their LATEST non-COMMENTED
 //     review counts as their "decision" — matches the GitHub UI's
-//     per-reviewer collapse rule.
+//     per-reviewer collapse rule. A reviewer who CR'd then later
+//     APPROVED contributes APPROVED.
 //   - COMMENTED contributes only when a reviewer has never left a
-//     decision (no APPROVED / CHANGES_REQUESTED entry).
+//     decision (no APPROVED / CHANGES_REQUESTED entry); within that
+//     branch, the LATEST COMMENTED from the same reviewer wins so
+//     the aggregate's timestamp advances and the Tier 3 fresh-
+//     same-state gate can re-dispatch on a follow-up comment.
 //   - Across reviewers, CHANGES_REQUESTED dominates APPROVED dominates
 //     COMMENTED dominates empty.
 //
 // The returned `reviewer` and `at` correspond to the latest review
 // that drives the aggregate (so the SSE payload can name the reviewer
 // who triggered the state).
+//
+// The per-reviewer collapse is shared with the Responder + FixRunner
+// trigger selectors via currentDecisionsByReviewer, so the trigger
+// picker and the aggregator can never disagree about who the active
+// reviewer is.
 func LatestExternalReviewState(reviews []github.PRReview, botLogin string) (state, reviewer string, at time.Time) {
-	type decision struct {
-		state string
-		at    time.Time
-		login string
-	}
-	perReviewer := map[string]decision{}
-
-	botLower := strings.ToLower(botLogin)
-	for _, r := range reviews {
-		if botLower != "" && strings.EqualFold(r.User.Login, botLogin) {
-			continue
-		}
-		key := strings.ToLower(r.User.Login)
-		switch r.State {
-		case "DISMISSED":
-			// Drop any prior decision from this reviewer — DISMISSED
-			// resets them to "no current opinion".
-			delete(perReviewer, key)
-		case ReviewStateApproved, ReviewStateChangesRequested:
-			perReviewer[key] = decision{state: r.State, at: r.SubmittedAt, login: r.User.Login}
-		case ReviewStateCommented:
-			// Only set if the reviewer has no decision yet.
-			if _, ok := perReviewer[key]; !ok {
-				perReviewer[key] = decision{state: r.State, at: r.SubmittedAt, login: r.User.Login}
-			}
-		default:
-			// PENDING and any future state — ignore.
-		}
-	}
-
-	// Pick the dominant aggregate.
-	var bestApproved, bestCR, bestComment *decision
-	for _, d := range perReviewer {
-		d := d
-		switch d.state {
+	dec := currentDecisionsByReviewer(reviews, botLogin)
+	var bestApproved, bestCR, bestComment *github.PRReview
+	for _, r := range dec {
+		cur := r
+		switch cur.State {
 		case ReviewStateChangesRequested:
-			if bestCR == nil || d.at.After(bestCR.at) {
-				bestCR = &d
+			if bestCR == nil || cur.SubmittedAt.After(bestCR.SubmittedAt) {
+				bestCR = &cur
 			}
 		case ReviewStateApproved:
-			if bestApproved == nil || d.at.After(bestApproved.at) {
-				bestApproved = &d
+			if bestApproved == nil || cur.SubmittedAt.After(bestApproved.SubmittedAt) {
+				bestApproved = &cur
 			}
 		case ReviewStateCommented:
-			if bestComment == nil || d.at.After(bestComment.at) {
-				bestComment = &d
+			if bestComment == nil || cur.SubmittedAt.After(bestComment.SubmittedAt) {
+				bestComment = &cur
 			}
 		}
 	}
 	switch {
 	case bestCR != nil:
-		return ReviewStateChangesRequested, bestCR.login, bestCR.at
+		return ReviewStateChangesRequested, bestCR.User.Login, bestCR.SubmittedAt
 	case bestApproved != nil:
-		return ReviewStateApproved, bestApproved.login, bestApproved.at
+		return ReviewStateApproved, bestApproved.User.Login, bestApproved.SubmittedAt
 	case bestComment != nil:
-		return ReviewStateCommented, bestComment.login, bestComment.at
+		return ReviewStateCommented, bestComment.User.Login, bestComment.SubmittedAt
 	}
 	return "", "", time.Time{}
 }

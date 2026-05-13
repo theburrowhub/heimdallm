@@ -240,12 +240,20 @@ func latestChangesRequestedByExternal(reviews []github.PRReview, botLogin string
 
 // currentDecisionsByReviewer applies the per-reviewer collapse the
 // aggregator uses: bot reviews are filtered out, DISMISSED drops the
-// reviewer's prior decision, and only the latest non-COMMENTED state
-// from a reviewer counts as their "decision". Returns the map of
-// driving reviews keyed by lowercased reviewer login. Shared between
-// the FixRunner trigger selector and the Responder's COMMENTED
-// selector so the trigger picker and the aggregator can never
+// reviewer's prior decision, and only the LATEST non-COMMENTED state
+// from a reviewer counts as their "decision". COMMENTED contributes
+// only while the reviewer has no decision yet — within that branch
+// the LATEST COMMENTED wins so a second comment from the same
+// reviewer advances the aggregate timestamp (otherwise the fresh-
+// same-state gate at Tier 3 would freeze on the first comment and
+// silently swallow follow-ups). Shared between the FixRunner trigger
+// selector, the Responder's COMMENTED selector, and the aggregator
+// so the trigger picker and LatestExternalReviewState can never
 // disagree about who the active reviewer is.
+//
+// The function does NOT assume the input is sorted by submitted_at —
+// each branch compares timestamps explicitly so an out-of-order list
+// still produces the correct "latest" result.
 func currentDecisionsByReviewer(reviews []github.PRReview, botLogin string) map[string]github.PRReview {
 	out := map[string]github.PRReview{}
 	for _, r := range reviews {
@@ -257,9 +265,23 @@ func currentDecisionsByReviewer(reviews []github.PRReview, botLogin string) map[
 		case "DISMISSED":
 			delete(out, key)
 		case ReviewStateApproved, ReviewStateChangesRequested:
-			out[key] = r
+			// A non-COMMENTED decision always overrides the previous
+			// entry (whether that was a COMMENTED or an older
+			// decision); among decisions the latest wins.
+			if cur, has := out[key]; !has || r.SubmittedAt.After(cur.SubmittedAt) {
+				out[key] = r
+			}
 		case ReviewStateCommented:
-			if _, has := out[key]; !has {
+			cur, has := out[key]
+			if !has {
+				out[key] = r
+				continue
+			}
+			// A COMMENTED MUST NOT downgrade an existing
+			// APPROVED/CHANGES_REQUESTED decision from the same
+			// reviewer. Only update when the current entry is also
+			// COMMENTED and the new one is strictly newer.
+			if cur.State == ReviewStateCommented && r.SubmittedAt.After(cur.SubmittedAt) {
 				out[key] = r
 			}
 		}

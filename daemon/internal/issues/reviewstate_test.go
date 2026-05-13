@@ -91,6 +91,69 @@ func TestLatestExternalReviewState_StaleStateSupersededByDecision(t *testing.T) 
 	}
 }
 
+// TestLatestExternalReviewState_LatestCommentedFromSameReviewerWins
+// pins the bug found in PR review: when a reviewer leaves two
+// COMMENTED reviews back-to-back, the aggregator must surface the
+// LATEST one (so its SubmittedAt advances and the Tier 3
+// "fresh same-state" gate can re-dispatch the Responder). The earlier
+// collapse kept the FIRST COMMENTED, freezing the timestamp at T1
+// and silently swallowing T2.
+func TestLatestExternalReviewState_LatestCommentedFromSameReviewerWins(t *testing.T) {
+	t1 := time.Now().Add(-2 * time.Hour)
+	t2 := t1.Add(time.Hour)
+	revs := []github.PRReview{
+		mkRev("alice", "COMMENTED", t1),
+		mkRev("alice", "COMMENTED", t2),
+	}
+	state, reviewer, at := issues.LatestExternalReviewState(revs, "bot")
+	if state != "COMMENTED" {
+		t.Errorf("state = %q, want COMMENTED", state)
+	}
+	if reviewer != "alice" {
+		t.Errorf("reviewer = %q, want alice", reviewer)
+	}
+	if !at.Equal(t2) {
+		t.Errorf("at = %v, want %v (latest COMMENTED must win)", at, t2)
+	}
+}
+
+// TestLatestExternalReviewState_LatestDecisionFromSameReviewerWins
+// is the symmetric pin for the decision case — alice's later
+// APPROVED supersedes her earlier CR for HER state, even when both
+// arrive in the same reviews list.
+func TestLatestExternalReviewState_LatestDecisionFromSameReviewerWins(t *testing.T) {
+	t1 := time.Now().Add(-2 * time.Hour)
+	t2 := t1.Add(time.Hour)
+	revs := []github.PRReview{
+		mkRev("alice", "CHANGES_REQUESTED", t1),
+		mkRev("alice", "APPROVED", t2),
+	}
+	state, _, at := issues.LatestExternalReviewState(revs, "bot")
+	if state != "APPROVED" {
+		t.Errorf("state = %q, want APPROVED", state)
+	}
+	if !at.Equal(t2) {
+		t.Errorf("at = %v, want %v", at, t2)
+	}
+}
+
+// TestLatestExternalReviewState_DecisionThenCommentKeepsDecision
+// guards against the inverse failure: a COMMENTED arriving after a
+// reviewer has already submitted a non-COMMENTED decision must NOT
+// downgrade their state.
+func TestLatestExternalReviewState_DecisionThenCommentKeepsDecision(t *testing.T) {
+	t1 := time.Now().Add(-2 * time.Hour)
+	t2 := t1.Add(time.Hour)
+	revs := []github.PRReview{
+		mkRev("alice", "APPROVED", t1),
+		mkRev("alice", "COMMENTED", t2),
+	}
+	state, _, _ := issues.LatestExternalReviewState(revs, "bot")
+	if state != "APPROVED" {
+		t.Errorf("state = %q, want APPROVED (later COMMENTED must not downgrade)", state)
+	}
+}
+
 // TestLatestExternalReviewState_EmptyListYieldsEmptyState is the
 // no-reviews path the dashboard relies on to render an "in flight"
 // chip rather than a misleading default.
