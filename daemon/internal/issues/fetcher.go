@@ -32,14 +32,6 @@ const RecomputeGrace = 30 * time.Second
 // See issue #223.
 const MaxAutoImplementFailures = 3
 
-// MaxAutoImplementNoChanges caps how many auto_implement_no_changes runs we
-// allow on a single issue before the fetcher permanently skips it. After the
-// agent has produced an empty diff this many times in a row, retrying is
-// almost certainly burning tokens for nothing — the issue needs more context,
-// a different agent, or a human. The retry marker / dismiss / mode change
-// path still unblocks the issue manually. See issue #433.
-const MaxAutoImplementNoChanges = 1
-
 // IssuesFetcher is the subset of github.Client that fetches classified
 // issues. Kept as an interface so the fetcher can be tested without an HTTP
 // server standing in.
@@ -63,10 +55,6 @@ type issueDedupStore interface {
 	// "auto_implement_failed" review rows for the issue. Used to enforce
 	// MaxAutoImplementFailures; see issue #223.
 	CountFailedAutoImplement(issueID int64) (int, error)
-	// CountAutoImplementNoChanges returns the number of stored
-	// "auto_implement_no_changes" review rows for the issue. Used to enforce
-	// MaxAutoImplementNoChanges; see issue #433.
-	CountAutoImplementNoChanges(issueID int64) (int, error)
 }
 
 // issueMarkerFetcher fetches comments for an issue so the fetcher can scan

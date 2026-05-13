@@ -52,8 +52,6 @@ type dedupEntry struct {
 	revErr            error
 	failedAutoImpl    int // stub for CountFailedAutoImplement
 	failedAutoImplErr error
-	noChangesCount    int // stub for CountAutoImplementNoChanges
-	noChangesErr      error
 }
 
 type fakeDedup struct {
@@ -93,18 +91,6 @@ func (d *fakeDedup) CountFailedAutoImplement(issueID int64) (int, error) {
 				return 0, e.failedAutoImplErr
 			}
 			return e.failedAutoImpl, nil
-		}
-	}
-	return 0, nil
-}
-
-func (d *fakeDedup) CountAutoImplementNoChanges(issueID int64) (int, error) {
-	for _, e := range d.byGithubID {
-		if e.row != nil && e.row.ID == issueID {
-			if e.noChangesErr != nil {
-				return 0, e.noChangesErr
-			}
-			return e.noChangesCount, nil
 		}
 	}
 	return 0, nil

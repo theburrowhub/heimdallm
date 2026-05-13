@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/models/pr.dart';
 import '../../core/models/tracked_issue.dart';
 import '../../shared/widgets/keep_alive_tab.dart';
+import '../../shared/widgets/attention_badge.dart';
 import '../../shared/widgets/severity_badge.dart';
 import '../../shared/widgets/state_badge.dart';
 import '../../shared/widgets/toast.dart';
@@ -704,6 +705,12 @@ class _IssueActivityTileState extends ConsumerState<_IssueActivityTile> {
     final issue = widget.issue;
     final reviewed = issue.latestReview != null;
     final severity = issue.latestReview?.severity ?? '';
+    // auto_implement_no_changes is a terminal "needs attention" state —
+    // the review row has an empty triage block (severity defaults to
+    // LOW/green), which would otherwise misrepresent it as a clean low
+    // severity result. See #483.
+    final needsAttention =
+        issue.latestReview?.actionTaken == 'auto_implement_no_changes';
 
     return Opacity(
       opacity: issue.state == 'open' ? 1.0 : 0.6,
@@ -760,7 +767,9 @@ class _IssueActivityTileState extends ConsumerState<_IssueActivityTile> {
                 Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    if (reviewed)
+                    if (needsAttention)
+                      const AttentionBadge()
+                    else if (reviewed)
                       SeverityBadge(severity: severity)
                     else
                       Container(
@@ -826,6 +835,7 @@ class _ActivityGridTile extends StatelessWidget {
     final String title;
     final String subtitle;
     final String? severity;
+    final bool needsAttention;
     final DateTime timestamp;
 
     switch (item) {
@@ -836,6 +846,7 @@ class _ActivityGridTile extends StatelessWidget {
         title = pr.title;
         subtitle = '${pr.repo} #${pr.number} · ${pr.author}';
         severity = pr.latestReview?.severity;
+        needsAttention = false;
         timestamp = pr.updatedAt;
       case _IssueItem(:final issue):
         final isDev = issue.latestReview?.actionTaken == 'auto_implement';
@@ -844,6 +855,11 @@ class _ActivityGridTile extends StatelessWidget {
         state = issue.state;
         title = issue.title;
         subtitle = '${issue.repo} #${issue.number} · ${issue.author}';
+        // Terminal no-changes rows have an empty triage block — render
+        // them as a NEEDS ATTENTION chip instead of a misleading green
+        // LOW badge (#483).
+        needsAttention =
+            issue.latestReview?.actionTaken == 'auto_implement_no_changes';
         severity = issue.latestReview?.severity;
         timestamp = issue.fetchedAt;
     }
@@ -900,7 +916,10 @@ class _ActivityGridTile extends StatelessWidget {
               const Spacer(),
               Row(
                 children: [
-                  if (severity != null) SeverityBadge(severity: severity),
+                  if (needsAttention)
+                    const AttentionBadge()
+                  else if (severity != null)
+                    SeverityBadge(severity: severity),
                   const Spacer(),
                   Text(
                     _timeAgo(timestamp),
