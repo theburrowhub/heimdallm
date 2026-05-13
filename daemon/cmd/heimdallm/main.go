@@ -566,6 +566,42 @@ func main() {
 		lastBreakerTrips:     make(map[breakerTripKey]breakerTripDedup),
 	}
 
+	// Phase 2/3 of #482: build the Responder and FixRunner with real
+	// dependencies and wire them into the adapter. Both modules check
+	// their own Enabled flag on every Run so a cold-start with the
+	// feature disabled costs nothing; flipping the flag in TOML and
+	// reloading is enough to opt in.
+	adapter.responder = issuepipeline.NewResponder(
+		s, ghClient,
+		&prReviewExecutor{runner: exec, cfg: &cfg, cfgMu: &cfgMu},
+		broker,
+		func() config.ReviewResponseConfig {
+			cfgMu.Lock()
+			defer cfgMu.Unlock()
+			return cfg.AI.ReviewResponse
+		},
+		func() string {
+			loginMu.Lock()
+			defer loginMu.Unlock()
+			return cachedLogin
+		},
+	)
+	adapter.fixRunner = issuepipeline.NewFixRunner(
+		s, ghClient,
+		&prFixExecutor{runner: exec, cfg: &cfg, cfgMu: &cfgMu},
+		broker,
+		func() config.ReviewFixConfig {
+			cfgMu.Lock()
+			defer cfgMu.Unlock()
+			return cfg.AI.ReviewFix
+		},
+		func() string {
+			loginMu.Lock()
+			defer loginMu.Unlock()
+			return cachedLogin
+		},
+	)
+
 	repoPublisher := bus.NewRepoPublisher(conn)
 	prReviewPublisher := bus.NewPRReviewPublisher(conn)
 
