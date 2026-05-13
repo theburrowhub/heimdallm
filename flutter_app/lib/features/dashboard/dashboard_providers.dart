@@ -214,6 +214,11 @@ void _handleSseEvent(Ref ref, SseEvent event) {
               .read(reviewingIssuesProvider.notifier)
               .update((s) => s.difference({issueKey}));
         }
+        // Terminal failure — bump the list refresh so the issue's row
+        // re-fetches its latest review state (e.g. the new
+        // auto_implement_no_changes terminal state from #483), matching
+        // the behaviour of the other terminal issue events above.
+        ref.read(issueListRefreshProvider.notifier).update((s) => s + 1);
 
       // ── Circuit breaker ────────────────────────────────────────────────
       case 'circuit_breaker_tripped':
