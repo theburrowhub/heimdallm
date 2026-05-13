@@ -2193,9 +2193,20 @@ func runTier2(
 
 	// runIssueTier promotes ready issues and processes every repo's
 	// issue list in parallel, bounded by ai.tier2_repo_concurrency.
+	//
+	// NOTE: if NATS publishes are ever added to this tier, also call
+	// adapter.PublishPending() at the end — it is intentionally bound
+	// to the PR tick today (see prTick) because pending publishes
+	// originate exclusively from runPRTier.
 	runIssueTier := func(currentRepos []string) {
 		sse.EmitPollingStarted(ssePub, "issues", currentRepos)
 		issueStart := time.Now()
+		// issueCount is intentionally captured by the deferred
+		// EmitPollingCompleted closure so the final value (assigned
+		// after processReposInParallel returns) is what the SSE event
+		// reports. Reassigning it later via `=` keeps the capture
+		// valid; a future refactor that switches to a fresh local
+		// would silently emit 0.
 		issueCount := 0
 		defer func() {
 			sse.EmitPollingCompleted(ssePub, "issues", issueCount, time.Since(issueStart))
@@ -2264,6 +2275,13 @@ func runTier2(
 		runIssueTier(currentRepos)
 	}
 
+	// runTickerLoop is the per-tier event loop. time.Ticker's channel
+	// is buffered to size 1, so a tick that fires while the previous
+	// `tick()` is still running is silently dropped — this is the
+	// invariant that prevents a tier from running concurrently against
+	// itself without needing a mutex. PR and issue tiers each get
+	// their own goroutine + ticker so a slow run on one tier never
+	// stalls the other.
 	runTickerLoop := func(tick func()) {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
@@ -2557,11 +2575,15 @@ func (a *tier2Adapter) FetchPRsToReview() ([]scheduler.Tier2PR, error) {
 	nonMonSnap := append([]string(nil), cfg.GitHub.NonMonitored...)
 	a.cfgMu.Unlock()
 
-	// Defer reviews on repos discovered this tick by one cycle so the
-	// UI receives `repo_discovered` before `review_started` (#481).
-	// On the next tick `upsertDiscoveredRepos` will return an empty
-	// `added` list for these repos (they're already in the config),
-	// and the same PR flows through normally.
+	// Defer reviews on repos discovered THIS call to upsertDiscoveredRepos
+	// by one tick so the UI receives `repo_discovered` before
+	// `review_started` (#481). The guarantee is "one tick relative to
+	// upsertDiscoveredRepos", not "guaranteed UI delivery": if the SSE
+	// bridge to NATS is stalled, the UI may still see the events out of
+	// order despite the deferral. On the next tick
+	// `upsertDiscoveredRepos` returns an empty `added` list for these
+	// repos (they're already in the config), and the same PR flows
+	// through normally.
 	addedThisTick := make(map[string]struct{}, len(added))
 	for _, r := range added {
 		addedThisTick[r] = struct{}{}
