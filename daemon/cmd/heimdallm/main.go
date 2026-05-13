@@ -3274,10 +3274,18 @@ func (a *tier2Adapter) CheckItem(ctx context.Context, item *scheduler.WatchItem)
 			if err := a.refreshAutoImplementPRReviewState(item, stored); err != nil {
 				// Propagate the error so the state-handler can apply
 				// its 404 cleanup + the StateWorker increases backoff
-				// rather than burning the API on every tick. A
-				// transient failure leaves stored.ExternalReviewState
-				// untouched — the next successful refresh recovers
-				// the correct state.
+				// (no LastSeen advance) rather than burning the API
+				// on every tick.
+				//
+				// Two error shapes flow through here. A GetPRReviews
+				// failure surfaces before any persist, so the store
+				// row is untouched and the next refresh re-observes
+				// from scratch. A runner failure (Responder /
+				// FixRunner) surfaces AFTER the new aggregate state
+				// was persisted + SSE-emitted on this tick — the
+				// stateMoved gate in refresh then sees
+				// stateMoved=false on the retry tick and re-dispatches
+				// without re-emitting the event.
 				return false, nil, err
 			}
 			// Success: signal `changed=true` so the StateWorker resets
