@@ -588,7 +588,14 @@ func main() {
 	)
 	adapter.fixRunner = issuepipeline.NewFixRunner(
 		s, ghClient,
-		&prFixExecutor{runner: exec, cfg: &cfg, cfgMu: &cfgMu},
+		&prFixExecutor{
+			pipeline: issuePipe,
+			repoCtx:  repoCtx,
+			ghClient: ghClient,
+			ghToken:  token,
+			cfg:      &cfg,
+			cfgMu:    &cfgMu,
+		},
 		broker,
 		func() config.ReviewFixConfig {
 			cfgMu.Lock()

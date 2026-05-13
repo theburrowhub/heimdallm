@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -80,15 +79,15 @@ func (f *fakeFixGH) PostComment(_ string, _ int, body string) (time.Time, error)
 
 type fakeFixExec struct {
 	called bool
-	prompt string
-	body   string
+	req    issues.FixRequest
+	result issues.FixResult
 	err    error
 }
 
-func (f *fakeFixExec) GenerateFixResponse(_ context.Context, prompt string) (string, error) {
+func (f *fakeFixExec) RunFix(_ context.Context, req issues.FixRequest) (issues.FixResult, error) {
 	f.called = true
-	f.prompt = prompt
-	return f.body, f.err
+	f.req = req
+	return f.result, f.err
 }
 
 func makeFixRunner(t *testing.T,
@@ -115,10 +114,17 @@ func crReview(login, body string, at time.Time) github.PRReview {
 
 // ── tests ────────────────────────────────────────────────────────────────────
 
+// pushedResult is the canonical "happy path" result the production
+// executor returns when the agent produced changes that were
+// successfully pushed.
+func pushedResult() issues.FixResult {
+	return issues.FixResult{Pushed: true, CommentBody: "Heimdallm pushed a fix."}
+}
+
 func TestFixRunner_DisabledByDefault_NoOp(t *testing.T) {
 	st := &fakeFixStore{}
 	gh := &fakeFixGH{reviews: []github.PRReview{crReview("alice", "rename", time.Now())}}
-	exec := &fakeFixExec{body: "would do X"}
+	exec := &fakeFixExec{result: pushedResult()}
 	broker := &fakeResponderBroker{}
 	r := makeFixRunner(t, st, gh, exec, broker, config.ReviewFixConfig{
 		Enabled: false, PerPRLifetime: 3, CooldownSecs: 0,
@@ -136,7 +142,7 @@ func TestFixRunner_DisabledByDefault_NoOp(t *testing.T) {
 func TestFixRunner_PerPRLifetimeCap(t *testing.T) {
 	st := &fakeFixStore{count: 3}
 	gh := &fakeFixGH{reviews: []github.PRReview{crReview("alice", "rename", time.Now())}}
-	exec := &fakeFixExec{body: "would do X"}
+	exec := &fakeFixExec{result: pushedResult()}
 	broker := &fakeResponderBroker{}
 	r := makeFixRunner(t, st, gh, exec, broker, config.ReviewFixConfig{
 		Enabled: true, PerPRLifetime: 3, CooldownSecs: 0,
@@ -163,7 +169,7 @@ func TestFixRunner_PerPRLifetimeCap(t *testing.T) {
 func TestFixRunner_CooldownRespected(t *testing.T) {
 	st := &fakeFixStore{}
 	gh := &fakeFixGH{reviews: []github.PRReview{crReview("alice", "rename", time.Now())}}
-	exec := &fakeFixExec{body: "would do X"}
+	exec := &fakeFixExec{result: pushedResult()}
 	broker := &fakeResponderBroker{}
 	r := makeFixRunner(t, st, gh, exec, broker, config.ReviewFixConfig{
 		Enabled: true, PerPRLifetime: 3, CooldownSecs: 600,
@@ -187,7 +193,7 @@ func TestFixRunner_BotOnlyCRIsNoOp(t *testing.T) {
 	gh := &fakeFixGH{reviews: []github.PRReview{
 		crReview("HeimdallM-Bot", "self-CR", time.Now()),
 	}}
-	exec := &fakeFixExec{body: "x"}
+	exec := &fakeFixExec{result: pushedResult()}
 	broker := &fakeResponderBroker{}
 	r := makeFixRunner(t, st, gh, exec, broker, config.ReviewFixConfig{
 		Enabled: true, PerPRLifetime: 3, CooldownSecs: 0,
@@ -203,17 +209,20 @@ func TestFixRunner_BotOnlyCRIsNoOp(t *testing.T) {
 	}
 }
 
-// TestFixRunner_HappyPath_MarksFixPushed pins the re-arm behaviour:
-// after a successful run, external_review_state flips to FIX_PUSHED
-// so the next Tier 3 tick compares against the live reviews list
-// rather than re-firing on the same CR.
-func TestFixRunner_HappyPath_MarksFixPushed(t *testing.T) {
+// TestFixRunner_PushedFlipsFixPushedState pins the re-arm behaviour
+// for the success path: when the executor reports Pushed=true the
+// runner flips ExternalReviewState to FIX_PUSHED so the next Tier 3
+// tick compares against the live reviews list rather than re-firing
+// on the same CR.
+func TestFixRunner_PushedFlipsFixPushedState(t *testing.T) {
 	st := &fakeFixStore{}
 	now := time.Now()
 	gh := &fakeFixGH{reviews: []github.PRReview{
 		crReview("alice", "rename Foo to Bar", now),
 	}}
-	exec := &fakeFixExec{body: "Renamed Foo → Bar in pkg/x and pkg/y."}
+	exec := &fakeFixExec{result: issues.FixResult{
+		Pushed: true, CommentBody: "Pushed a follow-up commit.",
+	}}
 	broker := &fakeResponderBroker{}
 	r := makeFixRunner(t, st, gh, exec, broker, config.ReviewFixConfig{
 		Enabled: true, PerPRLifetime: 3, CooldownSecs: 0,
@@ -243,20 +252,27 @@ func TestFixRunner_HappyPath_MarksFixPushed(t *testing.T) {
 	if payload["mode"] != "review_fix" {
 		t.Errorf("mode = %v, want review_fix", payload["mode"])
 	}
+	if payload["pushed"] != true {
+		t.Errorf("pushed = %v, want true", payload["pushed"])
+	}
 }
 
-// TestFixRunner_PromptEmbedsIssueContext pins that the FixRunner
-// hydrates the originating issue into the prompt so the agent can
-// judge whether the requested changes are in-scope (#482).
-func TestFixRunner_PromptEmbedsIssueContext(t *testing.T) {
-	st := &fakeFixStore{issue: &store.Issue{
-		ID: 99, Number: 17, Title: "Refactor: pull config out",
-		Body: "Move flags into config.New",
-	}}
+// TestFixRunner_NoChangesDoesNotFlipFixPushed pins the advisory-
+// fallback semantics: when the executor returns Pushed=false (the
+// agent looked at the CR and left the working tree unchanged) the
+// runner posts the advisory comment but does NOT mark FIX_PUSHED.
+// Leaving the state at CHANGES_REQUESTED lets a reviewer who
+// supplies more context retrigger the runner — until the lifetime
+// cap.
+func TestFixRunner_NoChangesDoesNotFlipFixPushed(t *testing.T) {
+	st := &fakeFixStore{}
 	gh := &fakeFixGH{reviews: []github.PRReview{
-		crReview("alice", "rename FromEnv to FromTOML", time.Now()),
+		crReview("alice", "rename", time.Now()),
 	}}
-	exec := &fakeFixExec{body: "would rename in pkg/config"}
+	exec := &fakeFixExec{result: issues.FixResult{
+		Pushed:      false,
+		CommentBody: "Agent declined to apply changes.",
+	}}
 	broker := &fakeResponderBroker{}
 	r := makeFixRunner(t, st, gh, exec, broker, config.ReviewFixConfig{
 		Enabled: true, PerPRLifetime: 3, CooldownSecs: 0,
@@ -264,27 +280,67 @@ func TestFixRunner_PromptEmbedsIssueContext(t *testing.T) {
 	if err := r.Run(context.Background(), samplePR(), 99); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if !exec.called {
-		t.Fatal("executor not invoked")
+	if !gh.postCalled {
+		t.Error("advisory comment not posted on no-changes path")
 	}
-	if !strings.Contains(exec.prompt, "Refactor: pull config out") {
-		t.Errorf("prompt missing issue title:\n%s", exec.prompt)
+	if st.state == "FIX_PUSHED" {
+		t.Error("state flipped to FIX_PUSHED despite Pushed=false")
 	}
-	if !strings.Contains(exec.prompt, "Move flags into config.New") {
-		t.Errorf("prompt missing issue body:\n%s", exec.prompt)
+	if st.count != 1 {
+		t.Errorf("counter = %d, want 1 (no-changes path must still advance counter)", st.count)
 	}
-	if !strings.Contains(exec.prompt, "#17") {
-		t.Errorf("prompt missing issue number:\n%s", exec.prompt)
+	events := broker.eventsByType(sse.EventIssueReviewCompleted)
+	if len(events) != 1 {
+		t.Fatalf("completed events = %d, want 1", len(events))
+	}
+	var payload map[string]any
+	json.Unmarshal([]byte(events[0].Data), &payload)
+	if payload["pushed"] != false {
+		t.Errorf("pushed payload field = %v, want false", payload["pushed"])
 	}
 }
 
-// TestFixRunner_AgentReturnsEmpty_PostsNothing pins that an empty
-// agent response is treated as "no advisable fix" — the counter
-// advances (cap math stays honest) but no comment is posted.
-func TestFixRunner_AgentReturnsEmpty_PostsNothing(t *testing.T) {
+// TestFixRunner_PassesOriginIssueToExecutor pins that the FixRunner
+// hydrates and forwards the originating issue to the executor — the
+// executor is the one that builds the agent prompt, so without this
+// hand-off the agent would lose the issue context #482 specifies.
+func TestFixRunner_PassesOriginIssueToExecutor(t *testing.T) {
+	issue := &store.Issue{ID: 99, Number: 17, Title: "Refactor", Body: "Move config"}
+	st := &fakeFixStore{issue: issue}
+	gh := &fakeFixGH{reviews: []github.PRReview{
+		crReview("alice", "rename", time.Now()),
+	}}
+	exec := &fakeFixExec{result: pushedResult()}
+	broker := &fakeResponderBroker{}
+	r := makeFixRunner(t, st, gh, exec, broker, config.ReviewFixConfig{
+		Enabled: true, PerPRLifetime: 3, CooldownSecs: 0,
+	})
+	if err := r.Run(context.Background(), samplePR(), 99); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if exec.req.OriginIssue == nil {
+		t.Fatal("OriginIssue not forwarded to executor")
+	}
+	if exec.req.OriginIssue.Number != 17 {
+		t.Errorf("OriginIssue.Number = %d, want 17", exec.req.OriginIssue.Number)
+	}
+	if exec.req.ReviewerLogin != "alice" {
+		t.Errorf("ReviewerLogin = %q", exec.req.ReviewerLogin)
+	}
+	if exec.req.ReviewBody != "rename" {
+		t.Errorf("ReviewBody = %q", exec.req.ReviewBody)
+	}
+}
+
+// TestFixRunner_EmptyCommentBody_PostsNothing pins that an executor
+// that returned a non-error result with an empty CommentBody (a
+// pathological case — the production wiring always populates it,
+// but defensive) does not produce a spurious empty comment. The
+// counter still advances.
+func TestFixRunner_EmptyCommentBody_PostsNothing(t *testing.T) {
 	st := &fakeFixStore{}
 	gh := &fakeFixGH{reviews: []github.PRReview{crReview("alice", "rename", time.Now())}}
-	exec := &fakeFixExec{body: ""}
+	exec := &fakeFixExec{result: issues.FixResult{Pushed: false, CommentBody: "   "}}
 	broker := &fakeResponderBroker{}
 	r := makeFixRunner(t, st, gh, exec, broker, config.ReviewFixConfig{
 		Enabled: true, PerPRLifetime: 3, CooldownSecs: 0,
@@ -294,10 +350,7 @@ func TestFixRunner_AgentReturnsEmpty_PostsNothing(t *testing.T) {
 		t.Fatalf("run: %v", err)
 	}
 	if gh.postCalled {
-		t.Error("PostComment invoked for empty agent output")
-	}
-	if st.state == "FIX_PUSHED" {
-		t.Error("state flipped to FIX_PUSHED on empty agent output")
+		t.Error("PostComment invoked for empty CommentBody")
 	}
 	if st.count != 1 {
 		t.Errorf("counter = %d, want 1", st.count)

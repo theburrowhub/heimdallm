@@ -84,6 +84,11 @@ type Repo struct {
 type Branch struct {
 	Repo Repo   `json:"repo"`
 	SHA  string `json:"sha"`
+	// Ref is the branch name (e.g. "heimdallm/issue-42"). Returned by
+	// the Pulls API but not the Search Issues API; the review-state
+	// fix flow (#482 phase 3) reads it to push back to the same
+	// branch the PR was opened from.
+	Ref string `json:"ref"`
 }
 
 type PullRequest struct {
