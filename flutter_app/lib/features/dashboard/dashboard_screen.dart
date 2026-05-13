@@ -6,6 +6,7 @@ import '../../core/models/pr.dart';
 import '../../core/models/tracked_issue.dart';
 import '../../shared/widgets/keep_alive_tab.dart';
 import '../../shared/widgets/attention_badge.dart';
+import '../../shared/widgets/pr_review_state_badge.dart';
 import '../../shared/widgets/severity_badge.dart';
 import '../../shared/widgets/state_badge.dart';
 import '../../shared/widgets/toast.dart';
@@ -769,6 +770,13 @@ class _IssueActivityTileState extends ConsumerState<_IssueActivityTile> {
                 Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
+                    if (issue.linkedPR != null &&
+                        issue.linkedPR!.externalReviewState.isNotEmpty) ...[
+                      PRReviewStateBadge(
+                        state: issue.linkedPR!.externalReviewState,
+                      ),
+                      const SizedBox(width: 6),
+                    ],
                     if (needsAttention)
                       const AttentionBadge()
                     else if (reviewed)
