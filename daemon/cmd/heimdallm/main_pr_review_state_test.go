@@ -274,6 +274,98 @@ func TestRefreshAutoImplementPRReviewState_ApprovedRoutesNowhere(t *testing.T) {
 	}
 }
 
+// TestRefreshAutoImplementPRReviewState_NewCommentReFiresResponder
+// pins the bug found in PR review: the early-return on `state ==
+// stored.ExternalReviewState` swallowed a fresh COMMENTED review
+// submitted after the daemon already responded to an earlier one.
+// A new review (SubmittedAt > stored.ExternalReviewAt) IS a fresh
+// trigger and must re-dispatch.
+func TestRefreshAutoImplementPRReviewState_NewCommentReFiresResponder(t *testing.T) {
+	newerTS := "2026-05-14T09:00:00Z"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[
+			{"id":1,"user":{"login":"alice"},"state":"COMMENTED","body":"second question","submitted_at":"` + newerTS + `"}
+		]`))
+	}))
+	defer srv.Close()
+
+	s := newMemStore(t)
+	pr := seedAutoImplementPR(t, s, 4001, 31)
+	// Simulate: a prior COMMENTED already drove the state; the
+	// daemon recorded the older timestamp. The stub now returns a
+	// strictly-newer COMMENTED.
+	older, _ := time.Parse(time.RFC3339, "2026-05-13T09:00:00Z")
+	if err := s.UpdatePRReviewState(pr.ID, "COMMENTED", "alice", older); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	pr, _ = s.GetPRByGithubID(4001)
+	a, _, sub := makePRReviewStateAdapter(t, srv, s, "heimdallm-bot")
+	responder := &reviewStateDispatcher{}
+	a.responder = responder
+
+	item := &scheduler.WatchItem{Type: "pr", Repo: "org/repo", Number: 31, GithubID: 4001}
+	if err := a.refreshAutoImplementPRReviewState(item, pr); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if responder.count() != 1 {
+		t.Fatalf("Responder not re-fired on fresh COMMENTED: %d calls", responder.count())
+	}
+	got, _ := s.GetPRByGithubID(4001)
+	wantAt, _ := time.Parse(time.RFC3339, newerTS)
+	if !got.ExternalReviewAt.Equal(wantAt) {
+		t.Errorf("stored ExternalReviewAt = %v, want %v (timestamp must advance)", got.ExternalReviewAt, wantAt)
+	}
+	// SSE event must still fire so Flutter knows the row has a fresh
+	// trigger (the aggregate state didn't change but the timestamp
+	// did).
+	select {
+	case ev := <-sub:
+		if ev.Type != sse.EventPRReviewStateChanged {
+			t.Errorf("event type = %q, want pr_review_state_changed", ev.Type)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("no SSE event on fresh COMMENTED")
+	}
+}
+
+// TestRefreshAutoImplementPRReviewState_NewCRReFiresFix_NoAdvisoryPriorPush
+// is the symmetric pin for the CHANGES_REQUESTED case after a no-
+// changes advisory (NOT after a successful push, which is covered by
+// the FIX_PUSHED guard): a reviewer who submits a second CR with
+// more context after the daemon's advisory must re-trigger the fix
+// runner.
+func TestRefreshAutoImplementPRReviewState_NewCRReFiresFix_NoAdvisoryPriorPush(t *testing.T) {
+	newerTS := "2026-05-14T09:00:00Z"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[
+			{"id":2,"user":{"login":"alice"},"state":"CHANGES_REQUESTED","body":"please rename","submitted_at":"` + newerTS + `"}
+		]`))
+	}))
+	defer srv.Close()
+
+	s := newMemStore(t)
+	pr := seedAutoImplementPR(t, s, 4002, 32)
+	// Stored state is CHANGES_REQUESTED with an OLDER timestamp —
+	// represents the path where the FixRunner posted an advisory
+	// (no push) and the reviewer follows up with more context.
+	older, _ := time.Parse(time.RFC3339, "2026-05-13T09:00:00Z")
+	if err := s.UpdatePRReviewState(pr.ID, "CHANGES_REQUESTED", "alice", older); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	pr, _ = s.GetPRByGithubID(4002)
+	a, _, _ := makePRReviewStateAdapter(t, srv, s, "heimdallm-bot")
+	fixer := &reviewStateDispatcher{}
+	a.fixRunner = fixer
+
+	item := &scheduler.WatchItem{Type: "pr", Repo: "org/repo", Number: 32, GithubID: 4002}
+	if err := a.refreshAutoImplementPRReviewState(item, pr); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if fixer.count() != 1 {
+		t.Fatalf("FixRunner not re-fired on fresh CHANGES_REQUESTED: %d calls", fixer.count())
+	}
+}
+
 // TestRefreshAutoImplementPRReviewState_FixPushedSuppressesStaleCR
 // pins the re-arm fix for the bug review caught: after the FixRunner
 // flips the stored state to FIX_PUSHED, the next Tier 3 tick must NOT

@@ -220,6 +220,16 @@ void _handleSseEvent(Ref ref, SseEvent event) {
         // the behaviour of the other terminal issue events above.
         ref.read(issueListRefreshProvider.notifier).update((s) => s + 1);
 
+      // pr_review_state_changed fires when Tier 3 observes a new
+      // aggregate external review state on an auto_implement-created
+      // PR (#482 phase 1). The dashboard tile renders the chip from
+      // the issue's linked_pr.external_review_state, so a list
+      // refresh re-fetches that field and the chip updates live.
+      // Without this case the badge can sit stale until the next
+      // unrelated refresh (poll completion, manual reload).
+      case 'pr_review_state_changed':
+        ref.read(issueListRefreshProvider.notifier).update((s) => s + 1);
+
       // ── Circuit breaker ────────────────────────────────────────────────
       case 'circuit_breaker_tripped':
         final repo = data['repo'] as String? ?? 'unknown';

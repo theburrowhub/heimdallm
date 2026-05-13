@@ -50,21 +50,28 @@ func (a *tier2Adapter) refreshAutoImplementPRReviewState(
 	}
 	botLogin := a.cachedAuthenticatedUser()
 	state, reviewer, at := issuepipeline.LatestExternalReviewState(reviews, botLogin)
-	if state == stored.ExternalReviewState {
-		return nil
-	}
+
 	// FIX_PUSHED re-arm guard: after the FixRunner addresses a CR it
 	// flips the stored state to FIX_PUSHED with `external_review_at`
 	// set to the CR's own SubmittedAt. The raw aggregate over the same
 	// historical reviews list will still return CHANGES_REQUESTED for
 	// that exact CR — without this guard we would flip back every
-	// tick, re-fire the FixRunner with stale feedback (cap/cooldown
-	// would mask the bug but not fix it), and emit a noisy SSE for
-	// every poll. Only a fresh CR (SubmittedAt strictly after the
-	// stored mark) reactivates the cycle.
+	// tick, re-fire the FixRunner with stale feedback, and emit a
+	// noisy SSE for every poll. Only a fresh CR (SubmittedAt strictly
+	// after the stored mark) reactivates the cycle.
 	if stored.ExternalReviewState == issuepipeline.ReviewStateFixPushed &&
 		state == issuepipeline.ReviewStateChangesRequested &&
 		!at.After(stored.ExternalReviewAt) {
+		return nil
+	}
+	// Generic gate: skip only when nothing has actually moved — same
+	// aggregate state AND the latest-review timestamp has not
+	// advanced. A fresh review of the same kind (e.g. a second
+	// COMMENTED after the daemon already replied, or a follow-up
+	// CHANGES_REQUESTED after a no-changes advisory) carries
+	// at.After(stored.ExternalReviewAt) and IS a new trigger — the
+	// runner must see it.
+	if state == stored.ExternalReviewState && !at.After(stored.ExternalReviewAt) {
 		return nil
 	}
 	prevState := stored.ExternalReviewState
