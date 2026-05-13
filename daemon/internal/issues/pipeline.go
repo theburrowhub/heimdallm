@@ -274,7 +274,17 @@ type Pipeline struct {
 	// disables both axes (no limit). Configure at startup via
 	// SetCircuitBreakerLimits.
 	breaker *store.IssueCircuitBreakerLimits
+
+	// watch enrols freshly-created auto_implement PRs into Tier 3 so
+	// the new review-state checker observes external reviews on them
+	// (#482). Nil-safe: single-tier setups (some tests) leave it unset.
+	watch WatchEnroller
 }
+
+// SetWatchEnroller wires the Tier 3 watch enroller so auto_implement
+// PRs are picked up by the review-state checker right after creation
+// (#482). Optional — the pipeline checks for nil before calling.
+func (p *Pipeline) SetWatchEnroller(w WatchEnroller) { p.watch = w }
 
 // SetBotLogin sets the GitHub login of the bot account. Used to filter
 // the bot's own comments from the "new discussion" section in re-triages.
@@ -302,9 +312,23 @@ type issueStore interface {
 	LatestIssueReview(issueID int64) (*store.IssueReview, error)
 	LatestIssueReviewByAction(issueID int64, action string) (*store.IssueReview, error)
 	UpsertPR(pr *store.PR) (int64, error)
+	// MarkPRAutoImplementOrigin back-links the freshly-created PR row
+	// to the issue's store row id. Tier 3 keys its review-state
+	// vigilance on a non-zero value here (#482).
+	MarkPRAutoImplementOrigin(prID, issueID int64) error
 	ClaimIssueTriageInFlight(issueID int64, updatedAt string) (bool, error)
 	ReleaseIssueTriageInFlight(issueID int64, updatedAt string) error
 	CheckIssueCircuitBreaker(issueID int64, repo string, cfg store.IssueCircuitBreakerLimits) (bool, string, error)
+}
+
+// WatchEnroller enrols an item (PR or issue) into the Tier 3 watch
+// bucket so the state monitor periodically refreshes it (#482). The
+// pipeline calls this after auto_implement creates a PR so the new
+// PR-review-state CheckItem branch picks it up. Wired via
+// SetWatchEnroller; nil-safe — single-tier setups (some tests) leave
+// it unset.
+type WatchEnroller interface {
+	Enroll(ctx context.Context, kind, repo string, number int, githubID int64) error
 }
 
 // issueGitHub groups every GitHub-facing method the pipeline uses. The
@@ -823,9 +847,30 @@ func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, is
 		UpdatedAt: now,
 		FetchedAt: now,
 	}
-	if _, upsertErr := p.store.UpsertPR(prRow); upsertErr != nil {
+	prRowID, upsertErr := p.store.UpsertPR(prRow)
+	if upsertErr != nil {
 		slog.Warn("issues pipeline: failed to store auto-created PR",
 			"repo", issue.Repo, "pr", createdPR.Number, "err", upsertErr)
+	}
+	// Mark the PR as auto_implement-origin so Tier 3's review-state
+	// checker picks it up (#482). The mark is best-effort: a failure
+	// here only means the observation layer misses this PR, not that
+	// the PR itself is corrupted.
+	if prRowID > 0 {
+		if markErr := p.store.MarkPRAutoImplementOrigin(prRowID, issueID); markErr != nil {
+			slog.Warn("issues pipeline: failed to mark PR auto_implement origin",
+				"repo", issue.Repo, "pr", createdPR.Number, "err", markErr)
+		}
+	}
+	// Enrol the PR in the Tier 3 watch bucket so the review-state
+	// checker periodically refreshes it. Nil-safe for single-tier
+	// setups; failure is best-effort (the next scan still creates a
+	// row if needed when humans review the PR).
+	if p.watch != nil {
+		if enrollErr := p.watch.Enroll(ctx, "pr", issue.Repo, createdPR.Number, createdPR.ID); enrollErr != nil {
+			slog.Warn("issues pipeline: failed to enroll auto-implement PR in Tier 3 watch",
+				"repo", issue.Repo, "pr", createdPR.Number, "err", enrollErr)
+		}
 	}
 
 	// Apply PR metadata (reviewers, labels, assignees). All best-effort —

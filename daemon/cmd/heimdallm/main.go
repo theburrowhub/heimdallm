@@ -284,6 +284,10 @@ func main() {
 	// when auto_implement is not in use.
 	issuePipe := issuepipeline.New(s, ghClient, exec, issuepipeline.NewGitExec(), broker, &notifyWithSSE{notifier: notifier})
 	issuePipe.SetCircuitBreakerLimits(&issueCBLimits)
+	// Wire the Tier 3 watch enroller so auto_implement-created PRs are
+	// picked up by the new review-state checker (#482). watchStore
+	// implements the WatchEnroller interface via its Enroll method.
+	issuePipe.SetWatchEnroller(watchStore)
 
 	// Resolve bot login for re-review / re-triage context filtering.
 	var resolvedBotLogin string

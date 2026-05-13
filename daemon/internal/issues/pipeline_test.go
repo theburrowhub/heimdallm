@@ -30,7 +30,8 @@ type fakeStore struct {
 	nextPRID     int64
 	upsertErr    error
 	insertErr    error
-	upsertPRErr  error
+	upsertPRErr   error
+	markOriginErr error
 
 	latestReview    *store.IssueReview
 	latestReviewErr error
@@ -97,6 +98,22 @@ func (f *fakeStore) UpsertPR(pr *store.PR) (int64, error) {
 	copy.ID = f.nextPRID
 	f.prs = append(f.prs, &copy)
 	return f.nextPRID, nil
+}
+
+// MarkPRAutoImplementOrigin records the back-link from PR → originating
+// issue for the review-state vigilance flow (#482). The fake stores the
+// latest pair so tests can assert it was called with the right ids.
+func (f *fakeStore) MarkPRAutoImplementOrigin(prID, issueID int64) error {
+	if f.markOriginErr != nil {
+		return f.markOriginErr
+	}
+	for _, pr := range f.prs {
+		if pr.ID == prID {
+			pr.AutoImplementIssueID = issueID
+			return nil
+		}
+	}
+	return fmt.Errorf("fakeStore: pr %d not found", prID)
 }
 
 func (f *fakeStore) ClaimIssueTriageInFlight(issueID int64, updatedAt string) (bool, error) {
@@ -1032,6 +1049,109 @@ func TestPipeline_AutoImplementNoChangesRecordsTerminalNoChanges(t *testing.T) {
 	types := broker.types()
 	if types[len(types)-1] != sse.EventIssueReviewError {
 		t.Errorf("last event = %q, want issue_review_error", types[len(types)-1])
+	}
+}
+
+// fakeWatchEnroller records calls so tests can assert the
+// auto_implement pipeline correctly enrolls newly-created PRs into the
+// Tier 3 watch bucket (#482 phase 1).
+type fakeWatchEnroller struct {
+	mu    sync.Mutex
+	calls []watchEnrollCall
+	err   error
+}
+
+type watchEnrollCall struct {
+	Kind     string
+	Repo     string
+	Number   int
+	GithubID int64
+}
+
+func (f *fakeWatchEnroller) Enroll(_ context.Context, kind, repo string, number int, githubID int64) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, watchEnrollCall{Kind: kind, Repo: repo, Number: number, GithubID: githubID})
+	return nil
+}
+
+func (f *fakeWatchEnroller) lastCall() *watchEnrollCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.calls) == 0 {
+		return nil
+	}
+	c := f.calls[len(f.calls)-1]
+	return &c
+}
+
+// TestPipeline_AutoImplement_EnrollsPRInWatch pins the first half of
+// the review-state vigilance bridge (#482): after auto_implement
+// creates a PR, the pipeline must enrol it in the Tier 3 watch bucket
+// so the new CheckItem branch can observe external reviews on it.
+func TestPipeline_AutoImplement_EnrollsPRInWatch(t *testing.T) {
+	s := &fakeStore{}
+	gh := &fakeGH{defaultBranch: "main", createPRNumber: 7, createPRID: 9999}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("done")}
+	git := &fakeGit{hasChanges: true}
+	watch := &fakeWatchEnroller{}
+	p := issues.New(s, gh, exec, git, &fakeBroker{}, nil)
+	p.SetWatchEnroller(watch)
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := watch.lastCall()
+	if got == nil {
+		t.Fatal("expected one Enroll call, got none")
+	}
+	if got.Kind != "pr" || got.Number != 7 || got.GithubID != 9999 {
+		t.Errorf("Enroll call = %+v, want kind=pr number=7 github_id=9999", *got)
+	}
+}
+
+// TestPipeline_AutoImplement_MarksPRAutoImplementOrigin pins the
+// second half of the bridge: the PR row carries the originating
+// issue's store-row id so Tier 3 can decide "this PR is eligible for
+// review-state vigilance" without re-deriving from review history.
+func TestPipeline_AutoImplement_MarksPRAutoImplementOrigin(t *testing.T) {
+	s := &fakeStore{}
+	gh := &fakeGH{defaultBranch: "main", createPRNumber: 8, createPRID: 8888}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("done")}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(s, gh, exec, git, &fakeBroker{}, nil)
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(s.prs) != 1 {
+		t.Fatalf("expected 1 stored PR, got %d", len(s.prs))
+	}
+	if s.prs[0].AutoImplementIssueID == 0 {
+		t.Error("AutoImplementIssueID = 0, want non-zero (origin must be marked)")
+	}
+}
+
+// TestPipeline_AutoImplement_WatchEnrollerOptional pins that the
+// pipeline still completes its auto_implement happy path when no
+// WatchEnroller is wired in (tests, single-tier deployments). A nil
+// enroller must not panic and must not block the PR-creation flow.
+func TestPipeline_AutoImplement_WatchEnrollerOptional(t *testing.T) {
+	s := &fakeStore{}
+	gh := &fakeGH{defaultBranch: "main", createPRNumber: 9, createPRID: 7777}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("done")}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(s, gh, exec, git, &fakeBroker{}, nil)
+	// Deliberately NOT calling SetWatchEnroller.
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(s.prs) != 1 {
+		t.Fatalf("expected 1 stored PR, got %d", len(s.prs))
 	}
 }
 
