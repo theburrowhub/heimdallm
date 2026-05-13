@@ -26,21 +26,28 @@ type reviewFixDispatcher interface {
 }
 
 // refreshAutoImplementPRReviewState observes the external reviews on
-// an auto_implement-created PR (#482, phase 1) and updates the store
-// when the aggregated state changes. Called from Tier 3's CheckItem
-// branch keyed on `stored.AutoImplementIssueID != 0`.
+// an auto_implement-created PR (#482) and reacts to them. Two
+// concerns kept independent so a transient runner failure can be
+// retried without re-emitting SSE noise:
 //
-// Always returns nil after a successful fetch — even when the state
-// did not change, because the caller (CheckItem) already short-
-// circuits the standard review codepath for these PRs. An error from
-// the GitHub fetch is surfaced so the caller can log it; the store
-// stays untouched in that case.
+//   - Persist + SSE only fire when the aggregate state actually
+//     moves (different state OR newer timestamp). The FIX_PUSHED
+//     re-arm guard suppresses the daemon-internal CHANGES_REQUESTED
+//     flip-back for the same CR the FixRunner already addressed.
 //
-// Side effects:
-//   - Calls UpdatePRReviewState when the aggregate differs from the
-//     stored value.
-//   - Publishes sse.EventPRReviewStateChanged with the new and prior
-//     state when a change is detected (no event on no-op refreshes).
+//   - Dispatch fires on every tick whose aggregate state requires
+//     action (COMMENTED → Responder, CHANGES_REQUESTED → FixRunner).
+//     The runners' own cap / cooldown / last_responded_at gates
+//     decide whether to actually do work. Decoupling here is what
+//     makes failed runs retriable: when the runner fails the state
+//     was already persisted by an earlier tick (or never moved at
+//     all if the failure happened on the first observation), so a
+//     plain "state changed?" gate would silently swallow the retry.
+//
+// CheckItem (in main.go) routes errors from this function to the
+// state-handler, which propagates them to the StateWorker so backoff
+// increases on transient failures (no LastSeen advance until a tick
+// succeeds).
 func (a *tier2Adapter) refreshAutoImplementPRReviewState(
 	item *scheduler.WatchItem, stored *store.PR,
 ) error {
@@ -55,50 +62,54 @@ func (a *tier2Adapter) refreshAutoImplementPRReviewState(
 	// flips the stored state to FIX_PUSHED with `external_review_at`
 	// set to the CR's own SubmittedAt. The raw aggregate over the same
 	// historical reviews list will still return CHANGES_REQUESTED for
-	// that exact CR — without this guard we would flip back every
-	// tick, re-fire the FixRunner with stale feedback, and emit a
-	// noisy SSE for every poll. Only a fresh CR (SubmittedAt strictly
-	// after the stored mark) reactivates the cycle.
-	if stored.ExternalReviewState == issuepipeline.ReviewStateFixPushed &&
+	// that exact CR. Suppress BOTH the persist+emit and the dispatch
+	// in that case — re-firing the FixRunner with stale feedback is
+	// exactly the loop the guard exists to prevent. A fresh CR
+	// (SubmittedAt strictly after the stored mark) reactivates the
+	// cycle.
+	fixPushedSameCR := stored.ExternalReviewState == issuepipeline.ReviewStateFixPushed &&
 		state == issuepipeline.ReviewStateChangesRequested &&
-		!at.After(stored.ExternalReviewAt) {
+		!at.After(stored.ExternalReviewAt)
+	if fixPushedSameCR {
 		return nil
 	}
-	// Generic gate: skip only when nothing has actually moved — same
-	// aggregate state AND the latest-review timestamp has not
-	// advanced. A fresh review of the same kind (e.g. a second
-	// COMMENTED after the daemon already replied, or a follow-up
-	// CHANGES_REQUESTED after a no-changes advisory) carries
-	// at.After(stored.ExternalReviewAt) and IS a new trigger — the
-	// runner must see it.
-	if state == stored.ExternalReviewState && !at.After(stored.ExternalReviewAt) {
-		return nil
-	}
-	prevState := stored.ExternalReviewState
-	if err := a.store.UpdatePRReviewState(stored.ID, state, reviewer, at); err != nil {
-		return fmt.Errorf("update pr review state: %w", err)
-	}
-	if a.broker != nil {
-		a.broker.Publish(sse.Event{
-			Type: sse.EventPRReviewStateChanged,
-			Data: sseData(map[string]any{
-				"pr_id":      stored.ID,
-				"repo":       item.Repo,
-				"number":     item.Number,
-				"state":      state,
-				"reviewer":   reviewer,
-				"prev_state": prevState,
-			}),
-		})
-	}
-	slog.Info("tier3: PR review state changed",
-		"repo", item.Repo, "number", item.Number,
-		"prev_state", prevState, "new_state", state, "reviewer", reviewer)
 
-	// Dispatch to the phase-2/phase-3 modules. Both Run methods are
-	// safe to call when their owning config flag is off (they return
-	// nil immediately) so the gating logic stays inside the modules
-	// rather than smearing across the adapter.
+	// Persist + emit only on real movement. Same-state same-at means
+	// the dashboard has no new chip to show; emitting another SSE
+	// would just flap. The dispatch below still fires for retry.
+	stateMoved := state != stored.ExternalReviewState || at.After(stored.ExternalReviewAt)
+	if stateMoved {
+		prevState := stored.ExternalReviewState
+		if err := a.store.UpdatePRReviewState(stored.ID, state, reviewer, at); err != nil {
+			return fmt.Errorf("update pr review state: %w", err)
+		}
+		if a.broker != nil {
+			a.broker.Publish(sse.Event{
+				Type: sse.EventPRReviewStateChanged,
+				Data: sseData(map[string]any{
+					"pr_id":      stored.ID,
+					"repo":       item.Repo,
+					"number":     item.Number,
+					"state":      state,
+					"reviewer":   reviewer,
+					"prev_state": prevState,
+				}),
+			})
+		}
+		slog.Info("tier3: PR review state changed",
+			"repo", item.Repo, "number", item.Number,
+			"prev_state", prevState, "new_state", state, "reviewer", reviewer)
+	}
+
+	// Dispatch independently of persist/emit so a failed runner does
+	// not poison the retry path. Both Run methods are safe to call
+	// when their owning config flag is off (they return nil
+	// immediately); when on, the runner's own cap / cooldown /
+	// last_responded_at gates filter the no-op cases. A dispatch on
+	// every tick whose state is COMMENTED or CHANGES_REQUESTED costs
+	// at most one extra GetPRReviews call inside the runner while the
+	// cooldown window is open — bounded by the runner's per-PR
+	// lifetime cap.
 	switch state {
 	case issuepipeline.ReviewStateCommented:
 		if a.responder != nil {
@@ -117,4 +128,3 @@ func (a *tier2Adapter) refreshAutoImplementPRReviewState(
 	}
 	return nil
 }
-

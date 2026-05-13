@@ -496,6 +496,111 @@ func TestCheckItem_AutoImplementPRBranch_ReturnsChangedSoLastSeenAdvances(t *tes
 	}
 }
 
+// TestRefreshAutoImplementPRReviewState_RetriesDispatchOnUnchangedCR
+// pins the bug found in PR review: when a previous tick persisted
+// the CHANGES_REQUESTED state but the FixRunner failed (executor
+// error, transient push failure, PostComment 5xx), the dispatch
+// must still fire on the next tick. Coupling persist + dispatch
+// behind the same "state moved" gate silently swallows the retry —
+// the reviewer's CR sits unaddressed until they post a fresh
+// review.
+func TestRefreshAutoImplementPRReviewState_RetriesDispatchOnUnchangedCR(t *testing.T) {
+	crTS := "2026-05-13T09:00:00Z"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[
+			{"id":1,"user":{"login":"alice"},"state":"CHANGES_REQUESTED","body":"please rename","submitted_at":"` + crTS + `"}
+		]`))
+	}))
+	defer srv.Close()
+
+	s := newMemStore(t)
+	pr := seedAutoImplementPR(t, s, 6001, 51)
+	// Pre-seed: state is CR with exactly the timestamp the stub
+	// returns. Simulates "previous tick persisted state, dispatch
+	// failed, state has not moved".
+	at, _ := time.Parse(time.RFC3339, crTS)
+	if err := s.UpdatePRReviewState(pr.ID, "CHANGES_REQUESTED", "alice", at); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	pr, _ = s.GetPRByGithubID(6001)
+	a, _, _ := makePRReviewStateAdapter(t, srv, s, "heimdallm-bot")
+	fixer := &reviewStateDispatcher{}
+	a.fixRunner = fixer
+
+	item := &scheduler.WatchItem{Type: "pr", Repo: "org/repo", Number: 51, GithubID: 6001}
+	if err := a.refreshAutoImplementPRReviewState(item, pr); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if fixer.count() != 1 {
+		t.Fatalf("FixRunner did not retry on unchanged CR state: %d calls (a failed previous tick would now leave the CR forever unaddressed)", fixer.count())
+	}
+}
+
+// TestRefreshAutoImplementPRReviewState_RetriesDispatchOnUnchangedCommented
+// is the symmetric pin for the Responder.
+func TestRefreshAutoImplementPRReviewState_RetriesDispatchOnUnchangedCommented(t *testing.T) {
+	commTS := "2026-05-13T09:00:00Z"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[
+			{"id":1,"user":{"login":"alice"},"state":"COMMENTED","body":"q","submitted_at":"` + commTS + `"}
+		]`))
+	}))
+	defer srv.Close()
+
+	s := newMemStore(t)
+	pr := seedAutoImplementPR(t, s, 6002, 52)
+	at, _ := time.Parse(time.RFC3339, commTS)
+	if err := s.UpdatePRReviewState(pr.ID, "COMMENTED", "alice", at); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	pr, _ = s.GetPRByGithubID(6002)
+	a, _, _ := makePRReviewStateAdapter(t, srv, s, "heimdallm-bot")
+	responder := &reviewStateDispatcher{}
+	a.responder = responder
+
+	item := &scheduler.WatchItem{Type: "pr", Repo: "org/repo", Number: 52, GithubID: 6002}
+	if err := a.refreshAutoImplementPRReviewState(item, pr); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if responder.count() != 1 {
+		t.Fatalf("Responder did not retry on unchanged COMMENTED state: %d calls", responder.count())
+	}
+}
+
+// TestRefreshAutoImplementPRReviewState_UnchangedCR_NoExtraSSE pins
+// that the retry-dispatch behaviour above does NOT come with an
+// extra noisy SSE event on every tick. Persist + emit stay gated on
+// real state movement.
+func TestRefreshAutoImplementPRReviewState_UnchangedCR_NoExtraSSE(t *testing.T) {
+	crTS := "2026-05-13T09:00:00Z"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[
+			{"id":1,"user":{"login":"alice"},"state":"CHANGES_REQUESTED","body":"x","submitted_at":"` + crTS + `"}
+		]`))
+	}))
+	defer srv.Close()
+
+	s := newMemStore(t)
+	pr := seedAutoImplementPR(t, s, 6003, 53)
+	at, _ := time.Parse(time.RFC3339, crTS)
+	if err := s.UpdatePRReviewState(pr.ID, "CHANGES_REQUESTED", "alice", at); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	pr, _ = s.GetPRByGithubID(6003)
+	a, _, sub := makePRReviewStateAdapter(t, srv, s, "heimdallm-bot")
+	a.fixRunner = &reviewStateDispatcher{}
+
+	item := &scheduler.WatchItem{Type: "pr", Repo: "org/repo", Number: 53, GithubID: 6003}
+	if err := a.refreshAutoImplementPRReviewState(item, pr); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	select {
+	case ev := <-sub:
+		t.Fatalf("unexpected SSE event %q on unchanged-state retry tick", ev.Type)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 // TestRefreshAutoImplementPRReviewState_FiltersBotReviews pins the
 // self-loop guard: a review submitted by the bot's own login must be
 // filtered out by LatestExternalReviewState, so an all-bot reviews
