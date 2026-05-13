@@ -59,6 +59,23 @@ func TestApplyDefaults_PreservesExisting(t *testing.T) {
 	}
 }
 
+func TestApplyDefaults_Tier2RepoConcurrency(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+	if cfg.AI.Tier2RepoConcurrency != 5 {
+		t.Errorf("Tier2RepoConcurrency = %d, want 5", cfg.AI.Tier2RepoConcurrency)
+	}
+}
+
+func TestApplyDefaults_Tier2RepoConcurrency_PreservesExisting(t *testing.T) {
+	cfg := &Config{}
+	cfg.AI.Tier2RepoConcurrency = 12
+	cfg.applyDefaults()
+	if cfg.AI.Tier2RepoConcurrency != 12 {
+		t.Errorf("Tier2RepoConcurrency overwritten: %d", cfg.AI.Tier2RepoConcurrency)
+	}
+}
+
 func TestApplyDefaults_MaxWorktreesPerRepo(t *testing.T) {
 	cfg := &Config{}
 	cfg.applyDefaults()

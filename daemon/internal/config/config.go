@@ -382,6 +382,13 @@ type AIConfig struct {
 	// if disk pressure dominates.
 	MaxWorktreesPerRepo int `toml:"max_worktrees_per_repo"`
 
+	// Tier2RepoConcurrency caps how many repos the Tier 2 issue
+	// polling loop processes in parallel within a single tick (#481).
+	// A fresh value of 0 inherits the daemon default (5). The cap
+	// applies to wall-clock parallelism; the GitHub API rate limiter
+	// (scheduler.RateLimiter) still throttles network usage.
+	Tier2RepoConcurrency int `toml:"tier2_repo_concurrency"`
+
 	// GeneratePRDescription enables LLM-generated PR titles and descriptions
 	// for auto_implement PRs. When true, after the implementation commit,
 	// a second LLM call generates a rich PR description from the diff.
@@ -862,6 +869,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.AI.MaxWorktreesPerRepo == 0 {
 		c.AI.MaxWorktreesPerRepo = 5
+	}
+	if c.AI.Tier2RepoConcurrency == 0 {
+		c.AI.Tier2RepoConcurrency = 5
 	}
 	if c.ActivityLog.Enabled == nil {
 		v := true
