@@ -2526,6 +2526,16 @@ func (a *tier2Adapter) FetchPRsToReview() ([]scheduler.Tier2PR, error) {
 	nonMonSnap := append([]string(nil), cfg.GitHub.NonMonitored...)
 	a.cfgMu.Unlock()
 
+	// Defer reviews on repos discovered this tick by one cycle so the
+	// UI receives `repo_discovered` before `review_started` (#481).
+	// On the next tick `upsertDiscoveredRepos` will return an empty
+	// `added` list for these repos (they're already in the config),
+	// and the same PR flows through normally.
+	addedThisTick := make(map[string]struct{}, len(added))
+	for _, r := range added {
+		addedThisTick[r] = struct{}{}
+	}
+
 	// Benign race window: between the Unlock above and the SetConfig calls
 	// inside processDiscoveredRepos, a config reload can swap *a.cfg to a
 	// fresh Config that does not contain the just-appended repos. On the
@@ -2584,6 +2594,14 @@ func (a *tier2Adapter) FetchPRsToReview() ([]scheduler.Tier2PR, error) {
 			if _, ok := prAllowedOrgs[strings.ToLower(org)]; !ok {
 				continue
 			}
+		}
+		// Defer reviews for repos that were auto-discovered this tick;
+		// the next tick picks them up after `repo_discovered` has
+		// reached the UI. See #481.
+		if _, justDiscovered := addedThisTick[pr.Repo]; justDiscovered {
+			slog.Info("tier2: deferring review for newly-discovered repo to next tick",
+				"repo", pr.Repo, "pr", pr.Number)
+			continue
 		}
 		seenIDs[pr.ID] = struct{}{}
 		reason := pipeline.Evaluate(pipeline.PRGate{

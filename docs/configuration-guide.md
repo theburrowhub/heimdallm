@@ -347,6 +347,12 @@ auto_promote_refinement = true   # unset = true only when develop_labels is conf
 >
 > This ensures issues are only processed when you explicitly opt them in, preventing runaway costs from repeated AI invocations. Using generic labels like `bug` or `enhancement` in `develop_labels` or `review_only_labels` is discouraged because these are commonly assigned to many issues and can trigger unintended mass processing.
 >
+> **Tier 2 polling concurrency (`ai.tier2_repo_concurrency`)**
+>
+> Per-repo issue polling inside a single Tier 2 tick runs in parallel up to `ai.tier2_repo_concurrency` repos at a time (default `5`). The GitHub API rate limiter still throttles network usage; this knob controls wall-clock parallelism. Set higher on a fast network with many monitored repos; set to `1` to force the legacy sequential behaviour. PR fetch and issue processing also run as independent goroutines within each tick, so a slow issue cycle on one repo never delays PR detection across the rest.
+>
+> Newly auto-discovered repos have their first PR review **deferred by one poll cycle** so the Flutter UI receives `repo_discovered` before `review_started`. The cost is one tick of latency on the very first review of a brand-new repo; the alternative was a race where the UI rendered "review in progress" for a repo it had not yet learned about.
+
 > **Example of a safe, explicit configuration:**
 >
 > ```toml
