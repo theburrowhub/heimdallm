@@ -67,6 +67,7 @@ func TestSendDiscoveryReposRefreshesTopicBeforePublish(t *testing.T) {
 				DiscoveryOrgs:  []string{"org"},
 			}
 		},
+		nil,
 	)
 
 	if disc.refreshCalls != 1 {
@@ -101,6 +102,7 @@ func TestSendDiscoveryReposSkipsRefreshWhenTopicDisabled(t *testing.T) {
 				StaticRepos: []string{"org/static"},
 			}
 		},
+		nil,
 	)
 
 	if disc.refreshCalls != 0 {
@@ -131,6 +133,7 @@ func TestSendDiscoveryReposPublishesCachedReposWhenRefreshFails(t *testing.T) {
 				DiscoveryOrgs:  []string{"org"},
 			}
 		},
+		nil,
 	)
 
 	if disc.refreshCalls != 1 {

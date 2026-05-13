@@ -449,6 +449,37 @@ func (c *Client) fetchReposForOrg(topic, org string) ([]string, error) {
 	return repos, nil
 }
 
+// IsRepoArchived checks whether a repository is archived or has been deleted.
+// Returns true for archived repos and repos that return 404 (deleted/transferred).
+// Non-200/404 responses are treated as errors and the caller should assume the
+// repo is still active (fail-open, so transient API errors do not purge repos).
+func (c *Client) IsRepoArchived(repo string) (bool, error) {
+	path := fmt.Sprintf("/repos/%s", repo)
+	resp, err := c.do("GET", path, "application/vnd.github+json")
+	if err != nil {
+		return false, fmt.Errorf("github: check repo archived: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+
+	if resp.StatusCode == http.StatusNotFound {
+		return true, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		errBody := safeTruncate(string(body), maxErrBodyLen)
+		return false, fmt.Errorf("github: check repo archived: status %d: %s", resp.StatusCode, errBody)
+	}
+
+	var result struct {
+		Archived bool `json:"archived"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return false, fmt.Errorf("github: decode repo: %w", err)
+	}
+	return result.Archived, nil
+}
+
 // PRHeadInfo bundles the HEAD SHA and the pending-reviewer logins returned by
 // the Pulls API. Tier 2 uses ReviewRequestedFor to confirm the bot is still a
 // pending reviewer (the Search API index can lag behind the actual

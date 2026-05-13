@@ -172,6 +172,42 @@ func MergeRepos(static, discovered, nonMonitored []string) []string {
 	return out
 }
 
+// ArchivedChecker verifies whether a single repository is archived or deleted.
+type ArchivedChecker interface {
+	IsRepoArchived(repo string) (bool, error)
+}
+
+// FilterArchived separates repos into active and archived/deleted sets.
+// Repos listed in skipCheck (e.g. those freshly returned by topic-based
+// discovery, which already filters archived:false) are assumed active and
+// not re-verified, saving one API call each.
+// When the checker returns an error for a repo the repo is kept in the
+// active set (fail-open) so transient API failures never purge repos.
+func FilterArchived(repos []string, checker ArchivedChecker, skipCheck []string) (active, archived []string) {
+	skip := make(map[string]struct{}, len(skipCheck))
+	for _, r := range skipCheck {
+		skip[r] = struct{}{}
+	}
+	for _, r := range repos {
+		if _, ok := skip[r]; ok {
+			active = append(active, r)
+			continue
+		}
+		isArchived, err := checker.IsRepoArchived(r)
+		if err != nil {
+			slog.Warn("discovery: archive check failed, keeping repo", "repo", r, "err", err)
+			active = append(active, r)
+			continue
+		}
+		if isArchived {
+			archived = append(archived, r)
+			continue
+		}
+		active = append(active, r)
+	}
+	return
+}
+
 // InferOrgs extracts unique organization prefixes from "org/repo" strings.
 // Returns sorted, deduplicated org names. Used when discovery_orgs is empty.
 func InferOrgs(repos []string) []string {

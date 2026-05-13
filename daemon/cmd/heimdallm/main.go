@@ -620,7 +620,7 @@ func main() {
 			}
 
 			// Publish initial repos immediately
-			sendDiscoveryRepos(ctx, discoverySvc, limiter, repoPublisher, tier1ConfigFn)
+			sendDiscoveryRepos(ctx, discoverySvc, limiter, repoPublisher, tier1ConfigFn, ghClient)
 
 			ticker := time.NewTicker(discoveryInterval)
 			defer ticker.Stop()
@@ -629,7 +629,7 @@ func main() {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					sendDiscoveryRepos(ctx, discoverySvc, limiter, repoPublisher, tier1ConfigFn)
+					sendDiscoveryRepos(ctx, discoverySvc, limiter, repoPublisher, tier1ConfigFn, ghClient)
 				}
 			}
 		}()
@@ -1990,6 +1990,7 @@ func sendDiscoveryRepos(
 	limiter *scheduler.RateLimiter,
 	pub scheduler.Tier1Publisher,
 	configFn func() scheduler.Tier1Config,
+	archiveChecker discovery.ArchivedChecker,
 ) {
 	cfg := configFn()
 	var discovered []string
@@ -2007,6 +2008,15 @@ func sendDiscoveryRepos(
 	}
 
 	repos := discovery.MergeRepos(cfg.StaticRepos, discovered, cfg.NonMonitored)
+
+	if archiveChecker != nil {
+		active, archived := discovery.FilterArchived(repos, archiveChecker, discovered)
+		for _, r := range archived {
+			slog.Warn("tier1: dropping archived/deleted repo from active set", "repo", r)
+		}
+		repos = active
+	}
+
 	slog.Info("tier1: discovery complete", "repos", len(repos))
 	if err := pub.PublishRepos(ctx, repos); err != nil {
 		slog.Error("tier1: publish repos failed", "err", err)
