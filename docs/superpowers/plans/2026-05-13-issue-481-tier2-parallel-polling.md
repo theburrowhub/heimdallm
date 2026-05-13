@@ -119,11 +119,16 @@ NATS instance — observed race in the field is real, and the simplest
 robust fix is to **defer the review by one tick**: any PR whose repo
 was added this tick is skipped this cycle and picked up next time.
 
-Implementation:
-1. `FetchPRsToReview` returns `(prs []scheduler.Tier2PR, addedThisTick map[string]bool, err error)`.
-2. `processTick` filters out PRs whose repo is in `addedThisTick`.
-3. By the next tick (≤ poll interval), the UI has already received
-   `EventRepoDiscovered` for those repos.
+Implementation (kept the `Tier2PRFetcher` interface unchanged):
+1. Inside `FetchPRsToReview`, after `upsertDiscoveredRepos` returns
+   the list of newly-added repos, build a `map[string]struct{}`
+   snapshot for the current call.
+2. The existing PR filter loop adds a check: if a PR's repo is in
+   the just-added set, log at info and skip the PR — it is not
+   appended to the returned slice this cycle.
+3. By the next tick (≤ poll interval), `upsertDiscoveredRepos`
+   returns an empty added list for those repos and the same PR
+   flows through normally.
 
 Trade-off: first review on a never-before-seen repo is delayed by
 one poll interval. Acceptable — the alternative (synchronising with
@@ -131,20 +136,38 @@ the SSE handler over NATS) is significantly more invasive.
 
 ## Tests
 
+Per-repo helper (`daemon/cmd/heimdallm/main_tier2_parallel_test.go`):
+
 | Test | What it pins |
 |---|---|
-| `TestTier2ProcessTick_RunsPRAndIssueTiersConcurrently` | A spy adapter with a blocked-issue `ProcessRepo` does not delay `FetchPRsToReview`; PR call returns while issue tier is still running. |
-| `TestTier2ProcessTick_ParallelPerRepoIssueProcessing` | 10 repos × 50ms `ProcessRepo` completes in << 500ms total; observed concurrency reaches the configured cap. |
-| `TestTier2ProcessTick_RespectsRepoConcurrencyCap` | With cap=2 and 6 repos, never more than 2 `ProcessRepo` calls in flight. |
-| `TestTier2ProcessTick_NewlyDiscoveredRepoReviewIsDeferred` | First tick after a PR is discovered for repoX: `EventRepoDiscovered` emitted, `PublishPRReview` NOT called for that PR. Second tick: `PublishPRReview` IS called. |
-| `TestApplyDefaults_Tier2RepoConcurrency` | Default 5; non-zero value preserved. |
+| `TestProcessReposInParallel_AllReposProcessed` | Every repo invoked exactly once; counts aggregated. |
+| `TestProcessReposInParallel_RespectsConcurrencyCap` | Peak in-flight workers ≤ cap. |
+| `TestProcessReposInParallel_RunsConcurrently` | 6 repos × 100ms with cap=3 completes in << 400ms (wall-clock parallelism). |
+| `TestProcessReposInParallel_ContinuesAfterFailure` | One repo returning an error does not abort siblings; failed repo contributes 0 to total. |
+| `TestProcessReposInParallel_RespectsContextCancellation` | In-flight workers see the cancel and the helper returns within 500ms. |
+| `TestProcessReposInParallel_CancelStopsScheduling` | cap=2, 20 repos, cancel after 2 workers start — helper must NOT process all 20 (catches the labelled-break / ctx-aware semaphore bug). |
+| `TestProcessReposInParallel_NilOrEmptyReposNoOp` | nil and empty inputs never invoke workFn. |
+| `TestProcessReposInParallel_NonPositiveCapFallsBack` | cap ≤ 0 falls back to a sane default rather than deadlocking. |
+
+Adapter behaviour (`daemon/cmd/heimdallm/main_tier2_defer_test.go`):
+
+| Test | What it pins |
+|---|---|
+| `TestTier2Adapter_FetchPRsToReview_DefersNewlyDiscoveredRepo` | First cycle publishes `EventRepoDiscovered` and withholds the PR for the new repo; second cycle returns the PR normally. |
+
+Config (`daemon/internal/config/config_test.go`):
+
+| Test | What it pins |
+|---|---|
+| `TestApplyDefaults_Tier2RepoConcurrency` | Default 5. |
+| `TestApplyDefaults_Tier2RepoConcurrency_PreservesExisting` | Non-zero value not overwritten by defaults. |
 
 ## Implementation order (TDD)
 
 1. **RED+GREEN**: add `tier2_repo_concurrency` to config with default. Update tests in `config_test.go`.
-2. **RED+GREEN (B)**: per-repo parallel processing inside `runIssueTier`. Refactor `processTick` to extract `runIssueTier`.
-3. **RED+GREEN (A)**: PR and issue tiers in parallel goroutines.
-4. **RED+GREEN (C)**: `FetchPRsToReview` returns the `addedThisTick` set; `processTick` defers review for those PRs.
+2. **RED+GREEN (B)**: extract `processReposInParallel` helper with full TDD coverage; wire it into `runIssueTier`.
+3. **RED+GREEN (A)**: split `runTier2` into two independent goroutines, each with its own `time.NewTicker(interval)` — PR and issue tiers no longer share a tick boundary.
+4. **RED+GREEN (C)**: inside `FetchPRsToReview`, build the `addedThisTick` set from `upsertDiscoveredRepos` return and skip PRs whose repo is in it. `scheduler.Tier2PRFetcher` interface signature stays unchanged.
 5. Docs: update `configuration-guide.md` with the new knob + a short note on the deferred-review semantics.
 
 ## Risks

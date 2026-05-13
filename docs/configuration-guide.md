@@ -349,7 +349,7 @@ auto_promote_refinement = true   # unset = true only when develop_labels is conf
 >
 > **Tier 2 polling concurrency (`ai.tier2_repo_concurrency`)**
 >
-> Per-repo issue polling inside a single Tier 2 tick runs in parallel up to `ai.tier2_repo_concurrency` repos at a time (default `5`). The GitHub API rate limiter still throttles network usage; this knob controls wall-clock parallelism. Set higher on a fast network with many monitored repos; set to `1` to force the legacy sequential behaviour. PR fetch and issue processing also run as independent goroutines within each tick, so a slow issue cycle on one repo never delays PR detection across the rest.
+> Per-repo issue polling inside a single Tier 2 issue tick runs in parallel up to `ai.tier2_repo_concurrency` repos at a time (default `5`). The GitHub API rate limiter still throttles network usage; this knob controls wall-clock parallelism. Set higher on a fast network with many monitored repos; set to `1` to force the legacy sequential behaviour. PR fetch and issue processing also run on independent tickers — each tier has its own goroutine with its own `time.Ticker`, and a `time.Ticker` drops redundant ticks when the previous run is still in flight. So a slow issue cycle never delays PR detection, and one tier never blocks the other even if its run exceeds `poll_interval`.
 >
 > Newly auto-discovered repos have their first PR review **deferred by one poll cycle** so the Flutter UI receives `repo_discovered` before `review_started`. The cost is one tick of latency on the very first review of a brand-new repo; the alternative was a race where the UI rendered "review in progress" for a repo it had not yet learned about.
 
