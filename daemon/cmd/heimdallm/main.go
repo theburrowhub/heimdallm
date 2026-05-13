@@ -2220,7 +2220,14 @@ func runTier2(
 			}
 			n, err := adapter.ProcessRepo(ctx, repo)
 			if err != nil {
-				slog.Error("tier2: issue processing", "repo", repo, "err", err)
+				// Demote to debug during graceful shutdown — a
+				// cancelled ctx is expected behaviour, not a fault
+				// worth paging an operator.
+				if ctx.Err() != nil {
+					slog.Debug("tier2: issue processing cancelled", "repo", repo, "err", err)
+				} else {
+					slog.Error("tier2: issue processing", "repo", repo, "err", err)
+				}
 				return 0, err
 			}
 			if n > 0 {
