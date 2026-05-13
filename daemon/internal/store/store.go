@@ -24,17 +24,29 @@ type Store struct {
 
 const schema = `
 CREATE TABLE IF NOT EXISTS prs (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  github_id  INTEGER UNIQUE NOT NULL,
-  repo       TEXT NOT NULL,
-  number     INTEGER NOT NULL,
-  title      TEXT NOT NULL,
-  author     TEXT NOT NULL,
-  url        TEXT NOT NULL,
-  state      TEXT NOT NULL,
-  updated_at DATETIME NOT NULL,
-  fetched_at DATETIME NOT NULL,
-  dismissed  INTEGER NOT NULL DEFAULT 0
+  id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+  github_id                INTEGER UNIQUE NOT NULL,
+  repo                     TEXT NOT NULL,
+  number                   INTEGER NOT NULL,
+  title                    TEXT NOT NULL,
+  author                   TEXT NOT NULL,
+  url                      TEXT NOT NULL,
+  state                    TEXT NOT NULL,
+  updated_at               DATETIME NOT NULL,
+  fetched_at               DATETIME NOT NULL,
+  dismissed                INTEGER NOT NULL DEFAULT 0,
+  -- Review-state vigilance for auto_implement-created PRs (#482). The
+  -- columns are managed by Tier 3 (external_*) and the response/fix
+  -- modules (counters + last_responded_at), never by UpsertPR — see
+  -- the explicit migration block below for idempotent ADD COLUMNs that
+  -- cover existing DBs.
+  external_review_state    TEXT NOT NULL DEFAULT '',
+  external_reviewer        TEXT NOT NULL DEFAULT '',
+  external_review_at       TEXT NOT NULL DEFAULT '',
+  auto_implement_issue_id  INTEGER NOT NULL DEFAULT 0,
+  review_response_count    INTEGER NOT NULL DEFAULT 0,
+  review_fix_count         INTEGER NOT NULL DEFAULT 0,
+  last_responded_at        TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS reviews (
@@ -170,6 +182,15 @@ func Open(dsn string) (*Store, error) {
 	db.Exec("ALTER TABLE agents ADD COLUMN cli_flags TEXT NOT NULL DEFAULT ''")
 	db.Exec("ALTER TABLE agents RENAME COLUMN prompt TO prompt") // no-op, ensures column exists
 	db.Exec("ALTER TABLE prs ADD COLUMN dismissed INTEGER NOT NULL DEFAULT 0")
+	// Review-state vigilance (#482). Idempotent on existing DBs; the
+	// schema constant above already includes these for fresh installs.
+	db.Exec("ALTER TABLE prs ADD COLUMN external_review_state TEXT NOT NULL DEFAULT ''")
+	db.Exec("ALTER TABLE prs ADD COLUMN external_reviewer TEXT NOT NULL DEFAULT ''")
+	db.Exec("ALTER TABLE prs ADD COLUMN external_review_at TEXT NOT NULL DEFAULT ''")
+	db.Exec("ALTER TABLE prs ADD COLUMN auto_implement_issue_id INTEGER NOT NULL DEFAULT 0")
+	db.Exec("ALTER TABLE prs ADD COLUMN review_response_count INTEGER NOT NULL DEFAULT 0")
+	db.Exec("ALTER TABLE prs ADD COLUMN review_fix_count INTEGER NOT NULL DEFAULT 0")
+	db.Exec("ALTER TABLE prs ADD COLUMN last_responded_at TEXT NOT NULL DEFAULT ''")
 	db.Exec("ALTER TABLE agents ADD COLUMN issue_prompt TEXT NOT NULL DEFAULT ''")
 	db.Exec("ALTER TABLE agents ADD COLUMN issue_instructions TEXT NOT NULL DEFAULT ''")
 	db.Exec("ALTER TABLE agents ADD COLUMN implement_prompt TEXT NOT NULL DEFAULT ''")
