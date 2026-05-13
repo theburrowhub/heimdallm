@@ -2388,6 +2388,11 @@ type tier2Adapter struct {
 	runReview  func(pr *gh.PullRequest, aiCfg config.RepoAI) *store.Review
 	publishPub *bus.PRPublishPublisher
 	watchStore *bus.WatchStore
+	// Review-state vigilance dispatch (#482). Optional — nil-safe so a
+	// daemon configured without the opt-in feature flags simply skips
+	// the dispatch and the new CheckItem branch remains observational.
+	responder reviewResponderDispatcher
+	fixRunner reviewFixDispatcher
 
 	// skipMu protects the lightweight SSE dedup caches below.
 	skipMu               sync.Mutex

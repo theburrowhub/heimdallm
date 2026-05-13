@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,32 @@ import (
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
 )
+
+// reviewStateDispatcher captures every (pr, issueID) pair passed to
+// Run so the routing tests can assert exactly which dispatcher fired
+// for a given external review state.
+type reviewStateDispatcher struct {
+	mu    sync.Mutex
+	calls []reviewStateDispatchCall
+}
+
+type reviewStateDispatchCall struct {
+	PRID    int64
+	IssueID int64
+}
+
+func (d *reviewStateDispatcher) Run(_ context.Context, pr *store.PR, issueID int64) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.calls = append(d.calls, reviewStateDispatchCall{PRID: pr.ID, IssueID: issueID})
+	return nil
+}
+
+func (d *reviewStateDispatcher) count() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.calls)
+}
 
 // makePRReviewStateAdapter wires the minimum tier2Adapter fields
 // refreshAutoImplementPRReviewState reads. The /reviews endpoint is
@@ -151,6 +178,99 @@ func TestRefreshAutoImplementPRReviewState_NoChange_NoSideEffects(t *testing.T) 
 		t.Fatalf("unexpected SSE event %q on no-op refresh", ev.Type)
 	case <-time.After(100 * time.Millisecond):
 		// no event — correct
+	}
+}
+
+// TestRefreshAutoImplementPRReviewState_RoutesCommentedToResponder
+// pins phase-2 dispatch: when the aggregate state goes to COMMENTED,
+// the responder dispatcher is invoked exactly once with the PR row
+// and the originating issue id. The fix runner is NOT invoked.
+func TestRefreshAutoImplementPRReviewState_RoutesCommentedToResponder(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[
+			{"id":1,"user":{"login":"alice"},"state":"COMMENTED","body":"q","submitted_at":"2026-05-13T11:00:00Z"}
+		]`))
+	}))
+	defer srv.Close()
+
+	s := newMemStore(t)
+	pr := seedAutoImplementPR(t, s, 2001, 11)
+	a, _, _ := makePRReviewStateAdapter(t, srv, s, "heimdallm-bot")
+	responder := &reviewStateDispatcher{}
+	fixer := &reviewStateDispatcher{}
+	a.responder = responder
+	a.fixRunner = fixer
+
+	item := &scheduler.WatchItem{Type: "pr", Repo: "org/repo", Number: 11, GithubID: 2001}
+	if err := a.refreshAutoImplementPRReviewState(item, pr); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if responder.count() != 1 {
+		t.Errorf("responder calls = %d, want 1", responder.count())
+	}
+	if fixer.count() != 0 {
+		t.Errorf("fixer calls = %d, want 0", fixer.count())
+	}
+	if responder.calls[0].IssueID != 4242 {
+		t.Errorf("origin issue id = %d, want 4242", responder.calls[0].IssueID)
+	}
+}
+
+// TestRefreshAutoImplementPRReviewState_RoutesChangesRequestedToFix
+// is the symmetric pin for phase-3 dispatch.
+func TestRefreshAutoImplementPRReviewState_RoutesChangesRequestedToFix(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[
+			{"id":1,"user":{"login":"alice"},"state":"CHANGES_REQUESTED","body":"rename","submitted_at":"2026-05-13T11:00:00Z"}
+		]`))
+	}))
+	defer srv.Close()
+
+	s := newMemStore(t)
+	pr := seedAutoImplementPR(t, s, 2002, 12)
+	a, _, _ := makePRReviewStateAdapter(t, srv, s, "heimdallm-bot")
+	responder := &reviewStateDispatcher{}
+	fixer := &reviewStateDispatcher{}
+	a.responder = responder
+	a.fixRunner = fixer
+
+	item := &scheduler.WatchItem{Type: "pr", Repo: "org/repo", Number: 12, GithubID: 2002}
+	if err := a.refreshAutoImplementPRReviewState(item, pr); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if fixer.count() != 1 {
+		t.Errorf("fixer calls = %d, want 1", fixer.count())
+	}
+	if responder.count() != 0 {
+		t.Errorf("responder calls = %d, want 0", responder.count())
+	}
+}
+
+// TestRefreshAutoImplementPRReviewState_ApprovedRoutesNowhere pins
+// that APPROVED is a terminal observation event only — no
+// dispatcher is invoked.
+func TestRefreshAutoImplementPRReviewState_ApprovedRoutesNowhere(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[
+			{"id":1,"user":{"login":"alice"},"state":"APPROVED","body":"lgtm","submitted_at":"2026-05-13T11:00:00Z"}
+		]`))
+	}))
+	defer srv.Close()
+
+	s := newMemStore(t)
+	pr := seedAutoImplementPR(t, s, 2003, 13)
+	a, _, _ := makePRReviewStateAdapter(t, srv, s, "heimdallm-bot")
+	responder := &reviewStateDispatcher{}
+	fixer := &reviewStateDispatcher{}
+	a.responder = responder
+	a.fixRunner = fixer
+
+	item := &scheduler.WatchItem{Type: "pr", Repo: "org/repo", Number: 13, GithubID: 2003}
+	if err := a.refreshAutoImplementPRReviewState(item, pr); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if responder.count() != 0 || fixer.count() != 0 {
+		t.Errorf("APPROVED dispatched somewhere: responder=%d fixer=%d", responder.count(), fixer.count())
 	}
 }
 

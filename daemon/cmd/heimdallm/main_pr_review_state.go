@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 
@@ -9,6 +10,20 @@ import (
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
 )
+
+// reviewResponderDispatcher is the abstraction Tier 3 uses to invoke
+// the phase-2 Responder. *issuepipeline.Responder satisfies this
+// directly; tests inject a stub that records calls without touching
+// the executor.
+type reviewResponderDispatcher interface {
+	Run(ctx context.Context, pr *store.PR, originIssueID int64) error
+}
+
+// reviewFixDispatcher is the phase-3 surface; same shape so the two
+// callsites in refreshAutoImplementPRReviewState stay symmetric.
+type reviewFixDispatcher interface {
+	Run(ctx context.Context, pr *store.PR, originIssueID int64) error
+}
 
 // refreshAutoImplementPRReviewState observes the external reviews on
 // an auto_implement-created PR (#482, phase 1) and updates the store
@@ -58,6 +73,27 @@ func (a *tier2Adapter) refreshAutoImplementPRReviewState(
 	slog.Info("tier3: PR review state changed",
 		"repo", item.Repo, "number", item.Number,
 		"prev_state", prevState, "new_state", state, "reviewer", reviewer)
+
+	// Dispatch to the phase-2/phase-3 modules. Both Run methods are
+	// safe to call when their owning config flag is off (they return
+	// nil immediately) so the gating logic stays inside the modules
+	// rather than smearing across the adapter.
+	switch state {
+	case issuepipeline.ReviewStateCommented:
+		if a.responder != nil {
+			if err := a.responder.Run(context.Background(), stored, stored.AutoImplementIssueID); err != nil {
+				slog.Warn("tier3: responder run failed",
+					"repo", item.Repo, "number", item.Number, "err", err)
+			}
+		}
+	case issuepipeline.ReviewStateChangesRequested:
+		if a.fixRunner != nil {
+			if err := a.fixRunner.Run(context.Background(), stored, stored.AutoImplementIssueID); err != nil {
+				slog.Warn("tier3: fix runner failed",
+					"repo", item.Repo, "number", item.Number, "err", err)
+			}
+		}
+	}
 	return nil
 }
 
