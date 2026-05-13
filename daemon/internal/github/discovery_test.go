@@ -251,3 +251,69 @@ func TestFetchReposByTopic_AllOrgsFail(t *testing.T) {
 		t.Errorf("expected empty result, got %v", got)
 	}
 }
+
+// ── IsRepoArchived ─────────────────────────────────────────────────────────
+
+func TestIsRepoArchived_ActiveRepo(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/org/active" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		w.Write([]byte(`{"full_name":"org/active","archived":false}`))
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	archived, err := client.IsRepoArchived("org/active")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if archived {
+		t.Error("expected false for active repo")
+	}
+}
+
+func TestIsRepoArchived_ArchivedRepo(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"full_name":"org/old","archived":true}`))
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	archived, err := client.IsRepoArchived("org/old")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !archived {
+		t.Error("expected true for archived repo")
+	}
+}
+
+func TestIsRepoArchived_DeletedRepo(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	archived, err := client.IsRepoArchived("org/deleted")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !archived {
+		t.Error("expected true for deleted (404) repo")
+	}
+}
+
+func TestIsRepoArchived_APIError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message":"rate limit"}`, http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	_, err := client.IsRepoArchived("org/repo")
+	if err == nil {
+		t.Fatal("expected error on non-200/404 status")
+	}
+}
