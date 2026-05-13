@@ -3214,6 +3214,21 @@ func (a *tier2Adapter) CheckItem(ctx context.Context, item *scheduler.WatchItem)
 		if !snap.UpdatedAt.After(item.LastSeen) {
 			return false, nil, nil
 		}
+		// Review-state vigilance branch (#482): for PRs that
+		// auto_implement created, the snapshot's updated_at advance is
+		// almost always a reviewer submitting feedback. Fetch the
+		// reviews list, aggregate, and short-circuit out of the
+		// standard review codepath — the daemon's own PRs would be
+		// rejected by SkipReasonSelfAuthored anyway, but routing them
+		// here keeps the observation layer's intent explicit.
+		stored, _ := a.store.GetPRByGithubID(item.GithubID)
+		if stored != nil && stored.AutoImplementIssueID != 0 {
+			if err := a.refreshAutoImplementPRReviewState(item, stored); err != nil {
+				slog.Warn("tier3: refresh PR review state failed",
+					"repo", item.Repo, "number", item.Number, "err", err)
+			}
+			return false, nil, nil
+		}
 		// Forward HeadSHA so HandleChange can feed it into runReview's
 		// persistent in-flight claim (#258, theburrowhub/heimdallm#264).
 		// GetPRSnapshot already fetches head.sha in the same /pulls/N call —
