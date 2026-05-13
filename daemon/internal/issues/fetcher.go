@@ -298,22 +298,12 @@ func (f *Fetcher) alreadyProcessed(issue *github.Issue) (bool, string, error) {
 		return true, "already implemented (PR created)", nil
 	}
 	if latest.ActionTaken == ActionAutoImplementNoChanges && issue.Mode == config.IssueModeDevelop {
-		// If the agent has produced an empty diff at or above the cap, stop
-		// retrying. Manual unblock paths: a retry marker (handled above
-		// before we reach this point), dismiss, or moving the issue back
-		// to a different stage label. See issue #433.
-		noChangesCount, ncErr := f.store.CountAutoImplementNoChanges(row.ID)
-		if ncErr != nil {
-			slog.Warn("issues fetcher: could not count no-changes auto_implement, falling through to legacy block",
-				"repo", issue.Repo, "number", issue.Number, "err", ncErr)
-			return true, "auto_implement produced no changes; waiting for manual retry", nil
-		}
-		if noChangesCount >= MaxAutoImplementNoChanges {
-			return true, fmt.Sprintf(
-				"auto_implement produced no changes %d times (cap %d); requires human intervention or retry marker",
-				noChangesCount, MaxAutoImplementNoChanges), nil
-		}
-		return true, "auto_implement produced no changes; waiting for manual retry", nil
+		// Back-compat skip for rows written before #483 added MarkerDone
+		// to the fallback comment. New no-changes runs are terminated by
+		// the marker scan above; reaching here means the row was stored
+		// without a marker, so we keep skipping until a human posts
+		// MarkerRetry (handled before this block).
+		return true, "auto_implement produced no changes (historical row, no done marker); add retry marker to reprocess", nil
 	}
 
 	// Bot-comment dedup: if the most recent comment is from the bot AND the

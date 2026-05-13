@@ -887,12 +887,16 @@ func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, is
 // implement" escape hatch fired. We post a review_only-style comment so the
 // issue still gets acknowledged and the user sees why no PR appeared.
 func (p *Pipeline) autoImplementNoChangesFallback(issue *github.Issue, issueID int64, cli string) (*store.IssueReview, error) {
+	// MarkerDone makes this a terminal state for the fetcher's marker scan
+	// (#483): without it, the fallback row collides with the dedup gate on
+	// every poll and the issue sits in limbo. MarkerRetry is named inline
+	// so the user can find the escape hatch without grepping source.
 	body := fmt.Sprintf(
-		"## ⚠️ Heimdallm auto-implement skipped\n\n"+
+		"%s\n## ⚠️ Heimdallm auto-implement skipped\n\n"+
 			"The agent looked at #%d but left the working tree unchanged — it likely needs a human decision or more context than the issue alone provides.\n\n"+
-			"Add more details and a retry marker to run auto-implementation again, or remove the develop label to stop here.\n\n"+
+			"To retry auto-implementation, add a `%s` marker comment (or edit the issue body to include it). To stop here, remove the develop label.\n\n"+
 			"---\n*auto_implement → review_only fallback · Heimdallm*",
-		issue.Number,
+		MarkerDone, issue.Number, MarkerRetry,
 	)
 	commentedAt, postErr := p.gh.PostComment(issue.Repo, issue.Number, body)
 	if postErr != nil {
@@ -916,9 +920,14 @@ func (p *Pipeline) autoImplementNoChangesFallback(issue *github.Issue, issueID i
 	}
 	rev.ID = revID
 
-	p.publish(sse.EventIssueReviewCompleted, map[string]any{
+	// EventIssueReviewError (not Completed) so the UI renders a
+	// needs-attention card; the reason field disambiguates the cause for
+	// Flutter-side copy (#483).
+	p.publish(sse.EventIssueReviewError, map[string]any{
 		"issue_id": issueID, "number": issue.Number, "repo": issue.Repo,
-		"mode": "auto_implement_no_changes", "post_ok": postErr == nil,
+		"reason":  "auto_implement_no_changes",
+		"post_ok": postErr == nil,
+		"message": "Agent left the working tree unchanged; add a retry marker to retry or close the issue.",
 	})
 	slog.Info("issues pipeline: auto_implement had no changes, posted fallback comment",
 		"repo", issue.Repo, "number", issue.Number, "posted", postErr == nil)
