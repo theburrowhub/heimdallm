@@ -549,10 +549,12 @@ func TestAlreadyProcessed_DoneMarkerSkipsBeforeDedupGate(t *testing.T) {
 	}
 }
 
-// TestAlreadyProcessed_RetryMarker_ReprocessesNoChanges proves the
-// retry escape hatch is actually reachable now that the dedup gate no
-// longer unconditionally swallows no-changes rows. Pre-#483, the gate
-// short-circuited before any marker check could reopen the issue.
+// TestAlreadyProcessed_RetryMarker_ReprocessesNoChanges pins the retry
+// escape hatch on a no-changes row. The marker scan already ran before
+// the dedup gate pre-#483, so this is the documented user workflow —
+// what the test really protects against is a future refactor that
+// moves the dedup gate above the marker scan or that drops the retry
+// override for the ActionAutoImplementNoChanges branch.
 func TestAlreadyProcessed_RetryMarker_ReprocessesNoChanges(t *testing.T) {
 	reviewedAt := time.Now().Add(-10 * time.Minute)
 	issue := fixture(1, time.Now())

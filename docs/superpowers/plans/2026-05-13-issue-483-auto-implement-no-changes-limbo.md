@@ -2,10 +2,28 @@
 
 > **Status: DONE.** Landed in PR #488 (2026-05-13). Kept as historical
 > reference alongside other completed plans in this directory; the PR
-> description carries the merge-ready summary. See the PR review for
-> the follow-up polish (marker-collision fix, Flutter `error` payload
-> alignment, `NEEDS ATTENTION` badge, dead-code removal) that landed on
-> top of the original three sub-fixes described below.
+> description carries the merge-ready summary. The body below reflects
+> the original plan written before context-compact and has not been
+> rewritten to match the final shape — three changes shipped that the
+> plan called "follow-up" or did not anticipate, do not treat the
+> snippets below as the implementation spec:
+>
+> - `MaxAutoImplementNoChanges` constant and the
+>   `CountAutoImplementNoChanges` interface + store method were
+>   **deleted** in this PR (the plan parked them as out-of-scope
+>   cleanup).
+> - The SSE payload uses `error` (not `message`), aligning with the
+>   convention of every other `EventIssueReviewError` emitter and the
+>   Flutter renderer.
+> - The fallback body deliberately does **not** embed the literal
+>   `MarkerRetry` token because `ScanMarkers` prioritises Retry over
+>   Done within a single comment; the body references the marker by
+>   keyword and points at the configuration guide instead.
+> - Flutter side: new `AttentionBadge` widget + side-bar tint replace
+>   the misleading green LOW chip on `auto_implement_no_changes` rows
+>   across the dashboard tile/grid, the issues list and the issue
+>   detail review header. `dashboard_providers.dart` also now bumps
+>   `issueListRefreshProvider` on `issue_review_error`.
 
 Closes `theburrowhub/heimdallm#483`. Three small fixes inside the
 `auto_implement` no-changes fallback path so the issue reaches a
