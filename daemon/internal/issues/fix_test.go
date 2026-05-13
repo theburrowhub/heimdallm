@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/heimdallm/daemon/internal/github"
 	"github.com/heimdallm/daemon/internal/issues"
 	"github.com/heimdallm/daemon/internal/sse"
+	"github.com/heimdallm/daemon/internal/store"
 )
 
 // ── FixRunner fakes ──────────────────────────────────────────────────────────
@@ -23,6 +25,7 @@ type fakeFixStore struct {
 	state           string
 	reviewer        string
 	stateAt         time.Time
+	issue           *store.Issue
 }
 
 func (f *fakeFixStore) IncrementPRReviewFixCount(_ int64) (int, error) {
@@ -44,6 +47,12 @@ func (f *fakeFixStore) UpdatePRReviewState(_ int64, state, reviewer string, at t
 	f.reviewer = reviewer
 	f.stateAt = at
 	return nil
+}
+func (f *fakeFixStore) GetIssue(_ int64) (*store.Issue, error) {
+	if f.issue == nil {
+		return nil, errors.New("not found")
+	}
+	return f.issue, nil
 }
 
 type fakeFixGH struct {
@@ -233,6 +242,39 @@ func TestFixRunner_HappyPath_MarksFixPushed(t *testing.T) {
 	json.Unmarshal([]byte(events[0].Data), &payload)
 	if payload["mode"] != "review_fix" {
 		t.Errorf("mode = %v, want review_fix", payload["mode"])
+	}
+}
+
+// TestFixRunner_PromptEmbedsIssueContext pins that the FixRunner
+// hydrates the originating issue into the prompt so the agent can
+// judge whether the requested changes are in-scope (#482).
+func TestFixRunner_PromptEmbedsIssueContext(t *testing.T) {
+	st := &fakeFixStore{issue: &store.Issue{
+		ID: 99, Number: 17, Title: "Refactor: pull config out",
+		Body: "Move flags into config.New",
+	}}
+	gh := &fakeFixGH{reviews: []github.PRReview{
+		crReview("alice", "rename FromEnv to FromTOML", time.Now()),
+	}}
+	exec := &fakeFixExec{body: "would rename in pkg/config"}
+	broker := &fakeResponderBroker{}
+	r := makeFixRunner(t, st, gh, exec, broker, config.ReviewFixConfig{
+		Enabled: true, PerPRLifetime: 3, CooldownSecs: 0,
+	})
+	if err := r.Run(context.Background(), samplePR(), 99); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !exec.called {
+		t.Fatal("executor not invoked")
+	}
+	if !strings.Contains(exec.prompt, "Refactor: pull config out") {
+		t.Errorf("prompt missing issue title:\n%s", exec.prompt)
+	}
+	if !strings.Contains(exec.prompt, "Move flags into config.New") {
+		t.Errorf("prompt missing issue body:\n%s", exec.prompt)
+	}
+	if !strings.Contains(exec.prompt, "#17") {
+		t.Errorf("prompt missing issue number:\n%s", exec.prompt)
 	}
 }
 

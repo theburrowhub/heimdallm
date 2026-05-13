@@ -53,6 +53,20 @@ func (a *tier2Adapter) refreshAutoImplementPRReviewState(
 	if state == stored.ExternalReviewState {
 		return nil
 	}
+	// FIX_PUSHED re-arm guard: after the FixRunner addresses a CR it
+	// flips the stored state to FIX_PUSHED with `external_review_at`
+	// set to the CR's own SubmittedAt. The raw aggregate over the same
+	// historical reviews list will still return CHANGES_REQUESTED for
+	// that exact CR — without this guard we would flip back every
+	// tick, re-fire the FixRunner with stale feedback (cap/cooldown
+	// would mask the bug but not fix it), and emit a noisy SSE for
+	// every poll. Only a fresh CR (SubmittedAt strictly after the
+	// stored mark) reactivates the cycle.
+	if stored.ExternalReviewState == issuepipeline.ReviewStateFixPushed &&
+		state == issuepipeline.ReviewStateChangesRequested &&
+		!at.After(stored.ExternalReviewAt) {
+		return nil
+	}
 	prevState := stored.ExternalReviewState
 	if err := a.store.UpdatePRReviewState(stored.ID, state, reviewer, at); err != nil {
 		return fmt.Errorf("update pr review state: %w", err)

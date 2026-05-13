@@ -274,6 +274,88 @@ func TestRefreshAutoImplementPRReviewState_ApprovedRoutesNowhere(t *testing.T) {
 	}
 }
 
+// TestRefreshAutoImplementPRReviewState_FixPushedSuppressesStaleCR
+// pins the re-arm fix for the bug review caught: after the FixRunner
+// flips the stored state to FIX_PUSHED, the next Tier 3 tick must NOT
+// flip back to CHANGES_REQUESTED on the same historical CR. Only a
+// fresh CR (SubmittedAt > stored.ExternalReviewAt) reactivates the
+// cycle.
+func TestRefreshAutoImplementPRReviewState_FixPushedSuppressesStaleCR(t *testing.T) {
+	crTS := "2026-05-13T09:00:00Z"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[
+			{"id":1,"user":{"login":"alice"},"state":"CHANGES_REQUESTED","body":"rename","submitted_at":"` + crTS + `"}
+		]`))
+	}))
+	defer srv.Close()
+
+	s := newMemStore(t)
+	pr := seedAutoImplementPR(t, s, 3001, 21)
+	// Simulate: the FixRunner already addressed this exact CR. Stored
+	// state is FIX_PUSHED with external_review_at set to the CR's own
+	// SubmittedAt.
+	at, _ := time.Parse(time.RFC3339, crTS)
+	if err := s.UpdatePRReviewState(pr.ID, "FIX_PUSHED", "alice", at); err != nil {
+		t.Fatalf("seed FIX_PUSHED: %v", err)
+	}
+	pr, _ = s.GetPRByGithubID(3001)
+	a, _, sub := makePRReviewStateAdapter(t, srv, s, "heimdallm-bot")
+	responder := &reviewStateDispatcher{}
+	fixer := &reviewStateDispatcher{}
+	a.responder = responder
+	a.fixRunner = fixer
+
+	item := &scheduler.WatchItem{Type: "pr", Repo: "org/repo", Number: 21, GithubID: 3001}
+	if err := a.refreshAutoImplementPRReviewState(item, pr); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	got, _ := s.GetPRByGithubID(3001)
+	if got.ExternalReviewState != "FIX_PUSHED" {
+		t.Errorf("state flipped back to %q from FIX_PUSHED", got.ExternalReviewState)
+	}
+	if fixer.count() != 0 {
+		t.Errorf("FixRunner re-fired on the same historical CR: %d calls", fixer.count())
+	}
+	select {
+	case ev := <-sub:
+		t.Fatalf("unexpected SSE event %q on FIX_PUSHED re-arm tick", ev.Type)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// TestRefreshAutoImplementPRReviewState_FixPushed_NewCRReactivates
+// is the symmetric pin: a CR submitted AFTER the FixRunner's response
+// (SubmittedAt > stored.ExternalReviewAt) does flip the state back to
+// CHANGES_REQUESTED and re-dispatches.
+func TestRefreshAutoImplementPRReviewState_FixPushed_NewCRReactivates(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[
+			{"id":2,"user":{"login":"alice"},"state":"CHANGES_REQUESTED","body":"second pass","submitted_at":"2026-05-13T12:00:00Z"}
+		]`))
+	}))
+	defer srv.Close()
+
+	s := newMemStore(t)
+	pr := seedAutoImplementPR(t, s, 3002, 22)
+	earlier, _ := time.Parse(time.RFC3339, "2026-05-13T09:00:00Z")
+	if err := s.UpdatePRReviewState(pr.ID, "FIX_PUSHED", "alice", earlier); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	pr, _ = s.GetPRByGithubID(3002)
+	a, _, _ := makePRReviewStateAdapter(t, srv, s, "heimdallm-bot")
+	fixer := &reviewStateDispatcher{}
+	a.fixRunner = fixer
+
+	item := &scheduler.WatchItem{Type: "pr", Repo: "org/repo", Number: 22, GithubID: 3002}
+	if err := a.refreshAutoImplementPRReviewState(item, pr); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if fixer.count() != 1 {
+		t.Fatalf("FixRunner not re-fired on fresh CR: %d calls", fixer.count())
+	}
+}
+
 // TestRefreshAutoImplementPRReviewState_FiltersBotReviews pins the
 // self-loop guard: a review submitted by the bot's own login must be
 // filtered out by LatestExternalReviewState, so an all-bot reviews
