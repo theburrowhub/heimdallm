@@ -571,6 +571,16 @@ func main() {
 	// their own Enabled flag on every Run so a cold-start with the
 	// feature disabled costs nothing; flipping the flag in TOML and
 	// reloading is enough to opt in.
+	// botLoginAccessor is the single source for the bot's login the
+	// Responder and FixRunner consume — wraps the same loginMu /
+	// cachedLogin pair the adapter's cachedAuthenticatedUser uses, so
+	// locking discipline lives in one closure rather than being
+	// duplicated at each callsite.
+	botLoginAccessor := func() string {
+		loginMu.Lock()
+		defer loginMu.Unlock()
+		return cachedLogin
+	}
 	adapter.responder = issuepipeline.NewResponder(
 		s, ghClient,
 		&prReviewExecutor{runner: exec, cfg: &cfg, cfgMu: &cfgMu},
@@ -580,11 +590,7 @@ func main() {
 			defer cfgMu.Unlock()
 			return cfg.AI.ReviewResponse
 		},
-		func() string {
-			loginMu.Lock()
-			defer loginMu.Unlock()
-			return cachedLogin
-		},
+		botLoginAccessor,
 	)
 	adapter.fixRunner = issuepipeline.NewFixRunner(
 		s, ghClient,
@@ -602,11 +608,7 @@ func main() {
 			defer cfgMu.Unlock()
 			return cfg.AI.ReviewFix
 		},
-		func() string {
-			loginMu.Lock()
-			defer loginMu.Unlock()
-			return cachedLogin
-		},
+		botLoginAccessor,
 	)
 
 	repoPublisher := bus.NewRepoPublisher(conn)
@@ -3279,9 +3281,19 @@ func (a *tier2Adapter) CheckItem(ctx context.Context, item *scheduler.WatchItem)
 		// standard review codepath — the daemon's own PRs would be
 		// rejected by SkipReasonSelfAuthored anyway, but routing them
 		// here keeps the observation layer's intent explicit.
-		stored, _ := a.store.GetPRByGithubID(item.GithubID)
+		stored, storeErr := a.store.GetPRByGithubID(item.GithubID)
+		if storeErr != nil {
+			// A non-ErrNoRows failure means SQLite is unhappy
+			// (corruption, FS error). Logging it makes operational
+			// debugging tractable; CheckItem still falls through to
+			// the standard review codepath rather than swallowing
+			// silently so the daemon keeps watching the PR — at
+			// worst the standard path applies its own guards.
+			slog.Warn("tier3: GetPRByGithubID failed, falling through to standard review path",
+				"repo", item.Repo, "number", item.Number, "err", storeErr)
+		}
 		if stored != nil && stored.AutoImplementIssueID != 0 {
-			if err := a.refreshAutoImplementPRReviewState(item, stored); err != nil {
+			if err := a.refreshAutoImplementPRReviewState(ctx, item, stored); err != nil {
 				// Propagate the error so the state-handler can apply
 				// its 404 cleanup + the StateWorker increases backoff
 				// (no LastSeen advance) rather than burning the API

@@ -49,7 +49,7 @@ type reviewFixDispatcher interface {
 // increases on transient failures (no LastSeen advance until a tick
 // succeeds).
 func (a *tier2Adapter) refreshAutoImplementPRReviewState(
-	item *scheduler.WatchItem, stored *store.PR,
+	ctx context.Context, item *scheduler.WatchItem, stored *store.PR,
 ) error {
 	reviews, err := a.ghClient.GetPRReviews(item.Repo, item.Number)
 	if err != nil {
@@ -124,7 +124,7 @@ func (a *tier2Adapter) refreshAutoImplementPRReviewState(
 	switch state {
 	case issuepipeline.ReviewStateCommented:
 		if a.responder != nil {
-			if err := a.responder.Run(context.Background(), stored, stored.AutoImplementIssueID); err != nil {
+			if err := a.responder.Run(ctx, stored, stored.AutoImplementIssueID); err != nil {
 				slog.Warn("tier3: responder run failed (retrying next tick)",
 					"repo", item.Repo, "number", item.Number, "err", err)
 				return fmt.Errorf("responder: %w", err)
@@ -132,7 +132,7 @@ func (a *tier2Adapter) refreshAutoImplementPRReviewState(
 		}
 	case issuepipeline.ReviewStateChangesRequested:
 		if a.fixRunner != nil {
-			if err := a.fixRunner.Run(context.Background(), stored, stored.AutoImplementIssueID); err != nil {
+			if err := a.fixRunner.Run(ctx, stored, stored.AutoImplementIssueID); err != nil {
 				slog.Warn("tier3: fix runner failed (retrying next tick)",
 					"repo", item.Repo, "number", item.Number, "err", err)
 				return fmt.Errorf("fix runner: %w", err)

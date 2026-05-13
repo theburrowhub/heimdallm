@@ -24,6 +24,11 @@ type reviewStateDispatcher struct {
 	mu    sync.Mutex
 	calls []reviewStateDispatchCall
 	err   error // when non-nil, every Run returns this error
+	// lastCtx captures the context the dispatcher was invoked with
+	// so tests can assert the CheckItem ctx propagated all the way
+	// through refreshAutoImplementPRReviewState rather than being
+	// silently replaced by context.Background().
+	lastCtx context.Context
 }
 
 type reviewStateDispatchCall struct {
@@ -31,9 +36,10 @@ type reviewStateDispatchCall struct {
 	IssueID int64
 }
 
-func (d *reviewStateDispatcher) Run(_ context.Context, pr *store.PR, issueID int64) error {
+func (d *reviewStateDispatcher) Run(ctx context.Context, pr *store.PR, issueID int64) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.lastCtx = ctx
 	d.calls = append(d.calls, reviewStateDispatchCall{PRID: pr.ID, IssueID: issueID})
 	return d.err
 }
@@ -111,7 +117,7 @@ func TestRefreshAutoImplementPRReviewState_DetectsStateChange(t *testing.T) {
 	a, _, sub := makePRReviewStateAdapter(t, srv, s, "heimdallm-bot")
 	item := &scheduler.WatchItem{Type: "pr", Repo: "org/repo", Number: 7, GithubID: 1234}
 
-	if err := a.refreshAutoImplementPRReviewState(item, pr); err != nil {
+	if err := a.refreshAutoImplementPRReviewState(context.Background(), item, pr); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
 
@@ -172,7 +178,7 @@ func TestRefreshAutoImplementPRReviewState_NoChange_NoSideEffects(t *testing.T) 
 	a, _, sub := makePRReviewStateAdapter(t, srv, s, "heimdallm-bot")
 	item := &scheduler.WatchItem{Type: "pr", Repo: "org/repo", Number: 8, GithubID: 1235}
 
-	if err := a.refreshAutoImplementPRReviewState(item, pr); err != nil {
+	if err := a.refreshAutoImplementPRReviewState(context.Background(), item, pr); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
 
@@ -205,7 +211,7 @@ func TestRefreshAutoImplementPRReviewState_RoutesCommentedToResponder(t *testing
 	a.fixRunner = fixer
 
 	item := &scheduler.WatchItem{Type: "pr", Repo: "org/repo", Number: 11, GithubID: 2001}
-	if err := a.refreshAutoImplementPRReviewState(item, pr); err != nil {
+	if err := a.refreshAutoImplementPRReviewState(context.Background(), item, pr); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
 	if responder.count() != 1 {
@@ -238,7 +244,7 @@ func TestRefreshAutoImplementPRReviewState_RoutesChangesRequestedToFix(t *testin
 	a.fixRunner = fixer
 
 	item := &scheduler.WatchItem{Type: "pr", Repo: "org/repo", Number: 12, GithubID: 2002}
-	if err := a.refreshAutoImplementPRReviewState(item, pr); err != nil {
+	if err := a.refreshAutoImplementPRReviewState(context.Background(), item, pr); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
 	if fixer.count() != 1 {
@@ -269,7 +275,7 @@ func TestRefreshAutoImplementPRReviewState_ApprovedRoutesNowhere(t *testing.T) {
 	a.fixRunner = fixer
 
 	item := &scheduler.WatchItem{Type: "pr", Repo: "org/repo", Number: 13, GithubID: 2003}
-	if err := a.refreshAutoImplementPRReviewState(item, pr); err != nil {
+	if err := a.refreshAutoImplementPRReviewState(context.Background(), item, pr); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
 	if responder.count() != 0 || fixer.count() != 0 {
@@ -307,7 +313,7 @@ func TestRefreshAutoImplementPRReviewState_NewCommentReFiresResponder(t *testing
 	a.responder = responder
 
 	item := &scheduler.WatchItem{Type: "pr", Repo: "org/repo", Number: 31, GithubID: 4001}
-	if err := a.refreshAutoImplementPRReviewState(item, pr); err != nil {
+	if err := a.refreshAutoImplementPRReviewState(context.Background(), item, pr); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
 	if responder.count() != 1 {
@@ -361,7 +367,7 @@ func TestRefreshAutoImplementPRReviewState_NewCRReFiresFix_NoAdvisoryPriorPush(t
 	a.fixRunner = fixer
 
 	item := &scheduler.WatchItem{Type: "pr", Repo: "org/repo", Number: 32, GithubID: 4002}
-	if err := a.refreshAutoImplementPRReviewState(item, pr); err != nil {
+	if err := a.refreshAutoImplementPRReviewState(context.Background(), item, pr); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
 	if fixer.count() != 1 {
@@ -401,7 +407,7 @@ func TestRefreshAutoImplementPRReviewState_FixPushedSuppressesStaleCR(t *testing
 	a.fixRunner = fixer
 
 	item := &scheduler.WatchItem{Type: "pr", Repo: "org/repo", Number: 21, GithubID: 3001}
-	if err := a.refreshAutoImplementPRReviewState(item, pr); err != nil {
+	if err := a.refreshAutoImplementPRReviewState(context.Background(), item, pr); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
 
@@ -443,7 +449,7 @@ func TestRefreshAutoImplementPRReviewState_FixPushed_NewCRReactivates(t *testing
 	a.fixRunner = fixer
 
 	item := &scheduler.WatchItem{Type: "pr", Repo: "org/repo", Number: 22, GithubID: 3002}
-	if err := a.refreshAutoImplementPRReviewState(item, pr); err != nil {
+	if err := a.refreshAutoImplementPRReviewState(context.Background(), item, pr); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
 	if fixer.count() != 1 {
@@ -496,6 +502,50 @@ func TestCheckItem_AutoImplementPRBranch_ReturnsChangedSoLastSeenAdvances(t *tes
 	}
 	if snap != nil {
 		t.Errorf("snap must be nil so HandleChange short-circuits, got %+v", snap)
+	}
+}
+
+// TestCheckItem_AutoImplementPRBranch_PropagatesCtxToDispatchers
+// pins the cancellation contract reviewers flagged: the runner runs
+// can be long-lived (FixRunner does checkout + agent + push), so the
+// CheckItem ctx must reach them. Using context.Background() would
+// leak in-flight goroutines on daemon shutdown.
+func TestCheckItem_AutoImplementPRBranch_PropagatesCtxToDispatchers(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/org/repo/pulls/64", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"state":"open","draft":false,
+			"user":{"login":"heimdallm-bot"},
+			"updated_at":"2026-05-14T10:00:00Z",
+			"head":{"sha":"deadbeef","ref":"heimdallm/issue-80"}
+		}`))
+	})
+	mux.HandleFunc("/repos/org/repo/pulls/64/reviews", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[
+			{"id":1,"user":{"login":"alice"},"state":"CHANGES_REQUESTED","body":"x","submitted_at":"2026-05-14T09:00:00Z"}
+		]`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	s := newMemStore(t)
+	seedAutoImplementPR(t, s, 7004, 64)
+	a, _, _ := makePRReviewStateAdapter(t, srv, s, "heimdallm-bot")
+	fixer := &reviewStateDispatcher{}
+	a.fixRunner = fixer
+	item := &scheduler.WatchItem{Type: "pr", Repo: "org/repo", Number: 64, GithubID: 7004}
+
+	// Marker value flows through CheckItem -> refresh -> dispatcher.
+	type ctxKey string
+	ctx := context.WithValue(context.Background(), ctxKey("marker"), "from-caller")
+	if _, _, err := a.CheckItem(ctx, item); err != nil {
+		t.Fatalf("CheckItem: %v", err)
+	}
+	if fixer.lastCtx == nil {
+		t.Fatal("dispatcher saw no ctx")
+	}
+	if got, _ := fixer.lastCtx.Value(ctxKey("marker")).(string); got != "from-caller" {
+		t.Errorf("dispatcher ctx did not carry the caller's value (got %q) — context.Background() was used somewhere on the path", got)
 	}
 }
 
@@ -657,7 +707,7 @@ func TestRefreshAutoImplementPRReviewState_RetriesDispatchOnUnchangedCR(t *testi
 	a.fixRunner = fixer
 
 	item := &scheduler.WatchItem{Type: "pr", Repo: "org/repo", Number: 51, GithubID: 6001}
-	if err := a.refreshAutoImplementPRReviewState(item, pr); err != nil {
+	if err := a.refreshAutoImplementPRReviewState(context.Background(), item, pr); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
 	if fixer.count() != 1 {
@@ -688,7 +738,7 @@ func TestRefreshAutoImplementPRReviewState_RetriesDispatchOnUnchangedCommented(t
 	a.responder = responder
 
 	item := &scheduler.WatchItem{Type: "pr", Repo: "org/repo", Number: 52, GithubID: 6002}
-	if err := a.refreshAutoImplementPRReviewState(item, pr); err != nil {
+	if err := a.refreshAutoImplementPRReviewState(context.Background(), item, pr); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
 	if responder.count() != 1 {
@@ -720,7 +770,7 @@ func TestRefreshAutoImplementPRReviewState_UnchangedCR_NoExtraSSE(t *testing.T) 
 	a.fixRunner = &reviewStateDispatcher{}
 
 	item := &scheduler.WatchItem{Type: "pr", Repo: "org/repo", Number: 53, GithubID: 6003}
-	if err := a.refreshAutoImplementPRReviewState(item, pr); err != nil {
+	if err := a.refreshAutoImplementPRReviewState(context.Background(), item, pr); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
 	select {
@@ -747,7 +797,7 @@ func TestRefreshAutoImplementPRReviewState_FiltersBotReviews(t *testing.T) {
 	a, _, sub := makePRReviewStateAdapter(t, srv, s, "heimdallm-bot")
 	item := &scheduler.WatchItem{Type: "pr", Repo: "org/repo", Number: 9, GithubID: 1236}
 
-	if err := a.refreshAutoImplementPRReviewState(item, pr); err != nil {
+	if err := a.refreshAutoImplementPRReviewState(context.Background(), item, pr); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
 	got, _ := s.GetPRByGithubID(1236)
