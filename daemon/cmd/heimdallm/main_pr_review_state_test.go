@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -21,6 +23,7 @@ import (
 type reviewStateDispatcher struct {
 	mu    sync.Mutex
 	calls []reviewStateDispatchCall
+	err   error // when non-nil, every Run returns this error
 }
 
 type reviewStateDispatchCall struct {
@@ -32,7 +35,7 @@ func (d *reviewStateDispatcher) Run(_ context.Context, pr *store.PR, issueID int
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.calls = append(d.calls, reviewStateDispatchCall{PRID: pr.ID, IssueID: issueID})
-	return nil
+	return d.err
 }
 
 func (d *reviewStateDispatcher) count() int {
@@ -493,6 +496,132 @@ func TestCheckItem_AutoImplementPRBranch_ReturnsChangedSoLastSeenAdvances(t *tes
 	}
 	if snap != nil {
 		t.Errorf("snap must be nil so HandleChange short-circuits, got %+v", snap)
+	}
+}
+
+// TestCheckItem_AutoImplementPRBranch_PropagatesRunnerError pins the
+// end-to-end retry contract for #482 phase 2/3: when the runner
+// fails, the error must propagate through CheckItem so the
+// state-handler returns an error to the StateWorker, which then
+// calls IncreaseBackoff (NOT ResetBackoff). LastSeen must NOT
+// advance — otherwise the next tick's early gate
+// `!snap.UpdatedAt.After(item.LastSeen)` would silently drop the
+// review and the runner never retries until GitHub bumps the PR's
+// updated_at again.
+func TestCheckItem_AutoImplementPRBranch_PropagatesRunnerError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/org/repo/pulls/61", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"state":"open","draft":false,
+			"user":{"login":"heimdallm-bot"},
+			"updated_at":"2026-05-14T10:00:00Z",
+			"head":{"sha":"deadbeef","ref":"heimdallm/issue-77"}
+		}`))
+	})
+	mux.HandleFunc("/repos/org/repo/pulls/61/reviews", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[
+			{"id":1,"user":{"login":"alice"},"state":"CHANGES_REQUESTED","body":"rename","submitted_at":"2026-05-14T09:00:00Z"}
+		]`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	s := newMemStore(t)
+	seedAutoImplementPR(t, s, 7001, 61)
+	a, _, _ := makePRReviewStateAdapter(t, srv, s, "heimdallm-bot")
+	a.fixRunner = &reviewStateDispatcher{err: errors.New("transient executor failure")}
+	item := &scheduler.WatchItem{Type: "pr", Repo: "org/repo", Number: 61, GithubID: 7001}
+
+	changed, _, err := a.CheckItem(context.Background(), item)
+	if err == nil {
+		t.Fatal("CheckItem returned nil error after FixRunner failure — StateWorker will ResetBackoff and advance LastSeen, dropping the retry")
+	}
+	if !strings.Contains(err.Error(), "transient executor failure") {
+		t.Errorf("err = %v, want it to wrap the runner's error", err)
+	}
+	if changed {
+		t.Error("changed = true on runner failure — should be false so the worker IncreaseBackoff path runs (no LastSeen advance)")
+	}
+}
+
+// TestCheckItem_AutoImplementPRBranch_PropagatesResponderError is
+// the symmetric pin for the COMMENTED → Responder path.
+func TestCheckItem_AutoImplementPRBranch_PropagatesResponderError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/org/repo/pulls/62", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"state":"open","draft":false,
+			"user":{"login":"heimdallm-bot"},
+			"updated_at":"2026-05-14T10:00:00Z",
+			"head":{"sha":"deadbeef","ref":"heimdallm/issue-78"}
+		}`))
+	})
+	mux.HandleFunc("/repos/org/repo/pulls/62/reviews", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[
+			{"id":1,"user":{"login":"alice"},"state":"COMMENTED","body":"q","submitted_at":"2026-05-14T09:00:00Z"}
+		]`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	s := newMemStore(t)
+	seedAutoImplementPR(t, s, 7002, 62)
+	a, _, _ := makePRReviewStateAdapter(t, srv, s, "heimdallm-bot")
+	a.responder = &reviewStateDispatcher{err: errors.New("post comment 5xx")}
+	item := &scheduler.WatchItem{Type: "pr", Repo: "org/repo", Number: 62, GithubID: 7002}
+
+	changed, _, err := a.CheckItem(context.Background(), item)
+	if err == nil {
+		t.Fatal("CheckItem returned nil after Responder failure — retry path is broken")
+	}
+	if changed {
+		t.Error("changed = true on runner failure")
+	}
+}
+
+// TestCheckItem_AutoImplementPRBranch_PersistsStateBeforeRunnerError
+// pins the side-effect ordering: even when the runner fails, the
+// state observation was real — so the new aggregate must be
+// persisted and the SSE must fire before the error propagates.
+// Subsequent retry ticks then see stateMoved=false and only
+// re-dispatch (no SSE flapping).
+func TestCheckItem_AutoImplementPRBranch_PersistsStateBeforeRunnerError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/org/repo/pulls/63", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"state":"open","draft":false,
+			"user":{"login":"heimdallm-bot"},
+			"updated_at":"2026-05-14T10:00:00Z",
+			"head":{"sha":"deadbeef","ref":"heimdallm/issue-79"}
+		}`))
+	})
+	mux.HandleFunc("/repos/org/repo/pulls/63/reviews", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[
+			{"id":1,"user":{"login":"alice"},"state":"CHANGES_REQUESTED","body":"x","submitted_at":"2026-05-14T09:00:00Z"}
+		]`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	s := newMemStore(t)
+	seedAutoImplementPR(t, s, 7003, 63)
+	a, _, sub := makePRReviewStateAdapter(t, srv, s, "heimdallm-bot")
+	a.fixRunner = &reviewStateDispatcher{err: errors.New("boom")}
+	item := &scheduler.WatchItem{Type: "pr", Repo: "org/repo", Number: 63, GithubID: 7003}
+
+	_, _, _ = a.CheckItem(context.Background(), item)
+
+	got, _ := s.GetPRByGithubID(7003)
+	if got.ExternalReviewState != "CHANGES_REQUESTED" {
+		t.Errorf("ExternalReviewState = %q, want CHANGES_REQUESTED — observation must persist even when runner fails", got.ExternalReviewState)
+	}
+	select {
+	case ev := <-sub:
+		if ev.Type != sse.EventPRReviewStateChanged {
+			t.Errorf("first event = %q, want pr_review_state_changed", ev.Type)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("no SSE event despite real state transition")
 	}
 }
 

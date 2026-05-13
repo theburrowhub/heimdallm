@@ -110,19 +110,32 @@ func (a *tier2Adapter) refreshAutoImplementPRReviewState(
 	// at most one extra GetPRReviews call inside the runner while the
 	// cooldown window is open — bounded by the runner's per-PR
 	// lifetime cap.
+	//
+	// Critically: runner errors propagate. Without propagation the
+	// caller (CheckItem) would return changed=true and the
+	// StateWorker would ResetBackoff → advance LastSeen → the next
+	// tick's early `!snap.UpdatedAt.After(LastSeen)` gate would
+	// silently drop the still-unaddressed review. Surfacing the
+	// error keeps LastSeen frozen so the next tick re-enters the
+	// refresh and retries the dispatch. The state-handler in
+	// main.go's stateHandler closure already routes 404 errors to
+	// the watch-cleanup path; other errors fall through to the
+	// StateWorker's IncreaseBackoff branch.
 	switch state {
 	case issuepipeline.ReviewStateCommented:
 		if a.responder != nil {
 			if err := a.responder.Run(context.Background(), stored, stored.AutoImplementIssueID); err != nil {
-				slog.Warn("tier3: responder run failed",
+				slog.Warn("tier3: responder run failed (retrying next tick)",
 					"repo", item.Repo, "number", item.Number, "err", err)
+				return fmt.Errorf("responder: %w", err)
 			}
 		}
 	case issuepipeline.ReviewStateChangesRequested:
 		if a.fixRunner != nil {
 			if err := a.fixRunner.Run(context.Background(), stored, stored.AutoImplementIssueID); err != nil {
-				slog.Warn("tier3: fix runner failed",
+				slog.Warn("tier3: fix runner failed (retrying next tick)",
 					"repo", item.Repo, "number", item.Number, "err", err)
+				return fmt.Errorf("fix runner: %w", err)
 			}
 		}
 	}
