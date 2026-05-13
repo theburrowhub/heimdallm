@@ -93,6 +93,72 @@ func TestApplyDefaults_MaxWorktreesPerRepo_PreservesExisting(t *testing.T) {
 	}
 }
 
+// TestApplyDefaults_ReviewResponseDisabledByDefault locks in the
+// safety-first stance of #482 phase 2: a fresh config with no
+// review_response section keeps the feature disabled. The cap and
+// cooldown axes still get sane defaults so an operator who only sets
+// Enabled = true does not accidentally lift the cap.
+func TestApplyDefaults_ReviewResponseDisabledByDefault(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+	if cfg.AI.ReviewResponse.Enabled {
+		t.Error("ReviewResponse.Enabled defaulted to true; must be opt-in")
+	}
+	if cfg.AI.ReviewResponse.PerPRLifetime != DefaultReviewResponsePerPRLifetime {
+		t.Errorf("PerPRLifetime = %d, want %d", cfg.AI.ReviewResponse.PerPRLifetime, DefaultReviewResponsePerPRLifetime)
+	}
+	if cfg.AI.ReviewResponse.CooldownSecs != DefaultReviewResponseCooldownSecs {
+		t.Errorf("CooldownSecs = %d, want %d", cfg.AI.ReviewResponse.CooldownSecs, DefaultReviewResponseCooldownSecs)
+	}
+}
+
+func TestApplyDefaults_ReviewResponse_PreservesExisting(t *testing.T) {
+	cfg := &Config{}
+	cfg.AI.ReviewResponse.Enabled = true
+	cfg.AI.ReviewResponse.PerPRLifetime = 2
+	cfg.AI.ReviewResponse.CooldownSecs = 60
+	cfg.applyDefaults()
+	if !cfg.AI.ReviewResponse.Enabled {
+		t.Error("Enabled flipped off by applyDefaults")
+	}
+	if cfg.AI.ReviewResponse.PerPRLifetime != 2 {
+		t.Errorf("PerPRLifetime overwritten: %d", cfg.AI.ReviewResponse.PerPRLifetime)
+	}
+	if cfg.AI.ReviewResponse.CooldownSecs != 60 {
+		t.Errorf("CooldownSecs overwritten: %d", cfg.AI.ReviewResponse.CooldownSecs)
+	}
+}
+
+// TestApplyDefaults_ReviewResponse_NegativeFallsBack pins that a
+// negative or zero cap is treated as "use the default" — never as
+// "unlimited" — so a misconfigured TOML cannot uncap the feature.
+func TestApplyDefaults_ReviewResponse_NegativeFallsBack(t *testing.T) {
+	cfg := &Config{}
+	cfg.AI.ReviewResponse.PerPRLifetime = -1
+	cfg.AI.ReviewResponse.CooldownSecs = -1
+	cfg.applyDefaults()
+	if cfg.AI.ReviewResponse.PerPRLifetime != DefaultReviewResponsePerPRLifetime {
+		t.Errorf("negative PerPRLifetime not reset, got %d", cfg.AI.ReviewResponse.PerPRLifetime)
+	}
+	if cfg.AI.ReviewResponse.CooldownSecs != DefaultReviewResponseCooldownSecs {
+		t.Errorf("negative CooldownSecs not reset, got %d", cfg.AI.ReviewResponse.CooldownSecs)
+	}
+}
+
+func TestApplyDefaults_ReviewFixDisabledByDefault(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+	if cfg.AI.ReviewFix.Enabled {
+		t.Error("ReviewFix.Enabled defaulted to true; must be opt-in")
+	}
+	if cfg.AI.ReviewFix.PerPRLifetime != DefaultReviewFixPerPRLifetime {
+		t.Errorf("PerPRLifetime = %d, want %d", cfg.AI.ReviewFix.PerPRLifetime, DefaultReviewFixPerPRLifetime)
+	}
+	if cfg.AI.ReviewFix.CooldownSecs != DefaultReviewFixCooldownSecs {
+		t.Errorf("CooldownSecs = %d, want %d", cfg.AI.ReviewFix.CooldownSecs, DefaultReviewFixCooldownSecs)
+	}
+}
+
 // ── applyEnvOverrides ────────────────────────────────────────────────────────
 
 func TestApplyDefaults_MaxConcurrentWorkers(t *testing.T) {

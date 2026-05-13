@@ -400,7 +400,60 @@ type AIConfig struct {
 	// a second LLM call generates a rich PR description from the diff.
 	// Default: false (backwards compat).
 	GeneratePRDescription bool `toml:"generate_pr_description"`
+
+	// ReviewResponse configures phase 2 of the PR review-state vigilance
+	// feature (#482): the daemon optionally posts an AI-generated reply
+	// when an external reviewer leaves COMMENTED feedback on a PR that
+	// auto_implement created. Off by default — operators opt in per
+	// daemon by flipping Enabled.
+	ReviewResponse ReviewResponseConfig `toml:"review_response"`
+
+	// ReviewFix configures phase 3: when an external reviewer requests
+	// changes, the daemon optionally re-runs the agent on the PR's head
+	// branch and pushes a fix. Off by default; carries a hard
+	// per-PR-lifetime cap so the worst case is bounded.
+	ReviewFix ReviewFixConfig `toml:"review_fix"`
 }
+
+// ReviewResponseConfig caps the AI cost of phase-2 auto-responses to
+// PR review comments (#482). All thresholds default to safe values via
+// applyDefaults; a zero or negative value also falls back to the
+// default rather than meaning "unlimited".
+type ReviewResponseConfig struct {
+	// Enabled defaults to false. When false the Responder is a no-op
+	// regardless of every other knob — opt-in only.
+	Enabled bool `toml:"enabled"`
+	// PerPRLifetime caps how many responder runs a single PR can ever
+	// trigger. The counter is persisted on the PR row so a daemon
+	// restart cannot reset it; operators can manually zero it in SQL
+	// if they want the agent to start over. A future follow-up may
+	// add a sliding-24h cap as a second axis, but lifetime is the
+	// safer default for the first opt-in surface.
+	PerPRLifetime int `toml:"per_pr_lifetime"`
+	// CooldownSecs is the minimum gap between two responder runs on
+	// the same PR. Protects against a chatty reviewer firing the
+	// responder once per comment within the same tick.
+	CooldownSecs int `toml:"cooldown_secs"`
+}
+
+// ReviewFixConfig caps the AI cost of phase-3 auto-fix runs (#482).
+// The lifetime cap is intentionally low: an operator who wants more
+// rounds must opt-in explicitly so we never silently amplify cost.
+type ReviewFixConfig struct {
+	Enabled         bool `toml:"enabled"`
+	PerPRLifetime   int  `toml:"per_pr_lifetime"`
+	CooldownSecs    int  `toml:"cooldown_secs"`
+}
+
+// Defaults for the review-response and review-fix paths (#482).
+// Single source of truth: applyDefaults reads these, the runtime
+// guards reference them when callers leave a 0 in TOML.
+const (
+	DefaultReviewResponsePerPRLifetime = 5
+	DefaultReviewResponseCooldownSecs  = 300
+	DefaultReviewFixPerPRLifetime      = 3
+	DefaultReviewFixCooldownSecs       = 300
+)
 
 type RepoAI struct {
 	Primary string `toml:"primary"`
@@ -878,6 +931,23 @@ func (c *Config) applyDefaults() {
 	}
 	if c.AI.Tier2RepoConcurrency == 0 {
 		c.AI.Tier2RepoConcurrency = DefaultTier2RepoConcurrency
+	}
+	// Review-state vigilance defaults (#482). The Enabled flag is NOT
+	// touched here — it must stay false unless the operator explicitly
+	// opts in via TOML. Only the cap/cooldown axes fall back to defaults
+	// when left at zero (treating zero as "unlimited" would defeat the
+	// safety story).
+	if c.AI.ReviewResponse.PerPRLifetime <= 0 {
+		c.AI.ReviewResponse.PerPRLifetime = DefaultReviewResponsePerPRLifetime
+	}
+	if c.AI.ReviewResponse.CooldownSecs <= 0 {
+		c.AI.ReviewResponse.CooldownSecs = DefaultReviewResponseCooldownSecs
+	}
+	if c.AI.ReviewFix.PerPRLifetime <= 0 {
+		c.AI.ReviewFix.PerPRLifetime = DefaultReviewFixPerPRLifetime
+	}
+	if c.AI.ReviewFix.CooldownSecs <= 0 {
+		c.AI.ReviewFix.CooldownSecs = DefaultReviewFixCooldownSecs
 	}
 	if c.ActivityLog.Enabled == nil {
 		v := true
