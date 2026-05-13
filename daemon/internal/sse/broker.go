@@ -37,6 +37,13 @@ const (
 
 	EventPRStateChanged    = "pr_state_changed"
 	EventIssueStateChanged = "issue_state_changed"
+
+	// EventPRReviewStateChanged fires when Tier 3 observes a change in
+	// the aggregated external review state of an auto_implement-created
+	// PR (#482). Payload includes pr_id, repo, number, state, reviewer,
+	// prev_state. Only fires for PRs whose `auto_implement_issue_id`
+	// column is non-zero — standard PRs never publish this event.
+	EventPRReviewStateChanged = "pr_review_state_changed"
 )
 
 // maxSubscribers limits the number of concurrent SSE connections to prevent

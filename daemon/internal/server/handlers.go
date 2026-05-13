@@ -1112,6 +1112,25 @@ type issueResponse struct {
 	FetchedAt    time.Time            `json:"fetched_at"`
 	Dismissed    bool                 `json:"dismissed"`
 	LatestReview *issueReviewResponse `json:"latest_review,omitempty"`
+	// LinkedPR carries the external review state of the PR
+	// auto_implement created for this issue (#482 phase 1). Populated
+	// only when the issue's latest review action is `auto_implement`
+	// and the PR row carries a non-zero `auto_implement_issue_id`;
+	// triage-only flows leave this nil.
+	LinkedPR *issueLinkedPRResponse `json:"linked_pr,omitempty"`
+}
+
+// issueLinkedPRResponse is the slim PR-side view embedded on the
+// issue response so a single issue endpoint hit gives Flutter
+// everything it needs to render the "PR Changes Requested" /
+// "PR Approved" chip.
+type issueLinkedPRResponse struct {
+	Number              int       `json:"number"`
+	URL                 string    `json:"url"`
+	State               string    `json:"state"`
+	ExternalReviewState string    `json:"external_review_state"`
+	ExternalReviewer    string    `json:"external_reviewer"`
+	ExternalReviewAt    time.Time `json:"external_review_at,omitempty"`
 }
 
 // issueReviewResponse wraps a store.IssueReview, parsing Triage/Suggestions
@@ -1145,6 +1164,29 @@ func toIssueResponse(iss *store.Issue, rev *store.IssueReview) issueResponse {
 	return resp
 }
 
+// attachLinkedPR hydrates the linked_pr block on the response when the
+// latest review created a PR AND that PR carries the
+// auto_implement_issue_id back-link (#482). Both conditions are
+// required: a PR created by auto_implement before this PR landed in
+// production stays unmarked and falls through cleanly.
+func (srv *Server) attachLinkedPR(resp *issueResponse, iss *store.Issue, rev *store.IssueReview) {
+	if rev == nil || rev.PRCreated <= 0 {
+		return
+	}
+	pr, err := srv.store.GetPRByRepoNumber(iss.Repo, rev.PRCreated)
+	if err != nil || pr == nil || pr.AutoImplementIssueID == 0 {
+		return
+	}
+	resp.LinkedPR = &issueLinkedPRResponse{
+		Number:              pr.Number,
+		URL:                 pr.URL,
+		State:               pr.State,
+		ExternalReviewState: pr.ExternalReviewState,
+		ExternalReviewer:    pr.ExternalReviewer,
+		ExternalReviewAt:    pr.ExternalReviewAt,
+	}
+}
+
 func toIssueReviewResponse(r *store.IssueReview) *issueReviewResponse {
 	resp := &issueReviewResponse{
 		ID: r.ID, IssueID: r.IssueID, CLIUsed: r.CLIUsed,
@@ -1174,7 +1216,9 @@ func (srv *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
 	result := make([]issueResponse, 0, len(issues))
 	for _, iss := range issues {
 		rev, _ := srv.store.LatestIssueReview(iss.ID)
-		result = append(result, toIssueResponse(iss, rev))
+		resp := toIssueResponse(iss, rev)
+		srv.attachLinkedPR(&resp, iss, rev)
+		result = append(result, resp)
 	}
 	writeJSON(w, http.StatusOK, result)
 }
@@ -1195,7 +1239,9 @@ func (srv *Server) handleGetIssue(w http.ResponseWriter, r *http.Request) {
 	for _, rev := range reviews {
 		reviewResps = append(reviewResps, toIssueReviewResponse(rev))
 	}
-	issResp := toIssueResponse(iss, nil)
+	latestRev, _ := srv.store.LatestIssueReview(id)
+	issResp := toIssueResponse(iss, latestRev)
+	srv.attachLinkedPR(&issResp, iss, latestRev)
 	writeJSON(w, http.StatusOK, map[string]any{"issue": issResp, "reviews": reviewResps})
 }
 

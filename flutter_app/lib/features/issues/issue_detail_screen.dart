@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../core/models/tracked_issue.dart';
 import '../../shared/widgets/attention_badge.dart';
+import '../../shared/widgets/pr_review_state_badge.dart';
 import '../../shared/widgets/severity_badge.dart';
 import '../../shared/widgets/toast.dart';
 import '../dashboard/dashboard_providers.dart';
@@ -255,6 +256,24 @@ class _ReviewPanel extends StatelessWidget {
             '${issue.repo} #${issue.number} by ${issue.author}',
             style: Theme.of(context).textTheme.bodySmall,
           ),
+          if (issue.linkedPR != null &&
+              issue.linkedPR!.externalReviewState.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                PRReviewStateBadge(
+                  state: issue.linkedPR!.externalReviewState,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  issue.linkedPR!.externalReviewer.isEmpty
+                      ? 'PR #${issue.linkedPR!.number}'
+                      : '${issue.linkedPR!.externalReviewer} on PR #${issue.linkedPR!.number}',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ],
+            ),
+          ],
           const SizedBox(height: 16),
           if (reviews.isEmpty)
             const Text('No reviews yet.')

@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 import '../../core/models/tracked_issue.dart';
 import '../../core/state/local_state_notifier.dart';
 import '../../shared/widgets/attention_badge.dart';
+import '../../shared/widgets/pr_review_state_badge.dart';
 import '../../shared/widgets/severity_badge.dart';
 import '../../shared/widgets/toast.dart';
 import '../dashboard/dashboard_providers.dart';
@@ -278,6 +279,11 @@ class _IssueTileState extends ConsumerState<_IssueTile> {
                             ? Theme.of(context).colorScheme.secondary
                             : Theme.of(context).colorScheme.primary,
                       ),
+                    )
+                  else if (issue.linkedPR != null &&
+                      issue.linkedPR!.externalReviewState.isNotEmpty)
+                    PRReviewStateBadge(
+                      state: issue.linkedPR!.externalReviewState,
                     )
                   else if (needsAttention)
                     const AttentionBadge()

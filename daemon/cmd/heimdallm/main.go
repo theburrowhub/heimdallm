@@ -284,6 +284,10 @@ func main() {
 	// when auto_implement is not in use.
 	issuePipe := issuepipeline.New(s, ghClient, exec, issuepipeline.NewGitExec(), broker, &notifyWithSSE{notifier: notifier})
 	issuePipe.SetCircuitBreakerLimits(&issueCBLimits)
+	// Wire the Tier 3 watch enroller so auto_implement-created PRs are
+	// picked up by the new review-state checker (#482). watchStore
+	// implements the WatchEnroller interface via its Enroll method.
+	issuePipe.SetWatchEnroller(watchStore)
 
 	// Resolve bot login for re-review / re-triage context filtering.
 	var resolvedBotLogin string
@@ -561,6 +565,51 @@ func main() {
 		lastSkippedUpdatedAt: make(map[int64]time.Time),
 		lastBreakerTrips:     make(map[breakerTripKey]breakerTripDedup),
 	}
+
+	// Phase 2/3 of #482: build the Responder and FixRunner with real
+	// dependencies and wire them into the adapter. Both modules check
+	// their own Enabled flag on every Run so a cold-start with the
+	// feature disabled costs nothing; flipping the flag in TOML and
+	// reloading is enough to opt in.
+	// botLoginAccessor is the single source for the bot's login the
+	// Responder and FixRunner consume — wraps the same loginMu /
+	// cachedLogin pair the adapter's cachedAuthenticatedUser uses, so
+	// locking discipline lives in one closure rather than being
+	// duplicated at each callsite.
+	botLoginAccessor := func() string {
+		loginMu.Lock()
+		defer loginMu.Unlock()
+		return cachedLogin
+	}
+	adapter.responder = issuepipeline.NewResponder(
+		s, ghClient,
+		&prReviewExecutor{runner: exec, cfg: &cfg, cfgMu: &cfgMu},
+		broker,
+		func() config.ReviewResponseConfig {
+			cfgMu.Lock()
+			defer cfgMu.Unlock()
+			return cfg.AI.ReviewResponse
+		},
+		botLoginAccessor,
+	)
+	adapter.fixRunner = issuepipeline.NewFixRunner(
+		s, ghClient,
+		&prFixExecutor{
+			pipeline: issuePipe,
+			repoCtx:  repoCtx,
+			ghClient: ghClient,
+			ghToken:  token,
+			cfg:      &cfg,
+			cfgMu:    &cfgMu,
+		},
+		broker,
+		func() config.ReviewFixConfig {
+			cfgMu.Lock()
+			defer cfgMu.Unlock()
+			return cfg.AI.ReviewFix
+		},
+		botLoginAccessor,
+	)
 
 	repoPublisher := bus.NewRepoPublisher(conn)
 	prReviewPublisher := bus.NewPRReviewPublisher(conn)
@@ -2394,6 +2443,11 @@ type tier2Adapter struct {
 	runReview  func(pr *gh.PullRequest, aiCfg config.RepoAI) *store.Review
 	publishPub *bus.PRPublishPublisher
 	watchStore *bus.WatchStore
+	// Review-state vigilance dispatch (#482). Optional — nil-safe so a
+	// daemon configured without the opt-in feature flags simply skips
+	// the dispatch and the new CheckItem branch remains observational.
+	responder reviewResponderDispatcher
+	fixRunner reviewFixDispatcher
 
 	// skipMu protects the lightweight SSE dedup caches below.
 	skipMu               sync.Mutex
@@ -3219,6 +3273,49 @@ func (a *tier2Adapter) CheckItem(ctx context.Context, item *scheduler.WatchItem)
 		}
 		if !snap.UpdatedAt.After(item.LastSeen) {
 			return false, nil, nil
+		}
+		// Review-state vigilance branch (#482): for PRs that
+		// auto_implement created, the snapshot's updated_at advance is
+		// almost always a reviewer submitting feedback. Fetch the
+		// reviews list, aggregate, and short-circuit out of the
+		// standard review codepath — the daemon's own PRs would be
+		// rejected by SkipReasonSelfAuthored anyway, but routing them
+		// here keeps the observation layer's intent explicit.
+		stored, storeErr := a.store.GetPRByGithubID(item.GithubID)
+		if storeErr != nil {
+			// A non-ErrNoRows failure means SQLite is unhappy
+			// (corruption, FS error). Logging it makes operational
+			// debugging tractable; CheckItem still falls through to
+			// the standard review codepath rather than swallowing
+			// silently so the daemon keeps watching the PR — at
+			// worst the standard path applies its own guards.
+			slog.Warn("tier3: GetPRByGithubID failed, falling through to standard review path",
+				"repo", item.Repo, "number", item.Number, "err", storeErr)
+		}
+		if stored != nil && stored.AutoImplementIssueID != 0 {
+			if err := a.refreshAutoImplementPRReviewState(ctx, item, stored); err != nil {
+				// Propagate the error so the state-handler can apply
+				// its 404 cleanup + the StateWorker increases backoff
+				// (no LastSeen advance) rather than burning the API
+				// on every tick.
+				//
+				// Two error shapes flow through here. A GetPRReviews
+				// failure surfaces before any persist, so the store
+				// row is untouched and the next refresh re-observes
+				// from scratch. A runner failure (Responder /
+				// FixRunner) surfaces AFTER the new aggregate state
+				// was persisted + SSE-emitted on this tick — the
+				// stateMoved gate in refresh then sees
+				// stateMoved=false on the retry tick and re-dispatches
+				// without re-emitting the event.
+				return false, nil, err
+			}
+			// Success: signal `changed=true` so the StateWorker resets
+			// backoff and advances LastSeen. A nil snap means
+			// HandleChange's first guard short-circuits — we already
+			// handled dispatch inline inside refresh, the standard
+			// review codepath has nothing to do here.
+			return true, nil, nil
 		}
 		// Forward HeadSHA so HandleChange can feed it into runReview's
 		// persistent in-flight claim (#258, theburrowhub/heimdallm#264).
