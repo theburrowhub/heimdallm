@@ -448,6 +448,54 @@ func TestRefreshAutoImplementPRReviewState_FixPushed_NewCRReactivates(t *testing
 	}
 }
 
+// TestCheckItem_AutoImplementPRBranch_ReturnsChangedSoLastSeenAdvances
+// pins the contract with the StateWorker (#482, second-pass review):
+// after the auto-implement branch refreshes the review state, it
+// must signal `changed=true` so the watch KV resets the backoff and
+// advances LastSeen. Returning false would re-poll on every tick
+// (same updated_at keeps looking new), burn API calls, and grow the
+// backoff despite the daemon doing real work. A nil snap is
+// returned alongside so HandleChange's first guard short-circuits
+// — we already handled the dispatch inline.
+func TestCheckItem_AutoImplementPRBranch_ReturnsChangedSoLastSeenAdvances(t *testing.T) {
+	// Stub the Pulls + reviews endpoints. updated_at strictly newer
+	// than item.LastSeen so the standard "no change" gate falls
+	// through into the auto-implement branch.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/org/repo/pulls/41", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"state":"open","draft":false,
+			"user":{"login":"heimdallm-bot"},
+			"updated_at":"2026-05-14T10:00:00Z",
+			"head":{"sha":"deadbeef","ref":"heimdallm/issue-99"}
+		}`))
+	})
+	mux.HandleFunc("/repos/org/repo/pulls/41/reviews", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[]`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	s := newMemStore(t)
+	seedAutoImplementPR(t, s, 5001, 41)
+	a, _, _ := makePRReviewStateAdapter(t, srv, s, "heimdallm-bot")
+	item := &scheduler.WatchItem{
+		Type: "pr", Repo: "org/repo", Number: 41, GithubID: 5001,
+		LastSeen: time.Time{}, // zero → snap.UpdatedAt advances
+	}
+
+	changed, snap, err := a.CheckItem(context.Background(), item)
+	if err != nil {
+		t.Fatalf("CheckItem: %v", err)
+	}
+	if !changed {
+		t.Fatal("CheckItem returned changed=false on auto-implement refresh — LastSeen will not advance, backoff will grow")
+	}
+	if snap != nil {
+		t.Errorf("snap must be nil so HandleChange short-circuits, got %+v", snap)
+	}
+}
+
 // TestRefreshAutoImplementPRReviewState_FiltersBotReviews pins the
 // self-loop guard: a review submitted by the bot's own login must be
 // filtered out by LatestExternalReviewState, so an all-bot reviews

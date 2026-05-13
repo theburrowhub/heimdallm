@@ -219,22 +219,27 @@ func (r *Responder) publishErrorEvent(pr *store.PR, issueID int64, reason, errMs
 	})
 }
 
-// latestExternalCommentedReview walks the chronological reviews list
-// in reverse and returns the most recent non-bot review whose state is
-// COMMENTED. nil when none exists (the caller treats nil as "trigger
-// disappeared between Tier 3's aggregate and the responder's fetch").
+// latestExternalCommentedReview returns the COMMENTED review that
+// drives the aggregator's per-reviewer collapse — that is, the
+// reviewer's current decision is COMMENTED (they have not yet
+// approved or requested changes). A reviewer who left a COMMENTED
+// and later moved on to APPROVED/CHANGES_REQUESTED no longer
+// contributes a COMMENTED trigger; ignoring this rule would have
+// the Responder reply to old questions the reviewer already
+// resolved themselves.
 func latestExternalCommentedReview(reviews []github.PRReview, botLogin string) *github.PRReview {
-	for i := len(reviews) - 1; i >= 0; i-- {
-		r := reviews[i]
+	dec := currentDecisionsByReviewer(reviews, botLogin)
+	var best *github.PRReview
+	for _, r := range dec {
 		if r.State != ReviewStateCommented {
 			continue
 		}
-		if botLogin != "" && strings.EqualFold(r.User.Login, botLogin) {
-			continue
+		cur := r
+		if best == nil || cur.SubmittedAt.After(best.SubmittedAt) {
+			best = &cur
 		}
-		return &r
 	}
-	return nil
+	return best
 }
 
 // buildResponderPrompt produces the sanitised prompt for the

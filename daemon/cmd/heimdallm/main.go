@@ -3272,10 +3272,20 @@ func (a *tier2Adapter) CheckItem(ctx context.Context, item *scheduler.WatchItem)
 		stored, _ := a.store.GetPRByGithubID(item.GithubID)
 		if stored != nil && stored.AutoImplementIssueID != 0 {
 			if err := a.refreshAutoImplementPRReviewState(item, stored); err != nil {
-				slog.Warn("tier3: refresh PR review state failed",
-					"repo", item.Repo, "number", item.Number, "err", err)
+				// Propagate the error so the state-handler can apply
+				// its 404 cleanup + the StateWorker increases backoff
+				// rather than burning the API on every tick. A
+				// transient failure leaves stored.ExternalReviewState
+				// untouched — the next successful refresh recovers
+				// the correct state.
+				return false, nil, err
 			}
-			return false, nil, nil
+			// Success: signal `changed=true` so the StateWorker resets
+			// backoff and advances LastSeen. A nil snap means
+			// HandleChange's first guard short-circuits — we already
+			// handled dispatch inline inside refresh, the standard
+			// review codepath has nothing to do here.
+			return true, nil, nil
 		}
 		// Forward HeadSHA so HandleChange can feed it into runReview's
 		// persistent in-flight claim (#258, theburrowhub/heimdallm#264).

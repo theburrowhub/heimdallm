@@ -213,19 +213,57 @@ func (r *FixRunner) Run(ctx context.Context, pr *store.PR, originIssueID int64) 
 	return nil
 }
 
-// latestChangesRequestedByExternal returns the most recent non-bot
-// CHANGES_REQUESTED review, or nil if no such review exists.
+// latestChangesRequestedByExternal returns the review that drives the
+// CHANGES_REQUESTED aggregate per the same per-reviewer collapse used
+// by LatestExternalReviewState — that's what guarantees we act on the
+// CR the aggregator surfaced and never on a stale CR that was
+// superseded by an APPROVED or DISMISSED from the same reviewer.
+//
+// Without this collapse the runner would pick the most recent raw CR
+// in the list, which could be a CR Alice posted minutes before
+// approving — and "fixing" a CR the reviewer already withdrew is the
+// wrong action.
 func latestChangesRequestedByExternal(reviews []github.PRReview, botLogin string) *github.PRReview {
-	for i := len(reviews) - 1; i >= 0; i-- {
-		r := reviews[i]
+	dec := currentDecisionsByReviewer(reviews, botLogin)
+	var best *github.PRReview
+	for _, r := range dec {
 		if r.State != ReviewStateChangesRequested {
 			continue
 		}
+		cur := r
+		if best == nil || cur.SubmittedAt.After(best.SubmittedAt) {
+			best = &cur
+		}
+	}
+	return best
+}
+
+// currentDecisionsByReviewer applies the per-reviewer collapse the
+// aggregator uses: bot reviews are filtered out, DISMISSED drops the
+// reviewer's prior decision, and only the latest non-COMMENTED state
+// from a reviewer counts as their "decision". Returns the map of
+// driving reviews keyed by lowercased reviewer login. Shared between
+// the FixRunner trigger selector and the Responder's COMMENTED
+// selector so the trigger picker and the aggregator can never
+// disagree about who the active reviewer is.
+func currentDecisionsByReviewer(reviews []github.PRReview, botLogin string) map[string]github.PRReview {
+	out := map[string]github.PRReview{}
+	for _, r := range reviews {
 		if botLogin != "" && strings.EqualFold(r.User.Login, botLogin) {
 			continue
 		}
-		return &r
+		key := strings.ToLower(r.User.Login)
+		switch r.State {
+		case "DISMISSED":
+			delete(out, key)
+		case ReviewStateApproved, ReviewStateChangesRequested:
+			out[key] = r
+		case ReviewStateCommented:
+			if _, has := out[key]; !has {
+				out[key] = r
+			}
+		}
 	}
-	return nil
+	return out
 }
 

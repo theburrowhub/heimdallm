@@ -332,6 +332,72 @@ func TestFixRunner_PassesOriginIssueToExecutor(t *testing.T) {
 	}
 }
 
+// TestFixRunner_SkipsSupersededCR pins the bug found in PR review:
+// the trigger selector must mirror the aggregator's per-reviewer
+// collapse. When Alice posts CR then later APPROVES (her decision
+// is APPROVED) and Bob has an active CR, the runner must act on
+// Bob's review — not Alice's stale CR. Walking the list backwards
+// and grabbing the first raw CR was wrong: it picked Alice's.
+func TestFixRunner_SkipsSupersededCR(t *testing.T) {
+	now := time.Now()
+	st := &fakeFixStore{}
+	gh := &fakeFixGH{reviews: []github.PRReview{
+		// Bob CR is the truly active CR per the aggregator's
+		// per-reviewer collapse: he never followed up with another
+		// decision. Older than Alice's reviews in the wire order
+		// — the buggy reverse-walk selector would still skip past
+		// Alice's APPROVED and stop at Alice's stale CR instead of
+		// Bob's, demonstrating the per-reviewer rule must apply.
+		crReview("bob", "bob's active CR", now.Add(-2*time.Hour)),
+		// Alice CR — later superseded by her own APPROVED.
+		crReview("alice", "alice's CR — stale", now.Add(-time.Hour)),
+		// Alice approves: her decision is now APPROVED, not CR.
+		{User: github.User{Login: "alice"}, State: "APPROVED", Body: "lgtm now", SubmittedAt: now},
+	}}
+	exec := &fakeFixExec{result: pushedResult()}
+	broker := &fakeResponderBroker{}
+	r := makeFixRunner(t, st, gh, exec, broker, config.ReviewFixConfig{
+		Enabled: true, PerPRLifetime: 3, CooldownSecs: 0,
+	})
+
+	if err := r.Run(context.Background(), samplePR(), 99); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !exec.called {
+		t.Fatal("executor not invoked")
+	}
+	if exec.req.ReviewerLogin != "bob" {
+		t.Errorf("ReviewerLogin = %q, want bob (alice's CR was superseded by her APPROVED)", exec.req.ReviewerLogin)
+	}
+	if exec.req.ReviewBody != "bob's active CR" {
+		t.Errorf("ReviewBody = %q, want bob's active CR", exec.req.ReviewBody)
+	}
+}
+
+// TestFixRunner_SkipsDismissedCR mirrors the test above for the
+// DISMISSED path: a CR that the reviewer (or an admin) later
+// dismissed must not drive the fix flow.
+func TestFixRunner_SkipsDismissedCR(t *testing.T) {
+	now := time.Now()
+	st := &fakeFixStore{}
+	gh := &fakeFixGH{reviews: []github.PRReview{
+		crReview("alice", "alice's CR", now.Add(-time.Hour)),
+		{User: github.User{Login: "alice"}, State: "DISMISSED", Body: "", SubmittedAt: now},
+	}}
+	exec := &fakeFixExec{result: pushedResult()}
+	broker := &fakeResponderBroker{}
+	r := makeFixRunner(t, st, gh, exec, broker, config.ReviewFixConfig{
+		Enabled: true, PerPRLifetime: 3, CooldownSecs: 0,
+	})
+
+	if err := r.Run(context.Background(), samplePR(), 99); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if exec.called {
+		t.Error("executor invoked despite the CR being dismissed")
+	}
+}
+
 // TestFixRunner_EmptyCommentBody_PostsNothing pins that an executor
 // that returned a non-error result with an empty CommentBody (a
 // pathological case — the production wiring always populates it,
