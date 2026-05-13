@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -656,7 +657,12 @@ func main() {
 				}
 				return discovery.MergeRepos(cfg.GitHub.Repositories, discovered, cfg.GitHub.NonMonitored)
 			}
-			runTier2(ctx, adapter, limiter, prReviewPublisher, broker, tier2ConfigFn, reposChan, pollInterval, coldStart)
+			tier2RepoConcurrencyFn := func() int {
+				cfgMu.Lock()
+				defer cfgMu.Unlock()
+				return cfg.AI.Tier2RepoConcurrency
+			}
+			runTier2(ctx, adapter, limiter, prReviewPublisher, broker, tier2ConfigFn, tier2RepoConcurrencyFn, reposChan, pollInterval, coldStart)
 		}()
 
 		slog.Info("pollers: started",
@@ -2037,8 +2043,66 @@ func bridgeDiscovery(ctx context.Context, conn *nats.Conn, out chan<- []string) 
 	}
 }
 
+// processReposInParallel runs workFn for every repo in repos with at
+// most `concurrency` calls in flight at once. Returns the sum of the
+// integer return values from the workers (intended for issue-count
+// aggregation). Errors are logged via slog and never abort siblings —
+// a single repo's failure must not freeze the whole tick. (#481)
+//
+// A non-positive concurrency falls back to a sane default so a
+// misconfiguration cannot deadlock the daemon. Nil or empty repo
+// list is a no-op.
+func processReposInParallel(
+	ctx context.Context,
+	repos []string,
+	concurrency int,
+	workFn func(ctx context.Context, repo string) (int, error),
+) int {
+	if len(repos) == 0 {
+		return 0
+	}
+	if concurrency <= 0 {
+		concurrency = 5
+	}
+	if concurrency > len(repos) {
+		concurrency = len(repos)
+	}
+
+	sem := make(chan struct{}, concurrency)
+	var total int64
+	var wg sync.WaitGroup
+	for _, repo := range repos {
+		// Honour cancellation before queuing more work — keeps shutdown
+		// snappy when the user pulls the plug mid-tick.
+		select {
+		case <-ctx.Done():
+			break
+		default:
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(repo string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			n, err := workFn(ctx, repo)
+			if err != nil {
+				slog.Error("tier2: per-repo work failed", "repo", repo, "err", err)
+				return
+			}
+			atomic.AddInt64(&total, int64(n))
+		}(repo)
+	}
+	wg.Wait()
+	return int(total)
+}
+
 // runTier2 runs the PR/issue polling loop. Replaces the old RunTier2 from
 // the scheduler package.
+//
+// repoConcurrencyFn returns the live per-tick cap on parallel
+// per-repo issue processing (`ai.tier2_repo_concurrency`). It is
+// evaluated on every tick so a config reload takes effect without
+// restarting the daemon.
 func runTier2(
 	ctx context.Context,
 	adapter *tier2Adapter,
@@ -2046,6 +2110,7 @@ func runTier2(
 	prPublisher scheduler.Tier2PRPublisher,
 	ssePub sse.Publisher,
 	configFn func() []string,
+	repoConcurrencyFn func() int,
 	reposChan <-chan []string,
 	interval time.Duration,
 	coldStart bool,
@@ -2080,6 +2145,80 @@ func runTier2(
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	// runPRTier publishes review requests for every reviewable PR.
+	// Independent of the issue tier so a slow GitHub Search call does
+	// not block per-repo issue work.
+	runPRTier := func(currentRepos []string) {
+		sse.EmitPollingStarted(ssePub, "prs", currentRepos)
+		prStart := time.Now()
+		prCount := 0
+		defer func() {
+			sse.EmitPollingCompleted(ssePub, "prs", prCount, time.Since(prStart))
+		}()
+		if err := limiter.Acquire(ctx, scheduler.TierRepo); err != nil {
+			return
+		}
+		prs, err := adapter.FetchPRsToReview()
+		if err != nil {
+			slog.Error("tier2: fetch PRs", "err", err)
+			return
+		}
+		monitoredSet := make(map[string]struct{}, len(currentRepos))
+		for _, r := range currentRepos {
+			monitoredSet[r] = struct{}{}
+		}
+		for _, pr := range prs {
+			if _, ok := monitoredSet[pr.Repo]; !ok {
+				continue
+			}
+			if adapter.PRAlreadyReviewed(pr.ID, pr.Repo, pr.Number, pr.UpdatedAt, pr.HeadSHA) {
+				continue
+			}
+			prCount++
+			if err := prPublisher.PublishPRReview(ctx, pr.Repo, pr.Number, pr.ID, pr.HeadSHA); err != nil {
+				slog.Error("tier2: publish PR review", "repo", pr.Repo, "pr", pr.Number, "err", err)
+			}
+		}
+	}
+
+	// runIssueTier promotes ready issues and processes every repo's
+	// issue list in parallel, bounded by ai.tier2_repo_concurrency.
+	runIssueTier := func(currentRepos []string) {
+		sse.EmitPollingStarted(ssePub, "issues", currentRepos)
+		issueStart := time.Now()
+		issueCount := 0
+		defer func() {
+			sse.EmitPollingCompleted(ssePub, "issues", issueCount, time.Since(issueStart))
+		}()
+		if err := limiter.Acquire(ctx, scheduler.TierRepo); err != nil {
+			return
+		}
+		if n, err := adapter.PromoteReady(ctx, currentRepos); err != nil {
+			slog.Error("tier2: promotion", "err", err)
+		} else if n > 0 {
+			slog.Info("tier2: promoted issues", "count", n)
+		}
+		cap := 5
+		if repoConcurrencyFn != nil {
+			if v := repoConcurrencyFn(); v > 0 {
+				cap = v
+			}
+		}
+		issueCount = processReposInParallel(ctx, currentRepos, cap, func(ctx context.Context, repo string) (int, error) {
+			if err := limiter.Acquire(ctx, scheduler.TierRepo); err != nil {
+				return 0, err
+			}
+			n, err := adapter.ProcessRepo(ctx, repo)
+			if err != nil {
+				return 0, err
+			}
+			if n > 0 {
+				slog.Info("tier2: processed issues", "repo", repo, "count", n)
+			}
+			return n, nil
+		})
+	}
+
 	processTick := func() {
 		mu.Lock()
 		currentRepos := append([]string(nil), repos...)
@@ -2089,68 +2228,15 @@ func runTier2(
 			return
 		}
 
-		// PR processing
-		sse.EmitPollingStarted(ssePub, "prs", currentRepos)
-		prStart := time.Now()
-		prCount := 0
-		if err := limiter.Acquire(ctx, scheduler.TierRepo); err != nil {
-			sse.EmitPollingCompleted(ssePub, "prs", prCount, time.Since(prStart))
-			return
-		}
-		prs, err := adapter.FetchPRsToReview()
-		if err != nil {
-			slog.Error("tier2: fetch PRs", "err", err)
-		} else {
-			monitoredSet := make(map[string]struct{}, len(currentRepos))
-			for _, r := range currentRepos {
-				monitoredSet[r] = struct{}{}
-			}
-			for _, pr := range prs {
-				if _, ok := monitoredSet[pr.Repo]; !ok {
-					continue
-				}
-				if adapter.PRAlreadyReviewed(pr.ID, pr.Repo, pr.Number, pr.UpdatedAt, pr.HeadSHA) {
-					continue
-				}
-				prCount++
-				if err := prPublisher.PublishPRReview(ctx, pr.Repo, pr.Number, pr.ID, pr.HeadSHA); err != nil {
-					slog.Error("tier2: publish PR review", "repo", pr.Repo, "pr", pr.Number, "err", err)
-				}
-			}
-		}
-		sse.EmitPollingCompleted(ssePub, "prs", prCount, time.Since(prStart))
-
-		// Issue processing
-		sse.EmitPollingStarted(ssePub, "issues", currentRepos)
-		issueStart := time.Now()
-		issueCount := 0
-		if err := limiter.Acquire(ctx, scheduler.TierRepo); err != nil {
-			sse.EmitPollingCompleted(ssePub, "issues", issueCount, time.Since(issueStart))
-			return
-		}
-		if n, err := adapter.PromoteReady(ctx, currentRepos); err != nil {
-			slog.Error("tier2: promotion", "err", err)
-		} else if n > 0 {
-			slog.Info("tier2: promoted issues", "count", n)
-		}
-
-		// Issue processing per repo
-		for _, repo := range currentRepos {
-			if err := limiter.Acquire(ctx, scheduler.TierRepo); err != nil {
-				sse.EmitPollingCompleted(ssePub, "issues", issueCount, time.Since(issueStart))
-				return
-			}
-			n, err := adapter.ProcessRepo(ctx, repo)
-			if err != nil {
-				slog.Error("tier2: issue processing", "repo", repo, "err", err)
-				continue
-			}
-			issueCount += n
-			if n > 0 {
-				slog.Info("tier2: processed issues", "repo", repo, "count", n)
-			}
-		}
-		sse.EmitPollingCompleted(ssePub, "issues", issueCount, time.Since(issueStart))
+		// PR and issue tiers run in parallel so a slow issue cycle
+		// cannot delay PR detection (and vice versa). They still
+		// share the tick; the next tick waits for both to finish so
+		// we never let one tier accumulate unbounded backlog.
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); runPRTier(currentRepos) }()
+		go func() { defer wg.Done(); runIssueTier(currentRepos) }()
+		wg.Wait()
 
 		// Retry pending publishes
 		adapter.PublishPending()
