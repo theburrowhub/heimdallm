@@ -339,6 +339,11 @@ type CLIAgentConfig struct {
 	ExecutionTimeout     string `toml:"execution_timeout" json:"execution_timeout,omitempty"` // per-agent override, e.g. "20m"
 }
 
+// DefaultTier2RepoConcurrency is the fallback used by both
+// applyDefaults and processReposInParallel so the two paths can't
+// drift out of sync. See #481.
+const DefaultTier2RepoConcurrency = 5
+
 type AIConfig struct {
 	Primary          string                    `toml:"primary"`
 	Fallback         string                    `toml:"fallback"`
@@ -381,6 +386,14 @@ type AIConfig struct {
 	// the repo has many independent stages running in parallel; lower
 	// if disk pressure dominates.
 	MaxWorktreesPerRepo int `toml:"max_worktrees_per_repo"`
+
+	// Tier2RepoConcurrency caps how many repos the Tier 2 issue
+	// polling loop processes in parallel within a single tick (#481).
+	// A fresh value of 0 inherits the daemon default
+	// (DefaultTier2RepoConcurrency). The cap applies to wall-clock
+	// parallelism; the GitHub API rate limiter
+	// (scheduler.RateLimiter) still throttles network usage.
+	Tier2RepoConcurrency int `toml:"tier2_repo_concurrency"`
 
 	// GeneratePRDescription enables LLM-generated PR titles and descriptions
 	// for auto_implement PRs. When true, after the implementation commit,
@@ -862,6 +875,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.AI.MaxWorktreesPerRepo == 0 {
 		c.AI.MaxWorktreesPerRepo = 5
+	}
+	if c.AI.Tier2RepoConcurrency == 0 {
+		c.AI.Tier2RepoConcurrency = DefaultTier2RepoConcurrency
 	}
 	if c.ActivityLog.Enabled == nil {
 		v := true

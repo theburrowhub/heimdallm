@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -656,7 +657,12 @@ func main() {
 				}
 				return discovery.MergeRepos(cfg.GitHub.Repositories, discovered, cfg.GitHub.NonMonitored)
 			}
-			runTier2(ctx, adapter, limiter, prReviewPublisher, broker, tier2ConfigFn, reposChan, pollInterval, coldStart)
+			tier2RepoConcurrencyFn := func() int {
+				cfgMu.Lock()
+				defer cfgMu.Unlock()
+				return cfg.AI.Tier2RepoConcurrency
+			}
+			runTier2(ctx, adapter, limiter, prReviewPublisher, broker, tier2ConfigFn, tier2RepoConcurrencyFn, reposChan, pollInterval, coldStart)
 		}()
 
 		slog.Info("pollers: started",
@@ -2037,8 +2043,73 @@ func bridgeDiscovery(ctx context.Context, conn *nats.Conn, out chan<- []string) 
 	}
 }
 
+// processReposInParallel runs workFn for every repo in repos with at
+// most `concurrency` calls in flight at once. Returns the sum of the
+// integer return values from the workers. workFn errors are silently
+// counted as zero — the helper has no domain context to log them
+// usefully; callers wrap workFn to log per-repo failures in the
+// vocabulary that fits their tier. (#481)
+//
+// A non-positive concurrency falls back to
+// config.DefaultTier2RepoConcurrency so a misconfiguration cannot
+// deadlock the daemon. Nil or empty repo list is a no-op.
+//
+// Cancellation: both the per-repo scheduling loop and the semaphore
+// acquire observe ctx.Done so a daemon shutdown does not get stuck
+// waiting for the last free slot when workers are still draining.
+// Already-running workers receive ctx through workFn and are
+// responsible for their own short-circuit.
+func processReposInParallel(
+	ctx context.Context,
+	repos []string,
+	concurrency int,
+	workFn func(ctx context.Context, repo string) (int, error),
+) int {
+	if len(repos) == 0 {
+		return 0
+	}
+	if concurrency <= 0 {
+		concurrency = config.DefaultTier2RepoConcurrency
+	}
+	if concurrency > len(repos) {
+		concurrency = len(repos)
+	}
+
+	sem := make(chan struct{}, concurrency)
+	var total int64
+	var wg sync.WaitGroup
+schedule:
+	for _, repo := range repos {
+		select {
+		case <-ctx.Done():
+			// Stop dispatching new work; a plain `break` here would
+			// only exit the select, leaving the loop to keep queuing.
+			break schedule
+		case sem <- struct{}{}:
+			// Acquired a slot. Fall through to spawn the worker.
+		}
+		wg.Add(1)
+		go func(repo string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			n, err := workFn(ctx, repo)
+			if err != nil {
+				return
+			}
+			atomic.AddInt64(&total, int64(n))
+		}(repo)
+	}
+	wg.Wait()
+	return int(total)
+}
+
 // runTier2 runs the PR/issue polling loop. Replaces the old RunTier2 from
 // the scheduler package.
+//
+// repoConcurrencyFn returns the live per-tick cap on parallel
+// per-repo issue processing (`ai.tier2_repo_concurrency`). It is
+// evaluated on every tick so a config reload takes effect without
+// restarting the daemon.
 func runTier2(
 	ctx context.Context,
 	adapter *tier2Adapter,
@@ -2046,6 +2117,7 @@ func runTier2(
 	prPublisher scheduler.Tier2PRPublisher,
 	ssePub sse.Publisher,
 	configFn func() []string,
+	repoConcurrencyFn func() int,
 	reposChan <-chan []string,
 	interval time.Duration,
 	coldStart bool,
@@ -2077,55 +2149,69 @@ func runTier2(
 		return
 	}
 
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	processTick := func() {
+	snapshotRepos := func() []string {
 		mu.Lock()
-		currentRepos := append([]string(nil), repos...)
-		mu.Unlock()
+		defer mu.Unlock()
+		return append([]string(nil), repos...)
+	}
 
-		if len(currentRepos) == 0 {
-			return
-		}
-
-		// PR processing
+	// runPRTier publishes review requests for every reviewable PR.
+	// Independent of the issue tier so a slow GitHub Search call does
+	// not block per-repo issue work.
+	runPRTier := func(currentRepos []string) {
 		sse.EmitPollingStarted(ssePub, "prs", currentRepos)
 		prStart := time.Now()
 		prCount := 0
-		if err := limiter.Acquire(ctx, scheduler.TierRepo); err != nil {
+		defer func() {
 			sse.EmitPollingCompleted(ssePub, "prs", prCount, time.Since(prStart))
+		}()
+		if err := limiter.Acquire(ctx, scheduler.TierRepo); err != nil {
 			return
 		}
 		prs, err := adapter.FetchPRsToReview()
 		if err != nil {
 			slog.Error("tier2: fetch PRs", "err", err)
-		} else {
-			monitoredSet := make(map[string]struct{}, len(currentRepos))
-			for _, r := range currentRepos {
-				monitoredSet[r] = struct{}{}
+			return
+		}
+		monitoredSet := make(map[string]struct{}, len(currentRepos))
+		for _, r := range currentRepos {
+			monitoredSet[r] = struct{}{}
+		}
+		for _, pr := range prs {
+			if _, ok := monitoredSet[pr.Repo]; !ok {
+				continue
 			}
-			for _, pr := range prs {
-				if _, ok := monitoredSet[pr.Repo]; !ok {
-					continue
-				}
-				if adapter.PRAlreadyReviewed(pr.ID, pr.Repo, pr.Number, pr.UpdatedAt, pr.HeadSHA) {
-					continue
-				}
-				prCount++
-				if err := prPublisher.PublishPRReview(ctx, pr.Repo, pr.Number, pr.ID, pr.HeadSHA); err != nil {
-					slog.Error("tier2: publish PR review", "repo", pr.Repo, "pr", pr.Number, "err", err)
-				}
+			if adapter.PRAlreadyReviewed(pr.ID, pr.Repo, pr.Number, pr.UpdatedAt, pr.HeadSHA) {
+				continue
+			}
+			prCount++
+			if err := prPublisher.PublishPRReview(ctx, pr.Repo, pr.Number, pr.ID, pr.HeadSHA); err != nil {
+				slog.Error("tier2: publish PR review", "repo", pr.Repo, "pr", pr.Number, "err", err)
 			}
 		}
-		sse.EmitPollingCompleted(ssePub, "prs", prCount, time.Since(prStart))
+	}
 
-		// Issue processing
+	// runIssueTier promotes ready issues and processes every repo's
+	// issue list in parallel, bounded by ai.tier2_repo_concurrency.
+	//
+	// NOTE: if NATS publishes are ever added to this tier, also call
+	// adapter.PublishPending() at the end — it is intentionally bound
+	// to the PR tick today (see prTick) because pending publishes
+	// originate exclusively from runPRTier.
+	runIssueTier := func(currentRepos []string) {
 		sse.EmitPollingStarted(ssePub, "issues", currentRepos)
 		issueStart := time.Now()
+		// issueCount is intentionally captured by the deferred
+		// EmitPollingCompleted closure so the final value (assigned
+		// after processReposInParallel returns) is what the SSE event
+		// reports. Reassigning it later via `=` keeps the capture
+		// valid; a future refactor that switches to a fresh local
+		// would silently emit 0.
 		issueCount := 0
-		if err := limiter.Acquire(ctx, scheduler.TierRepo); err != nil {
+		defer func() {
 			sse.EmitPollingCompleted(ssePub, "issues", issueCount, time.Since(issueStart))
+		}()
+		if err := limiter.Acquire(ctx, scheduler.TierRepo); err != nil {
 			return
 		}
 		if n, err := adapter.PromoteReady(ctx, currentRepos); err != nil {
@@ -2133,41 +2219,90 @@ func runTier2(
 		} else if n > 0 {
 			slog.Info("tier2: promoted issues", "count", n)
 		}
-
-		// Issue processing per repo
-		for _, repo := range currentRepos {
+		concurrency := config.DefaultTier2RepoConcurrency
+		if repoConcurrencyFn != nil {
+			if v := repoConcurrencyFn(); v > 0 {
+				concurrency = v
+			}
+		}
+		issueCount = processReposInParallel(ctx, currentRepos, concurrency, func(ctx context.Context, repo string) (int, error) {
 			if err := limiter.Acquire(ctx, scheduler.TierRepo); err != nil {
-				sse.EmitPollingCompleted(ssePub, "issues", issueCount, time.Since(issueStart))
-				return
+				return 0, err
 			}
 			n, err := adapter.ProcessRepo(ctx, repo)
 			if err != nil {
-				slog.Error("tier2: issue processing", "repo", repo, "err", err)
-				continue
+				// Demote to debug during graceful shutdown — a
+				// cancelled ctx is expected behaviour, not a fault
+				// worth paging an operator.
+				if ctx.Err() != nil {
+					slog.Debug("tier2: issue processing cancelled", "repo", repo, "err", err)
+				} else {
+					slog.Error("tier2: issue processing", "repo", repo, "err", err)
+				}
+				return 0, err
 			}
-			issueCount += n
 			if n > 0 {
 				slog.Info("tier2: processed issues", "repo", repo, "count", n)
 			}
-		}
-		sse.EmitPollingCompleted(ssePub, "issues", issueCount, time.Since(issueStart))
+			return n, nil
+		})
+	}
 
-		// Retry pending publishes
+	// PR and issue tiers run on independent tickers so a slow issue
+	// cycle (taking longer than `interval`) cannot delay the next PR
+	// poll. Each tier serialises against itself: a Ticker drops
+	// extra ticks when its previous run is still in flight, so we
+	// never spawn two concurrent issue cycles.
+	prTick := func() {
+		currentRepos := snapshotRepos()
+		if len(currentRepos) == 0 {
+			return
+		}
+		runPRTier(currentRepos)
+		// PublishPending lives in the PR tick on purpose: pending
+		// publishes are almost exclusively PR-review NATS messages
+		// from runPRTier, and retries are idempotent. If we ever
+		// route issue-side NATS publishes through the same queue,
+		// add a sibling call inside issueTick rather than removing
+		// this one.
 		adapter.PublishPending()
 	}
-
-	if coldStart {
-		processTick()
+	issueTick := func() {
+		currentRepos := snapshotRepos()
+		if len(currentRepos) == 0 {
+			return
+		}
+		runIssueTier(currentRepos)
 	}
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			processTick()
+	// runTickerLoop is the per-tier event loop. time.Ticker's channel
+	// is buffered to size 1, so a tick that fires while the previous
+	// `tick()` is still running is silently dropped — this is the
+	// invariant that prevents a tier from running concurrently against
+	// itself without needing a mutex. PR and issue tiers each get
+	// their own goroutine + ticker so a slow run on one tier never
+	// stalls the other.
+	runTickerLoop := func(tick func()) {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		if coldStart {
+			tick()
+		}
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				tick()
+			}
 		}
 	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); runTickerLoop(prTick) }()
+	go func() { defer wg.Done(); runTickerLoop(issueTick) }()
+	wg.Wait()
 }
 
 // upsertDiscoveredRepos adds PRs' repos to the monitored (or non-monitored)
@@ -2440,6 +2575,20 @@ func (a *tier2Adapter) FetchPRsToReview() ([]scheduler.Tier2PR, error) {
 	nonMonSnap := append([]string(nil), cfg.GitHub.NonMonitored...)
 	a.cfgMu.Unlock()
 
+	// Defer reviews on repos discovered THIS call to upsertDiscoveredRepos
+	// by one tick so the UI receives `repo_discovered` before
+	// `review_started` (#481). The guarantee is "one tick relative to
+	// upsertDiscoveredRepos", not "guaranteed UI delivery": if the SSE
+	// bridge to NATS is stalled, the UI may still see the events out of
+	// order despite the deferral. On the next tick
+	// `upsertDiscoveredRepos` returns an empty `added` list for these
+	// repos (they're already in the config), and the same PR flows
+	// through normally.
+	addedThisTick := make(map[string]struct{}, len(added))
+	for _, r := range added {
+		addedThisTick[r] = struct{}{}
+	}
+
 	// Benign race window: between the Unlock above and the SetConfig calls
 	// inside processDiscoveredRepos, a config reload can swap *a.cfg to a
 	// fresh Config that does not contain the just-appended repos. On the
@@ -2498,6 +2647,14 @@ func (a *tier2Adapter) FetchPRsToReview() ([]scheduler.Tier2PR, error) {
 			if _, ok := prAllowedOrgs[strings.ToLower(org)]; !ok {
 				continue
 			}
+		}
+		// Defer reviews for repos that were auto-discovered this tick;
+		// the next tick picks them up after `repo_discovered` has
+		// reached the UI. See #481.
+		if _, justDiscovered := addedThisTick[pr.Repo]; justDiscovered {
+			slog.Info("tier2: deferring review for newly-discovered repo to next tick",
+				"repo", pr.Repo, "pr", pr.Number)
+			continue
 		}
 		seenIDs[pr.ID] = struct{}{}
 		reason := pipeline.Evaluate(pipeline.PRGate{

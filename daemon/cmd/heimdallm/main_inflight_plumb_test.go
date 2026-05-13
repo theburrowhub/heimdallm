@@ -79,7 +79,10 @@ func TestTier2Adapter_FetchPRsToReview_PopulatesHeadSHA(t *testing.T) {
 		loginMu sync.Mutex
 		login   = "heimdallm-bot"
 		cfgMu   sync.Mutex
-		cfg     = &config.Config{}
+		// Pre-register org/repo so the deferred-discovery filter (#481)
+		// does not withhold this test's PR — this scenario exercises
+		// HeadSHA plumbing, not auto-discovery.
+		cfg = &config.Config{GitHub: config.GitHubConfig{Repositories: []string{"org/repo"}}}
 	)
 
 	a := &tier2Adapter{
@@ -149,7 +152,9 @@ func TestTier2Adapter_FetchPRsToReview_EmptyHeadSHAWhenResolverFails(t *testing.
 		loginMu sync.Mutex
 		login   = "heimdallm-bot"
 		cfgMu   sync.Mutex
-		cfg     = &config.Config{}
+		// Pre-register so the deferred-discovery filter (#481) does
+		// not withhold this test's PR.
+		cfg = &config.Config{GitHub: config.GitHubConfig{Repositories: []string{"org/repo"}}}
 	)
 
 	a := &tier2Adapter{
