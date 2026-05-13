@@ -1,5 +1,12 @@
 # Plan — Issue #483: auto_implement no-changes limbo
 
+> **Status: DONE.** Landed in PR #488 (2026-05-13). Kept as historical
+> reference alongside other completed plans in this directory; the PR
+> description carries the merge-ready summary. See the PR review for
+> the follow-up polish (marker-collision fix, Flutter `error` payload
+> alignment, `NEEDS ATTENTION` badge, dead-code removal) that landed on
+> top of the original three sub-fixes described below.
+
 Closes `theburrowhub/heimdallm#483`. Three small fixes inside the
 `auto_implement` no-changes fallback path so the issue reaches a
 clean terminal state instead of silently looping in the fetcher.

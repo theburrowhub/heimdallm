@@ -205,6 +205,8 @@ class _IssueTileState extends ConsumerState<_IssueTile> {
                 decoration: BoxDecoration(
                   color: isReviewing
                       ? Theme.of(context).colorScheme.primary
+                      : needsAttention
+                      ? Colors.deepOrange.shade700
                       : reviewed
                       ? _severityColor(severity)
                       : Colors.grey.shade600,

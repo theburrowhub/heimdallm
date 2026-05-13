@@ -728,7 +728,9 @@ class _IssueActivityTileState extends ConsumerState<_IssueActivityTile> {
                   height: 48,
                   margin: const EdgeInsets.only(right: 12),
                   decoration: BoxDecoration(
-                    color: reviewed
+                    color: needsAttention
+                        ? Colors.deepOrange.shade700
+                        : reviewed
                         ? _severityColor(severity)
                         : Colors.grey.shade600,
                     borderRadius: BorderRadius.circular(2),
