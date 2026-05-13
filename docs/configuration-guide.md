@@ -388,6 +388,40 @@ auto_promote_refinement = true   # unset = true only when develop_labels is conf
 > 1. Restrict `auto_implement` (the `develop` stage) to repositories where **all issue authors are trusted collaborators**. Public repositories accepting issues from anonymous reporters should keep `develop` disabled and rely on `triage` / `refinement` for visibility instead.
 > 2. The daemon's worktree contains only the cloned repository, so the AI cannot read files outside it. Keep operator secrets (HEIMDALLM token, GitHub PAT, etc.) outside any monitored clone.
 
+> **Review-state vigilance on `auto_implement` PRs**
+>
+> Once `auto_implement` creates a PR the daemon used to stop watching it. Issue #482 fixes that: Tier 3 now observes the PR's aggregated external review state and emits the `pr_review_state_changed` SSE event when it flips between `APPROVED`, `CHANGES_REQUESTED`, `COMMENTED` and the daemon-internal `FIX_PUSHED`. The state is surfaced on the issue detail and the dashboard tile as a coloured chip, so an operator sees the moment a reviewer leaves feedback without polling GitHub manually.
+>
+> The observation layer is **always on** and costs zero AI tokens — it adds one `GET /pulls/{n}/reviews` call per Tier 3 tick per PR that auto_implement created (PRs marked with a non-zero `auto_implement_issue_id` in the store).
+>
+> Two opt-in flags add agentic responses on top of the observation:
+>
+> ```toml
+> [ai.review_response]
+> enabled         = false   # default — off. Flip to true to opt in.
+> per_pr_lifetime = 5       # max responder runs per PR ever
+> cooldown_secs   = 300     # min seconds between two runs on the same PR
+>
+> [ai.review_fix]
+> enabled         = false   # default — off. Flip to true to opt in.
+> per_pr_lifetime = 3       # max fix runs per PR ever
+> cooldown_secs   = 300
+> ```
+>
+> When `ai.review_response.enabled = true`, a reviewer leaving a `COMMENTED` review triggers the Responder: the agent reads the latest non-bot comment, generates a short conversational reply, and posts it on the PR. The reply is review-only — the agent has no Edit/Write tool — and the reviewer's text passes through the same `UNTRUSTED USER COMMENTS` sanitisation fence the issue triage pipeline uses (#478). After `per_pr_lifetime` responses on the same PR, the Responder emits an `issue_review_error` with `reason="review_response_cap_exceeded"` and stops — there is no way to lift the cap from configuration; the counter is persistent on the PR row.
+>
+> When `ai.review_fix.enabled = true`, a reviewer leaving a `CHANGES_REQUESTED` review triggers the FixRunner. The first cut of phase 3 ships in advisory mode: the agent reads the CR body and produces a concrete fix description (file paths, function names, change shape) which the daemon posts as a PR comment. After each successful run the PR's external review state flips to `FIX_PUSHED` so the runner does not re-fire on the same CR; a reviewer submitting a fresh CR after the response flips the state back. The lifetime cap (default 3) terminates the cycle for good once reached.
+>
+> Cost ceiling guarantees, in plain English:
+>
+> | Feature | Off-by-default | Counter persisted | Max AI invocations per PR |
+> |---|---|---|---|
+> | Observation (Tier 3 reviews fetch) | n/a (always on) | n/a | 0 |
+> | `review_response` | yes | yes (`review_response_count`) | `per_pr_lifetime` (default 5) |
+> | `review_fix` | yes | yes (`review_fix_count`) | `per_pr_lifetime` (default 3) |
+>
+> A misconfigured TOML (`per_pr_lifetime = 0` or negative) falls back to the constant default rather than meaning "unlimited" — flipping `enabled` is the only way to opt in, and the caps cannot be silently uncapped. An operator who wants to retry beyond the cap zeroes the counter in SQLite (`UPDATE prs SET review_response_count = 0 WHERE id = ?`).
+
 ### Scope filters
 
 Restrict which issues the pipeline processes:
