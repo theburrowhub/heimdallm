@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../core/models/tracked_issue.dart';
+import '../../shared/widgets/attention_badge.dart';
 import '../../shared/widgets/severity_badge.dart';
 import '../../shared/widgets/toast.dart';
 import '../dashboard/dashboard_providers.dart';
@@ -302,7 +303,10 @@ class _IssueReviewCard extends StatelessWidget {
                   ),
                 ),
                 const Spacer(),
-                SeverityBadge(severity: review.severity),
+                if (review.actionTaken == 'auto_implement_no_changes')
+                  const AttentionBadge()
+                else
+                  SeverityBadge(severity: review.severity),
               ],
             ),
             const SizedBox(height: 8),

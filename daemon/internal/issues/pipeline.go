@@ -887,12 +887,19 @@ func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, is
 // implement" escape hatch fired. We post a review_only-style comment so the
 // issue still gets acknowledged and the user sees why no PR appeared.
 func (p *Pipeline) autoImplementNoChangesFallback(issue *github.Issue, issueID int64, cli string) (*store.IssueReview, error) {
+	// MarkerDone makes this a terminal state for the fetcher's marker scan
+	// (#483): without it, the fallback row collides with the dedup gate on
+	// every poll and the issue sits in limbo. We deliberately do NOT embed
+	// the MarkerRetry literal in the body — ScanMarkers prioritises Retry
+	// over Done within a single comment, so the very next poll would
+	// reprocess the issue. The retry instructions reference the token by
+	// keyword instead and point at the configuration guide.
 	body := fmt.Sprintf(
-		"## ⚠️ Heimdallm auto-implement skipped\n\n"+
+		"%s\n## ⚠️ Heimdallm auto-implement skipped\n\n"+
 			"The agent looked at #%d but left the working tree unchanged — it likely needs a human decision or more context than the issue alone provides.\n\n"+
-			"Add more details and a retry marker to run auto-implementation again, or remove the develop label to stop here.\n\n"+
+			"To retry auto-implementation, post a new comment containing a Heimdallm `heimdallm:retry` marker (see the configuration guide's `auto_implement` section for the exact syntax). To stop here, remove the develop label.\n\n"+
 			"---\n*auto_implement → review_only fallback · Heimdallm*",
-		issue.Number,
+		MarkerDone, issue.Number,
 	)
 	commentedAt, postErr := p.gh.PostComment(issue.Repo, issue.Number, body)
 	if postErr != nil {
@@ -916,9 +923,17 @@ func (p *Pipeline) autoImplementNoChangesFallback(issue *github.Issue, issueID i
 	}
 	rev.ID = revID
 
-	p.publish(sse.EventIssueReviewCompleted, map[string]any{
+	// EventIssueReviewError (not Completed) so the UI renders a
+	// needs-attention card. The `error` field follows the convention of
+	// other EventIssueReviewError emitters (Flutter's `_errorDetails` and
+	// the detail toast both read it); `reason` is a machine-readable cause
+	// kept distinct so future UI work can render reason-specific copy
+	// without parsing the human string (#483).
+	p.publish(sse.EventIssueReviewError, map[string]any{
 		"issue_id": issueID, "number": issue.Number, "repo": issue.Repo,
-		"mode": "auto_implement_no_changes", "post_ok": postErr == nil,
+		"reason":  "auto_implement_no_changes",
+		"post_ok": postErr == nil,
+		"error":   "Agent left the working tree unchanged; post a retry marker comment to retry, or close the issue.",
 	})
 	slog.Info("issues pipeline: auto_implement had no changes, posted fallback comment",
 		"repo", issue.Repo, "number", issue.Number, "posted", postErr == nil)

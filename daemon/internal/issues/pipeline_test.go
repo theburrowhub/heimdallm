@@ -1027,10 +1027,103 @@ func TestPipeline_AutoImplementNoChangesRecordsTerminalNoChanges(t *testing.T) {
 		t.Errorf("PRCreated=%d, want 0", rev.PRCreated)
 	}
 
-	// SSE completes with review_completed, not implemented.
+	// SSE completes with review_error so the UI renders a needs-attention
+	// card instead of a clean success state (#483).
 	types := broker.types()
-	if types[len(types)-1] != sse.EventIssueReviewCompleted {
-		t.Errorf("last event = %q, want issue_review_completed", types[len(types)-1])
+	if types[len(types)-1] != sse.EventIssueReviewError {
+		t.Errorf("last event = %q, want issue_review_error", types[len(types)-1])
+	}
+}
+
+// TestAutoImplementNoChangesFallback_PostsDoneMarker pins #483 fix A:
+// the fallback comment must carry MarkerDone so the fetcher's marker scan
+// (which runs before the dedup gate) terminates the issue cleanly.
+func TestAutoImplementNoChangesFallback_PostsDoneMarker(t *testing.T) {
+	s := &fakeStore{}
+	gh := &fakeGH{defaultBranch: "main"}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("nothing to do")}
+	git := &fakeGit{hasChanges: false}
+	p := issues.New(s, gh, exec, git, &fakeBroker{}, nil)
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if len(gh.postCalls) != 1 {
+		t.Fatalf("expected 1 fallback PostComment, got %d", len(gh.postCalls))
+	}
+	body := gh.postCalls[0].Body
+	if !strings.Contains(body, issues.MarkerDone) {
+		t.Errorf("fallback body missing MarkerDone (%q):\n%s", issues.MarkerDone, body)
+	}
+}
+
+// TestAutoImplementNoChangesFallback_BodyScansAsDone is the regression
+// pin for a draft of #483 where the fallback body included the literal
+// MarkerRetry token as a copy-pasteable retry hint. Within a single
+// comment ScanMarkers gives Retry priority over Done, so the very next
+// poll would treat the fallback comment itself as a retry signal and
+// re-run auto_implement — defeating the entire fix. Pass the real body
+// through the scanner and assert MarkerResultDone.
+func TestAutoImplementNoChangesFallback_BodyScansAsDone(t *testing.T) {
+	s := &fakeStore{}
+	gh := &fakeGH{defaultBranch: "main"}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("nothing to do")}
+	git := &fakeGit{hasChanges: false}
+	p := issues.New(s, gh, exec, git, &fakeBroker{}, nil)
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(gh.postCalls) != 1 {
+		t.Fatalf("expected 1 fallback PostComment, got %d", len(gh.postCalls))
+	}
+	body := gh.postCalls[0].Body
+	got := issues.ScanMarkers([]github.Comment{{Body: body}})
+	if got != issues.MarkerResultDone {
+		t.Fatalf("ScanMarkers on fallback body = %d, want MarkerResultDone (%d)\nbody:\n%s",
+			got, issues.MarkerResultDone, body)
+	}
+}
+
+// TestAutoImplementNoChangesFallback_EmitsReviewError pins #483 fix B:
+// the SSE event must be issue_review_error (needs-attention) rather than
+// issue_review_completed (clean success), with reason=auto_implement_no_changes
+// so Flutter can render a distinct copy.
+func TestAutoImplementNoChangesFallback_EmitsReviewError(t *testing.T) {
+	s := &fakeStore{}
+	gh := &fakeGH{defaultBranch: "main"}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("nothing to do")}
+	git := &fakeGit{hasChanges: false}
+	broker := &fakeBroker{}
+	p := issues.New(s, gh, exec, git, broker, nil)
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	types := broker.types()
+	if len(types) == 0 {
+		t.Fatalf("no events published")
+	}
+	last := broker.event(len(types) - 1)
+	if last.Type != sse.EventIssueReviewError {
+		t.Fatalf("last event type = %q, want %q", last.Type, sse.EventIssueReviewError)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(last.Data), &payload); err != nil {
+		t.Fatalf("event payload not JSON: %v (data=%q)", err, last.Data)
+	}
+	if payload["reason"] != "auto_implement_no_changes" {
+		t.Errorf("payload reason = %v, want %q", payload["reason"], "auto_implement_no_changes")
+	}
+	// The error field follows the convention of the other ReviewError
+	// emitters (Flutter reads payload["error"] in both the activity row
+	// renderer and the issue-detail toast — without it the user sees
+	// "Review failed: Unknown error").
+	if err, _ := payload["error"].(string); err == "" {
+		t.Errorf("payload missing error field; have %v", payload)
 	}
 }
 

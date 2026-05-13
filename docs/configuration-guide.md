@@ -368,6 +368,12 @@ auto_promote_refinement = true   # unset = true only when develop_labels is conf
 > skip_labels        = ["wontfix", "duplicate", "invalid"]
 > ```
 
+> **When `auto_implement` produces no changes**
+>
+> If the agent runs to completion but leaves the working tree untouched (because the issue lacks enough context, the prompt's "leave untouched if you cannot implement" escape hatch fired, etc.), the daemon reaches a terminal state rather than retrying on every poll. The fallback comment posted on the issue carries a hidden `<!-- heimdallm:done -->` marker so the fetcher's marker scan skips the issue on subsequent ticks. The SSE event surfaced to the UI is `issue_review_error` with `reason: "auto_implement_no_changes"`, rendered as a needs-attention card — not a clean success.
+>
+> To reopen the issue for another auto-implement attempt, post a comment containing `<!-- heimdallm:retry -->` (or remove the develop label to stop here). The retry marker overrides the done marker and forces reprocessing. Issues stored before this behaviour landed (no marker on the comment) keep skipping with reason `auto_implement produced no changes (historical row, no done marker); add retry marker to reprocess` until you post the retry marker manually.
+
 > **Security — `auto_implement` and untrusted issue authors**
 >
 > The body, title, and quoted comments of every processed issue are user-submitted input. When `auto_implement` is enabled, that input becomes part of the prompt sent to an AI CLI with **write access** to the repository checkout. A maliciously crafted issue (the classic "prompt injection" attack) could try to instruct the AI to read sensitive files from the worktree and embed them in the resulting commit.

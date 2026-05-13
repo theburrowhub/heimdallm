@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../core/models/tracked_issue.dart';
 import '../../core/state/local_state_notifier.dart';
+import '../../shared/widgets/attention_badge.dart';
 import '../../shared/widgets/severity_badge.dart';
 import '../../shared/widgets/toast.dart';
 import '../dashboard/dashboard_providers.dart';
@@ -174,6 +175,11 @@ class _IssueTileState extends ConsumerState<_IssueTile> {
     final isReviewing = ref.watch(reviewingIssuesProvider).contains(_reviewKey);
     final isPromoting = ref.watch(promotingIssuesProvider).contains(_reviewKey);
     final severity = issue.latestReview?.severity ?? '';
+    // Terminal no-changes rows have an empty triage block (severity
+    // defaults to LOW/green); render a NEEDS ATTENTION chip instead so
+    // the list signals the row needs human input (#483).
+    final needsAttention =
+        issue.latestReview?.actionTaken == 'auto_implement_no_changes';
     // Promote only when the latest issue artifact represents a stage that has
     // a possible successor in the state machine.
     final canPromote =
@@ -199,6 +205,8 @@ class _IssueTileState extends ConsumerState<_IssueTile> {
                 decoration: BoxDecoration(
                   color: isReviewing
                       ? Theme.of(context).colorScheme.primary
+                      : needsAttention
+                      ? Colors.deepOrange.shade700
                       : reviewed
                       ? _severityColor(severity)
                       : Colors.grey.shade600,
@@ -271,6 +279,8 @@ class _IssueTileState extends ConsumerState<_IssueTile> {
                             : Theme.of(context).colorScheme.primary,
                       ),
                     )
+                  else if (needsAttention)
+                    const AttentionBadge()
                   else if (reviewed)
                     SeverityBadge(severity: severity)
                   else
