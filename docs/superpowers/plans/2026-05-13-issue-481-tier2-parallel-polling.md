@@ -31,36 +31,37 @@ issue polling **sequentially in a single goroutine**:
 
 ## Design
 
-### A. Run PR and issue tiers in parallel within each tick
+### A. Run PR and issue tiers on independent tickers
 
-Replace the sequential `processTick` body with two goroutines that
-share the same ticker:
+Per the original issue ("tier of PRs needs its own loop/ticker so
+that a slow issue cycle can never delay PR detection") the two
+tiers now run as independent goroutines, each with its own ticker:
 
 ```go
-processTick := func() {
-    currentRepos := snapshot()
-    if len(currentRepos) == 0 { return }
-    var wg sync.WaitGroup
-    wg.Add(2)
-    go func() { defer wg.Done(); runPRTier(ctx, currentRepos) }()
-    go func() { defer wg.Done(); runIssueTier(ctx, currentRepos) }()
-    wg.Wait()
-}
+go func() {
+    ticker := time.NewTicker(interval); defer ticker.Stop()
+    if coldStart { prTick() }
+    for { select { case <-ctx.Done(): return; case <-ticker.C: prTick() } }
+}()
+go func() {
+    ticker := time.NewTicker(interval); defer ticker.Stop()
+    if coldStart { issueTick() }
+    for { select { case <-ctx.Done(): return; case <-ticker.C: issueTick() } }
+}()
 ```
 
+Each tier serialises against itself: `time.Ticker` drops extra ticks
+when the previous run is still in flight, so we never spawn two
+concurrent issue cycles. The PR ticker fires every `interval`
+regardless of how long an issue cycle is taking.
+
 Both tiers emit their own `polling_started`/`polling_completed`
-events — operators see two parallel SSE cycles per tick rather than
-the current single combined cycle. No behavioural change for the
-sub-tasks themselves.
+events — operators see two parallel SSE cycles per interval rather
+than the previous single combined cycle.
 
-Trade-offs considered:
-
-- **Two independent loops with separate tickers**: more flexibility
-  (each tier can have its own cadence) but introduces a new config
-  surface. Out of scope here; can land as a follow-up.
-- **WaitGroup vs no-wait**: we wait so the next tick still requires
-  both tiers to have finished — protects against unbounded backlog
-  when one tier consistently misses its window.
+`adapter.PublishPending()` (NATS retry) runs at the tail of each PR
+tick; the typical pending publishes come from PR fetch and the
+retry is idempotent, so binding it to one tier is fine.
 
 ### B. Parallelise per-repo issue processing
 
@@ -156,6 +157,6 @@ the SSE handler over NATS) is significantly more invasive.
 
 ## Out of scope (follow-ups)
 
-- Independent tickers per tier (would let PR poll faster than issue poll).
+- Different cadences per tier (`pr_poll_interval` vs `issue_poll_interval`).
 - Parallelising the PR fan-out itself across many repos (today's PR fetch is a single search query, not per-repo).
 - Streaming SSE events with delivery acknowledgement instead of the deferred-review workaround.

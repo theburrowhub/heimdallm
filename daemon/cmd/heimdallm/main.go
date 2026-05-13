@@ -2052,6 +2052,12 @@ func bridgeDiscovery(ctx context.Context, conn *nats.Conn, out chan<- []string) 
 // A non-positive concurrency falls back to a sane default so a
 // misconfiguration cannot deadlock the daemon. Nil or empty repo
 // list is a no-op.
+//
+// Cancellation: both the per-repo scheduling loop and the semaphore
+// acquire observe ctx.Done so a daemon shutdown does not get stuck
+// waiting for the last free slot when workers are still draining.
+// Already-running workers receive ctx through workFn and are
+// responsible for their own short-circuit.
 func processReposInParallel(
 	ctx context.Context,
 	repos []string,
@@ -2071,16 +2077,17 @@ func processReposInParallel(
 	sem := make(chan struct{}, concurrency)
 	var total int64
 	var wg sync.WaitGroup
+schedule:
 	for _, repo := range repos {
-		// Honour cancellation before queuing more work — keeps shutdown
-		// snappy when the user pulls the plug mid-tick.
 		select {
 		case <-ctx.Done():
-			break
-		default:
+			// Stop dispatching new work; the previous `break` only
+			// exited the select, leaving the loop to keep queuing.
+			break schedule
+		case sem <- struct{}{}:
+			// Acquired a slot. Fall through to spawn the worker.
 		}
 		wg.Add(1)
-		sem <- struct{}{}
 		go func(repo string) {
 			defer wg.Done()
 			defer func() { <-sem }()
@@ -2142,8 +2149,11 @@ func runTier2(
 		return
 	}
 
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	snapshotRepos := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), repos...)
+	}
 
 	// runPRTier publishes review requests for every reviewable PR.
 	// Independent of the issue tier so a slow GitHub Search call does
@@ -2219,41 +2229,64 @@ func runTier2(
 		})
 	}
 
-	processTick := func() {
-		mu.Lock()
-		currentRepos := append([]string(nil), repos...)
-		mu.Unlock()
-
+	// PR and issue tiers run on independent tickers so a slow issue
+	// cycle (taking longer than `interval`) cannot delay the next PR
+	// poll. Each tier serialises against itself: a Ticker drops
+	// extra ticks when its previous run is still in flight, so we
+	// never spawn two concurrent issue cycles. The PublishPending
+	// retry runs at the tail of each PR tick — the typical pending
+	// publishes come from PR fetch, and retries are idempotent.
+	prTick := func() {
+		currentRepos := snapshotRepos()
 		if len(currentRepos) == 0 {
 			return
 		}
-
-		// PR and issue tiers run in parallel so a slow issue cycle
-		// cannot delay PR detection (and vice versa). They still
-		// share the tick; the next tick waits for both to finish so
-		// we never let one tier accumulate unbounded backlog.
-		var wg sync.WaitGroup
-		wg.Add(2)
-		go func() { defer wg.Done(); runPRTier(currentRepos) }()
-		go func() { defer wg.Done(); runIssueTier(currentRepos) }()
-		wg.Wait()
-
-		// Retry pending publishes
+		runPRTier(currentRepos)
 		adapter.PublishPending()
 	}
-
-	if coldStart {
-		processTick()
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
+	issueTick := func() {
+		currentRepos := snapshotRepos()
+		if len(currentRepos) == 0 {
 			return
-		case <-ticker.C:
-			processTick()
 		}
+		runIssueTier(currentRepos)
 	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		if coldStart {
+			prTick()
+		}
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				prTick()
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		if coldStart {
+			issueTick()
+		}
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				issueTick()
+			}
+		}
+	}()
+	wg.Wait()
 }
 
 // upsertDiscoveredRepos adds PRs' repos to the monitored (or non-monitored)

@@ -128,6 +128,65 @@ func TestProcessReposInParallel_RespectsContextCancellation(t *testing.T) {
 	}
 }
 
+// TestProcessReposInParallel_CancelStopsScheduling pins the fix for
+// the bug spotted in PR review: with cap < len(repos), the old code
+// only `break`ed the select (not the for loop) and then tried to
+// `sem <- struct{}{}` without observing ctx.Done — the helper could
+// keep queuing repos and block waiting for slots that would never
+// arrive promptly when workers themselves were stuck.
+func TestProcessReposInParallel_CancelStopsScheduling(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// 20 repos, cap=2 — the scheduling loop is forced to gate on
+	// the semaphore between dispatches. A worker that ignores ctx
+	// would mean every queued repo eventually runs.
+	repos := make([]string, 20)
+	for i := range repos {
+		repos[i] = "org/r"
+	}
+
+	var processed int64
+	// Cancel after the first two workers start.
+	startedTwo := make(chan struct{}, 2)
+	done := make(chan struct{})
+
+	go func() {
+		processReposInParallel(ctx, repos, 2, func(ctx context.Context, _ string) (int, error) {
+			select {
+			case startedTwo <- struct{}{}:
+			default:
+			}
+			atomic.AddInt64(&processed, 1)
+			// Worker honours ctx — returns promptly when cancelled.
+			select {
+			case <-ctx.Done():
+				return 0, ctx.Err()
+			case <-time.After(80 * time.Millisecond):
+				return 0, nil
+			}
+		})
+		close(done)
+	}()
+
+	// Wait for the first two workers to start, then cancel.
+	<-startedTwo
+	<-startedTwo
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("processReposInParallel did not return within 500ms after cancel — scheduling loop leaked")
+	}
+
+	// At most a handful of workers should have run — definitely
+	// not all 20. The exact bound depends on timing, but a healthy
+	// fix means most repos never get dispatched.
+	if got := atomic.LoadInt64(&processed); got >= int64(len(repos)) {
+		t.Fatalf("processed %d/%d repos after cancel — scheduling loop did not honour ctx", got, len(repos))
+	}
+}
+
 // TestProcessReposInParallel_NilOrEmptyReposNoOp asserts the helper
 // is a no-op for empty input and never spawns workers.
 func TestProcessReposInParallel_NilOrEmptyReposNoOp(t *testing.T) {
