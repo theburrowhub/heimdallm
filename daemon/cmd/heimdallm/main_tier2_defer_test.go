@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -97,7 +98,7 @@ drain:
 	for {
 		select {
 		case ev := <-sub:
-			if ev.Type == sse.EventRepoDiscovered && testEventDataContains(ev.Data, repo) {
+			if ev.Type == sse.EventRepoDiscovered && strings.Contains(ev.Data, repo) {
 				gotRepoDiscovered = true
 			}
 		case <-deadline:
@@ -118,15 +119,3 @@ drain:
 	}
 }
 
-func testEventDataContains(data, needle string) bool {
-	return len(data) > 0 && (data == needle || stringContains(data, needle))
-}
-
-func stringContains(haystack, needle string) bool {
-	for i := 0; i+len(needle) <= len(haystack); i++ {
-		if haystack[i:i+len(needle)] == needle {
-			return true
-		}
-	}
-	return false
-}

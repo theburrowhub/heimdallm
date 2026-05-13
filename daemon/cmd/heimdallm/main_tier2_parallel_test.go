@@ -62,22 +62,10 @@ func TestProcessReposInParallel_RespectsConcurrencyCap(t *testing.T) {
 	}
 }
 
-// TestProcessReposInParallel_RunsConcurrently asserts wall-clock
-// parallelism: 6 repos × 100ms with cap=3 should complete in ≈200ms,
-// not 600ms.
-func TestProcessReposInParallel_RunsConcurrently(t *testing.T) {
-	repos := []string{"r/1", "r/2", "r/3", "r/4", "r/5", "r/6"}
-	start := time.Now()
-	processReposInParallel(context.Background(), repos, 3, func(_ context.Context, _ string) (int, error) {
-		time.Sleep(100 * time.Millisecond)
-		return 0, nil
-	})
-	elapsed := time.Since(start)
-	// Sequential would take 600ms; cap=3 floor is 200ms.
-	if elapsed > 400*time.Millisecond {
-		t.Fatalf("elapsed=%v — looks sequential (cap=3 should make this ≈200ms)", elapsed)
-	}
-}
+// Note: parallelism is already pinned by
+// TestProcessReposInParallel_RespectsConcurrencyCap via the peak
+// in-flight counter (peak must be >= 2). A wall-clock test would be
+// strictly redundant and flaky on loaded CI runners.
 
 // TestProcessReposInParallel_AggregatesErrors_ContinuesAfterFailure
 // asserts a failing repo does not stop the others. Errors are

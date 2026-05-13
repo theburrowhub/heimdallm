@@ -2045,13 +2045,14 @@ func bridgeDiscovery(ctx context.Context, conn *nats.Conn, out chan<- []string) 
 
 // processReposInParallel runs workFn for every repo in repos with at
 // most `concurrency` calls in flight at once. Returns the sum of the
-// integer return values from the workers (intended for issue-count
-// aggregation). Errors are logged via slog and never abort siblings —
-// a single repo's failure must not freeze the whole tick. (#481)
+// integer return values from the workers. workFn errors are silently
+// counted as zero — the helper has no domain context to log them
+// usefully; callers wrap workFn to log per-repo failures in the
+// vocabulary that fits their tier. (#481)
 //
-// A non-positive concurrency falls back to a sane default so a
-// misconfiguration cannot deadlock the daemon. Nil or empty repo
-// list is a no-op.
+// A non-positive concurrency falls back to
+// config.DefaultTier2RepoConcurrency so a misconfiguration cannot
+// deadlock the daemon. Nil or empty repo list is a no-op.
 //
 // Cancellation: both the per-repo scheduling loop and the semaphore
 // acquire observe ctx.Done so a daemon shutdown does not get stuck
@@ -2068,7 +2069,7 @@ func processReposInParallel(
 		return 0
 	}
 	if concurrency <= 0 {
-		concurrency = 5
+		concurrency = config.DefaultTier2RepoConcurrency
 	}
 	if concurrency > len(repos) {
 		concurrency = len(repos)
@@ -2081,8 +2082,8 @@ schedule:
 	for _, repo := range repos {
 		select {
 		case <-ctx.Done():
-			// Stop dispatching new work; the previous `break` only
-			// exited the select, leaving the loop to keep queuing.
+			// Stop dispatching new work; a plain `break` here would
+			// only exit the select, leaving the loop to keep queuing.
 			break schedule
 		case sem <- struct{}{}:
 			// Acquired a slot. Fall through to spawn the worker.
@@ -2093,7 +2094,6 @@ schedule:
 			defer func() { <-sem }()
 			n, err := workFn(ctx, repo)
 			if err != nil {
-				slog.Error("tier2: per-repo work failed", "repo", repo, "err", err)
 				return
 			}
 			atomic.AddInt64(&total, int64(n))
@@ -2208,18 +2208,19 @@ func runTier2(
 		} else if n > 0 {
 			slog.Info("tier2: promoted issues", "count", n)
 		}
-		cap := 5
+		concurrency := config.DefaultTier2RepoConcurrency
 		if repoConcurrencyFn != nil {
 			if v := repoConcurrencyFn(); v > 0 {
-				cap = v
+				concurrency = v
 			}
 		}
-		issueCount = processReposInParallel(ctx, currentRepos, cap, func(ctx context.Context, repo string) (int, error) {
+		issueCount = processReposInParallel(ctx, currentRepos, concurrency, func(ctx context.Context, repo string) (int, error) {
 			if err := limiter.Acquire(ctx, scheduler.TierRepo); err != nil {
 				return 0, err
 			}
 			n, err := adapter.ProcessRepo(ctx, repo)
 			if err != nil {
+				slog.Error("tier2: issue processing", "repo", repo, "err", err)
 				return 0, err
 			}
 			if n > 0 {
@@ -2233,15 +2234,19 @@ func runTier2(
 	// cycle (taking longer than `interval`) cannot delay the next PR
 	// poll. Each tier serialises against itself: a Ticker drops
 	// extra ticks when its previous run is still in flight, so we
-	// never spawn two concurrent issue cycles. The PublishPending
-	// retry runs at the tail of each PR tick — the typical pending
-	// publishes come from PR fetch, and retries are idempotent.
+	// never spawn two concurrent issue cycles.
 	prTick := func() {
 		currentRepos := snapshotRepos()
 		if len(currentRepos) == 0 {
 			return
 		}
 		runPRTier(currentRepos)
+		// PublishPending lives in the PR tick on purpose: pending
+		// publishes are almost exclusively PR-review NATS messages
+		// from runPRTier, and retries are idempotent. If we ever
+		// route issue-side NATS publishes through the same queue,
+		// add a sibling call inside issueTick rather than removing
+		// this one.
 		adapter.PublishPending()
 	}
 	issueTick := func() {
@@ -2252,40 +2257,26 @@ func runTier2(
 		runIssueTier(currentRepos)
 	}
 
+	runTickerLoop := func(tick func()) {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		if coldStart {
+			tick()
+		}
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				tick()
+			}
+		}
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		if coldStart {
-			prTick()
-		}
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				prTick()
-			}
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		if coldStart {
-			issueTick()
-		}
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				issueTick()
-			}
-		}
-	}()
+	go func() { defer wg.Done(); runTickerLoop(prTick) }()
+	go func() { defer wg.Done(); runTickerLoop(issueTick) }()
 	wg.Wait()
 }
 
