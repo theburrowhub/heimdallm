@@ -9,6 +9,25 @@
 * **issues:** issue classification now follows the state-machine order `skip > blocked > review_only > refinement > develop > default_action`. If a repo intentionally double-labels issues with triage/review and develop labels, the earlier stage now wins so Heimdallm does not skip triage or refinement during promotion.
 * **issues:** `auto_promote_triage` defaults on only when `refinement_labels` is configured. Repos without a refinement target keep their previous review-only behavior; set `auto_promote_triage = false` explicitly to keep refinement manual even when refinement labels exist.
 
+## [0.6.18](https://github.com/theburrowhub/heimdallm/compare/v0.6.17...v0.6.18) (2026-05-13)
+
+
+### Features
+
+* implement [#390](https://github.com/theburrowhub/heimdallm/issues/390) — bug: archived repos not purged from monitored list ([#391](https://github.com/theburrowhub/heimdallm/issues/391)) ([27c8d2c](https://github.com/theburrowhub/heimdallm/commit/27c8d2c846f2ebde8f95907cbb523c1cff1e80c0))
+* **issues/tier3:** PR review-state vigilance on auto_implement PRs ([#482](https://github.com/theburrowhub/heimdallm/issues/482)) ([#490](https://github.com/theburrowhub/heimdallm/issues/490)) ([24ef821](https://github.com/theburrowhub/heimdallm/commit/24ef821b053b4722fb85d59cdb93efc244d94df2))
+* **tier2:** parallel PR/issue polling + per-repo concurrency ([#481](https://github.com/theburrowhub/heimdallm/issues/481)) ([#486](https://github.com/theburrowhub/heimdallm/issues/486)) ([5b0c21d](https://github.com/theburrowhub/heimdallm/commit/5b0c21d85d4906fd0ec2947adc20b23ea07fe379))
+
+
+### Bug Fixes
+
+* **issues:** terminate auto_implement no-changes runs cleanly ([#483](https://github.com/theburrowhub/heimdallm/issues/483)) ([#488](https://github.com/theburrowhub/heimdallm/issues/488)) ([f3d8c17](https://github.com/theburrowhub/heimdallm/commit/f3d8c17968c1e0e29943d8b515ce075f47655f5e))
+
+
+### Documentation
+
+* explain macOS TCC permission dialogs for Music/Downloads ([#371](https://github.com/theburrowhub/heimdallm/issues/371)) ([8ed3fef](https://github.com/theburrowhub/heimdallm/commit/8ed3fefe392411d0d7e8f14dcd36dfa409381386))
+
 ## [0.6.17](https://github.com/theburrowhub/heimdallm/compare/v0.6.16...v0.6.17) (2026-05-12)
 
 
