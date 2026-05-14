@@ -165,6 +165,14 @@ curl -X POST http://localhost:23456/admin/repo-rename \
   -d '{"old_repo": "acme/legacy", "new_repo": "acme/modern"}'
 ```
 
+**Caveat — the TOML rewrite is lossy for surface details.** Just like the existing `PATCH /config` endpoints, the rename pipeline round-trips `config.toml` through a generic decoder/encoder, which means:
+
+- Comments anywhere in the file are dropped.
+- Key order inside a table follows the encoder, not the original file.
+- Blank lines between sections are not preserved.
+
+If you maintain `config.toml` by hand and care about comments or layout, keep a separate annotated copy as your source of truth — the daemon's view of `config.toml` is its parsed structure, not its bytes on disk.
+
 ---
 
 ## 4. Local Directory Resolution

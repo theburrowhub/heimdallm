@@ -23,6 +23,21 @@ import (
 // rewrites the TOML (byte-equivalent content) so callers do not need
 // to special-case the no-op path; this keeps the contract uniform and
 // the audit trail at the SQLite layer authoritative.
+//
+// LIMITATIONS — the rewrite goes through BurntSushi/toml's
+// `map[string]any` round-trip, which is lossy for surface details
+// that have no representation in the decoded map:
+//   - Comments anywhere in the file are dropped.
+//   - Key order inside a table is determined by the encoder, not by
+//     the original on-disk order.
+//   - Blank lines between sections are not preserved.
+//
+// This matches the behaviour of every other path in the daemon that
+// writes config.toml (PATCH /config and friends all go through
+// AtomicWriteTOML with the same round-trip). Operators relying on
+// hand-formatted comments should keep a separate copy or pin them
+// in a comment block that the daemon does not parse — there is no
+// `# heimdallm:` magic that survives the rewrite today.
 func RenameRepoInTOML(path, oldRepo, newRepo string) error {
 	m, err := ReadTOMLMap(path)
 	if err != nil {
