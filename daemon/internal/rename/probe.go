@@ -2,8 +2,8 @@ package rename
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -190,12 +190,18 @@ func (p *Probe) tickNonMonitored(ctx context.Context) {
 		slog.Warn("rename probe: non-monitored repo has been renamed; entry is stale",
 			"old_repo", repo, "new_repo", canonical)
 		if p.deps.Publisher != nil {
+			// json.Marshal of a map[string]string is infallible and
+			// produces a deterministic key-sorted payload, which
+			// matches the SSE consumer expectations on the Flutter
+			// side. Preferred over fmt.Sprintf %q on the same shape
+			// because the encoder owns the escaping rules.
+			payload, _ := json.Marshal(map[string]string{
+				"old_repo": repo,
+				"new_repo": canonical,
+			})
 			p.deps.Publisher.Publish(sse.Event{
 				Type: sse.EventRepoNonMonitoredStale,
-				Data: fmt.Sprintf(
-					`{"old_repo":%q,"new_repo":%q}`,
-					repo, canonical,
-				),
+				Data: string(payload),
 			})
 		}
 	}
