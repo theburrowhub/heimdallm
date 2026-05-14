@@ -80,14 +80,15 @@ func newDeps(store *fakeStore, persister *fakePersister, purger *fakePurger,
 	publisher *fakePublisher, op *applyOp,
 ) rename.Deps {
 	return rename.Deps{
-		Store:     store,
-		Persister: persister,
-		Purger:    purger,
-		Publisher: publisher,
+		Store:       store,
+		Persister:   persister,
+		Purger:      purger,
+		Publisher:   publisher,
 		ApplyConfig: op.op,
-		CfgMu:    &sync.Mutex{},
-		CfgPath:  "/tmp/heimdallm/config.toml",
-		CloneDir: "/tmp/heimdallm/clones",
+		CfgMu:       &sync.Mutex{},
+		TOMLMu:      &sync.Mutex{},
+		CfgPath:     "/tmp/heimdallm/config.toml",
+		CloneDir:    "/tmp/heimdallm/clones",
 	}
 }
 
@@ -148,14 +149,19 @@ func TestReconciler_Run_RecoversFromPersisterFailureOnRetry(t *testing.T) {
 	op := &applyOp{}
 	r := rename.NewReconciler(newDeps(store, persister, purger, publisher, op))
 
-	// First Run: persister fails after store commit. Reconciler
-	// returns the error; downstream surfaces (purge, SSE) are
-	// skipped because cfgErr aborts the function before them.
+	// First Run: persister fails. Reconciler returns the error;
+	// downstream surfaces (ApplyConfig, purge, SSE) are skipped —
+	// crucially ApplyConfig too, because the in-memory mutation
+	// would mask the mismatch from the probe's next tick and the
+	// recovery path would never re-enter Run.
 	if err := r.Run(context.Background(), "acme/old", "acme/new"); err == nil {
 		t.Fatal("first Run: expected persister failure to surface")
 	}
-	if op.calls != 1 || persister.calls != 1 {
-		t.Errorf("first Run: op=%d persister=%d, want 1/1", op.calls, persister.calls)
+	if persister.calls != 1 {
+		t.Errorf("first Run: persister.calls = %d, want 1", persister.calls)
+	}
+	if op.calls != 0 {
+		t.Errorf("first Run: ApplyConfig was called (%d) even though persister failed — in-memory must stay on the old slug so the probe re-detects the mismatch", op.calls)
 	}
 	if purger.calls != 0 || publisher.calls != 0 {
 		t.Errorf("first Run leaked past persister failure: purger=%d publisher=%d",
@@ -174,8 +180,8 @@ func TestReconciler_Run_RecoversFromPersisterFailureOnRetry(t *testing.T) {
 	if err := r.Run(context.Background(), "acme/old", "acme/new"); err != nil {
 		t.Fatalf("second Run (recovery): %v", err)
 	}
-	if op.calls != 2 {
-		t.Errorf("ApplyConfig calls = %d, want 2 (rerun on retry)", op.calls)
+	if op.calls != 1 {
+		t.Errorf("ApplyConfig calls = %d, want 1 (only after the recovery persister success)", op.calls)
 	}
 	if persister.calls != 2 {
 		t.Errorf("persister.calls = %d, want 2", persister.calls)

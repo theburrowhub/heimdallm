@@ -72,9 +72,21 @@ type Deps struct {
 	// readers never see disk/memory drift.
 	CfgMu sync.Locker
 
+	// TOMLMu serializes read-modify-write operations against the
+	// config TOML file on disk. The HTTP server's PATCH handlers
+	// hold the same mutex (Server.TOMLMu) so the rename pipeline
+	// and operator-driven config edits do not clobber each other.
+	// Lock order is TOMLMu → CfgMu, consistent with the PATCH path
+	// which holds TOMLMu while triggering reloadFn (which takes
+	// CfgMu internally).
+	TOMLMu sync.Locker
+
 	// ApplyConfig mutates the in-memory config in place (rename keys
 	// in Repositories, NonMonitored, AI.Repos, AI.Orgs as applicable).
-	// Invoked under CfgMu between the store commit and the disk write.
+	// Invoked under CfgMu only AFTER Persister.Rename has successfully
+	// rewritten the disk TOML — so a persister failure leaves the
+	// in-memory config untouched and the next probe tick re-detects
+	// the mismatch (because Repos() still reads the old slug).
 	ApplyConfig func(oldRepo, newRepo string)
 
 	CfgPath  string // path to the config TOML to rewrite
@@ -131,17 +143,27 @@ func (r *Reconciler) Run(ctx context.Context, oldRepo, newRepo string) error {
 			"old_repo", oldRepo, "new_repo", newRepo)
 	}
 
-	// 2. Config mutation + on-disk rewrite under cfgMu so readers
-	//    that hold the lock cannot observe a half-applied state.
+	// 2. Config rewrite. Lock order: TOMLMu first (shared with the
+	//    HTTP PATCH handlers' read-modify-write), then CfgMu. Disk
+	//    persister runs FIRST: if it fails, in-memory config stays
+	//    untouched and the probe's next tick will still see the old
+	//    slug in Repos() and re-dispatch this reconciler — which is
+	//    the recovery path. Mutating in-memory first would mask the
+	//    mismatch from the probe and the rename would silently stick
+	//    in a half-state until daemon restart.
+	r.deps.TOMLMu.Lock()
 	r.deps.CfgMu.Lock()
-	r.deps.ApplyConfig(oldRepo, newRepo)
 	cfgErr := r.deps.Persister.Rename(r.deps.CfgPath, oldRepo, newRepo)
+	if cfgErr == nil {
+		r.deps.ApplyConfig(oldRepo, newRepo)
+	}
 	r.deps.CfgMu.Unlock()
+	r.deps.TOMLMu.Unlock()
 	if cfgErr != nil {
 		// Store has the audit row but config persistence failed. We
 		// do NOT roll back the store — the next probe tick (or a
 		// manual /admin/repo-rename call) re-enters Run, the store
-		// returns applied=false, and the new flow above re-runs the
+		// returns applied=false, and the flow above re-runs the
 		// downstream until the persister succeeds.
 		return fmt.Errorf("rename: persist config: %w", cfgErr)
 	}

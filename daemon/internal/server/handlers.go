@@ -204,6 +204,14 @@ func (srv *Server) SetRepoRenameFn(fn func(ctx context.Context, oldRepo, newRepo
 	srv.repoRenameFn = fn
 }
 
+// TOMLMu returns the mutex serialising read-modify-write operations
+// on the config TOML file. The rename reconciler (#489) shares this
+// mutex with the HTTP PATCH/DELETE handlers so concurrent operator
+// edits and rename reconciliations cannot clobber each other on disk.
+func (srv *Server) TOMLMu() *sync.Mutex {
+	return &srv.tomlMu
+}
+
 // SetCleanCloneFn wires the manual single-repo managed-clone cleanup callback.
 func (srv *Server) SetCleanCloneFn(fn func(ctx context.Context, repo string) error) {
 	srv.cleanCloneFn = fn

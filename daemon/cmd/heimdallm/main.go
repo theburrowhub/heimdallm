@@ -325,9 +325,10 @@ func main() {
 	// Manual rename trigger for POST /admin/repo-rename (#489).
 	// Constructs a one-shot reconciler with the same deps the probe
 	// uses so manual triggers and automatic detection share idempotency
-	// guarantees end-to-end.
+	// guarantees end-to-end. Reuses srv.TOMLMu() so the rewrite races
+	// safely with concurrent PATCH /config writes.
 	srv.SetRepoRenameFn(func(ctx context.Context, oldRepo, newRepo string) error {
-		reconciler := newRenameReconciler(cfg, &cfgMu, s, repoCtx, broker, cfgPath)
+		reconciler := newRenameReconciler(cfg, &cfgMu, srv.TOMLMu(), s, repoCtx, broker, cfgPath)
 		return reconciler.Run(ctx, oldRepo, newRepo)
 	})
 	srv.SetCleanClonesFn(func(ctx context.Context) (int, error) {
@@ -738,7 +739,7 @@ func main() {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				probe := newRenameProbe(ctx, cfg, &cfgMu, ghClient, s, repoCtx, broker, cfgPath, renameInterval)
+				probe := newRenameProbe(ctx, cfg, &cfgMu, srv.TOMLMu(), ghClient, s, repoCtx, broker, cfgPath, renameInterval)
 				probe.Run(ctx)
 			}()
 			slog.Info("rename probe: started", "interval", renameInterval)

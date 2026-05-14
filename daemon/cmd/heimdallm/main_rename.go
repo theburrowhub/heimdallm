@@ -71,6 +71,7 @@ func newRenameProbe(
 	_ context.Context,
 	cfg *config.Config,
 	cfgMu *sync.Mutex,
+	tomlMu *sync.Mutex,
 	ghClient *gh.Client,
 	s *store.Store,
 	repoCtx *repoctx.Manager,
@@ -78,7 +79,7 @@ func newRenameProbe(
 	cfgPath string,
 	interval time.Duration,
 ) *rename.Probe {
-	reconciler := newRenameReconciler(cfg, cfgMu, s, repoCtx, broker, cfgPath)
+	reconciler := newRenameReconciler(cfg, cfgMu, tomlMu, s, repoCtx, broker, cfgPath)
 	return rename.NewProbe(rename.ProbeDeps{
 		Probe:      ghClient,
 		Dispatcher: reconciler,
@@ -88,7 +89,9 @@ func newRenameProbe(
 }
 
 // newRenameReconciler is the constructor seam that the admin endpoint
-// (step 8) and the probe share — both wire the same dependencies.
+// (step 8) and the probe share — both wire the same dependencies,
+// including the shared tomlMu that serializes config-TOML writes with
+// the HTTP PATCH handlers (#489 race fix).
 //
 // CloneDir comes from the global AI default rather than per-repo
 // AIForRepo: the rename probe purges the OLD slug whose per-repo
@@ -99,6 +102,7 @@ func newRenameProbe(
 func newRenameReconciler(
 	cfg *config.Config,
 	cfgMu *sync.Mutex,
+	tomlMu *sync.Mutex,
 	s *store.Store,
 	repoCtx *repoctx.Manager,
 	broker *sse.Broker,
@@ -116,6 +120,7 @@ func newRenameReconciler(
 		Purger:    repoCtx,
 		Publisher: broker,
 		CfgMu:     cfgMu,
+		TOMLMu:    tomlMu,
 		ApplyConfig: func(oldRepo, newRepo string) {
 			cfg.ApplyRename(oldRepo, newRepo)
 		},
