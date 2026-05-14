@@ -140,6 +140,31 @@ HEIMDALLM_POLL_INTERVAL=5m   # valid: 1m, 5m, 30m, 1h
 poll_interval = "5m"
 ```
 
+### Repo / org rename propagation
+
+When a repository or its parent organisation is renamed on GitHub, Heimdallm needs to flip every record keyed on the old slug — otherwise rows for the OLD slug keep accumulating in the store while new poll data lands under the NEW slug, per-repo `[ai.repos."old/name"]` overrides stop applying, and stale working dirs linger on disk.
+
+A low-frequency probe queries GitHub for each monitored repo's canonical `full_name` and dispatches a reconciler when it differs. The reconciler runs the rename through a single SQLite transaction (`prs`, `issues`, `activity_log`, `watch_state`, plus an audit row in `repo_renames`), rewrites the config TOML (including `[ai.repos."<old>"]` and `[ai.orgs."<old-org>"]` when the org changed), purges the old worktree so the next acquire clones fresh, and emits an `repo_renamed` SSE event for the dashboard.
+
+```toml
+[ai]
+# Default 1h. "0" disables the probe entirely; operators can still
+# trigger renames manually via POST /admin/repo-rename.
+repo_rename_check_interval = "1h"
+```
+
+| Knob | Default | Purpose |
+|---|---|---|
+| `ai.repo_rename_check_interval` | `1h` | Probe cadence (`0` disables) |
+
+Manual trigger for emergencies (idempotent against the probe — re-running with the same pair after the audit row is in place is a no-op):
+
+```bash
+curl -X POST http://localhost:23456/admin/repo-rename \
+  -H "X-Heimdallm-Token: $HEIMDALLM_API_TOKEN" \
+  -d '{"old_repo": "acme/legacy", "new_repo": "acme/modern"}'
+```
+
 ---
 
 ## 4. Local Directory Resolution

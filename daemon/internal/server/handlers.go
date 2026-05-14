@@ -48,6 +48,11 @@ type Server struct {
 	triggerPromoteFn     func(issueID int64) error
 	cleanCloneFn         func(ctx context.Context, repo string) error
 	cleanClonesFn        func(ctx context.Context) (int, error)
+	// repoRenameFn drives the manual rename trigger at
+	// POST /admin/repo-rename (#489). Wired by main; nil when the
+	// daemon was constructed without the rename reconciler (e.g. in
+	// tests that don't need it).
+	repoRenameFn func(ctx context.Context, oldRepo, newRepo string) error
 	meFn                 func() (string, error)
 	// configFn returns the current running config as a JSON-serializable map.
 	configFn func() map[string]any
@@ -191,6 +196,14 @@ func (srv *Server) SetTriggerPromoteFn(fn func(issueID int64) error) {
 	srv.triggerPromoteFn = fn
 }
 
+// SetRepoRenameFn wires the manual rename trigger called by
+// POST /admin/repo-rename (#489). The callback runs the same
+// reconciler the rename probe uses, so a manual rename is fully
+// idempotent against subsequent probe ticks.
+func (srv *Server) SetRepoRenameFn(fn func(ctx context.Context, oldRepo, newRepo string) error) {
+	srv.repoRenameFn = fn
+}
+
 // SetCleanCloneFn wires the manual single-repo managed-clone cleanup callback.
 func (srv *Server) SetCleanCloneFn(fn func(ctx context.Context, repo string) error) {
 	srv.cleanCloneFn = fn
@@ -321,6 +334,7 @@ func (srv *Server) buildRouter() chi.Router {
 	r.Delete("/config/clones/{repo}", srv.handleDeleteManagedClone)
 	r.Post("/reload", srv.handleReload)
 	r.Post("/shutdown", srv.handleShutdown)
+	r.Post("/admin/repo-rename", srv.handleAdminRepoRename)
 	r.Get("/events", srv.handleSSE)
 	r.Get("/logs/stream", srv.handleLogsStream)
 	return r

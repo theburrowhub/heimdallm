@@ -322,6 +322,14 @@ func main() {
 		cfgMu.Unlock()
 		return repoCtx.Purge(ctx, repo, aiCfg.CloneDir)
 	})
+	// Manual rename trigger for POST /admin/repo-rename (#489).
+	// Constructs a one-shot reconciler with the same deps the probe
+	// uses so manual triggers and automatic detection share idempotency
+	// guarantees end-to-end.
+	srv.SetRepoRenameFn(func(ctx context.Context, oldRepo, newRepo string) error {
+		reconciler := newRenameReconciler(cfg, &cfgMu, s, repoCtx, broker, cfgPath)
+		return reconciler.Run(ctx, oldRepo, newRepo)
+	})
 	srv.SetCleanClonesFn(func(ctx context.Context) (int, error) {
 		cfgMu.Lock()
 		cfgSnap := cfg

@@ -230,6 +230,17 @@ void _handleSseEvent(Ref ref, SseEvent event) {
       case 'pr_review_state_changed':
         ref.read(issueListRefreshProvider.notifier).update((s) => s + 1);
 
+      // repo_renamed fires when the rename reconciler propagates a
+      // GitHub repo/org rename through daemon state (#489). Every
+      // cached list keyed on the OLD slug is now stale: PRs, issues,
+      // activity, stats. Bump every refresh counter so the next
+      // render pulls the post-rename data. Payload also carries
+      // worktree_purged so a follow-up surface could badge a
+      // dashboard warning when false; for now we just refresh.
+      case 'repo_renamed':
+        ref.read(prListRefreshProvider.notifier).update((s) => s + 1);
+        ref.read(issueListRefreshProvider.notifier).update((s) => s + 1);
+
       // ── Circuit breaker ────────────────────────────────────────────────
       case 'circuit_breaker_tripped':
         final repo = data['repo'] as String? ?? 'unknown';
