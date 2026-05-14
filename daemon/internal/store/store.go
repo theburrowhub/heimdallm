@@ -246,10 +246,15 @@ func Open(dsn string) (*Store, error) {
 		started_at  DATETIME NOT NULL,
 		PRIMARY KEY (issue_id, updated_at)
 	)`)
-	// Repo rename audit table (#489). RenameRepo writes an audit row in
-	// the same TX that bulk-renames prs/issues/activity_log/watch_state,
-	// and consults the latest row per old_repo to short-circuit idempotent
-	// re-invocations on daemon restart.
+	// Repo rename audit table (#489). RenameRepo writes a row here
+	// in the same TX that bulk-renames prs/issues/activity_log/
+	// watch_state. The audit table is informational — it is NOT
+	// consulted to short-circuit idempotency of the UPDATEs (those
+	// are naturally idempotent via `WHERE repo = oldRepo`), so the
+	// log is safe across rename-back chains like A→B→A→B. The most
+	// recent row per old_repo is read only on the empty-state edge
+	// path to decide whether to insert a fresh audit row when the
+	// UPDATEs matched zero rows.
 	db.Exec(`CREATE TABLE IF NOT EXISTS repo_renames (
 		id          INTEGER PRIMARY KEY AUTOINCREMENT,
 		old_repo    TEXT NOT NULL,

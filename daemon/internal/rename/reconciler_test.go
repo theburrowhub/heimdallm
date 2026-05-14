@@ -295,4 +295,3 @@ func TestReconciler_Run_WorktreePurgeFailure_NotFatal(t *testing.T) {
 		t.Errorf("payload missing worktree_purged=false: %s", publisher.events[0].Data)
 	}
 }
-
