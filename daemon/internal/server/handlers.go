@@ -237,11 +237,37 @@ func (srv *Server) SetRepoMetaFns(labels func(string) ([]string, error), collabs
 // SetConfigPath sets the path to config.toml for PATCH/DELETE handlers.
 func (srv *Server) SetConfigPath(path string) { srv.configPath = path }
 
-// patchTOML is the shared read-merge-write pipeline for all TOML-mutating
-// endpoints. mutateFn receives the current TOML as a map and must apply
-// its changes in-place. On success, returns the full live config for the
-// response body.
+// patchTOML is the shared read-merge-write pipeline for all
+// TOML-mutating endpoints. mutateFn receives the current TOML as a
+// map and must apply its changes in-place. On success, returns the
+// full live config for the response body.
+//
+// tomlMu is held ONLY through the read-mutate-write half. reloadFn
+// runs AFTER the unlock because it can wait on goroutines (the
+// rename probe in particular) that themselves need to acquire
+// tomlMu — keeping the mutex held across reloadFn deadlocks the
+// daemon (#489 review feedback).
 func (srv *Server) patchTOML(mutateFn func(m map[string]any) error) (map[string]any, error) {
+	m, err := srv.writeTOMLUnderLock(mutateFn)
+	if err != nil {
+		return nil, err
+	}
+	if srv.reloadFn != nil {
+		if err := srv.reloadFn(); err != nil {
+			return nil, fmt.Errorf("config reload after write: %w", err)
+		}
+	}
+	if srv.configFn != nil {
+		return srv.configFn(), nil
+	}
+	return m, nil
+}
+
+// writeTOMLUnderLock executes the read-mutate-validate-write half of
+// patchTOML while holding tomlMu, releasing the lock on every exit
+// path (including errors). Split out from patchTOML so the unlock
+// happens before reloadFn — see the comment on patchTOML.
+func (srv *Server) writeTOMLUnderLock(mutateFn func(m map[string]any) error) (map[string]any, error) {
 	srv.tomlMu.Lock()
 	defer srv.tomlMu.Unlock()
 
@@ -269,14 +295,6 @@ func (srv *Server) patchTOML(mutateFn func(m map[string]any) error) (map[string]
 	}
 	if err := config.AtomicWriteTOML(srv.configPath, m); err != nil {
 		return nil, err
-	}
-	if srv.reloadFn != nil {
-		if err := srv.reloadFn(); err != nil {
-			return nil, fmt.Errorf("config reload after write: %w", err)
-		}
-	}
-	if srv.configFn != nil {
-		return srv.configFn(), nil
 	}
 	return m, nil
 }
