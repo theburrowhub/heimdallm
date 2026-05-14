@@ -395,6 +395,14 @@ type AIConfig struct {
 	// (scheduler.RateLimiter) still throttles network usage.
 	Tier2RepoConcurrency int `toml:"tier2_repo_concurrency"`
 
+	// RepoRenameCheckInterval controls how often the rename probe
+	// queries GitHub for each monitored repo's canonical full_name
+	// to detect a repo or org rename (#489). Empty string falls back
+	// to the daemon default (1h). Setting "0" disables the probe
+	// entirely; operators can still trigger renames manually via
+	// POST /admin/repo-rename.
+	RepoRenameCheckInterval string `toml:"repo_rename_check_interval"`
+
 	// GeneratePRDescription enables LLM-generated PR titles and descriptions
 	// for auto_implement PRs. When true, after the implementation commit,
 	// a second LLM call generates a rich PR description from the diff.
@@ -931,6 +939,10 @@ func (c *Config) applyDefaults() {
 	}
 	if c.AI.Tier2RepoConcurrency == 0 {
 		c.AI.Tier2RepoConcurrency = DefaultTier2RepoConcurrency
+	}
+	// Empty string falls back to 1h. "0" stays "0" — operator-disabled.
+	if c.AI.RepoRenameCheckInterval == "" {
+		c.AI.RepoRenameCheckInterval = "1h"
 	}
 	// Review-state vigilance defaults (#482). The Enabled flag is NOT
 	// touched here — it must stay false unless the operator explicitly

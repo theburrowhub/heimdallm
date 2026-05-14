@@ -90,3 +90,45 @@ func orgOf(repo string) string {
 	}
 	return parts[0]
 }
+
+// ApplyRename mutates the in-memory Config in place to reflect a
+// repo rename `oldRepo`→`newRepo`. The caller must hold cfgMu while
+// invoking this — every running goroutine that reads cfg.GitHub.* or
+// cfg.AI.Repos / cfg.AI.Orgs takes cfgMu, so the mutation is safe
+// only when serialised with those readers.
+//
+// Mirror of RenameRepoInTOML's surface coverage: Repositories,
+// NonMonitored, AI.Repos[<repo>], and AI.Orgs[<org>] when the org
+// component changed between old and new.
+func (c *Config) ApplyRename(oldRepo, newRepo string) {
+	c.GitHub.Repositories = replaceInStringSlice(c.GitHub.Repositories, oldRepo, newRepo)
+	c.GitHub.NonMonitored = replaceInStringSlice(c.GitHub.NonMonitored, oldRepo, newRepo)
+	if c.AI.Repos != nil {
+		if v, ok := c.AI.Repos[oldRepo]; ok {
+			delete(c.AI.Repos, oldRepo)
+			c.AI.Repos[newRepo] = v
+		}
+	}
+	oldOrg, newOrg := orgOf(oldRepo), orgOf(newRepo)
+	if oldOrg != "" && newOrg != "" && oldOrg != newOrg && c.AI.Orgs != nil {
+		if v, ok := c.AI.Orgs[oldOrg]; ok {
+			delete(c.AI.Orgs, oldOrg)
+			c.AI.Orgs[newOrg] = v
+		}
+	}
+}
+
+func replaceInStringSlice(in []string, old, new string) []string {
+	if len(in) == 0 {
+		return in
+	}
+	out := make([]string, len(in))
+	for i, s := range in {
+		if s == old {
+			out[i] = new
+		} else {
+			out[i] = s
+		}
+	}
+	return out
+}

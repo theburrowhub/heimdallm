@@ -176,6 +176,61 @@ implement_prompt = "fast"
 	}
 }
 
+// TestConfig_ApplyRename_AllSurfaces pins the in-memory mutation
+// contract that complements RenameRepoInTOML on disk. The reconciler
+// invokes both under cfgMu so they must agree on which fields move.
+func TestConfig_ApplyRename_AllSurfaces(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.GitHub.Repositories = []string{"foo/bar", "acme/old", "x/y"}
+	cfg.GitHub.NonMonitored = []string{"acme/old", "z/z"}
+	cfg.AI.Repos = map[string]config.RepoAI{
+		"acme/old": {Primary: "claude"},
+		"foo/bar":  {Primary: "gemini"},
+	}
+	cfg.AI.Orgs = map[string]config.OrgAI{
+		"acme": {IssuePrompt: "org-default"},
+	}
+
+	// Org rename: acme/old → widget/api flips BOTH the repo key and
+	// the parent org key.
+	cfg.ApplyRename("acme/old", "widget/api")
+
+	wantRepos := []string{"foo/bar", "widget/api", "x/y"}
+	if !reflect.DeepEqual(cfg.GitHub.Repositories, wantRepos) {
+		t.Errorf("Repositories = %v, want %v", cfg.GitHub.Repositories, wantRepos)
+	}
+	wantNon := []string{"widget/api", "z/z"}
+	if !reflect.DeepEqual(cfg.GitHub.NonMonitored, wantNon) {
+		t.Errorf("NonMonitored = %v, want %v", cfg.GitHub.NonMonitored, wantNon)
+	}
+	if _, has := cfg.AI.Repos["acme/old"]; has {
+		t.Error("AI.Repos still keyed on acme/old after rename")
+	}
+	if _, has := cfg.AI.Repos["widget/api"]; !has {
+		t.Error("AI.Repos missing widget/api after rename")
+	}
+	if _, has := cfg.AI.Orgs["acme"]; has {
+		t.Error("AI.Orgs still keyed on acme after org rename")
+	}
+	if _, has := cfg.AI.Orgs["widget"]; !has {
+		t.Error("AI.Orgs missing widget after org rename")
+	}
+}
+
+// TestConfig_ApplyRename_SameOrgLeavesOrgsMap pins the org-not-changed
+// path: a within-org rename must NOT touch AI.Orgs at all.
+func TestConfig_ApplyRename_SameOrgLeavesOrgsMap(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.AI.Repos = map[string]config.RepoAI{"acme/old": {Primary: "claude"}}
+	cfg.AI.Orgs = map[string]config.OrgAI{"acme": {IssuePrompt: "p"}}
+
+	cfg.ApplyRename("acme/old", "acme/new")
+
+	if _, has := cfg.AI.Orgs["acme"]; !has {
+		t.Error("AI.Orgs[acme] dropped on within-org rename")
+	}
+}
+
 func toStringSlice(v any) []string {
 	if v == nil {
 		return nil
