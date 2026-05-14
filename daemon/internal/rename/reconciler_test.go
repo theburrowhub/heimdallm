@@ -129,12 +129,79 @@ func TestReconciler_Run_FullPipeline(t *testing.T) {
 	}
 }
 
-func TestReconciler_Run_Idempotent(t *testing.T) {
-	// Store says "already done" by returning applied=false. The
-	// reconciler must short-circuit BEFORE touching config/persister/
-	// purger/publisher to avoid an SSE storm on every probe tick after
-	// a successful rename.
-	store := &fakeStore{applied: false}
+// TestReconciler_Run_RecoversFromPersisterFailureOnRetry pins the
+// partial-failure recovery contract. When a prior Run committed the
+// store (audit row written) but failed at the persister, the next
+// invocation sees applied=false from the store's idempotency guard
+// — and MUST still complete config + purge + SSE, otherwise the
+// rename is stuck forever with DB on the new slug but config TOML
+// + worktree on the old.
+//
+// This is the bug that motivated removing the applied=false short-
+// circuit at the reconciler entry point: see
+// `daemon/internal/rename/reconciler.go` Run docstring.
+func TestReconciler_Run_RecoversFromPersisterFailureOnRetry(t *testing.T) {
+	store := &fakeStore{applied: true} // first Run: store moves rows
+	persister := &fakePersister{err: errors.New("disk full")}
+	purger := &fakePurger{}
+	publisher := &fakePublisher{}
+	op := &applyOp{}
+	r := rename.NewReconciler(newDeps(store, persister, purger, publisher, op))
+
+	// First Run: persister fails after store commit. Reconciler
+	// returns the error; downstream surfaces (purge, SSE) are
+	// skipped because cfgErr aborts the function before them.
+	if err := r.Run(context.Background(), "acme/old", "acme/new"); err == nil {
+		t.Fatal("first Run: expected persister failure to surface")
+	}
+	if op.calls != 1 || persister.calls != 1 {
+		t.Errorf("first Run: op=%d persister=%d, want 1/1", op.calls, persister.calls)
+	}
+	if purger.calls != 0 || publisher.calls != 0 {
+		t.Errorf("first Run leaked past persister failure: purger=%d publisher=%d",
+			purger.calls, publisher.calls)
+	}
+
+	// Simulate the real store's idempotency guard on the retry: the
+	// audit row is now present, so RenameRepo returns applied=false.
+	// Persister succeeds this time.
+	store.applied = false
+	persister.err = nil
+
+	// Second Run: MUST complete config + purge + SSE despite
+	// applied=false. Pre-fix, the reconciler returned early at this
+	// point and left the system stuck in partial-failure state.
+	if err := r.Run(context.Background(), "acme/old", "acme/new"); err != nil {
+		t.Fatalf("second Run (recovery): %v", err)
+	}
+	if op.calls != 2 {
+		t.Errorf("ApplyConfig calls = %d, want 2 (rerun on retry)", op.calls)
+	}
+	if persister.calls != 2 {
+		t.Errorf("persister.calls = %d, want 2", persister.calls)
+	}
+	if purger.calls != 1 {
+		t.Errorf("purger.calls = %d, want 1 (only the recovery attempt)", purger.calls)
+	}
+	if publisher.calls != 1 {
+		t.Errorf("publisher.calls = %d, want 1 (only the recovery attempt)", publisher.calls)
+	}
+	if !strings.Contains(publisher.events[0].Data, `"old_repo":"acme/old"`) {
+		t.Errorf("recovery SSE payload missing old_repo: %s", publisher.events[0].Data)
+	}
+}
+
+// TestReconciler_Run_NoSSEStormOnRepeatedSuccessfulRuns pins the
+// other side of the contract: in a healthy steady state where the
+// store / config / worktree all agree, the probe should not actually
+// dispatch Run at all (canonical name matches configured slug, no
+// mismatch). But if a buggy caller drives Run repeatedly with the
+// same pair after a successful rename, the downstream re-runs are
+// bounded by their own idempotency — the test asserts no error and
+// a single SSE per call (idempotency at the TOML / Purge layer is
+// already covered in their own packages).
+func TestReconciler_Run_RepeatedRunsConverge(t *testing.T) {
+	store := &fakeStore{applied: true}
 	persister := &fakePersister{}
 	purger := &fakePurger{}
 	publisher := &fakePublisher{}
@@ -142,11 +209,19 @@ func TestReconciler_Run_Idempotent(t *testing.T) {
 	r := rename.NewReconciler(newDeps(store, persister, purger, publisher, op))
 
 	if err := r.Run(context.Background(), "acme/old", "acme/new"); err != nil {
-		t.Fatalf("Run: %v", err)
+		t.Fatalf("first Run: %v", err)
 	}
-	if op.calls != 0 || persister.calls != 0 || purger.calls != 0 || publisher.calls != 0 {
-		t.Errorf("idempotent path leaked side effects: op=%d persister=%d purger=%d publisher=%d",
-			op.calls, persister.calls, purger.calls, publisher.calls)
+	// Second Run with the store now returning applied=false (audit
+	// row present) — still runs the downstream and emits SSE. That
+	// is the documented behaviour; callers that don't want this
+	// should rely on the probe's canonical-name compare to avoid
+	// re-dispatching when state is settled.
+	store.applied = false
+	if err := r.Run(context.Background(), "acme/old", "acme/new"); err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+	if publisher.calls != 2 {
+		t.Errorf("publisher.calls = %d, want 2 (one per Run)", publisher.calls)
 	}
 }
 

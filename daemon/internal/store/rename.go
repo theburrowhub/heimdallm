@@ -30,8 +30,16 @@ var ErrInvalidRepoSlug = errors.New("store: invalid repo slug")
 // the method returns (false, nil) without writing further state. This
 // keeps daemon restarts from re-applying a successful rename, and lets
 // the detection probe call RenameRepo on every probe tick without
-// worry. On a real rename, returns (true, nil); callers fan that out
-// to SSE / log only when applied=true.
+// double-writing the audit trail.
+//
+// IMPORTANT: `applied` is INFORMATIONAL telemetry only — callers MUST
+// NOT use it to skip downstream reconciliation work (config rewrite,
+// worktree purge, SSE emission). The downstream surfaces are not
+// audited at the store level, so a prior invocation could have
+// committed this audit row and then failed at the persister or
+// purger; the recovery retry sees applied=false and must still
+// complete those steps. See rename.Reconciler.Run for the full
+// rationale.
 func (s *Store) RenameRepo(oldRepo, newRepo string) (applied bool, err error) {
 	if err := validateRenamePair(oldRepo, newRepo); err != nil {
 		return false, err

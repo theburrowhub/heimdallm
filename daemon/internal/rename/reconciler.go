@@ -96,9 +96,19 @@ func NewReconciler(deps Deps) *Reconciler {
 }
 
 // Run reconciles oldRepo→newRepo across every surface. It is safe to
-// call repeatedly with the same pair: the store-level idempotency
-// guard short-circuits the call before any side effects fire, so the
-// detection probe can invoke Run on every tick without consequence.
+// call repeatedly with the same pair: each downstream step
+// (ApplyConfig, Persister.Rename, Purger.Purge) is itself idempotent
+// in the absence of the old slug, so a retry after a partial failure
+// converges.
+//
+// The store's `applied` return value is informational only — it
+// tracks whether THIS invocation moved rows or whether a prior
+// invocation already wrote the audit row. It is NOT a signal to skip
+// downstream work: the downstream surfaces are not audited, so a
+// previous Run could have committed the store and then failed at
+// config persistence or worktree purge, leaving disk and DB out of
+// sync. Re-running the downstream on every successful audit covers
+// the recovery path.
 func (r *Reconciler) Run(ctx context.Context, oldRepo, newRepo string) error {
 	if err := validatePair(oldRepo, newRepo); err != nil {
 		return err
@@ -109,11 +119,16 @@ func (r *Reconciler) Run(ctx context.Context, oldRepo, newRepo string) error {
 	if err != nil {
 		return fmt.Errorf("rename: store: %w", err)
 	}
-	if !applied {
-		// Already on record — every downstream surface should be in
-		// the renamed state already, so we exit silently. This is
-		// the post-restart / probe-loop path.
-		return nil
+	if applied {
+		slog.Info("rename: applying", "old_repo", oldRepo, "new_repo", newRepo)
+	} else {
+		// Audit row already present — could be a duplicate probe
+		// tick after a fully-successful prior Run, or a recovery
+		// attempt after a prior Run committed the store and failed
+		// downstream. Either way we run the downstream; if state is
+		// already settled the steps are cheap no-ops.
+		slog.Info("rename: recovery path (audit row present)",
+			"old_repo", oldRepo, "new_repo", newRepo)
 	}
 
 	// 2. Config mutation + on-disk rewrite under cfgMu so readers
@@ -123,11 +138,11 @@ func (r *Reconciler) Run(ctx context.Context, oldRepo, newRepo string) error {
 	cfgErr := r.deps.Persister.Rename(r.deps.CfgPath, oldRepo, newRepo)
 	r.deps.CfgMu.Unlock()
 	if cfgErr != nil {
-		// Store committed but config persistence failed. We do NOT
-		// roll back the store — its audit row reflects truth and the
-		// next probe tick will retry the persister via the same
-		// reconciler entry point (store call short-circuits at that
-		// point, so retry cost is bounded to the persister).
+		// Store has the audit row but config persistence failed. We
+		// do NOT roll back the store — the next probe tick (or a
+		// manual /admin/repo-rename call) re-enters Run, the store
+		// returns applied=false, and the new flow above re-runs the
+		// downstream until the persister succeeds.
 		return fmt.Errorf("rename: persist config: %w", cfgErr)
 	}
 
