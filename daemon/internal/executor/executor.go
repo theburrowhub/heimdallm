@@ -39,7 +39,8 @@ type ExecOptions struct {
 	Model string
 	// MaxTurns sets --max-turns <n> for Claude (0 = not set).
 	MaxTurns int
-	// ApprovalMode sets --approval-mode <value> for Codex.
+	// ApprovalMode sets Codex --ask-for-approval <value>.
+	// Legacy values from older Codex CLIs are still accepted and normalized.
 	ApprovalMode string
 	// ExtraFlags is a free-form string of additional CLI flags (split on spaces).
 	ExtraFlags string
@@ -114,11 +115,18 @@ var allowedPermissionModes = map[string]struct{}{
 	"dontAsk":     {},
 }
 
-// allowedApprovalModes is the allowlist for the codex --approval-mode flag.
+// allowedApprovalModes is the allowlist for the Codex approval mode config.
+// The first group is the current Codex --ask-for-approval vocabulary; the
+// second group is kept for existing config.toml files created before Codex
+// switched from --approval-mode to --ask-for-approval.
 var allowedApprovalModes = map[string]struct{}{
-	"auto-edit": {},
-	"full-auto": {},
-	"suggest":   {},
+	"untrusted":  {},
+	"on-failure": {},
+	"on-request": {},
+	"never":      {},
+	"auto-edit":  {},
+	"full-auto":  {},
+	"suggest":    {},
 }
 
 // ValidatePermissionMode returns an error if mode is not in the allowlist.
@@ -136,13 +144,27 @@ func ValidatePermissionMode(mode string) error {
 // ValidateApprovalMode returns an error if mode is not in the allowlist.
 // An empty string is accepted (means "not set").
 func ValidateApprovalMode(mode string) error {
+	mode = strings.TrimSpace(mode)
 	if mode == "" {
 		return nil
 	}
 	if _, ok := allowedApprovalModes[mode]; !ok {
-		return fmt.Errorf("executor: approval_mode %q is not allowed — valid values: auto-edit, full-auto, suggest", mode)
+		return fmt.Errorf("executor: approval_mode %q is not allowed — valid values: untrusted, on-failure, on-request, never, auto-edit, full-auto, suggest", mode)
 	}
 	return nil
+}
+
+func normalizeCodexApprovalMode(mode string) string {
+	switch strings.TrimSpace(mode) {
+	case "full-auto":
+		return "never"
+	case "auto-edit":
+		return "on-request"
+	case "suggest":
+		return "untrusted"
+	default:
+		return strings.TrimSpace(mode)
+	}
 }
 
 // dangerousFlagPrefixes is the denylist for ValidateExtraFlags.
@@ -442,15 +464,19 @@ func buildArgs(cli string, opts ExecOptions, workDirFlags []string) []string {
 			args = append(args, "-m", opts.Model)
 		}
 	case "codex":
+		// Codex's top-level command is interactive and requires a TTY. The
+		// daemon must use the non-interactive subcommand and feed the prompt on
+		// stdin, otherwise Codex exits with "stdin is not a terminal".
+		if mode := strings.TrimSpace(opts.ApprovalMode); mode != "" {
+			if err := ValidateApprovalMode(mode); err != nil {
+				slog.Warn("buildArgs: ApprovalMode rejected, ignoring", "mode", mode, "err", err)
+			} else {
+				args = append(args, "--ask-for-approval", normalizeCodexApprovalMode(mode))
+			}
+		}
+		args = append(args, "exec")
 		if opts.Model != "" {
 			args = append(args, "--model", opts.Model)
-		}
-		if opts.ApprovalMode != "" {
-			if err := ValidateApprovalMode(opts.ApprovalMode); err != nil {
-				slog.Warn("buildArgs: ApprovalMode rejected, ignoring", "mode", opts.ApprovalMode, "err", err)
-			} else {
-				args = append(args, "--approval-mode", opts.ApprovalMode)
-			}
 		}
 	default:
 		// claude, gemini: stdin mode
@@ -495,6 +521,9 @@ func buildArgs(cli string, opts ExecOptions, workDirFlags []string) []string {
 		args = append(args, strings.Fields(opts.ExtraFlags)...)
 	}
 	if cli == "claude" && len(workDirFlags) > 0 {
+		args = append(args, "-")
+	}
+	if cli == "codex" {
 		args = append(args, "-")
 	}
 

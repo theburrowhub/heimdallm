@@ -326,7 +326,7 @@ func labelSetIntersects(set map[string]struct{}, list []string) bool {
 type CLIAgentConfig struct {
 	Model        string `toml:"model" json:"model,omitempty"`                 // e.g. "claude-opus-4-6"
 	MaxTurns     int    `toml:"max_turns" json:"max_turns,omitempty"`         // claude: --max-turns (0 = not set)
-	ApprovalMode string `toml:"approval_mode" json:"approval_mode,omitempty"` // codex: --approval-mode
+	ApprovalMode string `toml:"approval_mode" json:"approval_mode,omitempty"` // codex: --ask-for-approval
 	ExtraFlags   string `toml:"extra_flags" json:"extra_flags,omitempty"`     // free-form additional CLI flags
 	PromptID     string `toml:"prompt" json:"prompt,omitempty"`               // agent-level prompt override
 
@@ -448,9 +448,9 @@ type ReviewResponseConfig struct {
 // The lifetime cap is intentionally low: an operator who wants more
 // rounds must opt-in explicitly so we never silently amplify cost.
 type ReviewFixConfig struct {
-	Enabled         bool `toml:"enabled"`
-	PerPRLifetime   int  `toml:"per_pr_lifetime"`
-	CooldownSecs    int  `toml:"cooldown_secs"`
+	Enabled       bool `toml:"enabled"`
+	PerPRLifetime int  `toml:"per_pr_lifetime"`
+	CooldownSecs  int  `toml:"cooldown_secs"`
 }
 
 // Defaults for the review-response and review-fix paths (#482).
