@@ -9,6 +9,18 @@
 * **issues:** issue classification now follows the state-machine order `skip > blocked > review_only > refinement > develop > default_action`. If a repo intentionally double-labels issues with triage/review and develop labels, the earlier stage now wins so Heimdallm does not skip triage or refinement during promotion.
 * **issues:** `auto_promote_triage` defaults on only when `refinement_labels` is configured. Repos without a refinement target keep their previous review-only behavior; set `auto_promote_triage = false` explicitly to keep refinement manual even when refinement labels exist.
 
+## [0.6.19](https://github.com/theburrowhub/heimdallm/compare/v0.6.18...v0.6.19) (2026-05-14)
+
+
+### Features
+
+* **rename:** warn on stale non_monitored slugs ([#493](https://github.com/theburrowhub/heimdallm/issues/493)) ([#495](https://github.com/theburrowhub/heimdallm/issues/495)) ([eb0d3dd](https://github.com/theburrowhub/heimdallm/commit/eb0d3dda0838ec6b3414bcdad3764e60d9d2bbe0))
+
+
+### Bug Fixes
+
+* **rename:** propagate GitHub repo/org renames across daemon state ([#489](https://github.com/theburrowhub/heimdallm/issues/489)) ([#491](https://github.com/theburrowhub/heimdallm/issues/491)) ([e5b7340](https://github.com/theburrowhub/heimdallm/commit/e5b7340df858ecae575ba746bb4e3fd2c52f635d))
+
 ## [0.6.18](https://github.com/theburrowhub/heimdallm/compare/v0.6.17...v0.6.18) (2026-05-13)
 
 
