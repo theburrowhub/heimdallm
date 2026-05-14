@@ -346,6 +346,59 @@ func TestStore_RenameRepo_PreservesActivityOrgOnSameOrgRename(t *testing.T) {
 	}
 }
 
+// TestStore_RenameRepo_AuditsRenameOnEmptyState pins the edge case
+// flagged in review: a repo configured on the daemon may be renamed
+// on GitHub BEFORE any PRs/issues/activity rows have accumulated
+// under it. The UPDATEs match zero rows in that case, but the
+// rename still happened from the reconciler's point of view and the
+// issue/PR contract requires the mapping to land in repo_renames so
+// the historical record survives restarts.
+func TestStore_RenameRepo_AuditsRenameOnEmptyState(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	// First call on empty state: no SQLite rows for either slug.
+	applied, err := s.RenameRepo("acme/empty", "acme/renamed")
+	if err != nil {
+		t.Fatalf("RenameRepo on empty state: %v", err)
+	}
+	if !applied {
+		t.Error("applied=false on first rename of an empty-state repo — caller treats this as a recovery path, but it is a fresh rename that just lacks SQLite rows")
+	}
+
+	count := func() int {
+		t.Helper()
+		var n int
+		if err := s.DB().QueryRow(
+			"SELECT COUNT(*) FROM repo_renames WHERE old_repo = ? AND new_repo = ?",
+			"acme/empty", "acme/renamed",
+		).Scan(&n); err != nil {
+			t.Fatalf("count audit: %v", err)
+		}
+		return n
+	}
+	if got := count(); got != 1 {
+		t.Errorf("repo_renames row count = %d, want 1 — empty-state rename must persist the mapping per #489", got)
+	}
+
+	// Retry with the same pair: audit row already records the
+	// mapping, so this is a true no-op. applied=false, no duplicate
+	// audit row.
+	applied, err = s.RenameRepo("acme/empty", "acme/renamed")
+	if err != nil {
+		t.Fatalf("RenameRepo retry: %v", err)
+	}
+	if applied {
+		t.Error("applied=true on duplicate retry — the mapping is already audited and there is no new state to record")
+	}
+	if got := count(); got != 1 {
+		t.Errorf("retry duplicated audit row: count = %d, want 1", got)
+	}
+}
+
 func TestStore_RenameRepo_Idempotent(t *testing.T) {
 	s := seedForRename(t, "acme/old", 1000)
 

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -28,14 +29,21 @@ var ErrInvalidRepoSlug = errors.New("store: invalid repo slug")
 // In-flight tables (`reviews_in_flight`, `issue_triage_in_flight`)
 // are keyed on numeric IDs and do not need renaming.
 //
-// Idempotency is derived from the data, not the audit table: each
-// UPDATE matches `WHERE repo = oldRepo`, so on a second call after
-// a successful rename the WHERE matches zero rows and the UPDATE is
-// a natural no-op. This correctly handles rename chains like
-// A→B→A→B: every step inspects the current state of the tables and
-// moves whatever is there. The audit row is inserted ONLY when at
-// least one row actually moved, so the audit log reflects real
-// state transitions instead of accumulating attempts.
+// Idempotency for the UPDATEs is derived from the data, not the
+// audit table: each UPDATE matches `WHERE repo = oldRepo`, so on a
+// second call after a successful rename the WHERE matches zero rows
+// and the UPDATE is a natural no-op. This correctly handles rename
+// chains like A→B→A→B: every step inspects the current state of the
+// tables and moves whatever is there.
+//
+// The audit row in `repo_renames` is inserted whenever this call
+// records a NEW mapping for oldRepo — including the "configured
+// repo renamed before any SQLite state existed" edge case, where
+// the UPDATEs match zero rows but the rename still happened from
+// the reconciler's perspective and the issue/PR contract requires
+// it to be persisted. Duplicate retries (probe re-detection or
+// rerun where the most recent audit row for oldRepo already maps
+// to newRepo) skip the insert to keep the log free of churn.
 //
 // IMPORTANT: `applied` is INFORMATIONAL telemetry only — callers MUST
 // NOT use it to skip downstream reconciliation work (config rewrite,
@@ -97,11 +105,31 @@ func (s *Store) RenameRepo(oldRepo, newRepo string) (applied bool, err error) {
 	}
 	totalMoved += n
 
-	// Audit row only when something actually moved. Reflecting "no
-	// rows for oldRepo" as a no-op in the audit table keeps the log
-	// usable as a real-state-transitions history rather than a
-	// retry/probe-tick log.
-	if totalMoved > 0 {
+	// Audit policy: insert when this call records a NEW mapping.
+	// `rowsMoved` is the common case (rows actually transitioned).
+	// When zero rows moved, we still insert if the most recent audit
+	// row for oldRepo does NOT already map to newRepo — this covers
+	// the edge case of a repo renamed before it had any SQLite state
+	// yet, so the historical mapping survives in repo_renames per
+	// the #489 contract. Duplicate probe re-detections of the same
+	// rename hit the suppression branch and leave the log clean.
+	rowsMoved := totalMoved > 0
+	insertAudit := rowsMoved
+	if !rowsMoved {
+		var lastNew sql.NullString
+		if err := tx.QueryRow(
+			`SELECT new_repo FROM repo_renames WHERE old_repo = ? ORDER BY id DESC LIMIT 1`,
+			oldRepo,
+		).Scan(&lastNew); err != nil && err != sql.ErrNoRows {
+			return false, fmt.Errorf("store: rename audit lookup: %w", err)
+		}
+		// New mapping (no prior audit, or last audit pointed somewhere
+		// else): record this rename.
+		if !lastNew.Valid || lastNew.String != newRepo {
+			insertAudit = true
+		}
+	}
+	if insertAudit {
 		if _, err := tx.Exec(
 			`INSERT INTO repo_renames (old_repo, new_repo, renamed_at) VALUES (?, ?, ?)`,
 			oldRepo, newRepo, time.Now().UTC().Format(sqliteTimeFormat),
@@ -114,7 +142,11 @@ func (s *Store) RenameRepo(oldRepo, newRepo string) (applied bool, err error) {
 		return false, fmt.Errorf("store: rename commit: %w", err)
 	}
 	committed = true
-	return totalMoved > 0, nil
+	// `applied` tracks whether this call produced any state change:
+	// either SQLite rows moved or a new audit row recorded the
+	// rename. Reconciler uses this for log telemetry only — it does
+	// NOT gate downstream work (see the docstring above).
+	return insertAudit, nil
 }
 
 func validateRenamePair(oldRepo, newRepo string) error {
