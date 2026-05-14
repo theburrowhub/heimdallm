@@ -93,7 +93,16 @@ func (p *Probe) Tick(ctx context.Context) {
 // is synchronous — a single slow GET (canonical lookup of one repo)
 // is bounded by the GitHub client timeout, so a stuck tick cannot
 // stack up beyond one interval window.
+//
+// Fires one Tick immediately on start so the daemon detects renames
+// that happened while it was offline without waiting a full
+// interval (default 1h) — operator-visible latency after a restart
+// would otherwise be unbounded by the probe cadence alone.
 func (p *Probe) Run(ctx context.Context) {
+	p.Tick(ctx)
+	if ctx.Err() != nil {
+		return
+	}
 	ticker := time.NewTicker(p.deps.Interval)
 	defer ticker.Stop()
 	for {

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
 	gh "github.com/heimdallm/daemon/internal/github"
 	"github.com/heimdallm/daemon/internal/rename"
@@ -124,6 +125,62 @@ func TestRenameProbe_404FromGH_DoesNotDispatch(t *testing.T) {
 	}
 	if dispatcher.gotPairs[0] != [2]string{"acme/renamed", "acme/new-name"} {
 		t.Errorf("dispatched pair = %v, want (acme/renamed, acme/new-name)", dispatcher.gotPairs[0])
+	}
+}
+
+// TestRenameProbe_Run_FiresInitialTickBeforeIntervalElapses pins
+// the "no offline-rename blind spot after restart" invariant: the
+// first Tick runs immediately on Run start, not after one interval
+// window. Without this, a rename that happened while the daemon
+// was down sat undetected for up to `Interval` (default 1h) after
+// the next start.
+func TestRenameProbe_Run_FiresInitialTickBeforeIntervalElapses(t *testing.T) {
+	canonical := &fakeCanonical{
+		results: map[string]canonicalResult{
+			"acme/old": {canonical: "acme/new"},
+		},
+	}
+	dispatcher := &fakeDispatcher{}
+	// Interval far longer than the test wait — any dispatch in the
+	// test window must come from the initial Tick, not the loop.
+	p := rename.NewProbe(rename.ProbeDeps{
+		Probe:      canonical,
+		Dispatcher: dispatcher,
+		Repos:      func() []string { return []string{"acme/old"} },
+		Interval:   time.Hour,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		p.Run(ctx)
+		close(done)
+	}()
+
+	// Poll for the dispatch caused by the initial Tick. Generous
+	// budget so a slow CI host doesn't false-flag, but well below
+	// the 1h interval that the loop tick would need.
+	deadline := time.After(2 * time.Second)
+	for {
+		canonical.mu.Lock()
+		calls := canonical.calls
+		canonical.mu.Unlock()
+		if calls >= 1 && dispatcher.calls >= 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("initial tick did not fire within budget: canonical.calls=%d, dispatcher.calls=%d",
+				calls, dispatcher.calls)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
 	}
 }
 

@@ -14,10 +14,18 @@ import (
 	"github.com/heimdallm/daemon/internal/store"
 )
 
+// minRenameProbeInterval is the lower bound enforced on operator
+// input. Below 1 minute the probe would burn GitHub rate-limit
+// budget (one GET per repo per tick) for no real detection gain —
+// renames are by nature rare events. Misconfigurations get clamped
+// up with an audit-log warn rather than silently honoured.
+const minRenameProbeInterval = time.Minute
+
 // parseRenameProbeInterval parses the operator-facing duration string
 // for `ai.repo_rename_check_interval`. Empty / unparseable falls back
 // to 1h; literal "0" returns 0 so the caller knows the probe is
-// disabled. Returning <= 0 from here is the disable signal.
+// disabled. Returning <= 0 from here is the disable signal. Positive
+// values below minRenameProbeInterval are clamped up.
 func parseRenameProbeInterval(raw string) time.Duration {
 	if raw == "0" {
 		return 0
@@ -30,6 +38,11 @@ func parseRenameProbeInterval(raw string) time.Duration {
 		slog.Warn("rename probe: unparseable interval, falling back to default",
 			"raw", raw, "default", rename.DefaultProbeInterval)
 		return rename.DefaultProbeInterval
+	}
+	if d < minRenameProbeInterval {
+		slog.Warn("rename probe: interval below floor, clamping",
+			"raw", raw, "floor", minRenameProbeInterval)
+		return minRenameProbeInterval
 	}
 	return d
 }
