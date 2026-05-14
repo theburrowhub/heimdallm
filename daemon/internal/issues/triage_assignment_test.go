@@ -47,7 +47,7 @@ func TestResolveTriageAssignee_VerifiesSuggestedAssigneeInHistory(t *testing.T) 
 	}
 }
 
-func TestResolveTriageAssignee_UsesTopContributorWhenNoFallbackOwner(t *testing.T) {
+func TestResolveTriageAssignee_KeepsSuggestedWhenHistoryPointsElsewhereWithoutFallback(t *testing.T) {
 	runner := &fakeHistoryRunner{outByCmd: map[string]string{
 		historyKey("rev-parse", "--is-shallow-repository"):                                                     "false\n",
 		historyKey("log", "--max-count=500", "--no-merges", "--format=%ae%x00%an", "--", "daemon/pipeline.go"): "alice@users.noreply.github.com\x00Alice\nbob@users.noreply.github.com\x00Bob\nalice@users.noreply.github.com\x00Alice\n",
@@ -59,34 +59,57 @@ func TestResolveTriageAssignee_UsesTopContributorWhenNoFallbackOwner(t *testing.
 	}
 
 	assignee, source, diagnostic, _ := resolveTriageAssignee(context.Background(), "/repo", "", triage, runner)
-	if assignee != "alice" || source != "history_top_contributor" {
-		t.Fatalf("assignee/source = %q/%q, want alice/history_top_contributor", assignee, source)
+	if assignee != "ghost" || source != "suggested_assignee_unverified" {
+		t.Fatalf("assignee/source = %q/%q, want ghost/suggested_assignee_unverified", assignee, source)
 	}
-	if !strings.Contains(diagnostic, "ghost") {
-		t.Fatalf("diagnostic should mention rejected suggestion, got %q", diagnostic)
+	if !strings.Contains(diagnostic, "keeping suggested assignee") {
+		t.Fatalf("diagnostic should explain the suggested assignee was kept, got %q", diagnostic)
 	}
 }
 
-func TestResolveTriageAssignee_KeepsFallbackWhenSuggestedMissingFromHistory(t *testing.T) {
+func TestResolveTriageAssignee_KeepsSuggestedWhenOnlyRecognizedHistoryIsAnotherContributor(t *testing.T) {
 	runner := &fakeHistoryRunner{outByCmd: map[string]string{
 		historyKey("rev-parse", "--is-shallow-repository"):                                                 "false\n",
-		historyKey("log", "--max-count=500", "--no-merges", "--format=%ae%x00%an", "--", "docs/config.md"): "vbuenog@users.noreply.github.com\x00V Bueno\n",
+		historyKey("log", "--max-count=500", "--no-merges", "--format=%ae%x00%an", "--", "docs/config.md"): "carol@users.noreply.github.com\x00Carol\n",
 	}}
 	triage := Triage{
 		AffectedPaths:      []string{"docs/config.md"},
-		SuggestedAssignee:  "ivanmunozruiz",
+		SuggestedAssignee:  "alice",
 		AssigneeConfidence: "high",
 	}
 
-	assignee, source, diagnostic, evidence := resolveTriageAssignee(context.Background(), "/repo", "ivanmunozruiz", triage, runner)
-	if assignee != "ivanmunozruiz" || source != "triage_owner" {
-		t.Fatalf("assignee/source = %q/%q, want ivanmunozruiz/triage_owner", assignee, source)
+	assignee, source, diagnostic, evidence := resolveTriageAssignee(context.Background(), "/repo", "owner", triage, runner)
+	if assignee != "alice" || source != "suggested_assignee_unverified" {
+		t.Fatalf("assignee/source = %q/%q, want alice/suggested_assignee_unverified", assignee, source)
 	}
-	if !strings.Contains(diagnostic, "ivanmunozruiz") {
-		t.Fatalf("diagnostic should mention rejected suggestion, got %q", diagnostic)
+	if !strings.Contains(diagnostic, "alice") {
+		t.Fatalf("diagnostic should mention unverified suggestion, got %q", diagnostic)
 	}
-	if len(evidence) == 0 || !strings.Contains(evidence[0], "triage_owner") {
-		t.Fatalf("expected fallback evidence, got %v", evidence)
+	if len(evidence) == 0 || !strings.Contains(evidence[0], "@carol") {
+		t.Fatalf("expected history evidence without assigning carol, got %v", evidence)
+	}
+}
+
+func TestResolveTriageAssignee_KeepsSuggestedWhenHistoryHasNoRecognizedLogins(t *testing.T) {
+	runner := &fakeHistoryRunner{outByCmd: map[string]string{
+		historyKey("rev-parse", "--is-shallow-repository"):                                                     "false\n",
+		historyKey("log", "--max-count=500", "--no-merges", "--format=%ae%x00%an", "--", "daemon/pipeline.go"): "dev@example.com\x00Dev One\nmaintainer@company.test\x00Maintainer\n",
+	}}
+	triage := Triage{
+		AffectedPaths:      []string{"daemon/pipeline.go"},
+		SuggestedAssignee:  "alice",
+		AssigneeConfidence: "high",
+	}
+
+	assignee, source, diagnostic, evidence := resolveTriageAssignee(context.Background(), "/repo", "owner", triage, runner)
+	if assignee != "alice" || source != "suggested_assignee_unverified" {
+		t.Fatalf("assignee/source = %q/%q, want alice/suggested_assignee_unverified", assignee, source)
+	}
+	if !strings.Contains(diagnostic, "no GitHub-login-like contributors") {
+		t.Fatalf("diagnostic should mention unrecognized history, got %q", diagnostic)
+	}
+	if evidence != nil {
+		t.Fatalf("evidence = %v, want nil", evidence)
 	}
 }
 
@@ -128,7 +151,7 @@ func TestEnrichTriageResult_PreservesTentativeAssignee(t *testing.T) {
 	}
 }
 
-func TestResolveTriageAssignee_ShallowHistoryFallsBackToTriageOwner(t *testing.T) {
+func TestResolveTriageAssignee_ShallowHistoryKeepsSuggestedUnverified(t *testing.T) {
 	runner := &fakeHistoryRunner{outByCmd: map[string]string{
 		historyKey("rev-parse", "--is-shallow-repository"): "true\n",
 	}}
@@ -138,11 +161,33 @@ func TestResolveTriageAssignee_ShallowHistoryFallsBackToTriageOwner(t *testing.T
 		AssigneeConfidence: "high",
 	}, runner)
 
-	if assignee != "owner" || source != "triage_owner" {
-		t.Fatalf("assignee/source = %q/%q, want owner/triage_owner", assignee, source)
+	if assignee != "alice" || source != "suggested_assignee_unverified" {
+		t.Fatalf("assignee/source = %q/%q, want alice/suggested_assignee_unverified", assignee, source)
 	}
 	if !strings.Contains(diagnostic, errShallowHistory.Error()) {
 		t.Fatalf("diagnostic should mention shallow history, got %q", diagnostic)
+	}
+}
+
+func TestResolveTriageAssignee_NoSuggestedNoFallbackDoesNotAssignTopContributor(t *testing.T) {
+	runner := &fakeHistoryRunner{outByCmd: map[string]string{
+		historyKey("rev-parse", "--is-shallow-repository"):                                       "false\n",
+		historyKey("log", "--max-count=500", "--no-merges", "--format=%ae%x00%an", "--", "x.go"): "alice@users.noreply.github.com\x00Alice\n",
+	}}
+
+	assignee, source, diagnostic, evidence := resolveTriageAssignee(context.Background(), "/repo", "", Triage{
+		AffectedPaths:      []string{"x.go"},
+		AssigneeConfidence: "high",
+	}, runner)
+
+	if assignee != "" || source != "none" {
+		t.Fatalf("assignee/source = %q/%q, want empty/none", assignee, source)
+	}
+	if !strings.Contains(diagnostic, "no suggested_assignee") {
+		t.Fatalf("diagnostic should mention missing suggestion, got %q", diagnostic)
+	}
+	if evidence != nil {
+		t.Fatalf("evidence = %v, want nil", evidence)
 	}
 }
 
