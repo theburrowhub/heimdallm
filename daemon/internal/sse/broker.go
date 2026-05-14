@@ -51,6 +51,18 @@ const (
 	// Flutter consumers refresh the repo / PR / issue lists and dismiss
 	// cached entries keyed on `old_repo`.
 	EventRepoRenamed = "repo_renamed"
+
+	// EventRepoNonMonitoredStale fires when the rename probe detects
+	// that an entry in `github.non_monitored` has been renamed on
+	// GitHub (#493 follow-up to #489). The daemon deliberately does
+	// NOT auto-rewrite non_monitored entries — they reflect an
+	// explicit operator-disabled state — so this event surfaces the
+	// stale slug for human action. Payload:
+	// {"old_repo": "...", "new_repo": "..."}.
+	// The probe dedupes warnings per (old, new) pair across its
+	// in-memory lifetime, so this event fires at most once per
+	// detected drift per daemon start.
+	EventRepoNonMonitoredStale = "repo_non_monitored_stale"
 )
 
 // maxSubscribers limits the number of concurrent SSE connections to prevent

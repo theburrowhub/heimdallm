@@ -75,6 +75,21 @@ func renameRepoListFn(cfg *config.Config, cfgMu *sync.Mutex) func() []string {
 	}
 }
 
+// renameNonMonitoredListFn returns the operator-disabled repo set
+// (#493). The probe scans this list separately from the monitored
+// one and emits stale-slug warnings without dispatching the
+// reconciler — non_monitored entries reflect explicit operator
+// choice and must not be auto-rewritten.
+func renameNonMonitoredListFn(cfg *config.Config, cfgMu *sync.Mutex) func() []string {
+	return func() []string {
+		cfgMu.Lock()
+		defer cfgMu.Unlock()
+		out := make([]string, 0, len(cfg.GitHub.NonMonitored))
+		out = append(out, cfg.GitHub.NonMonitored...)
+		return out
+	}
+}
+
 // newRenameProbe constructs the Reconciler + Probe with their real
 // daemon deps. It is invoked once per pollers cycle (re-construction
 // is safe; the probe is goroutine-local), but called from a single
@@ -94,10 +109,12 @@ func newRenameProbe(
 ) *rename.Probe {
 	reconciler := newRenameReconciler(cfg, cfgMu, tomlMu, s, repoCtx, broker, cfgPath)
 	return rename.NewProbe(rename.ProbeDeps{
-		Probe:      ghClient,
-		Dispatcher: reconciler,
-		Repos:      renameRepoListFn(cfg, cfgMu),
-		Interval:   interval,
+		Probe:        ghClient,
+		Dispatcher:   reconciler,
+		Repos:        renameRepoListFn(cfg, cfgMu),
+		NonMonitored: renameNonMonitoredListFn(cfg, cfgMu),
+		Publisher:    broker,
+		Interval:     interval,
 	})
 }
 

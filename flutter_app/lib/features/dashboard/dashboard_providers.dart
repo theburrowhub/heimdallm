@@ -35,6 +35,21 @@ final circuitBreakerProvider =
       () => LocalStateNotifier<String?>(null),
     );
 
+/// Stale non_monitored entries the daemon's rename probe has flagged
+/// (#493). Keys are the configured `old_repo` slug, values are the
+/// canonical `new_repo` GitHub reported. The map accumulates entries
+/// across the session so a future UI surface (banner, settings hint)
+/// can list every stale slug the operator should clean up manually.
+///
+/// The daemon dedupes per (old, new) pair across its lifetime, so this
+/// map grows only when a NEW drift is detected — not on every probe
+/// tick. Cleared on app restart (matches the daemon-side dedup reset).
+final nonMonitoredStaleProvider =
+    NotifierProvider<
+      LocalStateNotifier<Map<String, String>>,
+      Map<String, String>
+    >(() => LocalStateNotifier<Map<String, String>>(const <String, String>{}));
+
 /// Tracks whether the desktop app is trying to spawn the daemon.
 final daemonStartingProvider =
     NotifierProvider<LocalStateNotifier<bool>, bool>(
@@ -240,6 +255,23 @@ void _handleSseEvent(Ref ref, SseEvent event) {
       case 'repo_renamed':
         ref.read(prListRefreshProvider.notifier).update((s) => s + 1);
         ref.read(issueListRefreshProvider.notifier).update((s) => s + 1);
+
+      // repo_non_monitored_stale fires when the rename probe detects
+      // that an entry in github.non_monitored has been renamed
+      // upstream (#493). The daemon does NOT auto-rewrite those
+      // entries — they reflect explicit operator-disabled state — so
+      // we accumulate the (old, new) pairs in a provider that a
+      // future settings/banner surface can list. No list refresh
+      // bump: the disabled entries don't drive any daemon polling
+      // so cached views are unaffected.
+      case 'repo_non_monitored_stale':
+        final oldRepo = data['old_repo'] as String? ?? '';
+        final newRepo = data['new_repo'] as String? ?? '';
+        if (oldRepo.isNotEmpty && newRepo.isNotEmpty) {
+          ref
+              .read(nonMonitoredStaleProvider.notifier)
+              .update((s) => {...s, oldRepo: newRepo});
+        }
 
       // ── Circuit breaker ────────────────────────────────────────────────
       case 'circuit_breaker_tripped':
