@@ -27,12 +27,14 @@ var ErrInvalidRepoSlug = errors.New("store: invalid repo slug")
 // rename in audit history.
 //
 // Idempotency: if a `repo_renames` row already maps `oldRepo`→`newRepo`,
-// the method returns nil without writing further state. This keeps
-// daemon restarts from re-applying a successful rename, and lets the
-// detection probe call RenameRepo on every probe tick without worry.
-func (s *Store) RenameRepo(oldRepo, newRepo string) error {
+// the method returns (false, nil) without writing further state. This
+// keeps daemon restarts from re-applying a successful rename, and lets
+// the detection probe call RenameRepo on every probe tick without
+// worry. On a real rename, returns (true, nil); callers fan that out
+// to SSE / log only when applied=true.
+func (s *Store) RenameRepo(oldRepo, newRepo string) (applied bool, err error) {
 	if err := validateRenamePair(oldRepo, newRepo); err != nil {
-		return err
+		return false, err
 	}
 
 	// Idempotency guard: if the most recent audit row for oldRepo
@@ -45,15 +47,15 @@ func (s *Store) RenameRepo(oldRepo, newRepo string) error {
 		`SELECT new_repo FROM repo_renames WHERE old_repo = ? ORDER BY id DESC LIMIT 1`,
 		oldRepo,
 	).Scan(&lastNew); err != nil && err != sql.ErrNoRows {
-		return fmt.Errorf("store: rename idempotency check: %w", err)
+		return false, fmt.Errorf("store: rename idempotency check: %w", err)
 	}
 	if lastNew.Valid && lastNew.String == newRepo {
-		return nil
+		return false, nil
 	}
 
 	tx, err := s.db.Begin()
 	if err != nil {
-		return fmt.Errorf("store: rename begin tx: %w", err)
+		return false, fmt.Errorf("store: rename begin tx: %w", err)
 	}
 	// Roll back unconditionally; the Commit path nils err so the deferred
 	// rollback becomes a no-op (sql.ErrTxDone is expected and ignored).
@@ -69,7 +71,7 @@ func (s *Store) RenameRepo(oldRepo, newRepo string) error {
 			`UPDATE `+table+` SET repo = ? WHERE repo = ?`,
 			newRepo, oldRepo,
 		); err != nil {
-			return fmt.Errorf("store: rename %s: %w", table, err)
+			return false, fmt.Errorf("store: rename %s: %w", table, err)
 		}
 	}
 
@@ -77,14 +79,14 @@ func (s *Store) RenameRepo(oldRepo, newRepo string) error {
 		`INSERT INTO repo_renames (old_repo, new_repo, renamed_at) VALUES (?, ?, ?)`,
 		oldRepo, newRepo, time.Now().UTC().Format(sqliteTimeFormat),
 	); err != nil {
-		return fmt.Errorf("store: rename insert audit: %w", err)
+		return false, fmt.Errorf("store: rename insert audit: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("store: rename commit: %w", err)
+		return false, fmt.Errorf("store: rename commit: %w", err)
 	}
 	committed = true
-	return nil
+	return true, nil
 }
 
 func validateRenamePair(oldRepo, newRepo string) error {

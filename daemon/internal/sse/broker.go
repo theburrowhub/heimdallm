@@ -44,6 +44,13 @@ const (
 	// prev_state. Only fires for PRs whose `auto_implement_issue_id`
 	// column is non-zero — standard PRs never publish this event.
 	EventPRReviewStateChanged = "pr_review_state_changed"
+
+	// EventRepoRenamed fires when the rename reconciler propagates a
+	// GitHub repo/org rename across daemon state (#489). Payload:
+	// {"old_repo": "...", "new_repo": "...", "worktree_purged": bool}.
+	// Flutter consumers refresh the repo / PR / issue lists and dismiss
+	// cached entries keyed on `old_repo`.
+	EventRepoRenamed = "repo_renamed"
 )
 
 // maxSubscribers limits the number of concurrent SSE connections to prevent

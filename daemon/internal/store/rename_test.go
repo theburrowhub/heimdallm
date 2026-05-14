@@ -97,7 +97,7 @@ func countWithRepo(t *testing.T, s *store.Store, table, repo string) int {
 func TestStore_RenameRepo_UpdatesAllTables(t *testing.T) {
 	s := seedForRename(t, "acme/old", 1000)
 
-	if err := s.RenameRepo("acme/old", "acme/new"); err != nil {
+	if _, err := s.RenameRepo("acme/old", "acme/new"); err != nil {
 		t.Fatalf("rename: %v", err)
 	}
 
@@ -136,7 +136,7 @@ func TestStore_RenameRepo_LeavesUnrelatedRowsUntouched(t *testing.T) {
 		t.Fatalf("seed unrelated activity: %v", err)
 	}
 
-	if err := s.RenameRepo("acme/old", "acme/new"); err != nil {
+	if _, err := s.RenameRepo("acme/old", "acme/new"); err != nil {
 		t.Fatalf("rename: %v", err)
 	}
 
@@ -151,7 +151,7 @@ func TestStore_RenameRepo_LeavesUnrelatedRowsUntouched(t *testing.T) {
 func TestStore_RenameRepo_InsertsAuditRow(t *testing.T) {
 	s := seedForRename(t, "acme/old", 1000)
 
-	if err := s.RenameRepo("acme/old", "acme/new"); err != nil {
+	if _, err := s.RenameRepo("acme/old", "acme/new"); err != nil {
 		t.Fatalf("rename: %v", err)
 	}
 
@@ -185,7 +185,7 @@ func TestStore_RenameRepo_IsAtomic_OnError(t *testing.T) {
 		t.Fatalf("drop activity_log: %v", err)
 	}
 
-	err := s.RenameRepo("acme/old", "acme/new")
+	_, err := s.RenameRepo("acme/old", "acme/new")
 	if err == nil {
 		t.Fatal("expected error from RenameRepo when activity_log is missing")
 	}
@@ -213,11 +213,19 @@ func TestStore_RenameRepo_IsAtomic_OnError(t *testing.T) {
 func TestStore_RenameRepo_Idempotent(t *testing.T) {
 	s := seedForRename(t, "acme/old", 1000)
 
-	if err := s.RenameRepo("acme/old", "acme/new"); err != nil {
+	applied1, err := s.RenameRepo("acme/old", "acme/new")
+	if err != nil {
 		t.Fatalf("rename #1: %v", err)
 	}
-	if err := s.RenameRepo("acme/old", "acme/new"); err != nil {
+	if !applied1 {
+		t.Error("first rename: applied=false, want true")
+	}
+	applied2, err := s.RenameRepo("acme/old", "acme/new")
+	if err != nil {
 		t.Fatalf("rename #2 (should be no-op): %v", err)
+	}
+	if applied2 {
+		t.Error("second rename: applied=true, want false (idempotent no-op)")
 	}
 
 	var n int
