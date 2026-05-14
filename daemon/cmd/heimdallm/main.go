@@ -322,6 +322,15 @@ func main() {
 		cfgMu.Unlock()
 		return repoCtx.Purge(ctx, repo, aiCfg.CloneDir)
 	})
+	// Manual rename trigger for POST /admin/repo-rename (#489).
+	// Constructs a one-shot reconciler with the same deps the probe
+	// uses so manual triggers and automatic detection share idempotency
+	// guarantees end-to-end. Reuses srv.TOMLMu() so the rewrite races
+	// safely with concurrent PATCH /config writes.
+	srv.SetRepoRenameFn(func(ctx context.Context, oldRepo, newRepo string) error {
+		reconciler := newRenameReconciler(cfg, &cfgMu, srv.TOMLMu(), s, repoCtx, broker, cfgPath)
+		return reconciler.Run(ctx, oldRepo, newRepo)
+	})
 	srv.SetCleanClonesFn(func(ctx context.Context) (int, error) {
 		cfgMu.Lock()
 		cfgSnap := cfg
@@ -713,6 +722,30 @@ func main() {
 			}
 			runTier2(ctx, adapter, limiter, prReviewPublisher, broker, tier2ConfigFn, tier2RepoConcurrencyFn, reposChan, pollInterval, coldStart)
 		}()
+
+		// Repo/org rename probe (#489). Detects when GitHub has
+		// renamed a monitored repo (or its parent org) and dispatches
+		// the reconciler to propagate the new slug across SQLite,
+		// config TOML, in-memory config, and worktrees. Interval "0"
+		// disables — operators can still trigger rename manually via
+		// POST /admin/repo-rename. The probe runs its own goroutine
+		// because its cadence (1h default) is orders of magnitude
+		// longer than Tier 2's, and we want it independent of Tier 2
+		// failures.
+		cfgMu.Lock()
+		renameInterval := parseRenameProbeInterval(cfg.AI.RepoRenameCheckInterval)
+		cfgMu.Unlock()
+		if renameInterval > 0 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				probe := newRenameProbe(ctx, cfg, &cfgMu, srv.TOMLMu(), ghClient, s, repoCtx, broker, cfgPath, renameInterval)
+				probe.Run(ctx)
+			}()
+			slog.Info("rename probe: started", "interval", renameInterval)
+		} else {
+			slog.Info("rename probe: disabled (ai.repo_rename_check_interval=0)")
+		}
 
 		slog.Info("pollers: started",
 			"discovery", discoveryInterval,

@@ -48,6 +48,11 @@ type Server struct {
 	triggerPromoteFn     func(issueID int64) error
 	cleanCloneFn         func(ctx context.Context, repo string) error
 	cleanClonesFn        func(ctx context.Context) (int, error)
+	// repoRenameFn drives the manual rename trigger at
+	// POST /admin/repo-rename (#489). Wired by main; nil when the
+	// daemon was constructed without the rename reconciler (e.g. in
+	// tests that don't need it).
+	repoRenameFn func(ctx context.Context, oldRepo, newRepo string) error
 	meFn                 func() (string, error)
 	// configFn returns the current running config as a JSON-serializable map.
 	configFn func() map[string]any
@@ -191,6 +196,22 @@ func (srv *Server) SetTriggerPromoteFn(fn func(issueID int64) error) {
 	srv.triggerPromoteFn = fn
 }
 
+// SetRepoRenameFn wires the manual rename trigger called by
+// POST /admin/repo-rename (#489). The callback runs the same
+// reconciler the rename probe uses, so a manual rename is fully
+// idempotent against subsequent probe ticks.
+func (srv *Server) SetRepoRenameFn(fn func(ctx context.Context, oldRepo, newRepo string) error) {
+	srv.repoRenameFn = fn
+}
+
+// TOMLMu returns the mutex serialising read-modify-write operations
+// on the config TOML file. The rename reconciler (#489) shares this
+// mutex with the HTTP PATCH/DELETE handlers so concurrent operator
+// edits and rename reconciliations cannot clobber each other on disk.
+func (srv *Server) TOMLMu() *sync.Mutex {
+	return &srv.tomlMu
+}
+
 // SetCleanCloneFn wires the manual single-repo managed-clone cleanup callback.
 func (srv *Server) SetCleanCloneFn(fn func(ctx context.Context, repo string) error) {
 	srv.cleanCloneFn = fn
@@ -216,11 +237,37 @@ func (srv *Server) SetRepoMetaFns(labels func(string) ([]string, error), collabs
 // SetConfigPath sets the path to config.toml for PATCH/DELETE handlers.
 func (srv *Server) SetConfigPath(path string) { srv.configPath = path }
 
-// patchTOML is the shared read-merge-write pipeline for all TOML-mutating
-// endpoints. mutateFn receives the current TOML as a map and must apply
-// its changes in-place. On success, returns the full live config for the
-// response body.
+// patchTOML is the shared read-merge-write pipeline for all
+// TOML-mutating endpoints. mutateFn receives the current TOML as a
+// map and must apply its changes in-place. On success, returns the
+// full live config for the response body.
+//
+// tomlMu is held ONLY through the read-mutate-write half. reloadFn
+// runs AFTER the unlock because it can wait on goroutines (the
+// rename probe in particular) that themselves need to acquire
+// tomlMu — keeping the mutex held across reloadFn deadlocks the
+// daemon (#489 review feedback).
 func (srv *Server) patchTOML(mutateFn func(m map[string]any) error) (map[string]any, error) {
+	m, err := srv.writeTOMLUnderLock(mutateFn)
+	if err != nil {
+		return nil, err
+	}
+	if srv.reloadFn != nil {
+		if err := srv.reloadFn(); err != nil {
+			return nil, fmt.Errorf("config reload after write: %w", err)
+		}
+	}
+	if srv.configFn != nil {
+		return srv.configFn(), nil
+	}
+	return m, nil
+}
+
+// writeTOMLUnderLock executes the read-mutate-validate-write half of
+// patchTOML while holding tomlMu, releasing the lock on every exit
+// path (including errors). Split out from patchTOML so the unlock
+// happens before reloadFn — see the comment on patchTOML.
+func (srv *Server) writeTOMLUnderLock(mutateFn func(m map[string]any) error) (map[string]any, error) {
 	srv.tomlMu.Lock()
 	defer srv.tomlMu.Unlock()
 
@@ -248,14 +295,6 @@ func (srv *Server) patchTOML(mutateFn func(m map[string]any) error) (map[string]
 	}
 	if err := config.AtomicWriteTOML(srv.configPath, m); err != nil {
 		return nil, err
-	}
-	if srv.reloadFn != nil {
-		if err := srv.reloadFn(); err != nil {
-			return nil, fmt.Errorf("config reload after write: %w", err)
-		}
-	}
-	if srv.configFn != nil {
-		return srv.configFn(), nil
 	}
 	return m, nil
 }
@@ -321,6 +360,7 @@ func (srv *Server) buildRouter() chi.Router {
 	r.Delete("/config/clones/{repo}", srv.handleDeleteManagedClone)
 	r.Post("/reload", srv.handleReload)
 	r.Post("/shutdown", srv.handleShutdown)
+	r.Post("/admin/repo-rename", srv.handleAdminRepoRename)
 	r.Get("/events", srv.handleSSE)
 	r.Get("/logs/stream", srv.handleLogsStream)
 	return r
