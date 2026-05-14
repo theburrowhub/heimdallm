@@ -210,6 +210,142 @@ func TestStore_RenameRepo_IsAtomic_OnError(t *testing.T) {
 	}
 }
 
+// TestStore_RenameRepo_HandlesRenameBackChain pins the chain-convergence
+// requirement from issue #489 ("A rename followed by a rename-back ...
+// must converge correctly"). The previous audit-table-only idempotency
+// check returned applied=false on the third leg (A→B after a B→A round
+// trip), leaving DB rows on A while the reconciler advanced the config
+// to B — silent drift.
+func TestStore_RenameRepo_HandlesRenameBackChain(t *testing.T) {
+	s := seedForRename(t, "acme/old", 1000)
+
+	step := func(oldR, newR string, wantApplied bool) {
+		t.Helper()
+		applied, err := s.RenameRepo(oldR, newR)
+		if err != nil {
+			t.Fatalf("RenameRepo(%s, %s): %v", oldR, newR, err)
+		}
+		if applied != wantApplied {
+			t.Errorf("RenameRepo(%s, %s) applied = %v, want %v", oldR, newR, applied, wantApplied)
+		}
+	}
+	stateAt := func(repo string) int {
+		t.Helper()
+		return countWithRepo(t, s, "prs", repo) +
+			countWithRepo(t, s, "issues", repo) +
+			countWithRepo(t, s, "activity_log", repo) +
+			countWithRepo(t, s, "watch_state", repo)
+	}
+
+	// Forward: rows move to acme/new.
+	step("acme/old", "acme/new", true)
+	if got := stateAt("acme/old"); got != 0 {
+		t.Errorf("after A→B: %d rows still at acme/old, want 0", got)
+	}
+	if got := stateAt("acme/new"); got == 0 {
+		t.Errorf("after A→B: 0 rows at acme/new, want > 0")
+	}
+
+	// Back: rows return to acme/old.
+	step("acme/new", "acme/old", true)
+	if got := stateAt("acme/new"); got != 0 {
+		t.Errorf("after B→A: %d rows still at acme/new, want 0", got)
+	}
+	if got := stateAt("acme/old"); got == 0 {
+		t.Errorf("after B→A: 0 rows at acme/old, want > 0")
+	}
+
+	// Forward again: this is the leg the old guard mishandled.
+	// MUST return applied=true and actually move the rows.
+	step("acme/old", "acme/new", true)
+	if got := stateAt("acme/old"); got != 0 {
+		t.Errorf("after A→B (round 2): %d rows still at acme/old — rename-back chain broken", got)
+	}
+	if got := stateAt("acme/new"); got == 0 {
+		t.Errorf("after A→B (round 2): 0 rows at acme/new, want > 0")
+	}
+
+	// A fourth A→B with no rows to move is the natural no-op.
+	step("acme/old", "acme/new", false)
+}
+
+// TestStore_RenameRepo_UpdatesActivityLogOrgOnOrgRename pins the org
+// column maintenance for org-level renames (old-org/repo →
+// new-org/repo). The ListActivity org filter (activity.go) keys on
+// the org column, so leaving it stale silently hides historical
+// rows from the post-rename org's view.
+func TestStore_RenameRepo_UpdatesActivityLogOrgOnOrgRename(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	ts := time.Now().UTC().Truncate(time.Second)
+	if _, err := s.InsertActivity(ts, "old-org", "old-org/api", "pr", 1, "x", "review", "", nil); err != nil {
+		t.Fatalf("seed activity: %v", err)
+	}
+
+	if _, err := s.RenameRepo("old-org/api", "new-org/api"); err != nil {
+		t.Fatalf("RenameRepo: %v", err)
+	}
+
+	// repo column must reflect the new slug.
+	if got := countWithRepo(t, s, "activity_log", "new-org/api"); got != 1 {
+		t.Errorf("activity_log row not renamed: %d rows at new-org/api, want 1", got)
+	}
+	// org column must also reflect the new org — otherwise the
+	// ListActivity Orgs filter loses this row.
+	var org string
+	if err := s.DB().QueryRow(
+		"SELECT org FROM activity_log WHERE repo = ?", "new-org/api",
+	).Scan(&org); err != nil {
+		t.Fatalf("scan org: %v", err)
+	}
+	if org != "new-org" {
+		t.Errorf("activity_log.org = %q, want new-org — UI filter by new-org would lose this row", org)
+	}
+}
+
+// TestStore_RenameRepo_PreservesActivityOrgOnSameOrgRename pins the
+// other half: a within-org rename keeps the org column untouched
+// (newOrg == oldOrg), and other rows under that org are unaffected.
+func TestStore_RenameRepo_PreservesActivityOrgOnSameOrgRename(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	ts := time.Now().UTC().Truncate(time.Second)
+	for _, row := range []struct{ repo string }{
+		{"acme/old"},
+		{"acme/sibling"}, // must NOT be touched
+	} {
+		if _, err := s.InsertActivity(ts, "acme", row.repo, "pr", 1, "x", "review", "", nil); err != nil {
+			t.Fatalf("seed activity for %s: %v", row.repo, err)
+		}
+	}
+
+	if _, err := s.RenameRepo("acme/old", "acme/new"); err != nil {
+		t.Fatalf("RenameRepo: %v", err)
+	}
+
+	var org string
+	if err := s.DB().QueryRow(
+		"SELECT org FROM activity_log WHERE repo = ?", "acme/new",
+	).Scan(&org); err != nil {
+		t.Fatalf("scan org for renamed row: %v", err)
+	}
+	if org != "acme" {
+		t.Errorf("renamed row org = %q, want acme", org)
+	}
+	// Sibling row in the same org must remain untouched.
+	if got := countWithRepo(t, s, "activity_log", "acme/sibling"); got != 1 {
+		t.Errorf("sibling row was touched: count = %d, want 1", got)
+	}
+}
+
 func TestStore_RenameRepo_Idempotent(t *testing.T) {
 	s := seedForRename(t, "acme/old", 1000)
 
