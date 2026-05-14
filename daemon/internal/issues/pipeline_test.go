@@ -22,14 +22,14 @@ import (
 // ── fakes ────────────────────────────────────────────────────────────────────
 
 type fakeStore struct {
-	upserts      []*store.Issue
-	reviews      []*store.IssueReview
-	prs          []*store.PR
-	nextIssueID  int64
-	nextReviewID int64
-	nextPRID     int64
-	upsertErr    error
-	insertErr    error
+	upserts       []*store.Issue
+	reviews       []*store.IssueReview
+	prs           []*store.PR
+	nextIssueID   int64
+	nextReviewID  int64
+	nextPRID      int64
+	upsertErr     error
+	insertErr     error
 	upsertPRErr   error
 	markOriginErr error
 
@@ -1003,8 +1003,8 @@ func TestPipeline_AutoImplementDefaultsCodexApprovalMode(t *testing.T) {
 	if _, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions()); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if exec.lastOpts.ApprovalMode != "full-auto" {
-		t.Errorf("ApprovalMode = %q, want full-auto (default for codex auto_implement)", exec.lastOpts.ApprovalMode)
+	if exec.lastOpts.ApprovalMode != "never" {
+		t.Errorf("ApprovalMode = %q, want never (default for codex auto_implement)", exec.lastOpts.ApprovalMode)
 	}
 }
 

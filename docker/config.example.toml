@@ -76,7 +76,7 @@ review_mode = "single"   # "single" or "multi"
 
 # [ai.agents.codex]
 # model = "codex-mini"
-# approval_mode = "full-auto"
+# approval_mode = "never"
 
 # [ai.agents.opencode]
 # model = "anthropic/claude-sonnet-4"

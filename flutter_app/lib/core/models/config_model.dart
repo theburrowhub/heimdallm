@@ -3,7 +3,7 @@
 class CLIAgentConfig {
   final String model; // --model value ('' = use CLI default)
   final int maxTurns; // claude: --max-turns (0 = not set)
-  final String approvalMode; // codex: --approval-mode ('' = not set)
+  final String approvalMode; // codex: --ask-for-approval ('' = not set)
   final String extraFlags; // free-form additional CLI flags (space-separated)
   final String?
   promptId; // agent-level prompt override (null = use global default)
@@ -88,7 +88,15 @@ class CLIAgentConfig {
     'codex': ['o4-mini', 'o3', 'gpt-4o'],
   };
 
-  static const approvalModeOptions = ['full-auto', 'auto-edit', 'suggest'];
+  static const approvalModeOptions = [
+    'never',
+    'on-request',
+    'on-failure',
+    'untrusted',
+    'full-auto',
+    'auto-edit',
+    'suggest',
+  ];
   static const effortOptions = ['low', 'medium', 'high', 'max'];
   static const permissionModeOptions = [
     'default',

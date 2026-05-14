@@ -548,7 +548,7 @@ model = "gemini-2.5-pro"
 
 [ai.agents.codex]
 model         = "codex-mini"
-approval_mode = "full-auto"
+approval_mode = "never"       # Codex --ask-for-approval value. Legacy full-auto maps to never.
 
 [ai.agents.opencode]
 model = "anthropic/claude-sonnet-4"
@@ -1106,7 +1106,7 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 
 # [ai.agents.codex]
 # model         = "codex-mini"
-# approval_mode = "full-auto"
+# approval_mode = "never"
 
 # [ai.agents.opencode]
 # model = "anthropic/claude-sonnet-4"

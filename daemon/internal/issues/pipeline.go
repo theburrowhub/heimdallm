@@ -1007,8 +1007,8 @@ func ensureAutoImplementWritePerms(cli string, opts executor.ExecOptions) execut
 		}
 	case "codex":
 		if strings.TrimSpace(opts.ApprovalMode) == "" {
-			opts.ApprovalMode = "full-auto"
-			slog.Info("issues pipeline: defaulting codex approval_mode to full-auto for auto_implement",
+			opts.ApprovalMode = "never"
+			slog.Info("issues pipeline: defaulting codex approval_mode to never for auto_implement",
 				"cli", cli)
 		}
 	case "gemini":
