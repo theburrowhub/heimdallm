@@ -246,6 +246,31 @@ func Open(dsn string) (*Store, error) {
 		started_at  DATETIME NOT NULL,
 		PRIMARY KEY (issue_id, updated_at)
 	)`)
+	// Repo rename audit table (#489). RenameRepo writes an audit row in
+	// the same TX that bulk-renames prs/issues/activity_log/watch_state,
+	// and consults the latest row per old_repo to short-circuit idempotent
+	// re-invocations on daemon restart.
+	db.Exec(`CREATE TABLE IF NOT EXISTS repo_renames (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		old_repo    TEXT NOT NULL,
+		new_repo    TEXT NOT NULL,
+		renamed_at  DATETIME NOT NULL
+	)`)
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_repo_renames_old ON repo_renames(old_repo)")
+	// watch_state is owned by bus.NewWatchStore at runtime, but RenameRepo
+	// needs to UPDATE rows here in the same TX as the prs/issues moves.
+	// Mirror the schema with IF NOT EXISTS so the rename can run from
+	// tests and migration paths that have not yet constructed a WatchStore.
+	db.Exec(`CREATE TABLE IF NOT EXISTS watch_state (
+		key        TEXT PRIMARY KEY,
+		type       TEXT NOT NULL,
+		repo       TEXT NOT NULL,
+		number     INTEGER NOT NULL,
+		github_id  INTEGER NOT NULL,
+		next_check TEXT NOT NULL,
+		backoff_ns INTEGER NOT NULL,
+		last_seen  TEXT NOT NULL
+	)`)
 	// Enforce single-flight per issue at the schema level (#458). The
 	// claim SQL already uses INSERT ... WHERE NOT EXISTS, but a UNIQUE
 	// index lifts the invariant from a query convention to a DB
