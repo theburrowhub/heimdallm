@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -1548,6 +1549,16 @@ func main() {
 			return fmt.Errorf("reload: %w", err)
 		}
 
+		cfgMu.Lock()
+		restartPollers := configReloadRequiresPollerRestart(cfg, newCfg)
+		if !restartPollers {
+			cfg = newCfg
+			cfgMu.Unlock()
+			slog.Info("config reload: applied without poller restart")
+			return nil
+		}
+		cfgMu.Unlock()
+
 		// Read the current cancel/wg under cfgMu, then stop OUTSIDE the lock.
 		// Holding cfgMu across Wait() risks deadlock: if Wait() blocks
 		// waiting for in-flight goroutines that also acquire cfgMu (e.g.
@@ -2022,6 +2033,66 @@ func parseDiscoveryInterval(discoveryInterval, pollInterval string) time.Duratio
 		return parsePollInterval(pollInterval)
 	}
 	return d
+}
+
+// configReloadRequiresPollerRestart returns true unless the diff is limited to
+// fields known to be read dynamically through cfg under cfgMu. This keeps new
+// config fields conservative by default: if a future field is not scrubbed in
+// configReloadRestartSnapshot, reloads restart pollers until the field is
+// explicitly classified as dynamic.
+func configReloadRequiresPollerRestart(oldCfg, newCfg *config.Config) bool {
+	if oldCfg == nil || newCfg == nil {
+		return true
+	}
+	return !reflect.DeepEqual(configReloadRestartSnapshot(oldCfg), configReloadRestartSnapshot(newCfg))
+}
+
+func configReloadRestartSnapshot(c *config.Config) config.Config {
+	snap := *c
+	snap.GitHub.Repositories = normalizeReloadStringSlice(snap.GitHub.Repositories)
+	snap.GitHub.NonMonitored = normalizeReloadStringSlice(snap.GitHub.NonMonitored)
+	snap.GitHub.DiscoveryOrgs = normalizeReloadStringSlice(snap.GitHub.DiscoveryOrgs)
+	snap.GitHub.LocalDirBase = nil
+	snap.GitHub.AutoEnablePROnDiscovery = nil
+	snap.GitHub.WatchInterval = ""
+	snap.GitHub.IssueTracking = config.IssueTrackingConfig{}
+	snap.GitHub.ReviewGuards = config.ReviewGuardsConfig{}
+
+	snap.AI.Primary = ""
+	snap.AI.Fallback = ""
+	snap.AI.ReviewMode = ""
+	snap.AI.ExecutionTimeout = ""
+	snap.AI.Agents = nil
+	snap.AI.Repos = nil
+	snap.AI.Orgs = nil
+	snap.AI.PRMetadata = config.PRMetadataConfig{}
+	snap.AI.PRReviewers = nil
+	snap.AI.PRLabels = nil
+	snap.AI.PRAssignee = ""
+	snap.AI.PRDraft = nil
+	snap.AI.IssuePrompt = ""
+	snap.AI.ImplementPrompt = ""
+	snap.AI.RefinementTimeout = ""
+	snap.AI.TriageOwner = ""
+	snap.AI.CloneDir = ""
+	snap.AI.AutoPromoteTriage = nil
+	snap.AI.AutoPromoteRefinement = nil
+	snap.AI.Tier2RepoConcurrency = 0
+	snap.AI.GeneratePRDescription = false
+	snap.AI.ReviewResponse = config.ReviewResponseConfig{}
+	snap.AI.ReviewFix = config.ReviewFixConfig{}
+
+	snap.Retention = config.RetentionConfig{}
+	snap.ActivityLog = config.ActivityLogConfig{}
+	snap.CircuitBreaker = config.CircuitBreakerConfig{}
+	return snap
+}
+
+func normalizeReloadStringSlice(v []string) []string {
+	if len(v) == 0 {
+		return nil
+	}
+	return append([]string(nil), v...)
 }
 
 // resolveExecutionTimeout returns the effective execution timeout for the CLI
