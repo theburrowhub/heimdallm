@@ -9,6 +9,14 @@
 * **issues:** issue classification now follows the state-machine order `skip > blocked > review_only > refinement > develop > default_action`. If a repo intentionally double-labels issues with triage/review and develop labels, the earlier stage now wins so Heimdallm does not skip triage or refinement during promotion.
 * **issues:** `auto_promote_triage` defaults on only when `refinement_labels` is configured. Repos without a refinement target keep their previous review-only behavior; set `auto_promote_triage = false` explicitly to keep refinement manual even when refinement labels exist.
 
+## [0.6.21](https://github.com/theburrowhub/heimdallm/compare/v0.6.20...v0.6.21) (2026-05-15)
+
+
+### Bug Fixes
+
+* avoid poller restart for dynamic config reloads ([#503](https://github.com/theburrowhub/heimdallm/issues/503)) ([5b60cd0](https://github.com/theburrowhub/heimdallm/commit/5b60cd03362dc9bab4dca1bce80479a5e2dfae57))
+* hide self-authored PRs from review queue ([#500](https://github.com/theburrowhub/heimdallm/issues/500)) ([fc58697](https://github.com/theburrowhub/heimdallm/commit/fc58697b277efa76e867404c1b0768749ec37ec7))
+
 ## [0.6.20](https://github.com/theburrowhub/heimdallm/compare/v0.6.19...v0.6.20) (2026-05-14)
 
 
