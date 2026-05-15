@@ -8,10 +8,10 @@ build:
 	go build -o $(BINARY) $(CMD)
 
 test:
-	go test ./... -timeout 60s
+	go test -timeout 60s ./...
 
 test-race:
-	go test ./... -race -timeout 60s
+	go test -race -timeout 60s ./...
 
 lint:
 	go vet ./...
