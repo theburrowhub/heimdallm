@@ -900,6 +900,12 @@ Worst-case disk use: `(HEIMDALLM_LOG_KEEP + 1) × HEIMDALLM_LOG_MAX_MB`.
 
 ### Installation
 
+**Homebrew:**
+
+```bash
+brew install theburrowhub/tap/heimdallm-cli
+```
+
 **Binary download:**
 
 Download the appropriate archive from [GitHub Releases](https://github.com/theburrowhub/heimdallm/releases) (look for `heimdallm-cli_*`):
@@ -940,6 +946,29 @@ make setup   # prints the token and copies it into docker/.env
 docker exec heimdallm cat /data/api_token
 ```
 
+### Local development
+
+The CLI is a separate Go module under `cli/`. It uses Cobra for commands and
+Bubble Tea + Lipgloss for the dashboard, and it talks to the daemon through
+`cli/internal/api/client.go`.
+
+From the repository root:
+
+```bash
+make build-cli    # builds cli/bin/heimdallm-cli
+make test-cli     # host-safe CLI tests
+make lint-cli     # go vet for the CLI module
+make dev-daemon   # run the daemon at http://localhost:7842
+make dev-cli      # run heimdallm-cli dashboard
+```
+
+Set `HEIMDALLM_HOST` and `HEIMDALLM_TOKEN` when testing against a non-local
+daemon:
+
+```bash
+HEIMDALLM_HOST=https://heimdallm.example.com HEIMDALLM_TOKEN=... make dev-cli
+```
+
 ### Commands
 
 | Command | Description |
@@ -953,6 +982,28 @@ docker exec heimdallm cat /data/api_token
 | `heimdallm-cli config` | Print the daemon's running configuration as JSON |
 | `heimdallm-cli stats` | Review statistics: totals, by severity, by CLI, top repos, timing |
 | `heimdallm-cli dashboard` | Live terminal dashboard |
+
+### TUI dashboard keybindings
+
+The dashboard tabs are Activity, PRs, Issues, Config, Stats, Logs, and Server.
+
+| Key | Action |
+|---|---|
+| `tab`, `l`, `right` | Move to the next tab |
+| `h`, `left` | Move to the previous tab |
+| `1`-`7` | Jump directly to a tab |
+| `r` | Refresh data |
+| `s` | Stop the daemon (opens a confirmation prompt) |
+| `q`, `ctrl+c` | Quit |
+| `j`, `down` | Move or scroll down |
+| `k`, `up` | Move or scroll up |
+| `pgdn`, `pgup` | Page through long lists or detail views |
+| `g` | Jump to the top of the current list |
+| `G` | Follow the live Logs tab |
+| `enter` | Open PR or issue details |
+| `esc` | Close an open detail view |
+| `p` | Promote a promotable issue |
+| `y` / `n` | Confirm or cancel daemon shutdown |
 
 ---
 

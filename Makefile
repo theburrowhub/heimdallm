@@ -16,7 +16,7 @@ else
   APP_BUNDLE       := $(FLUTTER_BUILD)/bundle
 endif
 
-.PHONY: build-daemon build-app build-web test test-docker dev dev-daemon dev-stop \
+.PHONY: build-daemon build-app build-web build-cli test test-cli lint-cli dev-cli test-docker dev dev-daemon dev-stop \
         release-local package-macos install-service verify-linux run-linux \
         install-linux uninstall-linux \
         setup up up-build up-daemon up-build-daemon down logs logs-daemon \
@@ -30,6 +30,9 @@ build-daemon:
 build-app:
 	cd flutter_app && flutter build $(FLUTTER_DEVICE) --release
 
+build-cli:
+	$(MAKE) -C cli build
+
 # Flutter Web bundle, consumed by docker/Dockerfile.web (served via Nginx).
 # --base-href=/ matches the Nginx server block that expects assets at the root.
 build-web:
@@ -40,6 +43,13 @@ build-web:
 test:
 	cd daemon && make test
 	cd flutter_app && flutter test
+	$(MAKE) -C cli test
+
+test-cli:
+	$(MAKE) -C cli test
+
+lint-cli:
+	$(MAKE) -C cli lint
 
 # ── Sandboxed Go tests (EDR-safe) ─────────────────────────────────────────────
 #
@@ -95,6 +105,9 @@ dev: build-daemon dev-stop
 dev-daemon: build-daemon dev-stop
 	@echo "▶  Daemon en http://localhost:7842 (Ctrl-C para parar)"
 	GITHUB_TOKEN="$${GITHUB_TOKEN}" $(DAEMON_BIN)
+
+dev-cli:
+	$(MAKE) -C cli dev
 
 dev-stop:
 	@pkill -f "$(DAEMON_BIN)" 2>/dev/null && echo "↓  Daemon parado" || true
