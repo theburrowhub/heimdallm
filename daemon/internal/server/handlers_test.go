@@ -101,6 +101,31 @@ func TestHandlerListPRs(t *testing.T) {
 	}
 }
 
+func TestHandlerListPRsFiltersSelfAuthored(t *testing.T) {
+	srv, s := setupServer(t)
+	srv.SetMeFn(func() (string, error) { return "ivan", nil })
+	now := time.Now()
+	s.UpsertPR(&store.PR{GithubID: 1, Repo: "org/r", Number: 1, Title: "own", Author: "Ivan", URL: "u1", State: "open", UpdatedAt: now, FetchedAt: now})
+	s.UpsertPR(&store.PR{GithubID: 2, Repo: "org/r", Number: 2, Title: "team", Author: "teammate", URL: "u2", State: "open", UpdatedAt: now, FetchedAt: now})
+
+	req := httptest.NewRequest("GET", "/prs", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list prs: status %d", w.Code)
+	}
+	var prs []map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&prs); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(prs) != 1 {
+		t.Fatalf("expected 1 non-self PR, got %d: %#v", len(prs), prs)
+	}
+	if prs[0]["author"] != "teammate" {
+		t.Fatalf("author = %v, want teammate", prs[0]["author"])
+	}
+}
+
 func TestHandlerGetPR(t *testing.T) {
 	srv, s := setupServer(t)
 	id, _ := s.UpsertPR(&store.PR{GithubID: 2, Repo: "org/r", Number: 2, Title: "t", Author: "a", URL: "u", State: "open", UpdatedAt: time.Now(), FetchedAt: time.Now()})

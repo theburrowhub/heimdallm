@@ -133,8 +133,39 @@ func (c *Client) FetchPRsToReview() ([]*PullRequest, error) {
 	if err != nil {
 		return nil, err
 	}
+	prs, skipped := filterSelfAuthoredPRs(prs, username)
+	if skipped > 0 {
+		slog.Info("github: self-authored PRs skipped by review scope", "count", skipped, "user", username)
+	}
 	slog.Info("github: PRs to review (all repos)", "count", len(prs))
 	return prs, nil
+}
+
+func filterSelfAuthoredPRs(prs []*PullRequest, username string) ([]*PullRequest, int) {
+	username = normalizeGitHubLoginForCompare(username)
+	if username == "" || len(prs) == 0 {
+		return prs, 0
+	}
+	filtered := make([]*PullRequest, 0, len(prs))
+	skipped := 0
+	for _, pr := range prs {
+		if pr != nil && githubLoginsEqual(pr.User.Login, username) {
+			skipped++
+			continue
+		}
+		filtered = append(filtered, pr)
+	}
+	return filtered, skipped
+}
+
+func githubLoginsEqual(a, b string) bool {
+	a = normalizeGitHubLoginForCompare(a)
+	b = normalizeGitHubLoginForCompare(b)
+	return a != "" && b != "" && strings.EqualFold(a, b)
+}
+
+func normalizeGitHubLoginForCompare(login string) string {
+	return strings.TrimSpace(strings.TrimLeft(login, "@"))
 }
 
 // FetchPRs fetches all open PRs where the user is reviewer, assignee, or author.

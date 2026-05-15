@@ -47,6 +47,50 @@ func TestFetchPRs(t *testing.T) {
 	}
 }
 
+func TestFetchPRsToReviewFiltersSelfAuthored(t *testing.T) {
+	prs := []gh.PullRequest{
+		{ID: 1, Number: 41, Title: "Own PR", HTMLURL: "https://github.com/org/repo/pull/41",
+			User: gh.User{Login: "alice"}, State: "open",
+			Head: gh.Branch{Repo: gh.Repo{FullName: "org/repo"}},
+		},
+		{ID: 2, Number: 42, Title: "Team PR", HTMLURL: "https://github.com/org/repo/pull/42",
+			User: gh.User{Login: "bob"}, State: "open",
+			Head: gh.Branch{Repo: gh.Repo{FullName: "org/repo"}},
+		},
+	}
+	var searchQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/user":
+			json.NewEncoder(w).Encode(map[string]string{"login": "alice"})
+		case "/search/issues":
+			searchQuery = r.URL.Query().Get("q")
+			result := struct {
+				Items []gh.PullRequest `json:"items"`
+			}{Items: prs}
+			json.NewEncoder(w).Encode(result)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	got, err := client.FetchPRsToReview()
+	if err != nil {
+		t.Fatalf("FetchPRsToReview: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 PR after self-author filter, got %d", len(got))
+	}
+	if got[0].User.Login != "bob" {
+		t.Fatalf("remaining author = %q, want bob", got[0].User.Login)
+	}
+	if !strings.Contains(searchQuery, "review-requested:alice") {
+		t.Fatalf("search query = %q, want review-requested:alice", searchQuery)
+	}
+}
+
 func TestFetchDiff(t *testing.T) {
 	diff := "diff --git a/main.go b/main.go\n+added line\n"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
