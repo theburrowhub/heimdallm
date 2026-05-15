@@ -398,12 +398,43 @@ func (srv *Server) handleListPRs(w http.ResponseWriter, r *http.Request) {
 		*store.PR
 		LatestReview *store.Review `json:"latest_review,omitempty"`
 	}
+	authLogin := srv.authenticatedLoginForPRListing()
+	skippedSelf := 0
 	result := make([]prWithReview, 0, len(prs))
 	for _, pr := range prs {
+		if authLogin != "" && githubLoginsEqual(pr.Author, authLogin) {
+			skippedSelf++
+			continue
+		}
 		rev, _ := srv.store.LatestReviewForPR(pr.ID)
 		result = append(result, prWithReview{PR: pr, LatestReview: rev})
 	}
+	if skippedSelf > 0 {
+		slog.Info("handleListPRs: self-authored PRs hidden from review listing", "count", skippedSelf, "user", authLogin)
+	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (srv *Server) authenticatedLoginForPRListing() string {
+	if srv.meFn == nil {
+		return ""
+	}
+	login, err := srv.meFn()
+	if err != nil {
+		slog.Warn("handleListPRs: authenticated user unavailable; self-authored PRs remain visible", "err", err)
+		return ""
+	}
+	return normalizeGitHubLoginForCompare(login)
+}
+
+func githubLoginsEqual(a, b string) bool {
+	a = normalizeGitHubLoginForCompare(a)
+	b = normalizeGitHubLoginForCompare(b)
+	return a != "" && b != "" && strings.EqualFold(a, b)
+}
+
+func normalizeGitHubLoginForCompare(login string) string {
+	return strings.TrimSpace(strings.TrimLeft(login, "@"))
 }
 
 func (srv *Server) handleGetPR(w http.ResponseWriter, r *http.Request) {

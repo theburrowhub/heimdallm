@@ -877,6 +877,7 @@ func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, is
 	// a metadata failure does not roll back the PR, which is already public.
 	metadataOpts := opts
 	metadataOpts.PRAssignee = resolveAutoImplementPRAssignee(issue, opts)
+	metadataOpts.PRReviewers = filterSelfPRReviewers(metadataOpts.PRReviewers, firstNonEmpty(p.botLogin, opts.AuthUser))
 	applyPRMetadata(p.gh, issue.Repo, prNumber, metadataOpts)
 
 	// Post a done-marker comment on the issue so watchers see the PR land
@@ -1148,6 +1149,26 @@ func applyPRMetadata(gh PRMetadataApplier, repo string, prNumber int, opts RunOp
 				"repo", repo, "pr", prNumber, "err", err)
 		}
 	}
+}
+
+func filterSelfPRReviewers(reviewers []string, authUser string) []string {
+	authUser = normalizeGitHubLogin(authUser)
+	if authUser == "" || len(reviewers) == 0 {
+		return reviewers
+	}
+	filtered := make([]string, 0, len(reviewers))
+	skipped := 0
+	for _, reviewer := range reviewers {
+		if strings.EqualFold(normalizeGitHubLogin(reviewer), authUser) {
+			skipped++
+			continue
+		}
+		filtered = append(filtered, reviewer)
+	}
+	if skipped > 0 {
+		slog.Info("issues pipeline: self reviewer skipped on auto-created PR", "count", skipped, "user", authUser)
+	}
+	return filtered
 }
 
 func resolveAutoImplementPRAssignee(issue *github.Issue, opts RunOptions) string {

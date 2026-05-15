@@ -1921,6 +1921,28 @@ func TestAutoImplement_AppliesPRMetadata(t *testing.T) {
 	}
 }
 
+func TestAutoImplement_FiltersAuthenticatedUserFromPRReviewers(t *testing.T) {
+	gh := &fakeGH{defaultBranch: "main", createPRNumber: 77}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("implement done")}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(&fakeStore{}, gh, exec, git, &fakeBroker{}, nil)
+
+	opts := issues.RunOptions{
+		Primary:     "claude",
+		ExecOpts:    executor.ExecOptions{WorkDir: "/tmp/repo"},
+		GitHubToken: "tok",
+		AuthUser:    "ivanmunozruiz",
+		PRReviewers: []string{"alice", "ivanmunozruiz", "@IVANMUNOZRUIZ", "bob"},
+	}
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), opts); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gh.reviewersCalls) != 1 || !stringsEqual(gh.reviewersCalls[0], []string{"alice", "bob"}) {
+		t.Errorf("reviewers = %v, want [alice bob]", gh.reviewersCalls)
+	}
+}
+
 func TestAutoImplement_DefaultsPRAssigneeToSingleIssueAssignee(t *testing.T) {
 	gh := &fakeGH{defaultBranch: "main", createPRNumber: 77}
 	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("implement done")}
