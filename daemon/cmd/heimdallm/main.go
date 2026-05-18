@@ -305,6 +305,15 @@ func main() {
 	// cfgMu protects cfg and the pipeline so reload is safe from any goroutine.
 	var cfgMu sync.Mutex
 	var reloadMu sync.Mutex // serialises config reloads to prevent duplicate pipelines
+	var lastPollUnixNano int64
+	var pollIntervalNano int64
+	storePollInterval := func(interval time.Duration) {
+		atomic.StoreInt64(&pollIntervalNano, int64(interval))
+	}
+	storePollInterval(parsePollInterval(cfg.GitHub.PollInterval))
+	recordPollCompleted := func(_ string, at time.Time) {
+		atomic.StoreInt64(&lastPollUnixNano, at.UTC().UnixNano())
+	}
 
 	srv := server.NewWithOptions(s, broker, p, apiToken, server.Options{
 		Version:   versionString(),
@@ -312,6 +321,17 @@ func main() {
 	})
 	srv.SetNATSConn(eventBus.Conn())
 	srv.SetConfigPath(cfgPath)
+	srv.SetHealthSnapshotFn(func() server.HealthSnapshot {
+		interval := time.Duration(atomic.LoadInt64(&pollIntervalNano))
+		var lastPoll time.Time
+		if n := atomic.LoadInt64(&lastPollUnixNano); n > 0 {
+			lastPoll = time.Unix(0, n).UTC()
+		}
+		return server.HealthSnapshot{
+			LastPollAt:   lastPoll,
+			PollInterval: interval,
+		}
+	})
 	shutdownReq := make(chan struct{}, 1)
 
 	// discoverySvc holds the discovered repo cache.
@@ -704,6 +724,7 @@ func main() {
 		cfgMu.Lock()
 		pollInterval := parsePollInterval(cfg.GitHub.PollInterval)
 		cfgMu.Unlock()
+		storePollInterval(pollInterval)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -721,7 +742,7 @@ func main() {
 				defer cfgMu.Unlock()
 				return cfg.AI.Tier2RepoConcurrency
 			}
-			runTier2(ctx, adapter, limiter, prReviewPublisher, broker, tier2ConfigFn, tier2RepoConcurrencyFn, reposChan, pollInterval, coldStart)
+			runTier2(ctx, adapter, limiter, prReviewPublisher, broker, tier2ConfigFn, tier2RepoConcurrencyFn, reposChan, pollInterval, coldStart, recordPollCompleted)
 		}()
 
 		// Repo/org rename probe (#489). Detects when GitHub has
@@ -2284,6 +2305,7 @@ func runTier2(
 	reposChan <-chan []string,
 	interval time.Duration,
 	coldStart bool,
+	pollCompletedFn func(kind string, at time.Time),
 ) {
 	var (
 		mu    sync.Mutex
@@ -2326,7 +2348,11 @@ func runTier2(
 		prStart := time.Now()
 		prCount := 0
 		defer func() {
-			sse.EmitPollingCompleted(ssePub, "prs", prCount, time.Since(prStart))
+			completedAt := time.Now()
+			if pollCompletedFn != nil {
+				pollCompletedFn("prs", completedAt)
+			}
+			sse.EmitPollingCompleted(ssePub, "prs", prCount, completedAt.Sub(prStart))
 		}()
 		if err := limiter.Acquire(ctx, scheduler.TierRepo); err != nil {
 			return
@@ -2372,7 +2398,11 @@ func runTier2(
 		// would silently emit 0.
 		issueCount := 0
 		defer func() {
-			sse.EmitPollingCompleted(ssePub, "issues", issueCount, time.Since(issueStart))
+			completedAt := time.Now()
+			if pollCompletedFn != nil {
+				pollCompletedFn("issues", completedAt)
+			}
+			sse.EmitPollingCompleted(ssePub, "issues", issueCount, completedAt.Sub(issueStart))
 		}()
 		if err := limiter.Acquire(ctx, scheduler.TierRepo); err != nil {
 			return
