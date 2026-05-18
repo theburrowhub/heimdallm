@@ -77,3 +77,25 @@ func TestDashboardDropsStaleHealthProbeAfterHeartbeat(t *testing.T) {
 		t.Fatal("health check flag was not cleared")
 	}
 }
+
+func TestDashboardDropsStaleReconnectAfterWatchdogReset(t *testing.T) {
+	d := NewDashboard("http://localhost:0", "", "test")
+	oldSessionID := d.sseSessionID
+
+	model, cmd := d.Update(sseDisconnectMsg{sessionID: oldSessionID, err: errors.New("stream closed")})
+	d = model.(*Dashboard)
+	if cmd == nil {
+		t.Fatal("disconnect should schedule delayed reconnect")
+	}
+
+	d.resetSSE()
+	if d.sseSessionID == oldSessionID {
+		t.Fatal("reset did not bump SSE session")
+	}
+
+	model, cmd = d.Update(sseReconnectMsg{sessionID: oldSessionID})
+	d = model.(*Dashboard)
+	if cmd != nil {
+		t.Fatal("stale reconnect tick should be ignored")
+	}
+}

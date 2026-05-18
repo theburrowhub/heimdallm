@@ -94,7 +94,7 @@ type sseDisconnectMsg struct {
 	sessionID int64
 	err       error
 }
-type sseReconnectMsg struct{}
+type sseReconnectMsg struct{ sessionID int64 }
 type sseWatchdogMsg time.Time
 type healthCheckMsg struct {
 	err         error
@@ -391,11 +391,15 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		d.connected = false
 		d.err = msg.err
 		d.sseStale = false
+		sessionID := msg.sessionID
 		return d, tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
-			return sseReconnectMsg{}
+			return sseReconnectMsg{sessionID: sessionID}
 		})
 
 	case sseReconnectMsg:
+		if msg.sessionID != d.sseSessionID {
+			return d, nil
+		}
 		connect, _ := d.sseCommands()
 		return d, connect
 
@@ -410,16 +414,13 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			d.sseStatusMessage = "Daemon health check failed"
 			return d, nil
 		}
-		if d.sseStale {
-			d.resetSSE()
-			connect, listen := d.sseCommands()
-			d.connected = false
-			d.err = nil
-			d.sseStale = false
-			d.sseStatusMessage = "Reconnecting SSE stream..."
-			return d, tea.Batch(connect, listen)
-		}
-		return d, nil
+		d.resetSSE()
+		connect, listen := d.sseCommands()
+		d.connected = false
+		d.err = nil
+		d.sseStale = false
+		d.sseStatusMessage = "Reconnecting SSE stream..."
+		return d, tea.Batch(connect, listen)
 
 	case shutdownMsg:
 		d.shutdownInFlight = false
