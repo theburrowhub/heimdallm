@@ -306,6 +306,11 @@ func main() {
 	var cfgMu sync.Mutex
 	var reloadMu sync.Mutex // serialises config reloads to prevent duplicate pipelines
 	var lastPollUnixNano int64
+	var pollIntervalNano int64
+	storePollInterval := func(interval time.Duration) {
+		atomic.StoreInt64(&pollIntervalNano, int64(interval))
+	}
+	storePollInterval(parsePollInterval(cfg.GitHub.PollInterval))
 	recordPollCompleted := func(_ string, at time.Time) {
 		atomic.StoreInt64(&lastPollUnixNano, at.UTC().UnixNano())
 	}
@@ -317,9 +322,7 @@ func main() {
 	srv.SetNATSConn(eventBus.Conn())
 	srv.SetConfigPath(cfgPath)
 	srv.SetHealthSnapshotFn(func() server.HealthSnapshot {
-		cfgMu.Lock()
-		interval := parsePollInterval(cfg.GitHub.PollInterval)
-		cfgMu.Unlock()
+		interval := time.Duration(atomic.LoadInt64(&pollIntervalNano))
 		var lastPoll time.Time
 		if n := atomic.LoadInt64(&lastPollUnixNano); n > 0 {
 			lastPoll = time.Unix(0, n).UTC()
@@ -721,6 +724,7 @@ func main() {
 		cfgMu.Lock()
 		pollInterval := parsePollInterval(cfg.GitHub.PollInterval)
 		cfgMu.Unlock()
+		storePollInterval(pollInterval)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

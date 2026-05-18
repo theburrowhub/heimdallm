@@ -71,18 +71,6 @@ class DaemonConnectionStatus {
 
   const DaemonConnectionStatus.connecting()
     : this(phase: DaemonConnectionPhase.connecting);
-
-  DaemonConnectionStatus copyWith({
-    DaemonConnectionPhase? phase,
-    DateTime? lastEventAt,
-    String? message,
-  }) {
-    return DaemonConnectionStatus(
-      phase: phase ?? this.phase,
-      lastEventAt: lastEventAt ?? this.lastEventAt,
-      message: message,
-    );
-  }
 }
 
 class DaemonConnectionNotifier extends Notifier<DaemonConnectionStatus> {
@@ -137,6 +125,7 @@ class DaemonConnectionNotifier extends Notifier<DaemonConnectionStatus> {
       final healthy = await ref.read(apiClientProvider).checkHealth();
       if (!ref.mounted) return;
       if (healthy) {
+        state = const DaemonConnectionStatus.connecting();
         ref.invalidate(sseStreamProvider);
       } else {
         state = DaemonConnectionStatus(
