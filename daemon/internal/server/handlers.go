@@ -389,10 +389,9 @@ func (srv *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"status": "ok",
 		"checks": map[string]any{
-			"nats":       srv.natsHealthCheck(),
-			"sqlite":     srv.sqliteHealthCheck(r.Context()),
-			"last_poll":  srv.lastPollHealthCheck(now),
-			"goroutines": map[string]any{"count": runtime.NumGoroutine()},
+			"nats":      srv.natsHealthCheck(),
+			"sqlite":    srv.sqliteHealthCheck(r.Context()),
+			"last_poll": srv.lastPollHealthCheck(now),
 		},
 	}
 	if srv.version != "" {
@@ -436,13 +435,13 @@ func (srv *Server) sqliteHealthCheck(ctx context.Context) map[string]any {
 		out["error"] = err.Error()
 		return out
 	}
-	var result string
-	if err := srv.store.DB().QueryRowContext(ctx, "PRAGMA quick_check").Scan(&result); err != nil {
+	var result int
+	if err := srv.store.DB().QueryRowContext(ctx, "SELECT 1").Scan(&result); err != nil {
 		out["error"] = err.Error()
 		return out
 	}
-	out["quick_check"] = result
-	out["ok"] = result == "ok"
+	out["query"] = "ok"
+	out["ok"] = result == 1
 	return out
 }
 
@@ -1197,8 +1196,7 @@ func (srv *Server) handleSSEViaNATS(w http.ResponseWriter, r *http.Request, flus
 func (srv *Server) heartbeatEvent(now time.Time) sse.Event {
 	now = now.UTC()
 	data := map[string]any{
-		"ts":         now.Format(time.RFC3339),
-		"goroutines": runtime.NumGoroutine(),
+		"ts": now.Format(time.RFC3339),
 	}
 	snap := srv.healthSnapshot()
 	if snap.LastPollAt.IsZero() {
@@ -1214,6 +1212,7 @@ func (srv *Server) heartbeatEvent(now time.Time) sse.Event {
 	}
 	b, err := json.Marshal(data)
 	if err != nil {
+		slog.Warn("marshal heartbeat payload", "err", err)
 		b = []byte(`{"ts":"` + now.Format(time.RFC3339) + `"}`)
 	}
 	return sse.Event{Type: sse.EventHeartbeat, Data: string(b)}

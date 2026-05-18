@@ -100,7 +100,8 @@ class DashboardScreen extends ConsumerWidget {
                 onDismiss: () =>
                     ref.read(circuitBreakerProvider.notifier).set(null),
               ),
-            if (connection != null)
+            if (connection != null &&
+                connection.phase != DaemonConnectionPhase.connected)
               _ConnectionBanner(
                 status: connection,
                 onRestart: () => server_actions.restartDaemon(context, ref),

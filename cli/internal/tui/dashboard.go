@@ -54,6 +54,7 @@ type Dashboard struct {
 	confirmShutdown   bool
 	shutdownInFlight  bool
 	shutdownMessage   string
+	sseStatusMessage  string
 	startTime         time.Time
 	lastUpdate        time.Time
 	lastSSEEvent      time.Time
@@ -291,7 +292,7 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !d.shutdownInFlight && !d.sseHealthChecking && !d.lastSSEEvent.IsZero() && time.Since(d.lastSSEEvent) > time.Minute {
 			d.sseStale = true
 			d.sseHealthChecking = true
-			d.shutdownMessage = "SSE stream stale; checking daemon health..."
+			d.sseStatusMessage = "SSE stream stale; checking daemon health..."
 			cmds = append(cmds, d.checkHealth(d.lastSSEEvent))
 		}
 		return d, tea.Batch(cmds...)
@@ -349,11 +350,12 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		d.lastSSEEvent = time.Now()
 		d.sseStale = false
 		if !d.sseHealthChecking {
-			d.shutdownMessage = ""
+			d.sseStatusMessage = ""
 			d.connected = true
 			d.err = nil
 		}
 		if event.Type == "heartbeat" {
+			// Heartbeats are liveness-only and intentionally skipped in Activity/Logs.
 			return d, d.listenSSE(d.sseSessionID, d.sseCtx, d.sseEvents)
 		}
 		itemType, info := formatSSEData(event.Type, event.Data)
@@ -403,7 +405,7 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			d.connected = false
 			d.err = msg.err
-			d.shutdownMessage = "Daemon health check failed"
+			d.sseStatusMessage = "Daemon health check failed"
 			return d, nil
 		}
 		if d.sseStale {
@@ -412,7 +414,7 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			d.connected = false
 			d.err = nil
 			d.sseStale = false
-			d.shutdownMessage = "Reconnecting SSE stream..."
+			d.sseStatusMessage = "Reconnecting SSE stream..."
 			return d, tea.Batch(connect, listen)
 		}
 		return d, nil
@@ -824,6 +826,9 @@ func (d *Dashboard) renderStatusBar() string {
 		parts = append(parts, "Confirm stop: y/n")
 	} else if d.shutdownMessage != "" {
 		parts = append(parts, truncateRunes(d.shutdownMessage, 80))
+	}
+	if d.sseStatusMessage != "" {
+		parts = append(parts, truncateRunes(d.sseStatusMessage, 80))
 	}
 
 	return headerStyle.Render(strings.Join(parts, "  │  "))

@@ -76,9 +76,11 @@ class DaemonConnectionStatus {
 class DaemonConnectionNotifier extends Notifier<DaemonConnectionStatus> {
   static const staleAfter = Duration(seconds: 60);
   static const checkEvery = Duration(seconds: 5);
+  static const maxReconnectDelay = Duration(minutes: 5);
 
   Timer? _watchdog;
   bool _checkingHealth = false;
+  int _reconnectAttempts = 0;
 
   @override
   DaemonConnectionStatus build() {
@@ -94,6 +96,7 @@ class DaemonConnectionNotifier extends Notifier<DaemonConnectionStatus> {
         );
       }
       next.whenData((_) {
+        _reconnectAttempts = 0;
         state = DaemonConnectionStatus(
           phase: DaemonConnectionPhase.connected,
           lastEventAt: DateTime.now(),
@@ -108,7 +111,7 @@ class DaemonConnectionNotifier extends Notifier<DaemonConnectionStatus> {
   void _checkForStaleStream() {
     final lastEventAt = state.lastEventAt;
     if (lastEventAt == null) return;
-    if (DateTime.now().difference(lastEventAt) < staleAfter) return;
+    if (DateTime.now().difference(lastEventAt) < _currentStaleAfter()) return;
     if (state.phase == DaemonConnectionPhase.offline) return;
     state = DaemonConnectionStatus(
       phase: DaemonConnectionPhase.stale,
@@ -118,6 +121,12 @@ class DaemonConnectionNotifier extends Notifier<DaemonConnectionStatus> {
     unawaited(_verifyAndReconnect());
   }
 
+  Duration _currentStaleAfter() {
+    final shift = _reconnectAttempts > 3 ? 3 : _reconnectAttempts;
+    final delay = Duration(seconds: staleAfter.inSeconds * (1 << shift));
+    return delay.compareTo(maxReconnectDelay) > 0 ? maxReconnectDelay : delay;
+  }
+
   Future<void> _verifyAndReconnect() async {
     if (_checkingHealth) return;
     _checkingHealth = true;
@@ -125,7 +134,11 @@ class DaemonConnectionNotifier extends Notifier<DaemonConnectionStatus> {
       final healthy = await ref.read(apiClientProvider).checkHealth();
       if (!ref.mounted) return;
       if (healthy) {
-        state = const DaemonConnectionStatus.connecting();
+        _reconnectAttempts++;
+        state = DaemonConnectionStatus(
+          phase: DaemonConnectionPhase.connecting,
+          lastEventAt: DateTime.now(),
+        );
         ref.invalidate(sseStreamProvider);
       } else {
         state = DaemonConnectionStatus(

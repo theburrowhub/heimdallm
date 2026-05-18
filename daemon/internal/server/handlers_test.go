@@ -81,9 +81,6 @@ func TestHealth_ReturnsDeepChecks(t *testing.T) {
 	if last, ok := checks["last_poll"].(map[string]any); !ok || last["ok"] != true || last["at"] == nil {
 		t.Fatalf("last_poll check not ok: %v", checks["last_poll"])
 	}
-	if goroutines, ok := checks["goroutines"].(map[string]any); !ok || goroutines["count"] == nil {
-		t.Fatalf("goroutines check missing: %v", checks["goroutines"])
-	}
 }
 
 func TestHealth_ReturnsVersionAndStartedAt(t *testing.T) {
@@ -172,7 +169,7 @@ func TestEventsEmitsObservableHeartbeat(t *testing.T) {
 	if err := json.Unmarshal([]byte(heartbeatData), &payload); err != nil {
 		t.Fatalf("decode heartbeat: %v", err)
 	}
-	if payload["ts"] == "" || payload["goroutines"] == nil {
+	if payload["ts"] == "" {
 		t.Fatalf("heartbeat payload missing liveness fields: %v", payload)
 	}
 	if payload["last_poll_at"] != "2026-01-02T03:04:05Z" {
