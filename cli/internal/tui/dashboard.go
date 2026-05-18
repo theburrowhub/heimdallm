@@ -218,6 +218,8 @@ func (d *Dashboard) resetSSE() {
 	if d.sseCancel != nil {
 		d.sseCancel()
 	}
+	// The StreamEvents producer owns the send side and exits through ctx.Done().
+	// Closing the channel here would race with a send and can panic.
 	ctx, cancel := context.WithCancel(context.Background())
 	d.sseCtx = ctx
 	d.sseCancel = cancel

@@ -386,13 +386,20 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func (srv *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
+	checks := map[string]any{
+		"nats":      srv.natsHealthCheck(),
+		"sqlite":    srv.sqliteHealthCheck(r.Context()),
+		"last_poll": srv.lastPollHealthCheck(now),
+	}
+	statusCode := http.StatusOK
+	status := "ok"
+	if !healthCheckOK(checks["nats"]) || !healthCheckOK(checks["sqlite"]) || !healthCheckOK(checks["last_poll"]) {
+		statusCode = http.StatusServiceUnavailable
+		status = "degraded"
+	}
 	resp := map[string]any{
-		"status": "ok",
-		"checks": map[string]any{
-			"nats":      srv.natsHealthCheck(),
-			"sqlite":    srv.sqliteHealthCheck(r.Context()),
-			"last_poll": srv.lastPollHealthCheck(now),
-		},
+		"status": status,
+		"checks": checks,
 	}
 	if srv.version != "" {
 		resp["version"] = srv.version
@@ -401,13 +408,22 @@ func (srv *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		resp["started_at"] = srv.startedAt.UTC().Format(time.RFC3339)
 		resp["uptime_seconds"] = int64(now.Sub(srv.startedAt.UTC()).Seconds())
 	}
-	writeJSON(w, http.StatusOK, resp)
+	writeJSON(w, statusCode, resp)
+}
+
+func healthCheckOK(check any) bool {
+	m, ok := check.(map[string]any)
+	if !ok {
+		return false
+	}
+	okValue, ok := m["ok"].(bool)
+	return ok && okValue
 }
 
 func (srv *Server) natsHealthCheck() map[string]any {
 	if srv.natsConn == nil {
 		return map[string]any{
-			"ok":         false,
+			"ok":         true,
 			"configured": false,
 			"connected":  false,
 		}
@@ -451,6 +467,8 @@ func (srv *Server) lastPollHealthCheck(now time.Time) map[string]any {
 		"ok": false,
 	}
 	if snap.LastPollAt.IsZero() {
+		out["ok"] = true
+		out["status"] = "unknown"
 		out["at"] = nil
 		out["age_seconds"] = nil
 		return out

@@ -83,6 +83,30 @@ func TestHealth_ReturnsDeepChecks(t *testing.T) {
 	}
 }
 
+func TestHealth_ReturnsServiceUnavailableForStalePoll(t *testing.T) {
+	srv, _ := setupServer(t)
+	srv.SetHealthSnapshotFn(func() server.HealthSnapshot {
+		return server.HealthSnapshot{
+			LastPollAt:   time.Now().UTC().Add(-3 * time.Minute),
+			PollInterval: time.Minute,
+		}
+	})
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("health status: got %d want %d", w.Code, http.StatusServiceUnavailable)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode health: %v", err)
+	}
+	if body["status"] != "degraded" {
+		t.Fatalf("health status body: %v", body)
+	}
+}
+
 func TestHealth_ReturnsVersionAndStartedAt(t *testing.T) {
 	s, err := store.Open(":memory:")
 	if err != nil {
