@@ -48,12 +48,14 @@ type Dashboard struct {
 
 	err              error
 	connected        bool
+	sseStale         bool
 	refreshing       bool
 	confirmShutdown  bool
 	shutdownInFlight bool
 	shutdownMessage  string
 	startTime        time.Time
 	lastUpdate       time.Time
+	lastSSEEvent     time.Time
 	version          string
 
 	sseEvents chan api.SSEEvent
@@ -84,6 +86,8 @@ type dataMsg struct {
 type sseMsg api.SSEEvent
 type sseDisconnectMsg struct{ err error }
 type sseReconnectMsg struct{}
+type sseWatchdogMsg time.Time
+type healthCheckMsg struct{ err error }
 type shutdownMsg struct{ err error }
 type promoteIssueMsg struct {
 	id  int64
@@ -93,13 +97,14 @@ type promoteIssueMsg struct {
 func NewDashboard(host, token, version string) *Dashboard {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Dashboard{
-		client:    api.New(host, token),
-		version:   version,
-		startTime: time.Now(),
-		sseEvents: make(chan api.SSEEvent, 32),
-		logFollow: true,
-		sseCtx:    ctx,
-		sseCancel: cancel,
+		client:       api.New(host, token),
+		version:      version,
+		startTime:    time.Now(),
+		lastSSEEvent: time.Now(),
+		sseEvents:    make(chan api.SSEEvent, 32),
+		logFollow:    true,
+		sseCtx:       ctx,
+		sseCancel:    cancel,
 	}
 }
 
@@ -109,12 +114,19 @@ func (d *Dashboard) Init() tea.Cmd {
 		d.connectSSE,
 		d.listenSSE(),
 		tickCmd(),
+		sseWatchdogCmd(),
 	)
 }
 
 func tickCmd() tea.Cmd {
 	return tea.Tick(10*time.Second, func(t time.Time) tea.Msg {
 		return tickMsg(t)
+	})
+}
+
+func sseWatchdogCmd() tea.Cmd {
+	return tea.Tick(10*time.Second, func(t time.Time) tea.Msg {
+		return sseWatchdogMsg(t)
 	})
 }
 
@@ -181,6 +193,17 @@ func (d *Dashboard) listenSSE() tea.Cmd {
 	}
 }
 
+func (d *Dashboard) resetSSE() {
+	if d.sseCancel != nil {
+		d.sseCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	d.sseCtx = ctx
+	d.sseCancel = cancel
+	d.sseEvents = make(chan api.SSEEvent, 32)
+	d.lastSSEEvent = time.Now()
+}
+
 func (d *Dashboard) shutdownDaemon() tea.Cmd {
 	return func() tea.Msg {
 		return shutdownMsg{err: d.client.Shutdown()}
@@ -190,6 +213,12 @@ func (d *Dashboard) shutdownDaemon() tea.Cmd {
 func (d *Dashboard) promoteIssue(id int64) tea.Cmd {
 	return func() tea.Msg {
 		return promoteIssueMsg{id: id, err: d.client.PromoteIssue(id)}
+	}
+}
+
+func (d *Dashboard) checkHealth() tea.Cmd {
+	return func() tea.Msg {
+		return healthCheckMsg{err: d.client.Health()}
 	}
 }
 
@@ -235,6 +264,15 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		return d, tea.Batch(d.fetchData, tickCmd())
+
+	case sseWatchdogMsg:
+		cmds := []tea.Cmd{sseWatchdogCmd()}
+		if !d.shutdownInFlight && !d.lastSSEEvent.IsZero() && time.Since(d.lastSSEEvent) > time.Minute {
+			d.sseStale = true
+			d.shutdownMessage = "SSE stream stale; checking daemon health..."
+			cmds = append(cmds, d.checkHealth())
+		}
+		return d, tea.Batch(cmds...)
 
 	case dataMsg:
 		d.refreshing = false
@@ -282,6 +320,14 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return d, nil
 
 	case sseMsg:
+		d.lastSSEEvent = time.Now()
+		d.sseStale = false
+		d.shutdownMessage = ""
+		d.connected = true
+		d.err = nil
+		if msg.Type == "heartbeat" {
+			return d, d.listenSSE()
+		}
 		itemType, info := formatSSEData(msg.Type, msg.Data)
 		line := activityLine{
 			Time:     time.Now().Format("15:04"),
@@ -304,16 +350,35 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-		d.connected = true
 		return d, d.listenSSE()
 
 	case sseDisconnectMsg:
+		d.connected = false
+		d.err = msg.err
+		d.sseStale = false
 		return d, tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
 			return sseReconnectMsg{}
 		})
 
 	case sseReconnectMsg:
 		return d, d.connectSSE
+
+	case healthCheckMsg:
+		if msg.err != nil {
+			d.connected = false
+			d.err = msg.err
+			d.shutdownMessage = "Daemon health check failed"
+			return d, nil
+		}
+		if d.sseStale {
+			d.resetSSE()
+			d.connected = false
+			d.err = nil
+			d.sseStale = false
+			d.shutdownMessage = "Reconnecting SSE stream..."
+			return d, tea.Batch(d.connectSSE, d.listenSSE())
+		}
+		return d, nil
 
 	case shutdownMsg:
 		d.shutdownInFlight = false
@@ -665,6 +730,9 @@ func (d *Dashboard) renderStatus() string {
 	if d.refreshing {
 		return lipgloss.NewStyle().Foreground(colorWarning).Bold(true).Render("● refreshing...")
 	}
+	if d.sseStale {
+		return lipgloss.NewStyle().Foreground(colorWarning).Bold(true).Render("● unresponsive...")
+	}
 	if d.connected {
 		return statusOnline.Render("● online")
 	}
@@ -920,6 +988,9 @@ func (d *Dashboard) renderConfig(height int) string {
 func (d *Dashboard) serverStatusBadge() string {
 	if d.shutdownInFlight {
 		return lipgloss.NewStyle().Foreground(colorWarning).Bold(true).Render("● stopping...")
+	}
+	if d.sseStale {
+		return lipgloss.NewStyle().Foreground(colorWarning).Bold(true).Render("● unresponsive")
 	}
 	if !d.connected {
 		return lipgloss.NewStyle().Foreground(colorMuted).Render("● stopped")

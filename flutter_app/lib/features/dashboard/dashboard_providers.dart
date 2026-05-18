@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -51,9 +52,108 @@ final nonMonitoredStaleProvider =
     >(() => LocalStateNotifier<Map<String, String>>(const <String, String>{}));
 
 /// Tracks whether the desktop app is trying to spawn the daemon.
-final daemonStartingProvider =
-    NotifierProvider<LocalStateNotifier<bool>, bool>(
-      () => LocalStateNotifier<bool>(false),
+final daemonStartingProvider = NotifierProvider<LocalStateNotifier<bool>, bool>(
+  () => LocalStateNotifier<bool>(false),
+);
+
+enum DaemonConnectionPhase { connecting, connected, stale, offline }
+
+class DaemonConnectionStatus {
+  final DaemonConnectionPhase phase;
+  final DateTime? lastEventAt;
+  final String? message;
+
+  const DaemonConnectionStatus({
+    required this.phase,
+    this.lastEventAt,
+    this.message,
+  });
+
+  const DaemonConnectionStatus.connecting()
+    : this(phase: DaemonConnectionPhase.connecting);
+
+  DaemonConnectionStatus copyWith({
+    DaemonConnectionPhase? phase,
+    DateTime? lastEventAt,
+    String? message,
+  }) {
+    return DaemonConnectionStatus(
+      phase: phase ?? this.phase,
+      lastEventAt: lastEventAt ?? this.lastEventAt,
+      message: message,
+    );
+  }
+}
+
+class DaemonConnectionNotifier extends Notifier<DaemonConnectionStatus> {
+  static const staleAfter = Duration(seconds: 60);
+  static const checkEvery = Duration(seconds: 5);
+
+  Timer? _watchdog;
+  bool _checkingHealth = false;
+
+  @override
+  DaemonConnectionStatus build() {
+    ref.listen<AsyncValue<SseEvent>>(sseStreamProvider, (prev, next) {
+      if (next.isLoading && !(prev?.hasValue ?? false)) {
+        state = const DaemonConnectionStatus.connecting();
+      }
+      if (next.hasError) {
+        state = DaemonConnectionStatus(
+          phase: DaemonConnectionPhase.offline,
+          lastEventAt: state.lastEventAt,
+          message: next.error.toString(),
+        );
+      }
+      next.whenData((_) {
+        state = DaemonConnectionStatus(
+          phase: DaemonConnectionPhase.connected,
+          lastEventAt: DateTime.now(),
+        );
+      });
+    });
+    _watchdog = Timer.periodic(checkEvery, (_) => _checkForStaleStream());
+    ref.onDispose(() => _watchdog?.cancel());
+    return const DaemonConnectionStatus.connecting();
+  }
+
+  void _checkForStaleStream() {
+    final lastEventAt = state.lastEventAt;
+    if (lastEventAt == null) return;
+    if (DateTime.now().difference(lastEventAt) < staleAfter) return;
+    if (state.phase == DaemonConnectionPhase.offline) return;
+    state = DaemonConnectionStatus(
+      phase: DaemonConnectionPhase.stale,
+      lastEventAt: lastEventAt,
+      message: 'No events received for ${staleAfter.inSeconds}s',
+    );
+    unawaited(_verifyAndReconnect());
+  }
+
+  Future<void> _verifyAndReconnect() async {
+    if (_checkingHealth) return;
+    _checkingHealth = true;
+    try {
+      final healthy = await ref.read(apiClientProvider).checkHealth();
+      if (!ref.mounted) return;
+      if (healthy) {
+        ref.invalidate(sseStreamProvider);
+      } else {
+        state = DaemonConnectionStatus(
+          phase: DaemonConnectionPhase.offline,
+          lastEventAt: state.lastEventAt,
+          message: 'Health check failed',
+        );
+      }
+    } finally {
+      _checkingHealth = false;
+    }
+  }
+}
+
+final daemonConnectionProvider =
+    NotifierProvider<DaemonConnectionNotifier, DaemonConnectionStatus>(
+      DaemonConnectionNotifier.new,
     );
 
 /// Tracks PRs currently being reviewed, keyed by "repo:prNumber". Used to
@@ -95,8 +195,9 @@ class PrListRefreshNotifier extends Notifier<int> {
   void update(int Function(int) updater) => state = updater(state);
 }
 
-final prListRefreshProvider =
-    NotifierProvider<PrListRefreshNotifier, int>(PrListRefreshNotifier.new);
+final prListRefreshProvider = NotifierProvider<PrListRefreshNotifier, int>(
+  PrListRefreshNotifier.new,
+);
 
 void _handleSseEvent(Ref ref, SseEvent event) {
   try {
@@ -278,8 +379,9 @@ void _handleSseEvent(Ref ref, SseEvent event) {
         final repo = data['repo'] as String? ?? 'unknown';
         final prNumber = (data['pr_number'] as num?)?.toInt() ?? 0;
         final reason = data['reason'] as String? ?? '';
-        ref.read(circuitBreakerProvider.notifier).set(
-            '$repo #$prNumber — $reason');
+        ref
+            .read(circuitBreakerProvider.notifier)
+            .set('$repo #$prNumber — $reason');
     }
   } catch (_) {}
 }

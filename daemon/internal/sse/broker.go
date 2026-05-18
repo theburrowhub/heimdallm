@@ -4,6 +4,7 @@ import "fmt"
 
 // Event type constants
 const (
+	EventHeartbeat             = "heartbeat"
 	EventPRDetected            = "pr_detected"
 	EventReviewStarted         = "review_started"
 	EventReviewCompleted       = "review_completed"

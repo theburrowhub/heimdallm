@@ -53,9 +53,11 @@ type Server struct {
 	// daemon was constructed without the rename reconciler (e.g. in
 	// tests that don't need it).
 	repoRenameFn func(ctx context.Context, oldRepo, newRepo string) error
-	meFn                 func() (string, error)
+	meFn         func() (string, error)
 	// configFn returns the current running config as a JSON-serializable map.
 	configFn func() map[string]any
+	// healthSnapshotFn returns live daemon liveness metadata for /health and SSE heartbeat.
+	healthSnapshotFn func() HealthSnapshot
 	// repoMetaFns fetch repo metadata from GitHub for autocomplete.
 	fetchLabelsFn        func(repo string) ([]string, error)
 	fetchCollaboratorsFn func(repo string) ([]string, error)
@@ -85,6 +87,13 @@ type Options struct {
 
 const defaultMaxConcurrentReviews = 5
 const cloneCleanupTimeout = 30 * time.Second
+const heartbeatInterval = 20 * time.Second
+
+// HealthSnapshot is supplied by the daemon to enrich /health and SSE heartbeats.
+type HealthSnapshot struct {
+	LastPollAt   time.Time
+	PollInterval time.Duration
+}
 
 // New creates a new Server. p may be nil if the pipeline is not yet configured.
 // apiToken must be the value returned by LoadOrCreateAPIToken — it is required
@@ -227,6 +236,9 @@ func (srv *Server) SetMeFn(fn func() (string, error)) { srv.meFn = fn }
 
 // SetConfigFn wires the callback that returns the live config for GET /config.
 func (srv *Server) SetConfigFn(fn func() map[string]any) { srv.configFn = fn }
+
+// SetHealthSnapshotFn wires live liveness metadata for GET /health and heartbeat SSE.
+func (srv *Server) SetHealthSnapshotFn(fn func() HealthSnapshot) { srv.healthSnapshotFn = fn }
 
 // SetRepoMetaFns wires GitHub metadata fetchers for autocomplete endpoints.
 func (srv *Server) SetRepoMetaFns(labels func(string) ([]string, error), collabs func(string) ([]string, error)) {
@@ -373,14 +385,95 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func (srv *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	resp := map[string]any{"status": "ok"}
+	now := time.Now().UTC()
+	resp := map[string]any{
+		"status": "ok",
+		"checks": map[string]any{
+			"nats":       srv.natsHealthCheck(),
+			"sqlite":     srv.sqliteHealthCheck(r.Context()),
+			"last_poll":  srv.lastPollHealthCheck(now),
+			"goroutines": map[string]any{"count": runtime.NumGoroutine()},
+		},
+	}
 	if srv.version != "" {
 		resp["version"] = srv.version
 	}
 	if !srv.startedAt.IsZero() {
 		resp["started_at"] = srv.startedAt.UTC().Format(time.RFC3339)
+		resp["uptime_seconds"] = int64(now.Sub(srv.startedAt.UTC()).Seconds())
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (srv *Server) natsHealthCheck() map[string]any {
+	if srv.natsConn == nil {
+		return map[string]any{
+			"ok":         false,
+			"configured": false,
+			"connected":  false,
+		}
+	}
+	connected := srv.natsConn.IsConnected()
+	return map[string]any{
+		"ok":         connected,
+		"configured": true,
+		"connected":  connected,
+		"status":     fmt.Sprint(srv.natsConn.Status()),
+	}
+}
+
+func (srv *Server) sqliteHealthCheck(ctx context.Context) map[string]any {
+	out := map[string]any{
+		"ok": false,
+	}
+	if srv.store == nil || srv.store.DB() == nil {
+		out["error"] = "store unavailable"
+		return out
+	}
+	ctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	if err := srv.store.DB().PingContext(ctx); err != nil {
+		out["error"] = err.Error()
+		return out
+	}
+	var result string
+	if err := srv.store.DB().QueryRowContext(ctx, "PRAGMA quick_check").Scan(&result); err != nil {
+		out["error"] = err.Error()
+		return out
+	}
+	out["quick_check"] = result
+	out["ok"] = result == "ok"
+	return out
+}
+
+func (srv *Server) lastPollHealthCheck(now time.Time) map[string]any {
+	snap := srv.healthSnapshot()
+	out := map[string]any{
+		"ok": false,
+	}
+	if snap.LastPollAt.IsZero() {
+		out["at"] = nil
+		out["age_seconds"] = nil
+		return out
+	}
+	lastPoll := snap.LastPollAt.UTC()
+	age := now.Sub(lastPoll)
+	out["at"] = lastPoll.Format(time.RFC3339)
+	out["age_seconds"] = int64(age.Seconds())
+	if snap.PollInterval > 0 {
+		out["max_age_seconds"] = int64((2 * snap.PollInterval).Seconds())
+		out["ok"] = age <= 2*snap.PollInterval
+	} else {
+		out["ok"] = true
+	}
+	return out
+}
+
+func (srv *Server) healthSnapshot() HealthSnapshot {
+	if srv.healthSnapshotFn == nil {
+		return HealthSnapshot{}
+	}
+	return srv.healthSnapshotFn()
 }
 
 func (srv *Server) handleListPRs(w http.ResponseWriter, r *http.Request) {
@@ -1044,7 +1137,11 @@ func (srv *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	defer srv.broker.Unsubscribe(ch)
 
 	fmt.Fprintf(w, ": connected\n\n")
+	fmt.Fprint(w, srv.heartbeatEvent(time.Now()).Format())
 	flusher.Flush()
+
+	heartbeat := time.NewTicker(heartbeatInterval)
+	defer heartbeat.Stop()
 
 	for {
 		select {
@@ -1053,6 +1150,9 @@ func (srv *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			fmt.Fprint(w, event.Format())
+			flusher.Flush()
+		case <-heartbeat.C:
+			fmt.Fprint(w, srv.heartbeatEvent(time.Now()).Format())
 			flusher.Flush()
 		case <-r.Context().Done():
 			return
@@ -1072,11 +1172,12 @@ func (srv *Server) handleSSEViaNATS(w http.ResponseWriter, r *http.Request, flus
 	defer sub.Unsubscribe()
 
 	fmt.Fprintf(w, ": connected\n\n")
+	fmt.Fprint(w, srv.heartbeatEvent(time.Now()).Format())
 	flusher.Flush()
 
-	// Keep-alive ticker prevents proxies/load balancers from closing idle connections.
-	keepAlive := time.NewTicker(20 * time.Second)
-	defer keepAlive.Stop()
+	// Heartbeat prevents idle connection drops and gives clients observable liveness.
+	heartbeat := time.NewTicker(heartbeatInterval)
+	defer heartbeat.Stop()
 
 	for {
 		select {
@@ -1084,13 +1185,38 @@ func (srv *Server) handleSSEViaNATS(w http.ResponseWriter, r *http.Request, flus
 			eventType := strings.TrimPrefix(msg.Subject, "heimdallm.events.")
 			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, string(msg.Data))
 			flusher.Flush()
-		case <-keepAlive.C:
-			fmt.Fprintf(w, ": ping\n\n")
+		case <-heartbeat.C:
+			fmt.Fprint(w, srv.heartbeatEvent(time.Now()).Format())
 			flusher.Flush()
 		case <-r.Context().Done():
 			return
 		}
 	}
+}
+
+func (srv *Server) heartbeatEvent(now time.Time) sse.Event {
+	now = now.UTC()
+	data := map[string]any{
+		"ts":         now.Format(time.RFC3339),
+		"goroutines": runtime.NumGoroutine(),
+	}
+	snap := srv.healthSnapshot()
+	if snap.LastPollAt.IsZero() {
+		data["last_poll_at"] = nil
+		data["last_poll_age_seconds"] = nil
+	} else {
+		lastPoll := snap.LastPollAt.UTC()
+		data["last_poll_at"] = lastPoll.Format(time.RFC3339)
+		data["last_poll_age_seconds"] = int64(now.Sub(lastPoll).Seconds())
+	}
+	if srv.natsConn != nil {
+		data["nats_connected"] = srv.natsConn.IsConnected()
+	}
+	b, err := json.Marshal(data)
+	if err != nil {
+		b = []byte(`{"ts":"` + now.Format(time.RFC3339) + `"}`)
+	}
+	return sse.Event{Type: sse.EventHeartbeat, Data: string(b)}
 }
 
 func (srv *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {

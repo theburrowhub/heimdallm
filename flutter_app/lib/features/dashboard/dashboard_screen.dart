@@ -33,6 +33,9 @@ class DashboardScreen extends ConsumerWidget {
     final cbMessage = ref.watch(circuitBreakerProvider);
     final daemonRunning = ref.watch(daemonHealthProvider).value ?? false;
     final daemonStarting = ref.watch(daemonStartingProvider);
+    final connection = daemonRunning
+        ? ref.watch(daemonConnectionProvider)
+        : null;
     return DefaultTabController(
       length: 6,
       child: Scaffold(
@@ -97,6 +100,11 @@ class DashboardScreen extends ConsumerWidget {
                 onDismiss: () =>
                     ref.read(circuitBreakerProvider.notifier).set(null),
               ),
+            if (connection != null)
+              _ConnectionBanner(
+                status: connection,
+                onRestart: () => server_actions.restartDaemon(context, ref),
+              ),
             const Expanded(
               child: TabBarView(
                 children: [
@@ -110,6 +118,72 @@ class DashboardScreen extends ConsumerWidget {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ConnectionBanner extends StatelessWidget {
+  const _ConnectionBanner({required this.status, required this.onRestart});
+
+  final DaemonConnectionStatus status;
+  final VoidCallback onRestart;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final (color, icon, label) = switch (status.phase) {
+      DaemonConnectionPhase.connected => (
+        Colors.green,
+        Icons.check_circle_outline,
+        'Connected',
+      ),
+      DaemonConnectionPhase.stale => (
+        Colors.amber,
+        Icons.sync_problem,
+        'No events received — reconnecting',
+      ),
+      DaemonConnectionPhase.offline => (
+        theme.colorScheme.error,
+        Icons.error_outline,
+        'Server unavailable',
+      ),
+      DaemonConnectionPhase.connecting => (
+        Colors.blueGrey,
+        Icons.sync,
+        'Connecting',
+      ),
+    };
+    return Material(
+      color: color.withValues(alpha: 0.10),
+      child: SafeArea(
+        bottom: false,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 36),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+            child: Row(
+              children: [
+                Icon(icon, size: 18, color: color),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    label,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: color,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                if (status.phase == DaemonConnectionPhase.offline)
+                  TextButton(
+                    onPressed: onRestart,
+                    child: const Text('Restart'),
+                  ),
+              ],
+            ),
+          ),
         ),
       ),
     );
@@ -672,8 +746,7 @@ class _IssueActivityTile extends ConsumerStatefulWidget {
   const _IssueActivityTile({required this.issue});
 
   @override
-  ConsumerState<_IssueActivityTile> createState() =>
-      _IssueActivityTileState();
+  ConsumerState<_IssueActivityTile> createState() => _IssueActivityTileState();
 }
 
 class _IssueActivityTileState extends ConsumerState<_IssueActivityTile> {
