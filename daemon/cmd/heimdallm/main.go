@@ -2323,6 +2323,11 @@ func runTier2(
 				repos = r
 				mu.Unlock()
 				slog.Info("tier2: received repo list", "count", len(r))
+
+				// Persist topic-discovered repos so they appear in
+				// heimdallm-cli status and GET /config even when they
+				// have no open PRs. Fixes #507.
+				adapter.upsertDiscoveredFromTopics(r)
 			}
 		}
 	}()
@@ -2557,6 +2562,59 @@ func upsertDiscoveredRepos(c *config.Config, prs []*gh.PullRequest) []string {
 		added = append(added, pr.Repo)
 	}
 	return added
+}
+
+// upsertDiscoveredFromTopics persists repos received from tier1's topic
+// discovery into cfg.GitHub.Repositories (or NonMonitored) and invokes
+// processDiscoveredRepos to write them to the K/V store. This ensures repos
+// discovered by topic appear in heimdallm-cli status and GET /config even
+// when they have no open PRs. Fixes #507.
+func (a *tier2Adapter) upsertDiscoveredFromTopics(repos []string) {
+	if len(repos) == 0 {
+		return
+	}
+
+	a.cfgMu.Lock()
+	cfg := *a.cfg
+
+	known := make(map[string]struct{}, len(cfg.GitHub.Repositories)+len(cfg.GitHub.NonMonitored))
+	for _, r := range cfg.GitHub.Repositories {
+		known[r] = struct{}{}
+	}
+	for _, r := range cfg.GitHub.NonMonitored {
+		known[r] = struct{}{}
+	}
+
+	enable := cfg.GitHub.AutoEnablePRForDiscovery()
+	var added []string
+	for _, repo := range repos {
+		if repo == "" {
+			continue
+		}
+		if _, ok := known[repo]; ok {
+			continue
+		}
+		if enable {
+			cfg.GitHub.Repositories = append(cfg.GitHub.Repositories, repo)
+		} else {
+			cfg.GitHub.NonMonitored = append(cfg.GitHub.NonMonitored, repo)
+		}
+		known[repo] = struct{}{}
+		added = append(added, repo)
+	}
+
+	reposSnap := append([]string(nil), cfg.GitHub.Repositories...)
+	nonMonSnap := append([]string(nil), cfg.GitHub.NonMonitored...)
+	a.cfgMu.Unlock()
+
+	// Intentionally release the mutex before persisting to the K/V store:
+	// processDiscoveredRepos performs I/O (SQLite writes, SSE publish) that
+	// should not hold the config lock. The in-memory config is already
+	// mutated above; the snapshots capture the post-mutation state.
+	if len(added) > 0 {
+		slog.Info("tier2: persisting topic-discovered repos", "added", len(added), "repos", added)
+		processDiscoveredRepos(added, reposSnap, nonMonSnap, a.store, a.broker, time.Now())
+	}
 }
 
 // ── tier2Adapter bridges main.go's concrete types to Pipeline interfaces ──
