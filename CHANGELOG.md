@@ -9,6 +9,18 @@
 * **issues:** issue classification now follows the state-machine order `skip > blocked > review_only > refinement > develop > default_action`. If a repo intentionally double-labels issues with triage/review and develop labels, the earlier stage now wins so Heimdallm does not skip triage or refinement during promotion.
 * **issues:** `auto_promote_triage` defaults on only when `refinement_labels` is configured. Repos without a refinement target keep their previous review-only behavior; set `auto_promote_triage = false` explicitly to keep refinement manual even when refinement labels exist.
 
+## [0.6.22](https://github.com/theburrowhub/heimdallm/compare/v0.6.21...v0.6.22) (2026-05-21)
+
+
+### Features
+
+* add liveness heartbeat watchdog ([#504](https://github.com/theburrowhub/heimdallm/issues/504)) ([b7c0172](https://github.com/theburrowhub/heimdallm/commit/b7c01728efdd6dc3393c173424f7bb47d1e0012f))
+
+
+### Bug Fixes
+
+* persist topic-discovered repos to config even without open PRs ([#508](https://github.com/theburrowhub/heimdallm/issues/508)) ([38525d7](https://github.com/theburrowhub/heimdallm/commit/38525d74caea635fcfa03a7575118d1819f67d28))
+
 ## [0.6.21](https://github.com/theburrowhub/heimdallm/compare/v0.6.20...v0.6.21) (2026-05-15)
 
 
