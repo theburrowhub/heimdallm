@@ -2607,6 +2607,10 @@ func (a *tier2Adapter) upsertDiscoveredFromTopics(repos []string) {
 	nonMonSnap := append([]string(nil), cfg.GitHub.NonMonitored...)
 	a.cfgMu.Unlock()
 
+	// Intentionally release the mutex before persisting to the K/V store:
+	// processDiscoveredRepos performs I/O (SQLite writes, SSE publish) that
+	// should not hold the config lock. The in-memory config is already
+	// mutated above; the snapshots capture the post-mutation state.
 	if len(added) > 0 {
 		slog.Info("tier2: persisting topic-discovered repos", "added", len(added), "repos", added)
 		processDiscoveredRepos(added, reposSnap, nonMonSnap, a.store, a.broker, time.Now())
