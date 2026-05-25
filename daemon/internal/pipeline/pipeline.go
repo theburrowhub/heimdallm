@@ -409,31 +409,44 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		p.publishSkipped(pr, SkipReasonLegacyBackfill)
 		return nil, nil
 	}
-	if prevReview != nil && pr.Head.SHA != "" && prevReview.HeadSHA == pr.Head.SHA {
-		// Before honouring the SHA-skip, check whether the operator
-		// explicitly re-requested a review via the GitHub UI on this same
-		// commit. The fail-closed SHA dedup (#245) was designed to ignore
-		// updated_at bumps from CI bots and cross-references, but it
-		// should NOT swallow a deliberate human action. See
-		// theburrowhub/heimdallm#322 Bug 5.
+	if prevReview != nil && pr.Head.SHA != "" {
+		// Regardless of whether the HEAD SHA changed, the bot must not
+		// re-review unless the operator explicitly re-requested it. The
+		// SHA-unchanged half is the original #322 Bug 5 / #245
+		// behaviour: cross-instance updated_at bumps must not trigger
+		// re-review. The SHA-changed half closes theburrowhub/heimdallm#509:
+		// when a target repo auto-re-adds the bot to requested_reviewers
+		// after a push (Dismiss stale reviews on push, CODEOWNERS
+		// auto-request workflows, …), the Tier 2 ReviewRequestedFor
+		// gate (#385) lets the PR through even though no human asked
+		// for a new review. The shared bypass predicate consults the
+		// PR timeline for a review_requested event newer than the
+		// previous review.
 		//
-		// Decision rule: bypass the skip iff the most recent
-		// review_requested or review_dismissed event for the bot login is
-		// a review_requested newer than prevReview.CreatedAt. A later
-		// review_dismissed (or any other state) cancels the bypass —
-		// dismiss-then-no-new-request means the operator no longer wants
-		// our review. Same fail-closed posture as #245: a timeline API
-		// error keeps the original skip in place rather than widening
-		// the cost surface on a transient outage.
-		if p.shouldBypassSHASkipForReReview(pr, prevReview) {
-			slog.Info("pipeline: SHA unchanged but explicit re-request detected — proceeding with review",
-				"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA)
-		} else {
-			slog.Info("pipeline: skipping re-review, HEAD SHA unchanged",
-				"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA)
-			p.publishSkipped(pr, SkipReasonSHAUnchanged)
+		// Decision rule (same for both SHA states): proceed iff the
+		// most recent review_requested or review_dismissed event for
+		// the bot login is a review_requested newer than
+		// prevReview.CreatedAt. A later review_dismissed (or any other
+		// state) cancels the bypass — dismiss-then-no-new-request
+		// means the operator no longer wants our review. Fail-closed
+		// posture (same as #245 and #322): a missing dependency or
+		// timeline API error keeps the skip in place rather than
+		// widening the cost surface on a transient outage.
+		if !p.shouldBypassSHASkipForReReview(pr, prevReview) {
+			reason := SkipReasonSHAUnchanged
+			if prevReview.HeadSHA != pr.Head.SHA {
+				reason = SkipReasonNoReReviewRequest
+			}
+			slog.Info("pipeline: skipping re-review, no explicit re-request",
+				"repo", pr.Repo, "pr", pr.Number,
+				"prev_head_sha", prevReview.HeadSHA, "head_sha", pr.Head.SHA,
+				"reason", string(reason))
+			p.publishSkipped(pr, reason)
 			return nil, nil
 		}
+		slog.Info("pipeline: explicit re-request detected — proceeding with review",
+			"repo", pr.Repo, "pr", pr.Number,
+			"prev_head_sha", prevReview.HeadSHA, "head_sha", pr.Head.SHA)
 	}
 
 	// 2b. Fetch PR comments for context (non-fatal: proceed without if unavailable)
