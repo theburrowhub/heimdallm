@@ -41,12 +41,16 @@ type fakeDispatcher struct {
 	calls    int
 	gotPairs [][2]string
 	err      error
+	mu       sync.Mutex
 }
 
 func (f *fakeDispatcher) Run(_ context.Context, oldRepo, newRepo string) error {
+	f.mu.Lock()
 	f.calls++
 	f.gotPairs = append(f.gotPairs, [2]string{oldRepo, newRepo})
-	return f.err
+	err := f.err
+	f.mu.Unlock()
+	return err
 }
 
 func newProbe(t *testing.T, canonical *fakeCanonical, dispatcher *fakeDispatcher,
@@ -165,13 +169,16 @@ func TestRenameProbe_Run_FiresInitialTickBeforeIntervalElapses(t *testing.T) {
 		canonical.mu.Lock()
 		calls := canonical.calls
 		canonical.mu.Unlock()
-		if calls >= 1 && dispatcher.calls >= 1 {
+		dispatcher.mu.Lock()
+		dispatched := dispatcher.calls
+		dispatcher.mu.Unlock()
+		if calls >= 1 && dispatched >= 1 {
 			break
 		}
 		select {
 		case <-deadline:
 			t.Fatalf("initial tick did not fire within budget: canonical.calls=%d, dispatcher.calls=%d",
-				calls, dispatcher.calls)
+				calls, dispatched)
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
