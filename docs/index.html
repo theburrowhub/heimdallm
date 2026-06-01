@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Heimdallm — Autonomous GitHub automation: PR reviews, issue triage, auto-implement</title>
-  <meta name="description" content="Heimdallm is an AI-driven GitHub automation daemon. It reviews pull requests, triages and refines issues, and can even open implementation PRs — all using Claude, Gemini, Codex or OpenCode. Native apps for macOS and Linux, plus a web UI and a CLI/TUI.">
+  <title>Heimdallm — AI agent for GitHub PRs &amp; issues</title>
+  <meta name="description" content="Heimdallm — AI daemon that reviews PRs, triages issues, and opens implementation PRs on GitHub. Open source. macOS, Linux, Docker, web UI, CLI/TUI.">
   <meta property="og:title" content="Heimdallm — Autonomous GitHub automation">
   <meta property="og:description" content="AI agent that reviews your PRs, triages your issues, and opens implementation PRs for you. macOS, Linux, Docker, Web UI and CLI/TUI. Open source.">
   <style>
@@ -334,7 +334,7 @@
 
 <!-- Hero -->
 <section class="hero">
-  <div class="hero-badge">⚡ macOS · Linux · Docker · v0.6.23 · Open Source</div>
+  <div class="hero-badge">⚡ macOS · Linux · Docker · Free · Open Source</div>
   <h1>Your GitHub, on <em>autopilot</em>.<br>Reviews, triage, and PRs.</h1>
   <p>
     Heimdallm is a background daemon that reviews your pull requests, triages and refines your issues,
@@ -411,7 +411,7 @@
       <div class="card">
         <div class="card-icon">✍️</div>
         <h3>Custom prompts</h3>
-        <p>Review profiles managed from the web UI at <code>/agents</code>. Placeholders for <code>{diff}</code>, <code>{title}</code>, <code>{author}</code>, <code>{comments}</code> and full template overrides.</p>
+        <p>Review profiles managed from the web UI at <code>/agents</code>. Placeholders for <code>{diff}</code>, <code>{title}</code>, <code>{author}</code>, <code>{link}</code>, <code>{comments}</code> and full template overrides.</p>
       </div>
       <div class="card">
         <div class="card-icon">🏷️</div>
@@ -484,7 +484,7 @@
   <div class="section-inner">
     <div class="section-label">Prompts</div>
     <h2>Built-in review profiles</h2>
-    <p style="margin-bottom:1.5rem;">Pick a preset or write your own from the web UI at <code>/agents</code>. Mix <code>{diff}</code>, <code>{title}</code>, <code>{author}</code>, <code>{comments}</code> placeholders, or replace the full template. Each profile can be assigned globally or per repo.</p>
+    <p style="margin-bottom:1.5rem;">Pick a preset or write your own from the web UI at <code>/agents</code>. Mix <code>{diff}</code>, <code>{title}</code>, <code>{author}</code>, <code>{link}</code>, <code>{comments}</code> placeholders, or replace the full template. Each profile can be assigned globally or per repo.</p>
     <div class="prompt-grid">
       <div class="prompt-card"><div class="emoji">🔍</div><div><h4>General Review</h4><p>Correctness, maintainability, error handling, code style</p></div></div>
       <div class="prompt-card"><div class="emoji">🔒</div><div><h4>Security Audit</h4><p>OWASP Top 10, injection, hardcoded secrets, auth flaws</p></div></div>
@@ -651,9 +651,8 @@ sudo apt-get install -f -y</pre>
           <div class="step-num">3</div>
           <div>
             <h4>Open the dashboard</h4>
-            <pre class="inline-code">curl http://localhost:7842/health
-open http://localhost:3000</pre>
-            <p style="margin-top:.4rem;">Flutter Web UI on port 3000, daemon API on 7842.</p>
+            <pre class="inline-code">curl http://localhost:7842/health</pre>
+            <p style="margin-top:.4rem;">Then visit <code>http://localhost:3000</code> in your browser — Flutter web UI on port 3000, daemon API on 7842.</p>
           </div>
         </div>
       </div>
@@ -677,7 +676,7 @@ open http://localhost:3000</pre>
             <h4>Point at a running daemon</h4>
             <pre class="inline-code">export HEIMDALLM_HOST=http://localhost:7842
 export HEIMDALLM_TOKEN=&lt;your token&gt;</pre>
-            <p style="margin-top:.4rem;">Defaults to localhost — skip these if you're on the same host.</p>
+            <p style="margin-top:.4rem;">Defaults to localhost — skip these if you're on the same host. See the <a href="https://github.com/theburrowhub/heimdallm/blob/main/docs/configuration-guide.md#12-cli">configuration guide</a> for token setup.</p>
           </div>
         </div>
         <div class="install-step">
