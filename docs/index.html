@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Heimdallm — AI-powered GitHub PR Reviews for macOS &amp; Linux</title>
-  <meta name="description" content="Heimdallm watches your GitHub pull requests and automatically runs AI code reviews using Claude, Gemini or Codex — then posts the review directly to GitHub. Available for macOS and Linux.">
-  <meta property="og:title" content="Heimdallm">
-  <meta property="og:description" content="AI-powered GitHub PR reviews for macOS and Linux. Runs in your menu bar. Reviews automatically. Posts to GitHub.">
+  <title>Heimdallm — Autonomous GitHub automation: PR reviews, issue triage, auto-implement</title>
+  <meta name="description" content="Heimdallm is an AI-driven GitHub automation daemon. It reviews pull requests, triages and refines issues, and can even open implementation PRs — all using Claude, Gemini, Codex or OpenCode. Native apps for macOS and Linux, plus a web UI and a CLI/TUI.">
+  <meta property="og:title" content="Heimdallm — Autonomous GitHub automation">
+  <meta property="og:description" content="AI agent that reviews your PRs, triages your issues, and opens implementation PRs for you. macOS, Linux, Docker, Web UI and CLI/TUI. Open source.">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -120,15 +120,28 @@
     }
 
     /* ── Flow ── */
-    .flow {
-      max-width: 860px;
+    .flow-wrap {
+      max-width: 920px;
       margin: 0 auto 5rem;
       padding: 0 2rem;
+    }
+    .flow-label {
+      text-transform: uppercase;
+      font-size: 0.7rem;
+      font-weight: 700;
+      letter-spacing: .12em;
+      color: var(--accent);
+      text-align: center;
+      margin: 1.25rem 0 0.5rem;
+    }
+    .flow-label:first-child { margin-top: 0; }
+    .flow {
       display: flex;
       align-items: center;
       justify-content: center;
       gap: 0;
       flex-wrap: wrap;
+      margin-bottom: 1.5rem;
     }
     .flow-step {
       text-align: center;
@@ -313,6 +326,7 @@
 <nav>
   <div class="logo"><span>🛡️</span> Heimdallm</div>
   <a href="#features">Features</a>
+  <a href="#flow">How it works</a>
   <a href="#prompts">Prompts</a>
   <a href="#install">Install</a>
   <a href="https://github.com/theburrowhub/heimdallm" class="cta">GitHub →</a>
@@ -320,11 +334,12 @@
 
 <!-- Hero -->
 <section class="hero">
-  <div class="hero-badge">⚡ macOS · Linux · Docker · Free · Open Source</div>
-  <h1>Your PRs, <em>reviewed automatically</em>.<br>Posted to GitHub.</h1>
+  <div class="hero-badge">⚡ macOS · Linux · Docker · v0.6.23 · Open Source</div>
+  <h1>Your GitHub, on <em>autopilot</em>.<br>Reviews, triage, and PRs.</h1>
   <p>
-    Heimdallm runs silently in your menu bar, watches your GitHub review requests,
-    and submits AI-generated code reviews — powered by Claude, Gemini or Codex.
+    Heimdallm is a background daemon that reviews your pull requests, triages and refines your issues,
+    and can even open implementation PRs for you — driven by Claude, Gemini, Codex or OpenCode and posted
+    to GitHub as your account.
   </p>
   <div class="hero-actions">
     <a href="https://github.com/theburrowhub/heimdallm/releases/latest" class="btn btn-primary">
@@ -337,62 +352,96 @@
 </section>
 
 <!-- Flow -->
-<div class="flow">
-  <div class="flow-step"><span class="flow-icon">🔔</span><strong>PR arrives</strong><p>Someone requests your review on GitHub</p></div>
-  <div class="flow-arrow">→</div>
-  <div class="flow-step"><span class="flow-icon">🤖</span><strong>AI reviews</strong><p>Heimdallm fetches the diff and runs your AI agent</p></div>
-  <div class="flow-arrow">→</div>
-  <div class="flow-step"><span class="flow-icon">📝</span><strong>Posted to GitHub</strong><p>Review submitted as your account with severity rating</p></div>
-  <div class="flow-arrow">→</div>
-  <div class="flow-step"><span class="flow-icon">🔔</span><strong>You're notified</strong><p>Native macOS notification with a link to the review</p></div>
+<div class="flow-wrap" id="flow">
+  <div class="flow-label">PR review pipeline</div>
+  <div class="flow">
+    <div class="flow-step"><span class="flow-icon">🔔</span><strong>Review requested</strong><p>You're added as reviewer on a GitHub PR</p></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step"><span class="flow-icon">🤖</span><strong>AI reviews</strong><p>Heimdallm fetches the diff and runs your AI agent</p></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step"><span class="flow-icon">📝</span><strong>Posted to GitHub</strong><p>Review submitted as your account with severity rating</p></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step"><span class="flow-icon">🔔</span><strong>You're notified</strong><p>Desktop notification with a link straight to the review</p></div>
+  </div>
+
+  <div class="flow-label">Issue pipeline</div>
+  <div class="flow">
+    <div class="flow-step"><span class="flow-icon">🏷️</span><strong>New issue</strong><p>Labels drive what Heimdallm does next</p></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step"><span class="flow-icon">🧭</span><strong>Triage &amp; refine</strong><p>Classify, summarise, and plan the work</p></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step"><span class="flow-icon">🛠️</span><strong>Auto-implement</strong><p>Branch, commit, and open a PR against your default branch</p></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step"><span class="flow-icon">👀</span><strong>You review</strong><p>Same review pipeline kicks in on the AI's own PR</p></div>
+  </div>
 </div>
 
 <!-- Features -->
 <section class="section" id="features">
   <div class="section-inner">
     <div class="section-label">Features</div>
-    <h2>Everything you need. Nothing you don't.</h2>
-    <p>Heimdallm is a small, focused tool that does one thing well.</p>
+    <h2>One daemon. Every GitHub chore.</h2>
+    <p>Heimdallm is a Go daemon plus a Flutter desktop / web app and a CLI/TUI. It polls GitHub on your behalf and runs three pipelines in parallel: PR reviews, issue triage, and auto-implement.</p>
     <div class="grid">
       <div class="card">
-        <div class="card-icon">🔍</div>
-        <h3>Automatic detection</h3>
-        <p>Polls GitHub for <code>review-requested:@me</code>. No setup needed — uses your <code>gh</code> CLI token.</p>
+        <div class="card-icon">🤖</div>
+        <h3>Automatic PR reviews</h3>
+        <p>Polls <code>review-requested:@me</code>, runs your AI agent on the diff, and submits a proper GitHub review under your account. <code>REQUEST_CHANGES</code> on high severity, <code>APPROVE</code> otherwise.</p>
       </div>
       <div class="card">
-        <div class="card-icon">📬</div>
-        <h3>Posts to GitHub</h3>
-        <p>Reviews are submitted as proper GitHub PR reviews — not stored locally. REQUEST_CHANGES on high severity, APPROVE otherwise.</p>
+        <div class="card-icon">🧭</div>
+        <h3>Issue triage &amp; refinement</h3>
+        <p>Classifies issues by label — <code>review_only</code>, <code>refinement</code>, <code>develop</code>, <code>skip</code>, <code>blocked</code> — and walks them through triage → refinement → development with a state machine you control.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">🛠️</div>
+        <h3>Auto-implement</h3>
+        <p>For <code>develop</code>-track issues the agent creates a branch, commits the change, and opens a PR against your default branch — hardened against prompt injection.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">🔗</div>
+        <h3>Issue dependencies</h3>
+        <p>Declare blockers with a <code>## Depends on</code> section or GitHub's native sub-issues. Heimdallm holds the issue until every prerequisite closes, then auto-promotes it.</p>
       </div>
       <div class="card">
         <div class="card-icon">🧠</div>
         <h3>Your AI, your rules</h3>
-        <p>Works with Claude, Gemini and Codex. Configure which agent reviews which repo. Pass custom CLI flags.</p>
+        <p>Pick Claude, Gemini, Codex, or OpenCode — globally or per repo. Plug in your subscription token or an API key. Pass custom CLI flags.</p>
       </div>
       <div class="card">
         <div class="card-icon">✍️</div>
         <h3>Custom prompts</h3>
-        <p>Define review profiles: security audit, performance, architecture. Use <code>{diff}</code> <code>{author}</code> <code>{link}</code> placeholders.</p>
+        <p>Review profiles managed from the web UI at <code>/agents</code>. Placeholders for <code>{diff}</code>, <code>{title}</code>, <code>{author}</code>, <code>{comments}</code> and full template overrides.</p>
       </div>
       <div class="card">
-        <div class="card-icon">📊</div>
-        <h3>Review statistics</h3>
-        <p>Track reviews over time: severity distribution, top repos, reviews per day, average issues per review.</p>
+        <div class="card-icon">🏷️</div>
+        <h3>Topic-based discovery</h3>
+        <p>Tag a repo with a GitHub topic and it joins the monitored set on the next discovery cycle — no config edits, no daemon restart. Persists across restarts even before its first PR.</p>
       </div>
       <div class="card">
-        <div class="card-icon">💬</div>
-        <h3>Feedback modes</h3>
-        <p><em>Single</em>: one consolidated review comment. <em>Multi</em>: one comment per issue + summary. Configurable globally or per repo.</p>
+        <div class="card-icon">⚡</div>
+        <h3>Parallel polling</h3>
+        <p>Per-repo concurrency on Tier 2 polling, per-execution git worktrees so concurrent pipelines don't fight over the working tree, and an internal liveness watchdog.</p>
       </div>
       <div class="card">
-        <div class="card-icon">🐳</div>
-        <h3>Docker deployment</h3>
-        <p>Run headless on any server. Pre-built image with Claude, Gemini, Codex and OpenCode bundled. Configure via environment variables.</p>
+        <div class="card-icon">🔁</div>
+        <h3>Survives rename / archive</h3>
+        <p>Detects when GitHub renames a repo or org and propagates the new slug across config and stored state. Auto-purges archived repos from the monitored list.</p>
       </div>
       <div class="card">
         <div class="card-icon">🖥️</div>
-        <h3>macOS &amp; Linux</h3>
-        <p>Menu bar on macOS. Native desktop on Linux (.deb, .rpm, AppImage). No Electron, no browser — just a Go daemon and a Flutter UI.</p>
+        <h3>Native apps + Web UI + CLI</h3>
+        <p>Menu-bar app on macOS, native desktop on Linux (.deb, .rpm, AppImage), a Flutter Web dashboard for headless deploys, and a Bubble Tea CLI/TUI via Homebrew.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">🐳</div>
+        <h3>Docker mode</h3>
+        <p><code>make up</code> brings up the daemon and the web UI on port <code>3000</code>. All four AI CLIs bundled. Configure via env vars or a live-editable <code>config.toml</code>.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">🔒</div>
+        <h3>Safe by default</h3>
+        <p>Hides PRs you authored from the review queue, refuses dangerous skip-perms flags over the HTTP API, and runs every AI agent in non-interactive mode.</p>
       </div>
     </div>
   </div>
@@ -403,13 +452,13 @@
   <div class="section-inner">
     <div class="section-label">Example review</div>
     <h2>What a review looks like on GitHub</h2>
-    <p style="margin-bottom:1.5rem;">Posted as a proper GitHub review under your account, with file-level issues and an overall severity badge.</p>
+    <p style="margin-bottom:1.5rem;">Posted as a proper GitHub review under your account, with file-level findings and an overall severity badge. Single-comment or one-comment-per-issue, your choice.</p>
     <div class="review-box">
       <div class="review-header">
         <div class="avatar">🤖</div>
         <div class="meta">
           <strong>Heimdallm AI Review</strong>
-          <span>reviewed just now via heimdallm · Reviewed by claude</span>
+          <span>reviewed just now via heimdallm · agent: claude</span>
         </div>
         <span class="badge">HIGH</span>
       </div>
@@ -435,13 +484,13 @@
   <div class="section-inner">
     <div class="section-label">Prompts</div>
     <h2>Built-in review profiles</h2>
-    <p style="margin-bottom:1.5rem;">Choose a preset or write your own with <code>{diff}</code> <code>{title}</code> <code>{author}</code> <code>{link}</code> placeholders.</p>
+    <p style="margin-bottom:1.5rem;">Pick a preset or write your own from the web UI at <code>/agents</code>. Mix <code>{diff}</code>, <code>{title}</code>, <code>{author}</code>, <code>{comments}</code> placeholders, or replace the full template. Each profile can be assigned globally or per repo.</p>
     <div class="prompt-grid">
       <div class="prompt-card"><div class="emoji">🔍</div><div><h4>General Review</h4><p>Correctness, maintainability, error handling, code style</p></div></div>
       <div class="prompt-card"><div class="emoji">🔒</div><div><h4>Security Audit</h4><p>OWASP Top 10, injection, hardcoded secrets, auth flaws</p></div></div>
       <div class="prompt-card"><div class="emoji">⚡</div><div><h4>Performance</h4><p>N+1 queries, allocations, blocking I/O, O(n²) algorithms</p></div></div>
       <div class="prompt-card"><div class="emoji">🏛️</div><div><h4>Architecture</h4><p>SOLID violations, coupling, separation of concerns</p></div></div>
-      <div class="prompt-card"><div class="emoji">📝</div><div><h4>Docs & Style</h4><p>Docstrings, naming, magic numbers, conventions</p></div></div>
+      <div class="prompt-card"><div class="emoji">📝</div><div><h4>Docs &amp; Style</h4><p>Docstrings, naming, magic numbers, conventions</p></div></div>
       <div class="prompt-card"><div class="emoji">✨</div><div><h4>Custom</h4><p>Write your own with placeholders and optional full template</p></div></div>
     </div>
   </div>
@@ -460,6 +509,7 @@
       <button class="os-tab" onclick="showOS('linux-rpm',this)">🎩 Fedora / RHEL</button>
       <button class="os-tab" onclick="showOS('linux-appimage',this)">📦 AppImage (universal)</button>
       <button class="os-tab" onclick="showOS('docker',this)">🐳 Docker</button>
+      <button class="os-tab" onclick="showOS('cli',this)">⌨️ CLI / TUI</button>
     </div>
 
     <!-- macOS -->
@@ -489,7 +539,7 @@
           </div>
         </div>
       </div>
-      <p style="margin-top:1.5rem; color:var(--muted); font-size:.875rem;">Requires macOS 13+ · <a href="https://cli.github.com">gh CLI</a> authenticated · Claude/Gemini/Codex CLI installed</p>
+      <p style="margin-top:1.5rem; color:var(--muted); font-size:.875rem;">Requires macOS 13+ (Apple Silicon or Intel) · <a href="https://cli.github.com">gh CLI</a> authenticated · at least one of Claude / Gemini / Codex / OpenCode CLIs installed on the host</p>
     </div>
 
     <!-- Ubuntu/Debian -->
@@ -586,26 +636,60 @@ sudo apt-get install -f -y</pre>
           <div class="step-num">1</div>
           <div>
             <h4>Configure</h4>
-            <pre class="inline-code">cd docker && cp .env.example .env
-# Edit .env with your tokens</pre>
+            <pre class="inline-code">cp docker/.env.example docker/.env
+# Fill in GITHUB_TOKEN + at least one provider key</pre>
           </div>
         </div>
         <div class="install-step">
           <div class="step-num">2</div>
           <div>
-            <h4>Start</h4>
-            <pre class="inline-code">docker compose up -d</pre>
+            <h4>Start daemon + web UI</h4>
+            <pre class="inline-code">make up</pre>
           </div>
         </div>
         <div class="install-step">
           <div class="step-num">3</div>
           <div>
-            <h4>Verify</h4>
-            <pre class="inline-code">curl http://localhost:7842/health</pre>
+            <h4>Open the dashboard</h4>
+            <pre class="inline-code">curl http://localhost:7842/health
+open http://localhost:3000</pre>
+            <p style="margin-top:.4rem;">Flutter Web UI on port 3000, daemon API on 7842.</p>
           </div>
         </div>
       </div>
-      <p style="margin-top:1.5rem; color:var(--muted); font-size:.875rem;">Image: <code>ghcr.io/theburrowhub/heimdallm:latest</code> · ~2.4 GB · Runs as non-root · Built-in health check</p>
+      <p style="margin-top:1.5rem; color:var(--muted); font-size:.875rem;">Image: <code>ghcr.io/theburrowhub/heimdallm:latest</code> · all four AI CLIs bundled · runs as non-root · web UI waits for the daemon's healthcheck before accepting traffic</p>
+    </div>
+
+    <!-- CLI / TUI -->
+    <div id="os-cli" class="os-panel" style="display:none">
+      <div class="install-steps">
+        <div class="install-step">
+          <div class="step-num">1</div>
+          <div>
+            <h4>Install</h4>
+            <pre class="inline-code">brew install theburrowhub/tap/heimdallm-cli</pre>
+            <p style="margin-top:.4rem;">Or grab a <code>heimdallm-cli_*</code> archive from <a href="https://github.com/theburrowhub/heimdallm/releases/latest">Releases</a>.</p>
+          </div>
+        </div>
+        <div class="install-step">
+          <div class="step-num">2</div>
+          <div>
+            <h4>Point at a running daemon</h4>
+            <pre class="inline-code">export HEIMDALLM_HOST=http://localhost:7842
+export HEIMDALLM_TOKEN=&lt;your token&gt;</pre>
+            <p style="margin-top:.4rem;">Defaults to localhost — skip these if you're on the same host.</p>
+          </div>
+        </div>
+        <div class="install-step">
+          <div class="step-num">3</div>
+          <div>
+            <h4>Launch the dashboard</h4>
+            <pre class="inline-code">heimdallm-cli dashboard</pre>
+            <p style="margin-top:.4rem;">Or: <code>prs</code>, <code>issues</code>, <code>repos</code>, <code>review-pr</code>, <code>follow</code>, <code>config</code>, <code>stats</code>.</p>
+          </div>
+        </div>
+      </div>
+      <p style="margin-top:1.5rem; color:var(--muted); font-size:.875rem;">Bubble Tea + Lipgloss TUI · live SSE event stream · same daemon API as the desktop and web apps</p>
     </div>
   </div>
 </section>
