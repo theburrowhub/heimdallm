@@ -3,9 +3,11 @@ package github_test
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -186,6 +188,277 @@ func TestFetchComments_APIError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for 404 response, got nil")
 	}
+}
+
+// TestFetchComments_PaginatesReviewAndIssueComments locks in the fix for
+// theburrowhub/heimdallm#512: GitHub returns 30 comments per page sorted
+// ascending by created_at, so without explicit pagination any PR with >30
+// review or issue comments silently lost the newest entries — exactly the
+// ones a re-review depends on. This test mocks both endpoints to return
+// 100+50 (full + partial page) and asserts FetchComments returns all 300
+// merged entries.
+func TestFetchComments_PaginatesReviewAndIssueComments(t *testing.T) {
+	const fullPage = 100
+	const tailPage = 50
+
+	var reviewPages, issuePages int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := 1
+		if p := r.URL.Query().Get("page"); p != "" {
+			fmt.Sscanf(p, "%d", &page)
+		}
+		if pp := r.URL.Query().Get("per_page"); pp != "100" {
+			t.Errorf("expected per_page=100, got %q on path %s", pp, r.URL.Path)
+		}
+		switch r.URL.Path {
+		case "/repos/org/repo/pulls/1/comments":
+			atomic.AddInt32(&reviewPages, 1)
+			emitReviewCommentsPage(w, page, fullPage, tailPage, "review")
+		case "/repos/org/repo/issues/1/comments":
+			atomic.AddInt32(&issuePages, 1)
+			emitIssueCommentsPage(w, page, fullPage, tailPage, "issue")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	comments, err := client.FetchComments("org/repo", 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got, want := len(comments), 2*(fullPage+tailPage); got != want {
+		t.Fatalf("expected %d total comments, got %d", want, got)
+	}
+	// Both endpoints fetched 2 pages each (1 full + 1 partial).
+	if got := atomic.LoadInt32(&reviewPages); got != 2 {
+		t.Errorf("review endpoint hit count: got %d, want 2", got)
+	}
+	if got := atomic.LoadInt32(&issuePages); got != 2 {
+		t.Errorf("issue endpoint hit count: got %d, want 2", got)
+	}
+	// Spot-check that comments from the tail page (only available via
+	// pagination) actually made it through.
+	foundTail := false
+	for _, c := range comments {
+		if c.Body == "review-2-49" {
+			foundTail = true
+			break
+		}
+	}
+	if !foundTail {
+		t.Errorf("expected to find a comment from the second review page (body=review-2-49); pagination dropped it")
+	}
+}
+
+// TestFetchComments_ShortFirstPageStopsPaging guards against the inverse
+// regression: a single short page must NOT trigger a redundant second
+// request. Cheap PRs (<100 comments) should still cost exactly one round
+// trip per endpoint.
+func TestFetchComments_ShortFirstPageStopsPaging(t *testing.T) {
+	var reviewPages, issuePages int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/org/repo/pulls/1/comments":
+			atomic.AddInt32(&reviewPages, 1)
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"user":          map[string]string{"login": "bob"},
+					"body":          "inline",
+					"created_at":    "2024-01-02T00:00:00Z",
+					"path":          "main.go",
+					"original_line": 10,
+				},
+			})
+		case "/repos/org/repo/issues/1/comments":
+			atomic.AddInt32(&issuePages, 1)
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"user":       map[string]string{"login": "alice"},
+					"body":       "general",
+					"created_at": "2024-01-01T00:00:00Z",
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	comments, err := client.FetchComments("org/repo", 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(comments) != 2 {
+		t.Fatalf("expected 2 comments, got %d", len(comments))
+	}
+	if got := atomic.LoadInt32(&reviewPages); got != 1 {
+		t.Errorf("review endpoint hit %d times, want 1 (short page must not trigger another request)", got)
+	}
+	if got := atomic.LoadInt32(&issuePages); got != 1 {
+		t.Errorf("issue endpoint hit %d times, want 1 (short page must not trigger another request)", got)
+	}
+}
+
+// TestFetchComments_FullPageThenEmptyStopsCleanly covers the edge case
+// where total_count is an exact multiple of per_page=100: the first page
+// is full (so we paginate), the second page is empty, and pagination must
+// terminate cleanly without surfacing an error.
+func TestFetchComments_FullPageThenEmptyStopsCleanly(t *testing.T) {
+	var reviewPages, issuePages int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := 1
+		if p := r.URL.Query().Get("page"); p != "" {
+			fmt.Sscanf(p, "%d", &page)
+		}
+		switch r.URL.Path {
+		case "/repos/org/repo/pulls/1/comments":
+			atomic.AddInt32(&reviewPages, 1)
+			if page == 1 {
+				emitReviewCommentsPage(w, page, 100, 0, "review")
+			} else {
+				_ = json.NewEncoder(w).Encode([]map[string]any{})
+			}
+		case "/repos/org/repo/issues/1/comments":
+			atomic.AddInt32(&issuePages, 1)
+			if page == 1 {
+				emitIssueCommentsPage(w, page, 100, 0, "issue")
+			} else {
+				_ = json.NewEncoder(w).Encode([]map[string]any{})
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	comments, err := client.FetchComments("org/repo", 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// 100 review + 100 issue, all from the first page.
+	if got, want := len(comments), 200; got != want {
+		t.Fatalf("expected %d comments, got %d", want, got)
+	}
+	if got := atomic.LoadInt32(&reviewPages); got != 2 {
+		t.Errorf("review endpoint hits: got %d, want 2 (page 1 full + page 2 empty)", got)
+	}
+	if got := atomic.LoadInt32(&issuePages); got != 2 {
+		t.Errorf("issue endpoint hits: got %d, want 2 (page 1 full + page 2 empty)", got)
+	}
+}
+
+// TestFetchComments_MidPaginationErrorPropagates verifies that an HTTP 500
+// on page 2 of /pulls/:n/comments surfaces as a hard error rather than a
+// silently-truncated slice. Returning partial results would defeat the
+// point of paginating in the first place.
+func TestFetchComments_MidPaginationErrorPropagates(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := 1
+		if p := r.URL.Query().Get("page"); p != "" {
+			fmt.Sscanf(p, "%d", &page)
+		}
+		switch r.URL.Path {
+		case "/repos/org/repo/pulls/1/comments":
+			if page == 1 {
+				emitReviewCommentsPage(w, page, 100, 0, "review")
+				return
+			}
+			http.Error(w, `{"message":"boom"}`, http.StatusInternalServerError)
+		case "/repos/org/repo/issues/1/comments":
+			// Issue side is well-behaved so the failure is unambiguously the review leg.
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	got, err := client.FetchComments("org/repo", 1)
+	if err == nil {
+		t.Fatalf("expected error from mid-pagination 500, got nil and %d comments", len(got))
+	}
+	if !strings.Contains(err.Error(), "fetch review comments") {
+		t.Errorf("expected error to mention 'fetch review comments', got: %v", err)
+	}
+}
+
+// TestFetchComments_MidPaginationErrorOnIssuesPropagates is the symmetric
+// guard for the issue-comments leg. Same contract: mid-pagination failure
+// must NOT return a partial slice.
+func TestFetchComments_MidPaginationErrorOnIssuesPropagates(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := 1
+		if p := r.URL.Query().Get("page"); p != "" {
+			fmt.Sscanf(p, "%d", &page)
+		}
+		switch r.URL.Path {
+		case "/repos/org/repo/pulls/1/comments":
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
+		case "/repos/org/repo/issues/1/comments":
+			if page == 1 {
+				emitIssueCommentsPage(w, page, 100, 0, "issue")
+				return
+			}
+			http.Error(w, `{"message":"boom"}`, http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	got, err := client.FetchIssueCommentsOnly("org/repo", 1)
+	if err == nil {
+		t.Fatalf("expected error from mid-pagination 500, got nil and %d comments", len(got))
+	}
+	if !strings.Contains(err.Error(), "fetch issue comments") {
+		t.Errorf("expected error to mention 'fetch issue comments', got: %v", err)
+	}
+}
+
+// emitReviewCommentsPage writes a JSON page of /pulls/:n/comments shaped
+// items. Page 1 emits fullSize items; subsequent pages emit tailSize and
+// signal end-of-pagination by being short. Each body is tagged "<tag>-<page>-<index>"
+// so tests can assert specific entries survived pagination.
+func emitReviewCommentsPage(w http.ResponseWriter, page, fullSize, tailSize int, tag string) {
+	n := fullSize
+	if page > 1 {
+		n = tailSize
+	}
+	raw := make([]map[string]any, 0, n)
+	for i := 0; i < n; i++ {
+		raw = append(raw, map[string]any{
+			"user":          map[string]string{"login": fmt.Sprintf("u%d", i)},
+			"body":          fmt.Sprintf("%s-%d-%d", tag, page, i),
+			"created_at":    "2024-01-01T00:00:00Z",
+			"path":          "main.go",
+			"original_line": i,
+		})
+	}
+	_ = json.NewEncoder(w).Encode(raw)
+}
+
+// emitIssueCommentsPage is the issue-comments counterpart: no file/line
+// fields, since /issues/:n/comments doesn't return them.
+func emitIssueCommentsPage(w http.ResponseWriter, page, fullSize, tailSize int, tag string) {
+	n := fullSize
+	if page > 1 {
+		n = tailSize
+	}
+	raw := make([]map[string]any, 0, n)
+	for i := 0; i < n; i++ {
+		raw = append(raw, map[string]any{
+			"user":       map[string]string{"login": fmt.Sprintf("u%d", i)},
+			"body":       fmt.Sprintf("%s-%d-%d", tag, page, i),
+			"created_at": "2024-01-01T00:00:00Z",
+		})
+	}
+	_ = json.NewEncoder(w).Encode(raw)
 }
 
 // TestFetchIssueCommentsOnly_IgnoresPREndpoint locks in the fix for #292:
