@@ -203,10 +203,7 @@ func TestFetchComments_PaginatesReviewAndIssueComments(t *testing.T) {
 
 	var reviewPages, issuePages int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		page := 1
-		if p := r.URL.Query().Get("page"); p != "" {
-			fmt.Sscanf(p, "%d", &page)
-		}
+		page := parsePageParam(t, r)
 		if pp := r.URL.Query().Get("per_page"); pp != "100" {
 			t.Errorf("expected per_page=100, got %q on path %s", pp, r.URL.Path)
 		}
@@ -309,10 +306,7 @@ func TestFetchComments_ShortFirstPageStopsPaging(t *testing.T) {
 func TestFetchComments_FullPageThenEmptyStopsCleanly(t *testing.T) {
 	var reviewPages, issuePages int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		page := 1
-		if p := r.URL.Query().Get("page"); p != "" {
-			fmt.Sscanf(p, "%d", &page)
-		}
+		page := parsePageParam(t, r)
 		switch r.URL.Path {
 		case "/repos/org/repo/pulls/1/comments":
 			atomic.AddInt32(&reviewPages, 1)
@@ -357,10 +351,7 @@ func TestFetchComments_FullPageThenEmptyStopsCleanly(t *testing.T) {
 // point of paginating in the first place.
 func TestFetchComments_MidPaginationErrorPropagates(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		page := 1
-		if p := r.URL.Query().Get("page"); p != "" {
-			fmt.Sscanf(p, "%d", &page)
-		}
+		page := parsePageParam(t, r)
 		switch r.URL.Path {
 		case "/repos/org/repo/pulls/1/comments":
 			if page == 1 {
@@ -392,10 +383,7 @@ func TestFetchComments_MidPaginationErrorPropagates(t *testing.T) {
 // must NOT return a partial slice.
 func TestFetchComments_MidPaginationErrorOnIssuesPropagates(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		page := 1
-		if p := r.URL.Query().Get("page"); p != "" {
-			fmt.Sscanf(p, "%d", &page)
-		}
+		page := parsePageParam(t, r)
 		switch r.URL.Path {
 		case "/repos/org/repo/pulls/1/comments":
 			_ = json.NewEncoder(w).Encode([]map[string]any{})
@@ -419,6 +407,102 @@ func TestFetchComments_MidPaginationErrorOnIssuesPropagates(t *testing.T) {
 	if !strings.Contains(err.Error(), "fetch issue comments") {
 		t.Errorf("expected error to mention 'fetch issue comments', got: %v", err)
 	}
+}
+
+// TestFetchComments_PaginationCapReturnsError locks in the contract that
+// hitting maxCommentPages with every page full surfaces a hard error
+// rather than a silently-truncated slice. Silent partial results here
+// would re-introduce the exact failure mode #512 exists to prevent
+// (dropping the newest comments) and would be inconsistent with the
+// mid-pagination 500 contract that TestFetchComments_MidPaginationError*
+// already enforce. Also asserts the production code does NOT walk past
+// the cap (no 51st request).
+func TestFetchComments_PaginationCapReturnsError(t *testing.T) {
+	t.Run("review_comments", func(t *testing.T) {
+		var reviewPages int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			page := parsePageParam(t, r)
+			switch r.URL.Path {
+			case "/repos/org/repo/pulls/1/comments":
+				atomic.AddInt32(&reviewPages, 1)
+				// Always emit a full page so the loop never short-circuits
+				// on len<perPage and is forced to hit the cap.
+				emitReviewCommentsPage(w, page, 100, 100, "review")
+			case "/repos/org/repo/issues/1/comments":
+				_ = json.NewEncoder(w).Encode([]map[string]any{})
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+
+		client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+		got, err := client.FetchComments("org/repo", 1)
+		if err == nil {
+			t.Fatalf("expected pagination cap error, got nil and %d comments", len(got))
+		}
+		if !strings.Contains(err.Error(), "comment pagination exceeded") {
+			t.Errorf("expected error to mention 'comment pagination exceeded', got: %v", err)
+		}
+		if got != nil {
+			t.Errorf("expected nil slice on cap-hit error, got %d comments", len(got))
+		}
+		// The loop runs `for page := 1; page <= maxCommentPages; page++`,
+		// so on cap-hit exactly maxCommentPages (50) requests should be
+		// made and no 51st request should be attempted.
+		if got, want := atomic.LoadInt32(&reviewPages), int32(50); got != want {
+			t.Errorf("review endpoint hit count: got %d, want %d (must not walk past cap)", got, want)
+		}
+	})
+
+	t.Run("issue_comments", func(t *testing.T) {
+		var issuePages int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			page := parsePageParam(t, r)
+			switch r.URL.Path {
+			case "/repos/org/repo/pulls/1/comments":
+				_ = json.NewEncoder(w).Encode([]map[string]any{})
+			case "/repos/org/repo/issues/1/comments":
+				atomic.AddInt32(&issuePages, 1)
+				emitIssueCommentsPage(w, page, 100, 100, "issue")
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+
+		client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+		got, err := client.FetchIssueCommentsOnly("org/repo", 1)
+		if err == nil {
+			t.Fatalf("expected pagination cap error, got nil and %d comments", len(got))
+		}
+		if !strings.Contains(err.Error(), "comment pagination exceeded") {
+			t.Errorf("expected error to mention 'comment pagination exceeded', got: %v", err)
+		}
+		if got != nil {
+			t.Errorf("expected nil slice on cap-hit error, got %d comments", len(got))
+		}
+		if got, want := atomic.LoadInt32(&issuePages), int32(50); got != want {
+			t.Errorf("issue endpoint hit count: got %d, want %d (must not walk past cap)", got, want)
+		}
+	})
+}
+
+// parsePageParam reads ?page=N from r and returns it, defaulting to 1 when
+// the param is absent. A malformed value is a test bug — the production
+// code only ever emits integers — so we fail loudly via t.Fatalf rather
+// than silently coercing to 1 and masking the mistake.
+func parsePageParam(t *testing.T, r *http.Request) int {
+	t.Helper()
+	raw := r.URL.Query().Get("page")
+	if raw == "" {
+		return 1
+	}
+	page := 0
+	if _, err := fmt.Sscanf(raw, "%d", &page); err != nil {
+		t.Fatalf("test bug: malformed page param %q on %s: %v", raw, r.URL.Path, err)
+	}
+	return page
 }
 
 // emitReviewCommentsPage writes a JSON page of /pulls/:n/comments shaped

@@ -833,15 +833,25 @@ func (c *Client) GetPRTimelineEventsForReviewer(repo string, number int, login s
 // misbehaving server from making us iterate forever.
 const maxCommentPages = 50
 
+// perPage is the page size used for paginated comment endpoints. Kept
+// alongside maxCommentPages so changing either is an explicit decision,
+// and so the per_page query parameter and the short-page termination
+// check can't drift apart.
+const perPage = 100
+
 func (c *Client) fetchReviewComments(repo string, number int) ([]Comment, error) {
 	// GitHub's default page size is 30 and the API sorts ascending by
 	// created_at, so without explicit pagination any PR with >30 review
 	// comments silently drops the newest entries — exactly the ones a
 	// re-review depends on. Walk every page with per_page=100, matching
-	// the pattern used by GetPRTimelineEventsForReviewer.
+	// the pattern used by GetPRTimelineEventsForReviewer. Pin
+	// sort=created&direction=asc explicitly as defense-in-depth against
+	// server-side default changes; callers downstream rely on ascending
+	// order.
 	comments := []Comment{}
 	for page := 1; page <= maxCommentPages; page++ {
-		path := fmt.Sprintf("/repos/%s/pulls/%d/comments?per_page=100&page=%d", repo, number, page)
+		path := fmt.Sprintf("/repos/%s/pulls/%d/comments?per_page=%d&page=%d&sort=created&direction=asc",
+			repo, number, perPage, page)
 		resp, err := c.do("GET", path, "application/vnd.github+json")
 		if err != nil {
 			return nil, fmt.Errorf("github: fetch review comments: %w", err)
@@ -879,22 +889,30 @@ func (c *Client) fetchReviewComments(repo string, number int) ([]Comment, error)
 			})
 		}
 		// Short page means GitHub has no more entries upstream.
-		if len(raw) < 100 {
+		if len(raw) < perPage {
 			return comments, nil
 		}
 	}
-	slog.Warn("github: fetch review comments pagination cap hit, returning partial results",
+	// Hitting the cap with every page full is suspicious: either GitHub
+	// is misbehaving or this PR has >5,000 review comments. Either way,
+	// silently returning a truncated slice would re-introduce the exact
+	// bug this function exists to fix (losing the newest entries — the
+	// ones a re-review depends on), so surface a hard error and match
+	// the mid-pagination error contract the other tests already enforce.
+	slog.Warn("github: fetch review comments pagination cap hit",
 		"repo", repo, "pr", number, "pages", maxCommentPages)
-	return comments, nil
+	return nil, fmt.Errorf("github: comment pagination exceeded %d pages for %s#%d (per_page=%d, possible runaway)",
+		maxCommentPages, repo, number, perPage)
 }
 
 func (c *Client) fetchIssueComments(repo string, number int) ([]Comment, error) {
-	// Same rationale as fetchReviewComments: paginate with per_page=100
+	// Same rationale as fetchReviewComments: paginate with per_page=perPage
 	// so we don't lose the newest issue comments on long-running PRs or
-	// busy issues.
+	// busy issues, and pin sort=created&direction=asc explicitly.
 	comments := []Comment{}
 	for page := 1; page <= maxCommentPages; page++ {
-		path := fmt.Sprintf("/repos/%s/issues/%d/comments?per_page=100&page=%d", repo, number, page)
+		path := fmt.Sprintf("/repos/%s/issues/%d/comments?per_page=%d&page=%d&sort=created&direction=asc",
+			repo, number, perPage, page)
 		resp, err := c.do("GET", path, "application/vnd.github+json")
 		if err != nil {
 			return nil, fmt.Errorf("github: fetch issue comments: %w", err)
@@ -922,13 +940,16 @@ func (c *Client) fetchIssueComments(repo string, number int) ([]Comment, error) 
 				CreatedAt: r.CreatedAt,
 			})
 		}
-		if len(raw) < 100 {
+		if len(raw) < perPage {
 			return comments, nil
 		}
 	}
-	slog.Warn("github: fetch issue comments pagination cap hit, returning partial results",
+	// See fetchReviewComments for the rationale: silent partial results
+	// at the cap would re-introduce the bug #512 fixes.
+	slog.Warn("github: fetch issue comments pagination cap hit",
 		"repo", repo, "issue", number, "pages", maxCommentPages)
-	return comments, nil
+	return nil, fmt.Errorf("github: comment pagination exceeded %d pages for %s#%d (per_page=%d, possible runaway)",
+		maxCommentPages, repo, number, perPage)
 }
 
 // FetchLabels returns the label names for a repository.
