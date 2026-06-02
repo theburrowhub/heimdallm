@@ -33,6 +33,15 @@ func (f *fakeCanonical) GetCanonicalFullName(repo string) (string, error) {
 	return r.canonical, r.err
 }
 
+// callCount returns f.calls under the mutex. Use from any test goroutine
+// that may run concurrently with GetCanonicalFullName (e.g. Run-based
+// tests) instead of inlining lock/read/unlock at each call site.
+func (f *fakeCanonical) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
 // fakeDispatcher records reconciler invocations so the test can pin
 // which (old, new) pairs the probe dispatched. Concrete *Reconciler
 // is too heavy to construct in a probe test; the Dispatcher interface
@@ -41,12 +50,24 @@ type fakeDispatcher struct {
 	calls    int
 	gotPairs [][2]string
 	err      error
+	mu       sync.Mutex
 }
 
 func (f *fakeDispatcher) Run(_ context.Context, oldRepo, newRepo string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls++
 	f.gotPairs = append(f.gotPairs, [2]string{oldRepo, newRepo})
 	return f.err
+}
+
+// callCount returns f.calls under the mutex. Use from any test goroutine
+// that may run concurrently with Run (e.g. Run-based tests) instead of
+// inlining lock/read/unlock at each call site.
+func (f *fakeDispatcher) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
 }
 
 func newProbe(t *testing.T, canonical *fakeCanonical, dispatcher *fakeDispatcher,
@@ -162,16 +183,15 @@ func TestRenameProbe_Run_FiresInitialTickBeforeIntervalElapses(t *testing.T) {
 	// the 1h interval that the loop tick would need.
 	deadline := time.After(2 * time.Second)
 	for {
-		canonical.mu.Lock()
-		calls := canonical.calls
-		canonical.mu.Unlock()
-		if calls >= 1 && dispatcher.calls >= 1 {
+		calls := canonical.callCount()
+		dispatched := dispatcher.callCount()
+		if calls >= 1 && dispatched >= 1 {
 			break
 		}
 		select {
 		case <-deadline:
 			t.Fatalf("initial tick did not fire within budget: canonical.calls=%d, dispatcher.calls=%d",
-				calls, dispatcher.calls)
+				calls, dispatched)
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
