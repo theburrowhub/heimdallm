@@ -264,6 +264,23 @@ func (c IssueTrackingConfig) MatchesAssignees(assignees []string) bool {
 	return ok
 }
 
+// MatchesInstructionAuthors reports whether login is permitted to issue
+// persistent review-instruction directives for this repo. Case-insensitive and
+// tolerant of a leading "@". An empty allowlist denies everyone — comment-driven
+// instructions are opt-in and must be explicitly granted (issue #383).
+func (r RepoAI) MatchesInstructionAuthors(login string) bool {
+	login = strings.ToLower(strings.TrimSpace(strings.TrimLeft(login, "@")))
+	if login == "" {
+		return false
+	}
+	for _, a := range r.InstructionAuthors {
+		if strings.ToLower(strings.TrimSpace(strings.TrimLeft(a, "@"))) == login {
+			return true
+		}
+	}
+	return false
+}
+
 // Classify returns the processing mode for an issue given its labels.
 // Matching is case-insensitive to match the way GitHub displays labels; the
 // underlying labels API is case-preserving but the UI is not, so users
@@ -360,6 +377,12 @@ type AIConfig struct {
 	PRLabels    []string `toml:"pr_labels"`
 	PRAssignee  string   `toml:"pr_assignee"`
 	PRDraft     *bool    `toml:"pr_draft,omitempty"`
+
+	// InstructionAuthors are GitHub logins permitted to set persistent,
+	// per-repo review instructions via PR comment directives (#383). Resolved
+	// through the repo > org > global hierarchy like PRReviewers. Empty means
+	// nobody is authorized — the comment-driven feature is opt-in.
+	InstructionAuthors []string `toml:"instruction_authors"`
 
 	// IssuePrompt is the global default agent profile ID for issue triage.
 	// Per-repo overrides in [ai.repos.<name>] take precedence.
@@ -492,6 +515,8 @@ type RepoAI struct {
 	PRLabels    []string `toml:"pr_labels"`          // labels to add to the PR
 	PRDraft     *bool    `toml:"pr_draft,omitempty"` // create as draft PR
 
+	InstructionAuthors []string `toml:"instruction_authors"` // GitHub logins allowed to set standing instructions (#383)
+
 	// GeneratePRDescription overrides the global ai.generate_pr_description
 	// for this repo. nil = inherit from global.
 	GeneratePRDescription *bool `toml:"generate_pr_description,omitempty"`
@@ -547,10 +572,11 @@ type OrgAI struct {
 
 	// Nil slices inherit from global; non-nil empty slices explicitly clear
 	// inherited values for every repo in this org.
-	PRReviewers []string `toml:"pr_reviewers"`
-	PRAssignee  string   `toml:"pr_assignee"`
-	PRLabels    []string `toml:"pr_labels"`
-	PRDraft     *bool    `toml:"pr_draft,omitempty"`
+	PRReviewers        []string `toml:"pr_reviewers"`
+	PRAssignee         string   `toml:"pr_assignee"`
+	PRLabels           []string `toml:"pr_labels"`
+	PRDraft            *bool    `toml:"pr_draft,omitempty"`
+	InstructionAuthors []string `toml:"instruction_authors"` // see RepoAI.InstructionAuthors (#383)
 
 	GeneratePRDescription *bool                  `toml:"generate_pr_description,omitempty"`
 	IssueTracking         *IssueTrackingOverride `toml:"issue_tracking,omitempty" json:"issue_tracking,omitempty"`
@@ -697,6 +723,7 @@ func (c *Config) AIForRepo(repo string) RepoAI {
 		CloneDir:              c.AI.CloneDir,
 		AutoPromoteTriage:     c.AI.AutoPromoteTriage,
 		AutoPromoteRefinement: c.AI.AutoPromoteRefinement,
+		InstructionAuthors:    c.AI.InstructionAuthors,
 	}
 	if org := repoOrg(repo); org != "" && c.AI.Orgs != nil {
 		if o, ok := c.AI.Orgs[org]; ok {
@@ -730,6 +757,7 @@ func applyOrgAI(out *RepoAI, o OrgAI) {
 		PRAssignee:            o.PRAssignee,
 		PRDraft:               o.PRDraft,
 		GeneratePRDescription: o.GeneratePRDescription,
+		InstructionAuthors:    o.InstructionAuthors,
 	})
 }
 
@@ -752,6 +780,7 @@ func applyRepoAI(out *RepoAI, r RepoAI) {
 		PRAssignee:            r.PRAssignee,
 		PRDraft:               r.PRDraft,
 		GeneratePRDescription: r.GeneratePRDescription,
+		InstructionAuthors:    r.InstructionAuthors,
 	})
 }
 
@@ -773,6 +802,7 @@ type scopedAIFields struct {
 	PRAssignee            string
 	PRDraft               *bool
 	GeneratePRDescription *bool
+	InstructionAuthors    []string
 }
 
 func applyScopedAI(out *RepoAI, fields scopedAIFields) {
@@ -826,6 +856,9 @@ func applyScopedAI(out *RepoAI, fields scopedAIFields) {
 	}
 	if fields.GeneratePRDescription != nil {
 		out.GeneratePRDescription = fields.GeneratePRDescription
+	}
+	if fields.InstructionAuthors != nil {
+		out.InstructionAuthors = fields.InstructionAuthors
 	}
 }
 
