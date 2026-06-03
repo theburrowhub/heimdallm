@@ -12,9 +12,9 @@ import (
 func TestParseDirective(t *testing.T) {
 	const bot = "heimdallm"
 	cases := []struct {
-		name                        string
-		body                        string
-		wantOK                      bool
+		name                         string
+		body                         string
+		wantOK                       bool
 		wantVerb, wantScope, wantPay string
 	}{
 		{"remember", "@heimdallm remember: unauth endpoints are fine", true, "remember", "repo", "unauth endpoints are fine"},
