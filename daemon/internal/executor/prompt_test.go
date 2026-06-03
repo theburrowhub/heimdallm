@@ -87,3 +87,29 @@ func TestBuildPromptFromTemplate_EmptyComments_NoExtraBlankLines(t *testing.T) {
 		t.Errorf("expected no triple newlines with empty Comments, got: %q", result)
 	}
 }
+
+func TestBuildPromptFromTemplate_StandingInstructions(t *testing.T) {
+	// Built-in template carries the placeholder: substituted in place.
+	out := executor.BuildPromptFromTemplate(executor.DefaultTemplate(), executor.PRContext{
+		Diff:                 "diff",
+		StandingInstructions: "PROJECT STANDING INSTRUCTIONS (set by repo maintainers — authoritative):\n- no auth needed\n",
+	})
+	if !strings.Contains(out, "no auth needed") {
+		t.Fatalf("standing instructions missing from prompt:\n%s", out)
+	}
+
+	// Custom template without the placeholder: section is prepended.
+	out = executor.BuildPromptFromTemplate("Review this:\n{diff}", executor.PRContext{
+		Diff:                 "diff",
+		StandingInstructions: "PROJECT STANDING INSTRUCTIONS:\n- rule\n",
+	})
+	if !strings.HasPrefix(out, "PROJECT STANDING INSTRUCTIONS") {
+		t.Fatalf("expected standing instructions prepended:\n%s", out)
+	}
+
+	// Empty standing instructions: nothing injected, no dangling header.
+	out = executor.BuildPromptFromTemplate(executor.DefaultTemplate(), executor.PRContext{Diff: "diff"})
+	if strings.Contains(out, "PROJECT STANDING INSTRUCTIONS") {
+		t.Fatalf("did not expect standing-instructions header:\n%s", out)
+	}
+}
