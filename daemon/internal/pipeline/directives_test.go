@@ -5,30 +5,34 @@ import "testing"
 func TestParseDirective(t *testing.T) {
 	const bot = "heimdallm"
 	cases := []struct {
-		name              string
-		body              string
-		wantOK            bool
-		wantVerb, wantPay string
+		name                        string
+		body                        string
+		wantOK                      bool
+		wantVerb, wantScope, wantPay string
 	}{
-		{"remember", "@heimdallm remember: unauth endpoints are fine", true, "remember", "unauth endpoints are fine"},
-		{"remember scoped", "@heimdallm remember(repo): rule X", true, "remember", "rule X"},
-		{"forget", "@heimdallm forget: 12", true, "forget", "12"},
-		{"list", "@heimdallm list", true, "list", ""},
-		{"case-insensitive mention+verb", "@HeimdallM REMEMBER: y", true, "remember", "y"},
-		{"leading whitespace", "   @heimdallm list", true, "list", ""},
-		{"not a directive", "looks good to me", false, "", ""},
-		{"mention without verb", "@heimdallm hello there", false, "", ""},
-		{"remember without payload", "@heimdallm remember:", false, "", ""},
-		{"unknown verb", "@heimdallm frobnicate: x", false, "", ""},
+		{"remember", "@heimdallm remember: unauth endpoints are fine", true, "remember", "repo", "unauth endpoints are fine"},
+		{"remember scoped", "@heimdallm remember(repo): rule X", true, "remember", "repo", "rule X"},
+		{"forget", "@heimdallm forget: 12", true, "forget", "repo", "12"},
+		{"list", "@heimdallm list", true, "list", "repo", ""},
+		{"case-insensitive mention+verb", "@HeimdallM REMEMBER: y", true, "remember", "repo", "y"},
+		{"leading whitespace", "   @heimdallm list", true, "list", "repo", ""},
+		{"not a directive", "looks good to me", false, "", "", ""},
+		{"mention without verb", "@heimdallm hello there", false, "", "", ""},
+		{"remember without payload", "@heimdallm remember:", false, "", "", ""},
+		{"unknown verb", "@heimdallm frobnicate: x", false, "", "", ""},
+		{"remember scoped non-default", "@heimdallm remember(global): rule X", true, "remember", "global", "rule X"},
+		{"list scoped", "@heimdallm list(global)", true, "list", "global", ""},
+		{"no word boundary", "@heimdallmremember: x", false, "", "", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			verb, _, payload, ok := parseDirective(tc.body, bot)
+			verb, scope, payload, ok := parseDirective(tc.body, bot)
 			if ok != tc.wantOK {
 				t.Fatalf("ok=%v want %v", ok, tc.wantOK)
 			}
-			if ok && (verb != tc.wantVerb || payload != tc.wantPay) {
-				t.Fatalf("got verb=%q payload=%q; want verb=%q payload=%q", verb, payload, tc.wantVerb, tc.wantPay)
+			if ok && (verb != tc.wantVerb || scope != tc.wantScope || payload != tc.wantPay) {
+				t.Fatalf("got verb=%q scope=%q payload=%q; want verb=%q scope=%q payload=%q",
+					verb, scope, payload, tc.wantVerb, tc.wantScope, tc.wantPay)
 			}
 		})
 	}

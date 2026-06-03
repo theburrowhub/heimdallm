@@ -30,7 +30,13 @@ func parseDirective(body, botLogin string) (verb, scope, payload string, ok bool
 	if !strings.HasPrefix(strings.ToLower(line), strings.ToLower(mention)) {
 		return "", "", "", false
 	}
-	rest := strings.TrimSpace(line[len(mention):])
+	raw := line[len(mention):]
+	// Require a word boundary after the mention so a login that is a strict
+	// prefix of the next token (e.g. "@heimdallmremember") does not match.
+	if raw != "" && raw[0] != ' ' && raw[0] != '\t' && raw[0] != '(' {
+		return "", "", "", false
+	}
+	rest := strings.TrimSpace(raw)
 
 	head := rest
 	if i := strings.Index(rest, ":"); i >= 0 {
@@ -54,7 +60,9 @@ func parseDirective(body, botLogin string) (verb, scope, payload string, ok bool
 			return "", "", "", false
 		}
 	case directiveList:
-		// no payload
+		if payload != "" {
+			return "", "", "", false
+		}
 	default:
 		return "", "", "", false
 	}
