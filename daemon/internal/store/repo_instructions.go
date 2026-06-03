@@ -36,7 +36,9 @@ func (s *Store) ListRepoInstructions(repo string) ([]RepoInstruction, error) {
 		if err := rows.Scan(&ri.ID, &ri.Repo, &ri.Instruction, &ri.Author, &ri.CommentID, &createdAt); err != nil {
 			return nil, fmt.Errorf("store: scan repo instruction: %w", err)
 		}
-		ri.CreatedAt, _ = time.Parse(sqliteTimeFormat, createdAt)
+		if ri.CreatedAt, err = time.Parse(sqliteTimeFormat, createdAt); err != nil {
+			return nil, fmt.Errorf("store: parse created_at %q: %w", createdAt, err)
+		}
 		out = append(out, ri)
 	}
 	return out, rows.Err()
