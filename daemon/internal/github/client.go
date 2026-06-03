@@ -863,6 +863,7 @@ func (c *Client) fetchReviewComments(repo string, number int) ([]Comment, error)
 			return nil, fmt.Errorf("github: fetch review comments: status %d: %s", resp.StatusCode, errBody)
 		}
 		var raw []struct {
+			ID   int64 `json:"id"`
 			User struct {
 				Login string `json:"login"`
 			} `json:"user"`
@@ -881,6 +882,7 @@ func (c *Client) fetchReviewComments(repo string, number int) ([]Comment, error)
 				line = *r.Line
 			}
 			comments = append(comments, Comment{
+				ID:        r.ID,
 				Author:    r.User.Login,
 				Body:      r.Body,
 				CreatedAt: r.CreatedAt,
@@ -924,6 +926,7 @@ func (c *Client) fetchIssueComments(repo string, number int) ([]Comment, error) 
 			return nil, fmt.Errorf("github: fetch issue comments: status %d: %s", resp.StatusCode, errBody)
 		}
 		var raw []struct {
+			ID   int64 `json:"id"`
 			User struct {
 				Login string `json:"login"`
 			} `json:"user"`
@@ -935,6 +938,7 @@ func (c *Client) fetchIssueComments(repo string, number int) ([]Comment, error) 
 		}
 		for _, r := range raw {
 			comments = append(comments, Comment{
+				ID:        r.ID,
 				Author:    r.User.Login,
 				Body:      r.Body,
 				CreatedAt: r.CreatedAt,
