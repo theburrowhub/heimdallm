@@ -168,6 +168,7 @@ CREATE TABLE IF NOT EXISTS repo_instructions (
   created_at  DATETIME NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_repo_instructions_repo ON repo_instructions(repo);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_repo_instructions_comment ON repo_instructions(comment_id);
 
 -- Dedup/audit guard so each directive comment is applied/acked exactly once
 -- across poll cycles. GitHub comment ids are stable and effectively unique.
@@ -291,6 +292,7 @@ func Open(dsn string) (*Store, error) {
 		created_at  DATETIME NOT NULL
 	)`)
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_repo_instructions_repo ON repo_instructions(repo)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_repo_instructions_comment ON repo_instructions(comment_id)")
 	db.Exec(`CREATE TABLE IF NOT EXISTS directive_marks (
 		comment_id   INTEGER PRIMARY KEY,
 		verb         TEXT NOT NULL,
