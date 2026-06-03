@@ -9,12 +9,12 @@ const maxDiffBytes = 32 * 1024 // 32KB ~ 8k tokens
 
 // PRContext holds all substitutable data for a prompt template.
 type PRContext struct {
-	Title         string
-	Number        int
-	Repo          string
-	Author        string
-	Link          string
-	Diff          string
+	Title                string
+	Number               int
+	Repo                 string
+	Author               string
+	Link                 string
+	Diff                 string
 	Comments             string // pre-formatted discussion section; empty string if no comments
 	ReviewContext        string // structured re-review context; empty on first review
 	StandingInstructions string // persistent per-repo instructions; empty when none
@@ -107,7 +107,7 @@ func BuildPrompt(title, author, diff string) string {
 }
 
 // BuildPromptFromTemplate substitutes placeholders in a template.
-// Supported placeholders: {title} {number} {repo} {author} {link} {diff} {comments} {review_context}
+// Supported placeholders: {title} {number} {repo} {author} {link} {diff} {comments} {review_context} {standing_instructions}
 //
 // Behavior for {comments}:
 //
