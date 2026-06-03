@@ -293,6 +293,10 @@ type RunOptions struct {
 	// before pushing PRs into the pipeline; this layer prevents regressions
 	// if a new caller forgets.
 	Guards GateConfig
+	// InstructionAuthors is the resolved allowlist of GitHub logins permitted
+	// to set persistent per-repo instructions via comment directives (#383).
+	// Empty disables the comment-driven path for this repo.
+	InstructionAuthors []string
 }
 
 // Run executes the full review pipeline for one PR and publishes the review to GitHub.
@@ -409,6 +413,21 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		p.publishSkipped(pr, SkipReasonLegacyBackfill)
 		return nil, nil
 	}
+
+	// 2a.5 Process persistent-instruction directives (#383) BEFORE the
+	// re-review skip gate so a remember/forget takes effect even on cycles
+	// that will not produce a review. Opt-in: only when the repo configures an
+	// instruction-author allowlist, so unconfigured repos pay no extra fetch.
+	var prComments []github.Comment
+	if len(opts.InstructionAuthors) > 0 {
+		if cs, err := p.gh.FetchComments(pr.Repo, pr.Number); err != nil {
+			slog.Warn("pipeline: fetch comments for directives failed", "err", err, "repo", pr.Repo, "pr", pr.Number)
+		} else {
+			prComments = cs
+			p.processDirectives(pr, prComments, opts.InstructionAuthors)
+		}
+	}
+
 	if prevReview != nil && pr.Head.SHA != "" {
 		// Regardless of whether the HEAD SHA changed, the bot must not
 		// re-review unless the operator explicitly re-requested it. The
@@ -449,11 +468,16 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 			"prev_head_sha", prevReview.HeadSHA, "head_sha", pr.Head.SHA)
 	}
 
-	// 2b. Fetch PR comments for context (non-fatal: proceed without if unavailable)
-	prComments, err := p.gh.FetchComments(pr.Repo, pr.Number)
-	if err != nil {
-		slog.Warn("pipeline: failed to fetch PR comments, proceeding without", "err", err)
-		prComments = nil
+	// 2b. Fetch PR comments for context (non-fatal: proceed without if unavailable).
+	// prComments may already be populated by the directive-fetch above; reuse it
+	// to avoid a duplicate API call.
+	if prComments == nil {
+		cs, err := p.gh.FetchComments(pr.Repo, pr.Number)
+		if err != nil {
+			slog.Warn("pipeline: failed to fetch PR comments, proceeding without", "err", err)
+			cs = nil
+		}
+		prComments = cs
 	}
 	commentsSection := formatComments(prComments, pr.User.Login)
 
@@ -474,15 +498,22 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	promptTemplate := executor.DefaultTemplate()
 	var cliFlags string
 	p.applyPrompt(promptOverride, opts.AgentPromptID, &promptTemplate, &cliFlags)
+	var standing string
+	if instr, err := p.store.ListRepoInstructions(pr.Repo); err != nil {
+		slog.Warn("pipeline: list repo instructions for prompt failed", "err", err, "repo", pr.Repo)
+	} else {
+		standing = formatStandingInstructions(instr)
+	}
 	prompt := executor.BuildPromptFromTemplate(promptTemplate, executor.PRContext{
-		Title:         pr.Title,
-		Number:        pr.Number,
-		Repo:          pr.Repo,
-		Author:        pr.User.Login,
-		Link:          pr.HTMLURL,
-		Diff:          diff,
-		Comments:      commentsSection,
-		ReviewContext: reviewCtx,
+		Title:                pr.Title,
+		Number:               pr.Number,
+		Repo:                 pr.Repo,
+		Author:               pr.User.Login,
+		Link:                 pr.HTMLURL,
+		Diff:                 diff,
+		Comments:             commentsSection,
+		ReviewContext:        reviewCtx,
+		StandingInstructions: standing,
 	})
 
 	// 4. Select CLI (profile can override the global primary/fallback)

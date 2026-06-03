@@ -1,6 +1,13 @@
 package pipeline
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/heimdallm/daemon/internal/github"
+	"github.com/heimdallm/daemon/internal/store"
+)
 
 func TestParseDirective(t *testing.T) {
 	const bot = "heimdallm"
@@ -47,3 +54,71 @@ func TestAuthorAllowed(t *testing.T) {
 		t.Error("unexpected allow")
 	}
 }
+
+// fakeGH satisfies the pipeline's gh interface; only the methods used by
+// processDirectives do real work.
+type fakeGH struct {
+	posted []string
+}
+
+func (f *fakeGH) FetchDiff(string, int) (string, error)               { return "", nil }
+func (f *fakeGH) GetPRHeadSHA(string, int) (string, error)            { return "", nil }
+func (f *fakeGH) FetchComments(string, int) ([]github.Comment, error) { return nil, nil }
+func (f *fakeGH) SubmitReview(string, int, string, string) (int64, string, error) {
+	return 0, "", nil
+}
+func (f *fakeGH) PostComment(_ string, _ int, body string) (time.Time, error) {
+	f.posted = append(f.posted, body)
+	return time.Time{}, nil
+}
+
+type nopNotifier struct{}
+
+func (nopNotifier) Notify(string, string) {}
+
+func TestProcessDirectives_RememberForgetDedup(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	gh := &fakeGH{}
+	p := New(s, gh, nil, nopNotifier{})
+	p.SetBotLogin("heimdallm")
+
+	pr := &github.PullRequest{Repo: "org/repo", Number: 7}
+	allow := []string{"alice"}
+
+	comments := []github.Comment{
+		{ID: 1, Author: "mallory", Body: "@heimdallm remember: evil"},
+		{ID: 2, Author: "alice", Body: "@heimdallm remember: unauth endpoints are fine"},
+	}
+	p.processDirectives(pr, comments, allow)
+
+	items, _ := s.ListRepoInstructions("org/repo")
+	if len(items) != 1 || items[0].Instruction != "unauth endpoints are fine" {
+		t.Fatalf("want 1 authorized instruction, got %+v", items)
+	}
+	if len(gh.posted) != 1 {
+		t.Fatalf("want 1 ack, got %d: %v", len(gh.posted), gh.posted)
+	}
+
+	// Re-processing the same comments is a no-op (dedup via directive_marks).
+	p.processDirectives(pr, comments, allow)
+	items, _ = s.ListRepoInstructions("org/repo")
+	if len(items) != 1 {
+		t.Fatalf("dedup failed: got %d instructions", len(items))
+	}
+	if len(gh.posted) != 1 {
+		t.Fatalf("dedup failed: got %d acks", len(gh.posted))
+	}
+
+	// forget removes it.
+	forget := []github.Comment{{ID: 3, Author: "alice", Body: "@heimdallm forget: " + itoa(items[0].ID)}}
+	p.processDirectives(pr, forget, allow)
+	items, _ = s.ListRepoInstructions("org/repo")
+	if len(items) != 0 {
+		t.Fatalf("forget failed: %d remain", len(items))
+	}
+}
+
+func itoa(n int64) string { return fmt.Sprintf("%d", n) }

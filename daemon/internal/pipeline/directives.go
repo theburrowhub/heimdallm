@@ -2,8 +2,11 @@ package pipeline
 
 import (
 	"fmt"
+	"log/slog"
+	"strconv"
 	"strings"
 
+	"github.com/heimdallm/daemon/internal/github"
 	"github.com/heimdallm/daemon/internal/store"
 )
 
@@ -98,6 +101,99 @@ func formatStandingInstructions(items []store.RepoInstruction) string {
 	b.WriteString("PROJECT STANDING INSTRUCTIONS (set by repo maintainers — authoritative):\n")
 	for _, it := range items {
 		fmt.Fprintf(&b, "- %s\n", it.Instruction)
+	}
+	return b.String()
+}
+
+// processDirectives scans comments for heimdallm instruction directives (#383).
+// Authorized directives mutate the repo's persistent instruction set and are
+// acknowledged with a reply; every processed directive comment is marked so it
+// is applied at most once across poll cycles. All failures are logged and never
+// abort the surrounding review.
+func (p *Pipeline) processDirectives(pr *github.PullRequest, comments []github.Comment, allowlist []string) {
+	for _, c := range comments {
+		if c.ID == 0 {
+			continue // cannot dedup without a stable id
+		}
+		verb, scope, payload, ok := parseDirective(c.Body, p.botLogin)
+		if !ok {
+			continue
+		}
+		done, err := p.store.DirectiveProcessed(c.ID)
+		if err != nil {
+			slog.Warn("pipeline: directive dedup check failed", "err", err, "comment_id", c.ID)
+			continue
+		}
+		if done {
+			continue
+		}
+		switch {
+		case scope != "repo":
+			slog.Info("pipeline: ignoring directive with unsupported scope", "scope", scope, "repo", pr.Repo)
+		case !authorAllowed(allowlist, c.Author):
+			slog.Info("pipeline: ignoring directive from unauthorized author", "author", c.Author, "repo", pr.Repo)
+		default:
+			p.applyDirective(pr, verb, payload, c)
+		}
+		p.markDirective(c.ID, verb)
+	}
+}
+
+func (p *Pipeline) applyDirective(pr *github.PullRequest, verb, payload string, c github.Comment) {
+	switch verb {
+	case directiveRemember:
+		id, err := p.store.AddRepoInstruction(pr.Repo, payload, c.Author, c.ID)
+		if err != nil {
+			slog.Warn("pipeline: add repo instruction failed", "err", err, "repo", pr.Repo)
+			return
+		}
+		p.reply(pr, fmt.Sprintf("✅ Remembered for %s (#%d): %s", pr.Repo, id, payload))
+	case directiveForget:
+		id, perr := strconv.ParseInt(strings.TrimSpace(payload), 10, 64)
+		if perr != nil {
+			p.reply(pr, fmt.Sprintf("⚠️ `forget` expects a numeric instruction id; got %q. Use `@%s list` to see ids.", payload, p.botLogin))
+			return
+		}
+		removed, err := p.store.DeleteRepoInstruction(pr.Repo, id)
+		if err != nil {
+			slog.Warn("pipeline: delete repo instruction failed", "err", err, "repo", pr.Repo)
+			return
+		}
+		if !removed {
+			p.reply(pr, fmt.Sprintf("⚠️ No standing instruction #%d for %s.", id, pr.Repo))
+			return
+		}
+		p.reply(pr, fmt.Sprintf("🗑️ Forgot #%d for %s.", id, pr.Repo))
+	case directiveList:
+		p.reply(pr, p.formatInstructionList(pr.Repo))
+	}
+}
+
+func (p *Pipeline) reply(pr *github.PullRequest, body string) {
+	if _, err := p.gh.PostComment(pr.Repo, pr.Number, body); err != nil {
+		slog.Warn("pipeline: post directive reply failed", "err", err, "repo", pr.Repo, "pr", pr.Number)
+	}
+}
+
+func (p *Pipeline) markDirective(commentID int64, verb string) {
+	if err := p.store.MarkDirectiveProcessed(commentID, verb); err != nil {
+		slog.Warn("pipeline: mark directive processed failed", "err", err, "comment_id", commentID)
+	}
+}
+
+func (p *Pipeline) formatInstructionList(repo string) string {
+	items, err := p.store.ListRepoInstructions(repo)
+	if err != nil {
+		slog.Warn("pipeline: list repo instructions failed", "err", err, "repo", repo)
+		return "⚠️ Could not read standing instructions."
+	}
+	if len(items) == 0 {
+		return fmt.Sprintf("No standing instructions for %s.", repo)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Standing instructions for %s:\n", repo)
+	for _, it := range items {
+		fmt.Fprintf(&b, "- #%d: %s\n", it.ID, it.Instruction)
 	}
 	return b.String()
 }
