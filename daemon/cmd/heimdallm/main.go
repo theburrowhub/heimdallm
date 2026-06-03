@@ -414,11 +414,12 @@ func main() {
 			}
 		}
 		return pipeline.RunOptions{
-			Primary:        aiCfg.Primary,
-			Fallback:       aiCfg.Fallback,
-			PromptOverride: aiCfg.Prompt,
-			AgentPromptID:  agentCfg.PromptID,
-			ReviewMode:     aiCfg.ReviewMode,
+			Primary:            aiCfg.Primary,
+			Fallback:           aiCfg.Fallback,
+			PromptOverride:     aiCfg.Prompt,
+			AgentPromptID:      agentCfg.PromptID,
+			ReviewMode:         aiCfg.ReviewMode,
+			InstructionAuthors: aiCfg.InstructionAuthors,
 			ExecOpts: executor.ExecOptions{
 				Model:                agentCfg.Model,
 				MaxTurns:             agentCfg.MaxTurns,

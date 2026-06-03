@@ -2686,3 +2686,43 @@ func TestReviewGuards_ExplicitFalse(t *testing.T) {
 		t.Errorf("SkipSelfAuthor: explicit false not honoured")
 	}
 }
+
+func TestMatchesInstructionAuthors(t *testing.T) {
+	r := RepoAI{InstructionAuthors: []string{"Alice", "@bob"}}
+	if !r.MatchesInstructionAuthors("alice") {
+		t.Error("alice should match (case-insensitive)")
+	}
+	if !r.MatchesInstructionAuthors("@BOB") {
+		t.Error("@BOB should match (leading @ + case-insensitive)")
+	}
+	if r.MatchesInstructionAuthors("mallory") {
+		t.Error("mallory must not match")
+	}
+	if r.MatchesInstructionAuthors("") {
+		t.Error("empty login must not match")
+	}
+	if (RepoAI{}).MatchesInstructionAuthors("alice") {
+		t.Error("empty allowlist must deny everyone")
+	}
+}
+
+func TestAIForRepo_InstructionAuthorsResolution(t *testing.T) {
+	c := &Config{}
+	c.AI.InstructionAuthors = []string{"global-user"}
+	c.AI.Orgs = map[string]OrgAI{
+		"org": {InstructionAuthors: []string{"org-user"}},
+	}
+	c.AI.Repos = map[string]RepoAI{
+		"org/repo":  {InstructionAuthors: []string{"repo-user"}},
+		"org/inhrt": {}, // nil → inherits org
+	}
+	if got := c.AIForRepo("org/repo").InstructionAuthors; len(got) != 1 || got[0] != "repo-user" {
+		t.Errorf("repo override: got %v", got)
+	}
+	if got := c.AIForRepo("org/inhrt").InstructionAuthors; len(got) != 1 || got[0] != "org-user" {
+		t.Errorf("org inherit: got %v", got)
+	}
+	if got := c.AIForRepo("other/x").InstructionAuthors; len(got) != 1 || got[0] != "global-user" {
+		t.Errorf("global fallback: got %v", got)
+	}
+}

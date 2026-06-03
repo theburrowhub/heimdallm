@@ -115,6 +115,7 @@ type PullRequest struct {
 // Comment represents a single comment on a PR — either an inline review comment
 // (File and Line are set) or a general issue comment (File and Line are zero values).
 type Comment struct {
+	ID        int64 // GitHub comment id; 0 if unknown
 	Author    string
 	Body      string
 	CreatedAt time.Time

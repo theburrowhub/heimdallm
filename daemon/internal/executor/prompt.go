@@ -9,14 +9,15 @@ const maxDiffBytes = 32 * 1024 // 32KB ~ 8k tokens
 
 // PRContext holds all substitutable data for a prompt template.
 type PRContext struct {
-	Title         string
-	Number        int
-	Repo          string
-	Author        string
-	Link          string
-	Diff          string
-	Comments      string // pre-formatted discussion section; empty string if no comments
-	ReviewContext string // structured re-review context; empty on first review
+	Title                string
+	Number               int
+	Repo                 string
+	Author               string
+	Link                 string
+	Diff                 string
+	Comments             string // pre-formatted discussion section; empty string if no comments
+	ReviewContext        string // structured re-review context; empty on first review
+	StandingInstructions string // persistent per-repo instructions; empty when none
 }
 
 // defaultTemplate is used when no custom agent template is configured.
@@ -35,6 +36,7 @@ Repo: {repo}
 Author: {author}
 Link: {link}
 
+{standing_instructions}
 <user_content>
 Diff:
 {diff}
@@ -69,6 +71,7 @@ Repo: {repo}
 Author: {author}
 Link: {link}
 
+{standing_instructions}
 REVIEW FOCUS:
 ` + instructions + `
 
@@ -104,7 +107,7 @@ func BuildPrompt(title, author, diff string) string {
 }
 
 // BuildPromptFromTemplate substitutes placeholders in a template.
-// Supported placeholders: {title} {number} {repo} {author} {link} {diff} {comments} {review_context}
+// Supported placeholders: {title} {number} {repo} {author} {link} {diff} {comments} {review_context} {standing_instructions}
 //
 // Behavior for {comments}:
 //
@@ -118,6 +121,7 @@ func BuildPromptFromTemplate(tmpl string, ctx PRContext) string {
 
 	hasPlaceholder := strings.Contains(tmpl, "{comments}")
 	hasReviewCtx := strings.Contains(tmpl, "{review_context}")
+	hasStanding := strings.Contains(tmpl, "{standing_instructions}")
 
 	r := strings.NewReplacer(
 		"{title}", ctx.Title,
@@ -128,6 +132,7 @@ func BuildPromptFromTemplate(tmpl string, ctx PRContext) string {
 		"{diff}", ctx.Diff,
 		"{comments}", ctx.Comments,
 		"{review_context}", ctx.ReviewContext,
+		"{standing_instructions}", ctx.StandingInstructions,
 	)
 	result := r.Replace(tmpl)
 
@@ -144,6 +149,11 @@ func BuildPromptFromTemplate(tmpl string, ctx PRContext) string {
 	// Prepend review context if template had no {review_context} placeholder
 	if !hasReviewCtx && ctx.ReviewContext != "" {
 		result = ctx.ReviewContext + "\n" + result
+	}
+
+	// Prepend standing instructions if the template had no placeholder.
+	if !hasStanding && ctx.StandingInstructions != "" {
+		result = ctx.StandingInstructions + "\n" + result
 	}
 
 	return result

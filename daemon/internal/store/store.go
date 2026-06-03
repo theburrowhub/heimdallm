@@ -156,6 +156,27 @@ CREATE TABLE IF NOT EXISTS issue_triage_in_flight (
   started_at  DATETIME NOT NULL,
   PRIMARY KEY (issue_id, updated_at)
 );
+
+-- Persistent per-repo review instructions captured from authorized PR
+-- comment directives (#383). Injected into every future review of the repo.
+CREATE TABLE IF NOT EXISTS repo_instructions (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo        TEXT NOT NULL,
+  instruction TEXT NOT NULL,
+  author      TEXT NOT NULL,
+  comment_id  INTEGER NOT NULL,
+  created_at  DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_repo_instructions_repo ON repo_instructions(repo);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_repo_instructions_comment ON repo_instructions(comment_id);
+
+-- Dedup/audit guard so each directive comment is applied/acked exactly once
+-- across poll cycles. GitHub comment ids are stable and effectively unique.
+CREATE TABLE IF NOT EXISTS directive_marks (
+  comment_id   INTEGER PRIMARY KEY,
+  verb         TEXT NOT NULL,
+  processed_at DATETIME NOT NULL
+);
 `
 
 // Open opens (or creates) a SQLite database at dsn and applies the schema.
@@ -262,6 +283,21 @@ func Open(dsn string) (*Store, error) {
 		renamed_at  DATETIME NOT NULL
 	)`)
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_repo_renames_old ON repo_renames(old_repo)")
+	db.Exec(`CREATE TABLE IF NOT EXISTS repo_instructions (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		repo        TEXT NOT NULL,
+		instruction TEXT NOT NULL,
+		author      TEXT NOT NULL,
+		comment_id  INTEGER NOT NULL,
+		created_at  DATETIME NOT NULL
+	)`)
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_repo_instructions_repo ON repo_instructions(repo)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_repo_instructions_comment ON repo_instructions(comment_id)")
+	db.Exec(`CREATE TABLE IF NOT EXISTS directive_marks (
+		comment_id   INTEGER PRIMARY KEY,
+		verb         TEXT NOT NULL,
+		processed_at DATETIME NOT NULL
+	)`)
 	// watch_state is owned by bus.NewWatchStore at runtime, but RenameRepo
 	// needs to UPDATE rows here in the same TX as the prs/issues moves.
 	// Mirror the schema with IF NOT EXISTS so the rename can run from
