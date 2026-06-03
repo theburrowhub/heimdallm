@@ -122,3 +122,45 @@ func TestProcessDirectives_RememberForgetDedup(t *testing.T) {
 }
 
 func itoa(n int64) string { return fmt.Sprintf("%d", n) }
+
+func TestProcessDirectives_UnsupportedScopeRepliesNoStore(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	gh := &fakeGH{}
+	p := New(s, gh, nil, nopNotifier{})
+	p.SetBotLogin("heimdallm")
+	pr := &github.PullRequest{Repo: "org/repo", Number: 9}
+
+	p.processDirectives(pr, []github.Comment{
+		{ID: 50, Author: "alice", Body: "@heimdallm remember(global): everywhere"},
+	}, []string{"alice"})
+
+	if items, _ := s.ListRepoInstructions("org/repo"); len(items) != 0 {
+		t.Fatalf("unsupported scope must not store an instruction, got %d", len(items))
+	}
+	if len(gh.posted) != 1 {
+		t.Fatalf("want 1 reply explaining unsupported scope, got %d", len(gh.posted))
+	}
+}
+
+func TestProcessDirectives_UnauthorizedIsSilent(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	gh := &fakeGH{}
+	p := New(s, gh, nil, nopNotifier{})
+	p.SetBotLogin("heimdallm")
+	pr := &github.PullRequest{Repo: "org/repo", Number: 9}
+
+	// Unauthorized user, even with bad scope, gets NO reply (no info leak).
+	p.processDirectives(pr, []github.Comment{
+		{ID: 51, Author: "mallory", Body: "@heimdallm remember(global): everywhere"},
+	}, []string{"alice"})
+
+	if len(gh.posted) != 0 {
+		t.Fatalf("unauthorized directive must get no reply, got %d", len(gh.posted))
+	}
+}

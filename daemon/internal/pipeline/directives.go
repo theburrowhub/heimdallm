@@ -112,6 +112,12 @@ func formatStandingInstructions(items []store.RepoInstruction) string {
 // abort the surrounding review.
 func (p *Pipeline) processDirectives(pr *github.PullRequest, comments []github.Comment, allowlist []string) {
 	for _, c := range comments {
+		// Dedup is keyed on the GitHub comment ID. Directives are normally
+		// top-level issue comments; review-comment and issue-comment IDs are
+		// separate GitHub sequences, so a cross-space ID collision could in
+		// theory mark one directive as already-seen. The blast radius is a
+		// single missed directive (recoverable by re-commenting), so we accept
+		// the bare-ID key rather than a (kind, id) composite.
 		if c.ID == 0 {
 			continue // cannot dedup without a stable id
 		}
@@ -128,10 +134,16 @@ func (p *Pipeline) processDirectives(pr *github.PullRequest, comments []github.C
 			continue
 		}
 		switch {
-		case scope != "repo":
-			slog.Info("pipeline: ignoring directive with unsupported scope", "scope", scope, "repo", pr.Repo)
 		case !authorAllowed(allowlist, c.Author):
+			// Silent for unauthorized users — no reply, so the bot does not
+			// advertise the directive feature to non-maintainers. Marked
+			// processed below so it is not re-evaluated every poll cycle.
 			slog.Info("pipeline: ignoring directive from unauthorized author", "author", c.Author, "repo", pr.Repo)
+		case scope != "repo":
+			// Authorized user, but only repo scope is implemented. Reply so the
+			// maintainer knows why nothing happened, then burn the comment.
+			slog.Info("pipeline: ignoring directive with unsupported scope", "scope", scope, "repo", pr.Repo)
+			p.reply(pr, fmt.Sprintf("⚠️ Only repo-scoped instructions are supported. Drop the scope (e.g. `@%s %s: …`) to apply it to %s.", p.botLogin, verb, pr.Repo))
 		default:
 			p.applyDirective(pr, verb, payload, c)
 		}
