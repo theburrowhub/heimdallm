@@ -418,7 +418,8 @@ func main() {
 			Fallback:       aiCfg.Fallback,
 			PromptOverride: aiCfg.Prompt,
 			AgentPromptID:  agentCfg.PromptID,
-			ReviewMode:     aiCfg.ReviewMode,
+			ReviewMode:         aiCfg.ReviewMode,
+			InstructionAuthors: aiCfg.InstructionAuthors,
 			ExecOpts: executor.ExecOptions{
 				Model:                agentCfg.Model,
 				MaxTurns:             agentCfg.MaxTurns,
