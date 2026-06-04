@@ -744,15 +744,17 @@ type TimelineEvent struct {
 // regardless of the user's explicit intent.
 //
 // Returns an empty slice (not nil) when no relevant events exist —
-// callers can range over the result without a nil guard.
+// callers can range over the result without a nil guard. Returns an
+// error (never a partial slice) when the pagination cap is hit, so
+// callers can fail closed instead of acting on a truncated timeline
+// (#519).
 func (c *Client) GetPRTimelineEventsForReviewer(repo string, number int, login string) ([]TimelineEvent, error) {
 	if login == "" {
 		return nil, fmt.Errorf("github: GetPRTimelineEventsForReviewer: empty login")
 	}
 	out := []TimelineEvent{}
-	page := 1
-	for {
-		path := fmt.Sprintf("/repos/%s/issues/%d/timeline?per_page=100&page=%d", repo, number, page)
+	for page := 1; page <= maxPaginationPages; page++ {
+		path := fmt.Sprintf("/repos/%s/issues/%d/timeline?per_page=%d&page=%d", repo, number, perPage, page)
 		resp, err := c.do("GET", path, "application/vnd.github+json")
 		if err != nil {
 			return nil, fmt.Errorf("github: fetch timeline: %w", err)
@@ -801,42 +803,46 @@ func (c *Client) GetPRTimelineEventsForReviewer(repo string, number int, login s
 				}
 			}
 		}
-		// Stop paging when we get a short page (under per_page=100).
-		if len(raw) < 100 {
-			break
-		}
-		page++
-		// Hard cap so a misbehaving server can't make us iterate forever.
-		if page > 50 {
-			slog.Warn("github: timeline pagination cap hit, returning partial results",
-				"repo", repo, "pr", number, "pages", page)
-			break
+		// Stop paging when we get a short page (under per_page).
+		if len(raw) < perPage {
+			// Defensive re-sort: GitHub's timeline API documents ascending
+			// chronological order, but the contract is not load-bearing for us
+			// — pipeline.shouldBypassSHASkipForReReview relies on the slice
+			// being sorted to walk it backward in O(1) for the common case.
+			// A single sort here is cheap (events is filtered down to just
+			// review_requested / review_dismissed for one login) and immunises
+			// the caller against an undocumented re-ordering on GitHub's side.
+			sort.Slice(out, func(i, j int) bool {
+				return out[i].CreatedAt.Before(out[j].CreatedAt)
+			})
+			return out, nil
 		}
 	}
-	// Defensive re-sort: GitHub's timeline API documents ascending
-	// chronological order, but the contract is not load-bearing for us
-	// — pipeline.shouldBypassSHASkipForReReview relies on the slice
-	// being sorted to walk it backward in O(1) for the common case.
-	// A single sort here is cheap (events is filtered down to just
-	// review_requested / review_dismissed for one login) and immunises
-	// the caller against an undocumented re-ordering on GitHub's side.
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].CreatedAt.Before(out[j].CreatedAt)
-	})
-	return out, nil
+	// Hitting the cap with every page full is suspicious: either GitHub is
+	// misbehaving or this PR has >5,000 timeline events. Silently returning
+	// a truncated slice would drop exactly the tail events that
+	// pipeline.shouldBypassSHASkipForReReview walks backward to detect
+	// re-review intent (#322 Bug 5), so surface a hard error and let the
+	// caller fail closed — matching the cap-hit contract of
+	// fetchReviewComments / fetchIssueComments post-#516 (see #519).
+	slog.Warn("github: timeline pagination cap hit",
+		"repo", repo, "pr", number, "pages", maxPaginationPages)
+	return nil, fmt.Errorf("github: timeline pagination exceeded %d pages for %s#%d (per_page=%d, possible runaway)",
+		maxPaginationPages, repo, number, perPage)
 }
 
-// maxCommentPages bounds the number of pages fetchReviewComments and
-// fetchIssueComments will walk. GitHub returns 30 items per page by default
-// and 100 max; with per_page=100 this caps each fetcher at 5,000 comments,
-// well above the largest real PRs we've seen. The cap exists only to keep a
-// misbehaving server from making us iterate forever.
-const maxCommentPages = 50
+// maxPaginationPages bounds the number of pages the paginated endpoints
+// (fetchReviewComments, fetchIssueComments, GetPRTimelineEventsForReviewer)
+// will walk. GitHub returns 30 items per page by default and 100 max; with
+// per_page=100 this caps each fetcher at 5,000 items, well above the
+// largest real PRs we've seen. The cap exists only to keep a misbehaving
+// server from making us iterate forever.
+const maxPaginationPages = 50
 
-// perPage is the page size used for paginated comment endpoints. Kept
-// alongside maxCommentPages so changing either is an explicit decision,
-// and so the per_page query parameter and the short-page termination
-// check can't drift apart.
+// perPage is the page size used for paginated endpoints. Kept alongside
+// maxPaginationPages so changing either is an explicit decision, and so
+// the per_page query parameter and the short-page termination check
+// can't drift apart.
 const perPage = 100
 
 func (c *Client) fetchReviewComments(repo string, number int) ([]Comment, error) {
@@ -849,7 +855,7 @@ func (c *Client) fetchReviewComments(repo string, number int) ([]Comment, error)
 	// server-side default changes; callers downstream rely on ascending
 	// order.
 	comments := []Comment{}
-	for page := 1; page <= maxCommentPages; page++ {
+	for page := 1; page <= maxPaginationPages; page++ {
 		path := fmt.Sprintf("/repos/%s/pulls/%d/comments?per_page=%d&page=%d&sort=created&direction=asc",
 			repo, number, perPage, page)
 		resp, err := c.do("GET", path, "application/vnd.github+json")
@@ -902,9 +908,9 @@ func (c *Client) fetchReviewComments(repo string, number int) ([]Comment, error)
 	// ones a re-review depends on), so surface a hard error and match
 	// the mid-pagination error contract the other tests already enforce.
 	slog.Warn("github: fetch review comments pagination cap hit",
-		"repo", repo, "pr", number, "pages", maxCommentPages)
+		"repo", repo, "pr", number, "pages", maxPaginationPages)
 	return nil, fmt.Errorf("github: comment pagination exceeded %d pages for %s#%d (per_page=%d, possible runaway)",
-		maxCommentPages, repo, number, perPage)
+		maxPaginationPages, repo, number, perPage)
 }
 
 func (c *Client) fetchIssueComments(repo string, number int) ([]Comment, error) {
@@ -912,7 +918,7 @@ func (c *Client) fetchIssueComments(repo string, number int) ([]Comment, error) 
 	// so we don't lose the newest issue comments on long-running PRs or
 	// busy issues, and pin sort=created&direction=asc explicitly.
 	comments := []Comment{}
-	for page := 1; page <= maxCommentPages; page++ {
+	for page := 1; page <= maxPaginationPages; page++ {
 		path := fmt.Sprintf("/repos/%s/issues/%d/comments?per_page=%d&page=%d&sort=created&direction=asc",
 			repo, number, perPage, page)
 		resp, err := c.do("GET", path, "application/vnd.github+json")
@@ -951,9 +957,9 @@ func (c *Client) fetchIssueComments(repo string, number int) ([]Comment, error) 
 	// See fetchReviewComments for the rationale: silent partial results
 	// at the cap would re-introduce the bug #512 fixes.
 	slog.Warn("github: fetch issue comments pagination cap hit",
-		"repo", repo, "issue", number, "pages", maxCommentPages)
+		"repo", repo, "issue", number, "pages", maxPaginationPages)
 	return nil, fmt.Errorf("github: comment pagination exceeded %d pages for %s#%d (per_page=%d, possible runaway)",
-		maxCommentPages, repo, number, perPage)
+		maxPaginationPages, repo, number, perPage)
 }
 
 // FetchLabels returns the label names for a repository.

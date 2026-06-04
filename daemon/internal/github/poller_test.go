@@ -410,7 +410,7 @@ func TestFetchComments_MidPaginationErrorOnIssuesPropagates(t *testing.T) {
 }
 
 // TestFetchComments_PaginationCapReturnsError locks in the contract that
-// hitting maxCommentPages with every page full surfaces a hard error
+// hitting maxPaginationPages with every page full surfaces a hard error
 // rather than a silently-truncated slice. Silent partial results here
 // would re-introduce the exact failure mode #512 exists to prevent
 // (dropping the newest comments) and would be inconsistent with the
@@ -447,8 +447,8 @@ func TestFetchComments_PaginationCapReturnsError(t *testing.T) {
 		if got != nil {
 			t.Errorf("expected nil slice on cap-hit error, got %d comments", len(got))
 		}
-		// The loop runs `for page := 1; page <= maxCommentPages; page++`,
-		// so on cap-hit exactly maxCommentPages (50) requests should be
+		// The loop runs `for page := 1; page <= maxPaginationPages; page++`,
+		// so on cap-hit exactly maxPaginationPages (50) requests should be
 		// made and no 51st request should be attempted.
 		if got, want := atomic.LoadInt32(&reviewPages), int32(50); got != want {
 			t.Errorf("review endpoint hit count: got %d, want %d (must not walk past cap)", got, want)
@@ -674,6 +674,65 @@ func TestGetPRTimelineEventsForReviewer_RejectsEmptyLogin(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error on empty login, got nil")
 	}
+}
+
+// TestGetPRTimelineEventsForReviewer_PaginationCapReturnsError mirrors
+// TestFetchComments_PaginationCapReturnsError for the timeline endpoint
+// (#519): hitting the pagination cap with every page full must surface a
+// hard error rather than a silently-truncated slice. The tail events are
+// exactly what pipeline.shouldBypassSHASkipForReReview walks backward to
+// detect re-review intent (#322 Bug 5), so silent truncation here could
+// skip a review the operator explicitly asked for. The caller already
+// fails closed on error, so the contract change is safe. Also asserts
+// the production code does NOT walk past the cap (no 51st request).
+func TestGetPRTimelineEventsForReviewer_PaginationCapReturnsError(t *testing.T) {
+	var pages int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/org/repo/issues/7/timeline" {
+			http.NotFound(w, r)
+			return
+		}
+		atomic.AddInt32(&pages, 1)
+		// Always emit a full page so the loop never short-circuits on
+		// len<perPage and is forced to hit the cap.
+		emitTimelinePage(w, 100, "heimdallm-bot")
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	got, err := client.GetPRTimelineEventsForReviewer("org/repo", 7, "heimdallm-bot")
+	if err == nil {
+		t.Fatalf("expected pagination cap error, got nil and %d events", len(got))
+	}
+	if !strings.Contains(err.Error(), "timeline pagination exceeded") {
+		t.Errorf("expected error to mention 'timeline pagination exceeded', got: %v", err)
+	}
+	if got != nil {
+		t.Errorf("expected nil slice on cap-hit error, got %d events", len(got))
+	}
+	// The loop runs `for page := 1; page <= maxPaginationPages; page++`,
+	// so on cap-hit exactly maxPaginationPages (50) requests should be
+	// made and no 51st request should be attempted.
+	if got, want := atomic.LoadInt32(&pages), int32(50); got != want {
+		t.Errorf("timeline endpoint hit count: got %d, want %d (must not walk past cap)", got, want)
+	}
+}
+
+// emitTimelinePage writes a JSON page of /issues/:n/timeline shaped items:
+// n review_requested events targeting the given reviewer login, so the
+// production filter keeps them and the raw page length drives the
+// short-page termination check.
+func emitTimelinePage(w http.ResponseWriter, n int, login string) {
+	raw := make([]map[string]any, 0, n)
+	for i := 0; i < n; i++ {
+		raw = append(raw, map[string]any{
+			"event":              "review_requested",
+			"created_at":         "2026-04-24T07:00:00Z",
+			"actor":              map[string]string{"login": "alice"},
+			"requested_reviewer": map[string]string{"login": login},
+		})
+	}
+	_ = json.NewEncoder(w).Encode(raw)
 }
 
 func mustTime(s string) time.Time {
