@@ -25,6 +25,18 @@ const maxBodyBytes = 1 * 1024 * 1024 // 1 MB for most API responses
 // maxDiffBodyBytes allows a larger limit for PR diffs, which can be legitimately large.
 const maxDiffBodyBytes = 10 * 1024 * 1024 // 10 MB for diffs
 
+// maxPaginatedPageBytes is the body ceiling for the paginated endpoints
+// (fetchReviewComments, fetchIssueComments, GetPRTimelineEventsForReviewer).
+// These request per_page=100 items per call, and a single comment can
+// legitimately carry 30 KB+ (long stack traces, big code blocks,
+// multi-paragraph review bodies), so a full page can exceed the generic
+// 1 MiB maxBodyBytes — truncating mid-JSON and aborting pagination with a
+// decode error, which drops the newest comments (#518, the failure mode
+// #512 exists to prevent). 5 MiB gives ~50 KB per item at a full page,
+// comfortably above anything observed, while still bounding exposure to a
+// misbehaving server.
+const maxPaginatedPageBytes = 5 * 1024 * 1024 // 5 MB for per_page=100 endpoints
+
 // maxErrBodyLen limits the number of bytes included in error messages to avoid
 // leaking sensitive GitHub diagnostic information (e.g. token details).
 const maxErrBodyLen = 200
@@ -759,7 +771,7 @@ func (c *Client) GetPRTimelineEventsForReviewer(repo string, number int, login s
 		if err != nil {
 			return nil, fmt.Errorf("github: fetch timeline: %w", err)
 		}
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxPaginatedPageBytes))
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			errBody := safeTruncate(string(body), maxErrBodyLen)
@@ -781,7 +793,9 @@ func (c *Client) GetPRTimelineEventsForReviewer(repo string, number int, login s
 			} `json:"dismissed_review,omitempty"`
 		}
 		if err := json.Unmarshal(body, &raw); err != nil {
-			return nil, fmt.Errorf("github: decode timeline: %w", err)
+			// Include the payload size: a decode failure right at the byte
+			// ceiling is the signature of a truncated page (#518).
+			return nil, fmt.Errorf("github: decode timeline (%d bytes read): %w", len(body), err)
 		}
 		for _, ev := range raw {
 			switch ev.Event {
@@ -862,7 +876,7 @@ func (c *Client) fetchReviewComments(repo string, number int) ([]Comment, error)
 		if err != nil {
 			return nil, fmt.Errorf("github: fetch review comments: %w", err)
 		}
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxPaginatedPageBytes))
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			errBody := safeTruncate(string(body), maxErrBodyLen)
@@ -880,7 +894,9 @@ func (c *Client) fetchReviewComments(repo string, number int) ([]Comment, error)
 			OriginalLine int       `json:"original_line"`
 		}
 		if err := json.Unmarshal(body, &raw); err != nil {
-			return nil, fmt.Errorf("github: decode review comments: %w", err)
+			// Include the payload size: a decode failure right at the byte
+			// ceiling is the signature of a truncated page (#518).
+			return nil, fmt.Errorf("github: decode review comments (%d bytes read): %w", len(body), err)
 		}
 		for _, r := range raw {
 			line := r.OriginalLine
@@ -925,7 +941,7 @@ func (c *Client) fetchIssueComments(repo string, number int) ([]Comment, error) 
 		if err != nil {
 			return nil, fmt.Errorf("github: fetch issue comments: %w", err)
 		}
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxPaginatedPageBytes))
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			errBody := safeTruncate(string(body), maxErrBodyLen)
@@ -940,7 +956,9 @@ func (c *Client) fetchIssueComments(repo string, number int) ([]Comment, error) 
 			CreatedAt time.Time `json:"created_at"`
 		}
 		if err := json.Unmarshal(body, &raw); err != nil {
-			return nil, fmt.Errorf("github: decode issue comments: %w", err)
+			// Include the payload size: a decode failure right at the byte
+			// ceiling is the signature of a truncated page (#518).
+			return nil, fmt.Errorf("github: decode issue comments (%d bytes read): %w", len(body), err)
 		}
 		for _, r := range raw {
 			comments = append(comments, Comment{
