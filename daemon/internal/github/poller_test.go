@@ -718,6 +718,89 @@ func TestGetPRTimelineEventsForReviewer_PaginationCapReturnsError(t *testing.T) 
 	}
 }
 
+// TestFetchComments_LargeCommentPagesFetchSuccessfully locks in the fix
+// for #518: with per_page=100, a page of comments with large bodies
+// (long stack traces, big code blocks) can exceed the generic 1 MiB
+// maxBodyBytes ceiling. The old io.LimitReader truncated the response
+// mid-JSON, json.Unmarshal failed on the partial body, and pagination
+// aborted — dropping the newest comments yet again (the failure mode
+// #512 was opened to fix). Acceptance criterion from the issue: a PR
+// with 100 comments of 30 KB each fetches successfully.
+func TestFetchComments_LargeCommentPagesFetchSuccessfully(t *testing.T) {
+	// 100 × ~30 KB ≈ 3 MB per page — over 1 MiB, under the paginated ceiling.
+	bigBody := strings.Repeat("x", 30*1024)
+	emitLargePage := func(w http.ResponseWriter, page, n int) {
+		if page > 1 {
+			n = 0 // short page terminates pagination
+		}
+		raw := make([]map[string]any, 0, n)
+		for i := 0; i < n; i++ {
+			raw = append(raw, map[string]any{
+				"user":       map[string]string{"login": fmt.Sprintf("u%d", i)},
+				"body":       bigBody,
+				"created_at": "2024-01-01T00:00:00Z",
+			})
+		}
+		_ = json.NewEncoder(w).Encode(raw)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := parsePageParam(t, r)
+		switch r.URL.Path {
+		case "/repos/org/repo/pulls/1/comments":
+			emitLargePage(w, page, 100)
+		case "/repos/org/repo/issues/1/comments":
+			emitLargePage(w, page, 100)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	comments, err := client.FetchComments("org/repo", 1)
+	if err != nil {
+		t.Fatalf("unexpected error fetching large comment pages: %v", err)
+	}
+	if got, want := len(comments), 200; got != want {
+		t.Fatalf("expected %d comments (100 review + 100 issue), got %d", want, got)
+	}
+	for i, c := range comments {
+		if len(c.Body) != len(bigBody) {
+			t.Fatalf("comment %d body truncated: got %d bytes, want %d", i, len(c.Body), len(bigBody))
+		}
+	}
+}
+
+// TestFetchComments_DecodeErrorReportsPayloadSize is the defensive bonus
+// from #518: when a comment page fails to decode after a non-empty body
+// read, the error must report how many bytes were read so a
+// ceiling-truncation (or upstream corruption) is diagnosable from
+// production logs before users complain.
+func TestFetchComments_DecodeErrorReportsPayloadSize(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/org/repo/pulls/1/comments":
+			// Invalid JSON: looks like a truncated array, as produced by a
+			// byte-ceiling cut mid-payload.
+			_, _ = w.Write([]byte(`[{"user":{"login":"alice"},"body":"trunc`))
+		case "/repos/org/repo/issues/1/comments":
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	_, err := client.FetchComments("org/repo", 1)
+	if err == nil {
+		t.Fatal("expected decode error, got nil")
+	}
+	if !strings.Contains(err.Error(), "bytes read") {
+		t.Errorf("expected decode error to report payload size ('bytes read'), got: %v", err)
+	}
+}
+
 // emitTimelinePage writes a JSON page of /issues/:n/timeline shaped items:
 // n review_requested events targeting the given reviewer login, so the
 // production filter keeps them and the raw page length drives the
