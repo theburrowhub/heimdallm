@@ -770,7 +770,15 @@ pages:
 			return "", fmt.Errorf("github: decode pr files (%d bytes read): %w", len(body), err)
 		}
 		for i := range raw {
-			if b.Len() >= maxDiffBodyBytes {
+			// Render the entry separately and check the PROJECTED size, not
+			// the accumulated size before append — a single oversized patch
+			// (under maxFilesPageBytes, over maxDiffBodyBytes) on a short
+			// page would otherwise be appended whole and returned without a
+			// truncation note, breaking the "same ceiling as the direct
+			// diff path" contract.
+			var entry strings.Builder
+			appendFileDiff(&entry, &raw[i])
+			if b.Len()+entry.Len() > maxDiffBodyBytes {
 				// Same ceiling as the direct diff path. Stop paginating too:
 				// the remaining pages would only be fetched to be dropped,
 				// which is why the truncation note is generic (no exact
@@ -780,7 +788,7 @@ pages:
 				truncated = true
 				break pages
 			}
-			appendFileDiff(&b, &raw[i])
+			b.WriteString(entry.String())
 			listed++
 		}
 		if len(raw) < perPage {

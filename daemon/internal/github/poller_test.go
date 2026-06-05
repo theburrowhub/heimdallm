@@ -295,6 +295,43 @@ func TestFetchDiff_FilesAPITruncatesAtMaxDiffBodyBytes(t *testing.T) {
 	}
 }
 
+// TestFetchDiff_FilesAPISingleOversizedPatchRespectsCeiling: the size
+// check must be on the PROJECTED size, not the accumulated size before
+// append — otherwise a single patch under maxFilesPageBytes but over
+// maxDiffBodyBytes lands on a short page with complete=true and FetchDiff
+// returns a >10 MiB diff with no truncation note, breaking the "same
+// ceiling as the direct diff path" contract.
+func TestFetchDiff_FilesAPISingleOversizedPatchRespectsCeiling(t *testing.T) {
+	// One file, ~12 MiB patch: under the 20 MiB page ceiling, over the
+	// 10 MiB reconstruction ceiling, on a single short page.
+	patch := "@@ -1 +1 @@\n+" + strings.Repeat("w", 12*1024*1024)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/org/repo/pulls/42":
+			http.Error(w, `{"message":"diff too big"}`, http.StatusNotAcceptable)
+		case "/repos/org/repo/pulls/42/files":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"filename": "pkg/huge.go", "status": "modified", "additions": 1, "deletions": 1, "patch": patch},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	diff, err := client.FetchDiff("org/repo", 42)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(diff) > 10*1024*1024 {
+		t.Errorf("reconstructed diff exceeds maxDiffBodyBytes: %d bytes", len(diff))
+	}
+	if !strings.Contains(diff, "diff truncated") {
+		t.Errorf("expected truncation note when a single patch exceeds the ceiling")
+	}
+}
+
 // TestFetchDiff_FilesAPIWarnsAtGitHubFileCap: GitHub hard-caps this
 // endpoint at 3,000 files. Reading that many must append a note that
 // files may be missing — conservatively, even a PR with exactly 3,000

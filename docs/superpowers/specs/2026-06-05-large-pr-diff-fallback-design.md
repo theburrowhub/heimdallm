@@ -88,7 +88,7 @@ endpoint); there is no message sniffing.
 
 | Condition | Behavior |
 |---|---|
-| Accumulated diff exceeds `maxDiffBodyBytes` (10 MB) | stop appending, add `... (diff truncated, N files omitted)`, `slog.Warn` — mirrors the direct path's truncation behavior |
+| Appending a file would push the reconstruction over `maxDiffBodyBytes` (10 MB) | skip it, stop appending and paginating, add a generic truncation note (no exact omitted count — we stop paginating rather than walk the rest just to count), `slog.Warn`. Checked on the projected size so the result never exceeds the ceiling, even for a single oversized patch |
 | ≥3,000 files read (GitHub's documented hard cap on this endpoint) | append a note that GitHub caps file listings at 3,000 files and some files may be missing, `slog.Warn`. Conservative: a PR with exactly 3,000 files gets the note too — the client cannot distinguish "exactly at cap" from "capped" without extra API calls (`changed_files` is not parsed in our `PullRequest` model), and a spurious note on an at-cap PR is harmless |
 | Pagination cap hit (50 pages) | return the partial diff with a truncation note, `slog.Warn` — deliberately NOT an error (see below) |
 | HTTP error mid-pagination | propagate as error |
