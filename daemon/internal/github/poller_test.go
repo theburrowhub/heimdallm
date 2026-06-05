@@ -111,6 +111,337 @@ func TestFetchDiff(t *testing.T) {
 	}
 }
 
+// emitFilesPage writes a JSON page of /pulls/:n/files shaped items. Each
+// file is "pkg/file<page>_<i>.go", modified, with the given patch body.
+func emitFilesPage(w http.ResponseWriter, page, n int, patch string) {
+	files := make([]map[string]any, 0, n)
+	for i := 0; i < n; i++ {
+		files = append(files, map[string]any{
+			"filename":  fmt.Sprintf("pkg/file%d_%d.go", page, i),
+			"status":    "modified",
+			"additions": 1,
+			"deletions": 1,
+			"patch":     patch,
+		})
+	}
+	_ = json.NewEncoder(w).Encode(files)
+}
+
+// TestFetchDiff_FallsBackToFilesAPIOn406 locks in the core fix for #506:
+// when the diff endpoint returns 406 (PR exceeds GitHub's 300-file diff
+// limit), FetchDiff must fall back to the List Pull Request Files API and
+// return a reconstructed unified diff instead of aborting the review.
+// Exercises pagination (full + short page), rename handling, added and
+// removed files, and the leading agent note.
+func TestFetchDiff_FallsBackToFilesAPIOn406(t *testing.T) {
+	var filesPages int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/org/repo/pulls/42":
+			http.Error(w, `{"message":"Sorry, the diff exceeded the maximum number of files (300)."}`, http.StatusNotAcceptable)
+		case "/repos/org/repo/pulls/42/files":
+			atomic.AddInt32(&filesPages, 1)
+			page := parsePageParam(t, r)
+			if page > 1 {
+				// Short page terminates pagination; includes a removed file
+				// so the assertion below proves page-2 content survived.
+				_ = json.NewEncoder(w).Encode([]map[string]any{
+					{"filename": "pkg/gone.go", "status": "removed", "additions": 0, "deletions": 3,
+						"patch": "@@ -1,3 +0,0 @@\n-bye\n-bye\n-bye"},
+				})
+				return
+			}
+			files := make([]map[string]any, 0, 100)
+			for i := 0; i < 100; i++ {
+				files = append(files, map[string]any{
+					"filename":  fmt.Sprintf("pkg/file%d.go", i),
+					"status":    "modified",
+					"additions": 1,
+					"deletions": 1,
+					"patch":     fmt.Sprintf("@@ -1 +1 @@\n-old%d\n+new%d", i, i),
+				})
+			}
+			files[1] = map[string]any{"filename": "pkg/renamed.go", "previous_filename": "pkg/old.go",
+				"status": "renamed", "additions": 1, "deletions": 1, "patch": "@@ -1 +1 @@\n-a\n+b"}
+			files[2] = map[string]any{"filename": "pkg/new.go", "status": "added",
+				"additions": 1, "deletions": 0, "patch": "@@ -0,0 +1 @@\n+x"}
+			_ = json.NewEncoder(w).Encode(files)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	diff, err := client.FetchDiff("org/repo", 42)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(diff, "reconstructed via") {
+		t.Errorf("expected leading agent note mentioning 'reconstructed via', got start: %.200s", diff)
+	}
+	if !strings.Contains(diff, "diff --git a/pkg/file0.go b/pkg/file0.go") {
+		t.Errorf("expected per-file diff header for pkg/file0.go")
+	}
+	if !strings.Contains(diff, "diff --git a/pkg/old.go b/pkg/renamed.go") {
+		t.Errorf("expected rename to use previous_filename on the a/ side")
+	}
+	if !strings.Contains(diff, "--- /dev/null\n+++ b/pkg/new.go") {
+		t.Errorf("expected added file to use /dev/null on the old side")
+	}
+	if !strings.Contains(diff, "--- a/pkg/gone.go\n+++ /dev/null") {
+		t.Errorf("expected removed file (from page 2) to use /dev/null on the new side")
+	}
+	if !strings.Contains(diff, "-old5\n+new5") {
+		t.Errorf("expected patch body content to survive reconstruction")
+	}
+	if got := atomic.LoadInt32(&filesPages); got != 2 {
+		t.Errorf("files endpoint hit count: got %d, want 2", got)
+	}
+}
+
+// TestFetchDiff_FilesAPIStubsMissingPatch: files without a patch field
+// (binary or oversized per-file diffs) must yield a stub line instead of
+// being dropped silently.
+func TestFetchDiff_FilesAPIStubsMissingPatch(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/org/repo/pulls/42":
+			http.Error(w, `{"message":"diff too big"}`, http.StatusNotAcceptable)
+		case "/repos/org/repo/pulls/42/files":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"filename": "assets/logo.png", "status": "modified", "additions": 3, "deletions": 1},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	diff, err := client.FetchDiff("org/repo", 42)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(diff, "diff --git a/assets/logo.png b/assets/logo.png") {
+		t.Errorf("expected diff header for patch-less file")
+	}
+	if !strings.Contains(diff, "(patch unavailable — +3/-1)") {
+		t.Errorf("expected stub line for patch-less file, got: %s", diff)
+	}
+}
+
+// TestFetchDiff_NonDiffErrorsStillPropagate guards the fallback trigger:
+// only 406 falls back to the files API. Genuine errors (404, 500) keep the
+// existing contract and must NOT touch the files endpoint. Note: this test
+// passes before the #506 change by construction — it exists to pin the
+// contract so the fallback cannot widen to non-406 statuses unnoticed.
+func TestFetchDiff_NonDiffErrorsStillPropagate(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusInternalServerError} {
+		filesHit := false
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/repos/org/repo/pulls/42/files" {
+				filesHit = true
+			}
+			http.Error(w, `{"message":"nope"}`, status)
+		}))
+
+		client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+		_, err := client.FetchDiff("org/repo", 42)
+		if err == nil {
+			t.Errorf("status %d: expected error, got nil", status)
+		}
+		if filesHit {
+			t.Errorf("status %d: files endpoint must not be hit for non-406 errors", status)
+		}
+		srv.Close()
+	}
+}
+
+// TestFetchDiff_FilesAPITruncatesAtMaxDiffBodyBytes: the reconstruction
+// must stop appending once it crosses the same 10 MiB ceiling the direct
+// diff path uses, carry a generic truncation note (no exact omitted count
+// — we stop paginating rather than walk the rest just to count), and not
+// fetch further pages.
+func TestFetchDiff_FilesAPITruncatesAtMaxDiffBodyBytes(t *testing.T) {
+	var filesPages int32
+	// 100 files × ~120 KB patch ≈ 12 MB on one page: crosses the 10 MiB
+	// reconstruction ceiling mid-page while staying under the 20 MiB page
+	// ceiling.
+	bigPatch := "@@ -1 +1 @@\n+" + strings.Repeat("x", 120*1024)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/org/repo/pulls/42":
+			http.Error(w, `{"message":"diff too big"}`, http.StatusNotAcceptable)
+		case "/repos/org/repo/pulls/42/files":
+			atomic.AddInt32(&filesPages, 1)
+			emitFilesPage(w, parsePageParam(t, r), 100, bigPatch)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	diff, err := client.FetchDiff("org/repo", 42)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(diff, "diff truncated") {
+		t.Errorf("expected truncation note in reconstructed diff")
+	}
+	if got := atomic.LoadInt32(&filesPages); got != 1 {
+		t.Errorf("files endpoint hit count: got %d, want 1 (must stop paginating after truncation)", got)
+	}
+}
+
+// TestFetchDiff_FilesAPISingleOversizedPatchRespectsCeiling: the size
+// check must be on the PROJECTED size, not the accumulated size before
+// append — otherwise a single patch under maxFilesPageBytes but over
+// maxDiffBodyBytes lands on a short page with complete=true and FetchDiff
+// returns a >10 MiB diff with no truncation note, breaking the "same
+// ceiling as the direct diff path" contract.
+func TestFetchDiff_FilesAPISingleOversizedPatchRespectsCeiling(t *testing.T) {
+	// One file, ~12 MiB patch: under the 20 MiB page ceiling, over the
+	// 10 MiB reconstruction ceiling, on a single short page.
+	patch := "@@ -1 +1 @@\n+" + strings.Repeat("w", 12*1024*1024)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/org/repo/pulls/42":
+			http.Error(w, `{"message":"diff too big"}`, http.StatusNotAcceptable)
+		case "/repos/org/repo/pulls/42/files":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"filename": "pkg/huge.go", "status": "modified", "additions": 1, "deletions": 1, "patch": patch},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	diff, err := client.FetchDiff("org/repo", 42)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(diff) > 10*1024*1024 {
+		t.Errorf("reconstructed diff exceeds maxDiffBodyBytes: %d bytes", len(diff))
+	}
+	if !strings.Contains(diff, "diff truncated") {
+		t.Errorf("expected truncation note when a single patch exceeds the ceiling")
+	}
+}
+
+// TestFetchDiff_FilesAPIWarnsAtGitHubFileCap: GitHub hard-caps this
+// endpoint at 3,000 files. Reading that many must append a note that
+// files may be missing — conservatively, even a PR with exactly 3,000
+// files gets the note (we cannot distinguish the two without extra API
+// calls).
+func TestFetchDiff_FilesAPIWarnsAtGitHubFileCap(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/org/repo/pulls/42":
+			http.Error(w, `{"message":"diff too big"}`, http.StatusNotAcceptable)
+		case "/repos/org/repo/pulls/42/files":
+			page := parsePageParam(t, r)
+			if page > 30 {
+				_ = json.NewEncoder(w).Encode([]map[string]any{})
+				return
+			}
+			emitFilesPage(w, page, 100, "@@ -1 +1 @@\n-a\n+b")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	diff, err := client.FetchDiff("org/repo", 42)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(diff, "3,000 files") {
+		t.Errorf("expected GitHub file-cap note after reading 3,000 files")
+	}
+}
+
+// TestFetchDiff_FilesAPIHandlesLargePages: a single files page over the
+// generic 5 MiB paginated ceiling (but under the dedicated 20 MiB files
+// ceiling) must decode and reconstruct successfully — files pages embed
+// patch strings, which is why they get their own ceiling (#506 review).
+func TestFetchDiff_FilesAPIHandlesLargePages(t *testing.T) {
+	// 100 files × ~80 KB ≈ 8 MB page.
+	patch := "@@ -1 +1 @@\n+" + strings.Repeat("y", 80*1024)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/org/repo/pulls/42":
+			http.Error(w, `{"message":"diff too big"}`, http.StatusNotAcceptable)
+		case "/repos/org/repo/pulls/42/files":
+			if parsePageParam(t, r) > 1 {
+				_ = json.NewEncoder(w).Encode([]map[string]any{})
+				return
+			}
+			emitFilesPage(w, 1, 100, patch)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	diff, err := client.FetchDiff("org/repo", 42)
+	if err != nil {
+		t.Fatalf("unexpected error on >5MiB files page: %v", err)
+	}
+	if !strings.Contains(diff, "diff --git a/pkg/file1_0.go b/pkg/file1_0.go") {
+		t.Errorf("expected reconstructed content from the large page")
+	}
+}
+
+// TestFetchDiff_FilesAPIPageAtCeilingDegradesGracefully: when a files page
+// is cut by the 20 MiB page ceiling itself (decode fails with the body
+// read exactly at the limit), the fallback must return the diff
+// accumulated so far with a truncation note — NOT an error. Erroring here
+// would re-create the aborted-review failure mode #506 removes.
+func TestFetchDiff_FilesAPIPageAtCeilingDegradesGracefully(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/org/repo/pulls/42":
+			http.Error(w, `{"message":"diff too big"}`, http.StatusNotAcceptable)
+		case "/repos/org/repo/pulls/42/files":
+			if parsePageParam(t, r) == 1 {
+				emitFilesPage(w, 1, 100, "@@ -1 +1 @@\n-a\n+b")
+				return
+			}
+			// Page 2: valid JSON prefix far larger than the 20 MiB page
+			// ceiling, so the client reads exactly the ceiling and the
+			// decode fails on the truncated body.
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"filename":"`))
+			chunk := strings.Repeat("z", 1024*1024)
+			for i := 0; i < 21; i++ {
+				_, _ = w.Write([]byte(chunk))
+			}
+			_, _ = w.Write([]byte(`"}]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	diff, err := client.FetchDiff("org/repo", 42)
+	if err != nil {
+		t.Fatalf("expected graceful partial diff on at-ceiling decode failure, got error: %v", err)
+	}
+	if !strings.Contains(diff, "diff --git a/pkg/file1_0.go b/pkg/file1_0.go") {
+		t.Errorf("expected page-1 content to survive")
+	}
+	if !strings.Contains(diff, "diff truncated") {
+		t.Errorf("expected truncation note on at-ceiling degradation")
+	}
+}
+
 func TestFetchComments_MergesAndSorts(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
