@@ -490,6 +490,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 			prevReview.CreatedAt,
 			prComments,
 			p.botLogin,
+			pr.User.Login,
 		)
 	}
 
@@ -582,6 +583,13 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		return nil, fmt.Errorf("pipeline: execute %s: %w", cli, err)
 	}
 
+	// 5b. Reconcile severity: ensure top-level severity >= max(issues[].severity).
+	// Guards against LLM inconsistencies (prompt injection, model errors).
+	reconciledSeverity := ReconcileSeverity(result)
+
+	// 5c. Extract comment signals for the review decision.
+	commentSignals := ExtractCommentSignals(prComments, pr.User.Login)
+
 	// 6. Marshal issues and suggestions to JSON for storage
 	issuesJSON, err := json.Marshal(result.Issues)
 	if err != nil {
@@ -599,7 +607,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		Summary:        result.Summary,
 		Issues:         string(issuesJSON),
 		Suggestions:    string(suggestionsJSON),
-		Severity:       result.Severity,
+		Severity:       reconciledSeverity,
 		CreatedAt:      time.Now().UTC(),
 		GitHubReviewID: 0, // will be set after GitHub publish
 		HeadSHA:        pr.Head.SHA,
@@ -627,7 +635,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	ghReviewID, ghReviewState, publishErr := p.gh.SubmitReview(
 		pr.Repo, pr.Number,
 		reviewBody,
-		SeverityToEvent(result.Severity, len(result.Issues)),
+		SeverityToEvent(reconciledSeverity, commentSignals),
 	)
 	if publishErr != nil {
 		// Permanent submit failure (PR locked etc.): mark the freshly
@@ -736,10 +744,12 @@ func (p *Pipeline) PublishPending() {
 		}
 		// PublishPending always uses single-mode body (individual comments were
 		// already posted when the review first ran; we only retry the formal review).
+		// Note: comment signals were already factored into the stored severity
+		// at initial review time; retry uses stored severity as-is.
 		ghID, ghState, err := p.gh.SubmitReview(
 			pr.Repo, pr.Number,
 			BuildGitHubBody(result),
-			SeverityToEvent(rev.Severity, len(issues)),
+			SeverityToEvent(rev.Severity, CommentSignals{}),
 		)
 		if err != nil {
 			// Permanent submit failures (currently HTTP 422 "lock
@@ -856,11 +866,61 @@ func BuildGitHubBody(r *executor.ReviewResult) string {
 	return sb.String()
 }
 
-// SeverityToEvent maps severity to a GitHub review event type.
+// severityRank maps a severity string to a numeric rank for comparison.
+func severityRank(s string) int {
+	switch strings.ToLower(s) {
+	case "high":
+		return 3
+	case "medium":
+		return 2
+	default:
+		return 1
+	}
+}
+
+// rankToSeverity converts a numeric rank back to a severity string.
+func rankToSeverity(r int) string {
+	switch r {
+	case 3:
+		return "high"
+	case 2:
+		return "medium"
+	default:
+		return "low"
+	}
+}
+
+// ReconcileSeverity ensures the top-level severity is at least as high as
+// the maximum severity found in individual issues. This guards against LLM
+// inconsistencies where issues are flagged high but the global field is set
+// low (prompt injection, model error, hallucination).
+func ReconcileSeverity(result *executor.ReviewResult) string {
+	maxRank := severityRank(result.Severity)
+	for _, iss := range result.Issues {
+		if r := severityRank(iss.Severity); r > maxRank {
+			maxRank = r
+		}
+	}
+	reconciled := rankToSeverity(maxRank)
+	if reconciled != result.Severity {
+		slog.Warn("pipeline: severity reconciled (AI inconsistency)",
+			"ai_severity", result.Severity,
+			"reconciled", reconciled,
+			"issue_count", len(result.Issues))
+	}
+	return reconciled
+}
+
+// SeverityToEvent maps severity + comment signals to a GitHub review event type.
 // Only high-severity issues block a PR — Heimdallm must not be a blocker
-// for medium/low issues. Those are left as informational comments with an APPROVE.
-func SeverityToEvent(severity string, _ int) string {
+// for medium/low issues unless comment signals indicate blocking concerns.
+func SeverityToEvent(severity string, signals CommentSignals) string {
 	if severity == "high" {
+		return "REQUEST_CHANGES"
+	}
+	// Elevate to REQUEST_CHANGES if comment signals indicate blocking concerns
+	// even when AI assessed medium severity.
+	if severity == "medium" && signals.Urgency >= 3 {
 		return "REQUEST_CHANGES"
 	}
 	return "APPROVE"

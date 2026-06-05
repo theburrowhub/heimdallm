@@ -31,7 +31,7 @@ type reviewIssue struct {
 
 // buildReviewContext creates a structured prompt section for re-reviews.
 // Returns empty string for first-time reviews (no previous review exists).
-func buildReviewContext(prevIssuesJSON, prevSeverity string, lastReviewAt time.Time, comments []github.Comment, botLogin string) string {
+func buildReviewContext(prevIssuesJSON, prevSeverity string, lastReviewAt time.Time, comments []github.Comment, botLogin, prAuthor string) string {
 	if prevIssuesJSON == "" && lastReviewAt.IsZero() {
 		return ""
 	}
@@ -77,6 +77,16 @@ func buildReviewContext(prevIssuesJSON, prevSeverity string, lastReviewAt time.T
 			}
 		}
 		b.WriteString("\n")
+
+		// Inject unresolved concern signal so the AI explicitly considers it.
+		signals := ExtractCommentSignals(newDiscussion, prAuthor)
+		if signals.UnresolvedConcerns > 0 {
+			b.WriteString(fmt.Sprintf(
+				"NOTE: There are %d unresolved reviewer concern(s) in the discussion above. "+
+					"Verify whether the current diff addresses them. If a concern about a real defect "+
+					"remains unaddressed, reflect this in your severity assessment.\n\n",
+				signals.UnresolvedConcerns))
+		}
 	}
 
 	return b.String()

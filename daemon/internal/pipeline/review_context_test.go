@@ -65,7 +65,7 @@ func TestBuildReviewContext_WithPreviousReview(t *testing.T) {
 		{Author: "other-reviewer", Body: "Looks good now", CreatedAt: lastReviewAt.Add(2 * time.Hour)},
 	}
 
-	ctx := buildReviewContext(prevIssues, "high", lastReviewAt, comments, "heimdallm-bot")
+	ctx := buildReviewContext(prevIssues, "high", lastReviewAt, comments, "heimdallm-bot", "author")
 
 	if ctx == "" {
 		t.Fatal("expected non-empty review context")
@@ -86,7 +86,7 @@ func TestBuildReviewContext_WithPreviousReview(t *testing.T) {
 }
 
 func TestBuildReviewContext_NoPreviousReview(t *testing.T) {
-	ctx := buildReviewContext("", "", time.Time{}, nil, "bot")
+	ctx := buildReviewContext("", "", time.Time{}, nil, "bot", "")
 	if ctx != "" {
 		t.Errorf("expected empty context for first review, got: %q", ctx)
 	}
@@ -96,7 +96,7 @@ func TestBuildReviewContext_PreviousReviewNoNewComments(t *testing.T) {
 	prevIssues := `[{"file":"main.go","line":10,"description":"Unused import","severity":"low"}]`
 	lastReviewAt := time.Now()
 
-	ctx := buildReviewContext(prevIssues, "low", lastReviewAt, nil, "bot")
+	ctx := buildReviewContext(prevIssues, "low", lastReviewAt, nil, "bot", "")
 
 	if !strings.Contains(ctx, "RE-REVIEW") {
 		t.Error("missing RE-REVIEW instruction")
