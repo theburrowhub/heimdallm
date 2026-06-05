@@ -26,9 +26,11 @@ never reviews these PRs at all. Example: freepik-company/ai-bumblebee-proxy#1147
 - `executor.BuildPromptFromTemplate` already truncates the diff at 32 KB
   (`maxDiffBytes`), so the prompt never sees more than that regardless of
   how complete the fetched diff is.
-- The review agent already runs with `WorkDir` set to a local worktree of the
-  repo (acquired via `repoctx`, `ModeRead`), so it can inspect any file
-  locally; the 406 simply aborted the pipeline before reaching that point.
+- The review agent *usually* runs with `WorkDir` set to a local worktree of
+  the repo (acquired via `repoctx`, `ModeRead`) — but repoctx is best-effort:
+  on acquire failure `main.go` clears `aiCfg.LocalDir` and the review still
+  runs without a checkout. `FetchDiff(repo, number)` cannot know which case
+  applies, so the reconstructed diff must NOT claim a checkout exists.
 
 These three facts make the diff *advisory, lossy-by-design context* — unlike
 PR comments (#516/#518) or timeline events (#519), which feed correctness
@@ -68,15 +70,18 @@ endpoint); there is no message sniffing.
   - renames use `previous_filename` on the `a/` side
 - Files without `patch` (binary or oversized): a stub line
   `(patch unavailable — +<additions>/-<deletions>)`.
-- The reconstructed diff starts with a comment line telling the agent that
-  the diff was rebuilt because the PR exceeds GitHub's 300-file limit and
-  that the full checkout is available in its working directory.
+- The reconstructed diff starts with a neutral comment line: the diff was
+  rebuilt via the List Pull Request Files API because the PR exceeds
+  GitHub's 300-file diff limit, and may be incomplete. It makes no claim
+  about a local checkout (the review path runs with or without one, and
+  the client cannot tell which).
 
 ### Limits and error handling
 
 | Condition | Behavior |
 |---|---|
 | Accumulated diff exceeds `maxDiffBodyBytes` (10 MB) | stop appending, add `... (diff truncated, N files omitted)`, `slog.Warn` — mirrors the direct path's truncation behavior |
+| ≥3,000 files read (GitHub's documented hard cap on this endpoint) | append a note that GitHub caps file listings at 3,000 files and some files may be missing, `slog.Warn`. Conservative: a PR with exactly 3,000 files gets the note too — the client cannot distinguish "exactly at cap" from "capped" without extra API calls (`changed_files` is not parsed in our `PullRequest` model), and a spurious note on an at-cap PR is harmless |
 | Pagination cap hit (50 pages) | return the partial diff with a truncation note, `slog.Warn` — deliberately NOT an error (see below) |
 | HTTP error mid-pagination | propagate as error |
 | JSON decode error | propagate as error, including `N bytes read` (pattern from #518) |
@@ -100,11 +105,18 @@ GitHub also hard-caps this endpoint at 3,000 files (30 pages), so the
 3. `TestFetchDiff_NonDiffErrorsStillPropagate` — 404/500 from the diff
    endpoint do NOT trigger the fallback and surface as errors (existing
    contract).
-4. Existing `TestFetchDiff*` tests pass unchanged (200 path untouched).
+4. `TestFetchDiff_FilesAPITruncatesAtMaxDiffBodyBytes` — accumulated
+   reconstruction crossing 10 MB stops appending and carries the
+   `diff truncated, N files omitted` note.
+5. `TestFetchDiff_FilesAPIWarnsAtGitHubFileCap` — reading 3,000 files
+   appends the GitHub-cap note.
+6. Existing `TestFetchDiff*` tests pass unchanged (200 path untouched).
 
 ## Out of scope
 
-- PRs beyond GitHub's 3,000-file files-API cap (partial diff + note).
+- Recovering file content beyond GitHub's 3,000-file files-API cap (the
+  fallback returns the capped diff plus the warning note defined above;
+  fetching the remainder would require cloning, the rejected alternative).
 - Local `git diff` computation (rejected alternative; can be revisited if
   the files API proves insufficient).
 - Changes to the prompt template or the 32 KB prompt truncation.
