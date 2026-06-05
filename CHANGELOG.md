@@ -10,6 +10,28 @@
 * **issues:** `auto_promote_triage` defaults on only when `refinement_labels` is configured. Repos without a refinement target keep their previous review-only behavior; set `auto_promote_triage = false` explicitly to keep refinement manual even when refinement labels exist.
 * **pipeline (PR reviews):** a push (new HEAD SHA) on a previously-reviewed PR no longer triggers an automatic re-review on its own. Heimdallm now requires an explicit `review_requested` event for the bot — i.e. someone (or some automation) pressing "Re-request review" — newer than the previous review's `CreatedAt`. The SHA-unchanged dedup (#322 Bug 5) and this SHA-changed gate now share the same predicate, so the contract is "review iff explicitly re-requested" regardless of whether the commit changed. Workflows that relied on push-triggered re-reviews — typically repos with "Dismiss stale reviews on push" or CODEOWNERS auto-request workflows that auto-re-added the bot to `requested_reviewers` — must now explicitly re-request the review (manually in the UI, or via a GitHub Action calling `gh pr edit --add-reviewer`). Skipped pushes surface as a `review_skipped` SSE with reason `no_rereview_request` (distinct from `sha_unchanged`) so dashboards can tell the two cases apart. Closes #509.
 
+## [0.6.24](https://github.com/theburrowhub/heimdallm/compare/v0.6.23...v0.6.24) (2026-06-05)
+
+
+### Features
+
+* **pipeline:** factor PR comments into review approve/request_changes decision ([#525](https://github.com/theburrowhub/heimdallm/issues/525)) ([6c243d3](https://github.com/theburrowhub/heimdallm/commit/6c243d3cdc41b62b129ed15873101242d3e68c9e))
+* **pipeline:** persistent per-repo review instructions via PR comment directives (refs ai-platform-workspace[#383](https://github.com/theburrowhub/heimdallm/issues/383)) ([#520](https://github.com/theburrowhub/heimdallm/issues/520)) ([783f47e](https://github.com/theburrowhub/heimdallm/commit/783f47e4ef50b9f47e797565af8e2dfdde0379a3))
+
+
+### Bug Fixes
+
+* **github:** paginate PR comments to capture newest entries (closes [#512](https://github.com/theburrowhub/heimdallm/issues/512)) ([#516](https://github.com/theburrowhub/heimdallm/issues/516)) ([13ecb25](https://github.com/theburrowhub/heimdallm/commit/13ecb25155cb4daec8161b352f5717d05027c459))
+* **github:** reconstruct diff via List PR Files API for PRs over 300 files (closes [#506](https://github.com/theburrowhub/heimdallm/issues/506)) ([#523](https://github.com/theburrowhub/heimdallm/issues/523)) ([f5205c0](https://github.com/theburrowhub/heimdallm/commit/f5205c002a1aed65dd71a25cb6dabf82eee8b64e))
+* **github:** return error on timeline pagination cap instead of partial results (closes [#519](https://github.com/theburrowhub/heimdallm/issues/519)) ([#521](https://github.com/theburrowhub/heimdallm/issues/521)) ([1424048](https://github.com/theburrowhub/heimdallm/commit/142404834c90e38716f7a49cebbab395aa435d78))
+* **github:** scale body ceiling for paginated comment endpoints (closes [#518](https://github.com/theburrowhub/heimdallm/issues/518)) ([#522](https://github.com/theburrowhub/heimdallm/issues/522)) ([21b474c](https://github.com/theburrowhub/heimdallm/commit/21b474cc59fce156dc33944f89b200975b12f169))
+
+
+### Documentation
+
+* **landing:** auto-version the hero badge via release-please extra-files (closes [#514](https://github.com/theburrowhub/heimdallm/issues/514)) ([#524](https://github.com/theburrowhub/heimdallm/issues/524)) ([e2793b6](https://github.com/theburrowhub/heimdallm/commit/e2793b655da64489bcf3c91c42da9706671cee8b))
+* refresh landing to reflect 0.6.23 product scope ([#513](https://github.com/theburrowhub/heimdallm/issues/513)) ([a994086](https://github.com/theburrowhub/heimdallm/commit/a99408691e8f7692dc9673423b8443e7521ca126))
+
 ## [0.6.23](https://github.com/theburrowhub/heimdallm/compare/v0.6.22...v0.6.23) (2026-05-25)
 
 
