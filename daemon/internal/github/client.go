@@ -665,7 +665,10 @@ func (c *Client) GetPR(repo string, number int) (*PullRequest, error) {
 	return &pr, nil
 }
 
-// FetchDiff returns the unified diff for a PR.
+// FetchDiff returns the unified diff for a PR. PRs over GitHub's 300-file
+// diff limit make the diff endpoint return 406; those fall back to a
+// reconstruction from the List Pull Request Files API (#506) instead of
+// aborting the review.
 func (c *Client) FetchDiff(repo string, number int) (string, error) {
 	path := fmt.Sprintf("/repos/%s/pulls/%d", repo, number)
 	resp, err := c.do("GET", path, "application/vnd.github.v3.diff")
@@ -673,6 +676,14 @@ func (c *Client) FetchDiff(repo string, number int) (string, error) {
 		return "", fmt.Errorf("github: fetch diff: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotAcceptable {
+		// GitHub's "diff exceeded the maximum number of files (300)"
+		// response. Only 406 triggers the fallback; every other non-200
+		// keeps the hard-error contract below.
+		slog.Info("github: diff endpoint returned 406, reconstructing via files API",
+			"repo", repo, "pr", number)
+		return c.fetchDiffViaFilesAPI(repo, number)
+	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 		errBody := safeTruncate(string(body), maxErrBodyLen)
@@ -686,6 +697,146 @@ func (c *Client) FetchDiff(repo string, number int) (string, error) {
 		slog.Warn("github: diff truncated at size limit", "repo", repo, "pr", number, "limit_bytes", maxDiffBodyBytes)
 	}
 	return string(data), nil
+}
+
+// maxFilesPageBytes is the body ceiling for List Pull Request Files pages.
+// Deliberately NOT maxPaginatedPageBytes (5 MiB): files pages embed per-file
+// `patch` strings, so a per_page=100 page can plausibly exceed 5 MiB even
+// when the final reconstruction would truncate safely at maxDiffBodyBytes —
+// a truncated JSON page fails to decode and would abort the review, the
+// exact failure mode #506 removes. 2× maxDiffBodyBytes (20 MiB) is generous
+// because GitHub omits the `patch` field entirely for very large file
+// diffs, which bounds realistic page sizes.
+const maxFilesPageBytes = 2 * maxDiffBodyBytes
+
+// githubPRFilesCap is GitHub's documented hard cap on the List Pull Request
+// Files endpoint: at most 3,000 files are ever returned, regardless of
+// pagination.
+const githubPRFilesCap = 3000
+
+// prDiffFile is the subset of a List Pull Request Files item needed to
+// reconstruct a unified-diff entry.
+type prDiffFile struct {
+	Filename         string `json:"filename"`
+	PreviousFilename string `json:"previous_filename"`
+	Status           string `json:"status"`
+	Additions        int    `json:"additions"`
+	Deletions        int    `json:"deletions"`
+	Patch            string `json:"patch"`
+}
+
+// fetchDiffViaFilesAPI reconstructs a unified diff from the List Pull
+// Request Files API, for PRs whose diff endpoint 406s (>300 files, #506).
+//
+// Unlike the comment/timeline fetchers (#516/#519), every degradation path
+// here returns a PARTIAL diff with a note instead of an error: the diff is
+// advisory review context that the prompt layer already truncates to 32 KB,
+// whereas comments and timeline events feed dedup/re-review correctness
+// decisions. Erroring on truncation would re-create the aborted-review
+// failure mode this fallback exists to remove. The reconstructed diff makes
+// no claim about a local checkout: the review path runs with or without one
+// (repoctx is best-effort) and this client cannot tell which.
+func (c *Client) fetchDiffViaFilesAPI(repo string, number int) (string, error) {
+	var b strings.Builder
+	b.WriteString("# NOTE: diff reconstructed via GitHub's List Pull Request Files API because this PR exceeds GitHub's 300-file diff limit; it may be incomplete.\n")
+
+	listed := 0       // files received from the API, appended or not
+	truncated := false // any lossy stop: size ceiling, page ceiling, pagination cap
+	complete := false  // saw a short page (no more files upstream)
+pages:
+	for page := 1; page <= maxPaginationPages; page++ {
+		path := fmt.Sprintf("/repos/%s/pulls/%d/files?per_page=%d&page=%d", repo, number, perPage, page)
+		resp, err := c.do("GET", path, "application/vnd.github+json")
+		if err != nil {
+			return "", fmt.Errorf("github: list pr files: %w", err)
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxFilesPageBytes))
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			errBody := safeTruncate(string(body), maxErrBodyLen)
+			return "", fmt.Errorf("github: list pr files: status %d: %s", resp.StatusCode, errBody)
+		}
+		var raw []prDiffFile
+		if err := json.Unmarshal(body, &raw); err != nil {
+			if int64(len(body)) >= maxFilesPageBytes {
+				// Self-inflicted truncation: the page ceiling cut the JSON.
+				// Degrade to what we have rather than abort the review.
+				slog.Warn("github: pr files page truncated at byte ceiling, returning partial reconstructed diff",
+					"repo", repo, "pr", number, "page", page, "bytes_read", len(body))
+				truncated = true
+				break
+			}
+			// Below the ceiling this is genuine upstream corruption.
+			return "", fmt.Errorf("github: decode pr files (%d bytes read): %w", len(body), err)
+		}
+		for i := range raw {
+			if b.Len() >= maxDiffBodyBytes {
+				// Same ceiling as the direct diff path. Stop paginating too:
+				// the remaining pages would only be fetched to be dropped,
+				// which is why the truncation note is generic (no exact
+				// omitted count).
+				slog.Warn("github: reconstructed diff truncated at size limit",
+					"repo", repo, "pr", number, "limit_bytes", maxDiffBodyBytes, "files_appended", listed)
+				truncated = true
+				break pages
+			}
+			appendFileDiff(&b, &raw[i])
+			listed++
+		}
+		if len(raw) < perPage {
+			complete = true
+			break
+		}
+	}
+	if !complete && !truncated {
+		// Pagination cap with every page full. Unreachable in practice
+		// (GitHub caps the endpoint at 3,000 files = 30 pages, the cap is
+		// 50) but handled for symmetry with the other fetchers.
+		slog.Warn("github: pr files pagination cap hit, returning partial reconstructed diff",
+			"repo", repo, "pr", number, "pages", maxPaginationPages)
+		truncated = true
+	}
+	if truncated {
+		b.WriteString("\n... (diff truncated: size limit reached, remaining files omitted)\n")
+	}
+	if listed >= githubPRFilesCap {
+		// Conservative: a PR with exactly 3,000 files gets the note too —
+		// distinguishing "at cap" from "capped" would need extra API calls
+		// and a spurious note is harmless.
+		slog.Warn("github: pr files listing reached GitHub's 3,000-file cap, diff may omit files",
+			"repo", repo, "pr", number, "files", listed)
+		b.WriteString("\n# NOTE: GitHub caps file listings at 3,000 files; some files may be missing from this diff.\n")
+	}
+	return b.String(), nil
+}
+
+// appendFileDiff writes one file's unified-diff-shaped entry: the
+// `diff --git` header, `---`/`+++` markers (with /dev/null for added and
+// removed files, and previous_filename on the a/ side for renames), then
+// the patch body — or a stub when GitHub omitted the patch (binary or
+// oversized per-file diff).
+func appendFileDiff(b *strings.Builder, f *prDiffFile) {
+	oldName := f.Filename
+	if f.PreviousFilename != "" {
+		oldName = f.PreviousFilename
+	}
+	fmt.Fprintf(b, "diff --git a/%s b/%s\n", oldName, f.Filename)
+	switch f.Status {
+	case "added":
+		fmt.Fprintf(b, "--- /dev/null\n+++ b/%s\n", f.Filename)
+	case "removed":
+		fmt.Fprintf(b, "--- a/%s\n+++ /dev/null\n", oldName)
+	default:
+		fmt.Fprintf(b, "--- a/%s\n+++ b/%s\n", oldName, f.Filename)
+	}
+	if f.Patch == "" {
+		fmt.Fprintf(b, "(patch unavailable — +%d/-%d)\n", f.Additions, f.Deletions)
+		return
+	}
+	b.WriteString(f.Patch)
+	if !strings.HasSuffix(f.Patch, "\n") {
+		b.WriteByte('\n')
+	}
 }
 
 // FetchComments retrieves both inline review comments and general issue comments
