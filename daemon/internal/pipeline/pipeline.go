@@ -587,8 +587,12 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	// Guards against LLM inconsistencies (prompt injection, model errors).
 	reconciledSeverity := ReconcileSeverity(result)
 
-	// 5c. Extract comment signals for the review decision.
+	// 5c. Extract comment signals and apply escalation to the severity that
+	// will be persisted. By folding signal-driven escalation into the stored
+	// severity, retry paths (PublishPending, NATS worker) reproduce the same
+	// APPROVE/REQUEST_CHANGES decision without needing to re-extract signals.
 	commentSignals := ExtractCommentSignals(prComments, pr.User.Login)
+	finalSeverity := ApplySignalEscalation(reconciledSeverity, commentSignals)
 
 	// 6. Marshal issues and suggestions to JSON for storage
 	issuesJSON, err := json.Marshal(result.Issues)
@@ -607,7 +611,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		Summary:        result.Summary,
 		Issues:         string(issuesJSON),
 		Suggestions:    string(suggestionsJSON),
-		Severity:       reconciledSeverity,
+		Severity:       finalSeverity,
 		CreatedAt:      time.Now().UTC(),
 		GitHubReviewID: 0, // will be set after GitHub publish
 		HeadSHA:        pr.Head.SHA,
@@ -635,7 +639,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	ghReviewID, ghReviewState, publishErr := p.gh.SubmitReview(
 		pr.Repo, pr.Number,
 		reviewBody,
-		SeverityToEvent(reconciledSeverity, commentSignals),
+		SeverityToEvent(finalSeverity),
 	)
 	if publishErr != nil {
 		// Permanent submit failure (PR locked etc.): mark the freshly
@@ -744,12 +748,12 @@ func (p *Pipeline) PublishPending() {
 		}
 		// PublishPending always uses single-mode body (individual comments were
 		// already posted when the review first ran; we only retry the formal review).
-		// Note: comment signals were already factored into the stored severity
-		// at initial review time; retry uses stored severity as-is.
+		// The stored severity already incorporates signal escalation from the
+		// initial review, so SeverityToEvent reproduces the original decision.
 		ghID, ghState, err := p.gh.SubmitReview(
 			pr.Repo, pr.Number,
 			BuildGitHubBody(result),
-			SeverityToEvent(rev.Severity, CommentSignals{}),
+			SeverityToEvent(rev.Severity),
 		)
 		if err != nil {
 			// Permanent submit failures (currently HTTP 422 "lock
@@ -911,16 +915,27 @@ func ReconcileSeverity(result *executor.ReviewResult) string {
 	return reconciled
 }
 
-// SeverityToEvent maps severity + comment signals to a GitHub review event type.
-// Only high-severity issues block a PR — Heimdallm must not be a blocker
-// for medium/low issues unless comment signals indicate blocking concerns.
-func SeverityToEvent(severity string, signals CommentSignals) string {
-	if severity == "high" {
-		return "REQUEST_CHANGES"
-	}
-	// Elevate to REQUEST_CHANGES if comment signals indicate blocking concerns
-	// even when AI assessed medium severity.
+// ApplySignalEscalation elevates severity based on comment signals.
+// A "medium" severity is escalated to "high" when blocker signals are detected.
+// This ensures the escalated severity is persisted, so retry paths reproduce
+// the same decision without re-extracting signals.
+func ApplySignalEscalation(severity string, signals CommentSignals) string {
 	if severity == "medium" && signals.Urgency >= 3 {
+		slog.Info("pipeline: severity escalated by comment signals",
+			"original", severity, "escalated", "high",
+			"has_blocker_keywords", signals.HasBlockerKeywords,
+			"unresolved_concerns", signals.UnresolvedConcerns)
+		return "high"
+	}
+	return severity
+}
+
+// SeverityToEvent maps severity to a GitHub review event type.
+// Only high-severity issues block a PR — Heimdallm must not be a blocker
+// for medium/low issues. Signal-driven escalation is applied upstream via
+// ApplySignalEscalation before the severity reaches this function.
+func SeverityToEvent(severity string) string {
+	if severity == "high" {
 		return "REQUEST_CHANGES"
 	}
 	return "APPROVE"

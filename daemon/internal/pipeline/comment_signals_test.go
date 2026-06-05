@@ -7,6 +7,8 @@ import (
 	"github.com/heimdallm/daemon/internal/github"
 )
 
+// --- Tests for ExtractCommentSignals ---
+
 func TestExtractCommentSignals_Empty(t *testing.T) {
 	signals := ExtractCommentSignals(nil, "author")
 	if signals.HasBlockerKeywords || signals.UnresolvedConcerns != 0 || signals.Urgency != 0 {
@@ -145,23 +147,141 @@ func TestExtractCommentSignals_NoCasualFalsePositive(t *testing.T) {
 	}
 }
 
+// --- Fix 2: Word-boundary matching prevents substring false positives ---
+
+func TestExtractCommentSignals_NonBlockingNotFalsePositive(t *testing.T) {
+	comments := []github.Comment{
+		{Author: "reviewer", Body: "This is non-blocking, just a nit"},
+	}
+	signals := ExtractCommentSignals(comments, "author")
+	if signals.HasBlockerKeywords {
+		t.Error("'non-blocking' should NOT trigger blocker detection")
+	}
+	if signals.Urgency == 3 {
+		t.Error("'non-blocking' should not produce urgency 3")
+	}
+}
+
+func TestExtractCommentSignals_NotABlockerNotFalsePositive(t *testing.T) {
+	comments := []github.Comment{
+		{Author: "reviewer", Body: "Not a blocker, but consider refactoring"},
+	}
+	signals := ExtractCommentSignals(comments, "author")
+	if signals.HasBlockerKeywords {
+		t.Error("'not a blocker' should NOT trigger blocker detection")
+	}
+}
+
+func TestExtractCommentSignals_NegatedMustFixNotFalsePositive(t *testing.T) {
+	comments := []github.Comment{
+		{Author: "reviewer", Body: "This is not a must fix, just a suggestion"},
+	}
+	signals := ExtractCommentSignals(comments, "author")
+	if signals.HasBlockerKeywords {
+		t.Error("'not a must fix' should NOT trigger blocker detection")
+	}
+}
+
+func TestExtractCommentSignals_KnackNotFalsePositive(t *testing.T) {
+	// "nack" as a pattern should not match inside other words
+	comments := []github.Comment{
+		{Author: "reviewer", Body: "You have a knack for clean code"},
+	}
+	signals := ExtractCommentSignals(comments, "author")
+	if signals.HasBlockerKeywords {
+		t.Error("'knack' should NOT trigger 'nack' blocker detection")
+	}
+}
+
+func TestExtractCommentSignals_RealBlockerStillDetected(t *testing.T) {
+	// After adding negation handling, real blockers must still work
+	comments := []github.Comment{
+		{Author: "reviewer", Body: "This is definitely a blocker for the release"},
+	}
+	signals := ExtractCommentSignals(comments, "author")
+	if !signals.HasBlockerKeywords {
+		t.Error("real 'blocker' keyword should still be detected")
+	}
+}
+
+func TestExtractCommentSignals_RealBlockingStillDetected(t *testing.T) {
+	comments := []github.Comment{
+		{Author: "reviewer", Body: "This bug is blocking the deploy pipeline"},
+	}
+	signals := ExtractCommentSignals(comments, "author")
+	if !signals.HasBlockerKeywords {
+		t.Error("real 'blocking' keyword should still be detected")
+	}
+}
+
+// --- Fix 3: HasBlockerKeywords resets when author resolves ---
+
+func TestExtractCommentSignals_BlockerResolvedByAuthor(t *testing.T) {
+	comments := []github.Comment{
+		{Author: "reviewer", Body: "This is a blocker — exposed credentials"},
+		{Author: "author", Body: "Fixed, removed the credentials"},
+	}
+	signals := ExtractCommentSignals(comments, "author")
+	if signals.HasBlockerKeywords {
+		t.Error("blocker resolved by author reply should clear HasBlockerKeywords")
+	}
+	if signals.UnresolvedConcerns != 0 {
+		t.Errorf("expected 0 unresolved after author addresses blocker, got %d", signals.UnresolvedConcerns)
+	}
+	if signals.Urgency != 0 {
+		t.Errorf("resolved blocker should produce urgency 0, got %d", signals.Urgency)
+	}
+}
+
+func TestExtractCommentSignals_BlockerResolvedThenNewConcern(t *testing.T) {
+	comments := []github.Comment{
+		{Author: "reviewer", Body: "This is a blocker"},
+		{Author: "author", Body: "Fixed"},
+		{Author: "reviewer", Body: "New minor concern, not a big deal"},
+	}
+	signals := ExtractCommentSignals(comments, "author")
+	if signals.HasBlockerKeywords {
+		t.Error("old blocker was resolved; new comment has no blocker keyword")
+	}
+	if signals.UnresolvedConcerns != 1 {
+		t.Errorf("expected 1 unresolved concern (new one), got %d", signals.UnresolvedConcerns)
+	}
+	if signals.Urgency != 1 {
+		t.Errorf("expected urgency 1 (1 unresolved, no blocker), got %d", signals.Urgency)
+	}
+}
+
+func TestExtractCommentSignals_UnresolvedBlockerPersists(t *testing.T) {
+	// If the author never replies to a blocker, it persists
+	comments := []github.Comment{
+		{Author: "reviewer", Body: "This is a blocker"},
+		{Author: "other-reviewer", Body: "I agree, must fix this"},
+	}
+	signals := ExtractCommentSignals(comments, "author")
+	if !signals.HasBlockerKeywords {
+		t.Error("unresolved blocker should persist HasBlockerKeywords")
+	}
+	if signals.Urgency != 3 {
+		t.Errorf("expected urgency 3 for unresolved blocker, got %d", signals.Urgency)
+	}
+}
+
 // --- Tests for ReconcileSeverity ---
 
 func TestReconcileSeverity_Consistent(t *testing.T) {
 	tests := []struct {
 		name     string
 		severity string
-		issues   []Issue
+		issues   []testIssue
 		want     string
 	}{
-		{"high matches", "high", []Issue{{Severity: "high"}}, "high"},
-		{"medium matches", "medium", []Issue{{Severity: "medium"}}, "medium"},
-		{"low matches", "low", []Issue{{Severity: "low"}}, "low"},
+		{"high matches", "high", []testIssue{{Severity: "high"}}, "high"},
+		{"medium matches", "medium", []testIssue{{Severity: "medium"}}, "medium"},
+		{"low matches", "low", []testIssue{{Severity: "low"}}, "low"},
 		{"no issues low", "low", nil, "low"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Convert pipeline.Issue to executor.Issue for the function
 			result := makeResult(tt.severity, tt.issues)
 			got := ReconcileSeverity(result)
 			if got != tt.want {
@@ -172,7 +292,7 @@ func TestReconcileSeverity_Consistent(t *testing.T) {
 }
 
 func TestReconcileSeverity_EscalatesFromLowToHigh(t *testing.T) {
-	result := makeResult("low", []Issue{
+	result := makeResult("low", []testIssue{
 		{Severity: "low"},
 		{Severity: "high"},
 	})
@@ -183,7 +303,7 @@ func TestReconcileSeverity_EscalatesFromLowToHigh(t *testing.T) {
 }
 
 func TestReconcileSeverity_EscalatesFromLowToMedium(t *testing.T) {
-	result := makeResult("low", []Issue{
+	result := makeResult("low", []testIssue{
 		{Severity: "medium"},
 	})
 	got := ReconcileSeverity(result)
@@ -194,7 +314,7 @@ func TestReconcileSeverity_EscalatesFromLowToMedium(t *testing.T) {
 
 func TestReconcileSeverity_NeverLowers(t *testing.T) {
 	// AI says "high" but all issues are "low" — we trust the AI's higher assessment
-	result := makeResult("high", []Issue{
+	result := makeResult("high", []testIssue{
 		{Severity: "low"},
 		{Severity: "low"},
 	})
@@ -204,61 +324,89 @@ func TestReconcileSeverity_NeverLowers(t *testing.T) {
 	}
 }
 
-// --- Tests for SeverityToEvent with CommentSignals ---
+// --- Tests for ApplySignalEscalation ---
 
-func TestSeverityToEvent_HighAlwaysRequestsChanges(t *testing.T) {
-	got := SeverityToEvent("high", CommentSignals{})
+func TestApplySignalEscalation_MediumWithBlocker(t *testing.T) {
+	got := ApplySignalEscalation("medium", CommentSignals{HasBlockerKeywords: true, Urgency: 3})
+	if got != "high" {
+		t.Errorf("medium + blocker should escalate to high, got %q", got)
+	}
+}
+
+func TestApplySignalEscalation_MediumWithoutBlocker(t *testing.T) {
+	got := ApplySignalEscalation("medium", CommentSignals{Urgency: 2})
+	if got != "medium" {
+		t.Errorf("medium + urgency 2 should stay medium, got %q", got)
+	}
+}
+
+func TestApplySignalEscalation_LowWithBlocker(t *testing.T) {
+	// Low is never escalated by signals — conservative design
+	got := ApplySignalEscalation("low", CommentSignals{HasBlockerKeywords: true, Urgency: 3})
+	if got != "low" {
+		t.Errorf("low should never be escalated by signals, got %q", got)
+	}
+}
+
+func TestApplySignalEscalation_HighUnchanged(t *testing.T) {
+	got := ApplySignalEscalation("high", CommentSignals{})
+	if got != "high" {
+		t.Errorf("high should stay high, got %q", got)
+	}
+}
+
+// --- Tests for SeverityToEvent ---
+
+func TestSeverityToEvent_HighRequestsChanges(t *testing.T) {
+	got := SeverityToEvent("high")
 	if got != "REQUEST_CHANGES" {
-		t.Errorf("high severity should always REQUEST_CHANGES, got %q", got)
+		t.Errorf("high severity should REQUEST_CHANGES, got %q", got)
+	}
+}
+
+func TestSeverityToEvent_MediumApproves(t *testing.T) {
+	got := SeverityToEvent("medium")
+	if got != "APPROVE" {
+		t.Errorf("medium severity should APPROVE, got %q", got)
 	}
 }
 
 func TestSeverityToEvent_LowApproves(t *testing.T) {
-	got := SeverityToEvent("low", CommentSignals{})
+	got := SeverityToEvent("low")
 	if got != "APPROVE" {
-		t.Errorf("low severity without signals should APPROVE, got %q", got)
+		t.Errorf("low severity should APPROVE, got %q", got)
 	}
 }
 
-func TestSeverityToEvent_MediumApprovesNormally(t *testing.T) {
-	got := SeverityToEvent("medium", CommentSignals{Urgency: 1})
-	if got != "APPROVE" {
-		t.Errorf("medium with low urgency should APPROVE, got %q", got)
-	}
-}
+// --- Fix 1: Verify escalation is persisted correctly (integration scenario) ---
 
-func TestSeverityToEvent_MediumEscalatesWithBlocker(t *testing.T) {
-	signals := CommentSignals{
-		HasBlockerKeywords: true,
-		Urgency:            3,
-	}
-	got := SeverityToEvent("medium", signals)
-	if got != "REQUEST_CHANGES" {
-		t.Errorf("medium + blocker signals should REQUEST_CHANGES, got %q", got)
-	}
-}
+func TestEscalationPersistenceScenario(t *testing.T) {
+	// Simulate the pipeline flow: medium severity + blocker signals → stored as high
+	signals := ExtractCommentSignals([]github.Comment{
+		{Author: "reviewer", Body: "This is a blocker for release"},
+	}, "author")
+	reconciled := "medium" // AI said medium
+	finalSeverity := ApplySignalEscalation(reconciled, signals)
 
-func TestSeverityToEvent_LowDoesNotEscalateWithBlocker(t *testing.T) {
-	// Design choice: "low" severity is not elevated even with blocker keywords.
-	// Only "medium" can be escalated — keeps Heimdallm non-aggressive.
-	signals := CommentSignals{
-		HasBlockerKeywords: true,
-		Urgency:            3,
+	// This is what gets stored in the DB
+	if finalSeverity != "high" {
+		t.Fatalf("expected stored severity 'high', got %q", finalSeverity)
 	}
-	got := SeverityToEvent("low", signals)
-	if got != "APPROVE" {
-		t.Errorf("low severity should not escalate even with blockers, got %q", got)
+
+	// On retry, PublishPending uses stored severity with no signals
+	event := SeverityToEvent(finalSeverity)
+	if event != "REQUEST_CHANGES" {
+		t.Errorf("retry should reproduce REQUEST_CHANGES from stored severity, got %q", event)
 	}
 }
 
 // --- Helper ---
 
-// Issue mirrors executor.Issue for test readability.
-type Issue struct {
+type testIssue struct {
 	Severity string
 }
 
-func makeResult(severity string, issues []Issue) *executor.ReviewResult {
+func makeResult(severity string, issues []testIssue) *executor.ReviewResult {
 	var execIssues []executor.Issue
 	for _, iss := range issues {
 		execIssues = append(execIssues, executor.Issue{Severity: iss.Severity})

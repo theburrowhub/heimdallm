@@ -910,7 +910,7 @@ func main() {
 		ghID, ghState, err := ghClient.SubmitReview(
 			pr.Repo, pr.Number,
 			pipeline.BuildGitHubBody(result),
-			pipeline.SeverityToEvent(rev.Severity, pipeline.CommentSignals{}),
+			pipeline.SeverityToEvent(rev.Severity),
 		)
 		if err != nil {
 			errStr := err.Error()
