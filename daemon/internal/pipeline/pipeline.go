@@ -591,7 +591,12 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	// will be persisted. By folding signal-driven escalation into the stored
 	// severity, retry paths (PublishPending, NATS worker) reproduce the same
 	// APPROVE/REQUEST_CHANGES decision without needing to re-extract signals.
-	commentSignals := ExtractCommentSignals(prComments, pr.User.Login)
+	//
+	// Filter out the bot's own comments before extraction — Heimdallm's prior
+	// review bodies often contain blocker keywords ("security issue",
+	// "must fix", etc.) that would otherwise self-trigger escalation.
+	signalComments := filterBotComments(prComments, p.botLogin)
+	commentSignals := ExtractCommentSignals(signalComments, pr.User.Login)
 	finalSeverity := ApplySignalEscalation(reconciledSeverity, commentSignals)
 
 	// 6. Marshal issues and suggestions to JSON for storage
@@ -943,6 +948,22 @@ func SeverityToEvent(severity string) string {
 
 // maxCommentsBytes limits the total formatted PR comments included in the prompt.
 const maxCommentsBytes = 16 * 1024 // 16KB
+
+// filterBotComments returns a new slice excluding comments authored by the bot.
+// This prevents Heimdallm's own prior review bodies (which contain keywords like
+// "security issue", "must fix", etc.) from self-triggering blocker detection.
+func filterBotComments(comments []github.Comment, botLogin string) []github.Comment {
+	if botLogin == "" {
+		return comments
+	}
+	filtered := make([]github.Comment, 0, len(comments))
+	for _, c := range comments {
+		if !strings.EqualFold(c.Author, botLogin) {
+			filtered = append(filtered, c)
+		}
+	}
+	return filtered
+}
 
 // formatComments formats a slice of GitHub comments into a prompt section string.
 // Returns empty string if comments is nil or empty.
