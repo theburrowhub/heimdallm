@@ -62,8 +62,16 @@ endpoint); there is no message sniffing.
 ### fetchDiffViaFilesAPI
 
 - Paginates `GET /repos/{repo}/pulls/{n}/files?per_page=100&page=K` reusing
-  the shared pagination constants (`perPage`, `maxPaginationPages`) and the
-  paginated body ceiling (`maxPaginatedPageBytes`) from #519/#518.
+  the shared pagination constants (`perPage`, `maxPaginationPages`) from
+  #519/#518.
+- **Dedicated page-body ceiling** `maxFilesPageBytes = 2 × maxDiffBodyBytes`
+  (20 MiB). The generic `maxPaginatedPageBytes` (5 MiB) is NOT reused: files
+  pages embed per-file `patch` strings, so a 100-file page can plausibly
+  exceed 5 MiB even when the final reconstruction would truncate safely at
+  10 MiB — a truncated JSON page would fail to decode and abort the review,
+  the exact failure mode this design removes. 20 MiB is generous because
+  GitHub omits the `patch` field entirely for very large file diffs, which
+  bounds realistic page sizes.
 - Emits, per file, unified-diff-shaped headers followed by the `patch` field:
   - `diff --git a/<previous_filename|filename> b/<filename>`
   - `--- a/<old>` / `+++ b/<new>`, with `/dev/null` for added/removed files
@@ -84,7 +92,8 @@ endpoint); there is no message sniffing.
 | ≥3,000 files read (GitHub's documented hard cap on this endpoint) | append a note that GitHub caps file listings at 3,000 files and some files may be missing, `slog.Warn`. Conservative: a PR with exactly 3,000 files gets the note too — the client cannot distinguish "exactly at cap" from "capped" without extra API calls (`changed_files` is not parsed in our `PullRequest` model), and a spurious note on an at-cap PR is harmless |
 | Pagination cap hit (50 pages) | return the partial diff with a truncation note, `slog.Warn` — deliberately NOT an error (see below) |
 | HTTP error mid-pagination | propagate as error |
-| JSON decode error | propagate as error, including `N bytes read` (pattern from #518) |
+| Decode error with the page read at the `maxFilesPageBytes` ceiling | self-inflicted truncation: return the diff accumulated so far with a truncation note, `slog.Warn` with bytes read — NOT an error (same advisory-context rationale as the cap) |
+| Decode error below the ceiling | genuine upstream corruption: propagate as error, including `N bytes read` (pattern from #518) |
 
 **Why cap-hit ≠ error here (unlike #519):** the diff is advisory context that
 the prompt truncates to 32 KB anyway; failing hard would re-create the exact
@@ -110,7 +119,13 @@ GitHub also hard-caps this endpoint at 3,000 files (30 pages), so the
    `diff truncated, N files omitted` note.
 5. `TestFetchDiff_FilesAPIWarnsAtGitHubFileCap` — reading 3,000 files
    appends the GitHub-cap note.
-6. Existing `TestFetchDiff*` tests pass unchanged (200 path untouched).
+6. `TestFetchDiff_FilesAPIHandlesLargePages` — a single files page >5 MiB
+   (over the generic paginated ceiling, under `maxFilesPageBytes`) decodes
+   and reconstructs successfully.
+7. `TestFetchDiff_FilesAPIPageAtCeilingDegradesGracefully` — a page
+   truncated at `maxFilesPageBytes` returns the diff accumulated so far
+   with a truncation note instead of an error.
+8. Existing `TestFetchDiff*` tests pass unchanged (200 path untouched).
 
 ## Out of scope
 
