@@ -1,0 +1,110 @@
+# Large-PR diff fallback via List Pull Request Files (#506)
+
+**Date:** 2026-06-05
+**Issue:** [#506 — Gestionar PRs mastodónticas](https://github.com/theburrowhub/heimdallm/issues/506)
+**Status:** Approved
+
+## Problem
+
+When a PR touches more than 300 files, GitHub's diff endpoint
+(`GET /repos/{repo}/pulls/{n}` with `Accept: application/vnd.github.v3.diff`)
+returns `406 Not Acceptable`:
+
+```
+Review failed: pipeline: fetch diff: github: fetch diff: status 406:
+{"message":"Sorry, the diff exceeded the maximum number of files (300).
+Consider using 'List pull requests files' API or locally cloning the repository instead."}
+```
+
+`pipeline.Run` aborts at the fetch-diff step (`pipeline.go`), so Heimdallm
+never reviews these PRs at all. Example: freepik-company/ai-bumblebee-proxy#1147.
+
+## Context that shapes the design
+
+- The diff has exactly one consumer: `PRContext.Diff`, embedded in the review
+  prompt. Nothing else parses it.
+- `executor.BuildPromptFromTemplate` already truncates the diff at 32 KB
+  (`maxDiffBytes`), so the prompt never sees more than that regardless of
+  how complete the fetched diff is.
+- The review agent already runs with `WorkDir` set to a local worktree of the
+  repo (acquired via `repoctx`, `ModeRead`), so it can inspect any file
+  locally; the 406 simply aborted the pipeline before reaching that point.
+
+These three facts make the diff *advisory, lossy-by-design context* — unlike
+PR comments (#516/#518) or timeline events (#519), which feed correctness
+decisions and therefore fail hard on truncation.
+
+## Decision
+
+**Option A from the issue: fall back to the List Pull Request Files API.**
+Rejected alternatives: local `git diff` in the worktree (more plumbing across
+layers; the review worktree is a shallow `ModeRead` clone without guaranteed
+full history) and prompt-note-only (review quality would depend entirely on
+the agent exploring on its own).
+
+## Design
+
+All changes live in `daemon/internal/github/client.go`. `FetchDiff` keeps its
+signature; the `pipeline.DiffFetcher` interface and all callers are untouched.
+
+```
+FetchDiff(repo, number)
+  ├─ GET /pulls/N (Accept: diff) → 200: return diff      (existing path, unchanged)
+  ├─ 406                          → fetchDiffViaFilesAPI (new fallback)
+  └─ any other non-200            → error                (existing path, unchanged)
+```
+
+Any 406 triggers the fallback (GitHub uses it for "diff too large" on this
+endpoint); there is no message sniffing.
+
+### fetchDiffViaFilesAPI
+
+- Paginates `GET /repos/{repo}/pulls/{n}/files?per_page=100&page=K` reusing
+  the shared pagination constants (`perPage`, `maxPaginationPages`) and the
+  paginated body ceiling (`maxPaginatedPageBytes`) from #519/#518.
+- Emits, per file, unified-diff-shaped headers followed by the `patch` field:
+  - `diff --git a/<previous_filename|filename> b/<filename>`
+  - `--- a/<old>` / `+++ b/<new>`, with `/dev/null` for added/removed files
+  - renames use `previous_filename` on the `a/` side
+- Files without `patch` (binary or oversized): a stub line
+  `(patch unavailable — +<additions>/-<deletions>)`.
+- The reconstructed diff starts with a comment line telling the agent that
+  the diff was rebuilt because the PR exceeds GitHub's 300-file limit and
+  that the full checkout is available in its working directory.
+
+### Limits and error handling
+
+| Condition | Behavior |
+|---|---|
+| Accumulated diff exceeds `maxDiffBodyBytes` (10 MB) | stop appending, add `... (diff truncated, N files omitted)`, `slog.Warn` — mirrors the direct path's truncation behavior |
+| Pagination cap hit (50 pages) | return the partial diff with a truncation note, `slog.Warn` — deliberately NOT an error (see below) |
+| HTTP error mid-pagination | propagate as error |
+| JSON decode error | propagate as error, including `N bytes read` (pattern from #518) |
+
+**Why cap-hit ≠ error here (unlike #519):** the diff is advisory context that
+the prompt truncates to 32 KB anyway; failing hard would re-create the exact
+problem this issue fixes (review aborts on big PRs). Comments and timeline
+events drive dedup/re-review correctness decisions, which is why those
+fetchers fail closed. This rationale is documented inline in the code.
+GitHub also hard-caps this endpoint at 3,000 files (30 pages), so the
+50-page cap is unreachable in practice.
+
+## Testing (TDD)
+
+1. `TestFetchDiff_FallsBackToFilesAPIOn406` — diff endpoint returns 406; files
+   endpoint serves 2 pages (full + short). Asserts: reconstructed diff
+   contains per-file headers, patch bodies, rename handling, and the leading
+   agent note; files endpoint hit exactly twice.
+2. `TestFetchDiff_FilesAPIStubsMissingPatch` — a file without `patch` yields
+   the stub line instead of dropping the file silently.
+3. `TestFetchDiff_NonDiffErrorsStillPropagate` — 404/500 from the diff
+   endpoint do NOT trigger the fallback and surface as errors (existing
+   contract).
+4. Existing `TestFetchDiff*` tests pass unchanged (200 path untouched).
+
+## Out of scope
+
+- PRs beyond GitHub's 3,000-file files-API cap (partial diff + note).
+- Local `git diff` computation (rejected alternative; can be revisited if
+  the files API proves insufficient).
+- Changes to the prompt template or the 32 KB prompt truncation.
