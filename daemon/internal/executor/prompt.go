@@ -55,7 +55,11 @@ Review the above diff and respond with ONLY valid JSON in this exact format (no 
   "severity": "low|medium|high"
 }
 
-The top-level "severity" is the highest severity found. If no issues, return empty arrays and severity "low".`
+Rules for severity determination:
+- The top-level "severity" MUST be at least the highest severity of any individual issue.
+- If the PR discussion contains unresolved concerns from reviewers (especially about correctness, security, or design), factor them into your severity assessment. An unresolved reviewer concern about a real defect warrants at least "medium".
+- If reviewers have explicitly flagged something as a blocker or requested changes that were not addressed in the current diff, this is "high" severity.
+- If no issues exist and no unresolved concerns remain, return empty arrays and severity "low".`
 
 // DefaultTemplate returns the built-in prompt template.
 func DefaultTemplate() string { return defaultTemplate }
@@ -93,7 +97,11 @@ Review the diff according to the focus above and respond with ONLY valid JSON (n
   "severity": "low|medium|high"
 }
 
-The top-level "severity" is the highest severity found. If no issues, return empty arrays and severity "low".`
+Rules for severity determination:
+- The top-level "severity" MUST be at least the highest severity of any individual issue.
+- If the PR discussion contains unresolved concerns from reviewers (especially about correctness, security, or design), factor them into your severity assessment. An unresolved reviewer concern about a real defect warrants at least "medium".
+- If reviewers have explicitly flagged something as a blocker or requested changes that were not addressed in the current diff, this is "high" severity.
+- If no issues exist and no unresolved concerns remain, return empty arrays and severity "low".`
 }
 
 // BuildPrompt builds a prompt from the default template.
