@@ -77,6 +77,17 @@ make uninstall-linux PURGE=1 # also wipe ~/.config + ~/.local/share state
 
 > **Requires**: Docker running, `gh` CLI authenticated (or `$GITHUB_TOKEN` exported), Ubuntu 22.04 / Debian 12+ / Fedora / Arch or similarly current distro. Same binary-compatibility envelope as the CI-built `.deb`.
 
+### CLI / TUI
+
+The terminal client is distributed as `heimdallm-cli` via Homebrew and GitHub Releases. It connects to a running daemon and supports status checks, PR/issue lists, manual review triggers, live event following, stats, config inspection, and a Bubble Tea dashboard.
+
+```bash
+brew install theburrowhub/tap/heimdallm-cli
+
+# or download a heimdallm-cli_* archive from GitHub Releases
+heimdallm-cli dashboard
+```
+
 ### Docker
 
 For headless/server deployment, Heimdallm runs as a Docker container with all four AI CLIs bundled. The repository ships Make wrappers around `docker compose` so you don't have to remember the compose path.
@@ -363,15 +374,16 @@ On first launch Heimdallm detects your `gh` CLI token automatically and sets its
 
 The **Go daemon** (`heimdalld`, port `7842`) is the engine. It polls GitHub for PRs and issues, dispatches work to the configured AI CLI, posts reviews or opens implementation PRs, and broadcasts state to any connected UI over SSE.
 
-Two first-party UIs talk to it over HTTP:
+Three first-party UIs talk to it over HTTP:
 
 - **Flutter desktop app** — macOS menu-bar + dashboard, system notifications. Ships inside the `.dmg` / Linux packages.
 - **Flutter Web UI** — browser dashboard on port `3000`, served by Nginx, ships as a second Docker container alongside the daemon.
+- **Terminal CLI/TUI** — Cobra commands plus a Bubble Tea + Lipgloss dashboard. Ships as `heimdallm-cli` via Homebrew and GitHub Releases.
 
 ```
 Flutter app ─┐
-             ├──→ HTTP / SSE ──→  heimdalld  ──→  GitHub API
-Web UI     ──┘                       │
+Web UI      ─┼──→ HTTP / SSE ──→  heimdalld  ──→  GitHub API
+CLI / TUI   ─┘                       │
                                      ├──→  PR review pipeline   ──→  POST /reviews
                                      ├──→  Issue triage pipeline
                                      └──→  Auto-implement       ──→  branch + commits + PR
@@ -414,11 +426,24 @@ For iterating on the Flutter Web bundle against a running daemon:
 make build-web    # compile Flutter → web/; then `make up-build` to bake into the Nginx image
 ```
 
+**CLI / TUI** — terminal client against a running daemon:
+```bash
+make build-cli
+make dev-daemon
+make dev-cli
+make test-cli
+```
+`make dev-cli` launches `heimdallm-cli dashboard` against `http://localhost:7842` by default. Set `HEIMDALLM_HOST` and `HEIMDALLM_TOKEN` when targeting another daemon.
+
 ### Other targets
 
 ```bash
-make test          # Run Go + Flutter test suites on the host
+make test          # Run daemon Go + Flutter + CLI tests on the host
 make test-docker   # Run Go tests inside a pinned Docker image (EDR-safe)
+make build-cli     # Build cli/bin/heimdallm-cli
+make test-cli      # Run CLI module tests on the host
+make lint-cli      # Run CLI module vet checks
+make dev-cli       # Run the CLI dashboard against localhost:7842
 make dev-daemon    # Run daemon only (debug API at localhost:7842)
 make dev-stop      # Stop the running daemon
 make up                # Docker: bring up daemon + web UI
@@ -459,6 +484,12 @@ heimdallm/
 │       ├── scheduler/       Poll loop, grace windows
 │       ├── server/          HTTP + SSE API
 │       └── keychain/        Host credential storage
+├── cli/                     Terminal client and TUI (separate Go module)
+│   ├── cmd/heimdallm-cli/   Cobra entrypoint
+│   └── internal/
+│       ├── api/             Daemon HTTP + SSE client
+│       ├── cli/             Commands and config loading
+│       └── tui/             Bubble Tea dashboard
 ├── flutter_app/             macOS / Linux / Web UI
 │   ├── lib/
 │   │   ├── features/

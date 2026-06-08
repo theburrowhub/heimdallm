@@ -48,9 +48,16 @@ type Server struct {
 	triggerPromoteFn     func(issueID int64) error
 	cleanCloneFn         func(ctx context.Context, repo string) error
 	cleanClonesFn        func(ctx context.Context) (int, error)
-	meFn                 func() (string, error)
+	// repoRenameFn drives the manual rename trigger at
+	// POST /admin/repo-rename (#489). Wired by main; nil when the
+	// daemon was constructed without the rename reconciler (e.g. in
+	// tests that don't need it).
+	repoRenameFn func(ctx context.Context, oldRepo, newRepo string) error
+	meFn         func() (string, error)
 	// configFn returns the current running config as a JSON-serializable map.
 	configFn func() map[string]any
+	// healthSnapshotFn returns live daemon liveness metadata for /health and SSE heartbeat.
+	healthSnapshotFn func() HealthSnapshot
 	// repoMetaFns fetch repo metadata from GitHub for autocomplete.
 	fetchLabelsFn        func(repo string) ([]string, error)
 	fetchCollaboratorsFn func(repo string) ([]string, error)
@@ -80,6 +87,13 @@ type Options struct {
 
 const defaultMaxConcurrentReviews = 5
 const cloneCleanupTimeout = 30 * time.Second
+const heartbeatInterval = 20 * time.Second
+
+// HealthSnapshot is supplied by the daemon to enrich /health and SSE heartbeats.
+type HealthSnapshot struct {
+	LastPollAt   time.Time
+	PollInterval time.Duration
+}
 
 // New creates a new Server. p may be nil if the pipeline is not yet configured.
 // apiToken must be the value returned by LoadOrCreateAPIToken — it is required
@@ -191,6 +205,22 @@ func (srv *Server) SetTriggerPromoteFn(fn func(issueID int64) error) {
 	srv.triggerPromoteFn = fn
 }
 
+// SetRepoRenameFn wires the manual rename trigger called by
+// POST /admin/repo-rename (#489). The callback runs the same
+// reconciler the rename probe uses, so a manual rename is fully
+// idempotent against subsequent probe ticks.
+func (srv *Server) SetRepoRenameFn(fn func(ctx context.Context, oldRepo, newRepo string) error) {
+	srv.repoRenameFn = fn
+}
+
+// TOMLMu returns the mutex serialising read-modify-write operations
+// on the config TOML file. The rename reconciler (#489) shares this
+// mutex with the HTTP PATCH/DELETE handlers so concurrent operator
+// edits and rename reconciliations cannot clobber each other on disk.
+func (srv *Server) TOMLMu() *sync.Mutex {
+	return &srv.tomlMu
+}
+
 // SetCleanCloneFn wires the manual single-repo managed-clone cleanup callback.
 func (srv *Server) SetCleanCloneFn(fn func(ctx context.Context, repo string) error) {
 	srv.cleanCloneFn = fn
@@ -207,6 +237,9 @@ func (srv *Server) SetMeFn(fn func() (string, error)) { srv.meFn = fn }
 // SetConfigFn wires the callback that returns the live config for GET /config.
 func (srv *Server) SetConfigFn(fn func() map[string]any) { srv.configFn = fn }
 
+// SetHealthSnapshotFn wires live liveness metadata for GET /health and heartbeat SSE.
+func (srv *Server) SetHealthSnapshotFn(fn func() HealthSnapshot) { srv.healthSnapshotFn = fn }
+
 // SetRepoMetaFns wires GitHub metadata fetchers for autocomplete endpoints.
 func (srv *Server) SetRepoMetaFns(labels func(string) ([]string, error), collabs func(string) ([]string, error)) {
 	srv.fetchLabelsFn = labels
@@ -216,11 +249,37 @@ func (srv *Server) SetRepoMetaFns(labels func(string) ([]string, error), collabs
 // SetConfigPath sets the path to config.toml for PATCH/DELETE handlers.
 func (srv *Server) SetConfigPath(path string) { srv.configPath = path }
 
-// patchTOML is the shared read-merge-write pipeline for all TOML-mutating
-// endpoints. mutateFn receives the current TOML as a map and must apply
-// its changes in-place. On success, returns the full live config for the
-// response body.
+// patchTOML is the shared read-merge-write pipeline for all
+// TOML-mutating endpoints. mutateFn receives the current TOML as a
+// map and must apply its changes in-place. On success, returns the
+// full live config for the response body.
+//
+// tomlMu is held ONLY through the read-mutate-write half. reloadFn
+// runs AFTER the unlock because it can wait on goroutines (the
+// rename probe in particular) that themselves need to acquire
+// tomlMu — keeping the mutex held across reloadFn deadlocks the
+// daemon (#489 review feedback).
 func (srv *Server) patchTOML(mutateFn func(m map[string]any) error) (map[string]any, error) {
+	m, err := srv.writeTOMLUnderLock(mutateFn)
+	if err != nil {
+		return nil, err
+	}
+	if srv.reloadFn != nil {
+		if err := srv.reloadFn(); err != nil {
+			return nil, fmt.Errorf("config reload after write: %w", err)
+		}
+	}
+	if srv.configFn != nil {
+		return srv.configFn(), nil
+	}
+	return m, nil
+}
+
+// writeTOMLUnderLock executes the read-mutate-validate-write half of
+// patchTOML while holding tomlMu, releasing the lock on every exit
+// path (including errors). Split out from patchTOML so the unlock
+// happens before reloadFn — see the comment on patchTOML.
+func (srv *Server) writeTOMLUnderLock(mutateFn func(m map[string]any) error) (map[string]any, error) {
 	srv.tomlMu.Lock()
 	defer srv.tomlMu.Unlock()
 
@@ -248,14 +307,6 @@ func (srv *Server) patchTOML(mutateFn func(m map[string]any) error) (map[string]
 	}
 	if err := config.AtomicWriteTOML(srv.configPath, m); err != nil {
 		return nil, err
-	}
-	if srv.reloadFn != nil {
-		if err := srv.reloadFn(); err != nil {
-			return nil, fmt.Errorf("config reload after write: %w", err)
-		}
-	}
-	if srv.configFn != nil {
-		return srv.configFn(), nil
 	}
 	return m, nil
 }
@@ -321,6 +372,7 @@ func (srv *Server) buildRouter() chi.Router {
 	r.Delete("/config/clones/{repo}", srv.handleDeleteManagedClone)
 	r.Post("/reload", srv.handleReload)
 	r.Post("/shutdown", srv.handleShutdown)
+	r.Post("/admin/repo-rename", srv.handleAdminRepoRename)
 	r.Get("/events", srv.handleSSE)
 	r.Get("/logs/stream", srv.handleLogsStream)
 	return r
@@ -333,14 +385,112 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func (srv *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	resp := map[string]any{"status": "ok"}
+	now := time.Now().UTC()
+	checks := map[string]any{
+		"nats":      srv.natsHealthCheck(),
+		"sqlite":    srv.sqliteHealthCheck(r.Context()),
+		"last_poll": srv.lastPollHealthCheck(now),
+	}
+	statusCode := http.StatusOK
+	status := "ok"
+	if !healthCheckOK(checks["nats"]) || !healthCheckOK(checks["sqlite"]) || !healthCheckOK(checks["last_poll"]) {
+		statusCode = http.StatusServiceUnavailable
+		status = "degraded"
+	}
+	resp := map[string]any{
+		"status": status,
+		"checks": checks,
+	}
 	if srv.version != "" {
 		resp["version"] = srv.version
 	}
 	if !srv.startedAt.IsZero() {
 		resp["started_at"] = srv.startedAt.UTC().Format(time.RFC3339)
+		resp["uptime_seconds"] = int64(now.Sub(srv.startedAt.UTC()).Seconds())
 	}
-	writeJSON(w, http.StatusOK, resp)
+	writeJSON(w, statusCode, resp)
+}
+
+func healthCheckOK(check any) bool {
+	m, ok := check.(map[string]any)
+	if !ok {
+		return false
+	}
+	okValue, ok := m["ok"].(bool)
+	return ok && okValue
+}
+
+func (srv *Server) natsHealthCheck() map[string]any {
+	if srv.natsConn == nil {
+		return map[string]any{
+			"ok":         true,
+			"configured": false,
+			"connected":  false,
+		}
+	}
+	connected := srv.natsConn.IsConnected()
+	return map[string]any{
+		"ok":         connected,
+		"configured": true,
+		"connected":  connected,
+		"status":     fmt.Sprint(srv.natsConn.Status()),
+	}
+}
+
+func (srv *Server) sqliteHealthCheck(ctx context.Context) map[string]any {
+	out := map[string]any{
+		"ok": false,
+	}
+	if srv.store == nil || srv.store.DB() == nil {
+		out["error"] = "store unavailable"
+		return out
+	}
+	ctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	if err := srv.store.DB().PingContext(ctx); err != nil {
+		out["error"] = err.Error()
+		return out
+	}
+	var result int
+	if err := srv.store.DB().QueryRowContext(ctx, "SELECT 1").Scan(&result); err != nil {
+		out["error"] = err.Error()
+		return out
+	}
+	out["query"] = "ok"
+	out["ok"] = result == 1
+	return out
+}
+
+func (srv *Server) lastPollHealthCheck(now time.Time) map[string]any {
+	snap := srv.healthSnapshot()
+	out := map[string]any{
+		"ok": false,
+	}
+	if snap.LastPollAt.IsZero() {
+		out["ok"] = true
+		out["status"] = "unknown"
+		out["at"] = nil
+		out["age_seconds"] = nil
+		return out
+	}
+	lastPoll := snap.LastPollAt.UTC()
+	age := now.Sub(lastPoll)
+	out["at"] = lastPoll.Format(time.RFC3339)
+	out["age_seconds"] = int64(age.Seconds())
+	if snap.PollInterval > 0 {
+		out["max_age_seconds"] = int64((2 * snap.PollInterval).Seconds())
+		out["ok"] = age <= 2*snap.PollInterval
+	} else {
+		out["ok"] = true
+	}
+	return out
+}
+
+func (srv *Server) healthSnapshot() HealthSnapshot {
+	if srv.healthSnapshotFn == nil {
+		return HealthSnapshot{}
+	}
+	return srv.healthSnapshotFn()
 }
 
 func (srv *Server) handleListPRs(w http.ResponseWriter, r *http.Request) {
@@ -358,12 +508,43 @@ func (srv *Server) handleListPRs(w http.ResponseWriter, r *http.Request) {
 		*store.PR
 		LatestReview *store.Review `json:"latest_review,omitempty"`
 	}
+	authLogin := srv.authenticatedLoginForPRListing()
+	skippedSelf := 0
 	result := make([]prWithReview, 0, len(prs))
 	for _, pr := range prs {
+		if authLogin != "" && githubLoginsEqual(pr.Author, authLogin) {
+			skippedSelf++
+			continue
+		}
 		rev, _ := srv.store.LatestReviewForPR(pr.ID)
 		result = append(result, prWithReview{PR: pr, LatestReview: rev})
 	}
+	if skippedSelf > 0 {
+		slog.Info("handleListPRs: self-authored PRs hidden from review listing", "count", skippedSelf, "user", authLogin)
+	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (srv *Server) authenticatedLoginForPRListing() string {
+	if srv.meFn == nil {
+		return ""
+	}
+	login, err := srv.meFn()
+	if err != nil {
+		slog.Warn("handleListPRs: authenticated user unavailable; self-authored PRs remain visible", "err", err)
+		return ""
+	}
+	return normalizeGitHubLoginForCompare(login)
+}
+
+func githubLoginsEqual(a, b string) bool {
+	a = normalizeGitHubLoginForCompare(a)
+	b = normalizeGitHubLoginForCompare(b)
+	return a != "" && b != "" && strings.EqualFold(a, b)
+}
+
+func normalizeGitHubLoginForCompare(login string) string {
+	return strings.TrimSpace(strings.TrimLeft(login, "@"))
 }
 
 func (srv *Server) handleGetPR(w http.ResponseWriter, r *http.Request) {
@@ -973,7 +1154,11 @@ func (srv *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	defer srv.broker.Unsubscribe(ch)
 
 	fmt.Fprintf(w, ": connected\n\n")
+	fmt.Fprint(w, srv.heartbeatEvent(time.Now()).Format())
 	flusher.Flush()
+
+	heartbeat := time.NewTicker(heartbeatInterval)
+	defer heartbeat.Stop()
 
 	for {
 		select {
@@ -982,6 +1167,9 @@ func (srv *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			fmt.Fprint(w, event.Format())
+			flusher.Flush()
+		case <-heartbeat.C:
+			fmt.Fprint(w, srv.heartbeatEvent(time.Now()).Format())
 			flusher.Flush()
 		case <-r.Context().Done():
 			return
@@ -1001,11 +1189,12 @@ func (srv *Server) handleSSEViaNATS(w http.ResponseWriter, r *http.Request, flus
 	defer sub.Unsubscribe()
 
 	fmt.Fprintf(w, ": connected\n\n")
+	fmt.Fprint(w, srv.heartbeatEvent(time.Now()).Format())
 	flusher.Flush()
 
-	// Keep-alive ticker prevents proxies/load balancers from closing idle connections.
-	keepAlive := time.NewTicker(20 * time.Second)
-	defer keepAlive.Stop()
+	// Heartbeat prevents idle connection drops and gives clients observable liveness.
+	heartbeat := time.NewTicker(heartbeatInterval)
+	defer heartbeat.Stop()
 
 	for {
 		select {
@@ -1013,13 +1202,38 @@ func (srv *Server) handleSSEViaNATS(w http.ResponseWriter, r *http.Request, flus
 			eventType := strings.TrimPrefix(msg.Subject, "heimdallm.events.")
 			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, string(msg.Data))
 			flusher.Flush()
-		case <-keepAlive.C:
-			fmt.Fprintf(w, ": ping\n\n")
+		case <-heartbeat.C:
+			fmt.Fprint(w, srv.heartbeatEvent(time.Now()).Format())
 			flusher.Flush()
 		case <-r.Context().Done():
 			return
 		}
 	}
+}
+
+func (srv *Server) heartbeatEvent(now time.Time) sse.Event {
+	now = now.UTC()
+	data := map[string]any{
+		"ts": now.Format(time.RFC3339),
+	}
+	snap := srv.healthSnapshot()
+	if snap.LastPollAt.IsZero() {
+		data["last_poll_at"] = nil
+		data["last_poll_age_seconds"] = nil
+	} else {
+		lastPoll := snap.LastPollAt.UTC()
+		data["last_poll_at"] = lastPoll.Format(time.RFC3339)
+		data["last_poll_age_seconds"] = int64(now.Sub(lastPoll).Seconds())
+	}
+	if srv.natsConn != nil {
+		data["nats_connected"] = srv.natsConn.IsConnected()
+	}
+	b, err := json.Marshal(data)
+	if err != nil {
+		slog.Warn("marshal heartbeat payload", "err", err)
+		b = []byte(`{"ts":"` + now.Format(time.RFC3339) + `"}`)
+	}
+	return sse.Event{Type: sse.EventHeartbeat, Data: string(b)}
 }
 
 func (srv *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
@@ -1112,6 +1326,25 @@ type issueResponse struct {
 	FetchedAt    time.Time            `json:"fetched_at"`
 	Dismissed    bool                 `json:"dismissed"`
 	LatestReview *issueReviewResponse `json:"latest_review,omitempty"`
+	// LinkedPR carries the external review state of the PR
+	// auto_implement created for this issue (#482 phase 1). Populated
+	// only when the issue's latest review action is `auto_implement`
+	// and the PR row carries a non-zero `auto_implement_issue_id`;
+	// triage-only flows leave this nil.
+	LinkedPR *issueLinkedPRResponse `json:"linked_pr,omitempty"`
+}
+
+// issueLinkedPRResponse is the slim PR-side view embedded on the
+// issue response so a single issue endpoint hit gives Flutter
+// everything it needs to render the "PR Changes Requested" /
+// "PR Approved" chip.
+type issueLinkedPRResponse struct {
+	Number              int       `json:"number"`
+	URL                 string    `json:"url"`
+	State               string    `json:"state"`
+	ExternalReviewState string    `json:"external_review_state"`
+	ExternalReviewer    string    `json:"external_reviewer"`
+	ExternalReviewAt    time.Time `json:"external_review_at,omitempty"`
 }
 
 // issueReviewResponse wraps a store.IssueReview, parsing Triage/Suggestions
@@ -1145,6 +1378,29 @@ func toIssueResponse(iss *store.Issue, rev *store.IssueReview) issueResponse {
 	return resp
 }
 
+// attachLinkedPR hydrates the linked_pr block on the response when the
+// latest review created a PR AND that PR carries the
+// auto_implement_issue_id back-link (#482). Both conditions are
+// required: a PR created by auto_implement before this PR landed in
+// production stays unmarked and falls through cleanly.
+func (srv *Server) attachLinkedPR(resp *issueResponse, iss *store.Issue, rev *store.IssueReview) {
+	if rev == nil || rev.PRCreated <= 0 {
+		return
+	}
+	pr, err := srv.store.GetPRByRepoNumber(iss.Repo, rev.PRCreated)
+	if err != nil || pr == nil || pr.AutoImplementIssueID == 0 {
+		return
+	}
+	resp.LinkedPR = &issueLinkedPRResponse{
+		Number:              pr.Number,
+		URL:                 pr.URL,
+		State:               pr.State,
+		ExternalReviewState: pr.ExternalReviewState,
+		ExternalReviewer:    pr.ExternalReviewer,
+		ExternalReviewAt:    pr.ExternalReviewAt,
+	}
+}
+
 func toIssueReviewResponse(r *store.IssueReview) *issueReviewResponse {
 	resp := &issueReviewResponse{
 		ID: r.ID, IssueID: r.IssueID, CLIUsed: r.CLIUsed,
@@ -1174,7 +1430,9 @@ func (srv *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
 	result := make([]issueResponse, 0, len(issues))
 	for _, iss := range issues {
 		rev, _ := srv.store.LatestIssueReview(iss.ID)
-		result = append(result, toIssueResponse(iss, rev))
+		resp := toIssueResponse(iss, rev)
+		srv.attachLinkedPR(&resp, iss, rev)
+		result = append(result, resp)
 	}
 	writeJSON(w, http.StatusOK, result)
 }
@@ -1195,7 +1453,9 @@ func (srv *Server) handleGetIssue(w http.ResponseWriter, r *http.Request) {
 	for _, rev := range reviews {
 		reviewResps = append(reviewResps, toIssueReviewResponse(rev))
 	}
-	issResp := toIssueResponse(iss, nil)
+	latestRev, _ := srv.store.LatestIssueReview(id)
+	issResp := toIssueResponse(iss, latestRev)
+	srv.attachLinkedPR(&issResp, iss, latestRev)
 	writeJSON(w, http.StatusOK, map[string]any{"issue": issResp, "reviews": reviewResps})
 }
 

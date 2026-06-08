@@ -77,18 +77,27 @@ func resolveTriageAssignee(ctx context.Context, workDir, triageOwner string, tri
 		}
 		return fallback, "triage_owner", reason, []string{fmt.Sprintf("@%s configured as triage_owner fallback", fallback)}
 	}
+	unverifiedSuggestedResult := func(reason string, evidence []string) (string, string, string, []string) {
+		if len(evidence) == 0 {
+			evidence = nil
+		}
+		return suggested, "suggested_assignee_unverified", reason, evidence
+	}
 
 	if suggested == "" && fallback == "" {
 		return "", "none", "no suggested_assignee or triage_owner available", nil
+	}
+	if suggested == "" {
+		return fallbackResult("no suggested_assignee available")
 	}
 	if !confidenceAllowsAssignment(confidence) {
 		return fallbackResult("assignee confidence is low or missing")
 	}
 	if strings.TrimSpace(workDir) == "" {
-		return fallbackResult("repo workdir unavailable; cannot verify assignee against git history")
+		return unverifiedSuggestedResult("repo workdir unavailable; cannot verify assignee against git history", nil)
 	}
 	if len(triage.AffectedPaths) == 0 {
-		return fallbackResult("no affected_paths provided for git-history verification")
+		return unverifiedSuggestedResult("no affected_paths provided for git-history verification", nil)
 	}
 	if runner == nil {
 		runner = defaultGitHistoryRunner{}
@@ -96,29 +105,22 @@ func resolveTriageAssignee(ctx context.Context, workDir, triageOwner string, tri
 
 	contributors, err := contributorsForPaths(ctx, runner, workDir, triage.AffectedPaths)
 	if err != nil {
-		return fallbackResult(fmt.Sprintf("git-history verification unavailable: %v", err))
+		return unverifiedSuggestedResult(fmt.Sprintf("git-history verification unavailable: %v", err), nil)
 	}
 	if len(contributors) == 0 {
-		return fallbackResult("no GitHub-login-like contributors found in affected path history")
+		return unverifiedSuggestedResult("no GitHub-login-like contributors found in affected path history", nil)
 	}
 
-	if suggested != "" {
-		for _, c := range contributors {
-			if strings.EqualFold(c.login, suggested) {
-				return c.login, "suggested_assignee_verified", "suggested_assignee appears in affected path history", contributorEvidence(contributors)
-			}
-		}
-		if fallback != "" {
-			return fallbackResult(fmt.Sprintf("model suggested @%s, but that login was not found in affected path history", suggested))
+	for _, c := range contributors {
+		if strings.EqualFold(c.login, suggested) {
+			return c.login, "suggested_assignee_verified", "suggested_assignee appears in affected path history", contributorEvidence(contributors)
 		}
 	}
 
-	top := contributors[0]
-	reason := "assigned top contributor from affected path history"
-	if suggested != "" {
-		reason = fmt.Sprintf("model suggested @%s, but that login was not found in affected path history; assigned top contributor instead", suggested)
-	}
-	return top.login, "history_top_contributor", reason, contributorEvidence(contributors)
+	return unverifiedSuggestedResult(
+		fmt.Sprintf("model suggested @%s, but that login was not found in affected path history; keeping suggested assignee", suggested),
+		contributorEvidence(contributors),
+	)
 }
 
 func contributorsForPaths(ctx context.Context, runner gitHistoryRunner, workDir string, affectedPaths []string) ([]contributorHit, error) {

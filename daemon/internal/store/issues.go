@@ -271,25 +271,6 @@ func (s *Store) CountFailedAutoImplement(issueID int64) (int, error) {
 	return n, nil
 }
 
-// CountAutoImplementNoChanges returns how many auto_implement_no_changes rows
-// the issue has accumulated. A successful auto_implement run lands a row with
-// action_taken="auto_implement" and pr_created>0 which the fetcher's
-// "already implemented" branch (fetcher.go) skips before the cap is consulted,
-// so a true success short-circuits the loop without needing a counter reset.
-// The cap exists so the daemon eventually stops re-running an agent that
-// keeps producing empty diffs run after run (#433 — staged loop).
-func (s *Store) CountAutoImplementNoChanges(issueID int64) (int, error) {
-	row := s.db.QueryRow(
-		`SELECT COUNT(*) FROM issue_reviews WHERE issue_id = ? AND action_taken = 'auto_implement_no_changes'`,
-		issueID,
-	)
-	var n int
-	if err := row.Scan(&n); err != nil {
-		return 0, fmt.Errorf("store: count no-changes auto_implement for issue %d: %w", issueID, err)
-	}
-	return n, nil
-}
-
 func scanIssue(s scanner) (*Issue, error) {
 	var i Issue
 	var createdAt, fetchedAt string

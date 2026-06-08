@@ -5,6 +5,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/models/pr.dart';
 import '../../core/models/tracked_issue.dart';
 import '../../shared/widgets/keep_alive_tab.dart';
+import '../../shared/widgets/attention_badge.dart';
+import '../../shared/widgets/pr_review_state_badge.dart';
 import '../../shared/widgets/severity_badge.dart';
 import '../../shared/widgets/state_badge.dart';
 import '../../shared/widgets/toast.dart';
@@ -31,6 +33,9 @@ class DashboardScreen extends ConsumerWidget {
     final cbMessage = ref.watch(circuitBreakerProvider);
     final daemonRunning = ref.watch(daemonHealthProvider).value ?? false;
     final daemonStarting = ref.watch(daemonStartingProvider);
+    final connection = daemonRunning
+        ? ref.watch(daemonConnectionProvider)
+        : null;
     return DefaultTabController(
       length: 6,
       child: Scaffold(
@@ -95,6 +100,12 @@ class DashboardScreen extends ConsumerWidget {
                 onDismiss: () =>
                     ref.read(circuitBreakerProvider.notifier).set(null),
               ),
+            if (connection != null &&
+                connection.phase != DaemonConnectionPhase.connected)
+              _ConnectionBanner(
+                status: connection,
+                onRestart: () => server_actions.restartDaemon(context, ref),
+              ),
             const Expanded(
               child: TabBarView(
                 children: [
@@ -108,6 +119,72 @@ class DashboardScreen extends ConsumerWidget {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ConnectionBanner extends StatelessWidget {
+  const _ConnectionBanner({required this.status, required this.onRestart});
+
+  final DaemonConnectionStatus status;
+  final VoidCallback onRestart;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final (color, icon, label) = switch (status.phase) {
+      DaemonConnectionPhase.connected => (
+        Colors.green,
+        Icons.check_circle_outline,
+        'Connected',
+      ),
+      DaemonConnectionPhase.stale => (
+        Colors.amber,
+        Icons.sync_problem,
+        'No events received — reconnecting',
+      ),
+      DaemonConnectionPhase.offline => (
+        theme.colorScheme.error,
+        Icons.error_outline,
+        'Server unavailable',
+      ),
+      DaemonConnectionPhase.connecting => (
+        Colors.blueGrey,
+        Icons.sync,
+        'Connecting',
+      ),
+    };
+    return Material(
+      color: color.withValues(alpha: 0.10),
+      child: SafeArea(
+        bottom: false,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 36),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+            child: Row(
+              children: [
+                Icon(icon, size: 18, color: color),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    label,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: color,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                if (status.phase == DaemonConnectionPhase.offline)
+                  TextButton(
+                    onPressed: onRestart,
+                    child: const Text('Restart'),
+                  ),
+              ],
+            ),
+          ),
         ),
       ),
     );
@@ -670,8 +747,7 @@ class _IssueActivityTile extends ConsumerStatefulWidget {
   const _IssueActivityTile({required this.issue});
 
   @override
-  ConsumerState<_IssueActivityTile> createState() =>
-      _IssueActivityTileState();
+  ConsumerState<_IssueActivityTile> createState() => _IssueActivityTileState();
 }
 
 class _IssueActivityTileState extends ConsumerState<_IssueActivityTile> {
@@ -704,6 +780,12 @@ class _IssueActivityTileState extends ConsumerState<_IssueActivityTile> {
     final issue = widget.issue;
     final reviewed = issue.latestReview != null;
     final severity = issue.latestReview?.severity ?? '';
+    // auto_implement_no_changes is a terminal "needs attention" state —
+    // the review row has an empty triage block (severity defaults to
+    // LOW/green), which would otherwise misrepresent it as a clean low
+    // severity result. See #483.
+    final needsAttention =
+        issue.latestReview?.actionTaken == 'auto_implement_no_changes';
 
     return Opacity(
       opacity: issue.state == 'open' ? 1.0 : 0.6,
@@ -721,7 +803,9 @@ class _IssueActivityTileState extends ConsumerState<_IssueActivityTile> {
                   height: 48,
                   margin: const EdgeInsets.only(right: 12),
                   decoration: BoxDecoration(
-                    color: reviewed
+                    color: needsAttention
+                        ? Colors.deepOrange.shade700
+                        : reviewed
                         ? _severityColor(severity)
                         : Colors.grey.shade600,
                     borderRadius: BorderRadius.circular(2),
@@ -760,7 +844,16 @@ class _IssueActivityTileState extends ConsumerState<_IssueActivityTile> {
                 Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    if (reviewed)
+                    if (issue.linkedPR != null &&
+                        issue.linkedPR!.externalReviewState.isNotEmpty) ...[
+                      PRReviewStateBadge(
+                        state: issue.linkedPR!.externalReviewState,
+                      ),
+                      const SizedBox(width: 6),
+                    ],
+                    if (needsAttention)
+                      const AttentionBadge()
+                    else if (reviewed)
                       SeverityBadge(severity: severity)
                     else
                       Container(
@@ -826,6 +919,7 @@ class _ActivityGridTile extends StatelessWidget {
     final String title;
     final String subtitle;
     final String? severity;
+    final bool needsAttention;
     final DateTime timestamp;
 
     switch (item) {
@@ -836,6 +930,7 @@ class _ActivityGridTile extends StatelessWidget {
         title = pr.title;
         subtitle = '${pr.repo} #${pr.number} · ${pr.author}';
         severity = pr.latestReview?.severity;
+        needsAttention = false;
         timestamp = pr.updatedAt;
       case _IssueItem(:final issue):
         final isDev = issue.latestReview?.actionTaken == 'auto_implement';
@@ -844,6 +939,11 @@ class _ActivityGridTile extends StatelessWidget {
         state = issue.state;
         title = issue.title;
         subtitle = '${issue.repo} #${issue.number} · ${issue.author}';
+        // Terminal no-changes rows have an empty triage block — render
+        // them as a NEEDS ATTENTION chip instead of a misleading green
+        // LOW badge (#483).
+        needsAttention =
+            issue.latestReview?.actionTaken == 'auto_implement_no_changes';
         severity = issue.latestReview?.severity;
         timestamp = issue.fetchedAt;
     }
@@ -900,7 +1000,10 @@ class _ActivityGridTile extends StatelessWidget {
               const Spacer(),
               Row(
                 children: [
-                  if (severity != null) SeverityBadge(severity: severity),
+                  if (needsAttention)
+                    const AttentionBadge()
+                  else if (severity != null)
+                    SeverityBadge(severity: severity),
                   const Spacer(),
                   Text(
                     _timeAgo(timestamp),

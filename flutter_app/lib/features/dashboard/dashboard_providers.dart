@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -35,10 +36,126 @@ final circuitBreakerProvider =
       () => LocalStateNotifier<String?>(null),
     );
 
+/// Stale non_monitored entries the daemon's rename probe has flagged
+/// (#493). Keys are the configured `old_repo` slug, values are the
+/// canonical `new_repo` GitHub reported. The map accumulates entries
+/// across the session so a future UI surface (banner, settings hint)
+/// can list every stale slug the operator should clean up manually.
+///
+/// The daemon dedupes per (old, new) pair across its lifetime, so this
+/// map grows only when a NEW drift is detected — not on every probe
+/// tick. Cleared on app restart (matches the daemon-side dedup reset).
+final nonMonitoredStaleProvider =
+    NotifierProvider<
+      LocalStateNotifier<Map<String, String>>,
+      Map<String, String>
+    >(() => LocalStateNotifier<Map<String, String>>(const <String, String>{}));
+
 /// Tracks whether the desktop app is trying to spawn the daemon.
-final daemonStartingProvider =
-    NotifierProvider<LocalStateNotifier<bool>, bool>(
-      () => LocalStateNotifier<bool>(false),
+final daemonStartingProvider = NotifierProvider<LocalStateNotifier<bool>, bool>(
+  () => LocalStateNotifier<bool>(false),
+);
+
+enum DaemonConnectionPhase { connecting, connected, stale, offline }
+
+class DaemonConnectionStatus {
+  final DaemonConnectionPhase phase;
+  final DateTime? lastEventAt;
+  final String? message;
+
+  const DaemonConnectionStatus({
+    required this.phase,
+    this.lastEventAt,
+    this.message,
+  });
+
+  const DaemonConnectionStatus.connecting()
+    : this(phase: DaemonConnectionPhase.connecting);
+}
+
+class DaemonConnectionNotifier extends Notifier<DaemonConnectionStatus> {
+  static const staleAfter = Duration(seconds: 60);
+  static const checkEvery = Duration(seconds: 5);
+  static const maxReconnectDelay = Duration(minutes: 5);
+
+  Timer? _watchdog;
+  bool _checkingHealth = false;
+  int _reconnectAttempts = 0;
+
+  @override
+  DaemonConnectionStatus build() {
+    ref.listen<AsyncValue<SseEvent>>(sseStreamProvider, (prev, next) {
+      if (next.isLoading && !(prev?.hasValue ?? false)) {
+        state = const DaemonConnectionStatus.connecting();
+      }
+      if (next.hasError) {
+        state = DaemonConnectionStatus(
+          phase: DaemonConnectionPhase.offline,
+          lastEventAt: state.lastEventAt,
+          message: next.error.toString(),
+        );
+      }
+      next.whenData((_) {
+        _reconnectAttempts = 0;
+        state = DaemonConnectionStatus(
+          phase: DaemonConnectionPhase.connected,
+          lastEventAt: DateTime.now(),
+        );
+      });
+    });
+    _watchdog = Timer.periodic(checkEvery, (_) => _checkForStaleStream());
+    ref.onDispose(() => _watchdog?.cancel());
+    return const DaemonConnectionStatus.connecting();
+  }
+
+  void _checkForStaleStream() {
+    final lastEventAt = state.lastEventAt;
+    if (lastEventAt == null) return;
+    if (DateTime.now().difference(lastEventAt) < _currentStaleAfter()) return;
+    if (state.phase == DaemonConnectionPhase.offline) return;
+    state = DaemonConnectionStatus(
+      phase: DaemonConnectionPhase.stale,
+      lastEventAt: lastEventAt,
+      message: 'No events received for ${staleAfter.inSeconds}s',
+    );
+    unawaited(_verifyAndReconnect());
+  }
+
+  Duration _currentStaleAfter() {
+    final shift = _reconnectAttempts > 3 ? 3 : _reconnectAttempts;
+    final delay = Duration(seconds: staleAfter.inSeconds * (1 << shift));
+    return delay.compareTo(maxReconnectDelay) > 0 ? maxReconnectDelay : delay;
+  }
+
+  Future<void> _verifyAndReconnect() async {
+    if (_checkingHealth) return;
+    _checkingHealth = true;
+    try {
+      final healthy = await ref.read(apiClientProvider).checkHealth();
+      if (!ref.mounted) return;
+      if (healthy) {
+        _reconnectAttempts++;
+        state = DaemonConnectionStatus(
+          phase: DaemonConnectionPhase.connecting,
+          lastEventAt: DateTime.now(),
+        );
+        ref.invalidate(sseStreamProvider);
+      } else {
+        state = DaemonConnectionStatus(
+          phase: DaemonConnectionPhase.offline,
+          lastEventAt: state.lastEventAt,
+          message: 'Health check failed',
+        );
+      }
+    } finally {
+      _checkingHealth = false;
+    }
+  }
+}
+
+final daemonConnectionProvider =
+    NotifierProvider<DaemonConnectionNotifier, DaemonConnectionStatus>(
+      DaemonConnectionNotifier.new,
     );
 
 /// Tracks PRs currently being reviewed, keyed by "repo:prNumber". Used to
@@ -80,8 +197,9 @@ class PrListRefreshNotifier extends Notifier<int> {
   void update(int Function(int) updater) => state = updater(state);
 }
 
-final prListRefreshProvider =
-    NotifierProvider<PrListRefreshNotifier, int>(PrListRefreshNotifier.new);
+final prListRefreshProvider = NotifierProvider<PrListRefreshNotifier, int>(
+  PrListRefreshNotifier.new,
+);
 
 void _handleSseEvent(Ref ref, SseEvent event) {
   try {
@@ -214,14 +332,58 @@ void _handleSseEvent(Ref ref, SseEvent event) {
               .read(reviewingIssuesProvider.notifier)
               .update((s) => s.difference({issueKey}));
         }
+        // Terminal failure — bump the list refresh so the issue's row
+        // re-fetches its latest review state (e.g. the new
+        // auto_implement_no_changes terminal state from #483), matching
+        // the behaviour of the other terminal issue events above.
+        ref.read(issueListRefreshProvider.notifier).update((s) => s + 1);
+
+      // pr_review_state_changed fires when Tier 3 observes a new
+      // aggregate external review state on an auto_implement-created
+      // PR (#482 phase 1). The dashboard tile renders the chip from
+      // the issue's linked_pr.external_review_state, so a list
+      // refresh re-fetches that field and the chip updates live.
+      // Without this case the badge can sit stale until the next
+      // unrelated refresh (poll completion, manual reload).
+      case 'pr_review_state_changed':
+        ref.read(issueListRefreshProvider.notifier).update((s) => s + 1);
+
+      // repo_renamed fires when the rename reconciler propagates a
+      // GitHub repo/org rename through daemon state (#489). Every
+      // cached list keyed on the OLD slug is now stale: PRs, issues,
+      // activity, stats. Bump every refresh counter so the next
+      // render pulls the post-rename data. Payload also carries
+      // worktree_purged so a follow-up surface could badge a
+      // dashboard warning when false; for now we just refresh.
+      case 'repo_renamed':
+        ref.read(prListRefreshProvider.notifier).update((s) => s + 1);
+        ref.read(issueListRefreshProvider.notifier).update((s) => s + 1);
+
+      // repo_non_monitored_stale fires when the rename probe detects
+      // that an entry in github.non_monitored has been renamed
+      // upstream (#493). The daemon does NOT auto-rewrite those
+      // entries — they reflect explicit operator-disabled state — so
+      // we accumulate the (old, new) pairs in a provider that a
+      // future settings/banner surface can list. No list refresh
+      // bump: the disabled entries don't drive any daemon polling
+      // so cached views are unaffected.
+      case 'repo_non_monitored_stale':
+        final oldRepo = data['old_repo'] as String? ?? '';
+        final newRepo = data['new_repo'] as String? ?? '';
+        if (oldRepo.isNotEmpty && newRepo.isNotEmpty) {
+          ref
+              .read(nonMonitoredStaleProvider.notifier)
+              .update((s) => {...s, oldRepo: newRepo});
+        }
 
       // ── Circuit breaker ────────────────────────────────────────────────
       case 'circuit_breaker_tripped':
         final repo = data['repo'] as String? ?? 'unknown';
         final prNumber = (data['pr_number'] as num?)?.toInt() ?? 0;
         final reason = data['reason'] as String? ?? '';
-        ref.read(circuitBreakerProvider.notifier).set(
-            '$repo #$prNumber — $reason');
+        ref
+            .read(circuitBreakerProvider.notifier)
+            .set('$repo #$prNumber — $reason');
     }
   } catch (_) {}
 }

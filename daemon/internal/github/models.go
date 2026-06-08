@@ -84,6 +84,11 @@ type Repo struct {
 type Branch struct {
 	Repo Repo   `json:"repo"`
 	SHA  string `json:"sha"`
+	// Ref is the branch name (e.g. "heimdallm/issue-42"). Returned by
+	// the Pulls API but not the Search Issues API; the review-state
+	// fix flow (#482 phase 3) reads it to push back to the same
+	// branch the PR was opened from.
+	Ref string `json:"ref"`
 }
 
 type PullRequest struct {
@@ -110,6 +115,7 @@ type PullRequest struct {
 // Comment represents a single comment on a PR — either an inline review comment
 // (File and Line are set) or a general issue comment (File and Line are zero values).
 type Comment struct {
+	ID        int64 // GitHub comment id; 0 if unknown
 	Author    string
 	Body      string
 	CreatedAt time.Time

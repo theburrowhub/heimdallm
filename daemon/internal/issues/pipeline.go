@@ -274,7 +274,17 @@ type Pipeline struct {
 	// disables both axes (no limit). Configure at startup via
 	// SetCircuitBreakerLimits.
 	breaker *store.IssueCircuitBreakerLimits
+
+	// watch enrols freshly-created auto_implement PRs into Tier 3 so
+	// the new review-state checker observes external reviews on them
+	// (#482). Nil-safe: single-tier setups (some tests) leave it unset.
+	watch WatchEnroller
 }
+
+// SetWatchEnroller wires the Tier 3 watch enroller so auto_implement
+// PRs are picked up by the review-state checker right after creation
+// (#482). Optional — the pipeline checks for nil before calling.
+func (p *Pipeline) SetWatchEnroller(w WatchEnroller) { p.watch = w }
 
 // SetBotLogin sets the GitHub login of the bot account. Used to filter
 // the bot's own comments from the "new discussion" section in re-triages.
@@ -302,9 +312,23 @@ type issueStore interface {
 	LatestIssueReview(issueID int64) (*store.IssueReview, error)
 	LatestIssueReviewByAction(issueID int64, action string) (*store.IssueReview, error)
 	UpsertPR(pr *store.PR) (int64, error)
+	// MarkPRAutoImplementOrigin back-links the freshly-created PR row
+	// to the issue's store row id. Tier 3 keys its review-state
+	// vigilance on a non-zero value here (#482).
+	MarkPRAutoImplementOrigin(prID, issueID int64) error
 	ClaimIssueTriageInFlight(issueID int64, updatedAt string) (bool, error)
 	ReleaseIssueTriageInFlight(issueID int64, updatedAt string) error
 	CheckIssueCircuitBreaker(issueID int64, repo string, cfg store.IssueCircuitBreakerLimits) (bool, string, error)
+}
+
+// WatchEnroller enrols an item (PR or issue) into the Tier 3 watch
+// bucket so the state monitor periodically refreshes it (#482). The
+// pipeline calls this after auto_implement creates a PR so the new
+// PR-review-state CheckItem branch picks it up. Wired via
+// SetWatchEnroller; nil-safe — single-tier setups (some tests) leave
+// it unset.
+type WatchEnroller interface {
+	Enroll(ctx context.Context, kind, repo string, number int, githubID int64) error
 }
 
 // issueGitHub groups every GitHub-facing method the pipeline uses. The
@@ -823,15 +847,37 @@ func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, is
 		UpdatedAt: now,
 		FetchedAt: now,
 	}
-	if _, upsertErr := p.store.UpsertPR(prRow); upsertErr != nil {
+	prRowID, upsertErr := p.store.UpsertPR(prRow)
+	if upsertErr != nil {
 		slog.Warn("issues pipeline: failed to store auto-created PR",
 			"repo", issue.Repo, "pr", createdPR.Number, "err", upsertErr)
+	}
+	// Mark the PR as auto_implement-origin so Tier 3's review-state
+	// checker picks it up (#482). The mark is best-effort: a failure
+	// here only means the observation layer misses this PR, not that
+	// the PR itself is corrupted.
+	if prRowID > 0 {
+		if markErr := p.store.MarkPRAutoImplementOrigin(prRowID, issueID); markErr != nil {
+			slog.Warn("issues pipeline: failed to mark PR auto_implement origin",
+				"repo", issue.Repo, "pr", createdPR.Number, "err", markErr)
+		}
+	}
+	// Enrol the PR in the Tier 3 watch bucket so the review-state
+	// checker periodically refreshes it. Nil-safe for single-tier
+	// setups; failure is best-effort (the next scan still creates a
+	// row if needed when humans review the PR).
+	if p.watch != nil {
+		if enrollErr := p.watch.Enroll(ctx, "pr", issue.Repo, createdPR.Number, createdPR.ID); enrollErr != nil {
+			slog.Warn("issues pipeline: failed to enroll auto-implement PR in Tier 3 watch",
+				"repo", issue.Repo, "pr", createdPR.Number, "err", enrollErr)
+		}
 	}
 
 	// Apply PR metadata (reviewers, labels, assignees). All best-effort —
 	// a metadata failure does not roll back the PR, which is already public.
 	metadataOpts := opts
 	metadataOpts.PRAssignee = resolveAutoImplementPRAssignee(issue, opts)
+	metadataOpts.PRReviewers = filterSelfPRReviewers(metadataOpts.PRReviewers, firstNonEmpty(p.botLogin, opts.AuthUser))
 	applyPRMetadata(p.gh, issue.Repo, prNumber, metadataOpts)
 
 	// Post a done-marker comment on the issue so watchers see the PR land
@@ -887,12 +933,19 @@ func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, is
 // implement" escape hatch fired. We post a review_only-style comment so the
 // issue still gets acknowledged and the user sees why no PR appeared.
 func (p *Pipeline) autoImplementNoChangesFallback(issue *github.Issue, issueID int64, cli string) (*store.IssueReview, error) {
+	// MarkerDone makes this a terminal state for the fetcher's marker scan
+	// (#483): without it, the fallback row collides with the dedup gate on
+	// every poll and the issue sits in limbo. We deliberately do NOT embed
+	// the MarkerRetry literal in the body — ScanMarkers prioritises Retry
+	// over Done within a single comment, so the very next poll would
+	// reprocess the issue. The retry instructions reference the token by
+	// keyword instead and point at the configuration guide.
 	body := fmt.Sprintf(
-		"## ⚠️ Heimdallm auto-implement skipped\n\n"+
+		"%s\n## ⚠️ Heimdallm auto-implement skipped\n\n"+
 			"The agent looked at #%d but left the working tree unchanged — it likely needs a human decision or more context than the issue alone provides.\n\n"+
-			"Add more details and a retry marker to run auto-implementation again, or remove the develop label to stop here.\n\n"+
+			"To retry auto-implementation, post a new comment containing a Heimdallm `heimdallm:retry` marker (see the configuration guide's `auto_implement` section for the exact syntax). To stop here, remove the develop label.\n\n"+
 			"---\n*auto_implement → review_only fallback · Heimdallm*",
-		issue.Number,
+		MarkerDone, issue.Number,
 	)
 	commentedAt, postErr := p.gh.PostComment(issue.Repo, issue.Number, body)
 	if postErr != nil {
@@ -916,9 +969,17 @@ func (p *Pipeline) autoImplementNoChangesFallback(issue *github.Issue, issueID i
 	}
 	rev.ID = revID
 
-	p.publish(sse.EventIssueReviewCompleted, map[string]any{
+	// EventIssueReviewError (not Completed) so the UI renders a
+	// needs-attention card. The `error` field follows the convention of
+	// other EventIssueReviewError emitters (Flutter's `_errorDetails` and
+	// the detail toast both read it); `reason` is a machine-readable cause
+	// kept distinct so future UI work can render reason-specific copy
+	// without parsing the human string (#483).
+	p.publish(sse.EventIssueReviewError, map[string]any{
 		"issue_id": issueID, "number": issue.Number, "repo": issue.Repo,
-		"mode": "auto_implement_no_changes", "post_ok": postErr == nil,
+		"reason":  "auto_implement_no_changes",
+		"post_ok": postErr == nil,
+		"error":   "Agent left the working tree unchanged; post a retry marker comment to retry, or close the issue.",
 	})
 	slog.Info("issues pipeline: auto_implement had no changes, posted fallback comment",
 		"repo", issue.Repo, "number", issue.Number, "posted", postErr == nil)
@@ -947,8 +1008,8 @@ func ensureAutoImplementWritePerms(cli string, opts executor.ExecOptions) execut
 		}
 	case "codex":
 		if strings.TrimSpace(opts.ApprovalMode) == "" {
-			opts.ApprovalMode = "full-auto"
-			slog.Info("issues pipeline: defaulting codex approval_mode to full-auto for auto_implement",
+			opts.ApprovalMode = "never"
+			slog.Info("issues pipeline: defaulting codex approval_mode to never for auto_implement",
 				"cli", cli)
 		}
 	case "gemini":
@@ -1088,6 +1149,26 @@ func applyPRMetadata(gh PRMetadataApplier, repo string, prNumber int, opts RunOp
 				"repo", repo, "pr", prNumber, "err", err)
 		}
 	}
+}
+
+func filterSelfPRReviewers(reviewers []string, authUser string) []string {
+	authUser = normalizeGitHubLogin(authUser)
+	if authUser == "" || len(reviewers) == 0 {
+		return reviewers
+	}
+	filtered := make([]string, 0, len(reviewers))
+	skipped := 0
+	for _, reviewer := range reviewers {
+		if strings.EqualFold(normalizeGitHubLogin(reviewer), authUser) {
+			skipped++
+			continue
+		}
+		filtered = append(filtered, reviewer)
+	}
+	if skipped > 0 {
+		slog.Info("issues pipeline: self reviewer skipped on auto-created PR", "count", skipped, "user", authUser)
+	}
+	return filtered
 }
 
 func resolveAutoImplementPRAssignee(issue *github.Issue, opts RunOptions) string {

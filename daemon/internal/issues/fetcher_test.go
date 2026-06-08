@@ -52,8 +52,6 @@ type dedupEntry struct {
 	revErr            error
 	failedAutoImpl    int // stub for CountFailedAutoImplement
 	failedAutoImplErr error
-	noChangesCount    int // stub for CountAutoImplementNoChanges
-	noChangesErr      error
 }
 
 type fakeDedup struct {
@@ -93,18 +91,6 @@ func (d *fakeDedup) CountFailedAutoImplement(issueID int64) (int, error) {
 				return 0, e.failedAutoImplErr
 			}
 			return e.failedAutoImpl, nil
-		}
-	}
-	return 0, nil
-}
-
-func (d *fakeDedup) CountAutoImplementNoChanges(issueID int64) (int, error) {
-	for _, e := range d.byGithubID {
-		if e.row != nil && e.row.ID == issueID {
-			if e.noChangesErr != nil {
-				return 0, e.noChangesErr
-			}
-			return e.noChangesCount, nil
 		}
 	}
 	return 0, nil
@@ -494,7 +480,12 @@ func TestFetcher_DoesNotSkipBelowMaxAutoImplementFailures(t *testing.T) {
 	}
 }
 
-func TestFetcher_SkipsAutoImplementNoChangesUntilManualRetry(t *testing.T) {
+// TestAlreadyProcessed_HistoricalNoChangesRow_StillSkipped pins the
+// back-compat branch of the simplified dedup gate (#483): rows written
+// before MarkerDone was added to the fallback comment have no marker on
+// the issue but still carry ActionTaken=auto_implement_no_changes, so the
+// dedup gate must keep skipping them until a human posts MarkerRetry.
+func TestAlreadyProcessed_HistoricalNoChangesRow_StillSkipped(t *testing.T) {
 	reviewedAt := time.Now().Add(-10 * time.Minute)
 	issue := fixture(1, time.Now())
 	issue.Mode = config.IssueModeDevelop
@@ -507,26 +498,28 @@ func TestFetcher_SkipsAutoImplementNoChangesUntilManualRetry(t *testing.T) {
 				CreatedAt:   reviewedAt,
 				CommentedAt: reviewedAt,
 			},
-			noChangesCount: 1, // at the cap (MaxAutoImplementNoChanges = 1)
 		},
 	}}
+	// No comments at all — pre-#483 row that never got a MarkerDone.
+	mf := &fakeMarkerFetcher{commentsByKey: map[string][]github.Comment{}}
 	p := &fakePipeline{}
-	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, nil, dedup, p)
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, mf, dedup, p)
 
 	processed, err := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if processed != 0 || len(p.calls) != 0 {
-		t.Fatalf("no-changes auto_implement should wait for retry marker, processed=%d calls=%v", processed, p.calls)
+		t.Fatalf("historical no-changes row must still be skipped, processed=%d calls=%v", processed, p.calls)
 	}
 }
 
-func TestFetcher_AutoImplementNoChangesCapStopsLoop(t *testing.T) {
-	// Symmetric to MaxAutoImplementFailures: once the agent has produced
-	// an empty diff at or above MaxAutoImplementNoChanges, the fetcher must
-	// stop dispatching the issue regardless of updated_at bumps. Manual retry
-	// marker still bypasses this (handled before the cap check).
+// TestAlreadyProcessed_DoneMarkerSkipsBeforeDedupGate proves the
+// marker-first ordering: a no-changes row whose comment thread now
+// carries MarkerDone (the post-#483 happy path) is terminated by the
+// marker scan, not by the back-compat dedup gate. Without this ordering
+// the user could not see "done marker" in the skip reason.
+func TestAlreadyProcessed_DoneMarkerSkipsBeforeDedupGate(t *testing.T) {
 	reviewedAt := time.Now().Add(-10 * time.Minute)
 	issue := fixture(1, time.Now())
 	issue.Mode = config.IssueModeDevelop
@@ -539,25 +532,30 @@ func TestFetcher_AutoImplementNoChangesCapStopsLoop(t *testing.T) {
 				CreatedAt:   reviewedAt,
 				CommentedAt: reviewedAt,
 			},
-			noChangesCount: issues.MaxAutoImplementNoChanges + 5, // well over the cap
 		},
 	}}
+	mf := &fakeMarkerFetcher{commentsByKey: map[string][]github.Comment{
+		"org/repo#1": {{Body: issues.MarkerDone + "\nfallback comment", CreatedAt: time.Now()}},
+	}}
 	p := &fakePipeline{}
-	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, nil, dedup, p)
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, mf, dedup, p)
 
 	processed, err := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if processed != 0 || len(p.calls) != 0 {
-		t.Fatalf("over-cap issue must not be processed, processed=%d calls=%v", processed, p.calls)
+		t.Fatalf("done marker must skip ahead of dedup gate, processed=%d calls=%v", processed, p.calls)
 	}
 }
 
-func TestFetcher_AutoImplementNoChangesCountErrFallsThrough(t *testing.T) {
-	// A flaky CountAutoImplementNoChanges must not block the existing
-	// "wait for manual retry" skip — degrade gracefully like the failure cap
-	// does (TestFetcher_CountFailedAutoImplErrDoesNotSkip).
+// TestAlreadyProcessed_RetryMarker_ReprocessesNoChanges pins the retry
+// escape hatch on a no-changes row. The marker scan already ran before
+// the dedup gate pre-#483, so this is the documented user workflow —
+// what the test really protects against is a future refactor that
+// moves the dedup gate above the marker scan or that drops the retry
+// override for the ActionAutoImplementNoChanges branch.
+func TestAlreadyProcessed_RetryMarker_ReprocessesNoChanges(t *testing.T) {
 	reviewedAt := time.Now().Add(-10 * time.Minute)
 	issue := fixture(1, time.Now())
 	issue.Mode = config.IssueModeDevelop
@@ -570,18 +568,23 @@ func TestFetcher_AutoImplementNoChangesCountErrFallsThrough(t *testing.T) {
 				CreatedAt:   reviewedAt,
 				CommentedAt: reviewedAt,
 			},
-			noChangesErr: errors.New("db timeout"),
+		},
+	}}
+	mf := &fakeMarkerFetcher{commentsByKey: map[string][]github.Comment{
+		"org/repo#1": {
+			{Body: issues.MarkerDone + "\nfallback comment", CreatedAt: time.Now().Add(-5 * time.Minute)},
+			{Body: issues.MarkerRetry + "\nplease retry", CreatedAt: time.Now()},
 		},
 	}}
 	p := &fakePipeline{}
-	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, nil, dedup, p)
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, mf, dedup, p)
 
 	processed, err := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if processed != 0 || len(p.calls) != 0 {
-		t.Fatalf("count error must still skip, processed=%d calls=%v", processed, p.calls)
+	if processed != 1 || len(p.calls) != 1 {
+		t.Fatalf("retry marker must reopen a no-changes row, processed=%d calls=%v", processed, p.calls)
 	}
 }
 

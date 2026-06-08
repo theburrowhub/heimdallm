@@ -4,6 +4,7 @@ import "fmt"
 
 // Event type constants
 const (
+	EventHeartbeat             = "heartbeat"
 	EventPRDetected            = "pr_detected"
 	EventReviewStarted         = "review_started"
 	EventReviewCompleted       = "review_completed"
@@ -37,6 +38,32 @@ const (
 
 	EventPRStateChanged    = "pr_state_changed"
 	EventIssueStateChanged = "issue_state_changed"
+
+	// EventPRReviewStateChanged fires when Tier 3 observes a change in
+	// the aggregated external review state of an auto_implement-created
+	// PR (#482). Payload includes pr_id, repo, number, state, reviewer,
+	// prev_state. Only fires for PRs whose `auto_implement_issue_id`
+	// column is non-zero — standard PRs never publish this event.
+	EventPRReviewStateChanged = "pr_review_state_changed"
+
+	// EventRepoRenamed fires when the rename reconciler propagates a
+	// GitHub repo/org rename across daemon state (#489). Payload:
+	// {"old_repo": "...", "new_repo": "...", "worktree_purged": bool}.
+	// Flutter consumers refresh the repo / PR / issue lists and dismiss
+	// cached entries keyed on `old_repo`.
+	EventRepoRenamed = "repo_renamed"
+
+	// EventRepoNonMonitoredStale fires when the rename probe detects
+	// that an entry in `github.non_monitored` has been renamed on
+	// GitHub (#493 follow-up to #489). The daemon deliberately does
+	// NOT auto-rewrite non_monitored entries — they reflect an
+	// explicit operator-disabled state — so this event surfaces the
+	// stale slug for human action. Payload:
+	// {"old_repo": "...", "new_repo": "..."}.
+	// The probe dedupes warnings per (old, new) pair across its
+	// in-memory lifetime, so this event fires at most once per
+	// detected drift per daemon start.
+	EventRepoNonMonitoredStale = "repo_non_monitored_stale"
 )
 
 // maxSubscribers limits the number of concurrent SSE connections to prevent

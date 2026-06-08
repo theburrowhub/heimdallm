@@ -13,10 +13,12 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -283,6 +285,10 @@ func main() {
 	// when auto_implement is not in use.
 	issuePipe := issuepipeline.New(s, ghClient, exec, issuepipeline.NewGitExec(), broker, &notifyWithSSE{notifier: notifier})
 	issuePipe.SetCircuitBreakerLimits(&issueCBLimits)
+	// Wire the Tier 3 watch enroller so auto_implement-created PRs are
+	// picked up by the new review-state checker (#482). watchStore
+	// implements the WatchEnroller interface via its Enroll method.
+	issuePipe.SetWatchEnroller(watchStore)
 
 	// Resolve bot login for re-review / re-triage context filtering.
 	var resolvedBotLogin string
@@ -299,6 +305,15 @@ func main() {
 	// cfgMu protects cfg and the pipeline so reload is safe from any goroutine.
 	var cfgMu sync.Mutex
 	var reloadMu sync.Mutex // serialises config reloads to prevent duplicate pipelines
+	var lastPollUnixNano int64
+	var pollIntervalNano int64
+	storePollInterval := func(interval time.Duration) {
+		atomic.StoreInt64(&pollIntervalNano, int64(interval))
+	}
+	storePollInterval(parsePollInterval(cfg.GitHub.PollInterval))
+	recordPollCompleted := func(_ string, at time.Time) {
+		atomic.StoreInt64(&lastPollUnixNano, at.UTC().UnixNano())
+	}
 
 	srv := server.NewWithOptions(s, broker, p, apiToken, server.Options{
 		Version:   versionString(),
@@ -306,6 +321,17 @@ func main() {
 	})
 	srv.SetNATSConn(eventBus.Conn())
 	srv.SetConfigPath(cfgPath)
+	srv.SetHealthSnapshotFn(func() server.HealthSnapshot {
+		interval := time.Duration(atomic.LoadInt64(&pollIntervalNano))
+		var lastPoll time.Time
+		if n := atomic.LoadInt64(&lastPollUnixNano); n > 0 {
+			lastPoll = time.Unix(0, n).UTC()
+		}
+		return server.HealthSnapshot{
+			LastPollAt:   lastPoll,
+			PollInterval: interval,
+		}
+	})
 	shutdownReq := make(chan struct{}, 1)
 
 	// discoverySvc holds the discovered repo cache.
@@ -316,6 +342,15 @@ func main() {
 		aiCfg := cfg.AIForRepo(repo)
 		cfgMu.Unlock()
 		return repoCtx.Purge(ctx, repo, aiCfg.CloneDir)
+	})
+	// Manual rename trigger for POST /admin/repo-rename (#489).
+	// Constructs a one-shot reconciler with the same deps the probe
+	// uses so manual triggers and automatic detection share idempotency
+	// guarantees end-to-end. Reuses srv.TOMLMu() so the rewrite races
+	// safely with concurrent PATCH /config writes.
+	srv.SetRepoRenameFn(func(ctx context.Context, oldRepo, newRepo string) error {
+		reconciler := newRenameReconciler(cfg, &cfgMu, srv.TOMLMu(), s, repoCtx, broker, cfgPath)
+		return reconciler.Run(ctx, oldRepo, newRepo)
 	})
 	srv.SetCleanClonesFn(func(ctx context.Context) (int, error) {
 		cfgMu.Lock()
@@ -379,11 +414,12 @@ func main() {
 			}
 		}
 		return pipeline.RunOptions{
-			Primary:        aiCfg.Primary,
-			Fallback:       aiCfg.Fallback,
-			PromptOverride: aiCfg.Prompt,
-			AgentPromptID:  agentCfg.PromptID,
-			ReviewMode:     aiCfg.ReviewMode,
+			Primary:            aiCfg.Primary,
+			Fallback:           aiCfg.Fallback,
+			PromptOverride:     aiCfg.Prompt,
+			AgentPromptID:      agentCfg.PromptID,
+			ReviewMode:         aiCfg.ReviewMode,
+			InstructionAuthors: aiCfg.InstructionAuthors,
 			ExecOpts: executor.ExecOptions{
 				Model:                agentCfg.Model,
 				MaxTurns:             agentCfg.MaxTurns,
@@ -561,6 +597,51 @@ func main() {
 		lastBreakerTrips:     make(map[breakerTripKey]breakerTripDedup),
 	}
 
+	// Phase 2/3 of #482: build the Responder and FixRunner with real
+	// dependencies and wire them into the adapter. Both modules check
+	// their own Enabled flag on every Run so a cold-start with the
+	// feature disabled costs nothing; flipping the flag in TOML and
+	// reloading is enough to opt in.
+	// botLoginAccessor is the single source for the bot's login the
+	// Responder and FixRunner consume — wraps the same loginMu /
+	// cachedLogin pair the adapter's cachedAuthenticatedUser uses, so
+	// locking discipline lives in one closure rather than being
+	// duplicated at each callsite.
+	botLoginAccessor := func() string {
+		loginMu.Lock()
+		defer loginMu.Unlock()
+		return cachedLogin
+	}
+	adapter.responder = issuepipeline.NewResponder(
+		s, ghClient,
+		&prReviewExecutor{runner: exec, cfg: &cfg, cfgMu: &cfgMu},
+		broker,
+		func() config.ReviewResponseConfig {
+			cfgMu.Lock()
+			defer cfgMu.Unlock()
+			return cfg.AI.ReviewResponse
+		},
+		botLoginAccessor,
+	)
+	adapter.fixRunner = issuepipeline.NewFixRunner(
+		s, ghClient,
+		&prFixExecutor{
+			pipeline: issuePipe,
+			repoCtx:  repoCtx,
+			ghClient: ghClient,
+			ghToken:  token,
+			cfg:      &cfg,
+			cfgMu:    &cfgMu,
+		},
+		broker,
+		func() config.ReviewFixConfig {
+			cfgMu.Lock()
+			defer cfgMu.Unlock()
+			return cfg.AI.ReviewFix
+		},
+		botLoginAccessor,
+	)
+
 	repoPublisher := bus.NewRepoPublisher(conn)
 	prReviewPublisher := bus.NewPRReviewPublisher(conn)
 
@@ -620,7 +701,7 @@ func main() {
 			}
 
 			// Publish initial repos immediately
-			sendDiscoveryRepos(ctx, discoverySvc, limiter, repoPublisher, tier1ConfigFn)
+			sendDiscoveryRepos(ctx, discoverySvc, limiter, repoPublisher, tier1ConfigFn, ghClient)
 
 			ticker := time.NewTicker(discoveryInterval)
 			defer ticker.Stop()
@@ -629,7 +710,7 @@ func main() {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					sendDiscoveryRepos(ctx, discoverySvc, limiter, repoPublisher, tier1ConfigFn)
+					sendDiscoveryRepos(ctx, discoverySvc, limiter, repoPublisher, tier1ConfigFn, ghClient)
 				}
 			}
 		}()
@@ -645,6 +726,7 @@ func main() {
 		cfgMu.Lock()
 		pollInterval := parsePollInterval(cfg.GitHub.PollInterval)
 		cfgMu.Unlock()
+		storePollInterval(pollInterval)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -657,8 +739,37 @@ func main() {
 				}
 				return discovery.MergeRepos(cfg.GitHub.Repositories, aiRepoKeys(cfg), discovered, cfg.GitHub.NonMonitored)
 			}
-			runTier2(ctx, adapter, limiter, prReviewPublisher, broker, tier2ConfigFn, reposChan, pollInterval, coldStart)
+			tier2RepoConcurrencyFn := func() int {
+				cfgMu.Lock()
+				defer cfgMu.Unlock()
+				return cfg.AI.Tier2RepoConcurrency
+			}
+			runTier2(ctx, adapter, limiter, prReviewPublisher, broker, tier2ConfigFn, tier2RepoConcurrencyFn, reposChan, pollInterval, coldStart, recordPollCompleted)
 		}()
+
+		// Repo/org rename probe (#489). Detects when GitHub has
+		// renamed a monitored repo (or its parent org) and dispatches
+		// the reconciler to propagate the new slug across SQLite,
+		// config TOML, in-memory config, and worktrees. Interval "0"
+		// disables — operators can still trigger rename manually via
+		// POST /admin/repo-rename. The probe runs its own goroutine
+		// because its cadence (1h default) is orders of magnitude
+		// longer than Tier 2's, and we want it independent of Tier 2
+		// failures.
+		cfgMu.Lock()
+		renameInterval := parseRenameProbeInterval(cfg.AI.RepoRenameCheckInterval)
+		cfgMu.Unlock()
+		if renameInterval > 0 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				probe := newRenameProbe(ctx, cfg, &cfgMu, srv.TOMLMu(), ghClient, s, repoCtx, broker, cfgPath, renameInterval)
+				probe.Run(ctx)
+			}()
+			slog.Info("rename probe: started", "interval", renameInterval)
+		} else {
+			slog.Info("rename probe: disabled (ai.repo_rename_check_interval=0)")
+		}
 
 		slog.Info("pollers: started",
 			"discovery", discoveryInterval,
@@ -800,7 +911,7 @@ func main() {
 		ghID, ghState, err := ghClient.SubmitReview(
 			pr.Repo, pr.Number,
 			pipeline.BuildGitHubBody(result),
-			pipeline.SeverityToEvent(rev.Severity, len(issues)),
+			pipeline.SeverityToEvent(rev.Severity),
 		)
 		if err != nil {
 			errStr := err.Error()
@@ -1461,6 +1572,16 @@ func main() {
 			return fmt.Errorf("reload: %w", err)
 		}
 
+		cfgMu.Lock()
+		restartPollers := configReloadRequiresPollerRestart(cfg, newCfg)
+		if !restartPollers {
+			cfg = newCfg
+			cfgMu.Unlock()
+			slog.Info("config reload: applied without poller restart")
+			return nil
+		}
+		cfgMu.Unlock()
+
 		// Read the current cancel/wg under cfgMu, then stop OUTSIDE the lock.
 		// Holding cfgMu across Wait() risks deadlock: if Wait() blocks
 		// waiting for in-flight goroutines that also acquire cfgMu (e.g.
@@ -1937,6 +2058,66 @@ func parseDiscoveryInterval(discoveryInterval, pollInterval string) time.Duratio
 	return d
 }
 
+// configReloadRequiresPollerRestart returns true unless the diff is limited to
+// fields known to be read dynamically through cfg under cfgMu. This keeps new
+// config fields conservative by default: if a future field is not scrubbed in
+// configReloadRestartSnapshot, reloads restart pollers until the field is
+// explicitly classified as dynamic.
+func configReloadRequiresPollerRestart(oldCfg, newCfg *config.Config) bool {
+	if oldCfg == nil || newCfg == nil {
+		return true
+	}
+	return !reflect.DeepEqual(configReloadRestartSnapshot(oldCfg), configReloadRestartSnapshot(newCfg))
+}
+
+func configReloadRestartSnapshot(c *config.Config) config.Config {
+	snap := *c
+	snap.GitHub.Repositories = normalizeReloadStringSlice(snap.GitHub.Repositories)
+	snap.GitHub.NonMonitored = normalizeReloadStringSlice(snap.GitHub.NonMonitored)
+	snap.GitHub.DiscoveryOrgs = normalizeReloadStringSlice(snap.GitHub.DiscoveryOrgs)
+	snap.GitHub.LocalDirBase = nil
+	snap.GitHub.AutoEnablePROnDiscovery = nil
+	snap.GitHub.WatchInterval = ""
+	snap.GitHub.IssueTracking = config.IssueTrackingConfig{}
+	snap.GitHub.ReviewGuards = config.ReviewGuardsConfig{}
+
+	snap.AI.Primary = ""
+	snap.AI.Fallback = ""
+	snap.AI.ReviewMode = ""
+	snap.AI.ExecutionTimeout = ""
+	snap.AI.Agents = nil
+	snap.AI.Repos = nil
+	snap.AI.Orgs = nil
+	snap.AI.PRMetadata = config.PRMetadataConfig{}
+	snap.AI.PRReviewers = nil
+	snap.AI.PRLabels = nil
+	snap.AI.PRAssignee = ""
+	snap.AI.PRDraft = nil
+	snap.AI.IssuePrompt = ""
+	snap.AI.ImplementPrompt = ""
+	snap.AI.RefinementTimeout = ""
+	snap.AI.TriageOwner = ""
+	snap.AI.CloneDir = ""
+	snap.AI.AutoPromoteTriage = nil
+	snap.AI.AutoPromoteRefinement = nil
+	snap.AI.Tier2RepoConcurrency = 0
+	snap.AI.GeneratePRDescription = false
+	snap.AI.ReviewResponse = config.ReviewResponseConfig{}
+	snap.AI.ReviewFix = config.ReviewFixConfig{}
+
+	snap.Retention = config.RetentionConfig{}
+	snap.ActivityLog = config.ActivityLogConfig{}
+	snap.CircuitBreaker = config.CircuitBreakerConfig{}
+	return snap
+}
+
+func normalizeReloadStringSlice(v []string) []string {
+	if len(v) == 0 {
+		return nil
+	}
+	return append([]string(nil), v...)
+}
+
 // resolveExecutionTimeout returns the effective execution timeout for the CLI
 // process. Per-agent timeout wins over the global timeout; zero means "use
 // executor default (5m)".
@@ -1985,6 +2166,7 @@ func sendDiscoveryRepos(
 	limiter *scheduler.RateLimiter,
 	pub scheduler.Tier1Publisher,
 	configFn func() scheduler.Tier1Config,
+	archiveChecker discovery.ArchivedChecker,
 ) {
 	cfg := configFn()
 	var discovered []string
@@ -2002,6 +2184,15 @@ func sendDiscoveryRepos(
 	}
 
 	repos := discovery.MergeRepos(cfg.StaticRepos, cfg.ConfiguredRepos, discovered, cfg.NonMonitored)
+
+	if archiveChecker != nil {
+		active, archived := discovery.FilterArchived(repos, archiveChecker, discovered)
+		for _, r := range archived {
+			slog.Warn("tier1: dropping archived/deleted repo from active set", "repo", r)
+		}
+		repos = active
+	}
+
 	slog.Info("tier1: discovery complete", "repos", len(repos))
 	if err := pub.PublishRepos(ctx, repos); err != nil {
 		slog.Error("tier1: publish repos failed", "err", err)
@@ -2038,8 +2229,73 @@ func bridgeDiscovery(ctx context.Context, conn *nats.Conn, out chan<- []string) 
 	}
 }
 
+// processReposInParallel runs workFn for every repo in repos with at
+// most `concurrency` calls in flight at once. Returns the sum of the
+// integer return values from the workers. workFn errors are silently
+// counted as zero — the helper has no domain context to log them
+// usefully; callers wrap workFn to log per-repo failures in the
+// vocabulary that fits their tier. (#481)
+//
+// A non-positive concurrency falls back to
+// config.DefaultTier2RepoConcurrency so a misconfiguration cannot
+// deadlock the daemon. Nil or empty repo list is a no-op.
+//
+// Cancellation: both the per-repo scheduling loop and the semaphore
+// acquire observe ctx.Done so a daemon shutdown does not get stuck
+// waiting for the last free slot when workers are still draining.
+// Already-running workers receive ctx through workFn and are
+// responsible for their own short-circuit.
+func processReposInParallel(
+	ctx context.Context,
+	repos []string,
+	concurrency int,
+	workFn func(ctx context.Context, repo string) (int, error),
+) int {
+	if len(repos) == 0 {
+		return 0
+	}
+	if concurrency <= 0 {
+		concurrency = config.DefaultTier2RepoConcurrency
+	}
+	if concurrency > len(repos) {
+		concurrency = len(repos)
+	}
+
+	sem := make(chan struct{}, concurrency)
+	var total int64
+	var wg sync.WaitGroup
+schedule:
+	for _, repo := range repos {
+		select {
+		case <-ctx.Done():
+			// Stop dispatching new work; a plain `break` here would
+			// only exit the select, leaving the loop to keep queuing.
+			break schedule
+		case sem <- struct{}{}:
+			// Acquired a slot. Fall through to spawn the worker.
+		}
+		wg.Add(1)
+		go func(repo string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			n, err := workFn(ctx, repo)
+			if err != nil {
+				return
+			}
+			atomic.AddInt64(&total, int64(n))
+		}(repo)
+	}
+	wg.Wait()
+	return int(total)
+}
+
 // runTier2 runs the PR/issue polling loop. Replaces the old RunTier2 from
 // the scheduler package.
+//
+// repoConcurrencyFn returns the live per-tick cap on parallel
+// per-repo issue processing (`ai.tier2_repo_concurrency`). It is
+// evaluated on every tick so a config reload takes effect without
+// restarting the daemon.
 func runTier2(
 	ctx context.Context,
 	adapter *tier2Adapter,
@@ -2047,9 +2303,11 @@ func runTier2(
 	prPublisher scheduler.Tier2PRPublisher,
 	ssePub sse.Publisher,
 	configFn func() []string,
+	repoConcurrencyFn func() int,
 	reposChan <-chan []string,
 	interval time.Duration,
 	coldStart bool,
+	pollCompletedFn func(kind string, at time.Time),
 ) {
 	var (
 		mu    sync.Mutex
@@ -2067,6 +2325,11 @@ func runTier2(
 				repos = r
 				mu.Unlock()
 				slog.Info("tier2: received repo list", "count", len(r))
+
+				// Persist topic-discovered repos so they appear in
+				// heimdallm-cli status and GET /config even when they
+				// have no open PRs. Fixes #507.
+				adapter.upsertDiscoveredFromTopics(r)
 			}
 		}
 	}()
@@ -2078,55 +2341,77 @@ func runTier2(
 		return
 	}
 
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	processTick := func() {
+	snapshotRepos := func() []string {
 		mu.Lock()
-		currentRepos := append([]string(nil), repos...)
-		mu.Unlock()
+		defer mu.Unlock()
+		return append([]string(nil), repos...)
+	}
 
-		if len(currentRepos) == 0 {
-			return
-		}
-
-		// PR processing
+	// runPRTier publishes review requests for every reviewable PR.
+	// Independent of the issue tier so a slow GitHub Search call does
+	// not block per-repo issue work.
+	runPRTier := func(currentRepos []string) {
 		sse.EmitPollingStarted(ssePub, "prs", currentRepos)
 		prStart := time.Now()
 		prCount := 0
+		defer func() {
+			completedAt := time.Now()
+			if pollCompletedFn != nil {
+				pollCompletedFn("prs", completedAt)
+			}
+			sse.EmitPollingCompleted(ssePub, "prs", prCount, completedAt.Sub(prStart))
+		}()
 		if err := limiter.Acquire(ctx, scheduler.TierRepo); err != nil {
-			sse.EmitPollingCompleted(ssePub, "prs", prCount, time.Since(prStart))
 			return
 		}
 		prs, err := adapter.FetchPRsToReview()
 		if err != nil {
 			slog.Error("tier2: fetch PRs", "err", err)
-		} else {
-			monitoredSet := make(map[string]struct{}, len(currentRepos))
-			for _, r := range currentRepos {
-				monitoredSet[r] = struct{}{}
+			return
+		}
+		monitoredSet := make(map[string]struct{}, len(currentRepos))
+		for _, r := range currentRepos {
+			monitoredSet[r] = struct{}{}
+		}
+		for _, pr := range prs {
+			if _, ok := monitoredSet[pr.Repo]; !ok {
+				continue
 			}
-			for _, pr := range prs {
-				if _, ok := monitoredSet[pr.Repo]; !ok {
-					continue
-				}
-				if adapter.PRAlreadyReviewed(pr.ID, pr.Repo, pr.Number, pr.UpdatedAt, pr.HeadSHA) {
-					continue
-				}
-				prCount++
-				if err := prPublisher.PublishPRReview(ctx, pr.Repo, pr.Number, pr.ID, pr.HeadSHA); err != nil {
-					slog.Error("tier2: publish PR review", "repo", pr.Repo, "pr", pr.Number, "err", err)
-				}
+			if adapter.PRAlreadyReviewed(pr.ID, pr.Repo, pr.Number, pr.UpdatedAt, pr.HeadSHA) {
+				continue
+			}
+			prCount++
+			if err := prPublisher.PublishPRReview(ctx, pr.Repo, pr.Number, pr.ID, pr.HeadSHA); err != nil {
+				slog.Error("tier2: publish PR review", "repo", pr.Repo, "pr", pr.Number, "err", err)
 			}
 		}
-		sse.EmitPollingCompleted(ssePub, "prs", prCount, time.Since(prStart))
+	}
 
-		// Issue processing
+	// runIssueTier promotes ready issues and processes every repo's
+	// issue list in parallel, bounded by ai.tier2_repo_concurrency.
+	//
+	// NOTE: if NATS publishes are ever added to this tier, also call
+	// adapter.PublishPending() at the end — it is intentionally bound
+	// to the PR tick today (see prTick) because pending publishes
+	// originate exclusively from runPRTier.
+	runIssueTier := func(currentRepos []string) {
 		sse.EmitPollingStarted(ssePub, "issues", currentRepos)
 		issueStart := time.Now()
+		// issueCount is intentionally captured by the deferred
+		// EmitPollingCompleted closure so the final value (assigned
+		// after processReposInParallel returns) is what the SSE event
+		// reports. Reassigning it later via `=` keeps the capture
+		// valid; a future refactor that switches to a fresh local
+		// would silently emit 0.
 		issueCount := 0
+		defer func() {
+			completedAt := time.Now()
+			if pollCompletedFn != nil {
+				pollCompletedFn("issues", completedAt)
+			}
+			sse.EmitPollingCompleted(ssePub, "issues", issueCount, completedAt.Sub(issueStart))
+		}()
 		if err := limiter.Acquire(ctx, scheduler.TierRepo); err != nil {
-			sse.EmitPollingCompleted(ssePub, "issues", issueCount, time.Since(issueStart))
 			return
 		}
 		if n, err := adapter.PromoteReady(ctx, currentRepos); err != nil {
@@ -2134,41 +2419,90 @@ func runTier2(
 		} else if n > 0 {
 			slog.Info("tier2: promoted issues", "count", n)
 		}
-
-		// Issue processing per repo
-		for _, repo := range currentRepos {
+		concurrency := config.DefaultTier2RepoConcurrency
+		if repoConcurrencyFn != nil {
+			if v := repoConcurrencyFn(); v > 0 {
+				concurrency = v
+			}
+		}
+		issueCount = processReposInParallel(ctx, currentRepos, concurrency, func(ctx context.Context, repo string) (int, error) {
 			if err := limiter.Acquire(ctx, scheduler.TierRepo); err != nil {
-				sse.EmitPollingCompleted(ssePub, "issues", issueCount, time.Since(issueStart))
-				return
+				return 0, err
 			}
 			n, err := adapter.ProcessRepo(ctx, repo)
 			if err != nil {
-				slog.Error("tier2: issue processing", "repo", repo, "err", err)
-				continue
+				// Demote to debug during graceful shutdown — a
+				// cancelled ctx is expected behaviour, not a fault
+				// worth paging an operator.
+				if ctx.Err() != nil {
+					slog.Debug("tier2: issue processing cancelled", "repo", repo, "err", err)
+				} else {
+					slog.Error("tier2: issue processing", "repo", repo, "err", err)
+				}
+				return 0, err
 			}
-			issueCount += n
 			if n > 0 {
 				slog.Info("tier2: processed issues", "repo", repo, "count", n)
 			}
-		}
-		sse.EmitPollingCompleted(ssePub, "issues", issueCount, time.Since(issueStart))
+			return n, nil
+		})
+	}
 
-		// Retry pending publishes
+	// PR and issue tiers run on independent tickers so a slow issue
+	// cycle (taking longer than `interval`) cannot delay the next PR
+	// poll. Each tier serialises against itself: a Ticker drops
+	// extra ticks when its previous run is still in flight, so we
+	// never spawn two concurrent issue cycles.
+	prTick := func() {
+		currentRepos := snapshotRepos()
+		if len(currentRepos) == 0 {
+			return
+		}
+		runPRTier(currentRepos)
+		// PublishPending lives in the PR tick on purpose: pending
+		// publishes are almost exclusively PR-review NATS messages
+		// from runPRTier, and retries are idempotent. If we ever
+		// route issue-side NATS publishes through the same queue,
+		// add a sibling call inside issueTick rather than removing
+		// this one.
 		adapter.PublishPending()
 	}
-
-	if coldStart {
-		processTick()
+	issueTick := func() {
+		currentRepos := snapshotRepos()
+		if len(currentRepos) == 0 {
+			return
+		}
+		runIssueTier(currentRepos)
 	}
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			processTick()
+	// runTickerLoop is the per-tier event loop. time.Ticker's channel
+	// is buffered to size 1, so a tick that fires while the previous
+	// `tick()` is still running is silently dropped — this is the
+	// invariant that prevents a tier from running concurrently against
+	// itself without needing a mutex. PR and issue tiers each get
+	// their own goroutine + ticker so a slow run on one tier never
+	// stalls the other.
+	runTickerLoop := func(tick func()) {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		if coldStart {
+			tick()
+		}
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				tick()
+			}
 		}
 	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); runTickerLoop(prTick) }()
+	go func() { defer wg.Done(); runTickerLoop(issueTick) }()
+	wg.Wait()
 }
 
 // aiRepoKeys returns the sorted list of repos with an explicit [ai.repos.*]
@@ -2185,8 +2519,10 @@ func aiRepoKeys(c *config.Config) []string {
 	}
 	out := make([]string, 0, len(c.AI.Repos))
 	for repo := range c.AI.Repos {
-		if repo != "" {
-			out = append(out, repo)
+		// TrimSpace to match monitoredRepoSet's normalization so a TOML key
+		// like " org/repo " is treated identically across both code paths.
+		if r := strings.TrimSpace(repo); r != "" {
+			out = append(out, r)
 		}
 	}
 	sort.Strings(out)
@@ -2260,6 +2596,59 @@ func upsertDiscoveredRepos(c *config.Config, prs []*gh.PullRequest) []string {
 	return added
 }
 
+// upsertDiscoveredFromTopics persists repos received from tier1's topic
+// discovery into cfg.GitHub.Repositories (or NonMonitored) and invokes
+// processDiscoveredRepos to write them to the K/V store. This ensures repos
+// discovered by topic appear in heimdallm-cli status and GET /config even
+// when they have no open PRs. Fixes #507.
+func (a *tier2Adapter) upsertDiscoveredFromTopics(repos []string) {
+	if len(repos) == 0 {
+		return
+	}
+
+	a.cfgMu.Lock()
+	cfg := *a.cfg
+
+	known := make(map[string]struct{}, len(cfg.GitHub.Repositories)+len(cfg.GitHub.NonMonitored))
+	for _, r := range cfg.GitHub.Repositories {
+		known[r] = struct{}{}
+	}
+	for _, r := range cfg.GitHub.NonMonitored {
+		known[r] = struct{}{}
+	}
+
+	enable := cfg.GitHub.AutoEnablePRForDiscovery()
+	var added []string
+	for _, repo := range repos {
+		if repo == "" {
+			continue
+		}
+		if _, ok := known[repo]; ok {
+			continue
+		}
+		if enable {
+			cfg.GitHub.Repositories = append(cfg.GitHub.Repositories, repo)
+		} else {
+			cfg.GitHub.NonMonitored = append(cfg.GitHub.NonMonitored, repo)
+		}
+		known[repo] = struct{}{}
+		added = append(added, repo)
+	}
+
+	reposSnap := append([]string(nil), cfg.GitHub.Repositories...)
+	nonMonSnap := append([]string(nil), cfg.GitHub.NonMonitored...)
+	a.cfgMu.Unlock()
+
+	// Intentionally release the mutex before persisting to the K/V store:
+	// processDiscoveredRepos performs I/O (SQLite writes, SSE publish) that
+	// should not hold the config lock. The in-memory config is already
+	// mutated above; the snapshots capture the post-mutation state.
+	if len(added) > 0 {
+		slog.Info("tier2: persisting topic-discovered repos", "added", len(added), "repos", added)
+		processDiscoveredRepos(added, reposSnap, nonMonSnap, a.store, a.broker, time.Now())
+	}
+}
+
 // ── tier2Adapter bridges main.go's concrete types to Pipeline interfaces ──
 
 type tier2Adapter struct {
@@ -2278,6 +2667,11 @@ type tier2Adapter struct {
 	runReview  func(pr *gh.PullRequest, aiCfg config.RepoAI) *store.Review
 	publishPub *bus.PRPublishPublisher
 	watchStore *bus.WatchStore
+	// Review-state vigilance dispatch (#482). Optional — nil-safe so a
+	// daemon configured without the opt-in feature flags simply skips
+	// the dispatch and the new CheckItem branch remains observational.
+	responder reviewResponderDispatcher
+	fixRunner reviewFixDispatcher
 
 	// skipMu protects the lightweight SSE dedup caches below.
 	skipMu               sync.Mutex
@@ -2469,6 +2863,20 @@ func (a *tier2Adapter) FetchPRsToReview() ([]scheduler.Tier2PR, error) {
 	nonMonSnap := append([]string(nil), cfg.GitHub.NonMonitored...)
 	a.cfgMu.Unlock()
 
+	// Defer reviews on repos discovered THIS call to upsertDiscoveredRepos
+	// by one tick so the UI receives `repo_discovered` before
+	// `review_started` (#481). The guarantee is "one tick relative to
+	// upsertDiscoveredRepos", not "guaranteed UI delivery": if the SSE
+	// bridge to NATS is stalled, the UI may still see the events out of
+	// order despite the deferral. On the next tick
+	// `upsertDiscoveredRepos` returns an empty `added` list for these
+	// repos (they're already in the config), and the same PR flows
+	// through normally.
+	addedThisTick := make(map[string]struct{}, len(added))
+	for _, r := range added {
+		addedThisTick[r] = struct{}{}
+	}
+
 	// Benign race window: between the Unlock above and the SetConfig calls
 	// inside processDiscoveredRepos, a config reload can swap *a.cfg to a
 	// fresh Config that does not contain the just-appended repos. On the
@@ -2527,6 +2935,14 @@ func (a *tier2Adapter) FetchPRsToReview() ([]scheduler.Tier2PR, error) {
 			if _, ok := prAllowedOrgs[strings.ToLower(org)]; !ok {
 				continue
 			}
+		}
+		// Defer reviews for repos that were auto-discovered this tick;
+		// the next tick picks them up after `repo_discovered` has
+		// reached the UI. See #481.
+		if _, justDiscovered := addedThisTick[pr.Repo]; justDiscovered {
+			slog.Info("tier2: deferring review for newly-discovered repo to next tick",
+				"repo", pr.Repo, "pr", pr.Number)
+			continue
 		}
 		seenIDs[pr.ID] = struct{}{}
 		reason := pipeline.Evaluate(pipeline.PRGate{
@@ -3081,6 +3497,49 @@ func (a *tier2Adapter) CheckItem(ctx context.Context, item *scheduler.WatchItem)
 		}
 		if !snap.UpdatedAt.After(item.LastSeen) {
 			return false, nil, nil
+		}
+		// Review-state vigilance branch (#482): for PRs that
+		// auto_implement created, the snapshot's updated_at advance is
+		// almost always a reviewer submitting feedback. Fetch the
+		// reviews list, aggregate, and short-circuit out of the
+		// standard review codepath — the daemon's own PRs would be
+		// rejected by SkipReasonSelfAuthored anyway, but routing them
+		// here keeps the observation layer's intent explicit.
+		stored, storeErr := a.store.GetPRByGithubID(item.GithubID)
+		if storeErr != nil {
+			// A non-ErrNoRows failure means SQLite is unhappy
+			// (corruption, FS error). Logging it makes operational
+			// debugging tractable; CheckItem still falls through to
+			// the standard review codepath rather than swallowing
+			// silently so the daemon keeps watching the PR — at
+			// worst the standard path applies its own guards.
+			slog.Warn("tier3: GetPRByGithubID failed, falling through to standard review path",
+				"repo", item.Repo, "number", item.Number, "err", storeErr)
+		}
+		if stored != nil && stored.AutoImplementIssueID != 0 {
+			if err := a.refreshAutoImplementPRReviewState(ctx, item, stored); err != nil {
+				// Propagate the error so the state-handler can apply
+				// its 404 cleanup + the StateWorker increases backoff
+				// (no LastSeen advance) rather than burning the API
+				// on every tick.
+				//
+				// Two error shapes flow through here. A GetPRReviews
+				// failure surfaces before any persist, so the store
+				// row is untouched and the next refresh re-observes
+				// from scratch. A runner failure (Responder /
+				// FixRunner) surfaces AFTER the new aggregate state
+				// was persisted + SSE-emitted on this tick — the
+				// stateMoved gate in refresh then sees
+				// stateMoved=false on the retry tick and re-dispatches
+				// without re-emitting the event.
+				return false, nil, err
+			}
+			// Success: signal `changed=true` so the StateWorker resets
+			// backoff and advances LastSeen. A nil snap means
+			// HandleChange's first guard short-circuits — we already
+			// handled dispatch inline inside refresh, the standard
+			// review codepath has nothing to do here.
+			return true, nil, nil
 		}
 		// Forward HeadSHA so HandleChange can feed it into runReview's
 		// persistent in-flight claim (#258, theburrowhub/heimdallm#264).

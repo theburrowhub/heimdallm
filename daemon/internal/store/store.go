@@ -24,17 +24,29 @@ type Store struct {
 
 const schema = `
 CREATE TABLE IF NOT EXISTS prs (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  github_id  INTEGER UNIQUE NOT NULL,
-  repo       TEXT NOT NULL,
-  number     INTEGER NOT NULL,
-  title      TEXT NOT NULL,
-  author     TEXT NOT NULL,
-  url        TEXT NOT NULL,
-  state      TEXT NOT NULL,
-  updated_at DATETIME NOT NULL,
-  fetched_at DATETIME NOT NULL,
-  dismissed  INTEGER NOT NULL DEFAULT 0
+  id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+  github_id                INTEGER UNIQUE NOT NULL,
+  repo                     TEXT NOT NULL,
+  number                   INTEGER NOT NULL,
+  title                    TEXT NOT NULL,
+  author                   TEXT NOT NULL,
+  url                      TEXT NOT NULL,
+  state                    TEXT NOT NULL,
+  updated_at               DATETIME NOT NULL,
+  fetched_at               DATETIME NOT NULL,
+  dismissed                INTEGER NOT NULL DEFAULT 0,
+  -- Review-state vigilance for auto_implement-created PRs (#482). The
+  -- columns are managed by Tier 3 (external_*) and the response/fix
+  -- modules (counters + last_responded_at), never by UpsertPR — see
+  -- the explicit migration block below for idempotent ADD COLUMNs that
+  -- cover existing DBs.
+  external_review_state    TEXT NOT NULL DEFAULT '',
+  external_reviewer        TEXT NOT NULL DEFAULT '',
+  external_review_at       TEXT NOT NULL DEFAULT '',
+  auto_implement_issue_id  INTEGER NOT NULL DEFAULT 0,
+  review_response_count    INTEGER NOT NULL DEFAULT 0,
+  review_fix_count         INTEGER NOT NULL DEFAULT 0,
+  last_responded_at        TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS reviews (
@@ -144,6 +156,27 @@ CREATE TABLE IF NOT EXISTS issue_triage_in_flight (
   started_at  DATETIME NOT NULL,
   PRIMARY KEY (issue_id, updated_at)
 );
+
+-- Persistent per-repo review instructions captured from authorized PR
+-- comment directives (#383). Injected into every future review of the repo.
+CREATE TABLE IF NOT EXISTS repo_instructions (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo        TEXT NOT NULL,
+  instruction TEXT NOT NULL,
+  author      TEXT NOT NULL,
+  comment_id  INTEGER NOT NULL,
+  created_at  DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_repo_instructions_repo ON repo_instructions(repo);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_repo_instructions_comment ON repo_instructions(comment_id);
+
+-- Dedup/audit guard so each directive comment is applied/acked exactly once
+-- across poll cycles. GitHub comment ids are stable and effectively unique.
+CREATE TABLE IF NOT EXISTS directive_marks (
+  comment_id   INTEGER PRIMARY KEY,
+  verb         TEXT NOT NULL,
+  processed_at DATETIME NOT NULL
+);
 `
 
 // Open opens (or creates) a SQLite database at dsn and applies the schema.
@@ -170,6 +203,15 @@ func Open(dsn string) (*Store, error) {
 	db.Exec("ALTER TABLE agents ADD COLUMN cli_flags TEXT NOT NULL DEFAULT ''")
 	db.Exec("ALTER TABLE agents RENAME COLUMN prompt TO prompt") // no-op, ensures column exists
 	db.Exec("ALTER TABLE prs ADD COLUMN dismissed INTEGER NOT NULL DEFAULT 0")
+	// Review-state vigilance (#482). Idempotent on existing DBs; the
+	// schema constant above already includes these for fresh installs.
+	db.Exec("ALTER TABLE prs ADD COLUMN external_review_state TEXT NOT NULL DEFAULT ''")
+	db.Exec("ALTER TABLE prs ADD COLUMN external_reviewer TEXT NOT NULL DEFAULT ''")
+	db.Exec("ALTER TABLE prs ADD COLUMN external_review_at TEXT NOT NULL DEFAULT ''")
+	db.Exec("ALTER TABLE prs ADD COLUMN auto_implement_issue_id INTEGER NOT NULL DEFAULT 0")
+	db.Exec("ALTER TABLE prs ADD COLUMN review_response_count INTEGER NOT NULL DEFAULT 0")
+	db.Exec("ALTER TABLE prs ADD COLUMN review_fix_count INTEGER NOT NULL DEFAULT 0")
+	db.Exec("ALTER TABLE prs ADD COLUMN last_responded_at TEXT NOT NULL DEFAULT ''")
 	db.Exec("ALTER TABLE agents ADD COLUMN issue_prompt TEXT NOT NULL DEFAULT ''")
 	db.Exec("ALTER TABLE agents ADD COLUMN issue_instructions TEXT NOT NULL DEFAULT ''")
 	db.Exec("ALTER TABLE agents ADD COLUMN implement_prompt TEXT NOT NULL DEFAULT ''")
@@ -224,6 +266,51 @@ func Open(dsn string) (*Store, error) {
 		updated_at  TEXT    NOT NULL,
 		started_at  DATETIME NOT NULL,
 		PRIMARY KEY (issue_id, updated_at)
+	)`)
+	// Repo rename audit table (#489). RenameRepo writes a row here
+	// in the same TX that bulk-renames prs/issues/activity_log/
+	// watch_state. The audit table is informational — it is NOT
+	// consulted to short-circuit idempotency of the UPDATEs (those
+	// are naturally idempotent via `WHERE repo = oldRepo`), so the
+	// log is safe across rename-back chains like A→B→A→B. The most
+	// recent row per old_repo is read only on the empty-state edge
+	// path to decide whether to insert a fresh audit row when the
+	// UPDATEs matched zero rows.
+	db.Exec(`CREATE TABLE IF NOT EXISTS repo_renames (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		old_repo    TEXT NOT NULL,
+		new_repo    TEXT NOT NULL,
+		renamed_at  DATETIME NOT NULL
+	)`)
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_repo_renames_old ON repo_renames(old_repo)")
+	db.Exec(`CREATE TABLE IF NOT EXISTS repo_instructions (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		repo        TEXT NOT NULL,
+		instruction TEXT NOT NULL,
+		author      TEXT NOT NULL,
+		comment_id  INTEGER NOT NULL,
+		created_at  DATETIME NOT NULL
+	)`)
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_repo_instructions_repo ON repo_instructions(repo)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_repo_instructions_comment ON repo_instructions(comment_id)")
+	db.Exec(`CREATE TABLE IF NOT EXISTS directive_marks (
+		comment_id   INTEGER PRIMARY KEY,
+		verb         TEXT NOT NULL,
+		processed_at DATETIME NOT NULL
+	)`)
+	// watch_state is owned by bus.NewWatchStore at runtime, but RenameRepo
+	// needs to UPDATE rows here in the same TX as the prs/issues moves.
+	// Mirror the schema with IF NOT EXISTS so the rename can run from
+	// tests and migration paths that have not yet constructed a WatchStore.
+	db.Exec(`CREATE TABLE IF NOT EXISTS watch_state (
+		key        TEXT PRIMARY KEY,
+		type       TEXT NOT NULL,
+		repo       TEXT NOT NULL,
+		number     INTEGER NOT NULL,
+		github_id  INTEGER NOT NULL,
+		next_check TEXT NOT NULL,
+		backoff_ns INTEGER NOT NULL,
+		last_seen  TEXT NOT NULL
 	)`)
 	// Enforce single-flight per issue at the schema level (#458). The
 	// claim SQL already uses INSERT ... WHERE NOT EXISTS, but a UNIQUE

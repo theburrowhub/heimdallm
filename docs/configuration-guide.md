@@ -140,6 +140,39 @@ HEIMDALLM_POLL_INTERVAL=5m   # valid: 1m, 5m, 30m, 1h
 poll_interval = "5m"
 ```
 
+### Repo / org rename propagation
+
+When a repository or its parent organisation is renamed on GitHub, Heimdallm needs to flip every record keyed on the old slug — otherwise rows for the OLD slug keep accumulating in the store while new poll data lands under the NEW slug, per-repo `[ai.repos."old/name"]` overrides stop applying, and stale working dirs linger on disk.
+
+A low-frequency probe queries GitHub for each monitored repo's canonical `full_name` and dispatches a reconciler when it differs. The reconciler runs the rename through a single SQLite transaction (`prs`, `issues`, `activity_log`, `watch_state`, plus an audit row in `repo_renames`), rewrites the config TOML (including `[ai.repos."<old>"]` and `[ai.orgs."<old-org>"]` when the org changed), purges the old worktree so the next acquire clones fresh, and emits an `repo_renamed` SSE event for the dashboard.
+
+```toml
+[ai]
+# Default 1h. "0" disables the probe entirely; operators can still
+# trigger renames manually via POST /admin/repo-rename.
+repo_rename_check_interval = "1h"
+```
+
+| Knob | Default | Purpose |
+|---|---|---|
+| `ai.repo_rename_check_interval` | `1h` | Probe cadence (`0` disables) |
+
+Manual trigger for emergencies (idempotent against the probe — re-running with the same pair after the audit row is in place is a no-op):
+
+```bash
+curl -X POST http://localhost:23456/admin/repo-rename \
+  -H "X-Heimdallm-Token: $HEIMDALLM_API_TOKEN" \
+  -d '{"old_repo": "acme/legacy", "new_repo": "acme/modern"}'
+```
+
+**Caveat — the TOML rewrite is lossy for surface details.** Just like the existing `PATCH /config` endpoints, the rename pipeline round-trips `config.toml` through a generic decoder/encoder, which means:
+
+- Comments anywhere in the file are dropped.
+- Key order inside a table follows the encoder, not the original file.
+- Blank lines between sections are not preserved.
+
+If you maintain `config.toml` by hand and care about comments or layout, keep a separate annotated copy as your source of truth — the daemon's view of `config.toml` is its parsed structure, not its bytes on disk.
+
 ---
 
 ## 4. Local Directory Resolution
@@ -347,6 +380,12 @@ auto_promote_refinement = true   # unset = true only when develop_labels is conf
 >
 > This ensures issues are only processed when you explicitly opt them in, preventing runaway costs from repeated AI invocations. Using generic labels like `bug` or `enhancement` in `develop_labels` or `review_only_labels` is discouraged because these are commonly assigned to many issues and can trigger unintended mass processing.
 >
+> **Tier 2 polling concurrency (`ai.tier2_repo_concurrency`)**
+>
+> Per-repo issue polling inside a single Tier 2 issue tick runs in parallel up to `ai.tier2_repo_concurrency` repos at a time (default `5`). The GitHub API rate limiter still throttles network usage; this knob controls wall-clock parallelism. Set higher on a fast network with many monitored repos; set to `1` to force the legacy sequential behaviour. PR fetch and issue processing also run on independent tickers — each tier has its own goroutine with its own `time.Ticker`, and a `time.Ticker` drops redundant ticks when the previous run is still in flight. So a slow issue cycle never delays PR detection, and one tier never blocks the other even if its run exceeds `poll_interval`.
+>
+> Newly auto-discovered repos have their first PR review **deferred by one poll cycle** so the Flutter UI receives `repo_discovered` before `review_started`. The cost is one tick of latency on the very first review of a brand-new repo; the alternative was a race where the UI rendered "review in progress" for a repo it had not yet learned about.
+
 > **Example of a safe, explicit configuration:**
 >
 > ```toml
@@ -362,6 +401,12 @@ auto_promote_refinement = true   # unset = true only when develop_labels is conf
 > skip_labels        = ["wontfix", "duplicate", "invalid"]
 > ```
 
+> **When `auto_implement` produces no changes**
+>
+> If the agent runs to completion but leaves the working tree untouched (because the issue lacks enough context, the prompt's "leave untouched if you cannot implement" escape hatch fired, etc.), the daemon reaches a terminal state rather than retrying on every poll. The fallback comment posted on the issue carries a hidden `<!-- heimdallm:done -->` marker so the fetcher's marker scan skips the issue on subsequent ticks. The SSE event surfaced to the UI is `issue_review_error` with `reason: "auto_implement_no_changes"`, rendered as a needs-attention card — not a clean success.
+>
+> To reopen the issue for another auto-implement attempt, post a comment containing `<!-- heimdallm:retry -->` (or remove the develop label to stop here). The retry marker overrides the done marker and forces reprocessing. Issues stored before this behaviour landed (no marker on the comment) keep skipping with reason `auto_implement produced no changes (historical row, no done marker); add retry marker to reprocess` until you post the retry marker manually.
+
 > **Security — `auto_implement` and untrusted issue authors**
 >
 > The body, title, and quoted comments of every processed issue are user-submitted input. When `auto_implement` is enabled, that input becomes part of the prompt sent to an AI CLI with **write access** to the repository checkout. A maliciously crafted issue (the classic "prompt injection" attack) could try to instruct the AI to read sensitive files from the worktree and embed them in the resulting commit.
@@ -375,6 +420,42 @@ auto_promote_refinement = true   # unset = true only when develop_labels is conf
 >
 > 1. Restrict `auto_implement` (the `develop` stage) to repositories where **all issue authors are trusted collaborators**. Public repositories accepting issues from anonymous reporters should keep `develop` disabled and rely on `triage` / `refinement` for visibility instead.
 > 2. The daemon's worktree contains only the cloned repository, so the AI cannot read files outside it. Keep operator secrets (HEIMDALLM token, GitHub PAT, etc.) outside any monitored clone.
+
+> **Review-state vigilance on `auto_implement` PRs**
+>
+> Once `auto_implement` creates a PR the daemon used to stop watching it. Issue #482 fixes that: Tier 3 now observes the PR's aggregated external review state and emits the `pr_review_state_changed` SSE event when it flips between `APPROVED`, `CHANGES_REQUESTED`, `COMMENTED` and the daemon-internal `FIX_PUSHED`. The state is surfaced on the issue detail and the dashboard tile as a coloured chip, so an operator sees the moment a reviewer leaves feedback without polling GitHub manually.
+>
+> The observation layer is **always on** and costs zero AI tokens — it adds one `GET /pulls/{n}/reviews` call per Tier 3 tick per PR that auto_implement created (PRs marked with a non-zero `auto_implement_issue_id` in the store).
+>
+> Two opt-in flags add agentic responses on top of the observation:
+>
+> ```toml
+> [ai.review_response]
+> enabled         = false   # default — off. Flip to true to opt in.
+> per_pr_lifetime = 5       # max responder runs per PR ever
+> cooldown_secs   = 300     # min seconds between two runs on the same PR
+>
+> [ai.review_fix]
+> enabled         = false   # default — off. Flip to true to opt in.
+> per_pr_lifetime = 3       # max fix runs per PR ever
+> cooldown_secs   = 300
+> ```
+>
+> When `ai.review_response.enabled = true`, a reviewer leaving a `COMMENTED` review triggers the Responder: the agent reads the latest non-bot comment, generates a short conversational reply, and posts it on the PR. The reply is review-only — the agent has no Edit/Write tool — and the reviewer's text passes through the same `UNTRUSTED USER COMMENTS` sanitisation fence the issue triage pipeline uses (#478). After `per_pr_lifetime` responses on the same PR, the Responder emits an `issue_review_error` with `reason="review_response_cap_exceeded"` and stops — there is no way to lift the cap from configuration; the counter is persistent on the PR row.
+>
+> When `ai.review_fix.enabled = true`, a reviewer leaving a `CHANGES_REQUESTED` review triggers the FixRunner. The daemon reserves a per-execution worktree via `repoctx` (#461), fetches the PR's head ref, checks it out at the current tip, runs the agent with the same write-mode permissions as `auto_implement`, and if the working tree changes, commits and pushes back to the same head branch. The follow-up commit is announced via a PR comment so the reviewer sees what landed. After a successful push the PR's external review state flips to `FIX_PUSHED` so the runner does not re-fire on the same CR; a reviewer submitting a fresh CR after the push flips the state back to `CHANGES_REQUESTED` and the cycle can repeat. The lifetime cap (default 3) terminates the cycle for good once reached.
+>
+> If the agent inspects the request and decides not to apply it (out of scope, already addressed, or unclear) the working tree stays clean — the daemon posts an advisory comment explaining the decision but does NOT push and does NOT mark `FIX_PUSHED`. A reviewer who supplies more context can re-trigger the runner within the cooldown + lifetime cap.
+>
+> Cost ceiling guarantees, in plain English:
+>
+> | Feature | Off-by-default | Counter persisted | Max AI invocations per PR |
+> |---|---|---|---|
+> | Observation (Tier 3 reviews fetch) | n/a (always on) | n/a | 0 |
+> | `review_response` | yes | yes (`review_response_count`) | `per_pr_lifetime` (default 5) |
+> | `review_fix` | yes | yes (`review_fix_count`) | `per_pr_lifetime` (default 3) |
+>
+> A misconfigured TOML (`per_pr_lifetime = 0` or negative) falls back to the constant default rather than meaning "unlimited" — flipping `enabled` is the only way to opt in, and the caps cannot be silently uncapped. An operator who wants to retry beyond the cap zeroes the counter in SQLite (`UPDATE prs SET review_response_count = 0 WHERE id = ?`).
 
 ### Scope filters
 
@@ -467,7 +548,7 @@ model = "gemini-2.5-pro"
 
 [ai.agents.codex]
 model         = "codex-mini"
-approval_mode = "full-auto"
+approval_mode = "never"       # Codex --ask-for-approval value. Legacy full-auto maps to never.
 
 [ai.agents.opencode]
 model = "anthropic/claude-sonnet-4"
@@ -819,6 +900,12 @@ Worst-case disk use: `(HEIMDALLM_LOG_KEEP + 1) × HEIMDALLM_LOG_MAX_MB`.
 
 ### Installation
 
+**Homebrew:**
+
+```bash
+brew install theburrowhub/tap/heimdallm-cli
+```
+
 **Binary download:**
 
 Download the appropriate archive from [GitHub Releases](https://github.com/theburrowhub/heimdallm/releases) (look for `heimdallm-cli_*`):
@@ -859,6 +946,29 @@ make setup   # prints the token and copies it into docker/.env
 docker exec heimdallm cat /data/api_token
 ```
 
+### Local development
+
+The CLI is a separate Go module under `cli/`. It uses Cobra for commands and
+Bubble Tea + Lipgloss for the dashboard, and it talks to the daemon through
+`cli/internal/api/client.go`.
+
+From the repository root:
+
+```bash
+make build-cli    # builds cli/bin/heimdallm-cli
+make test-cli     # host-safe CLI tests
+make lint-cli     # go vet for the CLI module
+make dev-daemon   # run the daemon at http://localhost:7842
+make dev-cli      # run heimdallm-cli dashboard
+```
+
+Set `HEIMDALLM_HOST` and `HEIMDALLM_TOKEN` when testing against a non-local
+daemon:
+
+```bash
+HEIMDALLM_HOST=https://heimdallm.example.com HEIMDALLM_TOKEN=... make dev-cli
+```
+
 ### Commands
 
 | Command | Description |
@@ -872,6 +982,28 @@ docker exec heimdallm cat /data/api_token
 | `heimdallm-cli config` | Print the daemon's running configuration as JSON |
 | `heimdallm-cli stats` | Review statistics: totals, by severity, by CLI, top repos, timing |
 | `heimdallm-cli dashboard` | Live terminal dashboard |
+
+### TUI dashboard keybindings
+
+The dashboard tabs are Activity, PRs, Issues, Config, Stats, Logs, and Server.
+
+| Key | Action |
+|---|---|
+| `tab`, `l`, `right` | Move to the next tab |
+| `h`, `left` | Move to the previous tab |
+| `1`-`7` | Jump directly to a tab |
+| `r` | Refresh data |
+| `s` | Stop the daemon (opens a confirmation prompt) |
+| `q`, `ctrl+c` | Quit |
+| `j`, `down` | Move or scroll down |
+| `k`, `up` | Move or scroll up |
+| `pgdn`, `pgup` | Page through long lists or detail views |
+| `g` | Jump to the top of the current list |
+| `G` | Follow the live Logs tab |
+| `enter` | Open PR or issue details |
+| `esc` | Close an open detail view |
+| `p` | Promote a promotable issue |
+| `y` / `n` | Confirm or cancel daemon shutdown |
 
 ---
 
@@ -1025,7 +1157,7 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 
 # [ai.agents.codex]
 # model         = "codex-mini"
-# approval_mode = "full-auto"
+# approval_mode = "never"
 
 # [ai.agents.opencode]
 # model = "anthropic/claude-sonnet-4"

@@ -1,6 +1,7 @@
 package server_test
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -41,10 +42,68 @@ func TestHandlerHealth(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("health: status %d", w.Code)
 	}
-	var body map[string]string
-	json.NewDecoder(w.Body).Decode(&body)
+	var body map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode health: %v", err)
+	}
 	if body["status"] != "ok" {
 		t.Errorf("health body: %v", body)
+	}
+}
+
+func TestHealth_ReturnsDeepChecks(t *testing.T) {
+	srv, _ := setupServer(t)
+	lastPoll := time.Now().UTC().Add(-5 * time.Second)
+	srv.SetHealthSnapshotFn(func() server.HealthSnapshot {
+		return server.HealthSnapshot{
+			LastPollAt:   lastPoll,
+			PollInterval: time.Minute,
+		}
+	})
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("health: status %d", w.Code)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode health: %v", err)
+	}
+	checks, ok := body["checks"].(map[string]any)
+	if !ok {
+		t.Fatalf("checks missing: %v", body)
+	}
+	if sqlite, ok := checks["sqlite"].(map[string]any); !ok || sqlite["ok"] != true {
+		t.Fatalf("sqlite check not ok: %v", checks["sqlite"])
+	}
+	if last, ok := checks["last_poll"].(map[string]any); !ok || last["ok"] != true || last["at"] == nil {
+		t.Fatalf("last_poll check not ok: %v", checks["last_poll"])
+	}
+}
+
+func TestHealth_ReturnsServiceUnavailableForStalePoll(t *testing.T) {
+	srv, _ := setupServer(t)
+	srv.SetHealthSnapshotFn(func() server.HealthSnapshot {
+		return server.HealthSnapshot{
+			LastPollAt:   time.Now().UTC().Add(-3 * time.Minute),
+			PollInterval: time.Minute,
+		}
+	})
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("health status: got %d want %d", w.Code, http.StatusServiceUnavailable)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode health: %v", err)
+	}
+	if body["status"] != "degraded" {
+		t.Fatalf("health status body: %v", body)
 	}
 }
 
@@ -84,6 +143,64 @@ func TestHealth_ReturnsVersionAndStartedAt(t *testing.T) {
 	}
 }
 
+func TestEventsEmitsObservableHeartbeat(t *testing.T) {
+	srv, _ := setupServer(t)
+	srv.SetHealthSnapshotFn(func() server.HealthSnapshot {
+		return server.HealthSnapshot{
+			LastPollAt:   time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+			PollInterval: time.Minute,
+		}
+	})
+	ts := httptest.NewServer(srv.Router())
+	t.Cleanup(ts.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/events", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /events: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d want 200", resp.StatusCode)
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	seenHeartbeat := false
+	var heartbeatData string
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "event: heartbeat" {
+			seenHeartbeat = true
+			continue
+		}
+		if seenHeartbeat && strings.HasPrefix(line, "data: ") {
+			heartbeatData = strings.TrimPrefix(line, "data: ")
+			break
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("scan SSE: %v", err)
+	}
+	if heartbeatData == "" {
+		t.Fatal("heartbeat event not received")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(heartbeatData), &payload); err != nil {
+		t.Fatalf("decode heartbeat: %v", err)
+	}
+	if payload["ts"] == "" {
+		t.Fatalf("heartbeat payload missing liveness fields: %v", payload)
+	}
+	if payload["last_poll_at"] != "2026-01-02T03:04:05Z" {
+		t.Fatalf("last_poll_at: got %v", payload["last_poll_at"])
+	}
+}
+
 func TestHandlerListPRs(t *testing.T) {
 	srv, s := setupServer(t)
 	s.UpsertPR(&store.PR{GithubID: 1, Repo: "org/r", Number: 1, Title: "t", Author: "a", URL: "u", State: "open", UpdatedAt: time.Now(), FetchedAt: time.Now()})
@@ -98,6 +215,31 @@ func TestHandlerListPRs(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&prs)
 	if len(prs) != 1 {
 		t.Errorf("expected 1 PR, got %d", len(prs))
+	}
+}
+
+func TestHandlerListPRsFiltersSelfAuthored(t *testing.T) {
+	srv, s := setupServer(t)
+	srv.SetMeFn(func() (string, error) { return "ivan", nil })
+	now := time.Now()
+	s.UpsertPR(&store.PR{GithubID: 1, Repo: "org/r", Number: 1, Title: "own", Author: "Ivan", URL: "u1", State: "open", UpdatedAt: now, FetchedAt: now})
+	s.UpsertPR(&store.PR{GithubID: 2, Repo: "org/r", Number: 2, Title: "team", Author: "teammate", URL: "u2", State: "open", UpdatedAt: now, FetchedAt: now})
+
+	req := httptest.NewRequest("GET", "/prs", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list prs: status %d", w.Code)
+	}
+	var prs []map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&prs); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(prs) != 1 {
+		t.Fatalf("expected 1 non-self PR, got %d: %#v", len(prs), prs)
+	}
+	if prs[0]["author"] != "teammate" {
+		t.Fatalf("author = %v, want teammate", prs[0]["author"])
 	}
 }
 

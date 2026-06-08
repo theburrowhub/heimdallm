@@ -388,7 +388,7 @@ class _AgentSectionState extends State<_AgentSection> {
                 // ignore: deprecated_member_use
                 value: s.approvalMode.isEmpty ? null : s.approvalMode,
                 decoration: const InputDecoration(
-                    labelText: '--approval-mode', border: OutlineInputBorder()),
+                    labelText: '--ask-for-approval', border: OutlineInputBorder()),
                 items: [
                   const DropdownMenuItem<String>(value: null, child: Text('CLI default')),
                   ...CLIAgentConfig.approvalModeOptions.map(
@@ -659,7 +659,7 @@ class _AgentSectionState extends State<_AgentSection> {
     switch (name) {
       case 'claude': return '--allowedTools Bash,Read';
       case 'gemini': return '--all-files';
-      case 'codex':  return '--full-auto';
+      case 'codex':  return '--sandbox workspace-write';
       default:       return '--flag value';
     }
   }

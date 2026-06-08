@@ -152,6 +152,84 @@ func TestExecuteRawFallsBackToCWDWhenWorkDirFlagUnsupported(t *testing.T) {
 	requireSameDir(t, strings.TrimSpace(string(cwdBytes)), workDir)
 }
 
+func TestExecuteRawCodexUsesExecAndReadsPromptFromStdin(t *testing.T) {
+	binDir := t.TempDir()
+	captureArgs := filepath.Join(t.TempDir(), "args.txt")
+	capturePrompt := filepath.Join(t.TempDir(), "prompt.txt")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"--help\" ]; then\n" +
+		"  printf 'Usage: codex\\n  -C, --cd <DIR>\\n'\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"last=''\n" +
+		"saw_exec=0\n" +
+		"for arg in \"$@\"; do last=\"$arg\"; done\n" +
+		"for arg in \"$@\"; do if [ \"$arg\" = \"exec\" ]; then saw_exec=1; fi; done\n" +
+		"if [ \"$saw_exec\" != \"1\" ]; then\n" +
+		"  printf 'exec subcommand missing\\n' >&2\n" +
+		"  exit 2\n" +
+		"fi\n" +
+		"if [ \"$last\" != \"-\" ]; then\n" +
+		"  printf 'stdin prompt marker missing\\n' >&2\n" +
+		"  exit 2\n" +
+		"fi\n" +
+		"cat > " + shellQuote(capturePrompt) + "\n" +
+		"printf '%s\\n' \"$*\" > " + shellQuote(captureArgs) + "\n" +
+		"printf 'ok\\n'\n"
+	path := filepath.Join(binDir, "codex")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake CLI: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	prompt := "review this PR"
+	e := executor.New()
+	if _, err := e.ExecuteRaw("codex", prompt, executor.ExecOptions{ApprovalMode: "full-auto"}); err != nil {
+		t.Fatalf("ExecuteRaw: %v", err)
+	}
+
+	argsBytes, err := os.ReadFile(captureArgs)
+	if err != nil {
+		t.Fatalf("read captured args: %v", err)
+	}
+	args := strings.Fields(string(argsBytes))
+	execIdx := indexOf(args, "exec")
+	if execIdx < 0 {
+		t.Fatalf("args = %v, want codex exec subcommand", args)
+	}
+	if got := args[len(args)-1]; got != "-" {
+		t.Fatalf("args = %v, want stdin marker '-' as final arg", args)
+	}
+	approvalIdx := indexOf(args, "--ask-for-approval")
+	if approvalIdx < 0 || approvalIdx > execIdx || !containsInOrder(args, "--ask-for-approval", "never") {
+		t.Fatalf("args = %v, want legacy full-auto mapped to --ask-for-approval never", args)
+	}
+	if strings.Contains(string(argsBytes), "--approval-mode") {
+		t.Fatalf("args = %v, must not use removed --approval-mode flag", args)
+	}
+	promptBytes, err := os.ReadFile(capturePrompt)
+	if err != nil {
+		t.Fatalf("read captured prompt: %v", err)
+	}
+	if string(promptBytes) != prompt {
+		t.Fatalf("prompt = %q, want %q", string(promptBytes), prompt)
+	}
+}
+
+func TestValidateApprovalModeAcceptsCurrentAndLegacyCodexValues(t *testing.T) {
+	for _, mode := range []string{"", "untrusted", "on-failure", "on-request", "never", "auto-edit", "full-auto", "suggest"} {
+		t.Run(mode, func(t *testing.T) {
+			if err := executor.ValidateApprovalMode(mode); err != nil {
+				t.Fatalf("ValidateApprovalMode(%q): %v", mode, err)
+			}
+		})
+	}
+
+	if err := executor.ValidateApprovalMode("danger-full-access"); err == nil {
+		t.Fatal("ValidateApprovalMode accepted an unsupported value")
+	}
+}
+
 func containsInOrder(args []string, first, second string) bool {
 	for i := 0; i+1 < len(args); i++ {
 		if args[i] == first && args[i+1] == second {
@@ -159,6 +237,15 @@ func containsInOrder(args []string, first, second string) bool {
 		}
 	}
 	return false
+}
+
+func indexOf(args []string, target string) int {
+	for i, arg := range args {
+		if arg == target {
+			return i
+		}
+	}
+	return -1
 }
 
 func fakeCLIScript(help, captureArgs, captureCWD string) string {

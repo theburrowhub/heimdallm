@@ -52,7 +52,7 @@ Hardening details are inlined in the Makefile target. Summary:
 If IT/Security asks how we run Go tests on their laptops, point them at
 this section and the `test-docker` target.
 
-## When `go test` on the host is OK
+## When daemon `go test` on the host is OK
 
 Never, on a corporate laptop with an EDR, unless Security has explicitly
 whitelisted `$GOCACHE` and `/var/folders/.../go-build/`. Raising a ticket
@@ -70,12 +70,41 @@ binaries). Run them normally:
 
 ```bash
 cd flutter_app && flutter test
-# or combined with Go tests (note: `make test` runs Go on the host):
+# or combined with daemon + CLI tests (note: `make test` runs daemon Go tests on the host):
 make test
 ```
 
-**Prefer `make test-docker && cd flutter_app && flutter test`** over
-`make test` on EDR-protected endpoints.
+**Prefer `make test-docker && cd flutter_app && flutter test && make test-cli`**
+over `make test` on EDR-protected endpoints.
+
+## CLI / TUI
+
+The CLI/TUI lives in `cli/` and is a separate Go module
+(`github.com/theburrowhub/heimdallm/cli`). It uses Cobra for commands and
+Bubble Tea + Lipgloss for the terminal dashboard. It talks to the daemon only
+over HTTP/SSE through `cli/internal/api/client.go`.
+
+CLI tests are OK to run on the host: unlike the daemon, the CLI is a client
+process with no embedded NATS, SQLite, pollers, worker loops, or daemon
+server. Run:
+
+```bash
+make -C cli test
+make test-cli
+make -C cli lint
+make lint-cli
+```
+
+For TUI UI changes, run a daemon locally and verify the dashboard visually:
+
+```bash
+make dev-daemon
+make dev-cli
+```
+
+Any daemon endpoint consumed by CLI/TUI should get a matching method in
+`cli/internal/api/client.go`; do not let commands or TUI screens make ad hoc
+HTTP calls.
 
 ## Flutter platform abstraction layer
 
@@ -126,7 +155,9 @@ bump.
 
 ## Do not
 
-- Run `go test` / `go build` on the host on a corporate laptop with EDR.
+- Run daemon `go test` / `go build` on the host on a corporate laptop with EDR.
+- Import daemon packages from `cli/`; the CLI is a separate Go module and must
+  use `cli/internal/api/client.go` over HTTP/SSE.
 - Stage `.DS_Store` in commits.
 - Push directly to `main` — always open a PR.
 - Skip hooks (`--no-verify`) without an explicit user instruction.

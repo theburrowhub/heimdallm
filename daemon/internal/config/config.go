@@ -264,6 +264,23 @@ func (c IssueTrackingConfig) MatchesAssignees(assignees []string) bool {
 	return ok
 }
 
+// MatchesInstructionAuthors reports whether login is permitted to issue
+// persistent review-instruction directives for this repo. Case-insensitive and
+// tolerant of a leading "@". An empty allowlist denies everyone — comment-driven
+// instructions are opt-in and must be explicitly granted (issue #383).
+func (r RepoAI) MatchesInstructionAuthors(login string) bool {
+	login = strings.ToLower(strings.TrimSpace(strings.TrimLeft(login, "@")))
+	if login == "" {
+		return false
+	}
+	for _, a := range r.InstructionAuthors {
+		if strings.ToLower(strings.TrimSpace(strings.TrimLeft(a, "@"))) == login {
+			return true
+		}
+	}
+	return false
+}
+
 // Classify returns the processing mode for an issue given its labels.
 // Matching is case-insensitive to match the way GitHub displays labels; the
 // underlying labels API is case-preserving but the UI is not, so users
@@ -326,7 +343,7 @@ func labelSetIntersects(set map[string]struct{}, list []string) bool {
 type CLIAgentConfig struct {
 	Model        string `toml:"model" json:"model,omitempty"`                 // e.g. "claude-opus-4-6"
 	MaxTurns     int    `toml:"max_turns" json:"max_turns,omitempty"`         // claude: --max-turns (0 = not set)
-	ApprovalMode string `toml:"approval_mode" json:"approval_mode,omitempty"` // codex: --approval-mode
+	ApprovalMode string `toml:"approval_mode" json:"approval_mode,omitempty"` // codex: --ask-for-approval
 	ExtraFlags   string `toml:"extra_flags" json:"extra_flags,omitempty"`     // free-form additional CLI flags
 	PromptID     string `toml:"prompt" json:"prompt,omitempty"`               // agent-level prompt override
 
@@ -338,6 +355,11 @@ type CLIAgentConfig struct {
 	NoSessionPersistence bool   `toml:"no_session_persistence" json:"no_session_persistence"` // --no-session-persistence
 	ExecutionTimeout     string `toml:"execution_timeout" json:"execution_timeout,omitempty"` // per-agent override, e.g. "20m"
 }
+
+// DefaultTier2RepoConcurrency is the fallback used by both
+// applyDefaults and processReposInParallel so the two paths can't
+// drift out of sync. See #481.
+const DefaultTier2RepoConcurrency = 5
 
 type AIConfig struct {
 	Primary          string                    `toml:"primary"`
@@ -355,6 +377,12 @@ type AIConfig struct {
 	PRLabels    []string `toml:"pr_labels"`
 	PRAssignee  string   `toml:"pr_assignee"`
 	PRDraft     *bool    `toml:"pr_draft,omitempty"`
+
+	// InstructionAuthors are GitHub logins permitted to set persistent,
+	// per-repo review instructions via PR comment directives (#383). Resolved
+	// through the repo > org > global hierarchy like PRReviewers. Empty means
+	// nobody is authorized — the comment-driven feature is opt-in.
+	InstructionAuthors []string `toml:"instruction_authors"`
 
 	// IssuePrompt is the global default agent profile ID for issue triage.
 	// Per-repo overrides in [ai.repos.<name>] take precedence.
@@ -382,12 +410,81 @@ type AIConfig struct {
 	// if disk pressure dominates.
 	MaxWorktreesPerRepo int `toml:"max_worktrees_per_repo"`
 
+	// Tier2RepoConcurrency caps how many repos the Tier 2 issue
+	// polling loop processes in parallel within a single tick (#481).
+	// A fresh value of 0 inherits the daemon default
+	// (DefaultTier2RepoConcurrency). The cap applies to wall-clock
+	// parallelism; the GitHub API rate limiter
+	// (scheduler.RateLimiter) still throttles network usage.
+	Tier2RepoConcurrency int `toml:"tier2_repo_concurrency"`
+
+	// RepoRenameCheckInterval controls how often the rename probe
+	// queries GitHub for each monitored repo's canonical full_name
+	// to detect a repo or org rename (#489). Empty string falls back
+	// to the daemon default (1h). Setting "0" disables the probe
+	// entirely; operators can still trigger renames manually via
+	// POST /admin/repo-rename.
+	RepoRenameCheckInterval string `toml:"repo_rename_check_interval"`
+
 	// GeneratePRDescription enables LLM-generated PR titles and descriptions
 	// for auto_implement PRs. When true, after the implementation commit,
 	// a second LLM call generates a rich PR description from the diff.
 	// Default: false (backwards compat).
 	GeneratePRDescription bool `toml:"generate_pr_description"`
+
+	// ReviewResponse configures phase 2 of the PR review-state vigilance
+	// feature (#482): the daemon optionally posts an AI-generated reply
+	// when an external reviewer leaves COMMENTED feedback on a PR that
+	// auto_implement created. Off by default — operators opt in per
+	// daemon by flipping Enabled.
+	ReviewResponse ReviewResponseConfig `toml:"review_response"`
+
+	// ReviewFix configures phase 3: when an external reviewer requests
+	// changes, the daemon optionally re-runs the agent on the PR's head
+	// branch and pushes a fix. Off by default; carries a hard
+	// per-PR-lifetime cap so the worst case is bounded.
+	ReviewFix ReviewFixConfig `toml:"review_fix"`
 }
+
+// ReviewResponseConfig caps the AI cost of phase-2 auto-responses to
+// PR review comments (#482). All thresholds default to safe values via
+// applyDefaults; a zero or negative value also falls back to the
+// default rather than meaning "unlimited".
+type ReviewResponseConfig struct {
+	// Enabled defaults to false. When false the Responder is a no-op
+	// regardless of every other knob — opt-in only.
+	Enabled bool `toml:"enabled"`
+	// PerPRLifetime caps how many responder runs a single PR can ever
+	// trigger. The counter is persisted on the PR row so a daemon
+	// restart cannot reset it; operators can manually zero it in SQL
+	// if they want the agent to start over. A future follow-up may
+	// add a sliding-24h cap as a second axis, but lifetime is the
+	// safer default for the first opt-in surface.
+	PerPRLifetime int `toml:"per_pr_lifetime"`
+	// CooldownSecs is the minimum gap between two responder runs on
+	// the same PR. Protects against a chatty reviewer firing the
+	// responder once per comment within the same tick.
+	CooldownSecs int `toml:"cooldown_secs"`
+}
+
+// ReviewFixConfig caps the AI cost of phase-3 auto-fix runs (#482).
+// The lifetime cap is intentionally low: an operator who wants more
+// rounds must opt-in explicitly so we never silently amplify cost.
+type ReviewFixConfig struct {
+	Enabled       bool `toml:"enabled"`
+	PerPRLifetime int  `toml:"per_pr_lifetime"`
+	CooldownSecs  int  `toml:"cooldown_secs"`
+}
+
+// Defaults for the review-response and review-fix paths (#482).
+// Single source of truth: applyDefaults reads these, the runtime
+// guards reference them when callers leave a 0 in TOML.
+const (
+	DefaultReviewResponsePerPRLifetime = 5
+	DefaultReviewResponseCooldownSecs  = 300
+	DefaultReviewFixPerPRLifetime      = 3
+	DefaultReviewFixCooldownSecs       = 300
+)
 
 type RepoAI struct {
 	Primary string `toml:"primary"`
@@ -417,6 +514,8 @@ type RepoAI struct {
 	PRAssignee  string   `toml:"pr_assignee"`        // GitHub login to assign the PR to
 	PRLabels    []string `toml:"pr_labels"`          // labels to add to the PR
 	PRDraft     *bool    `toml:"pr_draft,omitempty"` // create as draft PR
+
+	InstructionAuthors []string `toml:"instruction_authors"` // GitHub logins allowed to set standing instructions (#383)
 
 	// GeneratePRDescription overrides the global ai.generate_pr_description
 	// for this repo. nil = inherit from global.
@@ -473,10 +572,11 @@ type OrgAI struct {
 
 	// Nil slices inherit from global; non-nil empty slices explicitly clear
 	// inherited values for every repo in this org.
-	PRReviewers []string `toml:"pr_reviewers"`
-	PRAssignee  string   `toml:"pr_assignee"`
-	PRLabels    []string `toml:"pr_labels"`
-	PRDraft     *bool    `toml:"pr_draft,omitempty"`
+	PRReviewers        []string `toml:"pr_reviewers"`
+	PRAssignee         string   `toml:"pr_assignee"`
+	PRLabels           []string `toml:"pr_labels"`
+	PRDraft            *bool    `toml:"pr_draft,omitempty"`
+	InstructionAuthors []string `toml:"instruction_authors"` // see RepoAI.InstructionAuthors (#383)
 
 	GeneratePRDescription *bool                  `toml:"generate_pr_description,omitempty"`
 	IssueTracking         *IssueTrackingOverride `toml:"issue_tracking,omitempty" json:"issue_tracking,omitempty"`
@@ -623,6 +723,7 @@ func (c *Config) AIForRepo(repo string) RepoAI {
 		CloneDir:              c.AI.CloneDir,
 		AutoPromoteTriage:     c.AI.AutoPromoteTriage,
 		AutoPromoteRefinement: c.AI.AutoPromoteRefinement,
+		InstructionAuthors:    c.AI.InstructionAuthors,
 	}
 	if org := repoOrg(repo); org != "" && c.AI.Orgs != nil {
 		if o, ok := c.AI.Orgs[org]; ok {
@@ -656,6 +757,7 @@ func applyOrgAI(out *RepoAI, o OrgAI) {
 		PRAssignee:            o.PRAssignee,
 		PRDraft:               o.PRDraft,
 		GeneratePRDescription: o.GeneratePRDescription,
+		InstructionAuthors:    o.InstructionAuthors,
 	})
 }
 
@@ -678,6 +780,7 @@ func applyRepoAI(out *RepoAI, r RepoAI) {
 		PRAssignee:            r.PRAssignee,
 		PRDraft:               r.PRDraft,
 		GeneratePRDescription: r.GeneratePRDescription,
+		InstructionAuthors:    r.InstructionAuthors,
 	})
 }
 
@@ -699,6 +802,7 @@ type scopedAIFields struct {
 	PRAssignee            string
 	PRDraft               *bool
 	GeneratePRDescription *bool
+	InstructionAuthors    []string
 }
 
 func applyScopedAI(out *RepoAI, fields scopedAIFields) {
@@ -752,6 +856,9 @@ func applyScopedAI(out *RepoAI, fields scopedAIFields) {
 	}
 	if fields.GeneratePRDescription != nil {
 		out.GeneratePRDescription = fields.GeneratePRDescription
+	}
+	if fields.InstructionAuthors != nil {
+		out.InstructionAuthors = fields.InstructionAuthors
 	}
 }
 
@@ -862,6 +969,30 @@ func (c *Config) applyDefaults() {
 	}
 	if c.AI.MaxWorktreesPerRepo == 0 {
 		c.AI.MaxWorktreesPerRepo = 5
+	}
+	if c.AI.Tier2RepoConcurrency == 0 {
+		c.AI.Tier2RepoConcurrency = DefaultTier2RepoConcurrency
+	}
+	// Empty string falls back to 1h. "0" stays "0" — operator-disabled.
+	if c.AI.RepoRenameCheckInterval == "" {
+		c.AI.RepoRenameCheckInterval = "1h"
+	}
+	// Review-state vigilance defaults (#482). The Enabled flag is NOT
+	// touched here — it must stay false unless the operator explicitly
+	// opts in via TOML. Only the cap/cooldown axes fall back to defaults
+	// when left at zero (treating zero as "unlimited" would defeat the
+	// safety story).
+	if c.AI.ReviewResponse.PerPRLifetime <= 0 {
+		c.AI.ReviewResponse.PerPRLifetime = DefaultReviewResponsePerPRLifetime
+	}
+	if c.AI.ReviewResponse.CooldownSecs <= 0 {
+		c.AI.ReviewResponse.CooldownSecs = DefaultReviewResponseCooldownSecs
+	}
+	if c.AI.ReviewFix.PerPRLifetime <= 0 {
+		c.AI.ReviewFix.PerPRLifetime = DefaultReviewFixPerPRLifetime
+	}
+	if c.AI.ReviewFix.CooldownSecs <= 0 {
+		c.AI.ReviewFix.CooldownSecs = DefaultReviewFixCooldownSecs
 	}
 	if c.ActivityLog.Enabled == nil {
 		v := true

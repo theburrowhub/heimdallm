@@ -21,6 +21,16 @@ const (
 	// is now backfilled from the current snapshot. The user must trigger
 	// a re-review manually to score that exact commit.
 	SkipReasonLegacyBackfill SkipReason = "legacy_backfill"
+	// SkipReasonNoReReviewRequest is emitted when pipeline.Run skips a
+	// review because the HEAD SHA changed (push) but no explicit
+	// review_requested event was found in the timeline after the
+	// previous review. Closes theburrowhub/heimdallm#509: repos with
+	// "Dismiss stale reviews on push" (or any auto-re-add workflow)
+	// were re-triggering reviews on every push without operator
+	// intent. Distinct from SkipReasonSHAUnchanged so UI/logs can tell
+	// "we already covered this commit" from "we covered an earlier
+	// commit and nobody asked us to re-review yet".
+	SkipReasonNoReReviewRequest SkipReason = "no_rereview_request"
 )
 
 // PRGate is the minimal PR view the guard evaluator needs. Callers synthesize
