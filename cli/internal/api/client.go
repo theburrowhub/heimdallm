@@ -264,6 +264,18 @@ func (c *Client) TriggerIssueReview(id int64) error {
 	return err
 }
 
+// PromoteIssue moves an issue to its next configured stage by changing labels.
+func (c *Client) PromoteIssue(id int64) error {
+	_, err := c.do("POST", fmt.Sprintf("/issues/%d/promote", id))
+	return err
+}
+
+// Shutdown asks the daemon to stop gracefully.
+func (c *Client) Shutdown() error {
+	_, err := c.do("POST", "/shutdown")
+	return err
+}
+
 // DismissIssue hides an issue from the pipeline, stopping retries until undismissed.
 func (c *Client) DismissIssue(id int64) error {
 	_, err := c.do("POST", fmt.Sprintf("/issues/%d/dismiss", id))

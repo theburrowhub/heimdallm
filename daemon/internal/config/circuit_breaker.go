@@ -13,8 +13,10 @@ package config
 // are independent: a busy repo running both PR review and issue triage
 // can consume PerRepoHr PR reviews AND PerIssueRepoHr triages per hour.
 type CircuitBreakerConfig struct {
-	// PerPR24h caps PR reviews on the same PR over any 24-hour window.
-	// Default 3; set to 0 to apply the default.
+	// PerPR24h caps PR reviews on the same PR HEAD SHA over any 24-hour
+	// window. A new commit gets its own allowance; an unresolved HEAD SHA
+	// falls back to the whole-PR cap. Default 3; set to 0 to apply the
+	// default.
 	PerPR24h int `toml:"per_pr_24h"`
 	// PerRepoHr caps PR reviews on the same repo over any 1-hour window.
 	// Default 20; set to 0 to apply the default.

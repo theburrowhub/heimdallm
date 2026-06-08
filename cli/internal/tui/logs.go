@@ -126,6 +126,15 @@ func sseToLogLine(evt api.SSEEvent) logLine {
 		line.Badge = "ISSUE"
 		line.Action = "PROMOTED"
 		line.Status = logSuccess
+		from, _ := m["from_stage"].(string)
+		to, _ := m["to_stage"].(string)
+		if from == "" && to == "" {
+			from, _ = m["from_label"].(string)
+			to, _ = m["to_label"].(string)
+		}
+		if from != "" || to != "" {
+			line.Details = strings.TrimSpace(from + " -> " + to)
+		}
 
 	case "repo_discovered":
 		line.Badge = "REPO"
@@ -138,7 +147,7 @@ func sseToLogLine(evt api.SSEEvent) logLine {
 		line.Badge = "EVENT"
 		line.Action = strings.ToUpper(evt.Type)
 		line.Status = logNeutral
-		_, line.Target = formatSSEData(evt.Data)
+		_, line.Target = formatSSEData(evt.Type, evt.Data)
 		return line
 	}
 

@@ -202,11 +202,46 @@ func TestRecorder_IssueImplemented(t *testing.T) {
 	waitFor(t, func() bool { return fs.count() == 1 })
 
 	got := fs.at(0)
+	if got.itemType != "issue" || got.itemNumber != 12 || got.itemTitle != "Refactor auth" {
+		t.Errorf("row basics: %+v", got)
+	}
 	if got.action != "implement" || got.outcome != "pr_opened" {
 		t.Errorf("action/outcome: %s/%s", got.action, got.outcome)
 	}
+	if got.details["cli_used"] != "claude" {
+		t.Errorf("details cli_used: %v", got.details["cli_used"])
+	}
 	if got.details["pr_number"] != 99 {
 		t.Errorf("details pr_number: %v", got.details["pr_number"])
+	}
+}
+
+func TestRecorder_IssueRefinementDone(t *testing.T) {
+	_, fs, events := newTestRecorder(t)
+	payload, _ := json.Marshal(map[string]any{
+		"repo":         "acme/api",
+		"issue_number": 12,
+		"issue_title":  "Refactor auth",
+		"cli_used":     "claude",
+		"review_id":    321,
+		"post_ok":      true,
+		"truncated":    false,
+	})
+	events <- sse.Event{Type: sse.EventIssueRefinementDone, Data: string(payload)}
+	waitFor(t, func() bool { return fs.count() == 1 })
+
+	got := fs.at(0)
+	if got.itemType != "issue" || got.itemNumber != 12 || got.itemTitle != "Refactor auth" {
+		t.Errorf("row basics: %+v", got)
+	}
+	if got.action != "refinement" || got.outcome != "completed" {
+		t.Errorf("action/outcome: %s/%s", got.action, got.outcome)
+	}
+	if got.details["cli_used"] != "claude" || got.details["review_id"] != int64(321) {
+		t.Errorf("details: %+v", got.details)
+	}
+	if got.details["post_ok"] != true || got.details["truncated"] != false {
+		t.Errorf("post/truncation details: %+v", got.details)
 	}
 }
 
@@ -267,6 +302,57 @@ func TestRecorder_IssuePromoted(t *testing.T) {
 	}
 	if got.details["reason"] != "dependencies closed" {
 		t.Errorf("details: %+v", got.details)
+	}
+}
+
+func TestRecorder_IssueStagePromoted(t *testing.T) {
+	_, fs, events := newTestRecorder(t)
+	payload, _ := json.Marshal(map[string]any{
+		"repo":         "acme/api",
+		"issue_number": 43,
+		"issue_title":  "Plan implementation",
+		"from_stage":   "triage",
+		"to_stage":     "refinement",
+		"trigger":      "manual API",
+	})
+	events <- sse.Event{Type: sse.EventIssuePromoted, Data: string(payload)}
+	waitFor(t, func() bool { return fs.count() == 1 })
+
+	got := fs.at(0)
+	if got.action != "promote" || got.outcome != "triage → refinement" {
+		t.Errorf("action/outcome: %s/%s", got.action, got.outcome)
+	}
+	if got.details["trigger"] != "manual API" {
+		t.Errorf("details: %+v", got.details)
+	}
+	if _, ok := got.details["from_label"]; ok {
+		t.Errorf("stage event should not persist empty legacy label details: %+v", got.details)
+	}
+}
+
+func TestRecorder_IssueStagePromotedPrefersStageDetailsOverLegacyLabels(t *testing.T) {
+	_, fs, events := newTestRecorder(t)
+	payload, _ := json.Marshal(map[string]any{
+		"repo":         "acme/api",
+		"issue_number": 44,
+		"issue_title":  "Plan implementation",
+		"from_label":   "blocked",
+		"to_label":     "ready",
+		"from_stage":   "triage",
+		"to_stage":     "refinement",
+	})
+	events <- sse.Event{Type: sse.EventIssuePromoted, Data: string(payload)}
+	waitFor(t, func() bool { return fs.count() == 1 })
+
+	got := fs.at(0)
+	if got.outcome != "triage → refinement" {
+		t.Errorf("outcome: %s", got.outcome)
+	}
+	if got.details["from_stage"] != "triage" || got.details["to_stage"] != "refinement" {
+		t.Errorf("stage details: %+v", got.details)
+	}
+	if _, ok := got.details["from_label"]; ok {
+		t.Errorf("stage event should omit legacy label details even when payload has them: %+v", got.details)
 	}
 }
 
@@ -340,4 +426,24 @@ func TestRecorder_StoreFailureIsLoggedAndDropped(t *testing.T) {
 	time.Sleep(30 * time.Millisecond)
 	events <- sse.Event{Type: sse.EventReviewCompleted, Data: string(payload)}
 	waitFor(t, func() bool { return fs.count() == 1 })
+}
+
+func TestRecorder_PollingEventsAreIgnored(t *testing.T) {
+	_, fs, events := newTestRecorder(t)
+
+	// Feed both polling event types through the event channel that
+	// the recorder's Start loop consumes.
+	for _, ev := range []sse.Event{
+		{Type: sse.EventPollingStarted, Data: `{"kind":"prs","repos":["acme/foo"]}`},
+		{Type: sse.EventPollingCompleted, Data: `{"kind":"issues","count":3,"duration_ms":42}`},
+	} {
+		events <- ev
+	}
+
+	// Give the recorder a beat to process any rows it might have inserted.
+	time.Sleep(50 * time.Millisecond)
+
+	if got := fs.count(); got != 0 {
+		t.Errorf("polling events should not produce rows; got %d", got)
+	}
 }

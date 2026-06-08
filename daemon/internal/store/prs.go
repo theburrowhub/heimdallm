@@ -19,6 +19,18 @@ type PR struct {
 	UpdatedAt time.Time `json:"updated_at"`
 	FetchedAt time.Time `json:"fetched_at"`
 	Dismissed bool      `json:"dismissed"`
+
+	// Review-state vigilance for auto_implement-created PRs (#482). All
+	// fields are zero-valued on standard PRs (not created by
+	// auto_implement) and stay that way — only Tier 3's review-state
+	// path and the Responder/FixRunner modules write here.
+	ExternalReviewState  string    `json:"external_review_state,omitempty"`
+	ExternalReviewer     string    `json:"external_reviewer,omitempty"`
+	ExternalReviewAt     time.Time `json:"external_review_at,omitempty"`
+	AutoImplementIssueID int64     `json:"auto_implement_issue_id,omitempty"`
+	ReviewResponseCount  int       `json:"review_response_count,omitempty"`
+	ReviewFixCount       int       `json:"review_fix_count,omitempty"`
+	LastRespondedAt      time.Time `json:"last_responded_at,omitempty"`
 }
 
 // UpsertPR inserts or updates a PR record, keyed on github_id. Returns the row ID.
@@ -52,19 +64,43 @@ func (s *Store) UpsertPR(pr *PR) (int64, error) {
 	return id, nil
 }
 
+// prColumns is the canonical column list for PR SELECTs, kept on a single
+// line so adding a column only touches the schema + this constant + scanPR.
+const prColumns = "id, github_id, repo, number, title, author, url, state, " +
+	"updated_at, fetched_at, dismissed, " +
+	"external_review_state, external_reviewer, external_review_at, " +
+	"auto_implement_issue_id, review_response_count, review_fix_count, " +
+	"last_responded_at"
+
 // GetPR retrieves a PR by its local row ID.
 func (s *Store) GetPR(id int64) (*PR, error) {
-	row := s.db.QueryRow(
-		"SELECT id, github_id, repo, number, title, author, url, state, updated_at, fetched_at, dismissed FROM prs WHERE id = ?", id,
-	)
+	row := s.db.QueryRow("SELECT "+prColumns+" FROM prs WHERE id = ?", id)
 	return scanPR(row)
 }
 
 // GetPRByGithubID retrieves a PR by its GitHub PR ID.
 func (s *Store) GetPRByGithubID(githubID int64) (*PR, error) {
-	row := s.db.QueryRow(
-		"SELECT id, github_id, repo, number, title, author, url, state, updated_at, fetched_at, dismissed FROM prs WHERE github_id = ?", githubID,
-	)
+	row := s.db.QueryRow("SELECT "+prColumns+" FROM prs WHERE github_id = ?", githubID)
+	return scanPR(row)
+}
+
+// GetPRByRepoNumber retrieves a PR by its stable repository-local identity.
+// GitHub's Search Issues API and Pulls API can return different global IDs for
+// the same PR, so scheduler-side dedup needs this fallback after github_id
+// misses. If duplicate rows exist from an older bug, prefer the row that
+// already has review history so we dedup against the real prior work.
+func (s *Store) GetPRByRepoNumber(repo string, number int) (*PR, error) {
+	row := s.db.QueryRow(`
+		SELECT `+prColumns+`
+		FROM prs p
+		WHERE p.repo = ? AND p.number = ?
+		ORDER BY (
+			SELECT COALESCE(MAX(r.created_at), '')
+			FROM reviews r
+			WHERE r.pr_id = p.id
+		) DESC, p.fetched_at DESC, p.id DESC
+		LIMIT 1
+	`, repo, number)
 	return scanPR(row)
 }
 
@@ -72,7 +108,7 @@ func (s *Store) GetPRByGithubID(githubID int64) (*PR, error) {
 // An optional list of states (e.g. "open", "closed") filters the result;
 // when no states are provided all non-dismissed PRs are returned.
 func (s *Store) ListPRs(states ...string) ([]*PR, error) {
-	query := "SELECT id, github_id, repo, number, title, author, url, state, updated_at, fetched_at, dismissed FROM prs WHERE dismissed = 0"
+	query := "SELECT " + prColumns + " FROM prs WHERE dismissed = 0"
 	var args []any
 	if len(states) > 0 {
 		placeholders := strings.Repeat("?,", len(states))
@@ -151,10 +187,15 @@ type scanner interface {
 func scanPR(s scanner) (*PR, error) {
 	var pr PR
 	var updatedAt, fetchedAt string
+	var externalReviewAt, lastRespondedAt string
 	var dismissed int
 	var err error
 	if err = s.Scan(&pr.ID, &pr.GithubID, &pr.Repo, &pr.Number, &pr.Title,
-		&pr.Author, &pr.URL, &pr.State, &updatedAt, &fetchedAt, &dismissed); err != nil {
+		&pr.Author, &pr.URL, &pr.State, &updatedAt, &fetchedAt, &dismissed,
+		&pr.ExternalReviewState, &pr.ExternalReviewer, &externalReviewAt,
+		&pr.AutoImplementIssueID, &pr.ReviewResponseCount, &pr.ReviewFixCount,
+		&lastRespondedAt,
+	); err != nil {
 		return nil, fmt.Errorf("store: scan pr: %w", err)
 	}
 	if pr.UpdatedAt, err = time.Parse(sqliteTimeFormat, updatedAt); err != nil {
@@ -163,6 +204,101 @@ func scanPR(s scanner) (*PR, error) {
 	if pr.FetchedAt, err = time.Parse(sqliteTimeFormat, fetchedAt); err != nil {
 		return nil, fmt.Errorf("store: parse fetched_at %q: %w", fetchedAt, err)
 	}
+	// The external_review_at / last_responded_at columns are stored as
+	// TEXT with empty-string defaults so legacy rows (and PRs that never
+	// received an external review) round-trip to a zero Time without an
+	// extra IFNULL on every read.
+	if externalReviewAt != "" {
+		if pr.ExternalReviewAt, err = time.Parse(sqliteTimeFormat, externalReviewAt); err != nil {
+			return nil, fmt.Errorf("store: parse external_review_at %q: %w", externalReviewAt, err)
+		}
+	}
+	if lastRespondedAt != "" {
+		if pr.LastRespondedAt, err = time.Parse(sqliteTimeFormat, lastRespondedAt); err != nil {
+			return nil, fmt.Errorf("store: parse last_responded_at %q: %w", lastRespondedAt, err)
+		}
+	}
 	pr.Dismissed = dismissed != 0
 	return &pr, nil
+}
+
+// UpdatePRReviewState records the external review-state observed by
+// Tier 3 for an auto_implement-created PR (#482). Always replaces the
+// previous value — Tier 3 only calls this when the aggregate state has
+// actually changed (see main.go CheckItem flow).
+func (s *Store) UpdatePRReviewState(prID int64, state, reviewer string, at time.Time) error {
+	_, err := s.db.Exec(
+		`UPDATE prs SET external_review_state = ?, external_reviewer = ?, external_review_at = ? WHERE id = ?`,
+		state, reviewer, at.UTC().Format(sqliteTimeFormat), prID,
+	)
+	if err != nil {
+		return fmt.Errorf("store: update pr review state %d: %w", prID, err)
+	}
+	return nil
+}
+
+// MarkPRAutoImplementOrigin writes the back-link from a PR to the issue
+// that produced it via auto_implement (#482). Tier 3 keys its review-
+// state vigilance on a non-zero value here; standard PRs (created by
+// humans or by other automation) leave this at 0 and stay on the
+// existing PR-review codepath.
+func (s *Store) MarkPRAutoImplementOrigin(prID, issueID int64) error {
+	_, err := s.db.Exec(
+		`UPDATE prs SET auto_implement_issue_id = ? WHERE id = ?`,
+		issueID, prID,
+	)
+	if err != nil {
+		return fmt.Errorf("store: mark pr %d origin issue %d: %w", prID, issueID, err)
+	}
+	return nil
+}
+
+// IncrementPRReviewResponseCount atomically bumps the per-PR response
+// counter and returns the post-increment value. Callers compare the
+// return value against the per_pr_24h cap (#482 phase 2).
+//
+// Atomicity note: the Store uses a single-writer sqlite connection
+// (SetMaxOpenConns(1) in Open), so the UPDATE + SELECT pair runs
+// sequentially against the same writer. A future move to a higher
+// concurrency limit would require wrapping these in a transaction.
+func (s *Store) IncrementPRReviewResponseCount(prID int64) (int, error) {
+	if _, err := s.db.Exec(
+		`UPDATE prs SET review_response_count = review_response_count + 1 WHERE id = ?`, prID,
+	); err != nil {
+		return 0, fmt.Errorf("store: increment pr review_response_count %d: %w", prID, err)
+	}
+	var n int
+	if err := s.db.QueryRow(`SELECT review_response_count FROM prs WHERE id = ?`, prID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: read pr review_response_count %d: %w", prID, err)
+	}
+	return n, nil
+}
+
+// IncrementPRReviewFixCount mirrors IncrementPRReviewResponseCount for
+// the per-PR-lifetime fix counter (#482 phase 3).
+func (s *Store) IncrementPRReviewFixCount(prID int64) (int, error) {
+	if _, err := s.db.Exec(
+		`UPDATE prs SET review_fix_count = review_fix_count + 1 WHERE id = ?`, prID,
+	); err != nil {
+		return 0, fmt.Errorf("store: increment pr review_fix_count %d: %w", prID, err)
+	}
+	var n int
+	if err := s.db.QueryRow(`SELECT review_fix_count FROM prs WHERE id = ?`, prID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: read pr review_fix_count %d: %w", prID, err)
+	}
+	return n, nil
+}
+
+// SetPRLastRespondedAt records the timestamp of the most recent
+// Responder-posted comment on a PR. Used by the Responder's cooldown
+// check (#482 phase 2).
+func (s *Store) SetPRLastRespondedAt(prID int64, at time.Time) error {
+	_, err := s.db.Exec(
+		`UPDATE prs SET last_responded_at = ? WHERE id = ?`,
+		at.UTC().Format(sqliteTimeFormat), prID,
+	)
+	if err != nil {
+		return fmt.Errorf("store: set pr last_responded_at %d: %w", prID, err)
+	}
+	return nil
 }

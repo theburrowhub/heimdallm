@@ -15,7 +15,7 @@ void main() {
         Feature.issueTracking: null,
         Feature.develop: false,
       },
-      onApply: (_, __) {},
+      onApply: (_, _) {},
       onClear: () {},
     )));
     expect(find.text('3 selected'), findsOneWidget);
@@ -31,7 +31,7 @@ void main() {
         Feature.issueTracking: null,
         Feature.develop: false,
       },
-      onApply: (_, __) {},
+      onApply: (_, _) {},
       onClear: () {},
     )));
     expect(find.text('MIXED'), findsOneWidget);
@@ -66,7 +66,7 @@ void main() {
         Feature.issueTracking: true,
         Feature.develop: true,
       },
-      onApply: (_, __) {},
+      onApply: (_, _) {},
       onClear: () => cleared = true,
     )));
     await tester.tap(find.text('Clear'));

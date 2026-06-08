@@ -7,6 +7,8 @@ import (
 	"testing"
 )
 
+func testBoolPtr(v bool) *bool { return &v }
+
 // ── applyDefaults ────────────────────────────────────────────────────────────
 
 func TestApplyDefaults(t *testing.T) {
@@ -54,6 +56,106 @@ func TestApplyDefaults_PreservesExisting(t *testing.T) {
 	}
 	if cfg.AI.ReviewMode != "multi" {
 		t.Errorf("ReviewMode overwritten: %q", cfg.AI.ReviewMode)
+	}
+}
+
+func TestApplyDefaults_Tier2RepoConcurrency(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+	if cfg.AI.Tier2RepoConcurrency != 5 {
+		t.Errorf("Tier2RepoConcurrency = %d, want 5", cfg.AI.Tier2RepoConcurrency)
+	}
+}
+
+func TestApplyDefaults_Tier2RepoConcurrency_PreservesExisting(t *testing.T) {
+	cfg := &Config{}
+	cfg.AI.Tier2RepoConcurrency = 12
+	cfg.applyDefaults()
+	if cfg.AI.Tier2RepoConcurrency != 12 {
+		t.Errorf("Tier2RepoConcurrency overwritten: %d", cfg.AI.Tier2RepoConcurrency)
+	}
+}
+
+func TestApplyDefaults_MaxWorktreesPerRepo(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+	if cfg.AI.MaxWorktreesPerRepo != 5 {
+		t.Errorf("MaxWorktreesPerRepo = %d, want 5", cfg.AI.MaxWorktreesPerRepo)
+	}
+}
+
+func TestApplyDefaults_MaxWorktreesPerRepo_PreservesExisting(t *testing.T) {
+	cfg := &Config{}
+	cfg.AI.MaxWorktreesPerRepo = 12
+	cfg.applyDefaults()
+	if cfg.AI.MaxWorktreesPerRepo != 12 {
+		t.Errorf("MaxWorktreesPerRepo overwritten: %d", cfg.AI.MaxWorktreesPerRepo)
+	}
+}
+
+// TestApplyDefaults_ReviewResponseDisabledByDefault locks in the
+// safety-first stance of #482 phase 2: a fresh config with no
+// review_response section keeps the feature disabled. The cap and
+// cooldown axes still get sane defaults so an operator who only sets
+// Enabled = true does not accidentally lift the cap.
+func TestApplyDefaults_ReviewResponseDisabledByDefault(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+	if cfg.AI.ReviewResponse.Enabled {
+		t.Error("ReviewResponse.Enabled defaulted to true; must be opt-in")
+	}
+	if cfg.AI.ReviewResponse.PerPRLifetime != DefaultReviewResponsePerPRLifetime {
+		t.Errorf("PerPRLifetime = %d, want %d", cfg.AI.ReviewResponse.PerPRLifetime, DefaultReviewResponsePerPRLifetime)
+	}
+	if cfg.AI.ReviewResponse.CooldownSecs != DefaultReviewResponseCooldownSecs {
+		t.Errorf("CooldownSecs = %d, want %d", cfg.AI.ReviewResponse.CooldownSecs, DefaultReviewResponseCooldownSecs)
+	}
+}
+
+func TestApplyDefaults_ReviewResponse_PreservesExisting(t *testing.T) {
+	cfg := &Config{}
+	cfg.AI.ReviewResponse.Enabled = true
+	cfg.AI.ReviewResponse.PerPRLifetime = 2
+	cfg.AI.ReviewResponse.CooldownSecs = 60
+	cfg.applyDefaults()
+	if !cfg.AI.ReviewResponse.Enabled {
+		t.Error("Enabled flipped off by applyDefaults")
+	}
+	if cfg.AI.ReviewResponse.PerPRLifetime != 2 {
+		t.Errorf("PerPRLifetime overwritten: %d", cfg.AI.ReviewResponse.PerPRLifetime)
+	}
+	if cfg.AI.ReviewResponse.CooldownSecs != 60 {
+		t.Errorf("CooldownSecs overwritten: %d", cfg.AI.ReviewResponse.CooldownSecs)
+	}
+}
+
+// TestApplyDefaults_ReviewResponse_NegativeFallsBack pins that a
+// negative or zero cap is treated as "use the default" — never as
+// "unlimited" — so a misconfigured TOML cannot uncap the feature.
+func TestApplyDefaults_ReviewResponse_NegativeFallsBack(t *testing.T) {
+	cfg := &Config{}
+	cfg.AI.ReviewResponse.PerPRLifetime = -1
+	cfg.AI.ReviewResponse.CooldownSecs = -1
+	cfg.applyDefaults()
+	if cfg.AI.ReviewResponse.PerPRLifetime != DefaultReviewResponsePerPRLifetime {
+		t.Errorf("negative PerPRLifetime not reset, got %d", cfg.AI.ReviewResponse.PerPRLifetime)
+	}
+	if cfg.AI.ReviewResponse.CooldownSecs != DefaultReviewResponseCooldownSecs {
+		t.Errorf("negative CooldownSecs not reset, got %d", cfg.AI.ReviewResponse.CooldownSecs)
+	}
+}
+
+func TestApplyDefaults_ReviewFixDisabledByDefault(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+	if cfg.AI.ReviewFix.Enabled {
+		t.Error("ReviewFix.Enabled defaulted to true; must be opt-in")
+	}
+	if cfg.AI.ReviewFix.PerPRLifetime != DefaultReviewFixPerPRLifetime {
+		t.Errorf("PerPRLifetime = %d, want %d", cfg.AI.ReviewFix.PerPRLifetime, DefaultReviewFixPerPRLifetime)
+	}
+	if cfg.AI.ReviewFix.CooldownSecs != DefaultReviewFixCooldownSecs {
+		t.Errorf("CooldownSecs = %d, want %d", cfg.AI.ReviewFix.CooldownSecs, DefaultReviewFixCooldownSecs)
 	}
 }
 
@@ -194,15 +296,66 @@ func TestValidate_AllValidIntervals(t *testing.T) {
 	}
 }
 
+func TestValidate_InvalidRefinementTimeout(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{
+			name: "global",
+			cfg: Config{
+				AI: AIConfig{Primary: "claude", RefinementTimeout: "30 m"},
+			},
+			want: "ai.refinement_timeout",
+		},
+		{
+			name: "org",
+			cfg: Config{
+				AI: AIConfig{
+					Primary: "claude",
+					Orgs: map[string]OrgAI{
+						"org": {RefinementTimeout: "-1m"},
+					},
+				},
+			},
+			want: `ai.orgs."org".refinement_timeout`,
+		},
+		{
+			name: "repo",
+			cfg: Config{
+				AI: AIConfig{
+					Primary: "claude",
+					Repos: map[string]RepoAI{
+						"org/repo": {RefinementTimeout: "0s"},
+					},
+				},
+			},
+			want: `ai.repos."org/repo".refinement_timeout`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.cfg.Validate()
+			if err == nil {
+				t.Fatal("Validate() = nil, want error")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Validate() error = %v, want path %q", err, tc.want)
+			}
+		})
+	}
+}
+
 // ── Topic-based discovery ────────────────────────────────────────────────────
 
-func TestApplyDefaults_DiscoveryIntervalWhenTopicSet(t *testing.T) {
+func TestApplyDefaults_DiscoveryIntervalUnsetWhenTopicSet(t *testing.T) {
 	cfg := &Config{}
 	cfg.GitHub.DiscoveryTopic = "heimdallm-review"
 	cfg.applyDefaults()
 
-	if cfg.GitHub.DiscoveryInterval != "15m" {
-		t.Errorf("DiscoveryInterval = %q, want default %q", cfg.GitHub.DiscoveryInterval, "15m")
+	if cfg.GitHub.DiscoveryInterval != "" {
+		t.Errorf("DiscoveryInterval = %q, want empty runtime fallback", cfg.GitHub.DiscoveryInterval)
 	}
 }
 
@@ -425,6 +578,9 @@ func TestApplyDefaults_IssueTracking(t *testing.T) {
 	if cfg.GitHub.IssueTracking.Enabled {
 		t.Error("Enabled should default to false")
 	}
+	if cfg.AI.RefinementTimeout != "30m" {
+		t.Errorf("RefinementTimeout = %q, want 30m", cfg.AI.RefinementTimeout)
+	}
 }
 
 func TestApplyDefaults_IssueTrackingPreservesExisting(t *testing.T) {
@@ -441,6 +597,41 @@ func TestApplyDefaults_IssueTrackingPreservesExisting(t *testing.T) {
 	}
 }
 
+func TestIssueTrackingWithDefaultAssignee(t *testing.T) {
+	cfg := IssueTrackingConfig{Enabled: true}
+	got := cfg.WithDefaultAssignee("@alice")
+	if len(got.Assignees) != 1 || got.Assignees[0] != "alice" {
+		t.Fatalf("Assignees = %v, want [alice]", got.Assignees)
+	}
+	if len(cfg.Assignees) != 0 {
+		t.Fatalf("WithDefaultAssignee mutated receiver: %v", cfg.Assignees)
+	}
+}
+
+func TestIssueTrackingWithDefaultAssigneePreservesExplicitList(t *testing.T) {
+	cfg := IssueTrackingConfig{Enabled: true, Assignees: []string{"bob"}}
+	got := cfg.WithDefaultAssignee("alice")
+	if len(got.Assignees) != 1 || got.Assignees[0] != "bob" {
+		t.Fatalf("Assignees = %v, want explicit [bob]", got.Assignees)
+	}
+}
+
+func TestIssueTrackingMatchesAssignees(t *testing.T) {
+	cfg := IssueTrackingConfig{Assignees: []string{"Alice"}}
+	if !cfg.MatchesAssignees([]string{"alice"}) {
+		t.Fatal("expected case-insensitive assignee match")
+	}
+	if cfg.MatchesAssignees([]string{"bob", "alice"}) {
+		t.Fatal("multi-assignee issue must not match active assignee filter")
+	}
+	if cfg.MatchesAssignees([]string{"bob"}) {
+		t.Fatal("unexpected assignee match")
+	}
+	if cfg.MatchesAssignees(nil) {
+		t.Fatal("unassigned issue must not match active assignee filter")
+	}
+}
+
 func TestApplyEnvOverrides_IssueTracking(t *testing.T) {
 	cfg := &Config{}
 	cfg.applyDefaults()
@@ -451,8 +642,10 @@ func TestApplyEnvOverrides_IssueTracking(t *testing.T) {
 	t.Setenv("HEIMDALLM_ISSUE_ORGANIZATIONS", "freepik-company, theburrowhub")
 	t.Setenv("HEIMDALLM_ISSUE_ASSIGNEES", "sergiotejon")
 	t.Setenv("HEIMDALLM_ISSUE_DEVELOP_LABELS", "enhancement,feature, bug")
+	t.Setenv("HEIMDALLM_ISSUE_REFINEMENT_LABELS", "refine,needs-plan")
 	t.Setenv("HEIMDALLM_ISSUE_REVIEW_ONLY_LABELS", "question,discussion")
 	t.Setenv("HEIMDALLM_ISSUE_SKIP_LABELS", "wontfix")
+	t.Setenv("HEIMDALLM_REFINEMENT_TIMEOUT", "45m")
 
 	cfg.applyEnvOverrides()
 
@@ -475,11 +668,17 @@ func TestApplyEnvOverrides_IssueTracking(t *testing.T) {
 	if len(it.DevelopLabels) != 3 || it.DevelopLabels[2] != "bug" {
 		t.Errorf("DevelopLabels = %v", it.DevelopLabels)
 	}
+	if len(it.RefinementLabels) != 2 || it.RefinementLabels[1] != "needs-plan" {
+		t.Errorf("RefinementLabels = %v", it.RefinementLabels)
+	}
 	if len(it.ReviewOnlyLabels) != 2 {
 		t.Errorf("ReviewOnlyLabels = %v", it.ReviewOnlyLabels)
 	}
 	if len(it.SkipLabels) != 1 {
 		t.Errorf("SkipLabels = %v", it.SkipLabels)
+	}
+	if cfg.AI.RefinementTimeout != "45m" {
+		t.Errorf("RefinementTimeout = %q, want 45m", cfg.AI.RefinementTimeout)
 	}
 }
 
@@ -561,12 +760,55 @@ func TestValidate_IssueTrackingEnabledDefaultsPassValidation(t *testing.T) {
 	}
 }
 
+func TestValidate_InvalidOrgOverrideKey(t *testing.T) {
+	cfg := &Config{
+		AI: AIConfig{
+			Primary: "claude",
+			Orgs: map[string]OrgAI{
+				"bad org": {Primary: "gemini"},
+			},
+		},
+	}
+	cfg.applyDefaults()
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate with invalid org key = nil, want error")
+	}
+}
+
+func TestValidate_OrgIssueTrackingOverride(t *testing.T) {
+	cfg := &Config{
+		AI: AIConfig{
+			Primary: "claude",
+			Orgs: map[string]OrgAI{
+				"org": {
+					IssueTracking: &IssueTrackingOverride{
+						Enabled:       testBoolPtr(true),
+						FilterMode:    FilterMode("bad-mode"),
+						DefaultAction: string(IssueModeIgnore),
+					},
+				},
+			},
+		},
+	}
+	cfg.applyDefaults()
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate with invalid org issue_tracking = nil, want error")
+	}
+	if !strings.Contains(err.Error(), `ai.orgs."org".issue_tracking.filter_mode`) {
+		t.Fatalf("error should name org issue_tracking path, got: %v", err)
+	}
+}
+
 // ── Issue classification ─────────────────────────────────────────────────────
 
 func TestClassify_Precedence(t *testing.T) {
 	cfg := IssueTrackingConfig{
 		SkipLabels:       []string{"wontfix"},
 		ReviewOnlyLabels: []string{"question", "discussion"},
+		RefinementLabels: []string{"refine"},
 		DevelopLabels:    []string{"bug", "enhancement"},
 		DefaultAction:    string(IssueModeIgnore),
 	}
@@ -576,10 +818,11 @@ func TestClassify_Precedence(t *testing.T) {
 		want   IssueMode
 	}{
 		{"skip wins over review_only + develop", []string{"wontfix", "question", "bug"}, IssueModeIgnore},
-		// develop beats review_only when both are present (#223): the operator
-		// tagged with a DEV label, so auto_implement is the intended action.
-		{"develop wins over review_only when both present", []string{"question", "bug"}, IssueModeDevelop},
+		{"review_only wins over refinement + develop", []string{"question", "refine", "bug"}, IssueModeReviewOnly},
+		{"review_only wins over develop when both present", []string{"question", "bug"}, IssueModeReviewOnly},
+		{"refinement wins over develop when both present", []string{"refine", "bug"}, IssueModeRefinement},
 		{"develop only", []string{"bug"}, IssueModeDevelop},
+		{"refinement only", []string{"refine"}, IssueModeRefinement},
 		{"review_only only", []string{"question"}, IssueModeReviewOnly},
 		{"unrelated labels fall back to default_action=ignore", []string{"help-wanted"}, IssueModeIgnore},
 		{"no labels fall back to default_action=ignore", nil, IssueModeIgnore},
@@ -594,13 +837,14 @@ func TestClassify_Precedence(t *testing.T) {
 }
 
 func TestClassify_BlockedPrecedence(t *testing.T) {
-	// Precedence must be: skip > blocked > develop > review_only > default.
+	// Precedence must be: skip > blocked > review_only > refinement > develop > default.
 	// Blocked slots in between skip (don't touch it) and develop/review_only
 	// (blocked is cheaper than any processing — we haven't even confirmed we
-	// want to run it yet). develop beats review_only per issue #223.
+	// want to run it yet). Stage labels then prefer the earliest state.
 	cfg := IssueTrackingConfig{
 		SkipLabels:       []string{"wontfix"},
 		BlockedLabels:    []string{"blocked"},
+		RefinementLabels: []string{"refine"},
 		ReviewOnlyLabels: []string{"question"},
 		DevelopLabels:    []string{"bug"},
 		DefaultAction:    string(IssueModeIgnore),
@@ -612,10 +856,10 @@ func TestClassify_BlockedPrecedence(t *testing.T) {
 	}{
 		{"skip wins over blocked", []string{"wontfix", "blocked", "bug"}, IssueModeIgnore},
 		{"blocked wins over review_only", []string{"blocked", "question"}, IssueModeBlocked},
+		{"blocked wins over refinement", []string{"blocked", "refine"}, IssueModeBlocked},
 		{"blocked wins over develop", []string{"blocked", "bug"}, IssueModeBlocked},
 		{"blocked alone", []string{"blocked"}, IssueModeBlocked},
-		// develop beats review_only when both present (#223)
-		{"develop wins over review_only without blocked", []string{"question", "bug"}, IssueModeDevelop},
+		{"review_only wins over develop without blocked", []string{"question", "bug"}, IssueModeReviewOnly},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -628,9 +872,9 @@ func TestClassify_BlockedPrecedence(t *testing.T) {
 
 func TestResolvePromoteToLabel(t *testing.T) {
 	cases := []struct {
-		name          string
-		cfg           IssueTrackingConfig
-		wantLabel     string
+		name      string
+		cfg       IssueTrackingConfig
+		wantLabel string
 	}{
 		{
 			name:      "explicit target wins",
@@ -1051,6 +1295,93 @@ func TestAIForRepo_OrgDraftOverride(t *testing.T) {
 	}
 }
 
+func TestAIForRepo_OrgOverridesAgentSelectionAndPrompts(t *testing.T) {
+	autoTriage := true
+	autoRefine := false
+	genDesc := true
+	cfg := &Config{
+		AI: AIConfig{
+			Primary:               "claude",
+			Fallback:              "gemini",
+			ReviewMode:            "single",
+			IssuePrompt:           "global-issue",
+			ImplementPrompt:       "global-impl",
+			TriageOwner:           "global-owner",
+			CloneDir:              "/tmp/global-clones",
+			GeneratePRDescription: false,
+			Orgs: map[string]OrgAI{
+				"myorg": {
+					Primary:               "codex",
+					Fallback:              "opencode",
+					ReviewMode:            "multi",
+					Prompt:                "org-pr",
+					IssuePrompt:           "org-issue",
+					ImplementPrompt:       "org-impl",
+					TriageOwner:           "org-owner",
+					CloneDir:              "/tmp/org-clones",
+					AutoPromoteTriage:     &autoTriage,
+					AutoPromoteRefinement: &autoRefine,
+					GeneratePRDescription: &genDesc,
+				},
+			},
+		},
+	}
+
+	r := cfg.AIForRepo("myorg/repo")
+	if r.Primary != "codex" || r.Fallback != "opencode" || r.ReviewMode != "multi" {
+		t.Fatalf("agent selection = (%q,%q,%q), want org values", r.Primary, r.Fallback, r.ReviewMode)
+	}
+	if r.Prompt != "org-pr" || r.IssuePrompt != "org-issue" || r.ImplementPrompt != "org-impl" {
+		t.Fatalf("prompts = (%q,%q,%q), want org prompts", r.Prompt, r.IssuePrompt, r.ImplementPrompt)
+	}
+	if r.TriageOwner != "org-owner" || r.CloneDir != "/tmp/org-clones" {
+		t.Fatalf("future fields = (%q,%q), want org values", r.TriageOwner, r.CloneDir)
+	}
+	if r.AutoPromoteTriage == nil || !*r.AutoPromoteTriage {
+		t.Fatal("AutoPromoteTriage should inherit org true")
+	}
+	if r.AutoPromoteRefinement == nil || *r.AutoPromoteRefinement {
+		t.Fatal("AutoPromoteRefinement should inherit org false")
+	}
+	if r.GeneratePRDescription == nil || !*r.GeneratePRDescription {
+		t.Fatal("GeneratePRDescription should inherit org true")
+	}
+}
+
+func TestAIForRepo_RepoOverridesOrgAgentSelectionAndPrompts(t *testing.T) {
+	orgAuto := true
+	repoAuto := false
+	cfg := &Config{
+		AI: AIConfig{
+			Primary: "claude",
+			Orgs: map[string]OrgAI{
+				"myorg": {
+					Primary:           "codex",
+					Prompt:            "org-pr",
+					IssuePrompt:       "org-issue",
+					AutoPromoteTriage: &orgAuto,
+				},
+			},
+			Repos: map[string]RepoAI{
+				"myorg/repo": {
+					Primary:           "gemini",
+					Prompt:            "repo-pr",
+					IssuePrompt:       "repo-issue",
+					AutoPromoteTriage: &repoAuto,
+				},
+			},
+		},
+	}
+
+	r := cfg.AIForRepo("myorg/repo")
+	if r.Primary != "gemini" || r.Prompt != "repo-pr" || r.IssuePrompt != "repo-issue" {
+		t.Fatalf("repo fields did not override org: %+v", r)
+	}
+	if r.AutoPromoteTriage == nil || *r.AutoPromoteTriage {
+		t.Fatal("repo AutoPromoteTriage=false should override org true")
+	}
+}
+
 func TestAIForRepo_IndependentFieldResolution(t *testing.T) {
 	cfg := &Config{
 		AI: AIConfig{
@@ -1269,13 +1600,142 @@ pr_reviewers = ["data-lead"]
 	}
 }
 
+func TestAIForRepo_ThreeLevelAllScopedFields(t *testing.T) {
+	globalTriage := false
+	globalRefine := true
+	globalDraft := false
+	orgTriage := true
+	orgRefine := false
+	orgDraft := true
+	orgGenDesc := true
+	repoRefine := true
+	repoDraft := false
+	repoGenDesc := false
+
+	cfg := &Config{
+		AI: AIConfig{
+			Primary:               "global-primary",
+			Fallback:              "global-fallback",
+			ReviewMode:            "single",
+			IssuePrompt:           "global-issue",
+			ImplementPrompt:       "global-impl",
+			TriageOwner:           "global-owner",
+			CloneDir:              "global-clone",
+			AutoPromoteTriage:     &globalTriage,
+			AutoPromoteRefinement: &globalRefine,
+			GeneratePRDescription: false,
+			PRReviewers:           []string{"global-reviewer"},
+			PRLabels:              []string{"global-label"},
+			PRAssignee:            "global-assignee",
+			PRDraft:               &globalDraft,
+			Orgs: map[string]OrgAI{
+				"org": {
+					Primary:               "org-primary",
+					Fallback:              "org-fallback",
+					ReviewMode:            "multi",
+					Prompt:                "org-prompt",
+					IssuePrompt:           "org-issue",
+					ImplementPrompt:       "org-impl",
+					LocalDir:              "/org/local",
+					TriageOwner:           "org-owner",
+					CloneDir:              "org-clone",
+					AutoPromoteTriage:     &orgTriage,
+					AutoPromoteRefinement: &orgRefine,
+					PRReviewers:           []string{"org-reviewer"},
+					PRAssignee:            "org-assignee",
+					PRLabels:              []string{"org-label"},
+					PRDraft:               &orgDraft,
+					GeneratePRDescription: &orgGenDesc,
+				},
+			},
+			Repos: map[string]RepoAI{
+				"org/repo": {
+					Primary:               "repo-primary",
+					Prompt:                "repo-prompt",
+					ImplementPrompt:       "repo-impl",
+					LocalDir:              "/repo/local",
+					CloneDir:              "repo-clone",
+					AutoPromoteRefinement: &repoRefine,
+					PRLabels:              []string{"repo-label"},
+					PRDraft:               &repoDraft,
+					GeneratePRDescription: &repoGenDesc,
+				},
+			},
+		},
+	}
+
+	got := cfg.AIForRepo("org/repo")
+	if got.Primary != "repo-primary" || got.Fallback != "org-fallback" || got.ReviewMode != "multi" {
+		t.Fatalf("agent selection = (%q,%q,%q), want repo/org/org", got.Primary, got.Fallback, got.ReviewMode)
+	}
+	if got.Prompt != "repo-prompt" || got.IssuePrompt != "org-issue" || got.ImplementPrompt != "repo-impl" {
+		t.Fatalf("prompts = (%q,%q,%q), want repo/org/repo", got.Prompt, got.IssuePrompt, got.ImplementPrompt)
+	}
+	if got.LocalDir != "/repo/local" || got.TriageOwner != "org-owner" || got.CloneDir != "repo-clone" {
+		t.Fatalf("paths/owners = (%q,%q,%q), want repo/org/repo", got.LocalDir, got.TriageOwner, got.CloneDir)
+	}
+	if got.AutoPromoteTriage == nil || !*got.AutoPromoteTriage {
+		t.Fatal("AutoPromoteTriage should come from org")
+	}
+	if got.AutoPromoteRefinement == nil || !*got.AutoPromoteRefinement {
+		t.Fatal("AutoPromoteRefinement should come from repo")
+	}
+	if len(got.PRReviewers) != 1 || got.PRReviewers[0] != "org-reviewer" {
+		t.Fatalf("PRReviewers = %v, want org reviewer", got.PRReviewers)
+	}
+	if got.PRAssignee != "org-assignee" || len(got.PRLabels) != 1 || got.PRLabels[0] != "repo-label" {
+		t.Fatalf("PR metadata = assignee %q labels %v, want org/repo", got.PRAssignee, got.PRLabels)
+	}
+	if got.PRDraft == nil || *got.PRDraft {
+		t.Fatal("PRDraft should come from repo false")
+	}
+	if got.GeneratePRDescription == nil || *got.GeneratePRDescription {
+		t.Fatal("GeneratePRDescription should come from repo false")
+	}
+}
+
+func TestAIForRepo_EmptyPRMetadataOverridesClearInheritedValues(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	content := `
+[ai]
+primary = "claude"
+pr_reviewers = ["global-r1"]
+pr_labels = ["global-label"]
+
+[ai.orgs."org"]
+pr_reviewers = []
+pr_labels = ["org-label"]
+
+[ai.repos."org/repo"]
+pr_labels = []
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	r := cfg.AIForRepo("org/repo")
+	if len(r.PRReviewers) != 0 {
+		t.Fatalf("PRReviewers = %v, want explicit org clear", r.PRReviewers)
+	}
+	if len(r.PRLabels) != 0 {
+		t.Fatalf("PRLabels = %v, want explicit repo clear", r.PRLabels)
+	}
+}
+
 func TestRepoOrg(t *testing.T) {
 	cases := map[string]string{
-		"org/repo":   "org",
-		"a/b/c":      "a",
-		"noslash":     "",
-		"":            "",
-		"/leading":    "",
+		"org/repo": "org",
+		"a/b/c":    "a",
+		"noslash":  "",
+		"":         "",
+		"/leading": "",
 	}
 	for input, want := range cases {
 		if got := repoOrg(input); got != want {
@@ -1304,6 +1764,124 @@ func TestIssueTrackingForRepo_GlobalOnly(t *testing.T) {
 	}
 }
 
+func TestIssueTrackingForRepo_OrgOverride(t *testing.T) {
+	c := &Config{}
+	c.GitHub.IssueTracking = IssueTrackingConfig{
+		Enabled:          true,
+		FilterMode:       FilterModeExclusive,
+		DevelopLabels:    []string{"global-dev"},
+		RefinementLabels: []string{"global-refine"},
+		ReviewOnlyLabels: []string{"global-review"},
+		SkipLabels:       []string{"global-skip"},
+		BlockedLabels:    []string{"global-blocked"},
+		PromoteToLabel:   "global-ready",
+		DefaultAction:    "ignore",
+	}
+	c.AI.Orgs = map[string]OrgAI{
+		"org": {
+			IssueTracking: &IssueTrackingOverride{
+				FilterMode:       FilterModeInclusive,
+				DevelopLabels:    []string{"org-dev"},
+				RefinementLabels: []string{"org-refine"},
+				ReviewOnlyLabels: []string{"org-review"},
+				BlockedLabels:    []string{"org-blocked"},
+				PromoteToLabel:   "org-ready",
+			},
+		},
+	}
+
+	got := c.IssueTrackingForRepo("org/repo")
+	if !got.Enabled {
+		t.Fatal("enabled should inherit true from global")
+	}
+	if got.FilterMode != FilterModeInclusive {
+		t.Errorf("filter_mode = %q, want org override", got.FilterMode)
+	}
+	if len(got.DevelopLabels) != 1 || got.DevelopLabels[0] != "org-dev" {
+		t.Errorf("develop_labels = %v, want org override", got.DevelopLabels)
+	}
+	if len(got.RefinementLabels) != 1 || got.RefinementLabels[0] != "org-refine" {
+		t.Errorf("refinement_labels = %v, want org override", got.RefinementLabels)
+	}
+	if len(got.SkipLabels) != 1 || got.SkipLabels[0] != "global-skip" {
+		t.Errorf("skip_labels = %v, want inherited global skip label", got.SkipLabels)
+	}
+	if len(got.BlockedLabels) != 1 || got.BlockedLabels[0] != "org-blocked" {
+		t.Errorf("blocked_labels = %v, want org override", got.BlockedLabels)
+	}
+	if got.PromoteToLabel != "org-ready" {
+		t.Errorf("promote_to_label = %q, want org-ready", got.PromoteToLabel)
+	}
+}
+
+func TestIssueTrackingForRepo_RepoOverridesOrg(t *testing.T) {
+	c := &Config{}
+	c.GitHub.IssueTracking = IssueTrackingConfig{
+		Enabled:       true,
+		FilterMode:    FilterModeExclusive,
+		DevelopLabels: []string{"global-dev"},
+		DefaultAction: "ignore",
+	}
+	c.AI.Orgs = map[string]OrgAI{
+		"org": {
+			IssueTracking: &IssueTrackingOverride{
+				DevelopLabels: []string{"org-dev"},
+				SkipLabels:    []string{"org-skip"},
+			},
+		},
+	}
+	c.AI.Repos = map[string]RepoAI{
+		"org/repo": {
+			IssueTracking: &IssueTrackingOverride{
+				DevelopLabels: []string{"repo-dev"},
+			},
+		},
+	}
+
+	got := c.IssueTrackingForRepo("org/repo")
+	if len(got.DevelopLabels) != 1 || got.DevelopLabels[0] != "repo-dev" {
+		t.Errorf("develop_labels = %v, want repo override", got.DevelopLabels)
+	}
+	if len(got.SkipLabels) != 1 || got.SkipLabels[0] != "org-skip" {
+		t.Errorf("skip_labels = %v, want inherited org override", got.SkipLabels)
+	}
+}
+
+func TestIssueTrackingForRepo_ExplicitFalseDisablesInheritedEnabled(t *testing.T) {
+	c := &Config{}
+	c.GitHub.IssueTracking = IssueTrackingConfig{Enabled: true, FilterMode: FilterModeExclusive, DefaultAction: "ignore"}
+	c.AI.Orgs = map[string]OrgAI{
+		"org": {
+			IssueTracking: &IssueTrackingOverride{Enabled: testBoolPtr(false)},
+		},
+	}
+
+	got := c.IssueTrackingForRepo("org/repo")
+	if got.Enabled {
+		t.Fatal("org enabled=false should disable global issue tracking for that org")
+	}
+}
+
+func TestIssueTrackingForRepo_EmptyListClearsInheritedLabels(t *testing.T) {
+	c := &Config{}
+	c.GitHub.IssueTracking = IssueTrackingConfig{
+		Enabled:       true,
+		FilterMode:    FilterModeExclusive,
+		DevelopLabels: []string{"global-dev"},
+		DefaultAction: "ignore",
+	}
+	c.AI.Orgs = map[string]OrgAI{
+		"org": {
+			IssueTracking: &IssueTrackingOverride{DevelopLabels: []string{}},
+		},
+	}
+
+	got := c.IssueTrackingForRepo("org/repo")
+	if got.DevelopLabels == nil || len(got.DevelopLabels) != 0 {
+		t.Fatalf("develop_labels = %#v, want explicit empty override", got.DevelopLabels)
+	}
+}
+
 func TestIssueTrackingForRepo_PerRepoOverride(t *testing.T) {
 	c := &Config{}
 	c.GitHub.IssueTracking = IssueTrackingConfig{
@@ -1316,8 +1894,8 @@ func TestIssueTrackingForRepo_PerRepoOverride(t *testing.T) {
 	c.AI.Primary = "claude"
 	c.AI.Repos = map[string]RepoAI{
 		"org/secure-repo": {
-			IssueTracking: &IssueTrackingConfig{
-				Enabled:       true, // per-repo Enabled overrides global unconditionally
+			IssueTracking: &IssueTrackingOverride{
+				Enabled:       testBoolPtr(true), // per-repo Enabled overrides global unconditionally
 				DevelopLabels: []string{"security-fix"},
 				SkipLabels:    []string{"wontfix", "stale"},
 			},
@@ -1361,8 +1939,8 @@ func TestIssueTrackingForRepo_PerRepoEnablesWhenGlobalOff(t *testing.T) {
 	}
 	c.AI.Repos = map[string]RepoAI{
 		"org/active-repo": {
-			IssueTracking: &IssueTrackingConfig{
-				Enabled:       true,
+			IssueTracking: &IssueTrackingOverride{
+				Enabled:       testBoolPtr(true),
 				DevelopLabels: []string{"feature"},
 			},
 		},
@@ -1387,7 +1965,7 @@ func TestIssueTrackingForRepo_LabelsImplyEnabled(t *testing.T) {
 	c.GitHub.IssueTracking = IssueTrackingConfig{Enabled: false}
 	c.AI.Repos = map[string]RepoAI{
 		"org/labels-only": {
-			IssueTracking: &IssueTrackingConfig{
+			IssueTracking: &IssueTrackingOverride{
 				// Enabled not set (false), but labels configured
 				DevelopLabels:    []string{"heimdallm-auto-implement"},
 				ReviewOnlyLabels: []string{"heimdallm-auto-refine"},
@@ -1400,12 +1978,135 @@ func TestIssueTrackingForRepo_LabelsImplyEnabled(t *testing.T) {
 	}
 }
 
+func TestIssueTrackingForRepo_TOMLLabelsWithoutEnabledImplicitlyEnable(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	content := `
+[ai]
+primary = "claude"
+
+[ai.repos."org/repo".issue_tracking]
+develop_labels = ["ready"]
+review_only_labels = ["triage"]
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := cfg.IssueTrackingForRepo("org/repo")
+	if !got.Enabled {
+		t.Error("TOML labels without enabled should preserve implicit-enable behavior")
+	}
+}
+
+func TestIssueTrackingForRepo_OrgLabelsImplyEnabled(t *testing.T) {
+	c := &Config{}
+	c.GitHub.IssueTracking = IssueTrackingConfig{Enabled: false}
+	c.AI.Orgs = map[string]OrgAI{
+		"org": {
+			IssueTracking: &IssueTrackingOverride{
+				DevelopLabels:    []string{"heimdallm-auto-implement"},
+				ReviewOnlyLabels: []string{"heimdallm-auto-refine"},
+			},
+		},
+	}
+	got := c.IssueTrackingForRepo("org/labels-only")
+	if !got.Enabled {
+		t.Error("org with labels should be implicitly enabled")
+	}
+}
+
+func TestIssueTrackingForRepo_ExplicitFalseWinsOverOrgLabels(t *testing.T) {
+	c := &Config{}
+	c.GitHub.IssueTracking = IssueTrackingConfig{Enabled: true}
+	c.AI.Orgs = map[string]OrgAI{
+		"org": {
+			IssueTracking: &IssueTrackingOverride{
+				Enabled:          testBoolPtr(false),
+				DevelopLabels:    []string{"heimdallm-auto-implement"},
+				ReviewOnlyLabels: []string{"heimdallm-auto-refine"},
+			},
+		},
+	}
+	got := c.IssueTrackingForRepo("org/labels-only")
+	if got.Enabled {
+		t.Error("explicit org enabled=false should win over labels")
+	}
+}
+
+func TestIssueTrackingForRepo_RepoExplicitFalseWithLabelsDisables(t *testing.T) {
+	c := &Config{}
+	c.GitHub.IssueTracking = IssueTrackingConfig{Enabled: true}
+	c.AI.Repos = map[string]RepoAI{
+		"org/repo": {
+			IssueTracking: &IssueTrackingOverride{
+				Enabled:          testBoolPtr(false),
+				DevelopLabels:    []string{"heimdallm-auto-implement"},
+				ReviewOnlyLabels: []string{"heimdallm-auto-refine"},
+			},
+		},
+	}
+	got := c.IssueTrackingForRepo("org/repo")
+	if got.Enabled {
+		t.Error("explicit repo enabled=false should win over labels")
+	}
+}
+
+func TestIssueTrackingForRepo_OrgImplicitEnableSurvivesRepoMetadataOverride(t *testing.T) {
+	c := &Config{}
+	c.GitHub.IssueTracking = IssueTrackingConfig{Enabled: false}
+	c.AI.Orgs = map[string]OrgAI{
+		"org": {
+			IssueTracking: &IssueTrackingOverride{
+				ReviewOnlyLabels: []string{"needs-triage"},
+			},
+		},
+	}
+	c.AI.Repos = map[string]RepoAI{
+		"org/repo": {
+			IssueTracking: &IssueTrackingOverride{
+				PromoteToLabel: "ready",
+			},
+		},
+	}
+	got := c.IssueTrackingForRepo("org/repo")
+	if !got.Enabled {
+		t.Error("repo override without enabled or labels should not undo org implicit enable")
+	}
+}
+
+func TestIssueTrackingForRepo_RepoLabelsReenableOrgDisabled(t *testing.T) {
+	c := &Config{}
+	c.GitHub.IssueTracking = IssueTrackingConfig{Enabled: true}
+	c.AI.Orgs = map[string]OrgAI{
+		"org": {
+			IssueTracking: &IssueTrackingOverride{Enabled: testBoolPtr(false)},
+		},
+	}
+	c.AI.Repos = map[string]RepoAI{
+		"org/repo": {
+			IssueTracking: &IssueTrackingOverride{
+				DevelopLabels: []string{"ready"},
+			},
+		},
+	}
+	got := c.IssueTrackingForRepo("org/repo")
+	if !got.Enabled {
+		t.Error("repo labels should re-enable tracking after org disabled it")
+	}
+}
+
 func TestIssueTrackingForRepo_NoLabelsNoOverride(t *testing.T) {
 	c := &Config{}
 	c.GitHub.IssueTracking = IssueTrackingConfig{Enabled: false}
 	c.AI.Repos = map[string]RepoAI{
 		"org/empty-override": {
-			IssueTracking: &IssueTrackingConfig{},
+			IssueTracking: &IssueTrackingOverride{},
 		},
 	}
 	got := c.IssueTrackingForRepo("org/empty-override")
@@ -1983,5 +2684,45 @@ func TestReviewGuards_ExplicitFalse(t *testing.T) {
 	}
 	if g.SkipSelfAuthor {
 		t.Errorf("SkipSelfAuthor: explicit false not honoured")
+	}
+}
+
+func TestMatchesInstructionAuthors(t *testing.T) {
+	r := RepoAI{InstructionAuthors: []string{"Alice", "@bob"}}
+	if !r.MatchesInstructionAuthors("alice") {
+		t.Error("alice should match (case-insensitive)")
+	}
+	if !r.MatchesInstructionAuthors("@BOB") {
+		t.Error("@BOB should match (leading @ + case-insensitive)")
+	}
+	if r.MatchesInstructionAuthors("mallory") {
+		t.Error("mallory must not match")
+	}
+	if r.MatchesInstructionAuthors("") {
+		t.Error("empty login must not match")
+	}
+	if (RepoAI{}).MatchesInstructionAuthors("alice") {
+		t.Error("empty allowlist must deny everyone")
+	}
+}
+
+func TestAIForRepo_InstructionAuthorsResolution(t *testing.T) {
+	c := &Config{}
+	c.AI.InstructionAuthors = []string{"global-user"}
+	c.AI.Orgs = map[string]OrgAI{
+		"org": {InstructionAuthors: []string{"org-user"}},
+	}
+	c.AI.Repos = map[string]RepoAI{
+		"org/repo":  {InstructionAuthors: []string{"repo-user"}},
+		"org/inhrt": {}, // nil → inherits org
+	}
+	if got := c.AIForRepo("org/repo").InstructionAuthors; len(got) != 1 || got[0] != "repo-user" {
+		t.Errorf("repo override: got %v", got)
+	}
+	if got := c.AIForRepo("org/inhrt").InstructionAuthors; len(got) != 1 || got[0] != "org-user" {
+		t.Errorf("org inherit: got %v", got)
+	}
+	if got := c.AIForRepo("other/x").InstructionAuthors; len(got) != 1 || got[0] != "global-user" {
+		t.Errorf("global fallback: got %v", got)
 	}
 }

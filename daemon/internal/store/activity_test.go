@@ -83,6 +83,36 @@ func TestListActivity_FilterByOrgAndAction(t *testing.T) {
 	}
 }
 
+func TestListActivity_FilterByItemTypeAndOutcome(t *testing.T) {
+	s := newActivityStore(t)
+	base := time.Now().UTC().Truncate(time.Second)
+
+	must := func(itemType, action, outcome string, number int) {
+		t.Helper()
+		if _, err := s.InsertActivity(base, "acme", "acme/api", itemType, number, "t", action, outcome, nil); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+	}
+	must("pr", "review_skipped", "draft", 1)
+	must("pr", "review_skipped", "not_open", 2)
+	must("issue", "triage", "draft", 3)
+
+	entries, _, err := s.ListActivity(store.ActivityQuery{
+		ItemTypes: []string{"pr"},
+		Actions:   []string{"review_skipped"},
+		Outcomes:  []string{"draft"},
+	})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("want 1 entry, got %d", len(entries))
+	}
+	if entries[0].ItemNumber != 1 {
+		t.Errorf("item_number = %d, want 1", entries[0].ItemNumber)
+	}
+}
+
 func TestListActivity_Truncation(t *testing.T) {
 	s := newActivityStore(t)
 	base := time.Now().UTC().Truncate(time.Second)

@@ -184,6 +184,11 @@ func formatEventData(data string) string {
 			parts = append(parts, from+" → "+to)
 		}
 	}
+	if from, ok := m["from_stage"].(string); ok {
+		if to, ok := m["to_stage"].(string); ok {
+			parts = append(parts, from+" → "+to)
+		}
+	}
 
 	if reason, ok := m["reason"].(string); ok && reason != "" {
 		parts = append(parts, styleMuted.Render(reason))

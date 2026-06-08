@@ -9,13 +9,18 @@ import (
 
 func seedIssueReview(t *testing.T, s *store.Store, issueID int64, at time.Time) {
 	t.Helper()
+	seedIssueReviewWithAction(t, s, issueID, at, "review_only")
+}
+
+func seedIssueReviewWithAction(t *testing.T, s *store.Store, issueID int64, at time.Time, action string) {
+	t.Helper()
 	if _, err := s.InsertIssueReview(&store.IssueReview{
 		IssueID:     issueID,
 		CLIUsed:     "claude",
 		Summary:     "s",
 		Triage:      "{}",
 		Suggestions: "[]",
-		ActionTaken: "review_only",
+		ActionTaken: action,
 		CreatedAt:   at,
 	}); err != nil {
 		t.Fatalf("insert review: %v", err)
@@ -50,6 +55,31 @@ func TestCountIssueReviewsForIssue_CountsWithinWindow(t *testing.T) {
 	}
 }
 
+func TestCountIssueReviewsForIssue_IgnoresNonTriageActions(t *testing.T) {
+	s := newTestStore(t)
+	issueID, err := s.UpsertIssue(&store.Issue{
+		GithubID: 1, Repo: "org/r", Number: 1,
+		Title: "t", Author: "a", State: "open",
+		CreatedAt: time.Now(), FetchedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().Add(-10 * time.Minute)
+	seedIssueReview(t, s, issueID, now)
+	seedIssueReviewWithAction(t, s, issueID, now.Add(time.Minute), "refinement")
+	seedIssueReviewWithAction(t, s, issueID, now.Add(2*time.Minute), "develop")
+
+	n, err := s.CountIssueReviewsForIssue(issueID, time.Now().Add(-24*time.Hour))
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("want only the triage review counted, got %d", n)
+	}
+}
+
 func TestCountIssueTriagesForRepo_CountsAcrossIssues(t *testing.T) {
 	s := newTestStore(t)
 	for i := int64(1); i <= 3; i++ {
@@ -78,6 +108,29 @@ func TestCountIssueTriagesForRepo_CountsAcrossIssues(t *testing.T) {
 	}
 	if n != 3 {
 		t.Errorf("want 3 triages in org/r in last hour, got %d", n)
+	}
+}
+
+func TestCountIssueTriagesForRepo_IgnoresNonTriageActions(t *testing.T) {
+	s := newTestStore(t)
+	for i, action := range []string{"review_only", "refinement", "develop"} {
+		id, err := s.UpsertIssue(&store.Issue{
+			GithubID: int64(i + 1), Repo: "org/r", Number: i + 1,
+			Title: "t", Author: "a", State: "open",
+			CreatedAt: time.Now(), FetchedAt: time.Now(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		seedIssueReviewWithAction(t, s, id, time.Now().Add(-10*time.Minute), action)
+	}
+
+	n, err := s.CountIssueTriagesForRepo("org/r", time.Now().Add(-1*time.Hour))
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("want only the triage review counted, got %d", n)
 	}
 }
 

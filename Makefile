@@ -16,11 +16,11 @@ else
   APP_BUNDLE       := $(FLUTTER_BUILD)/bundle
 endif
 
-.PHONY: build-daemon build-app build-web test test-docker dev dev-daemon dev-stop \
+.PHONY: build-daemon build-app build-web build-cli test test-cli lint-cli dev-cli test-docker dev dev-daemon dev-stop \
         release-local package-macos install-service verify-linux run-linux \
         install-linux uninstall-linux \
         setup up up-build up-daemon up-build-daemon down logs logs-daemon \
-        ps restart clean _check-docker _check-env _check-linux _post-up-hints
+        ps restart clean clean-clones _check-docker _check-env _check-linux _post-up-hints
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
@@ -29,6 +29,9 @@ build-daemon:
 
 build-app:
 	cd flutter_app && flutter build $(FLUTTER_DEVICE) --release
+
+build-cli:
+	$(MAKE) -C cli build
 
 # Flutter Web bundle, consumed by docker/Dockerfile.web (served via Nginx).
 # --base-href=/ matches the Nginx server block that expects assets at the root.
@@ -40,6 +43,13 @@ build-web:
 test:
 	cd daemon && make test
 	cd flutter_app && flutter test
+	$(MAKE) -C cli test
+
+test-cli:
+	$(MAKE) -C cli test
+
+lint-cli:
+	$(MAKE) -C cli lint
 
 # ── Sandboxed Go tests (EDR-safe) ─────────────────────────────────────────────
 #
@@ -63,7 +73,7 @@ test:
 #   make test-docker
 #   make test-docker GO_TEST_ARGS="-run TestFoo ./internal/config/..."
 
-GO_DOCKER_IMAGE ?= golang:1.21-alpine@sha256:2414035b086e3c42b99654c8b26e6f5b1b1598080d65fd03c7f499552ff4dc94
+GO_DOCKER_IMAGE ?= golang:1.25-alpine@sha256:f6751d823c26342f9506c03797d2527668d095b0a15f1862cddb4d927a7a4ced
 GO_TEST_ARGS    ?= -timeout 60s -count=1 ./...
 
 test-docker:
@@ -96,6 +106,9 @@ dev-daemon: build-daemon dev-stop
 	@echo "▶  Daemon en http://localhost:7842 (Ctrl-C para parar)"
 	GITHUB_TOKEN="$${GITHUB_TOKEN}" $(DAEMON_BIN)
 
+dev-cli:
+	$(MAKE) -C cli dev
+
 dev-stop:
 	@pkill -f "$(DAEMON_BIN)" 2>/dev/null && echo "↓  Daemon parado" || true
 	@UI_PID_FILE="$$HOME/.local/share/heimdallm/ui.pid"; \
@@ -104,6 +117,14 @@ dev-stop:
 	   kill "$$UI_PID" 2>/dev/null && echo "↓  UI parada (PID $$UI_PID)" || true; \
 	   rm -f "$$UI_PID_FILE"; \
 	 fi
+
+clean-clones:
+	@: "$${HEIMDALLM_API_TOKEN:?set HEIMDALLM_API_TOKEN to the daemon API token}"
+	@HEIMDALLM_SERVER_URL="$${HEIMDALLM_SERVER_URL:-http://localhost:7842}"; \
+	  curl -fsS -X DELETE \
+	    -H "X-Heimdallm-Token: $$HEIMDALLM_API_TOKEN" \
+	    "$$HEIMDALLM_SERVER_URL/config/clones"; \
+	  echo
 
 # ── Local release (macOS only: sign + notarize + DMG + GitHub release) ───────
 #

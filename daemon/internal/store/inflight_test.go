@@ -7,12 +7,33 @@ import (
 
 func TestInFlight_ClaimAndRelease(t *testing.T) {
 	s := newTestStore(t)
+	inFlight, err := s.ReviewInFlight(42, "abc123")
+	if err != nil {
+		t.Fatalf("initial in-flight check: %v", err)
+	}
+	if inFlight {
+		t.Fatal("review should not be in-flight before claim")
+	}
 	claimed, err := s.ClaimInFlightReview(42, "abc123")
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
 	if !claimed {
 		t.Errorf("first claim should succeed")
+	}
+	inFlight, err = s.ReviewInFlight(42, "abc123")
+	if err != nil {
+		t.Fatalf("in-flight check after claim: %v", err)
+	}
+	if !inFlight {
+		t.Fatal("review should be in-flight after claim")
+	}
+	inFlight, err = s.ReviewInFlight(42, "")
+	if err != nil {
+		t.Fatalf("empty sha in-flight check: %v", err)
+	}
+	if inFlight {
+		t.Fatal("empty head SHA should not match an in-flight review")
 	}
 	// Second claim on the same (pr_id, head_sha) must fail.
 	claimed, err = s.ClaimInFlightReview(42, "abc123")
@@ -33,6 +54,13 @@ func TestInFlight_ClaimAndRelease(t *testing.T) {
 	// Release the first claim; should allow a re-claim.
 	if err := s.ReleaseInFlightReview(42, "abc123"); err != nil {
 		t.Fatalf("release: %v", err)
+	}
+	inFlight, err = s.ReviewInFlight(42, "abc123")
+	if err != nil {
+		t.Fatalf("in-flight check after release: %v", err)
+	}
+	if inFlight {
+		t.Fatal("review should not be in-flight after release")
 	}
 	claimed, err = s.ClaimInFlightReview(42, "abc123")
 	if err != nil {

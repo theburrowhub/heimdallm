@@ -1,6 +1,6 @@
 # Dockerfile.linux-verify
 #
-# Replicates the CI environment (ubuntu-22.04, Go 1.21, Flutter 3.x stable)
+# Replicates the CI environment (ubuntu-22.04, Go 1.25, Flutter 3.x stable)
 # and runs the full verification pipeline:
 #
 #   daemon tests → flutter pub get → flutter test →
@@ -23,8 +23,8 @@ RUN apt-get update -y && apt-get install -y --no-install-recommends \
       git curl unzip xz-utils wget ca-certificates make \
     && rm -rf /var/lib/apt/lists/*
 
-# ── Go 1.21 (matches daemon/go.mod) ──────────────────────────────────────────
-RUN wget -q https://go.dev/dl/go1.21.13.linux-amd64.tar.gz -O /tmp/go.tar.gz \
+# ── Go 1.25 (matches daemon/go.mod) ──────────────────────────────────────────
+RUN wget -q https://go.dev/dl/go1.25.7.linux-amd64.tar.gz -O /tmp/go.tar.gz \
     && tar -C /usr/local -xzf /tmp/go.tar.gz \
     && rm /tmp/go.tar.gz
 ENV PATH="/usr/local/go/bin:${PATH}"

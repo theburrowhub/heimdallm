@@ -13,8 +13,9 @@ const (
 	SubjPRPublish = "heimdallm.pr.publish"
 
 	// Issue workflow
-	SubjIssueTriage    = "heimdallm.issue.triage"
-	SubjIssueImplement = "heimdallm.issue.implement"
+	SubjIssueTriage     = "heimdallm.issue.triage"
+	SubjIssueRefinement = "heimdallm.issue.refinement"
+	SubjIssueImplement  = "heimdallm.issue.implement"
 
 	// State checking
 	SubjStateCheck = "heimdallm.state.check"
@@ -31,6 +32,8 @@ const (
 	SubjEventPRDetected      = "heimdallm.events.pr_detected"
 	SubjEventIssueDetected   = "heimdallm.events.issue_detected"
 	SubjEventIssueTriage     = "heimdallm.events.issue_review_completed"
+	// Mirrors sse.EventIssueRefinementDone for activity/SSE bridge consumers.
+	SubjEventIssueRefinement = "heimdallm.events.issue_refinement_done"
 	SubjEventIssueImplement  = "heimdallm.events.issue_implemented"
 	SubjEventIssueState      = "heimdallm.events.issue_state_changed"
 	SubjEventRepoDiscovered  = "heimdallm.events.repo_discovered"

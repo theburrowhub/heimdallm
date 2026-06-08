@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,9 +25,23 @@ const maxBodyBytes = 1 * 1024 * 1024 // 1 MB for most API responses
 // maxDiffBodyBytes allows a larger limit for PR diffs, which can be legitimately large.
 const maxDiffBodyBytes = 10 * 1024 * 1024 // 10 MB for diffs
 
+// maxPaginatedPageBytes is the body ceiling for the paginated endpoints
+// (fetchReviewComments, fetchIssueComments, GetPRTimelineEventsForReviewer).
+// These request per_page=100 items per call, and a single comment can
+// legitimately carry 30 KB+ (long stack traces, big code blocks,
+// multi-paragraph review bodies), so a full page can exceed the generic
+// 1 MiB maxBodyBytes — truncating mid-JSON and aborting pagination with a
+// decode error, which drops the newest comments (#518, the failure mode
+// #512 exists to prevent). 5 MiB gives ~50 KB per item at a full page,
+// comfortably above anything observed, while still bounding exposure to a
+// misbehaving server.
+const maxPaginatedPageBytes = 5 * 1024 * 1024 // 5 MB for per_page=100 endpoints
+
 // maxErrBodyLen limits the number of bytes included in error messages to avoid
 // leaking sensitive GitHub diagnostic information (e.g. token details).
 const maxErrBodyLen = 200
+
+var labelColorRE = regexp.MustCompile(`^[0-9A-Fa-f]{6}$`)
 
 // safeTruncate shortens s to at most max bytes, snapping on a rune boundary
 // so we never emit a split multi-byte UTF-8 character in an error message.
@@ -130,8 +145,39 @@ func (c *Client) FetchPRsToReview() ([]*PullRequest, error) {
 	if err != nil {
 		return nil, err
 	}
+	prs, skipped := filterSelfAuthoredPRs(prs, username)
+	if skipped > 0 {
+		slog.Info("github: self-authored PRs skipped by review scope", "count", skipped, "user", username)
+	}
 	slog.Info("github: PRs to review (all repos)", "count", len(prs))
 	return prs, nil
+}
+
+func filterSelfAuthoredPRs(prs []*PullRequest, username string) ([]*PullRequest, int) {
+	username = normalizeGitHubLoginForCompare(username)
+	if username == "" || len(prs) == 0 {
+		return prs, 0
+	}
+	filtered := make([]*PullRequest, 0, len(prs))
+	skipped := 0
+	for _, pr := range prs {
+		if pr != nil && githubLoginsEqual(pr.User.Login, username) {
+			skipped++
+			continue
+		}
+		filtered = append(filtered, pr)
+	}
+	return filtered, skipped
+}
+
+func githubLoginsEqual(a, b string) bool {
+	a = normalizeGitHubLoginForCompare(a)
+	b = normalizeGitHubLoginForCompare(b)
+	return a != "" && b != "" && strings.EqualFold(a, b)
+}
+
+func normalizeGitHubLoginForCompare(login string) string {
+	return strings.TrimSpace(strings.TrimLeft(login, "@"))
 }
 
 // FetchPRs fetches all open PRs where the user is reviewer, assignee, or author.
@@ -446,27 +492,107 @@ func (c *Client) fetchReposForOrg(topic, org string) ([]string, error) {
 	return repos, nil
 }
 
-// GetPRHeadSHA returns the PR's current HEAD commit SHA via the Pulls API.
-// The Search Issues API used by FetchPRsToReview does not populate head.sha,
-// so the pipeline needs this lookup to deduplicate reviews by commit rather
-// than by the PR's updated_at (which any peer reviewer bumps on every review).
-func (c *Client) GetPRHeadSHA(repo string, number int) (string, error) {
+// IsRepoArchived checks whether a repository is archived or has been deleted.
+// Returns true for archived repos and repos that return 404 (deleted/transferred).
+// Non-200/404 responses are treated as errors and the caller should assume the
+// repo is still active (fail-open, so transient API errors do not purge repos).
+func (c *Client) IsRepoArchived(repo string) (bool, error) {
+	path := fmt.Sprintf("/repos/%s", repo)
+	resp, err := c.do("GET", path, "application/vnd.github+json")
+	if err != nil {
+		return false, fmt.Errorf("github: check repo archived: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+
+	if resp.StatusCode == http.StatusNotFound {
+		return true, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		errBody := safeTruncate(string(body), maxErrBodyLen)
+		return false, fmt.Errorf("github: check repo archived: status %d: %s", resp.StatusCode, errBody)
+	}
+
+	var result struct {
+		Archived bool `json:"archived"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return false, fmt.Errorf("github: decode repo: %w", err)
+	}
+	return result.Archived, nil
+}
+
+// PRHeadInfo bundles the HEAD SHA and the pending-reviewer logins returned by
+// the Pulls API. Tier 2 uses ReviewRequestedFor to confirm the bot is still a
+// pending reviewer (the Search API index can lag behind the actual
+// requested_reviewers list).
+type PRHeadInfo struct {
+	HeadSHA            string
+	RequestedReviewers []string // lowercased logins
+}
+
+// ReviewRequestedFor reports whether login (case-insensitive) is still in the
+// PR's requested_reviewers list. Returns false when the list is empty (which
+// happens after the bot submits a review).
+func (info PRHeadInfo) ReviewRequestedFor(login string) bool {
+	lower := strings.ToLower(login)
+	for _, r := range info.RequestedReviewers {
+		if r == lower {
+			return true
+		}
+	}
+	return false
+}
+
+// getPR fetches a single PR via the Pulls API and returns the unmarshalled
+// struct. Shared by GetPRHeadSHA (pipeline interface — returns only the SHA)
+// and GetPRHeadInfo (tier 2 — returns SHA + requested_reviewers).
+func (c *Client) getPR(repo string, number int) (*PullRequest, error) {
 	path := fmt.Sprintf("/repos/%s/pulls/%d", repo, number)
 	resp, err := c.do("GET", path, "application/vnd.github+json")
 	if err != nil {
-		return "", fmt.Errorf("github: get PR head sha: %w", err)
+		return nil, fmt.Errorf("github: get PR: %w", err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	if resp.StatusCode != http.StatusOK {
 		errBody := safeTruncate(string(body), maxErrBodyLen)
-		return "", fmt.Errorf("github: get PR head sha (%s #%d): status %d: %s", repo, number, resp.StatusCode, errBody)
+		return nil, fmt.Errorf("github: get PR (%s #%d): status %d: %s", repo, number, resp.StatusCode, errBody)
 	}
 	var pr PullRequest
 	if err := json.Unmarshal(body, &pr); err != nil {
-		return "", fmt.Errorf("github: get PR head sha: unmarshal: %w", err)
+		return nil, fmt.Errorf("github: get PR: unmarshal: %w", err)
+	}
+	return &pr, nil
+}
+
+// GetPRHeadSHA returns the PR's current HEAD commit SHA via the Pulls API.
+// The Search Issues API used by FetchPRsToReview does not populate head.sha,
+// so the pipeline needs this lookup to deduplicate reviews by commit rather
+// than by the PR's updated_at (which any peer reviewer bumps on every review).
+func (c *Client) GetPRHeadSHA(repo string, number int) (string, error) {
+	pr, err := c.getPR(repo, number)
+	if err != nil {
+		return "", err
 	}
 	return pr.Head.SHA, nil
+}
+
+// GetPRHeadInfo returns the HEAD SHA and pending reviewer logins for a PR.
+// Used by the tier-2 adapter to (a) resolve the HEAD SHA and (b) confirm the
+// bot is still in requested_reviewers before enqueuing a review — without an
+// extra API call, since both fields come from the same GET /pulls/{n} response.
+func (c *Client) GetPRHeadInfo(repo string, number int) (PRHeadInfo, error) {
+	pr, err := c.getPR(repo, number)
+	if err != nil {
+		return PRHeadInfo{}, err
+	}
+	logins := make([]string, len(pr.RequestedReviewers))
+	for i, u := range pr.RequestedReviewers {
+		logins[i] = strings.ToLower(u.Login)
+	}
+	return PRHeadInfo{HeadSHA: pr.Head.SHA, RequestedReviewers: logins}, nil
 }
 
 // PRSnapshot is the subset of PR fields Tier 3's guard evaluator needs.
@@ -539,7 +665,10 @@ func (c *Client) GetPR(repo string, number int) (*PullRequest, error) {
 	return &pr, nil
 }
 
-// FetchDiff returns the unified diff for a PR.
+// FetchDiff returns the unified diff for a PR. PRs over GitHub's 300-file
+// diff limit make the diff endpoint return 406; those fall back to a
+// reconstruction from the List Pull Request Files API (#506) instead of
+// aborting the review.
 func (c *Client) FetchDiff(repo string, number int) (string, error) {
 	path := fmt.Sprintf("/repos/%s/pulls/%d", repo, number)
 	resp, err := c.do("GET", path, "application/vnd.github.v3.diff")
@@ -547,6 +676,14 @@ func (c *Client) FetchDiff(repo string, number int) (string, error) {
 		return "", fmt.Errorf("github: fetch diff: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotAcceptable {
+		// GitHub's "diff exceeded the maximum number of files (300)"
+		// response. Only 406 triggers the fallback; every other non-200
+		// keeps the hard-error contract below.
+		slog.Info("github: diff endpoint returned 406, reconstructing via files API",
+			"repo", repo, "pr", number)
+		return c.fetchDiffViaFilesAPI(repo, number)
+	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 		errBody := safeTruncate(string(body), maxErrBodyLen)
@@ -560,6 +697,154 @@ func (c *Client) FetchDiff(repo string, number int) (string, error) {
 		slog.Warn("github: diff truncated at size limit", "repo", repo, "pr", number, "limit_bytes", maxDiffBodyBytes)
 	}
 	return string(data), nil
+}
+
+// maxFilesPageBytes is the body ceiling for List Pull Request Files pages.
+// Deliberately NOT maxPaginatedPageBytes (5 MiB): files pages embed per-file
+// `patch` strings, so a per_page=100 page can plausibly exceed 5 MiB even
+// when the final reconstruction would truncate safely at maxDiffBodyBytes —
+// a truncated JSON page fails to decode and would abort the review, the
+// exact failure mode #506 removes. 2× maxDiffBodyBytes (20 MiB) is generous
+// because GitHub omits the `patch` field entirely for very large file
+// diffs, which bounds realistic page sizes.
+const maxFilesPageBytes = 2 * maxDiffBodyBytes
+
+// githubPRFilesCap is GitHub's documented hard cap on the List Pull Request
+// Files endpoint: at most 3,000 files are ever returned, regardless of
+// pagination.
+const githubPRFilesCap = 3000
+
+// prDiffFile is the subset of a List Pull Request Files item needed to
+// reconstruct a unified-diff entry.
+type prDiffFile struct {
+	Filename         string `json:"filename"`
+	PreviousFilename string `json:"previous_filename"`
+	Status           string `json:"status"`
+	Additions        int    `json:"additions"`
+	Deletions        int    `json:"deletions"`
+	Patch            string `json:"patch"`
+}
+
+// fetchDiffViaFilesAPI reconstructs a unified diff from the List Pull
+// Request Files API, for PRs whose diff endpoint 406s (>300 files, #506).
+//
+// Unlike the comment/timeline fetchers (#516/#519), every degradation path
+// here returns a PARTIAL diff with a note instead of an error: the diff is
+// advisory review context that the prompt layer already truncates to 32 KB,
+// whereas comments and timeline events feed dedup/re-review correctness
+// decisions. Erroring on truncation would re-create the aborted-review
+// failure mode this fallback exists to remove. The reconstructed diff makes
+// no claim about a local checkout: the review path runs with or without one
+// (repoctx is best-effort) and this client cannot tell which.
+func (c *Client) fetchDiffViaFilesAPI(repo string, number int) (string, error) {
+	var b strings.Builder
+	b.WriteString("# NOTE: diff reconstructed via GitHub's List Pull Request Files API because this PR exceeds GitHub's 300-file diff limit; it may be incomplete.\n")
+
+	listed := 0       // files received from the API, appended or not
+	truncated := false // any lossy stop: size ceiling, page ceiling, pagination cap
+	complete := false  // saw a short page (no more files upstream)
+pages:
+	for page := 1; page <= maxPaginationPages; page++ {
+		path := fmt.Sprintf("/repos/%s/pulls/%d/files?per_page=%d&page=%d", repo, number, perPage, page)
+		resp, err := c.do("GET", path, "application/vnd.github+json")
+		if err != nil {
+			return "", fmt.Errorf("github: list pr files: %w", err)
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxFilesPageBytes))
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			errBody := safeTruncate(string(body), maxErrBodyLen)
+			return "", fmt.Errorf("github: list pr files: status %d: %s", resp.StatusCode, errBody)
+		}
+		var raw []prDiffFile
+		if err := json.Unmarshal(body, &raw); err != nil {
+			if int64(len(body)) >= maxFilesPageBytes {
+				// Self-inflicted truncation: the page ceiling cut the JSON.
+				// Degrade to what we have rather than abort the review.
+				slog.Warn("github: pr files page truncated at byte ceiling, returning partial reconstructed diff",
+					"repo", repo, "pr", number, "page", page, "bytes_read", len(body))
+				truncated = true
+				break
+			}
+			// Below the ceiling this is genuine upstream corruption.
+			return "", fmt.Errorf("github: decode pr files (%d bytes read): %w", len(body), err)
+		}
+		for i := range raw {
+			// Render the entry separately and check the PROJECTED size, not
+			// the accumulated size before append — a single oversized patch
+			// (under maxFilesPageBytes, over maxDiffBodyBytes) on a short
+			// page would otherwise be appended whole and returned without a
+			// truncation note, breaking the "same ceiling as the direct
+			// diff path" contract.
+			var entry strings.Builder
+			appendFileDiff(&entry, &raw[i])
+			if b.Len()+entry.Len() > maxDiffBodyBytes {
+				// Same ceiling as the direct diff path. Stop paginating too:
+				// the remaining pages would only be fetched to be dropped,
+				// which is why the truncation note is generic (no exact
+				// omitted count).
+				slog.Warn("github: reconstructed diff truncated at size limit",
+					"repo", repo, "pr", number, "limit_bytes", maxDiffBodyBytes, "files_appended", listed)
+				truncated = true
+				break pages
+			}
+			b.WriteString(entry.String())
+			listed++
+		}
+		if len(raw) < perPage {
+			complete = true
+			break
+		}
+	}
+	if !complete && !truncated {
+		// Pagination cap with every page full. Unreachable in practice
+		// (GitHub caps the endpoint at 3,000 files = 30 pages, the cap is
+		// 50) but handled for symmetry with the other fetchers.
+		slog.Warn("github: pr files pagination cap hit, returning partial reconstructed diff",
+			"repo", repo, "pr", number, "pages", maxPaginationPages)
+		truncated = true
+	}
+	if truncated {
+		b.WriteString("\n... (diff truncated: size limit reached, remaining files omitted)\n")
+	}
+	if listed >= githubPRFilesCap {
+		// Conservative: a PR with exactly 3,000 files gets the note too —
+		// distinguishing "at cap" from "capped" would need extra API calls
+		// and a spurious note is harmless.
+		slog.Warn("github: pr files listing reached GitHub's 3,000-file cap, diff may omit files",
+			"repo", repo, "pr", number, "files", listed)
+		b.WriteString("\n# NOTE: GitHub caps file listings at 3,000 files; some files may be missing from this diff.\n")
+	}
+	return b.String(), nil
+}
+
+// appendFileDiff writes one file's unified-diff-shaped entry: the
+// `diff --git` header, `---`/`+++` markers (with /dev/null for added and
+// removed files, and previous_filename on the a/ side for renames), then
+// the patch body — or a stub when GitHub omitted the patch (binary or
+// oversized per-file diff).
+func appendFileDiff(b *strings.Builder, f *prDiffFile) {
+	oldName := f.Filename
+	if f.PreviousFilename != "" {
+		oldName = f.PreviousFilename
+	}
+	fmt.Fprintf(b, "diff --git a/%s b/%s\n", oldName, f.Filename)
+	switch f.Status {
+	case "added":
+		fmt.Fprintf(b, "--- /dev/null\n+++ b/%s\n", f.Filename)
+	case "removed":
+		fmt.Fprintf(b, "--- a/%s\n+++ /dev/null\n", oldName)
+	default:
+		fmt.Fprintf(b, "--- a/%s\n+++ b/%s\n", oldName, f.Filename)
+	}
+	if f.Patch == "" {
+		fmt.Fprintf(b, "(patch unavailable — +%d/-%d)\n", f.Additions, f.Deletions)
+		return
+	}
+	b.WriteString(f.Patch)
+	if !strings.HasSuffix(f.Patch, "\n") {
+		b.WriteByte('\n')
+	}
 }
 
 // FetchComments retrieves both inline review comments and general issue comments
@@ -615,8 +900,8 @@ func (c *Client) FetchIssueCommentsOnly(repo string, number int) ([]Comment, err
 // timeline (commits, labels, comments, assignments…) are filtered out
 // at fetch time so callers don't have to reason about them.
 type TimelineEvent struct {
-	Event     string    // "review_requested" or "review_dismissed"
-	Actor     string    // login of the user who triggered the event
+	Event     string // "review_requested" or "review_dismissed"
+	Actor     string // login of the user who triggered the event
 	CreatedAt time.Time
 }
 
@@ -630,20 +915,22 @@ type TimelineEvent struct {
 // regardless of the user's explicit intent.
 //
 // Returns an empty slice (not nil) when no relevant events exist —
-// callers can range over the result without a nil guard.
+// callers can range over the result without a nil guard. Returns an
+// error (never a partial slice) when the pagination cap is hit, so
+// callers can fail closed instead of acting on a truncated timeline
+// (#519).
 func (c *Client) GetPRTimelineEventsForReviewer(repo string, number int, login string) ([]TimelineEvent, error) {
 	if login == "" {
 		return nil, fmt.Errorf("github: GetPRTimelineEventsForReviewer: empty login")
 	}
 	out := []TimelineEvent{}
-	page := 1
-	for {
-		path := fmt.Sprintf("/repos/%s/issues/%d/timeline?per_page=100&page=%d", repo, number, page)
+	for page := 1; page <= maxPaginationPages; page++ {
+		path := fmt.Sprintf("/repos/%s/issues/%d/timeline?per_page=%d&page=%d", repo, number, perPage, page)
 		resp, err := c.do("GET", path, "application/vnd.github+json")
 		if err != nil {
 			return nil, fmt.Errorf("github: fetch timeline: %w", err)
 		}
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxPaginatedPageBytes))
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			errBody := safeTruncate(string(body), maxErrBodyLen)
@@ -665,7 +952,9 @@ func (c *Client) GetPRTimelineEventsForReviewer(repo string, number int, login s
 			} `json:"dismissed_review,omitempty"`
 		}
 		if err := json.Unmarshal(body, &raw); err != nil {
-			return nil, fmt.Errorf("github: decode timeline: %w", err)
+			// Include the payload size: a decode failure right at the byte
+			// ceiling is the signature of a truncated page (#518).
+			return nil, fmt.Errorf("github: decode timeline (%d bytes read): %w", len(body), err)
 		}
 		for _, ev := range raw {
 			switch ev.Event {
@@ -687,104 +976,167 @@ func (c *Client) GetPRTimelineEventsForReviewer(repo string, number int, login s
 				}
 			}
 		}
-		// Stop paging when we get a short page (under per_page=100).
-		if len(raw) < 100 {
-			break
-		}
-		page++
-		// Hard cap so a misbehaving server can't make us iterate forever.
-		if page > 50 {
-			slog.Warn("github: timeline pagination cap hit, returning partial results",
-				"repo", repo, "pr", number, "pages", page)
-			break
+		// Stop paging when we get a short page (under per_page).
+		if len(raw) < perPage {
+			// Defensive re-sort: GitHub's timeline API documents ascending
+			// chronological order, but the contract is not load-bearing for us
+			// — pipeline.shouldBypassSHASkipForReReview relies on the slice
+			// being sorted to walk it backward in O(1) for the common case.
+			// A single sort here is cheap (events is filtered down to just
+			// review_requested / review_dismissed for one login) and immunises
+			// the caller against an undocumented re-ordering on GitHub's side.
+			sort.Slice(out, func(i, j int) bool {
+				return out[i].CreatedAt.Before(out[j].CreatedAt)
+			})
+			return out, nil
 		}
 	}
-	// Defensive re-sort: GitHub's timeline API documents ascending
-	// chronological order, but the contract is not load-bearing for us
-	// — pipeline.shouldBypassSHASkipForReReview relies on the slice
-	// being sorted to walk it backward in O(1) for the common case.
-	// A single sort here is cheap (events is filtered down to just
-	// review_requested / review_dismissed for one login) and immunises
-	// the caller against an undocumented re-ordering on GitHub's side.
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].CreatedAt.Before(out[j].CreatedAt)
-	})
-	return out, nil
+	// Hitting the cap with every page full is suspicious: either GitHub is
+	// misbehaving or this PR has >5,000 timeline events. Silently returning
+	// a truncated slice would drop exactly the tail events that
+	// pipeline.shouldBypassSHASkipForReReview walks backward to detect
+	// re-review intent (#322 Bug 5), so surface a hard error and let the
+	// caller fail closed — matching the cap-hit contract of
+	// fetchReviewComments / fetchIssueComments post-#516 (see #519).
+	slog.Warn("github: timeline pagination cap hit",
+		"repo", repo, "pr", number, "pages", maxPaginationPages)
+	return nil, fmt.Errorf("github: timeline pagination exceeded %d pages for %s#%d (per_page=%d, possible runaway)",
+		maxPaginationPages, repo, number, perPage)
 }
 
+// maxPaginationPages bounds the number of pages the paginated endpoints
+// (fetchReviewComments, fetchIssueComments, GetPRTimelineEventsForReviewer)
+// will walk. GitHub returns 30 items per page by default and 100 max; with
+// per_page=100 this caps each fetcher at 5,000 items, well above the
+// largest real PRs we've seen. The cap exists only to keep a misbehaving
+// server from making us iterate forever.
+const maxPaginationPages = 50
+
+// perPage is the page size used for paginated endpoints. Kept alongside
+// maxPaginationPages so changing either is an explicit decision, and so
+// the per_page query parameter and the short-page termination check
+// can't drift apart.
+const perPage = 100
+
 func (c *Client) fetchReviewComments(repo string, number int) ([]Comment, error) {
-	path := fmt.Sprintf("/repos/%s/pulls/%d/comments", repo, number)
-	resp, err := c.do("GET", path, "application/vnd.github+json")
-	if err != nil {
-		return nil, fmt.Errorf("github: fetch review comments: %w", err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
-	if resp.StatusCode != http.StatusOK {
-		errBody := safeTruncate(string(body), maxErrBodyLen)
-		return nil, fmt.Errorf("github: fetch review comments: status %d: %s", resp.StatusCode, errBody)
-	}
-	var raw []struct {
-		User struct {
-			Login string `json:"login"`
-		} `json:"user"`
-		Body         string    `json:"body"`
-		CreatedAt    time.Time `json:"created_at"`
-		Path         string    `json:"path"`
-		Line         *int      `json:"line"`
-		OriginalLine int       `json:"original_line"`
-	}
-	if err := json.Unmarshal(body, &raw); err != nil {
-		return nil, fmt.Errorf("github: decode review comments: %w", err)
-	}
-	comments := make([]Comment, len(raw))
-	for i, r := range raw {
-		line := r.OriginalLine
-		if r.Line != nil {
-			line = *r.Line
+	// GitHub's default page size is 30 and the API sorts ascending by
+	// created_at, so without explicit pagination any PR with >30 review
+	// comments silently drops the newest entries — exactly the ones a
+	// re-review depends on. Walk every page with per_page=100, matching
+	// the pattern used by GetPRTimelineEventsForReviewer. Pin
+	// sort=created&direction=asc explicitly as defense-in-depth against
+	// server-side default changes; callers downstream rely on ascending
+	// order.
+	comments := []Comment{}
+	for page := 1; page <= maxPaginationPages; page++ {
+		path := fmt.Sprintf("/repos/%s/pulls/%d/comments?per_page=%d&page=%d&sort=created&direction=asc",
+			repo, number, perPage, page)
+		resp, err := c.do("GET", path, "application/vnd.github+json")
+		if err != nil {
+			return nil, fmt.Errorf("github: fetch review comments: %w", err)
 		}
-		comments[i] = Comment{
-			Author:    r.User.Login,
-			Body:      r.Body,
-			CreatedAt: r.CreatedAt,
-			File:      r.Path,
-			Line:      line,
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxPaginatedPageBytes))
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			errBody := safeTruncate(string(body), maxErrBodyLen)
+			return nil, fmt.Errorf("github: fetch review comments: status %d: %s", resp.StatusCode, errBody)
+		}
+		var raw []struct {
+			ID   int64 `json:"id"`
+			User struct {
+				Login string `json:"login"`
+			} `json:"user"`
+			Body         string    `json:"body"`
+			CreatedAt    time.Time `json:"created_at"`
+			Path         string    `json:"path"`
+			Line         *int      `json:"line"`
+			OriginalLine int       `json:"original_line"`
+		}
+		if err := json.Unmarshal(body, &raw); err != nil {
+			// Include the payload size: a decode failure right at the byte
+			// ceiling is the signature of a truncated page (#518).
+			return nil, fmt.Errorf("github: decode review comments (%d bytes read): %w", len(body), err)
+		}
+		for _, r := range raw {
+			line := r.OriginalLine
+			if r.Line != nil {
+				line = *r.Line
+			}
+			comments = append(comments, Comment{
+				ID:        r.ID,
+				Author:    r.User.Login,
+				Body:      r.Body,
+				CreatedAt: r.CreatedAt,
+				File:      r.Path,
+				Line:      line,
+			})
+		}
+		// Short page means GitHub has no more entries upstream.
+		if len(raw) < perPage {
+			return comments, nil
 		}
 	}
-	return comments, nil
+	// Hitting the cap with every page full is suspicious: either GitHub
+	// is misbehaving or this PR has >5,000 review comments. Either way,
+	// silently returning a truncated slice would re-introduce the exact
+	// bug this function exists to fix (losing the newest entries — the
+	// ones a re-review depends on), so surface a hard error and match
+	// the mid-pagination error contract the other tests already enforce.
+	slog.Warn("github: fetch review comments pagination cap hit",
+		"repo", repo, "pr", number, "pages", maxPaginationPages)
+	return nil, fmt.Errorf("github: comment pagination exceeded %d pages for %s#%d (per_page=%d, possible runaway)",
+		maxPaginationPages, repo, number, perPage)
 }
 
 func (c *Client) fetchIssueComments(repo string, number int) ([]Comment, error) {
-	path := fmt.Sprintf("/repos/%s/issues/%d/comments", repo, number)
-	resp, err := c.do("GET", path, "application/vnd.github+json")
-	if err != nil {
-		return nil, fmt.Errorf("github: fetch issue comments: %w", err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
-	if resp.StatusCode != http.StatusOK {
-		errBody := safeTruncate(string(body), maxErrBodyLen)
-		return nil, fmt.Errorf("github: fetch issue comments: status %d: %s", resp.StatusCode, errBody)
-	}
-	var raw []struct {
-		User struct {
-			Login string `json:"login"`
-		} `json:"user"`
-		Body      string    `json:"body"`
-		CreatedAt time.Time `json:"created_at"`
-	}
-	if err := json.Unmarshal(body, &raw); err != nil {
-		return nil, fmt.Errorf("github: decode issue comments: %w", err)
-	}
-	comments := make([]Comment, len(raw))
-	for i, r := range raw {
-		comments[i] = Comment{
-			Author:    r.User.Login,
-			Body:      r.Body,
-			CreatedAt: r.CreatedAt,
+	// Same rationale as fetchReviewComments: paginate with per_page=perPage
+	// so we don't lose the newest issue comments on long-running PRs or
+	// busy issues, and pin sort=created&direction=asc explicitly.
+	comments := []Comment{}
+	for page := 1; page <= maxPaginationPages; page++ {
+		path := fmt.Sprintf("/repos/%s/issues/%d/comments?per_page=%d&page=%d&sort=created&direction=asc",
+			repo, number, perPage, page)
+		resp, err := c.do("GET", path, "application/vnd.github+json")
+		if err != nil {
+			return nil, fmt.Errorf("github: fetch issue comments: %w", err)
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxPaginatedPageBytes))
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			errBody := safeTruncate(string(body), maxErrBodyLen)
+			return nil, fmt.Errorf("github: fetch issue comments: status %d: %s", resp.StatusCode, errBody)
+		}
+		var raw []struct {
+			ID   int64 `json:"id"`
+			User struct {
+				Login string `json:"login"`
+			} `json:"user"`
+			Body      string    `json:"body"`
+			CreatedAt time.Time `json:"created_at"`
+		}
+		if err := json.Unmarshal(body, &raw); err != nil {
+			// Include the payload size: a decode failure right at the byte
+			// ceiling is the signature of a truncated page (#518).
+			return nil, fmt.Errorf("github: decode issue comments (%d bytes read): %w", len(body), err)
+		}
+		for _, r := range raw {
+			comments = append(comments, Comment{
+				ID:        r.ID,
+				Author:    r.User.Login,
+				Body:      r.Body,
+				CreatedAt: r.CreatedAt,
+			})
+		}
+		if len(raw) < perPage {
+			return comments, nil
 		}
 	}
-	return comments, nil
+	// See fetchReviewComments for the rationale: silent partial results
+	// at the cap would re-introduce the bug #512 fixes.
+	slog.Warn("github: fetch issue comments pagination cap hit",
+		"repo", repo, "issue", number, "pages", maxPaginationPages)
+	return nil, fmt.Errorf("github: comment pagination exceeded %d pages for %s#%d (per_page=%d, possible runaway)",
+		maxPaginationPages, repo, number, perPage)
 }
 
 // FetchLabels returns the label names for a repository.
@@ -812,6 +1164,48 @@ func (c *Client) FetchLabels(repo string) ([]string, error) {
 		names[i] = l.Name
 	}
 	return names, nil
+}
+
+// CreateLabel creates a repository label. A 422 is tolerated only when GitHub
+// reports an already-existing label, which can happen if another process wins
+// the race after FetchLabels.
+func (c *Client) CreateLabel(repo, name, color, description string) error {
+	if repo == "" || name == "" {
+		return nil
+	}
+	color = strings.TrimPrefix(color, "#")
+	if !labelColorRE.MatchString(color) {
+		return fmt.Errorf("github: invalid label color %q", color)
+	}
+	payload, err := json.Marshal(map[string]string{
+		"name":        name,
+		"color":       color,
+		"description": description,
+	})
+	if err != nil {
+		return fmt.Errorf("github: marshal label: %w", err)
+	}
+	resp, err := c.doWithBody("POST",
+		fmt.Sprintf("/repos/%s/labels", repo),
+		"application/vnd.github+json", "application/json",
+		strings.NewReader(string(payload)))
+	if err != nil {
+		return fmt.Errorf("github: create label: %w", err)
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		if resp.StatusCode == http.StatusUnprocessableEntity && labelAlreadyExistsBody(body) {
+			return nil
+		}
+		return fmt.Errorf("github: create label %q in %s: status %d: %s", name, repo, resp.StatusCode, safeTruncate(string(body), maxErrBodyLen))
+	}
+	return nil
+}
+
+func labelAlreadyExistsBody(body []byte) bool {
+	s := strings.ToLower(string(body))
+	return strings.Contains(s, "already_exists") || strings.Contains(s, "already exists")
 }
 
 // AddIssueLabel adds a label to an issue. No-op if the label is already present.
@@ -849,29 +1243,71 @@ func (c *Client) RemoveIssueLabel(repo string, number int, label string) error {
 	return nil
 }
 
-// FetchCollaborators returns the login names of repository collaborators.
+// parseNextLink extracts the URL whose rel parameter is "next" from a GitHub
+// Link header. Returns "" when no such URL exists. The header format is:
+//
+//	<https://api.github.com/...&page=2>; rel="next", <...>; rel="last"
+//
+// We do not pull in a parser dependency; a small string scan is sufficient.
+func parseNextLink(header string) string {
+	for _, part := range strings.Split(header, ",") {
+		segs := strings.Split(strings.TrimSpace(part), ";")
+		if len(segs) < 2 {
+			continue
+		}
+		urlPart := strings.TrimSpace(segs[0])
+		if !strings.HasPrefix(urlPart, "<") || !strings.HasSuffix(urlPart, ">") {
+			continue
+		}
+		linkURL := urlPart[1 : len(urlPart)-1]
+		for _, s := range segs[1:] {
+			s = strings.TrimSpace(s)
+			if s == `rel="next"` || s == "rel=next" {
+				return linkURL
+			}
+		}
+	}
+	return ""
+}
+
+// FetchCollaborators returns the login names of repository collaborators,
+// following GitHub's Link: rel="next" header to walk every page.
 func (c *Client) FetchCollaborators(repo string) ([]string, error) {
 	if repo == "" {
 		return nil, nil
 	}
-	resp, err := c.do("GET", fmt.Sprintf("/repos/%s/collaborators?per_page=100", repo), "application/vnd.github+json")
-	if err != nil {
-		return nil, fmt.Errorf("github: fetch collaborators: %w", err)
+	const maxPages = 100
+	path := fmt.Sprintf("/repos/%s/collaborators?per_page=100", repo)
+	var logins []string
+	for page := 0; page < maxPages; page++ {
+		resp, err := c.do("GET", path, "application/vnd.github+json")
+		if err != nil {
+			return nil, fmt.Errorf("github: fetch collaborators: %w", err)
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+		linkHeader := resp.Header.Get("Link")
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("github: fetch collaborators %s: status %d", repo, resp.StatusCode)
+		}
+		var raw []struct {
+			Login string `json:"login"`
+		}
+		if err := json.Unmarshal(body, &raw); err != nil {
+			return nil, fmt.Errorf("github: decode collaborators: %w", err)
+		}
+		for _, u := range raw {
+			logins = append(logins, u.Login)
+		}
+		next := parseNextLink(linkHeader)
+		if next == "" {
+			return logins, nil
+		}
+		nextURL, err := url.Parse(next)
+		if err != nil {
+			return nil, fmt.Errorf("github: parse next link %q: %w", next, err)
+		}
+		path = nextURL.RequestURI()
 	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("github: fetch collaborators %s: status %d", repo, resp.StatusCode)
-	}
-	var raw []struct {
-		Login string `json:"login"`
-	}
-	if err := json.Unmarshal(body, &raw); err != nil {
-		return nil, fmt.Errorf("github: decode collaborators: %w", err)
-	}
-	logins := make([]string, len(raw))
-	for i, u := range raw {
-		logins[i] = u.Login
-	}
-	return logins, nil
+	return nil, fmt.Errorf("github: fetch collaborators %s: pagination exceeded %d pages", repo, maxPages)
 }

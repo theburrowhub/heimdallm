@@ -1,6 +1,7 @@
 package server_test
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -41,10 +42,162 @@ func TestHandlerHealth(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("health: status %d", w.Code)
 	}
-	var body map[string]string
-	json.NewDecoder(w.Body).Decode(&body)
+	var body map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode health: %v", err)
+	}
 	if body["status"] != "ok" {
 		t.Errorf("health body: %v", body)
+	}
+}
+
+func TestHealth_ReturnsDeepChecks(t *testing.T) {
+	srv, _ := setupServer(t)
+	lastPoll := time.Now().UTC().Add(-5 * time.Second)
+	srv.SetHealthSnapshotFn(func() server.HealthSnapshot {
+		return server.HealthSnapshot{
+			LastPollAt:   lastPoll,
+			PollInterval: time.Minute,
+		}
+	})
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("health: status %d", w.Code)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode health: %v", err)
+	}
+	checks, ok := body["checks"].(map[string]any)
+	if !ok {
+		t.Fatalf("checks missing: %v", body)
+	}
+	if sqlite, ok := checks["sqlite"].(map[string]any); !ok || sqlite["ok"] != true {
+		t.Fatalf("sqlite check not ok: %v", checks["sqlite"])
+	}
+	if last, ok := checks["last_poll"].(map[string]any); !ok || last["ok"] != true || last["at"] == nil {
+		t.Fatalf("last_poll check not ok: %v", checks["last_poll"])
+	}
+}
+
+func TestHealth_ReturnsServiceUnavailableForStalePoll(t *testing.T) {
+	srv, _ := setupServer(t)
+	srv.SetHealthSnapshotFn(func() server.HealthSnapshot {
+		return server.HealthSnapshot{
+			LastPollAt:   time.Now().UTC().Add(-3 * time.Minute),
+			PollInterval: time.Minute,
+		}
+	})
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("health status: got %d want %d", w.Code, http.StatusServiceUnavailable)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode health: %v", err)
+	}
+	if body["status"] != "degraded" {
+		t.Fatalf("health status body: %v", body)
+	}
+}
+
+func TestHealth_ReturnsVersionAndStartedAt(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+	broker := sse.NewBroker()
+	broker.Start()
+	t.Cleanup(broker.Stop)
+	srv := server.NewWithOptions(s, broker, nil, "", server.Options{
+		Version:   "v1.2.3-test",
+		StartedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+	})
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/health", nil)
+	srv.Router().ServeHTTP(rr, req)
+
+	if rr.Code != 200 {
+		t.Fatalf("status: got %d want 200", rr.Code)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got["status"] != "ok" {
+		t.Errorf("status field: got %v", got["status"])
+	}
+	if got["version"] != "v1.2.3-test" {
+		t.Errorf("version: got %v", got["version"])
+	}
+	if got["started_at"] != "2026-01-02T03:04:05Z" {
+		t.Errorf("started_at: got %v", got["started_at"])
+	}
+}
+
+func TestEventsEmitsObservableHeartbeat(t *testing.T) {
+	srv, _ := setupServer(t)
+	srv.SetHealthSnapshotFn(func() server.HealthSnapshot {
+		return server.HealthSnapshot{
+			LastPollAt:   time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+			PollInterval: time.Minute,
+		}
+	})
+	ts := httptest.NewServer(srv.Router())
+	t.Cleanup(ts.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/events", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /events: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d want 200", resp.StatusCode)
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	seenHeartbeat := false
+	var heartbeatData string
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "event: heartbeat" {
+			seenHeartbeat = true
+			continue
+		}
+		if seenHeartbeat && strings.HasPrefix(line, "data: ") {
+			heartbeatData = strings.TrimPrefix(line, "data: ")
+			break
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("scan SSE: %v", err)
+	}
+	if heartbeatData == "" {
+		t.Fatal("heartbeat event not received")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(heartbeatData), &payload); err != nil {
+		t.Fatalf("decode heartbeat: %v", err)
+	}
+	if payload["ts"] == "" {
+		t.Fatalf("heartbeat payload missing liveness fields: %v", payload)
+	}
+	if payload["last_poll_at"] != "2026-01-02T03:04:05Z" {
+		t.Fatalf("last_poll_at: got %v", payload["last_poll_at"])
 	}
 }
 
@@ -62,6 +215,31 @@ func TestHandlerListPRs(t *testing.T) {
 	json.NewDecoder(w.Body).Decode(&prs)
 	if len(prs) != 1 {
 		t.Errorf("expected 1 PR, got %d", len(prs))
+	}
+}
+
+func TestHandlerListPRsFiltersSelfAuthored(t *testing.T) {
+	srv, s := setupServer(t)
+	srv.SetMeFn(func() (string, error) { return "ivan", nil })
+	now := time.Now()
+	s.UpsertPR(&store.PR{GithubID: 1, Repo: "org/r", Number: 1, Title: "own", Author: "Ivan", URL: "u1", State: "open", UpdatedAt: now, FetchedAt: now})
+	s.UpsertPR(&store.PR{GithubID: 2, Repo: "org/r", Number: 2, Title: "team", Author: "teammate", URL: "u2", State: "open", UpdatedAt: now, FetchedAt: now})
+
+	req := httptest.NewRequest("GET", "/prs", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list prs: status %d", w.Code)
+	}
+	var prs []map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&prs); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(prs) != 1 {
+		t.Fatalf("expected 1 non-self PR, got %d: %#v", len(prs), prs)
+	}
+	if prs[0]["author"] != "teammate" {
+		t.Fatalf("author = %v, want teammate", prs[0]["author"])
 	}
 }
 
@@ -145,6 +323,71 @@ func TestHandlerPutConfig(t *testing.T) {
 	srv.Router().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Errorf("put config: status %d, body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandlerShutdown(t *testing.T) {
+	srv, _ := setupServer(t)
+	shutdown := make(chan struct{}, 1)
+	srv.SetShutdownFn(func() {
+		shutdown <- struct{}{}
+	})
+
+	req := httptest.NewRequest("POST", "/shutdown", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("shutdown: status %d, body: %s", w.Code, w.Body.String())
+	}
+	var body map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body["status"] != "shutdown queued" {
+		t.Fatalf("status = %q, want shutdown queued", body["status"])
+	}
+	select {
+	case <-shutdown:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown callback was not called")
+	}
+}
+
+func TestHandlerShutdownNotConfigured(t *testing.T) {
+	srv, _ := setupServer(t)
+	req := httptest.NewRequest("POST", "/shutdown", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", w.Code)
+	}
+}
+
+func TestHandlerShutdownRequiresAuthWhenTokenSet(t *testing.T) {
+	srv := setupServerWithToken(t, "secret-token")
+	shutdown := make(chan struct{}, 1)
+	srv.SetShutdownFn(func() {
+		shutdown <- struct{}{}
+	})
+
+	req := httptest.NewRequest("POST", "/shutdown", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("POST /shutdown without token: status = %d, want 401", w.Code)
+	}
+
+	req = httptest.NewRequest("POST", "/shutdown", nil)
+	req.Header.Set("X-Heimdallm-Token", "secret-token")
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("POST /shutdown with token: status = %d, want 202", w.Code)
+	}
+	select {
+	case <-shutdown:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown callback was not called")
 	}
 }
 
@@ -472,6 +715,74 @@ func TestHandlerTriggerIssueReview_NotConfigured(t *testing.T) {
 	}
 }
 
+func TestHandlerTriggerIssueRefine(t *testing.T) {
+	srv, s := setupServer(t)
+	now := time.Now()
+	id, _ := s.UpsertIssue(&store.Issue{
+		GithubID: 610, Repo: "org/r", Number: 15, Title: "t",
+		Body: "b", Author: "a", Assignees: `[]`, Labels: `[]`,
+		State: "open", CreatedAt: now, FetchedAt: now,
+	})
+
+	type call struct {
+		id    int64
+		force bool
+	}
+	triggered := make(chan call, 1)
+	srv.SetTriggerIssueRefineFn(func(issueID int64, force bool) error {
+		triggered <- call{id: issueID, force: force}
+		return nil
+	})
+
+	req := httptest.NewRequest("POST", "/issues/"+itoa(id)+"/refine?force=true", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("trigger issue refine: status %d, body: %s", w.Code, w.Body.String())
+	}
+
+	select {
+	case got := <-triggered:
+		if got.id != id || !got.force {
+			t.Errorf("triggered with %+v, expected id=%d force=true", got, id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("refine callback not called within 2s")
+	}
+}
+
+func TestHandlerTriggerIssueRefine_NotConfigured(t *testing.T) {
+	srv, s := setupServer(t)
+	now := time.Now()
+	id, _ := s.UpsertIssue(&store.Issue{
+		GithubID: 611, Repo: "org/r", Number: 16, Title: "t",
+		Body: "b", Author: "a", Assignees: `[]`, Labels: `[]`,
+		State: "open", CreatedAt: now, FetchedAt: now,
+	})
+
+	req := httptest.NewRequest("POST", "/issues/"+itoa(id)+"/refine", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 when refine not configured, got %d", w.Code)
+	}
+}
+
+func TestHandlerTriggerIssueRefine_NotFound(t *testing.T) {
+	srv, _ := setupServer(t)
+	srv.SetTriggerIssueRefineFn(func(issueID int64, force bool) error {
+		t.Fatalf("callback should not be called for unknown issue")
+		return nil
+	})
+
+	req := httptest.NewRequest("POST", "/issues/999/refine", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for unknown issue, got %d", w.Code)
+	}
+}
+
 func TestHandlerPromoteIssue(t *testing.T) {
 	srv, s := setupServer(t)
 	now := time.Now()
@@ -495,7 +806,7 @@ func TestHandlerPromoteIssue(t *testing.T) {
 	}
 	var body map[string]string
 	json.NewDecoder(w.Body).Decode(&body)
-	if body["status"] != "promote queued" {
+	if body["status"] != "promotion applied" {
 		t.Errorf("promote issue: unexpected body %v", body)
 	}
 
@@ -506,6 +817,27 @@ func TestHandlerPromoteIssue(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Error("promote callback not called within 2s")
+	}
+}
+
+func TestHandlerPromoteIssue_Conflict(t *testing.T) {
+	srv, s := setupServer(t)
+	now := time.Now()
+	id, _ := s.UpsertIssue(&store.Issue{
+		GithubID: 802, Repo: "org/r", Number: 22, Title: "t",
+		Body: "b", Author: "a", Assignees: `[]`, Labels: `[]`,
+		State: "open", CreatedAt: now, FetchedAt: now,
+	})
+
+	srv.SetTriggerPromoteFn(func(issueID int64) error {
+		return fmt.Errorf("%w: already in development", server.ErrPromoteConflict)
+	})
+
+	req := httptest.NewRequest("POST", "/issues/"+itoa(id)+"/promote", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("promote issue: status %d, want 409; body: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -567,6 +899,7 @@ func TestIssueEndpointsRequireAuthWhenTokenSet(t *testing.T) {
 	// POST endpoints — protected via method-based auth (all POST requires token)
 	postPaths := []string{
 		"/issues/" + issueID + "/review",
+		"/issues/" + issueID + "/refine",
 		"/issues/" + issueID + "/promote",
 		"/issues/" + issueID + "/dismiss",
 		"/issues/" + issueID + "/undismiss",
@@ -690,11 +1023,12 @@ func TestHandlerPutConfig_ReadOnlyKeys_Accepted(t *testing.T) {
 		name string
 		body string
 	}{
+		{"repositories", `{"repositories":["org/monitored"]}`},
 		{"non_monitored", `{"non_monitored":["org/archived"]}`},
 		{"repo_overrides", `{"repo_overrides":{"org/a":{"primary":"claude"}}}`},
-		{"agent_configs", `{"agent_configs":{"claude":{"model":"claude-opus-4-7"}}}`},
+		{"org_overrides", `{"org_overrides":{"org":{"primary":"claude"}}}`},
 		{"server_port", `{"server_port":7842}`},
-		{"all-at-once", `{"non_monitored":[],"repo_overrides":{},"agent_configs":{},"server_port":7842}`},
+		{"all-at-once", `{"repositories":[],"non_monitored":[],"repo_overrides":{},"org_overrides":{},"server_port":7842}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -713,7 +1047,7 @@ func TestHandlerPutConfig_ReadOnlyKeys_NotPersisted(t *testing.T) {
 	// reload doesn't have to re-examine them and ApplyStore's
 	// "unknown/bootstrap-only" branches stay dormant.
 	srv, s := setupServer(t)
-	body := `{"non_monitored":["org/x"],"repo_overrides":{"org/a":{"primary":"claude"}},"agent_configs":{"claude":{"model":"x"}},"server_port":7842}`
+	body := `{"repositories":["org/y"],"non_monitored":["org/x"],"repo_overrides":{"org/a":{"primary":"claude"}},"org_overrides":{"org":{"primary":"gemini"}},"server_port":7842}`
 	w := httptest.NewRecorder()
 	srv.Router().ServeHTTP(w, putConfigRequest(body))
 	if w.Code != http.StatusOK {
@@ -724,7 +1058,7 @@ func TestHandlerPutConfig_ReadOnlyKeys_NotPersisted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListConfigs: %v", err)
 	}
-	for _, banned := range []string{"non_monitored", "repo_overrides", "agent_configs", "server_port"} {
+	for _, banned := range []string{"repositories", "non_monitored", "repo_overrides", "org_overrides", "server_port"} {
 		if _, leaked := rows[banned]; leaked {
 			t.Errorf("read-only key %q was persisted (rows: %v)", banned, rows)
 		}
@@ -732,11 +1066,12 @@ func TestHandlerPutConfig_ReadOnlyKeys_NotPersisted(t *testing.T) {
 }
 
 func TestHandlerPutConfig_WritableAndReadOnly_Mixed(t *testing.T) {
-	// A realistic save: the Svelte UI sends editable fields next to the
-	// round-tripped read-only ones. Only the editable fields land in the
-	// store — nothing else bleeds in.
+	// A realistic save: the Flutter UI sends writable fields (poll_interval,
+	// agent_configs) next to the round-tripped read-only ones (repositories,
+	// non_monitored). Writables land in the store; read-only keys are
+	// silently dropped.
 	srv, s := setupServer(t)
-	body := `{"poll_interval":"30m","agent_configs":{"claude":{"model":"x"}},"non_monitored":["org/x"]}`
+	body := `{"poll_interval":"30m","agent_configs":{"claude":{"model":"x","permission_mode":"acceptEdits"}},"repositories":["org/y"],"non_monitored":["org/x"]}`
 	w := httptest.NewRecorder()
 	srv.Router().ServeHTTP(w, putConfigRequest(body))
 	if w.Code != http.StatusOK {
@@ -750,11 +1085,62 @@ func TestHandlerPutConfig_WritableAndReadOnly_Mixed(t *testing.T) {
 	if rows["poll_interval"] != "30m" {
 		t.Errorf("poll_interval = %q, want 30m", rows["poll_interval"])
 	}
-	if _, ok := rows["agent_configs"]; ok {
-		t.Errorf("agent_configs unexpectedly persisted")
+	if got := rows["agent_configs"]; got == "" {
+		t.Errorf("agent_configs was not persisted (rows: %v)", rows)
+	} else if !strings.Contains(got, `"permission_mode":"acceptEdits"`) || !strings.Contains(got, `"model":"x"`) {
+		t.Errorf("agent_configs payload missing fields: %s", got)
+	}
+	if _, ok := rows["repositories"]; ok {
+		t.Errorf("repositories unexpectedly persisted")
 	}
 	if _, ok := rows["non_monitored"]; ok {
 		t.Errorf("non_monitored unexpectedly persisted")
+	}
+}
+
+func TestHandlerPutConfig_AgentConfigs_RejectsDangerouslySkipPerms(t *testing.T) {
+	// Security gate M-5: --dangerously-skip-permissions cannot be flipped
+	// over HTTP. The handler must 400 with a message that points the
+	// operator at config.toml so the toggle never lands in sqlite.
+	srv, _ := setupServer(t)
+	body := `{"agent_configs":{"claude":{"dangerously_skip_perms":true}}}`
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, putConfigRequest(body))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (body: %s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "dangerously_skip_perms") {
+		t.Errorf("error message must name the rejected key, got: %s", w.Body.String())
+	}
+}
+
+func TestHandlerPutConfig_AgentConfigs_RejectsBadPermissionMode(t *testing.T) {
+	srv, _ := setupServer(t)
+	body := `{"agent_configs":{"claude":{"permission_mode":"bypassPermissions"}}}`
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, putConfigRequest(body))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+func TestHandlerPutConfig_AgentConfigs_RejectsUnknownSubkey(t *testing.T) {
+	srv, _ := setupServer(t)
+	body := `{"agent_configs":{"claude":{"new_secret_field":true}}}`
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, putConfigRequest(body))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+func TestHandlerPutConfig_AgentConfigs_RejectsUnknownCLI(t *testing.T) {
+	srv, _ := setupServer(t)
+	body := `{"agent_configs":{"not-a-cli":{"model":"x"}}}`
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, putConfigRequest(body))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (body: %s)", w.Code, w.Body.String())
 	}
 }
 
@@ -928,9 +1314,9 @@ func TestHandleActivity_RequiresAuth(t *testing.T) {
 func TestHandleActivity_FilterByRepoAndAction(t *testing.T) {
 	srv, s := setupServer(t)
 	now := time.Now()
-	_, _ = s.InsertActivity(now, "acme",   "acme/api", "pr",    1, "t", "review", "minor", nil)
-	_, _ = s.InsertActivity(now, "acme",   "acme/api", "issue", 2, "t", "triage", "major", nil)
-	_, _ = s.InsertActivity(now, "globex", "globex/w", "pr",    3, "t", "review", "minor", nil)
+	_, _ = s.InsertActivity(now, "acme", "acme/api", "pr", 1, "t", "review", "minor", nil)
+	_, _ = s.InsertActivity(now, "acme", "acme/api", "issue", 2, "t", "triage", "major", nil)
+	_, _ = s.InsertActivity(now, "globex", "globex/w", "pr", 3, "t", "review", "minor", nil)
 
 	req := httptest.NewRequest("GET", "/activity?repo=acme/api&action=review", nil)
 	w := httptest.NewRecorder()
@@ -948,6 +1334,91 @@ func TestHandleActivity_FilterByRepoAndAction(t *testing.T) {
 	}
 	if resp.Entries[0].Repo != "acme/api" || resp.Entries[0].Action != "review" {
 		t.Errorf("wrong entry: %+v", resp.Entries[0])
+	}
+}
+
+func TestHandleActivity_FilterByItemTypeAndOutcome(t *testing.T) {
+	srv, s := setupServer(t)
+	now := time.Now()
+	_, _ = s.InsertActivity(now, "acme", "acme/api", "pr", 1, "t", "review_skipped", "draft", nil)
+	_, _ = s.InsertActivity(now, "acme", "acme/api", "pr", 2, "t", "review_skipped", "not_open", nil)
+	_, _ = s.InsertActivity(now, "acme", "acme/api", "issue", 3, "t", "triage", "draft", nil)
+
+	req := httptest.NewRequest("GET", "/activity?item_type=pr&action=review_skipped&outcome=draft", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Entries []struct {
+			ItemType   string `json:"item_type"`
+			ItemNumber int    `json:"item_number"`
+			Action     string `json:"action"`
+			Outcome    string `json:"outcome"`
+		} `json:"entries"`
+		Count int `json:"count"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp.Count != 1 {
+		t.Fatalf("count = %d, want 1", resp.Count)
+	}
+	if resp.Entries[0].ItemType != "pr" ||
+		resp.Entries[0].ItemNumber != 1 ||
+		resp.Entries[0].Action != "review_skipped" ||
+		resp.Entries[0].Outcome != "draft" {
+		t.Errorf("wrong entry: %+v", resp.Entries[0])
+	}
+}
+
+func TestHandleActivity_RejectsInvalidFilterValues(t *testing.T) {
+	cases := []struct {
+		name  string
+		query url.Values
+	}{
+		{
+			name:  "invalid item_type",
+			query: url.Values{"item_type": {"repo"}},
+		},
+		{
+			name:  "invalid action",
+			query: url.Values{"action": {"reviewSkipped"}},
+		},
+		{
+			name:  "empty repo",
+			query: url.Values{"repo": {""}},
+		},
+		{
+			name:  "too long outcome",
+			query: url.Values{"outcome": {strings.Repeat("x", 513)}},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := setupServer(t)
+			req := httptest.NewRequest("GET", "/activity?"+tc.query.Encode(), nil)
+			w := httptest.NewRecorder()
+			srv.Router().ServeHTTP(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (body = %s)", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestHandleActivity_RejectsTooManyFilterValues(t *testing.T) {
+	srv, _ := setupServer(t)
+	q := url.Values{}
+	for i := 0; i < 51; i++ {
+		q.Add("repo", fmt.Sprintf("acme/api-%d", i))
+	}
+
+	req := httptest.NewRequest("GET", "/activity?"+q.Encode(), nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body = %s)", w.Code, w.Body.String())
 	}
 }
 
@@ -1095,6 +1566,246 @@ func TestHandlePatchConfig(t *testing.T) {
 	}
 }
 
+func TestHandlePatchConfig_RepoListsWriteTOML(t *testing.T) {
+	tomlContent := "[ai]\nprimary = \"claude\"\n"
+	tomlPath := writeTempTOML(t, tomlContent)
+
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+
+	body := `{"github":{"repositories":["org/monitored"],"non_monitored":["org/disabled"]}}`
+	req := httptest.NewRequest("PATCH", "/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	m, err := config.ReadTOMLMap(tomlPath)
+	if err != nil {
+		t.Fatalf("read TOML after PATCH: %v", err)
+	}
+	gh, ok := m["github"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected [github] section in TOML, got %v", m)
+	}
+	repos, ok := gh["repositories"].([]any)
+	if !ok || len(repos) != 1 || repos[0] != "org/monitored" {
+		t.Fatalf("repositories = %v, want [org/monitored]", gh["repositories"])
+	}
+	nonMonitored, ok := gh["non_monitored"].([]any)
+	if !ok || len(nonMonitored) != 1 || nonMonitored[0] != "org/disabled" {
+		t.Fatalf("non_monitored = %v, want [org/disabled]", gh["non_monitored"])
+	}
+}
+
+func TestHandlePatchConfig_StripsDangerouslySkipPerms(t *testing.T) {
+	// Security gate M-5: PUT /config rejects dangerously_skip_perms with
+	// a 400. PATCH /config deep-merges arbitrary JSON; before this fix it
+	// silently persisted the flag, granting AI runs --dangerously-skip-
+	// permissions on the next reload. The PATCH path must scrub the flag
+	// out of every agent under ai.agents before validating + writing TOML
+	// so HTTP can never flip the toggle.
+	tomlContent := "[ai]\nprimary = \"claude\"\n"
+	tomlPath := writeTempTOML(t, tomlContent)
+
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+
+	body := `{"ai":{"agents":{"claude":{"dangerously_skip_perms":true,"permission_mode":"acceptEdits"}}}}`
+	req := httptest.NewRequest("PATCH", "/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("PATCH should succeed (other fields land), got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	m, err := config.ReadTOMLMap(tomlPath)
+	if err != nil {
+		t.Fatalf("read TOML after PATCH: %v", err)
+	}
+	ai, _ := m["ai"].(map[string]any)
+	agents, _ := ai["agents"].(map[string]any)
+	claude, ok := agents["claude"].(map[string]any)
+	if !ok {
+		t.Fatalf("ai.agents.claude missing after PATCH: %v", agents)
+	}
+	if _, present := claude["dangerously_skip_perms"]; present {
+		t.Fatalf("dangerously_skip_perms persisted via PATCH (M-5 bypass): %v", claude)
+	}
+	// Sanity: other legal fields landed so the strip is targeted, not nuking the whole section.
+	if claude["permission_mode"] != "acceptEdits" {
+		t.Errorf("permission_mode = %v, want acceptEdits (legal fields must still land)", claude["permission_mode"])
+	}
+}
+
+func TestHandlePatchConfig_StripsDangerouslySkipPermsCaseInsensitive(t *testing.T) {
+	// JSON preserves key casing; the merged map then feeds into a
+	// Go struct via mapstructure/koanf, which is case-insensitive
+	// by default — so a payload using mixed/upper casing would
+	// otherwise bypass an exact-match strip.
+	tomlContent := "[ai]\nprimary = \"claude\"\n"
+	tomlPath := writeTempTOML(t, tomlContent)
+
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+
+	body := `{"ai":{"agents":{` +
+		`"claude":{"Dangerously_Skip_Perms":true},` +
+		`"gemini":{"DANGEROUSLY_SKIP_PERMS":true},` +
+		`"codex":{"dANGEROUSLY_skip_perms":true}` +
+		`}}}`
+	req := httptest.NewRequest("PATCH", "/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("PATCH should succeed, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	m, _ := config.ReadTOMLMap(tomlPath)
+	ai, _ := m["ai"].(map[string]any)
+	agents, _ := ai["agents"].(map[string]any)
+	for _, name := range []string{"claude", "gemini", "codex"} {
+		inner, ok := agents[name].(map[string]any)
+		if !ok {
+			continue
+		}
+		for k := range inner {
+			if strings.EqualFold(k, "dangerously_skip_perms") {
+				t.Errorf("case-variant %q persisted for %s (M-5 bypass)", k, name)
+			}
+		}
+	}
+}
+
+func TestHandlePatchConfig_StripsDangerouslySkipPermsInRepoOverride(t *testing.T) {
+	// Per-repo overrides land at ai.repos.<repo>.agents.<cli>.* in
+	// the merged map. The scrubber must walk those too so a buggy
+	// future schema or a koanf-style alias can't grant the flag via
+	// a non-top-level path.
+	tomlContent := "[ai]\nprimary = \"claude\"\n"
+	tomlPath := writeTempTOML(t, tomlContent)
+
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+
+	body := `{"ai":{"repos":{"org/repo":{"agents":{"claude":{"dangerously_skip_perms":true}}}}}}`
+	req := httptest.NewRequest("PATCH", "/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("PATCH should succeed, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	m, _ := config.ReadTOMLMap(tomlPath)
+	ai, _ := m["ai"].(map[string]any)
+	repos, _ := ai["repos"].(map[string]any)
+	repo, ok := repos["org/repo"].(map[string]any)
+	if !ok {
+		return
+	}
+	agents, ok := repo["agents"].(map[string]any)
+	if !ok {
+		return
+	}
+	claude, ok := agents["claude"].(map[string]any)
+	if !ok {
+		return
+	}
+	if _, present := claude["dangerously_skip_perms"]; present {
+		t.Fatalf("repo-level dangerously_skip_perms persisted (M-5 bypass): %v", claude)
+	}
+}
+
+func TestHandlePatchConfig_StripsDangerouslySkipPermsInOrgOverride(t *testing.T) {
+	tomlContent := "[ai]\nprimary = \"claude\"\n"
+	tomlPath := writeTempTOML(t, tomlContent)
+
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+
+	body := `{"ai":{"orgs":{"org":{"agents":{"claude":{"dangerously_skip_perms":true}}}}}}`
+	req := httptest.NewRequest("PATCH", "/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("PATCH should succeed, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	m, _ := config.ReadTOMLMap(tomlPath)
+	ai, _ := m["ai"].(map[string]any)
+	orgs, _ := ai["orgs"].(map[string]any)
+	org, ok := orgs["org"].(map[string]any)
+	if !ok {
+		return
+	}
+	agents, ok := org["agents"].(map[string]any)
+	if !ok {
+		return
+	}
+	claude, ok := agents["claude"].(map[string]any)
+	if !ok {
+		return
+	}
+	if _, present := claude["dangerously_skip_perms"]; present {
+		t.Fatalf("org-level dangerously_skip_perms persisted (M-5 bypass): %v", claude)
+	}
+}
+
+func TestHandlePatchConfig_StripsDangerouslySkipPermsAcrossAllAgents(t *testing.T) {
+	// Same gate applied to every CLI under ai.agents — an attacker may
+	// try flipping the flag on a less-watched agent.
+	tomlContent := "[ai]\nprimary = \"claude\"\n"
+	tomlPath := writeTempTOML(t, tomlContent)
+
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+
+	body := `{"ai":{"agents":{` +
+		`"claude":{"dangerously_skip_perms":true},` +
+		`"gemini":{"dangerously_skip_perms":true},` +
+		`"codex":{"dangerously_skip_perms":true},` +
+		`"opencode":{"dangerously_skip_perms":true}` +
+		`}}}`
+	req := httptest.NewRequest("PATCH", "/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("PATCH failed: %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	m, _ := config.ReadTOMLMap(tomlPath)
+	ai, _ := m["ai"].(map[string]any)
+	agents, _ := ai["agents"].(map[string]any)
+	for _, name := range []string{"claude", "gemini", "codex", "opencode"} {
+		inner, ok := agents[name].(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, present := inner["dangerously_skip_perms"]; present {
+			t.Errorf("dangerously_skip_perms persisted for %s (M-5 bypass)", name)
+		}
+	}
+}
+
 func TestHandlePatchConfig_RejectsNull(t *testing.T) {
 	tomlContent := "[ai]\nprimary = \"claude\"\n"
 	tomlPath := writeTempTOML(t, tomlContent)
@@ -1201,6 +1912,73 @@ func TestHandlePatchRepoConfig_CreatesNewSection(t *testing.T) {
 	}
 }
 
+func TestHandlePatchOrgConfig(t *testing.T) {
+	tomlContent := "[ai]\nprimary = \"claude\"\n\n[ai.orgs.\"org\"]\nprimary = \"gemini\"\nfallback = \"openai\"\n"
+	tomlPath := writeTempTOML(t, tomlContent)
+
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+
+	body := `{"primary":"codex","issue_tracking":{"enabled":true,"develop_labels":["ready"]}}`
+	req := httptest.NewRequest("PATCH", "/config/orgs/"+url.PathEscape("org"), strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	m, err := config.ReadTOMLMap(tomlPath)
+	if err != nil {
+		t.Fatalf("read TOML after PATCH: %v", err)
+	}
+	ai, ok := m["ai"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected [ai] section, got %v", m)
+	}
+	orgs, ok := ai["orgs"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected [ai.orgs] section, got %v", ai)
+	}
+	org, ok := orgs["org"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected [ai.orgs.org] section, got %v", orgs)
+	}
+	if org["primary"] != "codex" {
+		t.Errorf("primary = %v, want codex", org["primary"])
+	}
+	if org["fallback"] != "openai" {
+		t.Errorf("fallback = %v, want openai (should be preserved)", org["fallback"])
+	}
+	it, ok := org["issue_tracking"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected issue_tracking section, got %v", org)
+	}
+	labels, ok := it["develop_labels"].([]any)
+	if !ok || len(labels) != 1 || labels[0] != "ready" {
+		t.Fatalf("develop_labels = %v, want [ready]", it["develop_labels"])
+	}
+}
+
+func TestHandlePatchOrgConfig_RejectsInvalidOrg(t *testing.T) {
+	tomlPath := writeTempTOML(t, "[ai]\nprimary = \"claude\"\n")
+
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+
+	req := httptest.NewRequest("PATCH", "/config/orgs/"+url.PathEscape("bad org"), strings.NewReader(`{"primary":"codex"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (body: %s)", w.Code, w.Body.String())
+	}
+}
+
 func TestHandleDeleteRepoField_TopLevel(t *testing.T) {
 	tomlContent := "[ai]\nprimary = \"claude\"\n\n[ai.repos.\"org/repo1\"]\nprimary = \"gemini\"\npr_draft = true\n"
 	tomlPath := writeTempTOML(t, tomlContent)
@@ -1285,6 +2063,50 @@ func TestHandleDeleteRepoField_NestedPath(t *testing.T) {
 	}
 }
 
+func TestHandleDeleteOrgField_NestedPath(t *testing.T) {
+	tomlContent := "[ai]\nprimary = \"claude\"\n\n[ai.orgs.\"org\".issue_tracking]\ndevelop_labels = [\"ready\"]\nfilter_mode = \"exclusive\"\n"
+	tomlPath := writeTempTOML(t, tomlContent)
+
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+
+	req := httptest.NewRequest("DELETE", "/config/orgs/"+url.PathEscape("org")+"/issue_tracking/develop_labels", nil)
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	m, err := config.ReadTOMLMap(tomlPath)
+	if err != nil {
+		t.Fatalf("read TOML after DELETE: %v", err)
+	}
+	ai, ok := m["ai"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected [ai] section, got %v", m)
+	}
+	orgs, ok := ai["orgs"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected [ai.orgs] section, got %v", ai)
+	}
+	org, ok := orgs["org"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected [ai.orgs.org] section, got %v", orgs)
+	}
+	issueTracking, ok := org["issue_tracking"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected issue_tracking section, got %v", org)
+	}
+	if _, found := issueTracking["develop_labels"]; found {
+		t.Errorf("develop_labels should have been deleted, still present: %v", issueTracking)
+	}
+	if issueTracking["filter_mode"] != "exclusive" {
+		t.Errorf("filter_mode = %v, want exclusive (should be preserved)", issueTracking["filter_mode"])
+	}
+}
+
 func TestHandleDeleteRepoField_Idempotent(t *testing.T) {
 	tomlContent := "[ai]\nprimary = \"claude\"\n"
 	tomlPath := writeTempTOML(t, tomlContent)
@@ -1300,6 +2122,81 @@ func TestHandleDeleteRepoField_Idempotent(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 (idempotent), got %d (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleDeleteManagedCloneRequiresAuthAndCallsCallback(t *testing.T) {
+	srv := setupServerWithToken(t, "test-token")
+	var gotRepo string
+	srv.SetCleanCloneFn(func(ctx context.Context, repo string) error {
+		gotRepo = repo
+		return nil
+	})
+	path := "/config/clones/" + url.PathEscape("org/repo")
+
+	req := httptest.NewRequest("DELETE", path, nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("DELETE without token status = %d, want 401", w.Code)
+	}
+
+	req = httptest.NewRequest("DELETE", path, nil)
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("DELETE with token status = %d, body: %s", w.Code, w.Body.String())
+	}
+	if gotRepo != "org/repo" {
+		t.Fatalf("callback repo = %q, want org/repo", gotRepo)
+	}
+}
+
+func TestHandleDeleteManagedCloneSurfacesCallbackError(t *testing.T) {
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetCleanCloneFn(func(ctx context.Context, repo string) error {
+		return fmt.Errorf("repoctx: clone target %q exists but is not managed", "/tmp/heimdallm/org/repo")
+	})
+	req := httptest.NewRequest("DELETE", "/config/clones/"+url.PathEscape("org/repo"), nil)
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+	if strings.Contains(w.Body.String(), "/tmp/heimdallm") {
+		t.Fatalf("response leaked clone path: %s", w.Body.String())
+	}
+}
+
+func TestHandleDeleteManagedClonesRequiresAuthAndCallsCallback(t *testing.T) {
+	srv := setupServerWithToken(t, "test-token")
+	called := false
+	srv.SetCleanClonesFn(func(ctx context.Context) (int, error) {
+		called = true
+		return 3, nil
+	})
+
+	req := httptest.NewRequest("DELETE", "/config/clones", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("DELETE without token status = %d, want 401", w.Code)
+	}
+
+	req = httptest.NewRequest("DELETE", "/config/clones", nil)
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("DELETE with token status = %d, body: %s", w.Code, w.Body.String())
+	}
+	if !called {
+		t.Fatal("expected cleanup callback to be called")
+	}
+	if !strings.Contains(w.Body.String(), `"removed":3`) {
+		t.Fatalf("body = %s, want removed count", w.Body.String())
 	}
 }
 

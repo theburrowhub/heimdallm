@@ -42,15 +42,14 @@ const maxIssuePages = 10
 //     ignore". The label dimension is therefore filtered before filter_mode
 //     is applied to the remaining dimensions (org + assignee).
 //
-//  3. Applies organizations and assignees filters. filter_mode decides how
-//     they combine: "exclusive" = all active dimensions must pass (AND);
-//     "inclusive" = at least one active dimension must pass (OR). A
-//     dimension is "active" only when its configured list is non-empty.
+//  3. Applies organizations and assignees filters. Assignee scope is always a
+//     hard owner check when configured: exactly one issue assignee must match.
+//     filter_mode only decides how the remaining active dimensions combine
+//     once assignee ownership has passed.
 //
 //  4. Sorts: issues assigned to authenticatedUser first, then the rest;
-//     within each group review_only before develop (review is cheap, develop
-//     is expensive, so it clears the queue faster); within each mode oldest
-//     first so long-pending issues move forward.
+//     within each group triage (review_only) before refinement before develop;
+//     within each mode oldest first so long-pending issues move forward.
 //
 // The store-level "skip already processed without new activity" check is
 // intentionally not here — it needs the local store and belongs to the
@@ -161,13 +160,23 @@ func (c *Client) fetchIssuesPage(repo string, page int) ([]*Issue, error) {
 // issueMatchesFilters applies organizations + assignees + filter_mode.
 // The label dimension is handled up-stream (cfg.Classify + ignore short-
 // circuit), so by the time we get here the issue is known to be
-// review_only or develop.
+// review_only, refinement, or develop.
 func issueMatchesFilters(issue *Issue, repo string, cfg config.IssueTrackingConfig) bool {
 	orgActive := len(cfg.Organizations) > 0
 	assigneeActive := len(cfg.Assignees) > 0
 
 	orgPass := !orgActive || repoBelongsToOrg(repo, cfg.Organizations)
-	assigneePass := !assigneeActive || hasAnyAssignee(issue.AssigneeLogins(), cfg.Assignees)
+	assigneePass := cfg.MatchesAssignees(issue.AssigneeLogins())
+
+	// Assignee scope is a hard ownership boundary even in inclusive mode.
+	// A staged issue with zero, multiple, or out-of-scope assignees must not be
+	// picked up just because the repository also matches an organization filter.
+	if assigneeActive && !assigneePass {
+		slog.Info("github: issue skipped by assignee scope",
+			"repo", repo, "number", issue.Number,
+			"assignees", issue.AssigneeLogins(), "allowed_assignees", cfg.Assignees)
+		return false
+	}
 
 	// No active filters → include.
 	if !orgActive && !assigneeActive {
@@ -187,9 +196,6 @@ func issueMatchesFilters(issue *Issue, repo string, cfg config.IssueTrackingConf
 
 	// Default / exclusive: AND across active dimensions.
 	if orgActive && !orgPass {
-		return false
-	}
-	if assigneeActive && !assigneePass {
 		return false
 	}
 	return true
@@ -212,30 +218,11 @@ func repoBelongsToOrg(repo string, orgs []string) bool {
 	return false
 }
 
-// hasAnyAssignee reports whether any entry in got is also in want. Empty
-// got never matches — an issue with no assignees never satisfies an active
-// assignee filter.
-func hasAnyAssignee(got, want []string) bool {
-	if len(got) == 0 || len(want) == 0 {
-		return false
-	}
-	wantSet := make(map[string]struct{}, len(want))
-	for _, w := range want {
-		wantSet[strings.ToLower(strings.TrimSpace(w))] = struct{}{}
-	}
-	for _, g := range got {
-		if _, ok := wantSet[strings.ToLower(strings.TrimSpace(g))]; ok {
-			return true
-		}
-	}
-	return false
-}
-
 // sortIssuesByPriority applies the ordering described in FetchIssues:
 //
-//	1) assigned-to-authenticatedUser before everyone else
-//	2) review_only before develop (review is cheap, clears the queue faster)
-//	3) oldest first
+//  1. assigned-to-authenticatedUser before everyone else
+//  2. non-develop modes before develop (review/refinement are read-only)
+//  3. oldest first
 //
 // sort.SliceStable keeps the GitHub response order within otherwise-equal
 // issues (GitHub returns newest-updated first), making the tertiary
@@ -259,11 +246,23 @@ func sortIssuesByPriority(issues []*Issue, authenticatedUser string) {
 		if am != bm {
 			return am // mine first
 		}
-		aDev := a.Mode == config.IssueModeDevelop
-		bDev := b.Mode == config.IssueModeDevelop
-		if aDev != bDev {
-			return !aDev // review_only (develop=false) first
+		ar, br := issueModeRank(a.Mode), issueModeRank(b.Mode)
+		if ar != br {
+			return ar < br
 		}
 		return a.CreatedAt.Before(b.CreatedAt) // older first
 	})
+}
+
+func issueModeRank(mode config.IssueMode) int {
+	switch mode {
+	case config.IssueModeReviewOnly:
+		return 0
+	case config.IssueModeRefinement:
+		return 1
+	case config.IssueModeDevelop:
+		return 2
+	default:
+		return 3
+	}
 }

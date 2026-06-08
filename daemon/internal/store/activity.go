@@ -29,12 +29,14 @@ type Activity struct {
 // To is an EXCLUSIVE upper bound (ts < To). Pass the start of the day
 // AFTER your intended last day, not 23:59:59 on the last day.
 type ActivityQuery struct {
-	From    time.Time
-	To      time.Time
-	Orgs    []string
-	Repos   []string
-	Actions []string
-	Limit   int
+	From      time.Time
+	To        time.Time
+	Orgs      []string
+	Repos     []string
+	ItemTypes []string
+	Actions   []string
+	Outcomes  []string
+	Limit     int
 }
 
 const defaultActivityLimit = 500
@@ -100,10 +102,22 @@ func (s *Store) ListActivity(q ActivityQuery) ([]*Activity, bool, error) {
 			args = append(args, r)
 		}
 	}
+	if len(q.ItemTypes) > 0 {
+		where = append(where, "item_type IN ("+placeholders(len(q.ItemTypes))+")")
+		for _, typ := range q.ItemTypes {
+			args = append(args, typ)
+		}
+	}
 	if len(q.Actions) > 0 {
 		where = append(where, "action IN ("+placeholders(len(q.Actions))+")")
 		for _, a := range q.Actions {
 			args = append(args, a)
+		}
+	}
+	if len(q.Outcomes) > 0 {
+		where = append(where, "outcome IN ("+placeholders(len(q.Outcomes))+")")
+		for _, o := range q.Outcomes {
+			args = append(args, o)
 		}
 	}
 

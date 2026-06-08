@@ -38,6 +38,37 @@ class TrackedIssueReview {
   String get category => (triage['category'] as String?) ?? '';
 }
 
+/// TrackedIssueLinkedPR carries the slim PR-side view embedded on the
+/// issue response so the dashboard can render the review-state chip
+/// (#482 phase 1) without an extra round-trip. Populated only when
+/// auto_implement created the PR and the daemon's Tier 3 watch has
+/// observed an external review on it.
+@JsonSerializable()
+class TrackedIssueLinkedPR {
+  final int number;
+  final String url;
+  final String state;
+  @JsonKey(name: 'external_review_state')
+  final String externalReviewState;
+  @JsonKey(name: 'external_reviewer')
+  final String externalReviewer;
+  @JsonKey(name: 'external_review_at')
+  final DateTime? externalReviewAt;
+
+  const TrackedIssueLinkedPR({
+    required this.number,
+    required this.url,
+    required this.state,
+    required this.externalReviewState,
+    required this.externalReviewer,
+    this.externalReviewAt,
+  });
+
+  factory TrackedIssueLinkedPR.fromJson(Map<String, dynamic> json) =>
+      _$TrackedIssueLinkedPRFromJson(json);
+  Map<String, dynamic> toJson() => _$TrackedIssueLinkedPRToJson(this);
+}
+
 @JsonSerializable()
 class TrackedIssue {
   final int id;
@@ -59,6 +90,8 @@ class TrackedIssue {
   final bool dismissed;
   @JsonKey(name: 'latest_review', includeIfNull: false)
   final TrackedIssueReview? latestReview;
+  @JsonKey(name: 'linked_pr', includeIfNull: false)
+  final TrackedIssueLinkedPR? linkedPR;
 
   const TrackedIssue({
     required this.id,
@@ -75,6 +108,7 @@ class TrackedIssue {
     required this.fetchedAt,
     this.dismissed = false,
     this.latestReview,
+    this.linkedPR,
   });
 
   factory TrackedIssue.fromJson(Map<String, dynamic> json) =>

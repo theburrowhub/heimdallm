@@ -18,13 +18,13 @@ import (
 // ── fixtures ─────────────────────────────────────────────────────────────────
 
 type issueFixture struct {
-	ID          int64
-	Number      int
-	Title       string
-	Labels      []string
-	Assignees   []string
-	CreatedAt   time.Time
-	IsPR        bool
+	ID        int64
+	Number    int
+	Title     string
+	Labels    []string
+	Assignees []string
+	CreatedAt time.Time
+	IsPR      bool
 }
 
 func (f issueFixture) marshal() map[string]any {
@@ -234,6 +234,7 @@ func TestFetchIssues_AssigneesFilter(t *testing.T) {
 			{ID: 60, Number: 60, Title: "alice's", Assignees: []string{"alice"}, Labels: []string{"bug"}, CreatedAt: time.Now()},
 			{ID: 61, Number: 61, Title: "bob's", Assignees: []string{"bob"}, Labels: []string{"bug"}, CreatedAt: time.Now()},
 			{ID: 62, Number: 62, Title: "unassigned", Labels: []string{"bug"}, CreatedAt: time.Now()},
+			{ID: 63, Number: 63, Title: "shared", Assignees: []string{"alice", "bob"}, Labels: []string{"bug"}, CreatedAt: time.Now()},
 		},
 	})
 	defer srv.Close()
@@ -242,6 +243,40 @@ func TestFetchIssues_AssigneesFilter(t *testing.T) {
 	got, _ := client.FetchIssues("org/repo", cfg, "")
 	if len(got) != 1 || got[0].Number != 60 {
 		t.Errorf("expected only alice's issue, got %+v", got)
+	}
+}
+
+func TestFetchIssues_AssigneeScopedStageCanStartAtRefinement(t *testing.T) {
+	cfg := baseCfg()
+	cfg.RefinementLabels = []string{"refine"}
+	cfg.Assignees = []string{"bob"}
+	srv := issuesPageServer(t, map[int][]issueFixture{
+		1: {
+			{ID: 63, Number: 63, Title: "already triaged by another daemon", Assignees: []string{"bob"}, Labels: []string{"refine"}, CreatedAt: time.Now()},
+			{ID: 64, Number: 64, Title: "triage still mine", Assignees: []string{"bob"}, Labels: []string{"question"}, CreatedAt: time.Now()},
+			{ID: 65, Number: 65, Title: "belongs to alice", Assignees: []string{"alice"}, Labels: []string{"refine"}, CreatedAt: time.Now()},
+			{ID: 66, Number: 66, Title: "unassigned", Labels: []string{"refine"}, CreatedAt: time.Now()},
+		},
+	})
+	defer srv.Close()
+	client := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+
+	got, err := client.FetchIssues("org/repo", cfg, "bob")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected only bob-scoped triage/refinement issues, got %+v", got)
+	}
+	modes := map[int]config.IssueMode{}
+	for _, issue := range got {
+		modes[issue.Number] = issue.Mode
+	}
+	if modes[63] != config.IssueModeRefinement {
+		t.Errorf("#63 should enter directly as refinement, got %q", modes[63])
+	}
+	if modes[64] != config.IssueModeReviewOnly {
+		t.Errorf("#64 should remain triage, got %q", modes[64])
 	}
 }
 
@@ -272,24 +307,26 @@ func TestFetchIssues_FilterModeExclusive_AllMustPass(t *testing.T) {
 	}
 }
 
-func TestFetchIssues_FilterModeInclusive_AtLeastOneDimensionPasses(t *testing.T) {
+func TestFetchIssues_FilterModeInclusive_AssigneeScopeRemainsMandatory(t *testing.T) {
 	cfg := baseCfg()
 	cfg.FilterMode = config.FilterModeInclusive
 	cfg.Organizations = []string{"wanted-org"}
 	cfg.Assignees = []string{"alice"}
 	srv := issuesPageServer(t, map[int][]issueFixture{
 		1: {
-			{ID: 80, Number: 80, Assignees: []string{"bob"}, Labels: []string{"bug"}, CreatedAt: time.Now()}, // org matches (we'll fetch via wanted-org)
+			{ID: 80, Number: 80, Assignees: []string{"bob"}, Labels: []string{"bug"}, CreatedAt: time.Now()},   // org matches (we'll fetch via wanted-org)
 			{ID: 81, Number: 81, Assignees: []string{"alice"}, Labels: []string{"bug"}, CreatedAt: time.Now()}, // assignee matches even in other-org
+			{ID: 82, Number: 82, Assignees: []string{"alice", "bob"}, Labels: []string{"bug"}, CreatedAt: time.Now()},
 		},
 	})
 	defer srv.Close()
 	client := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
 
-	// Fetched from wanted-org — org passes, so both issues are kept.
+	// Fetched from wanted-org — org passes, but assignee scope is still a hard
+	// ownership boundary for staged issues.
 	got, _ := client.FetchIssues("wanted-org/repo", cfg, "")
-	if len(got) != 2 {
-		t.Errorf("inclusive + org matches: expected 2 issues, got %d", len(got))
+	if len(got) != 1 || got[0].Number != 81 {
+		t.Errorf("inclusive + org matches: expected only #81, got %+v", got)
 	}
 
 	// Fetched from other-org — org fails, assignee decides.

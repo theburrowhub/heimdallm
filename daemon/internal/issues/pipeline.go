@@ -135,9 +135,19 @@ type Notifier interface {
 
 // Triage is the structured triage block returned by the LLM.
 type Triage struct {
-	Severity          string `json:"severity"`
-	Category          string `json:"category"`
-	SuggestedAssignee string `json:"suggested_assignee"`
+	Severity             string   `json:"severity"`
+	Category             string   `json:"category"`
+	AffectedArea         string   `json:"affected_area,omitempty"`
+	AffectedPaths        []string `json:"affected_paths,omitempty"`
+	PriorityLabel        string   `json:"priority_label,omitempty"`
+	SuggestedAssignee    string   `json:"suggested_assignee"`
+	AssignedAssignee     string   `json:"assigned_assignee,omitempty"`
+	AssigneeReason       string   `json:"assignee_reason,omitempty"`
+	AssigneeConfidence   string   `json:"assignee_confidence,omitempty"`
+	AssigneeEvidence     []string `json:"assignee_evidence,omitempty"`
+	AssignmentSource     string   `json:"assignment_source,omitempty"`
+	TentativeAssignee    string   `json:"tentative_assignee,omitempty"`
+	AssignmentDiagnostic string   `json:"assignment_diagnostic,omitempty"`
 }
 
 // IssueReviewResult is the parsed LLM output for a triage run. Mirrors the
@@ -153,6 +163,35 @@ type IssueReviewResult struct {
 type PRDescription struct {
 	Title string `json:"title"`
 	Body  string `json:"body"`
+}
+
+// RefinementResult is the structured deep-investigation output produced by
+// the refinement stage before development.
+type RefinementResult struct {
+	AnalysisSummary     string              `json:"analysis_summary"`
+	AffectedAreas       []RefinementArea    `json:"affected_areas"`
+	Subtasks            []RefinementSubtask `json:"subtasks"`
+	ImplementationOrder []string            `json:"implementation_order"`
+	Assumptions         []string            `json:"assumptions"`
+	OpenQuestions       []string            `json:"open_questions"`
+	Risks               []string            `json:"risks"`
+	TestPlan            []string            `json:"test_plan"`
+}
+
+type RefinementArea struct {
+	Path    string   `json:"path"`
+	Symbols []string `json:"symbols"`
+	Reason  string   `json:"reason"`
+}
+
+type RefinementSubtask struct {
+	ID             string   `json:"id"`
+	Description    string   `json:"description"`
+	AffectedFiles  []string `json:"affected_files"`
+	Symbols        []string `json:"symbols"`
+	ExpectedChange string   `json:"expected_change"`
+	Complexity     string   `json:"complexity"`
+	Dependencies   []string `json:"dependencies"`
 }
 
 // RunOptions carries per-execution settings derived from global + repo +
@@ -179,6 +218,7 @@ type RunOptions struct {
 	// Priority: IssuePromptOverride (full template) > IssueInstructions (injected into default) > built-in default.
 	IssuePromptOverride string // full custom template from repo-level agent
 	IssueInstructions   string // plain text injected into default template
+	TriageOwner         string // fallback issue assignee resolved repo > org > global
 
 	// Auto_implement prompt customization (same resolution shape as the
 	// triage pair above, but consulted only on the runAutoImplement path).
@@ -192,10 +232,32 @@ type RunOptions struct {
 	PRLabels    []string
 	PRDraft     bool
 
+	// AuthUser is the daemon's cached GitHub login. It is used as the
+	// PR author fallback when the create-PR response omits user.login so
+	// the stored row never falls back to the issue reporter (#456).
+	AuthUser string
+
 	// GeneratePRDescription enables a second LLM call after commit to
 	// produce a rich PR title and description from the implementation diff.
 	// When false (default), the pipeline uses the template strings.
 	GeneratePRDescription bool
+
+	// Force bypasses refinement idempotency for manual reruns.
+	Force bool
+
+	// RequireWorkDirForDevelop turns the historical develop→review_only
+	// fallback into a hard error. Production auto-clone callers set this so
+	// an auto_implement run never silently proceeds without a writable checkout.
+	RequireWorkDirForDevelop bool
+
+	// RequireWorkDirForRefinement records the production contract explicitly:
+	// refinement needs full repository context and must not degrade to issue-only.
+	RequireWorkDirForRefinement bool
+
+	// ReleaseRepoContext releases a checkout handle acquired by the caller.
+	// It is intentionally a one-shot cleanup hook rather than another source
+	// of path truth; ExecOpts.WorkDir remains authoritative.
+	ReleaseRepoContext func()
 }
 
 // Pipeline runs a single issue triage or implementation end-to-end.
@@ -212,7 +274,17 @@ type Pipeline struct {
 	// disables both axes (no limit). Configure at startup via
 	// SetCircuitBreakerLimits.
 	breaker *store.IssueCircuitBreakerLimits
+
+	// watch enrols freshly-created auto_implement PRs into Tier 3 so
+	// the new review-state checker observes external reviews on them
+	// (#482). Nil-safe: single-tier setups (some tests) leave it unset.
+	watch WatchEnroller
 }
+
+// SetWatchEnroller wires the Tier 3 watch enroller so auto_implement
+// PRs are picked up by the review-state checker right after creation
+// (#482). Optional — the pipeline checks for nil before calling.
+func (p *Pipeline) SetWatchEnroller(w WatchEnroller) { p.watch = w }
 
 // SetBotLogin sets the GitHub login of the bot account. Used to filter
 // the bot's own comments from the "new discussion" section in re-triages.
@@ -228,18 +300,35 @@ func (p *Pipeline) SetCircuitBreakerLimits(limits *store.IssueCircuitBreakerLimi
 // issueStore is the subset of *store.Store the pipeline needs. Kept narrow
 // so tests can substitute a fake without bringing in SQLite.
 //
-// ClaimIssueTriageInFlight / ReleaseIssueTriageInFlight gate Run on the
-// persistent (github_issue_id, updated_at) key so two concurrent fetcher
-// ticks on the same snapshot collapse to one Claude dispatch — mirroring
-// the PR-side claim (#258). See theburrowhub/heimdallm#292.
+// ClaimIssueTriageInFlight / ReleaseIssueTriageInFlight gate Run on a
+// single-flight-per-issue key (github_issue_id only). updated_at is
+// passed for diagnostics but is not part of the contention key — that
+// design was relaxed in #458 because the bot's own triage comment bumps
+// updated_at, which previously let a second snapshot pass the claim and
+// spawn a duplicate run. Mirrors the PR-side claim (#258); see #292.
 type issueStore interface {
 	UpsertIssue(i *store.Issue) (int64, error)
 	InsertIssueReview(r *store.IssueReview) (int64, error)
 	LatestIssueReview(issueID int64) (*store.IssueReview, error)
+	LatestIssueReviewByAction(issueID int64, action string) (*store.IssueReview, error)
 	UpsertPR(pr *store.PR) (int64, error)
+	// MarkPRAutoImplementOrigin back-links the freshly-created PR row
+	// to the issue's store row id. Tier 3 keys its review-state
+	// vigilance on a non-zero value here (#482).
+	MarkPRAutoImplementOrigin(prID, issueID int64) error
 	ClaimIssueTriageInFlight(issueID int64, updatedAt string) (bool, error)
 	ReleaseIssueTriageInFlight(issueID int64, updatedAt string) error
 	CheckIssueCircuitBreaker(issueID int64, repo string, cfg store.IssueCircuitBreakerLimits) (bool, string, error)
+}
+
+// WatchEnroller enrols an item (PR or issue) into the Tier 3 watch
+// bucket so the state monitor periodically refreshes it (#482). The
+// pipeline calls this after auto_implement creates a PR so the new
+// PR-review-state CheckItem branch picks it up. Wired via
+// SetWatchEnroller; nil-safe — single-tier setups (some tests) leave
+// it unset.
+type WatchEnroller interface {
+	Enroll(ctx context.Context, kind, repo string, number int, githubID int64) error
 }
 
 // issueGitHub groups every GitHub-facing method the pipeline uses. The
@@ -275,6 +364,9 @@ func New(s issueStore, gh issueGitHub, exec CLIExecutor, git GitOps, broker Publ
 // passes a context so long-running network operations (git fetch / push,
 // CLI invocation) can be cancelled on daemon shutdown.
 func (p *Pipeline) Run(ctx context.Context, issue *github.Issue, opts RunOptions) (*store.IssueReview, error) {
+	if opts.ReleaseRepoContext != nil {
+		defer opts.ReleaseRepoContext()
+	}
 	if issue == nil {
 		return nil, fmt.Errorf("issues pipeline: nil issue")
 	}
@@ -282,12 +374,14 @@ func (p *Pipeline) Run(ctx context.Context, issue *github.Issue, opts RunOptions
 		ctx = context.Background()
 	}
 
-	// Persistent in-flight claim keyed on (github_issue_id, updated_at).
-	// Two concurrent fetcher ticks observing the same snapshot collapse to
-	// one Claude dispatch. Fail-open on any claim error — the downstream
-	// circuit breaker and marker-scan dedup still cap cost. Empty key is
-	// treated as "no claim possible"; the scheduler should have prevented
-	// that but the guard is cheap. See theburrowhub/heimdallm#292.
+	// Single-flight in-flight claim keyed on github_issue_id (#458). Any
+	// poller tick that arrives while a run is in progress collapses to a
+	// no-op, regardless of whether the issue's updated_at changed mid-
+	// flight (which the bot's own PostComment does at the tail of the
+	// run). Fail-open on any claim error — the downstream circuit breaker
+	// and marker-scan dedup still cap cost. Empty key is treated as "no
+	// claim possible"; the scheduler should have prevented that but the
+	// guard is cheap. See theburrowhub/heimdallm#292.
 	//
 	// Key-space note: the claim uses issue.ID (the GitHub-assigned ID,
 	// stable and known before any DB write) so we can gate Run before
@@ -298,10 +392,10 @@ func (p *Pipeline) Run(ctx context.Context, issue *github.Issue, opts RunOptions
 	// distinct — do not "unify" them without revisiting the
 	// claim-before-upsert ordering that gives Run an early exit.
 	var (
-		claimed       bool
-		breakerHeld   bool // when true, defer must NOT release the claim
-		claimKey      string
-		claimIssueID  = issue.ID
+		claimed      bool
+		breakerHeld  bool // when true, defer must NOT release the claim
+		claimKey     string
+		claimIssueID = issue.ID
 	)
 	if !issue.UpdatedAt.IsZero() && claimIssueID != 0 {
 		claimKey = issue.UpdatedAt.UTC().Format(time.RFC3339)
@@ -325,12 +419,20 @@ func (p *Pipeline) Run(ctx context.Context, issue *github.Issue, opts RunOptions
 	}
 	defer func() {
 		// Release on every path EXCEPT a circuit-breaker trip. Holding
-		// the claim across a trip prevents the next fetcher tick on the
-		// same (issue, updated_at) snapshot from re-acquiring, re-hitting
-		// the breaker, and re-firing the operator notification once per
-		// poll. The 30-min stale sweep eventually reclaims the row, or a
-		// genuine activity bump (new updated_at) produces a new claim
-		// key that bypasses the held one.
+		// the claim across a trip prevents the next fetcher tick from
+		// re-acquiring, re-hitting the breaker, and re-firing the
+		// operator notification once per poll.
+		//
+		// Behavior change under single-flight-per-issue (#458): the hold
+		// is now sticky for the full ClearStaleIssueTriageInFlight sweep
+		// window (~30 min) — the previous "new updated_at bypasses the
+		// held claim" path is gone. This is intentional and conservative
+		// for cost-runaway protection: the previous bypass let the same
+		// issue re-trip the breaker on every new activity. Operator-
+		// driven retries (retry-marker comments, label flips) take effect
+		// after the sweep clears the held row. If a tighter manual
+		// unblock is needed, file a follow-up — possibly an explicit
+		// force-release path for retry markers.
 		if claimed && !breakerHeld {
 			if err := p.store.ReleaseIssueTriageInFlight(claimIssueID, claimKey); err != nil {
 				slog.Warn("issues pipeline: release inflight failed",
@@ -345,20 +447,26 @@ func (p *Pipeline) Run(ctx context.Context, issue *github.Issue, opts RunOptions
 	workDir := strings.TrimSpace(opts.ExecOpts.WorkDir)
 	effective := issue.Mode
 	if effective == config.IssueModeDevelop && workDir == "" {
+		if opts.RequireWorkDirForDevelop {
+			return nil, fmt.Errorf("issues pipeline: develop mode requires local repo context")
+		}
 		slog.Warn("issues pipeline: develop mode requires local_dir, downgrading to review_only",
 			"repo", issue.Repo, "issue", issue.Number)
 		effective = config.IssueModeReviewOnly
+	}
+	if effective == config.IssueModeRefinement && workDir == "" {
+		return nil, fmt.Errorf("issues pipeline: refinement mode requires local repo context")
 	}
 	if effective == config.IssueModeIgnore {
 		return nil, fmt.Errorf("issues pipeline: refusing an ignore-classified issue (fetcher should have filtered it out)")
 	}
 
-	// Upsert + initial SSE events are common to both flows so we do them
+	// Upsert + initial SSE events are common to all flows so we do them
 	// here. issue_detected fires before the flow forks, issue_review_started
 	// fires after so the UI can show the correct "triaging" vs "implementing"
 	// copy — the runner sets the exact flavour it wants.
 	//
-	// Upsert runs BEFORE the circuit breaker so the breaker's per-issue
+	// For triage runs, upsert runs BEFORE the circuit breaker so its per-issue
 	// count (which keys on the internal store ID via issue_reviews.issue_id)
 	// sees the correct row. The upsert is idempotent — on a breaker-trip
 	// the issue row stays but no issue_reviews row is written for this
@@ -372,12 +480,14 @@ func (p *Pipeline) Run(ctx context.Context, issue *github.Issue, opts RunOptions
 		return nil, fmt.Errorf("issues pipeline: upsert issue: %w", err)
 	}
 
-	// Circuit breaker: hard cap on triage count per issue / per repo.
+	// Circuit breaker: hard cap on triage count per issue / per repo. It must
+	// not gate refinement or develop, otherwise a correctly promoted issue can
+	// get stuck after earlier triage/refinement activity.
 	// Runs AFTER the in-flight claim and upsert so it only fires when
 	// both dedup layers missed; returns *CircuitBreakerError so the
 	// caller (fetcher) can distinguish it from a genuine pipeline
 	// failure. See theburrowhub/heimdallm#292.
-	if p.breaker != nil {
+	if p.breaker != nil && effective == config.IssueModeReviewOnly {
 		tripped, reason, err := p.store.CheckIssueCircuitBreaker(issueID, issue.Repo, *p.breaker)
 		if err != nil {
 			slog.Warn("issues pipeline: circuit breaker check failed, proceeding",
@@ -403,6 +513,8 @@ func (p *Pipeline) Run(ctx context.Context, issue *github.Issue, opts RunOptions
 	switch effective {
 	case config.IssueModeReviewOnly:
 		return p.runReviewOnly(ctx, issue, issueID, workDir, opts)
+	case config.IssueModeRefinement:
+		return p.runRefinement(ctx, issue, issueID, workDir, opts)
 	case config.IssueModeDevelop:
 		return p.runAutoImplement(ctx, issue, issueID, workDir, opts)
 	default:
@@ -472,6 +584,7 @@ func (p *Pipeline) runReviewOnly(ctx context.Context, issue *github.Issue, issue
 		Comments:      humanComments,
 		HasLocalDir:   workDir != "",
 		TriageContext: triageCtx,
+		TriageOwner:   opts.TriageOwner,
 	}
 	prompt := BuildPromptWithProfile(promptCtx, opts.IssuePromptOverride, opts.IssueInstructions)
 
@@ -490,6 +603,7 @@ func (p *Pipeline) runReviewOnly(ctx context.Context, issue *github.Issue, issue
 		p.publishError(issueID, issue, err)
 		return nil, fmt.Errorf("issues pipeline: parse result: %w", err)
 	}
+	enrichTriageResult(ctx, result, workDir, opts.TriageOwner, defaultGitHistoryRunner{})
 
 	// Build + post the Markdown comment. PostComment failure is not fatal —
 	// the review is still persisted locally with a zero pr_created so
@@ -500,6 +614,7 @@ func (p *Pipeline) runReviewOnly(ctx context.Context, issue *github.Issue, issue
 		slog.Warn("issues pipeline: PostComment failed, review will be stored locally only",
 			"repo", issue.Repo, "number", issue.Number, "err", postErr)
 	}
+	applyIssueTriageMetadata(p.gh, issue.Repo, issue.Number, result)
 
 	triageJSON, err := json.Marshal(result.Triage)
 	if err != nil {
@@ -541,8 +656,8 @@ func (p *Pipeline) runReviewOnly(ctx context.Context, issue *github.Issue, issue
 
 // runAutoImplement creates a branch, asks the agent to implement the issue,
 // commits + pushes whatever it changed, opens a PR, and persists the review.
-// When the agent produces no changes the run silently degrades to
-// review_only with an explanatory comment rather than opening an empty PR.
+// When the agent produces no changes the run degrades to review_only with an
+// explanatory comment rather than opening an empty PR.
 // On a Push-succeeded-but-CreatePR-failed path the orphaned remote branch is
 // cleaned up so the re-run starts from a clean remote.
 func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, issueID int64, workDir string, opts RunOptions) (*store.IssueReview, error) {
@@ -595,19 +710,22 @@ func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, is
 		return nil, fmt.Errorf("issues pipeline: detect CLI: %w", err)
 	}
 
-	// Build re-triage context if a previous review exists for this issue.
+	// Auto_implement requires the CLI to be allowed to write files. When the
+	// operator has not configured a permission/approval flag explicitly, fall
+	// back to the safest mode that still permits edits — otherwise the agent
+	// silently completes without touching the tree and every run degrades to
+	// the no-changes fallback (#433).
+	opts.ExecOpts = ensureAutoImplementWritePerms(cli, opts.ExecOpts)
+
+	// Build prior-issue context. Prefer the latest refinement plan when it
+	// exists so auto_implement can execute the researched plan; otherwise fall
+	// back to the historical triage context.
 	var triageCtx string
-	prevReview, _ := p.store.LatestIssueReview(issueID)
-	if prevReview != nil {
-		triageCtx = buildTriageContext(
-			prevReview.Triage,
-			prevReview.Suggestions,
-			prevReview.Summary,
-			extractSeverity(prevReview.Triage),
-			prevReview.CreatedAt,
-			comments,
-			p.botLogin,
-		)
+	prevRefinement, _ := p.store.LatestIssueReviewByAction(issueID, string(config.IssueModeRefinement))
+	if prevRefinement != nil {
+		triageCtx = buildIssueRunContext(prevRefinement, comments, p.botLogin)
+	} else if prevReview, _ := p.store.LatestIssueReview(issueID); prevReview != nil {
+		triageCtx = buildIssueRunContext(prevReview, comments, p.botLogin)
 	}
 
 	// Agent profile customization: ImplementPromptOverride replaces the entire
@@ -624,8 +742,10 @@ func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, is
 		opts.ImplementInstructions,
 	)
 	if _, err := p.executor.ExecuteRaw(cli, prompt, opts.ExecOpts); err != nil {
-		p.publishError(issueID, issue, fmt.Errorf("execute %s: %w", cli, err))
-		return nil, fmt.Errorf("issues pipeline: execute %s: %w", cli, err)
+		execErr := fmt.Errorf("execute %s: %w", cli, err)
+		p.recordAutoImplementFailure(issueID, cli, fmt.Sprintf("auto_implement %s", execErr))
+		p.publishError(issueID, issue, execErr)
+		return nil, fmt.Errorf("issues pipeline: %w", execErr)
 	}
 
 	// If the agent produced no changes we do NOT open an empty PR. Fall back
@@ -665,19 +785,7 @@ func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, is
 		// MaxAutoImplementFailures retry cap (#223). Without this row the
 		// dedup logic would have no visibility into failed attempts and the
 		// daemon would retry forever on non-fast-forward errors.
-		failedRev := &store.IssueReview{
-			IssueID:     issueID,
-			CLIUsed:     cli,
-			Summary:     fmt.Sprintf("auto_implement push failed: %v", err),
-			Triage:      "{}",
-			Suggestions: "[]",
-			ActionTaken: "auto_implement_failed",
-			CreatedAt:   time.Now().UTC(),
-		}
-		if _, storeErr := p.store.InsertIssueReview(failedRev); storeErr != nil {
-			slog.Warn("issues pipeline: could not record push failure in store",
-				"repo", issue.Repo, "number", issue.Number, "err", storeErr)
-		}
+		p.recordAutoImplementFailure(issueID, cli, fmt.Sprintf("auto_implement push failed: %v", err))
 		p.publishError(issueID, issue, fmt.Errorf("push: %w", err))
 		return nil, fmt.Errorf("issues pipeline: push: %w", err)
 	}
@@ -716,25 +824,61 @@ func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, is
 	// Store the auto-created PR in SQLite so the Activity view shows
 	// it immediately with the correct title (fixes #117).
 	now := time.Now().UTC()
+	prAuthor := strings.TrimSpace(createdPR.Author)
+	if prAuthor == "" {
+		prAuthor = strings.TrimSpace(strings.TrimLeft(opts.AuthUser, "@"))
+	}
+	if prAuthor == "" {
+		// The PR row's author column is NOT NULL; the upsert will surface
+		// the constraint. Warn so the missing identity is observable in
+		// logs rather than mysteriously truncating Activity rows.
+		slog.Warn("issues pipeline: auto-created PR has no recoverable author identity",
+			"repo", issue.Repo, "pr", createdPR.Number,
+			"created_pr_author", createdPR.Author, "auth_user", opts.AuthUser)
+	}
 	prRow := &store.PR{
 		GithubID:  createdPR.ID,
 		Repo:      issue.Repo,
 		Number:    createdPR.Number,
 		Title:     prTitle,
-		Author:    issue.User.Login,
+		Author:    prAuthor,
 		URL:       createdPR.HTMLURL,
 		State:     "open",
 		UpdatedAt: now,
 		FetchedAt: now,
 	}
-	if _, upsertErr := p.store.UpsertPR(prRow); upsertErr != nil {
+	prRowID, upsertErr := p.store.UpsertPR(prRow)
+	if upsertErr != nil {
 		slog.Warn("issues pipeline: failed to store auto-created PR",
 			"repo", issue.Repo, "pr", createdPR.Number, "err", upsertErr)
+	}
+	// Mark the PR as auto_implement-origin so Tier 3's review-state
+	// checker picks it up (#482). The mark is best-effort: a failure
+	// here only means the observation layer misses this PR, not that
+	// the PR itself is corrupted.
+	if prRowID > 0 {
+		if markErr := p.store.MarkPRAutoImplementOrigin(prRowID, issueID); markErr != nil {
+			slog.Warn("issues pipeline: failed to mark PR auto_implement origin",
+				"repo", issue.Repo, "pr", createdPR.Number, "err", markErr)
+		}
+	}
+	// Enrol the PR in the Tier 3 watch bucket so the review-state
+	// checker periodically refreshes it. Nil-safe for single-tier
+	// setups; failure is best-effort (the next scan still creates a
+	// row if needed when humans review the PR).
+	if p.watch != nil {
+		if enrollErr := p.watch.Enroll(ctx, "pr", issue.Repo, createdPR.Number, createdPR.ID); enrollErr != nil {
+			slog.Warn("issues pipeline: failed to enroll auto-implement PR in Tier 3 watch",
+				"repo", issue.Repo, "pr", createdPR.Number, "err", enrollErr)
+		}
 	}
 
 	// Apply PR metadata (reviewers, labels, assignees). All best-effort —
 	// a metadata failure does not roll back the PR, which is already public.
-	applyPRMetadata(p.gh, issue.Repo, prNumber, opts)
+	metadataOpts := opts
+	metadataOpts.PRAssignee = resolveAutoImplementPRAssignee(issue, opts)
+	metadataOpts.PRReviewers = filterSelfPRReviewers(metadataOpts.PRReviewers, firstNonEmpty(p.botLogin, opts.AuthUser))
+	applyPRMetadata(p.gh, issue.Repo, prNumber, metadataOpts)
 
 	// Post a done-marker comment on the issue so watchers see the PR land
 	// and the fetcher's marker scan skips the issue on future polls (#238).
@@ -767,9 +911,12 @@ func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, is
 	}
 	rev.ID = revID
 
+	// issue_number/pr_number are canonical for activity-log consumers; number
+	// and pr_created remain legacy SSE aliases for older UI/session consumers.
 	p.publish(sse.EventIssueImplemented, map[string]any{
-		"issue_id": issueID, "number": issue.Number, "repo": issue.Repo,
-		"pr_created": prNumber, "branch": branch,
+		"issue_id": issueID, "number": issue.Number, "issue_number": issue.Number, "repo": issue.Repo,
+		"issue_title": issue.Title, "cli_used": cli,
+		"pr_created": prNumber, "pr_number": prNumber, "pr_url": createdPR.HTMLURL, "branch": branch,
 	})
 	if p.notify != nil {
 		p.notify.Notify("Issue Auto-Implemented",
@@ -786,12 +933,19 @@ func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, is
 // implement" escape hatch fired. We post a review_only-style comment so the
 // issue still gets acknowledged and the user sees why no PR appeared.
 func (p *Pipeline) autoImplementNoChangesFallback(issue *github.Issue, issueID int64, cli string) (*store.IssueReview, error) {
+	// MarkerDone makes this a terminal state for the fetcher's marker scan
+	// (#483): without it, the fallback row collides with the dedup gate on
+	// every poll and the issue sits in limbo. We deliberately do NOT embed
+	// the MarkerRetry literal in the body — ScanMarkers prioritises Retry
+	// over Done within a single comment, so the very next poll would
+	// reprocess the issue. The retry instructions reference the token by
+	// keyword instead and point at the configuration guide.
 	body := fmt.Sprintf(
-		"## ⚠️ Heimdallm auto-implement skipped\n\n"+
+		"%s\n## ⚠️ Heimdallm auto-implement skipped\n\n"+
 			"The agent looked at #%d but left the working tree unchanged — it likely needs a human decision or more context than the issue alone provides.\n\n"+
-			"Rerun manually with more details in the issue body, or remove the develop label to stop retries.\n\n"+
+			"To retry auto-implementation, post a new comment containing a Heimdallm `heimdallm:retry` marker (see the configuration guide's `auto_implement` section for the exact syntax). To stop here, remove the develop label.\n\n"+
 			"---\n*auto_implement → review_only fallback · Heimdallm*",
-		issue.Number,
+		MarkerDone, issue.Number,
 	)
 	commentedAt, postErr := p.gh.PostComment(issue.Repo, issue.Number, body)
 	if postErr != nil {
@@ -805,10 +959,7 @@ func (p *Pipeline) autoImplementNoChangesFallback(issue *github.Issue, issueID i
 		Summary:     "auto_implement produced no changes; downgraded to review_only",
 		Triage:      "{}",
 		Suggestions: "[]",
-		// ActionTaken reflects what actually ran — keeps the audit trail
-		// honest per the same rule we established in #26 for the
-		// develop-without-local_dir fallback.
-		ActionTaken: string(config.IssueModeReviewOnly),
+		ActionTaken: ActionAutoImplementNoChanges,
 		CreatedAt:   time.Now().UTC(),
 		CommentedAt: commentedAt,
 	}
@@ -818,13 +969,77 @@ func (p *Pipeline) autoImplementNoChangesFallback(issue *github.Issue, issueID i
 	}
 	rev.ID = revID
 
-	p.publish(sse.EventIssueReviewCompleted, map[string]any{
+	// EventIssueReviewError (not Completed) so the UI renders a
+	// needs-attention card. The `error` field follows the convention of
+	// other EventIssueReviewError emitters (Flutter's `_errorDetails` and
+	// the detail toast both read it); `reason` is a machine-readable cause
+	// kept distinct so future UI work can render reason-specific copy
+	// without parsing the human string (#483).
+	p.publish(sse.EventIssueReviewError, map[string]any{
 		"issue_id": issueID, "number": issue.Number, "repo": issue.Repo,
-		"mode": "auto_implement_no_changes", "post_ok": postErr == nil,
+		"reason":  "auto_implement_no_changes",
+		"post_ok": postErr == nil,
+		"error":   "Agent left the working tree unchanged; post a retry marker comment to retry, or close the issue.",
 	})
 	slog.Info("issues pipeline: auto_implement had no changes, posted fallback comment",
 		"repo", issue.Repo, "number", issue.Number, "posted", postErr == nil)
 	return rev, nil
+}
+
+// ensureAutoImplementWritePerms returns opts with a sane default permission /
+// approval flag for the auto_implement path when the operator has not set one.
+// Without this, the daemon spawns the CLI in a mode where Edit/Write tool
+// calls require a human prompt — in non-interactive `-p` mode they simply
+// don't fire, the CLI exits cleanly, and `git status` shows a clean tree, so
+// every issue degrades to the no-changes fallback comment (#433). Any
+// explicit operator setting wins; this only fills the gap when *nothing* is
+// configured.
+//
+// gemini has no equivalent non-interactive write flag today: callers must
+// configure --include-directories plus an approval bypass in extra_flags
+// themselves. We log a warn so the operator sees why writes are no-op.
+func ensureAutoImplementWritePerms(cli string, opts executor.ExecOptions) executor.ExecOptions {
+	switch cli {
+	case "claude":
+		if strings.TrimSpace(opts.PermissionMode) == "" && !opts.DangerouslySkipPerms {
+			opts.PermissionMode = "acceptEdits"
+			slog.Info("issues pipeline: defaulting claude permission_mode to acceptEdits for auto_implement",
+				"cli", cli)
+		}
+	case "codex":
+		if strings.TrimSpace(opts.ApprovalMode) == "" {
+			opts.ApprovalMode = "never"
+			slog.Info("issues pipeline: defaulting codex approval_mode to never for auto_implement",
+				"cli", cli)
+		}
+	case "gemini":
+		slog.Warn("issues pipeline: gemini has no built-in write-permission default; "+
+			"configure approval bypass via extra_flags or expect no-changes runs",
+			"cli", cli)
+	}
+	return opts
+}
+
+func (p *Pipeline) recordAutoImplementFailure(issueID int64, cli, summary string) {
+	if p == nil || p.store == nil {
+		return
+	}
+	if strings.TrimSpace(cli) == "" {
+		cli = "unknown"
+	}
+	failedRev := &store.IssueReview{
+		IssueID:     issueID,
+		CLIUsed:     cli,
+		Summary:     summary,
+		Triage:      "{}",
+		Suggestions: "[]",
+		ActionTaken: "auto_implement_failed",
+		CreatedAt:   time.Now().UTC(),
+	}
+	if _, storeErr := p.store.InsertIssueReview(failedRev); storeErr != nil {
+		slog.Warn("issues pipeline: could not record auto_implement failure in store",
+			"issue_id", issueID, "err", storeErr)
+	}
 }
 
 // generatePRDescription invokes the LLM with the implementation diff to
@@ -905,9 +1120,9 @@ func parseIssueResult(data []byte) (*IssueReviewResult, error) {
 // store keeps assignees and labels as JSON arrays (`[]` when empty), matching
 // the schema introduced in #24.
 //
-// The issue's processing mode (review_only vs develop) is intentionally not
-// part of store.Issue — the issues table captures the issue itself, while
-// the mode of *each triage run* lives on issue_reviews.action_taken. That
+// The issue's processing mode is intentionally not part of store.Issue — the
+// issues table captures the issue itself, while the mode of *each pipeline
+// run* lives on issue_reviews.action_taken. That
 // separation lets a single issue accumulate multiple reviews across mode
 // changes (e.g. initial review_only → later auto_implement in #27) without
 // losing the history.
@@ -934,6 +1149,92 @@ func applyPRMetadata(gh PRMetadataApplier, repo string, prNumber int, opts RunOp
 				"repo", repo, "pr", prNumber, "err", err)
 		}
 	}
+}
+
+func filterSelfPRReviewers(reviewers []string, authUser string) []string {
+	authUser = normalizeGitHubLogin(authUser)
+	if authUser == "" || len(reviewers) == 0 {
+		return reviewers
+	}
+	filtered := make([]string, 0, len(reviewers))
+	skipped := 0
+	for _, reviewer := range reviewers {
+		if strings.EqualFold(normalizeGitHubLogin(reviewer), authUser) {
+			skipped++
+			continue
+		}
+		filtered = append(filtered, reviewer)
+	}
+	if skipped > 0 {
+		slog.Info("issues pipeline: self reviewer skipped on auto-created PR", "count", skipped, "user", authUser)
+	}
+	return filtered
+}
+
+func resolveAutoImplementPRAssignee(issue *github.Issue, opts RunOptions) string {
+	if assignee := normalizeGitHubLogin(opts.PRAssignee); assignee != "" {
+		return assignee
+	}
+	if issue == nil {
+		return ""
+	}
+	assignees := issue.AssigneeLogins()
+	if len(assignees) != 1 {
+		return ""
+	}
+	return normalizeGitHubLogin(assignees[0])
+}
+
+// IssueLabelCatalog is optionally implemented by GitHub clients that can
+// inspect/create repository labels. Tests and custom clients can omit it; the
+// pipeline still attempts AddLabels and treats failures as non-fatal.
+type IssueLabelCatalog interface {
+	FetchLabels(repo string) ([]string, error)
+	CreateLabel(repo, name, color, description string) error
+}
+
+func applyIssueTriageMetadata(gh issueGitHub, repo string, number int, r *IssueReviewResult) {
+	if r == nil {
+		return
+	}
+	if label := strings.TrimSpace(r.Triage.PriorityLabel); label != "" {
+		label = ensureIssueLabel(gh, repo, label, r.Severity)
+		if err := gh.AddLabels(repo, number, []string{label}); err != nil {
+			slog.Warn("issues pipeline: add priority label failed",
+				"repo", repo, "issue", number, "label", label, "err", err)
+		}
+	}
+	if assignee := strings.TrimSpace(r.Triage.AssignedAssignee); assignee != "" {
+		if err := gh.SetAssignees(repo, number, []string{assignee}); err != nil {
+			slog.Warn("issues pipeline: set issue assignee failed",
+				"repo", repo, "issue", number, "assignee", assignee, "err", err)
+		}
+	}
+}
+
+func ensureIssueLabel(gh issueGitHub, repo, label, severity string) string {
+	catalog, ok := gh.(IssueLabelCatalog)
+	if !ok {
+		slog.Warn("issues pipeline: label catalog unavailable; trying priority label directly",
+			"repo", repo, "label", label)
+		return label
+	}
+	labels, err := catalog.FetchLabels(repo)
+	if err != nil {
+		slog.Warn("issues pipeline: fetch labels failed; trying priority label directly",
+			"repo", repo, "label", label, "err", err)
+		return label
+	}
+	for _, existing := range labels {
+		if strings.EqualFold(existing, label) {
+			return existing
+		}
+	}
+	if err := catalog.CreateLabel(repo, label, priorityLabelColor(severity), "Heimdallm triage priority"); err != nil {
+		slog.Warn("issues pipeline: create priority label failed; trying to apply anyway",
+			"repo", repo, "label", label, "err", err)
+	}
+	return label
 }
 
 // extractSeverity pulls the severity string from a triage JSON blob.
@@ -1010,11 +1311,37 @@ func BuildMarkdownComment(r *IssueReviewResult) string {
 	if r.Triage.Severity != "" {
 		sb.WriteString(fmt.Sprintf("- **Suggested severity:** %s\n", r.Triage.Severity))
 	}
+	if r.Triage.PriorityLabel != "" {
+		sb.WriteString(fmt.Sprintf("- **Priority label:** %s\n", r.Triage.PriorityLabel))
+	}
+	if r.Triage.AffectedArea != "" {
+		sb.WriteString(fmt.Sprintf("- **Likely affected area:** %s\n", r.Triage.AffectedArea))
+	}
+	if len(r.Triage.AffectedPaths) > 0 {
+		sb.WriteString(fmt.Sprintf("- **Affected paths:** %s\n", strings.Join(r.Triage.AffectedPaths, ", ")))
+	}
+	if r.Triage.AssignedAssignee != "" {
+		sb.WriteString(fmt.Sprintf("- **Assigned owner:** @%s\n", strings.TrimLeft(r.Triage.AssignedAssignee, "@")))
+	} else if r.Triage.TentativeAssignee != "" {
+		sb.WriteString(fmt.Sprintf("- **Tentative owner:** @%s\n", strings.TrimLeft(r.Triage.TentativeAssignee, "@")))
+	}
 	if r.Triage.SuggestedAssignee != "" {
 		// Strip any leading '@' the LLM may have included so the template
 		// does not render a double '@@alice' that pings nobody.
 		assignee := strings.TrimLeft(r.Triage.SuggestedAssignee, "@")
 		sb.WriteString(fmt.Sprintf("- **Suggested assignee:** @%s\n", assignee))
+	}
+	if r.Triage.AssigneeReason != "" {
+		sb.WriteString(fmt.Sprintf("- **Owner rationale:** %s\n", r.Triage.AssigneeReason))
+	}
+	if r.Triage.AssigneeConfidence != "" {
+		sb.WriteString(fmt.Sprintf("- **Owner confidence:** %s\n", r.Triage.AssigneeConfidence))
+	}
+	if len(r.Triage.AssigneeEvidence) > 0 {
+		sb.WriteString("- **Owner evidence:**\n")
+		for _, ev := range r.Triage.AssigneeEvidence {
+			sb.WriteString(fmt.Sprintf("  - %s\n", ev))
+		}
 	}
 	sb.WriteString("\n")
 

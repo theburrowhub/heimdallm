@@ -30,6 +30,24 @@ func (s *Store) ClaimInFlightReview(prID int64, headSHA string) (bool, error) {
 	return n == 1, nil
 }
 
+// ReviewInFlight reports whether (prID, headSHA) is currently claimed. The PR
+// ID must use the same namespace as ClaimInFlightReview; the daemon passes the
+// GitHub PR ID for poll-driven reviews.
+func (s *Store) ReviewInFlight(prID int64, headSHA string) (bool, error) {
+	if headSHA == "" {
+		return false, nil
+	}
+	var n int
+	err := s.db.QueryRow(
+		"SELECT COUNT(*) FROM reviews_in_flight WHERE pr_id = ? AND head_sha = ?",
+		prID, headSHA,
+	).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("store: review inflight: %w", err)
+	}
+	return n > 0, nil
+}
+
 // ReleaseInFlightReview removes the (prID, headSHA) row so the pair can be
 // re-claimed. Always call in a defer from the caller that successfully
 // claimed; no-op if the row doesn't exist.

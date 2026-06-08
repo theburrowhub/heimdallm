@@ -68,7 +68,10 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
     final previous = _config;
     setState(() => _config = updated);
     _debounce?.cancel();
-    _debounce = Timer(const Duration(milliseconds: 800), () => _autoSave(previous));
+    _debounce = Timer(
+      const Duration(milliseconds: 800),
+      () => _autoSave(previous),
+    );
   }
 
   Future<void> _autoSave(RepoConfig previous) async {
@@ -82,18 +85,24 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
 
       final monitoringChanged = previous.isMonitored != _config.isMonitored;
       if (monitoringChanged) {
-        final current = ref.read(configNotifierProvider).valueOrNull;
+        final current = ref.read(configNotifierProvider).value;
         if (current != null) {
-          final updatedRepos = Map<String, RepoConfig>.from(current.repoConfigs);
+          final updatedRepos = Map<String, RepoConfig>.from(
+            current.repoConfigs,
+          );
           updatedRepos[widget.repoName] = _config;
-          final monitored = updatedRepos.entries
-              .where((e) => e.value.isMonitored)
-              .map((e) => e.key)
-              .toList()..sort();
-          final nonMonitored = updatedRepos.entries
-              .where((e) => !e.value.isMonitored)
-              .map((e) => e.key)
-              .toList()..sort();
+          final monitored =
+              updatedRepos.entries
+                  .where((e) => e.value.isMonitored)
+                  .map((e) => e.key)
+                  .toList()
+                ..sort();
+          final nonMonitored =
+              updatedRepos.entries
+                  .where((e) => !e.value.isMonitored)
+                  .map((e) => e.key)
+                  .toList()
+                ..sort();
           lastResponse = await api.patchConfig({
             'github': {
               'repositories': monitored,
@@ -104,7 +113,9 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
       }
 
       if (lastResponse != null) {
-        ref.read(configNotifierProvider.notifier).updateFromServer(lastResponse);
+        ref
+            .read(configNotifierProvider.notifier)
+            .updateFromServer(lastResponse);
       }
       _previousConfig = _config;
       if (mounted) showToast(context, 'Saved');
@@ -120,7 +131,8 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
       ref.read(configNotifierProvider.notifier).updateFromServer(freshJson);
       final freshConfig = AppConfig.fromJson(freshJson);
       setState(() {
-        _config = freshConfig.repoConfigs[widget.repoName] ?? const RepoConfig();
+        _config =
+            freshConfig.repoConfigs[widget.repoName] ?? const RepoConfig();
         _previousConfig = _config;
       });
       if (mounted) showToast(context, 'Reset to global');
@@ -131,14 +143,33 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
 
   Map<String, dynamic> _computeRepoDiff(RepoConfig old, RepoConfig updated) {
     final diff = <String, dynamic>{};
-    if (old.aiPrimary != updated.aiPrimary) diff['primary'] = updated.aiPrimary ?? '';
-    if (old.aiFallback != updated.aiFallback) diff['fallback'] = updated.aiFallback ?? '';
-    if (old.reviewMode != updated.reviewMode) diff['review_mode'] = updated.reviewMode ?? '';
-    if (old.promptId != updated.promptId) diff['prompt'] = updated.promptId ?? '';
-    if (old.localDir != updated.localDir) diff['local_dir'] = updated.localDir ?? '';
-    if (old.prAssignee != updated.prAssignee) diff['pr_assignee'] = updated.prAssignee ?? '';
-    if (old.prDraft != updated.prDraft && updated.prDraft != null) diff['pr_draft'] = updated.prDraft!;
-    if (old.developPromptId != updated.developPromptId) diff['implement_prompt'] = updated.developPromptId ?? '';
+    if (old.aiPrimary != updated.aiPrimary) {
+      diff['primary'] = updated.aiPrimary ?? '';
+    }
+    if (old.aiFallback != updated.aiFallback) {
+      diff['fallback'] = updated.aiFallback ?? '';
+    }
+    if (old.reviewMode != updated.reviewMode) {
+      diff['review_mode'] = updated.reviewMode ?? '';
+    }
+    if (old.promptId != updated.promptId) {
+      diff['prompt'] = updated.promptId ?? '';
+    }
+    if (old.localDir != updated.localDir) {
+      diff['local_dir'] = updated.localDir ?? '';
+    }
+    if (old.prAssignee != updated.prAssignee) {
+      diff['pr_assignee'] = updated.prAssignee ?? '';
+    }
+    if (old.prDraft != updated.prDraft && updated.prDraft != null) {
+      diff['pr_draft'] = updated.prDraft!;
+    }
+    if (old.developPromptId != updated.developPromptId) {
+      diff['implement_prompt'] = updated.developPromptId ?? '';
+    }
+    if (old.issuePromptId != updated.issuePromptId) {
+      diff['issue_prompt'] = updated.issuePromptId ?? '';
+    }
 
     if (!_listsEqual(old.prReviewers, updated.prReviewers)) {
       diff['pr_reviewers'] = updated.prReviewers ?? <String>[];
@@ -160,20 +191,17 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
     if (old.issueDefaultAction != updated.issueDefaultAction) {
       itDiff['default_action'] = updated.issueDefaultAction ?? '';
     }
-    if (old.issuePromptId != updated.issuePromptId) {
-      itDiff['issue_prompt'] = updated.issuePromptId ?? '';
-    }
     if (!_listsEqual(old.reviewOnlyLabels, updated.reviewOnlyLabels)) {
       itDiff['review_only_labels'] = updated.reviewOnlyLabels ?? <String>[];
+    }
+    if (!_listsEqual(old.refinementLabels, updated.refinementLabels)) {
+      itDiff['refinement_labels'] = updated.refinementLabels ?? <String>[];
     }
     if (!_listsEqual(old.skipLabels, updated.skipLabels)) {
       itDiff['skip_labels'] = updated.skipLabels ?? <String>[];
     }
     if (!_listsEqual(old.developLabels, updated.developLabels)) {
       itDiff['develop_labels'] = updated.developLabels ?? <String>[];
-    }
-    if (!_listsEqual(old.issueOrganizations, updated.issueOrganizations)) {
-      itDiff['organizations'] = updated.issueOrganizations ?? <String>[];
     }
     if (!_listsEqual(old.issueAssignees, updated.issueAssignees)) {
       itDiff['assignees'] = updated.issueAssignees ?? <String>[];
@@ -197,15 +225,9 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
 
   String _joinList(List<String>? list) => list?.join(', ') ?? '';
 
-  List<String>? _parseList(String? value) {
-    if (value == null) return null;
-    final parsed = value
-        .split(',')
-        .map((s) => s.trim())
-        .where((s) => s.isNotEmpty)
-        .toList();
-    return parsed.isEmpty ? null : parsed;
-  }
+  List<String> _mergeOptions(List<String> first, List<String> second) =>
+      ({...first, ...second}.where((v) => v.trim().isNotEmpty).toList()
+        ..sort());
 
   // ── Section card ─────────────────────────────────────────────────────────────
 
@@ -250,18 +272,22 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
         title: Text(widget.repoName),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
-          onPressed: () =>
-              context.canPop() ? context.pop() : context.go('/'),
+          onPressed: () => context.canPop() ? context.pop() : context.go('/'),
         ),
       ),
       body: configAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
-        error: (_, __) =>
-            const Center(child: Text('Could not load config')),
+        error: (_, _) => const Center(child: Text('Could not load config')),
         data: (appConfig) {
           _initFrom(appConfig);
           final prompts =
-              ref.watch(agentsProvider).valueOrNull ?? <ReviewPrompt>[];
+              ref.watch(agentsProvider).value ?? <ReviewPrompt>[];
+          final orgName = widget.repoName.contains('/')
+              ? widget.repoName.split('/').first
+              : widget.repoName;
+          final orgConfig = appConfig.orgConfigs[orgName];
+          String source(bool hasOrgValue) =>
+              hasOrgValue ? 'org: $orgName' : 'global';
 
           return SingleChildScrollView(
             padding: const EdgeInsets.all(16),
@@ -269,114 +295,169 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
               children: [
                 // ── Section 1: General ─────────────────────────────────
                 _sectionCard('General', [
-                  const Text('Local directory',
-                      style: TextStyle(fontSize: 12, color: Colors.grey)),
+                  const Text(
+                    'Local directory',
+                    style: TextStyle(fontSize: 12, color: Colors.grey),
+                  ),
                   const SizedBox(height: 4),
                   Text(
                     'When set, the AI agent runs inside this directory and can read all project files.',
-                    style: TextStyle(
-                        fontSize: 11, color: Colors.grey.shade600),
+                    style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
                   ),
                   const SizedBox(height: 8),
                   _LocalDirField(
-                    value: _config.localDir ?? '',
+                    value: _config.localDir ?? orgConfig?.localDir ?? '',
+                    sourceLabel: _config.localDir != null
+                        ? 'repo override'
+                        : source(orgConfig?.localDir != null),
                     detectedDir: appConfig.localDirsDetected[widget.repoName],
-                    onChanged: (dir) => _update(_config.copyWith(
-                        localDir: dir.isEmpty ? null : dir)),
+                    onChanged: (dir) => _update(
+                      _config.copyWith(localDir: dir.isEmpty ? null : dir),
+                    ),
                   ),
                 ]),
 
                 // ── Section 2: PR Review ───────────────────────────────
                 _sectionCard('PR Review', [
-                  Row(children: [
-                    const Expanded(
-                      child: Text('Auto-review PRs',
-                          style: TextStyle(fontSize: 13)),
-                    ),
-                    FeatureSwitch(
-                      feature: Feature.prReview,
-                      value: _config.prEnabled ?? false,
-                      onChanged: (v) =>
-                          _update(_config.copyWith(prEnabled: v)),
-                    ),
-                  ]),
+                  Row(
+                    children: [
+                      const Expanded(
+                        child: Text(
+                          'Auto-review PRs',
+                          style: TextStyle(fontSize: 13),
+                        ),
+                      ),
+                      FeatureSwitch(
+                        feature: Feature.prReview,
+                        value: _config.prEnabled ?? false,
+                        onChanged: (v) =>
+                            _update(_config.copyWith(prEnabled: v)),
+                      ),
+                    ],
+                  ),
                   const SizedBox(height: 6),
                   OverrideDropdown(
                     label: 'Primary',
-                    globalValue: appConfig.aiPrimary,
+                    globalValue: orgConfig?.aiPrimary ?? appConfig.aiPrimary,
+                    inheritedLabel: source(orgConfig?.aiPrimary != null),
                     overrideValue: _config.aiPrimary,
                     options: const ['claude', 'gemini', 'codex'],
-                    onChanged: (v) =>
-                        _update(_config.copyWith(aiPrimary: v)),
+                    onChanged: (v) => _update(_config.copyWith(aiPrimary: v)),
                     onReset: () => _resetField('primary'),
                   ),
                   const SizedBox(height: 10),
                   OverrideDropdown(
                     label: 'Fallback',
-                    globalValue: appConfig.aiFallback.isEmpty
+                    globalValue:
+                        (orgConfig?.aiFallback ?? appConfig.aiFallback).isEmpty
                         ? 'none'
-                        : appConfig.aiFallback,
+                        : (orgConfig?.aiFallback ?? appConfig.aiFallback),
+                    inheritedLabel: source(orgConfig?.aiFallback != null),
                     overrideValue: _config.aiFallback,
                     options: const ['claude', 'gemini', 'codex'],
-                    onChanged: (v) =>
-                        _update(_config.copyWith(aiFallback: v)),
+                    onChanged: (v) => _update(_config.copyWith(aiFallback: v)),
                     onReset: () => _resetField('fallback'),
                   ),
                   const SizedBox(height: 10),
                   OverrideDropdown(
                     label: 'Review mode',
-                    globalValue: appConfig.reviewMode,
+                    globalValue: orgConfig?.reviewMode ?? appConfig.reviewMode,
+                    inheritedLabel: source(orgConfig?.reviewMode != null),
                     overrideValue: _config.reviewMode,
                     options: const ['single', 'multi'],
-                    onChanged: (v) =>
-                        _update(_config.copyWith(reviewMode: v)),
+                    onChanged: (v) => _update(_config.copyWith(reviewMode: v)),
                     onReset: () => _resetField('review_mode'),
                   ),
                   const SizedBox(height: 10),
                   OverrideDropdown(
                     label: 'Prompt',
-                    globalValue: 'default',
+                    globalValue: orgConfig?.promptId ?? 'default',
+                    inheritedLabel: source(orgConfig?.promptId != null),
                     overrideValue: _config.promptId,
                     options: prompts.map((p) => p.id).toList(),
-                    onChanged: (v) =>
-                        _update(_config.copyWith(promptId: v)),
+                    onChanged: (v) => _update(_config.copyWith(promptId: v)),
                     onReset: () => _resetField('prompt'),
                   ),
                 ], accent: FeaturePalette.prReview),
 
                 // ── Section 3: Issue Tracking ──────────────────────────
                 _sectionCard('Issue Tracking', [
-                  Row(children: [
-                    const Expanded(
-                      child: Text('Triage issues',
-                          style: TextStyle(fontSize: 13)),
-                    ),
-                    FeatureSwitch(
-                      feature: Feature.issueTracking,
-                      value: _config.itEnabled ?? false,
-                      onChanged: (v) =>
-                          _update(_config.copyWith(itEnabled: v)),
-                    ),
-                  ]),
+                  Row(
+                    children: [
+                      const Expanded(
+                        child: Text(
+                          'Triage issues',
+                          style: TextStyle(fontSize: 13),
+                        ),
+                      ),
+                      FeatureSwitch(
+                        feature: Feature.issueTracking,
+                        value:
+                            _config.itEnabled ??
+                            orgConfig?.itEnabled ??
+                            appConfig.issueTracking.enabled,
+                        onChanged: (v) =>
+                            _update(_config.copyWith(itEnabled: v)),
+                      ),
+                    ],
+                  ),
                   const SizedBox(height: 6),
                   AutocompleteChipField(
                     label: 'Review-only labels',
-                    helper: 'Issues with these labels get a review comment only',
-                    selectedValues: _config.reviewOnlyLabels ?? appConfig.issueTracking.reviewOnlyLabels,
+                    helper:
+                        'Issues with these labels get a review comment only',
+                    selectedValues:
+                        _config.reviewOnlyLabels ??
+                        orgConfig?.reviewOnlyLabels ??
+                        appConfig.issueTracking.reviewOnlyLabels,
                     availableOptions: _repoLabels,
                     isOverridden: _config.reviewOnlyLabels != null,
-                    globalHint: _joinList(appConfig.issueTracking.reviewOnlyLabels),
-                    onChanged: (v) => _update(_config.copyWith(reviewOnlyLabels: v)),
-                    onReset: () => _resetField('issue_tracking/review_only_labels'),
+                    inheritedLabel: source(orgConfig?.reviewOnlyLabels != null),
+                    globalHint: _joinList(
+                      orgConfig?.reviewOnlyLabels ??
+                          appConfig.issueTracking.reviewOnlyLabels,
+                    ),
+                    onChanged: (v) =>
+                        _update(_config.copyWith(reviewOnlyLabels: v)),
+                    onReset: () =>
+                        _resetField('issue_tracking/review_only_labels'),
+                  ),
+                  const SizedBox(height: 10),
+                  AutocompleteChipField(
+                    label: 'Refinement labels',
+                    helper:
+                        'Issues with these labels get a deep implementation plan',
+                    selectedValues:
+                        _config.refinementLabels ??
+                        orgConfig?.refinementLabels ??
+                        appConfig.issueTracking.refinementLabels,
+                    availableOptions: _repoLabels,
+                    isOverridden: _config.refinementLabels != null,
+                    inheritedLabel: source(orgConfig?.refinementLabels != null),
+                    globalHint: _joinList(
+                      orgConfig?.refinementLabels ??
+                          appConfig.issueTracking.refinementLabels,
+                    ),
+                    onChanged: (v) =>
+                        _update(_config.copyWith(refinementLabels: v)),
+                    onReset: () =>
+                        _resetField('issue_tracking/refinement_labels'),
                   ),
                   const SizedBox(height: 10),
                   AutocompleteChipField(
                     label: 'Skip labels',
                     helper: 'Issues with these labels are ignored',
-                    selectedValues: _config.skipLabels ?? appConfig.issueTracking.skipLabels,
+                    selectedValues:
+                        _config.skipLabels ??
+                        orgConfig?.skipLabels ??
+                        appConfig.issueTracking.skipLabels,
                     availableOptions: _repoLabels,
                     isOverridden: _config.skipLabels != null,
-                    globalHint: _joinList(appConfig.issueTracking.skipLabels),
+                    inheritedLabel: source(orgConfig?.skipLabels != null),
+                    globalHint: _joinList(
+                      orgConfig?.skipLabels ??
+                          appConfig.issueTracking.skipLabels,
+                    ),
                     onChanged: (v) => _update(_config.copyWith(skipLabels: v)),
                     onReset: () => _resetField('issue_tracking/skip_labels'),
                   ),
@@ -384,88 +465,123 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                   OverrideDropdown(
                     label: 'Filter mode',
                     globalValue:
+                        orgConfig?.issueFilterMode ??
                         appConfig.issueTracking.filterMode,
+                    inheritedLabel: source(orgConfig?.issueFilterMode != null),
                     overrideValue: _config.issueFilterMode,
                     options: const ['exclusive', 'inclusive'],
-                    onChanged: (v) => _update(
-                        _config.copyWith(issueFilterMode: v)),
+                    onChanged: (v) =>
+                        _update(_config.copyWith(issueFilterMode: v)),
                     onReset: () => _resetField('issue_tracking/filter_mode'),
                   ),
                   const SizedBox(height: 10),
                   OverrideDropdown(
                     label: 'Default action',
                     globalValue:
+                        orgConfig?.issueDefaultAction ??
                         appConfig.issueTracking.defaultAction,
+                    inheritedLabel: source(
+                      orgConfig?.issueDefaultAction != null,
+                    ),
                     overrideValue: _config.issueDefaultAction,
                     options: const ['ignore', 'review_only'],
-                    onChanged: (v) => _update(
-                        _config.copyWith(issueDefaultAction: v)),
+                    onChanged: (v) =>
+                        _update(_config.copyWith(issueDefaultAction: v)),
                     onReset: () => _resetField('issue_tracking/default_action'),
-                  ),
-                  const SizedBox(height: 10),
-                  OverrideTextField(
-                    label: 'Organizations',
-                    helper: 'GitHub org names to filter issues',
-                    globalValue: _joinList(appConfig.issueTracking.organizations),
-                    overrideValue: _config.issueOrganizations?.join(', '),
-                    onChanged: (v) => _update(_config.copyWith(
-                        issueOrganizations: v != null ? _parseList(v) : null)),
                   ),
                   const SizedBox(height: 10),
                   AutocompleteChipField(
                     label: 'Assignees',
                     helper: 'Only process issues assigned to these users',
-                    selectedValues: _config.issueAssignees ?? appConfig.issueTracking.assignees,
-                    availableOptions: _repoCollaborators,
+                    selectedValues:
+                        _config.issueAssignees ??
+                        orgConfig?.issueAssignees ??
+                        appConfig.issueTracking.assignees,
+                    availableOptions: _mergeOptions(
+                      _repoCollaborators,
+                      appConfig.knownGitHubUsers,
+                    ),
                     isOverridden: _config.issueAssignees != null,
-                    globalHint: _joinList(appConfig.issueTracking.assignees),
-                    onChanged: (v) => _update(_config.copyWith(issueAssignees: v)),
+                    inheritedLabel: source(orgConfig?.issueAssignees != null),
+                    globalHint: _joinList(
+                      orgConfig?.issueAssignees ??
+                          appConfig.issueTracking.assignees,
+                    ),
+                    onChanged: (v) =>
+                        _update(_config.copyWith(issueAssignees: v)),
                     onReset: () => _resetField('issue_tracking/assignees'),
                   ),
                   const SizedBox(height: 10),
                   OverrideDropdown(
                     label: 'Prompt',
-                    globalValue: 'default',
+                    globalValue:
+                        orgConfig?.issuePromptId ??
+                        (appConfig.globalIssuePrompt.isEmpty
+                            ? 'default'
+                            : appConfig.globalIssuePrompt),
+                    inheritedLabel: source(orgConfig?.issuePromptId != null),
                     overrideValue: _config.issuePromptId,
                     options: prompts.map((p) => p.id).toList(),
                     onChanged: (v) =>
                         _update(_config.copyWith(issuePromptId: v)),
-                    onReset: () => _resetField('issue_tracking/issue_prompt'),
+                    onReset: () => _resetField('issue_prompt'),
                   ),
                 ], accent: FeaturePalette.issueTracking),
 
                 // ── Section 4: Develop ─────────────────────────────────
                 _sectionCard('Develop', [
-                  Row(children: [
-                    const Expanded(
-                      child: Text('Auto-implement issues',
-                          style: TextStyle(fontSize: 13)),
-                    ),
-                    FeatureSwitch(
-                      feature: Feature.develop,
-                      value: _config.devEnabled ?? false,
-                      onChanged: (v) =>
-                          _update(_config.copyWith(devEnabled: v)),
-                    ),
-                  ]),
+                  Row(
+                    children: [
+                      const Expanded(
+                        child: Text(
+                          'Auto-implement issues',
+                          style: TextStyle(fontSize: 13),
+                        ),
+                      ),
+                      FeatureSwitch(
+                        feature: Feature.develop,
+                        value:
+                            _config.devEnabled ??
+                            orgConfig?.devEnabled ??
+                            false,
+                        onChanged: (v) =>
+                            _update(_config.copyWith(devEnabled: v)),
+                      ),
+                    ],
+                  ),
                   const SizedBox(height: 6),
                   AutocompleteChipField(
                     label: 'Develop labels',
                     helper: 'Issues with these labels get a branch + PR',
-                    selectedValues: _config.developLabels ?? appConfig.issueTracking.developLabels,
+                    selectedValues:
+                        _config.developLabels ??
+                        orgConfig?.developLabels ??
+                        appConfig.issueTracking.developLabels,
                     availableOptions: _repoLabels,
                     isOverridden: _config.developLabels != null,
-                    globalHint: _joinList(appConfig.issueTracking.developLabels),
-                    onChanged: (v) => _update(_config.copyWith(developLabels: v)),
+                    inheritedLabel: source(orgConfig?.developLabels != null),
+                    globalHint: _joinList(
+                      orgConfig?.developLabels ??
+                          appConfig.issueTracking.developLabels,
+                    ),
+                    onChanged: (v) =>
+                        _update(_config.copyWith(developLabels: v)),
                     onReset: () => _resetField('issue_tracking/develop_labels'),
                   ),
                   const SizedBox(height: 10),
                   AutocompleteChipField(
                     label: 'PR Reviewers',
                     helper: 'GitHub usernames to request review',
-                    selectedValues: _config.prReviewers ?? [],
+                    selectedValues:
+                        _config.prReviewers ??
+                        orgConfig?.prReviewers ??
+                        appConfig.globalPRReviewers,
                     availableOptions: _repoCollaborators,
                     isOverridden: _config.prReviewers != null,
+                    inheritedLabel: source(orgConfig?.prReviewers != null),
+                    globalHint: _joinList(
+                      orgConfig?.prReviewers ?? appConfig.globalPRReviewers,
+                    ),
                     onChanged: (v) => _update(_config.copyWith(prReviewers: v)),
                     onReset: () => _resetField('pr_reviewers'),
                   ),
@@ -473,37 +589,64 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                   AutocompleteChipField(
                     label: 'PR Assignee',
                     helper: 'GitHub username to assign to PRs',
-                    selectedValues: _config.prAssignee != null ? [_config.prAssignee!] : [],
+                    selectedValues: _config.prAssignee != null
+                        ? [_config.prAssignee!]
+                        : (orgConfig?.prAssignee != null
+                              ? [orgConfig!.prAssignee!]
+                              : (appConfig.globalPRAssignee.isNotEmpty
+                                    ? [appConfig.globalPRAssignee]
+                                    : [])),
                     availableOptions: _repoCollaborators,
                     isOverridden: _config.prAssignee != null,
-                    onChanged: (v) => _update(_config.copyWith(
-                        prAssignee: v != null && v.isNotEmpty ? v.first : null)),
+                    inheritedLabel: source(orgConfig?.prAssignee != null),
+                    globalHint:
+                        orgConfig?.prAssignee ?? appConfig.globalPRAssignee,
+                    onChanged: (v) => _update(
+                      _config.copyWith(
+                        prAssignee: v != null && v.isNotEmpty ? v.first : null,
+                      ),
+                    ),
                     onReset: () => _resetField('pr_assignee'),
                   ),
                   const SizedBox(height: 10),
                   AutocompleteChipField(
                     label: 'PR Labels',
                     helper: 'Labels to add to PRs',
-                    selectedValues: _config.prLabels ?? [],
+                    selectedValues:
+                        _config.prLabels ??
+                        orgConfig?.prLabels ??
+                        appConfig.globalPRLabels,
                     availableOptions: _repoLabels,
                     isOverridden: _config.prLabels != null,
+                    inheritedLabel: source(orgConfig?.prLabels != null),
+                    globalHint: _joinList(
+                      orgConfig?.prLabels ?? appConfig.globalPRLabels,
+                    ),
                     onChanged: (v) => _update(_config.copyWith(prLabels: v)),
                     onReset: () => _resetField('pr_labels'),
                   ),
                   const SizedBox(height: 10),
                   OverrideDropdown(
                     label: 'Draft',
-                    globalValue: 'false',
+                    globalValue: (orgConfig?.prDraft ?? appConfig.globalPRDraft)
+                        .toString(),
+                    inheritedLabel: source(orgConfig?.prDraft != null),
                     overrideValue: _config.prDraft?.toString(),
                     options: const ['true', 'false'],
-                    onChanged: (v) => _update(_config.copyWith(
-                        prDraft: v != null ? v == 'true' : null)),
+                    onChanged: (v) => _update(
+                      _config.copyWith(prDraft: v != null ? v == 'true' : null),
+                    ),
                     onReset: () => _resetField('pr_draft'),
                   ),
                   const SizedBox(height: 10),
                   OverrideDropdown(
                     label: 'Prompt',
-                    globalValue: 'default',
+                    globalValue:
+                        orgConfig?.developPromptId ??
+                        (appConfig.globalImplementPrompt.isEmpty
+                            ? 'default'
+                            : appConfig.globalImplementPrompt),
+                    inheritedLabel: source(orgConfig?.developPromptId != null),
                     overrideValue: _config.developPromptId,
                     options: prompts.map((p) => p.id).toList(),
                     onChanged: (v) =>
@@ -524,7 +667,9 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
 
 class _LocalDirField extends StatefulWidget {
   final String value;
+  final String sourceLabel;
   final ValueChanged<String> onChanged;
+
   /// Non-null when the daemon detected a `/home/heimdallm/repos/<name>` path
   /// for this repo (HEIMDALLM_LOCAL_DIR_BASE is mounted and the repo is
   /// visible there). Shown
@@ -533,6 +678,7 @@ class _LocalDirField extends StatefulWidget {
   final String? detectedDir;
   const _LocalDirField({
     required this.value,
+    required this.sourceLabel,
     required this.onChanged,
     this.detectedDir,
   });
@@ -551,13 +697,21 @@ class _LocalDirFieldState extends State<_LocalDirField> {
   }
 
   @override
+  void didUpdateWidget(_LocalDirField oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.value != oldWidget.value && _ctrl.text != widget.value) {
+      _ctrl.text = widget.value;
+    }
+  }
+
+  @override
   void dispose() {
     _ctrl.dispose();
     super.dispose();
   }
 
   Future<void> _pick() async {
-    final dir = await FilePicker.platform.getDirectoryPath(
+    final dir = await FilePicker.getDirectoryPath(
       dialogTitle: 'Select local repository directory',
       lockParentWindow: true,
     );
@@ -575,76 +729,92 @@ class _LocalDirFieldState extends State<_LocalDirField> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(children: [
-          Expanded(
-            child: TextFormField(
-              controller: _ctrl,
-              decoration: InputDecoration(
-                hintText: hintText,
-                hintStyle: detected != null && detected.isNotEmpty
-                    ? TextStyle(
-                        color: Colors.blue.shade400,
-                        fontStyle: FontStyle.italic,
-                      )
-                    : null,
-                border: const OutlineInputBorder(),
-                isDense: true,
+        Padding(
+          padding: const EdgeInsets.only(bottom: 6),
+          child: Text(
+            widget.sourceLabel,
+            style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+          ),
+        ),
+        Row(
+          children: [
+            Expanded(
+              child: TextFormField(
+                controller: _ctrl,
+                decoration: InputDecoration(
+                  hintText: hintText,
+                  hintStyle: detected != null && detected.isNotEmpty
+                      ? TextStyle(
+                          color: Colors.blue.shade400,
+                          fontStyle: FontStyle.italic,
+                        )
+                      : null,
+                  border: const OutlineInputBorder(),
+                  isDense: true,
+                ),
+                onChanged: widget.onChanged,
               ),
-              onChanged: widget.onChanged,
             ),
-          ),
-      // Browse button is desktop-only — browsers can't expose native
-      // filesystem paths to the daemon. On web the operator types a
-      // path that exists inside the daemon container (e.g.
-      // /home/heimdallm/repos/foo if they've bind-mounted their host
-      // repos root via HEIMDALLM_LOCAL_DIR_BASE).
-      if (!kIsWeb) ...[
-        const SizedBox(width: 8),
-        OutlinedButton.icon(
-          icon: const Icon(Icons.folder_open, size: 16),
-          label: const Text('Browse'),
-          onPressed: _pick,
-          style: OutlinedButton.styleFrom(
-            padding:
-                const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-          ),
+            // Browse button is desktop-only — browsers can't expose native
+            // filesystem paths to the daemon. On web the operator types a
+            // path that exists inside the daemon container (e.g.
+            // /home/heimdallm/repos/foo if they've bind-mounted their host
+            // repos root via HEIMDALLM_LOCAL_DIR_BASE).
+            if (!kIsWeb) ...[
+              const SizedBox(width: 8),
+              OutlinedButton.icon(
+                icon: const Icon(Icons.folder_open, size: 16),
+                label: const Text('Browse'),
+                onPressed: _pick,
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 12,
+                  ),
+                ),
+              ),
+            ] else ...[
+              const SizedBox(width: 8),
+              Tooltip(
+                message:
+                    'The daemon runs in a container, so paths here refer to '
+                    'directories inside that container — typically a bind-mount '
+                    'like /home/heimdallm/repos/<name>. Enter the path manually.',
+                child: Icon(
+                  Icons.info_outline,
+                  size: 16,
+                  color: Colors.grey.shade500,
+                ),
+              ),
+            ],
+            if (_ctrl.text.isNotEmpty) ...[
+              const SizedBox(width: 4),
+              IconButton(
+                icon: const Icon(Icons.clear, size: 16),
+                tooltip: 'Clear',
+                onPressed: () {
+                  setState(() => _ctrl.clear());
+                  widget.onChanged('');
+                },
+              ),
+            ],
+          ],
         ),
-      ] else ...[
-        const SizedBox(width: 8),
-        Tooltip(
-          message: 'The daemon runs in a container, so paths here refer to '
-              'directories inside that container — typically a bind-mount '
-              'like /home/heimdallm/repos/<name>. Enter the path manually.',
-          child: Icon(Icons.info_outline,
-              size: 16, color: Colors.grey.shade500),
-        ),
-      ],
-      if (_ctrl.text.isNotEmpty) ...[
-        const SizedBox(width: 4),
-        IconButton(
-          icon: const Icon(Icons.clear, size: 16),
-          tooltip: 'Clear',
-          onPressed: () {
-            setState(() => _ctrl.clear());
-            widget.onChanged('');
-          },
-        ),
-      ],
-        ]),
         if (detected != null && detected.isNotEmpty && _ctrl.text.isEmpty) ...[
           const SizedBox(height: 6),
-          Row(children: [
-            Icon(Icons.auto_awesome, size: 12, color: Colors.blue.shade400),
-            const SizedBox(width: 4),
-            Expanded(
-              child: Text(
-                'Leave empty to use the auto-detected path above. '
-                'Type a different path to override.',
-                style: TextStyle(
-                    fontSize: 11, color: Colors.blue.shade400),
+          Row(
+            children: [
+              Icon(Icons.auto_awesome, size: 12, color: Colors.blue.shade400),
+              const SizedBox(width: 4),
+              Expanded(
+                child: Text(
+                  'Leave empty to use the auto-detected path above. '
+                  'Type a different path to override.',
+                  style: TextStyle(fontSize: 11, color: Colors.blue.shade400),
+                ),
               ),
-            ),
-          ]),
+            ],
+          ),
         ],
       ],
     );

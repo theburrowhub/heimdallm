@@ -89,13 +89,12 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
       return result ?? false;
     }
 
-    bool hasDir(RepoConfig c) =>
-        c.localDir != null && c.localDir!.isNotEmpty;
+    bool hasDir(RepoConfig c) => c.localDir != null && c.localDir!.isNotEmpty;
 
     return {
-      Feature.prReview:      agg((c) => c.prEnabled ?? false),
+      Feature.prReview: agg((c) => c.prEnabled ?? false),
       Feature.issueTracking: agg((c) => c.itEnabled ?? false),
-      Feature.develop:       agg((c) => (c.devEnabled ?? false) && hasDir(c)),
+      Feature.develop: agg((c) => (c.devEnabled ?? false) && hasDir(c)),
     };
   }
 
@@ -114,9 +113,9 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
           continue;
         }
         _repoConfigs[r] = switch (f) {
-          Feature.prReview      => c.copyWith(prEnabled: enable),
+          Feature.prReview => c.copyWith(prEnabled: enable),
           Feature.issueTracking => c.copyWith(itEnabled: enable),
-          Feature.develop       => c.copyWith(devEnabled: enable),
+          Feature.develop => c.copyWith(devEnabled: enable),
         };
       }
     });
@@ -158,7 +157,7 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
   }
 
   Future<void> _autoSave() async {
-    final current = ref.read(configNotifierProvider).valueOrNull;
+    final current = ref.read(configNotifierProvider).value;
     if (current == null) return;
     if (mounted) setState(() => _syncStatus = _SyncStatus.saving);
     final updated = current.copyWith(repoConfigs: Map.from(_repoConfigs));
@@ -167,8 +166,9 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
       if (!mounted) return;
       setState(() => _syncStatus = _SyncStatus.saved);
       _savedResetTimer?.cancel();
-      _savedResetTimer = Timer(const Duration(seconds: 2),
-          () { if (mounted) setState(() => _syncStatus = _SyncStatus.idle); });
+      _savedResetTimer = Timer(const Duration(seconds: 2), () {
+        if (mounted) setState(() => _syncStatus = _SyncStatus.idle);
+      });
     } catch (e) {
       if (mounted) {
         setState(() => _syncStatus = _SyncStatus.idle);
@@ -183,7 +183,7 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
 
     return configAsync.when(
       loading: () => const Center(child: CircularProgressIndicator()),
-      error: (_, __) => const Center(child: Text('Could not load config')),
+      error: (_, _) => const Center(child: Text('Could not load config')),
       data: (config) {
         _initFrom(config);
 
@@ -197,11 +197,12 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
           });
         // Derive all orgs for the org filter dropdown. Only shown when more
         // than one org has at least one repo.
-        final allOrgs = _repoConfigs.keys
-            .map((r) => r.contains('/') ? r.split('/').first : r)
-            .toSet()
-            .toList()
-          ..sort();
+        final allOrgs =
+            _repoConfigs.keys
+                .map((r) => r.contains('/') ? r.split('/').first : r)
+                .toSet()
+                .toList()
+              ..sort();
 
         final filtered = allRepos.where((r) {
           if (_search.isNotEmpty &&
@@ -263,34 +264,46 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
                       const SizedBox(width: 4),
                       GestureDetector(
                         onTap: () => setState(() => _orgFilter = {}),
-                        child: const Icon(Icons.clear, size: 16, color: Colors.grey),
+                        child: const Icon(
+                          Icons.clear,
+                          size: 16,
+                          color: Colors.grey,
+                        ),
                       ),
                     ],
                     const SizedBox(width: 8),
                   ],
-                  Row(children: [
-                    _ViewToggleButton(
-                      icon: Icons.view_list,
-                      active: _viewMode == 'list',
-                      onTap: () => _setViewMode('list'),
-                      buttonKey: const Key('repos_view_toggle_list'),
-                    ),
-                    _ViewToggleButton(
-                      icon: Icons.grid_view,
-                      active: _viewMode == 'grid',
-                      onTap: () => _setViewMode('grid'),
-                      buttonKey: const Key('repos_view_toggle_grid'),
-                    ),
-                  ]),
+                  Row(
+                    children: [
+                      _ViewToggleButton(
+                        icon: Icons.view_list,
+                        active: _viewMode == 'list',
+                        onTap: () => _setViewMode('list'),
+                        buttonKey: const Key('repos_view_toggle_list'),
+                      ),
+                      _ViewToggleButton(
+                        icon: Icons.grid_view,
+                        active: _viewMode == 'grid',
+                        onTap: () => _setViewMode('grid'),
+                        buttonKey: const Key('repos_view_toggle_grid'),
+                      ),
+                    ],
+                  ),
                   const SizedBox(width: 12),
                   // Auto-save status indicator
                   SizedBox(
-                    width: 22, height: 22,
+                    width: 22,
+                    height: 22,
                     child: switch (_syncStatus) {
-                      _SyncStatus.saving => const CircularProgressIndicator(strokeWidth: 2),
-                      _SyncStatus.saved  => Icon(Icons.cloud_done_outlined,
-                          size: 20, color: Colors.green.shade500),
-                      _SyncStatus.idle   => const SizedBox.shrink(),
+                      _SyncStatus.saving => const CircularProgressIndicator(
+                        strokeWidth: 2,
+                      ),
+                      _SyncStatus.saved => Icon(
+                        Icons.cloud_done_outlined,
+                        size: 20,
+                        color: Colors.green.shade500,
+                      ),
+                      _SyncStatus.idle => const SizedBox.shrink(),
                     },
                   ),
                 ],
@@ -308,25 +321,25 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
               child: filtered.isEmpty
                   ? Center(child: Text(_emptyStateText()))
                   : _viewMode == 'grid'
-                      ? _ReposGrid(
-                          repos: filtered,
-                          configs: _repoConfigs,
-                          appConfig: config,
-                          selected: _selected,
-                          onSelectionToggle: _toggleSelection,
-                          showNewFor: _shouldShowNew,
-                          onDismissNew: _dismissNew,
-                        )
-                      : _RepoListWithSections(
-                          repos: filtered,
-                          configs: _repoConfigs,
-                          appConfig: config,
-                          onChanged: _onChange,
-                          selected: _selected,
-                          onSelectionToggle: _toggleSelection,
-                          showNewFor: _shouldShowNew,
-                          onDismissNew: _dismissNew,
-                        ),
+                  ? _ReposGrid(
+                      repos: filtered,
+                      configs: _repoConfigs,
+                      appConfig: config,
+                      selected: _selected,
+                      onSelectionToggle: _toggleSelection,
+                      showNewFor: _shouldShowNew,
+                      onDismissNew: _dismissNew,
+                    )
+                  : _RepoListWithSections(
+                      repos: filtered,
+                      configs: _repoConfigs,
+                      appConfig: config,
+                      onChanged: _onChange,
+                      selected: _selected,
+                      onSelectionToggle: _toggleSelection,
+                      showNewFor: _shouldShowNew,
+                      onDismissNew: _dismissNew,
+                    ),
             ),
           ],
         );
@@ -385,15 +398,18 @@ class _RepoListWithSectionsState extends ConsumerState<_RepoListWithSections> {
     }
     // Return sorted by org name
     return Map.fromEntries(
-        groups.entries.toList()..sort((a, b) => a.key.compareTo(b.key)));
+      groups.entries.toList()..sort((a, b) => a.key.compareTo(b.key)),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    final monitored =
-        widget.repos.where((r) => widget.configs[r]!.isMonitored).toList();
-    final disabled =
-        widget.repos.where((r) => !widget.configs[r]!.isMonitored).toList();
+    final monitored = widget.repos
+        .where((r) => widget.configs[r]!.isMonitored)
+        .toList();
+    final disabled = widget.repos
+        .where((r) => !widget.configs[r]!.isMonitored)
+        .toList();
 
     return ListView(
       padding: const EdgeInsets.symmetric(vertical: 4),
@@ -427,10 +443,7 @@ class _RepoListWithSectionsState extends ConsumerState<_RepoListWithSections> {
     );
   }
 
-  List<Widget> _buildOrgGroups(
-    String section,
-    List<String> repos,
-  ) {
+  List<Widget> _buildOrgGroups(String section, List<String> repos) {
     final groups = _groupByOrg(repos);
     final items = <Widget>[];
     for (final entry in groups.entries) {
@@ -439,21 +452,31 @@ class _RepoListWithSectionsState extends ConsumerState<_RepoListWithSections> {
       final key = '$section:$org';
       final expanded = _isExpanded(key);
 
-      items.add(_orgHeader(org, orgRepos.length, expanded, () => _toggle(key)));
+      items.add(
+        _orgHeader(
+          org,
+          orgRepos.length,
+          expanded,
+          () => _toggle(key),
+          () => context.push('/orgs/${Uri.encodeComponent(org)}'),
+        ),
+      );
       if (expanded) {
         for (final r in orgRepos) {
-          items.add(RepoListTile(
-            repo: r,
-            config: widget.configs[r]!,
-            appConfig: widget.appConfig,
-            selected: widget.selected.contains(r),
-            showNew: widget.showNewFor(r, widget.configs[r]!),
-            onSelectionToggle: () => widget.onSelectionToggle(r),
-            onTap: () {
-              widget.onDismissNew(r);
-              context.push('/repos/${Uri.encodeComponent(r)}');
-            },
-          ));
+          items.add(
+            RepoListTile(
+              repo: r,
+              config: widget.configs[r]!,
+              appConfig: widget.appConfig,
+              selected: widget.selected.contains(r),
+              showNew: widget.showNewFor(r, widget.configs[r]!),
+              onSelectionToggle: () => widget.onSelectionToggle(r),
+              onTap: () {
+                widget.onDismissNew(r);
+                context.push('/repos/${Uri.encodeComponent(r)}');
+              },
+            ),
+          );
         }
       }
     }
@@ -461,49 +484,80 @@ class _RepoListWithSectionsState extends ConsumerState<_RepoListWithSections> {
   }
 
   Widget _sectionHeader(
-      BuildContext ctx, String label, int count, Color color) {
+    BuildContext ctx,
+    String label,
+    int count,
+    Color color,
+  ) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 14, 16, 4),
-      child: Row(children: [
-        Container(
+      child: Row(
+        children: [
+          Container(
             width: 8,
             height: 8,
-            decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
-        const SizedBox(width: 6),
-        Text(label,
+            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+          ),
+          const SizedBox(width: 6),
+          Text(
+            label,
             style: TextStyle(
-                fontSize: 12,
-                color: Colors.grey.shade400,
-                fontWeight: FontWeight.w600)),
-        const SizedBox(width: 6),
-        Text('$count',
-            style: TextStyle(fontSize: 11, color: Colors.grey.shade500)),
-      ]),
+              fontSize: 12,
+              color: Colors.grey.shade400,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(width: 6),
+          Text(
+            '$count',
+            style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+          ),
+        ],
+      ),
     );
   }
 
   Widget _orgHeader(
-      String org, int count, bool expanded, VoidCallback onTap) {
+    String org,
+    int count,
+    bool expanded,
+    VoidCallback onTap,
+    VoidCallback onConfig,
+  ) {
     return InkWell(
       onTap: onTap,
       child: Padding(
         padding: const EdgeInsets.fromLTRB(24, 6, 16, 2),
-        child: Row(children: [
-          Icon(
-            expanded ? Icons.expand_less : Icons.expand_more,
-            size: 16,
-            color: Colors.grey.shade500,
-          ),
-          const SizedBox(width: 4),
-          Text(org,
+        child: Row(
+          children: [
+            Icon(
+              expanded ? Icons.expand_less : Icons.expand_more,
+              size: 16,
+              color: Colors.grey.shade500,
+            ),
+            const SizedBox(width: 4),
+            Text(
+              org,
               style: TextStyle(
-                  fontSize: 12,
-                  color: Colors.grey.shade400,
-                  fontWeight: FontWeight.w500)),
-          const SizedBox(width: 6),
-          Text('$count',
-              style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
-        ]),
+                fontSize: 12,
+                color: Colors.grey.shade400,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+            const SizedBox(width: 6),
+            Text(
+              '$count',
+              style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+            ),
+            const Spacer(),
+            IconButton(
+              icon: const Icon(Icons.settings_outlined, size: 16),
+              tooltip: 'Organization settings',
+              visualDensity: VisualDensity.compact,
+              onPressed: onConfig,
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -528,9 +582,12 @@ class _ViewToggleButton extends StatelessWidget {
       onTap: onTap,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-        color: active ? primary.withValues(alpha:0.22) : null,
-        child: Icon(icon,
-            size: 18, color: active ? primary : Colors.grey.shade500),
+        color: active ? primary.withValues(alpha: 0.22) : null,
+        child: Icon(
+          icon,
+          size: 18,
+          color: active ? primary : Colors.grey.shade500,
+        ),
       ),
     );
   }
@@ -566,15 +623,27 @@ class _ReposGrid extends StatelessWidget {
           SliverToBoxAdapter(
             child: Padding(
               padding: const EdgeInsets.fromLTRB(16, 14, 16, 4),
-              child: Row(children: [
-                Container(
-                  width: 8, height: 8,
-                  decoration: const BoxDecoration(color: Color(0xFF3FB950), shape: BoxShape.circle),
-                ),
-                const SizedBox(width: 6),
-                Text('MONITORED · ${monitored.length}',
-                    style: TextStyle(fontSize: 11.5, color: Colors.grey.shade400, fontWeight: FontWeight.w600)),
-              ]),
+              child: Row(
+                children: [
+                  Container(
+                    width: 8,
+                    height: 8,
+                    decoration: const BoxDecoration(
+                      color: Color(0xFF3FB950),
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    'MONITORED · ${monitored.length}',
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      color: Colors.grey.shade400,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
           SliverPadding(
@@ -586,24 +655,21 @@ class _ReposGrid extends StatelessWidget {
                 crossAxisSpacing: 10,
                 childAspectRatio: 1.0,
               ),
-              delegate: SliverChildBuilderDelegate(
-                (ctx, i) {
-                  final r = monitored[i];
-                  return RepoGridTile(
-                    repo: r,
-                    config: configs[r]!,
-                    appConfig: appConfig,
-                    selected: selected.contains(r),
-                    showNew: showNewFor(r, configs[r]!),
-                    onSelectionToggle: () => onSelectionToggle(r),
-                    onTap: () {
-                      onDismissNew(r);
-                      ctx.push('/repos/${Uri.encodeComponent(r)}');
-                    },
-                  );
-                },
-                childCount: monitored.length,
-              ),
+              delegate: SliverChildBuilderDelegate((ctx, i) {
+                final r = monitored[i];
+                return RepoGridTile(
+                  repo: r,
+                  config: configs[r]!,
+                  appConfig: appConfig,
+                  selected: selected.contains(r),
+                  showNew: showNewFor(r, configs[r]!),
+                  onSelectionToggle: () => onSelectionToggle(r),
+                  onTap: () {
+                    onDismissNew(r);
+                    ctx.push('/repos/${Uri.encodeComponent(r)}');
+                  },
+                );
+              }, childCount: monitored.length),
             ),
           ),
         ],
@@ -611,15 +677,27 @@ class _ReposGrid extends StatelessWidget {
           SliverToBoxAdapter(
             child: Padding(
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
-              child: Row(children: [
-                Container(
-                  width: 8, height: 8,
-                  decoration: BoxDecoration(color: Colors.grey.shade600, shape: BoxShape.circle),
-                ),
-                const SizedBox(width: 6),
-                Text('NOT MONITORED · ${disabled.length}',
-                    style: TextStyle(fontSize: 11.5, color: Colors.grey.shade400, fontWeight: FontWeight.w600)),
-              ]),
+              child: Row(
+                children: [
+                  Container(
+                    width: 8,
+                    height: 8,
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade600,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    'NOT MONITORED · ${disabled.length}',
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      color: Colors.grey.shade400,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
           SliverPadding(
@@ -631,24 +709,21 @@ class _ReposGrid extends StatelessWidget {
                 crossAxisSpacing: 10,
                 childAspectRatio: 1.0,
               ),
-              delegate: SliverChildBuilderDelegate(
-                (ctx, i) {
-                  final r = disabled[i];
-                  return RepoGridTile(
-                    repo: r,
-                    config: configs[r]!,
-                    appConfig: appConfig,
-                    selected: selected.contains(r),
-                    showNew: showNewFor(r, configs[r]!),
-                    onSelectionToggle: () => onSelectionToggle(r),
-                    onTap: () {
-                      onDismissNew(r);
-                      ctx.push('/repos/${Uri.encodeComponent(r)}');
-                    },
-                  );
-                },
-                childCount: disabled.length,
-              ),
+              delegate: SliverChildBuilderDelegate((ctx, i) {
+                final r = disabled[i];
+                return RepoGridTile(
+                  repo: r,
+                  config: configs[r]!,
+                  appConfig: appConfig,
+                  selected: selected.contains(r),
+                  showNew: showNewFor(r, configs[r]!),
+                  onSelectionToggle: () => onSelectionToggle(r),
+                  onTap: () {
+                    onDismissNew(r);
+                    ctx.push('/repos/${Uri.encodeComponent(r)}');
+                  },
+                );
+              }, childCount: disabled.length),
             ),
           ),
         ],
@@ -656,7 +731,6 @@ class _ReposGrid extends StatelessWidget {
     );
   }
 }
-
 
 /// Multi-select org filter chip. Opens a checkbox dialog when tapped.
 /// Matches the Activity screen's org filter UX (issue #112 / PR #133).
@@ -688,14 +762,18 @@ class _OrgFilterChip extends StatelessWidget {
         if (result != null) onChanged(result);
       },
       child: Chip(
-        avatar: Icon(Icons.business, size: 14, color: isActive ? primary : Colors.grey),
+        avatar: Icon(
+          Icons.business,
+          size: 14,
+          color: isActive ? primary : Colors.grey,
+        ),
         label: Text(
           isActive ? 'Org (${selected.length})' : 'Org',
           style: TextStyle(fontSize: 12, color: isActive ? primary : null),
         ),
         visualDensity: VisualDensity.compact,
         side: isActive
-            ? BorderSide(color: primary.withValues(alpha:0.5))
+            ? BorderSide(color: primary.withValues(alpha: 0.5))
             : const BorderSide(color: Colors.transparent),
       ),
     );

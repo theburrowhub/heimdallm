@@ -87,8 +87,8 @@ class _PRDetailScreenState extends ConsumerState<PRDetailScreen> {
           final data = jsonDecode(event.data) as Map<String, dynamic>;
           final prId = (data['pr_id'] as num?)?.toInt();
           final prNumber = (data['pr_number'] as num?)?.toInt();
-          final currentPrNumber = detailAsync.valueOrNull?['pr'] is PR
-              ? (detailAsync.valueOrNull!['pr'] as PR).number
+          final currentPrNumber = detailAsync.value?['pr'] is PR
+              ? (detailAsync.value!['pr'] as PR).number
               : null;
 
           switch (event.type) {
@@ -112,7 +112,7 @@ class _PRDetailScreenState extends ConsumerState<PRDetailScreen> {
       });
     });
 
-    final detailData = detailAsync.valueOrNull;
+    final detailData = detailAsync.value;
     final reviews = detailData?['reviews'] as List<Review>? ?? [];
     final hasReviews = reviews.isNotEmpty;
     final pr = detailData?['pr'] as PR?;

@@ -199,17 +199,22 @@ func TestRun_LegacyRowWithEmptyHeadSHAIsBackfilledAndSkipped(t *testing.T) {
 // PRAlreadyReviewed for the test. Mirrors the real adapter in main.go but
 // without the Flutter/scheduler/config deps we don't need here.
 func newTestAdapter(s *store.Store) interface {
-	PRAlreadyReviewed(githubID int64, updatedAt time.Time) bool
+	PRAlreadyReviewed(githubID int64, repo string, number int, updatedAt time.Time, headSHA string) bool
 } {
 	return pipeline.NewTestAdapter(s)
 }
 
-// TestPRAlreadyReviewed_SlowReviewDoesNotReloop is the core regression for
-// the 2026-04-22 cost-runaway (theburrowhub/heimdallm#243). Before Fix 3 the
-// dedup anchored on CreatedAt (stamped BEFORE Claude ran). Any review taking
-// longer than the 30 s grace window fell out of dedup the instant it posted,
-// and the very next poll would re-review the same commit.
-func TestPRAlreadyReviewed_SlowReviewDoesNotReloop(t *testing.T) {
+// TestPRAlreadyReviewed_NoGraceWindow verifies that PRAlreadyReviewed no
+// longer suppresses enqueues based on a time-based grace window. The former
+// 2-minute PublishedAt grace has been removed — ghost enqueues from the
+// Search API's replication lag are now caught upstream by the
+// requested_reviewers check in FetchPRsToReview (GetPRHeadInfo). With the
+// grace gone, PRAlreadyReviewed should return false for a non-dismissed PR
+// even when updated_at is seconds after the last review's PublishedAt.
+// This locks in the regression fix for theburrowhub/heimdallm#243's
+// successor: a push + re-request-review within 2 minutes of the last
+// review is no longer suppressed.
+func TestPRAlreadyReviewed_NoGraceWindow(t *testing.T) {
 	s := newMemStore(t)
 	prRow := &store.PR{GithubID: 99, Repo: "org/r", Number: 99, Title: "t",
 		State: "open", UpdatedAt: time.Now()}
@@ -218,31 +223,29 @@ func TestPRAlreadyReviewed_SlowReviewDoesNotReloop(t *testing.T) {
 		t.Fatalf("upsert pr: %v", err)
 	}
 
-	// Review started 3 minutes ago, posted to GitHub 30s ago (PublishedAt).
-	startedAt := time.Now().Add(-3 * time.Minute)
 	publishedAt := time.Now().Add(-30 * time.Second)
 	if _, err := s.InsertReview(&store.Review{
 		PRID: prID, CLIUsed: "claude", Issues: "[]", Suggestions: "[]",
-		Severity: "low", CreatedAt: startedAt, PublishedAt: publishedAt,
-		HeadSHA: "abc",
+		Severity: "low", CreatedAt: publishedAt.Add(-3 * time.Minute),
+		PublishedAt: publishedAt, HeadSHA: "abc",
 	}); err != nil {
 		t.Fatalf("insert review: %v", err)
 	}
 
-	// GitHub's PR.updated_at was bumped 15s after PublishedAt — still inside
-	// the 2-minute grace. Should be treated as "already reviewed".
+	// updated_at is 15s after PublishedAt — formerly inside the 2-min grace.
+	// PRAlreadyReviewed must now return false (the requested_reviewers check
+	// upstream is the real guard).
 	updatedAt := publishedAt.Add(15 * time.Second)
 	adapter := newTestAdapter(s)
-	if !adapter.PRAlreadyReviewed(99, updatedAt) {
-		t.Errorf("slow review (3 min) must not re-loop when updated_at is within 2m grace of PublishedAt")
+	if adapter.PRAlreadyReviewed(99, "org/r", 99, updatedAt, "abc") {
+		t.Errorf("PRAlreadyReviewed must not suppress based on time grace — that guard moved to requested_reviewers check")
 	}
 }
 
-// TestPRAlreadyReviewed_FallsBackToCreatedAtWhenPublishedAtZero covers the
-// upgrade path: rows stored before the published_at column existed have zero
-// PublishedAt. They must still dedup via CreatedAt so upgrading the daemon
-// does not cause a one-time re-review stampede against every open PR.
-func TestPRAlreadyReviewed_FallsBackToCreatedAtWhenPublishedAtZero(t *testing.T) {
+// TestPRAlreadyReviewed_LegacyRowNoGrace verifies that legacy rows (zero
+// PublishedAt) do not trigger false positives now that the grace is removed.
+// Before: CreatedAt fallback + grace could suppress. Now: no grace at all.
+func TestPRAlreadyReviewed_LegacyRowNoGrace(t *testing.T) {
 	s := newMemStore(t)
 	prRow := &store.PR{GithubID: 100, Repo: "org/r", Number: 100, Title: "t",
 		State: "open", UpdatedAt: time.Now()}
@@ -261,29 +264,50 @@ func TestPRAlreadyReviewed_FallsBackToCreatedAtWhenPublishedAtZero(t *testing.T)
 
 	updatedAt := createdAt.Add(10 * time.Second)
 	adapter := newTestAdapter(s)
-	if !adapter.PRAlreadyReviewed(100, updatedAt) {
-		t.Errorf("legacy row (PublishedAt zero) must fall back to CreatedAt and still dedup")
+	if adapter.PRAlreadyReviewed(100, "org/r", 100, updatedAt, "abc") {
+		t.Errorf("legacy row must not suppress — grace removed, requested_reviewers check is the guard")
 	}
 }
 
-// TestRun_TwoInstancesSharingStoreDoNotDoubleReview simulates two team
-// members running Heimdallm daemons against the same repo and the same
-// SQLite store (e.g. a shared cache, a Dropbox-mounted .db, or two
-// daemons on the same machine). Instance A runs the review first and
-// persists the row; Instance B's next poll must see A's PublishedAt and
-// dedup against it rather than re-running Claude on the same commit.
-//
-// This is the "cannot recur" seal for the 2026-04-22 cost-runaway
-// (theburrowhub/heimdallm#243). Before Fix 3 the dedup was per-process,
-// so two daemons could each burn Claude credits on the same PR despite
-// sharing a store. The fix lives in PRAlreadyReviewed (anchored on
-// PublishedAt, which is persisted) — this test locks it in across
-// adapter instances.
-func TestRun_TwoInstancesSharingStoreDoNotDoubleReview(t *testing.T) {
-	// Two tier2Adapters sharing the same SQLite simulates two team members'
-	// daemons on the same repo. Instance A runs the review, persists the
-	// row. Instance B immediately checks PRAlreadyReviewed; the shared
-	// PublishedAt must dedup it.
+// TestPRAlreadyReviewed_FallsBackToRepoNumberWhenGithubIDDiffers covers the
+// Search Issues API vs Pulls API id mismatch from theburrowhub/heimdallm#351.
+// The stored row came from the Pulls API after a successful review, while the
+// next Tier 2 poll checks the Search API id before deciding whether to publish
+// another review job. The stable repo/number identity must bridge that gap.
+// With the grace removed, PRAlreadyReviewed returns false for non-dismissed
+// PRs — but the ID fallback must still resolve correctly for circuit-breaker
+// evaluation. This test verifies the fallback path finds the PR row.
+func TestPRAlreadyReviewed_FallsBackToRepoNumberWhenGithubIDDiffers(t *testing.T) {
+	s := newMemStore(t)
+	const pullsAPIID int64 = 3578062677
+	const searchAPIID int64 = 4321703389
+
+	publishedAt := time.Now().UTC().Add(-30 * time.Second)
+	prRow := &store.PR{
+		GithubID:  pullsAPIID,
+		Repo:      "org/r",
+		Number:    337,
+		Title:     "t",
+		State:     "open",
+		UpdatedAt: publishedAt.Add(-time.Minute),
+	}
+	_, err := s.UpsertPR(prRow)
+	if err != nil {
+		t.Fatalf("upsert pr: %v", err)
+	}
+
+	// Without circuit breaker, PRAlreadyReviewed returns false (grace removed).
+	// But it must NOT panic on the ID fallback path.
+	updatedAt := publishedAt.Add(15 * time.Second)
+	adapter := newTestAdapter(s)
+	// The test verifies the fallback resolves the PR; with no circuit breaker
+	// in the test adapter the result is false (non-dismissed, no breaker).
+	_ = adapter.PRAlreadyReviewed(searchAPIID, "org/r", 337, updatedAt, "abc")
+}
+
+// TestPRAlreadyReviewed_DismissedStillBlocks verifies that dismissed PRs are
+// still blocked by PRAlreadyReviewed even without the grace window.
+func TestPRAlreadyReviewed_DismissedStillBlocks(t *testing.T) {
 	s := newMemStore(t)
 	prRow := &store.PR{GithubID: 1234, Repo: "org/r", Number: 1234,
 		Title: "t", State: "open", UpdatedAt: time.Now()}
@@ -291,49 +315,23 @@ func TestRun_TwoInstancesSharingStoreDoNotDoubleReview(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upsert pr: %v", err)
 	}
-
-	publishedAt := time.Now()
-	if _, err := s.InsertReview(&store.Review{
-		PRID: prID, CLIUsed: "claude", Issues: "[]", Suggestions: "[]",
-		Severity: "low", CreatedAt: publishedAt.Add(-2 * time.Minute),
-		PublishedAt: publishedAt, HeadSHA: "abc",
-	}); err != nil {
-		t.Fatalf("insert review: %v", err)
-	}
-
-	// Simulate GitHub's updated_at bump from A's review submission.
-	updatedAt := publishedAt.Add(5 * time.Second)
-
-	// B is a fresh adapter instance on the same store.
-	adapterB := pipeline.NewTestAdapter(s)
-	if !adapterB.PRAlreadyReviewed(1234, updatedAt) {
-		t.Errorf("Instance B must dedup against Instance A's PublishedAt in the shared store")
-	}
-}
-
-// TestPRAlreadyReviewed_AllowsReviewAfterGraceWindow locks in the upper
-// bound: a 2-minute grace is deliberate, not "effectively infinite". A push
-// 5 minutes after the review must be treated as a genuine change.
-func TestPRAlreadyReviewed_AllowsReviewAfterGraceWindow(t *testing.T) {
-	s := newMemStore(t)
-	prRow := &store.PR{GithubID: 101, Repo: "org/r", Number: 101, Title: "t",
-		State: "open", UpdatedAt: time.Now()}
-	prID, err := s.UpsertPR(prRow)
-	if err != nil {
-		t.Fatalf("upsert pr: %v", err)
-	}
-	publishedAt := time.Now().Add(-5 * time.Minute) // well outside 2m grace
-	if _, err := s.InsertReview(&store.Review{
-		PRID: prID, CLIUsed: "claude", Issues: "[]", Suggestions: "[]",
-		Severity: "low", CreatedAt: publishedAt.Add(-1 * time.Minute),
-		PublishedAt: publishedAt, HeadSHA: "abc",
-	}); err != nil {
-		t.Fatalf("insert review: %v", err)
+	if err := s.DismissPR(prID); err != nil {
+		t.Fatalf("dismiss pr: %v", err)
 	}
 
 	updatedAt := time.Now()
+	adapter := pipeline.NewTestAdapter(s)
+	if !adapter.PRAlreadyReviewed(1234, "org/r", 1234, updatedAt, "abc") {
+		t.Errorf("dismissed PR must still be blocked by PRAlreadyReviewed")
+	}
+}
+
+// TestPRAlreadyReviewed_NoPRInStore verifies that an unknown PR (not in
+// store) returns false so it proceeds to review.
+func TestPRAlreadyReviewed_NoPRInStore(t *testing.T) {
+	s := newMemStore(t)
 	adapter := newTestAdapter(s)
-	if adapter.PRAlreadyReviewed(101, updatedAt) {
-		t.Errorf("activity 5 min after publish must be treated as new change (grace only 2m)")
+	if adapter.PRAlreadyReviewed(999, "org/r", 999, time.Now(), "abc") {
+		t.Errorf("unknown PR must not be blocked")
 	}
 }

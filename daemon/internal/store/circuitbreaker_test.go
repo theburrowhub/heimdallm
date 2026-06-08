@@ -37,6 +37,34 @@ func TestCountReviewsForPR_CountsWithinWindow(t *testing.T) {
 	}
 }
 
+func TestCountReviewsForPRHeadSHA_CountsOnlyMatchingHead(t *testing.T) {
+	s := newTestStore(t)
+	prID, err := s.UpsertPR(&store.PR{GithubID: 1, Repo: "org/r", Number: 1,
+		Title: "t", State: "open", UpdatedAt: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recent := time.Now().Add(-2 * time.Hour)
+	for _, headSHA := range []string{"abc", "abc", "def"} {
+		if _, err := s.InsertReview(&store.Review{
+			PRID: prID, CLIUsed: "claude", Issues: "[]", Suggestions: "[]",
+			Severity: "low", CreatedAt: recent, HeadSHA: headSHA,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	since := time.Now().Add(-24 * time.Hour)
+	n, err := s.CountReviewsForPRHeadSHA(prID, "abc", since)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("want 2 reviews for head abc, got %d", n)
+	}
+}
+
 func TestCountReviewsForRepo_CountsDistinctPRs(t *testing.T) {
 	s := newTestStore(t)
 	for i := int64(1); i <= 3; i++ {
@@ -68,6 +96,7 @@ func TestCircuitBreaker_TripsOnPerPRCap(t *testing.T) {
 		if _, err := s.InsertReview(&store.Review{
 			PRID: prID, CLIUsed: "claude", Issues: "[]", Suggestions: "[]",
 			Severity: "low", CreatedAt: time.Now().Add(time.Duration(-i) * time.Minute),
+			HeadSHA: "abc",
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -77,7 +106,7 @@ func TestCircuitBreaker_TripsOnPerPRCap(t *testing.T) {
 		PerPR24h:  3,
 		PerRepoHr: 20,
 	}
-	tripped, reason, err := s.CheckCircuitBreaker(prID, "org/r", cfg)
+	tripped, reason, err := s.CheckCircuitBreaker(prID, "org/r", "abc", cfg)
 	if err != nil {
 		t.Fatalf("check: %v", err)
 	}
@@ -86,6 +115,31 @@ func TestCircuitBreaker_TripsOnPerPRCap(t *testing.T) {
 	}
 	if reason == "" {
 		t.Errorf("tripped must include a human-readable reason")
+	}
+}
+
+func TestCircuitBreaker_AllowsDifferentHeadSHAUnderPerPRCap(t *testing.T) {
+	s := newTestStore(t)
+	prID, _ := s.UpsertPR(&store.PR{GithubID: 4, Repo: "org/r", Number: 4,
+		Title: "t", State: "open", UpdatedAt: time.Now()})
+	// Three reviews on the previous commit must not consume the allowance for
+	// a developer's follow-up commit.
+	for i := 0; i < 3; i++ {
+		if _, err := s.InsertReview(&store.Review{
+			PRID: prID, CLIUsed: "claude", Issues: "[]", Suggestions: "[]",
+			Severity: "low", CreatedAt: time.Now().Add(time.Duration(-i) * time.Minute),
+			HeadSHA: "old",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := store.CircuitBreakerLimits{PerPR24h: 3, PerRepoHr: 20}
+	tripped, reason, err := s.CheckCircuitBreaker(prID, "org/r", "new", cfg)
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	if tripped {
+		t.Errorf("new head SHA should be allowed despite previous-head cap (reason=%q)", reason)
 	}
 }
 
@@ -98,12 +152,13 @@ func TestCircuitBreaker_AllowsUnderCap(t *testing.T) {
 		if _, err := s.InsertReview(&store.Review{
 			PRID: prID, CLIUsed: "claude", Issues: "[]", Suggestions: "[]",
 			Severity: "low", CreatedAt: time.Now().Add(time.Duration(-i) * time.Minute),
+			HeadSHA: "abc",
 		}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	cfg := store.CircuitBreakerLimits{PerPR24h: 3, PerRepoHr: 20}
-	tripped, _, err := s.CheckCircuitBreaker(prID, "org/r", cfg)
+	tripped, _, err := s.CheckCircuitBreaker(prID, "org/r", "abc", cfg)
 	if err != nil {
 		t.Fatalf("check: %v", err)
 	}
@@ -125,12 +180,13 @@ func TestCircuitBreaker_ZeroCapMeansUnlimited(t *testing.T) {
 		if _, err := s.InsertReview(&store.Review{
 			PRID: prID, CLIUsed: "claude", Issues: "[]", Suggestions: "[]",
 			Severity: "low", CreatedAt: time.Now().Add(time.Duration(-i) * time.Minute),
+			HeadSHA: "abc",
 		}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	cfg := store.CircuitBreakerLimits{PerPR24h: 0, PerRepoHr: 0}
-	tripped, _, err := s.CheckCircuitBreaker(prID, "org/r", cfg)
+	tripped, _, err := s.CheckCircuitBreaker(prID, "org/r", "abc", cfg)
 	if err != nil {
 		t.Fatalf("check: %v", err)
 	}

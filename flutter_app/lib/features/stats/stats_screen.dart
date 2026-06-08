@@ -12,8 +12,8 @@ class StatsScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final statsAsync = ref.watch(statsProvider);
-    final prs = ref.watch(prsProvider).valueOrNull ?? <PR>[];
-    final issues = ref.watch(issuesProvider).valueOrNull ?? <TrackedIssue>[];
+    final prs = ref.watch(prsProvider).value ?? <PR>[];
+    final issues = ref.watch(issuesProvider).value ?? <TrackedIssue>[];
 
     final allRepos = <String>{
       ...prs.map((p) => p.repo),

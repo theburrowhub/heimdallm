@@ -41,6 +41,40 @@ void main() {
       expect(e.action, ActivityAction.unknown);
     });
 
+    test('parses review_skipped action', () {
+      final e = ActivityEntry.fromJson({
+        'id': 1,
+        'ts': '2026-04-20T09:34:12+02:00',
+        'org': 'a',
+        'repo': 'a/b',
+        'item_type': 'pr',
+        'item_number': 1,
+        'item_title': 't',
+        'action': 'review_skipped',
+        'outcome': 'draft',
+        'details': {'reason': 'draft'},
+      });
+      expect(e.action, ActivityAction.reviewSkipped);
+      expect(e.outcome, 'draft');
+    });
+
+    test('parses refinement action', () {
+      final e = ActivityEntry.fromJson({
+        'id': 1,
+        'ts': '2026-04-20T09:34:12+02:00',
+        'org': 'a',
+        'repo': 'a/b',
+        'item_type': 'issue',
+        'item_number': 1,
+        'item_title': 't',
+        'action': 'refinement',
+        'outcome': 'completed',
+        'details': {'post_ok': true},
+      });
+      expect(e.action, ActivityAction.refinement);
+      expect(e.outcome, 'completed');
+    });
+
     test('missing outcome defaults to empty string', () {
       final e = ActivityEntry.fromJson({
         'id': 1,
@@ -83,7 +117,7 @@ void main() {
             'action': 'review',
             'outcome': 'minor',
             'details': {},
-          }
+          },
         ],
         'count': 500,
         'truncated': true,
@@ -118,23 +152,23 @@ void main() {
       const q = ActivityQuery(
         orgs: {'a', 'b'},
         repos: {'a/x'},
-        actions: {ActivityAction.review, ActivityAction.triage},
+        itemTypes: {'pr'},
+        actions: {ActivityAction.reviewSkipped, ActivityAction.triage},
+        outcomes: {'draft'},
       );
       final p = q.toQueryParameters();
       expect(p['org']!.toSet(), {'a', 'b'});
       expect(p['repo'], ['a/x']);
-      expect(p['action']!.toSet(), {'review', 'triage'});
+      expect(p['item_type'], ['pr']);
+      expect(p['action']!.toSet(), {'review_skipped', 'triage'});
+      expect(p['outcome'], ['draft']);
     });
 
     test('always includes limit', () {
-      expect(
-        const ActivityQuery().toQueryParameters()['limit'],
-        ['500'],
-      );
-      expect(
-        const ActivityQuery(limit: 250).toQueryParameters()['limit'],
-        ['250'],
-      );
+      expect(const ActivityQuery().toQueryParameters()['limit'], ['500']);
+      expect(const ActivityQuery(limit: 250).toQueryParameters()['limit'], [
+        '250',
+      ]);
     });
   });
 

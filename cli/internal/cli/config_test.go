@@ -204,6 +204,38 @@ func TestCfgAILinesPRMetadata(t *testing.T) {
 	}
 }
 
+func TestCfgOrgLines(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	cfg := map[string]any{
+		"org_overrides": map[string]any{
+			"myorg": map[string]any{
+				"primary":      "gemini",
+				"review_mode":  "multi",
+				"pr_reviewers": []any{"alice"},
+				"issue_tracking": map[string]any{
+					"enabled":         true,
+					"develop_enabled": false,
+					"develop_labels":  []any{"ready"},
+				},
+			},
+		},
+	}
+	lines := cfgOrgLines(cfg)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "myorg") {
+		t.Error("missing org header")
+	}
+	if !strings.Contains(joined, "gemini") {
+		t.Error("missing org primary")
+	}
+	if !strings.Contains(joined, "ready") {
+		t.Error("missing org issue tracking labels")
+	}
+	if !strings.Contains(joined, "Develop enabled") || !strings.Contains(joined, "false") {
+		t.Error("missing org issue tracking develop_enabled=false")
+	}
+}
+
 func TestCfgIssueTrackingLinesDisabled(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	cfg := map[string]any{

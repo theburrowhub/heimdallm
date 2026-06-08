@@ -53,15 +53,10 @@ func (f *fakeExecBreaker) Execute(_, _ string, _ executor.ExecOptions) (*executo
 	return &executor.ReviewResult{Summary: "ok", Severity: "low"}, nil
 }
 
-// TestRun_CircuitBreakerTripStopsExecute verifies that when the per-PR cap
-// is reached, pipeline.Run refuses to call SubmitReview / Execute. This is
-// the unconditional ceiling that caps worst-case cost when every other
+// TestRun_CircuitBreakerTripStopsExecute verifies that when the per-PR HEAD
+// cap is reached, pipeline.Run refuses to call SubmitReview / Execute. This
+// is the unconditional ceiling that caps worst-case cost when every other
 // dedup defense fails (see issue #243).
-//
-// The test drives 3 reviews through the pipeline itself (rather than
-// pre-seeding the reviews table) so that the prID the pipeline sees on each
-// Run matches the pr_id value stored in the reviews rows — the circuit
-// breaker counts by prID, and any mismatch would silently fail the test.
 func TestRun_CircuitBreakerTripStopsExecute(t *testing.T) {
 	s, err := store.Open(":memory:")
 	if err != nil {
@@ -75,38 +70,57 @@ func TestRun_CircuitBreakerTripStopsExecute(t *testing.T) {
 	pub := &fakePublisher{}
 	p := pipeline.New(s, fgh, fexec, notify)
 	p.SetPublisher(pub)
-	// Cap at 3 per PR so the 4th review is the one that must trip.
+	p.SetBotLogin("heimdallm-bot")
+	// Cap at 3 per PR HEAD so the next explicit re-request on the same commit
+	// is the one that must trip.
 	p.SetCircuitBreakerLimits(&store.CircuitBreakerLimits{PerPR24h: 3, PerRepoHr: 999})
 
-	// Drive 3 successful reviews via the pipeline — each with a distinct
-	// HEAD SHA so the HEAD-SHA dedup does not short-circuit. This populates
-	// the reviews table with 3 rows all pointing at the correct pr_id.
-	for i, sha := range []string{"sha1", "sha2", "sha3"} {
-		fgh.submitted = false
-		pr := &gh.PullRequest{
-			ID: 42, Number: 42, Title: "t", Repo: "org/r",
-			User: gh.User{Login: "alice"}, State: "open",
-			UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/r/pull/42",
-			Head: gh.Branch{SHA: sha},
-		}
-		if _, err := p.Run(pr, pipeline.RunOptions{Primary: "claude", Fallback: "gemini"}); err != nil {
-			t.Fatalf("seed run %d: %v", i, err)
-		}
+	now := time.Now().UTC()
+	prID, err := s.UpsertPR(&store.PR{
+		GithubID:  42,
+		Repo:      "org/r",
+		Number:    42,
+		Title:     "t",
+		Author:    "alice",
+		URL:       "https://github.com/org/r/pull/42",
+		State:     "open",
+		UpdatedAt: now,
+		FetchedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("upsert pr: %v", err)
 	}
-	// Sanity: executor should have been called 3 times so far.
-	if fexec.calls != 3 {
-		t.Fatalf("seed: executor calls = %d, want 3", fexec.calls)
+	for i := 0; i < 3; i++ {
+		createdAt := now.Add(time.Duration(-3+i) * time.Minute)
+		if _, err := s.InsertReview(&store.Review{
+			PRID:              prID,
+			CLIUsed:           "claude",
+			Issues:            "[]",
+			Suggestions:       "[]",
+			Severity:          "low",
+			CreatedAt:         createdAt,
+			PublishedAt:       createdAt,
+			GitHubReviewID:    int64(9000 + i),
+			GitHubReviewState: "APPROVED",
+			HeadSHA:           "sha1",
+		}); err != nil {
+			t.Fatalf("insert review %d: %v", i, err)
+		}
 	}
 
-	// 4th run on a new HEAD SHA — the HEAD-SHA dedup passes (new commit),
-	// so the breaker is the only defense left. It MUST trip.
-	fgh.submitted = false
+	// SHA dedup would normally skip same-commit reviews. Simulate an explicit
+	// GitHub re-request after the latest local review so the pipeline bypasses
+	// SHA dedup and the circuit breaker remains the last defense.
+	p.SetTimelineFetcher(&fakeTimeline{events: []gh.TimelineEvent{
+		{Event: "review_requested", Actor: "alice", CreatedAt: now.Add(time.Minute)},
+	}})
+
 	before := fexec.calls
 	pr := &gh.PullRequest{
 		ID: 42, Number: 42, Title: "t", Repo: "org/r",
 		User: gh.User{Login: "alice"}, State: "open",
-		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/r/pull/42",
-		Head: gh.Branch{SHA: "sha4"},
+		UpdatedAt: now.Add(time.Minute), HTMLURL: "https://github.com/org/r/pull/42",
+		Head: gh.Branch{SHA: "sha1"},
 	}
 	_, err = p.Run(pr, pipeline.RunOptions{Primary: "claude", Fallback: "gemini"})
 	// Verify both the typed-error contract and the sentinel: callers in main.go
@@ -136,8 +150,8 @@ func TestRun_CircuitBreakerTripStopsExecute(t *testing.T) {
 	// phantom spinner and the operator with a phantom desktop notification
 	// every time the cap clamped down.
 	startedNotifies := countNotify(notify.events, "PR Review Started")
-	if startedNotifies != 3 {
-		t.Errorf("notify(\"PR Review Started\"): got %d, want 3 (one per real review, none on breaker trip)", startedNotifies)
+	if startedNotifies != 0 {
+		t.Errorf("notify(\"PR Review Started\"): got %d, want 0 on breaker trip", startedNotifies)
 	}
 	startedSSEs := 0
 	for _, ev := range pub.types() {
@@ -145,7 +159,7 @@ func TestRun_CircuitBreakerTripStopsExecute(t *testing.T) {
 			startedSSEs++
 		}
 	}
-	if startedSSEs != 3 {
-		t.Errorf("EventReviewStarted: got %d, want 3 (one per real review, none on breaker trip)", startedSSEs)
+	if startedSSEs != 0 {
+		t.Errorf("EventReviewStarted: got %d, want 0 on breaker trip", startedSSEs)
 	}
 }

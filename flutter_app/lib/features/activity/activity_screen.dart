@@ -1,8 +1,10 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/models/activity.dart';
-import '../../shared/widgets/toast.dart';
 import 'activity_providers.dart';
 import 'widgets/activity_entry_tile.dart';
 import 'widgets/activity_filter_chips.dart';
@@ -18,15 +20,19 @@ class ActivityScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final q = ref.watch(activityQueryProvider);
+    ref.watch(activityLiveRefreshProvider);
     final async = ref.watch(activityEntriesProvider);
     final optionsAsync = ref.watch(activityOptionsProvider);
 
-    final orgs = optionsAsync.valueOrNull?.entries
-            .map((e) => e.org).toSet().toList()
-        ?? const <String>[];
-    final repos = optionsAsync.valueOrNull?.entries
-            .map((e) => e.repo).toSet().toList()
-        ?? const <String>[];
+    final optionEntries =
+        optionsAsync.value?.entries ??
+        async.value?.entries ??
+        const <ActivityEntry>[];
+    final usingFallbackOptions =
+        optionsAsync.value == null && async.value != null;
+    final orgs = _sortedDistinct(optionEntries.map((e) => e.org));
+    final repos = _sortedDistinct(optionEntries.map((e) => e.repo));
+    final outcomes = _sortedDistinct(optionEntries.map((e) => e.outcome));
 
     return Column(
       children: [
@@ -36,6 +42,8 @@ class ActivityScreen extends ConsumerWidget {
           child: ActivityFilterChips(
             availableOrgs: orgs,
             availableRepos: repos,
+            availableOutcomes: outcomes,
+            optionsLimited: usingFallbackOptions,
           ),
         ),
         const Divider(height: 1),
@@ -49,6 +57,12 @@ class ActivityScreen extends ConsumerWidget {
       ],
     );
   }
+}
+
+List<String> _sortedDistinct(Iterable<String> values) {
+  final list = values.where((v) => v.isNotEmpty).toSet().toList();
+  list.sort();
+  return list;
 }
 
 class _ErrorView extends StatelessWidget {
@@ -66,8 +80,10 @@ class _ErrorView extends StatelessWidget {
             children: [
               Icon(Icons.toggle_off_outlined, size: 48, color: Colors.grey),
               SizedBox(height: 12),
-              Text('Activity log is disabled',
-                  style: TextStyle(fontWeight: FontWeight.w600)),
+              Text(
+                'Activity log is disabled',
+                style: TextStyle(fontWeight: FontWeight.w600),
+              ),
               SizedBox(height: 4),
               Text(
                 'Enable activity_log in the daemon config to start recording activity.',
@@ -97,56 +113,75 @@ class _DatePickerBar extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final notifier   = ref.read(activityQueryProvider.notifier);
-    final today      = DateTime.now();
-    final yesterday  = today.subtract(const Duration(days: 1));
-    final isToday    = _isSameDay(query.date, today);
+    final notifier = ref.read(activityQueryProvider.notifier);
+    final live = ref.watch(activityLiveUpdatesProvider);
+    final today = DateTime.now();
+    final yesterday = today.subtract(const Duration(days: 1));
+    final isToday = _isSameDay(query.date, today);
     final isYesterday = _isSameDay(query.date, yesterday);
 
     return SingleChildScrollView(
       scrollDirection: Axis.horizontal,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      child: Row(children: [
-        ChoiceChip(
-          label: const Text('Today'),
-          selected: isToday,
-          onSelected: (_) => notifier.setDate(today),
-        ),
-        const SizedBox(width: 8),
-        ChoiceChip(
-          label: const Text('Yesterday'),
-          selected: isYesterday,
-          onSelected: (_) => notifier.setDate(yesterday),
-        ),
-        const SizedBox(width: 8),
-        ActionChip(
-          label: const Text('Pick day'),
-          onPressed: () async {
-            final picked = await showDatePicker(
-              context: context,
-              initialDate: query.date ?? today,
-              firstDate: today.subtract(const Duration(days: 365)),
-              lastDate: today,
-            );
-            if (picked != null) notifier.setDate(picked);
-          },
-        ),
-        const SizedBox(width: 8),
-        ActionChip(
-          label: const Text('Pick range'),
-          onPressed: () async {
-            final picked = await showDateRangePicker(
-              context: context,
-              firstDate: today.subtract(const Duration(days: 365)),
-              lastDate: today,
-              initialDateRange: (query.from != null && query.to != null)
-                  ? DateTimeRange(start: query.from!, end: query.to!)
-                  : null,
-            );
-            if (picked != null) notifier.setRange(picked.start, picked.end);
-          },
-        ),
-      ]),
+      child: Row(
+        children: [
+          ChoiceChip(
+            label: const Text('Today'),
+            selected: isToday,
+            onSelected: (_) => notifier.setDate(today),
+          ),
+          const SizedBox(width: 8),
+          ChoiceChip(
+            label: const Text('Yesterday'),
+            selected: isYesterday,
+            onSelected: (_) => notifier.setDate(yesterday),
+          ),
+          const SizedBox(width: 8),
+          ActionChip(
+            label: const Text('Pick day'),
+            onPressed: () async {
+              final picked = await showDatePicker(
+                context: context,
+                initialDate: query.date ?? today,
+                firstDate: today.subtract(const Duration(days: 365)),
+                lastDate: today,
+              );
+              if (picked != null) notifier.setDate(picked);
+            },
+          ),
+          const SizedBox(width: 8),
+          ActionChip(
+            label: const Text('Pick range'),
+            onPressed: () async {
+              final picked = await showDateRangePicker(
+                context: context,
+                firstDate: today.subtract(const Duration(days: 365)),
+                lastDate: today,
+                initialDateRange: (query.from != null && query.to != null)
+                    ? DateTimeRange(start: query.from!, end: query.to!)
+                    : null,
+              );
+              if (picked != null) notifier.setRange(picked.start, picked.end);
+            },
+          ),
+          const SizedBox(width: 8),
+          FilterChip(
+            label: const Text('Live'),
+            selected: live,
+            onSelected: (v) =>
+                ref.read(activityLiveUpdatesProvider.notifier).set(v),
+          ),
+          const SizedBox(width: 4),
+          IconButton(
+            tooltip: 'Refresh activity',
+            icon: const Icon(Icons.refresh),
+            onPressed: () {
+              ref.invalidate(activityEntriesProvider);
+              ref.invalidate(activityOptionsProvider);
+            },
+          ),
+        ],
+      ),
     );
   }
 }
@@ -238,9 +273,9 @@ class _Timeline extends StatelessWidget {
           padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
           child: Text(
             _formatDay(day),
-            style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                  fontWeight: FontWeight.bold,
-                ),
+            style: Theme.of(
+              context,
+            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
           ),
         );
       case _HourHeader(:final hour):
@@ -254,23 +289,170 @@ class _Timeline extends StatelessWidget {
       case _EntryItem(:final entry):
         return ActivityEntryTile(
           entry: entry,
-          onTap: () {
-            // Tap → detail navigation is deferred: the activity_log row knows
-            // repo + number but not the PR/issue store ID the /prs/:id and
-            // /issues/:id routes expect. Follow-up spec (AI report generation)
-            // will add a by-number lookup endpoint.
-            showToast(context, '${entry.repo} #${entry.itemNumber}',
-                duration: const Duration(seconds: 2));
-          },
+          onTap: () => _showActivityDetail(context, entry),
         );
     }
   }
 
   static String _formatDay(DateTime d) {
     const months = [
-      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
     ];
     return '${months[d.month - 1]} ${d.day}, ${d.year}';
+  }
+}
+
+void _showActivityDetail(BuildContext context, ActivityEntry entry) {
+  showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    constraints: const BoxConstraints(maxWidth: 760),
+    builder: (_) => _ActivityDetailSheet(entry: entry),
+  );
+}
+
+class _ActivityDetailSheet extends StatelessWidget {
+  final ActivityEntry entry;
+  const _ActivityDetailSheet({required this.entry});
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final details = const JsonEncoder.withIndent('  ').convert(entry.details);
+    final githubUrl = _githubUrl(entry);
+
+    return SafeArea(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(20, 18, 20, 24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                ActivityActionBadge(action: entry.action),
+                const SizedBox(width: 8),
+                ActivityItemTypeBadge(itemType: entry.itemType),
+                const Spacer(),
+                IconButton(
+                  tooltip: 'Close',
+                  icon: const Icon(Icons.close),
+                  onPressed: () => Navigator.of(context).pop(),
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            Text(
+              activityEntryTitle(entry),
+              style: Theme.of(
+                context,
+              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              activityOutcomeText(entry),
+              style: Theme.of(
+                context,
+              ).textTheme.bodyMedium?.copyWith(color: scheme.onSurfaceVariant),
+            ),
+            const SizedBox(height: 18),
+            _DetailRow(label: 'Repository', value: entry.repo),
+            _DetailRow(label: 'Number', value: '#${entry.itemNumber}'),
+            _DetailRow(label: 'Title', value: entry.itemTitle),
+            _DetailRow(label: 'Action', value: entry.action.wireName),
+            _DetailRow(label: 'Outcome', value: entry.outcome),
+            _DetailRow(label: 'Time', value: _formatTimestamp(entry.timestamp)),
+            const SizedBox(height: 14),
+            OutlinedButton.icon(
+              icon: const Icon(Icons.open_in_new, size: 16),
+              label: const Text('Open in GitHub'),
+              onPressed: () async {
+                final opened = await launchUrl(githubUrl);
+                if (!context.mounted || opened) return;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('Could not open $githubUrl')),
+                );
+              },
+            ),
+            if (entry.details.isNotEmpty) ...[
+              const SizedBox(height: 20),
+              Text(
+                'Details',
+                style: Theme.of(
+                  context,
+                ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(height: 8),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: scheme.surfaceContainerHighest.withValues(alpha: 0.55),
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(color: scheme.outlineVariant),
+                ),
+                child: SelectableText(
+                  details,
+                  style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  static Uri _githubUrl(ActivityEntry entry) {
+    final kind = entry.itemType == 'issue' ? 'issues' : 'pull';
+    return Uri.parse(
+      'https://github.com/${entry.repo}/$kind/${entry.itemNumber}',
+    );
+  }
+
+  static String _formatTimestamp(DateTime t) {
+    final date =
+        '${t.year.toString().padLeft(4, '0')}-${t.month.toString().padLeft(2, '0')}-${t.day.toString().padLeft(2, '0')}';
+    return '$date ${activityTimeLabel(t)}';
+  }
+}
+
+class _DetailRow extends StatelessWidget {
+  final String label;
+  final String value;
+  const _DetailRow({required this.label, required this.value});
+
+  @override
+  Widget build(BuildContext context) {
+    if (value.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 96,
+            child: Text(
+              label,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          Expanded(child: SelectableText(value)),
+        ],
+      ),
+    );
   }
 }

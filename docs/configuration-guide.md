@@ -91,6 +91,10 @@ HEIMDALLM_REPOSITORIES=myorg/api,myorg/backend,myorg/frontend
 repositories = ["myorg/api", "myorg/backend", "myorg/frontend"]
 ```
 
+Explicit repo lists in `config.toml` or `HEIMDALLM_REPOSITORIES` win over
+runtime discovery state saved in SQLite. A repo explicitly listed as monitored
+will not be disabled by an older `non_monitored` store row.
+
 ### Topic-based discovery
 
 Instead of (or in addition to) a static list, tag GitHub repositories with a topic and let the daemon discover them automatically.
@@ -135,6 +139,39 @@ HEIMDALLM_POLL_INTERVAL=5m   # valid: 1m, 5m, 30m, 1h
 [github]
 poll_interval = "5m"
 ```
+
+### Repo / org rename propagation
+
+When a repository or its parent organisation is renamed on GitHub, Heimdallm needs to flip every record keyed on the old slug — otherwise rows for the OLD slug keep accumulating in the store while new poll data lands under the NEW slug, per-repo `[ai.repos."old/name"]` overrides stop applying, and stale working dirs linger on disk.
+
+A low-frequency probe queries GitHub for each monitored repo's canonical `full_name` and dispatches a reconciler when it differs. The reconciler runs the rename through a single SQLite transaction (`prs`, `issues`, `activity_log`, `watch_state`, plus an audit row in `repo_renames`), rewrites the config TOML (including `[ai.repos."<old>"]` and `[ai.orgs."<old-org>"]` when the org changed), purges the old worktree so the next acquire clones fresh, and emits an `repo_renamed` SSE event for the dashboard.
+
+```toml
+[ai]
+# Default 1h. "0" disables the probe entirely; operators can still
+# trigger renames manually via POST /admin/repo-rename.
+repo_rename_check_interval = "1h"
+```
+
+| Knob | Default | Purpose |
+|---|---|---|
+| `ai.repo_rename_check_interval` | `1h` | Probe cadence (`0` disables) |
+
+Manual trigger for emergencies (idempotent against the probe — re-running with the same pair after the audit row is in place is a no-op):
+
+```bash
+curl -X POST http://localhost:23456/admin/repo-rename \
+  -H "X-Heimdallm-Token: $HEIMDALLM_API_TOKEN" \
+  -d '{"old_repo": "acme/legacy", "new_repo": "acme/modern"}'
+```
+
+**Caveat — the TOML rewrite is lossy for surface details.** Just like the existing `PATCH /config` endpoints, the rename pipeline round-trips `config.toml` through a generic decoder/encoder, which means:
+
+- Comments anywhere in the file are dropped.
+- Key order inside a table follows the encoder, not the original file.
+- Blank lines between sections are not preserved.
+
+If you maintain `config.toml` by hand and care about comments or layout, keep a separate annotated copy as your source of truth — the daemon's view of `config.toml` is its parsed structure, not its bytes on disk.
 
 ---
 
@@ -246,7 +283,7 @@ The per-agent override takes precedence when set (see [AI Agents](#7-ai-agents))
 
 ## 6. Issue Tracking
 
-The issue tracking pipeline fetches open GitHub issues from monitored repos, classifies them by label, and — depending on the classification — posts an AI analysis comment (`review_only`) or creates a branch, commits the fix, and opens a PR (`develop` / `auto_implement`).
+The issue tracking pipeline fetches open GitHub issues from monitored repos, classifies them by label, and moves them through the stage sequence `triage` (`review_only`) -> `refinement` -> `development` (`develop` / `auto_implement`).
 
 ### Enabling
 
@@ -282,7 +319,7 @@ filter_mode = "exclusive"
 Labels are matched case-insensitively. Precedence from highest to lowest:
 
 ```
-skip_labels  >  blocked_labels  >  review_only_labels  >  develop_labels  >  default_action
+skip_labels  >  blocked_labels  >  review_only_labels  >  refinement_labels  >  develop_labels  >  default_action
 ```
 
 | Field | Env var | Description |
@@ -290,11 +327,13 @@ skip_labels  >  blocked_labels  >  review_only_labels  >  develop_labels  >  def
 | `skip_labels` | `HEIMDALLM_ISSUE_SKIP_LABELS` | Issues with these labels are ignored entirely |
 | `blocked_labels` | `HEIMDALLM_ISSUE_BLOCKED_LABELS` | Issues held until all dependencies close, then promoted |
 | `review_only_labels` | `HEIMDALLM_ISSUE_REVIEW_ONLY_LABELS` | AI posts a triage comment, no implementation |
+| `refinement_labels` | `HEIMDALLM_ISSUE_REFINEMENT_LABELS` | AI reads the repo and posts a structured implementation plan |
 | `develop_labels` | `HEIMDALLM_ISSUE_DEVELOP_LABELS` | AI implements the issue (branch + commit + PR) |
 | `default_action` | `HEIMDALLM_ISSUE_DEFAULT_ACTION` | Applied when no label matches; `ignore` or `review_only` |
 
 ```bash
 HEIMDALLM_ISSUE_DEVELOP_LABELS=enhancement,feature,bug
+HEIMDALLM_ISSUE_REFINEMENT_LABELS=needs-plan
 HEIMDALLM_ISSUE_REVIEW_ONLY_LABELS=question,discussion,analysis
 HEIMDALLM_ISSUE_SKIP_LABELS=wontfix,duplicate,invalid
 HEIMDALLM_ISSUE_DEFAULT_ACTION=ignore
@@ -303,9 +342,27 @@ HEIMDALLM_ISSUE_DEFAULT_ACTION=ignore
 ```toml
 [github.issue_tracking]
 develop_labels     = ["enhancement", "feature", "bug"]
+refinement_labels  = ["needs-plan"]
 review_only_labels = ["question", "discussion", "analysis"]
 skip_labels        = ["wontfix", "duplicate", "invalid"]
 default_action     = "ignore"
+```
+
+### Stage promotion
+
+Promotion changes only GitHub labels; the next poll cycle executes the newly visible stage. This keeps manual API/UI/CLI promotion, auto-promotion, and manual label swaps on GitHub on the same path.
+
+| From | To | Trigger |
+|---|---|---|
+| `triage` / `review_only` | `refinement` | Manual Promote, `auto_promote_triage = true`, or replacing the label on GitHub |
+| `refinement` | `development` | Manual Promote, `auto_promote_refinement = true`, or replacing the label on GitHub |
+
+Manual promotion from triage falls back to `develop_labels` only for legacy configs that have no `refinement_labels`. Auto-promotion does not skip stages: when `auto_promote_triage` is unset, it defaults on only if `refinement_labels` is configured; when `auto_promote_refinement` is unset, it defaults on only if `develop_labels` is configured. If an auto-promote flag is `true` but the target label is not configured, the daemon logs a warning and leaves the issue in its current stage.
+
+```toml
+[ai]
+auto_promote_triage = true       # unset = true only when refinement_labels is configured
+auto_promote_refinement = true   # unset = true only when develop_labels is configured
 ```
 
 > **Warning — `default_action = "review_only"` can cause re-processing loops and excessive API costs.**
@@ -317,11 +374,18 @@ default_action     = "ignore"
 > | Label | Action |
 > |---|---|
 > | A dedicated develop label (e.g. `heimdallm-develop`) | Auto-implement: creates branch + PR |
+> | A dedicated refinement label (e.g. `heimdallm-refine`) | Deep planning: AI reads the repo and posts subtasks |
 > | A dedicated triage label (e.g. `heimdallm-triage`) | Review only: AI analyses and comments once |
 > | No matching label | Ignored (safe default) |
 >
 > This ensures issues are only processed when you explicitly opt them in, preventing runaway costs from repeated AI invocations. Using generic labels like `bug` or `enhancement` in `develop_labels` or `review_only_labels` is discouraged because these are commonly assigned to many issues and can trigger unintended mass processing.
 >
+> **Tier 2 polling concurrency (`ai.tier2_repo_concurrency`)**
+>
+> Per-repo issue polling inside a single Tier 2 issue tick runs in parallel up to `ai.tier2_repo_concurrency` repos at a time (default `5`). The GitHub API rate limiter still throttles network usage; this knob controls wall-clock parallelism. Set higher on a fast network with many monitored repos; set to `1` to force the legacy sequential behaviour. PR fetch and issue processing also run on independent tickers — each tier has its own goroutine with its own `time.Ticker`, and a `time.Ticker` drops redundant ticks when the previous run is still in flight. So a slow issue cycle never delays PR detection, and one tier never blocks the other even if its run exceeds `poll_interval`.
+>
+> Newly auto-discovered repos have their first PR review **deferred by one poll cycle** so the Flutter UI receives `repo_discovered` before `review_started`. The cost is one tick of latency on the very first review of a brand-new repo; the alternative was a race where the UI rendered "review in progress" for a repo it had not yet learned about.
+
 > **Example of a safe, explicit configuration:**
 >
 > ```toml
@@ -332,9 +396,66 @@ default_action     = "ignore"
 > organizations  = ["myorg"]
 > assignees      = ["myusername"]
 > develop_labels     = ["heimdallm-develop"]
+> refinement_labels  = ["heimdallm-refine"]
 > review_only_labels = ["heimdallm-triage"]
 > skip_labels        = ["wontfix", "duplicate", "invalid"]
 > ```
+
+> **When `auto_implement` produces no changes**
+>
+> If the agent runs to completion but leaves the working tree untouched (because the issue lacks enough context, the prompt's "leave untouched if you cannot implement" escape hatch fired, etc.), the daemon reaches a terminal state rather than retrying on every poll. The fallback comment posted on the issue carries a hidden `<!-- heimdallm:done -->` marker so the fetcher's marker scan skips the issue on subsequent ticks. The SSE event surfaced to the UI is `issue_review_error` with `reason: "auto_implement_no_changes"`, rendered as a needs-attention card — not a clean success.
+>
+> To reopen the issue for another auto-implement attempt, post a comment containing `<!-- heimdallm:retry -->` (or remove the develop label to stop here). The retry marker overrides the done marker and forces reprocessing. Issues stored before this behaviour landed (no marker on the comment) keep skipping with reason `auto_implement produced no changes (historical row, no done marker); add retry marker to reprocess` until you post the retry marker manually.
+
+> **Security — `auto_implement` and untrusted issue authors**
+>
+> The body, title, and quoted comments of every processed issue are user-submitted input. When `auto_implement` is enabled, that input becomes part of the prompt sent to an AI CLI with **write access** to the repository checkout. A maliciously crafted issue (the classic "prompt injection" attack) could try to instruct the AI to read sensitive files from the worktree and embed them in the resulting commit.
+>
+> Heimdallm applies layered defenses:
+>
+> - The prompt now declares a **trust boundary**: issue title/body/comments are tagged as untrusted, wrapped in fenced regions, and the AI is told explicitly not to follow instructions found inside them. Any attempt to inject a forged closing fence is neutralised before the prompt is sent.
+> - Before pushing, `CommitAll` scans the staged file list against a **sensitive-path denylist** covering common secret shapes: dotenv files (`.env`, `.env.*`), private keys and certificates (`*.pem`, `*.key`, `*.crt`, `*.cer`, `*.p12`, `*.pfx`, `*.gpg`, `*.asc`), keystores (`*.jks`, `*.keystore`, `*.kdbx`), VPN/wallet (`*.ovpn`, `wallet.dat`), SSH private keys (`id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519` — public `.pub` variants are allowed), `credentials` / `credentials.*` / `.git-credentials`, `kubeconfig`, `.npmrc`, `.netrc`, `.pypirc`, shell history (`.bash_history`, `.zsh_history`), `service-account*.json`, `terraform.tfvars` / `.tfvars.*`. The operator's own `config.toml` is refused only when written at the repository root. Match is case-insensitive (so `.ENV` and `ID_RSA` are also caught). A hit aborts the commit, resets the index, removes the offending files from the worktree, and emits `slog.Warn` with the path and pattern so operators can audit prompt-injection attempts. Symlinks are refused outright even if their basename is innocuous.
+>
+> These defenses reduce blast radius but do not eliminate it. Two operational guidelines still apply:
+>
+> 1. Restrict `auto_implement` (the `develop` stage) to repositories where **all issue authors are trusted collaborators**. Public repositories accepting issues from anonymous reporters should keep `develop` disabled and rely on `triage` / `refinement` for visibility instead.
+> 2. The daemon's worktree contains only the cloned repository, so the AI cannot read files outside it. Keep operator secrets (HEIMDALLM token, GitHub PAT, etc.) outside any monitored clone.
+
+> **Review-state vigilance on `auto_implement` PRs**
+>
+> Once `auto_implement` creates a PR the daemon used to stop watching it. Issue #482 fixes that: Tier 3 now observes the PR's aggregated external review state and emits the `pr_review_state_changed` SSE event when it flips between `APPROVED`, `CHANGES_REQUESTED`, `COMMENTED` and the daemon-internal `FIX_PUSHED`. The state is surfaced on the issue detail and the dashboard tile as a coloured chip, so an operator sees the moment a reviewer leaves feedback without polling GitHub manually.
+>
+> The observation layer is **always on** and costs zero AI tokens — it adds one `GET /pulls/{n}/reviews` call per Tier 3 tick per PR that auto_implement created (PRs marked with a non-zero `auto_implement_issue_id` in the store).
+>
+> Two opt-in flags add agentic responses on top of the observation:
+>
+> ```toml
+> [ai.review_response]
+> enabled         = false   # default — off. Flip to true to opt in.
+> per_pr_lifetime = 5       # max responder runs per PR ever
+> cooldown_secs   = 300     # min seconds between two runs on the same PR
+>
+> [ai.review_fix]
+> enabled         = false   # default — off. Flip to true to opt in.
+> per_pr_lifetime = 3       # max fix runs per PR ever
+> cooldown_secs   = 300
+> ```
+>
+> When `ai.review_response.enabled = true`, a reviewer leaving a `COMMENTED` review triggers the Responder: the agent reads the latest non-bot comment, generates a short conversational reply, and posts it on the PR. The reply is review-only — the agent has no Edit/Write tool — and the reviewer's text passes through the same `UNTRUSTED USER COMMENTS` sanitisation fence the issue triage pipeline uses (#478). After `per_pr_lifetime` responses on the same PR, the Responder emits an `issue_review_error` with `reason="review_response_cap_exceeded"` and stops — there is no way to lift the cap from configuration; the counter is persistent on the PR row.
+>
+> When `ai.review_fix.enabled = true`, a reviewer leaving a `CHANGES_REQUESTED` review triggers the FixRunner. The daemon reserves a per-execution worktree via `repoctx` (#461), fetches the PR's head ref, checks it out at the current tip, runs the agent with the same write-mode permissions as `auto_implement`, and if the working tree changes, commits and pushes back to the same head branch. The follow-up commit is announced via a PR comment so the reviewer sees what landed. After a successful push the PR's external review state flips to `FIX_PUSHED` so the runner does not re-fire on the same CR; a reviewer submitting a fresh CR after the push flips the state back to `CHANGES_REQUESTED` and the cycle can repeat. The lifetime cap (default 3) terminates the cycle for good once reached.
+>
+> If the agent inspects the request and decides not to apply it (out of scope, already addressed, or unclear) the working tree stays clean — the daemon posts an advisory comment explaining the decision but does NOT push and does NOT mark `FIX_PUSHED`. A reviewer who supplies more context can re-trigger the runner within the cooldown + lifetime cap.
+>
+> Cost ceiling guarantees, in plain English:
+>
+> | Feature | Off-by-default | Counter persisted | Max AI invocations per PR |
+> |---|---|---|---|
+> | Observation (Tier 3 reviews fetch) | n/a (always on) | n/a | 0 |
+> | `review_response` | yes | yes (`review_response_count`) | `per_pr_lifetime` (default 5) |
+> | `review_fix` | yes | yes (`review_fix_count`) | `per_pr_lifetime` (default 3) |
+>
+> A misconfigured TOML (`per_pr_lifetime = 0` or negative) falls back to the constant default rather than meaning "unlimited" — flipping `enabled` is the only way to opt in, and the caps cannot be silently uncapped. An operator who wants to retry beyond the cap zeroes the counter in SQLite (`UPDATE prs SET review_response_count = 0 WHERE id = ?`).
 
 ### Scope filters
 
@@ -350,6 +471,15 @@ HEIMDALLM_ISSUE_ASSIGNEES=myusername
 organizations = ["myorg"]
 assignees     = ["myusername"]
 ```
+
+`assignees` is owner scope, not just a sort hint. When issue tracking is
+enabled and no assignees are configured, Heimdallm uses the authenticated
+GitHub login for that machine. That means each daemon processes only issues
+assigned to its operator by default; unassigned issues are ignored even if they
+carry a Heimdallm stage label. To hand work to another operator, triage can
+assign the issue to that user and move it to `refinement`; that user's
+Heimdallm can then continue directly from `refinement` without repeating
+triage.
 
 ### Dependency-based issue promotion
 
@@ -371,6 +501,15 @@ Declare dependencies in the issue body:
 Or use GitHub's native sub-issues feature. Heimdallm reads both sources and unions the results.
 
 When all dependencies are `closed`, the daemon removes the blocked label, adds the promote-to label, and leaves an audit comment.
+
+### Operator smoke test
+
+To verify the staged issue flow end-to-end against a real repository, walk a throwaway issue through `triage` → `refinement` → `development`:
+
+1. Assign the test issue to exactly one user — the current Heimdallm operator — before adding any stage label. `assignees` is owner scope (see above), so the daemon will only pick up issues assigned to its operator.
+2. Add the configured triage label (e.g. `heimdallm-triage`) to enter the flow.
+3. Let Heimdallm promote through `triage` → `refinement` → `development` using the configured stage labels. If `auto_promote_triage` or `auto_promote_refinement` is disabled in your config, promote manually between stages.
+4. If the resulting auto-implement PR is only a smoke-test artifact, close it without merging.
 
 ---
 
@@ -409,7 +548,7 @@ model = "gemini-2.5-pro"
 
 [ai.agents.codex]
 model         = "codex-mini"
-approval_mode = "full-auto"
+approval_mode = "never"       # Codex --ask-for-approval value. Legacy full-auto maps to never.
 
 [ai.agents.opencode]
 model = "anthropic/claude-sonnet-4"
@@ -492,19 +631,58 @@ draft     = false
 
 ### Per-org overrides
 
-Applied to all repos in the org unless a per-repo override exists:
+Applied to all repos in the org unless a per-repo override exists. Resolution is
+field-by-field: `ai.repos."org/repo"` wins over `ai.orgs."org"`, which wins
+over global defaults.
 
 ```toml
 [ai.orgs."myorg"]
+primary      = "gemini"
+fallback     = "claude"
+review_mode  = "multi"
+prompt       = "org-pr-review-profile"
+issue_prompt = "org-issue-triage-profile"
+implement_prompt = "org-implementation-profile"
+refinement_timeout = "30m"
+triage_owner = "alice"
+clone_dir = "/home/heimdallm/repos/myorg-worktrees"
+auto_promote_triage = true
+auto_promote_refinement = false
+generate_pr_description = true
+
 pr_reviewers = ["alice", "bob", "carol"]
 pr_labels    = ["auto-generated", "ai-platform"]
 pr_assignee  = "myusername"
 pr_draft     = false
 
+[ai.orgs."myorg".issue_tracking]
+enabled            = true
+develop_labels     = ["heimdallm-develop"]
+refinement_labels  = ["heimdallm-refine"]
+review_only_labels = ["heimdallm-triage"]
+skip_labels        = ["wontfix"]
+
 [ai.orgs."other-org"]
+primary = "codex"
 pr_reviewers = ["dave"]
 pr_labels    = ["auto-generated"]
 ```
+
+`local_dir` is also accepted at org scope because org overrides share the same
+resolution path as repo overrides, but prefer `local_dir_base` or per-repo
+`local_dir` unless every repo in the org should use the same checkout path.
+
+Scoped overrides distinguish "unset" from "set to empty/false":
+
+- Omit `enabled` under `ai.orgs.*.issue_tracking` or
+  `ai.repos.*.issue_tracking` to inherit. If labels are present and `enabled`
+  is omitted, Heimdallm still treats that scope as enabled, preserving the
+  historical labels-imply-enabled behaviour.
+- Set `enabled = false` to explicitly disable issue tracking at that scope,
+  even when labels are also present.
+- Omit list fields such as `pr_reviewers`, `pr_labels`, `develop_labels`, or
+  `review_only_labels` to inherit. Set them to `[]` to explicitly clear the
+  inherited list.
 
 ### Per-repo overrides
 
@@ -698,7 +876,10 @@ HEIMDALLM_RETENTION_DAYS=90
 max_days = 90
 ```
 
-The purge runs on each poll cycle. Records older than `max_days` are deleted. Set to `0` to disable purging.
+Review/activity records older than `max_days` are deleted. Managed auto-clones
+for repos that are no longer monitored are also purged after `max_days`, but
+only when their `.heimdallm-managed` marker is present. Set to `0` to disable
+purging.
 
 ### Log rotation
 
@@ -718,6 +899,12 @@ Worst-case disk use: `(HEIMDALLM_LOG_KEEP + 1) × HEIMDALLM_LOG_MAX_MB`.
 `heimdallm-cli` is a terminal client for the Heimdallm daemon. Use it to inspect status, list PRs and issues, trigger manual reviews, and tail live events.
 
 ### Installation
+
+**Homebrew:**
+
+```bash
+brew install theburrowhub/tap/heimdallm-cli
+```
 
 **Binary download:**
 
@@ -759,6 +946,29 @@ make setup   # prints the token and copies it into docker/.env
 docker exec heimdallm cat /data/api_token
 ```
 
+### Local development
+
+The CLI is a separate Go module under `cli/`. It uses Cobra for commands and
+Bubble Tea + Lipgloss for the dashboard, and it talks to the daemon through
+`cli/internal/api/client.go`.
+
+From the repository root:
+
+```bash
+make build-cli    # builds cli/bin/heimdallm-cli
+make test-cli     # host-safe CLI tests
+make lint-cli     # go vet for the CLI module
+make dev-daemon   # run the daemon at http://localhost:7842
+make dev-cli      # run heimdallm-cli dashboard
+```
+
+Set `HEIMDALLM_HOST` and `HEIMDALLM_TOKEN` when testing against a non-local
+daemon:
+
+```bash
+HEIMDALLM_HOST=https://heimdallm.example.com HEIMDALLM_TOKEN=... make dev-cli
+```
+
 ### Commands
 
 | Command | Description |
@@ -772,6 +982,28 @@ docker exec heimdallm cat /data/api_token
 | `heimdallm-cli config` | Print the daemon's running configuration as JSON |
 | `heimdallm-cli stats` | Review statistics: totals, by severity, by CLI, top repos, timing |
 | `heimdallm-cli dashboard` | Live terminal dashboard |
+
+### TUI dashboard keybindings
+
+The dashboard tabs are Activity, PRs, Issues, Config, Stats, Logs, and Server.
+
+| Key | Action |
+|---|---|
+| `tab`, `l`, `right` | Move to the next tab |
+| `h`, `left` | Move to the previous tab |
+| `1`-`7` | Jump directly to a tab |
+| `r` | Refresh data |
+| `s` | Stop the daemon (opens a confirmation prompt) |
+| `q`, `ctrl+c` | Quit |
+| `j`, `down` | Move or scroll down |
+| `k`, `up` | Move or scroll up |
+| `pgdn`, `pgup` | Page through long lists or detail views |
+| `g` | Jump to the top of the current list |
+| `G` | Follow the live Logs tab |
+| `enter` | Open PR or issue details |
+| `esc` | Close an open detail view |
+| `p` | Promote a promotable issue |
+| `y` / `n` | Confirm or cancel daemon shutdown |
 
 ---
 
@@ -858,8 +1090,11 @@ non_monitored = []
 #                                       # (see §6 Issue Tracking). Use "ignore" + explicit labels.
 # organizations  = ["myorg"]            # env: HEIMDALLM_ISSUE_ORGANIZATIONS
 # assignees      = ["myusername"]       # env: HEIMDALLM_ISSUE_ASSIGNEES
+#                                       # empty defaults to the authenticated GitHub login
 # develop_labels     = ["enhancement", "feature", "bug"]
 #                                       # env: HEIMDALLM_ISSUE_DEVELOP_LABELS
+# refinement_labels  = ["refine"]
+#                                       # env: HEIMDALLM_ISSUE_REFINEMENT_LABELS
 # review_only_labels = ["question", "discussion", "analysis"]
 #                                       # env: HEIMDALLM_ISSUE_REVIEW_ONLY_LABELS
 # skip_labels        = ["wontfix", "duplicate", "invalid"]
@@ -880,9 +1115,30 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 
 # Global execution timeout for AI CLI calls.
 # execution_timeout = "20m"   # default: 5m — env: HEIMDALLM_EXECUTION_TIMEOUT
+# refinement_timeout = "30m"  # deep issue refinement — env: HEIMDALLM_REFINEMENT_TIMEOUT
+
+# Issue pipeline ownership and promotion defaults.
+# triage_owner = "alice"
+# clone_dir = "/home/heimdallm/repos/worktrees"
+# auto_promote_triage = true      # unset = true only when refinement_labels is configured
+# auto_promote_refinement = true  # unset = true only when develop_labels is configured
 
 # Generate LLM-produced PR titles and descriptions for auto_implement PRs.
 # generate_pr_description = false
+
+# When local_dir is unset, Heimdallm prepares a managed shallow clone for agent
+# context under clone_dir. If clone_dir is also unset, the default is
+# os.TempDir()/heimdallm/<org>/<repo>. Existing directories are mutated only
+# when they contain Heimdallm's .heimdallm-managed marker; local_dir and
+# local_dir_base checkouts are treated as operator-owned.
+# AI CLIs always run with this directory as their process cwd. When the
+# installed CLI advertises a supported repo-context flag in --help, Heimdallm
+# also passes that flag (for example Claude --add-dir, Gemini
+# --include-directories, Codex --cd); otherwise it safely falls back to cwd.
+# Managed clone cleanup is marker-protected and authenticated:
+# DELETE /config/clones                         # all managed clones in configured clone dirs
+# DELETE /config/clones/<url-escaped org/repo>
+# make clean-clones                            # calls DELETE /config/clones
 
 # ── Per-CLI settings (optional) ──────────────────────────────────────────────
 
@@ -901,7 +1157,7 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 
 # [ai.agents.codex]
 # model         = "codex-mini"
-# approval_mode = "full-auto"
+# approval_mode = "never"
 
 # [ai.agents.opencode]
 # model = "anthropic/claude-sonnet-4"
@@ -917,16 +1173,37 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # pr_assignee  = "myusername"
 # pr_draft     = false
 
-# ── Per-org PR metadata overrides ────────────────────────────────────────────
+# ── Per-org overrides ────────────────────────────────────────────────────────
 # Applied to all repos in the org unless overridden per-repo.
+# Each field is optional and inherits from global defaults when absent.
 
 # [ai.orgs."myorg"]
+# primary = "gemini"
+# fallback = "claude"
+# review_mode = "multi"
+# prompt = "org-pr-review-profile"
+# issue_prompt = "org-issue-triage-profile"
+# implement_prompt = "org-implementation-profile"
+# refinement_timeout = "30m"
+# triage_owner = "alice"
+# clone_dir = "/home/heimdallm/repos/myorg-worktrees"
+# auto_promote_triage = true
+# auto_promote_refinement = false
+# generate_pr_description = true
 # pr_reviewers = ["alice", "bob"]
 # pr_labels    = ["auto-generated", "myorg-team"]
 # pr_assignee  = "myusername"
 # pr_draft     = false
+#
+# [ai.orgs."myorg".issue_tracking]
+# enabled = true
+# develop_labels = ["heimdallm-develop"]
+# refinement_labels = ["heimdallm-refine"]
+# review_only_labels = ["heimdallm-triage"]
+# skip_labels = ["wontfix"]
 
 # [ai.orgs."other-org"]
+# primary = "codex"
 # pr_reviewers = ["carol"]
 
 # ── Per-repo AI overrides ─────────────────────────────────────────────────────

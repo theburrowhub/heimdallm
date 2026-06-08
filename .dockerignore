@@ -1,5 +1,22 @@
-# Docker context exclusions for Dockerfile.linux-verify
+# Docker context exclusions for repo-root builds
 .git
+.codex
+
+# Local secrets and runtime config
+.env
+.env.*
+!.env.example
+docker/.env
+docker/.env.*
+!docker/.env.example
+docker/config
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# Build outputs
 flutter_app/build
 daemon/bin
 dist

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/heimdallm/daemon/internal/config"
@@ -73,13 +74,16 @@ type issueMarkerFetcher interface {
 // Fetcher, ProcessRepo publishes to NATS instead of calling pipeline.Run.
 type IssuePublisher interface {
 	PublishIssueTriage(ctx context.Context, repo string, number int, githubID int64) error
+	PublishIssueRefinement(ctx context.Context, repo string, number int, githubID int64) error
 	PublishIssueImplement(ctx context.Context, repo string, number int, githubID int64) error
 }
 
 // OptionsFn lets the caller map each classified issue to its RunOptions.
 // In production main.go resolves per-repo AI config here; tests can return a
-// constant.
-type OptionsFn func(issue *github.Issue) RunOptions
+// constant. ok=false skips this issue after classification; use it when the
+// caller cannot prepare required execution context and has already surfaced
+// the failure.
+type OptionsFn func(issue *github.Issue) (opts RunOptions, ok bool)
 
 // Fetcher orchestrates: fetch issues for a repo, skip those already processed
 // without new activity, dispatch the rest to the pipeline.
@@ -89,6 +93,10 @@ type Fetcher struct {
 	store     issueDedupStore
 	pipeline  PipelineRunner
 	publisher IssuePublisher // optional — when set, publishes to NATS instead of running pipeline
+	botLogin  string         // GitHub login of the bot — used to ignore self-triggered updated_at bumps
+
+	stageClient StageTransitionClient
+	stageBroker Publisher
 }
 
 // NewFetcher wires the orchestrator. All dependencies are interfaces so
@@ -105,6 +113,21 @@ func (f *Fetcher) SetPublisher(p IssuePublisher) {
 	f.publisher = p
 }
 
+// SetBotLogin sets the GitHub login of the bot account. When set, the
+// dedup check ignores updated_at bumps caused by the bot's own comments,
+// breaking the re-triage loop described in #362.
+func (f *Fetcher) SetBotLogin(login string) {
+	f.botLogin = login
+}
+
+// SetStageTransitioner enables audit + normalization when a user manually
+// changes stage labels on GitHub. The next poll sees the new classification,
+// records the transition, and then dispatches the new stage normally.
+func (f *Fetcher) SetStageTransitioner(client StageTransitionClient, broker Publisher) {
+	f.stageClient = client
+	f.stageBroker = broker
+}
+
 // ProcessRepo fetches every eligible issue for one repo and dispatches it to
 // the pipeline. Returns the number of issues actually handed off and a
 // non-nil error only when the fetch itself failed — per-issue pipeline
@@ -115,6 +138,12 @@ func (f *Fetcher) SetPublisher(p IssuePublisher) {
 // shutdown cancels whatever issue is currently being processed.
 func (f *Fetcher) ProcessRepo(ctx context.Context, repo string, cfg config.IssueTrackingConfig, authUser string, optsFor OptionsFn) (int, error) {
 	if !cfg.Enabled {
+		return 0, nil
+	}
+	cfg = cfg.WithDefaultAssignee(authUser)
+	if len(cfg.Assignees) == 0 {
+		slog.Warn("issues fetcher: issue tracking has no assignee scope, skipping repo",
+			"repo", repo)
 		return 0, nil
 	}
 	if optsFor == nil {
@@ -149,12 +178,18 @@ func (f *Fetcher) ProcessRepo(ctx context.Context, repo string, cfg config.Issue
 				"repo", repo, "number", issue.Number, "reason", reason)
 			continue
 		}
+		if err := f.auditManualStageChange(ctx, issue, cfg); err != nil {
+			slog.Warn("issues fetcher: manual stage transition audit failed",
+				"repo", repo, "number", issue.Number, "err", err)
+		}
 
 		if f.publisher != nil {
 			var pubErr error
 			switch issue.Mode {
 			case config.IssueModeReviewOnly:
 				pubErr = f.publisher.PublishIssueTriage(ctx, issue.Repo, issue.Number, issue.ID)
+			case config.IssueModeRefinement:
+				pubErr = f.publisher.PublishIssueRefinement(ctx, issue.Repo, issue.Number, issue.ID)
 			case config.IssueModeDevelop:
 				pubErr = f.publisher.PublishIssueImplement(ctx, issue.Repo, issue.Number, issue.ID)
 			default:
@@ -168,7 +203,11 @@ func (f *Fetcher) ProcessRepo(ctx context.Context, repo string, cfg config.Issue
 				continue
 			}
 		} else {
-			if _, runErr := f.pipeline.Run(ctx, issue, optsFor(issue)); runErr != nil {
+			opts, ok := optsFor(issue)
+			if !ok {
+				continue
+			}
+			if _, runErr := f.pipeline.Run(ctx, issue, opts); runErr != nil {
 				slog.Error("issues fetcher: pipeline run failed",
 					"repo", repo, "number", issue.Number, "err", runErr)
 				continue
@@ -204,12 +243,17 @@ func (f *Fetcher) alreadyProcessed(issue *github.Issue) (bool, string, error) {
 	// dedup gates so a retry marker can override all of them. The API call
 	// is skipped when the comment fetcher is nil (legacy callers / tests
 	// that pre-date marker support).
+	// cachedComments holds the comments fetched during marker scanning,
+	// reused later for the bot-comment check to avoid a second API call.
+	var cachedComments []github.Comment
+
 	if f.comments != nil {
 		comments, cmErr := f.comments.FetchIssueCommentsOnly(issue.Repo, issue.Number)
 		if cmErr != nil {
 			slog.Warn("issues fetcher: marker scan failed, falling through to dedup checks",
 				"repo", issue.Repo, "number", issue.Number, "err", cmErr)
 		} else {
+			cachedComments = comments
 			switch ScanMarkers(comments) {
 			case MarkerResultRetry:
 				return false, "", nil // force reprocess
@@ -241,6 +285,27 @@ func (f *Fetcher) alreadyProcessed(issue *github.Issue) (bool, string, error) {
 	if latest.ActionTaken == "auto_implement" && latest.PRCreated > 0 {
 		return true, "already implemented (PR created)", nil
 	}
+	if latest.ActionTaken == ActionAutoImplementNoChanges && issue.Mode == config.IssueModeDevelop {
+		// Back-compat skip for rows written before #483 added MarkerDone
+		// to the fallback comment. New no-changes runs are terminated by
+		// the marker scan above; reaching here means the row was stored
+		// without a marker, so we keep skipping until a human posts
+		// MarkerRetry (handled before this block).
+		return true, "auto_implement produced no changes (historical row, no done marker); add retry marker to reprocess", nil
+	}
+
+	// Bot-comment dedup: if the most recent comment is from the bot AND the
+	// issue's current mode matches what was already done (ActionTaken), the
+	// updated_at bump was self-triggered — skip. When the mode changed
+	// (e.g. review_only → develop after a label swap), reprocess even if
+	// the last comment is from the bot. This breaks the re-triage loop
+	// (#362) without blocking mode transitions.
+	if f.botLogin != "" && len(cachedComments) > 0 {
+		last := cachedComments[len(cachedComments)-1]
+		if strings.EqualFold(last.Author, f.botLogin) && latest.ActionTaken == string(issue.Mode) {
+			return true, "last comment is from bot, same mode (self-triggered update)", nil
+		}
+	}
 
 	// If the auto_implement push has failed too many times, stop retrying.
 	failCount, fcErr := f.store.CountFailedAutoImplement(row.ID)
@@ -249,6 +314,15 @@ func (f *Fetcher) alreadyProcessed(issue *github.Issue) (bool, string, error) {
 			"repo", issue.Repo, "number", issue.Number, "err", fcErr)
 	} else if failCount >= MaxAutoImplementFailures {
 		return true, fmt.Sprintf("auto_implement failed %d times (cap %d), requires human intervention", failCount, MaxAutoImplementFailures), nil
+	}
+
+	// Any adjacent forward stage promotion is real new work, regardless of
+	// whether the bot or a human changed labels. Do not let RecomputeGrace hide
+	// triage -> refinement or refinement -> development.
+	if latestStage, latestOK := StageFromAction(latest.ActionTaken); latestOK {
+		if currentStage, currentOK := StageFromMode(issue.Mode); currentOK && isForwardStageAdvance(latestStage, currentStage) {
+			return false, "", nil
+		}
 	}
 
 	ref := latest.CommentedAt
@@ -260,4 +334,95 @@ func (f *Fetcher) alreadyProcessed(issue *github.Issue) (bool, string, error) {
 		return true, "no new activity since last review", nil
 	}
 	return false, "", nil
+}
+
+func (f *Fetcher) auditManualStageChange(ctx context.Context, issue *github.Issue, cfg config.IssueTrackingConfig) error {
+	if f.stageClient == nil || issue == nil {
+		return nil
+	}
+	to, ok := StageFromMode(issue.Mode)
+	if !ok {
+		return nil
+	}
+	row, err := f.store.GetIssueByGithubID(issue.ID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	latest, err := f.store.LatestIssueReview(row.ID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	if latest == nil {
+		return nil
+	}
+	from, ok := StageFromAction(latest.ActionTaken)
+	if !ok || from == to {
+		return nil
+	}
+
+	var comments []github.Comment
+	if f.comments != nil {
+		got, err := f.comments.FetchIssueCommentsOnly(issue.Repo, issue.Number)
+		if err != nil {
+			slog.Warn("issues fetcher: manual stage audit comment fetch failed, continuing without dedup context",
+				"repo", issue.Repo, "number", issue.Number, "err", err)
+		} else {
+			comments = got
+		}
+	}
+	ref := latest.CommentedAt
+	if ref.IsZero() {
+		ref = latest.CreatedAt
+	}
+	alreadyAudited := hasStagePromotionCommentSince(comments, from, to, ref)
+	targetAudited := alreadyAudited || hasStagePromotionTargetCommentSince(comments, to, ref)
+	if targetAudited && stageTransitionApplied(issue, cfg, to) {
+		slog.Debug("issues fetcher: stage transition already audited since latest review",
+			"repo", issue.Repo, "number", issue.Number, "from", from, "to", to)
+		return nil
+	}
+	if targetAudited {
+		slog.Debug("issues fetcher: stage transition audit exists but labels need normalization",
+			"repo", issue.Repo, "number", issue.Number, "from", from, "to", to)
+	}
+
+	return TransitionIssueStage(ctx, f.stageClient, StageTransition{
+		Issue:          issue,
+		StoreIssueID:   row.ID,
+		Config:         cfg,
+		From:           from,
+		To:             to,
+		Trigger:        StagePromotionManualGitHub,
+		Time:           time.Now().UTC(),
+		RecentComments: comments,
+		SuppressAudit:  targetAudited,
+		Broker:         f.stageBroker,
+	})
+}
+
+var issueStageOrder = []IssueStage{
+	IssueStageTriage,
+	IssueStageRefinement,
+	IssueStageDevelopment,
+}
+
+func isForwardStageAdvance(from, to IssueStage) bool {
+	fromIdx, fromOK := issueStageOrdinal(from)
+	toIdx, toOK := issueStageOrdinal(to)
+	return fromOK && toOK && toIdx == fromIdx+1
+}
+
+func issueStageOrdinal(stage IssueStage) (int, bool) {
+	for idx, candidate := range issueStageOrder {
+		if candidate == stage {
+			return idx, true
+		}
+	}
+	return 0, false
 }

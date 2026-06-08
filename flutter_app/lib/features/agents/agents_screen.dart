@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/models/agent.dart';
+import '../../shared/widgets/keep_alive_tab.dart';
 import '../../shared/widgets/toast.dart';
 import '../dashboard/dashboard_providers.dart';
 
@@ -73,25 +74,31 @@ class _PromptsView extends ConsumerWidget {
           Expanded(
             child: TabBarView(
               children: [
-                _CategoryTab(
-                  category: PromptCategory.prReview,
-                  prompts: prompts,
-                  presets: ReviewPrompt.presets,
-                  emptyMessage: 'Add a preset or create a custom prompt.',
+                KeepAliveTab(
+                  child: _CategoryTab(
+                    category: PromptCategory.prReview,
+                    prompts: prompts,
+                    presets: ReviewPrompt.presets,
+                    emptyMessage: 'Add a preset or create a custom prompt.',
+                  ),
                 ),
-                _CategoryTab(
-                  category: PromptCategory.issueTriage,
-                  prompts: prompts,
-                  presets: ReviewPrompt.issueTriagePresets,
-                  emptyMessage:
-                      'Tap a preset above or create a custom prompt to customise how issues are analysed.',
+                KeepAliveTab(
+                  child: _CategoryTab(
+                    category: PromptCategory.issueTriage,
+                    prompts: prompts,
+                    presets: ReviewPrompt.issueTriagePresets,
+                    emptyMessage:
+                        'Tap a preset above or create a custom prompt to customise how issues are analysed.',
+                  ),
                 ),
-                _CategoryTab(
-                  category: PromptCategory.development,
-                  prompts: prompts,
-                  presets: ReviewPrompt.developmentPresets,
-                  emptyMessage:
-                      'Tap a preset above or create a custom prompt to customise auto-implementation.',
+                KeepAliveTab(
+                  child: _CategoryTab(
+                    category: PromptCategory.development,
+                    prompts: prompts,
+                    presets: ReviewPrompt.developmentPresets,
+                    emptyMessage:
+                        'Tap a preset above or create a custom prompt to customise auto-implementation.',
+                  ),
                 ),
               ],
             ),
@@ -509,7 +516,7 @@ class _SectionHeader extends StatelessWidget {
         Text(title, style: Theme.of(context).textTheme.titleSmall
             ?.copyWith(fontWeight: FontWeight.bold)),
         const Spacer(),
-        if (trailing != null) trailing!,
+        ?trailing,
       ]),
     );
   }

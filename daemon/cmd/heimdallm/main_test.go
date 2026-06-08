@@ -1,12 +1,26 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/heimdallm/daemon/internal/bus"
+	"github.com/heimdallm/daemon/internal/config"
+	gh "github.com/heimdallm/daemon/internal/github"
+	issuepipeline "github.com/heimdallm/daemon/internal/issues"
+	"github.com/heimdallm/daemon/internal/repoctx"
+	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
+	natsserver "github.com/nats-io/nats-server/v2/server"
+	"github.com/nats-io/nats.go"
 )
 
 // newMemStore returns an in-memory SQLite store with a short cleanup hook.
@@ -23,10 +37,1009 @@ func newMemStore(t *testing.T) *store.Store {
 	return s
 }
 
+func TestAcquireRepoContextNilManagerIsError(t *testing.T) {
+	aiCfg := config.RepoAI{}
+	_, err := acquireRepoContext(context.Background(), nil, "org/repo", &aiCfg, nil, "secret", repoctx.ModeRead, "", "", "")
+	if err == nil || !strings.Contains(err.Error(), "nil manager") {
+		t.Fatalf("err = %v, want nil manager error", err)
+	}
+}
+
+func TestDefaultAutoImplementPRAssignee(t *testing.T) {
+	if got := defaultAutoImplementPRAssignee("", "@ivanmunozruiz"); got != "ivanmunozruiz" {
+		t.Fatalf("default assignee = %q, want ivanmunozruiz", got)
+	}
+	if got := defaultAutoImplementPRAssignee("configured", "ivanmunozruiz"); got != "configured" {
+		t.Fatalf("configured assignee = %q, want configured", got)
+	}
+}
+
+// TestAutoPromoteTransitionsLabelEvenWhenAssigneeOutOfScope pins the #458
+// contract: auto-promote moves the stage label unconditionally when enabled.
+// Handoff to another operator happens at the *next* stage's worker entry,
+// which already gates by assignee scope (see issueTrackingWithAssigneeScope +
+// issueStageStillCurrent in this file). Re-introducing a scope gate inside
+// autoPromoteAfterStage — as #457 did — strands the issue at the current
+// stage label and the new assignee's daemon never picks it up.
+func TestAutoPromoteTransitionsLabelEvenWhenAssigneeOutOfScope(t *testing.T) {
+	var (
+		addedLabels   [][]string
+		removedLabels []string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/org/repo/issues/7/comments":
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/org/repo/labels":
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/org/repo/issues/7/labels":
+			var payload struct {
+				Labels []string `json:"labels"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			addedLabels = append(addedLabels, payload.Labels)
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode([]map[string]string{})
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/repos/org/repo/issues/7/labels/"):
+			removedLabels = append(removedLabels, strings.TrimPrefix(r.URL.Path, "/repos/org/repo/issues/7/labels/"))
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode([]map[string]string{})
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/org/repo/issues/7/comments":
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"created_at": time.Now().UTC().Format(time.RFC3339),
+			})
+		default:
+			t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.String())
+			http.Error(w, "unexpected request", http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("tok", gh.WithBaseURL(srv.URL))
+	it := config.IssueTrackingConfig{
+		Assignees:        []string{"userA"},
+		ReviewOnlyLabels: []string{"heimdallm-triage"},
+		RefinementLabels: []string{"heimdallm-refine"},
+	}
+	// The issue's GitHub assignee is userB (handoff target); the daemon's
+	// scope is userA. Auto-promote must still transition the label so
+	// userB's daemon picks up refinement on its next poll.
+	issue := &gh.Issue{
+		Repo:      "org/repo",
+		Number:    7,
+		State:     "open",
+		Assignees: []gh.User{{Login: "userB"}},
+		Labels:    []gh.Label{{Name: "heimdallm-triage"}},
+	}
+
+	autoPromoteAfterStage(context.Background(), client, nil, issue, 42, it, config.RepoAI{},
+		issuepipeline.IssueStageTriage, "test")
+
+	if len(addedLabels) != 1 || len(addedLabels[0]) != 1 || addedLabels[0][0] != "heimdallm-refine" {
+		t.Fatalf("AddLabels = %#v, want one call with [heimdallm-refine] (label transition is unconditional under #458)", addedLabels)
+	}
+	if len(removedLabels) != 1 || removedLabels[0] != "heimdallm-triage" {
+		t.Fatalf("RemoveLabels = %#v, want one DELETE for heimdallm-triage", removedLabels)
+	}
+}
+
+// ── manual re-review dispatch by current stage (#462) ───────────────────────
+
+// dispatchCall records which Publish* method the dispatcher called and with
+// what arguments. Tests assert the (subject, repo, number, githubID) tuple
+// rather than the raw bus.IssueMsg encoding so a future field addition to
+// IssueMsg does not silently break these assertions.
+type dispatchCall struct {
+	Subject  string
+	Repo     string
+	Number   int
+	GithubID int64
+}
+
+type fakeIssueRunPublisher struct {
+	calls []dispatchCall
+	err   error
+}
+
+func (f *fakeIssueRunPublisher) PublishIssueTriage(_ context.Context, repo string, number int, githubID int64) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.calls = append(f.calls, dispatchCall{"triage", repo, number, githubID})
+	return nil
+}
+
+func (f *fakeIssueRunPublisher) PublishIssueRefinement(_ context.Context, repo string, number int, githubID int64) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.calls = append(f.calls, dispatchCall{"refinement", repo, number, githubID})
+	return nil
+}
+
+func (f *fakeIssueRunPublisher) PublishIssueImplement(_ context.Context, repo string, number int, githubID int64) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.calls = append(f.calls, dispatchCall{"implement", repo, number, githubID})
+	return nil
+}
+
+func dispatchIssue(labels ...string) *gh.Issue {
+	ghLabels := make([]gh.Label, 0, len(labels))
+	for _, l := range labels {
+		ghLabels = append(ghLabels, gh.Label{Name: l})
+	}
+	return &gh.Issue{
+		ID:     4242,
+		Repo:   "org/repo",
+		Number: 7,
+		Labels: ghLabels,
+	}
+}
+
+func TestDispatchIssueRunByCurrentMode_Triage(t *testing.T) {
+	pub := &fakeIssueRunPublisher{}
+	cfg := config.IssueTrackingConfig{
+		ReviewOnlyLabels: []string{"heimdallm-triage"},
+		RefinementLabels: []string{"heimdallm-refine"},
+		DevelopLabels:    []string{"heimdallm-develop"},
+	}
+
+	if err := dispatchIssueRunByCurrentMode(context.Background(), pub, cfg, dispatchIssue("heimdallm-triage")); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if len(pub.calls) != 1 || pub.calls[0].Subject != "triage" {
+		t.Fatalf("calls = %#v, want one triage", pub.calls)
+	}
+	if pub.calls[0].Repo != "org/repo" || pub.calls[0].Number != 7 || pub.calls[0].GithubID != 4242 {
+		t.Errorf("call args = %#v, want repo/number/id propagated from issue", pub.calls[0])
+	}
+}
+
+func TestDispatchIssueRunByCurrentMode_Refinement(t *testing.T) {
+	pub := &fakeIssueRunPublisher{}
+	cfg := config.IssueTrackingConfig{
+		ReviewOnlyLabels: []string{"heimdallm-triage"},
+		RefinementLabels: []string{"heimdallm-refine"},
+		DevelopLabels:    []string{"heimdallm-develop"},
+	}
+
+	if err := dispatchIssueRunByCurrentMode(context.Background(), pub, cfg, dispatchIssue("heimdallm-refine")); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if len(pub.calls) != 1 || pub.calls[0].Subject != "refinement" {
+		t.Fatalf("calls = %#v, want one refinement", pub.calls)
+	}
+}
+
+func TestDispatchIssueRunByCurrentMode_Develop(t *testing.T) {
+	// Pins the #462 fix: an issue auto-promoted to develop re-dispatches
+	// to the implement worker, not back to triage as the previous stored-
+	// classification path did.
+	pub := &fakeIssueRunPublisher{}
+	cfg := config.IssueTrackingConfig{
+		ReviewOnlyLabels: []string{"heimdallm-triage"},
+		RefinementLabels: []string{"heimdallm-refine"},
+		DevelopLabels:    []string{"heimdallm-develop"},
+	}
+
+	if err := dispatchIssueRunByCurrentMode(context.Background(), pub, cfg, dispatchIssue("heimdallm-develop")); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if len(pub.calls) != 1 || pub.calls[0].Subject != "implement" {
+		t.Fatalf("calls = %#v, want one implement (post-auto-promote re-review must hit develop, #462)", pub.calls)
+	}
+}
+
+func TestDispatchIssueRunByCurrentMode_BlockedReturnsErrorWithoutPublishing(t *testing.T) {
+	pub := &fakeIssueRunPublisher{}
+	cfg := config.IssueTrackingConfig{
+		BlockedLabels: []string{"blocked"},
+		DevelopLabels: []string{"heimdallm-develop"},
+	}
+
+	err := dispatchIssueRunByCurrentMode(context.Background(), pub, cfg, dispatchIssue("blocked"))
+	if err == nil {
+		t.Fatal("expected error for blocked issue, got nil")
+	}
+	if !strings.Contains(err.Error(), "blocked") {
+		t.Errorf("error should mention blocked state, got: %v", err)
+	}
+	if len(pub.calls) != 0 {
+		t.Errorf("expected no publish for blocked issue, got %#v", pub.calls)
+	}
+}
+
+func TestDispatchIssueRunByCurrentMode_SkipLabelReturnsErrorWithoutPublishing(t *testing.T) {
+	pub := &fakeIssueRunPublisher{}
+	cfg := config.IssueTrackingConfig{
+		SkipLabels:    []string{"wontfix"},
+		DevelopLabels: []string{"heimdallm-develop"},
+	}
+
+	err := dispatchIssueRunByCurrentMode(context.Background(), pub, cfg, dispatchIssue("wontfix"))
+	if err == nil {
+		t.Fatal("expected error for skip-labelled issue, got nil")
+	}
+	// The error must be label-aware so the operator sees WHY the manual
+	// re-review was rejected — generic "nothing to run" hid the skip label
+	// case behind the no-stage-label phrasing.
+	if !strings.Contains(err.Error(), "ignored by current label") {
+		t.Errorf("error should mention current label configuration, got: %v", err)
+	}
+	if len(pub.calls) != 0 {
+		t.Errorf("expected no publish for skip-labelled issue, got %#v", pub.calls)
+	}
+}
+
+func TestDispatchIssueRunByCurrentMode_DefaultsToTriageWhenConfigured(t *testing.T) {
+	// No stage labels on the issue, but default_action = review_only →
+	// dispatch to triage. Matches the fetcher's classification fallback.
+	pub := &fakeIssueRunPublisher{}
+	cfg := config.IssueTrackingConfig{
+		DefaultAction: "review_only",
+	}
+
+	if err := dispatchIssueRunByCurrentMode(context.Background(), pub, cfg, dispatchIssue("user-tag")); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if len(pub.calls) != 1 || pub.calls[0].Subject != "triage" {
+		t.Fatalf("calls = %#v, want one triage from default_action fallback", pub.calls)
+	}
+}
+
+func TestDispatchIssueRunByCurrentMode_DefaultsToIgnoreReturnsError(t *testing.T) {
+	// No stage labels, no default_action — same as the fetcher: ignore.
+	// Re-review on such an issue is meaningless; surface a clear error.
+	pub := &fakeIssueRunPublisher{}
+	cfg := config.IssueTrackingConfig{}
+
+	err := dispatchIssueRunByCurrentMode(context.Background(), pub, cfg, dispatchIssue("user-tag"))
+	if err == nil {
+		t.Fatal("expected error when issue has no stage label and no default_action, got nil")
+	}
+	if !strings.Contains(err.Error(), "ignored by current label") {
+		t.Errorf("error should mention current label configuration, got: %v", err)
+	}
+	if len(pub.calls) != 0 {
+		t.Errorf("expected no publish, got %#v", pub.calls)
+	}
+}
+
+func TestDispatchIssueRunByCurrentMode_NilIssueReturnsError(t *testing.T) {
+	pub := &fakeIssueRunPublisher{}
+	err := dispatchIssueRunByCurrentMode(context.Background(), pub, config.IssueTrackingConfig{}, nil)
+	if err == nil {
+		t.Fatal("expected error for nil issue, got nil")
+	}
+	if len(pub.calls) != 0 {
+		t.Errorf("expected no publish on nil issue, got %#v", pub.calls)
+	}
+}
+
+func TestDispatchIssueRunByCurrentMode_AssigneeOutOfScopeReturnsErrorWithoutPublishing(t *testing.T) {
+	// The worker entries (issueStageStillCurrent) silently skip when the
+	// issue's assignees fall outside the daemon's scope, which makes a
+	// manual Re-review click look like the GUI is broken: spinner +
+	// silence. Gate at the dispatcher so the operator sees a clear error
+	// instead.
+	pub := &fakeIssueRunPublisher{}
+	cfg := config.IssueTrackingConfig{
+		Assignees:     []string{"userA"},
+		DevelopLabels: []string{"heimdallm-develop"},
+	}
+	issue := &gh.Issue{
+		ID: 4242, Repo: "org/repo", Number: 7,
+		Labels:    []gh.Label{{Name: "heimdallm-develop"}},
+		Assignees: []gh.User{{Login: "userB"}},
+	}
+
+	err := dispatchIssueRunByCurrentMode(context.Background(), pub, cfg, issue)
+	if err == nil {
+		t.Fatal("expected error when issue is outside daemon scope, got nil")
+	}
+	if !strings.Contains(err.Error(), "scope") {
+		t.Errorf("error should mention scope, got: %v", err)
+	}
+	if len(pub.calls) != 0 {
+		t.Errorf("expected no publish for out-of-scope issue, got %#v", pub.calls)
+	}
+}
+
+func TestDispatchIssueRunByCurrentMode_InScopeAssigneeProceeds(t *testing.T) {
+	// Mirror image of the out-of-scope test: when the issue's assignee
+	// matches the daemon scope, dispatch proceeds. Pins both branches of
+	// the scope gate.
+	pub := &fakeIssueRunPublisher{}
+	cfg := config.IssueTrackingConfig{
+		Assignees:     []string{"userA"},
+		DevelopLabels: []string{"heimdallm-develop"},
+	}
+	issue := &gh.Issue{
+		ID: 4242, Repo: "org/repo", Number: 7,
+		Labels:    []gh.Label{{Name: "heimdallm-develop"}},
+		Assignees: []gh.User{{Login: "userA"}},
+	}
+
+	if err := dispatchIssueRunByCurrentMode(context.Background(), pub, cfg, issue); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if len(pub.calls) != 1 || pub.calls[0].Subject != "implement" {
+		t.Fatalf("calls = %#v, want one implement (assignee in scope)", pub.calls)
+	}
+}
+
+func TestAutoPromoteTriageSmartDefaultRequiresRefinementLabel(t *testing.T) {
+	aiCfg := config.RepoAI{}
+	it := config.IssueTrackingConfig{}
+	if autoPromoteStageEnabled(aiCfg, it, issuepipeline.IssueStageTriage) {
+		t.Fatal("unset auto_promote_triage without refinement labels should preserve legacy manual behavior")
+	}
+
+	it.RefinementLabels = []string{"heimdallm-refine"}
+	if !autoPromoteStageEnabled(aiCfg, it, issuepipeline.IssueStageTriage) {
+		t.Fatal("unset auto_promote_triage with refinement labels should adopt the staged default")
+	}
+
+	disabled := false
+	aiCfg.AutoPromoteTriage = &disabled
+	if autoPromoteStageEnabled(aiCfg, it, issuepipeline.IssueStageTriage) {
+		t.Fatal("explicit auto_promote_triage=false should win over refinement labels")
+	}
+}
+
+func TestAutoPromoteRefinementSmartDefaultRequiresDevelopLabel(t *testing.T) {
+	aiCfg := config.RepoAI{}
+	it := config.IssueTrackingConfig{}
+	if autoPromoteStageEnabled(aiCfg, it, issuepipeline.IssueStageRefinement) {
+		t.Fatal("unset auto_promote_refinement without develop labels should preserve manual behavior")
+	}
+
+	it.DevelopLabels = []string{"heimdallm-develop"}
+	if !autoPromoteStageEnabled(aiCfg, it, issuepipeline.IssueStageRefinement) {
+		t.Fatal("unset auto_promote_refinement with develop labels should adopt the staged default")
+	}
+
+	disabled := false
+	aiCfg.AutoPromoteRefinement = &disabled
+	if autoPromoteStageEnabled(aiCfg, it, issuepipeline.IssueStageRefinement) {
+		t.Fatal("explicit auto_promote_refinement=false should win over develop labels")
+	}
+}
+
+func TestManagedCloneDirsIncludesDefaultAndScopedOverrides(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.AI.CloneDir = "/global"
+	cfg.AI.Orgs = map[string]config.OrgAI{
+		"org": {CloneDir: "/org"},
+	}
+	cfg.AI.Repos = map[string]config.RepoAI{
+		"org/repo":  {CloneDir: "/repo"},
+		"org/other": {CloneDir: "/org"},
+	}
+
+	got := managedCloneDirs(cfg)
+	want := []string{"", "/global", "/org", "/repo"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("managedCloneDirs = %v, want %v", got, want)
+	}
+}
+
+func TestMonitoredRepoSetMergesDiscoveredAndExcludesNonMonitored(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.GitHub.Repositories = []string{"org/static"}
+	cfg.GitHub.NonMonitored = []string{"org/disabled"}
+
+	got := monitoredRepoSet(cfg, []string{"org/discovered", "org/disabled"})
+	for _, repo := range []string{"org/static", "org/discovered"} {
+		if _, ok := got[repo]; !ok {
+			t.Fatalf("monitoredRepoSet missing %s: %v", repo, got)
+		}
+	}
+	if _, ok := got["org/disabled"]; ok {
+		t.Fatalf("monitoredRepoSet includes non-monitored repo: %v", got)
+	}
+}
+
+func TestPurgeStaleManagedClonesUsesRetentionAndConfiguredDirs(t *testing.T) {
+	base := t.TempDir()
+	oldRepo := filepath.Join(base, "org", "old")
+	keepRepo := filepath.Join(base, "org", "keep")
+	for repo, dir := range map[string]string{
+		"org/old":  oldRepo,
+		"org/keep": keepRepo,
+	} {
+		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeManagedMarkerForTest(t, dir, repo)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	for _, dir := range []string{oldRepo, keepRepo} {
+		if err := os.Chtimes(filepath.Join(dir, repoctx.MarkerFile), old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := &config.Config{}
+	cfg.AI.CloneDir = base
+	cfg.GitHub.Repositories = []string{"org/keep"}
+	cfg.Retention.MaxDays = 1
+
+	removed, err := purgeStaleManagedClones(context.Background(), repoctx.NewManager(), cfg, nil)
+	if err != nil {
+		t.Fatalf("purgeStaleManagedClones: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+	if _, err := os.Stat(oldRepo); !os.IsNotExist(err) {
+		t.Fatalf("old unmonitored clone still exists or stat failed unexpectedly: %v", err)
+	}
+	if _, err := os.Stat(keepRepo); err != nil {
+		t.Fatalf("monitored clone should remain: %v", err)
+	}
+}
+
+func writeManagedMarkerForTest(t *testing.T, dir, repo string) {
+	t.Helper()
+	data := []byte(`{"version":1,"repo":"` + repo + `","managed_by":"heimdallm"}` + "\n")
+	if err := os.WriteFile(filepath.Join(dir, repoctx.MarkerFile), data, 0o600); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+}
+
 func seedAgent(t *testing.T, s *store.Store, a store.Agent) {
 	t.Helper()
 	if err := s.UpsertAgent(&a); err != nil {
 		t.Fatalf("upsert agent %q: %v", a.ID, err)
+	}
+}
+
+func newInProcessNATS(t *testing.T) *nats.Conn {
+	t.Helper()
+	srv, err := natsserver.NewServer(&natsserver.Options{
+		ServerName: t.Name(),
+		DontListen: true,
+		NoLog:      true,
+		NoSigs:     true,
+	})
+	if err != nil {
+		t.Fatalf("new nats server: %v", err)
+	}
+	srv.Start()
+	if !srv.ReadyForConnections(5 * time.Second) {
+		t.Fatal("nats server not ready")
+	}
+	conn, err := nats.Connect("", nats.InProcessServer(srv), nats.Name(t.Name()))
+	if err != nil {
+		t.Fatalf("connect nats: %v", err)
+	}
+	t.Cleanup(func() {
+		conn.Close()
+		srv.Shutdown()
+		srv.WaitForShutdown()
+	})
+	return conn
+}
+
+func seedPRWithReview(t *testing.T, s *store.Store, githubID int64, createdAt time.Time) int64 {
+	t.Helper()
+	prID, err := s.UpsertPR(&store.PR{
+		GithubID:  githubID,
+		Repo:      "org/repo",
+		Number:    int(githubID),
+		Title:     "test pr",
+		Author:    "alice",
+		URL:       "https://github.test/org/repo/pull/1",
+		State:     "open",
+		UpdatedAt: createdAt,
+		FetchedAt: createdAt,
+	})
+	if err != nil {
+		t.Fatalf("upsert pr: %v", err)
+	}
+	revID, err := s.InsertReview(&store.Review{
+		PRID:           prID,
+		CLIUsed:        "codex",
+		Summary:        "summary",
+		Issues:         "[]",
+		Suggestions:    "[]",
+		Severity:       "low",
+		CreatedAt:      createdAt,
+		GitHubReviewID: 0,
+		HeadSHA:        "abc123",
+	})
+	if err != nil {
+		t.Fatalf("insert review: %v", err)
+	}
+	return revID
+}
+
+func TestTier2AdapterReviewReadyForPublishRetry(t *testing.T) {
+	s := newMemStore(t)
+	now := time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)
+	readyID := seedPRWithReview(t, s, 101, now)
+	inFlightID := seedPRWithReview(t, s, 102, now)
+	if claimed, err := s.ClaimInFlightReview(102, "abc123"); err != nil {
+		t.Fatalf("claim in-flight review: %v", err)
+	} else if !claimed {
+		t.Fatal("expected in-flight claim to succeed")
+	}
+	a := &tier2Adapter{store: s}
+
+	readyRev, err := s.GetReview(readyID)
+	if err != nil {
+		t.Fatalf("get ready review: %v", err)
+	}
+	ready, err := a.reviewReadyForPublishRetry(readyRev)
+	if err != nil {
+		t.Fatalf("reviewReadyForPublishRetry ready: %v", err)
+	}
+	if !ready {
+		t.Fatal("unpublished review with no in-flight claim should be ready")
+	}
+
+	inFlightRev, err := s.GetReview(inFlightID)
+	if err != nil {
+		t.Fatalf("get in-flight review: %v", err)
+	}
+	ready, err = a.reviewReadyForPublishRetry(inFlightRev)
+	if err != nil {
+		t.Fatalf("reviewReadyForPublishRetry in-flight: %v", err)
+	}
+	if ready {
+		t.Fatal("in-flight review should not be ready for retry")
+	}
+
+	if err := s.MarkReviewPublished(readyID, 123, "APPROVED", now); err != nil {
+		t.Fatalf("mark published: %v", err)
+	}
+	publishedRev, err := s.GetReview(readyID)
+	if err != nil {
+		t.Fatalf("get published review: %v", err)
+	}
+	ready, err = a.reviewReadyForPublishRetry(publishedRev)
+	if err != nil {
+		t.Fatalf("reviewReadyForPublishRetry published: %v", err)
+	}
+	if ready {
+		t.Fatal("published review should not be ready for retry")
+	}
+}
+
+func TestTier2AdapterPublishPendingDefersInFlightReviews(t *testing.T) {
+	s := newMemStore(t)
+	now := time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)
+	readyReviewID := seedPRWithReview(t, s, 101, now)
+	seedPRWithReview(t, s, 102, now)
+	if claimed, err := s.ClaimInFlightReview(102, "abc123"); err != nil {
+		t.Fatalf("claim in-flight review: %v", err)
+	} else if !claimed {
+		t.Fatal("expected in-flight claim to succeed")
+	}
+
+	conn := newInProcessNATS(t)
+	ch := make(chan *nats.Msg, 2)
+	sub, err := conn.ChanSubscribe(bus.SubjPRPublish, ch)
+	if err != nil {
+		t.Fatalf("subscribe publish subject: %v", err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+	if err := conn.Flush(); err != nil {
+		t.Fatalf("flush subscribe: %v", err)
+	}
+
+	a := &tier2Adapter{
+		store:      s,
+		publishPub: bus.NewPRPublishPublisher(conn),
+	}
+	a.publishPending()
+	if err := conn.Flush(); err != nil {
+		t.Fatalf("flush publish: %v", err)
+	}
+
+	select {
+	case msg := <-ch:
+		var got bus.PRPublishMsg
+		if err := bus.Decode(msg.Data, &got); err != nil {
+			t.Fatalf("decode publish msg: %v", err)
+		}
+		if got.ReviewID != readyReviewID {
+			t.Fatalf("published review ID = %d, want ready review %d", got.ReviewID, readyReviewID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ready pending review was not enqueued")
+	}
+
+	// publishPending publishes synchronously; the short wait catches stray
+	// buffered messages without making this negative assertion expensive.
+	select {
+	case msg := <-ch:
+		var got bus.PRPublishMsg
+		_ = bus.Decode(msg.Data, &got)
+		t.Fatalf("unexpected extra publish message: %+v", got)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+func TestTier2AdapterPromoteReadyUsesOrgScopedIssueTracking(t *testing.T) {
+	var addedLabels [][]string
+	removedLabels := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/org/repo/issues":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"number":    10,
+					"title":     "blocked",
+					"state":     "open",
+					"body":      "## Depends on\n- #5\n",
+					"assignees": []map[string]string{{"login": "bot"}},
+					"labels":    []map[string]string{{"name": "blocked"}},
+				},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/org/repo/issues/10/sub_issues":
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/org/repo/issues/5":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"number": 5,
+				"title":  "dependency",
+				"state":  "closed",
+				"labels": []map[string]string{},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/org/repo/issues/10/labels":
+			var payload struct {
+				Labels []string `json:"labels"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Errorf("decode labels payload: %v", err)
+			}
+			addedLabels = append(addedLabels, payload.Labels)
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode([]map[string]string{{"name": "org-ready"}})
+		case r.Method == http.MethodDelete && r.URL.Path == "/repos/org/repo/issues/10/labels/blocked":
+			removedLabels++
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode([]map[string]string{})
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/org/repo/issues/10/comments":
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"created_at": time.Now().UTC().Format(time.RFC3339),
+			})
+		default:
+			t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.String())
+			http.Error(w, "unexpected request", http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	enabled := true
+	cfg := &config.Config{}
+	cfg.GitHub.IssueTracking = config.IssueTrackingConfig{
+		Enabled:       false,
+		FilterMode:    config.FilterModeExclusive,
+		DefaultAction: string(config.IssueModeIgnore),
+		Assignees:     []string{"bot"},
+		BlockedLabels: []string{"blocked"},
+		DevelopLabels: []string{"global-ready"},
+	}
+	cfg.AI.Orgs = map[string]config.OrgAI{
+		"org": {
+			IssueTracking: &config.IssueTrackingOverride{
+				Enabled:        &enabled,
+				PromoteToLabel: "org-ready",
+			},
+		},
+	}
+	cfgRef := cfg
+	var cfgMu sync.Mutex
+	a := &tier2Adapter{
+		ghClient: gh.NewClient("token", gh.WithBaseURL(srv.URL)),
+		cfgMu:    &cfgMu,
+		cfg:      &cfgRef,
+		broker:   sse.NewBroker(),
+	}
+
+	n, err := a.PromoteReady(t.Context(), []string{"org/repo"})
+	if err != nil {
+		t.Fatalf("PromoteReady: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("promotions = %d, want 1", n)
+	}
+	if len(addedLabels) != 1 || len(addedLabels[0]) != 1 || addedLabels[0][0] != "org-ready" {
+		t.Fatalf("added labels = %#v, want [[org-ready]]", addedLabels)
+	}
+	if removedLabels != 1 {
+		t.Fatalf("removed labels = %d, want 1", removedLabels)
+	}
+}
+
+func TestTier2AdapterPromoteReadyBatchesReposWithSameIssueTracking(t *testing.T) {
+	sharedGets := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/org/a/issues":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"number":    10,
+					"title":     "blocked a",
+					"state":     "open",
+					"body":      "## Depends on\n- org/shared#5\n",
+					"assignees": []map[string]string{{"login": "bot"}},
+					"labels":    []map[string]string{{"name": "blocked"}},
+				},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/org/b/issues":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{
+					"number":    20,
+					"title":     "blocked b",
+					"state":     "open",
+					"body":      "## Depends on\n- org/shared#5\n",
+					"assignees": []map[string]string{{"login": "bot"}},
+					"labels":    []map[string]string{{"name": "blocked"}},
+				},
+			})
+		case r.Method == http.MethodGet && (r.URL.Path == "/repos/org/a/issues/10/sub_issues" || r.URL.Path == "/repos/org/b/issues/20/sub_issues"):
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/org/shared/issues/5":
+			sharedGets++
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"number": 5,
+				"title":  "shared dependency",
+				"state":  "closed",
+				"labels": []map[string]string{},
+			})
+		case r.Method == http.MethodDelete && (r.URL.Path == "/repos/org/a/issues/10/labels/blocked" || r.URL.Path == "/repos/org/b/issues/20/labels/blocked"):
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode([]map[string]string{})
+		case r.Method == http.MethodPost && (r.URL.Path == "/repos/org/a/issues/10/labels" || r.URL.Path == "/repos/org/b/issues/20/labels"):
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode([]map[string]string{{"name": "ready"}})
+		case r.Method == http.MethodPost && (r.URL.Path == "/repos/org/a/issues/10/comments" || r.URL.Path == "/repos/org/b/issues/20/comments"):
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"created_at": time.Now().UTC().Format(time.RFC3339),
+			})
+		default:
+			t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.String())
+			http.Error(w, "unexpected request", http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{}
+	cfg.GitHub.IssueTracking = config.IssueTrackingConfig{
+		Enabled:       true,
+		FilterMode:    config.FilterModeExclusive,
+		DefaultAction: string(config.IssueModeIgnore),
+		Assignees:     []string{"bot"},
+		BlockedLabels: []string{"blocked"},
+		DevelopLabels: []string{"ready"},
+	}
+	cfgRef := cfg
+	var cfgMu sync.Mutex
+	a := &tier2Adapter{
+		ghClient: gh.NewClient("token", gh.WithBaseURL(srv.URL)),
+		cfgMu:    &cfgMu,
+		cfg:      &cfgRef,
+		broker:   sse.NewBroker(),
+	}
+
+	n, err := a.PromoteReady(t.Context(), []string{"org/a", "org/b"})
+	if err != nil {
+		t.Fatalf("PromoteReady: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("promotions = %d, want 2", n)
+	}
+	if sharedGets != 1 {
+		t.Fatalf("shared dependency fetches = %d, want 1", sharedGets)
+	}
+}
+
+func TestTier2AdapterPromoteReadyReportsAllGroupErrors(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.GitHub.IssueTracking = config.IssueTrackingConfig{
+		Enabled:       true,
+		Assignees:     []string{"alice"},
+		BlockedLabels: []string{"blocked"},
+	}
+	cfg.AI.Repos = map[string]config.RepoAI{
+		"org/b": {
+			IssueTracking: &config.IssueTrackingOverride{
+				Assignees: []string{"bob"},
+			},
+		},
+	}
+	cfgRef := cfg
+	var cfgMu sync.Mutex
+	a := &tier2Adapter{
+		cfgMu:  &cfgMu,
+		cfg:    &cfgRef,
+		broker: sse.NewBroker(),
+	}
+
+	n, err := a.PromoteReady(t.Context(), []string{"org/a", "org/b"})
+	if n != 0 {
+		t.Fatalf("promotions = %d, want 0", n)
+	}
+	if err == nil {
+		t.Fatal("PromoteReady error = nil, want config group errors")
+	}
+	if got := err.Error(); !strings.Contains(got, "org/a") || !strings.Contains(got, "org/b") {
+		t.Fatalf("joined error = %q, want both repo groups", got)
+	}
+}
+
+func TestPRAlreadyReviewedCircuitBreakerSuppressesRepeatedEnqueue(t *testing.T) {
+	s := newMemStore(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	prID, err := s.UpsertPR(&store.PR{
+		GithubID:  1001,
+		Repo:      "org/repo",
+		Number:    7,
+		Title:     "cost loop",
+		Author:    "alice",
+		URL:       "https://github.test/org/repo/pull/7",
+		State:     "open",
+		UpdatedAt: now,
+		FetchedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("upsert pr: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := s.InsertReview(&store.Review{
+			PRID:              prID,
+			CLIUsed:           "codex",
+			Summary:           "summary",
+			Issues:            "[]",
+			Suggestions:       "[]",
+			Severity:          "low",
+			CreatedAt:         now.Add(-time.Duration(i) * time.Minute),
+			PublishedAt:       now.Add(-time.Duration(i) * time.Minute),
+			GitHubReviewID:    int64(9000 + i),
+			GitHubReviewState: "APPROVED",
+			HeadSHA:           "abc123",
+		}); err != nil {
+			t.Fatalf("insert review %d: %v", i, err)
+		}
+	}
+
+	broker := sse.NewBroker()
+	broker.Start()
+	defer broker.Stop()
+	events := broker.Subscribe()
+	defer broker.Unsubscribe(events)
+
+	cfg := &config.Config{}
+	cfg.CircuitBreaker.PerPR24h = 3
+	cfg.CircuitBreaker.PerRepoHr = 999
+	var cfgMu sync.Mutex
+	a := &tier2Adapter{
+		store:            s,
+		broker:           broker,
+		cfgMu:            &cfgMu,
+		cfg:              &cfg,
+		lastBreakerTrips: make(map[breakerTripKey]breakerTripDedup),
+	}
+
+	updatedAt := now.Add(10 * time.Minute)
+	if !a.PRAlreadyReviewed(1001, "org/repo", 7, updatedAt, "abc123") {
+		t.Fatal("circuit breaker trip should suppress enqueue")
+	}
+	if !a.PRAlreadyReviewed(1001, "org/repo", 7, updatedAt, "abc123") {
+		t.Fatal("same circuit breaker trip should keep suppressing enqueue")
+	}
+
+	count := 0
+	var reason string
+drain:
+	for {
+		select {
+		case ev := <-events:
+			if ev.Type != sse.EventCircuitBreakerTripped {
+				continue
+			}
+			count++
+			var payload struct {
+				Reason string `json:"reason"`
+			}
+			if err := json.Unmarshal([]byte(ev.Data), &payload); err != nil {
+				t.Fatalf("decode circuit breaker event: %v", err)
+			}
+			reason = payload.Reason
+		case <-time.After(100 * time.Millisecond):
+			break drain
+		}
+	}
+	if count != 1 {
+		t.Fatalf("circuit breaker events = %d, want 1", count)
+	}
+	if reason != "per-PR HEAD cap reached: 3 reviews on this commit in last 24h (cap 3)" {
+		t.Fatalf("reason = %q", reason)
+	}
+}
+
+func TestBreakerTripDedupPrunesByTTL(t *testing.T) {
+	now := time.Date(2026, 4, 28, 15, 0, 0, 0, time.UTC)
+	freshKey := breakerTripKey{Repo: "org/repo", Number: 7, HeadSHA: "abc", Reason: "cap"}
+	oldKey := breakerTripKey{Repo: "org/repo", Number: 8, HeadSHA: "def", Reason: "cap"}
+	a := &tier2Adapter{
+		lastBreakerTrips: map[breakerTripKey]breakerTripDedup{
+			freshKey: {UpdatedAt: now, EmittedAt: now.Add(-breakerTripDedupTTL + time.Second)},
+			oldKey:   {UpdatedAt: now, EmittedAt: now.Add(-breakerTripDedupTTL - time.Second)},
+		},
+	}
+
+	a.pruneBreakerTripDedup(now)
+
+	if _, ok := a.lastBreakerTrips[freshKey]; !ok {
+		t.Fatal("fresh breaker dedup entry should survive pruning")
+	}
+	if _, ok := a.lastBreakerTrips[oldKey]; ok {
+		t.Fatal("old breaker dedup entry should be pruned")
+	}
+}
+
+func TestPRAlreadyReviewedCircuitBreakerAllowsNewHeadSHA(t *testing.T) {
+	s := newMemStore(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	prID, err := s.UpsertPR(&store.PR{
+		GithubID:  1002,
+		Repo:      "org/repo",
+		Number:    8,
+		Title:     "follow-up changes",
+		Author:    "alice",
+		URL:       "https://github.test/org/repo/pull/8",
+		State:     "open",
+		UpdatedAt: now,
+		FetchedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("upsert pr: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := s.InsertReview(&store.Review{
+			PRID:              prID,
+			CLIUsed:           "codex",
+			Summary:           "summary",
+			Issues:            "[]",
+			Suggestions:       "[]",
+			Severity:          "low",
+			CreatedAt:         now.Add(-time.Duration(i) * time.Minute),
+			PublishedAt:       now.Add(-time.Duration(i) * time.Minute),
+			GitHubReviewID:    int64(9100 + i),
+			GitHubReviewState: "APPROVED",
+			HeadSHA:           "old-sha",
+		}); err != nil {
+			t.Fatalf("insert review %d: %v", i, err)
+		}
+	}
+
+	cfg := &config.Config{}
+	cfg.CircuitBreaker.PerPR24h = 3
+	cfg.CircuitBreaker.PerRepoHr = 999
+	var cfgMu sync.Mutex
+	a := &tier2Adapter{
+		store:  s,
+		cfgMu:  &cfgMu,
+		cfg:    &cfg,
+		broker: sse.NewBroker(),
+	}
+
+	updatedAt := now.Add(10 * time.Minute)
+	if a.PRAlreadyReviewed(1002, "org/repo", 8, updatedAt, "new-sha") {
+		t.Fatal("new head SHA should not be suppressed by the per-PR circuit breaker")
 	}
 }
 
@@ -86,10 +1099,10 @@ func TestResolveImplementPrompt_AgentFallbackWhenNoRepoMatch(t *testing.T) {
 func TestResolveImplementPrompt_DefaultFallbackWhenAgentMissing(t *testing.T) {
 	s := newMemStore(t)
 	seedAgent(t, s, store.Agent{
-		ID:                    "default-agent",
-		Name:                  "default",
-		IsDefaultDev:          true,
-		ImplementPrompt:       "DEFAULT TEMPLATE",
+		ID:              "default-agent",
+		Name:            "default",
+		IsDefaultDev:    true,
+		ImplementPrompt: "DEFAULT TEMPLATE",
 	})
 
 	// Neither the repo nor the agent ID exists → use global default's ImplementPrompt.

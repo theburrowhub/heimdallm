@@ -460,7 +460,18 @@ func TestPipeline_Run_SkipsReviewOnSameHeadSHA(t *testing.T) {
 		t.Errorf("notify(\"PR Review Started\") fired %d times across 1 real review + 1 SHA-skip; want exactly 1", startedCount)
 	}
 
-	// Third run with a new HEAD SHA — must proceed normally.
+	// Third run with a new HEAD SHA AND an explicit re-request — must
+	// proceed. Under the new #509 contract the SHA-change path also
+	// requires a timeline review_requested newer than the previous
+	// review; without it the pipeline fail-closes. The original intent
+	// of this test was to prove a new commit re-opens the review path,
+	// which still holds — it just now needs the explicit re-request
+	// signal too, matching real GitHub usage (push + click
+	// "Re-request review").
+	p.SetBotLogin("heimdallm-bot")
+	p.SetTimelineFetcher(&fakeTimeline{events: []github.TimelineEvent{
+		{Event: "review_requested", Actor: "alice", CreatedAt: time.Now().Add(1 * time.Minute)},
+	}})
 	pr.Head.SHA = "cafef00d"
 	_, err = p.Run(pr, pipeline.RunOptions{Primary: "claude", Fallback: "gemini"})
 	if err != nil {
@@ -753,6 +764,162 @@ func TestPipeline_Run_TimelineErrorKeepsSkip(t *testing.T) {
 	}
 	if exec.calls != 1 {
 		t.Errorf("timeline error must keep the skip (fail-closed), got exec.calls=%d", exec.calls)
+	}
+	if tl.callCount() == 0 {
+		t.Errorf("timeline was not consulted")
+	}
+}
+
+// ── #509: explicit re-request required on SHA change too ─────────────
+
+// TestPipeline_Run_SkipsOnSHAChangeWithoutExplicitReReview is the core
+// regression guard for theburrowhub/heimdallm#509: when the HEAD SHA
+// changes (push) and the bot is still listed in requested_reviewers
+// because the target repo auto-re-adds reviewers on push (Dismiss
+// stale reviews on push, CODEOWNERS auto-request workflows, etc.),
+// the pipeline must require an explicit review_requested event after
+// the previous review before spending Claude credits. Without this
+// guard every push triggered a fresh review — observed in
+// freepik-company/ai-bumblebee-proxy#1198 where 11 reviews fired on
+// 11 SHAs in 4 hours but only 2 review_requested events came from a
+// human reviewer.
+func TestPipeline_Run_SkipsOnSHAChangeWithoutExplicitReReview(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	exec := &fakeExecCounter{}
+	gh := &fakeGHCounter{diff: "+line"}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	p.SetBotLogin("heimdallm-bot")
+
+	pr := &github.PullRequest{
+		ID: 1198, Number: 1198, Title: "feat: x", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now().Add(-1 * time.Hour),
+		HTMLURL:   "https://github.com/org/repo/pull/1198",
+		Head:      github.Branch{SHA: "old-sha"},
+	}
+	runFirstReview(t, p, pr)
+	if exec.calls != 1 {
+		t.Fatalf("seed: expected exec.calls=1, got %d", exec.calls)
+	}
+
+	// Timeline only contains a stale review_requested that predates
+	// the previous review (already-satisfied). Simulates the
+	// auto-re-add-on-push case: GitHub put the bot back in
+	// requested_reviewers but no human pressed "Re-request review".
+	tl := &fakeTimeline{events: []github.TimelineEvent{
+		{Event: "review_requested", Actor: "alice", CreatedAt: time.Now().Add(-2 * time.Hour)},
+	}}
+	p.SetTimelineFetcher(tl)
+
+	pr.Head.SHA = "new-sha-after-push"
+	pr.UpdatedAt = time.Now()
+	rev, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"})
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if rev != nil {
+		t.Errorf("expected nil review on SHA-change without re-request, got %+v", rev)
+	}
+	if exec.calls != 1 {
+		t.Errorf("SHA-change without re-request must NOT trigger CLI, got exec.calls=%d", exec.calls)
+	}
+	if gh.submits != 1 {
+		t.Errorf("SHA-change without re-request must NOT submit, got gh.submits=%d", gh.submits)
+	}
+	if tl.callCount() == 0 {
+		t.Errorf("timeline must be consulted on SHA-change path")
+	}
+}
+
+// TestPipeline_Run_ProceedsOnSHAChangeWithExplicitReReview is the
+// happy-path symmetric to #509: SHA changed AND the operator hit
+// "Re-request review" after the previous review — the pipeline MUST
+// run the review. Defends against the new gate being too eager.
+func TestPipeline_Run_ProceedsOnSHAChangeWithExplicitReReview(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	exec := &fakeExecCounter{}
+	gh := &fakeGHCounter{diff: "+line"}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	p.SetBotLogin("heimdallm-bot")
+
+	pr := &github.PullRequest{
+		ID: 1199, Number: 1199, Title: "feat: y", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now().Add(-1 * time.Hour),
+		HTMLURL:   "https://github.com/org/repo/pull/1199",
+		Head:      github.Branch{SHA: "first-sha"},
+	}
+	runFirstReview(t, p, pr)
+
+	// Operator explicitly re-requests the bot after the seed review.
+	// +1 minute offset for the same reason as
+	// TestPipeline_Run_RespectsExplicitReReviewOnSameSHA: the predicate
+	// uses .After() and the seed CreatedAt was sealed microseconds ago.
+	tl := &fakeTimeline{events: []github.TimelineEvent{
+		{Event: "review_requested", Actor: "alice", CreatedAt: time.Now().Add(1 * time.Minute)},
+	}}
+	p.SetTimelineFetcher(tl)
+
+	pr.Head.SHA = "second-sha-after-push"
+	pr.UpdatedAt = time.Now()
+	if _, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"}); err != nil {
+		t.Fatalf("re-request run: %v", err)
+	}
+	if exec.calls != 2 {
+		t.Errorf("explicit re-request on new SHA must trigger CLI, got exec.calls=%d", exec.calls)
+	}
+	if gh.submits != 2 {
+		t.Errorf("explicit re-request on new SHA must submit, got gh.submits=%d", gh.submits)
+	}
+}
+
+// TestPipeline_Run_SHAChangeTimelineErrorFailClosed enforces the
+// fail-closed posture on the SHA-change path: a transient timeline
+// API error MUST NOT widen the cost surface by triggering a review
+// — same rule as TestPipeline_Run_TimelineErrorKeepsSkip on the
+// SHA-unchanged path. Both branches converge on "no timeline
+// evidence → no review".
+func TestPipeline_Run_SHAChangeTimelineErrorFailClosed(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	exec := &fakeExecCounter{}
+	gh := &fakeGHCounter{diff: "+line"}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	p.SetBotLogin("heimdallm-bot")
+
+	pr := &github.PullRequest{
+		ID: 1200, Number: 1200, Title: "feat: z", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now().Add(-1 * time.Hour),
+		HTMLURL:   "https://github.com/org/repo/pull/1200",
+		Head:      github.Branch{SHA: "first-sha"},
+	}
+	runFirstReview(t, p, pr)
+
+	tl := &fakeTimeline{err: errors.New("github: 503 service unavailable")}
+	p.SetTimelineFetcher(tl)
+
+	pr.Head.SHA = "second-sha"
+	pr.UpdatedAt = time.Now()
+	if _, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"}); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if exec.calls != 1 {
+		t.Errorf("timeline error on SHA change must keep skip (fail-closed), got exec.calls=%d", exec.calls)
 	}
 	if tl.callCount() == 0 {
 		t.Errorf("timeline was not consulted")

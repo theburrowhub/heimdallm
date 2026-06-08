@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,8 +18,11 @@ import (
 // ── fetcher-only fakes ───────────────────────────────────────────────────────
 
 type fakeClient struct {
-	issues []*github.Issue
-	err    error
+	issues       []*github.Issue
+	err          error
+	calls        int
+	lastCfg      config.IssueTrackingConfig
+	lastAuthUser string
 }
 
 type fakeMarkerFetcher struct {
@@ -35,6 +39,9 @@ func (f *fakeMarkerFetcher) FetchIssueCommentsOnly(repo string, number int) ([]g
 }
 
 func (c *fakeClient) FetchIssues(repo string, cfg config.IssueTrackingConfig, authenticatedUser string) ([]*github.Issue, error) {
+	c.calls++
+	c.lastCfg = cfg
+	c.lastAuthUser = authenticatedUser
 	return c.issues, c.err
 }
 
@@ -102,7 +109,55 @@ func (f *fakePipeline) Run(ctx context.Context, issue *github.Issue, opts issues
 	return &store.IssueReview{IssueID: int64(issue.Number), ActionTaken: string(config.IssueModeReviewOnly)}, nil
 }
 
-func noOpts(_ *github.Issue) issues.RunOptions { return issues.RunOptions{} }
+type fakeIssuePublisher struct {
+	triage     []int
+	refinement []int
+	implement  []int
+}
+
+type fakeStageTransitionClient struct {
+	created  []string
+	added    []string
+	removed  []string
+	comments []string
+}
+
+func (f *fakeStageTransitionClient) CreateLabel(repo, name, color, description string) error {
+	f.created = append(f.created, name)
+	return nil
+}
+
+func (f *fakeStageTransitionClient) AddLabels(repo string, number int, labels []string) error {
+	f.added = append(f.added, strings.Join(labels, ","))
+	return nil
+}
+
+func (f *fakeStageTransitionClient) RemoveLabels(repo string, number int, labels []string) error {
+	f.removed = append(f.removed, strings.Join(labels, ","))
+	return nil
+}
+
+func (f *fakeStageTransitionClient) PostComment(repo string, number int, body string) (time.Time, error) {
+	f.comments = append(f.comments, body)
+	return time.Now().UTC(), nil
+}
+
+func (f *fakeIssuePublisher) PublishIssueTriage(ctx context.Context, repo string, number int, githubID int64) error {
+	f.triage = append(f.triage, number)
+	return nil
+}
+
+func (f *fakeIssuePublisher) PublishIssueRefinement(ctx context.Context, repo string, number int, githubID int64) error {
+	f.refinement = append(f.refinement, number)
+	return nil
+}
+
+func (f *fakeIssuePublisher) PublishIssueImplement(ctx context.Context, repo string, number int, githubID int64) error {
+	f.implement = append(f.implement, number)
+	return nil
+}
+
+func noOpts(_ *github.Issue) (issues.RunOptions, bool) { return issues.RunOptions{}, true }
 
 func fixture(number int, updated time.Time) *github.Issue {
 	return &github.Issue{
@@ -111,6 +166,23 @@ func fixture(number int, updated time.Time) *github.Issue {
 		Repo:      "org/repo",
 		UpdatedAt: updated,
 		Mode:      config.IssueModeReviewOnly,
+	}
+}
+
+func issueLabels(labels ...string) []github.Label {
+	out := make([]github.Label, 0, len(labels))
+	for _, label := range labels {
+		out = append(out, github.Label{Name: label})
+	}
+	return out
+}
+
+func stagePipelineCfg() config.IssueTrackingConfig {
+	return config.IssueTrackingConfig{
+		Enabled:          true,
+		ReviewOnlyLabels: []string{"triage"},
+		RefinementLabels: []string{"refine"},
+		DevelopLabels:    []string{"develop"},
 	}
 }
 
@@ -152,6 +224,41 @@ func TestFetcher_FetchErrorIsFatalForThisRun(t *testing.T) {
 	}
 }
 
+func TestFetcher_DefaultsAssigneeScopeToAuthenticatedUser(t *testing.T) {
+	client := &fakeClient{issues: []*github.Issue{fixture(1, time.Now())}}
+	f := issues.NewFetcher(client, nil, &fakeDedup{byGithubID: map[int64]dedupEntry{}}, &fakePipeline{})
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 1 {
+		t.Fatalf("processed = %d, want 1", processed)
+	}
+	if len(client.lastCfg.Assignees) != 1 || client.lastCfg.Assignees[0] != "alice" {
+		t.Fatalf("FetchIssues cfg.Assignees = %v, want [alice]", client.lastCfg.Assignees)
+	}
+	if client.lastAuthUser != "alice" {
+		t.Fatalf("authenticatedUser = %q, want alice", client.lastAuthUser)
+	}
+}
+
+func TestFetcher_SkipsWhenAssigneeScopeUnavailable(t *testing.T) {
+	client := &fakeClient{issues: []*github.Issue{fixture(1, time.Now())}}
+	f := issues.NewFetcher(client, nil, &fakeDedup{byGithubID: map[int64]dedupEntry{}}, &fakePipeline{})
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 0 {
+		t.Fatalf("processed = %d, want 0", processed)
+	}
+	if client.calls != 0 {
+		t.Fatalf("FetchIssues calls = %d, want 0 when scope is unavailable", client.calls)
+	}
+}
+
 func TestFetcher_DispatchesUnprocessedIssues(t *testing.T) {
 	client := &fakeClient{issues: []*github.Issue{fixture(1, time.Now()), fixture(2, time.Now())}}
 	p := &fakePipeline{}
@@ -163,6 +270,26 @@ func TestFetcher_DispatchesUnprocessedIssues(t *testing.T) {
 	}
 	if processed != 2 || len(p.calls) != 2 {
 		t.Errorf("expected 2 dispatches, got processed=%d calls=%v", processed, p.calls)
+	}
+}
+
+func TestFetcher_SkipsWhenOptionsFnReturnsFalse(t *testing.T) {
+	client := &fakeClient{issues: []*github.Issue{fixture(1, time.Now()), fixture(2, time.Now())}}
+	p := &fakePipeline{}
+	f := issues.NewFetcher(client, nil, &fakeDedup{byGithubID: map[int64]dedupEntry{}}, p)
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice",
+		func(issue *github.Issue) (issues.RunOptions, bool) {
+			if issue.Number == 1 {
+				return issues.RunOptions{}, false
+			}
+			return issues.RunOptions{}, true
+		})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 1 || len(p.calls) != 1 || p.calls[0] != 2 {
+		t.Errorf("expected only issue 2 dispatched, got processed=%d calls=%v", processed, p.calls)
 	}
 }
 
@@ -353,6 +480,114 @@ func TestFetcher_DoesNotSkipBelowMaxAutoImplementFailures(t *testing.T) {
 	}
 }
 
+// TestAlreadyProcessed_HistoricalNoChangesRow_StillSkipped pins the
+// back-compat branch of the simplified dedup gate (#483): rows written
+// before MarkerDone was added to the fallback comment have no marker on
+// the issue but still carry ActionTaken=auto_implement_no_changes, so the
+// dedup gate must keep skipping them until a human posts MarkerRetry.
+func TestAlreadyProcessed_HistoricalNoChangesRow_StillSkipped(t *testing.T) {
+	reviewedAt := time.Now().Add(-10 * time.Minute)
+	issue := fixture(1, time.Now())
+	issue.Mode = config.IssueModeDevelop
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {
+			row: &store.Issue{ID: 10, GithubID: issue.ID},
+			review: &store.IssueReview{
+				IssueID:     10,
+				ActionTaken: issues.ActionAutoImplementNoChanges,
+				CreatedAt:   reviewedAt,
+				CommentedAt: reviewedAt,
+			},
+		},
+	}}
+	// No comments at all — pre-#483 row that never got a MarkerDone.
+	mf := &fakeMarkerFetcher{commentsByKey: map[string][]github.Comment{}}
+	p := &fakePipeline{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, mf, dedup, p)
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 0 || len(p.calls) != 0 {
+		t.Fatalf("historical no-changes row must still be skipped, processed=%d calls=%v", processed, p.calls)
+	}
+}
+
+// TestAlreadyProcessed_DoneMarkerSkipsBeforeDedupGate proves the
+// marker-first ordering: a no-changes row whose comment thread now
+// carries MarkerDone (the post-#483 happy path) is terminated by the
+// marker scan, not by the back-compat dedup gate. Without this ordering
+// the user could not see "done marker" in the skip reason.
+func TestAlreadyProcessed_DoneMarkerSkipsBeforeDedupGate(t *testing.T) {
+	reviewedAt := time.Now().Add(-10 * time.Minute)
+	issue := fixture(1, time.Now())
+	issue.Mode = config.IssueModeDevelop
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {
+			row: &store.Issue{ID: 10, GithubID: issue.ID},
+			review: &store.IssueReview{
+				IssueID:     10,
+				ActionTaken: issues.ActionAutoImplementNoChanges,
+				CreatedAt:   reviewedAt,
+				CommentedAt: reviewedAt,
+			},
+		},
+	}}
+	mf := &fakeMarkerFetcher{commentsByKey: map[string][]github.Comment{
+		"org/repo#1": {{Body: issues.MarkerDone + "\nfallback comment", CreatedAt: time.Now()}},
+	}}
+	p := &fakePipeline{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, mf, dedup, p)
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 0 || len(p.calls) != 0 {
+		t.Fatalf("done marker must skip ahead of dedup gate, processed=%d calls=%v", processed, p.calls)
+	}
+}
+
+// TestAlreadyProcessed_RetryMarker_ReprocessesNoChanges pins the retry
+// escape hatch on a no-changes row. The marker scan already ran before
+// the dedup gate pre-#483, so this is the documented user workflow —
+// what the test really protects against is a future refactor that
+// moves the dedup gate above the marker scan or that drops the retry
+// override for the ActionAutoImplementNoChanges branch.
+func TestAlreadyProcessed_RetryMarker_ReprocessesNoChanges(t *testing.T) {
+	reviewedAt := time.Now().Add(-10 * time.Minute)
+	issue := fixture(1, time.Now())
+	issue.Mode = config.IssueModeDevelop
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {
+			row: &store.Issue{ID: 10, GithubID: issue.ID},
+			review: &store.IssueReview{
+				IssueID:     10,
+				ActionTaken: issues.ActionAutoImplementNoChanges,
+				CreatedAt:   reviewedAt,
+				CommentedAt: reviewedAt,
+			},
+		},
+	}}
+	mf := &fakeMarkerFetcher{commentsByKey: map[string][]github.Comment{
+		"org/repo#1": {
+			{Body: issues.MarkerDone + "\nfallback comment", CreatedAt: time.Now().Add(-5 * time.Minute)},
+			{Body: issues.MarkerRetry + "\nplease retry", CreatedAt: time.Now()},
+		},
+	}}
+	p := &fakePipeline{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, mf, dedup, p)
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 1 || len(p.calls) != 1 {
+		t.Fatalf("retry marker must reopen a no-changes row, processed=%d calls=%v", processed, p.calls)
+	}
+}
+
 func TestFetcher_CountFailedAutoImplErrDoesNotSkip(t *testing.T) {
 	// When CountFailedAutoImplement returns an error, the fetcher must log
 	// and proceed (fail-safe: never block an issue due to a flaky store).
@@ -473,5 +708,684 @@ func TestFetcher_NilMarkerFetcherSkipsMarkerCheck(t *testing.T) {
 	processed, _ := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
 	if processed != 1 {
 		t.Errorf("nil marker fetcher should skip marker check and process, got processed=%d", processed)
+	}
+}
+
+// TestFetcher_BotCommentSkipsReprocess verifies that when the most recent
+// comment on an issue is from the bot itself, the fetcher skips reprocessing
+// — breaking the re-triage loop described in #362.
+func TestFetcher_BotCommentSkipsReprocess(t *testing.T) {
+	now := time.Now()
+	issue := fixture(1, now)
+
+	// The issue has a previous review_only review with CommentedAt 2 minutes ago.
+	// updated_at (now) is well past the 30s grace window, so without the
+	// bot-comment check it would be reprocessed.
+	commentedAt := now.Add(-2 * time.Minute)
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {
+			row:    &store.Issue{ID: 10, GithubID: issue.ID},
+			review: &store.IssueReview{CommentedAt: commentedAt, ActionTaken: "review_only"},
+		},
+	}}
+
+	// The latest comment is from the bot.
+	mf := &fakeMarkerFetcher{
+		commentsByKey: map[string][]github.Comment{
+			"org/repo#1": {
+				{Author: "some-user", Body: "please triage this"},
+				{Author: "heimdallm-bot", Body: "## Triage\n..."},
+			},
+		},
+	}
+
+	p := &fakePipeline{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, mf, dedup, p)
+	f.SetBotLogin("heimdallm-bot")
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 0 {
+		t.Errorf("bot's own comment should prevent reprocessing, got processed=%d", processed)
+	}
+	if len(p.calls) != 0 {
+		t.Errorf("pipeline should not have been called, got %d calls", len(p.calls))
+	}
+}
+
+// TestFetcher_HumanCommentAfterBotAllowsReprocess verifies that when a
+// human comments after the bot, the issue IS reprocessed.
+func TestFetcher_HumanCommentAfterBotAllowsReprocess(t *testing.T) {
+	now := time.Now()
+	issue := fixture(1, now)
+
+	commentedAt := now.Add(-2 * time.Minute)
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {
+			row:    &store.Issue{ID: 10, GithubID: issue.ID},
+			review: &store.IssueReview{CommentedAt: commentedAt},
+		},
+	}}
+
+	// Bot commented, then a human replied — should reprocess.
+	mf := &fakeMarkerFetcher{
+		commentsByKey: map[string][]github.Comment{
+			"org/repo#1": {
+				{Author: "heimdallm-bot", Body: "## Triage\n..."},
+				{Author: "some-user", Body: "I disagree with this analysis"},
+			},
+		},
+	}
+
+	p := &fakePipeline{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, mf, dedup, p)
+	f.SetBotLogin("heimdallm-bot")
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 1 {
+		t.Errorf("human comment after bot should allow reprocessing, got processed=%d", processed)
+	}
+}
+
+// TestFetcher_ModeChangeBypassesBotCommentCheck verifies that when the issue
+// mode changed (e.g. label swapped from heimdallm-triage to heimdallm-develop),
+// the bot-comment check does NOT block reprocessing — even if the last comment
+// is from the bot (#362).
+func TestFetcher_ModeChangeBypassesBotCommentCheck(t *testing.T) {
+	now := time.Now()
+	// Issue now has develop mode (label changed).
+	issue := &github.Issue{
+		ID:        int64(1001),
+		Number:    1,
+		Repo:      "org/repo",
+		UpdatedAt: now,
+		Mode:      config.IssueModeDevelop,
+	}
+
+	// Previous review was review_only — mode has changed.
+	commentedAt := now.Add(-2 * time.Minute)
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {
+			row:    &store.Issue{ID: 10, GithubID: issue.ID},
+			review: &store.IssueReview{CommentedAt: commentedAt, ActionTaken: "review_only"},
+		},
+	}}
+
+	// Last comment is from the bot (triage comment).
+	mf := &fakeMarkerFetcher{
+		commentsByKey: map[string][]github.Comment{
+			"org/repo#1": {
+				{Author: "heimdallm-bot", Body: "## Triage\n..."},
+			},
+		},
+	}
+
+	p := &fakePipeline{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, mf, dedup, p)
+	f.SetBotLogin("heimdallm-bot")
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 1 {
+		t.Errorf("mode change should bypass bot-comment check, got processed=%d", processed)
+	}
+}
+
+func TestFetcher_StageChangeBypassesGraceWindowToRunRefinement(t *testing.T) {
+	reviewedAt := time.Now().Add(-2 * time.Minute)
+	commentedAt := reviewedAt.Add(10 * time.Second)
+	issue := fixture(1, commentedAt.Add(5*time.Second))
+	issue.Mode = config.IssueModeRefinement
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {
+			row: &store.Issue{ID: 10, GithubID: issue.ID},
+			review: &store.IssueReview{
+				IssueID:     10,
+				CreatedAt:   reviewedAt,
+				CommentedAt: commentedAt,
+				ActionTaken: string(config.IssueModeReviewOnly),
+			},
+		},
+	}}
+	pub := &fakeIssuePublisher{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, nil, dedup, &fakePipeline{})
+	f.SetPublisher(pub)
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", stagePipelineCfg(), "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 1 || len(pub.refinement) != 1 || pub.refinement[0] != 1 {
+		t.Fatalf("stage change should run refinement despite grace window, processed=%d pub=%v", processed, pub.refinement)
+	}
+}
+
+func TestFetcher_StageChangeBypassesGraceWindowToRunDevelop(t *testing.T) {
+	reviewedAt := time.Now().Add(-2 * time.Minute)
+	commentedAt := reviewedAt.Add(10 * time.Second)
+	issue := &github.Issue{
+		ID:        2002,
+		Number:    2,
+		Repo:      "org/repo",
+		UpdatedAt: commentedAt.Add(5 * time.Second),
+		Mode:      config.IssueModeDevelop,
+	}
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {
+			row: &store.Issue{ID: 20, GithubID: issue.ID},
+			review: &store.IssueReview{
+				IssueID:     20,
+				CreatedAt:   reviewedAt,
+				CommentedAt: commentedAt,
+				ActionTaken: string(config.IssueModeRefinement),
+			},
+		},
+	}}
+	pub := &fakeIssuePublisher{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, nil, dedup, &fakePipeline{})
+	f.SetPublisher(pub)
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", stagePipelineCfg(), "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 1 || len(pub.implement) != 1 || pub.implement[0] != 2 {
+		t.Fatalf("stage change should run develop despite grace window, processed=%d pub=%v", processed, pub.implement)
+	}
+}
+
+func TestFetcher_NonForwardStageChangesStillUseGraceWindow(t *testing.T) {
+	reviewedAt := time.Now().Add(-2 * time.Minute)
+	commentedAt := reviewedAt.Add(10 * time.Second)
+	cases := []struct {
+		name        string
+		number      int
+		actionTaken string
+		mode        config.IssueMode
+	}{
+		{
+			name:        "triage to development is non-adjacent",
+			number:      3,
+			actionTaken: string(config.IssueModeReviewOnly),
+			mode:        config.IssueModeDevelop,
+		},
+		{
+			name:        "development to refinement is backward",
+			number:      4,
+			actionTaken: string(config.IssueModeDevelop),
+			mode:        config.IssueModeRefinement,
+		},
+		{
+			name:        "refinement to refinement is same stage",
+			number:      5,
+			actionTaken: string(config.IssueModeRefinement),
+			mode:        config.IssueModeRefinement,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			issue := fixture(tc.number, commentedAt.Add(5*time.Second))
+			issue.Mode = tc.mode
+			dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+				issue.ID: {
+					row: &store.Issue{ID: int64(tc.number), GithubID: issue.ID},
+					review: &store.IssueReview{
+						IssueID:     int64(tc.number),
+						CreatedAt:   reviewedAt,
+						CommentedAt: commentedAt,
+						ActionTaken: tc.actionTaken,
+					},
+				},
+			}}
+			pub := &fakeIssuePublisher{}
+			f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, nil, dedup, &fakePipeline{})
+			f.SetPublisher(pub)
+
+			processed, err := f.ProcessRepo(context.Background(), "org/repo", stagePipelineCfg(), "alice", noOpts)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if processed != 0 || len(pub.triage) != 0 || len(pub.refinement) != 0 || len(pub.implement) != 0 {
+				t.Fatalf("non-forward stage change should stay deduped within grace, processed=%d pub=%+v", processed, pub)
+			}
+		})
+	}
+}
+
+func TestFetcher_StageChangeDoesNotBypassAutoImplementFailureCap(t *testing.T) {
+	reviewedAt := time.Now().Add(-2 * time.Minute)
+	commentedAt := reviewedAt.Add(10 * time.Second)
+	issue := &github.Issue{
+		ID:        2006,
+		Number:    6,
+		Repo:      "org/repo",
+		UpdatedAt: commentedAt.Add(5 * time.Second),
+		Mode:      config.IssueModeDevelop,
+	}
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {
+			row: &store.Issue{ID: 60, GithubID: issue.ID},
+			review: &store.IssueReview{
+				IssueID:     60,
+				CreatedAt:   reviewedAt,
+				CommentedAt: commentedAt,
+				ActionTaken: string(config.IssueModeRefinement),
+			},
+			failedAutoImpl: issues.MaxAutoImplementFailures,
+		},
+	}}
+	pub := &fakeIssuePublisher{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, nil, dedup, &fakePipeline{})
+	f.SetPublisher(pub)
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", stagePipelineCfg(), "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 0 || len(pub.implement) != 0 {
+		t.Fatalf("failure cap should block develop even on stage advance, processed=%d pub=%v", processed, pub.implement)
+	}
+}
+
+func TestFetcher_ManualStageLabelChangeAuditsAndDispatchesNewStage(t *testing.T) {
+	now := time.Now()
+	issue := &github.Issue{
+		ID:        int64(1002),
+		Number:    2,
+		Repo:      "org/repo",
+		Title:     "Needs plan",
+		UpdatedAt: now,
+		Mode:      config.IssueModeRefinement,
+	}
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {
+			row: &store.Issue{ID: 11, GithubID: issue.ID},
+			review: &store.IssueReview{
+				IssueID:     11,
+				CommentedAt: now.Add(-2 * time.Minute),
+				ActionTaken: string(config.IssueModeReviewOnly),
+			},
+		},
+	}}
+	mf := &fakeMarkerFetcher{commentsByKey: map[string][]github.Comment{"org/repo#2": {}}}
+	pub := &fakeIssuePublisher{}
+	stage := &fakeStageTransitionClient{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, mf, dedup, &fakePipeline{})
+	f.SetPublisher(pub)
+	f.SetStageTransitioner(stage, nil)
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", config.IssueTrackingConfig{
+		Enabled:          true,
+		ReviewOnlyLabels: []string{"triage"},
+		RefinementLabels: []string{"refine"},
+		DevelopLabels:    []string{"develop"},
+	}, "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 1 || len(pub.refinement) != 1 || pub.refinement[0] != 2 {
+		t.Fatalf("expected refinement dispatch, processed=%d pub=%v", processed, pub.refinement)
+	}
+	if len(stage.added) != 1 || stage.added[0] != "refine" {
+		t.Fatalf("stage added = %v, want [refine]", stage.added)
+	}
+	if len(stage.removed) != 1 || stage.removed[0] != "triage,develop" {
+		t.Fatalf("stage removed = %v, want [triage,develop]", stage.removed)
+	}
+	if len(stage.comments) != 1 || !strings.Contains(stage.comments[0], "manual GitHub label change") {
+		t.Fatalf("stage audit comment = %q, want manual GitHub trigger", stage.comments)
+	}
+}
+
+func TestFetcher_ManualStageLabelChangeSkipsAlreadyAuditedTransition(t *testing.T) {
+	now := time.Now()
+	issue := &github.Issue{
+		ID:        int64(1003),
+		Number:    3,
+		Repo:      "org/repo",
+		Title:     "Needs plan",
+		UpdatedAt: now,
+		Mode:      config.IssueModeRefinement,
+		Labels:    issueLabels("refine"),
+	}
+	latestReviewAt := now.Add(-5 * time.Minute)
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {
+			row: &store.Issue{ID: 12, GithubID: issue.ID},
+			review: &store.IssueReview{
+				IssueID:     12,
+				CommentedAt: latestReviewAt,
+				ActionTaken: string(config.IssueModeReviewOnly),
+			},
+		},
+	}}
+	mf := &fakeMarkerFetcher{commentsByKey: map[string][]github.Comment{
+		"org/repo#3": {
+			{
+				Author:    "heimdallm-bot",
+				CreatedAt: latestReviewAt.Add(time.Minute),
+				Body: issues.StagePromotionAuditComment(
+					issues.IssueStageTriage,
+					issues.IssueStageRefinement,
+					issues.StagePromotionAuto,
+					latestReviewAt.Add(time.Minute),
+				),
+			},
+		},
+	}}
+	pub := &fakeIssuePublisher{}
+	stage := &fakeStageTransitionClient{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, mf, dedup, &fakePipeline{})
+	f.SetPublisher(pub)
+	f.SetStageTransitioner(stage, nil)
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", stagePipelineCfg(), "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 1 || len(pub.refinement) != 1 || pub.refinement[0] != 3 {
+		t.Fatalf("expected refinement dispatch, processed=%d pub=%v", processed, pub.refinement)
+	}
+	if len(stage.added) != 0 || len(stage.removed) != 0 || len(stage.comments) != 0 {
+		t.Fatalf("already-audited transition should not mutate labels or comment, added=%v removed=%v comments=%v",
+			stage.added, stage.removed, stage.comments)
+	}
+}
+
+func TestFetcher_ManualStageLabelChangeRetriesLabelsWhenAuditExistsButLabelsAreStale(t *testing.T) {
+	now := time.Now()
+	issue := &github.Issue{
+		ID:        int64(1004),
+		Number:    4,
+		Repo:      "org/repo",
+		Title:     "Needs plan",
+		UpdatedAt: now,
+		Mode:      config.IssueModeRefinement,
+		Labels:    issueLabels("triage", "refine"),
+	}
+	latestReviewAt := now.Add(-5 * time.Minute)
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {
+			row: &store.Issue{ID: 13, GithubID: issue.ID},
+			review: &store.IssueReview{
+				IssueID:     13,
+				CommentedAt: latestReviewAt,
+				ActionTaken: string(config.IssueModeReviewOnly),
+			},
+		},
+	}}
+	auditAt := latestReviewAt.Add(time.Minute)
+	mf := &fakeMarkerFetcher{commentsByKey: map[string][]github.Comment{
+		"org/repo#4": {{
+			Author:    "heimdallm-bot",
+			CreatedAt: auditAt,
+			Body: issues.StagePromotionAuditComment(
+				issues.IssueStageTriage,
+				issues.IssueStageRefinement,
+				issues.StagePromotionAuto,
+				auditAt,
+			),
+		}},
+	}}
+	pub := &fakeIssuePublisher{}
+	stage := &fakeStageTransitionClient{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, mf, dedup, &fakePipeline{})
+	f.SetPublisher(pub)
+	f.SetStageTransitioner(stage, nil)
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", stagePipelineCfg(), "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 1 || len(pub.refinement) != 1 || pub.refinement[0] != 4 {
+		t.Fatalf("expected refinement dispatch, processed=%d pub=%v", processed, pub.refinement)
+	}
+	if len(stage.added) != 1 || stage.added[0] != "refine" {
+		t.Fatalf("stage added = %v, want [refine]", stage.added)
+	}
+	if len(stage.removed) != 1 || stage.removed[0] != "triage,develop" {
+		t.Fatalf("stage removed = %v, want [triage,develop]", stage.removed)
+	}
+	if len(stage.comments) != 0 {
+		t.Fatalf("existing audit should suppress duplicate comment while labels retry, comments=%v", stage.comments)
+	}
+}
+
+func TestFetcher_ManualStageLabelChangeSkipsStaleFromWhenTargetAlreadyAudited(t *testing.T) {
+	now := time.Now()
+	issue := &github.Issue{
+		ID:        int64(1008),
+		Number:    8,
+		Repo:      "org/repo",
+		Title:     "Ready to build",
+		UpdatedAt: now,
+		Mode:      config.IssueModeDevelop,
+		Labels:    issueLabels("develop"),
+	}
+	latestReviewAt := now.Add(-5 * time.Minute)
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {
+			row: &store.Issue{ID: 17, GithubID: issue.ID},
+			review: &store.IssueReview{
+				IssueID:     17,
+				CommentedAt: latestReviewAt,
+				ActionTaken: string(config.IssueModeReviewOnly),
+			},
+		},
+	}}
+	auditAt := latestReviewAt.Add(time.Minute)
+	mf := &fakeMarkerFetcher{commentsByKey: map[string][]github.Comment{
+		"org/repo#8": {{
+			Author:    "heimdallm-bot",
+			CreatedAt: auditAt,
+			Body: issues.StagePromotionAuditComment(
+				issues.IssueStageRefinement,
+				issues.IssueStageDevelopment,
+				issues.StagePromotionAuto,
+				auditAt,
+			),
+		}},
+	}}
+	pub := &fakeIssuePublisher{}
+	stage := &fakeStageTransitionClient{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, mf, dedup, &fakePipeline{})
+	f.SetPublisher(pub)
+	f.SetStageTransitioner(stage, nil)
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", stagePipelineCfg(), "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 1 || len(pub.implement) != 1 || pub.implement[0] != 8 {
+		t.Fatalf("expected implement dispatch, processed=%d pub=%v", processed, pub.implement)
+	}
+	if len(stage.added) != 0 || len(stage.removed) != 0 || len(stage.comments) != 0 {
+		t.Fatalf("target-stage audit should suppress stale-from transition, added=%v removed=%v comments=%v",
+			stage.added, stage.removed, stage.comments)
+	}
+}
+
+func TestFetcher_ManualStageLabelChangeAuditsWhenExistingAuditIsDifferentTransition(t *testing.T) {
+	now := time.Now()
+	issue := &github.Issue{
+		ID:        int64(1005),
+		Number:    5,
+		Repo:      "org/repo",
+		Title:     "Needs plan",
+		UpdatedAt: now,
+		Mode:      config.IssueModeRefinement,
+		Labels:    issueLabels("refine"),
+	}
+	latestReviewAt := now.Add(-2 * time.Minute)
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {
+			row: &store.Issue{ID: 14, GithubID: issue.ID},
+			review: &store.IssueReview{
+				IssueID:     14,
+				CommentedAt: latestReviewAt,
+				ActionTaken: string(config.IssueModeReviewOnly),
+			},
+		},
+	}}
+	mf := &fakeMarkerFetcher{commentsByKey: map[string][]github.Comment{
+		"org/repo#5": {{
+			Author:    "heimdallm-bot",
+			CreatedAt: latestReviewAt.Add(time.Minute),
+			Body: issues.StagePromotionAuditComment(
+				issues.IssueStageTriage,
+				issues.IssueStageDevelopment,
+				issues.StagePromotionAuto,
+				latestReviewAt.Add(time.Minute),
+			),
+		}},
+	}}
+	stage := &fakeStageTransitionClient{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, mf, dedup, &fakePipeline{})
+	f.SetPublisher(&fakeIssuePublisher{})
+	f.SetStageTransitioner(stage, nil)
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", stagePipelineCfg(), "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 1 {
+		t.Fatalf("processed = %d, want 1", processed)
+	}
+	if len(stage.comments) != 1 || !strings.Contains(stage.comments[0], "- To: `refinement`") {
+		t.Fatalf("different existing audit should not suppress refinement audit, comments=%v", stage.comments)
+	}
+}
+
+func TestFetcher_ManualStageLabelChangeAuditsWhenExistingAuditPredatesLatestReview(t *testing.T) {
+	now := time.Now()
+	issue := &github.Issue{
+		ID:        int64(1006),
+		Number:    6,
+		Repo:      "org/repo",
+		Title:     "Needs plan",
+		UpdatedAt: now,
+		Mode:      config.IssueModeRefinement,
+		Labels:    issueLabels("refine"),
+	}
+	latestReviewAt := now.Add(-2 * time.Minute)
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {
+			row: &store.Issue{ID: 15, GithubID: issue.ID},
+			review: &store.IssueReview{
+				IssueID:     15,
+				CommentedAt: latestReviewAt,
+				ActionTaken: string(config.IssueModeReviewOnly),
+			},
+		},
+	}}
+	mf := &fakeMarkerFetcher{commentsByKey: map[string][]github.Comment{
+		"org/repo#6": {{
+			Author:    "heimdallm-bot",
+			CreatedAt: latestReviewAt.Add(-time.Minute),
+			Body: issues.StagePromotionAuditComment(
+				issues.IssueStageTriage,
+				issues.IssueStageRefinement,
+				issues.StagePromotionAuto,
+				latestReviewAt.Add(-time.Minute),
+			),
+		}},
+	}}
+	stage := &fakeStageTransitionClient{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, mf, dedup, &fakePipeline{})
+	f.SetPublisher(&fakeIssuePublisher{})
+	f.SetStageTransitioner(stage, nil)
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", stagePipelineCfg(), "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 1 {
+		t.Fatalf("processed = %d, want 1", processed)
+	}
+	if len(stage.comments) != 1 || !strings.Contains(stage.comments[0], "- To: `refinement`") {
+		t.Fatalf("old audit should not suppress new transition audit, comments=%v", stage.comments)
+	}
+}
+
+func TestFetcher_ManualStageLabelChangeDedupFallsBackToCreatedAt(t *testing.T) {
+	now := time.Now()
+	issue := &github.Issue{
+		ID:        int64(1007),
+		Number:    7,
+		Repo:      "org/repo",
+		Title:     "Needs plan",
+		UpdatedAt: now,
+		Mode:      config.IssueModeRefinement,
+		Labels:    issueLabels("refine"),
+	}
+	latestReviewAt := now.Add(-5 * time.Minute)
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {
+			row: &store.Issue{ID: 16, GithubID: issue.ID},
+			review: &store.IssueReview{
+				IssueID:     16,
+				CreatedAt:   latestReviewAt,
+				ActionTaken: string(config.IssueModeReviewOnly),
+			},
+		},
+	}}
+	mf := &fakeMarkerFetcher{commentsByKey: map[string][]github.Comment{
+		"org/repo#7": {{
+			Author:    "heimdallm-bot",
+			CreatedAt: latestReviewAt.Add(time.Minute),
+			Body: issues.StagePromotionAuditComment(
+				issues.IssueStageTriage,
+				issues.IssueStageRefinement,
+				issues.StagePromotionAuto,
+				latestReviewAt.Add(time.Minute),
+			),
+		}},
+	}}
+	stage := &fakeStageTransitionClient{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, mf, dedup, &fakePipeline{})
+	f.SetPublisher(&fakeIssuePublisher{})
+	f.SetStageTransitioner(stage, nil)
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", stagePipelineCfg(), "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 1 {
+		t.Fatalf("processed = %d, want 1", processed)
+	}
+	if len(stage.added) != 0 || len(stage.removed) != 0 || len(stage.comments) != 0 {
+		t.Fatalf("CreatedAt fallback should dedup applied transition, added=%v removed=%v comments=%v",
+			stage.added, stage.removed, stage.comments)
+	}
+}
+
+func TestFetcher_PublishesRefinementMode(t *testing.T) {
+	now := time.Now()
+	issue := fixture(9, now)
+	issue.Mode = config.IssueModeRefinement
+	pub := &fakeIssuePublisher{}
+	f := issues.NewFetcher(&fakeClient{issues: []*github.Issue{issue}}, nil, &fakeDedup{}, &fakePipeline{})
+	f.SetPublisher(pub)
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", enabledCfg(), "alice", noOpts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if processed != 1 {
+		t.Fatalf("processed = %d, want 1", processed)
+	}
+	if len(pub.refinement) != 1 || pub.refinement[0] != 9 {
+		t.Fatalf("refinement publishes = %v, want [9]", pub.refinement)
+	}
+	if len(pub.triage) != 0 || len(pub.implement) != 0 {
+		t.Fatalf("unexpected publishes triage=%v implement=%v", pub.triage, pub.implement)
 	}
 }

@@ -25,7 +25,7 @@ void main() {
         ],
         child: MaterialApp.router(
           routerConfig: GoRouter(routes: [
-            GoRoute(path: '/', builder: (_, __) => const SizedBox()),
+            GoRoute(path: '/', builder: (_, _) => const SizedBox()),
             GoRoute(path: '/prs/:id', builder: (ctx, state) =>
                 PRDetailScreen(prId: int.parse(state.pathParameters['id']!))),
           ], initialLocation: '/prs/1'),

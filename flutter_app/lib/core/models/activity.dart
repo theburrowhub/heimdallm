@@ -1,8 +1,32 @@
 /// Known activity actions from the daemon's activity_log. `unknown` is a
 /// safety fallback so the UI never crashes on a forward-compat value.
-enum ActivityAction { review, triage, implement, promote, error, unknown }
+enum ActivityAction {
+  review,
+  reviewSkipped,
+  triage,
+  refinement,
+  implement,
+  promote,
+  error,
+  unknown,
+}
 
-final Map<String, ActivityAction> _actionByName = ActivityAction.values.asNameMap();
+extension ActivityActionWireName on ActivityAction {
+  String get wireName => switch (this) {
+    ActivityAction.review => 'review',
+    ActivityAction.reviewSkipped => 'review_skipped',
+    ActivityAction.triage => 'triage',
+    ActivityAction.refinement => 'refinement',
+    ActivityAction.implement => 'implement',
+    ActivityAction.promote => 'promote',
+    ActivityAction.error => 'error',
+    ActivityAction.unknown => 'unknown',
+  };
+}
+
+final Map<String, ActivityAction> _actionByName = {
+  for (final action in ActivityAction.values) action.wireName: action,
+};
 
 ActivityAction _parseAction(String s) =>
     _actionByName[s] ?? ActivityAction.unknown;
@@ -57,7 +81,9 @@ class ActivityQuery {
   final DateTime? to;
   final Set<String> orgs;
   final Set<String> repos;
+  final Set<String> itemTypes;
   final Set<ActivityAction> actions;
+  final Set<String> outcomes;
   final int limit;
 
   const ActivityQuery({
@@ -66,12 +92,14 @@ class ActivityQuery {
     this.to,
     this.orgs = const {},
     this.repos = const {},
+    this.itemTypes = const {},
     this.actions = const {},
+    this.outcomes = const {},
     this.limit = 500,
   }) : assert(
-          (from == null) == (to == null),
-          'from and to must both be set or both null',
-        );
+         (from == null) == (to == null),
+         'from and to must both be set or both null',
+       );
 
   /// Returns a copy with the given fields overridden. `date`, `from`, `to`
   /// use a sentinel to distinguish "not passed" (keep current) from
@@ -82,17 +110,21 @@ class ActivityQuery {
     Object? to = _unset,
     Set<String>? orgs,
     Set<String>? repos,
+    Set<String>? itemTypes,
     Set<ActivityAction>? actions,
+    Set<String>? outcomes,
     int? limit,
   }) {
     return ActivityQuery(
-      date:    identical(date, _unset) ? this.date : date as DateTime?,
-      from:    identical(from, _unset) ? this.from : from as DateTime?,
-      to:      identical(to,   _unset) ? this.to   : to   as DateTime?,
-      orgs:    orgs    ?? this.orgs,
-      repos:   repos   ?? this.repos,
+      date: identical(date, _unset) ? this.date : date as DateTime?,
+      from: identical(from, _unset) ? this.from : from as DateTime?,
+      to: identical(to, _unset) ? this.to : to as DateTime?,
+      orgs: orgs ?? this.orgs,
+      repos: repos ?? this.repos,
+      itemTypes: itemTypes ?? this.itemTypes,
       actions: actions ?? this.actions,
-      limit:   limit   ?? this.limit,
+      outcomes: outcomes ?? this.outcomes,
+      limit: limit ?? this.limit,
     );
   }
 
@@ -108,9 +140,11 @@ class ActivityQuery {
     }
     if (orgs.isNotEmpty) params['org'] = orgs.toList();
     if (repos.isNotEmpty) params['repo'] = repos.toList();
+    if (itemTypes.isNotEmpty) params['item_type'] = itemTypes.toList();
     if (actions.isNotEmpty) {
-      params['action'] = actions.map((a) => a.name).toList();
+      params['action'] = actions.map((a) => a.wireName).toList();
     }
+    if (outcomes.isNotEmpty) params['outcome'] = outcomes.toList();
     params['limit'] = [limit.toString()];
     return params;
   }

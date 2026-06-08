@@ -5,18 +5,17 @@ import (
 	"time"
 )
 
-// CountIssueReviewsForIssue returns the number of reviews for the given
-// issue whose created_at is at or after `since`. Mirrors
-// CountReviewsForPR from the PR side; used by the issue-triage circuit
-// breaker to cap runaway re-triage loops (see theburrowhub/heimdallm#292).
+// CountIssueReviewsForIssue returns the number of triage reviews for the
+// given issue whose created_at is at or after `since`. Refinement/develop
+// rows do not consume the triage breaker budget.
 func (s *Store) CountIssueReviewsForIssue(issueID int64, since time.Time) (int, error) {
 	var n int
 	err := s.db.QueryRow(
-		"SELECT COUNT(*) FROM issue_reviews WHERE issue_id = ? AND created_at >= ?",
+		"SELECT COUNT(*) FROM issue_reviews WHERE issue_id = ? AND created_at >= ? AND action_taken = 'review_only'",
 		issueID, since.UTC().Format(sqliteTimeFormat),
 	).Scan(&n)
 	if err != nil {
-		return 0, fmt.Errorf("store: count issue reviews for issue: %w", err)
+		return 0, fmt.Errorf("store: count issue triages for issue: %w", err)
 	}
 	return n, nil
 }
@@ -29,7 +28,7 @@ func (s *Store) CountIssueTriagesForRepo(repo string, since time.Time) (int, err
 	err := s.db.QueryRow(`
 		SELECT COUNT(*) FROM issue_reviews r
 		JOIN issues i ON r.issue_id = i.id
-		WHERE i.repo = ? AND r.created_at >= ?`,
+		WHERE i.repo = ? AND r.created_at >= ? AND r.action_taken = 'review_only'`,
 		repo, since.UTC().Format(sqliteTimeFormat),
 	).Scan(&n)
 	if err != nil {

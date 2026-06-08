@@ -93,3 +93,56 @@ func TestUpsertDiscoveredRepos_IgnoresPRsWithEmptyRepo(t *testing.T) {
 		t.Fatalf("PRs with empty Repo must be ignored, got %v", added)
 	}
 }
+
+func TestUpsertDiscoveredRepos_FiltersOutsideDiscoveryOrgs(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.GitHub.DiscoveryOrgs = []string{"overmind-swarm"}
+
+	prs := []*gh.PullRequest{
+		{RepositoryURL: "https://api.github.com/repos/overmind-swarm/backend", Number: 1},
+		{RepositoryURL: "https://api.github.com/repos/freepik-company/fc-py-cogito", Number: 2},
+		{RepositoryURL: "https://api.github.com/repos/other-org/repo", Number: 3},
+	}
+	for _, pr := range prs {
+		pr.ResolveRepo()
+	}
+
+	added := upsertDiscoveredRepos(cfg, prs)
+	if len(added) != 1 || added[0] != "overmind-swarm/backend" {
+		t.Fatalf("expected only overmind-swarm/backend, got %v", added)
+	}
+}
+
+func TestUpsertDiscoveredRepos_NoOrgFilterWhenDiscoveryOrgsEmpty(t *testing.T) {
+	cfg := &config.Config{}
+	// DiscoveryOrgs empty → all orgs accepted (backward compat)
+
+	prs := []*gh.PullRequest{
+		{RepositoryURL: "https://api.github.com/repos/any-org/repo", Number: 1},
+	}
+	for _, pr := range prs {
+		pr.ResolveRepo()
+	}
+
+	added := upsertDiscoveredRepos(cfg, prs)
+	if len(added) != 1 || added[0] != "any-org/repo" {
+		t.Fatalf("without DiscoveryOrgs all repos should be accepted, got %v", added)
+	}
+}
+
+func TestUpsertDiscoveredRepos_OrgFilterCaseInsensitive(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.GitHub.DiscoveryOrgs = []string{"Overmind-Swarm"}
+
+	prs := []*gh.PullRequest{
+		{RepositoryURL: "https://api.github.com/repos/overmind-swarm/repo", Number: 1},
+	}
+	for _, pr := range prs {
+		pr.ResolveRepo()
+	}
+
+	added := upsertDiscoveredRepos(cfg, prs)
+	if len(added) != 1 {
+		t.Fatalf("org filter should be case-insensitive, got %v", added)
+	}
+}

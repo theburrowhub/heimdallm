@@ -32,3 +32,59 @@ func TestGetPRSnapshot(t *testing.T) {
 		t.Errorf("snapshot = %+v", snap)
 	}
 }
+
+func TestGetPRHeadInfo(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/org/repo/pulls/42" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{
+			"head":{"sha":"abc123"},
+			"requested_reviewers":[
+				{"login":"heimdallm-bot"},
+				{"login":"Alice"}
+			]
+		}`))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	info, err := c.GetPRHeadInfo("org/repo", 42)
+	if err != nil {
+		t.Fatalf("GetPRHeadInfo: %v", err)
+	}
+	if info.HeadSHA != "abc123" {
+		t.Errorf("HeadSHA = %q, want abc123", info.HeadSHA)
+	}
+	if !info.ReviewRequestedFor("heimdallm-bot") {
+		t.Error("ReviewRequestedFor(heimdallm-bot) = false, want true")
+	}
+	if !info.ReviewRequestedFor("ALICE") {
+		t.Error("ReviewRequestedFor(ALICE) = false, want true (case-insensitive)")
+	}
+	if info.ReviewRequestedFor("bob") {
+		t.Error("ReviewRequestedFor(bob) = true, want false")
+	}
+}
+
+func TestGetPRHeadInfo_EmptyReviewers(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"head":{"sha":"def456"},
+			"requested_reviewers":[]
+		}`))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	info, err := c.GetPRHeadInfo("org/repo", 1)
+	if err != nil {
+		t.Fatalf("GetPRHeadInfo: %v", err)
+	}
+	if info.HeadSHA != "def456" {
+		t.Errorf("HeadSHA = %q, want def456", info.HeadSHA)
+	}
+	if info.ReviewRequestedFor("anyone") {
+		t.Error("empty requested_reviewers must return false for any login")
+	}
+}

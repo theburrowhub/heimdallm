@@ -47,8 +47,8 @@ class StatsFilterBar extends ConsumerWidget {
                   final org = r.contains('/') ? r.split('/').first : r;
                   return selectedOrgs.isEmpty || selectedOrgs.contains(org);
                 }).toSet();
-                ref.read(statsFiltersProvider.notifier).state =
-                    filters.copyWith(orgs: selectedOrgs, repos: validRepos);
+                ref.read(statsFiltersProvider.notifier).set(
+                    filters.copyWith(orgs: selectedOrgs, repos: validRepos));
               },
             ),
 
@@ -61,8 +61,8 @@ class StatsFilterBar extends ConsumerWidget {
               allItems: visibleRepos.toList()..sort(),
               selected: filters.repos,
               onChanged: (repos) {
-                ref.read(statsFiltersProvider.notifier).state =
-                    filters.copyWith(repos: repos);
+                ref.read(statsFiltersProvider.notifier).set(
+                    filters.copyWith(repos: repos));
               },
             ),
 
@@ -73,8 +73,8 @@ class StatsFilterBar extends ConsumerWidget {
               label: const Text('Reset', style: TextStyle(fontSize: 12)),
               visualDensity: VisualDensity.compact,
               onPressed: () {
-                ref.read(statsFiltersProvider.notifier).state =
-                    const StatsFilters();
+                ref.read(statsFiltersProvider.notifier).set(
+                    const StatsFilters());
               },
             ),
         ],

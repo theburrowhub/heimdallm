@@ -2,6 +2,228 @@
 
 > **Note:** Versions 0.1.0–0.1.3 were originally published under [`theburrowhub/heimdallr-docker`](https://github.com/theburrowhub/heimdallr-docker) (now archived). The project was unified into this repository and renamed to Heimdallm in v0.1.1.
 
+## Unreleased
+
+### Upgrade Notes
+
+* **issues:** issue classification now follows the state-machine order `skip > blocked > review_only > refinement > develop > default_action`. If a repo intentionally double-labels issues with triage/review and develop labels, the earlier stage now wins so Heimdallm does not skip triage or refinement during promotion.
+* **issues:** `auto_promote_triage` defaults on only when `refinement_labels` is configured. Repos without a refinement target keep their previous review-only behavior; set `auto_promote_triage = false` explicitly to keep refinement manual even when refinement labels exist.
+* **pipeline (PR reviews):** a push (new HEAD SHA) on a previously-reviewed PR no longer triggers an automatic re-review on its own. Heimdallm now requires an explicit `review_requested` event for the bot — i.e. someone (or some automation) pressing "Re-request review" — newer than the previous review's `CreatedAt`. The SHA-unchanged dedup (#322 Bug 5) and this SHA-changed gate now share the same predicate, so the contract is "review iff explicitly re-requested" regardless of whether the commit changed. Workflows that relied on push-triggered re-reviews — typically repos with "Dismiss stale reviews on push" or CODEOWNERS auto-request workflows that auto-re-added the bot to `requested_reviewers` — must now explicitly re-request the review (manually in the UI, or via a GitHub Action calling `gh pr edit --add-reviewer`). Skipped pushes surface as a `review_skipped` SSE with reason `no_rereview_request` (distinct from `sha_unchanged`) so dashboards can tell the two cases apart. Closes #509.
+
+## [0.6.24](https://github.com/theburrowhub/heimdallm/compare/v0.6.23...v0.6.24) (2026-06-05)
+
+
+### Features
+
+* **pipeline:** factor PR comments into review approve/request_changes decision ([#525](https://github.com/theburrowhub/heimdallm/issues/525)) ([6c243d3](https://github.com/theburrowhub/heimdallm/commit/6c243d3cdc41b62b129ed15873101242d3e68c9e))
+* **pipeline:** persistent per-repo review instructions via PR comment directives (refs ai-platform-workspace[#383](https://github.com/theburrowhub/heimdallm/issues/383)) ([#520](https://github.com/theburrowhub/heimdallm/issues/520)) ([783f47e](https://github.com/theburrowhub/heimdallm/commit/783f47e4ef50b9f47e797565af8e2dfdde0379a3))
+
+
+### Bug Fixes
+
+* **github:** paginate PR comments to capture newest entries (closes [#512](https://github.com/theburrowhub/heimdallm/issues/512)) ([#516](https://github.com/theburrowhub/heimdallm/issues/516)) ([13ecb25](https://github.com/theburrowhub/heimdallm/commit/13ecb25155cb4daec8161b352f5717d05027c459))
+* **github:** reconstruct diff via List PR Files API for PRs over 300 files (closes [#506](https://github.com/theburrowhub/heimdallm/issues/506)) ([#523](https://github.com/theburrowhub/heimdallm/issues/523)) ([f5205c0](https://github.com/theburrowhub/heimdallm/commit/f5205c002a1aed65dd71a25cb6dabf82eee8b64e))
+* **github:** return error on timeline pagination cap instead of partial results (closes [#519](https://github.com/theburrowhub/heimdallm/issues/519)) ([#521](https://github.com/theburrowhub/heimdallm/issues/521)) ([1424048](https://github.com/theburrowhub/heimdallm/commit/142404834c90e38716f7a49cebbab395aa435d78))
+* **github:** scale body ceiling for paginated comment endpoints (closes [#518](https://github.com/theburrowhub/heimdallm/issues/518)) ([#522](https://github.com/theburrowhub/heimdallm/issues/522)) ([21b474c](https://github.com/theburrowhub/heimdallm/commit/21b474cc59fce156dc33944f89b200975b12f169))
+
+
+### Documentation
+
+* **landing:** auto-version the hero badge via release-please extra-files (closes [#514](https://github.com/theburrowhub/heimdallm/issues/514)) ([#524](https://github.com/theburrowhub/heimdallm/issues/524)) ([e2793b6](https://github.com/theburrowhub/heimdallm/commit/e2793b655da64489bcf3c91c42da9706671cee8b))
+* refresh landing to reflect 0.6.23 product scope ([#513](https://github.com/theburrowhub/heimdallm/issues/513)) ([a994086](https://github.com/theburrowhub/heimdallm/commit/a99408691e8f7692dc9673423b8443e7521ca126))
+
+## [0.6.23](https://github.com/theburrowhub/heimdallm/compare/v0.6.22...v0.6.23) (2026-05-25)
+
+
+### Bug Fixes
+
+* **pipeline:** require explicit re-request on SHA change (closes [#509](https://github.com/theburrowhub/heimdallm/issues/509)) ([#510](https://github.com/theburrowhub/heimdallm/issues/510)) ([cd44802](https://github.com/theburrowhub/heimdallm/commit/cd448025a784e52e86eb421bc8e941c479cd0c74))
+
+## [0.6.22](https://github.com/theburrowhub/heimdallm/compare/v0.6.21...v0.6.22) (2026-05-21)
+
+
+### Features
+
+* add liveness heartbeat watchdog ([#504](https://github.com/theburrowhub/heimdallm/issues/504)) ([b7c0172](https://github.com/theburrowhub/heimdallm/commit/b7c01728efdd6dc3393c173424f7bb47d1e0012f))
+
+
+### Bug Fixes
+
+* persist topic-discovered repos to config even without open PRs ([#508](https://github.com/theburrowhub/heimdallm/issues/508)) ([38525d7](https://github.com/theburrowhub/heimdallm/commit/38525d74caea635fcfa03a7575118d1819f67d28))
+
+## [0.6.21](https://github.com/theburrowhub/heimdallm/compare/v0.6.20...v0.6.21) (2026-05-15)
+
+
+### Bug Fixes
+
+* avoid poller restart for dynamic config reloads ([#503](https://github.com/theburrowhub/heimdallm/issues/503)) ([5b60cd0](https://github.com/theburrowhub/heimdallm/commit/5b60cd03362dc9bab4dca1bce80479a5e2dfae57))
+* hide self-authored PRs from review queue ([#500](https://github.com/theburrowhub/heimdallm/issues/500)) ([fc58697](https://github.com/theburrowhub/heimdallm/commit/fc58697b277efa76e867404c1b0768749ec37ec7))
+
+## [0.6.20](https://github.com/theburrowhub/heimdallm/compare/v0.6.19...v0.6.20) (2026-05-14)
+
+
+### Bug Fixes
+
+* keep triage suggested assignee when unverified ([#496](https://github.com/theburrowhub/heimdallm/issues/496)) ([a2e6514](https://github.com/theburrowhub/heimdallm/commit/a2e6514327f81adfcf7b8b39045de093ed85843d))
+* run codex through non-interactive exec ([#498](https://github.com/theburrowhub/heimdallm/issues/498)) ([f96b0f2](https://github.com/theburrowhub/heimdallm/commit/f96b0f25c0b80f7fe31fa2e85cfbd51bb0031312))
+
+## [0.6.19](https://github.com/theburrowhub/heimdallm/compare/v0.6.18...v0.6.19) (2026-05-14)
+
+
+### Features
+
+* **rename:** warn on stale non_monitored slugs ([#493](https://github.com/theburrowhub/heimdallm/issues/493)) ([#495](https://github.com/theburrowhub/heimdallm/issues/495)) ([eb0d3dd](https://github.com/theburrowhub/heimdallm/commit/eb0d3dda0838ec6b3414bcdad3764e60d9d2bbe0))
+
+
+### Bug Fixes
+
+* **rename:** propagate GitHub repo/org renames across daemon state ([#489](https://github.com/theburrowhub/heimdallm/issues/489)) ([#491](https://github.com/theburrowhub/heimdallm/issues/491)) ([e5b7340](https://github.com/theburrowhub/heimdallm/commit/e5b7340df858ecae575ba746bb4e3fd2c52f635d))
+
+## [0.6.18](https://github.com/theburrowhub/heimdallm/compare/v0.6.17...v0.6.18) (2026-05-13)
+
+
+### Features
+
+* implement [#390](https://github.com/theburrowhub/heimdallm/issues/390) — bug: archived repos not purged from monitored list ([#391](https://github.com/theburrowhub/heimdallm/issues/391)) ([27c8d2c](https://github.com/theburrowhub/heimdallm/commit/27c8d2c846f2ebde8f95907cbb523c1cff1e80c0))
+* **issues/tier3:** PR review-state vigilance on auto_implement PRs ([#482](https://github.com/theburrowhub/heimdallm/issues/482)) ([#490](https://github.com/theburrowhub/heimdallm/issues/490)) ([24ef821](https://github.com/theburrowhub/heimdallm/commit/24ef821b053b4722fb85d59cdb93efc244d94df2))
+* **tier2:** parallel PR/issue polling + per-repo concurrency ([#481](https://github.com/theburrowhub/heimdallm/issues/481)) ([#486](https://github.com/theburrowhub/heimdallm/issues/486)) ([5b0c21d](https://github.com/theburrowhub/heimdallm/commit/5b0c21d85d4906fd0ec2947adc20b23ea07fe379))
+
+
+### Bug Fixes
+
+* **issues:** terminate auto_implement no-changes runs cleanly ([#483](https://github.com/theburrowhub/heimdallm/issues/483)) ([#488](https://github.com/theburrowhub/heimdallm/issues/488)) ([f3d8c17](https://github.com/theburrowhub/heimdallm/commit/f3d8c17968c1e0e29943d8b515ce075f47655f5e))
+
+
+### Documentation
+
+* explain macOS TCC permission dialogs for Music/Downloads ([#371](https://github.com/theburrowhub/heimdallm/issues/371)) ([8ed3fef](https://github.com/theburrowhub/heimdallm/commit/8ed3fefe392411d0d7e8f14dcd36dfa409381386))
+
+## [0.6.17](https://github.com/theburrowhub/heimdallm/compare/v0.6.16...v0.6.17) (2026-05-12)
+
+
+### Features
+
+* **repoctx:** per-execution git worktrees for concurrent pipelines ([#461](https://github.com/theburrowhub/heimdallm/issues/461)) ([#476](https://github.com/theburrowhub/heimdallm/issues/476)) ([d98b914](https://github.com/theburrowhub/heimdallm/commit/d98b914509ecf8bee1be37d137230250ac222b12))
+
+
+### Bug Fixes
+
+* **issues:** dispatch re-review by current GitHub labels, not stored action ([#462](https://github.com/theburrowhub/heimdallm/issues/462)) ([#473](https://github.com/theburrowhub/heimdallm/issues/473)) ([82b0f1d](https://github.com/theburrowhub/heimdallm/commit/82b0f1dd4a10728b60f32576e9d62e304aadb537))
+* **security:** harden auto_implement against prompt injection ([#478](https://github.com/theburrowhub/heimdallm/issues/478)) ([#480](https://github.com/theburrowhub/heimdallm/issues/480)) ([21f87d5](https://github.com/theburrowhub/heimdallm/commit/21f87d5588a96f9a3b17c84cd14c2b4cba52271f))
+* **server:** strip dangerously_skip_perms from PATCH bodies ([#477](https://github.com/theburrowhub/heimdallm/issues/477)) ([#479](https://github.com/theburrowhub/heimdallm/issues/479)) ([0a1e58c](https://github.com/theburrowhub/heimdallm/commit/0a1e58c51a809c522e612f045ed33be6fb280080))
+* **server:** structured event cards in Events tab ([#453](https://github.com/theburrowhub/heimdallm/issues/453)) ([#475](https://github.com/theburrowhub/heimdallm/issues/475)) ([3228854](https://github.com/theburrowhub/heimdallm/commit/3228854e7b907144b57f8f550d5c68fcf5bf0823))
+
+## [0.6.16](https://github.com/theburrowhub/heimdallm/compare/v0.6.15...v0.6.16) (2026-05-12)
+
+
+### Bug Fixes
+
+* **github:** paginate FetchCollaborators via Link header ([#435](https://github.com/theburrowhub/heimdallm/issues/435)) ([9878454](https://github.com/theburrowhub/heimdallm/commit/98784547b2a0e3d5221e672d3ca9802942e473c9))
+* **issues:** restore handoff flow + single-flight triage claim per issue ([#458](https://github.com/theburrowhub/heimdallm/issues/458)) ([#459](https://github.com/theburrowhub/heimdallm/issues/459)) ([e838e4a](https://github.com/theburrowhub/heimdallm/commit/e838e4abf2caa909adfb37c60a0793677d81f4ea))
+* **issues:** scope auto-promote to daemon assignee + record real PR author ([#456](https://github.com/theburrowhub/heimdallm/issues/456)) ([#457](https://github.com/theburrowhub/heimdallm/issues/457)) ([cbdabf3](https://github.com/theburrowhub/heimdallm/commit/cbdabf37f93eee3240ba14f772296d7c9f064b1b))
+
+## [0.6.15](https://github.com/theburrowhub/heimdallm/compare/v0.6.14...v0.6.15) (2026-05-11)
+
+
+### Bug Fixes
+
+* **issues:** add Dismiss button to dashboard activity list tiles ([#450](https://github.com/theburrowhub/heimdallm/issues/450)) ([c11485e](https://github.com/theburrowhub/heimdallm/commit/c11485e2f1b13a2ecabca61aed969b7ed081df47))
+
+## [0.6.14](https://github.com/theburrowhub/heimdallm/compare/v0.6.13...v0.6.14) (2026-05-11)
+
+
+### Bug Fixes
+
+* **notifications:** migrate from local_notifier to flutter_local_notifications ([#448](https://github.com/theburrowhub/heimdallm/issues/448)) ([0c78da1](https://github.com/theburrowhub/heimdallm/commit/0c78da11c0e6082c141116c4e3158c369bf97f44))
+
+## [0.6.13](https://github.com/theburrowhub/heimdallm/compare/v0.6.12...v0.6.13) (2026-05-11)
+
+
+### Features
+
+* add issue refinement stage ([#402](https://github.com/theburrowhub/heimdallm/issues/402)) ([4305ea0](https://github.com/theburrowhub/heimdallm/commit/4305ea06b917e8c67dffc30437fd8e09971e167c))
+* add lightweight issue triage heuristics ([#401](https://github.com/theburrowhub/heimdallm/issues/401)) ([23635ae](https://github.com/theburrowhub/heimdallm/commit/23635aedbce179a94d6949a7a41867c4ddb8fd17))
+* add organization config scope ([#398](https://github.com/theburrowhub/heimdallm/issues/398)) ([fd6e609](https://github.com/theburrowhub/heimdallm/commit/fd6e60987331deb8aa2c373a1eed179599ce77f2))
+* **app:** expose refinement labels config ([#409](https://github.com/theburrowhub/heimdallm/issues/409)) ([53d0b98](https://github.com/theburrowhub/heimdallm/commit/53d0b98ccbd10a99531d689584b78ae94c9a3173))
+* auto-clone repo context for agents ([302ea3f](https://github.com/theburrowhub/heimdallm/commit/302ea3f1c03c2f9b272698e88ca37202a1ccf604))
+* implement [#433](https://github.com/theburrowhub/heimdallm/issues/433) — docs: add staged issue flow smoke-test note ([#434](https://github.com/theburrowhub/heimdallm/issues/434)) ([951d755](https://github.com/theburrowhub/heimdallm/commit/951d755166a88090a8d4cc78f7c63922ec6e80ee))
+* **issues:** add issue stage promotion state machine ([#404](https://github.com/theburrowhub/heimdallm/issues/404)) ([2a124de](https://github.com/theburrowhub/heimdallm/commit/2a124de8ad3a612a874e9d737395276d7431d068))
+* **issues:** smart-promote refinement and record activity ([#421](https://github.com/theburrowhub/heimdallm/issues/421)) ([2b1a9f4](https://github.com/theburrowhub/heimdallm/commit/2b1a9f4449003b4d52b372e46f9214e6c48b621c))
+* **server:** GUI Server section ([#397](https://github.com/theburrowhub/heimdallm/issues/397), PR 1/2) ([#406](https://github.com/theburrowhub/heimdallm/issues/406)) ([6e09c83](https://github.com/theburrowhub/heimdallm/commit/6e09c83036361ddf0533921da7260b6d8a5851b0))
+* **tui:** Server tab ([#397](https://github.com/theburrowhub/heimdallm/issues/397), PR 2/2) ([#415](https://github.com/theburrowhub/heimdallm/issues/415)) ([0aff057](https://github.com/theburrowhub/heimdallm/commit/0aff05709e8c35966ad37accf835aa4e237792d8))
+
+
+### Bug Fixes
+
+* **issues:** dedupe stage promotion audits ([#412](https://github.com/theburrowhub/heimdallm/issues/412)) ([590a328](https://github.com/theburrowhub/heimdallm/commit/590a32803852da283089938184cc5d0fb0829ed4))
+* **issues:** dedupe stale stage promotion audits ([#425](https://github.com/theburrowhub/heimdallm/issues/425)) ([a0e0fe8](https://github.com/theburrowhub/heimdallm/commit/a0e0fe8c50f5c54859cb5441562f0ede41c832b1))
+* **issues:** enforce scoped auto-implementation changes ([#432](https://github.com/theburrowhub/heimdallm/issues/432)) ([2c04848](https://github.com/theburrowhub/heimdallm/commit/2c04848e12381333c141e7ecc7b3e2ed545dbb1d))
+* **issues:** process promoted stages within grace ([#417](https://github.com/theburrowhub/heimdallm/issues/417)) ([c12908d](https://github.com/theburrowhub/heimdallm/commit/c12908d14ba093399594decc84c07573e6b9a2dc))
+* **issues:** scope staged pipeline by assignee ([#429](https://github.com/theburrowhub/heimdallm/issues/429)) ([deb741a](https://github.com/theburrowhub/heimdallm/commit/deb741afe43efdca0a93f2cdcf3972feb83a9a93))
+* **issues:** scope triage breaker to triage runs ([#419](https://github.com/theburrowhub/heimdallm/issues/419)) ([0a30d14](https://github.com/theburrowhub/heimdallm/commit/0a30d14cdf2ab12b5e11730e8a46cb225e9a4df0))
+* **ui:** hide Organizations filter at repo scope ([#403](https://github.com/theburrowhub/heimdallm/issues/403)) ([#405](https://github.com/theburrowhub/heimdallm/issues/405)) ([48b07e9](https://github.com/theburrowhub/heimdallm/commit/48b07e9db3f862d000ec29dd827745f7102d2cb8))
+
+## [0.6.12](https://github.com/theburrowhub/heimdallm/compare/v0.6.11...v0.6.12) (2026-05-01)
+
+
+### Bug Fixes
+
+* **cli:** make j/k/arrows scroll Stats and Config tabs directly ([#387](https://github.com/theburrowhub/heimdallm/issues/387)) ([adc9aaa](https://github.com/theburrowhub/heimdallm/commit/adc9aaa7fbcc4ad729b1eea6784507cdfa15862f)), closes [#388](https://github.com/theburrowhub/heimdallm/issues/388)
+
+## [0.6.11](https://github.com/theburrowhub/heimdallm/compare/v0.6.10...v0.6.11) (2026-04-30)
+
+
+### Features
+
+* gate PR reviews on requested_reviewers check, remove 2-min grace ([#385](https://github.com/theburrowhub/heimdallm/issues/385)) ([7dad9a6](https://github.com/theburrowhub/heimdallm/commit/7dad9a69564395157cbc99dcbd6807601aae863f))
+
+## [0.6.10](https://github.com/theburrowhub/heimdallm/compare/v0.6.9...v0.6.10) (2026-04-30)
+
+
+### Features
+
+* add daemon shutdown controls ([#367](https://github.com/theburrowhub/heimdallm/issues/367)) ([ff7efed](https://github.com/theburrowhub/heimdallm/commit/ff7efedbc3c499e141a6f879a3e86eeba196f8c9))
+* improve activity log UX ([#375](https://github.com/theburrowhub/heimdallm/issues/375)) ([7db75d5](https://github.com/theburrowhub/heimdallm/commit/7db75d5d968a3df303574711f7d08e929409cb8d))
+
+
+### Bug Fixes
+
+* allow starting daemon from offline dashboard ([#369](https://github.com/theburrowhub/heimdallm/issues/369)) ([5b9ede7](https://github.com/theburrowhub/heimdallm/commit/5b9ede7c1fdcde4828c6156ed5c8102b23fde1ab))
+* avoid duplicate review publish retries ([#380](https://github.com/theburrowhub/heimdallm/issues/380)) ([7640899](https://github.com/theburrowhub/heimdallm/commit/76408997a76174919932449c1abb731cf41b09ea))
+* filter PR auto-discovery by discovery_orgs ([#382](https://github.com/theburrowhub/heimdallm/issues/382)) ([ca8313f](https://github.com/theburrowhub/heimdallm/commit/ca8313f8186bdcbf1c305aed9f3f93f65daf82c3))
+* keep toml repo lists above store state ([#374](https://github.com/theburrowhub/heimdallm/issues/374)) ([671cce6](https://github.com/theburrowhub/heimdallm/commit/671cce624a1bf8e0b4f772818090f3b3600c2f9a))
+* make discovery interval follow poll interval ([#370](https://github.com/theburrowhub/heimdallm/issues/370)) ([4554ab1](https://github.com/theburrowhub/heimdallm/commit/4554ab1305377075674264b739f80a3074d77db3))
+* populate activity filter options ([#379](https://github.com/theburrowhub/heimdallm/issues/379)) ([2718c98](https://github.com/theburrowhub/heimdallm/commit/2718c98370843b867046e5d8d8446bf3101e6bbc))
+* prevent duplicate SSE notification streams ([#378](https://github.com/theburrowhub/heimdallm/issues/378)) ([81b9d93](https://github.com/theburrowhub/heimdallm/commit/81b9d935efdf9d48e46ba61d5df1a7377f524cd6))
+* refresh topic discovery before publishing repos ([#373](https://github.com/theburrowhub/heimdallm/issues/373)) ([92ecb4c](https://github.com/theburrowhub/heimdallm/commit/92ecb4c7c67057c23e7b476af03449193313239f))
+* restore docker go test gate ([#372](https://github.com/theburrowhub/heimdallm/issues/372)) ([d9d5cf8](https://github.com/theburrowhub/heimdallm/commit/d9d5cf8689c78afbc94cf2611e41727bf00655c6))
+* stop circuit breaker requeue loop ([#381](https://github.com/theburrowhub/heimdallm/issues/381)) ([b2ddae8](https://github.com/theburrowhub/heimdallm/commit/b2ddae86cc3b70a8fcbedb3342896406089a4654))
+* use time.Now() in circuit breaker tests to stay within 24h window ([#384](https://github.com/theburrowhub/heimdallm/issues/384)) ([f2f3339](https://github.com/theburrowhub/heimdallm/commit/f2f333974a2160c511e22f110c740d6e380c574e)), closes [#383](https://github.com/theburrowhub/heimdallm/issues/383)
+
+## [0.6.9](https://github.com/theburrowhub/heimdallm/compare/v0.6.8...v0.6.9) (2026-04-25)
+
+
+### Bug Fixes
+
+* **issues:** bot-comment check must allow mode transitions ([#364](https://github.com/theburrowhub/heimdallm/issues/364)) ([9e50b10](https://github.com/theburrowhub/heimdallm/commit/9e50b10a93ea67f20bcaf24e7ef487e4e5a4445d)), closes [#362](https://github.com/theburrowhub/heimdallm/issues/362)
+
+## [0.6.8](https://github.com/theburrowhub/heimdallm/compare/v0.6.7...v0.6.8) (2026-04-25)
+
+
+### Bug Fixes
+
+* auto-dismiss legacy items with empty repo from watch_state ([#357](https://github.com/theburrowhub/heimdallm/issues/357)) ([df733ca](https://github.com/theburrowhub/heimdallm/commit/df733ca36caa093b1350725c1eb26fcbb370f861))
+* **daemon:** mark review orphan on permanent submit failure (closes [#325](https://github.com/theburrowhub/heimdallm/issues/325)) ([#326](https://github.com/theburrowhub/heimdallm/issues/326)) ([9002737](https://github.com/theburrowhub/heimdallm/commit/9002737df6c7e9c4c2604d2e15625721f630a299))
+* **daemon:** silence PR SHA-skip side effects + respect re-request review (closes [#322](https://github.com/theburrowhub/heimdallm/issues/322) bugs 3-5) ([#324](https://github.com/theburrowhub/heimdallm/issues/324)) ([da81a0e](https://github.com/theburrowhub/heimdallm/commit/da81a0ec45ba6d7bef3ffd495ac6bb29986a903a))
+* **daemon:** stop issue-triage cost-runaway (closes [#292](https://github.com/theburrowhub/heimdallm/issues/292)) ([#296](https://github.com/theburrowhub/heimdallm/issues/296)) ([38669ba](https://github.com/theburrowhub/heimdallm/commit/38669ba8c15fff4f6b1d31a55258695ce8d4e63b))
+* **daemon:** use GitHub ID for PR in-flight claim on cold-start (closes [#359](https://github.com/theburrowhub/heimdallm/issues/359)) ([#360](https://github.com/theburrowhub/heimdallm/issues/360)) ([35a5aa3](https://github.com/theburrowhub/heimdallm/commit/35a5aa3296e283a13b25c87e6d151d5a5ed0f6dc))
+* **issues:** break re-triage loop by detecting bot own comments (closes [#362](https://github.com/theburrowhub/heimdallm/issues/362)) ([#363](https://github.com/theburrowhub/heimdallm/issues/363)) ([da19183](https://github.com/theburrowhub/heimdallm/commit/da1918398e4b1bcc00f334a747a73e14bbd32fc8))
+
+
+### Documentation
+
+* **config:** warn about review_only re-processing loop and excessive API costs ([#347](https://github.com/theburrowhub/heimdallm/issues/347)) ([a894160](https://github.com/theburrowhub/heimdallm/commit/a894160d495d6d5c13f9cfea8534cbed2e1743f5)), closes [#346](https://github.com/theburrowhub/heimdallm/issues/346)
+
 ## [0.6.7](https://github.com/theburrowhub/heimdallm/compare/v0.6.6...v0.6.7) (2026-04-23)
 
 

@@ -28,21 +28,36 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
+// ErrPromoteConflict is returned by the promote callback when the request is
+// syntactically valid but the issue is not currently in a promotable stage.
+var ErrPromoteConflict = errors.New("issue promotion conflict")
+
 // Server holds the HTTP router, SSE broker, store, and optional pipeline.
 type Server struct {
-	store           *store.Store
-	broker          *sse.Broker
-	natsConn        *nats.Conn // when set, handleSSE reads from NATS instead of broker
-	pipeline        *pipeline.Pipeline
-	router          chi.Router
-	httpServer      *http.Server
-	reloadFn        func() error
+	store                *store.Store
+	broker               *sse.Broker
+	natsConn             *nats.Conn // when set, handleSSE reads from NATS instead of broker
+	pipeline             *pipeline.Pipeline
+	router               chi.Router
+	httpServer           *http.Server
+	reloadFn             func() error
+	shutdownFn           func()
 	triggerReviewFn      func(prID int64) error
 	triggerIssueReviewFn func(issueID int64) error
+	triggerIssueRefineFn func(issueID int64, force bool) error
 	triggerPromoteFn     func(issueID int64) error
-	meFn                 func() (string, error)
+	cleanCloneFn         func(ctx context.Context, repo string) error
+	cleanClonesFn        func(ctx context.Context) (int, error)
+	// repoRenameFn drives the manual rename trigger at
+	// POST /admin/repo-rename (#489). Wired by main; nil when the
+	// daemon was constructed without the rename reconciler (e.g. in
+	// tests that don't need it).
+	repoRenameFn func(ctx context.Context, oldRepo, newRepo string) error
+	meFn         func() (string, error)
 	// configFn returns the current running config as a JSON-serializable map.
 	configFn func() map[string]any
+	// healthSnapshotFn returns live daemon liveness metadata for /health and SSE heartbeat.
+	healthSnapshotFn func() HealthSnapshot
 	// repoMetaFns fetch repo metadata from GitHub for autocomplete.
 	fetchLabelsFn        func(repo string) ([]string, error)
 	fetchCollaboratorsFn func(repo string) ([]string, error)
@@ -50,6 +65,8 @@ type Server struct {
 	// Empty string disables authentication (should not happen in production).
 	apiToken  string
 	reviewSem chan struct{} // counting semaphore for concurrent review triggers
+	version   string
+	startedAt time.Time
 	// configPath is the path to config.toml. Required for PATCH/DELETE
 	// endpoints that read-merge-write the TOML file.
 	configPath string
@@ -62,9 +79,21 @@ type Options struct {
 	// MaxConcurrentReviews limits how many POST /prs/{id}/review goroutines
 	// can run simultaneously. 0 means use the default (5).
 	MaxConcurrentReviews int
+	// Version is the build-time version string (e.g. "v1.2.3"). Optional.
+	Version string
+	// StartedAt is the time the server process started. Optional.
+	StartedAt time.Time
 }
 
 const defaultMaxConcurrentReviews = 5
+const cloneCleanupTimeout = 30 * time.Second
+const heartbeatInterval = 20 * time.Second
+
+// HealthSnapshot is supplied by the daemon to enrich /health and SSE heartbeats.
+type HealthSnapshot struct {
+	LastPollAt   time.Time
+	PollInterval time.Duration
+}
 
 // New creates a new Server. p may be nil if the pipeline is not yet configured.
 // apiToken must be the value returned by LoadOrCreateAPIToken — it is required
@@ -86,6 +115,10 @@ func NewWithOptions(s *store.Store, broker *sse.Broker, p *pipeline.Pipeline, ap
 		apiToken:  apiToken,
 		reviewSem: make(chan struct{}, max),
 	}
+	srv.version = opts.Version
+	if !opts.StartedAt.IsZero() {
+		srv.startedAt = opts.StartedAt
+	}
 	srv.router = srv.buildRouter()
 	return srv
 }
@@ -106,7 +139,7 @@ var sensitiveGETPaths = []string{
 	"/agents",
 	"/events",
 	"/logs/stream",
-	"/me",    // exposes GitHub username
+	"/me",     // exposes GitHub username
 	"/prs",    // exposes PR titles, repos, authors
 	"/stats",  // exposes review activity metadata
 	"/issues", // covers /issues and /issues/{id}
@@ -149,6 +182,9 @@ func (srv *Server) authMiddleware(next http.Handler) http.Handler {
 // SetReloadFn wires the config-reload callback called by POST /reload.
 func (srv *Server) SetReloadFn(fn func() error) { srv.reloadFn = fn }
 
+// SetShutdownFn wires the daemon shutdown callback called by POST /shutdown.
+func (srv *Server) SetShutdownFn(fn func()) { srv.shutdownFn = fn }
+
 // SetTriggerReviewFn wires the review-trigger callback called by POST /prs/{id}/review.
 func (srv *Server) SetTriggerReviewFn(fn func(prID int64) error) { srv.triggerReviewFn = fn }
 
@@ -157,11 +193,42 @@ func (srv *Server) SetTriggerIssueReviewFn(fn func(issueID int64) error) {
 	srv.triggerIssueReviewFn = fn
 }
 
+// SetTriggerIssueRefineFn wires the refinement trigger called by POST /issues/{id}/refine.
+func (srv *Server) SetTriggerIssueRefineFn(fn func(issueID int64, force bool) error) {
+	srv.triggerIssueRefineFn = fn
+}
+
 // SetTriggerPromoteFn wires the promote callback called by POST /issues/{id}/promote.
-// The callback must run the auto_implement pipeline for the given issue regardless
-// of its current classification (review_only → develop promotion).
+// The callback validates and applies a stage-label transition only. The poll
+// cycle executes the new stage after it observes the updated GitHub labels.
 func (srv *Server) SetTriggerPromoteFn(fn func(issueID int64) error) {
 	srv.triggerPromoteFn = fn
+}
+
+// SetRepoRenameFn wires the manual rename trigger called by
+// POST /admin/repo-rename (#489). The callback runs the same
+// reconciler the rename probe uses, so a manual rename is fully
+// idempotent against subsequent probe ticks.
+func (srv *Server) SetRepoRenameFn(fn func(ctx context.Context, oldRepo, newRepo string) error) {
+	srv.repoRenameFn = fn
+}
+
+// TOMLMu returns the mutex serialising read-modify-write operations
+// on the config TOML file. The rename reconciler (#489) shares this
+// mutex with the HTTP PATCH/DELETE handlers so concurrent operator
+// edits and rename reconciliations cannot clobber each other on disk.
+func (srv *Server) TOMLMu() *sync.Mutex {
+	return &srv.tomlMu
+}
+
+// SetCleanCloneFn wires the manual single-repo managed-clone cleanup callback.
+func (srv *Server) SetCleanCloneFn(fn func(ctx context.Context, repo string) error) {
+	srv.cleanCloneFn = fn
+}
+
+// SetCleanClonesFn wires the manual all-managed-clones cleanup callback.
+func (srv *Server) SetCleanClonesFn(fn func(ctx context.Context) (int, error)) {
+	srv.cleanClonesFn = fn
 }
 
 // SetMeFn wires the authenticated-user callback called by GET /me.
@@ -169,6 +236,9 @@ func (srv *Server) SetMeFn(fn func() (string, error)) { srv.meFn = fn }
 
 // SetConfigFn wires the callback that returns the live config for GET /config.
 func (srv *Server) SetConfigFn(fn func() map[string]any) { srv.configFn = fn }
+
+// SetHealthSnapshotFn wires live liveness metadata for GET /health and heartbeat SSE.
+func (srv *Server) SetHealthSnapshotFn(fn func() HealthSnapshot) { srv.healthSnapshotFn = fn }
 
 // SetRepoMetaFns wires GitHub metadata fetchers for autocomplete endpoints.
 func (srv *Server) SetRepoMetaFns(labels func(string) ([]string, error), collabs func(string) ([]string, error)) {
@@ -179,11 +249,37 @@ func (srv *Server) SetRepoMetaFns(labels func(string) ([]string, error), collabs
 // SetConfigPath sets the path to config.toml for PATCH/DELETE handlers.
 func (srv *Server) SetConfigPath(path string) { srv.configPath = path }
 
-// patchTOML is the shared read-merge-write pipeline for all TOML-mutating
-// endpoints. mutateFn receives the current TOML as a map and must apply
-// its changes in-place. On success, returns the full live config for the
-// response body.
+// patchTOML is the shared read-merge-write pipeline for all
+// TOML-mutating endpoints. mutateFn receives the current TOML as a
+// map and must apply its changes in-place. On success, returns the
+// full live config for the response body.
+//
+// tomlMu is held ONLY through the read-mutate-write half. reloadFn
+// runs AFTER the unlock because it can wait on goroutines (the
+// rename probe in particular) that themselves need to acquire
+// tomlMu — keeping the mutex held across reloadFn deadlocks the
+// daemon (#489 review feedback).
 func (srv *Server) patchTOML(mutateFn func(m map[string]any) error) (map[string]any, error) {
+	m, err := srv.writeTOMLUnderLock(mutateFn)
+	if err != nil {
+		return nil, err
+	}
+	if srv.reloadFn != nil {
+		if err := srv.reloadFn(); err != nil {
+			return nil, fmt.Errorf("config reload after write: %w", err)
+		}
+	}
+	if srv.configFn != nil {
+		return srv.configFn(), nil
+	}
+	return m, nil
+}
+
+// writeTOMLUnderLock executes the read-mutate-validate-write half of
+// patchTOML while holding tomlMu, releasing the lock on every exit
+// path (including errors). Split out from patchTOML so the unlock
+// happens before reloadFn — see the comment on patchTOML.
+func (srv *Server) writeTOMLUnderLock(mutateFn func(m map[string]any) error) (map[string]any, error) {
 	srv.tomlMu.Lock()
 	defer srv.tomlMu.Unlock()
 
@@ -194,19 +290,23 @@ func (srv *Server) patchTOML(mutateFn func(m map[string]any) error) (map[string]
 	if err := mutateFn(m); err != nil {
 		return nil, err
 	}
+	// Defense-in-depth (security gate M-5): every PATCH path that
+	// touches ai.agents.* must drop dangerously_skip_perms before the
+	// merged map is validated and persisted. PUT rejects the key with
+	// a 400 via normalizeAgentConfigsForPut, but PATCH deep-merges
+	// arbitrary JSON, so the gate has to be enforced here regardless
+	// of which handler invoked patchTOML. Audit-log non-zero strips so
+	// operators can detect bypass attempts even though they're now
+	// neutralized.
+	if stripped := stripDangerousAgentFlags(m); stripped > 0 {
+		slog.Warn("config: PATCH attempted to set dangerously_skip_perms; stripped (M-5 gate)",
+			"count", stripped)
+	}
 	if err := config.ValidateMap(m); err != nil {
 		return nil, err
 	}
 	if err := config.AtomicWriteTOML(srv.configPath, m); err != nil {
 		return nil, err
-	}
-	if srv.reloadFn != nil {
-		if err := srv.reloadFn(); err != nil {
-			return nil, fmt.Errorf("config reload after write: %w", err)
-		}
-	}
-	if srv.configFn != nil {
-		return srv.configFn(), nil
 	}
 	return m, nil
 }
@@ -250,6 +350,7 @@ func (srv *Server) buildRouter() chi.Router {
 	r.Get("/issues", srv.handleListIssues)
 	r.Get("/issues/{id}", srv.handleGetIssue)
 	r.Post("/issues/{id}/review", srv.handleTriggerIssueReview)
+	r.Post("/issues/{id}/refine", srv.handleTriggerIssueRefine)
 	r.Post("/issues/{id}/promote", srv.handlePromoteIssue)
 	r.Post("/issues/{id}/dismiss", srv.handleDismissIssue)
 	r.Post("/issues/{id}/undismiss", srv.handleUndismissIssue)
@@ -265,7 +366,13 @@ func (srv *Server) buildRouter() chi.Router {
 	r.Patch("/config", srv.handlePatchConfig)
 	r.Patch("/config/repos/{repo}", srv.handlePatchRepoConfig)
 	r.Delete("/config/repos/{repo}/*", srv.handleDeleteRepoField)
+	r.Patch("/config/orgs/{org}", srv.handlePatchOrgConfig)
+	r.Delete("/config/orgs/{org}/*", srv.handleDeleteOrgField)
+	r.Delete("/config/clones", srv.handleDeleteManagedClones)
+	r.Delete("/config/clones/{repo}", srv.handleDeleteManagedClone)
 	r.Post("/reload", srv.handleReload)
+	r.Post("/shutdown", srv.handleShutdown)
+	r.Post("/admin/repo-rename", srv.handleAdminRepoRename)
 	r.Get("/events", srv.handleSSE)
 	r.Get("/logs/stream", srv.handleLogsStream)
 	return r
@@ -278,7 +385,112 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func (srv *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	now := time.Now().UTC()
+	checks := map[string]any{
+		"nats":      srv.natsHealthCheck(),
+		"sqlite":    srv.sqliteHealthCheck(r.Context()),
+		"last_poll": srv.lastPollHealthCheck(now),
+	}
+	statusCode := http.StatusOK
+	status := "ok"
+	if !healthCheckOK(checks["nats"]) || !healthCheckOK(checks["sqlite"]) || !healthCheckOK(checks["last_poll"]) {
+		statusCode = http.StatusServiceUnavailable
+		status = "degraded"
+	}
+	resp := map[string]any{
+		"status": status,
+		"checks": checks,
+	}
+	if srv.version != "" {
+		resp["version"] = srv.version
+	}
+	if !srv.startedAt.IsZero() {
+		resp["started_at"] = srv.startedAt.UTC().Format(time.RFC3339)
+		resp["uptime_seconds"] = int64(now.Sub(srv.startedAt.UTC()).Seconds())
+	}
+	writeJSON(w, statusCode, resp)
+}
+
+func healthCheckOK(check any) bool {
+	m, ok := check.(map[string]any)
+	if !ok {
+		return false
+	}
+	okValue, ok := m["ok"].(bool)
+	return ok && okValue
+}
+
+func (srv *Server) natsHealthCheck() map[string]any {
+	if srv.natsConn == nil {
+		return map[string]any{
+			"ok":         true,
+			"configured": false,
+			"connected":  false,
+		}
+	}
+	connected := srv.natsConn.IsConnected()
+	return map[string]any{
+		"ok":         connected,
+		"configured": true,
+		"connected":  connected,
+		"status":     fmt.Sprint(srv.natsConn.Status()),
+	}
+}
+
+func (srv *Server) sqliteHealthCheck(ctx context.Context) map[string]any {
+	out := map[string]any{
+		"ok": false,
+	}
+	if srv.store == nil || srv.store.DB() == nil {
+		out["error"] = "store unavailable"
+		return out
+	}
+	ctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	if err := srv.store.DB().PingContext(ctx); err != nil {
+		out["error"] = err.Error()
+		return out
+	}
+	var result int
+	if err := srv.store.DB().QueryRowContext(ctx, "SELECT 1").Scan(&result); err != nil {
+		out["error"] = err.Error()
+		return out
+	}
+	out["query"] = "ok"
+	out["ok"] = result == 1
+	return out
+}
+
+func (srv *Server) lastPollHealthCheck(now time.Time) map[string]any {
+	snap := srv.healthSnapshot()
+	out := map[string]any{
+		"ok": false,
+	}
+	if snap.LastPollAt.IsZero() {
+		out["ok"] = true
+		out["status"] = "unknown"
+		out["at"] = nil
+		out["age_seconds"] = nil
+		return out
+	}
+	lastPoll := snap.LastPollAt.UTC()
+	age := now.Sub(lastPoll)
+	out["at"] = lastPoll.Format(time.RFC3339)
+	out["age_seconds"] = int64(age.Seconds())
+	if snap.PollInterval > 0 {
+		out["max_age_seconds"] = int64((2 * snap.PollInterval).Seconds())
+		out["ok"] = age <= 2*snap.PollInterval
+	} else {
+		out["ok"] = true
+	}
+	return out
+}
+
+func (srv *Server) healthSnapshot() HealthSnapshot {
+	if srv.healthSnapshotFn == nil {
+		return HealthSnapshot{}
+	}
+	return srv.healthSnapshotFn()
 }
 
 func (srv *Server) handleListPRs(w http.ResponseWriter, r *http.Request) {
@@ -296,12 +508,43 @@ func (srv *Server) handleListPRs(w http.ResponseWriter, r *http.Request) {
 		*store.PR
 		LatestReview *store.Review `json:"latest_review,omitempty"`
 	}
+	authLogin := srv.authenticatedLoginForPRListing()
+	skippedSelf := 0
 	result := make([]prWithReview, 0, len(prs))
 	for _, pr := range prs {
+		if authLogin != "" && githubLoginsEqual(pr.Author, authLogin) {
+			skippedSelf++
+			continue
+		}
 		rev, _ := srv.store.LatestReviewForPR(pr.ID)
 		result = append(result, prWithReview{PR: pr, LatestReview: rev})
 	}
+	if skippedSelf > 0 {
+		slog.Info("handleListPRs: self-authored PRs hidden from review listing", "count", skippedSelf, "user", authLogin)
+	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (srv *Server) authenticatedLoginForPRListing() string {
+	if srv.meFn == nil {
+		return ""
+	}
+	login, err := srv.meFn()
+	if err != nil {
+		slog.Warn("handleListPRs: authenticated user unavailable; self-authored PRs remain visible", "err", err)
+		return ""
+	}
+	return normalizeGitHubLoginForCompare(login)
+}
+
+func githubLoginsEqual(a, b string) bool {
+	a = normalizeGitHubLoginForCompare(a)
+	b = normalizeGitHubLoginForCompare(b)
+	return a != "" && b != "" && strings.EqualFold(a, b)
+}
+
+func normalizeGitHubLoginForCompare(login string) string {
+	return strings.TrimSpace(strings.TrimLeft(login, "@"))
 }
 
 func (srv *Server) handleGetPR(w http.ResponseWriter, r *http.Request) {
@@ -386,13 +629,14 @@ func (srv *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 // readOnlyConfigKeys below) is rejected with HTTP 400 to prevent arbitrary
 // data injection into the configs table (security issue #4).
 var validConfigKeys = map[string]struct{}{
-	"poll_interval":  {},
-	"repositories":   {},
-	"ai_primary":     {},
-	"ai_fallback":    {},
-	"review_mode":    {},
-	"retention_days": {},
-	"issue_tracking": {},
+	"poll_interval":      {},
+	"ai_primary":         {},
+	"ai_fallback":        {},
+	"review_mode":        {},
+	"refinement_timeout": {},
+	"retention_days":     {},
+	"issue_tracking":     {},
+	"agent_configs":      {},
 }
 
 // readOnlyConfigKeys are keys that GET /config returns (so the web UI can
@@ -403,20 +647,42 @@ var validConfigKeys = map[string]struct{}{
 // arbitrary keys permitted.
 //
 // Why each key is here:
+//   - repositories  : repo-list changes belong in config.toml via PATCH
+//     /config. Persisting this key in SQLite lets runtime discovery override
+//     explicit TOML/env repo choices.
 //   - non_monitored : Flutter-UI managed list of disabled repos, not a
 //     web-UI concern.
 //   - repo_overrides: per-repo AI config lives in [ai.repos.<name>] or
 //     the Flutter app; no write-path through this endpoint.
-//   - agent_configs : per-CLI agent tuning lives in [ai.agents.<name>]
-//     or /agents endpoints; no write-path here.
+//   - org_overrides : per-org AI config lives in [ai.orgs.<name>] and is
+//     patched through /config/orgs/{org}.
 //   - server_port   : bootstrap-only (changing the listening port mid-
 //     flight would drop every in-flight connection). Its numeric-range
 //     pre-check still runs so clients get feedback on bad values.
 var readOnlyConfigKeys = map[string]struct{}{
+	"repositories":   {},
 	"non_monitored":  {},
 	"repo_overrides": {},
-	"agent_configs":  {},
+	"org_overrides":  {},
 	"server_port":    {},
+}
+
+// allowedAgentConfigSubkeys is the per-agent allowlist for PUT /config.
+// Mirrors CLIAgentConfig fields exposed via the Flutter UI. Note the deliberate
+// omission of dangerously_skip_perms (M-5): toggling --dangerously-skip-permissions
+// at runtime over HTTP would let an attacker with API access escalate the
+// agent's effective permissions. That field stays TOML/env-only.
+var allowedAgentConfigSubkeys = map[string]struct{}{
+	"model":                  {},
+	"max_turns":              {},
+	"approval_mode":          {},
+	"extra_flags":            {},
+	"prompt":                 {},
+	"effort":                 {},
+	"permission_mode":        {},
+	"bare":                   {},
+	"no_session_persistence": {},
+	"execution_timeout":      {},
 }
 
 // validPollIntervals is the allowlist of permitted poll_interval values.
@@ -486,6 +752,17 @@ func (srv *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if v, ok := body["refinement_timeout"]; ok {
+		s, isStr := v.(string)
+		if !isStr {
+			http.Error(w, "refinement_timeout must be a string", http.StatusBadRequest)
+			return
+		}
+		if d, err := time.ParseDuration(s); err != nil || d <= 0 {
+			http.Error(w, "refinement_timeout must be a positive duration, e.g. 30m", http.StatusBadRequest)
+			return
+		}
+	}
 	if v, ok := body["issue_tracking"]; ok {
 		// Round-trip through JSON to decode into the typed struct. This
 		// rejects malformed payloads (e.g. the client sent a string or
@@ -505,6 +782,16 @@ func (srv *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+	}
+	if v, ok := body["agent_configs"]; ok {
+		normalized, err := normalizeAgentConfigsForPut(v)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		// Replace with normalized form so the JSON we persist below carries
+		// the validated/coerced types (numbers as int, etc.).
+		body["agent_configs"] = normalized
 	}
 
 	for k, v := range body {
@@ -636,6 +923,67 @@ func (srv *Server) handlePatchRepoConfig(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, result)
 }
 
+func (srv *Server) handlePatchOrgConfig(w http.ResponseWriter, r *http.Request) {
+	if srv.configPath == "" {
+		http.Error(w, `{"error":"PATCH not available — configPath not set"}`, http.StatusServiceUnavailable)
+		return
+	}
+	org, err := url.PathUnescape(chi.URLParam(r, "org"))
+	if err != nil || org == "" {
+		http.Error(w, `{"error":"invalid org parameter"}`, http.StatusBadRequest)
+		return
+	}
+	if err := config.ValidateOrgSlug(org); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var patch map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+		return
+	}
+	if err := config.ContainsNull(patch); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "null values not allowed in PATCH — use DELETE to remove fields",
+		})
+		return
+	}
+	config.NormalizeNumbers(patch)
+
+	globalPatch := map[string]any{
+		"ai": map[string]any{
+			"orgs": map[string]any{
+				org: patch,
+			},
+		},
+	}
+
+	result, err := srv.patchTOML(func(m map[string]any) error {
+		merged := config.DeepMerge(m, globalPatch)
+		for k, v := range merged {
+			m[k] = v
+		}
+		for k := range m {
+			if _, ok := merged[k]; !ok {
+				delete(m, k)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		slog.Error("PATCH /config/orgs failed", "org", org, "err", err)
+		var ve *config.ValidationError
+		if errors.As(err, &ve) {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+		} else {
+			http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (srv *Server) handleDeleteRepoField(w http.ResponseWriter, r *http.Request) {
 	if srv.configPath == "" {
 		http.Error(w, `{"error":"DELETE not available — configPath not set"}`, http.StatusServiceUnavailable)
@@ -672,6 +1020,88 @@ func (srv *Server) handleDeleteRepoField(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, result)
 }
 
+func (srv *Server) handleDeleteOrgField(w http.ResponseWriter, r *http.Request) {
+	if srv.configPath == "" {
+		http.Error(w, `{"error":"DELETE not available — configPath not set"}`, http.StatusServiceUnavailable)
+		return
+	}
+	org, err := url.PathUnescape(chi.URLParam(r, "org"))
+	if err != nil || org == "" {
+		http.Error(w, `{"error":"invalid org parameter"}`, http.StatusBadRequest)
+		return
+	}
+	if err := config.ValidateOrgSlug(org); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+	field := chi.URLParam(r, "*")
+	if field == "" {
+		http.Error(w, `{"error":"field path required"}`, http.StatusBadRequest)
+		return
+	}
+	segments := append([]string{"ai", "orgs", org}, strings.Split(field, "/")...)
+
+	result, err := srv.patchTOML(func(m map[string]any) error {
+		config.DeleteNestedKey(m, segments)
+		return nil
+	})
+	if err != nil {
+		slog.Error("DELETE /config/orgs field failed", "org", org, "field", field, "err", err)
+		var ve *config.ValidationError
+		if errors.As(err, &ve) {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+		} else {
+			http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (srv *Server) handleDeleteManagedClone(w http.ResponseWriter, r *http.Request) {
+	if srv.cleanCloneFn == nil {
+		http.Error(w, `{"error":"clone cleanup not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+	repo, err := url.PathUnescape(chi.URLParam(r, "repo"))
+	if err != nil || repo == "" {
+		http.Error(w, `{"error":"invalid repo parameter"}`, http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), cloneCleanupTimeout)
+	defer cancel()
+	if err := srv.cleanCloneFn(ctx, repo); err != nil {
+		slog.Error("DELETE /config/clones failed", "repo", repo, "err", err)
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			http.Error(w, `{"error":"clone cleanup timed out"}`, http.StatusGatewayTimeout)
+			return
+		}
+		http.Error(w, `{"error":"clone cleanup failed"}`, http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "repo": repo})
+}
+
+func (srv *Server) handleDeleteManagedClones(w http.ResponseWriter, r *http.Request) {
+	if srv.cleanClonesFn == nil {
+		http.Error(w, `{"error":"clone cleanup not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), cloneCleanupTimeout)
+	defer cancel()
+	removed, err := srv.cleanClonesFn(ctx)
+	if err != nil {
+		slog.Error("DELETE /config/clones failed", "err", err)
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			http.Error(w, `{"error":"clone cleanup timed out"}`, http.StatusGatewayTimeout)
+			return
+		}
+		http.Error(w, `{"error":"clone cleanup failed"}`, http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "removed": removed})
+}
+
 func (srv *Server) handleReload(w http.ResponseWriter, r *http.Request) {
 	if srv.reloadFn == nil {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -684,6 +1114,19 @@ func (srv *Server) handleReload(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Info("config reloaded via API")
 	writeJSON(w, http.StatusOK, map[string]string{"status": "reloaded"})
+}
+
+func (srv *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
+	if srv.shutdownFn == nil {
+		http.Error(w, `{"error":"shutdown not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+	slog.Info("shutdown requested via API")
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "shutdown queued"})
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	go srv.shutdownFn()
 }
 
 func (srv *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
@@ -711,7 +1154,11 @@ func (srv *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	defer srv.broker.Unsubscribe(ch)
 
 	fmt.Fprintf(w, ": connected\n\n")
+	fmt.Fprint(w, srv.heartbeatEvent(time.Now()).Format())
 	flusher.Flush()
+
+	heartbeat := time.NewTicker(heartbeatInterval)
+	defer heartbeat.Stop()
 
 	for {
 		select {
@@ -720,6 +1167,9 @@ func (srv *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			fmt.Fprint(w, event.Format())
+			flusher.Flush()
+		case <-heartbeat.C:
+			fmt.Fprint(w, srv.heartbeatEvent(time.Now()).Format())
 			flusher.Flush()
 		case <-r.Context().Done():
 			return
@@ -739,11 +1189,12 @@ func (srv *Server) handleSSEViaNATS(w http.ResponseWriter, r *http.Request, flus
 	defer sub.Unsubscribe()
 
 	fmt.Fprintf(w, ": connected\n\n")
+	fmt.Fprint(w, srv.heartbeatEvent(time.Now()).Format())
 	flusher.Flush()
 
-	// Keep-alive ticker prevents proxies/load balancers from closing idle connections.
-	keepAlive := time.NewTicker(20 * time.Second)
-	defer keepAlive.Stop()
+	// Heartbeat prevents idle connection drops and gives clients observable liveness.
+	heartbeat := time.NewTicker(heartbeatInterval)
+	defer heartbeat.Stop()
 
 	for {
 		select {
@@ -751,13 +1202,38 @@ func (srv *Server) handleSSEViaNATS(w http.ResponseWriter, r *http.Request, flus
 			eventType := strings.TrimPrefix(msg.Subject, "heimdallm.events.")
 			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, string(msg.Data))
 			flusher.Flush()
-		case <-keepAlive.C:
-			fmt.Fprintf(w, ": ping\n\n")
+		case <-heartbeat.C:
+			fmt.Fprint(w, srv.heartbeatEvent(time.Now()).Format())
 			flusher.Flush()
 		case <-r.Context().Done():
 			return
 		}
 	}
+}
+
+func (srv *Server) heartbeatEvent(now time.Time) sse.Event {
+	now = now.UTC()
+	data := map[string]any{
+		"ts": now.Format(time.RFC3339),
+	}
+	snap := srv.healthSnapshot()
+	if snap.LastPollAt.IsZero() {
+		data["last_poll_at"] = nil
+		data["last_poll_age_seconds"] = nil
+	} else {
+		lastPoll := snap.LastPollAt.UTC()
+		data["last_poll_at"] = lastPoll.Format(time.RFC3339)
+		data["last_poll_age_seconds"] = int64(now.Sub(lastPoll).Seconds())
+	}
+	if srv.natsConn != nil {
+		data["nats_connected"] = srv.natsConn.IsConnected()
+	}
+	b, err := json.Marshal(data)
+	if err != nil {
+		slog.Warn("marshal heartbeat payload", "err", err)
+		b = []byte(`{"ts":"` + now.Format(time.RFC3339) + `"}`)
+	}
+	return sse.Event{Type: sse.EventHeartbeat, Data: string(b)}
 }
 
 func (srv *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
@@ -850,20 +1326,40 @@ type issueResponse struct {
 	FetchedAt    time.Time            `json:"fetched_at"`
 	Dismissed    bool                 `json:"dismissed"`
 	LatestReview *issueReviewResponse `json:"latest_review,omitempty"`
+	// LinkedPR carries the external review state of the PR
+	// auto_implement created for this issue (#482 phase 1). Populated
+	// only when the issue's latest review action is `auto_implement`
+	// and the PR row carries a non-zero `auto_implement_issue_id`;
+	// triage-only flows leave this nil.
+	LinkedPR *issueLinkedPRResponse `json:"linked_pr,omitempty"`
+}
+
+// issueLinkedPRResponse is the slim PR-side view embedded on the
+// issue response so a single issue endpoint hit gives Flutter
+// everything it needs to render the "PR Changes Requested" /
+// "PR Approved" chip.
+type issueLinkedPRResponse struct {
+	Number              int       `json:"number"`
+	URL                 string    `json:"url"`
+	State               string    `json:"state"`
+	ExternalReviewState string    `json:"external_review_state"`
+	ExternalReviewer    string    `json:"external_reviewer"`
+	ExternalReviewAt    time.Time `json:"external_review_at,omitempty"`
 }
 
 // issueReviewResponse wraps a store.IssueReview, parsing Triage/Suggestions
 // JSON strings into structured objects.
 type issueReviewResponse struct {
-	ID          int64           `json:"id"`
-	IssueID     int64           `json:"issue_id"`
-	CLIUsed     string          `json:"cli_used"`
-	Summary     string          `json:"summary"`
-	Triage      json.RawMessage `json:"triage"`
-	Suggestions json.RawMessage `json:"suggestions"`
-	ActionTaken string          `json:"action_taken"`
-	PRCreated   int             `json:"pr_created"`
-	CreatedAt   time.Time       `json:"created_at"`
+	ID             int64           `json:"id"`
+	IssueID        int64           `json:"issue_id"`
+	CLIUsed        string          `json:"cli_used"`
+	Summary        string          `json:"summary"`
+	Triage         json.RawMessage `json:"triage"`
+	RefinementData json.RawMessage `json:"refinement_data,omitempty"`
+	Suggestions    json.RawMessage `json:"suggestions"`
+	ActionTaken    string          `json:"action_taken"`
+	PRCreated      int             `json:"pr_created"`
+	CreatedAt      time.Time       `json:"created_at"`
 }
 
 func toIssueResponse(iss *store.Issue, rev *store.IssueReview) issueResponse {
@@ -882,15 +1378,42 @@ func toIssueResponse(iss *store.Issue, rev *store.IssueReview) issueResponse {
 	return resp
 }
 
+// attachLinkedPR hydrates the linked_pr block on the response when the
+// latest review created a PR AND that PR carries the
+// auto_implement_issue_id back-link (#482). Both conditions are
+// required: a PR created by auto_implement before this PR landed in
+// production stays unmarked and falls through cleanly.
+func (srv *Server) attachLinkedPR(resp *issueResponse, iss *store.Issue, rev *store.IssueReview) {
+	if rev == nil || rev.PRCreated <= 0 {
+		return
+	}
+	pr, err := srv.store.GetPRByRepoNumber(iss.Repo, rev.PRCreated)
+	if err != nil || pr == nil || pr.AutoImplementIssueID == 0 {
+		return
+	}
+	resp.LinkedPR = &issueLinkedPRResponse{
+		Number:              pr.Number,
+		URL:                 pr.URL,
+		State:               pr.State,
+		ExternalReviewState: pr.ExternalReviewState,
+		ExternalReviewer:    pr.ExternalReviewer,
+		ExternalReviewAt:    pr.ExternalReviewAt,
+	}
+}
+
 func toIssueReviewResponse(r *store.IssueReview) *issueReviewResponse {
-	return &issueReviewResponse{
+	resp := &issueReviewResponse{
 		ID: r.ID, IssueID: r.IssueID, CLIUsed: r.CLIUsed,
-		Summary: r.Summary,
+		Summary:     r.Summary,
 		Triage:      json.RawMessage(r.Triage),
 		Suggestions: json.RawMessage(r.Suggestions),
 		ActionTaken: r.ActionTaken, PRCreated: r.PRCreated,
 		CreatedAt: r.CreatedAt,
 	}
+	if r.RefinementData != "" {
+		resp.RefinementData = json.RawMessage(r.RefinementData)
+	}
+	return resp
 }
 
 func (srv *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
@@ -907,7 +1430,9 @@ func (srv *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
 	result := make([]issueResponse, 0, len(issues))
 	for _, iss := range issues {
 		rev, _ := srv.store.LatestIssueReview(iss.ID)
-		result = append(result, toIssueResponse(iss, rev))
+		resp := toIssueResponse(iss, rev)
+		srv.attachLinkedPR(&resp, iss, rev)
+		result = append(result, resp)
 	}
 	writeJSON(w, http.StatusOK, result)
 }
@@ -928,7 +1453,9 @@ func (srv *Server) handleGetIssue(w http.ResponseWriter, r *http.Request) {
 	for _, rev := range reviews {
 		reviewResps = append(reviewResps, toIssueReviewResponse(rev))
 	}
-	issResp := toIssueResponse(iss, nil)
+	latestRev, _ := srv.store.LatestIssueReview(id)
+	issResp := toIssueResponse(iss, latestRev)
+	srv.attachLinkedPR(&issResp, iss, latestRev)
 	writeJSON(w, http.StatusOK, map[string]any{"issue": issResp, "reviews": reviewResps})
 }
 
@@ -988,10 +1515,41 @@ func (srv *Server) handleTriggerIssueReview(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "review queued"})
 }
 
-// handlePromoteIssue promotes a review_only-classified issue to auto_implement,
-// triggering the full develop pipeline immediately without waiting for a label
-// change on GitHub. It shares the same semaphore as review and triage so total
-// concurrent AI processes stay bounded.
+func (srv *Server) handleTriggerIssueRefine(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if srv.triggerIssueRefineFn == nil {
+		http.Error(w, "issue refinement trigger not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if _, err := srv.store.GetIssue(id); err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	force := strings.EqualFold(r.URL.Query().Get("force"), "true") || r.URL.Query().Get("force") == "1"
+	// Shared semaphore with PR reviews and issue triage because refinement
+	// also launches an AI CLI process.
+	select {
+	case srv.reviewSem <- struct{}{}:
+	default:
+		http.Error(w, `{"error":"too many concurrent reviews — try again later"}`, http.StatusTooManyRequests)
+		return
+	}
+	go func() {
+		defer func() { <-srv.reviewSem }()
+		if err := srv.triggerIssueRefineFn(id, force); err != nil {
+			slog.Error("trigger issue refinement failed", "issue_id", id, "force", force, "err", err)
+		}
+	}()
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "refinement queued"})
+}
+
+// handlePromoteIssue moves an issue to its next configured stage by updating
+// GitHub labels. It does not run AI work directly; the next poll sees the new
+// labels and dispatches refinement/development through the normal workers.
 func (srv *Server) handlePromoteIssue(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
@@ -1002,19 +1560,20 @@ func (srv *Server) handlePromoteIssue(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "promote trigger not configured", http.StatusServiceUnavailable)
 		return
 	}
-	select {
-	case srv.reviewSem <- struct{}{}:
-	default:
-		http.Error(w, `{"error":"too many concurrent reviews — try again later"}`, http.StatusTooManyRequests)
+	if _, err := srv.store.GetIssue(id); err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	go func() {
-		defer func() { <-srv.reviewSem }()
-		if err := srv.triggerPromoteFn(id); err != nil {
-			slog.Error("promote issue failed", "issue_id", id, "err", err)
+	if err := srv.triggerPromoteFn(id); err != nil {
+		slog.Error("promote issue failed", "issue_id", id, "err", err)
+		if errors.Is(err, ErrPromoteConflict) {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
 		}
-	}()
-	writeJSON(w, http.StatusAccepted, map[string]string{"status": "promote queued"})
+		http.Error(w, "promote failed", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "promotion applied"})
 }
 
 func (srv *Server) handleRepoLabels(w http.ResponseWriter, r *http.Request) {
@@ -1085,7 +1644,9 @@ func (srv *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 //	from=YYYY-MM-DD & to=YYYY-MM-DD  — inclusive range in daemon local TZ
 //	org=... (repeatable)             — org filter
 //	repo=... (repeatable)            — repo filter (full slug "org/name")
-//	action=review|triage|implement|promote|error (repeatable)
+//	item_type=pr|issue (repeatable)  — item type filter
+//	action=review|review_skipped|triage|implement|promote|error (repeatable)
+//	outcome=... (repeatable)         — exact outcome filter
 //	limit=N (default 500, max 5000)
 //
 // Default when neither date nor from/to is supplied: today in daemon local TZ.
@@ -1165,13 +1726,36 @@ func (srv *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 		limit = n
 	}
 
+	orgs, ok := activityFilterValues(w, q, "org", nil)
+	if !ok {
+		return
+	}
+	repos, ok := activityFilterValues(w, q, "repo", nil)
+	if !ok {
+		return
+	}
+	itemTypes, ok := activityFilterValues(w, q, "item_type", validActivityItemTypes)
+	if !ok {
+		return
+	}
+	actions, ok := activityFilterValues(w, q, "action", validActivityActions)
+	if !ok {
+		return
+	}
+	outcomes, ok := activityFilterValues(w, q, "outcome", nil)
+	if !ok {
+		return
+	}
+
 	entries, truncated, err := srv.store.ListActivity(store.ActivityQuery{
-		From:    start,
-		To:      end,
-		Orgs:    q["org"],
-		Repos:   q["repo"],
-		Actions: q["action"],
-		Limit:   limit,
+		From:      start,
+		To:        end,
+		Orgs:      orgs,
+		Repos:     repos,
+		ItemTypes: itemTypes,
+		Actions:   actions,
+		Outcomes:  outcomes,
+		Limit:     limit,
 	})
 	if err != nil {
 		slog.Error("activity: list failed", "err", err)
@@ -1218,6 +1802,46 @@ func (srv *Server) handleActivity(w http.ResponseWriter, r *http.Request) {
 		"count":     len(out),
 		"truncated": truncated,
 	})
+}
+
+const maxActivityFilterValues = 50
+const maxActivityFilterValueLen = 512
+
+var validActivityItemTypes = map[string]bool{
+	"pr":    true,
+	"issue": true,
+}
+
+var validActivityActions = map[string]bool{
+	"review":         true,
+	"review_skipped": true,
+	"triage":         true,
+	"implement":      true,
+	"promote":        true,
+	"error":          true,
+}
+
+func activityFilterValues(w http.ResponseWriter, q url.Values, name string, allowed map[string]bool) ([]string, bool) {
+	values := q[name]
+	if len(values) > maxActivityFilterValues {
+		httpJSONErr(w, http.StatusBadRequest, name+" has too many values")
+		return nil, false
+	}
+	for _, v := range values {
+		if v == "" {
+			httpJSONErr(w, http.StatusBadRequest, name+" cannot be empty")
+			return nil, false
+		}
+		if len(v) > maxActivityFilterValueLen {
+			httpJSONErr(w, http.StatusBadRequest, name+" value is too long")
+			return nil, false
+		}
+		if allowed != nil && !allowed[v] {
+			httpJSONErr(w, http.StatusBadRequest, name+" has an invalid value")
+			return nil, false
+		}
+	}
+	return values, true
 }
 
 // httpJSONErr writes a JSON {"error": msg} body with the given HTTP status.
@@ -1379,4 +2003,173 @@ func tailLines(f *os.File, n int) []string {
 	// Seek file to end of last line read.
 	f.Seek(size, io.SeekStart) //nolint:errcheck
 	return lines
+}
+
+// dangerousAgentFlagKey names the security-gated flag that grants
+// `--dangerously-skip-permissions` to the AI CLI. Both
+// normalizeAgentConfigsForPut and stripDangerousAgentFlags reference
+// this constant so the M-5 denylist has a single source of truth.
+const dangerousAgentFlagKey = "dangerously_skip_perms"
+
+// stripDangerousAgentFlags removes the HTTP-forbidden
+// dangerously_skip_perms flag from every agent map reachable in the
+// merged config: top-level ai.agents.<cli>, per-repo
+// ai.repos.<repo>.agents.<cli>, and per-org ai.orgs.<org>.agents.<cli>.
+// The flag is still settable via direct edits to config.toml
+// (security gate M-5: only filesystem-trusted inputs can grant the
+// permission-sandbox bypass), but never via the HTTP API.
+//
+// Returns the number of entries stripped so callers can audit-log
+// bypass attempts. Key comparison is case-insensitive because the
+// downstream koanf/mapstructure decoder is case-insensitive when
+// mapping into CLIAgentConfig.DangerouslySkipPerms — an exact-case
+// match would leave Dangerously_Skip_Perms / DANGEROUSLY_SKIP_PERMS
+// shaped payloads as a live bypass.
+//
+// Invoked from patchTOML so every PATCH endpoint (global, per-repo,
+// per-org) inherits the gate without each handler having to remember
+// to call it.
+func stripDangerousAgentFlags(m map[string]any) int {
+	if m == nil {
+		return 0
+	}
+	stripped := 0
+	scrub := func(agents map[string]any) {
+		for _, raw := range agents {
+			inner, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			for k := range inner {
+				if strings.EqualFold(k, dangerousAgentFlagKey) {
+					delete(inner, k)
+					stripped++
+				}
+			}
+		}
+	}
+	ai, ok := m["ai"].(map[string]any)
+	if !ok {
+		return 0
+	}
+	if agents, ok := ai["agents"].(map[string]any); ok {
+		scrub(agents)
+	}
+	if repos, ok := ai["repos"].(map[string]any); ok {
+		for _, raw := range repos {
+			repo, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if agents, ok := repo["agents"].(map[string]any); ok {
+				scrub(agents)
+			}
+		}
+	}
+	if orgs, ok := ai["orgs"].(map[string]any); ok {
+		for _, raw := range orgs {
+			org, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if agents, ok := org["agents"].(map[string]any); ok {
+				scrub(agents)
+			}
+		}
+	}
+	return stripped
+}
+
+// normalizeAgentConfigsForPut validates the agent_configs payload from PUT
+// /config. The payload must be a JSON object keyed by CLI name (claude, gemini,
+// codex, opencode), where each value is itself an object whose keys are in
+// allowedAgentConfigSubkeys. Subkeys outside that set — including the
+// security-gated dangerously_skip_perms — return a 400 with a descriptive
+// message. permission_mode / approval_mode / extra_flags get value validation
+// against the executor allowlists.
+//
+// The returned map is shaped for json.Marshal so the persisted row deserializes
+// cleanly into map[string]CLIAgentConfig in ApplyStore.
+func normalizeAgentConfigsForPut(v any) (map[string]map[string]any, error) {
+	outer, ok := v.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("agent_configs must be an object keyed by CLI name")
+	}
+	out := make(map[string]map[string]any, len(outer))
+	for cli, raw := range outer {
+		if err := executor.ValidateCLIName(cli); err != nil {
+			return nil, fmt.Errorf("agent_configs: %v", err)
+		}
+		inner, ok := raw.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("agent_configs[%q] must be an object", cli)
+		}
+		normalized := make(map[string]any, len(inner))
+		for k, val := range inner {
+			if strings.EqualFold(k, dangerousAgentFlagKey) {
+				return nil, fmt.Errorf(
+					"agent_configs[%q].%s cannot be set via HTTP API; "+
+						"configure it in config.toml under [ai.agents.%s] (security gate M-5)",
+					cli, dangerousAgentFlagKey, cli)
+			}
+			if _, allowed := allowedAgentConfigSubkeys[k]; !allowed {
+				return nil, fmt.Errorf("agent_configs[%q]: unknown key %q", cli, k)
+			}
+			switch k {
+			case "model", "extra_flags", "prompt", "effort", "execution_timeout":
+				s, isStr := val.(string)
+				if !isStr {
+					return nil, fmt.Errorf("agent_configs[%q].%s must be a string", cli, k)
+				}
+				if k == "extra_flags" && s != "" {
+					if err := executor.ValidateExtraFlags(s); err != nil {
+						return nil, fmt.Errorf("agent_configs[%q].extra_flags: %v", cli, err)
+					}
+				}
+				if k == "execution_timeout" && s != "" {
+					if d, err := time.ParseDuration(s); err != nil || d <= 0 {
+						return nil, fmt.Errorf("agent_configs[%q].execution_timeout must be a positive duration, e.g. 20m", cli)
+					}
+				}
+				normalized[k] = s
+			case "permission_mode":
+				s, isStr := val.(string)
+				if !isStr {
+					return nil, fmt.Errorf("agent_configs[%q].permission_mode must be a string", cli)
+				}
+				if err := executor.ValidatePermissionMode(s); err != nil {
+					return nil, fmt.Errorf("agent_configs[%q].permission_mode: %v", cli, err)
+				}
+				normalized[k] = s
+			case "approval_mode":
+				s, isStr := val.(string)
+				if !isStr {
+					return nil, fmt.Errorf("agent_configs[%q].approval_mode must be a string", cli)
+				}
+				if err := executor.ValidateApprovalMode(s); err != nil {
+					return nil, fmt.Errorf("agent_configs[%q].approval_mode: %v", cli, err)
+				}
+				normalized[k] = s
+			case "max_turns":
+				n, isNum := val.(float64) // JSON numbers decode as float64
+				if !isNum || n < 0 || n != float64(int(n)) {
+					return nil, fmt.Errorf("agent_configs[%q].max_turns must be a non-negative integer", cli)
+				}
+				normalized[k] = int(n)
+			case "bare", "no_session_persistence":
+				b, isBool := val.(bool)
+				if !isBool {
+					return nil, fmt.Errorf("agent_configs[%q].%s must be a boolean", cli, k)
+				}
+				normalized[k] = b
+			default:
+				// Defensive: subkey passed the allowlist check but no parser
+				// branch above. Reject loudly so a future allowlist addition
+				// can't silently land an untyped value in the store.
+				return nil, fmt.Errorf("agent_configs[%q]: %q is allowed but has no validator (please open an issue)", cli, k)
+			}
+		}
+		out[cli] = normalized
+	}
+	return out, nil
 }

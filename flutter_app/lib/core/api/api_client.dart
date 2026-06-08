@@ -11,8 +11,8 @@ class ApiClient {
   final PlatformServices _platform;
 
   ApiClient({http.Client? httpClient, required PlatformServices platform})
-      : _client = httpClient ?? http.Client(),
-        _platform = platform;
+    : _client = httpClient ?? http.Client(),
+      _platform = platform;
 
   Uri _uri(String path) => Uri.parse('${_platform.apiBaseUrl}$path');
 
@@ -43,6 +43,18 @@ class ApiClient {
     }
   }
 
+  /// Returns the full /health payload, or null if the daemon is unreachable.
+  /// Includes status, version (optional), started_at (optional, RFC3339).
+  Future<Map<String, dynamic>?> fetchHealth() async {
+    try {
+      final resp = await _client.get(_uri('/health'), headers: await _authHeaders());
+      if (resp.statusCode != 200) return null;
+      return jsonDecode(resp.body) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<List<PR>> fetchPRs({List<String> states = const []}) async {
     var path = '/prs';
     if (states.isNotEmpty) {
@@ -53,11 +65,16 @@ class ApiClient {
       throw ApiException('GET /prs failed: ${resp.statusCode}');
     }
     final list = jsonDecode(resp.body) as List<dynamic>;
-    return list.map((e) => _parsePRWithReview(e as Map<String, dynamic>)).toList();
+    return list
+        .map((e) => _parsePRWithReview(e as Map<String, dynamic>))
+        .toList();
   }
 
   Future<Map<String, dynamic>> fetchPR(int id) async {
-    final resp = await _client.get(_uri('/prs/$id'), headers: await _authHeaders());
+    final resp = await _client.get(
+      _uri('/prs/$id'),
+      headers: await _authHeaders(),
+    );
     if (resp.statusCode != 200) {
       throw ApiException('GET /prs/$id failed: ${resp.statusCode}');
     }
@@ -75,7 +92,9 @@ class ApiClient {
     // Build /activity via the shared _uri helper so both desktop
     // (http://127.0.0.1:7842/activity) and web (/api/activity — resolved
     // against the browser origin and proxied by Nginx) work unchanged.
-    final uri = _uri('/activity').replace(queryParameters: q.toQueryParameters());
+    final uri = _uri(
+      '/activity',
+    ).replace(queryParameters: q.toQueryParameters());
     final resp = await _client.get(uri, headers: headers);
     if (resp.statusCode == 503) {
       throw ActivityDisabledException();
@@ -88,26 +107,34 @@ class ApiClient {
   }
 
   Future<void> triggerReview(int prId) async {
-    final resp = await _client.post(_uri('/prs/$prId/review'),
-        headers: await _authHeaders());
+    final resp = await _client.post(
+      _uri('/prs/$prId/review'),
+      headers: await _authHeaders(),
+    );
     if (resp.statusCode != 202) {
       throw ApiException('POST /prs/$prId/review failed: ${resp.statusCode}');
     }
   }
 
   Future<void> dismissPR(int prId) async {
-    final resp = await _client.post(_uri('/prs/$prId/dismiss'),
-        headers: await _authHeaders());
+    final resp = await _client.post(
+      _uri('/prs/$prId/dismiss'),
+      headers: await _authHeaders(),
+    );
     if (resp.statusCode != 200) {
       throw ApiException('POST /prs/$prId/dismiss failed: ${resp.statusCode}');
     }
   }
 
   Future<void> undismissPR(int prId) async {
-    final resp = await _client.post(_uri('/prs/$prId/undismiss'),
-        headers: await _authHeaders());
+    final resp = await _client.post(
+      _uri('/prs/$prId/undismiss'),
+      headers: await _authHeaders(),
+    );
     if (resp.statusCode != 200) {
-      throw ApiException('POST /prs/$prId/undismiss failed: ${resp.statusCode}');
+      throw ApiException(
+        'POST /prs/$prId/undismiss failed: ${resp.statusCode}',
+      );
     }
   }
 
@@ -120,9 +147,21 @@ class ApiClient {
     }
   }
 
+  Future<void> shutdownDaemon() async {
+    final resp = await _client.post(
+      _uri('/shutdown'),
+      headers: await _authHeaders(),
+    );
+    if (resp.statusCode != 202) {
+      throw ApiException('POST /shutdown failed: ${resp.statusCode}');
+    }
+  }
+
   Future<Map<String, dynamic>> fetchConfig() async {
-    final resp = await _client.get(_uri('/config'),
-        headers: await _authHeaders());
+    final resp = await _client.get(
+      _uri('/config'),
+      headers: await _authHeaders(),
+    );
     if (resp.statusCode != 200) {
       throw ApiException('GET /config failed: ${resp.statusCode}');
     }
@@ -132,29 +171,43 @@ class ApiClient {
   // ── Agents ──────────────────────────────────────────────────────────────
 
   Future<List<Map<String, dynamic>>> fetchAgents() async {
-    final resp = await _client.get(_uri('/agents'),
-        headers: await _authHeaders());
-    if (resp.statusCode != 200) throw ApiException('GET /agents failed: ${resp.statusCode}');
+    final resp = await _client.get(
+      _uri('/agents'),
+      headers: await _authHeaders(),
+    );
+    if (resp.statusCode != 200) {
+      throw ApiException('GET /agents failed: ${resp.statusCode}');
+    }
     return (jsonDecode(resp.body) as List<dynamic>)
         .cast<Map<String, dynamic>>();
   }
 
   Future<void> upsertAgent(Map<String, dynamic> agent) async {
-    final resp = await _client.post(_uri('/agents'),
-        headers: await _authHeaders(),
-        body: jsonEncode(agent));
-    if (resp.statusCode != 200) throw ApiException('POST /agents failed: ${resp.statusCode}');
+    final resp = await _client.post(
+      _uri('/agents'),
+      headers: await _authHeaders(),
+      body: jsonEncode(agent),
+    );
+    if (resp.statusCode != 200) {
+      throw ApiException('POST /agents failed: ${resp.statusCode}');
+    }
   }
 
   Future<void> deleteAgent(String id) async {
-    final resp = await _client.delete(_uri('/agents/$id'),
-        headers: await _authHeaders());
-    if (resp.statusCode != 200) throw ApiException('DELETE /agents/$id failed: ${resp.statusCode}');
+    final resp = await _client.delete(
+      _uri('/agents/$id'),
+      headers: await _authHeaders(),
+    );
+    if (resp.statusCode != 200) {
+      throw ApiException('DELETE /agents/$id failed: ${resp.statusCode}');
+    }
   }
 
   Future<String> fetchMe() async {
     final resp = await _client.get(_uri('/me'), headers: await _authHeaders());
-    if (resp.statusCode != 200) throw ApiException('GET /me failed: ${resp.statusCode}');
+    if (resp.statusCode != 200) {
+      throw ApiException('GET /me failed: ${resp.statusCode}');
+    }
     final body = jsonDecode(resp.body) as Map<String, dynamic>;
     return body['login'] as String? ?? '';
   }
@@ -166,9 +219,13 @@ class ApiClient {
     final params = <String, String>{};
     if (repos.isNotEmpty) params['repos'] = repos.join(',');
     if (orgs.isNotEmpty) params['orgs'] = orgs.join(',');
-    final uri = _uri('/stats').replace(queryParameters: params.isNotEmpty ? params : null);
+    final uri = _uri(
+      '/stats',
+    ).replace(queryParameters: params.isNotEmpty ? params : null);
     final resp = await _client.get(uri, headers: await _authHeaders());
-    if (resp.statusCode != 200) throw ApiException('GET /stats failed: ${resp.statusCode}');
+    if (resp.statusCode != 200) {
+      throw ApiException('GET /stats failed: ${resp.statusCode}');
+    }
     return jsonDecode(resp.body) as Map<String, dynamic>;
   }
 
@@ -195,7 +252,9 @@ class ApiClient {
       body: jsonEncode(patch),
     );
     if (resp.statusCode != 200) {
-      throw ApiException('PATCH /config failed: ${resp.statusCode} ${resp.body}');
+      throw ApiException(
+        'PATCH /config failed: ${resp.statusCode} ${resp.body}',
+      );
     }
     return jsonDecode(resp.body) as Map<String, dynamic>;
   }
@@ -204,7 +263,9 @@ class ApiClient {
   /// patch into [ai.repos."<repo>"] in the TOML file. Returns the full
   /// config after the merge.
   Future<Map<String, dynamic>> patchRepoConfig(
-      String repo, Map<String, dynamic> patch) async {
+    String repo,
+    Map<String, dynamic> patch,
+  ) async {
     final resp = await _client.patch(
       _uri('/config/repos/${Uri.encodeComponent(repo)}'),
       headers: await _authHeaders(),
@@ -212,7 +273,28 @@ class ApiClient {
     );
     if (resp.statusCode != 200) {
       throw ApiException(
-          'PATCH /config/repos failed: ${resp.statusCode} ${resp.body}');
+        'PATCH /config/repos failed: ${resp.statusCode} ${resp.body}',
+      );
+    }
+    return jsonDecode(resp.body) as Map<String, dynamic>;
+  }
+
+  /// Sends a partial per-organization override update. The daemon deep-merges
+  /// the patch into [ai.orgs."<org>"] in the TOML file. Returns the full
+  /// config after the merge.
+  Future<Map<String, dynamic>> patchOrgConfig(
+    String org,
+    Map<String, dynamic> patch,
+  ) async {
+    final resp = await _client.patch(
+      _uri('/config/orgs/${Uri.encodeComponent(org)}'),
+      headers: await _authHeaders(),
+      body: jsonEncode(patch),
+    );
+    if (resp.statusCode != 200) {
+      throw ApiException(
+        'PATCH /config/orgs failed: ${resp.statusCode} ${resp.body}',
+      );
     }
     return jsonDecode(resp.body) as Map<String, dynamic>;
   }
@@ -222,14 +304,35 @@ class ApiClient {
   /// fields (e.g. "issue_tracking/develop_labels"). Returns the full
   /// config after the deletion.
   Future<Map<String, dynamic>> deleteRepoField(
-      String repo, String fieldPath) async {
+    String repo,
+    String fieldPath,
+  ) async {
     final resp = await _client.delete(
       _uri('/config/repos/${Uri.encodeComponent(repo)}/$fieldPath'),
       headers: await _authHeaders(),
     );
     if (resp.statusCode != 200) {
       throw ApiException(
-          'DELETE /config/repos field failed: ${resp.statusCode} ${resp.body}');
+        'DELETE /config/repos field failed: ${resp.statusCode} ${resp.body}',
+      );
+    }
+    return jsonDecode(resp.body) as Map<String, dynamic>;
+  }
+
+  /// Resets a per-organization override field back to the global default by
+  /// removing it from the TOML file. [fieldPath] uses "/" for nested fields.
+  Future<Map<String, dynamic>> deleteOrgField(
+    String org,
+    String fieldPath,
+  ) async {
+    final resp = await _client.delete(
+      _uri('/config/orgs/${Uri.encodeComponent(org)}/$fieldPath'),
+      headers: await _authHeaders(),
+    );
+    if (resp.statusCode != 200) {
+      throw ApiException(
+        'DELETE /config/orgs field failed: ${resp.statusCode} ${resp.body}',
+      );
     }
     return jsonDecode(resp.body) as Map<String, dynamic>;
   }
@@ -238,23 +341,27 @@ class ApiClient {
 
   Future<List<String>> fetchRepoLabels(String repo) async {
     final resp = await _client.get(
-        _uri('/repos/${Uri.encodeComponent(repo)}/labels'),
-        headers: await _authHeaders());
+      _uri('/repos/${Uri.encodeComponent(repo)}/labels'),
+      headers: await _authHeaders(),
+    );
     if (resp.statusCode != 200) return [];
     return (jsonDecode(resp.body) as List<dynamic>).cast<String>();
   }
 
   Future<List<String>> fetchRepoCollaborators(String repo) async {
     final resp = await _client.get(
-        _uri('/repos/${Uri.encodeComponent(repo)}/collaborators'),
-        headers: await _authHeaders());
+      _uri('/repos/${Uri.encodeComponent(repo)}/collaborators'),
+      headers: await _authHeaders(),
+    );
     if (resp.statusCode != 200) return [];
     return (jsonDecode(resp.body) as List<dynamic>).cast<String>();
   }
 
   // ── Issues ────────────────────────────────────────────────────────────
 
-  Future<List<TrackedIssue>> fetchIssues({List<String> states = const []}) async {
+  Future<List<TrackedIssue>> fetchIssues({
+    List<String> states = const [],
+  }) async {
     var path = '/issues';
     if (states.isNotEmpty) {
       path += '?state=${states.join(',')}';
@@ -265,57 +372,83 @@ class ApiClient {
     }
     final list = jsonDecode(resp.body) as List<dynamic>;
     return list
-        .map((e) => TrackedIssue.fromJson(_parseIssueMap(e as Map<String, dynamic>)))
+        .map(
+          (e) =>
+              TrackedIssue.fromJson(_parseIssueMap(e as Map<String, dynamic>)),
+        )
         .toList();
   }
 
   Future<Map<String, dynamic>> fetchIssue(int id) async {
-    final resp = await _client.get(_uri('/issues/$id'), headers: await _authHeaders());
+    final resp = await _client.get(
+      _uri('/issues/$id'),
+      headers: await _authHeaders(),
+    );
     if (resp.statusCode != 200) {
       throw ApiException('GET /issues/$id failed: ${resp.statusCode}');
     }
     final body = jsonDecode(resp.body) as Map<String, dynamic>;
     final issue = TrackedIssue.fromJson(
-        _parseIssueMap(body['issue'] as Map<String, dynamic>));
+      _parseIssueMap(body['issue'] as Map<String, dynamic>),
+    );
     final reviewsRaw = body['reviews'] as List<dynamic>? ?? [];
     final reviews = reviewsRaw
-        .map((r) => TrackedIssueReview.fromJson(
-            _parseIssueReviewMap(r as Map<String, dynamic>)))
+        .map(
+          (r) => TrackedIssueReview.fromJson(
+            _parseIssueReviewMap(r as Map<String, dynamic>),
+          ),
+        )
         .toList();
     return {'issue': issue, 'reviews': reviews};
   }
 
   Future<void> triggerIssueReview(int issueId) async {
-    final resp = await _client.post(_uri('/issues/$issueId/review'),
-        headers: await _authHeaders());
+    final resp = await _client.post(
+      _uri('/issues/$issueId/review'),
+      headers: await _authHeaders(),
+    );
     if (resp.statusCode != 202) {
-      throw ApiException('POST /issues/$issueId/review failed: ${resp.statusCode}');
+      throw ApiException(
+        'POST /issues/$issueId/review failed: ${resp.statusCode}',
+      );
     }
   }
 
-  /// Promotes a review_only-classified issue to auto_implement, triggering the
-  /// full develop pipeline without requiring a GitHub label change.
+  /// Moves an issue to the next configured stage by updating GitHub labels.
+  /// The daemon poller executes the new stage after it observes the label swap.
   Future<void> promoteIssue(int issueId) async {
-    final resp = await _client.post(_uri('/issues/$issueId/promote'),
-        headers: await _authHeaders());
+    final resp = await _client.post(
+      _uri('/issues/$issueId/promote'),
+      headers: await _authHeaders(),
+    );
     if (resp.statusCode != 202) {
-      throw ApiException('POST /issues/$issueId/promote failed: ${resp.statusCode}');
+      throw ApiException(
+        'POST /issues/$issueId/promote failed: ${resp.statusCode}',
+      );
     }
   }
 
   Future<void> dismissIssue(int issueId) async {
-    final resp = await _client.post(_uri('/issues/$issueId/dismiss'),
-        headers: await _authHeaders());
+    final resp = await _client.post(
+      _uri('/issues/$issueId/dismiss'),
+      headers: await _authHeaders(),
+    );
     if (resp.statusCode != 200) {
-      throw ApiException('POST /issues/$issueId/dismiss failed: ${resp.statusCode}');
+      throw ApiException(
+        'POST /issues/$issueId/dismiss failed: ${resp.statusCode}',
+      );
     }
   }
 
   Future<void> undismissIssue(int issueId) async {
-    final resp = await _client.post(_uri('/issues/$issueId/undismiss'),
-        headers: await _authHeaders());
+    final resp = await _client.post(
+      _uri('/issues/$issueId/undismiss'),
+      headers: await _authHeaders(),
+    );
     if (resp.statusCode != 200) {
-      throw ApiException('POST /issues/$issueId/undismiss failed: ${resp.statusCode}');
+      throw ApiException(
+        'POST /issues/$issueId/undismiss failed: ${resp.statusCode}',
+      );
     }
   }
 
@@ -323,7 +456,8 @@ class ApiClient {
     if (json['latest_review'] != null) {
       json = Map.from(json);
       json['latest_review'] = _parseReviewMap(
-          json['latest_review'] as Map<String, dynamic>);
+        json['latest_review'] as Map<String, dynamic>,
+      );
     }
     return PR.fromJson(json);
   }
@@ -349,7 +483,8 @@ class ApiClient {
     final result = Map<String, dynamic>.from(json);
     if (result['latest_review'] != null) {
       result['latest_review'] = _parseIssueReviewMap(
-          result['latest_review'] as Map<String, dynamic>);
+        result['latest_review'] as Map<String, dynamic>,
+      );
     }
     return result;
   }

@@ -32,16 +32,17 @@ type Issue struct {
 // see #26). `PRCreated` stores the GitHub PR number when auto_implement opened
 // one, or zero otherwise.
 type IssueReview struct {
-	ID          int64     `json:"id"`
-	IssueID     int64     `json:"issue_id"`
-	CLIUsed     string    `json:"cli_used"`
-	Summary     string    `json:"summary"`
-	Triage      string    `json:"triage"`      // JSON object {severity, category, ...}
-	Suggestions string    `json:"suggestions"` // JSON array
-	ActionTaken string    `json:"action_taken"`
-	PRCreated   int       `json:"pr_created"`
-	CreatedAt   time.Time `json:"created_at"`
-	CommentedAt time.Time `json:"commented_at"`
+	ID             int64     `json:"id"`
+	IssueID        int64     `json:"issue_id"`
+	CLIUsed        string    `json:"cli_used"`
+	Summary        string    `json:"summary"`
+	Triage         string    `json:"triage"`                    // JSON object {severity, category, ...}
+	RefinementData string    `json:"refinement_data,omitempty"` // JSON object for refinement runs
+	Suggestions    string    `json:"suggestions"`               // JSON array
+	ActionTaken    string    `json:"action_taken"`
+	PRCreated      int       `json:"pr_created"`
+	CreatedAt      time.Time `json:"created_at"`
+	CommentedAt    time.Time `json:"commented_at"`
 }
 
 // UpsertIssue inserts or updates an issue keyed on github_id. The dismissed
@@ -196,9 +197,9 @@ func (s *Store) InsertIssueReview(r *IssueReview) (int64, error) {
 		commentedAt = r.CommentedAt.UTC().Format(sqliteTimeFormat)
 	}
 	res, err := s.db.Exec(`
-		INSERT INTO issue_reviews (issue_id, cli_used, summary, triage, suggestions, action_taken, pr_created, created_at, commented_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, r.IssueID, r.CLIUsed, r.Summary, r.Triage, r.Suggestions, r.ActionTaken, r.PRCreated,
+		INSERT INTO issue_reviews (issue_id, cli_used, summary, triage, refinement_data, suggestions, action_taken, pr_created, created_at, commented_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, r.IssueID, r.CLIUsed, r.Summary, r.Triage, r.RefinementData, r.Suggestions, r.ActionTaken, r.PRCreated,
 		r.CreatedAt.UTC().Format(sqliteTimeFormat),
 		commentedAt,
 	)
@@ -211,7 +212,7 @@ func (s *Store) InsertIssueReview(r *IssueReview) (int64, error) {
 // ListIssueReviews returns every review for an issue, newest first.
 func (s *Store) ListIssueReviews(issueID int64) ([]*IssueReview, error) {
 	rows, err := s.db.Query(
-		`SELECT id, issue_id, cli_used, summary, triage, suggestions, action_taken, pr_created, created_at, COALESCE(commented_at,'')
+		`SELECT id, issue_id, cli_used, summary, triage, COALESCE(refinement_data,''), suggestions, action_taken, pr_created, created_at, COALESCE(commented_at,'')
 		 FROM issue_reviews WHERE issue_id = ? ORDER BY created_at DESC`,
 		issueID,
 	)
@@ -234,9 +235,20 @@ func (s *Store) ListIssueReviews(issueID int64) ([]*IssueReview, error) {
 // sql.ErrNoRows if none exists yet.
 func (s *Store) LatestIssueReview(issueID int64) (*IssueReview, error) {
 	row := s.db.QueryRow(
-		`SELECT id, issue_id, cli_used, summary, triage, suggestions, action_taken, pr_created, created_at, COALESCE(commented_at,'')
+		`SELECT id, issue_id, cli_used, summary, triage, COALESCE(refinement_data,''), suggestions, action_taken, pr_created, created_at, COALESCE(commented_at,'')
 		 FROM issue_reviews WHERE issue_id = ? ORDER BY created_at DESC LIMIT 1`,
 		issueID,
+	)
+	return scanIssueReview(row)
+}
+
+// LatestIssueReviewByAction returns the newest review row for a given action,
+// or sql.ErrNoRows when that action has not run for the issue yet.
+func (s *Store) LatestIssueReviewByAction(issueID int64, action string) (*IssueReview, error) {
+	row := s.db.QueryRow(
+		`SELECT id, issue_id, cli_used, summary, triage, COALESCE(refinement_data,''), suggestions, action_taken, pr_created, created_at, COALESCE(commented_at,'')
+		 FROM issue_reviews WHERE issue_id = ? AND action_taken = ? ORDER BY created_at DESC LIMIT 1`,
+		issueID, action,
 	)
 	return scanIssueReview(row)
 }
@@ -282,7 +294,7 @@ func scanIssueReview(s scanner) (*IssueReview, error) {
 	var r IssueReview
 	var createdAt, commentedAt string
 	if err := s.Scan(&r.ID, &r.IssueID, &r.CLIUsed, &r.Summary, &r.Triage,
-		&r.Suggestions, &r.ActionTaken, &r.PRCreated, &createdAt, &commentedAt); err != nil {
+		&r.RefinementData, &r.Suggestions, &r.ActionTaken, &r.PRCreated, &createdAt, &commentedAt); err != nil {
 		return nil, fmt.Errorf("store: scan issue review: %w", err)
 	}
 	var err error

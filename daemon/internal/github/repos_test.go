@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -175,6 +176,51 @@ func TestCreatePR_HTTPError(t *testing.T) {
 	}
 }
 
+func TestCreatePR_CapturesAuthorFromResponse(t *testing.T) {
+	// GitHub returns `user.login` on the created PR — the bot identity that
+	// opened it. Heimdallm must record that login as the PR's author so the
+	// Activity view does not mis-credit the issue reporter (issue #456).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"number":   42,
+			"id":       12345,
+			"html_url": "https://github.com/org/repo/pull/42",
+			"user":     map[string]any{"login": "heimdallm-bot"},
+		})
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	created, err := client.CreatePR("org/repo", "t", "b", "h", "m", false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if created.Author != "heimdallm-bot" {
+		t.Errorf("Author = %q, want heimdallm-bot", created.Author)
+	}
+}
+
+func TestCreatePR_AuthorEmptyWhenMissing(t *testing.T) {
+	// Defensive: if the API response omits `user` (or it is malformed),
+	// CreatedPR.Author is empty so the caller can fall back to a sensible
+	// default rather than crashing on a partial payload.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{"number": 99})
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	created, err := client.CreatePR("org/repo", "t", "b", "h", "m", false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if created.Author != "" {
+		t.Errorf("Author = %q, want empty", created.Author)
+	}
+}
+
 func TestCreatePR_MissingNumberInResponse(t *testing.T) {
 	// If the API returns 201 but no `number`, the caller cannot persist
 	// pr_created — treat as an error rather than pretending PR #0 exists.
@@ -273,6 +319,63 @@ func TestAddLabels_Error(t *testing.T) {
 	err := c.AddLabels("org/repo", 42, []string{"nonexistent-label"})
 	if err == nil {
 		t.Fatal("expected error for 404 response")
+	}
+}
+
+// ── CreateLabel ──────────────────────────────────────────────────────────────
+
+func TestCreateLabel(t *testing.T) {
+	var captured map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/repos/org/repo/labels" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &captured)
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{"name":"priority: high"}`))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	if err := c.CreateLabel("org/repo", "priority: high", "#D93F0B", "desc"); err != nil {
+		t.Fatalf("CreateLabel: %v", err)
+	}
+	if captured["color"] != "D93F0B" {
+		t.Errorf("color = %q, want D93F0B", captured["color"])
+	}
+}
+
+func TestCreateLabel_InvalidColor(t *testing.T) {
+	c := gh.NewClient("fake-token")
+	if err := c.CreateLabel("org/repo", "priority: high", "not-hex", "desc"); err == nil {
+		t.Fatal("expected invalid color error")
+	}
+}
+
+func TestCreateLabel_AlreadyExists422IsNoop(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		w.Write([]byte(`{"errors":[{"code":"already_exists","field":"name"}]}`))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	if err := c.CreateLabel("org/repo", "priority: high", "D93F0B", "desc"); err != nil {
+		t.Fatalf("already_exists should be nil, got: %v", err)
+	}
+}
+
+func TestCreateLabel_InvalidPayload422Surfaces(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		w.Write([]byte(`{"errors":[{"code":"invalid","field":"name"}]}`))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	if err := c.CreateLabel("org/repo", "priority: high", "D93F0B", "desc"); err == nil {
+		t.Fatal("expected invalid 422 to surface")
 	}
 }
 
@@ -475,10 +578,19 @@ func TestListSubIssues_CrossRepoSameOwner(t *testing.T) {
 
 func TestSetAssignees(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" || r.URL.Path != "/repos/org/repo/issues/42/assignees" {
+		if r.Method != "PATCH" || r.URL.Path != "/repos/org/repo/issues/42" {
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
-		w.WriteHeader(http.StatusCreated)
+		var payload struct {
+			Assignees []string `json:"assignees"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if !reflect.DeepEqual(payload.Assignees, []string{"sergiotejon"}) {
+			t.Fatalf("assignees payload = %v, want [sergiotejon]", payload.Assignees)
+		}
+		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("{}"))
 	}))
 	defer srv.Close()

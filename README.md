@@ -14,7 +14,7 @@ Heimdallm runs in the background and does three things, in parallel, at your con
 Watches the PRs where you're requested as a reviewer, runs an AI code review, and submits it to GitHub as your account. No copy-pasting, no manual prompting.
 
 ### 2. Issue triage & auto-implement
-Fetches issues from monitored repos, classifies them by label (`review_only` vs `auto_implement` vs `skip` vs `blocked`), and for the develop-track ones optionally **creates a branch, commits the change, and opens a PR** against your default branch — fully autonomous on the issues you mark for it. Issues can declare dependencies on other issues/PRs; Heimdallm holds them in a `blocked` state until the prerequisites close, then promotes them automatically.
+Fetches issues from monitored repos, classifies them by label (`review_only` triage, `refinement`, `develop` / `auto_implement`, `skip`, `blocked`), and can move issues through triage -> refinement -> development. Develop-track issues optionally **create a branch, commit the change, and open a PR** against your default branch. Issues can declare dependencies on other issues/PRs; Heimdallm holds them in a `blocked` state until the prerequisites close, then promotes them automatically.
 
 ### 3. Self-monitoring UI
 A Flutter Web dashboard (`:3000`) with Dashboard, PR list, Issue list, prompt/agent editor, live config editor, and a live log stream. Opens alongside the daemon in Docker mode.
@@ -22,7 +22,7 @@ A Flutter Web dashboard (`:3000`) with Dashboard, PR list, Issue list, prompt/ag
 ### Headline features
 
 - **Automatic reviews** — polls `review-requested:@me` on GitHub and submits reviews as your account
-- **Issue pipeline** — label-driven triage + optional auto-implement with branch/commit/PR cycle
+- **Issue pipeline** — label-driven triage, refinement planning, and optional auto-implement with branch/commit/PR cycle
 - **Issue dependencies** — mark downstream work with a `blocked` label; declare deps via a `## Depends on` body section *or* GitHub's native sub-issues; Heimdallm auto-promotes when all blockers close
 - **Configurable prompts** — general review, security audit, performance, architecture, or your own with `{diff}` `{title}` `{author}` `{comments}` placeholders, managed from the web UI at `/agents`
 - **Two feedback modes** — *single* (one consolidated review) or *multi* (one GitHub comment per issue + summary), globally and per repo
@@ -76,6 +76,17 @@ make uninstall-linux PURGE=1 # also wipe ~/.config + ~/.local/share state
 `make install-linux` runs `verify-linux` (which builds the `heimdallm-verify` Docker image), extracts the Flutter bundle + Go daemon from the image, and stages them into `~/.local/opt/heimdallm/` with a `~/.local/bin/heimdallm` symlink, a desktop entry, and four icon sizes under `~/.local/share/icons/hicolor/`. No sudo. No host Flutter SDK. The first install also seeds `~/.config/heimdallm/.token` from `$GITHUB_TOKEN` or `gh auth token` so the app launches cleanly from the OS app launcher on first run.
 
 > **Requires**: Docker running, `gh` CLI authenticated (or `$GITHUB_TOKEN` exported), Ubuntu 22.04 / Debian 12+ / Fedora / Arch or similarly current distro. Same binary-compatibility envelope as the CI-built `.deb`.
+
+### CLI / TUI
+
+The terminal client is distributed as `heimdallm-cli` via Homebrew and GitHub Releases. It connects to a running daemon and supports status checks, PR/issue lists, manual review triggers, live event following, stats, config inspection, and a Bubble Tea dashboard.
+
+```bash
+brew install theburrowhub/tap/heimdallm-cli
+
+# or download a heimdallm-cli_* archive from GitHub Releases
+heimdallm-cli dashboard
+```
 
 ### Docker
 
@@ -335,7 +346,7 @@ label:
    label(s), add `HEIMDALLM_ISSUE_PROMOTE_TO_LABEL`, and leave an audit
    comment listing each dep and its state at check time.
 6. The same poll cycle's fetch pass then classifies the promoted issue
-   normally and dispatches it to triage or auto-implement.
+   normally and dispatches it to triage, refinement, or auto-implement.
 
 Issues with a blocked label but **no declared deps in either source**
 stay blocked — the daemon won't guess when to unblock them. Remove the
@@ -344,10 +355,12 @@ a given issue, Heimdallm skips that issue for the current cycle rather
 than risk promoting on incomplete information.
 
 Classification precedence is
-`skip > blocked > review_only > develop > default_action`, so an issue
+`skip > blocked > review_only > refinement > develop > default_action`, so an issue
 tagged with both a blocked and a develop label stays blocked until
-promotion. The feature is **opt-in**: leave `HEIMDALLM_ISSUE_BLOCKED_LABELS`
+promotion. Stage promotion updates labels only; the next poll executes the newly visible stage. The feature is **opt-in**: leave `HEIMDALLM_ISSUE_BLOCKED_LABELS`
 empty and nothing about the existing pipeline changes.
+
+**Upgrade note for staged issues:** earlier-stage labels now win over later-stage labels. If you previously used overlapping triage/develop labels to force direct development, split them into dedicated labels or remove the triage label before applying the develop label. `auto_promote_triage` defaults on only when `refinement_labels` is configured, and `auto_promote_refinement` defaults on only when `develop_labels` is configured; set either flag to `false` to keep that promotion manual.
 
 ### Automated install (for agents / scripts)
 
@@ -361,15 +374,16 @@ On first launch Heimdallm detects your `gh` CLI token automatically and sets its
 
 The **Go daemon** (`heimdalld`, port `7842`) is the engine. It polls GitHub for PRs and issues, dispatches work to the configured AI CLI, posts reviews or opens implementation PRs, and broadcasts state to any connected UI over SSE.
 
-Two first-party UIs talk to it over HTTP:
+Three first-party UIs talk to it over HTTP:
 
 - **Flutter desktop app** — macOS menu-bar + dashboard, system notifications. Ships inside the `.dmg` / Linux packages.
 - **Flutter Web UI** — browser dashboard on port `3000`, served by Nginx, ships as a second Docker container alongside the daemon.
+- **Terminal CLI/TUI** — Cobra commands plus a Bubble Tea + Lipgloss dashboard. Ships as `heimdallm-cli` via Homebrew and GitHub Releases.
 
 ```
 Flutter app ─┐
-             ├──→ HTTP / SSE ──→  heimdalld  ──→  GitHub API
-Web UI     ──┘                       │
+Web UI      ─┼──→ HTTP / SSE ──→  heimdalld  ──→  GitHub API
+CLI / TUI   ─┘                       │
                                      ├──→  PR review pipeline   ──→  POST /reviews
                                      ├──→  Issue triage pipeline
                                      └──→  Auto-implement       ──→  branch + commits + PR
@@ -385,7 +399,7 @@ In **Docker mode** the daemon runs standalone with the web UI container as an op
 
 ### Prerequisites
 
-- Go 1.21+
+- Go 1.25+
 - Flutter 3.x (stable)
 - `gh` CLI authenticated
 - macOS 13+ with Xcode **or** Linux with GTK 3 dev libraries
@@ -412,11 +426,24 @@ For iterating on the Flutter Web bundle against a running daemon:
 make build-web    # compile Flutter → web/; then `make up-build` to bake into the Nginx image
 ```
 
+**CLI / TUI** — terminal client against a running daemon:
+```bash
+make build-cli
+make dev-daemon
+make dev-cli
+make test-cli
+```
+`make dev-cli` launches `heimdallm-cli dashboard` against `http://localhost:7842` by default. Set `HEIMDALLM_HOST` and `HEIMDALLM_TOKEN` when targeting another daemon.
+
 ### Other targets
 
 ```bash
-make test          # Run Go + Flutter test suites on the host
+make test          # Run daemon Go + Flutter + CLI tests on the host
 make test-docker   # Run Go tests inside a pinned Docker image (EDR-safe)
+make build-cli     # Build cli/bin/heimdallm-cli
+make test-cli      # Run CLI module tests on the host
+make lint-cli      # Run CLI module vet checks
+make dev-cli       # Run the CLI dashboard against localhost:7842
 make dev-daemon    # Run daemon only (debug API at localhost:7842)
 make dev-stop      # Stop the running daemon
 make up                # Docker: bring up daemon + web UI
@@ -457,6 +484,12 @@ heimdallm/
 │       ├── scheduler/       Poll loop, grace windows
 │       ├── server/          HTTP + SSE API
 │       └── keychain/        Host credential storage
+├── cli/                     Terminal client and TUI (separate Go module)
+│   ├── cmd/heimdallm-cli/   Cobra entrypoint
+│   └── internal/
+│       ├── api/             Daemon HTTP + SSE client
+│       ├── cli/             Commands and config loading
+│       └── tui/             Bubble Tea dashboard
 ├── flutter_app/             macOS / Linux / Web UI
 │   ├── lib/
 │   │   ├── features/
@@ -504,6 +537,34 @@ The `tag.yml` workflow analyses commits since the last tag:
 Pushing the tag triggers `build.yml`, which builds, signs, notarizes (if Developer ID configured), and publishes the DMG to GitHub Releases.
 
 Alternatively, **release-please** (via `release.yml`) automates this: it reads conventional commits, opens a Release PR with changelog, and on merge creates the tag + GitHub Release. This also triggers the Docker image build and push to `ghcr.io/theburrowhub/heimdallm`.
+
+---
+
+## Troubleshooting
+
+### macOS asks for permission to access Music, Downloads, or other folders
+
+On macOS, the daemon's `local_dir_base` feature calls `os.Stat()` on
+candidate paths for each monitored repository (to auto-detect local
+clones). If `HEIMDALLM_LOCAL_DIR_BASE` is set to a broad path like `$HOME`,
+the stat probes can touch TCC-protected directories (`~/Music`,
+`~/Downloads`, `~/Pictures`, etc.), causing macOS to show permission
+dialogs — even though Heimdallm has no interest in those folders.
+
+**Fix:** set `HEIMDALLM_LOCAL_DIR_BASE` to the specific directory (or
+directories) where your repos actually live:
+
+```bash
+# Good — scoped to your actual code directories
+export HEIMDALLM_LOCAL_DIR_BASE=~/projects,~/work
+
+# Bad — triggers TCC prompts for every protected subfolder of $HOME
+export HEIMDALLM_LOCAL_DIR_BASE=~
+```
+
+The native file picker (`Browse` button in repo settings) may also
+trigger similar prompts when macOS enumerates recent/default locations.
+This is standard `NSOpenPanel` behavior and not specific to Heimdallm.
 
 ---
 

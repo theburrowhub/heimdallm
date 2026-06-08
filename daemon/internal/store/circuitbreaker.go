@@ -7,9 +7,10 @@ import (
 
 // CountReviewsForPR returns the number of reviews for the given PR whose
 // created_at is at or after `since`. Used by the circuit breaker to cap
-// runaway re-review loops. Only reviews already persisted to SQLite count —
-// an in-flight review that has not called InsertReview yet is gated
-// separately via the inflight table (Task 5).
+// runaway re-review loops when the caller cannot scope the check to a HEAD
+// SHA. Only reviews already persisted to SQLite count — an in-flight review
+// that has not called InsertReview yet is gated separately via the inflight
+// table (Task 5).
 func (s *Store) CountReviewsForPR(prID int64, since time.Time) (int, error) {
 	var n int
 	err := s.db.QueryRow(
@@ -18,6 +19,22 @@ func (s *Store) CountReviewsForPR(prID int64, since time.Time) (int, error) {
 	).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("store: count reviews for pr: %w", err)
+	}
+	return n, nil
+}
+
+// CountReviewsForPRHeadSHA returns the number of reviews for the given PR and
+// HEAD SHA whose created_at is at or after `since`. This is the PR-side
+// breaker's primary axis: cap repeated reviews of the same commit while
+// allowing a developer's follow-up commit to be reviewed normally.
+func (s *Store) CountReviewsForPRHeadSHA(prID int64, headSHA string, since time.Time) (int, error) {
+	var n int
+	err := s.db.QueryRow(
+		"SELECT COUNT(*) FROM reviews WHERE pr_id = ? AND head_sha = ? AND created_at >= ?",
+		prID, headSHA, since.UTC().Format(sqliteTimeFormat),
+	).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("store: count reviews for pr head sha: %w", err)
 	}
 	return n, nil
 }
@@ -42,7 +59,7 @@ func (s *Store) CountReviewsForRepo(repo string, since time.Time) (int, error) {
 // CircuitBreakerLimits is the configured set of caps. Enforced by
 // CheckCircuitBreaker; zero values mean "unlimited" for that axis.
 type CircuitBreakerLimits struct {
-	PerPR24h  int // max reviews per PR in any 24h window
+	PerPR24h  int // max reviews per PR HEAD SHA in any 24h window
 	PerRepoHr int // max reviews per repo in any 1h window
 }
 
@@ -50,13 +67,24 @@ type CircuitBreakerLimits struct {
 // the caller MUST NOT proceed to spend Claude credits for this PR. reason is
 // a human-readable explanation suitable for logs and UI surfaces; it is
 // empty when tripped is false.
-func (s *Store) CheckCircuitBreaker(prID int64, repo string, cfg CircuitBreakerLimits) (bool, string, error) {
+func (s *Store) CheckCircuitBreaker(prID int64, repo, headSHA string, cfg CircuitBreakerLimits) (bool, string, error) {
 	if cfg.PerPR24h > 0 {
-		n, err := s.CountReviewsForPR(prID, time.Now().Add(-24*time.Hour))
+		var (
+			n   int
+			err error
+		)
+		if headSHA != "" {
+			n, err = s.CountReviewsForPRHeadSHA(prID, headSHA, time.Now().Add(-24*time.Hour))
+		} else {
+			n, err = s.CountReviewsForPR(prID, time.Now().Add(-24*time.Hour))
+		}
 		if err != nil {
 			return false, "", err
 		}
 		if n >= cfg.PerPR24h {
+			if headSHA != "" {
+				return true, fmt.Sprintf("per-PR HEAD cap reached: %d reviews on this commit in last 24h (cap %d)", n, cfg.PerPR24h), nil
+			}
 			return true, fmt.Sprintf("per-PR cap reached: %d reviews in last 24h (cap %d)", n, cfg.PerPR24h), nil
 		}
 	}

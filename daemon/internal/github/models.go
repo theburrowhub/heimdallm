@@ -84,6 +84,11 @@ type Repo struct {
 type Branch struct {
 	Repo Repo   `json:"repo"`
 	SHA  string `json:"sha"`
+	// Ref is the branch name (e.g. "heimdallm/issue-42"). Returned by
+	// the Pulls API but not the Search Issues API; the review-state
+	// fix flow (#482 phase 3) reads it to push back to the same
+	// branch the PR was opened from.
+	Ref string `json:"ref"`
 }
 
 type PullRequest struct {
@@ -96,6 +101,11 @@ type PullRequest struct {
 	Draft     bool      `json:"draft"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Head      Branch    `json:"head"`
+	// RequestedReviewers is populated by the Pulls API (GET /repos/{o}/{r}/pulls/{n})
+	// but NOT by the Search Issues API. Used by the tier-2 loop to confirm the
+	// bot is still a pending reviewer before enqueuing a review — the search
+	// index can lag behind the actual requested_reviewers list.
+	RequestedReviewers []User `json:"requested_reviewers"`
 	// repository_url is returned by the Search Issues API: "https://api.github.com/repos/org/repo"
 	RepositoryURL string `json:"repository_url"`
 	// Populated client-side from RepositoryURL or Head.Repo.FullName
@@ -105,6 +115,7 @@ type PullRequest struct {
 // Comment represents a single comment on a PR — either an inline review comment
 // (File and Line are set) or a general issue comment (File and Line are zero values).
 type Comment struct {
+	ID        int64 // GitHub comment id; 0 if unknown
 	Author    string
 	Body      string
 	CreatedAt time.Time

@@ -58,7 +58,7 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
   }
 
   Future<void> _autoSave() async {
-    final current = ref.read(configNotifierProvider).valueOrNull;
+    final current = ref.read(configNotifierProvider).value;
     if (current == null) return;
     await _save(current);
   }
@@ -93,11 +93,11 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
   @override
   Widget build(BuildContext context) {
     final configAsync = ref.watch(configNotifierProvider);
-    final prompts = ref.watch(agentsProvider).valueOrNull ?? [];
+    final prompts = ref.watch(agentsProvider).value ?? [];
 
     return configAsync.when(
       loading: () => const Center(child: CircularProgressIndicator()),
-      error: (_, __) => const Center(child: Text('Could not load config')),
+      error: (_, _) => const Center(child: Text('Could not load config')),
       data: (config) {
         _initFrom(config);
         return Column(
@@ -388,7 +388,7 @@ class _AgentSectionState extends State<_AgentSection> {
                 // ignore: deprecated_member_use
                 value: s.approvalMode.isEmpty ? null : s.approvalMode,
                 decoration: const InputDecoration(
-                    labelText: '--approval-mode', border: OutlineInputBorder()),
+                    labelText: '--ask-for-approval', border: OutlineInputBorder()),
                 items: [
                   const DropdownMenuItem<String>(value: null, child: Text('CLI default')),
                   ...CLIAgentConfig.approvalModeOptions.map(
@@ -659,7 +659,7 @@ class _AgentSectionState extends State<_AgentSection> {
     switch (name) {
       case 'claude': return '--allowedTools Bash,Read';
       case 'gemini': return '--all-files';
-      case 'codex':  return '--full-auto';
+      case 'codex':  return '--sandbox workspace-write';
       default:       return '--flag value';
     }
   }

@@ -10,6 +10,7 @@ import (
 // Tier1Discovery is the interface the discovery tier needs.
 type Tier1Discovery interface {
 	Discovered() []string
+	Refresh(topic string, orgs []string) error
 }
 
 // Tier1Publisher publishes the discovered repo list.
@@ -83,7 +84,7 @@ type Tier2PRPublisher interface {
 
 // Tier2Store checks if a PR has already been reviewed recently.
 type Tier2Store interface {
-	PRAlreadyReviewed(githubID int64, updatedAt time.Time) bool
+	PRAlreadyReviewed(githubID int64, repo string, number int, updatedAt time.Time, headSHA string) bool
 }
 
 // ── Tier 3 / Watch types (formerly in tier3.go + queue.go) ──────────────

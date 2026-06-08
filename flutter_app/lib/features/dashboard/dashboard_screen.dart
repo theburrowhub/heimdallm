@@ -4,6 +4,9 @@ import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/models/pr.dart';
 import '../../core/models/tracked_issue.dart';
+import '../../shared/widgets/keep_alive_tab.dart';
+import '../../shared/widgets/attention_badge.dart';
+import '../../shared/widgets/pr_review_state_badge.dart';
 import '../../shared/widgets/severity_badge.dart';
 import '../../shared/widgets/state_badge.dart';
 import '../../shared/widgets/toast.dart';
@@ -13,12 +16,14 @@ import '../activity/activity_providers.dart';
 import '../agents/agents_screen.dart';
 import '../circuit_breaker/circuit_breaker_banner.dart';
 import '../cli_agents/cli_agents_screen.dart';
+import '../config/config_providers.dart';
 import '../issues/issues_providers.dart';
 import '../repositories/repos_screen.dart';
 import '../stats/stats_screen.dart';
 import 'activity_filter_bar.dart';
 import 'activity_filters.dart';
 import 'dashboard_providers.dart';
+import '../server/server_actions.dart' as server_actions;
 
 class DashboardScreen extends ConsumerWidget {
   const DashboardScreen({super.key});
@@ -26,6 +31,11 @@ class DashboardScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final cbMessage = ref.watch(circuitBreakerProvider);
+    final daemonRunning = ref.watch(daemonHealthProvider).value ?? false;
+    final daemonStarting = ref.watch(daemonStartingProvider);
+    final connection = daemonRunning
+        ? ref.watch(daemonConnectionProvider)
+        : null;
     return DefaultTabController(
       length: 6,
       child: Scaffold(
@@ -33,9 +43,28 @@ class DashboardScreen extends ConsumerWidget {
           title: const Text('Heimdallm'),
           actions: [
             IconButton(
-              icon: const Icon(Icons.article_outlined),
-              tooltip: 'Daemon logs',
-              onPressed: () => context.push('/logs'),
+              icon: daemonStarting
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : Icon(
+                      daemonRunning
+                          ? Icons.power_settings_new
+                          : Icons.play_arrow,
+                    ),
+              tooltip: daemonRunning ? 'Stop Server' : 'Start Server',
+              onPressed: daemonStarting
+                  ? null
+                  : daemonRunning
+                  ? () => _confirmShutdown(context, ref)
+                  : () => _startDaemon(context, ref),
+            ),
+            IconButton(
+              icon: const Icon(Icons.dns_outlined),
+              tooltip: 'Server',
+              onPressed: () => context.push('/server'),
             ),
             IconButton(
               icon: const Icon(Icons.settings),
@@ -69,17 +98,23 @@ class DashboardScreen extends ConsumerWidget {
               CircuitBreakerBanner(
                 message: cbMessage,
                 onDismiss: () =>
-                    ref.read(circuitBreakerProvider.notifier).state = null,
+                    ref.read(circuitBreakerProvider.notifier).set(null),
+              ),
+            if (connection != null &&
+                connection.phase != DaemonConnectionPhase.connected)
+              _ConnectionBanner(
+                status: connection,
+                onRestart: () => server_actions.restartDaemon(context, ref),
               ),
             const Expanded(
               child: TabBarView(
                 children: [
-                  _ActivityTab(),
-                  ActivityScreen(),
-                  ReposScreen(),
-                  AgentsScreen(),
-                  CLIAgentsScreen(),
-                  StatsScreen(),
+                  KeepAliveTab(child: _ActivityTab()),
+                  KeepAliveTab(child: ActivityScreen()),
+                  KeepAliveTab(child: ReposScreen()),
+                  KeepAliveTab(child: AgentsScreen()),
+                  KeepAliveTab(child: CLIAgentsScreen()),
+                  KeepAliveTab(child: StatsScreen()),
                 ],
               ),
             ),
@@ -89,6 +124,78 @@ class DashboardScreen extends ConsumerWidget {
     );
   }
 }
+
+class _ConnectionBanner extends StatelessWidget {
+  const _ConnectionBanner({required this.status, required this.onRestart});
+
+  final DaemonConnectionStatus status;
+  final VoidCallback onRestart;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final (color, icon, label) = switch (status.phase) {
+      DaemonConnectionPhase.connected => (
+        Colors.green,
+        Icons.check_circle_outline,
+        'Connected',
+      ),
+      DaemonConnectionPhase.stale => (
+        Colors.amber,
+        Icons.sync_problem,
+        'No events received — reconnecting',
+      ),
+      DaemonConnectionPhase.offline => (
+        theme.colorScheme.error,
+        Icons.error_outline,
+        'Server unavailable',
+      ),
+      DaemonConnectionPhase.connecting => (
+        Colors.blueGrey,
+        Icons.sync,
+        'Connecting',
+      ),
+    };
+    return Material(
+      color: color.withValues(alpha: 0.10),
+      child: SafeArea(
+        bottom: false,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 36),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+            child: Row(
+              children: [
+                Icon(icon, size: 18, color: color),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    label,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: color,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                if (status.phase == DaemonConnectionPhase.offline)
+                  TextButton(
+                    onPressed: onRestart,
+                    child: const Text('Restart'),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+Future<void> _confirmShutdown(BuildContext context, WidgetRef ref) =>
+    server_actions.confirmShutdown(context, ref);
+
+Future<void> _startDaemon(BuildContext context, WidgetRef ref) =>
+    server_actions.startDaemon(context, ref);
 
 // ── Reviews tab ──────────────────────────────────────────────────────────────
 
@@ -290,8 +397,8 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
       return _errorView(context, prsAsync.error!);
     }
 
-    final prs = prsAsync.valueOrNull ?? [];
-    final issues = issuesAsync.valueOrNull ?? [];
+    final prs = prsAsync.value ?? [];
+    final issues = issuesAsync.value ?? [];
 
     // Collect all known repos for the filter bar.
     final allRepos = <String>{
@@ -385,6 +492,7 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
   }
 
   Widget _errorView(BuildContext context, Object e) {
+    final daemonStarting = ref.watch(daemonStartingProvider);
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -397,12 +505,14 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
           ),
           const SizedBox(height: 4),
           const Text(
-            'Go to Settings to configure and start it.',
+            'Start it here or open Settings to adjust configuration.',
             style: TextStyle(color: Colors.grey),
           ),
           const SizedBox(height: 16),
-          Row(
-            mainAxisSize: MainAxisSize.min,
+          Wrap(
+            alignment: WrapAlignment.center,
+            spacing: 8,
+            runSpacing: 8,
             children: [
               TextButton(
                 onPressed: () {
@@ -411,7 +521,22 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
                 },
                 child: const Text('Retry'),
               ),
-              const SizedBox(width: 8),
+              FilledButton.icon(
+                icon: daemonStarting
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Icon(Icons.play_arrow, size: 16),
+                label: Text(daemonStarting ? 'Starting...' : 'Start Server'),
+                onPressed: daemonStarting
+                    ? null
+                    : () => _startDaemon(context, ref),
+              ),
               FilledButton.icon(
                 icon: const Icon(Icons.settings, size: 16),
                 label: const Text('Settings'),
@@ -617,16 +742,50 @@ class _PRTileState extends ConsumerState<_PRTile> {
   }
 }
 
-class _IssueActivityTile extends StatelessWidget {
+class _IssueActivityTile extends ConsumerStatefulWidget {
   final TrackedIssue issue;
   const _IssueActivityTile({required this.issue});
 
-  String get _type => _itemType(_IssueItem(issue));
+  @override
+  ConsumerState<_IssueActivityTile> createState() => _IssueActivityTileState();
+}
+
+class _IssueActivityTileState extends ConsumerState<_IssueActivityTile> {
+  String get _type => _itemType(_IssueItem(widget.issue));
+
+  Future<void> _dismiss() async {
+    final api = ref.read(apiClientProvider);
+    try {
+      await api.dismissIssue(widget.issue.id);
+      ref.invalidate(issuesProvider);
+      if (mounted) {
+        showToast(
+          context,
+          'Issue #${widget.issue.number} dismissed',
+          duration: const Duration(seconds: 5),
+          actionLabel: 'Undo',
+          onAction: () async {
+            await api.undismissIssue(widget.issue.id);
+            ref.invalidate(issuesProvider);
+          },
+        );
+      }
+    } catch (e) {
+      if (mounted) showToast(context, 'Error: $e', isError: true);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    final issue = widget.issue;
     final reviewed = issue.latestReview != null;
     final severity = issue.latestReview?.severity ?? '';
+    // auto_implement_no_changes is a terminal "needs attention" state —
+    // the review row has an empty triage block (severity defaults to
+    // LOW/green), which would otherwise misrepresent it as a clean low
+    // severity result. See #483.
+    final needsAttention =
+        issue.latestReview?.actionTaken == 'auto_implement_no_changes';
 
     return Opacity(
       opacity: issue.state == 'open' ? 1.0 : 0.6,
@@ -644,7 +803,9 @@ class _IssueActivityTile extends StatelessWidget {
                   height: 48,
                   margin: const EdgeInsets.only(right: 12),
                   decoration: BoxDecoration(
-                    color: reviewed
+                    color: needsAttention
+                        ? Colors.deepOrange.shade700
+                        : reviewed
                         ? _severityColor(severity)
                         : Colors.grey.shade600,
                     borderRadius: BorderRadius.circular(2),
@@ -679,27 +840,49 @@ class _IssueActivityTile extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: 12),
-                if (reviewed)
-                  SeverityBadge(severity: severity)
-                else
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 3,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Colors.grey.shade700,
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                    child: const Text(
-                      'PENDING',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
+                // Trailing: severity/PENDING badge + dismiss — mirrors _PRTile.
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (issue.linkedPR != null &&
+                        issue.linkedPR!.externalReviewState.isNotEmpty) ...[
+                      PRReviewStateBadge(
+                        state: issue.linkedPR!.externalReviewState,
                       ),
+                      const SizedBox(width: 6),
+                    ],
+                    if (needsAttention)
+                      const AttentionBadge()
+                    else if (reviewed)
+                      SeverityBadge(severity: severity)
+                    else
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 3,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.grey.shade700,
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: const Text(
+                          'PENDING',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    IconButton(
+                      icon: const Icon(Icons.close, size: 14),
+                      tooltip: 'Dismiss issue',
+                      color: Colors.grey.shade600,
+                      visualDensity: VisualDensity.compact,
+                      onPressed: _dismiss,
                     ),
-                  ),
+                  ],
+                ),
               ],
             ),
           ),
@@ -736,6 +919,7 @@ class _ActivityGridTile extends StatelessWidget {
     final String title;
     final String subtitle;
     final String? severity;
+    final bool needsAttention;
     final DateTime timestamp;
 
     switch (item) {
@@ -746,6 +930,7 @@ class _ActivityGridTile extends StatelessWidget {
         title = pr.title;
         subtitle = '${pr.repo} #${pr.number} · ${pr.author}';
         severity = pr.latestReview?.severity;
+        needsAttention = false;
         timestamp = pr.updatedAt;
       case _IssueItem(:final issue):
         final isDev = issue.latestReview?.actionTaken == 'auto_implement';
@@ -754,6 +939,11 @@ class _ActivityGridTile extends StatelessWidget {
         state = issue.state;
         title = issue.title;
         subtitle = '${issue.repo} #${issue.number} · ${issue.author}';
+        // Terminal no-changes rows have an empty triage block — render
+        // them as a NEEDS ATTENTION chip instead of a misleading green
+        // LOW badge (#483).
+        needsAttention =
+            issue.latestReview?.actionTaken == 'auto_implement_no_changes';
         severity = issue.latestReview?.severity;
         timestamp = issue.fetchedAt;
     }
@@ -810,7 +1000,10 @@ class _ActivityGridTile extends StatelessWidget {
               const Spacer(),
               Row(
                 children: [
-                  if (severity != null) SeverityBadge(severity: severity),
+                  if (needsAttention)
+                    const AttentionBadge()
+                  else if (severity != null)
+                    SeverityBadge(severity: severity),
                   const Spacer(),
                   Text(
                     _timeAgo(timestamp),

@@ -2,6 +2,7 @@ package issues_test
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,18 +22,20 @@ import (
 // ── fakes ────────────────────────────────────────────────────────────────────
 
 type fakeStore struct {
-	upserts      []*store.Issue
-	reviews      []*store.IssueReview
-	prs          []*store.PR
-	nextIssueID  int64
-	nextReviewID int64
-	nextPRID     int64
-	upsertErr    error
-	insertErr    error
-	upsertPRErr  error
+	upserts       []*store.Issue
+	reviews       []*store.IssueReview
+	prs           []*store.PR
+	nextIssueID   int64
+	nextReviewID  int64
+	nextPRID      int64
+	upsertErr     error
+	insertErr     error
+	upsertPRErr   error
+	markOriginErr error
 
 	latestReview    *store.IssueReview
 	latestReviewErr error
+	latestByAction  map[string]*store.IssueReview
 
 	// in-flight claim state (#292). claims is keyed on "issueID|updatedAt"
 	// so tests can assert claims / releases without racing the map.
@@ -77,6 +80,15 @@ func (f *fakeStore) LatestIssueReview(issueID int64) (*store.IssueReview, error)
 	return f.latestReview, nil
 }
 
+func (f *fakeStore) LatestIssueReviewByAction(issueID int64, action string) (*store.IssueReview, error) {
+	if f.latestByAction != nil {
+		if rev, ok := f.latestByAction[action]; ok {
+			return rev, nil
+		}
+	}
+	return nil, sql.ErrNoRows
+}
+
 func (f *fakeStore) UpsertPR(pr *store.PR) (int64, error) {
 	if f.upsertPRErr != nil {
 		return 0, f.upsertPRErr
@@ -88,6 +100,22 @@ func (f *fakeStore) UpsertPR(pr *store.PR) (int64, error) {
 	return f.nextPRID, nil
 }
 
+// MarkPRAutoImplementOrigin records the back-link from PR → originating
+// issue for the review-state vigilance flow (#482). The fake stores the
+// latest pair so tests can assert it was called with the right ids.
+func (f *fakeStore) MarkPRAutoImplementOrigin(prID, issueID int64) error {
+	if f.markOriginErr != nil {
+		return f.markOriginErr
+	}
+	for _, pr := range f.prs {
+		if pr.ID == prID {
+			pr.AutoImplementIssueID = issueID
+			return nil
+		}
+	}
+	return fmt.Errorf("fakeStore: pr %d not found", prID)
+}
+
 func (f *fakeStore) ClaimIssueTriageInFlight(issueID int64, updatedAt string) (bool, error) {
 	if f.claimErr != nil {
 		return false, f.claimErr
@@ -97,7 +125,11 @@ func (f *fakeStore) ClaimIssueTriageInFlight(issueID int64, updatedAt string) (b
 	if f.claims == nil {
 		f.claims = make(map[string]struct{})
 	}
-	key := fmt.Sprintf("%d|%s", issueID, updatedAt)
+	// Single-flight per issue (#458): drop updated_at from the contention
+	// key so the fake mirrors the real store's INSERT … WHERE NOT EXISTS
+	// semantics. _ keeps the parameter alive for API symmetry.
+	_ = updatedAt
+	key := fmt.Sprintf("%d", issueID)
 	if _, ok := f.claims[key]; ok {
 		return false, nil
 	}
@@ -105,13 +137,13 @@ func (f *fakeStore) ClaimIssueTriageInFlight(issueID int64, updatedAt string) (b
 	return true, nil
 }
 
-func (f *fakeStore) ReleaseIssueTriageInFlight(issueID int64, updatedAt string) error {
+func (f *fakeStore) ReleaseIssueTriageInFlight(issueID int64, _ string) error {
 	if f.releaseErr != nil {
 		return f.releaseErr
 	}
 	f.claimsMu.Lock()
 	defer f.claimsMu.Unlock()
-	delete(f.claims, fmt.Sprintf("%d|%s", issueID, updatedAt))
+	delete(f.claims, fmt.Sprintf("%d", issueID))
 	return nil
 }
 
@@ -142,16 +174,28 @@ type fakeGH struct {
 	createPRNumber   int
 	createPRID       int64
 	createPRHTMLURL  string
+	createPRAuthor   string
 	createPRErr      error
 
 	// PR metadata tracking
-	reviewersCalls [][]string
-	labelsCalls    [][]string
-	assigneesCalls [][]string
+	reviewersCalls  [][]string
+	labelsCalls     [][]string
+	assigneesCalls  [][]string
+	addLabelsErr    error
+	setAssigneesErr error
+
+	labelCatalog   []string
+	fetchLabelsErr error
+	createLabelErr error
+	createdLabels  []labelCall
 
 	// GetIssue stub for pre-push state check (#238).
 	getIssueState string // returned state; defaults to "open"
 	getIssueErr   error
+}
+
+type labelCall struct {
+	Repo, Name, Color, Description string
 }
 
 type postCall struct {
@@ -206,7 +250,7 @@ func (f *fakeGH) CreatePR(repo, title, body, head, base string, draft bool) (*gi
 	if htmlURL == "" {
 		htmlURL = fmt.Sprintf("https://github.com/%s/pull/%d", repo, num)
 	}
-	return &github.CreatedPR{Number: num, ID: id, HTMLURL: htmlURL}, nil
+	return &github.CreatedPR{Number: num, ID: id, HTMLURL: htmlURL, Author: f.createPRAuthor}, nil
 }
 
 func (f *fakeGH) GetIssue(repo string, number int) (*github.Issue, error) {
@@ -226,10 +270,24 @@ func (f *fakeGH) SetPRReviewers(repo string, prNumber int, reviewers []string) e
 }
 func (f *fakeGH) AddLabels(repo string, number int, labels []string) error {
 	f.labelsCalls = append(f.labelsCalls, labels)
-	return nil
+	return f.addLabelsErr
 }
 func (f *fakeGH) SetAssignees(repo string, number int, assignees []string) error {
 	f.assigneesCalls = append(f.assigneesCalls, assignees)
+	return f.setAssigneesErr
+}
+func (f *fakeGH) FetchLabels(repo string) ([]string, error) {
+	if f.fetchLabelsErr != nil {
+		return nil, f.fetchLabelsErr
+	}
+	return append([]string(nil), f.labelCatalog...), nil
+}
+func (f *fakeGH) CreateLabel(repo, name, color, description string) error {
+	f.createdLabels = append(f.createdLabels, labelCall{Repo: repo, Name: name, Color: color, Description: description})
+	if f.createLabelErr != nil {
+		return f.createLabelErr
+	}
+	f.labelCatalog = append(f.labelCatalog, name)
 	return nil
 }
 
@@ -295,6 +353,12 @@ func (b *fakeBroker) types() []string {
 	return out
 }
 
+func (b *fakeBroker) event(i int) sse.Event {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.events[i]
+}
+
 type fakeNotifier struct {
 	calls []string
 }
@@ -358,6 +422,40 @@ const validResult = `
   },
   "suggestions": ["reproduce locally", "check auth migration"],
   "severity": "high"
+}
+`
+
+const validRefinementResult = `
+{
+  "analysis_summary": "Login failures route through the auth middleware and session store. The implementation should add a regression test, then adjust the middleware error handling so storage failures return a controlled response.",
+  "affected_areas": [
+    {"path": "daemon/internal/auth/middleware.go", "symbols": ["Authenticate"], "reason": "request authentication lives here"}
+  ],
+  "subtasks": [
+    {
+      "id": "task-1",
+      "description": "Add a failing regression test for the login error path.",
+      "affected_files": ["daemon/internal/auth/middleware_test.go"],
+      "symbols": ["TestAuthenticateStorageFailure"],
+      "expected_change": "test captures the 500 regression",
+      "complexity": "low",
+      "dependencies": []
+    },
+    {
+      "id": "task-2",
+      "description": "Handle session store failures without panicking.",
+      "affected_files": ["daemon/internal/auth/middleware.go"],
+      "symbols": ["Authenticate"],
+      "expected_change": "return a controlled error response",
+      "complexity": "medium",
+      "dependencies": ["task-1"]
+    }
+  ],
+  "implementation_order": ["task-1", "task-2"],
+  "assumptions": ["auth middleware owns login validation"],
+  "open_questions": [],
+  "risks": ["session behavior may differ across storage backends"],
+  "test_plan": ["make test-docker GO_TEST_ARGS=\"./internal/auth/...\""]
 }
 `
 
@@ -515,6 +613,105 @@ func TestPipeline_FirstTriageHasNoReTriageContext(t *testing.T) {
 	}
 }
 
+func TestPipeline_RunRefinementHappyPath(t *testing.T) {
+	s := &fakeStore{}
+	gh := &fakeGH{}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte(validRefinementResult)}
+	broker := &fakeBroker{}
+	p := issues.New(s, gh, exec, nil, broker, nil)
+
+	issue := newIssue(config.IssueModeRefinement)
+	rev, err := p.Run(context.Background(), issue, issues.RunOptions{
+		Primary:                     "claude",
+		ExecOpts:                    executor.ExecOptions{WorkDir: "/tmp/repo"},
+		RequireWorkDirForRefinement: true,
+	})
+	if err != nil {
+		t.Fatalf("run refinement: %v", err)
+	}
+	if rev == nil {
+		t.Fatal("nil refinement review returned")
+	}
+	if len(gh.postCalls) != 1 {
+		t.Fatalf("expected 1 refinement comment, got %d", len(gh.postCalls))
+	}
+	if !strings.Contains(gh.postCalls[0].Body, "Heimdallm refinement") {
+		t.Errorf("refinement comment missing heading: %q", gh.postCalls[0].Body)
+	}
+	if !strings.Contains(gh.postCalls[0].Body, "task-2") {
+		t.Errorf("refinement comment missing subtask: %q", gh.postCalls[0].Body)
+	}
+	if len(s.reviews) != 1 {
+		t.Fatalf("expected 1 review stored, got %d", len(s.reviews))
+	}
+	stored := s.reviews[0]
+	if stored.ActionTaken != string(config.IssueModeRefinement) {
+		t.Errorf("action_taken=%q, want refinement", stored.ActionTaken)
+	}
+	if !strings.Contains(stored.RefinementData, `"analysis_summary"`) {
+		t.Errorf("refinement_data not persisted: %q", stored.RefinementData)
+	}
+	if stored.Triage != "{}" {
+		t.Errorf("triage for refinement = %q, want {}", stored.Triage)
+	}
+	types := broker.types()
+	want := []string{sse.EventIssueDetected, sse.EventIssueReviewStarted, sse.EventIssueRefinementDone}
+	if !stringsEqual(types, want) {
+		t.Errorf("SSE sequence = %v, want %v", types, want)
+	}
+	var donePayload struct {
+		Repo        string `json:"repo"`
+		IssueNumber int    `json:"issue_number"`
+		IssueTitle  string `json:"issue_title"`
+		CLIUsed     string `json:"cli_used"`
+		ReviewID    int64  `json:"review_id"`
+		PostOK      bool   `json:"post_ok"`
+	}
+	if err := json.Unmarshal([]byte(broker.event(2).Data), &donePayload); err != nil {
+		t.Fatalf("decode refinement done payload: %v", err)
+	}
+	if donePayload.Repo != issue.Repo || donePayload.IssueNumber != issue.Number || donePayload.IssueTitle != issue.Title {
+		t.Errorf("refinement done issue payload = %+v", donePayload)
+	}
+	if donePayload.CLIUsed != "claude" || donePayload.ReviewID != rev.ID || !donePayload.PostOK {
+		t.Errorf("refinement done details = %+v, review ID %d", donePayload, rev.ID)
+	}
+}
+
+func TestPipeline_CircuitBreakerDoesNotGateRefinement(t *testing.T) {
+	s := &fakeStore{
+		breakerTripped: true,
+		breakerReason:  "triage cap reached",
+	}
+	gh := &fakeGH{}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte(validRefinementResult)}
+	p := issues.New(s, gh, exec, nil, &fakeBroker{}, nil)
+	p.SetCircuitBreakerLimits(&store.IssueCircuitBreakerLimits{PerIssue24h: 3, PerRepoHr: 10})
+
+	rev, err := p.Run(context.Background(), newIssue(config.IssueModeRefinement), issues.RunOptions{
+		Primary:                     "claude",
+		ExecOpts:                    executor.ExecOptions{WorkDir: "/tmp/repo"},
+		RequireWorkDirForRefinement: true,
+	})
+	if err != nil {
+		t.Fatalf("refinement should not be blocked by the triage circuit breaker: %v", err)
+	}
+	if rev == nil || rev.ActionTaken != string(config.IssueModeRefinement) {
+		t.Fatalf("review = %+v, want refinement review", rev)
+	}
+}
+
+func TestPipeline_RefinementRequiresWorkDir(t *testing.T) {
+	p := issues.New(&fakeStore{}, &fakeGH{}, &fakeExec{}, nil, &fakeBroker{}, nil)
+	_, err := p.Run(context.Background(), newIssue(config.IssueModeRefinement), issues.RunOptions{Primary: "claude"})
+	if err == nil {
+		t.Fatal("expected refinement without WorkDir to fail")
+	}
+	if !strings.Contains(err.Error(), "refinement mode requires local repo context") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestPipeline_ReTriageLatestReviewErrorIsNonFatal(t *testing.T) {
 	s := &fakeStore{
 		latestReviewErr: errors.New("database locked"),
@@ -559,6 +756,24 @@ func TestPipeline_DevelopFallsBackToReviewOnlyWithoutLocalDir(t *testing.T) {
 	}
 }
 
+func TestPipeline_DevelopRequiresWorkDirWhenConfigured(t *testing.T) {
+	s := &fakeStore{}
+	gh := &fakeGH{}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte(validResult)}
+	p := issues.New(s, gh, exec, nil, &fakeBroker{}, nil)
+
+	_, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), issues.RunOptions{
+		Primary:                  "claude",
+		RequireWorkDirForDevelop: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "requires local repo context") {
+		t.Fatalf("err = %v, want local repo context error", err)
+	}
+	if len(gh.postCalls) != 0 {
+		t.Fatalf("pipeline should not degrade to review_only, got %d comments", len(gh.postCalls))
+	}
+}
+
 // ── auto_implement ───────────────────────────────────────────────────────────
 
 func autoImplementRunOptions() issues.RunOptions {
@@ -566,6 +781,60 @@ func autoImplementRunOptions() issues.RunOptions {
 		Primary:     "claude",
 		ExecOpts:    executor.ExecOptions{WorkDir: "/tmp/repo"},
 		GitHubToken: "ghs_fake_token",
+	}
+}
+
+func TestPipeline_AutoImplementInjectsPreviousRefinement(t *testing.T) {
+	s := &fakeStore{
+		latestByAction: map[string]*store.IssueReview{
+			string(config.IssueModeRefinement): {
+				Summary:        "plan exists",
+				RefinementData: validRefinementResult,
+				ActionTaken:    string(config.IssueModeRefinement),
+				CreatedAt:      time.Now().Add(-1 * time.Hour),
+			},
+		},
+	}
+	gh := &fakeGH{defaultBranch: "main", createPRNumber: 123}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("done")}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(s, gh, exec, git, &fakeBroker{}, nil)
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !strings.Contains(exec.lastPrompt, "Previous refinement plan") {
+		t.Fatalf("implement prompt should include previous refinement plan, got: %s", exec.lastPrompt)
+	}
+	if !strings.Contains(exec.lastPrompt, "task-2") {
+		t.Errorf("implement prompt should include refinement subtasks, got: %s", exec.lastPrompt)
+	}
+	if !strings.Contains(exec.lastPrompt, "treat it as the implementation contract") {
+		t.Errorf("implement prompt should make refinement mandatory context, got: %s", exec.lastPrompt)
+	}
+	if !strings.Contains(exec.lastPrompt, "Affected files: daemon/internal/auth/middleware.go") {
+		t.Errorf("implement prompt should include affected files from refinement, got: %s", exec.lastPrompt)
+	}
+	if !strings.Contains(exec.lastPrompt, "Expected change: return a controlled error response") {
+		t.Errorf("implement prompt should include expected changes from refinement, got: %s", exec.lastPrompt)
+	}
+}
+
+func TestPipeline_AutoImplementWithoutRefinementKeepsPromptCompatible(t *testing.T) {
+	s := &fakeStore{}
+	gh := &fakeGH{defaultBranch: "main", createPRNumber: 123}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("done")}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(s, gh, exec, git, &fakeBroker{}, nil)
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if strings.Contains(exec.lastPrompt, "Previous refinement plan") {
+		t.Fatalf("implement prompt unexpectedly includes refinement context: %s", exec.lastPrompt)
+	}
+	if !strings.Contains(exec.lastPrompt, "Implement what the issue asks for") {
+		t.Errorf("implement prompt lost default instructions: %s", exec.lastPrompt)
 	}
 }
 
@@ -625,6 +894,24 @@ func TestPipeline_AutoImplementHappyPath(t *testing.T) {
 	if !stringsEqual(types, want) {
 		t.Errorf("SSE sequence = %v, want %v", types, want)
 	}
+	var implementedPayload struct {
+		Repo        string `json:"repo"`
+		IssueNumber int    `json:"issue_number"`
+		IssueTitle  string `json:"issue_title"`
+		CLIUsed     string `json:"cli_used"`
+		PRNumber    int    `json:"pr_number"`
+		PRURL       string `json:"pr_url"`
+		Branch      string `json:"branch"`
+	}
+	if err := json.Unmarshal([]byte(broker.event(2).Data), &implementedPayload); err != nil {
+		t.Fatalf("decode implemented payload: %v", err)
+	}
+	if implementedPayload.Repo != issue.Repo || implementedPayload.IssueNumber != issue.Number || implementedPayload.IssueTitle != issue.Title {
+		t.Errorf("implemented issue payload = %+v", implementedPayload)
+	}
+	if implementedPayload.CLIUsed != "claude" || implementedPayload.PRNumber != 123 || implementedPayload.PRURL == "" || implementedPayload.Branch != "heimdallm/issue-7" {
+		t.Errorf("implemented details = %+v", implementedPayload)
+	}
 
 	// Exactly one PostComment: the done-marker comment pointing watchers of
 	// the issue at the newly-opened PR and marking it processed (#238).
@@ -644,7 +931,84 @@ func TestPipeline_AutoImplementHappyPath(t *testing.T) {
 	}
 }
 
-func TestPipeline_AutoImplementNoChangesFallsBackToReviewOnly(t *testing.T) {
+func TestPipeline_CircuitBreakerDoesNotGateDevelop(t *testing.T) {
+	s := &fakeStore{
+		breakerTripped: true,
+		breakerReason:  "triage cap reached",
+	}
+	gh := &fakeGH{defaultBranch: "main", createPRNumber: 123}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("done")}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(s, gh, exec, git, &fakeBroker{}, nil)
+	p.SetCircuitBreakerLimits(&store.IssueCircuitBreakerLimits{PerIssue24h: 3, PerRepoHr: 10})
+
+	rev, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions())
+	if err != nil {
+		t.Fatalf("develop should not be blocked by the triage circuit breaker: %v", err)
+	}
+	if rev == nil || rev.ActionTaken != string(config.IssueModeDevelop) {
+		t.Fatalf("review = %+v, want develop review", rev)
+	}
+}
+
+func TestPipeline_AutoImplementDefaultsClaudePermissionMode(t *testing.T) {
+	// Without this default, claude in -p mode silently no-ops every Edit/Write
+	// tool call, so HasChanges always reports clean and every issue degrades
+	// to the no-changes fallback (#433). The default applies only when the
+	// operator left both knobs unset.
+	s := &fakeStore{}
+	gh := &fakeGH{defaultBranch: "main"}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("ok")}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(s, gh, exec, git, &fakeBroker{}, nil)
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if exec.lastOpts.PermissionMode != "acceptEdits" {
+		t.Errorf("PermissionMode = %q, want acceptEdits (default for claude auto_implement)", exec.lastOpts.PermissionMode)
+	}
+}
+
+func TestPipeline_AutoImplementRespectsExplicitDangerouslySkipPerms(t *testing.T) {
+	// When the operator has flipped DangerouslySkipPerms in TOML, the default
+	// must NOT shadow that choice with acceptEdits — the operator's explicit
+	// permission posture wins.
+	s := &fakeStore{}
+	gh := &fakeGH{defaultBranch: "main"}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("ok")}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(s, gh, exec, git, &fakeBroker{}, nil)
+
+	opts := autoImplementRunOptions()
+	opts.ExecOpts.DangerouslySkipPerms = true
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), opts); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if exec.lastOpts.PermissionMode != "" {
+		t.Errorf("PermissionMode = %q, want empty (operator chose DangerouslySkipPerms)", exec.lastOpts.PermissionMode)
+	}
+	if !exec.lastOpts.DangerouslySkipPerms {
+		t.Errorf("DangerouslySkipPerms cleared by default helper")
+	}
+}
+
+func TestPipeline_AutoImplementDefaultsCodexApprovalMode(t *testing.T) {
+	s := &fakeStore{}
+	gh := &fakeGH{defaultBranch: "main"}
+	exec := &fakeExec{detectCLI: "codex", rawOutput: []byte("ok")}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(s, gh, exec, git, &fakeBroker{}, nil)
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if exec.lastOpts.ApprovalMode != "never" {
+		t.Errorf("ApprovalMode = %q, want never (default for codex auto_implement)", exec.lastOpts.ApprovalMode)
+	}
+}
+
+func TestPipeline_AutoImplementNoChangesRecordsTerminalNoChanges(t *testing.T) {
 	// Agent escape hatch fired; the working tree is untouched. The pipeline
 	// must degrade to a review_only-style comment rather than open an empty PR.
 	s := &fakeStore{}
@@ -673,18 +1037,213 @@ func TestPipeline_AutoImplementNoChangesFallsBackToReviewOnly(t *testing.T) {
 		t.Errorf("fallback body should explain the skip, got %q", gh.postCalls[0].Body)
 	}
 
-	// Review persisted reflects the actual mode that ran.
-	if rev.ActionTaken != string(config.IssueModeReviewOnly) {
-		t.Errorf("ActionTaken=%q, want review_only (audit-honest fallback)", rev.ActionTaken)
+	if rev.ActionTaken != issues.ActionAutoImplementNoChanges {
+		t.Errorf("ActionTaken=%q, want %s", rev.ActionTaken, issues.ActionAutoImplementNoChanges)
 	}
 	if rev.PRCreated != 0 {
 		t.Errorf("PRCreated=%d, want 0", rev.PRCreated)
 	}
 
-	// SSE completes with review_completed, not implemented.
+	// SSE completes with review_error so the UI renders a needs-attention
+	// card instead of a clean success state (#483).
 	types := broker.types()
-	if types[len(types)-1] != sse.EventIssueReviewCompleted {
-		t.Errorf("last event = %q, want issue_review_completed", types[len(types)-1])
+	if types[len(types)-1] != sse.EventIssueReviewError {
+		t.Errorf("last event = %q, want issue_review_error", types[len(types)-1])
+	}
+}
+
+// fakeWatchEnroller records calls so tests can assert the
+// auto_implement pipeline correctly enrolls newly-created PRs into the
+// Tier 3 watch bucket (#482 phase 1).
+type fakeWatchEnroller struct {
+	mu    sync.Mutex
+	calls []watchEnrollCall
+	err   error
+}
+
+type watchEnrollCall struct {
+	Kind     string
+	Repo     string
+	Number   int
+	GithubID int64
+}
+
+func (f *fakeWatchEnroller) Enroll(_ context.Context, kind, repo string, number int, githubID int64) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, watchEnrollCall{Kind: kind, Repo: repo, Number: number, GithubID: githubID})
+	return nil
+}
+
+func (f *fakeWatchEnroller) lastCall() *watchEnrollCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.calls) == 0 {
+		return nil
+	}
+	c := f.calls[len(f.calls)-1]
+	return &c
+}
+
+// TestPipeline_AutoImplement_EnrollsPRInWatch pins the first half of
+// the review-state vigilance bridge (#482): after auto_implement
+// creates a PR, the pipeline must enrol it in the Tier 3 watch bucket
+// so the new CheckItem branch can observe external reviews on it.
+func TestPipeline_AutoImplement_EnrollsPRInWatch(t *testing.T) {
+	s := &fakeStore{}
+	gh := &fakeGH{defaultBranch: "main", createPRNumber: 7, createPRID: 9999}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("done")}
+	git := &fakeGit{hasChanges: true}
+	watch := &fakeWatchEnroller{}
+	p := issues.New(s, gh, exec, git, &fakeBroker{}, nil)
+	p.SetWatchEnroller(watch)
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := watch.lastCall()
+	if got == nil {
+		t.Fatal("expected one Enroll call, got none")
+	}
+	if got.Kind != "pr" || got.Number != 7 || got.GithubID != 9999 {
+		t.Errorf("Enroll call = %+v, want kind=pr number=7 github_id=9999", *got)
+	}
+}
+
+// TestPipeline_AutoImplement_MarksPRAutoImplementOrigin pins the
+// second half of the bridge: the PR row carries the originating
+// issue's store-row id so Tier 3 can decide "this PR is eligible for
+// review-state vigilance" without re-deriving from review history.
+func TestPipeline_AutoImplement_MarksPRAutoImplementOrigin(t *testing.T) {
+	s := &fakeStore{}
+	gh := &fakeGH{defaultBranch: "main", createPRNumber: 8, createPRID: 8888}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("done")}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(s, gh, exec, git, &fakeBroker{}, nil)
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(s.prs) != 1 {
+		t.Fatalf("expected 1 stored PR, got %d", len(s.prs))
+	}
+	if s.prs[0].AutoImplementIssueID == 0 {
+		t.Error("AutoImplementIssueID = 0, want non-zero (origin must be marked)")
+	}
+}
+
+// TestPipeline_AutoImplement_WatchEnrollerOptional pins that the
+// pipeline still completes its auto_implement happy path when no
+// WatchEnroller is wired in (tests, single-tier deployments). A nil
+// enroller must not panic and must not block the PR-creation flow.
+func TestPipeline_AutoImplement_WatchEnrollerOptional(t *testing.T) {
+	s := &fakeStore{}
+	gh := &fakeGH{defaultBranch: "main", createPRNumber: 9, createPRID: 7777}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("done")}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(s, gh, exec, git, &fakeBroker{}, nil)
+	// Deliberately NOT calling SetWatchEnroller.
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(s.prs) != 1 {
+		t.Fatalf("expected 1 stored PR, got %d", len(s.prs))
+	}
+}
+
+// TestAutoImplementNoChangesFallback_PostsDoneMarker pins #483 fix A:
+// the fallback comment must carry MarkerDone so the fetcher's marker scan
+// (which runs before the dedup gate) terminates the issue cleanly.
+func TestAutoImplementNoChangesFallback_PostsDoneMarker(t *testing.T) {
+	s := &fakeStore{}
+	gh := &fakeGH{defaultBranch: "main"}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("nothing to do")}
+	git := &fakeGit{hasChanges: false}
+	p := issues.New(s, gh, exec, git, &fakeBroker{}, nil)
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if len(gh.postCalls) != 1 {
+		t.Fatalf("expected 1 fallback PostComment, got %d", len(gh.postCalls))
+	}
+	body := gh.postCalls[0].Body
+	if !strings.Contains(body, issues.MarkerDone) {
+		t.Errorf("fallback body missing MarkerDone (%q):\n%s", issues.MarkerDone, body)
+	}
+}
+
+// TestAutoImplementNoChangesFallback_BodyScansAsDone is the regression
+// pin for a draft of #483 where the fallback body included the literal
+// MarkerRetry token as a copy-pasteable retry hint. Within a single
+// comment ScanMarkers gives Retry priority over Done, so the very next
+// poll would treat the fallback comment itself as a retry signal and
+// re-run auto_implement — defeating the entire fix. Pass the real body
+// through the scanner and assert MarkerResultDone.
+func TestAutoImplementNoChangesFallback_BodyScansAsDone(t *testing.T) {
+	s := &fakeStore{}
+	gh := &fakeGH{defaultBranch: "main"}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("nothing to do")}
+	git := &fakeGit{hasChanges: false}
+	p := issues.New(s, gh, exec, git, &fakeBroker{}, nil)
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(gh.postCalls) != 1 {
+		t.Fatalf("expected 1 fallback PostComment, got %d", len(gh.postCalls))
+	}
+	body := gh.postCalls[0].Body
+	got := issues.ScanMarkers([]github.Comment{{Body: body}})
+	if got != issues.MarkerResultDone {
+		t.Fatalf("ScanMarkers on fallback body = %d, want MarkerResultDone (%d)\nbody:\n%s",
+			got, issues.MarkerResultDone, body)
+	}
+}
+
+// TestAutoImplementNoChangesFallback_EmitsReviewError pins #483 fix B:
+// the SSE event must be issue_review_error (needs-attention) rather than
+// issue_review_completed (clean success), with reason=auto_implement_no_changes
+// so Flutter can render a distinct copy.
+func TestAutoImplementNoChangesFallback_EmitsReviewError(t *testing.T) {
+	s := &fakeStore{}
+	gh := &fakeGH{defaultBranch: "main"}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("nothing to do")}
+	git := &fakeGit{hasChanges: false}
+	broker := &fakeBroker{}
+	p := issues.New(s, gh, exec, git, broker, nil)
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	types := broker.types()
+	if len(types) == 0 {
+		t.Fatalf("no events published")
+	}
+	last := broker.event(len(types) - 1)
+	if last.Type != sse.EventIssueReviewError {
+		t.Fatalf("last event type = %q, want %q", last.Type, sse.EventIssueReviewError)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(last.Data), &payload); err != nil {
+		t.Fatalf("event payload not JSON: %v (data=%q)", err, last.Data)
+	}
+	if payload["reason"] != "auto_implement_no_changes" {
+		t.Errorf("payload reason = %v, want %q", payload["reason"], "auto_implement_no_changes")
+	}
+	// The error field follows the convention of the other ReviewError
+	// emitters (Flutter reads payload["error"] in both the activity row
+	// renderer and the issue-detail toast — without it the user sees
+	// "Review failed: Unknown error").
+	if err, _ := payload["error"].(string); err == "" {
+		t.Errorf("payload missing error field; have %v", payload)
 	}
 }
 
@@ -732,14 +1291,44 @@ func TestPipeline_AutoImplementSurfacesCheckoutError(t *testing.T) {
 func TestPipeline_AutoImplementSurfacesPushError(t *testing.T) {
 	git := &fakeGit{hasChanges: true, pushErr: errors.New("remote rejected")}
 	broker := &fakeBroker{}
-	p := issues.New(&fakeStore{}, &fakeGH{defaultBranch: "main"},
+	s := &fakeStore{}
+	p := issues.New(s, &fakeGH{defaultBranch: "main"},
 		&fakeExec{detectCLI: "claude", rawOutput: []byte("x")}, git, broker, nil)
 
 	_, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions())
 	if err == nil {
 		t.Fatal("expected push error to surface")
 	}
+	if len(s.reviews) != 1 || s.reviews[0].ActionTaken != "auto_implement_failed" {
+		t.Fatalf("push failure review = %+v, want one auto_implement_failed row", s.reviews)
+	}
 	// An issue_review_error event is published so operators see the failure.
+	types := broker.types()
+	if types[len(types)-1] != sse.EventIssueReviewError {
+		t.Errorf("last event should be issue_review_error, got %v", types)
+	}
+}
+
+func TestPipeline_AutoImplementRecordsExecuteFailure(t *testing.T) {
+	s := &fakeStore{}
+	broker := &fakeBroker{}
+	p := issues.New(s, &fakeGH{defaultBranch: "main"},
+		&fakeExec{detectCLI: "claude", rawErr: errors.New("signal: killed")}, &fakeGit{}, broker, nil)
+
+	_, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions())
+	if err == nil {
+		t.Fatal("expected execute error to surface")
+	}
+	if len(s.reviews) != 1 {
+		t.Fatalf("reviews = %d, want 1", len(s.reviews))
+	}
+	rev := s.reviews[0]
+	if rev.ActionTaken != "auto_implement_failed" {
+		t.Fatalf("ActionTaken = %q, want auto_implement_failed", rev.ActionTaken)
+	}
+	if !strings.Contains(rev.Summary, "execute claude") || !strings.Contains(rev.Summary, "signal: killed") {
+		t.Fatalf("failure summary = %q, want execute context", rev.Summary)
+	}
 	types := broker.types()
 	if types[len(types)-1] != sse.EventIssueReviewError {
 		t.Errorf("last event should be issue_review_error, got %v", types)
@@ -1052,6 +1641,121 @@ func TestPipeline_StripsLeadingAtInSuggestedAssignee(t *testing.T) {
 	}
 }
 
+func TestPipeline_ReviewOnlyAppliesPriorityLabelAndTriageOwnerFallback(t *testing.T) {
+	raw := `
+	{
+	  "summary": "new payment export",
+	  "triage": {
+	    "severity": "high",
+	    "category": "feature",
+	    "affected_area": "billing exports",
+	    "affected_paths": ["daemon/internal/billing/export.go"],
+	    "suggested_assignee": "",
+	    "assignee_reason": "no clear contributor without repo context",
+	    "assignee_confidence": "high"
+	  },
+	  "suggestions": ["identify export format"],
+	  "severity": "high"
+	}`
+	s := &fakeStore{}
+	gh := &fakeGH{labelCatalog: []string{"priority: high"}}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte(raw)}
+	p := issues.New(s, gh, exec, nil, nil, nil)
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeReviewOnly), issues.RunOptions{Primary: "claude", TriageOwner: "@maintainer"}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(gh.labelsCalls) != 1 || !stringsEqual(gh.labelsCalls[0], []string{"priority: high"}) {
+		t.Fatalf("priority labels = %v, want [[priority: high]]", gh.labelsCalls)
+	}
+	if len(gh.createdLabels) != 0 {
+		t.Fatalf("existing priority label should not be recreated: %+v", gh.createdLabels)
+	}
+	if len(gh.assigneesCalls) != 1 || !stringsEqual(gh.assigneesCalls[0], []string{"maintainer"}) {
+		t.Fatalf("assignees = %v, want [[maintainer]]", gh.assigneesCalls)
+	}
+	if len(s.reviews) != 1 {
+		t.Fatalf("reviews = %d, want 1", len(s.reviews))
+	}
+	var triage issues.Triage
+	if err := json.Unmarshal([]byte(s.reviews[0].Triage), &triage); err != nil {
+		t.Fatalf("triage JSON: %v", err)
+	}
+	if triage.AssignedAssignee != "maintainer" || triage.AssignmentSource != "triage_owner" {
+		t.Errorf("assigned/source = %q/%q, want maintainer/triage_owner", triage.AssignedAssignee, triage.AssignmentSource)
+	}
+	if triage.PriorityLabel != "priority: high" {
+		t.Errorf("priority label = %q, want priority: high", triage.PriorityLabel)
+	}
+	if body := gh.postCalls[0].Body; !strings.Contains(body, "Assigned owner:** @maintainer") {
+		t.Errorf("comment missing assigned owner: %s", body)
+	}
+}
+
+func TestPipeline_ReviewOnlyCreatesMissingPriorityLabelBestEffort(t *testing.T) {
+	raw := `
+	{
+	  "summary": "outage",
+	  "triage": {"severity":"critical","category":"bug","assignee_confidence":"low"},
+	  "suggestions": [],
+	  "severity": "critical"
+	}`
+	s := &fakeStore{}
+	gh := &fakeGH{}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte(raw)}
+	p := issues.New(s, gh, exec, nil, nil, nil)
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeReviewOnly), issues.RunOptions{Primary: "claude"}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(gh.createdLabels) != 1 || gh.createdLabels[0].Name != "priority: critical" {
+		t.Fatalf("created labels = %+v, want priority: critical", gh.createdLabels)
+	}
+	if len(gh.labelsCalls) != 1 || !stringsEqual(gh.labelsCalls[0], []string{"priority: critical"}) {
+		t.Fatalf("labels = %v, want [[priority: critical]]", gh.labelsCalls)
+	}
+}
+
+func TestPipeline_MetadataFailuresDoNotAbortTriage(t *testing.T) {
+	s := &fakeStore{}
+	gh := &fakeGH{
+		addLabelsErr:    errors.New("missing label"),
+		setAssigneesErr: errors.New("not assignable"),
+	}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte(validResult)}
+	p := issues.New(s, gh, exec, nil, nil, nil)
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeReviewOnly), issues.RunOptions{Primary: "claude", TriageOwner: "maintainer"}); err != nil {
+		t.Fatalf("metadata failures must not abort triage, got: %v", err)
+	}
+	if len(s.reviews) != 1 {
+		t.Fatalf("review should still be persisted, got %d", len(s.reviews))
+	}
+}
+
+func TestPipeline_BackCompatOldIssueResultWithoutTriageBlock(t *testing.T) {
+	raw := `{"summary":"legacy result","suggestions":["look"],"severity":"medium"}`
+	s := &fakeStore{}
+	gh := &fakeGH{labelCatalog: []string{"priority: medium"}}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte(raw)}
+	p := issues.New(s, gh, exec, nil, nil, nil)
+
+	rev, err := p.Run(context.Background(), newIssue(config.IssueModeReviewOnly), issues.RunOptions{Primary: "claude"})
+	if err != nil {
+		t.Fatalf("legacy result should still parse: %v", err)
+	}
+	var triage issues.Triage
+	if err := json.Unmarshal([]byte(rev.Triage), &triage); err != nil {
+		t.Fatalf("triage JSON: %v", err)
+	}
+	if triage.Severity != "medium" || triage.PriorityLabel != "priority: medium" {
+		t.Errorf("triage severity/priority = %q/%q, want medium/priority: medium", triage.Severity, triage.PriorityLabel)
+	}
+	if len(gh.assigneesCalls) != 0 {
+		t.Errorf("legacy result without confidence should not assign, got %v", gh.assigneesCalls)
+	}
+}
+
 // ── robustness: LLM output, comments, postcomment ────────────────────────────
 
 func TestPipeline_HandlesMarkdownWrappedJSON(t *testing.T) {
@@ -1217,6 +1921,50 @@ func TestAutoImplement_AppliesPRMetadata(t *testing.T) {
 	}
 }
 
+func TestAutoImplement_FiltersAuthenticatedUserFromPRReviewers(t *testing.T) {
+	gh := &fakeGH{defaultBranch: "main", createPRNumber: 77}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("implement done")}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(&fakeStore{}, gh, exec, git, &fakeBroker{}, nil)
+
+	opts := issues.RunOptions{
+		Primary:     "claude",
+		ExecOpts:    executor.ExecOptions{WorkDir: "/tmp/repo"},
+		GitHubToken: "tok",
+		AuthUser:    "ivanmunozruiz",
+		PRReviewers: []string{"alice", "ivanmunozruiz", "@IVANMUNOZRUIZ", "bob"},
+	}
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), opts); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gh.reviewersCalls) != 1 || !stringsEqual(gh.reviewersCalls[0], []string{"alice", "bob"}) {
+		t.Errorf("reviewers = %v, want [alice bob]", gh.reviewersCalls)
+	}
+}
+
+func TestAutoImplement_DefaultsPRAssigneeToSingleIssueAssignee(t *testing.T) {
+	gh := &fakeGH{defaultBranch: "main", createPRNumber: 77}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("implement done")}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(&fakeStore{}, gh, exec, git, &fakeBroker{}, nil)
+
+	issue := newIssue(config.IssueModeDevelop)
+	issue.Assignees = []github.User{{Login: "ivanmunozruiz"}}
+
+	_, err := p.Run(context.Background(), issue, issues.RunOptions{
+		Primary:     "claude",
+		ExecOpts:    executor.ExecOptions{WorkDir: "/tmp/repo"},
+		GitHubToken: "tok",
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gh.assigneesCalls) != 1 || !stringsEqual(gh.assigneesCalls[0], []string{"ivanmunozruiz"}) {
+		t.Errorf("assignees = %v, want [ivanmunozruiz]", gh.assigneesCalls)
+	}
+}
+
 func TestAutoImplement_SkipsEmptyMetadata(t *testing.T) {
 	gh := &fakeGH{defaultBranch: "main", createPRNumber: 88}
 	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("implement done")}
@@ -1230,7 +1978,9 @@ func TestAutoImplement_SkipsEmptyMetadata(t *testing.T) {
 		// No PR metadata set
 	}
 
-	_, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), opts)
+	issue := newIssue(config.IssueModeDevelop)
+	issue.Assignees = nil
+	_, err := p.Run(context.Background(), issue, opts)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -1244,6 +1994,60 @@ func TestAutoImplement_SkipsEmptyMetadata(t *testing.T) {
 	}
 	if len(gh.assigneesCalls) != 0 {
 		t.Errorf("expected 0 assignees calls, got %d", len(gh.assigneesCalls))
+	}
+}
+
+// ── Auto-created PR author recording (#456) ─────────────────────────────────
+
+func TestAutoImplement_StoresCreatedPRAuthorFromGitHubResponse(t *testing.T) {
+	// The PR row must credit the GitHub identity that opened the PR (the
+	// bot), not the issue reporter — fixes #456 bug #2.
+	s := &fakeStore{}
+	gh := &fakeGH{
+		defaultBranch:  "main",
+		createPRNumber: 77,
+		createPRAuthor: "heimdallm-bot",
+	}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("implement done")}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(s, gh, exec, git, &fakeBroker{}, nil)
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(s.prs) != 1 {
+		t.Fatalf("expected 1 PR stored, got %d", len(s.prs))
+	}
+	if s.prs[0].Author != "heimdallm-bot" {
+		t.Errorf("PR.Author = %q, want heimdallm-bot (not the issue reporter)", s.prs[0].Author)
+	}
+}
+
+func TestAutoImplement_FallsBackToAuthUserWhenCreatedPRAuthorEmpty(t *testing.T) {
+	// Defensive: when the GitHub create-PR response omits user.login, the
+	// pipeline must fall back to RunOptions.AuthUser (the daemon's cached
+	// login) so the PR row is never credited to the issue reporter.
+	s := &fakeStore{}
+	gh := &fakeGH{
+		defaultBranch:  "main",
+		createPRNumber: 78,
+		createPRAuthor: "", // simulate missing user in API response
+	}
+	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("implement done")}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(s, gh, exec, git, &fakeBroker{}, nil)
+
+	opts := autoImplementRunOptions()
+	opts.AuthUser = "heimdallm-bot"
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), opts); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(s.prs) != 1 {
+		t.Fatalf("expected 1 PR stored, got %d", len(s.prs))
+	}
+	if s.prs[0].Author != "heimdallm-bot" {
+		t.Errorf("PR.Author = %q, want heimdallm-bot fallback", s.prs[0].Author)
 	}
 }
 
@@ -1406,9 +2210,9 @@ func TestPipeline_AutoImplementAbortsWhenIssueClosedDuringImplementation(t *test
 
 func TestPipeline_AutoImplementProceedsWhenStateCheckFails(t *testing.T) {
 	gh := &fakeGH{
-		defaultBranch: "main",
+		defaultBranch:  "main",
 		createPRNumber: 55,
-		getIssueErr:   errors.New("API timeout"),
+		getIssueErr:    errors.New("API timeout"),
 	}
 	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte("done")}
 	git := &fakeGit{hasChanges: true}

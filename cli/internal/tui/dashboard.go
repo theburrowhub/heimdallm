@@ -22,9 +22,10 @@ const (
 	tabConfig
 	tabStats
 	tabLogs
+	tabServer
 )
 
-var tabNames = []string{"Activity", "PRs", "Issues", "Config", "Stats", "Logs"}
+var tabNames = []string{"Activity", "PRs", "Issues", "Config", "Stats", "Logs", "Server"}
 
 type Dashboard struct {
 	client *api.Client
@@ -45,16 +46,24 @@ type Dashboard struct {
 	logOffset int
 	logSeeded bool
 
-	err        error
-	connected  bool
-	refreshing bool
-	startTime  time.Time
-	lastUpdate time.Time
-	version    string
+	err               error
+	connected         bool
+	sseStale          bool
+	sseHealthChecking bool
+	refreshing        bool
+	confirmShutdown   bool
+	shutdownInFlight  bool
+	shutdownMessage   string
+	sseStatusMessage  string
+	startTime         time.Time
+	lastUpdate        time.Time
+	lastSSEEvent      time.Time
+	version           string
 
-	sseEvents chan api.SSEEvent
-	sseCtx    context.Context
-	sseCancel context.CancelFunc
+	sseEvents    chan api.SSEEvent
+	sseCtx       context.Context
+	sseCancel    context.CancelFunc
+	sseSessionID int64
 
 	showDetail   bool
 	detailScroll int
@@ -77,35 +86,61 @@ type dataMsg struct {
 	activity *api.ActivityResponse
 	err      error
 }
-type sseMsg api.SSEEvent
-type sseDisconnectMsg struct{ err error }
-type sseReconnectMsg struct{}
+type sseMsg struct {
+	sessionID int64
+	event     api.SSEEvent
+}
+type sseDisconnectMsg struct {
+	sessionID int64
+	err       error
+}
+type sseReconnectMsg struct{ sessionID int64 }
+type sseWatchdogMsg time.Time
+type healthCheckMsg struct {
+	err         error
+	lastEventAt time.Time
+}
+type shutdownMsg struct{ err error }
+type promoteIssueMsg struct {
+	id  int64
+	err error
+}
 
 func NewDashboard(host, token, version string) *Dashboard {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Dashboard{
-		client:    api.New(host, token),
-		version:   version,
-		startTime: time.Now(),
-		sseEvents: make(chan api.SSEEvent, 32),
-		logFollow: true,
-		sseCtx:    ctx,
-		sseCancel: cancel,
+		client:       api.New(host, token),
+		version:      version,
+		startTime:    time.Now(),
+		lastSSEEvent: time.Now(),
+		sseEvents:    make(chan api.SSEEvent, 32),
+		logFollow:    true,
+		sseCtx:       ctx,
+		sseCancel:    cancel,
+		sseSessionID: 1,
 	}
 }
 
 func (d *Dashboard) Init() tea.Cmd {
+	connect, listen := d.sseCommands()
 	return tea.Batch(
 		d.fetchData,
-		d.connectSSE,
-		d.listenSSE(),
+		connect,
+		listen,
 		tickCmd(),
+		sseWatchdogCmd(),
 	)
 }
 
 func tickCmd() tea.Cmd {
 	return tea.Tick(10*time.Second, func(t time.Time) tea.Msg {
 		return tickMsg(t)
+	})
+}
+
+func sseWatchdogCmd() tea.Cmd {
+	return tea.Tick(10*time.Second, func(t time.Time) tea.Msg {
+		return sseWatchdogMsg(t)
 	})
 }
 
@@ -150,25 +185,64 @@ func (d *Dashboard) fetchData() tea.Msg {
 	return msg
 }
 
-func (d *Dashboard) connectSSE() tea.Msg {
-	err := d.client.StreamEvents(d.sseCtx, d.sseEvents)
-	if d.sseCtx.Err() != nil {
-		return nil
-	}
-	return sseDisconnectMsg{err: err}
+func (d *Dashboard) sseCommands() (tea.Cmd, tea.Cmd) {
+	return d.connectSSE(d.sseSessionID, d.sseCtx, d.sseEvents),
+		d.listenSSE(d.sseSessionID, d.sseCtx, d.sseEvents)
 }
 
-func (d *Dashboard) listenSSE() tea.Cmd {
+func (d *Dashboard) connectSSE(sessionID int64, ctx context.Context, events chan<- api.SSEEvent) tea.Cmd {
+	return func() tea.Msg {
+		err := d.client.StreamEvents(ctx, events)
+		if ctx.Err() != nil {
+			return nil
+		}
+		return sseDisconnectMsg{sessionID: sessionID, err: err}
+	}
+}
+
+func (d *Dashboard) listenSSE(sessionID int64, ctx context.Context, events <-chan api.SSEEvent) tea.Cmd {
 	return func() tea.Msg {
 		select {
-		case event, ok := <-d.sseEvents:
+		case event, ok := <-events:
 			if !ok {
 				return nil
 			}
-			return sseMsg(event)
-		case <-d.sseCtx.Done():
+			return sseMsg{sessionID: sessionID, event: event}
+		case <-ctx.Done():
 			return nil
 		}
+	}
+}
+
+func (d *Dashboard) resetSSE() {
+	if d.sseCancel != nil {
+		d.sseCancel()
+	}
+	// The StreamEvents producer owns the send side and exits through ctx.Done().
+	// Closing the channel here would race with a send and can panic.
+	ctx, cancel := context.WithCancel(context.Background())
+	d.sseCtx = ctx
+	d.sseCancel = cancel
+	d.sseEvents = make(chan api.SSEEvent, 32)
+	d.sseSessionID++
+	d.lastSSEEvent = time.Now()
+}
+
+func (d *Dashboard) shutdownDaemon() tea.Cmd {
+	return func() tea.Msg {
+		return shutdownMsg{err: d.client.Shutdown()}
+	}
+}
+
+func (d *Dashboard) promoteIssue(id int64) tea.Cmd {
+	return func() tea.Msg {
+		return promoteIssueMsg{id: id, err: d.client.PromoteIssue(id)}
+	}
+}
+
+func (d *Dashboard) checkHealth(lastEventAt time.Time) tea.Cmd {
+	return func() tea.Msg {
+		return healthCheckMsg{err: d.client.Health(), lastEventAt: lastEventAt}
 	}
 }
 
@@ -214,6 +288,16 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		return d, tea.Batch(d.fetchData, tickCmd())
+
+	case sseWatchdogMsg:
+		cmds := []tea.Cmd{sseWatchdogCmd()}
+		if !d.shutdownInFlight && !d.sseHealthChecking && !d.lastSSEEvent.IsZero() && time.Since(d.lastSSEEvent) > time.Minute {
+			d.sseStale = true
+			d.sseHealthChecking = true
+			d.sseStatusMessage = "SSE stream stale; checking daemon health..."
+			cmds = append(cmds, d.checkHealth(d.lastSSEEvent))
+		}
+		return d, tea.Batch(cmds...)
 
 	case dataMsg:
 		d.refreshing = false
@@ -261,10 +345,25 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return d, nil
 
 	case sseMsg:
-		itemType, info := formatSSEData(msg.Data)
+		if msg.sessionID != d.sseSessionID {
+			return d, nil
+		}
+		event := msg.event
+		d.lastSSEEvent = time.Now()
+		d.sseStale = false
+		if !d.sseHealthChecking {
+			d.sseStatusMessage = ""
+			d.connected = true
+			d.err = nil
+		}
+		if event.Type == "heartbeat" {
+			// Heartbeats are liveness-only and intentionally skipped in Activity/Logs.
+			return d, d.listenSSE(d.sseSessionID, d.sseCtx, d.sseEvents)
+		}
+		itemType, info := formatSSEData(event.Type, event.Data)
 		line := activityLine{
 			Time:     time.Now().Format("15:04"),
-			Event:    msg.Type,
+			Event:    event.Type,
 			Info:     info,
 			ItemType: itemType,
 		}
@@ -272,7 +371,7 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(d.activity) > 100 {
 			d.activity = d.activity[:100]
 		}
-		d.logLines = append(d.logLines, sseToLogLine(api.SSEEvent(msg)))
+		d.logLines = append(d.logLines, sseToLogLine(event))
 		if len(d.logLines) > 1000 {
 			excess := len(d.logLines) - 1000
 			d.logLines = d.logLines[excess:]
@@ -283,16 +382,72 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-		d.connected = true
-		return d, d.listenSSE()
+		return d, d.listenSSE(d.sseSessionID, d.sseCtx, d.sseEvents)
 
 	case sseDisconnectMsg:
+		if msg.sessionID != d.sseSessionID {
+			return d, nil
+		}
+		d.connected = false
+		d.err = msg.err
+		d.sseStale = false
+		sessionID := msg.sessionID
 		return d, tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
-			return sseReconnectMsg{}
+			return sseReconnectMsg{sessionID: sessionID}
 		})
 
 	case sseReconnectMsg:
-		return d, d.connectSSE
+		if msg.sessionID != d.sseSessionID {
+			return d, nil
+		}
+		connect, _ := d.sseCommands()
+		return d, connect
+
+	case healthCheckMsg:
+		d.sseHealthChecking = false
+		if !d.sseStale || !msg.lastEventAt.Equal(d.lastSSEEvent) {
+			return d, nil
+		}
+		if msg.err != nil {
+			d.connected = false
+			d.err = msg.err
+			d.sseStatusMessage = "Daemon health check failed"
+			return d, nil
+		}
+		d.resetSSE()
+		connect, listen := d.sseCommands()
+		d.connected = false
+		d.err = nil
+		d.sseStale = false
+		d.sseStatusMessage = "Reconnecting SSE stream..."
+		return d, tea.Batch(connect, listen)
+
+	case shutdownMsg:
+		d.shutdownInFlight = false
+		d.confirmShutdown = false
+		if msg.err != nil {
+			d.err = msg.err
+			d.connected = false
+			d.shutdownMessage = fmt.Sprintf("Shutdown failed: %v", msg.err)
+			return d, nil
+		}
+		d.connected = false
+		d.err = fmt.Errorf("daemon shutdown requested")
+		d.shutdownMessage = "Shutdown requested"
+		if d.sseCancel != nil {
+			d.sseCancel()
+		}
+		return d, nil
+
+	case promoteIssueMsg:
+		d.refreshing = false
+		if msg.err != nil {
+			d.err = msg.err
+			d.shutdownMessage = fmt.Sprintf("Promotion failed: %v", msg.err)
+			return d, nil
+		}
+		d.shutdownMessage = "Promotion requested"
+		return d, d.fetchData
 	}
 
 	return d, nil
@@ -301,6 +456,25 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (d *Dashboard) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if d.showDetail {
 		return d.handleDetailKey(msg)
+	}
+	if d.confirmShutdown {
+		switch msg.String() {
+		case "y", "Y":
+			d.shutdownInFlight = true
+			d.shutdownMessage = "Requesting shutdown..."
+			return d, d.shutdownDaemon()
+		case "n", "N", "esc":
+			d.confirmShutdown = false
+			d.shutdownMessage = ""
+			return d, nil
+		case "q", "ctrl+c":
+			if d.sseCancel != nil {
+				d.sseCancel()
+			}
+			return d, tea.Quit
+		default:
+			return d, nil
+		}
 	}
 	switch msg.String() {
 	case "q", "ctrl+c":
@@ -380,9 +554,18 @@ func (d *Dashboard) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else if d.activeTab == tabIssues && d.cursor < len(d.issues) {
 			d.openDetail()
 		}
+	case "p", "P":
+		if cmd := d.promoteSelectedIssue(); cmd != nil {
+			return d, cmd
+		}
 	case "r":
 		d.refreshing = true
 		return d, d.fetchData
+	case "s", "S":
+		if !d.shutdownInFlight {
+			d.confirmShutdown = true
+			d.shutdownMessage = "Stop daemon? y/n"
+		}
 	case "1":
 		d.activeTab = tabActivity
 		d.cursor = 0
@@ -401,6 +584,9 @@ func (d *Dashboard) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "6":
 		d.activeTab = tabLogs
 		d.cursor = 0
+	case "7":
+		d.activeTab = tabServer
+		d.cursor = 0
 	}
 	return d, nil
 }
@@ -414,6 +600,10 @@ func (d *Dashboard) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return d, tea.Quit
 	case "esc", "enter":
 		d.showDetail = false
+	case "p", "P":
+		if cmd := d.promoteSelectedIssue(); cmd != nil {
+			return d, cmd
+		}
 	case "j", "down":
 		d.scrollDetailDown()
 	case "k", "up":
@@ -435,6 +625,19 @@ func (d *Dashboard) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return d, nil
+}
+
+func (d *Dashboard) promoteSelectedIssue() tea.Cmd {
+	if d.activeTab != tabIssues || d.cursor >= len(d.issues) {
+		return nil
+	}
+	issue := d.issues[d.cursor]
+	if !canPromoteIssue(issue) {
+		return nil
+	}
+	d.refreshing = true
+	d.shutdownMessage = fmt.Sprintf("Promoting issue #%d...", issue.Number)
+	return d.promoteIssue(issue.ID)
 }
 
 func (d *Dashboard) openDetail() {
@@ -493,10 +696,37 @@ func (d *Dashboard) scrollDetailUp() {
 	}
 }
 
+// isScrollOffsetTab reports whether the active tab uses the cursor as a
+// scroll offset (first visible line) rather than a selected-row index.
+// Read-only informational tabs (Stats, Config) have no selectable rows,
+// so j/k/arrows scroll the viewport directly instead of moving a highlight.
+func (d *Dashboard) isScrollOffsetTab() bool {
+	return d.activeTab == tabStats || d.activeTab == tabConfig
+}
+
 func (d *Dashboard) clampCursor() {
 	max := d.tabItemCount()
-	if max > 0 && d.cursor >= max {
-		d.cursor = max - 1
+	if d.isScrollOffsetTab() {
+		// cursor is a scroll offset: clamp so the last line is visible
+		// at the bottom of the viewport.
+		visible := d.contentHeight()
+		if d.activeTab == tabConfig {
+			visible -= 2 // header + separator
+		}
+		if visible < 1 {
+			visible = 1
+		}
+		upper := max - visible
+		if upper < 0 {
+			upper = 0
+		}
+		if d.cursor > upper {
+			d.cursor = upper
+		}
+	} else {
+		if max > 0 && d.cursor >= max {
+			d.cursor = max - 1
+		}
 	}
 	if d.cursor < 0 {
 		d.cursor = 0
@@ -536,8 +766,14 @@ func (d *Dashboard) View() string {
 }
 
 func (d *Dashboard) renderStatus() string {
+	if d.shutdownInFlight {
+		return lipgloss.NewStyle().Foreground(colorWarning).Bold(true).Render("● stopping...")
+	}
 	if d.refreshing {
 		return lipgloss.NewStyle().Foreground(colorWarning).Bold(true).Render("● refreshing...")
+	}
+	if d.sseStale {
+		return lipgloss.NewStyle().Foreground(colorWarning).Bold(true).Render("● unresponsive...")
 	}
 	if d.connected {
 		return statusOnline.Render("● online")
@@ -589,6 +825,14 @@ func (d *Dashboard) renderStatusBar() string {
 	if d.version != "" {
 		parts = append(parts, "v"+d.version)
 	}
+	if d.confirmShutdown {
+		parts = append(parts, "Confirm stop: y/n")
+	} else if d.shutdownMessage != "" {
+		parts = append(parts, truncateRunes(d.shutdownMessage, 80))
+	}
+	if d.sseStatusMessage != "" {
+		parts = append(parts, truncateRunes(d.sseStatusMessage, 80))
+	}
 
 	return headerStyle.Render(strings.Join(parts, "  │  "))
 }
@@ -610,6 +854,8 @@ func (d *Dashboard) renderContent(height int) string {
 		return d.renderStats(height)
 	case tabLogs:
 		return d.renderLogs(height)
+	case tabServer:
+		return d.renderServer(height)
 	}
 	return ""
 }
@@ -755,11 +1001,24 @@ func (d *Dashboard) renderConfig(height int) string {
 		return b.String()
 	}
 
-	maxVisible := height - 2
+	maxVisible := height - 2 // header + separator
 	if maxVisible < 1 {
 		maxVisible = 1
 	}
-	start, end := visibleRange(d.cursor, len(lines), maxVisible)
+
+	// cursor is a scroll offset (first visible line).
+	start := d.cursor
+	if start > len(lines)-maxVisible {
+		start = len(lines) - maxVisible
+	}
+	if start < 0 {
+		start = 0
+	}
+	end := start + maxVisible
+	if end > len(lines) {
+		end = len(lines)
+	}
+
 	for i := start; i < end; i++ {
 		b.WriteString(lines[i])
 		b.WriteString("\n")
@@ -768,6 +1027,85 @@ func (d *Dashboard) renderConfig(height int) string {
 	if ind := scrollIndicator(start, end, len(lines)); ind != "" {
 		b.WriteString(lipgloss.NewStyle().Foreground(colorMuted).Render(ind))
 	}
+	return b.String()
+}
+
+func (d *Dashboard) serverStatusBadge() string {
+	if d.shutdownInFlight {
+		return lipgloss.NewStyle().Foreground(colorWarning).Bold(true).Render("● stopping...")
+	}
+	if d.sseStale {
+		return lipgloss.NewStyle().Foreground(colorWarning).Bold(true).Render("● unresponsive")
+	}
+	if !d.connected {
+		return lipgloss.NewStyle().Foreground(colorMuted).Render("● stopped")
+	}
+	return lipgloss.NewStyle().Foreground(colorSuccess).Bold(true).Render("● running")
+}
+
+func (d *Dashboard) renderServer(height int) string {
+	var b strings.Builder
+
+	b.WriteString(headerStyle.Render("  Server"))
+	b.WriteString("\n")
+	b.WriteString("  " + strings.Repeat("─", 64))
+	b.WriteString("\n")
+
+	mutedNote := lipgloss.NewStyle().Foreground(colorMuted)
+
+	// Status row
+	b.WriteString(fmt.Sprintf("  %-10s %s\n", "Status", d.serverStatusBadge()))
+
+	// Version row — d.version is the build-time version passed into NewDashboard
+	version := d.version
+	if version == "" {
+		version = mutedNote.Render("(unknown)")
+	}
+	b.WriteString(fmt.Sprintf("  %-10s %s\n", "Version", version))
+
+	// Uptime row
+	uptime := time.Since(d.startTime).Truncate(time.Second).String()
+	b.WriteString(fmt.Sprintf("  %-10s %s\n", "Uptime", uptime))
+
+	// Bind addr / port — sourced from d.config (last successful /config fetch)
+	bindAddr := mutedNote.Render("(unavailable)")
+	port := mutedNote.Render("(unavailable)")
+	if d.config != nil {
+		if v, ok := d.config["bind_addr"].(string); ok && v != "" {
+			bindAddr = v
+		} else {
+			bindAddr = mutedNote.Render("(default: 127.0.0.1)")
+		}
+		if n := toInt(d.config["server_port"]); n != 0 {
+			port = fmt.Sprintf("%d", n)
+		}
+	}
+
+	b.WriteString(fmt.Sprintf("  %-10s %s   %s\n", "Bind addr", bindAddr,
+		mutedNote.Render("(read-only — edit ~/.config/heimdallm/config.toml)")))
+	b.WriteString(fmt.Sprintf("  %-10s %s   %s\n", "Port", port,
+		mutedNote.Render("(read-only)")))
+
+	b.WriteString("\n")
+
+	// Help line — only show Stop hint when daemon is up.
+	if d.connected && !d.shutdownInFlight {
+		b.WriteString("  " + helpStyle.Render("[s] Stop daemon   [r] Refresh"))
+	} else if d.shutdownInFlight {
+		b.WriteString("  " + helpStyle.Render("[r] Refresh"))
+	} else {
+		b.WriteString("  " + helpStyle.Render("[r] Refresh   (start the daemon from your shell)"))
+	}
+	b.WriteString("\n\n")
+
+	b.WriteString("  ")
+	b.WriteString(mutedNote.Render(
+		"Restarting requires running heimdalld again from your shell"))
+	b.WriteString("\n  ")
+	b.WriteString(mutedNote.Render(
+		"or service manager (TUI cannot spawn the daemon)."))
+	b.WriteString("\n")
+
 	return b.String()
 }
 
@@ -786,7 +1124,20 @@ func (d *Dashboard) renderStats(height int) string {
 	if maxVisible < 1 {
 		maxVisible = 1
 	}
-	start, end := visibleRange(d.cursor, len(lines), maxVisible)
+
+	// cursor is a scroll offset (first visible line).
+	start := d.cursor
+	if start > len(lines)-maxVisible {
+		start = len(lines) - maxVisible
+	}
+	if start < 0 {
+		start = 0
+	}
+	end := start + maxVisible
+	if end > len(lines) {
+		end = len(lines)
+	}
+
 	for i := start; i < end; i++ {
 		b.WriteString(lines[i])
 		b.WriteString("\n")
@@ -877,13 +1228,25 @@ func (d *Dashboard) buildStatsLines() []string {
 }
 
 func (d *Dashboard) renderHelp() string {
+	if d.confirmShutdown {
+		return helpStyle.Render("Stop daemon and disconnect clients?  [y]es  [n/esc]cancel")
+	}
+	if d.shutdownInFlight {
+		return helpStyle.Render("Stopping daemon...")
+	}
 	if d.showDetail {
+		if d.activeTab == tabIssues && d.cursor < len(d.issues) && canPromoteIssue(d.issues[d.cursor]) {
+			return helpStyle.Render("[esc]close  [p]romote  [j/k]scroll  [pgup/pgdn]page  [q]uit")
+		}
 		return helpStyle.Render("[esc]close  [j/k]scroll  [pgup/pgdn]page  [q]uit")
 	}
-	if d.activeTab == tabPRs || d.activeTab == tabIssues {
-		return helpStyle.Render("[q]uit  [r]efresh  [enter]detail  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-6]jump")
+	if d.activeTab == tabIssues {
+		return helpStyle.Render("[q]uit  [r]efresh  [s]top  [enter]detail  [p]romote  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-7]jump")
 	}
-	return helpStyle.Render("[q]uit  [r]efresh  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-6]jump  [G]follow")
+	if d.activeTab == tabPRs {
+		return helpStyle.Render("[q]uit  [r]efresh  [s]top  [enter]detail  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-7]jump")
+	}
+	return helpStyle.Render("[q]uit  [r]efresh  [s]top  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-7]jump  [G]follow")
 }
 
 func (d *Dashboard) contentHeight() int {
@@ -990,10 +1353,22 @@ func formatActivityTime(ts string) string {
 	return t.Format("15:04")
 }
 
-func formatSSEData(data string) (itemType string, info string) {
+func formatSSEData(eventType, data string) (itemType string, info string) {
 	var m map[string]any
 	if err := json.Unmarshal([]byte(data), &m); err != nil {
 		return "", data
+	}
+
+	switch eventType {
+	case "polling_started":
+		kind, _ := m["kind"].(string)
+		repos, _ := m["repos"].([]any)
+		return "", fmt.Sprintf("%s (%d repos)", kind, len(repos))
+	case "polling_completed":
+		kind, _ := m["kind"].(string)
+		count := toInt(m["count"])
+		ms := toInt(m["duration_ms"])
+		return "", fmt.Sprintf("%s %d items in %dms", kind, count, ms)
 	}
 
 	parts := make([]string, 0)
@@ -1057,6 +1432,18 @@ func itemTypeStyle(itemType string) lipgloss.Style {
 		return lipgloss.NewStyle().Foreground(colorIssue)
 	default:
 		return lipgloss.NewStyle()
+	}
+}
+
+func canPromoteIssue(issue api.Issue) bool {
+	if issue.LatestReview == nil {
+		return false
+	}
+	switch issue.LatestReview.ActionTaken {
+	case "review_only", "refinement":
+		return true
+	default:
+		return false
 	}
 }
 

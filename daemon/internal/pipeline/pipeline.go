@@ -15,14 +15,14 @@ import (
 )
 
 // ErrCircuitBreakerTripped is returned by Run when a review was skipped
-// because the per-PR or per-repo cap was exceeded. Callers detect it via
+// because the per-PR HEAD or per-repo cap was exceeded. Callers detect it via
 // errors.As on a *CircuitBreakerError value to extract the human-readable
 // reason for telemetry/UI, or via errors.Is(err, ErrCircuitBreakerTripped)
 // when the reason is not needed.
 var ErrCircuitBreakerTripped = errors.New("pipeline: circuit breaker tripped")
 
 // CircuitBreakerError wraps ErrCircuitBreakerTripped with the specific
-// reason the breaker returned ("per-PR cap reached: ...", etc). Use
+// reason the breaker returned ("per-PR HEAD cap reached: ...", etc). Use
 // errors.As on this type to read Reason without parsing the error string.
 type CircuitBreakerError struct {
 	Reason string
@@ -293,6 +293,10 @@ type RunOptions struct {
 	// before pushing PRs into the pipeline; this layer prevents regressions
 	// if a new caller forgets.
 	Guards GateConfig
+	// InstructionAuthors is the resolved allowlist of GitHub logins permitted
+	// to set persistent per-repo instructions via comment directives (#383).
+	// Empty disables the comment-driven path for this repo.
+	InstructionAuthors []string
 }
 
 // Run executes the full review pipeline for one PR and publishes the review to GitHub.
@@ -409,38 +413,71 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		p.publishSkipped(pr, SkipReasonLegacyBackfill)
 		return nil, nil
 	}
-	if prevReview != nil && pr.Head.SHA != "" && prevReview.HeadSHA == pr.Head.SHA {
-		// Before honouring the SHA-skip, check whether the operator
-		// explicitly re-requested a review via the GitHub UI on this same
-		// commit. The fail-closed SHA dedup (#245) was designed to ignore
-		// updated_at bumps from CI bots and cross-references, but it
-		// should NOT swallow a deliberate human action. See
-		// theburrowhub/heimdallm#322 Bug 5.
-		//
-		// Decision rule: bypass the skip iff the most recent
-		// review_requested or review_dismissed event for the bot login is
-		// a review_requested newer than prevReview.CreatedAt. A later
-		// review_dismissed (or any other state) cancels the bypass —
-		// dismiss-then-no-new-request means the operator no longer wants
-		// our review. Same fail-closed posture as #245: a timeline API
-		// error keeps the original skip in place rather than widening
-		// the cost surface on a transient outage.
-		if p.shouldBypassSHASkipForReReview(pr, prevReview) {
-			slog.Info("pipeline: SHA unchanged but explicit re-request detected — proceeding with review",
-				"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA)
+
+	// 2a.5 Process persistent-instruction directives (#383) BEFORE the
+	// re-review skip gate so a remember/forget takes effect even on cycles
+	// that will not produce a review. Opt-in: only when the repo configures an
+	// instruction-author allowlist, so unconfigured repos pay no extra fetch.
+	var prComments []github.Comment
+	if len(opts.InstructionAuthors) > 0 {
+		if cs, err := p.gh.FetchComments(pr.Repo, pr.Number); err != nil {
+			slog.Warn("pipeline: fetch comments for directives failed", "err", err, "repo", pr.Repo, "pr", pr.Number)
 		} else {
-			slog.Info("pipeline: skipping re-review, HEAD SHA unchanged",
-				"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA)
-			p.publishSkipped(pr, SkipReasonSHAUnchanged)
-			return nil, nil
+			prComments = cs
+			p.processDirectives(pr, prComments, opts.InstructionAuthors)
 		}
 	}
 
-	// 2b. Fetch PR comments for context (non-fatal: proceed without if unavailable)
-	prComments, err := p.gh.FetchComments(pr.Repo, pr.Number)
-	if err != nil {
-		slog.Warn("pipeline: failed to fetch PR comments, proceeding without", "err", err)
-		prComments = nil
+	if prevReview != nil && pr.Head.SHA != "" {
+		// Regardless of whether the HEAD SHA changed, the bot must not
+		// re-review unless the operator explicitly re-requested it. The
+		// SHA-unchanged half is the original #322 Bug 5 / #245
+		// behaviour: cross-instance updated_at bumps must not trigger
+		// re-review. The SHA-changed half closes theburrowhub/heimdallm#509:
+		// when a target repo auto-re-adds the bot to requested_reviewers
+		// after a push (Dismiss stale reviews on push, CODEOWNERS
+		// auto-request workflows, …), the Tier 2 ReviewRequestedFor
+		// gate (#385) lets the PR through even though no human asked
+		// for a new review. The shared bypass predicate consults the
+		// PR timeline for a review_requested event newer than the
+		// previous review.
+		//
+		// Decision rule (same for both SHA states): proceed iff the
+		// most recent review_requested or review_dismissed event for
+		// the bot login is a review_requested newer than
+		// prevReview.CreatedAt. A later review_dismissed (or any other
+		// state) cancels the bypass — dismiss-then-no-new-request
+		// means the operator no longer wants our review. Fail-closed
+		// posture (same as #245 and #322): a missing dependency or
+		// timeline API error keeps the skip in place rather than
+		// widening the cost surface on a transient outage.
+		if !p.shouldBypassSHASkipForReReview(pr, prevReview) {
+			reason := SkipReasonSHAUnchanged
+			if prevReview.HeadSHA != pr.Head.SHA {
+				reason = SkipReasonNoReReviewRequest
+			}
+			slog.Info("pipeline: skipping re-review, no explicit re-request",
+				"repo", pr.Repo, "pr", pr.Number,
+				"prev_head_sha", prevReview.HeadSHA, "head_sha", pr.Head.SHA,
+				"reason", string(reason))
+			p.publishSkipped(pr, reason)
+			return nil, nil
+		}
+		slog.Info("pipeline: explicit re-request detected — proceeding with review",
+			"repo", pr.Repo, "pr", pr.Number,
+			"prev_head_sha", prevReview.HeadSHA, "head_sha", pr.Head.SHA)
+	}
+
+	// 2b. Fetch PR comments for context (non-fatal: proceed without if unavailable).
+	// prComments may already be populated by the directive-fetch above; reuse it
+	// to avoid a duplicate API call.
+	if prComments == nil {
+		cs, err := p.gh.FetchComments(pr.Repo, pr.Number)
+		if err != nil {
+			slog.Warn("pipeline: failed to fetch PR comments, proceeding without", "err", err)
+			cs = nil
+		}
+		prComments = cs
 	}
 	commentsSection := formatComments(prComments, pr.User.Login)
 
@@ -453,6 +490,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 			prevReview.CreatedAt,
 			prComments,
 			p.botLogin,
+			pr.User.Login,
 		)
 	}
 
@@ -461,15 +499,22 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	promptTemplate := executor.DefaultTemplate()
 	var cliFlags string
 	p.applyPrompt(promptOverride, opts.AgentPromptID, &promptTemplate, &cliFlags)
+	var standing string
+	if instr, err := p.store.ListRepoInstructions(pr.Repo); err != nil {
+		slog.Warn("pipeline: list repo instructions for prompt failed", "err", err, "repo", pr.Repo)
+	} else {
+		standing = formatStandingInstructions(instr)
+	}
 	prompt := executor.BuildPromptFromTemplate(promptTemplate, executor.PRContext{
-		Title:         pr.Title,
-		Number:        pr.Number,
-		Repo:          pr.Repo,
-		Author:        pr.User.Login,
-		Link:          pr.HTMLURL,
-		Diff:          diff,
-		Comments:      commentsSection,
-		ReviewContext: reviewCtx,
+		Title:                pr.Title,
+		Number:               pr.Number,
+		Repo:                 pr.Repo,
+		Author:               pr.User.Login,
+		Link:                 pr.HTMLURL,
+		Diff:                 diff,
+		Comments:             commentsSection,
+		ReviewContext:        reviewCtx,
+		StandingInstructions: standing,
 	})
 
 	// 4. Select CLI (profile can override the global primary/fallback)
@@ -480,12 +525,12 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	}
 	slog.Info("pipeline: using CLI", "cli", cli)
 
-	// 4b. Circuit breaker: hard cap on review count per PR / per repo. Runs
-	// AFTER all dedup layers so it only fires when the dedup failed but the
-	// caller is about to spend Claude credits anyway. See
+	// 4b. Circuit breaker: hard cap on review count per PR HEAD / per repo.
+	// Runs AFTER all dedup layers so it only fires when the dedup failed but
+	// the caller is about to spend Claude credits anyway. See
 	// theburrowhub/heimdallm#243.
 	if p.breaker != nil {
-		tripped, reason, err := p.store.CheckCircuitBreaker(prID, pr.Repo, *p.breaker)
+		tripped, reason, err := p.store.CheckCircuitBreaker(prID, pr.Repo, pr.Head.SHA, *p.breaker)
 		if err != nil {
 			slog.Warn("pipeline: circuit breaker check failed, proceeding", "err", err)
 		} else if tripped {
@@ -538,6 +583,22 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		return nil, fmt.Errorf("pipeline: execute %s: %w", cli, err)
 	}
 
+	// 5b. Reconcile severity: ensure top-level severity >= max(issues[].severity).
+	// Guards against LLM inconsistencies (prompt injection, model errors).
+	reconciledSeverity := ReconcileSeverity(result)
+
+	// 5c. Extract comment signals and apply escalation to the severity that
+	// will be persisted. By folding signal-driven escalation into the stored
+	// severity, retry paths (PublishPending, NATS worker) reproduce the same
+	// APPROVE/REQUEST_CHANGES decision without needing to re-extract signals.
+	//
+	// Filter out the bot's own comments before extraction — Heimdallm's prior
+	// review bodies often contain blocker keywords ("security issue",
+	// "must fix", etc.) that would otherwise self-trigger escalation.
+	signalComments := filterBotComments(prComments, p.botLogin)
+	commentSignals := ExtractCommentSignals(signalComments, pr.User.Login)
+	finalSeverity := ApplySignalEscalation(reconciledSeverity, commentSignals)
+
 	// 6. Marshal issues and suggestions to JSON for storage
 	issuesJSON, err := json.Marshal(result.Issues)
 	if err != nil {
@@ -555,7 +616,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		Summary:        result.Summary,
 		Issues:         string(issuesJSON),
 		Suggestions:    string(suggestionsJSON),
-		Severity:       result.Severity,
+		Severity:       finalSeverity,
 		CreatedAt:      time.Now().UTC(),
 		GitHubReviewID: 0, // will be set after GitHub publish
 		HeadSHA:        pr.Head.SHA,
@@ -583,7 +644,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	ghReviewID, ghReviewState, publishErr := p.gh.SubmitReview(
 		pr.Repo, pr.Number,
 		reviewBody,
-		SeverityToEvent(result.Severity, len(result.Issues)),
+		SeverityToEvent(finalSeverity),
 	)
 	if publishErr != nil {
 		// Permanent submit failure (PR locked etc.): mark the freshly
@@ -692,10 +753,12 @@ func (p *Pipeline) PublishPending() {
 		}
 		// PublishPending always uses single-mode body (individual comments were
 		// already posted when the review first ran; we only retry the formal review).
+		// The stored severity already incorporates signal escalation from the
+		// initial review, so SeverityToEvent reproduces the original decision.
 		ghID, ghState, err := p.gh.SubmitReview(
 			pr.Repo, pr.Number,
 			BuildGitHubBody(result),
-			SeverityToEvent(rev.Severity, len(issues)),
+			SeverityToEvent(rev.Severity),
 		)
 		if err != nil {
 			// Permanent submit failures (currently HTTP 422 "lock
@@ -812,10 +875,71 @@ func BuildGitHubBody(r *executor.ReviewResult) string {
 	return sb.String()
 }
 
+// severityRank maps a severity string to a numeric rank for comparison.
+func severityRank(s string) int {
+	switch strings.ToLower(s) {
+	case "high":
+		return 3
+	case "medium":
+		return 2
+	default:
+		return 1
+	}
+}
+
+// rankToSeverity converts a numeric rank back to a severity string.
+func rankToSeverity(r int) string {
+	switch r {
+	case 3:
+		return "high"
+	case 2:
+		return "medium"
+	default:
+		return "low"
+	}
+}
+
+// ReconcileSeverity ensures the top-level severity is at least as high as
+// the maximum severity found in individual issues. This guards against LLM
+// inconsistencies where issues are flagged high but the global field is set
+// low (prompt injection, model error, hallucination).
+func ReconcileSeverity(result *executor.ReviewResult) string {
+	maxRank := severityRank(result.Severity)
+	for _, iss := range result.Issues {
+		if r := severityRank(iss.Severity); r > maxRank {
+			maxRank = r
+		}
+	}
+	reconciled := rankToSeverity(maxRank)
+	if reconciled != result.Severity {
+		slog.Warn("pipeline: severity reconciled (AI inconsistency)",
+			"ai_severity", result.Severity,
+			"reconciled", reconciled,
+			"issue_count", len(result.Issues))
+	}
+	return reconciled
+}
+
+// ApplySignalEscalation elevates severity based on comment signals.
+// A "medium" severity is escalated to "high" when blocker signals are detected.
+// This ensures the escalated severity is persisted, so retry paths reproduce
+// the same decision without re-extracting signals.
+func ApplySignalEscalation(severity string, signals CommentSignals) string {
+	if severity == "medium" && signals.Urgency >= 3 {
+		slog.Info("pipeline: severity escalated by comment signals",
+			"original", severity, "escalated", "high",
+			"has_blocker_keywords", signals.HasBlockerKeywords,
+			"unresolved_concerns", signals.UnresolvedConcerns)
+		return "high"
+	}
+	return severity
+}
+
 // SeverityToEvent maps severity to a GitHub review event type.
 // Only high-severity issues block a PR — Heimdallm must not be a blocker
-// for medium/low issues. Those are left as informational comments with an APPROVE.
-func SeverityToEvent(severity string, _ int) string {
+// for medium/low issues. Signal-driven escalation is applied upstream via
+// ApplySignalEscalation before the severity reaches this function.
+func SeverityToEvent(severity string) string {
 	if severity == "high" {
 		return "REQUEST_CHANGES"
 	}
@@ -824,6 +948,22 @@ func SeverityToEvent(severity string, _ int) string {
 
 // maxCommentsBytes limits the total formatted PR comments included in the prompt.
 const maxCommentsBytes = 16 * 1024 // 16KB
+
+// filterBotComments returns a new slice excluding comments authored by the bot.
+// This prevents Heimdallm's own prior review bodies (which contain keywords like
+// "security issue", "must fix", etc.) from self-triggering blocker detection.
+func filterBotComments(comments []github.Comment, botLogin string) []github.Comment {
+	if botLogin == "" {
+		return comments
+	}
+	filtered := make([]github.Comment, 0, len(comments))
+	for _, c := range comments {
+		if !strings.EqualFold(c.Author, botLogin) {
+			filtered = append(filtered, c)
+		}
+	}
+	return filtered
+}
 
 // formatComments formats a slice of GitHub comments into a prompt section string.
 // Returns empty string if comments is nil or empty.

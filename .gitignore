@@ -2,6 +2,7 @@
 dist/*.dmg
 dist/*.zip
 daemon/bin/
+cli/bin/
 
 # Local Docker runtime state
 # - docker/.env holds GITHUB_TOKEN + provider credentials; never commit.
@@ -22,3 +23,4 @@ docker/config/
 daemon/heimdallm
 cli/heimdallm-cli
 .superpowers/
+.claude/scheduled_tasks.lock

@@ -261,7 +261,7 @@ class _SplashApp extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               Image.asset('assets/icon.png', width: 96, height: 96,
-                  errorBuilder: (_, __, ___) => const Icon(Icons.shield, size: 96)),
+                  errorBuilder: (_, _, _) => const Icon(Icons.shield, size: 96)),
               const SizedBox(height: 24),
               const Text('Heimdallm',
                   style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold)),

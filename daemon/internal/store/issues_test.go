@@ -1,8 +1,8 @@
 package store_test
 
 import (
-	"errors"
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
@@ -174,14 +174,15 @@ func TestIssueReview_InsertAndList(t *testing.T) {
 	issueID, _ := s.UpsertIssue(newIssue(209, 23))
 
 	rev := &store.IssueReview{
-		IssueID:     issueID,
-		CLIUsed:     "claude",
-		Summary:     "looks like a config bug",
-		Triage:      `{"severity":"medium","category":"config"}`,
-		Suggestions: `["document the flag","add a validation step"]`,
-		ActionTaken: "review_only",
-		PRCreated:   0,
-		CreatedAt:   time.Now().UTC().Truncate(time.Second),
+		IssueID:        issueID,
+		CLIUsed:        "claude",
+		Summary:        "looks like a config bug",
+		Triage:         `{"severity":"medium","category":"config"}`,
+		RefinementData: `{"analysis_summary":"plan"}`,
+		Suggestions:    `["document the flag","add a validation step"]`,
+		ActionTaken:    "review_only",
+		PRCreated:      0,
+		CreatedAt:      time.Now().UTC().Truncate(time.Second),
 	}
 	revID, err := s.InsertIssueReview(rev)
 	if err != nil {
@@ -200,6 +201,16 @@ func TestIssueReview_InsertAndList(t *testing.T) {
 	}
 	if reviews[0].Triage != rev.Triage {
 		t.Errorf("triage mismatch: %q", reviews[0].Triage)
+	}
+	if reviews[0].RefinementData != rev.RefinementData {
+		t.Errorf("refinement_data mismatch: %q", reviews[0].RefinementData)
+	}
+	latestRef, err := s.LatestIssueReviewByAction(issueID, "review_only")
+	if err != nil {
+		t.Fatalf("latest by action: %v", err)
+	}
+	if latestRef.ID != revID {
+		t.Errorf("LatestIssueReviewByAction ID = %d, want %d", latestRef.ID, revID)
 	}
 }
 

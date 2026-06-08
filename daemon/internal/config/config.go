@@ -61,9 +61,9 @@ type GitHubConfig struct {
 	// Required when DiscoveryTopic is set (prevents scanning all of GitHub).
 	DiscoveryOrgs []string `toml:"discovery_orgs"`
 	// DiscoveryInterval controls how often the discovery query is refreshed.
-	// Independent from PollInterval because the Search API has a stricter
-	// rate limit (30 req/min authenticated). Defaults to "15m" when discovery
-	// is enabled. Accepts any Go time.ParseDuration value.
+	// When empty, discovery follows PollInterval; set this when discovery
+	// should run on its own cadence, for example to preserve Search API budget
+	// across many discovery_orgs. Accepts any Go time.ParseDuration value.
 	DiscoveryInterval string `toml:"discovery_interval"`
 
 	// AutoEnablePROnDiscovery controls the initial prEnabled value for repos
@@ -103,6 +103,7 @@ const (
 	IssueModeIgnore     IssueMode = "ignore"
 	IssueModeBlocked    IssueMode = "blocked"
 	IssueModeDevelop    IssueMode = "develop"
+	IssueModeRefinement IssueMode = "refinement"
 	IssueModeReviewOnly IssueMode = "review_only"
 )
 
@@ -120,14 +121,12 @@ const (
 //
 // Classification precedence (applied in Classify):
 //
-//	skip_labels  >  blocked_labels  >  develop_labels  >  review_only_labels  >  default_action
+//	skip_labels  >  blocked_labels  >  review_only_labels  >  refinement_labels  >  develop_labels  >  default_action
 //
-// develop_labels intentionally takes precedence over review_only_labels: when
-// an issue carries both a "please implement" label and a "please review only"
-// label, the operator intent is auto_implement (the stronger action). This
-// prevents misclassification as IT (review_only) when labels overlap, which
-// would otherwise cause an infinite retry loop if the daemon later tried to
-// auto-implement an issue that was already classified as IT. See issue #223.
+// The stage labels intentionally prefer the earliest configured state. If an
+// issue is temporarily double-labelled during a transition, triage wins over
+// refinement, and refinement wins over development, so Heimdallm never skips
+// ahead silently.
 type IssueTrackingConfig struct {
 	Enabled bool `toml:"enabled" json:"enabled"`
 
@@ -141,16 +140,21 @@ type IssueTrackingConfig struct {
 	Organizations []string `toml:"organizations" json:"organizations"`
 
 	// Assignees limits processing to issues assigned to these GitHub users.
-	// Empty = no assignee filter.
+	// Empty in raw config means "use the authenticated GitHub login" at
+	// runtime. A deliberately shared queue must be introduced explicitly; the
+	// issue pipeline must not treat an absent assignee filter as "anyone".
 	Assignees []string `toml:"assignees" json:"assignees"`
 
 	// DevelopLabels are labels that mark an issue as "please implement".
 	DevelopLabels []string `toml:"develop_labels" json:"develop_labels"`
 
+	// RefinementLabels are labels that mark an issue as "deeply investigate
+	// and produce an implementation plan". This is the trigger for the
+	// refinement stage and the target for triage -> refinement promotion.
+	RefinementLabels []string `toml:"refinement_labels" json:"refinement_labels"`
+
 	// ReviewOnlyLabels are labels that mark an issue as "please analyse and
-	// comment only". DevelopLabels take precedence over ReviewOnlyLabels when
-	// both are present on the same issue — the operator explicitly tagged it
-	// for implementation, which is the stronger intent. See issue #223.
+	// comment only". In the issue state machine this is the triage stage.
 	ReviewOnlyLabels []string `toml:"review_only_labels" json:"review_only_labels"`
 
 	// SkipLabels are labels that opt an issue out of processing entirely.
@@ -171,8 +175,8 @@ type IssueTrackingConfig struct {
 	// promotion has no target and blocked issues would stick forever.
 	PromoteToLabel string `toml:"promote_to_label" json:"promote_to_label"`
 
-	// DefaultAction is applied when an issue carries no label from any of
-	// the three lists above. Must be "ignore" or "review_only".
+	// DefaultAction is applied when an issue carries no label from any
+	// configured mode list above. Must be "ignore" or "review_only".
 	DefaultAction string `toml:"default_action" json:"default_action"`
 }
 
@@ -218,15 +222,74 @@ func (c IssueTrackingConfig) ResolvePromoteToLabel() string {
 	return ""
 }
 
+// WithDefaultAssignee returns a copy whose assignee scope falls back to the
+// authenticated GitHub login. This keeps issue processing single-owner by
+// default while preserving explicitly configured assignee lists.
+func (c IssueTrackingConfig) WithDefaultAssignee(login string) IssueTrackingConfig {
+	if len(c.Assignees) > 0 {
+		return c
+	}
+	login = strings.TrimSpace(strings.TrimLeft(login, "@"))
+	if login == "" {
+		return c
+	}
+	c.Assignees = []string{login}
+	return c
+}
+
+// MatchesAssignees reports whether the current assignee filter permits an
+// issue assigned to the provided GitHub logins. An inactive filter permits all;
+// an active filter only matches issues with exactly one assignee in scope.
+// That single-owner invariant prevents two Heimdallm instances from processing
+// the same staged issue when GitHub temporarily shows multiple assignees.
+func (c IssueTrackingConfig) MatchesAssignees(assignees []string) bool {
+	if len(c.Assignees) == 0 {
+		return true
+	}
+	if len(assignees) != 1 {
+		return false
+	}
+	want := make(map[string]struct{}, len(c.Assignees))
+	for _, a := range c.Assignees {
+		a = strings.ToLower(strings.TrimSpace(strings.TrimLeft(a, "@")))
+		if a != "" {
+			want[a] = struct{}{}
+		}
+	}
+	if len(want) == 0 {
+		return false
+	}
+	a := strings.ToLower(strings.TrimSpace(strings.TrimLeft(assignees[0], "@")))
+	_, ok := want[a]
+	return ok
+}
+
+// MatchesInstructionAuthors reports whether login is permitted to issue
+// persistent review-instruction directives for this repo. Case-insensitive and
+// tolerant of a leading "@". An empty allowlist denies everyone — comment-driven
+// instructions are opt-in and must be explicitly granted (issue #383).
+func (r RepoAI) MatchesInstructionAuthors(login string) bool {
+	login = strings.ToLower(strings.TrimSpace(strings.TrimLeft(login, "@")))
+	if login == "" {
+		return false
+	}
+	for _, a := range r.InstructionAuthors {
+		if strings.ToLower(strings.TrimSpace(strings.TrimLeft(a, "@"))) == login {
+			return true
+		}
+	}
+	return false
+}
+
 // Classify returns the processing mode for an issue given its labels.
 // Matching is case-insensitive to match the way GitHub displays labels; the
 // underlying labels API is case-preserving but the UI is not, so users
 // routinely mix "Bug" and "bug" in practice.
 //
-// Precedence: skip > blocked > develop > review_only > default_action.
-// develop beats review_only so that an issue tagged with both a DEV label and
-// an IT label is always auto-implemented, never silently downgraded to
-// review_only. This prevents the infinite retry loop described in issue #223.
+// Precedence: skip > blocked > review_only > refinement > develop > default_action.
+// The stage order follows the state machine: triage (review_only) comes before
+// refinement, which comes before development. This keeps messy multi-label
+// states recoverable by choosing the earliest stage instead of jumping ahead.
 func (c IssueTrackingConfig) Classify(labels []string) IssueMode {
 	set := make(map[string]struct{}, len(labels))
 	for _, l := range labels {
@@ -238,13 +301,14 @@ func (c IssueTrackingConfig) Classify(labels []string) IssueMode {
 	if labelSetIntersects(set, c.BlockedLabels) {
 		return IssueModeBlocked
 	}
-	// develop takes precedence over review_only: when both are present the
-	// operator wants auto_implement (the stronger action). See issue #223.
-	if labelSetIntersects(set, c.DevelopLabels) {
-		return IssueModeDevelop
-	}
 	if labelSetIntersects(set, c.ReviewOnlyLabels) {
 		return IssueModeReviewOnly
+	}
+	if labelSetIntersects(set, c.RefinementLabels) {
+		return IssueModeRefinement
+	}
+	if labelSetIntersects(set, c.DevelopLabels) {
+		return IssueModeDevelop
 	}
 	switch strings.ToLower(c.DefaultAction) {
 	case "review_only":
@@ -265,21 +329,37 @@ func labelSetIntersects(set map[string]struct{}, list []string) bool {
 
 // CLIAgentConfig holds per-CLI execution settings (model, flags, prompt override).
 // Stored under [ai.agents.<cli-name>] in config.toml.
+//
+// JSON tags must match the snake_case keys written by the PUT /config handler
+// (handlers.go:normalizeAgentConfigsForPut) so ApplyStore can unmarshal a
+// stored row back into this struct symmetrically.
+//
+// Boolean fields deliberately do NOT use `omitempty`. With omitempty a future
+// caller that marshals this struct directly (instead of the current map[string]any
+// path in the handler) would silently drop a `false` value, and ApplyStore's
+// "unmarshal into the existing struct" merge would then preserve a TOML `true`
+// the operator was trying to override. Keeping the zero value in the JSON
+// guarantees the override semantic regardless of how the JSON is produced.
 type CLIAgentConfig struct {
-	Model        string `toml:"model"`         // e.g. "claude-opus-4-6"
-	MaxTurns     int    `toml:"max_turns"`     // claude: --max-turns (0 = not set)
-	ApprovalMode string `toml:"approval_mode"` // codex: --approval-mode
-	ExtraFlags   string `toml:"extra_flags"`   // free-form additional CLI flags
-	PromptID     string `toml:"prompt"`        // agent-level prompt override
+	Model        string `toml:"model" json:"model,omitempty"`                 // e.g. "claude-opus-4-6"
+	MaxTurns     int    `toml:"max_turns" json:"max_turns,omitempty"`         // claude: --max-turns (0 = not set)
+	ApprovalMode string `toml:"approval_mode" json:"approval_mode,omitempty"` // codex: --ask-for-approval
+	ExtraFlags   string `toml:"extra_flags" json:"extra_flags,omitempty"`     // free-form additional CLI flags
+	PromptID     string `toml:"prompt" json:"prompt,omitempty"`               // agent-level prompt override
 
 	// Claude-specific flags
-	Effort               string `toml:"effort"`                 // low|medium|high|max
-	PermissionMode       string `toml:"permission_mode"`        // default|auto|acceptEdits|dontAsk (bypassPermissions is explicitly forbidden)
-	Bare                 bool   `toml:"bare"`                   // --bare
-	DangerouslySkipPerms bool   `toml:"dangerously_skip_perms"` // --dangerously-skip-permissions (cannot be set via HTTP API, see M-5)
-	NoSessionPersistence bool   `toml:"no_session_persistence"` // --no-session-persistence
-	ExecutionTimeout     string `toml:"execution_timeout"`      // per-agent override, e.g. "20m"
+	Effort               string `toml:"effort" json:"effort,omitempty"`                       // low|medium|high|max
+	PermissionMode       string `toml:"permission_mode" json:"permission_mode,omitempty"`     // default|auto|acceptEdits|dontAsk (bypassPermissions is explicitly forbidden)
+	Bare                 bool   `toml:"bare" json:"bare"`                                     // --bare
+	DangerouslySkipPerms bool   `toml:"dangerously_skip_perms" json:"dangerously_skip_perms"` // --dangerously-skip-permissions (cannot be set via HTTP API, see M-5)
+	NoSessionPersistence bool   `toml:"no_session_persistence" json:"no_session_persistence"` // --no-session-persistence
+	ExecutionTimeout     string `toml:"execution_timeout" json:"execution_timeout,omitempty"` // per-agent override, e.g. "20m"
 }
+
+// DefaultTier2RepoConcurrency is the fallback used by both
+// applyDefaults and processReposInParallel so the two paths can't
+// drift out of sync. See #481.
+const DefaultTier2RepoConcurrency = 5
 
 type AIConfig struct {
 	Primary          string                    `toml:"primary"`
@@ -288,7 +368,7 @@ type AIConfig struct {
 	ExecutionTimeout string                    `toml:"execution_timeout"` // e.g. "20m", "1h"
 	Agents           map[string]CLIAgentConfig `toml:"agents"`            // keyed by CLI name
 	Repos            map[string]RepoAI         `toml:"repos"`
-	Orgs             map[string]OrgAI          `toml:"orgs"`        // per-org PR metadata overrides
+	Orgs             map[string]OrgAI          `toml:"orgs"`        // per-org AI/issue/PR metadata overrides
 	PRMetadata       PRMetadataConfig          `toml:"pr_metadata"` // global PR creation defaults
 
 	// Top-level PR metadata fields — flat alternatives to [ai.pr_metadata].
@@ -298,19 +378,113 @@ type AIConfig struct {
 	PRAssignee  string   `toml:"pr_assignee"`
 	PRDraft     *bool    `toml:"pr_draft,omitempty"`
 
+	// InstructionAuthors are GitHub logins permitted to set persistent,
+	// per-repo review instructions via PR comment directives (#383). Resolved
+	// through the repo > org > global hierarchy like PRReviewers. Empty means
+	// nobody is authorized — the comment-driven feature is opt-in.
+	InstructionAuthors []string `toml:"instruction_authors"`
+
 	// IssuePrompt is the global default agent profile ID for issue triage.
 	// Per-repo overrides in [ai.repos.<name>] take precedence.
 	IssuePrompt string `toml:"issue_prompt"`
 	// ImplementPrompt is the global default agent profile ID for auto-implement.
 	// Per-repo overrides in [ai.repos.<name>] take precedence.
 	ImplementPrompt string `toml:"implement_prompt"`
+	// RefinementTimeout caps the deep-investigation stage. It defaults higher
+	// than the general executor timeout because refinement is expected to read
+	// the repository and build an implementation plan.
+	RefinementTimeout string `toml:"refinement_timeout"`
+
+	// Future issue pipeline fields. They are parsed and resolved through the
+	// same repo > org > global hierarchy so follow-up pipeline work can consume
+	// them without changing the config contract again.
+	TriageOwner           string `toml:"triage_owner"`
+	CloneDir              string `toml:"clone_dir"`
+	AutoPromoteTriage     *bool  `toml:"auto_promote_triage,omitempty"`
+	AutoPromoteRefinement *bool  `toml:"auto_promote_refinement,omitempty"`
+
+	// MaxWorktreesPerRepo caps how many per-execution git worktrees the
+	// daemon will hold concurrently for a single repository (#461). A
+	// fresh value of 0 inherits the daemon default (5). Set higher if
+	// the repo has many independent stages running in parallel; lower
+	// if disk pressure dominates.
+	MaxWorktreesPerRepo int `toml:"max_worktrees_per_repo"`
+
+	// Tier2RepoConcurrency caps how many repos the Tier 2 issue
+	// polling loop processes in parallel within a single tick (#481).
+	// A fresh value of 0 inherits the daemon default
+	// (DefaultTier2RepoConcurrency). The cap applies to wall-clock
+	// parallelism; the GitHub API rate limiter
+	// (scheduler.RateLimiter) still throttles network usage.
+	Tier2RepoConcurrency int `toml:"tier2_repo_concurrency"`
+
+	// RepoRenameCheckInterval controls how often the rename probe
+	// queries GitHub for each monitored repo's canonical full_name
+	// to detect a repo or org rename (#489). Empty string falls back
+	// to the daemon default (1h). Setting "0" disables the probe
+	// entirely; operators can still trigger renames manually via
+	// POST /admin/repo-rename.
+	RepoRenameCheckInterval string `toml:"repo_rename_check_interval"`
 
 	// GeneratePRDescription enables LLM-generated PR titles and descriptions
 	// for auto_implement PRs. When true, after the implementation commit,
 	// a second LLM call generates a rich PR description from the diff.
 	// Default: false (backwards compat).
 	GeneratePRDescription bool `toml:"generate_pr_description"`
+
+	// ReviewResponse configures phase 2 of the PR review-state vigilance
+	// feature (#482): the daemon optionally posts an AI-generated reply
+	// when an external reviewer leaves COMMENTED feedback on a PR that
+	// auto_implement created. Off by default — operators opt in per
+	// daemon by flipping Enabled.
+	ReviewResponse ReviewResponseConfig `toml:"review_response"`
+
+	// ReviewFix configures phase 3: when an external reviewer requests
+	// changes, the daemon optionally re-runs the agent on the PR's head
+	// branch and pushes a fix. Off by default; carries a hard
+	// per-PR-lifetime cap so the worst case is bounded.
+	ReviewFix ReviewFixConfig `toml:"review_fix"`
 }
+
+// ReviewResponseConfig caps the AI cost of phase-2 auto-responses to
+// PR review comments (#482). All thresholds default to safe values via
+// applyDefaults; a zero or negative value also falls back to the
+// default rather than meaning "unlimited".
+type ReviewResponseConfig struct {
+	// Enabled defaults to false. When false the Responder is a no-op
+	// regardless of every other knob — opt-in only.
+	Enabled bool `toml:"enabled"`
+	// PerPRLifetime caps how many responder runs a single PR can ever
+	// trigger. The counter is persisted on the PR row so a daemon
+	// restart cannot reset it; operators can manually zero it in SQL
+	// if they want the agent to start over. A future follow-up may
+	// add a sliding-24h cap as a second axis, but lifetime is the
+	// safer default for the first opt-in surface.
+	PerPRLifetime int `toml:"per_pr_lifetime"`
+	// CooldownSecs is the minimum gap between two responder runs on
+	// the same PR. Protects against a chatty reviewer firing the
+	// responder once per comment within the same tick.
+	CooldownSecs int `toml:"cooldown_secs"`
+}
+
+// ReviewFixConfig caps the AI cost of phase-3 auto-fix runs (#482).
+// The lifetime cap is intentionally low: an operator who wants more
+// rounds must opt-in explicitly so we never silently amplify cost.
+type ReviewFixConfig struct {
+	Enabled       bool `toml:"enabled"`
+	PerPRLifetime int  `toml:"per_pr_lifetime"`
+	CooldownSecs  int  `toml:"cooldown_secs"`
+}
+
+// Defaults for the review-response and review-fix paths (#482).
+// Single source of truth: applyDefaults reads these, the runtime
+// guards reference them when callers leave a 0 in TOML.
+const (
+	DefaultReviewResponsePerPRLifetime = 5
+	DefaultReviewResponseCooldownSecs  = 300
+	DefaultReviewFixPerPRLifetime      = 3
+	DefaultReviewFixCooldownSecs       = 300
+)
 
 type RepoAI struct {
 	Primary string `toml:"primary"`
@@ -323,24 +497,32 @@ type RepoAI struct {
 	// ImplementPrompt is the ID of an agent profile whose ImplementPrompt /
 	// ImplementInstructions fields drive the auto_implement code-generation
 	// prompt for this repo. Overrides agent-level and global default.
-	ImplementPrompt string `toml:"implement_prompt"`
-	Fallback        string `toml:"fallback"`
-	ReviewMode      string `toml:"review_mode"` // "" = inherit global
-	LocalDir        string `toml:"local_dir"`   // local repo path for full-repo analysis
+	ImplementPrompt       string `toml:"implement_prompt"`
+	RefinementTimeout     string `toml:"refinement_timeout"`
+	Fallback              string `toml:"fallback"`
+	ReviewMode            string `toml:"review_mode"` // "" = inherit global
+	LocalDir              string `toml:"local_dir"`   // local repo path for full-repo analysis
+	TriageOwner           string `toml:"triage_owner"`
+	CloneDir              string `toml:"clone_dir"`
+	AutoPromoteTriage     *bool  `toml:"auto_promote_triage,omitempty"`
+	AutoPromoteRefinement *bool  `toml:"auto_promote_refinement,omitempty"`
 
 	// PR creation metadata (applied by auto_implement after CreatePR).
+	// Nil slices inherit from org/global; non-nil empty slices explicitly
+	// clear inherited values for this repo.
 	PRReviewers []string `toml:"pr_reviewers"`       // GitHub logins to request review from
 	PRAssignee  string   `toml:"pr_assignee"`        // GitHub login to assign the PR to
 	PRLabels    []string `toml:"pr_labels"`          // labels to add to the PR
 	PRDraft     *bool    `toml:"pr_draft,omitempty"` // create as draft PR
 
+	InstructionAuthors []string `toml:"instruction_authors"` // GitHub logins allowed to set standing instructions (#383)
+
 	// GeneratePRDescription overrides the global ai.generate_pr_description
 	// for this repo. nil = inherit from global.
 	GeneratePRDescription *bool `toml:"generate_pr_description,omitempty"`
 
-	// Per-repo issue tracking override. When set, non-zero fields replace
-	// the global [github.issue_tracking] values for this repo only.
-	IssueTracking *IssueTrackingConfig `toml:"issue_tracking,omitempty" json:"issue_tracking,omitempty"`
+	// Per-repo issue tracking override. Nil fields inherit from org/global.
+	IssueTracking *IssueTrackingOverride `toml:"issue_tracking,omitempty" json:"issue_tracking,omitempty"`
 }
 
 // PRMetadataConfig holds global defaults for PR creation metadata,
@@ -352,14 +534,52 @@ type PRMetadataConfig struct {
 	Draft     *bool    `toml:"pr_draft,omitempty"`
 }
 
-// OrgAI holds per-organisation PR metadata overrides, applied to all repos
-// in the org unless overridden per-repo. Keyed by GitHub org slug under
-// [ai.orgs."org-name"].
+// IssueTrackingOverride holds repo/org scoped issue-tracking overrides.
+//
+// Pointer bools and nil slices mean "inherit". Non-nil slices, including
+// empty slices, are explicit overrides. That distinction matters for org scope:
+// an org must be able to intentionally clear a global label list for all repos.
+type IssueTrackingOverride struct {
+	Enabled          *bool      `toml:"enabled,omitempty" json:"enabled,omitempty"`
+	DevelopEnabled   *bool      `toml:"develop_enabled,omitempty" json:"develop_enabled,omitempty"`
+	FilterMode       FilterMode `toml:"filter_mode,omitempty" json:"filter_mode,omitempty"`
+	Organizations    []string   `toml:"organizations,omitempty" json:"organizations,omitempty"`
+	Assignees        []string   `toml:"assignees,omitempty" json:"assignees,omitempty"`
+	DevelopLabels    []string   `toml:"develop_labels,omitempty" json:"develop_labels,omitempty"`
+	RefinementLabels []string   `toml:"refinement_labels,omitempty" json:"refinement_labels,omitempty"`
+	ReviewOnlyLabels []string   `toml:"review_only_labels,omitempty" json:"review_only_labels,omitempty"`
+	SkipLabels       []string   `toml:"skip_labels,omitempty" json:"skip_labels,omitempty"`
+	BlockedLabels    []string   `toml:"blocked_labels,omitempty" json:"blocked_labels,omitempty"`
+	PromoteToLabel   string     `toml:"promote_to_label,omitempty" json:"promote_to_label,omitempty"`
+	DefaultAction    string     `toml:"default_action,omitempty" json:"default_action,omitempty"`
+}
+
+// OrgAI holds per-organisation overrides, applied to all repos in the org
+// unless overridden per-repo. Keyed by GitHub org slug under [ai.orgs."org-name"].
 type OrgAI struct {
-	PRReviewers []string `toml:"pr_reviewers"`
-	PRAssignee  string   `toml:"pr_assignee"`
-	PRLabels    []string `toml:"pr_labels"`
-	PRDraft     *bool    `toml:"pr_draft,omitempty"`
+	Primary               string `toml:"primary"`
+	Prompt                string `toml:"prompt"`
+	IssuePrompt           string `toml:"issue_prompt"`
+	ImplementPrompt       string `toml:"implement_prompt"`
+	RefinementTimeout     string `toml:"refinement_timeout"`
+	Fallback              string `toml:"fallback"`
+	ReviewMode            string `toml:"review_mode"`
+	LocalDir              string `toml:"local_dir"`
+	TriageOwner           string `toml:"triage_owner"`
+	CloneDir              string `toml:"clone_dir"`
+	AutoPromoteTriage     *bool  `toml:"auto_promote_triage,omitempty"`
+	AutoPromoteRefinement *bool  `toml:"auto_promote_refinement,omitempty"`
+
+	// Nil slices inherit from global; non-nil empty slices explicitly clear
+	// inherited values for every repo in this org.
+	PRReviewers        []string `toml:"pr_reviewers"`
+	PRAssignee         string   `toml:"pr_assignee"`
+	PRLabels           []string `toml:"pr_labels"`
+	PRDraft            *bool    `toml:"pr_draft,omitempty"`
+	InstructionAuthors []string `toml:"instruction_authors"` // see RepoAI.InstructionAuthors (#383)
+
+	GeneratePRDescription *bool                  `toml:"generate_pr_description,omitempty"`
+	IssueTracking         *IssueTrackingOverride `toml:"issue_tracking,omitempty" json:"issue_tracking,omitempty"`
 }
 
 type RetentionConfig struct {
@@ -486,97 +706,197 @@ func (c *Config) ResolvedPRMetadata() (reviewers, labels []string, assignee stri
 // field resolves independently.
 func (c *Config) AIForRepo(repo string) RepoAI {
 	gReviewers, gLabels, gAssignee, gDraft := c.ResolvedPRMetadata()
-
-	// Org-level layer: start from global, overlay org-level fields.
-	orgReviewers, orgLabels, orgAssignee, orgDraft := gReviewers, gLabels, gAssignee, gDraft
+	gGenDesc := c.AI.GeneratePRDescription
+	out := RepoAI{
+		Primary:               c.AI.Primary,
+		Fallback:              c.AI.Fallback,
+		ReviewMode:            c.AI.ReviewMode,
+		IssuePrompt:           c.AI.IssuePrompt,
+		ImplementPrompt:       c.AI.ImplementPrompt,
+		RefinementTimeout:     c.AI.RefinementTimeout,
+		PRReviewers:           gReviewers,
+		PRLabels:              gLabels,
+		PRAssignee:            gAssignee,
+		PRDraft:               gDraft,
+		GeneratePRDescription: &gGenDesc,
+		TriageOwner:           c.AI.TriageOwner,
+		CloneDir:              c.AI.CloneDir,
+		AutoPromoteTriage:     c.AI.AutoPromoteTriage,
+		AutoPromoteRefinement: c.AI.AutoPromoteRefinement,
+		InstructionAuthors:    c.AI.InstructionAuthors,
+	}
 	if org := repoOrg(repo); org != "" && c.AI.Orgs != nil {
 		if o, ok := c.AI.Orgs[org]; ok {
-			if len(o.PRReviewers) > 0 {
-				orgReviewers = o.PRReviewers
-			}
-			if len(o.PRLabels) > 0 {
-				orgLabels = o.PRLabels
-			}
-			if o.PRAssignee != "" {
-				orgAssignee = o.PRAssignee
-			}
-			if o.PRDraft != nil {
-				orgDraft = o.PRDraft
-			}
+			applyOrgAI(&out, o)
 		}
 	}
-
 	if c.AI.Repos != nil {
 		if r, ok := c.AI.Repos[repo]; ok {
-			if r.Primary == "" {
-				r.Primary = c.AI.Primary
-			}
-			if r.Fallback == "" {
-				r.Fallback = c.AI.Fallback
-			}
-			if r.ReviewMode == "" {
-				r.ReviewMode = c.AI.ReviewMode
-			}
-			if len(r.PRReviewers) == 0 {
-				r.PRReviewers = orgReviewers
-			}
-			if len(r.PRLabels) == 0 {
-				r.PRLabels = orgLabels
-			}
-			if r.PRAssignee == "" {
-				r.PRAssignee = orgAssignee
-			}
-			if r.PRDraft == nil {
-				r.PRDraft = orgDraft
-			}
-			if r.GeneratePRDescription == nil {
-				v := c.AI.GeneratePRDescription
-				r.GeneratePRDescription = &v
-			}
-			return r
+			applyRepoAI(&out, r)
 		}
 	}
-	gGenDesc := c.AI.GeneratePRDescription
-	return RepoAI{
-		Primary: c.AI.Primary, Fallback: c.AI.Fallback, ReviewMode: c.AI.ReviewMode,
-		PRReviewers: orgReviewers, PRLabels: orgLabels, PRAssignee: orgAssignee, PRDraft: orgDraft,
-		GeneratePRDescription: &gGenDesc,
+	return out
+}
+
+func applyOrgAI(out *RepoAI, o OrgAI) {
+	applyScopedAI(out, scopedAIFields{
+		Primary:               o.Primary,
+		Fallback:              o.Fallback,
+		ReviewMode:            o.ReviewMode,
+		Prompt:                o.Prompt,
+		IssuePrompt:           o.IssuePrompt,
+		ImplementPrompt:       o.ImplementPrompt,
+		RefinementTimeout:     o.RefinementTimeout,
+		LocalDir:              o.LocalDir,
+		TriageOwner:           o.TriageOwner,
+		CloneDir:              o.CloneDir,
+		AutoPromoteTriage:     o.AutoPromoteTriage,
+		AutoPromoteRefinement: o.AutoPromoteRefinement,
+		PRReviewers:           o.PRReviewers,
+		PRLabels:              o.PRLabels,
+		PRAssignee:            o.PRAssignee,
+		PRDraft:               o.PRDraft,
+		GeneratePRDescription: o.GeneratePRDescription,
+		InstructionAuthors:    o.InstructionAuthors,
+	})
+}
+
+func applyRepoAI(out *RepoAI, r RepoAI) {
+	applyScopedAI(out, scopedAIFields{
+		Primary:               r.Primary,
+		Fallback:              r.Fallback,
+		ReviewMode:            r.ReviewMode,
+		Prompt:                r.Prompt,
+		IssuePrompt:           r.IssuePrompt,
+		ImplementPrompt:       r.ImplementPrompt,
+		RefinementTimeout:     r.RefinementTimeout,
+		LocalDir:              r.LocalDir,
+		TriageOwner:           r.TriageOwner,
+		CloneDir:              r.CloneDir,
+		AutoPromoteTriage:     r.AutoPromoteTriage,
+		AutoPromoteRefinement: r.AutoPromoteRefinement,
+		PRReviewers:           r.PRReviewers,
+		PRLabels:              r.PRLabels,
+		PRAssignee:            r.PRAssignee,
+		PRDraft:               r.PRDraft,
+		GeneratePRDescription: r.GeneratePRDescription,
+		InstructionAuthors:    r.InstructionAuthors,
+	})
+}
+
+type scopedAIFields struct {
+	Primary               string
+	Fallback              string
+	ReviewMode            string
+	Prompt                string
+	IssuePrompt           string
+	ImplementPrompt       string
+	RefinementTimeout     string
+	LocalDir              string
+	TriageOwner           string
+	CloneDir              string
+	AutoPromoteTriage     *bool
+	AutoPromoteRefinement *bool
+	PRReviewers           []string
+	PRLabels              []string
+	PRAssignee            string
+	PRDraft               *bool
+	GeneratePRDescription *bool
+	InstructionAuthors    []string
+}
+
+func applyScopedAI(out *RepoAI, fields scopedAIFields) {
+	if fields.Primary != "" {
+		out.Primary = fields.Primary
+	}
+	if fields.Fallback != "" {
+		out.Fallback = fields.Fallback
+	}
+	if fields.ReviewMode != "" {
+		out.ReviewMode = fields.ReviewMode
+	}
+	if fields.Prompt != "" {
+		out.Prompt = fields.Prompt
+	}
+	if fields.IssuePrompt != "" {
+		out.IssuePrompt = fields.IssuePrompt
+	}
+	if fields.ImplementPrompt != "" {
+		out.ImplementPrompt = fields.ImplementPrompt
+	}
+	if fields.RefinementTimeout != "" {
+		out.RefinementTimeout = fields.RefinementTimeout
+	}
+	if fields.LocalDir != "" {
+		out.LocalDir = fields.LocalDir
+	}
+	if fields.TriageOwner != "" {
+		out.TriageOwner = fields.TriageOwner
+	}
+	if fields.CloneDir != "" {
+		out.CloneDir = fields.CloneDir
+	}
+	if fields.AutoPromoteTriage != nil {
+		out.AutoPromoteTriage = fields.AutoPromoteTriage
+	}
+	if fields.AutoPromoteRefinement != nil {
+		out.AutoPromoteRefinement = fields.AutoPromoteRefinement
+	}
+	if fields.PRReviewers != nil {
+		out.PRReviewers = fields.PRReviewers
+	}
+	if fields.PRLabels != nil {
+		out.PRLabels = fields.PRLabels
+	}
+	if fields.PRAssignee != "" {
+		out.PRAssignee = fields.PRAssignee
+	}
+	if fields.PRDraft != nil {
+		out.PRDraft = fields.PRDraft
+	}
+	if fields.GeneratePRDescription != nil {
+		out.GeneratePRDescription = fields.GeneratePRDescription
+	}
+	if fields.InstructionAuthors != nil {
+		out.InstructionAuthors = fields.InstructionAuthors
 	}
 }
 
 // IssueTrackingForRepo returns the issue tracking config for a specific repo,
-// merging per-repo overrides (field-level) with the global config.
-// Non-zero per-repo fields win; zero/nil fields inherit from global.
+// merging repo > org > global overrides field-by-field.
 func (c *Config) IssueTrackingForRepo(repo string) IssueTrackingConfig {
-	global := c.GitHub.IssueTracking
-	if c.AI.Repos == nil {
-		return global
+	merged := c.GitHub.IssueTracking
+	if org := repoOrg(repo); org != "" && c.AI.Orgs != nil {
+		if o, ok := c.AI.Orgs[org]; ok {
+			applyIssueTrackingOverride(&merged, o.IssueTracking)
+		}
 	}
-	r, ok := c.AI.Repos[repo]
-	if !ok || r.IssueTracking == nil {
-		return global
+	if c.AI.Repos != nil {
+		if r, ok := c.AI.Repos[repo]; ok {
+			applyIssueTrackingOverride(&merged, r.IssueTracking)
+		}
 	}
-	ov := r.IssueTracking
-	merged := global
-	// Enabled resolution: the per-repo override enables IT if Enabled is
-	// explicitly true OR if labels are configured (implicit intent). This
-	// prevents the common mistake of configuring labels but forgetting the
-	// toggle.
-	//
-	// Limitation: a per-repo override cannot explicitly disable IT when the
-	// global is on, because Enabled=false is indistinguishable from "not set"
-	// (bool zero value). A *bool refactor would fix this if needed.
-	if ov.Enabled || len(ov.DevelopLabels) > 0 || len(ov.ReviewOnlyLabels) > 0 {
-		merged.Enabled = true
+	return merged
+}
+
+func applyIssueTrackingOverride(merged *IssueTrackingConfig, ov *IssueTrackingOverride) {
+	if ov == nil {
+		return
 	}
-	if len(ov.DevelopLabels) > 0 {
+	if ov.DevelopLabels != nil {
 		merged.DevelopLabels = ov.DevelopLabels
 	}
-	if len(ov.ReviewOnlyLabels) > 0 {
+	if ov.RefinementLabels != nil {
+		merged.RefinementLabels = ov.RefinementLabels
+	}
+	if ov.ReviewOnlyLabels != nil {
 		merged.ReviewOnlyLabels = ov.ReviewOnlyLabels
 	}
-	if len(ov.SkipLabels) > 0 {
+	if ov.SkipLabels != nil {
 		merged.SkipLabels = ov.SkipLabels
+	}
+	if ov.BlockedLabels != nil {
+		merged.BlockedLabels = ov.BlockedLabels
 	}
 	if ov.FilterMode != "" {
 		merged.FilterMode = ov.FilterMode
@@ -584,13 +904,21 @@ func (c *Config) IssueTrackingForRepo(repo string) IssueTrackingConfig {
 	if ov.DefaultAction != "" {
 		merged.DefaultAction = ov.DefaultAction
 	}
-	if len(ov.Organizations) > 0 {
+	if ov.PromoteToLabel != "" {
+		merged.PromoteToLabel = ov.PromoteToLabel
+	}
+	if ov.Organizations != nil {
 		merged.Organizations = ov.Organizations
 	}
-	if len(ov.Assignees) > 0 {
+	if ov.Assignees != nil {
 		merged.Assignees = ov.Assignees
 	}
-	return merged
+	if ov.Enabled == nil && (len(ov.DevelopLabels) > 0 || len(ov.RefinementLabels) > 0 || len(ov.ReviewOnlyLabels) > 0) {
+		merged.Enabled = true
+	}
+	if ov.Enabled != nil {
+		merged.Enabled = *ov.Enabled
+	}
 }
 
 // AutoEnablePRForDiscovery returns the effective boolean value.
@@ -624,9 +952,6 @@ func (c *Config) applyDefaults() {
 	if c.GitHub.PollInterval == "" {
 		c.GitHub.PollInterval = "5m"
 	}
-	if c.GitHub.DiscoveryTopic != "" && c.GitHub.DiscoveryInterval == "" {
-		c.GitHub.DiscoveryInterval = "15m"
-	}
 	if c.GitHub.IssueTracking.FilterMode == "" {
 		c.GitHub.IssueTracking.FilterMode = FilterModeExclusive
 	}
@@ -638,6 +963,36 @@ func (c *Config) applyDefaults() {
 	}
 	if c.AI.ReviewMode == "" {
 		c.AI.ReviewMode = "single"
+	}
+	if c.AI.RefinementTimeout == "" {
+		c.AI.RefinementTimeout = "30m"
+	}
+	if c.AI.MaxWorktreesPerRepo == 0 {
+		c.AI.MaxWorktreesPerRepo = 5
+	}
+	if c.AI.Tier2RepoConcurrency == 0 {
+		c.AI.Tier2RepoConcurrency = DefaultTier2RepoConcurrency
+	}
+	// Empty string falls back to 1h. "0" stays "0" — operator-disabled.
+	if c.AI.RepoRenameCheckInterval == "" {
+		c.AI.RepoRenameCheckInterval = "1h"
+	}
+	// Review-state vigilance defaults (#482). The Enabled flag is NOT
+	// touched here — it must stay false unless the operator explicitly
+	// opts in via TOML. Only the cap/cooldown axes fall back to defaults
+	// when left at zero (treating zero as "unlimited" would defeat the
+	// safety story).
+	if c.AI.ReviewResponse.PerPRLifetime <= 0 {
+		c.AI.ReviewResponse.PerPRLifetime = DefaultReviewResponsePerPRLifetime
+	}
+	if c.AI.ReviewResponse.CooldownSecs <= 0 {
+		c.AI.ReviewResponse.CooldownSecs = DefaultReviewResponseCooldownSecs
+	}
+	if c.AI.ReviewFix.PerPRLifetime <= 0 {
+		c.AI.ReviewFix.PerPRLifetime = DefaultReviewFixPerPRLifetime
+	}
+	if c.AI.ReviewFix.CooldownSecs <= 0 {
+		c.AI.ReviewFix.CooldownSecs = DefaultReviewFixCooldownSecs
 	}
 	if c.ActivityLog.Enabled == nil {
 		v := true
@@ -703,6 +1058,9 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := os.Getenv("HEIMDALLM_EXECUTION_TIMEOUT"); v != "" {
 		c.AI.ExecutionTimeout = v
+	}
+	if v := os.Getenv("HEIMDALLM_REFINEMENT_TIMEOUT"); v != "" {
+		c.AI.RefinementTimeout = v
 	}
 	if v := os.Getenv("HEIMDALLM_RETENTION_DAYS"); v != "" {
 		if d, err := strconv.Atoi(v); err == nil {
@@ -793,6 +1151,9 @@ func (c *Config) applyIssueTrackingEnv() {
 	if list, ok := csvEnv("HEIMDALLM_ISSUE_DEVELOP_LABELS"); ok {
 		c.GitHub.IssueTracking.DevelopLabels = list
 	}
+	if list, ok := csvEnv("HEIMDALLM_ISSUE_REFINEMENT_LABELS"); ok {
+		c.GitHub.IssueTracking.RefinementLabels = list
+	}
 	if list, ok := csvEnv("HEIMDALLM_ISSUE_REVIEW_ONLY_LABELS"); ok {
 		c.GitHub.IssueTracking.ReviewOnlyLabels = list
 	}
@@ -846,10 +1207,19 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("config: agents[%s].approval_mode: %w", name, err)
 		}
 	}
+	if err := c.validateRefinementTimeouts(); err != nil {
+		return err
+	}
 	if err := c.validateDiscovery(); err != nil {
 		return err
 	}
+	if err := c.validateOrgKeys(); err != nil {
+		return err
+	}
 	if err := c.validateIssueTracking(); err != nil {
+		return err
+	}
+	if err := c.validateScopedIssueTracking(); err != nil {
 		return err
 	}
 	if c.ActivityLog.RetentionDays != nil {
@@ -873,9 +1243,7 @@ func (c *Config) Validate() error {
 // take the extra fields as parameters too or future validations will pass
 // silently against zero values.
 func ValidateIssueTracking(it IssueTrackingConfig) error {
-	c := &Config{}
-	c.GitHub.IssueTracking = it
-	return c.validateIssueTracking()
+	return validateIssueTrackingConfig("github.issue_tracking", it)
 }
 
 // validateIssueTracking enforces the small set of invariants the pipeline
@@ -886,22 +1254,101 @@ func ValidateIssueTracking(it IssueTrackingConfig) error {
 // errors; they exist so an explicit typo like filter_mode = "excluive" fails
 // fast instead of defaulting silently.
 func (c *Config) validateIssueTracking() error {
-	it := c.GitHub.IssueTracking
+	return validateIssueTrackingConfig("github.issue_tracking", c.GitHub.IssueTracking)
+}
+
+func validateIssueTrackingConfig(path string, it IssueTrackingConfig) error {
 	if !it.Enabled {
 		return nil
 	}
 	switch it.FilterMode {
 	case FilterModeExclusive, FilterModeInclusive:
 	default:
-		return fmt.Errorf("config: github.issue_tracking.filter_mode %q is invalid (must be %q or %q)", it.FilterMode, FilterModeExclusive, FilterModeInclusive)
+		return fmt.Errorf("config: %s.filter_mode %q is invalid (must be %q or %q)", path, it.FilterMode, FilterModeExclusive, FilterModeInclusive)
 	}
 	switch IssueMode(it.DefaultAction) {
 	case IssueModeIgnore, IssueModeReviewOnly:
 	default:
-		return fmt.Errorf("config: github.issue_tracking.default_action %q is invalid (must be %q or %q)", it.DefaultAction, IssueModeIgnore, IssueModeReviewOnly)
+		return fmt.Errorf("config: %s.default_action %q is invalid (must be %q or %q)", path, it.DefaultAction, IssueModeIgnore, IssueModeReviewOnly)
 	}
 	if len(it.BlockedLabels) > 0 && it.ResolvePromoteToLabel() == "" {
-		return fmt.Errorf("config: github.issue_tracking.blocked_labels set but no promote target — set promote_to_label or populate develop_labels")
+		return fmt.Errorf("config: %s.blocked_labels set but no promote target — set promote_to_label or populate develop_labels", path)
+	}
+	return nil
+}
+
+func (c *Config) validateScopedIssueTracking() error {
+	for org, o := range c.AI.Orgs {
+		if o.IssueTracking == nil {
+			continue
+		}
+		it := c.GitHub.IssueTracking
+		applyIssueTrackingOverride(&it, o.IssueTracking)
+		if err := validateIssueTrackingConfig(fmt.Sprintf("ai.orgs.%q.issue_tracking", org), it); err != nil {
+			return err
+		}
+	}
+	for repo, r := range c.AI.Repos {
+		it := c.GitHub.IssueTracking
+		if org := repoOrg(repo); org != "" && c.AI.Orgs != nil {
+			if o, ok := c.AI.Orgs[org]; ok {
+				applyIssueTrackingOverride(&it, o.IssueTracking)
+			}
+		}
+		applyIssueTrackingOverride(&it, r.IssueTracking)
+		if err := validateIssueTrackingConfig(fmt.Sprintf("ai.repos.%q.issue_tracking", repo), it); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ValidateOrgSlug validates a GitHub org/user slug used as an [ai.orgs] key.
+func ValidateOrgSlug(org string) error {
+	if !githubOrgPattern.MatchString(org) {
+		return fmt.Errorf("config: org %q is invalid (must match GitHub org/user slug: 1-39 alphanumerics plus internal hyphens)", org)
+	}
+	return nil
+}
+
+func (c *Config) validateOrgKeys() error {
+	for org := range c.AI.Orgs {
+		if err := ValidateOrgSlug(org); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Config) validateRefinementTimeouts() error {
+	if err := validatePositiveDuration("ai.refinement_timeout", c.AI.RefinementTimeout); err != nil {
+		return err
+	}
+	for org, ai := range c.AI.Orgs {
+		path := fmt.Sprintf(`ai.orgs.%q.refinement_timeout`, org)
+		if err := validatePositiveDuration(path, ai.RefinementTimeout); err != nil {
+			return err
+		}
+	}
+	for repo, ai := range c.AI.Repos {
+		path := fmt.Sprintf(`ai.repos.%q.refinement_timeout`, repo)
+		if err := validatePositiveDuration(path, ai.RefinementTimeout); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validatePositiveDuration(path, raw string) error {
+	if raw == "" {
+		return nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return fmt.Errorf("config: %s %q is invalid: %w", path, raw, err)
+	}
+	if d <= 0 {
+		return fmt.Errorf("config: %s %q must be positive", path, raw)
 	}
 	return nil
 }

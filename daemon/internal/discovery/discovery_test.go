@@ -102,6 +102,77 @@ func TestMergeRepos_NonMonitored(t *testing.T) {
 	}
 }
 
+// ── FilterArchived ──────────────────────────────────────────────────────────
+
+type fakeArchivedChecker struct {
+	archived map[string]bool
+	errRepos map[string]error
+}
+
+func (f *fakeArchivedChecker) IsRepoArchived(repo string) (bool, error) {
+	if err, ok := f.errRepos[repo]; ok {
+		return false, err
+	}
+	return f.archived[repo], nil
+}
+
+func TestFilterArchived_RemovesArchivedRepos(t *testing.T) {
+	checker := &fakeArchivedChecker{
+		archived: map[string]bool{
+			"org/archived1": true,
+			"org/archived2": true,
+		},
+	}
+	repos := []string{"org/active", "org/archived1", "org/other", "org/archived2"}
+	active, archived := discovery.FilterArchived(repos, checker, nil)
+	if len(active) != 2 || active[0] != "org/active" || active[1] != "org/other" {
+		t.Errorf("active = %v, want [org/active org/other]", active)
+	}
+	if len(archived) != 2 || archived[0] != "org/archived1" || archived[1] != "org/archived2" {
+		t.Errorf("archived = %v, want [org/archived1 org/archived2]", archived)
+	}
+}
+
+func TestFilterArchived_SkipsCheckForDiscoveredRepos(t *testing.T) {
+	checker := &fakeArchivedChecker{
+		archived: map[string]bool{"org/fresh": true},
+	}
+	repos := []string{"org/fresh", "org/static"}
+	skipCheck := []string{"org/fresh"}
+	active, archived := discovery.FilterArchived(repos, checker, skipCheck)
+	if len(active) != 2 {
+		t.Errorf("skipped repo should remain active, got active=%v archived=%v", active, archived)
+	}
+	if len(archived) != 0 {
+		t.Errorf("no repos should be archived when skipped, got %v", archived)
+	}
+}
+
+func TestFilterArchived_KeepsRepoOnError(t *testing.T) {
+	checker := &fakeArchivedChecker{
+		errRepos: map[string]error{"org/flaky": errors.New("rate limit")},
+	}
+	repos := []string{"org/flaky", "org/ok"}
+	active, archived := discovery.FilterArchived(repos, checker, nil)
+	if len(active) != 2 {
+		t.Errorf("error repos should be kept, got active=%v", active)
+	}
+	if len(archived) != 0 {
+		t.Errorf("no repos should be archived on error, got %v", archived)
+	}
+}
+
+func TestFilterArchived_EmptyInput(t *testing.T) {
+	checker := &fakeArchivedChecker{}
+	active, archived := discovery.FilterArchived(nil, checker, nil)
+	if active != nil {
+		t.Errorf("active should be nil for empty input, got %v", active)
+	}
+	if archived != nil {
+		t.Errorf("archived should be nil for empty input, got %v", archived)
+	}
+}
+
 // ── InferOrgs ───────────────────────────────────────────────────────────────
 
 func TestInferOrgs(t *testing.T) {
