@@ -124,47 +124,57 @@ func (s *Service) Run(ctx context.Context, interval time.Duration, topic string,
 	}
 }
 
-// MergeRepos returns the union of static and discovered repositories,
-// preserving the order of static entries (stable for config-driven overrides)
-// and appending discovered entries that are not already present.
-// Repos listed in nonMonitored are excluded unconditionally (absolute blacklist).
-func MergeRepos(static, discovered, nonMonitored []string) []string {
-	if len(static) == 0 && len(discovered) == 0 {
+// MergeRepos returns the union of static, configured, and discovered repos.
+// Order: static first (stable for TOML-driven overrides), then configured
+// ([ai.repos.*] explicit entries), then discovered (topic search results).
+//
+// Repos in nonMonitored are excluded — UNLESS they appear in configured.
+// Explicit [ai.repos.*] config wins over the NonMonitored blacklist: a stale
+// auto-discovery row in non_monitored must not silently demote a repo the
+// operator has explicitly wired up. See theburrowhub/heimdallm#281.
+func MergeRepos(static, configured, discovered, nonMonitored []string) []string {
+	if len(static) == 0 && len(configured) == 0 && len(discovered) == 0 {
 		return nil
+	}
+	exempt := make(map[string]struct{}, len(configured))
+	for _, r := range configured {
+		if r != "" {
+			exempt[r] = struct{}{}
+		}
 	}
 	blacklist := make(map[string]struct{}, len(nonMonitored))
 	for _, r := range nonMonitored {
-		if r != "" {
-			blacklist[r] = struct{}{}
-		}
-	}
-	seen := make(map[string]struct{}, len(static)+len(discovered))
-	out := make([]string, 0, len(static)+len(discovered))
-	for _, r := range static {
 		if r == "" {
 			continue
 		}
-		if _, blocked := blacklist[r]; blocked {
+		if _, ok := exempt[r]; ok {
 			continue
 		}
+		blacklist[r] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(static)+len(configured)+len(discovered))
+	out := make([]string, 0, len(static)+len(configured)+len(discovered))
+	add := func(r string) {
+		if r == "" {
+			return
+		}
+		if _, blocked := blacklist[r]; blocked {
+			return
+		}
 		if _, dup := seen[r]; dup {
-			continue
+			return
 		}
 		seen[r] = struct{}{}
 		out = append(out, r)
+	}
+	for _, r := range static {
+		add(r)
+	}
+	for _, r := range configured {
+		add(r)
 	}
 	for _, r := range discovered {
-		if r == "" {
-			continue
-		}
-		if _, blocked := blacklist[r]; blocked {
-			continue
-		}
-		if _, dup := seen[r]; dup {
-			continue
-		}
-		seen[r] = struct{}{}
-		out = append(out, r)
+		add(r)
 	}
 	if len(out) == 0 {
 		return nil

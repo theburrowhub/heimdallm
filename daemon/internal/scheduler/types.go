@@ -19,11 +19,18 @@ type Tier1Publisher interface {
 }
 
 // Tier1Config provides the repo lists for merging.
+//
+// ConfiguredRepos carries the keys of [ai.repos.*] from the live config so the
+// merge can include explicitly-configured repos in the union AND exempt them
+// from the NonMonitored blacklist. See theburrowhub/heimdallm#281: a repo wired
+// up under [ai.repos."org/repo"] but with no active PRs must still receive
+// issue polling.
 type Tier1Config struct {
-	StaticRepos    []string
-	NonMonitored   []string
-	DiscoveryTopic string
-	DiscoveryOrgs  []string
+	StaticRepos     []string
+	ConfiguredRepos []string
+	NonMonitored    []string
+	DiscoveryTopic  string
+	DiscoveryOrgs   []string
 }
 
 // ── Tier 2 types (formerly in tier2.go) ─────────────────────────────────

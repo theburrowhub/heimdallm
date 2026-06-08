@@ -44,6 +44,7 @@ func (f *fakeFetcher) set(repos []string, err error) {
 func TestMergeRepos_PreservesStaticOrderAndDeduplicates(t *testing.T) {
 	out := discovery.MergeRepos(
 		[]string{"org/static1", "org/shared"},
+		nil,
 		[]string{"org/shared", "org/discovered1", "org/discovered2"},
 		nil,
 	)
@@ -58,28 +59,35 @@ func TestMergeRepos_PreservesStaticOrderAndDeduplicates(t *testing.T) {
 	}
 }
 
-func TestMergeRepos_BothEmpty(t *testing.T) {
-	if got := discovery.MergeRepos(nil, nil, nil); got != nil {
-		t.Errorf("MergeRepos(nil, nil, nil) = %v, want nil", got)
+func TestMergeRepos_AllEmpty(t *testing.T) {
+	if got := discovery.MergeRepos(nil, nil, nil, nil); got != nil {
+		t.Errorf("MergeRepos(nil, nil, nil, nil) = %v, want nil", got)
 	}
 }
 
 func TestMergeRepos_OnlyStatic(t *testing.T) {
-	got := discovery.MergeRepos([]string{"a", "b"}, nil, nil)
+	got := discovery.MergeRepos([]string{"a", "b"}, nil, nil, nil)
 	if len(got) != 2 || got[0] != "a" || got[1] != "b" {
 		t.Errorf("got %v", got)
 	}
 }
 
 func TestMergeRepos_OnlyDiscovered(t *testing.T) {
-	got := discovery.MergeRepos(nil, []string{"a", "b"}, nil)
+	got := discovery.MergeRepos(nil, nil, []string{"a", "b"}, nil)
+	if len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Errorf("got %v", got)
+	}
+}
+
+func TestMergeRepos_OnlyConfigured(t *testing.T) {
+	got := discovery.MergeRepos(nil, []string{"a", "b"}, nil, nil)
 	if len(got) != 2 || got[0] != "a" || got[1] != "b" {
 		t.Errorf("got %v", got)
 	}
 }
 
 func TestMergeRepos_IgnoresEmptyStrings(t *testing.T) {
-	got := discovery.MergeRepos([]string{"", "a", ""}, []string{"", "b"}, nil)
+	got := discovery.MergeRepos([]string{"", "a", ""}, nil, []string{"", "b"}, nil)
 	if len(got) != 2 || got[0] != "a" || got[1] != "b" {
 		t.Errorf("got %v", got)
 	}
@@ -88,10 +96,68 @@ func TestMergeRepos_IgnoresEmptyStrings(t *testing.T) {
 func TestMergeRepos_NonMonitored(t *testing.T) {
 	got := discovery.MergeRepos(
 		[]string{"org/static1", "org/blocked"},
+		nil,
 		[]string{"org/discovered1", "org/blocked2"},
 		[]string{"org/blocked", "org/blocked2"},
 	)
 	want := []string{"org/static1", "org/discovered1"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("got[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// Repos with explicit [ai.repos.*] config (configured) are part of the union
+// even when they are absent from static and never returned by topic discovery.
+// This is the primary fix for theburrowhub/heimdallm#281: a repo that has no
+// active PRs but is wired up via [ai.repos.*] must still receive issue polling.
+func TestMergeRepos_ConfiguredIncludedInUnion(t *testing.T) {
+	got := discovery.MergeRepos(
+		[]string{"org/static1"},
+		[]string{"org/configured1", "org/configured2"},
+		[]string{"org/discovered1"},
+		nil,
+	)
+	want := []string{"org/static1", "org/configured1", "org/configured2", "org/discovered1"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("got[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// Repos in configured are exempt from the NonMonitored blacklist. A stale
+// auto-discovery row in non_monitored must not silently demote a repo that
+// the operator has explicitly wired up under [ai.repos.*].
+// See theburrowhub/heimdallm#281.
+func TestMergeRepos_ConfiguredOverridesNonMonitored(t *testing.T) {
+	got := discovery.MergeRepos(
+		nil,
+		[]string{"org/wired-up"},
+		nil,
+		[]string{"org/wired-up"},
+	)
+	if len(got) != 1 || got[0] != "org/wired-up" {
+		t.Errorf("configured repo must override non_monitored blacklist, got %v", got)
+	}
+}
+
+// A repo listed in both static and configured is deduplicated; static order wins.
+func TestMergeRepos_ConfiguredDeduplicatesWithStatic(t *testing.T) {
+	got := discovery.MergeRepos(
+		[]string{"org/a", "org/b"},
+		[]string{"org/b", "org/c"},
+		nil,
+		nil,
+	)
+	want := []string{"org/a", "org/b", "org/c"}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}

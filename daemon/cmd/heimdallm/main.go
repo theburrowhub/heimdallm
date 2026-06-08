@@ -692,10 +692,11 @@ func main() {
 					orgs = discovery.InferOrgs(cfg.GitHub.Repositories)
 				}
 				return scheduler.Tier1Config{
-					StaticRepos:    cfg.GitHub.Repositories,
-					NonMonitored:   cfg.GitHub.NonMonitored,
-					DiscoveryTopic: cfg.GitHub.DiscoveryTopic,
-					DiscoveryOrgs:  orgs,
+					StaticRepos:     cfg.GitHub.Repositories,
+					ConfiguredRepos: aiRepoKeys(cfg),
+					NonMonitored:    cfg.GitHub.NonMonitored,
+					DiscoveryTopic:  cfg.GitHub.DiscoveryTopic,
+					DiscoveryOrgs:   orgs,
 				}
 			}
 
@@ -736,7 +737,7 @@ func main() {
 				if cfg.GitHub.DiscoveryTopic != "" {
 					discovered = discoverySvc.Discovered()
 				}
-				return discovery.MergeRepos(cfg.GitHub.Repositories, discovered, cfg.GitHub.NonMonitored)
+				return discovery.MergeRepos(cfg.GitHub.Repositories, aiRepoKeys(cfg), discovered, cfg.GitHub.NonMonitored)
 			}
 			tier2RepoConcurrencyFn := func() int {
 				cfgMu.Lock()
@@ -2182,7 +2183,7 @@ func sendDiscoveryRepos(
 		discovered = disc.Discovered()
 	}
 
-	repos := discovery.MergeRepos(cfg.StaticRepos, discovered, cfg.NonMonitored)
+	repos := discovery.MergeRepos(cfg.StaticRepos, cfg.ConfiguredRepos, discovered, cfg.NonMonitored)
 
 	if archiveChecker != nil {
 		active, archived := discovery.FilterArchived(repos, archiveChecker, discovered)
@@ -2504,6 +2505,30 @@ func runTier2(
 	wg.Wait()
 }
 
+// aiRepoKeys returns the sorted list of repos with an explicit [ai.repos.*]
+// entry. Used to seed MergeRepos with the operator's TOML opt-ins so a repo
+// that is wired up but has no active PRs still receives issue polling.
+// See theburrowhub/heimdallm#281.
+//
+// Sorted output keeps the published repo list deterministic between ticks
+// (Go map iteration is randomised) so log lines and SSE payloads do not
+// re-shuffle when nothing has actually changed.
+func aiRepoKeys(c *config.Config) []string {
+	if c == nil || len(c.AI.Repos) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(c.AI.Repos))
+	for repo := range c.AI.Repos {
+		// TrimSpace to match monitoredRepoSet's normalization so a TOML key
+		// like " org/repo " is treated identically across both code paths.
+		if r := strings.TrimSpace(repo); r != "" {
+			out = append(out, r)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // upsertDiscoveredRepos adds PRs' repos to the monitored (or non-monitored)
 // list when they're new. Returns the list of repos that were added.
 // Never removes; mutually-exclusive with NonMonitored when adding.
@@ -2554,7 +2579,13 @@ func upsertDiscoveredRepos(c *config.Config, prs []*gh.PullRequest) []string {
 				continue
 			}
 		}
-		if enable {
+		// Repos with an explicit [ai.repos.*] entry are opted in by the operator
+		// and must NEVER land in NonMonitored — even when AutoEnablePRForDiscovery
+		// is off. Otherwise the next MergeRepos call would blacklist them and
+		// silently stop issue polling for a repo the user just configured. See
+		// theburrowhub/heimdallm#281.
+		_, hasExplicitAIConfig := c.AI.Repos[pr.Repo]
+		if enable || hasExplicitAIConfig {
 			c.GitHub.Repositories = append(c.GitHub.Repositories, pr.Repo)
 		} else {
 			c.GitHub.NonMonitored = append(c.GitHub.NonMonitored, pr.Repo)
@@ -4400,7 +4431,7 @@ func monitoredRepoSet(cfg *config.Config, discovered []string) map[string]struct
 	if cfg == nil {
 		return out
 	}
-	repos := discovery.MergeRepos(cfg.GitHub.Repositories, discovered, cfg.GitHub.NonMonitored)
+	repos := discovery.MergeRepos(cfg.GitHub.Repositories, aiRepoKeys(cfg), discovered, cfg.GitHub.NonMonitored)
 	for _, repo := range repos {
 		repo = strings.TrimSpace(repo)
 		if repo != "" {
