@@ -45,6 +45,40 @@ type IssueCircuitBreakerLimits struct {
 	PerRepoHr   int // max triages per repo in any 1h window
 }
 
+// CountImplementsForRepo counts auto_implement attempts (success, failure,
+// or no-changes) recorded for a repo since `since`. Used by the autonomous
+// implement breaker — the per-issue breaker counts only review_only.
+func (s *Store) CountImplementsForRepo(repo string, since time.Time) (int, error) {
+	const q = `
+SELECT COUNT(*) FROM issue_reviews ir
+JOIN issues i ON i.id = ir.issue_id
+WHERE i.repo = ?
+  AND ir.created_at >= ?
+  AND ir.action_taken IN ('develop','auto_implement','auto_implement_failed','auto_implement_no_changes')`
+	var n int
+	if err := s.db.QueryRow(q, repo, since.UTC().Format(sqliteTimeFormat)).Scan(&n); err != nil {
+		return 0, fmt.Errorf("store: count implements for repo %s: %w", repo, err)
+	}
+	return n, nil
+}
+
+// CheckImplementCircuitBreaker returns (tripped, reason, err). It guards the
+// breadth dimension of autonomous mode: how many development runs a repo may
+// start per hour. perRepoHr <= 0 disables the axis.
+func (s *Store) CheckImplementCircuitBreaker(repo string, perRepoHr int) (bool, string, error) {
+	if perRepoHr <= 0 || repo == "" {
+		return false, "", nil
+	}
+	n, err := s.CountImplementsForRepo(repo, time.Now().Add(-1*time.Hour))
+	if err != nil {
+		return false, "", err
+	}
+	if n >= perRepoHr {
+		return true, fmt.Sprintf("per-repo implement cap reached: %d development runs on %s in last 1h (cap %d)", n, repo, perRepoHr), nil
+	}
+	return false, "", nil
+}
+
 // CheckIssueCircuitBreaker returns (tripped, reason, err). When tripped
 // is true, the caller MUST NOT proceed to spend Claude credits for this
 // issue. reason is a human-readable explanation suitable for logs and
