@@ -697,11 +697,7 @@ func clampScrollOffset(offset, total, visible int) int {
 func (d *Dashboard) clampCursor() {
 	max := d.tabItemCount()
 	if d.isScrollOffsetTab() {
-		visible := d.contentHeight()
-		if d.activeTab == tabConfig {
-			visible -= 2 // header + separator rendered by renderConfig
-		}
-		d.cursor = clampScrollOffset(d.cursor, max, visible)
+		d.cursor = clampScrollOffset(d.cursor, max, d.contentHeight())
 		return
 	}
 	if max > 0 && d.cursor >= max {
@@ -930,20 +926,14 @@ func (d *Dashboard) renderConfig(height int) string {
 		return lipgloss.NewStyle().Foreground(colorMuted).Render("  No configuration loaded.")
 	}
 
-	var b strings.Builder
-	b.WriteString(headerStyle.Render("  Configuration"))
-	b.WriteString("\n")
-	b.WriteString("  " + strings.Repeat("─", 60))
-	b.WriteString("\n")
-
 	lines := d.buildConfigLines()
 	if len(lines) == 0 {
-		return b.String()
+		return ""
 	}
 
-	maxVisible := height - 2 // header + separator
-	start := clampScrollOffset(d.cursor, len(lines), maxVisible)
-	end := start + maxVisible
+	var b strings.Builder
+	start := clampScrollOffset(d.cursor, len(lines), height)
+	end := start + height
 	if end > len(lines) {
 		end = len(lines)
 	}
@@ -1203,21 +1193,259 @@ func (d *Dashboard) buildConfigLines() []string {
 	if d.config == nil {
 		return nil
 	}
-	keys := []string{
-		"poll_interval", "repositories", "ai_primary", "ai_fallback",
-		"review_mode", "retention_days", "issue_tracking",
-	}
+
+	keyStyle := lipgloss.NewStyle().Foreground(colorMuted)
+	valStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#E5E7EB"))
+
 	var lines []string
-	for _, key := range keys {
-		val, ok := d.config[key]
-		if !ok {
-			continue
+
+	section := func(title string) {
+		label := fmt.Sprintf("── %s ", title)
+		pad := 50 - len([]rune(label))
+		if pad < 0 {
+			pad = 0
 		}
-		valStr := formatConfigValue(val)
-		for _, part := range strings.Split(fmt.Sprintf("  %-20s %s", key+":", valStr), "\n") {
-			lines = append(lines, part)
+		lines = append(lines, headerStyle.Render(label+strings.Repeat("─", pad)))
+	}
+
+	kv := func(key, val string) {
+		if val == "" {
+			val = "—"
+		}
+		lines = append(lines, fmt.Sprintf("  %s %s",
+			keyStyle.Render(fmt.Sprintf("%-22s", key+":")),
+			valStyle.Render(val)))
+	}
+
+	bulletList := func(items []string) {
+		for _, item := range items {
+			lines = append(lines, valStyle.Render("    • "+item))
 		}
 	}
+
+	blank := func() { lines = append(lines, "") }
+
+	str := func(key string) string {
+		if v, ok := d.config[key].(string); ok && v != "" {
+			return v
+		}
+		return "—"
+	}
+
+	boolStr := func(key string) string {
+		if v, ok := d.config[key].(bool); ok {
+			if v {
+				return "true"
+			}
+			return "false"
+		}
+		return "—"
+	}
+
+	// ── Server ──
+	section("Server")
+	if n := toInt(d.config["server_port"]); n != 0 {
+		kv("Port", fmt.Sprintf("%d", n))
+	}
+	if v, ok := d.config["bind_addr"].(string); ok && v != "" {
+		kv("Bind", v)
+	}
+	kv("Poll interval", str("poll_interval"))
+	blank()
+
+	// ── Repositories ──
+	repos := configStringSlice(d.config["repositories"])
+	section(fmt.Sprintf("Repositories (%d)", len(repos)))
+	if len(repos) == 0 {
+		lines = append(lines, lipgloss.NewStyle().Foreground(colorMuted).Render("    (none)"))
+	} else {
+		bulletList(repos)
+	}
+	blank()
+
+	nonMon := configStringSlice(d.config["non_monitored"])
+	if len(nonMon) > 0 {
+		section(fmt.Sprintf("Non-Monitored (%d)", len(nonMon)))
+		bulletList(nonMon)
+		blank()
+	}
+
+	// ── AI ──
+	section("AI")
+	kv("Primary", str("ai_primary"))
+	kv("Fallback", str("ai_fallback"))
+	kv("Mode", str("review_mode"))
+	kv("Refinement timeout", str("refinement_timeout"))
+	kv("Triage owner", str("triage_owner"))
+	kv("Clone dir", str("clone_dir"))
+	kv("Generate PR desc", boolStr("generate_pr_description"))
+	if _, ok := d.config["auto_promote_triage"]; ok {
+		kv("Auto promote triage", boolStr("auto_promote_triage"))
+	}
+	if _, ok := d.config["auto_promote_refinement"]; ok {
+		kv("Auto promote refine", boolStr("auto_promote_refinement"))
+	}
+	blank()
+
+	// ── Issue Tracking ──
+	if itRaw, ok := d.config["issue_tracking"]; ok {
+		section("Issue Tracking")
+		if it, ok := itRaw.(map[string]any); ok {
+			if v, ok := it["enabled"].(bool); ok {
+				kv("Enabled", fmt.Sprintf("%v", v))
+			}
+			if v, ok := it["filter_mode"].(string); ok && v != "" {
+				kv("Filter mode", v)
+			}
+			for _, pair := range [][2]string{
+				{"develop_labels", "Develop"},
+				{"refinement_labels", "Refinement"},
+				{"review_only_labels", "Review only"},
+				{"skip_labels", "Skip"},
+				{"blocked_labels", "Blocked"},
+			} {
+				if labels := configStringSlice(it[pair[0]]); len(labels) > 0 {
+					kv(pair[1], strings.Join(labels, ", "))
+				}
+			}
+			if v, ok := it["promote_to_label"].(string); ok && v != "" {
+				kv("Promote to label", v)
+			}
+			if v, ok := it["default_action"].(string); ok && v != "" {
+				kv("Default action", v)
+			}
+			if orgs := configStringSlice(it["organizations"]); len(orgs) > 0 {
+				kv("Organizations", strings.Join(orgs, ", "))
+			}
+			if assignees := configStringSlice(it["assignees"]); len(assignees) > 0 {
+				kv("Assignees", strings.Join(assignees, ", "))
+			}
+		}
+		blank()
+	}
+
+	// ── PR Metadata (defaults) ──
+	if pmRaw, ok := d.config["pr_metadata"]; ok {
+		if pm, ok := pmRaw.(map[string]any); ok && len(pm) > 0 {
+			section("PR Metadata (defaults)")
+			if reviewers := configStringSlice(pm["reviewers"]); len(reviewers) > 0 {
+				kv("Reviewers", strings.Join(reviewers, ", "))
+			}
+			if labels := configStringSlice(pm["labels"]); len(labels) > 0 {
+				kv("Labels", strings.Join(labels, ", "))
+			}
+			if v, ok := pm["pr_assignee"].(string); ok && v != "" {
+				kv("Assignee", v)
+			}
+			if v, ok := pm["pr_draft"].(bool); ok {
+				kv("Draft", fmt.Sprintf("%v", v))
+			}
+			blank()
+		}
+	}
+
+	// ── Agent Configs ──
+	if acRaw, ok := d.config["agent_configs"]; ok {
+		if ac, ok := acRaw.(map[string]any); ok && len(ac) > 0 {
+			section(fmt.Sprintf("Agent Configs (%d)", len(ac)))
+			for _, name := range configSortedKeys(ac) {
+				lines = append(lines, valStyle.Render("    "+name))
+				if agent, ok := ac[name].(map[string]any); ok {
+					for _, field := range []string{"model", "max_turns", "approval_mode", "effort", "permission_mode", "prompt"} {
+						if v, ok := agent[field]; ok {
+							s := fmt.Sprintf("%v", v)
+							if s != "" && s != "0" && s != "false" {
+								lines = append(lines, fmt.Sprintf("      %s %s",
+									keyStyle.Render(fmt.Sprintf("%-20s", field+":")),
+									valStyle.Render(s)))
+							}
+						}
+					}
+				}
+			}
+			blank()
+		}
+	}
+
+	// ── Repo Overrides ──
+	if roRaw, ok := d.config["repo_overrides"]; ok {
+		if ro, ok := roRaw.(map[string]any); ok && len(ro) > 0 {
+			section(fmt.Sprintf("Repo Overrides (%d)", len(ro)))
+			for _, name := range configSortedKeys(ro) {
+				lines = append(lines, valStyle.Render("    "+name))
+				if over, ok := ro[name].(map[string]any); ok {
+					for _, k := range configSortedKeys(over) {
+						s := configFlatValue(over[k])
+						if s != "" {
+							lines = append(lines, fmt.Sprintf("      %s %s",
+								keyStyle.Render(fmt.Sprintf("%-22s", k+":")),
+								valStyle.Render(s)))
+						}
+					}
+				}
+			}
+			blank()
+		}
+	}
+
+	// ── Org Overrides ──
+	if ooRaw, ok := d.config["org_overrides"]; ok {
+		if oo, ok := ooRaw.(map[string]any); ok && len(oo) > 0 {
+			section(fmt.Sprintf("Org Overrides (%d)", len(oo)))
+			for _, name := range configSortedKeys(oo) {
+				lines = append(lines, valStyle.Render("    "+name))
+				if over, ok := oo[name].(map[string]any); ok {
+					for _, k := range configSortedKeys(over) {
+						s := configFlatValue(over[k])
+						if s != "" {
+							lines = append(lines, fmt.Sprintf("      %s %s",
+								keyStyle.Render(fmt.Sprintf("%-22s", k+":")),
+								valStyle.Render(s)))
+						}
+					}
+				}
+			}
+			blank()
+		}
+	}
+
+	// ── Local Directories ──
+	localDirBase := configStringSlice(d.config["local_dir_base"])
+	ldMap, hasDetected := d.config["local_dirs_detected"].(map[string]any)
+	if len(localDirBase) > 0 || (hasDetected && len(ldMap) > 0) {
+		section("Local Directories")
+		if len(localDirBase) > 0 {
+			kv("Base paths", strings.Join(localDirBase, ", "))
+		}
+		if hasDetected && len(ldMap) > 0 {
+			lines = append(lines, keyStyle.Render("  Detected:"))
+			for _, repo := range configSortedKeys(ldMap) {
+				path := fmt.Sprintf("%v", ldMap[repo])
+				lines = append(lines, fmt.Sprintf("    %s  %s",
+					valStyle.Render("• "+repo),
+					keyStyle.Render("→ "+path)))
+			}
+		}
+		blank()
+	}
+
+	// ── Activity Log ──
+	if _, ok := d.config["activity_log_enabled"]; ok {
+		section("Activity Log")
+		kv("Enabled", boolStr("activity_log_enabled"))
+		if n := toInt(d.config["activity_log_retention_days"]); n != 0 {
+			kv("Retention", fmt.Sprintf("%d days", n))
+		}
+		blank()
+	}
+
+	// ── Retention ──
+	if n := toInt(d.config["retention_days"]); n != 0 {
+		section("Retention")
+		kv("Max days", fmt.Sprintf("%d", n))
+		blank()
+	}
+
 	return lines
 }
 
@@ -1265,6 +1493,54 @@ func formatConfigValue(v any) string {
 	case map[string]any:
 		b, _ := json.Marshal(val)
 		return truncateRunes(string(b), 60)
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
+func configStringSlice(v any) []string {
+	arr, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	result := make([]string, 0, len(arr))
+	for _, item := range arr {
+		if s, ok := item.(string); ok {
+			result = append(result, s)
+		} else {
+			result = append(result, fmt.Sprintf("%v", item))
+		}
+	}
+	return result
+}
+
+func configSortedKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func configFlatValue(v any) string {
+	switch val := v.(type) {
+	case []any:
+		parts := make([]string, len(val))
+		for i, item := range val {
+			parts[i] = fmt.Sprintf("%v", item)
+		}
+		return strings.Join(parts, ", ")
+	case map[string]any:
+		b, _ := json.Marshal(val)
+		return string(b)
+	case float64:
+		if val == float64(int(val)) {
+			return fmt.Sprintf("%d", int(val))
+		}
+		return fmt.Sprintf("%g", val)
+	case nil:
+		return ""
 	default:
 		return fmt.Sprintf("%v", v)
 	}
