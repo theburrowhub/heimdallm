@@ -99,3 +99,61 @@ func TestDashboardDropsStaleReconnectAfterWatchdogReset(t *testing.T) {
 		t.Fatal("stale reconnect tick should be ignored")
 	}
 }
+
+func TestClampScrollOffset(t *testing.T) {
+	cases := []struct {
+		name                    string
+		offset, total, visible  int
+		want                    int
+	}{
+		{"viewport larger than content keeps offset at 0", 0, 5, 20, 0},
+		{"viewport larger than content clamps non-zero offset to 0", 7, 5, 20, 0},
+		{"viewport exactly fits content keeps offset at 0", 0, 10, 10, 0},
+		{"offset within bounds passes through", 3, 20, 10, 3},
+		{"offset at upper bound passes through", 10, 20, 10, 10},
+		{"offset past upper bound clamps to upper", 18, 20, 10, 10},
+		{"negative offset clamps to 0", -5, 20, 10, 0},
+		{"zero visible treated as 1 (last line reachable)", 5, 3, 0, 2},
+		{"negative visible treated as 1", 5, 3, -4, 2},
+		{"empty content always 0", 0, 0, 10, 0},
+		{"empty content with positive offset clamps to 0", 9, 0, 10, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := clampScrollOffset(tc.offset, tc.total, tc.visible)
+			if got != tc.want {
+				t.Fatalf("clampScrollOffset(%d, %d, %d) = %d, want %d",
+					tc.offset, tc.total, tc.visible, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsScrollOffsetTab(t *testing.T) {
+	d := NewDashboard("http://localhost:0", "", "test")
+	want := map[tab]bool{
+		tabActivity: false,
+		tabPRs:      false,
+		tabIssues:   false,
+		tabConfig:   true,
+		tabStats:    true,
+		tabServer:   false,
+	}
+	for tb, expected := range want {
+		d.activeTab = tb
+		if got := d.isScrollOffsetTab(); got != expected {
+			t.Fatalf("isScrollOffsetTab(tab=%d) = %v, want %v", tb, got, expected)
+		}
+	}
+}
+
+func TestTabItemCountActivityIsZero(t *testing.T) {
+	// Activity scrolls via logOffset, never via cursor. Returning the
+	// length of logLines would mislead callers — assert the contract.
+	d := NewDashboard("http://localhost:0", "", "test")
+	d.activeTab = tabActivity
+	d.logLines = []logLine{{}, {}, {}}
+	if got := d.tabItemCount(); got != 0 {
+		t.Fatalf("tabItemCount(tabActivity) = %d, want 0 (cursor is unused for Activity)", got)
+	}
+}
