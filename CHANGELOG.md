@@ -10,6 +10,29 @@
 * **issues:** `auto_promote_triage` defaults on only when `refinement_labels` is configured. Repos without a refinement target keep their previous review-only behavior; set `auto_promote_triage = false` explicitly to keep refinement manual even when refinement labels exist.
 * **pipeline (PR reviews):** a push (new HEAD SHA) on a previously-reviewed PR no longer triggers an automatic re-review on its own. Heimdallm now requires an explicit `review_requested` event for the bot — i.e. someone (or some automation) pressing "Re-request review" — newer than the previous review's `CreatedAt`. The SHA-unchanged dedup (#322 Bug 5) and this SHA-changed gate now share the same predicate, so the contract is "review iff explicitly re-requested" regardless of whether the commit changed. Workflows that relied on push-triggered re-reviews — typically repos with "Dismiss stale reviews on push" or CODEOWNERS auto-request workflows that auto-re-added the bot to `requested_reviewers` — must now explicitly re-request the review (manually in the UI, or via a GitHub Action calling `gh pr edit --add-reviewer`). Skipped pushes surface as a `review_skipped` SSE with reason `no_rereview_request` (distinct from `sha_unchanged`) so dashboards can tell the two cases apart. Closes #509.
 
+## [0.7.0](https://github.com/theburrowhub/heimdallm/compare/v0.6.24...v0.7.0) (2026-06-12)
+
+
+### Features
+
+* **autonomous:** fully unattended end-to-end mode ([#529](https://github.com/theburrowhub/heimdallm/issues/529)) ([eac9ade](https://github.com/theburrowhub/heimdallm/commit/eac9aded800751038b221779d4c32dbca64d8e65))
+* **cli:** merge Logs tab into Activity tab ([#389](https://github.com/theburrowhub/heimdallm/issues/389)) ([101406c](https://github.com/theburrowhub/heimdallm/commit/101406c8235d882aff7bda740226d0b877104ec8))
+* implement [#327](https://github.com/theburrowhub/heimdallm/issues/327) — feat(cli): Activity tab — load history, show titles, humanize event names ([#530](https://github.com/theburrowhub/heimdallm/issues/530)) ([36f3234](https://github.com/theburrowhub/heimdallm/commit/36f3234b6be47e23c13b9c98a3c66f7b0527b239))
+* implement [#328](https://github.com/theburrowhub/heimdallm/issues/328) — feat(cli): PRs tab — show GitHub number instead of DB ID, add author and date columns ([#533](https://github.com/theburrowhub/heimdallm/issues/533)) ([95656b8](https://github.com/theburrowhub/heimdallm/commit/95656b8c7f14066569923ae50d584e7d6e859784))
+* implement [#329](https://github.com/theburrowhub/heimdallm/issues/329) — feat(cli): Issues tab — show GitHub number, author, date, PR created, humanize action ([#531](https://github.com/theburrowhub/heimdallm/issues/531)) ([c9b9cb0](https://github.com/theburrowhub/heimdallm/commit/c9b9cb05598668db7e6639cb6e6a68eff8f4d84f))
+* implement [#331](https://github.com/theburrowhub/heimdallm/issues/331) — feat(cli): Config tab — show all fields, sections, expand repos and maps ([#532](https://github.com/theburrowhub/heimdallm/issues/532)) ([73100b6](https://github.com/theburrowhub/heimdallm/commit/73100b6b0f00faed7cef52754de60cdd00160d1b))
+
+
+### Bug Fixes
+
+* **discovery:** include [ai.repos.*] in Tier 2 merge and protect from demotion ([#485](https://github.com/theburrowhub/heimdallm/issues/485)) ([764391c](https://github.com/theburrowhub/heimdallm/commit/764391ce7e1a594d292727bbcbedbc983feb04de)), closes [#281](https://github.com/theburrowhub/heimdallm/issues/281)
+* **flutter:** include agent configs in PATCH /config diff ([#358](https://github.com/theburrowhub/heimdallm/issues/358)) ([55f3237](https://github.com/theburrowhub/heimdallm/commit/55f323717ec27553cc45b4d74e94e279babc4d3b)), closes [#285](https://github.com/theburrowhub/heimdallm/issues/285)
+
+
+### Miscellaneous
+
+* release 0.7.0 ([2efff7f](https://github.com/theburrowhub/heimdallm/commit/2efff7f54cc59575ca66f35e0f430537d801762d))
+
 ## [0.6.24](https://github.com/theburrowhub/heimdallm/compare/v0.6.23...v0.6.24) (2026-06-05)
 
 
