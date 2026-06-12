@@ -1825,10 +1825,14 @@ func parseLabels(raw json.RawMessage) []string {
 		Name string `json:"name"`
 	}
 	if json.Unmarshal(raw, &objects) == nil {
+		// Fresh slice — the prior Unmarshal into `names` may have
+		// partially populated it with zero-value strings before the
+		// type error surfaced, which would leak empty entries here.
+		out := make([]string, 0, len(objects))
 		for _, o := range objects {
-			names = append(names, o.Name)
+			out = append(out, o.Name)
 		}
-		return names
+		return out
 	}
 	return nil
 }
