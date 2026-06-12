@@ -1576,6 +1576,35 @@ func main() {
 		if len(pm) > 0 {
 			result["pr_metadata"] = pm
 		}
+		// Autonomous end-to-end mode config.
+		autonomousOrgs := make(map[string]any)
+		for org, o := range c.Autonomous.Orgs {
+			autonomousOrgs[org] = autonomousOverrideMap(o)
+		}
+		autonomousRepos := make(map[string]any)
+		for repo, o := range c.Autonomous.Repos {
+			autonomousRepos[repo] = autonomousOverrideMap(o)
+		}
+		result["autonomous"] = map[string]any{
+			"enabled":           c.Autonomous.Enabled,
+			"auto_merge":        c.Autonomous.AutoMerge,
+			"merge_method":      c.Autonomous.MergeMethod,
+			"take_others_tasks": c.Autonomous.TakeOthersTasks,
+			"reassign_on_take":  c.Autonomous.ReassignOnTake,
+			"dev_max_turns":     c.Autonomous.DevMaxTurns,
+			"dev_effort":        c.Autonomous.DevEffort,
+			"dev_timeout":       c.Autonomous.DevTimeout,
+			"claim_lease":       c.Autonomous.ClaimLease,
+			"orgs":              autonomousOrgs,
+			"repos":             autonomousRepos,
+		}
+		result["circuit_breaker"] = map[string]any{
+			"per_pr_24h":        c.CircuitBreaker.PerPR24h,
+			"per_repo_hr":       c.CircuitBreaker.PerRepoHr,
+			"per_issue_24h":     c.CircuitBreaker.PerIssue24h,
+			"per_issue_repo_hr": c.CircuitBreaker.PerIssueRepoHr,
+			"per_impl_repo_hr":  c.CircuitBreaker.PerImplRepoHr,
+		}
 		return result
 	})
 
@@ -4268,6 +4297,42 @@ func logRepoContextFallback(scope, repo string, err error) {
 
 // ptrBoolOrTrue returns the dereferenced value of p, or true if p is nil.
 // Used to serialize *bool config fields where nil means "default enabled".
+// autonomousOverrideMap serialises an AutonomousOverride into a map[string]any
+// for the GET /config DTO. Only fields that are explicitly set (non-nil pointer
+// or non-empty string) are included so the caller can distinguish "inherit" from
+// an explicit false/zero value.
+func autonomousOverrideMap(o config.AutonomousOverride) map[string]any {
+	out := map[string]any{}
+	if o.Enabled != nil {
+		out["enabled"] = *o.Enabled
+	}
+	if o.AutoMerge != nil {
+		out["auto_merge"] = *o.AutoMerge
+	}
+	if o.MergeMethod != "" {
+		out["merge_method"] = o.MergeMethod
+	}
+	if o.TakeOthersTasks != nil {
+		out["take_others_tasks"] = *o.TakeOthersTasks
+	}
+	if o.ReassignOnTake != nil {
+		out["reassign_on_take"] = *o.ReassignOnTake
+	}
+	if o.DevMaxTurns != nil {
+		out["dev_max_turns"] = *o.DevMaxTurns
+	}
+	if o.DevEffort != "" {
+		out["dev_effort"] = o.DevEffort
+	}
+	if o.DevTimeout != "" {
+		out["dev_timeout"] = o.DevTimeout
+	}
+	if o.ClaimLease != "" {
+		out["claim_lease"] = o.ClaimLease
+	}
+	return out
+}
+
 func ptrBoolOrTrue(p *bool) bool {
 	if p == nil {
 		return true
