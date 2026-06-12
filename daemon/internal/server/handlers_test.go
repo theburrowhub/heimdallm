@@ -2319,3 +2319,245 @@ func TestHandleListIssues_StateFilter(t *testing.T) {
 		t.Errorf("GET /issues?state=open,closed: expected 2, got %d", len(got))
 	}
 }
+
+// TestHandlerGetConfig_ExposesAutonomousAndCircuitBreaker guards that GET
+// /config always includes the autonomous and circuit_breaker top-level keys
+// with the correct snake_case field names. The Flutter UI reads these keys to
+// render the autonomous-mode panel — a silent rename or re-nesting would break
+// the UI without a test failure.
+func TestHandlerGetConfig_ExposesAutonomousAndCircuitBreaker(t *testing.T) {
+	srv, _ := setupServer(t)
+	srv.SetConfigFn(func() map[string]any {
+		return map[string]any{
+			"autonomous": map[string]any{
+				"enabled":           true,
+				"auto_merge":        false,
+				"merge_method":      "squash",
+				"take_others_tasks": false,
+				"reassign_on_take":  false,
+				"dev_max_turns":     0,
+				"dev_effort":        "high",
+				"dev_timeout":       "45m",
+				"claim_lease":       "2h",
+				"orgs":              map[string]any{},
+				"repos":             map[string]any{},
+			},
+			"circuit_breaker": map[string]any{
+				"per_pr_24h":        3,
+				"per_repo_hr":       20,
+				"per_issue_24h":     3,
+				"per_issue_repo_hr": 10,
+				"per_impl_repo_hr":  5,
+			},
+		}
+	})
+
+	req := httptest.NewRequest("GET", "/config", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v (body: %s)", err, w.Body.String())
+	}
+
+	// Verify autonomous section.
+	autonomous, ok := body["autonomous"].(map[string]any)
+	if !ok {
+		t.Fatalf("autonomous missing or wrong type: %T: %v", body["autonomous"], body["autonomous"])
+	}
+	if autonomous["enabled"] != true {
+		t.Errorf("autonomous.enabled = %v, want true", autonomous["enabled"])
+	}
+	if autonomous["merge_method"] != "squash" {
+		t.Errorf("autonomous.merge_method = %v, want squash", autonomous["merge_method"])
+	}
+	if autonomous["dev_effort"] != "high" {
+		t.Errorf("autonomous.dev_effort = %v, want high", autonomous["dev_effort"])
+	}
+	if autonomous["claim_lease"] != "2h" {
+		t.Errorf("autonomous.claim_lease = %v, want 2h", autonomous["claim_lease"])
+	}
+	if _, ok := autonomous["orgs"]; !ok {
+		t.Errorf("autonomous.orgs missing")
+	}
+	if _, ok := autonomous["repos"]; !ok {
+		t.Errorf("autonomous.repos missing")
+	}
+
+	// Verify circuit_breaker section.
+	cb, ok := body["circuit_breaker"].(map[string]any)
+	if !ok {
+		t.Fatalf("circuit_breaker missing or wrong type: %T: %v", body["circuit_breaker"], body["circuit_breaker"])
+	}
+	// JSON numbers decode to float64 in map[string]any.
+	if cb["per_pr_24h"].(float64) != 3 {
+		t.Errorf("circuit_breaker.per_pr_24h = %v, want 3", cb["per_pr_24h"])
+	}
+	if cb["per_repo_hr"].(float64) != 20 {
+		t.Errorf("circuit_breaker.per_repo_hr = %v, want 20", cb["per_repo_hr"])
+	}
+	if cb["per_impl_repo_hr"].(float64) != 5 {
+		t.Errorf("circuit_breaker.per_impl_repo_hr = %v, want 5", cb["per_impl_repo_hr"])
+	}
+}
+
+// TestHandlePatchConfig_AutonomousGlobalPersists verifies that a global PATCH
+// containing an autonomous section is accepted and written to TOML.
+func TestHandlePatchConfig_AutonomousGlobalPersists(t *testing.T) {
+	tomlContent := "[ai]\nprimary = \"claude\"\n"
+	tomlPath := writeTempTOML(t, tomlContent)
+
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+
+	body := `{"autonomous":{"enabled":true,"dev_max_turns":20}}`
+	req := httptest.NewRequest("PATCH", "/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	m, err := config.ReadTOMLMap(tomlPath)
+	if err != nil {
+		t.Fatalf("read TOML after PATCH: %v", err)
+	}
+	autonomous, ok := m["autonomous"].(map[string]any)
+	if !ok {
+		t.Fatalf("autonomous section missing in TOML after PATCH: %v", m)
+	}
+	if autonomous["enabled"] != true {
+		t.Errorf("autonomous.enabled = %v, want true", autonomous["enabled"])
+	}
+	if autonomous["dev_max_turns"] != int64(20) {
+		t.Errorf("autonomous.dev_max_turns = %v (%T), want 20", autonomous["dev_max_turns"], autonomous["dev_max_turns"])
+	}
+}
+
+// TestHandlePatchConfig_CircuitBreakerGlobalPersists verifies that a global PATCH
+// containing a circuit_breaker section is accepted and written to TOML.
+func TestHandlePatchConfig_CircuitBreakerGlobalPersists(t *testing.T) {
+	tomlContent := "[ai]\nprimary = \"claude\"\n"
+	tomlPath := writeTempTOML(t, tomlContent)
+
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+
+	body := `{"circuit_breaker":{"per_impl_repo_hr":9}}`
+	req := httptest.NewRequest("PATCH", "/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	m, err := config.ReadTOMLMap(tomlPath)
+	if err != nil {
+		t.Fatalf("read TOML after PATCH: %v", err)
+	}
+	cb, ok := m["circuit_breaker"].(map[string]any)
+	if !ok {
+		t.Fatalf("circuit_breaker section missing in TOML after PATCH: %v", m)
+	}
+	if cb["per_impl_repo_hr"] != int64(9) {
+		t.Errorf("circuit_breaker.per_impl_repo_hr = %v (%T), want 9", cb["per_impl_repo_hr"], cb["per_impl_repo_hr"])
+	}
+}
+
+// TestHandlePatchAutonomousRepoConfig verifies that PATCH
+// /config/autonomous/repos/{repo} writes autonomous.repos.<repo> into TOML.
+func TestHandlePatchAutonomousRepoConfig(t *testing.T) {
+	tomlContent := "[ai]\nprimary = \"claude\"\n"
+	tomlPath := writeTempTOML(t, tomlContent)
+
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+
+	body := `{"enabled":true,"auto_merge":false}`
+	req := httptest.NewRequest("PATCH", "/config/autonomous/repos/"+url.PathEscape("org/myrepo"), strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	m, err := config.ReadTOMLMap(tomlPath)
+	if err != nil {
+		t.Fatalf("read TOML after PATCH: %v", err)
+	}
+	autonomous, ok := m["autonomous"].(map[string]any)
+	if !ok {
+		t.Fatalf("autonomous section missing in TOML: %v", m)
+	}
+	repos, ok := autonomous["repos"].(map[string]any)
+	if !ok {
+		t.Fatalf("autonomous.repos section missing in TOML: %v", autonomous)
+	}
+	myrepo, ok := repos["org/myrepo"].(map[string]any)
+	if !ok {
+		t.Fatalf("autonomous.repos[\"org/myrepo\"] missing in TOML: %v", repos)
+	}
+	if myrepo["enabled"] != true {
+		t.Errorf("autonomous.repos[org/myrepo].enabled = %v, want true", myrepo["enabled"])
+	}
+	if myrepo["auto_merge"] != false {
+		t.Errorf("autonomous.repos[org/myrepo].auto_merge = %v, want false", myrepo["auto_merge"])
+	}
+}
+
+// TestHandlePatchAutonomousOrgConfig verifies that PATCH
+// /config/autonomous/orgs/{org} writes autonomous.orgs.<org> into TOML.
+func TestHandlePatchAutonomousOrgConfig(t *testing.T) {
+	tomlContent := "[ai]\nprimary = \"claude\"\n"
+	tomlPath := writeTempTOML(t, tomlContent)
+
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+
+	body := `{"enabled":false,"dev_max_turns":10}`
+	req := httptest.NewRequest("PATCH", "/config/autonomous/orgs/myorg", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	m, err := config.ReadTOMLMap(tomlPath)
+	if err != nil {
+		t.Fatalf("read TOML after PATCH: %v", err)
+	}
+	autonomous, ok := m["autonomous"].(map[string]any)
+	if !ok {
+		t.Fatalf("autonomous section missing in TOML: %v", m)
+	}
+	orgs, ok := autonomous["orgs"].(map[string]any)
+	if !ok {
+		t.Fatalf("autonomous.orgs section missing in TOML: %v", autonomous)
+	}
+	myorg, ok := orgs["myorg"].(map[string]any)
+	if !ok {
+		t.Fatalf("autonomous.orgs[\"myorg\"] missing in TOML: %v", orgs)
+	}
+	if myorg["enabled"] != false {
+		t.Errorf("autonomous.orgs[myorg].enabled = %v, want false", myorg["enabled"])
+	}
+	if myorg["dev_max_turns"] != int64(10) {
+		t.Errorf("autonomous.orgs[myorg].dev_max_turns = %v (%T), want 10", myorg["dev_max_turns"], myorg["dev_max_turns"])
+	}
+}
