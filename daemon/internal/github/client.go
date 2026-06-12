@@ -764,7 +764,7 @@ func (c *Client) fetchDiffViaFilesAPI(repo string, number int) (string, error) {
 	var b strings.Builder
 	b.WriteString("# NOTE: diff reconstructed via GitHub's List Pull Request Files API because this PR exceeds GitHub's 300-file diff limit; it may be incomplete.\n")
 
-	listed := 0       // files received from the API, appended or not
+	listed := 0        // files received from the API, appended or not
 	truncated := false // any lossy stop: size ceiling, page ceiling, pagination cap
 	complete := false  // saw a short page (no more files upstream)
 pages:

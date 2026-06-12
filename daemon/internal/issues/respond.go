@@ -34,13 +34,13 @@ func marshalEvent(m map[string]any) string {
 // cooldown, bot-author skip) lives here so Tier 3's HandleChange
 // branch can route blindly and trust the no-op path.
 type Responder struct {
-	store    responderStore
-	gh       responderGH
-	exec     ResponderExecutor
-	broker   eventPublisher
-	cfgFn    func() config.ReviewResponseConfig
-	loginFn  func() string
-	nowFn    func() time.Time
+	store   responderStore
+	gh      responderGH
+	exec    ResponderExecutor
+	broker  eventPublisher
+	cfgFn   func() config.ReviewResponseConfig
+	loginFn func() string
+	nowFn   func() time.Time
 }
 
 // responderStore captures the slice of *store.Store the Responder
