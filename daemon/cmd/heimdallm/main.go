@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/heimdallm/daemon/internal/activity"
+	"github.com/heimdallm/daemon/internal/autonomous"
 	"github.com/heimdallm/daemon/internal/bus"
 	"github.com/heimdallm/daemon/internal/config"
 	"github.com/heimdallm/daemon/internal/discovery"
@@ -770,6 +771,58 @@ func main() {
 		} else {
 			slog.Info("rename probe: disabled (ai.repo_rename_check_interval=0)")
 		}
+
+		// Autonomous end-to-end poller. Selects an issue (bot-assigned >
+		// unassigned > others), drives it through triage→refinement→development
+		// single-flight, and lets Tier 3 react to reviews. Reuses the same
+		// repo enumeration as Tier 2. The whole tick is a cheap no-op when no
+		// monitored repo has autonomous enabled, so it is always started; the
+		// per-repo Enabled flag (resolved under cfgMu each tick) is the gate.
+		autonomousReposFn := func() []string {
+			cfgMu.Lock()
+			defer cfgMu.Unlock()
+			var discovered []string
+			if cfg.GitHub.DiscoveryTopic != "" {
+				discovered = discoverySvc.Discovered()
+			}
+			return discovery.MergeRepos(cfg.GitHub.Repositories, aiRepoKeys(cfg), discovered, cfg.GitHub.NonMonitored)
+		}
+		autonomousStageR := &autonomousStageRunner{
+			ghClient:  ghClient,
+			issuePipe: issuePipe,
+			store:     s,
+			repoCtx:   repoCtx,
+			broker:    broker,
+			token:     token,
+			cfg:       &cfg,
+			cfgMu:     &cfgMu,
+			authUser:  botLoginAccessor,
+		}
+		autonomousPoller := &AutonomousPoller{
+			ghClient: ghClient,
+			store:    s,
+			broker:   broker,
+			orch:     autonomous.NewOrchestrator(autonomousStageR, autonomous.NewPhaseGuard()),
+			runner:   exec,
+			cfg:      &cfg,
+			cfgMu:    &cfgMu,
+			botLogin: botLoginAccessor,
+			reposFn:  autonomousReposFn,
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ticker := time.NewTicker(pollInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					autonomousPoller.Run(ctx)
+				}
+			}
+		}()
 
 		slog.Info("pollers: started",
 			"discovery", discoveryInterval,
