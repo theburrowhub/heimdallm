@@ -22,7 +22,7 @@ const (
 type logLine struct {
 	Time    string
 	Badge   string // "PR", "ISSUE", "REPO"
-	Action  string // "DETECTED", "REVIEW ▶", "IMPLEMENT ✓", etc.
+	Action  string // "Detected", "Review ▶", "Implement ✓", etc.
 	Target  string // "org/repo #123"
 	Details string // "severity=low", "error: …", "→ PR #157"
 	Status  logStatus
@@ -37,6 +37,11 @@ func sseToLogLine(evt api.SSEEvent) logLine {
 
 	repo, _ := m["repo"].(string)
 	errMsg, _ := m["error"].(string)
+	title, _ := m["pr_title"].(string)
+	if title == "" {
+		title, _ = m["issue_title"].(string)
+	}
+	author, _ := m["author"].(string)
 
 	line := logLine{
 		Time: time.Now().Format("15:04:05"),
@@ -47,19 +52,19 @@ func sseToLogLine(evt api.SSEEvent) logLine {
 	case "pr_detected":
 		num = jsonInt(m, "pr_number")
 		line.Badge = "PR"
-		line.Action = "DETECTED"
+		line.Action = "Detected"
 		line.Status = logNeutral
 
 	case "review_started":
 		num = jsonInt(m, "pr_number")
 		line.Badge = "PR"
-		line.Action = "REVIEW ▶"
+		line.Action = "Review ▶"
 		line.Status = logProgress
 
 	case "review_completed":
 		num = jsonInt(m, "pr_number")
 		line.Badge = "PR"
-		line.Action = "REVIEW ✓"
+		line.Action = "Review ✓"
 		line.Status = logSuccess
 		if sev, ok := m["severity"].(string); ok {
 			line.Details = "severity=" + sev
@@ -68,7 +73,7 @@ func sseToLogLine(evt api.SSEEvent) logLine {
 	case "review_error":
 		num = jsonInt(m, "pr_number")
 		line.Badge = "PR"
-		line.Action = "REVIEW ✗"
+		line.Action = "Review ✗"
 		line.Status = logError
 		if errMsg != "" {
 			line.Details = "error: " + errMsg
@@ -77,15 +82,15 @@ func sseToLogLine(evt api.SSEEvent) logLine {
 	case "issue_detected":
 		num = jsonInt(m, "issue_number")
 		line.Badge = "ISSUE"
-		line.Action = "DETECTED"
+		line.Action = "Detected"
 		line.Status = logNeutral
 
 	case "issue_review_started":
 		num = jsonInt(m, "issue_number")
 		line.Badge = "ISSUE"
-		action := "REVIEW"
+		action := "Review"
 		if a, ok := m["action"].(string); ok && a == "implement" {
-			action = "IMPLEMENT"
+			action = "Implement"
 		}
 		line.Action = action + " ▶"
 		line.Status = logProgress
@@ -93,7 +98,7 @@ func sseToLogLine(evt api.SSEEvent) logLine {
 	case "issue_review_completed":
 		num = jsonInt(m, "issue_number")
 		line.Badge = "ISSUE"
-		line.Action = "REVIEW ✓"
+		line.Action = "Review ✓"
 		line.Status = logSuccess
 		if sev, ok := m["severity"].(string); ok {
 			line.Details = "severity=" + sev
@@ -102,7 +107,7 @@ func sseToLogLine(evt api.SSEEvent) logLine {
 	case "issue_implemented":
 		num = jsonInt(m, "issue_number")
 		line.Badge = "ISSUE"
-		line.Action = "IMPLEMENT ✓"
+		line.Action = "Implement ✓"
 		line.Status = logSuccess
 		if pr := jsonInt(m, "pr_created"); pr > 0 {
 			line.Details = fmt.Sprintf("→ PR #%d", pr)
@@ -111,9 +116,9 @@ func sseToLogLine(evt api.SSEEvent) logLine {
 	case "issue_review_error":
 		num = jsonInt(m, "issue_number")
 		line.Badge = "ISSUE"
-		action := "REVIEW"
+		action := "Review"
 		if a, ok := m["action"].(string); ok && a == "implement" {
-			action = "IMPLEMENT"
+			action = "Implement"
 		}
 		line.Action = action + " ✗"
 		line.Status = logError
@@ -124,7 +129,7 @@ func sseToLogLine(evt api.SSEEvent) logLine {
 	case "issue_promoted":
 		num = jsonInt(m, "issue_number")
 		line.Badge = "ISSUE"
-		line.Action = "PROMOTED"
+		line.Action = "Promoted"
 		line.Status = logSuccess
 		from, _ := m["from_stage"].(string)
 		to, _ := m["to_stage"].(string)
@@ -138,14 +143,14 @@ func sseToLogLine(evt api.SSEEvent) logLine {
 
 	case "repo_discovered":
 		line.Badge = "REPO"
-		line.Action = "DISCOVERED"
+		line.Action = "Discovered"
 		line.Status = logNeutral
 		line.Target = repo
 		return line
 
 	default:
 		line.Badge = "EVENT"
-		line.Action = strings.ToUpper(evt.Type)
+		line.Action = humanize(evt.Type)
 		line.Status = logNeutral
 		_, line.Target = formatSSEData(evt.Type, evt.Data)
 		return line
@@ -153,8 +158,19 @@ func sseToLogLine(evt api.SSEEvent) logLine {
 
 	if repo != "" && num > 0 {
 		line.Target = fmt.Sprintf("%s #%d", repo, num)
+		if title != "" {
+			line.Target += " " + truncateRunes(title, 40)
+		}
 	} else if repo != "" {
 		line.Target = repo
+	}
+
+	if author != "" {
+		if line.Details != "" {
+			line.Details = "by @" + author + "  " + line.Details
+		} else {
+			line.Details = "by @" + author
+		}
 	}
 
 	return line
@@ -180,11 +196,14 @@ func activityToLogLine(e api.ActivityEntry) logLine {
 
 	if e.ItemNumber > 0 {
 		line.Target = fmt.Sprintf("%s #%d", e.Repo, e.ItemNumber)
+		if e.ItemTitle != "" {
+			line.Target += " " + truncateRunes(e.ItemTitle, 40)
+		}
 	} else if e.Repo != "" {
 		line.Target = e.Repo
 	}
 
-	action := strings.ToUpper(e.Action)
+	action := humanize(e.Action)
 	switch e.Outcome {
 	case "error", "failed":
 		line.Action = action + " ✗"
@@ -200,14 +219,19 @@ func activityToLogLine(e api.ActivityEntry) logLine {
 		line.Status = logNeutral
 	}
 
+	if a, ok := e.Details["author"]; ok {
+		if s, ok := a.(string); ok && s != "" {
+			line.Details = "by @" + s
+		}
+	}
 	if sev, ok := e.Details["severity"]; ok {
-		line.Details = fmt.Sprintf("severity=%v", sev)
+		line.Details = appendDetail(line.Details, fmt.Sprintf("severity=%v", sev))
 	}
 	if em, ok := e.Details["error"]; ok {
-		line.Details = fmt.Sprintf("error: %v", em)
+		line.Details = appendDetail(line.Details, fmt.Sprintf("error: %v", em))
 	}
 	if pr, ok := e.Details["pr_created"]; ok {
-		line.Details = fmt.Sprintf("→ PR #%v", pr)
+		line.Details = appendDetail(line.Details, fmt.Sprintf("→ PR #%v", pr))
 	}
 
 	return line
@@ -234,6 +258,21 @@ func jsonInt(m map[string]any, key string) int {
 	default:
 		return 0
 	}
+}
+
+func humanize(s string) string {
+	s = strings.ReplaceAll(strings.ToLower(s), "_", " ")
+	if len(s) > 0 {
+		return strings.ToUpper(s[:1]) + s[1:]
+	}
+	return s
+}
+
+func appendDetail(existing, extra string) string {
+	if existing == "" {
+		return extra
+	}
+	return existing + "  " + extra
 }
 
 var (
