@@ -44,11 +44,11 @@ func NewMergeGate(merger Merger, enabled bool, method string) *MergeGate {
 
 // Run merges the PR if enabled; otherwise returns MergeSkippedDisabled.
 func (g *MergeGate) Run(ctx context.Context, repo string, number int) (MergeResult, error) {
-	if err := ctx.Err(); err != nil {
-		return MergeSkippedDisabled, err
-	}
 	if !g.enabled {
 		return MergeSkippedDisabled, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return MergeSkippedDisabled, err
 	}
 	if err := g.merger.MergePR(repo, number, g.method); err != nil {
 		return MergeSkippedDisabled, fmt.Errorf("autonomous: merge gate: %w", err)

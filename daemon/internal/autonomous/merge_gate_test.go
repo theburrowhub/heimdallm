@@ -3,6 +3,7 @@ package autonomous
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -60,8 +61,12 @@ func TestMergeGate_DefaultsMethod(t *testing.T) {
 
 func TestMergeGate_PropagatesError(t *testing.T) {
 	g := NewMergeGate(errMerger{}, true, "squash")
-	if _, err := g.Run(context.Background(), "a/b", 7); err == nil {
-		t.Errorf("want error propagated from merger")
+	_, err := g.Run(context.Background(), "a/b", 7)
+	if err == nil {
+		t.Fatalf("want error propagated from merger")
+	}
+	if !strings.Contains(err.Error(), "autonomous: merge gate:") {
+		t.Errorf("error must be wrapped, got %q", err.Error())
 	}
 }
 

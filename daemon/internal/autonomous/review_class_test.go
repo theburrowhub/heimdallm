@@ -15,6 +15,8 @@ func TestClassifyReview(t *testing.T) {
 		{"approved with actionable body", []ReviewInput{{State: "APPROVED", Body: "please rename foo before merge"}}, DecisionFix},
 		{"no human reviews", []ReviewInput{}, DecisionWait},
 		{"latest approved supersedes older changes", []ReviewInput{{State: "CHANGES_REQUESTED"}, {State: "APPROVED", Body: "LGTM"}}, DecisionMergeGate},
+		{"approved with spanish todos is not actionable", []ReviewInput{{State: "APPROVED", Body: "todos los cambios están bien"}}, DecisionMergeGate},
+		{"approved with todo marker is actionable", []ReviewInput{{State: "APPROVED", Body: "todo: rename foo"}}, DecisionFix},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

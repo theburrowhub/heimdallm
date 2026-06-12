@@ -34,7 +34,7 @@ func (d ReviewDecision) String() string {
 // to a fix rather than merge.
 var actionableHints = []string{
 	"please ", "before merge", "should change", "needs ", "fix ", "rename ",
-	"remove ", "address ", "todo", "must ",
+	"remove ", "address ", "todo:", "must ",
 }
 
 // ClassifyReview reduces the review list to a single decision. The latest
