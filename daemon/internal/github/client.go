@@ -390,6 +390,30 @@ func (c *Client) PostComment(repo string, number int, body string) (time.Time, e
 	return result.CreatedAt, nil
 }
 
+// MergePR merges a pull request using the given method ("squash"|"merge"|
+// "rebase"). Built for the autonomous merge gate, which is disabled by
+// default — this only runs when AutoMerge is explicitly enabled.
+func (c *Client) MergePR(repo string, number int, method string) error {
+	if method == "" {
+		method = "squash"
+	}
+	payload, err := json.Marshal(map[string]any{"merge_method": method})
+	if err != nil {
+		return fmt.Errorf("github: marshal merge: %w", err)
+	}
+	path := fmt.Sprintf("/repos/%s/pulls/%d/merge", repo, number)
+	resp, err := c.doWithBody("PUT", path, "application/vnd.github+json", "application/json", strings.NewReader(string(payload)))
+	if err != nil {
+		return fmt.Errorf("github: merge PR %s#%d: %w", repo, number, err)
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("github: merge PR %s#%d: status %d: %s", repo, number, resp.StatusCode, safeTruncate(string(body), maxErrBodyLen))
+	}
+	return nil
+}
+
 // maxDiscoveryPages bounds the number of Search API pages consumed per org.
 // GitHub caps search results at 1000 entries (10 pages × 100 per_page); we stop
 // there to avoid endless pagination in the unlikely event of a malformed response.

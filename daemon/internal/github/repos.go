@@ -252,6 +252,50 @@ func (c *Client) ListSubIssues(repo string, number int) ([]*Issue, error) {
 	return out, nil
 }
 
+// AddAssignees adds GitHub logins as assignees on an issue/PR without removing
+// existing assignees (POST .../assignees is additive). Used by the autonomous
+// selector to claim another user's task while keeping the original assignee.
+func (c *Client) AddAssignees(repo string, number int, assignees []string) error {
+	if repo == "" || number == 0 || len(assignees) == 0 {
+		return nil
+	}
+	payload, err := json.Marshal(map[string]any{"assignees": assignees})
+	if err != nil {
+		return fmt.Errorf("github: marshal assignees: %w", err)
+	}
+	path := fmt.Sprintf("/repos/%s/issues/%d/assignees", repo, number)
+	resp, err := c.doWithBody("POST", path, "application/vnd.github+json", "application/json", bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("github: add assignees: %w", err)
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("github: add assignees %s#%d: status %d: %s", repo, number, resp.StatusCode, safeTruncate(string(body), maxErrBodyLen))
+	}
+	return nil
+}
+
+// BranchExists reports whether a branch exists on the remote. 404 => false,
+// nil error. Any other non-200 status is surfaced as an error.
+func (c *Client) BranchExists(repo, branch string) (bool, error) {
+	path := fmt.Sprintf("/repos/%s/branches/%s", repo, url.PathEscape(branch))
+	resp, err := c.do("GET", path, "application/vnd.github+json")
+	if err != nil {
+		return false, fmt.Errorf("github: get branch %s#%s: %w", repo, branch, err)
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+	resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return true, nil
+	case http.StatusNotFound:
+		return false, nil
+	default:
+		return false, fmt.Errorf("github: get branch %s#%s: status %d: %s", repo, branch, resp.StatusCode, safeTruncate(string(body), maxErrBodyLen))
+	}
+}
+
 // SetAssignees replaces assignees on an issue or pull request.
 func (c *Client) SetAssignees(repo string, number int, assignees []string) error {
 	if repo == "" || number == 0 || len(assignees) == 0 {
