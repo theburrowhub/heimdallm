@@ -179,6 +179,15 @@ func (a *tier2Adapter) autonomousEnabledForRepo(repo string) bool {
 //
 // Runner errors propagate exactly like the legacy path so the StateWorker keeps
 // LastSeen frozen and retries the dispatch next tick.
+//
+// Ordering note: the FIX_PUSHED re-arm guard in
+// refreshAutoImplementPRReviewState runs BEFORE this function — when the
+// aggregate state is the same CR the FixRunner already addressed it early-
+// returns nil and dispatchAutonomousReview is never reached. EventAutonomousReviewClass
+// is therefore intentionally NOT emitted on a tick suppressed by the re-arm
+// guard (the review state has not moved, so re-emitting would only flap the
+// dashboard); it re-emits once a fresh CR (a strictly newer SubmittedAt)
+// arrives and the guard releases.
 func (a *tier2Adapter) dispatchAutonomousReview(
 	ctx context.Context, item *scheduler.WatchItem, stored *store.PR, reviews []gh.PRReview,
 ) error {
