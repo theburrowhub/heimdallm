@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -148,5 +149,54 @@ func TestIssueToCandidate_MapsFields(t *testing.T) {
 		if c.Labels[i] != wantLabels[i] {
 			t.Errorf("Labels[%d] = %q, want %q", i, c.Labels[i], wantLabels[i])
 		}
+	}
+}
+
+// TestHardenCoordinationComment_NeutralisesMentions verifies @-mentions are
+// defanged so the posted comment cannot ping arbitrary users/teams.
+func TestHardenCoordinationComment_NeutralisesMentions(t *testing.T) {
+	out := hardenCoordinationComment("cc @alice and @org/team-9, thanks")
+	if strings.Contains(out, "@alice") {
+		t.Errorf("expected @alice to be neutralised, got %q", out)
+	}
+	if strings.Contains(out, "@org") {
+		t.Errorf("expected @org to be neutralised, got %q", out)
+	}
+	// The zero-width space is inserted right after the @.
+	if !strings.Contains(out, "@​alice") {
+		t.Errorf("expected zero-width-space-neutralised mention, got %q", out)
+	}
+}
+
+// TestHardenCoordinationComment_LengthCap verifies the comment is truncated to
+// the cap with an ellipsis, bounding a runaway agent response.
+func TestHardenCoordinationComment_LengthCap(t *testing.T) {
+	long := strings.Repeat("x", maxCoordinationCommentLen+500)
+	out := hardenCoordinationComment(long)
+	if len([]rune(out)) > maxCoordinationCommentLen+1 { // +1 for the ellipsis rune
+		t.Errorf("expected truncation to <= cap+ellipsis, got %d runes", len([]rune(out)))
+	}
+	if !strings.HasSuffix(out, "…") {
+		t.Errorf("expected ellipsis suffix, got %q", out[len(out)-10:])
+	}
+}
+
+// TestHardenCoordinationComment_Empty verifies whitespace-only input yields "".
+func TestHardenCoordinationComment_Empty(t *testing.T) {
+	if out := hardenCoordinationComment("   \n\t "); out != "" {
+		t.Errorf("expected empty string for whitespace input, got %q", out)
+	}
+}
+
+// TestStripCodeFences verifies triple-backticks are neutralised so an untrusted
+// body cannot break out of the prompt code fence.
+func TestStripCodeFences(t *testing.T) {
+	in := "before ```bash\nrm -rf /\n``` after"
+	out := stripCodeFences(in)
+	if strings.Contains(out, "```") {
+		t.Errorf("expected triple-backticks stripped, got %q", out)
+	}
+	if !strings.Contains(out, "before") || !strings.Contains(out, "after") {
+		t.Errorf("expected surrounding text preserved, got %q", out)
 	}
 }

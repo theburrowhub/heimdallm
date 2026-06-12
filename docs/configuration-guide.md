@@ -1098,6 +1098,7 @@ reassign_on_take  = false   # when taking another user's task, add the bot as co
 dev_max_turns    = 0        # agent max turns for development; 0 = no practical cap
 dev_effort       = "high"   # agent effort level: low | medium | high | max
 dev_timeout      = "45m"    # timeout for the development agent run
+claim_lease      = "2h"     # per-issue claim lease + failure/no-progress cooldown
 ```
 
 | Field | Default | Description |
@@ -1110,8 +1111,9 @@ dev_timeout      = "45m"    # timeout for the development agent run
 | `dev_max_turns` | `0` | Maximum agent turns for the development stage. `0` means no practical cap (the underlying CLI default applies). |
 | `dev_effort` | `"high"` | Agent effort level passed to the AI CLI for the development stage. Accepted values: `low`, `medium`, `high`, `max`. |
 | `dev_timeout` | `"45m"` | Wall-clock timeout for a single development agent run. Generous by default to accommodate complex implementations. |
+| `claim_lease` | `"2h"` | Per-issue claim lease, expressed as a Go duration. When the poller picks up an issue it records a lease expiring `now + claim_lease`; the selector treats any issue with an active (un-expired) lease as ineligible. This prevents two daemon ticks (or two daemons across a restart) from driving the same issue concurrently, and — because the lease is **kept** when a Drive fails or makes no progress — it doubles as the failure/no-progress **cooldown** that prevents a retry-storm on a persistently failing issue. The lease is cleared early once a PR is created (the open-PR guard takes over re-selection) and otherwise expires on its own, so a crash mid-Drive never sticks the claim permanently and needs no manual operator step. **It must exceed the longest possible Drive** (triage + refinement + development timeouts combined); the `2h` default comfortably exceeds the `45m` `dev_timeout` plus the lighter triage/refinement stages. |
 
-**Default behaviour summary:** all bools (`enabled`, `auto_merge`, `take_others_tasks`, `reassign_on_take`) default to `false` via Go's zero value — they are not given non-zero defaults by `applyAutonomousDefaults`. Only the three string fields (`merge_method`, `dev_effort`, `dev_timeout`) receive explicit non-zero defaults.
+**Default behaviour summary:** all bools (`enabled`, `auto_merge`, `take_others_tasks`, `reassign_on_take`) default to `false` via Go's zero value — they are not given non-zero defaults by `applyAutonomousDefaults`. The string fields (`merge_method`, `dev_effort`, `dev_timeout`, `claim_lease`) receive explicit non-zero defaults.
 
 ### Per-org and per-repo overrides
 

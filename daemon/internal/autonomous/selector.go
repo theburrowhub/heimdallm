@@ -8,13 +8,20 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // SelectorStore is the persistence surface the selector needs.
 type SelectorStore interface {
 	HasOpenAutoImplementPR(issueGithubID int64) (bool, error)
+	// SetIssueClaimedByAutonomous flags the issue as claimed. Retained as a
+	// coarse audit signal only — the eligibility gate is the time-based lease
+	// (IsAutonomousClaimActive), not this boolean.
 	SetIssueClaimedByAutonomous(issueID int64, claimed bool) error
-	IsIssueClaimedByAutonomous(issueID int64) (bool, error)
+	// IsAutonomousClaimActive reports whether the issue currently holds an
+	// active (un-expired) claim lease. The lease doubles as the failure
+	// cooldown and recovers automatically from a crash (it expires).
+	IsAutonomousClaimActive(issueID int64, now time.Time) (bool, error)
 }
 
 // SelectorGH is the GitHub surface the selector needs.
@@ -140,16 +147,19 @@ func (s *Selector) isEligible(ctx context.Context, c Candidate) (bool, error) {
 	if hasPR {
 		return false, nil
 	}
-	// Claimed flag: survives a daemon restart mid-Drive (the poller clears it
-	// only on normal Drive completion). Without this check a crash during
-	// triage/refinement — before any PR or branch exists — would let the next
-	// tick re-pick the same issue and start a duplicate Drive.
+	// Claim lease: a time-based lease that survives a daemon restart mid-Drive
+	// AND acts as the failure/no-progress cooldown. Without this check a crash
+	// during triage/refinement — before any PR or branch exists — would let the
+	// next tick re-pick the same issue and start a duplicate Drive, and a
+	// persistently failing issue would be re-picked every tick (retry-storm).
+	// The lease expires naturally, so a crash never sticks the claim forever and
+	// no manual operator step is needed to recover.
 	if c.StoreID != 0 {
-		claimed, err := s.store.IsIssueClaimedByAutonomous(c.StoreID)
+		active, err := s.store.IsAutonomousClaimActive(c.StoreID, time.Now())
 		if err != nil {
-			return false, fmt.Errorf("autonomous: eligibility claimed check: %w", err)
+			return false, fmt.Errorf("autonomous: eligibility claim-lease check: %w", err)
 		}
-		if claimed {
+		if active {
 			return false, nil
 		}
 	}

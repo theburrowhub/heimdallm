@@ -13,6 +13,7 @@ type AutonomousConfig struct {
 	DevMaxTurns     int    `toml:"dev_max_turns"`     // 0 = no practical cap for development
 	DevEffort       string `toml:"dev_effort"`        // agent effort for development
 	DevTimeout      string `toml:"dev_timeout"`       // generous development timeout (e.g. "45m")
+	ClaimLease      string `toml:"claim_lease"`       // per-issue claim lease + failure cooldown (default "2h")
 
 	Orgs  map[string]AutonomousOverride `toml:"orgs"`  // per-org overrides ([autonomous.orgs."org"])
 	Repos map[string]AutonomousOverride `toml:"repos"` // per-repo overrides ([autonomous.repos."org/repo"])
@@ -29,6 +30,7 @@ type AutonomousOverride struct {
 	DevMaxTurns     *int   `toml:"dev_max_turns,omitempty"`
 	DevEffort       string `toml:"dev_effort,omitempty"`
 	DevTimeout      string `toml:"dev_timeout,omitempty"`
+	ClaimLease      string `toml:"claim_lease,omitempty"`
 }
 
 // AutonomousForRepo resolves autonomous config for a repo: repo > org > global.
@@ -72,6 +74,9 @@ func applyAutonomousOverride(out *AutonomousConfig, o AutonomousOverride) {
 	if o.DevTimeout != "" {
 		out.DevTimeout = o.DevTimeout
 	}
+	if o.ClaimLease != "" {
+		out.ClaimLease = o.ClaimLease
+	}
 }
 
 // applyAutonomousDefaults fills zero-value scalars with safe defaults.
@@ -84,5 +89,12 @@ func (c *Config) applyAutonomousDefaults() {
 	}
 	if c.Autonomous.DevTimeout == "" {
 		c.Autonomous.DevTimeout = "45m"
+	}
+	// The lease MUST exceed the longest possible Drive (triage + refinement +
+	// development timeouts) so it never expires mid-Drive and lets a second
+	// tick start a duplicate. 2h comfortably exceeds the 45m dev default plus
+	// the lighter triage/refinement stages.
+	if c.Autonomous.ClaimLease == "" {
+		c.Autonomous.ClaimLease = "2h"
 	}
 }

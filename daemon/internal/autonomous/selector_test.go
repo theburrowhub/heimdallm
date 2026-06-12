@@ -3,16 +3,22 @@ package autonomous
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 // fakeStore implements SelectorStore
 type fakeStore struct {
-	openPRs map[int64]bool // keyed by GithubID
-	claimed map[int64]bool // keyed by StoreID
+	openPRs    map[int64]bool      // keyed by GithubID
+	claimed    map[int64]bool      // keyed by StoreID (coarse audit flag)
+	claimUntil map[int64]time.Time // keyed by StoreID (eligibility lease)
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{openPRs: make(map[int64]bool), claimed: make(map[int64]bool)}
+	return &fakeStore{
+		openPRs:    make(map[int64]bool),
+		claimed:    make(map[int64]bool),
+		claimUntil: make(map[int64]time.Time),
+	}
 }
 
 func (f *fakeStore) HasOpenAutoImplementPR(issueGithubID int64) (bool, error) {
@@ -24,8 +30,12 @@ func (f *fakeStore) SetIssueClaimedByAutonomous(issueID int64, claimed bool) err
 	return nil
 }
 
-func (f *fakeStore) IsIssueClaimedByAutonomous(issueID int64) (bool, error) {
-	return f.claimed[issueID], nil
+func (f *fakeStore) IsAutonomousClaimActive(issueID int64, now time.Time) (bool, error) {
+	until, ok := f.claimUntil[issueID]
+	if !ok || until.IsZero() {
+		return false, nil
+	}
+	return until.After(now), nil
 }
 
 // fakeGH implements SelectorGH
@@ -145,10 +155,12 @@ func TestIsEligible(t *testing.T) {
 		}
 	})
 
-	t.Run("claimed_by_autonomous makes candidate ineligible", func(t *testing.T) {
+	t.Run("active claim lease makes candidate ineligible", func(t *testing.T) {
 		store := newFakeStore()
 		gh := newFakeGH()
-		store.claimed[5] = true // StoreID 5 already claimed by a prior Drive
+		// StoreID 5 holds a lease expiring an hour from now (a prior Drive that
+		// has not yet completed / cooled down).
+		store.claimUntil[5] = time.Now().Add(time.Hour)
 
 		sel := NewSelector(store, gh, botLogin, branchPrefix, nil)
 		sel.Configure(true, true, nil)

@@ -294,6 +294,41 @@ func (s *Store) IsIssueClaimedByAutonomous(issueID int64) (bool, error) {
 	return v != 0, nil
 }
 
+// SetAutonomousClaimUntil records a time-based claim lease on the issue. The
+// lease doubles as the failure/no-progress cooldown for the autonomous
+// selector and, because it has an explicit expiry, recovers automatically from
+// a crash mid-Drive (no permanent stuck claim, no manual operator step). A zero
+// `until` clears the lease (stored as ”). Times are persisted RFC3339 UTC.
+func (s *Store) SetAutonomousClaimUntil(issueID int64, until time.Time) error {
+	v := ""
+	if !until.IsZero() {
+		v = until.UTC().Format(sqliteTimeFormat)
+	}
+	if _, err := s.db.Exec(`UPDATE issues SET autonomous_claim_until = ? WHERE id = ?`, v, issueID); err != nil {
+		return fmt.Errorf("store: set issue autonomous_claim_until: %w", err)
+	}
+	return nil
+}
+
+// IsAutonomousClaimActive reports whether the issue currently holds an active
+// (un-expired) autonomous claim lease relative to `now`. An empty or
+// unparseable stored value is treated leniently as "no active lease" (false) so
+// a malformed row never permanently blocks selection.
+func (s *Store) IsAutonomousClaimActive(issueID int64, now time.Time) (bool, error) {
+	var v string
+	if err := s.db.QueryRow(`SELECT autonomous_claim_until FROM issues WHERE id = ?`, issueID).Scan(&v); err != nil {
+		return false, fmt.Errorf("store: get issue autonomous_claim_until: %w", err)
+	}
+	if strings.TrimSpace(v) == "" {
+		return false, nil
+	}
+	until, err := time.Parse(sqliteTimeFormat, v)
+	if err != nil {
+		return false, nil // lenient: malformed lease never blocks
+	}
+	return until.After(now), nil
+}
+
 // HasOpenAutoImplementPR reports whether an open PR is linked to the issue's
 // GitHub id via auto_implement_issue_id. Used by the autonomous selector's
 // "not started" predicate.

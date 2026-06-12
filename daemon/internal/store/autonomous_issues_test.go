@@ -54,6 +54,66 @@ func TestSetIssueClaimedByAutonomous(t *testing.T) {
 	}
 }
 
+// TestAutonomousClaimUntil verifies the time-based claim lease that doubles as
+// the failure/no-progress cooldown: a future lease is active, a past lease is
+// not, and a cleared lease is not.
+func TestAutonomousClaimUntil(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	id, err := s.UpsertIssue(&store.Issue{
+		GithubID: 6001, Repo: "org/r", Number: 1, Title: "t", Author: "a",
+		State: "open", CreatedAt: now, FetchedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("upsert issue: %v", err)
+	}
+
+	// Default (no lease) → not active.
+	active, err := s.IsAutonomousClaimActive(id, now)
+	if err != nil {
+		t.Fatalf("IsAutonomousClaimActive initial: %v", err)
+	}
+	if active {
+		t.Error("expected no active lease for a fresh issue")
+	}
+
+	// Future lease → active.
+	if err := s.SetAutonomousClaimUntil(id, now.Add(time.Hour)); err != nil {
+		t.Fatalf("SetAutonomousClaimUntil(future): %v", err)
+	}
+	active, err = s.IsAutonomousClaimActive(id, now)
+	if err != nil {
+		t.Fatalf("IsAutonomousClaimActive after future set: %v", err)
+	}
+	if !active {
+		t.Error("expected active lease when claim_until is in the future")
+	}
+
+	// Past lease → not active (acts as an expired cooldown).
+	if err := s.SetAutonomousClaimUntil(id, now.Add(-time.Hour)); err != nil {
+		t.Fatalf("SetAutonomousClaimUntil(past): %v", err)
+	}
+	active, err = s.IsAutonomousClaimActive(id, now)
+	if err != nil {
+		t.Fatalf("IsAutonomousClaimActive after past set: %v", err)
+	}
+	if active {
+		t.Error("expected inactive lease when claim_until is in the past")
+	}
+
+	// Cleared (zero time) → not active.
+	if err := s.SetAutonomousClaimUntil(id, time.Time{}); err != nil {
+		t.Fatalf("SetAutonomousClaimUntil(clear): %v", err)
+	}
+	active, err = s.IsAutonomousClaimActive(id, now)
+	if err != nil {
+		t.Fatalf("IsAutonomousClaimActive after clear: %v", err)
+	}
+	if active {
+		t.Error("expected inactive lease after clearing")
+	}
+}
+
 // TestHasOpenAutoImplementPR verifies the three key scenarios for the
 // autonomous selector's "not started" predicate.
 func TestHasOpenAutoImplementPR(t *testing.T) {

@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
-	"encoding/json"
+	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -80,7 +82,48 @@ func (g *coordinationCommentGen) GenerateCoordinationComment(_ context.Context, 
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(string(raw)), nil
+	// Defense-in-depth: the comment is LLM output derived from untrusted issue
+	// text and posted publicly. Neutralise @-mentions and cap the length so it
+	// cannot ping arbitrary users/teams or flood the thread.
+	return hardenCoordinationComment(string(raw)), nil
+}
+
+// maxCoordinationCommentLen caps the posted coordination comment. The prompt
+// asks for 2-3 sentences; this bounds a runaway agent response.
+const maxCoordinationCommentLen = 2000
+
+// mentionRe matches an @ immediately followed by a mention word char. Used to
+// neutralise pings in untrusted/LLM-derived comment text.
+var mentionRe = regexp.MustCompile(`@([A-Za-z0-9_-])`)
+
+// hardenCoordinationComment makes an agent-generated coordination comment safe
+// to post publicly: it trims whitespace, neutralises @-mentions (so the
+// comment cannot ping arbitrary users/teams) by inserting a zero-width space
+// after the @, and truncates to a sane maximum with an ellipsis. An
+// empty/whitespace input yields "" (the caller skips posting empty bodies).
+func hardenCoordinationComment(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	s = neutraliseMentions(s)
+	if len(s) > maxCoordinationCommentLen {
+		s = strings.TrimSpace(s[:maxCoordinationCommentLen]) + "…"
+	}
+	return s
+}
+
+// neutraliseMentions inserts a zero-width space between @ and the following
+// word char so GitHub does not resolve it as a notification mention.
+func neutraliseMentions(s string) string {
+	return mentionRe.ReplaceAllString(s, "@​$1")
+}
+
+// stripCodeFences neutralises triple-backtick sequences in untrusted text so an
+// embedded body cannot break out of the fenced block in the prompt. Replaces
+// each "```" with a visually similar but inert sequence.
+func stripCodeFences(s string) string {
+	return strings.ReplaceAll(s, "```", "ʼʼʼ")
 }
 
 func (g *coordinationCommentGen) cliInputs() (primary, fallback string) {
@@ -105,7 +148,9 @@ func buildCoordinationPrompt(c autonomous.Candidate) string {
 		body = "(empty issue body)"
 	}
 	sb.WriteString("```issue-body (untrusted)\n")
-	sb.WriteString(issuepipeline.SanitiseUntrustedFreeText(body))
+	// Strip triple-backticks BEFORE sanitising so the untrusted body cannot
+	// break out of this fenced block, then run the shared free-text sanitiser.
+	sb.WriteString(issuepipeline.SanitiseUntrustedFreeText(stripCodeFences(body)))
 	sb.WriteString("\n```\n\n")
 	sb.WriteString("Output ONLY the comment text, no preamble, no code fences.\n")
 	return sb.String()
@@ -162,11 +207,11 @@ var _ autonomous.StageRunner = (*autonomousStageRunner)(nil)
 // dispatches it. The pipeline switches on issue.Mode, NOT labels.
 func stageToMode(stage string) (config.IssueMode, bool) {
 	switch stage {
-	case "triage":
+	case autonomous.StageTriage:
 		return config.IssueModeReviewOnly, true
-	case "refinement":
+	case autonomous.StageRefinement:
 		return config.IssueModeRefinement, true
-	case "development":
+	case autonomous.StageDevelopment:
 		return config.IssueModeDevelop, true
 	default:
 		return "", false
@@ -185,7 +230,16 @@ func (r *autonomousStageRunner) RunStage(ctx context.Context, stage string, c au
 		r.cfgMu.Lock()
 		cb := (*r.cfg).CircuitBreakerForRepo(c.Repo)
 		r.cfgMu.Unlock()
-		if tripped, reason, err := r.store.CheckImplementCircuitBreaker(c.Repo, cb.PerImplRepoHr); err == nil && tripped {
+		tripped, reason, err := r.store.CheckImplementCircuitBreaker(c.Repo, cb.PerImplRepoHr)
+		if err != nil {
+			// Fail CLOSED: a store error must NOT silently bypass the breaker.
+			// Skip development this stage; the claim lease will let it retry
+			// after expiry once the DB recovers.
+			slog.Warn("autonomous: implement circuit breaker check failed — failing closed, skipping development",
+				"repo", c.Repo, "number", c.Number, "err", err)
+			return autonomous.StageOutcome{Success: false}, nil
+		}
+		if tripped {
 			slog.Warn("autonomous: implement circuit breaker tripped — skipping development",
 				"repo", c.Repo, "number", c.Number, "reason", reason)
 			if r.broker != nil {
@@ -200,19 +254,16 @@ func (r *autonomousStageRunner) RunStage(ctx context.Context, stage string, c au
 		}
 	}
 
-	// Fetch a fresh issue snapshot. The fresh UpdatedAt also gives each stage a
-	// distinct single-flight claim key inside Pipeline.Run (the claim is keyed
-	// on issue.ID + UpdatedAt), avoiding a self-collision when the same issue
-	// re-enters Run for consecutive stages within one Drive.
+	// Fetch a fresh issue snapshot. We keep GitHub's real UpdatedAt intact (no
+	// mutation of the persisted snapshot); the per-stage single-flight claim
+	// key is made distinct via opts.InFlightSalt below instead, so the same
+	// issue can re-enter Run for consecutive stages without self-colliding.
 	ghIssue, err := r.ghClient.GetIssue(c.Repo, c.Number)
 	if err != nil {
 		return autonomous.StageOutcome{}, fmt.Errorf("autonomous: fetch issue %s#%d: %w", c.Repo, c.Number, err)
 	}
 	ghIssue.Repo = c.Repo
 	ghIssue.Mode = mode
-	// Belt-and-braces: ensure a distinct claim key per stage even if GitHub
-	// returned an unchanged UpdatedAt.
-	ghIssue.UpdatedAt = time.Now().UTC()
 
 	// Resolve per-repo config under lock.
 	r.cfgMu.Lock()
@@ -274,6 +325,14 @@ func (r *autonomousStageRunner) RunStage(ctx context.Context, stage string, c au
 		PRDraft:                 aiCfg.PRDraft != nil && *aiCfg.PRDraft,
 		GeneratePRDescription:   aiCfg.GeneratePRDescription != nil && *aiCfg.GeneratePRDescription,
 		AuthUser:                authUser,
+		// Stage-tagged in-flight claim key WITHOUT mutating the persisted issue
+		// snapshot (the previous code overwrote ghIssue.UpdatedAt, polluting the
+		// stored row). Stages run sequentially within one Drive and each Run
+		// releases its claim in a defer before the next starts, so this salt is
+		// not load-bearing for de-collision; it tags the stored diagnostic
+		// updated_at column with the originating stage. Default (empty) keeps
+		// every existing caller's behaviour unchanged.
+		InFlightSalt: stage,
 	}
 
 	// The refinement and development stages need a writable repo checkout. The
@@ -299,6 +358,9 @@ func (r *autonomousStageRunner) RunStage(ctx context.Context, stage string, c au
 			}
 			if d, err := time.ParseDuration(strings.TrimSpace(auto.DevTimeout)); err == nil && d > 0 {
 				opts.ExecOpts.Timeout = d
+			} else if strings.TrimSpace(auto.DevTimeout) != "" {
+				slog.Warn("autonomous: invalid dev_timeout, falling back to default",
+					"repo", c.Repo, "number", c.Number, "value", auto.DevTimeout)
 			}
 		}
 
@@ -384,9 +446,9 @@ func (r *autonomousStageRunner) advanceStageAudit(ctx context.Context, ghIssue *
 // was created); there is no further stage label to advance to.
 func stageAuditEdge(stage string) (from, to issuepipeline.IssueStage, ok bool) {
 	switch stage {
-	case "triage":
+	case autonomous.StageTriage:
 		return issuepipeline.IssueStageTriage, issuepipeline.IssueStageRefinement, true
-	case "refinement":
+	case autonomous.StageRefinement:
 		return issuepipeline.IssueStageRefinement, issuepipeline.IssueStageDevelopment, true
 	default:
 		return "", "", false
@@ -494,6 +556,24 @@ func (p *AutonomousPoller) Run(ctx context.Context) {
 			slog.Warn("autonomous: claim failed", "repo", repo, "number", picked.Number, "err", err)
 			continue
 		}
+		// Set a time-based claim lease that doubles as the failure/no-progress
+		// cooldown. Selector.Claim already flagged claimed_by_autonomous=true as
+		// a coarse audit signal; the lease (not the boolean) is the eligibility
+		// gate. It MUST exceed the longest possible Drive so it never expires
+		// mid-Drive; on parse failure we fall back to 2h.
+		lease := 2 * time.Hour
+		if d, err := time.ParseDuration(strings.TrimSpace(auto.ClaimLease)); err == nil && d > 0 {
+			lease = d
+		} else if strings.TrimSpace(auto.ClaimLease) != "" {
+			slog.Warn("autonomous: invalid claim_lease, falling back to 2h",
+				"repo", repo, "number", picked.Number, "value", auto.ClaimLease)
+		}
+		if picked.StoreID != 0 {
+			if e := p.store.SetAutonomousClaimUntil(picked.StoreID, time.Now().Add(lease)); e != nil {
+				slog.Warn("autonomous: set claim lease failed",
+					"repo", picked.Repo, "number", picked.Number, "err", e)
+			}
+		}
 		if bucket == autonomous.BucketOthers && p.broker != nil {
 			p.broker.Publish(sse.Event{
 				Type: sse.EventAutonomousTaskReassigned,
@@ -505,17 +585,19 @@ func (p *AutonomousPoller) Run(ctx context.Context) {
 
 		res, driveErr := p.orch.Drive(ctx, *picked)
 
-		// Clear the claimed flag on normal completion (success OR a returned
-		// error). A crash mid-Drive leaves the flag SET — that is the safe
-		// state: the issue stays claimed and the selector's isEligible check
-		// keeps it from being re-driven (no duplicate work) until an operator
-		// or a future fix clears it. On normal return we free it so a future
-		// legitimate re-drive can occur; that re-drive is still gated by
-		// HasOpenAutoImplementPR / BranchExists, so freeing it cannot cause a
-		// duplicate while a PR or work branch already exists.
-		if picked.StoreID != 0 {
-			if e := p.store.SetIssueClaimedByAutonomous(picked.StoreID, false); e != nil {
-				slog.Warn("autonomous: clear claimed flag failed",
+		// Claim-lease lifecycle after Drive:
+		//   - PR created (res.PRNumber != 0): CLEAR the lease. Re-selection is
+		//     now guarded by HasOpenAutoImplementPR, which takes over the job of
+		//     keeping the issue out of the cascade, so the lease is redundant.
+		//   - failure OR no-progress (no PR): LEAVE the lease in place so it acts
+		//     as a cooldown until it expires — this prevents the retry-storm
+		//     where a persistently failing issue is re-picked every tick and
+		//     burns tokens. The issue auto-recovers once the lease window passes.
+		//   - crash mid-Drive: the lease was set before Drive and simply expires
+		//     on its own — no permanent stuck claim, no manual operator step.
+		if picked.StoreID != 0 && res.PRNumber != 0 {
+			if e := p.store.SetAutonomousClaimUntil(picked.StoreID, time.Time{}); e != nil {
+				slog.Warn("autonomous: clear claim lease failed",
 					"repo", picked.Repo, "number", picked.Number, "err", e)
 			}
 		}
@@ -551,50 +633,23 @@ func (p *AutonomousPoller) candidatesForRepo(repo string, it config.IssueTrackin
 func (p *AutonomousPoller) resolveStoreID(iss *gh.Issue) int64 {
 	if existing, err := p.store.GetIssueByGithubID(iss.ID); err == nil && existing != nil {
 		return existing.ID
+	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		// A not-found is the normal first-sight path (we fall through to upsert);
+		// only surface genuine DB errors.
+		slog.Warn("autonomous: lookup issue by github id failed",
+			"repo", iss.Repo, "number", iss.Number, "err", err)
 	}
-	si, err := issueToStoreRow(iss)
+	si, err := issuepipeline.IssueToStoreRow(iss)
 	if err != nil {
+		slog.Warn("autonomous: project issue for upsert failed",
+			"repo", iss.Repo, "number", iss.Number, "err", err)
 		return 0
 	}
 	id, err := p.store.UpsertIssue(si)
 	if err != nil {
+		slog.Warn("autonomous: upsert issue failed (store id unavailable, claim lease skipped)",
+			"repo", iss.Repo, "number", iss.Number, "err", err)
 		return 0
 	}
 	return id
-}
-
-// issueToStoreRow projects a GitHub issue into a store row for the idempotent
-// upsert path. Mirrors the issues package's internal mapper (assignees/labels
-// stored as JSON arrays); kept local because the package helper is unexported
-// and this is a small, stable projection.
-func issueToStoreRow(i *gh.Issue) (*store.Issue, error) {
-	assignees := i.AssigneeLogins()
-	if assignees == nil {
-		assignees = []string{}
-	}
-	labels := i.LabelNames()
-	if labels == nil {
-		labels = []string{}
-	}
-	assigneesJSON, err := json.Marshal(assignees)
-	if err != nil {
-		return nil, fmt.Errorf("autonomous: marshal assignees: %w", err)
-	}
-	labelsJSON, err := json.Marshal(labels)
-	if err != nil {
-		return nil, fmt.Errorf("autonomous: marshal labels: %w", err)
-	}
-	return &store.Issue{
-		GithubID:  i.ID,
-		Repo:      i.Repo,
-		Number:    i.Number,
-		Title:     i.Title,
-		Body:      i.Body,
-		Author:    i.User.Login,
-		Assignees: string(assigneesJSON),
-		Labels:    string(labelsJSON),
-		State:     i.State,
-		CreatedAt: i.CreatedAt,
-		FetchedAt: time.Now().UTC(),
-	}, nil
 }

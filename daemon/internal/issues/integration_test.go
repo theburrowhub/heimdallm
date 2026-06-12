@@ -218,6 +218,95 @@ func TestIntegration_ConcurrentPipelineRunsCollapseToOneDispatch(t *testing.T) {
 	}
 }
 
+// TestIntegration_InFlightSaltDefaultStillCollapses confirms FIX 3 did not
+// regress the single-flight contract for default (empty-salt) callers: two
+// concurrent Run calls on the same snapshot with no InFlightSalt still collapse
+// to one dispatch. (The autonomous chain runs its stages SEQUENTIALLY — each
+// Run releases its claim in a defer before the next stage starts — so the salt
+// is not needed to disambiguate them; the real store deliberately keys the
+// contention on issue_id alone, see ClaimIssueTriageInFlight / #458. The salt
+// is therefore a harmless no-op against the contention key and exists only so
+// the stored diagnostic updated_at column carries the stage. Removing the
+// UpdatedAt mutation is the real fix; this guards the unchanged default path.)
+func TestIntegration_InFlightSaltDefaultStillCollapses(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	now := time.Now().UTC().Truncate(time.Second)
+	issue := &github.Issue{
+		ID: 2002, Number: 8, Repo: "org/repo",
+		Title: "Salt default", Body: ".",
+		State: "open", User: github.User{Login: "reporter"},
+		Labels: []github.Label{}, Assignees: []github.User{},
+		CreatedAt: now, UpdatedAt: now,
+		Mode: config.IssueModeReviewOnly,
+	}
+
+	holdingClaim := make(chan struct{})
+	release := make(chan struct{})
+	var claimSignaler sync.Once
+	var execCount int32
+	bexec := &blockingExec{
+		cli: "claude",
+		out: []byte(validResult),
+		onCall: func() {
+			atomic.AddInt32(&execCount, 1)
+			claimSignaler.Do(func() { close(holdingClaim) })
+			<-release
+		},
+	}
+
+	gh := &fakeGH{}
+	pipe := issues.New(s, gh, bexec, nil, &fakeBroker{}, nil)
+	opts := issues.RunOptions{Primary: "claude"} // empty InFlightSalt (default)
+
+	doneA := make(chan error, 1)
+	go func() {
+		_, err := pipe.Run(context.Background(), issue, opts)
+		doneA <- err
+	}()
+
+	select {
+	case <-holdingClaim:
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("goroutine A never reached ExecuteRaw; claim path is broken")
+	}
+
+	doneB := make(chan error, 1)
+	go func() {
+		_, err := pipe.Run(context.Background(), issue, opts)
+		doneB <- err
+	}()
+
+	select {
+	case err := <-doneB:
+		if err != nil {
+			t.Fatalf("goroutine B should return (nil, nil) when claim is taken, got err=%v", err)
+		}
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("goroutine B blocked; default-salt claim is not short-circuiting Run")
+	}
+
+	close(release)
+	select {
+	case err := <-doneA:
+		if err != nil {
+			t.Fatalf("goroutine A returned err=%v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("goroutine A never completed after release")
+	}
+
+	if n := atomic.LoadInt32(&execCount); n != 1 {
+		t.Errorf("expected exactly 1 ExecuteRaw call (default-salt dispatches collapse), got %d", n)
+	}
+}
+
 // blockingExec is a CLIExecutor whose ExecuteRaw invokes `onCall` (if
 // set) before returning. Tests use it to insert a sync primitive between
 // "pipeline took the claim" and "pipeline releases the claim", so two
