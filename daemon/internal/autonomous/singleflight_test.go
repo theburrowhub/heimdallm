@@ -15,9 +15,11 @@ func TestPhaseGuard_OneAtATime(t *testing.T) {
 	if _, ok := g.TryEnter("development"); ok {
 		t.Errorf("second enter of busy phase must fail")
 	}
-	if _, ok := g.TryEnter("triage"); !ok {
+	relTriage, ok := g.TryEnter("triage")
+	if !ok {
 		t.Errorf("independent phase should enter")
 	}
+	defer relTriage()
 	rel()
 	if _, ok := g.TryEnter("development"); !ok {
 		t.Errorf("after release, phase should be enterable again")

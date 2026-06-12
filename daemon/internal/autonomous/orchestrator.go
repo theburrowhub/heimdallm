@@ -24,10 +24,6 @@ type DriveResult struct {
 	LastDone string // last successfully completed stage
 }
 
-// stages is the fixed chain. Review is handled asynchronously by Tier 3, not
-// by Drive, so it is intentionally absent here.
-var stages = []string{"triage", "refinement", "development"}
-
 // Orchestrator drives one issue through the stage chain single-flight.
 type Orchestrator struct {
 	runner StageRunner
@@ -44,6 +40,10 @@ func NewOrchestrator(runner StageRunner, guard *PhaseGuard) *Orchestrator {
 // cleanly (Started reflects whether any stage ran). A non-success stage stops
 // the chain (the issue stays where it is for the next tick / human inspection).
 func (o *Orchestrator) Drive(ctx context.Context, c Candidate) (DriveResult, error) {
+	// stages is the fixed chain. Review is handled asynchronously by Tier 3,
+	// not by Drive, so it is intentionally absent here. Kept function-local so
+	// no other code in the package can reassign or mutate it.
+	stages := []string{"triage", "refinement", "development"}
 	var res DriveResult
 	for _, stage := range stages {
 		rel, ok := o.guard.TryEnter(stage)
