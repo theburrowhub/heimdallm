@@ -79,7 +79,7 @@ type FixResult struct {
 //
 // All security primitives applied to auto_implement apply here:
 // `ensureAutoImplementWritePerms` (write-mode CLI flags),
-// `sanitiseUntrustedFreeText` (reviewer text + issue body fences),
+// `SanitiseUntrustedFreeText` (reviewer text + issue body fences),
 // and the `sensitivePathPatterns` denylist inside CommitAll.
 func (p *Pipeline) RunFix(ctx context.Context, req FixRequest) (FixResult, error) {
 	if p.git == nil {
@@ -157,21 +157,21 @@ func (p *Pipeline) RunFix(ctx context.Context, req FixRequest) (FixResult, error
 // agent to apply it. Both prompt builders apply the same untrusted-
 // text sanitisation to the reviewer body and the originating issue.
 func buildFixAgentPrompt(req FixRequest) string {
-	safeReviewer := sanitiseUntrustedFreeText(req.ReviewerLogin)
-	safeReview := sanitiseUntrustedFreeText(req.ReviewBody)
+	safeReviewer := SanitiseUntrustedFreeText(req.ReviewerLogin)
+	safeReview := SanitiseUntrustedFreeText(req.ReviewBody)
 	var b strings.Builder
 	b.WriteString("You are addressing a reviewer's CHANGES_REQUESTED on a PR you opened.\n")
 	b.WriteString("The repository is checked out at the PR's head branch. ")
 	b.WriteString("Apply the requested changes by editing files in the working tree. ")
 	b.WriteString("If the changes are out of scope or already addressed, leave the working tree unchanged — the daemon detects an empty diff and posts an explanatory comment instead of pushing.\n\n")
 	b.WriteString(fmt.Sprintf("Repository: %s\nPR number: #%d\nPR title: %s\n",
-		req.Repo, req.PRNumber, sanitiseUntrustedFreeText(req.PRTitle)))
+		req.Repo, req.PRNumber, SanitiseUntrustedFreeText(req.PRTitle)))
 	if req.OriginIssue != nil {
 		b.WriteString(fmt.Sprintf("Originating issue: #%d %s\n\n",
-			req.OriginIssue.Number, sanitiseUntrustedFreeText(req.OriginIssue.Title)))
+			req.OriginIssue.Number, SanitiseUntrustedFreeText(req.OriginIssue.Title)))
 		b.WriteString(untrustedBodyFenceOpen)
 		b.WriteString("\n")
-		b.WriteString(sanitiseUntrustedFreeText(req.OriginIssue.Body))
+		b.WriteString(SanitiseUntrustedFreeText(req.OriginIssue.Body))
 		b.WriteString("\n")
 		b.WriteString(untrustedBodyFenceClose)
 		b.WriteString("\n\n")

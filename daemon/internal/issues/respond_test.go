@@ -366,7 +366,7 @@ func TestResponder_PromptSanitisesExternalText(t *testing.T) {
 		t.Fatal("executor not invoked")
 	}
 	// The literal forged close marker must not survive untouched in
-	// the prompt; sanitiseUntrustedFreeText neutralises the box-drawing
+	// the prompt; SanitiseUntrustedFreeText neutralises the box-drawing
 	// characters so a model parser cannot mistake it for the real
 	// fence boundary.
 	if strings.Contains(exec.prompt, hostileBody) {
