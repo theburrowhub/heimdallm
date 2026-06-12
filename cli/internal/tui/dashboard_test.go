@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -270,5 +271,156 @@ func TestTabItemCountRespectsFilter(t *testing.T) {
 	d.prRepoFilter = "org/a"
 	if got := d.tabItemCount(); got != 2 {
 		t.Fatalf("filter org/a: expected 2, got %d", got)
+	}
+}
+
+func TestHumanizeAction(t *testing.T) {
+	cases := []struct {
+		name   string
+		review *api.IssueReview
+		want   string
+	}{
+		{"nil review", nil, "---"},
+		{"review_only", &api.IssueReview{ActionTaken: "review_only"}, "Triaged"},
+		{"refinement", &api.IssueReview{ActionTaken: "refinement"}, "Refined"},
+		{"auto_implement no PR", &api.IssueReview{ActionTaken: "auto_implement"}, "Implemented"},
+		{"auto_implement with PR", &api.IssueReview{ActionTaken: "auto_implement", PRCreated: 157}, "→ PR #157"},
+		{"unknown action", &api.IssueReview{ActionTaken: "custom_action"}, "custom_action"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := humanizeAction(tc.review)
+			if got != tc.want {
+				t.Fatalf("humanizeAction() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTimeAgo(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name string
+		t    time.Time
+		want string
+	}{
+		{"zero time", time.Time{}, "---"},
+		{"30 seconds ago", now.Add(-30 * time.Second), "just now"},
+		{"5 minutes ago", now.Add(-5 * time.Minute), "5m ago"},
+		{"3 hours ago", now.Add(-3 * time.Hour), "3h ago"},
+		{"10 days ago", now.Add(-10 * 24 * time.Hour), "10d ago"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := timeAgo(tc.t)
+			if got != tc.want {
+				t.Fatalf("timeAgo() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	old := now.Add(-60 * 24 * time.Hour)
+	got := timeAgo(old)
+	if got != old.Format("Jan 02") {
+		t.Fatalf("timeAgo(60 days) = %q, want %q", got, old.Format("Jan 02"))
+	}
+}
+
+func TestParseLabels(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  json.RawMessage
+		want []string
+	}{
+		{"nil", nil, nil},
+		{"empty", json.RawMessage(""), nil},
+		{"string array", json.RawMessage(`["bug","enhancement"]`), []string{"bug", "enhancement"}},
+		{"object array", json.RawMessage(`[{"name":"bug"},{"name":"help wanted"}]`), []string{"bug", "help wanted"}},
+		{"invalid json", json.RawMessage(`{invalid`), nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseLabels(tc.raw)
+			if len(got) != len(tc.want) {
+				t.Fatalf("parseLabels() = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("parseLabels()[%d] = %q, want %q", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestVisibleIssuesFilter(t *testing.T) {
+	d := NewDashboard("http://localhost:0", "", "test")
+	d.issues = []api.Issue{
+		{Number: 1, Repo: "org/alpha", LatestReview: &api.IssueReview{ActionTaken: "review_only"}},
+		{Number: 2, Repo: "org/beta", LatestReview: &api.IssueReview{ActionTaken: "auto_implement"}},
+		{Number: 3, Repo: "org/alpha", LatestReview: &api.IssueReview{ActionTaken: "auto_implement"}},
+	}
+
+	if got := len(d.visibleIssues()); got != 3 {
+		t.Fatalf("no filter: got %d, want 3", got)
+	}
+
+	d.issueRepoFilter = "org/alpha"
+	if got := len(d.visibleIssues()); got != 2 {
+		t.Fatalf("repo filter: got %d, want 2", got)
+	}
+
+	d.issueRepoFilter = ""
+	d.issueActionFilter = "auto_implement"
+	if got := len(d.visibleIssues()); got != 2 {
+		t.Fatalf("action filter: got %d, want 2", got)
+	}
+
+	d.issueRepoFilter = "org/alpha"
+	d.issueActionFilter = "auto_implement"
+	vis := d.visibleIssues()
+	if len(vis) != 1 || vis[0].Number != 3 {
+		t.Fatalf("combined filter: got %v, want [#3]", vis)
+	}
+}
+
+func TestCycleIssueRepoFilter(t *testing.T) {
+	d := NewDashboard("http://localhost:0", "", "test")
+	d.issues = []api.Issue{
+		{Repo: "org/beta"},
+		{Repo: "org/alpha"},
+	}
+
+	d.cycleIssueRepoFilter()
+	if d.issueRepoFilter != "org/alpha" {
+		t.Fatalf("first cycle: got %q, want org/alpha", d.issueRepoFilter)
+	}
+	d.cycleIssueRepoFilter()
+	if d.issueRepoFilter != "org/beta" {
+		t.Fatalf("second cycle: got %q, want org/beta", d.issueRepoFilter)
+	}
+	d.cycleIssueRepoFilter()
+	if d.issueRepoFilter != "" {
+		t.Fatalf("third cycle: got %q, want empty (all)", d.issueRepoFilter)
+	}
+}
+
+func TestIssuesSortedByDate(t *testing.T) {
+	d := NewDashboard("http://localhost:0", "", "test")
+	now := time.Now()
+	msg := dataMsg{
+		issues: []api.Issue{
+			{Number: 1, LatestReview: &api.IssueReview{CreatedAt: now.Add(-3 * time.Hour)}},
+			{Number: 2, LatestReview: &api.IssueReview{CreatedAt: now.Add(-1 * time.Hour)}},
+			{Number: 3, LatestReview: &api.IssueReview{CreatedAt: now.Add(-2 * time.Hour)}},
+			{Number: 4},
+		},
+	}
+	d.Update(msg)
+	if len(d.issues) != 3 {
+		t.Fatalf("expected 3 issues with reviews, got %d", len(d.issues))
+	}
+	if d.issues[0].Number != 2 || d.issues[1].Number != 3 || d.issues[2].Number != 1 {
+		t.Fatalf("issues not sorted by date desc: got #%d, #%d, #%d",
+			d.issues[0].Number, d.issues[1].Number, d.issues[2].Number)
 	}
 }
