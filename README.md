@@ -1,5 +1,7 @@
 # Heimdallm
 
+> ⚠️ This project is under active development.
+
 > AI-powered GitHub automation for macOS and Linux — reviews your pull requests, triages your issues, and can even open implementation PRs for you. Uses Claude, Gemini, Codex, or OpenCode under the hood, posts everything back as your GitHub account, and keeps you informed via a native menu-bar app or a Flutter Web UI.
 
 ![Heimdallm dashboard](assets/icon.png)
