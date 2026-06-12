@@ -19,7 +19,9 @@ Full reference for all settings, environment variables, and deployment options.
 11. [Retention](#11-retention)
 12. [CLI](#12-cli)
 13. [Distribution Formats](#13-distribution-formats)
-14. [Full config.toml Reference](#14-full-configtoml-reference)
+14. [Circuit Breakers](#14-circuit-breakers)
+15. [Autonomous Mode](#15-autonomous-mode)
+16. [Full config.toml Reference](#16-full-configtoml-reference)
 
 ---
 
@@ -1039,7 +1041,132 @@ architecture.
 
 ---
 
-## 14. Full config.toml Reference
+## 14. Circuit Breakers
+
+Circuit breakers cap AI invocations to prevent cost-runaway loops. The defaults are deliberately conservative — high-volume workflows must raise caps explicitly. There is currently no way to express "unlimited" through TOML; set a large value (e.g. `99999`) if you need near-unbounded behaviour.
+
+```toml
+[circuit_breaker]
+per_pr_24h       = 3    # max reviews on the same PR HEAD SHA in any 24 h window
+per_repo_hr      = 20   # max PR reviews on the same repo in any 1 h window
+per_issue_24h    = 3    # max triages on the same issue in any 24 h window
+per_issue_repo_hr = 10  # max issue triages on the same repo in any 1 h window
+per_impl_repo_hr  = 5   # max auto_implement (development) runs per repo in any 1 h window
+```
+
+| Field | Default | Description |
+|---|---|---|
+| `per_pr_24h` | `3` | Reviews on the same PR HEAD SHA over a 24 h window. A new commit gets its own allowance. |
+| `per_repo_hr` | `20` | PR reviews across the same repo over a 1 h window. |
+| `per_issue_24h` | `3` | Issue triages on the same issue over a 24 h window. |
+| `per_issue_repo_hr` | `10` | Issue triages across the same repo over a 1 h window. Tighter than the PR cap because each triage is a full-context agent run. |
+| `per_impl_repo_hr` | `5` | Auto-implement (development) runs per repo in any 1 h window. The per-issue breaker only counts triages (`review_only`), leaving development uncapped at the issue level; this field is the breadth guard for autonomous mode. |
+
+All zero values are treated as "unset" and substituted with the defaults above. There is no separate env-var mapping for circuit breaker fields — set them in `config.toml`.
+
+### Per-org and per-repo circuit breaker overrides
+
+All five fields are resolvable per org and per repo via `[ai.orgs."org".circuit_breaker]` and `[ai.repos."org/repo".circuit_breaker]`, following the same `repo > org > global` precedence as all other `[ai.*]` overrides. Only fields present in the override section are applied; absent fields inherit from the next level.
+
+```toml
+# Tighten the development breadth guard for a high-activity repo
+[ai.repos."my-org/my-repo".circuit_breaker]
+per_impl_repo_hr = 3
+
+# Loosen the per-repo PR cap for an org with frequent pushes
+[ai.orgs."my-org".circuit_breaker]
+per_repo_hr = 40
+```
+
+---
+
+## 15. Autonomous Mode
+
+Autonomous mode turns Heimdallm into a fully-unattended end-to-end agent: it picks up issues, implements them, opens PRs, and — when configured — merges approved PRs without any human touch. Safety relies entirely on circuit breakers (see [§14 Circuit Breakers](#14-circuit-breakers)) and single-flight locks (at most one agent run per issue at a time); there is intentionally no per-day task cap. `skip_labels` and `blocked_labels` are always respected regardless of autonomous settings.
+
+> **Autonomous mode is opt-in and off by default.** Every flag defaults to `false` (or its documented string default). Flip `enabled = true` only when you are ready for unattended operation.
+
+### Configuration reference
+
+```toml
+[autonomous]
+enabled          = false    # master switch — false = autonomous mode off entirely
+auto_merge       = false    # merge gate — even approved-clean PRs are not merged unless true
+merge_method     = "squash" # squash | merge | rebase (ignored when auto_merge = false)
+take_others_tasks = false   # pick up issues assigned to other users (cascade bucket 3)
+reassign_on_take  = false   # when taking another user's task, add the bot as co-assignee
+dev_max_turns    = 0        # agent max turns for development; 0 = no practical cap
+dev_effort       = "high"   # agent effort level: low | medium | high | max
+dev_timeout      = "45m"    # timeout for the development agent run
+claim_lease      = "2h"     # per-issue claim lease + failure/no-progress cooldown
+```
+
+| Field | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Master switch and kill-switch. When `false`, autonomous mode is entirely inactive regardless of all other fields. |
+| `auto_merge` | `false` | Merge gate. Built into the pipeline but **disabled by default**. Even when an approved, clean PR is detected, nothing is merged unless this is explicitly `true`. |
+| `merge_method` | `"squash"` | Merge strategy to use when `auto_merge = true`. Accepted values: `squash`, `merge`, `rebase`. |
+| `take_others_tasks` | `false` | When `false` (the default), the agent processes only issues assigned to the configured operator. Set to `true` to also pick up issues assigned to other users (cascade bucket 3 in the task resolver). |
+| `reassign_on_take` | `false` | When taking another user's task (`take_others_tasks = true`), add the bot as a co-assignee (the original assignee is kept) and post an agent-generated coordination comment on the issue. |
+| `dev_max_turns` | `0` | Maximum agent turns for the development stage. `0` means no practical cap (the underlying CLI default applies). |
+| `dev_effort` | `"high"` | Agent effort level passed to the AI CLI for the development stage. Accepted values: `low`, `medium`, `high`, `max`. |
+| `dev_timeout` | `"45m"` | Wall-clock timeout for a single development agent run. Generous by default to accommodate complex implementations. |
+| `claim_lease` | `"2h"` | Per-issue claim lease, expressed as a Go duration. When the poller picks up an issue it records a lease expiring `now + claim_lease`; the selector treats any issue with an active (un-expired) lease as ineligible. This prevents two daemon ticks (or two daemons across a restart) from driving the same issue concurrently, and — because the lease is **kept** when a Drive fails or makes no progress — it doubles as the failure/no-progress **cooldown** that prevents a retry-storm on a persistently failing issue. The lease is cleared early once a PR is created (the open-PR guard takes over re-selection) and otherwise expires on its own, so a crash mid-Drive never sticks the claim permanently and needs no manual operator step. **It must exceed the longest possible Drive** (triage + refinement + development timeouts combined); the `2h` default comfortably exceeds the `45m` `dev_timeout` plus the lighter triage/refinement stages. |
+
+**Default behaviour summary:** all bools (`enabled`, `auto_merge`, `take_others_tasks`, `reassign_on_take`) default to `false` via Go's zero value — they are not given non-zero defaults by `applyAutonomousDefaults`. The string fields (`merge_method`, `dev_effort`, `dev_timeout`, `claim_lease`) receive explicit non-zero defaults.
+
+### Per-org and per-repo overrides
+
+Every field supports the same `repo > org > global` precedence used throughout the rest of the config. Override only the fields you need to change; absent fields inherit from the parent level.
+
+```toml
+[autonomous]
+enabled          = false
+auto_merge       = false
+merge_method     = "squash"
+take_others_tasks = true
+reassign_on_take  = true
+dev_effort       = "high"
+dev_timeout      = "45m"
+
+# Enable autonomous mode for the whole org, but keep auto_merge off
+[autonomous.orgs."my-org"]
+enabled = true
+
+# Enable autonomous mode for a single repo and also allow merging
+[autonomous.repos."my-org/my-repo"]
+enabled    = true
+auto_merge = true
+```
+
+Precedence: `autonomous.repos."org/repo"` > `autonomous.orgs."org"` > global `[autonomous]`.
+
+### Worked example: enabling autonomous mode for a single repo conservatively
+
+```toml
+# Global autonomous block — keep everything off
+[autonomous]
+enabled          = false
+auto_merge       = false
+dev_effort       = "high"
+dev_timeout      = "45m"
+
+# Opt a single repo in, with a conservative implementation cap
+[autonomous.repos."my-org/my-repo"]
+enabled       = true
+auto_merge    = false    # review PRs but don't merge automatically
+dev_max_turns = 30       # cap agent turns to bound cost
+
+# Pair with a tight circuit breaker for that repo
+[ai.repos."my-org/my-repo".circuit_breaker]
+per_impl_repo_hr = 2    # at most 2 development runs per hour
+```
+
+With this setup, Heimdallm will autonomously triage issues and implement them in `my-org/my-repo`, but a human must approve and merge the resulting PRs. The circuit breaker limits development runs to 2 per hour regardless of how many issues arrive.
+
+---
+
+## 16. Full config.toml Reference
 
 ```toml
 # Heimdallm configuration
@@ -1201,6 +1328,10 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # refinement_labels = ["heimdallm-refine"]
 # review_only_labels = ["heimdallm-triage"]
 # skip_labels = ["wontfix"]
+#
+# # Per-org circuit breaker override (optional, fields overlay the global baseline)
+# [ai.orgs."myorg".circuit_breaker]
+# per_repo_hr = 40
 
 # [ai.orgs."other-org"]
 # primary = "codex"
@@ -1221,6 +1352,47 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # pr_assignee      = "deploybot"
 # pr_labels        = ["api-team"]
 # pr_draft         = false
+#
+# # Per-repo circuit breaker override (optional, fields overlay the org/global baseline)
+# [ai.repos."myorg/api".circuit_breaker]
+# per_impl_repo_hr = 3
+
+# ── Circuit breakers ──────────────────────────────────────────────────────────
+# Caps AI invocations to prevent cost-runaway loops. 0 = use the default.
+# There is no "unlimited" setting — use a large value (e.g. 99999) if needed.
+# See §14 Circuit Breakers in the guide for per-org/per-repo override syntax.
+
+# [circuit_breaker]
+# per_pr_24h        = 3    # max reviews on the same PR HEAD SHA in any 24 h window
+# per_repo_hr       = 20   # max PR reviews on the same repo in any 1 h window
+# per_issue_24h     = 3    # max triages on the same issue in any 24 h window
+# per_issue_repo_hr = 10   # max issue triages on the same repo in any 1 h window
+# per_impl_repo_hr  = 5    # max auto_implement (development) runs per repo in any 1 h window
+
+# ── Autonomous mode ───────────────────────────────────────────────────────────
+# Fully-unattended end-to-end mode. All bools default to false.
+# Safety relies on circuit breakers; there is no per-day task cap.
+# skip_labels and blocked_labels are always respected.
+# See §15 Autonomous Mode in the guide for per-org/per-repo override syntax.
+
+# [autonomous]
+# enabled           = false   # master switch / kill-switch
+# auto_merge        = false   # merge gate; built but OFF by default
+# merge_method      = "squash" # squash | merge | rebase (used only when auto_merge = true)
+# take_others_tasks = false   # enable cascade bucket 3 (others' assigned issues)
+# reassign_on_take  = false   # add bot as co-assignee when taking another user's task
+# dev_max_turns     = 0       # 0 = no practical cap
+# dev_effort        = "high"  # low | medium | high | max
+# dev_timeout       = "45m"   # wall-clock timeout for a development agent run
+
+# Per-org override example:
+# [autonomous.orgs."my-org"]
+# enabled = true
+
+# Per-repo override example:
+# [autonomous.repos."my-org/my-repo"]
+# enabled    = true
+# auto_merge = true
 
 # ── Retention ─────────────────────────────────────────────────────────────────
 

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/heimdallm/daemon/internal/autonomous"
+	gh "github.com/heimdallm/daemon/internal/github"
 	issuepipeline "github.com/heimdallm/daemon/internal/issues"
 	"github.com/heimdallm/daemon/internal/scheduler"
 	"github.com/heimdallm/daemon/internal/sse"
@@ -101,6 +103,15 @@ func (a *tier2Adapter) refreshAutoImplementPRReviewState(
 			"prev_state", prevState, "new_state", state, "reviewer", reviewer)
 	}
 
+	// Autonomous repos route review reactions through the classifier so an
+	// approved-clean PR can advance to the merge gate without a human. When
+	// autonomous is disabled for the repo the classifier is bypassed entirely
+	// and the legacy COMMENTED→Responder / CHANGES_REQUESTED→FixRunner switch
+	// below runs unchanged.
+	if a.autonomousEnabledForRepo(item.Repo) {
+		return a.dispatchAutonomousReview(ctx, item, stored, reviews, state)
+	}
+
 	// Dispatch independently of persist/emit so a failed runner does
 	// not poison the retry path. Both Run methods are safe to call
 	// when their owning config flag is off (they return nil
@@ -140,4 +151,132 @@ func (a *tier2Adapter) refreshAutoImplementPRReviewState(
 		}
 	}
 	return nil
+}
+
+// autonomousEnabledForRepo reports whether autonomous mode is enabled for the
+// repo, resolving config under the adapter's cfg lock.
+func (a *tier2Adapter) autonomousEnabledForRepo(repo string) bool {
+	if a == nil || a.cfg == nil {
+		return false
+	}
+	if a.cfgMu != nil {
+		a.cfgMu.Lock()
+		defer a.cfgMu.Unlock()
+	}
+	return (*a.cfg).AutonomousForRepo(repo).Enabled
+}
+
+// dispatchAutonomousReview is the Tier 3 reaction for autonomous repos. It
+// classifies the aggregate review set and routes:
+//
+//   - DecisionFix       → split on the real review state to preserve the legacy
+//     behaviour: a COMMENTED review goes to the Responder (answer the comment),
+//     while a CHANGES_REQUESTED or approved-with-issues review goes to the
+//     FixRunner (push a fix). Without the split a COMMENTED review would hit
+//     the FixRunner, which no-ops with no CR present, and the comment would be
+//     neither answered nor fixed.
+//   - DecisionMergeGate → the merge gate. With auto_merge disabled (the
+//     default) this is a safe no-op that emits an audit SSE; with it enabled
+//     the PR is merged via the configured method (emits a merge-done SSE).
+//   - DecisionWait      → nothing (no human review yet).
+//
+// Runner errors propagate exactly like the legacy path so the StateWorker keeps
+// LastSeen frozen and retries the dispatch next tick.
+//
+// Ordering note: the FIX_PUSHED re-arm guard in
+// refreshAutoImplementPRReviewState runs BEFORE this function — when the
+// aggregate state is the same CR the FixRunner already addressed it early-
+// returns nil and dispatchAutonomousReview is never reached. EventAutonomousReviewClass
+// is therefore intentionally NOT emitted on a tick suppressed by the re-arm
+// guard (the review state has not moved, so re-emitting would only flap the
+// dashboard); it re-emits once a fresh CR (a strictly newer SubmittedAt)
+// arrives and the guard releases.
+func (a *tier2Adapter) dispatchAutonomousReview(
+	ctx context.Context, item *scheduler.WatchItem, stored *store.PR, reviews []gh.PRReview, state string,
+) error {
+	decision := autonomous.ClassifyReview(toReviewInputs(reviews))
+
+	if a.broker != nil {
+		a.broker.Publish(sse.Event{
+			Type: sse.EventAutonomousReviewClass,
+			Data: sseData(map[string]any{
+				"repo": item.Repo, "number": item.Number, "decision": decision.String(),
+			}),
+		})
+	}
+
+	switch decision {
+	case autonomous.DecisionFix:
+		// Preserve the legacy split: a plain COMMENTED review is answered by
+		// the Responder; a CHANGES_REQUESTED or approved-with-issues review is
+		// addressed by the FixRunner. The FixRunner no-ops when there is no CR,
+		// so routing COMMENTED there would silently drop the comment.
+		if state == issuepipeline.ReviewStateCommented {
+			if a.responder != nil {
+				if err := a.responder.Run(ctx, stored, stored.AutoImplementIssueID); err != nil {
+					slog.Warn("tier3: autonomous responder run failed (retrying next tick)",
+						"repo", item.Repo, "number", item.Number, "err", err)
+					return fmt.Errorf("autonomous responder: %w", err)
+				}
+			}
+		} else if a.fixRunner != nil {
+			if err := a.fixRunner.Run(ctx, stored, stored.AutoImplementIssueID); err != nil {
+				slog.Warn("tier3: autonomous fix runner failed (retrying next tick)",
+					"repo", item.Repo, "number", item.Number, "err", err)
+				return fmt.Errorf("autonomous fix runner: %w", err)
+			}
+		}
+	case autonomous.DecisionMergeGate:
+		auto := a.autonomousConfigForRepo(item.Repo)
+		gate := autonomous.NewMergeGate(a.ghClient, auto.AutoMerge, auto.MergeMethod)
+		res, err := gate.Run(ctx, item.Repo, item.Number)
+		if err != nil {
+			slog.Warn("tier3: autonomous merge gate failed (retrying next tick)",
+				"repo", item.Repo, "number", item.Number, "err", err)
+			return fmt.Errorf("autonomous merge gate: %w", err)
+		}
+		if a.broker != nil {
+			switch res {
+			case autonomous.MergeSkippedDisabled:
+				a.broker.Publish(sse.Event{
+					Type: sse.EventAutonomousMergeSkipped,
+					Data: sseData(map[string]any{
+						"repo": item.Repo, "number": item.Number, "reason": "auto_merge_disabled",
+					}),
+				})
+			case autonomous.MergeDone:
+				a.broker.Publish(sse.Event{
+					Type: sse.EventAutonomousMergeDone,
+					Data: sseData(map[string]any{
+						"repo": item.Repo, "number": item.Number, "method": auto.MergeMethod,
+					}),
+				})
+			}
+		}
+		slog.Info("tier3: autonomous merge gate",
+			"repo", item.Repo, "number", item.Number, "result", res.String())
+	case autonomous.DecisionWait:
+		// No human review yet — keep watching.
+	}
+	return nil
+}
+
+// autonomousConfigForRepo resolves the autonomous config for a repo under lock.
+func (a *tier2Adapter) autonomousConfigForRepo(repo string) (cfg autonomousConfigView) {
+	if a == nil || a.cfg == nil {
+		return cfg
+	}
+	if a.cfgMu != nil {
+		a.cfgMu.Lock()
+		defer a.cfgMu.Unlock()
+	}
+	resolved := (*a.cfg).AutonomousForRepo(repo)
+	return autonomousConfigView{AutoMerge: resolved.AutoMerge, MergeMethod: resolved.MergeMethod}
+}
+
+// autonomousConfigView is the minimal projection dispatchAutonomousReview needs
+// from the resolved autonomous config; kept tiny so the lock is held briefly.
+type autonomousConfigView struct {
+	AutoMerge   bool
+	MergeMethod string
 }

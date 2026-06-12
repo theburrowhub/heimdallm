@@ -28,6 +28,12 @@ type CircuitBreakerConfig struct {
 	// window. Default 10 — tighter than the PR cap because each triage is
 	// a full-context Claude run; set to 0 to apply the default.
 	PerIssueRepoHr int `toml:"per_issue_repo_hr"`
+	// PerImplRepoHr caps auto_implement (development) runs per repo in any
+	// 1h window. The per-issue breaker only counts triages (review_only),
+	// leaving development uncapped; this is the breadth guard. Default 5
+	// (applied by applyDefaults when 0); the enforcement layer treats a
+	// configured non-zero value as the cap.
+	PerImplRepoHr int `toml:"per_impl_repo_hr"`
 }
 
 // DefaultCircuitBreakerConfig returns the safe defaults applied when the
@@ -38,5 +44,6 @@ func DefaultCircuitBreakerConfig() CircuitBreakerConfig {
 		PerRepoHr:      20,
 		PerIssue24h:    3,
 		PerIssueRepoHr: 10,
+		PerImplRepoHr:  5,
 	}
 }

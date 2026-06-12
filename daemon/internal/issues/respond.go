@@ -34,13 +34,13 @@ func marshalEvent(m map[string]any) string {
 // cooldown, bot-author skip) lives here so Tier 3's HandleChange
 // branch can route blindly and trust the no-op path.
 type Responder struct {
-	store    responderStore
-	gh       responderGH
-	exec     ResponderExecutor
-	broker   eventPublisher
-	cfgFn    func() config.ReviewResponseConfig
-	loginFn  func() string
-	nowFn    func() time.Time
+	store   responderStore
+	gh      responderGH
+	exec    ResponderExecutor
+	broker  eventPublisher
+	cfgFn   func() config.ReviewResponseConfig
+	loginFn func() string
+	nowFn   func() time.Time
 }
 
 // responderStore captures the slice of *store.Store the Responder
@@ -251,18 +251,18 @@ func latestExternalCommentedReview(reviews []github.PRReview, botLogin string) *
 // `UNTRUSTED USER ISSUE BODY` fence so the agent can reason about the
 // reviewer's question in the light of the original work item.
 func buildResponderPrompt(pr *store.PR, issue *store.Issue, latest *github.PRReview) string {
-	safeAuthor := sanitiseUntrustedFreeText(latest.User.Login)
-	safeBody := sanitiseUntrustedFreeText(latest.Body)
+	safeAuthor := SanitiseUntrustedFreeText(latest.User.Login)
+	safeBody := SanitiseUntrustedFreeText(latest.Body)
 	var b strings.Builder
 	b.WriteString("You are responding to a reviewer's review on a PR you opened.\n\n")
 	b.WriteString(fmt.Sprintf("Repository: %s\nPR number: #%d\nPR title: %s\n",
-		pr.Repo, pr.Number, sanitiseUntrustedFreeText(pr.Title)))
+		pr.Repo, pr.Number, SanitiseUntrustedFreeText(pr.Title)))
 	if issue != nil {
 		b.WriteString(fmt.Sprintf("Originating issue: #%d %s\n\n",
-			issue.Number, sanitiseUntrustedFreeText(issue.Title)))
+			issue.Number, SanitiseUntrustedFreeText(issue.Title)))
 		b.WriteString(untrustedBodyFenceOpen)
 		b.WriteString("\n")
-		b.WriteString(sanitiseUntrustedFreeText(issue.Body))
+		b.WriteString(SanitiseUntrustedFreeText(issue.Body))
 		b.WriteString("\n")
 		b.WriteString(untrustedBodyFenceClose)
 		b.WriteString("\n\n")

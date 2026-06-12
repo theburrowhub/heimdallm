@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/heimdallm/daemon/internal/activity"
+	"github.com/heimdallm/daemon/internal/autonomous"
 	"github.com/heimdallm/daemon/internal/bus"
 	"github.com/heimdallm/daemon/internal/config"
 	"github.com/heimdallm/daemon/internal/discovery"
@@ -770,6 +771,65 @@ func main() {
 		} else {
 			slog.Info("rename probe: disabled (ai.repo_rename_check_interval=0)")
 		}
+
+		// Autonomous end-to-end poller. Selects an issue (bot-assigned >
+		// unassigned > others), drives it through triage→refinement→development
+		// single-flight, and lets Tier 3 react to reviews. Reuses the same
+		// repo enumeration as Tier 2. The whole tick is a cheap no-op when no
+		// monitored repo has autonomous enabled, so it is always started; the
+		// per-repo Enabled flag (resolved under cfgMu each tick) is the gate.
+		autonomousReposFn := func() []string {
+			cfgMu.Lock()
+			defer cfgMu.Unlock()
+			var discovered []string
+			if cfg.GitHub.DiscoveryTopic != "" {
+				discovered = discoverySvc.Discovered()
+			}
+			return discovery.MergeRepos(cfg.GitHub.Repositories, aiRepoKeys(cfg), discovered, cfg.GitHub.NonMonitored)
+		}
+		autonomousStageR := &autonomousStageRunner{
+			ghClient:  ghClient,
+			issuePipe: issuePipe,
+			store:     s,
+			repoCtx:   repoCtx,
+			broker:    broker,
+			token:     token,
+			cfg:       &cfg,
+			cfgMu:     &cfgMu,
+			authUser:  botLoginAccessor,
+		}
+		autonomousPoller := &AutonomousPoller{
+			ghClient: ghClient,
+			store:    s,
+			broker:   broker,
+			orch:     autonomous.NewOrchestrator(autonomousStageR, autonomous.NewPhaseGuard()),
+			runner:   exec,
+			cfg:      &cfg,
+			cfgMu:    &cfgMu,
+			botLogin: botLoginAccessor,
+			reposFn:  autonomousReposFn,
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ticker := time.NewTicker(pollInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					// Run drives repos SEQUENTIALLY within a tick: at most one
+					// issue per repo per tick, and each Drive blocks (up to
+					// DevTimeout, ~45 min) before the next repo is considered.
+					// For multi-repo setups the next repo therefore waits for
+					// the current Drive to finish. This is intentional single-
+					// flight behavior (bounded concurrency, no agent stampede),
+					// not a bug.
+					autonomousPoller.Run(ctx)
+				}
+			}
+		}()
 
 		slog.Info("pollers: started",
 			"discovery", discoveryInterval,
@@ -3135,9 +3195,20 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 	a.cfgMu.Lock()
 	c := *a.cfg
 	repoIT := c.IssueTrackingForRepo(repo)
+	autonomousEnabled := c.AutonomousForRepo(repo).Enabled
 	a.cfgMu.Unlock()
 
-	if !repoIT.Enabled {
+	// When autonomous mode is enabled for a repo, the autonomous poller owns
+	// the issue lifecycle (selection + triage→refinement→development single-
+	// flight) for that repo. The legacy label-driven issue pipeline must NOT
+	// run in parallel: otherwise a Tier 2 tick could re-pick an issue the
+	// autonomous Drive is already working (which has no IssueReview/PR yet, so
+	// alreadyProcessed misses), enqueue a second NATS implement job, and run a
+	// duplicate agent → duplicate PRs / failed git push / wasted compute. This
+	// guard is scoped to ISSUE processing only — PR review (ProcessPR + the
+	// Tier 3 Responder/FixRunner) is unaffected and remains the autonomous
+	// review loop.
+	if !repoIT.Enabled || autonomousEnabled {
 		return 0, nil
 	}
 
@@ -3280,6 +3351,14 @@ func (a *tier2Adapter) PromoteReady(ctx context.Context, repos []string) (int, e
 	groupOrder := make([]string, 0, len(repos))
 	groups := make(map[string]*promoteGroup)
 	for _, repo := range repos {
+		// Skip autonomous-owned repos: the autonomous poller owns the issue
+		// lifecycle (including stage advancement, which it records as a best-
+		// effort audit trail). Letting Tier 2 also auto-promote stage labels
+		// here would race the poller and cause spurious label advances on
+		// issues the autonomous pipeline is driving. PR review is unaffected.
+		if c.AutonomousForRepo(repo).Enabled {
+			continue
+		}
 		it := c.IssueTrackingForRepo(repo)
 		if it.Enabled && len(it.BlockedLabels) > 0 && len(it.Assignees) == 0 && authUser == "" {
 			authUser = a.resolveAuthenticatedUser()

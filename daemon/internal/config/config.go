@@ -37,6 +37,7 @@ type Config struct {
 	Retention      RetentionConfig      `toml:"retention"`
 	ActivityLog    ActivityLogConfig    `toml:"activity_log"`
 	CircuitBreaker CircuitBreakerConfig `toml:"circuit_breaker"`
+	Autonomous     AutonomousConfig     `toml:"autonomous"`
 }
 
 type ServerConfig struct {
@@ -523,6 +524,9 @@ type RepoAI struct {
 
 	// Per-repo issue tracking override. Nil fields inherit from org/global.
 	IssueTracking *IssueTrackingOverride `toml:"issue_tracking,omitempty" json:"issue_tracking,omitempty"`
+	// CircuitBreaker overrides circuit-breaker caps for this repo.
+	// nil = inherit from org/global. Present fields overlay the inherited baseline.
+	CircuitBreaker *CircuitBreakerConfig `toml:"circuit_breaker,omitempty"`
 }
 
 // PRMetadataConfig holds global defaults for PR creation metadata,
@@ -580,6 +584,9 @@ type OrgAI struct {
 
 	GeneratePRDescription *bool                  `toml:"generate_pr_description,omitempty"`
 	IssueTracking         *IssueTrackingOverride `toml:"issue_tracking,omitempty" json:"issue_tracking,omitempty"`
+	// CircuitBreaker overrides circuit-breaker caps for all repos in this org.
+	// nil = inherit from global. Present fields overlay the global baseline.
+	CircuitBreaker *CircuitBreakerConfig `toml:"circuit_breaker,omitempty"`
 }
 
 type RetentionConfig struct {
@@ -1014,6 +1021,10 @@ func (c *Config) applyDefaults() {
 	if c.CircuitBreaker.PerIssueRepoHr == 0 {
 		c.CircuitBreaker.PerIssueRepoHr = 10
 	}
+	if c.CircuitBreaker.PerImplRepoHr == 0 {
+		c.CircuitBreaker.PerImplRepoHr = 5
+	}
+	c.applyAutonomousDefaults()
 }
 
 // applyEnvOverrides applies HEIMDALLM_* environment variable overrides.
@@ -1469,4 +1480,43 @@ func (c *Config) ReviewGuards(botLogin string) ResolvedReviewGuards {
 func DefaultPath() string {
 	home, _ := os.UserHomeDir()
 	return home + "/.config/heimdallm/config.toml"
+}
+
+// CircuitBreakerForRepo resolves circuit-breaker caps for a repo through
+// three levels: per-repo > per-org > global. A nil override at a level is
+// skipped; present override fields overlay onto the inherited value.
+func (c *Config) CircuitBreakerForRepo(repo string) CircuitBreakerConfig {
+	out := c.CircuitBreaker
+	if org := repoOrg(repo); org != "" && c.AI.Orgs != nil {
+		if o, ok := c.AI.Orgs[org]; ok && o.CircuitBreaker != nil {
+			out = mergeCircuitBreaker(out, *o.CircuitBreaker)
+		}
+	}
+	if c.AI.Repos != nil {
+		if r, ok := c.AI.Repos[repo]; ok && r.CircuitBreaker != nil {
+			out = mergeCircuitBreaker(out, *r.CircuitBreaker)
+		}
+	}
+	return out
+}
+
+// mergeCircuitBreaker overlays non-zero fields of override onto base, so an
+// org/repo can tune a single axis without restating the rest.
+func mergeCircuitBreaker(base, override CircuitBreakerConfig) CircuitBreakerConfig {
+	if override.PerPR24h != 0 {
+		base.PerPR24h = override.PerPR24h
+	}
+	if override.PerRepoHr != 0 {
+		base.PerRepoHr = override.PerRepoHr
+	}
+	if override.PerIssue24h != 0 {
+		base.PerIssue24h = override.PerIssue24h
+	}
+	if override.PerIssueRepoHr != 0 {
+		base.PerIssueRepoHr = override.PerIssueRepoHr
+	}
+	if override.PerImplRepoHr != 0 {
+		base.PerImplRepoHr = override.PerImplRepoHr
+	}
+	return base
 }

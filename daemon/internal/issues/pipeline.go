@@ -258,6 +258,15 @@ type RunOptions struct {
 	// It is intentionally a one-shot cleanup hook rather than another source
 	// of path truth; ExecOpts.WorkDir remains authoritative.
 	ReleaseRepoContext func()
+
+	// InFlightSalt, when non-empty, is appended to the diagnostic in-flight
+	// claim key (stored in issue_triage_in_flight.updated_at) so the autonomous
+	// chain can tag which stage kicked off a run without mutating the persisted
+	// issue snapshot. Note the store's single-flight contention is keyed on
+	// issue_id ALONE (ClaimIssueTriageInFlight / #458), so the salt does NOT
+	// change collapse semantics — it is diagnostic only. Default (empty) leaves
+	// the key purely issue.UpdatedAt, preserving existing caller behaviour.
+	InFlightSalt string
 }
 
 // Pipeline runs a single issue triage or implementation end-to-end.
@@ -399,6 +408,11 @@ func (p *Pipeline) Run(ctx context.Context, issue *github.Issue, opts RunOptions
 	)
 	if !issue.UpdatedAt.IsZero() && claimIssueID != 0 {
 		claimKey = issue.UpdatedAt.UTC().Format(time.RFC3339)
+		// An optional salt distinguishes consecutive same-snapshot stage runs
+		// (autonomous chain) without mutating the persisted issue snapshot.
+		if opts.InFlightSalt != "" {
+			claimKey += "|" + opts.InFlightSalt
+		}
 		ok, err := p.store.ClaimIssueTriageInFlight(claimIssueID, claimKey)
 		if err != nil {
 			// Fail-open: if the INSERT actually landed but the driver
@@ -471,7 +485,7 @@ func (p *Pipeline) Run(ctx context.Context, issue *github.Issue, opts RunOptions
 	// sees the correct row. The upsert is idempotent — on a breaker-trip
 	// the issue row stays but no issue_reviews row is written for this
 	// attempt, which matches the PR-side behaviour.
-	storeIssue, err := issueToStore(issue)
+	storeIssue, err := IssueToStoreRow(issue)
 	if err != nil {
 		return nil, err
 	}
@@ -1116,9 +1130,10 @@ func parseIssueResult(data []byte) (*IssueReviewResult, error) {
 	return &r, nil
 }
 
-// issueToStore converts the github.Issue wire shape into the store row. The
+// IssueToStoreRow converts the github.Issue wire shape into the store row. The
 // store keeps assignees and labels as JSON arrays (`[]` when empty), matching
-// the schema introduced in #24.
+// the schema introduced in #24. Exported so out-of-package idempotent-upsert
+// callers (e.g. the autonomous poller) share this single projection.
 //
 // The issue's processing mode is intentionally not part of store.Issue — the
 // issues table captures the issue itself, while the mode of *each pipeline
@@ -1250,7 +1265,7 @@ func extractSeverity(triageJSON string) string {
 	return t.Severity
 }
 
-func issueToStore(i *github.Issue) (*store.Issue, error) {
+func IssueToStoreRow(i *github.Issue) (*store.Issue, error) {
 	assignees := i.AssigneeLogins()
 	if assignees == nil {
 		assignees = []string{}

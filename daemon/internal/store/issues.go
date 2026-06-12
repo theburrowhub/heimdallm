@@ -271,6 +271,86 @@ func (s *Store) CountFailedAutoImplement(issueID int64) (int, error) {
 	return n, nil
 }
 
+// SetIssueClaimedByAutonomous flags (or clears) an issue as claimed by the
+// autonomous end-to-end pipeline. Used for auditing and to keep the selector
+// from re-picking an in-flight task.
+func (s *Store) SetIssueClaimedByAutonomous(issueID int64, claimed bool) error {
+	v := 0
+	if claimed {
+		v = 1
+	}
+	if _, err := s.db.Exec(`UPDATE issues SET claimed_by_autonomous = ? WHERE id = ?`, v, issueID); err != nil {
+		return fmt.Errorf("store: set issue claimed_by_autonomous: %w", err)
+	}
+	return nil
+}
+
+// IsIssueClaimedByAutonomous reports whether the issue is flagged claimed.
+func (s *Store) IsIssueClaimedByAutonomous(issueID int64) (bool, error) {
+	var v int
+	if err := s.db.QueryRow(`SELECT claimed_by_autonomous FROM issues WHERE id = ?`, issueID).Scan(&v); err != nil {
+		return false, fmt.Errorf("store: get issue claimed_by_autonomous: %w", err)
+	}
+	return v != 0, nil
+}
+
+// SetAutonomousClaimUntil records a time-based claim lease on the issue. The
+// lease doubles as the failure/no-progress cooldown for the autonomous
+// selector and, because it has an explicit expiry, recovers automatically from
+// a crash mid-Drive (no permanent stuck claim, no manual operator step). A zero
+// `until` clears the lease (stored as ”). Times are persisted RFC3339 UTC.
+func (s *Store) SetAutonomousClaimUntil(issueID int64, until time.Time) error {
+	v := ""
+	if !until.IsZero() {
+		v = until.UTC().Format(sqliteTimeFormat)
+	}
+	if _, err := s.db.Exec(`UPDATE issues SET autonomous_claim_until = ? WHERE id = ?`, v, issueID); err != nil {
+		return fmt.Errorf("store: set issue autonomous_claim_until: %w", err)
+	}
+	return nil
+}
+
+// IsAutonomousClaimActive reports whether the issue currently holds an active
+// (un-expired) autonomous claim lease relative to `now`. An empty or
+// unparseable stored value is treated leniently as "no active lease" (false) so
+// a malformed row never permanently blocks selection.
+func (s *Store) IsAutonomousClaimActive(issueID int64, now time.Time) (bool, error) {
+	var v string
+	if err := s.db.QueryRow(`SELECT autonomous_claim_until FROM issues WHERE id = ?`, issueID).Scan(&v); err != nil {
+		return false, fmt.Errorf("store: get issue autonomous_claim_until: %w", err)
+	}
+	if strings.TrimSpace(v) == "" {
+		return false, nil
+	}
+	until, err := time.Parse(sqliteTimeFormat, v)
+	if err != nil {
+		return false, nil // lenient: malformed lease never blocks
+	}
+	return until.After(now), nil
+}
+
+// HasOpenAutoImplementPR reports whether an open PR is linked to the issue's
+// GitHub id via auto_implement_issue_id. Used by the autonomous selector's
+// "not started" predicate.
+//
+// Production stores prs.auto_implement_issue_id as the issue STORE ROW ID (the
+// return of UpsertIssue; see issues pipeline MarkPRAutoImplementOrigin), not
+// the GitHub id. Callers, however, hold the GitHub id, so we map github_id →
+// store id with a subquery. An unknown github_id yields NULL from the subquery,
+// which matches no row (COUNT = 0), so the function safely returns false.
+func (s *Store) HasOpenAutoImplementPR(issueGithubID int64) (bool, error) {
+	var n int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM prs
+		 WHERE auto_implement_issue_id = (SELECT id FROM issues WHERE github_id = ?)
+		   AND state = 'open'`,
+		issueGithubID,
+	).Scan(&n); err != nil {
+		return false, fmt.Errorf("store: has open auto_implement PR: %w", err)
+	}
+	return n > 0, nil
+}
+
 func scanIssue(s scanner) (*Issue, error) {
 	var i Issue
 	var createdAt, fetchedAt string

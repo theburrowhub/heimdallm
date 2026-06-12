@@ -106,8 +106,10 @@ CREATE TABLE IF NOT EXISTS issues (
   labels      TEXT NOT NULL DEFAULT '[]',
   state       TEXT NOT NULL,
   created_at  DATETIME NOT NULL,
-  fetched_at  DATETIME NOT NULL,
-  dismissed   INTEGER NOT NULL DEFAULT 0
+  fetched_at             DATETIME NOT NULL,
+  dismissed              INTEGER NOT NULL DEFAULT 0,
+  claimed_by_autonomous  INTEGER NOT NULL DEFAULT 0,
+  autonomous_claim_until TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS issue_reviews (
@@ -252,6 +254,13 @@ func Open(dsn string) (*Store, error) {
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_issue_reviews_issue_created ON issue_reviews(issue_id, created_at)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_issue_reviews_created ON issue_reviews(created_at)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_issues_repo ON issues(repo)")
+	// Autonomous end-to-end pipeline (#spec). Idempotent on existing DBs;
+	// the schema constant above already includes this column for fresh installs.
+	db.Exec("ALTER TABLE issues ADD COLUMN claimed_by_autonomous INTEGER NOT NULL DEFAULT 0")
+	// Time-based autonomous claim lease (#spec). Doubles as the failure/no-
+	// progress cooldown and survives crashes (expires naturally). Idempotent
+	// on existing DBs; the schema constant above includes it for fresh installs.
+	db.Exec("ALTER TABLE issues ADD COLUMN autonomous_claim_until TEXT NOT NULL DEFAULT ''")
 	// Idempotent migration for existing DBs — new installs get the table
 	// from the schema constant above. Safe on every startup.
 	db.Exec(`CREATE TABLE IF NOT EXISTS reviews_in_flight (
