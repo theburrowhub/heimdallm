@@ -64,6 +64,13 @@ const (
 	// in-memory lifetime, so this event fires at most once per
 	// detected drift per daemon start.
 	EventRepoNonMonitoredStale = "repo_non_monitored_stale"
+
+	// Autonomous end-to-end mode (spec 2026-06-12).
+	EventAutonomousTaskSelected   = "autonomous_task_selected"     // {repo, number, bucket}
+	EventAutonomousTaskReassigned = "autonomous_task_reassigned"   // {repo, number, assignee}
+	EventAutonomousStageAdvanced  = "autonomous_stage_advanced"    // {repo, number, from, to}
+	EventAutonomousReviewClass    = "autonomous_review_classified" // {repo, number, decision}
+	EventAutonomousMergeSkipped   = "autonomous_merge_skipped"     // {repo, number, reason}
 )
 
 // maxSubscribers limits the number of concurrent SSE connections to prevent
