@@ -157,3 +157,118 @@ func TestTabItemCountActivityIsZero(t *testing.T) {
 		t.Fatalf("tabItemCount(tabActivity) = %d, want 0 (cursor is unused for Activity)", got)
 	}
 }
+
+func TestPRsSortedByReviewDate(t *testing.T) {
+	d := NewDashboard("http://localhost:0", "", "test")
+	d.width = 120
+	d.height = 40
+
+	old := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	mid := time.Date(2024, 6, 15, 0, 0, 0, 0, time.UTC)
+	recent := time.Date(2024, 12, 31, 0, 0, 0, 0, time.UTC)
+
+	msg := dataMsg{
+		prs: []api.PR{
+			{ID: 1, Number: 10, LatestReview: &api.Review{CreatedAt: old}},
+			{ID: 2, Number: 20, LatestReview: &api.Review{CreatedAt: recent}},
+			{ID: 3, Number: 30, LatestReview: &api.Review{CreatedAt: mid}},
+		},
+		config: map[string]any{},
+		stats:  &api.Stats{},
+	}
+
+	model, _ := d.Update(msg)
+	d = model.(*Dashboard)
+
+	if len(d.prs) != 3 {
+		t.Fatalf("expected 3 PRs, got %d", len(d.prs))
+	}
+	if d.prs[0].Number != 20 {
+		t.Fatalf("expected first PR #20 (most recent), got #%d", d.prs[0].Number)
+	}
+	if d.prs[1].Number != 30 {
+		t.Fatalf("expected second PR #30, got #%d", d.prs[1].Number)
+	}
+	if d.prs[2].Number != 10 {
+		t.Fatalf("expected third PR #10 (oldest), got #%d", d.prs[2].Number)
+	}
+}
+
+func TestVisiblePRsFilter(t *testing.T) {
+	d := NewDashboard("http://localhost:0", "", "test")
+	d.prs = []api.PR{
+		{ID: 1, Repo: "org/repo-a", LatestReview: &api.Review{}},
+		{ID: 2, Repo: "org/repo-b", LatestReview: &api.Review{}},
+		{ID: 3, Repo: "org/repo-a", LatestReview: &api.Review{}},
+	}
+
+	visible := d.visiblePRs()
+	if len(visible) != 3 {
+		t.Fatalf("no filter: expected 3, got %d", len(visible))
+	}
+
+	d.prRepoFilter = "org/repo-a"
+	visible = d.visiblePRs()
+	if len(visible) != 2 {
+		t.Fatalf("filter repo-a: expected 2, got %d", len(visible))
+	}
+	for _, pr := range visible {
+		if pr.Repo != "org/repo-a" {
+			t.Fatalf("expected repo-a, got %s", pr.Repo)
+		}
+	}
+
+	d.prRepoFilter = "org/repo-c"
+	visible = d.visiblePRs()
+	if len(visible) != 0 {
+		t.Fatalf("filter repo-c: expected 0, got %d", len(visible))
+	}
+}
+
+func TestCycleRepoFilter(t *testing.T) {
+	d := NewDashboard("http://localhost:0", "", "test")
+	d.activeTab = tabPRs
+	d.prs = []api.PR{
+		{Repo: "org/alpha", LatestReview: &api.Review{}},
+		{Repo: "org/beta", LatestReview: &api.Review{}},
+		{Repo: "org/alpha", LatestReview: &api.Review{}},
+	}
+
+	if d.prRepoFilter != "" {
+		t.Fatal("initial filter should be empty")
+	}
+
+	d.cycleRepoFilter()
+	if d.prRepoFilter != "org/alpha" {
+		t.Fatalf("first cycle: expected org/alpha, got %s", d.prRepoFilter)
+	}
+
+	d.cycleRepoFilter()
+	if d.prRepoFilter != "org/beta" {
+		t.Fatalf("second cycle: expected org/beta, got %s", d.prRepoFilter)
+	}
+
+	d.cycleRepoFilter()
+	if d.prRepoFilter != "" {
+		t.Fatalf("third cycle: expected empty, got %s", d.prRepoFilter)
+	}
+}
+
+func TestTabItemCountRespectsFilter(t *testing.T) {
+	d := NewDashboard("http://localhost:0", "", "test")
+	d.activeTab = tabPRs
+	d.prs = []api.PR{
+		{Repo: "org/a", LatestReview: &api.Review{}},
+		{Repo: "org/b", LatestReview: &api.Review{}},
+		{Repo: "org/a", LatestReview: &api.Review{}},
+	}
+
+	if got := d.tabItemCount(); got != 3 {
+		t.Fatalf("no filter: expected 3, got %d", got)
+	}
+
+	d.prRepoFilter = "org/a"
+	if got := d.tabItemCount(); got != 2 {
+		t.Fatalf("filter org/a: expected 2, got %d", got)
+	}
+}

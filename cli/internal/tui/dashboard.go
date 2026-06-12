@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os/exec"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -33,6 +35,8 @@ type Dashboard struct {
 
 	activeTab tab
 	cursor    int
+
+	prRepoFilter string
 
 	prs    []api.PR
 	issues []api.Issue
@@ -96,6 +100,7 @@ type promoteIssueMsg struct {
 	id  int64
 	err error
 }
+type openURLMsg struct{ err error }
 
 func NewDashboard(host, token, version string) *Dashboard {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -305,6 +310,9 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					d.prs = append(d.prs, pr)
 				}
 			}
+			sort.Slice(d.prs, func(i, j int) bool {
+				return d.prs[i].LatestReview.CreatedAt.After(d.prs[j].LatestReview.CreatedAt)
+			})
 			d.issues = nil
 			for _, iss := range msg.issues {
 				if iss.LatestReview != nil {
@@ -324,6 +332,7 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+		d.clampCursor()
 		return d, nil
 
 	case sseMsg:
@@ -419,6 +428,12 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		d.shutdownMessage = "Promotion requested"
 		return d, d.fetchData
+
+	case openURLMsg:
+		if msg.err != nil {
+			d.shutdownMessage = fmt.Sprintf("Cannot open URL: %v", msg.err)
+		}
+		return d, nil
 	}
 
 	return d, nil
@@ -519,8 +534,19 @@ func (d *Dashboard) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				d.cursor = max - 1
 			}
 		}
+	case "o":
+		if d.activeTab == tabPRs {
+			prs := d.visiblePRs()
+			if d.cursor < len(prs) {
+				return d, openURLCmd(prs[d.cursor].URL)
+			}
+		}
+	case "f":
+		if d.activeTab == tabPRs {
+			d.cycleRepoFilter()
+		}
 	case "enter":
-		if d.activeTab == tabPRs && d.cursor < len(d.prs) {
+		if d.activeTab == tabPRs && d.cursor < len(d.visiblePRs()) {
 			d.openDetail()
 		} else if d.activeTab == tabIssues && d.cursor < len(d.issues) {
 			d.openDetail()
@@ -568,6 +594,13 @@ func (d *Dashboard) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return d, tea.Quit
 	case "esc", "enter":
 		d.showDetail = false
+	case "o":
+		if d.activeTab == tabPRs {
+			prs := d.visiblePRs()
+			if d.cursor < len(prs) {
+				return d, openURLCmd(prs[d.cursor].URL)
+			}
+		}
 	case "p", "P":
 		if cmd := d.promoteSelectedIssue(); cmd != nil {
 			return d, cmd
@@ -613,7 +646,7 @@ func (d *Dashboard) openDetail() {
 	d.detailScroll = 0
 	switch d.activeTab {
 	case tabPRs:
-		d.detailLines = buildPRDetailLines(d.prs[d.cursor], d.width)
+		d.detailLines = buildPRDetailLines(d.visiblePRs()[d.cursor], d.width)
 	case tabIssues:
 		d.detailLines = buildIssueDetailLines(d.issues[d.cursor], d.width)
 	}
@@ -834,33 +867,58 @@ func (d *Dashboard) renderContent(height int) string {
 }
 
 func (d *Dashboard) renderPRs(height int) string {
-	if len(d.prs) == 0 {
+	prs := d.visiblePRs()
+	if len(prs) == 0 {
+		if d.prRepoFilter != "" {
+			return lipgloss.NewStyle().Foreground(colorMuted).Render(
+				fmt.Sprintf("  No PRs found (filtered: %s). Press [f] to cycle filter.", d.prRepoFilter))
+		}
 		return lipgloss.NewStyle().Foreground(colorMuted).Render("  No PRs found.")
 	}
 
 	var b strings.Builder
-	header := fmt.Sprintf("  %-6s %-25s %-35s %-8s %-8s", "ID", "REPO", "TITLE", "SEVERITY", "STATE")
+	header := fmt.Sprintf("  %-7s %-20s %-25s %-12s %-8s %-12s %-10s", "PR", "REPO", "TITLE", "AUTHOR", "SEVERITY", "REVIEWED", "STATE")
 	b.WriteString(headerStyle.Render(header))
 	b.WriteString("\n")
-	b.WriteString("  " + strings.Repeat("─", 86))
+	b.WriteString("  " + strings.Repeat("─", 100))
 	b.WriteString("\n")
 
 	maxVisible := height - 2
+	if d.prRepoFilter != "" {
+		b.WriteString(lipgloss.NewStyle().Foreground(colorSecondary).Render(
+			fmt.Sprintf("  filter: %s", d.prRepoFilter)))
+		b.WriteString("\n")
+		maxVisible--
+	}
 	if maxVisible < 1 {
 		maxVisible = 1
 	}
-	start, end := visibleRange(d.cursor, len(d.prs), maxVisible)
+	start, end := visibleRange(d.cursor, len(prs), maxVisible)
 
 	for i := start; i < end; i++ {
-		pr := d.prs[i]
+		pr := prs[i]
 		sev := "---"
+		reviewed := "---"
 		if pr.LatestReview != nil {
 			sev = pr.LatestReview.Severity
+			reviewed = pr.LatestReview.CreatedAt.Format("2006-01-02")
 		}
-		title := truncateRunes(pr.Title, 33)
-		repo := truncateRunes(pr.Repo, 23)
+		title := truncateRunes(pr.Title, 23)
+		repo := truncateRunes(pr.Repo, 18)
+		author := truncateRunes(pr.Author, 10)
+		prNum := fmt.Sprintf("#%d", pr.Number)
 		sevRendered := severityStyle(sev).Render(fmt.Sprintf("%-8s", sev))
-		line := fmt.Sprintf("  %-6d %-25s %-35s %s %-8s", pr.ID, repo, title, sevRendered, pr.State)
+
+		stateStr := pr.State
+		var stateRendered string
+		if pr.Dismissed {
+			stateStr = "dismissed"
+			stateRendered = lipgloss.NewStyle().Foreground(colorWarning).Render(fmt.Sprintf("%-10s", stateStr))
+		} else {
+			stateRendered = fmt.Sprintf("%-10s", stateStr)
+		}
+
+		line := fmt.Sprintf("  %-7s %-20s %-25s %-12s %s %-12s %s", prNum, repo, title, author, sevRendered, reviewed, stateRendered)
 
 		if i == d.cursor {
 			b.WriteString(selectedRowStyle.Render(line))
@@ -870,7 +928,7 @@ func (d *Dashboard) renderPRs(height int) string {
 		b.WriteString("\n")
 	}
 
-	if ind := scrollIndicator(start, end, len(d.prs)); ind != "" {
+	if ind := scrollIndicator(start, end, len(prs)); ind != "" {
 		b.WriteString(lipgloss.NewStyle().Foreground(colorMuted).Render(ind))
 	}
 	return b.String()
@@ -1143,6 +1201,9 @@ func (d *Dashboard) renderHelp() string {
 		return helpStyle.Render("Stopping daemon...")
 	}
 	if d.showDetail {
+		if d.activeTab == tabPRs {
+			return helpStyle.Render("[esc]close  [o]pen in browser  [j/k]scroll  [pgup/pgdn]page  [q]uit")
+		}
 		if d.activeTab == tabIssues && d.cursor < len(d.issues) && canPromoteIssue(d.issues[d.cursor]) {
 			return helpStyle.Render("[esc]close  [p]romote  [j/k]scroll  [pgup/pgdn]page  [q]uit")
 		}
@@ -1152,7 +1213,7 @@ func (d *Dashboard) renderHelp() string {
 		return helpStyle.Render("[q]uit  [r]efresh  [s]top  [enter]detail  [p]romote  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-6]jump")
 	}
 	if d.activeTab == tabPRs {
-		return helpStyle.Render("[q]uit  [r]efresh  [s]top  [enter]detail  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-6]jump")
+		return helpStyle.Render("[q]uit  [r]efresh  [s]top  [enter]detail  [o]pen  [f]ilter repo  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-6]jump")
 	}
 	if d.activeTab == tabActivity {
 		return helpStyle.Render("[q]uit  [r]efresh  [s]top  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-6]jump  [G]follow")
@@ -1177,7 +1238,7 @@ func (d *Dashboard) tabItemCount() int {
 		// Return 0 so any accidental future caller treats it as empty.
 		return 0
 	case tabPRs:
-		return len(d.prs)
+		return len(d.visiblePRs())
 	case tabIssues:
 		return len(d.issues)
 	case tabConfig:
@@ -1604,6 +1665,68 @@ func canPromoteIssue(issue api.Issue) bool {
 	}
 }
 
+func (d *Dashboard) visiblePRs() []api.PR {
+	if d.prRepoFilter == "" {
+		return d.prs
+	}
+	var filtered []api.PR
+	for _, pr := range d.prs {
+		if pr.Repo == d.prRepoFilter {
+			filtered = append(filtered, pr)
+		}
+	}
+	return filtered
+}
+
+func (d *Dashboard) cycleRepoFilter() {
+	repos := make(map[string]bool)
+	for _, pr := range d.prs {
+		repos[pr.Repo] = true
+	}
+	if len(repos) == 0 {
+		d.prRepoFilter = ""
+		return
+	}
+	sorted := make([]string, 0, len(repos))
+	for r := range repos {
+		sorted = append(sorted, r)
+	}
+	sort.Strings(sorted)
+
+	if d.prRepoFilter == "" {
+		d.prRepoFilter = sorted[0]
+		d.cursor = 0
+		return
+	}
+	for i, r := range sorted {
+		if r == d.prRepoFilter {
+			if i+1 < len(sorted) {
+				d.prRepoFilter = sorted[i+1]
+			} else {
+				d.prRepoFilter = ""
+			}
+			d.cursor = 0
+			return
+		}
+	}
+	d.prRepoFilter = ""
+	d.cursor = 0
+}
+
+func openURLCmd(url string) tea.Cmd {
+	return func() tea.Msg {
+		var cmd *exec.Cmd
+		switch runtime.GOOS {
+		case "darwin":
+			cmd = exec.Command("open", url)
+		case "windows":
+			cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+		default:
+			cmd = exec.Command("xdg-open", url)
+		}
+		return openURLMsg{err: cmd.Start()}
+	}
+}
 
 func toInt(v any) int {
 	switch n := v.(type) {
