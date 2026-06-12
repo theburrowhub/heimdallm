@@ -24,6 +24,10 @@ func (f *fakeStore) SetIssueClaimedByAutonomous(issueID int64, claimed bool) err
 	return nil
 }
 
+func (f *fakeStore) IsIssueClaimedByAutonomous(issueID int64) (bool, error) {
+	return f.claimed[issueID], nil
+}
+
 // fakeGH implements SelectorGH
 type fakeGH struct {
 	branches map[string]bool // key: "repo/branch"
@@ -135,6 +139,29 @@ func TestIsEligible(t *testing.T) {
 		}
 		if picked != nil {
 			t.Errorf("expected nil pick when branch exists, got %+v", picked)
+		}
+		if bucket != BucketNone {
+			t.Errorf("expected BucketNone, got %v", bucket)
+		}
+	})
+
+	t.Run("claimed_by_autonomous makes candidate ineligible", func(t *testing.T) {
+		store := newFakeStore()
+		gh := newFakeGH()
+		store.claimed[5] = true // StoreID 5 already claimed by a prior Drive
+
+		sel := NewSelector(store, gh, botLogin, branchPrefix, nil)
+		sel.Configure(true, true, nil)
+
+		cands := []Candidate{
+			{Repo: "org/repo", Number: 25, GithubID: 250, StoreID: 5, Assignees: []string{botLogin}},
+		}
+		picked, bucket, err := sel.Pick(ctx, cands)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if picked != nil {
+			t.Errorf("expected nil pick when issue is already claimed, got %+v", picked)
 		}
 		if bucket != BucketNone {
 			t.Errorf("expected BucketNone, got %v", bucket)

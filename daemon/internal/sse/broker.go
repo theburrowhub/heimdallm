@@ -71,6 +71,7 @@ const (
 	EventAutonomousStageAdvanced  = "autonomous_stage_advanced"    // {repo, number, from, to}
 	EventAutonomousReviewClass    = "autonomous_review_classified" // {repo, number, decision}
 	EventAutonomousMergeSkipped   = "autonomous_merge_skipped"     // {repo, number, reason}
+	EventAutonomousMergeDone      = "autonomous_merge_done"        // {repo, number, method}
 )
 
 // maxSubscribers limits the number of concurrent SSE connections to prevent

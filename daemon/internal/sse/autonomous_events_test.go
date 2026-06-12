@@ -9,6 +9,7 @@ func TestAutonomousEventConstants(t *testing.T) {
 		EventAutonomousStageAdvanced:  "autonomous_stage_advanced",
 		EventAutonomousReviewClass:    "autonomous_review_classified",
 		EventAutonomousMergeSkipped:   "autonomous_merge_skipped",
+		EventAutonomousMergeDone:      "autonomous_merge_done",
 	}
 	for got, want := range pairs {
 		if got != want {

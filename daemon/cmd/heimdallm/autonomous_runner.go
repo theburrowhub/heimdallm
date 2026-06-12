@@ -503,9 +503,25 @@ func (p *AutonomousPoller) Run(ctx context.Context) {
 			})
 		}
 
-		res, err := p.orch.Drive(ctx, *picked)
-		if err != nil {
-			slog.Warn("autonomous: drive failed", "repo", repo, "number", picked.Number, "err", err)
+		res, driveErr := p.orch.Drive(ctx, *picked)
+
+		// Clear the claimed flag on normal completion (success OR a returned
+		// error). A crash mid-Drive leaves the flag SET — that is the safe
+		// state: the issue stays claimed and the selector's isEligible check
+		// keeps it from being re-driven (no duplicate work) until an operator
+		// or a future fix clears it. On normal return we free it so a future
+		// legitimate re-drive can occur; that re-drive is still gated by
+		// HasOpenAutoImplementPR / BranchExists, so freeing it cannot cause a
+		// duplicate while a PR or work branch already exists.
+		if picked.StoreID != 0 {
+			if e := p.store.SetIssueClaimedByAutonomous(picked.StoreID, false); e != nil {
+				slog.Warn("autonomous: clear claimed flag failed",
+					"repo", picked.Repo, "number", picked.Number, "err", e)
+			}
+		}
+
+		if driveErr != nil {
+			slog.Warn("autonomous: drive failed", "repo", repo, "number", picked.Number, "err", driveErr)
 			continue
 		}
 		slog.Info("autonomous: drove task",

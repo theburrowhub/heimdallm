@@ -14,6 +14,7 @@ import (
 type SelectorStore interface {
 	HasOpenAutoImplementPR(issueGithubID int64) (bool, error)
 	SetIssueClaimedByAutonomous(issueID int64, claimed bool) error
+	IsIssueClaimedByAutonomous(issueID int64) (bool, error)
 }
 
 // SelectorGH is the GitHub surface the selector needs.
@@ -124,8 +125,9 @@ func (s *Selector) Pick(ctx context.Context, cands []Candidate) (*Candidate, Buc
 	return nil, BucketNone, nil
 }
 
-// isEligible reports whether the candidate is unstarted: no open linked PR and
-// no remote branch referencing it. Conservative — on doubt it returns false
+// isEligible reports whether the candidate is unstarted: not already claimed by
+// a previous (possibly crashed) autonomous Drive, no open linked PR, and no
+// remote branch referencing it. Conservative — on doubt it returns false
 // (treated as started, so the selector skips it).
 func (s *Selector) isEligible(ctx context.Context, c Candidate) (bool, error) {
 	if err := ctx.Err(); err != nil {
@@ -137,6 +139,19 @@ func (s *Selector) isEligible(ctx context.Context, c Candidate) (bool, error) {
 	}
 	if hasPR {
 		return false, nil
+	}
+	// Claimed flag: survives a daemon restart mid-Drive (the poller clears it
+	// only on normal Drive completion). Without this check a crash during
+	// triage/refinement — before any PR or branch exists — would let the next
+	// tick re-pick the same issue and start a duplicate Drive.
+	if c.StoreID != 0 {
+		claimed, err := s.store.IsIssueClaimedByAutonomous(c.StoreID)
+		if err != nil {
+			return false, fmt.Errorf("autonomous: eligibility claimed check: %w", err)
+		}
+		if claimed {
+			return false, nil
+		}
 	}
 	branch := fmt.Sprintf("%s%d", s.branchPrefix, c.Number)
 	hasBranch, err := s.gh.BranchExists(c.Repo, branch)

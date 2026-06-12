@@ -109,7 +109,7 @@ func (a *tier2Adapter) refreshAutoImplementPRReviewState(
 	// and the legacy COMMENTED→Responder / CHANGES_REQUESTED→FixRunner switch
 	// below runs unchanged.
 	if a.autonomousEnabledForRepo(item.Repo) {
-		return a.dispatchAutonomousReview(ctx, item, stored, reviews)
+		return a.dispatchAutonomousReview(ctx, item, stored, reviews, state)
 	}
 
 	// Dispatch independently of persist/emit so a failed runner does
@@ -169,12 +169,15 @@ func (a *tier2Adapter) autonomousEnabledForRepo(repo string) bool {
 // dispatchAutonomousReview is the Tier 3 reaction for autonomous repos. It
 // classifies the aggregate review set and routes:
 //
-//   - DecisionFix       → the existing FixRunner (same path as legacy
-//     CHANGES_REQUESTED / COMMENTED handling), so reviewer feedback is
-//     addressed automatically.
+//   - DecisionFix       → split on the real review state to preserve the legacy
+//     behaviour: a COMMENTED review goes to the Responder (answer the comment),
+//     while a CHANGES_REQUESTED or approved-with-issues review goes to the
+//     FixRunner (push a fix). Without the split a COMMENTED review would hit
+//     the FixRunner, which no-ops with no CR present, and the comment would be
+//     neither answered nor fixed.
 //   - DecisionMergeGate → the merge gate. With auto_merge disabled (the
 //     default) this is a safe no-op that emits an audit SSE; with it enabled
-//     the PR is merged via the configured method.
+//     the PR is merged via the configured method (emits a merge-done SSE).
 //   - DecisionWait      → nothing (no human review yet).
 //
 // Runner errors propagate exactly like the legacy path so the StateWorker keeps
@@ -189,7 +192,7 @@ func (a *tier2Adapter) autonomousEnabledForRepo(repo string) bool {
 // dashboard); it re-emits once a fresh CR (a strictly newer SubmittedAt)
 // arrives and the guard releases.
 func (a *tier2Adapter) dispatchAutonomousReview(
-	ctx context.Context, item *scheduler.WatchItem, stored *store.PR, reviews []gh.PRReview,
+	ctx context.Context, item *scheduler.WatchItem, stored *store.PR, reviews []gh.PRReview, state string,
 ) error {
 	decision := autonomous.ClassifyReview(toReviewInputs(reviews))
 
@@ -204,7 +207,19 @@ func (a *tier2Adapter) dispatchAutonomousReview(
 
 	switch decision {
 	case autonomous.DecisionFix:
-		if a.fixRunner != nil {
+		// Preserve the legacy split: a plain COMMENTED review is answered by
+		// the Responder; a CHANGES_REQUESTED or approved-with-issues review is
+		// addressed by the FixRunner. The FixRunner no-ops when there is no CR,
+		// so routing COMMENTED there would silently drop the comment.
+		if state == issuepipeline.ReviewStateCommented {
+			if a.responder != nil {
+				if err := a.responder.Run(ctx, stored, stored.AutoImplementIssueID); err != nil {
+					slog.Warn("tier3: autonomous responder run failed (retrying next tick)",
+						"repo", item.Repo, "number", item.Number, "err", err)
+					return fmt.Errorf("autonomous responder: %w", err)
+				}
+			}
+		} else if a.fixRunner != nil {
 			if err := a.fixRunner.Run(ctx, stored, stored.AutoImplementIssueID); err != nil {
 				slog.Warn("tier3: autonomous fix runner failed (retrying next tick)",
 					"repo", item.Repo, "number", item.Number, "err", err)
@@ -220,13 +235,23 @@ func (a *tier2Adapter) dispatchAutonomousReview(
 				"repo", item.Repo, "number", item.Number, "err", err)
 			return fmt.Errorf("autonomous merge gate: %w", err)
 		}
-		if res == autonomous.MergeSkippedDisabled && a.broker != nil {
-			a.broker.Publish(sse.Event{
-				Type: sse.EventAutonomousMergeSkipped,
-				Data: sseData(map[string]any{
-					"repo": item.Repo, "number": item.Number, "reason": "auto_merge_disabled",
-				}),
-			})
+		if a.broker != nil {
+			switch res {
+			case autonomous.MergeSkippedDisabled:
+				a.broker.Publish(sse.Event{
+					Type: sse.EventAutonomousMergeSkipped,
+					Data: sseData(map[string]any{
+						"repo": item.Repo, "number": item.Number, "reason": "auto_merge_disabled",
+					}),
+				})
+			case autonomous.MergeDone:
+				a.broker.Publish(sse.Event{
+					Type: sse.EventAutonomousMergeDone,
+					Data: sseData(map[string]any{
+						"repo": item.Repo, "number": item.Number, "method": auto.MergeMethod,
+					}),
+				})
+			}
 		}
 		slog.Info("tier3: autonomous merge gate",
 			"repo", item.Repo, "number", item.Number, "result", res.String())
