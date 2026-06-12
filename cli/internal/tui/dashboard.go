@@ -672,29 +672,40 @@ func (d *Dashboard) isScrollOffsetTab() bool {
 	return d.activeTab == tabStats || d.activeTab == tabConfig
 }
 
+// clampScrollOffset returns offset clamped to [0, max(0, total - visible)].
+// A viewport of `visible` lines starting at the returned offset still
+// shows the last line of `total`-length content. Shared by clampCursor
+// (when the active tab uses cursor as a scroll offset) and by renderConfig
+// / renderStats (which compute their viewport `start` the same way).
+func clampScrollOffset(offset, total, visible int) int {
+	if visible < 1 {
+		visible = 1
+	}
+	upper := total - visible
+	if upper < 0 {
+		upper = 0
+	}
+	if offset < 0 {
+		return 0
+	}
+	if offset > upper {
+		return upper
+	}
+	return offset
+}
+
 func (d *Dashboard) clampCursor() {
 	max := d.tabItemCount()
 	if d.isScrollOffsetTab() {
-		// cursor is a scroll offset: clamp so the last line is visible
-		// at the bottom of the viewport.
 		visible := d.contentHeight()
 		if d.activeTab == tabConfig {
-			visible -= 2 // header + separator
+			visible -= 2 // header + separator rendered by renderConfig
 		}
-		if visible < 1 {
-			visible = 1
-		}
-		upper := max - visible
-		if upper < 0 {
-			upper = 0
-		}
-		if d.cursor > upper {
-			d.cursor = upper
-		}
-	} else {
-		if max > 0 && d.cursor >= max {
-			d.cursor = max - 1
-		}
+		d.cursor = clampScrollOffset(d.cursor, max, visible)
+		return
+	}
+	if max > 0 && d.cursor >= max {
+		d.cursor = max - 1
 	}
 	if d.cursor < 0 {
 		d.cursor = 0
@@ -931,18 +942,7 @@ func (d *Dashboard) renderConfig(height int) string {
 	}
 
 	maxVisible := height - 2 // header + separator
-	if maxVisible < 1 {
-		maxVisible = 1
-	}
-
-	// cursor is a scroll offset (first visible line).
-	start := d.cursor
-	if start > len(lines)-maxVisible {
-		start = len(lines) - maxVisible
-	}
-	if start < 0 {
-		start = 0
-	}
+	start := clampScrollOffset(d.cursor, len(lines), maxVisible)
 	end := start + maxVisible
 	if end > len(lines) {
 		end = len(lines)
@@ -1050,18 +1050,7 @@ func (d *Dashboard) renderStats(height int) string {
 
 	var b strings.Builder
 	maxVisible := height
-	if maxVisible < 1 {
-		maxVisible = 1
-	}
-
-	// cursor is a scroll offset (first visible line).
-	start := d.cursor
-	if start > len(lines)-maxVisible {
-		start = len(lines) - maxVisible
-	}
-	if start < 0 {
-		start = 0
-	}
+	start := clampScrollOffset(d.cursor, len(lines), maxVisible)
 	end := start + maxVisible
 	if end > len(lines) {
 		end = len(lines)
@@ -1192,7 +1181,11 @@ func (d *Dashboard) contentHeight() int {
 func (d *Dashboard) tabItemCount() int {
 	switch d.activeTab {
 	case tabActivity:
-		return len(d.logLines)
+		// Activity scrolls via d.logOffset / d.logFollow, not d.cursor.
+		// clampCursor never reads this value for tabActivity, and the
+		// cursor-bound branches in handleKey skip tabActivity outright.
+		// Return 0 so any accidental future caller treats it as empty.
+		return 0
 	case tabPRs:
 		return len(d.prs)
 	case tabIssues:
