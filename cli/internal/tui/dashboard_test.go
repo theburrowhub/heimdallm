@@ -404,6 +404,71 @@ func TestCycleIssueRepoFilter(t *testing.T) {
 	}
 }
 
+func TestBuildConfigLinesAutonomousAndCircuitBreaker(t *testing.T) {
+	d := NewDashboard("http://localhost:0", "", "test")
+	d.config = map[string]any{
+		"autonomous": map[string]any{
+			"enabled":           true,
+			"auto_merge":        false,
+			"merge_method":      "squash",
+			"dev_max_turns":     float64(20),
+			"dev_effort":        "high",
+			"dev_timeout":       "30m",
+			"claim_lease":       "5m",
+			"take_others_tasks": true,
+			"reassign_on_take":  false,
+		},
+		"circuit_breaker": map[string]any{
+			"enabled":           true,
+			"per_pr_24h":        float64(10),
+			"per_repo_hr":       float64(5),
+			"per_issue_24h":     float64(8),
+			"per_issue_repo_hr": float64(3),
+			"per_impl_repo_hr":  float64(2),
+		},
+	}
+
+	lines := d.buildConfigLines()
+
+	joined := ""
+	for _, l := range lines {
+		joined += l + "\n"
+	}
+
+	checks := []string{
+		"Autonomous Mode",
+		"Circuit Breaker",
+		"squash",
+		"20",
+		"high",
+		"30m",
+		"5m",
+		"Per PR / 24h",
+		"Per repo / hr",
+		"Per issue / 24h",
+		"Per issue-repo / hr",
+		"Per impl-repo / hr",
+	}
+	for _, want := range checks {
+		if !containsStr(joined, want) {
+			t.Errorf("buildConfigLines(): expected output to contain %q", want)
+		}
+	}
+}
+
+func containsStr(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsStrLinear(s, substr))
+}
+
+func containsStrLinear(s, sub string) bool {
+	for i := 0; i <= len(s)-len(sub); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
+
 func TestIssuesSortedByDate(t *testing.T) {
 	d := NewDashboard("http://localhost:0", "", "test")
 	now := time.Now()
