@@ -13,6 +13,9 @@ import 'package:heimdallm/features/config/config_screen.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import '../core/platform/fake_platform_services.dart';
 
+// Expose _computeGlobalDiff for testing via the public save path.
+// We drive it indirectly through ConfigNotifier.save and inspect patchConfig calls.
+
 class MockApiClient extends Mock implements ApiClient {}
 
 void main() {
@@ -432,4 +435,204 @@ void main() {
       expect(platform.spawnedDaemons, contains('/fake/bin/heimdalld'));
     },
   );
+
+  // ── AutonomousConfig ───────────────────────────────────────────────────────
+
+  test('AutonomousConfig.fromJson round-trip preserves all fields', () {
+    final json = {
+      'enabled': true,
+      'auto_merge': true,
+      'merge_method': 'rebase',
+      'take_others_tasks': true,
+      'reassign_on_take': true,
+      'dev_max_turns': 10,
+      'dev_effort': 'max',
+      'dev_timeout': '30m',
+      'claim_lease': '1h',
+    };
+
+    final cfg = AutonomousConfig.fromJson(json);
+    expect(cfg.enabled, isTrue);
+    expect(cfg.autoMerge, isTrue);
+    expect(cfg.mergeMethod, 'rebase');
+    expect(cfg.takeOthersTasks, isTrue);
+    expect(cfg.reassignOnTake, isTrue);
+    expect(cfg.devMaxTurns, 10);
+    expect(cfg.devEffort, 'max');
+    expect(cfg.devTimeout, '30m');
+    expect(cfg.claimLease, '1h');
+
+    final roundTrip = AutonomousConfig.fromJson(cfg.toJson());
+    expect(roundTrip.enabled, cfg.enabled);
+    expect(roundTrip.autoMerge, cfg.autoMerge);
+    expect(roundTrip.mergeMethod, cfg.mergeMethod);
+    expect(roundTrip.takeOthersTasks, cfg.takeOthersTasks);
+    expect(roundTrip.reassignOnTake, cfg.reassignOnTake);
+    expect(roundTrip.devMaxTurns, cfg.devMaxTurns);
+    expect(roundTrip.devEffort, cfg.devEffort);
+    expect(roundTrip.devTimeout, cfg.devTimeout);
+    expect(roundTrip.claimLease, cfg.claimLease);
+  });
+
+  test('AutonomousConfig.fromJson uses defaults for missing fields', () {
+    final cfg = AutonomousConfig.fromJson({});
+    expect(cfg.enabled, isFalse);
+    expect(cfg.autoMerge, isFalse);
+    expect(cfg.mergeMethod, 'squash');
+    expect(cfg.takeOthersTasks, isFalse);
+    expect(cfg.reassignOnTake, isFalse);
+    expect(cfg.devMaxTurns, 0);
+    expect(cfg.devEffort, 'high');
+    expect(cfg.devTimeout, '45m');
+    expect(cfg.claimLease, '2h');
+  });
+
+  // ── CircuitBreakerConfig ───────────────────────────────────────────────────
+
+  test('CircuitBreakerConfig.fromJson round-trip preserves all fields', () {
+    final json = {
+      'per_pr_24h': 5,
+      'per_repo_hr': 15,
+      'per_issue_24h': 7,
+      'per_issue_repo_hr': 8,
+      'per_impl_repo_hr': 3,
+    };
+
+    final cfg = CircuitBreakerConfig.fromJson(json);
+    expect(cfg.perPr24h, 5);
+    expect(cfg.perRepoHr, 15);
+    expect(cfg.perIssue24h, 7);
+    expect(cfg.perIssueRepoHr, 8);
+    expect(cfg.perImplRepoHr, 3);
+
+    final roundTrip = CircuitBreakerConfig.fromJson(cfg.toJson());
+    expect(roundTrip.perPr24h, cfg.perPr24h);
+    expect(roundTrip.perRepoHr, cfg.perRepoHr);
+    expect(roundTrip.perIssue24h, cfg.perIssue24h);
+    expect(roundTrip.perIssueRepoHr, cfg.perIssueRepoHr);
+    expect(roundTrip.perImplRepoHr, cfg.perImplRepoHr);
+  });
+
+  test('CircuitBreakerConfig.fromJson uses defaults for missing fields', () {
+    final cfg = CircuitBreakerConfig.fromJson({});
+    expect(cfg.perPr24h, 3);
+    expect(cfg.perRepoHr, 20);
+    expect(cfg.perIssue24h, 3);
+    expect(cfg.perIssueRepoHr, 10);
+    expect(cfg.perImplRepoHr, 5);
+  });
+
+  // ── AppConfig parses autonomous / circuit_breaker ──────────────────────────
+
+  test('AppConfig.fromJson parses autonomous and circuit_breaker blocks', () {
+    final json = {
+      'repositories': <String>[],
+      'server_port': 7842,
+      'poll_interval': '5m',
+      'retention_days': 90,
+      'ai_primary': 'claude',
+      'ai_fallback': '',
+      'review_mode': 'single',
+      'issue_tracking': {'enabled': false},
+      'autonomous': {
+        'enabled': true,
+        'merge_method': 'merge',
+        'dev_effort': 'low',
+      },
+      'circuit_breaker': {
+        'per_pr_24h': 10,
+        'per_repo_hr': 50,
+      },
+    };
+
+    final cfg = AppConfig.fromJson(json);
+    expect(cfg.autonomous.enabled, isTrue);
+    expect(cfg.autonomous.mergeMethod, 'merge');
+    expect(cfg.autonomous.devEffort, 'low');
+    expect(cfg.circuitBreaker.perPr24h, 10);
+    expect(cfg.circuitBreaker.perRepoHr, 50);
+    // Unspecified fields get defaults
+    expect(cfg.circuitBreaker.perIssue24h, 3);
+  });
+
+  test('AppConfig.fromJson uses defaults when autonomous/circuit_breaker absent', () {
+    final json = {
+      'repositories': <String>[],
+      'server_port': 7842,
+      'poll_interval': '5m',
+      'retention_days': 90,
+      'ai_primary': 'claude',
+      'ai_fallback': '',
+      'review_mode': 'single',
+      'issue_tracking': {'enabled': false},
+    };
+
+    final cfg = AppConfig.fromJson(json);
+    expect(cfg.autonomous.enabled, isFalse);
+    expect(cfg.autonomous.mergeMethod, 'squash');
+    expect(cfg.circuitBreaker.perPr24h, 3);
+  });
+
+  // ── _computeGlobalDiff via ConfigNotifier.save ────────────────────────────
+
+  test('_computeGlobalDiff emits autonomous diff when enabled changes', () async {
+    final mockApi = MockApiClient();
+    Map<String, dynamic>? capturedPatch;
+
+    const initialConfig = AppConfig();
+    when(() => mockApi.fetchConfig()).thenAnswer((_) async => initialConfig.toJson());
+    when(() => mockApi.patchConfig(any())).thenAnswer((invocation) async {
+      capturedPatch = invocation.positionalArguments[0] as Map<String, dynamic>;
+      return initialConfig.copyWith(
+        autonomous: const AutonomousConfig(enabled: true),
+      ).toJson();
+    });
+
+    final container = ProviderContainer(
+      overrides: [apiClientProvider.overrideWithValue(mockApi)],
+    );
+    addTearDown(container.dispose);
+
+    // Wait for the provider to load
+    await container.read(configNotifierProvider.future);
+
+    final updated = initialConfig.copyWith(
+      autonomous: const AutonomousConfig(enabled: true),
+    );
+    await container.read(configNotifierProvider.notifier).save(updated);
+
+    expect(capturedPatch, isNotNull);
+    expect(capturedPatch!['autonomous'], isNotNull);
+    expect(capturedPatch!['autonomous']['enabled'], isTrue);
+  });
+
+  test('_computeGlobalDiff emits circuit_breaker diff when a field changes', () async {
+    final mockApi = MockApiClient();
+    Map<String, dynamic>? capturedPatch;
+
+    const initialConfig = AppConfig();
+    when(() => mockApi.fetchConfig()).thenAnswer((_) async => initialConfig.toJson());
+    when(() => mockApi.patchConfig(any())).thenAnswer((invocation) async {
+      capturedPatch = invocation.positionalArguments[0] as Map<String, dynamic>;
+      return initialConfig.copyWith(
+        circuitBreaker: const CircuitBreakerConfig(perPr24h: 10),
+      ).toJson();
+    });
+
+    final container = ProviderContainer(
+      overrides: [apiClientProvider.overrideWithValue(mockApi)],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(configNotifierProvider.future);
+
+    final updated = initialConfig.copyWith(
+      circuitBreaker: const CircuitBreakerConfig(perPr24h: 10),
+    );
+    await container.read(configNotifierProvider.notifier).save(updated);
+
+    expect(capturedPatch, isNotNull);
+    expect(capturedPatch!['circuit_breaker'], isNotNull);
+    expect(capturedPatch!['circuit_breaker']['per_pr_24h'], 10);
+  });
 }

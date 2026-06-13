@@ -32,6 +32,19 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   // All known repos. Key = "org/repo", Value = per-repo settings.
   Map<String, RepoConfig> _repoConfigs = {};
 
+  // Autonomous mode
+  AutonomousConfig _autonomous = const AutonomousConfig();
+  CircuitBreakerConfig _circuitBreaker = const CircuitBreakerConfig();
+  late TextEditingController _devMaxTurnsController;
+  late TextEditingController _devTimeoutController;
+  late TextEditingController _claimLeaseController;
+  late TextEditingController _perPr24hController;
+  late TextEditingController _perRepoHrController;
+  late TextEditingController _perIssue24hController;
+  late TextEditingController _perIssueRepoHrController;
+  late TextEditingController _perImplRepoHrController;
+  bool _autonomousControllersInitialized = false;
+
   bool _initialized = false;
   bool _discovering = false;
   String? _discoverError;
@@ -39,12 +52,28 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   @override
   void initState() {
     super.initState();
+    _devMaxTurnsController = TextEditingController();
+    _devTimeoutController = TextEditingController();
+    _claimLeaseController = TextEditingController();
+    _perPr24hController = TextEditingController();
+    _perRepoHrController = TextEditingController();
+    _perIssue24hController = TextEditingController();
+    _perIssueRepoHrController = TextEditingController();
+    _perImplRepoHrController = TextEditingController();
     _detectToken().then((_) => _autoDiscoverRepos());
   }
 
   @override
   void dispose() {
     _tokenController.dispose();
+    _devMaxTurnsController.dispose();
+    _devTimeoutController.dispose();
+    _claimLeaseController.dispose();
+    _perPr24hController.dispose();
+    _perRepoHrController.dispose();
+    _perIssue24hController.dispose();
+    _perIssueRepoHrController.dispose();
+    _perImplRepoHrController.dispose();
     super.dispose();
   }
 
@@ -83,6 +112,22 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     _developPromptId = config.globalImplementPrompt.isEmpty
         ? null
         : config.globalImplementPrompt;
+    _initAutonomousFromConfig(config);
+  }
+
+  void _initAutonomousFromConfig(AppConfig config) {
+    if (_autonomousControllersInitialized) return;
+    _autonomousControllersInitialized = true;
+    _autonomous = config.autonomous;
+    _circuitBreaker = config.circuitBreaker;
+    _devMaxTurnsController.text = config.autonomous.devMaxTurns.toString();
+    _devTimeoutController.text = config.autonomous.devTimeout;
+    _claimLeaseController.text = config.autonomous.claimLease;
+    _perPr24hController.text = config.circuitBreaker.perPr24h.toString();
+    _perRepoHrController.text = config.circuitBreaker.perRepoHr.toString();
+    _perIssue24hController.text = config.circuitBreaker.perIssue24h.toString();
+    _perIssueRepoHrController.text = config.circuitBreaker.perIssueRepoHr.toString();
+    _perImplRepoHrController.text = config.circuitBreaker.perImplRepoHr.toString();
   }
 
   /// Auto-discovers repos from the user's PRs. Runs silently on init.
@@ -180,6 +225,10 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
             _issueTrackingSection(config),
             const SizedBox(height: 20),
             _developSection(config),
+            const SizedBox(height: 20),
+            _autonomousSection(),
+            const SizedBox(height: 20),
+            _circuitBreakerSection(),
             const SizedBox(height: 28),
             _saveButton(context, config, daemonRunning),
           ],
@@ -657,6 +706,237 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     ]);
   }
 
+  // ── Autonomous mode ────────────────────────────────────────────────────────
+
+  Widget _autonomousSection() {
+    return _settingsCard('Autonomous Mode', [
+      SwitchListTile(
+        title: const Text('Enable autonomous mode', style: TextStyle(fontSize: 13)),
+        subtitle: const Text(
+          'Allow Heimdallm to act autonomously on PRs and issues',
+          style: TextStyle(fontSize: 11),
+        ),
+        dense: true,
+        contentPadding: EdgeInsets.zero,
+        value: _autonomous.enabled,
+        onChanged: (v) => setState(() {
+          _autonomous = _autonomous.copyWith(enabled: v);
+        }),
+      ),
+      if (_autonomous.enabled) ...[
+        const SizedBox(height: 8),
+        SwitchListTile(
+          title: const Text('Auto-merge approved PRs', style: TextStyle(fontSize: 13)),
+          subtitle: const Text(
+            'Automatically merge PRs that pass all checks',
+            style: TextStyle(fontSize: 11),
+          ),
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+          value: _autonomous.autoMerge,
+          onChanged: (v) => setState(() {
+            _autonomous = _autonomous.copyWith(autoMerge: v);
+          }),
+        ),
+        const SizedBox(height: 8),
+        DropdownButtonFormField<String>(
+          // ignore: deprecated_member_use
+          value: _autonomous.mergeMethod,
+          decoration: const InputDecoration(
+            labelText: 'Merge method',
+            border: OutlineInputBorder(),
+            isDense: true,
+          ),
+          items: ['squash', 'merge', 'rebase']
+              .map((v) => DropdownMenuItem(value: v, child: Text(v)))
+              .toList(),
+          onChanged: (v) => setState(() {
+            _autonomous = _autonomous.copyWith(mergeMethod: v);
+          }),
+        ),
+        const SizedBox(height: 8),
+        DropdownButtonFormField<String>(
+          // ignore: deprecated_member_use
+          value: _autonomous.devEffort,
+          decoration: const InputDecoration(
+            labelText: 'Dev effort',
+            helperText: 'Effort level for autonomous development tasks',
+            border: OutlineInputBorder(),
+            isDense: true,
+          ),
+          items: ['low', 'medium', 'high', 'max']
+              .map((v) => DropdownMenuItem(value: v, child: Text(v)))
+              .toList(),
+          onChanged: (v) => setState(() {
+            _autonomous = _autonomous.copyWith(devEffort: v);
+          }),
+        ),
+        const SizedBox(height: 8),
+        TextFormField(
+          controller: _devMaxTurnsController,
+          decoration: const InputDecoration(
+            labelText: 'Dev max turns (0 = unlimited)',
+            border: OutlineInputBorder(),
+            isDense: true,
+          ),
+          keyboardType: TextInputType.number,
+          onChanged: (v) => setState(() {
+            _autonomous = _autonomous.copyWith(devMaxTurns: int.tryParse(v) ?? 0);
+          }),
+        ),
+        const SizedBox(height: 8),
+        TextFormField(
+          controller: _devTimeoutController,
+          decoration: const InputDecoration(
+            labelText: 'Dev timeout (e.g. 45m)',
+            border: OutlineInputBorder(),
+            isDense: true,
+          ),
+          onChanged: (v) => setState(() {
+            _autonomous = _autonomous.copyWith(devTimeout: v);
+          }),
+        ),
+        const SizedBox(height: 8),
+        TextFormField(
+          controller: _claimLeaseController,
+          decoration: const InputDecoration(
+            labelText: 'Claim lease (e.g. 2h)',
+            helperText: 'How long to hold a claim on an issue before releasing',
+            border: OutlineInputBorder(),
+            isDense: true,
+          ),
+          onChanged: (v) => setState(() {
+            _autonomous = _autonomous.copyWith(claimLease: v);
+          }),
+        ),
+        const SizedBox(height: 8),
+        SwitchListTile(
+          title: const Text("Take others' tasks", style: TextStyle(fontSize: 13)),
+          subtitle: const Text(
+            'Claim issues assigned to other users',
+            style: TextStyle(fontSize: 11),
+          ),
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+          value: _autonomous.takeOthersTasks,
+          onChanged: (v) => setState(() {
+            _autonomous = _autonomous.copyWith(
+              takeOthersTasks: v,
+              reassignOnTake: v ? _autonomous.reassignOnTake : false,
+            );
+          }),
+        ),
+        if (_autonomous.takeOthersTasks) ...[
+          const SizedBox(height: 4),
+          Container(
+            decoration: BoxDecoration(
+              color: Theme.of(context)
+                  .colorScheme
+                  .surfaceContainerHighest
+                  .withValues(alpha: 0.3),
+              borderRadius: BorderRadius.circular(6),
+            ),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+            child: SwitchListTile(
+              title: const Text('Reassign on take', style: TextStyle(fontSize: 11)),
+              subtitle: Text(
+                'Reassign issue to the bot user when claiming',
+                style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+              ),
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              value: _autonomous.reassignOnTake,
+              onChanged: (v) => setState(() {
+                _autonomous = _autonomous.copyWith(reassignOnTake: v);
+              }),
+            ),
+          ),
+        ],
+      ],
+    ]);
+  }
+
+  // ── Circuit breaker ────────────────────────────────────────────────────────
+
+  Widget _circuitBreakerSection() {
+    return _settingsCard('Circuit Breaker', [
+      TextFormField(
+        controller: _perPr24hController,
+        decoration: const InputDecoration(
+          labelText: 'PRs per 24h',
+          border: OutlineInputBorder(),
+          isDense: true,
+        ),
+        keyboardType: TextInputType.number,
+        onChanged: (v) => setState(() {
+          _circuitBreaker = _circuitBreaker.copyWith(
+            perPr24h: int.tryParse(v) ?? _circuitBreaker.perPr24h,
+          );
+        }),
+      ),
+      const SizedBox(height: 8),
+      TextFormField(
+        controller: _perRepoHrController,
+        decoration: const InputDecoration(
+          labelText: 'PRs per repo per hour',
+          border: OutlineInputBorder(),
+          isDense: true,
+        ),
+        keyboardType: TextInputType.number,
+        onChanged: (v) => setState(() {
+          _circuitBreaker = _circuitBreaker.copyWith(
+            perRepoHr: int.tryParse(v) ?? _circuitBreaker.perRepoHr,
+          );
+        }),
+      ),
+      const SizedBox(height: 8),
+      TextFormField(
+        controller: _perIssue24hController,
+        decoration: const InputDecoration(
+          labelText: 'Issues per 24h',
+          border: OutlineInputBorder(),
+          isDense: true,
+        ),
+        keyboardType: TextInputType.number,
+        onChanged: (v) => setState(() {
+          _circuitBreaker = _circuitBreaker.copyWith(
+            perIssue24h: int.tryParse(v) ?? _circuitBreaker.perIssue24h,
+          );
+        }),
+      ),
+      const SizedBox(height: 8),
+      TextFormField(
+        controller: _perIssueRepoHrController,
+        decoration: const InputDecoration(
+          labelText: 'Issues per repo per hour',
+          border: OutlineInputBorder(),
+          isDense: true,
+        ),
+        keyboardType: TextInputType.number,
+        onChanged: (v) => setState(() {
+          _circuitBreaker = _circuitBreaker.copyWith(
+            perIssueRepoHr: int.tryParse(v) ?? _circuitBreaker.perIssueRepoHr,
+          );
+        }),
+      ),
+      const SizedBox(height: 8),
+      TextFormField(
+        controller: _perImplRepoHrController,
+        decoration: const InputDecoration(
+          labelText: 'Implementations per repo per hour (autonomous dev)',
+          border: OutlineInputBorder(),
+          isDense: true,
+        ),
+        keyboardType: TextInputType.number,
+        onChanged: (v) => setState(() {
+          _circuitBreaker = _circuitBreaker.copyWith(
+            perImplRepoHr: int.tryParse(v) ?? _circuitBreaker.perImplRepoHr,
+          );
+        }),
+      ),
+    ]);
+  }
+
   Widget _agentDropdown({
     required String label,
     required String helper,
@@ -853,6 +1133,8 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     globalPRDraft: _globalPRDraft,
     globalIssuePrompt: _issuePromptId ?? '',
     globalImplementPrompt: _developPromptId ?? '',
+    autonomous: _autonomous,
+    circuitBreaker: _circuitBreaker,
     // aiPrimary, aiFallback, reviewMode, agentConfigs managed in Agents tab
   );
 

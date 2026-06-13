@@ -628,6 +628,124 @@ List<String>? _nullableStringListAllowEmpty(dynamic v) {
       .toList();
 }
 
+/// Autonomous-mode global settings.
+class AutonomousConfig {
+  final bool enabled;
+  final bool autoMerge;
+  final String mergeMethod; // 'squash' | 'merge' | 'rebase'
+  final bool takeOthersTasks;
+  final bool reassignOnTake;
+  final int devMaxTurns; // 0 = not set
+  final String devEffort; // 'low' | 'medium' | 'high' | 'max'
+  final String devTimeout;
+  final String claimLease;
+
+  const AutonomousConfig({
+    this.enabled = false,
+    this.autoMerge = false,
+    this.mergeMethod = 'squash',
+    this.takeOthersTasks = false,
+    this.reassignOnTake = false,
+    this.devMaxTurns = 0,
+    this.devEffort = 'high',
+    this.devTimeout = '45m',
+    this.claimLease = '2h',
+  });
+
+  AutonomousConfig copyWith({
+    bool? enabled,
+    bool? autoMerge,
+    String? mergeMethod,
+    bool? takeOthersTasks,
+    bool? reassignOnTake,
+    int? devMaxTurns,
+    String? devEffort,
+    String? devTimeout,
+    String? claimLease,
+  }) => AutonomousConfig(
+    enabled: enabled ?? this.enabled,
+    autoMerge: autoMerge ?? this.autoMerge,
+    mergeMethod: mergeMethod ?? this.mergeMethod,
+    takeOthersTasks: takeOthersTasks ?? this.takeOthersTasks,
+    reassignOnTake: reassignOnTake ?? this.reassignOnTake,
+    devMaxTurns: devMaxTurns ?? this.devMaxTurns,
+    devEffort: devEffort ?? this.devEffort,
+    devTimeout: devTimeout ?? this.devTimeout,
+    claimLease: claimLease ?? this.claimLease,
+  );
+
+  factory AutonomousConfig.fromJson(Map<String, dynamic> json) => AutonomousConfig(
+    enabled: json['enabled'] as bool? ?? false,
+    autoMerge: json['auto_merge'] as bool? ?? false,
+    mergeMethod: json['merge_method'] as String? ?? 'squash',
+    takeOthersTasks: json['take_others_tasks'] as bool? ?? false,
+    reassignOnTake: json['reassign_on_take'] as bool? ?? false,
+    devMaxTurns: (json['dev_max_turns'] as num?)?.toInt() ?? 0,
+    devEffort: json['dev_effort'] as String? ?? 'high',
+    devTimeout: json['dev_timeout'] as String? ?? '45m',
+    claimLease: json['claim_lease'] as String? ?? '2h',
+  );
+
+  Map<String, dynamic> toJson() => {
+    'enabled': enabled,
+    'auto_merge': autoMerge,
+    'merge_method': mergeMethod,
+    'take_others_tasks': takeOthersTasks,
+    'reassign_on_take': reassignOnTake,
+    'dev_max_turns': devMaxTurns,
+    'dev_effort': devEffort,
+    'dev_timeout': devTimeout,
+    'claim_lease': claimLease,
+  };
+}
+
+/// Circuit-breaker rate limits for autonomous mode.
+class CircuitBreakerConfig {
+  final int perPr24h;
+  final int perRepoHr;
+  final int perIssue24h;
+  final int perIssueRepoHr;
+  final int perImplRepoHr;
+
+  const CircuitBreakerConfig({
+    this.perPr24h = 3,
+    this.perRepoHr = 20,
+    this.perIssue24h = 3,
+    this.perIssueRepoHr = 10,
+    this.perImplRepoHr = 5,
+  });
+
+  CircuitBreakerConfig copyWith({
+    int? perPr24h,
+    int? perRepoHr,
+    int? perIssue24h,
+    int? perIssueRepoHr,
+    int? perImplRepoHr,
+  }) => CircuitBreakerConfig(
+    perPr24h: perPr24h ?? this.perPr24h,
+    perRepoHr: perRepoHr ?? this.perRepoHr,
+    perIssue24h: perIssue24h ?? this.perIssue24h,
+    perIssueRepoHr: perIssueRepoHr ?? this.perIssueRepoHr,
+    perImplRepoHr: perImplRepoHr ?? this.perImplRepoHr,
+  );
+
+  factory CircuitBreakerConfig.fromJson(Map<String, dynamic> json) => CircuitBreakerConfig(
+    perPr24h: (json['per_pr_24h'] as num?)?.toInt() ?? 3,
+    perRepoHr: (json['per_repo_hr'] as num?)?.toInt() ?? 20,
+    perIssue24h: (json['per_issue_24h'] as num?)?.toInt() ?? 3,
+    perIssueRepoHr: (json['per_issue_repo_hr'] as num?)?.toInt() ?? 10,
+    perImplRepoHr: (json['per_impl_repo_hr'] as num?)?.toInt() ?? 5,
+  );
+
+  Map<String, dynamic> toJson() => {
+    'per_pr_24h': perPr24h,
+    'per_repo_hr': perRepoHr,
+    'per_issue_24h': perIssue24h,
+    'per_issue_repo_hr': perIssueRepoHr,
+    'per_impl_repo_hr': perImplRepoHr,
+  };
+}
+
 /// Issue tracking pipeline configuration.
 class IssueTrackingConfig {
   final bool enabled;
@@ -737,6 +855,9 @@ class AppConfig {
   final bool? globalAutoPromoteRefinement;
   final bool globalGeneratePRDescription;
 
+  final AutonomousConfig autonomous;
+  final CircuitBreakerConfig circuitBreaker;
+
   /// Host paths the daemon scans (in order) when a repo has no explicit
   /// `local_dir` set — first match at `{base}/{short-repo-name}` wins.
   final List<String> localDirBase;
@@ -773,6 +894,8 @@ class AppConfig {
     this.globalAutoPromoteTriage,
     this.globalAutoPromoteRefinement,
     this.globalGeneratePRDescription = false,
+    this.autonomous = const AutonomousConfig(),
+    this.circuitBreaker = const CircuitBreakerConfig(),
     this.localDirBase = const [],
     this.localDirsDetected = const {},
   });
@@ -847,6 +970,8 @@ class AppConfig {
     Object? globalAutoPromoteTriage = _sentinel,
     Object? globalAutoPromoteRefinement = _sentinel,
     bool? globalGeneratePRDescription,
+    AutonomousConfig? autonomous,
+    CircuitBreakerConfig? circuitBreaker,
     List<String>? localDirBase,
     Map<String, String>? localDirsDetected,
   }) {
@@ -879,6 +1004,8 @@ class AppConfig {
           : globalAutoPromoteRefinement as bool?,
       globalGeneratePRDescription:
           globalGeneratePRDescription ?? this.globalGeneratePRDescription,
+      autonomous: autonomous ?? this.autonomous,
+      circuitBreaker: circuitBreaker ?? this.circuitBreaker,
       localDirBase: localDirBase ?? this.localDirBase,
       localDirsDetected: localDirsDetected ?? this.localDirsDetected,
     );
@@ -1061,6 +1188,16 @@ class AppConfig {
       globalAutoPromoteRefinement: json['auto_promote_refinement'] as bool?,
       globalGeneratePRDescription:
           (json['generate_pr_description'] as bool?) ?? false,
+      autonomous: json['autonomous'] != null
+          ? AutonomousConfig.fromJson(
+              json['autonomous'] as Map<String, dynamic>,
+            )
+          : const AutonomousConfig(),
+      circuitBreaker: json['circuit_breaker'] != null
+          ? CircuitBreakerConfig.fromJson(
+              json['circuit_breaker'] as Map<String, dynamic>,
+            )
+          : const CircuitBreakerConfig(),
       localDirBase: _parseStringList(json['local_dir_base']),
       localDirsDetected: localDirsDetected,
     );
