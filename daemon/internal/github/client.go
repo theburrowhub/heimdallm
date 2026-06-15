@@ -75,6 +75,7 @@ type Client struct {
 	cache         *ConditionalCache
 	rateObs       RateLimitObserver
 	cacheDisabled atomic.Bool // when true, ETag conditional-request layer is bypassed
+	useGraphQL    atomic.Bool // when true, SearchIssues dispatches to GraphQL with REST fallback
 
 	// rate-limit circuit breaker: when GitHub rejects a request with a rate
 	// limit (primary exhaustion or a secondary/abuse burst block), every
