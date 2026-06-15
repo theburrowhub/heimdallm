@@ -8,7 +8,8 @@ import 'package:heimdallm/core/api/api_client.dart';
 import 'package:heimdallm/core/models/config_model.dart';
 import 'package:heimdallm/core/platform/platform_services_provider.dart';
 import 'package:heimdallm/core/setup/first_run_setup.dart';
-import 'package:heimdallm/features/config/config_providers.dart';
+import 'package:heimdallm/features/config/config_providers.dart'
+    show ConfigNotifier, configNotifierProvider, computeGlobalDiffForTest;
 import 'package:heimdallm/features/config/config_screen.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import '../core/platform/fake_platform_services.dart';
@@ -448,6 +449,132 @@ void main() {
       'repo-reviewer',
     ]);
   });
+
+  // ── PollingConfig tests ────────────────────────────────────────────────────
+
+  test('PollingConfig.fromJson round-trips via toJson', () {
+    final json = {
+      'adaptive': true,
+      'poll_interval': '2m',
+      'min_interval': '30s',
+      'max_interval': '10m',
+      'discovery_interval': '3m',
+      'tier3_interval': '1m',
+      'rate_limit_safety_threshold': 200,
+      'use_etag': false,
+      'use_graphql': true,
+    };
+    final cfg = PollingConfig.fromJson(json);
+    expect(cfg.adaptive, isTrue);
+    expect(cfg.pollInterval, '2m');
+    expect(cfg.minInterval, '30s');
+    expect(cfg.maxInterval, '10m');
+    expect(cfg.discoveryInterval, '3m');
+    expect(cfg.tier3Interval, '1m');
+    expect(cfg.rateLimitSafetyThreshold, 200);
+    expect(cfg.useEtag, isFalse);
+    expect(cfg.useGraphql, isTrue);
+
+    final roundTrip = PollingConfig.fromJson(cfg.toJson());
+    expect(roundTrip.adaptive, cfg.adaptive);
+    expect(roundTrip.pollInterval, cfg.pollInterval);
+    expect(roundTrip.minInterval, cfg.minInterval);
+    expect(roundTrip.maxInterval, cfg.maxInterval);
+    expect(roundTrip.discoveryInterval, cfg.discoveryInterval);
+    expect(roundTrip.tier3Interval, cfg.tier3Interval);
+    expect(roundTrip.rateLimitSafetyThreshold, cfg.rateLimitSafetyThreshold);
+    expect(roundTrip.useEtag, cfg.useEtag);
+    expect(roundTrip.useGraphql, cfg.useGraphql);
+  });
+
+  test('PollingConfig.fromJson applies defaults for missing keys', () {
+    final cfg = PollingConfig.fromJson({});
+    expect(cfg.adaptive, isFalse);
+    expect(cfg.pollInterval, '');
+    expect(cfg.minInterval, '1m');
+    expect(cfg.maxInterval, '15m');
+    expect(cfg.discoveryInterval, '5m');
+    expect(cfg.tier3Interval, '30s');
+    expect(cfg.rateLimitSafetyThreshold, 100);
+    expect(cfg.useEtag, isTrue);
+    expect(cfg.useGraphql, isFalse);
+  });
+
+  test('PollingConfig.fromJson parses rate_limit_safety_threshold as int via num', () {
+    // The daemon may send it as a JSON number (double or int)
+    final cfg = PollingConfig.fromJson({'rate_limit_safety_threshold': 150});
+    expect(cfg.rateLimitSafetyThreshold, 150);
+  });
+
+  test('AppConfig.fromJson parses nested polling object', () {
+    final json = {
+      'repositories': <String>[],
+      'server_port': 7842,
+      'poll_interval': '5m',
+      'retention_days': 90,
+      'ai_primary': 'claude',
+      'ai_fallback': '',
+      'review_mode': 'single',
+      'issue_tracking': {'enabled': false},
+      'polling': {
+        'adaptive': true,
+        'poll_interval': '1m',
+        'min_interval': '30s',
+        'max_interval': '10m',
+        'discovery_interval': '4m',
+        'tier3_interval': '45s',
+        'rate_limit_safety_threshold': 50,
+        'use_etag': true,
+        'use_graphql': false,
+      },
+    };
+    final cfg = AppConfig.fromJson(json);
+    expect(cfg.polling.adaptive, isTrue);
+    expect(cfg.polling.pollInterval, '1m');
+    expect(cfg.polling.minInterval, '30s');
+    expect(cfg.polling.rateLimitSafetyThreshold, 50);
+  });
+
+  test('AppConfig.fromJson uses PollingConfig defaults when polling key absent', () {
+    final json = {
+      'repositories': <String>[],
+      'server_port': 7842,
+      'poll_interval': '5m',
+      'retention_days': 90,
+      'ai_primary': 'claude',
+      'ai_fallback': '',
+      'review_mode': 'single',
+      'issue_tracking': {'enabled': false},
+    };
+    final cfg = AppConfig.fromJson(json);
+    expect(cfg.polling.adaptive, isFalse);
+    expect(cfg.polling.useEtag, isTrue);
+  });
+
+  test('_computeGlobalDiff emits polling diff only for changed fields', () {
+    const old = AppConfig();
+    // Change two fields: adaptive and use_graphql
+    final updated = old.copyWith(
+      polling: const PollingConfig(adaptive: true, useGraphql: true),
+    );
+    final diff = computeGlobalDiffForTest(old, updated);
+    expect(diff.containsKey('polling'), isTrue);
+    final pd = diff['polling'] as Map<String, dynamic>;
+    expect(pd['adaptive'], isTrue);
+    expect(pd['use_graphql'], isTrue);
+    // Unchanged fields must not appear
+    expect(pd.containsKey('use_etag'), isFalse);
+    expect(pd.containsKey('min_interval'), isFalse);
+    expect(pd.containsKey('poll_interval'), isFalse);
+  });
+
+  test('_computeGlobalDiff emits no polling diff when polling unchanged', () {
+    const cfg = AppConfig();
+    final diff = computeGlobalDiffForTest(cfg, cfg);
+    expect(diff.containsKey('polling'), isFalse);
+  });
+
+  // ── saveAndStartDaemon tests ───────────────────────────────────────────────
 
   testWidgets('saveAndStartDaemon calls platform.spawnDaemon', (tester) async {
     final platform = FakePlatformServices(

@@ -97,6 +97,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   IssueTrackingConfig _issueTracking = const IssueTrackingConfig();
   String? _issuePromptId;
   String? _developPromptId;
+  PollingConfig _polling = const PollingConfig();
 
   // All known repos. Key = "org/repo", Value = per-repo settings.
   Map<String, RepoConfig> _repoConfigs = {};
@@ -148,6 +149,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     _retentionDays = config.retentionDays;
     _repoConfigs = Map.from(config.repoConfigs);
     _issueTracking = config.issueTracking;
+    _polling = config.polling;
     _issuePromptId = config.globalIssuePrompt.isEmpty
         ? null
         : config.globalIssuePrompt;
@@ -247,6 +249,8 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
             _pollSection(),
             const SizedBox(height: 20),
             _retentionSection(),
+            const SizedBox(height: 20),
+            _pollingSection(),
             const SizedBox(height: 20),
             _issueTrackingSection(config),
             const SizedBox(height: 20),
@@ -499,6 +503,165 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
         ),
       ],
     );
+  }
+
+  // ── Polling / Rate-limit ─────────────────────────────────────────────────
+
+  Widget _pollingSection() {
+    return _settingsCard('Polling / Rate Limit', [
+      SwitchListTile(
+        title: const Text('Adaptive polling', style: TextStyle(fontSize: 13)),
+        subtitle: const Text(
+          'Dynamically adjust poll interval based on activity',
+          style: TextStyle(fontSize: 11),
+        ),
+        dense: true,
+        contentPadding: EdgeInsets.zero,
+        value: _polling.adaptive,
+        onChanged: (v) => setState(() {
+          _polling = _polling.copyWith(adaptive: v);
+        }),
+      ),
+      const SizedBox(height: 10),
+      TextFormField(
+        initialValue: _polling.pollInterval,
+        decoration: const InputDecoration(
+          labelText: 'Poll interval',
+          helperText: 'Override global poll interval (e.g. 2m, 30s)',
+          border: OutlineInputBorder(),
+        ),
+        onChanged: (v) => setState(() {
+          _polling = _polling.copyWith(pollInterval: v);
+        }),
+      ),
+      if (_polling.adaptive) ...[
+        const SizedBox(height: 10),
+        Row(
+          children: [
+            Expanded(
+              child: TextFormField(
+                initialValue: _polling.minInterval,
+                decoration: const InputDecoration(
+                  labelText: 'Min interval',
+                  helperText: 'Shortest allowed poll cycle',
+                  border: OutlineInputBorder(),
+                ),
+                onChanged: (v) => setState(() {
+                  _polling = _polling.copyWith(minInterval: v);
+                }),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: TextFormField(
+                initialValue: _polling.maxInterval,
+                decoration: const InputDecoration(
+                  labelText: 'Max interval',
+                  helperText: 'Longest allowed poll cycle',
+                  border: OutlineInputBorder(),
+                ),
+                onChanged: (v) => setState(() {
+                  _polling = _polling.copyWith(maxInterval: v);
+                }),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        Row(
+          children: [
+            Expanded(
+              child: TextFormField(
+                initialValue: _polling.discoveryInterval,
+                decoration: const InputDecoration(
+                  labelText: 'Discovery interval',
+                  helperText: 'Repo discovery scan cadence',
+                  border: OutlineInputBorder(),
+                ),
+                onChanged: (v) => setState(() {
+                  _polling = _polling.copyWith(discoveryInterval: v);
+                }),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: TextFormField(
+                initialValue: _polling.tier3Interval,
+                decoration: const InputDecoration(
+                  labelText: 'Tier-3 interval',
+                  helperText: 'Slow-lane repos poll cadence',
+                  border: OutlineInputBorder(),
+                ),
+                onChanged: (v) => setState(() {
+                  _polling = _polling.copyWith(tier3Interval: v);
+                }),
+              ),
+            ),
+          ],
+        ),
+      ],
+      const SizedBox(height: 10),
+      TextFormField(
+        initialValue: _polling.rateLimitSafetyThreshold.toString(),
+        decoration: const InputDecoration(
+          labelText: 'Rate-limit safety threshold',
+          helperText: 'Remaining API requests before backing off',
+          border: OutlineInputBorder(),
+        ),
+        keyboardType: TextInputType.number,
+        onChanged: (v) => setState(() {
+          _polling = _polling.copyWith(
+            rateLimitSafetyThreshold: int.tryParse(v) ?? 100,
+          );
+        }),
+      ),
+      const SizedBox(height: 10),
+      Container(
+        decoration: BoxDecoration(
+          color: Theme.of(
+            context,
+          ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
+          borderRadius: BorderRadius.circular(6),
+        ),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+        child: Column(
+          children: [
+            SwitchListTile(
+              title: const Text(
+                'Use ETag caching',
+                style: TextStyle(fontSize: 11),
+              ),
+              subtitle: Text(
+                'Skip unchanged responses using HTTP ETags',
+                style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+              ),
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              value: _polling.useEtag,
+              onChanged: (v) => setState(() {
+                _polling = _polling.copyWith(useEtag: v);
+              }),
+            ),
+            SwitchListTile(
+              title: const Text(
+                'Use GraphQL API',
+                style: TextStyle(fontSize: 11),
+              ),
+              subtitle: Text(
+                'Fetch PR/issue data via GraphQL instead of REST',
+                style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+              ),
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              value: _polling.useGraphql,
+              onChanged: (v) => setState(() {
+                _polling = _polling.copyWith(useGraphql: v);
+              }),
+            ),
+          ],
+        ),
+      ),
+    ]);
   }
 
   // ── Issue tracking ──────────────────────────────────────────────────────
@@ -949,6 +1112,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     retentionDays: _retentionDays,
     repoConfigs: Map.from(_repoConfigs),
     issueTracking: _issueTracking,
+    polling: _polling,
     globalPRReviewers: _globalPRReviewers,
     globalPRLabels: _globalPRLabels,
     globalPRAssignee: _globalPRAssignee,
