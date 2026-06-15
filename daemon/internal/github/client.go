@@ -39,6 +39,13 @@ const maxDiffBodyBytes = 10 * 1024 * 1024 // 10 MB for diffs
 // misbehaving server.
 const maxPaginatedPageBytes = 5 * 1024 * 1024 // 5 MB for per_page=100 endpoints
 
+// maxCacheBodyBytes is the maximum body size that will be stored in the ETag
+// cache. Bodies larger than this limit are still served in full to the caller
+// (read up to maxDiffBodyBytes) but are not kept in memory across requests.
+// Set to maxBodyBytes (1 MiB) so the cached-entry memory budget is bounded
+// regardless of which Accept type was used to fetch the resource.
+const maxCacheBodyBytes = maxBodyBytes // 1 MB
+
 // maxErrBodyLen limits the number of bytes included in error messages to avoid
 // leaking sensitive GitHub diagnostic information (e.g. token details).
 const maxErrBodyLen = 200
@@ -171,7 +178,12 @@ func (c *Client) do(method, path string, accept string) (*http.Response, error) 
 	// On 200 with a new ETag: read+buffer the body, store it, hand the caller
 	// a fresh reader so it can decode normally.
 	// Any other status: passthrough without touching the cache.
-	key := cacheKey(method, path)
+	//
+	// The key includes the Accept value because the same path can be requested
+	// with different Accept headers (e.g. application/vnd.github+json vs
+	// application/vnd.github.v3.diff for the pulls endpoint) and must produce
+	// separate cache entries. See cacheKey for details.
+	key := cacheKey(method, accept, path)
 	cachedETag, cachedBody, hasCached := c.cache.Get(key)
 
 	req, err := http.NewRequest(method, c.baseURL+path, nil)
@@ -230,8 +242,20 @@ func (c *Client) do(method, path string, accept string) (*http.Response, error) 
 			// No ETag — pass through without caching.
 			return resp, nil
 		}
-		// Buffer the body so we can (a) cache it and (b) give the caller a fresh reader.
-		data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+		// Do not cache paginated responses: a 304 re-serve would lose the
+		// Link header and break the caller's cursor-based pagination
+		// (e.g. FetchCollaborators). Serve the body normally without storing.
+		if resp.Header.Get("Link") != "" {
+			return resp, nil
+		}
+		// Buffer the full body up to maxDiffBodyBytes so that large diffs
+		// (up to 10 MiB) are never silently truncated by the cache layer.
+		// We read with the larger limit here; callers that need only a
+		// smaller bound (most JSON endpoints) apply their own LimitReader
+		// after receiving the response. The body is served in full regardless
+		// of size, but is only stored in the cache when it is small enough
+		// not to blow the per-entry memory budget (maxCacheBodyBytes).
+		data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxDiffBodyBytes))
 		resp.Body.Close()
 		if readErr != nil {
 			// Return an error-wrapping response with a body so callers that
@@ -239,8 +263,10 @@ func (c *Client) do(method, path string, accept string) (*http.Response, error) 
 			resp.Body = http.NoBody
 			return resp, fmt.Errorf("github: etag cache: read body: %w", readErr)
 		}
-		c.cache.Put(key, newETag, data)
-		c.cache.cacheMisses.Add(1)
+		if len(data) <= maxCacheBodyBytes {
+			c.cache.Put(key, newETag, data)
+			c.cache.cacheMisses.Add(1)
+		}
 		resp.Body = io.NopCloser(bytes.NewReader(data))
 		return resp, nil
 

@@ -87,10 +87,15 @@ func (c *ConditionalCache) CacheHits() int64 { return c.cacheHits.Load() }
 // CacheMisses returns the number of 200 responses that were stored since creation.
 func (c *ConditionalCache) CacheMisses() int64 { return c.cacheMisses.Load() }
 
-// cacheKey builds the lookup key for a given path (which already includes
-// any query string). The method parameter is retained in the signature for
-// clarity but the cache is only used for GET; the key itself is just the path
-// because the method is always "GET" at call sites.
-func cacheKey(_ string, path string) string {
-	return path
+// cacheKey builds the lookup key for a given GET request. The cache is keyed
+// by both the Accept header and the path (including any query string) because
+// the same path can legitimately be requested with different Accept values that
+// produce different response bodies — for example, /repos/{}/pulls/{n} is
+// fetched as application/vnd.github+json by getPR/GetPRSnapshot and as
+// application/vnd.github.v3.diff by FetchDiff. Path-only keying caused cache
+// collisions between those two callers (the diff body was served for the JSON
+// request or vice-versa). The method parameter is retained in the signature for
+// symmetry with its callers but is always "GET" at every call site.
+func cacheKey(_ string, accept, path string) string {
+	return accept + "\n" + path
 }
