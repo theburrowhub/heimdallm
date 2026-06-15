@@ -1,6 +1,7 @@
 package github
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -62,6 +63,7 @@ type Client struct {
 	token   string
 	baseURL string
 	http    *http.Client
+	cache   *ConditionalCache
 }
 
 type Option func(*Client)
@@ -75,11 +77,19 @@ func NewClient(token string, opts ...Option) *Client {
 		token:   token,
 		baseURL: defaultBaseURL,
 		http:    &http.Client{Timeout: 30 * time.Second},
+		cache:   NewConditionalCache(),
 	}
 	for _, o := range opts {
 		o(c)
 	}
 	return c
+}
+
+// CacheStats returns the number of ETag cache hits (304→200 transparently
+// converted) and misses (200 responses stored) since this client was created.
+// Intended for observability / metrics; callers must not depend on exact values.
+func (c *Client) CacheStats() (hits, misses int64) {
+	return c.cache.CacheHits(), c.cache.CacheMisses()
 }
 
 // AuthenticatedUser returns the GitHub login of the token owner.
@@ -105,7 +115,81 @@ func (c *Client) AuthenticatedUser() (string, error) {
 }
 
 func (c *Client) do(method, path string, accept string) (*http.Response, error) {
-	return c.doWithBody(method, path, accept, "", nil)
+	if method != "GET" {
+		return c.doWithBody(method, path, accept, "", nil)
+	}
+
+	// ── ETag conditional-request layer (GET only) ────────────────────────────
+	// If we have a cached ETag for this path, send If-None-Match so GitHub can
+	// return 304 Not Modified (which does NOT count against the rate limit).
+	// On 304: swap the empty body for the cached bytes and re-report 200 so
+	// every caller transparently gets the data it already decoded once.
+	// On 200 with a new ETag: read+buffer the body, store it, hand the caller
+	// a fresh reader so it can decode normally.
+	// Any other status: passthrough without touching the cache.
+	key := cacheKey(method, path)
+	cachedETag, cachedBody, hasCached := c.cache.Get(key)
+
+	req, err := http.NewRequest(method, c.baseURL+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Accept", accept)
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if hasCached && cachedETag != "" {
+		req.Header.Set("If-None-Match", cachedETag)
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	switch resp.StatusCode {
+	case http.StatusNotModified: // 304
+		// Must drain and close the (empty) server body.
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+
+		if !hasCached || cachedBody == nil {
+			// Defensive: 304 with nothing cached — this shouldn't happen with a
+			// well-behaved server, but we must not return a nil body to callers.
+			// Treat it as a passthrough empty 304 that callers will handle as an
+			// error (non-200 status).
+			resp.Body = http.NoBody
+			return resp, nil
+		}
+
+		c.cache.cacheHits.Add(1)
+		resp.StatusCode = http.StatusOK
+		resp.Body = io.NopCloser(bytes.NewReader(cachedBody))
+		return resp, nil
+
+	case http.StatusOK:
+		newETag := resp.Header.Get("ETag")
+		if newETag == "" {
+			// No ETag — pass through without caching.
+			return resp, nil
+		}
+		// Buffer the body so we can (a) cache it and (b) give the caller a fresh reader.
+		data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+		resp.Body.Close()
+		if readErr != nil {
+			// Return an error-wrapping response with a body so callers that
+			// do resp.Body.Close() don't panic.
+			resp.Body = http.NoBody
+			return resp, fmt.Errorf("github: etag cache: read body: %w", readErr)
+		}
+		c.cache.Put(key, newETag, data)
+		c.cache.cacheMisses.Add(1)
+		resp.Body = io.NopCloser(bytes.NewReader(data))
+		return resp, nil
+
+	default:
+		// Non-200/304 status — pass through unchanged; do not cache.
+		return resp, nil
+	}
 }
 
 // doWithBody is the POST/PUT/PATCH counterpart to do(). It accepts an
