@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/api/sse_client.dart';
 import '../../core/models/config_model.dart';
@@ -502,6 +503,38 @@ Map<String, dynamic> _computeGlobalDiff(AppConfig old, AppConfig updated) {
     cbDiff['per_impl_repo_hr'] = updated.circuitBreaker.perImplRepoHr;
   }
   if (cbDiff.isNotEmpty) diff['circuit_breaker'] = cbDiff;
+  // Polling
+  final pollingDiff = <String, dynamic>{};
+  if (old.polling.adaptive != updated.polling.adaptive) {
+    pollingDiff['adaptive'] = updated.polling.adaptive;
+  }
+  if (old.polling.pollInterval != updated.polling.pollInterval) {
+    pollingDiff['poll_interval'] = updated.polling.pollInterval;
+  }
+  if (old.polling.minInterval != updated.polling.minInterval) {
+    pollingDiff['min_interval'] = updated.polling.minInterval;
+  }
+  if (old.polling.maxInterval != updated.polling.maxInterval) {
+    pollingDiff['max_interval'] = updated.polling.maxInterval;
+  }
+  if (old.polling.discoveryInterval != updated.polling.discoveryInterval) {
+    pollingDiff['discovery_interval'] = updated.polling.discoveryInterval;
+  }
+  if (old.polling.tier3Interval != updated.polling.tier3Interval) {
+    pollingDiff['tier3_interval'] = updated.polling.tier3Interval;
+  }
+  if (old.polling.rateLimitSafetyThreshold !=
+      updated.polling.rateLimitSafetyThreshold) {
+    pollingDiff['rate_limit_safety_threshold'] =
+        updated.polling.rateLimitSafetyThreshold;
+  }
+  if (old.polling.useEtag != updated.polling.useEtag) {
+    pollingDiff['use_etag'] = updated.polling.useEtag;
+  }
+  if (old.polling.useGraphql != updated.polling.useGraphql) {
+    pollingDiff['use_graphql'] = updated.polling.useGraphql;
+  }
+  if (pollingDiff.isNotEmpty) diff['polling'] = pollingDiff;
 
   return diff;
 }
@@ -548,3 +581,10 @@ bool _listsDiffer(List<String> a, List<String> b) {
   }
   return false;
 }
+
+/// Thin wrapper that exposes [_computeGlobalDiff] to unit tests.
+@visibleForTesting
+Map<String, dynamic> computeGlobalDiffForTest(
+  AppConfig old,
+  AppConfig updated,
+) => _computeGlobalDiff(old, updated);

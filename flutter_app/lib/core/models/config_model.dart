@@ -764,6 +764,79 @@ class CircuitBreakerConfig {
   };
 }
 
+/// Adaptive polling / rate-limit configuration (mirrors [polling] TOML section).
+class PollingConfig {
+  final bool adaptive;
+  final String pollInterval;
+  final String minInterval;
+  final String maxInterval;
+  final String discoveryInterval;
+  final String tier3Interval;
+  final int rateLimitSafetyThreshold;
+  final bool useEtag;
+  final bool useGraphql;
+
+  const PollingConfig({
+    this.adaptive = false,
+    this.pollInterval = '',
+    this.minInterval = '1m',
+    this.maxInterval = '15m',
+    this.discoveryInterval = '5m',
+    this.tier3Interval = '30s',
+    this.rateLimitSafetyThreshold = 100,
+    this.useEtag = true,
+    this.useGraphql = false,
+  });
+
+  PollingConfig copyWith({
+    bool? adaptive,
+    String? pollInterval,
+    String? minInterval,
+    String? maxInterval,
+    String? discoveryInterval,
+    String? tier3Interval,
+    int? rateLimitSafetyThreshold,
+    bool? useEtag,
+    bool? useGraphql,
+  }) => PollingConfig(
+    adaptive: adaptive ?? this.adaptive,
+    pollInterval: pollInterval ?? this.pollInterval,
+    minInterval: minInterval ?? this.minInterval,
+    maxInterval: maxInterval ?? this.maxInterval,
+    discoveryInterval: discoveryInterval ?? this.discoveryInterval,
+    tier3Interval: tier3Interval ?? this.tier3Interval,
+    rateLimitSafetyThreshold:
+        rateLimitSafetyThreshold ?? this.rateLimitSafetyThreshold,
+    useEtag: useEtag ?? this.useEtag,
+    useGraphql: useGraphql ?? this.useGraphql,
+  );
+
+  factory PollingConfig.fromJson(Map<String, dynamic> json) => PollingConfig(
+    adaptive: (json['adaptive'] as bool?) ?? false,
+    pollInterval: (json['poll_interval'] as String?) ?? '',
+    minInterval: (json['min_interval'] as String?) ?? '1m',
+    maxInterval: (json['max_interval'] as String?) ?? '15m',
+    discoveryInterval: (json['discovery_interval'] as String?) ?? '5m',
+    tier3Interval: (json['tier3_interval'] as String?) ?? '30s',
+    rateLimitSafetyThreshold:
+        ((json['rate_limit_safety_threshold'] as num?)?.toInt()) ?? 100,
+    useEtag: (json['use_etag'] as bool?) ?? true,
+    useGraphql: (json['use_graphql'] as bool?) ?? false,
+  );
+
+  Map<String, dynamic> toJson() => {
+    'adaptive': adaptive,
+    'poll_interval': pollInterval,
+    'min_interval': minInterval,
+    'max_interval': maxInterval,
+    'discovery_interval': discoveryInterval,
+    'tier3_interval': tier3Interval,
+    'rate_limit_safety_threshold': rateLimitSafetyThreshold,
+    'use_etag': useEtag,
+    'use_graphql': useGraphql,
+  };
+}
+
 /// Issue tracking pipeline configuration.
 class IssueTrackingConfig {
   final bool enabled;
@@ -876,6 +949,7 @@ class AppConfig {
 
   final AutonomousConfig autonomous;
   final CircuitBreakerConfig circuitBreaker;
+  final PollingConfig polling;
 
   /// Host paths the daemon scans (in order) when a repo has no explicit
   /// `local_dir` set — first match at `{base}/{short-repo-name}` wins.
@@ -916,6 +990,7 @@ class AppConfig {
     this.autonomous = const AutonomousConfig(),
     this.circuitBreaker = const CircuitBreakerConfig(),
     this.globalNeverApproveWithIssues = false,
+    this.polling = const PollingConfig(),
     this.localDirBase = const [],
     this.localDirsDetected = const {},
   });
@@ -993,6 +1068,7 @@ class AppConfig {
     AutonomousConfig? autonomous,
     CircuitBreakerConfig? circuitBreaker,
     bool? globalNeverApproveWithIssues,
+    PollingConfig? polling,
     List<String>? localDirBase,
     Map<String, String>? localDirsDetected,
   }) {
@@ -1029,6 +1105,7 @@ class AppConfig {
       circuitBreaker: circuitBreaker ?? this.circuitBreaker,
       globalNeverApproveWithIssues:
           globalNeverApproveWithIssues ?? this.globalNeverApproveWithIssues,
+      polling: polling ?? this.polling,
       localDirBase: localDirBase ?? this.localDirBase,
       localDirsDetected: localDirsDetected ?? this.localDirsDetected,
     );
@@ -1225,6 +1302,9 @@ class AppConfig {
           : const CircuitBreakerConfig(),
       globalNeverApproveWithIssues:
           (json['never_approve_with_issues'] as bool?) ?? false,
+      polling: json['polling'] != null
+          ? PollingConfig.fromJson(json['polling'] as Map<String, dynamic>)
+          : const PollingConfig(),
       localDirBase: _parseStringList(json['local_dir_base']),
       localDirsDetected: localDirsDetected,
     );
