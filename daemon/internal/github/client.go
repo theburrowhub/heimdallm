@@ -74,6 +74,7 @@ type Client struct {
 	cache         *ConditionalCache
 	rateObs       RateLimitObserver
 	cacheDisabled atomic.Bool // when true, ETag conditional-request layer is bypassed
+	useGraphQL    atomic.Bool // when true, SearchIssues dispatches to GraphQL with REST fallback
 }
 
 type Option func(*Client)

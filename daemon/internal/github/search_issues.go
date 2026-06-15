@@ -18,8 +18,30 @@ import (
 // empty or error response.
 const maxSearchIssuePages = 10
 
-// SearchIssues fetches open issues matching query from the GitHub Search API
-// (GET /search/issues?q=...) and returns them as a flat []*Issue slice.
+// SearchIssues fetches open issues matching query. When GraphQL is enabled via
+// SetGraphQLEnabled(true), it dispatches to SearchIssuesGraphQL first; on any
+// error it falls back to the REST /search/issues path automatically (the caller
+// never sees the GraphQL error — only the REST result or error).
+//
+// When GraphQL is disabled (the default), only the REST path is used.
+//
+// On any error SearchIssues returns (nil, err) so callers can decide whether
+// to fall back to per-repo FetchIssues.
+func (c *Client) SearchIssues(query string) ([]*Issue, error) {
+	if c.useGraphQL.Load() {
+		issues, err := c.SearchIssuesGraphQL(query)
+		if err != nil {
+			slog.Warn("github: SearchIssuesGraphQL failed, falling back to REST",
+				"err", err)
+			return c.searchIssuesREST(query)
+		}
+		return issues, nil
+	}
+	return c.searchIssuesREST(query)
+}
+
+// searchIssuesREST fetches open issues matching query from the GitHub Search
+// API (GET /search/issues?q=...) and returns them as a flat []*Issue slice.
 //
 // Each page is capped at 100 items; pagination stops when GitHub returns a
 // partial page, the result set hits the 1000-item cap (maxSearchIssuePages ×
@@ -34,9 +56,8 @@ const maxSearchIssuePages = 10
 // targets issues unless `is:issue` is present — this is defense-in-depth for
 // callers that pass a query without that qualifier).
 //
-// On any error SearchIssues returns (nil, err) so callers can decide whether
-// to fall back to per-repo FetchIssues.
-func (c *Client) SearchIssues(query string) ([]*Issue, error) {
+// On any error searchIssuesREST returns (nil, err).
+func (c *Client) searchIssuesREST(query string) ([]*Issue, error) {
 	var all []*Issue
 	for page := 1; page <= maxSearchIssuePages; page++ {
 		params := url.Values{}
