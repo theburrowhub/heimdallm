@@ -39,6 +39,13 @@ type IssuesFetcher interface {
 	FetchIssues(repo string, cfg config.IssueTrackingConfig, authenticatedUser string) ([]*github.Issue, error)
 }
 
+// IssueSearcher is the optional Search API back-end used by PrefetchIssues.
+// Keeping it separate from IssuesFetcher lets tests that only need FetchIssues
+// inject a nil searcher without changes.
+type IssueSearcher interface {
+	SearchIssues(query string) ([]*github.Issue, error)
+}
+
 // PipelineRunner is the subset of *Pipeline the fetcher uses. Takes a
 // context so shutdown cancellation propagates through the whole dispatch
 // path down to the git / HTTP calls inside the pipeline.
@@ -97,6 +104,12 @@ type Fetcher struct {
 
 	stageClient StageTransitionClient
 	stageBroker Publisher
+
+	// searcher is optional. When set, PrefetchIssues uses the Search API to
+	// aggregate issue results across repos in a single call, populating
+	// prefetched so ProcessRepo can skip the per-repo REST call.
+	searcher   IssueSearcher
+	prefetched map[string][]*github.Issue // set by PrefetchIssues; read by ProcessRepo
 }
 
 // NewFetcher wires the orchestrator. All dependencies are interfaces so
@@ -128,6 +141,83 @@ func (f *Fetcher) SetStageTransitioner(client StageTransitionClient, broker Publ
 	f.stageBroker = broker
 }
 
+// SetSearcher enables the aggregated Search API prefetch path. When set,
+// PrefetchIssues is available for callers to warm the prefetch map before
+// calling ProcessRepo.
+func (f *Fetcher) SetSearcher(s IssueSearcher) {
+	f.searcher = s
+}
+
+// PrefetchIssues runs ONE aggregated GET /search/issues query covering all
+// eligible repos in repos (those with issue tracking enabled and autonomous
+// mode disabled), builds a per-repo map of raw []*github.Issue, and stores it
+// internally so subsequent ProcessRepo calls for any of those repos can skip
+// the per-repo REST GET.
+//
+// eligibleFn(repo) should return (IssueTrackingConfig, autonomousEnabled, ok).
+// Repos for which autonomousEnabled==true or ok==false are excluded from the
+// search scope (matching the gating in ProcessRepo).
+//
+// On search error PrefetchIssues logs a warning and returns the error; callers
+// should then call ProcessRepo without a prefetched map, which falls back to the
+// per-repo FetchIssues path automatically.
+//
+// PrefetchIssues is NOT goroutine-safe; it must be called BEFORE the parallel
+// ProcessRepo fan-out begins and the prefetched map must not be written again
+// until all ProcessRepo calls for that cycle have returned.
+func (f *Fetcher) PrefetchIssues(
+	it config.IssueTrackingConfig,
+	authUser string,
+	repos []string,
+) (map[string][]*github.Issue, error) {
+	if f.searcher == nil {
+		return nil, nil
+	}
+
+	// Filter repos to those eligible for search.
+	eligible := repos[:0:0] // same backing array cap avoids allocation on empty input
+	eligible = make([]string, 0, len(repos))
+	for _, r := range repos {
+		if r != "" {
+			eligible = append(eligible, r)
+		}
+	}
+	if len(eligible) == 0 {
+		return nil, nil
+	}
+
+	query := github.BuildIssueSearchQuery(it, authUser, eligible)
+	if query == "" {
+		return nil, nil
+	}
+
+	raw, err := f.searcher.SearchIssues(query)
+	if err != nil {
+		slog.Warn("issues fetcher: search prefetch failed, will fall back to per-repo fetch",
+			"err", err, "repos", len(eligible))
+		return nil, err
+	}
+
+	byRepo := make(map[string][]*github.Issue, len(eligible))
+	for _, issue := range raw {
+		if issue.Repo == "" {
+			continue
+		}
+		byRepo[issue.Repo] = append(byRepo[issue.Repo], issue)
+	}
+
+	slog.Info("issues fetcher: search prefetch complete",
+		"repos", len(eligible), "issues", len(raw))
+	f.prefetched = byRepo
+	return byRepo, nil
+}
+
+// ClearPrefetch discards the prefetch map. Call once per cycle after all
+// ProcessRepo calls have completed so stale data cannot leak into the next cycle.
+func (f *Fetcher) ClearPrefetch() {
+	f.prefetched = nil
+}
+
 // ProcessRepo fetches every eligible issue for one repo and dispatches it to
 // the pipeline. Returns the number of issues actually handed off and a
 // non-nil error only when the fetch itself failed — per-issue pipeline
@@ -153,9 +243,25 @@ func (f *Fetcher) ProcessRepo(ctx context.Context, repo string, cfg config.Issue
 		ctx = context.Background()
 	}
 
-	issues, err := f.client.FetchIssues(repo, cfg, authUser)
-	if err != nil {
-		return 0, fmt.Errorf("issues fetcher: fetch %s: %w", repo, err)
+	// Use prefetched search results when available; fall back to per-repo REST.
+	// The prefetch map is populated by PrefetchIssues before the parallel
+	// ProcessRepo fan-out begins and is read-only during that fan-out, so no
+	// locking is needed here.
+	var issues []*github.Issue
+	var fetchErr error
+	if prefetchedSlice, ok := f.prefetched[repo]; ok {
+		slog.Debug("issues fetcher: using prefetched search results",
+			"repo", repo, "count", len(prefetchedSlice))
+		// The raw search results still need to go through the same
+		// classification + filter pipeline that FetchIssues applies.
+		// ClassifyAndFilterIssues is the exported version of that logic.
+		issues = github.ClassifyAndFilterIssues(prefetchedSlice, repo, cfg, authUser)
+	} else {
+		// No prefetch for this repo — use the per-repo REST endpoint.
+		issues, fetchErr = f.client.FetchIssues(repo, cfg, authUser)
+		if fetchErr != nil {
+			return 0, fmt.Errorf("issues fetcher: fetch %s: %w", repo, fetchErr)
+		}
 	}
 
 	processed := 0

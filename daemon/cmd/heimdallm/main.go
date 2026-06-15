@@ -338,7 +338,8 @@ func main() {
 		slog.Warn("could not resolve bot login for re-review context", "err", err)
 	}
 	issueFetcher := issuepipeline.NewFetcher(ghClient, ghClient, s, issuePipe)
-	issueFetcher.SetBotLogin(resolvedBotLogin) // break re-triage loop (#362)
+	issueFetcher.SetBotLogin(resolvedBotLogin)   // break re-triage loop (#362)
+	issueFetcher.SetSearcher(ghClient)            // enable aggregated Search API prefetch (separate rate budget)
 	// cfgMu protects cfg and the pipeline so reload is safe from any goroutine.
 	var cfgMu sync.Mutex
 	repoCurrentlyMonitored := func(repo string) bool {
@@ -2846,6 +2847,14 @@ func runTier2(
 				concurrency = v
 			}
 		}
+
+		// Aggregated Search API prefetch: one query covers all eligible repos,
+		// using the separate search rate budget (30/min) instead of the core
+		// REST budget (5000/hr). On search error the per-repo REST fallback is
+		// still active inside ProcessRepo — no repos are skipped.
+		adapter.PrefetchIssuesForCycle(currentRepos)
+		defer adapter.ClearIssuePrefetch()
+
 		issueCount = processReposInParallel(ctx, currentRepos, concurrency, func(ctx context.Context, repo string) (int, error) {
 			if err := limiter.Acquire(ctx, scheduler.TierRepo); err != nil {
 				return 0, err
@@ -3747,6 +3756,55 @@ func (a *tier2Adapter) reviewReadyForPublishRetry(rev *store.Review) (bool, erro
 		return false, err
 	}
 	return !inFlight, nil
+}
+
+// PrefetchIssuesForCycle runs the aggregated Search API query for all eligible
+// repos, populating the Fetcher's per-cycle prefetch map. Must be called BEFORE
+// the parallel ProcessRepo fan-out. On search error it logs and returns so
+// per-repo FetchIssues fallback still applies inside ProcessRepo.
+//
+// The method iterates repos to build the eligible list (skipping repos with
+// issue_tracking disabled or autonomous mode enabled — the same gating
+// ProcessRepo applies — so the search scope matches what would actually be
+// processed).
+func (a *tier2Adapter) PrefetchIssuesForCycle(repos []string) {
+	if a.fetcher == nil {
+		return
+	}
+	a.cfgMu.Lock()
+	c := *a.cfg
+	a.cfgMu.Unlock()
+	authUser := a.resolveAuthenticatedUser()
+
+	// Collect repos that are eligible for issue processing this cycle.
+	eligible := make([]string, 0, len(repos))
+	for _, repo := range repos {
+		repoIT := c.IssueTrackingForRepo(repo)
+		autonomousEnabled := c.AutonomousForRepo(repo).Enabled
+		if !repoIT.Enabled || autonomousEnabled {
+			continue
+		}
+		eligible = append(eligible, repo)
+	}
+	if len(eligible) == 0 {
+		return
+	}
+
+	// Use the global issue tracking config as the query base; per-repo
+	// overrides are applied after in ProcessRepo (classification + filter).
+	globalIT := c.GitHub.IssueTracking
+	if _, err := a.fetcher.PrefetchIssues(globalIT, authUser, eligible); err != nil {
+		// Error already logged by PrefetchIssues; fallback is automatic.
+		return
+	}
+}
+
+// ClearIssuePrefetch discards the cycle-scoped prefetch map so stale results
+// cannot leak into the next cycle.
+func (a *tier2Adapter) ClearIssuePrefetch() {
+	if a.fetcher != nil {
+		a.fetcher.ClearPrefetch()
+	}
 }
 
 // ProcessRepo implements scheduler.Tier2IssueProcessor.
