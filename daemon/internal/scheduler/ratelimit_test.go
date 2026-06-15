@@ -57,3 +57,50 @@ func TestRateLimiter_Refill(t *testing.T) {
 		t.Errorf("after refill = %d, want 10", rl.Available())
 	}
 }
+
+// TestSetDiscoverySafetyThreshold verifies the override and its per-tier scaling.
+func TestSetDiscoverySafetyThreshold(t *testing.T) {
+	t.Run("default thresholds unchanged when override is zero", func(t *testing.T) {
+		rl := NewRateLimiter(100)
+		if got := rl.effectiveThreshold(TierDiscovery); got != 100 {
+			t.Errorf("TierDiscovery default = %d, want 100", got)
+		}
+		if got := rl.effectiveThreshold(TierRepo); got != 75 {
+			t.Errorf("TierRepo default = %d, want 75", got)
+		}
+		if got := rl.effectiveThreshold(TierWatch); got != 25 {
+			t.Errorf("TierWatch default = %d, want 25", got)
+		}
+	})
+
+	t.Run("override scales all tiers proportionally", func(t *testing.T) {
+		rl := NewRateLimiter(100)
+		rl.SetDiscoverySafetyThreshold(200)
+		if got := rl.effectiveThreshold(TierDiscovery); got != 200 {
+			t.Errorf("TierDiscovery with override 200 = %d, want 200", got)
+		}
+		if got := rl.effectiveThreshold(TierRepo); got != 175 {
+			t.Errorf("TierRepo with override 200 = %d, want 175", got)
+		}
+		if got := rl.effectiveThreshold(TierWatch); got != 125 {
+			t.Errorf("TierWatch with override 200 = %d, want 125", got)
+		}
+	})
+
+	t.Run("zero or negative override reverts to package default", func(t *testing.T) {
+		rl := NewRateLimiter(100)
+		rl.SetDiscoverySafetyThreshold(200)
+		rl.SetDiscoverySafetyThreshold(0) // revert
+		if got := rl.effectiveThreshold(TierDiscovery); got != 100 {
+			t.Errorf("TierDiscovery after revert = %d, want 100", got)
+		}
+	})
+
+	t.Run("watch tier clamped to 1 when base is very low", func(t *testing.T) {
+		rl := NewRateLimiter(100)
+		rl.SetDiscoverySafetyThreshold(50) // TierWatch = 50 - 75 = -25, should clamp to 1
+		if got := rl.effectiveThreshold(TierWatch); got < 1 {
+			t.Errorf("TierWatch with low base = %d, want >= 1", got)
+		}
+	})
+}

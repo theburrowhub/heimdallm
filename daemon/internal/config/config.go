@@ -62,6 +62,7 @@ type Config struct {
 	ActivityLog    ActivityLogConfig    `toml:"activity_log"`
 	CircuitBreaker CircuitBreakerConfig `toml:"circuit_breaker"`
 	Autonomous     AutonomousConfig     `toml:"autonomous"`
+	Polling        PollingConfig        `toml:"polling"`
 }
 
 type ServerConfig struct {
@@ -1054,6 +1055,7 @@ func (c *Config) applyDefaults() {
 		c.CircuitBreaker.PerImplRepoHr = 5
 	}
 	c.applyAutonomousDefaults()
+	c.applyPollingDefaults()
 }
 
 // applyEnvOverrides applies HEIMDALLM_* environment variable overrides.

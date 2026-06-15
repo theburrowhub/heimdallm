@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -67,11 +68,12 @@ func safeTruncate(s string, max int) string {
 }
 
 type Client struct {
-	token   string
-	baseURL string
-	http    *http.Client
-	cache   *ConditionalCache
-	rateObs RateLimitObserver
+	token         string
+	baseURL       string
+	http          *http.Client
+	cache         *ConditionalCache
+	rateObs       RateLimitObserver
+	cacheDisabled atomic.Bool // when true, ETag conditional-request layer is bypassed
 }
 
 type Option func(*Client)
@@ -98,6 +100,14 @@ func NewClient(token string, opts ...Option) *Client {
 // Intended for observability / metrics; callers must not depend on exact values.
 func (c *Client) CacheStats() (hits, misses int64) {
 	return c.cache.CacheHits(), c.cache.CacheMisses()
+}
+
+// SetCacheEnabled enables or disables the conditional ETag cache. When
+// disabled every GET request is made without an If-None-Match header, forcing
+// a full 200 response from GitHub. Thread-safe; takes effect on the next
+// request. Defaults to enabled (true).
+func (c *Client) SetCacheEnabled(enabled bool) {
+	c.cacheDisabled.Store(!enabled)
 }
 
 // SetRateObserver registers an observer that will be called after every HTTP
@@ -145,6 +155,12 @@ func (c *Client) do(method, path string, accept string) (*http.Response, error) 
 	}
 
 	// ── ETag conditional-request layer (GET only) ────────────────────────────
+	// When the cache is disabled via SetCacheEnabled(false), bypass the ETag
+	// layer entirely and make a plain unconditional GET. doWithBody already
+	// calls notifyRateObserver so all rate-limit accounting still applies.
+	if c.cacheDisabled.Load() {
+		return c.doWithBody(method, path, accept, "", nil)
+	}
 	// If we have a cached ETag for this path, send If-None-Match so GitHub can
 	// return 304 Not Modified (which does NOT count against the rate limit).
 	// On 304: swap the empty body for the cached bytes and re-report 200 so

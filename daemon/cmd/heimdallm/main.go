@@ -340,7 +340,7 @@ func main() {
 	storePollInterval := func(interval time.Duration) {
 		atomic.StoreInt64(&pollIntervalNano, int64(interval))
 	}
-	storePollInterval(parsePollInterval(cfg.GitHub.PollInterval))
+	storePollInterval(cfg.ResolvedPollInterval())
 	recordPollCompleted := func(_ string, at time.Time) {
 		atomic.StoreInt64(&lastPollUnixNano, at.UTC().UnixNano())
 	}
@@ -611,6 +611,13 @@ func main() {
 	// on secondary limits (Retry-After).
 	ghClient.SetRateObserver(&rateLimitAdapter{limiter: limiter})
 
+	// Apply [polling] kill-switches and safety knobs from config.
+	// ETag cache (C1): enabled by default; operator can disable via use_etag=false.
+	ghClient.SetCacheEnabled(cfg.ETagEnabled())
+	// Rate-limit safety threshold: drives how eagerly each tier backs off.
+	// Default 100 matches the current hardcoded tierSafetyThreshold[TierDiscovery].
+	limiter.SetDiscoverySafetyThreshold(cfg.Polling.RateLimitSafetyThreshold)
+
 	// tier2Adapter bridges main.go's concrete types to the polling logic.
 	adapter := &tier2Adapter{
 		ghClient:             ghClient,
@@ -744,11 +751,10 @@ func main() {
 		}()
 
 		// Tier 1: Discovery — publishes to NATS
+		// [polling].discovery_interval takes precedence over [github].discovery_interval;
+		// both fall back to 5m (ResolvedDiscoveryInterval handles the full cascade).
 		cfgMu.Lock()
-		discoveryInterval := parseDiscoveryInterval(
-			cfg.GitHub.DiscoveryInterval,
-			cfg.GitHub.PollInterval,
-		)
+		discoveryInterval := cfg.ResolvedDiscoveryInterval()
 		cfgMu.Unlock()
 		wg.Add(1)
 		go func() {
@@ -791,9 +797,10 @@ func main() {
 			bridgeDiscovery(ctx, conn, reposChan)
 		}()
 
-		// Tier 2: PR / issue polling
+		// Tier 2: PR / issue polling — use the resolved interval which honours
+		// [polling].poll_interval > [github].poll_interval > 5m default.
 		cfgMu.Lock()
-		pollInterval := parsePollInterval(cfg.GitHub.PollInterval)
+		pollInterval := cfg.ResolvedPollInterval()
 		cfgMu.Unlock()
 		storePollInterval(pollInterval)
 		wg.Add(1)
@@ -901,7 +908,9 @@ func main() {
 
 		slog.Info("pollers: started",
 			"discovery", discoveryInterval,
-			"poll", pollInterval)
+			"poll", pollInterval,
+			"etag_cache", cfg.ETagEnabled(),
+			"rate_limit_threshold", cfg.Polling.RateLimitSafetyThreshold)
 
 		return cancel, &wg
 	}
@@ -1382,13 +1391,17 @@ func main() {
 	}()
 
 	// ── State check poller ──────────────────────────────────────────────
-	// Scans the NATS KV watch bucket every 30s and publishes StateCheckMsg
-	// for items due for a state check. Replaces the in-memory WatchQueue.
+	// Scans the NATS KV watch bucket on the configured Tier 3 interval and
+	// publishes StateCheckMsg for items due for a state check. Replaces the
+	// in-memory WatchQueue. Default: 30s (matches previous hardcoded value).
 	stateCheckPub := bus.NewStateCheckPublisher(conn)
 	statePollerCtx, statePollerCancel := context.WithCancel(context.Background())
 	defer statePollerCancel()
 	go func() {
-		ticker := time.NewTicker(30 * time.Second)
+		cfgMu.Lock()
+		tier3Interval := cfg.ResolvedTier3Interval()
+		cfgMu.Unlock()
+		ticker := time.NewTicker(tier3Interval)
 		defer ticker.Stop()
 		for {
 			select {

@@ -56,9 +56,10 @@ type RateLimiter struct {
 	pool chan struct{}
 	size int
 
-	mu       sync.Mutex
-	budgets  map[string]*resourceBudget // keyed by resource name, e.g. "core", "search"
-	cooldown time.Time                   // secondary-limit cooldown: block until this time
+	mu               sync.Mutex
+	budgets          map[string]*resourceBudget // keyed by resource name, e.g. "core", "search"
+	cooldown         time.Time                   // secondary-limit cooldown: block until this time
+	baseDiscThreshold int                        // override for TierDiscovery threshold (0 = use package default)
 }
 
 // NewRateLimiter creates a rate limiter with the given number of tokens.
@@ -168,10 +169,57 @@ func (r *RateLimiter) waitForCooldown(ctx context.Context) error {
 	}
 }
 
+// SetDiscoverySafetyThreshold overrides the base safety threshold for
+// TierDiscovery. The per-tier offsets (TierRepo = base-25, TierWatch = base-75)
+// are applied relative to this value when it is set.  A value of 0 or below
+// falls back to the package-level default (100). Thread-safe.
+func (r *RateLimiter) SetDiscoverySafetyThreshold(threshold int) {
+	r.mu.Lock()
+	if threshold > 0 {
+		r.baseDiscThreshold = threshold
+	} else {
+		r.baseDiscThreshold = 0 // revert to package default
+	}
+	r.mu.Unlock()
+}
+
+// effectiveThreshold returns the safety threshold for a given tier, taking
+// into account any SetDiscoverySafetyThreshold override.
+func (r *RateLimiter) effectiveThreshold(tier Tier) int {
+	r.mu.Lock()
+	base := r.baseDiscThreshold
+	r.mu.Unlock()
+	if base <= 0 {
+		return tierSafetyThreshold[tier]
+	}
+	// Scale the tier offsets relative to the configured base:
+	//   TierDiscovery → base
+	//   TierRepo      → base - 25 (same delta as default 100→75)
+	//   TierWatch     → base - 75 (same delta as default 100→25)
+	switch tier {
+	case TierDiscovery:
+		return base
+	case TierRepo:
+		v := base - 25
+		if v < 1 {
+			return 1
+		}
+		return v
+	case TierWatch:
+		v := base - 75
+		if v < 1 {
+			return 1
+		}
+		return v
+	default:
+		return tierSafetyThreshold[tier]
+	}
+}
+
 // waitForBudget blocks until the resource's remaining budget is above the
 // tier's safety threshold, or until the reset time passes, or ctx is done.
 func (r *RateLimiter) waitForBudget(ctx context.Context, tier Tier, resource string) error {
-	threshold := tierSafetyThreshold[tier]
+	threshold := r.effectiveThreshold(tier)
 
 	r.mu.Lock()
 	b, ok := r.budgets[resource]
