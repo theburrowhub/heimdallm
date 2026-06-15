@@ -317,6 +317,237 @@ func TestETagCaching_NoETagResponseIsNotCached(t *testing.T) {
 	}
 }
 
+// TestETagCaching_DifferentAcceptHeadersKeepSeparateEntries verifies that two
+// GETs to the SAME path with DIFFERENT Accept headers maintain independent
+// cache entries. This is the regression test for the FetchDiff vs getPR
+// cache-key collision: both hit /repos/{}/pulls/{n} but with Accept values
+// application/vnd.github.v3.diff and application/vnd.github+json respectively,
+// and must never serve one body in place of the other.
+func TestETagCaching_DifferentAcceptHeadersKeepSeparateEntries(t *testing.T) {
+	const jsonBody = `{"state":"open"}`
+	const diffBody = `diff --git a/foo.go b/foo.go\n--- a/foo.go\n+++ b/foo.go\n@@ -1 +1 @@\n-old\n+new`
+	const acceptJSON = "application/vnd.github+json"
+	const acceptDiff = "application/vnd.github.v3.diff"
+	path := "/repos/org/repo/pulls/7"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != path {
+			http.NotFound(w, r)
+			return
+		}
+		switch r.Header.Get("Accept") {
+		case acceptJSON:
+			inm := r.Header.Get("If-None-Match")
+			if inm == `"json-v1"` {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+			w.Header().Set("ETag", `"json-v1"`)
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprint(w, jsonBody)
+		case acceptDiff:
+			inm := r.Header.Get("If-None-Match")
+			if inm == `"diff-v1"` {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+			w.Header().Set("ETag", `"diff-v1"`)
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprint(w, diffBody)
+		default:
+			http.Error(w, "unexpected Accept", http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+
+	// First JSON GET — populates the json-keyed cache entry.
+	r1, err := client.DoGETForTest(path, acceptJSON)
+	if err != nil {
+		t.Fatalf("json call 1: %v", err)
+	}
+	d1, _ := io.ReadAll(r1.Body)
+	r1.Body.Close()
+	if string(d1) != jsonBody {
+		t.Errorf("json call 1 body = %q, want %q", d1, jsonBody)
+	}
+
+	// First Diff GET — populates the diff-keyed cache entry (different key).
+	r2, err := client.DoGETForTest(path, acceptDiff)
+	if err != nil {
+		t.Fatalf("diff call 1: %v", err)
+	}
+	d2, _ := io.ReadAll(r2.Body)
+	r2.Body.Close()
+	if string(d2) != diffBody {
+		t.Errorf("diff call 1 body = %q, want %q", d2, diffBody)
+	}
+
+	// Second JSON GET — must return the JSON body (not the diff body).
+	r3, err := client.DoGETForTest(path, acceptJSON)
+	if err != nil {
+		t.Fatalf("json call 2: %v", err)
+	}
+	d3, _ := io.ReadAll(r3.Body)
+	r3.Body.Close()
+	if r3.StatusCode != http.StatusOK {
+		t.Errorf("json call 2 status = %d, want 200", r3.StatusCode)
+	}
+	if string(d3) != jsonBody {
+		t.Errorf("json call 2 body = %q, want %q (must NOT serve diff body)", d3, jsonBody)
+	}
+
+	// Second Diff GET — must return the diff body (not the JSON body).
+	r4, err := client.DoGETForTest(path, acceptDiff)
+	if err != nil {
+		t.Fatalf("diff call 2: %v", err)
+	}
+	d4, _ := io.ReadAll(r4.Body)
+	r4.Body.Close()
+	if r4.StatusCode != http.StatusOK {
+		t.Errorf("diff call 2 status = %d, want 200", r4.StatusCode)
+	}
+	if string(d4) != diffBody {
+		t.Errorf("diff call 2 body = %q, want %q (must NOT serve json body)", d4, diffBody)
+	}
+
+	// We stored 2 entries (one per Accept) and got 2 hits (one per Accept on
+	// the second round). Assert on the aggregated counters.
+	hits, misses := client.CacheStats()
+	if hits != 2 {
+		t.Errorf("cache hits = %d, want 2", hits)
+	}
+	if misses != 2 {
+		t.Errorf("cache misses (stores) = %d, want 2", misses)
+	}
+}
+
+// TestETagCaching_LargeBodyServedFullButNotCached verifies that a response
+// body larger than maxCacheBodyBytes (1 MiB) is served to the caller in full
+// (no truncation) and is NOT stored in the cache. A subsequent GET must NOT
+// send If-None-Match (because nothing was cached), and the server delivers a
+// fresh response — confirming that large bodies do not poison the cache.
+func TestETagCaching_LargeBodyServedFullButNotCached(t *testing.T) {
+	// Build a body that is strictly larger than 1 MiB (maxCacheBodyBytes).
+	const oneMiB = 1 * 1024 * 1024
+	largeBody := make([]byte, oneMiB+1)
+	for i := range largeBody {
+		largeBody[i] = 'x'
+	}
+	callCount := 0
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		// If the client sent If-None-Match the large body was incorrectly
+		// cached — fail immediately.
+		if r.Header.Get("If-None-Match") != "" {
+			http.Error(w, "unexpected If-None-Match for large body", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("ETag", `"big-v1"`)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(largeBody)
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	path := "/repos/org/repo/pulls/99"
+
+	// First call — body is large; must be served in full.
+	r1, err := client.DoGETForTest(path, "application/vnd.github.v3.diff")
+	if err != nil {
+		t.Fatalf("call 1: %v", err)
+	}
+	d1, _ := io.ReadAll(r1.Body)
+	r1.Body.Close()
+	if r1.StatusCode != http.StatusOK {
+		t.Fatalf("call 1 status = %d, want 200", r1.StatusCode)
+	}
+	if len(d1) != len(largeBody) {
+		t.Errorf("call 1 body length = %d, want %d (must not be truncated)", len(d1), len(largeBody))
+	}
+
+	// Second call — must NOT send If-None-Match (server handler above would
+	// fail if it did). Server returns a fresh 200.
+	r2, err := client.DoGETForTest(path, "application/vnd.github.v3.diff")
+	if err != nil {
+		t.Fatalf("call 2: %v", err)
+	}
+	r2.Body.Close()
+	if r2.StatusCode != http.StatusOK {
+		t.Fatalf("call 2 status = %d, want 200", r2.StatusCode)
+	}
+	if callCount != 2 {
+		t.Errorf("server call count = %d, want 2 (large body must not be cached)", callCount)
+	}
+
+	// Misses counter must remain 0 because the entry was never stored.
+	_, misses := client.CacheStats()
+	if misses != 0 {
+		t.Errorf("cache misses (stores) = %d, want 0 (large body not stored)", misses)
+	}
+}
+
+// TestETagCaching_LinkHeaderSkipsCaching verifies that a 200 response that
+// carries a Link header (cursor/offset pagination) is NOT stored in the cache.
+// Caching paginated responses would cause a later 304 re-serve to lose the
+// Link header, breaking the caller's pagination cursor. This covers endpoints
+// like FetchCollaborators that use Link: rel="next" style pagination.
+func TestETagCaching_LinkHeaderSkipsCaching(t *testing.T) {
+	const body1 = `[{"login":"alice"},{"login":"bob"}]`
+	callCount := 0
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		// If the client sent If-None-Match the paginated response was
+		// incorrectly cached — fail the test immediately.
+		if r.Header.Get("If-None-Match") != "" {
+			http.Error(w, "unexpected If-None-Match for paginated response", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("ETag", `"page-v1"`)
+		w.Header().Set("Link", `<https://api.github.com/repos/org/repo/collaborators?page=2>; rel="next"`)
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, body1)
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	path := "/repos/org/repo/collaborators?per_page=100"
+
+	// Two calls: both must reach the server (no caching) and both must receive
+	// the full body including the Link header.
+	for i := 1; i <= 2; i++ {
+		resp, err := client.DoGETForTest(path, "application/vnd.github+json")
+		if err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+		data, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("call %d status = %d, want 200", i, resp.StatusCode)
+		}
+		if string(data) != body1 {
+			t.Errorf("call %d body = %q, want %q", i, data, body1)
+		}
+		// The Link header must survive in the response the caller sees.
+		if resp.Header.Get("Link") == "" {
+			t.Errorf("call %d: Link header missing from response (pagination broken)", i)
+		}
+	}
+
+	if callCount != 2 {
+		t.Errorf("server call count = %d, want 2 (paginated response must not be cached)", callCount)
+	}
+
+	// Nothing was stored — misses counter must remain 0.
+	_, misses := client.CacheStats()
+	if misses != 0 {
+		t.Errorf("cache misses (stores) = %d, want 0 (Link header → no caching)", misses)
+	}
+}
+
 // TestETagCaching_NonGETNotCached confirms that DELETE (and other non-GET
 // methods) are never intercepted by the cache layer.
 func TestETagCaching_NonGETNotCached(t *testing.T) {
