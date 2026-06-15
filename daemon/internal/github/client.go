@@ -64,6 +64,7 @@ type Client struct {
 	baseURL string
 	http    *http.Client
 	cache   *ConditionalCache
+	rateObs RateLimitObserver
 }
 
 type Option func(*Client)
@@ -90,6 +91,23 @@ func NewClient(token string, opts ...Option) *Client {
 // Intended for observability / metrics; callers must not depend on exact values.
 func (c *Client) CacheStats() (hits, misses int64) {
 	return c.cache.CacheHits(), c.cache.CacheMisses()
+}
+
+// SetRateObserver registers an observer that will be called after every HTTP
+// response (success or error status) made through do() or doWithBody().
+// The observer receives the raw *http.Response to inspect headers.
+// Replaces any previously registered observer. Pass nil to disable.
+func (c *Client) SetRateObserver(o RateLimitObserver) {
+	c.rateObs = o
+}
+
+// notifyRateObserver calls the registered observer if one is set.
+// Must be called AFTER the response is ready but BEFORE the body is consumed
+// by this layer (headers are what the observer needs).
+func (c *Client) notifyRateObserver(resp *http.Response) {
+	if c.rateObs != nil && resp != nil {
+		c.rateObs.ObserveResponse(resp)
+	}
 }
 
 // AuthenticatedUser returns the GitHub login of the token owner.
@@ -145,6 +163,13 @@ func (c *Client) do(method, path string, accept string) (*http.Response, error) 
 	if err != nil {
 		return nil, err
 	}
+
+	// Notify the rate-limit observer with the raw response (headers only —
+	// the observer must not consume the body). Called before the ETag cache
+	// layer modifies the response so the observer sees the real status code
+	// and headers GitHub sent (including 304, which does not count against
+	// the budget and carries up-to-date X-RateLimit-* values).
+	c.notifyRateObserver(resp)
 
 	switch resp.StatusCode {
 	case http.StatusNotModified: // 304
@@ -211,7 +236,14 @@ func (c *Client) doWithBody(method, path, accept, contentType string, body io.Re
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
-	return c.http.Do(req)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return resp, err
+	}
+	// Notify the rate-limit observer so POST/PUT/PATCH responses also update
+	// the live budget. The observer inspects headers only; the body is untouched.
+	c.notifyRateObserver(resp)
+	return resp, nil
 }
 
 // FetchPRsToReview returns all open PRs where the authenticated user is explicitly

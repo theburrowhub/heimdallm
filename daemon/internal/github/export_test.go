@@ -17,3 +17,4 @@ func (c *Client) DoGETForTest(path, accept string) (*http.Response, error) {
 func (c *Client) DoDELETEForTest(path, accept string) (*http.Response, error) {
 	return c.do("DELETE", path, accept)
 }
+

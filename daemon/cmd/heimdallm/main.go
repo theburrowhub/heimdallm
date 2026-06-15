@@ -605,6 +605,11 @@ func main() {
 	// Shared rate limiter (was Pipeline.limiter).
 	limiter := scheduler.NewRateLimiter(4500)
 
+	// Wire the GitHub client → rate limiter so every API response updates the
+	// live budget, enabling proactive throttle before a 403 and correct backoff
+	// on secondary limits (Retry-After).
+	ghClient.SetRateObserver(&rateLimitAdapter{limiter: limiter})
+
 	// tier2Adapter bridges main.go's concrete types to the polling logic.
 	adapter := &tier2Adapter{
 		ghClient:             ghClient,
@@ -2822,6 +2827,29 @@ func (a *tier2Adapter) upsertDiscoveredFromTopics(repos []string) {
 	if len(added) > 0 {
 		slog.Info("tier2: persisting topic-discovered repos", "added", len(added), "repos", added)
 		processDiscoveredRepos(added, reposSnap, nonMonSnap, a.store, a.broker, time.Now())
+	}
+}
+
+// ── rateLimitAdapter bridges the GitHub client observer → scheduler limiter ──
+
+// rateLimitAdapter implements gh.RateLimitObserver. After every GitHub API
+// response it parses the X-RateLimit-* headers and forwards the live budget
+// to the scheduler limiter, enabling proactive throttle before hitting 403
+// and honoring Retry-After on secondary limits.
+type rateLimitAdapter struct {
+	limiter *scheduler.RateLimiter
+}
+
+func (a *rateLimitAdapter) ObserveResponse(resp *http.Response) {
+	parsed, ok := gh.ParseRateLimitHeaders(resp)
+	if !ok {
+		return
+	}
+	if parsed.Resource != "" {
+		a.limiter.Observe(parsed.Resource, parsed.Remaining, parsed.Reset)
+	}
+	if parsed.RetryAfter > 0 {
+		a.limiter.ObserveRetryAfter(parsed.RetryAfter)
 	}
 }
 
