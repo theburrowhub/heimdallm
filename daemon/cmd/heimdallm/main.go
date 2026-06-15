@@ -715,6 +715,16 @@ func main() {
 	// consumes from NATS and forwards repo lists through this channel.
 	reposChan := make(chan []string, 1)
 
+	// adaptiveSched is the per-repo adaptive interval engine (C5). It is
+	// constructed once at daemon start and intentionally outlives config
+	// reloads — accumulated backoff state must not be lost when the operator
+	// tweaks an unrelated setting. It is passed to runTier2 which uses it
+	// when cfg.Polling.Adaptive is true; when Adaptive is false the scheduler
+	// is allocated but never consulted, so the overhead is negligible.
+	cfgMu.Lock()
+	adaptiveSched := scheduler.NewAdaptiveScheduler(cfg.ResolvedMinInterval(), cfg.ResolvedMaxInterval())
+	cfgMu.Unlock()
+
 	// startPollers launches all polling goroutines under the given context.
 	// Returns a cancel function and a WaitGroup that completes when all
 	// goroutines have exited.
@@ -850,7 +860,12 @@ func main() {
 				defer cfgMu.Unlock()
 				return cfg.AI.Tier2RepoConcurrency
 			}
-			runTier2(ctx, adapter, limiter, prReviewPublisher, broker, tier2ConfigFn, tier2RepoConcurrencyFn, reposChan, pollInterval, coldStart, recordPollCompleted)
+			tier2AdaptiveFn := func() bool {
+				cfgMu.Lock()
+				defer cfgMu.Unlock()
+				return cfg.Polling.Adaptive
+			}
+			runTier2(ctx, adapter, limiter, prReviewPublisher, broker, tier2ConfigFn, tier2RepoConcurrencyFn, tier2AdaptiveFn, adaptiveSched, reposChan, pollInterval, coldStart, recordPollCompleted)
 		}()
 
 		// Repo/org rename probe (#489). Detects when GitHub has
@@ -2741,6 +2756,8 @@ func runTier2(
 	ssePub sse.Publisher,
 	configFn func() []string,
 	repoConcurrencyFn func() int,
+	adaptiveFn func() bool,
+	adaptiveSched *scheduler.AdaptiveScheduler,
 	reposChan <-chan []string,
 	interval time.Duration,
 	coldStart bool,
@@ -2825,6 +2842,21 @@ func runTier2(
 	// runIssueTier promotes ready issues and processes every repo's
 	// issue list in parallel, bounded by ai.tier2_repo_concurrency.
 	//
+	// When polling.adaptive is true (opt-in), only repos whose next
+	// scheduled poll is due are processed this tick. After each repo
+	// finishes, MarkActive (count>0) or MarkIdle (count==0) adjusts
+	// its interval so active repos stay at min_interval while idle
+	// repos back off toward max_interval.
+	//
+	// The Search API prefetch always covers ALL currentRepos regardless
+	// of the adaptive filter. This keeps the C2 prefetch intact (one
+	// cheap search query per cycle) while the actual processing fan-out
+	// is limited to due repos. On search error the per-repo REST fallback
+	// inside ProcessRepo is unaffected.
+	//
+	// When polling.adaptive is false (default) the behaviour is EXACTLY
+	// unchanged: all currentRepos are processed every tick.
+	//
 	// NOTE: if NATS publishes are ever added to this tier, also call
 	// adapter.PublishPending() at the end — it is intentionally bound
 	// to the PR tick today (see prTick) because pending publishes
@@ -2865,10 +2897,28 @@ func runTier2(
 		// using the separate search rate budget (30/min) instead of the core
 		// REST budget (5000/hr). On search error the per-repo REST fallback is
 		// still active inside ProcessRepo — no repos are skipped.
+		// The prefetch always covers ALL currentRepos even in adaptive mode so
+		// the search result cache is warm for whichever repos are due.
 		adapter.PrefetchIssuesForCycle(currentRepos)
 		defer adapter.ClearIssuePrefetch()
 
-		issueCount = processReposInParallel(ctx, currentRepos, concurrency, func(ctx context.Context, repo string) (int, error) {
+		// Adaptive gating: narrow the work list to only repos that are due
+		// this tick. Falls back to all repos when adaptive is disabled.
+		adaptive := adaptiveFn != nil && adaptiveFn()
+		reposToProcess := currentRepos
+		now := time.Now()
+		if adaptive {
+			reposToProcess = adaptiveSched.Due(now, currentRepos)
+			if len(reposToProcess) < len(currentRepos) {
+				slog.Debug("tier2: adaptive mode — skipping idle repos",
+					"total", len(currentRepos), "due", len(reposToProcess))
+			}
+			// Prune repos that have been removed from monitoring so the
+			// scheduler's memory stays bounded.
+			adaptiveSched.PruneAbsent(currentRepos)
+		}
+
+		issueCount = processReposInParallel(ctx, reposToProcess, concurrency, func(ctx context.Context, repo string) (int, error) {
 			if err := limiter.Acquire(ctx, scheduler.TierRepo); err != nil {
 				return 0, err
 			}
@@ -2882,10 +2932,22 @@ func runTier2(
 				} else {
 					slog.Error("tier2: issue processing", "repo", repo, "err", err)
 				}
+				// On error we don't advance the adaptive schedule for
+				// this repo; it will be re-evaluated as due on the next
+				// tick (nextDue is not updated because MarkActive/MarkIdle
+				// are not called).
 				return 0, err
 			}
 			if n > 0 {
 				slog.Info("tier2: processed issues", "repo", repo, "count", n)
+			}
+			// Update adaptive cadence based on observed activity.
+			if adaptive {
+				if n > 0 {
+					adaptiveSched.MarkActive(repo, now)
+				} else {
+					adaptiveSched.MarkIdle(repo, now)
+				}
 			}
 			return n, nil
 		})
