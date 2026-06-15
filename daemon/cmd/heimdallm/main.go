@@ -614,6 +614,10 @@ func main() {
 	// Apply [polling] kill-switches and safety knobs from config.
 	// ETag cache (C1): enabled by default; operator can disable via use_etag=false.
 	ghClient.SetCacheEnabled(cfg.ETagEnabled())
+	// GraphQL issue search (C4): disabled by default; operator enables via use_graphql=true.
+	// When enabled, SearchIssues dispatches to the GraphQL API first and falls
+	// back to REST /search/issues on any error — zero behaviour change when false.
+	ghClient.SetGraphQLEnabled(cfg.GraphQLEnabled())
 	// Rate-limit safety threshold: drives how eagerly each tier backs off.
 	// Default 100 matches the current hardcoded tierSafetyThreshold[TierDiscovery].
 	limiter.SetDiscoverySafetyThreshold(cfg.Polling.RateLimitSafetyThreshold)
