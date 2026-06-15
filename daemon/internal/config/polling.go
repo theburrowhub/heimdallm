@@ -57,10 +57,10 @@ type PollingConfig struct {
 // Default values for [polling] — centralised so applyPollingDefaults and the
 // Resolved* helpers can't drift.
 const (
-	DefaultPollingMinInterval             = "1m"
-	DefaultPollingMaxInterval             = "15m"
-	DefaultPollingDiscoveryInterval       = "5m"
-	DefaultPollingTier3Interval           = "30s"
+	DefaultPollingMinInterval              = "1m"
+	DefaultPollingMaxInterval              = "15m"
+	DefaultPollingDiscoveryInterval        = "5m"
+	DefaultPollingTier3Interval            = "30s"
 	DefaultPollingRateLimitSafetyThreshold = 100
 )
 

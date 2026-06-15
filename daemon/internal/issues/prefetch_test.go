@@ -343,7 +343,7 @@ func TestClearPrefetch_PreventsStaleReuseAcrossCycles(t *testing.T) {
 
 	repos := []string{"org/repo"}
 	// Cycle 1: prefetch active — FetchIssues must NOT be called.
-	fetcher.PrefetchIssues(simpleEligibleFn(cfg, repos), "alice", repos) //nolint:errcheck
+	fetcher.PrefetchIssues(simpleEligibleFn(cfg, repos), "alice", repos)         //nolint:errcheck
 	fetcher.ProcessRepo(context.Background(), "org/repo", cfg, "alice", optsFor) //nolint:errcheck
 	if restClient.calls != 0 {
 		t.Fatalf("cycle 1: FetchIssues should not be called when prefetch warm; got %d", restClient.calls)

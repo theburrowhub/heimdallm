@@ -56,9 +56,9 @@ type RateLimiter struct {
 	pool chan struct{}
 	size int
 
-	mu               sync.Mutex
-	budgets          map[string]*resourceBudget // keyed by resource name, e.g. "core", "search"
-	cooldown         time.Time                   // secondary-limit cooldown: block until this time
+	mu                sync.Mutex
+	budgets           map[string]*resourceBudget // keyed by resource name, e.g. "core", "search"
+	cooldown          time.Time                  // secondary-limit cooldown: block until this time
 	baseDiscThreshold int                        // override for TierDiscovery threshold (0 = use package default)
 }
 

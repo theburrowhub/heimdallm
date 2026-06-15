@@ -29,17 +29,17 @@ func searchIssueItem(id int64, number int, repo, title string, labels, assignees
 		assigneeItems[i] = map[string]string{"login": a}
 	}
 	item := map[string]any{
-		"id":               id,
-		"number":           number,
-		"title":            title,
-		"state":            "open",
-		"labels":           labelItems,
-		"assignees":        assigneeItems,
-		"user":             map[string]string{"login": "author"},
-		"html_url":         fmt.Sprintf("https://github.com/%s/issues/%d", repo, number),
-		"repository_url":   fmt.Sprintf("https://api.github.com/repos/%s", repo),
-		"created_at":       time.Now().UTC().Format(time.RFC3339),
-		"updated_at":       time.Now().UTC().Format(time.RFC3339),
+		"id":             id,
+		"number":         number,
+		"title":          title,
+		"state":          "open",
+		"labels":         labelItems,
+		"assignees":      assigneeItems,
+		"user":           map[string]string{"login": "author"},
+		"html_url":       fmt.Sprintf("https://github.com/%s/issues/%d", repo, number),
+		"repository_url": fmt.Sprintf("https://api.github.com/repos/%s", repo),
+		"created_at":     time.Now().UTC().Format(time.RFC3339),
+		"updated_at":     time.Now().UTC().Format(time.RFC3339),
 	}
 	if isPR {
 		item["pull_request"] = map[string]string{"url": "…"}
@@ -378,9 +378,9 @@ func TestBuildIssueSearchQuery_QURLEncodeable(t *testing.T) {
 
 func TestBuildIssueSearchQuery_DeduplicatesLabels(t *testing.T) {
 	it := config.IssueTrackingConfig{
-		DefaultAction: string(config.IssueModeIgnore),
-		DevelopLabels: []string{"bug", "bug"}, // duplicate
-		ReviewOnlyLabels: []string{"bug"},     // same label in another dimension
+		DefaultAction:    string(config.IssueModeIgnore),
+		DevelopLabels:    []string{"bug", "bug"}, // duplicate
+		ReviewOnlyLabels: []string{"bug"},        // same label in another dimension
 	}
 	q := gh.BuildIssueSearchQuery(it, "", nil)
 	count := strings.Count(q, "label:bug")

@@ -155,13 +155,13 @@ func TestParseRateLimitHeaders_NilResponseReturnsFalse(t *testing.T) {
 func TestParseRateLimitHeaders_TableDriven(t *testing.T) {
 	epoch := int64(1700000000)
 	cases := []struct {
-		name       string
-		status     int
-		headers    map[string]string
-		wantOK     bool
-		wantRes    string
-		wantRem    int
-		wantRetry  time.Duration
+		name      string
+		status    int
+		headers   map[string]string
+		wantOK    bool
+		wantRes   string
+		wantRem   int
+		wantRetry time.Duration
 	}{
 		{
 			name:   "core 200",
