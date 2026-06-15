@@ -65,6 +65,7 @@ type Client struct {
 	baseURL string
 	http    *http.Client
 	cache   *ConditionalCache
+	rateObs RateLimitObserver
 
 	// rate-limit circuit breaker: when GitHub rejects a request with a rate
 	// limit (primary exhaustion or a secondary/abuse burst block), every
@@ -110,6 +111,23 @@ func (c *Client) CacheStats() (hits, misses int64) {
 	return c.cache.CacheHits(), c.cache.CacheMisses()
 }
 
+// SetRateObserver registers an observer that will be called after every HTTP
+// response (success or error status) made through do() or doWithBody().
+// The observer receives the raw *http.Response to inspect headers.
+// Replaces any previously registered observer. Pass nil to disable.
+func (c *Client) SetRateObserver(o RateLimitObserver) {
+	c.rateObs = o
+}
+
+// notifyRateObserver calls the registered observer if one is set.
+// Must be called AFTER the response is ready but BEFORE the body is consumed
+// by this layer (headers are what the observer needs).
+func (c *Client) notifyRateObserver(resp *http.Response) {
+	if c.rateObs != nil && resp != nil {
+		c.rateObs.ObserveResponse(resp)
+	}
+}
+
 // AuthenticatedUser returns the GitHub login of the token owner.
 // Used to resolve the actual username instead of @me (which some token types reject).
 func (c *Client) AuthenticatedUser() (string, error) {
@@ -137,6 +155,14 @@ func (c *Client) do(method, path string, accept string) (*http.Response, error) 
 		return c.doWithBody(method, path, accept, "", nil)
 	}
 
+	// Circuit breaker: while a rate-limit cooldown is active, fail fast without
+	// touching GitHub. GETs take their own path below (the ETag layer) instead
+	// of going through doWithBody, so the breaker has to be checked here too —
+	// GET polling is the bulk of the traffic a cooldown exists to suppress.
+	if until, paused := c.rateLimitPaused(); paused {
+		return nil, &RateLimitError{RetryAt: until}
+	}
+
 	// ── ETag conditional-request layer (GET only) ────────────────────────────
 	// If we have a cached ETag for this path, send If-None-Match so GitHub can
 	// return 304 Not Modified (which does NOT count against the rate limit).
@@ -162,6 +188,20 @@ func (c *Client) do(method, path string, accept string) (*http.Response, error) 
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err
+	}
+
+	// Notify the rate-limit observer with the raw response (headers only —
+	// the observer must not consume the body). Called before the ETag cache
+	// layer modifies the response so the observer sees the real status code
+	// and headers GitHub sent (including 304, which does not count against
+	// the budget and carries up-to-date X-RateLimit-* values).
+	c.notifyRateObserver(resp)
+
+	// Open the breaker if GitHub rejected this GET for rate limiting, so the
+	// rest of the poll cycle stops hammering. The response is still returned
+	// and handled by the switch below exactly as before.
+	if wait, limited := rateLimitDelay(resp); limited {
+		c.pauseRateLimit(wait)
 	}
 
 	switch resp.StatusCode {
@@ -240,6 +280,10 @@ func (c *Client) doWithBody(method, path, accept, contentType string, body io.Re
 	if err != nil {
 		return nil, err
 	}
+
+	// Notify the rate-limit observer so POST/PUT/PATCH responses also update
+	// the live budget. The observer inspects headers only; the body is untouched.
+	c.notifyRateObserver(resp)
 
 	// If GitHub rate-limited this request, open the breaker so the rest of the
 	// poll cycle stops hammering. The current response is still returned so the
