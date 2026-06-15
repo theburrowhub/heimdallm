@@ -338,8 +338,8 @@ func main() {
 		slog.Warn("could not resolve bot login for re-review context", "err", err)
 	}
 	issueFetcher := issuepipeline.NewFetcher(ghClient, ghClient, s, issuePipe)
-	issueFetcher.SetBotLogin(resolvedBotLogin)   // break re-triage loop (#362)
-	issueFetcher.SetSearcher(ghClient)            // enable aggregated Search API prefetch (separate rate budget)
+	issueFetcher.SetBotLogin(resolvedBotLogin) // break re-triage loop (#362)
+	issueFetcher.SetSearcher(ghClient)         // enable aggregated Search API prefetch (separate rate budget)
 	// cfgMu protects cfg and the pipeline so reload is safe from any goroutine.
 	var cfgMu sync.Mutex
 	repoCurrentlyMonitored := func(repo string) bool {
@@ -1861,6 +1861,17 @@ func main() {
 			"per_issue_24h":     c.CircuitBreaker.PerIssue24h,
 			"per_issue_repo_hr": c.CircuitBreaker.PerIssueRepoHr,
 			"per_impl_repo_hr":  c.CircuitBreaker.PerImplRepoHr,
+		}
+		result["polling"] = map[string]any{
+			"poll_interval":               c.Polling.PollInterval,
+			"min_interval":                c.Polling.MinInterval,
+			"max_interval":                c.Polling.MaxInterval,
+			"adaptive":                    c.Polling.Adaptive,
+			"discovery_interval":          c.Polling.DiscoveryInterval,
+			"tier3_interval":              c.Polling.Tier3Interval,
+			"rate_limit_safety_threshold": c.Polling.RateLimitSafetyThreshold,
+			"use_etag":                    c.ETagEnabled(),
+			"use_graphql":                 c.GraphQLEnabled(),
 		}
 		return result
 	})
