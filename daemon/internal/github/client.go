@@ -281,9 +281,6 @@ func (c *Client) do(method, path string, accept string) (*http.Response, error) 
 // set when a body is present. Every authenticated call should go through
 // this helper so auth, Accept headers, and the pinned API version stay in
 // one place.
-//
-// TODO: migrate SubmitReview and PostComment to doWithBody as well — they
-// still build their request inline, duplicating the header setup.
 func (c *Client) doWithBody(method, path, accept, contentType string, body io.Reader) (*http.Response, error) {
 	// Circuit breaker: while a rate-limit cooldown is active, fail fast without
 	// touching GitHub. Sending more traffic during a secondary/abuse block only
@@ -577,16 +574,7 @@ func (c *Client) submitReview(repo string, number int, body, event, commitID str
 	}
 
 	data, _ := json.Marshal(payload)
-	req, err := http.NewRequest("POST", c.baseURL+path, strings.NewReader(string(data)))
-	if err != nil {
-		return 0, "", fmt.Errorf("github: submit review: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-
-	resp, err := c.http.Do(req)
+	resp, err := c.doWithBody("POST", path, "application/vnd.github+json", "application/json", strings.NewReader(string(data)))
 	if err != nil {
 		return 0, "", fmt.Errorf("github: submit review: %w", err)
 	}
@@ -626,15 +614,7 @@ func (c *Client) PostComment(repo string, number int, body string) (time.Time, e
 	path := fmt.Sprintf("/repos/%s/issues/%d/comments", repo, number)
 	payload := map[string]any{"body": body}
 	data, _ := json.Marshal(payload)
-	req, err := http.NewRequest("POST", c.baseURL+path, strings.NewReader(string(data)))
-	if err != nil {
-		return time.Time{}, fmt.Errorf("github: post comment: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	resp, err := c.http.Do(req)
+	resp, err := c.doWithBody("POST", path, "application/vnd.github+json", "application/json", strings.NewReader(string(data)))
 	if err != nil {
 		return time.Time{}, fmt.Errorf("github: post comment: %w", err)
 	}

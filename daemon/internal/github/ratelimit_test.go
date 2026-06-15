@@ -416,3 +416,146 @@ func TestSetRateObserver_MultipleRequestsCallObserverEachTime(t *testing.T) {
 		t.Errorf("observer called %d times, want %d", obs.count(), n)
 	}
 }
+
+// TestSetRateObserver_CalledAfterSubmitReview verifies that a registered
+// observer is called when SubmitReview is invoked, so 403 secondary-rate-limit
+// responses on the write path update the limiter's cooldown.
+func TestSetRateObserver_CalledAfterSubmitReview(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Remaining", "3000")
+		w.Header().Set("X-RateLimit-Reset", "1700000000")
+		w.Header().Set("X-RateLimit-Resource", "core")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"id":42,"state":"APPROVED"}`)
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	obs := &fakeObserver{}
+	client.SetRateObserver(obs)
+
+	_, _, err := client.SubmitReview("org/repo", 1, "looks good", "APPROVE")
+	if err != nil {
+		t.Fatalf("SubmitReview: %v", err)
+	}
+
+	if obs.count() != 1 {
+		t.Errorf("observer called %d times after SubmitReview, want 1", obs.count())
+	}
+	last := obs.last()
+	if last == nil {
+		t.Fatal("last observed response is nil")
+	}
+	if last.Header.Get("X-RateLimit-Remaining") != "3000" {
+		t.Errorf("observer saw Remaining=%q, want %q",
+			last.Header.Get("X-RateLimit-Remaining"), "3000")
+	}
+}
+
+// TestSetRateObserver_CalledAfterPostComment verifies that a registered
+// observer is called when PostComment is invoked, so 403 secondary-rate-limit
+// responses on the write path update the limiter's cooldown.
+func TestSetRateObserver_CalledAfterPostComment(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Remaining", "1500")
+		w.Header().Set("X-RateLimit-Reset", "1700000000")
+		w.Header().Set("X-RateLimit-Resource", "core")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"created_at":"2024-01-01T00:00:00Z"}`)
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	obs := &fakeObserver{}
+	client.SetRateObserver(obs)
+
+	_, err := client.PostComment("org/repo", 1, "hello from bot")
+	if err != nil {
+		t.Fatalf("PostComment: %v", err)
+	}
+
+	if obs.count() != 1 {
+		t.Errorf("observer called %d times after PostComment, want 1", obs.count())
+	}
+	last := obs.last()
+	if last == nil {
+		t.Fatal("last observed response is nil")
+	}
+	if last.Header.Get("X-RateLimit-Remaining") != "1500" {
+		t.Errorf("observer saw Remaining=%q, want %q",
+			last.Header.Get("X-RateLimit-Remaining"), "1500")
+	}
+}
+
+// TestSetRateObserver_SubmitReview403SecondaryRateLimit verifies that a 403
+// with Retry-After (GitHub's secondary rate-limit signal) on SubmitReview
+// reaches the observer so the limiter can enter cooldown.
+func TestSetRateObserver_SubmitReview403SecondaryRateLimit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Reset", "1700000000")
+		w.Header().Set("X-RateLimit-Resource", "core")
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"message":"You have exceeded a secondary rate limit."}`)
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	obs := &fakeObserver{}
+	client.SetRateObserver(obs)
+
+	// SubmitReview will return an error (403), but the observer must still fire.
+	_, _, _ = client.SubmitReview("org/repo", 1, "body", "APPROVE")
+
+	if obs.count() != 1 {
+		t.Errorf("observer called %d times on 403 from SubmitReview, want 1", obs.count())
+	}
+	last := obs.last()
+	if last == nil {
+		t.Fatal("last observed response is nil")
+	}
+	parsed, ok := gh.ParseRateLimitHeaders(last)
+	if !ok {
+		t.Fatal("ParseRateLimitHeaders returned ok=false on 403 response")
+	}
+	if parsed.RetryAfter != 60*time.Second {
+		t.Errorf("RetryAfter = %v, want 60s", parsed.RetryAfter)
+	}
+}
+
+// TestSetRateObserver_PostComment403SecondaryRateLimit verifies that a 403
+// with Retry-After on PostComment reaches the observer.
+func TestSetRateObserver_PostComment403SecondaryRateLimit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Reset", "1700000000")
+		w.Header().Set("X-RateLimit-Resource", "core")
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"message":"You have exceeded a secondary rate limit."}`)
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	obs := &fakeObserver{}
+	client.SetRateObserver(obs)
+
+	// PostComment will return an error (403), but the observer must still fire.
+	_, _ = client.PostComment("org/repo", 1, "body")
+
+	if obs.count() != 1 {
+		t.Errorf("observer called %d times on 403 from PostComment, want 1", obs.count())
+	}
+	last := obs.last()
+	if last == nil {
+		t.Fatal("last observed response is nil")
+	}
+	parsed, ok := gh.ParseRateLimitHeaders(last)
+	if !ok {
+		t.Fatal("ParseRateLimitHeaders returned ok=false on 403 response")
+	}
+	if parsed.RetryAfter != 30*time.Second {
+		t.Errorf("RetryAfter = %v, want 30s", parsed.RetryAfter)
+	}
+}
