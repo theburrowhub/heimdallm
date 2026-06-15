@@ -3776,24 +3776,17 @@ func (a *tier2Adapter) PrefetchIssuesForCycle(repos []string) {
 	a.cfgMu.Unlock()
 	authUser := a.resolveAuthenticatedUser()
 
-	// Collect repos that are eligible for issue processing this cycle.
-	eligible := make([]string, 0, len(repos))
-	for _, repo := range repos {
+	// eligibleFn resolves the effective IssueTrackingConfig and autonomous flag
+	// for each repo. PrefetchIssues uses this to group repos by their resolved
+	// assignee set, running one search query per group. This ensures repos with
+	// per-repo assignee overrides are fetched with their own assignee scope
+	// rather than the global one, preventing silent issue drops.
+	eligibleFn := func(repo string) (config.IssueTrackingConfig, bool, bool) {
 		repoIT := c.IssueTrackingForRepo(repo)
 		autonomousEnabled := c.AutonomousForRepo(repo).Enabled
-		if !repoIT.Enabled || autonomousEnabled {
-			continue
-		}
-		eligible = append(eligible, repo)
+		return repoIT, autonomousEnabled, true
 	}
-	if len(eligible) == 0 {
-		return
-	}
-
-	// Use the global issue tracking config as the query base; per-repo
-	// overrides are applied after in ProcessRepo (classification + filter).
-	globalIT := c.GitHub.IssueTracking
-	if _, err := a.fetcher.PrefetchIssues(globalIT, authUser, eligible); err != nil {
+	if _, err := a.fetcher.PrefetchIssues(eligibleFn, authUser, repos); err != nil {
 		// Error already logged by PrefetchIssues; fallback is automatic.
 		return
 	}

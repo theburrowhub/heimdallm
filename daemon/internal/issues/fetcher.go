@@ -148,25 +148,60 @@ func (f *Fetcher) SetSearcher(s IssueSearcher) {
 	f.searcher = s
 }
 
-// PrefetchIssues runs ONE aggregated GET /search/issues query covering all
-// eligible repos in repos (those with issue tracking enabled and autonomous
-// mode disabled), builds a per-repo map of raw []*github.Issue, and stores it
-// internally so subsequent ProcessRepo calls for any of those repos can skip
-// the per-repo REST GET.
+// EligibleFn is the per-repo eligibility callback passed to PrefetchIssues.
+// It returns the effective IssueTrackingConfig for repo, whether autonomous
+// mode is enabled (which disables issue processing), and whether the repo
+// should be included at all (ok=false skips the repo silently).
+type EligibleFn func(repo string) (it config.IssueTrackingConfig, autonomousEnabled bool, ok bool)
+
+// assigneeKey builds a canonical string key for a resolved assignee set so
+// repos that share the same effective assignees end up in the same search
+// group. The key is the sorted, joined assignee list (case-preserved to match
+// the GitHub login convention).
+func assigneeKey(assignees []string) string {
+	if len(assignees) == 0 {
+		return ""
+	}
+	sorted := make([]string, len(assignees))
+	copy(sorted, assignees)
+	// simple insertion sort — lists are always tiny (1–5 entries)
+	for i := 1; i < len(sorted); i++ {
+		for j := i; j > 0 && sorted[j] < sorted[j-1]; j-- {
+			sorted[j], sorted[j-1] = sorted[j-1], sorted[j]
+		}
+	}
+	return strings.Join(sorted, "\x00")
+}
+
+// PrefetchIssues runs one aggregated GET /search/issues query PER DISTINCT
+// ASSIGNEE SET covering all eligible repos, builds a per-repo map of raw
+// []*github.Issue, and stores it internally so subsequent ProcessRepo calls for
+// any of those repos can skip the per-repo REST GET.
 //
-// eligibleFn(repo) should return (IssueTrackingConfig, autonomousEnabled, ok).
-// Repos for which autonomousEnabled==true or ok==false are excluded from the
-// search scope (matching the gating in ProcessRepo).
+// eligibleFn(repo) returns (effectiveIssueTrackingConfig, autonomousEnabled,
+// ok). Repos for which autonomousEnabled==true or ok==false are excluded from
+// the search scope (matching the gating in ProcessRepo).
 //
-// On search error PrefetchIssues logs a warning and returns the error; callers
-// should then call ProcessRepo without a prefetched map, which falls back to the
-// per-repo FetchIssues path automatically.
+// Grouping by assignee set is necessary because per-repo IssueTracking
+// overrides can specify different Assignees than the global config. Running a
+// single global-assignee query and storing results under a repo whose effective
+// assignees differ would silently drop issues assigned to the override assignees.
 //
-// PrefetchIssues is NOT goroutine-safe; it must be called BEFORE the parallel
-// ProcessRepo fan-out begins and the prefetched map must not be written again
-// until all ProcessRepo calls for that cycle have returned.
+// Label qualifiers are intentionally omitted from the aggregated queries
+// (BuildAggregatedSearchQuery). The per-repo client-side ClassifyAndFilterIssues
+// step (called in ProcessRepo) already applies classification and label/filter
+// filtering precisely, so the aggregated query only needs to narrow by assignee
+// and repo scope.
+//
+// On search error for any group, PrefetchIssues logs a warning, clears the
+// internal prefetch map for that group's repos (leaving them absent so
+// ProcessRepo falls back to per-repo FetchIssues), and returns the last error.
+//
+// PrefetchIssues is NOT goroutine-safe; call it BEFORE the parallel ProcessRepo
+// fan-out and do not write the prefetch map again until all ProcessRepo calls
+// for that cycle have returned.
 func (f *Fetcher) PrefetchIssues(
-	it config.IssueTrackingConfig,
+	eligibleFn EligibleFn,
 	authUser string,
 	repos []string,
 ) (map[string][]*github.Issue, error) {
@@ -174,42 +209,72 @@ func (f *Fetcher) PrefetchIssues(
 		return nil, nil
 	}
 
-	// Filter repos to those eligible for search.
-	eligible := repos[:0:0] // same backing array cap avoids allocation on empty input
-	eligible = make([]string, 0, len(repos))
+	// Build groups: assigneeKey → (assignees, []repo)
+	type group struct {
+		assignees []string
+		repos     []string
+	}
+	groups := make(map[string]*group)
+	groupOrder := make([]string, 0) // preserve deterministic iteration order
+
 	for _, r := range repos {
-		if r != "" {
-			eligible = append(eligible, r)
-		}
-	}
-	if len(eligible) == 0 {
-		return nil, nil
-	}
-
-	query := github.BuildIssueSearchQuery(it, authUser, eligible)
-	if query == "" {
-		return nil, nil
-	}
-
-	raw, err := f.searcher.SearchIssues(query)
-	if err != nil {
-		slog.Warn("issues fetcher: search prefetch failed, will fall back to per-repo fetch",
-			"err", err, "repos", len(eligible))
-		return nil, err
-	}
-
-	byRepo := make(map[string][]*github.Issue, len(eligible))
-	for _, issue := range raw {
-		if issue.Repo == "" {
+		if r == "" {
 			continue
 		}
-		byRepo[issue.Repo] = append(byRepo[issue.Repo], issue)
+		it, autonomous, ok := eligibleFn(r)
+		if !ok || autonomous || !it.Enabled {
+			continue
+		}
+		// Resolve effective assignees the same way ProcessRepo / FetchIssues does.
+		resolved := it.WithDefaultAssignee(authUser).Assignees
+		key := assigneeKey(resolved)
+		if _, exists := groups[key]; !exists {
+			groups[key] = &group{assignees: resolved}
+			groupOrder = append(groupOrder, key)
+		}
+		groups[key].repos = append(groups[key].repos, r)
+	}
+
+	if len(groups) == 0 {
+		return nil, nil
+	}
+
+	byRepo := make(map[string][]*github.Issue)
+	var lastErr error
+	totalRepos := 0
+	totalIssues := 0
+
+	for _, key := range groupOrder {
+		g := groups[key]
+		query := github.BuildAggregatedSearchQuery(g.assignees, g.repos)
+		if query == "" {
+			continue
+		}
+		raw, err := f.searcher.SearchIssues(query)
+		if err != nil {
+			slog.Warn("issues fetcher: search prefetch failed for assignee group, will fall back to per-repo fetch",
+				"err", err, "repos", len(g.repos))
+			lastErr = err
+			continue
+		}
+		for _, issue := range raw {
+			if issue.Repo == "" {
+				continue
+			}
+			byRepo[issue.Repo] = append(byRepo[issue.Repo], issue)
+		}
+		totalRepos += len(g.repos)
+		totalIssues += len(raw)
+	}
+
+	if len(byRepo) == 0 && lastErr != nil {
+		return nil, lastErr
 	}
 
 	slog.Info("issues fetcher: search prefetch complete",
-		"repos", len(eligible), "issues", len(raw))
+		"groups", len(groups), "repos", totalRepos, "issues", totalIssues)
 	f.prefetched = byRepo
-	return byRepo, nil
+	return byRepo, lastErr
 }
 
 // ClearPrefetch discards the prefetch map. Call once per cycle after all
