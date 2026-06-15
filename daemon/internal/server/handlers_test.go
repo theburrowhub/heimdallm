@@ -2377,3 +2377,137 @@ func TestHandleListIssues_StateFilter(t *testing.T) {
 		t.Errorf("GET /issues?state=open,closed: expected 2, got %d", len(got))
 	}
 }
+
+// TestHandlerGetConfig_ExposesPolling guards the [polling] section in the GET
+// /config response. The Flutter UI and CLI Config tab read these keys, so a
+// silent rename or re-nesting would break consumers.
+func TestHandlerGetConfig_ExposesPolling(t *testing.T) {
+	srv, _ := setupServer(t)
+	srv.SetConfigFn(func() map[string]any {
+		return map[string]any{
+			"polling": map[string]any{
+				"poll_interval":               "3m",
+				"min_interval":                "1m",
+				"max_interval":                "15m",
+				"adaptive":                    true,
+				"discovery_interval":          "5m",
+				"tier3_interval":              "30s",
+				"rate_limit_safety_threshold": int64(100),
+				"use_etag":                    true,
+				"use_graphql":                 false,
+			},
+		}
+	})
+
+	req := httptest.NewRequest("GET", "/config", nil)
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v (body: %s)", err, w.Body.String())
+	}
+	polling, ok := body["polling"].(map[string]any)
+	if !ok {
+		t.Fatalf("polling missing or wrong type: %T: %v", body["polling"], body["polling"])
+	}
+
+	checks := map[string]any{
+		"poll_interval":               "3m",
+		"min_interval":                "1m",
+		"max_interval":                "15m",
+		"adaptive":                    true,
+		"discovery_interval":          "5m",
+		"tier3_interval":              "30s",
+		"rate_limit_safety_threshold": float64(100), // JSON numbers decode to float64
+		"use_etag":                    true,
+		"use_graphql":                 false,
+	}
+	for key, want := range checks {
+		got := polling[key]
+		if got != want {
+			t.Errorf("polling[%q] = %v (%T), want %v (%T)", key, got, got, want, want)
+		}
+	}
+}
+
+// TestHandlePatchConfig_PollingSectionPersists verifies that PATCH /config
+// with {"polling":{...}} round-trips to TOML correctly. Mirrors the pattern
+// used by TestHandlePatchConfig and its siblings.
+func TestHandlePatchConfig_PollingSectionPersists(t *testing.T) {
+	tomlContent := "[ai]\nprimary = \"claude\"\n"
+	tomlPath := writeTempTOML(t, tomlContent)
+
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+
+	body := `{"polling":{"adaptive":true,"max_interval":"30m"}}`
+	req := httptest.NewRequest("PATCH", "/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	m, err := config.ReadTOMLMap(tomlPath)
+	if err != nil {
+		t.Fatalf("read TOML after PATCH: %v", err)
+	}
+	polling, ok := m["polling"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected [polling] section in TOML, got %v", m)
+	}
+	if polling["adaptive"] != true {
+		t.Errorf("adaptive = %v, want true", polling["adaptive"])
+	}
+	if polling["max_interval"] != "30m" {
+		t.Errorf("max_interval = %v, want 30m", polling["max_interval"])
+	}
+}
+
+// TestHandlePatchConfig_PollingIntAndBoolFields verifies that integer
+// (rate_limit_safety_threshold) and pointer-bool (use_etag) fields in the
+// [polling] section persist to TOML via PATCH /config.
+func TestHandlePatchConfig_PollingIntAndBoolFields(t *testing.T) {
+	tomlContent := "[ai]\nprimary = \"claude\"\n"
+	tomlPath := writeTempTOML(t, tomlContent)
+
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+
+	body := `{"polling":{"rate_limit_safety_threshold":200,"use_etag":false}}`
+	req := httptest.NewRequest("PATCH", "/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	m, err := config.ReadTOMLMap(tomlPath)
+	if err != nil {
+		t.Fatalf("read TOML after PATCH: %v", err)
+	}
+	polling, ok := m["polling"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected [polling] section in TOML, got %v", m)
+	}
+	// TOML round-trip: JSON integers arrive as float64 after NormalizeNumbers
+	// converts them to int64; TOML writes int64; reads back as int64.
+	threshold := polling["rate_limit_safety_threshold"]
+	if threshold != int64(200) {
+		t.Errorf("rate_limit_safety_threshold = %v (%T), want int64(200)", threshold, threshold)
+	}
+	if polling["use_etag"] != false {
+		t.Errorf("use_etag = %v, want false", polling["use_etag"])
+	}
+}

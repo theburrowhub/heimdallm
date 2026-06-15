@@ -1672,6 +1672,17 @@ func main() {
 		if len(pm) > 0 {
 			result["pr_metadata"] = pm
 		}
+		result["polling"] = map[string]any{
+			"poll_interval":              c.Polling.PollInterval,
+			"min_interval":               c.Polling.MinInterval,
+			"max_interval":               c.Polling.MaxInterval,
+			"adaptive":                   c.Polling.Adaptive,
+			"discovery_interval":         c.Polling.DiscoveryInterval,
+			"tier3_interval":             c.Polling.Tier3Interval,
+			"rate_limit_safety_threshold": c.Polling.RateLimitSafetyThreshold,
+			"use_etag":                   c.ETagEnabled(),
+			"use_graphql":                c.GraphQLEnabled(),
+		}
 		return result
 	})
 
