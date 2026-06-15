@@ -109,6 +109,9 @@ query($q: String!, $cursor: String) {
         url
         createdAt
         updatedAt
+        author {
+          login
+        }
         repository {
           nameWithOwner
         }
@@ -152,6 +155,9 @@ type graphQLIssueNode struct {
 	URL        string `json:"url"` // HTMLURL
 	CreatedAt  string `json:"createdAt"`
 	UpdatedAt  string `json:"updatedAt"`
+	Author     struct {
+		Login string `json:"login"`
+	} `json:"author"`
 	Repository struct {
 		NameWithOwner string `json:"nameWithOwner"`
 	} `json:"repository"`
@@ -201,8 +207,9 @@ func (c *Client) SearchIssuesGraphQL(searchQuery string) ([]*Issue, error) {
 				Number:  node.Number,
 				Title:   node.Title,
 				Body:    node.Body,
-				State:   node.State,
+				State:   strings.ToLower(node.State),
 				HTMLURL: node.URL,
+				User:    User{Login: node.Author.Login},
 				Repo:    node.Repository.NameWithOwner,
 			}
 

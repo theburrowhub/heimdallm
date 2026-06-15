@@ -15,7 +15,13 @@ import (
 // ── GraphQL test helpers ──────────────────────────────────────────────────────
 
 // gqlIssueNode builds a GraphQL Issue node matching the search query fields.
+// author is the login of the issue author (maps to Issue.User).
 func gqlIssueNode(id int64, number int, repo, title, state string, labels, assignees []string) map[string]any {
+	return gqlIssueNodeWithAuthor(id, number, repo, title, state, "", labels, assignees)
+}
+
+// gqlIssueNodeWithAuthor is like gqlIssueNode but also sets the author login.
+func gqlIssueNodeWithAuthor(id int64, number int, repo, title, state, author string, labels, assignees []string) map[string]any {
 	labelNodes := make([]map[string]string, len(labels))
 	for i, l := range labels {
 		labelNodes[i] = map[string]string{"name": l}
@@ -33,6 +39,7 @@ func gqlIssueNode(id int64, number int, repo, title, state string, labels, assig
 		"url":        fmt.Sprintf("https://github.com/%s/issues/%d", repo, number),
 		"createdAt":  time.Now().UTC().Format(time.RFC3339),
 		"updatedAt":  time.Now().UTC().Format(time.RFC3339),
+		"author":     map[string]string{"login": author},
 		"repository": map[string]string{"nameWithOwner": repo},
 		"assignees":  map[string]any{"nodes": assigneeNodes},
 		"labels":     map[string]any{"nodes": labelNodes},
@@ -69,7 +76,7 @@ func gqlErrorEnvelope(messages ...string) []byte {
 // ── SearchIssuesGraphQL tests ─────────────────────────────────────────────────
 
 func TestSearchIssuesGraphQL_ParsesPayloadAndMapsFields(t *testing.T) {
-	node := gqlIssueNode(42, 7, "org/repo", "GraphQL issue", "OPEN", []string{"bug"}, []string{"alice"})
+	node := gqlIssueNodeWithAuthor(42, 7, "org/repo", "GraphQL issue", "OPEN", "bob", []string{"bug"}, []string{"alice"})
 	body := gqlSearchEnvelope([]map[string]any{node}, false, "")
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -107,8 +114,11 @@ func TestSearchIssuesGraphQL_ParsesPayloadAndMapsFields(t *testing.T) {
 	if got.Repo != "org/repo" {
 		t.Errorf("Repo: want %q, got %q", "org/repo", got.Repo)
 	}
-	if got.State != "OPEN" {
-		t.Errorf("State: want %q, got %q", "OPEN", got.State)
+	if got.State != "open" {
+		t.Errorf("State: want %q, got %q", "open", got.State)
+	}
+	if got.User.Login != "bob" {
+		t.Errorf("User.Login: want %q, got %q", "bob", got.User.Login)
 	}
 	if got.HTMLURL != "https://github.com/org/repo/issues/7" {
 		t.Errorf("HTMLURL: want %q, got %q", "https://github.com/org/repo/issues/7", got.HTMLURL)
