@@ -94,17 +94,12 @@ func (c *Client) SearchIssues(query string) ([]*Issue, error) {
 }
 
 // repoFromURL derives "org/repo" from a GitHub html_url
-// ("https://github.com/org/repo/issues/42") or a repository_url
-// ("https://api.github.com/repos/org/repo"). Returns "" on failure.
+// ("https://github.com/org/repo/issues/42"). Returns "" on failure.
+//
+// Note: issue.HTMLURL is always a github.com URL; the api.github.com/repos/
+// form only appears in the repository_url field, which is handled by the
+// Repository.FullName path in SearchIssues before repoFromURL is called.
 func repoFromURL(rawURL string) string {
-	// repository_url form: https://api.github.com/repos/org/repo
-	const apiPrefix = "https://api.github.com/repos/"
-	if strings.HasPrefix(rawURL, apiPrefix) {
-		extracted := rawURL[len(apiPrefix):]
-		if isValidRepo(extracted) {
-			return extracted
-		}
-	}
 	// html_url form: https://github.com/org/repo/issues/42
 	const ghPrefix = "https://github.com/"
 	if strings.HasPrefix(rawURL, ghPrefix) {
@@ -126,6 +121,41 @@ func isValidRepo(s string) bool {
 	return strings.Count(s, "/") == 1 &&
 		!strings.Contains(s, "..") &&
 		!strings.Contains(s, "//")
+}
+
+// BuildAggregatedSearchQuery constructs a minimal `q=` value for the
+// aggregated prefetch path. Unlike BuildIssueSearchQuery it intentionally
+// omits label qualifiers so the search returns a SUPERSET of all issues that
+// the per-repo client-side ClassifyAndFilterIssues would keep. This is correct
+// because:
+//
+//  1. Per-repo label configs differ, so no single label set can scope all repos.
+//  2. ClassifyAndFilterIssues (called in ProcessRepo for prefetched results)
+//     already applies classification + label/filter_mode filtering precisely,
+//     ensuring no unwanted issue survives into the pipeline.
+//
+// The query includes `is:issue is:open`, one `assignee:<login>` qualifier per
+// assignee, and one `repo:<org/repo>` qualifier per repo.
+//
+// assignees must be the resolved set for the group (empty falls back to authUser
+// if provided via the caller; pass the already-resolved list here).
+// repos must be non-empty.
+func BuildAggregatedSearchQuery(assignees []string, repos []string) string {
+	var parts []string
+	parts = append(parts, "is:issue", "is:open")
+	for _, a := range assignees {
+		a = strings.TrimSpace(a)
+		if a != "" {
+			parts = append(parts, "assignee:"+a)
+		}
+	}
+	for _, r := range repos {
+		r = strings.TrimSpace(r)
+		if r != "" {
+			parts = append(parts, "repo:"+r)
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 // BuildIssueSearchQuery constructs the `q=` value for GET /search/issues that

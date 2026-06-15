@@ -3,6 +3,7 @@ package issues_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,15 +14,33 @@ import (
 
 // ── fakeSearcher ─────────────────────────────────────────────────────────────
 
+// fakeSearcher records every query it receives so tests can assert the
+// correct number and shape of queries.
 type fakeSearcher struct {
+	// issues is returned for every call unless perQueryIssues is set.
 	issues []*github.Issue
 	err    error
 	calls  int
+	// queries records the raw query strings passed to each SearchIssues call.
+	queries []string
+	// perQueryIssues maps query index (0-based) to a custom result. When set,
+	// the corresponding call returns that slice instead of f.issues.
+	perQueryIssues map[int][]*github.Issue
 }
 
-func (s *fakeSearcher) SearchIssues(_ string) ([]*github.Issue, error) {
+func (s *fakeSearcher) SearchIssues(query string) ([]*github.Issue, error) {
+	idx := s.calls
 	s.calls++
-	return s.issues, s.err
+	s.queries = append(s.queries, query)
+	if s.err != nil {
+		return nil, s.err
+	}
+	if s.perQueryIssues != nil {
+		if specific, ok := s.perQueryIssues[idx]; ok {
+			return specific, nil
+		}
+	}
+	return s.issues, nil
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -59,6 +78,22 @@ func searchCfg() config.IssueTrackingConfig {
 	}
 }
 
+// simpleEligibleFn builds an issues.EligibleFn that returns the same cfg for
+// every repo in the allowed set (autonomous=false, ok=true) and ok=false for
+// any repo not in the set. Pass nil to allow all repos.
+func simpleEligibleFn(cfg config.IssueTrackingConfig, allowed []string) issues.EligibleFn {
+	set := make(map[string]bool, len(allowed))
+	for _, r := range allowed {
+		set[r] = true
+	}
+	return func(repo string) (config.IssueTrackingConfig, bool, bool) {
+		if len(set) > 0 && !set[repo] {
+			return config.IssueTrackingConfig{}, false, false
+		}
+		return cfg, false, true
+	}
+}
+
 // ── PrefetchIssues tests ──────────────────────────────────────────────────────
 
 func TestPrefetchIssues_PopulatesMapByRepo(t *testing.T) {
@@ -73,7 +108,8 @@ func TestPrefetchIssues_PopulatesMapByRepo(t *testing.T) {
 	fetcher := issues.NewFetcher(client, nil, &fakeDedup{}, nil)
 	fetcher.SetSearcher(searcher)
 
-	byRepo, err := fetcher.PrefetchIssues(searchCfg(), "alice", []string{"org/repo-a", "org/repo-b"})
+	repos := []string{"org/repo-a", "org/repo-b"}
+	byRepo, err := fetcher.PrefetchIssues(simpleEligibleFn(searchCfg(), repos), "alice", repos)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -92,7 +128,8 @@ func TestPrefetchIssues_NilSearcherReturnsNil(t *testing.T) {
 	fetcher := issues.NewFetcher(&fakeClient{}, nil, &fakeDedup{}, nil)
 	// no SetSearcher call
 
-	byRepo, err := fetcher.PrefetchIssues(searchCfg(), "alice", []string{"org/repo"})
+	repos := []string{"org/repo"}
+	byRepo, err := fetcher.PrefetchIssues(simpleEligibleFn(searchCfg(), repos), "alice", repos)
 	if err != nil {
 		t.Fatalf("expected nil error, got: %v", err)
 	}
@@ -107,7 +144,8 @@ func TestPrefetchIssues_SearchErrorPropagated(t *testing.T) {
 	fetcher := issues.NewFetcher(&fakeClient{}, nil, &fakeDedup{}, nil)
 	fetcher.SetSearcher(searcher)
 
-	_, err := fetcher.PrefetchIssues(searchCfg(), "alice", []string{"org/repo"})
+	repos := []string{"org/repo"}
+	_, err := fetcher.PrefetchIssues(simpleEligibleFn(searchCfg(), repos), "alice", repos)
 	if err == nil {
 		t.Fatal("expected error to be propagated, got nil")
 	}
@@ -118,7 +156,7 @@ func TestPrefetchIssues_EmptyReposListReturnsNil(t *testing.T) {
 	fetcher := issues.NewFetcher(&fakeClient{}, nil, &fakeDedup{}, nil)
 	fetcher.SetSearcher(searcher)
 
-	byRepo, err := fetcher.PrefetchIssues(searchCfg(), "alice", nil)
+	byRepo, err := fetcher.PrefetchIssues(simpleEligibleFn(searchCfg(), nil), "alice", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -156,8 +194,9 @@ func TestProcessRepo_UsesPrefetchedResults(t *testing.T) {
 	cfg := searchCfg()
 	cfg.Assignees = []string{"alice"}
 
+	repos := []string{"org/repo"}
 	// Warm the prefetch.
-	if _, err := fetcher.PrefetchIssues(cfg, "alice", []string{"org/repo"}); err != nil {
+	if _, err := fetcher.PrefetchIssues(simpleEligibleFn(cfg, repos), "alice", repos); err != nil {
 		t.Fatalf("PrefetchIssues failed: %v", err)
 	}
 
@@ -208,6 +247,46 @@ func TestProcessRepo_FallsBackToFetchIssuesWhenNoPrefetch(t *testing.T) {
 	}
 }
 
+// TestProcessRepo_FallsBackWhenPrefetchMapNonNilButKeyAbsent verifies that
+// ProcessRepo falls back to per-repo FetchIssues when the prefetch map is
+// non-nil but does not contain the repo. This covers the case where the search
+// API returned 0 results for that repo (e.g., over the 1000-issue cap within
+// its group).
+func TestProcessRepo_FallsBackWhenPrefetchMapNonNilButKeyAbsent(t *testing.T) {
+	// Prefetch is warm for org/other-repo but NOT for org/repo.
+	searcher := &fakeSearcher{
+		issues: []*github.Issue{
+			makeIssue(10, 10, "org/other-repo", []string{"bug"}, []string{"alice"}),
+		},
+	}
+	restClient := &fakeClient{
+		issues: []*github.Issue{
+			makeIssue(7, 7, "org/repo", []string{"bug"}, nil),
+		},
+	}
+	pipe := &fakePipeline{}
+	fetcher := issues.NewFetcher(restClient, nil, &fakeDedup{}, pipe)
+	fetcher.SetSearcher(searcher)
+
+	cfg := searchCfg()
+	cfg.Assignees = []string{"alice"}
+
+	// Prefetch covers org/other-repo, not org/repo.
+	repos := []string{"org/other-repo", "org/repo"}
+	if _, err := fetcher.PrefetchIssues(simpleEligibleFn(cfg, repos), "alice", repos); err != nil {
+		t.Fatalf("PrefetchIssues failed: %v", err)
+	}
+
+	optsFor := func(_ *github.Issue) (issues.RunOptions, bool) { return issues.RunOptions{}, true }
+	// ProcessRepo for org/repo — prefetch map exists but org/repo key is absent.
+	if _, err := fetcher.ProcessRepo(context.Background(), "org/repo", cfg, "alice", optsFor); err != nil {
+		t.Fatalf("ProcessRepo failed: %v", err)
+	}
+	if restClient.calls != 1 {
+		t.Errorf("FetchIssues fallback should have fired for absent key; got %d calls", restClient.calls)
+	}
+}
+
 // TestProcessRepo_FallsBackWhenSearchErrors verifies that a failed PrefetchIssues
 // leaves the prefetch map nil so ProcessRepo falls back to per-repo FetchIssues.
 func TestProcessRepo_FallsBackWhenSearchErrors(t *testing.T) {
@@ -223,8 +302,9 @@ func TestProcessRepo_FallsBackWhenSearchErrors(t *testing.T) {
 
 	cfg := searchCfg()
 
+	repos := []string{"org/repo"}
 	// PrefetchIssues returns an error — prefetch map stays nil.
-	if _, err := fetcher.PrefetchIssues(cfg, "alice", []string{"org/repo"}); err == nil {
+	if _, err := fetcher.PrefetchIssues(simpleEligibleFn(cfg, repos), "alice", repos); err == nil {
 		t.Fatal("expected PrefetchIssues to return the search error")
 	}
 
@@ -261,8 +341,9 @@ func TestClearPrefetch_PreventsStaleReuseAcrossCycles(t *testing.T) {
 	cfg.Assignees = []string{"alice"}
 	optsFor := func(_ *github.Issue) (issues.RunOptions, bool) { return issues.RunOptions{}, true }
 
+	repos := []string{"org/repo"}
 	// Cycle 1: prefetch active — FetchIssues must NOT be called.
-	fetcher.PrefetchIssues(cfg, "alice", []string{"org/repo"}) //nolint:errcheck
+	fetcher.PrefetchIssues(simpleEligibleFn(cfg, repos), "alice", repos) //nolint:errcheck
 	fetcher.ProcessRepo(context.Background(), "org/repo", cfg, "alice", optsFor) //nolint:errcheck
 	if restClient.calls != 0 {
 		t.Fatalf("cycle 1: FetchIssues should not be called when prefetch warm; got %d", restClient.calls)
@@ -302,7 +383,8 @@ func TestPrefetchIssues_ClassifyAndFilterApplied(t *testing.T) {
 	cfg := searchCfg()
 	cfg.Assignees = []string{"alice"}
 
-	if _, err := fetcher.PrefetchIssues(cfg, "alice", []string{"org/repo"}); err != nil {
+	repos := []string{"org/repo"}
+	if _, err := fetcher.PrefetchIssues(simpleEligibleFn(cfg, repos), "alice", repos); err != nil {
 		t.Fatalf("PrefetchIssues failed: %v", err)
 	}
 
@@ -318,5 +400,226 @@ func TestPrefetchIssues_ClassifyAndFilterApplied(t *testing.T) {
 	}
 	if len(pipe.calls) != 1 || pipe.calls[0] != 1 {
 		t.Errorf("expected only issue #1 dispatched, got %v", pipe.calls)
+	}
+}
+
+// ── Group-by-assignee-set tests ───────────────────────────────────────────────
+
+// TestPrefetchIssues_TwoGroupsIssuesTwoSearchCalls verifies that when two repos
+// have different effective assignee sets, PrefetchIssues issues TWO search
+// queries (one per group) and merges both repos' results into the prefetch map.
+func TestPrefetchIssues_TwoGroupsIssuesTwoSearchCalls(t *testing.T) {
+	// Group 1: org/global-repo uses global assignees ["alice"]
+	// Group 2: org/override-repo uses per-repo override assignees ["bob"]
+	globalCfg := config.IssueTrackingConfig{
+		Enabled:       true,
+		Assignees:     []string{"alice"},
+		DefaultAction: string(config.IssueModeIgnore),
+		DevelopLabels: []string{"bug"},
+	}
+	overrideCfg := config.IssueTrackingConfig{
+		Enabled:       true,
+		Assignees:     []string{"bob"},
+		DefaultAction: string(config.IssueModeIgnore),
+		DevelopLabels: []string{"bug"},
+	}
+
+	searcher := &fakeSearcher{
+		perQueryIssues: map[int][]*github.Issue{
+			// First query (group: alice): returns issue for org/global-repo
+			0: {makeIssue(1, 1, "org/global-repo", []string{"bug"}, []string{"alice"})},
+			// Second query (group: bob): returns issue for org/override-repo
+			1: {makeIssue(2, 2, "org/override-repo", []string{"bug"}, []string{"bob"})},
+		},
+	}
+	fetcher := issues.NewFetcher(&fakeClient{}, nil, &fakeDedup{}, nil)
+	fetcher.SetSearcher(searcher)
+
+	repos := []string{"org/global-repo", "org/override-repo"}
+	eligibleFn := func(repo string) (config.IssueTrackingConfig, bool, bool) {
+		switch repo {
+		case "org/global-repo":
+			return globalCfg, false, true
+		case "org/override-repo":
+			return overrideCfg, false, true
+		default:
+			return config.IssueTrackingConfig{}, false, false
+		}
+	}
+
+	byRepo, err := fetcher.PrefetchIssues(eligibleFn, "alice", repos)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Two distinct assignee sets → two search queries.
+	if searcher.calls != 2 {
+		t.Errorf("expected 2 SearchIssues calls (one per assignee group), got %d", searcher.calls)
+	}
+
+	// Both repos' issues must be in the prefetch map.
+	if len(byRepo["org/global-repo"]) != 1 {
+		t.Errorf("expected 1 issue for org/global-repo, got %d", len(byRepo["org/global-repo"]))
+	}
+	if len(byRepo["org/override-repo"]) != 1 {
+		t.Errorf("expected 1 issue for org/override-repo, got %d", len(byRepo["org/override-repo"]))
+	}
+
+	// Each query must use the correct assignee scope.
+	globalQuery := searcher.queries[0]
+	overrideQuery := searcher.queries[1]
+	// Determine which query is for which group (order is deterministic but
+	// depends on group key sort — check both queries collectively).
+	allQueries := globalQuery + " " + overrideQuery
+	if !strings.Contains(allQueries, "assignee:alice") {
+		t.Errorf("expected assignee:alice in one of the queries, got: %v", searcher.queries)
+	}
+	if !strings.Contains(allQueries, "assignee:bob") {
+		t.Errorf("expected assignee:bob in one of the queries, got: %v", searcher.queries)
+	}
+}
+
+// TestPrefetchIssues_PerRepoOverrideAssigneeIssueNotDropped verifies the core
+// correctness fix: an issue assigned to a per-repo-override assignee is present
+// in that repo's prefetched results even when the global assignees are different.
+// Before the fix, the single-query path would miss such issues if the prefetch
+// map already had an entry for that repo (from global-assignee issues), causing
+// silently dropped issues.
+func TestPrefetchIssues_PerRepoOverrideAssigneeIssueNotDropped(t *testing.T) {
+	globalCfg := config.IssueTrackingConfig{
+		Enabled:       true,
+		Assignees:     []string{"alice"},
+		DefaultAction: string(config.IssueModeIgnore),
+		DevelopLabels: []string{"bug"},
+	}
+	overrideCfg := config.IssueTrackingConfig{
+		Enabled:       true,
+		Assignees:     []string{"bob"},
+		DefaultAction: string(config.IssueModeIgnore),
+		DevelopLabels: []string{"bug"},
+	}
+
+	// The searcher returns an issue assigned to "bob" for org/override-repo.
+	searcher := &fakeSearcher{
+		perQueryIssues: map[int][]*github.Issue{
+			0: {makeIssue(1, 1, "org/global-repo", []string{"bug"}, []string{"alice"})},
+			1: {makeIssue(2, 2, "org/override-repo", []string{"bug"}, []string{"bob"})},
+		},
+	}
+	restClient := &fakeClient{}
+	pipe := &fakePipeline{}
+	fetcher := issues.NewFetcher(restClient, nil, &fakeDedup{}, pipe)
+	fetcher.SetSearcher(searcher)
+
+	repos := []string{"org/global-repo", "org/override-repo"}
+	eligibleFn := func(repo string) (config.IssueTrackingConfig, bool, bool) {
+		switch repo {
+		case "org/global-repo":
+			return globalCfg, false, true
+		case "org/override-repo":
+			return overrideCfg, false, true
+		default:
+			return config.IssueTrackingConfig{}, false, false
+		}
+	}
+
+	if _, err := fetcher.PrefetchIssues(eligibleFn, "alice", repos); err != nil {
+		t.Fatalf("PrefetchIssues failed: %v", err)
+	}
+
+	// ProcessRepo for org/override-repo must use prefetched results and
+	// classify/filter them with the override config (assignee=bob).
+	optsFor := func(_ *github.Issue) (issues.RunOptions, bool) { return issues.RunOptions{}, true }
+	n, err := fetcher.ProcessRepo(context.Background(), "org/override-repo", overrideCfg, "alice", optsFor)
+	if err != nil {
+		t.Fatalf("ProcessRepo(org/override-repo) failed: %v", err)
+	}
+	// The bob-assigned issue must have been dispatched.
+	if n != 1 {
+		t.Errorf("expected 1 dispatched issue for org/override-repo (bob-assigned), got %d", n)
+	}
+	if restClient.calls != 0 {
+		t.Errorf("FetchIssues should NOT have been called (prefetch was populated); got %d calls", restClient.calls)
+	}
+}
+
+// TestPrefetchIssues_SharedAssigneeSetRunsOneQuery verifies that repos sharing
+// the same effective assignees are batched into a single search query.
+func TestPrefetchIssues_SharedAssigneeSetRunsOneQuery(t *testing.T) {
+	sharedCfg := config.IssueTrackingConfig{
+		Enabled:       true,
+		Assignees:     []string{"alice"},
+		DefaultAction: string(config.IssueModeIgnore),
+		DevelopLabels: []string{"bug"},
+	}
+
+	searcher := &fakeSearcher{
+		issues: []*github.Issue{
+			makeIssue(1, 1, "org/repo-a", []string{"bug"}, []string{"alice"}),
+			makeIssue(2, 2, "org/repo-b", []string{"bug"}, []string{"alice"}),
+		},
+	}
+	fetcher := issues.NewFetcher(&fakeClient{}, nil, &fakeDedup{}, nil)
+	fetcher.SetSearcher(searcher)
+
+	repos := []string{"org/repo-a", "org/repo-b"}
+	if _, err := fetcher.PrefetchIssues(simpleEligibleFn(sharedCfg, repos), "alice", repos); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Same assignees → one query covering both repos.
+	if searcher.calls != 1 {
+		t.Errorf("expected 1 SearchIssues call for shared assignee set, got %d", searcher.calls)
+	}
+	// Both repos must appear in the single query.
+	if len(searcher.queries) == 0 {
+		t.Fatal("no queries recorded")
+	}
+	q := searcher.queries[0]
+	if !strings.Contains(q, "repo:org/repo-a") {
+		t.Errorf("expected repo:org/repo-a in query, got %q", q)
+	}
+	if !strings.Contains(q, "repo:org/repo-b") {
+		t.Errorf("expected repo:org/repo-b in query, got %q", q)
+	}
+}
+
+// ── BuildAggregatedSearchQuery tests ─────────────────────────────────────────
+
+// TestBuildAggregatedSearchQuery_NoLabelQualifiers verifies that the aggregated
+// search query contains assignee and repo scope but NO label qualifiers.
+func TestBuildAggregatedSearchQuery_NoLabelQualifiers(t *testing.T) {
+	q := github.BuildAggregatedSearchQuery([]string{"alice"}, []string{"org/repo"})
+	if strings.Contains(q, "label:") {
+		t.Errorf("aggregated query must not contain label qualifiers, got %q", q)
+	}
+	if !strings.Contains(q, "is:issue") {
+		t.Errorf("expected is:issue, got %q", q)
+	}
+	if !strings.Contains(q, "is:open") {
+		t.Errorf("expected is:open, got %q", q)
+	}
+	if !strings.Contains(q, "assignee:alice") {
+		t.Errorf("expected assignee:alice, got %q", q)
+	}
+	if !strings.Contains(q, "repo:org/repo") {
+		t.Errorf("expected repo:org/repo, got %q", q)
+	}
+}
+
+// TestBuildAggregatedSearchQuery_MultipleAssigneesAndRepos verifies that
+// multiple assignees and repos are all included in the query.
+func TestBuildAggregatedSearchQuery_MultipleAssigneesAndRepos(t *testing.T) {
+	q := github.BuildAggregatedSearchQuery(
+		[]string{"alice", "bob"},
+		[]string{"org/repo-a", "org/repo-b"},
+	)
+	for _, expected := range []string{"assignee:alice", "assignee:bob", "repo:org/repo-a", "repo:org/repo-b"} {
+		if !strings.Contains(q, expected) {
+			t.Errorf("expected %q in query, got %q", expected, q)
+		}
+	}
+	if strings.Contains(q, "label:") {
+		t.Errorf("no label qualifiers expected, got %q", q)
 	}
 }
