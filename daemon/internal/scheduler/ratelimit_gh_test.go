@@ -262,7 +262,7 @@ func TestRateLimiter_ResetAlreadyPassedProceedsImmediately(t *testing.T) {
 // values so a future change to defaults is a deliberate, visible diff.
 func TestRateLimiter_TierThresholdValues(t *testing.T) {
 	cases := []struct {
-		tier      Tier
+		tier       Tier
 		wantThresh int
 	}{
 		{TierDiscovery, 100},

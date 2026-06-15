@@ -106,10 +106,10 @@ func TestApplyPollingDefaults_DoesNotOverwriteExplicitValues(t *testing.T) {
 // TestResolvedPollInterval covers all resolution branches.
 func TestResolvedPollInterval(t *testing.T) {
 	tests := []struct {
-		name           string
-		pollingPoll    string
-		githubPoll     string
-		wantDuration   time.Duration
+		name         string
+		pollingPoll  string
+		githubPoll   string
+		wantDuration time.Duration
 	}{
 		{
 			name:         "polling.poll_interval takes precedence over github.poll_interval",

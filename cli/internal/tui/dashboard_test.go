@@ -104,9 +104,9 @@ func TestDashboardDropsStaleReconnectAfterWatchdogReset(t *testing.T) {
 
 func TestClampScrollOffset(t *testing.T) {
 	cases := []struct {
-		name                    string
-		offset, total, visible  int
-		want                    int
+		name                   string
+		offset, total, visible int
+		want                   int
 	}{
 		{"viewport larger than content keeps offset at 0", 0, 5, 20, 0},
 		{"viewport larger than content clamps non-zero offset to 0", 7, 5, 20, 0},
