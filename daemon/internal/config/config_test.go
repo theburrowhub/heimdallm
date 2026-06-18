@@ -277,18 +277,28 @@ func TestValidate_ValidConfig(t *testing.T) {
 }
 
 func TestValidate_InvalidPollInterval(t *testing.T) {
-	cfg := &Config{}
-	cfg.applyDefaults()
-	cfg.AI.Primary = "claude"
-	cfg.GitHub.PollInterval = "2m"
+	for _, interval := range []string{
+		"nonsense", // unparseable
+		"30s",      // below the 1m floor
+		"0",        // zero
+		"-5m",      // negative
+		"48h",      // above the 24h ceiling
+	} {
+		cfg := &Config{}
+		cfg.applyDefaults()
+		cfg.AI.Primary = "claude"
+		cfg.GitHub.PollInterval = interval
 
-	if err := cfg.Validate(); err == nil {
-		t.Error("Validate() = nil, want error for invalid poll_interval")
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("Validate() with interval %q = nil, want error", interval)
+		}
 	}
 }
 
 func TestValidate_AllValidIntervals(t *testing.T) {
-	for _, interval := range []string{"1m", "5m", "30m", "1h"} {
+	// Any time.ParseDuration value within [1m, 24h] is accepted, including
+	// arbitrary values like 3m that the old discrete whitelist rejected.
+	for _, interval := range []string{"1m", "3m", "5m", "10m", "30m", "90m", "1h", "12h", "24h"} {
 		cfg := &Config{AI: AIConfig{Primary: "claude"}, GitHub: GitHubConfig{PollInterval: interval}}
 		if err := cfg.Validate(); err != nil {
 			t.Errorf("Validate() with interval %q = %v", interval, err)

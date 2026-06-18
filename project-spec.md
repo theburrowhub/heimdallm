@@ -23,7 +23,7 @@ Language: Prefer Go (fallback: Python if necessary)
 
 ### 1.1 GitHub Integration
 
--   Poll GitHub API at configurable intervals (1m, 5m, 30m, 1h)
+-   Poll GitHub API at configurable intervals (any duration in [1m, 24h], e.g. 3m, 10m)
 -   Fetch PRs assigned or requesting review
 -   Filter by configured repositories
 

@@ -1436,8 +1436,23 @@ func TestHandlerPutConfigValueValidation(t *testing.T) {
 			wantStatus: http.StatusOK,
 		},
 		{
-			name:       "invalid poll_interval 2m",
-			body:       `{"poll_interval":"2m"}`,
+			name:       "valid arbitrary poll_interval 3m",
+			body:       `{"poll_interval":"3m"}`,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "invalid poll_interval below floor 30s",
+			body:       `{"poll_interval":"30s"}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "invalid poll_interval above ceiling 48h",
+			body:       `{"poll_interval":"48h"}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "invalid poll_interval unparseable",
+			body:       `{"poll_interval":"nonsense"}`,
 			wantStatus: http.StatusBadRequest,
 		},
 		{

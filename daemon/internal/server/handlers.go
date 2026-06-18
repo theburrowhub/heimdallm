@@ -685,14 +685,6 @@ var allowedAgentConfigSubkeys = map[string]struct{}{
 	"execution_timeout":      {},
 }
 
-// validPollIntervals is the allowlist of permitted poll_interval values.
-var validPollIntervals = map[string]struct{}{
-	"1m":  {},
-	"5m":  {},
-	"30m": {},
-	"1h":  {},
-}
-
 // validReviewModes is the allowlist of permitted review_mode values.
 var validReviewModes = map[string]struct{}{
 	"single": {},
@@ -722,8 +714,8 @@ func (srv *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "poll_interval must be a string", http.StatusBadRequest)
 			return
 		}
-		if _, valid := validPollIntervals[s]; !valid {
-			http.Error(w, "poll_interval must be one of: 1m, 5m, 30m, 1h", http.StatusBadRequest)
+		if err := config.ValidatePollInterval(s); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 	}
