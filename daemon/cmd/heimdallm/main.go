@@ -2601,12 +2601,13 @@ func aiRepoKeys(c *config.Config) []string {
 // first-seen timestamps. This helper is pure state mutation so it's easy
 // to test in isolation.
 func upsertDiscoveredRepos(c *config.Config, prs []*gh.PullRequest) []string {
-	known := make(map[string]struct{})
+	inRepositories := make(map[string]struct{}, len(c.GitHub.Repositories))
 	for _, r := range c.GitHub.Repositories {
-		known[r] = struct{}{}
+		inRepositories[r] = struct{}{}
 	}
+	inNonMonitored := make(map[string]struct{}, len(c.GitHub.NonMonitored))
 	for _, r := range c.GitHub.NonMonitored {
-		known[r] = struct{}{}
+		inNonMonitored[r] = struct{}{}
 	}
 
 	// Build an org allowlist from DiscoveryOrgs. When set, repos whose org
@@ -2624,7 +2625,43 @@ func upsertDiscoveredRepos(c *config.Config, prs []*gh.PullRequest) []string {
 		if pr.Repo == "" {
 			continue
 		}
-		if _, alreadyKnown := known[pr.Repo]; alreadyKnown {
+
+		// Repos with an explicit [ai.repos.*] entry are opted in by the
+		// operator. Explicit config is intent and must win over both guards:
+		//   - It bypasses the discovery_orgs allowlist (theburrowhub/heimdallm#527
+		//     item 2): a configured repo outside the discovery orgs must still
+		//     be monitored, so this check precedes the org filter below.
+		//   - It promotes the repo out of NonMonitored when a stale row from a
+		//     prior tick blacklisted it (#527 item 1). Leaving it in
+		//     NonMonitored keeps config state inconsistent for code that reads
+		//     the list directly, even though MergeRepos already exempts it. So
+		//     we strip the repo from NonMonitored and add it to Repositories.
+		// See also theburrowhub/heimdallm#281 for why a configured repo must
+		// never linger in NonMonitored (MergeRepos would otherwise blacklist it
+		// and silently stop issue polling).
+		if _, hasExplicitAIConfig := c.AI.Repos[pr.Repo]; hasExplicitAIConfig {
+			_, alreadyMonitored := inRepositories[pr.Repo]
+			if _, blacklisted := inNonMonitored[pr.Repo]; blacklisted {
+				c.GitHub.NonMonitored = removeRepo(c.GitHub.NonMonitored, pr.Repo)
+				delete(inNonMonitored, pr.Repo)
+			}
+			if !alreadyMonitored {
+				c.GitHub.Repositories = append(c.GitHub.Repositories, pr.Repo)
+				inRepositories[pr.Repo] = struct{}{}
+				// Reported as added so processDiscoveredRepos persists the
+				// updated lists (it early-returns on an empty added set) — this
+				// is what makes the NonMonitored strip durable across reloads.
+				added = append(added, pr.Repo)
+			}
+			continue
+		}
+
+		// Auto-discovered repos (no explicit config): skip when already tracked
+		// in either list.
+		if _, ok := inRepositories[pr.Repo]; ok {
+			continue
+		}
+		if _, ok := inNonMonitored[pr.Repo]; ok {
 			continue
 		}
 		// Filter by allowed orgs when configured.
@@ -2639,21 +2676,27 @@ func upsertDiscoveredRepos(c *config.Config, prs []*gh.PullRequest) []string {
 				continue
 			}
 		}
-		// Repos with an explicit [ai.repos.*] entry are opted in by the operator
-		// and must NEVER land in NonMonitored — even when AutoEnablePRForDiscovery
-		// is off. Otherwise the next MergeRepos call would blacklist them and
-		// silently stop issue polling for a repo the user just configured. See
-		// theburrowhub/heimdallm#281.
-		_, hasExplicitAIConfig := c.AI.Repos[pr.Repo]
-		if enable || hasExplicitAIConfig {
+		if enable {
 			c.GitHub.Repositories = append(c.GitHub.Repositories, pr.Repo)
+			inRepositories[pr.Repo] = struct{}{}
 		} else {
 			c.GitHub.NonMonitored = append(c.GitHub.NonMonitored, pr.Repo)
+			inNonMonitored[pr.Repo] = struct{}{}
 		}
-		known[pr.Repo] = struct{}{}
 		added = append(added, pr.Repo)
 	}
 	return added
+}
+
+// removeRepo returns s without the first occurrence of repo, preserving order.
+// Returns s unchanged when repo is absent.
+func removeRepo(s []string, repo string) []string {
+	for i, r := range s {
+		if r == repo {
+			return append(s[:i:i], s[i+1:]...)
+		}
+	}
+	return s
 }
 
 // upsertDiscoveredFromTopics persists repos received from tier1's topic
