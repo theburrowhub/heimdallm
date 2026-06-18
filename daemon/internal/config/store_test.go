@@ -359,14 +359,14 @@ func TestMergeStoreLayer_InvalidStoreValue_ReturnsError(t *testing.T) {
 
 func TestMergeStoreLayer_FailsValidationOnBadMergedCfg(t *testing.T) {
 	// If the store row passes JSON decoding but the merged Config fails
-	// Validate (e.g. poll_interval not in allowlist), MergeStoreLayer must
-	// surface the error so reload can abort cleanly.
+	// Validate (e.g. poll_interval out of the accepted [1m,24h] range),
+	// MergeStoreLayer must surface the error so reload can abort cleanly.
 	cfg := &Config{}
 	cfg.applyDefaults()
 	cfg.AI.Primary = "claude"
 
 	store := &fakeStoreLister{rows: map[string]string{
-		"poll_interval": "42m", // valid as string, invalid per validIntervals
+		"poll_interval": "48h", // parseable string, but above the 24h ceiling
 	}}
 
 	if err := cfg.MergeStoreLayer(store); err == nil {

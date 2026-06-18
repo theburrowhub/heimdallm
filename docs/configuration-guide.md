@@ -134,7 +134,7 @@ non_monitored = ["myorg/archived-repo", "myorg/internal-mirror"]
 ### Poll interval
 
 ```bash
-HEIMDALLM_POLL_INTERVAL=5m   # valid: 1m, 5m, 30m, 1h
+HEIMDALLM_POLL_INTERVAL=5m   # any time.ParseDuration value in [1m, 24h], e.g. 3m, 10m
 ```
 
 ```toml
@@ -1183,7 +1183,7 @@ bind_addr = "0.0.0.0"  # env: HEIMDALLM_BIND_ADDR
 # ── GitHub ───────────────────────────────────────────────────────────────────
 
 [github]
-# Poll interval for PR/issue checks. Valid: 1m, 5m, 30m, 1h.
+# Poll interval for PR/issue checks. Any time.ParseDuration value in [1m, 24h], e.g. 3m, 10m.
 poll_interval = "5m"   # env: HEIMDALLM_POLL_INTERVAL
 
 # Static list of repos to monitor.
