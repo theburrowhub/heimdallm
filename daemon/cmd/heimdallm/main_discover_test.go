@@ -247,6 +247,52 @@ func TestUpsertDiscoveredRepos_PromotesExplicitConfigOutOfNonMonitored(t *testin
 	}
 }
 
+// Edge case (review of #527): a repo that is SIMULTANEOUSLY in Repositories and
+// NonMonitored — the inconsistent prior-tick state this fix targets — must still
+// have its NonMonitored strip reported in `added`, even though it is already
+// monitored. Otherwise, if it is the only change in the tick, the empty `added`
+// set makes processDiscoveredRepos early-return and the strip is never persisted.
+func TestUpsertDiscoveredRepos_PromotionPersistsWhenAlreadyMonitored(t *testing.T) {
+	f := false
+	cfg := &config.Config{}
+	cfg.GitHub.AutoEnablePROnDiscovery = &f
+	cfg.GitHub.Repositories = []string{"a/wired-up"}
+	cfg.GitHub.NonMonitored = []string{"a/wired-up"} // inconsistent: present in both
+	cfg.AI.Repos = map[string]config.RepoAI{
+		"a/wired-up": {},
+	}
+
+	prs := []*gh.PullRequest{
+		{RepositoryURL: "https://api.github.com/repos/a/wired-up", Number: 1},
+	}
+	for _, pr := range prs {
+		pr.ResolveRepo()
+	}
+
+	added := upsertDiscoveredRepos(cfg, prs)
+
+	// The strip MUST be reported so the updated lists get persisted.
+	if len(added) != 1 || added[0] != "a/wired-up" {
+		t.Fatalf("strip-only promotion must be reported in added (else it is not persisted), got %v", added)
+	}
+	// Stripped from NonMonitored.
+	for _, r := range cfg.GitHub.NonMonitored {
+		if r == "a/wired-up" {
+			t.Fatalf("a/wired-up must be stripped from NonMonitored, got %v", cfg.GitHub.NonMonitored)
+		}
+	}
+	// Still present in Repositories exactly once (no duplicate append).
+	count := 0
+	for _, r := range cfg.GitHub.Repositories {
+		if r == "a/wired-up" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("a/wired-up must appear exactly once in Repositories, got %v", cfg.GitHub.Repositories)
+	}
+}
+
 // theburrowhub/heimdallm#527 item 2: explicit [ai.repos.*] config is operator
 // intent and must bypass the discovery_orgs allowlist. A configured repo whose
 // org is outside discovery_orgs must still land in Repositories via upsert,

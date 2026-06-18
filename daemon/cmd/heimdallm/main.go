@@ -2640,17 +2640,28 @@ func upsertDiscoveredRepos(c *config.Config, prs []*gh.PullRequest) []string {
 		// never linger in NonMonitored (MergeRepos would otherwise blacklist it
 		// and silently stop issue polling).
 		if _, hasExplicitAIConfig := c.AI.Repos[pr.Repo]; hasExplicitAIConfig {
+			// Within-tick duplicate PRs for the same repo are absorbed: after the
+			// first one promotes the repo, inRepositories/inNonMonitored reflect
+			// the new state, so a second PR for the same repo is a no-op here.
 			_, alreadyMonitored := inRepositories[pr.Repo]
-			if _, blacklisted := inNonMonitored[pr.Repo]; blacklisted {
+			_, blacklisted := inNonMonitored[pr.Repo]
+			if blacklisted {
 				c.GitHub.NonMonitored = removeRepo(c.GitHub.NonMonitored, pr.Repo)
 				delete(inNonMonitored, pr.Repo)
 			}
 			if !alreadyMonitored {
 				c.GitHub.Repositories = append(c.GitHub.Repositories, pr.Repo)
 				inRepositories[pr.Repo] = struct{}{}
-				// Reported as added so processDiscoveredRepos persists the
-				// updated lists (it early-returns on an empty added set) — this
-				// is what makes the NonMonitored strip durable across reloads.
+			}
+			// Report the repo as added whenever EITHER list was mutated — not
+			// only on the add-to-Repositories path. processDiscoveredRepos
+			// early-returns on an empty added set, so a strip-only change (repo
+			// already in Repositories but also stale in NonMonitored) must still
+			// land here, or the NonMonitored strip would not be persisted and the
+			// inconsistency would survive across reloads.
+			if blacklisted || !alreadyMonitored {
+				slog.Info("upsertDiscoveredRepos: promoted explicitly-configured repo",
+					"repo", pr.Repo, "added_to_repositories", !alreadyMonitored, "stripped_from_non_monitored", blacklisted)
 				added = append(added, pr.Repo)
 			}
 			continue
