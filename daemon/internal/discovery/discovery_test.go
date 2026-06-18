@@ -149,6 +149,28 @@ func TestMergeRepos_ConfiguredOverridesNonMonitored(t *testing.T) {
 	}
 }
 
+// theburrowhub/heimdallm#527 item 4: a repo present in static, configured AND
+// nonMonitored simultaneously must survive — explicit [ai.repos.*] config
+// (exempt) wins over the NonMonitored blacklist across all three sources, and
+// the repo is deduplicated to a single entry.
+func TestMergeRepos_ConfiguredExemptWinsAcrossAllSources(t *testing.T) {
+	got := discovery.MergeRepos(
+		[]string{"org/triple", "org/static-only"},
+		[]string{"org/triple"},
+		[]string{"org/triple"},
+		[]string{"org/triple"},
+	)
+	want := []string{"org/triple", "org/static-only"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v (exempt config must win over non_monitored, deduped)", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("got[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 // A repo listed in both static and configured is deduplicated; static order wins.
 func TestMergeRepos_ConfiguredDeduplicatesWithStatic(t *testing.T) {
 	got := discovery.MergeRepos(
