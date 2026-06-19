@@ -11,6 +11,65 @@ import 'config_providers.dart';
 
 const _aiOptions = ['claude', 'gemini', 'codex'];
 
+// Poll-interval bounds, mirrored from the daemon's config.ValidatePollInterval
+// (daemon/internal/config/config.go: minPollInterval=1m, maxPollInterval=24h).
+// The daemon is authoritative — these power a client-side UX guard so the
+// operator gets immediate feedback instead of a round-trip 400.
+const _minPollInterval = Duration(minutes: 1);
+const _maxPollInterval = Duration(hours: 24);
+const _pollIntervalSuggestions = ['1m', '5m', '30m', '1h'];
+
+const _durationUnitMicros = <String, double>{
+  'ns': 0.001,
+  'us': 1,
+  'µs': 1,
+  'ms': 1000,
+  's': 1000 * 1000.0,
+  'm': 60 * 1000 * 1000.0,
+  'h': 60 * 60 * 1000 * 1000.0,
+};
+
+// Order matters: multi-char units (ns, ms, µs/us) must precede the bare 's'
+// so the regex consumes "ms" rather than matching "m" then leaving "s".
+final _goDurationToken = RegExp(r'([0-9]*\.?[0-9]+)(ns|µs|us|ms|s|m|h)');
+
+/// Parses the common subset of Go's `time.ParseDuration` that operators use for
+/// `poll_interval` (e.g. `5m`, `90m`, `1h30m`, `1.5h`, `300s`) into a
+/// [Duration], or returns null if the string is not a clean sequence of
+/// number+unit tokens. This is a UX guard, not a full reimplementation — the
+/// daemon still validates authoritatively, so anything missed here surfaces as
+/// a backend error on save.
+Duration? _parseGoDuration(String raw) {
+  final s = raw.trim();
+  if (s.isEmpty) return null;
+  var consumed = 0;
+  var micros = 0.0;
+  for (final m in _goDurationToken.allMatches(s)) {
+    if (m.start != consumed) return null; // junk between tokens
+    consumed = m.end;
+    final value = double.tryParse(m.group(1)!);
+    final mult = _durationUnitMicros[m.group(2)];
+    if (value == null || mult == null) return null;
+    micros += value * mult;
+  }
+  if (consumed != s.length) return null; // leading/trailing junk
+  return Duration(microseconds: micros.round());
+}
+
+/// Form validator for `poll_interval`: parseable as a duration within
+/// [1m, 24h], mirroring the daemon. Returns an error string for the field, or
+/// null when acceptable.
+String? validatePollInterval(String? raw) {
+  final s = (raw ?? '').trim();
+  if (s.isEmpty) return 'Required (e.g. 5m, 90m, 1h30m)';
+  final d = _parseGoDuration(s);
+  if (d == null) return 'Invalid duration (e.g. 5m, 90m, 1h30m)';
+  if (d < _minPollInterval || d > _maxPollInterval) {
+    return 'Must be between 1m and 24h';
+  }
+  return null;
+}
+
 class ConfigScreen extends ConsumerStatefulWidget {
   const ConfigScreen({super.key});
 
@@ -20,6 +79,7 @@ class ConfigScreen extends ConsumerStatefulWidget {
 
 class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   final _tokenController = TextEditingController();
+  final _pollController = TextEditingController();
   bool _obscureToken = true;
   bool _tokenFromGh = false; // true = auto-detected from gh CLI
 
@@ -45,6 +105,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   @override
   void dispose() {
     _tokenController.dispose();
+    _pollController.dispose();
     super.dispose();
   }
 
@@ -74,6 +135,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     if (_initialized) return;
     _initialized = true;
     _pollInterval = config.pollInterval;
+    _pollController.text = config.pollInterval;
     _retentionDays = config.retentionDays;
     _repoConfigs = Map.from(config.repoConfigs);
     _issueTracking = config.issueTracking;
@@ -368,21 +430,33 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         _sectionHeader('Polling'),
-        DropdownButtonFormField<String>(
-          // ignore: deprecated_member_use
-          value: _pollInterval,
+        TextFormField(
+          controller: _pollController,
           decoration: const InputDecoration(
             labelText: 'Poll interval',
-            helperText: 'How often to check GitHub for new review requests',
+            helperText:
+                'How often to check GitHub for new review requests '
+                '(any duration from 1m to 24h, e.g. 5m, 90m, 1h30m)',
             border: OutlineInputBorder(),
           ),
-          items: [
-            '1m',
-            '5m',
-            '30m',
-            '1h',
-          ].map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(),
-          onChanged: (v) => setState(() => _pollInterval = v!),
+          autovalidateMode: AutovalidateMode.onUserInteraction,
+          validator: validatePollInterval,
+          onChanged: (v) => setState(() => _pollInterval = v.trim()),
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          children: _pollIntervalSuggestions
+              .map(
+                (v) => ActionChip(
+                  label: Text(v),
+                  onPressed: () => setState(() {
+                    _pollInterval = v;
+                    _pollController.text = v;
+                  }),
+                ),
+              )
+              .toList(),
         ),
       ],
     );

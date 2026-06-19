@@ -55,6 +55,35 @@ void main() {
     // Primary agent ('claude') moved to Agents tab — no longer in ConfigScreen
   });
 
+  group('validatePollInterval', () {
+    test('accepts arbitrary durations within [1m, 24h]', () {
+      for (final v in ['1m', '5m', '3m', '90m', '1h', '1h30m', '1.5h', '24h']) {
+        expect(validatePollInterval(v), isNull, reason: v);
+      }
+    });
+
+    test('rejects values below the 1m floor', () {
+      for (final v in ['59s', '30s', '0s', '1ms']) {
+        expect(validatePollInterval(v), 'Must be between 1m and 24h', reason: v);
+      }
+    });
+
+    test('rejects values above the 24h ceiling', () {
+      for (final v in ['25h', '1441m', '2d']) {
+        expect(validatePollInterval(v), isNotNull, reason: v);
+      }
+    });
+
+    test('rejects empty and unparseable input', () {
+      expect(validatePollInterval(''), isNotNull);
+      expect(validatePollInterval('  '), isNotNull);
+      expect(validatePollInterval('abc'), isNotNull);
+      expect(validatePollInterval('5'), isNotNull);
+      expect(validatePollInterval('5 m'), isNotNull);
+      expect(validatePollInterval('5minutes'), isNotNull);
+    });
+  });
+
   test('RepoConfig parses first_seen_at when provided', () {
     final json = {
       'repositories': ['a/b'],
