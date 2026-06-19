@@ -324,6 +324,18 @@ func TestReconcileSeverity_NeverLowers(t *testing.T) {
 	}
 }
 
+func TestReconcileSeverity_WhitespaceOnlyTopLevelFailsSafeToHigh(t *testing.T) {
+	// A whitespace-only severity is non-empty but trims to "" — it is malformed
+	// model output, NOT the documented empty/no-issues default (which parseResult
+	// coerces to "low" upstream before this runs). So it fails safe to high like
+	// any other non-canonical value.
+	for _, sev := range []string{"   ", "\t", "\n "} {
+		if got := ReconcileSeverity(makeResult(sev, nil)); got != "high" {
+			t.Errorf("ReconcileSeverity(%q) = %q, want high (fail-safe)", sev, got)
+		}
+	}
+}
+
 func TestReconcileSeverity_NonCanonicalTopLevelFailsSafeToHigh(t *testing.T) {
 	// A model that escalates with an out-of-vocabulary label (or emits garbage)
 	// must NOT be silently downgraded to low and APPROVEd. Top-level
