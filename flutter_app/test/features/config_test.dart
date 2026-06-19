@@ -55,6 +55,59 @@ void main() {
     // Primary agent ('claude') moved to Agents tab — no longer in ConfigScreen
   });
 
+  testWidgets('Save is gated on a valid poll interval', (tester) async {
+    const config = AppConfig(
+      pollInterval: '5m',
+      aiPrimary: 'claude',
+      repoConfigs: {'org/repo': RepoConfig(prEnabled: true)},
+    );
+
+    final mockApi = MockApiClient();
+    when(() => mockApi.fetchConfig()).thenAnswer((_) async => config.toJson());
+    when(() => mockApi.updateConfig(any())).thenAnswer((_) async {});
+    when(() => mockApi.checkHealth()).thenAnswer((_) async => false);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          apiClientProvider.overrideWithValue(mockApi),
+          configNotifierProvider.overrideWith(ConfigNotifier.new),
+          platformServicesProvider.overrideWithValue(FakePlatformServices()),
+        ],
+        child: MaterialApp.router(
+          routerConfig: GoRouter(
+            routes: [
+              GoRoute(path: '/', builder: (_, _) => const ConfigScreen()),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final pollField = find.ancestor(
+      of: find.text('Poll interval'),
+      matching: find.byType(TextField),
+    );
+    final saveButton = find.widgetWithText(
+      FilledButton,
+      'Save and start Heimdallm',
+    );
+
+    // Valid default → Save is enabled.
+    expect(tester.widget<FilledButton>(saveButton).onPressed, isNotNull);
+
+    // Out-of-range value → Save is disabled (no round-trip to a daemon 400).
+    await tester.enterText(pollField, '30s');
+    await tester.pumpAndSettle();
+    expect(tester.widget<FilledButton>(saveButton).onPressed, isNull);
+
+    // Back to a valid value → Save is re-enabled.
+    await tester.enterText(pollField, '90m');
+    await tester.pumpAndSettle();
+    expect(tester.widget<FilledButton>(saveButton).onPressed, isNotNull);
+  });
+
   group('validatePollInterval', () {
     test('accepts arbitrary durations within [1m, 24h]', () {
       for (final v in ['1m', '5m', '3m', '90m', '1h', '1h30m', '1.5h', '24h']) {
@@ -69,18 +122,25 @@ void main() {
     });
 
     test('rejects values above the 24h ceiling', () {
-      for (final v in ['25h', '1441m', '2d']) {
-        expect(validatePollInterval(v), isNotNull, reason: v);
+      // Parseable but out of range → the range message, not a parse error.
+      for (final v in ['25h', '1441m']) {
+        expect(validatePollInterval(v), 'Must be between 1m and 24h', reason: v);
       }
     });
 
+    test('exercises the accumulation path near the upper bound', () {
+      // Compound durations must sum correctly: 23h59m is under the ceiling,
+      // 24h1m is just over it. Guards against regressions in the micros sum.
+      expect(validatePollInterval('23h59m'), isNull);
+      expect(validatePollInterval('24h1m'), 'Must be between 1m and 24h');
+    });
+
     test('rejects empty and unparseable input', () {
-      expect(validatePollInterval(''), isNotNull);
-      expect(validatePollInterval('  '), isNotNull);
-      expect(validatePollInterval('abc'), isNotNull);
-      expect(validatePollInterval('5'), isNotNull);
-      expect(validatePollInterval('5 m'), isNotNull);
-      expect(validatePollInterval('5minutes'), isNotNull);
+      // '2d' is rejected here (Go has no 'd' unit → unparseable), not as an
+      // out-of-range value.
+      for (final v in ['', '  ', 'abc', '5', '5 m', '5minutes', '2d']) {
+        expect(validatePollInterval(v), isNotNull, reason: '"$v"');
+      }
     });
   });
 

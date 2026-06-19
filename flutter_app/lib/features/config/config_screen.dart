@@ -19,6 +19,12 @@ const _minPollInterval = Duration(minutes: 1);
 const _maxPollInterval = Duration(hours: 24);
 const _pollIntervalSuggestions = ['1m', '5m', '30m', '1h'];
 
+// Intentionally covers only the units that make sense for a [1m, 24h] poll
+// interval. Sub-second units are accepted (so the parser stays a faithful
+// subset of Go) but always fall below the 1m floor. Go's day-like 'd' is not a
+// real unit and is correctly rejected; the Greek-mu micro variant ('μs',
+// U+03BC) is not special-cased — irrelevant at this scale, and the daemon
+// remains authoritative either way.
 const _durationUnitMicros = <String, double>{
   'ns': 0.001,
   'us': 1,
@@ -50,6 +56,8 @@ Duration? _parseGoDuration(String raw) {
     final value = double.tryParse(m.group(1)!);
     final mult = _durationUnitMicros[m.group(2)];
     if (value == null || mult == null) return null;
+    // Like Go's time.ParseDuration, repeated units accumulate
+    // (e.g. "1h30m" → 90m, and "1h2h" → 3h).
     micros += value * mult;
   }
   if (consumed != s.length) return null; // leading/trailing junk
@@ -80,6 +88,7 @@ class ConfigScreen extends ConsumerStatefulWidget {
 class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   final _tokenController = TextEditingController();
   final _pollController = TextEditingController();
+  final _pollFieldKey = GlobalKey<FormFieldState<String>>();
   bool _obscureToken = true;
   bool _tokenFromGh = false; // true = auto-detected from gh CLI
 
@@ -431,6 +440,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
       children: [
         _sectionHeader('Polling'),
         TextFormField(
+          key: _pollFieldKey,
           controller: _pollController,
           decoration: const InputDecoration(
             labelText: 'Poll interval',
@@ -447,19 +457,27 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
         Wrap(
           spacing: 8,
           children: _pollIntervalSuggestions
-              .map(
-                (v) => ActionChip(
-                  label: Text(v),
-                  onPressed: () => setState(() {
-                    _pollInterval = v;
-                    _pollController.text = v;
-                  }),
-                ),
-              )
+              .map((v) => ActionChip(label: Text(v), onPressed: () => _pickPollInterval(v)))
               .toList(),
         ),
       ],
     );
+  }
+
+  /// Applies a quick-pick suggestion. Sets the controller value (cursor at end,
+  /// since a bare `.text =` would reset it to 0) and re-runs the field
+  /// validator — a programmatic change does not count as user interaction under
+  /// [AutovalidateMode.onUserInteraction], so without this an error from prior
+  /// typing would linger even though the chosen value is valid.
+  void _pickPollInterval(String v) {
+    setState(() {
+      _pollInterval = v;
+      _pollController.value = TextEditingValue(
+        text: v,
+        selection: TextSelection.collapsed(offset: v.length),
+      );
+    });
+    _pollFieldKey.currentState?.validate();
   }
 
   // ── Retention ────────────────────────────────────────────────────────────
@@ -838,29 +856,39 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     // always reads the current state at the moment the user taps Save, avoiding
     // stale closure captures when setState and Save happen in the same frame.
 
+    // Gate Save on a valid poll_interval so the client-side check actually
+    // prevents the round-trip 400 (the inline validator alone only displays the
+    // error). onChanged/_pickPollInterval call setState, so this re-evaluates as
+    // the user types or picks a chip. The daemon stays authoritative.
+    final pollInvalid = validatePollInterval(_pollInterval) != null;
+
     if (daemonRunning) {
       return SizedBox(
         width: double.infinity,
         child: ElevatedButton(
-          onPressed: () async {
-            final updated = _buildConfig(base);
-            try {
-              final token = _tokenController.text.trim();
-              if (token.isNotEmpty && !_tokenFromGh) {
-                await ref
-                    .read(platformServicesProvider)
-                    .storeGitHubToken(token);
-                // Invalidate the cached token so the ApiClient re-reads it on the next request.
-                ref.read(apiClientProvider).clearTokenCache();
-              }
-              await ref.read(configNotifierProvider.notifier).save(updated);
-              if (context.mounted) showToast(context, 'Settings saved');
-            } catch (e) {
-              if (context.mounted) {
-                showToast(context, 'Error: $e', isError: true);
-              }
-            }
-          },
+          onPressed: pollInvalid
+              ? null
+              : () async {
+                  final updated = _buildConfig(base);
+                  try {
+                    final token = _tokenController.text.trim();
+                    if (token.isNotEmpty && !_tokenFromGh) {
+                      await ref
+                          .read(platformServicesProvider)
+                          .storeGitHubToken(token);
+                      // Invalidate the cached token so the ApiClient re-reads it on the next request.
+                      ref.read(apiClientProvider).clearTokenCache();
+                    }
+                    await ref
+                        .read(configNotifierProvider.notifier)
+                        .save(updated);
+                    if (context.mounted) showToast(context, 'Settings saved');
+                  } catch (e) {
+                    if (context.mounted) {
+                      showToast(context, 'Error: $e', isError: true);
+                    }
+                  }
+                },
           child: const Text('Save'),
         ),
       );
@@ -880,7 +908,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
               )
             : const Icon(Icons.rocket_launch),
         label: Text(isLoading ? 'Starting…' : 'Save and start Heimdallm'),
-        onPressed: isLoading
+        onPressed: (isLoading || pollInvalid)
             ? null
             : () async {
                 final updated = _buildConfig(base);
