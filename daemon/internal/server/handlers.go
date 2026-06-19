@@ -788,12 +788,14 @@ func (srv *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var failedKeys []string
+	var attempted int
 	for k, v := range body {
 		// Read-only keys were accepted above to avoid 400s on UI saves that
 		// round-trip the GET payload, but they must not land in the store.
 		if _, readOnly := readOnlyConfigKeys[k]; readOnly {
 			continue
 		}
+		attempted++
 		var val string
 		switch typed := v.(type) {
 		case string:
@@ -820,6 +822,7 @@ func (srv *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	// not transactional: earlier keys in the loop may already be persisted.
 	if len(failedKeys) > 0 {
 		sort.Strings(failedKeys) // deterministic: Go map iteration order is random
+		slog.Warn("config: partial persist failure", "failed", len(failedKeys), "attempted", attempted)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"error":       "failed to persist one or more config keys",
 			"failed_keys": failedKeys,
