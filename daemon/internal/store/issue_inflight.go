@@ -75,3 +75,19 @@ func (s *Store) ClearStaleIssueTriageInFlight(maxAge time.Duration) (int, error)
 	}
 	return int(n), nil
 }
+
+// ClearAllIssueTriageInFlight is the issue-triage mirror of
+// ClearAllInFlight (#544). Removes every row from issue_triage_in_flight
+// unconditionally — used at single-instance startup where any surviving
+// claim is, by definition, orphaned.
+func (s *Store) ClearAllIssueTriageInFlight() (int, error) {
+	res, err := s.db.Exec("DELETE FROM issue_triage_in_flight")
+	if err != nil {
+		return 0, fmt.Errorf("store: clear all issue triage inflight: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("store: clear all issue triage inflight rowsaffected: %w", err)
+	}
+	return int(n), nil
+}

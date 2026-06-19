@@ -77,3 +77,23 @@ func (s *Store) ClearStaleInFlight(maxAge time.Duration) (int, error) {
 	}
 	return int(n), nil
 }
+
+// ClearAllInFlight removes every row from reviews_in_flight unconditionally.
+// Used at single-instance startup (#544): any claim that survives a daemon
+// restart is, by definition, orphaned — no goroutine from the previous
+// process can still be holding the work. Distinct from ClearStaleInFlight
+// because the latter compares against a sqliteTimeFormat cutoff with
+// second precision, and would silently skip rows inserted in the same
+// second as the call (which is exactly the dead zone #544 reports).
+// Returns the number of rows cleared.
+func (s *Store) ClearAllInFlight() (int, error) {
+	res, err := s.db.Exec("DELETE FROM reviews_in_flight")
+	if err != nil {
+		return 0, fmt.Errorf("store: clear all inflight: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("store: clear all inflight rowsaffected: %w", err)
+	}
+	return int(n), nil
+}
