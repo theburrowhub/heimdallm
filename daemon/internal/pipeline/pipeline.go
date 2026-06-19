@@ -743,9 +743,18 @@ func (p *Pipeline) PublishPending() {
 			slog.Info("pipeline: skipping pending review for PR with no repo", "review_id", rev.ID)
 			continue
 		}
-		// Rebuild a minimal result from stored JSON for the body
+		// Rebuild a minimal result from stored JSON for the body. The daemon
+		// always writes well-formed JSON here, so a decode failure means the
+		// stored row is corrupt and the issue list is unrecoverable. Don't
+		// publish a misleading review missing its findings, and don't retry a
+		// deterministic failure forever — orphan it like the no-repo case above.
 		var issues []executor.Issue
-		json.Unmarshal([]byte(rev.Issues), &issues)
+		if err := json.Unmarshal([]byte(rev.Issues), &issues); err != nil {
+			slog.Warn("pipeline: skipping pending review with corrupt issues JSON",
+				"review_id", rev.ID, "pr", pr.Number, "repo", pr.Repo, "err", err)
+			_ = p.store.MarkReviewPublished(rev.ID, -1, "", time.Now().UTC())
+			continue
+		}
 		result := &executor.ReviewResult{
 			Summary:  rev.Summary,
 			Issues:   issues,
