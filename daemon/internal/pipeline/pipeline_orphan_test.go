@@ -211,3 +211,65 @@ func (f *fakeGHTransientSubmit) FetchComments(_ string, _ int) ([]gh.Comment, er
 	return nil, nil
 }
 func (f *fakeGHTransientSubmit) GetPRHeadSHA(_ string, _ int) (string, error) { return "", nil }
+
+// TestPublishPending_CorruptIssuesJSONOrphansWithoutPublishing covers #549: a
+// stored review whose issues JSON is corrupt must NOT be posted to GitHub with
+// its findings silently dropped, and must be orphaned so the deterministic
+// decode failure doesn't loop the retry forever.
+func TestPublishPending_CorruptIssuesJSONOrphansWithoutPublishing(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	prID, err := s.UpsertPR(&store.PR{
+		GithubID: 300, Repo: "org/repo", Number: 9, Title: "t", Author: "alice",
+		State: "open", UpdatedAt: time.Now(), FetchedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("upsert pr: %v", err)
+	}
+	// Seed an unpublished review whose Issues column is corrupt JSON.
+	prevReviewID, err := s.InsertReview(&store.Review{
+		PRID: prID, CLIUsed: "claude", Issues: "{not valid json", Suggestions: "[]",
+		Severity: "high", CreatedAt: time.Now(), HeadSHA: "abc", GitHubReviewID: 0,
+	})
+	if err != nil {
+		t.Fatalf("insert review: %v", err)
+	}
+
+	fgh := &fakeGHTransientSubmit{} // would be called if the bug were present; we assert it isn't
+	p := pipeline.New(s, fgh, &fakeExecOrphan{}, &fakeNotify{})
+
+	p.PublishPending()
+
+	// Must NOT post a misleading (issue-less) review to GitHub.
+	if fgh.submitCalls != 0 {
+		t.Errorf("SubmitReview called on corrupt-JSON review: calls=%d, want 0", fgh.submitCalls)
+	}
+	// Must be orphaned so it doesn't retry forever.
+	unpub, err := s.ListUnpublishedReviews()
+	if err != nil {
+		t.Fatalf("list unpublished: %v", err)
+	}
+	if len(unpub) != 0 {
+		t.Errorf("expected 0 unpublished reviews after corrupt-JSON orphaning, got %d", len(unpub))
+	}
+
+	// Lock in the orphan-sentinel contract: the row is stamped with the
+	// orphaned-review id (-1), not a real GitHub review id.
+	got, err := s.GetReview(prevReviewID)
+	if err != nil {
+		t.Fatalf("get review: %v", err)
+	}
+	if got.GitHubReviewID != -1 {
+		t.Errorf("orphaned review GitHubReviewID = %d, want -1 (sentinel)", got.GitHubReviewID)
+	}
+
+	// Subsequent ticks must remain a no-op.
+	p.PublishPending()
+	if fgh.submitCalls != 0 {
+		t.Errorf("PublishPending re-attempted on orphaned corrupt row: calls=%d, want 0", fgh.submitCalls)
+	}
+}
