@@ -10,6 +10,21 @@
 * **issues:** `auto_promote_triage` defaults on only when `refinement_labels` is configured. Repos without a refinement target keep their previous review-only behavior; set `auto_promote_triage = false` explicitly to keep refinement manual even when refinement labels exist.
 * **pipeline (PR reviews):** a push (new HEAD SHA) on a previously-reviewed PR no longer triggers an automatic re-review on its own. Heimdallm now requires an explicit `review_requested` event for the bot — i.e. someone (or some automation) pressing "Re-request review" — newer than the previous review's `CreatedAt`. The SHA-unchanged dedup (#322 Bug 5) and this SHA-changed gate now share the same predicate, so the contract is "review iff explicitly re-requested" regardless of whether the commit changed. Workflows that relied on push-triggered re-reviews — typically repos with "Dismiss stale reviews on push" or CODEOWNERS auto-request workflows that auto-re-added the bot to `requested_reviewers` — must now explicitly re-request the review (manually in the UI, or via a GitHub Action calling `gh pr edit --add-reviewer`). Skipped pushes surface as a `review_skipped` SSE with reason `no_rereview_request` (distinct from `sha_unchanged`) so dashboards can tell the two cases apart. Closes #509.
 
+## [0.7.1](https://github.com/theburrowhub/heimdallm/compare/v0.7.0...v0.7.1) (2026-06-19)
+
+
+### Features
+
+* **config:** accept arbitrary poll_interval in [1m, 24h], drop fixed whitelist ([#539](https://github.com/theburrowhub/heimdallm/issues/539)) ([02b1c1d](https://github.com/theburrowhub/heimdallm/commit/02b1c1dcb58ebc5d7515ec2416094181130c542b)), closes [#538](https://github.com/theburrowhub/heimdallm/issues/538)
+* **flutter:** free-form poll_interval input in Settings (closes [#543](https://github.com/theburrowhub/heimdallm/issues/543)) ([#545](https://github.com/theburrowhub/heimdallm/issues/545)) ([12b9751](https://github.com/theburrowhub/heimdallm/commit/12b97513e3ba158aad04861e25bc875dd7c9872e))
+
+
+### Bug Fixes
+
+* **daemon:** periodic in-flight claim sweep + unconditional startup wipe (closes [#544](https://github.com/theburrowhub/heimdallm/issues/544)) ([#555](https://github.com/theburrowhub/heimdallm/issues/555)) ([b249099](https://github.com/theburrowhub/heimdallm/commit/b24909910a25ec2f6b191935f9cc264683bfeb02))
+* **discovery:** keep config consistent when promoting explicit [ai.repos.*] repos (closes [#527](https://github.com/theburrowhub/heimdallm/issues/527)) ([#541](https://github.com/theburrowhub/heimdallm/issues/541)) ([07709a4](https://github.com/theburrowhub/heimdallm/commit/07709a4233408d990abfd47d0b196be79fa96402))
+* **pipeline:** fail-safe non-canonical agent severity to high (closes [#547](https://github.com/theburrowhub/heimdallm/issues/547)) ([#556](https://github.com/theburrowhub/heimdallm/issues/556)) ([c5e32cc](https://github.com/theburrowhub/heimdallm/commit/c5e32cc7e06e3ec23e221af99990cf6e6e9c9401))
+
 ## [0.7.0](https://github.com/theburrowhub/heimdallm/compare/v0.6.24...v0.7.0) (2026-06-12)
 
 
