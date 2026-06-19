@@ -231,10 +231,11 @@ func TestPublishPending_CorruptIssuesJSONOrphansWithoutPublishing(t *testing.T) 
 		t.Fatalf("upsert pr: %v", err)
 	}
 	// Seed an unpublished review whose Issues column is corrupt JSON.
-	if _, err := s.InsertReview(&store.Review{
+	prevReviewID, err := s.InsertReview(&store.Review{
 		PRID: prID, CLIUsed: "claude", Issues: "{not valid json", Suggestions: "[]",
 		Severity: "high", CreatedAt: time.Now(), HeadSHA: "abc", GitHubReviewID: 0,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("insert review: %v", err)
 	}
 
@@ -254,6 +255,16 @@ func TestPublishPending_CorruptIssuesJSONOrphansWithoutPublishing(t *testing.T) 
 	}
 	if len(unpub) != 0 {
 		t.Errorf("expected 0 unpublished reviews after corrupt-JSON orphaning, got %d", len(unpub))
+	}
+
+	// Lock in the orphan-sentinel contract: the row is stamped with the
+	// orphaned-review id (-1), not a real GitHub review id.
+	got, err := s.GetReview(prevReviewID)
+	if err != nil {
+		t.Fatalf("get review: %v", err)
+	}
+	if got.GitHubReviewID != -1 {
+		t.Errorf("orphaned review GitHubReviewID = %d, want -1 (sentinel)", got.GitHubReviewID)
 	}
 
 	// Subsequent ticks must remain a no-op.

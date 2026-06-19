@@ -696,6 +696,12 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	return rev, nil
 }
 
+// orphanedReviewID is the sentinel github_review_id stored for a review that
+// can never be published (no repo, corrupt stored JSON, or a permanent submit
+// failure). It marks the row as resolved so PublishPending stops retrying it,
+// while being distinguishable from a real GitHub review id.
+const orphanedReviewID = -1
+
 // markOrphanIfPermanent inspects the error returned by SubmitReview and,
 // when it is a *github.PermanentSubmitError, marks the local review row
 // as orphaned via the (-1, "") sentinel that PublishPending also uses
@@ -714,7 +720,7 @@ func (p *Pipeline) markOrphanIfPermanent(reviewID int64, submitErr error, source
 	if !errors.As(submitErr, &permErr) {
 		return false
 	}
-	if mErr := p.store.MarkReviewPublished(reviewID, -1, "", time.Now().UTC()); mErr != nil {
+	if mErr := p.store.MarkReviewPublished(reviewID, orphanedReviewID, "", time.Now().UTC()); mErr != nil {
 		slog.Warn("pipeline: failed to mark orphaned review, will retry next tick",
 			"review_id", reviewID, "source", source, "reason", permErr.Reason, "err", mErr)
 		return true
@@ -737,9 +743,9 @@ func (p *Pipeline) PublishPending() {
 			continue
 		}
 		// Skip reviews for PRs with no repo — orphaned records that will never publish.
-		// Mark them as permanently published (fake ID -1, empty state) to stop retry noise.
+		// Mark them as permanently published (orphanedReviewID, empty state) to stop retry noise.
 		if pr.Repo == "" {
-			_ = p.store.MarkReviewPublished(rev.ID, -1, "", time.Now().UTC())
+			_ = p.store.MarkReviewPublished(rev.ID, orphanedReviewID, "", time.Now().UTC())
 			slog.Info("pipeline: skipping pending review for PR with no repo", "review_id", rev.ID)
 			continue
 		}
@@ -752,7 +758,7 @@ func (p *Pipeline) PublishPending() {
 		if err := json.Unmarshal([]byte(rev.Issues), &issues); err != nil {
 			slog.Warn("pipeline: skipping pending review with corrupt issues JSON",
 				"review_id", rev.ID, "pr", pr.Number, "repo", pr.Repo, "err", err)
-			_ = p.store.MarkReviewPublished(rev.ID, -1, "", time.Now().UTC())
+			_ = p.store.MarkReviewPublished(rev.ID, orphanedReviewID, "", time.Now().UTC())
 			continue
 		}
 		result := &executor.ReviewResult{
