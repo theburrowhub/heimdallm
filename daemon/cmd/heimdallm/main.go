@@ -4295,8 +4295,6 @@ func logRepoContextFallback(scope, repo string, err error) {
 		"repo", repo, "err", err)
 }
 
-// ptrBoolOrTrue returns the dereferenced value of p, or true if p is nil.
-// Used to serialize *bool config fields where nil means "default enabled".
 // autonomousOverrideMap serialises an AutonomousOverride into a map[string]any
 // for the GET /config DTO. Only fields that are explicitly set (non-nil pointer
 // or non-empty string) are included so the caller can distinguish "inherit" from
@@ -4333,6 +4331,8 @@ func autonomousOverrideMap(o config.AutonomousOverride) map[string]any {
 	return out
 }
 
+// ptrBoolOrTrue returns the dereferenced value of p, or true if p is nil.
+// Used to serialize *bool config fields where nil means "default enabled".
 func ptrBoolOrTrue(p *bool) bool {
 	if p == nil {
 		return true

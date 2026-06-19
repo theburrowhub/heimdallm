@@ -987,67 +987,15 @@ func (srv *Server) handlePatchOrgConfig(w http.ResponseWriter, r *http.Request) 
 }
 
 func (srv *Server) handlePatchAutonomousRepoConfig(w http.ResponseWriter, r *http.Request) {
-	if srv.configPath == "" {
-		http.Error(w, `{"error":"PATCH not available — configPath not set"}`, http.StatusServiceUnavailable)
-		return
-	}
 	repo, err := url.PathUnescape(chi.URLParam(r, "repo"))
 	if err != nil || repo == "" {
 		http.Error(w, `{"error":"invalid repo parameter"}`, http.StatusBadRequest)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	var patch map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
-		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
-		return
-	}
-	if err := config.ContainsNull(patch); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "null values not allowed in PATCH — use DELETE to remove fields",
-		})
-		return
-	}
-	config.NormalizeNumbers(patch)
-
-	globalPatch := map[string]any{
-		"autonomous": map[string]any{
-			"repos": map[string]any{
-				repo: patch,
-			},
-		},
-	}
-
-	result, err := srv.patchTOML(func(m map[string]any) error {
-		merged := config.DeepMerge(m, globalPatch)
-		for k, v := range merged {
-			m[k] = v
-		}
-		for k := range m {
-			if _, ok := merged[k]; !ok {
-				delete(m, k)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		slog.Error("PATCH /config/autonomous/repos failed", "repo", repo, "err", err)
-		var ve *config.ValidationError
-		if errors.As(err, &ve) {
-			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
-		} else {
-			http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
-		}
-		return
-	}
-	writeJSON(w, http.StatusOK, result)
+	srv.patchAutonomousSubKey(w, r, "repos", repo)
 }
 
 func (srv *Server) handlePatchAutonomousOrgConfig(w http.ResponseWriter, r *http.Request) {
-	if srv.configPath == "" {
-		http.Error(w, `{"error":"PATCH not available — configPath not set"}`, http.StatusServiceUnavailable)
-		return
-	}
 	org, err := url.PathUnescape(chi.URLParam(r, "org"))
 	if err != nil || org == "" {
 		http.Error(w, `{"error":"invalid org parameter"}`, http.StatusBadRequest)
@@ -1057,6 +1005,18 @@ func (srv *Server) handlePatchAutonomousOrgConfig(w http.ResponseWriter, r *http
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
 		return
 	}
+	srv.patchAutonomousSubKey(w, r, "orgs", org)
+}
+
+// patchAutonomousSubKey merges a PATCH body into autonomous.<subKey>.<id>
+// (subKey is "repos" or "orgs"), pruning keys that the merge removed, the same
+// way the global config PATCH handlers do. Callers are responsible for
+// unescaping and validating id before calling.
+func (srv *Server) patchAutonomousSubKey(w http.ResponseWriter, r *http.Request, subKey, id string) {
+	if srv.configPath == "" {
+		http.Error(w, `{"error":"PATCH not available — configPath not set"}`, http.StatusServiceUnavailable)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var patch map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
@@ -1073,8 +1033,8 @@ func (srv *Server) handlePatchAutonomousOrgConfig(w http.ResponseWriter, r *http
 
 	globalPatch := map[string]any{
 		"autonomous": map[string]any{
-			"orgs": map[string]any{
-				org: patch,
+			subKey: map[string]any{
+				id: patch,
 			},
 		},
 	}
@@ -1092,7 +1052,7 @@ func (srv *Server) handlePatchAutonomousOrgConfig(w http.ResponseWriter, r *http
 		return nil
 	})
 	if err != nil {
-		slog.Error("PATCH /config/autonomous/orgs failed", "org", org, "err", err)
+		slog.Error("PATCH /config/autonomous failed", "subkey", subKey, "id", id, "err", err)
 		var ve *config.ValidationError
 		if errors.As(err, &ve) {
 			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)

@@ -1593,9 +1593,6 @@ func (d *Dashboard) buildConfigLines() []string {
 	if cbRaw, ok := d.config["circuit_breaker"]; ok {
 		if cb, ok := cbRaw.(map[string]any); ok {
 			section("Circuit Breaker")
-			if v, ok := cb["enabled"].(bool); ok {
-				kv("Enabled", fmt.Sprintf("%v", v))
-			}
 			if f, ok := cb["per_pr_24h"].(float64); ok {
 				kv("Per PR / 24h", fmt.Sprintf("%d", int(f)))
 			}

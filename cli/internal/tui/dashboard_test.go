@@ -3,6 +3,7 @@ package tui
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -103,9 +104,9 @@ func TestDashboardDropsStaleReconnectAfterWatchdogReset(t *testing.T) {
 
 func TestClampScrollOffset(t *testing.T) {
 	cases := []struct {
-		name                    string
-		offset, total, visible  int
-		want                    int
+		name                   string
+		offset, total, visible int
+		want                   int
 	}{
 		{"viewport larger than content keeps offset at 0", 0, 5, 20, 0},
 		{"viewport larger than content clamps non-zero offset to 0", 7, 5, 20, 0},
@@ -419,7 +420,6 @@ func TestBuildConfigLinesAutonomousAndCircuitBreaker(t *testing.T) {
 			"reassign_on_take":  false,
 		},
 		"circuit_breaker": map[string]any{
-			"enabled":           true,
 			"per_pr_24h":        float64(10),
 			"per_repo_hr":       float64(5),
 			"per_issue_24h":     float64(8),
@@ -450,23 +450,10 @@ func TestBuildConfigLinesAutonomousAndCircuitBreaker(t *testing.T) {
 		"Per impl-repo / hr",
 	}
 	for _, want := range checks {
-		if !containsStr(joined, want) {
+		if !strings.Contains(joined, want) {
 			t.Errorf("buildConfigLines(): expected output to contain %q", want)
 		}
 	}
-}
-
-func containsStr(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsStrLinear(s, substr))
-}
-
-func containsStrLinear(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }
 
 func TestIssuesSortedByDate(t *testing.T) {

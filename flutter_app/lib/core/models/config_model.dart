@@ -707,6 +707,9 @@ class CircuitBreakerConfig {
   final int perIssueRepoHr;
   final int perImplRepoHr;
 
+  // Defaults must stay in sync with the daemon's DefaultCircuitBreakerConfig()
+  // in daemon/internal/config/circuit_breaker.go. They are only used as a
+  // fallback when the daemon omits a key from GET /config.
   const CircuitBreakerConfig({
     this.perPr24h = 3,
     this.perRepoHr = 20,
