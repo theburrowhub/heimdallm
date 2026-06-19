@@ -11,6 +11,73 @@ import 'config_providers.dart';
 
 const _aiOptions = ['claude', 'gemini', 'codex'];
 
+// Poll-interval bounds, mirrored from the daemon's config.ValidatePollInterval
+// (daemon/internal/config/config.go: minPollInterval=1m, maxPollInterval=24h).
+// The daemon is authoritative — these power a client-side UX guard so the
+// operator gets immediate feedback instead of a round-trip 400.
+const _minPollInterval = Duration(minutes: 1);
+const _maxPollInterval = Duration(hours: 24);
+const _pollIntervalSuggestions = ['1m', '5m', '30m', '1h'];
+
+// Intentionally covers only the units that make sense for a [1m, 24h] poll
+// interval. Sub-second units are accepted (so the parser stays a faithful
+// subset of Go) but always fall below the 1m floor. Go's day-like 'd' is not a
+// real unit and is correctly rejected; the Greek-mu micro variant ('μs',
+// U+03BC) is not special-cased — irrelevant at this scale, and the daemon
+// remains authoritative either way.
+const _durationUnitMicros = <String, double>{
+  'ns': 0.001,
+  'us': 1,
+  'µs': 1,
+  'ms': 1000,
+  's': 1000 * 1000.0,
+  'm': 60 * 1000 * 1000.0,
+  'h': 60 * 60 * 1000 * 1000.0,
+};
+
+// Order matters: multi-char units (ns, ms, µs/us) must precede the bare 's'
+// so the regex consumes "ms" rather than matching "m" then leaving "s".
+final _goDurationToken = RegExp(r'([0-9]*\.?[0-9]+)(ns|µs|us|ms|s|m|h)');
+
+/// Parses the common subset of Go's `time.ParseDuration` that operators use for
+/// `poll_interval` (e.g. `5m`, `90m`, `1h30m`, `1.5h`, `300s`) into a
+/// [Duration], or returns null if the string is not a clean sequence of
+/// number+unit tokens. This is a UX guard, not a full reimplementation — the
+/// daemon still validates authoritatively, so anything missed here surfaces as
+/// a backend error on save.
+Duration? _parseGoDuration(String raw) {
+  final s = raw.trim();
+  if (s.isEmpty) return null;
+  var consumed = 0;
+  var micros = 0.0;
+  for (final m in _goDurationToken.allMatches(s)) {
+    if (m.start != consumed) return null; // junk between tokens
+    consumed = m.end;
+    final value = double.tryParse(m.group(1)!);
+    final mult = _durationUnitMicros[m.group(2)];
+    if (value == null || mult == null) return null;
+    // Like Go's time.ParseDuration, repeated units accumulate
+    // (e.g. "1h30m" → 90m, and "1h2h" → 3h).
+    micros += value * mult;
+  }
+  if (consumed != s.length) return null; // leading/trailing junk
+  return Duration(microseconds: micros.round());
+}
+
+/// Form validator for `poll_interval`: parseable as a duration within
+/// [1m, 24h], mirroring the daemon. Returns an error string for the field, or
+/// null when acceptable.
+String? validatePollInterval(String? raw) {
+  final s = (raw ?? '').trim();
+  if (s.isEmpty) return 'Required (e.g. 5m, 90m, 1h30m)';
+  final d = _parseGoDuration(s);
+  if (d == null) return 'Invalid duration (e.g. 5m, 90m, 1h30m)';
+  if (d < _minPollInterval || d > _maxPollInterval) {
+    return 'Must be between 1m and 24h';
+  }
+  return null;
+}
+
 class ConfigScreen extends ConsumerStatefulWidget {
   const ConfigScreen({super.key});
 
@@ -20,6 +87,8 @@ class ConfigScreen extends ConsumerStatefulWidget {
 
 class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   final _tokenController = TextEditingController();
+  final _pollController = TextEditingController();
+  final _pollFieldKey = GlobalKey<FormFieldState<String>>();
   bool _obscureToken = true;
   bool _tokenFromGh = false; // true = auto-detected from gh CLI
 
@@ -45,6 +114,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   @override
   void dispose() {
     _tokenController.dispose();
+    _pollController.dispose();
     super.dispose();
   }
 
@@ -74,6 +144,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     if (_initialized) return;
     _initialized = true;
     _pollInterval = config.pollInterval;
+    _pollController.text = config.pollInterval;
     _retentionDays = config.retentionDays;
     _repoConfigs = Map.from(config.repoConfigs);
     _issueTracking = config.issueTracking;
@@ -368,24 +439,45 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         _sectionHeader('Polling'),
-        DropdownButtonFormField<String>(
-          // ignore: deprecated_member_use
-          value: _pollInterval,
+        TextFormField(
+          key: _pollFieldKey,
+          controller: _pollController,
           decoration: const InputDecoration(
             labelText: 'Poll interval',
-            helperText: 'How often to check GitHub for new review requests',
+            helperText:
+                'How often to check GitHub for new review requests '
+                '(any duration from 1m to 24h, e.g. 5m, 90m, 1h30m)',
             border: OutlineInputBorder(),
           ),
-          items: [
-            '1m',
-            '5m',
-            '30m',
-            '1h',
-          ].map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(),
-          onChanged: (v) => setState(() => _pollInterval = v!),
+          autovalidateMode: AutovalidateMode.onUserInteraction,
+          validator: validatePollInterval,
+          onChanged: (v) => setState(() => _pollInterval = v.trim()),
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          children: _pollIntervalSuggestions
+              .map((v) => ActionChip(label: Text(v), onPressed: () => _pickPollInterval(v)))
+              .toList(),
         ),
       ],
     );
+  }
+
+  /// Applies a quick-pick suggestion. Sets the controller value (cursor at end,
+  /// since a bare `.text =` would reset it to 0) and re-runs the field
+  /// validator — a programmatic change does not count as user interaction under
+  /// [AutovalidateMode.onUserInteraction], so without this an error from prior
+  /// typing would linger even though the chosen value is valid.
+  void _pickPollInterval(String v) {
+    setState(() {
+      _pollInterval = v;
+      _pollController.value = TextEditingValue(
+        text: v,
+        selection: TextSelection.collapsed(offset: v.length),
+      );
+    });
+    _pollFieldKey.currentState?.validate();
   }
 
   // ── Retention ────────────────────────────────────────────────────────────
@@ -764,29 +856,39 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     // always reads the current state at the moment the user taps Save, avoiding
     // stale closure captures when setState and Save happen in the same frame.
 
+    // Gate Save on a valid poll_interval so the client-side check actually
+    // prevents the round-trip 400 (the inline validator alone only displays the
+    // error). onChanged/_pickPollInterval call setState, so this re-evaluates as
+    // the user types or picks a chip. The daemon stays authoritative.
+    final pollInvalid = validatePollInterval(_pollInterval) != null;
+
     if (daemonRunning) {
       return SizedBox(
         width: double.infinity,
         child: ElevatedButton(
-          onPressed: () async {
-            final updated = _buildConfig(base);
-            try {
-              final token = _tokenController.text.trim();
-              if (token.isNotEmpty && !_tokenFromGh) {
-                await ref
-                    .read(platformServicesProvider)
-                    .storeGitHubToken(token);
-                // Invalidate the cached token so the ApiClient re-reads it on the next request.
-                ref.read(apiClientProvider).clearTokenCache();
-              }
-              await ref.read(configNotifierProvider.notifier).save(updated);
-              if (context.mounted) showToast(context, 'Settings saved');
-            } catch (e) {
-              if (context.mounted) {
-                showToast(context, 'Error: $e', isError: true);
-              }
-            }
-          },
+          onPressed: pollInvalid
+              ? null
+              : () async {
+                  final updated = _buildConfig(base);
+                  try {
+                    final token = _tokenController.text.trim();
+                    if (token.isNotEmpty && !_tokenFromGh) {
+                      await ref
+                          .read(platformServicesProvider)
+                          .storeGitHubToken(token);
+                      // Invalidate the cached token so the ApiClient re-reads it on the next request.
+                      ref.read(apiClientProvider).clearTokenCache();
+                    }
+                    await ref
+                        .read(configNotifierProvider.notifier)
+                        .save(updated);
+                    if (context.mounted) showToast(context, 'Settings saved');
+                  } catch (e) {
+                    if (context.mounted) {
+                      showToast(context, 'Error: $e', isError: true);
+                    }
+                  }
+                },
           child: const Text('Save'),
         ),
       );
@@ -806,7 +908,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
               )
             : const Icon(Icons.rocket_launch),
         label: Text(isLoading ? 'Starting…' : 'Save and start Heimdallm'),
-        onPressed: isLoading
+        onPressed: (isLoading || pollInvalid)
             ? null
             : () async {
                 final updated = _buildConfig(base);
