@@ -324,6 +324,50 @@ func TestReconcileSeverity_NeverLowers(t *testing.T) {
 	}
 }
 
+func TestReconcileSeverity_NonCanonicalTopLevelFailsSafeToHigh(t *testing.T) {
+	// A model that escalates with an out-of-vocabulary label (or emits garbage)
+	// must NOT be silently downgraded to low and APPROVEd. Top-level
+	// non-canonical → high.
+	for _, sev := range []string{"critical", "blocker", "severe", "CRITICAL", "🔥", "definitely-bad"} {
+		got := ReconcileSeverity(makeResult(sev, nil))
+		if got != "high" {
+			t.Errorf("ReconcileSeverity(top-level %q) = %q, want high (fail-safe)", sev, got)
+		}
+	}
+}
+
+func TestReconcileSeverity_NonCanonicalPerIssueStaysTolerant(t *testing.T) {
+	// Stray below-the-bar issue labels must not escalate the whole review.
+	result := makeResult("low", []testIssue{
+		{Severity: "info"},
+		{Severity: "nit"},
+		{Severity: "trivial"},
+	})
+	if got := ReconcileSeverity(result); got != "low" {
+		t.Errorf("non-canonical per-issue severities should not escalate; got %q, want low", got)
+	}
+}
+
+func TestReconcileSeverity_CaseInsensitiveCanonicalNotEscalated(t *testing.T) {
+	// "High"/"Medium" are canonical (case-insensitive) and must keep their
+	// own rank, not be treated as non-canonical.
+	if got := ReconcileSeverity(makeResult("High", nil)); got != "high" {
+		t.Errorf(`ReconcileSeverity("High") = %q, want high`, got)
+	}
+	if got := ReconcileSeverity(makeResult("Medium", nil)); got != "medium" {
+		t.Errorf(`ReconcileSeverity("Medium") = %q, want medium`, got)
+	}
+}
+
+func TestReconcileThenEvent_CriticalBlocks(t *testing.T) {
+	// End-to-end gate: a "critical" top-level severity must drive REQUEST_CHANGES,
+	// not a silent APPROVE (the bug in #547).
+	reconciled := ReconcileSeverity(makeResult("critical", nil))
+	if event := SeverityToEvent(reconciled); event != "REQUEST_CHANGES" {
+		t.Errorf("critical severity must block: SeverityToEvent(%q) = %q, want REQUEST_CHANGES", reconciled, event)
+	}
+}
+
 // --- Tests for ApplySignalEscalation ---
 
 func TestApplySignalEscalation_MediumWithBlocker(t *testing.T) {

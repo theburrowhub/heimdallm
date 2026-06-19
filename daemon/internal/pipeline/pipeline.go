@@ -887,6 +887,17 @@ func severityRank(s string) int {
 	}
 }
 
+// isCanonicalSeverity reports whether s is one of the severities the agent
+// prompt mandates (low|medium|high), case-insensitive.
+func isCanonicalSeverity(s string) bool {
+	switch strings.ToLower(s) {
+	case "low", "medium", "high":
+		return true
+	default:
+		return false
+	}
+}
+
 // rankToSeverity converts a numeric rank back to a severity string.
 func rankToSeverity(r int) string {
 	switch r {
@@ -904,7 +915,19 @@ func rankToSeverity(r int) string {
 // inconsistencies where issues are flagged high but the global field is set
 // low (prompt injection, model error, hallucination).
 func ReconcileSeverity(result *executor.ReviewResult) string {
+	// Fail-safe on the top-level severity. The agent prompt mandates one of
+	// low|medium|high; a non-canonical value ("critical", "blocker", or model
+	// garbage) would otherwise fall through severityRank's default to rank 1
+	// ("low") and silently APPROVE a PR the model meant to block. Treat any
+	// unrecognized top-level severity as "high" so a human reviews it. Per-issue
+	// severities stay tolerant (unknown → low) so a stray "nit"/"info" label
+	// cannot escalate the whole review.
 	maxRank := severityRank(result.Severity)
+	if result.Severity != "" && !isCanonicalSeverity(result.Severity) {
+		slog.Warn("pipeline: non-canonical top-level severity from agent; failing safe to high",
+			"ai_severity", result.Severity)
+		maxRank = severityRank("high")
+	}
 	for _, iss := range result.Issues {
 		if r := severityRank(iss.Severity); r > maxRank {
 			maxRank = r
