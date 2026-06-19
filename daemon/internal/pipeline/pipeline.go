@@ -758,7 +758,10 @@ func (p *Pipeline) PublishPending() {
 		if err := json.Unmarshal([]byte(rev.Issues), &issues); err != nil {
 			slog.Warn("pipeline: skipping pending review with corrupt issues JSON",
 				"review_id", rev.ID, "pr", pr.Number, "repo", pr.Repo, "err", err)
-			_ = p.store.MarkReviewPublished(rev.ID, orphanedReviewID, "", time.Now().UTC())
+			if mErr := p.store.MarkReviewPublished(rev.ID, orphanedReviewID, "", time.Now().UTC()); mErr != nil {
+				slog.Warn("pipeline: failed to orphan corrupt review, will retry next tick",
+					"review_id", rev.ID, "err", mErr)
+			}
 			continue
 		}
 		result := &executor.ReviewResult{
