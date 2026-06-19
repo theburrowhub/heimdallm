@@ -877,7 +877,7 @@ func BuildGitHubBody(r *executor.ReviewResult) string {
 
 // severityRank maps a severity string to a numeric rank for comparison.
 func severityRank(s string) int {
-	switch strings.ToLower(s) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "high":
 		return 3
 	case "medium":
@@ -890,7 +890,7 @@ func severityRank(s string) int {
 // isCanonicalSeverity reports whether s is one of the severities the agent
 // prompt mandates (low|medium|high), case-insensitive.
 func isCanonicalSeverity(s string) bool {
-	switch strings.ToLower(s) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "low", "medium", "high":
 		return true
 	default:
@@ -922,11 +922,19 @@ func ReconcileSeverity(result *executor.ReviewResult) string {
 	// unrecognized top-level severity as "high" so a human reviews it. Per-issue
 	// severities stay tolerant (unknown → low) so a stray "nit"/"info" label
 	// cannot escalate the whole review.
-	maxRank := severityRank(result.Severity)
-	if result.Severity != "" && !isCanonicalSeverity(result.Severity) {
+	//
+	// An empty top-level severity is intentionally NOT failed-safe: parseResult
+	// coerces a missing severity to "low" before this runs, and an omitted
+	// severity is the documented "no issues" default — not a blocked escalation
+	// (the #547 failure mode). Escalating empty would over-block clean reviews.
+	nonCanonical := result.Severity != "" && !isCanonicalSeverity(result.Severity)
+	var maxRank int
+	if nonCanonical {
 		slog.Warn("pipeline: non-canonical top-level severity from agent; failing safe to high",
 			"ai_severity", result.Severity)
 		maxRank = severityRank("high")
+	} else {
+		maxRank = severityRank(result.Severity)
 	}
 	for _, iss := range result.Issues {
 		if r := severityRank(iss.Severity); r > maxRank {
@@ -934,7 +942,11 @@ func ReconcileSeverity(result *executor.ReviewResult) string {
 		}
 	}
 	reconciled := rankToSeverity(maxRank)
-	if reconciled != result.Severity {
+	// Only emit the "AI inconsistency" warning for the case it actually
+	// describes — a canonical top-level raised by a higher per-issue severity.
+	// The non-canonical path already logged its own accurate warning above, so
+	// guarding here avoids a misleading double log on the same call.
+	if !nonCanonical && reconciled != result.Severity {
 		slog.Warn("pipeline: severity reconciled (AI inconsistency)",
 			"ai_severity", result.Severity,
 			"reconciled", reconciled,

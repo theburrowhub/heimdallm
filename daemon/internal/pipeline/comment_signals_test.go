@@ -359,6 +359,44 @@ func TestReconcileSeverity_CaseInsensitiveCanonicalNotEscalated(t *testing.T) {
 	}
 }
 
+func TestReconcileSeverity_EmptyTopLevelStaysLow(t *testing.T) {
+	// Empty top-level severity is the documented no-issues default (parseResult
+	// coerces a missing severity to "low" upstream). It must NOT fail-safe to
+	// high — that would over-block legitimately clean reviews.
+	if got := ReconcileSeverity(makeResult("", nil)); got != "low" {
+		t.Errorf(`ReconcileSeverity("") = %q, want low (no-issues default, not fail-safe)`, got)
+	}
+	// A real per-issue severity still escalates an empty top-level.
+	if got := ReconcileSeverity(makeResult("", []testIssue{{Severity: "high"}})); got != "high" {
+		t.Errorf(`empty top-level with a high issue should escalate; got %q, want high`, got)
+	}
+}
+
+func TestReconcileSeverity_WhitespacePaddedCanonicalNotEscalated(t *testing.T) {
+	// Padded canonical values must rank by their trimmed value, not be treated
+	// as non-canonical (which would wrongly escalate " low " to high).
+	for in, want := range map[string]string{" high ": "high", " low ": "low", "  medium": "medium"} {
+		if got := ReconcileSeverity(makeResult(in, nil)); got != want {
+			t.Errorf("ReconcileSeverity(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestReconcileSeverity_NonCanonicalTopLevelNeverCaps(t *testing.T) {
+	// The fail-safe only ever raises to high; combined with any mix of per-issue
+	// severities it must stay high, never be capped below it.
+	for _, issues := range [][]testIssue{
+		nil,
+		{{Severity: "low"}, {Severity: "low"}},
+		{{Severity: "high"}},
+		{{Severity: "medium"}, {Severity: "info"}},
+	} {
+		if got := ReconcileSeverity(makeResult("critical", issues)); got != "high" {
+			t.Errorf("non-canonical top-level must stay high regardless of issues %v; got %q", issues, got)
+		}
+	}
+}
+
 func TestReconcileThenEvent_CriticalBlocks(t *testing.T) {
 	// End-to-end gate: a "critical" top-level severity must drive REQUEST_CHANGES,
 	// not a silent APPROVE (the bug in #547).
