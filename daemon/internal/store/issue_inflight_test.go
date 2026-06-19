@@ -76,3 +76,43 @@ func TestIssueInflight_StaleEntriesAreCleared(t *testing.T) {
 		t.Errorf("claim after stale-clear must succeed")
 	}
 }
+
+// TestIssueInflight_ClearAllIssueTriageInFlight — mirror of
+// TestInFlight_ClearAllInFlight for issue-triage claims (#544).
+func TestIssueInflight_ClearAllIssueTriageInFlight(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.InsertStaleIssueTriageInFlight(1, "2026-06-19T10:00:00Z", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.InsertStaleIssueTriageInFlight(2, "2026-06-19T10:00:00Z", time.Now().Add(-29*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.ClearAllIssueTriageInFlight()
+	if err != nil {
+		t.Fatalf("clear all: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("ClearAllIssueTriageInFlight want 2 cleared, got %d", n)
+	}
+}
+
+// TestIssueInflight_PeriodicSweepPreservesYoungClaims — mirror of the
+// PR-side invariant for issue-triage. The periodic sweep with maxAge=30m
+// must not reap a freshly-claimed triage. (#544)
+func TestIssueInflight_PeriodicSweepPreservesYoungClaims(t *testing.T) {
+	s := newTestStore(t)
+	claimed, err := s.ClaimIssueTriageInFlight(42, "2026-06-19T10:00:00Z")
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if !claimed {
+		t.Fatal("initial claim must succeed")
+	}
+	n, err := s.ClearStaleIssueTriageInFlight(30 * time.Minute)
+	if err != nil {
+		t.Fatalf("periodic sweep: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("periodic sweep killed a fresh claim: cleared %d, want 0", n)
+	}
+}

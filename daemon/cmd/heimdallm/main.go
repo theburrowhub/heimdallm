@@ -133,20 +133,30 @@ func main() {
 	}
 
 	// Clear in-flight review claims leaked by a daemon that crashed between
-	// claim and release. The 30-minute cutoff gives normal reviews (which
-	// finish in seconds-minutes) plenty of headroom while still cleaning up
-	// anything stuck from a previous process. See theburrowhub/heimdallm#243.
-	if n, err := s.ClearStaleInFlight(30 * time.Minute); err != nil {
-		slog.Warn("startup: clear stale inflight failed", "err", err)
+	// claim and release. See theburrowhub/heimdallm#243.
+	//
+	// Single-instance deployment: any claim that survives a restart is, by
+	// definition, orphaned — no goroutine from the previous process can still
+	// be holding the work. The earlier 30-minute cutoff left a "dead zone"
+	// (#544) where a claim younger than the cutoff would survive forever —
+	// the daemon's restart-only sweep skipped it, and there was no periodic
+	// sweep to reap it later. Clearing unconditionally at startup eliminates
+	// that dead zone. The periodic sweep in startPollers handles claims
+	// leaked at runtime (still uses the age-based cutoff so live reviews are
+	// not killed). If multi-instance support is ever added (see #243/#426)
+	// this must be replaced by a lease + instance-id scheme — a time-based
+	// cutoff is the wrong abstraction for multi-instance.
+	if n, err := s.ClearAllInFlight(); err != nil {
+		slog.Warn("startup: clear all inflight failed", "err", err)
 	} else if n > 0 {
-		slog.Info("startup: cleared stale inflight rows", "count", n)
+		slog.Info("startup: cleared inflight rows", "count", n)
 	}
 
 	// Mirror of the PR-side sweep above for issue-triage claims (#292).
-	if n, err := s.ClearStaleIssueTriageInFlight(30 * time.Minute); err != nil {
-		slog.Warn("startup: clear stale issue triage inflight failed", "err", err)
+	if n, err := s.ClearAllIssueTriageInFlight(); err != nil {
+		slog.Warn("startup: clear all issue triage inflight failed", "err", err)
 	} else if n > 0 {
-		slog.Info("startup: cleared stale issue triage inflight rows", "count", n)
+		slog.Info("startup: cleared issue triage inflight rows", "count", n)
 	}
 
 	// ── NATS event bus (core only, no JetStream) ───────────────────────
@@ -671,6 +681,40 @@ func main() {
 				case <-ticker.C:
 					limiter.Refill()
 					slog.Info("pollers: rate limiter refilled")
+				}
+			}
+		}()
+
+		// In-flight claim sweep (#544). Catches reviews_in_flight and
+		// issue_triage_in_flight claims that were leaked at runtime (panic,
+		// SIGKILL between claim and the deferred release, etc.). Worst-case
+		// reap latency is sweepInterval + inflightSweepMaxAge ≈ 35 min, well
+		// under the previous "forever" failure mode. The 30-min maxAge gives
+		// normal reviews (seconds to a few minutes) plenty of headroom; the
+		// PeriodicSweepPreservesYoungClaims tests in package store lock in
+		// that a fresh claim survives this sweep.
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			const sweepInterval = 5 * time.Minute
+			const inflightSweepMaxAge = 30 * time.Minute
+			ticker := time.NewTicker(sweepInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if n, err := s.ClearStaleInFlight(inflightSweepMaxAge); err != nil {
+						slog.Warn("sweep: clear stale inflight failed", "err", err)
+					} else if n > 0 {
+						slog.Info("sweep: cleared stale inflight rows", "count", n)
+					}
+					if n, err := s.ClearStaleIssueTriageInFlight(inflightSweepMaxAge); err != nil {
+						slog.Warn("sweep: clear stale issue triage inflight failed", "err", err)
+					} else if n > 0 {
+						slog.Info("sweep: cleared stale issue triage inflight rows", "count", n)
+					}
 				}
 			}
 		}()
