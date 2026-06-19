@@ -64,7 +64,7 @@ func publishBridgeEvents(events <-chan sse.Event, publish func(subject string, d
 						"type", event.Type, "panic", r, "stack", string(debug.Stack()))
 				}
 			}()
-			if err := publish("heimdallm.events."+event.Type, []byte(event.Data)); err != nil {
+			if err := publish(bus.SubjEventPrefix+event.Type, []byte(event.Data)); err != nil {
 				slog.Warn("sse-bridge: publish to NATS failed", "type", event.Type, "err", err)
 			}
 		}()
@@ -199,6 +199,8 @@ func main() {
 	// to NATS events subjects, removing the need for the broker entirely.
 	bridgeCh := broker.Subscribe()
 	if bridgeCh != nil {
+		// publishBridgeEvents recovers per event and never panics outward, so
+		// it is safe to run in this bare goroutine.
 		go publishBridgeEvents(bridgeCh, eventBus.Conn().Publish)
 	} else {
 		slog.Warn("sse-bridge: broker subscriber cap reached, SSE bridge disabled")

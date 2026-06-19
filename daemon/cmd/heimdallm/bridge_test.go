@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 
+	"github.com/heimdallm/daemon/internal/bus"
 	"github.com/heimdallm/daemon/internal/sse"
 )
 
@@ -19,7 +21,7 @@ func TestPublishBridgeEvents_RecoversFromPanicAndContinues(t *testing.T) {
 
 	var got []string
 	publish := func(subject string, data []byte) error {
-		if subject == "heimdallm.events.boom" {
+		if subject == bus.SubjEventPrefix+"boom" {
 			panic("simulated nats publish panic")
 		}
 		got = append(got, subject)
@@ -29,9 +31,34 @@ func TestPublishBridgeEvents_RecoversFromPanicAndContinues(t *testing.T) {
 	// Returns (does not propagate the panic) once the channel is drained.
 	publishBridgeEvents(events, publish)
 
-	want := []string{"heimdallm.events.a", "heimdallm.events.c"}
-	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+	want := []string{bus.SubjEventPrefix + "a", bus.SubjEventPrefix + "c"}
+	if !slices.Equal(got, want) {
 		t.Fatalf("expected bridge to process %v after recovering, got %v", want, got)
+	}
+}
+
+// recover() must also catch a non-string / runtime panic (here, assignment to
+// a nil map), not just explicit panic("string") calls.
+func TestPublishBridgeEvents_RecoversFromRuntimePanic(t *testing.T) {
+	events := make(chan sse.Event, 2)
+	events <- sse.Event{Type: "nilmap", Data: "1"}
+	events <- sse.Event{Type: "ok", Data: "2"}
+	close(events)
+
+	var got []string
+	publish := func(subject string, data []byte) error {
+		if subject == bus.SubjEventPrefix+"nilmap" {
+			var m map[string]int
+			m["boom"] = 1 // runtime panic: assignment to entry in nil map
+		}
+		got = append(got, subject)
+		return nil
+	}
+
+	publishBridgeEvents(events, publish)
+
+	if want := []string{bus.SubjEventPrefix + "ok"}; !slices.Equal(got, want) {
+		t.Fatalf("expected bridge to recover from a runtime panic and continue; want %v, got %v", want, got)
 	}
 }
 
