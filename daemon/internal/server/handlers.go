@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -786,6 +787,7 @@ func (srv *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 		body["agent_configs"] = normalized
 	}
 
+	var failedKeys []string
 	for k, v := range body {
 		// Read-only keys were accepted above to avoid 400s on UI saves that
 		// round-trip the GET payload, but they must not land in the store.
@@ -809,7 +811,20 @@ func (srv *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		if _, err := srv.store.SetConfig(k, val); err != nil {
 			slog.Error("config: set", "key", k, "err", err)
+			failedKeys = append(failedKeys, k)
 		}
+	}
+	// A swallowed persist error here would 200-OK a save that never hit disk,
+	// so the UI shows success while the next reload silently re-applies stale
+	// values (#550). Report 500 with the offending keys instead. Note this is
+	// not transactional: earlier keys in the loop may already be persisted.
+	if len(failedKeys) > 0 {
+		sort.Strings(failedKeys) // deterministic: Go map iteration order is random
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error":       "failed to persist one or more config keys",
+			"failed_keys": failedKeys,
+		})
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

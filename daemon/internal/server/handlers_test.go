@@ -326,6 +326,39 @@ func TestHandlerPutConfig(t *testing.T) {
 	}
 }
 
+// TestHandlerPutConfig_PersistFailureReturns500 guards #550: a failed
+// SetConfig must surface as 500 with the offending keys, not a misleading
+// 200 OK that makes the UI believe a never-persisted save succeeded.
+func TestHandlerPutConfig_PersistFailureReturns500(t *testing.T) {
+	srv, s := setupServer(t)
+	// Close the store so the write fails (sql: database is closed) while the
+	// pure key/value validation above still passes.
+	s.Close()
+
+	body := `{"poll_interval":"5m"}`
+	req := httptest.NewRequest("PUT", "/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 on persist failure, got %d (body: %s)", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Error      string   `json:"error"`
+		FailedKeys []string `json:"failed_keys"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v (body: %s)", err, w.Body.String())
+	}
+	if resp.Error == "" {
+		t.Errorf("expected non-empty error message, got body: %s", w.Body.String())
+	}
+	if len(resp.FailedKeys) != 1 || resp.FailedKeys[0] != "poll_interval" {
+		t.Errorf("failed_keys = %v, want [poll_interval]", resp.FailedKeys)
+	}
+}
+
 func TestHandlerShutdown(t *testing.T) {
 	srv, _ := setupServer(t)
 	shutdown := make(chan struct{}, 1)
