@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -235,6 +236,38 @@ func TestRetentionPurge(t *testing.T) {
 	reviews, _ := s.ListReviewsForPR(prID)
 	if len(reviews) != 0 {
 		t.Errorf("expected 0 reviews after purge, got %d", len(reviews))
+	}
+}
+
+// Regression for #551: a non-positive maxDays must not compute a future cutoff
+// and delete the entire review history; both 0 and negatives are no-ops.
+func TestPurgeOldReviews_NonPositiveIsNoOp(t *testing.T) {
+	for _, maxDays := range []int{0, -1, -365} {
+		t.Run(fmt.Sprintf("maxDays=%d", maxDays), func(t *testing.T) {
+			s := newTestStore(t)
+			prID, err := s.UpsertPR(&store.PR{GithubID: 1, Repo: "org/r", Number: 1, Title: "t", Author: "a", URL: "u", State: "open", UpdatedAt: time.Now(), FetchedAt: time.Now()})
+			if err != nil {
+				t.Fatalf("upsert pr: %v", err)
+			}
+			for _, age := range []time.Duration{-100 * 24 * time.Hour, -1 * time.Hour} {
+				if _, err := s.InsertReview(&store.Review{
+					PRID: prID, CLIUsed: "claude", Summary: "s", Issues: "[]", Suggestions: "[]", Severity: "low",
+					CreatedAt: time.Now().Add(age),
+				}); err != nil {
+					t.Fatalf("insert review: %v", err)
+				}
+			}
+			if err := s.PurgeOldReviews(maxDays); err != nil {
+				t.Fatalf("purge: %v", err)
+			}
+			reviews, err := s.ListReviewsForPR(prID)
+			if err != nil {
+				t.Fatalf("list reviews: %v", err)
+			}
+			if len(reviews) != 2 {
+				t.Errorf("maxDays=%d wiped reviews: got %d, want 2 (no-op expected)", maxDays, len(reviews))
+			}
+		})
 	}
 }
 

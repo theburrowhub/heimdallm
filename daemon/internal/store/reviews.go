@@ -146,11 +146,13 @@ func (s *Store) LatestReviewForPR(prID int64) (*Review, error) {
 	return scanReview(row)
 }
 
-// PurgeOldReviews deletes reviews older than maxDays. No-op if maxDays == 0.
+// PurgeOldReviews deletes reviews older than maxDays. No-op if maxDays <= 0
+// (a negative value is a defensive no-op rather than a future cutoff that would
+// wipe every review; config validation already rejects negatives — see #551).
 // The cutoff is computed in Go and passed as an RFC3339 string so that the
 // comparison is consistent with how the modernc.org/sqlite driver stores values.
 func (s *Store) PurgeOldReviews(maxDays int) error {
-	if maxDays == 0 {
+	if maxDays <= 0 {
 		return nil
 	}
 	cutoff := time.Now().UTC().Add(-time.Duration(maxDays) * 24 * time.Hour).Format(sqliteTimeFormat)

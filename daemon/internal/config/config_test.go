@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -303,6 +304,54 @@ func TestValidate_AllValidIntervals(t *testing.T) {
 		if err := cfg.Validate(); err != nil {
 			t.Errorf("Validate() with interval %q = %v", interval, err)
 		}
+	}
+}
+
+func TestValidate_RetentionMaxDaysOutOfRange(t *testing.T) {
+	for _, days := range []int{-1, -365, 3651} {
+		t.Run(fmt.Sprintf("days=%d", days), func(t *testing.T) {
+			cfg := &Config{}
+			cfg.applyDefaults()
+			cfg.AI.Primary = "claude"
+			cfg.Retention.MaxDays = days // set after applyDefaults, which coerces 0 -> 90
+
+			if err := cfg.Validate(); err == nil {
+				t.Errorf("Validate() with retention.max_days=%d = nil, want error", days)
+			}
+		})
+	}
+}
+
+func TestValidate_RetentionMaxDaysValid(t *testing.T) {
+	for _, days := range []int{0, 1, 90, 3650} {
+		t.Run(fmt.Sprintf("days=%d", days), func(t *testing.T) {
+			cfg := &Config{}
+			cfg.applyDefaults()
+			cfg.AI.Primary = "claude"
+			cfg.Retention.MaxDays = days
+
+			if err := cfg.Validate(); err != nil {
+				t.Errorf("Validate() with retention.max_days=%d = %v, want nil", days, err)
+			}
+		})
+	}
+}
+
+// Regression for #551: a negative HEIMDALLM_RETENTION_DAYS must be rejected at
+// load time rather than silently flowing into PurgeOldReviews (whose cutoff
+// would land in the future and wipe the entire review history).
+func TestApplyEnvOverrides_NegativeRetentionRejectedByValidate(t *testing.T) {
+	t.Setenv("HEIMDALLM_RETENTION_DAYS", "-1")
+	cfg := &Config{}
+	cfg.applyDefaults()
+	cfg.AI.Primary = "claude"
+	cfg.applyEnvOverrides()
+
+	if cfg.Retention.MaxDays != -1 {
+		t.Fatalf("env override not applied: MaxDays = %d, want -1", cfg.Retention.MaxDays)
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Error("Validate() = nil for HEIMDALLM_RETENTION_DAYS=-1, want error")
 	}
 }
 

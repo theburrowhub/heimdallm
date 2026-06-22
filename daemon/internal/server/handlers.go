@@ -722,8 +722,8 @@ func (srv *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if v, ok := body["retention_days"]; ok {
 		n, isNum := v.(float64) // JSON numbers decode as float64
-		if !isNum || n < 0 || n > 3650 {
-			http.Error(w, "retention_days must be between 0 and 3650", http.StatusBadRequest)
+		if !isNum || n < 0 || n > config.MaxRetentionDays {
+			http.Error(w, fmt.Sprintf("retention_days must be between 0 and %d", config.MaxRetentionDays), http.StatusBadRequest)
 			return
 		}
 	}
