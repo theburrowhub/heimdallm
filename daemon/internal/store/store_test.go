@@ -238,6 +238,26 @@ func TestRetentionPurge(t *testing.T) {
 	}
 }
 
+// Regression for #551: a negative maxDays must not compute a future cutoff and
+// delete the entire review history; it is treated as a no-op.
+func TestPurgeOldReviews_NegativeIsNoOp(t *testing.T) {
+	s := newTestStore(t)
+	prID, _ := s.UpsertPR(&store.PR{GithubID: 1, Repo: "org/r", Number: 1, Title: "t", Author: "a", URL: "u", State: "open", UpdatedAt: time.Now(), FetchedAt: time.Now()})
+	for _, age := range []time.Duration{-100 * 24 * time.Hour, -1 * time.Hour} {
+		s.InsertReview(&store.Review{
+			PRID: prID, CLIUsed: "claude", Summary: "s", Issues: "[]", Suggestions: "[]", Severity: "low",
+			CreatedAt: time.Now().Add(age),
+		})
+	}
+	if err := s.PurgeOldReviews(-1); err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	reviews, _ := s.ListReviewsForPR(prID)
+	if len(reviews) != 2 {
+		t.Errorf("negative maxDays wiped reviews: got %d, want 2 (no-op expected)", len(reviews))
+	}
+}
+
 func TestConfigs_ListReturnsAllRows(t *testing.T) {
 	s := newTestStore(t)
 
