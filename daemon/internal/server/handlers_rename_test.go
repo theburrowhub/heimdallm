@@ -88,37 +88,47 @@ func TestHandleAdminRepoRename_SurfacesValidationErrorAs400(t *testing.T) {
 }
 
 // Regression for #552: the 400 validation branch must JSON-escape the error
-// message. If the message carries a quote or backslash (e.g. a slug echoed
-// back), a hand-built `{"error":"..."}` literal would emit invalid JSON.
+// message. If the message carries a quote, backslash, control char, etc. (e.g.
+// a slug echoed back), a hand-built `{"error":"..."}` literal would emit invalid
+// JSON. Each case routes to the 400 branch via the "invalid repo slug" sentinel
+// and carries an adversarial suffix that naive concatenation would mangle.
 func TestHandleAdminRepoRename_ValidationError400BodyIsValidJSON(t *testing.T) {
-	srv := setupServerWithToken(t, "test-token")
-	// "invalid repo slug" routes to the 400 branch; the embedded quote and
-	// backslash are what break unescaped concatenation.
-	msg := `rename: invalid repo slug: bad "owner"\name`
-	srv.SetRepoRenameFn(func(ctx context.Context, oldRepo, newRepo string) error {
-		return errors.New(msg)
-	})
+	for _, suffix := range []string{
+		`bad "owner"\name`,
+		`lone\backslash`,
+		"tab\tand\nnewline",
+		"null\x00byte",
+		`unicode résumé 🚀`,
+	} {
+		t.Run(suffix, func(t *testing.T) {
+			msg := "rename: invalid repo slug: " + suffix
+			srv := setupServerWithToken(t, "test-token")
+			srv.SetRepoRenameFn(func(ctx context.Context, oldRepo, newRepo string) error {
+				return errors.New(msg)
+			})
 
-	req := httptest.NewRequest("POST", "/admin/repo-rename",
-		strings.NewReader(`{"old_repo":"acme/old","new_repo":"acme/new"}`))
-	req.Header.Set("X-Heimdallm-Token", "test-token")
-	w := httptest.NewRecorder()
-	srv.Router().ServeHTTP(w, req)
+			req := httptest.NewRequest("POST", "/admin/repo-rename",
+				strings.NewReader(`{"old_repo":"acme/old","new_repo":"acme/new"}`))
+			req.Header.Set("X-Heimdallm-Token", "test-token")
+			w := httptest.NewRecorder()
+			srv.Router().ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400 (body=%s)", w.Code, w.Body.String())
-	}
-	var body struct {
-		Error string `json:"error"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-		t.Fatalf("response body is not valid JSON: %v (body=%q)", err, w.Body.String())
-	}
-	if body.Error != msg {
-		t.Errorf("error field = %q, want %q", body.Error, msg)
-	}
-	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
-		t.Errorf("Content-Type = %q, want application/json", ct)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (body=%s)", w.Code, w.Body.String())
+			}
+			var body struct {
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+				t.Fatalf("response body is not valid JSON: %v (body=%q)", err, w.Body.String())
+			}
+			if body.Error != msg {
+				t.Errorf("error field = %q, want %q", body.Error, msg)
+			}
+			if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+				t.Errorf("Content-Type = %q, want application/json", ct)
+			}
+		})
 	}
 }
 
