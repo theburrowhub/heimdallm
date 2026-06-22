@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -687,14 +688,6 @@ var allowedAgentConfigSubkeys = map[string]struct{}{
 	"execution_timeout":      {},
 }
 
-// validPollIntervals is the allowlist of permitted poll_interval values.
-var validPollIntervals = map[string]struct{}{
-	"1m":  {},
-	"5m":  {},
-	"30m": {},
-	"1h":  {},
-}
-
 // validReviewModes is the allowlist of permitted review_mode values.
 var validReviewModes = map[string]struct{}{
 	"single": {},
@@ -724,15 +717,15 @@ func (srv *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "poll_interval must be a string", http.StatusBadRequest)
 			return
 		}
-		if _, valid := validPollIntervals[s]; !valid {
-			http.Error(w, "poll_interval must be one of: 1m, 5m, 30m, 1h", http.StatusBadRequest)
+		if err := config.ValidatePollInterval(s); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 	}
 	if v, ok := body["retention_days"]; ok {
 		n, isNum := v.(float64) // JSON numbers decode as float64
-		if !isNum || n < 0 || n > 3650 {
-			http.Error(w, "retention_days must be between 0 and 3650", http.StatusBadRequest)
+		if !isNum || n < 0 || n > config.MaxRetentionDays {
+			http.Error(w, fmt.Sprintf("retention_days must be between 0 and %d", config.MaxRetentionDays), http.StatusBadRequest)
 			return
 		}
 	}
@@ -796,12 +789,15 @@ func (srv *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 		body["agent_configs"] = normalized
 	}
 
+	var failedKeys []string
+	var attempted int
 	for k, v := range body {
 		// Read-only keys were accepted above to avoid 400s on UI saves that
 		// round-trip the GET payload, but they must not land in the store.
 		if _, readOnly := readOnlyConfigKeys[k]; readOnly {
 			continue
 		}
+		attempted++
 		var val string
 		switch typed := v.(type) {
 		case string:
@@ -819,7 +815,21 @@ func (srv *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		if _, err := srv.store.SetConfig(k, val); err != nil {
 			slog.Error("config: set", "key", k, "err", err)
+			failedKeys = append(failedKeys, k)
 		}
+	}
+	// A swallowed persist error here would 200-OK a save that never hit disk,
+	// so the UI shows success while the next reload silently re-applies stale
+	// values (#550). Report 500 with the offending keys instead. Note this is
+	// not transactional: earlier keys in the loop may already be persisted.
+	if len(failedKeys) > 0 {
+		sort.Strings(failedKeys) // deterministic: Go map iteration order is random
+		slog.Warn("config: partial persist failure", "failed", len(failedKeys), "attempted", attempted)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error":       "failed to persist one or more config keys",
+			"failed_keys": failedKeys,
+		})
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

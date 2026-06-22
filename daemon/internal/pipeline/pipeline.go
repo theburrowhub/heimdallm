@@ -696,6 +696,12 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	return rev, nil
 }
 
+// orphanedReviewID is the sentinel github_review_id stored for a review that
+// can never be published (no repo, corrupt stored JSON, or a permanent submit
+// failure). It marks the row as resolved so PublishPending stops retrying it,
+// while being distinguishable from a real GitHub review id.
+const orphanedReviewID = -1
+
 // markOrphanIfPermanent inspects the error returned by SubmitReview and,
 // when it is a *github.PermanentSubmitError, marks the local review row
 // as orphaned via the (-1, "") sentinel that PublishPending also uses
@@ -714,7 +720,7 @@ func (p *Pipeline) markOrphanIfPermanent(reviewID int64, submitErr error, source
 	if !errors.As(submitErr, &permErr) {
 		return false
 	}
-	if mErr := p.store.MarkReviewPublished(reviewID, -1, "", time.Now().UTC()); mErr != nil {
+	if mErr := p.store.MarkReviewPublished(reviewID, orphanedReviewID, "", time.Now().UTC()); mErr != nil {
 		slog.Warn("pipeline: failed to mark orphaned review, will retry next tick",
 			"review_id", reviewID, "source", source, "reason", permErr.Reason, "err", mErr)
 		return true
@@ -737,15 +743,27 @@ func (p *Pipeline) PublishPending() {
 			continue
 		}
 		// Skip reviews for PRs with no repo — orphaned records that will never publish.
-		// Mark them as permanently published (fake ID -1, empty state) to stop retry noise.
+		// Mark them as permanently published (orphanedReviewID, empty state) to stop retry noise.
 		if pr.Repo == "" {
-			_ = p.store.MarkReviewPublished(rev.ID, -1, "", time.Now().UTC())
+			_ = p.store.MarkReviewPublished(rev.ID, orphanedReviewID, "", time.Now().UTC())
 			slog.Info("pipeline: skipping pending review for PR with no repo", "review_id", rev.ID)
 			continue
 		}
-		// Rebuild a minimal result from stored JSON for the body
+		// Rebuild a minimal result from stored JSON for the body. The daemon
+		// always writes well-formed JSON here, so a decode failure means the
+		// stored row is corrupt and the issue list is unrecoverable. Don't
+		// publish a misleading review missing its findings, and don't retry a
+		// deterministic failure forever — orphan it like the no-repo case above.
 		var issues []executor.Issue
-		json.Unmarshal([]byte(rev.Issues), &issues)
+		if err := json.Unmarshal([]byte(rev.Issues), &issues); err != nil {
+			slog.Warn("pipeline: skipping pending review with corrupt issues JSON",
+				"review_id", rev.ID, "pr", pr.Number, "repo", pr.Repo, "err", err)
+			if mErr := p.store.MarkReviewPublished(rev.ID, orphanedReviewID, "", time.Now().UTC()); mErr != nil {
+				slog.Warn("pipeline: failed to orphan corrupt review, will retry next tick",
+					"review_id", rev.ID, "err", mErr)
+			}
+			continue
+		}
 		result := &executor.ReviewResult{
 			Summary:  rev.Summary,
 			Issues:   issues,
@@ -877,13 +895,24 @@ func BuildGitHubBody(r *executor.ReviewResult) string {
 
 // severityRank maps a severity string to a numeric rank for comparison.
 func severityRank(s string) int {
-	switch strings.ToLower(s) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "high":
 		return 3
 	case "medium":
 		return 2
 	default:
 		return 1
+	}
+}
+
+// isCanonicalSeverity reports whether s is one of the severities the agent
+// prompt mandates (low|medium|high), case-insensitive.
+func isCanonicalSeverity(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "low", "medium", "high":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -904,14 +933,38 @@ func rankToSeverity(r int) string {
 // inconsistencies where issues are flagged high but the global field is set
 // low (prompt injection, model error, hallucination).
 func ReconcileSeverity(result *executor.ReviewResult) string {
-	maxRank := severityRank(result.Severity)
+	// Fail-safe on the top-level severity. The agent prompt mandates one of
+	// low|medium|high; a non-canonical value ("critical", "blocker", or model
+	// garbage) would otherwise fall through severityRank's default to rank 1
+	// ("low") and silently APPROVE a PR the model meant to block. Treat any
+	// unrecognized top-level severity as "high" so a human reviews it. Per-issue
+	// severities stay tolerant (unknown → low) so a stray "nit"/"info" label
+	// cannot escalate the whole review.
+	//
+	// An empty top-level severity is intentionally NOT failed-safe: parseResult
+	// coerces a missing severity to "low" before this runs, and an omitted
+	// severity is the documented "no issues" default — not a blocked escalation
+	// (the #547 failure mode). Escalating empty would over-block clean reviews.
+	nonCanonical := result.Severity != "" && !isCanonicalSeverity(result.Severity)
+	var maxRank int
+	if nonCanonical {
+		slog.Warn("pipeline: non-canonical top-level severity from agent; failing safe to high",
+			"ai_severity", result.Severity)
+		maxRank = severityRank("high")
+	} else {
+		maxRank = severityRank(result.Severity)
+	}
 	for _, iss := range result.Issues {
 		if r := severityRank(iss.Severity); r > maxRank {
 			maxRank = r
 		}
 	}
 	reconciled := rankToSeverity(maxRank)
-	if reconciled != result.Severity {
+	// Only emit the "AI inconsistency" warning for the case it actually
+	// describes — a canonical top-level raised by a higher per-issue severity.
+	// The non-canonical path already logged its own accurate warning above, so
+	// guarding here avoids a misleading double log on the same call.
+	if !nonCanonical && reconciled != result.Severity {
 		slog.Warn("pipeline: severity reconciled (AI inconsistency)",
 			"ai_severity", result.Severity,
 			"reconciled", reconciled,

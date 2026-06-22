@@ -29,18 +29,18 @@ type repoRenameRequest struct {
 // no-op at the store layer and silently returns 200.
 func (srv *Server) handleAdminRepoRename(w http.ResponseWriter, r *http.Request) {
 	if srv.repoRenameFn == nil {
-		http.Error(w, `{"error":"rename trigger not available"}`, http.StatusServiceUnavailable)
+		httpJSONErr(w, http.StatusServiceUnavailable, "rename trigger not available")
 		return
 	}
 	var req repoRenameRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid JSON body"}`, http.StatusBadRequest)
+		httpJSONErr(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
 	req.OldRepo = strings.TrimSpace(req.OldRepo)
 	req.NewRepo = strings.TrimSpace(req.NewRepo)
 	if req.OldRepo == "" || req.NewRepo == "" {
-		http.Error(w, `{"error":"old_repo and new_repo are required"}`, http.StatusBadRequest)
+		httpJSONErr(w, http.StatusBadRequest, "old_repo and new_repo are required")
 		return
 	}
 
@@ -50,7 +50,7 @@ func (srv *Server) handleAdminRepoRename(w http.ResponseWriter, r *http.Request)
 		slog.Error("POST /admin/repo-rename failed",
 			"old_repo", req.OldRepo, "new_repo", req.NewRepo, "err", err)
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-			http.Error(w, `{"error":"rename timed out"}`, http.StatusGatewayTimeout)
+			httpJSONErr(w, http.StatusGatewayTimeout, "rename timed out")
 			return
 		}
 		// Validation errors (empty/identical/malformed slugs) surface
@@ -59,10 +59,12 @@ func (srv *Server) handleAdminRepoRename(w http.ResponseWriter, r *http.Request)
 		// we use a simple substring match — no need to import the
 		// rename package here for one sentinel check.
 		if strings.Contains(err.Error(), "invalid repo slug") {
-			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadRequest)
+			// httpJSONErr escapes the message so a slug with a quote/backslash
+			// can't break the JSON body. See #552.
+			httpJSONErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		http.Error(w, `{"error":"rename failed"}`, http.StatusInternalServerError)
+		httpJSONErr(w, http.StatusInternalServerError, "rename failed")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{

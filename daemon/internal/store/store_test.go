@@ -2,7 +2,9 @@ package store_test
 
 import (
 	"database/sql"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -235,6 +237,114 @@ func TestRetentionPurge(t *testing.T) {
 	reviews, _ := s.ListReviewsForPR(prID)
 	if len(reviews) != 0 {
 		t.Errorf("expected 0 reviews after purge, got %d", len(reviews))
+	}
+}
+
+// Regression for #551: a non-positive maxDays must not compute a future cutoff
+// and delete the entire review history; both 0 and negatives are no-ops.
+func TestPurgeOldReviews_NonPositiveIsNoOp(t *testing.T) {
+	for _, maxDays := range []int{0, -1, -365} {
+		t.Run(fmt.Sprintf("maxDays=%d", maxDays), func(t *testing.T) {
+			s := newTestStore(t)
+			prID, err := s.UpsertPR(&store.PR{GithubID: 1, Repo: "org/r", Number: 1, Title: "t", Author: "a", URL: "u", State: "open", UpdatedAt: time.Now(), FetchedAt: time.Now()})
+			if err != nil {
+				t.Fatalf("upsert pr: %v", err)
+			}
+			for _, age := range []time.Duration{-100 * 24 * time.Hour, -1 * time.Hour} {
+				if _, err := s.InsertReview(&store.Review{
+					PRID: prID, CLIUsed: "claude", Summary: "s", Issues: "[]", Suggestions: "[]", Severity: "low",
+					CreatedAt: time.Now().Add(age),
+				}); err != nil {
+					t.Fatalf("insert review: %v", err)
+				}
+			}
+			if err := s.PurgeOldReviews(maxDays); err != nil {
+				t.Fatalf("purge: %v", err)
+			}
+			reviews, err := s.ListReviewsForPR(prID)
+			if err != nil {
+				t.Fatalf("list reviews: %v", err)
+			}
+			if len(reviews) != 2 {
+				t.Errorf("maxDays=%d wiped reviews: got %d, want 2 (no-op expected)", maxDays, len(reviews))
+			}
+		})
+	}
+}
+
+func TestComputeStats_CountsBasics(t *testing.T) {
+	s := newTestStore(t)
+	prID, err := s.UpsertPR(&store.PR{GithubID: 1, Repo: "org/r", Number: 1, Title: "t", Author: "a", URL: "u", State: "open", UpdatedAt: time.Now(), FetchedAt: time.Now()})
+	if err != nil {
+		t.Fatalf("upsert pr: %v", err)
+	}
+	for _, sev := range []string{"low", "low", "high"} {
+		if _, err := s.InsertReview(&store.Review{
+			PRID: prID, CLIUsed: "claude", Summary: "s", Issues: "[]", Suggestions: "[]", Severity: sev,
+			CreatedAt: time.Now(),
+		}); err != nil {
+			t.Fatalf("insert review: %v", err)
+		}
+	}
+
+	stats, err := s.ComputeStats(nil, nil)
+	if err != nil {
+		t.Fatalf("ComputeStats: %v", err)
+	}
+	if stats.TotalReviews != 3 {
+		t.Errorf("TotalReviews = %d, want 3", stats.TotalReviews)
+	}
+	if stats.BySeverity["low"] != 2 || stats.BySeverity["high"] != 1 {
+		t.Errorf("BySeverity = %v, want low:2 high:1", stats.BySeverity)
+	}
+}
+
+func TestComputeStats_AvgIssuesPerReview(t *testing.T) {
+	s := newTestStore(t)
+	prID, err := s.UpsertPR(&store.PR{GithubID: 1, Repo: "org/r", Number: 1, Title: "t", Author: "a", URL: "u", State: "open", UpdatedAt: time.Now(), FetchedAt: time.Now()})
+	if err != nil {
+		t.Fatalf("upsert pr: %v", err)
+	}
+	// Two reviews carrying 3 and 1 issues, plus one with none — avg over all 3
+	// reviews is (3+1+0)/3 = 1.333…
+	for _, issues := range []string{
+		`[{"a":1},{"a":2},{"a":3}]`,
+		`[{"a":1}]`,
+		`[]`,
+	} {
+		if _, err := s.InsertReview(&store.Review{
+			PRID: prID, CLIUsed: "claude", Summary: "s", Issues: issues, Suggestions: "[]", Severity: "low",
+			CreatedAt: time.Now(),
+		}); err != nil {
+			t.Fatalf("insert review: %v", err)
+		}
+	}
+
+	stats, err := s.ComputeStats(nil, nil)
+	if err != nil {
+		t.Fatalf("ComputeStats: %v", err)
+	}
+	if want := 4.0 / 3.0; stats.AvgIssuesPerReview != want {
+		t.Errorf("AvgIssuesPerReview = %v, want %v", stats.AvgIssuesPerReview, want)
+	}
+}
+
+// Regression for #553: a DB error must surface through the error return rather
+// than yielding zeroed/partial stats with a nil error. Closing the store makes
+// every query fail, so ComputeStats must report it instead of returning ok.
+func TestComputeStats_DBErrorPropagates(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	stats, err := s.ComputeStats(nil, nil)
+	if err == nil {
+		t.Fatalf("ComputeStats on closed DB = nil error (stats=%+v), want error", stats)
+	}
+	// The first query (total reviews) is what fails; assert the wrapped message
+	// localizes it, so a future reorder of the queries is caught.
+	if !strings.Contains(err.Error(), "total reviews") {
+		t.Errorf("error = %q, want it to mention %q", err, "total reviews")
 	}
 }
 

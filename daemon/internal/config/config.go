@@ -14,8 +14,32 @@ import (
 	"github.com/heimdallm/daemon/internal/executor"
 )
 
-var validIntervals = map[string]bool{
-	"1m": true, "5m": true, "30m": true, "1h": true,
+// Poll interval bounds. Any time.ParseDuration value within this range is
+// accepted; the discrete whitelist {1m,5m,30m,1h} was removed in favour of a
+// continuous range so values like 3m or 10m are valid everywhere (TOML, GUI,
+// TUI). 1m keeps the GitHub rate-limit floor; 24h is a generous ceiling that
+// still rejects pathological values like 1s or 0.
+const (
+	minPollInterval = time.Minute
+	maxPollInterval = 24 * time.Hour
+)
+
+// ValidatePollInterval reports whether raw is an acceptable poll_interval: a
+// time.ParseDuration value within [minPollInterval, maxPollInterval]. An empty
+// string is allowed (callers apply the default). Exported so the HTTP config
+// handler enforces the same rule as config load.
+func ValidatePollInterval(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return fmt.Errorf("invalid poll_interval %q: %w", raw, err)
+	}
+	if d < minPollInterval || d > maxPollInterval {
+		return fmt.Errorf("poll_interval %q out of range (must be between %s and %s)", raw, minPollInterval, maxPollInterval)
+	}
+	return nil
 }
 
 // githubTopicPattern enforces GitHub's topic rules: lowercase letters, digits
@@ -588,6 +612,11 @@ type OrgAI struct {
 	// nil = inherit from global. Present fields overlay the global baseline.
 	CircuitBreaker *CircuitBreakerConfig `toml:"circuit_breaker,omitempty"`
 }
+
+// MaxRetentionDays is the upper bound (≈10 years) shared by every retention
+// limit: retention.max_days, activity_log.retention_days, and the HTTP
+// PUT /config validator. Keeping it in one place stops the three checks drifting.
+const MaxRetentionDays = 3650
 
 type RetentionConfig struct {
 	MaxDays int `toml:"max_days"`
@@ -1206,8 +1235,8 @@ func (c *Config) Validate() error {
 	if c.AI.Primary == "" {
 		return fmt.Errorf("config: ai.primary is required")
 	}
-	if c.GitHub.PollInterval != "" && !validIntervals[c.GitHub.PollInterval] {
-		return fmt.Errorf("config: invalid poll_interval %q (valid: 1m, 5m, 30m, 1h)", c.GitHub.PollInterval)
+	if err := ValidatePollInterval(c.GitHub.PollInterval); err != nil {
+		return fmt.Errorf("config: %w", err)
 	}
 	// Validate per-CLI agent configs: permission_mode and approval_mode must be in their allowlists.
 	for name, a := range c.AI.Agents {
@@ -1233,10 +1262,16 @@ func (c *Config) Validate() error {
 	if err := c.validateScopedIssueTracking(); err != nil {
 		return err
 	}
+	// Bound the review-retention window for the TOML and env paths (the HTTP
+	// PUT /config validator covers its own path). A negative value would push
+	// PurgeOldReviews' cutoff into the future and wipe all reviews (#551).
+	if c.Retention.MaxDays < 0 || c.Retention.MaxDays > MaxRetentionDays {
+		return fmt.Errorf("config: retention.max_days must be between 0 and %d, got %d", MaxRetentionDays, c.Retention.MaxDays)
+	}
 	if c.ActivityLog.RetentionDays != nil {
 		d := *c.ActivityLog.RetentionDays
-		if d < 0 || d > 3650 {
-			return fmt.Errorf("config: activity_log.retention_days must be between 0 and 3650, got %d", d)
+		if d < 0 || d > MaxRetentionDays {
+			return fmt.Errorf("config: activity_log.retention_days must be between 0 and %d, got %d", MaxRetentionDays, d)
 		}
 	}
 	return nil

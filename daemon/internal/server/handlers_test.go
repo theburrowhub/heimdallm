@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -323,6 +324,49 @@ func TestHandlerPutConfig(t *testing.T) {
 	srv.Router().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Errorf("put config: status %d, body: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestHandlerPutConfig_PersistFailureReturns500 guards #550: a failed
+// SetConfig must surface as 500 with the offending keys, not a misleading
+// 200 OK that makes the UI believe a never-persisted save succeeded.
+//
+// The multi-key payload also locks the contract that the loop accumulates
+// EVERY failed key (not just the first) and returns them sorted, so the
+// response is deterministic regardless of Go's random map iteration order.
+// Forcing only a subset to fail would require a store seam to inject per-key
+// errors; the store is a concrete *store.Store, so we close it to fail all
+// writes and assert the full sorted set instead.
+func TestHandlerPutConfig_PersistFailureReturns500(t *testing.T) {
+	srv, s := setupServer(t)
+	// Close the store so the writes fail (sql: database is closed) while the
+	// pure key/value validation above still passes.
+	s.Close()
+
+	// Several writable keys, deliberately not in alphabetical order in the
+	// payload, so the assertion proves sort.Strings ordered the result.
+	body := `{"review_mode":"single","poll_interval":"5m","retention_days":90}`
+	req := httptest.NewRequest("PUT", "/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 on persist failure, got %d (body: %s)", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Error      string   `json:"error"`
+		FailedKeys []string `json:"failed_keys"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v (body: %s)", err, w.Body.String())
+	}
+	if resp.Error == "" {
+		t.Errorf("expected non-empty error message, got body: %s", w.Body.String())
+	}
+	want := []string{"poll_interval", "retention_days", "review_mode"} // sorted
+	if !reflect.DeepEqual(resp.FailedKeys, want) {
+		t.Errorf("failed_keys = %v, want %v (exact set, sorted)", resp.FailedKeys, want)
 	}
 }
 
@@ -1436,8 +1480,23 @@ func TestHandlerPutConfigValueValidation(t *testing.T) {
 			wantStatus: http.StatusOK,
 		},
 		{
-			name:       "invalid poll_interval 2m",
-			body:       `{"poll_interval":"2m"}`,
+			name:       "valid arbitrary poll_interval 3m",
+			body:       `{"poll_interval":"3m"}`,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "invalid poll_interval below floor 30s",
+			body:       `{"poll_interval":"30s"}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "invalid poll_interval above ceiling 48h",
+			body:       `{"poll_interval":"48h"}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "invalid poll_interval unparseable",
+			body:       `{"poll_interval":"nonsense"}`,
 			wantStatus: http.StatusBadRequest,
 		},
 		{

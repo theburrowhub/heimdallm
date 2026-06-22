@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"reflect"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -47,6 +48,28 @@ import (
 var version = "dev"
 
 func versionString() string { return version }
+
+// publishBridgeEvents re-publishes every SSE broker event to NATS so the SSE
+// handler (which reads from NATS) sees events from all broker publishers.
+// Each event is processed under its own recover(): a panic on one event is
+// logged with a stack and the loop continues to the next, so a single bad
+// event can neither crash the daemon (a panic in a bare goroutine is fatal)
+// nor permanently kill the bridge that feeds every SSE client.
+func publishBridgeEvents(events <-chan sse.Event, publish func(subject string, data []byte) error) {
+	for event := range events {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("sse-bridge: recovered from panic; continuing",
+						"type", event.Type, "panic", r, "stack", string(debug.Stack()))
+				}
+			}()
+			if err := publish(bus.SubjEventPrefix+event.Type, []byte(event.Data)); err != nil {
+				slog.Warn("sse-bridge: publish to NATS failed", "type", event.Type, "err", err)
+			}
+		}()
+	}
+}
 
 func main() {
 	if len(os.Args) > 1 {
@@ -133,20 +156,30 @@ func main() {
 	}
 
 	// Clear in-flight review claims leaked by a daemon that crashed between
-	// claim and release. The 30-minute cutoff gives normal reviews (which
-	// finish in seconds-minutes) plenty of headroom while still cleaning up
-	// anything stuck from a previous process. See theburrowhub/heimdallm#243.
-	if n, err := s.ClearStaleInFlight(30 * time.Minute); err != nil {
-		slog.Warn("startup: clear stale inflight failed", "err", err)
+	// claim and release. See theburrowhub/heimdallm#243.
+	//
+	// Single-instance deployment: any claim that survives a restart is, by
+	// definition, orphaned — no goroutine from the previous process can still
+	// be holding the work. The earlier 30-minute cutoff left a "dead zone"
+	// (#544) where a claim younger than the cutoff would survive forever —
+	// the daemon's restart-only sweep skipped it, and there was no periodic
+	// sweep to reap it later. Clearing unconditionally at startup eliminates
+	// that dead zone. The periodic sweep in startPollers handles claims
+	// leaked at runtime (still uses the age-based cutoff so live reviews are
+	// not killed). If multi-instance support is ever added (see #243/#426)
+	// this must be replaced by a lease + instance-id scheme — a time-based
+	// cutoff is the wrong abstraction for multi-instance.
+	if n, err := s.ClearAllInFlight(); err != nil {
+		slog.Warn("startup: clear all inflight failed", "err", err)
 	} else if n > 0 {
-		slog.Info("startup: cleared stale inflight rows", "count", n)
+		slog.Info("startup: cleared inflight rows", "count", n)
 	}
 
 	// Mirror of the PR-side sweep above for issue-triage claims (#292).
-	if n, err := s.ClearStaleIssueTriageInFlight(30 * time.Minute); err != nil {
-		slog.Warn("startup: clear stale issue triage inflight failed", "err", err)
+	if n, err := s.ClearAllIssueTriageInFlight(); err != nil {
+		slog.Warn("startup: clear all issue triage inflight failed", "err", err)
 	} else if n > 0 {
-		slog.Info("startup: cleared stale issue triage inflight rows", "count", n)
+		slog.Info("startup: cleared issue triage inflight rows", "count", n)
 	}
 
 	// ── NATS event bus (core only, no JetStream) ───────────────────────
@@ -176,14 +209,9 @@ func main() {
 	// to NATS events subjects, removing the need for the broker entirely.
 	bridgeCh := broker.Subscribe()
 	if bridgeCh != nil {
-		go func() {
-			for event := range bridgeCh {
-				subj := "heimdallm.events." + event.Type
-				if err := eventBus.Conn().Publish(subj, []byte(event.Data)); err != nil {
-					slog.Warn("sse-bridge: publish to NATS failed", "type", event.Type, "err", err)
-				}
-			}
-		}()
+		// publishBridgeEvents recovers per event and never panics outward, so
+		// it is safe to run in this bare goroutine.
+		go publishBridgeEvents(bridgeCh, eventBus.Conn().Publish)
 	} else {
 		slog.Warn("sse-bridge: broker subscriber cap reached, SSE bridge disabled")
 	}
@@ -671,6 +699,40 @@ func main() {
 				case <-ticker.C:
 					limiter.Refill()
 					slog.Info("pollers: rate limiter refilled")
+				}
+			}
+		}()
+
+		// In-flight claim sweep (#544). Catches reviews_in_flight and
+		// issue_triage_in_flight claims that were leaked at runtime (panic,
+		// SIGKILL between claim and the deferred release, etc.). Worst-case
+		// reap latency is sweepInterval + inflightSweepMaxAge ≈ 35 min, well
+		// under the previous "forever" failure mode. The 30-min maxAge gives
+		// normal reviews (seconds to a few minutes) plenty of headroom; the
+		// PeriodicSweepPreservesYoungClaims tests in package store lock in
+		// that a fresh claim survives this sweep.
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			const sweepInterval = 5 * time.Minute
+			const inflightSweepMaxAge = 30 * time.Minute
+			ticker := time.NewTicker(sweepInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if n, err := s.ClearStaleInFlight(inflightSweepMaxAge); err != nil {
+						slog.Warn("sweep: clear stale inflight failed", "err", err)
+					} else if n > 0 {
+						slog.Info("sweep: cleared stale inflight rows", "count", n)
+					}
+					if n, err := s.ClearStaleIssueTriageInFlight(inflightSweepMaxAge); err != nil {
+						slog.Warn("sweep: clear stale issue triage inflight failed", "err", err)
+					} else if n > 0 {
+						slog.Info("sweep: cleared stale issue triage inflight rows", "count", n)
+					}
 				}
 			}
 		}()
@@ -2630,12 +2692,13 @@ func aiRepoKeys(c *config.Config) []string {
 // first-seen timestamps. This helper is pure state mutation so it's easy
 // to test in isolation.
 func upsertDiscoveredRepos(c *config.Config, prs []*gh.PullRequest) []string {
-	known := make(map[string]struct{})
+	inRepositories := make(map[string]struct{}, len(c.GitHub.Repositories))
 	for _, r := range c.GitHub.Repositories {
-		known[r] = struct{}{}
+		inRepositories[r] = struct{}{}
 	}
+	inNonMonitored := make(map[string]struct{}, len(c.GitHub.NonMonitored))
 	for _, r := range c.GitHub.NonMonitored {
-		known[r] = struct{}{}
+		inNonMonitored[r] = struct{}{}
 	}
 
 	// Build an org allowlist from DiscoveryOrgs. When set, repos whose org
@@ -2653,7 +2716,54 @@ func upsertDiscoveredRepos(c *config.Config, prs []*gh.PullRequest) []string {
 		if pr.Repo == "" {
 			continue
 		}
-		if _, alreadyKnown := known[pr.Repo]; alreadyKnown {
+
+		// Repos with an explicit [ai.repos.*] entry are opted in by the
+		// operator. Explicit config is intent and must win over both guards:
+		//   - It bypasses the discovery_orgs allowlist (theburrowhub/heimdallm#527
+		//     item 2): a configured repo outside the discovery orgs must still
+		//     be monitored, so this check precedes the org filter below.
+		//   - It promotes the repo out of NonMonitored when a stale row from a
+		//     prior tick blacklisted it (#527 item 1). Leaving it in
+		//     NonMonitored keeps config state inconsistent for code that reads
+		//     the list directly, even though MergeRepos already exempts it. So
+		//     we strip the repo from NonMonitored and add it to Repositories.
+		// See also theburrowhub/heimdallm#281 for why a configured repo must
+		// never linger in NonMonitored (MergeRepos would otherwise blacklist it
+		// and silently stop issue polling).
+		if _, hasExplicitAIConfig := c.AI.Repos[pr.Repo]; hasExplicitAIConfig {
+			// Within-tick duplicate PRs for the same repo are absorbed: after the
+			// first one promotes the repo, inRepositories/inNonMonitored reflect
+			// the new state, so a second PR for the same repo is a no-op here.
+			_, alreadyMonitored := inRepositories[pr.Repo]
+			_, blacklisted := inNonMonitored[pr.Repo]
+			if blacklisted {
+				c.GitHub.NonMonitored = removeRepo(c.GitHub.NonMonitored, pr.Repo)
+				delete(inNonMonitored, pr.Repo)
+			}
+			if !alreadyMonitored {
+				c.GitHub.Repositories = append(c.GitHub.Repositories, pr.Repo)
+				inRepositories[pr.Repo] = struct{}{}
+			}
+			// Report the repo as added whenever EITHER list was mutated — not
+			// only on the add-to-Repositories path. processDiscoveredRepos
+			// early-returns on an empty added set, so a strip-only change (repo
+			// already in Repositories but also stale in NonMonitored) must still
+			// land here, or the NonMonitored strip would not be persisted and the
+			// inconsistency would survive across reloads.
+			if blacklisted || !alreadyMonitored {
+				slog.Info("upsertDiscoveredRepos: promoted explicitly-configured repo",
+					"repo", pr.Repo, "added_to_repositories", !alreadyMonitored, "stripped_from_non_monitored", blacklisted)
+				added = append(added, pr.Repo)
+			}
+			continue
+		}
+
+		// Auto-discovered repos (no explicit config): skip when already tracked
+		// in either list.
+		if _, ok := inRepositories[pr.Repo]; ok {
+			continue
+		}
+		if _, ok := inNonMonitored[pr.Repo]; ok {
 			continue
 		}
 		// Filter by allowed orgs when configured.
@@ -2668,21 +2778,27 @@ func upsertDiscoveredRepos(c *config.Config, prs []*gh.PullRequest) []string {
 				continue
 			}
 		}
-		// Repos with an explicit [ai.repos.*] entry are opted in by the operator
-		// and must NEVER land in NonMonitored — even when AutoEnablePRForDiscovery
-		// is off. Otherwise the next MergeRepos call would blacklist them and
-		// silently stop issue polling for a repo the user just configured. See
-		// theburrowhub/heimdallm#281.
-		_, hasExplicitAIConfig := c.AI.Repos[pr.Repo]
-		if enable || hasExplicitAIConfig {
+		if enable {
 			c.GitHub.Repositories = append(c.GitHub.Repositories, pr.Repo)
+			inRepositories[pr.Repo] = struct{}{}
 		} else {
 			c.GitHub.NonMonitored = append(c.GitHub.NonMonitored, pr.Repo)
+			inNonMonitored[pr.Repo] = struct{}{}
 		}
-		known[pr.Repo] = struct{}{}
 		added = append(added, pr.Repo)
 	}
 	return added
+}
+
+// removeRepo returns s without the first occurrence of repo, preserving order.
+// Returns s unchanged when repo is absent.
+func removeRepo(s []string, repo string) []string {
+	for i, r := range s {
+		if r == repo {
+			return append(s[:i:i], s[i+1:]...)
+		}
+	}
+	return s
 }
 
 // upsertDiscoveredFromTopics persists repos received from tier1's topic
