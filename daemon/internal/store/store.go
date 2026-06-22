@@ -482,30 +482,44 @@ func (s *Store) ComputeStats(repos []string, orgs []string) (*Stats, error) {
 	}
 
 	// Total reviews
-	s.db.QueryRow("SELECT COUNT(*) FROM reviews r WHERE 1=1"+repoFilter, repoArgs...).Scan(&stats.TotalReviews)
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM reviews r WHERE 1=1"+repoFilter, repoArgs...).Scan(&stats.TotalReviews); err != nil {
+		return nil, fmt.Errorf("store: stats total reviews: %w", err)
+	}
 
 	// By severity
-	rows, _ := s.db.Query("SELECT severity, COUNT(*) FROM reviews r WHERE 1=1"+repoFilter+" GROUP BY severity", repoArgs...)
-	if rows != nil {
-		defer rows.Close()
-		for rows.Next() {
-			var sev string
-			var cnt int
-			rows.Scan(&sev, &cnt)
-			stats.BySeverity[sev] = cnt
+	rows, err := s.db.Query("SELECT severity, COUNT(*) FROM reviews r WHERE 1=1"+repoFilter+" GROUP BY severity", repoArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("store: stats by severity: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sev string
+		var cnt int
+		if err := rows.Scan(&sev, &cnt); err != nil {
+			return nil, fmt.Errorf("store: stats by severity scan: %w", err)
 		}
+		stats.BySeverity[sev] = cnt
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: stats by severity rows: %w", err)
 	}
 
 	// By CLI
-	rows2, _ := s.db.Query("SELECT cli_used, COUNT(*) FROM reviews r WHERE 1=1"+repoFilter+" GROUP BY cli_used", repoArgs...)
-	if rows2 != nil {
-		defer rows2.Close()
-		for rows2.Next() {
-			var cli string
-			var cnt int
-			rows2.Scan(&cli, &cnt)
-			stats.ByCLI[cli] = cnt
+	rows2, err := s.db.Query("SELECT cli_used, COUNT(*) FROM reviews r WHERE 1=1"+repoFilter+" GROUP BY cli_used", repoArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("store: stats by cli: %w", err)
+	}
+	defer rows2.Close()
+	for rows2.Next() {
+		var cli string
+		var cnt int
+		if err := rows2.Scan(&cli, &cnt); err != nil {
+			return nil, fmt.Errorf("store: stats by cli scan: %w", err)
 		}
+		stats.ByCLI[cli] = cnt
+	}
+	if err := rows2.Err(); err != nil {
+		return nil, fmt.Errorf("store: stats by cli rows: %w", err)
 	}
 
 	// Top repos by review count
@@ -514,14 +528,20 @@ func (s *Store) ComputeStats(repos []string, orgs []string) (*Stats, error) {
 		FROM reviews r JOIN prs p ON p.id = r.pr_id
 		WHERE p.repo != ''` + repoFilterJoined + `
 		GROUP BY p.repo ORDER BY cnt DESC LIMIT 8`
-	rows3, _ := s.db.Query(topRepoQuery, repoArgs...)
-	if rows3 != nil {
-		defer rows3.Close()
-		for rows3.Next() {
-			var rc RepoCount
-			rows3.Scan(&rc.Repo, &rc.Count)
-			stats.TopRepos = append(stats.TopRepos, rc)
+	rows3, err := s.db.Query(topRepoQuery, repoArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("store: stats top repos: %w", err)
+	}
+	defer rows3.Close()
+	for rows3.Next() {
+		var rc RepoCount
+		if err := rows3.Scan(&rc.Repo, &rc.Count); err != nil {
+			return nil, fmt.Errorf("store: stats top repos scan: %w", err)
 		}
+		stats.TopRepos = append(stats.TopRepos, rc)
+	}
+	if err := rows3.Err(); err != nil {
+		return nil, fmt.Errorf("store: stats top repos rows: %w", err)
 	}
 
 	// Reviews per day last 7 days
@@ -530,21 +550,31 @@ func (s *Store) ComputeStats(repos []string, orgs []string) (*Stats, error) {
 		FROM reviews r
 		WHERE r.created_at >= datetime('now', '-7 days')` + repoFilter + `
 		GROUP BY day ORDER BY day ASC`
-	rows4, _ := s.db.Query(last7Query, repoArgs...)
-	if rows4 != nil {
-		defer rows4.Close()
-		for rows4.Next() {
-			var dc DayCount
-			rows4.Scan(&dc.Day, &dc.Count)
-			stats.ReviewsLast7Days = append(stats.ReviewsLast7Days, dc)
+	rows4, err := s.db.Query(last7Query, repoArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("store: stats last 7 days: %w", err)
+	}
+	defer rows4.Close()
+	for rows4.Next() {
+		var dc DayCount
+		if err := rows4.Scan(&dc.Day, &dc.Count); err != nil {
+			return nil, fmt.Errorf("store: stats last 7 days scan: %w", err)
 		}
+		stats.ReviewsLast7Days = append(stats.ReviewsLast7Days, dc)
+	}
+	if err := rows4.Err(); err != nil {
+		return nil, fmt.Errorf("store: stats last 7 days rows: %w", err)
 	}
 
 	// Avg issues per review (issues is a JSON array stored as text)
 	var totalIssues, reviewsWithIssues int
-	s.db.QueryRow("SELECT COUNT(*) FROM reviews r WHERE issues != '[]' AND issues != 'null'"+repoFilter, repoArgs...).Scan(&reviewsWithIssues)
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM reviews r WHERE issues != '[]' AND issues != 'null'"+repoFilter, repoArgs...).Scan(&reviewsWithIssues); err != nil {
+		return nil, fmt.Errorf("store: stats reviews with issues: %w", err)
+	}
 	if reviewsWithIssues > 0 {
-		s.db.QueryRow("SELECT COALESCE(SUM(json_array_length(issues)),0) FROM reviews r WHERE issues IS NOT NULL"+repoFilter, repoArgs...).Scan(&totalIssues)
+		if err := s.db.QueryRow("SELECT COALESCE(SUM(json_array_length(issues)),0) FROM reviews r WHERE issues IS NOT NULL"+repoFilter, repoArgs...).Scan(&totalIssues); err != nil {
+			return nil, fmt.Errorf("store: stats total issues: %w", err)
+		}
 		if stats.TotalReviews > 0 {
 			stats.AvgIssuesPerReview = float64(totalIssues) / float64(stats.TotalReviews)
 		}
@@ -560,58 +590,64 @@ func (s *Store) ComputeStats(repos []string, orgs []string) (*Stats, error) {
 		  AND p.fetched_at != ''` + repoFilterJoined + `
 		ORDER BY r.created_at DESC
 		LIMIT 200`
-	timingRows, _ := s.db.Query(timingQuery, repoArgs...)
-	if timingRows != nil {
-		var durations []float64
-		for timingRows.Next() {
-			var d float64
-			timingRows.Scan(&d)
-			// Sanity check: 5s–3600s (ignore implausible values)
-			if d >= 5 && d <= 3600 {
-				durations = append(durations, d)
+	timingRows, err := s.db.Query(timingQuery, repoArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("store: stats timing: %w", err)
+	}
+	defer timingRows.Close()
+	var durations []float64
+	for timingRows.Next() {
+		var d float64
+		if err := timingRows.Scan(&d); err != nil {
+			return nil, fmt.Errorf("store: stats timing scan: %w", err)
+		}
+		// Sanity check: 5s–3600s (ignore implausible values)
+		if d >= 5 && d <= 3600 {
+			durations = append(durations, d)
+		}
+	}
+	if err := timingRows.Err(); err != nil {
+		return nil, fmt.Errorf("store: stats timing rows: %w", err)
+	}
+	if n := len(durations); n > 0 {
+		t := &stats.ReviewTiming
+		t.SampleCount = n
+		sum, minD, maxD := 0.0, durations[0], durations[0]
+		for _, d := range durations {
+			sum += d
+			if d < minD {
+				minD = d
+			}
+			if d > maxD {
+				maxD = d
+			}
+			switch {
+			case d < 30:
+				t.BucketFast++
+			case d < 120:
+				t.BucketMedium++
+			case d < 300:
+				t.BucketSlow++
+			default:
+				t.BucketVerySlow++
 			}
 		}
-		timingRows.Close()
-		if n := len(durations); n > 0 {
-			t := &stats.ReviewTiming
-			t.SampleCount = n
-			sum, minD, maxD := 0.0, durations[0], durations[0]
-			for _, d := range durations {
-				sum += d
-				if d < minD {
-					minD = d
-				}
-				if d > maxD {
-					maxD = d
-				}
-				switch {
-				case d < 30:
-					t.BucketFast++
-				case d < 120:
-					t.BucketMedium++
-				case d < 300:
-					t.BucketSlow++
-				default:
-					t.BucketVerySlow++
-				}
+		t.AvgSeconds = sum / float64(n)
+		t.MinSeconds = minD
+		t.MaxSeconds = maxD
+		// Median (durations are already in insertion order, approximate)
+		sorted := make([]float64, n)
+		copy(sorted, durations)
+		// Simple insertion sort for small N
+		for i := 1; i < n; i++ {
+			for j := i; j > 0 && sorted[j] < sorted[j-1]; j-- {
+				sorted[j], sorted[j-1] = sorted[j-1], sorted[j]
 			}
-			t.AvgSeconds = sum / float64(n)
-			t.MinSeconds = minD
-			t.MaxSeconds = maxD
-			// Median (durations are already in insertion order, approximate)
-			sorted := make([]float64, n)
-			copy(sorted, durations)
-			// Simple insertion sort for small N
-			for i := 1; i < n; i++ {
-				for j := i; j > 0 && sorted[j] < sorted[j-1]; j-- {
-					sorted[j], sorted[j-1] = sorted[j-1], sorted[j]
-				}
-			}
-			if n%2 == 0 {
-				t.MedianSeconds = (sorted[n/2-1] + sorted[n/2]) / 2
-			} else {
-				t.MedianSeconds = sorted[n/2]
-			}
+		}
+		if n%2 == 0 {
+			t.MedianSeconds = (sorted[n/2-1] + sorted[n/2]) / 2
+		} else {
+			t.MedianSeconds = sorted[n/2]
 		}
 	}
 

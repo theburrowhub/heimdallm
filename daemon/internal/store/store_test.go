@@ -271,6 +271,47 @@ func TestPurgeOldReviews_NonPositiveIsNoOp(t *testing.T) {
 	}
 }
 
+func TestComputeStats_CountsBasics(t *testing.T) {
+	s := newTestStore(t)
+	prID, err := s.UpsertPR(&store.PR{GithubID: 1, Repo: "org/r", Number: 1, Title: "t", Author: "a", URL: "u", State: "open", UpdatedAt: time.Now(), FetchedAt: time.Now()})
+	if err != nil {
+		t.Fatalf("upsert pr: %v", err)
+	}
+	for _, sev := range []string{"low", "low", "high"} {
+		if _, err := s.InsertReview(&store.Review{
+			PRID: prID, CLIUsed: "claude", Summary: "s", Issues: "[]", Suggestions: "[]", Severity: sev,
+			CreatedAt: time.Now(),
+		}); err != nil {
+			t.Fatalf("insert review: %v", err)
+		}
+	}
+
+	stats, err := s.ComputeStats(nil, nil)
+	if err != nil {
+		t.Fatalf("ComputeStats: %v", err)
+	}
+	if stats.TotalReviews != 3 {
+		t.Errorf("TotalReviews = %d, want 3", stats.TotalReviews)
+	}
+	if stats.BySeverity["low"] != 2 || stats.BySeverity["high"] != 1 {
+		t.Errorf("BySeverity = %v, want low:2 high:1", stats.BySeverity)
+	}
+}
+
+// Regression for #553: a DB error must surface through the error return rather
+// than yielding zeroed/partial stats with a nil error. Closing the store makes
+// every query fail, so ComputeStats must report it instead of returning ok.
+func TestComputeStats_DBErrorPropagates(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	stats, err := s.ComputeStats(nil, nil)
+	if err == nil {
+		t.Fatalf("ComputeStats on closed DB = nil error (stats=%+v), want error", stats)
+	}
+}
+
 func TestConfigs_ListReturnsAllRows(t *testing.T) {
 	s := newTestStore(t)
 
