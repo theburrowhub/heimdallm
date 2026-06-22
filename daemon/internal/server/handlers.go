@@ -1002,7 +1002,7 @@ func (srv *Server) handlePatchAutonomousOrgConfig(w http.ResponseWriter, r *http
 		return
 	}
 	if err := config.ValidateOrgSlug(org); err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	srv.patchAutonomousSubKey(w, r, "orgs", org)
@@ -1055,9 +1055,9 @@ func (srv *Server) patchAutonomousSubKey(w http.ResponseWriter, r *http.Request,
 		slog.Error("PATCH /config/autonomous failed", "subkey", subKey, "id", id, "err", err)
 		var ve *config.ValidationError
 		if errors.As(err, &ve) {
-			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		} else {
-			http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
 		}
 		return
 	}
