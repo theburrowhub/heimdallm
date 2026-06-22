@@ -613,6 +613,11 @@ type OrgAI struct {
 	CircuitBreaker *CircuitBreakerConfig `toml:"circuit_breaker,omitempty"`
 }
 
+// MaxRetentionDays is the upper bound (≈10 years) shared by every retention
+// limit: retention.max_days, activity_log.retention_days, and the HTTP
+// PUT /config validator. Keeping it in one place stops the three checks drifting.
+const MaxRetentionDays = 3650
+
 type RetentionConfig struct {
 	MaxDays int `toml:"max_days"`
 }
@@ -1257,17 +1262,16 @@ func (c *Config) Validate() error {
 	if err := c.validateScopedIssueTracking(); err != nil {
 		return err
 	}
-	if c.Retention.MaxDays < 0 || c.Retention.MaxDays > 3650 {
-		// Bounds the review-retention window. The HTTP PUT /config path already
-		// rejects out-of-range retention_days; this catches the TOML-file and
-		// HEIMDALLM_RETENTION_DAYS env paths too. Without it, a negative value
-		// pushes PurgeOldReviews' cutoff into the future and wipes all reviews.
-		return fmt.Errorf("config: retention.max_days must be between 0 and 3650, got %d", c.Retention.MaxDays)
+	// Bound the review-retention window for the TOML and env paths (the HTTP
+	// PUT /config validator covers its own path). A negative value would push
+	// PurgeOldReviews' cutoff into the future and wipe all reviews (#551).
+	if c.Retention.MaxDays < 0 || c.Retention.MaxDays > MaxRetentionDays {
+		return fmt.Errorf("config: retention.max_days must be between 0 and %d, got %d", MaxRetentionDays, c.Retention.MaxDays)
 	}
 	if c.ActivityLog.RetentionDays != nil {
 		d := *c.ActivityLog.RetentionDays
-		if d < 0 || d > 3650 {
-			return fmt.Errorf("config: activity_log.retention_days must be between 0 and 3650, got %d", d)
+		if d < 0 || d > MaxRetentionDays {
+			return fmt.Errorf("config: activity_log.retention_days must be between 0 and %d, got %d", MaxRetentionDays, d)
 		}
 	}
 	return nil

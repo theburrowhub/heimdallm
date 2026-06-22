@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -308,27 +309,31 @@ func TestValidate_AllValidIntervals(t *testing.T) {
 
 func TestValidate_RetentionMaxDaysOutOfRange(t *testing.T) {
 	for _, days := range []int{-1, -365, 3651} {
-		cfg := &Config{}
-		cfg.applyDefaults()
-		cfg.AI.Primary = "claude"
-		cfg.Retention.MaxDays = days // set after applyDefaults, which coerces 0 -> 90
+		t.Run(fmt.Sprintf("days=%d", days), func(t *testing.T) {
+			cfg := &Config{}
+			cfg.applyDefaults()
+			cfg.AI.Primary = "claude"
+			cfg.Retention.MaxDays = days // set after applyDefaults, which coerces 0 -> 90
 
-		if err := cfg.Validate(); err == nil {
-			t.Errorf("Validate() with retention.max_days=%d = nil, want error", days)
-		}
+			if err := cfg.Validate(); err == nil {
+				t.Errorf("Validate() with retention.max_days=%d = nil, want error", days)
+			}
+		})
 	}
 }
 
 func TestValidate_RetentionMaxDaysValid(t *testing.T) {
 	for _, days := range []int{0, 1, 90, 3650} {
-		cfg := &Config{}
-		cfg.applyDefaults()
-		cfg.AI.Primary = "claude"
-		cfg.Retention.MaxDays = days
+		t.Run(fmt.Sprintf("days=%d", days), func(t *testing.T) {
+			cfg := &Config{}
+			cfg.applyDefaults()
+			cfg.AI.Primary = "claude"
+			cfg.Retention.MaxDays = days
 
-		if err := cfg.Validate(); err != nil {
-			t.Errorf("Validate() with retention.max_days=%d = %v, want nil", days, err)
-		}
+			if err := cfg.Validate(); err != nil {
+				t.Errorf("Validate() with retention.max_days=%d = %v, want nil", days, err)
+			}
+		})
 	}
 }
 
