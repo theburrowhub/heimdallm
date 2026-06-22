@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -298,6 +299,36 @@ func TestComputeStats_CountsBasics(t *testing.T) {
 	}
 }
 
+func TestComputeStats_AvgIssuesPerReview(t *testing.T) {
+	s := newTestStore(t)
+	prID, err := s.UpsertPR(&store.PR{GithubID: 1, Repo: "org/r", Number: 1, Title: "t", Author: "a", URL: "u", State: "open", UpdatedAt: time.Now(), FetchedAt: time.Now()})
+	if err != nil {
+		t.Fatalf("upsert pr: %v", err)
+	}
+	// Two reviews carrying 3 and 1 issues, plus one with none — avg over all 3
+	// reviews is (3+1+0)/3 = 1.333…
+	for _, issues := range []string{
+		`[{"a":1},{"a":2},{"a":3}]`,
+		`[{"a":1}]`,
+		`[]`,
+	} {
+		if _, err := s.InsertReview(&store.Review{
+			PRID: prID, CLIUsed: "claude", Summary: "s", Issues: issues, Suggestions: "[]", Severity: "low",
+			CreatedAt: time.Now(),
+		}); err != nil {
+			t.Fatalf("insert review: %v", err)
+		}
+	}
+
+	stats, err := s.ComputeStats(nil, nil)
+	if err != nil {
+		t.Fatalf("ComputeStats: %v", err)
+	}
+	if want := 4.0 / 3.0; stats.AvgIssuesPerReview != want {
+		t.Errorf("AvgIssuesPerReview = %v, want %v", stats.AvgIssuesPerReview, want)
+	}
+}
+
 // Regression for #553: a DB error must surface through the error return rather
 // than yielding zeroed/partial stats with a nil error. Closing the store makes
 // every query fail, so ComputeStats must report it instead of returning ok.
@@ -309,6 +340,11 @@ func TestComputeStats_DBErrorPropagates(t *testing.T) {
 	stats, err := s.ComputeStats(nil, nil)
 	if err == nil {
 		t.Fatalf("ComputeStats on closed DB = nil error (stats=%+v), want error", stats)
+	}
+	// The first query (total reviews) is what fails; assert the wrapped message
+	// localizes it, so a future reorder of the queries is caught.
+	if !strings.Contains(err.Error(), "total reviews") {
+		t.Errorf("error = %q, want it to mention %q", err, "total reviews")
 	}
 }
 

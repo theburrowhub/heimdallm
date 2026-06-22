@@ -487,39 +487,29 @@ func (s *Store) ComputeStats(repos []string, orgs []string) (*Stats, error) {
 	}
 
 	// By severity
-	rows, err := s.db.Query("SELECT severity, COUNT(*) FROM reviews r WHERE 1=1"+repoFilter+" GROUP BY severity", repoArgs...)
-	if err != nil {
-		return nil, fmt.Errorf("store: stats by severity: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
+	if err := queryRows(s.db, "SELECT severity, COUNT(*) FROM reviews r WHERE 1=1"+repoFilter+" GROUP BY severity", repoArgs, func(rows *sql.Rows) error {
 		var sev string
 		var cnt int
 		if err := rows.Scan(&sev, &cnt); err != nil {
-			return nil, fmt.Errorf("store: stats by severity scan: %w", err)
+			return err
 		}
 		stats.BySeverity[sev] = cnt
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: stats by severity rows: %w", err)
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("store: stats by severity: %w", err)
 	}
 
 	// By CLI
-	rows2, err := s.db.Query("SELECT cli_used, COUNT(*) FROM reviews r WHERE 1=1"+repoFilter+" GROUP BY cli_used", repoArgs...)
-	if err != nil {
-		return nil, fmt.Errorf("store: stats by cli: %w", err)
-	}
-	defer rows2.Close()
-	for rows2.Next() {
+	if err := queryRows(s.db, "SELECT cli_used, COUNT(*) FROM reviews r WHERE 1=1"+repoFilter+" GROUP BY cli_used", repoArgs, func(rows *sql.Rows) error {
 		var cli string
 		var cnt int
-		if err := rows2.Scan(&cli, &cnt); err != nil {
-			return nil, fmt.Errorf("store: stats by cli scan: %w", err)
+		if err := rows.Scan(&cli, &cnt); err != nil {
+			return err
 		}
 		stats.ByCLI[cli] = cnt
-	}
-	if err := rows2.Err(); err != nil {
-		return nil, fmt.Errorf("store: stats by cli rows: %w", err)
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("store: stats by cli: %w", err)
 	}
 
 	// Top repos by review count
@@ -528,20 +518,15 @@ func (s *Store) ComputeStats(repos []string, orgs []string) (*Stats, error) {
 		FROM reviews r JOIN prs p ON p.id = r.pr_id
 		WHERE p.repo != ''` + repoFilterJoined + `
 		GROUP BY p.repo ORDER BY cnt DESC LIMIT 8`
-	rows3, err := s.db.Query(topRepoQuery, repoArgs...)
-	if err != nil {
-		return nil, fmt.Errorf("store: stats top repos: %w", err)
-	}
-	defer rows3.Close()
-	for rows3.Next() {
+	if err := queryRows(s.db, topRepoQuery, repoArgs, func(rows *sql.Rows) error {
 		var rc RepoCount
-		if err := rows3.Scan(&rc.Repo, &rc.Count); err != nil {
-			return nil, fmt.Errorf("store: stats top repos scan: %w", err)
+		if err := rows.Scan(&rc.Repo, &rc.Count); err != nil {
+			return err
 		}
 		stats.TopRepos = append(stats.TopRepos, rc)
-	}
-	if err := rows3.Err(); err != nil {
-		return nil, fmt.Errorf("store: stats top repos rows: %w", err)
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("store: stats top repos: %w", err)
 	}
 
 	// Reviews per day last 7 days
@@ -550,20 +535,15 @@ func (s *Store) ComputeStats(repos []string, orgs []string) (*Stats, error) {
 		FROM reviews r
 		WHERE r.created_at >= datetime('now', '-7 days')` + repoFilter + `
 		GROUP BY day ORDER BY day ASC`
-	rows4, err := s.db.Query(last7Query, repoArgs...)
-	if err != nil {
-		return nil, fmt.Errorf("store: stats last 7 days: %w", err)
-	}
-	defer rows4.Close()
-	for rows4.Next() {
+	if err := queryRows(s.db, last7Query, repoArgs, func(rows *sql.Rows) error {
 		var dc DayCount
-		if err := rows4.Scan(&dc.Day, &dc.Count); err != nil {
-			return nil, fmt.Errorf("store: stats last 7 days scan: %w", err)
+		if err := rows.Scan(&dc.Day, &dc.Count); err != nil {
+			return err
 		}
 		stats.ReviewsLast7Days = append(stats.ReviewsLast7Days, dc)
-	}
-	if err := rows4.Err(); err != nil {
-		return nil, fmt.Errorf("store: stats last 7 days rows: %w", err)
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("store: stats last 7 days: %w", err)
 	}
 
 	// Avg issues per review (issues is a JSON array stored as text)
@@ -590,24 +570,19 @@ func (s *Store) ComputeStats(repos []string, orgs []string) (*Stats, error) {
 		  AND p.fetched_at != ''` + repoFilterJoined + `
 		ORDER BY r.created_at DESC
 		LIMIT 200`
-	timingRows, err := s.db.Query(timingQuery, repoArgs...)
-	if err != nil {
-		return nil, fmt.Errorf("store: stats timing: %w", err)
-	}
-	defer timingRows.Close()
 	var durations []float64
-	for timingRows.Next() {
+	if err := queryRows(s.db, timingQuery, repoArgs, func(rows *sql.Rows) error {
 		var d float64
-		if err := timingRows.Scan(&d); err != nil {
-			return nil, fmt.Errorf("store: stats timing scan: %w", err)
+		if err := rows.Scan(&d); err != nil {
+			return err
 		}
 		// Sanity check: 5s–3600s (ignore implausible values)
 		if d >= 5 && d <= 3600 {
 			durations = append(durations, d)
 		}
-	}
-	if err := timingRows.Err(); err != nil {
-		return nil, fmt.Errorf("store: stats timing rows: %w", err)
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("store: stats timing: %w", err)
 	}
 	if n := len(durations); n > 0 {
 		t := &stats.ReviewTiming
@@ -658,4 +633,22 @@ func (s *Store) ComputeStats(repos []string, orgs []string) (*Stats, error) {
 	}
 
 	return stats, nil
+}
+
+// queryRows runs query and calls scan once per row, returning the first of any
+// Query, scan, or iteration (rows.Err) error. The *sql.Rows is closed before
+// queryRows returns, so each result set is released as soon as its caller block
+// finishes rather than being held open until the enclosing function returns.
+func queryRows(db *sql.DB, query string, args []any, scan func(*sql.Rows) error) error {
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		if err := scan(rows); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
 }
