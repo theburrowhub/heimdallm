@@ -1568,7 +1568,11 @@ func (d *Dashboard) buildConfigLines() []string {
 				kv("Merge method", v)
 			}
 			if f, ok := aut["dev_max_turns"].(float64); ok {
-				kv("Dev max turns", fmt.Sprintf("%d", int(f)))
+				if int(f) == 0 {
+					kv("Dev max turns", "unlimited")
+				} else {
+					kv("Dev max turns", fmt.Sprintf("%d", int(f)))
+				}
 			}
 			if v, ok := aut["dev_effort"].(string); ok && v != "" {
 				kv("Dev effort", v)
