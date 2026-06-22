@@ -59,7 +59,10 @@ func (srv *Server) handleAdminRepoRename(w http.ResponseWriter, r *http.Request)
 		// we use a simple substring match — no need to import the
 		// rename package here for one sentinel check.
 		if strings.Contains(err.Error(), "invalid repo slug") {
-			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadRequest)
+			// Use httpJSONErr (not a hand-built literal) so an error message
+			// carrying a quote or backslash — e.g. a slug echoed back — is
+			// JSON-escaped and the body stays parseable. See #552.
+			httpJSONErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		http.Error(w, `{"error":"rename failed"}`, http.StatusInternalServerError)
