@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../core/models/config_model.dart';
@@ -780,6 +781,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
             isDense: true,
           ),
           keyboardType: TextInputType.number,
+          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
           onChanged: (v) => setState(() {
             _autonomous = _autonomous.copyWith(devMaxTurns: int.tryParse(v) ?? 0);
           }),
@@ -868,6 +870,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
           isDense: true,
         ),
         keyboardType: TextInputType.number,
+        inputFormatters: [FilteringTextInputFormatter.digitsOnly],
         onChanged: (v) => setState(() {
           _circuitBreaker = _circuitBreaker.copyWith(
             perPr24h: int.tryParse(v) ?? _circuitBreaker.perPr24h,
@@ -883,6 +886,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
           isDense: true,
         ),
         keyboardType: TextInputType.number,
+        inputFormatters: [FilteringTextInputFormatter.digitsOnly],
         onChanged: (v) => setState(() {
           _circuitBreaker = _circuitBreaker.copyWith(
             perRepoHr: int.tryParse(v) ?? _circuitBreaker.perRepoHr,
@@ -898,6 +902,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
           isDense: true,
         ),
         keyboardType: TextInputType.number,
+        inputFormatters: [FilteringTextInputFormatter.digitsOnly],
         onChanged: (v) => setState(() {
           _circuitBreaker = _circuitBreaker.copyWith(
             perIssue24h: int.tryParse(v) ?? _circuitBreaker.perIssue24h,
@@ -913,6 +918,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
           isDense: true,
         ),
         keyboardType: TextInputType.number,
+        inputFormatters: [FilteringTextInputFormatter.digitsOnly],
         onChanged: (v) => setState(() {
           _circuitBreaker = _circuitBreaker.copyWith(
             perIssueRepoHr: int.tryParse(v) ?? _circuitBreaker.perIssueRepoHr,
@@ -928,6 +934,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
           isDense: true,
         ),
         keyboardType: TextInputType.number,
+        inputFormatters: [FilteringTextInputFormatter.digitsOnly],
         onChanged: (v) => setState(() {
           _circuitBreaker = _circuitBreaker.copyWith(
             perImplRepoHr: int.tryParse(v) ?? _circuitBreaker.perImplRepoHr,
