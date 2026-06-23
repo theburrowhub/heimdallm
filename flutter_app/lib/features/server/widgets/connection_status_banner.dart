@@ -13,29 +13,34 @@ class ConnectionStatusBanner extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     const amber = Color(0xFFFFB347);
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      color: amber.withValues(alpha: 0.15),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const SizedBox(
-            width: 12,
-            height: 12,
-            child: CircularProgressIndicator(strokeWidth: 2, color: amber),
-          ),
-          const SizedBox(width: 8),
-          Flexible(
-            child: Text(
-              'Live stream disconnected — reconnecting…',
-              style: TextStyle(
-                fontSize: 12,
-                color: Theme.of(context).colorScheme.onSurface,
+    // liveRegion so assistive tech announces the drop/recovery as it toggles.
+    return Semantics(
+      liveRegion: true,
+      label: 'Live stream disconnected, reconnecting',
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        color: amber.withValues(alpha: 0.15),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(
+              width: 12,
+              height: 12,
+              child: CircularProgressIndicator(strokeWidth: 2, color: amber),
+            ),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(
+                'Live stream disconnected — reconnecting…',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Theme.of(context).colorScheme.onSurface,
+                ),
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

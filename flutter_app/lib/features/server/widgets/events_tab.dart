@@ -22,7 +22,14 @@ import 'event_row.dart';
 /// without chasing the scroll; auto-scroll keeps the view pinned to the
 /// freshest row until paused.
 class EventsTab extends ConsumerStatefulWidget {
-  const EventsTab({super.key});
+  const EventsTab({super.key, @visibleForTesting this.client});
+
+  /// Test-only seam: inject a pre-built [SseClient] (typically backed by a
+  /// mock HTTP client) so the connection-indicator behaviour can be driven
+  /// deterministically. Production code leaves this null and the tab builds
+  /// its own client against the daemon.
+  final SseClient? client;
+
   @override
   ConsumerState<EventsTab> createState() => _EventsTabState();
 }
@@ -51,7 +58,7 @@ class _EventsTabState extends ConsumerState<EventsTab> {
   void initState() {
     super.initState();
     final platform = ref.read(platformServicesProvider);
-    _client = SseClient(platform: platform, path: '/events');
+    _client = widget.client ?? SseClient(platform: platform, path: '/events');
     // The SSE stream forwards transport errors to listeners; the client
     // auto-reconnects, so flip a local flag to drive an in-tab banner instead
     // of letting the drop surface as an unhandled async error. _connected is
@@ -87,6 +94,9 @@ class _EventsTabState extends ConsumerState<EventsTab> {
   }
 
   void _onEvent(SseEvent ev) {
+    // A late event can arrive after dispose() cancels the subscription; bail
+    // before touching state so setState() is never called after dispose.
+    if (!mounted) return;
     Map<String, dynamic> payload;
     try {
       final decoded = jsonDecode(ev.data);
@@ -94,9 +104,9 @@ class _EventsTabState extends ConsumerState<EventsTab> {
     } catch (_) {
       payload = const {};
     }
-    // An event arriving means the stream is live again — clear any banner.
-    _connected = true;
     setState(() {
+      // An event arriving means the stream is live again — clear any banner.
+      _connected = true;
       final row = _EventRow(
         id: _nextRowId++,
         timestamp: DateTime.now(),
