@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/api/sse_client.dart';
 import '../../../core/platform/platform_services_provider.dart';
 import '../event_summary.dart';
+import 'connection_status_banner.dart';
 import 'event_row.dart';
 
 /// Server > Events tab — operational dashboard of live SSE events.
@@ -21,7 +22,14 @@ import 'event_row.dart';
 /// without chasing the scroll; auto-scroll keeps the view pinned to the
 /// freshest row until paused.
 class EventsTab extends ConsumerStatefulWidget {
-  const EventsTab({super.key});
+  const EventsTab({super.key, @visibleForTesting this.client});
+
+  /// Test-only seam: inject a pre-built [SseClient] (typically backed by a
+  /// mock HTTP client) so the connection-indicator behaviour can be driven
+  /// deterministically. Production code leaves this null and the tab builds
+  /// its own client against the daemon.
+  final SseClient? client;
+
   @override
   ConsumerState<EventsTab> createState() => _EventsTabState();
 }
@@ -38,6 +46,11 @@ class _EventsTabState extends ConsumerState<EventsTab> {
   final _expanded = <int>{};
   int _nextRowId = 0;
   bool _autoScroll = true;
+  // This tab's own SSE connection health. The shared stream that drives the
+  // global indicator is separate, so a drop isolated to this connection needs
+  // its own in-tab signal (#572). Optimistic on connect — no events arrive for
+  // up to a polling cycle (60 s) under normal operation.
+  bool _connected = true;
   final Set<String> _enabledGroups = {'pr', 'issue', 'polling', 'state', 'circuit_breaker'};
   String _searchQuery = '';
 
@@ -45,12 +58,21 @@ class _EventsTabState extends ConsumerState<EventsTab> {
   void initState() {
     super.initState();
     final platform = ref.read(platformServicesProvider);
-    _client = SseClient(platform: platform, path: '/events');
-    // The SSE stream now forwards transport errors to listeners; swallow them
-    // here so a transient drop doesn't surface as an unhandled async error.
-    // The client auto-reconnects and the global connection indicator already
-    // reflects the offline state.
-    _sub = _client!.connect().listen(_onEvent, onError: (_) {});
+    _client = widget.client ?? SseClient(platform: platform, path: '/events');
+    // The SSE stream forwards transport errors to listeners; the client
+    // auto-reconnects, so flip a local flag to drive an in-tab banner instead
+    // of letting the drop surface as an unhandled async error. _connected is
+    // restored in _onEvent when the stream resumes.
+    _sub = _client!.connect().listen(
+      _onEvent,
+      onError: (_) => _setConnected(false),
+      onDone: () => _setConnected(false),
+    );
+  }
+
+  void _setConnected(bool value) {
+    if (_connected == value || !mounted) return;
+    setState(() => _connected = value);
   }
 
   @override
@@ -72,6 +94,9 @@ class _EventsTabState extends ConsumerState<EventsTab> {
   }
 
   void _onEvent(SseEvent ev) {
+    // A late event can arrive after dispose() cancels the subscription; bail
+    // before touching state so setState() is never called after dispose.
+    if (!mounted) return;
     Map<String, dynamic> payload;
     try {
       final decoded = jsonDecode(ev.data);
@@ -80,6 +105,8 @@ class _EventsTabState extends ConsumerState<EventsTab> {
       payload = const {};
     }
     setState(() {
+      // An event arriving means the stream is live again — clear any banner.
+      _connected = true;
       final row = _EventRow(
         id: _nextRowId++,
         timestamp: DateTime.now(),
@@ -121,6 +148,7 @@ class _EventsTabState extends ConsumerState<EventsTab> {
             _expanded.clear();
           }),
         ),
+        if (!_connected) const ConnectionStatusBanner(),
         Expanded(
           child: visible.isEmpty
               ? Center(
