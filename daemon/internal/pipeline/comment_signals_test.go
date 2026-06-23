@@ -1,6 +1,9 @@
 package pipeline
 
 import (
+	"bytes"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/heimdallm/daemon/internal/executor"
@@ -394,6 +397,43 @@ func TestReconcileSeverity_NonCanonicalTopLevelNeverCaps(t *testing.T) {
 		if got := ReconcileSeverity(makeResult("critical", issues)); got != "high" {
 			t.Errorf("non-canonical top-level must stay high regardless of issues %v; got %q", issues, got)
 		}
+	}
+}
+
+func TestReconcileSeverity_LogAttrsThreadedIntoWarnLines(t *testing.T) {
+	// The correlation id passed by the caller (repo + PR number) must appear on
+	// BOTH warn lines so a production warning can be tied back to the review that
+	// triggered it (#557). Capture slog output and assert the attrs are present.
+	//
+	// NOTE: this captures via slog.SetDefault, which mutates package-global state.
+	// It is safe only because this test does not call t.Parallel() and no other
+	// test in this package does. Do NOT add t.Parallel() here or to a concurrent
+	// test that also touches the default logger — they would race.
+	capture := func(result *executor.ReviewResult) string {
+		var buf bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		defer slog.SetDefault(prev)
+		ReconcileSeverity(result, "repo", "owner/heimdallm", "pr", 557)
+		return buf.String()
+	}
+
+	// Non-canonical top-level → "failing safe to high" warn line.
+	out := capture(makeResult("critical", nil))
+	if !strings.Contains(out, "failing safe to high") {
+		t.Fatalf("expected the fail-safe warn line, got: %q", out)
+	}
+	if !strings.Contains(out, `repo=owner/heimdallm`) || !strings.Contains(out, "pr=557") {
+		t.Errorf("fail-safe warn line missing correlation id; got: %q", out)
+	}
+
+	// Canonical top-level raised by a higher per-issue severity → "AI inconsistency".
+	out = capture(makeResult("low", []testIssue{{Severity: "high"}}))
+	if !strings.Contains(out, "AI inconsistency") {
+		t.Fatalf("expected the AI-inconsistency warn line, got: %q", out)
+	}
+	if !strings.Contains(out, `repo=owner/heimdallm`) || !strings.Contains(out, "pr=557") {
+		t.Errorf("AI-inconsistency warn line missing correlation id; got: %q", out)
 	}
 }
 
