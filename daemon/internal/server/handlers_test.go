@@ -327,16 +327,15 @@ func TestHandlerPutConfig(t *testing.T) {
 	}
 }
 
-// TestHandlerPutConfig_PersistFailureReturns500 guards #550: a failed
-// SetConfig must surface as 500 with the offending keys, not a misleading
-// 200 OK that makes the UI believe a never-persisted save succeeded.
+// TestHandlerPutConfig_PersistFailureReturns500 guards #550 + #565: a failed
+// persist must surface as 500 with the offending keys, not a misleading 200 OK
+// that makes the UI believe a never-persisted save succeeded.
 //
-// The multi-key payload also locks the contract that the loop accumulates
-// EVERY failed key (not just the first) and returns them sorted, so the
-// response is deterministic regardless of Go's random map iteration order.
-// Forcing only a subset to fail would require a store seam to inject per-key
-// errors; the store is a concrete *store.Store, so we close it to fail all
-// writes and assert the full sorted set instead.
+// The write is now atomic (#565): handlePutConfig calls SetConfigs once and the
+// whole batch is rolled back on any error, so on failure NONE of the keys
+// persisted. The handler therefore reports the full attempted key set, sorted,
+// which is exactly what closing the store produces here — every write fails and
+// the response lists all keys deterministically regardless of map order.
 func TestHandlerPutConfig_PersistFailureReturns500(t *testing.T) {
 	srv, s := setupServer(t)
 	// Close the store so the writes fail (sql: database is closed) while the
