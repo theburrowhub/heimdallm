@@ -1,6 +1,9 @@
 package pipeline
 
 import (
+	"bytes"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/heimdallm/daemon/internal/executor"
@@ -394,6 +397,49 @@ func TestReconcileSeverity_NonCanonicalTopLevelNeverCaps(t *testing.T) {
 		if got := ReconcileSeverity(makeResult("critical", issues)); got != "high" {
 			t.Errorf("non-canonical top-level must stay high regardless of issues %v; got %q", issues, got)
 		}
+	}
+}
+
+func TestReconcileSeverity_ExtraAttrsAppendedToWarnings(t *testing.T) {
+	// extraAttrs let callers attach a correlation id (repo + PR number) so a
+	// fail-safe / reconciliation warning can be tied back to the review that
+	// triggered it (#557). Both warn paths must carry the fields.
+	cases := []struct {
+		name   string
+		result *executor.ReviewResult
+	}{
+		{
+			// Non-canonical top-level → "failing safe to high" warning.
+			"non-canonical fail-safe",
+			makeResult("critical", nil),
+		},
+		{
+			// Canonical top-level raised by a higher per-issue severity →
+			// "severity reconciled (AI inconsistency)" warning.
+			"ai inconsistency",
+			makeResult("low", []testIssue{{Severity: "high"}}),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+			defer slog.SetDefault(prev)
+
+			ReconcileSeverity(tc.result, "repo", "owner/heimdallm", "pr_number", 42)
+
+			out := buf.String()
+			if !strings.Contains(out, "level=WARN") {
+				t.Fatalf("expected a WARN line, got: %q", out)
+			}
+			if !strings.Contains(out, "repo=owner/heimdallm") {
+				t.Errorf("warn line missing repo correlation field; got: %q", out)
+			}
+			if !strings.Contains(out, "pr_number=42") {
+				t.Errorf("warn line missing pr_number correlation field; got: %q", out)
+			}
+		})
 	}
 }
 

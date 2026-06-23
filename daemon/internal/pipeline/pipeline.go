@@ -585,7 +585,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 
 	// 5b. Reconcile severity: ensure top-level severity >= max(issues[].severity).
 	// Guards against LLM inconsistencies (prompt injection, model errors).
-	reconciledSeverity := ReconcileSeverity(result)
+	reconciledSeverity := ReconcileSeverity(result, "repo", pr.Repo, "pr_number", pr.Number)
 
 	// 5c. Extract comment signals and apply escalation to the severity that
 	// will be persisted. By folding signal-driven escalation into the stored
@@ -932,7 +932,12 @@ func rankToSeverity(r int) string {
 // the maximum severity found in individual issues. This guards against LLM
 // inconsistencies where issues are flagged high but the global field is set
 // low (prompt injection, model error, hallucination).
-func ReconcileSeverity(result *executor.ReviewResult) string {
+//
+// extraAttrs are appended to any warning this emits (as slog key/value pairs)
+// so callers can attach a correlation id — e.g. "repo", pr.Repo, "pr_number",
+// pr.Number — to tie a fail-safe/reconciliation warning back to the review
+// that triggered it. Pass none to log without correlation fields (tests do).
+func ReconcileSeverity(result *executor.ReviewResult, extraAttrs ...any) string {
 	// Fail-safe on the top-level severity. The agent prompt mandates one of
 	// low|medium|high; a non-canonical value ("critical", "blocker", or model
 	// garbage) would otherwise fall through severityRank's default to rank 1
@@ -949,7 +954,7 @@ func ReconcileSeverity(result *executor.ReviewResult) string {
 	var maxRank int
 	if nonCanonical {
 		slog.Warn("pipeline: non-canonical top-level severity from agent; failing safe to high",
-			"ai_severity", result.Severity)
+			append([]any{"ai_severity", result.Severity}, extraAttrs...)...)
 		maxRank = severityRank("high")
 	} else {
 		maxRank = severityRank(result.Severity)
@@ -966,9 +971,11 @@ func ReconcileSeverity(result *executor.ReviewResult) string {
 	// guarding here avoids a misleading double log on the same call.
 	if !nonCanonical && reconciled != result.Severity {
 		slog.Warn("pipeline: severity reconciled (AI inconsistency)",
-			"ai_severity", result.Severity,
-			"reconciled", reconciled,
-			"issue_count", len(result.Issues))
+			append([]any{
+				"ai_severity", result.Severity,
+				"reconciled", reconciled,
+				"issue_count", len(result.Issues),
+			}, extraAttrs...)...)
 	}
 	return reconciled
 }
