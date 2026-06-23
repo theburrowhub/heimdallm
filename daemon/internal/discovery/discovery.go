@@ -187,6 +187,14 @@ type ArchivedChecker interface {
 	IsRepoArchived(repo string) (bool, error)
 }
 
+// BatchArchivedChecker resolves archived status for many repos at once (e.g.
+// via a single GraphQL query). Returns a map keyed by "owner/repo". A checker
+// that also implements this lets FilterArchived collapse N per-repo REST calls
+// into one batched call, falling back to per-repo IsRepoArchived on error.
+type BatchArchivedChecker interface {
+	BatchReposArchived(repos []string) (map[string]bool, error)
+}
+
 // FilterArchived separates repos into active and archived/deleted sets.
 // Repos listed in skipCheck (e.g. those freshly returned by topic-based
 // discovery, which already filters archived:false) are assumed active and
@@ -198,11 +206,38 @@ func FilterArchived(repos []string, checker ArchivedChecker, skipCheck []string)
 	for _, r := range skipCheck {
 		skip[r] = struct{}{}
 	}
+	var toCheck []string
 	for _, r := range repos {
 		if _, ok := skip[r]; ok {
 			active = append(active, r)
 			continue
 		}
+		toCheck = append(toCheck, r)
+	}
+	if len(toCheck) == 0 {
+		return
+	}
+
+	// Fast path: a single batched call (GraphQL) instead of one REST request
+	// per repo. On any error we fall through to the per-repo loop below, which
+	// is fail-open, so the batch path never risks purging repos.
+	if bc, ok := checker.(BatchArchivedChecker); ok {
+		if results, err := bc.BatchReposArchived(toCheck); err == nil {
+			for _, r := range toCheck {
+				if results[r] {
+					archived = append(archived, r)
+				} else {
+					active = append(active, r)
+				}
+			}
+			return
+		} else {
+			slog.Warn("discovery: batch archive check failed, falling back to per-repo", "repos", len(toCheck), "err", err)
+		}
+	}
+
+	// Slow path: per-repo REST checks, fail-open on error.
+	for _, r := range toCheck {
 		isArchived, err := checker.IsRepoArchived(r)
 		if err != nil {
 			slog.Warn("discovery: archive check failed, keeping repo", "repo", r, "err", err)

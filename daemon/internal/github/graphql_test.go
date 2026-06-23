@@ -478,3 +478,86 @@ func TestSearchIssues_GraphQLHTTPErrorFallsBackToREST(t *testing.T) {
 		t.Errorf("expected 1 issue from REST fallback, got %d", len(issues))
 	}
 }
+
+// ── BatchReposArchivedGraphQL tests ───────────────────────────────────────────
+
+func TestBatchReposArchivedGraphQL_MapsAliasesAndNullNodes(t *testing.T) {
+	// r0 active, r1 archived, r2 deleted (null node + NOT_FOUND error). The
+	// alias→repo order follows the input slice order (r0, r1, r2).
+	data := map[string]any{
+		"r0": map[string]any{"isArchived": false},
+		"r1": map[string]any{"isArchived": true},
+		"r2": nil,
+	}
+	envelope, _ := json.Marshal(map[string]any{
+		"data": data,
+		"errors": []map[string]string{
+			{"message": "Could not resolve to a Repository with the name 'org/gone'."},
+		},
+	})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/graphql" || r.Method != "POST" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(envelope)
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	got, err := client.BatchReposArchivedGraphQL([]string{"org/active", "org/old", "org/gone"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := map[string]bool{"org/active": false, "org/old": true, "org/gone": true}
+	for repo, w := range want {
+		if got[repo] != w {
+			t.Errorf("%s: want archived=%v, got %v", repo, w, got[repo])
+		}
+	}
+}
+
+func TestBatchReposArchivedGraphQL_UnexpectedErrorBubblesUp(t *testing.T) {
+	envelope := gqlErrorEnvelope("Something went very wrong")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(envelope)
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	if _, err := client.BatchReposArchivedGraphQL([]string{"org/a"}); err == nil {
+		t.Fatal("expected error to bubble up for non-NOT_FOUND GraphQL errors")
+	}
+}
+
+func TestBatchReposArchived_DisabledReturnsError(t *testing.T) {
+	// GraphQL off (default): BatchReposArchived must signal an error so the
+	// caller falls back to per-repo REST.
+	client := gh.NewClient("fake", gh.WithBaseURL("http://127.0.0.1:0"))
+	if _, err := client.BatchReposArchived([]string{"org/a"}); err == nil {
+		t.Fatal("expected error when GraphQL disabled")
+	}
+}
+
+func TestBatchReposArchived_EnabledUsesGraphQL(t *testing.T) {
+	data := map[string]any{"r0": map[string]any{"isArchived": true}}
+	envelope, _ := json.Marshal(map[string]any{"data": data})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(envelope)
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	client.SetGraphQLEnabled(true)
+	got, err := client.BatchReposArchived([]string{"org/old"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got["org/old"] {
+		t.Errorf("want org/old archived=true, got %v", got)
+	}
+}

@@ -261,6 +261,67 @@ func TestFilterArchived_EmptyInput(t *testing.T) {
 	}
 }
 
+// fakeBatchChecker also implements discovery.BatchArchivedChecker. batchErr,
+// when set, makes the batch path fail so FilterArchived falls back to per-repo.
+// perRepoCalls counts IsRepoArchived calls so tests can assert the batch path
+// avoided them.
+type fakeBatchChecker struct {
+	archived     map[string]bool
+	batchErr     error
+	perRepoCalls int
+}
+
+func (f *fakeBatchChecker) IsRepoArchived(repo string) (bool, error) {
+	f.perRepoCalls++
+	return f.archived[repo], nil
+}
+
+func (f *fakeBatchChecker) BatchReposArchived(repos []string) (map[string]bool, error) {
+	if f.batchErr != nil {
+		return nil, f.batchErr
+	}
+	out := make(map[string]bool, len(repos))
+	for _, r := range repos {
+		out[r] = f.archived[r]
+	}
+	return out, nil
+}
+
+func TestFilterArchived_UsesBatchPath(t *testing.T) {
+	checker := &fakeBatchChecker{
+		archived: map[string]bool{"org/old": true},
+	}
+	repos := []string{"org/active", "org/old", "org/other"}
+	active, archived := discovery.FilterArchived(repos, checker, nil)
+	if len(active) != 2 || active[0] != "org/active" || active[1] != "org/other" {
+		t.Errorf("active = %v, want [org/active org/other]", active)
+	}
+	if len(archived) != 1 || archived[0] != "org/old" {
+		t.Errorf("archived = %v, want [org/old]", archived)
+	}
+	if checker.perRepoCalls != 0 {
+		t.Errorf("batch path should avoid per-repo calls, got %d", checker.perRepoCalls)
+	}
+}
+
+func TestFilterArchived_FallsBackWhenBatchFails(t *testing.T) {
+	checker := &fakeBatchChecker{
+		archived: map[string]bool{"org/old": true},
+		batchErr: errors.New("graphql exploded"),
+	}
+	repos := []string{"org/active", "org/old"}
+	active, archived := discovery.FilterArchived(repos, checker, nil)
+	if len(active) != 1 || active[0] != "org/active" {
+		t.Errorf("active = %v, want [org/active]", active)
+	}
+	if len(archived) != 1 || archived[0] != "org/old" {
+		t.Errorf("archived = %v, want [org/old]", archived)
+	}
+	if checker.perRepoCalls != 2 {
+		t.Errorf("fallback should hit per-repo for each checked repo, got %d", checker.perRepoCalls)
+	}
+}
+
 // ── InferOrgs ───────────────────────────────────────────────────────────────
 
 func TestInferOrgs(t *testing.T) {
