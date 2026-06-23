@@ -156,7 +156,7 @@ void main() {
           doneReconnectDelay: const Duration(milliseconds: 10),
         );
 
-        final sub = client.connect().listen((_) {});
+        final sub = client.connect().listen((_) {}, onError: (_) {});
         await Future<void>.delayed(const Duration(milliseconds: 20));
         expect(requests, 1);
 
@@ -174,6 +174,49 @@ void main() {
         }
       },
     );
+
+    test('forwards stream transport errors to listeners', () async {
+      final platform = FakePlatformServices(
+        apiBaseUrl: 'http://127.0.0.1:7842',
+      );
+      final controllers = <StreamController<List<int>>>[];
+      final mockClient = MockClient.streaming((request, _) async {
+        final controller = StreamController<List<int>>();
+        controllers.add(controller);
+        return http.StreamedResponse(
+          controller.stream,
+          200,
+          headers: {'content-type': 'text/event-stream'},
+        );
+      });
+      final client = SseClient(
+        httpClient: mockClient,
+        platform: platform,
+        path: '/events',
+        errorReconnectDelay: const Duration(milliseconds: 10),
+      );
+
+      Object? forwarded;
+      final sub = client.connect().listen((_) {}, onError: (e) => forwarded = e);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(controllers, isNotEmpty);
+
+      controllers.first.addError(Exception('socket closed'));
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(
+        forwarded,
+        isNotNull,
+        reason: 'transport error must reach listeners, not be swallowed',
+      );
+
+      await sub.cancel();
+      for (final controller in controllers) {
+        if (!controller.isClosed) {
+          await controller.close();
+        }
+      }
+    });
 
     test('send failure schedules a reconnect', () async {
       final platform = FakePlatformServices(

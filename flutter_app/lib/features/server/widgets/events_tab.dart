@@ -46,7 +46,11 @@ class _EventsTabState extends ConsumerState<EventsTab> {
     super.initState();
     final platform = ref.read(platformServicesProvider);
     _client = SseClient(platform: platform, path: '/events');
-    _sub = _client!.connect().listen(_onEvent);
+    // The SSE stream now forwards transport errors to listeners; swallow them
+    // here so a transient drop doesn't surface as an unhandled async error.
+    // The client auto-reconnects and the global connection indicator already
+    // reflects the offline state.
+    _sub = _client!.connect().listen(_onEvent, onError: (_) {});
   }
 
   @override

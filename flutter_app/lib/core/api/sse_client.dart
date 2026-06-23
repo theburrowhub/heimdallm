@@ -123,7 +123,10 @@ class SseClient {
             },
             onError: (e) {
               _cancelSubscription();
-              // Reconnect after a delay instead of propagating the error permanently.
+              // Surface the transport error to listeners (mirrors the outer
+              // catch below) so the UI can reflect the dropped connection,
+              // then reconnect after a delay rather than giving up.
+              _controller?.addError(e);
               _scheduleReconnect(_errorReconnectDelay);
             },
             onDone: () {
