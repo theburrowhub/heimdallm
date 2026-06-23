@@ -644,8 +644,8 @@ var validConfigKeys = map[string]struct{}{
 // render them) but that PUT /config must not persist. The SvelteKit page
 // round-trips the entire GET payload as a forward-compat safeguard, so
 // rejecting these would 400 every save. We accept them at the endpoint
-// boundary and drop them before SetConfig — still a strict allowlist, no
-// arbitrary keys permitted.
+// boundary and drop them before the persist batch — still a strict allowlist,
+// no arbitrary keys permitted.
 //
 // Why each key is here:
 //   - repositories  : repo-list changes belong in config.toml via PATCH
@@ -787,15 +787,13 @@ func (srv *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 		body["agent_configs"] = normalized
 	}
 
-	var failedKeys []string
-	var attempted int
+	kv := make(map[string]string, len(body))
 	for k, v := range body {
 		// Read-only keys were accepted above to avoid 400s on UI saves that
 		// round-trip the GET payload, but they must not land in the store.
 		if _, readOnly := readOnlyConfigKeys[k]; readOnly {
 			continue
 		}
-		attempted++
 		var val string
 		switch typed := v.(type) {
 		case string:
@@ -811,20 +809,23 @@ func (srv *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 			}
 			val = string(b)
 		}
-		if _, err := srv.store.SetConfig(k, val); err != nil {
-			slog.Error("config: set", "key", k, "err", err)
-			failedKeys = append(failedKeys, k)
-		}
+		kv[k] = val
 	}
+	// Persist all keys in one transaction: the save is all-or-nothing (#565).
 	// A swallowed persist error here would 200-OK a save that never hit disk,
 	// so the UI shows success while the next reload silently re-applies stale
-	// values (#550). Report 500 with the offending keys instead. Note this is
-	// not transactional: earlier keys in the loop may already be persisted.
-	if len(failedKeys) > 0 {
+	// values (#550). On failure SetConfigs rolls back, so NO key is persisted —
+	// we report 500 with the full attempted key set (none of them landed), and
+	// the client recovers by simply retrying the whole payload.
+	if err := srv.store.SetConfigs(kv); err != nil {
+		failedKeys := make([]string, 0, len(kv))
+		for k := range kv {
+			failedKeys = append(failedKeys, k)
+		}
 		sort.Strings(failedKeys) // deterministic: Go map iteration order is random
-		slog.Warn("config: partial persist failure", "failed", len(failedKeys), "attempted", attempted)
+		slog.Error("config: set (atomic)", "keys", len(failedKeys), "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
-			"error":       "failed to persist one or more config keys",
+			"error":       "failed to persist config; no keys were saved (transaction rolled back)",
 			"failed_keys": failedKeys,
 		})
 		return

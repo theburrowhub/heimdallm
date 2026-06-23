@@ -373,6 +373,36 @@ func (s *Store) SetConfig(key, value string) (int64, error) {
 	return res.LastInsertId()
 }
 
+// SetConfigs upserts multiple key/value config entries atomically in a single
+// transaction. If any write fails, the whole batch is rolled back, so the store
+// is never left in a partial state (see #565: PUT /config must be all-or-nothing).
+// An empty map is a no-op that returns nil.
+func (s *Store) SetConfigs(kv map[string]string) error {
+	if len(kv) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("store: set configs: begin: %w", err)
+	}
+	// Rollback is a no-op once the tx has committed, so this defer safely
+	// unwinds the transaction on any early return below.
+	defer func() { _ = tx.Rollback() }()
+
+	for key, value := range kv {
+		if _, err := tx.Exec(
+			"INSERT INTO configs (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+			key, value,
+		); err != nil {
+			return fmt.Errorf("store: set config %q: %w", key, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: set configs: commit: %w", err)
+	}
+	return nil
+}
+
 // GetConfig retrieves the value for a config key. Returns sql.ErrNoRows if not found.
 func (s *Store) GetConfig(key string) (string, error) {
 	var value string

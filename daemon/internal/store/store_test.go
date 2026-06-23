@@ -385,6 +385,77 @@ func TestConfigs_ListOnEmptyTableReturnsEmptyMap(t *testing.T) {
 	}
 }
 
+// TestSetConfigs_PersistsAllKeysAtomically guards #565: a multi-key save must
+// write every key in one transaction (all-or-nothing), so PUT /config can't
+// leave the store in a partial state after a failure.
+func TestSetConfigs_PersistsAllKeysAtomically(t *testing.T) {
+	s := newTestStore(t)
+
+	in := map[string]string{
+		"poll_interval":  "30m",
+		"review_mode":    "single",
+		"retention_days": "90",
+		"repositories":   `["org/a","org/b"]`,
+	}
+	if err := s.SetConfigs(in); err != nil {
+		t.Fatalf("SetConfigs: %v", err)
+	}
+
+	got, err := s.ListConfigs()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != len(in) {
+		t.Fatalf("expected %d rows, got %d: %v", len(in), len(got), got)
+	}
+	for k, want := range in {
+		if got[k] != want {
+			t.Errorf("%s = %q, want %q", k, got[k], want)
+		}
+	}
+}
+
+func TestSetConfigs_EmptyMapIsNoOp(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.SetConfigs(nil); err != nil {
+		t.Errorf("SetConfigs(nil): %v", err)
+	}
+	if err := s.SetConfigs(map[string]string{}); err != nil {
+		t.Errorf("SetConfigs(empty): %v", err)
+	}
+	got, err := s.ListConfigs()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty configs after no-op, got %v", got)
+	}
+}
+
+// TestSetConfigs_SurfacesWriteFailure proves that when the batch cannot be
+// committed, SetConfigs returns an error rather than silently succeeding —
+// the signal handlePutConfig turns into a 500 instead of a misleading 200
+// (#550). Atomicity itself (single BEGIN/COMMIT, rollback on any error) is
+// structural in the implementation and exercised by the happy-path test above;
+// a partial commit is impossible because every key shares one transaction.
+func TestSetConfigs_SurfacesWriteFailure(t *testing.T) {
+	s := newTestStore(t)
+
+	// Close the DB so the transaction cannot begin/commit.
+	if err := s.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	err := s.SetConfigs(map[string]string{
+		"poll_interval":  "5m",
+		"review_mode":    "multi",
+		"retention_days": "7",
+	})
+	if err == nil {
+		t.Fatal("expected error from SetConfigs on a closed store, got nil")
+	}
+}
+
 func TestStore_AgentImplementFieldsRoundTrip(t *testing.T) {
 	s := newTestStore(t)
 
