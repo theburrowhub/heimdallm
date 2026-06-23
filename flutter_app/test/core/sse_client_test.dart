@@ -199,15 +199,26 @@ void main() {
       Object? forwarded;
       final sub = client.connect().listen((_) {}, onError: (e) => forwarded = e);
       await Future<void>.delayed(const Duration(milliseconds: 20));
-      expect(controllers, isNotEmpty);
+      expect(controllers, hasLength(1));
 
-      controllers.first.addError(Exception('socket closed'));
-      await Future<void>.delayed(const Duration(milliseconds: 10));
+      final injected = Exception('socket closed');
+      controllers.first.addError(injected);
+      await Future<void>.delayed(const Duration(milliseconds: 40));
 
+      // The original transport error is forwarded unwrapped — not swallowed,
+      // not transformed into a different/wrapped error.
       expect(
         forwarded,
-        isNotNull,
-        reason: 'transport error must reach listeners, not be swallowed',
+        same(injected),
+        reason: 'the exact transport error must reach listeners, unwrapped',
+      );
+      // ...and forwarding does not disrupt auto-reconnect: a second request
+      // is issued after errorReconnectDelay. Surfacing the error and recovering
+      // are both part of the contract.
+      expect(
+        controllers,
+        hasLength(2),
+        reason: 'client must reconnect after surfacing the error',
       );
 
       await sub.cancel();
