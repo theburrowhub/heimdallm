@@ -999,7 +999,7 @@ func (srv *Server) handlePatchOrgConfig(w http.ResponseWriter, r *http.Request) 
 func (srv *Server) handlePatchAutonomousRepoConfig(w http.ResponseWriter, r *http.Request) {
 	repo, err := url.PathUnescape(chi.URLParam(r, "repo"))
 	if err != nil || repo == "" {
-		http.Error(w, `{"error":"invalid repo parameter"}`, http.StatusBadRequest)
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo parameter"})
 		return
 	}
 	srv.patchAutonomousSubKey(w, r, "repos", repo)
@@ -1008,7 +1008,7 @@ func (srv *Server) handlePatchAutonomousRepoConfig(w http.ResponseWriter, r *htt
 func (srv *Server) handlePatchAutonomousOrgConfig(w http.ResponseWriter, r *http.Request) {
 	org, err := url.PathUnescape(chi.URLParam(r, "org"))
 	if err != nil || org == "" {
-		http.Error(w, `{"error":"invalid org parameter"}`, http.StatusBadRequest)
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid org parameter"})
 		return
 	}
 	if err := config.ValidateOrgSlug(org); err != nil {
@@ -1024,13 +1024,13 @@ func (srv *Server) handlePatchAutonomousOrgConfig(w http.ResponseWriter, r *http
 // unescaping and validating id before calling.
 func (srv *Server) patchAutonomousSubKey(w http.ResponseWriter, r *http.Request, subKey, id string) {
 	if srv.configPath == "" {
-		http.Error(w, `{"error":"PATCH not available — configPath not set"}`, http.StatusServiceUnavailable)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "PATCH not available — configPath not set"})
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var patch map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
-		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
 	}
 	if err := config.ContainsNull(patch); err != nil {
