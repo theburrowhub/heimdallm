@@ -611,16 +611,10 @@ func main() {
 	// on secondary limits (Retry-After).
 	ghClient.SetRateObserver(&rateLimitAdapter{limiter: limiter})
 
-	// Apply [polling] kill-switches and safety knobs from config.
-	// ETag cache (C1): enabled by default; operator can disable via use_etag=false.
-	ghClient.SetCacheEnabled(cfg.ETagEnabled())
-	// GraphQL issue search (C4): disabled by default; operator enables via use_graphql=true.
-	// When enabled, SearchIssues dispatches to the GraphQL API first and falls
-	// back to REST /search/issues on any error — zero behaviour change when false.
-	ghClient.SetGraphQLEnabled(cfg.GraphQLEnabled())
-	// Rate-limit safety threshold: drives how eagerly each tier backs off.
-	// Default 100 matches the current hardcoded tierSafetyThreshold[TierDiscovery].
-	limiter.SetDiscoverySafetyThreshold(cfg.Polling.RateLimitSafetyThreshold)
+	// Apply [polling] kill-switches and safety knobs from config. Re-applied on
+	// every reload (see SetReloadFn) so GUI/TUI toggles take effect hot, without
+	// a daemon restart.
+	applyClientRuntimeConfig(ghClient, limiter, cfg)
 
 	// tier2Adapter bridges main.go's concrete types to the polling logic.
 	adapter := &tier2Adapter{
@@ -1743,6 +1737,13 @@ func main() {
 			return fmt.Errorf("reload: %w", err)
 		}
 
+		// Re-apply client-side kill-switches (use_etag / use_graphql /
+		// rate_limit_safety_threshold) so a GUI/TUI toggle takes effect on this
+		// reload without a daemon restart. These live on ghClient/limiter and
+		// are not re-read by the pollers, so they must be set explicitly here —
+		// independent of the poller-restart decision below.
+		applyClientRuntimeConfig(ghClient, limiter, newCfg)
+
 		cfgMu.Lock()
 		restartPollers := configReloadRequiresPollerRestart(cfg, newCfg)
 		if !restartPollers {
@@ -2234,6 +2235,26 @@ func parseDiscoveryInterval(discoveryInterval, pollInterval string) time.Duratio
 // config fields conservative by default: if a future field is not scrubbed in
 // configReloadRestartSnapshot, reloads restart pollers until the field is
 // explicitly classified as dynamic.
+// applyClientRuntimeConfig (re)applies the [polling] kill-switches and safety
+// knobs that live on the long-lived ghClient / limiter objects rather than
+// being re-read each tick. Called at startup and on every config reload so the
+// GUI/TUI toggles (use_etag, use_graphql, rate_limit_safety_threshold) take
+// effect hot — without these re-applications a reload would update intervals
+// but leave the client-side feature flags frozen at their startup values until
+// the daemon restarts. All three setters are concurrency-safe (atomic.Bool /
+// mutex), so this is safe to call while pollers are running.
+func applyClientRuntimeConfig(ghClient *gh.Client, limiter *scheduler.RateLimiter, cfg *config.Config) {
+	// ETag cache (C1): enabled by default; operator can disable via use_etag=false.
+	ghClient.SetCacheEnabled(cfg.ETagEnabled())
+	// GraphQL (C4): disabled by default; operator enables via use_graphql=true.
+	// When enabled, SearchIssues and the discovery archive-check dispatch to the
+	// GraphQL API first and fall back to REST on any error.
+	ghClient.SetGraphQLEnabled(cfg.GraphQLEnabled())
+	// Rate-limit safety threshold: drives how eagerly each tier backs off.
+	// Default 100 matches the hardcoded tierSafetyThreshold[TierDiscovery].
+	limiter.SetDiscoverySafetyThreshold(cfg.Polling.RateLimitSafetyThreshold)
+}
+
 func configReloadRequiresPollerRestart(oldCfg, newCfg *config.Config) bool {
 	if oldCfg == nil || newCfg == nil {
 		return true
