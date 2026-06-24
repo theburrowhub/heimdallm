@@ -1752,6 +1752,12 @@ func main() {
 		adaptiveSched.UpdateBounds(newCfg.ResolvedMinInterval(), newCfg.ResolvedMaxInterval())
 
 		cfgMu.Lock()
+		// tier3_interval is restart-only (the state poller is not managed by
+		// startPollers). Warn so operators aren't surprised by the silent no-op.
+		if cfg.ResolvedTier3Interval() != newCfg.ResolvedTier3Interval() {
+			slog.Warn("config reload: tier3_interval change is restart-only; it will not take effect until the daemon is restarted",
+				"old", cfg.ResolvedTier3Interval(), "new", newCfg.ResolvedTier3Interval())
+		}
 		restartPollers := configReloadRequiresPollerRestart(cfg, newCfg)
 		if !restartPollers {
 			cfg = newCfg
@@ -3485,15 +3491,9 @@ func (a *tier2Adapter) PrefetchIssuesForCycle(repos []string) {
 	a.cfgMu.Unlock()
 	authUser := a.resolveAuthenticatedUser()
 
-	// eligibleFn resolves, per repo, the effective IssueTrackingConfig and the
-	// autonomous flag. The third return is "resolved ok" — always true here
-	// because resolution can't fail (it reads in-memory config); it exists so
-	// the EligibleFn signature can support resolvers that may fail. The actual
-	// gating (skip repos with issue_tracking disabled or autonomous enabled)
-	// happens inside PrefetchIssues, which checks `!ok || autonomous || !it.Enabled`
-	// — see fetcher.go. PrefetchIssues then groups eligible repos by their
-	// resolved assignee set (one search query per group) so per-repo assignee
-	// overrides use their own scope, preventing silent issue drops.
+	// The third return is "resolved ok" — always true here because resolving
+	// from in-memory config can't fail. The actual gating (disabled/autonomous)
+	// and assignee-set grouping happen in PrefetchIssues (see fetcher.go).
 	eligibleFn := func(repo string) (config.IssueTrackingConfig, bool, bool) {
 		repoIT := c.IssueTrackingForRepo(repo)
 		autonomousEnabled := c.AutonomousForRepo(repo).Enabled
