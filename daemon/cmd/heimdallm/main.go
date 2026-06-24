@@ -2248,14 +2248,10 @@ func parseDiscoveryInterval(discoveryInterval, pollInterval string) time.Duratio
 // config fields conservative by default: if a future field is not scrubbed in
 // configReloadRestartSnapshot, reloads restart pollers until the field is
 // explicitly classified as dynamic.
-// applyClientRuntimeConfig (re)applies the [polling] kill-switches and safety
-// knobs that live on the long-lived ghClient / limiter objects rather than
-// being re-read each tick. Called at startup and on every config reload so the
-// GUI/TUI toggles (use_etag, use_graphql, rate_limit_safety_threshold) take
-// effect hot — without these re-applications a reload would update intervals
-// but leave the client-side feature flags frozen at their startup values until
-// the daemon restarts. All three setters are concurrency-safe (atomic.Bool /
-// mutex), so this is safe to call while pollers are running.
+// applyClientRuntimeConfig (re)applies the [polling] kill-switches/knobs that
+// live on the long-lived ghClient/limiter (not re-read per tick). Called at
+// startup AND on every reload so GUI/TUI toggles take effect hot. All three
+// setters are concurrency-safe, so it is safe to call while pollers run.
 func applyClientRuntimeConfig(ghClient *gh.Client, limiter *scheduler.RateLimiter, cfg *config.Config) {
 	// ETag cache (C1): enabled by default; operator can disable via use_etag=false.
 	ghClient.SetCacheEnabled(cfg.ETagEnabled())
