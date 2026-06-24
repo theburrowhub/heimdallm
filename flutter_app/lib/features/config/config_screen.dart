@@ -526,7 +526,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
       TextFormField(
         initialValue: _polling.pollInterval,
         decoration: const InputDecoration(
-          labelText: 'Poll interval',
+          labelText: 'Poll interval override',
           helperText: 'Override global poll interval (e.g. 2m, 30s)',
           border: OutlineInputBorder(),
         ),
