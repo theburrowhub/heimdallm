@@ -1019,10 +1019,13 @@ func (c *Client) GetPRTimelineEventsForReviewer(repo string, number int, login s
 			// about half the time. On a tie we order review_dismissed BEFORE
 			// review_requested — the explicit re-request wins and ends up last
 			// — because when we cannot recover the true sub-second order we
-			// honour the operator's intent to be re-reviewed.
+			// honour the operator's intent to be re-reviewed. The tiebreak is
+			// kept total (a strict weak ordering): two same-second events of
+			// the same type compare as equal so the stable sort preserves
+			// their input order, rather than reporting both i<j and j<i.
 			sort.SliceStable(out, func(i, j int) bool {
 				if out[i].CreatedAt.Equal(out[j].CreatedAt) {
-					return out[i].Event == "review_dismissed"
+					return out[i].Event == "review_dismissed" && out[j].Event == "review_requested"
 				}
 				return out[i].CreatedAt.Before(out[j].CreatedAt)
 			})
