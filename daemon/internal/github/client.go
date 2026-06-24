@@ -1009,7 +1009,21 @@ func (c *Client) GetPRTimelineEventsForReviewer(repo string, number int, login s
 			// A single sort here is cheap (events is filtered down to just
 			// review_requested / review_dismissed for one login) and immunises
 			// the caller against an undocumented re-ordering on GitHub's side.
-			sort.Slice(out, func(i, j int) bool {
+			//
+			// Stable sort + an explicit same-second tiebreak (#602): both
+			// GitHub's created_at and our stored review anchor are RFC3339
+			// second-granularity, so a dismiss and a re-request done back to
+			// back (or by automation) collapse to the same timestamp. The
+			// caller decides on the single most-recent relevant event, so a
+			// non-deterministic order silently dropped legitimate re-reviews
+			// about half the time. On a tie we order review_dismissed BEFORE
+			// review_requested — the explicit re-request wins and ends up last
+			// — because when we cannot recover the true sub-second order we
+			// honour the operator's intent to be re-reviewed.
+			sort.SliceStable(out, func(i, j int) bool {
+				if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+					return out[i].Event == "review_dismissed"
+				}
 				return out[i].CreatedAt.Before(out[j].CreatedAt)
 			})
 			return out, nil
