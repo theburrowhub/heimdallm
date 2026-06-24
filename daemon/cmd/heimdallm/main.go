@@ -615,6 +615,7 @@ func main() {
 	// every reload (see SetReloadFn) so GUI/TUI toggles take effect hot, without
 	// a daemon restart.
 	applyClientRuntimeConfig(ghClient, limiter, cfg)
+	warnInvalidPollingDurations(cfg.Polling)
 
 	// tier2Adapter bridges main.go's concrete types to the polling logic.
 	adapter := &tier2Adapter{
@@ -1744,6 +1745,7 @@ func main() {
 		// are not re-read by the pollers, so they must be set explicitly here —
 		// independent of the poller-restart decision below.
 		applyClientRuntimeConfig(ghClient, limiter, newCfg)
+		warnInvalidPollingDurations(newCfg.Polling)
 
 		// Refresh adaptive-scheduler bounds in place so min_interval/max_interval
 		// changes take effect on reload while per-repo backoff state is preserved.
@@ -2262,6 +2264,29 @@ func applyClientRuntimeConfig(ghClient *gh.Client, limiter *scheduler.RateLimite
 	// Rate-limit safety threshold: drives how eagerly each tier backs off.
 	// Default 100 matches the hardcoded tierSafetyThreshold[TierDiscovery].
 	limiter.SetDiscoverySafetyThreshold(cfg.ResolvedRateLimitSafetyThreshold())
+}
+
+// warnInvalidPollingDurations logs a warning for any non-empty [polling]
+// duration string that fails to parse, so a typo (e.g. poll_interval = "bogus")
+// is surfaced to the operator instead of silently falling back to the default.
+// Called once per config load (startup + reload) — NOT inside the Resolved*
+// hot path, which would spam a warning on every tick.
+func warnInvalidPollingDurations(p config.PollingConfig) {
+	for _, f := range []struct{ name, val string }{
+		{"poll_interval", p.PollInterval},
+		{"min_interval", p.MinInterval},
+		{"max_interval", p.MaxInterval},
+		{"discovery_interval", p.DiscoveryInterval},
+		{"tier3_interval", p.Tier3Interval},
+	} {
+		if f.val == "" {
+			continue // empty = inherit / use default, not a typo
+		}
+		if _, err := time.ParseDuration(f.val); err != nil {
+			slog.Warn("[polling] invalid duration string; falling back to default",
+				"field", f.name, "value", f.val, "err", err)
+		}
+	}
 }
 
 func configReloadRequiresPollerRestart(oldCfg, newCfg *config.Config) bool {
