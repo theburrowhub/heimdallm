@@ -461,7 +461,12 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
         Wrap(
           spacing: 8,
           children: _pollIntervalSuggestions
-              .map((v) => ActionChip(label: Text(v), onPressed: () => _pickPollInterval(v)))
+              .map(
+                (v) => ActionChip(
+                  label: Text(v),
+                  onPressed: () => _pickPollInterval(v),
+                ),
+              )
               .toList(),
         ),
       ],
@@ -616,49 +621,50 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
         }),
       ),
       const SizedBox(height: 10),
-      Container(
-        decoration: BoxDecoration(
-          color: Theme.of(
-            context,
-          ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
-          borderRadius: BorderRadius.circular(6),
-        ),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
-        child: Column(
-          children: [
-            SwitchListTile(
-              title: const Text(
-                'Use ETag caching',
-                style: TextStyle(fontSize: 11),
+      Material(
+        type: MaterialType.canvas,
+        color: Theme.of(
+          context,
+        ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
+        borderRadius: BorderRadius.circular(6),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+          child: Column(
+            children: [
+              SwitchListTile(
+                title: const Text(
+                  'Use ETag caching',
+                  style: TextStyle(fontSize: 11),
+                ),
+                subtitle: Text(
+                  'Skip unchanged responses using HTTP ETags',
+                  style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+                ),
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                value: _polling.useEtag,
+                onChanged: (v) => setState(() {
+                  _polling = _polling.copyWith(useEtag: v);
+                }),
               ),
-              subtitle: Text(
-                'Skip unchanged responses using HTTP ETags',
-                style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+              SwitchListTile(
+                title: const Text(
+                  'Use GraphQL API',
+                  style: TextStyle(fontSize: 11),
+                ),
+                subtitle: Text(
+                  'Fetch PR/issue data via GraphQL instead of REST',
+                  style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+                ),
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                value: _polling.useGraphql,
+                onChanged: (v) => setState(() {
+                  _polling = _polling.copyWith(useGraphql: v);
+                }),
               ),
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-              value: _polling.useEtag,
-              onChanged: (v) => setState(() {
-                _polling = _polling.copyWith(useEtag: v);
-              }),
-            ),
-            SwitchListTile(
-              title: const Text(
-                'Use GraphQL API',
-                style: TextStyle(fontSize: 11),
-              ),
-              subtitle: Text(
-                'Fetch PR/issue data via GraphQL instead of REST',
-                style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
-              ),
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-              value: _polling.useGraphql,
-              onChanged: (v) => setState(() {
-                _polling = _polling.copyWith(useGraphql: v);
-              }),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     ]);
@@ -878,27 +884,28 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
           }),
         ),
         const SizedBox(height: 10),
-        Container(
-          decoration: BoxDecoration(
-            color: Theme.of(
-              context,
-            ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
-            borderRadius: BorderRadius.circular(6),
-          ),
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
-          child: SwitchListTile(
-            title: const Text(
-              'Create as draft',
-              style: TextStyle(fontSize: 11),
+        Material(
+          type: MaterialType.canvas,
+          color: Theme.of(
+            context,
+          ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
+          borderRadius: BorderRadius.circular(6),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+            child: SwitchListTile(
+              title: const Text(
+                'Create as draft',
+                style: TextStyle(fontSize: 11),
+              ),
+              subtitle: Text(
+                'PRs are created as drafts by default',
+                style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+              ),
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              value: _globalPRDraft,
+              onChanged: (v) => setState(() => _globalPRDraft = v),
             ),
-            subtitle: Text(
-              'PRs are created as drafts by default',
-              style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
-            ),
-            dense: true,
-            contentPadding: EdgeInsets.zero,
-            value: _globalPRDraft,
-            onChanged: (v) => setState(() => _globalPRDraft = v),
           ),
         ),
         const SizedBox(height: 10),
