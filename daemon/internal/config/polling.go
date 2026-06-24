@@ -34,6 +34,9 @@ type PollingConfig struct {
 
 	// Tier3Interval controls the state-check (watch) scanner tick. Default
 	// "30s" — matches the current hardcoded value in the state-poller goroutine.
+	// RESTART-ONLY: the state poller reads this once at startup and is not
+	// managed by startPollers, so a change only takes effect after a full daemon
+	// restart (not on config reload). Unlike poll_interval/discovery_interval.
 	Tier3Interval string `toml:"tier3_interval"`
 
 	// RateLimitSafetyThreshold is the minimum X-RateLimit-Remaining for the
@@ -41,7 +44,9 @@ type PollingConfig struct {
 	// The scheduler already uses per-tier offsets (TierRepo = base-25,
 	// TierWatch = base-75). Default 100, matching the current hardcoded value
 	// of tierSafetyThreshold[TierDiscovery].
-	RateLimitSafetyThreshold int `toml:"rate_limit_safety_threshold"`
+	// Pointer so an explicit rate_limit_safety_threshold = 0 is distinguishable
+	// from "unset" (nil → default). Resolve via ResolvedRateLimitSafetyThreshold.
+	RateLimitSafetyThreshold *int `toml:"rate_limit_safety_threshold,omitempty"`
 
 	// UseETag is a kill-switch for the conditional ETag cache (C1). Defaults
 	// to true (cache enabled). Set to false to disable If-None-Match and force
@@ -80,8 +85,9 @@ func (c *Config) applyPollingDefaults() {
 	if p.Tier3Interval == "" {
 		p.Tier3Interval = DefaultPollingTier3Interval
 	}
-	if p.RateLimitSafetyThreshold == 0 {
-		p.RateLimitSafetyThreshold = DefaultPollingRateLimitSafetyThreshold
+	if p.RateLimitSafetyThreshold == nil {
+		v := DefaultPollingRateLimitSafetyThreshold
+		p.RateLimitSafetyThreshold = &v
 	}
 	if p.UseETag == nil {
 		v := true
@@ -158,4 +164,14 @@ func (c *Config) GraphQLEnabled() bool {
 		return false
 	}
 	return *c.Polling.UseGraphQL
+}
+
+// ResolvedRateLimitSafetyThreshold returns the effective threshold: the
+// explicitly-configured value (including a deliberate 0), or the default when
+// unset. Safe to call before applyDefaults (nil → default).
+func (c *Config) ResolvedRateLimitSafetyThreshold() int {
+	if c.Polling.RateLimitSafetyThreshold == nil {
+		return DefaultPollingRateLimitSafetyThreshold
+	}
+	return *c.Polling.RateLimitSafetyThreshold
 }

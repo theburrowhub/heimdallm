@@ -45,6 +45,24 @@ func NewAdaptiveScheduler(min, max time.Duration) *AdaptiveScheduler {
 	}
 }
 
+// UpdateBounds replaces the min/max interval bounds while preserving the
+// accumulated per-repo backoff state. Called on config reload so changes to
+// [polling].min_interval / max_interval take effect without a daemon restart.
+// Same clamping as the constructor (min positive; max >= min). Existing repo
+// intervals are left as-is and naturally re-clamp on the next MarkActive/MarkIdle.
+func (a *AdaptiveScheduler) UpdateBounds(min, max time.Duration) {
+	if min <= 0 {
+		min = time.Minute
+	}
+	if max < min {
+		max = min
+	}
+	a.mu.Lock()
+	a.min = min
+	a.max = max
+	a.mu.Unlock()
+}
+
 // Due returns the subset of keys whose next scheduled poll is at or before now.
 // Keys that have never been seen are treated as immediately due and are
 // initialised with the minimum interval; their nextDue is set to now+min so

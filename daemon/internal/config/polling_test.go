@@ -29,9 +29,12 @@ func TestApplyPollingDefaults_FillsDocumentedDefaults(t *testing.T) {
 	if p.Tier3Interval != DefaultPollingTier3Interval {
 		t.Errorf("Tier3Interval: got %q, want %q", p.Tier3Interval, DefaultPollingTier3Interval)
 	}
-	if p.RateLimitSafetyThreshold != DefaultPollingRateLimitSafetyThreshold {
+	if p.RateLimitSafetyThreshold == nil {
+		t.Fatal("RateLimitSafetyThreshold: got nil, want non-nil")
+	}
+	if *p.RateLimitSafetyThreshold != DefaultPollingRateLimitSafetyThreshold {
 		t.Errorf("RateLimitSafetyThreshold: got %d, want %d",
-			p.RateLimitSafetyThreshold, DefaultPollingRateLimitSafetyThreshold)
+			*p.RateLimitSafetyThreshold, DefaultPollingRateLimitSafetyThreshold)
 	}
 	if p.UseETag == nil {
 		t.Fatal("UseETag: got nil, want non-nil")
@@ -58,6 +61,7 @@ func TestApplyPollingDefaults_FillsDocumentedDefaults(t *testing.T) {
 func TestApplyPollingDefaults_DoesNotOverwriteExplicitValues(t *testing.T) {
 	useETag := false
 	useGraphQL := true
+	threshold := 200
 	c := Config{
 		Polling: PollingConfig{
 			PollInterval:             "2m",
@@ -66,7 +70,7 @@ func TestApplyPollingDefaults_DoesNotOverwriteExplicitValues(t *testing.T) {
 			Adaptive:                 true,
 			DiscoveryInterval:        "3m",
 			Tier3Interval:            "1m",
-			RateLimitSafetyThreshold: 200,
+			RateLimitSafetyThreshold: &threshold,
 			UseETag:                  &useETag,
 			UseGraphQL:               &useGraphQL,
 		},
@@ -92,8 +96,8 @@ func TestApplyPollingDefaults_DoesNotOverwriteExplicitValues(t *testing.T) {
 	if p.Tier3Interval != "1m" {
 		t.Errorf("Tier3Interval overwritten: got %q", p.Tier3Interval)
 	}
-	if p.RateLimitSafetyThreshold != 200 {
-		t.Errorf("RateLimitSafetyThreshold overwritten: got %d", p.RateLimitSafetyThreshold)
+	if p.RateLimitSafetyThreshold == nil || *p.RateLimitSafetyThreshold != 200 {
+		t.Errorf("RateLimitSafetyThreshold overwritten: got %v", p.RateLimitSafetyThreshold)
 	}
 	if p.UseETag == nil || *p.UseETag {
 		t.Errorf("UseETag overwritten: got %v", p.UseETag)
@@ -305,9 +309,9 @@ func TestPollingDefaultsMatchCurrentBehaviour(t *testing.T) {
 	}
 
 	// Rate-limit safety: previously tierSafetyThreshold[TierDiscovery] = 100.
-	if c.Polling.RateLimitSafetyThreshold != 100 {
+	if c.ResolvedRateLimitSafetyThreshold() != 100 {
 		t.Errorf("RateLimitSafetyThreshold default changed from 100 to %d — behaviour regression",
-			c.Polling.RateLimitSafetyThreshold)
+			c.ResolvedRateLimitSafetyThreshold())
 	}
 
 	// ETag: previously always enabled.
@@ -335,5 +339,20 @@ func TestApplyDefaultsCallsPollingDefaults(t *testing.T) {
 	}
 	if c.Polling.UseETag == nil {
 		t.Error("applyDefaults did not populate Polling.UseETag")
+	}
+}
+
+// TestApplyPollingDefaults_PreservesExplicitZeroThreshold guards the *int
+// change: an operator-set rate_limit_safety_threshold = 0 must survive the
+// defaults pass (not be silently rewritten to the default 100).
+func TestApplyPollingDefaults_PreservesExplicitZeroThreshold(t *testing.T) {
+	zero := 0
+	c := Config{Polling: PollingConfig{RateLimitSafetyThreshold: &zero}}
+	c.applyPollingDefaults()
+	if c.Polling.RateLimitSafetyThreshold == nil || *c.Polling.RateLimitSafetyThreshold != 0 {
+		t.Errorf("explicit 0 must survive defaults, got %v", c.Polling.RateLimitSafetyThreshold)
+	}
+	if got := c.ResolvedRateLimitSafetyThreshold(); got != 0 {
+		t.Errorf("ResolvedRateLimitSafetyThreshold() = %d, want 0 (explicit)", got)
 	}
 }

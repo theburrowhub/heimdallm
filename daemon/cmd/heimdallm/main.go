@@ -696,9 +696,10 @@ func main() {
 	// tweaks an unrelated setting. It is passed to runTier2 which uses it
 	// when cfg.Polling.Adaptive is true; when Adaptive is false the scheduler
 	// is allocated but never consulted, so the overhead is negligible.
-	cfgMu.Lock()
+	// No cfgMu needed here: this runs at daemon startup before startPollers, so
+	// no other goroutine reads cfg yet. On reload the bounds are refreshed via
+	// adaptiveSched.UpdateBounds while per-repo backoff state is preserved.
 	adaptiveSched := scheduler.NewAdaptiveScheduler(cfg.ResolvedMinInterval(), cfg.ResolvedMaxInterval())
-	cfgMu.Unlock()
 
 	// startPollers launches all polling goroutines under the given context.
 	// Returns a cancel function and a WaitGroup that completes when all
@@ -923,7 +924,7 @@ func main() {
 			"discovery", discoveryInterval,
 			"poll", pollInterval,
 			"etag_cache", cfg.ETagEnabled(),
-			"rate_limit_threshold", cfg.Polling.RateLimitSafetyThreshold)
+			"rate_limit_threshold", cfg.ResolvedRateLimitSafetyThreshold())
 
 		return cancel, &wg
 	}
@@ -1677,7 +1678,7 @@ func main() {
 			"adaptive":                    c.Polling.Adaptive,
 			"discovery_interval":          c.Polling.DiscoveryInterval,
 			"tier3_interval":              c.Polling.Tier3Interval,
-			"rate_limit_safety_threshold": c.Polling.RateLimitSafetyThreshold,
+			"rate_limit_safety_threshold": c.ResolvedRateLimitSafetyThreshold(),
 			"use_etag":                    c.ETagEnabled(),
 			"use_graphql":                 c.GraphQLEnabled(),
 		}
@@ -1743,6 +1744,12 @@ func main() {
 		// are not re-read by the pollers, so they must be set explicitly here —
 		// independent of the poller-restart decision below.
 		applyClientRuntimeConfig(ghClient, limiter, newCfg)
+
+		// Refresh adaptive-scheduler bounds in place so min_interval/max_interval
+		// changes take effect on reload while per-repo backoff state is preserved.
+		// The scheduler lives outside startPollers, so the poller restart below
+		// would not pick these up otherwise.
+		adaptiveSched.UpdateBounds(newCfg.ResolvedMinInterval(), newCfg.ResolvedMaxInterval())
 
 		cfgMu.Lock()
 		restartPollers := configReloadRequiresPollerRestart(cfg, newCfg)
@@ -2252,7 +2259,7 @@ func applyClientRuntimeConfig(ghClient *gh.Client, limiter *scheduler.RateLimite
 	ghClient.SetGraphQLEnabled(cfg.GraphQLEnabled())
 	// Rate-limit safety threshold: drives how eagerly each tier backs off.
 	// Default 100 matches the hardcoded tierSafetyThreshold[TierDiscovery].
-	limiter.SetDiscoverySafetyThreshold(cfg.Polling.RateLimitSafetyThreshold)
+	limiter.SetDiscoverySafetyThreshold(cfg.ResolvedRateLimitSafetyThreshold())
 }
 
 func configReloadRequiresPollerRestart(oldCfg, newCfg *config.Config) bool {
@@ -2300,6 +2307,25 @@ func configReloadRestartSnapshot(c *config.Config) config.Config {
 	snap.Retention = config.RetentionConfig{}
 	snap.ActivityLog = config.ActivityLogConfig{}
 	snap.CircuitBreaker = config.CircuitBreakerConfig{}
+
+	// [polling]: zero the fields that already take effect on reload WITHOUT a
+	// poller restart, so changing them doesn't trigger a spurious restart:
+	//   - Adaptive            — read dynamically via adaptiveFn closures
+	//   - Min/MaxInterval     — applied via adaptiveSched.UpdateBounds on reload
+	//   - RateLimitSafetyThreshold/UseETag/UseGraphQL — applied via
+	//     applyClientRuntimeConfig on reload
+	//   - Tier3Interval       — restart-only (documented on PollingConfig); a
+	//     poller restart wouldn't re-create the state poller anyway, so don't
+	//     trigger one.
+	// PollInterval and DiscoveryInterval are intentionally KEPT: the pollers
+	// re-read them only on restart, so a change there must still restart pollers.
+	snap.Polling.Adaptive = false
+	snap.Polling.MinInterval = ""
+	snap.Polling.MaxInterval = ""
+	snap.Polling.Tier3Interval = ""
+	snap.Polling.RateLimitSafetyThreshold = nil
+	snap.Polling.UseETag = nil
+	snap.Polling.UseGraphQL = nil
 	return snap
 }
 
@@ -2581,28 +2607,15 @@ func runTier2(
 		}
 	}
 
-	// runIssueTier promotes ready issues and processes every repo's
-	// issue list in parallel, bounded by ai.tier2_repo_concurrency.
-	//
-	// When polling.adaptive is true (opt-in), only repos whose next
-	// scheduled poll is due are processed this tick. After each repo
-	// finishes, MarkActive (count>0) or MarkIdle (count==0) adjusts
-	// its interval so active repos stay at min_interval while idle
-	// repos back off toward max_interval.
-	//
-	// The Search API prefetch always covers ALL currentRepos regardless
-	// of the adaptive filter. This keeps the C2 prefetch intact (one
-	// cheap search query per cycle) while the actual processing fan-out
-	// is limited to due repos. On search error the per-repo REST fallback
-	// inside ProcessRepo is unaffected.
-	//
-	// When polling.adaptive is false (default) the behaviour is EXACTLY
-	// unchanged: all currentRepos are processed every tick.
+	// runIssueTier promotes ready issues and processes each repo's issue list in
+	// parallel (bounded by ai.tier2_repo_concurrency). Non-obvious invariant:
+	// the Search API prefetch always covers ALL currentRepos, even when
+	// polling.adaptive limits the processing fan-out to due repos — keeping the
+	// per-cycle prefetch a single cheap query.
 	//
 	// NOTE: if NATS publishes are ever added to this tier, also call
-	// adapter.PublishPending() at the end — it is intentionally bound
-	// to the PR tick today (see prTick) because pending publishes
-	// originate exclusively from runPRTier.
+	// adapter.PublishPending() at the end — today it is intentionally bound to
+	// the PR tick (see prTick) since pending publishes originate only there.
 	runIssueTier := func(currentRepos []string) {
 		sse.EmitPollingStarted(ssePub, "issues", currentRepos)
 		issueStart := time.Now()
@@ -3472,11 +3485,15 @@ func (a *tier2Adapter) PrefetchIssuesForCycle(repos []string) {
 	a.cfgMu.Unlock()
 	authUser := a.resolveAuthenticatedUser()
 
-	// eligibleFn resolves the effective IssueTrackingConfig and autonomous flag
-	// for each repo. PrefetchIssues uses this to group repos by their resolved
-	// assignee set, running one search query per group. This ensures repos with
-	// per-repo assignee overrides are fetched with their own assignee scope
-	// rather than the global one, preventing silent issue drops.
+	// eligibleFn resolves, per repo, the effective IssueTrackingConfig and the
+	// autonomous flag. The third return is "resolved ok" — always true here
+	// because resolution can't fail (it reads in-memory config); it exists so
+	// the EligibleFn signature can support resolvers that may fail. The actual
+	// gating (skip repos with issue_tracking disabled or autonomous enabled)
+	// happens inside PrefetchIssues, which checks `!ok || autonomous || !it.Enabled`
+	// — see fetcher.go. PrefetchIssues then groups eligible repos by their
+	// resolved assignee set (one search query per group) so per-repo assignee
+	// overrides use their own scope, preventing silent issue drops.
 	eligibleFn := func(repo string) (config.IssueTrackingConfig, bool, bool) {
 		repoIT := c.IssueTrackingForRepo(repo)
 		autonomousEnabled := c.AutonomousForRepo(repo).Enabled

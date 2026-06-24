@@ -363,3 +363,27 @@ func TestAdaptive_IssueGating_OnlyDueReposProcessed(t *testing.T) {
 		t.Error("c/3: MarkActive at t0 → due at t0+min")
 	}
 }
+
+// TestAdaptiveScheduler_UpdateBounds verifies that UpdateBounds changes the
+// min/max applied to subsequent MarkActive/MarkIdle while preserving the
+// existing per-repo state map (no reset).
+func TestAdaptiveScheduler_UpdateBounds(t *testing.T) {
+	s := scheduler.NewAdaptiveScheduler(time.Minute, 10*time.Minute)
+	t0 := time.Unix(1_000_000, 0).UTC()
+
+	// Seed a repo (becomes known) and grow it idle.
+	s.Due(t0, []string{"r/1"})
+	s.MarkIdle("r/1", t0)
+
+	// Tighten bounds; existing state must survive (not pruned).
+	s.UpdateBounds(5*time.Second, 20*time.Second)
+
+	// MarkActive now resets to the NEW min (5s), not the old 1m.
+	s.MarkActive("r/1", t0)
+	if due := s.Due(t0.Add(6*time.Second), []string{"r/1"}); len(due) != 1 {
+		t.Errorf("after UpdateBounds(min=5s)+MarkActive, repo should be due at t0+6s, got %v", due)
+	}
+	if due := s.Due(t0.Add(4*time.Second), []string{"r/1"}); len(due) != 0 {
+		t.Errorf("repo should NOT be due at t0+4s (new min=5s), got %v", due)
+	}
+}
