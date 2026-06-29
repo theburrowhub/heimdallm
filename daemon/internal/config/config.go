@@ -54,6 +54,11 @@ var githubTopicPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,49}$`)
 // verbatim into the `q=` parameter).
 var githubOrgPattern = regexp.MustCompile(`^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$`)
 
+// repoNamePattern matches the GitHub repository name segment of an "owner/name"
+// slug: alphanumerics plus dots, underscores and hyphens. The "." / ".." cases
+// are rejected separately by ValidateRepoSlug to avoid path-traversal tokens.
+var repoNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
 type Config struct {
 	Server         ServerConfig         `toml:"server"`
 	GitHub         GitHubConfig         `toml:"github"`
@@ -1353,6 +1358,27 @@ func (c *Config) validateScopedIssueTracking() error {
 func ValidateOrgSlug(org string) error {
 	if !githubOrgPattern.MatchString(org) {
 		return fmt.Errorf("config: org %q is invalid (must match GitHub org/user slug: 1-39 alphanumerics plus internal hyphens)", org)
+	}
+	return nil
+}
+
+// ValidateRepoSlug validates a GitHub "owner/name" repo slug used as an
+// [ai.repos] key. It enforces exactly one slash separating a valid org/user
+// owner (see ValidateOrgSlug) from a valid repository name. Validating this
+// defensively prevents a malformed key — e.g. an empty owner, embedded path
+// separators, or "." / ".." traversal tokens — from being written verbatim
+// into the config or interpolated into GitHub API paths.
+func ValidateRepoSlug(repo string) error {
+	parts := strings.Split(repo, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return fmt.Errorf("config: repo %q is invalid (must be in owner/name form)", repo)
+	}
+	if err := ValidateOrgSlug(parts[0]); err != nil {
+		return err
+	}
+	name := parts[1]
+	if name == "." || name == ".." || !repoNamePattern.MatchString(name) {
+		return fmt.Errorf("config: repo name %q is invalid (allowed: alphanumerics, '.', '_', '-')", name)
 	}
 	return nil
 }

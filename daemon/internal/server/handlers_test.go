@@ -2037,6 +2037,37 @@ func TestHandlePatchOrgConfig_RejectsInvalidOrg(t *testing.T) {
 	}
 }
 
+func TestHandlePatchRepoConfig_RejectsInvalidRepo(t *testing.T) {
+	cases := []struct {
+		name string
+		repo string
+	}{
+		{name: "missing slash", repo: "ownerrepo"},
+		{name: "empty owner", repo: "/repo1"},
+		{name: "empty name", repo: "org/"},
+		{name: "special chars in owner", repo: "bad org/repo1"},
+		{name: "special chars in name", repo: "org/bad repo"},
+		{name: "path traversal name", repo: "org/.."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tomlPath := writeTempTOML(t, "[ai]\nprimary = \"claude\"\n")
+			srv := setupServerWithToken(t, "test-token")
+			srv.SetConfigPath(tomlPath)
+
+			req := httptest.NewRequest("PATCH", "/config/repos/"+url.PathEscape(tc.repo), strings.NewReader(`{"primary":"codex"}`))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Heimdallm-Token", "test-token")
+			w := httptest.NewRecorder()
+			srv.Router().ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400 for repo %q, got %d (body: %s)", tc.repo, w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
 func TestHandleDeleteRepoField_TopLevel(t *testing.T) {
 	tomlContent := "[ai]\nprimary = \"claude\"\n\n[ai.repos.\"org/repo1\"]\nprimary = \"gemini\"\npr_draft = true\n"
 	tomlPath := writeTempTOML(t, tomlContent)

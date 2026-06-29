@@ -887,6 +887,10 @@ func (srv *Server) handlePatchRepoConfig(w http.ResponseWriter, r *http.Request)
 		http.Error(w, `{"error":"invalid repo parameter"}`, http.StatusBadRequest)
 		return
 	}
+	if err := config.ValidateRepoSlug(repo); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var patch map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
