@@ -8,24 +8,25 @@ import "time"
 // that reproduce the existing daemon behaviour when the section is absent.
 //
 // Adaptive scheduling (PollInterval → MinInterval / MaxInterval backoff) is
-// reserved for a separate task; the fields exist here so the config schema is
-// stable before the engine lands.
+// implemented by the AdaptiveScheduler and gated behind the Adaptive flag
+// (opt-in). When Adaptive is false the daemon polls every repo every cycle at
+// PollInterval, reproducing the prior behaviour.
 type PollingConfig struct {
 	// PollInterval is the base Tier 2 (per-repo PR/issue) poll cadence.
 	// Empty string inherits from [github].poll_interval. Accepts any
 	// Go time.ParseDuration value (e.g. "5m", "1m30s").
 	PollInterval string `toml:"poll_interval"`
 
-	// MinInterval is the adaptive lower bound. The adaptive engine (separate
-	// task) will never schedule a tick faster than this. Default "1m".
+	// MinInterval is the adaptive lower bound. The adaptive engine never
+	// schedules a tick faster than this. Default "1m".
 	MinInterval string `toml:"min_interval"`
 
 	// MaxInterval is the adaptive upper bound. The adaptive engine will never
 	// back off slower than this. Default "15m".
 	MaxInterval string `toml:"max_interval"`
 
-	// Adaptive enables the adaptive back-off engine (separate task). Default
-	// false — opt-in only. When false, MinInterval/MaxInterval are ignored.
+	// Adaptive enables the adaptive back-off engine. Default false — opt-in
+	// only. When false, MinInterval/MaxInterval are ignored.
 	Adaptive bool `toml:"adaptive"`
 
 	// DiscoveryInterval controls Tier 1 (topic-based repo discovery) cadence.
