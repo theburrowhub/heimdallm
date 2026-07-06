@@ -521,4 +521,26 @@ void main() {
       expect(platform.spawnedDaemons, contains('/fake/bin/heimdalld'));
     },
   );
+
+  test('never_approve_with_issues round-trips (global + repo override)', () {
+    final json = {
+      'never_approve_with_issues': true,
+      'repositories': <String>[],
+      'repo_overrides': {
+        'org/repo1': {'never_approve_with_issues': false},
+      },
+    };
+    final cfg = AppConfig.fromJson(json);
+    expect(cfg.globalNeverApproveWithIssues, isTrue);
+    expect(cfg.repoConfigs['org/repo1']!.neverApproveWithIssues, isFalse);
+
+    // Global survives toJson round-trip.
+    expect(cfg.toJson()['never_approve_with_issues'], isTrue);
+
+    // copyWith sentinel: repo override can be cleared to inherit (null).
+    final cleared = cfg.repoConfigs['org/repo1']!.copyWith(
+      neverApproveWithIssues: null,
+    );
+    expect(cleared.neverApproveWithIssues, isNull);
+  });
 }

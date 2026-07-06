@@ -149,6 +149,7 @@ class RepoConfig {
   final String? prAssignee;
   final List<String>? prLabels;
   final bool? prDraft;
+  final bool? neverApproveWithIssues;
 
   const RepoConfig({
     this.prEnabled,
@@ -178,6 +179,7 @@ class RepoConfig {
     this.prAssignee,
     this.prLabels,
     this.prDraft,
+    this.neverApproveWithIssues,
     this.firstSeenAt,
   });
 
@@ -226,7 +228,8 @@ class RepoConfig {
       prReviewers != null ||
       prAssignee != null ||
       prLabels != null ||
-      prDraft != null;
+      prDraft != null ||
+      neverApproveWithIssues != null;
 
   /// LED status for each feature: 'off', 'global', 'repo'
   String prLedStatus(bool globalMonitored) {
@@ -285,6 +288,7 @@ class RepoConfig {
     Object? prAssignee = _sentinel,
     Object? prLabels = _sentinel,
     Object? prDraft = _sentinel,
+    Object? neverApproveWithIssues = _sentinel,
     Object? firstSeenAt = _sentinel,
   }) {
     return RepoConfig(
@@ -355,6 +359,9 @@ class RepoConfig {
           ? this.prLabels
           : prLabels as List<String>?,
       prDraft: prDraft == _sentinel ? this.prDraft : prDraft as bool?,
+      neverApproveWithIssues: neverApproveWithIssues == _sentinel
+          ? this.neverApproveWithIssues
+          : neverApproveWithIssues as bool?,
       firstSeenAt: firstSeenAt == _sentinel
           ? this.firstSeenAt
           : firstSeenAt as DateTime?,
@@ -390,6 +397,7 @@ class OrgConfig {
   final String? prAssignee;
   final List<String>? prLabels;
   final bool? prDraft;
+  final bool? neverApproveWithIssues;
 
   const OrgConfig({
     this.aiPrimary,
@@ -418,6 +426,7 @@ class OrgConfig {
     this.prAssignee,
     this.prLabels,
     this.prDraft,
+    this.neverApproveWithIssues,
   });
 
   bool get hasOverride =>
@@ -475,6 +484,7 @@ class OrgConfig {
     Object? prAssignee = _sentinel,
     Object? prLabels = _sentinel,
     Object? prDraft = _sentinel,
+    Object? neverApproveWithIssues = _sentinel,
   }) => OrgConfig(
     aiPrimary: aiPrimary == _sentinel ? this.aiPrimary : aiPrimary as String?,
     aiFallback: aiFallback == _sentinel
@@ -538,6 +548,9 @@ class OrgConfig {
         : prAssignee as String?,
     prLabels: prLabels == _sentinel ? this.prLabels : prLabels as List<String>?,
     prDraft: prDraft == _sentinel ? this.prDraft : prDraft as bool?,
+    neverApproveWithIssues: neverApproveWithIssues == _sentinel
+        ? this.neverApproveWithIssues
+        : neverApproveWithIssues as bool?,
   );
 
   factory OrgConfig.fromJson(Map<String, dynamic> json) {
@@ -597,6 +610,7 @@ class OrgConfig {
       prAssignee: _nonEmpty(json['pr_assignee']),
       prLabels: _nullableStringListAllowEmpty(json['pr_labels']),
       prDraft: json['pr_draft'] as bool?,
+      neverApproveWithIssues: json['never_approve_with_issues'] as bool?,
     );
   }
 }
@@ -736,6 +750,7 @@ class AppConfig {
   final bool? globalAutoPromoteTriage;
   final bool? globalAutoPromoteRefinement;
   final bool globalGeneratePRDescription;
+  final bool globalNeverApproveWithIssues;
 
   /// Host paths the daemon scans (in order) when a repo has no explicit
   /// `local_dir` set — first match at `{base}/{short-repo-name}` wins.
@@ -773,6 +788,7 @@ class AppConfig {
     this.globalAutoPromoteTriage,
     this.globalAutoPromoteRefinement,
     this.globalGeneratePRDescription = false,
+    this.globalNeverApproveWithIssues = false,
     this.localDirBase = const [],
     this.localDirsDetected = const {},
   });
@@ -847,6 +863,7 @@ class AppConfig {
     Object? globalAutoPromoteTriage = _sentinel,
     Object? globalAutoPromoteRefinement = _sentinel,
     bool? globalGeneratePRDescription,
+    bool? globalNeverApproveWithIssues,
     List<String>? localDirBase,
     Map<String, String>? localDirsDetected,
   }) {
@@ -879,6 +896,8 @@ class AppConfig {
           : globalAutoPromoteRefinement as bool?,
       globalGeneratePRDescription:
           globalGeneratePRDescription ?? this.globalGeneratePRDescription,
+      globalNeverApproveWithIssues:
+          globalNeverApproveWithIssues ?? this.globalNeverApproveWithIssues,
       localDirBase: localDirBase ?? this.localDirBase,
       localDirsDetected: localDirsDetected ?? this.localDirsDetected,
     );
@@ -899,6 +918,7 @@ class AppConfig {
     'auto_promote_triage': globalAutoPromoteTriage,
     'auto_promote_refinement': globalAutoPromoteRefinement,
     'generate_pr_description': globalGeneratePRDescription,
+    'never_approve_with_issues': globalNeverApproveWithIssues,
   };
 
   factory AppConfig.fromJson(Map<String, dynamic> json) {
@@ -989,6 +1009,7 @@ class AppConfig {
           prAssignee: _nonEmpty(ov['pr_assignee']),
           prLabels: _nullableStringListAllowEmpty(ov['pr_labels']),
           prDraft: ov['pr_draft'] as bool?,
+          neverApproveWithIssues: ov['never_approve_with_issues'] as bool?,
           firstSeenAt: firstSeen,
         );
       }
@@ -1061,6 +1082,8 @@ class AppConfig {
       globalAutoPromoteRefinement: json['auto_promote_refinement'] as bool?,
       globalGeneratePRDescription:
           (json['generate_pr_description'] as bool?) ?? false,
+      globalNeverApproveWithIssues:
+          (json['never_approve_with_issues'] as bool?) ?? false,
       localDirBase: _parseStringList(json['local_dir_base']),
       localDirsDetected: localDirsDetected,
     );
