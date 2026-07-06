@@ -1107,3 +1107,32 @@ func equalStringSlices(a, b []string) bool {
 	}
 	return true
 }
+
+func TestReviewEvent(t *testing.T) {
+	cases := []struct {
+		sev       string
+		hasIssues bool
+		never     bool
+		want      string
+	}{
+		// flag OFF → identical to SeverityToEvent
+		{"low", true, false, "APPROVE"},
+		{"medium", true, false, "APPROVE"},
+		{"high", true, false, "REQUEST_CHANGES"},
+		{"", false, false, "APPROVE"},
+		// flag ON
+		{"low", true, true, "COMMENT"},
+		{"medium", true, true, "COMMENT"},
+		{"", true, true, "COMMENT"},
+		{"high", true, true, "REQUEST_CHANGES"}, // high never downgraded
+		{"low", false, true, "APPROVE"},         // clean review still approves
+		{"medium", false, true, "APPROVE"},
+	}
+	for _, tc := range cases {
+		got := pipeline.ReviewEvent(tc.sev, tc.hasIssues, tc.never)
+		if got != tc.want {
+			t.Errorf("ReviewEvent(%q, %v, %v) = %q, want %q",
+				tc.sev, tc.hasIssues, tc.never, got, tc.want)
+		}
+	}
+}

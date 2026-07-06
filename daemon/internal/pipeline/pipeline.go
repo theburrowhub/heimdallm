@@ -1006,6 +1006,19 @@ func SeverityToEvent(severity string) string {
 	return "APPROVE"
 }
 
+// ReviewEvent decides the GitHub review event, honoring the
+// never-approve-with-issues setting. It builds on SeverityToEvent: when the
+// base decision would be APPROVE, the setting is on, and the review found at
+// least one issue, it downgrades APPROVE to COMMENT. REQUEST_CHANGES is never
+// altered, and a clean review (no issues) still approves.
+func ReviewEvent(finalSeverity string, hasIssues bool, neverApproveWithIssues bool) string {
+	event := SeverityToEvent(finalSeverity)
+	if event == "APPROVE" && neverApproveWithIssues && hasIssues {
+		return "COMMENT"
+	}
+	return event
+}
+
 // maxCommentsBytes limits the total formatted PR comments included in the prompt.
 const maxCommentsBytes = 16 * 1024 // 16KB
 
