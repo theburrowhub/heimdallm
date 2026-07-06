@@ -543,4 +543,9 @@ void main() {
     );
     expect(cleared.neverApproveWithIssues, isNull);
   });
+
+  test('OrgConfig.hasOverride true when only never_approve_with_issues set', () {
+    const org = OrgConfig(neverApproveWithIssues: true);
+    expect(org.hasOverride, isTrue);
+  });
 }

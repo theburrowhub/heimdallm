@@ -440,6 +440,7 @@ class OrgConfig {
       autoPromoteTriage != null ||
       autoPromoteRefinement != null ||
       generatePRDescription != null ||
+      neverApproveWithIssues != null ||
       issuePromptId != null ||
       developPromptId != null ||
       itEnabled != null ||
