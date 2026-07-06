@@ -11,6 +11,7 @@ import 'package:heimdallm/core/setup/first_run_setup.dart';
 import 'package:heimdallm/features/config/config_providers.dart';
 import 'package:heimdallm/features/config/config_screen.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
+import 'package:heimdallm/features/repositories/repo_diff.dart';
 import '../core/platform/fake_platform_services.dart';
 
 class MockApiClient extends Mock implements ApiClient {}
@@ -547,5 +548,12 @@ void main() {
   test('OrgConfig.hasOverride true when only never_approve_with_issues set', () {
     const org = OrgConfig(neverApproveWithIssues: true);
     expect(org.hasOverride, isTrue);
+  });
+
+  test('repo diff includes never_approve_with_issues when set', () {
+    const oldCfg = RepoConfig();
+    final updated = oldCfg.copyWith(neverApproveWithIssues: true);
+    final diff = computeRepoDiff(oldCfg, updated);
+    expect(diff['never_approve_with_issues'], isTrue);
   });
 }
