@@ -61,7 +61,8 @@ CREATE TABLE IF NOT EXISTS reviews (
   published_at        TEXT NOT NULL DEFAULT '',
   github_review_id    INTEGER NOT NULL DEFAULT 0,
   github_review_state TEXT NOT NULL DEFAULT '',
-  head_sha            TEXT NOT NULL DEFAULT ''
+  head_sha            TEXT NOT NULL DEFAULT '',
+  event               TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS configs (
@@ -201,6 +202,10 @@ func Open(dsn string) (*Store, error) {
 	// time.Time{} and callers can fall back to created_at. See
 	// theburrowhub/heimdallm#243 Fix 3.
 	db.Exec("ALTER TABLE reviews ADD COLUMN published_at TEXT NOT NULL DEFAULT ''")
+	// event stores the decided review event (APPROVE|COMMENT|REQUEST_CHANGES)
+	// so retry/publish paths reproduce the decision. Empty default => legacy
+	// rows fall back to SeverityToEvent(severity).
+	db.Exec("ALTER TABLE reviews ADD COLUMN event TEXT NOT NULL DEFAULT ''")
 	db.Exec("ALTER TABLE agents ADD COLUMN instructions TEXT NOT NULL DEFAULT ''")
 	db.Exec("ALTER TABLE agents ADD COLUMN cli_flags TEXT NOT NULL DEFAULT ''")
 	db.Exec("ALTER TABLE agents RENAME COLUMN prompt TO prompt") // no-op, ensures column exists
