@@ -443,12 +443,13 @@ func main() {
 			}
 		}
 		return pipeline.RunOptions{
-			Primary:            aiCfg.Primary,
-			Fallback:           aiCfg.Fallback,
-			PromptOverride:     aiCfg.Prompt,
-			AgentPromptID:      agentCfg.PromptID,
-			ReviewMode:         aiCfg.ReviewMode,
-			InstructionAuthors: aiCfg.InstructionAuthors,
+			Primary:                aiCfg.Primary,
+			Fallback:               aiCfg.Fallback,
+			PromptOverride:         aiCfg.Prompt,
+			AgentPromptID:          agentCfg.PromptID,
+			ReviewMode:             aiCfg.ReviewMode,
+			InstructionAuthors:     aiCfg.InstructionAuthors,
+			NeverApproveWithIssues: aiCfg.NeverApproveWithIssues != nil && *aiCfg.NeverApproveWithIssues,
 			ExecOpts: executor.ExecOptions{
 				Model:                agentCfg.Model,
 				MaxTurns:             agentCfg.MaxTurns,

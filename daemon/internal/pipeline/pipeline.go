@@ -297,6 +297,9 @@ type RunOptions struct {
 	// to set persistent per-repo instructions via comment directives (#383).
 	// Empty disables the comment-driven path for this repo.
 	InstructionAuthors []string
+	// NeverApproveWithIssues, when true, publishes the review as COMMENT
+	// instead of APPROVE whenever the review found any issue (see ReviewEvent).
+	NeverApproveWithIssues bool
 }
 
 // Run executes the full review pipeline for one PR and publishes the review to GitHub.
@@ -598,6 +601,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	signalComments := filterBotComments(prComments, p.botLogin)
 	commentSignals := ExtractCommentSignals(signalComments, pr.User.Login)
 	finalSeverity := ApplySignalEscalation(reconciledSeverity, commentSignals)
+	reviewEvent := ReviewEvent(finalSeverity, len(result.Issues) > 0, opts.NeverApproveWithIssues)
 
 	// 6. Marshal issues and suggestions to JSON for storage
 	issuesJSON, err := json.Marshal(result.Issues)
@@ -617,6 +621,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		Issues:         string(issuesJSON),
 		Suggestions:    string(suggestionsJSON),
 		Severity:       finalSeverity,
+		Event:          reviewEvent,
 		CreatedAt:      time.Now().UTC(),
 		GitHubReviewID: 0, // will be set after GitHub publish
 		HeadSHA:        pr.Head.SHA,
@@ -644,7 +649,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	ghReviewID, ghReviewState, publishErr := p.gh.SubmitReview(
 		pr.Repo, pr.Number,
 		reviewBody,
-		SeverityToEvent(finalSeverity),
+		reviewEvent,
 	)
 	if publishErr != nil {
 		// Permanent submit failure (PR locked etc.): mark the freshly
@@ -771,12 +776,14 @@ func (p *Pipeline) PublishPending() {
 		}
 		// PublishPending always uses single-mode body (individual comments were
 		// already posted when the review first ran; we only retry the formal review).
-		// The stored severity already incorporates signal escalation from the
-		// initial review, so SeverityToEvent reproduces the original decision.
+		// The stored event already incorporates signal escalation and the
+		// never-approve-with-issues decision from the initial review; legacy
+		// rows without a stored event fall back to SeverityToEvent via
+		// publishEventFor.
 		ghID, ghState, err := p.gh.SubmitReview(
 			pr.Repo, pr.Number,
 			BuildGitHubBody(result),
-			SeverityToEvent(rev.Severity),
+			publishEventFor(rev),
 		)
 		if err != nil {
 			// Permanent submit failures (currently HTTP 422 "lock
@@ -1017,6 +1024,16 @@ func ReviewEvent(finalSeverity string, hasIssues bool, neverApproveWithIssues bo
 		return "COMMENT"
 	}
 	return event
+}
+
+// publishEventFor returns the GitHub event to submit for a stored review:
+// the decided event persisted at review time, or — for legacy rows written
+// before the event column existed — the severity-derived fallback.
+func publishEventFor(rev *store.Review) string {
+	if rev.Event != "" {
+		return rev.Event
+	}
+	return SeverityToEvent(rev.Severity)
 }
 
 // maxCommentsBytes limits the total formatted PR comments included in the prompt.
