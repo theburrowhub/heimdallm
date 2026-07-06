@@ -1615,6 +1615,7 @@ func main() {
 			"triage_owner":                c.AI.TriageOwner,
 			"clone_dir":                   c.AI.CloneDir,
 			"generate_pr_description":     c.AI.GeneratePRDescription,
+			"never_approve_with_issues":   c.AI.NeverApproveWithIssues,
 		}
 		if c.AI.AutoPromoteTriage != nil {
 			result["auto_promote_triage"] = *c.AI.AutoPromoteTriage
@@ -2225,6 +2226,7 @@ func configReloadRestartSnapshot(c *config.Config) config.Config {
 	snap.AI.AutoPromoteRefinement = nil
 	snap.AI.Tier2RepoConcurrency = 0
 	snap.AI.GeneratePRDescription = false
+	snap.AI.NeverApproveWithIssues = false
 	snap.AI.ReviewResponse = config.ReviewResponseConfig{}
 	snap.AI.ReviewFix = config.ReviewFixConfig{}
 
@@ -4409,19 +4411,20 @@ func repoAIOverrideMap(ai config.RepoAI) map[string]any {
 		"local_dir":   ai.LocalDir,
 	}
 	addCommonAIOverrideFields(out, aiOverrideFields{
-		Prompt:                ai.Prompt,
-		IssuePrompt:           ai.IssuePrompt,
-		ImplementPrompt:       ai.ImplementPrompt,
-		RefinementTimeout:     ai.RefinementTimeout,
-		TriageOwner:           ai.TriageOwner,
-		CloneDir:              ai.CloneDir,
-		AutoPromoteTriage:     ai.AutoPromoteTriage,
-		AutoPromoteRefinement: ai.AutoPromoteRefinement,
-		PRReviewers:           ai.PRReviewers,
-		PRAssignee:            ai.PRAssignee,
-		PRLabels:              ai.PRLabels,
-		PRDraft:               ai.PRDraft,
-		GeneratePRDescription: ai.GeneratePRDescription,
+		Prompt:                 ai.Prompt,
+		IssuePrompt:            ai.IssuePrompt,
+		ImplementPrompt:        ai.ImplementPrompt,
+		RefinementTimeout:      ai.RefinementTimeout,
+		TriageOwner:            ai.TriageOwner,
+		CloneDir:               ai.CloneDir,
+		AutoPromoteTriage:      ai.AutoPromoteTriage,
+		AutoPromoteRefinement:  ai.AutoPromoteRefinement,
+		PRReviewers:            ai.PRReviewers,
+		PRAssignee:             ai.PRAssignee,
+		PRLabels:               ai.PRLabels,
+		PRDraft:                ai.PRDraft,
+		GeneratePRDescription:  ai.GeneratePRDescription,
+		NeverApproveWithIssues: ai.NeverApproveWithIssues,
 	})
 	if ai.IssueTracking != nil {
 		out["issue_tracking"] = issueTrackingOverrideMap(ai.IssueTracking)
@@ -4444,19 +4447,20 @@ func orgAIOverrideMap(ai config.OrgAI) map[string]any {
 		out["local_dir"] = ai.LocalDir
 	}
 	addCommonAIOverrideFields(out, aiOverrideFields{
-		Prompt:                ai.Prompt,
-		IssuePrompt:           ai.IssuePrompt,
-		ImplementPrompt:       ai.ImplementPrompt,
-		RefinementTimeout:     ai.RefinementTimeout,
-		TriageOwner:           ai.TriageOwner,
-		CloneDir:              ai.CloneDir,
-		AutoPromoteTriage:     ai.AutoPromoteTriage,
-		AutoPromoteRefinement: ai.AutoPromoteRefinement,
-		PRReviewers:           ai.PRReviewers,
-		PRAssignee:            ai.PRAssignee,
-		PRLabels:              ai.PRLabels,
-		PRDraft:               ai.PRDraft,
-		GeneratePRDescription: ai.GeneratePRDescription,
+		Prompt:                 ai.Prompt,
+		IssuePrompt:            ai.IssuePrompt,
+		ImplementPrompt:        ai.ImplementPrompt,
+		RefinementTimeout:      ai.RefinementTimeout,
+		TriageOwner:            ai.TriageOwner,
+		CloneDir:               ai.CloneDir,
+		AutoPromoteTriage:      ai.AutoPromoteTriage,
+		AutoPromoteRefinement:  ai.AutoPromoteRefinement,
+		PRReviewers:            ai.PRReviewers,
+		PRAssignee:             ai.PRAssignee,
+		PRLabels:               ai.PRLabels,
+		PRDraft:                ai.PRDraft,
+		GeneratePRDescription:  ai.GeneratePRDescription,
+		NeverApproveWithIssues: ai.NeverApproveWithIssues,
 	})
 	if ai.IssueTracking != nil {
 		out["issue_tracking"] = issueTrackingOverrideMap(ai.IssueTracking)
@@ -4465,19 +4469,20 @@ func orgAIOverrideMap(ai config.OrgAI) map[string]any {
 }
 
 type aiOverrideFields struct {
-	Prompt                string
-	IssuePrompt           string
-	ImplementPrompt       string
-	RefinementTimeout     string
-	TriageOwner           string
-	CloneDir              string
-	AutoPromoteTriage     *bool
-	AutoPromoteRefinement *bool
-	PRReviewers           []string
-	PRAssignee            string
-	PRLabels              []string
-	PRDraft               *bool
-	GeneratePRDescription *bool
+	Prompt                 string
+	IssuePrompt            string
+	ImplementPrompt        string
+	RefinementTimeout      string
+	TriageOwner            string
+	CloneDir               string
+	AutoPromoteTriage      *bool
+	AutoPromoteRefinement  *bool
+	PRReviewers            []string
+	PRAssignee             string
+	PRLabels               []string
+	PRDraft                *bool
+	GeneratePRDescription  *bool
+	NeverApproveWithIssues *bool
 }
 
 func addCommonAIOverrideFields(out map[string]any, fields aiOverrideFields) {
@@ -4519,6 +4524,9 @@ func addCommonAIOverrideFields(out map[string]any, fields aiOverrideFields) {
 	}
 	if fields.GeneratePRDescription != nil {
 		out["generate_pr_description"] = *fields.GeneratePRDescription
+	}
+	if fields.NeverApproveWithIssues != nil {
+		out["never_approve_with_issues"] = *fields.NeverApproveWithIssues
 	}
 }
 

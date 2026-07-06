@@ -315,6 +315,53 @@ func TestHandlerGetConfig_ExposesRepoFirstSeenAt(t *testing.T) {
 	}
 }
 
+// TestGetConfig_ExposesNeverApproveWithIssues pins the JSON contract for the
+// never_approve_with_issues field added in main.go's GET /config result map
+// (global) and repoAIOverrideMap/orgAIOverrideMap (per-repo override), the
+// same way TestHandlerGetConfig_ExposesRepoFirstSeenAt pins first_seen_at.
+// The real map-building logic lives in cmd/heimdallm/main.go (package main,
+// not importable here); this test guards that whatever main.go's configFn
+// produces survives the HTTP handler unchanged.
+func TestGetConfig_ExposesNeverApproveWithIssues(t *testing.T) {
+	srv, _ := setupServer(t)
+	srv.SetConfigFn(func() map[string]any {
+		return map[string]any{
+			"never_approve_with_issues": true,
+			"repo_overrides": map[string]any{
+				"org/repo1": map[string]any{
+					"never_approve_with_issues": false,
+				},
+			},
+		}
+	})
+
+	req := httptest.NewRequest("GET", "/config", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v (body: %s)", err, w.Body.String())
+	}
+	if body["never_approve_with_issues"] != true {
+		t.Errorf("global never_approve_with_issues = %v, want true", body["never_approve_with_issues"])
+	}
+	overrides, ok := body["repo_overrides"].(map[string]any)
+	if !ok {
+		t.Fatalf("repo_overrides missing or wrong type: %T: %v", body["repo_overrides"], body["repo_overrides"])
+	}
+	ro, ok := overrides["org/repo1"].(map[string]any)
+	if !ok {
+		t.Fatalf("repo_overrides[org/repo1] missing or wrong type: %T: %v", overrides["org/repo1"], overrides["org/repo1"])
+	}
+	if ro["never_approve_with_issues"] != false {
+		t.Errorf("repo override never_approve_with_issues = %v, want false", ro["never_approve_with_issues"])
+	}
+}
+
 func TestHandlerPutConfig(t *testing.T) {
 	srv, _ := setupServer(t)
 	body := `{"poll_interval":"5m"}`
