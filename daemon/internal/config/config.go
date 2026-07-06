@@ -457,6 +457,12 @@ type AIConfig struct {
 	// Default: false (backwards compat).
 	GeneratePRDescription bool `toml:"generate_pr_description"`
 
+	// NeverApproveWithIssues, when true, downgrades an otherwise-APPROVE review
+	// to COMMENT whenever the review found any issue. REQUEST_CHANGES (high
+	// severity) is unaffected. Default: false (backwards compat). Overridable
+	// per-org and per-repo.
+	NeverApproveWithIssues bool `toml:"never_approve_with_issues"`
+
 	// ReviewResponse configures phase 2 of the PR review-state vigilance
 	// feature (#482): the daemon optionally posts an AI-generated reply
 	// when an external reviewer leaves COMMENTED feedback on a PR that
@@ -546,6 +552,10 @@ type RepoAI struct {
 	// for this repo. nil = inherit from global.
 	GeneratePRDescription *bool `toml:"generate_pr_description,omitempty"`
 
+	// NeverApproveWithIssues overrides ai.never_approve_with_issues for this
+	// repo. nil = inherit from org/global.
+	NeverApproveWithIssues *bool `toml:"never_approve_with_issues,omitempty"`
+
 	// Per-repo issue tracking override. Nil fields inherit from org/global.
 	IssueTracking *IssueTrackingOverride `toml:"issue_tracking,omitempty" json:"issue_tracking,omitempty"`
 	// CircuitBreaker overrides circuit-breaker caps for this repo.
@@ -606,8 +616,9 @@ type OrgAI struct {
 	PRDraft            *bool    `toml:"pr_draft,omitempty"`
 	InstructionAuthors []string `toml:"instruction_authors"` // see RepoAI.InstructionAuthors (#383)
 
-	GeneratePRDescription *bool                  `toml:"generate_pr_description,omitempty"`
-	IssueTracking         *IssueTrackingOverride `toml:"issue_tracking,omitempty" json:"issue_tracking,omitempty"`
+	GeneratePRDescription  *bool                  `toml:"generate_pr_description,omitempty"`
+	NeverApproveWithIssues *bool                  `toml:"never_approve_with_issues,omitempty"`
+	IssueTracking          *IssueTrackingOverride `toml:"issue_tracking,omitempty" json:"issue_tracking,omitempty"`
 	// CircuitBreaker overrides circuit-breaker caps for all repos in this org.
 	// nil = inherit from global. Present fields overlay the global baseline.
 	CircuitBreaker *CircuitBreakerConfig `toml:"circuit_breaker,omitempty"`
@@ -743,23 +754,25 @@ func (c *Config) ResolvedPRMetadata() (reviewers, labels []string, assignee stri
 func (c *Config) AIForRepo(repo string) RepoAI {
 	gReviewers, gLabels, gAssignee, gDraft := c.ResolvedPRMetadata()
 	gGenDesc := c.AI.GeneratePRDescription
+	gNever := c.AI.NeverApproveWithIssues
 	out := RepoAI{
-		Primary:               c.AI.Primary,
-		Fallback:              c.AI.Fallback,
-		ReviewMode:            c.AI.ReviewMode,
-		IssuePrompt:           c.AI.IssuePrompt,
-		ImplementPrompt:       c.AI.ImplementPrompt,
-		RefinementTimeout:     c.AI.RefinementTimeout,
-		PRReviewers:           gReviewers,
-		PRLabels:              gLabels,
-		PRAssignee:            gAssignee,
-		PRDraft:               gDraft,
-		GeneratePRDescription: &gGenDesc,
-		TriageOwner:           c.AI.TriageOwner,
-		CloneDir:              c.AI.CloneDir,
-		AutoPromoteTriage:     c.AI.AutoPromoteTriage,
-		AutoPromoteRefinement: c.AI.AutoPromoteRefinement,
-		InstructionAuthors:    c.AI.InstructionAuthors,
+		Primary:                c.AI.Primary,
+		Fallback:               c.AI.Fallback,
+		ReviewMode:             c.AI.ReviewMode,
+		IssuePrompt:            c.AI.IssuePrompt,
+		ImplementPrompt:        c.AI.ImplementPrompt,
+		RefinementTimeout:      c.AI.RefinementTimeout,
+		PRReviewers:            gReviewers,
+		PRLabels:               gLabels,
+		PRAssignee:             gAssignee,
+		PRDraft:                gDraft,
+		GeneratePRDescription:  &gGenDesc,
+		NeverApproveWithIssues: &gNever,
+		TriageOwner:            c.AI.TriageOwner,
+		CloneDir:               c.AI.CloneDir,
+		AutoPromoteTriage:      c.AI.AutoPromoteTriage,
+		AutoPromoteRefinement:  c.AI.AutoPromoteRefinement,
+		InstructionAuthors:     c.AI.InstructionAuthors,
 	}
 	if org := repoOrg(repo); org != "" && c.AI.Orgs != nil {
 		if o, ok := c.AI.Orgs[org]; ok {
@@ -776,69 +789,72 @@ func (c *Config) AIForRepo(repo string) RepoAI {
 
 func applyOrgAI(out *RepoAI, o OrgAI) {
 	applyScopedAI(out, scopedAIFields{
-		Primary:               o.Primary,
-		Fallback:              o.Fallback,
-		ReviewMode:            o.ReviewMode,
-		Prompt:                o.Prompt,
-		IssuePrompt:           o.IssuePrompt,
-		ImplementPrompt:       o.ImplementPrompt,
-		RefinementTimeout:     o.RefinementTimeout,
-		LocalDir:              o.LocalDir,
-		TriageOwner:           o.TriageOwner,
-		CloneDir:              o.CloneDir,
-		AutoPromoteTriage:     o.AutoPromoteTriage,
-		AutoPromoteRefinement: o.AutoPromoteRefinement,
-		PRReviewers:           o.PRReviewers,
-		PRLabels:              o.PRLabels,
-		PRAssignee:            o.PRAssignee,
-		PRDraft:               o.PRDraft,
-		GeneratePRDescription: o.GeneratePRDescription,
-		InstructionAuthors:    o.InstructionAuthors,
+		Primary:                o.Primary,
+		Fallback:               o.Fallback,
+		ReviewMode:             o.ReviewMode,
+		Prompt:                 o.Prompt,
+		IssuePrompt:            o.IssuePrompt,
+		ImplementPrompt:        o.ImplementPrompt,
+		RefinementTimeout:      o.RefinementTimeout,
+		LocalDir:               o.LocalDir,
+		TriageOwner:            o.TriageOwner,
+		CloneDir:               o.CloneDir,
+		AutoPromoteTriage:      o.AutoPromoteTriage,
+		AutoPromoteRefinement:  o.AutoPromoteRefinement,
+		PRReviewers:            o.PRReviewers,
+		PRLabels:               o.PRLabels,
+		PRAssignee:             o.PRAssignee,
+		PRDraft:                o.PRDraft,
+		GeneratePRDescription:  o.GeneratePRDescription,
+		NeverApproveWithIssues: o.NeverApproveWithIssues,
+		InstructionAuthors:     o.InstructionAuthors,
 	})
 }
 
 func applyRepoAI(out *RepoAI, r RepoAI) {
 	applyScopedAI(out, scopedAIFields{
-		Primary:               r.Primary,
-		Fallback:              r.Fallback,
-		ReviewMode:            r.ReviewMode,
-		Prompt:                r.Prompt,
-		IssuePrompt:           r.IssuePrompt,
-		ImplementPrompt:       r.ImplementPrompt,
-		RefinementTimeout:     r.RefinementTimeout,
-		LocalDir:              r.LocalDir,
-		TriageOwner:           r.TriageOwner,
-		CloneDir:              r.CloneDir,
-		AutoPromoteTriage:     r.AutoPromoteTriage,
-		AutoPromoteRefinement: r.AutoPromoteRefinement,
-		PRReviewers:           r.PRReviewers,
-		PRLabels:              r.PRLabels,
-		PRAssignee:            r.PRAssignee,
-		PRDraft:               r.PRDraft,
-		GeneratePRDescription: r.GeneratePRDescription,
-		InstructionAuthors:    r.InstructionAuthors,
+		Primary:                r.Primary,
+		Fallback:               r.Fallback,
+		ReviewMode:             r.ReviewMode,
+		Prompt:                 r.Prompt,
+		IssuePrompt:            r.IssuePrompt,
+		ImplementPrompt:        r.ImplementPrompt,
+		RefinementTimeout:      r.RefinementTimeout,
+		LocalDir:               r.LocalDir,
+		TriageOwner:            r.TriageOwner,
+		CloneDir:               r.CloneDir,
+		AutoPromoteTriage:      r.AutoPromoteTriage,
+		AutoPromoteRefinement:  r.AutoPromoteRefinement,
+		PRReviewers:            r.PRReviewers,
+		PRLabels:               r.PRLabels,
+		PRAssignee:             r.PRAssignee,
+		PRDraft:                r.PRDraft,
+		GeneratePRDescription:  r.GeneratePRDescription,
+		NeverApproveWithIssues: r.NeverApproveWithIssues,
+		InstructionAuthors:     r.InstructionAuthors,
 	})
 }
 
 type scopedAIFields struct {
-	Primary               string
-	Fallback              string
-	ReviewMode            string
-	Prompt                string
-	IssuePrompt           string
-	ImplementPrompt       string
-	RefinementTimeout     string
-	LocalDir              string
-	TriageOwner           string
-	CloneDir              string
-	AutoPromoteTriage     *bool
-	AutoPromoteRefinement *bool
-	PRReviewers           []string
-	PRLabels              []string
-	PRAssignee            string
-	PRDraft               *bool
-	GeneratePRDescription *bool
-	InstructionAuthors    []string
+	Primary                string
+	Fallback               string
+	ReviewMode             string
+	Prompt                 string
+	IssuePrompt            string
+	ImplementPrompt        string
+	RefinementTimeout      string
+	LocalDir               string
+	TriageOwner            string
+	CloneDir               string
+	AutoPromoteTriage      *bool
+	AutoPromoteRefinement  *bool
+	PRReviewers            []string
+	PRLabels               []string
+	PRAssignee             string
+	PRDraft                *bool
+	GeneratePRDescription  *bool
+	NeverApproveWithIssues *bool
+	InstructionAuthors     []string
 }
 
 func applyScopedAI(out *RepoAI, fields scopedAIFields) {
@@ -892,6 +908,9 @@ func applyScopedAI(out *RepoAI, fields scopedAIFields) {
 	}
 	if fields.GeneratePRDescription != nil {
 		out.GeneratePRDescription = fields.GeneratePRDescription
+	}
+	if fields.NeverApproveWithIssues != nil {
+		out.NeverApproveWithIssues = fields.NeverApproveWithIssues
 	}
 	if fields.InstructionAuthors != nil {
 		out.InstructionAuthors = fields.InstructionAuthors
