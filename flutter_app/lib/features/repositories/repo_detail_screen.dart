@@ -301,6 +301,28 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                   ),
                 ], accent: FeaturePalette.prReview),
 
+                // ── Section: Organizations (org-inherited review policy) ─
+                _sectionCard('Organizations', [
+                  OverrideDropdown(
+                    label: 'No aprobar PRs con issues',
+                    globalValue:
+                        (orgConfig?.neverApproveWithIssues ??
+                                appConfig.globalNeverApproveWithIssues)
+                            .toString(),
+                    inheritedLabel: source(
+                      orgConfig?.neverApproveWithIssues != null,
+                    ),
+                    overrideValue: _config.neverApproveWithIssues?.toString(),
+                    options: const ['true', 'false'],
+                    onChanged: (v) => _update(
+                      _config.copyWith(
+                        neverApproveWithIssues: v != null ? v == 'true' : null,
+                      ),
+                    ),
+                    onReset: () => _resetField('never_approve_with_issues'),
+                  ),
+                ]),
+
                 // ── Section 3: Issue Tracking ──────────────────────────
                 _sectionCard('Issue Tracking', [
                   Row(
@@ -558,25 +580,6 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                       _config.copyWith(prDraft: v != null ? v == 'true' : null),
                     ),
                     onReset: () => _resetField('pr_draft'),
-                  ),
-                  const SizedBox(height: 10),
-                  OverrideDropdown(
-                    label: 'No aprobar PRs con issues',
-                    globalValue:
-                        (orgConfig?.neverApproveWithIssues ??
-                                appConfig.globalNeverApproveWithIssues)
-                            .toString(),
-                    inheritedLabel: source(
-                      orgConfig?.neverApproveWithIssues != null,
-                    ),
-                    overrideValue: _config.neverApproveWithIssues?.toString(),
-                    options: const ['true', 'false'],
-                    onChanged: (v) => _update(
-                      _config.copyWith(
-                        neverApproveWithIssues: v != null ? v == 'true' : null,
-                      ),
-                    ),
-                    onReset: () => _resetField('never_approve_with_issues'),
                   ),
                   const SizedBox(height: 10),
                   OverrideDropdown(

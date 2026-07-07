@@ -127,6 +127,10 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
     if (old.prDraft != updated.prDraft && updated.prDraft != null) {
       diff['pr_draft'] = updated.prDraft!;
     }
+    if (old.neverApproveWithIssues != updated.neverApproveWithIssues &&
+        updated.neverApproveWithIssues != null) {
+      diff['never_approve_with_issues'] = updated.neverApproveWithIssues!;
+    }
     if (!_listsEqual(old.prReviewers, updated.prReviewers)) {
       diff['pr_reviewers'] = updated.prReviewers ?? <String>[];
     }
@@ -251,6 +255,20 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
                     options: promptOptions,
                     onChanged: (v) => _update(_config.copyWith(promptId: v)),
                     onReset: () => _resetField('prompt'),
+                  ),
+                  const SizedBox(height: 10),
+                  OverrideDropdown(
+                    label: 'No aprobar PRs con issues',
+                    globalValue: appConfig.globalNeverApproveWithIssues
+                        .toString(),
+                    overrideValue: _config.neverApproveWithIssues?.toString(),
+                    options: const ['true', 'false'],
+                    onChanged: (v) => _update(
+                      _config.copyWith(
+                        neverApproveWithIssues: v != null ? v == 'true' : null,
+                      ),
+                    ),
+                    onReset: () => _resetField('never_approve_with_issues'),
                   ),
                 ], accent: FeaturePalette.prReview),
                 _sectionCard('Issue Tracking', [

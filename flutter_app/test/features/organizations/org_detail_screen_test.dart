@@ -36,6 +36,7 @@ void main() {
             'auto_promote_triage': true,
             'auto_promote_refinement': true,
             'generate_pr_description': true,
+            'never_approve_with_issues': true,
             'issue_tracking': {
               'organizations': ['acme'],
               'assignees': ['alice'],
@@ -64,6 +65,7 @@ void main() {
     expect(find.text('Auto-promote refinement'), findsOneWidget);
     expect(find.text('Refinement labels'), findsOneWidget);
     expect(find.text('Generate PR description'), findsOneWidget);
+    expect(find.text('No aprobar PRs con issues'), findsOneWidget);
     expect(find.text('Organizations'), findsOneWidget);
     expect(find.text('Assignees'), findsOneWidget);
   });
