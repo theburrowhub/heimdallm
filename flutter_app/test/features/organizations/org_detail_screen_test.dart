@@ -66,7 +66,9 @@ void main() {
     expect(find.text('Refinement labels'), findsOneWidget);
     expect(find.text('Generate PR description'), findsOneWidget);
     expect(find.text('No aprobar PRs con issues'), findsOneWidget);
-    expect(find.text('Organizations'), findsOneWidget);
+    // "Organizations" now names both the new review-policy section header and
+    // the Issue Tracking org filter; target the filter by its unique helper.
+    expect(find.text('GitHub org names to filter issues'), findsOneWidget);
     expect(find.text('Assignees'), findsOneWidget);
   });
 }
