@@ -243,9 +243,19 @@ func resolveCLIPath(name string) string {
 	if path, err := exec.LookPath(name); err == nil && path != "" {
 		return path
 	}
-	// Try login shell — picks up ~/.zshrc, ~/.bashrc, Homebrew, nvm, etc.
-	// Pass name as $1 (positional arg) so it is never shell-interpolated,
-	// even though validateCLIName already guarantees it is safe.
+	// Fall back to the user's login shell.
+	return loginShellLookPath(name)
+}
+
+// loginShellLookPath resolves name via the user's login shell, which sources
+// ~/.zshrc, ~/.bashrc, Homebrew, nvm, etc. It is a package-level var so tests
+// can stub this profile-dependent probe and stay hermetic — otherwise a real
+// CLI installed on the developer's machine leaks in regardless of the test's
+// $PATH. Returns "" if not found.
+//
+// Pass name as $1 (positional arg) so it is never shell-interpolated, even
+// though validateCLIName already guarantees it is safe.
+var loginShellLookPath = func(name string) string {
 	for _, shell := range []string{"/bin/zsh", "/bin/bash"} {
 		cmd := exec.Command(shell, "-l", "-c", `which "$1"`, "--", name)
 		out, err := cmd.Output()
