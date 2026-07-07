@@ -297,6 +297,9 @@ type RunOptions struct {
 	// to set persistent per-repo instructions via comment directives (#383).
 	// Empty disables the comment-driven path for this repo.
 	InstructionAuthors []string
+	// NeverApproveWithIssues, when true, publishes the review as COMMENT
+	// instead of APPROVE whenever the review found any issue (see ReviewEvent).
+	NeverApproveWithIssues bool
 }
 
 // Run executes the full review pipeline for one PR and publishes the review to GitHub.
@@ -598,6 +601,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	signalComments := filterBotComments(prComments, p.botLogin)
 	commentSignals := ExtractCommentSignals(signalComments, pr.User.Login)
 	finalSeverity := ApplySignalEscalation(reconciledSeverity, commentSignals)
+	reviewEvent := ReviewEvent(finalSeverity, len(result.Issues) > 0, opts.NeverApproveWithIssues)
 
 	// 6. Marshal issues and suggestions to JSON for storage
 	issuesJSON, err := json.Marshal(result.Issues)
@@ -617,6 +621,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		Issues:         string(issuesJSON),
 		Suggestions:    string(suggestionsJSON),
 		Severity:       finalSeverity,
+		Event:          reviewEvent,
 		CreatedAt:      time.Now().UTC(),
 		GitHubReviewID: 0, // will be set after GitHub publish
 		HeadSHA:        pr.Head.SHA,
@@ -643,8 +648,8 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 
 	ghReviewID, ghReviewState, publishErr := p.gh.SubmitReview(
 		pr.Repo, pr.Number,
-		reviewBody,
-		SeverityToEvent(finalSeverity),
+		AnnotateBodyForEvent(reviewBody, reviewEvent),
+		reviewEvent,
 	)
 	if publishErr != nil {
 		// Permanent submit failure (PR locked etc.): mark the freshly
@@ -771,12 +776,15 @@ func (p *Pipeline) PublishPending() {
 		}
 		// PublishPending always uses single-mode body (individual comments were
 		// already posted when the review first ran; we only retry the formal review).
-		// The stored severity already incorporates signal escalation from the
-		// initial review, so SeverityToEvent reproduces the original decision.
+		// The stored event already incorporates signal escalation and the
+		// never-approve-with-issues decision from the initial review; legacy
+		// rows without a stored event fall back to SeverityToEvent via
+		// publishEventFor.
+		retryEvent := PublishEventFor(rev)
 		ghID, ghState, err := p.gh.SubmitReview(
 			pr.Repo, pr.Number,
-			BuildGitHubBody(result),
-			SeverityToEvent(rev.Severity),
+			AnnotateBodyForEvent(BuildGitHubBody(result), retryEvent),
+			retryEvent,
 		)
 		if err != nil {
 			// Permanent submit failures (currently HTTP 422 "lock
@@ -1004,6 +1012,49 @@ func SeverityToEvent(severity string) string {
 		return "REQUEST_CHANGES"
 	}
 	return "APPROVE"
+}
+
+// ReviewEvent decides the GitHub review event, honoring the
+// never-approve-with-issues setting. It builds on SeverityToEvent: when the
+// base decision would be APPROVE, the setting is on, and the review found at
+// least one issue, it downgrades APPROVE to COMMENT. REQUEST_CHANGES is never
+// altered, and a clean review (no issues) still approves.
+func ReviewEvent(finalSeverity string, hasIssues bool, neverApproveWithIssues bool) string {
+	event := SeverityToEvent(finalSeverity)
+	if event == "APPROVE" && neverApproveWithIssues && hasIssues {
+		return "COMMENT"
+	}
+	return event
+}
+
+// PublishEventFor returns the GitHub event to submit for a stored review:
+// the decided event persisted at review time, or — for legacy rows written
+// before the event column existed — the severity-derived fallback. Exported so
+// every publish path (Run, PublishPending, the NATS publish-worker) reproduces
+// the persisted decision with the same legacy fallback.
+func PublishEventFor(rev *store.Review) string {
+	if rev.Event != "" {
+		return rev.Event
+	}
+	return SeverityToEvent(rev.Severity)
+}
+
+// downgradeNote is appended to a review body when the event was downgraded to
+// COMMENT, so PR authors understand why Heimdallm commented instead of
+// approving. COMMENT is only ever produced by ReviewEvent's
+// never-approve-with-issues downgrade, so keying on the event is sufficient.
+const downgradeNote = "\n\n---\n_Not approving: issues were found and " +
+	"`never_approve_with_issues` is enabled for this repo — posting as a " +
+	"comment instead of an approval._"
+
+// AnnotateBodyForEvent appends an explanatory note to the review body when the
+// event is COMMENT (the never-approve-with-issues downgrade); otherwise the
+// body is returned unchanged.
+func AnnotateBodyForEvent(body, event string) string {
+	if event == "COMMENT" {
+		return body + downgradeNote
+	}
+	return body
 }
 
 // maxCommentsBytes limits the total formatted PR comments included in the prompt.

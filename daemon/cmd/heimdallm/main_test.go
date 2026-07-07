@@ -1043,6 +1043,30 @@ func TestPRAlreadyReviewedCircuitBreakerAllowsNewHeadSHA(t *testing.T) {
 	}
 }
 
+// TestRepoAIOverrideMap_ExposesNeverApproveWithIssues guards that the
+// per-repo AI override map GET /config serves under repo_overrides[repo]
+// carries never_approve_with_issues through, mirroring how
+// generate_pr_description is wired for the same map.
+func TestRepoAIOverrideMap_ExposesNeverApproveWithIssues(t *testing.T) {
+	no := false
+	out := repoAIOverrideMap(config.RepoAI{NeverApproveWithIssues: &no})
+	v, ok := out["never_approve_with_issues"].(bool)
+	if !ok || v != false {
+		t.Errorf("never_approve_with_issues = %v (present=%v), want false", out["never_approve_with_issues"], ok)
+	}
+}
+
+// TestOrgAIOverrideMap_ExposesNeverApproveWithIssues is the org-level
+// counterpart of TestRepoAIOverrideMap_ExposesNeverApproveWithIssues.
+func TestOrgAIOverrideMap_ExposesNeverApproveWithIssues(t *testing.T) {
+	yes := true
+	out := orgAIOverrideMap(config.OrgAI{NeverApproveWithIssues: &yes})
+	v, ok := out["never_approve_with_issues"].(bool)
+	if !ok || v != true {
+		t.Errorf("never_approve_with_issues = %v (present=%v), want true", out["never_approve_with_issues"], ok)
+	}
+}
+
 func TestResolveImplementPrompt_RepoOverrideWins(t *testing.T) {
 	s := newMemStore(t)
 	seedAgent(t, s, store.Agent{

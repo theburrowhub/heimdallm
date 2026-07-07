@@ -60,6 +60,12 @@ review_mode = "single"   # "single" or "multi"
 # change list, and test plan.
 # generate_pr_description = false
 
+# When true, a review that finds ANY issue is posted as a COMMENT instead of an
+# APPROVE (high-severity reviews still REQUEST_CHANGES; a clean review still
+# approves). Overridable per org ([ai.orgs.*]) and per repo ([ai.repos.*]).
+# Default: false.
+# never_approve_with_issues = false
+
 # Per-CLI settings (optional)
 # [ai.agents.claude]
 # model = "claude-sonnet-4-20250514"

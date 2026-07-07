@@ -208,6 +208,37 @@ func TestReview_HeadSHARoundTrip(t *testing.T) {
 	}
 }
 
+// TestReview_EventRoundTrip covers the event column added so the daemon's
+// decided GitHub review event (APPROVE|COMMENT|REQUEST_CHANGES) is persisted
+// and reproduced on retry rather than re-derived from severity, which could
+// drift if config changes between the original decision and a later retry.
+func TestReview_EventRoundTrip(t *testing.T) {
+	s := newTestStore(t)
+	prID, _ := s.UpsertPR(&store.PR{
+		GithubID: 1, Repo: "org/r", Number: 1, Title: "t", Author: "a",
+		URL: "u", State: "open", UpdatedAt: time.Now(), FetchedAt: time.Now(),
+	})
+
+	rev := &store.Review{
+		PRID: prID, CLIUsed: "claude",
+		Issues: "[]", Suggestions: "[]", Severity: "low",
+		Event:     "COMMENT",
+		CreatedAt: time.Now().UTC(),
+		HeadSHA:   "abc123",
+	}
+	id, err := s.InsertReview(rev)
+	if err != nil {
+		t.Fatalf("InsertReview: %v", err)
+	}
+	got, err := s.GetReview(id)
+	if err != nil {
+		t.Fatalf("GetReview: %v", err)
+	}
+	if got.Event != "COMMENT" {
+		t.Errorf("Event = %q, want %q", got.Event, "COMMENT")
+	}
+}
+
 func TestPR_ListAll(t *testing.T) {
 	s := newTestStore(t)
 	for i := 0; i < 3; i++ {

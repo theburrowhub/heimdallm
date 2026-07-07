@@ -2785,3 +2785,36 @@ func TestAIForRepo_InstructionAuthorsResolution(t *testing.T) {
 		t.Errorf("global fallback: got %v", got)
 	}
 }
+
+func TestNeverApproveWithIssues_Resolution(t *testing.T) {
+	tru := true
+	fal := false
+	cases := []struct {
+		name   string
+		global bool
+		org    *bool
+		repo   *bool
+		want   bool
+	}{
+		{"global off, no overrides", false, nil, nil, false},
+		{"global on, no overrides", true, nil, nil, true},
+		{"org on over global off", false, &tru, nil, true},
+		{"repo off over org on", false, &tru, &fal, false},
+		{"repo on over global off", false, nil, &tru, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &Config{}
+			c.AI.NeverApproveWithIssues = tc.global
+			c.AI.Orgs = map[string]OrgAI{"acme": {NeverApproveWithIssues: tc.org}}
+			c.AI.Repos = map[string]RepoAI{"acme/widget": {NeverApproveWithIssues: tc.repo}}
+			got := c.AIForRepo("acme/widget").NeverApproveWithIssues
+			if got == nil {
+				t.Fatalf("NeverApproveWithIssues is nil, want non-nil")
+			}
+			if *got != tc.want {
+				t.Errorf("NeverApproveWithIssues = %v, want %v", *got, tc.want)
+			}
+		})
+	}
+}
