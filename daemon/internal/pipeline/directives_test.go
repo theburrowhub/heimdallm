@@ -164,19 +164,3 @@ func TestProcessDirectives_UnauthorizedIsSilent(t *testing.T) {
 		t.Fatalf("unauthorized directive must get no reply, got %d", len(gh.posted))
 	}
 }
-
-func TestReviewEvent_PersistedAndReused(t *testing.T) {
-	// Unit-level guard: the decision helper + persistence contract.
-	// Run path: COMMENT chosen when flag on and issues present.
-	ev := ReviewEvent("medium", true, true)
-	if ev != "COMMENT" {
-		t.Fatalf("decision = %q, want COMMENT", ev)
-	}
-	// Publish reproduction: a stored event is used verbatim; empty falls back.
-	if got := publishEventFor(&store.Review{Event: "COMMENT", Severity: "low"}); got != "COMMENT" {
-		t.Errorf("publishEventFor(stored COMMENT) = %q, want COMMENT", got)
-	}
-	if got := publishEventFor(&store.Review{Event: "", Severity: "high"}); got != "REQUEST_CHANGES" {
-		t.Errorf("publishEventFor(legacy high) = %q, want REQUEST_CHANGES", got)
-	}
-}

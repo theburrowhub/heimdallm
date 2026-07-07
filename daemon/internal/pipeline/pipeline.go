@@ -648,7 +648,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 
 	ghReviewID, ghReviewState, publishErr := p.gh.SubmitReview(
 		pr.Repo, pr.Number,
-		reviewBody,
+		AnnotateBodyForEvent(reviewBody, reviewEvent),
 		reviewEvent,
 	)
 	if publishErr != nil {
@@ -780,10 +780,11 @@ func (p *Pipeline) PublishPending() {
 		// never-approve-with-issues decision from the initial review; legacy
 		// rows without a stored event fall back to SeverityToEvent via
 		// publishEventFor.
+		retryEvent := PublishEventFor(rev)
 		ghID, ghState, err := p.gh.SubmitReview(
 			pr.Repo, pr.Number,
-			BuildGitHubBody(result),
-			publishEventFor(rev),
+			AnnotateBodyForEvent(BuildGitHubBody(result), retryEvent),
+			retryEvent,
 		)
 		if err != nil {
 			// Permanent submit failures (currently HTTP 422 "lock
@@ -1026,14 +1027,34 @@ func ReviewEvent(finalSeverity string, hasIssues bool, neverApproveWithIssues bo
 	return event
 }
 
-// publishEventFor returns the GitHub event to submit for a stored review:
+// PublishEventFor returns the GitHub event to submit for a stored review:
 // the decided event persisted at review time, or — for legacy rows written
-// before the event column existed — the severity-derived fallback.
-func publishEventFor(rev *store.Review) string {
+// before the event column existed — the severity-derived fallback. Exported so
+// every publish path (Run, PublishPending, the NATS publish-worker) reproduces
+// the persisted decision with the same legacy fallback.
+func PublishEventFor(rev *store.Review) string {
 	if rev.Event != "" {
 		return rev.Event
 	}
 	return SeverityToEvent(rev.Severity)
+}
+
+// downgradeNote is appended to a review body when the event was downgraded to
+// COMMENT, so PR authors understand why Heimdallm commented instead of
+// approving. COMMENT is only ever produced by ReviewEvent's
+// never-approve-with-issues downgrade, so keying on the event is sufficient.
+const downgradeNote = "\n\n---\n_Not approving: issues were found and " +
+	"`never_approve_with_issues` is enabled for this repo — posting as a " +
+	"comment instead of an approval._"
+
+// AnnotateBodyForEvent appends an explanatory note to the review body when the
+// event is COMMENT (the never-approve-with-issues downgrade); otherwise the
+// body is returned unchanged.
+func AnnotateBodyForEvent(body, event string) string {
+	if event == "COMMENT" {
+		return body + downgradeNote
+	}
+	return body
 }
 
 // maxCommentsBytes limits the total formatted PR comments included in the prompt.

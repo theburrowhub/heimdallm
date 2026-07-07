@@ -1136,3 +1136,38 @@ func TestReviewEvent(t *testing.T) {
 		}
 	}
 }
+
+func TestPublishEventFor(t *testing.T) {
+	cases := []struct {
+		name string
+		rev  store.Review
+		want string
+	}{
+		{"stored COMMENT used verbatim", store.Review{Event: "COMMENT", Severity: "low"}, "COMMENT"},
+		{"stored REQUEST_CHANGES used verbatim", store.Review{Event: "REQUEST_CHANGES", Severity: "low"}, "REQUEST_CHANGES"},
+		{"stored APPROVE used verbatim", store.Review{Event: "APPROVE", Severity: "high"}, "APPROVE"},
+		{"legacy empty high falls back to severity", store.Review{Event: "", Severity: "high"}, "REQUEST_CHANGES"},
+		{"legacy empty low falls back to severity", store.Review{Event: "", Severity: "low"}, "APPROVE"},
+	}
+	for _, tc := range cases {
+		rev := tc.rev
+		if got := pipeline.PublishEventFor(&rev); got != tc.want {
+			t.Errorf("%s: PublishEventFor = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestAnnotateBodyForEvent(t *testing.T) {
+	const body = "## Review\nlgtm"
+	// COMMENT keeps the original body and appends the downgrade note.
+	got := pipeline.AnnotateBodyForEvent(body, "COMMENT")
+	if !strings.Contains(got, body) || !strings.Contains(got, "never_approve_with_issues") {
+		t.Errorf("COMMENT body should keep body and add the note, got %q", got)
+	}
+	// Non-downgrade events leave the body untouched.
+	for _, ev := range []string{"APPROVE", "REQUEST_CHANGES"} {
+		if got := pipeline.AnnotateBodyForEvent(body, ev); got != body {
+			t.Errorf("event %s: body should be unchanged, got %q", ev, got)
+		}
+	}
+}

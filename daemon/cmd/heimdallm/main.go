@@ -1031,10 +1031,15 @@ func main() {
 			return fmt.Errorf("rate limit cancelled: %w", err)
 		}
 
+		// Use the event decided and persisted at review time so a COMMENT
+		// (never_approve_with_issues) is never resubmitted as APPROVE on retry;
+		// legacy rows without a stored event fall back to severity. Mirrors the
+		// pipeline's Run / PublishPending paths.
+		publishEvent := pipeline.PublishEventFor(rev)
 		ghID, ghState, err := ghClient.SubmitReview(
 			pr.Repo, pr.Number,
-			pipeline.BuildGitHubBody(result),
-			pipeline.SeverityToEvent(rev.Severity),
+			pipeline.AnnotateBodyForEvent(pipeline.BuildGitHubBody(result), publishEvent),
+			publishEvent,
 		)
 		if err != nil {
 			errStr := err.Error()
