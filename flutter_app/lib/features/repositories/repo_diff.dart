@@ -39,6 +39,26 @@ Map<String, dynamic> computeRepoDiff(RepoConfig old, RepoConfig updated) {
     diff['issue_prompt'] = updated.issuePromptId ?? '';
   }
 
+  // Pipeline overrides.
+  if (old.triageOwner != updated.triageOwner) {
+    diff['triage_owner'] = updated.triageOwner ?? '';
+  }
+  if (old.cloneDir != updated.cloneDir) {
+    diff['clone_dir'] = updated.cloneDir ?? '';
+  }
+  if (old.autoPromoteTriage != updated.autoPromoteTriage &&
+      updated.autoPromoteTriage != null) {
+    diff['auto_promote_triage'] = updated.autoPromoteTriage!;
+  }
+  if (old.autoPromoteRefinement != updated.autoPromoteRefinement &&
+      updated.autoPromoteRefinement != null) {
+    diff['auto_promote_refinement'] = updated.autoPromoteRefinement!;
+  }
+  if (old.generatePRDescription != updated.generatePRDescription &&
+      updated.generatePRDescription != null) {
+    diff['generate_pr_description'] = updated.generatePRDescription!;
+  }
+
   if (!_listsEqual(old.prReviewers, updated.prReviewers)) {
     diff['pr_reviewers'] = updated.prReviewers ?? <String>[];
   }
@@ -73,6 +93,9 @@ Map<String, dynamic> computeRepoDiff(RepoConfig old, RepoConfig updated) {
   }
   if (!_listsEqual(old.issueAssignees, updated.issueAssignees)) {
     itDiff['assignees'] = updated.issueAssignees ?? <String>[];
+  }
+  if (!_listsEqual(old.issueOrganizations, updated.issueOrganizations)) {
+    itDiff['organizations'] = updated.issueOrganizations ?? <String>[];
   }
 
   if (itDiff.isNotEmpty) diff['issue_tracking'] = itDiff;

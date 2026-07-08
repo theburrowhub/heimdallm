@@ -250,6 +250,8 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
             const SizedBox(height: 20),
             _issueTrackingSection(config),
             const SizedBox(height: 20),
+            _pipelineSection(config),
+            const SizedBox(height: 20),
             _developSection(config),
             const SizedBox(height: 28),
             _saveButton(context, config, daemonRunning),
@@ -634,6 +636,11 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   String _globalPRAssignee = '';
   bool _globalPRDraft = false;
   bool _globalNeverApproveWithIssues = false;
+  String _globalTriageOwner = '';
+  String _globalCloneDir = '';
+  bool _globalAutoPromoteTriage = false;
+  bool _globalAutoPromoteRefinement = false;
+  bool _globalGeneratePRDescription = false;
   bool _developInitialized = false;
 
   void _initDevelopFromConfig(AppConfig config) {
@@ -644,6 +651,85 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     _globalPRAssignee = config.globalPRAssignee;
     _globalPRDraft = config.globalPRDraft;
     _globalNeverApproveWithIssues = config.globalNeverApproveWithIssues;
+    _globalTriageOwner = config.globalTriageOwner;
+    _globalCloneDir = config.globalCloneDir;
+    _globalAutoPromoteTriage = config.globalAutoPromoteTriage ?? false;
+    _globalAutoPromoteRefinement = config.globalAutoPromoteRefinement ?? false;
+    _globalGeneratePRDescription = config.globalGeneratePRDescription;
+  }
+
+  Widget _globalSwitchTile(
+    String title,
+    String subtitle,
+    bool value,
+    ValueChanged<bool> onChanged,
+  ) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Theme.of(
+          context,
+        ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+      child: SwitchListTile(
+        title: Text(title, style: const TextStyle(fontSize: 11)),
+        subtitle: Text(
+          subtitle,
+          style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+        ),
+        dense: true,
+        contentPadding: EdgeInsets.zero,
+        value: value,
+        onChanged: (v) => setState(() => onChanged(v)),
+      ),
+    );
+  }
+
+  Widget _pipelineSection(AppConfig config) {
+    _initDevelopFromConfig(config);
+    return _settingsCard('Pipeline', [
+      TextFormField(
+        initialValue: _globalTriageOwner,
+        decoration: const InputDecoration(
+          labelText: 'Triage owner',
+          hintText: 'GitHub username that owns triaged issues',
+          isDense: true,
+        ),
+        onChanged: (v) => _globalTriageOwner = v.trim(),
+      ),
+      const SizedBox(height: 12),
+      TextFormField(
+        initialValue: _globalCloneDir,
+        decoration: const InputDecoration(
+          labelText: 'Clone directory',
+          hintText: 'Base directory for managed repo clones',
+          isDense: true,
+        ),
+        onChanged: (v) => _globalCloneDir = v.trim(),
+      ),
+      const SizedBox(height: 12),
+      _globalSwitchTile(
+        'Auto-promote triage',
+        'Promote triaged issues to refinement automatically',
+        _globalAutoPromoteTriage,
+        (v) => _globalAutoPromoteTriage = v,
+      ),
+      const SizedBox(height: 10),
+      _globalSwitchTile(
+        'Auto-promote refinement',
+        'Promote refined issues to develop automatically',
+        _globalAutoPromoteRefinement,
+        (v) => _globalAutoPromoteRefinement = v,
+      ),
+      const SizedBox(height: 10),
+      _globalSwitchTile(
+        'Generate PR description',
+        'Use an LLM to generate PR titles and descriptions for auto_implement PRs',
+        _globalGeneratePRDescription,
+        (v) => _globalGeneratePRDescription = v,
+      ),
+    ]);
   }
 
   Widget _developSection(AppConfig config) {
@@ -983,6 +1069,11 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     globalPRAssignee: _globalPRAssignee,
     globalPRDraft: _globalPRDraft,
     globalNeverApproveWithIssues: _globalNeverApproveWithIssues,
+    globalTriageOwner: _globalTriageOwner,
+    globalCloneDir: _globalCloneDir,
+    globalAutoPromoteTriage: _globalAutoPromoteTriage,
+    globalAutoPromoteRefinement: _globalAutoPromoteRefinement,
+    globalGeneratePRDescription: _globalGeneratePRDescription,
     globalIssuePrompt: _issuePromptId ?? '',
     globalImplementPrompt: _developPromptId ?? '',
     // aiPrimary, aiFallback, reviewMode, agentConfigs managed in Agents tab

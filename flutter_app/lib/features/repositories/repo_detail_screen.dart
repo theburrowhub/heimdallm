@@ -434,6 +434,27 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                   ),
                   const SizedBox(height: 10),
                   AutocompleteChipField(
+                    label: 'Organizations',
+                    helper: 'GitHub org names to filter issues',
+                    selectedValues:
+                        _config.issueOrganizations ??
+                        orgConfig?.issueOrganizations ??
+                        appConfig.issueTracking.organizations,
+                    availableOptions: appConfig.knownOrganizations,
+                    isOverridden: _config.issueOrganizations != null,
+                    inheritedLabel: source(
+                      orgConfig?.issueOrganizations != null,
+                    ),
+                    globalHint: _joinList(
+                      orgConfig?.issueOrganizations ??
+                          appConfig.issueTracking.organizations,
+                    ),
+                    onChanged: (v) =>
+                        _update(_config.copyWith(issueOrganizations: v)),
+                    onReset: () => _resetField('issue_tracking/organizations'),
+                  ),
+                  const SizedBox(height: 10),
+                  AutocompleteChipField(
                     label: 'Assignees',
                     helper: 'Only process issues assigned to these users',
                     selectedValues:
@@ -470,6 +491,86 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                     onReset: () => _resetField('issue_prompt'),
                   ),
                 ], accent: FeaturePalette.issueTracking),
+
+                // ── Section: Pipeline ──────────────────────────────────
+                _sectionCard('Pipeline', [
+                  OverrideTextField(
+                    label: 'Triage owner',
+                    globalValue:
+                        orgConfig?.triageOwner ?? appConfig.globalTriageOwner,
+                    inheritedLabel: source(orgConfig?.triageOwner != null),
+                    overrideValue: _config.triageOwner,
+                    onChanged: (v) => _update(_config.copyWith(triageOwner: v)),
+                    onReset: () => _resetField('triage_owner'),
+                  ),
+                  const SizedBox(height: 10),
+                  OverrideTextField(
+                    label: 'Clone directory',
+                    globalValue:
+                        orgConfig?.cloneDir ?? appConfig.globalCloneDir,
+                    inheritedLabel: source(orgConfig?.cloneDir != null),
+                    overrideValue: _config.cloneDir,
+                    onChanged: (v) => _update(_config.copyWith(cloneDir: v)),
+                    onReset: () => _resetField('clone_dir'),
+                  ),
+                  const SizedBox(height: 10),
+                  OverrideDropdown(
+                    label: 'Auto-promote triage',
+                    globalValue:
+                        (orgConfig?.autoPromoteTriage ??
+                                appConfig.globalAutoPromoteTriage ??
+                                false)
+                            .toString(),
+                    inheritedLabel: source(orgConfig?.autoPromoteTriage != null),
+                    overrideValue: _config.autoPromoteTriage?.toString(),
+                    options: const ['true', 'false'],
+                    onChanged: (v) => _update(
+                      _config.copyWith(
+                        autoPromoteTriage: v != null ? v == 'true' : null,
+                      ),
+                    ),
+                    onReset: () => _resetField('auto_promote_triage'),
+                  ),
+                  const SizedBox(height: 10),
+                  OverrideDropdown(
+                    label: 'Auto-promote refinement',
+                    globalValue:
+                        (orgConfig?.autoPromoteRefinement ??
+                                appConfig.globalAutoPromoteRefinement ??
+                                false)
+                            .toString(),
+                    inheritedLabel: source(
+                      orgConfig?.autoPromoteRefinement != null,
+                    ),
+                    overrideValue: _config.autoPromoteRefinement?.toString(),
+                    options: const ['true', 'false'],
+                    onChanged: (v) => _update(
+                      _config.copyWith(
+                        autoPromoteRefinement: v != null ? v == 'true' : null,
+                      ),
+                    ),
+                    onReset: () => _resetField('auto_promote_refinement'),
+                  ),
+                  const SizedBox(height: 10),
+                  OverrideDropdown(
+                    label: 'Generate PR description',
+                    globalValue:
+                        (orgConfig?.generatePRDescription ??
+                                appConfig.globalGeneratePRDescription)
+                            .toString(),
+                    inheritedLabel: source(
+                      orgConfig?.generatePRDescription != null,
+                    ),
+                    overrideValue: _config.generatePRDescription?.toString(),
+                    options: const ['true', 'false'],
+                    onChanged: (v) => _update(
+                      _config.copyWith(
+                        generatePRDescription: v != null ? v == 'true' : null,
+                      ),
+                    ),
+                    onReset: () => _resetField('generate_pr_description'),
+                  ),
+                ]),
 
                 // ── Section 4: Develop ─────────────────────────────────
                 _sectionCard('Develop', [
