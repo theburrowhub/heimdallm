@@ -702,6 +702,14 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
             .toList(),
         onChanged: (v) => setState(() => _reviewMode = v ?? 'single'),
       ),
+      const SizedBox(height: 12),
+      _globalSwitchTile(
+        'No aprobar PRs con issues',
+        'Si la review encuentra issues, se publica como comentario en la PR en '
+            'vez de una aprobación (severidad alta sigue siendo cambios solicitados)',
+        _globalNeverApproveWithIssues,
+        (v) => _globalNeverApproveWithIssues = v,
+      ),
     ]);
   }
 
@@ -886,33 +894,6 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
             contentPadding: EdgeInsets.zero,
             value: _globalPRDraft,
             onChanged: (v) => setState(() => _globalPRDraft = v),
-          ),
-        ),
-        const SizedBox(height: 10),
-        Container(
-          decoration: BoxDecoration(
-            color: Theme.of(
-              context,
-            ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
-            borderRadius: BorderRadius.circular(6),
-          ),
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
-          child: SwitchListTile(
-            title: const Text(
-              'No aprobar PRs con issues',
-              style: TextStyle(fontSize: 11),
-            ),
-            subtitle: Text(
-              'Si la review encuentra issues (de cualquier severidad), se publica '
-              'como comentario en la PR en vez de una aprobación. Los casos que '
-              'bloquean (severidad alta) siguen siendo "cambios solicitados".',
-              style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
-            ),
-            dense: true,
-            contentPadding: EdgeInsets.zero,
-            value: _globalNeverApproveWithIssues,
-            onChanged: (v) =>
-                setState(() => _globalNeverApproveWithIssues = v),
           ),
         ),
         const SizedBox(height: 10),

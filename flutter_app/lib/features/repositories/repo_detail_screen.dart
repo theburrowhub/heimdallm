@@ -299,10 +299,7 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                     onChanged: (v) => _update(_config.copyWith(promptId: v)),
                     onReset: () => _resetField('prompt'),
                   ),
-                ], accent: FeaturePalette.prReview),
-
-                // ── Section: Organizations (org-inherited review policy) ─
-                _sectionCard('Organizations', [
+                  const SizedBox(height: 10),
                   OverrideDropdown(
                     label: 'No aprobar PRs con issues',
                     globalValue:
@@ -321,7 +318,7 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                     ),
                     onReset: () => _resetField('never_approve_with_issues'),
                   ),
-                ]),
+                ], accent: FeaturePalette.prReview),
 
                 // ── Section 3: Issue Tracking ──────────────────────────
                 _sectionCard('Issue Tracking', [
