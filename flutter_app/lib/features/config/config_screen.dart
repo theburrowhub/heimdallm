@@ -660,6 +660,10 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
 
   Widget _aiSection(AppConfig config) {
     _initAiFromConfig(config);
+    // never_approve lives here but is initialized by _initDevelopFromConfig,
+    // which otherwise only runs in the later Pipeline/Develop sections — call
+    // it now (idempotent) so the switch shows the real value on the first frame.
+    _initDevelopFromConfig(config);
     return _settingsCard('AI defaults', [
       DropdownButtonFormField<String>(
         initialValue: _aiPrimary,
@@ -704,9 +708,9 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
       ),
       const SizedBox(height: 12),
       _globalSwitchTile(
-        'No aprobar PRs con issues',
-        'Si la review encuentra issues, se publica como comentario en la PR en '
-            'vez de una aprobación (severidad alta sigue siendo cambios solicitados)',
+        'Never approve PRs with issues',
+        "If the review finds any issue, it's posted as a comment on the PR "
+            'instead of an approval (high severity still requests changes)',
         _globalNeverApproveWithIssues,
         (v) => _globalNeverApproveWithIssues = v,
       ),
@@ -734,14 +738,14 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     bool value,
     ValueChanged<bool> onChanged,
   ) {
-    return Container(
-      decoration: BoxDecoration(
-        color: Theme.of(
-          context,
-        ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
-        borderRadius: BorderRadius.circular(6),
-      ),
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+    // Material (not a colored DecoratedBox) so the SwitchListTile's ink/bg
+    // paints on it — a colored Container here throws a ListTile assertion in
+    // widget tests (see theburrowhub/heimdallm c1eb4e7).
+    return Material(
+      color: Theme.of(
+        context,
+      ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
+      borderRadius: BorderRadius.circular(6),
       child: SwitchListTile(
         title: Text(title, style: const TextStyle(fontSize: 11)),
         subtitle: Text(
@@ -749,7 +753,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
           style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
         ),
         dense: true,
-        contentPadding: EdgeInsets.zero,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
         value: value,
         onChanged: (v) => setState(() => onChanged(v)),
       ),
@@ -873,28 +877,11 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
           }),
         ),
         const SizedBox(height: 10),
-        Container(
-          decoration: BoxDecoration(
-            color: Theme.of(
-              context,
-            ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
-            borderRadius: BorderRadius.circular(6),
-          ),
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
-          child: SwitchListTile(
-            title: const Text(
-              'Create as draft',
-              style: TextStyle(fontSize: 11),
-            ),
-            subtitle: Text(
-              'PRs are created as drafts by default',
-              style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
-            ),
-            dense: true,
-            contentPadding: EdgeInsets.zero,
-            value: _globalPRDraft,
-            onChanged: (v) => setState(() => _globalPRDraft = v),
-          ),
+        _globalSwitchTile(
+          'Create as draft',
+          'PRs are created as drafts by default',
+          _globalPRDraft,
+          (v) => _globalPRDraft = v,
         ),
         const SizedBox(height: 10),
         _agentDropdown(

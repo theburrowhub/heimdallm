@@ -39,7 +39,10 @@ Map<String, dynamic> computeRepoDiff(RepoConfig old, RepoConfig updated) {
     diff['issue_prompt'] = updated.issuePromptId ?? '';
   }
 
-  // Pipeline overrides.
+  // Pipeline overrides. Note the intentional asymmetry (same as pr_draft etc.):
+  // string overrides emit '' to clear, but bool overrides only emit when
+  // non-null — clearing a bool override is done via _resetField (DELETE), never
+  // by diffing a null back into the PATCH body.
   if (old.triageOwner != updated.triageOwner) {
     diff['triage_owner'] = updated.triageOwner ?? '';
   }

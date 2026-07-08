@@ -258,7 +258,7 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
                   ),
                   const SizedBox(height: 10),
                   OverrideDropdown(
-                    label: 'No aprobar PRs con issues',
+                    label: 'Never approve PRs with issues',
                     globalValue: appConfig.globalNeverApproveWithIssues
                         .toString(),
                     overrideValue: _config.neverApproveWithIssues?.toString(),

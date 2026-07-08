@@ -301,7 +301,7 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                   ),
                   const SizedBox(height: 10),
                   OverrideDropdown(
-                    label: 'No aprobar PRs con issues',
+                    label: 'Never approve PRs with issues',
                     globalValue:
                         (orgConfig?.neverApproveWithIssues ??
                                 appConfig.globalNeverApproveWithIssues)
