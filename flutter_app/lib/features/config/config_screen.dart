@@ -248,6 +248,8 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
             const SizedBox(height: 20),
             _retentionSection(),
             const SizedBox(height: 20),
+            _aiSection(config),
+            const SizedBox(height: 20),
             _issueTrackingSection(config),
             const SizedBox(height: 20),
             _pipelineSection(config),
@@ -642,6 +644,66 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   bool _globalAutoPromoteRefinement = false;
   bool _globalGeneratePRDescription = false;
   bool _developInitialized = false;
+
+  String _aiPrimary = 'claude';
+  String _aiFallback = '';
+  String _reviewMode = 'single';
+  bool _aiInitialized = false;
+
+  void _initAiFromConfig(AppConfig config) {
+    if (_aiInitialized) return;
+    _aiInitialized = true;
+    _aiPrimary = config.aiPrimary.isEmpty ? 'claude' : config.aiPrimary;
+    _aiFallback = config.aiFallback;
+    _reviewMode = config.reviewMode.isEmpty ? 'single' : config.reviewMode;
+  }
+
+  Widget _aiSection(AppConfig config) {
+    _initAiFromConfig(config);
+    return _settingsCard('AI defaults', [
+      DropdownButtonFormField<String>(
+        initialValue: _aiPrimary,
+        decoration: const InputDecoration(
+          labelText: 'Primary agent',
+          border: OutlineInputBorder(),
+          isDense: true,
+        ),
+        items: const ['claude', 'gemini', 'codex']
+            .map((v) => DropdownMenuItem(value: v, child: Text(v)))
+            .toList(),
+        onChanged: (v) => setState(() => _aiPrimary = v ?? 'claude'),
+      ),
+      const SizedBox(height: 12),
+      DropdownButtonFormField<String>(
+        initialValue: _aiFallback.isEmpty ? 'none' : _aiFallback,
+        decoration: const InputDecoration(
+          labelText: 'Fallback agent',
+          border: OutlineInputBorder(),
+          isDense: true,
+        ),
+        items: const ['none', 'claude', 'gemini', 'codex']
+            .map((v) => DropdownMenuItem(value: v, child: Text(v)))
+            .toList(),
+        onChanged: (v) =>
+            setState(() => _aiFallback = (v == null || v == 'none') ? '' : v),
+      ),
+      const SizedBox(height: 12),
+      DropdownButtonFormField<String>(
+        initialValue: _reviewMode,
+        decoration: const InputDecoration(
+          labelText: 'Feedback mode',
+          helperText:
+              'single = one consolidated review; multi = one comment per issue',
+          border: OutlineInputBorder(),
+          isDense: true,
+        ),
+        items: const ['single', 'multi']
+            .map((v) => DropdownMenuItem(value: v, child: Text(v)))
+            .toList(),
+        onChanged: (v) => setState(() => _reviewMode = v ?? 'single'),
+      ),
+    ]);
+  }
 
   void _initDevelopFromConfig(AppConfig config) {
     if (_developInitialized) return;
@@ -1076,7 +1138,10 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     globalGeneratePRDescription: _globalGeneratePRDescription,
     globalIssuePrompt: _issuePromptId ?? '',
     globalImplementPrompt: _developPromptId ?? '',
-    // aiPrimary, aiFallback, reviewMode, agentConfigs managed in Agents tab
+    aiPrimary: _aiPrimary,
+    aiFallback: _aiFallback,
+    reviewMode: _reviewMode,
+    // agentConfigs (per-CLI) managed in Agents tab
   );
 
   // ── Helpers ──────────────────────────────────────────────────────────────
