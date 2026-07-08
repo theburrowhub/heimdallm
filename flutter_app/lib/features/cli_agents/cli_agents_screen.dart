@@ -16,11 +16,6 @@ class CLIAgentsScreen extends ConsumerStatefulWidget {
 }
 
 class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
-  // Global
-  String _aiPrimary = 'claude';
-  String _aiFallback = '';
-  String _reviewMode = 'single';
-
   // Per-agent — keys match _cliNames
   final Map<String, _AgentState> _agents = {
     for (final n in _cliNames) n: _AgentState(),
@@ -42,9 +37,6 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
   void _initFrom(AppConfig config) {
     if (_initialized) return;
     _initialized = true;
-    _aiPrimary  = config.aiPrimary;
-    _aiFallback = config.aiFallback;
-    _reviewMode = config.reviewMode;
     for (final name in _cliNames) {
       final ac = config.agentConfigs[name] ?? const CLIAgentConfig();
       _agents[name] = _AgentState.from(ac);
@@ -70,9 +62,6 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
         name: _agents[name]!.toConfig(),
     };
     final updated = current.copyWith(
-      aiPrimary:    _aiPrimary,
-      aiFallback:   _aiFallback,
-      reviewMode:   _reviewMode,
       agentConfigs: agentConfigs,
     );
     try {
@@ -106,49 +95,6 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
               child: ListView(
                 padding: const EdgeInsets.all(16),
                 children: [
-                  // ── Global ──────────────────────────────────────────────
-                  _sectionHeader('Global defaults'),
-                  const SizedBox(height: 12),
-                  Row(children: [
-                    Expanded(child: _dropdown(
-                      label: 'Primary agent',
-                      value: _aiPrimary,
-                      items: _cliNames,
-                      onChanged: (v) { setState(() => _aiPrimary = v!); _markDirty(); },
-                    )),
-                    const SizedBox(width: 12),
-                    Expanded(child: DropdownButtonFormField<String?>(
-                      // ignore: deprecated_member_use
-                      value: _aiFallback.isEmpty ? null : _aiFallback,
-                      decoration: const InputDecoration(
-                        labelText: 'Fallback agent',
-                        border: OutlineInputBorder(),
-                      ),
-                      items: [
-                        const DropdownMenuItem<String?>(value: null, child: Text('None')),
-                        ..._cliNames.map((v) => DropdownMenuItem<String?>(
-                          value: v, child: Text(v))),
-                      ],
-                      onChanged: (v) { setState(() => _aiFallback = v ?? ''); _markDirty(); },
-                    )),
-                    const SizedBox(width: 12),
-                    Expanded(child: DropdownButtonFormField<String>(
-                      // ignore: deprecated_member_use
-                      value: _reviewMode,
-                      decoration: const InputDecoration(
-                        labelText: 'Feedback mode',
-                        border: OutlineInputBorder(),
-                      ),
-                      items: const [
-                        DropdownMenuItem(value: 'single', child: Text('Single (consolidated)')),
-                        DropdownMenuItem(value: 'multi',  child: Text('Multi (per issue)')),
-                      ],
-                      onChanged: (v) { setState(() => _reviewMode = v!); _markDirty(); },
-                    )),
-                  ]),
-                  const SizedBox(height: 24),
-                  const Divider(),
-
                   // ── Per-agent sections ───────────────────────────────────
                   for (final name in _cliNames) ...[
                     const SizedBox(height: 16),
@@ -186,23 +132,6 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
     );
   }
 
-  Widget _sectionHeader(String title) => Text(
-    title,
-    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
-  );
-
-  Widget _dropdown({
-    required String label,
-    required String value,
-    required List<String> items,
-    required ValueChanged<String?> onChanged,
-  }) => DropdownButtonFormField<String>(
-    // ignore: deprecated_member_use
-    value: value,
-    decoration: InputDecoration(labelText: label, border: const OutlineInputBorder()),
-    items: items.map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(),
-    onChanged: onChanged,
-  );
 }
 
 // ── Per-agent editable state ────────────────────────────────────────────────

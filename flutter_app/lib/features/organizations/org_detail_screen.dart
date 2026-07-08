@@ -256,10 +256,9 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
                     onChanged: (v) => _update(_config.copyWith(promptId: v)),
                     onReset: () => _resetField('prompt'),
                   ),
-                ], accent: FeaturePalette.prReview),
-                _sectionCard('Organizations', [
+                  const SizedBox(height: 10),
                   OverrideDropdown(
-                    label: 'No aprobar PRs con issues',
+                    label: 'Never approve PRs with issues',
                     globalValue: appConfig.globalNeverApproveWithIssues
                         .toString(),
                     overrideValue: _config.neverApproveWithIssues?.toString(),
@@ -271,7 +270,7 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
                     ),
                     onReset: () => _resetField('never_approve_with_issues'),
                   ),
-                ]),
+                ], accent: FeaturePalette.prReview),
                 _sectionCard('Issue Tracking', [
                   Row(
                     children: [

@@ -556,4 +556,31 @@ void main() {
     final diff = computeRepoDiff(oldCfg, updated);
     expect(diff['never_approve_with_issues'], isTrue);
   });
+
+  test('repo diff includes Pipeline overrides when set', () {
+    const oldCfg = RepoConfig();
+    final updated = oldCfg.copyWith(
+      triageOwner: 'alice',
+      cloneDir: '/work/x',
+      autoPromoteTriage: true,
+      autoPromoteRefinement: false,
+      generatePRDescription: true,
+    );
+    final diff = computeRepoDiff(oldCfg, updated);
+    expect(diff['triage_owner'], 'alice');
+    expect(diff['clone_dir'], '/work/x');
+    expect(diff['auto_promote_triage'], isTrue);
+    expect(diff['auto_promote_refinement'], isFalse);
+    expect(diff['generate_pr_description'], isTrue);
+  });
+
+  test('repo diff includes issue_tracking organizations when set', () {
+    const oldCfg = RepoConfig();
+    final updated = oldCfg.copyWith(issueOrganizations: ['acme']);
+    final diff = computeRepoDiff(oldCfg, updated);
+    expect(
+      (diff['issue_tracking'] as Map)['organizations'],
+      ['acme'],
+    );
+  });
 }

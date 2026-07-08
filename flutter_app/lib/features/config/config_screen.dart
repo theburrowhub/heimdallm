@@ -248,7 +248,11 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
             const SizedBox(height: 20),
             _retentionSection(),
             const SizedBox(height: 20),
+            _aiSection(config),
+            const SizedBox(height: 20),
             _issueTrackingSection(config),
+            const SizedBox(height: 20),
+            _pipelineSection(config),
             const SizedBox(height: 20),
             _developSection(config),
             const SizedBox(height: 28),
@@ -634,7 +638,84 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   String _globalPRAssignee = '';
   bool _globalPRDraft = false;
   bool _globalNeverApproveWithIssues = false;
+  String _globalTriageOwner = '';
+  String _globalCloneDir = '';
+  bool _globalAutoPromoteTriage = false;
+  bool _globalAutoPromoteRefinement = false;
+  bool _globalGeneratePRDescription = false;
   bool _developInitialized = false;
+
+  String _aiPrimary = 'claude';
+  String _aiFallback = '';
+  String _reviewMode = 'single';
+  bool _aiInitialized = false;
+
+  void _initAiFromConfig(AppConfig config) {
+    if (_aiInitialized) return;
+    _aiInitialized = true;
+    _aiPrimary = config.aiPrimary.isEmpty ? 'claude' : config.aiPrimary;
+    _aiFallback = config.aiFallback;
+    _reviewMode = config.reviewMode.isEmpty ? 'single' : config.reviewMode;
+  }
+
+  Widget _aiSection(AppConfig config) {
+    _initAiFromConfig(config);
+    // never_approve lives here but is initialized by _initDevelopFromConfig,
+    // which otherwise only runs in the later Pipeline/Develop sections — call
+    // it now (idempotent) so the switch shows the real value on the first frame.
+    _initDevelopFromConfig(config);
+    return _settingsCard('AI defaults', [
+      DropdownButtonFormField<String>(
+        initialValue: _aiPrimary,
+        decoration: const InputDecoration(
+          labelText: 'Primary agent',
+          border: OutlineInputBorder(),
+          isDense: true,
+        ),
+        items: const ['claude', 'gemini', 'codex']
+            .map((v) => DropdownMenuItem(value: v, child: Text(v)))
+            .toList(),
+        onChanged: (v) => setState(() => _aiPrimary = v ?? 'claude'),
+      ),
+      const SizedBox(height: 12),
+      DropdownButtonFormField<String>(
+        initialValue: _aiFallback.isEmpty ? 'none' : _aiFallback,
+        decoration: const InputDecoration(
+          labelText: 'Fallback agent',
+          border: OutlineInputBorder(),
+          isDense: true,
+        ),
+        items: const ['none', 'claude', 'gemini', 'codex']
+            .map((v) => DropdownMenuItem(value: v, child: Text(v)))
+            .toList(),
+        onChanged: (v) =>
+            setState(() => _aiFallback = (v == null || v == 'none') ? '' : v),
+      ),
+      const SizedBox(height: 12),
+      DropdownButtonFormField<String>(
+        initialValue: _reviewMode,
+        decoration: const InputDecoration(
+          labelText: 'Feedback mode',
+          helperText:
+              'single = one consolidated review; multi = one comment per issue',
+          border: OutlineInputBorder(),
+          isDense: true,
+        ),
+        items: const ['single', 'multi']
+            .map((v) => DropdownMenuItem(value: v, child: Text(v)))
+            .toList(),
+        onChanged: (v) => setState(() => _reviewMode = v ?? 'single'),
+      ),
+      const SizedBox(height: 12),
+      _globalSwitchTile(
+        'Never approve PRs with issues',
+        "If the review finds any issue, it's posted as a comment on the PR "
+            'instead of an approval (high severity still requests changes)',
+        _globalNeverApproveWithIssues,
+        (v) => _globalNeverApproveWithIssues = v,
+      ),
+    ]);
+  }
 
   void _initDevelopFromConfig(AppConfig config) {
     if (_developInitialized) return;
@@ -644,6 +725,85 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     _globalPRAssignee = config.globalPRAssignee;
     _globalPRDraft = config.globalPRDraft;
     _globalNeverApproveWithIssues = config.globalNeverApproveWithIssues;
+    _globalTriageOwner = config.globalTriageOwner;
+    _globalCloneDir = config.globalCloneDir;
+    _globalAutoPromoteTriage = config.globalAutoPromoteTriage ?? false;
+    _globalAutoPromoteRefinement = config.globalAutoPromoteRefinement ?? false;
+    _globalGeneratePRDescription = config.globalGeneratePRDescription;
+  }
+
+  Widget _globalSwitchTile(
+    String title,
+    String subtitle,
+    bool value,
+    ValueChanged<bool> onChanged,
+  ) {
+    // Material (not a colored DecoratedBox) so the SwitchListTile's ink/bg
+    // paints on it — a colored Container here throws a ListTile assertion in
+    // widget tests (see theburrowhub/heimdallm c1eb4e7).
+    return Material(
+      color: Theme.of(
+        context,
+      ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
+      borderRadius: BorderRadius.circular(6),
+      child: SwitchListTile(
+        title: Text(title, style: const TextStyle(fontSize: 11)),
+        subtitle: Text(
+          subtitle,
+          style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+        ),
+        dense: true,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+        value: value,
+        onChanged: (v) => setState(() => onChanged(v)),
+      ),
+    );
+  }
+
+  Widget _pipelineSection(AppConfig config) {
+    _initDevelopFromConfig(config);
+    return _settingsCard('Pipeline', [
+      TextFormField(
+        initialValue: _globalTriageOwner,
+        decoration: const InputDecoration(
+          labelText: 'Triage owner',
+          hintText: 'GitHub username that owns triaged issues',
+          isDense: true,
+        ),
+        onChanged: (v) => _globalTriageOwner = v.trim(),
+      ),
+      const SizedBox(height: 12),
+      TextFormField(
+        initialValue: _globalCloneDir,
+        decoration: const InputDecoration(
+          labelText: 'Clone directory',
+          hintText: 'Base directory for managed repo clones',
+          isDense: true,
+        ),
+        onChanged: (v) => _globalCloneDir = v.trim(),
+      ),
+      const SizedBox(height: 12),
+      _globalSwitchTile(
+        'Auto-promote triage',
+        'Promote triaged issues to refinement automatically',
+        _globalAutoPromoteTriage,
+        (v) => _globalAutoPromoteTriage = v,
+      ),
+      const SizedBox(height: 10),
+      _globalSwitchTile(
+        'Auto-promote refinement',
+        'Promote refined issues to develop automatically',
+        _globalAutoPromoteRefinement,
+        (v) => _globalAutoPromoteRefinement = v,
+      ),
+      const SizedBox(height: 10),
+      _globalSwitchTile(
+        'Generate PR description',
+        'Use an LLM to generate PR titles and descriptions for auto_implement PRs',
+        _globalGeneratePRDescription,
+        (v) => _globalGeneratePRDescription = v,
+      ),
+    ]);
   }
 
   Widget _developSection(AppConfig config) {
@@ -717,55 +877,11 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
           }),
         ),
         const SizedBox(height: 10),
-        Container(
-          decoration: BoxDecoration(
-            color: Theme.of(
-              context,
-            ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
-            borderRadius: BorderRadius.circular(6),
-          ),
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
-          child: SwitchListTile(
-            title: const Text(
-              'Create as draft',
-              style: TextStyle(fontSize: 11),
-            ),
-            subtitle: Text(
-              'PRs are created as drafts by default',
-              style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
-            ),
-            dense: true,
-            contentPadding: EdgeInsets.zero,
-            value: _globalPRDraft,
-            onChanged: (v) => setState(() => _globalPRDraft = v),
-          ),
-        ),
-        const SizedBox(height: 10),
-        Container(
-          decoration: BoxDecoration(
-            color: Theme.of(
-              context,
-            ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
-            borderRadius: BorderRadius.circular(6),
-          ),
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
-          child: SwitchListTile(
-            title: const Text(
-              'No aprobar PRs con issues',
-              style: TextStyle(fontSize: 11),
-            ),
-            subtitle: Text(
-              'Si la review encuentra issues (de cualquier severidad), se publica '
-              'como comentario en la PR en vez de una aprobación. Los casos que '
-              'bloquean (severidad alta) siguen siendo "cambios solicitados".',
-              style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
-            ),
-            dense: true,
-            contentPadding: EdgeInsets.zero,
-            value: _globalNeverApproveWithIssues,
-            onChanged: (v) =>
-                setState(() => _globalNeverApproveWithIssues = v),
-          ),
+        _globalSwitchTile(
+          'Create as draft',
+          'PRs are created as drafts by default',
+          _globalPRDraft,
+          (v) => _globalPRDraft = v,
         ),
         const SizedBox(height: 10),
         _agentDropdown(
@@ -983,9 +1099,17 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     globalPRAssignee: _globalPRAssignee,
     globalPRDraft: _globalPRDraft,
     globalNeverApproveWithIssues: _globalNeverApproveWithIssues,
+    globalTriageOwner: _globalTriageOwner,
+    globalCloneDir: _globalCloneDir,
+    globalAutoPromoteTriage: _globalAutoPromoteTriage,
+    globalAutoPromoteRefinement: _globalAutoPromoteRefinement,
+    globalGeneratePRDescription: _globalGeneratePRDescription,
     globalIssuePrompt: _issuePromptId ?? '',
     globalImplementPrompt: _developPromptId ?? '',
-    // aiPrimary, aiFallback, reviewMode, agentConfigs managed in Agents tab
+    aiPrimary: _aiPrimary,
+    aiFallback: _aiFallback,
+    reviewMode: _reviewMode,
+    // agentConfigs (per-CLI) managed in Agents tab
   );
 
   // ── Helpers ──────────────────────────────────────────────────────────────
