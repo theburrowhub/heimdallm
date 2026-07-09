@@ -55,7 +55,6 @@ Review _review(int id) => Review(
   cliUsed: 'claude',
   summary: '',
   issues: const [],
-  suggestions: const [],
   severity: 'low',
   createdAt: DateTime.utc(2026, 1, 1),
 );

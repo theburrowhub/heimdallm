@@ -45,7 +45,7 @@ func TestHandleGetIssue_EmbedsLinkedPRReviewState(t *testing.T) {
 
 	if _, err := s.InsertIssueReview(&store.IssueReview{
 		IssueID: issueID, CLIUsed: "claude", Summary: "auto",
-		Triage: "{}", Suggestions: "[]",
+		Triage: "{}", NextSteps: "[]",
 		ActionTaken: "auto_implement", PRCreated: prNumber, CreatedAt: now,
 	}); err != nil {
 		t.Fatalf("insert review: %v", err)
@@ -97,7 +97,7 @@ func TestHandleGetIssue_NoLinkedPRWhenNotAutoImplement(t *testing.T) {
 	}
 	s.InsertIssueReview(&store.IssueReview{
 		IssueID: issueID, CLIUsed: "claude", Summary: "triage",
-		Triage: "{}", Suggestions: "[]",
+		Triage: "{}", NextSteps: "[]",
 		ActionTaken: "review_only", CreatedAt: now,
 	})
 

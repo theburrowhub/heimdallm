@@ -57,10 +57,9 @@ func (f *fakeExec) Detect(primary, fallback string) (string, error) {
 
 func (f *fakeExec) Execute(cli, prompt string, _ executor.ExecOptions) (*executor.ReviewResult, error) {
 	return &executor.ReviewResult{
-		Summary:     "Looks good",
-		Issues:      []executor.Issue{{File: "main.go", Line: 1, Description: "test", Severity: "low"}},
-		Suggestions: []string{"add tests"},
-		Severity:    "low",
+		Summary:  "Looks good",
+		Issues:   []executor.Issue{{File: "main.go", Line: 1, Description: "test", Severity: "low"}},
+		Severity: "low",
 	}, nil
 }
 

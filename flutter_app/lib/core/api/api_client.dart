@@ -484,11 +484,7 @@ class ApiClient {
     if (result['issues'] is String) {
       result['issues'] = jsonDecode(result['issues'] as String);
     }
-    if (result['suggestions'] is String) {
-      result['suggestions'] = jsonDecode(result['suggestions'] as String);
-    }
     result['issues'] ??= <dynamic>[];
-    result['suggestions'] ??= <dynamic>[];
     return result;
   }
 
@@ -507,11 +503,11 @@ class ApiClient {
     if (result['triage'] is String) {
       result['triage'] = jsonDecode(result['triage'] as String);
     }
-    if (result['suggestions'] is String) {
-      result['suggestions'] = jsonDecode(result['suggestions'] as String);
+    if (result['next_steps'] is String) {
+      result['next_steps'] = jsonDecode(result['next_steps'] as String);
     }
     result['triage'] ??= <String, dynamic>{};
-    result['suggestions'] ??= <dynamic>[];
+    result['next_steps'] ??= <dynamic>[];
     return result;
   }
 }

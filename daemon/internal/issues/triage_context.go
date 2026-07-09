@@ -23,7 +23,7 @@ func partitionComments(comments []github.Comment, cutoff time.Time) (before, aft
 
 // buildTriageContext creates a structured prompt section for re-triages.
 // Returns empty string for first-time triages (no previous review exists).
-func buildTriageContext(prevTriageJSON, prevSuggestionsJSON, prevSummary, prevSeverity string, lastTriageAt time.Time, comments []github.Comment, botLogin string) string {
+func buildTriageContext(prevTriageJSON, prevNextStepsJSON, prevSummary, prevSeverity string, lastTriageAt time.Time, comments []github.Comment, botLogin string) string {
 	if lastTriageAt.IsZero() {
 		return ""
 	}
@@ -56,13 +56,13 @@ func buildTriageContext(prevTriageJSON, prevSuggestionsJSON, prevSummary, prevSe
 		if prevSummary != "" {
 			b.WriteString(fmt.Sprintf("- Summary: %s\n", prevSummary))
 		}
-		var suggestions []string
-		if prevSuggestionsJSON != "" && prevSuggestionsJSON != "[]" {
-			json.Unmarshal([]byte(prevSuggestionsJSON), &suggestions)
+		var nextSteps []string
+		if prevNextStepsJSON != "" && prevNextStepsJSON != "[]" {
+			json.Unmarshal([]byte(prevNextStepsJSON), &nextSteps)
 		}
-		if len(suggestions) > 0 {
+		if len(nextSteps) > 0 {
 			b.WriteString("- Next steps:\n")
-			for _, s := range suggestions {
+			for _, s := range nextSteps {
 				b.WriteString(fmt.Sprintf("  - %s\n", s))
 			}
 		}

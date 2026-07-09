@@ -626,7 +626,7 @@ func TestHandlerListIssues(t *testing.T) {
 	}
 	s.InsertIssueReview(&store.IssueReview{
 		IssueID: id, CLIUsed: "claude", Summary: "triage summary",
-		Triage: `{"severity":"high","category":"bug"}`, Suggestions: `["fix it"]`,
+		Triage: `{"severity":"high","category":"bug"}`, NextSteps: `["fix it"]`,
 		ActionTaken: "review_only", CreatedAt: now,
 	})
 
@@ -676,7 +676,7 @@ func TestHandlerGetIssue(t *testing.T) {
 	})
 	s.InsertIssueReview(&store.IssueReview{
 		IssueID: id, CLIUsed: "gemini", Summary: "looks good",
-		Triage: `{"severity":"low","category":"feature"}`, Suggestions: `[]`,
+		Triage: `{"severity":"low","category":"feature"}`, NextSteps: `[]`,
 		ActionTaken: "review_only", CreatedAt: now,
 	})
 

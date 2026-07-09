@@ -111,7 +111,7 @@ func (p *Pipeline) runRefinement(ctx context.Context, issue *github.Issue, issue
 		Summary:        result.AnalysisSummary,
 		Triage:         "{}",
 		RefinementData: string(refinementJSON),
-		Suggestions:    "[]",
+		NextSteps:      "[]",
 		ActionTaken:    string(config.IssueModeRefinement),
 		CreatedAt:      time.Now().UTC(),
 		CommentedAt:    commentedAt,
@@ -441,7 +441,7 @@ func buildIssueRunContext(prev *store.IssueReview, comments []github.Comment, bo
 	}
 	return buildTriageContext(
 		prev.Triage,
-		prev.Suggestions,
+		prev.NextSteps,
 		prev.Summary,
 		extractSeverity(prev.Triage),
 		prev.CreatedAt,

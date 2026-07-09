@@ -11,7 +11,6 @@ class Review {
   final String cliUsed;
   final String summary;
   final List<Issue> issues;
-  final List<String> suggestions;
   final String severity;
   @JsonKey(name: 'created_at')
   final DateTime createdAt;
@@ -22,7 +21,6 @@ class Review {
     required this.cliUsed,
     required this.summary,
     required this.issues,
-    required this.suggestions,
     required this.severity,
     required this.createdAt,
   });

@@ -263,22 +263,6 @@ class _ReviewCard extends StatelessWidget {
                     ),
                   )),
             ],
-            if (review.suggestions.isNotEmpty) ...[
-              const SizedBox(height: 8),
-              Text('Suggestions',
-                  style: Theme.of(context).textTheme.labelMedium),
-              ...review.suggestions.map((s) => Padding(
-                    padding: const EdgeInsets.only(top: 4, left: 8),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Icon(Icons.lightbulb_outline, size: 14),
-                        const SizedBox(width: 4),
-                        Expanded(child: Text(s)),
-                      ],
-                    ),
-                  )),
-            ],
           ],
         ),
       ),

@@ -603,23 +603,22 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	finalSeverity := ApplySignalEscalation(reconciledSeverity, commentSignals)
 	reviewEvent := ReviewEvent(finalSeverity, len(result.Issues) > 0, opts.NeverApproveWithIssues)
 
-	// 6. Marshal issues and suggestions to JSON for storage
+	// 6. Marshal issues to JSON for storage
 	issuesJSON, err := json.Marshal(result.Issues)
 	if err != nil {
 		return nil, fmt.Errorf("pipeline: marshal issues: %w", err)
 	}
-	suggestionsJSON, err := json.Marshal(result.Suggestions)
-	if err != nil {
-		return nil, fmt.Errorf("pipeline: marshal suggestions: %w", err)
-	}
 
-	// 7. Store review in SQLite first (backup before publishing)
+	// 7. Store review in SQLite first (backup before publishing).
+	// Suggestions were dropped from the review agent (a review either raises an
+	// issue or it doesn't); the DB column is retained for backward compatibility
+	// with historical rows and always written as an empty array.
 	rev := &store.Review{
 		PRID:           prID,
 		CLIUsed:        cli,
 		Summary:        result.Summary,
 		Issues:         string(issuesJSON),
-		Suggestions:    string(suggestionsJSON),
+		Suggestions:    "[]",
 		Severity:       finalSeverity,
 		Event:          reviewEvent,
 		CreatedAt:      time.Now().UTC(),
@@ -854,13 +853,6 @@ func buildMultiSummaryBody(r *executor.ReviewResult) string {
 	if len(r.Issues) > 0 {
 		sb.WriteString(fmt.Sprintf("**%d issue(s) found** — see individual comments above for details.\n\n", len(r.Issues)))
 	}
-	if len(r.Suggestions) > 0 {
-		sb.WriteString("### Suggestions\n\n")
-		for _, s := range r.Suggestions {
-			sb.WriteString("- " + s + "\n")
-		}
-		sb.WriteString("\n")
-	}
 	sb.WriteString(fmt.Sprintf("---\n*Severity: **%s** · Reviewed by Heimdallm*",
 		strings.ToUpper(r.Severity)))
 	return sb.String()
@@ -884,14 +876,6 @@ func BuildGitHubBody(r *executor.ReviewResult) string {
 			}
 			sb.WriteString(fmt.Sprintf("%s **%s:%d** — %s\n",
 				icon, issue.File, issue.Line, issue.Description))
-		}
-		sb.WriteString("\n")
-	}
-
-	if len(r.Suggestions) > 0 {
-		sb.WriteString("### Suggestions\n\n")
-		for _, s := range r.Suggestions {
-			sb.WriteString("- " + s + "\n")
 		}
 		sb.WriteString("\n")
 	}

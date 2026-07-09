@@ -18,12 +18,12 @@ import (
 // field fully replaces the built-in template; *Instructions is injected
 // into the default template instead.
 type Agent struct {
-	ID           string    `json:"id"`
-	Name         string    `json:"name"`
-	CLI          string    `json:"cli"`          // claude | gemini | codex (overrides global)
-	Prompt       string    `json:"prompt"`       // full template (advanced); empty = use instructions
-	Instructions string    `json:"instructions"` // what to focus on (simple mode)
-	CLIFlags     string    `json:"cli_flags"`    // extra CLI args
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	CLI          string `json:"cli"`          // claude | gemini | codex (overrides global)
+	Prompt       string `json:"prompt"`       // full template (advanced); empty = use instructions
+	Instructions string `json:"instructions"` // what to focus on (simple mode)
+	CLIFlags     string `json:"cli_flags"`    // extra CLI args
 	// Per-category active flags. Each pipeline (PR review, issue triage,
 	// auto-implement) picks whichever agent has its flag set; the three
 	// activations are independent — a single agent can be active for one,

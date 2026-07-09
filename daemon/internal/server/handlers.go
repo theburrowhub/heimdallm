@@ -1451,7 +1451,7 @@ type issueLinkedPRResponse struct {
 	ExternalReviewAt    time.Time `json:"external_review_at,omitempty"`
 }
 
-// issueReviewResponse wraps a store.IssueReview, parsing Triage/Suggestions
+// issueReviewResponse wraps a store.IssueReview, parsing Triage/NextSteps
 // JSON strings into structured objects.
 type issueReviewResponse struct {
 	ID             int64           `json:"id"`
@@ -1460,7 +1460,7 @@ type issueReviewResponse struct {
 	Summary        string          `json:"summary"`
 	Triage         json.RawMessage `json:"triage"`
 	RefinementData json.RawMessage `json:"refinement_data,omitempty"`
-	Suggestions    json.RawMessage `json:"suggestions"`
+	NextSteps      json.RawMessage `json:"next_steps"`
 	ActionTaken    string          `json:"action_taken"`
 	PRCreated      int             `json:"pr_created"`
 	CreatedAt      time.Time       `json:"created_at"`
@@ -1510,7 +1510,7 @@ func toIssueReviewResponse(r *store.IssueReview) *issueReviewResponse {
 		ID: r.ID, IssueID: r.IssueID, CLIUsed: r.CLIUsed,
 		Summary:     r.Summary,
 		Triage:      json.RawMessage(r.Triage),
-		Suggestions: json.RawMessage(r.Suggestions),
+		NextSteps:   json.RawMessage(r.NextSteps),
 		ActionTaken: r.ActionTaken, PRCreated: r.PRCreated,
 		CreatedAt: r.CreatedAt,
 	}

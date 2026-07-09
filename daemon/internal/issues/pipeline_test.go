@@ -420,7 +420,7 @@ const validResult = `
     "category": "bug",
     "suggested_assignee": "alice"
   },
-  "suggestions": ["reproduce locally", "check auth migration"],
+  "next_steps": ["reproduce locally", "check auth migration"],
   "severity": "high"
 }
 `
@@ -533,8 +533,8 @@ func TestPipeline_RunHappyPath(t *testing.T) {
 	if !strings.Contains(storedRev.Triage, `"category":"bug"`) {
 		t.Errorf("triage JSON not persisted correctly: %q", storedRev.Triage)
 	}
-	if !strings.Contains(storedRev.Suggestions, "reproduce locally") {
-		t.Errorf("suggestions JSON missing: %q", storedRev.Suggestions)
+	if !strings.Contains(storedRev.NextSteps, "reproduce locally") {
+		t.Errorf("next_steps JSON missing: %q", storedRev.NextSteps)
 	}
 
 	// SSE sequence: detected → started → completed.
@@ -559,7 +559,7 @@ func TestPipeline_ReTriageInjectsContext(t *testing.T) {
 			IssueID:     1,
 			Summary:     "User cannot log in after upgrade.",
 			Triage:      `{"severity":"high","category":"bug","suggested_assignee":"alice"}`,
-			Suggestions: `["reproduce locally","check auth migration"]`,
+			NextSteps:   `["reproduce locally","check auth migration"]`,
 			ActionTaken: "review_only",
 			CreatedAt:   prevTriageAt,
 		},
@@ -1618,7 +1618,7 @@ func TestPipeline_StripsLeadingAtInSuggestedAssignee(t *testing.T) {
 	{
 	  "summary": "bug",
 	  "triage": {"severity":"low","category":"bug","suggested_assignee":"@alice"},
-	  "suggestions": [],
+	  "next_steps": [],
 	  "severity": "low"
 	}`
 	s := &fakeStore{}
@@ -1654,7 +1654,7 @@ func TestPipeline_ReviewOnlyAppliesPriorityLabelAndTriageOwnerFallback(t *testin
 	    "assignee_reason": "no clear contributor without repo context",
 	    "assignee_confidence": "high"
 	  },
-	  "suggestions": ["identify export format"],
+	  "next_steps": ["identify export format"],
 	  "severity": "high"
 	}`
 	s := &fakeStore{}
@@ -1697,7 +1697,7 @@ func TestPipeline_ReviewOnlyCreatesMissingPriorityLabelBestEffort(t *testing.T) 
 	{
 	  "summary": "outage",
 	  "triage": {"severity":"critical","category":"bug","assignee_confidence":"low"},
-	  "suggestions": [],
+	  "next_steps": [],
 	  "severity": "critical"
 	}`
 	s := &fakeStore{}
@@ -1734,7 +1734,7 @@ func TestPipeline_MetadataFailuresDoNotAbortTriage(t *testing.T) {
 }
 
 func TestPipeline_BackCompatOldIssueResultWithoutTriageBlock(t *testing.T) {
-	raw := `{"summary":"legacy result","suggestions":["look"],"severity":"medium"}`
+	raw := `{"summary":"legacy result","next_steps":["look"],"severity":"medium"}`
 	s := &fakeStore{}
 	gh := &fakeGH{labelCatalog: []string{"priority: medium"}}
 	exec := &fakeExec{detectCLI: "claude", rawOutput: []byte(raw)}
@@ -1778,7 +1778,7 @@ func TestPipeline_MissingTopSeverityFallsBackToTriage(t *testing.T) {
 	noTopSeverity := `
 	{ "summary": "x",
 	  "triage": {"severity":"medium","category":"bug","suggested_assignee":""},
-	  "suggestions": []
+	  "next_steps": []
 	}`
 	s := &fakeStore{}
 	gh := &fakeGH{}

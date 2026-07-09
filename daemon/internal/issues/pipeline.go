@@ -153,10 +153,10 @@ type Triage struct {
 // IssueReviewResult is the parsed LLM output for a triage run. Mirrors the
 // schema advertised in the prompt template.
 type IssueReviewResult struct {
-	Summary     string   `json:"summary"`
-	Triage      Triage   `json:"triage"`
-	Suggestions []string `json:"suggestions"`
-	Severity    string   `json:"severity"`
+	Summary   string   `json:"summary"`
+	Triage    Triage   `json:"triage"`
+	NextSteps []string `json:"next_steps"`
+	Severity  string   `json:"severity"`
 }
 
 // PRDescription is the parsed LLM output for a PR description generation call.
@@ -564,7 +564,7 @@ func (p *Pipeline) runReviewOnly(ctx context.Context, issue *github.Issue, issue
 	if prevReview != nil {
 		triageCtx = buildTriageContext(
 			prevReview.Triage,
-			prevReview.Suggestions,
+			prevReview.NextSteps,
 			prevReview.Summary,
 			extractSeverity(prevReview.Triage),
 			prevReview.CreatedAt,
@@ -634,16 +634,16 @@ func (p *Pipeline) runReviewOnly(ctx context.Context, issue *github.Issue, issue
 	if err != nil {
 		return nil, fmt.Errorf("issues pipeline: marshal triage: %w", err)
 	}
-	suggestionsJSON, err := json.Marshal(result.Suggestions)
+	nextStepsJSON, err := json.Marshal(result.NextSteps)
 	if err != nil {
-		return nil, fmt.Errorf("issues pipeline: marshal suggestions: %w", err)
+		return nil, fmt.Errorf("issues pipeline: marshal next_steps: %w", err)
 	}
 	rev := &store.IssueReview{
 		IssueID:     issueID,
 		CLIUsed:     cli,
 		Summary:     result.Summary,
 		Triage:      string(triageJSON),
-		Suggestions: string(suggestionsJSON),
+		NextSteps:   string(nextStepsJSON),
 		ActionTaken: string(config.IssueModeReviewOnly),
 		CreatedAt:   time.Now().UTC(),
 		CommentedAt: commentedAt,
@@ -913,7 +913,7 @@ func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, is
 		CLIUsed:     cli,
 		Summary:     fmt.Sprintf("Auto-implementation landed as PR #%d on branch %s.", prNumber, branch),
 		Triage:      "{}", // no triage block for implement runs
-		Suggestions: "[]",
+		NextSteps:   "[]",
 		ActionTaken: string(config.IssueModeDevelop),
 		PRCreated:   prNumber,
 		CreatedAt:   time.Now().UTC(),
@@ -972,7 +972,7 @@ func (p *Pipeline) autoImplementNoChangesFallback(issue *github.Issue, issueID i
 		CLIUsed:     cli,
 		Summary:     "auto_implement produced no changes; downgraded to review_only",
 		Triage:      "{}",
-		Suggestions: "[]",
+		NextSteps:   "[]",
 		ActionTaken: ActionAutoImplementNoChanges,
 		CreatedAt:   time.Now().UTC(),
 		CommentedAt: commentedAt,
@@ -1046,7 +1046,7 @@ func (p *Pipeline) recordAutoImplementFailure(issueID int64, cli, summary string
 		CLIUsed:     cli,
 		Summary:     summary,
 		Triage:      "{}",
-		Suggestions: "[]",
+		NextSteps:   "[]",
 		ActionTaken: "auto_implement_failed",
 		CreatedAt:   time.Now().UTC(),
 	}
@@ -1360,9 +1360,9 @@ func BuildMarkdownComment(r *IssueReviewResult) string {
 	}
 	sb.WriteString("\n")
 
-	if len(r.Suggestions) > 0 {
+	if len(r.NextSteps) > 0 {
 		sb.WriteString("### Next steps\n\n")
-		for _, s := range r.Suggestions {
+		for _, s := range r.NextSteps {
 			sb.WriteString("- " + s + "\n")
 		}
 		sb.WriteString("\n")

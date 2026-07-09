@@ -19,16 +19,28 @@ import (
 // every mutating call so tests can assert the exact side effects without
 // an HTTP server standing in.
 type fakePromoteClient struct {
-	open       map[string][]*github.Issue              // repo → open issues (listed)
-	byRef      map[string]*github.Issue                // "repo#N" → issue (for GetIssue)
-	subIssues  map[string][]*github.Issue              // "repo#N" → children (for ListSubIssues)
-	added      []struct{ Repo string; N int; Labels []string }
-	removed    []struct{ Repo string; N int; Labels []string }
-	comments   []struct{ Repo string; N int; Body string }
-	listErr    error
-	getErr     error
-	subErr     error
-	addErr     error
+	open      map[string][]*github.Issue // repo → open issues (listed)
+	byRef     map[string]*github.Issue   // "repo#N" → issue (for GetIssue)
+	subIssues map[string][]*github.Issue // "repo#N" → children (for ListSubIssues)
+	added     []struct {
+		Repo   string
+		N      int
+		Labels []string
+	}
+	removed []struct {
+		Repo   string
+		N      int
+		Labels []string
+	}
+	comments []struct {
+		Repo string
+		N    int
+		Body string
+	}
+	listErr error
+	getErr  error
+	subErr  error
+	addErr  error
 	// addLabelsFn lets a test inject custom per-call behaviour (e.g.
 	// "fail the first call, succeed the second"). When set, addErr is
 	// ignored. A nil return falls through to the normal "record call"
@@ -69,21 +81,33 @@ func (f *fakePromoteClient) AddLabels(repo string, n int, labels []string) error
 	} else if f.addErr != nil {
 		return f.addErr
 	}
-	f.added = append(f.added, struct{ Repo string; N int; Labels []string }{repo, n, labels})
+	f.added = append(f.added, struct {
+		Repo   string
+		N      int
+		Labels []string
+	}{repo, n, labels})
 	return nil
 }
 func (f *fakePromoteClient) RemoveLabels(repo string, n int, labels []string) error {
 	if f.removeErr != nil {
 		return f.removeErr
 	}
-	f.removed = append(f.removed, struct{ Repo string; N int; Labels []string }{repo, n, labels})
+	f.removed = append(f.removed, struct {
+		Repo   string
+		N      int
+		Labels []string
+	}{repo, n, labels})
 	return nil
 }
 func (f *fakePromoteClient) PostComment(repo string, n int, body string) (time.Time, error) {
 	if f.commentErr != nil {
 		return time.Time{}, f.commentErr
 	}
-	f.comments = append(f.comments, struct{ Repo string; N int; Body string }{repo, n, body})
+	f.comments = append(f.comments, struct {
+		Repo string
+		N    int
+		Body string
+	}{repo, n, body})
 	return time.Now().UTC(), nil
 }
 
@@ -256,7 +280,7 @@ func TestPromoteReady_ListErrorPerRepo_ContinuesOtherRepos(t *testing.T) {
 	// To actually simulate a failure on repo "org/a" only, we use a
 	// slightly different fake: return an error when repo == "org/a".
 	failFake := &failingPromoteClient{
-		inner: fake,
+		inner:      fake,
 		failOnRepo: "org/a",
 	}
 	n, err := PromoteReady(context.Background(), failFake, baseCfg(), []string{"org/a", "org/b"}, nil)

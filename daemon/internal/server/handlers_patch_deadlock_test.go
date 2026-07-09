@@ -12,14 +12,14 @@ import (
 // TestPatchTOML_DoesNotHoldTOMLMuDuringReloadFn pins the no-deadlock
 // invariant called out in the #489 review. Real-world scenario:
 //
-//	1. Operator hits PATCH /config (or any TOML-mutating endpoint).
-//	2. patchTOML acquires tomlMu, writes the file.
-//	3. patchTOML calls reloadFn — which cancels the pollers and waits
-//	   for the WaitGroup containing the rename probe goroutine.
-//	4. The probe goroutine is mid-Reconciler.Run, blocked acquiring
-//	   tomlMu (shared with the server since the #489 race fix).
-//	5. Without the fix, PATCH holds tomlMu while reloadFn blocks
-//	   waiting for the probe, the probe waits for tomlMu — deadlock.
+//  1. Operator hits PATCH /config (or any TOML-mutating endpoint).
+//  2. patchTOML acquires tomlMu, writes the file.
+//  3. patchTOML calls reloadFn — which cancels the pollers and waits
+//     for the WaitGroup containing the rename probe goroutine.
+//  4. The probe goroutine is mid-Reconciler.Run, blocked acquiring
+//     tomlMu (shared with the server since the #489 race fix).
+//  5. Without the fix, PATCH holds tomlMu while reloadFn blocks
+//     waiting for the probe, the probe waits for tomlMu — deadlock.
 //
 // The fix releases tomlMu *before* invoking reloadFn. This test
 // models the deadlock by having reloadFn attempt to acquire tomlMu
