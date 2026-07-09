@@ -23,6 +23,7 @@ class StatsScreen extends ConsumerWidget {
     return Column(
       children: [
         StatsFilterBar(allRepos: allRepos),
+        const _GitHubRateLimitCard(),
         Expanded(
           child: statsAsync.when(
             loading: () => const Center(child: CircularProgressIndicator()),
@@ -399,5 +400,133 @@ class _BarChart extends StatelessWidget {
         }).toList(),
       ),
     );
+  }
+}
+
+/// Live GitHub API rate limits (core / search / graphql) for the daemon's
+/// token. Fetched on demand via [githubRateLimitProvider]; the refresh button
+/// re-queries GitHub.
+class _GitHubRateLimitCard extends ConsumerWidget {
+  const _GitHubRateLimitCard();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final async = ref.watch(githubRateLimitProvider);
+    return Card(
+      margin: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.speed, size: 18),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text(
+                    'GitHub API limits',
+                    style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.refresh, size: 18),
+                  tooltip: 'Refresh',
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () => ref.invalidate(githubRateLimitProvider),
+                ),
+              ],
+            ),
+            async.when(
+              loading: () => const Padding(
+                padding: EdgeInsets.symmetric(vertical: 12),
+                child: Center(
+                  child: SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                ),
+              ),
+              error: (e, _) => Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Text(
+                  'Could not load rate limits: $e',
+                  style: TextStyle(color: Colors.red.shade400, fontSize: 12),
+                ),
+              ),
+              data: (rl) => Column(
+                children: [
+                  _bucket('Core (REST)', rl['core']),
+                  _bucket('Search', rl['search']),
+                  _bucket('GraphQL', rl['graphql']),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _bucket(String label, Object? raw) {
+    if (raw is! Map) return const SizedBox.shrink();
+    final limit = (raw['limit'] as num?)?.toInt() ?? 0;
+    final remaining = (raw['remaining'] as num?)?.toInt() ?? 0;
+    final reset = (raw['reset'] as num?)?.toInt() ?? 0;
+    final frac = limit > 0 ? (remaining / limit).clamp(0.0, 1.0) : 0.0;
+    final low = frac <= 0.1;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 92,
+            child: Text(label, style: const TextStyle(fontSize: 12)),
+          ),
+          Expanded(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(4),
+              child: LinearProgressIndicator(
+                value: frac,
+                minHeight: 6,
+                color: low ? Colors.red.shade400 : null,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          SizedBox(
+            width: 92,
+            child: Text(
+              '$remaining / $limit',
+              textAlign: TextAlign.right,
+              style: TextStyle(
+                fontSize: 12,
+                color: low ? Colors.red.shade400 : null,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          SizedBox(
+            width: 78,
+            child: Text(
+              _resetLabel(reset),
+              textAlign: TextAlign.right,
+              style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _resetLabel(int resetUnixSecs) {
+    if (resetUnixSecs <= 0) return '';
+    final reset = DateTime.fromMillisecondsSinceEpoch(resetUnixSecs * 1000);
+    final diff = reset.difference(DateTime.now());
+    if (diff.isNegative) return 'reset now';
+    if (diff.inMinutes < 1) return 'resets ${diff.inSeconds}s';
+    if (diff.inMinutes < 60) return 'resets ${diff.inMinutes}m';
+    return 'resets ${diff.inHours}h';
   }
 }

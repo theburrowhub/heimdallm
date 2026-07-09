@@ -479,6 +479,15 @@ final statsProvider = FutureProvider<Map<String, dynamic>>((ref) async {
   );
 });
 
+/// Live GitHub API rate limits. Fetched on demand (not polled); invalidate to
+/// refresh from the Stats screen.
+final githubRateLimitProvider = FutureProvider.autoDispose<Map<String, dynamic>>(
+  (ref) async {
+    final api = ref.watch(apiClientProvider);
+    return api.fetchGitHubRateLimit();
+  },
+);
+
 void _rebuildTray(Ref ref, List<PR> prs) {
   Future(() async {
     try {

@@ -547,6 +547,47 @@ func (c *Client) IsRepoArchived(repo string) (bool, error) {
 	return result.Archived, nil
 }
 
+// RateLimitResource is one GitHub rate-limit bucket (REST core, Search, GraphQL…).
+// Reset is a Unix timestamp (seconds) when the window rolls over.
+type RateLimitResource struct {
+	Limit     int   `json:"limit"`
+	Remaining int   `json:"remaining"`
+	Reset     int64 `json:"reset"`
+	Used      int   `json:"used"`
+}
+
+// RateLimit holds the GitHub API rate-limit buckets the app actually consumes:
+// the REST core pool, the Search API pool, and the GraphQL pool.
+type RateLimit struct {
+	Core    RateLimitResource `json:"core"`
+	Search  RateLimitResource `json:"search"`
+	GraphQL RateLimitResource `json:"graphql"`
+}
+
+// RateLimit queries GitHub's GET /rate_limit for the current token. This
+// endpoint does not itself count against the core rate limit.
+func (c *Client) RateLimit() (*RateLimit, error) {
+	resp, err := c.do("GET", "/rate_limit", "application/vnd.github+json")
+	if err != nil {
+		return nil, fmt.Errorf("github: rate limit: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+	if resp.StatusCode != http.StatusOK {
+		errBody := safeTruncate(string(body), maxErrBodyLen)
+		return nil, fmt.Errorf("github: rate limit: status %d: %s", resp.StatusCode, errBody)
+	}
+
+	var result struct {
+		Resources RateLimit `json:"resources"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("github: decode rate limit: %w", err)
+	}
+	return &result.Resources, nil
+}
+
 // PRHeadInfo bundles the HEAD SHA and the pending-reviewer logins returned by
 // the Pulls API. Tier 2 uses ReviewRequestedFor to confirm the bot is still a
 // pending reviewer (the Search API index can lag behind the actual

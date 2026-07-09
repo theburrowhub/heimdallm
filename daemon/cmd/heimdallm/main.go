@@ -1509,6 +1509,9 @@ func main() {
 	// Expose live config for GET /config
 	srv.SetRepoMetaFns(ghClient.FetchLabels, ghClient.FetchCollaborators)
 
+	// Live GitHub API rate-limit lookup for GET /github/rate_limit.
+	srv.SetRateLimitFn(func() (any, error) { return ghClient.RateLimit() })
+
 	srv.SetConfigFn(func() map[string]any {
 		// Snapshot the mutable slice fields under cfgMu. The poll-cycle
 		// auto-discovery path (upsertDiscoveredRepos) appends to
