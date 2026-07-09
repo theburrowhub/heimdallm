@@ -30,7 +30,14 @@ jobs:
         id: release
         uses: googleapis/release-please-action@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # Prefer a PAT (RELEASE_PLEASE_TOKEN) so the release PR's commits are
+          # attributed to a user and DO trigger the Tests / Docker workflows.
+          # PRs created with the default GITHUB_TOKEN never trigger further
+          # workflows, which left the release PR with no checks (UNSTABLE) and
+          # unmergeable. Falls back to GITHUB_TOKEN when the secret is absent
+          # (release PR is still created, but its checks must be run manually
+          # via the workflow_dispatch added to tests.yml / docker-publish.yml).
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
 
   # ═══════════════════════════════════════════════════════════════════════════
   # Test gate — all build jobs depend on this

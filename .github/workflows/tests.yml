@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Manual trigger: lets a maintainer run the checks on a branch that GitHub
+  # won't auto-run them on — notably the release-please PR, whose commits come
+  # from GITHUB_TOKEN and therefore never trigger pull_request workflows.
+  workflow_dispatch:
 
 concurrency:
   group: tests-${{ github.ref }}
