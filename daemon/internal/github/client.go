@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -62,6 +63,23 @@ type Client struct {
 	token   string
 	baseURL string
 	http    *http.Client
+
+	// rate-limit circuit breaker: when GitHub rejects a request with a rate
+	// limit (primary exhaustion or a secondary/abuse burst block), every
+	// subsequent request fails fast until rlPausedUntil instead of piling more
+	// traffic onto GitHub — which is what keeps a secondary block from ever
+	// clearing. Shared across all callers of this client.
+	rlMu          sync.Mutex
+	rlPausedUntil time.Time
+}
+
+// RateLimitError is returned (without contacting GitHub) while the client is in
+// its rate-limit cooldown window. Callers treat it like any transient fetch
+// error; the point is that no request is actually sent until RetryAt.
+type RateLimitError struct{ RetryAt time.Time }
+
+func (e *RateLimitError) Error() string {
+	return "github: rate limited, paused until " + e.RetryAt.Format(time.RFC3339)
 }
 
 type Option func(*Client)
@@ -117,6 +135,13 @@ func (c *Client) do(method, path string, accept string) (*http.Response, error) 
 // TODO: migrate SubmitReview and PostComment to doWithBody as well — they
 // still build their request inline, duplicating the header setup.
 func (c *Client) doWithBody(method, path, accept, contentType string, body io.Reader) (*http.Response, error) {
+	// Circuit breaker: while a rate-limit cooldown is active, fail fast without
+	// touching GitHub. Sending more traffic during a secondary/abuse block only
+	// keeps it alive; going quiet lets it clear.
+	if until, paused := c.rateLimitPaused(); paused {
+		return nil, &RateLimitError{RetryAt: until}
+	}
+
 	req, err := http.NewRequest(method, c.baseURL+path, body)
 	if err != nil {
 		return nil, err
@@ -127,7 +152,72 @@ func (c *Client) doWithBody(method, path, accept, contentType string, body io.Re
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
-	return c.http.Do(req)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	// If GitHub rate-limited this request, open the breaker so the rest of the
+	// poll cycle stops hammering. The current response is still returned so the
+	// caller handles this one as it always has.
+	if wait, limited := rateLimitDelay(resp); limited {
+		c.pauseRateLimit(wait)
+	}
+	return resp, nil
+}
+
+// rateLimitCooldown is the default pause applied when GitHub reports a rate
+// limit without a usable Retry-After. Secondary/abuse blocks typically clear
+// within a minute; a primary reset is far longer, but pausing a minute and
+// re-checking keeps traffic near zero without stalling the daemon for an hour.
+const rateLimitCooldown = 60 * time.Second
+
+// maxRateLimitCooldown caps how long the breaker stays open from a single
+// signal, so an over-large Retry-After can never wedge the daemon.
+const maxRateLimitCooldown = 5 * time.Minute
+
+func (c *Client) rateLimitPaused() (time.Time, bool) {
+	c.rlMu.Lock()
+	defer c.rlMu.Unlock()
+	if c.rlPausedUntil.IsZero() {
+		return time.Time{}, false
+	}
+	if time.Now().Before(c.rlPausedUntil) {
+		return c.rlPausedUntil, true
+	}
+	return time.Time{}, false
+}
+
+func (c *Client) pauseRateLimit(d time.Duration) {
+	if d <= 0 || d > maxRateLimitCooldown {
+		d = rateLimitCooldown
+	}
+	until := time.Now().Add(d)
+	c.rlMu.Lock()
+	if until.After(c.rlPausedUntil) {
+		c.rlPausedUntil = until
+		slog.Warn("github: rate limited, pausing API calls", "until", until.Format(time.RFC3339), "for", d.Round(time.Second))
+	}
+	c.rlMu.Unlock()
+}
+
+// rateLimitDelay reports whether resp is a GitHub rate-limit rejection and, if
+// so, a suggested cooldown. It honors a numeric Retry-After (secondary/abuse
+// limits); otherwise a 403/429 with X-RateLimit-Remaining==0 falls back to the
+// default cooldown.
+func rateLimitDelay(resp *http.Response) (time.Duration, bool) {
+	if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusTooManyRequests {
+		return 0, false
+	}
+	if ra := resp.Header.Get("Retry-After"); ra != "" {
+		if secs, err := strconv.Atoi(strings.TrimSpace(ra)); err == nil && secs >= 0 {
+			return time.Duration(secs)*time.Second + time.Second, true
+		}
+	}
+	if resp.Header.Get("X-RateLimit-Remaining") == "0" {
+		return rateLimitCooldown, true
+	}
+	return 0, false
 }
 
 // FetchPRsToReview returns all open PRs where the authenticated user is explicitly

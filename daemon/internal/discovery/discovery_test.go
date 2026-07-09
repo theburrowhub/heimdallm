@@ -133,19 +133,20 @@ func TestMergeRepos_ConfiguredIncludedInUnion(t *testing.T) {
 	}
 }
 
-// Repos in configured are exempt from the NonMonitored blacklist. A stale
-// auto-discovery row in non_monitored must not silently demote a repo that
-// the operator has explicitly wired up under [ai.repos.*].
-// See theburrowhub/heimdallm#281.
-func TestMergeRepos_ConfiguredOverridesNonMonitored(t *testing.T) {
+// An explicit non_monitored entry (e.g. the user disabling the repo in the
+// Repositories view) takes precedence even when the repo has [ai.repos.*]
+// config. Otherwise disabling a configured repo would be a silent no-op — the
+// bug reported after #281's exemption. Configured repos still join the union
+// when they are NOT in non_monitored (see TestMergeRepos_ConfiguredIncludedInUnion).
+func TestMergeRepos_NonMonitoredOverridesConfigured(t *testing.T) {
 	got := discovery.MergeRepos(
 		nil,
 		[]string{"org/wired-up"},
 		nil,
 		[]string{"org/wired-up"},
 	)
-	if len(got) != 1 || got[0] != "org/wired-up" {
-		t.Errorf("configured repo must override non_monitored blacklist, got %v", got)
+	if len(got) != 0 {
+		t.Errorf("explicit non_monitored must disable even a configured repo, got %v", got)
 	}
 }
 
@@ -153,16 +154,19 @@ func TestMergeRepos_ConfiguredOverridesNonMonitored(t *testing.T) {
 // nonMonitored simultaneously must survive — explicit [ai.repos.*] config
 // (exempt) wins over the NonMonitored blacklist across all three sources, and
 // the repo is deduplicated to a single entry.
-func TestMergeRepos_ConfiguredExemptWinsAcrossAllSources(t *testing.T) {
+func TestMergeRepos_NonMonitoredWinsAcrossAllSources(t *testing.T) {
+	// org/triple appears in static, configured AND discovered, but is also
+	// explicitly non_monitored → excluded from every source. org/static-only
+	// (not blacklisted) survives.
 	got := discovery.MergeRepos(
 		[]string{"org/triple", "org/static-only"},
 		[]string{"org/triple"},
 		[]string{"org/triple"},
 		[]string{"org/triple"},
 	)
-	want := []string{"org/triple", "org/static-only"}
+	want := []string{"org/static-only"}
 	if len(got) != len(want) {
-		t.Fatalf("got %v, want %v (exempt config must win over non_monitored, deduped)", got, want)
+		t.Fatalf("got %v, want %v (non_monitored must win over every source, deduped)", got, want)
 	}
 	for i := range want {
 		if got[i] != want[i] {
