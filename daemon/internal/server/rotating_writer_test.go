@@ -63,7 +63,7 @@ func TestRotatingWriter_CrossingCapRotatesOnce(t *testing.T) {
 	}
 	defer w.Close()
 
-	writeLine(t, w, "first\n") // 6 bytes — fits under cap
+	writeLine(t, w, "first\n")  // 6 bytes — fits under cap
 	writeLine(t, w, "second\n") // would exceed cap → rotates first
 
 	// .1 should now hold the first line, active file the second.

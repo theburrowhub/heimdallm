@@ -11,9 +11,9 @@ import (
 // review state strings (uppercase) so the SSE payload and the store
 // stay aligned with the wire protocol.
 const (
-	ReviewStateApproved          = "APPROVED"
-	ReviewStateChangesRequested  = "CHANGES_REQUESTED"
-	ReviewStateCommented         = "COMMENTED"
+	ReviewStateApproved         = "APPROVED"
+	ReviewStateChangesRequested = "CHANGES_REQUESTED"
+	ReviewStateCommented        = "COMMENTED"
 	// ReviewStateFixPushed marks a PR where the FixRunner has pushed
 	// changes in response to a CHANGES_REQUESTED. The state stays in
 	// this terminal slot until a reviewer submits a new review; this

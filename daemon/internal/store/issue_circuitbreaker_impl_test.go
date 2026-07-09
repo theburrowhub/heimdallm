@@ -31,7 +31,7 @@ func seedImplementReview(t *testing.T, s *store.Store, repo string, issueNumber 
 		CLIUsed:     "claude",
 		Summary:     "s",
 		Triage:      "{}",
-		Suggestions: "[]",
+		NextSteps:   "[]",
 		ActionTaken: actionTaken,
 		CreatedAt:   createdAt,
 	}); err != nil {

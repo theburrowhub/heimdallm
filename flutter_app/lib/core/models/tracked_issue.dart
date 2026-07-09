@@ -10,7 +10,8 @@ class TrackedIssueReview {
   final String cliUsed;
   final String summary;
   final Map<String, dynamic> triage;
-  final List<dynamic> suggestions;
+  @JsonKey(name: 'next_steps')
+  final List<dynamic> nextSteps;
   @JsonKey(name: 'action_taken')
   final String actionTaken;
   @JsonKey(name: 'pr_created')
@@ -24,7 +25,7 @@ class TrackedIssueReview {
     required this.cliUsed,
     required this.summary,
     required this.triage,
-    required this.suggestions,
+    required this.nextSteps,
     required this.actionTaken,
     required this.prCreated,
     required this.createdAt,

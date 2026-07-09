@@ -371,7 +371,7 @@ func TestIntegration_IssueCircuitBreakerTripsAfterCap(t *testing.T) {
 			IssueID: storeID, CLIUsed: "claude",
 			Summary:     "prior",
 			Triage:      "{}",
-			Suggestions: "[]",
+			NextSteps:   "[]",
 			ActionTaken: string(config.IssueModeReviewOnly),
 			CreatedAt:   time.Now().Add(time.Duration(-i) * time.Minute),
 		}); err != nil {

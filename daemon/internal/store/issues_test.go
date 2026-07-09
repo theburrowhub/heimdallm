@@ -179,7 +179,7 @@ func TestIssueReview_InsertAndList(t *testing.T) {
 		Summary:        "looks like a config bug",
 		Triage:         `{"severity":"medium","category":"config"}`,
 		RefinementData: `{"analysis_summary":"plan"}`,
-		Suggestions:    `["document the flag","add a validation step"]`,
+		NextSteps:      `["document the flag","add a validation step"]`,
 		ActionTaken:    "review_only",
 		PRCreated:      0,
 		CreatedAt:      time.Now().UTC().Truncate(time.Second),
@@ -235,8 +235,8 @@ func TestIssueReview_InsertDefaults(t *testing.T) {
 	if got.Triage != "{}" {
 		t.Errorf("triage default mismatch: %q", got.Triage)
 	}
-	if got.Suggestions != "[]" {
-		t.Errorf("suggestions default mismatch: %q", got.Suggestions)
+	if got.NextSteps != "[]" {
+		t.Errorf("next_steps default mismatch: %q", got.NextSteps)
 	}
 	if got.ActionTaken != "review_only" {
 		t.Errorf("action_taken default mismatch: %q", got.ActionTaken)

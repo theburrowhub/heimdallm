@@ -120,7 +120,7 @@ CREATE TABLE IF NOT EXISTS issue_reviews (
   summary      TEXT NOT NULL,
   triage       TEXT NOT NULL,
   refinement_data TEXT NOT NULL DEFAULT '',
-  suggestions  TEXT NOT NULL DEFAULT '[]',
+  next_steps   TEXT NOT NULL DEFAULT '[]',
   action_taken TEXT NOT NULL DEFAULT 'review_only',
   pr_created   INTEGER NOT NULL DEFAULT 0,
   created_at   DATETIME NOT NULL
@@ -240,6 +240,11 @@ func Open(dsn string) (*Store, error) {
 	}
 	db.Exec("ALTER TABLE issue_reviews ADD COLUMN commented_at DATETIME NOT NULL DEFAULT ''")
 	db.Exec("ALTER TABLE issue_reviews ADD COLUMN refinement_data TEXT NOT NULL DEFAULT ''")
+	// Ubiquitous-language rename: the issue-triage "suggestions" list is
+	// semantically the reviewer's concrete next steps, so call it that. On a
+	// fresh DB the schema above already creates `next_steps` and this RENAME
+	// no-ops (no `suggestions` column → error ignored, like the ADD COLUMNs).
+	db.Exec("ALTER TABLE issue_reviews RENAME COLUMN suggestions TO next_steps")
 	// Covering index for the circuit-breaker counters (see issue #243).
 	// CREATE INDEX IF NOT EXISTS is idempotent; safe on every startup.
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_reviews_pr_created ON reviews(pr_id, created_at)")

@@ -57,7 +57,7 @@ func TestPartitionComments_Empty(t *testing.T) {
 
 func TestBuildTriageContext_WithPreviousTriage(t *testing.T) {
 	prevTriage := `{"severity":"high","category":"bug","suggested_assignee":"alice"}`
-	prevSuggestions := `["reproduce locally","check auth migration"]`
+	prevNextSteps := `["reproduce locally","check auth migration"]`
 	prevSummary := "User cannot log in after upgrade."
 	lastTriageAt := time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)
 
@@ -68,7 +68,7 @@ func TestBuildTriageContext_WithPreviousTriage(t *testing.T) {
 		{Author: "reviewer", Body: "Agreed, the template needs to handle glob patterns", CreatedAt: lastTriageAt.Add(2 * time.Hour)},
 	}
 
-	ctx := buildTriageContext(prevTriage, prevSuggestions, prevSummary, "high", lastTriageAt, comments, "heimdallm-bot")
+	ctx := buildTriageContext(prevTriage, prevNextSteps, prevSummary, "high", lastTriageAt, comments, "heimdallm-bot")
 
 	if ctx == "" {
 		t.Fatal("expected non-empty triage context")
@@ -86,7 +86,7 @@ func TestBuildTriageContext_WithPreviousTriage(t *testing.T) {
 		t.Error("missing previous suggested assignee")
 	}
 	if !strings.Contains(ctx, "reproduce locally") {
-		t.Error("missing previous suggestion")
+		t.Error("missing previous next step")
 	}
 	if !strings.Contains(ctx, "User cannot log in") {
 		t.Error("missing previous summary")
@@ -114,10 +114,10 @@ func TestBuildTriageContext_NoPreviousTriage(t *testing.T) {
 
 func TestBuildTriageContext_PreviousTriageNoNewComments(t *testing.T) {
 	prevTriage := `{"severity":"low","category":"question","suggested_assignee":""}`
-	prevSuggestions := `["clarify requirements"]`
+	prevNextSteps := `["clarify requirements"]`
 	lastTriageAt := time.Now()
 
-	ctx := buildTriageContext(prevTriage, prevSuggestions, "Unclear request", "low", lastTriageAt, nil, "bot")
+	ctx := buildTriageContext(prevTriage, prevNextSteps, "Unclear request", "low", lastTriageAt, nil, "bot")
 
 	if !strings.Contains(ctx, "RE-TRIAGE") {
 		t.Error("missing RE-TRIAGE instruction")
@@ -126,7 +126,7 @@ func TestBuildTriageContext_PreviousTriageNoNewComments(t *testing.T) {
 		t.Error("missing previous category")
 	}
 	if !strings.Contains(ctx, "clarify requirements") {
-		t.Error("missing previous suggestion")
+		t.Error("missing previous next step")
 	}
 	if strings.Contains(ctx, "New discussion since") {
 		t.Error("should not have discussion section with no new comments")

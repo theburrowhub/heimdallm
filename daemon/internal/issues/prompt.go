@@ -179,7 +179,7 @@ func buildDefaultPrompt(ctx PromptContext, customInstructions string) string {
 	sb.WriteString(`    "assignee_confidence": "low|medium|high",` + "\n")
 	sb.WriteString(`    "assignee_evidence": ["git log/blame/shortlog evidence or fallback reason"]` + "\n")
 	sb.WriteString("  },\n")
-	sb.WriteString(`  "suggestions": ["concrete next step", "another one"],` + "\n")
+	sb.WriteString(`  "next_steps": ["concrete next step", "another one"],` + "\n")
 	sb.WriteString(`  "severity": "low|medium|high|critical"` + "\n")
 	sb.WriteString("}\n")
 	sb.WriteString("If unsure about a field, use a conservative default. Do not wrap the JSON in prose or code fences.\n")

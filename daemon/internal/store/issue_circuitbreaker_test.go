@@ -19,7 +19,7 @@ func seedIssueReviewWithAction(t *testing.T, s *store.Store, issueID int64, at t
 		CLIUsed:     "claude",
 		Summary:     "s",
 		Triage:      "{}",
-		Suggestions: "[]",
+		NextSteps:   "[]",
 		ActionTaken: action,
 		CreatedAt:   at,
 	}); err != nil {

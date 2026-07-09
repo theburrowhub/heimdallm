@@ -341,13 +341,13 @@ class _IssueReviewCard extends StatelessWidget {
                 child: Text('Category: ${review.category}'),
               ),
             ],
-            if (review.suggestions.isNotEmpty) ...[
+            if (review.nextSteps.isNotEmpty) ...[
               const SizedBox(height: 8),
               Text(
-                'Suggestions',
+                'Next steps',
                 style: Theme.of(context).textTheme.labelMedium,
               ),
-              ...review.suggestions.map(
+              ...review.nextSteps.map(
                 (s) => Padding(
                   padding: const EdgeInsets.only(top: 4, left: 8),
                   child: Row(

@@ -40,13 +40,13 @@ import (
 //   - The CHANGES_REQUESTED review's body is sanitised through the
 //     same untrusted-text fence the issue triage pipeline uses.
 type FixRunner struct {
-	store    fixStore
-	gh       fixGH
-	exec     FixExecutor
-	broker   eventPublisher
-	cfgFn    func() config.ReviewFixConfig
-	loginFn  func() string
-	nowFn    func() time.Time
+	store   fixStore
+	gh      fixGH
+	exec    FixExecutor
+	broker  eventPublisher
+	cfgFn   func() config.ReviewFixConfig
+	loginFn func() string
+	nowFn   func() time.Time
 }
 
 type fixStore interface {
@@ -288,4 +288,3 @@ func currentDecisionsByReviewer(reviews []github.PRReview, botLogin string) map[
 	}
 	return out
 }
-
