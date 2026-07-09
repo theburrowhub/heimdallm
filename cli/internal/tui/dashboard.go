@@ -1554,6 +1554,68 @@ func (d *Dashboard) buildConfigLines() []string {
 		blank()
 	}
 
+	// ── Autonomous Mode ──
+	if autRaw, ok := d.config["autonomous"]; ok {
+		if aut, ok := autRaw.(map[string]any); ok {
+			section("Autonomous Mode")
+			if v, ok := aut["enabled"].(bool); ok {
+				kv("Enabled", fmt.Sprintf("%v", v))
+			}
+			if v, ok := aut["auto_merge"].(bool); ok {
+				kv("Auto merge", fmt.Sprintf("%v", v))
+			}
+			if v, ok := aut["merge_method"].(string); ok && v != "" {
+				kv("Merge method", v)
+			}
+			if f, ok := aut["dev_max_turns"].(float64); ok {
+				if int(f) == 0 {
+					kv("Dev max turns", "unlimited")
+				} else {
+					kv("Dev max turns", fmt.Sprintf("%d", int(f)))
+				}
+			}
+			if v, ok := aut["dev_effort"].(string); ok && v != "" {
+				kv("Dev effort", v)
+			}
+			if v, ok := aut["dev_timeout"].(string); ok && v != "" {
+				kv("Dev timeout", v)
+			}
+			if v, ok := aut["claim_lease"].(string); ok && v != "" {
+				kv("Claim lease", v)
+			}
+			if v, ok := aut["take_others_tasks"].(bool); ok {
+				kv("Take others tasks", fmt.Sprintf("%v", v))
+			}
+			if v, ok := aut["reassign_on_take"].(bool); ok {
+				kv("Reassign on take", fmt.Sprintf("%v", v))
+			}
+			blank()
+		}
+	}
+
+	// ── Circuit Breaker ──
+	if cbRaw, ok := d.config["circuit_breaker"]; ok {
+		if cb, ok := cbRaw.(map[string]any); ok {
+			section("Circuit Breaker")
+			if f, ok := cb["per_pr_24h"].(float64); ok {
+				kv("Per PR / 24h", fmt.Sprintf("%d", int(f)))
+			}
+			if f, ok := cb["per_repo_hr"].(float64); ok {
+				kv("Per repo / hr", fmt.Sprintf("%d", int(f)))
+			}
+			if f, ok := cb["per_issue_24h"].(float64); ok {
+				kv("Per issue / 24h", fmt.Sprintf("%d", int(f)))
+			}
+			if f, ok := cb["per_issue_repo_hr"].(float64); ok {
+				kv("Per issue-repo / hr", fmt.Sprintf("%d", int(f)))
+			}
+			if f, ok := cb["per_impl_repo_hr"].(float64); ok {
+				kv("Per impl-repo / hr", fmt.Sprintf("%d", int(f)))
+			}
+			blank()
+		}
+	}
+
 	return lines
 }
 

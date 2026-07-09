@@ -3,6 +3,7 @@ package tui
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -103,9 +104,9 @@ func TestDashboardDropsStaleReconnectAfterWatchdogReset(t *testing.T) {
 
 func TestClampScrollOffset(t *testing.T) {
 	cases := []struct {
-		name                    string
-		offset, total, visible  int
-		want                    int
+		name                   string
+		offset, total, visible int
+		want                   int
 	}{
 		{"viewport larger than content keeps offset at 0", 0, 5, 20, 0},
 		{"viewport larger than content clamps non-zero offset to 0", 7, 5, 20, 0},
@@ -401,6 +402,57 @@ func TestCycleIssueRepoFilter(t *testing.T) {
 	d.cycleIssueRepoFilter()
 	if d.issueRepoFilter != "" {
 		t.Fatalf("third cycle: got %q, want empty (all)", d.issueRepoFilter)
+	}
+}
+
+func TestBuildConfigLinesAutonomousAndCircuitBreaker(t *testing.T) {
+	d := NewDashboard("http://localhost:0", "", "test")
+	d.config = map[string]any{
+		"autonomous": map[string]any{
+			"enabled":           true,
+			"auto_merge":        false,
+			"merge_method":      "squash",
+			"dev_max_turns":     float64(20),
+			"dev_effort":        "high",
+			"dev_timeout":       "30m",
+			"claim_lease":       "5m",
+			"take_others_tasks": true,
+			"reassign_on_take":  false,
+		},
+		"circuit_breaker": map[string]any{
+			"per_pr_24h":        float64(10),
+			"per_repo_hr":       float64(5),
+			"per_issue_24h":     float64(8),
+			"per_issue_repo_hr": float64(3),
+			"per_impl_repo_hr":  float64(2),
+		},
+	}
+
+	lines := d.buildConfigLines()
+
+	joined := ""
+	for _, l := range lines {
+		joined += l + "\n"
+	}
+
+	checks := []string{
+		"Autonomous Mode",
+		"Circuit Breaker",
+		"squash",
+		"20",
+		"high",
+		"30m",
+		"5m",
+		"Per PR / 24h",
+		"Per repo / hr",
+		"Per issue / 24h",
+		"Per issue-repo / hr",
+		"Per impl-repo / hr",
+	}
+	for _, want := range checks {
+		if !strings.Contains(joined, want) {
+			t.Errorf("buildConfigLines(): expected output to contain %q", want)
+		}
 	}
 }
 

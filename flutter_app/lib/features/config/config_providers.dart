@@ -222,6 +222,56 @@ Map<String, dynamic> _computeGlobalDiff(AppConfig old, AppConfig updated) {
     diff['retention'] = retentionDiff;
   }
 
+  // Autonomous mode
+  final autonomousDiff = <String, dynamic>{};
+  if (old.autonomous.enabled != updated.autonomous.enabled) {
+    autonomousDiff['enabled'] = updated.autonomous.enabled;
+  }
+  if (old.autonomous.autoMerge != updated.autonomous.autoMerge) {
+    autonomousDiff['auto_merge'] = updated.autonomous.autoMerge;
+  }
+  if (old.autonomous.mergeMethod != updated.autonomous.mergeMethod) {
+    autonomousDiff['merge_method'] = updated.autonomous.mergeMethod;
+  }
+  if (old.autonomous.takeOthersTasks != updated.autonomous.takeOthersTasks) {
+    autonomousDiff['take_others_tasks'] = updated.autonomous.takeOthersTasks;
+  }
+  if (old.autonomous.reassignOnTake != updated.autonomous.reassignOnTake) {
+    autonomousDiff['reassign_on_take'] = updated.autonomous.reassignOnTake;
+  }
+  if (old.autonomous.devMaxTurns != updated.autonomous.devMaxTurns) {
+    autonomousDiff['dev_max_turns'] = updated.autonomous.devMaxTurns;
+  }
+  if (old.autonomous.devEffort != updated.autonomous.devEffort) {
+    autonomousDiff['dev_effort'] = updated.autonomous.devEffort;
+  }
+  if (old.autonomous.devTimeout != updated.autonomous.devTimeout) {
+    autonomousDiff['dev_timeout'] = updated.autonomous.devTimeout;
+  }
+  if (old.autonomous.claimLease != updated.autonomous.claimLease) {
+    autonomousDiff['claim_lease'] = updated.autonomous.claimLease;
+  }
+  if (autonomousDiff.isNotEmpty) diff['autonomous'] = autonomousDiff;
+
+  // Circuit breaker
+  final cbDiff = <String, dynamic>{};
+  if (old.circuitBreaker.perPr24h != updated.circuitBreaker.perPr24h) {
+    cbDiff['per_pr_24h'] = updated.circuitBreaker.perPr24h;
+  }
+  if (old.circuitBreaker.perRepoHr != updated.circuitBreaker.perRepoHr) {
+    cbDiff['per_repo_hr'] = updated.circuitBreaker.perRepoHr;
+  }
+  if (old.circuitBreaker.perIssue24h != updated.circuitBreaker.perIssue24h) {
+    cbDiff['per_issue_24h'] = updated.circuitBreaker.perIssue24h;
+  }
+  if (old.circuitBreaker.perIssueRepoHr != updated.circuitBreaker.perIssueRepoHr) {
+    cbDiff['per_issue_repo_hr'] = updated.circuitBreaker.perIssueRepoHr;
+  }
+  if (old.circuitBreaker.perImplRepoHr != updated.circuitBreaker.perImplRepoHr) {
+    cbDiff['per_impl_repo_hr'] = updated.circuitBreaker.perImplRepoHr;
+  }
+  if (cbDiff.isNotEmpty) diff['circuit_breaker'] = cbDiff;
+
   return diff;
 }
 
