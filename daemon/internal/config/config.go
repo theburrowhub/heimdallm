@@ -15,13 +15,17 @@ import (
 )
 
 // Poll interval bounds. Any time.ParseDuration value within this range is
-// accepted; the discrete whitelist {1m,5m,30m,1h} was removed in favour of a
-// continuous range so values like 3m or 10m are valid everywhere (TOML, GUI,
-// TUI). 1m keeps the GitHub rate-limit floor; 24h is a generous ceiling that
-// still rejects pathological values like 1s or 0.
+// accepted by the daemon (config.toml load and the HTTP config API); the
+// discrete whitelist {1m,5m,30m,1h} was removed in favour of a continuous range
+// so values like 3m or 10m are valid. 1m keeps the GitHub rate-limit floor; 24h
+// is a generous ceiling that still rejects pathological values like 1s or 0.
 const (
 	minPollInterval = time.Minute
 	maxPollInterval = 24 * time.Hour
+	// Display forms for error messages — time.Duration.String() renders the
+	// constants as "1m0s"/"24h0s", which is noisier than the units operators type.
+	minPollIntervalStr = "1m"
+	maxPollIntervalStr = "24h"
 )
 
 // ValidatePollInterval reports whether raw is an acceptable poll_interval: a
@@ -37,7 +41,7 @@ func ValidatePollInterval(raw string) error {
 		return fmt.Errorf("invalid poll_interval %q: %w", raw, err)
 	}
 	if d < minPollInterval || d > maxPollInterval {
-		return fmt.Errorf("poll_interval %q out of range (must be between %s and %s)", raw, minPollInterval, maxPollInterval)
+		return fmt.Errorf("poll_interval %q out of range (must be between %s and %s)", raw, minPollIntervalStr, maxPollIntervalStr)
 	}
 	return nil
 }
