@@ -149,6 +149,9 @@ Map<String, dynamic> _computeGlobalDiff(AppConfig old, AppConfig updated) {
   if (old.globalGeneratePRDescription != updated.globalGeneratePRDescription) {
     aiDiff['generate_pr_description'] = updated.globalGeneratePRDescription;
   }
+  if (old.globalNeverApproveWithIssues != updated.globalNeverApproveWithIssues) {
+    aiDiff['never_approve_with_issues'] = updated.globalNeverApproveWithIssues;
+  }
 
   // Agent configs — diff each CLI agent's settings individually.
   final agentsDiff = <String, dynamic>{};

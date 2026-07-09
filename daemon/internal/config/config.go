@@ -15,13 +15,17 @@ import (
 )
 
 // Poll interval bounds. Any time.ParseDuration value within this range is
-// accepted; the discrete whitelist {1m,5m,30m,1h} was removed in favour of a
-// continuous range so values like 3m or 10m are valid everywhere (TOML, GUI,
-// TUI). 1m keeps the GitHub rate-limit floor; 24h is a generous ceiling that
-// still rejects pathological values like 1s or 0.
+// accepted by the daemon (config.toml load and the HTTP config API); the
+// discrete whitelist {1m,5m,30m,1h} was removed in favour of a continuous range
+// so values like 3m or 10m are valid. 1m keeps the GitHub rate-limit floor; 24h
+// is a generous ceiling that still rejects pathological values like 1s or 0.
 const (
 	minPollInterval = time.Minute
 	maxPollInterval = 24 * time.Hour
+	// Display forms for error messages — time.Duration.String() renders the
+	// constants as "1m0s"/"24h0s", which is noisier than the units operators type.
+	minPollIntervalStr = "1m"
+	maxPollIntervalStr = "24h"
 )
 
 // ValidatePollInterval reports whether raw is an acceptable poll_interval: a
@@ -37,7 +41,7 @@ func ValidatePollInterval(raw string) error {
 		return fmt.Errorf("invalid poll_interval %q: %w", raw, err)
 	}
 	if d < minPollInterval || d > maxPollInterval {
-		return fmt.Errorf("poll_interval %q out of range (must be between %s and %s)", raw, minPollInterval, maxPollInterval)
+		return fmt.Errorf("poll_interval %q out of range (must be between %s and %s)", raw, minPollIntervalStr, maxPollIntervalStr)
 	}
 	return nil
 }
@@ -53,6 +57,11 @@ var githubTopicPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,49}$`)
 // (e.g. a value like "evil-org archived:false org:other" being interpolated
 // verbatim into the `q=` parameter).
 var githubOrgPattern = regexp.MustCompile(`^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$`)
+
+// repoNamePattern matches the GitHub repository name segment of an "owner/name"
+// slug: alphanumerics plus dots, underscores and hyphens. The "." / ".." cases
+// are rejected separately by ValidateRepoSlug to avoid path-traversal tokens.
+var repoNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 type Config struct {
 	Server         ServerConfig         `toml:"server"`
@@ -457,6 +466,12 @@ type AIConfig struct {
 	// Default: false (backwards compat).
 	GeneratePRDescription bool `toml:"generate_pr_description"`
 
+	// NeverApproveWithIssues, when true, downgrades an otherwise-APPROVE review
+	// to COMMENT whenever the review found any issue. REQUEST_CHANGES (high
+	// severity) is unaffected. Default: false (backwards compat). Overridable
+	// per-org and per-repo.
+	NeverApproveWithIssues bool `toml:"never_approve_with_issues"`
+
 	// ReviewResponse configures phase 2 of the PR review-state vigilance
 	// feature (#482): the daemon optionally posts an AI-generated reply
 	// when an external reviewer leaves COMMENTED feedback on a PR that
@@ -546,6 +561,10 @@ type RepoAI struct {
 	// for this repo. nil = inherit from global.
 	GeneratePRDescription *bool `toml:"generate_pr_description,omitempty"`
 
+	// NeverApproveWithIssues overrides ai.never_approve_with_issues for this
+	// repo. nil = inherit from org/global.
+	NeverApproveWithIssues *bool `toml:"never_approve_with_issues,omitempty"`
+
 	// Per-repo issue tracking override. Nil fields inherit from org/global.
 	IssueTracking *IssueTrackingOverride `toml:"issue_tracking,omitempty" json:"issue_tracking,omitempty"`
 	// CircuitBreaker overrides circuit-breaker caps for this repo.
@@ -606,8 +625,9 @@ type OrgAI struct {
 	PRDraft            *bool    `toml:"pr_draft,omitempty"`
 	InstructionAuthors []string `toml:"instruction_authors"` // see RepoAI.InstructionAuthors (#383)
 
-	GeneratePRDescription *bool                  `toml:"generate_pr_description,omitempty"`
-	IssueTracking         *IssueTrackingOverride `toml:"issue_tracking,omitempty" json:"issue_tracking,omitempty"`
+	GeneratePRDescription  *bool                  `toml:"generate_pr_description,omitempty"`
+	NeverApproveWithIssues *bool                  `toml:"never_approve_with_issues,omitempty"`
+	IssueTracking          *IssueTrackingOverride `toml:"issue_tracking,omitempty" json:"issue_tracking,omitempty"`
 	// CircuitBreaker overrides circuit-breaker caps for all repos in this org.
 	// nil = inherit from global. Present fields overlay the global baseline.
 	CircuitBreaker *CircuitBreakerConfig `toml:"circuit_breaker,omitempty"`
@@ -743,23 +763,25 @@ func (c *Config) ResolvedPRMetadata() (reviewers, labels []string, assignee stri
 func (c *Config) AIForRepo(repo string) RepoAI {
 	gReviewers, gLabels, gAssignee, gDraft := c.ResolvedPRMetadata()
 	gGenDesc := c.AI.GeneratePRDescription
+	gNever := c.AI.NeverApproveWithIssues
 	out := RepoAI{
-		Primary:               c.AI.Primary,
-		Fallback:              c.AI.Fallback,
-		ReviewMode:            c.AI.ReviewMode,
-		IssuePrompt:           c.AI.IssuePrompt,
-		ImplementPrompt:       c.AI.ImplementPrompt,
-		RefinementTimeout:     c.AI.RefinementTimeout,
-		PRReviewers:           gReviewers,
-		PRLabels:              gLabels,
-		PRAssignee:            gAssignee,
-		PRDraft:               gDraft,
-		GeneratePRDescription: &gGenDesc,
-		TriageOwner:           c.AI.TriageOwner,
-		CloneDir:              c.AI.CloneDir,
-		AutoPromoteTriage:     c.AI.AutoPromoteTriage,
-		AutoPromoteRefinement: c.AI.AutoPromoteRefinement,
-		InstructionAuthors:    c.AI.InstructionAuthors,
+		Primary:                c.AI.Primary,
+		Fallback:               c.AI.Fallback,
+		ReviewMode:             c.AI.ReviewMode,
+		IssuePrompt:            c.AI.IssuePrompt,
+		ImplementPrompt:        c.AI.ImplementPrompt,
+		RefinementTimeout:      c.AI.RefinementTimeout,
+		PRReviewers:            gReviewers,
+		PRLabels:               gLabels,
+		PRAssignee:             gAssignee,
+		PRDraft:                gDraft,
+		GeneratePRDescription:  &gGenDesc,
+		NeverApproveWithIssues: &gNever,
+		TriageOwner:            c.AI.TriageOwner,
+		CloneDir:               c.AI.CloneDir,
+		AutoPromoteTriage:      c.AI.AutoPromoteTriage,
+		AutoPromoteRefinement:  c.AI.AutoPromoteRefinement,
+		InstructionAuthors:     c.AI.InstructionAuthors,
 	}
 	if org := repoOrg(repo); org != "" && c.AI.Orgs != nil {
 		if o, ok := c.AI.Orgs[org]; ok {
@@ -776,69 +798,72 @@ func (c *Config) AIForRepo(repo string) RepoAI {
 
 func applyOrgAI(out *RepoAI, o OrgAI) {
 	applyScopedAI(out, scopedAIFields{
-		Primary:               o.Primary,
-		Fallback:              o.Fallback,
-		ReviewMode:            o.ReviewMode,
-		Prompt:                o.Prompt,
-		IssuePrompt:           o.IssuePrompt,
-		ImplementPrompt:       o.ImplementPrompt,
-		RefinementTimeout:     o.RefinementTimeout,
-		LocalDir:              o.LocalDir,
-		TriageOwner:           o.TriageOwner,
-		CloneDir:              o.CloneDir,
-		AutoPromoteTriage:     o.AutoPromoteTriage,
-		AutoPromoteRefinement: o.AutoPromoteRefinement,
-		PRReviewers:           o.PRReviewers,
-		PRLabels:              o.PRLabels,
-		PRAssignee:            o.PRAssignee,
-		PRDraft:               o.PRDraft,
-		GeneratePRDescription: o.GeneratePRDescription,
-		InstructionAuthors:    o.InstructionAuthors,
+		Primary:                o.Primary,
+		Fallback:               o.Fallback,
+		ReviewMode:             o.ReviewMode,
+		Prompt:                 o.Prompt,
+		IssuePrompt:            o.IssuePrompt,
+		ImplementPrompt:        o.ImplementPrompt,
+		RefinementTimeout:      o.RefinementTimeout,
+		LocalDir:               o.LocalDir,
+		TriageOwner:            o.TriageOwner,
+		CloneDir:               o.CloneDir,
+		AutoPromoteTriage:      o.AutoPromoteTriage,
+		AutoPromoteRefinement:  o.AutoPromoteRefinement,
+		PRReviewers:            o.PRReviewers,
+		PRLabels:               o.PRLabels,
+		PRAssignee:             o.PRAssignee,
+		PRDraft:                o.PRDraft,
+		GeneratePRDescription:  o.GeneratePRDescription,
+		NeverApproveWithIssues: o.NeverApproveWithIssues,
+		InstructionAuthors:     o.InstructionAuthors,
 	})
 }
 
 func applyRepoAI(out *RepoAI, r RepoAI) {
 	applyScopedAI(out, scopedAIFields{
-		Primary:               r.Primary,
-		Fallback:              r.Fallback,
-		ReviewMode:            r.ReviewMode,
-		Prompt:                r.Prompt,
-		IssuePrompt:           r.IssuePrompt,
-		ImplementPrompt:       r.ImplementPrompt,
-		RefinementTimeout:     r.RefinementTimeout,
-		LocalDir:              r.LocalDir,
-		TriageOwner:           r.TriageOwner,
-		CloneDir:              r.CloneDir,
-		AutoPromoteTriage:     r.AutoPromoteTriage,
-		AutoPromoteRefinement: r.AutoPromoteRefinement,
-		PRReviewers:           r.PRReviewers,
-		PRLabels:              r.PRLabels,
-		PRAssignee:            r.PRAssignee,
-		PRDraft:               r.PRDraft,
-		GeneratePRDescription: r.GeneratePRDescription,
-		InstructionAuthors:    r.InstructionAuthors,
+		Primary:                r.Primary,
+		Fallback:               r.Fallback,
+		ReviewMode:             r.ReviewMode,
+		Prompt:                 r.Prompt,
+		IssuePrompt:            r.IssuePrompt,
+		ImplementPrompt:        r.ImplementPrompt,
+		RefinementTimeout:      r.RefinementTimeout,
+		LocalDir:               r.LocalDir,
+		TriageOwner:            r.TriageOwner,
+		CloneDir:               r.CloneDir,
+		AutoPromoteTriage:      r.AutoPromoteTriage,
+		AutoPromoteRefinement:  r.AutoPromoteRefinement,
+		PRReviewers:            r.PRReviewers,
+		PRLabels:               r.PRLabels,
+		PRAssignee:             r.PRAssignee,
+		PRDraft:                r.PRDraft,
+		GeneratePRDescription:  r.GeneratePRDescription,
+		NeverApproveWithIssues: r.NeverApproveWithIssues,
+		InstructionAuthors:     r.InstructionAuthors,
 	})
 }
 
 type scopedAIFields struct {
-	Primary               string
-	Fallback              string
-	ReviewMode            string
-	Prompt                string
-	IssuePrompt           string
-	ImplementPrompt       string
-	RefinementTimeout     string
-	LocalDir              string
-	TriageOwner           string
-	CloneDir              string
-	AutoPromoteTriage     *bool
-	AutoPromoteRefinement *bool
-	PRReviewers           []string
-	PRLabels              []string
-	PRAssignee            string
-	PRDraft               *bool
-	GeneratePRDescription *bool
-	InstructionAuthors    []string
+	Primary                string
+	Fallback               string
+	ReviewMode             string
+	Prompt                 string
+	IssuePrompt            string
+	ImplementPrompt        string
+	RefinementTimeout      string
+	LocalDir               string
+	TriageOwner            string
+	CloneDir               string
+	AutoPromoteTriage      *bool
+	AutoPromoteRefinement  *bool
+	PRReviewers            []string
+	PRLabels               []string
+	PRAssignee             string
+	PRDraft                *bool
+	GeneratePRDescription  *bool
+	NeverApproveWithIssues *bool
+	InstructionAuthors     []string
 }
 
 func applyScopedAI(out *RepoAI, fields scopedAIFields) {
@@ -892,6 +917,9 @@ func applyScopedAI(out *RepoAI, fields scopedAIFields) {
 	}
 	if fields.GeneratePRDescription != nil {
 		out.GeneratePRDescription = fields.GeneratePRDescription
+	}
+	if fields.NeverApproveWithIssues != nil {
+		out.NeverApproveWithIssues = fields.NeverApproveWithIssues
 	}
 	if fields.InstructionAuthors != nil {
 		out.InstructionAuthors = fields.InstructionAuthors
@@ -1353,6 +1381,27 @@ func (c *Config) validateScopedIssueTracking() error {
 func ValidateOrgSlug(org string) error {
 	if !githubOrgPattern.MatchString(org) {
 		return fmt.Errorf("config: org %q is invalid (must match GitHub org/user slug: 1-39 alphanumerics plus internal hyphens)", org)
+	}
+	return nil
+}
+
+// ValidateRepoSlug validates a GitHub "owner/name" repo slug used as an
+// [ai.repos] key. It enforces exactly one slash separating a valid org/user
+// owner (see ValidateOrgSlug) from a valid repository name. Validating this
+// defensively prevents a malformed key — e.g. an empty owner, embedded path
+// separators, or "." / ".." traversal tokens — from being written verbatim
+// into the config or interpolated into GitHub API paths.
+func ValidateRepoSlug(repo string) error {
+	parts := strings.Split(repo, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return fmt.Errorf("config: repo %q is invalid (must be in owner/name form)", repo)
+	}
+	if err := ValidateOrgSlug(parts[0]); err != nil {
+		return err
+	}
+	name := parts[1]
+	if name == "." || name == ".." || !repoNamePattern.MatchString(name) {
+		return fmt.Errorf("config: repo name %q is invalid (allowed: alphanumerics, '.', '_', '-')", name)
 	}
 	return nil
 }

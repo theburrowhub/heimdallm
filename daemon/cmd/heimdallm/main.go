@@ -334,6 +334,12 @@ func main() {
 	// cfgMu protects cfg and the pipeline so reload is safe from any goroutine.
 	var cfgMu sync.Mutex
 	var reloadMu sync.Mutex // serialises config reloads to prevent duplicate pipelines
+	// restartMu serialises the BACKGROUND poller teardown+restart kicked off by
+	// a reload that changed a poller-relevant field. Kept separate from
+	// reloadMu so a config save never blocks (waiting out in-flight poll
+	// cycles/reviews in oldWg.Wait()) — the reload applies cfg and returns,
+	// while at most one restart runs at a time here.
+	var restartMu sync.Mutex
 	var lastPollUnixNano int64
 	var pollIntervalNano int64
 	storePollInterval := func(interval time.Duration) {
@@ -443,12 +449,13 @@ func main() {
 			}
 		}
 		return pipeline.RunOptions{
-			Primary:            aiCfg.Primary,
-			Fallback:           aiCfg.Fallback,
-			PromptOverride:     aiCfg.Prompt,
-			AgentPromptID:      agentCfg.PromptID,
-			ReviewMode:         aiCfg.ReviewMode,
-			InstructionAuthors: aiCfg.InstructionAuthors,
+			Primary:                aiCfg.Primary,
+			Fallback:               aiCfg.Fallback,
+			PromptOverride:         aiCfg.Prompt,
+			AgentPromptID:          agentCfg.PromptID,
+			ReviewMode:             aiCfg.ReviewMode,
+			InstructionAuthors:     aiCfg.InstructionAuthors,
+			NeverApproveWithIssues: aiCfg.NeverApproveWithIssues != nil && *aiCfg.NeverApproveWithIssues,
 			ExecOpts: executor.ExecOptions{
 				Model:                agentCfg.Model,
 				MaxTurns:             agentCfg.MaxTurns,
@@ -763,8 +770,15 @@ func main() {
 				}
 			}
 
+			// Cache archived-status lookups: an archived/active repo almost
+			// never flips, but FilterArchived otherwise re-checks every repo
+			// (one GET /repos each) on every discovery tick — a large slice of
+			// the hourly GitHub budget for no new information. See the constant
+			// rate-limit exhaustion with 80+ monitored repos.
+			archiveChecker := newCachingArchivedChecker(ghClient, 6*time.Hour)
+
 			// Publish initial repos immediately
-			sendDiscoveryRepos(ctx, discoverySvc, limiter, repoPublisher, tier1ConfigFn, ghClient)
+			sendDiscoveryRepos(ctx, discoverySvc, limiter, repoPublisher, tier1ConfigFn, archiveChecker)
 
 			ticker := time.NewTicker(discoveryInterval)
 			defer ticker.Stop()
@@ -773,7 +787,7 @@ func main() {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					sendDiscoveryRepos(ctx, discoverySvc, limiter, repoPublisher, tier1ConfigFn, ghClient)
+					sendDiscoveryRepos(ctx, discoverySvc, limiter, repoPublisher, tier1ConfigFn, archiveChecker)
 				}
 			}
 		}()
@@ -1030,10 +1044,15 @@ func main() {
 			return fmt.Errorf("rate limit cancelled: %w", err)
 		}
 
+		// Use the event decided and persisted at review time so a COMMENT
+		// (never_approve_with_issues) is never resubmitted as APPROVE on retry;
+		// legacy rows without a stored event fall back to severity. Mirrors the
+		// pipeline's Run / PublishPending paths.
+		publishEvent := pipeline.PublishEventFor(rev)
 		ghID, ghState, err := ghClient.SubmitReview(
 			pr.Repo, pr.Number,
-			pipeline.BuildGitHubBody(result),
-			pipeline.SeverityToEvent(rev.Severity),
+			pipeline.AnnotateBodyForEvent(pipeline.BuildGitHubBody(result), publishEvent),
+			publishEvent,
 		)
 		if err != nil {
 			errStr := err.Error()
@@ -1503,6 +1522,9 @@ func main() {
 	// Expose live config for GET /config
 	srv.SetRepoMetaFns(ghClient.FetchLabels, ghClient.FetchCollaborators)
 
+	// Live GitHub API rate-limit lookup for GET /github/rate_limit.
+	srv.SetRateLimitFn(func() (any, error) { return ghClient.RateLimit() })
+
 	srv.SetConfigFn(func() map[string]any {
 		// Snapshot the mutable slice fields under cfgMu. The poll-cycle
 		// auto-discovery path (upsertDiscoveredRepos) appends to
@@ -1614,6 +1636,7 @@ func main() {
 			"triage_owner":                c.AI.TriageOwner,
 			"clone_dir":                   c.AI.CloneDir,
 			"generate_pr_description":     c.AI.GeneratePRDescription,
+			"never_approve_with_issues":   c.AI.NeverApproveWithIssues,
 		}
 		if c.AI.AutoPromoteTriage != nil {
 			result["auto_promote_triage"] = *c.AI.AutoPromoteTriage
@@ -1733,34 +1756,44 @@ func main() {
 		}
 		cfgMu.Unlock()
 
-		// Read the current cancel/wg under cfgMu, then stop OUTSIDE the lock.
-		// Holding cfgMu across Wait() risks deadlock: if Wait() blocks
-		// waiting for in-flight goroutines that also acquire cfgMu (e.g.
-		// tier2Adapter callbacks), both sides block forever.
-		cfgMu.Lock()
-		oldCancel := pollerCancel
-		oldWg := pollerWg
-		cfgMu.Unlock()
-
-		oldCancel()
-		oldWg.Wait()
-
-		// Swap cfg + pollers atomically under the lock so readers never
-		// see a half-updated state.
+		// Apply the new config immediately so config reads (GET /config, the
+		// next tier1ConfigFn tick, etc.) reflect it right away.
 		cfgMu.Lock()
 		cfg = newCfg
 		cfgMu.Unlock()
 
-		// Reload path → coldStart=false so Tier 2 waits one full PollInterval
-		// before its first tick. A UI config PATCH triggers this path; firing
-		// an immediate tick on every PATCH would fan out reviews across the
-		// whole fleet and amplify the cost-runaway loop #243 closed.
-		newCancel, newWg := startPollers(context.Background(), false)
+		// Restart the pollers in the BACKGROUND. oldWg.Wait() can block for
+		// tens of seconds (an in-flight poll cycle or agent review must finish
+		// first); doing it inline made every restart-triggering config save
+		// hang that long and froze the UI. restartMu serialises restarts so a
+		// burst of saves can never leave two poller sets racing on the same
+		// GitHub budget, and each restart tears the old set fully down before
+		// starting the new one (no overlap).
+		//
+		// coldStart=false: Tier 2 waits one full PollInterval before its first
+		// tick. Firing an immediate tick on every PATCH would fan out reviews
+		// across the whole fleet and amplify the cost-runaway loop #243 closed.
+		go func() {
+			restartMu.Lock()
+			defer restartMu.Unlock()
 
-		cfgMu.Lock()
-		pollerCancel = newCancel
-		pollerWg = newWg
-		cfgMu.Unlock()
+			cfgMu.Lock()
+			oldCancel := pollerCancel
+			oldWg := pollerWg
+			cfgMu.Unlock()
+
+			oldCancel()
+			oldWg.Wait()
+
+			newCancel, newWg := startPollers(context.Background(), false)
+
+			cfgMu.Lock()
+			pollerCancel = newCancel
+			pollerWg = newWg
+			cfgMu.Unlock()
+
+			slog.Info("config reload: pollers restarted")
+		}()
 
 		return nil
 	})
@@ -2253,6 +2286,7 @@ func configReloadRestartSnapshot(c *config.Config) config.Config {
 	snap.AI.AutoPromoteRefinement = nil
 	snap.AI.Tier2RepoConcurrency = 0
 	snap.AI.GeneratePRDescription = false
+	snap.AI.NeverApproveWithIssues = false
 	snap.AI.ReviewResponse = config.ReviewResponseConfig{}
 	snap.AI.ReviewFix = config.ReviewFixConfig{}
 
@@ -2311,6 +2345,44 @@ func resolveRefinementTimeout(refinementTimeout, globalTimeout, agentTimeout str
 
 // sendDiscoveryRepos merges static + discovered repos and publishes the
 // full list to NATS. Extracted from the old tier1.go sendRepos.
+// cachingArchivedChecker wraps a discovery.ArchivedChecker with a TTL cache so
+// the tier1 discovery loop does not spend one GET /repos per monitored repo on
+// every tick re-confirming near-static archived status. Only successful lookups
+// are cached (errors fall through, preserving FilterArchived's fail-open
+// behavior).
+type cachingArchivedChecker struct {
+	inner discovery.ArchivedChecker
+	ttl   time.Duration
+	mu    sync.Mutex
+	cache map[string]archivedCacheEntry
+}
+
+type archivedCacheEntry struct {
+	archived bool
+	at       time.Time
+}
+
+func newCachingArchivedChecker(inner discovery.ArchivedChecker, ttl time.Duration) *cachingArchivedChecker {
+	return &cachingArchivedChecker{inner: inner, ttl: ttl, cache: make(map[string]archivedCacheEntry)}
+}
+
+func (c *cachingArchivedChecker) IsRepoArchived(repo string) (bool, error) {
+	c.mu.Lock()
+	e, ok := c.cache[repo]
+	c.mu.Unlock()
+	if ok && time.Since(e.at) < c.ttl {
+		return e.archived, nil
+	}
+	archived, err := c.inner.IsRepoArchived(repo)
+	if err != nil {
+		return archived, err // don't cache transient failures
+	}
+	c.mu.Lock()
+	c.cache[repo] = archivedCacheEntry{archived: archived, at: time.Now()}
+	c.mu.Unlock()
+	return archived, nil
+}
+
 func sendDiscoveryRepos(
 	ctx context.Context,
 	disc scheduler.Tier1Discovery,
@@ -4473,19 +4545,20 @@ func repoAIOverrideMap(ai config.RepoAI) map[string]any {
 		"local_dir":   ai.LocalDir,
 	}
 	addCommonAIOverrideFields(out, aiOverrideFields{
-		Prompt:                ai.Prompt,
-		IssuePrompt:           ai.IssuePrompt,
-		ImplementPrompt:       ai.ImplementPrompt,
-		RefinementTimeout:     ai.RefinementTimeout,
-		TriageOwner:           ai.TriageOwner,
-		CloneDir:              ai.CloneDir,
-		AutoPromoteTriage:     ai.AutoPromoteTriage,
-		AutoPromoteRefinement: ai.AutoPromoteRefinement,
-		PRReviewers:           ai.PRReviewers,
-		PRAssignee:            ai.PRAssignee,
-		PRLabels:              ai.PRLabels,
-		PRDraft:               ai.PRDraft,
-		GeneratePRDescription: ai.GeneratePRDescription,
+		Prompt:                 ai.Prompt,
+		IssuePrompt:            ai.IssuePrompt,
+		ImplementPrompt:        ai.ImplementPrompt,
+		RefinementTimeout:      ai.RefinementTimeout,
+		TriageOwner:            ai.TriageOwner,
+		CloneDir:               ai.CloneDir,
+		AutoPromoteTriage:      ai.AutoPromoteTriage,
+		AutoPromoteRefinement:  ai.AutoPromoteRefinement,
+		PRReviewers:            ai.PRReviewers,
+		PRAssignee:             ai.PRAssignee,
+		PRLabels:               ai.PRLabels,
+		PRDraft:                ai.PRDraft,
+		GeneratePRDescription:  ai.GeneratePRDescription,
+		NeverApproveWithIssues: ai.NeverApproveWithIssues,
 	})
 	if ai.IssueTracking != nil {
 		out["issue_tracking"] = issueTrackingOverrideMap(ai.IssueTracking)
@@ -4508,19 +4581,20 @@ func orgAIOverrideMap(ai config.OrgAI) map[string]any {
 		out["local_dir"] = ai.LocalDir
 	}
 	addCommonAIOverrideFields(out, aiOverrideFields{
-		Prompt:                ai.Prompt,
-		IssuePrompt:           ai.IssuePrompt,
-		ImplementPrompt:       ai.ImplementPrompt,
-		RefinementTimeout:     ai.RefinementTimeout,
-		TriageOwner:           ai.TriageOwner,
-		CloneDir:              ai.CloneDir,
-		AutoPromoteTriage:     ai.AutoPromoteTriage,
-		AutoPromoteRefinement: ai.AutoPromoteRefinement,
-		PRReviewers:           ai.PRReviewers,
-		PRAssignee:            ai.PRAssignee,
-		PRLabels:              ai.PRLabels,
-		PRDraft:               ai.PRDraft,
-		GeneratePRDescription: ai.GeneratePRDescription,
+		Prompt:                 ai.Prompt,
+		IssuePrompt:            ai.IssuePrompt,
+		ImplementPrompt:        ai.ImplementPrompt,
+		RefinementTimeout:      ai.RefinementTimeout,
+		TriageOwner:            ai.TriageOwner,
+		CloneDir:               ai.CloneDir,
+		AutoPromoteTriage:      ai.AutoPromoteTriage,
+		AutoPromoteRefinement:  ai.AutoPromoteRefinement,
+		PRReviewers:            ai.PRReviewers,
+		PRAssignee:             ai.PRAssignee,
+		PRLabels:               ai.PRLabels,
+		PRDraft:                ai.PRDraft,
+		GeneratePRDescription:  ai.GeneratePRDescription,
+		NeverApproveWithIssues: ai.NeverApproveWithIssues,
 	})
 	if ai.IssueTracking != nil {
 		out["issue_tracking"] = issueTrackingOverrideMap(ai.IssueTracking)
@@ -4529,19 +4603,20 @@ func orgAIOverrideMap(ai config.OrgAI) map[string]any {
 }
 
 type aiOverrideFields struct {
-	Prompt                string
-	IssuePrompt           string
-	ImplementPrompt       string
-	RefinementTimeout     string
-	TriageOwner           string
-	CloneDir              string
-	AutoPromoteTriage     *bool
-	AutoPromoteRefinement *bool
-	PRReviewers           []string
-	PRAssignee            string
-	PRLabels              []string
-	PRDraft               *bool
-	GeneratePRDescription *bool
+	Prompt                 string
+	IssuePrompt            string
+	ImplementPrompt        string
+	RefinementTimeout      string
+	TriageOwner            string
+	CloneDir               string
+	AutoPromoteTriage      *bool
+	AutoPromoteRefinement  *bool
+	PRReviewers            []string
+	PRAssignee             string
+	PRLabels               []string
+	PRDraft                *bool
+	GeneratePRDescription  *bool
+	NeverApproveWithIssues *bool
 }
 
 func addCommonAIOverrideFields(out map[string]any, fields aiOverrideFields) {
@@ -4583,6 +4658,9 @@ func addCommonAIOverrideFields(out map[string]any, fields aiOverrideFields) {
 	}
 	if fields.GeneratePRDescription != nil {
 		out["generate_pr_description"] = *fields.GeneratePRDescription
+	}
+	if fields.NeverApproveWithIssues != nil {
+		out["never_approve_with_issues"] = *fields.NeverApproveWithIssues
 	}
 }
 

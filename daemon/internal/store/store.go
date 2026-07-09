@@ -61,7 +61,8 @@ CREATE TABLE IF NOT EXISTS reviews (
   published_at        TEXT NOT NULL DEFAULT '',
   github_review_id    INTEGER NOT NULL DEFAULT 0,
   github_review_state TEXT NOT NULL DEFAULT '',
-  head_sha            TEXT NOT NULL DEFAULT ''
+  head_sha            TEXT NOT NULL DEFAULT '',
+  event               TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS configs (
@@ -201,6 +202,10 @@ func Open(dsn string) (*Store, error) {
 	// time.Time{} and callers can fall back to created_at. See
 	// theburrowhub/heimdallm#243 Fix 3.
 	db.Exec("ALTER TABLE reviews ADD COLUMN published_at TEXT NOT NULL DEFAULT ''")
+	// event stores the decided review event (APPROVE|COMMENT|REQUEST_CHANGES)
+	// so retry/publish paths reproduce the decision. Empty default => legacy
+	// rows fall back to SeverityToEvent(severity).
+	db.Exec("ALTER TABLE reviews ADD COLUMN event TEXT NOT NULL DEFAULT ''")
 	db.Exec("ALTER TABLE agents ADD COLUMN instructions TEXT NOT NULL DEFAULT ''")
 	db.Exec("ALTER TABLE agents ADD COLUMN cli_flags TEXT NOT NULL DEFAULT ''")
 	db.Exec("ALTER TABLE agents RENAME COLUMN prompt TO prompt") // no-op, ensures column exists
@@ -371,6 +376,36 @@ func (s *Store) SetConfig(key, value string) (int64, error) {
 		return 0, fmt.Errorf("store: set config: %w", err)
 	}
 	return res.LastInsertId()
+}
+
+// SetConfigs upserts multiple key/value config entries atomically in a single
+// transaction. If any write fails, the whole batch is rolled back, so the store
+// is never left in a partial state (see #565: PUT /config must be all-or-nothing).
+// An empty map is a no-op that returns nil.
+func (s *Store) SetConfigs(kv map[string]string) error {
+	if len(kv) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("store: set configs: begin: %w", err)
+	}
+	// Rollback is a no-op once the tx has committed, so this defer safely
+	// unwinds the transaction on any early return below.
+	defer func() { _ = tx.Rollback() }()
+
+	for key, value := range kv {
+		if _, err := tx.Exec(
+			"INSERT INTO configs (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+			key, value,
+		); err != nil {
+			return fmt.Errorf("store: set config %q: %w", key, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: set configs: commit: %w", err)
+	}
+	return nil
 }
 
 // GetConfig retrieves the value for a config key. Returns sql.ErrNoRows if not found.

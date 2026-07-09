@@ -229,6 +229,19 @@ class ApiClient {
     return jsonDecode(resp.body) as Map<String, dynamic>;
   }
 
+  /// Live GitHub API rate-limit buckets (core / search / graphql) for the
+  /// daemon's token. Queries GitHub on each call — fetch on demand, not polled.
+  Future<Map<String, dynamic>> fetchGitHubRateLimit() async {
+    final resp = await _client.get(
+      _uri('/github/rate_limit'),
+      headers: await _authHeaders(),
+    );
+    if (resp.statusCode != 200) {
+      throw ApiException('GET /github/rate_limit failed: ${resp.statusCode}');
+    }
+    return jsonDecode(resp.body) as Map<String, dynamic>;
+  }
+
   Future<void> updateConfig(Map<String, dynamic> config) async {
     final resp = await _client.put(
       _uri('/config'),

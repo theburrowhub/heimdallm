@@ -13,9 +13,7 @@ import (
 func TestDetect(t *testing.T) {
 	_, file, _, _ := runtime.Caller(0)
 	binDir := filepath.Join(filepath.Dir(file), "testdata", "bin")
-	oldPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir+":"+oldPath)
-	defer os.Setenv("PATH", oldPath)
+	t.Setenv("PATH", binDir)
 
 	e := executor.New()
 	cli, err := e.Detect("claude", "")
@@ -30,9 +28,12 @@ func TestDetect(t *testing.T) {
 func TestDetect_Fallback(t *testing.T) {
 	_, file, _, _ := runtime.Caller(0)
 	binDir := filepath.Join(filepath.Dir(file), "testdata", "bin")
-	oldPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir+":"+oldPath)
-	defer os.Setenv("PATH", oldPath)
+	t.Setenv("PATH", binDir)
+	// Neutralize the login-shell probe: without this, a real `codex` installed
+	// on the developer's machine is resolved via the login shell regardless of
+	// the isolated $PATH, so the primary never "fails" and the fallback path is
+	// never exercised (the test then flakes on any dev box with codex present).
+	defer executor.SetLoginShellLookPathForTest(func(string) string { return "" })()
 
 	e := executor.New()
 	cli, err := e.Detect("codex", "gemini")
@@ -59,9 +60,7 @@ func TestDetect_NoneAvailable(t *testing.T) {
 func TestExecute(t *testing.T) {
 	_, file, _, _ := runtime.Caller(0)
 	binDir := filepath.Join(filepath.Dir(file), "testdata", "bin")
-	oldPath := os.Getenv("PATH")
-	os.Setenv("PATH", binDir+":"+oldPath)
-	defer os.Setenv("PATH", oldPath)
+	t.Setenv("PATH", binDir)
 
 	e := executor.New()
 	result, err := e.Execute("claude", "Review this diff", executor.ExecOptions{})

@@ -19,6 +19,7 @@ import '../cli_agents/cli_agents_screen.dart';
 import '../config/config_providers.dart';
 import '../issues/issues_providers.dart';
 import '../repositories/repos_screen.dart';
+import '../organizations/orgs_screen.dart';
 import '../stats/stats_screen.dart';
 import 'activity_filter_bar.dart';
 import 'activity_filters.dart';
@@ -37,7 +38,7 @@ class DashboardScreen extends ConsumerWidget {
         ? ref.watch(daemonConnectionProvider)
         : null;
     return DefaultTabController(
-      length: 6,
+      length: 7,
       child: Scaffold(
         appBar: AppBar(
           title: const Text('Heimdallm'),
@@ -86,6 +87,7 @@ class DashboardScreen extends ConsumerWidget {
               Tab(icon: Icon(Icons.dashboard), text: 'Activity'),
               Tab(icon: Icon(Icons.timeline), text: 'Activity log'),
               Tab(icon: Icon(Icons.folder_outlined), text: 'Repositories'),
+              Tab(icon: Icon(Icons.business_outlined), text: 'Organizations'),
               Tab(icon: Icon(Icons.auto_awesome), text: 'Prompts'),
               Tab(icon: Icon(Icons.smart_toy), text: 'Agents'),
               Tab(icon: Icon(Icons.bar_chart), text: 'Stats'),
@@ -112,6 +114,7 @@ class DashboardScreen extends ConsumerWidget {
                   KeepAliveTab(child: _ActivityTab()),
                   KeepAliveTab(child: ActivityScreen()),
                   KeepAliveTab(child: ReposScreen()),
+                  KeepAliveTab(child: OrgsScreen()),
                   KeepAliveTab(child: AgentsScreen()),
                   KeepAliveTab(child: CLIAgentsScreen()),
                   KeepAliveTab(child: StatsScreen()),

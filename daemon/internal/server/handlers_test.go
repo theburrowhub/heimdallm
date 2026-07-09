@@ -315,6 +315,53 @@ func TestHandlerGetConfig_ExposesRepoFirstSeenAt(t *testing.T) {
 	}
 }
 
+// TestGetConfig_ExposesNeverApproveWithIssues pins the JSON contract for the
+// never_approve_with_issues field added in main.go's GET /config result map
+// (global) and repoAIOverrideMap/orgAIOverrideMap (per-repo override), the
+// same way TestHandlerGetConfig_ExposesRepoFirstSeenAt pins first_seen_at.
+// The real map-building logic lives in cmd/heimdallm/main.go (package main,
+// not importable here); this test guards that whatever main.go's configFn
+// produces survives the HTTP handler unchanged.
+func TestGetConfig_ExposesNeverApproveWithIssues(t *testing.T) {
+	srv, _ := setupServer(t)
+	srv.SetConfigFn(func() map[string]any {
+		return map[string]any{
+			"never_approve_with_issues": true,
+			"repo_overrides": map[string]any{
+				"org/repo1": map[string]any{
+					"never_approve_with_issues": false,
+				},
+			},
+		}
+	})
+
+	req := httptest.NewRequest("GET", "/config", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v (body: %s)", err, w.Body.String())
+	}
+	if body["never_approve_with_issues"] != true {
+		t.Errorf("global never_approve_with_issues = %v, want true", body["never_approve_with_issues"])
+	}
+	overrides, ok := body["repo_overrides"].(map[string]any)
+	if !ok {
+		t.Fatalf("repo_overrides missing or wrong type: %T: %v", body["repo_overrides"], body["repo_overrides"])
+	}
+	ro, ok := overrides["org/repo1"].(map[string]any)
+	if !ok {
+		t.Fatalf("repo_overrides[org/repo1] missing or wrong type: %T: %v", overrides["org/repo1"], overrides["org/repo1"])
+	}
+	if ro["never_approve_with_issues"] != false {
+		t.Errorf("repo override never_approve_with_issues = %v, want false", ro["never_approve_with_issues"])
+	}
+}
+
 func TestHandlerPutConfig(t *testing.T) {
 	srv, _ := setupServer(t)
 	body := `{"poll_interval":"5m"}`
@@ -327,16 +374,15 @@ func TestHandlerPutConfig(t *testing.T) {
 	}
 }
 
-// TestHandlerPutConfig_PersistFailureReturns500 guards #550: a failed
-// SetConfig must surface as 500 with the offending keys, not a misleading
-// 200 OK that makes the UI believe a never-persisted save succeeded.
+// TestHandlerPutConfig_PersistFailureReturns500 guards #550 + #565: a failed
+// persist must surface as 500 with the offending keys, not a misleading 200 OK
+// that makes the UI believe a never-persisted save succeeded.
 //
-// The multi-key payload also locks the contract that the loop accumulates
-// EVERY failed key (not just the first) and returns them sorted, so the
-// response is deterministic regardless of Go's random map iteration order.
-// Forcing only a subset to fail would require a store seam to inject per-key
-// errors; the store is a concrete *store.Store, so we close it to fail all
-// writes and assert the full sorted set instead.
+// The write is now atomic (#565): handlePutConfig calls SetConfigs once and the
+// whole batch is rolled back on any error, so on failure NONE of the keys
+// persisted. The handler therefore reports the full attempted key set, sorted,
+// which is exactly what closing the store produces here — every write fails and
+// the response lists all keys deterministically regardless of map order.
 func TestHandlerPutConfig_PersistFailureReturns500(t *testing.T) {
 	srv, s := setupServer(t)
 	// Close the store so the writes fail (sql: database is closed) while the
@@ -2035,6 +2081,37 @@ func TestHandlePatchOrgConfig_RejectsInvalidOrg(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+func TestHandlePatchRepoConfig_RejectsInvalidRepo(t *testing.T) {
+	cases := []struct {
+		name string
+		repo string
+	}{
+		{name: "missing slash", repo: "ownerrepo"},
+		{name: "empty owner", repo: "/repo1"},
+		{name: "empty name", repo: "org/"},
+		{name: "special chars in owner", repo: "bad org/repo1"},
+		{name: "special chars in name", repo: "org/bad repo"},
+		{name: "path traversal name", repo: "org/.."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tomlPath := writeTempTOML(t, "[ai]\nprimary = \"claude\"\n")
+			srv := setupServerWithToken(t, "test-token")
+			srv.SetConfigPath(tomlPath)
+
+			req := httptest.NewRequest("PATCH", "/config/repos/"+url.PathEscape(tc.repo), strings.NewReader(`{"primary":"codex"}`))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Heimdallm-Token", "test-token")
+			w := httptest.NewRecorder()
+			srv.Router().ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400 for repo %q, got %d (body: %s)", tc.repo, w.Code, w.Body.String())
+			}
+		})
 	}
 }
 

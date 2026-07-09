@@ -651,6 +651,7 @@ clone_dir = "/home/heimdallm/repos/myorg-worktrees"
 auto_promote_triage = true
 auto_promote_refinement = false
 generate_pr_description = true
+never_approve_with_issues = false   # true = comment instead of approving when any issue is found
 
 pr_reviewers = ["alice", "bob", "carol"]
 pr_labels    = ["auto-generated", "ai-platform"]
@@ -1253,6 +1254,12 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # Generate LLM-produced PR titles and descriptions for auto_implement PRs.
 # generate_pr_description = false
 
+# When true, a review that finds ANY issue is published as a COMMENT instead of
+# an APPROVE (a high-severity review is still REQUEST_CHANGES; a clean review
+# still approves). Overridable per org ([ai.orgs.*]) and per repo ([ai.repos.*]).
+# Default: false.
+# never_approve_with_issues = false
+
 # When local_dir is unset, Heimdallm prepares a managed shallow clone for agent
 # context under clone_dir. If clone_dir is also unset, the default is
 # os.TempDir()/heimdallm/<org>/<repo>. Existing directories are mutated only
@@ -1317,6 +1324,7 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # auto_promote_triage = true
 # auto_promote_refinement = false
 # generate_pr_description = true
+# never_approve_with_issues = false
 # pr_reviewers = ["alice", "bob"]
 # pr_labels    = ["auto-generated", "myorg-team"]
 # pr_assignee  = "myusername"

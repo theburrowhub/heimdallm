@@ -49,8 +49,14 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    // Regression guard: Organizations field must not appear at repo scope.
-    expect(find.text('Organizations'), findsNothing);
+    // Regression guard: the Issue Tracking "Organizations" filter field must
+    // not appear at repo scope (it is a global/org-only filter). Target its
+    // unique helper text so the guard is not confused by the unrelated
+    // "Organizations" review-policy section header on this screen.
+    expect(
+      find.textContaining('Limit to issues from these orgs'),
+      findsNothing,
+    );
 
     // Sanity: surrounding Issue Tracking fields still render.
     expect(find.text('Review-only labels'), findsOneWidget);

@@ -11,6 +11,7 @@ import 'package:heimdallm/core/setup/first_run_setup.dart';
 import 'package:heimdallm/features/config/config_providers.dart';
 import 'package:heimdallm/features/config/config_screen.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
+import 'package:heimdallm/features/repositories/repo_diff.dart';
 import '../core/platform/fake_platform_services.dart';
 
 // Expose _computeGlobalDiff for testing via the public save path.
@@ -723,5 +724,66 @@ void main() {
     expect(capturedPatch, isNotNull);
     expect(capturedPatch!['circuit_breaker'], isNotNull);
     expect(capturedPatch!['circuit_breaker']['per_pr_24h'], 10);
+  });
+
+  test('never_approve_with_issues round-trips (global + repo override)', () {
+    final json = {
+      'never_approve_with_issues': true,
+      'repositories': <String>[],
+      'repo_overrides': {
+        'org/repo1': {'never_approve_with_issues': false},
+      },
+    };
+    final cfg = AppConfig.fromJson(json);
+    expect(cfg.globalNeverApproveWithIssues, isTrue);
+    expect(cfg.repoConfigs['org/repo1']!.neverApproveWithIssues, isFalse);
+
+    // Global survives toJson round-trip.
+    expect(cfg.toJson()['never_approve_with_issues'], isTrue);
+
+    // copyWith sentinel: repo override can be cleared to inherit (null).
+    final cleared = cfg.repoConfigs['org/repo1']!.copyWith(
+      neverApproveWithIssues: null,
+    );
+    expect(cleared.neverApproveWithIssues, isNull);
+  });
+
+  test('OrgConfig.hasOverride true when only never_approve_with_issues set', () {
+    const org = OrgConfig(neverApproveWithIssues: true);
+    expect(org.hasOverride, isTrue);
+  });
+
+  test('repo diff includes never_approve_with_issues when set', () {
+    const oldCfg = RepoConfig();
+    final updated = oldCfg.copyWith(neverApproveWithIssues: true);
+    final diff = computeRepoDiff(oldCfg, updated);
+    expect(diff['never_approve_with_issues'], isTrue);
+  });
+
+  test('repo diff includes Pipeline overrides when set', () {
+    const oldCfg = RepoConfig();
+    final updated = oldCfg.copyWith(
+      triageOwner: 'alice',
+      cloneDir: '/work/x',
+      autoPromoteTriage: true,
+      autoPromoteRefinement: false,
+      generatePRDescription: true,
+    );
+    final diff = computeRepoDiff(oldCfg, updated);
+    expect(diff['triage_owner'], 'alice');
+    expect(diff['clone_dir'], '/work/x');
+    expect(diff['auto_promote_triage'], isTrue);
+    expect(diff['auto_promote_refinement'], isFalse);
+    expect(diff['generate_pr_description'], isTrue);
+  });
+
+  test('repo diff includes issue_tracking organizations when set', () {
+    const oldCfg = RepoConfig();
+    final updated = oldCfg.copyWith(issueOrganizations: ['acme']);
+    final diff = computeRepoDiff(oldCfg, updated);
+    expect(
+      (diff['issue_tracking'] as Map)['organizations'],
+      ['acme'],
+    );
   });
 }

@@ -208,6 +208,37 @@ func TestReview_HeadSHARoundTrip(t *testing.T) {
 	}
 }
 
+// TestReview_EventRoundTrip covers the event column added so the daemon's
+// decided GitHub review event (APPROVE|COMMENT|REQUEST_CHANGES) is persisted
+// and reproduced on retry rather than re-derived from severity, which could
+// drift if config changes between the original decision and a later retry.
+func TestReview_EventRoundTrip(t *testing.T) {
+	s := newTestStore(t)
+	prID, _ := s.UpsertPR(&store.PR{
+		GithubID: 1, Repo: "org/r", Number: 1, Title: "t", Author: "a",
+		URL: "u", State: "open", UpdatedAt: time.Now(), FetchedAt: time.Now(),
+	})
+
+	rev := &store.Review{
+		PRID: prID, CLIUsed: "claude",
+		Issues: "[]", Suggestions: "[]", Severity: "low",
+		Event:     "COMMENT",
+		CreatedAt: time.Now().UTC(),
+		HeadSHA:   "abc123",
+	}
+	id, err := s.InsertReview(rev)
+	if err != nil {
+		t.Fatalf("InsertReview: %v", err)
+	}
+	got, err := s.GetReview(id)
+	if err != nil {
+		t.Fatalf("GetReview: %v", err)
+	}
+	if got.Event != "COMMENT" {
+		t.Errorf("Event = %q, want %q", got.Event, "COMMENT")
+	}
+}
+
 func TestPR_ListAll(t *testing.T) {
 	s := newTestStore(t)
 	for i := 0; i < 3; i++ {
@@ -382,6 +413,77 @@ func TestConfigs_ListOnEmptyTableReturnsEmptyMap(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("expected empty map, got %v", got)
+	}
+}
+
+// TestSetConfigs_PersistsAllKeysAtomically guards #565: a multi-key save must
+// write every key in one transaction (all-or-nothing), so PUT /config can't
+// leave the store in a partial state after a failure.
+func TestSetConfigs_PersistsAllKeysAtomically(t *testing.T) {
+	s := newTestStore(t)
+
+	in := map[string]string{
+		"poll_interval":  "30m",
+		"review_mode":    "single",
+		"retention_days": "90",
+		"repositories":   `["org/a","org/b"]`,
+	}
+	if err := s.SetConfigs(in); err != nil {
+		t.Fatalf("SetConfigs: %v", err)
+	}
+
+	got, err := s.ListConfigs()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != len(in) {
+		t.Fatalf("expected %d rows, got %d: %v", len(in), len(got), got)
+	}
+	for k, want := range in {
+		if got[k] != want {
+			t.Errorf("%s = %q, want %q", k, got[k], want)
+		}
+	}
+}
+
+func TestSetConfigs_EmptyMapIsNoOp(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.SetConfigs(nil); err != nil {
+		t.Errorf("SetConfigs(nil): %v", err)
+	}
+	if err := s.SetConfigs(map[string]string{}); err != nil {
+		t.Errorf("SetConfigs(empty): %v", err)
+	}
+	got, err := s.ListConfigs()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty configs after no-op, got %v", got)
+	}
+}
+
+// TestSetConfigs_SurfacesWriteFailure proves that when the batch cannot be
+// committed, SetConfigs returns an error rather than silently succeeding —
+// the signal handlePutConfig turns into a 500 instead of a misleading 200
+// (#550). Atomicity itself (single BEGIN/COMMIT, rollback on any error) is
+// structural in the implementation and exercised by the happy-path test above;
+// a partial commit is impossible because every key shares one transaction.
+func TestSetConfigs_SurfacesWriteFailure(t *testing.T) {
+	s := newTestStore(t)
+
+	// Close the DB so the transaction cannot begin/commit.
+	if err := s.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	err := s.SetConfigs(map[string]string{
+		"poll_interval":  "5m",
+		"review_mode":    "multi",
+		"retention_days": "7",
+	})
+	if err == nil {
+		t.Fatal("expected error from SetConfigs on a closed store, got nil")
 	}
 }
 

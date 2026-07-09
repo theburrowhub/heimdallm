@@ -55,6 +55,10 @@ type Server struct {
 	// tests that don't need it).
 	repoRenameFn func(ctx context.Context, oldRepo, newRepo string) error
 	meFn         func() (string, error)
+	// rateLimitFn returns the live GitHub API rate-limit buckets for the
+	// daemon's token. Wired by main; nil disables the /github/rate_limit
+	// endpoint (returns 503).
+	rateLimitFn func() (any, error)
 	// configFn returns the current running config as a JSON-serializable map.
 	configFn func() map[string]any
 	// healthSnapshotFn returns live daemon liveness metadata for /health and SSE heartbeat.
@@ -145,6 +149,7 @@ var sensitiveGETPaths = []string{
 	"/stats",  // exposes review activity metadata
 	"/issues", // covers /issues and /issues/{id}
 	"/repos",  // covers /repos/{name}/labels and /repos/{name}/collaborators
+	"/github", // covers /github/rate_limit (live GitHub API usage)
 }
 
 // authMiddleware rejects:
@@ -234,6 +239,9 @@ func (srv *Server) SetCleanClonesFn(fn func(ctx context.Context) (int, error)) {
 
 // SetMeFn wires the authenticated-user callback called by GET /me.
 func (srv *Server) SetMeFn(fn func() (string, error)) { srv.meFn = fn }
+
+// SetRateLimitFn wires the live GitHub rate-limit lookup for GET /github/rate_limit.
+func (srv *Server) SetRateLimitFn(fn func() (any, error)) { srv.rateLimitFn = fn }
 
 // SetConfigFn wires the callback that returns the live config for GET /config.
 func (srv *Server) SetConfigFn(fn func() map[string]any) { srv.configFn = fn }
@@ -359,6 +367,7 @@ func (srv *Server) buildRouter() chi.Router {
 	r.Get("/repos/{name}/collaborators", srv.handleRepoCollaborators)
 	r.Get("/activity", srv.handleActivity)
 	r.Get("/stats", srv.handleStats)
+	r.Get("/github/rate_limit", srv.handleGitHubRateLimit)
 	r.Get("/agents", srv.handleListAgents)
 	r.Post("/agents", srv.handleUpsertAgent)
 	r.Delete("/agents/{id}", srv.handleDeleteAgent)
@@ -646,8 +655,8 @@ var validConfigKeys = map[string]struct{}{
 // render them) but that PUT /config must not persist. The SvelteKit page
 // round-trips the entire GET payload as a forward-compat safeguard, so
 // rejecting these would 400 every save. We accept them at the endpoint
-// boundary and drop them before SetConfig — still a strict allowlist, no
-// arbitrary keys permitted.
+// boundary and drop them before the persist batch — still a strict allowlist,
+// no arbitrary keys permitted.
 //
 // Why each key is here:
 //   - repositories  : repo-list changes belong in config.toml via PATCH
@@ -789,15 +798,13 @@ func (srv *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 		body["agent_configs"] = normalized
 	}
 
-	var failedKeys []string
-	var attempted int
+	kv := make(map[string]string, len(body))
 	for k, v := range body {
 		// Read-only keys were accepted above to avoid 400s on UI saves that
 		// round-trip the GET payload, but they must not land in the store.
 		if _, readOnly := readOnlyConfigKeys[k]; readOnly {
 			continue
 		}
-		attempted++
 		var val string
 		switch typed := v.(type) {
 		case string:
@@ -813,20 +820,23 @@ func (srv *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 			}
 			val = string(b)
 		}
-		if _, err := srv.store.SetConfig(k, val); err != nil {
-			slog.Error("config: set", "key", k, "err", err)
-			failedKeys = append(failedKeys, k)
-		}
+		kv[k] = val
 	}
+	// Persist all keys in one transaction: the save is all-or-nothing (#565).
 	// A swallowed persist error here would 200-OK a save that never hit disk,
 	// so the UI shows success while the next reload silently re-applies stale
-	// values (#550). Report 500 with the offending keys instead. Note this is
-	// not transactional: earlier keys in the loop may already be persisted.
-	if len(failedKeys) > 0 {
+	// values (#550). On failure SetConfigs rolls back, so NO key is persisted —
+	// we report 500 with the full attempted key set (none of them landed), and
+	// the client recovers by simply retrying the whole payload.
+	if err := srv.store.SetConfigs(kv); err != nil {
+		failedKeys := make([]string, 0, len(kv))
+		for k := range kv {
+			failedKeys = append(failedKeys, k)
+		}
 		sort.Strings(failedKeys) // deterministic: Go map iteration order is random
-		slog.Warn("config: partial persist failure", "failed", len(failedKeys), "attempted", attempted)
+		slog.Error("config: set (atomic)", "keys", len(failedKeys), "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
-			"error":       "failed to persist one or more config keys",
+			"error":       "failed to persist config; no keys were saved (transaction rolled back)",
 			"failed_keys": failedKeys,
 		})
 		return
@@ -886,6 +896,10 @@ func (srv *Server) handlePatchRepoConfig(w http.ResponseWriter, r *http.Request)
 	repo, err := url.PathUnescape(chi.URLParam(r, "repo"))
 	if err != nil || repo == "" {
 		http.Error(w, `{"error":"invalid repo parameter"}`, http.StatusBadRequest)
+		return
+	}
+	if err := config.ValidateRepoSlug(repo); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
@@ -1725,6 +1739,23 @@ func (srv *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, stats)
+}
+
+// handleGitHubRateLimit returns the live GitHub API rate-limit buckets for the
+// daemon's token (core / search / graphql). It queries GitHub on each call, so
+// the UI should fetch it on demand rather than polling.
+func (srv *Server) handleGitHubRateLimit(w http.ResponseWriter, r *http.Request) {
+	if srv.rateLimitFn == nil {
+		http.Error(w, `{"error":"rate limit lookup not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+	rl, err := srv.rateLimitFn()
+	if err != nil {
+		slog.Error("handleGitHubRateLimit: fetch failed", "err", err)
+		http.Error(w, `{"error":"failed to fetch GitHub rate limit"}`, http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusOK, rl)
 }
 
 // handleActivity returns rows from activity_log matching the query.
