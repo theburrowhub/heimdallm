@@ -136,18 +136,17 @@ func MergeRepos(static, configured, discovered, nonMonitored []string) []string 
 	if len(static) == 0 && len(configured) == 0 && len(discovered) == 0 {
 		return nil
 	}
-	exempt := make(map[string]struct{}, len(configured))
-	for _, r := range configured {
-		if r != "" {
-			exempt[r] = struct{}{}
-		}
-	}
+	// non_monitored is authoritative: an explicit entry (e.g. the user
+	// disabling a repo in the Repositories view) excludes it even when the
+	// repo has [ai.repos.*] config. Previously configured repos were exempt
+	// from the blacklist (to survive a stale auto-discovery non_monitored row),
+	// but that made disabling a configured repo a silent no-op — the far more
+	// common and surprising case. Configured repos still join the union when
+	// NOT listed in non_monitored (the #281 fix), so issue polling for wired-up
+	// repos with no active PRs is unaffected.
 	blacklist := make(map[string]struct{}, len(nonMonitored))
 	for _, r := range nonMonitored {
 		if r == "" {
-			continue
-		}
-		if _, ok := exempt[r]; ok {
 			continue
 		}
 		blacklist[r] = struct{}{}
