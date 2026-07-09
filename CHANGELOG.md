@@ -10,6 +10,32 @@
 * **issues:** `auto_promote_triage` defaults on only when `refinement_labels` is configured. Repos without a refinement target keep their previous review-only behavior; set `auto_promote_triage = false` explicitly to keep refinement manual even when refinement labels exist.
 * **pipeline (PR reviews):** a push (new HEAD SHA) on a previously-reviewed PR no longer triggers an automatic re-review on its own. Heimdallm now requires an explicit `review_requested` event for the bot — i.e. someone (or some automation) pressing "Re-request review" — newer than the previous review's `CreatedAt`. The SHA-unchanged dedup (#322 Bug 5) and this SHA-changed gate now share the same predicate, so the contract is "review iff explicitly re-requested" regardless of whether the commit changed. Workflows that relied on push-triggered re-reviews — typically repos with "Dismiss stale reviews on push" or CODEOWNERS auto-request workflows that auto-re-added the bot to `requested_reviewers` — must now explicitly re-request the review (manually in the UI, or via a GitHub Action calling `gh pr edit --add-reviewer`). Skipped pushes surface as a `review_skipped` SSE with reason `no_rereview_request` (distinct from `sha_unchanged`) so dashboards can tell the two cases apart. Closes #509.
 
+## [0.7.2](https://github.com/theburrowhub/heimdallm/compare/v0.7.1...v0.7.2) (2026-07-09)
+
+
+### Features
+
+* **flutter:** in-tab connection indicator for events_tab SSE drops (closes [#572](https://github.com/theburrowhub/heimdallm/issues/572)) ([#576](https://github.com/theburrowhub/heimdallm/issues/576)) ([1a6c34d](https://github.com/theburrowhub/heimdallm/commit/1a6c34dc5d0a703f0d3fe7e12dfefa60d47add59))
+* **gui:** autonomous-mode + circuit-breaker settings in config screen ([#536](https://github.com/theburrowhub/heimdallm/issues/536)) ([e7514cb](https://github.com/theburrowhub/heimdallm/commit/e7514cb08d0292726d5290284a5404c5cc9ef5ed))
+* **gui:** unified config — Settings/Organizations/Repos parity + first-class Organizations tab ([#581](https://github.com/theburrowhub/heimdallm/issues/581)) ([60b19c9](https://github.com/theburrowhub/heimdallm/commit/60b19c96a67523f458aae5723c6959cb077467e3))
+* never_approve_with_issues (comment instead of approve when review has issues) ([#580](https://github.com/theburrowhub/heimdallm/issues/580)) ([c6bf430](https://github.com/theburrowhub/heimdallm/commit/c6bf430a1ddd664f71a54195dbc67574577076cf))
+* **stats:** GitHub API rate-limit section ([#582](https://github.com/theburrowhub/heimdallm/issues/582)) ([fa00ea2](https://github.com/theburrowhub/heimdallm/commit/fa00ea24288b11d9e70eb818b62ba531171ba197))
+
+
+### Bug Fixes
+
+* **config:** bound retention.max_days to [0,3650]; guard negative purge (closes [#551](https://github.com/theburrowhub/heimdallm/issues/551)) ([#567](https://github.com/theburrowhub/heimdallm/issues/567)) ([4834542](https://github.com/theburrowhub/heimdallm/commit/483454240a7cf575ccf308cfa5e083c1c3762938))
+* **config:** render poll_interval bounds as 1m/24h in error, not 1m0s/24h0s (review [#539](https://github.com/theburrowhub/heimdallm/issues/539)) ([#542](https://github.com/theburrowhub/heimdallm/issues/542)) ([e9f2c82](https://github.com/theburrowhub/heimdallm/commit/e9f2c82128368fae66c8efdad650a2ec2b98d20e))
+* **daemon:** GitHub rate-limit handling, honor non_monitored, non-blocking config saves ([#583](https://github.com/theburrowhub/heimdallm/issues/583)) ([2efdd18](https://github.com/theburrowhub/heimdallm/commit/2efdd18cb3e518c37e4bdf6b097402c8e5271064))
+* **daemon:** recover from panics in the SSE→NATS bridge goroutine (closes [#548](https://github.com/theburrowhub/heimdallm/issues/548)) ([#558](https://github.com/theburrowhub/heimdallm/issues/558)) ([54aef09](https://github.com/theburrowhub/heimdallm/commit/54aef094d03c930239ba2fbe0975bb051b6b1190))
+* **flutter:** surface SSE transport errors to listeners (closes [#554](https://github.com/theburrowhub/heimdallm/issues/554)) ([#571](https://github.com/theburrowhub/heimdallm/issues/571)) ([a4148f5](https://github.com/theburrowhub/heimdallm/commit/a4148f5fa5439a02449ead4fad539a86603c2494))
+* **github:** deterministic same-second timeline order so re-requests win re-review (refs ai-platform-workspace[#602](https://github.com/theburrowhub/heimdallm/issues/602)) ([#577](https://github.com/theburrowhub/heimdallm/issues/577)) ([ccfc913](https://github.com/theburrowhub/heimdallm/commit/ccfc913deec2817b22b5e6eb57a2aaa21cb32929))
+* **pipeline:** orphan pending reviews with corrupt issues JSON instead of posting empty (closes [#549](https://github.com/theburrowhub/heimdallm/issues/549)) ([#563](https://github.com/theburrowhub/heimdallm/issues/563)) ([ce160cc](https://github.com/theburrowhub/heimdallm/commit/ce160ccfe3ce832eb89cb5bc0926ef1b89b5b274))
+* **server:** JSON-escape repo-rename 400 error body (closes [#552](https://github.com/theburrowhub/heimdallm/issues/552)) ([#568](https://github.com/theburrowhub/heimdallm/issues/568)) ([afd07ed](https://github.com/theburrowhub/heimdallm/commit/afd07edf00692c785b68f57301f828c36b9ed3bd))
+* **server:** make PUT /config persist atomically (closes [#565](https://github.com/theburrowhub/heimdallm/issues/565)) ([#575](https://github.com/theburrowhub/heimdallm/issues/575)) ([6111bd0](https://github.com/theburrowhub/heimdallm/commit/6111bd064a7b77b040b90f71ba8c1064d0d8e455))
+* **server:** PUT /config returns 500 when SetConfig persist fails (closes [#550](https://github.com/theburrowhub/heimdallm/issues/550)) ([#564](https://github.com/theburrowhub/heimdallm/issues/564)) ([d601615](https://github.com/theburrowhub/heimdallm/commit/d6016154f3050a5f64de78d72651c1f10b1d2e6c))
+* **store:** propagate ComputeStats query/scan errors (closes [#553](https://github.com/theburrowhub/heimdallm/issues/553)) ([#569](https://github.com/theburrowhub/heimdallm/issues/569)) ([638f1db](https://github.com/theburrowhub/heimdallm/commit/638f1dbf522c9bb5c7e7e0f9aa21f97719a0c08f))
+
 ## [0.7.1](https://github.com/theburrowhub/heimdallm/compare/v0.7.0...v0.7.1) (2026-06-19)
 
 
