@@ -334,6 +334,12 @@ func main() {
 	// cfgMu protects cfg and the pipeline so reload is safe from any goroutine.
 	var cfgMu sync.Mutex
 	var reloadMu sync.Mutex // serialises config reloads to prevent duplicate pipelines
+	// restartMu serialises the BACKGROUND poller teardown+restart kicked off by
+	// a reload that changed a poller-relevant field. Kept separate from
+	// reloadMu so a config save never blocks (waiting out in-flight poll
+	// cycles/reviews in oldWg.Wait()) — the reload applies cfg and returns,
+	// while at most one restart runs at a time here.
+	var restartMu sync.Mutex
 	var lastPollUnixNano int64
 	var pollIntervalNano int64
 	storePollInterval := func(interval time.Duration) {
@@ -1721,34 +1727,44 @@ func main() {
 		}
 		cfgMu.Unlock()
 
-		// Read the current cancel/wg under cfgMu, then stop OUTSIDE the lock.
-		// Holding cfgMu across Wait() risks deadlock: if Wait() blocks
-		// waiting for in-flight goroutines that also acquire cfgMu (e.g.
-		// tier2Adapter callbacks), both sides block forever.
-		cfgMu.Lock()
-		oldCancel := pollerCancel
-		oldWg := pollerWg
-		cfgMu.Unlock()
-
-		oldCancel()
-		oldWg.Wait()
-
-		// Swap cfg + pollers atomically under the lock so readers never
-		// see a half-updated state.
+		// Apply the new config immediately so config reads (GET /config, the
+		// next tier1ConfigFn tick, etc.) reflect it right away.
 		cfgMu.Lock()
 		cfg = newCfg
 		cfgMu.Unlock()
 
-		// Reload path → coldStart=false so Tier 2 waits one full PollInterval
-		// before its first tick. A UI config PATCH triggers this path; firing
-		// an immediate tick on every PATCH would fan out reviews across the
-		// whole fleet and amplify the cost-runaway loop #243 closed.
-		newCancel, newWg := startPollers(context.Background(), false)
+		// Restart the pollers in the BACKGROUND. oldWg.Wait() can block for
+		// tens of seconds (an in-flight poll cycle or agent review must finish
+		// first); doing it inline made every restart-triggering config save
+		// hang that long and froze the UI. restartMu serialises restarts so a
+		// burst of saves can never leave two poller sets racing on the same
+		// GitHub budget, and each restart tears the old set fully down before
+		// starting the new one (no overlap).
+		//
+		// coldStart=false: Tier 2 waits one full PollInterval before its first
+		// tick. Firing an immediate tick on every PATCH would fan out reviews
+		// across the whole fleet and amplify the cost-runaway loop #243 closed.
+		go func() {
+			restartMu.Lock()
+			defer restartMu.Unlock()
 
-		cfgMu.Lock()
-		pollerCancel = newCancel
-		pollerWg = newWg
-		cfgMu.Unlock()
+			cfgMu.Lock()
+			oldCancel := pollerCancel
+			oldWg := pollerWg
+			cfgMu.Unlock()
+
+			oldCancel()
+			oldWg.Wait()
+
+			newCancel, newWg := startPollers(context.Background(), false)
+
+			cfgMu.Lock()
+			pollerCancel = newCancel
+			pollerWg = newWg
+			cfgMu.Unlock()
+
+			slog.Info("config reload: pollers restarted")
+		}()
 
 		return nil
 	})
