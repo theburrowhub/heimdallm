@@ -3,6 +3,9 @@ name: Docker Build Validation
 on:
   pull_request:
     branches: [main]
+  # Manual trigger for branches GitHub won't auto-run (e.g. the release-please
+  # PR, created by GITHUB_TOKEN). See tests.yml for the rationale.
+  workflow_dispatch:
 
 env:
   # Opt-in to Node.js 24 for all JavaScript actions (Node 20 deprecated Sep 2026)
