@@ -55,6 +55,10 @@ type Server struct {
 	// tests that don't need it).
 	repoRenameFn func(ctx context.Context, oldRepo, newRepo string) error
 	meFn         func() (string, error)
+	// rateLimitFn returns the live GitHub API rate-limit buckets for the
+	// daemon's token. Wired by main; nil disables the /github/rate_limit
+	// endpoint (returns 503).
+	rateLimitFn func() (any, error)
 	// configFn returns the current running config as a JSON-serializable map.
 	configFn func() map[string]any
 	// healthSnapshotFn returns live daemon liveness metadata for /health and SSE heartbeat.
@@ -145,6 +149,7 @@ var sensitiveGETPaths = []string{
 	"/stats",  // exposes review activity metadata
 	"/issues", // covers /issues and /issues/{id}
 	"/repos",  // covers /repos/{name}/labels and /repos/{name}/collaborators
+	"/github", // covers /github/rate_limit (live GitHub API usage)
 }
 
 // authMiddleware rejects:
@@ -234,6 +239,9 @@ func (srv *Server) SetCleanClonesFn(fn func(ctx context.Context) (int, error)) {
 
 // SetMeFn wires the authenticated-user callback called by GET /me.
 func (srv *Server) SetMeFn(fn func() (string, error)) { srv.meFn = fn }
+
+// SetRateLimitFn wires the live GitHub rate-limit lookup for GET /github/rate_limit.
+func (srv *Server) SetRateLimitFn(fn func() (any, error)) { srv.rateLimitFn = fn }
 
 // SetConfigFn wires the callback that returns the live config for GET /config.
 func (srv *Server) SetConfigFn(fn func() map[string]any) { srv.configFn = fn }
@@ -359,6 +367,7 @@ func (srv *Server) buildRouter() chi.Router {
 	r.Get("/repos/{name}/collaborators", srv.handleRepoCollaborators)
 	r.Get("/activity", srv.handleActivity)
 	r.Get("/stats", srv.handleStats)
+	r.Get("/github/rate_limit", srv.handleGitHubRateLimit)
 	r.Get("/agents", srv.handleListAgents)
 	r.Post("/agents", srv.handleUpsertAgent)
 	r.Delete("/agents/{id}", srv.handleDeleteAgent)
@@ -1646,6 +1655,23 @@ func (srv *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, stats)
+}
+
+// handleGitHubRateLimit returns the live GitHub API rate-limit buckets for the
+// daemon's token (core / search / graphql). It queries GitHub on each call, so
+// the UI should fetch it on demand rather than polling.
+func (srv *Server) handleGitHubRateLimit(w http.ResponseWriter, r *http.Request) {
+	if srv.rateLimitFn == nil {
+		http.Error(w, `{"error":"rate limit lookup not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+	rl, err := srv.rateLimitFn()
+	if err != nil {
+		slog.Error("handleGitHubRateLimit: fetch failed", "err", err)
+		http.Error(w, `{"error":"failed to fetch GitHub rate limit"}`, http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusOK, rl)
 }
 
 // handleActivity returns rows from activity_log matching the query.
