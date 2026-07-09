@@ -484,11 +484,7 @@ class ApiClient {
     if (result['issues'] is String) {
       result['issues'] = jsonDecode(result['issues'] as String);
     }
-    if (result['suggestions'] is String) {
-      result['suggestions'] = jsonDecode(result['suggestions'] as String);
-    }
     result['issues'] ??= <dynamic>[];
-    result['suggestions'] ??= <dynamic>[];
     return result;
   }
 

@@ -51,7 +51,6 @@ Review the above diff and respond with ONLY valid JSON in this exact format (no 
   "issues": [
     {"file": "filename", "line": 0, "description": "issue description", "severity": "low|medium|high"}
   ],
-  "suggestions": ["suggestion 1", "suggestion 2"],
   "severity": "low|medium|high"
 }
 
@@ -93,7 +92,6 @@ Review the diff according to the focus above and respond with ONLY valid JSON (n
   "issues": [
     {"file": "filename", "line": 0, "description": "issue description", "severity": "low|medium|high"}
   ],
-  "suggestions": ["suggestion 1"],
   "severity": "low|medium|high"
 }
 

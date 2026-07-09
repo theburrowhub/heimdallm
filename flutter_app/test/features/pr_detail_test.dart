@@ -14,7 +14,7 @@ void main() {
       title: 'Fix bug', author: 'alice', url: 'https://github.com',
       state: 'open', updatedAt: DateTime.now());
     final review = Review(id: 1, prId: 1, cliUsed: 'claude',
-      summary: 'Overall looks good', issues: [], suggestions: ['add tests'],
+      summary: 'Overall looks good', issues: [],
       severity: 'low', createdAt: DateTime.now());
 
     await tester.pumpWidget(

@@ -19,10 +19,9 @@ const cliHelpTimeout = 2 * time.Second
 
 // ReviewResult is the parsed JSON response from the AI CLI.
 type ReviewResult struct {
-	Summary     string   `json:"summary"`
-	Issues      []Issue  `json:"issues"`
-	Suggestions []string `json:"suggestions"`
-	Severity    string   `json:"severity"`
+	Summary  string  `json:"summary"`
+	Issues   []Issue `json:"issues"`
+	Severity string  `json:"severity"`
 }
 
 // Issue represents a single code issue found by the AI reviewer.
