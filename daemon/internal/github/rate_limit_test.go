@@ -1,6 +1,7 @@
 package github_test
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -58,31 +59,37 @@ func TestRateLimit_ErrorStatus(t *testing.T) {
 	}
 }
 
-// TestRateLimit_RetriesAfterBackoff verifies a GET that is rate-limited (403 +
-// Retry-After) is transparently retried after backing off, then succeeds.
-func TestRateLimit_RetriesAfterBackoff(t *testing.T) {
+// TestRateLimit_CircuitBreakerPausesAfter403 verifies that once GitHub
+// rate-limits a request, the client opens its breaker and subsequent calls fail
+// fast WITHOUT hitting GitHub — so the daemon stops piling traffic onto an
+// active (secondary) block instead of keeping it alive.
+func TestRateLimit_CircuitBreakerPausesAfter403(t *testing.T) {
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if atomic.AddInt32(&calls, 1) == 1 {
-			w.Header().Set("Retry-After", "0") // rate limited; retry immediately
-			w.WriteHeader(http.StatusForbidden)
-			_, _ = w.Write([]byte(`{"message":"API rate limit exceeded"}`))
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"archived": false}`))
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"message":"API rate limit exceeded"}`))
 	}))
 	defer srv.Close()
 
 	c := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
-	archived, err := c.IsRepoArchived("acme/widget")
-	if err != nil {
-		t.Fatalf("IsRepoArchived: %v", err)
+
+	// First call reaches GitHub, is rate-limited → surfaced as an error.
+	if _, err := c.IsRepoArchived("acme/widget"); err == nil {
+		t.Fatal("expected an error on the first rate-limited call")
 	}
-	if archived {
-		t.Error("archived = true, want false")
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("after first call server calls = %d, want 1", got)
 	}
-	if got := atomic.LoadInt32(&calls); got != 2 {
-		t.Errorf("server calls = %d, want 2 (rate-limited then retried)", got)
+
+	// Breaker is open: the next call fails fast without contacting GitHub.
+	_, err := c.IsRepoArchived("acme/other")
+	var rle *gh.RateLimitError
+	if !errors.As(err, &rle) {
+		t.Fatalf("second call error = %v, want *github.RateLimitError", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("second call hit the server (calls=%d); breaker should short-circuit", got)
 	}
 }

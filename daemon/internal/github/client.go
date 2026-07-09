@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -62,6 +63,23 @@ type Client struct {
 	token   string
 	baseURL string
 	http    *http.Client
+
+	// rate-limit circuit breaker: when GitHub rejects a request with a rate
+	// limit (primary exhaustion or a secondary/abuse burst block), every
+	// subsequent request fails fast until rlPausedUntil instead of piling more
+	// traffic onto GitHub — which is what keeps a secondary block from ever
+	// clearing. Shared across all callers of this client.
+	rlMu          sync.Mutex
+	rlPausedUntil time.Time
+}
+
+// RateLimitError is returned (without contacting GitHub) while the client is in
+// its rate-limit cooldown window. Callers treat it like any transient fetch
+// error; the point is that no request is actually sent until RetryAt.
+type RateLimitError struct{ RetryAt time.Time }
+
+func (e *RateLimitError) Error() string {
+	return "github: rate limited, paused until " + e.RetryAt.Format(time.RFC3339)
 }
 
 type Option func(*Client)
@@ -117,59 +135,77 @@ func (c *Client) do(method, path string, accept string) (*http.Response, error) 
 // TODO: migrate SubmitReview and PostComment to doWithBody as well — they
 // still build their request inline, duplicating the header setup.
 func (c *Client) doWithBody(method, path, accept, contentType string, body io.Reader) (*http.Response, error) {
-	// Bodyless (GET-like) requests are safe to re-issue after a rate-limit
-	// backoff. Requests with a body are attempted once — the reader would be
-	// consumed and cannot be rewound for a retry.
-	maxAttempts := 1
-	if body == nil {
-		maxAttempts = 3
+	// Circuit breaker: while a rate-limit cooldown is active, fail fast without
+	// touching GitHub. Sending more traffic during a secondary/abuse block only
+	// keeps it alive; going quiet lets it clear.
+	if until, paused := c.rateLimitPaused(); paused {
+		return nil, &RateLimitError{RetryAt: until}
 	}
-	for attempt := 1; ; attempt++ {
-		req, err := http.NewRequest(method, c.baseURL+path, body)
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Authorization", "Bearer "+c.token)
-		req.Header.Set("Accept", accept)
-		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-		if contentType != "" {
-			req.Header.Set("Content-Type", contentType)
-		}
-		resp, err := c.http.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		// When GitHub rate-limits us (primary exhaustion or a secondary/abuse
-		// burst limit), pause and retry instead of hammering. This paces the
-		// sequential bursts (discovery archive-checks, per-repo issue fetches)
-		// that otherwise trip the secondary limit even while the hourly budget
-		// is healthy. A far-off primary reset (beyond the cap) is returned to
-		// the caller so the daemon never blocks for the full hour.
-		if attempt < maxAttempts {
-			if wait, ok := rateLimitBackoff(resp); ok && wait <= maxRateLimitBackoff {
-				resp.Body.Close()
-				slog.Warn("github: rate limited, backing off before retry",
-					"path", path, "wait", wait.Round(time.Second), "attempt", attempt)
-				time.Sleep(wait)
-				continue
-			}
-		}
-		return resp, nil
+
+	req, err := http.NewRequest(method, c.baseURL+path, body)
+	if err != nil {
+		return nil, err
 	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Accept", accept)
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	// If GitHub rate-limited this request, open the breaker so the rest of the
+	// poll cycle stops hammering. The current response is still returned so the
+	// caller handles this one as it always has.
+	if wait, limited := rateLimitDelay(resp); limited {
+		c.pauseRateLimit(wait)
+	}
+	return resp, nil
 }
 
-// maxRateLimitBackoff caps how long a single request blocks waiting out a
-// rate-limit window before giving up. Secondary-limit Retry-After delays are
-// usually seconds; a primary-limit reset can be up to an hour away, and we must
-// not stall the daemon that long.
-const maxRateLimitBackoff = 90 * time.Second
+// rateLimitCooldown is the default pause applied when GitHub reports a rate
+// limit without a usable Retry-After. Secondary/abuse blocks typically clear
+// within a minute; a primary reset is far longer, but pausing a minute and
+// re-checking keeps traffic near zero without stalling the daemon for an hour.
+const rateLimitCooldown = 60 * time.Second
 
-// rateLimitBackoff reports whether resp is a GitHub rate-limit rejection and,
-// if so, how long to wait before retrying. It honors Retry-After (secondary /
-// abuse limits) first, then X-RateLimit-Remaining==0 with X-RateLimit-Reset
-// (primary), with a small default when a limit is signaled without a usable
-// delay. A one-second cushion is added so the retry lands after the window.
-func rateLimitBackoff(resp *http.Response) (time.Duration, bool) {
+// maxRateLimitCooldown caps how long the breaker stays open from a single
+// signal, so an over-large Retry-After can never wedge the daemon.
+const maxRateLimitCooldown = 5 * time.Minute
+
+func (c *Client) rateLimitPaused() (time.Time, bool) {
+	c.rlMu.Lock()
+	defer c.rlMu.Unlock()
+	if c.rlPausedUntil.IsZero() {
+		return time.Time{}, false
+	}
+	if time.Now().Before(c.rlPausedUntil) {
+		return c.rlPausedUntil, true
+	}
+	return time.Time{}, false
+}
+
+func (c *Client) pauseRateLimit(d time.Duration) {
+	if d <= 0 || d > maxRateLimitCooldown {
+		d = rateLimitCooldown
+	}
+	until := time.Now().Add(d)
+	c.rlMu.Lock()
+	if until.After(c.rlPausedUntil) {
+		c.rlPausedUntil = until
+		slog.Warn("github: rate limited, pausing API calls", "until", until.Format(time.RFC3339), "for", d.Round(time.Second))
+	}
+	c.rlMu.Unlock()
+}
+
+// rateLimitDelay reports whether resp is a GitHub rate-limit rejection and, if
+// so, a suggested cooldown. It honors a numeric Retry-After (secondary/abuse
+// limits); otherwise a 403/429 with X-RateLimit-Remaining==0 falls back to the
+// default cooldown.
+func rateLimitDelay(resp *http.Response) (time.Duration, bool) {
 	if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusTooManyRequests {
 		return 0, false
 	}
@@ -179,16 +215,7 @@ func rateLimitBackoff(resp *http.Response) (time.Duration, bool) {
 		}
 	}
 	if resp.Header.Get("X-RateLimit-Remaining") == "0" {
-		if rs := resp.Header.Get("X-RateLimit-Reset"); rs != "" {
-			if epoch, err := strconv.ParseInt(strings.TrimSpace(rs), 10, 64); err == nil {
-				wait := time.Until(time.Unix(epoch, 0)) + time.Second
-				if wait < time.Second {
-					wait = time.Second
-				}
-				return wait, true
-			}
-		}
-		return 2 * time.Second, true
+		return rateLimitCooldown, true
 	}
 	return 0, false
 }
