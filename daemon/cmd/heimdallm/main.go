@@ -764,8 +764,15 @@ func main() {
 				}
 			}
 
+			// Cache archived-status lookups: an archived/active repo almost
+			// never flips, but FilterArchived otherwise re-checks every repo
+			// (one GET /repos each) on every discovery tick — a large slice of
+			// the hourly GitHub budget for no new information. See the constant
+			// rate-limit exhaustion with 80+ monitored repos.
+			archiveChecker := newCachingArchivedChecker(ghClient, 6*time.Hour)
+
 			// Publish initial repos immediately
-			sendDiscoveryRepos(ctx, discoverySvc, limiter, repoPublisher, tier1ConfigFn, ghClient)
+			sendDiscoveryRepos(ctx, discoverySvc, limiter, repoPublisher, tier1ConfigFn, archiveChecker)
 
 			ticker := time.NewTicker(discoveryInterval)
 			defer ticker.Stop()
@@ -774,7 +781,7 @@ func main() {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					sendDiscoveryRepos(ctx, discoverySvc, limiter, repoPublisher, tier1ConfigFn, ghClient)
+					sendDiscoveryRepos(ctx, discoverySvc, limiter, repoPublisher, tier1ConfigFn, archiveChecker)
 				}
 			}
 		}()
@@ -2293,6 +2300,44 @@ func resolveRefinementTimeout(refinementTimeout, globalTimeout, agentTimeout str
 
 // sendDiscoveryRepos merges static + discovered repos and publishes the
 // full list to NATS. Extracted from the old tier1.go sendRepos.
+// cachingArchivedChecker wraps a discovery.ArchivedChecker with a TTL cache so
+// the tier1 discovery loop does not spend one GET /repos per monitored repo on
+// every tick re-confirming near-static archived status. Only successful lookups
+// are cached (errors fall through, preserving FilterArchived's fail-open
+// behavior).
+type cachingArchivedChecker struct {
+	inner discovery.ArchivedChecker
+	ttl   time.Duration
+	mu    sync.Mutex
+	cache map[string]archivedCacheEntry
+}
+
+type archivedCacheEntry struct {
+	archived bool
+	at       time.Time
+}
+
+func newCachingArchivedChecker(inner discovery.ArchivedChecker, ttl time.Duration) *cachingArchivedChecker {
+	return &cachingArchivedChecker{inner: inner, ttl: ttl, cache: make(map[string]archivedCacheEntry)}
+}
+
+func (c *cachingArchivedChecker) IsRepoArchived(repo string) (bool, error) {
+	c.mu.Lock()
+	e, ok := c.cache[repo]
+	c.mu.Unlock()
+	if ok && time.Since(e.at) < c.ttl {
+		return e.archived, nil
+	}
+	archived, err := c.inner.IsRepoArchived(repo)
+	if err != nil {
+		return archived, err // don't cache transient failures
+	}
+	c.mu.Lock()
+	c.cache[repo] = archivedCacheEntry{archived: archived, at: time.Now()}
+	c.mu.Unlock()
+	return archived, nil
+}
+
 func sendDiscoveryRepos(
 	ctx context.Context,
 	disc scheduler.Tier1Discovery,
