@@ -60,7 +60,12 @@ func TestDetect_NoneAvailable(t *testing.T) {
 func TestExecute(t *testing.T) {
 	_, file, _, _ := runtime.Caller(0)
 	binDir := filepath.Join(filepath.Dir(file), "testdata", "bin")
-	t.Setenv("PATH", binDir)
+	// Prepend (not replace) so the fake `claude` is resolved first while the
+	// system coreutils the fake script relies on (`cat`) stay on PATH. On a
+	// dash-based /bin/sh (Linux CI runners) `cat` is not a shell builtin, so a
+	// replaced PATH makes the fake CLI exit 127 with "cat: not found". The fake
+	// binary wins because binDir comes first.
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	e := executor.New()
 	result, err := e.Execute("claude", "Review this diff", executor.ExecOptions{})
@@ -179,7 +184,10 @@ func TestExecuteRawCodexUsesExecAndReadsPromptFromStdin(t *testing.T) {
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake CLI: %v", err)
 	}
-	t.Setenv("PATH", binDir)
+	// Prepend so the fake `codex` wins while the script's `cat > file`
+	// (stdin capture) can still resolve system `cat`. See TestExecute for why
+	// a replaced PATH breaks on dash-based /bin/sh.
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	prompt := "review this PR"
 	e := executor.New()
