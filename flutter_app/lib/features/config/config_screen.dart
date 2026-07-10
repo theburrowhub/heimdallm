@@ -10,8 +10,6 @@ import '../agents/agents_screen.dart' show agentsProvider;
 import '../dashboard/dashboard_providers.dart';
 import 'config_providers.dart';
 
-const _aiOptions = ['claude', 'gemini', 'codex'];
-
 // Poll-interval bounds, mirrored from the daemon's config.ValidatePollInterval
 // (daemon/internal/config/config.go: minPollInterval=1m, maxPollInterval=24h).
 // The daemon is authoritative — these power a client-side UX guard so the
@@ -116,8 +114,6 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   bool _autonomousControllersInitialized = false;
 
   bool _initialized = false;
-  bool _discovering = false;
-  String? _discoverError;
 
   @override
   void initState() {
@@ -130,7 +126,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     _perIssue24hController = TextEditingController();
     _perIssueRepoHrController = TextEditingController();
     _perImplRepoHrController = TextEditingController();
-    _detectToken().then((_) => _autoDiscoverRepos());
+    _detectToken();
   }
 
   @override
@@ -202,39 +198,6 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     _perImplRepoHrController.text = config.circuitBreaker.perImplRepoHr.toString();
   }
 
-  /// Auto-discovers repos from the user's PRs. Runs silently on init.
-  Future<void> _autoDiscoverRepos() async {
-    final token = _tokenController.text.trim();
-    if (token.isEmpty) return;
-    if (!mounted) return;
-    setState(() {
-      _discovering = true;
-      _discoverError = null;
-    });
-    try {
-      final discovered = await ref
-          .read(platformServicesProvider)
-          .discoverReposFromPRs(token);
-      if (!mounted) return;
-      setState(() {
-        for (final repo in discovered) {
-          // Keep existing toggle state; default new ones to monitored
-          _repoConfigs.putIfAbsent(
-            repo,
-            () => const RepoConfig(prEnabled: true),
-          );
-        }
-        _discovering = false;
-      });
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _discovering = false;
-        _discoverError = 'Could not discover repos: $e';
-      });
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     final configAsync = ref.watch(configNotifierProvider);
@@ -289,7 +252,6 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
             if (!daemonRunning) _setupBanner(),
             _tokenSection(),
             const SizedBox(height: 20),
-            if (!daemonRunning) ...[_repoSection(), const SizedBox(height: 20)],
             _pollSection(),
             const SizedBox(height: 20),
             _retentionSection(),
@@ -356,135 +318,6 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     );
   }
 
-  // ── Repos ───────────────────────────────────────────────────────────────
-
-  Widget _repoSection() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            _sectionHeaderInline('Repos with active PRs'),
-            if (_discovering) ...[
-              const SizedBox(width: 10),
-              const SizedBox(
-                width: 14,
-                height: 14,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              ),
-            ],
-          ],
-        ),
-        if (_discoverError != null) ...[
-          const SizedBox(height: 6),
-          _infoChip(Icons.warning_amber, _discoverError!, Colors.orange),
-        ],
-        const SizedBox(height: 8),
-        if (_repoConfigs.isEmpty && !_discovering)
-          const Padding(
-            padding: EdgeInsets.symmetric(vertical: 8),
-            child: Text(
-              'No active PRs found assigned to you.',
-              style: TextStyle(color: Colors.grey),
-            ),
-          )
-        else
-          _repoList(),
-      ],
-    );
-  }
-
-  Widget _repoList() {
-    final sorted = _repoConfigs.keys.toList()..sort();
-    return Column(children: sorted.map((repo) => _repoTile(repo)).toList());
-  }
-
-  Widget _repoTile(String repo) {
-    final rc = _repoConfigs[repo]!;
-    return Card(
-      margin: const EdgeInsets.only(bottom: 4),
-      child: ExpansionTile(
-        leading: Switch(
-          value: rc.isMonitored,
-          onChanged: (v) => setState(() {
-            _repoConfigs[repo] = rc.copyWith(prEnabled: v);
-          }),
-        ),
-        title: Text(
-          repo,
-          style: TextStyle(
-            color: rc.isMonitored ? null : Colors.grey,
-            fontWeight: rc.isMonitored ? FontWeight.w600 : FontWeight.normal,
-          ),
-        ),
-        subtitle: rc.hasAiOverride
-            ? Text(
-                'AI: ${rc.aiPrimary ?? "global"}',
-                style: const TextStyle(fontSize: 12),
-              )
-            : null,
-        childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-        children: [
-          const Divider(height: 1),
-          const SizedBox(height: 10),
-          const Text(
-            'AI overrides for this repo',
-            style: TextStyle(fontSize: 12, color: Colors.grey),
-          ),
-          const SizedBox(height: 8),
-          Row(
-            children: [
-              Expanded(
-                child: _overrideDropdown(
-                  label: 'Primary agent',
-                  value: rc.aiPrimary,
-                  onChanged: (v) => setState(() {
-                    _repoConfigs[repo] = rc.copyWith(aiPrimary: v);
-                  }),
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: _overrideDropdown(
-                  label: 'Fallback',
-                  value: rc.aiFallback,
-                  onChanged: (v) => setState(() {
-                    _repoConfigs[repo] = rc.copyWith(aiFallback: v);
-                  }),
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _overrideDropdown({
-    required String label,
-    required String? value,
-    required ValueChanged<String?> onChanged,
-  }) {
-    return DropdownButtonFormField<String?>(
-      // ignore: deprecated_member_use
-      value: value,
-      decoration: InputDecoration(
-        labelText: label,
-        border: const OutlineInputBorder(),
-        isDense: true,
-      ),
-      items: [
-        const DropdownMenuItem<String?>(
-          value: null,
-          child: Text('Global (no override)'),
-        ),
-        ..._aiOptions.map(
-          (v) => DropdownMenuItem<String?>(value: v, child: Text(v)),
-        ),
-      ],
-      onChanged: onChanged,
-    );
-  }
 
   // ── Poll interval ─────────────────────────────────────────────────────────
 
@@ -1452,10 +1285,5 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
       title,
       style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
     ),
-  );
-
-  Widget _sectionHeaderInline(String title) => Text(
-    title,
-    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
   );
 }
