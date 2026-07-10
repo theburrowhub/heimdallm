@@ -25,7 +25,13 @@ class OrgDetailScreen extends ConsumerStatefulWidget {
 
 class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
   OrgConfig _config = const OrgConfig();
+  // Last value successfully persisted to the daemon. All diffs are computed
+  // against this baseline (not the pre-edit value) so that rapid edits to
+  // several fields all reach the server, and so the Save button / dirty state
+  // reflect "unsaved since last persist".
+  OrgConfig _saved = const OrgConfig();
   bool _initialized = false;
+  bool _saving = false;
   Timer? _debounce;
 
   @override
@@ -38,29 +44,37 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
     if (_initialized) return;
     _initialized = true;
     _config = config.orgConfigs[widget.orgName] ?? const OrgConfig();
+    _saved = _config;
   }
+
+  bool get _dirty => _computeOrgDiff(_saved, _config).isNotEmpty;
 
   void _update(OrgConfig updated) {
-    final previous = _config;
     setState(() => _config = updated);
+    // Debounced convenience auto-save; the explicit Save button and the
+    // save-on-leave guard (PopScope) cover the sub-debounce window so edits
+    // are never silently dropped.
     _debounce?.cancel();
-    _debounce = Timer(
-      const Duration(milliseconds: 800),
-      () => _autoSave(previous),
-    );
+    _debounce = Timer(const Duration(milliseconds: 800), _save);
   }
 
-  Future<void> _autoSave(OrgConfig previous) async {
-    final diff = _computeOrgDiff(previous, _config);
+  Future<void> _save() async {
+    _debounce?.cancel();
+    final diff = _computeOrgDiff(_saved, _config);
     if (diff.isEmpty) return;
+    final target = _config;
+    if (mounted) setState(() => _saving = true);
     try {
       final freshJson = await ref
           .read(apiClientProvider)
           .patchOrgConfig(widget.orgName, diff);
       ref.read(configNotifierProvider.notifier).updateFromServer(freshJson);
+      _saved = target;
       if (mounted) showToast(context, 'Saved');
     } catch (e) {
       if (mounted) showToast(context, 'Error: $e', isError: true);
+    } finally {
+      if (mounted) setState(() => _saving = false);
     }
   }
 
@@ -73,6 +87,7 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
       final freshConfig = AppConfig.fromJson(freshJson);
       setState(() {
         _config = freshConfig.orgConfigs[widget.orgName] ?? const OrgConfig();
+        _saved = _config;
       });
       if (mounted) showToast(context, 'Reset to global');
     } catch (e) {
@@ -188,15 +203,44 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
   @override
   Widget build(BuildContext context) {
     final configAsync = ref.watch(configNotifierProvider);
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.orgName),
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          onPressed: () => context.canPop() ? context.pop() : context.go('/'),
+    return PopScope(
+      // Block the pop while there are unsaved edits so the sub-debounce window
+      // can't drop them: flush the save, then leave. When nothing is pending
+      // (canPop true) navigation proceeds normally.
+      canPop: !_dirty,
+      onPopInvokedWithResult: (didPop, _) async {
+        if (didPop) return;
+        await _save();
+        if (!context.mounted) return;
+        if (context.canPop()) context.pop();
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text(widget.orgName),
+          leading: IconButton(
+            icon: const Icon(Icons.arrow_back),
+            onPressed: () => context.canPop() ? context.pop() : context.go('/'),
+          ),
+          actions: [
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: _saving
+                  ? const Center(
+                      child: SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                    )
+                  : TextButton.icon(
+                      onPressed: _dirty ? _save : null,
+                      icon: const Icon(Icons.save, size: 18),
+                      label: const Text('Save'),
+                    ),
+            ),
+          ],
         ),
-      ),
-      body: configAsync.when(
+        body: configAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (_, _) => const Center(child: Text('Could not load config')),
         data: (appConfig) {
@@ -214,6 +258,7 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
                     label: 'Local directory',
                     globalValue: '',
                     overrideValue: _config.localDir,
+                    isDirectory: true,
                     onChanged: (v) => _update(_config.copyWith(localDir: v)),
                     onReset: () => _resetField('local_dir'),
                   ),
@@ -549,6 +594,7 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
             ),
           );
         },
+        ),
       ),
     );
   }

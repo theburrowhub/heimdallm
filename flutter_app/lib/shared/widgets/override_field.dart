@@ -1,3 +1,4 @@
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 /// A field that shows the effective value (global or overridden) with
@@ -15,6 +16,10 @@ class OverrideTextField extends StatefulWidget {
   final ValueChanged<String?> onChanged;
   final VoidCallback? onReset;
 
+  /// When true, renders a folder-picker button so the user can browse the
+  /// filesystem instead of typing the path by hand.
+  final bool isDirectory;
+
   const OverrideTextField({
     super.key,
     required this.label,
@@ -24,6 +29,7 @@ class OverrideTextField extends StatefulWidget {
     required this.overrideValue,
     required this.onChanged,
     this.onReset,
+    this.isDirectory = false,
   });
 
   @override
@@ -83,6 +89,16 @@ class _OverrideTextFieldState extends State<OverrideTextField> {
     } else {
       widget.onChanged(trimmed);
     }
+  }
+
+  Future<void> _pickDirectory() async {
+    final selected = await FilePicker.getDirectoryPath(
+      dialogTitle: 'Select ${widget.label}',
+      lockParentWindow: true,
+    );
+    if (selected == null || selected.isEmpty) return;
+    _ctrl.text = selected;
+    _handleChange(selected);
   }
 
   @override
@@ -173,6 +189,13 @@ class _OverrideTextFieldState extends State<OverrideTextField> {
                 horizontal: 8,
                 vertical: 8,
               ),
+              suffixIcon: widget.isDirectory
+                  ? IconButton(
+                      tooltip: 'Browse…',
+                      icon: const Icon(Icons.folder_open, size: 18),
+                      onPressed: _pickDirectory,
+                    )
+                  : null,
             ),
             onChanged: _handleChange,
           ),
