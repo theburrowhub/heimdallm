@@ -1,3 +1,4 @@
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -87,6 +88,7 @@ class ConfigScreen extends ConsumerStatefulWidget {
 class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   final _tokenController = TextEditingController();
   final _pollController = TextEditingController();
+  final _cloneDirController = TextEditingController();
   final _pollFieldKey = GlobalKey<FormFieldState<String>>();
   bool _obscureToken = true;
   bool _tokenFromGh = false; // true = auto-detected from gh CLI
@@ -133,6 +135,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   void dispose() {
     _tokenController.dispose();
     _pollController.dispose();
+    _cloneDirController.dispose();
     _devMaxTurnsController.dispose();
     _devTimeoutController.dispose();
     _claimLeaseController.dispose();
@@ -610,6 +613,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     _globalNeverApproveWithIssues = config.globalNeverApproveWithIssues;
     _globalTriageOwner = config.globalTriageOwner;
     _globalCloneDir = config.globalCloneDir;
+    _cloneDirController.text = config.globalCloneDir;
     _globalAutoPromoteTriage = config.globalAutoPromoteTriage ?? false;
     _globalAutoPromoteRefinement = config.globalAutoPromoteRefinement ?? false;
     _globalGeneratePRDescription = config.globalGeneratePRDescription;
@@ -657,11 +661,24 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
       ),
       const SizedBox(height: 12),
       TextFormField(
-        initialValue: _globalCloneDir,
-        decoration: const InputDecoration(
+        controller: _cloneDirController,
+        decoration: InputDecoration(
           labelText: 'Clone directory',
           hintText: 'Base directory for managed repo clones',
           isDense: true,
+          suffixIcon: IconButton(
+            tooltip: 'Browse…',
+            icon: const Icon(Icons.folder_open, size: 18),
+            onPressed: () async {
+              final dir = await FilePicker.getDirectoryPath(
+                dialogTitle: 'Select clone directory',
+                lockParentWindow: true,
+              );
+              if (dir == null || dir.isEmpty) return;
+              _cloneDirController.text = dir;
+              _globalCloneDir = dir;
+            },
+          ),
         ),
         onChanged: (v) => _globalCloneDir = v.trim(),
       ),
