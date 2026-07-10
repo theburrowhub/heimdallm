@@ -404,7 +404,13 @@ restart: _check-docker
 
 package-macos: _check-macos build-daemon build-app
 	cp $(DAEMON_BIN) "$(APP_BUNDLE)/Contents/MacOS/heimdalld"
-	codesign --force --deep --sign - "$(APP_BUNDLE)"
+	# Re-sign WITH the entitlements — a bare `codesign --sign -` strips the
+	# entitlements `flutter build` applied, dropping the
+	# files.user-selected.read-write capability so file_picker's native
+	# directory picker silently no-ops. Mirrors the release.yml build-macos job.
+	codesign --force --deep --sign - \
+	  --entitlements flutter_app/macos/Runner/Release.entitlements \
+	  "$(APP_BUNDLE)"
 	mkdir -p dist
 	hdiutil create \
 	  -volname "Heimdallm" \
