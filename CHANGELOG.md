@@ -10,6 +10,13 @@
 * **issues:** `auto_promote_triage` defaults on only when `refinement_labels` is configured. Repos without a refinement target keep their previous review-only behavior; set `auto_promote_triage = false` explicitly to keep refinement manual even when refinement labels exist.
 * **pipeline (PR reviews):** a push (new HEAD SHA) on a previously-reviewed PR no longer triggers an automatic re-review on its own. Heimdallm now requires an explicit `review_requested` event for the bot — i.e. someone (or some automation) pressing "Re-request review" — newer than the previous review's `CreatedAt`. The SHA-unchanged dedup (#322 Bug 5) and this SHA-changed gate now share the same predicate, so the contract is "review iff explicitly re-requested" regardless of whether the commit changed. Workflows that relied on push-triggered re-reviews — typically repos with "Dismiss stale reviews on push" or CODEOWNERS auto-request workflows that auto-re-added the bot to `requested_reviewers` — must now explicitly re-request the review (manually in the UI, or via a GitHub Action calling `gh pr edit --add-reviewer`). Skipped pushes surface as a `review_skipped` SSE with reason `no_rereview_request` (distinct from `sha_unchanged`) so dashboards can tell the two cases apart. Closes #509.
 
+## [0.7.7](https://github.com/theburrowhub/heimdallm/compare/v0.7.6...v0.7.7) (2026-07-10)
+
+
+### Bug Fixes
+
+* restore macOS entitlements in local package + stop false "Server unavailable" ([#594](https://github.com/theburrowhub/heimdallm/issues/594)) ([280550a](https://github.com/theburrowhub/heimdallm/commit/280550a982e208d073e3b3188f6b73db2895a0ef))
+
 ## [0.7.6](https://github.com/theburrowhub/heimdallm/compare/v0.7.5...v0.7.6) (2026-07-10)
 
 
