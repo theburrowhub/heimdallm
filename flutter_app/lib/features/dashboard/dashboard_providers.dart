@@ -89,11 +89,22 @@ class DaemonConnectionNotifier extends Notifier<DaemonConnectionStatus> {
         state = const DaemonConnectionStatus.connecting();
       }
       if (next.hasError) {
-        state = DaemonConnectionStatus(
-          phase: DaemonConnectionPhase.offline,
-          lastEventAt: state.lastEventAt,
-          message: next.error.toString(),
-        );
+        // A dropped/errored SSE stream does NOT mean the daemon is down: the
+        // long-lived connection resets for many benign reasons (idle timeout,
+        // the daemon momentarily busy, a network blip). Going straight to
+        // "offline" here is what flashes a bogus "Server unavailable" while the
+        // daemon is perfectly healthy. Instead show "reconnecting" and verify
+        // health first — _verifyAndReconnect reconnects when the daemon answers
+        // and only falls back to offline when it genuinely doesn't.
+        if (state.phase != DaemonConnectionPhase.offline &&
+            state.phase != DaemonConnectionPhase.connecting) {
+          state = DaemonConnectionStatus(
+            phase: DaemonConnectionPhase.connecting,
+            lastEventAt: state.lastEventAt,
+            message: 'Reconnecting…',
+          );
+        }
+        unawaited(_verifyAndReconnect());
       }
       next.whenData((_) {
         _reconnectAttempts = 0;
@@ -139,6 +150,13 @@ class DaemonConnectionNotifier extends Notifier<DaemonConnectionStatus> {
           phase: DaemonConnectionPhase.connecting,
           lastEventAt: DateTime.now(),
         );
+        // Back off before reconnecting so a stream that errors instantly
+        // (daemon healthy but the SSE endpoint flapping) can't hot-loop:
+        // 1s, 2s, 4s… capped. _checkingHealth stays true across the delay,
+        // so overlapping error emissions collapse into this one attempt.
+        final backoffShift = _reconnectAttempts > 4 ? 4 : _reconnectAttempts;
+        await Future<void>.delayed(Duration(seconds: 1 << backoffShift));
+        if (!ref.mounted) return;
         ref.invalidate(sseStreamProvider);
       } else {
         state = DaemonConnectionStatus(
