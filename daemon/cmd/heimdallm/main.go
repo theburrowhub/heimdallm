@@ -1930,6 +1930,11 @@ func main() {
 	})
 
 	// Wire the trigger-review callback: re-run pipeline on a single stored PR.
+	// In-process per-PR-ID guard for manual triggers. Backstops the persistent
+	// in-flight claim for the window where the HEAD SHA lookup fails (see
+	// triggerGuard and RunOptions.Force). One instance shared across all
+	// trigger invocations via the closure below.
+	manualReviewGuard := newTriggerGuard()
 	srv.SetTriggerReviewFn(func(prID int64) error {
 		publishErr := func(msg string) {
 			broker.Publish(sse.Event{
@@ -1937,6 +1942,15 @@ func main() {
 				Data: sseData(map[string]any{"pr_id": prID, "error": msg}),
 			})
 		}
+
+		// Reject a concurrent second click for the same PR outright. Keyed on
+		// PR ID so it holds even when the SHA lookup below fails and the
+		// persistent (pr_id, head_sha) claim cannot engage.
+		if !manualReviewGuard.tryAcquire(prID) {
+			slog.Info("trigger review: already running in-process for this PR, skipping", "pr_id", prID)
+			return fmt.Errorf("review already in progress for PR %d", prID)
+		}
+		defer manualReviewGuard.release(prID)
 
 		pr, err := s.GetPR(prID)
 		if err != nil {
@@ -1990,9 +2004,13 @@ func main() {
 		if sha, shaErr := ghClient.GetPRHeadSHA(pr.Repo, pr.Number); shaErr != nil {
 			slog.Warn("trigger review: HEAD SHA lookup failed, proceeding without in-flight claim",
 				"repo", pr.Repo, "pr", pr.Number, "err", shaErr)
-		} else {
+		} else if sha != "" {
 			ghPR.Head.SHA = sha
 		}
+		// An empty-but-nil SHA is left unset on purpose: pipeline.Run resolves
+		// it again and fails closed if it still comes back empty, rather than
+		// storing an ambiguous empty-HeadSHA row. The in-process guard above
+		// covers concurrency for this no-claim path.
 
 		// Persistent in-flight claim: keyed on (store pr_id, head_sha), the
 		// same mechanism as the poll loop so both paths share one guard across

@@ -428,6 +428,17 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 				"repo", pr.Repo, "pr", pr.Number, "err", err)
 			return nil, fmt.Errorf("pipeline: resolve HEAD SHA: %w", err)
 		}
+		if sha == "" {
+			// Empty-but-nil-error: treat as a lookup failure. Proceeding would
+			// store a review row with an empty HeadSHA, recreating the exact
+			// ambiguous legacy-row shape (#322 Bug 4) the backfill exists to
+			// repair — and on a forced run Force has no downstream dedup/breaker
+			// backstop, so this is the only place to fail closed. Applies to
+			// every caller, including the manual trigger.
+			slog.Warn("pipeline: HEAD SHA resolved empty — skipping review (fail-closed)",
+				"repo", pr.Repo, "pr", pr.Number)
+			return nil, fmt.Errorf("pipeline: resolve HEAD SHA: empty SHA returned")
+		}
 		pr.Head.SHA = sha
 	}
 	prevReview, _ := p.store.LatestReviewForPR(prID)

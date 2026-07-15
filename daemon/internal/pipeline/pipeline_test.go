@@ -165,6 +165,7 @@ func TestPipeline_Run(t *testing.T) {
 		ID: 1, Number: 1, Title: "Fix bug", Repo: "org/repo",
 		User: github.User{Login: "alice"}, State: "open",
 		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/1",
+		Head:      github.Branch{SHA: "sha1"},
 	}
 
 	rev, err := p.Run(pr, pipeline.RunOptions{Primary: "claude", Fallback: "gemini", ReviewMode: "single"})
@@ -247,6 +248,7 @@ func TestPipeline_Run_CommentsInjectedIntoPrompt(t *testing.T) {
 		ID: 2, Number: 2, Title: "Add feature", Repo: "org/repo",
 		User: github.User{Login: "alice"}, State: "open",
 		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/2",
+		Head:      github.Branch{SHA: "sha2"},
 	}
 	_, err = p.Run(pr, pipeline.RunOptions{Primary: "claude", Fallback: "gemini"})
 	if err != nil {
@@ -273,6 +275,7 @@ func TestPipeline_Run_CommentsFetchErrorIsNonFatal(t *testing.T) {
 		ID: 3, Number: 3, Title: "Fix", Repo: "org/repo",
 		User: github.User{Login: "alice"}, State: "open",
 		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/3",
+		Head:      github.Branch{SHA: "sha3"},
 	}
 	_, err = p.Run(pr, pipeline.RunOptions{Primary: "claude", Fallback: "gemini"})
 	if err != nil {
@@ -754,6 +757,42 @@ func TestPipeline_Run_ForceReReviewsSameSHAWithoutReRequest(t *testing.T) {
 	}
 	if gh.submits != 2 {
 		t.Errorf("forced re-review must submit again, got gh.submits=%d, want 2", gh.submits)
+	}
+}
+
+// TestPipeline_Run_FailsClosedOnEmptyResolvedSHA verifies that when the HEAD
+// SHA resolver returns an empty string with a nil error (an anomalous but
+// possible API result), Run fails closed instead of proceeding: proceeding
+// would store a review row with an empty HeadSHA, recreating the ambiguous
+// legacy-row shape (#322 Bug 4). This holds even under Force, which otherwise
+// has no downstream dedup/breaker backstop.
+func TestPipeline_Run_FailsClosedOnEmptyResolvedSHA(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	exec := &fakeExecCounter{}
+	// fakeGHCounter.GetPRHeadSHA returns ("", nil) — the empty-but-nil case.
+	gh := &fakeGHCounter{diff: "+line"}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+
+	pr := &github.PullRequest{
+		ID: 88, Number: 88, Title: "t", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/88",
+		Head:      github.Branch{SHA: ""}, // forces the resolver path
+	}
+	_, err = p.Run(pr, pipeline.RunOptions{Primary: "claude", Force: true})
+	if err == nil {
+		t.Fatalf("expected fail-closed error on empty resolved SHA, got nil")
+	}
+	if exec.calls != 0 {
+		t.Errorf("executor must not run when SHA resolves empty, got calls=%d", exec.calls)
+	}
+	if gh.submits != 0 {
+		t.Errorf("SubmitReview must not run when SHA resolves empty, got submits=%d", gh.submits)
 	}
 }
 
