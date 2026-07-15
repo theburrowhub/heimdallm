@@ -1945,10 +1945,15 @@ func main() {
 
 		// Reject a concurrent second click for the same PR outright. Keyed on
 		// PR ID so it holds even when the SHA lookup below fails and the
-		// persistent (pr_id, head_sha) claim cannot engage.
+		// persistent (pr_id, head_sha) claim cannot engage. Publish an
+		// EventReviewError so the UI shows feedback: the HTTP handler already
+		// returned 202 and runs this callback in a goroutine, so a bare error
+		// return would only reach the log and the click would look accepted but
+		// do nothing.
 		if !manualReviewGuard.tryAcquire(prID) {
-			slog.Info("trigger review: already running in-process for this PR, skipping", "pr_id", prID)
-			return fmt.Errorf("review already in progress for PR %d", prID)
+			slog.Info("trigger review: already in progress for this PR, skipping", "pr_id", prID)
+			publishErr("Review already in progress for this PR.")
+			return fmt.Errorf("trigger review: pr %d already in progress", prID)
 		}
 		defer manualReviewGuard.release(prID)
 
@@ -2028,7 +2033,14 @@ func main() {
 			if err != nil {
 				slog.Warn("trigger review: claim inflight failed, proceeding", "err", err)
 			} else if !ok {
-				return fmt.Errorf("review already in progress for PR %d", ghPR.Number)
+				// Same UX gap as the in-process guard above: publish an
+				// EventReviewError so the 202-then-async click gets feedback
+				// instead of a silent no-op. Message kept identical for a
+				// consistent UI/log correlation across both rejection paths.
+				slog.Info("trigger review: already in progress for this PR, skipping",
+					"pr_id", prID, "pr", ghPR.Number)
+				publishErr("Review already in progress for this PR.")
+				return fmt.Errorf("trigger review: pr %d already in progress", prID)
 			} else {
 				triggerClaimed = true
 			}

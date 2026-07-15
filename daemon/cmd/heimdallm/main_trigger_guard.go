@@ -15,6 +15,13 @@ import "sync"
 // resolution succeeding. It is a process-local backstop only; the persistent
 // claim remains the cross-restart / poll-path coordination mechanism. Both are
 // intentionally kept.
+//
+// Scope note: this guard covers ONLY the manual trigger path. It does NOT
+// coordinate with the automatic poll loop, so the narrow trigger-vs-poll race
+// (a forced run proceeding unclaimed after a failed SHA lookup while the poll
+// loop holds the persistent claim for the same PR/SHA) still exists — just far
+// narrower than before. Full cross-path coordination would need the persistent
+// claim, which requires a resolved SHA.
 type triggerGuard struct {
 	mu       sync.Mutex
 	inFlight map[int64]struct{}
