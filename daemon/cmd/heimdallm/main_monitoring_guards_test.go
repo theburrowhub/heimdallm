@@ -7,30 +7,26 @@ import (
 	"time"
 
 	"github.com/heimdallm/daemon/internal/bus"
+	gh "github.com/heimdallm/daemon/internal/github"
+	"github.com/heimdallm/daemon/internal/pipeline"
 	"github.com/heimdallm/daemon/internal/store"
 )
 
-func TestCancelPublishIfUnmonitoredMarksReviewTerminal(t *testing.T) {
+func TestDeferPublishIfUnmonitoredLeavesReviewPending(t *testing.T) {
 	s := newMemStore(t)
 	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
 	reviewID := seedPRWithReview(t, s, 901, now.Add(-time.Minute))
 
 	var checkedRepo string
-	cancelled, err := cancelPublishIfUnmonitored(
-		s,
-		reviewID,
+	deferred := deferPublishIfUnmonitored(
 		"org/repo",
 		func(repo string) bool {
 			checkedRepo = repo
 			return false
 		},
-		now,
 	)
-	if err != nil {
-		t.Fatalf("cancel publish: %v", err)
-	}
-	if !cancelled {
-		t.Fatal("cancelled = false, want true for an unmonitored repo")
+	if !deferred {
+		t.Fatal("deferred = false, want true for an unmonitored repo")
 	}
 	if checkedRepo != "org/repo" {
 		t.Fatalf("eligibility checked repo = %q, want org/repo", checkedRepo)
@@ -40,19 +36,67 @@ func TestCancelPublishIfUnmonitoredMarksReviewTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get review: %v", err)
 	}
-	if review.GitHubReviewID != -1 {
-		t.Fatalf("GitHubReviewID = %d, want -1 terminal sentinel", review.GitHubReviewID)
+	if review.GitHubReviewID != 0 {
+		t.Fatalf("GitHubReviewID = %d, want 0 pending", review.GitHubReviewID)
 	}
-	if !review.PublishedAt.Equal(now) {
-		t.Fatalf("PublishedAt = %v, want %v", review.PublishedAt, now)
+	if !review.PublishedAt.IsZero() {
+		t.Fatalf("PublishedAt = %v, want zero while deferred", review.PublishedAt)
 	}
 
 	pending, err := s.ListUnpublishedReviews()
 	if err != nil {
 		t.Fatalf("list unpublished reviews: %v", err)
 	}
-	if len(pending) != 0 {
-		t.Fatalf("unpublished reviews = %d, want 0 so PublishPending cannot re-enqueue it", len(pending))
+	if len(pending) != 1 || pending[0].ID != reviewID {
+		t.Fatalf("unpublished reviews = %+v, want deferred review %d", pending, reviewID)
+	}
+
+	if deferPublishIfUnmonitored("org/repo", func(string) bool { return true }) {
+		t.Fatal("deferred = true after repo re-enable")
+	}
+}
+
+func TestPendingReviewInvalidReason(t *testing.T) {
+	tests := []struct {
+		name     string
+		review   *store.Review
+		snapshot *gh.PRSnapshot
+		want     pipeline.SkipReason
+	}{
+		{
+			name:     "same head remains publishable",
+			review:   &store.Review{HeadSHA: "abc"},
+			snapshot: &gh.PRSnapshot{State: "open", HeadSHA: "abc"},
+		},
+		{
+			name:     "changed head retires stale review",
+			review:   &store.Review{HeadSHA: "abc"},
+			snapshot: &gh.PRSnapshot{State: "open", HeadSHA: "def"},
+			want:     pipeline.SkipReasonHeadChanged,
+		},
+		{
+			name:     "closed PR wins over head mismatch",
+			review:   &store.Review{HeadSHA: "abc"},
+			snapshot: &gh.PRSnapshot{State: "closed", HeadSHA: "def"},
+			want:     pipeline.SkipReasonNotOpen,
+		},
+		{
+			name:     "legacy empty review head keeps prior behavior",
+			review:   &store.Review{},
+			snapshot: &gh.PRSnapshot{State: "open", HeadSHA: "def"},
+		},
+		{
+			name:     "empty current head retries instead of retiring",
+			review:   &store.Review{HeadSHA: "abc"},
+			snapshot: &gh.PRSnapshot{State: "open"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := pendingReviewInvalidReason(tt.review, tt.snapshot); got != tt.want {
+				t.Fatalf("pendingReviewInvalidReason = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

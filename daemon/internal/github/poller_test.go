@@ -1157,6 +1157,44 @@ func mustTime(s string) time.Time {
 	return t
 }
 
+func TestSubmitReviewForCommitIncludesCommitID(t *testing.T) {
+	const wantCommit = "ecdd80bb57125d7ba9641ffaa4d7d2c19d3f3091"
+	var payload map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/org/repo/pulls/1/reviews" {
+			http.NotFound(w, r)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": 42, "state": "APPROVED"})
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	id, state, err := client.SubmitReviewForCommit("org/repo", 1, "body", "APPROVE", wantCommit)
+	if err != nil {
+		t.Fatalf("SubmitReviewForCommit: %v", err)
+	}
+	if id != 42 || state != "APPROVED" {
+		t.Fatalf("result = (%d, %q), want (42, APPROVED)", id, state)
+	}
+	if got, _ := payload["commit_id"].(string); got != wantCommit {
+		t.Fatalf("commit_id = %q, want %q", got, wantCommit)
+	}
+	if payload["body"] != "body" || payload["event"] != "APPROVE" {
+		t.Fatalf("review payload = %#v", payload)
+	}
+}
+
+func TestSubmitReviewForCommitRejectsEmptyCommitID(t *testing.T) {
+	client := gh.NewClient("fake-token")
+	if _, _, err := client.SubmitReviewForCommit("org/repo", 1, "body", "COMMENT", " "); err == nil {
+		t.Fatal("expected empty commit_id error")
+	}
+}
+
 // TestSubmitReview_LockedPRReturnsPermanentSubmitError locks in the
 // fix from theburrowhub/heimdallm#325: when GitHub returns 422 with a
 // "lock prevents review" body, the daemon must surface a typed

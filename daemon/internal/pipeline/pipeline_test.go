@@ -499,6 +499,52 @@ func TestPipeline_Run_SkipsReviewOnSameHeadSHA(t *testing.T) {
 	}
 }
 
+func TestPipeline_Run_SupersededPendingReviewDoesNotRequireRerequest(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	now := time.Now().UTC()
+	prID, err := s.UpsertPR(&store.PR{
+		GithubID: 77, Repo: "org/repo", Number: 77, Title: "Feature",
+		Author: "alice", URL: "https://github.com/org/repo/pull/77", State: "open",
+		UpdatedAt: now, FetchedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("seed PR: %v", err)
+	}
+	if _, err := s.InsertReview(&store.Review{
+		PRID: prID, CLIUsed: "claude", Summary: "old deferred result",
+		Issues: "[]", Suggestions: "[]", Severity: "low", CreatedAt: now,
+		GitHubReviewID: pipeline.SupersededReviewID, HeadSHA: "old-head",
+	}); err != nil {
+		t.Fatalf("seed superseded review: %v", err)
+	}
+
+	exec := &fakeExecCounter{}
+	gh := &fakeGHCounter{diff: "+line"}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	pr := &github.PullRequest{
+		ID: 77, Number: 77, Title: "Feature", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: now.Add(time.Minute), HTMLURL: "https://github.com/org/repo/pull/77",
+		Head: github.Branch{SHA: "new-head"},
+	}
+
+	rev, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"})
+	if err != nil {
+		t.Fatalf("run replacement HEAD: %v", err)
+	}
+	if rev == nil || rev.HeadSHA != "new-head" {
+		t.Fatalf("replacement review = %+v, want fresh review for new-head", rev)
+	}
+	if exec.calls != 1 || gh.submits != 1 {
+		t.Fatalf("replacement run: exec=%d submits=%d, want 1/1", exec.calls, gh.submits)
+	}
+}
+
 // TestPipeline_Run_GateSkipsReview: when the guard evaluator returns a skip
 // reason (here: state != "open"), the pipeline must not call the executor or
 // submit a review. Proves the defense-in-depth layer protects future callers
@@ -1106,7 +1152,7 @@ func TestPipeline_Run_NilPublisherIsNoop(t *testing.T) {
 	}
 }
 
-func TestPipeline_Run_DisabledDuringExecutionDoesNotPublish(t *testing.T) {
+func TestPipeline_Run_DisabledDuringExecutionPersistsPendingReview(t *testing.T) {
 	s, err := store.Open(":memory:")
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -1157,12 +1203,15 @@ func TestPipeline_Run_DisabledDuringExecutionDoesNotPublish(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list unpublished: %v", err)
 	}
-	if len(pending) != 0 {
-		t.Fatalf("unpublished reviews = %d, want 0", len(pending))
+	if len(pending) != 1 {
+		t.Fatalf("unpublished reviews = %d, want 1 deferred review", len(pending))
+	}
+	if pending[0].GitHubReviewID != 0 || !pending[0].PublishedAt.IsZero() {
+		t.Fatalf("deferred review = %+v, want unpublished row", pending[0])
 	}
 }
 
-func TestPipeline_Run_DisabledAfterStoreMarksReviewTerminal(t *testing.T) {
+func TestPipeline_Run_DisabledAfterStoreLeavesReviewPending(t *testing.T) {
 	s, err := store.Open(":memory:")
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -1182,8 +1231,8 @@ func TestPipeline_Run_DisabledAfterStoreMarksReviewTerminal(t *testing.T) {
 		Primary: "claude",
 		RepoEligible: func(string) bool {
 			checks++
-			// The fourth boundary is immediately after InsertReview.
-			return checks < 4
+			// The third boundary is immediately after InsertReview.
+			return checks < 3
 		},
 	})
 	if err != nil {
@@ -1203,15 +1252,18 @@ func TestPipeline_Run_DisabledAfterStoreMarksReviewTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("latest review: %v", err)
 	}
-	if storedReview.GitHubReviewID != -1 {
-		t.Fatalf("GitHubReviewID = %d, want -1 terminal sentinel", storedReview.GitHubReviewID)
+	if storedReview.GitHubReviewID != 0 {
+		t.Fatalf("GitHubReviewID = %d, want 0 pending", storedReview.GitHubReviewID)
+	}
+	if !storedReview.PublishedAt.IsZero() {
+		t.Fatalf("PublishedAt = %v, want zero while deferred", storedReview.PublishedAt)
 	}
 	pending, err := s.ListUnpublishedReviews()
 	if err != nil {
 		t.Fatalf("list unpublished: %v", err)
 	}
-	if len(pending) != 0 {
-		t.Fatalf("unpublished reviews = %d, want 0", len(pending))
+	if len(pending) != 1 || pending[0].ID != storedReview.ID {
+		t.Fatalf("unpublished reviews = %+v, want deferred review %d", pending, storedReview.ID)
 	}
 }
 

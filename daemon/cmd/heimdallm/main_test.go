@@ -445,6 +445,70 @@ func TestMonitoredRepoSetMergesDiscoveredAndExcludesNonMonitored(t *testing.T) {
 	}
 }
 
+func TestAIReposInNonMonitoredIsSortedExactAndReadOnly(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.AI.Repos = map[string]config.RepoAI{
+		"z/repo":    {},
+		"a/repo":    {},
+		"Org/Case":  {},
+		"keep/repo": {},
+	}
+	cfg.GitHub.NonMonitored = []string{"z/repo", "a/repo", "a/repo", "org/case"}
+	beforeNonMonitored := append([]string(nil), cfg.GitHub.NonMonitored...)
+
+	got := aiReposInNonMonitored(cfg)
+	want := []string{"a/repo", "z/repo"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("aiReposInNonMonitored = %v, want %v", got, want)
+	}
+	if strings.Join(cfg.GitHub.NonMonitored, "|") != strings.Join(beforeNonMonitored, "|") {
+		t.Fatalf("NonMonitored mutated: got %v, want %v", cfg.GitHub.NonMonitored, beforeNonMonitored)
+	}
+	if len(cfg.AI.Repos) != 4 {
+		t.Fatalf("AI.Repos mutated: %v", cfg.AI.Repos)
+	}
+}
+
+func TestAIReposInNonMonitoredDetectsStoreLayerConflict(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.AI.Repos = map[string]config.RepoAI{"legacy/repo": {}}
+	if err := cfg.ApplyStore(map[string]string{
+		"non_monitored": `["legacy/repo"]`,
+	}); err != nil {
+		t.Fatalf("ApplyStore: %v", err)
+	}
+	if got := aiReposInNonMonitored(cfg); len(got) != 1 || got[0] != "legacy/repo" {
+		t.Fatalf("store-backed conflict = %v, want [legacy/repo]", got)
+	}
+}
+
+func TestRepoMonitoringConflictWarnerDeduplicatesAndResets(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.AI.Repos = map[string]config.RepoAI{"a/repo": {}, "b/repo": {}}
+	cfg.GitHub.NonMonitored = []string{"a/repo"}
+	var w repoMonitoringConflictWarner
+
+	if got := w.next(cfg); len(got) != 1 || got[0] != "a/repo" {
+		t.Fatalf("first warning = %v, want [a/repo]", got)
+	}
+	if got := w.next(cfg); got != nil {
+		t.Fatalf("duplicate warning = %v, want nil", got)
+	}
+
+	cfg.GitHub.NonMonitored = []string{"b/repo"}
+	if got := w.next(cfg); len(got) != 1 || got[0] != "b/repo" {
+		t.Fatalf("changed warning = %v, want [b/repo]", got)
+	}
+	cfg.GitHub.NonMonitored = nil
+	if got := w.next(cfg); got != nil {
+		t.Fatalf("cleared warning = %v, want nil", got)
+	}
+	cfg.GitHub.NonMonitored = []string{"b/repo"}
+	if got := w.next(cfg); len(got) != 1 || got[0] != "b/repo" {
+		t.Fatalf("reintroduced warning = %v, want [b/repo]", got)
+	}
+}
+
 func TestPurgeStaleManagedClonesUsesRetentionAndConfiguredDirs(t *testing.T) {
 	base := t.TempDir()
 	oldRepo := filepath.Join(base, "org", "old")
@@ -667,7 +731,7 @@ func TestTier2AdapterPublishPendingDefersInFlightReviews(t *testing.T) {
 	}
 }
 
-func TestRunTier2PublishesPendingWhenLiveRepoSetIsEmpty(t *testing.T) {
+func TestTier2AdapterPublishPendingDefersUntilRepoReenabled(t *testing.T) {
 	s := newMemStore(t)
 	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
 	reviewID := seedPRWithReview(t, s, 103, now)
@@ -683,10 +747,8 @@ func TestRunTier2PublishesPendingWhenLiveRepoSetIsEmpty(t *testing.T) {
 		t.Fatalf("flush subscribe: %v", err)
 	}
 
-	// Tier 1's last snapshot can still contain a repo that the live config
-	// has just disabled. Keep that stale snapshot in the test so an empty
-	// intersection, rather than an empty discovery input, drives the branch.
 	cfg := &config.Config{}
+	cfg.GitHub.Repositories = []string{"org/repo"}
 	cfg.GitHub.NonMonitored = []string{"org/repo"}
 	var cfgMu sync.Mutex
 	adapter := &tier2Adapter{
@@ -695,9 +757,81 @@ func TestRunTier2PublishesPendingWhenLiveRepoSetIsEmpty(t *testing.T) {
 		cfgMu:      &cfgMu,
 		cfg:        &cfg,
 	}
-	reposCh := make(chan []string, 1)
-	reposCh <- []string{"org/repo"}
 
+	adapter.publishPending()
+	if err := conn.Flush(); err != nil {
+		t.Fatalf("flush deferred publish: %v", err)
+	}
+	select {
+	case msg := <-ch:
+		t.Fatalf("disabled repo was enqueued: %q", msg.Data)
+	case <-time.After(150 * time.Millisecond):
+	}
+	pending, err := s.ListUnpublishedReviews()
+	if err != nil {
+		t.Fatalf("list deferred review: %v", err)
+	}
+	if len(pending) != 1 || pending[0].ID != reviewID {
+		t.Fatalf("pending reviews = %+v, want review %d", pending, reviewID)
+	}
+
+	cfgMu.Lock()
+	cfg.GitHub.NonMonitored = nil
+	cfgMu.Unlock()
+	adapter.publishPending()
+	if err := conn.Flush(); err != nil {
+		t.Fatalf("flush resumed publish: %v", err)
+	}
+
+	select {
+	case msg := <-ch:
+		var got bus.PRPublishMsg
+		if err := bus.Decode(msg.Data, &got); err != nil {
+			t.Fatalf("decode publish msg: %v", err)
+		}
+		if got.ReviewID != reviewID {
+			t.Fatalf("published review ID = %d, want pending review %d", got.ReviewID, reviewID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("pending review was not enqueued after repo re-enable")
+	}
+
+	if err := s.MarkReviewPublished(reviewID, 12345, "APPROVED", now.Add(time.Minute)); err != nil {
+		t.Fatalf("mark review published: %v", err)
+	}
+	adapter.publishPending()
+	if err := conn.Flush(); err != nil {
+		t.Fatalf("flush idempotency check: %v", err)
+	}
+	select {
+	case msg := <-ch:
+		t.Fatalf("published review was enqueued again: %q", msg.Data)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+func TestRunTier2PublishesPendingWhenLiveRepoSetIsEmpty(t *testing.T) {
+	s := newMemStore(t)
+	reviewID := seedPRWithReview(t, s, 104, time.Now().UTC())
+
+	conn := newInProcessNATS(t)
+	ch := make(chan *nats.Msg, 1)
+	sub, err := conn.ChanSubscribe(bus.SubjPRPublish, ch)
+	if err != nil {
+		t.Fatalf("subscribe publish subject: %v", err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+	if err := conn.Flush(); err != nil {
+		t.Fatalf("flush subscribe: %v", err)
+	}
+
+	// No live repos means both review/issue polling branches are skipped. The
+	// PR tick must still call PublishPending so a review deferred by a prior
+	// disable can recover after config changes.
+	adapter := &tier2Adapter{
+		store:      s,
+		publishPub: bus.NewPRPublishPublisher(conn),
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -710,7 +844,7 @@ func TestRunTier2PublishesPendingWhenLiveRepoSetIsEmpty(t *testing.T) {
 			nil,
 			func() []string { return nil },
 			nil,
-			reposCh,
+			make(chan []string),
 			time.Hour,
 			true,
 			nil,

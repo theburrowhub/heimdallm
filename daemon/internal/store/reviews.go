@@ -109,9 +109,11 @@ func (s *Store) UpdateReviewHeadSHA(reviewID int64, headSHA string) error {
 // is what closes the 2026-04-22 cost-runaway regression. See
 // theburrowhub/heimdallm#243.
 //
-// Pass the sentinel pair (-1, "") for ghReviewID / ghReviewState to mark an
-// orphan review that can never publish (e.g. the source PR's repo was
-// unset); publishedAt is still stored as a reference point.
+// Negative ghReviewID values are internal terminal sentinels (for example -1
+// for an orphan that can never publish, or -2 for a deferred result superseded
+// by a newer HEAD). They are excluded from unpublished retry scans while
+// remaining distinguishable from real positive GitHub review IDs; publishedAt
+// is still stored as a reference point.
 func (s *Store) MarkReviewPublished(reviewID, ghReviewID int64, ghReviewState string, publishedAt time.Time) error {
 	_, err := s.db.Exec(
 		"UPDATE reviews SET github_review_id=?, github_review_state=?, published_at=? WHERE id=?",

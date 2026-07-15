@@ -131,6 +131,26 @@ Repos in `non_monitored` are excluded from the final set even if they appear in 
 non_monitored = ["myorg/archived-repo", "myorg/internal-mirror"]
 ```
 
+A repo-specific `[ai.repos."owner/name"]` section configures how a repo is
+processed; it does not override an explicit `non_monitored` entry. If both are
+present, automatic processing stays disabled while the AI override remains
+available for manual runs. The daemon logs a warning for this overlap at
+startup or config reload.
+
+Older Heimdallm versions could persist auto-discovery decisions in the same
+SQLite `non_monitored` setting used by the UI. Because that legacy data does
+not record whether an entry was automatic or an intentional user toggle,
+Heimdallm never deletes or re-enables these entries during an upgrade. Review
+the warning and re-enable the repository from the Repositories screen only
+after confirming that automatic reviews are desired.
+
+If a repository is disabled while an automatic review is already running,
+the computed result is kept pending rather than discarded. Re-enabling the
+repository resumes publication when the PR still has the same HEAD commit.
+If the HEAD changed while disabled, the stale result is retired and the
+outstanding review request can evaluate the replacement commit instead.
+Retry publication is anchored to the reviewed commit SHA.
+
 ### Poll interval
 
 ```bash

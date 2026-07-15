@@ -146,6 +146,8 @@ func main() {
 	if err := cfg.MergeStoreLayer(s); err != nil {
 		slog.Warn("config: store layer not applied, continuing with TOML+env", "err", err)
 	}
+	var monitoringConflictWarner repoMonitoringConflictWarner
+	monitoringConflictWarner.warn(cfg)
 
 	if err := s.PurgeOldReviews(cfg.Retention.MaxDays); err != nil {
 		slog.Warn("retention purge failed", "err", err)
@@ -1052,15 +1054,22 @@ func main() {
 			_ = s.MarkReviewPublished(rev.ID, -1, "", time.Now().UTC())
 			return nil // permanent — ack
 		}
-		inFlight, err := s.ReviewInFlight(pr.GithubID, rev.HeadSHA)
+		claimed, err := s.ClaimInFlightReview(pr.GithubID, rev.HeadSHA)
 		if err != nil {
-			return fmt.Errorf("check in-flight review: %w", err)
+			return fmt.Errorf("claim review for publish: %w", err)
 		}
-		if inFlight {
-			slog.Debug("publish-worker: initial publish still in flight, skipping retry",
+		if !claimed {
+			slog.Debug("publish-worker: review already claimed, skipping duplicate publish",
 				"review_id", msg.ReviewID, "github_id", pr.GithubID, "head_sha", rev.HeadSHA)
 			return nil // PublishPending re-enqueues if the row remains unpublished after release.
 		}
+		defer func() {
+			if err := s.ReleaseInFlightReview(pr.GithubID, rev.HeadSHA); err != nil {
+				slog.Warn("publish-worker: failed to release publish claim",
+					"review_id", msg.ReviewID, "github_id", pr.GithubID,
+					"head_sha", rev.HeadSHA, "err", err)
+			}
+		}()
 
 		// Rebuild ReviewResult from stored JSON
 		var issues []executor.Issue
@@ -1084,26 +1093,88 @@ func main() {
 		// legacy rows without a stored event fall back to severity. Mirrors the
 		// pipeline's Run / PublishPending paths.
 		publishEvent := pipeline.PublishEventFor(rev)
-		cancelled, err := cancelPublishIfUnmonitored(
-			s,
-			rev.ID,
-			pr.Repo,
-			repoCurrentlyMonitored,
-			time.Now().UTC(),
-		)
+		deferForMonitoringChange := func(stage string) bool {
+			if !deferPublishIfUnmonitored(pr.Repo, repoCurrentlyMonitored) {
+				return false
+			}
+			broker.Publish(sse.Event{
+				Type: sse.EventReviewSkipped,
+				Data: sseData(map[string]any{
+					"repo":      pr.Repo,
+					"pr_number": pr.Number,
+					"pr_title":  pr.Title,
+					"reason":    string(pipeline.SkipReasonNotMonitored),
+				}),
+			})
+			slog.Info("publish-worker: repo no longer monitored, deferring unpublished review",
+				"review_id", rev.ID, "repo", pr.Repo, "stage", stage)
+			return true
+		}
+		if deferForMonitoringChange("before_head_refresh") {
+			return nil // ack; PublishPending re-enqueues it after the repo is re-enabled
+		}
+
+		// A deferred review is valid only for the commit it analysed. Re-fetch
+		// the live PR snapshot immediately before SubmitReview so re-enabling a
+		// repo cannot attach stale findings to a newer HEAD. This uses the same
+		// rate-limit slot acquired above and happens while the atomic publish
+		// claim is held, so duplicate messages cannot race this decision.
+		snapshot, err := ghClient.GetPRSnapshot(pr.Repo, pr.Number)
 		if err != nil {
-			return err
+			var apiErr *gh.APIError
+			if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusNotFound || apiErr.StatusCode == http.StatusGone) {
+				if markErr := s.MarkReviewPublished(rev.ID, -1, "", time.Now().UTC()); markErr != nil {
+					return fmt.Errorf("mark missing-PR review %d orphaned: %w", rev.ID, markErr)
+				}
+				slog.Info("publish-worker: PR no longer exists, marking review orphaned",
+					"review_id", rev.ID, "repo", pr.Repo, "pr", pr.Number)
+				return nil
+			}
+			return fmt.Errorf("refresh PR before publishing review: %w", err)
 		}
-		if cancelled {
-			slog.Info("publish-worker: repo no longer monitored, cancelling unpublished review",
-				"review_id", rev.ID, "repo", pr.Repo)
-			return nil // permanent — ack; the sentinel keeps it out of PublishPending
+		if reason := pendingReviewInvalidReason(rev, snapshot); reason != pipeline.SkipReasonNone {
+			terminalReviewID := int64(-1)
+			if reason == pipeline.SkipReasonHeadChanged {
+				terminalReviewID = pipeline.SupersededReviewID
+			}
+			if err := s.MarkReviewPublished(rev.ID, terminalReviewID, "", time.Now().UTC()); err != nil {
+				return fmt.Errorf("retire stale review %d: %w", rev.ID, err)
+			}
+			broker.Publish(sse.Event{
+				Type: sse.EventReviewSkipped,
+				Data: sseData(map[string]any{
+					"repo":      pr.Repo,
+					"pr_number": pr.Number,
+					"pr_title":  pr.Title,
+					"reason":    string(reason),
+				}),
+			})
+			slog.Info("publish-worker: stored review no longer matches live PR, retiring it",
+				"review_id", rev.ID, "repo", pr.Repo, "pr", pr.Number,
+				"review_head_sha", rev.HeadSHA, "current_head_sha", snapshot.HeadSHA,
+				"state", snapshot.State, "reason", string(reason))
+			return nil
 		}
-		ghID, ghState, err := ghClient.SubmitReview(
-			pr.Repo, pr.Number,
-			pipeline.AnnotateBodyForEvent(pipeline.BuildGitHubBody(result), publishEvent),
-			publishEvent,
-		)
+		if rev.HeadSHA != "" && snapshot.HeadSHA == "" {
+			return fmt.Errorf("refresh PR before publishing review: empty HEAD SHA for %s #%d", pr.Repo, pr.Number)
+		}
+		if deferForMonitoringChange("before_submit") {
+			return nil
+		}
+		reviewBody := pipeline.AnnotateBodyForEvent(pipeline.BuildGitHubBody(result), publishEvent)
+		var ghID int64
+		var ghState string
+		if rev.HeadSHA != "" {
+			ghID, ghState, err = ghClient.SubmitReviewForCommit(
+				pr.Repo, pr.Number, reviewBody, publishEvent, rev.HeadSHA,
+			)
+		} else {
+			// Preserve retry compatibility for legacy rows created before head_sha
+			// was populated. New reviews always use the commit-anchored path above.
+			ghID, ghState, err = ghClient.SubmitReview(
+				pr.Repo, pr.Number, reviewBody, publishEvent,
+			)
+		}
 		if err != nil {
 			errStr := err.Error()
 			// 4xx errors (except 429 rate limit) are permanent — no point retrying.
@@ -1804,6 +1875,7 @@ func main() {
 		if err := newCfg.MergeStoreLayer(s); err != nil {
 			return fmt.Errorf("reload: %w", err)
 		}
+		monitoringConflictWarner.warn(newCfg)
 
 		cfgMu.Lock()
 		restartPollers := configReloadRequiresPollerRestart(cfg, newCfg)
@@ -2741,9 +2813,10 @@ func runTier2(
 		// PublishPending lives in the PR tick on purpose: pending
 		// publishes are almost exclusively PR-review NATS messages
 		// from runPRTier, and retries are idempotent. It must still run
-		// when the live repo set is empty so reviews for repos disabled
-		// after their initial publish attempt reach the publish worker,
-		// which marks them terminal. If we ever
+		// when the live repo set is empty so the adapter can re-evaluate
+		// pending rows immediately after a config reload re-enables their
+		// repositories. Disabled repos remain pending and are not enqueued.
+		// If we ever
 		// route issue-side NATS publishes through the same queue,
 		// add a sibling call inside issueTick rather than removing
 		// this one.
@@ -2847,6 +2920,60 @@ func aiRepoKeys(c *config.Config) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// aiReposInNonMonitored returns repo-specific AI entries that are disabled by
+// the effective non_monitored set. Older releases could persist auto-discovery
+// decisions in the same SQLite row as explicit UI toggles, so there is no safe
+// way to rewrite either list automatically. Keeping this helper read-only lets
+// the daemon surface the ambiguity without changing operator state.
+func aiReposInNonMonitored(c *config.Config) []string {
+	if c == nil || len(c.AI.Repos) == 0 || len(c.GitHub.NonMonitored) == 0 {
+		return nil
+	}
+	disabled := make(map[string]struct{}, len(c.GitHub.NonMonitored))
+	for _, repo := range c.GitHub.NonMonitored {
+		if repo != "" {
+			disabled[repo] = struct{}{}
+		}
+	}
+	conflicts := make([]string, 0)
+	for _, repo := range aiRepoKeys(c) {
+		if _, ok := disabled[repo]; ok {
+			conflicts = append(conflicts, repo)
+		}
+	}
+	return conflicts
+}
+
+// repoMonitoringConflictWarner logs each distinct conflict set once per
+// process. Reloads are serialized by reloadMu, so this small deduper does not
+// need its own lock. Clearing the conflict resets the fingerprint so a later
+// reintroduction is reported again.
+type repoMonitoringConflictWarner struct {
+	lastFingerprint string
+}
+
+func (w *repoMonitoringConflictWarner) next(c *config.Config) []string {
+	conflicts := aiReposInNonMonitored(c)
+	fingerprint := strings.Join(conflicts, "\x00")
+	if fingerprint == w.lastFingerprint {
+		return nil
+	}
+	w.lastFingerprint = fingerprint
+	return conflicts
+}
+
+func (w *repoMonitoringConflictWarner) warn(c *config.Config) {
+	conflicts := w.next(c)
+	if len(conflicts) == 0 {
+		return
+	}
+	slog.Warn(
+		"config: repo-specific AI overrides are present for repos in github.non_monitored; automatic processing stays disabled and overrides are retained for manual runs",
+		"repos", conflicts,
+		"count", len(conflicts),
+	)
 }
 
 // effectiveRepoLists returns the same monitored view used by the schedulers
@@ -3516,6 +3643,12 @@ func (a *tier2Adapter) reviewReadyForPublishRetry(rev *store.Review) (bool, erro
 	pr, err := a.store.GetPR(rev.PRID)
 	if err != nil {
 		return false, err
+	}
+	// Tests and legacy callers may construct the adapter without live config.
+	// Production always wires it; there, keep disabled repos pending until a
+	// later config reload makes them eligible again.
+	if a.cfg != nil && !a.repoIsMonitored(pr.Repo) {
+		return false, nil
 	}
 	inFlight, err := a.store.ReviewInFlight(pr.GithubID, rev.HeadSHA)
 	if err != nil {
@@ -4923,23 +5056,30 @@ func repoIsMonitored(cfg *config.Config, repo string) bool {
 	return ok
 }
 
-// cancelPublishIfUnmonitored performs the final live eligibility check before
-// SubmitReview. Marking the local row with the established orphan sentinel
-// keeps PublishPending from re-enqueueing a review after its repo is disabled.
-func cancelPublishIfUnmonitored(
-	s *store.Store,
-	reviewID int64,
-	repo string,
-	isMonitored func(string) bool,
-	now time.Time,
-) (bool, error) {
-	if isMonitored == nil || isMonitored(repo) {
-		return false, nil
+// deferPublishIfUnmonitored performs the final live eligibility check before
+// SubmitReview. It deliberately leaves the stored review unpublished: unlike
+// a permanent GitHub error, an operator disabling a repo is reversible, and
+// PublishPending can safely resume the same review after re-enable.
+func deferPublishIfUnmonitored(repo string, isMonitored func(string) bool) bool {
+	return isMonitored != nil && !isMonitored(repo)
+}
+
+// pendingReviewInvalidReason protects retry/deferred publication from live PR
+// drift. Empty review SHAs are legacy rows whose provenance cannot be checked;
+// they retain the pre-existing retry behavior rather than being destroyed by
+// an upgrade. A non-empty current SHA is required before classifying a commit
+// mismatch so transient/incomplete API responses retry instead of orphaning.
+func pendingReviewInvalidReason(rev *store.Review, snapshot *gh.PRSnapshot) pipeline.SkipReason {
+	if rev == nil || snapshot == nil {
+		return pipeline.SkipReasonNone
 	}
-	if err := s.MarkReviewPublished(reviewID, -1, "", now.UTC()); err != nil {
-		return false, fmt.Errorf("cancel unpublished review %d for unmonitored repo %q: %w", reviewID, repo, err)
+	if snapshot.State != "open" {
+		return pipeline.SkipReasonNotOpen
 	}
-	return true, nil
+	if rev.HeadSHA != "" && snapshot.HeadSHA != "" && rev.HeadSHA != snapshot.HeadSHA {
+		return pipeline.SkipReasonHeadChanged
+	}
+	return pipeline.SkipReasonNone
 }
 
 // enrollOpenItems enrolls up to 10 open PRs/issues not yet in watch_state.

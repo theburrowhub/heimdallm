@@ -166,28 +166,20 @@ func (p *Pipeline) SetPublisher(pub Publisher) {
 	p.publisher = pub
 }
 
-// stopIfRepoBecameIneligible is called at side-effect boundaries. When a
-// review has already been stored, mark it terminal before returning so no
-// delayed publisher can resurrect it.
+// stopIfRepoBecameIneligible is called at side-effect boundaries. A review
+// that has already been stored stays pending: disabling monitoring is
+// reversible, so the publish-pending scanner must be able to resume it after
+// the repo is re-enabled. The scanner and publish worker both apply the same
+// live eligibility gate before enqueueing/submitting it.
 func (p *Pipeline) stopIfRepoBecameIneligible(
 	pr *github.PullRequest,
-	rev *store.Review,
 	check func(string) bool,
 ) (bool, error) {
 	if check == nil || check(pr.Repo) {
 		return false, nil
 	}
-	if rev != nil {
-		cancelledAt := time.Now().UTC()
-		if err := p.store.MarkReviewPublished(rev.ID, orphanedReviewID, "", cancelledAt); err != nil {
-			return true, fmt.Errorf("pipeline: cancel review %d for unmonitored repo: %w", rev.ID, err)
-		}
-		rev.GitHubReviewID = orphanedReviewID
-		rev.GitHubReviewState = ""
-		rev.PublishedAt = cancelledAt
-	}
 	p.publishSkipped(pr, SkipReasonNotMonitored)
-	slog.Info("pipeline: repo no longer monitored, stopping review",
+	slog.Info("pipeline: repo no longer monitored, deferring review",
 		"repo", pr.Repo, "pr", pr.Number)
 	return true, nil
 }
@@ -369,7 +361,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	if err != nil {
 		return nil, fmt.Errorf("pipeline: upsert PR: %w", err)
 	}
-	if stopped, err := p.stopIfRepoBecameIneligible(pr, nil, opts.RepoEligible); stopped {
+	if stopped, err := p.stopIfRepoBecameIneligible(pr, opts.RepoEligible); stopped {
 		return nil, err
 	}
 
@@ -424,6 +416,18 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		pr.Head.SHA = sha
 	}
 	prevReview, _ := p.store.LatestReviewForPR(prID)
+	// A superseded pending review was generated for an older HEAD while the
+	// repo was temporarily disabled. It was never published, so it must not
+	// act like a completed prior review and require a fresh review_requested
+	// event. Treat it as absent; the current request can evaluate the new HEAD.
+	// Permanent/orphaned rows use a different sentinel and retain the existing
+	// fail-closed dedup behavior.
+	if prevReview != nil && prevReview.GitHubReviewID == SupersededReviewID {
+		slog.Info("pipeline: ignoring superseded unpublished review",
+			"repo", pr.Repo, "pr", pr.Number, "review_id", prevReview.ID,
+			"review_head_sha", prevReview.HeadSHA, "head_sha", pr.Head.SHA)
+		prevReview = nil
+	}
 	// Legacy rows (before the head_sha column was populated) have empty
 	// HeadSHA and would otherwise bypass the guard because "" never equals a
 	// real SHA. Treat as "cannot confirm safe" — backfill the column from the
@@ -460,7 +464,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 			slog.Warn("pipeline: fetch comments for directives failed", "err", err, "repo", pr.Repo, "pr", pr.Number)
 		} else {
 			prComments = cs
-			if stopped, err := p.stopIfRepoBecameIneligible(pr, nil, opts.RepoEligible); stopped {
+			if stopped, err := p.stopIfRepoBecameIneligible(pr, opts.RepoEligible); stopped {
 				return nil, err
 			}
 			p.processDirectives(pr, prComments, opts.InstructionAuthors)
@@ -594,7 +598,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	// already wraps the CircuitBreakerError into its own SSE event, so
 	// the breaker-trip path remains observable without a bogus
 	// review_started preceding it.
-	if stopped, err := p.stopIfRepoBecameIneligible(pr, nil, opts.RepoEligible); stopped {
+	if stopped, err := p.stopIfRepoBecameIneligible(pr, opts.RepoEligible); stopped {
 		return nil, err
 	}
 	p.notify.Notify("PR Review Started", fmt.Sprintf("%s #%d", pr.Repo, pr.Number))
@@ -623,9 +627,6 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	result, err := p.executor.Execute(cli, prompt, execOpts)
 	if err != nil {
 		return nil, fmt.Errorf("pipeline: execute %s: %w", cli, err)
-	}
-	if stopped, err := p.stopIfRepoBecameIneligible(pr, nil, opts.RepoEligible); stopped {
-		return nil, err
 	}
 
 	// 5b. Reconcile severity: ensure top-level severity >= max(issues[].severity).
@@ -672,7 +673,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		return nil, fmt.Errorf("pipeline: store review: %w", err)
 	}
 	slog.Info("pipeline: review stored locally", "review_id", rev.ID)
-	if stopped, err := p.stopIfRepoBecameIneligible(pr, rev, opts.RepoEligible); stopped {
+	if stopped, err := p.stopIfRepoBecameIneligible(pr, opts.RepoEligible); stopped {
 		return nil, err
 	}
 
@@ -681,7 +682,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	if reviewMode == "multi" && len(result.Issues) > 0 {
 		// Post one comment per issue (best-effort — failures are logged but don't abort)
 		for _, issue := range result.Issues {
-			if stopped, err := p.stopIfRepoBecameIneligible(pr, rev, opts.RepoEligible); stopped {
+			if stopped, err := p.stopIfRepoBecameIneligible(pr, opts.RepoEligible); stopped {
 				return nil, err
 			}
 			if _, err := p.gh.PostComment(pr.Repo, pr.Number, buildIssueComment(issue)); err != nil {
@@ -693,7 +694,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		reviewBody = BuildGitHubBody(result)
 	}
 
-	if stopped, err := p.stopIfRepoBecameIneligible(pr, rev, opts.RepoEligible); stopped {
+	if stopped, err := p.stopIfRepoBecameIneligible(pr, opts.RepoEligible); stopped {
 		return nil, err
 	}
 	ghReviewID, ghReviewState, publishErr := p.gh.SubmitReview(
@@ -756,6 +757,13 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 // failure). It marks the row as resolved so PublishPending stops retrying it,
 // while being distinguishable from a real GitHub review id.
 const orphanedReviewID = -1
+
+// SupersededReviewID marks an unpublished review whose analysed HEAD changed
+// before a deferred retry could publish it. Unlike orphanedReviewID, this
+// sentinel is intentionally ignored by the next pipeline run so an outstanding
+// review request can evaluate the replacement commit without an artificial
+// re-request. It is exported for the NATS publish worker in cmd/heimdallm.
+const SupersededReviewID int64 = -2
 
 // markOrphanIfPermanent inspects the error returned by SubmitReview and,
 // when it is a *github.PermanentSubmitError, marks the local review row
