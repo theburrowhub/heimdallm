@@ -4,6 +4,7 @@ package bus_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -227,5 +228,8 @@ func TestWatchStore_Delete(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not found") {
 		t.Errorf("expected 'not found' error, got %v", err)
+	}
+	if !errors.Is(err, bus.ErrWatchNotFound) {
+		t.Errorf("expected ErrWatchNotFound, got %v", err)
 	}
 }

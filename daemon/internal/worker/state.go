@@ -3,6 +3,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"runtime/debug"
@@ -69,18 +70,18 @@ func (w *StateWorker) Start(ctx context.Context) error {
 				slog.Warn("state-worker: check failed",
 					"type", checkMsg.Type, "repo", checkMsg.Repo,
 					"number", checkMsg.Number, "err", handlerErr)
-				if kvErr := w.watchKV.IncreaseBackoff(ctx, key); kvErr != nil {
+				if kvErr := w.watchKV.IncreaseBackoff(ctx, key); kvErr != nil && !errors.Is(kvErr, bus.ErrWatchNotFound) {
 					slog.Warn("state-worker: increase backoff failed", "key", key, "err", kvErr)
 				}
 			} else if changed {
 				slog.Info("state-worker: change detected",
 					"type", checkMsg.Type, "repo", checkMsg.Repo,
 					"number", checkMsg.Number)
-				if kvErr := w.watchKV.ResetBackoff(ctx, key, time.Now()); kvErr != nil {
+				if kvErr := w.watchKV.ResetBackoff(ctx, key, time.Now()); kvErr != nil && !errors.Is(kvErr, bus.ErrWatchNotFound) {
 					slog.Warn("state-worker: reset backoff failed", "key", key, "err", kvErr)
 				}
 			} else {
-				if kvErr := w.watchKV.IncreaseBackoff(ctx, key); kvErr != nil {
+				if kvErr := w.watchKV.IncreaseBackoff(ctx, key); kvErr != nil && !errors.Is(kvErr, bus.ErrWatchNotFound) {
 					slog.Warn("state-worker: increase backoff failed", "key", key, "err", kvErr)
 				}
 			}

@@ -9,6 +9,9 @@ const (
 	SkipReasonNotOpen      SkipReason = "not_open"
 	SkipReasonDraft        SkipReason = "draft"
 	SkipReasonSelfAuthored SkipReason = "self_authored"
+	// SkipReasonNotMonitored is emitted by automatic schedulers/workers when
+	// a repo was disabled after discovery or after a review job was queued.
+	SkipReasonNotMonitored SkipReason = "not_monitored"
 	// SkipReasonSHAUnchanged is emitted when pipeline.Run short-circuits
 	// because the previous review row already covers the current HEAD
 	// commit (the #245 fail-closed dedup) and no explicit re-request was

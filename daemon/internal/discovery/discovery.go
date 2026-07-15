@@ -128,10 +128,10 @@ func (s *Service) Run(ctx context.Context, interval time.Duration, topic string,
 // Order: static first (stable for TOML-driven overrides), then configured
 // ([ai.repos.*] explicit entries), then discovered (topic search results).
 //
-// Repos in nonMonitored are excluded — UNLESS they appear in configured.
-// Explicit [ai.repos.*] config wins over the NonMonitored blacklist: a stale
-// auto-discovery row in non_monitored must not silently demote a repo the
-// operator has explicitly wired up. See theburrowhub/heimdallm#281.
+// Repos in nonMonitored are always excluded. Configured repos still join the
+// union when they are not explicitly disabled, preserving issue polling for
+// repos wired through [ai.repos.*] without letting an override undo the
+// operator's Not monitored choice.
 func MergeRepos(static, configured, discovered, nonMonitored []string) []string {
 	if len(static) == 0 && len(configured) == 0 && len(discovered) == 0 {
 		return nil

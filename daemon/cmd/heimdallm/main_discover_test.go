@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/heimdallm/daemon/internal/config"
@@ -147,10 +148,60 @@ func TestUpsertDiscoveredRepos_OrgFilterCaseInsensitive(t *testing.T) {
 	}
 }
 
-// A repo with an explicit [ai.repos.*] entry must NEVER be added to
-// NonMonitored — even when AutoEnablePRForDiscovery is off. Otherwise the next
-// MergeRepos call would blacklist a repo the operator just configured, which
-// is exactly the regression described in theburrowhub/heimdallm#281.
+func TestIntersectMonitoredRepos_AppliesLiveDisableToStaleTier1Snapshot(t *testing.T) {
+	current := []string{"org/keep", "org/just-disabled", "org/archived-elsewhere"}
+	got := intersectMonitoredRepos(current, func() []string {
+		return []string{"org/keep", "org/not-in-tier1"}
+	})
+
+	if len(got) != 1 || got[0] != "org/keep" {
+		t.Fatalf("intersectMonitoredRepos = %v, want [org/keep]", got)
+	}
+}
+
+// On a repo's first topic-discovery cycle Tier 1 can publish it before Tier 2
+// persists the repo into NonMonitored (when auto-enable is off). The live
+// intersection must turn that now-stale publication into an empty work set.
+func TestIntersectMonitoredRepos_BlocksFirstCycleTopicRepoRecordedNonMonitored(t *testing.T) {
+	const repo = "org/new-disabled"
+	got := intersectMonitoredRepos([]string{repo}, func() []string { return nil })
+	if len(got) != 0 {
+		t.Fatalf("first-cycle non-monitored repo survived live gate: %v", got)
+	}
+}
+
+func TestRepoIsMonitored_NonMonitoredOverridesEveryOptInSource(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.GitHub.Repositories = []string{"org/repo"}
+	cfg.GitHub.NonMonitored = []string{"org/repo"}
+	cfg.AI.Repos = map[string]config.RepoAI{"org/repo": {}}
+
+	if repoIsMonitored(cfg, "org/repo") {
+		t.Fatal("repoIsMonitored returned true for explicitly disabled repo")
+	}
+}
+
+func TestEffectiveRepoListsExposeImplicitAIOptInsUnlessDisabled(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.GitHub.Repositories = []string{"org/static", "org/static-disabled"}
+	cfg.GitHub.NonMonitored = []string{"org/static-disabled", "org/ai-disabled"}
+	cfg.AI.Repos = map[string]config.RepoAI{
+		"org/ai-enabled":  {},
+		"org/ai-disabled": {},
+	}
+
+	monitored, nonMonitored := effectiveRepoLists(cfg)
+	if want := []string{"org/static", "org/ai-enabled"}; !slices.Equal(monitored, want) {
+		t.Fatalf("monitored = %v, want %v", monitored, want)
+	}
+	if !slices.Equal(nonMonitored, cfg.GitHub.NonMonitored) {
+		t.Fatalf("nonMonitored = %v, want %v", nonMonitored, cfg.GitHub.NonMonitored)
+	}
+}
+
+// A previously unknown repo with an explicit [ai.repos.*] entry is an implicit
+// opt-in even when auto-enable is off. This does not apply once the operator
+// has explicitly put the repo in NonMonitored (covered below).
 func TestUpsertDiscoveredRepos_ExplicitAIConfigOverridesAutoEnableOff(t *testing.T) {
 	f := false
 	cfg := &config.Config{}
@@ -202,13 +253,10 @@ func TestUpsertDiscoveredRepos_ExplicitAIConfigOverridesAutoEnableOff(t *testing
 	}
 }
 
-// theburrowhub/heimdallm#527 item 1: a repo blacklisted in NonMonitored on a
-// prior tick that later gains explicit [ai.repos.*] config must be promoted —
-// stripped from NonMonitored and added to Repositories — so config state stays
-// consistent for code that reads NonMonitored directly (not just MergeRepos,
-// which already exempts it). The promotion is reported in `added` so the
-// updated lists are persisted.
-func TestUpsertDiscoveredRepos_PromotesExplicitConfigOutOfNonMonitored(t *testing.T) {
+// NonMonitored is explicit operator intent and must win over an [ai.repos.*]
+// override. Before this regression fix, seeing a review-requested PR silently
+// stripped the disable and re-enabled the repository.
+func TestUpsertDiscoveredRepos_NonMonitoredOverridesExplicitConfig(t *testing.T) {
 	f := false
 	cfg := &config.Config{}
 	cfg.GitHub.AutoEnablePROnDiscovery = &f
@@ -225,34 +273,31 @@ func TestUpsertDiscoveredRepos_PromotesExplicitConfigOutOfNonMonitored(t *testin
 	}
 
 	added := upsertDiscoveredRepos(cfg, prs)
-	if len(added) != 1 || added[0] != "a/wired-up" {
-		t.Fatalf("promoted repo must be reported in added (so lists persist), got %v", added)
+	if len(added) != 0 {
+		t.Fatalf("explicitly disabled repo must not be auto-added, got %v", added)
 	}
 
-	// Must now be in Repositories.
-	foundWired := false
 	for _, r := range cfg.GitHub.Repositories {
 		if r == "a/wired-up" {
-			foundWired = true
+			t.Fatalf("a/wired-up must remain out of Repositories, got %v", cfg.GitHub.Repositories)
 		}
 	}
-	if !foundWired {
-		t.Fatalf("a/wired-up must be promoted to Repositories, got %v", cfg.GitHub.Repositories)
-	}
 
-	// Must be stripped from NonMonitored, while the unrelated blacklist row stays.
-	wantNonMon := []string{"a/keep-blacklisted"}
-	if len(cfg.GitHub.NonMonitored) != len(wantNonMon) || cfg.GitHub.NonMonitored[0] != wantNonMon[0] {
-		t.Fatalf("NonMonitored = %v, want %v (wired-up stripped, other kept)", cfg.GitHub.NonMonitored, wantNonMon)
+	wantNonMon := []string{"a/keep-blacklisted", "a/wired-up"}
+	if len(cfg.GitHub.NonMonitored) != len(wantNonMon) {
+		t.Fatalf("NonMonitored = %v, want %v", cfg.GitHub.NonMonitored, wantNonMon)
+	}
+	for i := range wantNonMon {
+		if cfg.GitHub.NonMonitored[i] != wantNonMon[i] {
+			t.Fatalf("NonMonitored = %v, want %v", cfg.GitHub.NonMonitored, wantNonMon)
+		}
 	}
 }
 
-// Edge case (review of #527): a repo that is SIMULTANEOUSLY in Repositories and
-// NonMonitored — the inconsistent prior-tick state this fix targets — must still
-// have its NonMonitored strip reported in `added`, even though it is already
-// monitored. Otherwise, if it is the only change in the tick, the empty `added`
-// set makes processDiscoveredRepos early-return and the strip is never persisted.
-func TestUpsertDiscoveredRepos_PromotionPersistsWhenAlreadyMonitored(t *testing.T) {
+// Even an inconsistent legacy row present in both lists must not have its
+// disable erased by PR discovery. MergeRepos gives NonMonitored precedence;
+// config normalization is deliberately left to the config writer.
+func TestUpsertDiscoveredRepos_DoesNotEraseNonMonitoredFromLegacyConflict(t *testing.T) {
 	f := false
 	cfg := &config.Config{}
 	cfg.GitHub.AutoEnablePROnDiscovery = &f
@@ -271,25 +316,18 @@ func TestUpsertDiscoveredRepos_PromotionPersistsWhenAlreadyMonitored(t *testing.
 
 	added := upsertDiscoveredRepos(cfg, prs)
 
-	// The strip MUST be reported so the updated lists get persisted.
-	if len(added) != 1 || added[0] != "a/wired-up" {
-		t.Fatalf("strip-only promotion must be reported in added (else it is not persisted), got %v", added)
+	if len(added) != 0 {
+		t.Fatalf("legacy conflict must not trigger auto-promotion, got %v", added)
 	}
-	// Stripped from NonMonitored.
+	// The authoritative disable remains intact.
+	foundDisabled := false
 	for _, r := range cfg.GitHub.NonMonitored {
 		if r == "a/wired-up" {
-			t.Fatalf("a/wired-up must be stripped from NonMonitored, got %v", cfg.GitHub.NonMonitored)
+			foundDisabled = true
 		}
 	}
-	// Still present in Repositories exactly once (no duplicate append).
-	count := 0
-	for _, r := range cfg.GitHub.Repositories {
-		if r == "a/wired-up" {
-			count++
-		}
-	}
-	if count != 1 {
-		t.Fatalf("a/wired-up must appear exactly once in Repositories, got %v", cfg.GitHub.Repositories)
+	if !foundDisabled {
+		t.Fatalf("a/wired-up must remain in NonMonitored, got %v", cfg.GitHub.NonMonitored)
 	}
 }
 

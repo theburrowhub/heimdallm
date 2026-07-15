@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/heimdallm/daemon/internal/config"
 	gh "github.com/heimdallm/daemon/internal/github"
 	"github.com/heimdallm/daemon/internal/scheduler"
 	"github.com/heimdallm/daemon/internal/sse"
@@ -502,6 +503,57 @@ func TestCheckItem_AutoImplementPRBranch_ReturnsChangedSoLastSeenAdvances(t *tes
 	}
 	if snap != nil {
 		t.Errorf("snap must be nil so HandleChange short-circuits, got %+v", snap)
+	}
+}
+
+func TestCheckItem_AutoImplementPRBranch_DisabledAfterSnapshotSkipsReaction(t *testing.T) {
+	var (
+		cfgMu        sync.Mutex
+		cfg          = &config.Config{GitHub: config.GitHubConfig{Repositories: []string{"org/repo"}}}
+		reviewsCalls int
+	)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/org/repo/pulls/42", func(w http.ResponseWriter, _ *http.Request) {
+		// Simulate an operator disabling the repo while the already-queued
+		// state check is fetching its fresh PR snapshot.
+		cfgMu.Lock()
+		cfg.GitHub.NonMonitored = []string{"org/repo"}
+		cfgMu.Unlock()
+		_, _ = w.Write([]byte(`{
+			"state":"open","draft":false,
+			"user":{"login":"heimdallm-bot"},
+			"updated_at":"2026-05-14T10:00:00Z",
+			"head":{"sha":"deadbeef","ref":"heimdallm/issue-99"}
+		}`))
+	})
+	mux.HandleFunc("/repos/org/repo/pulls/42/reviews", func(w http.ResponseWriter, _ *http.Request) {
+		reviewsCalls++
+		_, _ = w.Write([]byte(`[
+			{"id":1,"user":{"login":"alice"},"state":"CHANGES_REQUESTED","body":"x","submitted_at":"2026-05-14T09:00:00Z"}
+		]`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	s := newMemStore(t)
+	seedAutoImplementPR(t, s, 5002, 42)
+	a, _, _ := makePRReviewStateAdapter(t, srv, s, "heimdallm-bot")
+	a.cfgMu = &cfgMu
+	a.cfg = &cfg
+	fixer := &reviewStateDispatcher{}
+	a.fixRunner = fixer
+
+	_, _, err := a.CheckItem(context.Background(), &scheduler.WatchItem{
+		Type: "pr", Repo: "org/repo", Number: 42, GithubID: 5002,
+	})
+	if err != nil {
+		t.Fatalf("CheckItem: %v", err)
+	}
+	if reviewsCalls != 0 {
+		t.Fatalf("reviews endpoint called %d time(s) after repo disable, want 0", reviewsCalls)
+	}
+	if fixer.count() != 0 {
+		t.Fatalf("FixRunner called %d time(s) after repo disable, want 0", fixer.count())
 	}
 }
 

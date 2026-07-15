@@ -11,6 +11,7 @@ import (
 
 	"github.com/heimdallm/daemon/internal/config"
 	gh "github.com/heimdallm/daemon/internal/github"
+	"github.com/heimdallm/daemon/internal/pipeline"
 	"github.com/heimdallm/daemon/internal/scheduler"
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
@@ -35,7 +36,9 @@ func TestTier3Adapter_HandleChange_SkipsClosedPR(t *testing.T) {
 		loginMu sync.Mutex
 		login   = "heimdallm-bot"
 		cfgMu   sync.Mutex
-		cfg     = &config.Config{}
+		cfg     = &config.Config{GitHub: config.GitHubConfig{
+			Repositories: []string{"org/repo"},
+		}}
 	)
 
 	runReviewCalls := 0
@@ -98,6 +101,68 @@ func TestTier3Adapter_HandleChange_SkipsClosedPR(t *testing.T) {
 		}
 	case <-time.After(1 * time.Second):
 		t.Fatal("no SSE event emitted within 1s")
+	}
+}
+
+func TestTier3Adapter_HandleChange_SkipsNonMonitoredRepo(t *testing.T) {
+	s := newMemStore(t)
+	broker := sse.NewBroker()
+	broker.Start()
+	defer broker.Stop()
+	events := broker.Subscribe()
+	defer broker.Unsubscribe(events)
+
+	var (
+		loginMu sync.Mutex
+		login   = "heimdallm-bot"
+		cfgMu   sync.Mutex
+		cfg     = &config.Config{GitHub: config.GitHubConfig{
+			Repositories: []string{"org/repo"},
+			NonMonitored: []string{"org/repo"},
+		}}
+	)
+	runReviewCalls := 0
+	a := &tier2Adapter{
+		store:   s,
+		broker:  broker,
+		cfgMu:   &cfgMu,
+		cfg:     &cfg,
+		loginMu: &loginMu,
+		login:   &login,
+		runReview: func(*gh.PullRequest, config.RepoAI) *store.Review {
+			runReviewCalls++
+			return nil
+		},
+	}
+
+	err := a.HandleChange(context.Background(), &scheduler.WatchItem{
+		Type: "pr", Repo: "org/repo", Number: 42, GithubID: 42,
+	}, &scheduler.ItemSnapshot{
+		State: "open", Author: "alice", UpdatedAt: time.Now(), HeadSHA: "abc",
+	})
+	if err != nil {
+		t.Fatalf("HandleChange: %v", err)
+	}
+	if runReviewCalls != 0 {
+		t.Fatalf("runReview called %d time(s), want 0", runReviewCalls)
+	}
+
+	select {
+	case ev := <-events:
+		if ev.Type != sse.EventReviewSkipped {
+			t.Fatalf("event type = %q, want %q", ev.Type, sse.EventReviewSkipped)
+		}
+		var payload struct {
+			Reason string `json:"reason"`
+		}
+		if err := json.Unmarshal([]byte(ev.Data), &payload); err != nil {
+			t.Fatalf("decode event: %v", err)
+		}
+		if payload.Reason != string(pipeline.SkipReasonNotMonitored) {
+			t.Fatalf("reason = %q, want %q", payload.Reason, pipeline.SkipReasonNotMonitored)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no review_skipped event emitted")
 	}
 }
 

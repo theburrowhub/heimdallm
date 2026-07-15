@@ -166,6 +166,32 @@ func (p *Pipeline) SetPublisher(pub Publisher) {
 	p.publisher = pub
 }
 
+// stopIfRepoBecameIneligible is called at side-effect boundaries. When a
+// review has already been stored, mark it terminal before returning so no
+// delayed publisher can resurrect it.
+func (p *Pipeline) stopIfRepoBecameIneligible(
+	pr *github.PullRequest,
+	rev *store.Review,
+	check func(string) bool,
+) (bool, error) {
+	if check == nil || check(pr.Repo) {
+		return false, nil
+	}
+	if rev != nil {
+		cancelledAt := time.Now().UTC()
+		if err := p.store.MarkReviewPublished(rev.ID, orphanedReviewID, "", cancelledAt); err != nil {
+			return true, fmt.Errorf("pipeline: cancel review %d for unmonitored repo: %w", rev.ID, err)
+		}
+		rev.GitHubReviewID = orphanedReviewID
+		rev.GitHubReviewState = ""
+		rev.PublishedAt = cancelledAt
+	}
+	p.publishSkipped(pr, SkipReasonNotMonitored)
+	slog.Info("pipeline: repo no longer monitored, stopping review",
+		"repo", pr.Repo, "pr", pr.Number)
+	return true, nil
+}
+
 // publish emits an SSE lifecycle event with the given payload. No-op
 // when no publisher is wired. A marshal failure on a map[string]any
 // of basic types should not happen in practice (every payload site
@@ -300,6 +326,10 @@ type RunOptions struct {
 	// NeverApproveWithIssues, when true, publishes the review as COMMENT
 	// instead of APPROVE whenever the review found any issue (see ReviewEvent).
 	NeverApproveWithIssues bool
+	// RepoEligible is a live gate for automatic work. It is checked again at
+	// execution/publication boundaries so a config reload can stop an in-flight
+	// review. Nil intentionally allows explicit/manual calls to proceed.
+	RepoEligible func(string) bool
 }
 
 // Run executes the full review pipeline for one PR and publishes the review to GitHub.
@@ -338,6 +368,9 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	prID, err := p.store.UpsertPR(prRow)
 	if err != nil {
 		return nil, fmt.Errorf("pipeline: upsert PR: %w", err)
+	}
+	if stopped, err := p.stopIfRepoBecameIneligible(pr, nil, opts.RepoEligible); stopped {
+		return nil, err
 	}
 
 	// Defense-in-depth: refuse to run the CLI if the gate rejects this PR.
@@ -427,6 +460,9 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 			slog.Warn("pipeline: fetch comments for directives failed", "err", err, "repo", pr.Repo, "pr", pr.Number)
 		} else {
 			prComments = cs
+			if stopped, err := p.stopIfRepoBecameIneligible(pr, nil, opts.RepoEligible); stopped {
+				return nil, err
+			}
 			p.processDirectives(pr, prComments, opts.InstructionAuthors)
 		}
 	}
@@ -558,6 +594,9 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	// already wraps the CircuitBreakerError into its own SSE event, so
 	// the breaker-trip path remains observable without a bogus
 	// review_started preceding it.
+	if stopped, err := p.stopIfRepoBecameIneligible(pr, nil, opts.RepoEligible); stopped {
+		return nil, err
+	}
 	p.notify.Notify("PR Review Started", fmt.Sprintf("%s #%d", pr.Repo, pr.Number))
 	p.publish(sse.EventPRDetected, map[string]any{
 		"pr_number": pr.Number,
@@ -584,6 +623,9 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	result, err := p.executor.Execute(cli, prompt, execOpts)
 	if err != nil {
 		return nil, fmt.Errorf("pipeline: execute %s: %w", cli, err)
+	}
+	if stopped, err := p.stopIfRepoBecameIneligible(pr, nil, opts.RepoEligible); stopped {
+		return nil, err
 	}
 
 	// 5b. Reconcile severity: ensure top-level severity >= max(issues[].severity).
@@ -630,12 +672,18 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		return nil, fmt.Errorf("pipeline: store review: %w", err)
 	}
 	slog.Info("pipeline: review stored locally", "review_id", rev.ID)
+	if stopped, err := p.stopIfRepoBecameIneligible(pr, rev, opts.RepoEligible); stopped {
+		return nil, err
+	}
 
 	// 8. Publish review to GitHub
 	var reviewBody string
 	if reviewMode == "multi" && len(result.Issues) > 0 {
 		// Post one comment per issue (best-effort — failures are logged but don't abort)
 		for _, issue := range result.Issues {
+			if stopped, err := p.stopIfRepoBecameIneligible(pr, rev, opts.RepoEligible); stopped {
+				return nil, err
+			}
 			if _, err := p.gh.PostComment(pr.Repo, pr.Number, buildIssueComment(issue)); err != nil {
 				slog.Warn("pipeline: failed to post issue comment", "pr", pr.Number, "err", err)
 			}
@@ -645,6 +693,9 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		reviewBody = BuildGitHubBody(result)
 	}
 
+	if stopped, err := p.stopIfRepoBecameIneligible(pr, rev, opts.RepoEligible); stopped {
+		return nil, err
+	}
 	ghReviewID, ghReviewState, publishErr := p.gh.SubmitReview(
 		pr.Repo, pr.Number,
 		AnnotateBodyForEvent(reviewBody, reviewEvent),

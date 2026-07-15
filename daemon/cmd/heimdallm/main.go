@@ -333,6 +333,11 @@ func main() {
 	issueFetcher.SetBotLogin(resolvedBotLogin) // break re-triage loop (#362)
 	// cfgMu protects cfg and the pipeline so reload is safe from any goroutine.
 	var cfgMu sync.Mutex
+	repoCurrentlyMonitored := func(repo string) bool {
+		cfgMu.Lock()
+		defer cfgMu.Unlock()
+		return repoIsMonitored(cfg, repo)
+	}
 	var reloadMu sync.Mutex // serialises config reloads to prevent duplicate pipelines
 	// restartMu serialises the BACKGROUND poller teardown+restart kicked off by
 	// a reload that changed a poller-relevant field. Kept separate from
@@ -570,7 +575,9 @@ func main() {
 		// doesn't pre-shape (the err.Error() string and the
 		// CircuitBreakerError discriminant). See theburrowhub/heimdallm#322
 		// Bugs 3+4 for the regression that made emitting from here unsafe.
-		rev, err := p.Run(pr, buildRunOpts(pr, aiCfg))
+		runOpts := buildRunOpts(pr, aiCfg)
+		runOpts.RepoEligible = repoCurrentlyMonitored
+		rev, err := p.Run(pr, runOpts)
 		if err != nil {
 			slog.Error("pipeline run failed", "repo", pr.Repo, "pr", pr.Number, "err", err)
 			var cbErr *pipeline.CircuitBreakerError
@@ -810,11 +817,11 @@ func main() {
 			tier2ConfigFn := func() []string {
 				cfgMu.Lock()
 				defer cfgMu.Unlock()
-				var discovered []string
-				if cfg.GitHub.DiscoveryTopic != "" {
-					discovered = discoverySvc.Discovered()
-				}
-				return discovery.MergeRepos(cfg.GitHub.Repositories, aiRepoKeys(cfg), discovered, cfg.GitHub.NonMonitored)
+				// Topic results become eligible only after Tier 2 classifies and
+				// persists them into Repositories/NonMonitored. Reading the raw
+				// discovery cache here would create a first-seen race when
+				// auto-enable is off.
+				return discovery.MergeRepos(cfg.GitHub.Repositories, aiRepoKeys(cfg), nil, cfg.GitHub.NonMonitored)
 			}
 			tier2RepoConcurrencyFn := func() int {
 				cfgMu.Lock()
@@ -857,11 +864,7 @@ func main() {
 		autonomousReposFn := func() []string {
 			cfgMu.Lock()
 			defer cfgMu.Unlock()
-			var discovered []string
-			if cfg.GitHub.DiscoveryTopic != "" {
-				discovered = discoverySvc.Discovered()
-			}
-			return discovery.MergeRepos(cfg.GitHub.Repositories, aiRepoKeys(cfg), discovered, cfg.GitHub.NonMonitored)
+			return discovery.MergeRepos(cfg.GitHub.Repositories, aiRepoKeys(cfg), nil, cfg.GitHub.NonMonitored)
 		}
 		autonomousStageR := &autonomousStageRunner{
 			ghClient:  ghClient,
@@ -924,6 +927,30 @@ func main() {
 	// existing review pipeline. This replaces the goroutine-per-PR
 	// pattern that Tier 2 used to use.
 	reviewHandler := func(ctx context.Context, msg bus.PRReviewMsg) {
+		skipIfUnmonitored := func(stage string) bool {
+			if repoCurrentlyMonitored(msg.Repo) {
+				return false
+			}
+			broker.Publish(sse.Event{
+				Type: sse.EventReviewSkipped,
+				Data: sseData(map[string]any{
+					"repo":      msg.Repo,
+					"pr_number": msg.Number,
+					"reason":    string(pipeline.SkipReasonNotMonitored),
+				}),
+			})
+			slog.Info("review-worker: repo no longer monitored, skipping",
+				"repo", msg.Repo, "pr", msg.Number, "stage", stage)
+			return true
+		}
+
+		// A repo may be disabled after Tier 2 publishes this Core NATS
+		// message but before a worker slot becomes available. Revalidate before
+		// spending rate-limit budget or starting the AI pipeline.
+		if skipIfUnmonitored("dequeue") {
+			return
+		}
+
 		// Acquire returns only ctx.Err() (shutdown). On cancellation the
 		// message is acked without processing — acceptable because the
 		// daemon is shutting down and the PR will be re-detected next startup.
@@ -945,6 +972,9 @@ func main() {
 				"msg_sha", msg.HeadSHA, "current_sha", pr.Head.SHA)
 			return
 		}
+		if skipIfUnmonitored("pre_run") {
+			return
+		}
 
 		cfgMu.Lock()
 		c := *cfg
@@ -958,6 +988,11 @@ func main() {
 		}
 		if repoHandle != nil {
 			defer repoHandle.Release()
+		}
+		// Repo acquisition may clone/fetch for several seconds. Recheck at the
+		// final execution boundary so a disable during that wait stops the CLI.
+		if skipIfUnmonitored("post_acquire") {
+			return
 		}
 
 		rev := runReview(pr, aiCfg)
@@ -1049,6 +1084,21 @@ func main() {
 		// legacy rows without a stored event fall back to severity. Mirrors the
 		// pipeline's Run / PublishPending paths.
 		publishEvent := pipeline.PublishEventFor(rev)
+		cancelled, err := cancelPublishIfUnmonitored(
+			s,
+			rev.ID,
+			pr.Repo,
+			repoCurrentlyMonitored,
+			time.Now().UTC(),
+		)
+		if err != nil {
+			return err
+		}
+		if cancelled {
+			slog.Info("publish-worker: repo no longer monitored, cancelling unpublished review",
+				"review_id", rev.ID, "repo", pr.Repo)
+			return nil // permanent — ack; the sentinel keeps it out of PublishPending
+		}
 		ghID, ghState, err := ghClient.SubmitReview(
 			pr.Repo, pr.Number,
 			pipeline.AnnotateBodyForEvent(pipeline.BuildGitHubBody(result), publishEvent),
@@ -1408,9 +1458,9 @@ func main() {
 			case <-statePollerCtx.Done():
 				return
 			case <-ticker.C:
-				// Gradually enroll one open item not yet in watch_state per tick.
+				// Gradually enroll one monitored open item not yet in watch_state per tick.
 				// Backfills items from before the NATS migration without blocking startup.
-				enrollOpenItems(statePollerCtx, s, watchStore)
+				enrollOpenItems(statePollerCtx, s, watchStore, adapter.monitoredRepos())
 
 				if evicted, err := watchStore.EvictStale(statePollerCtx); err != nil {
 					slog.Warn("state-poller: evict failed", "err", err)
@@ -1445,6 +1495,16 @@ func main() {
 			}
 			slog.Info("state-handler: auto-dismissed legacy item with empty repo",
 				"type", msg.Type, "number", msg.Number, "github_id", msg.GithubID)
+			return false, nil
+		}
+		if !adapter.repoIsMonitored(msg.Repo) {
+			key := fmt.Sprintf("%s.%d", msg.Type, msg.GithubID)
+			if err := watchStore.Delete(ctx, key); err != nil {
+				slog.Warn("state-handler: failed to remove unmonitored item",
+					"key", key, "repo", msg.Repo, "err", err)
+			}
+			slog.Info("state-handler: repo no longer monitored, skipping",
+				"type", msg.Type, "repo", msg.Repo, "number", msg.Number)
 			return false, nil
 		}
 
@@ -1535,8 +1595,7 @@ func main() {
 		// state with the live Config after we release the lock.
 		cfgMu.Lock()
 		c := cfg
-		reposList := append([]string(nil), c.GitHub.Repositories...)
-		nonMonList := append([]string(nil), c.GitHub.NonMonitored...)
+		reposList, nonMonList := effectiveRepoLists(c)
 		localDirBaseList := append([]string(nil), c.GitHub.LocalDirBase...)
 		cfgMu.Unlock()
 		loginMu.Lock()
@@ -2544,15 +2603,13 @@ func runTier2(
 			case <-ctx.Done():
 				return
 			case r := <-reposChan:
+				// Classify first so live eligibility callbacks can never observe a
+				// raw topic result before auto-enable=false records it disabled.
+				adapter.upsertDiscoveredFromTopics(r)
 				mu.Lock()
 				repos = r
 				mu.Unlock()
 				slog.Info("tier2: received repo list", "count", len(r))
-
-				// Persist topic-discovered repos so they appear in
-				// heimdallm-cli status and GET /config even when they
-				// have no open PRs. Fixes #507.
-				adapter.upsertDiscoveredFromTopics(r)
 			}
 		}
 	}()
@@ -2677,21 +2734,23 @@ func runTier2(
 	// extra ticks when its previous run is still in flight, so we
 	// never spawn two concurrent issue cycles.
 	prTick := func() {
-		currentRepos := snapshotRepos()
-		if len(currentRepos) == 0 {
-			return
+		currentRepos := intersectMonitoredRepos(snapshotRepos(), configFn)
+		if len(currentRepos) > 0 {
+			runPRTier(currentRepos)
 		}
-		runPRTier(currentRepos)
 		// PublishPending lives in the PR tick on purpose: pending
 		// publishes are almost exclusively PR-review NATS messages
-		// from runPRTier, and retries are idempotent. If we ever
+		// from runPRTier, and retries are idempotent. It must still run
+		// when the live repo set is empty so reviews for repos disabled
+		// after their initial publish attempt reach the publish worker,
+		// which marks them terminal. If we ever
 		// route issue-side NATS publishes through the same queue,
 		// add a sibling call inside issueTick rather than removing
 		// this one.
 		adapter.PublishPending()
 	}
 	issueTick := func() {
-		currentRepos := snapshotRepos()
+		currentRepos := intersectMonitoredRepos(snapshotRepos(), configFn)
 		if len(currentRepos) == 0 {
 			return
 		}
@@ -2728,6 +2787,44 @@ func runTier2(
 	wg.Wait()
 }
 
+// intersectMonitoredRepos applies the live config as a final eligibility gate
+// to Tier 1's last published repo snapshot. Tier 1 remains responsible for
+// discovery and archived-repo filtering, while the live set makes an explicit
+// disable effective immediately instead of waiting for the next discovery
+// publication. It also closes the first-discovery race where Tier 1 published
+// a new topic repo, Tier 2 persisted it as non_monitored, then reviewed it from
+// the stale pre-persistence snapshot.
+func intersectMonitoredRepos(current []string, configFn func() []string) []string {
+	if len(current) == 0 {
+		return nil
+	}
+	if configFn == nil {
+		return append([]string(nil), current...)
+	}
+
+	live := configFn()
+	if len(live) == 0 {
+		return nil
+	}
+	liveSet := make(map[string]struct{}, len(live))
+	for _, repo := range live {
+		if repo = strings.TrimSpace(repo); repo != "" {
+			liveSet[repo] = struct{}{}
+		}
+	}
+
+	out := make([]string, 0, len(current))
+	for _, repo := range current {
+		if _, ok := liveSet[strings.TrimSpace(repo)]; ok {
+			out = append(out, repo)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // aiRepoKeys returns the sorted list of repos with an explicit [ai.repos.*]
 // entry. Used to seed MergeRepos with the operator's TOML opt-ins so a repo
 // that is wired up but has no active PRs still receives issue polling.
@@ -2752,9 +2849,27 @@ func aiRepoKeys(c *config.Config) []string {
 	return out
 }
 
+// effectiveRepoLists returns the same monitored view used by the schedulers
+// for GET /config. Explicit [ai.repos.*] entries are implicit opt-ins unless
+// they also appear in non_monitored; exposing only the raw github.repositories
+// slice would make the UI label an actively-polled repo as Not monitored.
+func effectiveRepoLists(c *config.Config) (monitored, nonMonitored []string) {
+	if c == nil {
+		return nil, nil
+	}
+	nonMonitored = append([]string(nil), c.GitHub.NonMonitored...)
+	monitored = discovery.MergeRepos(
+		c.GitHub.Repositories,
+		aiRepoKeys(c),
+		nil,
+		nonMonitored,
+	)
+	return monitored, nonMonitored
+}
+
 // upsertDiscoveredRepos adds PRs' repos to the monitored (or non-monitored)
 // list when they're new. Returns the list of repos that were added.
-// Never removes; mutually-exclusive with NonMonitored when adding.
+// Never removes and never overrides an explicit NonMonitored entry.
 //
 // The Flutter UI maps prEnabled via list membership: prEnabled=true ⇔
 // Repositories, prEnabled=false ⇔ NonMonitored, neither ⇔ undiscovered.
@@ -2788,43 +2903,24 @@ func upsertDiscoveredRepos(c *config.Config, prs []*gh.PullRequest) []string {
 		if pr.Repo == "" {
 			continue
 		}
+		// An explicit disable is authoritative. In particular, an
+		// [ai.repos.*] override may customize a repo without opting it back in;
+		// seeing a review-requested PR must never erase the operator's choice.
+		if _, disabled := inNonMonitored[pr.Repo]; disabled {
+			continue
+		}
 
-		// Repos with an explicit [ai.repos.*] entry are opted in by the
-		// operator. Explicit config is intent and must win over both guards:
-		//   - It bypasses the discovery_orgs allowlist (theburrowhub/heimdallm#527
-		//     item 2): a configured repo outside the discovery orgs must still
-		//     be monitored, so this check precedes the org filter below.
-		//   - It promotes the repo out of NonMonitored when a stale row from a
-		//     prior tick blacklisted it (#527 item 1). Leaving it in
-		//     NonMonitored keeps config state inconsistent for code that reads
-		//     the list directly, even though MergeRepos already exempts it. So
-		//     we strip the repo from NonMonitored and add it to Repositories.
-		// See also theburrowhub/heimdallm#281 for why a configured repo must
-		// never linger in NonMonitored (MergeRepos would otherwise blacklist it
-		// and silently stop issue polling).
+		// A repo with an explicit [ai.repos.*] entry is an implicit opt-in only
+		// while it is not explicitly disabled. It still bypasses the discovery
+		// org allowlist so a configured repo outside discovery_orgs can be
+		// monitored, but NonMonitored above always wins.
 		if _, hasExplicitAIConfig := c.AI.Repos[pr.Repo]; hasExplicitAIConfig {
-			// Within-tick duplicate PRs for the same repo are absorbed: after the
-			// first one promotes the repo, inRepositories/inNonMonitored reflect
-			// the new state, so a second PR for the same repo is a no-op here.
 			_, alreadyMonitored := inRepositories[pr.Repo]
-			_, blacklisted := inNonMonitored[pr.Repo]
-			if blacklisted {
-				c.GitHub.NonMonitored = removeRepo(c.GitHub.NonMonitored, pr.Repo)
-				delete(inNonMonitored, pr.Repo)
-			}
 			if !alreadyMonitored {
 				c.GitHub.Repositories = append(c.GitHub.Repositories, pr.Repo)
 				inRepositories[pr.Repo] = struct{}{}
-			}
-			// Report the repo as added whenever EITHER list was mutated — not
-			// only on the add-to-Repositories path. processDiscoveredRepos
-			// early-returns on an empty added set, so a strip-only change (repo
-			// already in Repositories but also stale in NonMonitored) must still
-			// land here, or the NonMonitored strip would not be persisted and the
-			// inconsistency would survive across reloads.
-			if blacklisted || !alreadyMonitored {
-				slog.Info("upsertDiscoveredRepos: promoted explicitly-configured repo",
-					"repo", pr.Repo, "added_to_repositories", !alreadyMonitored, "stripped_from_non_monitored", blacklisted)
+				slog.Info("upsertDiscoveredRepos: added explicitly-configured repo",
+					"repo", pr.Repo)
 				added = append(added, pr.Repo)
 			}
 			continue
@@ -2833,9 +2929,6 @@ func upsertDiscoveredRepos(c *config.Config, prs []*gh.PullRequest) []string {
 		// Auto-discovered repos (no explicit config): skip when already tracked
 		// in either list.
 		if _, ok := inRepositories[pr.Repo]; ok {
-			continue
-		}
-		if _, ok := inNonMonitored[pr.Repo]; ok {
 			continue
 		}
 		// Filter by allowed orgs when configured.
@@ -2862,17 +2955,6 @@ func upsertDiscoveredRepos(c *config.Config, prs []*gh.PullRequest) []string {
 	return added
 }
 
-// removeRepo returns s without the first occurrence of repo, preserving order.
-// Returns s unchanged when repo is absent.
-func removeRepo(s []string, repo string) []string {
-	for i, r := range s {
-		if r == repo {
-			return append(s[:i:i], s[i+1:]...)
-		}
-	}
-	return s
-}
-
 // upsertDiscoveredFromTopics persists repos received from tier1's topic
 // discovery into cfg.GitHub.Repositories (or NonMonitored) and invokes
 // processDiscoveredRepos to write them to the K/V store. This ensures repos
@@ -2892,6 +2974,12 @@ func (a *tier2Adapter) upsertDiscoveredFromTopics(repos []string) {
 	}
 	for _, r := range cfg.GitHub.NonMonitored {
 		known[r] = struct{}{}
+	}
+	// Explicit [ai.repos.*] entries are already operator opt-ins. They may not
+	// also appear in github.repositories, and auto-enable=false must not
+	// misclassify them as newly discovered and append them to NonMonitored.
+	for repo := range cfg.AI.Repos {
+		known[repo] = struct{}{}
 	}
 
 	enable := cfg.GitHub.AutoEnablePRForDiscovery()
@@ -2957,6 +3045,35 @@ type tier2Adapter struct {
 }
 
 const breakerTripDedupTTL = 24 * time.Hour
+
+func (a *tier2Adapter) repoIsMonitored(repo string) bool {
+	if a == nil || a.cfg == nil {
+		return false
+	}
+	if a.cfgMu == nil {
+		return repoIsMonitored(*a.cfg, repo)
+	}
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
+	return repoIsMonitored(*a.cfg, repo)
+}
+
+func (a *tier2Adapter) monitoredRepos() []string {
+	if a == nil || a.cfg == nil {
+		return nil
+	}
+	if a.cfgMu != nil {
+		a.cfgMu.Lock()
+		defer a.cfgMu.Unlock()
+	}
+	set := monitoredRepoSet(*a.cfg, nil)
+	repos := make([]string, 0, len(set))
+	for repo := range set {
+		repos = append(repos, repo)
+	}
+	sort.Strings(repos)
+	return repos
+}
 
 func (a *tier2Adapter) cachedAuthenticatedUser() string {
 	if a == nil || a.login == nil {
@@ -3897,8 +4014,22 @@ func (a *tier2Adapter) HandleChange(ctx context.Context, item *scheduler.WatchIt
 		// cast (config cannot import pipeline — import cycle).
 		guards := pipeline.GateConfig((*a.cfg).ReviewGuards(botLogin))
 		c := *a.cfg
+		monitored := repoIsMonitored(c, item.Repo)
 		aiCfg := c.AIForRepo(item.Repo)
 		a.cfgMu.Unlock()
+		if !monitored {
+			a.broker.Publish(sse.Event{
+				Type: sse.EventReviewSkipped,
+				Data: sseData(map[string]any{
+					"repo":      item.Repo,
+					"pr_number": item.Number,
+					"reason":    string(pipeline.SkipReasonNotMonitored),
+				}),
+			})
+			slog.Info("tier3: repo no longer monitored, skipping PR",
+				"repo", item.Repo, "pr", item.Number)
+			return nil
+		}
 
 		stored, _ := a.store.GetPRByGithubID(item.GithubID)
 		title := ""
@@ -4779,53 +4910,127 @@ func monitoredRepoSet(cfg *config.Config, discovered []string) map[string]struct
 	return out
 }
 
+// repoIsMonitored is the shared live eligibility check for automatic review
+// paths. Passing no discovered slice is sufficient after discovery has been
+// persisted into Repositories/NonMonitored; callers that own a fresh discovery
+// snapshot should use monitoredRepoSet directly.
+func repoIsMonitored(cfg *config.Config, repo string) bool {
+	repo = strings.TrimSpace(repo)
+	if repo == "" {
+		return false
+	}
+	_, ok := monitoredRepoSet(cfg, nil)[repo]
+	return ok
+}
+
+// cancelPublishIfUnmonitored performs the final live eligibility check before
+// SubmitReview. Marking the local row with the established orphan sentinel
+// keeps PublishPending from re-enqueueing a review after its repo is disabled.
+func cancelPublishIfUnmonitored(
+	s *store.Store,
+	reviewID int64,
+	repo string,
+	isMonitored func(string) bool,
+	now time.Time,
+) (bool, error) {
+	if isMonitored == nil || isMonitored(repo) {
+		return false, nil
+	}
+	if err := s.MarkReviewPublished(reviewID, -1, "", now.UTC()); err != nil {
+		return false, fmt.Errorf("cancel unpublished review %d for unmonitored repo %q: %w", reviewID, repo, err)
+	}
+	return true, nil
+}
+
 // enrollOpenItems enrolls up to 10 open PRs/issues not yet in watch_state.
 // Called once per state-poller tick (every 30s) to gradually backfill items
-// from before the NATS migration. Uses a batch query with LEFT JOIN to find
-// unenrolled items without holding a read lock during writes.
-func enrollOpenItems(ctx context.Context, s *store.Store, ws *bus.WatchStore) {
+// from before the NATS migration. The monitored set is snapshotted before the
+// query and pushed into SQL, so disabled rows cannot consume the LIMIT and the
+// daemon's single SQLite connection is never held during an unbounded scan.
+func enrollOpenItems(
+	ctx context.Context,
+	s *store.Store,
+	ws *bus.WatchStore,
+	monitoredRepos []string,
+) {
+	seen := make(map[string]struct{}, len(monitoredRepos))
+	normalizedRepos := make([]string, 0, len(monitoredRepos))
+	for _, repo := range monitoredRepos {
+		repo = strings.TrimSpace(repo)
+		if repo == "" {
+			continue
+		}
+		if _, ok := seen[repo]; ok {
+			continue
+		}
+		seen[repo] = struct{}{}
+		normalizedRepos = append(normalizedRepos, repo)
+	}
+	if len(normalizedRepos) == 0 {
+		return
+	}
+
 	for _, q := range []struct {
 		typ   string
-		query string
+		query string // one %s placeholder for a bounded repo IN clause
 	}{
 		{"pr", `SELECT p.github_id, p.repo, p.number FROM prs p
 			LEFT JOIN watch_state w ON w.key = 'pr.' || p.github_id
-			WHERE p.state='open' AND p.repo != '' AND w.key IS NULL LIMIT 10`},
+			WHERE p.state='open' AND p.repo != '' AND w.key IS NULL
+			AND p.repo IN (%s)
+			ORDER BY p.id LIMIT 10`},
 		{"issue", `SELECT i.github_id, i.repo, i.number FROM issues i
 			LEFT JOIN watch_state w ON w.key = 'issue.' || i.github_id
-			WHERE i.state='open' AND i.repo != '' AND w.key IS NULL LIMIT 10`},
+			WHERE i.state='open' AND i.repo != '' AND w.key IS NULL
+			AND i.repo IN (%s)
+			ORDER BY i.id LIMIT 10`},
 	} {
-		rows, err := s.DB().Query(q.query)
-		if err != nil {
-			continue
-		}
 		type item struct {
 			ghID   int64
 			repo   string
 			number int
 		}
 		var batch []item
-		for rows.Next() {
-			var it item
-			if err := rows.Scan(&it.ghID, &it.repo, &it.number); err != nil {
-				slog.Warn("state-poller: backfill scan failed", "type", q.typ, "err", err)
+		// Keep each query well below SQLite's bind-variable ceiling. Continue
+		// through chunks until ten eligible rows are found globally.
+		const repoChunkSize = 500
+		for start := 0; start < len(normalizedRepos) && len(batch) < 10; start += repoChunkSize {
+			end := min(start+repoChunkSize, len(normalizedRepos))
+			chunk := normalizedRepos[start:end]
+			args := make([]any, len(chunk))
+			for i, repo := range chunk {
+				args[i] = repo
+			}
+			placeholders := strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")
+			rows, err := s.DB().Query(fmt.Sprintf(q.query, placeholders), args...)
+			if err != nil {
+				slog.Warn("state-poller: backfill query failed", "type", q.typ, "err", err)
 				continue
 			}
-			batch = append(batch, it)
+			for rows.Next() && len(batch) < 10 {
+				var it item
+				if err := rows.Scan(&it.ghID, &it.repo, &it.number); err != nil {
+					slog.Warn("state-poller: backfill scan failed", "type", q.typ, "err", err)
+					continue
+				}
+				batch = append(batch, it)
+			}
+			if err := rows.Err(); err != nil {
+				slog.Warn("state-poller: backfill iteration error", "type", q.typ, "err", err)
+			}
+			rows.Close() // release the daemon's single DB connection between chunks
 		}
-		if err := rows.Err(); err != nil {
-			slog.Warn("state-poller: backfill iteration error", "type", q.typ, "err", err)
-		}
-		rows.Close() // close before writing to avoid SQLite lock contention
 
+		enrolled := 0
 		for _, it := range batch {
 			if err := ws.Enroll(ctx, q.typ, it.repo, it.number, it.ghID); err != nil {
 				slog.Warn("state-poller: backfill enroll failed", "type", q.typ, "repo", it.repo, "number", it.number, "err", err)
 				break // skip rest of this type, try next type
 			}
+			enrolled++
 		}
-		if len(batch) > 0 {
-			slog.Debug("state-poller: backfill enrolled", "type", q.typ, "count", len(batch))
+		if enrolled > 0 {
+			slog.Debug("state-poller: backfill enrolled", "type", q.typ, "count", enrolled)
 		}
 	}
 }

@@ -667,6 +667,74 @@ func TestTier2AdapterPublishPendingDefersInFlightReviews(t *testing.T) {
 	}
 }
 
+func TestRunTier2PublishesPendingWhenLiveRepoSetIsEmpty(t *testing.T) {
+	s := newMemStore(t)
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	reviewID := seedPRWithReview(t, s, 103, now)
+
+	conn := newInProcessNATS(t)
+	ch := make(chan *nats.Msg, 1)
+	sub, err := conn.ChanSubscribe(bus.SubjPRPublish, ch)
+	if err != nil {
+		t.Fatalf("subscribe publish subject: %v", err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+	if err := conn.Flush(); err != nil {
+		t.Fatalf("flush subscribe: %v", err)
+	}
+
+	// Tier 1's last snapshot can still contain a repo that the live config
+	// has just disabled. Keep that stale snapshot in the test so an empty
+	// intersection, rather than an empty discovery input, drives the branch.
+	cfg := &config.Config{}
+	cfg.GitHub.NonMonitored = []string{"org/repo"}
+	var cfgMu sync.Mutex
+	adapter := &tier2Adapter{
+		store:      s,
+		publishPub: bus.NewPRPublishPublisher(conn),
+		cfgMu:      &cfgMu,
+		cfg:        &cfg,
+	}
+	reposCh := make(chan []string, 1)
+	reposCh <- []string{"org/repo"}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runTier2(
+			ctx,
+			adapter,
+			nil,
+			nil,
+			nil,
+			func() []string { return nil },
+			nil,
+			reposCh,
+			time.Hour,
+			true,
+			nil,
+		)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	select {
+	case msg := <-ch:
+		var got bus.PRPublishMsg
+		if err := bus.Decode(msg.Data, &got); err != nil {
+			t.Fatalf("decode publish msg: %v", err)
+		}
+		if got.ReviewID != reviewID {
+			t.Fatalf("published review ID = %d, want pending review %d", got.ReviewID, reviewID)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("PublishPending was skipped when the live repo set was empty")
+	}
+}
+
 func TestTier2AdapterPromoteReadyUsesOrgScopedIssueTracking(t *testing.T) {
 	var addedLabels [][]string
 	removedLabels := 0

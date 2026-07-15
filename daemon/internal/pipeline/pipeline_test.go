@@ -300,7 +300,9 @@ func (f *fakeGHWithHeadSHA) SubmitReview(repo string, number int, body, event st
 	f.submits++
 	return 1, "COMMENTED", nil
 }
-func (f *fakeGHWithHeadSHA) PostComment(repo string, number int, body string) (time.Time, error) { return time.Now().UTC(), nil }
+func (f *fakeGHWithHeadSHA) PostComment(repo string, number int, body string) (time.Time, error) {
+	return time.Now().UTC(), nil
+}
 func (f *fakeGHWithHeadSHA) FetchComments(repo string, number int) ([]github.Comment, error) {
 	return nil, nil
 }
@@ -358,7 +360,8 @@ func TestPipeline_Run_HydratesHeadSHAWhenMissing(t *testing.T) {
 // fakeExecCounter records how many times Execute was called so tests can
 // assert whether the pipeline short-circuited before invoking the CLI.
 type fakeExecCounter struct {
-	calls int
+	calls     int
+	onExecute func()
 }
 
 func (f *fakeExecCounter) Detect(primary, fallback string) (string, error) {
@@ -367,14 +370,17 @@ func (f *fakeExecCounter) Detect(primary, fallback string) (string, error) {
 
 func (f *fakeExecCounter) Execute(cli, prompt string, _ executor.ExecOptions) (*executor.ReviewResult, error) {
 	f.calls++
+	if f.onExecute != nil {
+		f.onExecute()
+	}
 	return &executor.ReviewResult{Summary: "ok", Severity: "low"}, nil
 }
 
 // fakeGHCounter records SubmitReview calls so tests can verify no publish
 // happens on a skipped re-review.
 type fakeGHCounter struct {
-	diff     string
-	submits  int
+	diff    string
+	submits int
 }
 
 func (f *fakeGHCounter) FetchDiff(repo string, number int) (string, error) { return f.diff, nil }
@@ -382,9 +388,13 @@ func (f *fakeGHCounter) SubmitReview(repo string, number int, body, event string
 	f.submits++
 	return 1, "COMMENTED", nil
 }
-func (f *fakeGHCounter) PostComment(repo string, number int, body string) (time.Time, error) { return time.Now().UTC(), nil }
-func (f *fakeGHCounter) FetchComments(repo string, number int) ([]github.Comment, error) { return nil, nil }
-func (f *fakeGHCounter) GetPRHeadSHA(repo string, number int) (string, error)            { return "", nil }
+func (f *fakeGHCounter) PostComment(repo string, number int, body string) (time.Time, error) {
+	return time.Now().UTC(), nil
+}
+func (f *fakeGHCounter) FetchComments(repo string, number int) ([]github.Comment, error) {
+	return nil, nil
+}
+func (f *fakeGHCounter) GetPRHeadSHA(repo string, number int) (string, error) { return "", nil }
 
 // TestPipeline_Run_SkipsReviewOnSameHeadSHA is the regression guard for the
 // bot-feedback loop bug seen on theburrowhub/heimdallm#139: any review
@@ -417,7 +427,12 @@ func TestPipeline_Run_SkipsReviewOnSameHeadSHA(t *testing.T) {
 		t.Fatalf("first run: %v", err)
 	}
 	if rev1 == nil || rev1.HeadSHA != "deadbeef" {
-		t.Fatalf("first review HeadSHA = %q, want %q", func() string { if rev1 == nil { return "<nil>" }; return rev1.HeadSHA }(), "deadbeef")
+		t.Fatalf("first review HeadSHA = %q, want %q", func() string {
+			if rev1 == nil {
+				return "<nil>"
+			}
+			return rev1.HeadSHA
+		}(), "deadbeef")
 	}
 	if exec.calls != 1 || gh.submits != 1 {
 		t.Fatalf("first run: exec=%d submits=%d, want 1/1", exec.calls, gh.submits)
@@ -1088,6 +1103,115 @@ func TestPipeline_Run_NilPublisherIsNoop(t *testing.T) {
 	}
 	if _, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"}); err != nil {
 		t.Fatalf("run with nil publisher: %v", err)
+	}
+}
+
+func TestPipeline_Run_DisabledDuringExecutionDoesNotPublish(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	eligible := true
+	exec := &fakeExecCounter{onExecute: func() { eligible = false }}
+	gh := &fakeGHCounter{diff: "+line"}
+	pub := &fakePublisher{}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	p.SetPublisher(pub)
+
+	pr := &github.PullRequest{
+		ID: 301, Number: 301, Title: "t", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/301",
+		Head: github.Branch{SHA: "abc"},
+	}
+	rev, err := p.Run(pr, pipeline.RunOptions{
+		Primary: "claude",
+		RepoEligible: func(repo string) bool {
+			return repo == "org/repo" && eligible
+		},
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if rev != nil {
+		t.Fatalf("review = %+v, want nil after live disable", rev)
+	}
+	if exec.calls != 1 {
+		t.Fatalf("Execute calls = %d, want 1", exec.calls)
+	}
+	if gh.submits != 0 {
+		t.Fatalf("SubmitReview calls = %d, want 0", gh.submits)
+	}
+	if got := pub.types(); !equalStringSlices(got, []string{
+		sse.EventPRDetected, sse.EventReviewStarted, sse.EventReviewSkipped,
+	}) {
+		t.Fatalf("events: got %v, want detected/started/skipped", got)
+	}
+	ev, _ := pub.firstOf(sse.EventReviewSkipped)
+	if !strings.Contains(ev.Data, `"reason":"not_monitored"`) {
+		t.Fatalf("review_skipped payload missing not_monitored: %q", ev.Data)
+	}
+	pending, err := s.ListUnpublishedReviews()
+	if err != nil {
+		t.Fatalf("list unpublished: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("unpublished reviews = %d, want 0", len(pending))
+	}
+}
+
+func TestPipeline_Run_DisabledAfterStoreMarksReviewTerminal(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	checks := 0
+	gh := &fakeGHCounter{diff: "+line"}
+	p := pipeline.New(s, gh, &fakeExecCounter{}, &fakeNotify{})
+	pr := &github.PullRequest{
+		ID: 302, Number: 302, Title: "t", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/302",
+		Head: github.Branch{SHA: "def"},
+	}
+	rev, err := p.Run(pr, pipeline.RunOptions{
+		Primary: "claude",
+		RepoEligible: func(string) bool {
+			checks++
+			// The fourth boundary is immediately after InsertReview.
+			return checks < 4
+		},
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if rev != nil {
+		t.Fatalf("review = %+v, want nil after cancellation", rev)
+	}
+	if gh.submits != 0 {
+		t.Fatalf("SubmitReview calls = %d, want 0", gh.submits)
+	}
+	storedPR, err := s.GetPRByGithubID(302)
+	if err != nil {
+		t.Fatalf("get PR: %v", err)
+	}
+	storedReview, err := s.LatestReviewForPR(storedPR.ID)
+	if err != nil {
+		t.Fatalf("latest review: %v", err)
+	}
+	if storedReview.GitHubReviewID != -1 {
+		t.Fatalf("GitHubReviewID = %d, want -1 terminal sentinel", storedReview.GitHubReviewID)
+	}
+	pending, err := s.ListUnpublishedReviews()
+	if err != nil {
+		t.Fatalf("list unpublished: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("unpublished reviews = %d, want 0", len(pending))
 	}
 }
 

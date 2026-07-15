@@ -4,6 +4,7 @@ package bus
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -13,6 +14,11 @@ const (
 	MaxBackoff     = 15 * time.Minute
 	EvictAfter     = 1 * time.Hour
 )
+
+// ErrWatchNotFound identifies a watch entry that was removed after a state
+// check message had already been queued. State workers treat that race as a
+// successful no-op instead of logging a misleading backoff failure.
+var ErrWatchNotFound = errors.New("watch entry not found")
 
 // watchStateSchema is applied on construction to create the table if needed.
 const watchStateSchema = `
@@ -114,7 +120,7 @@ func (w *WatchStore) Get(_ context.Context, key string) (*WatchEntry, error) {
 		&nextCheckStr, &entry.BackoffNs, &lastSeenStr)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("watch: key %s not found", key)
+			return nil, fmt.Errorf("%w: %s", ErrWatchNotFound, key)
 		}
 		return nil, fmt.Errorf("watch: get %s: %w", key, err)
 	}
@@ -139,7 +145,7 @@ func (w *WatchStore) ResetBackoff(_ context.Context, key string, observedAt time
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return fmt.Errorf("watch: key %s not found", key)
+		return fmt.Errorf("%w: %s", ErrWatchNotFound, key)
 	}
 	return nil
 }

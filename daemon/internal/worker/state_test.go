@@ -2,8 +2,11 @@
 package worker_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -75,5 +78,55 @@ func TestStateWorker_ConsumesAndCallsHandler(t *testing.T) {
 	}
 	if entry.Backoff() <= bus.InitialBackoff {
 		t.Errorf("expected backoff > initial after no-change, got %v", entry.Backoff())
+	}
+}
+
+func TestStateWorker_DeletedWatchDoesNotLogBackoffFailure(t *testing.T) {
+	b := newTestBus(t)
+	conn := b.Conn()
+	ws := newTestWatch(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := ws.Enroll(ctx, "pr", "org/disabled", 42, 9876); err != nil {
+		t.Fatalf("Enroll: %v", err)
+	}
+
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	handled := make(chan struct{})
+	handler := func(ctx context.Context, _ bus.StateCheckMsg) (bool, error) {
+		if err := ws.Delete(ctx, "pr.9876"); err != nil {
+			return false, err
+		}
+		close(handled)
+		return false, nil
+	}
+
+	w := worker.NewStateWorker(conn, 1, ws, handler)
+	go func() { _ = w.Start(ctx) }()
+	time.Sleep(100 * time.Millisecond)
+
+	pub := bus.NewStateCheckPublisher(conn)
+	if err := pub.PublishStateCheck(ctx, "pr", "org/disabled", 42, 9876); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	select {
+	case <-handled:
+	case <-ctx.Done():
+		t.Fatal("state handler was not called")
+	}
+
+	// Give the worker time to apply its post-handler backoff update. A queued
+	// state check may legitimately outlive the watch row it references.
+	time.Sleep(50 * time.Millisecond)
+	if strings.Contains(logs.String(), "increase backoff failed") {
+		t.Fatalf("deleted watch produced a misleading warning: %s", logs.String())
+	}
+	if _, err := ws.Get(ctx, "pr.9876"); err == nil {
+		t.Fatal("deleted watch was unexpectedly recreated")
 	}
 }
