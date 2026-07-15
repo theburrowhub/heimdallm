@@ -1976,18 +1976,34 @@ func main() {
 		slog.Info("trigger review: running pipeline",
 			"store_pr_id", prID, "repo", pr.Repo, "number", pr.Number, "github_id", pr.GithubID)
 
-		// Persistent in-flight claim: keyed on (store pr_id, head_sha).
-		// Triggered reviews are reconstructed from stored PR data which has no
-		// HEAD SHA populated; in that case we skip the claim and rely on the
-		// downstream SHA dedup inside pipeline.Run (Task 1, fail-closed) to
-		// prevent duplicate work. When the head SHA is known, claim/release
-		// using the same mechanism as the poll loop so both paths share the
-		// same persistent guard across daemon restart / config reload.
-		//
-		// Fail-open on Claim error here for the same reason as the poll path —
-		// see runReview above for the full layered-defense rationale
-		// (HEAD-SHA guard + circuit breaker + PublishedAt dedup cap the
-		// worst case at <€30/PR).
+		// Resolve the current HEAD SHA up front so the in-flight claim below
+		// actually engages for manual triggers. The ghPR is reconstructed from
+		// stored data with an empty Head.SHA; without this lookup the claim is
+		// skipped, and because Force (set below) bypasses the pipeline's own
+		// SHA dedup, two rapid clicks of the Re-review button — the handler
+		// queues work and returns 202 — would run two full concurrent reviews
+		// and double-publish. Resolving the SHA restores the (pr_id, head_sha)
+		// in-flight claim as the concurrency guard for this path. Fail-open on
+		// lookup error (log + proceed without the claim), matching the poll
+		// path's posture: better to lose the guard for one request than to
+		// block a legitimate manual re-review on a transient API blip.
+		if sha, shaErr := ghClient.GetPRHeadSHA(pr.Repo, pr.Number); shaErr != nil {
+			slog.Warn("trigger review: HEAD SHA lookup failed, proceeding without in-flight claim",
+				"repo", pr.Repo, "pr", pr.Number, "err", shaErr)
+		} else {
+			ghPR.Head.SHA = sha
+		}
+
+		// Persistent in-flight claim: keyed on (store pr_id, head_sha), the
+		// same mechanism as the poll loop so both paths share one guard across
+		// daemon restart / config reload. This is the ONLY duplicate-work
+		// defense left on the forced path: Force deliberately bypasses the
+		// pipeline's SHA/re-request dedup and the circuit breaker (explicit
+		// operator intent — see pipeline.RunOptions.Force), so a second
+		// concurrent click is rejected here with "already in progress" while a
+		// review is running, and a fresh click after it completes (claim
+		// released via the defer) re-reviews as intended. Fail-open on Claim
+		// error: a transient SQLite blip must not block a manual re-review.
 		var triggerClaimed bool
 		if ghPR.Head.SHA != "" {
 			ok, err := s.ClaimInFlightReview(pr.ID, ghPR.Head.SHA)
@@ -2019,6 +2035,8 @@ func main() {
 		// It must re-review the current HEAD on demand, bypassing the
 		// re-request/SHA dedup gate (which fires because the app cannot
 		// create a GitHub review_requested event) AND the circuit breaker.
+		// Concurrency/duplicate protection is retained via the in-flight
+		// claim taken above (keyed on the HEAD SHA resolved just before it).
 		// See pipeline.RunOptions.Force. The poll path never sets this.
 		runOpts := buildRunOpts(ghPR, aiCfg)
 		runOpts.Force = true

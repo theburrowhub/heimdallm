@@ -757,6 +757,71 @@ func TestPipeline_Run_ForceReReviewsSameSHAWithoutReRequest(t *testing.T) {
 	}
 }
 
+// TestPipeline_Run_ForceBackfillsLegacyRowAndReviews covers the reviewer's
+// point on the legacy-row branch: the HeadSHA backfill and the re-review skip
+// are independent. A forced run over a legacy row (empty HeadSHA) must STILL
+// backfill the column — so the row is no longer ambiguous even if the forced
+// run later fails before storing a fresh review — AND proceed to review
+// instead of skipping.
+func TestPipeline_Run_ForceBackfillsLegacyRowAndReviews(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	prID, err := s.UpsertPR(&store.PR{
+		GithubID: 77, Repo: "org/repo", Number: 77, Title: "t", Author: "alice",
+		State: "open", UpdatedAt: time.Now(), FetchedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("upsert pr: %v", err)
+	}
+	// Legacy review row: HeadSHA empty (pre-migration).
+	if _, err := s.InsertReview(&store.Review{
+		PRID: prID, CLIUsed: "claude", Issues: "[]", Suggestions: "[]",
+		Severity: "low", CreatedAt: time.Now().Add(-1 * time.Hour), HeadSHA: "",
+	}); err != nil {
+		t.Fatalf("insert legacy review: %v", err)
+	}
+
+	exec := &fakeExecCounter{}
+	gh := &fakeGHCounter{diff: "+line"}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	p.SetBotLogin("heimdallm-bot")
+
+	pr := &github.PullRequest{
+		ID: 77, Number: 77, Title: "t", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/77",
+		Head:      github.Branch{SHA: "newsha"},
+	}
+	if _, err := p.Run(pr, pipeline.RunOptions{Primary: "claude", Force: true}); err != nil {
+		t.Fatalf("forced run: %v", err)
+	}
+	if exec.calls != 1 {
+		t.Errorf("forced run over legacy row must review, got exec.calls=%d, want 1", exec.calls)
+	}
+	// The legacy row must have been backfilled regardless of Force.
+	reviews, err := s.ListReviewsForPR(prID)
+	if err != nil {
+		t.Fatalf("list reviews: %v", err)
+	}
+	var legacy *store.Review
+	for _, r := range reviews {
+		if r.CreatedAt.Before(time.Now().Add(-30 * time.Minute)) {
+			legacy = r
+			break
+		}
+	}
+	if legacy == nil {
+		t.Fatalf("legacy row not found among %d reviews", len(reviews))
+	}
+	if legacy.HeadSHA != "newsha" {
+		t.Errorf("legacy row HeadSHA not backfilled under Force: got %q, want %q", legacy.HeadSHA, "newsha")
+	}
+}
+
 // TestPipeline_Run_IgnoresStaleReviewRequest covers the negative case:
 // a review_requested whose timestamp predates the existing review is
 // already-satisfied and must NOT bypass the SHA skip. Otherwise every

@@ -458,15 +458,24 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	// non-nil prevReview bypassed that filter and made every poll cycle on a
 	// stable PR look like a brand-new review in every UI surface, even though
 	// no Claude credits were spent.
-	if !opts.Force && prevReview != nil && prevReview.HeadSHA == "" && pr.Head.SHA != "" {
-		slog.Info("pipeline: backfilling empty HeadSHA on legacy review row, skipping re-review",
-			"repo", pr.Repo, "pr", pr.Number, "review_id", prevReview.ID, "head_sha", pr.Head.SHA)
+	if prevReview != nil && prevReview.HeadSHA == "" && pr.Head.SHA != "" {
+		// Backfill the empty HeadSHA on the legacy row REGARDLESS of Force:
+		// the backfill write and the re-review skip are independent. A forced
+		// run that proceeds must not leave the ambiguous legacy row untouched
+		// (if it then fails before storing a fresh review, the row would still
+		// read as "cannot confirm safe" on the next automatic cycle).
+		slog.Info("pipeline: backfilling empty HeadSHA on legacy review row",
+			"repo", pr.Repo, "pr", pr.Number, "review_id", prevReview.ID,
+			"head_sha", pr.Head.SHA, "forced", opts.Force)
 		if err := p.store.UpdateReviewHeadSHA(prevReview.ID, pr.Head.SHA); err != nil {
 			slog.Warn("pipeline: failed to backfill HeadSHA",
 				"review_id", prevReview.ID, "err", err)
 		}
-		p.publishSkipped(pr, SkipReasonLegacyBackfill)
-		return nil, nil
+		// Only the automatic path skips here; a forced re-review proceeds.
+		if !opts.Force {
+			p.publishSkipped(pr, SkipReasonLegacyBackfill)
+			return nil, nil
+		}
 	}
 
 	// 2a.5 Process persistent-instruction directives (#383) BEFORE the
@@ -486,14 +495,17 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		}
 	}
 
-	if opts.Force && prevReview != nil {
-		// Explicit operator-initiated re-review (app "Re-review" button).
-		// Bypass the dedup gate below: there is no GitHub review_requested
-		// event to detect (see RunOptions.Force) and the whole point of the
-		// button is to re-review the current HEAD on demand.
-		slog.Info("pipeline: forced re-review — bypassing SHA/re-request dedup + circuit breaker",
-			"repo", pr.Repo, "pr", pr.Number,
-			"prev_head_sha", prevReview.HeadSHA, "head_sha", pr.Head.SHA)
+	if opts.Force {
+		// Explicit operator-initiated review (app "Re-review" button).
+		// Bypasses the SHA/re-request dedup gate below AND the circuit
+		// breaker (see RunOptions.Force). Logged unconditionally — NOT gated
+		// on prevReview — because the breaker bypass at the check further
+		// down also covers a forced FIRST review whose per-repo cap is
+		// tripped, which would otherwise be suppressed silently in a
+		// cost-sensitive path.
+		slog.Info("pipeline: forced review — bypassing re-request dedup + circuit breaker",
+			"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA,
+			"has_prev_review", prevReview != nil)
 	}
 	if !opts.Force && prevReview != nil && pr.Head.SHA != "" {
 		// Regardless of whether the HEAD SHA changed, the bot must not
