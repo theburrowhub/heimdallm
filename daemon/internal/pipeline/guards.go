@@ -9,6 +9,9 @@ const (
 	SkipReasonNotOpen      SkipReason = "not_open"
 	SkipReasonDraft        SkipReason = "draft"
 	SkipReasonSelfAuthored SkipReason = "self_authored"
+	// SkipReasonNotMonitored is emitted by automatic schedulers/workers when
+	// a repo was disabled after discovery or after a review job was queued.
+	SkipReasonNotMonitored SkipReason = "not_monitored"
 	// SkipReasonSHAUnchanged is emitted when pipeline.Run short-circuits
 	// because the previous review row already covers the current HEAD
 	// commit (the #245 fail-closed dedup) and no explicit re-request was
@@ -21,6 +24,11 @@ const (
 	// is now backfilled from the current snapshot. The user must trigger
 	// a re-review manually to score that exact commit.
 	SkipReasonLegacyBackfill SkipReason = "legacy_backfill"
+	// SkipReasonHeadChanged is emitted when a stored unpublished review was
+	// generated for an older commit. Publishing it against the current HEAD
+	// would misrepresent stale findings, so the pending row is retired and a
+	// later review request can evaluate the new commit.
+	SkipReasonHeadChanged SkipReason = "head_changed"
 	// SkipReasonNoReReviewRequest is emitted when pipeline.Run skips a
 	// review because the HEAD SHA changed (push) but no explicit
 	// review_requested event was found in the timeline after the

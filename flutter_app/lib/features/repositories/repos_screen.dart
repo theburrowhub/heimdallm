@@ -23,7 +23,8 @@ enum _SyncStatus { idle, saving, saved }
 
 class _ReposScreenState extends ConsumerState<ReposScreen> {
   Map<String, RepoConfig> _repoConfigs = {};
-  bool _initialized = false;
+  AppConfig? _sourceConfig;
+  final Set<String> _dirtyRepos = {};
   String _search = '';
   String _filter = 'all'; // 'all' | 'monitored' | 'not_monitored'
   String _viewMode = 'list'; // 'list' | 'grid'
@@ -117,6 +118,7 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
           Feature.issueTracking => c.copyWith(itEnabled: enable),
           Feature.develop => c.copyWith(devEnabled: enable),
         };
+        _dirtyRepos.add(r);
       }
     });
     _debounce?.cancel();
@@ -143,15 +145,25 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
     super.dispose();
   }
 
-  void _initFrom(AppConfig config) {
-    if (_initialized) return;
-    _initialized = true;
+  void _syncFrom(AppConfig config, {bool force = false}) {
+    if (!force && identical(_sourceConfig, config)) return;
+    final localConfigs = _repoConfigs;
+    _sourceConfig = config;
     _repoConfigs = Map.from(config.repoConfigs);
+    for (final repo in _dirtyRepos) {
+      final local = localConfigs[repo];
+      if (local != null) _repoConfigs[repo] = local;
+    }
+    _dirtyRepos.removeWhere((repo) => !_repoConfigs.containsKey(repo));
+    _selected.retainAll(_repoConfigs.keys);
   }
 
   /// Called whenever a repo config changes — schedules an auto-save.
   void _onChange(String repo, RepoConfig rc) {
-    setState(() => _repoConfigs[repo] = rc);
+    setState(() {
+      _repoConfigs[repo] = rc;
+      _dirtyRepos.add(repo);
+    });
     _debounce?.cancel();
     _debounce = Timer(const Duration(milliseconds: 800), _autoSave);
   }
@@ -159,12 +171,27 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
   Future<void> _autoSave() async {
     final current = ref.read(configNotifierProvider).value;
     if (current == null) return;
+    final submitted = <String, RepoConfig>{};
+    for (final repo in _dirtyRepos) {
+      final config = _repoConfigs[repo];
+      if (config != null) submitted[repo] = config;
+    }
+    if (submitted.isEmpty) return;
     if (mounted) setState(() => _syncStatus = _SyncStatus.saving);
     final updated = current.copyWith(repoConfigs: Map.from(_repoConfigs));
     try {
       await ref.read(configNotifierProvider.notifier).save(updated);
       if (!mounted) return;
-      setState(() => _syncStatus = _SyncStatus.saved);
+      final latest = ref.read(configNotifierProvider).value;
+      setState(() {
+        for (final entry in submitted.entries) {
+          if (identical(_repoConfigs[entry.key], entry.value)) {
+            _dirtyRepos.remove(entry.key);
+          }
+        }
+        if (latest != null) _syncFrom(latest, force: true);
+        _syncStatus = _SyncStatus.saved;
+      });
       _savedResetTimer?.cancel();
       _savedResetTimer = Timer(const Duration(seconds: 2), () {
         if (mounted) setState(() => _syncStatus = _SyncStatus.idle);
@@ -179,13 +206,14 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
 
   @override
   Widget build(BuildContext context) {
+    ref.watch(configRefreshProvider);
     final configAsync = ref.watch(configNotifierProvider);
 
     return configAsync.when(
       loading: () => const Center(child: CircularProgressIndicator()),
       error: (_, _) => const Center(child: Text('Could not load config')),
       data: (config) {
-        _initFrom(config);
+        _syncFrom(config);
 
         // Monitored first, disabled last; both groups sorted alphabetically
         final allRepos = _repoConfigs.keys.toList()

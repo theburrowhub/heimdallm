@@ -53,9 +53,17 @@ type reviewFixDispatcher interface {
 func (a *tier2Adapter) refreshAutoImplementPRReviewState(
 	ctx context.Context, item *scheduler.WatchItem, stored *store.PR,
 ) error {
+	if a.repoMonitoringConfiguredAndDisabled(item.Repo) {
+		return nil
+	}
 	reviews, err := a.ghClient.GetPRReviews(item.Repo, item.Number)
 	if err != nil {
 		return fmt.Errorf("get pr reviews: %w", err)
+	}
+	// The repo may be disabled while the reviews request is in flight. Stop
+	// before persisting or dispatching any reaction from the stale watch item.
+	if a.repoMonitoringConfiguredAndDisabled(item.Repo) {
+		return nil
 	}
 	botLogin := a.cachedAuthenticatedUser()
 	state, reviewer, at := issuepipeline.LatestExternalReviewState(reviews, botLogin)
@@ -134,7 +142,7 @@ func (a *tier2Adapter) refreshAutoImplementPRReviewState(
 	// StateWorker's IncreaseBackoff branch.
 	switch state {
 	case issuepipeline.ReviewStateCommented:
-		if a.responder != nil {
+		if a.responder != nil && !a.repoMonitoringConfiguredAndDisabled(item.Repo) {
 			if err := a.responder.Run(ctx, stored, stored.AutoImplementIssueID); err != nil {
 				slog.Warn("tier3: responder run failed (retrying next tick)",
 					"repo", item.Repo, "number", item.Number, "err", err)
@@ -142,7 +150,7 @@ func (a *tier2Adapter) refreshAutoImplementPRReviewState(
 			}
 		}
 	case issuepipeline.ReviewStateChangesRequested:
-		if a.fixRunner != nil {
+		if a.fixRunner != nil && !a.repoMonitoringConfiguredAndDisabled(item.Repo) {
 			if err := a.fixRunner.Run(ctx, stored, stored.AutoImplementIssueID); err != nil {
 				slog.Warn("tier3: fix runner failed (retrying next tick)",
 					"repo", item.Repo, "number", item.Number, "err", err)
@@ -151,6 +159,13 @@ func (a *tier2Adapter) refreshAutoImplementPRReviewState(
 		}
 	}
 	return nil
+}
+
+// repoMonitoringConfiguredAndDisabled keeps the review-state helpers usable
+// in narrow unit tests that intentionally omit config, while production
+// adapters always enforce the live monitored set.
+func (a *tier2Adapter) repoMonitoringConfiguredAndDisabled(repo string) bool {
+	return a != nil && a.cfg != nil && !a.repoIsMonitored(repo)
 }
 
 // autonomousEnabledForRepo reports whether autonomous mode is enabled for the
@@ -194,6 +209,9 @@ func (a *tier2Adapter) autonomousEnabledForRepo(repo string) bool {
 func (a *tier2Adapter) dispatchAutonomousReview(
 	ctx context.Context, item *scheduler.WatchItem, stored *store.PR, reviews []gh.PRReview, state string,
 ) error {
+	if a.repoMonitoringConfiguredAndDisabled(item.Repo) {
+		return nil
+	}
 	decision := autonomous.ClassifyReview(toReviewInputs(reviews))
 
 	if a.broker != nil {

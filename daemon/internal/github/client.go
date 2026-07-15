@@ -396,11 +396,30 @@ func classifyPermanentSubmit422(status int, body []byte) (string, bool) {
 // as orphaned instead of retrying every poll cycle. See
 // theburrowhub/heimdallm#325.
 func (c *Client) SubmitReview(repo string, number int, body, event string) (int64, string, error) {
+	return c.submitReview(repo, number, body, event, "")
+}
+
+// SubmitReviewForCommit posts a review anchored to the exact commit that was
+// analysed. GitHub otherwise defaults to the pull request's current HEAD,
+// which lets a concurrent push misattribute findings from an older commit.
+// Keeping this as a separate concrete-client method preserves the existing
+// SubmitReview interface implemented by pipeline test doubles and adapters.
+func (c *Client) SubmitReviewForCommit(repo string, number int, body, event, commitID string) (int64, string, error) {
+	if strings.TrimSpace(commitID) == "" {
+		return 0, "", fmt.Errorf("github: submit review: empty commit_id")
+	}
+	return c.submitReview(repo, number, body, event, commitID)
+}
+
+func (c *Client) submitReview(repo string, number int, body, event, commitID string) (int64, string, error) {
 	path := fmt.Sprintf("/repos/%s/pulls/%d/reviews", repo, number)
 
 	payload := map[string]any{
 		"body":  body,
 		"event": event,
+	}
+	if commitID != "" {
+		payload["commit_id"] = commitID
 	}
 
 	data, _ := json.Marshal(payload)

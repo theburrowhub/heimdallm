@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/heimdallm/daemon/internal/config"
+	"github.com/heimdallm/daemon/internal/discovery"
 	"github.com/heimdallm/daemon/internal/sse"
 )
 
@@ -115,6 +116,39 @@ func TestUpsertDiscoveredFromTopics_RespectsDisabledFlag(t *testing.T) {
 	}
 	if len(cfg.GitHub.NonMonitored) != 1 || cfg.GitHub.NonMonitored[0] != "org/new" {
 		t.Fatalf("repo should be in NonMonitored, got %v", cfg.GitHub.NonMonitored)
+	}
+
+	// Even while the discovery service still reports the raw topic result,
+	// the just-persisted disable must win before Tier 2 exposes its snapshot.
+	live := func() []string {
+		return discovery.MergeRepos(
+			cfg.GitHub.Repositories,
+			aiRepoKeys(cfg),
+			[]string{"org/new"},
+			cfg.GitHub.NonMonitored,
+		)
+	}
+	if got := intersectMonitoredRepos([]string{"org/new"}, live); len(got) != 0 {
+		t.Fatalf("first-cycle topic repo survived non-monitored classification: %v", got)
+	}
+}
+
+func TestUpsertDiscoveredFromTopics_DoesNotDisableExplicitAIRepo(t *testing.T) {
+	autoEnable := false
+	cfg := &config.Config{}
+	cfg.GitHub.AutoEnablePROnDiscovery = &autoEnable
+	cfg.AI.Repos = map[string]config.RepoAI{"org/configured": {}}
+
+	s := newMemStore(t)
+	var mu sync.Mutex
+	a := &tier2Adapter{cfgMu: &mu, cfg: &cfg, store: s}
+	a.upsertDiscoveredFromTopics([]string{"org/configured"})
+
+	if len(cfg.GitHub.NonMonitored) != 0 {
+		t.Fatalf("explicit AI repo was auto-disabled: %v", cfg.GitHub.NonMonitored)
+	}
+	if !repoIsMonitored(cfg, "org/configured") {
+		t.Fatal("explicit AI repo is no longer monitored")
 	}
 }
 

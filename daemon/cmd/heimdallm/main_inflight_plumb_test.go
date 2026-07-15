@@ -223,14 +223,14 @@ func TestTier2Adapter_ProcessPR_PlumbsHeadSHAIntoGhPR(t *testing.T) {
 	}
 
 	pr := scheduler.Tier2PR{
-		ID:     4242,
-		Number: 7,
-		Repo:   "org/repo",
-		Title:  "t",
-		Author: "alice",
-		State:  "open",
-		Draft:  false,
-		HeadSHA: wantSHA,
+		ID:        4242,
+		Number:    7,
+		Repo:      "org/repo",
+		Title:     "t",
+		Author:    "alice",
+		State:     "open",
+		Draft:     false,
+		HeadSHA:   wantSHA,
 		UpdatedAt: time.Now(),
 	}
 
@@ -294,7 +294,9 @@ func TestTier2Adapter_HandleChange_PlumbsHeadSHAIntoGhPR(t *testing.T) {
 		loginMu sync.Mutex
 		login   = "heimdallm-bot"
 		cfgMu   sync.Mutex
-		cfg     = &config.Config{}
+		cfg     = &config.Config{GitHub: config.GitHubConfig{
+			Repositories: []string{"org/repo"},
+		}}
 	)
 
 	a := &tier2Adapter{
