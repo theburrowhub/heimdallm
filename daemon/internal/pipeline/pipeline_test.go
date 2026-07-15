@@ -115,6 +115,18 @@ func (f *fakeTimeline) callCount() int {
 	return f.calls
 }
 
+// fakeReviewerFetcher is a ReviewerFetcher stub returning a canned
+// PRHeadInfo (or an error) so the requested-reviewer bypass can be driven
+// deterministically. Used by the #1532 tests.
+type fakeReviewerFetcher struct {
+	info github.PRHeadInfo
+	err  error
+}
+
+func (f *fakeReviewerFetcher) GetPRHeadInfo(_ string, _ int) (github.PRHeadInfo, error) {
+	return f.info, f.err
+}
+
 // fakePublisher records every SSE event the pipeline emits so lifecycle
 // tests can assert the exact (event_type, payload) pairs that hit the
 // broker. Mirrors the *sse.Broker contract via duck-typing — no need to
@@ -165,6 +177,7 @@ func TestPipeline_Run(t *testing.T) {
 		ID: 1, Number: 1, Title: "Fix bug", Repo: "org/repo",
 		User: github.User{Login: "alice"}, State: "open",
 		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/1",
+		Head:      github.Branch{SHA: "sha1"},
 	}
 
 	rev, err := p.Run(pr, pipeline.RunOptions{Primary: "claude", Fallback: "gemini", ReviewMode: "single"})
@@ -247,6 +260,7 @@ func TestPipeline_Run_CommentsInjectedIntoPrompt(t *testing.T) {
 		ID: 2, Number: 2, Title: "Add feature", Repo: "org/repo",
 		User: github.User{Login: "alice"}, State: "open",
 		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/2",
+		Head:      github.Branch{SHA: "sha2"},
 	}
 	_, err = p.Run(pr, pipeline.RunOptions{Primary: "claude", Fallback: "gemini"})
 	if err != nil {
@@ -273,6 +287,7 @@ func TestPipeline_Run_CommentsFetchErrorIsNonFatal(t *testing.T) {
 		ID: 3, Number: 3, Title: "Fix", Repo: "org/repo",
 		User: github.User{Login: "alice"}, State: "open",
 		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/3",
+		Head:      github.Branch{SHA: "sha3"},
 	}
 	_, err = p.Run(pr, pipeline.RunOptions{Primary: "claude", Fallback: "gemini"})
 	if err != nil {
@@ -707,6 +722,281 @@ func TestPipeline_Run_RespectsExplicitReReviewOnSameSHA(t *testing.T) {
 	}
 	if tl.callCount() == 0 {
 		t.Errorf("timeline was not consulted on SHA-skip path")
+	}
+}
+
+// TestPipeline_Run_ForceReReviewsSameSHAWithoutReRequest is the regression
+// guard for the "manual Re-review never runs" bug. Heimdallm authenticates as
+// the operator's own GitHub account, which cannot request a review from
+// itself — so the app's "Re-review" button (POST /prs/{id}/review) can never
+// produce a review_requested timeline event, and the SHA-skip bypass never
+// fires. Before the fix, every manual re-review on an already-reviewed PR was
+// silently skipped (reason=sha_unchanged) and the button did nothing. With
+// RunOptions.Force the pipeline must re-run the review on the current HEAD.
+func TestPipeline_Run_ForceReReviewsSameSHAWithoutReRequest(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	exec := &fakeExecCounter{}
+	gh := &fakeGHCounter{diff: "+line"}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	p.SetBotLogin("heimdallm-bot")
+
+	pr := &github.PullRequest{
+		ID: 99, Number: 99, Title: "t", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now().Add(-1 * time.Hour),
+		HTMLURL:   "https://github.com/org/repo/pull/99",
+		Head:      github.Branch{SHA: "samesha"},
+	}
+	runFirstReview(t, p, pr)
+	if exec.calls != 1 {
+		t.Fatalf("seed: expected exec.calls=1, got %d", exec.calls)
+	}
+
+	// No timeline fetcher wired (mirrors "no GitHub review_requested event
+	// exists") and the HEAD SHA is unchanged — the exact conditions that made
+	// the automatic path skip. Force must override that.
+	pr.UpdatedAt = time.Now()
+	if _, err := p.Run(pr, pipeline.RunOptions{Primary: "claude", Force: true}); err != nil {
+		t.Fatalf("forced run: %v", err)
+	}
+	if exec.calls != 2 {
+		t.Errorf("forced re-review must re-run executor, got exec.calls=%d, want 2", exec.calls)
+	}
+	if gh.submits != 2 {
+		t.Errorf("forced re-review must submit again, got gh.submits=%d, want 2", gh.submits)
+	}
+}
+
+// TestPipeline_Run_FailsClosedOnEmptyResolvedSHA verifies that when the HEAD
+// SHA resolver returns an empty string with a nil error (an anomalous but
+// possible API result), Run fails closed instead of proceeding: proceeding
+// would store a review row with an empty HeadSHA, recreating the ambiguous
+// legacy-row shape (#322 Bug 4). This holds even under Force, which otherwise
+// has no downstream dedup/breaker backstop.
+func TestPipeline_Run_FailsClosedOnEmptyResolvedSHA(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	exec := &fakeExecCounter{}
+	// fakeGHCounter.GetPRHeadSHA returns ("", nil) — the empty-but-nil case.
+	gh := &fakeGHCounter{diff: "+line"}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+
+	pr := &github.PullRequest{
+		ID: 88, Number: 88, Title: "t", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/88",
+		Head:      github.Branch{SHA: ""}, // forces the resolver path
+	}
+	_, err = p.Run(pr, pipeline.RunOptions{Primary: "claude", Force: true})
+	if err == nil {
+		t.Fatalf("expected fail-closed error on empty resolved SHA, got nil")
+	}
+	if exec.calls != 0 {
+		t.Errorf("executor must not run when SHA resolves empty, got calls=%d", exec.calls)
+	}
+	if gh.submits != 0 {
+		t.Errorf("SubmitReview must not run when SHA resolves empty, got submits=%d", gh.submits)
+	}
+}
+
+// TestPipeline_Run_ForceBackfillsLegacyRowAndReviews covers the reviewer's
+// point on the legacy-row branch: the HeadSHA backfill and the re-review skip
+// are independent. A forced run over a legacy row (empty HeadSHA) must STILL
+// backfill the column — so the row is no longer ambiguous even if the forced
+// run later fails before storing a fresh review — AND proceed to review
+// instead of skipping.
+func TestPipeline_Run_ForceBackfillsLegacyRowAndReviews(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	prID, err := s.UpsertPR(&store.PR{
+		GithubID: 77, Repo: "org/repo", Number: 77, Title: "t", Author: "alice",
+		State: "open", UpdatedAt: time.Now(), FetchedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("upsert pr: %v", err)
+	}
+	// Legacy review row: HeadSHA empty (pre-migration).
+	if _, err := s.InsertReview(&store.Review{
+		PRID: prID, CLIUsed: "claude", Issues: "[]", Suggestions: "[]",
+		Severity: "low", CreatedAt: time.Now().Add(-1 * time.Hour), HeadSHA: "",
+	}); err != nil {
+		t.Fatalf("insert legacy review: %v", err)
+	}
+
+	exec := &fakeExecCounter{}
+	gh := &fakeGHCounter{diff: "+line"}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	p.SetBotLogin("heimdallm-bot")
+
+	pr := &github.PullRequest{
+		ID: 77, Number: 77, Title: "t", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/77",
+		Head:      github.Branch{SHA: "newsha"},
+	}
+	if _, err := p.Run(pr, pipeline.RunOptions{Primary: "claude", Force: true}); err != nil {
+		t.Fatalf("forced run: %v", err)
+	}
+	if exec.calls != 1 {
+		t.Errorf("forced run over legacy row must review, got exec.calls=%d, want 1", exec.calls)
+	}
+	// The legacy row must have been backfilled regardless of Force.
+	reviews, err := s.ListReviewsForPR(prID)
+	if err != nil {
+		t.Fatalf("list reviews: %v", err)
+	}
+	var legacy *store.Review
+	for _, r := range reviews {
+		if r.CreatedAt.Before(time.Now().Add(-30 * time.Minute)) {
+			legacy = r
+			break
+		}
+	}
+	if legacy == nil {
+		t.Fatalf("legacy row not found among %d reviews", len(reviews))
+	}
+	if legacy.HeadSHA != "newsha" {
+		t.Errorf("legacy row HeadSHA not backfilled under Force: got %q, want %q", legacy.HeadSHA, "newsha")
+	}
+}
+
+// TestPipeline_Run_ReReviewsNewCommitsWhenRequestedReviewer is the regression
+// guard for theburrowhub/heimdallm#1532: GitHub re-adds the bot to
+// requested_reviewers on new commits WITHOUT emitting a review_requested
+// timeline event, so the timeline bypass is blind to it. When the HEAD has
+// advanced past the last reviewed commit and the bot is a current requested
+// reviewer, the pipeline must re-review the new code.
+func TestPipeline_Run_ReReviewsNewCommitsWhenRequestedReviewer(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	exec := &fakeExecCounter{}
+	gh := &fakeGHCounter{diff: "+line"}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	p.SetBotLogin("heimdallm-bot")
+	// No timeline fetcher wired: mirrors "no review_requested event exists".
+	// The bot IS a current requested reviewer per the reviewer fetcher.
+	p.SetReviewerFetcher(&fakeReviewerFetcher{
+		info: github.PRHeadInfo{RequestedReviewers: []string{"heimdallm-bot"}},
+	})
+
+	pr := &github.PullRequest{
+		ID: 1532, Number: 1532, Title: "t", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now().Add(-1 * time.Hour),
+		HTMLURL:   "https://github.com/org/repo/pull/1532",
+		Head:      github.Branch{SHA: "oldsha"},
+	}
+	runFirstReview(t, p, pr)
+	if exec.calls != 1 {
+		t.Fatalf("seed: expected exec.calls=1, got %d", exec.calls)
+	}
+
+	// New commits pushed → HEAD advances. No review_requested event, but the
+	// bot is still a requested reviewer → must re-review.
+	pr.Head.SHA = "newsha"
+	pr.UpdatedAt = time.Now()
+	if _, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"}); err != nil {
+		t.Fatalf("re-review run: %v", err)
+	}
+	if exec.calls != 2 {
+		t.Errorf("new commits + requested reviewer must re-review, got exec.calls=%d, want 2", exec.calls)
+	}
+	if gh.submits != 2 {
+		t.Errorf("expected a second submit, got gh.submits=%d", gh.submits)
+	}
+}
+
+// TestPipeline_Run_SkipsNewCommitsWhenNotRequestedReviewer covers the
+// operator's explicit rule: new commits with NO pending review request must
+// NOT trigger a review. Same setup as the #1532 test but the bot is absent
+// from requested_reviewers.
+func TestPipeline_Run_SkipsNewCommitsWhenNotRequestedReviewer(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	exec := &fakeExecCounter{}
+	gh := &fakeGHCounter{diff: "+line"}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	p.SetBotLogin("heimdallm-bot")
+	// Bot is NOT in requested_reviewers (someone else is).
+	p.SetReviewerFetcher(&fakeReviewerFetcher{
+		info: github.PRHeadInfo{RequestedReviewers: []string{"alice"}},
+	})
+
+	pr := &github.PullRequest{
+		ID: 1, Number: 1, Title: "t", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now().Add(-1 * time.Hour),
+		HTMLURL:   "https://github.com/org/repo/pull/1",
+		Head:      github.Branch{SHA: "oldsha"},
+	}
+	runFirstReview(t, p, pr)
+
+	pr.Head.SHA = "newsha" // new commits, but no pending request for the bot
+	pr.UpdatedAt = time.Now()
+	if _, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"}); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if exec.calls != 1 {
+		t.Errorf("new commits without a pending request must NOT re-review, got exec.calls=%d", exec.calls)
+	}
+}
+
+// TestPipeline_Run_SkipsSameSHAEvenWhenRequestedReviewer guards against the
+// auto-re-add loop #509 mitigated: a requested reviewer on the SAME commit
+// (no new code, no timeline event) must NOT re-review — otherwise a repo that
+// keeps the bot permanently requested would review the same commit forever.
+func TestPipeline_Run_SkipsSameSHAEvenWhenRequestedReviewer(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	exec := &fakeExecCounter{}
+	gh := &fakeGHCounter{diff: "+line"}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	p.SetBotLogin("heimdallm-bot")
+	p.SetReviewerFetcher(&fakeReviewerFetcher{
+		info: github.PRHeadInfo{RequestedReviewers: []string{"heimdallm-bot"}},
+	})
+
+	pr := &github.PullRequest{
+		ID: 2, Number: 2, Title: "t", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now().Add(-1 * time.Hour),
+		HTMLURL:   "https://github.com/org/repo/pull/2",
+		Head:      github.Branch{SHA: "samesha"},
+	}
+	runFirstReview(t, p, pr)
+
+	// Same SHA, still a requested reviewer, no timeline event → must skip.
+	pr.UpdatedAt = time.Now()
+	if _, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"}); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if exec.calls != 1 {
+		t.Errorf("same SHA must NOT re-review even as requested reviewer, got exec.calls=%d", exec.calls)
 	}
 }
 

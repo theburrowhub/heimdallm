@@ -81,6 +81,21 @@ type TimelineFetcher interface {
 	GetPRTimelineEventsForReviewer(repo string, number int, login string) ([]github.TimelineEvent, error)
 }
 
+// ReviewerFetcher reports the PR's current requested_reviewers (via the Pulls
+// API). Used by the SHA-skip path to catch re-reviews that leave NO
+// review_requested timeline event: GitHub re-adds the bot to
+// requested_reviewers on some flows (observed on ai-bumblebee-proxy#1532)
+// without emitting an event the TimelineFetcher can see, so timeline-only
+// detection is blind to them. Combined with a HEAD SHA that advanced past the
+// last reviewed commit, being a current requested reviewer is treated as an
+// implicit re-request.
+//
+// Optional dependency: when not set (nil), the requested-reviewer bypass is
+// disabled and the pipeline falls back to timeline-only detection.
+type ReviewerFetcher interface {
+	GetPRHeadInfo(repo string, number int) (github.PRHeadInfo, error)
+}
+
 // Publisher is the broker subset the pipeline uses to emit lifecycle
 // events. *sse.Broker satisfies it directly so main.go can wire the
 // production broker as the publisher with no adapter.
@@ -122,6 +137,11 @@ type Pipeline struct {
 	// SHA-skip path on explicit re-request review actions. Nil keeps the
 	// pre-#322 behaviour (skip on SHA match regardless of user intent).
 	timeline TimelineFetcher
+	// reviewers is the optional requested_reviewers fetcher used to bypass
+	// the SHA-skip path when the HEAD advanced past the last reviewed commit
+	// and the bot is a current requested reviewer, even with no
+	// review_requested timeline event. Nil disables that bypass.
+	reviewers ReviewerFetcher
 	// publisher emits lifecycle SSE events (pr_detected, review_started,
 	// review_completed, review_skipped) at the same semantic point Run
 	// makes the actual decision. Nil disables emission (legacy contract).
@@ -156,6 +176,13 @@ func (p *Pipeline) SetCircuitBreakerLimits(limits *store.CircuitBreakerLimits) {
 // here at daemon startup.
 func (p *Pipeline) SetTimelineFetcher(t TimelineFetcher) {
 	p.timeline = t
+}
+
+// SetReviewerFetcher enables the requested-reviewer bypass for the SHA-skip
+// path (re-reviews that leave no review_requested timeline event). Nil keeps
+// timeline-only detection. Production wires the *github.Client here.
+func (p *Pipeline) SetReviewerFetcher(r ReviewerFetcher) {
+	p.reviewers = r
 }
 
 // SetPublisher wires the SSE broker so Run can emit lifecycle events
@@ -253,6 +280,43 @@ func (p *Pipeline) shouldBypassSHASkipForReReview(pr *github.PullRequest, prevRe
 	return false
 }
 
+// shouldReReviewNewCommitsAsRequestedReviewer returns true when the PR's HEAD
+// has advanced past the last reviewed commit AND the bot is currently a
+// requested reviewer. This catches re-reviews that leave no review_requested
+// timeline event (so shouldBypassSHASkipForReReview is blind to them): GitHub
+// re-adds the bot to requested_reviewers on some flows without emitting an
+// event — observed on ai-bumblebee-proxy#1532, where the bot is a pending
+// reviewer on unreviewed commits yet the timeline has no fresh request.
+//
+// Deliberately requires BOTH conditions:
+//   - HEAD SHA advanced past prevReview.HeadSHA — there is genuinely new,
+//     unreviewed code. A same-SHA re-add is NOT covered: no new code means
+//     re-reviewing would just reopen the auto-re-add loop #509 guarded against.
+//   - the bot is still a requested reviewer — a new commit with NO pending
+//     request must not trigger a review (the operator's explicit rule).
+//
+// Fail-closed on a missing dependency (nil reviewers / empty bot login / nil
+// prevReview / empty prevReview.HeadSHA) or an API error, matching the
+// timeline bypass's posture.
+func (p *Pipeline) shouldReReviewNewCommitsAsRequestedReviewer(pr *github.PullRequest, prevReview *store.Review) bool {
+	if p.reviewers == nil || p.botLogin == "" || prevReview == nil {
+		return false
+	}
+	// New code only: the HEAD must have advanced past the reviewed commit.
+	// Empty prevReview.HeadSHA is the ambiguous legacy row handled elsewhere;
+	// don't treat "" != sha as "new commits" here.
+	if prevReview.HeadSHA == "" || prevReview.HeadSHA == pr.Head.SHA {
+		return false
+	}
+	info, err := p.reviewers.GetPRHeadInfo(pr.Repo, pr.Number)
+	if err != nil {
+		slog.Warn("pipeline: requested-reviewer lookup failed, keeping SHA skip (fail-closed)",
+			"repo", pr.Repo, "pr", pr.Number, "err", err)
+		return false
+	}
+	return info.ReviewRequestedFor(p.botLogin)
+}
+
 // applyPrompt resolves a prompt with priority: repoPromptID > agentPromptID > global default.
 func (p *Pipeline) applyPrompt(repoPromptID, agentPromptID string, tmpl *string, flags *string) {
 	agents, err := p.store.ListAgents()
@@ -322,6 +386,21 @@ type RunOptions struct {
 	// execution/publication boundaries so a config reload can stop an in-flight
 	// review. Nil intentionally allows explicit/manual calls to proceed.
 	RepoEligible func(string) bool
+	// Force marks an explicit operator-initiated re-review (the app's
+	// "Re-review" button → POST /prs/{id}/review). It bypasses the two
+	// cost-control gates that exist to suppress the AUTOMATIC poll path:
+	//   1. the re-review dedup gate — SHA-unchanged / no-new-review_requested
+	//      (see #139/#245/#509). The app cannot create a GitHub
+	//      review_requested event (Heimdallm authenticates as the operator's
+	//      own account, which cannot request a review from itself), so the
+	//      timeline bypass never fires and every manual re-review was
+	//      silently skipped.
+	//   2. the circuit breaker (per-PR/per-repo cap, #243) — a human clicking
+	//      the button is deliberate intent, not a runaway loop.
+	// Force must ONLY be set by the manual-trigger callback, never by the
+	// pollers, so the automatic path keeps every protection intact. The
+	// state guards (opts.Guards: closed / draft / self-authored) still apply.
+	Force bool
 }
 
 // Run executes the full review pipeline for one PR and publishes the review to GitHub.
@@ -413,6 +492,17 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 				"repo", pr.Repo, "pr", pr.Number, "err", err)
 			return nil, fmt.Errorf("pipeline: resolve HEAD SHA: %w", err)
 		}
+		if sha == "" {
+			// Empty-but-nil-error: treat as a lookup failure. Proceeding would
+			// store a review row with an empty HeadSHA, recreating the exact
+			// ambiguous legacy-row shape (#322 Bug 4) the backfill exists to
+			// repair — and on a forced run Force has no downstream dedup/breaker
+			// backstop, so this is the only place to fail closed. Applies to
+			// every caller, including the manual trigger.
+			slog.Warn("pipeline: HEAD SHA resolved empty — skipping review (fail-closed)",
+				"repo", pr.Repo, "pr", pr.Number)
+			return nil, fmt.Errorf("pipeline: resolve HEAD SHA: empty SHA returned")
+		}
 		pr.Head.SHA = sha
 	}
 	prevReview, _ := p.store.LatestReviewForPR(prID)
@@ -444,14 +534,23 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	// stable PR look like a brand-new review in every UI surface, even though
 	// no Claude credits were spent.
 	if prevReview != nil && prevReview.HeadSHA == "" && pr.Head.SHA != "" {
-		slog.Info("pipeline: backfilling empty HeadSHA on legacy review row, skipping re-review",
-			"repo", pr.Repo, "pr", pr.Number, "review_id", prevReview.ID, "head_sha", pr.Head.SHA)
+		// Backfill the empty HeadSHA on the legacy row REGARDLESS of Force:
+		// the backfill write and the re-review skip are independent. A forced
+		// run that proceeds must not leave the ambiguous legacy row untouched
+		// (if it then fails before storing a fresh review, the row would still
+		// read as "cannot confirm safe" on the next automatic cycle).
+		slog.Info("pipeline: backfilling empty HeadSHA on legacy review row",
+			"repo", pr.Repo, "pr", pr.Number, "review_id", prevReview.ID,
+			"head_sha", pr.Head.SHA, "forced", opts.Force)
 		if err := p.store.UpdateReviewHeadSHA(prevReview.ID, pr.Head.SHA); err != nil {
 			slog.Warn("pipeline: failed to backfill HeadSHA",
 				"review_id", prevReview.ID, "err", err)
 		}
-		p.publishSkipped(pr, SkipReasonLegacyBackfill)
-		return nil, nil
+		// Only the automatic path skips here; a forced re-review proceeds.
+		if !opts.Force {
+			p.publishSkipped(pr, SkipReasonLegacyBackfill)
+			return nil, nil
+		}
 	}
 
 	// 2a.5 Process persistent-instruction directives (#383) BEFORE the
@@ -471,7 +570,19 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		}
 	}
 
-	if prevReview != nil && pr.Head.SHA != "" {
+	if opts.Force {
+		// Explicit operator-initiated review (app "Re-review" button).
+		// Bypasses the SHA/re-request dedup gate below AND the circuit
+		// breaker (see RunOptions.Force). Logged unconditionally — NOT gated
+		// on prevReview — because the breaker bypass at the check further
+		// down also covers a forced FIRST review whose per-repo cap is
+		// tripped, which would otherwise be suppressed silently in a
+		// cost-sensitive path.
+		slog.Info("pipeline: forced review — bypassing re-request dedup + circuit breaker",
+			"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA,
+			"has_prev_review", prevReview != nil)
+	}
+	if !opts.Force && prevReview != nil && pr.Head.SHA != "" {
 		// Regardless of whether the HEAD SHA changed, the bot must not
 		// re-review unless the operator explicitly re-requested it. The
 		// SHA-unchanged half is the original #322 Bug 5 / #245
@@ -494,7 +605,20 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		// posture (same as #245 and #322): a missing dependency or
 		// timeline API error keeps the skip in place rather than
 		// widening the cost surface on a transient outage.
-		if !p.shouldBypassSHASkipForReReview(pr, prevReview) {
+		switch {
+		case p.shouldBypassSHASkipForReReview(pr, prevReview):
+			slog.Info("pipeline: explicit re-request detected — proceeding with review",
+				"repo", pr.Repo, "pr", pr.Number,
+				"prev_head_sha", prevReview.HeadSHA, "head_sha", pr.Head.SHA)
+		case p.shouldReReviewNewCommitsAsRequestedReviewer(pr, prevReview):
+			// New unreviewed commits AND the bot is a current requested
+			// reviewer, but GitHub emitted no review_requested timeline event
+			// (see shouldReReviewNewCommitsAsRequestedReviewer / #1532). Treat
+			// the pending review request on new code as an implicit re-request.
+			slog.Info("pipeline: new commits + bot is a requested reviewer — proceeding with review",
+				"repo", pr.Repo, "pr", pr.Number,
+				"prev_head_sha", prevReview.HeadSHA, "head_sha", pr.Head.SHA)
+		default:
 			reason := SkipReasonSHAUnchanged
 			if prevReview.HeadSHA != pr.Head.SHA {
 				reason = SkipReasonNoReReviewRequest
@@ -506,9 +630,6 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 			p.publishSkipped(pr, reason)
 			return nil, nil
 		}
-		slog.Info("pipeline: explicit re-request detected — proceeding with review",
-			"repo", pr.Repo, "pr", pr.Number,
-			"prev_head_sha", prevReview.HeadSHA, "head_sha", pr.Head.SHA)
 	}
 
 	// 2b. Fetch PR comments for context (non-fatal: proceed without if unavailable).
@@ -572,7 +693,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	// Runs AFTER all dedup layers so it only fires when the dedup failed but
 	// the caller is about to spend Claude credits anyway. See
 	// theburrowhub/heimdallm#243.
-	if p.breaker != nil {
+	if !opts.Force && p.breaker != nil {
 		tripped, reason, err := p.store.CheckCircuitBreaker(prID, pr.Repo, pr.Head.SHA, *p.breaker)
 		if err != nil {
 			slog.Warn("pipeline: circuit breaker check failed, proceeding", "err", err)
