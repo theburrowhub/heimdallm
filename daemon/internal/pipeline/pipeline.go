@@ -322,6 +322,21 @@ type RunOptions struct {
 	// execution/publication boundaries so a config reload can stop an in-flight
 	// review. Nil intentionally allows explicit/manual calls to proceed.
 	RepoEligible func(string) bool
+	// Force marks an explicit operator-initiated re-review (the app's
+	// "Re-review" button → POST /prs/{id}/review). It bypasses the two
+	// cost-control gates that exist to suppress the AUTOMATIC poll path:
+	//   1. the re-review dedup gate — SHA-unchanged / no-new-review_requested
+	//      (see #139/#245/#509). The app cannot create a GitHub
+	//      review_requested event (Heimdallm authenticates as the operator's
+	//      own account, which cannot request a review from itself), so the
+	//      timeline bypass never fires and every manual re-review was
+	//      silently skipped.
+	//   2. the circuit breaker (per-PR/per-repo cap, #243) — a human clicking
+	//      the button is deliberate intent, not a runaway loop.
+	// Force must ONLY be set by the manual-trigger callback, never by the
+	// pollers, so the automatic path keeps every protection intact. The
+	// state guards (opts.Guards: closed / draft / self-authored) still apply.
+	Force bool
 }
 
 // Run executes the full review pipeline for one PR and publishes the review to GitHub.
@@ -443,7 +458,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	// non-nil prevReview bypassed that filter and made every poll cycle on a
 	// stable PR look like a brand-new review in every UI surface, even though
 	// no Claude credits were spent.
-	if prevReview != nil && prevReview.HeadSHA == "" && pr.Head.SHA != "" {
+	if !opts.Force && prevReview != nil && prevReview.HeadSHA == "" && pr.Head.SHA != "" {
 		slog.Info("pipeline: backfilling empty HeadSHA on legacy review row, skipping re-review",
 			"repo", pr.Repo, "pr", pr.Number, "review_id", prevReview.ID, "head_sha", pr.Head.SHA)
 		if err := p.store.UpdateReviewHeadSHA(prevReview.ID, pr.Head.SHA); err != nil {
@@ -471,7 +486,16 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		}
 	}
 
-	if prevReview != nil && pr.Head.SHA != "" {
+	if opts.Force && prevReview != nil {
+		// Explicit operator-initiated re-review (app "Re-review" button).
+		// Bypass the dedup gate below: there is no GitHub review_requested
+		// event to detect (see RunOptions.Force) and the whole point of the
+		// button is to re-review the current HEAD on demand.
+		slog.Info("pipeline: forced re-review — bypassing SHA/re-request dedup + circuit breaker",
+			"repo", pr.Repo, "pr", pr.Number,
+			"prev_head_sha", prevReview.HeadSHA, "head_sha", pr.Head.SHA)
+	}
+	if !opts.Force && prevReview != nil && pr.Head.SHA != "" {
 		// Regardless of whether the HEAD SHA changed, the bot must not
 		// re-review unless the operator explicitly re-requested it. The
 		// SHA-unchanged half is the original #322 Bug 5 / #245
@@ -572,7 +596,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	// Runs AFTER all dedup layers so it only fires when the dedup failed but
 	// the caller is about to spend Claude credits anyway. See
 	// theburrowhub/heimdallm#243.
-	if p.breaker != nil {
+	if !opts.Force && p.breaker != nil {
 		tripped, reason, err := p.store.CheckCircuitBreaker(prID, pr.Repo, pr.Head.SHA, *p.breaker)
 		if err != nil {
 			slog.Warn("pipeline: circuit breaker check failed, proceeding", "err", err)

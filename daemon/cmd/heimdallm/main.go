@@ -2015,7 +2015,14 @@ func main() {
 		// Pre-#322 the trigger fabricated review_skipped(not_open) on
 		// every nil return — that lied for SHA-skip / legacy-backfill
 		// paths added in #322 Bug 4.
-		rev, err := p.Run(ghPR, buildRunOpts(ghPR, aiCfg))
+		// Force: the manual "Re-review" button is explicit operator intent.
+		// It must re-review the current HEAD on demand, bypassing the
+		// re-request/SHA dedup gate (which fires because the app cannot
+		// create a GitHub review_requested event) AND the circuit breaker.
+		// See pipeline.RunOptions.Force. The poll path never sets this.
+		runOpts := buildRunOpts(ghPR, aiCfg)
+		runOpts.Force = true
+		rev, err := p.Run(ghPR, runOpts)
 		if err != nil {
 			var cbErr *pipeline.CircuitBreakerError
 			if errors.As(err, &cbErr) {

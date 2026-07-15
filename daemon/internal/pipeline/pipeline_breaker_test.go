@@ -163,3 +163,69 @@ func TestRun_CircuitBreakerTripStopsExecute(t *testing.T) {
 		t.Errorf("EventReviewStarted: got %d, want 0 on breaker trip", startedSSEs)
 	}
 }
+
+// TestRun_ForceBypassesCircuitBreaker verifies that an explicit operator
+// re-review (RunOptions.Force, the app's "Re-review" button) runs even when
+// the per-PR circuit breaker is fully tripped. A human clicking the button is
+// deliberate intent, not a runaway loop, so the cost cap must not silently
+// swallow it — the whole "manual re-review never runs" complaint. The
+// automatic poll path (Force=false) keeps the breaker as its last defense,
+// covered by TestRun_CircuitBreakerTripStopsExecute above.
+func TestRun_ForceBypassesCircuitBreaker(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	fgh := &fakeGHBreaker{headSHAValue: "sha1"}
+	fexec := &fakeExecBreaker{}
+	p := pipeline.New(s, fgh, fexec, &fakeNotify{})
+	p.SetBotLogin("heimdallm-bot")
+	// Cap at 3/PR HEAD, then seed exactly 3 reviews so the breaker is tripped.
+	p.SetCircuitBreakerLimits(&store.CircuitBreakerLimits{PerPR24h: 3, PerRepoHr: 999})
+
+	now := time.Now().UTC()
+	prID, err := s.UpsertPR(&store.PR{
+		GithubID: 43, Repo: "org/r", Number: 43, Title: "t", Author: "alice",
+		URL: "https://github.com/org/r/pull/43", State: "open",
+		UpdatedAt: now, FetchedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("upsert pr: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		createdAt := now.Add(time.Duration(-3+i) * time.Minute)
+		if _, err := s.InsertReview(&store.Review{
+			PRID: prID, CLIUsed: "claude", Issues: "[]", Suggestions: "[]",
+			Severity: "low", CreatedAt: createdAt, PublishedAt: createdAt,
+			GitHubReviewID: int64(9100 + i), GitHubReviewState: "APPROVED",
+			HeadSHA: "sha1",
+		}); err != nil {
+			t.Fatalf("insert review %d: %v", i, err)
+		}
+	}
+
+	// No timeline re-request event exists (the app can't create one) and the
+	// SHA is unchanged, so without Force this would skip; with the breaker
+	// tripped it would additionally be capped. Force must clear both.
+	pr := &gh.PullRequest{
+		ID: 43, Number: 43, Title: "t", Repo: "org/r",
+		User: gh.User{Login: "alice"}, State: "open",
+		UpdatedAt: now.Add(time.Minute), HTMLURL: "https://github.com/org/r/pull/43",
+		Head: gh.Branch{SHA: "sha1"},
+	}
+	rev, err := p.Run(pr, pipeline.RunOptions{Primary: "claude", Fallback: "gemini", Force: true})
+	if err != nil {
+		t.Fatalf("forced run must not error on tripped breaker, got %v", err)
+	}
+	if rev == nil {
+		t.Fatalf("forced run must produce a review, got nil")
+	}
+	if fexec.calls != 1 {
+		t.Errorf("forced re-review must call executor despite tripped breaker, got calls=%d", fexec.calls)
+	}
+	if !fgh.submitted {
+		t.Errorf("forced re-review must submit despite tripped breaker")
+	}
+}

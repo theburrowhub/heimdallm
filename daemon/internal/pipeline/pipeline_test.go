@@ -710,6 +710,53 @@ func TestPipeline_Run_RespectsExplicitReReviewOnSameSHA(t *testing.T) {
 	}
 }
 
+// TestPipeline_Run_ForceReReviewsSameSHAWithoutReRequest is the regression
+// guard for the "manual Re-review never runs" bug. Heimdallm authenticates as
+// the operator's own GitHub account, which cannot request a review from
+// itself — so the app's "Re-review" button (POST /prs/{id}/review) can never
+// produce a review_requested timeline event, and the SHA-skip bypass never
+// fires. Before the fix, every manual re-review on an already-reviewed PR was
+// silently skipped (reason=sha_unchanged) and the button did nothing. With
+// RunOptions.Force the pipeline must re-run the review on the current HEAD.
+func TestPipeline_Run_ForceReReviewsSameSHAWithoutReRequest(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	exec := &fakeExecCounter{}
+	gh := &fakeGHCounter{diff: "+line"}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	p.SetBotLogin("heimdallm-bot")
+
+	pr := &github.PullRequest{
+		ID: 99, Number: 99, Title: "t", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now().Add(-1 * time.Hour),
+		HTMLURL:   "https://github.com/org/repo/pull/99",
+		Head:      github.Branch{SHA: "samesha"},
+	}
+	runFirstReview(t, p, pr)
+	if exec.calls != 1 {
+		t.Fatalf("seed: expected exec.calls=1, got %d", exec.calls)
+	}
+
+	// No timeline fetcher wired (mirrors "no GitHub review_requested event
+	// exists") and the HEAD SHA is unchanged — the exact conditions that made
+	// the automatic path skip. Force must override that.
+	pr.UpdatedAt = time.Now()
+	if _, err := p.Run(pr, pipeline.RunOptions{Primary: "claude", Force: true}); err != nil {
+		t.Fatalf("forced run: %v", err)
+	}
+	if exec.calls != 2 {
+		t.Errorf("forced re-review must re-run executor, got exec.calls=%d, want 2", exec.calls)
+	}
+	if gh.submits != 2 {
+		t.Errorf("forced re-review must submit again, got gh.submits=%d, want 2", gh.submits)
+	}
+}
+
 // TestPipeline_Run_IgnoresStaleReviewRequest covers the negative case:
 // a review_requested whose timestamp predates the existing review is
 // already-satisfied and must NOT bypass the SHA skip. Otherwise every
