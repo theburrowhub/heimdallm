@@ -295,6 +295,12 @@ func main() {
 	// p.timeline or p.botLogin is unset.
 	p.SetTimelineFetcher(ghClient)
 
+	// Wire the GitHub client as the requested-reviewers fetcher so the
+	// SHA-skip path can re-review new commits when the bot is a current
+	// requested reviewer but GitHub emitted no review_requested timeline
+	// event (theburrowhub/heimdallm#1532). No-ops if the bot login is unset.
+	p.SetReviewerFetcher(ghClient)
+
 	// Wire the SSE broker as the lifecycle publisher so Run emits
 	// pr_detected / review_started / review_completed / review_skipped
 	// at the correct semantic point (after the SHA-skip + gate
