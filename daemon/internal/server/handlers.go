@@ -44,6 +44,10 @@ type Server struct {
 	reloadFn             func() error
 	shutdownFn           func()
 	triggerReviewFn      func(prID int64) error
+	// addPRFn fetches a PR from GitHub by (repo, number), upserts it into the
+	// store, and returns the stored row. Wired by main (needs the GitHub
+	// client + store). Nil disables POST /prs/add.
+	addPRFn              func(repo string, number int) (*store.PR, error)
 	triggerIssueReviewFn func(issueID int64) error
 	triggerIssueRefineFn func(issueID int64, force bool) error
 	triggerPromoteFn     func(issueID int64) error
@@ -193,6 +197,13 @@ func (srv *Server) SetShutdownFn(fn func()) { srv.shutdownFn = fn }
 
 // SetTriggerReviewFn wires the review-trigger callback called by POST /prs/{id}/review.
 func (srv *Server) SetTriggerReviewFn(fn func(prID int64) error) { srv.triggerReviewFn = fn }
+
+// SetAddPRFn wires the manual-add callback called by POST /prs/add: it fetches
+// a PR from GitHub by (repo, number), upserts it into the store, and returns
+// the stored row.
+func (srv *Server) SetAddPRFn(fn func(repo string, number int) (*store.PR, error)) {
+	srv.addPRFn = fn
+}
 
 // SetTriggerIssueReviewFn wires the issue-review-trigger callback called by POST /issues/{id}/review.
 func (srv *Server) SetTriggerIssueReviewFn(fn func(issueID int64) error) {
@@ -352,6 +363,7 @@ func (srv *Server) buildRouter() chi.Router {
 	r.Get("/health", srv.handleHealth)
 	r.Get("/me", srv.handleMe)
 	r.Get("/prs", srv.handleListPRs)
+	r.Post("/prs/add", srv.handleAddPR)
 	r.Get("/prs/{id}", srv.handleGetPR)
 	r.Post("/prs/{id}/review", srv.handleTriggerReview)
 	r.Post("/prs/{id}/dismiss", srv.handleDismissPR)
@@ -626,6 +638,134 @@ func (srv *Server) handleTriggerReview(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "review queued"})
+}
+
+// handleAddPR accepts a GitHub pull-request URL, adds its repository to the
+// monitored list (persisted to config.toml + reload), fetches and stores the
+// PR, and triggers an immediate review. Wired by the Activity view's "ADD"
+// action. Body: {"url": "https://github.com/owner/repo/pull/123"}.
+func (srv *Server) handleAddPR(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		URL string `json:"url"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return
+	}
+	repo, number, err := parsePRURL(body.URL)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if srv.addPRFn == nil || srv.triggerReviewFn == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "manual PR add not configured"})
+		return
+	}
+
+	// 1. Ensure the repo is monitored: add to github.repositories (and strip
+	// from non_monitored) in config.toml, then reload so the poller tracks it.
+	if srv.configPath != "" {
+		if _, err := srv.patchTOML(func(m map[string]any) error {
+			addRepoToTOMLMap(m, repo)
+			return nil
+		}); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("add repo to config: %v", err)})
+			return
+		}
+	}
+
+	// 2. Fetch the PR from GitHub and store it.
+	pr, err := srv.addPRFn(repo, number)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": fmt.Sprintf("fetch PR %s#%d: %v", repo, number, err)})
+		return
+	}
+
+	// 3. Review it now (async, bounded by the shared review semaphore). If all
+	// slots are busy the PR is still stored/monitored; the operator can retry
+	// or the next poll cycle picks it up.
+	select {
+	case srv.reviewSem <- struct{}{}:
+	default:
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"status": "pr added; review deferred (busy)", "pr": pr,
+		})
+		return
+	}
+	go func() {
+		defer func() { <-srv.reviewSem }()
+		if err := srv.triggerReviewFn(pr.ID); err != nil {
+			slog.Error("add PR: trigger review failed", "pr_id", pr.ID, "repo", repo, "number", number, "err", err)
+		}
+	}()
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": "pr added; review queued", "pr": pr})
+}
+
+// parsePRURL extracts the "owner/repo" slug and PR number from a GitHub PR URL
+// such as https://github.com/owner/repo/pull/123 (trailing segments like
+// /files and query strings are tolerated).
+func parsePRURL(raw string) (repo string, number int, err error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", 0, fmt.Errorf("empty URL")
+	}
+	u, perr := url.Parse(raw)
+	if perr != nil {
+		return "", 0, fmt.Errorf("invalid URL")
+	}
+	host := strings.ToLower(u.Host)
+	if host != "github.com" && host != "www.github.com" {
+		return "", 0, fmt.Errorf("not a github.com URL")
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) < 4 || parts[2] != "pull" {
+		return "", 0, fmt.Errorf("not a pull request URL (expected github.com/owner/repo/pull/N)")
+	}
+	owner, name := parts[0], parts[1]
+	if owner == "" || name == "" {
+		return "", 0, fmt.Errorf("missing owner/repo in URL")
+	}
+	number, perr = strconv.Atoi(parts[3])
+	if perr != nil || number <= 0 {
+		return "", 0, fmt.Errorf("invalid PR number %q", parts[3])
+	}
+	return owner + "/" + name, number, nil
+}
+
+// addRepoToTOMLMap appends repo to github.repositories (if absent) and removes
+// it from github.non_monitored, mutating the decoded TOML map in place.
+func addRepoToTOMLMap(m map[string]any, repo string) {
+	gh, ok := m["github"].(map[string]any)
+	if !ok || gh == nil {
+		gh = map[string]any{}
+		m["github"] = gh
+	}
+	gh["non_monitored"] = removeFromTOMLList(gh["non_monitored"], repo)
+
+	repos, _ := gh["repositories"].([]any)
+	for _, it := range repos {
+		if s, ok := it.(string); ok && s == repo {
+			return // already monitored
+		}
+	}
+	gh["repositories"] = append(repos, repo)
+}
+
+// removeFromTOMLList returns raw with every string element equal to target
+// removed. Non-list inputs are returned unchanged.
+func removeFromTOMLList(raw any, target string) any {
+	list, ok := raw.([]any)
+	if !ok {
+		return raw
+	}
+	out := make([]any, 0, len(list))
+	for _, it := range list {
+		if s, ok := it.(string); ok && s == target {
+			continue
+		}
+		out = append(out, it)
+	}
+	return out
 }
 
 func (srv *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
