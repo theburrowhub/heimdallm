@@ -1269,6 +1269,24 @@ func TestOrgAIOverrideMap_ExposesNeverApproveWithIssues(t *testing.T) {
 	}
 }
 
+// TestAIOverrideMaps_ExposeNeverApproveMinSeverity guards that both override
+// maps GET /config serves carry never_approve_min_severity through when set,
+// and omit it when empty (= inherit).
+func TestAIOverrideMaps_ExposeNeverApproveMinSeverity(t *testing.T) {
+	out := repoAIOverrideMap(config.RepoAI{NeverApproveMinSeverity: "medium"})
+	if v, ok := out["never_approve_min_severity"].(string); !ok || v != "medium" {
+		t.Errorf("repo never_approve_min_severity = %v (present=%v), want \"medium\"", out["never_approve_min_severity"], ok)
+	}
+	out = orgAIOverrideMap(config.OrgAI{NeverApproveMinSeverity: "high"})
+	if v, ok := out["never_approve_min_severity"].(string); !ok || v != "high" {
+		t.Errorf("org never_approve_min_severity = %v (present=%v), want \"high\"", out["never_approve_min_severity"], ok)
+	}
+	out = orgAIOverrideMap(config.OrgAI{})
+	if _, present := out["never_approve_min_severity"]; present {
+		t.Errorf("empty override should omit never_approve_min_severity, got %v", out["never_approve_min_severity"])
+	}
+}
+
 func TestResolveImplementPrompt_RepoOverrideWins(t *testing.T) {
 	s := newMemStore(t)
 	seedAgent(t, s, store.Agent{

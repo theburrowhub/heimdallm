@@ -382,6 +382,10 @@ type RunOptions struct {
 	// NeverApproveWithIssues, when true, publishes the review as COMMENT
 	// instead of APPROVE whenever the review found any issue (see ReviewEvent).
 	NeverApproveWithIssues bool
+	// NeverApproveMinSeverity is the minimum finding severity that triggers
+	// the NeverApproveWithIssues downgrade ("low"|"medium"|"high"). Empty is
+	// equivalent to "low": any finding downgrades (see ReviewEvent).
+	NeverApproveMinSeverity string
 	// RepoEligible is a live gate for automatic work. It is checked again at
 	// execution/publication boundaries so a config reload can stop an in-flight
 	// review. Nil intentionally allows explicit/manual calls to proceed.
@@ -765,7 +769,8 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	signalComments := filterBotComments(prComments, p.botLogin)
 	commentSignals := ExtractCommentSignals(signalComments, pr.User.Login)
 	finalSeverity := ApplySignalEscalation(reconciledSeverity, commentSignals)
-	reviewEvent := ReviewEvent(finalSeverity, len(result.Issues) > 0, opts.NeverApproveWithIssues)
+	reviewEvent := ReviewEvent(finalSeverity, MaxIssueSeverity(result.Issues),
+		opts.NeverApproveWithIssues, opts.NeverApproveMinSeverity)
 
 	// 6. Marshal issues to JSON for storage
 	issuesJSON, err := json.Marshal(result.Issues)
@@ -820,7 +825,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	}
 	ghReviewID, ghReviewState, publishErr := p.gh.SubmitReview(
 		pr.Repo, pr.Number,
-		AnnotateBodyForEvent(reviewBody, reviewEvent),
+		AnnotateBodyForEvent(reviewBody, reviewEvent, len(result.Issues)),
 		reviewEvent,
 	)
 	if publishErr != nil {
@@ -962,7 +967,7 @@ func (p *Pipeline) PublishPending() {
 		retryEvent := PublishEventFor(rev)
 		ghID, ghState, err := p.gh.SubmitReview(
 			pr.Repo, pr.Number,
-			AnnotateBodyForEvent(BuildGitHubBody(result), retryEvent),
+			AnnotateBodyForEvent(BuildGitHubBody(result), retryEvent, len(result.Issues)),
 			retryEvent,
 		)
 		if err != nil {
@@ -1178,14 +1183,37 @@ func SeverityToEvent(severity string) string {
 	return "APPROVE"
 }
 
+// MaxIssueSeverity returns the highest severity among the review's findings,
+// or "" when the review found none. Non-canonical severities rank as "low",
+// mirroring severityRank's default.
+func MaxIssueSeverity(issues []executor.Issue) string {
+	if len(issues) == 0 {
+		return ""
+	}
+	maxRank := severityRank("low")
+	for _, iss := range issues {
+		if r := severityRank(iss.Severity); r > maxRank {
+			maxRank = r
+		}
+	}
+	return rankToSeverity(maxRank)
+}
+
 // ReviewEvent decides the GitHub review event, honoring the
 // never-approve-with-issues setting. It builds on SeverityToEvent: when the
 // base decision would be APPROVE, the setting is on, and the review found at
-// least one issue, it downgrades APPROVE to COMMENT. REQUEST_CHANGES is never
-// altered, and a clean review (no issues) still approves.
-func ReviewEvent(finalSeverity string, hasIssues bool, neverApproveWithIssues bool) string {
+// least one issue of severity >= minSeverity, it downgrades APPROVE to
+// COMMENT. REQUEST_CHANGES is never altered, and a clean review (no issues)
+// still approves.
+//
+// maxIssueSeverity is MaxIssueSeverity(issues): "" means no findings.
+// minSeverity is the never_approve_min_severity setting; empty means "low"
+// (any finding downgrades — the pre-#597 behavior), matching severityRank's
+// default rank for unknown values.
+func ReviewEvent(finalSeverity, maxIssueSeverity string, neverApproveWithIssues bool, minSeverity string) string {
 	event := SeverityToEvent(finalSeverity)
-	if event == "APPROVE" && neverApproveWithIssues && hasIssues {
+	if event == "APPROVE" && neverApproveWithIssues && maxIssueSeverity != "" &&
+		severityRank(maxIssueSeverity) >= severityRank(minSeverity) {
 		return "COMMENT"
 	}
 	return event
@@ -1203,20 +1231,39 @@ func PublishEventFor(rev *store.Review) string {
 	return SeverityToEvent(rev.Severity)
 }
 
-// downgradeNote is appended to a review body when the event was downgraded to
-// COMMENT, so PR authors understand why Heimdallm commented instead of
+// downgradeNoteFor is appended to a review body when the event was downgraded
+// to COMMENT, so PR authors understand why Heimdallm commented instead of
 // approving. COMMENT is only ever produced by ReviewEvent's
 // never-approve-with-issues downgrade, so keying on the event is sufficient.
-const downgradeNote = "\n\n---\n_Not approving: issues were found and " +
-	"`never_approve_with_issues` is enabled for this repo — posting as a " +
-	"comment instead of an approval._"
+// It deliberately says "review finding(s)", not "issues": "issues were found"
+// was misread as "no GitHub issue is linked to this PR" (#597).
+//
+// findingCount is the TOTAL number of findings listed above the note, not
+// just those at or above never_approve_min_severity. The retry publish paths
+// (PublishPending, the NATS publish-worker) rebuild the note from the stored
+// review, which persists the decided event but not the threshold in effect
+// at decision time — re-reading the live config there could drift from the
+// original decision. The total matches the visible list, so it is always
+// accurate; "the blocking findings" carries the threshold nuance instead.
+func downgradeNoteFor(findingCount int) string {
+	findings := "findings"
+	if findingCount == 1 {
+		findings = "finding"
+	}
+	return fmt.Sprintf("\n\n---\n_Not approving: this review raised %d %s "+
+		"above, and `never_approve_with_issues` is enabled for this repo, so "+
+		"it is posted as a comment instead of an approval. Address or dispute "+
+		"the blocking findings and re-request a review to get an approval._",
+		findingCount, findings)
+}
 
 // AnnotateBodyForEvent appends an explanatory note to the review body when the
 // event is COMMENT (the never-approve-with-issues downgrade); otherwise the
-// body is returned unchanged.
-func AnnotateBodyForEvent(body, event string) string {
+// body is returned unchanged. findingCount is the number of findings the
+// review raised, quoted in the note.
+func AnnotateBodyForEvent(body, event string, findingCount int) string {
 	if event == "COMMENT" {
-		return body + downgradeNote
+		return body + downgradeNoteFor(findingCount)
 	}
 	return body
 }

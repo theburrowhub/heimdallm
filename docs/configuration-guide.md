@@ -671,7 +671,8 @@ clone_dir = "/home/heimdallm/repos/myorg-worktrees"
 auto_promote_triage = true
 auto_promote_refinement = false
 generate_pr_description = true
-never_approve_with_issues = false   # true = comment instead of approving when any issue is found
+never_approve_with_issues = false   # true = comment instead of approving when any finding is raised
+never_approve_min_severity = "low"  # findings below this severity don't trigger the downgrade
 
 pr_reviewers = ["alice", "bob", "carol"]
 pr_labels    = ["auto-generated", "ai-platform"]
@@ -1280,6 +1281,13 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # Default: false.
 # never_approve_with_issues = false
 
+# Minimum finding severity that triggers the never_approve_with_issues
+# downgrade: "low", "medium" or "high". Unset/empty = "low" (any finding
+# downgrades). With "medium", reviews whose findings are all low-severity
+# nits still approve. Overridable per org ([ai.orgs.*]) and per repo
+# ([ai.repos.*]).
+# never_approve_min_severity = "low"
+
 # When local_dir is unset, Heimdallm prepares a managed shallow clone for agent
 # context under clone_dir. If clone_dir is also unset, the default is
 # os.TempDir()/heimdallm/<org>/<repo>. Existing directories are mutated only
@@ -1345,6 +1353,7 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # auto_promote_refinement = false
 # generate_pr_description = true
 # never_approve_with_issues = false
+# never_approve_min_severity = "low"
 # pr_reviewers = ["alice", "bob"]
 # pr_labels    = ["auto-generated", "myorg-team"]
 # pr_assignee  = "myusername"

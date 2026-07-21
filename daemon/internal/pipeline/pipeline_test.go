@@ -1575,29 +1575,58 @@ func equalStringSlices(a, b []string) bool {
 
 func TestReviewEvent(t *testing.T) {
 	cases := []struct {
-		sev       string
-		hasIssues bool
-		never     bool
-		want      string
+		sev    string
+		maxIss string // MaxIssueSeverity: "" = no findings
+		never  bool
+		minSev string
+		want   string
 	}{
 		// flag OFF → identical to SeverityToEvent
-		{"low", true, false, "APPROVE"},
-		{"medium", true, false, "APPROVE"},
-		{"high", true, false, "REQUEST_CHANGES"},
-		{"", false, false, "APPROVE"},
-		// flag ON
-		{"low", true, true, "COMMENT"},
-		{"medium", true, true, "COMMENT"},
-		{"", true, true, "COMMENT"},
-		{"high", true, true, "REQUEST_CHANGES"}, // high never downgraded
-		{"low", false, true, "APPROVE"},         // clean review still approves
-		{"medium", false, true, "APPROVE"},
+		{"low", "low", false, "", "APPROVE"},
+		{"medium", "medium", false, "", "APPROVE"},
+		{"high", "high", false, "", "REQUEST_CHANGES"},
+		{"", "", false, "", "APPROVE"},
+		// flag ON, default threshold ("" = low: any finding downgrades)
+		{"low", "low", true, "", "COMMENT"},
+		{"medium", "medium", true, "", "COMMENT"},
+		{"", "low", true, "", "COMMENT"},
+		{"high", "high", true, "", "REQUEST_CHANGES"}, // high never downgraded
+		{"low", "", true, "", "APPROVE"},              // clean review still approves
+		{"medium", "", true, "", "APPROVE"},
+		// flag ON, explicit "low" threshold — same as default
+		{"low", "low", true, "low", "COMMENT"},
+		// flag ON, "medium" threshold: low-only findings keep the approval
+		{"low", "low", true, "medium", "APPROVE"},
+		{"medium", "medium", true, "medium", "COMMENT"},
+		{"medium", "low", true, "medium", "APPROVE"}, // escalated top-level, low findings
+		// flag ON, "high" threshold: medium findings keep the approval
+		{"medium", "medium", true, "high", "APPROVE"},
+		{"low", "low", true, "high", "APPROVE"},
 	}
 	for _, tc := range cases {
-		got := pipeline.ReviewEvent(tc.sev, tc.hasIssues, tc.never)
+		got := pipeline.ReviewEvent(tc.sev, tc.maxIss, tc.never, tc.minSev)
 		if got != tc.want {
-			t.Errorf("ReviewEvent(%q, %v, %v) = %q, want %q",
-				tc.sev, tc.hasIssues, tc.never, got, tc.want)
+			t.Errorf("ReviewEvent(%q, %q, %v, %q) = %q, want %q",
+				tc.sev, tc.maxIss, tc.never, tc.minSev, got, tc.want)
+		}
+	}
+}
+
+func TestMaxIssueSeverity(t *testing.T) {
+	cases := []struct {
+		name   string
+		issues []executor.Issue
+		want   string
+	}{
+		{"no findings", nil, ""},
+		{"single low", []executor.Issue{{Severity: "low"}}, "low"},
+		{"mixed picks max", []executor.Issue{{Severity: "low"}, {Severity: "medium"}}, "medium"},
+		{"high wins", []executor.Issue{{Severity: "medium"}, {Severity: "high"}, {Severity: "low"}}, "high"},
+		{"unknown severity ranks low", []executor.Issue{{Severity: "bogus"}}, "low"},
+	}
+	for _, tc := range cases {
+		if got := pipeline.MaxIssueSeverity(tc.issues); got != tc.want {
+			t.Errorf("%s: MaxIssueSeverity = %q, want %q", tc.name, got, tc.want)
 		}
 	}
 }
@@ -1625,13 +1654,30 @@ func TestPublishEventFor(t *testing.T) {
 func TestAnnotateBodyForEvent(t *testing.T) {
 	const body = "## Review\nlgtm"
 	// COMMENT keeps the original body and appends the downgrade note.
-	got := pipeline.AnnotateBodyForEvent(body, "COMMENT")
+	got := pipeline.AnnotateBodyForEvent(body, "COMMENT", 2)
 	if !strings.Contains(got, body) || !strings.Contains(got, "never_approve_with_issues") {
 		t.Errorf("COMMENT body should keep body and add the note, got %q", got)
 	}
+	// The note quotes the finding count and says "findings", not the
+	// GitHub-ambiguous "issues were found" (#597).
+	if !strings.Contains(got, "raised 2 findings") {
+		t.Errorf("note should quote the finding count, got %q", got)
+	}
+	// The action sentence says "the blocking findings" — with a min-severity
+	// threshold, not every listed finding withholds the approval.
+	if !strings.Contains(got, "Address or dispute the blocking findings") {
+		t.Errorf("note should point at the blocking findings, got %q", got)
+	}
+	if strings.Contains(got, "issues were found") {
+		t.Errorf("note must not use the ambiguous \"issues were found\" wording, got %q", got)
+	}
+	// Singular form for a single finding.
+	if got := pipeline.AnnotateBodyForEvent(body, "COMMENT", 1); !strings.Contains(got, "raised 1 finding above") {
+		t.Errorf("single-finding note should be singular, got %q", got)
+	}
 	// Non-downgrade events leave the body untouched.
 	for _, ev := range []string{"APPROVE", "REQUEST_CHANGES"} {
-		if got := pipeline.AnnotateBodyForEvent(body, ev); got != body {
+		if got := pipeline.AnnotateBodyForEvent(body, ev, 2); got != body {
 			t.Errorf("event %s: body should be unchanged, got %q", ev, got)
 		}
 	}

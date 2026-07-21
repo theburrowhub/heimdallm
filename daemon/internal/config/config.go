@@ -472,6 +472,14 @@ type AIConfig struct {
 	// per-org and per-repo.
 	NeverApproveWithIssues bool `toml:"never_approve_with_issues"`
 
+	// NeverApproveMinSeverity is the minimum finding severity that triggers
+	// the NeverApproveWithIssues downgrade: "low", "medium" or "high".
+	// Empty defaults to "low" (any finding downgrades — backwards compat).
+	// With "medium", reviews whose findings are all low-severity nits still
+	// approve. Only meaningful when NeverApproveWithIssues is on.
+	// Overridable per-org and per-repo.
+	NeverApproveMinSeverity string `toml:"never_approve_min_severity"`
+
 	// ReviewResponse configures phase 2 of the PR review-state vigilance
 	// feature (#482): the daemon optionally posts an AI-generated reply
 	// when an external reviewer leaves COMMENTED feedback on a PR that
@@ -565,6 +573,10 @@ type RepoAI struct {
 	// repo. nil = inherit from org/global.
 	NeverApproveWithIssues *bool `toml:"never_approve_with_issues,omitempty"`
 
+	// NeverApproveMinSeverity overrides ai.never_approve_min_severity for
+	// this repo. Empty = inherit from org/global.
+	NeverApproveMinSeverity string `toml:"never_approve_min_severity,omitempty"`
+
 	// Per-repo issue tracking override. Nil fields inherit from org/global.
 	IssueTracking *IssueTrackingOverride `toml:"issue_tracking,omitempty" json:"issue_tracking,omitempty"`
 	// CircuitBreaker overrides circuit-breaker caps for this repo.
@@ -625,9 +637,10 @@ type OrgAI struct {
 	PRDraft            *bool    `toml:"pr_draft,omitempty"`
 	InstructionAuthors []string `toml:"instruction_authors"` // see RepoAI.InstructionAuthors (#383)
 
-	GeneratePRDescription  *bool                  `toml:"generate_pr_description,omitempty"`
-	NeverApproveWithIssues *bool                  `toml:"never_approve_with_issues,omitempty"`
-	IssueTracking          *IssueTrackingOverride `toml:"issue_tracking,omitempty" json:"issue_tracking,omitempty"`
+	GeneratePRDescription   *bool                  `toml:"generate_pr_description,omitempty"`
+	NeverApproveWithIssues  *bool                  `toml:"never_approve_with_issues,omitempty"`
+	NeverApproveMinSeverity string                 `toml:"never_approve_min_severity,omitempty"`
+	IssueTracking           *IssueTrackingOverride `toml:"issue_tracking,omitempty" json:"issue_tracking,omitempty"`
 	// CircuitBreaker overrides circuit-breaker caps for all repos in this org.
 	// nil = inherit from global. Present fields overlay the global baseline.
 	CircuitBreaker *CircuitBreakerConfig `toml:"circuit_breaker,omitempty"`
@@ -765,23 +778,24 @@ func (c *Config) AIForRepo(repo string) RepoAI {
 	gGenDesc := c.AI.GeneratePRDescription
 	gNever := c.AI.NeverApproveWithIssues
 	out := RepoAI{
-		Primary:                c.AI.Primary,
-		Fallback:               c.AI.Fallback,
-		ReviewMode:             c.AI.ReviewMode,
-		IssuePrompt:            c.AI.IssuePrompt,
-		ImplementPrompt:        c.AI.ImplementPrompt,
-		RefinementTimeout:      c.AI.RefinementTimeout,
-		PRReviewers:            gReviewers,
-		PRLabels:               gLabels,
-		PRAssignee:             gAssignee,
-		PRDraft:                gDraft,
-		GeneratePRDescription:  &gGenDesc,
-		NeverApproveWithIssues: &gNever,
-		TriageOwner:            c.AI.TriageOwner,
-		CloneDir:               c.AI.CloneDir,
-		AutoPromoteTriage:      c.AI.AutoPromoteTriage,
-		AutoPromoteRefinement:  c.AI.AutoPromoteRefinement,
-		InstructionAuthors:     c.AI.InstructionAuthors,
+		Primary:                 c.AI.Primary,
+		Fallback:                c.AI.Fallback,
+		ReviewMode:              c.AI.ReviewMode,
+		IssuePrompt:             c.AI.IssuePrompt,
+		ImplementPrompt:         c.AI.ImplementPrompt,
+		RefinementTimeout:       c.AI.RefinementTimeout,
+		PRReviewers:             gReviewers,
+		PRLabels:                gLabels,
+		PRAssignee:              gAssignee,
+		PRDraft:                 gDraft,
+		GeneratePRDescription:   &gGenDesc,
+		NeverApproveWithIssues:  &gNever,
+		NeverApproveMinSeverity: c.AI.NeverApproveMinSeverity,
+		TriageOwner:             c.AI.TriageOwner,
+		CloneDir:                c.AI.CloneDir,
+		AutoPromoteTriage:       c.AI.AutoPromoteTriage,
+		AutoPromoteRefinement:   c.AI.AutoPromoteRefinement,
+		InstructionAuthors:      c.AI.InstructionAuthors,
 	}
 	if org := repoOrg(repo); org != "" && c.AI.Orgs != nil {
 		if o, ok := c.AI.Orgs[org]; ok {
@@ -798,72 +812,75 @@ func (c *Config) AIForRepo(repo string) RepoAI {
 
 func applyOrgAI(out *RepoAI, o OrgAI) {
 	applyScopedAI(out, scopedAIFields{
-		Primary:                o.Primary,
-		Fallback:               o.Fallback,
-		ReviewMode:             o.ReviewMode,
-		Prompt:                 o.Prompt,
-		IssuePrompt:            o.IssuePrompt,
-		ImplementPrompt:        o.ImplementPrompt,
-		RefinementTimeout:      o.RefinementTimeout,
-		LocalDir:               o.LocalDir,
-		TriageOwner:            o.TriageOwner,
-		CloneDir:               o.CloneDir,
-		AutoPromoteTriage:      o.AutoPromoteTriage,
-		AutoPromoteRefinement:  o.AutoPromoteRefinement,
-		PRReviewers:            o.PRReviewers,
-		PRLabels:               o.PRLabels,
-		PRAssignee:             o.PRAssignee,
-		PRDraft:                o.PRDraft,
-		GeneratePRDescription:  o.GeneratePRDescription,
-		NeverApproveWithIssues: o.NeverApproveWithIssues,
-		InstructionAuthors:     o.InstructionAuthors,
+		Primary:                 o.Primary,
+		Fallback:                o.Fallback,
+		ReviewMode:              o.ReviewMode,
+		Prompt:                  o.Prompt,
+		IssuePrompt:             o.IssuePrompt,
+		ImplementPrompt:         o.ImplementPrompt,
+		RefinementTimeout:       o.RefinementTimeout,
+		LocalDir:                o.LocalDir,
+		TriageOwner:             o.TriageOwner,
+		CloneDir:                o.CloneDir,
+		AutoPromoteTriage:       o.AutoPromoteTriage,
+		AutoPromoteRefinement:   o.AutoPromoteRefinement,
+		PRReviewers:             o.PRReviewers,
+		PRLabels:                o.PRLabels,
+		PRAssignee:              o.PRAssignee,
+		PRDraft:                 o.PRDraft,
+		GeneratePRDescription:   o.GeneratePRDescription,
+		NeverApproveWithIssues:  o.NeverApproveWithIssues,
+		NeverApproveMinSeverity: o.NeverApproveMinSeverity,
+		InstructionAuthors:      o.InstructionAuthors,
 	})
 }
 
 func applyRepoAI(out *RepoAI, r RepoAI) {
 	applyScopedAI(out, scopedAIFields{
-		Primary:                r.Primary,
-		Fallback:               r.Fallback,
-		ReviewMode:             r.ReviewMode,
-		Prompt:                 r.Prompt,
-		IssuePrompt:            r.IssuePrompt,
-		ImplementPrompt:        r.ImplementPrompt,
-		RefinementTimeout:      r.RefinementTimeout,
-		LocalDir:               r.LocalDir,
-		TriageOwner:            r.TriageOwner,
-		CloneDir:               r.CloneDir,
-		AutoPromoteTriage:      r.AutoPromoteTriage,
-		AutoPromoteRefinement:  r.AutoPromoteRefinement,
-		PRReviewers:            r.PRReviewers,
-		PRLabels:               r.PRLabels,
-		PRAssignee:             r.PRAssignee,
-		PRDraft:                r.PRDraft,
-		GeneratePRDescription:  r.GeneratePRDescription,
-		NeverApproveWithIssues: r.NeverApproveWithIssues,
-		InstructionAuthors:     r.InstructionAuthors,
+		Primary:                 r.Primary,
+		Fallback:                r.Fallback,
+		ReviewMode:              r.ReviewMode,
+		Prompt:                  r.Prompt,
+		IssuePrompt:             r.IssuePrompt,
+		ImplementPrompt:         r.ImplementPrompt,
+		RefinementTimeout:       r.RefinementTimeout,
+		LocalDir:                r.LocalDir,
+		TriageOwner:             r.TriageOwner,
+		CloneDir:                r.CloneDir,
+		AutoPromoteTriage:       r.AutoPromoteTriage,
+		AutoPromoteRefinement:   r.AutoPromoteRefinement,
+		PRReviewers:             r.PRReviewers,
+		PRLabels:                r.PRLabels,
+		PRAssignee:              r.PRAssignee,
+		PRDraft:                 r.PRDraft,
+		GeneratePRDescription:   r.GeneratePRDescription,
+		NeverApproveWithIssues:  r.NeverApproveWithIssues,
+		NeverApproveMinSeverity: r.NeverApproveMinSeverity,
+		InstructionAuthors:      r.InstructionAuthors,
 	})
 }
 
 type scopedAIFields struct {
-	Primary                string
-	Fallback               string
-	ReviewMode             string
-	Prompt                 string
-	IssuePrompt            string
-	ImplementPrompt        string
-	RefinementTimeout      string
-	LocalDir               string
-	TriageOwner            string
-	CloneDir               string
-	AutoPromoteTriage      *bool
-	AutoPromoteRefinement  *bool
-	PRReviewers            []string
-	PRLabels               []string
-	PRAssignee             string
-	PRDraft                *bool
-	GeneratePRDescription  *bool
-	NeverApproveWithIssues *bool
-	InstructionAuthors     []string
+	Primary                 string
+	Fallback                string
+	ReviewMode              string
+	Prompt                  string
+	IssuePrompt             string
+	ImplementPrompt         string
+	RefinementTimeout       string
+	LocalDir                string
+	TriageOwner             string
+	CloneDir                string
+	AutoPromoteTriage       *bool
+	AutoPromoteRefinement   *bool
+	PRReviewers             []string
+	PRLabels                []string
+	PRAssignee              string
+	PRDraft                 *bool
+	GeneratePRDescription   *bool
+	NeverApproveWithIssues  *bool
+	NeverApproveMinSeverity string
+	InstructionAuthors      []string
 }
 
 func applyScopedAI(out *RepoAI, fields scopedAIFields) {
@@ -920,6 +937,9 @@ func applyScopedAI(out *RepoAI, fields scopedAIFields) {
 	}
 	if fields.NeverApproveWithIssues != nil {
 		out.NeverApproveWithIssues = fields.NeverApproveWithIssues
+	}
+	if fields.NeverApproveMinSeverity != "" {
+		out.NeverApproveMinSeverity = fields.NeverApproveMinSeverity
 	}
 	if fields.InstructionAuthors != nil {
 		out.InstructionAuthors = fields.InstructionAuthors
@@ -1290,6 +1310,9 @@ func (c *Config) Validate() error {
 	if err := c.validateScopedIssueTracking(); err != nil {
 		return err
 	}
+	if err := c.validateNeverApproveMinSeverity(); err != nil {
+		return err
+	}
 	// Bound the review-retention window for the TOML and env paths (the HTTP
 	// PUT /config validator covers its own path). A negative value would push
 	// PurgeOldReviews' cutoff into the future and wipe all reviews (#551).
@@ -1300,6 +1323,34 @@ func (c *Config) Validate() error {
 		d := *c.ActivityLog.RetentionDays
 		if d < 0 || d > MaxRetentionDays {
 			return fmt.Errorf("config: activity_log.retention_days must be between 0 and %d, got %d", MaxRetentionDays, d)
+		}
+	}
+	return nil
+}
+
+// validateNeverApproveMinSeverity bounds never_approve_min_severity to the
+// canonical severities at every scope. Empty means "inherit" (repo/org) or
+// "low" (global), so it is always accepted.
+func (c *Config) validateNeverApproveMinSeverity() error {
+	check := func(scope, v string) error {
+		switch v {
+		case "", "low", "medium", "high":
+			return nil
+		default:
+			return fmt.Errorf("config: %s.never_approve_min_severity must be one of: low, medium, high; got %q", scope, v)
+		}
+	}
+	if err := check("ai", c.AI.NeverApproveMinSeverity); err != nil {
+		return err
+	}
+	for org, o := range c.AI.Orgs {
+		if err := check(fmt.Sprintf("ai.orgs[%s]", org), o.NeverApproveMinSeverity); err != nil {
+			return err
+		}
+	}
+	for repo, r := range c.AI.Repos {
+		if err := check(fmt.Sprintf("ai.repos[%s]", repo), r.NeverApproveMinSeverity); err != nil {
+			return err
 		}
 	}
 	return nil
