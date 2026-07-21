@@ -2818,3 +2818,62 @@ func TestNeverApproveWithIssues_Resolution(t *testing.T) {
 		})
 	}
 }
+
+func TestNeverApproveMinSeverity_Resolution(t *testing.T) {
+	cases := []struct {
+		name   string
+		global string
+		org    string
+		repo   string
+		want   string
+	}{
+		{"all empty inherits empty (low)", "", "", "", ""},
+		{"global only", "medium", "", "", "medium"},
+		{"org over global", "medium", "high", "", "high"},
+		{"repo over org", "medium", "high", "low", "low"},
+		{"repo over global", "medium", "", "high", "high"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &Config{}
+			c.AI.NeverApproveMinSeverity = tc.global
+			c.AI.Orgs = map[string]OrgAI{"acme": {NeverApproveMinSeverity: tc.org}}
+			c.AI.Repos = map[string]RepoAI{"acme/widget": {NeverApproveMinSeverity: tc.repo}}
+			got := c.AIForRepo("acme/widget").NeverApproveMinSeverity
+			if got != tc.want {
+				t.Errorf("NeverApproveMinSeverity = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNeverApproveMinSeverity_Validate(t *testing.T) {
+	base := func() *Config {
+		c := &Config{}
+		c.AI.Primary = "claude"
+		c.GitHub.PollInterval = "1m"
+		return c
+	}
+	for _, v := range []string{"", "low", "medium", "high"} {
+		c := base()
+		c.AI.NeverApproveMinSeverity = v
+		if err := c.Validate(); err != nil {
+			t.Errorf("valid value %q rejected: %v", v, err)
+		}
+	}
+	c := base()
+	c.AI.NeverApproveMinSeverity = "critical"
+	if err := c.Validate(); err == nil {
+		t.Errorf("invalid global value accepted")
+	}
+	c = base()
+	c.AI.Orgs = map[string]OrgAI{"acme": {NeverApproveMinSeverity: "urgent"}}
+	if err := c.Validate(); err == nil {
+		t.Errorf("invalid org value accepted")
+	}
+	c = base()
+	c.AI.Repos = map[string]RepoAI{"acme/widget": {NeverApproveMinSeverity: "nit"}}
+	if err := c.Validate(); err == nil {
+		t.Errorf("invalid repo value accepted")
+	}
+}
