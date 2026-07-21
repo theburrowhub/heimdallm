@@ -1663,6 +1663,11 @@ func TestAnnotateBodyForEvent(t *testing.T) {
 	if !strings.Contains(got, "raised 2 findings") {
 		t.Errorf("note should quote the finding count, got %q", got)
 	}
+	// The action sentence says "the blocking findings" — with a min-severity
+	// threshold, not every listed finding withholds the approval.
+	if !strings.Contains(got, "Address or dispute the blocking findings") {
+		t.Errorf("note should point at the blocking findings, got %q", got)
+	}
 	if strings.Contains(got, "issues were found") {
 		t.Errorf("note must not use the ambiguous \"issues were found\" wording, got %q", got)
 	}

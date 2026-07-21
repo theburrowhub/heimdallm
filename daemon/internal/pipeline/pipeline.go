@@ -1237,6 +1237,14 @@ func PublishEventFor(rev *store.Review) string {
 // never-approve-with-issues downgrade, so keying on the event is sufficient.
 // It deliberately says "review finding(s)", not "issues": "issues were found"
 // was misread as "no GitHub issue is linked to this PR" (#597).
+//
+// findingCount is the TOTAL number of findings listed above the note, not
+// just those at or above never_approve_min_severity. The retry publish paths
+// (PublishPending, the NATS publish-worker) rebuild the note from the stored
+// review, which persists the decided event but not the threshold in effect
+// at decision time — re-reading the live config there could drift from the
+// original decision. The total matches the visible list, so it is always
+// accurate; "the blocking findings" carries the threshold nuance instead.
 func downgradeNoteFor(findingCount int) string {
 	findings := "findings"
 	if findingCount == 1 {
@@ -1245,7 +1253,7 @@ func downgradeNoteFor(findingCount int) string {
 	return fmt.Sprintf("\n\n---\n_Not approving: this review raised %d %s "+
 		"above, and `never_approve_with_issues` is enabled for this repo, so "+
 		"it is posted as a comment instead of an approval. Address or dispute "+
-		"the findings and re-request a review to get an approval._",
+		"the blocking findings and re-request a review to get an approval._",
 		findingCount, findings)
 }
 
