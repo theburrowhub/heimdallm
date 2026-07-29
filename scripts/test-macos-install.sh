@@ -114,8 +114,13 @@ assert_rejects "rejects PURGE with trailing space before mutation" \
 # LaunchServices may know about development and installed bundles with the same
 # name and identifier. The install hint must select the installed path exactly.
 assert_output "launch hint opens the installed bundle by exact path" \
-  '/usr/bin/open "/Applications/Heimdallm.app"' \
-  installed_app_launch_command
+  "/usr/bin/open '/Applications/Heimdallm.app'" \
+  installed_app_launch_command "/Applications/Heimdallm.app"
+mi_special_app_path="/Applications/\$Team \`beta\` \"quoted\" \\ path's.app"
+mi_special_launch_command="/usr/bin/open '/Applications/\$Team \`beta\` \"quoted\" \\ path'\\''s.app'"
+assert_output "launch hint safely quotes a non-default bundle path" \
+  "$mi_special_launch_command" \
+  installed_app_launch_command "$mi_special_app_path"
 
 # Canonical user paths.
 assert_accepts "accepts macOS absolute home" set_user_paths "/Users/alice"
