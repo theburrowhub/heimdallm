@@ -457,6 +457,13 @@ For iterating on the Flutter Web bundle against a running daemon:
 ```bash
 make build-web    # compile Flutter → web/; then `make up-build` to bake into the Nginx image
 ```
+To validate the production image directly, run both commands from the
+repository root. The root context is required because `flutter_app/assets`
+links to the shared `assets/` directory:
+```bash
+docker build --target build -f flutter_app/Dockerfile.web .
+docker compose -f docker/docker-compose.yml build web
+```
 
 **CLI / TUI** — terminal client against a running daemon:
 ```bash

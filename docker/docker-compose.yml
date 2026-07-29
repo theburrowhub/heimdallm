@@ -129,8 +129,11 @@ services:
   # it into proxied /api/* requests so the browser never handles it.
   web:
     build:
-      context: ../flutter_app
-      dockerfile: Dockerfile.web
+      # The Flutter project shares the repository-root assets directory via
+      # flutter_app/assets -> ../assets. Use the repo root as context; the
+      # Dockerfile-specific ignore file keeps the transferred context minimal.
+      context: ..
+      dockerfile: flutter_app/Dockerfile.web
     container_name: heimdallm-web
     restart: unless-stopped
     ports:

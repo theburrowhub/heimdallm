@@ -6,13 +6,17 @@
 # bundle size / renderer.
 FROM ghcr.io/cirruslabs/flutter:stable AS build
 
-WORKDIR /src
+WORKDIR /src/flutter_app
 # Copy manifests first so pub get is cacheable on dependency-free changes.
-COPY pubspec.yaml pubspec.lock ./
+COPY flutter_app/pubspec.yaml flutter_app/pubspec.lock ./
 RUN flutter pub get
 
-# Now the rest of the source. .dockerignore keeps this cheap.
-COPY . .
+# The Flutter project deliberately shares the repository-root assets directory
+# through `flutter_app/assets -> ../assets`. The build context therefore has to
+# be the repository root; the Dockerfile-specific ignore file keeps that context
+# limited to the web sources and shared assets.
+COPY flutter_app/ ./
+COPY assets/ /src/assets/
 RUN flutter build web --release --base-href=/
 
 # ── Stage 2: Nginx runtime ───────────────────────────────────────────────
@@ -25,15 +29,15 @@ FROM nginx:1.27-alpine
 # gettext provides envsubst for the entrypoint rendering step.
 RUN apk add --no-cache gettext
 
-COPY --from=build /src/build/web /usr/share/nginx/html
+COPY --from=build /src/flutter_app/build/web /usr/share/nginx/html
 # NOTE: template lives OUTSIDE /etc/nginx/templates/ on purpose. The stock
 # nginx:alpine entrypoint auto-renders every *.template under that path
 # with an unrestricted envsubst invocation that (a) runs after our script
 # in a fresh shell where our exports no longer exist and (b) would write
 # a second server{} block into conf.d/. Keeping the template at a custom
 # path makes our entrypoint the single renderer.
-COPY nginx.conf.template /etc/nginx/heimdallm.conf.template
-COPY docker-entrypoint.d/10-heimdallm-token.sh /docker-entrypoint.d/10-heimdallm-token.sh
+COPY flutter_app/nginx.conf.template /etc/nginx/heimdallm.conf.template
+COPY flutter_app/docker-entrypoint.d/10-heimdallm-token.sh /docker-entrypoint.d/10-heimdallm-token.sh
 
 # The default conf.d entry shipped with the image would listen on 80 and
 # 404 everything we care about — remove it.
