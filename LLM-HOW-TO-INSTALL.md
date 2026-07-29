@@ -2,10 +2,65 @@
 
 Step-by-step guide for Claude Code or any AI agent to install Heimdallm on macOS or Linux.
 
-- **macOS**: steps 1–5 below (DMG installer)
+- **macOS with a repository checkout**: use the preferred Make target below
+- **macOS without a checkout**: use steps 1–5 (manual DMG fallback)
 - **Linux**: jump to [Linux installation](#linux-installation)
 
 ---
+
+## macOS from a repository checkout (preferred)
+
+Run from the repository root as the normal user:
+
+```bash
+make install-macos                  # latest release
+make install-macos RELEASE=v0.7.5   # specific release
+```
+
+Never run `sudo make install-macos` or `sudo make uninstall-macos`. If writing
+to `/Applications` requires elevation, the helper obtains one sudo ticket and
+elevates only the app-bundle operations. It keeps LaunchAgent and home-directory
+work in the invoking user's domain.
+
+If a Heimdallm LaunchAgent already exists, install migrates it to the daemon
+inside `/Applications/Heimdallm.app`. A loaded, enabled LaunchAgent is
+regenerated from the bundled daemon, which discards manual plist edits. For an
+unloaded or disabled LaunchAgent, only the daemon executable path changes and
+the remaining plist keys are preserved. Uninstall removes the app and
+LaunchAgent even without purge:
+
+```bash
+make uninstall-macos                # preserve config, history, logs, and Keychain
+make uninstall-macos PURGE=1        # irreversibly delete canonical user state
+```
+
+`PURGE=1` deletes exactly `~/.config/heimdallm`,
+`~/.local/share/heimdallm` (including the review database), and
+`~/Library/Logs/heimdallm`. It does not follow custom config/data path
+overrides, and it preserves the Keychain item. To remove the credential too,
+run:
+
+```bash
+security delete-generic-password -s heimdallm -a github-token
+```
+
+Leave `PURGE` empty for a normal uninstall. Any non-empty value other than
+exact `PURGE=1` is an error and aborts before changing the LaunchAgent, app, or
+user data.
+
+After a successful install, skip the manual download steps and continue at
+[Launch](#4-launch).
+
+---
+
+## macOS manual DMG fallback (no checkout)
+
+Use this path only when the repository and its Make target are unavailable.
+Unlike the preferred target, these commands do not migrate a pre-existing
+LaunchAgent. If
+`~/Library/LaunchAgents/com.heimdallm.daemon.plist` exists, stop here and use
+the repository target; the manual fallback can otherwise leave an old
+`KeepAlive` service running against the replacement app.
 
 ## 1. Get the latest version
 
@@ -49,7 +104,10 @@ fi
 echo "✓ Bundle looks good ($(ls -lh "$DAEMON_BIN" | awk '{print $5}') daemon, $(ls -lh "$FLUTTER_BIN" | awk '{print $5}') launcher)"
 
 # Install
-pkill -9 -f Heimdallm 2>/dev/null; sleep 1
+APP_PATTERN='^/Applications/Heimdallm[.]app/Contents/MacOS/(Heimdallm|heimdalld)([[:space:]]|$)'
+pkill -TERM -U "$(id -u)" -f "$APP_PATTERN" 2>/dev/null || true
+sleep 6
+pkill -KILL -U "$(id -u)" -f "$APP_PATTERN" 2>/dev/null || true
 rm -rf /Applications/Heimdallm.app
 cp -R "$APP_SRC" /Applications/Heimdallm.app
 echo "✓ Installed to /Applications"
@@ -216,4 +274,7 @@ If it exits, there's no config yet — the app creates it on first launch.
 
 ## Updating
 
-Repeat from step 1. Config (`~/.config/heimdallm/`) and history (`~/.local/share/heimdallm/`) are preserved.
+From a repository checkout, rerun `make install-macos` (optionally with
+`RELEASE=vX.Y.Z`). It preserves config (`~/.config/heimdallm/`), history
+(`~/.local/share/heimdallm/`), logs, custom override paths, and the Keychain
+credential. Without a checkout, repeat the manual macOS steps from step 1.

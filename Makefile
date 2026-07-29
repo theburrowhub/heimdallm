@@ -17,10 +17,10 @@ else
 endif
 
 .PHONY: build-daemon build-app build-web build-cli test test-cli lint-cli dev-cli test-docker dev dev-daemon dev-stop \
-        release-local package-macos install-service verify-linux run-linux \
-        install-linux uninstall-linux \
+        release-local package-macos install-service verify-linux run-linux test-install-macos \
+        install-macos uninstall-macos install-linux uninstall-linux \
         setup up up-build up-daemon up-build-daemon down logs logs-daemon \
-        ps restart clean clean-clones _check-docker _check-env _check-linux _post-up-hints
+        ps restart clean clean-clones _check-docker _check-env _check-macos _check-macos-user _check-linux _post-up-hints
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
@@ -50,6 +50,11 @@ test-cli:
 
 lint-cli:
 	$(MAKE) -C cli lint
+
+test-install-macos:
+	@sh -n scripts/macos-install.sh
+	@sh -n scripts/test-macos-install.sh
+	@./scripts/test-macos-install.sh
 
 # ── Sandboxed Go tests (EDR-safe) ─────────────────────────────────────────────
 #
@@ -236,6 +241,13 @@ _check-macos:
 	  exit 1; \
 	fi
 
+_check-macos-user: _check-macos
+	@if [ "$$(id -u)" -eq 0 ]; then \
+	  echo "❌  Do not install or uninstall Heimdallm as root."; \
+	  echo "    Run the macOS target as your normal user, without 'sudo make'."; \
+	  exit 1; \
+	fi
+
 _check-linux:
 	@if [ "$$(uname -s)" != "Linux" ]; then \
 	  echo "❌  This target requires Linux."; \
@@ -417,6 +429,29 @@ package-macos: _check-macos build-daemon build-app
 	  -srcfolder "$(APP_BUNDLE)" \
 	  -ov -format UDZO \
 	  "dist/Heimdallm.dmg"
+
+# ── Native macOS install / uninstall (release DMG) ────────────────────────────
+#
+# Downloads a release DMG and installs the validated app bundle transactionally
+# into /Applications. The helper owns launchd state, rollback, selective sudo,
+# and cleanup; keep these recipes thin so Make never evaluates macOS commands at
+# parse time.
+#
+# Usage:
+#   make install-macos
+#   make install-macos RELEASE=v0.7.5
+#   make uninstall-macos
+#   make uninstall-macos PURGE=1
+#
+# RELEASE/PURGE supplied on the make command line or inherited from the
+# environment already reach the recipe environment; do not export them
+# globally, where they could leak into unrelated targets.
+
+install-macos: _check-macos-user
+	@./scripts/macos-install.sh install
+
+uninstall-macos: _check-macos-user
+	@./scripts/macos-install.sh uninstall
 
 # ── Docker-based Linux build verification ─────────────────────────────────────
 #

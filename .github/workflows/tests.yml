@@ -15,6 +15,60 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  installer-shell:
+    name: macOS installer shell (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Syntax and pure-logic tests
+        run: |
+          set -eu
+          for script in scripts/macos-install.sh scripts/test-macos-install.sh; do
+            if [ ! -x "$script" ]; then
+              echo "::error::$script must be executable"
+              exit 1
+            fi
+          done
+          make test-install-macos
+
+      - name: Existing Linux install targets still parse
+        run: |
+          make -n install-linux >/dev/null
+          make -n uninstall-linux >/dev/null
+
+      - name: macOS targets stop at the platform guard
+        run: |
+          set -eu
+          for target in install-macos uninstall-macos; do
+            if output="$(make "$target" 2>&1)"; then
+              echo "::error::$target unexpectedly succeeded on Linux"
+              exit 1
+            fi
+            printf '%s\n' "$output"
+            if ! printf '%s\n' "$output" |
+              grep -Fq "This target requires macOS."; then
+              echo "::error::$target did not stop at the expected macOS guard"
+              exit 1
+            fi
+          done
+
+      - name: Direct helper invocation is also harmless on Linux
+        run: |
+          set -eu
+          for operation in install uninstall; do
+            if output="$(./scripts/macos-install.sh "$operation" 2>&1)"; then
+              echo "::error::direct $operation unexpectedly succeeded on Linux"
+              exit 1
+            fi
+            printf '%s\n' "$output"
+            if ! printf '%s\n' "$output" |
+              grep -Fq "This installer requires macOS."; then
+              echo "::error::direct $operation did not stop at the expected Linux guard"
+              exit 1
+            fi
+          done
+
   daemon:
     name: Daemon (Go)
     runs-on: macos-14
