@@ -10,33 +10,54 @@
 #   5. GET /api/events (SSE)     — stream opens with text/event-stream
 #   6. GET /prs/123              — SPA deep-link fallback (returns HTML)
 #
-# Assumptions: docker compose is installed; HEIMDALLM_PORT + HEIMDALLM_WEB_PORT
-# default to 7842 / 3000. Override via env.
+# Assumptions: docker compose is installed. Docker assigns free loopback host
+# ports by default so concurrent invocations remain independent.
 set -eu
 
-HEIMDALLM_WEB_PORT="${HEIMDALLM_WEB_PORT:-3000}"
-BASE="http://localhost:${HEIMDALLM_WEB_PORT}"
-COMPOSE="docker compose -f docker/docker-compose.yml -f docker/docker-compose.test.yml"
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
+cd "$REPO_ROOT"
+
+# shellcheck source=lib/compose-test.sh
+. "$SCRIPT_DIR/lib/compose-test.sh"
+compose_test_init web "$REPO_ROOT"
+
+BASE=""
 
 log() { printf '▶  %s\n' "$1"; }
 fail() { printf '✗  %s\n' "$1" >&2; exit 1; }
 
 cleanup() {
-  $COMPOSE down -v --remove-orphans >/dev/null 2>&1 || true
+  exit_code=$?
+  trap - EXIT
+  trap '' HUP INT TERM
   rm -f "${INDEX_HTML:-}" "${DEEP_HTML:-}" "${SSE_HDR:-}"
+  if ! compose_test_cleanup; then
+    if [ "$exit_code" -eq 0 ]; then
+      exit_code=1
+    fi
+  fi
+  exit "$exit_code"
 }
 trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # Temp files for response bodies/headers. mktemp is parallel-safe on CI.
 INDEX_HTML="$(mktemp)"
 DEEP_HTML="$(mktemp)"
 SSE_HDR="$(mktemp)"
 
-log "docker compose up -d --build"
-$COMPOSE up -d --build
+log "starting isolated Compose project ${COMPOSE_TEST_PROJECT_NAME}"
+compose_test up -d --build
+
+web_host_port=$(compose_test_published_port web 3000)
+BASE="http://127.0.0.1:${web_host_port}"
+log "web endpoint: ${BASE}"
 
 log "waiting for heimdallm-web healthcheck"
-web_container="$($COMPOSE ps -q web)"
+web_container="$(compose_test ps -q web)"
 for i in $(seq 1 60); do
   status="$(docker inspect -f '{{.State.Health.Status}}' "$web_container" 2>/dev/null || echo starting)"
   [ "$status" = "healthy" ] && break

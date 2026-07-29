@@ -73,15 +73,18 @@ Or use CODEOWNERS/branch protection to auto-assign reviewers.
 ### 4. Start the Daemon
 
 ```bash
-# With test compose overlay (no auto-restart, mapped ports)
-docker compose -f docker/docker-compose.yml -f docker/docker-compose.test.yml up --build
-```
-
-Or use the Makefile shortcut:
-
-```bash
+# Creates a unique, isolated Compose project for this invocation.
 make test-e2e
 ```
+
+Do not invoke `docker-compose.test.yml` directly. The runner generates a
+project name such as `heimdallm-test-local-<pid>-<random>`, unique container
+names, per-project data and config volumes, and free loopback-only host ports.
+This means a normal `make up` stack and other test runs can stay active without
+sharing containers, networks, ports, or persistent data.
+
+The runner prints the exact project name and daemon URL after startup. Keep it
+running while following the remaining steps; press Ctrl+C when finished.
 
 ### 5. Observe the Pipeline
 
@@ -102,7 +105,8 @@ Watch the logs for these stages in order:
 While the daemon is running, in another terminal:
 
 ```bash
-BASE=http://localhost:7842
+# Copy the per-run URL printed by make test-e2e.
+BASE='http://127.0.0.1:<printed-port>'
 
 # Health check
 curl -s $BASE/health | jq
@@ -134,7 +138,10 @@ Check the PR on GitHub — you should see a review comment from the token user w
 Read the API token from the container:
 
 ```bash
-API_TOKEN=$(docker compose -f docker/docker-compose.yml -f docker/docker-compose.test.yml exec heimdallm cat /data/api_token)
+# The runner prints its exact `docker compose --project-name ...` command.
+# Copy it into this terminal and append the exec arguments:
+<printed-compose-command> exec -T heimdallm cat /data/api_token
+API_TOKEN='<output from the previous command>'
 
 # Get PR ID from /prs
 PR_ID=$(curl -s $BASE/prs | jq '.[0].id')
@@ -151,11 +158,20 @@ curl -X POST $BASE/prs/$PR_ID/undismiss -H "X-Heimdallm-Token: $API_TOKEN"
 
 ### 9. Clean Up
 
-```bash
-# Stop the daemon
-docker compose -f docker/docker-compose.yml -f docker/docker-compose.test.yml down -v
+Press Ctrl+C in the runner terminal. Its EXIT trap verifies the private marker
+created for that process before it can call `down -v`; if the project name or
+marker does not match, cleanup fails closed and Docker is not invoked. The
+verified cleanup removes only that run's containers, network, and named
+volumes. The normal development/production project is never targeted.
 
-# Close the test PR
+If the process is killed with SIGKILL, Docker resources can remain because no
+shell trap can run. Their project and container names retain the
+`heimdallm-test-*` prefix for inspection; confirm the exact Compose project
+labels before removing only that run. Do not use an unscoped `down -v`.
+
+Finally, close the test PR:
+
+```bash
 gh pr close <PR_NUMBER> -d  # -d deletes the branch too
 ```
 
