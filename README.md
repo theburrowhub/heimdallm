@@ -54,6 +54,11 @@ ticket once and limits it to the app-bundle operations. A pre-existing
 LaunchAgent is migrated to the installed bundle; uninstall always removes the
 LaunchAgent so `launchd` cannot keep retrying a missing executable.
 
+Migration of a loaded, enabled LaunchAgent regenerates its canonical plist from
+the bundled daemon, so manual plist edits are discarded. If the LaunchAgent
+was unloaded or disabled, install changes only its daemon executable path and
+preserves the other plist keys.
+
 Normal uninstall preserves config, review history, logs, and the macOS
 Keychain credential. `PURGE=1` irreversibly removes only the canonical
 `~/.config/heimdallm`, `~/.local/share/heimdallm`, and
@@ -61,6 +66,8 @@ Keychain credential. `PURGE=1` irreversibly removes only the canonical
 path overrides, and it still preserves the Keychain credential. Remove that
 separately, if desired, with
 `security delete-generic-password -s heimdallm -a github-token`.
+An empty `PURGE` means normal uninstall; any non-empty value other than exact
+`PURGE=1` is rejected before the LaunchAgent, app, or user data is changed.
 
 Without a checkout, use the manual DMG fallback:
 

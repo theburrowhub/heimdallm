@@ -23,8 +23,11 @@ elevates only the app-bundle operations. It keeps LaunchAgent and home-directory
 work in the invoking user's domain.
 
 If a Heimdallm LaunchAgent already exists, install migrates it to the daemon
-inside `/Applications/Heimdallm.app`. Uninstall removes the app and LaunchAgent
-even without purge:
+inside `/Applications/Heimdallm.app`. A loaded, enabled LaunchAgent is
+regenerated from the bundled daemon, which discards manual plist edits. For an
+unloaded or disabled LaunchAgent, only the daemon executable path changes and
+the remaining plist keys are preserved. Uninstall removes the app and
+LaunchAgent even without purge:
 
 ```bash
 make uninstall-macos                # preserve config, history, logs, and Keychain
@@ -40,6 +43,10 @@ run:
 ```bash
 security delete-generic-password -s heimdallm -a github-token
 ```
+
+Leave `PURGE` empty for a normal uninstall. Any non-empty value other than
+exact `PURGE=1` is an error and aborts before changing the LaunchAgent, app, or
+user data.
 
 After a successful install, skip the manual download steps and continue at
 [Launch](#4-launch).
@@ -99,7 +106,7 @@ echo "✓ Bundle looks good ($(ls -lh "$DAEMON_BIN" | awk '{print $5}') daemon, 
 # Install
 APP_PATTERN='^/Applications/Heimdallm[.]app/Contents/MacOS/(Heimdallm|heimdalld)([[:space:]]|$)'
 pkill -TERM -U "$(id -u)" -f "$APP_PATTERN" 2>/dev/null || true
-sleep 2
+sleep 6
 pkill -KILL -U "$(id -u)" -f "$APP_PATTERN" 2>/dev/null || true
 rm -rf /Applications/Heimdallm.app
 cp -R "$APP_SRC" /Applications/Heimdallm.app

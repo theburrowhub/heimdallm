@@ -20,7 +20,7 @@ endif
         release-local package-macos install-service verify-linux run-linux test-install-macos \
         install-macos uninstall-macos install-linux uninstall-linux \
         setup up up-build up-daemon up-build-daemon down logs logs-daemon \
-        ps restart clean clean-clones _check-docker _check-env _check-macos _check-linux _post-up-hints
+        ps restart clean clean-clones _check-docker _check-env _check-macos _check-macos-user _check-linux _post-up-hints
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
@@ -54,7 +54,7 @@ lint-cli:
 test-install-macos:
 	@sh -n scripts/macos-install.sh
 	@sh -n scripts/test-macos-install.sh
-	@sh scripts/test-macos-install.sh
+	@./scripts/test-macos-install.sh
 
 # ── Sandboxed Go tests (EDR-safe) ─────────────────────────────────────────────
 #
@@ -239,6 +239,13 @@ _check-macos:
 	@if [ "$$(uname -s)" != "Darwin" ]; then \
 	  echo "❌  This target requires macOS."; \
 	  echo "    For a Linux install, use 'make install-linux'."; \
+	  exit 1; \
+	fi
+
+_check-macos-user: _check-macos
+	@if [ "$$(id -u)" -eq 0 ]; then \
+	  echo "❌  Do not install or uninstall Heimdallm as root."; \
+	  echo "    Run the macOS target as your normal user, without 'sudo make'."; \
 	  exit 1; \
 	fi
 
@@ -436,13 +443,15 @@ package-macos: _check-macos build-daemon build-app
 #   make install-macos RELEASE=v0.7.5
 #   make uninstall-macos
 #   make uninstall-macos PURGE=1
+#
+# RELEASE/PURGE supplied on the make command line or inherited from the
+# environment already reach the recipe environment; do not export them
+# globally, where they could leak into unrelated targets.
 
-install-macos: export RELEASE := $(RELEASE)
-install-macos: _check-macos
+install-macos: _check-macos-user
 	@./scripts/macos-install.sh install
 
-uninstall-macos: export PURGE := $(PURGE)
-uninstall-macos: _check-macos
+uninstall-macos: _check-macos-user
 	@./scripts/macos-install.sh uninstall
 
 # ── Docker-based Linux build verification ─────────────────────────────────────

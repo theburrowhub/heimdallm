@@ -10,6 +10,7 @@ APP_DAEMON_BIN="$APP_PATH/Contents/MacOS/heimdalld"
 BUNDLE_PROCESS_PATTERN='^/Applications/Heimdallm[.]app/Contents/MacOS/(Heimdallm|heimdalld)([[:space:]]|$)'
 LAUNCHAGENT_LABEL="com.heimdallm.daemon"
 PORT="7842"
+SERVICE_READY_TIMEOUT_SECONDS="60"
 
 info() {
   printf '%s\n' "$*"
@@ -46,6 +47,16 @@ validate_release_tag() {
 
 purge_requested() {
   [ "${1-}" = "1" ]
+}
+
+validate_purge_value() {
+  if [ "$#" -gt 1 ]; then
+    return 1
+  fi
+  case "${1-}" in
+    ""|"1") return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 validate_home_path() {
@@ -95,8 +106,8 @@ classify_listener() {
   fi
 }
 
-# Encodes the reviewed LaunchAgent × port matrix. The returned token is used by
-# both the implementation and the dependency-free test harness.
+# Abort/warn drives preflight; suffixes are a docs/test oracle. Later actions
+# derive from LAUNCHAGENT_STATE. Absent/unloaded + service is defensive only.
 decide_install_policy() {
   mi_plist_state=${1-}
   mi_listener_class=${2-}
@@ -136,6 +147,33 @@ rollback_new_move_detected() {
     { [ "${2-}" = "1" ] &&
       [ "${3-}" = "1" ] &&
       [ "${4-}" = "1" ]; }
+}
+
+rollback_required() {
+  [ "${1-}" = "1" ] && [ "${2-}" != "1" ]
+}
+
+# The captured service PID or exact installed executables are controlled by
+# uninstall; every other live database/ui.pid holder blocks purge.
+classify_purge_holder() {
+  mi_holder_pid=${1-}
+  mi_holder_executable=${2-}
+  mi_holder_uid=${3-}
+  mi_known_service_pid=${4-}
+  mi_expected_uid=${5-}
+
+  if [ -z "$mi_holder_uid" ] ||
+     [ "$mi_holder_uid" != "$mi_expected_uid" ]; then
+    printf '%s\n' "foreign"
+  elif [ -n "$mi_known_service_pid" ] &&
+       [ "$mi_holder_pid" = "$mi_known_service_pid" ]; then
+    printf '%s\n' "known-service"
+  elif [ "$mi_holder_executable" = "$APP_UI_BIN" ] ||
+       [ "$mi_holder_executable" = "$APP_DAEMON_BIN" ]; then
+    printf '%s\n' "known-bundle"
+  else
+    printf '%s\n' "foreign"
+  fi
 }
 
 init_runtime_state() {
@@ -1142,8 +1180,8 @@ handle_exit() {
   trap - 0
   trap '' HUP INT TERM
 
-  if [ "${ROLLBACK_ARMED:-0}" = "1" ] &&
-     [ "${INSTALL_COMMITTED:-0}" != "1" ]; then
+  if rollback_required \
+    "${ROLLBACK_ARMED:-0}" "${INSTALL_COMMITTED:-0}"; then
     if ! rollback_install; then
       mi_exit_status=1
     fi
@@ -1160,8 +1198,8 @@ handle_signal() {
   trap - 0
   trap '' HUP INT TERM
   warn "Received $mi_signal_name; cleaning up."
-  if [ "${ROLLBACK_ARMED:-0}" = "1" ] &&
-     [ "${INSTALL_COMMITTED:-0}" != "1" ]; then
+  if rollback_required \
+    "${ROLLBACK_ARMED:-0}" "${INSTALL_COMMITTED:-0}"; then
     rollback_install || true
   fi
   cleanup || true
@@ -1492,7 +1530,7 @@ verify_plist_program_path() {
 
 wait_for_loaded_service_ready() {
   mi_service_wait=0
-  while [ "$mi_service_wait" -lt 6 ]; do
+  while [ "$mi_service_wait" -lt "$SERVICE_READY_TIMEOUT_SECONDS" ]; do
     if ! mi_service_state=$(launchagent_job_state); then
       return 1
     fi
@@ -1503,6 +1541,7 @@ wait_for_loaded_service_ready() {
          inspect_port &&
          [ "$PORT_CLASS" = "service" ]; then
         /bin/sleep 1
+        mi_service_wait=$((mi_service_wait + 1))
         if ! mi_service_state=$(launchagent_job_state); then
           return 1
         fi
@@ -1513,6 +1552,7 @@ wait_for_loaded_service_ready() {
            [ "$PORT_CLASS" = "service" ]; then
           return 0
         fi
+        continue
       fi
     fi
     /bin/sleep 1
@@ -1628,6 +1668,8 @@ install_macos() {
   esac
 
   resolve_release
+  warn "This release DMG has no published checksum and is ad-hoc signed."
+  warn "hdiutil/codesign validate structure, not publisher identity; download trust relies on GitHub HTTPS."
   create_private_temp
   download_and_mount_release
   if ! validate_bundle "$SOURCE_APP"; then
@@ -1732,6 +1774,114 @@ ui_pid_is_live() {
   return 0
 }
 
+read_pid_file() {
+  mi_pid_file_path=${1-}
+  PID_FILE_VALUE=""
+  if [ "$#" -ne 1 ] || [ -z "$mi_pid_file_path" ]; then
+    return 1
+  fi
+  if IFS= read -r PID_FILE_VALUE < "$mi_pid_file_path"; then
+    return 0
+  fi
+  # Dart omits the newline; POSIX read assigns at EOF but returns non-zero.
+  [ -n "$PID_FILE_VALUE" ] || [ -r "$mi_pid_file_path" ]
+}
+
+inspect_purge_holder() {
+  mi_purge_holder_pid=${1-}
+  mi_purge_service_pid=${2-}
+  PURGE_HOLDER_CLASS=""
+  PURGE_HOLDER_EXECUTABLE=""
+
+  if ! mi_purge_holder_uid=$(
+    process_uid "$mi_purge_holder_pid" 2>/dev/null
+  ); then
+    if pid_exists "$mi_purge_holder_pid"; then
+      error "Cannot determine owner of live purge holder PID $mi_purge_holder_pid."
+      return 2
+    else
+      mi_purge_holder_status=$?
+    fi
+    if [ "$mi_purge_holder_status" -eq 1 ]; then
+      return 1
+    fi
+    error "Cannot determine whether purge holder PID $mi_purge_holder_pid still exists."
+    return 2
+  fi
+
+  PURGE_HOLDER_EXECUTABLE=$(
+    process_executable "$mi_purge_holder_pid" 2>/dev/null || true
+  )
+  if [ -z "$PURGE_HOLDER_EXECUTABLE" ] &&
+     { [ -z "$mi_purge_service_pid" ] ||
+       [ "$mi_purge_holder_pid" != "$mi_purge_service_pid" ]; }; then
+    if pid_exists "$mi_purge_holder_pid"; then
+      error "Cannot resolve executable for live purge holder PID $mi_purge_holder_pid."
+      return 2
+    else
+      mi_purge_holder_status=$?
+    fi
+    if [ "$mi_purge_holder_status" -eq 1 ]; then
+      return 1
+    fi
+    error "Cannot determine whether purge holder PID $mi_purge_holder_pid still exists."
+    return 2
+  fi
+
+  PURGE_HOLDER_CLASS=$(
+    classify_purge_holder \
+      "$mi_purge_holder_pid" \
+      "$PURGE_HOLDER_EXECUTABLE" \
+      "$mi_purge_holder_uid" \
+      "$mi_purge_service_pid" \
+      "$USER_UID"
+  )
+  return 0
+}
+
+preflight_purge_ui_pid() {
+  mi_purge_service_pid=${1-}
+  if [ ! -e "$UI_PID_PATH" ]; then
+    return 0
+  fi
+  if [ ! -f "$UI_PID_PATH" ] || [ -L "$UI_PID_PATH" ]; then
+    die "PURGE=1 refuses an unsafe ui.pid path before uninstall: $UI_PID_PATH"
+  fi
+
+  if ! read_pid_file "$UI_PID_PATH"; then
+    die "PURGE=1 cannot read ui.pid safely before uninstall: $UI_PID_PATH"
+  fi
+  mi_preflight_ui_pid=$PID_FILE_VALUE
+  case "$mi_preflight_ui_pid" in
+    ""|*[!0-9]*) return 0 ;;
+  esac
+
+  if pid_exists "$mi_preflight_ui_pid"; then
+    :
+  else
+    mi_preflight_ui_status=$?
+    if [ "$mi_preflight_ui_status" -eq 1 ]; then
+      return 0
+    fi
+    die "PURGE=1 cannot determine whether ui.pid PID $mi_preflight_ui_pid is live."
+  fi
+
+  if inspect_purge_holder \
+    "$mi_preflight_ui_pid" "$mi_purge_service_pid"; then
+    :
+  else
+    mi_preflight_ui_status=$?
+    if [ "$mi_preflight_ui_status" -eq 1 ]; then
+      return 0
+    fi
+    die "PURGE=1 cannot verify live ui.pid PID $mi_preflight_ui_pid."
+  fi
+  if [ "$PURGE_HOLDER_CLASS" = "foreign" ]; then
+    mi_preflight_ui_executable=${PURGE_HOLDER_EXECUTABLE:-unknown-executable}
+    die "PURGE=1 would affect live external ui.pid PID $mi_preflight_ui_pid ($mi_preflight_ui_executable); close it before uninstall."
+  fi
+}
+
 handle_ui_pid_file() {
   if [ ! -e "$UI_PID_PATH" ]; then
     return 0
@@ -1744,7 +1894,11 @@ handle_ui_pid_file() {
     return 0
   fi
 
-  IFS= read -r mi_ui_pid < "$UI_PID_PATH" || mi_ui_pid=""
+  if ! read_pid_file "$UI_PID_PATH"; then
+    warn "Preserving unreadable ui.pid path: $UI_PID_PATH"
+    return 0
+  fi
+  mi_ui_pid=$PID_FILE_VALUE
   if ! ui_pid_is_live "$mi_ui_pid"; then
     /bin/rm -f "$UI_PID_PATH"
     return 0
@@ -1781,31 +1935,32 @@ remove_installed_app() {
     die "Installed app path is not a regular application directory: $APP_PATH"
   fi
 
-  configure_application_privilege
   if ! run_privileged /bin/rm -rf "$APP_PATH"; then
     die "Could not remove $APP_PATH"
   fi
   info "↓  Removed $APP_PATH"
 }
 
-verify_database_closed() {
+inspect_database_holders() {
+  DATABASE_HOLDER_PIDS=""
   if [ ! -e "$DB_PATH" ]; then
     return 0
   fi
   if [ ! -f "$DB_PATH" ] || [ -L "$DB_PATH" ]; then
-    die "Database path is not a regular file: $DB_PATH"
+    error "Database path is not a regular file: $DB_PATH"
+    return 2
   fi
 
   mi_lsof_error=$(
-    /usr/bin/mktemp "${TMPDIR:-/tmp}/heimdallm-lsof.XXXXXX"
-  )
+    /usr/bin/mktemp "/tmp/heimdallm-lsof.XXXXXX"
+  ) || {
+    error "Could not create a scratch file for database inspection."
+    return 2
+  }
   if mi_lsof_output=$(
-    /usr/sbin/lsof -nP "$DB_PATH" 2>"$mi_lsof_error"
+    /usr/sbin/lsof -nP -Fp "$DB_PATH" 2>"$mi_lsof_error"
   ); then
-    /bin/rm -f "$mi_lsof_error"
-    error "Database is still open; refusing PURGE=1:"
-    printf '%s\n' "$mi_lsof_output" >&2
-    exit 1
+    mi_lsof_status=0
   else
     mi_lsof_status=$?
   fi
@@ -1816,11 +1971,82 @@ verify_database_closed() {
   fi
   /bin/rm -f "$mi_lsof_error"
 
-  if [ "$mi_lsof_status" -ne 1 ] || [ -n "$mi_lsof_error_text" ]; then
-    error "lsof could not prove that the database is closed; refusing PURGE=1."
+  if [ "$mi_lsof_status" -eq 1 ] &&
+     [ -z "$mi_lsof_output" ] &&
+     [ -z "$mi_lsof_error_text" ]; then
+    return 0
+  fi
+  if [ "$mi_lsof_status" -ne 0 ] || [ -n "$mi_lsof_error_text" ]; then
+    error "lsof could not inspect the database safely."
     if [ -n "$mi_lsof_error_text" ]; then
       printf '%s\n' "$mi_lsof_error_text" >&2
     fi
+    return 2
+  fi
+
+  DATABASE_HOLDER_PIDS=$(
+    printf '%s\n' "$mi_lsof_output" |
+      /usr/bin/awk '/^p[0-9]+$/ { sub(/^p/, ""); if (!seen[$0]++) print }'
+  )
+  if [ -z "$DATABASE_HOLDER_PIDS" ]; then
+    error "lsof reported an open database without an inspectable PID."
+    return 2
+  fi
+}
+
+preflight_purge_database() {
+  mi_purge_service_pid=${1-}
+  if ! inspect_database_holders; then
+    die "Cannot inspect database holders before PURGE=1."
+  fi
+
+  for mi_preflight_db_pid in $DATABASE_HOLDER_PIDS; do
+    if inspect_purge_holder \
+      "$mi_preflight_db_pid" "$mi_purge_service_pid"; then
+      :
+    else
+      mi_preflight_db_status=$?
+      if [ "$mi_preflight_db_status" -eq 1 ]; then
+        continue
+      fi
+      die "PURGE=1 cannot verify database holder PID $mi_preflight_db_pid."
+    fi
+    if [ "$PURGE_HOLDER_CLASS" = "foreign" ]; then
+      mi_preflight_db_executable=${PURGE_HOLDER_EXECUTABLE:-unknown-executable}
+      die "PURGE=1 found external database holder PID $mi_preflight_db_pid ($mi_preflight_db_executable); stop it before uninstall."
+    fi
+  done
+}
+
+preflight_purge() {
+  warn "PURGE=1 permanently deletes the Heimdallm database and all review history; this cannot be undone."
+
+  if ! mi_preflight_job_state=$(launchagent_job_state); then
+    die "Cannot inspect the LaunchAgent before PURGE=1."
+  fi
+  mi_preflight_service_pid=""
+  if [ "$mi_preflight_job_state" = "loaded" ]; then
+    mi_preflight_service_pid=$(current_job_pid 2>/dev/null || true)
+  fi
+
+  preflight_purge_ui_pid "$mi_preflight_service_pid"
+  preflight_purge_database "$mi_preflight_service_pid"
+}
+
+verify_database_closed() {
+  if ! inspect_database_holders; then
+    die "lsof could not prove that the database is closed; refusing PURGE=1."
+  fi
+  if [ -n "$DATABASE_HOLDER_PIDS" ]; then
+    error "Database is still open; refusing PURGE=1:"
+    for mi_database_holder_pid in $DATABASE_HOLDER_PIDS; do
+      mi_database_holder_executable=$(
+        process_executable "$mi_database_holder_pid" 2>/dev/null || true
+      )
+      printf 'PID %s (%s)\n' \
+        "$mi_database_holder_pid" \
+        "${mi_database_holder_executable:-unknown-executable}" >&2
+    done
     exit 1
   fi
 }
@@ -1841,9 +2067,6 @@ safe_purge_directory() {
 }
 
 purge_user_data() {
-  info ""
-  warn "PURGE=1 permanently deletes the Heimdallm database and all review history; this cannot be undone."
-
   if ! mi_purge_job_state=$(launchagent_job_state); then
     die "Cannot prove that the LaunchAgent is unloaded; refusing to purge."
   fi
@@ -1858,8 +2081,8 @@ purge_user_data() {
   fi
 
   verify_database_closed
-  safe_purge_directory "$CONFIG_DIR"
   safe_purge_directory "$DATA_DIR"
+  safe_purge_directory "$CONFIG_DIR"
   safe_purge_directory "$LOG_DIR"
 
   info ""
@@ -1887,8 +2110,22 @@ uninstall_macos() {
   require_common_commands
   resolve_invoking_user
 
-  if [ -n "${PURGE-}" ] && ! purge_requested "${PURGE-}"; then
-    warn "Ignoring PURGE=${PURGE}; only exact PURGE=1 deletes user data."
+  if ! validate_purge_value "${PURGE-}"; then
+    die "Invalid PURGE value; omit PURGE to preserve data or use PURGE=1 to delete it."
+  fi
+  if purge_requested "${PURGE-}"; then
+    info ""
+    preflight_purge
+  fi
+
+  # Authenticate while uninstall is still read-only.
+  if [ -L "$APP_PATH" ]; then
+    die "Installed app path must not be a symlink: $APP_PATH"
+  elif [ -e "$APP_PATH" ]; then
+    if [ ! -d "$APP_PATH" ]; then
+      die "Installed app path is not a regular application directory: $APP_PATH"
+    fi
+    configure_application_privilege
   fi
 
   info "▶  Removing Heimdallm LaunchAgent..."

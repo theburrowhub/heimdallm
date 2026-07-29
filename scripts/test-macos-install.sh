@@ -97,14 +97,19 @@ mi_newline_tag='v1
 v2'
 assert_rejects "rejects release newline" validate_release_tag "$mi_newline_tag"
 
-# PURGE must be exact; every other spelling preserves data.
+# PURGE mode is exact, and the public command accepts only empty/unset or 1.
 assert_accepts "PURGE=1 requests purge" purge_requested "1"
-assert_rejects "empty PURGE preserves data" purge_requested ""
-assert_rejects "unset-style PURGE preserves data" purge_requested
-assert_rejects "PURGE=0 preserves data" purge_requested "0"
-assert_rejects "PURGE=true preserves data" purge_requested "true"
-assert_rejects "PURGE=01 preserves data" purge_requested "01"
-assert_rejects "PURGE with trailing space preserves data" purge_requested "1 "
+assert_rejects "empty PURGE does not request purge" purge_requested ""
+assert_rejects "unset-style PURGE does not request purge" purge_requested
+assert_accepts "accepts unset PURGE value" validate_purge_value
+assert_accepts "accepts empty PURGE value" validate_purge_value ""
+assert_accepts "accepts exact PURGE=1 value" validate_purge_value "1"
+assert_rejects "rejects PURGE=0 before mutation" validate_purge_value "0"
+assert_rejects "rejects PURGE=true before mutation" \
+  validate_purge_value "true"
+assert_rejects "rejects PURGE=01 before mutation" validate_purge_value "01"
+assert_rejects "rejects PURGE with trailing space before mutation" \
+  validate_purge_value "1 "
 
 # Canonical user paths.
 assert_accepts "accepts macOS absolute home" set_user_paths "/Users/alice"
@@ -149,6 +154,15 @@ assert_rejects "rejects Applications root as work path" \
 assert_rejects "rejects short staging work path suffix" \
   safe_application_work_path "/Applications/.heimdallm-staging.ABC"
 
+# Flutter writes ui.pid without a trailing newline; retain the assigned value
+# even though POSIX read reports EOF as a non-zero status.
+mi_pid_file=$(mktemp "/tmp/heimdallm-ui-pid.XXXXXX")
+printf '%s' "12345" > "$mi_pid_file"
+assert_accepts "reads ui.pid without a trailing newline" \
+  read_pid_file "$mi_pid_file"
+assert_value "preserves ui.pid value assigned at EOF" "12345" "$PID_FILE_VALUE"
+rm -f "$mi_pid_file"
+
 # Listener classification uses exact executable paths and prioritizes the
 # captured LaunchAgent PID.
 assert_output "classifies empty listener as free" \
@@ -163,6 +177,26 @@ assert_output "rejects bundle-path prefix as foreign" \
   "foreign" classify_listener "43" "$APP_DAEMON_BIN.old" "42"
 assert_output "classifies checkout daemon as foreign" \
   "foreign" classify_listener "43" "/work/daemon/bin/heimdallm" "42"
+
+# PURGE preflight permits only the invoking user's known service or exact
+# installed-bundle executables. A checkout daemon is known only by service PID.
+assert_output "purge permits captured checkout service PID" \
+  "known-service" \
+  classify_purge_holder "42" "/work/daemon/bin/heimdallm" "501" "42" "501"
+assert_output "purge permits exact installed UI" \
+  "known-bundle" \
+  classify_purge_holder "43" "$APP_UI_BIN" "501" "42" "501"
+assert_output "purge permits exact installed daemon" \
+  "known-bundle" \
+  classify_purge_holder "44" "$APP_DAEMON_BIN" "501" "42" "501"
+assert_output "purge rejects a development daemon" \
+  "foreign" \
+  classify_purge_holder "45" "/work/daemon/bin/heimdallm" "501" "42" "501"
+assert_output "purge rejects another user's installed process" \
+  "foreign" \
+  classify_purge_holder "46" "$APP_DAEMON_BIN" "502" "42" "501"
+assert_output "purge rejects an unresolved executable" \
+  "foreign" classify_purge_holder "47" "" "501" "42" "501"
 
 # Reviewed 4 × 4 LaunchAgent/listener matrix.
 assert_policy "absent" "free" "proceed"
@@ -208,11 +242,43 @@ assert_accepts "path evidence closes new-move signal window" \
 assert_accepts "completed new-app flag is authoritative" \
   rollback_new_move_detected "1" "0" "0" "0"
 
-# Cleanup is deliberately tested only with every external resource disarmed.
-# Real hdiutil/launchctl/sudo/swap behavior belongs to macOS integration tests.
+# EXIT/signal handlers roll back only an armed, uncommitted transaction.
+assert_rejects "disarmed failed install does not roll back" \
+  rollback_required "0" "0"
+assert_accepts "armed failed install requires rollback" \
+  rollback_required "1" "0"
+assert_rejects "committed install does not roll back" \
+  rollback_required "1" "1"
+assert_rejects "disarmed committed install does not roll back" \
+  rollback_required "0" "1"
+
+# Cleanup exercises only real private /tmp state; external macOS integrations
+# (hdiutil/launchctl/sudo/swap) remain in the manual verification scenarios.
 init_runtime_state
 assert_accepts "cleanup succeeds with no resources armed" cleanup
 assert_accepts "cleanup is idempotent with no resources armed" cleanup
+
+mi_cleanup_dir=$(mktemp -d "/tmp/heimdallm-install.XXXXXX")
+init_runtime_state
+TEMP_DIR=$mi_cleanup_dir
+assert_accepts "cleanup removes an armed private temp directory" cleanup
+assert_rejects "armed private temp directory is gone" \
+  test -e "$mi_cleanup_dir"
+assert_value "cleanup disarms the private temp directory" "" "$TEMP_DIR"
+assert_accepts "cleanup stays idempotent after removing private temp" cleanup
+
+mi_preserved_dir=$(mktemp -d "/tmp/heimdallm-install.XXXXXX")
+init_runtime_state
+TEMP_DIR=$mi_preserved_dir
+PRESERVE_TEMP=1
+assert_accepts "cleanup preserves an explicitly protected temp directory" \
+  cleanup
+assert_accepts "protected temp directory remains present" \
+  test -d "$mi_preserved_dir"
+PRESERVE_TEMP=0
+assert_accepts "cleanup removes temp after protection is cleared" cleanup
+assert_rejects "formerly protected temp directory is gone" \
+  test -e "$mi_preserved_dir"
 
 if [ "$FAIL_COUNT" -ne 0 ]; then
   printf '\n%d of %d tests failed\n' "$FAIL_COUNT" "$TEST_COUNT" >&2
