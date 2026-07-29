@@ -59,6 +59,10 @@ validate_purge_value() {
   esac
 }
 
+installed_app_launch_command() {
+  printf '/usr/bin/open "%s"\n' "$APP_PATH"
+}
+
 validate_home_path() {
   if [ "$#" -ne 1 ]; then
     return 1
@@ -1627,7 +1631,7 @@ finish_install() {
   info ""
   info "✅  Heimdallm $RESOLVED_RELEASE installed."
   info "    App: $APP_PATH"
-  info "    Launch with: open -a Heimdallm"
+  info "    Launch with: $(installed_app_launch_command)"
   info ""
   info "    Preserved:"
   info "      Config:   $CONFIG_DIR"
