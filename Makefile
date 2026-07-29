@@ -17,10 +17,10 @@ else
 endif
 
 .PHONY: build-daemon build-app build-web build-cli test test-cli lint-cli dev-cli test-docker dev dev-daemon dev-stop \
-        release-local package-macos install-service verify-linux run-linux \
-        install-linux uninstall-linux \
+        release-local package-macos install-service verify-linux run-linux test-install-macos \
+        install-macos uninstall-macos install-linux uninstall-linux \
         setup up up-build up-daemon up-build-daemon down logs logs-daemon \
-        ps restart clean clean-clones _check-docker _check-env _check-linux _post-up-hints
+        ps restart clean clean-clones _check-docker _check-env _check-macos _check-linux _post-up-hints
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
@@ -50,6 +50,11 @@ test-cli:
 
 lint-cli:
 	$(MAKE) -C cli lint
+
+test-install-macos:
+	@sh -n scripts/macos-install.sh
+	@sh -n scripts/test-macos-install.sh
+	@sh scripts/test-macos-install.sh
 
 # ── Sandboxed Go tests (EDR-safe) ─────────────────────────────────────────────
 #
@@ -233,6 +238,7 @@ release-local: _check-macos _check-signing _check-gh build-daemon
 _check-macos:
 	@if [ "$$(uname -s)" != "Darwin" ]; then \
 	  echo "❌  This target requires macOS."; \
+	  echo "    For a Linux install, use 'make install-linux'."; \
 	  exit 1; \
 	fi
 
@@ -417,6 +423,27 @@ package-macos: _check-macos build-daemon build-app
 	  -srcfolder "$(APP_BUNDLE)" \
 	  -ov -format UDZO \
 	  "dist/Heimdallm.dmg"
+
+# ── Native macOS install / uninstall (release DMG) ────────────────────────────
+#
+# Downloads a release DMG and installs the validated app bundle transactionally
+# into /Applications. The helper owns launchd state, rollback, selective sudo,
+# and cleanup; keep these recipes thin so Make never evaluates macOS commands at
+# parse time.
+#
+# Usage:
+#   make install-macos
+#   make install-macos RELEASE=v0.7.5
+#   make uninstall-macos
+#   make uninstall-macos PURGE=1
+
+install-macos: export RELEASE := $(RELEASE)
+install-macos: _check-macos
+	@./scripts/macos-install.sh install
+
+uninstall-macos: export PURGE := $(PURGE)
+uninstall-macos: _check-macos
+	@./scripts/macos-install.sh uninstall
 
 # ── Docker-based Linux build verification ─────────────────────────────────────
 #

@@ -37,7 +37,32 @@ A Flutter Web dashboard (`:3000`) with Dashboard, PR list, Issue list, prompt/ag
 
 ## Installation
 
-### macOS (DMG)
+### macOS
+
+From a checkout of this repository, use the Make targets (preferred):
+
+```bash
+make install-macos                  # install the latest release
+make install-macos RELEASE=v0.7.5   # install a specific release
+make uninstall-macos                # remove app + service; keep user state
+make uninstall-macos PURGE=1        # also delete config, history, and logs
+```
+
+Run these targets as your normal user, never with `sudo make`. If
+`/Applications` needs elevated permissions, the installer requests a sudo
+ticket once and limits it to the app-bundle operations. A pre-existing
+LaunchAgent is migrated to the installed bundle; uninstall always removes the
+LaunchAgent so `launchd` cannot keep retrying a missing executable.
+
+Normal uninstall preserves config, review history, logs, and the macOS
+Keychain credential. `PURGE=1` irreversibly removes only the canonical
+`~/.config/heimdallm`, `~/.local/share/heimdallm`, and
+`~/Library/Logs/heimdallm` directories. It does not follow custom config/data
+path overrides, and it still preserves the Keychain credential. Remove that
+separately, if desired, with
+`security delete-generic-password -s heimdallm -a github-token`.
+
+Without a checkout, use the manual DMG fallback:
 
 1. Download `Heimdallm-vX.Y.Z.dmg` from [Releases](https://github.com/theburrowhub/heimdallm/releases)
 2. Open the DMG and drag **Heimdallm** to **Applications**
@@ -456,6 +481,9 @@ make restart       # Docker: bounce both containers
 make ps            # Docker: container status
 make setup         # Docker: copy daemon API token into docker/.env (optional)
 make release-local # Build signed + notarized DMG and publish GitHub release
+make install-macos     # macOS: install the latest release into /Applications
+make uninstall-macos   # macOS: remove app + LaunchAgent (add PURGE=1 to wipe user state)
+make test-install-macos # macOS installer: run portable shell logic tests
 make verify-linux      # Linux: build the heimdallm-verify Docker image (full CI pipeline inside)
 make run-linux         # Linux: launch the Flutter bundle from inside the Docker image (X11)
 make install-linux     # Linux: native install to ~/.local/ (no sudo, Docker-built)

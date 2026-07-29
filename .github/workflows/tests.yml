@@ -15,6 +15,44 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  installer-shell:
+    name: macOS installer shell (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Syntax and pure-logic tests
+        run: make test-install-macos
+
+      - name: Existing Linux install targets still parse
+        run: |
+          make -n install-linux >/dev/null
+          make -n uninstall-linux >/dev/null
+
+      - name: macOS targets stop at the platform guard
+        run: |
+          set -eu
+          for target in install-macos uninstall-macos; do
+            if output="$(make "$target" 2>&1)"; then
+              echo "::error::$target unexpectedly succeeded on Linux"
+              exit 1
+            fi
+            printf '%s\n' "$output"
+            printf '%s\n' "$output" | grep -F "This target requires macOS." >/dev/null
+          done
+
+      - name: Direct helper invocation is also harmless on Linux
+        run: |
+          set -eu
+          for operation in install uninstall; do
+            if output="$(sh scripts/macos-install.sh "$operation" 2>&1)"; then
+              echo "::error::direct $operation unexpectedly succeeded on Linux"
+              exit 1
+            fi
+            printf '%s\n' "$output"
+            printf '%s\n' "$output" | grep -F "This installer requires macOS." >/dev/null
+          done
+
   daemon:
     name: Daemon (Go)
     runs-on: macos-14
