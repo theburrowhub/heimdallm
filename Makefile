@@ -238,7 +238,6 @@ release-local: _check-macos _check-signing _check-gh build-daemon
 _check-macos:
 	@if [ "$$(uname -s)" != "Darwin" ]; then \
 	  echo "❌  This target requires macOS."; \
-	  echo "    For a Linux install, use 'make install-linux'."; \
 	  exit 1; \
 	fi
 
