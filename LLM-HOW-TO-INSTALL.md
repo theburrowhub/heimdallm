@@ -129,7 +129,7 @@ echo "✓ macOS restriction removed"
 ## 4. Launch
 
 ```bash
-open /Applications/Heimdallm.app
+/usr/bin/open '/Applications/Heimdallm.app'
 sleep 5
 
 # Confirm it started (should be exactly 1)
