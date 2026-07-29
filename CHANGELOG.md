@@ -10,6 +10,20 @@
 * **issues:** `auto_promote_triage` defaults on only when `refinement_labels` is configured. Repos without a refinement target keep their previous review-only behavior; set `auto_promote_triage = false` explicitly to keep refinement manual even when refinement labels exist.
 * **pipeline (PR reviews):** a push (new HEAD SHA) on a previously-reviewed PR no longer triggers an automatic re-review on its own. Heimdallm now requires an explicit `review_requested` event for the bot — i.e. someone (or some automation) pressing "Re-request review" — newer than the previous review's `CreatedAt`. The SHA-unchanged dedup (#322 Bug 5) and this SHA-changed gate now share the same predicate, so the contract is "review iff explicitly re-requested" regardless of whether the commit changed. Workflows that relied on push-triggered re-reviews — typically repos with "Dismiss stale reviews on push" or CODEOWNERS auto-request workflows that auto-re-added the bot to `requested_reviewers` — must now explicitly re-request the review (manually in the UI, or via a GitHub Action calling `gh pr edit --add-reviewer`). Skipped pushes surface as a `review_skipped` SSE with reason `no_rereview_request` (distinct from `sha_unchanged`) so dashboards can tell the two cases apart. Closes #509.
 
+## [0.7.8](https://github.com/theburrowhub/heimdallm/compare/v0.7.7...v0.7.8) (2026-07-29)
+
+
+### Features
+
+* **makefile:** add macOS install and uninstall targets ([#635](https://github.com/theburrowhub/heimdallm/issues/635)) ([858a802](https://github.com/theburrowhub/heimdallm/commit/858a8026ada67453c35ea92d219876410c654c32))
+* **review:** clearer never-approve downgrade note + min-severity threshold (closes [#597](https://github.com/theburrowhub/heimdallm/issues/597)) ([#602](https://github.com/theburrowhub/heimdallm/issues/602)) ([4b6704e](https://github.com/theburrowhub/heimdallm/commit/4b6704ed37c0247668b6be21c94504ef768e98d8))
+
+
+### Bug Fixes
+
+* **pipeline:** manual "Re-review" button now forces a re-review ([#601](https://github.com/theburrowhub/heimdallm/issues/601)) ([9fe0e89](https://github.com/theburrowhub/heimdallm/commit/9fe0e89b731117ae1b03207c50d9f7d3dae24ccc))
+* prevent automatic reviews for non-monitored repositories ([#598](https://github.com/theburrowhub/heimdallm/issues/598)) ([46dafc5](https://github.com/theburrowhub/heimdallm/commit/46dafc5639be647d8502fdf7988a7b3769d096f5))
+
 ## [0.7.7](https://github.com/theburrowhub/heimdallm/compare/v0.7.6...v0.7.7) (2026-07-10)
 
 
