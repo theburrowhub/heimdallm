@@ -1,0 +1,5 @@
+name: web_tooling_unsafe_asset_fixture
+
+flutter:
+  assets:
+    - assets/images/*.png

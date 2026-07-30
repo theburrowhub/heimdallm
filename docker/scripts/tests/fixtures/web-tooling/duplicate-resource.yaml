@@ -1,0 +1,7 @@
+name: web_tooling_duplicate_resource_fixture
+
+flutter:
+  assets:
+    - assets/icon.png
+  shaders:
+    - assets/icon.png

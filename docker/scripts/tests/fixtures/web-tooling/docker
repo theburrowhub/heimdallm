@@ -1,0 +1,54 @@
+#!/bin/sh
+set -eu
+
+log_args() {
+  [ -n "${FAKE_WEB_DOCKER_LOG:-}" ] || return 0
+
+  separator=
+  for argument in "$@"; do
+    printf '%s%s' "$separator" "$argument" >>"$FAKE_WEB_DOCKER_LOG"
+    separator='	'
+  done
+  printf '\n' >>"$FAKE_WEB_DOCKER_LOG"
+}
+
+log_args "$@"
+
+case "${1:-}" in
+  compose)
+    [ "${2:-}" = "version" ] || exit 64
+    [ "${FAKE_DOCKER_COMPOSE_FAIL:-0}" != "1" ]
+    ;;
+  buildx)
+    [ "${2:-}" = "version" ] || exit 64
+    [ "${FAKE_DOCKER_BUILDX_FAIL:-0}" != "1" ]
+    ;;
+  image)
+    [ "${2:-}" = "inspect" ] || exit 64
+    ;;
+  run)
+    for argument in "$@"; do
+      if [ "$argument" = "-d" ]; then
+        printf '%s\n' 'fake-container-id'
+        break
+      fi
+    done
+    ;;
+  exec)
+    # The image-smoke regression test deliberately exercises its unhealthy
+    # container path. A fake sleep binary makes all 30 attempts instantaneous.
+    exit 1
+    ;;
+  logs)
+    printf '%s\n' 'fake nginx startup failure'
+    ;;
+  inspect)
+    printf '%s\n' '[{"State":{"Status":"exited","ExitCode":42}}]'
+    ;;
+  rm)
+    ;;
+  *)
+    printf 'unexpected fake docker command: %s\n' "${1:-<empty>}" >&2
+    exit 64
+    ;;
+esac

@@ -16,7 +16,7 @@ else
   APP_BUNDLE       := $(FLUTTER_BUILD)/bundle
 endif
 
-.PHONY: build-daemon build-app build-web build-cli test test-cli lint-cli dev-cli test-docker dev dev-daemon dev-stop \
+.PHONY: build-daemon build-app build-web build-cli test test-cli lint-cli test-web-tooling dev-cli test-docker dev dev-daemon dev-stop \
         release-local package-macos install-service verify-linux run-linux test-install-macos \
         install-macos uninstall-macos install-linux uninstall-linux \
         setup up up-build up-daemon up-build-daemon down logs logs-daemon \
@@ -56,6 +56,9 @@ test-install-macos:
 	@sh -n scripts/macos-install.sh
 	@sh -n scripts/test-macos-install.sh
 	@./scripts/test-macos-install.sh
+
+test-web-tooling:
+	@sh docker/scripts/tests/test-web-tooling.sh
 
 # ── Sandboxed Go tests (EDR-safe) ─────────────────────────────────────────────
 #
@@ -338,10 +341,16 @@ _check-docker:
 	@command -v docker >/dev/null || { echo "❌  Docker is required. Install from https://docs.docker.com/get-docker/"; exit 1; }
 
 _check-buildkit: _check-docker
-	@if [ "$${DOCKER_BUILDKIT:-1}" = "0" ]; then \
-	  echo "❌  BuildKit cannot be disabled for Flutter Web builds."; \
-	  echo "    Dockerfile.web.dockerignore is only applied by BuildKit."; \
+	@docker compose version >/dev/null 2>&1 || { \
+	  echo "❌  Docker Compose v2 is required for Flutter Web builds."; \
 	  exit 1; \
+	}
+	@docker buildx version >/dev/null 2>&1 || { \
+	  echo "❌  Docker Buildx/BuildKit is required for Flutter Web builds."; \
+	  exit 1; \
+	}
+	@if [ "$${DOCKER_BUILDKIT:-1}" = "0" ]; then \
+	  echo "⚠  DOCKER_BUILDKIT=0 is overridden with 1 for the Flutter Web build."; \
 	fi
 
 _check-env: _check-docker

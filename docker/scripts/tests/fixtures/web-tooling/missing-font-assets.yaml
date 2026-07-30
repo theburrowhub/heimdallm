@@ -1,0 +1,7 @@
+name: web_tooling_missing_font_assets_fixture
+
+flutter:
+  assets:
+    - assets/icon.png
+  fonts:
+    - family: MissingAssets

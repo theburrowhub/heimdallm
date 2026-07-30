@@ -13,7 +13,21 @@ fail() {
 }
 
 cleanup() {
+  exit_code=$?
+  trap - EXIT
+
+  if [ "$exit_code" -ne 0 ] &&
+     docker inspect "$container_name" >/dev/null 2>&1; then
+    printf '%s\n' \
+      "Flutter Web smoke container logs (${container_name}):" >&2
+    docker logs "$container_name" >&2 || true
+    printf '%s\n' \
+      "Flutter Web smoke container inspect (${container_name}):" >&2
+    docker inspect "$container_name" >&2 || true
+  fi
+
   docker rm -f "$container_name" >/dev/null 2>&1 || true
+  exit "$exit_code"
 }
 trap cleanup EXIT
 
@@ -21,16 +35,16 @@ command -v docker >/dev/null 2>&1 || fail "Docker is required"
 docker image inspect "$image" >/dev/null 2>&1 \
   || fail "image '$image' does not exist locally"
 
-flutter_assets="$(
+flutter_resources="$(
   sh "$script_dir/list-flutter-assets.sh" \
     "$repo_root/flutter_app/pubspec.yaml"
 )"
 
-# Validate immutable image contents. Asset paths come directly from pubspec,
-# so adding or removing an asset cannot leave this smoke list stale.
+# Validate immutable image contents. Resource paths come directly from pubspec,
+# so adding or removing an asset, font or shader cannot leave this list stale.
 docker run --rm \
   --entrypoint sh \
-  --env "FLUTTER_ASSETS=$flutter_assets" \
+  --env "FLUTTER_RESOURCES=$flutter_resources" \
   "$image" -ec '
     web_root=/usr/share/nginx/html
     test -s "$web_root/index.html"
@@ -38,12 +52,12 @@ docker run --rm \
     test -s /etc/nginx/heimdallm.conf.template
     test -x /docker-entrypoint.d/10-heimdallm-token.sh
 
-    printf "%s\n" "$FLUTTER_ASSETS" |
-      while IFS= read -r asset; do
-        test -n "$asset"
-        test -s "$web_root/assets/$asset"
+    printf "%s\n" "$FLUTTER_RESOURCES" |
+      while IFS= read -r resource; do
+        test -n "$resource"
+        test -s "$web_root/assets/$resource"
       done
-  ' || fail "required bundle, asset, template, or executable is missing"
+  ' || fail "required bundle, resource, template, or executable is missing"
 
 # Start the image with its stock entrypoint/CMD. This catches failures that
 # static file checks miss, including template rendering and Nginx startup.

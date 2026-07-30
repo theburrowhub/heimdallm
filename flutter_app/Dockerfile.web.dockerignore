@@ -3,17 +3,22 @@
 # BuildKit uses this file instead of the root .dockerignore whenever
 # flutter_app/Dockerfile.web is selected; the legacy builder does not. Supported
 # Make targets, tests, and documented direct builds therefore require BuildKit.
-# Keep only the Flutter Web inputs, runtime Nginx files, and the shared asset
-# source reached by flutter_app/assets -> ../assets. CI verifies that the
-# literal asset entries below exactly match flutter.assets in pubspec.yaml.
+# Keep only the Flutter Web inputs, runtime Nginx files, and the resources
+# declared by Flutter. CI verifies that the generated resource block below
+# exactly matches flutter.assets, flutter.fonts and flutter.shaders in
+# pubspec.yaml.
 **
 !assets/
 assets/**
+!flutter_app/
+flutter_app/**
+
+# BEGIN flutter-resource-allowlist
 !assets/icon.png
 !assets/tray_icon.png
 !assets/tray_icon@2x.png
-!flutter_app/
-flutter_app/**
+# END flutter-resource-allowlist
+
 !flutter_app/.metadata
 !flutter_app/pubspec.yaml
 !flutter_app/pubspec.lock
