@@ -49,6 +49,13 @@ func walkKnownTOMLValue(raw any, schema reflect.Type, path string) (any, error) 
 	if schema == nil {
 		return nil, fmt.Errorf("config schema at %q has no concrete type", path)
 	}
+	rawValue := reflect.ValueOf(raw)
+	if rawValue.IsValid() &&
+		(rawValue.Kind() == reflect.Slice || rawValue.Kind() == reflect.Array) {
+		if err := validateHomogeneousTOMLArrays(raw, path, schema); err != nil {
+			return nil, err
+		}
+	}
 	if implementsTOMLScalar(schema) {
 		return raw, nil
 	}
@@ -87,9 +94,6 @@ func walkKnownTOMLValue(raw any, schema reflect.Type, path string) (any, error) 
 		}
 		return projected, nil
 	case reflect.Slice, reflect.Array:
-		if err := validateHomogeneousTOMLArrays(raw, path, schema); err != nil {
-			return nil, err
-		}
 		return raw, nil
 	case reflect.Interface:
 		return nil, fmt.Errorf("config schema at %q uses unsupported interface type %s", path, schema)
@@ -198,6 +202,9 @@ func selectCanonicalMapKey(matches []string, canonical string) (string, []string
 }
 
 func resolveFailClosedBool(table map[string]any, matches []string, canonical string) (bool, error) {
+	if len(matches) == 0 {
+		return false, fmt.Errorf("%s has no configured aliases", canonical)
+	}
 	value := true
 	for _, key := range matches {
 		candidate, ok := table[key].(bool)

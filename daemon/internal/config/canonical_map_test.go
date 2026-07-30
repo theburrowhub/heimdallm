@@ -141,6 +141,14 @@ func TestFailClosedDangerousValue_FalseWinsEveryAliasShape(t *testing.T) {
 		})
 	}
 
+	if got, err := resolveFailClosedBool(
+		map[string]any{},
+		nil,
+		"dangerously_skip_perms",
+	); err == nil || got || !strings.Contains(err.Error(), "has no configured aliases") {
+		t.Fatalf("empty aliases returned value=%v error=%v", got, err)
+	}
+
 	flags := map[string]any{"DANGEROUSLY_SKIP_PERMS": "false"}
 	if _, err := resolveFailClosedBool(
 		flags,

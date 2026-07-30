@@ -2320,30 +2320,59 @@ unknown_mixed = [3, "repo"]
 }
 
 func TestLoad_KnownMixedArrayReportsFieldPath(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.toml")
-	content := `
+	tests := []struct {
+		name     string
+		content  string
+		path     string
+		expected string
+	}{
+		{
+			name: "slice field",
+			content: `
 [github]
 repositories = ["org/repo", 1]
 
 [ai]
 primary = "claude"
-`
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
+`,
+			path:     "config.github.repositories",
+			expected: "[]string",
+		},
+		{
+			name: "scalar field",
+			content: `
+[ai]
+primary = "claude"
+
+[ai.agents.claude]
+model = ["safe-model", 1]
+`,
+			path:     `config.ai.agents["claude"].model`,
+			expected: "string",
+		},
 	}
 
-	_, err := Load(path)
-	if err == nil {
-		t.Fatal("Load accepted a mixed array for github.repositories")
-	}
-	for _, marker := range []string{
-		"config.github.repositories",
-		"TOML array has mixed element types",
-		"expected []string",
-	} {
-		if !strings.Contains(err.Error(), marker) {
-			t.Fatalf("Load error %q missing %q", err, marker)
-		}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte(tc.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := Load(path)
+			if err == nil {
+				t.Fatal("Load accepted a mixed array for a known field")
+			}
+			for _, marker := range []string{
+				tc.path,
+				"TOML array has mixed element types",
+				"expected " + tc.expected,
+			} {
+				if !strings.Contains(err.Error(), marker) {
+					t.Fatalf("Load error %q missing %q", err, marker)
+				}
+			}
+		})
 	}
 }
 
