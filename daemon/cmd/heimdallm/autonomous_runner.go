@@ -286,7 +286,7 @@ func (r *autonomousStageRunner) RunStage(ctx context.Context, stage string, c au
 
 	extraFlags := agentCfg.ExtraFlags
 	if extraFlags != "" {
-		if err := executor.ValidateExtraFlags(extraFlags); err != nil {
+		if err := executor.ValidateExtraFlagsForCLI(aiCfg.Primary, extraFlags); err != nil {
 			slog.Warn("autonomous: extra_flags rejected", "err", err)
 			extraFlags = ""
 		}

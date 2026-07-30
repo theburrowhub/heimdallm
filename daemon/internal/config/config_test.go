@@ -1,7 +1,9 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -2288,6 +2290,629 @@ primary = "claude"
 	}
 }
 
+func TestLoad_IgnoresUnknownMixedArraysOutsideTypedSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := `
+unknown_mixed = [1, "top-level"]
+
+[ai]
+primary = "claude"
+unknown_mixed = [2, "ai"]
+
+[ai.repos."Org/Repo"]
+primary = "codex"
+unknown_mixed = [3, "repo"]
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load with unknown mixed arrays: %v", err)
+	}
+	if cfg.AI.Primary != "claude" {
+		t.Fatalf("known sibling ai.primary = %q, want claude", cfg.AI.Primary)
+	}
+	if got := cfg.AI.Repos["Org/Repo"].Primary; got != "codex" {
+		t.Fatalf("known nested repo primary = %q, want codex", got)
+	}
+}
+
+func TestLoad_KnownMixedArrayReportsFieldPath(t *testing.T) {
+	tests := []struct {
+		name     string
+		content  string
+		path     string
+		expected string
+	}{
+		{
+			name: "slice field",
+			content: `
+[github]
+repositories = ["org/repo", 1]
+
+[ai]
+primary = "claude"
+`,
+			path:     "config.github.repositories",
+			expected: "[]string",
+		},
+		{
+			name: "scalar field",
+			content: `
+[ai]
+primary = "claude"
+
+[ai.agents.claude]
+model = ["safe-model", 1]
+`,
+			path:     `config.ai.agents["claude"].model`,
+			expected: "string",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte(tc.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := Load(path)
+			if err == nil {
+				t.Fatal("Load accepted a mixed array for a known field")
+			}
+			for _, marker := range []string{
+				tc.path,
+				"TOML array has mixed element types",
+				"expected " + tc.expected,
+			} {
+				if !strings.Contains(err.Error(), marker) {
+					t.Fatalf("Load error %q missing %q", err, marker)
+				}
+			}
+		})
+	}
+}
+
+func TestLoad_WarnsWhenCanonicalKeyDiscardsAliases(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := `
+[ai]
+primary = "claude"
+PRIMARY = "codex"
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load canonical plus alias: %v", err)
+	}
+	if cfg.AI.Primary != "claude" {
+		t.Fatalf("canonical primary did not win: %q", cfg.AI.Primary)
+	}
+	for _, marker := range []string{
+		"ignored case-variant aliases",
+		"path=config.ai",
+		"field=primary",
+		"PRIMARY",
+	} {
+		if !strings.Contains(logs.String(), marker) {
+			t.Fatalf("alias warning %q missing %q", logs.String(), marker)
+		}
+	}
+}
+
+func TestLoad_CanonicalizesSchemaFieldsWithoutFoldingDynamicMapKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := `
+[GITHUB]
+POLL_INTERVAL = "10m"
+
+[AI]
+primary = "claude"
+PRIMARY = "codex"
+
+[AI.AGENTS.Claude]
+MODEL = "preserve-inert"
+
+[AI.AGENTS.claude]
+MODEL = "active-model"
+
+[AI.REPOS."Org/Repo"]
+PRIMARY = "codex"
+
+[AI.REPOS."org/repo"]
+PRIMARY = "gemini"
+
+[AI.REPOS."Org/Repo".ISSUE_TRACKING]
+ENABLED = true
+unknown_mixed = [4, "pointer"]
+
+[AUTONOMOUS.REPOS."Org/Repo"]
+ENABLED = true
+
+[AUTONOMOUS.REPOS."org/repo"]
+ENABLED = false
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load aliases: %v", err)
+	}
+	if cfg.AI.Primary != "claude" {
+		t.Fatalf("exact canonical primary did not win its alias: %q", cfg.AI.Primary)
+	}
+	if cfg.GitHub.PollInterval != "10m" {
+		t.Fatalf("generic GitHub alias was not canonicalized: %q", cfg.GitHub.PollInterval)
+	}
+	if got := cfg.AI.Agents["Claude"].Model; got != "preserve-inert" {
+		t.Fatalf("case-sensitive inert agent key was changed: %q", got)
+	}
+	if got := cfg.AI.Agents["claude"].Model; got != "active-model" {
+		t.Fatalf("supported agent key or aliased field was lost: %q", got)
+	}
+	if len(cfg.AI.Agents) != 2 {
+		t.Fatalf("case-distinct agent keys collapsed: %#v", cfg.AI.Agents)
+	}
+	upperRepo, upperOK := cfg.AI.Repos["Org/Repo"]
+	lowerRepo, lowerOK := cfg.AI.Repos["org/repo"]
+	if !upperOK || !lowerOK || len(cfg.AI.Repos) != 2 {
+		t.Fatalf("case-distinct repo keys collapsed: %#v", cfg.AI.Repos)
+	}
+	if upperRepo.Primary != "codex" || upperRepo.IssueTracking == nil ||
+		upperRepo.IssueTracking.Enabled == nil || !*upperRepo.IssueTracking.Enabled {
+		t.Fatalf("upper-case repo fields/pointer were not decoded: %+v", upperRepo)
+	}
+	if lowerRepo.Primary != "gemini" {
+		t.Fatalf("lower-case repo primary = %q, want gemini", lowerRepo.Primary)
+	}
+	upperAuto, upperAutoOK := cfg.Autonomous.Repos["Org/Repo"]
+	lowerAuto, lowerAutoOK := cfg.Autonomous.Repos["org/repo"]
+	if !upperAutoOK || !lowerAutoOK || len(cfg.Autonomous.Repos) != 2 {
+		t.Fatalf("case-distinct autonomous repo keys collapsed: %#v", cfg.Autonomous.Repos)
+	}
+	if upperAuto.Enabled == nil || !*upperAuto.Enabled ||
+		lowerAuto.Enabled == nil || *lowerAuto.Enabled {
+		t.Fatalf("autonomous pointer aliases were not decoded: %#v", cfg.Autonomous.Repos)
+	}
+}
+
+func TestLoad_DangerousAliasesRemainFailClosed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := `
+[ai]
+primary = "claude"
+
+[ai.agents.claude]
+dangerously_skip_perms = true
+DANGEROUSLY_SKIP_PERMS = false
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load dangerous aliases: %v", err)
+	}
+	if cfg.AI.Agents["claude"].DangerouslySkipPerms {
+		t.Fatal("false dangerous alias did not override canonical true")
+	}
+}
+
+func TestLoad_SanitizesLegacyAgentFieldOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := `
+[ai]
+primary = "claude"
+
+[ai.agents.claude]
+model = "--sandbox"
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load unsafe legacy field: %v", err)
+	}
+	if cfg.AI.Agents["claude"].Model != "" {
+		t.Fatalf("unsafe model survived: %+v", cfg.AI.Agents["claude"])
+	}
+	if got := strings.Count(logs.String(), "field=model"); got != 1 {
+		t.Fatalf("model sanitation warnings = %d, want 1:\n%s", got, logs.String())
+	}
+}
+
+func TestLoad_SanitizesLegacyAgentPolicyWithoutBlockingStartup(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	content := `
+[github]
+poll_interval = "10m"
+
+[ai]
+primary = "codex"
+
+[ai.agents.codex]
+approval_mode = "ON-REQUEST"
+extra_flags = "--model gpt-5 --json"
+
+[ai.agents.gemini]
+approval_mode = "YOLO"
+extra_flags = "--sandbox"
+
+[ai.agents.claude]
+effort = "HIGH"
+permission_mode = "ACCEPTEDITS"
+
+[ai.agents.future_cli]
+model = "preserve-inert-profile"
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load legacy config: %v", err)
+	}
+	if cfg.GitHub.PollInterval != "10m" {
+		t.Fatalf("unrelated config lost: poll_interval = %q", cfg.GitHub.PollInterval)
+	}
+	codex := cfg.AI.Agents["codex"]
+	if codex.Model != "gpt-5" || codex.ApprovalMode != "on-request" || codex.ExtraFlags != "--json" {
+		t.Fatalf("Codex legacy policy was not migrated safely: %+v", codex)
+	}
+	gemini := cfg.AI.Agents["gemini"]
+	if gemini.ApprovalMode != "" || gemini.ExtraFlags != "" {
+		t.Fatalf("unsafe Gemini legacy policy survived: %+v", gemini)
+	}
+	claude := cfg.AI.Agents["claude"]
+	if claude.Effort != "high" || claude.PermissionMode != "acceptEdits" {
+		t.Fatalf("safe casing was not canonicalized: %+v", claude)
+	}
+	if got := cfg.AI.Agents["future_cli"].Model; got != "preserve-inert-profile" {
+		t.Fatalf("unknown inert profile was not preserved: %q", got)
+	}
+}
+
+func TestLoad_CanonicalizesAgentAliasesBeforeTypedDecode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	content := `
+[AI]
+primary = "claude"
+
+[AI.Agents.codex]
+model = "canonical-model"
+Model = "first-alias"
+MODEL = "second-alias"
+Prompt = "trusted-profile"
+BARE = true
+DANGEROUSLY_SKIP_PERMS = true
+NO_SESSION_PERSISTENCE = true
+EXECUTION_TIMEOUT = "20m"
+
+[AI.Agents.Claude]
+model = "--sandbox"
+permission_mode = "bypassPermissions"
+DANGEROUSLY_SKIP_PERMS = true
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HEIMDALLM_AI_PRIMARY", "gemini")
+
+	for i := 0; i < 64; i++ {
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load iteration %d: %v", i, err)
+		}
+		if cfg.AI.Primary != "gemini" {
+			t.Fatalf("iteration %d: env precedence changed, primary = %q", i, cfg.AI.Primary)
+		}
+		if cfg.GitHub.PollInterval != "5m" {
+			t.Fatalf("iteration %d: default precedence changed, poll_interval = %q", i, cfg.GitHub.PollInterval)
+		}
+		got := cfg.AI.Agents["codex"]
+		if got.Model != "canonical-model" ||
+			got.PromptID != "trusted-profile" ||
+			!got.Bare ||
+			!got.DangerouslySkipPerms ||
+			!got.NoSessionPersistence ||
+			got.ExecutionTimeout != "20m" {
+			t.Fatalf("iteration %d: aliases decoded inconsistently: %+v", i, got)
+		}
+		inert, ok := cfg.AI.Agents["Claude"]
+		if !ok ||
+			inert.Model != "--sandbox" ||
+			inert.PermissionMode != "bypassPermissions" ||
+			!inert.DangerouslySkipPerms {
+			t.Fatalf("iteration %d: case-variant CLI profile was not preserved inert: %+v", i, inert)
+		}
+		if _, active := cfg.AI.Agents["claude"]; active {
+			t.Fatalf("iteration %d: inert Claude profile was activated as canonical claude", i)
+		}
+	}
+	gotContent, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotContent) != content {
+		t.Fatalf("Load rewrote inert profile:\n%s", gotContent)
+	}
+}
+
+func TestLoad_RejectsAmbiguousAliasesDeterministically(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		marker  string
+	}{
+		{
+			name: "agent leaf aliases",
+			content: `
+[ai]
+primary = "codex"
+[ai.agents.codex]
+Model = "first"
+MODEL = "second"
+`,
+			marker: `ambiguous aliases for "model" (MODEL, Model)`,
+		},
+		{
+			name: "generic leaf aliases",
+			content: `
+[ai]
+Primary = "claude"
+PRIMARY = "codex"
+`,
+			marker: `ambiguous aliases for "primary" (PRIMARY, Primary)`,
+		},
+		{
+			name: "nested dynamic map leaf aliases",
+			content: `
+[ai]
+primary = "claude"
+[ai.repos."Org/Repo"]
+Primary = "codex"
+PRIMARY = "gemini"
+`,
+			marker: `config.ai.repos["Org/Repo"]: ambiguous aliases for "primary" (PRIMARY, Primary)`,
+		},
+		{
+			name: "structural aliases",
+			content: `
+[ai]
+primary = "codex"
+[AI]
+fallback = "gemini"
+`,
+			marker: `ambiguous structural aliases at "config" for "ai" (AI, ai)`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte(tc.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			var first string
+			for i := 0; i < 64; i++ {
+				_, err := Load(path)
+				if err == nil {
+					t.Fatalf("Load iteration %d unexpectedly accepted ambiguous aliases", i)
+				}
+				if !strings.Contains(err.Error(), tc.marker) {
+					t.Fatalf("iteration %d: error %q missing %q", i, err, tc.marker)
+				}
+				if i == 0 {
+					first = err.Error()
+				} else if err.Error() != first {
+					t.Fatalf("nondeterministic errors:\nfirst: %s\niteration %d: %s", first, i, err)
+				}
+			}
+		})
+	}
+}
+
+func TestSanitizeAgentExecutionFields_RevalidatesMigratedOutputs(t *testing.T) {
+	got := sanitizeAgentExecutionFields("claude", CLIAgentConfig{
+		Model:        " --sandbox ",
+		MaxTurns:     -1,
+		Effort:       "impossible",
+		ApprovalMode: "default",
+	}, "test migration", "migrated")
+
+	if got.Model != "" || got.MaxTurns != 0 || got.Effort != "" {
+		t.Fatalf("unsafe migrated typed outputs survived: %+v", got)
+	}
+	if got.ApprovalMode != "default" {
+		t.Fatalf("unrelated typed field changed: %+v", got)
+	}
+
+	safe := sanitizeAgentExecutionFields("claude", CLIAgentConfig{
+		Model:    " safe-model ",
+		MaxTurns: 7,
+		Effort:   "HIGH",
+	}, "test migration", "migrated")
+	if safe.Model != "safe-model" || safe.MaxTurns != 7 || safe.Effort != "high" {
+		t.Fatalf("safe migrated typed outputs were not canonicalized: %+v", safe)
+	}
+}
+
+func TestSanitizeLegacyAgentExecutionPolicyMap_CanonicalExactWinsAliases(t *testing.T) {
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	agent := map[string]any{
+		"model":                  "canonical-model",
+		"Model":                  "first-alias",
+		"MODEL":                  "second-alias",
+		"prompt":                 "canonical-prompt",
+		"Prompt":                 "alias-prompt",
+		"bare":                   true,
+		"Bare":                   false,
+		"no_session_persistence": false,
+		"No_Session_Persistence": true,
+		"execution_timeout":      "20m",
+		"Execution_Timeout":      "1m",
+	}
+	m := map[string]any{
+		"ai": map[string]any{
+			"agents": map[string]any{"codex": agent},
+		},
+	}
+
+	if err := SanitizeLegacyAgentExecutionPolicyMap(m, "test TOML"); err != nil {
+		t.Fatalf("sanitize canonical plus aliases: %v", err)
+	}
+	if got := agent["model"]; got != "canonical-model" {
+		t.Fatalf("canonical exact key did not win: %v", agent)
+	}
+	if _, present := agent["Model"]; present {
+		t.Fatalf("mixed-case alias was not removed: %v", agent)
+	}
+	if _, present := agent["MODEL"]; present {
+		t.Fatalf("uppercase alias was not removed: %v", agent)
+	}
+	if agent["prompt"] != "canonical-prompt" ||
+		agent["bare"] != true ||
+		agent["no_session_persistence"] != false ||
+		agent["execution_timeout"] != "20m" {
+		t.Fatalf("pass-through canonical leaves did not win: %v", agent)
+	}
+	for _, alias := range []string{"Prompt", "Bare", "No_Session_Persistence", "Execution_Timeout"} {
+		if _, present := agent[alias]; present {
+			t.Fatalf("pass-through alias %q was not removed: %v", alias, agent)
+		}
+	}
+	for _, marker := range []string{
+		"ignored case-variant aliases",
+		"config.ai.agents",
+		"field=model",
+		"MODEL",
+		"Model",
+	} {
+		if !strings.Contains(logs.String(), marker) {
+			t.Fatalf("legacy alias warning %q missing %q", logs.String(), marker)
+		}
+	}
+}
+
+func TestSanitizeLegacyAgentExecutionPolicyMap_DangerousAliasesFailClosed(t *testing.T) {
+	tests := []struct {
+		name  string
+		flags map[string]any
+		want  bool
+	}{
+		{
+			name:  "single canonical true",
+			flags: map[string]any{"dangerously_skip_perms": true},
+			want:  true,
+		},
+		{
+			name:  "single alias true",
+			flags: map[string]any{"DANGEROUSLY_SKIP_PERMS": true},
+			want:  true,
+		},
+		{
+			name: "canonical true plus alias false",
+			flags: map[string]any{
+				"dangerously_skip_perms": true,
+				"DANGEROUSLY_SKIP_PERMS": false,
+			},
+			want: false,
+		},
+		{
+			name: "aliases all true",
+			flags: map[string]any{
+				"Dangerously_Skip_Perms": true,
+				"DANGEROUSLY_SKIP_PERMS": true,
+			},
+			want: true,
+		},
+		{
+			name: "aliases mixed",
+			flags: map[string]any{
+				"Dangerously_Skip_Perms": true,
+				"DANGEROUSLY_SKIP_PERMS": false,
+			},
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := make(map[string]any, len(tc.flags))
+			for key, value := range tc.flags {
+				agent[key] = value
+			}
+			m := map[string]any{
+				"ai": map[string]any{
+					"agents": map[string]any{"claude": agent},
+				},
+			}
+			if err := SanitizeLegacyAgentExecutionPolicyMap(m, "test TOML"); err != nil {
+				t.Fatalf("sanitize dangerous aliases: %v", err)
+			}
+			if got, ok := agent["dangerously_skip_perms"].(bool); !ok || got != tc.want {
+				t.Fatalf("canonical dangerous value = %v, want %v (map: %v)", got, tc.want, agent)
+			}
+			for key := range agent {
+				if key != "dangerously_skip_perms" && strings.EqualFold(key, "dangerously_skip_perms") {
+					t.Fatalf("dangerous alias %q survived: %v", key, agent)
+				}
+			}
+		})
+	}
+}
+
+func TestSanitizeLegacyAgentExecutionPolicyMap_RejectsAmbiguousAliases(t *testing.T) {
+	agent := map[string]any{
+		"Model": "first-alias",
+		"MODEL": "second-alias",
+	}
+	m := map[string]any{
+		"ai": map[string]any{
+			"agents": map[string]any{"codex": agent},
+		},
+	}
+
+	err := SanitizeLegacyAgentExecutionPolicyMap(m, "test TOML")
+	if err == nil {
+		t.Fatal("ambiguous aliases unexpectedly accepted")
+	}
+	got := err.Error()
+	for _, want := range []string{`ambiguous aliases for "model"`, "MODEL, Model", `canonical "model"`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("error %q does not contain actionable detail %q", got, want)
+		}
+	}
+}
+
 // ── LoadOrCreate ─────────────────────────────────────────────────────────────
 
 func TestLoadOrCreate_Creates(t *testing.T) {
@@ -2875,5 +3500,92 @@ func TestNeverApproveMinSeverity_Validate(t *testing.T) {
 	c.AI.Repos = map[string]RepoAI{"acme/widget": {NeverApproveMinSeverity: "nit"}}
 	if err := c.Validate(); err == nil {
 		t.Errorf("invalid repo value accepted")
+	}
+}
+
+func TestValidateAgentExecutionPolicy(t *testing.T) {
+	base := func() *Config {
+		c := &Config{}
+		c.applyDefaults()
+		c.AI.Primary = "claude"
+		c.GitHub.PollInterval = "1m"
+		return c
+	}
+
+	tests := []struct {
+		name    string
+		agents  map[string]CLIAgentConfig
+		wantErr bool
+	}{
+		{
+			name: "safe provider flags and typed modes",
+			agents: map[string]CLIAgentConfig{
+				"claude": {Model: "opus", MaxTurns: 5, ExtraFlags: "--verbose", PermissionMode: "ACCEPTEDITS", Effort: "HIGH"},
+				"codex":  {ExtraFlags: "--json --color never", ApprovalMode: "on-request"},
+				"gemini": {ExtraFlags: "--output-format json", ApprovalMode: "auto_edit"},
+			},
+		},
+		{
+			name: "legacy Codex sandbox override",
+			agents: map[string]CLIAgentConfig{
+				"codex": {ExtraFlags: "--sandbox danger-full-access"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "legacy Gemini approval override",
+			agents: map[string]CLIAgentConfig{
+				"gemini": {ExtraFlags: "--approval-mode=yolo"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "unsafe typed Gemini approval",
+			agents: map[string]CLIAgentConfig{
+				"gemini": {ApprovalMode: "yolo"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "option-shaped typed model",
+			agents: map[string]CLIAgentConfig{
+				"claude": {Model: "--dangerously-skip-permissions"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid typed effort",
+			agents: map[string]CLIAgentConfig{
+				"claude": {Effort: "--dangerously-skip-permissions"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "unknown CLI config",
+			agents: map[string]CLIAgentConfig{
+				"other": {},
+			},
+		},
+		{
+			name: "negative max turns",
+			agents: map[string]CLIAgentConfig{
+				"claude": {MaxTurns: -1},
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := base()
+			c.AI.Agents = tc.agents
+			err := c.Validate()
+			if tc.wantErr && err == nil {
+				t.Fatal("expected agent execution policy error")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected agent execution policy error: %v", err)
+			}
+		})
 	}
 }

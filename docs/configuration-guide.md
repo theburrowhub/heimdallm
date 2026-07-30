@@ -566,7 +566,8 @@ no_session_persistence = false          # --no-session-persistence
 execution_timeout      = "20m"          # per-agent override
 
 [ai.agents.gemini]
-model = "gemini-2.5-pro"
+model         = "gemini-2.5-pro"
+approval_mode = "auto_edit"    # default | auto_edit | plan (yolo is forbidden)
 
 [ai.agents.codex]
 model         = "codex-mini"
@@ -578,7 +579,21 @@ model = "anthropic/claude-sonnet-4"
 
 **Important:** `bare = true` disables OAuth authentication. Use it only when authenticating via `ANTHROPIC_API_KEY`, never with `CLAUDE_CODE_OAUTH_TOKEN`.
 
-`dangerously_skip_perms` cannot be set via the HTTP API for security reasons — it must be set in `config.toml` directly.
+For security reasons, the HTTP API can only set `dangerously_skip_perms` to
+`false` (reducing privilege). Enabling it requires a direct edit to
+`config.toml`.
+
+`extra_flags` uses a fail-closed allowlist per CLI. Only reviewed presentation,
+output, resource-tuning and restrictive options are accepted; unknown flags and options
+that can alter approval, sandbox, permissions, sessions, trusted directories,
+files, tools, policy or external configuration are rejected. Heimdallm validates
+the list while loading configuration and again immediately before creating the
+subprocess. Model, effort, turn-limit, permission and approval settings must use
+their typed fields; legacy model/effort/turn flags are migrated on load with a
+warning. Unsafe legacy fields are ignored individually rather than preventing
+startup or discarding unrelated stored settings. When execution falls back to a
+different CLI, provider-specific options from the unavailable primary are not
+forwarded.
 
 ### Prompt categories
 
@@ -1310,12 +1325,13 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # effort                 = "high"         # low | medium | high | max
 # permission_mode        = "auto"         # default | auto | acceptEdits | dontAsk
 # bare                   = false          # WARNING: disables OAuth — use ANTHROPIC_API_KEY
-# dangerously_skip_perms = false          # cannot be set via HTTP API
+# dangerously_skip_perms = false          # HTTP may disable; enable only in config.toml
 # no_session_persistence = false
 # execution_timeout      = "20m"          # per-agent override (overrides [ai].execution_timeout)
 
 # [ai.agents.gemini]
-# model = "gemini-2.5-pro"
+# model         = "gemini-2.5-pro"
+# approval_mode = "auto_edit"    # default | auto_edit | plan (yolo is forbidden)
 
 # [ai.agents.codex]
 # model         = "codex-mini"

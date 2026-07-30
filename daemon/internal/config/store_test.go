@@ -61,12 +61,14 @@ func TestApplyStore_AgentConfigs_MergesOverTOML(t *testing.T) {
 	}
 }
 
-func TestApplyStore_AgentConfigs_FalseBoolOverridesTOMLTrue(t *testing.T) {
+func TestApplyStore_AgentConfigs_SafeFalseBoolsOverrideTOMLTrue(t *testing.T) {
 	// Regression for the omitempty foot-gun the bot review flagged on #432:
 	// an operator who flips bare=false in the UI must override a TOML
 	// bare=true. With omitempty on the bool tag, a direct Marshal of
-	// CLIAgentConfig would drop the false and ApplyStore's merge-into-
-	// existing-struct path would preserve the TOML true.
+	// CLIAgentConfig would drop the false and ApplyStore's merge-into-existing
+	// path would preserve the TOML true. dangerously_skip_perms deliberately
+	// uses asymmetric security semantics: a stored false may reduce privilege,
+	// while a stored true may never grant it.
 	cfg := &Config{}
 	cfg.applyDefaults()
 	cfg.AI.Agents = map[string]CLIAgentConfig{
@@ -84,10 +86,88 @@ func TestApplyStore_AgentConfigs_FalseBoolOverridesTOMLTrue(t *testing.T) {
 		t.Errorf("Bare: stored false did not override TOML true")
 	}
 	if got.DangerouslySkipPerms {
-		t.Errorf("DangerouslySkipPerms: stored false did not override TOML true")
+		t.Errorf("DangerouslySkipPerms: stored false did not disable TOML true")
 	}
 	if got.NoSessionPersistence {
 		t.Errorf("NoSessionPersistence: stored false did not override TOML true")
+	}
+}
+
+func TestApplyStore_AgentConfigs_CannotEnableDangerouslySkipPerms(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+	cfg.AI.Agents = map[string]CLIAgentConfig{
+		"claude": {DangerouslySkipPerms: false},
+	}
+
+	rows := map[string]string{
+		"agent_configs": `{"claude":{"DANGEROUSLY_SKIP_PERMS":true,"model":"safe-model"}}`,
+	}
+	if err := cfg.ApplyStore(rows); err != nil {
+		t.Fatalf("ApplyStore: %v", err)
+	}
+	got := cfg.AI.Agents["claude"]
+	if got.DangerouslySkipPerms {
+		t.Errorf("DangerouslySkipPerms enabled by legacy store row")
+	}
+	if got.Model != "safe-model" {
+		t.Errorf("safe sibling field was not applied: %v", got)
+	}
+}
+
+func TestApplyStore_AgentConfigs_DangerouslySkipPermsAsymmetricMatrix(t *testing.T) {
+	tests := []struct {
+		name    string
+		base    bool
+		payload string
+		want    bool
+	}{
+		{
+			name:    "omitted preserves trusted true",
+			base:    true,
+			payload: `{"claude":{"model":"safe"}}`,
+			want:    true,
+		},
+		{
+			name:    "false disables trusted true",
+			base:    true,
+			payload: `{"claude":{"dangerously_skip_perms":false}}`,
+			want:    false,
+		},
+		{
+			name:    "true cannot elevate false",
+			base:    false,
+			payload: `{"claude":{"dangerously_skip_perms":true}}`,
+			want:    false,
+		},
+		{
+			name:    "true cannot replace trusted source",
+			base:    true,
+			payload: `{"claude":{"dangerously_skip_perms":true}}`,
+			want:    true,
+		},
+		{
+			name:    "false wins conflicting legacy aliases",
+			base:    true,
+			payload: `{"claude":{"DANGEROUSLY_SKIP_PERMS":true,"dangerously_skip_perms":false}}`,
+			want:    false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{}
+			cfg.applyDefaults()
+			cfg.AI.Agents = map[string]CLIAgentConfig{
+				"claude": {DangerouslySkipPerms: tc.base},
+			}
+			if err := cfg.ApplyStore(map[string]string{"agent_configs": tc.payload}); err != nil {
+				t.Fatalf("ApplyStore: %v", err)
+			}
+			if got := cfg.AI.Agents["claude"].DangerouslySkipPerms; got != tc.want {
+				t.Fatalf("DangerouslySkipPerms = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -364,13 +444,122 @@ func TestMergeStoreLayer_FailsValidationOnBadMergedCfg(t *testing.T) {
 	cfg := &Config{}
 	cfg.applyDefaults()
 	cfg.AI.Primary = "claude"
+	originalPollInterval := cfg.GitHub.PollInterval
+	cfg.GitHub.IssueTracking.Assignees = []string{"original"}
 
 	store := &fakeStoreLister{rows: map[string]string{
-		"poll_interval": "48h", // parseable string, but above the 24h ceiling
+		"poll_interval":  "48h", // parseable string, but above the 24h ceiling
+		"issue_tracking": `{"assignees":["mutated"]}`,
 	}}
 
 	if err := cfg.MergeStoreLayer(store); err == nil {
 		t.Fatal("MergeStoreLayer with invalid merged cfg: expected error, got nil")
+	}
+	if cfg.GitHub.PollInterval != originalPollInterval {
+		t.Fatalf("PollInterval mutated to %q after failed validation; want %q",
+			cfg.GitHub.PollInterval, originalPollInterval)
+	}
+	if got := cfg.GitHub.IssueTracking.Assignees; len(got) != 1 || got[0] != "original" {
+		t.Fatalf("nested issue-tracking slice mutated after failed validation: %v", got)
+	}
+}
+
+func TestMergeStoreLayer_SanitizesLegacyUnsafeAgentFieldWithoutDroppingLayer(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+	cfg.AI.Primary = "codex"
+	cfg.AI.Agents = map[string]CLIAgentConfig{
+		"codex": {ExtraFlags: "--json"},
+	}
+	cfg.GitHub.IssueTracking.Assignees = []string{"toml-user"}
+
+	store := &fakeStoreLister{rows: map[string]string{
+		"agent_configs":  `{"codex":{"extra_flags":"--sandbox danger-full-access"}}`,
+		"poll_interval":  "30m",
+		"issue_tracking": `{"assignees":["store-user"]}`,
+	}}
+
+	if err := cfg.MergeStoreLayer(store); err != nil {
+		t.Fatalf("legacy semantic policy error must not discard the store layer: %v", err)
+	}
+	if got := cfg.AI.Agents["codex"].ExtraFlags; got != "--json" {
+		t.Fatalf("unsafe store field replaced trusted base ExtraFlags with %q", got)
+	}
+	if cfg.GitHub.PollInterval != "30m" {
+		t.Fatalf("valid store poll_interval was discarded: %q", cfg.GitHub.PollInterval)
+	}
+	if got := cfg.GitHub.IssueTracking.Assignees; len(got) != 1 || got[0] != "store-user" {
+		t.Fatalf("valid issue_tracking row was discarded: %v", got)
+	}
+}
+
+func TestApplyStore_MigratesLegacyTypedFlagsAndRestoresOnlyInvalidFields(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+	cfg.AI.Primary = "claude"
+	cfg.AI.Agents = map[string]CLIAgentConfig{
+		"claude": {
+			Model:          "toml-model",
+			Effort:         "low",
+			PermissionMode: "default",
+			ExtraFlags:     "--verbose",
+		},
+	}
+
+	rows := map[string]string{
+		"agent_configs": `{"claude":{"model":"--sandbox","effort":"HIGH","permission_mode":"bypassPermissions","extra_flags":"--model legacy --output-format json"}}`,
+	}
+	if err := cfg.ApplyStore(rows); err != nil {
+		t.Fatalf("ApplyStore: %v", err)
+	}
+
+	got := cfg.AI.Agents["claude"]
+	if got.Model != "toml-model" {
+		t.Fatalf("invalid stored model replaced trusted base: %+v", got)
+	}
+	if got.Effort != "high" {
+		t.Fatalf("safe stored effort was not canonicalized: %+v", got)
+	}
+	if got.PermissionMode != "default" {
+		t.Fatalf("invalid stored permission mode replaced trusted base: %+v", got)
+	}
+	if got.ExtraFlags != "--output-format json" {
+		t.Fatalf("legacy typed flag was not removed while safe sibling survived: %+v", got)
+	}
+}
+
+func TestApplyStore_LegacyTypedFlagsPreserveStorePrecedence(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+	cfg.AI.Primary = "claude"
+	cfg.AI.Agents = map[string]CLIAgentConfig{
+		"claude": {
+			Model:      "toml-model",
+			MaxTurns:   3,
+			Effort:     "low",
+			ExtraFlags: "--debug",
+		},
+	}
+
+	rows := map[string]string{
+		"agent_configs": `{"claude":{"extra_flags":"--model store-model --max-turns 9 --effort HIGH --verbose"}}`,
+	}
+	if err := cfg.ApplyStore(rows); err != nil {
+		t.Fatalf("ApplyStore: %v", err)
+	}
+
+	got := cfg.AI.Agents["claude"]
+	if got.Model != "store-model" {
+		t.Fatalf("legacy store model did not override lower-precedence TOML value: %+v", got)
+	}
+	if got.MaxTurns != 9 {
+		t.Fatalf("legacy store max_turns did not override lower-precedence TOML value: %+v", got)
+	}
+	if got.Effort != "high" {
+		t.Fatalf("legacy store effort did not override lower-precedence TOML value: %+v", got)
+	}
+	if got.ExtraFlags != "--verbose" {
+		t.Fatalf("legacy typed flags were not removed while the safe sibling survived: %+v", got)
 	}
 }
 
@@ -390,6 +579,9 @@ func TestApplyStore_PartialFailure_LeavesCfgUnchanged(t *testing.T) {
 	cfg.GitHub.PollInterval = "5m"
 	cfg.GitHub.Repositories = []string{"original/repo"}
 	cfg.AI.Primary = "claude"
+	cfg.AI.Agents = map[string]CLIAgentConfig{
+		"claude": {ExtraFlags: "--sandbox"},
+	}
 
 	rows := map[string]string{
 		"poll_interval": "30m",            // valid — would apply on its own
@@ -405,6 +597,29 @@ func TestApplyStore_PartialFailure_LeavesCfgUnchanged(t *testing.T) {
 	}
 	if len(cfg.GitHub.Repositories) != 1 || cfg.GitHub.Repositories[0] != "original/repo" {
 		t.Errorf("Repositories = %v, want [original/repo]", cfg.GitHub.Repositories)
+	}
+	if got := cfg.AI.Agents["claude"].ExtraFlags; got != "--sandbox" {
+		t.Errorf("legacy sanitizer leaked through failed atomic merge: %q", got)
+	}
+}
+
+func TestApplyStore_PartialIssueTrackingDecodeLeavesNestedSlicesUnchanged(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+	cfg.AI.Primary = "claude"
+	// Spare capacity makes encoding/json reuse the backing array while
+	// decoding, which exposes shallow-copy rollback bugs deterministically.
+	cfg.GitHub.IssueTracking.Assignees = make([]string, 1, 4)
+	cfg.GitHub.IssueTracking.Assignees[0] = "original"
+
+	err := cfg.ApplyStore(map[string]string{
+		"issue_tracking": `{"assignees":["mutated"],"enabled":"not-a-bool"}`,
+	})
+	if err == nil {
+		t.Fatal("expected malformed issue_tracking row to fail")
+	}
+	if got := cfg.GitHub.IssueTracking.Assignees; len(got) != 1 || got[0] != "original" {
+		t.Fatalf("nested issue-tracking slice mutated after failed decode: %v", got)
 	}
 }
 

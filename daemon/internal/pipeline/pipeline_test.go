@@ -177,7 +177,7 @@ func TestPipeline_Run(t *testing.T) {
 		ID: 1, Number: 1, Title: "Fix bug", Repo: "org/repo",
 		User: github.User{Login: "alice"}, State: "open",
 		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/1",
-		Head:      github.Branch{SHA: "sha1"},
+		Head: github.Branch{SHA: "sha1"},
 	}
 
 	rev, err := p.Run(pr, pipeline.RunOptions{Primary: "claude", Fallback: "gemini", ReviewMode: "single"})
@@ -205,15 +205,23 @@ func TestPipeline_Run(t *testing.T) {
 // fakeExecCapture captures the prompt passed to Execute for assertion in tests.
 type fakeExecCapture struct {
 	capturePrompt *string
+	captureOpts   *executor.ExecOptions
+	detectCLI     string
 }
 
 func (f *fakeExecCapture) Detect(primary, fallback string) (string, error) {
+	if f.detectCLI != "" {
+		return f.detectCLI, nil
+	}
 	return "fake_claude", nil
 }
 
-func (f *fakeExecCapture) Execute(cli, prompt string, _ executor.ExecOptions) (*executor.ReviewResult, error) {
+func (f *fakeExecCapture) Execute(cli, prompt string, opts executor.ExecOptions) (*executor.ReviewResult, error) {
 	if f.capturePrompt != nil {
 		*f.capturePrompt = prompt
+	}
+	if f.captureOpts != nil {
+		*f.captureOpts = opts
 	}
 	return &executor.ReviewResult{Summary: "ok", Severity: "low"}, nil
 }
@@ -260,7 +268,7 @@ func TestPipeline_Run_CommentsInjectedIntoPrompt(t *testing.T) {
 		ID: 2, Number: 2, Title: "Add feature", Repo: "org/repo",
 		User: github.User{Login: "alice"}, State: "open",
 		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/2",
-		Head:      github.Branch{SHA: "sha2"},
+		Head: github.Branch{SHA: "sha2"},
 	}
 	_, err = p.Run(pr, pipeline.RunOptions{Primary: "claude", Fallback: "gemini"})
 	if err != nil {
@@ -271,6 +279,102 @@ func TestPipeline_Run_CommentsInjectedIntoPrompt(t *testing.T) {
 	}
 	if !strings.Contains(capturedPrompt, "Please add error handling here") {
 		t.Errorf("expected comment body in prompt, got: %s", capturedPrompt)
+	}
+}
+
+func TestPipeline_RunFallbackDropsPrimaryProviderOptions(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	var captured executor.ExecOptions
+	exec := &fakeExecCapture{captureOpts: &captured, detectCLI: "gemini"}
+	p := pipeline.New(s, &fakeGH{diff: "+new line"}, exec, &fakeNotify{})
+	pr := &github.PullRequest{
+		ID: 22, Number: 22, Title: "Fallback", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/22",
+		Head: github.Branch{SHA: "sha22"},
+	}
+	opts := executor.ExecOptions{
+		Model:                "codex-only",
+		MaxTurns:             4,
+		ApprovalMode:         "never",
+		ExtraFlags:           "--json",
+		WorkDir:              "/tmp/repo",
+		Effort:               "high",
+		PermissionMode:       "acceptEdits",
+		Bare:                 true,
+		DangerouslySkipPerms: true,
+		NoSessionPersistence: true,
+		Timeout:              11 * time.Minute,
+	}
+
+	if _, err := p.Run(pr, pipeline.RunOptions{
+		Primary: "codex", Fallback: "gemini", ReviewMode: "single", ExecOpts: opts,
+	}); err != nil {
+		t.Fatalf("pipeline run: %v", err)
+	}
+	want := executor.ExecOptions{WorkDir: "/tmp/repo", Timeout: 11 * time.Minute}
+	if captured != want {
+		t.Fatalf("fallback options:\n got: %+v\nwant: %+v", captured, want)
+	}
+}
+
+func TestPipeline_RunMigratesStoredProfileCLIFlagsBeforeExecution(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.UpsertAgent(&store.Agent{
+		ID:           "legacy-profile",
+		Name:         "Legacy profile",
+		CLI:          "claude",
+		Instructions: "Review carefully",
+		CLIFlags:     "--model profile-model --max-turns 7 --effort HIGH --verbose",
+		IsDefaultPR:  true,
+		CreatedAt:    time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("upsert profile: %v", err)
+	}
+
+	var captured executor.ExecOptions
+	exec := &fakeExecCapture{captureOpts: &captured, detectCLI: "claude"}
+	p := pipeline.New(s, &fakeGH{diff: "+new line"}, exec, &fakeNotify{})
+	pr := &github.PullRequest{
+		ID: 23, Number: 23, Title: "Legacy profile", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/23",
+		Head: github.Branch{SHA: "sha23"},
+	}
+
+	if _, err := p.Run(pr, pipeline.RunOptions{
+		Primary: "claude",
+		ExecOpts: executor.ExecOptions{
+			Model:    "global-model",
+			MaxTurns: 2,
+			Effort:   "low",
+			WorkDir:  "/tmp/repo",
+			Timeout:  3 * time.Minute,
+		},
+	}); err != nil {
+		t.Fatalf("pipeline run: %v", err)
+	}
+
+	want := executor.ExecOptions{
+		Model:      "profile-model",
+		MaxTurns:   7,
+		Effort:     "high",
+		ExtraFlags: "--verbose",
+		WorkDir:    "/tmp/repo",
+		Timeout:    3 * time.Minute,
+	}
+	if captured != want {
+		t.Fatalf("stored profile options:\n got: %+v\nwant: %+v", captured, want)
 	}
 }
 
@@ -287,7 +391,7 @@ func TestPipeline_Run_CommentsFetchErrorIsNonFatal(t *testing.T) {
 		ID: 3, Number: 3, Title: "Fix", Repo: "org/repo",
 		User: github.User{Login: "alice"}, State: "open",
 		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/3",
-		Head:      github.Branch{SHA: "sha3"},
+		Head: github.Branch{SHA: "sha3"},
 	}
 	_, err = p.Run(pr, pipeline.RunOptions{Primary: "claude", Fallback: "gemini"})
 	if err != nil {
@@ -794,7 +898,7 @@ func TestPipeline_Run_FailsClosedOnEmptyResolvedSHA(t *testing.T) {
 		ID: 88, Number: 88, Title: "t", Repo: "org/repo",
 		User: github.User{Login: "alice"}, State: "open",
 		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/88",
-		Head:      github.Branch{SHA: ""}, // forces the resolver path
+		Head: github.Branch{SHA: ""}, // forces the resolver path
 	}
 	_, err = p.Run(pr, pipeline.RunOptions{Primary: "claude", Force: true})
 	if err == nil {
@@ -845,7 +949,7 @@ func TestPipeline_Run_ForceBackfillsLegacyRowAndReviews(t *testing.T) {
 		ID: 77, Number: 77, Title: "t", Repo: "org/repo",
 		User: github.User{Login: "alice"}, State: "open",
 		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/77",
-		Head:      github.Branch{SHA: "newsha"},
+		Head: github.Branch{SHA: "newsha"},
 	}
 	if _, err := p.Run(pr, pipeline.RunOptions{Primary: "claude", Force: true}); err != nil {
 		t.Fatalf("forced run: %v", err)

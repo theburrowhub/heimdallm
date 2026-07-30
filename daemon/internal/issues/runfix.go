@@ -110,7 +110,8 @@ func (p *Pipeline) RunFix(ctx context.Context, req FixRequest) (FixResult, error
 
 	// Promote CLI flags into write mode — same posture as
 	// runAutoImplement so the agent can actually edit files.
-	execOpts := ensureAutoImplementWritePerms(cli, req.ExecOpts)
+	execOpts := executor.OptionsForSelectedCLI(req.CLIPrimary, cli, req.ExecOpts)
+	execOpts = ensureAutoImplementWritePerms(cli, execOpts)
 
 	prompt := buildFixAgentPrompt(req)
 	if _, err := p.executor.ExecuteRaw(cli, prompt, execOpts); err != nil {

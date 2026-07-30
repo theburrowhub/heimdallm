@@ -362,6 +362,25 @@ func (p *Pipeline) applyPrompt(repoPromptID, agentPromptID string, tmpl *string,
 	*flags = a.CLIFlags
 }
 
+func applyStoredProfileCLIFlags(cli, raw string, opts executor.ExecOptions) (executor.ExecOptions, error) {
+	profileOpts, migrated, err := executor.NormalizeLegacyCLIFlagsForCLI(cli, raw)
+	if err != nil {
+		return opts, err
+	}
+	for _, field := range migrated {
+		switch field {
+		case "model":
+			opts.Model = profileOpts.Model
+		case "effort":
+			opts.Effort = profileOpts.Effort
+		case "max_turns":
+			opts.MaxTurns = profileOpts.MaxTurns
+		}
+	}
+	opts.ExtraFlags = profileOpts.ExtraFlags
+	return opts, nil
+}
+
 // RunOptions carries per-execution settings derived from global + repo + agent config.
 type RunOptions struct {
 	Primary        string
@@ -737,16 +756,17 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	})
 
 	// 5. Execute review (merge cliFlags from prompt into ExecOptions.ExtraFlags)
-	// Validate cliFlags from the prompt profile against the same denylist as
-	// ExtraFlags — a stored prompt can otherwise carry forbidden flags like
-	// --dangerously-skip-permissions that bypass the CLI agent config guards.
-	execOpts := opts.ExecOpts
+	// Validate cliFlags from the prompt profile against the selected provider's
+	// execution policy — a stored prompt must not override sandbox, approval,
+	// permission or workspace guards.
+	execOpts := executor.OptionsForSelectedCLI(primary, cli, opts.ExecOpts)
 	if cliFlags != "" && execOpts.ExtraFlags == "" {
-		if err := executor.ValidateExtraFlags(cliFlags); err != nil {
-			slog.Warn("pipeline: prompt cli_flags rejected by denylist, ignoring", "err", err)
+		migratedOpts, err := applyStoredProfileCLIFlags(cli, cliFlags, execOpts)
+		if err != nil {
+			slog.Warn("pipeline: prompt cli_flags rejected by execution policy, ignoring", "err", err)
 			// Don't abort the review — just skip the unsafe flags
 		} else {
-			execOpts.ExtraFlags = cliFlags
+			execOpts = migratedOpts
 		}
 	}
 	result, err := p.executor.Execute(cli, prompt, execOpts)
