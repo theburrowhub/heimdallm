@@ -566,7 +566,8 @@ no_session_persistence = false          # --no-session-persistence
 execution_timeout      = "20m"          # per-agent override
 
 [ai.agents.gemini]
-model = "gemini-2.5-pro"
+model         = "gemini-2.5-pro"
+approval_mode = "auto_edit"    # default | auto_edit | plan (yolo is forbidden)
 
 [ai.agents.codex]
 model         = "codex-mini"
@@ -579,6 +580,15 @@ model = "anthropic/claude-sonnet-4"
 **Important:** `bare = true` disables OAuth authentication. Use it only when authenticating via `ANTHROPIC_API_KEY`, never with `CLAUDE_CODE_OAUTH_TOKEN`.
 
 `dangerously_skip_perms` cannot be set via the HTTP API for security reasons — it must be set in `config.toml` directly.
+
+`extra_flags` uses a fail-closed allowlist per CLI. Only reviewed presentation,
+model, output and restrictive options are accepted; unknown flags and options
+that can alter approval, sandbox, permissions, sessions, trusted directories,
+files, tools, policy or external configuration are rejected. Heimdallm validates
+the list while loading configuration and again immediately before creating the
+subprocess. Use the typed `permission_mode` / `approval_mode` fields for
+supported safe modes instead. When execution falls back to a different CLI,
+provider-specific options from the unavailable primary are not forwarded.
 
 ### Prompt categories
 
@@ -1315,7 +1325,8 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # execution_timeout      = "20m"          # per-agent override (overrides [ai].execution_timeout)
 
 # [ai.agents.gemini]
-# model = "gemini-2.5-pro"
+# model         = "gemini-2.5-pro"
+# approval_mode = "auto_edit"    # default | auto_edit | plan (yolo is forbidden)
 
 # [ai.agents.codex]
 # model         = "codex-mini"

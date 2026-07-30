@@ -1214,6 +1214,83 @@ func TestHandlerPutConfig_AgentConfigs_RejectsBadPermissionMode(t *testing.T) {
 	}
 }
 
+func TestHandlerPutConfig_AgentConfigs_EnforcesProviderPolicy(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		wantStatus int
+	}{
+		{
+			name:       "Codex sandbox override rejected",
+			body:       `{"agent_configs":{"codex":{"extra_flags":"--sandbox danger-full-access"}}}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "Gemini yolo approval rejected",
+			body:       `{"agent_configs":{"gemini":{"approval_mode":"yolo"}}}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "Gemini typed auto edit accepted",
+			body:       `{"agent_configs":{"gemini":{"approval_mode":"auto_edit"}}}`,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "Option-shaped model rejected",
+			body:       `{"agent_configs":{"claude":{"model":"--dangerously-skip-permissions"}}}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "Option-shaped effort rejected",
+			body:       `{"agent_configs":{"claude":{"effort":"--dangerously-skip-permissions"}}}`,
+			wantStatus: http.StatusBadRequest,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := setupServer(t)
+			w := httptest.NewRecorder()
+			srv.Router().ServeHTTP(w, putConfigRequest(tc.body))
+			if w.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d (body: %s)", w.Code, tc.wantStatus, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestHandlerUpsertAgent_RejectsProviderPolicyFlags(t *testing.T) {
+	srv, _ := setupServer(t)
+	body := `{"id":"unsafe-codex","name":"Unsafe Codex","cli":"codex","cli_flags":"--sandbox=danger-full-access"}`
+	req := httptest.NewRequest("POST", "/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (body: %s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "--sandbox") {
+		t.Fatalf("error must identify rejected flag, got: %s", w.Body.String())
+	}
+}
+
+func TestHandlerUpsertAgent_RequiresCLIForFlags(t *testing.T) {
+	srv, _ := setupServer(t)
+	body := `{"id":"missing-cli","name":"Missing CLI","cli_flags":"--model safe-model"}`
+	req := httptest.NewRequest("POST", "/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (body: %s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "cli is required") {
+		t.Fatalf("error must explain the effective-provider requirement, got: %s", w.Body.String())
+	}
+}
+
 func TestHandlerPutConfig_AgentConfigs_RejectsUnknownSubkey(t *testing.T) {
 	srv, _ := setupServer(t)
 	body := `{"agent_configs":{"claude":{"new_secret_field":true}}}`
@@ -1750,6 +1827,46 @@ func TestHandlePatchConfig_StripsDangerouslySkipPerms(t *testing.T) {
 	}
 }
 
+func TestHandlePatchConfig_PreservesTrustedDangerousFlag(t *testing.T) {
+	tomlContent := "[ai]\n" +
+		"primary = \"claude\"\n" +
+		"[ai.agents.claude]\n" +
+		"dangerously_skip_perms = true\n" +
+		"permission_mode = \"default\"\n"
+	tomlPath := writeTempTOML(t, tomlContent)
+
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+
+	// HTTP cannot enable or disable the filesystem-trusted gate. The attempted
+	// false value is removed from the payload before merge, while legal sibling
+	// fields still apply.
+	body := `{"ai":{"agents":{"claude":{"dangerously_skip_perms":false,"permission_mode":"acceptEdits"}}}}`
+	req := httptest.NewRequest("PATCH", "/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("PATCH should succeed, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	m, err := config.ReadTOMLMap(tomlPath)
+	if err != nil {
+		t.Fatalf("read TOML after PATCH: %v", err)
+	}
+	ai, _ := m["ai"].(map[string]any)
+	agents, _ := ai["agents"].(map[string]any)
+	claude, _ := agents["claude"].(map[string]any)
+	if got, ok := claude["dangerously_skip_perms"].(bool); !ok || !got {
+		t.Fatalf("trusted dangerously_skip_perms was changed by HTTP PATCH: %v", claude)
+	}
+	if claude["permission_mode"] != "acceptEdits" {
+		t.Fatalf("legal sibling field did not land: %v", claude)
+	}
+}
+
 func TestHandlePatchConfig_StripsDangerouslySkipPermsCaseInsensitive(t *testing.T) {
 	// JSON preserves key casing; the merged map then feeds into a
 	// Go struct via mapstructure/koanf, which is case-insensitive
@@ -1789,6 +1906,98 @@ func TestHandlePatchConfig_StripsDangerouslySkipPermsCaseInsensitive(t *testing.
 				t.Errorf("case-variant %q persisted for %s (M-5 bypass)", k, name)
 			}
 		}
+	}
+}
+
+func TestHandlePatchConfig_RejectsCaseVariantAgentTree(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "top-level AI",
+			body: `{"AI":{"agents":{"claude":{"dangerously_skip_perms":true}}}}`,
+		},
+		{
+			name: "global Agents",
+			body: `{"ai":{"Agents":{"claude":{"dangerously_skip_perms":true}}}}`,
+		},
+		{
+			name: "repo Agents",
+			body: `{"ai":{"repos":{"org/repo":{"Agents":{"claude":{"dangerously_skip_perms":true}}}}}}`,
+		},
+		{
+			name: "org Agents",
+			body: `{"ai":{"orgs":{"org":{"Agents":{"claude":{"dangerously_skip_perms":true}}}}}}`,
+		},
+		{
+			name: "CLI name",
+			body: `{"ai":{"agents":{"Codex":{"extra_flags":"--sandbox danger-full-access"}}}}`,
+		},
+		{
+			name: "agent field",
+			body: `{"ai":{"agents":{"codex":{"Extra_Flags":"--sandbox danger-full-access"}}}}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tomlPath := writeTempTOML(t, "[ai]\nprimary = \"claude\"\n")
+			srv := setupServerWithToken(t, "test-token")
+			srv.SetConfigPath(tomlPath)
+
+			req := httptest.NewRequest("PATCH", "/config", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Heimdallm-Token", "test-token")
+			w := httptest.NewRecorder()
+			srv.Router().ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400 for case-variant config tree, got %d (body: %s)", w.Code, w.Body.String())
+			}
+			got, err := os.ReadFile(tomlPath)
+			if err != nil {
+				t.Fatalf("read config after rejected PATCH: %v", err)
+			}
+			if string(got) != "[ai]\nprimary = \"claude\"\n" {
+				t.Fatalf("rejected PATCH changed config:\n%s", got)
+			}
+		})
+	}
+}
+
+func TestHandleScopedPatchConfig_RejectsCaseVariantAgentTree(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+	}{
+		{
+			name: "repo",
+			path: "/config/repos/" + url.PathEscape("org/repo"),
+		},
+		{
+			name: "org",
+			path: "/config/orgs/" + url.PathEscape("org"),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tomlPath := writeTempTOML(t, "[ai]\nprimary = \"claude\"\n")
+			srv := setupServerWithToken(t, "test-token")
+			srv.SetConfigPath(tomlPath)
+
+			body := `{"Agents":{"claude":{"dangerously_skip_perms":true}}}`
+			req := httptest.NewRequest("PATCH", tc.path, strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Heimdallm-Token", "test-token")
+			w := httptest.NewRecorder()
+			srv.Router().ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400 for case-variant scoped tree, got %d (body: %s)", w.Code, w.Body.String())
+			}
+		})
 	}
 }
 
@@ -2695,5 +2904,55 @@ func TestHandlePatchAutonomousOrgConfig(t *testing.T) {
 	}
 	if myorg["dev_max_turns"] != int64(10) {
 		t.Errorf("autonomous.orgs[myorg].dev_max_turns = %v (%T), want 10", myorg["dev_max_turns"], myorg["dev_max_turns"])
+	}
+}
+
+func TestHandlePatchAutonomousConfigRejectsAgentsWithoutPersisting(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		body string
+	}{
+		{
+			name: "global config repo override",
+			path: "/config",
+			body: `{"autonomous":{"repos":{"org/repo":{"agents":{"codex":{"extra_flags":"--sandbox danger-full-access"}}}}}}`,
+		},
+		{
+			name: "repo endpoint",
+			path: "/config/autonomous/repos/" + url.PathEscape("org/repo"),
+			body: `{"agents":{"codex":{"extra_flags":"--sandbox danger-full-access"}}}`,
+		},
+		{
+			name: "org endpoint",
+			path: "/config/autonomous/orgs/org",
+			body: `{"agents":{"codex":{"extra_flags":"--sandbox danger-full-access"}}}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			const tomlContent = "[ai]\nprimary = \"claude\"\n\n[autonomous]\nenabled = true\n"
+			tomlPath := writeTempTOML(t, tomlContent)
+			srv := setupServerWithToken(t, "test-token")
+			srv.SetConfigPath(tomlPath)
+
+			req := httptest.NewRequest(http.MethodPatch, tc.path, strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Heimdallm-Token", "test-token")
+			w := httptest.NewRecorder()
+			srv.Router().ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d (body: %s)", w.Code, http.StatusBadRequest, w.Body.String())
+			}
+			got, err := os.ReadFile(tomlPath)
+			if err != nil {
+				t.Fatalf("read TOML after rejected PATCH: %v", err)
+			}
+			if string(got) != tomlContent {
+				t.Fatalf("rejected PATCH changed TOML:\n%s", got)
+			}
+		})
 	}
 }

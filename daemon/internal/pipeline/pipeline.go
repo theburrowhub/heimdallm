@@ -737,13 +737,13 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	})
 
 	// 5. Execute review (merge cliFlags from prompt into ExecOptions.ExtraFlags)
-	// Validate cliFlags from the prompt profile against the same denylist as
-	// ExtraFlags — a stored prompt can otherwise carry forbidden flags like
-	// --dangerously-skip-permissions that bypass the CLI agent config guards.
-	execOpts := opts.ExecOpts
+	// Validate cliFlags from the prompt profile against the selected provider's
+	// execution policy — a stored prompt must not override sandbox, approval,
+	// permission or workspace guards.
+	execOpts := executor.OptionsForSelectedCLI(primary, cli, opts.ExecOpts)
 	if cliFlags != "" && execOpts.ExtraFlags == "" {
-		if err := executor.ValidateExtraFlags(cliFlags); err != nil {
-			slog.Warn("pipeline: prompt cli_flags rejected by denylist, ignoring", "err", err)
+		if err := executor.ValidateExtraFlagsForCLI(cli, cliFlags); err != nil {
+			slog.Warn("pipeline: prompt cli_flags rejected by execution policy, ignoring", "err", err)
 			// Don't abort the review — just skip the unsafe flags
 		} else {
 			execOpts.ExtraFlags = cliFlags

@@ -146,6 +146,265 @@ func TestStripDangerousAgentFlags_ReportsCount(t *testing.T) {
 	}
 }
 
+func TestValidateCanonicalConfigPatchKeys(t *testing.T) {
+	tests := []struct {
+		name    string
+		patch   map[string]any
+		wantErr bool
+	}{
+		{
+			name: "canonical global agent tree",
+			patch: map[string]any{
+				"ai": map[string]any{
+					"agents": map[string]any{
+						"claude": map[string]any{"extra_flags": "--verbose"},
+					},
+				},
+			},
+		},
+		{
+			name: "canonical repo and org agent trees",
+			patch: map[string]any{
+				"ai": map[string]any{
+					"repos": map[string]any{
+						"org/repo": map[string]any{
+							"agents": map[string]any{
+								"codex": map[string]any{"approval_mode": "on-request"},
+							},
+						},
+					},
+					"orgs": map[string]any{
+						"org": map[string]any{
+							"agents": map[string]any{
+								"gemini": map[string]any{"model": "gemini-2.5-pro"},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "dangerous leaf aliases remain eligible for the scrubber",
+			patch: map[string]any{
+				"ai": map[string]any{
+					"agents": map[string]any{
+						"claude": map[string]any{"DANGEROUSLY_SKIP_PERMS": true},
+					},
+				},
+			},
+		},
+		{
+			name: "unsafe extra flags rejected in otherwise schema-ignored repo tree",
+			patch: map[string]any{
+				"ai": map[string]any{
+					"repos": map[string]any{
+						"org/repo": map[string]any{
+							"agents": map[string]any{
+								"codex": map[string]any{"extra_flags": "--sandbox danger-full-access"},
+							},
+						},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "unsafe approval rejected in otherwise schema-ignored org tree",
+			patch: map[string]any{
+				"ai": map[string]any{
+					"orgs": map[string]any{
+						"org": map[string]any{
+							"agents": map[string]any{
+								"gemini": map[string]any{"approval_mode": "yolo"},
+							},
+						},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "unknown CLI rejected",
+			patch: map[string]any{
+				"ai": map[string]any{
+					"agents": map[string]any{
+						"future-cli": map[string]any{"extra_flags": "--model safe"},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "non-object agent rejected",
+			patch: map[string]any{
+				"ai": map[string]any{
+					"agents": map[string]any{
+						"claude": "not-an-object",
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "non-object structural node rejected",
+			patch: map[string]any{
+				"ai": map[string]any{
+					"agents": "not-an-object",
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "top-level AI alias rejected",
+			patch: map[string]any{
+				"AI": map[string]any{},
+			},
+			wantErr: true,
+		},
+		{
+			name: "Agents alias rejected",
+			patch: map[string]any{
+				"ai": map[string]any{
+					"Agents": map[string]any{},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "Repos alias rejected",
+			patch: map[string]any{
+				"ai": map[string]any{
+					"Repos": map[string]any{},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "nested Agents alias rejected",
+			patch: map[string]any{
+				"ai": map[string]any{
+					"orgs": map[string]any{
+						"org": map[string]any{
+							"Agents": map[string]any{},
+						},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "CLI alias rejected",
+			patch: map[string]any{
+				"ai": map[string]any{
+					"agents": map[string]any{
+						"Codex": map[string]any{},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "agent field alias rejected",
+			patch: map[string]any{
+				"ai": map[string]any{
+					"agents": map[string]any{
+						"codex": map[string]any{"Extra_Flags": "--quiet"},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "autonomous repo agents rejected",
+			patch: map[string]any{
+				"autonomous": map[string]any{
+					"repos": map[string]any{
+						"org/repo": map[string]any{
+							"agents": map[string]any{
+								"codex": map[string]any{
+									"extra_flags": "--sandbox danger-full-access",
+								},
+							},
+						},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "autonomous agents alias rejected",
+			patch: map[string]any{
+				"autonomous": map[string]any{
+					"orgs": map[string]any{
+						"org": map[string]any{
+							"Agents": map[string]any{},
+						},
+					},
+				},
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateCanonicalConfigPatchKeys(tc.patch)
+			if tc.wantErr && err == nil {
+				t.Fatal("expected casing validation error")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected casing validation error: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateCanonicalScopedAgentPatchKeys(t *testing.T) {
+	tests := []struct {
+		name    string
+		patch   map[string]any
+		wantErr bool
+	}{
+		{
+			name: "canonical",
+			patch: map[string]any{
+				"agents": map[string]any{
+					"claude": map[string]any{"permission_mode": "acceptEdits"},
+				},
+			},
+		},
+		{
+			name: "case variant",
+			patch: map[string]any{
+				"Agents": map[string]any{
+					"claude": map[string]any{},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "unsafe extra flags",
+			patch: map[string]any{
+				"agents": map[string]any{
+					"opencode": map[string]any{"extra_flags": "--auto"},
+				},
+			},
+			wantErr: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateCanonicalScopedAgentPatchKeys(tc.patch, "ai.repos.org/repo")
+			if tc.wantErr && err == nil {
+				t.Fatal("expected casing validation error")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected casing validation error: %v", err)
+			}
+		})
+	}
+}
+
 func TestDaemonLogPath_XDGStateHomeUsedWhenSet(t *testing.T) {
 	if runtime.GOOS == "darwin" {
 		t.Skip("XDG path only used on non-darwin when HEIMDALLM_DATA_DIR is unset")

@@ -3,9 +3,11 @@ package executor_test
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/heimdallm/daemon/internal/executor"
 )
@@ -54,6 +56,35 @@ func TestDetect_NoneAvailable(t *testing.T) {
 	_, err := e.Detect("nonexistent", "also_nonexistent")
 	if err == nil {
 		t.Error("expected error when no CLI available")
+	}
+}
+
+func TestOptionsForSelectedCLI(t *testing.T) {
+	original := executor.ExecOptions{
+		Model:                "primary-model",
+		MaxTurns:             7,
+		ApprovalMode:         "never",
+		ExtraFlags:           "--json",
+		WorkDir:              "/tmp/repo",
+		Effort:               "high",
+		PermissionMode:       "acceptEdits",
+		Bare:                 true,
+		DangerouslySkipPerms: true,
+		NoSessionPersistence: true,
+		Timeout:              9 * time.Minute,
+	}
+
+	if got := executor.OptionsForSelectedCLI("codex", "codex", original); !reflect.DeepEqual(got, original) {
+		t.Fatalf("same provider changed options:\n got: %+v\nwant: %+v", got, original)
+	}
+
+	got := executor.OptionsForSelectedCLI("codex", "gemini", original)
+	want := executor.ExecOptions{
+		WorkDir: "/tmp/repo",
+		Timeout: 9 * time.Minute,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("fallback options:\n got: %+v\nwant: %+v", got, want)
 	}
 }
 
@@ -237,6 +268,159 @@ func TestValidateApprovalModeAcceptsCurrentAndLegacyCodexValues(t *testing.T) {
 	}
 }
 
+func TestValidateApprovalModeForCLI(t *testing.T) {
+	tests := []struct {
+		name    string
+		cli     string
+		mode    string
+		wantErr bool
+	}{
+		{name: "codex current", cli: "codex", mode: "on-request"},
+		{name: "codex legacy", cli: "codex", mode: "auto-edit"},
+		{name: "codex rejects gemini plan", cli: "codex", mode: "plan", wantErr: true},
+		{name: "gemini default", cli: "gemini", mode: "default"},
+		{name: "gemini underscore auto edit", cli: "gemini", mode: "auto_edit"},
+		{name: "gemini hyphen auto edit", cli: "gemini", mode: "auto-edit"},
+		{name: "gemini plan", cli: "gemini", mode: "plan"},
+		{name: "gemini rejects yolo", cli: "gemini", mode: "yolo", wantErr: true},
+		{name: "gemini rejects codex never", cli: "gemini", mode: "never", wantErr: true},
+		{name: "ignored codex mode remains safe on claude fallback", cli: "claude", mode: "on-request"},
+		{name: "ignored gemini mode remains safe on opencode fallback", cli: "opencode", mode: "auto_edit"},
+		{name: "fallback still rejects unknown mode", cli: "claude", mode: "bypassPermissions", wantErr: true},
+		{name: "unknown CLI", cli: "other", mode: "default", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := executor.ValidateApprovalModeForCLI(tc.cli, tc.mode)
+			if tc.wantErr && err == nil {
+				t.Fatalf("ValidateApprovalModeForCLI(%q, %q) unexpectedly succeeded", tc.cli, tc.mode)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("ValidateApprovalModeForCLI(%q, %q): %v", tc.cli, tc.mode, err)
+			}
+		})
+	}
+}
+
+func TestExecuteRawGeminiAddsTypedApprovalBeforeSafeExtraFlags(t *testing.T) {
+	binDir := t.TempDir()
+	captureArgs := filepath.Join(t.TempDir(), "args.txt")
+	captureCWD := filepath.Join(t.TempDir(), "cwd.txt")
+	path := filepath.Join(binDir, "gemini")
+	if err := os.WriteFile(path, []byte(fakeCLIScript("Usage: gemini\n", captureArgs, captureCWD)), 0o755); err != nil {
+		t.Fatalf("write fake Gemini: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	e := executor.New()
+	opts := executor.ExecOptions{
+		ApprovalMode: "auto-edit",
+		ExtraFlags:   "--output-format json --debug --output-format text",
+	}
+	if _, err := e.ExecuteRaw("gemini", "prompt", opts); err != nil {
+		t.Fatalf("ExecuteRaw: %v", err)
+	}
+
+	argsBytes, err := os.ReadFile(captureArgs)
+	if err != nil {
+		t.Fatalf("read captured args: %v", err)
+	}
+	args := strings.Fields(string(argsBytes))
+	if !containsInOrder(args, "--approval-mode", "auto_edit") {
+		t.Fatalf("args = %v, want normalized Gemini approval mode", args)
+	}
+	approvalIdx := indexOf(args, "--approval-mode")
+	outputIdx := indexOf(args, "--output-format")
+	if outputIdx < 0 || approvalIdx > outputIdx {
+		t.Fatalf("args = %v, typed approval must precede safe ExtraFlags", args)
+	}
+	if strings.Count(string(argsBytes), "--output-format") != 2 {
+		t.Fatalf("args = %v, repeated safe flags must be preserved", args)
+	}
+}
+
+func TestExecuteRawRejectsUnsafeRequestBeforeStartingCLI(t *testing.T) {
+	tests := []struct {
+		name string
+		cli  string
+		opts executor.ExecOptions
+	}{
+		{name: "unknown CLI", cli: "other"},
+		{
+			name: "invalid typed Claude permission mode",
+			cli:  "claude",
+			opts: executor.ExecOptions{PermissionMode: "bypassPermissions"},
+		},
+		{
+			name: "option-shaped typed model",
+			cli:  "claude",
+			opts: executor.ExecOptions{Model: "--dangerously-skip-permissions"},
+		},
+		{
+			name: "option-shaped typed effort",
+			cli:  "claude",
+			opts: executor.ExecOptions{Effort: "--dangerously-skip-permissions"},
+		},
+		{
+			name: "invalid typed Codex approval mode",
+			cli:  "codex",
+			opts: executor.ExecOptions{ApprovalMode: "danger-full-access"},
+		},
+		{
+			name: "unsafe typed Gemini approval mode",
+			cli:  "gemini",
+			opts: executor.ExecOptions{ApprovalMode: "yolo"},
+		},
+		{
+			name: "legacy Claude extra flags",
+			cli:  "claude",
+			opts: executor.ExecOptions{ExtraFlags: "--permission-mode=bypassPermissions"},
+		},
+		{
+			name: "legacy Codex extra flags",
+			cli:  "codex",
+			opts: executor.ExecOptions{ExtraFlags: "--sandbox danger-full-access"},
+		},
+		{
+			name: "legacy Gemini extra flags",
+			cli:  "gemini",
+			opts: executor.ExecOptions{ExtraFlags: "--approval-mode=yolo"},
+		},
+		{
+			name: "bundled Gemini yolo alias",
+			cli:  "gemini",
+			opts: executor.ExecOptions{ExtraFlags: "-dy"},
+		},
+		{
+			name: "legacy OpenCode extra flags",
+			cli:  "opencode",
+			opts: executor.ExecOptions{ExtraFlags: "--auto"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			binDir := t.TempDir()
+			started := filepath.Join(t.TempDir(), "started")
+			if tc.cli != "other" {
+				script := "#!/bin/sh\nprintf started > " + shellQuote(started) + "\nprintf ok\n"
+				if err := os.WriteFile(filepath.Join(binDir, tc.cli), []byte(script), 0o755); err != nil {
+					t.Fatalf("write fake CLI: %v", err)
+				}
+			}
+			t.Setenv("PATH", binDir)
+
+			if _, err := executor.New().ExecuteRaw(tc.cli, "prompt", tc.opts); err == nil {
+				t.Fatal("ExecuteRaw unexpectedly accepted an unsafe request")
+			}
+			if _, err := os.Stat(started); !os.IsNotExist(err) {
+				t.Fatalf("CLI subprocess was started before validation: stat error = %v", err)
+			}
+		})
+	}
+}
+
 func containsInOrder(args []string, first, second string) bool {
 	for i := 0; i+1 < len(args); i++ {
 		if args[i] == first && args[i+1] == second {
@@ -410,6 +594,26 @@ func TestValidateExtraFlags(t *testing.T) {
 			flags:   "--model claude-opus-4-6 --max-turns 5",
 			wantErr: false,
 		},
+		{
+			name:    "ambiguous short aliases remain compatible without a CLI",
+			flags:   "-s session-id -p password",
+			wantErr: false,
+		},
+		{
+			name:    "Codex sandbox long alias rejected without a CLI",
+			flags:   "--sandbox danger-full-access",
+			wantErr: true,
+		},
+		{
+			name:    "Gemini camel-case approval alias rejected without a CLI",
+			flags:   "--approvalMode=yolo",
+			wantErr: true,
+		},
+		{
+			name:    "OpenCode auto long alias rejected without a CLI",
+			flags:   "--auto",
+			wantErr: true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -420,6 +624,181 @@ func TestValidateExtraFlags(t *testing.T) {
 			}
 			if !tc.wantErr && err != nil {
 				t.Errorf("unexpected error for flags %q: %v", tc.flags, err)
+			}
+		})
+	}
+}
+
+func TestValidateExtraFlagsForCLIRejectsPolicyAliases(t *testing.T) {
+	tests := []struct {
+		name  string
+		cli   string
+		flags string
+	}{
+		{name: "Claude dangerous skip", cli: "claude", flags: "--dangerously-skip-permissions"},
+		{name: "Claude allow later bypass", cli: "claude", flags: "--allow-dangerously-skip-permissions"},
+		{name: "Claude permission mode", cli: "claude", flags: "--permission-mode default"},
+		{name: "Claude permission camel case", cli: "claude", flags: "--PeRmIsSiOn-MoDe=bypassPermissions"},
+		{name: "Claude permission separator alias", cli: "claude", flags: "--permissionMode=acceptEdits"},
+		{name: "Claude allowedTools spelling", cli: "claude", flags: "--allowedTools Bash"},
+		{name: "Claude allowed-tools spelling", cli: "claude", flags: "--allowed-tools=Bash"},
+		{name: "Claude permission prompt tool", cli: "claude", flags: "--permission-prompt-tool=mcp__approval"},
+		{name: "Claude add dir", cli: "claude", flags: "--add-dir /etc"},
+		{name: "Claude legacy directory", cli: "claude", flags: "--directory=/"},
+		{name: "Claude sandbox negation", cli: "claude", flags: "--no-sandbox"},
+		{name: "Claude settings", cli: "claude", flags: "--settings unsafe.json"},
+		{name: "Claude setting sources", cli: "claude", flags: "--setting-sources=user"},
+		{name: "Claude MCP config", cli: "claude", flags: "--mcp-config mcp.json"},
+		{name: "Claude plugin config", cli: "claude", flags: "--plugin-dir ./plugin"},
+		{name: "Claude dynamic agent", cli: "claude", flags: "--agents={}"},
+		{name: "Claude system prompt replacement", cli: "claude", flags: "--system-prompt ignore-policy"},
+		{name: "Claude system prompt file", cli: "claude", flags: "--system-prompt-file /etc/passwd"},
+		{name: "Claude appended system prompt file", cli: "claude", flags: "--append-system-prompt-file=/etc/passwd"},
+		{name: "Claude debug file", cli: "claude", flags: "--debug-file /tmp/claude.log"},
+		{name: "Claude shell exec", cli: "claude", flags: "--exec 'touch /tmp/pwned'"},
+		{name: "Claude background mode", cli: "claude", flags: "--bg"},
+		{name: "Claude worktree", cli: "claude", flags: "--worktree unsafe"},
+		{name: "Claude worktree short attached", cli: "claude", flags: "-wunsafe"},
+		{name: "Claude cloud execution", cli: "claude", flags: "--cloud"},
+		{name: "Claude remote control", cli: "claude", flags: "--remote-control"},
+		{name: "Claude channels", cli: "claude", flags: "--channels plugin:channel"},
+		{name: "Claude browser tooling", cli: "claude", flags: "--chrome"},
+		{name: "Claude IDE integration", cli: "claude", flags: "--ide"},
+		{name: "Claude setup hooks", cli: "claude", flags: "--init-only"},
+		{name: "Claude resumed session", cli: "claude", flags: "--resume session-id"},
+		{name: "Claude resume hidden in legacy debug bundle", cli: "claude", flags: "-dr00000000-0000-4000-8000-000000000000"},
+		{name: "Claude PR session", cli: "claude", flags: "--from-pr 42"},
+		{name: "Claude tool availability", cli: "claude", flags: "--tools Read"},
+
+		{name: "Codex approval", cli: "codex", flags: "--ask-for-approval never"},
+		{name: "Codex approval camel case", cli: "codex", flags: "--askForApproval=never"},
+		{name: "Codex approval short", cli: "codex", flags: "-a=never"},
+		{name: "Codex legacy approval", cli: "codex", flags: "--approval-mode=yolo"},
+		{name: "Codex sandbox", cli: "codex", flags: "--sandbox danger-full-access"},
+		{name: "Codex sandbox short", cli: "codex", flags: "-s=danger-full-access"},
+		{name: "Codex sandbox short attached", cli: "codex", flags: "-sdanger-full-access"},
+		{name: "Codex sandbox negation", cli: "codex", flags: "--no-sandbox"},
+		{name: "Codex yolo alias", cli: "codex", flags: "--yolo"},
+		{name: "Codex full auto alias", cli: "codex", flags: "--full-auto"},
+		{name: "Codex bypass alias", cli: "codex", flags: "--dangerously-bypass-approvals-and-sandbox"},
+		{name: "Codex hook trust bypass", cli: "codex", flags: "--dangerously-bypass-hook-trust"},
+		{name: "Codex cd", cli: "codex", flags: "--cd /etc"},
+		{name: "Codex uppercase C", cli: "codex", flags: "-C /etc"},
+		{name: "Codex uppercase C attached", cli: "codex", flags: "-C/etc"},
+		{name: "Codex config lowercase c", cli: "codex", flags: "-c sandbox_mode=danger-full-access"},
+		{name: "Codex config lowercase c attached", cli: "codex", flags: "-capproval_policy=never"},
+		{name: "Codex config", cli: "codex", flags: "--config=approval_policy=\"never\""},
+		{name: "Codex add dir", cli: "codex", flags: "--add-dir /etc"},
+		{name: "Codex image outside workdir", cli: "codex", flags: "--image /etc/passwd"},
+		{name: "Codex image short attached", cli: "codex", flags: "-i/etc/passwd"},
+		{name: "Codex output file", cli: "codex", flags: "--output-last-message /tmp/result"},
+		{name: "Codex output schema", cli: "codex", flags: "--output-schema=/etc/schema.json"},
+		{name: "Codex output short", cli: "codex", flags: "-o/tmp/result"},
+		{name: "Codex remote auth token env", cli: "codex", flags: "--remote-auth-token-env SECRET"},
+		{name: "Codex search permission", cli: "codex", flags: "--search"},
+		{name: "Codex profile", cli: "codex", flags: "--profile unsafe"},
+		{name: "Codex permission profile", cli: "codex", flags: "--permission-profile unsafe"},
+		{name: "Codex OSS provider", cli: "codex", flags: "--oss"},
+		{name: "Codex local provider", cli: "codex", flags: "--local-provider ollama"},
+		{name: "Codex repeated override", cli: "codex", flags: "--color never --sandbox read-only --SaNdBoX=danger-full-access"},
+
+		{name: "Gemini sandbox", cli: "gemini", flags: "--sandbox"},
+		{name: "Gemini sandbox short", cli: "gemini", flags: "-s"},
+		{name: "Gemini sandbox negation", cli: "gemini", flags: "--no-sandbox"},
+		{name: "Gemini approval", cli: "gemini", flags: "--approval-mode auto_edit"},
+		{name: "Gemini approval casing", cli: "gemini", flags: "--ApPrOvAl-MoDe=yolo"},
+		{name: "Gemini approval camel case", cli: "gemini", flags: "--approvalMode=yolo"},
+		{name: "Gemini approval snake case", cli: "gemini", flags: "--approval_mode=yolo"},
+		{name: "Gemini yolo", cli: "gemini", flags: "--yolo"},
+		{name: "Gemini yolo short", cli: "gemini", flags: "-y"},
+		{name: "Gemini yolo short bundle", cli: "gemini", flags: "-dy"},
+		{name: "Gemini sandbox and yolo short bundle", cli: "gemini", flags: "-dsy"},
+		{name: "Gemini skip trust", cli: "gemini", flags: "--skip-trust"},
+		{name: "Gemini allowed tools", cli: "gemini", flags: "--allowed-tools shell"},
+		{name: "Gemini policy", cli: "gemini", flags: "--policy allow-all.toml"},
+		{name: "Gemini admin policy", cli: "gemini", flags: "--admin-policy=allow-all.toml"},
+		{name: "Gemini extension", cli: "gemini", flags: "--extensions unsafe-extension"},
+		{name: "Gemini extension short", cli: "gemini", flags: "-e unsafe-extension"},
+		{name: "Gemini ACP mode", cli: "gemini", flags: "--experimental-acp"},
+		{name: "Gemini fake responses file", cli: "gemini", flags: "--fake-responses=/etc/responses.json"},
+		{name: "Gemini record responses file", cli: "gemini", flags: "--recordResponses=/etc/responses.json"},
+		{name: "Gemini session file", cli: "gemini", flags: "--session-file=/etc/session.json"},
+		{name: "Gemini resumed session", cli: "gemini", flags: "-r5"},
+		{name: "Gemini include directories", cli: "gemini", flags: "--include-directories=/etc"},
+		{name: "Gemini include directories camel case", cli: "gemini", flags: "--includeDirectories=/etc"},
+		{name: "Gemini no sandbox camel case", cli: "gemini", flags: "--noSandbox"},
+		{name: "Gemini worktree", cli: "gemini", flags: "-w unsafe"},
+		{name: "Gemini worktree short attached", cli: "gemini", flags: "-wunsafe"},
+
+		{name: "OpenCode auto", cli: "opencode", flags: "--auto"},
+		{name: "OpenCode agent", cli: "opencode", flags: "--agent build"},
+		{name: "OpenCode directory", cli: "opencode", flags: "--dir=/etc"},
+		{name: "OpenCode attach", cli: "opencode", flags: "--attach http://localhost:4096"},
+		{name: "OpenCode file", cli: "opencode", flags: "--file /etc/passwd"},
+		{name: "OpenCode file short", cli: "opencode", flags: "-f=/etc/passwd"},
+		{name: "OpenCode file short attached", cli: "opencode", flags: "-f/etc/passwd"},
+		{name: "OpenCode bundled file alias", cli: "opencode", flags: "-if/etc/passwd"},
+		{name: "OpenCode command config", cli: "opencode", flags: "--command unsafe"},
+		{name: "OpenCode future permission alias", cli: "opencode", flags: "--permission=allow"},
+		{name: "OpenCode external share", cli: "opencode", flags: "--share"},
+		{name: "OpenCode sandbox negation", cli: "opencode", flags: "--no-sandbox"},
+		{name: "OpenCode resumed session", cli: "opencode", flags: "-sSESSION"},
+		{name: "OpenCode continued session", cli: "opencode", flags: "--continue"},
+		{name: "OpenCode interactive mode", cli: "opencode", flags: "-i"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := executor.ValidateExtraFlagsForCLI(tc.cli, tc.flags); err == nil {
+				t.Fatalf("ValidateExtraFlagsForCLI(%q, %q) unexpectedly succeeded", tc.cli, tc.flags)
+			}
+		})
+	}
+}
+
+func TestValidateExtraFlagsForCLIAllowsSafeFlagsInOrder(t *testing.T) {
+	tests := []struct {
+		cli   string
+		flags string
+	}{
+		{cli: "claude", flags: "--model opus --max-turns 5 --output-format json --verbose --disallowed-tools Bash --strict-mcp-config"},
+		{cli: "codex", flags: "-mgpt-5 --json --color never --ephemeral"},
+		{cli: "gemini", flags: "-mpro --output-format json -d --screen-reader"},
+		{cli: "opencode", flags: "-mopenai/gpt-5 --format json --thinking --variant high --pure"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.cli, func(t *testing.T) {
+			if err := executor.ValidateExtraFlagsForCLI(tc.cli, tc.flags); err != nil {
+				t.Fatalf("ValidateExtraFlagsForCLI(%q, %q): %v", tc.cli, tc.flags, err)
+			}
+		})
+	}
+}
+
+func TestValidateExtraFlagsForCLIFailsClosed(t *testing.T) {
+	tests := []struct {
+		name  string
+		cli   string
+		flags string
+	}{
+		{name: "Claude future flag", cli: "claude", flags: "--future-auto-approve"},
+		{name: "Codex future flag", cli: "codex", flags: "--future-config /tmp/config"},
+		{name: "Gemini future short alias", cli: "gemini", flags: "-z"},
+		{name: "OpenCode future flag", cli: "opencode", flags: "--future-attach"},
+		{name: "Claude bare can omit project policy", cli: "claude", flags: "--bare"},
+		{name: "Claude restrictive bool disabled inline", cli: "claude", flags: "--no-session-persistence=false"},
+		{name: "Codex restrictive bool disabled inline", cli: "codex", flags: "--ephemeral=false"},
+		{name: "Gemini bool uses inline value", cli: "gemini", flags: "--debug=false"},
+		{name: "Codex positional subcommand", cli: "codex", flags: "--json resume deadbeef"},
+		{name: "bare positional argument", cli: "gemini", flags: "resume"},
+		{name: "missing required value", cli: "codex", flags: "--color"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := executor.ValidateExtraFlagsForCLI(tc.cli, tc.flags); err == nil {
+				t.Fatalf("ValidateExtraFlagsForCLI(%q, %q) unexpectedly succeeded", tc.cli, tc.flags)
 			}
 		})
 	}

@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -61,12 +62,13 @@ func TestApplyStore_AgentConfigs_MergesOverTOML(t *testing.T) {
 	}
 }
 
-func TestApplyStore_AgentConfigs_FalseBoolOverridesTOMLTrue(t *testing.T) {
+func TestApplyStore_AgentConfigs_SafeFalseBoolsOverrideTOMLTrue(t *testing.T) {
 	// Regression for the omitempty foot-gun the bot review flagged on #432:
 	// an operator who flips bare=false in the UI must override a TOML
 	// bare=true. With omitempty on the bool tag, a direct Marshal of
-	// CLIAgentConfig would drop the false and ApplyStore's merge-into-
-	// existing-struct path would preserve the TOML true.
+	// CLIAgentConfig would drop the false and ApplyStore's merge-into-existing
+	// path would preserve the TOML true. dangerously_skip_perms is different:
+	// it is filesystem-trusted and a legacy HTTP/store row must not alter it.
 	cfg := &Config{}
 	cfg.applyDefaults()
 	cfg.AI.Agents = map[string]CLIAgentConfig{
@@ -83,11 +85,33 @@ func TestApplyStore_AgentConfigs_FalseBoolOverridesTOMLTrue(t *testing.T) {
 	if got.Bare {
 		t.Errorf("Bare: stored false did not override TOML true")
 	}
-	if got.DangerouslySkipPerms {
-		t.Errorf("DangerouslySkipPerms: stored false did not override TOML true")
+	if !got.DangerouslySkipPerms {
+		t.Errorf("DangerouslySkipPerms: legacy store row overrode trusted TOML true")
 	}
 	if got.NoSessionPersistence {
 		t.Errorf("NoSessionPersistence: stored false did not override TOML true")
+	}
+}
+
+func TestApplyStore_AgentConfigs_CannotEnableDangerouslySkipPerms(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+	cfg.AI.Agents = map[string]CLIAgentConfig{
+		"claude": {DangerouslySkipPerms: false},
+	}
+
+	rows := map[string]string{
+		"agent_configs": `{"claude":{"DANGEROUSLY_SKIP_PERMS":true,"model":"safe-model"}}`,
+	}
+	if err := cfg.ApplyStore(rows); err != nil {
+		t.Fatalf("ApplyStore: %v", err)
+	}
+	got := cfg.AI.Agents["claude"]
+	if got.DangerouslySkipPerms {
+		t.Errorf("DangerouslySkipPerms enabled by legacy store row")
+	}
+	if got.Model != "safe-model" {
+		t.Errorf("safe sibling field was not applied: %v", got)
 	}
 }
 
@@ -364,13 +388,47 @@ func TestMergeStoreLayer_FailsValidationOnBadMergedCfg(t *testing.T) {
 	cfg := &Config{}
 	cfg.applyDefaults()
 	cfg.AI.Primary = "claude"
+	originalPollInterval := cfg.GitHub.PollInterval
+	cfg.GitHub.IssueTracking.Assignees = []string{"original"}
 
 	store := &fakeStoreLister{rows: map[string]string{
-		"poll_interval": "48h", // parseable string, but above the 24h ceiling
+		"poll_interval":  "48h", // parseable string, but above the 24h ceiling
+		"issue_tracking": `{"assignees":["mutated"]}`,
 	}}
 
 	if err := cfg.MergeStoreLayer(store); err == nil {
 		t.Fatal("MergeStoreLayer with invalid merged cfg: expected error, got nil")
+	}
+	if cfg.GitHub.PollInterval != originalPollInterval {
+		t.Fatalf("PollInterval mutated to %q after failed validation; want %q",
+			cfg.GitHub.PollInterval, originalPollInterval)
+	}
+	if got := cfg.GitHub.IssueTracking.Assignees; len(got) != 1 || got[0] != "original" {
+		t.Fatalf("nested issue-tracking slice mutated after failed validation: %v", got)
+	}
+}
+
+func TestMergeStoreLayer_RejectsLegacyUnsafeAgentFlags(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+	cfg.AI.Primary = "codex"
+	cfg.AI.Agents = map[string]CLIAgentConfig{
+		"codex": {ExtraFlags: "--json"},
+	}
+
+	store := &fakeStoreLister{rows: map[string]string{
+		"agent_configs": `{"codex":{"extra_flags":"--sandbox danger-full-access"}}`,
+	}}
+
+	err := cfg.MergeStoreLayer(store)
+	if err == nil {
+		t.Fatal("expected legacy unsafe extra_flags to fail store-layer validation")
+	}
+	if !strings.Contains(err.Error(), "extra_flags") || !strings.Contains(err.Error(), "--sandbox") {
+		t.Fatalf("error is not actionable: %v", err)
+	}
+	if got := cfg.AI.Agents["codex"].ExtraFlags; got != "--json" {
+		t.Fatalf("unsafe store row mutated ExtraFlags to %q after failed validation", got)
 	}
 }
 
@@ -405,6 +463,26 @@ func TestApplyStore_PartialFailure_LeavesCfgUnchanged(t *testing.T) {
 	}
 	if len(cfg.GitHub.Repositories) != 1 || cfg.GitHub.Repositories[0] != "original/repo" {
 		t.Errorf("Repositories = %v, want [original/repo]", cfg.GitHub.Repositories)
+	}
+}
+
+func TestApplyStore_PartialIssueTrackingDecodeLeavesNestedSlicesUnchanged(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+	cfg.AI.Primary = "claude"
+	// Spare capacity makes encoding/json reuse the backing array while
+	// decoding, which exposes shallow-copy rollback bugs deterministically.
+	cfg.GitHub.IssueTracking.Assignees = make([]string, 1, 4)
+	cfg.GitHub.IssueTracking.Assignees[0] = "original"
+
+	err := cfg.ApplyStore(map[string]string{
+		"issue_tracking": `{"assignees":["mutated"],"enabled":"not-a-bool"}`,
+	})
+	if err == nil {
+		t.Fatal("expected malformed issue_tracking row to fail")
+	}
+	if got := cfg.GitHub.IssueTracking.Assignees; len(got) != 1 || got[0] != "original" {
+		t.Fatalf("nested issue-tracking slice mutated after failed decode: %v", got)
 	}
 }
 

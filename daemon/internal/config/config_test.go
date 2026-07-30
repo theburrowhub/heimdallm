@@ -2877,3 +2877,84 @@ func TestNeverApproveMinSeverity_Validate(t *testing.T) {
 		t.Errorf("invalid repo value accepted")
 	}
 }
+
+func TestValidateAgentExecutionPolicy(t *testing.T) {
+	base := func() *Config {
+		c := &Config{}
+		c.applyDefaults()
+		c.AI.Primary = "claude"
+		c.GitHub.PollInterval = "1m"
+		return c
+	}
+
+	tests := []struct {
+		name    string
+		agents  map[string]CLIAgentConfig
+		wantErr bool
+	}{
+		{
+			name: "safe provider flags and typed modes",
+			agents: map[string]CLIAgentConfig{
+				"claude": {ExtraFlags: "--model opus --max-turns 5", PermissionMode: "acceptEdits"},
+				"codex":  {ExtraFlags: "--json --color never", ApprovalMode: "on-request"},
+				"gemini": {ExtraFlags: "--output-format json", ApprovalMode: "auto_edit"},
+			},
+		},
+		{
+			name: "legacy Codex sandbox override",
+			agents: map[string]CLIAgentConfig{
+				"codex": {ExtraFlags: "--sandbox danger-full-access"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "legacy Gemini approval override",
+			agents: map[string]CLIAgentConfig{
+				"gemini": {ExtraFlags: "--approval-mode=yolo"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "unsafe typed Gemini approval",
+			agents: map[string]CLIAgentConfig{
+				"gemini": {ApprovalMode: "yolo"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "option-shaped typed model",
+			agents: map[string]CLIAgentConfig{
+				"claude": {Model: "--dangerously-skip-permissions"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid typed effort",
+			agents: map[string]CLIAgentConfig{
+				"claude": {Effort: "--dangerously-skip-permissions"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "unknown CLI config",
+			agents: map[string]CLIAgentConfig{
+				"other": {},
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := base()
+			c.AI.Agents = tc.agents
+			err := c.Validate()
+			if tc.wantErr && err == nil {
+				t.Fatal("expected agent execution policy error")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected agent execution policy error: %v", err)
+			}
+		})
+	}
+}

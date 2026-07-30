@@ -456,7 +456,7 @@ func main() {
 		cfgMu.Unlock()
 		extraFlags := agentCfg.ExtraFlags
 		if extraFlags != "" {
-			if err := executor.ValidateExtraFlags(extraFlags); err != nil {
+			if err := executor.ValidateExtraFlagsForCLI(cli, extraFlags); err != nil {
 				slog.Warn("buildRunOpts: extra_flags from config rejected", "err", err)
 				extraFlags = ""
 			}
@@ -1263,7 +1263,7 @@ func main() {
 
 		extraFlags := agentCfg.ExtraFlags
 		if extraFlags != "" {
-			if err := executor.ValidateExtraFlags(extraFlags); err != nil {
+			if err := executor.ValidateExtraFlagsForCLI(aiCfg.Primary, extraFlags); err != nil {
 				slog.Warn("triage-worker: extra_flags rejected", "err", err)
 				extraFlags = ""
 			}
@@ -1459,7 +1459,7 @@ func main() {
 
 		extraFlags := agentCfg.ExtraFlags
 		if extraFlags != "" {
-			if err := executor.ValidateExtraFlags(extraFlags); err != nil {
+			if err := executor.ValidateExtraFlagsForCLI(aiCfg.Primary, extraFlags); err != nil {
 				slog.Warn("implement-worker: extra_flags rejected", "err", err)
 				extraFlags = ""
 			}
@@ -3816,7 +3816,7 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 
 		extraFlags := agentCfg.ExtraFlags
 		if extraFlags != "" {
-			if err := executor.ValidateExtraFlags(extraFlags); err != nil {
+			if err := executor.ValidateExtraFlagsForCLI(aiCfg.Primary, extraFlags); err != nil {
 				slog.Warn("issue poll: extra_flags rejected", "err", err)
 				extraFlags = ""
 			}
@@ -4501,7 +4501,7 @@ func buildRefinementRunOptions(
 
 	extraFlags := agentCfg.ExtraFlags
 	if extraFlags != "" {
-		if err := executor.ValidateExtraFlags(extraFlags); err != nil {
+		if err := executor.ValidateExtraFlagsForCLI(aiCfg.Primary, extraFlags); err != nil {
 			slog.Warn(scope+": extra_flags rejected", "err", err)
 			extraFlags = ""
 		}

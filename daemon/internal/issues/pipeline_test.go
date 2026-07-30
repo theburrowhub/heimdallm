@@ -1008,6 +1008,61 @@ func TestPipeline_AutoImplementDefaultsCodexApprovalMode(t *testing.T) {
 	}
 }
 
+func TestPipeline_AutoImplementDefaultsGeminiApprovalMode(t *testing.T) {
+	s := &fakeStore{}
+	gh := &fakeGH{defaultBranch: "main"}
+	exec := &fakeExec{detectCLI: "gemini", rawOutput: []byte("ok")}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(s, gh, exec, git, &fakeBroker{}, nil)
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), autoImplementRunOptions()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if exec.lastOpts.ApprovalMode != "auto_edit" {
+		t.Errorf("ApprovalMode = %q, want auto_edit (safe default for gemini auto_implement)", exec.lastOpts.ApprovalMode)
+	}
+}
+
+func TestPipeline_AutoImplementFallbackDropsPrimaryProviderOptions(t *testing.T) {
+	s := &fakeStore{}
+	gh := &fakeGH{defaultBranch: "main"}
+	exec := &fakeExec{detectCLI: "gemini", rawOutput: []byte("ok")}
+	git := &fakeGit{hasChanges: true}
+	p := issues.New(s, gh, exec, git, &fakeBroker{}, nil)
+
+	opts := autoImplementRunOptions()
+	opts.Primary = "codex"
+	opts.Fallback = "gemini"
+	opts.ExecOpts.Model = "codex-only-model"
+	opts.ExecOpts.MaxTurns = 9
+	opts.ExecOpts.ApprovalMode = "never"
+	opts.ExecOpts.ExtraFlags = "--json"
+	opts.ExecOpts.Effort = "high"
+	opts.ExecOpts.PermissionMode = "acceptEdits"
+	opts.ExecOpts.Bare = true
+	opts.ExecOpts.DangerouslySkipPerms = true
+	opts.ExecOpts.NoSessionPersistence = true
+	opts.ExecOpts.Timeout = 17 * time.Minute
+
+	if _, err := p.Run(context.Background(), newIssue(config.IssueModeDevelop), opts); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if exec.lastCLI != "gemini" {
+		t.Fatalf("CLI = %q, want gemini fallback", exec.lastCLI)
+	}
+	if exec.lastOpts.Model != "" || exec.lastOpts.MaxTurns != 0 || exec.lastOpts.ExtraFlags != "" ||
+		exec.lastOpts.Effort != "" || exec.lastOpts.PermissionMode != "" || exec.lastOpts.Bare ||
+		exec.lastOpts.DangerouslySkipPerms || exec.lastOpts.NoSessionPersistence {
+		t.Fatalf("primary provider options leaked to fallback: %+v", exec.lastOpts)
+	}
+	if exec.lastOpts.ApprovalMode != "auto_edit" {
+		t.Fatalf("ApprovalMode = %q, want fallback-specific Gemini write default", exec.lastOpts.ApprovalMode)
+	}
+	if exec.lastOpts.WorkDir != "/tmp/repo" || exec.lastOpts.Timeout != 17*time.Minute {
+		t.Fatalf("provider-independent options were not preserved: %+v", exec.lastOpts)
+	}
+}
+
 func TestPipeline_AutoImplementNoChangesRecordsTerminalNoChanges(t *testing.T) {
 	// Agent escape hatch fired; the working tree is untouched. The pipeline
 	// must degrade to a review_only-style comment rather than open an empty PR.

@@ -299,18 +299,6 @@ func (srv *Server) writeTOMLUnderLock(mutateFn func(m map[string]any) error) (ma
 	if err := mutateFn(m); err != nil {
 		return nil, err
 	}
-	// Defense-in-depth (security gate M-5): every PATCH path that
-	// touches ai.agents.* must drop dangerously_skip_perms before the
-	// merged map is validated and persisted. PUT rejects the key with
-	// a 400 via normalizeAgentConfigsForPut, but PATCH deep-merges
-	// arbitrary JSON, so the gate has to be enforced here regardless
-	// of which handler invoked patchTOML. Audit-log non-zero strips so
-	// operators can detect bypass attempts even though they're now
-	// neutralized.
-	if stripped := stripDangerousAgentFlags(m); stripped > 0 {
-		slog.Warn("config: PATCH attempted to set dangerously_skip_perms; stripped (M-5 gate)",
-			"count", stripped)
-	}
 	if err := config.ValidateMap(m); err != nil {
 		return nil, err
 	}
@@ -855,6 +843,11 @@ func (srv *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
 		return
 	}
+	if err := validateCanonicalConfigPatchKeys(patch); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	stripHTTPDangerousAgentFlags(patch)
 	if err := config.ContainsNull(patch); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": "null values not allowed in PATCH — use DELETE to remove fields",
@@ -908,6 +901,10 @@ func (srv *Server) handlePatchRepoConfig(w http.ResponseWriter, r *http.Request)
 		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
 		return
 	}
+	if err := validateCanonicalScopedAgentPatchKeys(patch, "ai.repos"); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	if err := config.ContainsNull(patch); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": "null values not allowed in PATCH — use DELETE to remove fields",
@@ -923,6 +920,7 @@ func (srv *Server) handlePatchRepoConfig(w http.ResponseWriter, r *http.Request)
 			},
 		},
 	}
+	stripHTTPDangerousAgentFlags(globalPatch)
 
 	result, err := srv.patchTOML(func(m map[string]any) error {
 		merged := config.DeepMerge(m, globalPatch)
@@ -969,6 +967,10 @@ func (srv *Server) handlePatchOrgConfig(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
 		return
 	}
+	if err := validateCanonicalScopedAgentPatchKeys(patch, "ai.orgs"); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	if err := config.ContainsNull(patch); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": "null values not allowed in PATCH — use DELETE to remove fields",
@@ -984,6 +986,7 @@ func (srv *Server) handlePatchOrgConfig(w http.ResponseWriter, r *http.Request) 
 			},
 		},
 	}
+	stripHTTPDangerousAgentFlags(globalPatch)
 
 	result, err := srv.patchTOML(func(m map[string]any) error {
 		merged := config.DeepMerge(m, globalPatch)
@@ -1045,6 +1048,10 @@ func (srv *Server) patchAutonomousSubKey(w http.ResponseWriter, r *http.Request,
 	var patch map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	if err := rejectAutonomousAgentPatch(patch, "autonomous."+subKey+"."+id); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	if err := config.ContainsNull(patch); err != nil {
@@ -1373,7 +1380,11 @@ func (srv *Server) handleUpsertAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	// Validate CLIFlags to reject dangerous flags before persisting.
 	if a.CLIFlags != "" {
-		if err := executor.ValidateExtraFlags(a.CLIFlags); err != nil {
+		if a.CLI == "" {
+			http.Error(w, "cli is required when cli_flags is set", http.StatusBadRequest)
+			return
+		}
+		if err := executor.ValidateExtraFlagsForCLI(a.CLI, a.CLIFlags); err != nil {
 			http.Error(w, fmt.Sprintf("invalid cli_flags: %v", err), http.StatusBadRequest)
 			return
 		}
@@ -2132,6 +2143,227 @@ func tailLines(f *os.File, n int) []string {
 // this constant so the M-5 denylist has a single source of truth.
 const dangerousAgentFlagKey = "dangerously_skip_perms"
 
+var canonicalAgentConfigKeys = []string{
+	"model",
+	"max_turns",
+	"approval_mode",
+	"extra_flags",
+	"prompt",
+	"effort",
+	"permission_mode",
+	"bare",
+	"no_session_persistence",
+	"execution_timeout",
+}
+
+// canonicalMapChild returns a map stored at canonicalKey and rejects aliases
+// that differ only by case. JSON object keys are case-sensitive, while the
+// downstream config decoder is not; accepting both spellings would let an
+// HTTP PATCH bypass validation performed against the canonical tree.
+func canonicalMapChild(m map[string]any, canonicalKey, path string) (map[string]any, bool, error) {
+	var raw any
+	found := false
+	for key, value := range m {
+		if !strings.EqualFold(key, canonicalKey) {
+			continue
+		}
+		if key != canonicalKey {
+			return nil, false, fmt.Errorf(
+				"config PATCH key %q must use canonical casing %q",
+				path+"."+key, path+"."+canonicalKey,
+			)
+		}
+		raw = value
+		found = true
+	}
+	if !found {
+		return nil, false, nil
+	}
+	child, ok := raw.(map[string]any)
+	if !ok {
+		return nil, false, fmt.Errorf("config PATCH key %q must be an object", path+"."+canonicalKey)
+	}
+	return child, true, nil
+}
+
+func validateCanonicalAgentConfigKeys(cli string, agent map[string]any, path string) error {
+	for key, value := range agent {
+		// Keep the existing case-insensitive scrub semantics for
+		// dangerously_skip_perms: every spelling is removed and audit-logged
+		// later by stripDangerousAgentFlags.
+		if strings.EqualFold(key, dangerousAgentFlagKey) {
+			continue
+		}
+		for _, canonical := range canonicalAgentConfigKeys {
+			if strings.EqualFold(key, canonical) && key != canonical {
+				return fmt.Errorf(
+					"config PATCH key %q must use canonical casing %q",
+					path+"."+key, path+"."+canonical,
+				)
+			}
+		}
+		switch key {
+		case "model":
+			model, ok := value.(string)
+			if !ok {
+				return fmt.Errorf("config PATCH key %q must be a string", path+"."+key)
+			}
+			if err := executor.ValidateModel(model); err != nil {
+				return fmt.Errorf("config PATCH key %q: %w", path+"."+key, err)
+			}
+		case "effort":
+			effort, ok := value.(string)
+			if !ok {
+				return fmt.Errorf("config PATCH key %q must be a string", path+"."+key)
+			}
+			if err := executor.ValidateEffort(effort); err != nil {
+				return fmt.Errorf("config PATCH key %q: %w", path+"."+key, err)
+			}
+		case "extra_flags":
+			flags, ok := value.(string)
+			if !ok {
+				return fmt.Errorf("config PATCH key %q must be a string", path+"."+key)
+			}
+			if err := executor.ValidateExtraFlagsForCLI(cli, flags); err != nil {
+				return fmt.Errorf("config PATCH key %q: %w", path+"."+key, err)
+			}
+		case "permission_mode":
+			mode, ok := value.(string)
+			if !ok {
+				return fmt.Errorf("config PATCH key %q must be a string", path+"."+key)
+			}
+			if err := executor.ValidatePermissionMode(mode); err != nil {
+				return fmt.Errorf("config PATCH key %q: %w", path+"."+key, err)
+			}
+		case "approval_mode":
+			mode, ok := value.(string)
+			if !ok {
+				return fmt.Errorf("config PATCH key %q must be a string", path+"."+key)
+			}
+			if err := executor.ValidateApprovalModeForCLI(cli, mode); err != nil {
+				return fmt.Errorf("config PATCH key %q: %w", path+"."+key, err)
+			}
+		}
+	}
+	return nil
+}
+
+func validateCanonicalAgentCollection(agents map[string]any, path string) error {
+	for cli, raw := range agents {
+		for _, canonical := range []string{"claude", "gemini", "codex", "opencode"} {
+			if strings.EqualFold(cli, canonical) && cli != canonical {
+				return fmt.Errorf(
+					"config PATCH key %q must use canonical casing %q",
+					path+"."+cli, path+"."+canonical,
+				)
+			}
+		}
+		if err := executor.ValidateCLIName(cli); err != nil {
+			return fmt.Errorf("config PATCH key %q: %w", path+"."+cli, err)
+		}
+		agent, ok := raw.(map[string]any)
+		if !ok {
+			return fmt.Errorf("config PATCH key %q must be an object", path+"."+cli)
+		}
+		if err := validateCanonicalAgentConfigKeys(cli, agent, path+"."+cli); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateCanonicalScopedAgentPatchKeys(patch map[string]any, path string) error {
+	agents, ok, err := canonicalMapChild(patch, "agents", path)
+	if err != nil || !ok {
+		return err
+	}
+	return validateCanonicalAgentCollection(agents, path+".agents")
+}
+
+// validateCanonicalConfigPatchKeys rejects case-variant structural aliases
+// before DeepMerge. This makes the HTTP policy operate on exactly the same
+// tree that is persisted and decoded, including global, repo and org agents.
+func validateCanonicalConfigPatchKeys(patch map[string]any) error {
+	ai, ok, err := canonicalMapChild(patch, "ai", "config")
+	if err != nil {
+		return err
+	}
+	if ok {
+		if err := validateCanonicalScopedAgentPatchKeys(ai, "ai"); err != nil {
+			return err
+		}
+		for _, scope := range []string{"repos", "orgs"} {
+			overrides, present, childErr := canonicalMapChild(ai, scope, "ai")
+			if childErr != nil {
+				return childErr
+			}
+			if !present {
+				continue
+			}
+			for id, raw := range overrides {
+				override, mapOK := raw.(map[string]any)
+				if !mapOK {
+					continue
+				}
+				if err := validateCanonicalScopedAgentPatchKeys(override, "ai."+scope+"."+id); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return validateCanonicalAutonomousPatchKeys(patch)
+}
+
+func validateCanonicalAutonomousPatchKeys(patch map[string]any) error {
+	autonomous, present, err := canonicalMapChild(patch, "autonomous", "config")
+	if err != nil || !present {
+		return err
+	}
+	if err := rejectAutonomousAgentPatch(autonomous, "autonomous"); err != nil {
+		return err
+	}
+	for _, scope := range []string{"repos", "orgs"} {
+		overrides, scoped, childErr := canonicalMapChild(autonomous, scope, "autonomous")
+		if childErr != nil {
+			return childErr
+		}
+		if !scoped {
+			continue
+		}
+		for id, raw := range overrides {
+			override, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if err := rejectAutonomousAgentPatch(override, "autonomous."+scope+"."+id); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func rejectAutonomousAgentPatch(patch map[string]any, path string) error {
+	agents, present, err := canonicalMapChild(patch, "agents", path)
+	if err != nil || !present {
+		return err
+	}
+	if err := validateCanonicalAgentCollection(agents, path+".agents"); err != nil {
+		return err
+	}
+	return fmt.Errorf(
+		"config PATCH key %q is not supported; configure execution options under ai.agents",
+		path+".agents",
+	)
+}
+
+func stripHTTPDangerousAgentFlags(patch map[string]any) {
+	if stripped := stripDangerousAgentFlags(patch); stripped > 0 {
+		slog.Warn("config: PATCH attempted to set dangerously_skip_perms; stripped (M-5 gate)",
+			"count", stripped)
+	}
+}
+
 // stripDangerousAgentFlags removes the HTTP-forbidden
 // dangerously_skip_perms flag from every agent map reachable in the
 // merged config: top-level ai.agents.<cli>, per-repo
@@ -2147,9 +2379,9 @@ const dangerousAgentFlagKey = "dangerously_skip_perms"
 // match would leave Dangerously_Skip_Perms / DANGEROUSLY_SKIP_PERMS
 // shaped payloads as a live bypass.
 //
-// Invoked from patchTOML so every PATCH endpoint (global, per-repo,
-// per-org) inherits the gate without each handler having to remember
-// to call it.
+// Invoked on the canonicalized HTTP payload before DeepMerge. Scrubbing the
+// merged config would also erase a trusted value set directly in config.toml
+// whenever an unrelated PATCH is applied.
 func stripDangerousAgentFlags(m map[string]any) int {
 	if m == nil {
 		return 0
@@ -2242,8 +2474,18 @@ func normalizeAgentConfigsForPut(v any) (map[string]map[string]any, error) {
 				if !isStr {
 					return nil, fmt.Errorf("agent_configs[%q].%s must be a string", cli, k)
 				}
+				if k == "model" {
+					if err := executor.ValidateModel(s); err != nil {
+						return nil, fmt.Errorf("agent_configs[%q].model: %v", cli, err)
+					}
+				}
+				if k == "effort" {
+					if err := executor.ValidateEffort(s); err != nil {
+						return nil, fmt.Errorf("agent_configs[%q].effort: %v", cli, err)
+					}
+				}
 				if k == "extra_flags" && s != "" {
-					if err := executor.ValidateExtraFlags(s); err != nil {
+					if err := executor.ValidateExtraFlagsForCLI(cli, s); err != nil {
 						return nil, fmt.Errorf("agent_configs[%q].extra_flags: %v", cli, err)
 					}
 				}
@@ -2267,7 +2509,7 @@ func normalizeAgentConfigsForPut(v any) (map[string]map[string]any, error) {
 				if !isStr {
 					return nil, fmt.Errorf("agent_configs[%q].approval_mode must be a string", cli)
 				}
-				if err := executor.ValidateApprovalMode(s); err != nil {
+				if err := executor.ValidateApprovalModeForCLI(cli, s); err != nil {
 					return nil, fmt.Errorf("agent_configs[%q].approval_mode: %v", cli, err)
 				}
 				normalized[k] = s

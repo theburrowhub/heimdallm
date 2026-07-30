@@ -79,7 +79,8 @@ func (p *Pipeline) runRefinement(ctx context.Context, issue *github.Issue, issue
 		p.publishError(issueID, issue, fmt.Errorf("detect CLI: %w", err))
 		return nil, fmt.Errorf("issues pipeline: detect CLI: %w", err)
 	}
-	raw, err := p.executor.ExecuteRaw(cli, prompt, opts.ExecOpts)
+	execOpts := executor.OptionsForSelectedCLI(opts.Primary, cli, opts.ExecOpts)
+	raw, err := p.executor.ExecuteRaw(cli, prompt, execOpts)
 	if err != nil {
 		p.publishError(issueID, issue, fmt.Errorf("execute %s: %w", cli, err))
 		return nil, fmt.Errorf("issues pipeline: execute %s: %w", cli, err)

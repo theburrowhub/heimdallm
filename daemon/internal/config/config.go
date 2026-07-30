@@ -377,7 +377,7 @@ func labelSetIntersects(set map[string]struct{}, list []string) bool {
 type CLIAgentConfig struct {
 	Model        string `toml:"model" json:"model,omitempty"`                 // e.g. "claude-opus-4-6"
 	MaxTurns     int    `toml:"max_turns" json:"max_turns,omitempty"`         // claude: --max-turns (0 = not set)
-	ApprovalMode string `toml:"approval_mode" json:"approval_mode,omitempty"` // codex: --ask-for-approval
+	ApprovalMode string `toml:"approval_mode" json:"approval_mode,omitempty"` // codex/gemini typed approval mode
 	ExtraFlags   string `toml:"extra_flags" json:"extra_flags,omitempty"`     // free-form additional CLI flags
 	PromptID     string `toml:"prompt" json:"prompt,omitempty"`               // agent-level prompt override
 
@@ -1286,13 +1286,24 @@ func (c *Config) Validate() error {
 	if err := ValidatePollInterval(c.GitHub.PollInterval); err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
-	// Validate per-CLI agent configs: permission_mode and approval_mode must be in their allowlists.
+	// Validate every persisted execution option before it reaches Executor.
+	// This catches legacy TOML/store rows during reload; ExecuteRaw repeats the
+	// same checks at the subprocess boundary as defense in depth.
 	for name, a := range c.AI.Agents {
+		if err := executor.ValidateModel(a.Model); err != nil {
+			return fmt.Errorf("config: agents[%s].model: %w", name, err)
+		}
+		if err := executor.ValidateEffort(a.Effort); err != nil {
+			return fmt.Errorf("config: agents[%s].effort: %w", name, err)
+		}
 		if err := executor.ValidatePermissionMode(a.PermissionMode); err != nil {
 			return fmt.Errorf("config: agents[%s].permission_mode: %w", name, err)
 		}
-		if err := executor.ValidateApprovalMode(a.ApprovalMode); err != nil {
+		if err := executor.ValidateApprovalModeForCLI(name, a.ApprovalMode); err != nil {
 			return fmt.Errorf("config: agents[%s].approval_mode: %w", name, err)
+		}
+		if err := executor.ValidateExtraFlagsForCLI(name, a.ExtraFlags); err != nil {
+			return fmt.Errorf("config: agents[%s].extra_flags: %w", name, err)
 		}
 	}
 	if err := c.validateRefinementTimeouts(); err != nil {

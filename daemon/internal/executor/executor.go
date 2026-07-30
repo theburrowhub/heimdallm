@@ -38,7 +38,7 @@ type ExecOptions struct {
 	Model string
 	// MaxTurns sets --max-turns <n> for Claude (0 = not set).
 	MaxTurns int
-	// ApprovalMode sets Codex --ask-for-approval <value>.
+	// ApprovalMode sets the typed Codex/Gemini approval option.
 	// Legacy values from older Codex CLIs are still accepted and normalized.
 	ApprovalMode string
 	// ExtraFlags is a free-form string of additional CLI flags (split on spaces).
@@ -62,6 +62,29 @@ type ExecOptions struct {
 	// Timeout overrides the default execution timeout for the CLI process.
 	// Zero = use default (5 minutes).
 	Timeout time.Duration
+}
+
+// OptionsForSelectedCLI removes provider-specific options when Detect falls
+// back to a different CLI. The options were resolved from the configured
+// primary agent, so forwarding its model, approval mode or free-form flags to
+// another provider is both unreliable and unsafe. WorkDir and Timeout are
+// provider-independent and remain in force.
+func OptionsForSelectedCLI(primary, selected string, opts ExecOptions) ExecOptions {
+	primary = strings.TrimSpace(primary)
+	selected = strings.TrimSpace(selected)
+	if primary == "" || selected == "" || primary == selected {
+		return opts
+	}
+	opts.Model = ""
+	opts.MaxTurns = 0
+	opts.ApprovalMode = ""
+	opts.ExtraFlags = ""
+	opts.Effort = ""
+	opts.PermissionMode = ""
+	opts.Bare = false
+	opts.DangerouslySkipPerms = false
+	opts.NoSessionPersistence = false
+	return opts
 }
 
 // Executor runs AI CLI tools for code review.
@@ -114,6 +137,39 @@ var allowedPermissionModes = map[string]struct{}{
 	"dontAsk":     {},
 }
 
+var allowedEfforts = map[string]struct{}{
+	"low":    {},
+	"medium": {},
+	"high":   {},
+	"max":    {},
+}
+
+// ValidateModel rejects option-shaped model identifiers. ExecOptions values
+// are passed as separate argv entries, but many CLI parsers reinterpret a
+// value beginning with "-" as the next option when the preceding flag expects
+// a value. That would turn a typed model field into another policy bypass.
+func ValidateModel(model string) error {
+	if model == "" {
+		return nil
+	}
+	if strings.HasPrefix(strings.TrimSpace(model), "-") {
+		return fmt.Errorf("executor: model %q must not begin with '-'", model)
+	}
+	return nil
+}
+
+// ValidateEffort validates Claude's typed --effort value. Keeping this field
+// enum-shaped prevents it from being interpreted as another CLI option.
+func ValidateEffort(effort string) error {
+	if effort == "" {
+		return nil
+	}
+	if _, ok := allowedEfforts[effort]; !ok {
+		return fmt.Errorf("executor: effort %q is not allowed — valid values: low, medium, high, max", effort)
+	}
+	return nil
+}
+
 // allowedApprovalModes is the allowlist for the Codex approval mode config.
 // The first group is the current Codex --ask-for-approval vocabulary; the
 // second group is kept for existing config.toml files created before Codex
@@ -126,6 +182,15 @@ var allowedApprovalModes = map[string]struct{}{
 	"auto-edit":  {},
 	"full-auto":  {},
 	"suggest":    {},
+}
+
+// allowedGeminiApprovalModes is deliberately narrower than Gemini's full
+// --approval-mode vocabulary: yolo removes every approval prompt and therefore
+// must never be reachable through Heimdallm's typed agent configuration.
+var allowedGeminiApprovalModes = map[string]struct{}{
+	"default":   {},
+	"auto_edit": {},
+	"plan":      {},
 }
 
 // ValidatePermissionMode returns an error if mode is not in the allowlist.
@@ -153,6 +218,45 @@ func ValidateApprovalMode(mode string) error {
 	return nil
 }
 
+// ValidateApprovalModeForCLI validates the typed approval mode using the
+// vocabulary of the CLI that will consume it. Codex keeps accepting its legacy
+// values for backwards compatibility. Gemini accepts auto-edit as a friendly
+// spelling but emits auto_edit, and intentionally rejects yolo.
+//
+// Claude and OpenCode do not consume ApprovalMode today. We still validate a
+// non-empty value against the safe Codex/Gemini union so a primary-to-fallback
+// transition does not fail merely because the selected fallback ignores a
+// setting belonging to the primary CLI.
+func ValidateApprovalModeForCLI(cli, mode string) error {
+	if err := ValidateCLIName(cli); err != nil {
+		return err
+	}
+
+	mode = strings.TrimSpace(mode)
+	if mode == "" {
+		return nil
+	}
+
+	switch cli {
+	case "codex":
+		return ValidateApprovalMode(mode)
+	case "gemini":
+		normalized := normalizeGeminiApprovalMode(mode)
+		if _, ok := allowedGeminiApprovalModes[normalized]; !ok {
+			return fmt.Errorf("executor: approval_mode %q is not allowed for gemini — valid values: default, auto_edit, auto-edit, plan", mode)
+		}
+		return nil
+	default:
+		if _, ok := allowedApprovalModes[mode]; ok {
+			return nil
+		}
+		if _, ok := allowedGeminiApprovalModes[normalizeGeminiApprovalMode(mode)]; ok {
+			return nil
+		}
+		return fmt.Errorf("executor: approval_mode %q is not a known safe mode for %s", mode, cli)
+	}
+}
+
 func normalizeCodexApprovalMode(mode string) string {
 	switch strings.TrimSpace(mode) {
 	case "full-auto":
@@ -166,51 +270,490 @@ func normalizeCodexApprovalMode(mode string) string {
 	}
 }
 
-// dangerousFlagPrefixes is the denylist for ValidateExtraFlags.
-var dangerousFlagPrefixes = []string{
-	"--dangerously-skip-permissions",
-	"--allow-dangerously",
-	"--danger",
-	"--permission-mode", // has a dedicated typed field (PermissionMode); must not appear in free-form flags
+func normalizeGeminiApprovalMode(mode string) string {
+	switch strings.TrimSpace(mode) {
+	case "auto-edit":
+		return "auto_edit"
+	default:
+		return strings.TrimSpace(mode)
+	}
+}
+
+// forbiddenExtraFlagsByCLI defines the policy-changing aliases understood by
+// each supported provider. ExtraFlags is appended after Heimdallm's typed
+// options, so allowing any of these names would let legacy config or a stored
+// agent replace the validated approval, sandbox, permission, config, or
+// workspace policy at the last possible moment.
+//
+// Long names are stored lowercase because validation is case-insensitive.
+// Short names are lowercase too: this intentionally treats Codex -C (workdir)
+// and -c (config override) as the same forbidden class.
+var forbiddenExtraFlagsByCLI = map[string]map[string]string{
+	"claude": {
+		"-c":                                   "session state",
+		"-r":                                   "session state",
+		"-w":                                   "working-directory access",
+		"--add-dir":                            "working-directory access",
+		"--agent":                              "agent configuration",
+		"--agents":                             "agent configuration",
+		"--allow-dangerously-skip-permissions": "permission policy",
+		"--allowed-tools":                      "permission policy",
+		"--allowedtools":                       "permission policy",
+		"--append-system-prompt":               "system instructions",
+		"--append-system-prompt-file":          "working-directory file access",
+		"--background":                         "execution boundary",
+		"--bg":                                 "execution boundary",
+		"--channels":                           "runtime configuration",
+		"--chrome":                             "execution boundary",
+		"--cloud":                              "execution boundary",
+		"--continue":                           "session state",
+		"--dangerously-load-development-channels": "permission policy",
+		"--dangerously-skip-permissions":          "permission policy",
+		"--debug-file":                            "working-directory file access",
+		"--directory":                             "working-directory access",
+		"--enable-auto-mode":                      "permission policy",
+		"--exec":                                  "execution boundary",
+		"--from-pr":                               "session state",
+		"--ide":                                   "execution boundary",
+		"--init":                                  "hook execution",
+		"--init-only":                             "hook execution",
+		"--maintenance":                           "hook execution",
+		"--mcp-config":                            "runtime configuration",
+		"--no-sandbox":                            "sandbox policy",
+		"--permission-mode":                       "permission policy",
+		"--permission-prompt-tool":                "permission policy",
+		"--plugin-dir":                            "runtime configuration",
+		"--plugin-url":                            "runtime configuration",
+		"--rc":                                    "execution boundary",
+		"--remote":                                "execution boundary",
+		"--remote-control":                        "execution boundary",
+		"--resume":                                "session state",
+		"--session-id":                            "session state",
+		"--setting-sources":                       "runtime configuration",
+		"--settings":                              "runtime configuration",
+		"--system-prompt":                         "system instructions",
+		"--system-prompt-file":                    "working-directory file access",
+		"--teleport":                              "execution boundary",
+		"--worktree":                              "working-directory access",
+	},
+	"codex": {
+		"-a":                 "approval policy",
+		"-c":                 "runtime configuration or working directory",
+		"-i":                 "working-directory file access",
+		"-o":                 "working-directory file access",
+		"-p":                 "runtime configuration",
+		"-s":                 "sandbox policy",
+		"--add-dir":          "working-directory access",
+		"--approval-mode":    "approval policy",
+		"--ask-for-approval": "approval policy",
+		"--cd":               "working-directory access",
+		"--config":           "runtime configuration",
+		"--cwd":              "working-directory access",
+		"--dangerously-bypass-approvals-and-sandbox": "approval and sandbox policy",
+		"--dangerously-bypass-hook-trust":            "permission policy",
+		"--disable":                                  "runtime configuration",
+		"--enable":                                   "runtime configuration",
+		"--full-auto":                                "approval and sandbox policy",
+		"--ignore-rules":                             "permission policy",
+		"--ignore-user-config":                       "runtime configuration",
+		"--image":                                    "working-directory file access",
+		"--include-managed-config":                   "runtime configuration",
+		"--local-provider":                           "execution boundary",
+		"--no-sandbox":                               "sandbox policy",
+		"--oss":                                      "execution boundary",
+		"--output-last-message":                      "working-directory file access",
+		"--output-schema":                            "working-directory file access",
+		"--permission-profile":                       "permission policy",
+		"--profile":                                  "runtime configuration",
+		"--remote":                                   "execution boundary",
+		"--remote-auth-token-env":                    "execution boundary",
+		"--sandbox":                                  "sandbox policy",
+		"--search":                                   "permission policy",
+		"--skip-git-repo-check":                      "workspace trust policy",
+		"--yolo":                                     "approval and sandbox policy",
+	},
+	"gemini": {
+		"-r":                         "session state",
+		"-e":                         "runtime configuration",
+		"-s":                         "sandbox policy",
+		"-w":                         "working-directory access",
+		"-y":                         "approval policy",
+		"--acp":                      "execution boundary",
+		"--admin-policy":             "permission policy",
+		"--allowed-mcp-server-names": "permission policy",
+		"--allowed-tools":            "permission policy",
+		"--approval-mode":            "approval policy",
+		"--config":                   "runtime configuration",
+		"--cwd":                      "working-directory access",
+		"--extensions":               "runtime configuration",
+		"--experimental-acp":         "execution boundary",
+		"--fake-responses":           "working-directory file access",
+		"--include-directories":      "working-directory access",
+		"--include-directory":        "working-directory access",
+		"--no-sandbox":               "sandbox policy",
+		"--policy":                   "permission policy",
+		"--record-responses":         "working-directory file access",
+		"--resume":                   "session state",
+		"--sandbox":                  "sandbox policy",
+		"--session-file":             "working-directory file access",
+		"--settings":                 "runtime configuration",
+		"--skip-trust":               "workspace trust policy",
+		"--worktree":                 "working-directory access",
+		"--yolo":                     "approval policy",
+	},
+	"opencode": {
+		"-c":            "session state",
+		"--agent":       "agent and permission configuration",
+		"--attach":      "execution boundary",
+		"--auto":        "approval policy",
+		"--command":     "runtime configuration",
+		"--continue":    "session state",
+		"--config":      "runtime configuration",
+		"--dir":         "working-directory access",
+		"--file":        "working-directory access",
+		"--fork":        "session state",
+		"--interactive": "execution boundary",
+		"--no-sandbox":  "sandbox policy",
+		"--password":    "execution boundary",
+		"--permission":  "permission policy",
+		"--permissions": "permission policy",
+		"--port":        "execution boundary",
+		"--sandbox":     "sandbox policy",
+		"--session":     "session state",
+		"--settings":    "runtime configuration",
+		"--share":       "external data sharing",
+		"--username":    "execution boundary",
+		"-f":            "working-directory access",
+		"-i":            "execution boundary",
+		"-p":            "execution boundary",
+		"-s":            "session state",
+		"-u":            "execution boundary",
+	},
+}
+
+type extraFlagArity uint8
+
+const (
+	extraFlagBoolean extraFlagArity = iota
+	extraFlagValue
+	extraFlagOptionalValue
+	extraFlagVariadicValue
+)
+
+// allowedExtraFlagsByCLI is the deliberate compatibility surface for the
+// free-form field. Unknown flags fail closed: upstream CLIs regularly add
+// options that can load files, select agents/config, resume sessions, or move
+// execution outside Heimdallm's validated workspace.
+//
+// Keep this list limited to output, model/resource tuning, accessibility, and
+// options that only remove capabilities. Security-sensitive behavior belongs
+// in typed ExecOptions fields instead.
+var allowedExtraFlagsByCLI = map[string]map[string]extraFlagArity{
+	"claude": {
+		"-d":                         extraFlagBoolean,
+		"-m":                         extraFlagValue,
+		"--debug":                    extraFlagOptionalValue,
+		"--disable-slash-commands":   extraFlagBoolean,
+		"--disallowed-tools":         extraFlagVariadicValue,
+		"--effort":                   extraFlagValue,
+		"--fallback-model":           extraFlagValue,
+		"--include-partial-messages": extraFlagBoolean,
+		"--input-format":             extraFlagValue,
+		"--json-schema":              extraFlagValue,
+		"--max-budget-usd":           extraFlagValue,
+		"--max-turns":                extraFlagValue,
+		"--model":                    extraFlagValue,
+		"--no-session-persistence":   extraFlagBoolean,
+		"--output-format":            extraFlagValue,
+		"--replay-user-messages":     extraFlagBoolean,
+		"--strict-mcp-config":        extraFlagBoolean,
+		"--verbose":                  extraFlagBoolean,
+	},
+	"codex": {
+		"-m":              extraFlagValue,
+		"--color":         extraFlagValue,
+		"--ephemeral":     extraFlagBoolean,
+		"--json":          extraFlagBoolean,
+		"--model":         extraFlagValue,
+		"--strict-config": extraFlagBoolean,
+	},
+	"gemini": {
+		"-d":              extraFlagBoolean,
+		"-m":              extraFlagValue,
+		"-o":              extraFlagValue,
+		"--debug":         extraFlagBoolean,
+		"--model":         extraFlagValue,
+		"--output-format": extraFlagValue,
+		"--screen-reader": extraFlagBoolean,
+	},
+	"opencode": {
+		"-m":         extraFlagValue,
+		"--format":   extraFlagValue,
+		"--model":    extraFlagValue,
+		"--pure":     extraFlagBoolean,
+		"--thinking": extraFlagBoolean,
+		"--variant":  extraFlagValue,
+	},
 }
 
 // dangerousFlagValues are flag values that must never appear regardless of position.
 var dangerousFlagValues = []string{"bypassPermissions"}
 
-// ValidateExtraFlags rejects free-form flag strings that contain dangerous flags.
-// These flags are already modelled as explicit typed fields (DangerouslySkipPerms,
-// PermissionMode, etc.) — the free-form field must not be able to re-set them or
-// bypass the CLI agent config guards (security issue #5).
+// ValidateExtraFlags rejects provider-independent dangerous free-form flags.
+// It is kept for callers that do not yet have a CLI name. Long aliases from
+// every provider are rejected, while provider-specific short aliases are left
+// to ValidateExtraFlagsForCLI.
 func ValidateExtraFlags(flags string) error {
+	return validateExtraFlags("", flags)
+}
+
+// ValidateExtraFlagsForCLI applies the provider-aware ExtraFlags policy. This
+// is the validation used at the ExecuteRaw process boundary.
+func ValidateExtraFlagsForCLI(cli, flags string) error {
+	if err := ValidateCLIName(cli); err != nil {
+		return err
+	}
+	return validateExtraFlags(cli, flags)
+}
+
+func validateExtraFlags(cli, flags string) error {
 	parts := strings.Fields(flags)
-	for _, part := range parts {
-		lower := strings.ToLower(part)
-		for _, bad := range dangerousFlagPrefixes {
-			if strings.HasPrefix(lower, bad) {
-				slog.Warn("executor: ExtraFlags validation failed",
-					"err", fmt.Sprintf("flag %q is forbidden in ExtraFlags/CLIFlags — use the dedicated config field instead", part))
-				return fmt.Errorf("executor: flag %q is forbidden in ExtraFlags/CLIFlags — use the dedicated config field instead", part)
+	for i := 0; i < len(parts); i++ {
+		part := parts[i]
+		flag := canonicalFlagName(part)
+		if flag != "" {
+			if strings.HasPrefix(flag, "--danger") || strings.HasPrefix(flag, "--allow-dangerously") {
+				return forbiddenExtraFlagError(cli, part, "permission or sandbox policy")
+			}
+			if category, forbidden := forbiddenExtraFlagCategory(cli, flag); forbidden {
+				return forbiddenExtraFlagError(cli, part, category)
 			}
 		}
+		if err := validateExtraFlagValue(part); err != nil {
+			return err
+		}
+
+		// The legacy provider-independent helper can only reject the union of
+		// known dangerous long flags. Every execution path supplies a CLI and
+		// therefore reaches the fail-closed parser below.
+		if cli == "" {
+			continue
+		}
+		if flag == "" {
+			return fmt.Errorf("executor: unexpected positional value %q in ExtraFlags/CLIFlags for %s", part, cli)
+		}
+
+		consumed, err := validateAllowedExtraFlag(cli, parts, i)
+		if err != nil {
+			return err
+		}
+		i += consumed
+	}
+	return nil
+}
+
+func validateExtraFlagValue(part string) error {
+	values := []string{part}
+	if idx := strings.IndexByte(part, '='); idx >= 0 {
+		values = append(values, part[idx+1:])
+	}
+	for _, value := range values {
 		for _, badVal := range dangerousFlagValues {
-			if strings.EqualFold(part, badVal) {
+			if strings.EqualFold(value, badVal) {
 				return fmt.Errorf("executor: value %q is forbidden in ExtraFlags/CLIFlags", part)
-			}
-		}
-		// Also catch --flag=value form (e.g. --permission-mode=bypassPermissions).
-		// Without this check a single token like "--permission-mode=bypassPermissions"
-		// passes the prefix loop (which only matches the exact flag prefix, not the
-		// joined form) and passes the value loop (which only matches bare values).
-		if idx := strings.Index(lower, "="); idx >= 0 {
-			val := lower[idx+1:]
-			for _, badVal := range dangerousFlagValues {
-				if strings.EqualFold(val, badVal) {
-					return fmt.Errorf("executor: value %q is forbidden in ExtraFlags/CLIFlags", part)
-				}
 			}
 		}
 	}
 	return nil
+}
+
+func canonicalFlagName(token string) string {
+	if len(token) < 2 || token[0] != '-' {
+		return ""
+	}
+	if idx := strings.IndexByte(token, '='); idx >= 0 {
+		token = token[:idx]
+	}
+	return strings.ToLower(token)
+}
+
+func validateAllowedExtraFlag(cli string, parts []string, index int) (int, error) {
+	token := parts[index]
+	name := canonicalFlagName(token)
+	if strings.HasPrefix(name, "--") {
+		arity, ok := allowedLongExtraFlag(cli, name)
+		if !ok {
+			return 0, unsupportedExtraFlagError(cli, token)
+		}
+		hasInlineValue := strings.Contains(token, "=")
+		return consumeExtraFlagValues(cli, token, arity, hasInlineValue, parts, index)
+	}
+
+	return validateAllowedShortExtraFlags(cli, token, parts, index)
+}
+
+func allowedLongExtraFlag(cli, flag string) (extraFlagArity, bool) {
+	policy := allowedExtraFlagsByCLI[cli]
+	if arity, ok := policy[flag]; ok {
+		return arity, true
+	}
+	comparable := comparableLongFlag(flag)
+	for alias, arity := range policy {
+		if strings.HasPrefix(alias, "--") && comparableLongFlag(alias) == comparable {
+			return arity, true
+		}
+	}
+	return 0, false
+}
+
+func validateAllowedShortExtraFlags(cli, token string, parts []string, index int) (int, error) {
+	nameAndValue := token
+	hasEqualsValue := false
+	if equals := strings.IndexByte(nameAndValue, '='); equals >= 0 {
+		nameAndValue = nameAndValue[:equals]
+		hasEqualsValue = true
+	}
+	if len(nameAndValue) < 2 {
+		return 0, unsupportedExtraFlagError(cli, token)
+	}
+
+	policy := allowedExtraFlagsByCLI[cli]
+	for pos := 1; pos < len(nameAndValue); pos++ {
+		alias := "-" + strings.ToLower(nameAndValue[pos:pos+1])
+		if category, forbidden := forbiddenExtraFlagCategory(cli, alias); forbidden {
+			return 0, forbiddenExtraFlagError(cli, token, category)
+		}
+		arity, allowed := policy[alias]
+		if !allowed {
+			return 0, unsupportedExtraFlagError(cli, token)
+		}
+		if arity == extraFlagBoolean {
+			if hasEqualsValue {
+				return 0, fmt.Errorf("executor: boolean flag %q cannot use an attached value in ExtraFlags/CLIFlags for %s", token, cli)
+			}
+			continue
+		}
+
+		hasAttachedValue := pos+1 < len(nameAndValue) || hasEqualsValue
+		return consumeExtraFlagValues(cli, token, arity, hasAttachedValue, parts, index)
+	}
+	return 0, nil
+}
+
+func consumeExtraFlagValues(cli, token string, arity extraFlagArity, hasInlineValue bool, parts []string, index int) (int, error) {
+	if arity == extraFlagBoolean {
+		if hasInlineValue {
+			return 0, fmt.Errorf("executor: boolean flag %q cannot use an attached value in ExtraFlags/CLIFlags for %s", token, cli)
+		}
+		return 0, nil
+	}
+	if hasInlineValue {
+		return 0, nil
+	}
+
+	switch arity {
+	case extraFlagValue:
+		if index+1 >= len(parts) || strings.HasPrefix(parts[index+1], "-") {
+			return 0, fmt.Errorf("executor: flag %q requires a value in ExtraFlags/CLIFlags for %s", token, cli)
+		}
+		if err := validateExtraFlagValue(parts[index+1]); err != nil {
+			return 0, err
+		}
+		return 1, nil
+	case extraFlagOptionalValue:
+		if index+1 < len(parts) && !strings.HasPrefix(parts[index+1], "-") {
+			if err := validateExtraFlagValue(parts[index+1]); err != nil {
+				return 0, err
+			}
+			return 1, nil
+		}
+		return 0, nil
+	case extraFlagVariadicValue:
+		consumed := 0
+		for index+consumed+1 < len(parts) && !strings.HasPrefix(parts[index+consumed+1], "-") {
+			consumed++
+			if err := validateExtraFlagValue(parts[index+consumed]); err != nil {
+				return 0, err
+			}
+		}
+		if consumed == 0 {
+			return 0, fmt.Errorf("executor: flag %q requires at least one value in ExtraFlags/CLIFlags for %s", token, cli)
+		}
+		return consumed, nil
+	default:
+		return 0, unsupportedExtraFlagError(cli, token)
+	}
+}
+
+func unsupportedExtraFlagError(cli, flag string) error {
+	err := fmt.Errorf(
+		"executor: flag %q is not in the safe ExtraFlags/CLIFlags allowlist for %s; use a typed configuration field or update Heimdallm's provider policy",
+		flag, cli)
+	slog.Warn("executor: ExtraFlags validation failed", "cli", cli, "flag", flag, "err", err)
+	return err
+}
+
+func forbiddenExtraFlagCategory(cli, flag string) (string, bool) {
+	if cli != "" {
+		policy := forbiddenExtraFlagsByCLI[cli]
+		if category, ok := policy[flag]; ok {
+			return category, true
+		}
+		// Yargs accepts camelCase/snake_case aliases for kebab-case options
+		// (for example --approvalMode=yolo). Compare long options with
+		// separators removed so alternate spellings reach the same policy.
+		if strings.HasPrefix(flag, "--") {
+			comparable := comparableLongFlag(flag)
+			for alias, category := range policy {
+				if strings.HasPrefix(alias, "--") && comparableLongFlag(alias) == comparable {
+					return category, true
+				}
+			}
+		}
+		// Clap/yargs accept attached short-option values in forms such as
+		// -sdanger-full-access, -C/etc, and -f/etc. Match only aliases that
+		// belong to this provider so an alias from one CLI cannot change the
+		// interpretation of another CLI's flags.
+		if strings.HasPrefix(flag, "-") && !strings.HasPrefix(flag, "--") {
+			for alias, category := range policy {
+				if len(alias) == 2 && alias[0] == '-' && strings.HasPrefix(flag, alias) {
+					return category, true
+				}
+			}
+		}
+		return "", false
+	}
+	if !strings.HasPrefix(flag, "--") {
+		return "", false
+	}
+	comparable := comparableLongFlag(flag)
+	for _, policy := range forbiddenExtraFlagsByCLI {
+		for alias, category := range policy {
+			if strings.HasPrefix(alias, "--") && comparableLongFlag(alias) == comparable {
+				return category, true
+			}
+		}
+	}
+	return "", false
+}
+
+func comparableLongFlag(flag string) string {
+	flag = strings.TrimPrefix(strings.ToLower(flag), "--")
+	flag = strings.ReplaceAll(flag, "-", "")
+	flag = strings.ReplaceAll(flag, "_", "")
+	return flag
+}
+
+func forbiddenExtraFlagError(cli, flag, category string) error {
+	scope := ""
+	if cli != "" {
+		scope = " for " + cli
+	}
+	err := fmt.Errorf(
+		"executor: flag %q is forbidden in ExtraFlags/CLIFlags%s because it can override %s; use the dedicated typed configuration instead",
+		flag, scope, category)
+	slog.Warn("executor: ExtraFlags validation failed", "cli", cli, "flag", flag, "err", err)
+	return err
 }
 
 // ValidateCLIName returns an error if name is not in the known-safe allowlist.
@@ -408,6 +951,13 @@ func (e *Executor) Execute(cli, prompt string, opts ExecOptions) (*ReviewResult,
 // output, etc.). Callers should pass the bytes through StripToJSON before
 // json.Unmarshal — CLIs routinely wrap JSON in code fences or surrounding text.
 func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, error) {
+	// This is the final trust boundary before creating a subprocess. Callers
+	// validate configuration on ingress too, but legacy rows, direct TOML edits,
+	// and future call paths must not be able to bypass the execution policy.
+	if err := validateExecutionRequest(cli, opts); err != nil {
+		return nil, err
+	}
+
 	timeout := executionTimeout
 	if opts.Timeout > 0 {
 		timeout = opts.Timeout
@@ -423,9 +973,6 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 
 	var workDirFlags []string
 	if opts.WorkDir != "" {
-		if err := ValidateWorkDir(opts.WorkDir); err != nil {
-			return nil, err
-		}
 		workDirFlags = detectWorkDirFlags(cli, cliPath, opts.WorkDir)
 	}
 
@@ -458,6 +1005,28 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 	}
 
 	return stdout.Bytes(), nil
+}
+
+func validateExecutionRequest(cli string, opts ExecOptions) error {
+	if err := ValidateCLIName(cli); err != nil {
+		return err
+	}
+	if err := ValidateModel(opts.Model); err != nil {
+		return err
+	}
+	if err := ValidateEffort(opts.Effort); err != nil {
+		return err
+	}
+	if err := ValidatePermissionMode(opts.PermissionMode); err != nil {
+		return err
+	}
+	if err := ValidateApprovalModeForCLI(cli, opts.ApprovalMode); err != nil {
+		return err
+	}
+	if err := validateExtraFlags(cli, opts.ExtraFlags); err != nil {
+		return err
+	}
+	return ValidateWorkDir(opts.WorkDir)
 }
 
 // buildArgs constructs the CLI argument list based on the CLI name and options.
@@ -496,6 +1065,15 @@ func buildArgs(cli string, opts ExecOptions, workDirFlags []string) []string {
 		}
 		if opts.Model != "" {
 			args = append(args, "--model", opts.Model)
+		}
+		if cli == "gemini" {
+			if mode := strings.TrimSpace(opts.ApprovalMode); mode != "" {
+				if err := ValidateApprovalModeForCLI(cli, mode); err != nil {
+					slog.Warn("buildArgs: ApprovalMode rejected, ignoring", "cli", cli, "mode", mode, "err", err)
+				} else {
+					args = append(args, "--approval-mode", normalizeGeminiApprovalMode(mode))
+				}
+			}
 		}
 		if cli == "claude" {
 			if opts.MaxTurns > 0 {

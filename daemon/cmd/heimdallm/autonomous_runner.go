@@ -78,7 +78,8 @@ func (g *coordinationCommentGen) GenerateCoordinationComment(_ context.Context, 
 		return "", err
 	}
 	prompt := buildCoordinationPrompt(c)
-	raw, err := g.runner.ExecuteRaw(cli, prompt, executor.ExecOptions{})
+	opts := executor.OptionsForSelectedCLI(primary, cli, executor.ExecOptions{})
+	raw, err := g.runner.ExecuteRaw(cli, prompt, opts)
 	if err != nil {
 		return "", err
 	}
@@ -286,7 +287,7 @@ func (r *autonomousStageRunner) RunStage(ctx context.Context, stage string, c au
 
 	extraFlags := agentCfg.ExtraFlags
 	if extraFlags != "" {
-		if err := executor.ValidateExtraFlags(extraFlags); err != nil {
+		if err := executor.ValidateExtraFlagsForCLI(aiCfg.Primary, extraFlags); err != nil {
 			slog.Warn("autonomous: extra_flags rejected", "err", err)
 			extraFlags = ""
 		}

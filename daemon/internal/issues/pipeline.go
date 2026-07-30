@@ -607,7 +607,8 @@ func (p *Pipeline) runReviewOnly(ctx context.Context, issue *github.Issue, issue
 		p.publishError(issueID, issue, fmt.Errorf("detect CLI: %w", err))
 		return nil, fmt.Errorf("issues pipeline: detect CLI: %w", err)
 	}
-	raw, err := p.executor.ExecuteRaw(cli, prompt, opts.ExecOpts)
+	execOpts := executor.OptionsForSelectedCLI(opts.Primary, cli, opts.ExecOpts)
+	raw, err := p.executor.ExecuteRaw(cli, prompt, execOpts)
 	if err != nil {
 		p.publishError(issueID, issue, fmt.Errorf("execute %s: %w", cli, err))
 		return nil, fmt.Errorf("issues pipeline: execute %s: %w", cli, err)
@@ -723,6 +724,7 @@ func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, is
 		p.publishError(issueID, issue, fmt.Errorf("detect CLI: %w", err))
 		return nil, fmt.Errorf("issues pipeline: detect CLI: %w", err)
 	}
+	opts.ExecOpts = executor.OptionsForSelectedCLI(opts.Primary, cli, opts.ExecOpts)
 
 	// Auto_implement requires the CLI to be allowed to write files. When the
 	// operator has not configured a permission/approval flag explicitly, fall
@@ -1008,10 +1010,6 @@ func (p *Pipeline) autoImplementNoChangesFallback(issue *github.Issue, issueID i
 // every issue degrades to the no-changes fallback comment (#433). Any
 // explicit operator setting wins; this only fills the gap when *nothing* is
 // configured.
-//
-// gemini has no equivalent non-interactive write flag today: callers must
-// configure --include-directories plus an approval bypass in extra_flags
-// themselves. We log a warn so the operator sees why writes are no-op.
 func ensureAutoImplementWritePerms(cli string, opts executor.ExecOptions) executor.ExecOptions {
 	switch cli {
 	case "claude":
@@ -1027,9 +1025,11 @@ func ensureAutoImplementWritePerms(cli string, opts executor.ExecOptions) execut
 				"cli", cli)
 		}
 	case "gemini":
-		slog.Warn("issues pipeline: gemini has no built-in write-permission default; "+
-			"configure approval bypass via extra_flags or expect no-changes runs",
-			"cli", cli)
+		if strings.TrimSpace(opts.ApprovalMode) == "" {
+			opts.ApprovalMode = "auto_edit"
+			slog.Info("issues pipeline: defaulting gemini approval_mode to auto_edit for auto_implement",
+				"cli", cli)
+		}
 	}
 	return opts
 }

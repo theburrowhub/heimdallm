@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 )
 
 // StoreLister is the subset of *store.Store that ApplyStore needs. Kept as a
@@ -19,20 +20,22 @@ type StoreLister interface {
 // the poller also writes them as runtime discovery state, so ApplyStore merges
 // those rows below explicit TOML/env values.
 //
-// Returns the first error encountered. On error the receiver is untouched
-// (ApplyStore is atomic and Validate is a read-only check), so the caller is
-// free to keep serving the previous Config on reload failure.
+// Returns the first error encountered. The complete apply+validate operation
+// happens on a shadow copy, so a row that decodes successfully but makes the
+// resulting config invalid cannot leak into the receiver.
 func (c *Config) MergeStoreLayer(s StoreLister) error {
 	rows, err := s.ListConfigs()
 	if err != nil {
 		return fmt.Errorf("config: list store: %w", err)
 	}
-	if err := c.ApplyStore(rows); err != nil {
+	shadow := cloneStoreMergeConfig(c)
+	if err := shadow.ApplyStore(rows); err != nil {
 		return fmt.Errorf("config: apply store: %w", err)
 	}
-	if err := c.Validate(); err != nil {
+	if err := shadow.Validate(); err != nil {
 		return fmt.Errorf("config: validate after store: %w", err)
 	}
+	*c = shadow
 	return nil
 }
 
@@ -56,16 +59,11 @@ func (c *Config) MergeStoreLayer(s StoreLister) error {
 // single malformed row therefore leaves the receiver untouched, so the
 // caller's error-path ("continuing with TOML+env") is truthful.
 //
-// INVARIANT — shallow copy + wholesale replacement: `shadow := *c` is a
-// shallow copy, so `shadow.AI.Agents` and `shadow.AI.Repos` (both maps)
-// still share backing storage with the receiver. Today every case below
-// *replaces the whole field* (slice/struct/string assignment) rather than
-// mutating it in place, so the atomicity guarantee holds. If you ever add
-// a case that writes into an existing map (e.g. `shadow.AI.Agents[k] = v`)
-// you MUST deep-copy that map into the shadow first, or the mutation will
-// leak through to the receiver even when a later row fails.
+// cloneStoreMergeConfig copies the mutable slices touched below, and the
+// agent_configs branch replaces its map wholesale. If a future store key
+// mutates another map/slice in place, add it to that helper first.
 func (c *Config) ApplyStore(rows map[string]string) error {
-	shadow := *c
+	shadow := cloneStoreMergeConfig(c)
 	var storeRepos []string
 	var storeNonMonitored []string
 	var sawStoreRepos bool
@@ -151,9 +149,24 @@ func (c *Config) ApplyStore(rows map[string]string) error {
 			}
 			for cli, payload := range perCLI {
 				existing := merged[cli]
+				trustedDangerouslySkipPerms := existing.DangerouslySkipPerms
+				var fields map[string]json.RawMessage
+				if err := json.Unmarshal(payload, &fields); err != nil {
+					return fmt.Errorf("config: apply store key %q: agent %q: %w", key, cli, err)
+				}
+				for field := range fields {
+					if strings.EqualFold(field, "dangerously_skip_perms") {
+						slog.Warn("config: ignoring HTTP/store override of dangerously_skip_perms (M-5 gate)",
+							"agent", cli)
+					}
+				}
 				if err := json.Unmarshal(payload, &existing); err != nil {
 					return fmt.Errorf("config: apply store key %q: agent %q: %w", key, cli, err)
 				}
+				// Store rows originate from the HTTP API and are never trusted
+				// to alter this filesystem-only gate. Preserve the TOML/env
+				// value even when a legacy row contains a case-variant alias.
+				existing.DangerouslySkipPerms = trustedDangerouslySkipPerms
 				merged[cli] = existing
 			}
 			shadow.AI.Agents = merged
@@ -171,6 +184,33 @@ func (c *Config) ApplyStore(rows map[string]string) error {
 	}
 	*c = shadow
 	return nil
+}
+
+func cloneStoreMergeConfig(c *Config) Config {
+	shadow := *c
+	shadow.GitHub.Repositories = cloneStrings(c.GitHub.Repositories)
+	shadow.GitHub.NonMonitored = cloneStrings(c.GitHub.NonMonitored)
+	shadow.GitHub.IssueTracking = cloneIssueTrackingConfig(c.GitHub.IssueTracking)
+	return shadow
+}
+
+func cloneIssueTrackingConfig(in IssueTrackingConfig) IssueTrackingConfig {
+	out := in
+	out.Organizations = cloneStrings(in.Organizations)
+	out.Assignees = cloneStrings(in.Assignees)
+	out.DevelopLabels = cloneStrings(in.DevelopLabels)
+	out.RefinementLabels = cloneStrings(in.RefinementLabels)
+	out.ReviewOnlyLabels = cloneStrings(in.ReviewOnlyLabels)
+	out.SkipLabels = cloneStrings(in.SkipLabels)
+	out.BlockedLabels = cloneStrings(in.BlockedLabels)
+	return out
+}
+
+func cloneStrings(in []string) []string {
+	if in == nil {
+		return nil
+	}
+	return append([]string{}, in...)
 }
 
 func mergeStoreRepoLists(c *Config, storeRepos, storeNonMonitored []string) {
