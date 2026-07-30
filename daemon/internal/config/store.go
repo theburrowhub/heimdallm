@@ -198,15 +198,38 @@ func mergeStoredAgentConfig(cli string, base CLIAgentConfig, payload json.RawMes
 		return base, false, err
 	}
 
-	for field := range fields {
-		if strings.EqualFold(field, "dangerously_skip_perms") {
-			slog.Warn("config: ignoring HTTP/store override of dangerously_skip_perms (M-5 gate)",
-				"agent", cli)
+	dangerousPresent := false
+	disableDangerous := false
+	for field, raw := range fields {
+		if !strings.EqualFold(field, "dangerously_skip_perms") {
+			continue
+		}
+		dangerousPresent = true
+		var requested bool
+		if err := json.Unmarshal(raw, &requested); err != nil {
+			return base, false, fmt.Errorf("dangerously_skip_perms must be a boolean: %w", err)
+		}
+		if !requested {
+			disableDangerous = true
 		}
 	}
-	// Store rows originate from the HTTP API and are never trusted to alter
-	// this filesystem-only gate, including through a case-variant alias.
-	candidate.DangerouslySkipPerms = base.DangerouslySkipPerms
+	switch {
+	case disableDangerous:
+		// HTTP/store is allowed to reduce privilege even when trusted TOML/env
+		// enabled the bypass. If a malformed legacy row contains conflicting
+		// aliases, the safer false value wins deterministically.
+		candidate.DangerouslySkipPerms = false
+		slog.Info("config: applied HTTP/store disable of dangerously_skip_perms (M-5 gate)",
+			"agent", cli)
+	case dangerousPresent:
+		// A stored true must never grant the filesystem-only capability. Keep
+		// a trusted base true if one already exists, otherwise remain false.
+		candidate.DangerouslySkipPerms = base.DangerouslySkipPerms
+		slog.Warn("config: ignored HTTP/store attempt to enable dangerously_skip_perms (M-5 gate)",
+			"agent", cli)
+	default:
+		candidate.DangerouslySkipPerms = base.DangerouslySkipPerms
+	}
 
 	if storeAgentFieldPresent(fields, "model") {
 		candidate.Model = strings.TrimSpace(candidate.Model)
@@ -248,11 +271,10 @@ func mergeStoredAgentConfig(cli string, base CLIAgentConfig, payload json.RawMes
 		maxTurnsPresent := storeAgentFieldPresent(fields, "max_turns")
 		effortPresent := storeAgentFieldPresent(fields, "effort")
 		migrationInput := executor.ExecOptions{
-			Model:        candidate.Model,
-			MaxTurns:     candidate.MaxTurns,
-			ApprovalMode: candidate.ApprovalMode,
-			ExtraFlags:   candidate.ExtraFlags,
-			Effort:       candidate.Effort,
+			Model:      candidate.Model,
+			MaxTurns:   candidate.MaxTurns,
+			ExtraFlags: candidate.ExtraFlags,
+			Effort:     candidate.Effort,
 		}
 		// A legacy typed flag belongs to the store layer. When the same stored
 		// payload does not contain the corresponding typed field, let the
@@ -275,11 +297,27 @@ func mergeStoredAgentConfig(cli string, base CLIAgentConfig, payload json.RawMes
 		for _, field := range migrated {
 			switch field {
 			case "model":
-				candidate.Model = opts.Model
+				model := strings.TrimSpace(opts.Model)
+				if err := executor.ValidateModel(model); err != nil {
+					warnIgnoredStoreAgentField(cli, "model", err)
+					candidate.Model = base.Model
+				} else {
+					candidate.Model = model
+				}
 			case "max_turns":
-				candidate.MaxTurns = opts.MaxTurns
+				if opts.MaxTurns < 0 {
+					warnIgnoredStoreAgentField(cli, "max_turns", fmt.Errorf("value must be non-negative"))
+					candidate.MaxTurns = base.MaxTurns
+				} else {
+					candidate.MaxTurns = opts.MaxTurns
+				}
 			case "effort":
-				candidate.Effort = opts.Effort
+				if normalized, err := executor.NormalizeEffort(opts.Effort); err != nil {
+					warnIgnoredStoreAgentField(cli, "effort", err)
+					candidate.Effort = base.Effort
+				} else {
+					candidate.Effort = normalized
+				}
 			}
 		}
 		candidate.ExtraFlags = opts.ExtraFlags

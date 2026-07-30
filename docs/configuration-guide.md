@@ -579,7 +579,9 @@ model = "anthropic/claude-sonnet-4"
 
 **Important:** `bare = true` disables OAuth authentication. Use it only when authenticating via `ANTHROPIC_API_KEY`, never with `CLAUDE_CODE_OAUTH_TOKEN`.
 
-`dangerously_skip_perms` cannot be set via the HTTP API for security reasons — it must be set in `config.toml` directly.
+For security reasons, the HTTP API can only set `dangerously_skip_perms` to
+`false` (reducing privilege). Enabling it requires a direct edit to
+`config.toml`.
 
 `extra_flags` uses a fail-closed allowlist per CLI. Only reviewed presentation,
 output, resource-tuning and restrictive options are accepted; unknown flags and options
@@ -1323,7 +1325,7 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # effort                 = "high"         # low | medium | high | max
 # permission_mode        = "auto"         # default | auto | acceptEdits | dontAsk
 # bare                   = false          # WARNING: disables OAuth — use ANTHROPIC_API_KEY
-# dangerously_skip_perms = false          # cannot be set via HTTP API
+# dangerously_skip_perms = false          # HTTP may disable; enable only in config.toml
 # no_session_persistence = false
 # execution_timeout      = "20m"          # per-agent override (overrides [ai].execution_timeout)
 

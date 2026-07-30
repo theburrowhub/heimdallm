@@ -148,6 +148,18 @@ func TestMigrateLegacyTypedExtraFlagsForCLI(t *testing.T) {
 				ExtraFlags: "--model --sandbox danger-full-access",
 			},
 		},
+		{
+			name: "approval flags are deliberately not migrated",
+			cli:  "codex",
+			opts: executor.ExecOptions{
+				ApprovalMode: "never",
+				ExtraFlags:   "--ask-for-approval on-request --json",
+			},
+			want: executor.ExecOptions{
+				ApprovalMode: "never",
+				ExtraFlags:   "--ask-for-approval on-request --json",
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -189,6 +201,12 @@ func TestNormalizeLegacyCLIFlagsForCLI(t *testing.T) {
 		"--model gpt-5 --sandbox danger-full-access",
 	); err == nil {
 		t.Fatal("unsafe sibling flag was accepted after typed model migration")
+	}
+	if _, _, err := executor.NormalizeLegacyCLIFlagsForCLI(
+		"codex",
+		"--ask-for-approval on-request --json",
+	); err == nil {
+		t.Fatal("legacy approval flag unexpectedly migrated or accepted")
 	}
 }
 

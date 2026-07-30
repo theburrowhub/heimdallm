@@ -385,8 +385,16 @@ Map<String, dynamic> _computeGlobalDiff(AppConfig old, AppConfig updated) {
       ad['permission_mode'] = n.permissionMode;
     }
     if (o.bare != n.bare) ad['bare'] = n.bare;
-    if (o.dangerouslySkipPerms != n.dangerouslySkipPerms) {
-      ad['dangerously_skip_perms'] = n.dangerouslySkipPerms;
+    // HTTP is deliberately asymmetric for this capability: the UI may reduce
+    // privilege, but enabling it requires a trusted config.toml edit.
+    if (!o.dangerouslySkipPerms && n.dangerouslySkipPerms) {
+      throw StateError(
+        'dangerously_skip_perms cannot be enabled via the HTTP API; '
+        'edit config.toml directly',
+      );
+    }
+    if (o.dangerouslySkipPerms && !n.dangerouslySkipPerms) {
+      ad['dangerously_skip_perms'] = false;
     }
     if (o.noSessionPersistence != n.noSessionPersistence) {
       ad['no_session_persistence'] = n.noSessionPersistence;

@@ -2341,6 +2341,288 @@ model = "preserve-inert-profile"
 	}
 }
 
+func TestLoad_CanonicalizesAgentAliasesBeforeTypedDecode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	content := `
+[AI]
+primary = "claude"
+
+[AI.Agents.codex]
+model = "canonical-model"
+Model = "first-alias"
+MODEL = "second-alias"
+Prompt = "trusted-profile"
+BARE = true
+DANGEROUSLY_SKIP_PERMS = true
+NO_SESSION_PERSISTENCE = true
+EXECUTION_TIMEOUT = "20m"
+
+[AI.Agents.Claude]
+model = "--sandbox"
+permission_mode = "bypassPermissions"
+DANGEROUSLY_SKIP_PERMS = true
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HEIMDALLM_AI_PRIMARY", "gemini")
+
+	for i := 0; i < 64; i++ {
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load iteration %d: %v", i, err)
+		}
+		if cfg.AI.Primary != "gemini" {
+			t.Fatalf("iteration %d: env precedence changed, primary = %q", i, cfg.AI.Primary)
+		}
+		if cfg.GitHub.PollInterval != "5m" {
+			t.Fatalf("iteration %d: default precedence changed, poll_interval = %q", i, cfg.GitHub.PollInterval)
+		}
+		got := cfg.AI.Agents["codex"]
+		if got.Model != "canonical-model" ||
+			got.PromptID != "trusted-profile" ||
+			!got.Bare ||
+			!got.DangerouslySkipPerms ||
+			!got.NoSessionPersistence ||
+			got.ExecutionTimeout != "20m" {
+			t.Fatalf("iteration %d: aliases decoded inconsistently: %+v", i, got)
+		}
+		inert, ok := cfg.AI.Agents["Claude"]
+		if !ok ||
+			inert.Model != "--sandbox" ||
+			inert.PermissionMode != "bypassPermissions" ||
+			!inert.DangerouslySkipPerms {
+			t.Fatalf("iteration %d: case-variant CLI profile was not preserved inert: %+v", i, inert)
+		}
+		if _, active := cfg.AI.Agents["claude"]; active {
+			t.Fatalf("iteration %d: inert Claude profile was activated as canonical claude", i)
+		}
+	}
+	gotContent, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotContent) != content {
+		t.Fatalf("Load rewrote inert profile:\n%s", gotContent)
+	}
+}
+
+func TestLoad_RejectsAmbiguousAliasesDeterministically(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		marker  string
+	}{
+		{
+			name: "agent leaf aliases",
+			content: `
+[ai]
+primary = "codex"
+[ai.agents.codex]
+Model = "first"
+MODEL = "second"
+`,
+			marker: `ambiguous aliases for "model" (MODEL, Model)`,
+		},
+		{
+			name: "structural aliases",
+			content: `
+[ai]
+primary = "codex"
+[AI]
+fallback = "gemini"
+`,
+			marker: `ambiguous structural aliases at "config" for "ai" (AI, ai)`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte(tc.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			var first string
+			for i := 0; i < 64; i++ {
+				_, err := Load(path)
+				if err == nil {
+					t.Fatalf("Load iteration %d unexpectedly accepted ambiguous aliases", i)
+				}
+				if !strings.Contains(err.Error(), tc.marker) {
+					t.Fatalf("iteration %d: error %q missing %q", i, err, tc.marker)
+				}
+				if i == 0 {
+					first = err.Error()
+				} else if err.Error() != first {
+					t.Fatalf("nondeterministic errors:\nfirst: %s\niteration %d: %s", first, i, err)
+				}
+			}
+		})
+	}
+}
+
+func TestSanitizeMigratedAgentExecutionFields_RevalidatesOutputs(t *testing.T) {
+	got := sanitizeMigratedAgentExecutionFields("claude", CLIAgentConfig{
+		Model:        " --sandbox ",
+		MaxTurns:     -1,
+		Effort:       "impossible",
+		ApprovalMode: "default",
+	}, "test migration")
+
+	if got.Model != "" || got.MaxTurns != 0 || got.Effort != "" {
+		t.Fatalf("unsafe migrated typed outputs survived: %+v", got)
+	}
+	if got.ApprovalMode != "default" {
+		t.Fatalf("unrelated typed field changed: %+v", got)
+	}
+
+	safe := sanitizeMigratedAgentExecutionFields("claude", CLIAgentConfig{
+		Model:    " safe-model ",
+		MaxTurns: 7,
+		Effort:   "HIGH",
+	}, "test migration")
+	if safe.Model != "safe-model" || safe.MaxTurns != 7 || safe.Effort != "high" {
+		t.Fatalf("safe migrated typed outputs were not canonicalized: %+v", safe)
+	}
+}
+
+func TestSanitizeLegacyAgentExecutionPolicyMap_CanonicalExactWinsAliases(t *testing.T) {
+	agent := map[string]any{
+		"model":                  "canonical-model",
+		"Model":                  "first-alias",
+		"MODEL":                  "second-alias",
+		"prompt":                 "canonical-prompt",
+		"Prompt":                 "alias-prompt",
+		"bare":                   true,
+		"Bare":                   false,
+		"no_session_persistence": false,
+		"No_Session_Persistence": true,
+		"execution_timeout":      "20m",
+		"Execution_Timeout":      "1m",
+	}
+	m := map[string]any{
+		"ai": map[string]any{
+			"agents": map[string]any{"codex": agent},
+		},
+	}
+
+	if err := SanitizeLegacyAgentExecutionPolicyMap(m, "test TOML"); err != nil {
+		t.Fatalf("sanitize canonical plus aliases: %v", err)
+	}
+	if got := agent["model"]; got != "canonical-model" {
+		t.Fatalf("canonical exact key did not win: %v", agent)
+	}
+	if _, present := agent["Model"]; present {
+		t.Fatalf("mixed-case alias was not removed: %v", agent)
+	}
+	if _, present := agent["MODEL"]; present {
+		t.Fatalf("uppercase alias was not removed: %v", agent)
+	}
+	if agent["prompt"] != "canonical-prompt" ||
+		agent["bare"] != true ||
+		agent["no_session_persistence"] != false ||
+		agent["execution_timeout"] != "20m" {
+		t.Fatalf("pass-through canonical leaves did not win: %v", agent)
+	}
+	for _, alias := range []string{"Prompt", "Bare", "No_Session_Persistence", "Execution_Timeout"} {
+		if _, present := agent[alias]; present {
+			t.Fatalf("pass-through alias %q was not removed: %v", alias, agent)
+		}
+	}
+}
+
+func TestSanitizeLegacyAgentExecutionPolicyMap_DangerousAliasesFailClosed(t *testing.T) {
+	tests := []struct {
+		name  string
+		flags map[string]any
+		want  bool
+	}{
+		{
+			name:  "single canonical true",
+			flags: map[string]any{"dangerously_skip_perms": true},
+			want:  true,
+		},
+		{
+			name:  "single alias true",
+			flags: map[string]any{"DANGEROUSLY_SKIP_PERMS": true},
+			want:  true,
+		},
+		{
+			name: "canonical true plus alias false",
+			flags: map[string]any{
+				"dangerously_skip_perms": true,
+				"DANGEROUSLY_SKIP_PERMS": false,
+			},
+			want: false,
+		},
+		{
+			name: "aliases all true",
+			flags: map[string]any{
+				"Dangerously_Skip_Perms": true,
+				"DANGEROUSLY_SKIP_PERMS": true,
+			},
+			want: true,
+		},
+		{
+			name: "aliases mixed",
+			flags: map[string]any{
+				"Dangerously_Skip_Perms": true,
+				"DANGEROUSLY_SKIP_PERMS": false,
+			},
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := make(map[string]any, len(tc.flags))
+			for key, value := range tc.flags {
+				agent[key] = value
+			}
+			m := map[string]any{
+				"ai": map[string]any{
+					"agents": map[string]any{"claude": agent},
+				},
+			}
+			if err := SanitizeLegacyAgentExecutionPolicyMap(m, "test TOML"); err != nil {
+				t.Fatalf("sanitize dangerous aliases: %v", err)
+			}
+			if got, ok := agent["dangerously_skip_perms"].(bool); !ok || got != tc.want {
+				t.Fatalf("canonical dangerous value = %v, want %v (map: %v)", got, tc.want, agent)
+			}
+			for key := range agent {
+				if key != "dangerously_skip_perms" && strings.EqualFold(key, "dangerously_skip_perms") {
+					t.Fatalf("dangerous alias %q survived: %v", key, agent)
+				}
+			}
+		})
+	}
+}
+
+func TestSanitizeLegacyAgentExecutionPolicyMap_RejectsAmbiguousAliases(t *testing.T) {
+	agent := map[string]any{
+		"Model": "first-alias",
+		"MODEL": "second-alias",
+	}
+	m := map[string]any{
+		"ai": map[string]any{
+			"agents": map[string]any{"codex": agent},
+		},
+	}
+
+	err := SanitizeLegacyAgentExecutionPolicyMap(m, "test TOML")
+	if err == nil {
+		t.Fatal("ambiguous aliases unexpectedly accepted")
+	}
+	got := err.Error()
+	for _, want := range []string{`ambiguous aliases for "model"`, "MODEL, Model", `canonical "model"`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("error %q does not contain actionable detail %q", got, want)
+		}
+	}
+}
+
 // ── LoadOrCreate ─────────────────────────────────────────────────────────────
 
 func TestLoadOrCreate_Creates(t *testing.T) {

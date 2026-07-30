@@ -85,67 +85,6 @@ func TestDaemonLogPath_FallsBackToNativeWhenDataDirUnset(t *testing.T) {
 	}
 }
 
-// TestStripDangerousAgentFlags_HandlesUnexpectedShapes pins the
-// type-assertion guards: callers feed the scrubber a merged config
-// map whose interior types come from JSON decoding plus a TOML round
-// trip, and weird shapes (nil, scalars where maps are expected)
-// must never panic. PATCH validation enforces shape strictly today,
-// but the scrubber must remain safe even if a future ValidateMap
-// becomes more permissive.
-func TestStripDangerousAgentFlags_HandlesUnexpectedShapes(t *testing.T) {
-	cases := []map[string]any{
-		nil,
-		{},
-		{"ai": "not a map"},
-		{"ai": map[string]any{"agents": nil}},
-		{"ai": map[string]any{"agents": "string"}},
-		{"ai": map[string]any{"agents": map[string]any{"claude": nil}}},
-		{"ai": map[string]any{"agents": map[string]any{"claude": "string"}}},
-		{"ai": map[string]any{"repos": "string"}},
-		{"ai": map[string]any{"repos": map[string]any{"org/r": "string"}}},
-		{"ai": map[string]any{"repos": map[string]any{"org/r": map[string]any{"agents": "string"}}}},
-		{"ai": map[string]any{"orgs": map[string]any{"org": map[string]any{"agents": map[string]any{"claude": nil}}}}},
-	}
-	for _, m := range cases {
-		stripDangerousAgentFlags(m) // must not panic
-	}
-}
-
-func TestStripDangerousAgentFlags_ReportsCount(t *testing.T) {
-	m := map[string]any{
-		"ai": map[string]any{
-			"agents": map[string]any{
-				"claude": map[string]any{"dangerously_skip_perms": true, "permission_mode": "acceptEdits"},
-				"gemini": map[string]any{"DANGEROUSLY_SKIP_PERMS": true},
-			},
-			"repos": map[string]any{
-				"org/r": map[string]any{
-					"agents": map[string]any{
-						"claude": map[string]any{"Dangerously_Skip_Perms": true},
-					},
-				},
-			},
-			"orgs": map[string]any{
-				"org": map[string]any{
-					"agents": map[string]any{
-						"claude": map[string]any{"dangerously_skip_perms": true},
-					},
-				},
-			},
-		},
-	}
-	n := stripDangerousAgentFlags(m)
-	if n != 4 {
-		t.Fatalf("stripped count = %d, want 4 (global x2 + repo + org)", n)
-	}
-	ai := m["ai"].(map[string]any)
-	agents := ai["agents"].(map[string]any)
-	claude := agents["claude"].(map[string]any)
-	if claude["permission_mode"] != "acceptEdits" {
-		t.Errorf("permission_mode lost: %v", claude)
-	}
-}
-
 func TestValidateCanonicalConfigPatchKeys(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -163,7 +102,7 @@ func TestValidateCanonicalConfigPatchKeys(t *testing.T) {
 			},
 		},
 		{
-			name: "canonical repo and org agent trees",
+			name: "repo and org agent trees are unsupported",
 			patch: map[string]any{
 				"ai": map[string]any{
 					"repos": map[string]any{
@@ -182,9 +121,31 @@ func TestValidateCanonicalConfigPatchKeys(t *testing.T) {
 					},
 				},
 			},
+			wantErr: true,
 		},
 		{
-			name: "dangerous leaf aliases remain eligible for the scrubber",
+			name: "dangerous false reduces privilege",
+			patch: map[string]any{
+				"ai": map[string]any{
+					"agents": map[string]any{
+						"claude": map[string]any{"dangerously_skip_perms": false},
+					},
+				},
+			},
+		},
+		{
+			name: "dangerous true cannot enable privilege",
+			patch: map[string]any{
+				"ai": map[string]any{
+					"agents": map[string]any{
+						"claude": map[string]any{"dangerously_skip_perms": true},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "dangerous leaf alias rejected",
 			patch: map[string]any{
 				"ai": map[string]any{
 					"agents": map[string]any{
@@ -192,6 +153,7 @@ func TestValidateCanonicalConfigPatchKeys(t *testing.T) {
 					},
 				},
 			},
+			wantErr: true,
 		},
 		{
 			name: "unsafe extra flags rejected in otherwise schema-ignored repo tree",
@@ -359,19 +321,26 @@ func TestValidateCanonicalConfigPatchKeys(t *testing.T) {
 	}
 }
 
-func TestValidateCanonicalScopedAgentPatchKeys(t *testing.T) {
+func TestRejectUnsupportedScopedAgentPatchKeys(t *testing.T) {
 	tests := []struct {
 		name    string
 		patch   map[string]any
 		wantErr bool
 	}{
 		{
-			name: "canonical",
+			name: "no agent tree",
+			patch: map[string]any{
+				"primary": "codex",
+			},
+		},
+		{
+			name: "canonical but unsupported",
 			patch: map[string]any{
 				"agents": map[string]any{
 					"claude": map[string]any{"permission_mode": "acceptEdits"},
 				},
 			},
+			wantErr: true,
 		},
 		{
 			name: "case variant",
@@ -394,12 +363,12 @@ func TestValidateCanonicalScopedAgentPatchKeys(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateCanonicalScopedAgentPatchKeys(tc.patch, "ai.repos.org/repo")
+			err := rejectUnsupportedScopedAgentPatchKeys(tc.patch, "ai.repos.org/repo")
 			if tc.wantErr && err == nil {
-				t.Fatal("expected casing validation error")
+				t.Fatal("expected scoped agent rejection")
 			}
 			if !tc.wantErr && err != nil {
-				t.Fatalf("unexpected casing validation error: %v", err)
+				t.Fatalf("unexpected scoped rejection: %v", err)
 			}
 		})
 	}

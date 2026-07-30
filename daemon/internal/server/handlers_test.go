@@ -1189,9 +1189,9 @@ func TestHandlerPutConfig_WritableAndReadOnly_Mixed(t *testing.T) {
 }
 
 func TestHandlerPutConfig_AgentConfigs_RejectsDangerouslySkipPerms(t *testing.T) {
-	// Security gate M-5: --dangerously-skip-permissions cannot be flipped
+	// Security gate M-5: --dangerously-skip-permissions cannot be enabled
 	// over HTTP. The handler must 400 with a message that points the
-	// operator at config.toml so the toggle never lands in sqlite.
+	// operator at config.toml so true never lands in sqlite.
 	srv, _ := setupServer(t)
 	body := `{"agent_configs":{"claude":{"dangerously_skip_perms":true}}}`
 	w := httptest.NewRecorder()
@@ -1201,6 +1201,23 @@ func TestHandlerPutConfig_AgentConfigs_RejectsDangerouslySkipPerms(t *testing.T)
 	}
 	if !strings.Contains(w.Body.String(), "dangerously_skip_perms") {
 		t.Errorf("error message must name the rejected key, got: %s", w.Body.String())
+	}
+}
+
+func TestHandlerPutConfig_AgentConfigs_AllowsDisablingDangerouslySkipPerms(t *testing.T) {
+	srv, s := setupServer(t)
+	body := `{"agent_configs":{"claude":{"dangerously_skip_perms":false}}}`
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, putConfigRequest(body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+	rows, err := s.ListConfigs()
+	if err != nil {
+		t.Fatalf("ListConfigs: %v", err)
+	}
+	if got := rows["agent_configs"]; !strings.Contains(got, `"dangerously_skip_perms":false`) {
+		t.Fatalf("explicit safety downgrade was not persisted: %q", got)
 	}
 }
 
@@ -1809,13 +1826,9 @@ func TestHandlePatchConfig_RepoListsWriteTOML(t *testing.T) {
 	}
 }
 
-func TestHandlePatchConfig_StripsDangerouslySkipPerms(t *testing.T) {
-	// Security gate M-5: PUT /config rejects dangerously_skip_perms with
-	// a 400. PATCH /config deep-merges arbitrary JSON; before this fix it
-	// silently persisted the flag, granting AI runs --dangerously-skip-
-	// permissions on the next reload. The PATCH path must scrub the flag
-	// out of every agent under ai.agents before validating + writing TOML
-	// so HTTP can never flip the toggle.
+func TestHandlePatchConfig_RejectsDangerouslySkipPermsEnable(t *testing.T) {
+	// Security gate M-5 must be explicit: HTTP callers cannot enable the
+	// bypass, and a rejected payload must not partially apply safe siblings.
 	tomlContent := "[ai]\nprimary = \"claude\"\n"
 	tomlPath := writeTempTOML(t, tomlContent)
 
@@ -1829,43 +1842,34 @@ func TestHandlePatchConfig_StripsDangerouslySkipPerms(t *testing.T) {
 	w := httptest.NewRecorder()
 	srv.Router().ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("PATCH should succeed (other fields land), got %d (body: %s)", w.Code, w.Body.String())
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("PATCH enable = %d, want 400 (body: %s)", w.Code, w.Body.String())
 	}
-
-	m, err := config.ReadTOMLMap(tomlPath)
+	if !strings.Contains(w.Body.String(), "cannot be enabled") {
+		t.Fatalf("PATCH error is not actionable: %s", w.Body.String())
+	}
+	got, err := os.ReadFile(tomlPath)
 	if err != nil {
-		t.Fatalf("read TOML after PATCH: %v", err)
+		t.Fatalf("read TOML after rejected PATCH: %v", err)
 	}
-	ai, _ := m["ai"].(map[string]any)
-	agents, _ := ai["agents"].(map[string]any)
-	claude, ok := agents["claude"].(map[string]any)
-	if !ok {
-		t.Fatalf("ai.agents.claude missing after PATCH: %v", agents)
-	}
-	if _, present := claude["dangerously_skip_perms"]; present {
-		t.Fatalf("dangerously_skip_perms persisted via PATCH (M-5 bypass): %v", claude)
-	}
-	// Sanity: other legal fields landed so the strip is targeted, not nuking the whole section.
-	if claude["permission_mode"] != "acceptEdits" {
-		t.Errorf("permission_mode = %v, want acceptEdits (legal fields must still land)", claude["permission_mode"])
+	if string(got) != tomlContent {
+		t.Fatalf("rejected PATCH partially changed TOML:\n%s", got)
 	}
 }
 
-func TestHandlePatchConfig_PreservesTrustedDangerousFlag(t *testing.T) {
-	tomlContent := "[ai]\n" +
+func TestHandlePatchConfig_DisablesAndCanonicalizesTrustedDangerousAlias(t *testing.T) {
+	tomlContent := "[AI]\n" +
 		"primary = \"claude\"\n" +
-		"[ai.agents.claude]\n" +
-		"dangerously_skip_perms = true\n" +
+		"[AI.Agents.claude]\n" +
+		"DANGEROUSLY_SKIP_PERMS = true\n" +
 		"permission_mode = \"default\"\n"
 	tomlPath := writeTempTOML(t, tomlContent)
 
 	srv := setupServerWithToken(t, "test-token")
 	srv.SetConfigPath(tomlPath)
 
-	// HTTP cannot enable or disable the filesystem-trusted gate. The attempted
-	// false value is removed from the payload before merge, while legal sibling
-	// fields still apply.
+	// HTTP may reduce privilege. False must persist rather than being silently
+	// stripped, while legal sibling fields still apply atomically.
 	body := `{"ai":{"agents":{"claude":{"dangerously_skip_perms":false,"permission_mode":"acceptEdits"}}}}`
 	req := httptest.NewRequest("PATCH", "/config", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -1881,14 +1885,38 @@ func TestHandlePatchConfig_PreservesTrustedDangerousFlag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read TOML after PATCH: %v", err)
 	}
+	for key := range m {
+		if strings.EqualFold(key, "ai") && key != "ai" {
+			t.Fatalf("legacy structural alias %q survived PATCH: %v", key, m)
+		}
+	}
 	ai, _ := m["ai"].(map[string]any)
+	for key := range ai {
+		if strings.EqualFold(key, "agents") && key != "agents" {
+			t.Fatalf("legacy agents alias %q survived PATCH: %v", key, ai)
+		}
+	}
 	agents, _ := ai["agents"].(map[string]any)
 	claude, _ := agents["claude"].(map[string]any)
-	if got, ok := claude["dangerously_skip_perms"].(bool); !ok || !got {
-		t.Fatalf("trusted dangerously_skip_perms was changed by HTTP PATCH: %v", claude)
+	if got, ok := claude["dangerously_skip_perms"].(bool); !ok || got {
+		t.Fatalf("dangerously_skip_perms was not disabled by HTTP PATCH: %v", claude)
+	}
+	for key := range claude {
+		if strings.EqualFold(key, "dangerously_skip_perms") && key != "dangerously_skip_perms" {
+			t.Fatalf("legacy dangerous alias %q survived PATCH: %v", key, claude)
+		}
 	}
 	if claude["permission_mode"] != "acceptEdits" {
 		t.Fatalf("legal sibling field did not land: %v", claude)
+	}
+	for i := 0; i < 32; i++ {
+		loaded, err := config.Load(tomlPath)
+		if err != nil {
+			t.Fatalf("Load iteration %d after PATCH: %v", i, err)
+		}
+		if loaded.AI.Agents["claude"].DangerouslySkipPerms {
+			t.Fatalf("Load iteration %d re-enabled dangerously_skip_perms", i)
+		}
 	}
 }
 
@@ -1929,6 +1957,41 @@ func TestHandlePatchConfig_MigratesLegacyTOMLBaseBeforeInnocuousPatch(t *testing
 	}
 }
 
+func TestHandlePatchConfig_ReportsAmbiguousTrustedAliases(t *testing.T) {
+	tomlContent := "[ai]\n" +
+		"primary = \"codex\"\n" +
+		"[ai.agents.codex]\n" +
+		"Model = \"first\"\n" +
+		"MODEL = \"second\"\n"
+	tomlPath := writeTempTOML(t, tomlContent)
+
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+	req := httptest.NewRequest(
+		"PATCH",
+		"/config",
+		strings.NewReader(`{"github":{"poll_interval":"10m"}}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("ambiguous trusted base PATCH = %d, want 400 (body: %s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "ambiguous aliases") {
+		t.Fatalf("ambiguous trusted base error is not actionable: %s", w.Body.String())
+	}
+	got, err := os.ReadFile(tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != tomlContent {
+		t.Fatalf("rejected PATCH changed ambiguous TOML:\n%s", got)
+	}
+}
+
 func TestHandlePatchConfig_RejectsNewLegacyTypedFlagWithoutChangingTOML(t *testing.T) {
 	tomlContent := "[ai]\nprimary = \"codex\"\n"
 	tomlPath := writeTempTOML(t, tomlContent)
@@ -1955,11 +2018,9 @@ func TestHandlePatchConfig_RejectsNewLegacyTypedFlagWithoutChangingTOML(t *testi
 	}
 }
 
-func TestHandlePatchConfig_StripsDangerouslySkipPermsCaseInsensitive(t *testing.T) {
-	// JSON preserves key casing; the merged map then feeds into a
-	// Go struct via mapstructure/koanf, which is case-insensitive
-	// by default — so a payload using mixed/upper casing would
-	// otherwise bypass an exact-match strip.
+func TestHandlePatchConfig_RejectsDangerouslySkipPermsCaseAliases(t *testing.T) {
+	// JSON preserves key casing while downstream decoding is case-insensitive.
+	// Reject aliases explicitly instead of relying on a silent scrub.
 	tomlContent := "[ai]\nprimary = \"claude\"\n"
 	tomlPath := writeTempTOML(t, tomlContent)
 
@@ -1977,23 +2038,15 @@ func TestHandlePatchConfig_StripsDangerouslySkipPermsCaseInsensitive(t *testing.
 	w := httptest.NewRecorder()
 	srv.Router().ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("PATCH should succeed, got %d (body: %s)", w.Code, w.Body.String())
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("PATCH aliases = %d, want 400 (body: %s)", w.Code, w.Body.String())
 	}
-
-	m, _ := config.ReadTOMLMap(tomlPath)
-	ai, _ := m["ai"].(map[string]any)
-	agents, _ := ai["agents"].(map[string]any)
-	for _, name := range []string{"claude", "gemini", "codex"} {
-		inner, ok := agents[name].(map[string]any)
-		if !ok {
-			continue
-		}
-		for k := range inner {
-			if strings.EqualFold(k, "dangerously_skip_perms") {
-				t.Errorf("case-variant %q persisted for %s (M-5 bypass)", k, name)
-			}
-		}
+	got, err := os.ReadFile(tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != tomlContent {
+		t.Fatalf("rejected alias PATCH changed TOML:\n%s", got)
 	}
 }
 
@@ -2089,11 +2142,65 @@ func TestHandleScopedPatchConfig_RejectsCaseVariantAgentTree(t *testing.T) {
 	}
 }
 
-func TestHandlePatchConfig_StripsDangerouslySkipPermsInRepoOverride(t *testing.T) {
-	// Per-repo overrides land at ai.repos.<repo>.agents.<cli>.* in
-	// the merged map. The scrubber must walk those too so a buggy
-	// future schema or a koanf-style alias can't grant the flag via
-	// a non-top-level path.
+func TestHandlePatchConfig_RejectsUnsupportedScopedAgentSafetyDowngrade(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		body string
+	}{
+		{
+			name: "repo endpoint",
+			path: "/config/repos/" + url.PathEscape("org/repo"),
+			body: `{"agents":{"claude":{"dangerously_skip_perms":false}}}`,
+		},
+		{
+			name: "org endpoint",
+			path: "/config/orgs/" + url.PathEscape("org"),
+			body: `{"agents":{"claude":{"dangerously_skip_perms":false}}}`,
+		},
+		{
+			name: "repo in global endpoint",
+			path: "/config",
+			body: `{"ai":{"repos":{"org/repo":{"agents":{"claude":{"dangerously_skip_perms":false}}}}}}`,
+		},
+		{
+			name: "org in global endpoint",
+			path: "/config",
+			body: `{"ai":{"orgs":{"org":{"agents":{"claude":{"dangerously_skip_perms":false}}}}}}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tomlContent := "[ai]\nprimary = \"claude\"\n"
+			tomlPath := writeTempTOML(t, tomlContent)
+			srv := setupServerWithToken(t, "test-token")
+			srv.SetConfigPath(tomlPath)
+
+			req := httptest.NewRequest("PATCH", tc.path, strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Heimdallm-Token", "test-token")
+			w := httptest.NewRecorder()
+			srv.Router().ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("scoped agent PATCH = %d, want 400 (body: %s)", w.Code, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), "not supported") {
+				t.Fatalf("scoped rejection is not actionable: %s", w.Body.String())
+			}
+			got, err := os.ReadFile(tomlPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != tomlContent {
+				t.Fatalf("rejected scoped PATCH changed TOML:\n%s", got)
+			}
+		})
+	}
+}
+
+func TestHandlePatchConfig_RejectsDangerouslySkipPermsInRepoOverride(t *testing.T) {
 	tomlContent := "[ai]\nprimary = \"claude\"\n"
 	tomlPath := writeTempTOML(t, tomlContent)
 
@@ -2107,31 +2214,19 @@ func TestHandlePatchConfig_StripsDangerouslySkipPermsInRepoOverride(t *testing.T
 	w := httptest.NewRecorder()
 	srv.Router().ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("PATCH should succeed, got %d (body: %s)", w.Code, w.Body.String())
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("repo PATCH enable = %d, want 400 (body: %s)", w.Code, w.Body.String())
 	}
-
-	m, _ := config.ReadTOMLMap(tomlPath)
-	ai, _ := m["ai"].(map[string]any)
-	repos, _ := ai["repos"].(map[string]any)
-	repo, ok := repos["org/repo"].(map[string]any)
-	if !ok {
-		return
+	got, err := os.ReadFile(tomlPath)
+	if err != nil {
+		t.Fatal(err)
 	}
-	agents, ok := repo["agents"].(map[string]any)
-	if !ok {
-		return
-	}
-	claude, ok := agents["claude"].(map[string]any)
-	if !ok {
-		return
-	}
-	if _, present := claude["dangerously_skip_perms"]; present {
-		t.Fatalf("repo-level dangerously_skip_perms persisted (M-5 bypass): %v", claude)
+	if string(got) != tomlContent {
+		t.Fatalf("rejected repo PATCH changed TOML:\n%s", got)
 	}
 }
 
-func TestHandlePatchConfig_StripsDangerouslySkipPermsInOrgOverride(t *testing.T) {
+func TestHandlePatchConfig_RejectsDangerouslySkipPermsInOrgOverride(t *testing.T) {
 	tomlContent := "[ai]\nprimary = \"claude\"\n"
 	tomlPath := writeTempTOML(t, tomlContent)
 
@@ -2145,31 +2240,19 @@ func TestHandlePatchConfig_StripsDangerouslySkipPermsInOrgOverride(t *testing.T)
 	w := httptest.NewRecorder()
 	srv.Router().ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("PATCH should succeed, got %d (body: %s)", w.Code, w.Body.String())
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("org PATCH enable = %d, want 400 (body: %s)", w.Code, w.Body.String())
 	}
-
-	m, _ := config.ReadTOMLMap(tomlPath)
-	ai, _ := m["ai"].(map[string]any)
-	orgs, _ := ai["orgs"].(map[string]any)
-	org, ok := orgs["org"].(map[string]any)
-	if !ok {
-		return
+	got, err := os.ReadFile(tomlPath)
+	if err != nil {
+		t.Fatal(err)
 	}
-	agents, ok := org["agents"].(map[string]any)
-	if !ok {
-		return
-	}
-	claude, ok := agents["claude"].(map[string]any)
-	if !ok {
-		return
-	}
-	if _, present := claude["dangerously_skip_perms"]; present {
-		t.Fatalf("org-level dangerously_skip_perms persisted (M-5 bypass): %v", claude)
+	if string(got) != tomlContent {
+		t.Fatalf("rejected org PATCH changed TOML:\n%s", got)
 	}
 }
 
-func TestHandlePatchConfig_StripsDangerouslySkipPermsAcrossAllAgents(t *testing.T) {
+func TestHandlePatchConfig_RejectsDangerouslySkipPermsAcrossAllAgents(t *testing.T) {
 	// Same gate applied to every CLI under ai.agents — an attacker may
 	// try flipping the flag on a less-watched agent.
 	tomlContent := "[ai]\nprimary = \"claude\"\n"
@@ -2190,21 +2273,15 @@ func TestHandlePatchConfig_StripsDangerouslySkipPermsAcrossAllAgents(t *testing.
 	w := httptest.NewRecorder()
 	srv.Router().ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("PATCH failed: %d (body: %s)", w.Code, w.Body.String())
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("multi-agent PATCH enable = %d, want 400 (body: %s)", w.Code, w.Body.String())
 	}
-
-	m, _ := config.ReadTOMLMap(tomlPath)
-	ai, _ := m["ai"].(map[string]any)
-	agents, _ := ai["agents"].(map[string]any)
-	for _, name := range []string{"claude", "gemini", "codex", "opencode"} {
-		inner, ok := agents[name].(map[string]any)
-		if !ok {
-			continue
-		}
-		if _, present := inner["dangerously_skip_perms"]; present {
-			t.Errorf("dangerously_skip_perms persisted for %s (M-5 bypass)", name)
-		}
+	got, err := os.ReadFile(tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != tomlContent {
+		t.Fatalf("rejected multi-agent PATCH changed TOML:\n%s", got)
 	}
 }
 

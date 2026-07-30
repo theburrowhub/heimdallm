@@ -66,8 +66,9 @@ func TestApplyStore_AgentConfigs_SafeFalseBoolsOverrideTOMLTrue(t *testing.T) {
 	// an operator who flips bare=false in the UI must override a TOML
 	// bare=true. With omitempty on the bool tag, a direct Marshal of
 	// CLIAgentConfig would drop the false and ApplyStore's merge-into-existing
-	// path would preserve the TOML true. dangerously_skip_perms is different:
-	// it is filesystem-trusted and a legacy HTTP/store row must not alter it.
+	// path would preserve the TOML true. dangerously_skip_perms deliberately
+	// uses asymmetric security semantics: a stored false may reduce privilege,
+	// while a stored true may never grant it.
 	cfg := &Config{}
 	cfg.applyDefaults()
 	cfg.AI.Agents = map[string]CLIAgentConfig{
@@ -84,8 +85,8 @@ func TestApplyStore_AgentConfigs_SafeFalseBoolsOverrideTOMLTrue(t *testing.T) {
 	if got.Bare {
 		t.Errorf("Bare: stored false did not override TOML true")
 	}
-	if !got.DangerouslySkipPerms {
-		t.Errorf("DangerouslySkipPerms: legacy store row overrode trusted TOML true")
+	if got.DangerouslySkipPerms {
+		t.Errorf("DangerouslySkipPerms: stored false did not disable TOML true")
 	}
 	if got.NoSessionPersistence {
 		t.Errorf("NoSessionPersistence: stored false did not override TOML true")
@@ -111,6 +112,62 @@ func TestApplyStore_AgentConfigs_CannotEnableDangerouslySkipPerms(t *testing.T) 
 	}
 	if got.Model != "safe-model" {
 		t.Errorf("safe sibling field was not applied: %v", got)
+	}
+}
+
+func TestApplyStore_AgentConfigs_DangerouslySkipPermsAsymmetricMatrix(t *testing.T) {
+	tests := []struct {
+		name    string
+		base    bool
+		payload string
+		want    bool
+	}{
+		{
+			name:    "omitted preserves trusted true",
+			base:    true,
+			payload: `{"claude":{"model":"safe"}}`,
+			want:    true,
+		},
+		{
+			name:    "false disables trusted true",
+			base:    true,
+			payload: `{"claude":{"dangerously_skip_perms":false}}`,
+			want:    false,
+		},
+		{
+			name:    "true cannot elevate false",
+			base:    false,
+			payload: `{"claude":{"dangerously_skip_perms":true}}`,
+			want:    false,
+		},
+		{
+			name:    "true cannot replace trusted source",
+			base:    true,
+			payload: `{"claude":{"dangerously_skip_perms":true}}`,
+			want:    true,
+		},
+		{
+			name:    "false wins conflicting legacy aliases",
+			base:    true,
+			payload: `{"claude":{"DANGEROUSLY_SKIP_PERMS":true,"dangerously_skip_perms":false}}`,
+			want:    false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{}
+			cfg.applyDefaults()
+			cfg.AI.Agents = map[string]CLIAgentConfig{
+				"claude": {DangerouslySkipPerms: tc.base},
+			}
+			if err := cfg.ApplyStore(map[string]string{"agent_configs": tc.payload}); err != nil {
+				t.Fatalf("ApplyStore: %v", err)
+			}
+			if got := cfg.AI.Agents["claude"].DangerouslySkipPerms; got != tc.want {
+				t.Fatalf("DangerouslySkipPerms = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

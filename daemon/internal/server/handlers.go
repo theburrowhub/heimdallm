@@ -301,7 +301,7 @@ func (srv *Server) writeTOMLUnderLock(mutateFn func(m map[string]any) error) (ma
 	// flags can no longer block an unrelated edit without creating a path for a
 	// new payload to smuggle those flags into ExtraFlags.
 	if err := config.SanitizeLegacyAgentExecutionPolicyMap(m, "toml PATCH base"); err != nil {
-		return nil, err
+		return nil, &config.ValidationError{Err: err}
 	}
 	if err := mutateFn(m); err != nil {
 		return nil, err
@@ -675,10 +675,9 @@ var readOnlyConfigKeys = map[string]struct{}{
 }
 
 // allowedAgentConfigSubkeys is the per-agent allowlist for PUT /config.
-// Mirrors CLIAgentConfig fields exposed via the Flutter UI. Note the deliberate
-// omission of dangerously_skip_perms (M-5): toggling --dangerously-skip-permissions
-// at runtime over HTTP would let an attacker with API access escalate the
-// agent's effective permissions. That field stays TOML/env-only.
+// Mirrors CLIAgentConfig fields exposed via the Flutter UI. The asymmetric
+// dangerously_skip_perms gate is handled separately: HTTP may persist false
+// to reduce privilege, but true remains TOML/env-only.
 var allowedAgentConfigSubkeys = map[string]struct{}{
 	"model":                  {},
 	"max_turns":              {},
@@ -854,7 +853,6 @@ func (srv *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	stripHTTPDangerousAgentFlags(patch)
 	if err := config.ContainsNull(patch); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": "null values not allowed in PATCH — use DELETE to remove fields",
@@ -908,7 +906,7 @@ func (srv *Server) handlePatchRepoConfig(w http.ResponseWriter, r *http.Request)
 		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
 		return
 	}
-	if err := validateCanonicalScopedAgentPatchKeys(patch, "ai.repos"); err != nil {
+	if err := rejectUnsupportedScopedAgentPatchKeys(patch, "ai.repos"); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -927,7 +925,6 @@ func (srv *Server) handlePatchRepoConfig(w http.ResponseWriter, r *http.Request)
 			},
 		},
 	}
-	stripHTTPDangerousAgentFlags(globalPatch)
 
 	result, err := srv.patchTOML(func(m map[string]any) error {
 		merged := config.DeepMerge(m, globalPatch)
@@ -974,7 +971,7 @@ func (srv *Server) handlePatchOrgConfig(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
 		return
 	}
-	if err := validateCanonicalScopedAgentPatchKeys(patch, "ai.orgs"); err != nil {
+	if err := rejectUnsupportedScopedAgentPatchKeys(patch, "ai.orgs"); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -993,7 +990,6 @@ func (srv *Server) handlePatchOrgConfig(w http.ResponseWriter, r *http.Request) 
 			},
 		},
 	}
-	stripHTTPDangerousAgentFlags(globalPatch)
 
 	result, err := srv.patchTOML(func(m map[string]any) error {
 		merged := config.DeepMerge(m, globalPatch)
@@ -2145,9 +2141,8 @@ func tailLines(f *os.File, n int) []string {
 }
 
 // dangerousAgentFlagKey names the security-gated flag that grants
-// `--dangerously-skip-permissions` to the AI CLI. Both
-// normalizeAgentConfigsForPut and stripDangerousAgentFlags reference
-// this constant so the M-5 denylist has a single source of truth.
+// `--dangerously-skip-permissions` to the AI CLI. HTTP callers may explicitly
+// disable it, but enabling it requires trusted TOML/env access.
 const dangerousAgentFlagKey = "dangerously_skip_perms"
 
 var canonicalAgentConfigKeys = []string{
@@ -2195,10 +2190,24 @@ func canonicalMapChild(m map[string]any, canonicalKey, path string) (map[string]
 
 func validateCanonicalAgentConfigKeys(cli string, agent map[string]any, path string) error {
 	for key, value := range agent {
-		// Keep the existing case-insensitive scrub semantics for
-		// dangerously_skip_perms: every spelling is removed and audit-logged
-		// later by stripDangerousAgentFlags.
 		if strings.EqualFold(key, dangerousAgentFlagKey) {
+			if key != dangerousAgentFlagKey {
+				return fmt.Errorf(
+					"config PATCH key %q must use canonical casing %q",
+					path+"."+key, path+"."+dangerousAgentFlagKey,
+				)
+			}
+			requested, ok := value.(bool)
+			if !ok {
+				return fmt.Errorf("config PATCH key %q must be a boolean", path+"."+key)
+			}
+			if requested {
+				return fmt.Errorf(
+					"config PATCH key %q cannot be enabled via HTTP API; "+
+						"configure it directly in config.toml (security gate M-5)",
+					path+"."+key,
+				)
+			}
 			continue
 		}
 		for _, canonical := range canonicalAgentConfigKeys {
@@ -2287,12 +2296,30 @@ func validateCanonicalAgentCollection(agents map[string]any, path string) error 
 	return nil
 }
 
-func validateCanonicalScopedAgentPatchKeys(patch map[string]any, path string) error {
+func validateCanonicalAgentPatchKeysAtPath(patch map[string]any, path string) error {
 	agents, ok, err := canonicalMapChild(patch, "agents", path)
 	if err != nil || !ok {
 		return err
 	}
 	return validateCanonicalAgentCollection(agents, path+".agents")
+}
+
+func rejectUnsupportedScopedAgentPatchKeys(patch map[string]any, path string) error {
+	agents, present, err := canonicalMapChild(patch, "agents", path)
+	if err != nil || !present {
+		return err
+	}
+	// Validate first so attempts to enable the dangerous gate and casing
+	// aliases retain their precise security error. A valid-looking false is
+	// still rejected: repo/org agent execution profiles are not consumed by
+	// AgentConfigFor, so persisting one would falsely imply a safety downgrade.
+	if err := validateCanonicalAgentCollection(agents, path+".agents"); err != nil {
+		return err
+	}
+	return fmt.Errorf(
+		"config PATCH key %q is not supported; configure execution options under ai.agents",
+		path+".agents",
+	)
 }
 
 // validateCanonicalConfigPatchKeys rejects case-variant structural aliases
@@ -2304,7 +2331,7 @@ func validateCanonicalConfigPatchKeys(patch map[string]any) error {
 		return err
 	}
 	if ok {
-		if err := validateCanonicalScopedAgentPatchKeys(ai, "ai"); err != nil {
+		if err := validateCanonicalAgentPatchKeysAtPath(ai, "ai"); err != nil {
 			return err
 		}
 		for _, scope := range []string{"repos", "orgs"} {
@@ -2320,7 +2347,7 @@ func validateCanonicalConfigPatchKeys(patch map[string]any) error {
 				if !mapOK {
 					continue
 				}
-				if err := validateCanonicalScopedAgentPatchKeys(override, "ai."+scope+"."+id); err != nil {
+				if err := rejectUnsupportedScopedAgentPatchKeys(override, "ai."+scope+"."+id); err != nil {
 					return err
 				}
 			}
@@ -2372,89 +2399,13 @@ func rejectAutonomousAgentPatch(patch map[string]any, path string) error {
 	)
 }
 
-func stripHTTPDangerousAgentFlags(patch map[string]any) {
-	if stripped := stripDangerousAgentFlags(patch); stripped > 0 {
-		slog.Warn("config: PATCH attempted to set dangerously_skip_perms; stripped (M-5 gate)",
-			"count", stripped)
-	}
-}
-
-// stripDangerousAgentFlags removes the HTTP-forbidden
-// dangerously_skip_perms flag from every agent map reachable in the
-// merged config: top-level ai.agents.<cli>, per-repo
-// ai.repos.<repo>.agents.<cli>, and per-org ai.orgs.<org>.agents.<cli>.
-// The flag is still settable via direct edits to config.toml
-// (security gate M-5: only filesystem-trusted inputs can grant the
-// permission-sandbox bypass), but never via the HTTP API.
-//
-// Returns the number of entries stripped so callers can audit-log
-// bypass attempts. Key comparison is case-insensitive because the
-// downstream koanf/mapstructure decoder is case-insensitive when
-// mapping into CLIAgentConfig.DangerouslySkipPerms — an exact-case
-// match would leave Dangerously_Skip_Perms / DANGEROUSLY_SKIP_PERMS
-// shaped payloads as a live bypass.
-//
-// Invoked on the canonicalized HTTP payload before DeepMerge. Scrubbing the
-// merged config would also erase a trusted value set directly in config.toml
-// whenever an unrelated PATCH is applied.
-func stripDangerousAgentFlags(m map[string]any) int {
-	if m == nil {
-		return 0
-	}
-	stripped := 0
-	scrub := func(agents map[string]any) {
-		for _, raw := range agents {
-			inner, ok := raw.(map[string]any)
-			if !ok {
-				continue
-			}
-			for k := range inner {
-				if strings.EqualFold(k, dangerousAgentFlagKey) {
-					delete(inner, k)
-					stripped++
-				}
-			}
-		}
-	}
-	ai, ok := m["ai"].(map[string]any)
-	if !ok {
-		return 0
-	}
-	if agents, ok := ai["agents"].(map[string]any); ok {
-		scrub(agents)
-	}
-	if repos, ok := ai["repos"].(map[string]any); ok {
-		for _, raw := range repos {
-			repo, ok := raw.(map[string]any)
-			if !ok {
-				continue
-			}
-			if agents, ok := repo["agents"].(map[string]any); ok {
-				scrub(agents)
-			}
-		}
-	}
-	if orgs, ok := ai["orgs"].(map[string]any); ok {
-		for _, raw := range orgs {
-			org, ok := raw.(map[string]any)
-			if !ok {
-				continue
-			}
-			if agents, ok := org["agents"].(map[string]any); ok {
-				scrub(agents)
-			}
-		}
-	}
-	return stripped
-}
-
 // normalizeAgentConfigsForPut validates the agent_configs payload from PUT
 // /config. The payload must be a JSON object keyed by CLI name (claude, gemini,
 // codex, opencode), where each value is itself an object whose keys are in
-// allowedAgentConfigSubkeys. Subkeys outside that set — including the
-// security-gated dangerously_skip_perms — return a 400 with a descriptive
-// message. permission_mode / approval_mode / extra_flags get value validation
-// against the executor allowlists.
+// allowedAgentConfigSubkeys. dangerously_skip_perms is the sole asymmetric
+// exception: false is accepted to reduce privilege, while true returns a 400.
+// permission_mode / approval_mode / extra_flags get value validation against
+// the executor allowlists.
 //
 // The returned map is shaped for json.Marshal so the persisted row deserializes
 // cleanly into map[string]CLIAgentConfig in ApplyStore.
@@ -2475,10 +2426,25 @@ func normalizeAgentConfigsForPut(v any) (map[string]map[string]any, error) {
 		normalized := make(map[string]any, len(inner))
 		for k, val := range inner {
 			if strings.EqualFold(k, dangerousAgentFlagKey) {
-				return nil, fmt.Errorf(
-					"agent_configs[%q].%s cannot be set via HTTP API; "+
-						"configure it in config.toml under [ai.agents.%s] (security gate M-5)",
-					cli, dangerousAgentFlagKey, cli)
+				if k != dangerousAgentFlagKey {
+					return nil, fmt.Errorf(
+						"agent_configs[%q].%s must use canonical casing %q",
+						cli, k, dangerousAgentFlagKey)
+				}
+				requested, isBool := val.(bool)
+				if !isBool {
+					return nil, fmt.Errorf(
+						"agent_configs[%q].%s must be a boolean",
+						cli, dangerousAgentFlagKey)
+				}
+				if requested {
+					return nil, fmt.Errorf(
+						"agent_configs[%q].%s cannot be enabled via HTTP API; "+
+							"configure it in config.toml under [ai.agents.%s] (security gate M-5)",
+						cli, dangerousAgentFlagKey, cli)
+				}
+				normalized[dangerousAgentFlagKey] = false
+				continue
 			}
 			if _, allowed := allowedAgentConfigSubkeys[k]; !allowed {
 				return nil, fmt.Errorf("agent_configs[%q]: unknown key %q", cli, k)

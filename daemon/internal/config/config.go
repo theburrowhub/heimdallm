@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -385,7 +386,7 @@ type CLIAgentConfig struct {
 	Effort               string `toml:"effort" json:"effort,omitempty"`                       // low|medium|high|max
 	PermissionMode       string `toml:"permission_mode" json:"permission_mode,omitempty"`     // default|auto|acceptEdits|dontAsk (bypassPermissions is explicitly forbidden)
 	Bare                 bool   `toml:"bare" json:"bare"`                                     // --bare
-	DangerouslySkipPerms bool   `toml:"dangerously_skip_perms" json:"dangerously_skip_perms"` // --dangerously-skip-permissions (cannot be set via HTTP API, see M-5)
+	DangerouslySkipPerms bool   `toml:"dangerously_skip_perms" json:"dangerously_skip_perms"` // --dangerously-skip-permissions (HTTP may only disable it, see M-5)
 	NoSessionPersistence bool   `toml:"no_session_persistence" json:"no_session_persistence"` // --no-session-persistence
 	ExecutionTimeout     string `toml:"execution_timeout" json:"execution_timeout,omitempty"` // per-agent override, e.g. "20m"
 }
@@ -1405,11 +1406,10 @@ func sanitizeLegacyAgentConfig(name string, agent CLIAgentConfig, source string)
 	}
 
 	opts, migrated := executor.MigrateLegacyTypedExtraFlagsForCLI(name, executor.ExecOptions{
-		Model:        agent.Model,
-		MaxTurns:     agent.MaxTurns,
-		ExtraFlags:   agent.ExtraFlags,
-		Effort:       agent.Effort,
-		ApprovalMode: agent.ApprovalMode,
+		Model:      agent.Model,
+		MaxTurns:   agent.MaxTurns,
+		ExtraFlags: agent.ExtraFlags,
+		Effort:     agent.Effort,
 	})
 	if len(migrated) > 0 {
 		slog.Warn("config: migrated legacy extra_flags to typed agent fields",
@@ -1419,6 +1419,11 @@ func sanitizeLegacyAgentConfig(name string, agent CLIAgentConfig, source string)
 	agent.MaxTurns = opts.MaxTurns
 	agent.Effort = opts.Effort
 	agent.ExtraFlags = opts.ExtraFlags
+	// MigrateLegacyTypedExtraFlagsForCLI currently emits only validated
+	// values. Keep the compatibility boundary defensive nevertheless: a
+	// future migration must not turn a formerly survivable legacy config into
+	// a startup failure by returning an unsafe typed value.
+	agent = sanitizeMigratedAgentExecutionFields(name, agent, source)
 	if err := executor.ValidateExtraFlagsForCLI(name, agent.ExtraFlags); err != nil {
 		slog.Warn("config: ignored unsafe legacy agent field",
 			"source", source, "agent", name, "field", "extra_flags", "err", err)
@@ -1427,59 +1432,115 @@ func sanitizeLegacyAgentConfig(name string, agent CLIAgentConfig, source string)
 	return agent
 }
 
+func sanitizeMigratedAgentExecutionFields(name string, agent CLIAgentConfig, source string) CLIAgentConfig {
+	agent.Model = strings.TrimSpace(agent.Model)
+	if err := executor.ValidateModel(agent.Model); err != nil {
+		slog.Warn("config: ignored unsafe migrated agent field",
+			"source", source, "agent", name, "field", "model", "err", err)
+		agent.Model = ""
+	}
+	if agent.MaxTurns < 0 {
+		slog.Warn("config: ignored invalid migrated agent field",
+			"source", source, "agent", name, "field", "max_turns",
+			"err", "value must be non-negative")
+		agent.MaxTurns = 0
+	}
+	if normalized, err := executor.NormalizeEffort(agent.Effort); err != nil {
+		slog.Warn("config: ignored unsafe migrated agent field",
+			"source", source, "agent", name, "field", "effort", "err", err)
+		agent.Effort = ""
+	} else {
+		agent.Effort = normalized
+	}
+	return agent
+}
+
 // SanitizeLegacyAgentExecutionPolicyMap migrates only the trusted agent
 // settings already present in a TOML map. HTTP handlers call this before
 // applying their separately validated payload, so an old local --model flag
 // cannot make an unrelated PATCH fail while a new HTTP --model flag remains a
-// strict 400. Unknown fields and the local-only dangerously_skip_perms gate are
-// left untouched.
+// strict 400. Known CLIAgentConfig leaves for supported providers are
+// canonicalized before any typed decode; unknown fields and inert provider
+// profiles remain untouched. Trusted dangerously_skip_perms values are
+// preserved, with conflicting aliases resolved fail-closed.
 func SanitizeLegacyAgentExecutionPolicyMap(m map[string]any, source string) error {
-	for aiKey, rawAI := range m {
-		if !strings.EqualFold(aiKey, "ai") {
+	ai, present, err := canonicalizeLegacyMapChild(m, "ai", "config")
+	if err != nil || !present {
+		return err
+	}
+	agents, present, err := canonicalizeLegacyMapChild(ai, "agents", "ai")
+	if err != nil || !present {
+		return err
+	}
+	for name, rawAgent := range agents {
+		if err := executor.ValidateCLIName(name); err != nil {
+			// Unknown profiles are intentionally inert and preserved exactly.
+			// Do not let newly introduced validation for supported providers
+			// turn a dormant future/legacy profile into a startup regression.
 			continue
 		}
-		ai, ok := rawAI.(map[string]any)
+		agentMap, ok := rawAgent.(map[string]any)
 		if !ok {
 			continue
 		}
-		for agentsKey, rawAgents := range ai {
-			if !strings.EqualFold(agentsKey, "agents") {
-				continue
-			}
-			agents, ok := rawAgents.(map[string]any)
-			if !ok {
-				continue
-			}
-			for name, rawAgent := range agents {
-				if err := executor.ValidateCLIName(name); err != nil {
-					continue
-				}
-				agentMap, ok := rawAgent.(map[string]any)
-				if !ok {
-					continue
-				}
-				before, rewrite, err := legacyAgentConfigFromMap(agentMap)
-				if err != nil {
-					return fmt.Errorf("config: sanitize legacy TOML agent %q: %w", name, err)
-				}
-				after := sanitizeLegacyAgentConfig(name, before, source)
-				syncLegacyAgentStringField(agentMap, "model", before.Model, after.Model, rewrite["model"])
-				syncLegacyAgentIntField(agentMap, "max_turns", before.MaxTurns, after.MaxTurns, rewrite["max_turns"])
-				syncLegacyAgentStringField(agentMap, "approval_mode", before.ApprovalMode, after.ApprovalMode, rewrite["approval_mode"])
-				syncLegacyAgentStringField(agentMap, "extra_flags", before.ExtraFlags, after.ExtraFlags, rewrite["extra_flags"])
-				syncLegacyAgentStringField(agentMap, "effort", before.Effort, after.Effort, rewrite["effort"])
-				syncLegacyAgentStringField(agentMap, "permission_mode", before.PermissionMode, after.PermissionMode, rewrite["permission_mode"])
-			}
+		before, rewrite, err := legacyAgentConfigFromMap(agentMap)
+		if err != nil {
+			return fmt.Errorf("config: sanitize legacy TOML agent %q: %w", name, err)
 		}
+		after := sanitizeLegacyAgentConfig(name, before, source)
+		syncLegacyAgentStringField(agentMap, "model", before.Model, after.Model, rewrite["model"])
+		syncLegacyAgentIntField(agentMap, "max_turns", before.MaxTurns, after.MaxTurns, rewrite["max_turns"])
+		syncLegacyAgentStringField(agentMap, "approval_mode", before.ApprovalMode, after.ApprovalMode, rewrite["approval_mode"])
+		syncLegacyAgentStringField(agentMap, "extra_flags", before.ExtraFlags, after.ExtraFlags, rewrite["extra_flags"])
+		syncLegacyAgentStringField(agentMap, "effort", before.Effort, after.Effort, rewrite["effort"])
+		syncLegacyAgentStringField(agentMap, "permission_mode", before.PermissionMode, after.PermissionMode, rewrite["permission_mode"])
+		syncLegacyAgentTrustedStringField(agentMap, "prompt", before.PromptID, after.PromptID, rewrite["prompt"])
+		syncLegacyAgentTrustedStringField(agentMap, "execution_timeout", before.ExecutionTimeout, after.ExecutionTimeout, rewrite["execution_timeout"])
+		syncLegacyAgentBoolField(agentMap, "bare", before.Bare, after.Bare, rewrite["bare"])
+		syncLegacyAgentBoolField(agentMap, "dangerously_skip_perms", before.DangerouslySkipPerms, after.DangerouslySkipPerms, rewrite["dangerously_skip_perms"])
+		syncLegacyAgentBoolField(agentMap, "no_session_persistence", before.NoSessionPersistence, after.NoSessionPersistence, rewrite["no_session_persistence"])
 	}
 	return nil
 }
 
+func canonicalizeLegacyMapChild(m map[string]any, canonical, path string) (map[string]any, bool, error) {
+	aliases := make([]string, 0, 1)
+	for key := range m {
+		if strings.EqualFold(key, canonical) {
+			aliases = append(aliases, key)
+		}
+	}
+	sort.Strings(aliases)
+	switch len(aliases) {
+	case 0:
+		return nil, false, nil
+	case 1:
+		key := aliases[0]
+		child, ok := m[key].(map[string]any)
+		if !ok {
+			return nil, false, fmt.Errorf("legacy TOML key %q must be a table", path+"."+key)
+		}
+		if key != canonical {
+			delete(m, key)
+			m[canonical] = child
+		}
+		return child, true, nil
+	default:
+		return nil, false, fmt.Errorf(
+			"ambiguous structural aliases at %q for %q (%s); keep a single canonical %q key",
+			path, canonical, strings.Join(aliases, ", "), canonical,
+		)
+	}
+}
+
 func legacyAgentConfigFromMap(m map[string]any) (CLIAgentConfig, map[string]bool, error) {
 	var agent CLIAgentConfig
-	rewrite := make(map[string]bool, 6)
+	rewrite := make(map[string]bool, 11)
 	stringField := func(canonical string, target *string) error {
-		raw, present, canonicalize := legacyMapValue(m, canonical)
+		raw, present, canonicalize, err := legacyMapValue(m, canonical)
+		if err != nil {
+			return err
+		}
 		rewrite[canonical] = canonicalize
 		if !present {
 			return nil
@@ -1487,6 +1548,22 @@ func legacyAgentConfigFromMap(m map[string]any) (CLIAgentConfig, map[string]bool
 		value, ok := raw.(string)
 		if !ok {
 			return fmt.Errorf("%s must be a string", canonical)
+		}
+		*target = value
+		return nil
+	}
+	boolField := func(canonical string, target *bool) error {
+		raw, present, canonicalize, err := legacyMapValue(m, canonical)
+		if err != nil {
+			return err
+		}
+		rewrite[canonical] = canonicalize
+		if !present {
+			return nil
+		}
+		value, ok := raw.(bool)
+		if !ok {
+			return fmt.Errorf("%s must be a boolean", canonical)
 		}
 		*target = value
 		return nil
@@ -1506,7 +1583,23 @@ func legacyAgentConfigFromMap(m map[string]any) (CLIAgentConfig, map[string]bool
 	if err := stringField("permission_mode", &agent.PermissionMode); err != nil {
 		return CLIAgentConfig{}, nil, err
 	}
-	if raw, present, canonicalize := legacyMapValue(m, "max_turns"); present {
+	if err := stringField("prompt", &agent.PromptID); err != nil {
+		return CLIAgentConfig{}, nil, err
+	}
+	if err := stringField("execution_timeout", &agent.ExecutionTimeout); err != nil {
+		return CLIAgentConfig{}, nil, err
+	}
+	if err := boolField("bare", &agent.Bare); err != nil {
+		return CLIAgentConfig{}, nil, err
+	}
+	if err := boolField("no_session_persistence", &agent.NoSessionPersistence); err != nil {
+		return CLIAgentConfig{}, nil, err
+	}
+	raw, present, canonicalize, err := legacyMapValue(m, "max_turns")
+	if err != nil {
+		return CLIAgentConfig{}, nil, err
+	}
+	if present {
 		rewrite["max_turns"] = canonicalize
 		value, err := legacyMapInt(raw)
 		if err != nil {
@@ -1516,29 +1609,73 @@ func legacyAgentConfigFromMap(m map[string]any) (CLIAgentConfig, map[string]bool
 	} else {
 		rewrite["max_turns"] = canonicalize
 	}
+	dangerous, present, canonicalize, err := legacyDangerousBoolValue(m)
+	if err != nil {
+		return CLIAgentConfig{}, nil, err
+	}
+	rewrite["dangerously_skip_perms"] = canonicalize
+	if present {
+		// This is trusted TOML state. Preserve true exactly; the HTTP boundary
+		// separately prevents untrusted callers from granting the capability.
+		// Conflicting trusted aliases resolve fail-closed: any false wins.
+		agent.DangerouslySkipPerms = dangerous
+	}
 	return agent, rewrite, nil
 }
 
-func legacyMapValue(m map[string]any, canonical string) (value any, present, canonicalize bool) {
+func legacyDangerousBoolValue(m map[string]any) (value bool, present, canonicalize bool, err error) {
+	const canonical = "dangerously_skip_perms"
+	aliases := make([]string, 0, 1)
+	for key := range m {
+		if strings.EqualFold(key, canonical) {
+			aliases = append(aliases, key)
+		}
+	}
+	sort.Strings(aliases)
+	if len(aliases) == 0 {
+		return false, false, false, nil
+	}
+	value = true
+	for _, key := range aliases {
+		candidate, ok := m[key].(bool)
+		if !ok {
+			return false, false, false, fmt.Errorf("%s must be a boolean", canonical)
+		}
+		if !candidate {
+			value = false
+		}
+	}
+	return value, true, len(aliases) != 1 || aliases[0] != canonical, nil
+}
+
+func legacyMapValue(m map[string]any, canonical string) (value any, present, canonicalize bool, err error) {
 	if exact, ok := m[canonical]; ok {
-		value = exact
-		present = true
+		aliases := 0
+		for key := range m {
+			if key != canonical && strings.EqualFold(key, canonical) {
+				aliases++
+			}
+		}
+		return exact, true, aliases > 0, nil
 	}
-	matches := 0
-	for key, candidate := range m {
-		if !strings.EqualFold(key, canonical) {
-			continue
-		}
-		matches++
-		if !present {
-			value = candidate
-			present = true
-		}
-		if key != canonical {
-			canonicalize = true
+	aliases := make([]string, 0, 1)
+	for key := range m {
+		if strings.EqualFold(key, canonical) {
+			aliases = append(aliases, key)
 		}
 	}
-	return value, present, canonicalize || matches > 1
+	sort.Strings(aliases)
+	switch len(aliases) {
+	case 0:
+		return nil, false, false, nil
+	case 1:
+		return m[aliases[0]], true, true, nil
+	default:
+		return nil, false, false, fmt.Errorf(
+			"ambiguous aliases for %q (%s); keep a single canonical %q key",
+			canonical, strings.Join(aliases, ", "), canonical,
+		)
+	}
 }
 
 func legacyMapInt(raw any) (int, error) {
@@ -1572,6 +1709,14 @@ func syncLegacyAgentStringField(m map[string]any, canonical, before, after strin
 	}
 }
 
+func syncLegacyAgentTrustedStringField(m map[string]any, canonical, before, after string, canonicalize bool) {
+	if before == after && !canonicalize {
+		return
+	}
+	deleteLegacyAgentFieldAliases(m, canonical)
+	m[canonical] = after
+}
+
 func syncLegacyAgentIntField(m map[string]any, canonical string, before, after int, canonicalize bool) {
 	if before == after && !canonicalize {
 		return
@@ -1580,6 +1725,14 @@ func syncLegacyAgentIntField(m map[string]any, canonical string, before, after i
 	if after != 0 {
 		m[canonical] = int64(after)
 	}
+}
+
+func syncLegacyAgentBoolField(m map[string]any, canonical string, before, after bool, canonicalize bool) {
+	if before == after && !canonicalize {
+		return
+	}
+	deleteLegacyAgentFieldAliases(m, canonical)
+	m[canonical] = after
 }
 
 func deleteLegacyAgentFieldAliases(m map[string]any, canonical string) {
@@ -1798,8 +1951,24 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("config: read %s: %w", path, err)
 	}
+	// Decode through a generic map first. BurntSushi's struct decoder matches
+	// TOML keys case-insensitively, so legacy aliases such as Model/MODEL can
+	// otherwise race on Go map iteration and produce different configs across
+	// reloads. Canonicalize or reject them deterministically before the typed
+	// decode used by the runtime.
+	var raw map[string]any
+	if err := toml.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("config: parse %s: %w", path, err)
+	}
+	if err := SanitizeLegacyAgentExecutionPolicyMap(raw, "toml load"); err != nil {
+		return nil, fmt.Errorf("config: sanitize %s: %w", path, err)
+	}
+	var canonical strings.Builder
+	if err := toml.NewEncoder(&canonical).Encode(raw); err != nil {
+		return nil, fmt.Errorf("config: canonicalize %s: %w", path, err)
+	}
 	var cfg Config
-	if err := toml.Unmarshal(data, &cfg); err != nil {
+	if err := toml.Unmarshal([]byte(canonical.String()), &cfg); err != nil {
 		return nil, fmt.Errorf("config: parse %s: %w", path, err)
 	}
 	cfg.applyDefaults()
