@@ -548,6 +548,15 @@ exit 0
 		t.Fatalf("DeleteBranch: %v", err)
 	}
 
+	targetPaths := []string{target}
+	canonicalTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatalf("resolve checkout path: %v", err)
+	}
+	if canonicalTarget != target {
+		targetPaths = append(targetPaths, canonicalTarget)
+	}
+
 	lines := strings.Split(strings.TrimSpace(mustRead(t, logPath)), "\n")
 	var authenticated int
 	var tokenlessCheckout bool
@@ -557,9 +566,11 @@ exit 0
 		}
 		if strings.HasPrefix(line, "AUTH=yes") {
 			authenticated++
-			if strings.Contains(line, "PWD="+target+"\t") ||
-				strings.Contains(line, "file://"+target) {
-				t.Fatalf("authenticated Git opened or referenced checkout: %s", line)
+			for _, targetPath := range targetPaths {
+				if strings.Contains(line, "PWD="+targetPath+"\t") ||
+					strings.Contains(line, "file://"+targetPath) {
+					t.Fatalf("authenticated Git opened or referenced checkout: %s", line)
+				}
 			}
 			if strings.Contains(line, " push ") {
 				if !strings.Contains(line, " --no-verify ") {
@@ -570,9 +581,11 @@ exit 0
 				}
 			}
 		}
-		if strings.HasPrefix(line, "AUTH=no\tPWD="+target+"\t") &&
-			strings.Contains(line, " checkout ") {
-			tokenlessCheckout = true
+		for _, targetPath := range targetPaths {
+			if strings.HasPrefix(line, "AUTH=no\tPWD="+targetPath+"\t") &&
+				strings.Contains(line, " checkout ") {
+				tokenlessCheckout = true
+			}
 		}
 	}
 	if authenticated != 4 {
