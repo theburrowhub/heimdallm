@@ -88,3 +88,32 @@ func TestGetPRHeadInfo_EmptyReviewers(t *testing.T) {
 		t.Error("empty requested_reviewers must return false for any login")
 	}
 }
+
+func TestGetPRPreservesBaseRepoForFork(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/org/base/pulls/7" {
+			t.Fatalf("path = %q, want base-repo pull route", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{
+			"number":7,
+			"head":{"sha":"head123","repo":{"full_name":"alice/fork"}},
+			"base":{"sha":"base123","repo":{"full_name":"org/base"}}
+		}`))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	pr, err := c.GetPR("org/base", 7)
+	if err != nil {
+		t.Fatalf("GetPR: %v", err)
+	}
+	if pr.Repo != "org/base" {
+		t.Fatalf("Repo = %q, want base repo org/base", pr.Repo)
+	}
+	if pr.Head.Repo.FullName != "alice/fork" {
+		t.Fatalf("Head.Repo = %q, want alice/fork", pr.Head.Repo.FullName)
+	}
+	if pr.Base.Repo.FullName != "org/base" || pr.Base.SHA != "base123" {
+		t.Fatalf("Base = %+v, want org/base@base123", pr.Base)
+	}
+}

@@ -111,6 +111,75 @@ func TestFetchDiff(t *testing.T) {
 	}
 }
 
+func TestFetchDiffForCommitUsesExactBaseAndHeadSHAs(t *testing.T) {
+	const (
+		baseSHA = "base123"
+		headSHA = "head456"
+		diff    = "diff --git a/main.go b/main.go\n+anchored\n"
+	)
+	var compareCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/org/repo/pulls/42":
+			_ = json.NewEncoder(w).Encode(gh.PullRequest{
+				Head: gh.Branch{SHA: headSHA},
+				Base: gh.Branch{SHA: baseSHA},
+			})
+		case "/repos/org/repo/compare/base123...head456":
+			compareCalls++
+			if got := r.Header.Get("Accept"); got != "application/vnd.github.diff" {
+				t.Fatalf("Accept = %q, want application/vnd.github.diff", got)
+			}
+			_, _ = w.Write([]byte(diff))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	got, err := client.FetchDiffForCommit("org/repo", 42, headSHA)
+	if err != nil {
+		t.Fatalf("FetchDiffForCommit: %v", err)
+	}
+	if got != diff {
+		t.Fatalf("diff = %q, want %q", got, diff)
+	}
+	if compareCalls != 1 {
+		t.Fatalf("compare calls = %d, want 1", compareCalls)
+	}
+}
+
+func TestFetchDiffForCommitRejectsChangedHeadBeforeCompare(t *testing.T) {
+	var compareCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/org/repo/pulls/42":
+			_ = json.NewEncoder(w).Encode(gh.PullRequest{
+				Head: gh.Branch{SHA: "new-head"},
+				Base: gh.Branch{SHA: "base"},
+			})
+		default:
+			compareCalls++
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	_, err := client.FetchDiffForCommit("org/repo", 42, "queued-head")
+	var changed *gh.HeadChangedError
+	if !errors.As(err, &changed) {
+		t.Fatalf("error = %v, want *HeadChangedError", err)
+	}
+	if changed.Expected != "queued-head" || changed.Actual != "new-head" {
+		t.Fatalf("HeadChangedError = %+v", changed)
+	}
+	if compareCalls != 0 {
+		t.Fatalf("compare calls = %d, want 0 for stale target", compareCalls)
+	}
+}
+
 // emitFilesPage writes a JSON page of /pulls/:n/files shaped items. Each
 // file is "pkg/file<page>_<i>.go", modified, with the given patch body.
 func emitFilesPage(w http.ResponseWriter, page, n int, patch string) {

@@ -33,6 +33,7 @@ type fakeGHReloop struct {
 	headSHACalls int
 	submitted    bool
 	diffCalled   bool
+	diffErr      error
 }
 
 func (f *fakeGHReloop) GetPRHeadSHA(_ string, _ int) (string, error) {
@@ -43,12 +44,12 @@ func (f *fakeGHReloop) GetPRHeadSHA(_ string, _ int) (string, error) {
 	return f.headSHAValue, nil
 }
 
-func (f *fakeGHReloop) FetchDiff(_ string, _ int) (string, error) {
+func (f *fakeGHReloop) FetchDiffForCommit(_ string, _ int, _ string) (string, error) {
 	f.diffCalled = true
-	return "+line", nil
+	return "+line", f.diffErr
 }
 
-func (f *fakeGHReloop) SubmitReview(_ string, _ int, _, _ string) (int64, string, error) {
+func (f *fakeGHReloop) SubmitReviewForCommit(_ string, _ int, _, _, _ string) (int64, string, error) {
 	f.submitted = true
 	return 0, "", nil
 }
@@ -95,12 +96,10 @@ func TestRun_FailClosedWhenHeadSHALookupFails(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected fail-closed error, got nil")
 	}
-	// Cost-boundary contract: FetchDiff IS allowed to run (it happens before
-	// the SHA check at pipeline.go:192) — it's a cheap GitHub API call. What
-	// must NOT run is the Claude executor or the review submission, because
-	// those are the expensive steps that burned €1,300 in #243.
-	if !fgh.diffCalled {
-		t.Errorf("expected FetchDiff to run before the SHA check (documents cost boundary)")
+	// Snapshot invariant: no code may be fetched until an immutable HEAD is
+	// known. Otherwise the diff could belong to a different commit.
+	if fgh.diffCalled {
+		t.Errorf("FetchDiffForCommit ran before HEAD resolution succeeded")
 	}
 	if fexec.calls != 0 {
 		t.Errorf("executor must not be called when HEAD SHA resolver fails (calls=%d)", fexec.calls)
@@ -111,6 +110,39 @@ func TestRun_FailClosedWhenHeadSHALookupFails(t *testing.T) {
 	// A single short retry is allowed to absorb rate-limit blips.
 	if fgh.headSHACalls > 2 {
 		t.Errorf("GetPRHeadSHA called more than twice (retries should stop at 1): %d", fgh.headSHACalls)
+	}
+}
+
+func TestRun_SkipsStaleTargetBeforeExecute(t *testing.T) {
+	s := newMemStore(t)
+	fgh := &fakeGHReloop{diffErr: &gh.HeadChangedError{
+		Expected: "queued-head",
+		Actual:   "new-head",
+	}}
+	fexec := &fakeExecReloop{}
+	p := pipeline.New(s, fgh, fexec, &fakeNotify{})
+
+	pr := &gh.PullRequest{
+		ID: 2, Number: 2, Title: "t", Repo: "org/repo",
+		User: gh.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/2",
+		Head: gh.Branch{SHA: "queued-head"},
+	}
+	rev, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if rev != nil {
+		t.Fatalf("review = %+v, want nil for stale target", rev)
+	}
+	if !fgh.diffCalled {
+		t.Fatal("FetchDiffForCommit was not called")
+	}
+	if fexec.calls != 0 {
+		t.Fatalf("executor calls = %d, want 0", fexec.calls)
+	}
+	if fgh.submitted {
+		t.Fatal("stale target was submitted")
 	}
 }
 

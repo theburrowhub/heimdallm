@@ -101,6 +101,7 @@ type PullRequest struct {
 	Draft     bool      `json:"draft"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Head      Branch    `json:"head"`
+	Base      Branch    `json:"base"`
 	// RequestedReviewers is populated by the Pulls API (GET /repos/{o}/{r}/pulls/{n})
 	// but NOT by the Search Issues API. Used by the tier-2 loop to confirm the
 	// bot is still a pending reviewer before enqueuing a review — the search
@@ -108,7 +109,7 @@ type PullRequest struct {
 	RequestedReviewers []User `json:"requested_reviewers"`
 	// repository_url is returned by the Search Issues API: "https://api.github.com/repos/org/repo"
 	RepositoryURL string `json:"repository_url"`
-	// Populated client-side from RepositoryURL or Head.Repo.FullName
+	// Populated client-side with the repository that owns the pull request.
 	Repo string `json:"-"`
 }
 

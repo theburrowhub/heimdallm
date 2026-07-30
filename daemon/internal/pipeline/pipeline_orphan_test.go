@@ -21,8 +21,11 @@ type fakeGHLockedSubmit struct {
 	headSHA     string
 }
 
-func (f *fakeGHLockedSubmit) FetchDiff(_ string, _ int) (string, error) { return "+line", nil }
-func (f *fakeGHLockedSubmit) SubmitReview(_ string, _ int, _, _ string) (int64, string, error) {
+func (f *fakeGHLockedSubmit) FetchDiffForCommit(_ string, _ int, headSHA string) (string, error) {
+	f.headSHA = headSHA
+	return "+line", nil
+}
+func (f *fakeGHLockedSubmit) SubmitReviewForCommit(_ string, _ int, _, _, _ string) (int64, string, error) {
 	f.submitCalls++
 	return 0, "", &gh.PermanentSubmitError{
 		StatusCode: 422,
@@ -189,19 +192,72 @@ func TestPublishPending_TransientErrorStillRetries(t *testing.T) {
 	if fgh.submitCalls != 2 {
 		t.Errorf("transient SubmitReview attempts = %d, want 2 (must keep retrying)", fgh.submitCalls)
 	}
+	if len(fgh.commitIDs) != 2 || fgh.commitIDs[0] != "def" || fgh.commitIDs[1] != "def" {
+		t.Errorf("pending commit IDs = %v, want [def def]", fgh.commitIDs)
+	}
 	unpub, _ := s.ListUnpublishedReviews()
 	if len(unpub) != 1 {
 		t.Errorf("expected 1 unpublished review (transient must NOT mark orphan), got %d", len(unpub))
 	}
 }
 
+func TestPublishPending_EmptyHeadSHANeverPublishes(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	prID, err := s.UpsertPR(&store.PR{
+		GithubID: 300, Repo: "org/repo", Number: 9, Title: "legacy", Author: "alice",
+		State: "open", UpdatedAt: time.Now(), FetchedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("upsert pr: %v", err)
+	}
+	reviewID, err := s.InsertReview(&store.Review{
+		PRID: prID, CLIUsed: "claude", Summary: "unknown snapshot",
+		Issues: "[]", Suggestions: "[]", Severity: "low",
+		CreatedAt: time.Now(), HeadSHA: "", GitHubReviewID: 0,
+	})
+	if err != nil {
+		t.Fatalf("insert review: %v", err)
+	}
+
+	fgh := &fakeGHTransientSubmit{}
+	p := pipeline.New(s, fgh, &fakeExecOrphan{}, &fakeNotify{})
+	p.PublishPending()
+
+	if fgh.submitCalls != 0 {
+		t.Fatalf("SubmitReviewForCommit calls = %d, want 0 for unknown commit", fgh.submitCalls)
+	}
+	if unpub, err := s.ListUnpublishedReviews(); err != nil {
+		t.Fatalf("ListUnpublishedReviews: %v", err)
+	} else if len(unpub) != 0 {
+		t.Fatalf("unpublished reviews = %d, want legacy row retired", len(unpub))
+	}
+	got, err := s.GetReview(reviewID)
+	if err != nil {
+		t.Fatalf("GetReview: %v", err)
+	}
+	if got.GitHubReviewID != -1 {
+		t.Fatalf("GitHubReviewID = %d, want orphan sentinel -1", got.GitHubReviewID)
+	}
+}
+
 // fakeGHTransientSubmit returns a generic non-permanent error so the
 // transient-keeps-retrying test can drive the negative path.
-type fakeGHTransientSubmit struct{ submitCalls int }
+type fakeGHTransientSubmit struct {
+	submitCalls int
+	commitIDs   []string
+}
 
-func (f *fakeGHTransientSubmit) FetchDiff(_ string, _ int) (string, error) { return "+line", nil }
-func (f *fakeGHTransientSubmit) SubmitReview(_ string, _ int, _, _ string) (int64, string, error) {
+func (f *fakeGHTransientSubmit) FetchDiffForCommit(_ string, _ int, _ string) (string, error) {
+	return "+line", nil
+}
+func (f *fakeGHTransientSubmit) SubmitReviewForCommit(_ string, _ int, _, _, commitID string) (int64, string, error) {
 	f.submitCalls++
+	f.commitIDs = append(f.commitIDs, commitID)
 	return 0, "", errors.New("github: submit review: status 503: upstream")
 }
 func (f *fakeGHTransientSubmit) PostComment(_ string, _ int, _ string) (time.Time, error) {

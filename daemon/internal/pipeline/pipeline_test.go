@@ -17,15 +17,19 @@ import (
 )
 
 type fakeGH struct {
-	diff     string
-	comments []github.Comment
+	diff               string
+	comments           []github.Comment
+	headSHA            string
+	submittedCommitIDs []string
 }
 
-func (f *fakeGH) FetchDiff(repo string, number int) (string, error) {
+func (f *fakeGH) FetchDiffForCommit(repo string, number int, headSHA string) (string, error) {
+	f.headSHA = headSHA
 	return f.diff, nil
 }
 
-func (f *fakeGH) SubmitReview(repo string, number int, body, event string) (int64, string, error) {
+func (f *fakeGH) SubmitReviewForCommit(repo string, number int, body, event, commitID string) (int64, string, error) {
+	f.submittedCommitIDs = append(f.submittedCommitIDs, commitID)
 	// Mirror GitHub's actual mapping from the submitted event to the
 	// returned state so pipeline tests that inspect GitHubReviewState see
 	// something realistic rather than a hardcoded constant.
@@ -47,7 +51,7 @@ func (f *fakeGH) FetchComments(repo string, number int) ([]github.Comment, error
 	return f.comments, nil
 }
 
-func (f *fakeGH) GetPRHeadSHA(repo string, number int) (string, error) { return "", nil }
+func (f *fakeGH) GetPRHeadSHA(repo string, number int) (string, error) { return f.headSHA, nil }
 
 type fakeExec struct{}
 
@@ -171,7 +175,8 @@ func TestPipeline_Run(t *testing.T) {
 	defer s.Close()
 
 	notify := &fakeNotify{}
-	p := pipeline.New(s, &fakeGH{diff: "+new line"}, &fakeExec{}, notify)
+	gh := &fakeGH{diff: "+new line"}
+	p := pipeline.New(s, gh, &fakeExec{}, notify)
 
 	pr := &github.PullRequest{
 		ID: 1, Number: 1, Title: "Fix bug", Repo: "org/repo",
@@ -199,6 +204,9 @@ func TestPipeline_Run(t *testing.T) {
 	}
 	if len(notify.events) < 2 {
 		t.Errorf("expected at least 2 notifications, got %d", len(notify.events))
+	}
+	if len(gh.submittedCommitIDs) != 1 || gh.submittedCommitIDs[0] != "sha1" {
+		t.Errorf("submitted commit IDs = %v, want [sha1]", gh.submittedCommitIDs)
 	}
 }
 
@@ -228,14 +236,16 @@ func (f *fakeExecCapture) Execute(cli, prompt string, opts executor.ExecOptions)
 
 // fakeGHCommentsError simulates a GitHub client where FetchComments fails.
 type fakeGHCommentsError struct {
-	diff string
+	diff    string
+	headSHA string
 }
 
-func (f *fakeGHCommentsError) FetchDiff(repo string, number int) (string, error) {
+func (f *fakeGHCommentsError) FetchDiffForCommit(repo string, number int, headSHA string) (string, error) {
+	f.headSHA = headSHA
 	return f.diff, nil
 }
 
-func (f *fakeGHCommentsError) SubmitReview(repo string, number int, body, event string) (int64, string, error) {
+func (f *fakeGHCommentsError) SubmitReviewForCommit(repo string, number int, body, event, commitID string) (int64, string, error) {
 	return 1, "COMMENTED", nil
 }
 
@@ -247,7 +257,9 @@ func (f *fakeGHCommentsError) FetchComments(repo string, number int) ([]github.C
 	return nil, fmt.Errorf("network error")
 }
 
-func (f *fakeGHCommentsError) GetPRHeadSHA(repo string, number int) (string, error) { return "", nil }
+func (f *fakeGHCommentsError) GetPRHeadSHA(repo string, number int) (string, error) {
+	return f.headSHA, nil
+}
 
 func TestPipeline_Run_CommentsInjectedIntoPrompt(t *testing.T) {
 	s, err := store.Open(":memory:")
@@ -406,16 +418,15 @@ type fakeGHWithHeadSHA struct {
 	diff   string
 	sha    string
 	shaErr error
-	// calls tracks GetPRHeadSHA invocations so tests can assert hydration
-	// only happens when pr.Head.SHA is empty.
+	// calls tracks both initial hydration and the post-execution revalidation.
 	shaCalls int
 	submits  int
 }
 
-func (f *fakeGHWithHeadSHA) FetchDiff(repo string, number int) (string, error) {
+func (f *fakeGHWithHeadSHA) FetchDiffForCommit(repo string, number int, headSHA string) (string, error) {
 	return f.diff, nil
 }
-func (f *fakeGHWithHeadSHA) SubmitReview(repo string, number int, body, event string) (int64, string, error) {
+func (f *fakeGHWithHeadSHA) SubmitReviewForCommit(repo string, number int, body, event, commitID string) (int64, string, error) {
 	f.submits++
 	return 1, "COMMENTED", nil
 }
@@ -454,21 +465,21 @@ func TestPipeline_Run_HydratesHeadSHAWhenMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if gh.shaCalls != 1 {
-		t.Errorf("expected 1 GetPRHeadSHA call, got %d", gh.shaCalls)
+	if gh.shaCalls != 2 {
+		t.Errorf("expected hydration + post-execute HEAD checks, got %d calls", gh.shaCalls)
 	}
 	if rev.HeadSHA != "abc123" {
 		t.Errorf("stored HeadSHA = %q, want %q", rev.HeadSHA, "abc123")
 	}
 
 	// Second run: the PR now has the SHA inline (as if hydrated upstream).
-	// Pipeline must NOT call GetPRHeadSHA again, and must skip on SHA match.
+	// Pipeline must skip on SHA match before the post-execute revalidation.
 	pr.Head.SHA = "abc123"
 	_, err = p.Run(pr, pipeline.RunOptions{Primary: "claude", Fallback: "gemini"})
 	if err != nil {
 		t.Fatalf("second run: %v", err)
 	}
-	if gh.shaCalls != 1 {
+	if gh.shaCalls != 2 {
 		t.Errorf("GetPRHeadSHA called redundantly: %d", gh.shaCalls)
 	}
 	if gh.submits != 1 {
@@ -498,13 +509,19 @@ func (f *fakeExecCounter) Execute(cli, prompt string, _ executor.ExecOptions) (*
 // fakeGHCounter records SubmitReview calls so tests can verify no publish
 // happens on a skipped re-review.
 type fakeGHCounter struct {
-	diff    string
-	submits int
+	diff               string
+	headSHA            string
+	submits            int
+	submittedCommitIDs []string
 }
 
-func (f *fakeGHCounter) FetchDiff(repo string, number int) (string, error) { return f.diff, nil }
-func (f *fakeGHCounter) SubmitReview(repo string, number int, body, event string) (int64, string, error) {
+func (f *fakeGHCounter) FetchDiffForCommit(repo string, number int, headSHA string) (string, error) {
+	f.headSHA = headSHA
+	return f.diff, nil
+}
+func (f *fakeGHCounter) SubmitReviewForCommit(repo string, number int, body, event, commitID string) (int64, string, error) {
 	f.submits++
+	f.submittedCommitIDs = append(f.submittedCommitIDs, commitID)
 	return 1, "COMMENTED", nil
 }
 func (f *fakeGHCounter) PostComment(repo string, number int, body string) (time.Time, error) {
@@ -513,7 +530,9 @@ func (f *fakeGHCounter) PostComment(repo string, number int, body string) (time.
 func (f *fakeGHCounter) FetchComments(repo string, number int) ([]github.Comment, error) {
 	return nil, nil
 }
-func (f *fakeGHCounter) GetPRHeadSHA(repo string, number int) (string, error) { return "", nil }
+func (f *fakeGHCounter) GetPRHeadSHA(repo string, number int) (string, error) {
+	return f.headSHA, nil
+}
 
 // TestPipeline_Run_SkipsReviewOnSameHeadSHA is the regression guard for the
 // bot-feedback loop bug seen on theburrowhub/heimdallm#139: any review
@@ -873,6 +892,60 @@ func TestPipeline_Run_ForceReReviewsSameSHAWithoutReRequest(t *testing.T) {
 	}
 	if gh.submits != 2 {
 		t.Errorf("forced re-review must submit again, got gh.submits=%d, want 2", gh.submits)
+	}
+	if got := gh.submittedCommitIDs; len(got) != 2 || got[0] != "samesha" || got[1] != "samesha" {
+		t.Errorf("forced re-review commit IDs = %v, want [samesha samesha]", got)
+	}
+}
+
+func TestPipeline_Run_DiscardsReviewWhenHeadChangesDuringAnalysis(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	gh := &fakeGHCounter{diff: "+line"}
+	exec := &fakeExecCounter{onExecute: func() {
+		gh.headSHA = "new-head"
+	}}
+	pub := &fakePublisher{}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	p.SetPublisher(pub)
+
+	pr := &github.PullRequest{
+		ID: 100, Number: 100, Title: "t", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/100",
+		Head: github.Branch{SHA: "analysed-head"},
+	}
+	rev, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if rev != nil {
+		t.Fatalf("review = %+v, want nil after HEAD changed", rev)
+	}
+	if gh.submits != 0 {
+		t.Fatalf("SubmitReviewForCommit calls = %d, want 0", gh.submits)
+	}
+	if pending, err := s.ListUnpublishedReviews(); err != nil {
+		t.Fatalf("ListUnpublishedReviews: %v", err)
+	} else if len(pending) != 0 {
+		t.Fatalf("unpublished reviews = %d, want 0", len(pending))
+	}
+	ev, ok := pub.firstOf(sse.EventReviewSkipped)
+	if !ok {
+		t.Fatal("review_skipped event not emitted")
+	}
+	var payload struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal([]byte(ev.Data), &payload); err != nil {
+		t.Fatalf("decode review_skipped: %v", err)
+	}
+	if payload.Reason != string(pipeline.SkipReasonHeadChanged) {
+		t.Fatalf("skip reason = %q, want %q", payload.Reason, pipeline.SkipReasonHeadChanged)
 	}
 }
 

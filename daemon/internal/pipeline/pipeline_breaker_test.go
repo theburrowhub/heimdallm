@@ -24,11 +24,12 @@ func (f *fakeGHBreaker) GetPRHeadSHA(_ string, _ int) (string, error) {
 	return f.headSHAValue, nil
 }
 
-func (f *fakeGHBreaker) FetchDiff(_ string, _ int) (string, error) {
+func (f *fakeGHBreaker) FetchDiffForCommit(_ string, _ int, headSHA string) (string, error) {
+	f.headSHAValue = headSHA
 	return "+line", nil
 }
 
-func (f *fakeGHBreaker) SubmitReview(_ string, _ int, _, _ string) (int64, string, error) {
+func (f *fakeGHBreaker) SubmitReviewForCommit(_ string, _ int, _, _, _ string) (int64, string, error) {
 	f.submitted = true
 	return 0, "", nil
 }

@@ -34,9 +34,9 @@ func (e *CircuitBreakerError) Error() string {
 
 func (e *CircuitBreakerError) Unwrap() error { return ErrCircuitBreakerTripped }
 
-// DiffFetcher retrieves the diff for a pull request.
+// DiffFetcher retrieves the diff for one immutable pull-request HEAD.
 type DiffFetcher interface {
-	FetchDiff(repo string, number int) (string, error)
+	FetchDiffForCommit(repo string, number int, headSHA string) (string, error)
 }
 
 // HeadSHAResolver fetches a PR's current HEAD commit SHA. The Search Issues
@@ -59,7 +59,7 @@ type Notifier interface {
 
 // GitHubReviewer can submit a review and post issue comments to GitHub.
 type GitHubReviewer interface {
-	SubmitReview(repo string, number int, body, event string) (int64, string, error)
+	SubmitReviewForCommit(repo string, number int, body, event, commitID string) (int64, string, error)
 	// PostComment posts a general PR comment (used in multi-feedback mode).
 	PostComment(repo string, number int, body string) (time.Time, error)
 }
@@ -483,24 +483,12 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		return nil, nil
 	}
 
-	// 2. Fetch diff
-	diff, err := p.gh.FetchDiff(pr.Repo, pr.Number)
-	if err != nil {
-		return nil, fmt.Errorf("pipeline: fetch diff: %w", err)
-	}
-
-	// 2a. Authoritative dedup by HEAD commit SHA. The Tier 2/3 dedup uses
-	// updated_at — but any peer reviewer submitting a review (human or another
-	// heimdallm instance) bumps updated_at, which would otherwise cause us to
-	// re-review the same commit indefinitely (see theburrowhub/heimdallm#139).
-	// If the last stored review is for the same HEAD SHA, return it unchanged.
-	//
-	// The Search Issues API used by Tier 2 does not populate head.sha, so we
-	// resolve it on-demand. We must NOT proceed to Execute when we cannot
-	// confirm the SHA, because a transient API failure would otherwise bypass
-	// the cross-instance dedup and let every peer bot run the review on top
-	// of the same commit. See theburrowhub/heimdallm#243.
-	if pr.Head.SHA == "" {
+	// 2. Resolve the immutable review target before fetching any code. The
+	// diff, local worktree, stored row and GitHub review must all refer to this
+	// exact SHA; silently switching to a newer HEAD midway through a run would
+	// mix two snapshots.
+	targetSHA := strings.TrimSpace(pr.Head.SHA)
+	if targetSHA == "" {
 		sha, err := p.gh.GetPRHeadSHA(pr.Repo, pr.Number)
 		if err != nil {
 			// Short backoff before the single retry — 0ms back-to-back retries
@@ -515,7 +503,8 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 				"repo", pr.Repo, "pr", pr.Number, "err", err)
 			return nil, fmt.Errorf("pipeline: resolve HEAD SHA: %w", err)
 		}
-		if sha == "" {
+		targetSHA = strings.TrimSpace(sha)
+		if targetSHA == "" {
 			// Empty-but-nil-error: treat as a lookup failure. Proceeding would
 			// store a review row with an empty HeadSHA, recreating the exact
 			// ambiguous legacy-row shape (#322 Bug 4) the backfill exists to
@@ -526,8 +515,36 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 				"repo", pr.Repo, "pr", pr.Number)
 			return nil, fmt.Errorf("pipeline: resolve HEAD SHA: empty SHA returned")
 		}
-		pr.Head.SHA = sha
 	}
+	// Keep the model in sync for helpers that still consume the PR view, while
+	// retaining targetSHA as the authoritative immutable value for persistence
+	// and publication below.
+	pr.Head.SHA = targetSHA
+
+	// 2a. Fetch a commit-addressed diff. The GitHub client verifies that the
+	// live PR still points at targetSHA before comparing captured base/head
+	// SHAs. A stale queued job is a normal skip; a later poll will schedule the
+	// replacement commit.
+	diff, err := p.gh.FetchDiffForCommit(pr.Repo, pr.Number, targetSHA)
+	if err != nil {
+		var headChanged *github.HeadChangedError
+		if errors.As(err, &headChanged) {
+			slog.Info("pipeline: HEAD changed before diff, skipping stale review",
+				"repo", pr.Repo, "pr", pr.Number,
+				"expected_head_sha", headChanged.Expected,
+				"current_head_sha", headChanged.Actual)
+			p.publishSkipped(pr, SkipReasonHeadChanged)
+			return nil, nil
+		}
+		return nil, fmt.Errorf("pipeline: fetch diff: %w", err)
+	}
+
+	// 2b. Authoritative dedup by HEAD commit SHA. The Tier 2/3 dedup uses
+	// updated_at — but any peer reviewer submitting a review (human or another
+	// heimdallm instance) bumps updated_at, which would otherwise cause us to
+	// re-review the same commit indefinitely (see theburrowhub/heimdallm#139).
+	// If the last stored review is for the same HEAD SHA, return it unchanged.
+	//
 	prevReview, _ := p.store.LatestReviewForPR(prID)
 	// A superseded pending review was generated for an older HEAD while the
 	// repo was temporarily disabled. It was never published, so it must not
@@ -576,7 +593,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		}
 	}
 
-	// 2a.5 Process persistent-instruction directives (#383) BEFORE the
+	// 2c. Process persistent-instruction directives (#383) BEFORE the
 	// re-review skip gate so a remember/forget takes effect even on cycles
 	// that will not produce a review. Opt-in: only when the repo configures an
 	// instruction-author allowlist, so unconfigured repos pay no extra fetch.
@@ -655,7 +672,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		}
 	}
 
-	// 2b. Fetch PR comments for context (non-fatal: proceed without if unavailable).
+	// 2d. Fetch PR comments for context (non-fatal: proceed without if unavailable).
 	// prComments may already be populated by the directive-fetch above; reuse it
 	// to avoid a duplicate API call.
 	if prComments == nil {
@@ -668,7 +685,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	}
 	commentsSection := formatComments(prComments, pr.User.Login)
 
-	// 2c. Build re-review context if a previous review exists for this PR.
+	// 2e. Build re-review context if a previous review exists for this PR.
 	var reviewCtx string
 	if prevReview != nil {
 		reviewCtx = buildReviewContext(
@@ -717,7 +734,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	// the caller is about to spend Claude credits anyway. See
 	// theburrowhub/heimdallm#243.
 	if !opts.Force && p.breaker != nil {
-		tripped, reason, err := p.store.CheckCircuitBreaker(prID, pr.Repo, pr.Head.SHA, *p.breaker)
+		tripped, reason, err := p.store.CheckCircuitBreaker(prID, pr.Repo, targetSHA, *p.breaker)
 		if err != nil {
 			slog.Warn("pipeline: circuit breaker check failed, proceeding", "err", err)
 		} else if tripped {
@@ -774,11 +791,32 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		return nil, fmt.Errorf("pipeline: execute %s: %w", cli, err)
 	}
 
-	// 5b. Reconcile severity: ensure top-level severity >= max(issues[].severity).
+	// 5b. Revalidate the live HEAD after analysis and before any GitHub write.
+	// The worktree and diff remain a coherent snapshot even when a push lands
+	// during Execute, but findings for the superseded commit must not be emitted
+	// as current PR feedback. A subsequent poll/re-request will create a fresh
+	// execution and worktree for the replacement SHA.
+	currentSHA, err := p.gh.GetPRHeadSHA(pr.Repo, pr.Number)
+	if err != nil {
+		return nil, fmt.Errorf("pipeline: revalidate HEAD SHA after execute: %w", err)
+	}
+	currentSHA = strings.TrimSpace(currentSHA)
+	if currentSHA == "" {
+		return nil, fmt.Errorf("pipeline: revalidate HEAD SHA after execute: empty SHA returned")
+	}
+	if currentSHA != targetSHA {
+		slog.Info("pipeline: HEAD changed during analysis, discarding stale review",
+			"repo", pr.Repo, "pr", pr.Number,
+			"review_head_sha", targetSHA, "current_head_sha", currentSHA)
+		p.publishSkipped(pr, SkipReasonHeadChanged)
+		return nil, nil
+	}
+
+	// 5c. Reconcile severity: ensure top-level severity >= max(issues[].severity).
 	// Guards against LLM inconsistencies (prompt injection, model errors).
 	reconciledSeverity := ReconcileSeverity(result, "repo", pr.Repo, "pr", pr.Number)
 
-	// 5c. Extract comment signals and apply escalation to the severity that
+	// 5d. Extract comment signals and apply escalation to the severity that
 	// will be persisted. By folding signal-driven escalation into the stored
 	// severity, retry paths (PublishPending, NATS worker) reproduce the same
 	// APPROVE/REQUEST_CHANGES decision without needing to re-extract signals.
@@ -812,7 +850,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		Event:          reviewEvent,
 		CreatedAt:      time.Now().UTC(),
 		GitHubReviewID: 0, // will be set after GitHub publish
-		HeadSHA:        pr.Head.SHA,
+		HeadSHA:        targetSHA,
 	}
 	rev.ID, err = p.store.InsertReview(rev)
 	if err != nil {
@@ -843,10 +881,11 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	if stopped, err := p.stopIfRepoBecameIneligible(pr, opts.RepoEligible); stopped {
 		return nil, err
 	}
-	ghReviewID, ghReviewState, publishErr := p.gh.SubmitReview(
+	ghReviewID, ghReviewState, publishErr := p.gh.SubmitReviewForCommit(
 		pr.Repo, pr.Number,
 		AnnotateBodyForEvent(reviewBody, reviewEvent, len(result.Issues)),
 		reviewEvent,
+		targetSHA,
 	)
 	if publishErr != nil {
 		// Permanent submit failure (PR locked etc.): mark the freshly
@@ -958,6 +997,20 @@ func (p *Pipeline) PublishPending() {
 			slog.Info("pipeline: skipping pending review for PR with no repo", "review_id", rev.ID)
 			continue
 		}
+		// Legacy rows without HeadSHA have no provable commit provenance. Never
+		// let GitHub default them to the PR's current HEAD: that could attach
+		// findings generated from unknown code to a newer commit. Retain the row
+		// locally but retire it from the retry queue.
+		if strings.TrimSpace(rev.HeadSHA) == "" {
+			if err := p.store.MarkReviewPublished(rev.ID, orphanedReviewID, "", time.Now().UTC()); err != nil {
+				slog.Warn("pipeline: failed to orphan pending review with empty HeadSHA, will retry next tick",
+					"review_id", rev.ID, "err", err)
+			} else {
+				slog.Info("pipeline: pending review has no HeadSHA, marking orphaned",
+					"review_id", rev.ID, "repo", pr.Repo, "pr", pr.Number)
+			}
+			continue
+		}
 		// Rebuild a minimal result from stored JSON for the body. The daemon
 		// always writes well-formed JSON here, so a decode failure means the
 		// stored row is corrupt and the issue list is unrecoverable. Don't
@@ -985,10 +1038,11 @@ func (p *Pipeline) PublishPending() {
 		// rows without a stored event fall back to SeverityToEvent via
 		// publishEventFor.
 		retryEvent := PublishEventFor(rev)
-		ghID, ghState, err := p.gh.SubmitReview(
+		ghID, ghState, err := p.gh.SubmitReviewForCommit(
 			pr.Repo, pr.Number,
 			AnnotateBodyForEvent(BuildGitHubBody(result), retryEvent, len(result.Issues)),
 			retryEvent,
+			rev.HeadSHA,
 		)
 		if err != nil {
 			// Permanent submit failures (currently HTTP 422 "lock

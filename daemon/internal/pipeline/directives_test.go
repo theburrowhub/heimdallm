@@ -61,10 +61,12 @@ type fakeGH struct {
 	posted []string
 }
 
-func (f *fakeGH) FetchDiff(string, int) (string, error)               { return "", nil }
+func (f *fakeGH) FetchDiffForCommit(string, int, string) (string, error) {
+	return "", nil
+}
 func (f *fakeGH) GetPRHeadSHA(string, int) (string, error)            { return "", nil }
 func (f *fakeGH) FetchComments(string, int) ([]github.Comment, error) { return nil, nil }
-func (f *fakeGH) SubmitReview(string, int, string, string) (int64, string, error) {
+func (f *fakeGH) SubmitReviewForCommit(string, int, string, string, string) (int64, string, error) {
 	return 0, "", nil
 }
 func (f *fakeGH) PostComment(_ string, _ int, body string) (time.Time, error) {

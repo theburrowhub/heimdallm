@@ -339,6 +339,19 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("github: API error (status %d): %s", e.StatusCode, e.Body)
 }
 
+// HeadChangedError reports that a caller's immutable review target no longer
+// matches the pull request's live HEAD. Callers should discard the stale
+// execution and schedule a new one for Actual rather than silently switching
+// snapshots in place.
+type HeadChangedError struct {
+	Expected string
+	Actual   string
+}
+
+func (e *HeadChangedError) Error() string {
+	return fmt.Sprintf("github: PR HEAD changed: expected %s, current %s", e.Expected, e.Actual)
+}
+
 // PermanentSubmitError signals that SubmitReview hit a state from
 // which no retry will recover — e.g. the PR's conversation is locked,
 // the PR has been deleted, or the repo was archived. Callers should
@@ -402,8 +415,8 @@ func (c *Client) SubmitReview(repo string, number int, body, event string) (int6
 // SubmitReviewForCommit posts a review anchored to the exact commit that was
 // analysed. GitHub otherwise defaults to the pull request's current HEAD,
 // which lets a concurrent push misattribute findings from an older commit.
-// Keeping this as a separate concrete-client method preserves the existing
-// SubmitReview interface implemented by pipeline test doubles and adapters.
+// Keeping this as a separate concrete-client method also leaves SubmitReview
+// available to callers that intentionally want GitHub's live-HEAD default.
 func (c *Client) SubmitReviewForCommit(repo string, number int, body, event, commitID string) (int64, string, error) {
 	if strings.TrimSpace(commitID) == "" {
 		return 0, "", fmt.Errorf("github: submit review: empty commit_id")
@@ -830,13 +843,65 @@ func (c *Client) GetPR(repo string, number int) (*PullRequest, error) {
 	if err := json.Unmarshal(body, &pr); err != nil {
 		return nil, fmt.Errorf("github: get PR: unmarshal: %w", err)
 	}
-	// Populate the Repo field the same way FetchPRs does.
-	if pr.Head.Repo.FullName != "" {
-		pr.Repo = pr.Head.Repo.FullName
-	} else {
-		pr.Repo = repo
-	}
+	// The route argument identifies the repository that owns the pull request.
+	// Never replace it with Head.Repo: for fork PRs that is the contributor's
+	// fork, where this pull number generally does not exist. Head.Repo remains
+	// available on the model for callers that need the source repository.
+	pr.Repo = repo
 	return &pr, nil
+}
+
+// FetchDiffForCommit returns a diff tied to one immutable PR HEAD commit.
+//
+// FetchDiff cannot provide that guarantee because GET /pulls/{number} with a
+// diff media type always follows the PR's live refs. Here we first read the PR
+// snapshot, reject a stale expected HEAD, then compare the captured base SHA
+// with the expected head SHA. Both compare operands are content-addressed, so
+// a push after the snapshot cannot change the returned diff.
+func (c *Client) FetchDiffForCommit(repo string, number int, expectedHeadSHA string) (string, error) {
+	expectedHeadSHA = strings.TrimSpace(expectedHeadSHA)
+	if expectedHeadSHA == "" {
+		return "", fmt.Errorf("github: fetch diff for commit: empty expected HEAD SHA")
+	}
+
+	pr, err := c.getPR(repo, number)
+	if err != nil {
+		return "", fmt.Errorf("github: fetch diff for commit: %w", err)
+	}
+	actualHeadSHA := strings.TrimSpace(pr.Head.SHA)
+	if actualHeadSHA == "" {
+		return "", fmt.Errorf("github: fetch diff for commit: PR returned empty HEAD SHA")
+	}
+	if actualHeadSHA != expectedHeadSHA {
+		return "", &HeadChangedError{Expected: expectedHeadSHA, Actual: actualHeadSHA}
+	}
+	baseSHA := strings.TrimSpace(pr.Base.SHA)
+	if baseSHA == "" {
+		return "", fmt.Errorf("github: fetch diff for commit: PR returned empty base SHA")
+	}
+
+	compare := url.PathEscape(baseSHA) + "..." + url.PathEscape(expectedHeadSHA)
+	path := fmt.Sprintf("/repos/%s/compare/%s", repo, compare)
+	resp, err := c.do("GET", path, "application/vnd.github.diff")
+	if err != nil {
+		return "", fmt.Errorf("github: fetch diff for commit: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+		errBody := safeTruncate(string(body), maxErrBodyLen)
+		return "", fmt.Errorf("github: fetch diff for commit: status %d: %s", resp.StatusCode, errBody)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxDiffBodyBytes))
+	if err != nil {
+		return "", fmt.Errorf("github: fetch diff for commit (%s #%d): read: %w", repo, number, err)
+	}
+	if int64(len(data)) >= maxDiffBodyBytes {
+		slog.Warn("github: commit diff truncated at size limit",
+			"repo", repo, "pr", number, "base_sha", baseSHA,
+			"head_sha", expectedHeadSHA, "limit_bytes", maxDiffBodyBytes)
+	}
+	return string(data), nil
 }
 
 // FetchDiff returns the unified diff for a PR. PRs over GitHub's 300-file
