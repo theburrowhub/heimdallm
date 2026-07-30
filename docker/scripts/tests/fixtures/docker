@@ -16,13 +16,23 @@ case "$*" in
         printf 'fake-web-container\n'
         ;;
     *" port web 3000")
+        if [ "${FAKE_DOCKER_FAIL_PORT:-0}" = "1" ]; then
+            printf 'simulated published-port lookup failure\n' >&2
+            exit 43
+        fi
         printf '127.0.0.1:1\n'
         ;;
     *" port heimdallm "*)
+        if [ "${FAKE_DOCKER_FAIL_PORT:-0}" = "1" ]; then
+            printf 'simulated published-port lookup failure\n' >&2
+            exit 43
+        fi
         printf '127.0.0.1:1\n'
         ;;
     *" exec -T heimdallm cat /data/api_token")
-        printf '0123456789abcdef0123456789abcdef\n'
+        if [ "${FAKE_DOCKER_EMPTY_TOKEN:-0}" != "1" ]; then
+            printf '0123456789abcdef0123456789abcdef\n'
+        fi
         ;;
     *" logs"*)
         printf 'daemon started\n'

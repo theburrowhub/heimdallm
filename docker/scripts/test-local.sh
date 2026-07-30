@@ -54,7 +54,11 @@ cleanup() {
     trap - EXIT
     trap '' HUP INT TERM
     info "Cleaning up..."
-    rm -f "$HTTP_BODY_FILE" 2>/dev/null || true
+    if ! compose_test_remove_run_file http-body "${HTTP_BODY_FILE:-}"; then
+        if [ "$exit_code" -eq 0 ]; then
+            exit_code=1
+        fi
+    fi
     if ! compose_test_cleanup; then
         if [ "$exit_code" -eq 0 ]; then
             exit_code=1
@@ -70,9 +74,29 @@ trap 'exit 143' TERM
 resolve_daemon_url() {
     local container_port="${HEIMDALLM_PORT:-7842}"
     local host_port
-    host_port=$(compose_test_published_port "$SERVICE" "$container_port")
+    if ! host_port=$(compose_test_published_port "$SERVICE" "$container_port"); then
+        return 1
+    fi
     BASE_URL="http://127.0.0.1:${host_port}"
     info "Isolated project: ${COMPOSE_TEST_PROJECT_NAME} (${BASE_URL})"
+}
+
+show_container_logs() {
+    echo ""
+    info "Container logs:"
+    compose_test logs --tail=30 2>&1 || true
+}
+
+read_api_token() {
+    local api_token
+    if ! api_token=$(compose_test exec -T "$SERVICE" cat /data/api_token 2>/dev/null); then
+        return 1
+    fi
+    api_token=$(printf '%s' "$api_token" | tr -d '[:space:]')
+    if [ -z "$api_token" ]; then
+        return 1
+    fi
+    printf '%s\n' "$api_token"
 }
 
 wait_for_health() {
@@ -94,7 +118,12 @@ check_http() {
     local desc="$1" method="$2" path="$3" expected="$4" body_check="${5:-}"
     local extra_headers="${6:-}"
     local url="${BASE_URL}${path}"
-    local args=(-s -o "$HTTP_BODY_FILE" -w "%{http_code}" -X "$method")
+    local response_file
+    if ! response_file=$(compose_test_run_path http-body); then
+        fail "$desc" "HTTP response file identity is invalid"
+        return
+    fi
+    local args=(-s -o "$response_file" -w "%{http_code}" -X "$method")
 
     if [ -n "$extra_headers" ]; then
         args+=(-H "$extra_headers")
@@ -110,7 +139,7 @@ check_http() {
 
     if [ -n "$body_check" ]; then
         local result
-        result=$(jq -r "$body_check" "$HTTP_BODY_FILE" 2>/dev/null) || result="false"
+        result=$(jq -r "$body_check" "$response_file" 2>/dev/null) || result="false"
         if [ "$result" != "true" ]; then
             fail "$desc" "body check failed: $body_check"
             return
@@ -199,23 +228,36 @@ test_smoke() {
     # Start with dummy credentials
     info "Starting container with dummy credentials..."
     compose_test up -d "$SERVICE" 2>&1
-    resolve_daemon_url
+    if ! resolve_daemon_url; then
+        fail "Container starts and /health responds" "published API port is unavailable"
+        show_container_logs
+        return 1
+    fi
 
     if wait_for_health; then
         pass "Container starts and /health responds"
     else
         fail "Container starts and /health responds" "timeout after ${HEALTH_TIMEOUT}s"
-        echo ""
-        info "Container logs:"
-        compose_test logs --tail=30 2>&1
+        show_container_logs
         return 1
     fi
 
     # Every endpoint except /health is authenticated. Read the generated token
-    # once and use it for the positive endpoint checks below.
-    local api_token
-    api_token=$(compose_test exec -T "$SERVICE" cat /data/api_token 2>/dev/null | tr -d '[:space:]') || api_token=""
-    local api_header="X-Heimdallm-Token: ${api_token}"
+    # once and run authenticated checks only when it is present and valid.
+    local api_token=""
+    local api_header=""
+    local api_token_ready=false
+    if api_token=$(read_api_token); then
+        if [ ${#api_token} -ge 32 ]; then
+            api_header="X-Heimdallm-Token: ${api_token}"
+            api_token_ready=true
+            pass "API token exists and is >= 32 chars"
+        else
+            fail "API token exists and is >= 32 chars" "got ${#api_token} chars"
+        fi
+    else
+        fail "Read generated API token" "could not read a non-empty /data/api_token"
+    fi
 
     echo ""
     info "Checking HTTP endpoints..."
@@ -224,25 +266,33 @@ test_smoke() {
     check_http "GET /health returns ok" \
         GET /health 200 '.status == "ok"'
 
-    # Config
-    check_http "GET /config returns valid JSON with ai_primary" \
-        GET /config 200 '.ai_primary == "gemini"' "$api_header"
+    if [ "$api_token_ready" = true ]; then
+        # Config
+        check_http "GET /config returns valid JSON with ai_primary" \
+            GET /config 200 '.ai_primary == "gemini"' "$api_header"
 
-    # PRs
-    check_http "GET /prs returns JSON array" \
-        GET /prs 200 'type == "array"' "$api_header"
+        # PRs
+        check_http "GET /prs returns JSON array" \
+            GET /prs 200 'type == "array"' "$api_header"
 
-    # Stats
-    check_http "GET /stats returns valid JSON" \
-        GET /stats 200 'type == "object"' "$api_header"
+        # Stats
+        check_http "GET /stats returns valid JSON" \
+            GET /stats 200 'type == "object"' "$api_header"
 
-    # Agents
-    check_http "GET /agents returns JSON array" \
-        GET /agents 200 'type == "array"' "$api_header"
+        # Agents
+        check_http "GET /agents returns JSON array" \
+            GET /agents 200 'type == "array"' "$api_header"
 
-    # SSE endpoint
-    check_http_header "GET /events returns SSE content type" \
-        GET /events "Content-Type" "text/event-stream" "$api_header"
+        # SSE endpoint
+        check_http_header "GET /events returns SSE content type" \
+            GET /events "Content-Type" "text/event-stream" "$api_header"
+    else
+        skip "GET /config returns valid JSON with ai_primary" "no valid API token available"
+        skip "GET /prs returns JSON array" "no valid API token available"
+        skip "GET /stats returns valid JSON" "no valid API token available"
+        skip "GET /agents returns JSON array" "no valid API token available"
+        skip "GET /events returns SSE content type" "no valid API token available"
+    fi
 
     echo ""
     info "Checking authentication..."
@@ -251,19 +301,13 @@ test_smoke() {
     check_http "POST /reload without token returns 401" \
         POST /reload 401
 
-    if [ ${#api_token} -ge 32 ]; then
-        pass "API token exists and is >= 32 chars"
-    else
-        fail "API token exists and is >= 32 chars" "got ${#api_token} chars"
-    fi
-
     # Auth acceptance (POST with valid token)
-    if [ -n "$api_token" ]; then
+    if [ "$api_token_ready" = true ]; then
         check_http "POST /reload with valid token returns 200" \
             POST /reload 200 '.status == "reloaded"' \
             "$api_header"
     else
-        skip "POST /reload with valid token" "no API token available"
+        skip "POST /reload with valid token" "no valid API token available"
     fi
 
     echo ""
@@ -326,15 +370,32 @@ test_github() {
     # Start with real .env
     info "Starting container with real credentials..."
     compose_test up -d "$SERVICE" 2>&1
-    resolve_daemon_url
+    if ! resolve_daemon_url; then
+        fail "Container starts and /health responds" "published API port is unavailable"
+        show_container_logs
+        return 1
+    fi
 
     if wait_for_health; then
         pass "Container starts and /health responds"
     else
         fail "Container starts and /health responds"
-        compose_test logs --tail=30 2>&1
+        show_container_logs
         return 1
     fi
+
+    local api_token
+    if ! api_token=$(read_api_token); then
+        fail "Read generated API token" "could not read a non-empty /data/api_token"
+        show_container_logs
+        return 1
+    fi
+    if [ ${#api_token} -lt 32 ]; then
+        fail "API token exists and is >= 32 chars" "got ${#api_token} chars"
+        return 1
+    fi
+    local api_header="X-Heimdallm-Token: ${api_token}"
+    pass "API token exists and is >= 32 chars"
 
     # Wait for first poll to complete
     info "Waiting for first poll cycle..."
@@ -345,7 +406,7 @@ test_github() {
 
     # /me should return a real login
     local me_body
-    me_body=$(curl -sf "${BASE_URL}/me" 2>/dev/null) || me_body="{}"
+    me_body=$(curl -sf -H "$api_header" "${BASE_URL}/me" 2>/dev/null) || me_body="{}"
     local login
     login=$(echo "$me_body" | jq -r '.login // empty' 2>/dev/null) || login=""
 
@@ -357,7 +418,7 @@ test_github() {
 
     # Config should have repositories
     local config_body
-    config_body=$(curl -sf "${BASE_URL}/config" 2>/dev/null) || config_body="{}"
+    config_body=$(curl -sf -H "$api_header" "${BASE_URL}/config" 2>/dev/null) || config_body="{}"
     local repo_count
     repo_count=$(echo "$config_body" | jq '.repositories | length' 2>/dev/null) || repo_count=0
 
@@ -373,7 +434,7 @@ test_github() {
 
     # Check if any PRs were detected
     local prs_body
-    prs_body=$(curl -sf "${BASE_URL}/prs" 2>/dev/null) || prs_body="[]"
+    prs_body=$(curl -sf -H "$api_header" "${BASE_URL}/prs" 2>/dev/null) || prs_body="[]"
     local pr_count
     pr_count=$(echo "$prs_body" | jq 'length' 2>/dev/null) || pr_count=0
 
@@ -438,32 +499,45 @@ test_e2e() {
 
     info "Starting container..."
     compose_test up -d "$SERVICE" 2>&1
-    resolve_daemon_url
+    if ! resolve_daemon_url; then
+        fail "Container health check" "published API port is unavailable"
+        show_container_logs
+        return 1
+    fi
 
     if ! wait_for_health; then
         fail "Container health check"
-        compose_test logs --tail=30 2>&1
+        show_container_logs
         return 1
     fi
     pass "Container is healthy"
 
     local api_token
-    api_token=$(compose_test exec -T "$SERVICE" cat /data/api_token 2>/dev/null | tr -d '[:space:]') || api_token=""
+    if ! api_token=$(read_api_token); then
+        fail "Read generated API token" "could not read a non-empty /data/api_token"
+        show_container_logs
+        return 1
+    fi
+    if [ ${#api_token} -lt 32 ]; then
+        fail "API token exists and is >= 32 chars" "got ${#api_token} chars"
+        return 1
+    fi
+    pass "API token exists and is >= 32 chars"
 
     echo ""
     echo -e "${BOLD}Container is running. Use the commands below to verify:${NC}"
     echo ""
     echo "  # Check authenticated user"
-    echo "  curl -s ${BASE_URL}/me | jq"
+    echo "  curl -s ${BASE_URL}/me -H 'X-Heimdallm-Token: ${api_token}' | jq"
     echo ""
     echo "  # List detected PRs"
-    echo "  curl -s ${BASE_URL}/prs | jq"
+    echo "  curl -s ${BASE_URL}/prs -H 'X-Heimdallm-Token: ${api_token}' | jq"
     echo ""
     echo "  # View stats"
-    echo "  curl -s ${BASE_URL}/stats | jq"
+    echo "  curl -s ${BASE_URL}/stats -H 'X-Heimdallm-Token: ${api_token}' | jq"
     echo ""
     echo "  # Follow SSE events (in another terminal)"
-    echo "  curl -N ${BASE_URL}/events"
+    echo "  curl -N ${BASE_URL}/events -H 'X-Heimdallm-Token: ${api_token}'"
     echo ""
     echo "  # Trigger manual review (replace <id> with PR ID from /prs)"
     echo "  curl -X POST ${BASE_URL}/prs/<id>/review -H 'X-Heimdallm-Token: ${api_token}'"

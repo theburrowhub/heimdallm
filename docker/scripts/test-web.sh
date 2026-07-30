@@ -31,7 +31,7 @@ cleanup() {
   exit_code=$?
   trap - EXIT
   trap '' HUP INT TERM
-  rm -f "${INDEX_HTML:-}" "${DEEP_HTML:-}" "${SSE_HDR:-}"
+  rm -f "${INDEX_HTML:-}" "${DEEP_HTML:-}" "${SSE_HDR:-}" 2>/dev/null || true
   if ! compose_test_cleanup; then
     if [ "$exit_code" -eq 0 ]; then
       exit_code=1
@@ -52,7 +52,11 @@ SSE_HDR="$(mktemp)"
 log "starting isolated Compose project ${COMPOSE_TEST_PROJECT_NAME}"
 compose_test up -d --build
 
-web_host_port=$(compose_test_published_port web 3000)
+if ! web_host_port=$(compose_test_published_port web 3000); then
+  log "container logs after published-port resolution failed"
+  compose_test logs --tail=30 2>&1 || true
+  fail "could not resolve the isolated web endpoint"
+fi
 BASE="http://127.0.0.1:${web_host_port}"
 log "web endpoint: ${BASE}"
 

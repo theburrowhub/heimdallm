@@ -108,20 +108,26 @@ While the daemon is running, in another terminal:
 # Copy the per-run URL printed by make test-e2e.
 BASE='http://127.0.0.1:<printed-port>'
 
+# The runner also prints its exact `docker compose --project-name ...` command.
+# Copy it into this terminal and append the exec arguments:
+<printed-compose-command> exec -T heimdallm cat /data/api_token
+API_TOKEN='<trimmed output from the previous command>'
+AUTH_HEADER="X-Heimdallm-Token: $API_TOKEN"
+
 # Health check
-curl -s $BASE/health | jq
+curl -s "$BASE/health" | jq
 
 # Authenticated user
-curl -s $BASE/me | jq
+curl -s -H "$AUTH_HEADER" "$BASE/me" | jq
 
 # Detected PRs
-curl -s $BASE/prs | jq
+curl -s -H "$AUTH_HEADER" "$BASE/prs" | jq
 
 # Review stats
-curl -s $BASE/stats | jq
+curl -s -H "$AUTH_HEADER" "$BASE/stats" | jq
 
 # Stream SSE events (Ctrl+C to stop)
-curl -N $BASE/events
+curl -N -H "$AUTH_HEADER" "$BASE/events"
 ```
 
 ### 7. Verify on GitHub
@@ -135,16 +141,11 @@ Check the PR on GitHub — you should see a review comment from the token user w
 
 ### 8. Advanced: Manual Review Trigger
 
-Read the API token from the container:
+Reuse the per-run `BASE`, `API_TOKEN`, and `AUTH_HEADER` values from step 6:
 
 ```bash
-# The runner prints its exact `docker compose --project-name ...` command.
-# Copy it into this terminal and append the exec arguments:
-<printed-compose-command> exec -T heimdallm cat /data/api_token
-API_TOKEN='<output from the previous command>'
-
 # Get PR ID from /prs
-PR_ID=$(curl -s $BASE/prs | jq '.[0].id')
+PR_ID=$(curl -s -H "$AUTH_HEADER" "$BASE/prs" | jq '.[0].id')
 
 # Trigger manual review
 curl -X POST $BASE/prs/$PR_ID/review -H "X-Heimdallm-Token: $API_TOKEN"
@@ -163,6 +164,13 @@ created for that process before it can call `down -v`; if the project name or
 marker does not match, cleanup fails closed and Docker is not invoked. The
 verified cleanup removes only that run's containers, network, and named
 volumes. The normal development/production project is never targeted.
+
+If cleanup fails, the runner preserves its private marker and cleanup log and
+prints two copyable, run-scoped commands: one to retry the exact
+`down -v --remove-orphans`, and another to remove the marker, log, and private
+state directory **after** Docker cleanup succeeds. The latter deliberately
+uses `rm -f` for the two known files followed by `rmdir`, rather than a
+recursive delete, so unexpected contents are never removed silently.
 
 If the process is killed with SIGKILL, Docker resources can remain because no
 shell trap can run. Their project and container names retain the

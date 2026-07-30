@@ -199,14 +199,22 @@ compose_test_cleanup() {
     COMPOSE_TEST_CLEANUP_LOG="$COMPOSE_TEST_STATE_DIR/cleanup.log"
     if compose_test_down >"$COMPOSE_TEST_CLEANUP_LOG" 2>&1; then
         rm -f "$COMPOSE_TEST_CLEANUP_LOG"
-        compose_test_release
-        return 0
+        if compose_test_release; then
+            return 0
+        fi
+
+        compose_test_error "Docker cleanup succeeded, but the private state directory could not be released"
+        compose_test_error "inspect state directory: $COMPOSE_TEST_STATE_DIR"
+        compose_test_error "after inspecting unexpected files, remove the preserved state explicitly"
+        return 1
     fi
 
     compose_test_error "cleanup failed; isolated Docker resources may remain"
     if compose_test_assert_identity >/dev/null 2>&1; then
         compose_test_error "project: $COMPOSE_TEST_PROJECT_NAME"
         compose_test_error "inspect: $(compose_test_display) ps -a"
+        compose_test_error "retry cleanup: $(compose_test_display) down -v --remove-orphans"
+        compose_test_error "after Docker cleanup succeeds, remove state: $(compose_test_display_state_cleanup)"
     fi
     compose_test_error "marker preserved: $COMPOSE_TEST_MARKER"
     compose_test_error "cleanup log: $COMPOSE_TEST_CLEANUP_LOG"
@@ -223,6 +231,32 @@ compose_test_run_path() {
     esac
     compose_test_assert_identity || return $?
     printf '%s/%s\n' "$COMPOSE_TEST_STATE_DIR" "$_compose_test_run_file"
+}
+
+compose_test_remove_run_file() {
+    _compose_test_remove_name="${1:-}"
+    _compose_test_remove_candidate="${2:-}"
+    _compose_test_remove_mismatch=0
+
+    # Derive the deletion target from the validated run identity. Never use the
+    # caller-provided candidate as an rm target: test-local.sh sources
+    # docker/.env, which can overwrite otherwise internal shell variables.
+    if ! _compose_test_remove_expected=$(compose_test_run_path "$_compose_test_remove_name"); then
+        compose_test_error "could not validate the per-run file; refusing deletion"
+        return 1
+    fi
+
+    if [ "$_compose_test_remove_candidate" != "$_compose_test_remove_expected" ]; then
+        compose_test_error "per-run file identity changed; deleting only the validated state file"
+        _compose_test_remove_mismatch=1
+    fi
+
+    if ! rm -f "$_compose_test_remove_expected"; then
+        compose_test_error "could not remove the validated per-run file"
+        return 1
+    fi
+
+    [ "$_compose_test_remove_mismatch" -eq 0 ]
 }
 
 compose_test_published_port() {
@@ -245,21 +279,61 @@ compose_test_published_port() {
 }
 
 compose_test_display() {
-    printf 'env HEIMDALLM_TEST_DAEMON_CONTAINER_NAME=%s HEIMDALLM_TEST_WEB_CONTAINER_NAME=%s HEIMDALLM_COMPOSE_DAEMON_HOST_IP=127.0.0.1 HEIMDALLM_COMPOSE_DAEMON_HOST_PORT=0 HEIMDALLM_COMPOSE_WEB_HOST_IP=127.0.0.1 HEIMDALLM_COMPOSE_WEB_HOST_PORT=0 docker compose --project-name %s -f "%s" -f "%s"' \
-        "$HEIMDALLM_TEST_DAEMON_CONTAINER_NAME" \
-        "$HEIMDALLM_TEST_WEB_CONTAINER_NAME" \
-        "$COMPOSE_TEST_PROJECT_NAME" \
-        "$COMPOSE_TEST_BASE_FILE" \
-        "$COMPOSE_TEST_OVERRIDE_FILE"
+    _compose_test_daemon_name=$(compose_test_shell_quote "$HEIMDALLM_TEST_DAEMON_CONTAINER_NAME")
+    _compose_test_web_name=$(compose_test_shell_quote "$HEIMDALLM_TEST_WEB_CONTAINER_NAME")
+    _compose_test_project=$(compose_test_shell_quote "$COMPOSE_TEST_PROJECT_NAME")
+    _compose_test_base_file=$(compose_test_shell_quote "$COMPOSE_TEST_BASE_FILE")
+    _compose_test_override_file=$(compose_test_shell_quote "$COMPOSE_TEST_OVERRIDE_FILE")
+
+    printf 'env HEIMDALLM_TEST_DAEMON_CONTAINER_NAME=%s HEIMDALLM_TEST_WEB_CONTAINER_NAME=%s HEIMDALLM_COMPOSE_DAEMON_HOST_IP=127.0.0.1 HEIMDALLM_COMPOSE_DAEMON_HOST_PORT=0 HEIMDALLM_COMPOSE_WEB_HOST_IP=127.0.0.1 HEIMDALLM_COMPOSE_WEB_HOST_PORT=0 docker compose --project-name %s -f %s -f %s' \
+        "$_compose_test_daemon_name" \
+        "$_compose_test_web_name" \
+        "$_compose_test_project" \
+        "$_compose_test_base_file" \
+        "$_compose_test_override_file"
+}
+
+compose_test_shell_quote() {
+    printf "'"
+    printf '%s' "$1" | sed "s/'/'\\\\''/g"
+    printf "'"
+}
+
+compose_test_display_state_cleanup() {
+    _compose_test_cleanup_log=${COMPOSE_TEST_CLEANUP_LOG:-"$COMPOSE_TEST_STATE_DIR/cleanup.log"}
+    _compose_test_quoted_log=$(compose_test_shell_quote "$_compose_test_cleanup_log")
+    _compose_test_quoted_marker=$(compose_test_shell_quote "$COMPOSE_TEST_MARKER")
+    _compose_test_quoted_state=$(compose_test_shell_quote "$COMPOSE_TEST_STATE_DIR")
+
+    # Deliberately avoid rm -rf. Removing only the two helper-owned files and
+    # then using rmdir makes recovery fail safely if anything unexpected is
+    # still present in the private directory.
+    printf 'rm -f %s %s && rmdir %s' \
+        "$_compose_test_quoted_log" \
+        "$_compose_test_quoted_marker" \
+        "$_compose_test_quoted_state"
 }
 
 compose_test_release() {
-    if [ -n "${COMPOSE_TEST_MARKER:-}" ] &&
-       [ "$COMPOSE_TEST_MARKER" = "${COMPOSE_TEST_STATE_DIR:-}/project" ]; then
-        rm -f "$COMPOSE_TEST_MARKER"
+    compose_test_assert_identity || return $?
+
+    if ! rm -f "$COMPOSE_TEST_MARKER"; then
+        compose_test_error "could not remove the private run marker"
+        return 1
     fi
-    if [ -n "${COMPOSE_TEST_STATE_DIR:-}" ]; then
-        rmdir "$COMPOSE_TEST_STATE_DIR" 2>/dev/null || true
+
+    if ! rmdir "$COMPOSE_TEST_STATE_DIR" 2>/dev/null; then
+        # Keep the identity recoverable when an unexpected per-run file stops
+        # the non-recursive directory removal.
+        if ! (
+            umask 077
+            printf '%s\n%s\n' "$COMPOSE_TEST_PROJECT_NAME" "$$" >"$COMPOSE_TEST_MARKER"
+        ); then
+            compose_test_error "could not restore the private run marker"
+            return 1
+        fi
+        compose_test_error "private state directory is not empty: $COMPOSE_TEST_STATE_DIR"
+        return 1
     fi
 
     unset HEIMDALLM_TEST_DAEMON_CONTAINER_NAME

@@ -26,7 +26,10 @@ cleanup_test_files() {
         "$TEST_TMP/parallel-b" \
         "$TEST_TMP/config.json" \
         "$TEST_TMP/production-config.json" \
-        "$TEST_TMP/runner-cleanup-failure.out"
+        "$TEST_TMP/runner-cleanup-failure.out" \
+        "$TEST_TMP/runner-port-failure.out" \
+        "$TEST_TMP/runner-token-failure.out" \
+        "$TEST_TMP/outside-http-body"
     rmdir "$FAKE_BIN" 2>/dev/null || true
     rmdir "$TEST_TMP" 2>/dev/null || true
 }
@@ -122,6 +125,12 @@ grep -F "cleanup failed; isolated Docker resources may remain" \
     fail "local runner did not report failed cleanup"
 grep -F "marker preserved:" "$TEST_TMP/runner-cleanup-failure.out" >/dev/null ||
     fail "local runner did not report its recovery marker"
+grep -F "retry cleanup:" "$TEST_TMP/runner-cleanup-failure.out" |
+    grep -F " down -v --remove-orphans" >/dev/null ||
+    fail "local runner did not print the exact run-scoped cleanup retry"
+grep -F "after Docker cleanup succeeds, remove state: rm -f " \
+    "$TEST_TMP/runner-cleanup-failure.out" >/dev/null ||
+    fail "local runner did not print explicit private-state recovery"
 set -- "$runner_failure_tmp"/heimdallm-compose-test-local.*
 [ "$#" -eq 1 ] && [ -d "$1" ] ||
     fail "local runner did not preserve exactly one failed-run directory"
@@ -129,11 +138,58 @@ runner_failure_state=$1
 [ -f "$runner_failure_state/project" ] &&
     [ -s "$runner_failure_state/cleanup.log" ] ||
     fail "local runner removed failed-cleanup recovery files"
-rm -f "$runner_failure_state/http-body" \
-    "$runner_failure_state/cleanup.log" \
-    "$runner_failure_state/project"
-rmdir "$runner_failure_state"
+grep -F "rmdir '$runner_failure_state'" \
+    "$TEST_TMP/runner-cleanup-failure.out" >/dev/null ||
+    fail "private-state recovery did not identify the exact run directory"
+if grep -F "rm -rf" "$TEST_TMP/runner-cleanup-failure.out" >/dev/null; then
+    fail "private-state recovery suggested an unsafe recursive deletion"
+fi
+
+recovery_down=$(sed -n 's/^compose-test: retry cleanup: //p' \
+    "$TEST_TMP/runner-cleanup-failure.out")
+[ -n "$recovery_down" ] || fail "could not extract the printed cleanup retry"
+sh -c "$recovery_down"
+recovery_state=$(sed -n \
+    's/^compose-test: after Docker cleanup succeeds, remove state: //p' \
+    "$TEST_TMP/runner-cleanup-failure.out")
+[ -n "$recovery_state" ] || fail "could not extract the printed state cleanup"
+sh -c "$recovery_state"
+[ ! -d "$runner_failure_state" ] ||
+    fail "printed recovery commands did not reclaim the private state directory"
 rmdir "$runner_failure_tmp"
+
+compose_test_init release "$REPO_ROOT"
+release_marker=$COMPOSE_TEST_MARKER
+release_state_dir=$COMPOSE_TEST_STATE_DIR
+release_extra=$(compose_test_run_path unexpected)
+: >"$release_extra"
+if compose_test_release 2>/dev/null; then
+    fail "release silently accepted an unexpected private-state file"
+fi
+[ -f "$release_marker" ] ||
+    fail "failed release did not restore its recovery marker"
+rm -f "$release_extra"
+compose_test_release
+[ ! -d "$release_state_dir" ] ||
+    fail "release retry left the private state directory behind"
+
+printf '    overwritten run-file variables never delete outside private state\n'
+compose_test_init run-file "$REPO_ROOT"
+expected_http_body=$(compose_test_run_path http-body)
+outside_http_body="$TEST_TMP/outside-http-body"
+printf '%s\n' 'private state response' >"$expected_http_body"
+printf '%s\n' 'must survive cleanup' >"$outside_http_body"
+HTTP_BODY_FILE=$outside_http_body
+if compose_test_remove_run_file http-body "$HTTP_BODY_FILE" 2>/dev/null; then
+    fail "run-file cleanup accepted an overwritten candidate path"
+fi
+[ ! -e "$expected_http_body" ] ||
+    fail "run-file cleanup did not remove its validated private-state file"
+[ "$(sed -n '1p' "$outside_http_body")" = "must survive cleanup" ] ||
+    fail "run-file cleanup modified a file outside the private state directory"
+rm -f "$outside_http_body"
+unset HTTP_BODY_FILE
+compose_test_release
 
 printf '4/8 concurrent initializations never share project, container, or body-file names\n'
 run_parallel_init() (
@@ -217,6 +273,50 @@ awk -F '\t' '
 ' "$FAKE_DOCKER_LOG" ||
     fail "local runner built or started services beyond heimdallm"
 assert_log_has_safe_down "$local_project"
+
+printf '    startup port failures retain Compose diagnostics\n'
+: >"$FAKE_DOCKER_LOG"
+if FAKE_DOCKER_FAIL_PORT=1 TMPDIR="$TEST_TMP" \
+    "$SCRIPT_DIR/test-local.sh" smoke >"$TEST_TMP/runner-port-failure.out" 2>&1; then
+    fail "local runner reported success without a published daemon port"
+fi
+grep -F "published API port is unavailable" \
+    "$TEST_TMP/runner-port-failure.out" >/dev/null ||
+    fail "local runner did not explain the published-port failure"
+grep -F "Container logs:" "$TEST_TMP/runner-port-failure.out" >/dev/null ||
+    fail "local runner omitted its log heading after port resolution failed"
+grep -F "daemon started" "$TEST_TMP/runner-port-failure.out" >/dev/null ||
+    fail "local runner omitted Compose logs after port resolution failed"
+port_failure_project=$(awk -F '\t' '$0 ~ /\tdown\t-v\t--remove-orphans$/ {
+    for (i = 1; i <= NF; i++) if ($i == "--project-name") print $(i + 1)
+}' "$FAKE_DOCKER_LOG")
+assert_log_has_safe_down "$port_failure_project"
+
+printf '    empty API tokens fail once and skip authenticated checks\n'
+: >"$FAKE_DOCKER_LOG"
+if FAKE_DOCKER_EMPTY_TOKEN=1 TMPDIR="$TEST_TMP" \
+    "$SCRIPT_DIR/test-local.sh" smoke >"$TEST_TMP/runner-token-failure.out" 2>&1; then
+    fail "local runner reported success with an empty API token"
+fi
+grep -F "could not read a non-empty /data/api_token" \
+    "$TEST_TMP/runner-token-failure.out" >/dev/null ||
+    fail "local runner did not identify the empty API token"
+grep -F "FAIL: 1" "$TEST_TMP/runner-token-failure.out" >/dev/null ||
+    fail "empty API token caused more than one hard failure"
+grep -F "SKIP: 6" "$TEST_TMP/runner-token-failure.out" >/dev/null ||
+    fail "authenticated checks were not skipped after an empty API token"
+token_skip_count=$(grep -c "no valid API token available" \
+    "$TEST_TMP/runner-token-failure.out")
+[ "$token_skip_count" -eq 6 ] ||
+    fail "expected six explicit authenticated-check skips, got $token_skip_count"
+if grep -F "expected HTTP 200, got 401" \
+    "$TEST_TMP/runner-token-failure.out" >/dev/null; then
+    fail "empty API token cascaded into opaque endpoint failures"
+fi
+token_failure_project=$(awk -F '\t' '$0 ~ /\tdown\t-v\t--remove-orphans$/ {
+    for (i = 1; i <= NF; i++) if ($i == "--project-name") print $(i + 1)
+}' "$FAKE_DOCKER_LOG")
+assert_log_has_safe_down "$token_failure_project"
 
 printf '7/8 web runner uses one isolated project for startup and cleanup\n'
 : >"$FAKE_DOCKER_LOG"

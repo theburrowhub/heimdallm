@@ -24,7 +24,10 @@ while [ "$#" -gt 0 ]; do
             ;;
         -H)
             case "$2" in
-                X-Heimdallm-Token:*) has_token=true ;;
+                X-Heimdallm-Token:*)
+                    token_value=${2#X-Heimdallm-Token: }
+                    [ -n "$token_value" ] && has_token=true
+                    ;;
             esac
             shift 2
             ;;
