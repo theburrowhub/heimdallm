@@ -239,7 +239,7 @@ func TestExecuteRawAddsDetectedWorkDirFlags(t *testing.T) {
 		help     string
 		wantFlag string
 	}{
-		{cli: "claude", help: "Usage: claude\n  --add-dir <directories...>\n", wantFlag: "--add-dir"},
+		{cli: "claude", help: "Usage: claude\n  --safe-mode\n  --add-dir <directories...>\n", wantFlag: "--add-dir"},
 		{cli: "gemini", help: "Usage: gemini\n  --include-directories <dirs>\n", wantFlag: "--include-directories"},
 		{cli: "codex", help: "Usage: codex\n  -C, --cd <DIR>\n", wantFlag: "--cd"},
 	}
@@ -274,16 +274,81 @@ func TestExecuteRawAddsDetectedWorkDirFlags(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read captured cwd: %v", err)
 			}
-			requireSameDir(t, strings.TrimSpace(string(cwdBytes)), workDir)
+			capturedCWD := strings.TrimSpace(string(cwdBytes))
+			if tc.cli == "claude" || tc.cli == "gemini" || tc.cli == "opencode" {
+				if cleanResolvedPath(capturedCWD) == cleanResolvedPath(workDir) {
+					t.Fatalf("%s ran inside the repository instead of its isolated directory", tc.cli)
+				}
+				if _, err := os.Stat(capturedCWD); !os.IsNotExist(err) {
+					t.Fatalf("%s isolated cwd was not removed after execution: %v", tc.cli, err)
+				}
+			} else {
+				requireSameDir(t, capturedCWD, workDir)
+			}
 		})
 	}
 }
 
-func TestExecuteRawFallsBackToCWDWhenWorkDirFlagUnsupported(t *testing.T) {
+func TestExecuteRawDetectsOpenCodeDirFromRunHelp(t *testing.T) {
 	binDir := t.TempDir()
 	captureArgs := filepath.Join(t.TempDir(), "args.txt")
 	captureCWD := filepath.Join(t.TempDir(), "cwd.txt")
-	script := fakeCLIScript("Usage: claude\n", captureArgs, captureCWD)
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"--help\" ]; then\n" +
+		"  printf '%s\\n' 'Usage: opencode [command]' 'Commands: run'\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"if [ \"$1\" = \"--pure\" ] && [ \"$2\" = \"run\" ] && [ \"$3\" = \"--help\" ]; then\n" +
+		"  printf '%s\\n' 'Usage: opencode run [message..]' '  --dir <path>'\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"printf '%s\\n' \"$*\" > " + shellQuote(captureArgs) + "\n" +
+		"printf '%s\\n' \"$PWD\" > " + shellQuote(captureCWD) + "\n" +
+		"printf '{\"ok\":true}\\n'\n"
+	if err := os.WriteFile(filepath.Join(binDir, "opencode"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake OpenCode: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	workDir := t.TempDir()
+	if _, err := executor.New().ExecuteRaw(
+		"opencode",
+		"prompt",
+		executor.ExecOptions{WorkDir: workDir},
+	); err != nil {
+		t.Fatalf("ExecuteRaw: %v", err)
+	}
+
+	argsBytes, err := os.ReadFile(captureArgs)
+	if err != nil {
+		t.Fatalf("read captured args: %v", err)
+	}
+	args := strings.Fields(string(argsBytes))
+	runIndex := indexOf(args, "run")
+	pureIndex := indexOf(args, "--pure")
+	dirIndex := indexOf(args, "--dir")
+	workDirIndex := indexOf(args, workDir)
+	if pureIndex < 0 || runIndex <= pureIndex || dirIndex <= runIndex || workDirIndex != dirIndex+1 {
+		t.Fatalf("args = %v, want OpenCode --pure run --dir %s", args, workDir)
+	}
+	cwdBytes, err := os.ReadFile(captureCWD)
+	if err != nil {
+		t.Fatalf("read captured cwd: %v", err)
+	}
+	capturedCWD := strings.TrimSpace(string(cwdBytes))
+	if cleanResolvedPath(capturedCWD) == cleanResolvedPath(workDir) {
+		t.Fatal("OpenCode ran inside the repository instead of its isolated directory")
+	}
+	if _, err := os.Stat(capturedCWD); !os.IsNotExist(err) {
+		t.Fatalf("OpenCode isolated cwd was not removed after execution: %v", err)
+	}
+}
+
+func TestClaudeRepositoryAnalysisRejectsCWDOnlyCLI(t *testing.T) {
+	binDir := t.TempDir()
+	captureArgs := filepath.Join(t.TempDir(), "args.txt")
+	captureCWD := filepath.Join(t.TempDir(), "cwd.txt")
+	script := fakeCLIScript("Usage: claude\n  --safe-mode\n", captureArgs, captureCWD)
 	path := filepath.Join(binDir, "claude")
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake CLI: %v", err)
@@ -292,24 +357,66 @@ func TestExecuteRawFallsBackToCWDWhenWorkDirFlagUnsupported(t *testing.T) {
 
 	workDir := t.TempDir()
 	e := executor.New()
-	if _, err := e.ExecuteRaw("claude", "prompt", executor.ExecOptions{WorkDir: workDir}); err != nil {
-		t.Fatalf("ExecuteRaw: %v", err)
+	_, err := e.ExecuteRaw("claude", "prompt", executor.ExecOptions{WorkDir: workDir})
+	if err == nil || !strings.Contains(err.Error(), "must support --add-dir or --directory") {
+		t.Fatalf("ExecuteRaw error = %v, want fail-closed Claude policy error", err)
 	}
-	argsBytes, err := os.ReadFile(captureArgs)
-	if err != nil {
-		t.Fatalf("read captured args: %v", err)
+	if _, statErr := os.Stat(captureArgs); !os.IsNotExist(statErr) {
+		t.Fatalf("Claude executed after unsafe CWD-only detection: %v", statErr)
 	}
-	if strings.Contains(string(argsBytes), workDir) {
-		t.Fatalf("args = %q, workdir should only be passed via cwd when no supported flag is advertised", string(argsBytes))
+	if _, statErr := os.Stat(captureCWD); !os.IsNotExist(statErr) {
+		t.Fatalf("Claude captured a repository cwd after policy rejection: %v", statErr)
 	}
-	cwdBytes, err := os.ReadFile(captureCWD)
-	if err != nil {
-		t.Fatalf("read captured cwd: %v", err)
+}
+
+func TestClaudeExecutionRejectsCLIWithoutSafeMode(t *testing.T) {
+	binDir := t.TempDir()
+	started := filepath.Join(t.TempDir(), "started")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"--help\" ]; then printf '%s\\n' 'Usage: claude' '  --add-dir <directories...>'; exit 0; fi\n" +
+		"printf started > " + shellQuote(started) + "\n"
+	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	requireSameDir(t, strings.TrimSpace(string(cwdBytes)), workDir)
+	t.Setenv("PATH", binDir)
+
+	_, err := executor.New().ExecuteRaw("claude", "prompt", executor.ExecOptions{})
+	if err == nil || !strings.Contains(err.Error(), "must support --safe-mode") {
+		t.Fatalf("ExecuteRaw error = %v, want fail-closed safe-mode error", err)
+	}
+	if _, statErr := os.Stat(started); !os.IsNotExist(statErr) {
+		t.Fatalf("Claude executed before safe-mode capability rejection: %v", statErr)
+	}
+}
+
+func TestOpenCodeRepositoryAnalysisRejectsCWDOnlyCLI(t *testing.T) {
+	binDir := t.TempDir()
+	started := filepath.Join(t.TempDir(), "started")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"--pure\" ] && [ \"$2\" = \"run\" ] && [ \"$3\" = \"--help\" ]; then printf '%s\\n' 'Usage: opencode run'; exit 0; fi\n" +
+		"printf started > " + shellQuote(started) + "\n"
+	if err := os.WriteFile(filepath.Join(binDir, "opencode"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake OpenCode: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	_, err := executor.New().ExecuteRaw(
+		"opencode",
+		"prompt",
+		executor.ExecOptions{WorkDir: t.TempDir()},
+	)
+	if err == nil || !strings.Contains(err.Error(), "must support --pure and run --dir") {
+		t.Fatalf("ExecuteRaw error = %v, want fail-closed OpenCode policy error", err)
+	}
+	if _, statErr := os.Stat(started); !os.IsNotExist(statErr) {
+		t.Fatalf("OpenCode executed after unsafe CWD-only detection: %v", statErr)
+	}
 }
 
 func TestExecuteRawCodexUsesExecAndReadsPromptFromStdin(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "codex-parent-secret")
+	t.Setenv("HTTPS_PROXY", "https://proxy-user:proxy-secret@example.invalid")
+	t.Setenv("NO_PROXY", "localhost,.internal.example")
 	binDir := t.TempDir()
 	captureArgs := filepath.Join(t.TempDir(), "args.txt")
 	capturePrompt := filepath.Join(t.TempDir(), "prompt.txt")
@@ -366,6 +473,20 @@ func TestExecuteRawCodexUsesExecAndReadsPromptFromStdin(t *testing.T) {
 	}
 	if strings.Contains(string(argsBytes), "--approval-mode") {
 		t.Fatalf("args = %v, must not use removed --approval-mode flag", args)
+	}
+	if !strings.Contains(string(argsBytes), "allow_login_shell=false") {
+		t.Fatalf("args = %v, want login shells disabled", args)
+	}
+	if !strings.Contains(string(argsBytes), `shell_environment_policy={inherit="none"`) {
+		t.Fatalf("args = %v, want a clean nested-command environment", args)
+	}
+	if !strings.Contains(string(argsBytes), "localhost,.internal.example") {
+		t.Fatalf("args = %v, want non-secret NO_PROXY in nested-command policy", args)
+	}
+	for _, secret := range []string{"codex-parent-secret", "proxy-secret"} {
+		if strings.Contains(string(argsBytes), secret) {
+			t.Fatalf("args exposed secret %q: %v", secret, args)
+		}
 	}
 	promptBytes, err := os.ReadFile(capturePrompt)
 	if err != nil {
@@ -571,6 +692,10 @@ func indexOf(args []string, target string) int {
 func fakeCLIScript(help, captureArgs, captureCWD string) string {
 	return "#!/bin/sh\n" +
 		"if [ \"$1\" = \"--help\" ]; then\n" +
+		"  printf '%s\\n' " + shellQuote(help) + "\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"if [ \"$1\" = \"--pure\" ] && [ \"$2\" = \"run\" ] && [ \"$3\" = \"--help\" ]; then\n" +
 		"  printf '%s\\n' " + shellQuote(help) + "\n" +
 		"  exit 0\n" +
 		"fi\n" +
@@ -876,6 +1001,7 @@ func TestValidateExtraFlagsForCLIRejectsPolicyAliases(t *testing.T) {
 		{name: "OpenCode command config", cli: "opencode", flags: "--command unsafe"},
 		{name: "OpenCode future permission alias", cli: "opencode", flags: "--permission=allow"},
 		{name: "OpenCode external share", cli: "opencode", flags: "--share"},
+		{name: "OpenCode pure negation", cli: "opencode", flags: "--pure=false"},
 		{name: "OpenCode sandbox negation", cli: "opencode", flags: "--no-sandbox"},
 		{name: "OpenCode resumed session", cli: "opencode", flags: "-sSESSION"},
 		{name: "OpenCode continued session", cli: "opencode", flags: "--continue"},

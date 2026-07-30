@@ -12,7 +12,8 @@ services:
     volumes:
       - heimdallm-test-data:/data
       - heimdallm-test-config:/config
-      # Gemini OAuth tokens from host (uncomment for Level 3 E2E test):
+      # Gemini OAuth tokens from host (read-only; refresh is ephemeral;
+      # uncomment for Level 3 E2E test):
       # - ~/.gemini:/home/heimdallm/.gemini:ro
 
   web:

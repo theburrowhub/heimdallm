@@ -7,7 +7,7 @@ This guide walks you through verifying the full Heimdallm review pipeline: daemo
 | Requirement | Details |
 |---|---|
 | **GitHub Token** | A `GITHUB_TOKEN` with `repo` scope for a user/bot account |
-| **AI Authentication** | At least one: `GEMINI_API_KEY`, `ANTHROPIC_API_KEY` (or `CLAUDE_CODE_OAUTH_TOKEN`), or `OPENAI_API_KEY` |
+| **AI Authentication** | At least one configured API/OAuth credential, or a selected Claude Bedrock/Vertex/gateway route |
 | **Monitored Repo** | A repo listed in `HEIMDALLM_REPOSITORIES` where the token user has write access |
 | **Open PR** | The token user must be **explicitly requested as a reviewer** on the PR |
 | **Collaborator** | GitHub does not allow requesting yourself as reviewer — another account must do it |
@@ -45,6 +45,8 @@ HEIMDALLM_POLL_INTERVAL=1m
 GEMINI_API_KEY=your_gemini_key
 # ANTHROPIC_API_KEY=your_anthropic_key
 # CLAUDE_CODE_OAUTH_TOKEN=your_oauth_token    # alternative to ANTHROPIC_API_KEY
+# ANTHROPIC_BASE_URL=https://gateway.example.com
+# ANTHROPIC_AUTH_TOKEN=your_gateway_token
 # OPENAI_API_KEY=your_openai_key
 ```
 
@@ -201,6 +203,8 @@ If you've already authenticated `gemini` on your host:
    volumes:
      - ~/.gemini:/home/heimdallm/.gemini:ro
    ```
+   The test imports authentication state read-only. Any OAuth refresh is
+   confined to that run and is not written back to the host.
 
 ### Option C: Vertex AI + Service Account
 
@@ -211,7 +215,9 @@ For production/CI environments:
 
 ## Claude Code Authentication for Docker
 
-Two options for authenticating Claude Code inside Docker:
+Five routes are supported. The Compose file forwards their exact documented
+variables; the executor activates Bedrock/Vertex credentials only when the
+matching provider selector is enabled.
 
 ### Option A: API Key (Simplest)
 
@@ -225,6 +231,29 @@ For Max/Pro/Team subscription users:
 2. Set `CLAUDE_CODE_OAUTH_TOKEN` in `docker/.env`
 
 > **Note:** Do not enable `bare = true` in `config.toml` when using OAuth tokens — bare mode disables OAuth and requires an API key.
+
+### Option C: Anthropic-Compatible Gateway
+
+Set `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`.
+
+### Option D: Amazon Bedrock
+
+Set `CLAUDE_CODE_USE_BEDROCK=1`, `AWS_REGION`, and either
+`AWS_BEARER_TOKEN_BEDROCK` or the standard access-key/session-token variables.
+A signing gateway can instead set `ANTHROPIC_BEDROCK_BASE_URL` and
+`CLAUDE_CODE_SKIP_BEDROCK_AUTH=1`.
+
+### Option E: Google Vertex AI
+
+Set `CLAUDE_CODE_USE_VERTEX=1`, `CLOUD_ML_REGION`,
+`ANTHROPIC_VERTEX_PROJECT_ID`, and a container-visible
+`GOOGLE_APPLICATION_CREDENTIALS` mount. A gateway can use
+`ANTHROPIC_VERTEX_BASE_URL` plus `CLAUDE_CODE_SKIP_VERTEX_AUTH=1`.
+
+AWS profiles and config files are intentionally not automatic because the
+isolated home does not project `~/.aws` and `credential_process` can execute a
+command. See the [Configuration Guide](configuration-guide.md#claude-code)
+before explicitly allowlisting those paths.
 
 ## Troubleshooting
 

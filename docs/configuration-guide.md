@@ -595,6 +595,87 @@ startup or discarding unrelated stored settings. When execution falls back to a
 different CLI, provider-specific options from the unavailable primary are not
 forwarded.
 
+### AI subprocess environment isolation
+
+AI CLIs do not inherit `os.Environ()` from the daemon. Every execution starts
+from an empty environment and receives only a small runtime baseline plus the
+selected provider's default credentials:
+
+| CLI | Credentials exposed by default |
+|---|---|
+| Claude | `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, and a conditionally selected Bedrock or Vertex group |
+| Codex | `OPENAI_API_KEY`, `CODEX_API_KEY` |
+| Gemini | `GEMINI_API_KEY`, `GOOGLE_API_KEY`, and explicitly configured Vertex AI variables |
+| OpenCode | `OPENROUTER_API_KEY` |
+
+For Claude, `ANTHROPIC_BASE_URL` supports an Anthropic-compatible gateway.
+Bedrock variables and AWS credentials are forwarded only when
+`CLAUDE_CODE_USE_BEDROCK` has one of Claude Code's enabled boolean values
+(`1`, `true`, `yes`, or `on`); Vertex selectors and ADC are forwarded only
+when `CLAUDE_CODE_USE_VERTEX` has an enabled value. The corresponding
+`CLAUDE_CODE_SKIP_*_AUTH` switch preserves gateway routing but omits client
+credentials. The Bedrock and Vertex selectors are mutually exclusive; enabling
+both fails before Claude starts so the two cloud credential groups are never
+co-resident. AWS profiles/config files remain explicit allowlist opt-ins
+because the isolated `HOME` does not project `~/.aws` and `credential_process`
+can execute operator-configured commands.
+
+Each execution also gets a new mode-`0700` temporary `HOME`. Only the selected
+provider's minimum state/authentication paths are projected into it, preserving
+file-based login without exposing another CLI's state or unrelated home files.
+Detection and `--help` probes receive no provider credentials.
+Claude runs from the isolated directory with its upstream `--safe-mode`; support
+is verified before every cached CLI version is used, and versions older than
+2.1.169 fail closed. The repository is granted only as an additional directory.
+Only `.claude/.credentials.json` and `.claude.json` are copied into the
+temporary home and safely synchronized back, so persistent user settings,
+CLAUDE.md, hooks, plugins, MCP servers, skills, commands, and agents are not
+loaded. A refresh against a source that is read-only or owned by another uid is
+ephemeral and warns without discarding a successful review; validation,
+concurrency and non-permission persistence failures remain fatal.
+Gemini projects only mutable OAuth/account/installation state and an input-only
+authentication selector. User settings, `.env`, GEMINI.md, MCP tokens,
+extensions, commands, skills, agents, and policies are excluded. Atomic
+rotations are synchronized on read-write native state; rotations against the
+documented read-only Docker mount are ephemeral and produce a warning without
+discarding a successful review.
+OpenCode runs with its managed `--pure` policy, so repository and user-state
+plugins are not executed with the selected backend credential. Heimdallm also
+sets `OPENCODE_DISABLE_PROJECT_CONFIG=1`; repository `opencode.json`,
+`.opencode`, MCP, command, agent, and dependency-install configuration is not
+loaded, while operator-level configuration remains available through the
+isolated state bridge.
+
+Additional variables require an exact, comma-separated names allowlist:
+
+```bash
+HEIMDALLM_AI_GEMINI_ENV_ALLOWLIST=GOOGLE_CLOUD_QUOTA_PROJECT
+HEIMDALLM_AI_OPENCODE_ENV_ALLOWLIST=CORPORATE_TENANT_ID
+```
+
+Standard proxy and CA variables are already part of the common runtime
+baseline and do not need to be repeated. Their names are matched
+case-insensitively, and empty elements in a comma-separated allowlist are
+ignored. A configured allowlist name that is absent produces a warning without
+logging its value; optional missing provider-state paths are reported once at
+info level.
+
+`GITHUB_TOKEN`, `GH_TOKEN`, `HEIMDALLM_*`, `GIT_*`, and known dynamic-loader,
+runtime-agent, module-loader, or shell-startup injection variables are
+permanently denied. This denylist is defense in depth rather than an exhaustive
+safety catalogue; every additional name remains an explicit operator trust
+decision. `SSH_AUTH_SOCK` is
+absent by default and requires both an explicit per-CLI allowlist entry and an
+operator-owned socket mount. Custom allowlisted values must also be forwarded
+to the daemon container through a private compose overlay. Cross-provider
+credential boundaries are permanent for Claude, Codex, and Gemini. OpenCode
+is the deliberate exception because it is a multi-provider client: an exact
+OpenCode allowlist entry authorizes only its configured backend key.
+
+See [AI subprocess security](subprocess-security.md) for the complete
+environment contract, provider-state bridge, SSH overlay, and residual threat
+model.
+
 ### Prompt categories
 
 Each repo can use different agent profiles for different pipeline stages:
@@ -778,7 +859,7 @@ echo "GITHUB_TOKEN=$(gh auth token)" >> docker/.env
 
 ### Claude Code
 
-Two authentication options:
+Claude supports direct credentials plus three enterprise routes:
 
 **Option A: API key (pay-as-you-go)**
 
@@ -804,15 +885,99 @@ Copy only the `sk-ant-oat...` line it prints and paste it into `docker/.env`.
 
 **Do not** set `bare = true` in `config.toml` when using OAuth — `bare` disables OAuth and forces API-key mode.
 
+**Option C: Anthropic-compatible gateway**
+
+```bash
+ANTHROPIC_BASE_URL=https://gateway.example.com
+ANTHROPIC_AUTH_TOKEN=<gateway bearer token>
+```
+
+`ANTHROPIC_AUTH_TOKEN` and credentials embedded in a base URL are redacted
+from CLI errors. A normal base URL remains visible for diagnostics.
+
+**Option D: Amazon Bedrock**
+
+```bash
+CLAUDE_CODE_USE_BEDROCK=1
+AWS_REGION=us-east-1
+
+# Choose one authentication form:
+AWS_BEARER_TOKEN_BEDROCK=<bedrock API key>
+# or:
+AWS_ACCESS_KEY_ID=<access key id>
+AWS_SECRET_ACCESS_KEY=<secret access key>
+AWS_SESSION_TOKEN=<optional session token>
+```
+
+For a gateway that signs Bedrock requests, set
+`ANTHROPIC_BEDROCK_BASE_URL` and `CLAUDE_CODE_SKIP_BEDROCK_AUTH=1`.
+Heimdallm then omits every AWS credential from the Claude subprocess.
+Do not combine this route with `CLAUDE_CODE_USE_VERTEX`; Heimdallm rejects
+conflicting cloud backends before starting Claude.
+
+**Option E: Google Vertex AI**
+
+```bash
+CLAUDE_CODE_USE_VERTEX=1
+CLOUD_ML_REGION=global
+ANTHROPIC_VERTEX_PROJECT_ID=my-project
+GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/google-application-credentials.json
+```
+
+The ADC path is container-local and needs the same operator-owned read-only
+mount shown in the Gemini Vertex example below. For a gateway that supplies
+Google authentication, set `ANTHROPIC_VERTEX_BASE_URL` and
+`CLAUDE_CODE_SKIP_VERTEX_AUTH=1`; the ADC path is then omitted.
+
+`AWS_PROFILE`, `AWS_CONFIG_FILE`, and `AWS_SHARED_CREDENTIALS_FILE` are not
+automatic. If a reviewed deployment needs them, add their exact names to
+`HEIMDALLM_AI_CLAUDE_ENV_ALLOWLIST`, expose absolute container paths through a
+private read-only mount, and audit any `credential_process` command first.
+
 ### Other AI CLIs
 
 | CLI | Env var | Where to get it |
 |---|---|---|
-| Gemini | `GEMINI_API_KEY` | https://aistudio.google.com/apikey |
+| Gemini API key | `GEMINI_API_KEY` or `GOOGLE_API_KEY` | https://aistudio.google.com/apikey |
+| Gemini Vertex AI | `GOOGLE_GENAI_USE_VERTEXAI`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_APPLICATION_CREDENTIALS` | Google Cloud |
 | Codex / OpenAI | `OPENAI_API_KEY` or `CODEX_API_KEY` | https://platform.openai.com/api-keys |
 | OpenCode (OpenRouter) | `OPENROUTER_API_KEY` | https://openrouter.ai/keys |
 
-OpenCode also accepts `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` depending on your configured provider.
+`OPENROUTER_API_KEY` is OpenCode's default credential. To preserve OpenCode's
+multi-provider support without exposing every daemon key, name only the
+configured backend credential explicitly:
+
+```bash
+HEIMDALLM_AI_OPENCODE_ENV_ALLOWLIST=ANTHROPIC_API_KEY
+```
+
+The same opt-in supports `OPENAI_API_KEY`, `CODEX_API_KEY`, `GEMINI_API_KEY`,
+or `GOOGLE_API_KEY`. Credentials not named in the OpenCode allowlist remain
+absent.
+
+**Gemini with Vertex AI:**
+
+```bash
+# docker/.env
+GOOGLE_GENAI_USE_VERTEXAI=true
+GOOGLE_CLOUD_PROJECT=my-project
+GOOGLE_CLOUD_LOCATION=global
+GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/google-application-credentials.json
+```
+
+The credentials path is container-local. Mount the service-account file with
+an operator-owned override rather than adding it to the repository:
+
+```yaml
+# docker/docker-compose.vertex.yml
+services:
+  heimdallm:
+    volumes:
+      - type: bind
+        source: /absolute/host/path/service-account.json
+        target: /run/secrets/google-application-credentials.json
+        read_only: true
+```
 
 **Reusing Gemini browser OAuth from your host:**
 
@@ -823,7 +988,12 @@ volumes:
   - ~/.gemini:/home/heimdallm/.gemini:ro
 ```
 
-Leave `GEMINI_API_KEY` empty. The container reads your host's OAuth tokens read-only.
+Leave `GEMINI_API_KEY` and `GOOGLE_API_KEY` empty. The container reads your
+host's OAuth tokens read-only and projects only Gemini authentication state
+into the execution's isolated temporary home. Token refreshes from that
+read-only mount are intentionally ephemeral; use an API key for fully stateless
+Docker operation, or authenticate the native/`make run-linux` installation when
+rotations must persist.
 
 ---
 
@@ -847,34 +1017,50 @@ The `web` service depends on the daemon's healthcheck (`/health`) before accepti
 | `heimdallm-data` (named) | `/data` | SQLite database and API token |
 | `heimdallm-config` (named) | `/config` | `config.toml` (daemon-owned, web UI edits here) |
 | `$HEIMDALLM_LOCAL_DIR_BASE` | `/home/heimdallm/repos` (read-only) | Host repos root for full-repo analysis |
-| SSH agent socket | `/ssh-agent` (read-only) | SSH agent for git operations in `auto_implement` |
 
 The config volume is a **named volume** (not a bind mount). This is intentional — a bind mount would be owned by root on the host, which blocked the daemon from writing `config.toml`. The image chowns `/config` to the `heimdallm` user during build.
 
-### SSH agent forwarding
+### Optional SSH agent access for an AI CLI
 
-`auto_implement` pushes branches over SSH. Forward your host's SSH agent into the container:
+The base deployment does not expose the host SSH agent. Heimdallm's
+`auto_implement` Git fetch/push path uses HTTPS with an ephemeral askpass helper
+and does not require SSH.
 
-**macOS (Docker Desktop):**
-
-Docker Desktop exposes the host agent at a fixed path. The compose file uses it by default:
-
-```yaml
-- ${HEIMDALLM_SSH_AUTH_SOCK:-/run/host-services/ssh-auth.sock}:/ssh-agent:ro
-```
-
-No extra configuration needed on macOS.
-
-**Linux:**
-
-Set `HEIMDALLM_SSH_AUTH_SOCK` to your agent socket path in `docker/.env`:
+If the selected AI CLI itself needs SSH, explicitly allow `SSH_AUTH_SOCK` for
+that provider and mount the socket with a private compose overlay. Example for
+Claude on macOS Docker Desktop:
 
 ```bash
 # docker/.env
-HEIMDALLM_SSH_AUTH_SOCK=/run/user/1000/keyring/ssh
-# or
-HEIMDALLM_SSH_AUTH_SOCK=$SSH_AUTH_SOCK
+HEIMDALLM_AI_CLAUDE_ENV_ALLOWLIST=SSH_AUTH_SOCK
+HEIMDALLM_SSH_AUTH_SOCK=/run/host-services/ssh-auth.sock
 ```
+
+```yaml
+# docker/docker-compose.ssh.yml
+services:
+  heimdallm:
+    environment:
+      SSH_AUTH_SOCK: /ssh-agent
+    volumes:
+      - type: bind
+        source: ${HEIMDALLM_SSH_AUTH_SOCK}
+        target: /ssh-agent
+        read_only: true
+```
+
+```bash
+docker compose \
+  --env-file docker/.env \
+  -f docker/docker-compose.yml \
+  -f docker/docker-compose.ssh.yml \
+  up -d
+```
+
+On Linux, set `HEIMDALLM_SSH_AUTH_SOCK` to the host agent's actual socket.
+Change the allowlist variable when the selected CLI is Codex, Gemini, or
+OpenCode. This gives that CLI signing authority through every key loaded in the
+agent; enable it only when that expanded authority is intentional.
 
 ### Day-to-day commands
 

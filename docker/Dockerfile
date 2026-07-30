@@ -25,7 +25,7 @@ RUN npm install -g @google/gemini-cli 2>/dev/null || true
 # Codex CLI (OpenAI) — requires OPENAI_API_KEY or CODEX_API_KEY at runtime
 RUN npm install -g @openai/codex 2>/dev/null || true
 
-# OpenCode CLI — requires provider API key (e.g. ANTHROPIC_API_KEY) at runtime
+# OpenCode CLI — OpenRouter by default; other backend keys require explicit opt-in
 # Install the musl-specific binary package alongside the main package (Alpine uses musl).
 # Then symlink the musl binary into the wrapper's expected location.
 RUN npm install -g opencode-ai opencode-linux-x64-musl 2>/dev/null || true \
@@ -51,9 +51,10 @@ RUN mkdir -p /home/heimdallm/.claude \
              /home/heimdallm/.local/share/opencode \
     && chown -R heimdallm:heimdallm /home/heimdallm
 
-# ── SSH setup for git operations (auto_implement) ───────────────────────────
-# Pre-seed GitHub's host key so git fetch/push over SSH never prompts.
-# The host's SSH agent socket is forwarded at runtime via docker-compose.
+# ── Optional SSH setup for explicitly opted-in AI CLIs ──────────────────────
+# Heimdallm's own Git transport uses HTTPS. Keep GitHub's host key available
+# only for operators who deliberately mount an agent and allow SSH_AUTH_SOCK
+# for one AI provider through a private compose overlay.
 RUN mkdir -p /home/heimdallm/.ssh \
     && ssh-keyscan github.com >> /home/heimdallm/.ssh/known_hosts 2>/dev/null \
     && chmod 700 /home/heimdallm/.ssh \

@@ -133,7 +133,8 @@ For headless/server deployment, Heimdallm runs as a Docker container with all fo
 - **Credentials for your chosen AI provider** (at least one):
   - **Claude — subscription (Max / Pro / Team)**: run `claude setup-token` on your host (interactive — opens a browser) and copy the `sk-ant-oat…` token it prints. This becomes `CLAUDE_CODE_OAUTH_TOKEN`. No billing setup required if your Anthropic subscription covers Claude Code.
   - **Claude — pay-as-you-go API key**: create one at https://console.anthropic.com/settings/keys. This becomes `ANTHROPIC_API_KEY`.
-  - **Gemini**: https://aistudio.google.com/apikey → `GEMINI_API_KEY`. Or reuse your host's browser OAuth — see [Reusing your host's AI authentication](#reusing-your-hosts-ai-authentication).
+  - **Claude — enterprise gateway, Bedrock, or Vertex AI**: the corresponding routing and cloud credentials are supported conditionally; see [Claude Code authentication](docs/configuration-guide.md#claude-code).
+  - **Gemini**: https://aistudio.google.com/apikey → `GEMINI_API_KEY` or `GOOGLE_API_KEY`. Browser OAuth and Vertex AI are also supported — see [Reusing your host's AI authentication](#reusing-your-hosts-ai-authentication) and the [Configuration Guide](docs/configuration-guide.md#other-ai-clis).
   - **OpenAI / Codex**: https://platform.openai.com/api-keys → `OPENAI_API_KEY` or `CODEX_API_KEY`.
   - **OpenRouter** (for OpenCode): https://openrouter.ai/keys → `OPENROUTER_API_KEY`.
 
@@ -174,8 +175,20 @@ Then open `docker/.env` in your editor and set at minimum:
   Leave `CLAUDE_CODE_OAUTH_TOKEN` empty.
 
 For non-Claude providers see [Reusing your host's AI authentication](#reusing-your-hosts-ai-authentication) (Gemini OAuth reuse) or just set the relevant `*_API_KEY` variable from the Prerequisites list.
+For Claude enterprise deployments, use the exact gateway, Bedrock, or Vertex
+variables in the [Configuration Guide](docs/configuration-guide.md#claude-code);
+AWS credentials are not exposed unless Bedrock is selected, and
+`CLAUDE_CODE_SKIP_*_AUTH` keeps client credentials out of gateway-backed runs.
 
 See [`docker/.env.example`](docker/.env.example) for every supported variable including issue-tracking, topic-based discovery, and web UI settings.
+
+AI CLIs do not inherit the daemon environment. Each launch starts from an
+empty environment and a mode-`0700` temporary home, then receives only the
+selected provider's credentials and state. Additional variables require an
+explicit per-provider allowlist; GitHub, Heimdallm, Git, and process-injection
+variables remain blocked. See [AI subprocess security](docs/subprocess-security.md)
+for the exact conditional Bedrock/Vertex contract, SSH opt-in, and residual
+threat model.
 
 #### 3. Start the stack
 
@@ -215,7 +228,10 @@ Then open the web UI:
 
 The `web` container reads the daemon's API token from the shared `heimdallm-data` volume automatically — no manual copy needed.
 
-After `make up` completes, the target prints a summary of which AI credentials were picked up from `docker/.env` and flags the optional knobs (full-repo analysis, topic discovery) that are currently off. Use it as a checklist before opening the UI.
+After `make up` completes, the target prints a summary of which AI
+authentication routes were picked up from `docker/.env` and flags the optional
+knobs (full-repo analysis, topic discovery) that are currently off. Use it as a
+checklist before opening the UI.
 
 #### 4b. Opt-in: full-repo analysis
 
@@ -269,7 +285,8 @@ If you already authenticate the AI CLIs on your host, you can reuse those
 credentials inside Docker instead of pasting an API key into `.env`. The
 daemon runs its **own** bundled CLIs inside the container — it never shells
 out to the binaries on your host — but the container can read the same
-OAuth tokens the host CLIs wrote.
+OAuth tokens the host CLIs wrote. At execution time Heimdallm bridges only the
+selected provider's state into that process's isolated temporary home.
 
 **Claude Code (Max / Pro / Team subscription):**
 
@@ -297,11 +314,17 @@ OAuth tokens the host CLIs wrote.
    - ~/.gemini:/home/heimdallm/.gemini:ro
    ```
    The mount is read-only, so the container cannot clobber your host
-   credentials.
+   credentials; the Gemini-only home bridge preserves that restriction. OAuth
+   refreshes remain usable for the current review but are ephemeral because the
+   source cannot be updated.
 3. Leave `GEMINI_API_KEY` empty in `docker/.env`.
 
-**Codex / OpenCode:** host-auth reuse is not wired up yet — use API keys
-(`OPENAI_API_KEY`, `CODEX_API_KEY`, `OPENROUTER_API_KEY`) in `docker/.env`.
+**Codex / OpenCode:** host-auth reuse is not wired up yet. Codex accepts
+`OPENAI_API_KEY` or `CODEX_API_KEY`. OpenCode receives
+`OPENROUTER_API_KEY` by default; when configured for Anthropic, OpenAI, or
+Gemini, explicitly name that backend key in
+`HEIMDALLM_AI_OPENCODE_ENV_ALLOWLIST`. Set the matching values in
+`docker/.env`.
 
 `make up` picks up the changes on the next start. Full reference (including
 Vertex AI service-account mode for Gemini) in
@@ -563,7 +586,10 @@ heimdallm/
 
 ## Configuration
 
-See the [Configuration Guide](docs/configuration-guide.md) for full reference of all settings, environment variables, and deployment options.
+See the [Configuration Guide](docs/configuration-guide.md) for full reference
+of all settings, environment variables, and deployment options. The
+[AI subprocess security guide](docs/subprocess-security.md) documents provider
+credential boundaries and the optional SSH-agent overlay.
 
 ---
 

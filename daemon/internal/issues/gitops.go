@@ -1,22 +1,15 @@
 package issues
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
-)
 
-// gitTimeout caps each `git` invocation so a hung network or huge fetch
-// cannot stall the pipeline indefinitely. Three minutes is generous for
-// fetch/push on a typical repo and still short enough to unblock operators.
-// Callers may tighten this per-call via the context they pass in.
-const gitTimeout = 3 * time.Minute
+	"github.com/heimdallm/daemon/internal/gitproc"
+)
 
 // CommitAuthorName / CommitAuthorEmail identify the daemon in the commits it
 // makes on behalf of the auto_implement pipeline. Using a clearly-synthetic
@@ -25,12 +18,6 @@ const (
 	CommitAuthorName  = "Heimdallm"
 	CommitAuthorEmail = "noreply@heimdallm.local"
 )
-
-// maxGitStderrBytes caps the amount of stderr we keep in memory for error
-// messages. Git can dump huge merge-conflict reports or verbose network
-// traces; keeping all of it would let a single bad repo push the daemon
-// toward OOM.
-const maxGitStderrBytes = 16 * 1024 // 16 KiB
 
 // managedCloneMarkerFile is written by repoctx into Heimdallm-managed clones.
 // It is operational metadata, not implementation output, so auto_implement
@@ -68,13 +55,22 @@ type GitOps interface {
 	Diff(ctx context.Context, dir, base string) (string, error)
 }
 
-// GitExec is the default GitOps implementation — shells out to the `git`
-// binary. The daemon assumes git is available in PATH; the first command
-// that runs returns a descriptive error if it is not.
-type GitExec struct{}
+// GitExec is the default GitOps implementation. All subprocesses pass through
+// gitproc so repository config, hooks and inherited environment cannot affect
+// daemon-owned Git operations.
+type GitExec struct {
+	runner *gitproc.Runner
+}
 
 // NewGitExec returns a ready-to-use GitExec. Zero configuration required.
-func NewGitExec() *GitExec { return &GitExec{} }
+func NewGitExec() *GitExec { return &GitExec{runner: gitproc.New()} }
+
+func (g *GitExec) proc() *gitproc.Runner {
+	if g == nil || g.runner == nil {
+		return gitproc.New()
+	}
+	return g.runner
+}
 
 // CheckoutNewBranch fetches the base branch via HTTPS (using the same
 // GIT_ASKPASS mechanism as Push) and creates (or resets) the work branch
@@ -88,18 +84,18 @@ func (g *GitExec) CheckoutNewBranch(ctx context.Context, dir, repo, branch, base
 	if token == "" {
 		return fmt.Errorf("gitops: checkout requires a non-empty token")
 	}
-	env, cleanup, err := buildAskPassEnv(token)
-	if err != nil {
-		return fmt.Errorf("gitops: setup askpass for fetch: %w", err)
+	if err := gitproc.ValidateBranch(branch); err != nil {
+		return fmt.Errorf("gitops: checkout branch: %w", err)
 	}
-	defer cleanup()
-
-	url := fmt.Sprintf("https://x-access-token@github.com/%s.git", repo)
-	if err := runGit(ctx, dir, env, "fetch", url, baseBranch); err != nil {
+	remote, err := gitproc.GitHubRemote(repo)
+	if err != nil {
+		return fmt.Errorf("gitops: remote: %w", err)
+	}
+	if err := g.proc().Fetch(ctx, dir, remote, baseBranch, token, gitproc.FetchOptions{}); err != nil {
 		return fmt.Errorf("gitops: fetch %s/%s: %w", repo, baseBranch, err)
 	}
 	// FETCH_HEAD points to the tip of what we just fetched.
-	if err := runGit(ctx, dir, nil, "checkout", "-B", branch, "FETCH_HEAD"); err != nil {
+	if err := g.proc().Run(ctx, dir, "checkout", "-B", branch, "FETCH_HEAD"); err != nil {
 		return fmt.Errorf("gitops: checkout -B %s: %w", branch, err)
 	}
 	return nil
@@ -109,7 +105,16 @@ func (g *GitExec) CheckoutNewBranch(ctx context.Context, dir, repo, branch, base
 // non-empty line means there is a modified, added, deleted, or untracked
 // file to commit.
 func (g *GitExec) HasChanges(ctx context.Context, dir string) (bool, error) {
-	out, err := captureGit(ctx, dir, nil, "status", "--porcelain", "--", ".", ":(exclude)"+managedCloneMarkerFile)
+	out, err := g.proc().Capture(
+		ctx,
+		dir,
+		"status",
+		"--porcelain",
+		"--untracked-files=all",
+		"--",
+		".",
+		":(exclude)"+managedCloneMarkerFile,
+	)
 	if err != nil {
 		return false, fmt.Errorf("gitops: status: %w", err)
 	}
@@ -199,14 +204,25 @@ func matchesSensitivePattern(path string) (string, bool) {
 // worktree to exfiltrate them via the PR, the commit is refused and
 // the index is reset so a retry from scratch is not poisoned.
 func (g *GitExec) CommitAll(ctx context.Context, dir, message string) error {
-	if err := runGit(ctx, dir, nil, "add", "-A", "--", ".", ":(exclude)"+managedCloneMarkerFile); err != nil {
+	if err := g.proc().Run(ctx, dir, "add", "-A", "--", ".", ":(exclude)"+managedCloneMarkerFile); err != nil {
 		return fmt.Errorf("gitops: add: %w", err)
 	}
 	// `-z` + NUL split: defeats core.quotepath=on (the git default)
 	// which would escape non-ASCII paths like `weird\303\251.pem` and
 	// make filepath.Match miss them. `-c core.quotepath=off` is
 	// redundant when -z is used but kept as belt-and-suspenders.
-	staged, err := captureGit(ctx, dir, nil, "-c", "core.quotepath=off", "diff", "--cached", "--name-only", "-z")
+	staged, err := g.proc().Capture(
+		ctx,
+		dir,
+		"-c", "core.quotepath=off",
+		"diff",
+		"--cached",
+		"--no-ext-diff",
+		"--no-textconv",
+		"--name-only",
+		"-z",
+		"--",
+	)
 	if err != nil {
 		return fmt.Errorf("gitops: list staged: %w", err)
 	}
@@ -241,7 +257,7 @@ func (g *GitExec) CommitAll(ctx context.Context, dir, message string) error {
 		// legitimate edits) stays intact for triage. Cleanup errors
 		// are surfaced via slog so a stuck worktree (read-only FS,
 		// missing perms) is diagnosable.
-		if resetErr := runGit(ctx, dir, nil, "reset", "--", "."); resetErr != nil {
+		if resetErr := g.proc().Run(ctx, dir, "reset", "--", "."); resetErr != nil {
 			slog.Error("gitops: failed to reset index after denylist hit", "err", resetErr)
 		}
 		for _, p := range refused {
@@ -253,19 +269,18 @@ func (g *GitExec) CommitAll(ctx context.Context, dir, message string) error {
 		return fmt.Errorf("gitops: refusing commit — staged %d file(s) matched sensitive-path denylist (e.g. %q); prompt-injection defense aborted the auto-implement run",
 			len(refused), refused[0])
 	}
-	if err := runGit(ctx, dir, nil,
+	if err := g.proc().Run(ctx, dir,
 		"-c", "user.name="+CommitAuthorName,
 		"-c", "user.email="+CommitAuthorEmail,
-		"commit", "-m", message,
+		"commit", "--no-verify", "-m", message,
 	); err != nil {
 		return fmt.Errorf("gitops: commit: %w", err)
 	}
 	return nil
 }
 
-// Push uploads the branch to origin. The token is handed to git via
-// GIT_ASKPASS: we write a tiny executable that echoes the token, set the
-// env var, and let git call it when it needs the password.
+// Push uploads the branch through gitproc's temporary bare transport. The
+// token is handed only to that transport's Git process via GIT_ASKPASS.
 //
 // This keeps the token out of:
 //   - argv (no token in `git push https://…@github.com/…` → invisible to
@@ -274,42 +289,40 @@ func (g *GitExec) CommitAll(ctx context.Context, dir, message string) error {
 //   - the error message path (git's stderr only ever sees an opaque
 //     "Password for 'https://x-access-token@github.com'" prompt).
 //
-// The helper file is written with 0700 perms in an owner-only temp dir and
-// removed on function exit.
+// The helper and transport live in owner-only temporary directories and are
+// removed when the operation returns.
 func (g *GitExec) Push(ctx context.Context, dir, repo, branch, token string) error {
 	if token == "" {
 		return fmt.Errorf("gitops: push requires a non-empty token")
 	}
-	env, cleanup, err := buildAskPassEnv(token)
+	remote, err := gitproc.GitHubRemote(repo)
 	if err != nil {
-		return fmt.Errorf("gitops: setup askpass: %w", err)
+		return fmt.Errorf("gitops: remote: %w", err)
 	}
-	defer cleanup()
-
-	url := fmt.Sprintf("https://x-access-token@github.com/%s.git", repo)
-	refspec := branch + ":" + branch
-	if err := runGit(ctx, dir, env, "push", url, refspec); err != nil {
+	if _, err := g.proc().PushBranch(ctx, dir, remote, branch, token); err != nil {
 		return fmt.Errorf("gitops: push %s:%s: %w", repo, branch, err)
 	}
 	return nil
 }
 
-// DeleteRemoteBranch drops the named branch from origin. Runs through the
-// same GIT_ASKPASS path as Push so the token stays off argv.
+// DeleteRemoteBranch drops the named branch only if it still points at the
+// local object that Push uploaded. It uses the same isolated transport as Push.
 func (g *GitExec) DeleteRemoteBranch(ctx context.Context, dir, repo, branch, token string) error {
 	if token == "" {
 		return fmt.Errorf("gitops: delete remote requires a non-empty token")
 	}
-	env, cleanup, err := buildAskPassEnv(token)
-	if err != nil {
-		return fmt.Errorf("gitops: setup askpass: %w", err)
+	if err := gitproc.ValidateBranch(branch); err != nil {
+		return fmt.Errorf("gitops: delete remote branch: %w", err)
 	}
-	defer cleanup()
-
-	url := fmt.Sprintf("https://x-access-token@github.com/%s.git", repo)
-	// `:<branch>` is the standard "delete the remote branch" refspec.
-	refspec := ":" + branch
-	if err := runGit(ctx, dir, env, "push", url, refspec); err != nil {
+	remote, err := gitproc.GitHubRemote(repo)
+	if err != nil {
+		return fmt.Errorf("gitops: remote: %w", err)
+	}
+	expected, err := g.proc().Revision(ctx, dir, "refs/heads/"+branch)
+	if err != nil {
+		return fmt.Errorf("gitops: resolve pushed branch %s: %w", branch, err)
+	}
+	if err := g.proc().DeleteBranch(ctx, remote, branch, expected, token); err != nil {
 		return fmt.Errorf("gitops: delete remote %s:%s: %w", repo, branch, err)
 	}
 	return nil
@@ -317,79 +330,23 @@ func (g *GitExec) DeleteRemoteBranch(ctx context.Context, dir, repo, branch, tok
 
 // Diff returns the unified diff between base and HEAD.
 func (g *GitExec) Diff(ctx context.Context, dir, base string) (string, error) {
-	out, err := captureGit(ctx, dir, nil, "diff", base+"..HEAD")
+	baseOID, err := g.proc().Revision(ctx, dir, base)
+	if err != nil {
+		return "", fmt.Errorf("gitops: resolve diff base %s: %w", base, err)
+	}
+	out, err := g.proc().Capture(ctx, dir, "diff", "--no-ext-diff", "--no-textconv", baseOID+"..HEAD", "--")
 	if err != nil {
 		return "", fmt.Errorf("gitops: diff %s..HEAD: %w", base, err)
 	}
 	return string(out), nil
 }
 
-// buildAskPassEnv writes a small helper script that echoes the token, and
-// returns an env slice that points GIT_ASKPASS at it. The returned cleanup
-// function must be called (via defer) to remove the temp dir.
-//
-// Using a temp directory — not just a temp file — means the helper script's
-// parent is owner-only too, so even momentarily the file is not world-
-// readable.
-func buildAskPassEnv(token string) ([]string, func(), error) {
-	dir, err := os.MkdirTemp("", "heimdallm-askpass-*")
-	if err != nil {
-		return nil, nil, fmt.Errorf("create askpass dir: %w", err)
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		os.RemoveAll(dir)
-		return nil, nil, fmt.Errorf("chmod askpass dir: %w", err)
-	}
-
-	helperPath := filepath.Join(dir, "askpass.sh")
-	// The script simply prints the token. Git ignores the "prompt" argument
-	// passed in $1; we do not read it. Writing the token verbatim with `cat`
-	// avoids shell-escaping pitfalls — the token is fed on stdin-less invoke.
-	script := "#!/bin/sh\nprintf '%s' \"$HEIMDALLM_GIT_TOKEN\"\n"
-	if err := os.WriteFile(helperPath, []byte(script), 0o700); err != nil {
-		os.RemoveAll(dir)
-		return nil, nil, fmt.Errorf("write askpass script: %w", err)
-	}
-
-	env := append(os.Environ(),
-		"GIT_ASKPASS="+helperPath,
-		"GIT_TERMINAL_PROMPT=0",
-		"HEIMDALLM_GIT_TOKEN="+token, // read by the helper script via env
-	)
-	cleanup := func() { os.RemoveAll(dir) }
-	return env, cleanup, nil
-}
-
-// runGit discards stdout and returns an error that wraps whatever git wrote
-// to stderr (truncated to maxGitStderrBytes so a verbose failure cannot
-// balloon the daemon's memory).
-func runGit(ctx context.Context, dir string, env []string, args ...string) error {
-	_, err := captureGit(ctx, dir, env, args...)
-	return err
-}
-
-// captureGit runs git with the effective dir / env / args and returns its
-// stdout. When git exits non-zero, the returned error includes a trimmed
-// stderr excerpt so the caller can diagnose without digging into logs.
+// captureGit remains the package-level history-reader seam used by triage.
+// Environment injection is deliberately unsupported: all callers now share
+// gitproc's clean subprocess boundary.
 func captureGit(ctx context.Context, dir string, env []string, args ...string) ([]byte, error) {
-	runCtx, cancel := context.WithTimeout(ctx, gitTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(runCtx, "git", args...)
-	cmd.Dir = dir
-	if env != nil {
-		cmd.Env = env
+	if len(env) != 0 {
+		return nil, fmt.Errorf("gitops: custom Git environments are disabled")
 	}
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		// Cap stderr to protect against pathological output (e.g. huge
-		// merge-conflict reports, repeated progress lines, etc).
-		errText := stderr.String()
-		if len(errText) > maxGitStderrBytes {
-			errText = errText[:maxGitStderrBytes] + "\n... (stderr truncated)"
-		}
-		return nil, fmt.Errorf("%w (stderr: %s)", err, strings.TrimSpace(errText))
-	}
-	return stdout.Bytes(), nil
+	return gitproc.New().Capture(ctx, dir, args...)
 }

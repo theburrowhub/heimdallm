@@ -488,7 +488,7 @@ test_e2e() {
     echo "  1. .env file with GITHUB_TOKEN, HEIMDALLM_AI_PRIMARY, HEIMDALLM_REPOSITORIES"
     echo "  2. AI CLI authentication:"
     echo "     - Gemini: GEMINI_API_KEY in .env, or mount ~/.gemini in docker-compose.test.yml"
-    echo "     - Claude: ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN in .env"
+    echo "     - Claude: API/OAuth, gateway, Bedrock, or Vertex variables in .env"
     echo "     - Codex:  OPENAI_API_KEY in .env"
     echo "  3. An open PR where the GITHUB_TOKEN user is a requested reviewer"
     echo ""
@@ -510,14 +510,22 @@ test_e2e() {
     # Check at least one AI key
     local has_ai_key=false
     [ -n "${ANTHROPIC_API_KEY:-}" ] && has_ai_key=true
+    [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] && has_ai_key=true
     [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && has_ai_key=true
+    case "${CLAUDE_CODE_USE_BEDROCK:-}" in
+        1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) has_ai_key=true ;;
+    esac
+    case "${CLAUDE_CODE_USE_VERTEX:-}" in
+        1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn]) has_ai_key=true ;;
+    esac
     [ -n "${GEMINI_API_KEY:-}" ] && has_ai_key=true
+    [ -n "${GOOGLE_API_KEY:-}" ] && has_ai_key=true
     [ -n "${OPENAI_API_KEY:-}" ] && has_ai_key=true
     [ -n "${CODEX_API_KEY:-}" ] && has_ai_key=true
 
     if [ "$has_ai_key" = false ]; then
-        warn "No AI API keys found in .env."
-        echo "  If using Gemini OAuth, uncomment the ~/.gemini volume in docker-compose.test.yml"
+        warn "No AI authentication route found in .env."
+        echo "  Gemini OAuth can instead use the ~/.gemini test volume."
         echo ""
     fi
 

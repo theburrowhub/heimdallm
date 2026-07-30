@@ -338,6 +338,134 @@ func TestCommitAll_AllowsLegitimateChanges(t *testing.T) {
 	}
 }
 
+func TestCommitAllNeutralizesRepositoryHooksAndFSMonitor(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git binary not available")
+	}
+	dir := t.TempDir()
+	runGitForTest(t, dir, "init")
+	runGitForTest(t, dir, "config", "user.name", "Test User")
+	runGitForTest(t, dir, "config", "user.email", "test@example.com")
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# init\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitForTest(t, dir, "add", "README.md")
+	runGitForTest(t, dir, "commit", "-m", "initial")
+
+	hooksDir := t.TempDir()
+	runGitForTest(t, dir, "config", "core.hooksPath", hooksDir)
+	for _, hookName := range []string{"pre-commit", "commit-msg"} {
+		hook := filepath.Join(hooksDir, hookName)
+		script := "#!/bin/sh\nprintf ran > ." + hookName + "-ran\n"
+		if err := os.WriteFile(hook, []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fsmonitor := filepath.Join(t.TempDir(), "fsmonitor")
+	if err := os.WriteFile(fsmonitor, []byte("#!/bin/sh\nprintf ran > .fsmonitor-ran\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runGitForTest(t, dir, "config", "core.fsmonitor", fsmonitor)
+	runGitForTest(t, dir, "config", "core.fsmonitorHookVersion", "1")
+	if err := os.WriteFile(filepath.Join(dir, "change.txt"), []byte("safe change\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := issues.NewGitExec().CommitAll(context.Background(), dir, "fix: safe change"); err != nil {
+		t.Fatalf("CommitAll: %v", err)
+	}
+	for _, hookName := range []string{"pre-commit", "commit-msg"} {
+		if _, err := os.Stat(filepath.Join(dir, "."+hookName+"-ran")); !os.IsNotExist(err) {
+			t.Fatalf("repository %s hook ran: %v", hookName, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".fsmonitor-ran")); !os.IsNotExist(err) {
+		t.Fatalf("repository fsmonitor hook ran: %v", err)
+	}
+}
+
+func TestGitExecRejectsExecutableLocalConfig(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git binary not available")
+	}
+	dir := t.TempDir()
+	runGitForTest(t, dir, "init")
+	runGitForTest(t, dir, "config", "filter.attacker.clean", "/tmp/attacker-filter")
+
+	_, err := issues.NewGitExec().HasChanges(context.Background(), dir)
+	if err == nil || !strings.Contains(err.Error(), "filter.attacker.clean") {
+		t.Fatalf("HasChanges error = %v, want rejected executable filter config", err)
+	}
+}
+
+func TestGitExecDoesNotInheritGitEnvironment(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git binary not available")
+	}
+	dir := t.TempDir()
+	runGitForTest(t, dir, "init")
+	if err := os.WriteFile(filepath.Join(dir, "change.txt"), []byte("change\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GIT_DIR", filepath.Join(t.TempDir(), "attacker.git"))
+	t.Setenv("GIT_WORK_TREE", t.TempDir())
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "core.hooksPath")
+	t.Setenv("GIT_CONFIG_VALUE_0", "/tmp/attacker-hooks")
+
+	changed, err := issues.NewGitExec().HasChanges(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("HasChanges inherited a hostile Git environment: %v", err)
+	}
+	if !changed {
+		t.Fatal("HasChanges did not inspect the intended repository")
+	}
+}
+
+func TestHasChangesOverridesHiddenUntrackedConfig(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git binary not available")
+	}
+	dir := t.TempDir()
+	runGitForTest(t, dir, "init")
+	runGitForTest(t, dir, "config", "status.showUntrackedFiles", "no")
+	if err := os.WriteFile(filepath.Join(dir, "untracked.txt"), []byte("must be seen\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := issues.NewGitExec().HasChanges(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("HasChanges: %v", err)
+	}
+	if !changed {
+		t.Fatal("local status.showUntrackedFiles=no hid an untracked implementation change")
+	}
+}
+
+func TestHasChangesIgnoresConfiguredGlobalExcludesFile(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git binary not available")
+	}
+	dir := t.TempDir()
+	runGitForTest(t, dir, "init")
+	excludes := filepath.Join(t.TempDir(), "excludes")
+	if err := os.WriteFile(excludes, []byte("*\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitForTest(t, dir, "config", "core.excludesFile", excludes)
+	if err := os.WriteFile(filepath.Join(dir, "untracked.txt"), []byte("must be seen\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := issues.NewGitExec().HasChanges(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("HasChanges: %v", err)
+	}
+	if !changed {
+		t.Fatal("local core.excludesFile hid an untracked implementation change")
+	}
+}
+
 func runGitForTest(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)
