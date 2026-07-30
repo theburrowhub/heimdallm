@@ -33,6 +33,26 @@ type Issue struct {
 	Severity    string `json:"severity"`
 }
 
+// InheritedFileSet is an immutable-at-construction group of files to pass to a
+// child process. The wrapper keeps ExecOptions comparable while still allowing
+// any number of descriptors to be inherited.
+type InheritedFileSet struct {
+	files []*os.File
+}
+
+// NewInheritedFileSet returns a file set suitable for ExecOptions.ExtraFiles.
+// The slice is copied, but the caller retains ownership of each file.
+func NewInheritedFileSet(files ...*os.File) *InheritedFileSet {
+	return &InheritedFileSet{files: append([]*os.File(nil), files...)}
+}
+
+func (s *InheritedFileSet) cloneFiles() []*os.File {
+	if s == nil {
+		return nil
+	}
+	return append([]*os.File(nil), s.files...)
+}
+
 // ExecOptions controls how the AI CLI is invoked.
 type ExecOptions struct {
 	// Model sets --model <value> for CLIs that support it.
@@ -63,13 +83,20 @@ type ExecOptions struct {
 	// Timeout overrides the default execution timeout for the CLI process.
 	// Zero = use default (5 minutes).
 	Timeout time.Duration
+
+	// ExtraFiles passes open files to the AI CLI as inherited descriptors,
+	// starting at fd 3 in set order. It is provider-independent and is
+	// preserved when execution falls back to another CLI. The caller retains
+	// ownership: files must remain open until ExecuteRaw returns, and Executor
+	// never closes them.
+	ExtraFiles *InheritedFileSet
 }
 
 // OptionsForSelectedCLI removes provider-specific options when Detect falls
 // back to a different CLI. The options were resolved from the configured
 // primary agent, so forwarding its model, approval mode or free-form flags to
-// another provider is both unreliable and unsafe. WorkDir and Timeout are
-// provider-independent and remain in force.
+// another provider is both unreliable and unsafe. WorkDir, Timeout, and
+// ExtraFiles are provider-independent and remain in force.
 func OptionsForSelectedCLI(primary, selected string, opts ExecOptions) ExecOptions {
 	primary = strings.TrimSpace(primary)
 	selected = strings.TrimSpace(selected)
@@ -1152,6 +1179,7 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 	args := buildArgs(cli, opts, workDirFlags)
 	cmd := exec.CommandContext(ctx, cliPath, args...)
 	cmd.Stdin = strings.NewReader(prompt)
+	cmd.ExtraFiles = opts.ExtraFiles.cloneFiles()
 
 	// Augment PATH with paths from the login shell so the CLI can find its own
 	// dependencies, without running stdin THROUGH the shell (which would cause
@@ -1199,7 +1227,22 @@ func validateExecutionRequest(cli string, opts ExecOptions) error {
 	if err := validateExtraFlags(cli, opts.ExtraFlags); err != nil {
 		return err
 	}
-	return ValidateWorkDir(opts.WorkDir)
+	if err := ValidateWorkDir(opts.WorkDir); err != nil {
+		return err
+	}
+	return validateExtraFiles(opts.ExtraFiles)
+}
+
+func validateExtraFiles(files *InheritedFileSet) error {
+	for i, file := range files.cloneFiles() {
+		if file == nil {
+			return fmt.Errorf("executor: extra file %d is nil", i)
+		}
+		if _, err := file.Stat(); err != nil {
+			return fmt.Errorf("executor: extra file %d is not open: %w", i, err)
+		}
+	}
+	return nil
 }
 
 // buildArgs constructs the CLI argument list based on the CLI name and options.

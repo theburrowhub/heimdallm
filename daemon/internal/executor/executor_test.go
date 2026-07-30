@@ -60,6 +60,13 @@ func TestDetect_NoneAvailable(t *testing.T) {
 }
 
 func TestOptionsForSelectedCLI(t *testing.T) {
+	leaseFile, err := os.CreateTemp(t.TempDir(), "lease-*")
+	if err != nil {
+		t.Fatalf("create lease file: %v", err)
+	}
+	defer leaseFile.Close()
+	inheritedFiles := executor.NewInheritedFileSet(leaseFile)
+
 	original := executor.ExecOptions{
 		Model:                "primary-model",
 		MaxTurns:             7,
@@ -72,6 +79,7 @@ func TestOptionsForSelectedCLI(t *testing.T) {
 		DangerouslySkipPerms: true,
 		NoSessionPersistence: true,
 		Timeout:              9 * time.Minute,
+		ExtraFiles:           inheritedFiles,
 	}
 
 	if got := executor.OptionsForSelectedCLI("codex", "codex", original); !reflect.DeepEqual(got, original) {
@@ -80,8 +88,9 @@ func TestOptionsForSelectedCLI(t *testing.T) {
 
 	got := executor.OptionsForSelectedCLI("codex", "gemini", original)
 	want := executor.ExecOptions{
-		WorkDir: "/tmp/repo",
-		Timeout: 9 * time.Minute,
+		WorkDir:    "/tmp/repo",
+		Timeout:    9 * time.Minute,
+		ExtraFiles: inheritedFiles,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("fallback options:\n got: %+v\nwant: %+v", got, want)
@@ -376,6 +385,40 @@ func TestExecuteRawCodexUsesExecAndReadsPromptFromStdin(t *testing.T) {
 	}
 }
 
+func TestExecuteRawPassesExtraFilesToChild(t *testing.T) {
+	binDir := t.TempDir()
+	path := filepath.Join(binDir, "claude")
+	script := "#!/bin/sh\n" +
+		"IFS= read -r inherited <&3 || exit 2\n" +
+		"printf '%s\\n' \"$inherited\"\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake CLI: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	leaseFile, err := os.CreateTemp(t.TempDir(), "lease-*")
+	if err != nil {
+		t.Fatalf("create lease file: %v", err)
+	}
+	defer leaseFile.Close()
+	if _, err := leaseFile.WriteString("lease-held-by-child\n"); err != nil {
+		t.Fatalf("write lease file: %v", err)
+	}
+	if _, err := leaseFile.Seek(0, 0); err != nil {
+		t.Fatalf("rewind lease file: %v", err)
+	}
+
+	raw, err := executor.New().ExecuteRaw("claude", "prompt", executor.ExecOptions{
+		ExtraFiles: executor.NewInheritedFileSet(leaseFile),
+	})
+	if err != nil {
+		t.Fatalf("ExecuteRaw: %v", err)
+	}
+	if got, want := strings.TrimSpace(string(raw)), "lease-held-by-child"; got != want {
+		t.Fatalf("child read inherited fd 3 = %q, want %q", got, want)
+	}
+}
+
 func TestValidateApprovalModeAcceptsCurrentAndLegacyCodexValues(t *testing.T) {
 	for _, mode := range []string{"", "untrusted", "on-failure", "on-request", "never", "auto-edit", "full-auto", "suggest"} {
 		t.Run(mode, func(t *testing.T) {
@@ -465,6 +508,14 @@ func TestExecuteRawGeminiAddsTypedApprovalBeforeSafeExtraFlags(t *testing.T) {
 }
 
 func TestExecuteRawRejectsUnsafeRequestBeforeStartingCLI(t *testing.T) {
+	closedFile, err := os.CreateTemp(t.TempDir(), "closed-extra-file-*")
+	if err != nil {
+		t.Fatalf("create closed extra file: %v", err)
+	}
+	if err := closedFile.Close(); err != nil {
+		t.Fatalf("close extra file: %v", err)
+	}
+
 	tests := []struct {
 		name string
 		cli  string
@@ -525,6 +576,16 @@ func TestExecuteRawRejectsUnsafeRequestBeforeStartingCLI(t *testing.T) {
 			name: "legacy OpenCode extra flags",
 			cli:  "opencode",
 			opts: executor.ExecOptions{ExtraFlags: "--auto"},
+		},
+		{
+			name: "nil inherited file",
+			cli:  "claude",
+			opts: executor.ExecOptions{ExtraFiles: executor.NewInheritedFileSet(nil)},
+		},
+		{
+			name: "closed inherited file",
+			cli:  "claude",
+			opts: executor.ExecOptions{ExtraFiles: executor.NewInheritedFileSet(closedFile)},
 		},
 	}
 
