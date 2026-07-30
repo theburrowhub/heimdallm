@@ -22,7 +22,26 @@ const environmentAllowlistPrefix = "HEIMDALLM_AI_"
 var providerEnvironmentNames = map[string][]string{
 	"claude": {
 		"ANTHROPIC_API_KEY",
+		"ANTHROPIC_AUTH_TOKEN",
+		"ANTHROPIC_BASE_URL",
+		"ANTHROPIC_BEDROCK_BASE_URL",
+		"ANTHROPIC_VERTEX_BASE_URL",
+		"ANTHROPIC_VERTEX_PROJECT_ID",
+		"AWS_ACCESS_KEY_ID",
+		"AWS_BEARER_TOKEN_BEDROCK",
+		"AWS_DEFAULT_REGION",
+		"AWS_REGION",
+		"AWS_SECRET_ACCESS_KEY",
+		"AWS_SESSION_TOKEN",
 		"CLAUDE_CODE_OAUTH_TOKEN",
+		"CLAUDE_CODE_SKIP_BEDROCK_AUTH",
+		"CLAUDE_CODE_SKIP_VERTEX_AUTH",
+		"CLAUDE_CODE_USE_BEDROCK",
+		"CLAUDE_CODE_USE_VERTEX",
+		"CLOUD_ML_REGION",
+		"GCLOUD_PROJECT",
+		"GOOGLE_APPLICATION_CREDENTIALS",
+		"GOOGLE_CLOUD_PROJECT",
 	},
 	"codex": {
 		"OPENAI_API_KEY",
@@ -48,13 +67,50 @@ var providerRuntimeNames = map[string][]string{
 }
 
 var providerSecretNames = map[string]struct{}{
-	"ANTHROPIC_API_KEY":       {},
-	"CLAUDE_CODE_OAUTH_TOKEN": {},
-	"CODEX_API_KEY":           {},
-	"GEMINI_API_KEY":          {},
-	"GOOGLE_API_KEY":          {},
-	"OPENAI_API_KEY":          {},
-	"OPENROUTER_API_KEY":      {},
+	"ANTHROPIC_API_KEY":        {},
+	"ANTHROPIC_AUTH_TOKEN":     {},
+	"AWS_ACCESS_KEY_ID":        {},
+	"AWS_BEARER_TOKEN_BEDROCK": {},
+	"AWS_SECRET_ACCESS_KEY":    {},
+	"AWS_SESSION_TOKEN":        {},
+	"CLAUDE_CODE_OAUTH_TOKEN":  {},
+	"CODEX_API_KEY":            {},
+	"GEMINI_API_KEY":           {},
+	"GOOGLE_API_KEY":           {},
+	"OPENAI_API_KEY":           {},
+	"OPENROUTER_API_KEY":       {},
+}
+
+var claudeBedrockEnvironmentNames = map[string]struct{}{
+	"ANTHROPIC_BEDROCK_BASE_URL":    {},
+	"AWS_ACCESS_KEY_ID":             {},
+	"AWS_BEARER_TOKEN_BEDROCK":      {},
+	"AWS_DEFAULT_REGION":            {},
+	"AWS_REGION":                    {},
+	"AWS_SECRET_ACCESS_KEY":         {},
+	"AWS_SESSION_TOKEN":             {},
+	"CLAUDE_CODE_SKIP_BEDROCK_AUTH": {},
+}
+
+var claudeBedrockCredentialNames = map[string]struct{}{
+	"AWS_ACCESS_KEY_ID":        {},
+	"AWS_BEARER_TOKEN_BEDROCK": {},
+	"AWS_SECRET_ACCESS_KEY":    {},
+	"AWS_SESSION_TOKEN":        {},
+}
+
+var claudeVertexEnvironmentNames = map[string]struct{}{
+	"ANTHROPIC_VERTEX_BASE_URL":      {},
+	"ANTHROPIC_VERTEX_PROJECT_ID":    {},
+	"CLAUDE_CODE_SKIP_VERTEX_AUTH":   {},
+	"CLOUD_ML_REGION":                {},
+	"GCLOUD_PROJECT":                 {},
+	"GOOGLE_APPLICATION_CREDENTIALS": {},
+	"GOOGLE_CLOUD_PROJECT":           {},
+}
+
+var claudeVertexCredentialNames = map[string]struct{}{
+	"GOOGLE_APPLICATION_CREDENTIALS": {},
 }
 
 var commonEnvironmentNames = map[string]struct{}{
@@ -110,26 +166,17 @@ var managedEnvironmentNames = map[string]struct{}{
 }
 
 var dangerousEnvironmentNames = map[string]struct{}{
-	"_JAVA_OPTIONS":                       {},
 	"BASH_ENV":                            {},
+	"CDPATH":                              {},
 	"CLAUDE_CODE_SAFE_MODE":               {},
 	"CLAUDE_CODE_SUBPROCESS_ENV_SCRUB":    {},
-	"CDPATH":                              {},
 	"CLAUDE_CONFIG_DIR":                   {},
 	"CODEX_HOME":                          {},
 	"DOTNET_STARTUP_HOOKS":                {},
 	"ENV":                                 {},
-	"GIO_EXTRA_MODULES":                   {},
-	"GIO_MODULE_DIR":                      {},
 	"GEMINI_CLI_HOME":                     {},
 	"GEMINI_CLI_IDE_SERVER_STDIO_COMMAND": {},
 	"GEMINI_CLI_SYSTEM_DEFAULTS_PATH":     {},
-	"GH_TOKEN":                            {},
-	"GITHUB_TOKEN":                        {},
-	"GIT_ASKPASS":                         {},
-	"GTK3_MODULES":                        {},
-	"GTK_MODULES":                         {},
-	"GTK_PATH":                            {},
 	"GEMINI_CLI_SYSTEM_SETTINGS_PATH":     {},
 	"GEMINI_CLI_TRUSTED_FOLDERS_PATH":     {},
 	"GEMINI_CLI_TRUST_WORKSPACE":          {},
@@ -137,6 +184,14 @@ var dangerousEnvironmentNames = map[string]struct{}{
 	"GEMINI_SANDBOX_PROXY_COMMAND":        {},
 	"GEMINI_SYSTEM_MD":                    {},
 	"GEMINI_WRITE_SYSTEM_MD":              {},
+	"GH_TOKEN":                            {},
+	"GIO_EXTRA_MODULES":                   {},
+	"GIO_MODULE_DIR":                      {},
+	"GITHUB_TOKEN":                        {},
+	"GIT_ASKPASS":                         {},
+	"GTK3_MODULES":                        {},
+	"GTK_MODULES":                         {},
+	"GTK_PATH":                            {},
 	"IFS":                                 {},
 	"JAVA_TOOL_OPTIONS":                   {},
 	"JDK_JAVA_OPTIONS":                    {},
@@ -158,6 +213,7 @@ var dangerousEnvironmentNames = map[string]struct{}{
 	"RUBYOPT":                             {},
 	"SSH_ASKPASS":                         {},
 	"ZDOTDIR":                             {},
+	"_JAVA_OPTIONS":                       {},
 }
 
 type capturedEnvironment struct {
@@ -207,6 +263,9 @@ func (c capturedEnvironment) loginProbeEnvironment() []string {
 }
 
 func (c capturedEnvironment) prepare(cli string) (*preparedEnvironment, error) {
+	if err := validateProviderEnvironmentSelection(cli, c.values); err != nil {
+		return nil, err
+	}
 	extraNames, err := c.additionalNames(cli)
 	if err != nil {
 		return nil, err
@@ -240,25 +299,30 @@ func (c capturedEnvironment) prepare(cli string) (*preparedEnvironment, error) {
 	env := cloneEnvironment(base)
 	redactions := make([]string, 0, len(providerEnvironmentNames[cli])+len(extraNames))
 	for _, name := range providerEnvironmentNames[cli] {
+		if !providerEnvironmentEnabled(cli, name, c.values) {
+			continue
+		}
 		if value := c.values[name]; value != "" {
 			env[name] = value
-			if _, secret := providerSecretNames[name]; secret {
-				redactions = append(redactions, value)
-			}
+			redactions = append(redactions, environmentRedactionValues(name, value)...)
 		}
 	}
 	for _, name := range providerRuntimeNames[cli] {
-		if value, ok := c.values[name]; ok {
+		if value, ok := c.additionalEnvironmentValue(name); ok {
 			env[name] = value
 		}
 	}
 	for _, name := range extraNames {
-		if value, ok := c.values[name]; ok {
+		if providerHasEnvironmentName(cli, name) &&
+			!providerEnvironmentEnabled(cli, name, c.values) {
+			continue
+		}
+		if value, ok := c.additionalEnvironmentValue(name); ok {
 			env[name] = value
 			if value != "" {
 				redactions = append(
 					redactions,
-					additionalEnvironmentRedactionValues(name, value)...,
+					environmentRedactionValues(name, value)...,
 				)
 			}
 		} else {
@@ -403,6 +467,13 @@ func (c capturedEnvironment) additionalNames(cli string) ([]string, error) {
 		if err := validateAdditionalEnvironmentName(cli, name); err != nil {
 			return nil, fmt.Errorf("executor: %s: %w", controlName, err)
 		}
+		// Environment names remain case-sensitive on Unix, except for this
+		// explicit cross-platform capability. Canonicalizing only the SSH
+		// socket keeps the allowlist and Codex's nested-tool forwarding aligned
+		// without changing the spelling of operator-defined variables.
+		if strings.EqualFold(name, "SSH_AUTH_SOCK") {
+			name = "SSH_AUTH_SOCK"
+		}
 		if _, ok := seen[name]; ok {
 			continue
 		}
@@ -411,6 +482,28 @@ func (c capturedEnvironment) additionalNames(cli string) ([]string, error) {
 	}
 	sort.Strings(names)
 	return names, nil
+}
+
+func (c capturedEnvironment) additionalEnvironmentValue(name string) (string, bool) {
+	if value, ok := c.values[name]; ok {
+		return value, true
+	}
+	if name != "SSH_AUTH_SOCK" {
+		return "", false
+	}
+	// The opt-in capability is canonicalized even if a Unix parent process
+	// used non-standard casing. Exact uppercase wins when both spellings exist.
+	var candidates []string
+	for capturedName := range c.values {
+		if strings.EqualFold(capturedName, name) {
+			candidates = append(candidates, capturedName)
+		}
+	}
+	sort.Strings(candidates)
+	if len(candidates) == 0 {
+		return "", false
+	}
+	return c.values[candidates[0]], true
 }
 
 func validateAdditionalEnvironmentName(cli, name string) error {
@@ -429,12 +522,22 @@ func validateAdditionalEnvironmentName(cli, name string) error {
 			return fmt.Errorf("%s is permanently blocked", name)
 		}
 	}
+	if providerHasEnvironmentName(cli, upper) {
+		return nil
+	}
 	for provider, providerNames := range providerEnvironmentNames {
 		if provider == cli {
 			continue
 		}
 		for _, providerName := range providerNames {
 			if upper == providerName {
+				if !providerCredentialBoundaryName(upper) {
+					// Non-secret routing selectors such as AWS_REGION may be
+					// useful to another CLI when the operator explicitly
+					// allowlists them. Only credential-bearing names form the
+					// permanent cross-provider boundary.
+					continue
+				}
 				if cli == "opencode" {
 					// OpenCode is a multi-provider client. Naming a backend
 					// credential in its exact allowlist is the operator's
@@ -446,6 +549,79 @@ func validateAdditionalEnvironmentName(cli, name string) error {
 		}
 	}
 	return nil
+}
+
+func providerCredentialBoundaryName(name string) bool {
+	if _, secret := providerSecretNames[name]; secret {
+		return true
+	}
+	// This is a path rather than secret bytes, so it must remain visible in
+	// diagnostics. It still grants access to another provider's credential
+	// file and therefore remains a cross-provider boundary.
+	return name == "GOOGLE_APPLICATION_CREDENTIALS"
+}
+
+func providerHasEnvironmentName(cli, name string) bool {
+	name = strings.ToUpper(name)
+	for _, providerName := range providerEnvironmentNames[cli] {
+		if name == providerName {
+			return true
+		}
+	}
+	return false
+}
+
+func validateProviderEnvironmentSelection(cli string, values map[string]string) error {
+	if cli == "claude" &&
+		environmentFlagEnabled(values["CLAUDE_CODE_USE_BEDROCK"]) &&
+		environmentFlagEnabled(values["CLAUDE_CODE_USE_VERTEX"]) {
+		return fmt.Errorf(
+			"executor: CLAUDE_CODE_USE_BEDROCK and CLAUDE_CODE_USE_VERTEX cannot both be enabled",
+		)
+	}
+	return nil
+}
+
+func providerEnvironmentEnabled(cli, name string, values map[string]string) bool {
+	if cli != "claude" {
+		return true
+	}
+	name = strings.ToUpper(name)
+	switch name {
+	case "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX":
+		// Preserve explicit false values as well as enabled selectors. Claude
+		// Code treats an empty value as unset.
+		return true
+	}
+	if _, bedrock := claudeBedrockEnvironmentNames[name]; bedrock {
+		if !environmentFlagEnabled(values["CLAUDE_CODE_USE_BEDROCK"]) {
+			return false
+		}
+		if _, credential := claudeBedrockCredentialNames[name]; credential &&
+			environmentFlagEnabled(values["CLAUDE_CODE_SKIP_BEDROCK_AUTH"]) {
+			return false
+		}
+	}
+	if _, vertex := claudeVertexEnvironmentNames[name]; vertex {
+		if !environmentFlagEnabled(values["CLAUDE_CODE_USE_VERTEX"]) {
+			return false
+		}
+		if _, credential := claudeVertexCredentialNames[name]; credential &&
+			environmentFlagEnabled(values["CLAUDE_CODE_SKIP_VERTEX_AUTH"]) {
+			return false
+		}
+	}
+	return true
+}
+
+func environmentFlagEnabled(value string) bool {
+	value = strings.TrimSpace(value)
+	switch strings.ToLower(value) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func validEnvironmentName(name string) bool {
@@ -482,7 +658,7 @@ func (c capturedEnvironment) bridgeProviderState(cli, root string) (func() error
 			if _, err := os.Lstat(mount.source); os.IsNotExist(err) {
 				logProviderStateAbsent(cli, mount.source)
 			}
-			syncState, err := bridgeMutableJSONState(mount.source, mount.dest)
+			syncState, err := bridgeClaudeMutableJSONState(mount.source, mount.dest)
 			if err != nil {
 				return nil, fmt.Errorf("executor: bridge %s mutable credential state: %w", cli, err)
 			}
@@ -525,11 +701,17 @@ func logProviderStateAbsent(cli, path string) {
 }
 
 type mutableStatePolicy struct {
-	seedWhenMissing          []byte
-	projectInitial           func([]byte) ([]byte, error)
-	persistUpdated           func(initial, updated []byte) ([]byte, error)
-	readOnly                 bool
-	allowEphemeralOnReadOnly bool
+	provider        string
+	seedWhenMissing []byte
+	projectInitial  func([]byte) ([]byte, error)
+	persistUpdated  func(initial, updated []byte) ([]byte, error)
+
+	// inputOnly projects state into the isolated home but never copies
+	// subprocess changes back. tolerateUnwritableSource still attempts
+	// copy-back, but treats EROFS/EACCES/EPERM as an explicit ephemeral
+	// refresh. The flags are orthogonal.
+	inputOnly                bool
+	tolerateUnwritableSource bool
 }
 
 type statePathAnchor struct {
@@ -551,16 +733,27 @@ func bridgeMutableJSONState(source, dest string) (func() error, error) {
 	})
 }
 
-func bridgeGeminiMutableJSONState(source, dest string) (func() error, error) {
+func bridgeClaudeMutableJSONState(source, dest string) (func() error, error) {
 	return bridgeMutableState(source, dest, mutableStatePolicy{
+		provider:                 "claude",
 		projectInitial:           projectMutableJSONState,
 		persistUpdated:           persistMutableJSONState,
-		allowEphemeralOnReadOnly: true,
+		tolerateUnwritableSource: true,
+	})
+}
+
+func bridgeGeminiMutableJSONState(source, dest string) (func() error, error) {
+	return bridgeMutableState(source, dest, mutableStatePolicy{
+		provider:                 "gemini",
+		projectInitial:           projectMutableJSONState,
+		persistUpdated:           persistMutableJSONState,
+		tolerateUnwritableSource: true,
 	})
 }
 
 func bridgeGeminiMutableOpaqueState(source, dest string) (func() error, error) {
 	return bridgeMutableState(source, dest, mutableStatePolicy{
+		provider: "gemini",
 		projectInitial: func(initial []byte) ([]byte, error) {
 			return bytes.Clone(initial), nil
 		},
@@ -573,15 +766,16 @@ func bridgeGeminiMutableOpaqueState(source, dest string) (func() error, error) {
 			}
 			return bytes.Clone(updated), nil
 		},
-		allowEphemeralOnReadOnly: true,
+		tolerateUnwritableSource: true,
 	})
 }
 
 func bridgeGeminiSettingsState(source, dest string) (func() error, error) {
 	return bridgeMutableState(source, dest, mutableStatePolicy{
+		provider:        "gemini",
 		seedWhenMissing: []byte("{}\n"),
 		projectInitial:  projectGeminiAuthSettings,
-		readOnly:        true,
+		inputOnly:       true,
 	})
 }
 
@@ -637,7 +831,7 @@ func bridgeMutableState(source, dest string, policy mutableStatePolicy) (func() 
 	case err != nil:
 		return nil, fmt.Errorf("inspect source %q: %w", source, err)
 	}
-	if policy.readOnly {
+	if policy.inputOnly {
 		// Gemini settings are input-only. The auth selector is needed to start
 		// a headless OAuth session, but persisting any settings written by the
 		// subprocess would reopen a configuration channel for future runs.
@@ -744,14 +938,13 @@ func bridgeMutableState(source, dest string, policy mutableStatePolicy) (func() 
 			}
 		}
 		if err := atomicWritePrivateState(resolvedSource, persisted); err != nil {
-			if policy.allowEphemeralOnReadOnly &&
-				(errors.Is(err, syscall.EROFS) || errors.Is(err, syscall.EACCES) ||
-					errors.Is(err, syscall.EPERM)) {
+			if policy.tolerateUnwritableSource && unwritableStateSourceError(err) {
 				// Docker examples deliberately mount provider OAuth state
 				// read-only. Preserve the successful review and make the
 				// non-persistent refresh explicit instead of discarding output.
 				slog.Warn(
 					"executor: provider state source is read-only; refreshed state is ephemeral",
+					"cli", policy.provider,
 					"path", source,
 					"err", err,
 				)
@@ -761,6 +954,12 @@ func bridgeMutableState(source, dest string, policy mutableStatePolicy) (func() 
 		}
 		return nil
 	}, nil
+}
+
+func unwritableStateSourceError(err error) bool {
+	return errors.Is(err, syscall.EROFS) ||
+		errors.Is(err, syscall.EACCES) ||
+		errors.Is(err, syscall.EPERM)
 }
 
 func resolveAbsentStatePath(path string) (string, statePathAnchor, error) {
@@ -1282,7 +1481,7 @@ func secretEnvironmentName(name string) bool {
 		}
 	}
 	switch upper {
-	case "AUTH", "CONNECTION_STRING", "COOKIE", "CREDENTIAL", "DATABASE_URL",
+	case "ANTHROPIC_CUSTOM_HEADERS", "AUTH", "CONNECTION_STRING", "COOKIE", "CREDENTIAL", "DATABASE_URL",
 		"DB_URI", "DSN", "PASSWORD", "PASSWD", "PRIVATE_KEY", "SECRET", "TOKEN":
 		return true
 	}
@@ -1311,7 +1510,7 @@ func secretEnvironmentName(name string) bool {
 	return false
 }
 
-func additionalEnvironmentRedactionValues(name, value string) []string {
+func environmentRedactionValues(name, value string) []string {
 	var values []string
 	if secretEnvironmentName(name) {
 		values = append(values, value)

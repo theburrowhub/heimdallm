@@ -374,12 +374,12 @@ _check-buildkit: _check-docker
 _check-env: _check-docker
 	@test -f $(DOCKER_ENV) || { \
 	  echo "❌  $(DOCKER_ENV) missing."; \
-	  echo "    Copy the template and fill in GITHUB_TOKEN + your AI API key:"; \
+	  echo "    Copy the template and fill in GITHUB_TOKEN + AI authentication:"; \
 	  echo "    cp docker/.env.example $(DOCKER_ENV)"; \
 	  exit 1; \
 	}
 
-# Prints a short post-up summary: the web URL, which AI keys are set, and
+# Prints a short post-up summary: the web URL, which AI auth routes are set, and
 # hints for the opt-in knobs operators most often miss (full-repo analysis,
 # topic discovery, issue tracking). Called after `up` / `up-build`.
 _post-up-hints:
@@ -389,13 +389,19 @@ _post-up-hints:
 	@echo ""
 	@set -a; . $(DOCKER_ENV); set +a; \
 	 _set=; _unset=; \
-	 for k in ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN OPENAI_API_KEY CODEX_API_KEY GEMINI_API_KEY OPENROUTER_API_KEY; do \
+	 for k in ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN \
+	          OPENAI_API_KEY CODEX_API_KEY GEMINI_API_KEY GOOGLE_API_KEY OPENROUTER_API_KEY; do \
 	   v=$$(eval "printf %s \"\$${$$k:-}\""); \
 	   if [ -n "$$v" ]; then _set="$$_set $$k"; fi; \
 	 done; \
-	 if [ -n "$$_set" ]; then echo "AI credentials present:$$_set"; \
-	 else echo "⚠  No AI credentials set — reviews will fail. Set one in $(DOCKER_ENV):"; \
-	      echo "     ANTHROPIC_API_KEY  CLAUDE_CODE_OAUTH_TOKEN  OPENAI_API_KEY  GEMINI_API_KEY"; fi
+	 for k in CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX; do \
+	   v=$$(eval "printf %s \"\$${$$k:-}\"" | tr '[:upper:]' '[:lower:]'); \
+	   if [ "$$v" = "1" ] || [ "$$v" = "true" ] || \
+	      [ "$$v" = "yes" ] || [ "$$v" = "on" ]; then _set="$$_set $$k"; fi; \
+	 done; \
+	 if [ -n "$$_set" ]; then echo "AI authentication configured:$$_set"; \
+	 else echo "⚠  No AI authentication set — reviews will fail. Configure one in $(DOCKER_ENV):"; \
+	      echo "     API/OAuth key, Anthropic gateway, Claude Bedrock, or Claude Vertex"; fi
 	@echo ""
 	@set -a; . $(DOCKER_ENV); set +a; \
 	 if [ -z "$${HEIMDALLM_LOCAL_DIR_BASE:-}" ]; then \
@@ -565,9 +571,18 @@ run-linux:
 	    echo "GITHUB_TOKEN=$$GH_TOK" >> "$$ENV_FILE" ; \
 	  fi ; \
 	fi ; \
-	for var in ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN \
+	for var in ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL \
+	           ANTHROPIC_BEDROCK_BASE_URL ANTHROPIC_VERTEX_BASE_URL \
+	           ANTHROPIC_VERTEX_PROJECT_ID \
+	           AWS_ACCESS_KEY_ID AWS_BEARER_TOKEN_BEDROCK AWS_DEFAULT_REGION \
+	           AWS_REGION AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN \
+	           CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CODE_SKIP_BEDROCK_AUTH \
+	           CLAUDE_CODE_SKIP_VERTEX_AUTH CLAUDE_CODE_USE_BEDROCK \
+	           CLAUDE_CODE_USE_VERTEX CLOUD_ML_REGION GCLOUD_PROJECT \
 	           OPENAI_API_KEY CODEX_API_KEY \
-	           GEMINI_API_KEY OPENROUTER_API_KEY ; do \
+	           GEMINI_API_KEY GOOGLE_API_KEY GOOGLE_APPLICATION_CREDENTIALS \
+	           GOOGLE_CLOUD_PROJECT GOOGLE_CLOUD_LOCATION \
+	           GOOGLE_GENAI_USE_VERTEXAI OPENROUTER_API_KEY ; do \
 	  val=$$(printenv "$$var" 2>/dev/null || true) ; \
 	  if [ -z "$$val" ] && [ -f docker/.env ]; then \
 	    val=$$(grep "^$$var=" docker/.env 2>/dev/null | head -1 | cut -d= -f2-) ; \

@@ -15,7 +15,7 @@ for the selected CLI:
 
 | CLI | Credentials exposed by default |
 |---|---|
-| Claude | `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN` |
+| Claude | `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, plus the selected Bedrock or Vertex authentication group |
 | Codex | `OPENAI_API_KEY`, `CODEX_API_KEY` |
 | Gemini | `GEMINI_API_KEY`, `GOOGLE_API_KEY`, plus explicitly configured Vertex AI variables |
 | OpenCode | `OPENROUTER_API_KEY` |
@@ -28,6 +28,33 @@ The Vertex AI variables are `GOOGLE_APPLICATION_CREDENTIALS`,
 `GOOGLE_GENAI_USE_VERTEXAI`. A credentials path must point to a file visible
 inside the container; Heimdallm does not mount host service-account files
 automatically.
+
+Claude gateway routing preserves `ANTHROPIC_BASE_URL` and treats
+`ANTHROPIC_AUTH_TOKEN` as a secret. Its enterprise groups are conditional:
+
+- `CLAUDE_CODE_USE_BEDROCK=1|true|yes|on` enables
+  `ANTHROPIC_BEDROCK_BASE_URL`, `AWS_REGION`, `AWS_DEFAULT_REGION`,
+  `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, and
+  `AWS_BEARER_TOKEN_BEDROCK`. All four credential values are redacted.
+  `CLAUDE_CODE_SKIP_BEDROCK_AUTH=1|true|yes|on` keeps those credentials out of the
+  subprocess while preserving routing selectors for a gateway that signs
+  requests itself.
+- `CLAUDE_CODE_USE_VERTEX=1|true|yes|on` enables `ANTHROPIC_VERTEX_BASE_URL`,
+  `ANTHROPIC_VERTEX_PROJECT_ID`, `CLOUD_ML_REGION`, `GCLOUD_PROJECT`,
+  `GOOGLE_CLOUD_PROJECT`, and `GOOGLE_APPLICATION_CREDENTIALS`.
+  `CLAUDE_CODE_SKIP_VERTEX_AUTH=1|true|yes|on` omits the ADC credential path while
+  preserving routing selectors.
+
+The Bedrock and Vertex selectors are mutually exclusive. If both are enabled,
+environment preparation fails before either cloud credential group is exposed
+to Claude.
+
+There is no `AWS_*` wildcard. `AWS_PROFILE`, `AWS_CONFIG_FILE`,
+`AWS_SHARED_CREDENTIALS_FILE`, web-identity/ECS variables, model pins, and
+other advanced knobs require exact Claude allowlist entries. The isolated
+`HOME` cannot see the daemon's `~/.aws`, and an operator-supplied AWS config
+can execute `credential_process`; use container-visible absolute paths and
+operator-owned read-only mounts only after reviewing that configuration.
 
 Detection and `--help` probes do not receive provider credentials.
 
@@ -87,6 +114,11 @@ narrowly scoped in-place fallback with mode `0600` and `fsync`. The
 `.claude.json` file remains trusted
 provider-owned state and can be updated by Claude itself; safe mode prevents
 entries stored there from starting MCP processes in a Heimdallm run.
+If a Claude state source cannot be written because of `EROFS`, `EACCES`, or
+`EPERM`, a refreshed copy remains ephemeral and an operator-visible warning is
+emitted without discarding an otherwise successful review. Validation,
+concurrent replacement, symlink/device changes, disk-full and I/O errors remain
+fatal.
 
 Gemini likewise uses copy-in/copy-out for only the four mutable token or
 identifier files, preserving first-run creation and atomic rotations. Its user
@@ -151,8 +183,11 @@ The following classes are denied even when named in an allowlist:
 Empty CSV elements are ignored, so a trailing or doubled comma does not disable
 valid entries. Invalid names and wildcard patterns are rejected. Matching is
 case-insensitive for the common runtime baseline while preserving the parent's
-original spelling. Do not treat an allowlist as a convenient way to copy the
-daemon's environment wholesale.
+original spelling. The sole canonicalized capability is `SSH_AUTH_SOCK`, so a
+lowercase allowlist spelling still reaches both the selected CLI and Codex's
+nested-tool policy. Other operator-defined names remain case-sensitive on
+Unix. Do not treat an allowlist as a convenient way to copy the daemon's
+environment wholesale.
 The permanent denylist is defense in depth, not an exhaustive catalogue of
 every runtime's future injection variables. A name not present in the denylist
 is not automatically safe: each explicit opt-in remains an operator trust

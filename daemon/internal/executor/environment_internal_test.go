@@ -1,6 +1,10 @@
 package executor
 
 import (
+	"bytes"
+	"errors"
+	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -74,6 +78,125 @@ func TestCodexShellEnvironmentPolicyRejectsInvalidUTF8(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "invalid UTF-8") {
 		t.Fatalf("codexShellEnvironmentPolicy error = %v, want invalid UTF-8", err)
+	}
+}
+
+func TestAdditionalEnvironmentValueCanonicalizesOnlySSHAuthSock(t *testing.T) {
+	captured := capturedEnvironment{values: map[string]string{
+		"SSH_AUTH_SOCK": "/tmp/canonical.sock",
+		"ssh_auth_sock": "/tmp/lower.sock",
+		"Mixed_Case":    "exact",
+	}}
+
+	if got, ok := captured.additionalEnvironmentValue("SSH_AUTH_SOCK"); !ok || got != "/tmp/canonical.sock" {
+		t.Fatalf("SSH_AUTH_SOCK = %q, %t, want canonical value", got, ok)
+	}
+	if got, ok := captured.additionalEnvironmentValue("Mixed_Case"); !ok || got != "exact" {
+		t.Fatalf("Mixed_Case = %q, %t, want exact value", got, ok)
+	}
+	if got, ok := captured.additionalEnvironmentValue("MIXED_CASE"); ok {
+		t.Fatalf("MIXED_CASE = %q, %t, want case-sensitive miss", got, ok)
+	}
+
+	delete(captured.values, "SSH_AUTH_SOCK")
+	if got, ok := captured.additionalEnvironmentValue("SSH_AUTH_SOCK"); !ok || got != "/tmp/lower.sock" {
+		t.Fatalf("lowercase SSH socket = %q, %t, want canonicalized fallback", got, ok)
+	}
+}
+
+func TestEnvironmentFlagEnabledMatchesClaudeBooleanValues(t *testing.T) {
+	for _, value := range []string{"1", "true", "TRUE", " yes ", "ON"} {
+		if !environmentFlagEnabled(value) {
+			t.Errorf("environmentFlagEnabled(%q) = false, want true", value)
+		}
+	}
+	for _, value := range []string{"", "0", "false", "no", "off", "unexpected"} {
+		if environmentFlagEnabled(value) {
+			t.Errorf("environmentFlagEnabled(%q) = true, want false", value)
+		}
+	}
+}
+
+func TestPrepareRejectsConflictingClaudeBackendsBeforeCreatingHome(t *testing.T) {
+	tmpRoot := t.TempDir()
+	t.Setenv("TMPDIR", tmpRoot)
+	captured := capturedEnvironment{values: map[string]string{
+		"CLAUDE_CODE_USE_BEDROCK": "yes",
+		"CLAUDE_CODE_USE_VERTEX":  "ON",
+	}}
+
+	prepared, err := captured.prepare("claude")
+	if prepared != nil {
+		_ = prepared.cleanup()
+		t.Fatal("prepare returned an environment for conflicting Claude backends")
+	}
+	if err == nil ||
+		!strings.Contains(err.Error(), "CLAUDE_CODE_USE_BEDROCK") ||
+		!strings.Contains(err.Error(), "CLAUDE_CODE_USE_VERTEX") {
+		t.Fatalf("prepare error = %v, want both conflicting selectors", err)
+	}
+	entries, readErr := os.ReadDir(tmpRoot)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("prepare created isolated state before rejecting conflict: %v", entries)
+	}
+}
+
+func TestKnownProviderPolicyEnvironmentNamesRemainBlocked(t *testing.T) {
+	names := []string{
+		"CLAUDE_CODE_SAFE_MODE",
+		"CLAUDE_CODE_SUBPROCESS_ENV_SCRUB",
+		"CLAUDE_CONFIG_DIR",
+		"CODEX_HOME",
+		"GEMINI_CLI_HOME",
+		"GEMINI_CLI_IDE_SERVER_STDIO_COMMAND",
+		"GEMINI_CLI_SYSTEM_DEFAULTS_PATH",
+		"GEMINI_CLI_SYSTEM_SETTINGS_PATH",
+		"GEMINI_CLI_TRUSTED_FOLDERS_PATH",
+		"GEMINI_CLI_TRUST_WORKSPACE",
+		"GEMINI_SANDBOX",
+		"GEMINI_SANDBOX_PROXY_COMMAND",
+		"GEMINI_SYSTEM_MD",
+		"GEMINI_WRITE_SYSTEM_MD",
+		"OPENCODE_CONFIG",
+		"OPENCODE_CONFIG_CONTENT",
+		"OPENCODE_CONFIG_DIR",
+		"OPENCODE_DISABLE_PROJECT_CONFIG",
+		"OPENCODE_PURE",
+	}
+	for _, name := range names {
+		t.Run(name, func(t *testing.T) {
+			if err := validateAdditionalEnvironmentName("codex", strings.ToLower(name)); err == nil {
+				t.Fatalf("%s is no longer blocked case-insensitively", name)
+			}
+		})
+	}
+}
+
+func TestUnwritableStateSourceErrorIsNarrow(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "read-only filesystem", err: syscall.EROFS, want: true},
+		{name: "permission denied", err: syscall.EACCES, want: true},
+		{name: "operation not permitted", err: syscall.EPERM, want: true},
+		{name: "wrapped permission error", err: fmt.Errorf("persist: %w", syscall.EACCES), want: true},
+		{name: "disk full", err: syscall.ENOSPC},
+		{name: "I/O error", err: syscall.EIO},
+		{name: "invalid argument", err: syscall.EINVAL},
+		{name: "unresolved busy mount", err: syscall.EBUSY},
+		{name: "unrelated wrapped error", err: fmt.Errorf("persist: %w", errors.New("boom"))},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := unwritableStateSourceError(tc.err); got != tc.want {
+				t.Fatalf("unwritableStateSourceError(%v) = %t, want %t", tc.err, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -263,7 +386,79 @@ func TestAtomicWritePrivateStateFallsBackForBusyBindMount(t *testing.T) {
 	}
 }
 
-func TestMutableJSONStateReportsReadOnlyPersistence(t *testing.T) {
+func TestClaudeMutableJSONStateKeepsUnwritableSourceEphemeral(t *testing.T) {
+	root := t.TempDir()
+	sourceDir := filepath.Join(root, "source")
+	if err := os.Mkdir(sourceDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(sourceDir, "state.json")
+	if err := os.WriteFile(source, []byte(`{"token":"old"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(root, "isolated", "state.json")
+	syncState, err := bridgeClaudeMutableJSONState(source, dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dest, []byte(`{"token":"rotated"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sourceDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chmod(sourceDir, 0o700) }()
+
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(
+		&logs,
+		&slog.HandlerOptions{Level: slog.LevelWarn},
+	)))
+	defer slog.SetDefault(previousLogger)
+
+	if err := syncState(); err != nil {
+		t.Fatalf("unwritable provider state should remain ephemeral: %v", err)
+	}
+	if got := string(mustReadInternalFile(t, source)); got != `{"token":"old"}` {
+		t.Fatalf("unwritable source changed to %q", got)
+	}
+	if got := logs.String(); !strings.Contains(got, "refreshed state is ephemeral") {
+		t.Fatalf("operator warning missing from logs:\n%s", got)
+	}
+}
+
+func TestClaudeMutableJSONStateKeepsUnwritableFirstRunEphemeral(t *testing.T) {
+	root := t.TempDir()
+	sourceDir := filepath.Join(root, "source")
+	if err := os.Mkdir(sourceDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(sourceDir, "state.json")
+	dest := filepath.Join(root, "isolated", "state.json")
+	syncState, err := bridgeClaudeMutableJSONState(source, dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dest, []byte(`{"token":"first-login"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sourceDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chmod(sourceDir, 0o700) }()
+	if err := syncState(); err != nil {
+		t.Fatalf("unwritable first-run state should remain ephemeral: %v", err)
+	}
+	if _, err := os.Lstat(source); !os.IsNotExist(err) {
+		t.Fatalf("first-run source was unexpectedly created: %v", err)
+	}
+}
+
+func TestMutableJSONStateReportsUnwritableSourceByDefault(t *testing.T) {
 	root := t.TempDir()
 	sourceDir := filepath.Join(root, "source")
 	if err := os.Mkdir(sourceDir, 0o700); err != nil {
@@ -286,10 +481,10 @@ func TestMutableJSONStateReportsReadOnlyPersistence(t *testing.T) {
 	}
 	defer func() { _ = os.Chmod(sourceDir, 0o700) }()
 	if err := syncState(); err == nil {
-		t.Fatal("read-only generic state persistence unexpectedly succeeded")
+		t.Fatal("generic state bridge unexpectedly hid an unwritable source")
 	}
 	if got := string(mustReadInternalFile(t, source)); got != `{"token":"old"}` {
-		t.Fatalf("read-only source changed to %q", got)
+		t.Fatalf("unwritable source changed to %q", got)
 	}
 }
 

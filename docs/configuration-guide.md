@@ -603,10 +603,22 @@ selected provider's default credentials:
 
 | CLI | Credentials exposed by default |
 |---|---|
-| Claude | `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN` |
+| Claude | `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, and a conditionally selected Bedrock or Vertex group |
 | Codex | `OPENAI_API_KEY`, `CODEX_API_KEY` |
 | Gemini | `GEMINI_API_KEY`, `GOOGLE_API_KEY`, and explicitly configured Vertex AI variables |
 | OpenCode | `OPENROUTER_API_KEY` |
+
+For Claude, `ANTHROPIC_BASE_URL` supports an Anthropic-compatible gateway.
+Bedrock variables and AWS credentials are forwarded only when
+`CLAUDE_CODE_USE_BEDROCK` has one of Claude Code's enabled boolean values
+(`1`, `true`, `yes`, or `on`); Vertex selectors and ADC are forwarded only
+when `CLAUDE_CODE_USE_VERTEX` has an enabled value. The corresponding
+`CLAUDE_CODE_SKIP_*_AUTH` switch preserves gateway routing but omits client
+credentials. The Bedrock and Vertex selectors are mutually exclusive; enabling
+both fails before Claude starts so the two cloud credential groups are never
+co-resident. AWS profiles/config files remain explicit allowlist opt-ins
+because the isolated `HOME` does not project `~/.aws` and `credential_process`
+can execute operator-configured commands.
 
 Each execution also gets a new mode-`0700` temporary `HOME`. Only the selected
 provider's minimum state/authentication paths are projected into it, preserving
@@ -618,7 +630,9 @@ is verified before every cached CLI version is used, and versions older than
 Only `.claude/.credentials.json` and `.claude.json` are copied into the
 temporary home and safely synchronized back, so persistent user settings,
 CLAUDE.md, hooks, plugins, MCP servers, skills, commands, and agents are not
-loaded.
+loaded. A refresh against a source that is read-only or owned by another uid is
+ephemeral and warns without discarding a successful review; validation,
+concurrency and non-permission persistence failures remain fatal.
 Gemini projects only mutable OAuth/account/installation state and an input-only
 authentication selector. User settings, `.env`, GEMINI.md, MCP tokens,
 extensions, commands, skills, agents, and policies are excluded. Atomic
@@ -845,7 +859,7 @@ echo "GITHUB_TOKEN=$(gh auth token)" >> docker/.env
 
 ### Claude Code
 
-Two authentication options:
+Claude supports direct credentials plus three enterprise routes:
 
 **Option A: API key (pay-as-you-go)**
 
@@ -870,6 +884,55 @@ claude setup-token
 Copy only the `sk-ant-oat...` line it prints and paste it into `docker/.env`.
 
 **Do not** set `bare = true` in `config.toml` when using OAuth — `bare` disables OAuth and forces API-key mode.
+
+**Option C: Anthropic-compatible gateway**
+
+```bash
+ANTHROPIC_BASE_URL=https://gateway.example.com
+ANTHROPIC_AUTH_TOKEN=<gateway bearer token>
+```
+
+`ANTHROPIC_AUTH_TOKEN` and credentials embedded in a base URL are redacted
+from CLI errors. A normal base URL remains visible for diagnostics.
+
+**Option D: Amazon Bedrock**
+
+```bash
+CLAUDE_CODE_USE_BEDROCK=1
+AWS_REGION=us-east-1
+
+# Choose one authentication form:
+AWS_BEARER_TOKEN_BEDROCK=<bedrock API key>
+# or:
+AWS_ACCESS_KEY_ID=<access key id>
+AWS_SECRET_ACCESS_KEY=<secret access key>
+AWS_SESSION_TOKEN=<optional session token>
+```
+
+For a gateway that signs Bedrock requests, set
+`ANTHROPIC_BEDROCK_BASE_URL` and `CLAUDE_CODE_SKIP_BEDROCK_AUTH=1`.
+Heimdallm then omits every AWS credential from the Claude subprocess.
+Do not combine this route with `CLAUDE_CODE_USE_VERTEX`; Heimdallm rejects
+conflicting cloud backends before starting Claude.
+
+**Option E: Google Vertex AI**
+
+```bash
+CLAUDE_CODE_USE_VERTEX=1
+CLOUD_ML_REGION=global
+ANTHROPIC_VERTEX_PROJECT_ID=my-project
+GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/google-application-credentials.json
+```
+
+The ADC path is container-local and needs the same operator-owned read-only
+mount shown in the Gemini Vertex example below. For a gateway that supplies
+Google authentication, set `ANTHROPIC_VERTEX_BASE_URL` and
+`CLAUDE_CODE_SKIP_VERTEX_AUTH=1`; the ADC path is then omitted.
+
+`AWS_PROFILE`, `AWS_CONFIG_FILE`, and `AWS_SHARED_CREDENTIALS_FILE` are not
+automatic. If a reviewed deployment needs them, add their exact names to
+`HEIMDALLM_AI_CLAUDE_ENV_ALLOWLIST`, expose absolute container paths through a
+private read-only mount, and audit any `credential_process` command first.
 
 ### Other AI CLIs
 

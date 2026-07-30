@@ -47,7 +47,30 @@ services:
       # ── AI CLI authentication ──────────────────────────────────────────
       # Claude Code CLI (Anthropic)
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN:-}
+      - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-}
       - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}
+      # Bedrock is activated by Claude's 1/true/yes/on boolean values. When
+      # SKIP_BEDROCK_AUTH is enabled, Heimdallm keeps AWS credentials out of
+      # the Claude subprocess because the gateway supplies authentication.
+      - ANTHROPIC_BEDROCK_BASE_URL=${ANTHROPIC_BEDROCK_BASE_URL:-}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_BEARER_TOKEN_BEDROCK=${AWS_BEARER_TOKEN_BEDROCK:-}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-}
+      - AWS_REGION=${AWS_REGION:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN:-}
+      - CLAUDE_CODE_SKIP_BEDROCK_AUTH=${CLAUDE_CODE_SKIP_BEDROCK_AUTH:-}
+      - CLAUDE_CODE_USE_BEDROCK=${CLAUDE_CODE_USE_BEDROCK:-}
+      # Claude Vertex authentication reuses the Google variables below.
+      # USE_BEDROCK and USE_VERTEX are mutually exclusive; the executor
+      # rejects a conflict before exposing either cloud credential group.
+      - ANTHROPIC_VERTEX_BASE_URL=${ANTHROPIC_VERTEX_BASE_URL:-}
+      - ANTHROPIC_VERTEX_PROJECT_ID=${ANTHROPIC_VERTEX_PROJECT_ID:-}
+      - CLAUDE_CODE_SKIP_VERTEX_AUTH=${CLAUDE_CODE_SKIP_VERTEX_AUTH:-}
+      - CLAUDE_CODE_USE_VERTEX=${CLAUDE_CODE_USE_VERTEX:-}
+      - CLOUD_ML_REGION=${CLOUD_ML_REGION:-}
+      - GCLOUD_PROJECT=${GCLOUD_PROJECT:-}
 
       # Codex CLI (OpenAI)
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
@@ -56,8 +79,9 @@ services:
       # Gemini CLI (Google)
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
-      # Vertex AI is opt-in. GOOGLE_APPLICATION_CREDENTIALS must name a
-      # container-visible file supplied by an operator-owned compose overlay.
+      # Vertex AI is opt-in for Gemini and Claude. GOOGLE_APPLICATION_CREDENTIALS
+      # must name a container-visible file supplied by an operator-owned
+      # compose overlay.
       - GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-}
       - GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT:-}
       - GOOGLE_CLOUD_LOCATION=${GOOGLE_CLOUD_LOCATION:-}

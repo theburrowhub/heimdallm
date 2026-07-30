@@ -133,6 +133,7 @@ For headless/server deployment, Heimdallm runs as a Docker container with all fo
 - **Credentials for your chosen AI provider** (at least one):
   - **Claude — subscription (Max / Pro / Team)**: run `claude setup-token` on your host (interactive — opens a browser) and copy the `sk-ant-oat…` token it prints. This becomes `CLAUDE_CODE_OAUTH_TOKEN`. No billing setup required if your Anthropic subscription covers Claude Code.
   - **Claude — pay-as-you-go API key**: create one at https://console.anthropic.com/settings/keys. This becomes `ANTHROPIC_API_KEY`.
+  - **Claude — enterprise gateway, Bedrock, or Vertex AI**: the corresponding routing and cloud credentials are supported conditionally; see [Claude Code authentication](docs/configuration-guide.md#claude-code).
   - **Gemini**: https://aistudio.google.com/apikey → `GEMINI_API_KEY` or `GOOGLE_API_KEY`. Browser OAuth and Vertex AI are also supported — see [Reusing your host's AI authentication](#reusing-your-hosts-ai-authentication) and the [Configuration Guide](docs/configuration-guide.md#other-ai-clis).
   - **OpenAI / Codex**: https://platform.openai.com/api-keys → `OPENAI_API_KEY` or `CODEX_API_KEY`.
   - **OpenRouter** (for OpenCode): https://openrouter.ai/keys → `OPENROUTER_API_KEY`.
@@ -174,6 +175,10 @@ Then open `docker/.env` in your editor and set at minimum:
   Leave `CLAUDE_CODE_OAUTH_TOKEN` empty.
 
 For non-Claude providers see [Reusing your host's AI authentication](#reusing-your-hosts-ai-authentication) (Gemini OAuth reuse) or just set the relevant `*_API_KEY` variable from the Prerequisites list.
+For Claude enterprise deployments, use the exact gateway, Bedrock, or Vertex
+variables in the [Configuration Guide](docs/configuration-guide.md#claude-code);
+AWS credentials are not exposed unless Bedrock is selected, and
+`CLAUDE_CODE_SKIP_*_AUTH` keeps client credentials out of gateway-backed runs.
 
 See [`docker/.env.example`](docker/.env.example) for every supported variable including issue-tracking, topic-based discovery, and web UI settings.
 
@@ -182,7 +187,8 @@ empty environment and a mode-`0700` temporary home, then receives only the
 selected provider's credentials and state. Additional variables require an
 explicit per-provider allowlist; GitHub, Heimdallm, Git, and process-injection
 variables remain blocked. See [AI subprocess security](docs/subprocess-security.md)
-for the exact contract, SSH opt-in, and residual threat model.
+for the exact conditional Bedrock/Vertex contract, SSH opt-in, and residual
+threat model.
 
 #### 3. Start the stack
 
@@ -222,7 +228,10 @@ Then open the web UI:
 
 The `web` container reads the daemon's API token from the shared `heimdallm-data` volume automatically — no manual copy needed.
 
-After `make up` completes, the target prints a summary of which AI credentials were picked up from `docker/.env` and flags the optional knobs (full-repo analysis, topic discovery) that are currently off. Use it as a checklist before opening the UI.
+After `make up` completes, the target prints a summary of which AI
+authentication routes were picked up from `docker/.env` and flags the optional
+knobs (full-repo analysis, topic discovery) that are currently off. Use it as a
+checklist before opening the UI.
 
 #### 4b. Opt-in: full-repo analysis
 
