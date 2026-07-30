@@ -1371,25 +1371,7 @@ func (c *Config) sanitizeLegacyAgentExecutionPolicy(source string) {
 }
 
 func sanitizeLegacyAgentConfig(name string, agent CLIAgentConfig, source string) CLIAgentConfig {
-	agent.Model = strings.TrimSpace(agent.Model)
-	if err := executor.ValidateModel(agent.Model); err != nil {
-		slog.Warn("config: ignored unsafe legacy agent field",
-			"source", source, "agent", name, "field", "model", "err", err)
-		agent.Model = ""
-	}
-	if agent.MaxTurns < 0 {
-		slog.Warn("config: ignored invalid legacy agent field",
-			"source", source, "agent", name, "field", "max_turns",
-			"err", "value must be non-negative")
-		agent.MaxTurns = 0
-	}
-	if normalized, err := executor.NormalizeEffort(agent.Effort); err != nil {
-		slog.Warn("config: ignored unsafe legacy agent field",
-			"source", source, "agent", name, "field", "effort", "err", err)
-		agent.Effort = ""
-	} else {
-		agent.Effort = normalized
-	}
+	agent = sanitizeAgentExecutionFields(name, agent, source, "legacy")
 	if normalized, err := executor.NormalizePermissionMode(agent.PermissionMode); err != nil {
 		slog.Warn("config: ignored unsafe legacy agent field",
 			"source", source, "agent", name, "field", "permission_mode", "err", err)
@@ -1423,7 +1405,7 @@ func sanitizeLegacyAgentConfig(name string, agent CLIAgentConfig, source string)
 	// values. Keep the compatibility boundary defensive nevertheless: a
 	// future migration must not turn a formerly survivable legacy config into
 	// a startup failure by returning an unsafe typed value.
-	agent = sanitizeMigratedAgentExecutionFields(name, agent, source)
+	agent = sanitizeAgentExecutionFields(name, agent, source, "migrated")
 	if err := executor.ValidateExtraFlagsForCLI(name, agent.ExtraFlags); err != nil {
 		slog.Warn("config: ignored unsafe legacy agent field",
 			"source", source, "agent", name, "field", "extra_flags", "err", err)
@@ -1432,21 +1414,28 @@ func sanitizeLegacyAgentConfig(name string, agent CLIAgentConfig, source string)
 	return agent
 }
 
-func sanitizeMigratedAgentExecutionFields(name string, agent CLIAgentConfig, source string) CLIAgentConfig {
+func sanitizeAgentExecutionFields(
+	name string,
+	agent CLIAgentConfig,
+	source string,
+	provenance string,
+) CLIAgentConfig {
+	unsafeMessage := "config: ignored unsafe " + provenance + " agent field"
+	invalidMessage := "config: ignored invalid " + provenance + " agent field"
 	agent.Model = strings.TrimSpace(agent.Model)
 	if err := executor.ValidateModel(agent.Model); err != nil {
-		slog.Warn("config: ignored unsafe migrated agent field",
+		slog.Warn(unsafeMessage,
 			"source", source, "agent", name, "field", "model", "err", err)
 		agent.Model = ""
 	}
 	if agent.MaxTurns < 0 {
-		slog.Warn("config: ignored invalid migrated agent field",
+		slog.Warn(invalidMessage,
 			"source", source, "agent", name, "field", "max_turns",
 			"err", "value must be non-negative")
 		agent.MaxTurns = 0
 	}
 	if normalized, err := executor.NormalizeEffort(agent.Effort); err != nil {
-		slog.Warn("config: ignored unsafe migrated agent field",
+		slog.Warn(unsafeMessage,
 			"source", source, "agent", name, "field", "effort", "err", err)
 		agent.Effort = ""
 	} else {
@@ -1535,7 +1524,7 @@ func canonicalizeLegacyMapChild(m map[string]any, canonical, path string) (map[s
 
 func legacyAgentConfigFromMap(m map[string]any) (CLIAgentConfig, map[string]bool, error) {
 	var agent CLIAgentConfig
-	rewrite := make(map[string]bool, 11)
+	rewrite := make(map[string]bool)
 	stringField := func(canonical string, target *string) error {
 		raw, present, canonicalize, err := legacyMapValue(m, canonical)
 		if err != nil {
@@ -1952,19 +1941,21 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config: read %s: %w", path, err)
 	}
 	// Decode through a generic map first. BurntSushi's struct decoder matches
-	// TOML keys case-insensitively, so legacy aliases such as Model/MODEL can
-	// otherwise race on Go map iteration and produce different configs across
-	// reloads. Canonicalize or reject them deterministically before the typed
-	// decode used by the runtime.
+	// TOML keys case-insensitively, so aliases that differ only in casing can
+	// otherwise race on Go map iteration. Project only schema-known fields
+	// under canonical names before the typed decode. Unknown TOML remains
+	// accepted and never passes through the encoder, which cannot re-emit
+	// every valid value its decoder accepts (for example mixed-type arrays).
 	var raw map[string]any
 	if err := toml.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("config: parse %s: %w", path, err)
 	}
-	if err := SanitizeLegacyAgentExecutionPolicyMap(raw, "toml load"); err != nil {
-		return nil, fmt.Errorf("config: sanitize %s: %w", path, err)
+	known, err := projectKnownConfigMap(raw)
+	if err != nil {
+		return nil, fmt.Errorf("config: canonicalize %s: %w", path, err)
 	}
 	var canonical strings.Builder
-	if err := toml.NewEncoder(&canonical).Encode(raw); err != nil {
+	if err := toml.NewEncoder(&canonical).Encode(known); err != nil {
 		return nil, fmt.Errorf("config: canonicalize %s: %w", path, err)
 	}
 	var cfg Config
