@@ -305,7 +305,9 @@ selected provider's state into that process's isolated temporary home.
    - ~/.gemini:/home/heimdallm/.gemini:ro
    ```
    The mount is read-only, so the container cannot clobber your host
-   credentials; the Gemini-only home bridge preserves that restriction.
+   credentials; the Gemini-only home bridge preserves that restriction. OAuth
+   refreshes remain usable for the current review but are ephemeral because the
+   source cannot be updated.
 3. Leave `GEMINI_API_KEY` empty in `docker/.env`.
 
 **Codex / OpenCode:** host-auth reuse is not wired up yet. Codex accepts

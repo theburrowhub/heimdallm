@@ -201,6 +201,8 @@ If you've already authenticated `gemini` on your host:
    volumes:
      - ~/.gemini:/home/heimdallm/.gemini:ro
    ```
+   The test imports authentication state read-only. Any OAuth refresh is
+   confined to that run and is not written back to the host.
 
 ### Option C: Vertex AI + Service Account
 

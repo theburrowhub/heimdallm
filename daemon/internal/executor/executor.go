@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -1131,7 +1132,7 @@ func (e *Executor) Execute(cli, prompt string, opts ExecOptions) (*ReviewResult,
 // that parse a schema other than ReviewResult (issue triage, auto_implement
 // output, etc.). Callers should pass the bytes through StripToJSON before
 // json.Unmarshal — CLIs routinely wrap JSON in code fences or surrounding text.
-func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, error) {
+func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) (output []byte, resultErr error) {
 	// This is the final trust boundary before creating a subprocess. Callers
 	// validate configuration on ingress too, but legacy rows, direct TOML edits,
 	// and future call paths must not be able to bypass the execution policy.
@@ -1142,7 +1143,15 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 	if err != nil {
 		return nil, err
 	}
-	defer prepared.cleanup()
+	defer func() {
+		if cleanupErr := prepared.cleanup(); cleanupErr != nil {
+			output = nil
+			resultErr = errors.Join(
+				resultErr,
+				fmt.Errorf("executor: persist %s provider state: %w", cli, cleanupErr),
+			)
+		}
+	}()
 
 	timeout := executionTimeout
 	if opts.Timeout > 0 {
@@ -1156,11 +1165,18 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 	if cliPath == "" {
 		cliPath = cli // best effort; execution will fail with a useful error
 	}
+	if cli == "claude" && !cliHelpSupports(cliPath, "--safe-mode") {
+		return nil, fmt.Errorf(
+			"executor: Claude CLI must support --safe-mode for isolated execution (Claude Code 2.1.169 or newer)",
+		)
+	}
 
 	var workDirFlags []string
 	if opts.WorkDir != "" {
 		workDirFlags = detectWorkDirFlags(cli, cliPath, opts.WorkDir)
 		switch {
+		case cli == "claude" && len(workDirFlags) == 0:
+			return nil, fmt.Errorf("executor: Claude CLI must support --add-dir or --directory for isolated repository analysis")
 		case cli == "gemini" && len(workDirFlags) == 0:
 			return nil, fmt.Errorf("executor: Gemini CLI must support an include-directory flag for isolated repository analysis")
 		case cli == "opencode" && len(workDirFlags) == 0:
@@ -1168,13 +1184,16 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 		}
 	}
 
-	args := buildArgs(cli, opts, workDirFlags, prepared.codexToolEnv)
+	args, err := buildArgs(cli, opts, workDirFlags, prepared.codexToolEnv)
+	if err != nil {
+		return nil, err
+	}
 	cmd := exec.CommandContext(ctx, cliPath, args...)
 	cmd.Stdin = strings.NewReader(prompt)
 	cmd.Env = prepared.env
 	cmd.Dir = prepared.runDir
 	if opts.WorkDir != "" {
-		if cli != "gemini" && cli != "opencode" {
+		if cli != "claude" && cli != "gemini" && cli != "opencode" {
 			cmd.Dir = opts.WorkDir
 		}
 	}
@@ -1218,7 +1237,7 @@ func validateExecutionRequest(cli string, opts ExecOptions) error {
 }
 
 // buildArgs constructs the CLI argument list based on the CLI name and options.
-func buildArgs(cli string, opts ExecOptions, workDirFlags []string, codexToolEnv map[string]string) []string {
+func buildArgs(cli string, opts ExecOptions, workDirFlags []string, codexToolEnv map[string]string) ([]string, error) {
 	var args []string
 
 	switch cli {
@@ -1232,6 +1251,10 @@ func buildArgs(cli string, opts ExecOptions, workDirFlags []string, codexToolEnv
 			args = append(args, "-m", strings.TrimSpace(opts.Model))
 		}
 	case "codex":
+		shellPolicy, err := codexShellEnvironmentPolicy(codexToolEnv)
+		if err != nil {
+			return nil, fmt.Errorf("executor: build Codex shell environment policy: %w", err)
+		}
 		// Codex's top-level command is interactive and requires a TTY. The
 		// daemon must use the non-interactive subcommand and feed the prompt on
 		// stdin, otherwise Codex exits with "stdin is not a terminal".
@@ -1242,7 +1265,7 @@ func buildArgs(cli string, opts ExecOptions, workDirFlags []string, codexToolEnv
 		// cannot restore inheritance or login-shell startup files.
 		args = append(args,
 			"--config", "allow_login_shell=false",
-			"--config", "shell_environment_policy="+codexShellEnvironmentPolicy(codexToolEnv),
+			"--config", "shell_environment_policy="+shellPolicy,
 		)
 		if mode := strings.TrimSpace(opts.ApprovalMode); mode != "" {
 			if normalized, err := NormalizeApprovalModeForCLI(cli, mode); err != nil {
@@ -1257,6 +1280,13 @@ func buildArgs(cli string, opts ExecOptions, workDirFlags []string, codexToolEnv
 		}
 	default:
 		// claude, gemini: stdin mode
+		if cli == "claude" {
+			// Safe mode is the upstream fail-closed boundary that disables
+			// CLAUDE.md, hooks, plugins, skills, commands, agents, workflows,
+			// output styles and MCP servers while preserving authentication,
+			// model/tool choices and managed policy.
+			args = append(args, "--safe-mode")
+		}
 		if cli == "gemini" {
 			// Gemini's settings-only ignoreLocalEnv switch deliberately still
 			// loads some .env locations. Force the CLI-level guard as well.
@@ -1323,7 +1353,7 @@ func buildArgs(cli string, opts ExecOptions, workDirFlags []string, codexToolEnv
 		args = append(args, "-")
 	}
 
-	return args
+	return args, nil
 }
 
 var (

@@ -609,9 +609,22 @@ selected provider's default credentials:
 | OpenCode | `OPENROUTER_API_KEY` |
 
 Each execution also gets a new mode-`0700` temporary `HOME`. Only the selected
-provider's state/authentication directories are bridged into it, preserving
+provider's minimum state/authentication paths are projected into it, preserving
 file-based login without exposing another CLI's state or unrelated home files.
 Detection and `--help` probes receive no provider credentials.
+Claude runs from the isolated directory with its upstream `--safe-mode`; support
+is verified before every cached CLI version is used, and versions older than
+2.1.169 fail closed. The repository is granted only as an additional directory.
+Only `.claude/.credentials.json` and `.claude.json` are copied into the
+temporary home and safely synchronized back, so persistent user settings,
+CLAUDE.md, hooks, plugins, MCP servers, skills, commands, and agents are not
+loaded.
+Gemini projects only mutable OAuth/account/installation state and an input-only
+authentication selector. User settings, `.env`, GEMINI.md, MCP tokens,
+extensions, commands, skills, agents, and policies are excluded. Atomic
+rotations are synchronized on read-write native state; rotations against the
+documented read-only Docker mount are ephemeral and produce a warning without
+discarding a successful review.
 OpenCode runs with its managed `--pure` policy, so repository and user-state
 plugins are not executed with the selected backend credential. Heimdallm also
 sets `OPENCODE_DISABLE_PROJECT_CONFIG=1`; repository `opencode.json`,
@@ -627,10 +640,17 @@ HEIMDALLM_AI_OPENCODE_ENV_ALLOWLIST=CORPORATE_TENANT_ID
 ```
 
 Standard proxy and CA variables are already part of the common runtime
-baseline and do not need to be repeated.
+baseline and do not need to be repeated. Their names are matched
+case-insensitively, and empty elements in a comma-separated allowlist are
+ignored. A configured allowlist name that is absent produces a warning without
+logging its value; optional missing provider-state paths are reported once at
+info level.
 
-`GITHUB_TOKEN`, `GH_TOKEN`, `HEIMDALLM_*`, `GIT_*`, and dynamic-loader or
-shell-startup injection variables are permanently denied. `SSH_AUTH_SOCK` is
+`GITHUB_TOKEN`, `GH_TOKEN`, `HEIMDALLM_*`, `GIT_*`, and known dynamic-loader,
+runtime-agent, module-loader, or shell-startup injection variables are
+permanently denied. This denylist is defense in depth rather than an exhaustive
+safety catalogue; every additional name remains an explicit operator trust
+decision. `SSH_AUTH_SOCK` is
 absent by default and requires both an explicit per-CLI allowlist entry and an
 operator-owned socket mount. Custom allowlisted values must also be forwarded
 to the daemon container through a private compose overlay. Cross-provider
@@ -906,8 +926,11 @@ volumes:
 ```
 
 Leave `GEMINI_API_KEY` and `GOOGLE_API_KEY` empty. The container reads your
-host's OAuth tokens read-only and projects only Gemini state into the
-execution's isolated temporary home.
+host's OAuth tokens read-only and projects only Gemini authentication state
+into the execution's isolated temporary home. Token refreshes from that
+read-only mount are intentionally ephemeral; use an API key for fully stateless
+Docker operation, or authenticate the native/`make run-linux` installation when
+rotations must persist.
 
 ---
 

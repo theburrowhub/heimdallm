@@ -108,7 +108,8 @@ services:
       # through the store layer and survive the volume swap.
       - heimdallm-config:/config
       #
-      # Gemini OAuth tokens from host (if using browser-based auth):
+      # Gemini OAuth tokens from host (browser auth; refresh is ephemeral
+      # because this security-sensitive source stays read-only):
       # - ~/.gemini:/home/heimdallm/.gemini:ro
       #
       # Local repos for full-repo analysis. The agent runs with its CWD

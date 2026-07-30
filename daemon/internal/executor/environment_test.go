@@ -1,6 +1,8 @@
 package executor_test
 
 import (
+	"bytes"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,6 +40,7 @@ func TestExecuteRawUsesProviderSpecificEnvironment(t *testing.T) {
 			originalHome := t.TempDir()
 			t.Setenv("HOME", originalHome)
 			t.Setenv("LANG", "es_ES.UTF-8")
+			t.Setenv("http_proxy", "http://lowercase-proxy.invalid:8080")
 			t.Setenv("GITHUB_TOKEN", "github-daemon-secret")
 			t.Setenv("GH_TOKEN", "gh-daemon-secret")
 			t.Setenv("HEIMDALLM_API_TOKEN", "heimdallm-daemon-secret")
@@ -112,6 +115,9 @@ func TestExecuteRawUsesProviderSpecificEnvironment(t *testing.T) {
 			if env["LANG"] != "es_ES.UTF-8" {
 				t.Errorf("LANG = %q, want preserved locale", env["LANG"])
 			}
+			if env["http_proxy"] != "http://lowercase-proxy.invalid:8080" {
+				t.Errorf("lowercase proxy was not matched case-insensitively: %q", env["http_proxy"])
+			}
 			if env["CI"] != "true" {
 				t.Errorf("CI = %q, want true", env["CI"])
 			}
@@ -137,7 +143,7 @@ func TestExecuteRawUsesProviderSpecificEnvironment(t *testing.T) {
 
 func TestExecuteRawBridgesOnlySelectedProviderState(t *testing.T) {
 	statePaths := map[string][]string{
-		"claude":   {".claude", ".claude.json"},
+		"claude":   {".claude/.credentials.json", ".claude.json"},
 		"codex":    {".codex"},
 		"gemini":   {".gemini"},
 		"opencode": {".config/opencode", ".local/share/opencode"},
@@ -151,7 +157,10 @@ func TestExecuteRawBridgesOnlySelectedProviderState(t *testing.T) {
 				for _, rel := range paths {
 					path := filepath.Join(sourceHome, filepath.FromSlash(rel))
 					if strings.HasSuffix(rel, ".json") {
-						if err := os.WriteFile(path, []byte(provider), 0o600); err != nil {
+						if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+							t.Fatalf("create state file directory: %v", err)
+						}
+						if err := os.WriteFile(path, []byte(`{"provider":"`+provider+`"}`), 0o600); err != nil {
 							t.Fatalf("write state file: %v", err)
 						}
 						continue
@@ -164,7 +173,7 @@ func TestExecuteRawBridgesOnlySelectedProviderState(t *testing.T) {
 
 			stateCapture := filepath.Join(t.TempDir(), "state")
 			homeCapture := filepath.Join(t.TempDir(), "home")
-			scriptBody := "for path in .claude .claude.json .codex .gemini .config/opencode .local/share/opencode; do\n" +
+			scriptBody := "for path in .claude/.credentials.json .claude.json .codex .gemini .config/opencode .local/share/opencode; do\n" +
 				"  if [ -e \"$HOME/$path\" ]; then printf '%s\\n' \"$path\"; fi\n" +
 				"done > " + shellQuote(stateCapture) + "\n"
 			binDir := installEnvironmentCLI(t, cli, filepath.Join(t.TempDir(), "env"), homeCapture, scriptBody)
@@ -182,10 +191,188 @@ func TestExecuteRawBridgesOnlySelectedProviderState(t *testing.T) {
 	}
 }
 
-func TestGeminiStateBridgeExcludesDotEnvButPreservesOAuth(t *testing.T) {
+func TestClaudeStateBridgeRotatesFilesWithoutLoadingPersistentConfig(t *testing.T) {
+	sourceHome := t.TempDir()
+	claudeDir := filepath.Join(sourceHome, ".claude")
+	if err := os.MkdirAll(filepath.Join(claudeDir, "hooks"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	credentialsPath := filepath.Join(claudeDir, ".credentials.json")
+	globalStatePath := filepath.Join(sourceHome, ".claude.json")
+	if err := os.WriteFile(credentialsPath, []byte(`{"token":"old"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		globalStatePath,
+		[]byte(`{"oauth":"old","mcpServers":{"operator":{}}}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(claudeDir, "settings.json"),
+		[]byte(`{"hooks":{"PreToolUse":[{"command":"must-not-run"}]}}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(claudeDir, "hooks", "persist.sh"), []byte("host"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", sourceHome)
+
+	workDir := t.TempDir()
+	policyCapture := filepath.Join(t.TempDir(), "policy")
+	cwdCapture := filepath.Join(t.TempDir(), "cwd")
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+if [ "$1" = "--help" ]; then
+  printf '%s\n' 'Usage: claude' '  --safe-mode' '  --add-dir <directories...>'
+  exit 0
+fi
+safe_mode=0
+added_dir=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --safe-mode)
+      safe_mode=1
+      ;;
+    --add-dir)
+      shift
+      if [ "$1" = ` + shellQuote(workDir) + ` ]; then added_dir=1; fi
+      ;;
+  esac
+  shift
+done
+printf '%s,%s\n' "$safe_mode" "$added_dir" > ` + shellQuote(policyCapture) + `
+printf '%s\n' "$PWD" > ` + shellQuote(cwdCapture) + `
+if [ -e "$HOME/.claude/settings.json" ] || [ -e "$HOME/.claude/hooks" ]; then
+  printf 'persistent Claude config was bridged\n' >&2
+  exit 12
+fi
+cat "$HOME/.claude/.credentials.json" >/dev/null
+cat "$HOME/.claude.json" >/dev/null
+printf '%s\n' '{"token":"rotated"}' > "$HOME/.claude/.credentials.json.tmp"
+mv "$HOME/.claude/.credentials.json.tmp" "$HOME/.claude/.credentials.json"
+printf '%s\n' '{"oauth":"rotated","mcpServers":{"operator":{}}}' > "$HOME/.claude.json.tmp"
+mv "$HOME/.claude.json.tmp" "$HOME/.claude.json"
+printf '{"ok":true}\n'
+`
+	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if _, err := executor.New().ExecuteRaw(
+		"claude",
+		"prompt",
+		executor.ExecOptions{WorkDir: workDir},
+	); err != nil {
+		t.Fatalf("ExecuteRaw: %v", err)
+	}
+	if got := strings.TrimSpace(string(mustReadFile(t, policyCapture))); got != "1,1" {
+		t.Fatalf("managed Claude policy capture = %q, want all controls enabled", got)
+	}
+	isolatedCWD := strings.TrimSpace(string(mustReadFile(t, cwdCapture)))
+	if cleanResolvedPath(isolatedCWD) == cleanResolvedPath(workDir) {
+		t.Fatal("Claude ran inside the repository instead of its isolated directory")
+	}
+	if _, err := os.Stat(isolatedCWD); !os.IsNotExist(err) {
+		t.Fatalf("isolated Claude cwd was not removed: %v", err)
+	}
+	if got := strings.TrimSpace(string(mustReadFile(t, credentialsPath))); got != `{"token":"rotated"}` {
+		t.Fatalf("credentials after atomic rotation = %q", got)
+	}
+	if got := strings.TrimSpace(string(mustReadFile(t, globalStatePath))); got != `{"oauth":"rotated","mcpServers":{"operator":{}}}` {
+		t.Fatalf("global state after atomic rotation = %q", got)
+	}
+	for _, path := range []string{credentialsPath, globalStatePath} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Errorf("%s mode = %o, want 600", path, info.Mode().Perm())
+		}
+	}
+	if got := string(mustReadFile(t, filepath.Join(claudeDir, "hooks", "persist.sh"))); got != "host" {
+		t.Fatalf("persistent hook changed to %q", got)
+	}
+}
+
+func TestClaudeStateBridgeRejectsSymlinkReplacement(t *testing.T) {
+	sourceHome := t.TempDir()
+	claudeDir := filepath.Join(sourceHome, ".claude")
+	if err := os.MkdirAll(claudeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	credentialsPath := filepath.Join(claudeDir, ".credentials.json")
+	const original = `{"token":"original"}`
+	if err := os.WriteFile(credentialsPath, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	externalPath := filepath.Join(t.TempDir(), "external.json")
+	if err := os.WriteFile(externalPath, []byte(`{"token":"external"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", sourceHome)
+
+	binDir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"--help\" ]; then printf '%s\\n' 'Usage: claude' '  --safe-mode'; exit 0; fi\n" +
+		"rm \"$HOME/.claude/.credentials.json\"\n" +
+		"ln -s " + shellQuote(externalPath) + " \"$HOME/.claude/.credentials.json\"\n" +
+		"printf '{\"ok\":true}\\n'\n"
+	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := executor.New().ExecuteRaw("claude", "prompt", executor.ExecOptions{})
+	if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("ExecuteRaw error = %v, want non-regular state rejection", err)
+	}
+	if got := string(mustReadFile(t, credentialsPath)); got != original {
+		t.Fatalf("source credentials changed to %q", got)
+	}
+	if got := string(mustReadFile(t, externalPath)); got != `{"token":"external"}` {
+		t.Fatalf("symlink target changed to %q", got)
+	}
+}
+
+func TestClaudeStateBridgePersistsRotationWhenCLIExitsWithError(t *testing.T) {
+	sourceHome := t.TempDir()
+	statePath := filepath.Join(sourceHome, ".claude.json")
+	if err := os.WriteFile(statePath, []byte(`{"oauth":"old"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", sourceHome)
+
+	binDir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"--help\" ]; then printf '%s\\n' 'Usage: claude' '  --safe-mode'; exit 0; fi\n" +
+		"printf '%s\\n' '{\"oauth\":\"rotated-before-error\"}' > \"$HOME/.claude.json.tmp\"\n" +
+		"mv \"$HOME/.claude.json.tmp\" \"$HOME/.claude.json\"\n" +
+		"printf 'provider failed\\n' >&2\n" +
+		"exit 7\n"
+	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := executor.New().ExecuteRaw("claude", "prompt", executor.ExecOptions{})
+	if err == nil || !strings.Contains(err.Error(), "provider failed") {
+		t.Fatalf("ExecuteRaw error = %v, want provider failure", err)
+	}
+	if got := strings.TrimSpace(string(mustReadFile(t, statePath))); got != `{"oauth":"rotated-before-error"}` {
+		t.Fatalf("state after CLI error = %q", got)
+	}
+}
+
+func TestGeminiStateBridgeProjectsOnlyAuthAndPersistsMutableState(t *testing.T) {
 	sourceHome := t.TempDir()
 	stateDir := filepath.Join(sourceHome, ".gemini")
-	if err := os.Mkdir(stateDir, 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(stateDir, "commands"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(
@@ -199,15 +386,56 @@ func TestGeminiStateBridgeExcludesDotEnvButPreservesOAuth(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(stateDir, "oauth_creds.json"), []byte(oauth), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(stateDir, "installation_id"), []byte("old-installation"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const persistentSettings = `{
+  "selectedAuthType": "oauth-personal",
+  "security": {
+    "auth": {
+      "selectedType": "oauth-personal",
+      "useExternal": true
+    }
+  },
+  "mcpServers": {
+    "operator": {
+      "command": "must-not-run"
+    }
+  },
+  "tools": {
+    "discoveryCommand": "must-not-run"
+  }
+}
+`
+	if err := os.WriteFile(filepath.Join(stateDir, "settings.json"), []byte(persistentSettings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "GEMINI.md"), []byte("host instructions"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "commands", "host.toml"), []byte("command"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HOME", sourceHome)
 
-	stateCapture := filepath.Join(t.TempDir(), "state")
+	settingsCapture := filepath.Join(t.TempDir(), "settings")
 	argsCapture := filepath.Join(t.TempDir(), "args")
 	binDir := t.TempDir()
 	script := "#!/bin/sh\n" +
 		"if [ \"$1\" = \"--help\" ]; then printf '%s\\n' '--include-directories'; exit 0; fi\n" +
-		"if [ -e \"$HOME/.gemini/.env\" ]; then printf dot-env-visible > " + shellQuote(stateCapture) + "; exit 8; fi\n" +
-		"cat \"$HOME/.gemini/oauth_creds.json\" > " + shellQuote(stateCapture) + "\n" +
+		"for blocked in .env GEMINI.md commands extensions policies skills agents; do\n" +
+		"  if [ -e \"$HOME/.gemini/$blocked\" ]; then printf '%s visible\\n' \"$blocked\" >&2; exit 8; fi\n" +
+		"done\n" +
+		"cat \"$HOME/.gemini/settings.json\" > " + shellQuote(settingsCapture) + "\n" +
+		"cat \"$HOME/.gemini/oauth_creds.json\" >/dev/null\n" +
+		"printf '%s\\n' '{\"refresh_token\":\"rotated\"}' > \"$HOME/.gemini/oauth_creds.json.tmp\"\n" +
+		"mv \"$HOME/.gemini/oauth_creds.json.tmp\" \"$HOME/.gemini/oauth_creds.json\"\n" +
+		"printf '%s\\n' '{\"accounts\":[\"new-account\"]}' > \"$HOME/.gemini/google_accounts.json.tmp\"\n" +
+		"mv \"$HOME/.gemini/google_accounts.json.tmp\" \"$HOME/.gemini/google_accounts.json\"\n" +
+		"printf '%s\\n' 'new-installation' > \"$HOME/.gemini/installation_id.tmp\"\n" +
+		"mv \"$HOME/.gemini/installation_id.tmp\" \"$HOME/.gemini/installation_id\"\n" +
+		"printf '%s\\n' '{\"security\":{\"auth\":{\"selectedType\":\"attacker\",\"useExternal\":true}},\"mcpServers\":{\"attacker\":{\"command\":\"run\"}}}' > \"$HOME/.gemini/settings.json.tmp\"\n" +
+		"mv \"$HOME/.gemini/settings.json.tmp\" \"$HOME/.gemini/settings.json\"\n" +
 		"printf '%s\\n' \"$@\" > " + shellQuote(argsCapture) + "\n" +
 		"printf ok\n"
 	if err := os.WriteFile(filepath.Join(binDir, "gemini"), []byte(script), 0o755); err != nil {
@@ -222,8 +450,28 @@ func TestGeminiStateBridgeExcludesDotEnvButPreservesOAuth(t *testing.T) {
 	); err != nil {
 		t.Fatalf("ExecuteRaw: %v", err)
 	}
-	if got := string(mustReadFile(t, stateCapture)); got != oauth {
-		t.Fatalf("Gemini state capture = %q, want OAuth state only", got)
+	projectedSettings := string(mustReadFile(t, settingsCapture))
+	for _, want := range []string{`"selectedAuthType": "oauth-personal"`, `"selectedType": "oauth-personal"`} {
+		if !strings.Contains(projectedSettings, want) {
+			t.Errorf("projected Gemini settings missing %s: %s", want, projectedSettings)
+		}
+	}
+	for _, blocked := range []string{"useExternal", "mcpServers", "discoveryCommand", "must-not-run"} {
+		if strings.Contains(projectedSettings, blocked) {
+			t.Errorf("projected Gemini settings exposed %q: %s", blocked, projectedSettings)
+		}
+	}
+	if got := strings.TrimSpace(string(mustReadFile(t, filepath.Join(stateDir, "oauth_creds.json")))); got != `{"refresh_token":"rotated"}` {
+		t.Fatalf("Gemini OAuth rotation = %q", got)
+	}
+	if got := strings.TrimSpace(string(mustReadFile(t, filepath.Join(stateDir, "google_accounts.json")))); got != `{"accounts":["new-account"]}` {
+		t.Fatalf("Gemini first-run account state = %q", got)
+	}
+	if got := strings.TrimSpace(string(mustReadFile(t, filepath.Join(stateDir, "installation_id")))); got != "new-installation" {
+		t.Fatalf("Gemini installation id rotation = %q", got)
+	}
+	if got := string(mustReadFile(t, filepath.Join(stateDir, "settings.json"))); got != persistentSettings {
+		t.Fatalf("persistent Gemini settings were modified:\n%s", got)
 	}
 	args := strings.Fields(string(mustReadFile(t, argsCapture)))
 	ignoreIndex := indexOf(args, "--ignore-env")
@@ -235,11 +483,50 @@ func TestGeminiStateBridgeExcludesDotEnvButPreservesOAuth(t *testing.T) {
 	}
 }
 
+func TestGeminiReadOnlyOAuthStateKeepsSuccessfulReviewEphemeral(t *testing.T) {
+	sourceHome := t.TempDir()
+	stateDir := filepath.Join(sourceHome, ".gemini")
+	if err := os.Mkdir(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oauthPath := filepath.Join(stateDir, "oauth_creds.json")
+	const original = `{"refresh_token":"read-only"}`
+	if err := os.WriteFile(oauthPath, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(stateDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chmod(stateDir, 0o700) }()
+	t.Setenv("HOME", sourceHome)
+
+	binDir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' '{\"refresh_token\":\"ephemeral-rotation\"}' > \"$HOME/.gemini/oauth_creds.json.tmp\"\n" +
+		"mv \"$HOME/.gemini/oauth_creds.json.tmp\" \"$HOME/.gemini/oauth_creds.json\"\n" +
+		"printf review-ok\n"
+	if err := os.WriteFile(filepath.Join(binDir, "gemini"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	output, err := executor.New().ExecuteRaw("gemini", "prompt", executor.ExecOptions{})
+	if err != nil {
+		t.Fatalf("ExecuteRaw with read-only Gemini state: %v", err)
+	}
+	if got := strings.TrimSpace(string(output)); got != "review-ok" {
+		t.Fatalf("output = %q, want successful review", got)
+	}
+	if got := string(mustReadFile(t, oauthPath)); got != original {
+		t.Fatalf("read-only OAuth source changed to %q", got)
+	}
+}
+
 func TestExecuteRawAdditionalEnvironmentRequiresSafeExplicitOptIn(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CUSTOM_REGION", "eu-test-1")
 	t.Setenv("SSH_AUTH_SOCK", "/tmp/operator-selected-agent.sock")
-	t.Setenv("HEIMDALLM_AI_CODEX_ENV_ALLOWLIST", " CUSTOM_REGION, SSH_AUTH_SOCK ")
+	t.Setenv("HEIMDALLM_AI_CODEX_ENV_ALLOWLIST", " , CUSTOM_REGION,, SSH_AUTH_SOCK, ")
 
 	envCapture := filepath.Join(t.TempDir(), "environment")
 	binDir := installEnvironmentCLI(t, "codex", envCapture, filepath.Join(t.TempDir(), "home"), "")
@@ -254,6 +541,49 @@ func TestExecuteRawAdditionalEnvironmentRequiresSafeExplicitOptIn(t *testing.T) 
 	}
 	if env["SSH_AUTH_SOCK"] != "/tmp/operator-selected-agent.sock" {
 		t.Errorf("SSH_AUTH_SOCK = %q, want explicit socket", env["SSH_AUTH_SOCK"])
+	}
+}
+
+func TestMissingAllowlistedVariableAndStatePathEmitOperatorVisibleDiagnostics(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("HEIMDALLM_AI_CODEX_ENV_ALLOWLIST", "MISSING_SELECTOR")
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(
+		&logs,
+		&slog.HandlerOptions{Level: slog.LevelInfo},
+	)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	binDir := installEnvironmentCLI(
+		t,
+		"codex",
+		filepath.Join(t.TempDir(), "environment"),
+		filepath.Join(t.TempDir(), "home"),
+		"",
+	)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if _, err := executor.New().ExecuteRaw("codex", "prompt", executor.ExecOptions{}); err != nil {
+		t.Fatalf("ExecuteRaw: %v", err)
+	}
+	if _, err := executor.New().ExecuteRaw("codex", "prompt", executor.ExecOptions{}); err != nil {
+		t.Fatalf("second ExecuteRaw: %v", err)
+	}
+
+	got := logs.String()
+	for _, fragment := range []string{
+		"allowlisted environment variable is not set",
+		"name=MISSING_SELECTOR",
+		"provider state path is absent",
+		filepath.Join(home, ".codex"),
+	} {
+		if !strings.Contains(got, fragment) {
+			t.Errorf("operator-visible logs missing %q:\n%s", fragment, got)
+		}
+	}
+	if count := strings.Count(got, "provider state path is absent"); count != 1 {
+		t.Errorf("state-absence diagnostic count = %d, want deduplicated once:\n%s", count, got)
 	}
 }
 
@@ -293,8 +623,27 @@ func TestExecuteRawRejectsDangerousAdditionalEnvironmentBeforeCLI(t *testing.T) 
 		{name: "Claude nested credential scrub", allowlist: "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"},
 		{name: "OpenCode project config policy", allowlist: "OPENCODE_DISABLE_PROJECT_CONFIG"},
 		{name: "OpenCode pure-mode policy", allowlist: "OPENCODE_PURE"},
+		{name: "OpenCode custom config file", allowlist: "OPENCODE_CONFIG"},
+		{name: "OpenCode inline config", allowlist: "OPENCODE_CONFIG_CONTENT"},
+		{name: "OpenCode executable config directory", allowlist: "OPENCODE_CONFIG_DIR"},
+		{name: "Gemini custom system prompt", allowlist: "GEMINI_SYSTEM_MD"},
+		{name: "Gemini system prompt writer", allowlist: "GEMINI_WRITE_SYSTEM_MD"},
+		{name: "Gemini home relocation", allowlist: "GEMINI_CLI_HOME"},
+		{name: "Gemini IDE command", allowlist: "GEMINI_CLI_IDE_SERVER_STDIO_COMMAND"},
+		{name: "Gemini sandbox command", allowlist: "GEMINI_SANDBOX"},
+		{name: "Gemini sandbox proxy command", allowlist: "GEMINI_SANDBOX_PROXY_COMMAND"},
 		{name: "Git config injection", allowlist: "GIT_CONFIG_COUNT"},
 		{name: "loader injection", allowlist: "LD_PRELOAD"},
+		{name: "JVM agent injection", allowlist: "JAVA_TOOL_OPTIONS"},
+		{name: "legacy JVM option injection", allowlist: "_JAVA_OPTIONS"},
+		{name: "JDK option injection", allowlist: "JDK_JAVA_OPTIONS"},
+		{name: ".NET startup hook", allowlist: "DOTNET_STARTUP_HOOKS"},
+		{name: "GTK module injection", allowlist: "GTK_MODULES"},
+		{name: "GTK 3 module injection", allowlist: "GTK3_MODULES"},
+		{name: "GTK path injection", allowlist: "GTK_PATH"},
+		{name: "GIO module directory", allowlist: "GIO_MODULE_DIR"},
+		{name: "GIO extra modules", allowlist: "GIO_EXTRA_MODULES"},
+		{name: "Python warning import", allowlist: "PYTHONWARNINGS"},
 		{name: "managed home", allowlist: "HOME"},
 		{name: "invalid name", allowlist: "VALID,NOT-VALID"},
 	}
@@ -454,17 +803,35 @@ func TestExecuteRawRedactsCredentialFromCLIError(t *testing.T) {
 	secret := "openai-error-secret-123"
 	proxySecret := "proxy-error-secret-456"
 	optInSecret := "database-error-secret-789"
+	serviceSecret := "service-error-secret-321"
+	const sentryDSN = "https://sentry-public-key@sentry.invalid/42"
+	const publicEndpoint = "https://true@example.invalid"
+	const nonSecret = "eu-error-visible"
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("OPENAI_API_KEY", secret)
 	t.Setenv("HTTPS_PROXY", "https://proxy-user:"+proxySecret+"@example.invalid")
 	t.Setenv("DATABASE_URL", optInSecret)
-	t.Setenv("HEIMDALLM_AI_CODEX_ENV_ALLOWLIST", "DATABASE_URL")
+	t.Setenv("SERVICE_TOKEN", serviceSecret)
+	t.Setenv("SENTRY_DSN", sentryDSN)
+	t.Setenv("PUBLIC_ENDPOINT", publicEndpoint)
+	t.Setenv("TOKENIZER_MODE", "true")
+	t.Setenv("CUSTOM_REGION", nonSecret)
+	t.Setenv(
+		"HEIMDALLM_AI_CODEX_ENV_ALLOWLIST",
+		"DATABASE_URL,SERVICE_TOKEN,SENTRY_DSN,PUBLIC_ENDPOINT,TOKENIZER_MODE,CUSTOM_REGION",
+	)
 	binDir := t.TempDir()
 	script := "#!/bin/sh\n" +
 		"printf '%s\\n' \"$OPENAI_API_KEY\" >&2\n" +
 		"printf '%s\\n' \"$HTTPS_PROXY\" >&2\n" +
 		"printf '%s\\n' '" + proxySecret + "' >&2\n" +
 		"printf '%s\\n' \"$DATABASE_URL\" >&2\n" +
+		"printf '%s\\n' \"$SERVICE_TOKEN\" >&2\n" +
+		"printf '%s\\n' \"$SENTRY_DSN\" >&2\n" +
+		"printf '%s\\n' \"$PUBLIC_ENDPOINT\" >&2\n" +
+		"printf '%s\\n' 'endpoint-user=true' >&2\n" +
+		"printf 'tokenizer=%s\\n' \"$TOKENIZER_MODE\" >&2\n" +
+		"printf 'region=%s\\n' \"$CUSTOM_REGION\" >&2\n" +
 		"exit 7\n"
 	if err := os.WriteFile(filepath.Join(binDir, "codex"), []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake CLI: %v", err)
@@ -475,13 +842,65 @@ func TestExecuteRawRedactsCredentialFromCLIError(t *testing.T) {
 	if err == nil {
 		t.Fatal("ExecuteRaw unexpectedly succeeded")
 	}
-	for _, value := range []string{secret, proxySecret, optInSecret} {
+	for _, value := range []string{
+		secret,
+		proxySecret,
+		optInSecret,
+		serviceSecret,
+		sentryDSN,
+		publicEndpoint,
+	} {
 		if strings.Contains(err.Error(), value) {
 			t.Fatalf("error exposed %q: %v", value, err)
 		}
 	}
 	if !strings.Contains(err.Error(), "[REDACTED]") {
 		t.Fatalf("error did not redact credential: %v", err)
+	}
+	for _, visible := range []string{"endpoint-user=true", "tokenizer=true", "region=" + nonSecret} {
+		if !strings.Contains(err.Error(), visible) {
+			t.Fatalf("error redacted non-secret allowlisted selector %q: %v", visible, err)
+		}
+	}
+}
+
+func TestGeminiErrorRedactsSecretsWithoutCorruptingRuntimeSelectors(t *testing.T) {
+	const secret = "gemini-error-secret-123"
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GEMINI_API_KEY", secret)
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", "/private/google/credentials.json")
+	t.Setenv("GOOGLE_CLOUD_PROJECT", "operator-project")
+	t.Setenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+	t.Setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
+	// Repeating a built-in non-secret selector in the explicit allowlist must
+	// not reclassify it as a secret merely because its name says credentials.
+	t.Setenv("HEIMDALLM_AI_GEMINI_ENV_ALLOWLIST", "GOOGLE_APPLICATION_CREDENTIALS")
+
+	binDir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"printf '%s|%s|%s|%s|%s\\n' \"$GEMINI_API_KEY\" \"$GOOGLE_APPLICATION_CREDENTIALS\" \"$GOOGLE_CLOUD_PROJECT\" \"$GOOGLE_CLOUD_LOCATION\" \"$GOOGLE_GENAI_USE_VERTEXAI\" >&2\n" +
+		"exit 7\n"
+	if err := os.WriteFile(filepath.Join(binDir, "gemini"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := executor.New().ExecuteRaw("gemini", "prompt", executor.ExecOptions{})
+	if err == nil {
+		t.Fatal("ExecuteRaw unexpectedly succeeded")
+	}
+	if strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "[REDACTED]") {
+		t.Fatalf("Gemini API key was not redacted: %v", err)
+	}
+	for _, selector := range []string{
+		"/private/google/credentials.json",
+		"operator-project",
+		"us-central1",
+		"true",
+	} {
+		if !strings.Contains(err.Error(), selector) {
+			t.Errorf("Gemini error lost non-secret selector %q: %v", selector, err)
+		}
 	}
 }
 
@@ -526,12 +945,16 @@ func TestExecutorEnvironmentSnapshotDoesNotCrossContaminateConcurrentRuns(t *tes
 func installEnvironmentCLI(t *testing.T, cli, envCapture, homeCapture, body string) string {
 	t.Helper()
 	binDir := t.TempDir()
-	script := "#!/bin/sh\n" +
+	script := "#!/bin/sh\n"
+	if cli == "claude" {
+		script += "if [ \"$1\" = \"--help\" ]; then printf '%s\\n' 'Usage: claude' '  --safe-mode'; exit 0; fi\n"
+	}
+	script +=
 		body +
-		"env > " + shellQuote(envCapture) + "\n" +
-		"printf '%s\\n' \"$HOME\" > " + shellQuote(homeCapture) + "\n" +
-		"touch \"$HOME/execution-was-here\"\n" +
-		"printf '{\"ok\":true}\\n'\n"
+			"env > " + shellQuote(envCapture) + "\n" +
+			"printf '%s\\n' \"$HOME\" > " + shellQuote(homeCapture) + "\n" +
+			"touch \"$HOME/execution-was-here\"\n" +
+			"printf '{\"ok\":true}\\n'\n"
 	if err := os.WriteFile(filepath.Join(binDir, cli), []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake %s CLI: %v", cli, err)
 	}

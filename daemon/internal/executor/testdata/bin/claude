@@ -1,5 +1,9 @@
 #!/bin/sh
 # Fake claude CLI — reads stdin, prints review JSON
+if [ "$1" = "--help" ]; then
+  printf '%s\n' 'Usage: claude' '  --safe-mode'
+  exit 0
+fi
 cat <<'EOF'
 {"summary":"Looks good overall","issues":[{"file":"main.go","line":10,"description":"possible nil dereference","severity":"medium"}],"suggestions":["add nil check before use"],"severity":"medium"}
 EOF

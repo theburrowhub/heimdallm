@@ -31,6 +31,16 @@ automatically.
 
 Detection and `--help` probes do not receive provider credentials.
 
+For full-repository Claude analysis, the process also stays in the isolated
+temporary directory and receives the validated repository only through
+`--add-dir` (or the compatible `--directory` form). Heimdallm always forces
+Claude's upstream `--safe-mode`, which disables CLAUDE.md instructions, hooks,
+plugins, skills, commands, agents, workflows, output styles, and MCP servers
+while preserving authentication and managed policy. Support for that flag is
+verified with the credential-free help probe; Claude Code older than 2.1.169
+fails closed. A Claude CLI without a supported additional-directory option
+also fails closed instead of running inside the repository.
+
 For full-repository Gemini analysis, the process CWD remains inside the
 temporary home and the validated repository is passed through Gemini's
 include-directory option. Heimdallm also supplies a mode-`0600` system
@@ -60,16 +70,39 @@ through the isolated global state bridge.
 Each execution gets a new mode-`0700` temporary `HOME`. Heimdallm projects only
 the selected provider's state/authentication paths into that home:
 
-- Claude: `.claude` and `.claude.json`
+- Claude: `.claude/.credentials.json` and `.claude.json`
 - Codex: `.codex`
-- Gemini: `.gemini`, except `.gemini/.env`
+- Gemini: `oauth_creds.json`, `google_accounts.json`, `installation_id`, and
+  legacy `user_id`, plus an input-only auth selector from `settings.json`
 - OpenCode: `.config/opencode` and `.local/share/opencode`
+
+Claude's two JSON files use mode-`0600` copy-in/copy-out instead of symlinks.
+Changed state is validated, normally synchronized with an atomic replace before
+the temporary home is removed, and rejected on concurrent modification or
+symlink/device replacement. This preserves OAuth rotation, including when the
+CLI exits with an error, without exposing persistent `.claude/settings.json`,
+hooks, plugins, skills, or commands. Empty first-run `.claude.json` files are
+accepted. Linux file bind mounts, which reject replacement with `EBUSY`, use a
+narrowly scoped in-place fallback with mode `0600` and `fsync`. The
+`.claude.json` file remains trusted
+provider-owned state and can be updated by Claude itself; safe mode prevents
+entries stored there from starting MCP processes in a Heimdallm run.
+
+Gemini likewise uses copy-in/copy-out for only the four mutable token or
+identifier files, preserving first-run creation and atomic rotations. Its user
+`settings.json` is reduced to `selectedAuthType` and
+`security.auth.selectedType` for headless login; it is input-only and never
+copied back. `.env`, `GEMINI.md`, MCP tokens, settings, extensions, commands,
+skills, agents, and policies are not projected. A read-only Docker OAuth mount
+remains read-only: a refresh is usable for that execution but cannot be
+persisted, and Heimdallm emits a warning instead of discarding a successful
+review. Native and `make run-linux` read-write state persists rotations.
 
 This preserves file-based login and session refresh without exposing unrelated
 home-directory state such as `.ssh`, `.aws`, `.gitconfig`, or another CLI's
 credentials. In Docker, an explicitly mounted read-only provider directory
-(for example the documented Gemini OAuth mount) remains read-only through the
-bridge. Values stored only in `.gemini/.env` are intentionally not imported;
+(for example the documented Gemini OAuth mount) remains read-only. Values
+stored only in `.gemini/.env` are intentionally not imported;
 configure built-in Gemini variables in the daemon environment, or use an
 explicit Gemini allowlist plus a private Compose overlay.
 
@@ -96,20 +129,34 @@ services:
       CORPORATE_TENANT_ID: ${CORPORATE_TENANT_ID}
 ```
 
+An allowlisted name that is absent emits an operator-visible warning without
+logging a value. Missing optional provider-state paths emit an info breadcrumb
+once per path, so first-run behavior is diagnosable without flooding logs.
+
 The following classes are denied even when named in an allowlist:
 
 - `GITHUB_TOKEN` and `GH_TOKEN`
 - every `HEIMDALLM_*` variable
 - every `GIT_*` variable
 - managed home, state, and policy controls such as `HOME`, `PATH`,
-  `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`, `GEMINI_CLI_SYSTEM_SETTINGS_PATH`,
+  `CLAUDE_CODE_SAFE_MODE`, `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`,
+  `GEMINI_CLI_HOME`, Gemini settings/system-prompt/sandbox command overrides,
+  OpenCode config path/content/directory overrides,
   `OPENCODE_DISABLE_PROJECT_CONFIG`, and `OPENCODE_PURE`
 - dynamic-loader and shell-startup injection variables, including
   `LD_PRELOAD`, `DYLD_*`, `BASH_ENV`, `ENV`, `PROMPT_COMMAND`, `NODE_OPTIONS`,
-  and `NODE_PATH`
+  `NODE_PATH`, JVM agent options, `.NET` startup hooks, GTK/GIO module paths,
+  and Python warning-import controls
 
-Empty names, invalid names, and wildcard patterns are rejected. Do not treat an
-allowlist as a convenient way to copy the daemon's environment wholesale.
+Empty CSV elements are ignored, so a trailing or doubled comma does not disable
+valid entries. Invalid names and wildcard patterns are rejected. Matching is
+case-insensitive for the common runtime baseline while preserving the parent's
+original spelling. Do not treat an allowlist as a convenient way to copy the
+daemon's environment wholesale.
+The permanent denylist is defense in depth, not an exhaustive catalogue of
+every runtime's future injection variables. A name not present in the denylist
+is not automatically safe: each explicit opt-in remains an operator trust
+decision.
 Provider credential boundaries are permanent for Claude, Codex, and Gemini.
 OpenCode is the deliberate exception because it is a multi-provider client:
 `OPENROUTER_API_KEY` is available by default, while an Anthropic, OpenAI, or
@@ -185,6 +232,16 @@ and all commits and pushes explicitly disable hooks.
 Corporate proxy and CA variables are the only host network settings forwarded
 to Git. Error output is bounded and redacts the GitHub token, its encoded
 representations, and proxy credentials.
+
+AI CLI errors redact selected provider secrets, proxy credentials, and
+explicitly opted-in values whose names have an exact secret suffix (`_TOKEN`,
+`_SECRET`, `_PASSWORD`, `_API_KEY`, `_DATABASE_URL`, `_DSN`, and related
+forms). Allowlisted URL values with user information are also redacted even
+when their names are neutral. This avoids false positives such as
+`TOKENIZER_MODE` or `COOKIE_POLICY`. Non-secret runtime selectors such as
+Vertex project, location, mode, credential-file path, or a custom region remain
+intact so diagnostics are not corrupted. Codex tool subprocesses do not receive
+credential-bearing proxy URLs but retain `NO_PROXY`.
 
 ## Threat model and residual risk
 
