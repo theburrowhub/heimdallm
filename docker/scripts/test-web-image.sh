@@ -37,6 +37,8 @@ docker image inspect "$image" >/dev/null 2>&1 \
 
 flutter_resources="$(
   sh "$script_dir/list-flutter-assets.sh" \
+    --dockerignore-file \
+    "$repo_root/flutter_app/Dockerfile.web.dockerignore" \
     "$repo_root/flutter_app/pubspec.yaml"
 )"
 

@@ -42,3 +42,11 @@ flutter_app/**
 **/*.crt
 **/*.p12
 **/*.pfx
+
+# Public resources whose exact names intentionally match the secret-like deny
+# rules above must be declared here as literal negation rules. The shared
+# parser rejects globs, directories, non-secret-like paths, duplicates and
+# entries not declared in pubspec.yaml.
+# BEGIN flutter-public-secret-like-resource-allowlist
+# No public secret-like resources are declared.
+# END flutter-public-secret-like-resource-allowlist

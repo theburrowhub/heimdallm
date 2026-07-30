@@ -2,36 +2,135 @@
 # Print file resources declared by flutter.assets, flutter.fonts and
 # flutter.shaders in pubspec.yaml.
 #
-# Default output uses Flutter-relative paths, one per line. With
-# --dockerignore, output the exact negation rules required by the repository-
-# root Docker context. The context check and image smoke both consume this
-# parser so pubspec.yaml remains the single source of truth.
+# Default output uses Flutter-relative paths, one per line. --context-paths
+# maps those resources to repository-root Docker context paths, while
+# --dockerignore emits the exact resource rules for that context.
 #
 # Directory entries and complex YAML values are rejected deliberately. Resource
 # paths must be simple, safe relative file names so they cannot turn a literal
-# Docker ignore allowlist into a glob.
+# Docker ignore allowlist into a glob. Secret-like names remain denied unless
+# their exact public context path is audited in Dockerfile.web.dockerignore.
 set -eu
 
 script_dir="$(CDPATH= cd "$(dirname "$0")" && pwd)"
 output_mode=paths
+output_mode_set=0
+pubspec="$script_dir/../../flutter_app/pubspec.yaml"
+pubspec_set=0
+dockerignore_file="$script_dir/../../flutter_app/Dockerfile.web.dockerignore"
+public_allowlist_begin="# BEGIN flutter-public-secret-like-resource-allowlist"
+public_allowlist_end="# END flutter-public-secret-like-resource-allowlist"
 
-if [ "${1:-}" = "--dockerignore" ]; then
-  output_mode=dockerignore
-  shift
-fi
-if [ "$#" -gt 1 ]; then
-  printf 'Usage: %s [--dockerignore] [pubspec.yaml]\n' "$0" >&2
+usage() {
+  printf '%s\n' \
+    "Usage: $0 [--dockerignore|--context-paths]" \
+    "       [--dockerignore-file Dockerfile.web.dockerignore] [pubspec.yaml]" >&2
   exit 1
-fi
+}
 
-pubspec="${1:-$script_dir/../../flutter_app/pubspec.yaml}"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --dockerignore)
+      [ "$output_mode_set" -eq 0 ] || usage
+      output_mode=dockerignore
+      output_mode_set=1
+      shift
+      ;;
+    --context-paths)
+      [ "$output_mode_set" -eq 0 ] || usage
+      output_mode=context-paths
+      output_mode_set=1
+      shift
+      ;;
+    --dockerignore-file)
+      [ "$#" -ge 2 ] || usage
+      dockerignore_file="$2"
+      shift 2
+      ;;
+    -*)
+      usage
+      ;;
+    *)
+      [ "$pubspec_set" -eq 0 ] || usage
+      pubspec="$1"
+      pubspec_set=1
+      shift
+      ;;
+  esac
+done
 
 if [ ! -f "$pubspec" ]; then
   printf 'Flutter pubspec not found: %s\n' "$pubspec" >&2
   exit 1
 fi
+if [ ! -f "$dockerignore_file" ]; then
+  printf 'Flutter Web Docker ignore policy not found: %s\n' \
+    "$dockerignore_file" >&2
+  exit 1
+fi
 
-awk -v output_mode="$output_mode" '
+if ! public_secret_like_context_paths="$(
+  awk \
+    -v begin_marker="$public_allowlist_begin" \
+    -v end_marker="$public_allowlist_end" '
+function invalid(message) {
+  print "invalid Flutter public-resource exception block: " message \
+    > "/dev/stderr"
+  failed = 1
+  exit 1
+}
+
+$0 == begin_marker {
+  if (inside || ++begin_count != 1) {
+    invalid("duplicate or nested begin marker")
+  }
+  inside = 1
+  next
+}
+
+$0 == end_marker {
+  if (!inside || ++end_count != 1) {
+    invalid("end marker has no matching begin marker")
+  }
+  inside = 0
+  next
+}
+
+inside {
+  value = $0
+  sub(/^[ \t]+/, "", value)
+  sub(/[ \t]+$/, "", value)
+  if (value == "" || value ~ /^#/) {
+    next
+  }
+  if (value !~ /^!/) {
+    invalid("entries must be exact Docker negation rules beginning with !")
+  }
+  sub(/^!/, "", value)
+  print value
+}
+
+END {
+  if (failed) {
+    exit 1
+  }
+  if (begin_count != 1 || end_count != 1 || inside) {
+    print "invalid Flutter public-resource exception block: expected exactly " \
+      "one matched marker pair" > "/dev/stderr"
+    exit 1
+  }
+}
+' "$dockerignore_file"
+)"; then
+  exit 1
+fi
+
+awk \
+  -v output_mode="$output_mode" \
+  -v public_exception_paths="$public_secret_like_context_paths" \
+  -v exception_source="$dockerignore_file" \
+  -v public_begin="$public_allowlist_begin" \
+  -v public_end="$public_allowlist_end" '
 function indentation(line, stripped) {
   stripped = line
   sub(/^[ \t]*/, "", stripped)
@@ -68,7 +167,7 @@ function scalar_value(raw, location, value, quote) {
   return value
 }
 
-function validate_path(value, kind, location) {
+function validate_literal_path(value, kind, location) {
   if (value == "") {
     invalid(kind " path is empty at " location)
   }
@@ -84,9 +183,44 @@ function validate_path(value, kind, location) {
   if (value ~ /[^A-Za-z0-9_@.+\/-]/) {
     invalid("\047" value "\047 contains characters unsafe for a literal Docker allowlist")
   }
-  if (value ~ /(^|\/)\.env([.]|$)/ ||
-      value ~ /[.](pem|key|crt|p12|pfx)$/) {
-    invalid("\047" value "\047 matches a protected secret-file pattern")
+}
+
+function is_secret_like(value) {
+  return value ~ /(^|\/)\.env([.]|$)/ ||
+    value ~ /[.](pem|key|crt|p12|pfx)$/
+}
+
+function to_context_path(path) {
+  if (path ~ /^assets\//) {
+    return path
+  }
+  return "flutter_app/" path
+}
+
+function validate_public_exception(value) {
+  validate_literal_path(value, "public exception", exception_source)
+  if (value !~ /^(assets|flutter_app)\//) {
+    invalid("\047" value "\047 must be under assets/ or flutter_app/ in " exception_source)
+  }
+  if (!is_secret_like(value)) {
+    invalid("\047" value "\047 is not secret-like and must not be in the public exception block")
+  }
+  if (public_exception[value]++) {
+    invalid("\047" value "\047 is duplicated in the public exception block")
+  }
+}
+
+function validate_path(value, kind, location, mapped) {
+  validate_literal_path(value, kind, location)
+  if (is_secret_like(value)) {
+    mapped = to_context_path(value)
+    if (!(mapped in public_exception)) {
+      invalid("\047" value "\047 matches a protected secret-file pattern. " \
+        "If it is intentionally public, add the exact rule \047!" mapped \
+        "\047 between \047" public_begin "\047 and \047" public_end \
+        "\047 in " exception_source)
+    }
+    used_public_exception[mapped] = 1
   }
 }
 
@@ -116,13 +250,9 @@ function finish_font_family(location) {
   font_family_location = ""
 }
 
-function emit_dockerignore(path, context_path, count, pieces, parent, i, rule) {
-  context_path = path
-  if (path !~ /^assets\//) {
-    context_path = "flutter_app/" path
-  }
-
-  count = split(context_path, pieces, "/")
+function emit_dockerignore(path, mapped_path, count, pieces, parent, i, rule) {
+  mapped_path = to_context_path(path)
+  count = split(mapped_path, pieces, "/")
   parent = pieces[1]
   for (i = 2; i < count; i++) {
     parent = parent "/" pieces[i]
@@ -133,7 +263,7 @@ function emit_dockerignore(path, context_path, count, pieces, parent, i, rule) {
     }
   }
 
-  rule = "!" context_path
+  rule = "!" mapped_path
   if (!emitted_rule[rule]++) {
     print rule
   }
@@ -154,6 +284,15 @@ BEGIN {
   font_family_seen = 0
   current_family_asset_count = 0
   failed = 0
+
+  if (public_exception_paths != "") {
+    public_exception_count = split(public_exception_paths, public_exception_entries, "\n")
+    for (public_exception_index = 1;
+         public_exception_index <= public_exception_count;
+         public_exception_index++) {
+      validate_public_exception(public_exception_entries[public_exception_index])
+    }
+  }
 }
 
 /^[ \t]*(#|$)/ {
@@ -295,10 +434,18 @@ END {
     print "pubspec has no supported Flutter file resources: " FILENAME > "/dev/stderr"
     exit 1
   }
+  for (public_exception_path in public_exception) {
+    if (!(public_exception_path in used_public_exception)) {
+      invalid("\047" public_exception_path "\047 in " exception_source \
+        " does not match a declared protected Flutter resource")
+    }
+  }
 
   for (i = 1; i <= resource_count; i++) {
     if (output_mode == "dockerignore") {
       emit_dockerignore(resources[i])
+    } else if (output_mode == "context-paths") {
+      print to_context_path(resources[i])
     } else {
       print resources[i]
     }

@@ -6,6 +6,8 @@ script_dir="$(CDPATH= cd "$(dirname "$0")" && pwd)"
 repo_root="$(CDPATH= cd "$script_dir/../../.." && pwd)"
 fixture_dir="$script_dir/fixtures/web-tooling"
 parser="$repo_root/docker/scripts/list-flutter-assets.sh"
+empty_public_policy="$fixture_dir/empty-public-exceptions.dockerignore"
+allowed_public_policy="$fixture_dir/allow-public-secret.dockerignore"
 temp_root="$(mktemp -d)"
 fake_log="$temp_root/fake-docker.log"
 
@@ -34,8 +36,13 @@ assert_contains() {
 assert_parser_fails() {
   fixture="$1"
   expected_error="$2"
+  public_policy="${3:-$empty_public_policy}"
 
-  if parser_error="$(sh "$parser" "$fixture" 2>&1)"; then
+  if parser_error="$(
+    sh "$parser" \
+      --dockerignore-file "$public_policy" \
+      "$fixture" 2>&1
+  )"; then
     fail "parser accepted unsupported fixture: $(basename "$fixture")"
   fi
   assert_contains \
@@ -49,10 +56,25 @@ fonts/Fixture-Regular.ttf
 fonts/Fixture-Bold.ttf
 shaders/fixture.frag'
 actual_resources="$(
-  sh "$parser" "$fixture_dir/resources.yaml"
+  sh "$parser" \
+    --dockerignore-file "$empty_public_policy" \
+    "$fixture_dir/resources.yaml"
 )"
 [ "$actual_resources" = "$expected_resources" ] \
   || fail "assets, font assets and shaders were not parsed in declaration order"
+
+expected_context_paths='assets/icon.png
+flutter_app/fonts/Fixture-Regular.ttf
+flutter_app/fonts/Fixture-Bold.ttf
+flutter_app/shaders/fixture.frag'
+actual_context_paths="$(
+  sh "$parser" \
+    --context-paths \
+    --dockerignore-file "$empty_public_policy" \
+    "$fixture_dir/resources.yaml"
+)"
+[ "$actual_context_paths" = "$expected_context_paths" ] \
+  || fail "--context-paths did not apply the parser's repository-root mapping"
 
 expected_allowlist='!assets/icon.png
 !flutter_app/fonts/
@@ -63,10 +85,36 @@ flutter_app/fonts/**
 flutter_app/shaders/**
 !flutter_app/shaders/fixture.frag'
 actual_allowlist="$(
-  sh "$parser" --dockerignore "$fixture_dir/resources.yaml"
+  sh "$parser" \
+    --dockerignore \
+    --dockerignore-file "$empty_public_policy" \
+    "$fixture_dir/resources.yaml"
 )"
 [ "$actual_allowlist" = "$expected_allowlist" ] \
   || fail "repository-root Docker paths were not generated literally"
+
+expected_public_resources='assets/certs/public-ca.crt
+assets/icon.png'
+actual_public_resources="$(
+  sh "$parser" \
+    --dockerignore-file "$allowed_public_policy" \
+    "$fixture_dir/public-secret-resource.yaml"
+)"
+[ "$actual_public_resources" = "$expected_public_resources" ] \
+  || fail "an exact audited public secret-like resource was not accepted"
+
+expected_public_allowlist='!assets/certs/
+assets/certs/**
+!assets/certs/public-ca.crt
+!assets/icon.png'
+actual_public_allowlist="$(
+  sh "$parser" \
+    --dockerignore \
+    --dockerignore-file "$allowed_public_policy" \
+    "$fixture_dir/public-secret-resource.yaml"
+)"
+[ "$actual_public_allowlist" = "$expected_public_allowlist" ] \
+  || fail "audited public resource did not produce literal Docker rules"
 
 assert_parser_fails \
   "$fixture_dir/inline-fonts.yaml" \
@@ -85,7 +133,15 @@ assert_parser_fails \
   "is declared more than once"
 assert_parser_fails \
   "$fixture_dir/secret-resource.yaml" \
-  "matches a protected secret-file pattern"
+  "add the exact rule '!assets/private-signing.key'"
+assert_parser_fails \
+  "$fixture_dir/public-secret-resource.yaml" \
+  "unsafe for a literal Docker allowlist" \
+  "$fixture_dir/broad-public-secret-exception.dockerignore"
+assert_parser_fails \
+  "$fixture_dir/resources.yaml" \
+  "does not match a declared protected Flutter resource" \
+  "$allowed_public_policy"
 assert_parser_fails \
   "$fixture_dir/partial-fonts.yaml" \
   "unsupported flutter.fonts entry"

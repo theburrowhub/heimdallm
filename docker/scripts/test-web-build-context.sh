@@ -8,11 +8,17 @@ repo_root="$(CDPATH= cd "$script_dir/../.." && pwd)"
 temp_root="$(mktemp -d)"
 context_dir="$temp_root/context"
 output_dir="$temp_root/output"
-declared_resources="$temp_root/declared-resources"
+public_context_dir="$temp_root/public-context"
+public_output_dir="$temp_root/public-output"
+declared_context_resources="$temp_root/declared-context-resources"
 generated_allowlist="$temp_root/generated-resource-allowlist"
 checked_in_allowlist="$temp_root/checked-in-resource-allowlist"
+pubspec="$repo_root/flutter_app/pubspec.yaml"
+resource_policy="$repo_root/flutter_app/Dockerfile.web.dockerignore"
 undeclared_asset="assets/heimdallm-undeclared-context-canary-$$.txt"
 undeclared_flutter_resource="flutter_app/fonts/heimdallm-undeclared-context-canary-$$.ttf"
+public_certificate="assets/certs/heimdallm-public-ca.crt"
+blocked_certificate="assets/certs/heimdallm-unlisted-ca.crt"
 
 fail() {
   printf 'Flutter Web build-context check failed: %s\n' "$1" >&2
@@ -32,13 +38,6 @@ write_fixture() {
   printf '%s\n' 'dummy build-context fixture' >"$context_dir/$fixture"
 }
 
-resource_context_path() {
-  case "$1" in
-    assets/*) printf '%s\n' "$1" ;;
-    *) printf 'flutter_app/%s\n' "$1" ;;
-  esac
-}
-
 command -v docker >/dev/null 2>&1 || fail "Docker is required"
 docker buildx version >/dev/null 2>&1 \
   || fail "Docker Buildx/BuildKit is required for Dockerfile-specific ignore rules"
@@ -46,10 +45,13 @@ docker buildx version >/dev/null 2>&1 \
 # pubspec.yaml is the source of truth. Require the checked-in allowlist to be
 # an exact mirror so additions and removals both fail CI until synchronized.
 sh "$script_dir/list-flutter-assets.sh" \
-  "$repo_root/flutter_app/pubspec.yaml" >"$declared_resources"
+  --context-paths \
+  --dockerignore-file "$resource_policy" \
+  "$pubspec" >"$declared_context_resources"
 sh "$script_dir/list-flutter-assets.sh" \
   --dockerignore \
-  "$repo_root/flutter_app/pubspec.yaml" >"$generated_allowlist"
+  --dockerignore-file "$resource_policy" \
+  "$pubspec" >"$generated_allowlist"
 
 if ! awk '
   $0 == "# BEGIN flutter-resource-allowlist" {
@@ -70,7 +72,7 @@ if ! awk '
       exit 2
     }
   }
-' "$repo_root/flutter_app/Dockerfile.web.dockerignore" \
+' "$resource_policy" \
   >"$checked_in_allowlist"; then
   fail "Dockerfile.web.dockerignore has an invalid resource allowlist block"
 fi
@@ -84,7 +86,7 @@ fi
 
 mkdir -p "$context_dir/flutter_app" "$output_dir"
 cp "$repo_root/.dockerignore" "$context_dir/.dockerignore"
-cp "$repo_root/flutter_app/Dockerfile.web.dockerignore" \
+cp "$resource_policy" \
   "$context_dir/flutter_app/Dockerfile.web.dockerignore"
 cp "$repo_root/flutter_app/pubspec.yaml" \
   "$context_dir/flutter_app/pubspec.yaml"
@@ -101,8 +103,8 @@ printf '%s\n' 'FROM scratch' 'COPY . /context' \
 # prove this is exact inclusion rather than a broad assets/** or fonts/**
 # exception.
 while IFS= read -r resource; do
-  write_fixture "$(resource_context_path "$resource")"
-done <"$declared_resources"
+  write_fixture "$resource"
+done <"$declared_context_resources"
 
 for allowed in \
   flutter_app/.metadata \
@@ -141,11 +143,10 @@ docker buildx build \
   "$context_dir" >/dev/null
 
 while IFS= read -r resource; do
-  context_resource="$(resource_context_path "$resource")"
-  if [ ! -f "$output_dir/context/$context_resource" ]; then
-    fail "declared resource missing from context: $context_resource"
+  if [ ! -f "$output_dir/context/$resource" ]; then
+    fail "declared resource missing from context: $resource"
   fi
-done <"$declared_resources"
+done <"$declared_context_resources"
 
 for allowed in \
   flutter_app/.metadata \
@@ -182,4 +183,86 @@ do
   fi
 done
 
-printf 'Flutter Web BuildKit context and resource allowlist verified\n'
+# Exercise the public secret-like exception end to end. This second context
+# deliberately places an exact public .crt exception after the broad .crt deny;
+# a neighbouring certificate without an exception must remain excluded.
+mkdir -p \
+  "$public_context_dir/flutter_app" \
+  "$public_context_dir/assets/certs" \
+  "$public_output_dir"
+cp "$repo_root/.dockerignore" "$public_context_dir/.dockerignore"
+
+public_pubspec="$public_context_dir/flutter_app/pubspec.yaml"
+public_policy="$public_context_dir/flutter_app/Dockerfile.web.dockerignore"
+printf '%s\n' \
+  'name: public_secret_like_context_fixture' \
+  '' \
+  'flutter:' \
+  '  assets:' \
+  "    - $public_certificate" >"$public_pubspec"
+
+# Seed the exception policy so the parser can validate and generate the normal
+# resource rules from the synthetic pubspec. The final policy below keeps that
+# exact exception after the broad deny, matching the production contract.
+printf '%s\n' \
+  '**' \
+  '!assets/' \
+  'assets/**' \
+  '!flutter_app/' \
+  'flutter_app/**' \
+  '# BEGIN flutter-resource-allowlist' \
+  '# END flutter-resource-allowlist' \
+  '**/*.crt' \
+  '# BEGIN flutter-public-secret-like-resource-allowlist' \
+  "!$public_certificate" \
+  '# END flutter-public-secret-like-resource-allowlist' >"$public_policy"
+
+public_resource_rules="$(
+  sh "$script_dir/list-flutter-assets.sh" \
+    --dockerignore \
+    --dockerignore-file "$public_policy" \
+    "$public_pubspec"
+)"
+public_context_paths="$(
+  sh "$script_dir/list-flutter-assets.sh" \
+    --context-paths \
+    --dockerignore-file "$public_policy" \
+    "$public_pubspec"
+)"
+[ "$public_context_paths" = "$public_certificate" ] \
+  || fail "public certificate mapped to an unexpected context path"
+
+printf '%s\n' \
+  '**' \
+  '!assets/' \
+  'assets/**' \
+  '!flutter_app/' \
+  'flutter_app/**' \
+  '# BEGIN flutter-resource-allowlist' \
+  "$public_resource_rules" \
+  '# END flutter-resource-allowlist' \
+  '**/*.crt' \
+  '# BEGIN flutter-public-secret-like-resource-allowlist' \
+  "!$public_certificate" \
+  '# END flutter-public-secret-like-resource-allowlist' >"$public_policy"
+
+printf '%s\n' 'FROM scratch' 'COPY . /context' \
+  >"$public_context_dir/flutter_app/Dockerfile.web"
+printf '%s\n' 'public certificate fixture' \
+  >"$public_context_dir/$public_certificate"
+printf '%s\n' 'blocked certificate fixture' \
+  >"$public_context_dir/$blocked_certificate"
+
+docker buildx build \
+  --quiet \
+  --output "type=local,dest=$public_output_dir" \
+  --file "$public_context_dir/flutter_app/Dockerfile.web" \
+  "$public_context_dir" >/dev/null
+
+[ -f "$public_output_dir/context/$public_certificate" ] \
+  || fail "exact public secret-like exception did not survive the broad deny"
+[ ! -e "$public_output_dir/context/$blocked_certificate" ] \
+  || fail "unlisted secret-like certificate was included in the context"
+
+printf '%s\n' \
+  'Flutter Web BuildKit context, resource allowlist and public exceptions verified'
