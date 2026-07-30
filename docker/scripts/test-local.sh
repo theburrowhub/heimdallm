@@ -18,7 +18,27 @@ cd "$REPO_ROOT"
 
 # shellcheck source=lib/compose-test.sh
 source "$SCRIPT_DIR/lib/compose-test.sh"
+
+cleanup_initialization() {
+    local exit_code=$?
+    trap - EXIT
+    trap '' HUP INT TERM
+    if ! compose_test_release; then
+        if [ "$exit_code" -eq 0 ]; then
+            exit_code=1
+        fi
+    fi
+    exit "$exit_code"
+}
+
 compose_test_init local "$REPO_ROOT"
+# Cover the initialization window before the full Docker-aware cleanup handler
+# is defined. No Compose command can have run yet, so only the private marker
+# and state directory need releasing here.
+trap cleanup_initialization EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 SERVICE="heimdallm"
 BASE_URL=""
@@ -66,6 +86,8 @@ cleanup() {
     fi
     exit "$exit_code"
 }
+# Replace the initialization-only handler once all runtime state and helpers
+# required by the full cleanup path exist.
 trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT

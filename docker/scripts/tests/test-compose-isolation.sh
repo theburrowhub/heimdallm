@@ -54,6 +54,19 @@ assert_log_has_safe_down() {
 PATH="$FAKE_BIN:$ORIGINAL_PATH"
 export PATH
 
+early_trap_line=$(awk '/^trap cleanup_initialization EXIT$/ { print NR; exit }' \
+    "$SCRIPT_DIR/test-local.sh")
+run_path_line=$(awk '/^HTTP_BODY_FILE=.*compose_test_run_path/ { print NR; exit }' \
+    "$SCRIPT_DIR/test-local.sh")
+full_trap_line=$(awk '/^trap cleanup EXIT$/ { print NR; exit }' \
+    "$SCRIPT_DIR/test-local.sh")
+[ -n "$early_trap_line" ] &&
+    [ -n "$run_path_line" ] &&
+    [ -n "$full_trap_line" ] &&
+    [ "$early_trap_line" -lt "$run_path_line" ] &&
+    [ "$run_path_line" -lt "$full_trap_line" ] ||
+    fail "local runner does not protect the initialization window with an early cleanup trap"
+
 printf '1/8 unique project identity and destructive wrapper arguments\n'
 : >"$FAKE_DOCKER_LOG"
 compose_test_init local "$REPO_ROOT"
