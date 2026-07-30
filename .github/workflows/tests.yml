@@ -109,6 +109,15 @@ jobs:
         working-directory: cli
         run: go vet ./...
 
+  compose-isolation:
+    name: Docker Compose test isolation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test destructive-command guards without starting services
+        run: make test-compose-isolation
+
   flutter:
     name: Flutter
     runs-on: macos-14
