@@ -2319,6 +2319,69 @@ unknown_mixed = [3, "repo"]
 	}
 }
 
+func TestLoad_KnownMixedArrayReportsFieldPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := `
+[github]
+repositories = ["org/repo", 1]
+
+[ai]
+primary = "claude"
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load accepted a mixed array for github.repositories")
+	}
+	for _, marker := range []string{
+		"config.github.repositories",
+		"TOML array has mixed element types",
+		"expected []string",
+	} {
+		if !strings.Contains(err.Error(), marker) {
+			t.Fatalf("Load error %q missing %q", err, marker)
+		}
+	}
+}
+
+func TestLoad_WarnsWhenCanonicalKeyDiscardsAliases(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := `
+[ai]
+primary = "claude"
+PRIMARY = "codex"
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load canonical plus alias: %v", err)
+	}
+	if cfg.AI.Primary != "claude" {
+		t.Fatalf("canonical primary did not win: %q", cfg.AI.Primary)
+	}
+	for _, marker := range []string{
+		"ignored case-variant aliases",
+		"path=config.ai",
+		"field=primary",
+		"PRIMARY",
+	} {
+		if !strings.Contains(logs.String(), marker) {
+			t.Fatalf("alias warning %q missing %q", logs.String(), marker)
+		}
+	}
+}
+
 func TestLoad_CanonicalizesSchemaFieldsWithoutFoldingDynamicMapKeys(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	content := `
@@ -2447,12 +2510,6 @@ model = "--sandbox"
 	}
 	if got := strings.Count(logs.String(), "field=model"); got != 1 {
 		t.Fatalf("model sanitation warnings = %d, want 1:\n%s", got, logs.String())
-	}
-}
-
-func TestProjectKnownConfigMap_CurrentSchemaIsSupported(t *testing.T) {
-	if _, err := projectKnownConfigMap(map[string]any{}); err != nil {
-		t.Fatalf("Config schema is unsupported by canonical projection: %v", err)
 	}
 }
 
@@ -2676,6 +2733,11 @@ func TestSanitizeAgentExecutionFields_RevalidatesMigratedOutputs(t *testing.T) {
 }
 
 func TestSanitizeLegacyAgentExecutionPolicyMap_CanonicalExactWinsAliases(t *testing.T) {
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
 	agent := map[string]any{
 		"model":                  "canonical-model",
 		"Model":                  "first-alias",
@@ -2716,6 +2778,17 @@ func TestSanitizeLegacyAgentExecutionPolicyMap_CanonicalExactWinsAliases(t *test
 	for _, alias := range []string{"Prompt", "Bare", "No_Session_Persistence", "Execution_Timeout"} {
 		if _, present := agent[alias]; present {
 			t.Fatalf("pass-through alias %q was not removed: %v", alias, agent)
+		}
+	}
+	for _, marker := range []string{
+		"ignored case-variant aliases",
+		"config.ai.agents",
+		"field=model",
+		"MODEL",
+		"Model",
+	} {
+		if !strings.Contains(logs.String(), marker) {
+			t.Fatalf("legacy alias warning %q missing %q", logs.String(), marker)
 		}
 	}
 }

@@ -16,6 +16,19 @@ func (*projectionTOMLScalar) UnmarshalTOML(any) error { return nil }
 
 type ProjectionEmbedded struct{}
 
+func TestValidateKnownTOMLSchema_AcceptsRealConfigSchema(t *testing.T) {
+	if err := validateKnownTOMLSchema(
+		reflect.TypeOf(Config{}),
+		"config",
+		make(map[reflect.Type]bool),
+	); err != nil {
+		t.Fatalf("real Config schema rejected: %v", err)
+	}
+	if _, err := projectKnownConfigMap(map[string]any{}); err != nil {
+		t.Fatalf("empty real Config projection failed: %v", err)
+	}
+}
+
 func TestValidateKnownTOMLSchema_RejectsUnsupportedShapes(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -118,9 +131,9 @@ func TestFailClosedDangerousValue_FalseWinsEveryAliasShape(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			matches := caseFoldedMapKeys(tc.flags, "dangerously_skip_perms")
-			got, err := failClosedDangerousValue(tc.flags, matches)
+			got, err := resolveFailClosedBool(tc.flags, matches, "dangerously_skip_perms")
 			if err != nil {
-				t.Fatalf("failClosedDangerousValue: %v", err)
+				t.Fatalf("resolveFailClosedBool: %v", err)
 			}
 			if got != tc.want {
 				t.Fatalf("dangerous value = %v, want %v", got, tc.want)
@@ -129,9 +142,10 @@ func TestFailClosedDangerousValue_FalseWinsEveryAliasShape(t *testing.T) {
 	}
 
 	flags := map[string]any{"DANGEROUSLY_SKIP_PERMS": "false"}
-	if _, err := failClosedDangerousValue(
+	if _, err := resolveFailClosedBool(
 		flags,
 		caseFoldedMapKeys(flags, "dangerously_skip_perms"),
+		"dangerously_skip_perms",
 	); err == nil || !strings.Contains(err.Error(), "must be a boolean") {
 		t.Fatalf("non-boolean dangerous alias error = %v", err)
 	}

@@ -3,9 +3,11 @@ package config
 import (
 	"encoding"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 )
 
 var (
@@ -16,6 +18,10 @@ var (
 	tomlUnmarshalerType = reflect.TypeOf((*interface {
 		UnmarshalTOML(any) error
 	})(nil)).Elem()
+
+	configSchemaValidation = sync.OnceValue(func() error {
+		return validateKnownTOMLSchema(configSchemaType, "config", make(map[reflect.Type]bool))
+	})
 )
 
 // projectKnownConfigMap returns a canonical, schema-shaped view of raw. It is
@@ -24,7 +30,7 @@ var (
 // heterogeneous array) cannot make an otherwise valid legacy config fail to
 // load.
 func projectKnownConfigMap(raw map[string]any) (map[string]any, error) {
-	if err := validateKnownTOMLSchema(configSchemaType, "config", make(map[reflect.Type]bool)); err != nil {
+	if err := configSchemaValidation(); err != nil {
 		return nil, err
 	}
 	projected, err := walkKnownTOMLValue(raw, configSchemaType, "config")
@@ -80,6 +86,11 @@ func walkKnownTOMLValue(raw any, schema reflect.Type, path string) (any, error) 
 			projected[key] = child
 		}
 		return projected, nil
+	case reflect.Slice, reflect.Array:
+		if err := validateHomogeneousTOMLArrays(raw, path, schema); err != nil {
+			return nil, err
+		}
+		return raw, nil
 	case reflect.Interface:
 		return nil, fmt.Errorf("config schema at %q uses unsupported interface type %s", path, schema)
 	default:
@@ -112,7 +123,7 @@ func walkKnownTOMLStruct(table map[string]any, schema reflect.Type, path string)
 		}
 
 		if schema == cliAgentSchemaType && canonical == "dangerously_skip_perms" {
-			value, err := failClosedDangerousValue(table, matches)
+			value, err := resolveFailClosedBool(table, matches, canonical)
 			if err != nil {
 				return nil, fmt.Errorf("%s: %w", path, err)
 			}
@@ -127,10 +138,11 @@ func walkKnownTOMLStruct(table map[string]any, schema reflect.Type, path string)
 			)
 		}
 
-		selected, err := selectCanonicalMapKey(matches, canonical)
+		selected, discarded, err := selectCanonicalMapKey(matches, canonical)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", path, err)
 		}
+		warnDiscardedAliases(path, canonical, discarded)
 		original := table[selected]
 		child, err := walkKnownTOMLValue(original, field.Type, path+"."+canonical)
 		if err != nil {
@@ -164,33 +176,109 @@ func caseFoldedMapKeys(table map[string]any, canonical string) []string {
 	return matches
 }
 
-func selectCanonicalMapKey(matches []string, canonical string) (string, error) {
+func selectCanonicalMapKey(matches []string, canonical string) (string, []string, error) {
 	for _, key := range matches {
 		if key == canonical {
-			return canonical, nil
+			discarded := make([]string, 0, len(matches)-1)
+			for _, alias := range matches {
+				if alias != canonical {
+					discarded = append(discarded, alias)
+				}
+			}
+			return canonical, discarded, nil
 		}
 	}
 	if len(matches) == 1 {
-		return matches[0], nil
+		return matches[0], nil, nil
 	}
-	return "", fmt.Errorf(
+	return "", nil, fmt.Errorf(
 		"ambiguous aliases for %q (%s); keep a single canonical %q key",
 		canonical, strings.Join(matches, ", "), canonical,
 	)
 }
 
-func failClosedDangerousValue(table map[string]any, matches []string) (bool, error) {
+func resolveFailClosedBool(table map[string]any, matches []string, canonical string) (bool, error) {
 	value := true
 	for _, key := range matches {
 		candidate, ok := table[key].(bool)
 		if !ok {
-			return false, fmt.Errorf("dangerously_skip_perms must be a boolean")
+			return false, fmt.Errorf("%s must be a boolean", canonical)
 		}
 		if !candidate {
 			value = false
 		}
 	}
 	return value, nil
+}
+
+func warnDiscardedAliases(path, canonical string, discarded []string) {
+	if len(discarded) == 0 {
+		return
+	}
+	slog.Warn(
+		"config: ignored case-variant aliases because the canonical key is present",
+		"path", path,
+		"field", canonical,
+		"aliases", discarded,
+	)
+}
+
+func validateHomogeneousTOMLArrays(raw any, path string, schema reflect.Type) error {
+	if table, ok := raw.(map[string]any); ok {
+		for _, key := range sortedMapKeys(table) {
+			if err := validateHomogeneousTOMLArrays(
+				table[key],
+				fmt.Sprintf("%s[%q]", path, key),
+				schema,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	value := reflect.ValueOf(raw)
+	if !value.IsValid() || (value.Kind() != reflect.Slice && value.Kind() != reflect.Array) {
+		return nil
+	}
+
+	var firstType reflect.Type
+	firstIndex := -1
+	childSchema := schema
+	if schema.Kind() == reflect.Slice || schema.Kind() == reflect.Array {
+		childSchema = schema.Elem()
+	}
+	for i := 0; i < value.Len(); i++ {
+		element := value.Index(i).Interface()
+		elementType := reflect.TypeOf(element)
+		if firstIndex < 0 {
+			firstType = elementType
+			firstIndex = i
+		} else if elementType != firstType {
+			return fmt.Errorf(
+				"%s: TOML array has mixed element types %s at index %d and %s at index %d; expected %s",
+				path,
+				displayType(firstType), firstIndex,
+				displayType(elementType), i,
+				schema,
+			)
+		}
+		if err := validateHomogeneousTOMLArrays(
+			element,
+			fmt.Sprintf("%s[%d]", path, i),
+			childSchema,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func displayType(value reflect.Type) string {
+	if value == nil {
+		return "<nil>"
+	}
+	return value.String()
 }
 
 func sortedMapKeys(table map[string]any) []string {

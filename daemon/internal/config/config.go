@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -64,6 +63,11 @@ var githubOrgPattern = regexp.MustCompile(`^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-z
 // are rejected separately by ValidateRepoSlug to avoid path-traversal tokens.
 var repoNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
+// Config is the schema root used by the deterministic TOML projection in
+// canonical_map.go. Every exported field in this graph must have a unique
+// case-insensitive toml tag. Embedded fields, interface values and slices of
+// composite structs/maps are deliberately unsupported; the schema invariant
+// test fails before such a change can turn into a runtime Load failure.
 type Config struct {
 	Server         ServerConfig         `toml:"server"`
 	GitHub         GitHubConfig         `toml:"github"`
@@ -1457,7 +1461,7 @@ func SanitizeLegacyAgentExecutionPolicyMap(m map[string]any, source string) erro
 	if err != nil || !present {
 		return err
 	}
-	agents, present, err := canonicalizeLegacyMapChild(ai, "agents", "ai")
+	agents, present, err := canonicalizeLegacyMapChild(ai, "agents", "config.ai")
 	if err != nil || !present {
 		return err
 	}
@@ -1472,7 +1476,8 @@ func SanitizeLegacyAgentExecutionPolicyMap(m map[string]any, source string) erro
 		if !ok {
 			continue
 		}
-		before, rewrite, err := legacyAgentConfigFromMap(agentMap)
+		agentPath := fmt.Sprintf(`config.ai.agents[%q]`, name)
+		before, rewrite, err := legacyAgentConfigFromMap(agentMap, agentPath)
 		if err != nil {
 			return fmt.Errorf("config: sanitize legacy TOML agent %q: %w", name, err)
 		}
@@ -1493,13 +1498,7 @@ func SanitizeLegacyAgentExecutionPolicyMap(m map[string]any, source string) erro
 }
 
 func canonicalizeLegacyMapChild(m map[string]any, canonical, path string) (map[string]any, bool, error) {
-	aliases := make([]string, 0, 1)
-	for key := range m {
-		if strings.EqualFold(key, canonical) {
-			aliases = append(aliases, key)
-		}
-	}
-	sort.Strings(aliases)
+	aliases := caseFoldedMapKeys(m, canonical)
 	switch len(aliases) {
 	case 0:
 		return nil, false, nil
@@ -1522,11 +1521,11 @@ func canonicalizeLegacyMapChild(m map[string]any, canonical, path string) (map[s
 	}
 }
 
-func legacyAgentConfigFromMap(m map[string]any) (CLIAgentConfig, map[string]bool, error) {
+func legacyAgentConfigFromMap(m map[string]any, path string) (CLIAgentConfig, map[string]bool, error) {
 	var agent CLIAgentConfig
 	rewrite := make(map[string]bool)
 	stringField := func(canonical string, target *string) error {
-		raw, present, canonicalize, err := legacyMapValue(m, canonical)
+		raw, present, canonicalize, err := legacyMapValue(m, canonical, path)
 		if err != nil {
 			return err
 		}
@@ -1542,7 +1541,7 @@ func legacyAgentConfigFromMap(m map[string]any) (CLIAgentConfig, map[string]bool
 		return nil
 	}
 	boolField := func(canonical string, target *bool) error {
-		raw, present, canonicalize, err := legacyMapValue(m, canonical)
+		raw, present, canonicalize, err := legacyMapValue(m, canonical, path)
 		if err != nil {
 			return err
 		}
@@ -1584,7 +1583,7 @@ func legacyAgentConfigFromMap(m map[string]any) (CLIAgentConfig, map[string]bool
 	if err := boolField("no_session_persistence", &agent.NoSessionPersistence); err != nil {
 		return CLIAgentConfig{}, nil, err
 	}
-	raw, present, canonicalize, err := legacyMapValue(m, "max_turns")
+	raw, present, canonicalize, err := legacyMapValue(m, "max_turns", path)
 	if err != nil {
 		return CLIAgentConfig{}, nil, err
 	}
@@ -1614,57 +1613,28 @@ func legacyAgentConfigFromMap(m map[string]any) (CLIAgentConfig, map[string]bool
 
 func legacyDangerousBoolValue(m map[string]any) (value bool, present, canonicalize bool, err error) {
 	const canonical = "dangerously_skip_perms"
-	aliases := make([]string, 0, 1)
-	for key := range m {
-		if strings.EqualFold(key, canonical) {
-			aliases = append(aliases, key)
-		}
-	}
-	sort.Strings(aliases)
+	aliases := caseFoldedMapKeys(m, canonical)
 	if len(aliases) == 0 {
 		return false, false, false, nil
 	}
-	value = true
-	for _, key := range aliases {
-		candidate, ok := m[key].(bool)
-		if !ok {
-			return false, false, false, fmt.Errorf("%s must be a boolean", canonical)
-		}
-		if !candidate {
-			value = false
-		}
+	value, err = resolveFailClosedBool(m, aliases, canonical)
+	if err != nil {
+		return false, false, false, err
 	}
 	return value, true, len(aliases) != 1 || aliases[0] != canonical, nil
 }
 
-func legacyMapValue(m map[string]any, canonical string) (value any, present, canonicalize bool, err error) {
-	if exact, ok := m[canonical]; ok {
-		aliases := 0
-		for key := range m {
-			if key != canonical && strings.EqualFold(key, canonical) {
-				aliases++
-			}
-		}
-		return exact, true, aliases > 0, nil
-	}
-	aliases := make([]string, 0, 1)
-	for key := range m {
-		if strings.EqualFold(key, canonical) {
-			aliases = append(aliases, key)
-		}
-	}
-	sort.Strings(aliases)
-	switch len(aliases) {
-	case 0:
+func legacyMapValue(m map[string]any, canonical, path string) (value any, present, canonicalize bool, err error) {
+	aliases := caseFoldedMapKeys(m, canonical)
+	if len(aliases) == 0 {
 		return nil, false, false, nil
-	case 1:
-		return m[aliases[0]], true, true, nil
-	default:
-		return nil, false, false, fmt.Errorf(
-			"ambiguous aliases for %q (%s); keep a single canonical %q key",
-			canonical, strings.Join(aliases, ", "), canonical,
-		)
 	}
+	selected, discarded, err := selectCanonicalMapKey(aliases, canonical)
+	if err != nil {
+		return nil, false, false, err
+	}
+	warnDiscardedAliases(path, canonical, discarded)
+	return m[selected], true, selected != canonical || len(discarded) > 0, nil
 }
 
 func legacyMapInt(raw any) (int, error) {
@@ -1725,10 +1695,8 @@ func syncLegacyAgentBoolField(m map[string]any, canonical string, before, after 
 }
 
 func deleteLegacyAgentFieldAliases(m map[string]any, canonical string) {
-	for key := range m {
-		if strings.EqualFold(key, canonical) {
-			delete(m, key)
-		}
+	for _, key := range caseFoldedMapKeys(m, canonical) {
+		delete(m, key)
 	}
 }
 
