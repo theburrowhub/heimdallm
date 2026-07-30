@@ -20,14 +20,15 @@ cd "$REPO_ROOT"
 
 # shellcheck source=lib/compose-test.sh
 . "$SCRIPT_DIR/lib/compose-test.sh"
+
+# Verify the supported build backend before allocating isolated run state.
+export DOCKER_BUILDKIT=1
+compose_test_require_build_tools
 compose_test_init web "$REPO_ROOT"
 
 BASE=""
-
 log() { printf '▶  %s\n' "$1"; }
 fail() { printf '✗  %s\n' "$1" >&2; exit 1; }
-
-export DOCKER_BUILDKIT=1
 
 cleanup() {
   exit_code=$?

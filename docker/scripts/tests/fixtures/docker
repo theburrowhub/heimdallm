@@ -11,6 +11,20 @@ set -eu
     printf '\n'
 } >>"$FAKE_DOCKER_LOG"
 
+if [ "$*" = "compose version" ]; then
+    if [ "${FAKE_DOCKER_FAIL_COMPOSE:-0}" = "1" ]; then
+        exit 45
+    fi
+    exit 0
+fi
+
+if [ "$*" = "buildx version" ]; then
+    if [ "${FAKE_DOCKER_FAIL_BUILDX:-0}" = "1" ]; then
+        exit 46
+    fi
+    exit 0
+fi
+
 case "$*" in
     *" ps -q web")
         printf 'fake-web-container\n'

@@ -13,6 +13,9 @@ public_output_dir="$temp_root/public-output"
 declared_context_resources="$temp_root/declared-context-resources"
 generated_allowlist="$temp_root/generated-resource-allowlist"
 checked_in_allowlist="$temp_root/checked-in-resource-allowlist"
+public_resource_rules_file="$temp_root/public-resource-rules"
+production_policy_skeleton="$temp_root/production-policy-skeleton"
+public_policy_skeleton="$temp_root/public-policy-skeleton"
 pubspec="$repo_root/flutter_app/pubspec.yaml"
 resource_policy="$repo_root/flutter_app/Dockerfile.web.dockerignore"
 undeclared_asset="assets/heimdallm-undeclared-context-canary-$$.txt"
@@ -36,6 +39,109 @@ write_fixture() {
   fixture="$1"
   mkdir -p "$(dirname "$context_dir/$fixture")"
   printf '%s\n' 'dummy build-context fixture' >"$context_dir/$fixture"
+}
+
+write_policy_variant() {
+  source_policy="$1"
+  destination_policy="$2"
+  resource_rules_file="$3"
+  public_exception_rule="$4"
+
+  awk \
+    -v resource_rules_file="$resource_rules_file" \
+    -v public_exception_rule="$public_exception_rule" '
+function invalid(message) {
+  print "invalid production Docker ignore policy: " message > "/dev/stderr"
+  failed = 1
+  exit 1
+}
+
+function emit_resource_rules(line) {
+  while ((getline line < resource_rules_file) > 0) {
+    print line
+  }
+  close(resource_rules_file)
+}
+
+$0 == "# BEGIN flutter-resource-allowlist" {
+  if (inside || ++resource_begin_count != 1) {
+    invalid("duplicate or nested Flutter resource begin marker")
+  }
+  print
+  emit_resource_rules()
+  inside = "resource"
+  next
+}
+
+$0 == "# END flutter-resource-allowlist" {
+  if (inside != "resource" || ++resource_end_count != 1) {
+    invalid("Flutter resource end marker has no matching begin marker")
+  }
+  inside = ""
+  print
+  next
+}
+
+$0 == "# BEGIN flutter-public-secret-like-resource-allowlist" {
+  if (inside || ++public_begin_count != 1) {
+    invalid("duplicate or nested public-resource begin marker")
+  }
+  print
+  print public_exception_rule
+  inside = "public"
+  next
+}
+
+$0 == "# END flutter-public-secret-like-resource-allowlist" {
+  if (inside != "public" || ++public_end_count != 1) {
+    invalid("public-resource end marker has no matching begin marker")
+  }
+  inside = ""
+  print
+  next
+}
+
+inside {
+  next
+}
+
+{
+  print
+}
+
+END {
+  if (failed) {
+    exit 1
+  }
+  if (inside ||
+      resource_begin_count != 1 || resource_end_count != 1 ||
+      public_begin_count != 1 || public_end_count != 1) {
+    print "invalid production Docker ignore policy: expected one matched " \
+      "pair for each generated block" > "/dev/stderr"
+    exit 1
+  }
+}
+' "$source_policy" >"$destination_policy"
+}
+
+write_policy_skeleton() {
+  awk '
+$0 == "# BEGIN flutter-resource-allowlist" ||
+$0 == "# BEGIN flutter-public-secret-like-resource-allowlist" {
+  print
+  inside = 1
+  next
+}
+$0 == "# END flutter-resource-allowlist" ||
+$0 == "# END flutter-public-secret-like-resource-allowlist" {
+  inside = 0
+  print
+  next
+}
+!inside {
+  print
+}
+' "$1" >"$2"
 }
 
 command -v docker >/dev/null 2>&1 || fail "Docker is required"
@@ -201,21 +307,14 @@ printf '%s\n' \
   '  assets:' \
   "    - $public_certificate" >"$public_pubspec"
 
-# Seed the exception policy so the parser can validate and generate the normal
-# resource rules from the synthetic pubspec. The final policy below keeps that
-# exact exception after the broad deny, matching the production contract.
-printf '%s\n' \
-  '**' \
-  '!assets/' \
-  'assets/**' \
-  '!flutter_app/' \
-  'flutter_app/**' \
-  '# BEGIN flutter-resource-allowlist' \
-  '# END flutter-resource-allowlist' \
-  '**/*.crt' \
-  '# BEGIN flutter-public-secret-like-resource-allowlist' \
-  "!$public_certificate" \
-  '# END flutter-public-secret-like-resource-allowlist' >"$public_policy"
+# Derive the synthetic policy from production and replace only generated block
+# contents. This keeps every base allow/deny rule and their ordering coupled to
+# Dockerfile.web.dockerignore instead of maintaining a second policy by hand.
+write_policy_variant \
+  "$resource_policy" \
+  "$public_policy" \
+  "$checked_in_allowlist" \
+  "!$public_certificate"
 
 public_resource_rules="$(
   sh "$script_dir/list-flutter-assets.sh" \
@@ -232,19 +331,22 @@ public_context_paths="$(
 [ "$public_context_paths" = "$public_certificate" ] \
   || fail "public certificate mapped to an unexpected context path"
 
+# Give the neighbouring certificate a normal resource exception as a canary:
+# the production-derived broad .crt deny must still remove it, while the exact
+# public block below re-includes only the audited certificate.
 printf '%s\n' \
-  '**' \
-  '!assets/' \
-  'assets/**' \
-  '!flutter_app/' \
-  'flutter_app/**' \
-  '# BEGIN flutter-resource-allowlist' \
   "$public_resource_rules" \
-  '# END flutter-resource-allowlist' \
-  '**/*.crt' \
-  '# BEGIN flutter-public-secret-like-resource-allowlist' \
-  "!$public_certificate" \
-  '# END flutter-public-secret-like-resource-allowlist' >"$public_policy"
+  "!$blocked_certificate" >"$public_resource_rules_file"
+write_policy_variant \
+  "$resource_policy" \
+  "$public_policy" \
+  "$public_resource_rules_file" \
+  "!$public_certificate"
+
+write_policy_skeleton "$resource_policy" "$production_policy_skeleton"
+write_policy_skeleton "$public_policy" "$public_policy_skeleton"
+cmp -s "$production_policy_skeleton" "$public_policy_skeleton" \
+  || fail "synthetic policy changed production rules outside generated blocks"
 
 printf '%s\n' 'FROM scratch' 'COPY . /context' \
   >"$public_context_dir/flutter_app/Dockerfile.web"

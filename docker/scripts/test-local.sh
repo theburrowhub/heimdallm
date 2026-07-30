@@ -19,6 +19,12 @@ cd "$REPO_ROOT"
 # shellcheck source=lib/compose-test.sh
 source "$SCRIPT_DIR/lib/compose-test.sh"
 
+# Keep every isolated Compose build on the same supported backend as the
+# production wrappers. Verify both plugins before allocating run state because
+# no cleanup is needed when the local Docker toolchain is incomplete.
+export DOCKER_BUILDKIT=1
+compose_test_require_build_tools
+
 cleanup_initialization() {
     local exit_code=$?
     trap - EXIT
@@ -45,10 +51,6 @@ BASE_URL=""
 HTTP_BODY_FILE=$(compose_test_run_path http-body)
 HEALTH_TIMEOUT=60   # seconds to wait for /health
 HEALTH_INTERVAL=2   # seconds between retries
-
-# The web service uses Dockerfile.web.dockerignore with a repository-root
-# context. The legacy builder ignores that file and must never be used here.
-export DOCKER_BUILDKIT=1
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
 
