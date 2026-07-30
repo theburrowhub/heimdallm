@@ -88,12 +88,16 @@ func OptionsForSelectedCLI(primary, selected string, opts ExecOptions) ExecOptio
 	return opts
 }
 
-// Executor runs AI CLI tools for code review.
-type Executor struct{}
+// Executor runs AI CLI tools for code review. The environment snapshot is
+// captured once so an execution can never observe credentials that another
+// goroutine adds to the daemon process later.
+type Executor struct {
+	environment capturedEnvironment
+}
 
 // New creates a new Executor.
 func New() *Executor {
-	return &Executor{}
+	return &Executor{environment: captureEnvironment()}
 }
 
 // Detect returns the first available CLI (primary → fallback).
@@ -971,9 +975,13 @@ func resolveCLIPath(name string) string {
 // Pass name as $1 (positional arg) so it is never shell-interpolated, even
 // though validateCLIName already guarantees it is safe.
 var loginShellLookPath = func(name string) string {
+	env := captureEnvironment().loginProbeEnvironment()
 	for _, shell := range []string{"/bin/zsh", "/bin/bash"} {
-		cmd := exec.Command(shell, "-l", "-c", `which "$1"`, "--", name)
+		ctx, cancel := context.WithTimeout(context.Background(), cliHelpTimeout)
+		cmd := exec.CommandContext(ctx, shell, "-l", "-c", `which "$1"`, "--", name)
+		cmd.Env = env
 		out, err := cmd.Output()
+		cancel()
 		if err == nil {
 			if path := strings.TrimSpace(string(out)); path != "" {
 				return path
@@ -1130,6 +1138,11 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 	if err := validateExecutionRequest(cli, opts); err != nil {
 		return nil, err
 	}
+	prepared, err := e.environment.prepare(cli)
+	if err != nil {
+		return nil, err
+	}
+	defer prepared.cleanup()
 
 	timeout := executionTimeout
 	if opts.Timeout > 0 {
@@ -1147,21 +1160,23 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 	var workDirFlags []string
 	if opts.WorkDir != "" {
 		workDirFlags = detectWorkDirFlags(cli, cliPath, opts.WorkDir)
+		switch {
+		case cli == "gemini" && len(workDirFlags) == 0:
+			return nil, fmt.Errorf("executor: Gemini CLI must support an include-directory flag for isolated repository analysis")
+		case cli == "opencode" && len(workDirFlags) == 0:
+			return nil, fmt.Errorf("executor: OpenCode CLI must support --pure and run --dir for isolated repository analysis")
+		}
 	}
 
-	args := buildArgs(cli, opts, workDirFlags)
+	args := buildArgs(cli, opts, workDirFlags, prepared.codexToolEnv)
 	cmd := exec.CommandContext(ctx, cliPath, args...)
 	cmd.Stdin = strings.NewReader(prompt)
-
-	// Augment PATH with paths from the login shell so the CLI can find its own
-	// dependencies, without running stdin THROUGH the shell (which would cause
-	// shell startup scripts to consume our prompt).
-	enrichedEnv := enrichEnvWithLoginPath()
-	if enrichedEnv != nil {
-		cmd.Env = enrichedEnv
-	}
+	cmd.Env = prepared.env
+	cmd.Dir = prepared.runDir
 	if opts.WorkDir != "" {
-		cmd.Dir = opts.WorkDir
+		if cli != "gemini" && cli != "opencode" {
+			cmd.Dir = opts.WorkDir
+		}
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -1174,7 +1189,7 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 		if errDetail == "" {
 			errDetail = strings.TrimSpace(stdout.String())
 		}
-		return nil, fmt.Errorf("executor: run %s: %w (output: %s)", cli, err, errDetail)
+		return nil, fmt.Errorf("executor: run %s: %w (output: %s)", cli, err, prepared.redact(errDetail))
 	}
 
 	return stdout.Bytes(), nil
@@ -1203,14 +1218,16 @@ func validateExecutionRequest(cli string, opts ExecOptions) error {
 }
 
 // buildArgs constructs the CLI argument list based on the CLI name and options.
-func buildArgs(cli string, opts ExecOptions, workDirFlags []string) []string {
+func buildArgs(cli string, opts ExecOptions, workDirFlags []string, codexToolEnv map[string]string) []string {
 	var args []string
 
 	switch cli {
 	case "opencode":
-		// opencode uses "run" subcommand; reads prompt from stdin when no
-		// positional message args are given.
-		args = append(args, "run")
+		// OpenCode uses the run subcommand and reads the prompt from stdin
+		// when no positional message is given. Pure mode is a managed global
+		// policy: repository-local plugins are executable code and would
+		// otherwise inherit the selected provider credential.
+		args = append(args, "--pure", "run")
 		if opts.Model != "" {
 			args = append(args, "-m", strings.TrimSpace(opts.Model))
 		}
@@ -1218,6 +1235,15 @@ func buildArgs(cli string, opts ExecOptions, workDirFlags []string) []string {
 		// Codex's top-level command is interactive and requires a TTY. The
 		// daemon must use the non-interactive subcommand and feed the prompt on
 		// stdin, otherwise Codex exits with "stdin is not a terminal".
+		//
+		// The CLI itself needs its selected provider credential, but commands
+		// proposed by the model do not. These command-line overrides have the
+		// highest Codex config precedence, so a project .codex/config.toml
+		// cannot restore inheritance or login-shell startup files.
+		args = append(args,
+			"--config", "allow_login_shell=false",
+			"--config", "shell_environment_policy="+codexShellEnvironmentPolicy(codexToolEnv),
+		)
 		if mode := strings.TrimSpace(opts.ApprovalMode); mode != "" {
 			if normalized, err := NormalizeApprovalModeForCLI(cli, mode); err != nil {
 				slog.Warn("buildArgs: ApprovalMode rejected, ignoring", "mode", mode, "err", err)
@@ -1231,6 +1257,14 @@ func buildArgs(cli string, opts ExecOptions, workDirFlags []string) []string {
 		}
 	default:
 		// claude, gemini: stdin mode
+		if cli == "gemini" {
+			// Gemini's settings-only ignoreLocalEnv switch deliberately still
+			// loads some .env locations. Force the CLI-level guard as well.
+			// The process CWD is an empty Heimdallm-owned directory, so trust
+			// applies only to that directory; the repository remains an
+			// explicitly included external context.
+			args = append(args, "--ignore-env", "--skip-trust")
+		}
 		if cli == "claude" && len(workDirFlags) > 0 {
 			args = append(args, "-p")
 		} else {
@@ -1294,8 +1328,8 @@ func buildArgs(cli string, opts ExecOptions, workDirFlags []string) []string {
 
 var (
 	loginPathOnce sync.Once
-	loginPathEnv  []string // os.Environ() + enriched PATH from login shell
-	cliHelpCache  sync.Map // map[string]string, keyed by resolved CLI path
+	loginPath     string
+	cliHelpCache  sync.Map // map[string]string, keyed by path plus help arguments
 )
 
 func detectWorkDirFlags(cli, cliPath, workDir string) []string {
@@ -1317,8 +1351,9 @@ func detectWorkDirFlags(cli, cliPath, workDir string) []string {
 		if cliHelpSupports(cliPath, "--include-directory") {
 			return []string{"--include-directory", workDir}
 		}
-		if cliHelpSupports(cliPath, "--cwd") {
-			return []string{"--cwd", workDir}
+	case "opencode":
+		if cliArgsHelpSupports(cliPath, "--dir", "--pure", "run", "--help") {
+			return []string{"--dir", workDir}
 		}
 	case "codex":
 		if cliHelpSupports(cliPath, "--cd") {
@@ -1332,71 +1367,64 @@ func detectWorkDirFlags(cli, cliPath, workDir string) []string {
 }
 
 func cliHelpSupports(cliPath, flag string) bool {
-	help, ok := cliHelp(cliPath)
+	help, ok := cliHelp(cliPath, "--help")
 	return ok && strings.Contains(help, flag)
 }
 
-func cliHelp(cliPath string) (string, bool) {
-	if cached, ok := cliHelpCache.Load(cliPath); ok {
+func cliArgsHelpSupports(cliPath, flag string, args ...string) bool {
+	help, ok := cliHelp(cliPath, args...)
+	return ok && strings.Contains(help, flag)
+}
+
+func cliHelp(cliPath string, args ...string) (string, bool) {
+	cacheKey := cliPath + "\x00" + strings.Join(args, "\x00")
+	if cached, ok := cliHelpCache.Load(cacheKey); ok {
 		return cached.(string), true
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), cliHelpTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, cliPath, "--help")
-	if env := enrichEnvWithLoginPath(); env != nil {
-		cmd.Env = env
+	prepared, err := captureEnvironment().prepareProbe()
+	if err != nil {
+		slog.Debug("executor: cannot prepare isolated CLI help environment", "cli", cliPath, "err", err)
+		return "", false
 	}
+	defer prepared.cleanup()
+	cmd := exec.CommandContext(ctx, cliPath, args...)
+	cmd.Env = prepared.env
+	cmd.Dir = prepared.runDir
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		slog.Debug("executor: CLI help unavailable; using cwd-only repo context", "cli", cliPath, "err", err)
+		slog.Debug("executor: CLI help probe unavailable", "cli", cliPath, "args", args, "err", err)
 		return "", false
 	}
 	help := string(out)
-	cliHelpCache.Store(cliPath, help)
+	cliHelpCache.Store(cacheKey, help)
 	return help, true
 }
 
-// enrichEnvWithLoginPath returns the process environment augmented with the PATH
-// from a login shell. Cached after the first call — cheap after startup.
-// Using a login shell ONLY for PATH (not for execution) avoids the stdin
-// consumption bug where shell startup scripts read our prompt.
-func enrichEnvWithLoginPath() []string {
+// enrichedPath returns a de-duplicated absolute PATH containing the daemon's
+// startup PATH and any extra entries discovered from the user's login shell.
+// Only the path string is cached: no credential-bearing environment snapshot
+// survives in package globals or reaches the shell probe.
+func enrichedPath(values map[string]string) string {
 	loginPathOnce.Do(func() {
-		base := os.Environ()
-		// Ask the login shell for its PATH without providing any stdin
-		// (pass /dev/null so startup scripts cannot accidentally consume stdin)
-		cmd := exec.Command("/bin/zsh", "-l", "-c", "echo $PATH")
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		cmd = exec.CommandContext(ctx, "/bin/zsh", "-l", "-c", "echo $PATH")
-		cmd.Stdin, _ = os.Open(os.DevNull)
-		cmd.Stderr = nil
-		out, err := cmd.Output()
-		if err != nil {
-			loginPathEnv = base
-			return
-		}
-		loginShellPath := strings.TrimSpace(string(out))
-		if loginShellPath == "" {
-			loginPathEnv = base
-			return
-		}
-		// Merge: put login shell PATH first so Homebrew bins take precedence
-		currentPath := os.Getenv("PATH")
-		merged := loginShellPath
-		if currentPath != "" {
-			merged = loginShellPath + ":" + currentPath
-		}
-		result := make([]string, 0, len(base)+1)
-		for _, e := range base {
-			if !strings.HasPrefix(e, "PATH=") {
-				result = append(result, e)
+		snapshot := captureEnvironment()
+		for _, shell := range []string{"/bin/zsh", "/bin/bash"} {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			cmd := exec.CommandContext(ctx, shell, "-l", "-c", "printf %s \"$PATH\"")
+			cmd.Env = snapshot.loginProbeEnvironment()
+			cmd.Stdin = strings.NewReader("")
+			out, err := cmd.Output()
+			cancel()
+			if err == nil {
+				loginPath = strings.TrimSpace(string(out))
+				if loginPath != "" {
+					break
+				}
 			}
 		}
-		result = append(result, "PATH="+merged)
-		loginPathEnv = result
 	})
-	return loginPathEnv
+	return sanitizePath(values["PATH"], loginPath)
 }
 
 // StripToJSON strips common LLM output wrappers (leading/trailing whitespace,

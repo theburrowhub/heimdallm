@@ -1,14 +1,12 @@
 package repoctx
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -17,14 +15,14 @@ import (
 	"time"
 
 	"github.com/heimdallm/daemon/internal/config"
+	"github.com/heimdallm/daemon/internal/gitproc"
 )
 
 const (
 	// MarkerFile identifies clones that Heimdallm is allowed to mutate.
 	MarkerFile = ".heimdallm-managed"
 
-	gitTimeout        = 3 * time.Minute
-	maxGitStderrBytes = 16 * 1024
+	gitTimeout = 3 * time.Minute
 )
 
 var repoNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
@@ -135,6 +133,15 @@ type gitRunner interface {
 	Run(ctx context.Context, dir string, env []string, args ...string) error
 }
 
+// secureGitRunner is implemented by the production runner. Keeping gitRunner
+// as the smaller seam preserves deterministic fakes while network operations
+// gain the isolated bare-transport path.
+type secureGitRunner interface {
+	gitRunner
+	CloneRemote(ctx context.Context, target, repo, token string) error
+	FetchRemote(ctx context.Context, target, repo, ref, token string, opts gitproc.FetchOptions) error
+}
+
 // PurgeReport summarizes managed clone cleanup without exposing local paths to
 // HTTP callers.
 type PurgeReport struct {
@@ -204,7 +211,7 @@ func NewManagerWithOptions(opts ManagerOptions) *Manager {
 		locks:          make(map[string]*repoLock),
 		caps:           make(map[string]*repoCap),
 		active:         make(map[string]struct{}),
-		git:            execGit{},
+		git:            execGit{runner: gitproc.New()},
 		tempDir:        os.TempDir,
 		maxWorktrees:   opts.MaxWorktreesPerRepo,
 		releaseTimeout: gitTimeout,
@@ -440,12 +447,23 @@ func (m *Manager) EnsureFullHistory(ctx context.Context, h *Handle, token string
 	} else if err != nil {
 		return fmt.Errorf("repoctx: inspect shallow marker: %w", err)
 	}
-	env, cleanup, err := buildAskPassEnv(token)
-	if err != nil {
-		return fmt.Errorf("repoctx: setup askpass: %w", err)
-	}
-	defer cleanup()
-	if err := m.runner().Run(ctx, h.Path(), env, "fetch", "--unshallow", "--prune", "origin"); err != nil {
+	runner := m.runner()
+	if secure, ok := runner.(secureGitRunner); ok {
+		metadata, _, err := readMarkerInfo(h.Path())
+		if err != nil {
+			return fmt.Errorf("repoctx: read managed clone marker for full history: %w", err)
+		}
+		if err := secure.FetchRemote(
+			ctx,
+			h.Path(),
+			metadata.Repo,
+			"HEAD",
+			token,
+			gitproc.FetchOptions{Unshallow: true},
+		); err != nil {
+			return fmt.Errorf("repoctx: unshallow %s: %w", h.Path(), err)
+		}
+	} else if err := runner.Run(ctx, h.Path(), nil, "fetch", "--unshallow", "--prune", "origin"); err != nil {
 		return fmt.Errorf("repoctx: unshallow %s: %w", h.Path(), err)
 	}
 	if err := touchMarker(h.Path()); err != nil {
@@ -618,14 +636,19 @@ func (m *Manager) ensureManagedClone(ctx context.Context, owner, name string, re
 }
 
 func (m *Manager) clone(ctx context.Context, target, repo, token string) error {
-	env, cleanup, err := buildAskPassEnv(token)
-	if err != nil {
-		return fmt.Errorf("repoctx: setup askpass: %w", err)
-	}
-	defer cleanup()
-	url := fmt.Sprintf("https://x-access-token@github.com/%s.git", repo)
-	if err := m.runner().Run(ctx, "", env, "clone", "--depth=1", url, target); err != nil {
-		return fmt.Errorf("repoctx: clone %s: %w", repo, err)
+	runner := m.runner()
+	if secure, ok := runner.(secureGitRunner); ok {
+		if err := secure.CloneRemote(ctx, target, repo, token); err != nil {
+			return fmt.Errorf("repoctx: clone %s: %w", repo, err)
+		}
+	} else {
+		url, err := gitproc.GitHubRemote(repo)
+		if err != nil {
+			return fmt.Errorf("repoctx: remote: %w", err)
+		}
+		if err := runner.Run(ctx, "", nil, "clone", "--depth=1", url, target); err != nil {
+			return fmt.Errorf("repoctx: clone %s: %w", repo, err)
+		}
 	}
 	if err := requireGitDir(target); err != nil {
 		return err
@@ -634,24 +657,34 @@ func (m *Manager) clone(ctx context.Context, target, repo, token string) error {
 }
 
 func (m *Manager) updateManagedClone(ctx context.Context, target, repo, token string) error {
-	env, cleanup, err := buildAskPassEnv(token)
+	url, err := gitproc.GitHubRemote(repo)
 	if err != nil {
-		return fmt.Errorf("repoctx: setup askpass: %w", err)
+		return fmt.Errorf("repoctx: remote: %w", err)
 	}
-	defer cleanup()
-	url := fmt.Sprintf("https://x-access-token@github.com/%s.git", repo)
+	runner := m.runner()
 	// set-url writes an opaque username-only URL and does not need
-	// credentials; keep the askpass env scoped to network operations.
-	if err := m.runner().Run(ctx, target, nil, "remote", "set-url", "origin", url); err != nil {
+	// credentials.
+	if err := runner.Run(ctx, target, nil, "remote", "set-url", "origin", url); err != nil {
 		return fmt.Errorf("repoctx: set remote url: %w", err)
 	}
-	if err := m.runner().Run(ctx, target, env, "fetch", "--depth=1", "--prune", "origin", "HEAD"); err != nil {
+	if secure, ok := runner.(secureGitRunner); ok {
+		if err := secure.FetchRemote(
+			ctx,
+			target,
+			repo,
+			"HEAD",
+			token,
+			gitproc.FetchOptions{Depth: 1},
+		); err != nil {
+			return fmt.Errorf("repoctx: fetch %s: %w", repo, err)
+		}
+	} else if err := runner.Run(ctx, target, nil, "fetch", "--depth=1", "--prune", "origin", "HEAD"); err != nil {
 		return fmt.Errorf("repoctx: fetch %s: %w", repo, err)
 	}
-	if err := m.runner().Run(ctx, target, nil, "reset", "--hard", "FETCH_HEAD"); err != nil {
+	if err := runner.Run(ctx, target, nil, "reset", "--hard", "FETCH_HEAD"); err != nil {
 		return fmt.Errorf("repoctx: reset %s: %w", repo, err)
 	}
-	if err := m.runner().Run(ctx, target, nil, "clean", "-fd", "-e", MarkerFile, "-e", worktreesDir); err != nil {
+	if err := runner.Run(ctx, target, nil, "clean", "-fd", "-e", MarkerFile, "-e", worktreesDir); err != nil {
 		return fmt.Errorf("repoctx: clean %s: %w", repo, err)
 	}
 	return nil
@@ -806,7 +839,7 @@ func (m *Manager) purgeTarget(ctx context.Context, repo, target string) error {
 
 func (m *Manager) runner() gitRunner {
 	if m == nil || m.git == nil {
-		return execGit{}
+		return execGit{runner: gitproc.New()}
 	}
 	return m.git
 }
@@ -1122,57 +1155,51 @@ func touchMarker(dir string) error {
 }
 
 func requireGitDir(dir string) error {
-	if info, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+	path := filepath.Join(dir, ".git")
+	if info, err := os.Lstat(path); err != nil {
 		return fmt.Errorf("repoctx: clone target %q has no .git directory: %w", dir, err)
+	} else if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("repoctx: clone target %q has symlinked .git", dir)
 	} else if !info.IsDir() {
 		return fmt.Errorf("repoctx: clone target %q has non-directory .git", dir)
 	}
 	return nil
 }
 
-func buildAskPassEnv(token string) ([]string, func(), error) {
-	dir, err := os.MkdirTemp("", "heimdallm-askpass-*")
-	if err != nil {
-		return nil, nil, fmt.Errorf("create askpass dir: %w", err)
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		os.RemoveAll(dir)
-		return nil, nil, fmt.Errorf("chmod askpass dir: %w", err)
-	}
-	helperPath := filepath.Join(dir, "askpass.sh")
-	script := "#!/bin/sh\nprintf '%s' \"$HEIMDALLM_GIT_TOKEN\"\n"
-	if err := os.WriteFile(helperPath, []byte(script), 0o700); err != nil {
-		os.RemoveAll(dir)
-		return nil, nil, fmt.Errorf("write askpass script: %w", err)
-	}
-	env := append(os.Environ(),
-		"GIT_ASKPASS="+helperPath,
-		"GIT_TERMINAL_PROMPT=0",
-		"HEIMDALLM_GIT_TOKEN="+token,
-	)
-	cleanup := func() { os.RemoveAll(dir) }
-	return env, cleanup, nil
+type execGit struct {
+	runner *gitproc.Runner
 }
 
-type execGit struct{}
+func (g execGit) proc() *gitproc.Runner {
+	if g.runner == nil {
+		return gitproc.New()
+	}
+	return g.runner
+}
 
-func (execGit) Run(ctx context.Context, dir string, env []string, args ...string) error {
-	runCtx, cancel := context.WithTimeout(ctx, gitTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(runCtx, "git", args...)
-	cmd.Dir = dir
-	cmd.Env = os.Environ()
-	if env != nil {
-		cmd.Env = env
+func (g execGit) Run(ctx context.Context, dir string, env []string, args ...string) error {
+	if len(env) != 0 {
+		return errors.New("repoctx: custom Git environments are disabled")
 	}
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		errText := stderr.String()
-		if len(errText) > maxGitStderrBytes {
-			errText = errText[:maxGitStderrBytes] + "\n... (stderr truncated)"
-		}
-		return fmt.Errorf("%w (stderr: %s)", err, strings.TrimSpace(errText))
+	return g.proc().Run(ctx, dir, args...)
+}
+
+func (g execGit) CloneRemote(ctx context.Context, target, repo, token string) error {
+	remote, err := gitproc.GitHubRemote(repo)
+	if err != nil {
+		return err
 	}
-	return nil
+	return g.proc().CloneNoCheckout(ctx, remote, target, token, 1)
+}
+
+func (g execGit) FetchRemote(
+	ctx context.Context,
+	target, repo, ref, token string,
+	opts gitproc.FetchOptions,
+) error {
+	remote, err := gitproc.GitHubRemote(repo)
+	if err != nil {
+		return err
+	}
+	return g.proc().Fetch(ctx, target, remote, ref, token, opts)
 }

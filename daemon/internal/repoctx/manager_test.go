@@ -1103,3 +1103,17 @@ func TestEnsureFullHistoryUnshallowsManagedClone(t *testing.T) {
 		t.Fatalf("git calls = %v, want unshallow fetch", calls)
 	}
 }
+
+func TestRequireGitDirRejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	attackerGitDir := filepath.Join(t.TempDir(), "git")
+	if err := os.MkdirAll(attackerGitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(attackerGitDir, filepath.Join(dir, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	if err := requireGitDir(dir); err == nil || !strings.Contains(err.Error(), "symlinked .git") {
+		t.Fatalf("requireGitDir error = %v, want symlink rejection", err)
+	}
+}

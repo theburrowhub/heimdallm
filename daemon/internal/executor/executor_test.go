@@ -274,8 +274,73 @@ func TestExecuteRawAddsDetectedWorkDirFlags(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read captured cwd: %v", err)
 			}
-			requireSameDir(t, strings.TrimSpace(string(cwdBytes)), workDir)
+			capturedCWD := strings.TrimSpace(string(cwdBytes))
+			if tc.cli == "gemini" || tc.cli == "opencode" {
+				if cleanResolvedPath(capturedCWD) == cleanResolvedPath(workDir) {
+					t.Fatalf("%s ran inside the repository instead of its isolated directory", tc.cli)
+				}
+				if _, err := os.Stat(capturedCWD); !os.IsNotExist(err) {
+					t.Fatalf("%s isolated cwd was not removed after execution: %v", tc.cli, err)
+				}
+			} else {
+				requireSameDir(t, capturedCWD, workDir)
+			}
 		})
+	}
+}
+
+func TestExecuteRawDetectsOpenCodeDirFromRunHelp(t *testing.T) {
+	binDir := t.TempDir()
+	captureArgs := filepath.Join(t.TempDir(), "args.txt")
+	captureCWD := filepath.Join(t.TempDir(), "cwd.txt")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"--help\" ]; then\n" +
+		"  printf '%s\\n' 'Usage: opencode [command]' 'Commands: run'\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"if [ \"$1\" = \"--pure\" ] && [ \"$2\" = \"run\" ] && [ \"$3\" = \"--help\" ]; then\n" +
+		"  printf '%s\\n' 'Usage: opencode run [message..]' '  --dir <path>'\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"printf '%s\\n' \"$*\" > " + shellQuote(captureArgs) + "\n" +
+		"printf '%s\\n' \"$PWD\" > " + shellQuote(captureCWD) + "\n" +
+		"printf '{\"ok\":true}\\n'\n"
+	if err := os.WriteFile(filepath.Join(binDir, "opencode"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake OpenCode: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	workDir := t.TempDir()
+	if _, err := executor.New().ExecuteRaw(
+		"opencode",
+		"prompt",
+		executor.ExecOptions{WorkDir: workDir},
+	); err != nil {
+		t.Fatalf("ExecuteRaw: %v", err)
+	}
+
+	argsBytes, err := os.ReadFile(captureArgs)
+	if err != nil {
+		t.Fatalf("read captured args: %v", err)
+	}
+	args := strings.Fields(string(argsBytes))
+	runIndex := indexOf(args, "run")
+	pureIndex := indexOf(args, "--pure")
+	dirIndex := indexOf(args, "--dir")
+	workDirIndex := indexOf(args, workDir)
+	if pureIndex < 0 || runIndex <= pureIndex || dirIndex <= runIndex || workDirIndex != dirIndex+1 {
+		t.Fatalf("args = %v, want OpenCode --pure run --dir %s", args, workDir)
+	}
+	cwdBytes, err := os.ReadFile(captureCWD)
+	if err != nil {
+		t.Fatalf("read captured cwd: %v", err)
+	}
+	capturedCWD := strings.TrimSpace(string(cwdBytes))
+	if cleanResolvedPath(capturedCWD) == cleanResolvedPath(workDir) {
+		t.Fatal("OpenCode ran inside the repository instead of its isolated directory")
+	}
+	if _, err := os.Stat(capturedCWD); !os.IsNotExist(err) {
+		t.Fatalf("OpenCode isolated cwd was not removed after execution: %v", err)
 	}
 }
 
@@ -309,7 +374,33 @@ func TestExecuteRawFallsBackToCWDWhenWorkDirFlagUnsupported(t *testing.T) {
 	requireSameDir(t, strings.TrimSpace(string(cwdBytes)), workDir)
 }
 
+func TestOpenCodeRepositoryAnalysisRejectsCWDOnlyCLI(t *testing.T) {
+	binDir := t.TempDir()
+	started := filepath.Join(t.TempDir(), "started")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"--pure\" ] && [ \"$2\" = \"run\" ] && [ \"$3\" = \"--help\" ]; then printf '%s\\n' 'Usage: opencode run'; exit 0; fi\n" +
+		"printf started > " + shellQuote(started) + "\n"
+	if err := os.WriteFile(filepath.Join(binDir, "opencode"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake OpenCode: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	_, err := executor.New().ExecuteRaw(
+		"opencode",
+		"prompt",
+		executor.ExecOptions{WorkDir: t.TempDir()},
+	)
+	if err == nil || !strings.Contains(err.Error(), "must support --pure and run --dir") {
+		t.Fatalf("ExecuteRaw error = %v, want fail-closed OpenCode policy error", err)
+	}
+	if _, statErr := os.Stat(started); !os.IsNotExist(statErr) {
+		t.Fatalf("OpenCode executed after unsafe CWD-only detection: %v", statErr)
+	}
+}
+
 func TestExecuteRawCodexUsesExecAndReadsPromptFromStdin(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "codex-parent-secret")
+	t.Setenv("HTTPS_PROXY", "https://proxy-user:proxy-secret@example.invalid")
 	binDir := t.TempDir()
 	captureArgs := filepath.Join(t.TempDir(), "args.txt")
 	capturePrompt := filepath.Join(t.TempDir(), "prompt.txt")
@@ -366,6 +457,17 @@ func TestExecuteRawCodexUsesExecAndReadsPromptFromStdin(t *testing.T) {
 	}
 	if strings.Contains(string(argsBytes), "--approval-mode") {
 		t.Fatalf("args = %v, must not use removed --approval-mode flag", args)
+	}
+	if !strings.Contains(string(argsBytes), "allow_login_shell=false") {
+		t.Fatalf("args = %v, want login shells disabled", args)
+	}
+	if !strings.Contains(string(argsBytes), `shell_environment_policy={inherit="none"`) {
+		t.Fatalf("args = %v, want a clean nested-command environment", args)
+	}
+	for _, secret := range []string{"codex-parent-secret", "proxy-secret"} {
+		if strings.Contains(string(argsBytes), secret) {
+			t.Fatalf("args exposed secret %q: %v", secret, args)
+		}
 	}
 	promptBytes, err := os.ReadFile(capturePrompt)
 	if err != nil {
@@ -571,6 +673,10 @@ func indexOf(args []string, target string) int {
 func fakeCLIScript(help, captureArgs, captureCWD string) string {
 	return "#!/bin/sh\n" +
 		"if [ \"$1\" = \"--help\" ]; then\n" +
+		"  printf '%s\\n' " + shellQuote(help) + "\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"if [ \"$1\" = \"--pure\" ] && [ \"$2\" = \"run\" ] && [ \"$3\" = \"--help\" ]; then\n" +
 		"  printf '%s\\n' " + shellQuote(help) + "\n" +
 		"  exit 0\n" +
 		"fi\n" +
@@ -876,6 +982,7 @@ func TestValidateExtraFlagsForCLIRejectsPolicyAliases(t *testing.T) {
 		{name: "OpenCode command config", cli: "opencode", flags: "--command unsafe"},
 		{name: "OpenCode future permission alias", cli: "opencode", flags: "--permission=allow"},
 		{name: "OpenCode external share", cli: "opencode", flags: "--share"},
+		{name: "OpenCode pure negation", cli: "opencode", flags: "--pure=false"},
 		{name: "OpenCode sandbox negation", cli: "opencode", flags: "--no-sandbox"},
 		{name: "OpenCode resumed session", cli: "opencode", flags: "-sSESSION"},
 		{name: "OpenCode continued session", cli: "opencode", flags: "--continue"},

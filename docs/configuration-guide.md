@@ -595,6 +595,53 @@ startup or discarding unrelated stored settings. When execution falls back to a
 different CLI, provider-specific options from the unavailable primary are not
 forwarded.
 
+### AI subprocess environment isolation
+
+AI CLIs do not inherit `os.Environ()` from the daemon. Every execution starts
+from an empty environment and receives only a small runtime baseline plus the
+selected provider's default credentials:
+
+| CLI | Credentials exposed by default |
+|---|---|
+| Claude | `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN` |
+| Codex | `OPENAI_API_KEY`, `CODEX_API_KEY` |
+| Gemini | `GEMINI_API_KEY`, `GOOGLE_API_KEY`, and explicitly configured Vertex AI variables |
+| OpenCode | `OPENROUTER_API_KEY` |
+
+Each execution also gets a new mode-`0700` temporary `HOME`. Only the selected
+provider's state/authentication directories are bridged into it, preserving
+file-based login without exposing another CLI's state or unrelated home files.
+Detection and `--help` probes receive no provider credentials.
+OpenCode runs with its managed `--pure` policy, so repository and user-state
+plugins are not executed with the selected backend credential. Heimdallm also
+sets `OPENCODE_DISABLE_PROJECT_CONFIG=1`; repository `opencode.json`,
+`.opencode`, MCP, command, agent, and dependency-install configuration is not
+loaded, while operator-level configuration remains available through the
+isolated state bridge.
+
+Additional variables require an exact, comma-separated names allowlist:
+
+```bash
+HEIMDALLM_AI_GEMINI_ENV_ALLOWLIST=GOOGLE_CLOUD_QUOTA_PROJECT
+HEIMDALLM_AI_OPENCODE_ENV_ALLOWLIST=CORPORATE_TENANT_ID
+```
+
+Standard proxy and CA variables are already part of the common runtime
+baseline and do not need to be repeated.
+
+`GITHUB_TOKEN`, `GH_TOKEN`, `HEIMDALLM_*`, `GIT_*`, and dynamic-loader or
+shell-startup injection variables are permanently denied. `SSH_AUTH_SOCK` is
+absent by default and requires both an explicit per-CLI allowlist entry and an
+operator-owned socket mount. Custom allowlisted values must also be forwarded
+to the daemon container through a private compose overlay. Cross-provider
+credential boundaries are permanent for Claude, Codex, and Gemini. OpenCode
+is the deliberate exception because it is a multi-provider client: an exact
+OpenCode allowlist entry authorizes only its configured backend key.
+
+See [AI subprocess security](subprocess-security.md) for the complete
+environment contract, provider-state bridge, SSH overlay, and residual threat
+model.
+
 ### Prompt categories
 
 Each repo can use different agent profiles for different pipeline stages:
@@ -808,11 +855,46 @@ Copy only the `sk-ant-oat...` line it prints and paste it into `docker/.env`.
 
 | CLI | Env var | Where to get it |
 |---|---|---|
-| Gemini | `GEMINI_API_KEY` | https://aistudio.google.com/apikey |
+| Gemini API key | `GEMINI_API_KEY` or `GOOGLE_API_KEY` | https://aistudio.google.com/apikey |
+| Gemini Vertex AI | `GOOGLE_GENAI_USE_VERTEXAI`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `GOOGLE_APPLICATION_CREDENTIALS` | Google Cloud |
 | Codex / OpenAI | `OPENAI_API_KEY` or `CODEX_API_KEY` | https://platform.openai.com/api-keys |
 | OpenCode (OpenRouter) | `OPENROUTER_API_KEY` | https://openrouter.ai/keys |
 
-OpenCode also accepts `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` depending on your configured provider.
+`OPENROUTER_API_KEY` is OpenCode's default credential. To preserve OpenCode's
+multi-provider support without exposing every daemon key, name only the
+configured backend credential explicitly:
+
+```bash
+HEIMDALLM_AI_OPENCODE_ENV_ALLOWLIST=ANTHROPIC_API_KEY
+```
+
+The same opt-in supports `OPENAI_API_KEY`, `CODEX_API_KEY`, `GEMINI_API_KEY`,
+or `GOOGLE_API_KEY`. Credentials not named in the OpenCode allowlist remain
+absent.
+
+**Gemini with Vertex AI:**
+
+```bash
+# docker/.env
+GOOGLE_GENAI_USE_VERTEXAI=true
+GOOGLE_CLOUD_PROJECT=my-project
+GOOGLE_CLOUD_LOCATION=global
+GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/google-application-credentials.json
+```
+
+The credentials path is container-local. Mount the service-account file with
+an operator-owned override rather than adding it to the repository:
+
+```yaml
+# docker/docker-compose.vertex.yml
+services:
+  heimdallm:
+    volumes:
+      - type: bind
+        source: /absolute/host/path/service-account.json
+        target: /run/secrets/google-application-credentials.json
+        read_only: true
+```
 
 **Reusing Gemini browser OAuth from your host:**
 
@@ -823,7 +905,9 @@ volumes:
   - ~/.gemini:/home/heimdallm/.gemini:ro
 ```
 
-Leave `GEMINI_API_KEY` empty. The container reads your host's OAuth tokens read-only.
+Leave `GEMINI_API_KEY` and `GOOGLE_API_KEY` empty. The container reads your
+host's OAuth tokens read-only and projects only Gemini state into the
+execution's isolated temporary home.
 
 ---
 
@@ -847,34 +931,50 @@ The `web` service depends on the daemon's healthcheck (`/health`) before accepti
 | `heimdallm-data` (named) | `/data` | SQLite database and API token |
 | `heimdallm-config` (named) | `/config` | `config.toml` (daemon-owned, web UI edits here) |
 | `$HEIMDALLM_LOCAL_DIR_BASE` | `/home/heimdallm/repos` (read-only) | Host repos root for full-repo analysis |
-| SSH agent socket | `/ssh-agent` (read-only) | SSH agent for git operations in `auto_implement` |
 
 The config volume is a **named volume** (not a bind mount). This is intentional — a bind mount would be owned by root on the host, which blocked the daemon from writing `config.toml`. The image chowns `/config` to the `heimdallm` user during build.
 
-### SSH agent forwarding
+### Optional SSH agent access for an AI CLI
 
-`auto_implement` pushes branches over SSH. Forward your host's SSH agent into the container:
+The base deployment does not expose the host SSH agent. Heimdallm's
+`auto_implement` Git fetch/push path uses HTTPS with an ephemeral askpass helper
+and does not require SSH.
 
-**macOS (Docker Desktop):**
-
-Docker Desktop exposes the host agent at a fixed path. The compose file uses it by default:
-
-```yaml
-- ${HEIMDALLM_SSH_AUTH_SOCK:-/run/host-services/ssh-auth.sock}:/ssh-agent:ro
-```
-
-No extra configuration needed on macOS.
-
-**Linux:**
-
-Set `HEIMDALLM_SSH_AUTH_SOCK` to your agent socket path in `docker/.env`:
+If the selected AI CLI itself needs SSH, explicitly allow `SSH_AUTH_SOCK` for
+that provider and mount the socket with a private compose overlay. Example for
+Claude on macOS Docker Desktop:
 
 ```bash
 # docker/.env
-HEIMDALLM_SSH_AUTH_SOCK=/run/user/1000/keyring/ssh
-# or
-HEIMDALLM_SSH_AUTH_SOCK=$SSH_AUTH_SOCK
+HEIMDALLM_AI_CLAUDE_ENV_ALLOWLIST=SSH_AUTH_SOCK
+HEIMDALLM_SSH_AUTH_SOCK=/run/host-services/ssh-auth.sock
 ```
+
+```yaml
+# docker/docker-compose.ssh.yml
+services:
+  heimdallm:
+    environment:
+      SSH_AUTH_SOCK: /ssh-agent
+    volumes:
+      - type: bind
+        source: ${HEIMDALLM_SSH_AUTH_SOCK}
+        target: /ssh-agent
+        read_only: true
+```
+
+```bash
+docker compose \
+  --env-file docker/.env \
+  -f docker/docker-compose.yml \
+  -f docker/docker-compose.ssh.yml \
+  up -d
+```
+
+On Linux, set `HEIMDALLM_SSH_AUTH_SOCK` to the host agent's actual socket.
+Change the allowlist variable when the selected CLI is Codex, Gemini, or
+OpenCode. This gives that CLI signing authority through every key loaded in the
+agent; enable it only when that expanded authority is intentional.
 
 ### Day-to-day commands
 
