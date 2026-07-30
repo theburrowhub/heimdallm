@@ -16,6 +16,9 @@ checked_in_allowlist="$temp_root/checked-in-resource-allowlist"
 public_resource_rules_file="$temp_root/public-resource-rules"
 production_policy_skeleton="$temp_root/production-policy-skeleton"
 public_policy_skeleton="$temp_root/public-policy-skeleton"
+empty_resource_rules_file="$temp_root/empty-resource-rules"
+empty_policy_output="$temp_root/empty-policy-output"
+empty_policy_error="$temp_root/empty-policy-error"
 pubspec="$repo_root/flutter_app/pubspec.yaml"
 resource_policy="$repo_root/flutter_app/Dockerfile.web.dockerignore"
 undeclared_asset="assets/heimdallm-undeclared-context-canary-$$.txt"
@@ -56,11 +59,18 @@ function invalid(message) {
   exit 1
 }
 
-function emit_resource_rules(line) {
-  while ((getline line < resource_rules_file) > 0) {
+function emit_resource_rules(line, result, emitted) {
+  while ((result = getline line < resource_rules_file) > 0) {
     print line
+    emitted++
   }
   close(resource_rules_file)
+  if (result < 0) {
+    invalid("cannot read resource rules file " resource_rules_file)
+  }
+  if (emitted == 0) {
+    invalid("resource rules file is empty: " resource_rules_file)
+  }
 }
 
 $0 == "# BEGIN flutter-resource-allowlist" {
@@ -143,6 +153,17 @@ $0 == "# END flutter-public-secret-like-resource-allowlist" {
 }
 ' "$1" >"$2"
 }
+
+: >"$empty_resource_rules_file"
+if write_policy_variant \
+  "$resource_policy" \
+  "$empty_policy_output" \
+  "$empty_resource_rules_file" \
+  "!$public_certificate" 2>"$empty_policy_error"; then
+  fail "policy generator accepted an empty resource rules file"
+fi
+grep -F "resource rules file is empty:" "$empty_policy_error" >/dev/null \
+  || fail "policy generator did not explain an empty resource rules file"
 
 command -v docker >/dev/null 2>&1 || fail "Docker is required"
 docker buildx version >/dev/null 2>&1 \
