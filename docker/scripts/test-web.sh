@@ -21,6 +21,8 @@ COMPOSE="docker compose -f docker/docker-compose.yml -f docker/docker-compose.te
 log() { printf '▶  %s\n' "$1"; }
 fail() { printf '✗  %s\n' "$1" >&2; exit 1; }
 
+export DOCKER_BUILDKIT=1
+
 cleanup() {
   $COMPOSE down -v --remove-orphans >/dev/null 2>&1 || true
   rm -f "${INDEX_HTML:-}" "${DEEP_HTML:-}" "${SSE_HDR:-}"

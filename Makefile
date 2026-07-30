@@ -20,7 +20,8 @@ endif
         release-local package-macos install-service verify-linux run-linux test-install-macos \
         install-macos uninstall-macos install-linux uninstall-linux \
         setup up up-build up-daemon up-build-daemon down logs logs-daemon \
-        ps restart clean clean-clones _check-docker _check-env _check-macos _check-macos-user _check-linux _post-up-hints
+        ps restart clean clean-clones _check-docker _check-buildkit _check-env \
+        _check-macos _check-macos-user _check-linux _post-up-hints
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
@@ -336,6 +337,13 @@ setup:
 _check-docker:
 	@command -v docker >/dev/null || { echo "❌  Docker is required. Install from https://docs.docker.com/get-docker/"; exit 1; }
 
+_check-buildkit: _check-docker
+	@if [ "$${DOCKER_BUILDKIT:-1}" = "0" ]; then \
+	  echo "❌  BuildKit cannot be disabled for Flutter Web builds."; \
+	  echo "    Dockerfile.web.dockerignore is only applied by BuildKit."; \
+	  exit 1; \
+	fi
+
 _check-env: _check-docker
 	@test -f $(DOCKER_ENV) || { \
 	  echo "❌  $(DOCKER_ENV) missing."; \
@@ -381,13 +389,13 @@ _post-up-hints:
 	@echo ""
 	@echo "Next: open http://localhost:$${HEIMDALLM_WEB_PORT:-3000}  ·  logs: \`make logs\`  ·  stop: \`make down\`"
 
-up: _check-env
-	docker compose -f $(COMPOSE_FILE) up -d
+up: _check-env _check-buildkit
+	DOCKER_BUILDKIT=1 docker compose -f $(COMPOSE_FILE) up -d
 	@$(MAKE) --no-print-directory _post-up-hints
 
 # Like `up` but rebuilds images from local source (use after `git pull` on main).
-up-build: _check-env
-	docker compose -f $(COMPOSE_FILE) up -d --build --pull always
+up-build: _check-env _check-buildkit
+	DOCKER_BUILDKIT=1 docker compose -f $(COMPOSE_FILE) up -d --build --pull always
 	@$(MAKE) --no-print-directory _post-up-hints
 
 up-daemon: _check-env

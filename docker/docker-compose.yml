@@ -78,9 +78,10 @@ services:
       # this version, otherwise the daemon will regenerate from env vars
       # and your manual edits are lost silently:
       #
-      #   docker compose up --no-start heimdallm     # create container
+      #   DOCKER_BUILDKIT=1 docker compose up --no-start heimdallm
+      #                                                   # create container
       #   docker cp docker/config/config.toml heimdallm:/config/config.toml
-      #   docker compose up -d                        # start with the file in place
+      #   DOCKER_BUILDKIT=1 docker compose up -d     # start with the file in place
       #
       # Env-driven setups (HEIMDALLM_* in docker/.env) and saves you made
       # via the web UI Configuration screen are unaffected; both flow
@@ -131,7 +132,8 @@ services:
     build:
       # The Flutter project shares the repository-root assets directory via
       # flutter_app/assets -> ../assets. Use the repo root as context; the
-      # Dockerfile-specific ignore file keeps the transferred context minimal.
+      # BuildKit-only Dockerfile-specific ignore file keeps the transferred
+      # context minimal. Make wrappers set DOCKER_BUILDKIT=1 explicitly.
       context: ..
       dockerfile: flutter_app/Dockerfile.web
     container_name: heimdallm-web

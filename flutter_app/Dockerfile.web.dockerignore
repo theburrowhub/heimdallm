@@ -1,9 +1,11 @@
 # Dockerfile-specific ignore rules for repository-root web builds.
 #
-# Docker uses this file instead of the root .dockerignore whenever
-# flutter_app/Dockerfile.web is selected. Keep only the Flutter Web inputs,
-# runtime Nginx files, and the shared asset source reached by
-# flutter_app/assets -> ../assets.
+# BuildKit uses this file instead of the root .dockerignore whenever
+# flutter_app/Dockerfile.web is selected; the legacy builder does not. Supported
+# Make targets, tests, and documented direct builds therefore require BuildKit.
+# Keep only the Flutter Web inputs, runtime Nginx files, and the shared asset
+# source reached by flutter_app/assets -> ../assets. CI verifies that the
+# literal asset entries below exactly match flutter.assets in pubspec.yaml.
 **
 !assets/
 assets/**
@@ -25,10 +27,11 @@ flutter_app/**
 !flutter_app/docker-entrypoint.d/**
 
 # Defense in depth: a future source-directory exception must not leak local
-# credentials or private key material into the Docker build context.
+# credentials or private key material into the Docker build context. No
+# .env.example file is a web build input, so there is intentionally no global
+# exception for that name.
 **/.env
 **/.env.*
-!**/.env.example
 **/*.pem
 **/*.key
 **/*.crt

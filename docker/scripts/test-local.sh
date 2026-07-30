@@ -22,6 +22,10 @@ BASE_URL="http://localhost:${HEIMDALLM_PORT:-7842}"
 HEALTH_TIMEOUT=60   # seconds to wait for /health
 HEALTH_INTERVAL=2   # seconds between retries
 
+# The web service uses Dockerfile.web.dockerignore with a repository-root
+# context. The legacy builder ignores that file and must never be used here.
+export DOCKER_BUILDKIT=1
+
 # ─── Colors ───────────────────────────────────────────────────────────────────
 
 RED='\033[0;31m'

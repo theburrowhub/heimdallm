@@ -46,13 +46,5 @@ jobs:
           cache-from: type=gha,scope=flutter-web
           cache-to: type=gha,mode=max,scope=flutter-web
 
-      - name: Smoke-test Flutter Web image contents
-        run: |
-          docker run --rm --entrypoint sh heimdallm-web:test -ec '
-            web_root=/usr/share/nginx/html
-            test -s "$web_root/index.html"
-            test -s "$web_root/main.dart.js"
-            test -s "$web_root/assets/assets/icon.png"
-            test -s "$web_root/assets/assets/tray_icon.png"
-            test -s "$web_root/assets/assets/tray_icon@2x.png"
-          '
+      - name: Smoke-test Flutter Web image contents and runtime
+        run: sh docker/scripts/test-web-image.sh heimdallm-web:test

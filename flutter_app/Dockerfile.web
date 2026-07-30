@@ -1,3 +1,6 @@
+# BuildKit is required so Docker applies Dockerfile.web.dockerignore to the
+# repository-root context. Supported commands enforce this requirement.
+#
 # ── Stage 1: build the Flutter Web bundle ────────────────────────────────
 #
 # ghcr.io/cirruslabs/flutter ships a working Flutter SDK (Dart, Flutter,

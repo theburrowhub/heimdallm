@@ -74,7 +74,7 @@ Or use CODEOWNERS/branch protection to auto-assign reviewers.
 
 ```bash
 # With test compose overlay (no auto-restart, mapped ports)
-docker compose -f docker/docker-compose.yml -f docker/docker-compose.test.yml up --build
+DOCKER_BUILDKIT=1 docker compose -f docker/docker-compose.yml -f docker/docker-compose.test.yml up --build
 ```
 
 Or use the Makefile shortcut:

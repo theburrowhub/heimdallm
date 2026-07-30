@@ -1,9 +1,0 @@
-build/
-.dart_tool/
-.idea/
-.vscode/
-ios/
-android/
-macos/
-linux/
-test/
