@@ -1245,6 +1245,11 @@ func TestHandlerPutConfig_AgentConfigs_EnforcesProviderPolicy(t *testing.T) {
 			body:       `{"agent_configs":{"claude":{"effort":"--dangerously-skip-permissions"}}}`,
 			wantStatus: http.StatusBadRequest,
 		},
+		{
+			name:       "Legacy free-form model rejected in new config writes",
+			body:       `{"agent_configs":{"claude":{"extra_flags":"--model opus"}}}`,
+			wantStatus: http.StatusBadRequest,
+		},
 	}
 
 	for _, tc := range tests {
@@ -1272,6 +1277,26 @@ func TestHandlerUpsertAgent_RejectsProviderPolicyFlags(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "--sandbox") {
 		t.Fatalf("error must identify rejected flag, got: %s", w.Body.String())
+	}
+}
+
+func TestHandlerUpsertAgent_AcceptsSafeLegacyTypedProfileFlags(t *testing.T) {
+	srv, s := setupServer(t)
+	body := `{"id":"legacy-claude","name":"Legacy Claude","cli":"claude","cli_flags":"--model opus --max-turns 5 --effort HIGH --verbose"}`
+	req := httptest.NewRequest("POST", "/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+	agents, err := s.ListAgents()
+	if err != nil {
+		t.Fatalf("list agents: %v", err)
+	}
+	if len(agents) != 1 || agents[0].CLIFlags != "--model opus --max-turns 5 --effort HIGH --verbose" {
+		t.Fatalf("legacy profile flags were not preserved for runtime migration: %+v", agents)
 	}
 }
 
@@ -1864,6 +1889,69 @@ func TestHandlePatchConfig_PreservesTrustedDangerousFlag(t *testing.T) {
 	}
 	if claude["permission_mode"] != "acceptEdits" {
 		t.Fatalf("legal sibling field did not land: %v", claude)
+	}
+}
+
+func TestHandlePatchConfig_MigratesLegacyTOMLBaseBeforeInnocuousPatch(t *testing.T) {
+	tomlContent := "[github]\n" +
+		"poll_interval = \"5m\"\n\n" +
+		"[ai]\n" +
+		"primary = \"codex\"\n\n" +
+		"[ai.agents.codex]\n" +
+		"extra_flags = \"--model gpt-5 --json\"\n"
+	tomlPath := writeTempTOML(t, tomlContent)
+
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+
+	req := httptest.NewRequest("PATCH", "/config", strings.NewReader(`{"github":{"poll_interval":"10m"}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("innocuous PATCH over legacy TOML = %d, want 200 (body: %s)", w.Code, w.Body.String())
+	}
+	m, err := config.ReadTOMLMap(tomlPath)
+	if err != nil {
+		t.Fatalf("read migrated TOML: %v", err)
+	}
+	githubConfig, _ := m["github"].(map[string]any)
+	if githubConfig["poll_interval"] != "10m" {
+		t.Fatalf("innocuous PATCH did not land: %v", githubConfig)
+	}
+	ai, _ := m["ai"].(map[string]any)
+	agents, _ := ai["agents"].(map[string]any)
+	codex, _ := agents["codex"].(map[string]any)
+	if codex["model"] != "gpt-5" || codex["extra_flags"] != "--json" {
+		t.Fatalf("legacy TOML base was not migrated safely: %v", codex)
+	}
+}
+
+func TestHandlePatchConfig_RejectsNewLegacyTypedFlagWithoutChangingTOML(t *testing.T) {
+	tomlContent := "[ai]\nprimary = \"codex\"\n"
+	tomlPath := writeTempTOML(t, tomlContent)
+
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+
+	body := `{"ai":{"agents":{"codex":{"extra_flags":"--model gpt-5"}}}}`
+	req := httptest.NewRequest("PATCH", "/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("new legacy typed flag PATCH = %d, want 400 (body: %s)", w.Code, w.Body.String())
+	}
+	got, err := os.ReadFile(tomlPath)
+	if err != nil {
+		t.Fatalf("read TOML after rejected PATCH: %v", err)
+	}
+	if string(got) != tomlContent {
+		t.Fatalf("rejected PATCH changed TOML:\n%s", got)
 	}
 }
 

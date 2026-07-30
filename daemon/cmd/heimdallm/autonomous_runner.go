@@ -78,8 +78,7 @@ func (g *coordinationCommentGen) GenerateCoordinationComment(_ context.Context, 
 		return "", err
 	}
 	prompt := buildCoordinationPrompt(c)
-	opts := executor.OptionsForSelectedCLI(primary, cli, executor.ExecOptions{})
-	raw, err := g.runner.ExecuteRaw(cli, prompt, opts)
+	raw, err := g.runner.ExecuteRaw(cli, prompt, executor.ExecOptions{})
 	if err != nil {
 		return "", err
 	}

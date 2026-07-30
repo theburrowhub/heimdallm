@@ -88,6 +88,110 @@ func TestOptionsForSelectedCLI(t *testing.T) {
 	}
 }
 
+func TestNormalizeTypedModesAcceptsHarmlessCaseVariants(t *testing.T) {
+	if got, err := executor.NormalizeEffort(" HIGH "); err != nil || got != "high" {
+		t.Fatalf("NormalizeEffort = %q, %v; want high", got, err)
+	}
+	if got, err := executor.NormalizePermissionMode("ACCEPTEDITS"); err != nil || got != "acceptEdits" {
+		t.Fatalf("NormalizePermissionMode = %q, %v; want acceptEdits", got, err)
+	}
+	if got, err := executor.NormalizeApprovalModeForCLI("codex", "FULL-AUTO"); err != nil || got != "never" {
+		t.Fatalf("NormalizeApprovalModeForCLI(codex) = %q, %v; want never", got, err)
+	}
+	if got, err := executor.NormalizeApprovalModeForCLI("gemini", "Auto-Edit"); err != nil || got != "auto_edit" {
+		t.Fatalf("NormalizeApprovalModeForCLI(gemini) = %q, %v; want auto_edit", got, err)
+	}
+}
+
+func TestMigrateLegacyTypedExtraFlagsForCLI(t *testing.T) {
+	tests := []struct {
+		name       string
+		cli        string
+		opts       executor.ExecOptions
+		want       executor.ExecOptions
+		wantFields []string
+	}{
+		{
+			name: "Claude promotes legacy typed fields and preserves safe flags",
+			cli:  "claude",
+			opts: executor.ExecOptions{
+				ExtraFlags: "--model opus --maxTurns=8 --effort HIGH --verbose",
+			},
+			want: executor.ExecOptions{
+				Model:      "opus",
+				MaxTurns:   8,
+				Effort:     "high",
+				ExtraFlags: "--verbose",
+			},
+			wantFields: []string{"model", "max_turns", "effort"},
+		},
+		{
+			name: "explicit typed model wins over legacy duplicate",
+			cli:  "codex",
+			opts: executor.ExecOptions{
+				Model:      "typed",
+				ExtraFlags: "-mlegacy --json",
+			},
+			want: executor.ExecOptions{
+				Model:      "typed",
+				ExtraFlags: "--json",
+			},
+			wantFields: []string{"model"},
+		},
+		{
+			name: "invalid legacy typed value remains for strict rejection",
+			cli:  "claude",
+			opts: executor.ExecOptions{
+				ExtraFlags: "--model --sandbox danger-full-access",
+			},
+			want: executor.ExecOptions{
+				ExtraFlags: "--model --sandbox danger-full-access",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, fields := executor.MigrateLegacyTypedExtraFlagsForCLI(tc.cli, tc.opts)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("migrated options:\n got: %+v\nwant: %+v", got, tc.want)
+			}
+			if !reflect.DeepEqual(fields, tc.wantFields) {
+				t.Fatalf("migrated fields = %v, want %v", fields, tc.wantFields)
+			}
+		})
+	}
+}
+
+func TestNormalizeLegacyCLIFlagsForCLI(t *testing.T) {
+	got, fields, err := executor.NormalizeLegacyCLIFlagsForCLI(
+		"claude",
+		"--model profile-model --max-turns 7 --effort HIGH --verbose",
+	)
+	if err != nil {
+		t.Fatalf("NormalizeLegacyCLIFlagsForCLI: %v", err)
+	}
+	want := executor.ExecOptions{
+		Model:      "profile-model",
+		MaxTurns:   7,
+		Effort:     "high",
+		ExtraFlags: "--verbose",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("normalized profile options:\n got: %+v\nwant: %+v", got, want)
+	}
+	if wantFields := []string{"model", "max_turns", "effort"}; !reflect.DeepEqual(fields, wantFields) {
+		t.Fatalf("migrated fields = %v, want %v", fields, wantFields)
+	}
+
+	if _, _, err := executor.NormalizeLegacyCLIFlagsForCLI(
+		"codex",
+		"--model gpt-5 --sandbox danger-full-access",
+	); err == nil {
+		t.Fatal("unsafe sibling flag was accepted after typed model migration")
+	}
+}
+
 func TestExecute(t *testing.T) {
 	_, file, _, _ := runtime.Caller(0)
 	binDir := filepath.Join(filepath.Dir(file), "testdata", "bin")
@@ -276,11 +380,13 @@ func TestValidateApprovalModeForCLI(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "codex current", cli: "codex", mode: "on-request"},
+		{name: "codex harmless casing", cli: "codex", mode: "On-Request"},
 		{name: "codex legacy", cli: "codex", mode: "auto-edit"},
 		{name: "codex rejects gemini plan", cli: "codex", mode: "plan", wantErr: true},
 		{name: "gemini default", cli: "gemini", mode: "default"},
 		{name: "gemini underscore auto edit", cli: "gemini", mode: "auto_edit"},
 		{name: "gemini hyphen auto edit", cli: "gemini", mode: "auto-edit"},
+		{name: "gemini harmless casing", cli: "gemini", mode: "AUTO-EDIT"},
 		{name: "gemini plan", cli: "gemini", mode: "plan"},
 		{name: "gemini rejects yolo", cli: "gemini", mode: "yolo", wantErr: true},
 		{name: "gemini rejects codex never", cli: "gemini", mode: "never", wantErr: true},
@@ -315,7 +421,7 @@ func TestExecuteRawGeminiAddsTypedApprovalBeforeSafeExtraFlags(t *testing.T) {
 
 	e := executor.New()
 	opts := executor.ExecOptions{
-		ApprovalMode: "auto-edit",
+		ApprovalMode: "AUTO-EDIT",
 		ExtraFlags:   "--output-format json --debug --output-format text",
 	}
 	if _, err := e.ExecuteRaw("gemini", "prompt", opts); err != nil {
@@ -376,6 +482,11 @@ func TestExecuteRawRejectsUnsafeRequestBeforeStartingCLI(t *testing.T) {
 			name: "legacy Claude extra flags",
 			cli:  "claude",
 			opts: executor.ExecOptions{ExtraFlags: "--permission-mode=bypassPermissions"},
+		},
+		{
+			name: "free-form model cannot override typed model",
+			cli:  "claude",
+			opts: executor.ExecOptions{Model: "typed", ExtraFlags: "--model other"},
 		},
 		{
 			name: "legacy Codex extra flags",
@@ -565,8 +676,8 @@ func TestValidateExtraFlags(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:    "safe model flag — allowed",
-			flags:   "--model claude-opus-4-6",
+			name:    "safe output flag — allowed",
+			flags:   "--output-format json",
 			wantErr: false,
 		},
 		{
@@ -591,7 +702,7 @@ func TestValidateExtraFlags(t *testing.T) {
 		},
 		{
 			name:    "mixed safe flags — allowed",
-			flags:   "--model claude-opus-4-6 --max-turns 5",
+			flags:   "--output-format json --verbose",
 			wantErr: false,
 		},
 		{
@@ -669,6 +780,10 @@ func TestValidateExtraFlagsForCLIRejectsPolicyAliases(t *testing.T) {
 		{name: "Claude resume hidden in legacy debug bundle", cli: "claude", flags: "-dr00000000-0000-4000-8000-000000000000"},
 		{name: "Claude PR session", cli: "claude", flags: "--from-pr 42"},
 		{name: "Claude tool availability", cli: "claude", flags: "--tools Read"},
+		{name: "Claude typed model long", cli: "claude", flags: "--model opus"},
+		{name: "Claude typed model short attached", cli: "claude", flags: "-mopus"},
+		{name: "Claude typed effort", cli: "claude", flags: "--effort high"},
+		{name: "Claude typed max turns casing alias", cli: "claude", flags: "--maxTurns=5"},
 
 		{name: "Codex approval", cli: "codex", flags: "--ask-for-approval never"},
 		{name: "Codex approval camel case", cli: "codex", flags: "--askForApproval=never"},
@@ -701,6 +816,7 @@ func TestValidateExtraFlagsForCLIRejectsPolicyAliases(t *testing.T) {
 		{name: "Codex OSS provider", cli: "codex", flags: "--oss"},
 		{name: "Codex local provider", cli: "codex", flags: "--local-provider ollama"},
 		{name: "Codex repeated override", cli: "codex", flags: "--color never --sandbox read-only --SaNdBoX=danger-full-access"},
+		{name: "Codex typed model short", cli: "codex", flags: "-m gpt-5"},
 
 		{name: "Gemini sandbox", cli: "gemini", flags: "--sandbox"},
 		{name: "Gemini sandbox short", cli: "gemini", flags: "-s"},
@@ -729,6 +845,7 @@ func TestValidateExtraFlagsForCLIRejectsPolicyAliases(t *testing.T) {
 		{name: "Gemini no sandbox camel case", cli: "gemini", flags: "--noSandbox"},
 		{name: "Gemini worktree", cli: "gemini", flags: "-w unsafe"},
 		{name: "Gemini worktree short attached", cli: "gemini", flags: "-wunsafe"},
+		{name: "Gemini typed model", cli: "gemini", flags: "--model pro"},
 
 		{name: "OpenCode auto", cli: "opencode", flags: "--auto"},
 		{name: "OpenCode agent", cli: "opencode", flags: "--agent build"},
@@ -745,6 +862,7 @@ func TestValidateExtraFlagsForCLIRejectsPolicyAliases(t *testing.T) {
 		{name: "OpenCode resumed session", cli: "opencode", flags: "-sSESSION"},
 		{name: "OpenCode continued session", cli: "opencode", flags: "--continue"},
 		{name: "OpenCode interactive mode", cli: "opencode", flags: "-i"},
+		{name: "OpenCode typed model attached", cli: "opencode", flags: "-mopenai/gpt-5"},
 	}
 
 	for _, tc := range tests {
@@ -761,10 +879,10 @@ func TestValidateExtraFlagsForCLIAllowsSafeFlagsInOrder(t *testing.T) {
 		cli   string
 		flags string
 	}{
-		{cli: "claude", flags: "--model opus --max-turns 5 --output-format json --verbose --disallowed-tools Bash --strict-mcp-config"},
-		{cli: "codex", flags: "-mgpt-5 --json --color never --ephemeral"},
-		{cli: "gemini", flags: "-mpro --output-format json -d --screen-reader"},
-		{cli: "opencode", flags: "-mopenai/gpt-5 --format json --thinking --variant high --pure"},
+		{cli: "claude", flags: "--fallback-model sonnet --output-format json --verbose --disallowed-tools Bash --strict-mcp-config"},
+		{cli: "codex", flags: "--json --color never --ephemeral"},
+		{cli: "gemini", flags: "--output-format json -d --screen-reader"},
+		{cli: "opencode", flags: "--format json --thinking --variant high --pure"},
 	}
 
 	for _, tc := range tests {

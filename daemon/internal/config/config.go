@@ -1290,8 +1290,18 @@ func (c *Config) Validate() error {
 	// This catches legacy TOML/store rows during reload; ExecuteRaw repeats the
 	// same checks at the subprocess boundary as defense in depth.
 	for name, a := range c.AI.Agents {
+		// Preserve unknown legacy profiles as inert configuration. They cannot
+		// be selected by Detect/ExecuteRaw, and every HTTP write still rejects
+		// unknown CLI names, but an unused historical section must not prevent
+		// the daemon from starting after an upgrade.
+		if err := executor.ValidateCLIName(name); err != nil {
+			continue
+		}
 		if err := executor.ValidateModel(a.Model); err != nil {
 			return fmt.Errorf("config: agents[%s].model: %w", name, err)
+		}
+		if a.MaxTurns < 0 {
+			return fmt.Errorf("config: agents[%s].max_turns must be non-negative", name)
 		}
 		if err := executor.ValidateEffort(a.Effort); err != nil {
 			return fmt.Errorf("config: agents[%s].effort: %w", name, err)
@@ -1337,6 +1347,247 @@ func (c *Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+// sanitizeLegacyAgentExecutionPolicy keeps trusted TOML/env configurations
+// from becoming a startup regression when Heimdallm learns about a newly
+// dangerous provider flag. HTTP writes remain strict and ExecuteRaw validates
+// again at the subprocess boundary; this compatibility path only canonicalizes
+// safe values and removes the individual unsafe field with an actionable log.
+//
+// Unknown profiles are preserved but inert. Detect and ExecuteRaw only accept
+// the four supported CLI names, while retaining the map entry avoids deleting
+// a user's dormant configuration during an upgrade.
+func (c *Config) sanitizeLegacyAgentExecutionPolicy(source string) {
+	for name, agent := range c.AI.Agents {
+		if err := executor.ValidateCLIName(name); err != nil {
+			slog.Warn("config: preserving inert legacy agent profile for unknown CLI",
+				"source", source, "agent", name, "err", err)
+			continue
+		}
+		c.AI.Agents[name] = sanitizeLegacyAgentConfig(name, agent, source)
+	}
+}
+
+func sanitizeLegacyAgentConfig(name string, agent CLIAgentConfig, source string) CLIAgentConfig {
+	agent.Model = strings.TrimSpace(agent.Model)
+	if err := executor.ValidateModel(agent.Model); err != nil {
+		slog.Warn("config: ignored unsafe legacy agent field",
+			"source", source, "agent", name, "field", "model", "err", err)
+		agent.Model = ""
+	}
+	if agent.MaxTurns < 0 {
+		slog.Warn("config: ignored invalid legacy agent field",
+			"source", source, "agent", name, "field", "max_turns",
+			"err", "value must be non-negative")
+		agent.MaxTurns = 0
+	}
+	if normalized, err := executor.NormalizeEffort(agent.Effort); err != nil {
+		slog.Warn("config: ignored unsafe legacy agent field",
+			"source", source, "agent", name, "field", "effort", "err", err)
+		agent.Effort = ""
+	} else {
+		agent.Effort = normalized
+	}
+	if normalized, err := executor.NormalizePermissionMode(agent.PermissionMode); err != nil {
+		slog.Warn("config: ignored unsafe legacy agent field",
+			"source", source, "agent", name, "field", "permission_mode", "err", err)
+		agent.PermissionMode = ""
+	} else {
+		agent.PermissionMode = normalized
+	}
+	if normalized, err := executor.NormalizeApprovalModeForCLI(name, agent.ApprovalMode); err != nil {
+		slog.Warn("config: ignored unsafe legacy agent field",
+			"source", source, "agent", name, "field", "approval_mode", "err", err)
+		agent.ApprovalMode = ""
+	} else {
+		agent.ApprovalMode = normalized
+	}
+
+	opts, migrated := executor.MigrateLegacyTypedExtraFlagsForCLI(name, executor.ExecOptions{
+		Model:        agent.Model,
+		MaxTurns:     agent.MaxTurns,
+		ExtraFlags:   agent.ExtraFlags,
+		Effort:       agent.Effort,
+		ApprovalMode: agent.ApprovalMode,
+	})
+	if len(migrated) > 0 {
+		slog.Warn("config: migrated legacy extra_flags to typed agent fields",
+			"source", source, "agent", name, "fields", migrated)
+	}
+	agent.Model = opts.Model
+	agent.MaxTurns = opts.MaxTurns
+	agent.Effort = opts.Effort
+	agent.ExtraFlags = opts.ExtraFlags
+	if err := executor.ValidateExtraFlagsForCLI(name, agent.ExtraFlags); err != nil {
+		slog.Warn("config: ignored unsafe legacy agent field",
+			"source", source, "agent", name, "field", "extra_flags", "err", err)
+		agent.ExtraFlags = ""
+	}
+	return agent
+}
+
+// SanitizeLegacyAgentExecutionPolicyMap migrates only the trusted agent
+// settings already present in a TOML map. HTTP handlers call this before
+// applying their separately validated payload, so an old local --model flag
+// cannot make an unrelated PATCH fail while a new HTTP --model flag remains a
+// strict 400. Unknown fields and the local-only dangerously_skip_perms gate are
+// left untouched.
+func SanitizeLegacyAgentExecutionPolicyMap(m map[string]any, source string) error {
+	for aiKey, rawAI := range m {
+		if !strings.EqualFold(aiKey, "ai") {
+			continue
+		}
+		ai, ok := rawAI.(map[string]any)
+		if !ok {
+			continue
+		}
+		for agentsKey, rawAgents := range ai {
+			if !strings.EqualFold(agentsKey, "agents") {
+				continue
+			}
+			agents, ok := rawAgents.(map[string]any)
+			if !ok {
+				continue
+			}
+			for name, rawAgent := range agents {
+				if err := executor.ValidateCLIName(name); err != nil {
+					continue
+				}
+				agentMap, ok := rawAgent.(map[string]any)
+				if !ok {
+					continue
+				}
+				before, rewrite, err := legacyAgentConfigFromMap(agentMap)
+				if err != nil {
+					return fmt.Errorf("config: sanitize legacy TOML agent %q: %w", name, err)
+				}
+				after := sanitizeLegacyAgentConfig(name, before, source)
+				syncLegacyAgentStringField(agentMap, "model", before.Model, after.Model, rewrite["model"])
+				syncLegacyAgentIntField(agentMap, "max_turns", before.MaxTurns, after.MaxTurns, rewrite["max_turns"])
+				syncLegacyAgentStringField(agentMap, "approval_mode", before.ApprovalMode, after.ApprovalMode, rewrite["approval_mode"])
+				syncLegacyAgentStringField(agentMap, "extra_flags", before.ExtraFlags, after.ExtraFlags, rewrite["extra_flags"])
+				syncLegacyAgentStringField(agentMap, "effort", before.Effort, after.Effort, rewrite["effort"])
+				syncLegacyAgentStringField(agentMap, "permission_mode", before.PermissionMode, after.PermissionMode, rewrite["permission_mode"])
+			}
+		}
+	}
+	return nil
+}
+
+func legacyAgentConfigFromMap(m map[string]any) (CLIAgentConfig, map[string]bool, error) {
+	var agent CLIAgentConfig
+	rewrite := make(map[string]bool, 6)
+	stringField := func(canonical string, target *string) error {
+		raw, present, canonicalize := legacyMapValue(m, canonical)
+		rewrite[canonical] = canonicalize
+		if !present {
+			return nil
+		}
+		value, ok := raw.(string)
+		if !ok {
+			return fmt.Errorf("%s must be a string", canonical)
+		}
+		*target = value
+		return nil
+	}
+	if err := stringField("model", &agent.Model); err != nil {
+		return CLIAgentConfig{}, nil, err
+	}
+	if err := stringField("approval_mode", &agent.ApprovalMode); err != nil {
+		return CLIAgentConfig{}, nil, err
+	}
+	if err := stringField("extra_flags", &agent.ExtraFlags); err != nil {
+		return CLIAgentConfig{}, nil, err
+	}
+	if err := stringField("effort", &agent.Effort); err != nil {
+		return CLIAgentConfig{}, nil, err
+	}
+	if err := stringField("permission_mode", &agent.PermissionMode); err != nil {
+		return CLIAgentConfig{}, nil, err
+	}
+	if raw, present, canonicalize := legacyMapValue(m, "max_turns"); present {
+		rewrite["max_turns"] = canonicalize
+		value, err := legacyMapInt(raw)
+		if err != nil {
+			return CLIAgentConfig{}, nil, fmt.Errorf("max_turns: %w", err)
+		}
+		agent.MaxTurns = value
+	} else {
+		rewrite["max_turns"] = canonicalize
+	}
+	return agent, rewrite, nil
+}
+
+func legacyMapValue(m map[string]any, canonical string) (value any, present, canonicalize bool) {
+	if exact, ok := m[canonical]; ok {
+		value = exact
+		present = true
+	}
+	matches := 0
+	for key, candidate := range m {
+		if !strings.EqualFold(key, canonical) {
+			continue
+		}
+		matches++
+		if !present {
+			value = candidate
+			present = true
+		}
+		if key != canonical {
+			canonicalize = true
+		}
+	}
+	return value, present, canonicalize || matches > 1
+}
+
+func legacyMapInt(raw any) (int, error) {
+	switch value := raw.(type) {
+	case int:
+		return value, nil
+	case int64:
+		converted := int(value)
+		if int64(converted) != value {
+			return 0, fmt.Errorf("value is outside the supported integer range")
+		}
+		return converted, nil
+	case float64:
+		converted := int(value)
+		if float64(converted) != value {
+			return 0, fmt.Errorf("value must be an integer")
+		}
+		return converted, nil
+	default:
+		return 0, fmt.Errorf("value must be an integer")
+	}
+}
+
+func syncLegacyAgentStringField(m map[string]any, canonical, before, after string, canonicalize bool) {
+	if before == after && !canonicalize {
+		return
+	}
+	deleteLegacyAgentFieldAliases(m, canonical)
+	if after != "" {
+		m[canonical] = after
+	}
+}
+
+func syncLegacyAgentIntField(m map[string]any, canonical string, before, after int, canonicalize bool) {
+	if before == after && !canonicalize {
+		return
+	}
+	deleteLegacyAgentFieldAliases(m, canonical)
+	if after != 0 {
+		m[canonical] = int64(after)
+	}
+}
+
+func deleteLegacyAgentFieldAliases(m map[string]any, canonical string) {
+	for key := range m {
+		if strings.EqualFold(key, canonical) {
+			delete(m, key)
+		}
+	}
 }
 
 // validateNeverApproveMinSeverity bounds never_approve_min_severity to the
@@ -1553,6 +1804,7 @@ func Load(path string) (*Config, error) {
 	}
 	cfg.applyDefaults()
 	cfg.applyEnvOverrides()
+	cfg.sanitizeLegacyAgentExecutionPolicy("toml/env")
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -1583,6 +1835,7 @@ func LoadOrCreate(path string) (*Config, error) {
 	cfg := &Config{}
 	cfg.applyDefaults()
 	cfg.applyEnvOverrides()
+	cfg.sanitizeLegacyAgentExecutionPolicy("generated env")
 	if cfg.AI.Primary == "" {
 		return nil, fmt.Errorf("no config file and HEIMDALLM_AI_PRIMARY not set")
 	}

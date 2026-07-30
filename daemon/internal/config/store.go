@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+
+	"github.com/heimdallm/daemon/internal/executor"
 )
 
 // StoreLister is the subset of *store.Store that ApplyStore needs. Kept as a
@@ -59,11 +61,12 @@ func (c *Config) MergeStoreLayer(s StoreLister) error {
 // single malformed row therefore leaves the receiver untouched, so the
 // caller's error-path ("continuing with TOML+env") is truthful.
 //
-// cloneStoreMergeConfig copies the mutable slices touched below, and the
-// agent_configs branch replaces its map wholesale. If a future store key
-// mutates another map/slice in place, add it to that helper first.
+// cloneStoreMergeConfig copies the mutable slices and agents map touched below.
+// If a future store key mutates another map/slice in place, add it to that
+// helper first.
 func (c *Config) ApplyStore(rows map[string]string) error {
 	shadow := cloneStoreMergeConfig(c)
+	shadow.sanitizeLegacyAgentExecutionPolicy("pre-store config")
 	var storeRepos []string
 	var storeNonMonitored []string
 	var sawStoreRepos bool
@@ -148,26 +151,16 @@ func (c *Config) ApplyStore(rows map[string]string) error {
 				merged[k] = v
 			}
 			for cli, payload := range perCLI {
-				existing := merged[cli]
-				trustedDangerouslySkipPerms := existing.DangerouslySkipPerms
-				var fields map[string]json.RawMessage
-				if err := json.Unmarshal(payload, &fields); err != nil {
+				base, existed := merged[cli]
+				candidate, apply, err := mergeStoredAgentConfig(cli, base, payload)
+				if err != nil {
 					return fmt.Errorf("config: apply store key %q: agent %q: %w", key, cli, err)
 				}
-				for field := range fields {
-					if strings.EqualFold(field, "dangerously_skip_perms") {
-						slog.Warn("config: ignoring HTTP/store override of dangerously_skip_perms (M-5 gate)",
-							"agent", cli)
-					}
+				if apply {
+					merged[cli] = candidate
+				} else if !existed {
+					delete(merged, cli)
 				}
-				if err := json.Unmarshal(payload, &existing); err != nil {
-					return fmt.Errorf("config: apply store key %q: agent %q: %w", key, cli, err)
-				}
-				// Store rows originate from the HTTP API and are never trusted
-				// to alter this filesystem-only gate. Preserve the TOML/env
-				// value even when a legacy row contains a case-variant alias.
-				existing.DangerouslySkipPerms = trustedDangerouslySkipPerms
-				merged[cli] = existing
 			}
 			shadow.AI.Agents = merged
 		case "server_port":
@@ -186,11 +179,143 @@ func (c *Config) ApplyStore(rows map[string]string) error {
 	return nil
 }
 
+func mergeStoredAgentConfig(cli string, base CLIAgentConfig, payload json.RawMessage) (CLIAgentConfig, bool, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return base, false, err
+	}
+	if fields == nil {
+		return base, false, fmt.Errorf("agent config must be an object")
+	}
+	if err := executor.ValidateCLIName(cli); err != nil {
+		slog.Warn("config: ignoring store override for unknown CLI",
+			"agent", cli, "err", err)
+		return base, false, nil
+	}
+
+	candidate := base
+	if err := json.Unmarshal(payload, &candidate); err != nil {
+		return base, false, err
+	}
+
+	for field := range fields {
+		if strings.EqualFold(field, "dangerously_skip_perms") {
+			slog.Warn("config: ignoring HTTP/store override of dangerously_skip_perms (M-5 gate)",
+				"agent", cli)
+		}
+	}
+	// Store rows originate from the HTTP API and are never trusted to alter
+	// this filesystem-only gate, including through a case-variant alias.
+	candidate.DangerouslySkipPerms = base.DangerouslySkipPerms
+
+	if storeAgentFieldPresent(fields, "model") {
+		candidate.Model = strings.TrimSpace(candidate.Model)
+		if err := executor.ValidateModel(candidate.Model); err != nil {
+			warnIgnoredStoreAgentField(cli, "model", err)
+			candidate.Model = base.Model
+		}
+	}
+	if storeAgentFieldPresent(fields, "max_turns") && candidate.MaxTurns < 0 {
+		warnIgnoredStoreAgentField(cli, "max_turns", fmt.Errorf("value must be non-negative"))
+		candidate.MaxTurns = base.MaxTurns
+	}
+	if storeAgentFieldPresent(fields, "effort") {
+		if normalized, err := executor.NormalizeEffort(candidate.Effort); err != nil {
+			warnIgnoredStoreAgentField(cli, "effort", err)
+			candidate.Effort = base.Effort
+		} else {
+			candidate.Effort = normalized
+		}
+	}
+	if storeAgentFieldPresent(fields, "permission_mode") {
+		if normalized, err := executor.NormalizePermissionMode(candidate.PermissionMode); err != nil {
+			warnIgnoredStoreAgentField(cli, "permission_mode", err)
+			candidate.PermissionMode = base.PermissionMode
+		} else {
+			candidate.PermissionMode = normalized
+		}
+	}
+	if storeAgentFieldPresent(fields, "approval_mode") {
+		if normalized, err := executor.NormalizeApprovalModeForCLI(cli, candidate.ApprovalMode); err != nil {
+			warnIgnoredStoreAgentField(cli, "approval_mode", err)
+			candidate.ApprovalMode = base.ApprovalMode
+		} else {
+			candidate.ApprovalMode = normalized
+		}
+	}
+	if storeAgentFieldPresent(fields, "extra_flags") {
+		modelPresent := storeAgentFieldPresent(fields, "model")
+		maxTurnsPresent := storeAgentFieldPresent(fields, "max_turns")
+		effortPresent := storeAgentFieldPresent(fields, "effort")
+		migrationInput := executor.ExecOptions{
+			Model:        candidate.Model,
+			MaxTurns:     candidate.MaxTurns,
+			ApprovalMode: candidate.ApprovalMode,
+			ExtraFlags:   candidate.ExtraFlags,
+			Effort:       candidate.Effort,
+		}
+		// A legacy typed flag belongs to the store layer. When the same stored
+		// payload does not contain the corresponding typed field, let the
+		// migrated value override the lower-precedence TOML/env base exactly as
+		// the trailing argv flag did before this migration.
+		if !modelPresent {
+			migrationInput.Model = ""
+		}
+		if !maxTurnsPresent {
+			migrationInput.MaxTurns = 0
+		}
+		if !effortPresent {
+			migrationInput.Effort = ""
+		}
+		opts, migrated := executor.MigrateLegacyTypedExtraFlagsForCLI(cli, migrationInput)
+		if len(migrated) > 0 {
+			slog.Warn("config: migrated stored legacy extra_flags to typed agent fields",
+				"agent", cli, "fields", migrated)
+		}
+		for _, field := range migrated {
+			switch field {
+			case "model":
+				candidate.Model = opts.Model
+			case "max_turns":
+				candidate.MaxTurns = opts.MaxTurns
+			case "effort":
+				candidate.Effort = opts.Effort
+			}
+		}
+		candidate.ExtraFlags = opts.ExtraFlags
+		if err := executor.ValidateExtraFlagsForCLI(cli, candidate.ExtraFlags); err != nil {
+			warnIgnoredStoreAgentField(cli, "extra_flags", err)
+			candidate.ExtraFlags = base.ExtraFlags
+		}
+	}
+	return candidate, true, nil
+}
+
+func storeAgentFieldPresent(fields map[string]json.RawMessage, canonical string) bool {
+	for field := range fields {
+		if strings.EqualFold(field, canonical) {
+			return true
+		}
+	}
+	return false
+}
+
+func warnIgnoredStoreAgentField(cli, field string, err error) {
+	slog.Warn("config: ignored unsafe legacy store agent field",
+		"agent", cli, "field", field, "err", err)
+}
+
 func cloneStoreMergeConfig(c *Config) Config {
 	shadow := *c
 	shadow.GitHub.Repositories = cloneStrings(c.GitHub.Repositories)
 	shadow.GitHub.NonMonitored = cloneStrings(c.GitHub.NonMonitored)
 	shadow.GitHub.IssueTracking = cloneIssueTrackingConfig(c.GitHub.IssueTracking)
+	if c.AI.Agents != nil {
+		shadow.AI.Agents = make(map[string]CLIAgentConfig, len(c.AI.Agents))
+		for cli, agent := range c.AI.Agents {
+			shadow.AI.Agents[cli] = agent
+		}
+	}
 	return shadow
 }
 

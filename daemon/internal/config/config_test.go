@@ -2288,6 +2288,59 @@ primary = "claude"
 	}
 }
 
+func TestLoad_SanitizesLegacyAgentPolicyWithoutBlockingStartup(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	content := `
+[github]
+poll_interval = "10m"
+
+[ai]
+primary = "codex"
+
+[ai.agents.codex]
+approval_mode = "ON-REQUEST"
+extra_flags = "--model gpt-5 --json"
+
+[ai.agents.gemini]
+approval_mode = "YOLO"
+extra_flags = "--sandbox"
+
+[ai.agents.claude]
+effort = "HIGH"
+permission_mode = "ACCEPTEDITS"
+
+[ai.agents.future_cli]
+model = "preserve-inert-profile"
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load legacy config: %v", err)
+	}
+	if cfg.GitHub.PollInterval != "10m" {
+		t.Fatalf("unrelated config lost: poll_interval = %q", cfg.GitHub.PollInterval)
+	}
+	codex := cfg.AI.Agents["codex"]
+	if codex.Model != "gpt-5" || codex.ApprovalMode != "on-request" || codex.ExtraFlags != "--json" {
+		t.Fatalf("Codex legacy policy was not migrated safely: %+v", codex)
+	}
+	gemini := cfg.AI.Agents["gemini"]
+	if gemini.ApprovalMode != "" || gemini.ExtraFlags != "" {
+		t.Fatalf("unsafe Gemini legacy policy survived: %+v", gemini)
+	}
+	claude := cfg.AI.Agents["claude"]
+	if claude.Effort != "high" || claude.PermissionMode != "acceptEdits" {
+		t.Fatalf("safe casing was not canonicalized: %+v", claude)
+	}
+	if got := cfg.AI.Agents["future_cli"].Model; got != "preserve-inert-profile" {
+		t.Fatalf("unknown inert profile was not preserved: %q", got)
+	}
+}
+
 // ── LoadOrCreate ─────────────────────────────────────────────────────────────
 
 func TestLoadOrCreate_Creates(t *testing.T) {
@@ -2895,7 +2948,7 @@ func TestValidateAgentExecutionPolicy(t *testing.T) {
 		{
 			name: "safe provider flags and typed modes",
 			agents: map[string]CLIAgentConfig{
-				"claude": {ExtraFlags: "--model opus --max-turns 5", PermissionMode: "acceptEdits"},
+				"claude": {Model: "opus", MaxTurns: 5, ExtraFlags: "--verbose", PermissionMode: "ACCEPTEDITS", Effort: "HIGH"},
 				"codex":  {ExtraFlags: "--json --color never", ApprovalMode: "on-request"},
 				"gemini": {ExtraFlags: "--output-format json", ApprovalMode: "auto_edit"},
 			},
@@ -2939,6 +2992,12 @@ func TestValidateAgentExecutionPolicy(t *testing.T) {
 			name: "unknown CLI config",
 			agents: map[string]CLIAgentConfig{
 				"other": {},
+			},
+		},
+		{
+			name: "negative max turns",
+			agents: map[string]CLIAgentConfig{
+				"claude": {MaxTurns: -1},
 			},
 			wantErr: true,
 		},

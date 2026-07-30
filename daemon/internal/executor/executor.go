@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -130,11 +131,11 @@ var allowedCLIs = map[string]struct{}{
 // allowedPermissionModes is the strict allowlist for the --permission-mode flag.
 // "bypassPermissions" is intentionally excluded — it grants unrestricted filesystem
 // access and must never be passed to the claude CLI from Heimdallm config.
-var allowedPermissionModes = map[string]struct{}{
-	"default":     {},
-	"auto":        {},
-	"acceptEdits": {},
-	"dontAsk":     {},
+var canonicalPermissionModes = map[string]string{
+	"default":     "default",
+	"auto":        "auto",
+	"acceptedits": "acceptEdits",
+	"dontask":     "dontAsk",
 }
 
 var allowedEfforts = map[string]struct{}{
@@ -158,16 +159,25 @@ func ValidateModel(model string) error {
 	return nil
 }
 
+// NormalizeEffort returns the canonical lowercase spelling of a safe effort
+// value. Accepting harmless case variants keeps older hand-written TOML files
+// working without widening the enum.
+func NormalizeEffort(effort string) (string, error) {
+	effort = strings.ToLower(strings.TrimSpace(effort))
+	if effort == "" {
+		return "", nil
+	}
+	if _, ok := allowedEfforts[effort]; !ok {
+		return "", fmt.Errorf("executor: effort %q is not allowed — valid values: low, medium, high, max", effort)
+	}
+	return effort, nil
+}
+
 // ValidateEffort validates Claude's typed --effort value. Keeping this field
 // enum-shaped prevents it from being interpreted as another CLI option.
 func ValidateEffort(effort string) error {
-	if effort == "" {
-		return nil
-	}
-	if _, ok := allowedEfforts[effort]; !ok {
-		return fmt.Errorf("executor: effort %q is not allowed — valid values: low, medium, high, max", effort)
-	}
-	return nil
+	_, err := NormalizeEffort(effort)
+	return err
 }
 
 // allowedApprovalModes is the allowlist for the Codex approval mode config.
@@ -195,20 +205,27 @@ var allowedGeminiApprovalModes = map[string]struct{}{
 
 // ValidatePermissionMode returns an error if mode is not in the allowlist.
 // An empty string is accepted (means "not set").
+func NormalizePermissionMode(mode string) (string, error) {
+	trimmed := strings.TrimSpace(mode)
+	if trimmed == "" {
+		return "", nil
+	}
+	normalized, ok := canonicalPermissionModes[strings.ToLower(trimmed)]
+	if !ok {
+		return "", fmt.Errorf("executor: permission_mode %q is not allowed — valid values: default, auto, acceptEdits, dontAsk", mode)
+	}
+	return normalized, nil
+}
+
 func ValidatePermissionMode(mode string) error {
-	if mode == "" {
-		return nil
-	}
-	if _, ok := allowedPermissionModes[mode]; !ok {
-		return fmt.Errorf("executor: permission_mode %q is not allowed — valid values: default, auto, acceptEdits, dontAsk", mode)
-	}
-	return nil
+	_, err := NormalizePermissionMode(mode)
+	return err
 }
 
 // ValidateApprovalMode returns an error if mode is not in the allowlist.
 // An empty string is accepted (means "not set").
 func ValidateApprovalMode(mode string) error {
-	mode = strings.TrimSpace(mode)
+	mode = strings.ToLower(strings.TrimSpace(mode))
 	if mode == "" {
 		return nil
 	}
@@ -218,47 +235,58 @@ func ValidateApprovalMode(mode string) error {
 	return nil
 }
 
-// ValidateApprovalModeForCLI validates the typed approval mode using the
-// vocabulary of the CLI that will consume it. Codex keeps accepting its legacy
-// values for backwards compatibility. Gemini accepts auto-edit as a friendly
-// spelling but emits auto_edit, and intentionally rejects yolo.
+// NormalizeApprovalModeForCLI validates a typed approval mode and returns the
+// canonical value emitted for the selected provider. Codex keeps accepting its
+// legacy values for backwards compatibility. Gemini accepts auto-edit as a
+// friendly spelling but emits auto_edit, and intentionally rejects yolo.
 //
 // Claude and OpenCode do not consume ApprovalMode today. We still validate a
 // non-empty value against the safe Codex/Gemini union so a primary-to-fallback
 // transition does not fail merely because the selected fallback ignores a
 // setting belonging to the primary CLI.
-func ValidateApprovalModeForCLI(cli, mode string) error {
+func NormalizeApprovalModeForCLI(cli, mode string) (string, error) {
 	if err := ValidateCLIName(cli); err != nil {
-		return err
+		return "", err
 	}
 
-	mode = strings.TrimSpace(mode)
+	mode = strings.ToLower(strings.TrimSpace(mode))
 	if mode == "" {
-		return nil
+		return "", nil
 	}
 
 	switch cli {
 	case "codex":
-		return ValidateApprovalMode(mode)
+		if err := ValidateApprovalMode(mode); err != nil {
+			return "", err
+		}
+		return normalizeCodexApprovalMode(mode), nil
 	case "gemini":
 		normalized := normalizeGeminiApprovalMode(mode)
 		if _, ok := allowedGeminiApprovalModes[normalized]; !ok {
-			return fmt.Errorf("executor: approval_mode %q is not allowed for gemini — valid values: default, auto_edit, auto-edit, plan", mode)
+			return "", fmt.Errorf("executor: approval_mode %q is not allowed for gemini — valid values: default, auto_edit, auto-edit, plan", mode)
 		}
-		return nil
+		return normalized, nil
 	default:
 		if _, ok := allowedApprovalModes[mode]; ok {
-			return nil
+			return normalizeCodexApprovalMode(mode), nil
 		}
-		if _, ok := allowedGeminiApprovalModes[normalizeGeminiApprovalMode(mode)]; ok {
-			return nil
+		normalized := normalizeGeminiApprovalMode(mode)
+		if _, ok := allowedGeminiApprovalModes[normalized]; ok {
+			return normalized, nil
 		}
-		return fmt.Errorf("executor: approval_mode %q is not a known safe mode for %s", mode, cli)
+		return "", fmt.Errorf("executor: approval_mode %q is not a known safe mode for %s", mode, cli)
 	}
 }
 
+// ValidateApprovalModeForCLI is the validation-only wrapper used by callers
+// that do not need the canonical spelling.
+func ValidateApprovalModeForCLI(cli, mode string) error {
+	_, err := NormalizeApprovalModeForCLI(cli, mode)
+	return err
+}
+
 func normalizeCodexApprovalMode(mode string) string {
-	switch strings.TrimSpace(mode) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "full-auto":
 		return "never"
 	case "auto-edit":
@@ -271,12 +299,157 @@ func normalizeCodexApprovalMode(mode string) string {
 }
 
 func normalizeGeminiApprovalMode(mode string) string {
-	switch strings.TrimSpace(mode) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "auto-edit":
 		return "auto_edit"
 	default:
-		return strings.TrimSpace(mode)
+		return strings.ToLower(strings.TrimSpace(mode))
 	}
+}
+
+// MigrateLegacyTypedExtraFlagsForCLI promotes the model/effort/turn-limit
+// flags that older releases allowed in ExtraFlags into their typed fields.
+// It exists only for trusted TOML/env/store compatibility. New HTTP writes and
+// the subprocess boundary reject these aliases in ExtraFlags so a trailing
+// free-form option can never override a validated typed value.
+//
+// Explicit typed values win over their legacy duplicates. The returned field
+// names describe the aliases removed from ExtraFlags so callers can emit an
+// actionable migration warning.
+func MigrateLegacyTypedExtraFlagsForCLI(cli string, opts ExecOptions) (ExecOptions, []string) {
+	if err := ValidateCLIName(cli); err != nil || strings.TrimSpace(opts.ExtraFlags) == "" {
+		return opts, nil
+	}
+
+	parts := strings.Fields(opts.ExtraFlags)
+	kept := make([]string, 0, len(parts))
+	var migrated []string
+	modelFromLegacy := strings.TrimSpace(opts.Model) == ""
+	effortFromLegacy := strings.TrimSpace(opts.Effort) == ""
+	maxTurnsFromLegacy := opts.MaxTurns == 0
+
+	recordMigration := func(field string) {
+		for _, existing := range migrated {
+			if existing == field {
+				return
+			}
+		}
+		migrated = append(migrated, field)
+	}
+
+	for i := 0; i < len(parts); i++ {
+		field, value, consumed, matched := legacyTypedExtraFlag(cli, parts, i)
+		if !matched {
+			kept = append(kept, parts[i])
+			continue
+		}
+
+		valid := false
+		switch field {
+		case "model":
+			value = strings.TrimSpace(value)
+			if err := ValidateModel(value); err == nil && value != "" {
+				if modelFromLegacy {
+					opts.Model = value // last legacy occurrence keeps CLI precedence
+				}
+				valid = true
+			}
+		case "effort":
+			if normalized, err := NormalizeEffort(value); err == nil && normalized != "" {
+				if effortFromLegacy {
+					opts.Effort = normalized
+				}
+				valid = true
+			}
+		case "max_turns":
+			if turns, err := strconv.Atoi(strings.TrimSpace(value)); err == nil && turns >= 0 {
+				if maxTurnsFromLegacy {
+					opts.MaxTurns = turns
+				}
+				valid = true
+			}
+		}
+		if !valid {
+			// Preserve the invalid spelling so the strict policy below can
+			// reject it and the compatibility sanitizer can report it.
+			kept = append(kept, parts[i])
+			continue
+		}
+
+		recordMigration(field)
+		i += consumed
+	}
+
+	opts.ExtraFlags = strings.Join(kept, " ")
+	return opts, migrated
+}
+
+// NormalizeLegacyCLIFlagsForCLI converts the typed aliases historically
+// accepted by stored prompt profiles into ExecOptions, then validates the
+// remaining free-form flags with the current provider policy. Callers must pass
+// the returned ExtraFlags rather than the original string so typed aliases
+// never reach the subprocess twice or override typed options by argv order.
+//
+// This compatibility helper is intentionally narrower than the general config
+// sanitizer: prompt profiles only have a CLIFlags string today, so model,
+// effort and max-turns have no other persisted representation there.
+func NormalizeLegacyCLIFlagsForCLI(cli, flags string) (ExecOptions, []string, error) {
+	opts, migrated := MigrateLegacyTypedExtraFlagsForCLI(cli, ExecOptions{ExtraFlags: flags})
+	if err := ValidateCLIName(cli); err != nil {
+		return ExecOptions{}, nil, err
+	}
+	if err := ValidateModel(opts.Model); err != nil {
+		return ExecOptions{}, nil, err
+	}
+	if opts.MaxTurns < 0 {
+		return ExecOptions{}, nil, fmt.Errorf("executor: max_turns must be non-negative")
+	}
+	if err := ValidateEffort(opts.Effort); err != nil {
+		return ExecOptions{}, nil, err
+	}
+	if err := ValidateExtraFlagsForCLI(cli, opts.ExtraFlags); err != nil {
+		return ExecOptions{}, nil, err
+	}
+	return opts, migrated, nil
+}
+
+func legacyTypedExtraFlag(cli string, parts []string, index int) (field, value string, consumed int, matched bool) {
+	token := parts[index]
+	name := canonicalFlagName(token)
+
+	if strings.HasPrefix(name, "--") {
+		switch comparableLongFlag(name) {
+		case "model":
+			field = "model"
+		case "effort":
+			if cli != "claude" {
+				return "", "", 0, false
+			}
+			field = "effort"
+		case "maxturns":
+			if cli != "claude" {
+				return "", "", 0, false
+			}
+			field = "max_turns"
+		default:
+			return "", "", 0, false
+		}
+	} else if strings.HasPrefix(name, "-m") {
+		field = "model"
+	} else {
+		return "", "", 0, false
+	}
+
+	if equals := strings.IndexByte(token, '='); equals >= 0 {
+		return field, token[equals+1:], 0, true
+	}
+	if strings.HasPrefix(name, "-m") && name != "-m" {
+		return field, token[2:], 0, true
+	}
+	if index+1 < len(parts) && !strings.HasPrefix(parts[index+1], "-") {
+		return field, parts[index+1], 1, true
+	}
+	return field, "", 0, true
 }
 
 // forbiddenExtraFlagsByCLI defines the policy-changing aliases understood by
@@ -291,6 +464,7 @@ func normalizeGeminiApprovalMode(mode string) string {
 var forbiddenExtraFlagsByCLI = map[string]map[string]string{
 	"claude": {
 		"-c":                                   "session state",
+		"-m":                                   "typed model configuration",
 		"-r":                                   "session state",
 		"-w":                                   "working-directory access",
 		"--add-dir":                            "working-directory access",
@@ -318,7 +492,9 @@ var forbiddenExtraFlagsByCLI = map[string]map[string]string{
 		"--init":                                  "hook execution",
 		"--init-only":                             "hook execution",
 		"--maintenance":                           "hook execution",
+		"--max-turns":                             "typed turn-limit configuration",
 		"--mcp-config":                            "runtime configuration",
+		"--model":                                 "typed model configuration",
 		"--no-sandbox":                            "sandbox policy",
 		"--permission-mode":                       "permission policy",
 		"--permission-prompt-tool":                "permission policy",
@@ -335,11 +511,13 @@ var forbiddenExtraFlagsByCLI = map[string]map[string]string{
 		"--system-prompt-file":                    "working-directory file access",
 		"--teleport":                              "execution boundary",
 		"--worktree":                              "working-directory access",
+		"--effort":                                "typed effort configuration",
 	},
 	"codex": {
 		"-a":                 "approval policy",
 		"-c":                 "runtime configuration or working directory",
 		"-i":                 "working-directory file access",
+		"-m":                 "typed model configuration",
 		"-o":                 "working-directory file access",
 		"-p":                 "runtime configuration",
 		"-s":                 "sandbox policy",
@@ -359,6 +537,7 @@ var forbiddenExtraFlagsByCLI = map[string]map[string]string{
 		"--image":                                    "working-directory file access",
 		"--include-managed-config":                   "runtime configuration",
 		"--local-provider":                           "execution boundary",
+		"--model":                                    "typed model configuration",
 		"--no-sandbox":                               "sandbox policy",
 		"--oss":                                      "execution boundary",
 		"--output-last-message":                      "working-directory file access",
@@ -375,6 +554,7 @@ var forbiddenExtraFlagsByCLI = map[string]map[string]string{
 	"gemini": {
 		"-r":                         "session state",
 		"-e":                         "runtime configuration",
+		"-m":                         "typed model configuration",
 		"-s":                         "sandbox policy",
 		"-w":                         "working-directory access",
 		"-y":                         "approval policy",
@@ -390,6 +570,7 @@ var forbiddenExtraFlagsByCLI = map[string]map[string]string{
 		"--fake-responses":           "working-directory file access",
 		"--include-directories":      "working-directory access",
 		"--include-directory":        "working-directory access",
+		"--model":                    "typed model configuration",
 		"--no-sandbox":               "sandbox policy",
 		"--policy":                   "permission policy",
 		"--record-responses":         "working-directory file access",
@@ -403,6 +584,7 @@ var forbiddenExtraFlagsByCLI = map[string]map[string]string{
 	},
 	"opencode": {
 		"-c":            "session state",
+		"-m":            "typed model configuration",
 		"--agent":       "agent and permission configuration",
 		"--attach":      "execution boundary",
 		"--auto":        "approval policy",
@@ -413,6 +595,7 @@ var forbiddenExtraFlagsByCLI = map[string]map[string]string{
 		"--file":        "working-directory access",
 		"--fork":        "session state",
 		"--interactive": "execution boundary",
+		"--model":       "typed model configuration",
 		"--no-sandbox":  "sandbox policy",
 		"--password":    "execution boundary",
 		"--permission":  "permission policy",
@@ -451,18 +634,14 @@ const (
 var allowedExtraFlagsByCLI = map[string]map[string]extraFlagArity{
 	"claude": {
 		"-d":                         extraFlagBoolean,
-		"-m":                         extraFlagValue,
 		"--debug":                    extraFlagOptionalValue,
 		"--disable-slash-commands":   extraFlagBoolean,
 		"--disallowed-tools":         extraFlagVariadicValue,
-		"--effort":                   extraFlagValue,
 		"--fallback-model":           extraFlagValue,
 		"--include-partial-messages": extraFlagBoolean,
 		"--input-format":             extraFlagValue,
 		"--json-schema":              extraFlagValue,
 		"--max-budget-usd":           extraFlagValue,
-		"--max-turns":                extraFlagValue,
-		"--model":                    extraFlagValue,
 		"--no-session-persistence":   extraFlagBoolean,
 		"--output-format":            extraFlagValue,
 		"--replay-user-messages":     extraFlagBoolean,
@@ -470,26 +649,20 @@ var allowedExtraFlagsByCLI = map[string]map[string]extraFlagArity{
 		"--verbose":                  extraFlagBoolean,
 	},
 	"codex": {
-		"-m":              extraFlagValue,
 		"--color":         extraFlagValue,
 		"--ephemeral":     extraFlagBoolean,
 		"--json":          extraFlagBoolean,
-		"--model":         extraFlagValue,
 		"--strict-config": extraFlagBoolean,
 	},
 	"gemini": {
 		"-d":              extraFlagBoolean,
-		"-m":              extraFlagValue,
 		"-o":              extraFlagValue,
 		"--debug":         extraFlagBoolean,
-		"--model":         extraFlagValue,
 		"--output-format": extraFlagValue,
 		"--screen-reader": extraFlagBoolean,
 	},
 	"opencode": {
-		"-m":         extraFlagValue,
 		"--format":   extraFlagValue,
-		"--model":    extraFlagValue,
 		"--pure":     extraFlagBoolean,
 		"--thinking": extraFlagBoolean,
 		"--variant":  extraFlagValue,
@@ -1039,22 +1212,22 @@ func buildArgs(cli string, opts ExecOptions, workDirFlags []string) []string {
 		// positional message args are given.
 		args = append(args, "run")
 		if opts.Model != "" {
-			args = append(args, "-m", opts.Model)
+			args = append(args, "-m", strings.TrimSpace(opts.Model))
 		}
 	case "codex":
 		// Codex's top-level command is interactive and requires a TTY. The
 		// daemon must use the non-interactive subcommand and feed the prompt on
 		// stdin, otherwise Codex exits with "stdin is not a terminal".
 		if mode := strings.TrimSpace(opts.ApprovalMode); mode != "" {
-			if err := ValidateApprovalMode(mode); err != nil {
+			if normalized, err := NormalizeApprovalModeForCLI(cli, mode); err != nil {
 				slog.Warn("buildArgs: ApprovalMode rejected, ignoring", "mode", mode, "err", err)
 			} else {
-				args = append(args, "--ask-for-approval", normalizeCodexApprovalMode(mode))
+				args = append(args, "--ask-for-approval", normalized)
 			}
 		}
 		args = append(args, "exec")
 		if opts.Model != "" {
-			args = append(args, "--model", opts.Model)
+			args = append(args, "--model", strings.TrimSpace(opts.Model))
 		}
 	default:
 		// claude, gemini: stdin mode
@@ -1064,14 +1237,14 @@ func buildArgs(cli string, opts ExecOptions, workDirFlags []string) []string {
 			args = append(args, "-p", "-")
 		}
 		if opts.Model != "" {
-			args = append(args, "--model", opts.Model)
+			args = append(args, "--model", strings.TrimSpace(opts.Model))
 		}
 		if cli == "gemini" {
 			if mode := strings.TrimSpace(opts.ApprovalMode); mode != "" {
-				if err := ValidateApprovalModeForCLI(cli, mode); err != nil {
+				if normalized, err := NormalizeApprovalModeForCLI(cli, mode); err != nil {
 					slog.Warn("buildArgs: ApprovalMode rejected, ignoring", "cli", cli, "mode", mode, "err", err)
 				} else {
-					args = append(args, "--approval-mode", normalizeGeminiApprovalMode(mode))
+					args = append(args, "--approval-mode", normalized)
 				}
 			}
 		}
@@ -1080,13 +1253,15 @@ func buildArgs(cli string, opts ExecOptions, workDirFlags []string) []string {
 				args = append(args, "--max-turns", fmt.Sprintf("%d", opts.MaxTurns))
 			}
 			if opts.Effort != "" {
-				args = append(args, "--effort", opts.Effort)
+				if effort, err := NormalizeEffort(opts.Effort); err == nil {
+					args = append(args, "--effort", effort)
+				}
 			}
 			if opts.PermissionMode != "" {
-				if err := ValidatePermissionMode(opts.PermissionMode); err != nil {
+				if mode, err := NormalizePermissionMode(opts.PermissionMode); err != nil {
 					slog.Warn("buildArgs: PermissionMode rejected, ignoring", "mode", opts.PermissionMode, "err", err)
 				} else {
-					args = append(args, "--permission-mode", opts.PermissionMode)
+					args = append(args, "--permission-mode", mode)
 				}
 			}
 			if opts.Bare {

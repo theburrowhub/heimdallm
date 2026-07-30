@@ -296,6 +296,13 @@ func (srv *Server) writeTOMLUnderLock(mutateFn func(m map[string]any) error) (ma
 	if err != nil {
 		return nil, err
 	}
+	// Migrate only the trusted TOML base before applying the request. Every
+	// PATCH payload has already passed the strict HTTP policy, so legacy typed
+	// flags can no longer block an unrelated edit without creating a path for a
+	// new payload to smuggle those flags into ExtraFlags.
+	if err := config.SanitizeLegacyAgentExecutionPolicyMap(m, "toml PATCH base"); err != nil {
+		return nil, err
+	}
 	if err := mutateFn(m); err != nil {
 		return nil, err
 	}
@@ -1384,7 +1391,7 @@ func (srv *Server) handleUpsertAgent(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "cli is required when cli_flags is set", http.StatusBadRequest)
 			return
 		}
-		if err := executor.ValidateExtraFlagsForCLI(a.CLI, a.CLIFlags); err != nil {
+		if _, _, err := executor.NormalizeLegacyCLIFlagsForCLI(a.CLI, a.CLIFlags); err != nil {
 			http.Error(w, fmt.Sprintf("invalid cli_flags: %v", err), http.StatusBadRequest)
 			return
 		}
@@ -2208,17 +2215,21 @@ func validateCanonicalAgentConfigKeys(cli string, agent map[string]any, path str
 			if !ok {
 				return fmt.Errorf("config PATCH key %q must be a string", path+"."+key)
 			}
+			model = strings.TrimSpace(model)
 			if err := executor.ValidateModel(model); err != nil {
 				return fmt.Errorf("config PATCH key %q: %w", path+"."+key, err)
 			}
+			agent[key] = model
 		case "effort":
 			effort, ok := value.(string)
 			if !ok {
 				return fmt.Errorf("config PATCH key %q must be a string", path+"."+key)
 			}
-			if err := executor.ValidateEffort(effort); err != nil {
+			canonicalValue, err := executor.NormalizeEffort(effort)
+			if err != nil {
 				return fmt.Errorf("config PATCH key %q: %w", path+"."+key, err)
 			}
+			agent[key] = canonicalValue
 		case "extra_flags":
 			flags, ok := value.(string)
 			if !ok {
@@ -2232,17 +2243,21 @@ func validateCanonicalAgentConfigKeys(cli string, agent map[string]any, path str
 			if !ok {
 				return fmt.Errorf("config PATCH key %q must be a string", path+"."+key)
 			}
-			if err := executor.ValidatePermissionMode(mode); err != nil {
+			canonicalValue, err := executor.NormalizePermissionMode(mode)
+			if err != nil {
 				return fmt.Errorf("config PATCH key %q: %w", path+"."+key, err)
 			}
+			agent[key] = canonicalValue
 		case "approval_mode":
 			mode, ok := value.(string)
 			if !ok {
 				return fmt.Errorf("config PATCH key %q must be a string", path+"."+key)
 			}
-			if err := executor.ValidateApprovalModeForCLI(cli, mode); err != nil {
+			canonicalValue, err := executor.NormalizeApprovalModeForCLI(cli, mode)
+			if err != nil {
 				return fmt.Errorf("config PATCH key %q: %w", path+"."+key, err)
 			}
+			agent[key] = canonicalValue
 		}
 	}
 	return nil
@@ -2475,14 +2490,17 @@ func normalizeAgentConfigsForPut(v any) (map[string]map[string]any, error) {
 					return nil, fmt.Errorf("agent_configs[%q].%s must be a string", cli, k)
 				}
 				if k == "model" {
+					s = strings.TrimSpace(s)
 					if err := executor.ValidateModel(s); err != nil {
 						return nil, fmt.Errorf("agent_configs[%q].model: %v", cli, err)
 					}
 				}
 				if k == "effort" {
-					if err := executor.ValidateEffort(s); err != nil {
+					canonicalValue, err := executor.NormalizeEffort(s)
+					if err != nil {
 						return nil, fmt.Errorf("agent_configs[%q].effort: %v", cli, err)
 					}
+					s = canonicalValue
 				}
 				if k == "extra_flags" && s != "" {
 					if err := executor.ValidateExtraFlagsForCLI(cli, s); err != nil {
@@ -2500,19 +2518,21 @@ func normalizeAgentConfigsForPut(v any) (map[string]map[string]any, error) {
 				if !isStr {
 					return nil, fmt.Errorf("agent_configs[%q].permission_mode must be a string", cli)
 				}
-				if err := executor.ValidatePermissionMode(s); err != nil {
+				canonicalValue, err := executor.NormalizePermissionMode(s)
+				if err != nil {
 					return nil, fmt.Errorf("agent_configs[%q].permission_mode: %v", cli, err)
 				}
-				normalized[k] = s
+				normalized[k] = canonicalValue
 			case "approval_mode":
 				s, isStr := val.(string)
 				if !isStr {
 					return nil, fmt.Errorf("agent_configs[%q].approval_mode must be a string", cli)
 				}
-				if err := executor.ValidateApprovalModeForCLI(cli, s); err != nil {
+				canonicalValue, err := executor.NormalizeApprovalModeForCLI(cli, s)
+				if err != nil {
 					return nil, fmt.Errorf("agent_configs[%q].approval_mode: %v", cli, err)
 				}
-				normalized[k] = s
+				normalized[k] = canonicalValue
 			case "max_turns":
 				n, isNum := val.(float64) // JSON numbers decode as float64
 				if !isNum || n < 0 || n != float64(int(n)) {

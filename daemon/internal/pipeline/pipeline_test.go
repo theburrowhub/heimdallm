@@ -323,6 +323,61 @@ func TestPipeline_RunFallbackDropsPrimaryProviderOptions(t *testing.T) {
 	}
 }
 
+func TestPipeline_RunMigratesStoredProfileCLIFlagsBeforeExecution(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	if err := s.UpsertAgent(&store.Agent{
+		ID:           "legacy-profile",
+		Name:         "Legacy profile",
+		CLI:          "claude",
+		Instructions: "Review carefully",
+		CLIFlags:     "--model profile-model --max-turns 7 --effort HIGH --verbose",
+		IsDefaultPR:  true,
+		CreatedAt:    time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("upsert profile: %v", err)
+	}
+
+	var captured executor.ExecOptions
+	exec := &fakeExecCapture{captureOpts: &captured, detectCLI: "claude"}
+	p := pipeline.New(s, &fakeGH{diff: "+new line"}, exec, &fakeNotify{})
+	pr := &github.PullRequest{
+		ID: 23, Number: 23, Title: "Legacy profile", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/23",
+		Head: github.Branch{SHA: "sha23"},
+	}
+
+	if _, err := p.Run(pr, pipeline.RunOptions{
+		Primary: "claude",
+		ExecOpts: executor.ExecOptions{
+			Model:    "global-model",
+			MaxTurns: 2,
+			Effort:   "low",
+			WorkDir:  "/tmp/repo",
+			Timeout:  3 * time.Minute,
+		},
+	}); err != nil {
+		t.Fatalf("pipeline run: %v", err)
+	}
+
+	want := executor.ExecOptions{
+		Model:      "profile-model",
+		MaxTurns:   7,
+		Effort:     "high",
+		ExtraFlags: "--verbose",
+		WorkDir:    "/tmp/repo",
+		Timeout:    3 * time.Minute,
+	}
+	if captured != want {
+		t.Fatalf("stored profile options:\n got: %+v\nwant: %+v", captured, want)
+	}
+}
+
 func TestPipeline_Run_CommentsFetchErrorIsNonFatal(t *testing.T) {
 	s, err := store.Open(":memory:")
 	if err != nil {

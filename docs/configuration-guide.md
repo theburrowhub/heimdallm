@@ -582,13 +582,16 @@ model = "anthropic/claude-sonnet-4"
 `dangerously_skip_perms` cannot be set via the HTTP API for security reasons — it must be set in `config.toml` directly.
 
 `extra_flags` uses a fail-closed allowlist per CLI. Only reviewed presentation,
-model, output and restrictive options are accepted; unknown flags and options
+output, resource-tuning and restrictive options are accepted; unknown flags and options
 that can alter approval, sandbox, permissions, sessions, trusted directories,
 files, tools, policy or external configuration are rejected. Heimdallm validates
 the list while loading configuration and again immediately before creating the
-subprocess. Use the typed `permission_mode` / `approval_mode` fields for
-supported safe modes instead. When execution falls back to a different CLI,
-provider-specific options from the unavailable primary are not forwarded.
+subprocess. Model, effort, turn-limit, permission and approval settings must use
+their typed fields; legacy model/effort/turn flags are migrated on load with a
+warning. Unsafe legacy fields are ignored individually rather than preventing
+startup or discarding unrelated stored settings. When execution falls back to a
+different CLI, provider-specific options from the unavailable primary are not
+forwarded.
 
 ### Prompt categories
 

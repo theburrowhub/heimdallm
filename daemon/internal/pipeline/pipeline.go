@@ -362,6 +362,25 @@ func (p *Pipeline) applyPrompt(repoPromptID, agentPromptID string, tmpl *string,
 	*flags = a.CLIFlags
 }
 
+func applyStoredProfileCLIFlags(cli, raw string, opts executor.ExecOptions) (executor.ExecOptions, error) {
+	profileOpts, migrated, err := executor.NormalizeLegacyCLIFlagsForCLI(cli, raw)
+	if err != nil {
+		return opts, err
+	}
+	for _, field := range migrated {
+		switch field {
+		case "model":
+			opts.Model = profileOpts.Model
+		case "effort":
+			opts.Effort = profileOpts.Effort
+		case "max_turns":
+			opts.MaxTurns = profileOpts.MaxTurns
+		}
+	}
+	opts.ExtraFlags = profileOpts.ExtraFlags
+	return opts, nil
+}
+
 // RunOptions carries per-execution settings derived from global + repo + agent config.
 type RunOptions struct {
 	Primary        string
@@ -742,11 +761,12 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	// permission or workspace guards.
 	execOpts := executor.OptionsForSelectedCLI(primary, cli, opts.ExecOpts)
 	if cliFlags != "" && execOpts.ExtraFlags == "" {
-		if err := executor.ValidateExtraFlagsForCLI(cli, cliFlags); err != nil {
+		migratedOpts, err := applyStoredProfileCLIFlags(cli, cliFlags, execOpts)
+		if err != nil {
 			slog.Warn("pipeline: prompt cli_flags rejected by execution policy, ignoring", "err", err)
 			// Don't abort the review — just skip the unsafe flags
 		} else {
-			execOpts.ExtraFlags = cliFlags
+			execOpts = migratedOpts
 		}
 	}
 	result, err := p.executor.Execute(cli, prompt, execOpts)

@@ -3,7 +3,6 @@ package config
 import (
 	"errors"
 	"fmt"
-	"strings"
 	"testing"
 )
 
@@ -408,27 +407,102 @@ func TestMergeStoreLayer_FailsValidationOnBadMergedCfg(t *testing.T) {
 	}
 }
 
-func TestMergeStoreLayer_RejectsLegacyUnsafeAgentFlags(t *testing.T) {
+func TestMergeStoreLayer_SanitizesLegacyUnsafeAgentFieldWithoutDroppingLayer(t *testing.T) {
 	cfg := &Config{}
 	cfg.applyDefaults()
 	cfg.AI.Primary = "codex"
 	cfg.AI.Agents = map[string]CLIAgentConfig{
 		"codex": {ExtraFlags: "--json"},
 	}
+	cfg.GitHub.IssueTracking.Assignees = []string{"toml-user"}
 
 	store := &fakeStoreLister{rows: map[string]string{
-		"agent_configs": `{"codex":{"extra_flags":"--sandbox danger-full-access"}}`,
+		"agent_configs":  `{"codex":{"extra_flags":"--sandbox danger-full-access"}}`,
+		"poll_interval":  "30m",
+		"issue_tracking": `{"assignees":["store-user"]}`,
 	}}
 
-	err := cfg.MergeStoreLayer(store)
-	if err == nil {
-		t.Fatal("expected legacy unsafe extra_flags to fail store-layer validation")
-	}
-	if !strings.Contains(err.Error(), "extra_flags") || !strings.Contains(err.Error(), "--sandbox") {
-		t.Fatalf("error is not actionable: %v", err)
+	if err := cfg.MergeStoreLayer(store); err != nil {
+		t.Fatalf("legacy semantic policy error must not discard the store layer: %v", err)
 	}
 	if got := cfg.AI.Agents["codex"].ExtraFlags; got != "--json" {
-		t.Fatalf("unsafe store row mutated ExtraFlags to %q after failed validation", got)
+		t.Fatalf("unsafe store field replaced trusted base ExtraFlags with %q", got)
+	}
+	if cfg.GitHub.PollInterval != "30m" {
+		t.Fatalf("valid store poll_interval was discarded: %q", cfg.GitHub.PollInterval)
+	}
+	if got := cfg.GitHub.IssueTracking.Assignees; len(got) != 1 || got[0] != "store-user" {
+		t.Fatalf("valid issue_tracking row was discarded: %v", got)
+	}
+}
+
+func TestApplyStore_MigratesLegacyTypedFlagsAndRestoresOnlyInvalidFields(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+	cfg.AI.Primary = "claude"
+	cfg.AI.Agents = map[string]CLIAgentConfig{
+		"claude": {
+			Model:          "toml-model",
+			Effort:         "low",
+			PermissionMode: "default",
+			ExtraFlags:     "--verbose",
+		},
+	}
+
+	rows := map[string]string{
+		"agent_configs": `{"claude":{"model":"--sandbox","effort":"HIGH","permission_mode":"bypassPermissions","extra_flags":"--model legacy --output-format json"}}`,
+	}
+	if err := cfg.ApplyStore(rows); err != nil {
+		t.Fatalf("ApplyStore: %v", err)
+	}
+
+	got := cfg.AI.Agents["claude"]
+	if got.Model != "toml-model" {
+		t.Fatalf("invalid stored model replaced trusted base: %+v", got)
+	}
+	if got.Effort != "high" {
+		t.Fatalf("safe stored effort was not canonicalized: %+v", got)
+	}
+	if got.PermissionMode != "default" {
+		t.Fatalf("invalid stored permission mode replaced trusted base: %+v", got)
+	}
+	if got.ExtraFlags != "--output-format json" {
+		t.Fatalf("legacy typed flag was not removed while safe sibling survived: %+v", got)
+	}
+}
+
+func TestApplyStore_LegacyTypedFlagsPreserveStorePrecedence(t *testing.T) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+	cfg.AI.Primary = "claude"
+	cfg.AI.Agents = map[string]CLIAgentConfig{
+		"claude": {
+			Model:      "toml-model",
+			MaxTurns:   3,
+			Effort:     "low",
+			ExtraFlags: "--debug",
+		},
+	}
+
+	rows := map[string]string{
+		"agent_configs": `{"claude":{"extra_flags":"--model store-model --max-turns 9 --effort HIGH --verbose"}}`,
+	}
+	if err := cfg.ApplyStore(rows); err != nil {
+		t.Fatalf("ApplyStore: %v", err)
+	}
+
+	got := cfg.AI.Agents["claude"]
+	if got.Model != "store-model" {
+		t.Fatalf("legacy store model did not override lower-precedence TOML value: %+v", got)
+	}
+	if got.MaxTurns != 9 {
+		t.Fatalf("legacy store max_turns did not override lower-precedence TOML value: %+v", got)
+	}
+	if got.Effort != "high" {
+		t.Fatalf("legacy store effort did not override lower-precedence TOML value: %+v", got)
+	}
+	if got.ExtraFlags != "--verbose" {
+		t.Fatalf("legacy typed flags were not removed while the safe sibling survived: %+v", got)
 	}
 }
 
@@ -448,6 +522,9 @@ func TestApplyStore_PartialFailure_LeavesCfgUnchanged(t *testing.T) {
 	cfg.GitHub.PollInterval = "5m"
 	cfg.GitHub.Repositories = []string{"original/repo"}
 	cfg.AI.Primary = "claude"
+	cfg.AI.Agents = map[string]CLIAgentConfig{
+		"claude": {ExtraFlags: "--sandbox"},
+	}
 
 	rows := map[string]string{
 		"poll_interval": "30m",            // valid — would apply on its own
@@ -463,6 +540,9 @@ func TestApplyStore_PartialFailure_LeavesCfgUnchanged(t *testing.T) {
 	}
 	if len(cfg.GitHub.Repositories) != 1 || cfg.GitHub.Repositories[0] != "original/repo" {
 		t.Errorf("Repositories = %v, want [original/repo]", cfg.GitHub.Repositories)
+	}
+	if got := cfg.AI.Agents["claude"].ExtraFlags; got != "--sandbox" {
+		t.Errorf("legacy sanitizer leaked through failed atomic merge: %q", got)
 	}
 }
 
