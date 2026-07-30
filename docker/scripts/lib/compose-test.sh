@@ -9,6 +9,17 @@ compose_test_error() {
     printf 'compose-test: %s\n' "$*" >&2
 }
 
+compose_test_require_build_tools() {
+    if ! command docker compose version >/dev/null 2>&1; then
+        compose_test_error "Docker Compose v2 is required for Flutter Web builds."
+        return 1
+    fi
+    if ! command docker buildx version >/dev/null 2>&1; then
+        compose_test_error "Docker Buildx/BuildKit is required for Flutter Web builds."
+        return 1
+    fi
+}
+
 compose_test_init() {
     if [ "${COMPOSE_TEST_INITIALIZED:-0}" = "1" ]; then
         compose_test_error "isolation is already initialized"

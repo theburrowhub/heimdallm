@@ -457,6 +457,19 @@ For iterating on the Flutter Web bundle against a running daemon:
 ```bash
 make build-web    # compile Flutter → web/; then `make up-build` to bake into the Nginx image
 ```
+The production web image requires BuildKit: its Dockerfile-specific
+`.dockerignore` is what keeps the repository-root context minimal. The Make
+wrappers enforce this requirement. For direct validation, run these commands
+from the repository root (`flutter_app/assets` links to the shared `assets/`
+directory):
+```bash
+sh docker/scripts/test-web-build-context.sh
+docker buildx build --load --target build -t heimdallm-web-build:test -f flutter_app/Dockerfile.web .
+DOCKER_BUILDKIT=1 docker compose -f docker/docker-compose.yml build web
+```
+Do not use the legacy `docker build` backend for this Dockerfile: it ignores
+`flutter_app/Dockerfile.web.dockerignore` and can transfer unrelated repository
+files to the builder.
 
 **CLI / TUI** — terminal client against a running daemon:
 ```bash

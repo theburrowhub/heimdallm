@@ -19,6 +19,12 @@ cd "$REPO_ROOT"
 # shellcheck source=lib/compose-test.sh
 source "$SCRIPT_DIR/lib/compose-test.sh"
 
+# Keep every isolated Compose build on the same supported backend as the
+# production wrappers. Verify both plugins before allocating run state because
+# no cleanup is needed when the local Docker toolchain is incomplete.
+export DOCKER_BUILDKIT=1
+compose_test_require_build_tools
+
 cleanup_initialization() {
     local exit_code=$?
     trap - EXIT

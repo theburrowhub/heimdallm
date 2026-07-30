@@ -27,6 +27,9 @@ cleanup_test_files() {
         "$TEST_TMP/config.json" \
         "$TEST_TMP/production-config.json" \
         "$TEST_TMP/runner-cleanup-failure.out" \
+        "$TEST_TMP/runner-compose-failure.out" \
+        "$TEST_TMP/runner-buildkit-failure.out" \
+        "$TEST_TMP/web-buildkit-failure.out" \
         "$TEST_TMP/runner-port-failure.out" \
         "$TEST_TMP/runner-token-failure.out" \
         "$TEST_TMP/outside-http-body"
@@ -287,6 +290,37 @@ awk -F '\t' '
     fail "local runner built or started services beyond heimdallm"
 assert_log_has_safe_down "$local_project"
 
+printf '    missing Compose v2 fails before run-state allocation\n'
+: >"$FAKE_DOCKER_LOG"
+if FAKE_DOCKER_FAIL_COMPOSE=1 TMPDIR="$TEST_TMP" \
+    "$SCRIPT_DIR/test-local.sh" smoke >"$TEST_TMP/runner-compose-failure.out" 2>&1; then
+    fail "local runner accepted a missing Docker Compose v2 plugin"
+fi
+grep -F "Docker Compose v2 is required for Flutter Web builds." \
+    "$TEST_TMP/runner-compose-failure.out" >/dev/null ||
+    fail "local runner did not report the shared Compose v2 requirement"
+if awk -F '\t' '$0 ~ /\t(build|up|down)\t/ { found = 1 } END { exit !found }' \
+    "$FAKE_DOCKER_LOG"; then
+    fail "local runner allocated Docker work before its Compose v2 preflight"
+fi
+
+printf '    missing Buildx fails before any image build or startup\n'
+: >"$FAKE_DOCKER_LOG"
+if FAKE_DOCKER_FAIL_BUILDX=1 TMPDIR="$TEST_TMP" \
+    "$SCRIPT_DIR/test-local.sh" smoke >"$TEST_TMP/runner-buildkit-failure.out" 2>&1; then
+    fail "local runner accepted a missing Docker Buildx plugin"
+fi
+grep -F "Docker Buildx/BuildKit is required for Flutter Web builds." \
+    "$TEST_TMP/runner-buildkit-failure.out" >/dev/null ||
+    fail "local runner did not report the shared Buildx requirement"
+if awk -F '\t' '$0 ~ /\t(build|up)\t/ { found = 1 } END { exit !found }' \
+    "$FAKE_DOCKER_LOG"; then
+    fail "local runner built or started services after the Buildx preflight failed"
+fi
+if grep -F "	down	" "$FAKE_DOCKER_LOG" >/dev/null; then
+    fail "local runner allocated cleanup work before its Buildx preflight"
+fi
+
 printf '    startup port failures retain Compose diagnostics\n'
 : >"$FAKE_DOCKER_LOG"
 if FAKE_DOCKER_FAIL_PORT=1 TMPDIR="$TEST_TMP" \
@@ -349,6 +383,23 @@ esac
 [ "$web_up_project" = "$web_down_project" ] ||
     fail "web runner startup and cleanup used different projects"
 assert_log_has_safe_down "$web_down_project"
+
+printf '    web runner shares the same Buildx preflight\n'
+: >"$FAKE_DOCKER_LOG"
+if FAKE_DOCKER_FAIL_BUILDX=1 TMPDIR="$TEST_TMP" \
+    "$SCRIPT_DIR/test-web.sh" >"$TEST_TMP/web-buildkit-failure.out" 2>&1; then
+    fail "web runner accepted a missing Docker Buildx plugin"
+fi
+grep -F "Docker Buildx/BuildKit is required for Flutter Web builds." \
+    "$TEST_TMP/web-buildkit-failure.out" >/dev/null ||
+    fail "web runner did not report the shared Buildx requirement"
+if awk -F '\t' '$0 ~ /\tup\t/ { found = 1 } END { exit !found }' \
+    "$FAKE_DOCKER_LOG"; then
+    fail "web runner started services after the Buildx preflight failed"
+fi
+if grep -F "	down	" "$FAKE_DOCKER_LOG" >/dev/null; then
+    fail "web runner allocated cleanup work before its Buildx preflight"
+fi
 
 printf '8/8 merged Compose config has per-run names, volumes, and ephemeral ports\n'
 if [ -n "$REAL_DOCKER" ] && "$REAL_DOCKER" compose version >/dev/null 2>&1; then
