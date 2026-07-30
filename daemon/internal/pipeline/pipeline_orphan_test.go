@@ -40,6 +40,9 @@ func (f *fakeGHLockedSubmit) FetchComments(_ string, _ int) ([]gh.Comment, error
 	return nil, nil
 }
 func (f *fakeGHLockedSubmit) GetPRHeadSHA(_ string, _ int) (string, error) { return f.headSHA, nil }
+func (f *fakeGHLockedSubmit) GetPRRevision(_ string, _ int) (gh.PRRevision, error) {
+	return gh.PRRevision{BaseSHA: "base", HeadSHA: f.headSHA}, nil
+}
 
 // fakeExecOrphan mirrors fakeExecCounter but lives in this file so the
 // orphan tests are self-contained.
@@ -129,12 +132,13 @@ func TestPublishPending_LockedPRStopsRetrying(t *testing.T) {
 		PRID: prID, CLIUsed: "claude", Issues: "[]", Suggestions: "[]",
 		Severity: "low", CreatedAt: time.Now(),
 		HeadSHA:        "abc",
+		BaseSHA:        "base",
 		GitHubReviewID: 0, // marks it as unpublished
 	}); err != nil {
 		t.Fatalf("insert review: %v", err)
 	}
 
-	fgh := &fakeGHLockedSubmit{}
+	fgh := &fakeGHLockedSubmit{headSHA: "abc"}
 	p := pipeline.New(s, fgh, &fakeExecOrphan{}, &fakeNotify{})
 
 	// First PublishPending tick: SubmitReview returns PermanentSubmitError,
@@ -177,12 +181,12 @@ func TestPublishPending_TransientErrorStillRetries(t *testing.T) {
 	if _, err := s.InsertReview(&store.Review{
 		PRID: prID, CLIUsed: "claude", Issues: "[]", Suggestions: "[]",
 		Severity: "low", CreatedAt: time.Now(),
-		HeadSHA: "def", GitHubReviewID: 0,
+		HeadSHA: "def", BaseSHA: "base", GitHubReviewID: 0,
 	}); err != nil {
 		t.Fatalf("insert review: %v", err)
 	}
 
-	fgh := &fakeGHTransientSubmit{}
+	fgh := &fakeGHTransientSubmit{headSHA: "def"}
 	p := pipeline.New(s, fgh, &fakeExecOrphan{}, &fakeNotify{})
 
 	// Two ticks — both should attempt SubmitReview, both should leave
@@ -198,6 +202,93 @@ func TestPublishPending_TransientErrorStillRetries(t *testing.T) {
 	unpub, _ := s.ListUnpublishedReviews()
 	if len(unpub) != 1 {
 		t.Errorf("expected 1 unpublished review (transient must NOT mark orphan), got %d", len(unpub))
+	}
+}
+
+func TestPublishPending_ForcedReviewRetainsManualAuthorization(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	fgh := &fakeGHTransientSubmit{succeedOnCall: 2}
+	exec := &fakeExecOrphan{}
+	p := pipeline.New(s, fgh, exec, &fakeNotify{})
+	p.SetBotLogin("heimdallm-bot")
+	p.SetTimelineFetcher(&fakeTimeline{events: []gh.TimelineEvent{
+		{ID: 501, Event: "review_request_removed", CreatedAt: time.Now().UTC()},
+	}})
+	p.SetReviewerFetcher(&fakeReviewerFetcher{info: gh.PRHeadInfo{HeadSHA: "head"}})
+	pr := &gh.PullRequest{
+		ID: 205, Number: 85, Title: "manual retry", Repo: "org/repo",
+		User: gh.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now(), Head: gh.Branch{SHA: "head"},
+	}
+
+	rev, err := p.Run(pr, pipeline.RunOptions{Primary: "claude", Force: true})
+	if err != nil {
+		t.Fatalf("forced run: %v", err)
+	}
+	if rev == nil || rev.AuthorizationSource != pipeline.ReviewAuthorizationManual {
+		t.Fatalf("review = %+v, want durable manual authorization", rev)
+	}
+	if rev.GitHubReviewID != 0 || fgh.submitCalls != 1 {
+		t.Fatalf("initial publish id/calls = %d/%d, want 0/1 after transient failure",
+			rev.GitHubReviewID, fgh.submitCalls)
+	}
+
+	// requested_reviewers remains empty and the timeline says the automatic
+	// request was removed. Neither may cancel an explicitly forced retry.
+	p.PublishPending()
+	if fgh.submitCalls != 2 {
+		t.Fatalf("retry submit calls = %d, want 2", fgh.submitCalls)
+	}
+	stored, err := s.GetReview(rev.ID)
+	if err != nil {
+		t.Fatalf("get stored review: %v", err)
+	}
+	if stored.GitHubReviewID <= 0 || stored.AuthorizationSource != pipeline.ReviewAuthorizationManual {
+		t.Fatalf("stored review = %+v, want published manual review", stored)
+	}
+}
+
+func TestPublishPending_ChangedHeadRetiresWithoutPublishing(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	prID, err := s.UpsertPR(&store.PR{
+		GithubID: 201, Repo: "org/repo", Number: 81, Title: "t", Author: "alice",
+		State: "open", UpdatedAt: time.Now(), FetchedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("upsert pr: %v", err)
+	}
+	reviewID, err := s.InsertReview(&store.Review{
+		PRID: prID, CLIUsed: "claude", Issues: "[]", Suggestions: "[]",
+		Severity: "low", CreatedAt: time.Now(),
+		HeadSHA: "old-sha", GitHubReviewID: 0,
+	})
+	if err != nil {
+		t.Fatalf("insert review: %v", err)
+	}
+
+	fgh := &fakeGHTransientSubmit{headSHA: "new-sha"}
+	pipeline.New(s, fgh, &fakeExecOrphan{}, &fakeNotify{}).PublishPending()
+
+	if fgh.submitCalls != 0 {
+		t.Fatalf("SubmitReviewForCommit calls = %d, want 0", fgh.submitCalls)
+	}
+	got, err := s.GetReview(reviewID)
+	if err != nil {
+		t.Fatalf("get review: %v", err)
+	}
+	if got.GitHubReviewID != pipeline.SupersededReviewID {
+		t.Fatalf("GitHubReviewID = %d, want superseded sentinel %d",
+			got.GitHubReviewID, pipeline.SupersededReviewID)
 	}
 }
 
@@ -248,16 +339,26 @@ func TestPublishPending_EmptyHeadSHANeverPublishes(t *testing.T) {
 // fakeGHTransientSubmit returns a generic non-permanent error so the
 // transient-keeps-retrying test can drive the negative path.
 type fakeGHTransientSubmit struct {
-	submitCalls int
-	commitIDs   []string
+	submitCalls   int
+	commitIDs     []string
+	headSHA       string
+	succeedOnCall int
 }
 
-func (f *fakeGHTransientSubmit) FetchDiffForCommit(_ string, _ int, _ string) (string, error) {
+func (f *fakeGHTransientSubmit) FetchDiffForCommit(_ string, _ int, headSHA string) (string, error) {
+	f.headSHA = headSHA
 	return "+line", nil
+}
+func (f *fakeGHTransientSubmit) FetchDiffSnapshot(_ string, _ int, headSHA string) (gh.PRDiffSnapshot, error) {
+	f.headSHA = headSHA
+	return gh.PRDiffSnapshot{Diff: "+line", BaseSHA: "base", HeadSHA: headSHA}, nil
 }
 func (f *fakeGHTransientSubmit) SubmitReviewForCommit(_ string, _ int, _, _, commitID string) (int64, string, error) {
 	f.submitCalls++
 	f.commitIDs = append(f.commitIDs, commitID)
+	if f.succeedOnCall > 0 && f.submitCalls >= f.succeedOnCall {
+		return int64(9000 + f.submitCalls), "COMMENTED", nil
+	}
 	return 0, "", errors.New("github: submit review: status 503: upstream")
 }
 func (f *fakeGHTransientSubmit) PostComment(_ string, _ int, _ string) (time.Time, error) {
@@ -266,13 +367,18 @@ func (f *fakeGHTransientSubmit) PostComment(_ string, _ int, _ string) (time.Tim
 func (f *fakeGHTransientSubmit) FetchComments(_ string, _ int) ([]gh.Comment, error) {
 	return nil, nil
 }
-func (f *fakeGHTransientSubmit) GetPRHeadSHA(_ string, _ int) (string, error) { return "", nil }
+func (f *fakeGHTransientSubmit) GetPRHeadSHA(_ string, _ int) (string, error) {
+	return f.headSHA, nil
+}
+func (f *fakeGHTransientSubmit) GetPRRevision(_ string, _ int) (gh.PRRevision, error) {
+	return gh.PRRevision{BaseSHA: "base", HeadSHA: f.headSHA}, nil
+}
 
 // TestPublishPending_CorruptIssuesJSONOrphansWithoutPublishing covers #549: a
 // stored review whose issues JSON is corrupt must NOT be posted to GitHub with
 // its findings silently dropped, and must be orphaned so the deterministic
 // decode failure doesn't loop the retry forever.
-func TestPublishPending_CorruptIssuesJSONOrphansWithoutPublishing(t *testing.T) {
+func TestPublishPending_CorruptIssuesJSONRetiresForRegeneration(t *testing.T) {
 	s, err := store.Open(":memory:")
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -304,28 +410,29 @@ func TestPublishPending_CorruptIssuesJSONOrphansWithoutPublishing(t *testing.T) 
 	if fgh.submitCalls != 0 {
 		t.Errorf("SubmitReview called on corrupt-JSON review: calls=%d, want 0", fgh.submitCalls)
 	}
-	// Must be orphaned so it doesn't retry forever.
+	// Must be retired so it doesn't retry forever.
 	unpub, err := s.ListUnpublishedReviews()
 	if err != nil {
 		t.Fatalf("list unpublished: %v", err)
 	}
 	if len(unpub) != 0 {
-		t.Errorf("expected 0 unpublished reviews after corrupt-JSON orphaning, got %d", len(unpub))
+		t.Errorf("expected 0 unpublished reviews after corrupt-JSON retirement, got %d", len(unpub))
 	}
 
-	// Lock in the orphan-sentinel contract: the row is stamped with the
-	// orphaned-review id (-1), not a real GitHub review id.
+	// Corruption happened before GitHub received anything, so use the
+	// regenerable sentinel rather than permanently blocking this PR/SHA.
 	got, err := s.GetReview(prevReviewID)
 	if err != nil {
 		t.Fatalf("get review: %v", err)
 	}
-	if got.GitHubReviewID != -1 {
-		t.Errorf("orphaned review GitHubReviewID = %d, want -1 (sentinel)", got.GitHubReviewID)
+	if got.GitHubReviewID != pipeline.SupersededReviewID {
+		t.Errorf("retired review GitHubReviewID = %d, want %d (regenerable sentinel)",
+			got.GitHubReviewID, pipeline.SupersededReviewID)
 	}
 
 	// Subsequent ticks must remain a no-op.
 	p.PublishPending()
 	if fgh.submitCalls != 0 {
-		t.Errorf("PublishPending re-attempted on orphaned corrupt row: calls=%d, want 0", fgh.submitCalls)
+		t.Errorf("PublishPending re-attempted on retired corrupt row: calls=%d, want 0", fgh.submitCalls)
 	}
 }

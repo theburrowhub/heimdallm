@@ -254,12 +254,16 @@ func main() {
 		MaxWorktreesPerRepo: cfg.AI.MaxWorktreesPerRepo,
 	})
 
-	// Sweep worktrees left behind by a previous daemon process. At
-	// startup the manager has no active worktrees, so every directory
-	// under `<clone>/.worktrees/` is by definition stale and safe to
-	// remove. Mirrors the in-flight DB sweeps above. (#461)
+	// Sweep only isolated checkouts whose normal Release wrote cleanup.ready
+	// after every inherited lease closed. Crash leftovers without that proof,
+	// and legacy unleased `.worktrees` entries, are retained fail-closed. (#461)
 	{
 		ctx := context.Background()
+		if n, err := repoCtx.PruneStaleExternalWorktrees(ctx); err != nil {
+			slog.Warn("startup: prune leased external worktrees", "err", err)
+		} else if n > 0 {
+			slog.Info("startup: pruned leased external worktrees", "count", n)
+		}
 		for _, cloneDir := range managedCloneDirs(cfg) {
 			if n, err := repoCtx.PruneStaleWorktreesUnder(ctx, cloneDir); err != nil {
 				slog.Warn("startup: prune stale worktrees", "dir", cloneDir, "err", err)
@@ -430,6 +434,20 @@ func main() {
 	clonePurge := scheduler.New(24*time.Hour, func() { runCloneRetention("periodic") })
 	clonePurge.Start()
 	defer clonePurge.Stop()
+	// A normal Release writes cleanup.ready only after every inherited child
+	// lease has closed. Retry those provably-safe removals periodically so a
+	// transient git/lock timeout does not leave snapshot copies until restart.
+	releasedCheckoutPurge := scheduler.New(1*time.Hour, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		if n, err := repoCtx.PruneStaleExternalWorktrees(ctx); err != nil {
+			slog.Warn("periodic: prune released isolated checkouts", "err", err)
+		} else if n > 0 {
+			slog.Info("periodic: pruned released isolated checkouts", "count", n)
+		}
+	})
+	releasedCheckoutPurge.Start()
+	defer releasedCheckoutPurge.Stop()
 
 	// loginMu guards cachedLogin against concurrent reads/writes from the
 	// poll cycle and HTTP goroutines.
@@ -488,6 +506,24 @@ func main() {
 	}
 
 	runReview := func(pr *gh.PullRequest, aiCfg config.RepoAI) *store.Review {
+		// Resolve and freeze the revision before taking any repository context.
+		// Every review execution gets a fresh independent snapshot at this exact
+		// SHA; a later push is detected again by pipeline.FetchDiffForCommit and
+		// the pre-publish guard.
+		liveSHA, err := ghClient.GetPRHeadSHA(pr.Repo, pr.Number)
+		if err != nil || strings.TrimSpace(liveSHA) == "" {
+			slog.Warn("runReview: HEAD SHA unavailable — skipping fail-closed",
+				"repo", pr.Repo, "pr", pr.Number, "err", err)
+			return nil
+		}
+		if pr.Head.SHA != "" && pr.Head.SHA != liveSHA {
+			slog.Info("runReview: stale revision — newer HEAD will be scheduled",
+				"repo", pr.Repo, "pr", pr.Number,
+				"requested_sha", pr.Head.SHA, "current_sha", liveSHA)
+			return nil
+		}
+		pr.Head.SHA = liveSHA
+
 		// Persistent in-flight claim: survives daemon restart and config reload.
 		// Keyed on (pr_id, head_sha) so a new commit on the same PR is not
 		// gated by a stale in-flight row from a prior HEAD. See
@@ -584,7 +620,27 @@ func main() {
 		// doesn't pre-shape (the err.Error() string and the
 		// CircuitBreakerError discriminant). See theburrowhub/heimdallm#322
 		// Bugs 3+4 for the regression that made emitting from here unsafe.
+		cfgMu.Lock()
+		localDirBase := append([]string(nil), cfg.GitHub.LocalDirBase...)
+		cfgMu.Unlock()
+		repoHandle, repoErr := acquireRepoContext(
+			context.Background(), repoCtx, pr.Repo, &aiCfg, localDirBase, token,
+			repoctx.ModeRead, wtTokenFor("pr-review", pr.Number), pr.Head.SHA,
+			fmt.Sprintf("refs/pull/%d/head", pr.Number),
+		)
+		if repoErr != nil {
+			// Diff-only review remains safe: critically, never fall back to the
+			// operator's shared checkout when isolated materialisation fails.
+			logRepoContextFallback("runReview", pr.Repo, repoErr)
+			aiCfg.LocalDir = ""
+		}
+		if repoHandle != nil {
+			defer repoHandle.Release()
+		}
+
 		runOpts := buildRunOpts(pr, aiCfg)
+		runOpts.ExecOpts.ExtraFiles = inheritedRepoLeaseFiles(repoHandle)
+		runOpts.ValidateSnapshot = repoSnapshotValidator(repoCtx, repoHandle)
 		runOpts.RepoEligible = repoCurrentlyMonitored
 		rev, err := p.Run(pr, runOpts)
 		if err != nil {
@@ -988,21 +1044,7 @@ func main() {
 		cfgMu.Lock()
 		c := *cfg
 		aiCfg := c.AIForRepo(pr.Repo)
-		localDirBase := c.GitHub.LocalDirBase
 		cfgMu.Unlock()
-		repoHandle, err := acquireRepoContext(ctx, repoCtx, pr.Repo, &aiCfg, localDirBase, token, repoctx.ModeRead, wtTokenFor("pr-review", pr.Number), "", "")
-		if err != nil {
-			logRepoContextFallback("review-worker", pr.Repo, err)
-			aiCfg.LocalDir = ""
-		}
-		if repoHandle != nil {
-			defer repoHandle.Release()
-		}
-		// Repo acquisition may clone/fetch for several seconds. Recheck at the
-		// final execution boundary so a disable during that wait stops the CLI.
-		if skipIfUnmonitored("post_acquire") {
-			return
-		}
 
 		rev := runReview(pr, aiCfg)
 
@@ -1061,6 +1103,26 @@ func main() {
 			_ = s.MarkReviewPublished(rev.ID, -1, "", time.Now().UTC())
 			return nil // permanent — ack
 		}
+		if strings.TrimSpace(rev.HeadSHA) == "" {
+			// Legacy rows have no provable commit provenance. Letting GitHub
+			// choose the current HEAD would risk publishing findings against
+			// code that was never analysed, so retire them permanently.
+			if err := s.MarkReviewPublished(rev.ID, -1, "", time.Now().UTC()); err != nil {
+				return fmt.Errorf("mark review %d with unknown commit orphaned: %w", rev.ID, err)
+			}
+			slog.Info("publish-worker: review has no HeadSHA, marking orphaned",
+				"review_id", rev.ID, "repo", pr.Repo, "pr", pr.Number)
+			return nil
+		}
+		if strings.TrimSpace(rev.BaseSHA) == "" {
+			if err := s.MarkReviewPublished(rev.ID, pipeline.SupersededReviewID, "", time.Now().UTC()); err != nil {
+				return fmt.Errorf("retire review %d with unknown base: %w", rev.ID, err)
+			}
+			_ = s.SetReviewSuccessorPending(rev.ID, false)
+			slog.Info("publish-worker: review has no BaseSHA, retiring for regeneration",
+				"review_id", rev.ID, "repo", pr.Repo, "pr", pr.Number)
+			return nil
+		}
 		claimed, err := s.ClaimInFlightReview(pr.GithubID, rev.HeadSHA)
 		if err != nil {
 			return fmt.Errorf("claim review for publish: %w", err)
@@ -1081,9 +1143,13 @@ func main() {
 		// Rebuild ReviewResult from stored JSON
 		var issues []executor.Issue
 		if err := json.Unmarshal([]byte(rev.Issues), &issues); err != nil {
-			slog.Error("publish-worker: corrupt issues JSON, skipping",
+			slog.Error("publish-worker: corrupt issues JSON, retiring for regeneration",
 				"review_id", msg.ReviewID, "err", err)
-			return nil // permanent — ack
+			if markErr := s.MarkReviewPublished(rev.ID, pipeline.SupersededReviewID, "", time.Now().UTC()); markErr != nil {
+				return fmt.Errorf("retire corrupt review %d: %w", rev.ID, markErr)
+			}
+			_ = s.SetReviewSuccessorPending(rev.ID, false)
+			return nil // ack; the outstanding request may generate a clean row
 		}
 		result := &executor.ReviewResult{
 			Summary:  rev.Summary,
@@ -1139,9 +1205,29 @@ func main() {
 			}
 			return fmt.Errorf("refresh PR before publishing review: %w", err)
 		}
+		loginMu.Lock()
+		publishBotLogin := cachedLogin
+		loginMu.Unlock()
+		cfgMu.Lock()
+		publishGuards := pipeline.GateConfig(cfg.ReviewGuards(publishBotLogin))
+		cfgMu.Unlock()
+		if reason := pipeline.Evaluate(pipeline.PRGate{
+			State:  snapshot.State,
+			Draft:  snapshot.Draft,
+			Author: snapshot.Author,
+		}, publishGuards); reason != pipeline.SkipReasonNone {
+			if err := s.MarkReviewPublished(rev.ID, -1, "", time.Now().UTC()); err != nil {
+				return fmt.Errorf("retire ineligible review %d: %w", rev.ID, err)
+			}
+			_ = s.SetReviewSuccessorPending(rev.ID, false)
+			slog.Info("publish-worker: live PR no longer passes review guards, retiring result",
+				"review_id", rev.ID, "repo", pr.Repo, "pr", pr.Number,
+				"reason", string(reason))
+			return nil
+		}
 		if reason := pendingReviewInvalidReason(rev, snapshot); reason != pipeline.SkipReasonNone {
 			terminalReviewID := int64(-1)
-			if reason == pipeline.SkipReasonHeadChanged {
+			if reason == pipeline.SkipReasonHeadChanged || reason == pipeline.SkipReasonBaseChanged {
 				terminalReviewID = pipeline.SupersededReviewID
 			}
 			if err := s.MarkReviewPublished(rev.ID, terminalReviewID, "", time.Now().UTC()); err != nil {
@@ -1165,31 +1251,67 @@ func main() {
 		if rev.HeadSHA != "" && snapshot.HeadSHA == "" {
 			return fmt.Errorf("refresh PR before publishing review: empty HEAD SHA for %s #%d", pr.Repo, pr.Number)
 		}
+		if rev.BaseSHA != "" && snapshot.BaseSHA == "" {
+			return fmt.Errorf("refresh PR before publishing review: empty base SHA for %s #%d", pr.Repo, pr.Number)
+		}
+		intentChange, intentErr := p.PendingReviewIntent(pr.Repo, pr.Number, rev)
+		if intentErr != nil {
+			return fmt.Errorf("refresh review-request intent before publishing review: %w", intentErr)
+		}
+		if intentChange != pipeline.PendingIntentUnchanged {
+			terminalID := pipeline.SupersededReviewID
+			if intentChange == pipeline.PendingIntentCancelled {
+				terminalID = -1
+			}
+			if err := s.MarkReviewPublished(rev.ID, terminalID, "", time.Now().UTC()); err != nil {
+				return fmt.Errorf("retire review %d after request-state change: %w", rev.ID, err)
+			}
+			_ = s.SetReviewSuccessorPending(rev.ID, false)
+			slog.Info("publish-worker: review-request state changed, retiring deferred result",
+				"review_id", rev.ID, "repo", pr.Repo, "pr", pr.Number)
+			return nil
+		}
+		if pipeline.ReviewRequiresCurrentRequest(rev) {
+			requested, requestErr := p.ReviewRequestCurrent(pr.Repo, pr.Number, rev.HeadSHA)
+			if requestErr != nil {
+				return fmt.Errorf("refresh requested-reviewer state before publishing review: %w", requestErr)
+			}
+			if !requested {
+				if err := s.MarkReviewPublished(rev.ID, -1, "", time.Now().UTC()); err != nil {
+					return fmt.Errorf("retire unrequested review %d: %w", rev.ID, err)
+				}
+				_ = s.SetReviewSuccessorPending(rev.ID, false)
+				slog.Info("publish-worker: bot no longer requested, retiring deferred result",
+					"review_id", rev.ID, "repo", pr.Repo, "pr", pr.Number)
+				return nil
+			}
+		}
 		if deferForMonitoringChange("before_submit") {
 			return nil
 		}
-		reviewBody := pipeline.AnnotateBodyForEvent(pipeline.BuildGitHubBody(result), publishEvent, len(result.Issues))
-		var ghID int64
-		var ghState string
-		if rev.HeadSHA != "" {
-			ghID, ghState, err = ghClient.SubmitReviewForCommit(
-				pr.Repo, pr.Number, reviewBody, publishEvent, rev.HeadSHA,
-			)
-		} else {
-			// Preserve retry compatibility for legacy rows created before head_sha
-			// was populated. New reviews always use the commit-anchored path above.
-			ghID, ghState, err = ghClient.SubmitReview(
-				pr.Repo, pr.Number, reviewBody, publishEvent,
-			)
+		// Arm the durable carry-forward flag before the external side effect.
+		// A review POST can consume GitHub's pending reviewer request even if a
+		// push lands between the HEAD check above and the request itself.
+		if err := s.SetReviewSuccessorPending(rev.ID, true); err != nil {
+			return fmt.Errorf("arm successor flag for review %d: %w", rev.ID, err)
 		}
+		rev.SuccessorPending = true
+		reviewBody := pipeline.AnnotateBodyForEvent(pipeline.BuildGitHubBody(result), publishEvent, len(result.Issues))
+		ghID, ghState, err := ghClient.SubmitReviewForCommit(
+			pr.Repo, pr.Number, reviewBody, publishEvent, rev.HeadSHA,
+		)
 		if err != nil {
-			errStr := err.Error()
-			// 4xx errors (except 429 rate limit) are permanent — no point retrying.
-			// 5xx and network errors are transient — nak for NATS retry.
-			if strings.Contains(errStr, "status 4") && !strings.Contains(errStr, "status 429") {
+			// Only the GitHub client may classify a submit error as
+			// permanent. Generic 403/422 responses can be rate limits or
+			// transient validation races and must remain retryable.
+			var permanent *gh.PermanentSubmitError
+			if errors.As(err, &permanent) {
 				slog.Error("publish-worker: permanent GitHub error, marking orphaned",
-					"review_id", msg.ReviewID, "err", err)
-				_ = s.MarkReviewPublished(msg.ReviewID, -1, "", time.Now().UTC())
+					"review_id", msg.ReviewID, "reason", permanent.Reason, "err", err)
+				if markErr := s.MarkReviewPublished(msg.ReviewID, -1, "", time.Now().UTC()); markErr != nil {
+					return fmt.Errorf("mark permanently failed review %d orphaned: %w", msg.ReviewID, markErr)
+				}
+				_ = s.SetReviewSuccessorPending(rev.ID, false)
 				return nil // permanent — ack
 			}
 			return fmt.Errorf("submit review to GitHub: %w", err)
@@ -1199,6 +1321,12 @@ func main() {
 		if err := s.MarkReviewPublished(rev.ID, ghID, ghState, publishedAt); err != nil {
 			slog.Warn("publish-worker: failed to mark published",
 				"review_id", rev.ID, "err", err)
+		}
+		if p.ReconcilePublishedReview(pr.Repo, pr.Number, rev) {
+			if _, enrollErr := watchStore.EnrollIfAbsent(ctx, "pr", pr.Repo, pr.Number, pr.GithubID); enrollErr != nil {
+				slog.Warn("publish-worker: failed to enroll successor watch",
+					"review_id", rev.ID, "repo", pr.Repo, "pr", pr.Number, "err", enrollErr)
+			}
 		}
 		slog.Info("publish-worker: review published",
 			"review_id", rev.ID, "github_review_id", ghID,
@@ -1288,6 +1416,7 @@ func main() {
 				DangerouslySkipPerms: agentCfg.DangerouslySkipPerms,
 				NoSessionPersistence: agentCfg.NoSessionPersistence,
 				Timeout:              resolveExecutionTimeout(globalTimeout, agentCfg.ExecutionTimeout),
+				ExtraFiles:           inheritedRepoLeaseFiles(repoHandle),
 			},
 			IssuePromptOverride:     issuePrompt,
 			IssueInstructions:       issueInstructions,
@@ -1484,6 +1613,7 @@ func main() {
 				DangerouslySkipPerms: agentCfg.DangerouslySkipPerms,
 				NoSessionPersistence: agentCfg.NoSessionPersistence,
 				Timeout:              resolveExecutionTimeout(globalTimeout, agentCfg.ExecutionTimeout),
+				ExtraFiles:           inheritedRepoLeaseFiles(repoHandle),
 			},
 			IssuePromptOverride:      issuePrompt,
 			IssueInstructions:        issueInstructions,
@@ -1564,7 +1694,7 @@ func main() {
 	// ── NATS state check worker ─────────────────────────────────────────
 	// Consumes state check requests, calls GitHub API, updates KV backoff.
 	// Reuses the existing CheckItem/HandleChange logic from tier2Adapter.
-	stateHandler := func(ctx context.Context, msg bus.StateCheckMsg) (bool, error) {
+	stateHandler := func(ctx context.Context, msg bus.StateCheckMsg) (bool, time.Time, string, error) {
 		// Auto-dismiss legacy items with missing data — they can never be checked.
 		if msg.Repo == "" {
 			key := fmt.Sprintf("%s.%d", msg.Type, msg.GithubID)
@@ -1573,7 +1703,7 @@ func main() {
 			}
 			slog.Info("state-handler: auto-dismissed legacy item with empty repo",
 				"type", msg.Type, "number", msg.Number, "github_id", msg.GithubID)
-			return false, nil
+			return false, time.Time{}, "", nil
 		}
 		if !adapter.repoIsMonitored(msg.Repo) {
 			key := fmt.Sprintf("%s.%d", msg.Type, msg.GithubID)
@@ -1583,13 +1713,13 @@ func main() {
 			}
 			slog.Info("state-handler: repo no longer monitored, skipping",
 				"type", msg.Type, "repo", msg.Repo, "number", msg.Number)
-			return false, nil
+			return false, time.Time{}, "", nil
 		}
 
 		// Rate limit before any GitHub API call. TierWatch (50ms) matches
 		// the old Tier 3 priority — state checks are lightweight and high-priority.
 		if err := limiter.Acquire(ctx, scheduler.TierWatch); err != nil {
-			return false, fmt.Errorf("rate limit cancelled: %w", err)
+			return false, time.Time{}, "", fmt.Errorf("rate limit cancelled: %w", err)
 		}
 
 		item := &scheduler.WatchItem{
@@ -1604,6 +1734,7 @@ func main() {
 		entry, err := watchStore.Get(ctx, key)
 		if err == nil {
 			item.LastSeen = entry.LastSeen
+			item.LastHeadSHA = entry.HeadSHA
 		} else {
 			slog.Warn("state-handler: KV get failed, using zero LastSeen",
 				"key", key, "err", err)
@@ -1620,17 +1751,23 @@ func main() {
 				}
 				slog.Info("state-handler: removed unreachable item from watch",
 					"type", msg.Type, "repo", msg.Repo, "number", msg.Number)
-				return false, nil
+				return false, time.Time{}, "", nil
 			}
-			return false, err
+			return false, time.Time{}, "", err
 		}
 		if !changed {
-			return false, nil
+			return false, time.Time{}, "", nil
+		}
+		if snap == nil || snap.UpdatedAt.IsZero() {
+			return false, time.Time{}, "", fmt.Errorf(
+				"state-handler: changed %s %s#%d has no observed updated_at",
+				msg.Type, msg.Repo, msg.Number,
+			)
 		}
 		if err := adapter.HandleChange(ctx, item, snap); err != nil {
-			return true, err
+			return true, snap.UpdatedAt, snap.HeadSHA, err
 		}
-		return true, nil
+		return true, snap.UpdatedAt, snap.HeadSHA, nil
 	}
 
 	stateW := worker.NewStateWorker(conn, maxWorkers*2, watchStore, stateHandler)
@@ -1842,12 +1979,9 @@ func main() {
 		loginMu.Unlock()
 
 		login, err := ghClient.AuthenticatedUser()
-
-		loginMu.Lock()
-		if err == nil && cachedLogin == "" {
-			cachedLogin = login
+		if err == nil {
+			adapter.cacheAuthenticatedUser(login)
 		}
-		loginMu.Unlock()
 
 		return login, err
 	})
@@ -1979,14 +2113,6 @@ func main() {
 		aiCfg := cfg.AIForRepo(pr.Repo)
 		localDirBase := cfg.GitHub.LocalDirBase
 		cfgMu.Unlock()
-		repoHandle, err := acquireRepoContext(context.Background(), repoCtx, pr.Repo, &aiCfg, localDirBase, token, repoctx.ModeRead, wtTokenFor("pr-review", pr.Number), "", "")
-		if err != nil {
-			logRepoContextFallback("trigger review", pr.Repo, err)
-			aiCfg.LocalDir = ""
-		}
-		if repoHandle != nil {
-			defer repoHandle.Release()
-		}
 
 		// Construct github.PullRequest from stored data
 		ghPR := &gh.PullRequest{
@@ -2010,22 +2136,35 @@ func main() {
 		// SHA dedup, two rapid clicks of the Re-review button — the handler
 		// queues work and returns 202 — would run two full concurrent reviews
 		// and double-publish. Resolving the SHA restores the (pr_id, head_sha)
-		// in-flight claim as the concurrency guard for this path. Fail-open on
-		// lookup error (log + proceed without the claim), matching the poll
-		// path's posture: better to lose the guard for one request than to
-		// block a legitimate manual re-review on a transient API blip.
-		if sha, shaErr := ghClient.GetPRHeadSHA(pr.Repo, pr.Number); shaErr != nil {
-			slog.Warn("trigger review: HEAD SHA lookup failed, proceeding without in-flight claim",
+		// in-flight claim as the concurrency guard for this path and gives the
+		// repository manager an immutable target for the detached worktree.
+		// Fail closed: a review without a known commit cannot be made coherent.
+		sha, shaErr := ghClient.GetPRHeadSHA(pr.Repo, pr.Number)
+		if shaErr != nil {
+			slog.Warn("trigger review: HEAD SHA lookup failed, skipping fail-closed",
 				"repo", pr.Repo, "pr", pr.Number, "err", shaErr)
-		} else if sha != "" {
-			ghPR.Head.SHA = sha
+			publishErr(fmt.Sprintf("Could not resolve the current PR commit: %v", shaErr))
+			return fmt.Errorf("trigger review: resolve HEAD SHA for %s#%d: %w", pr.Repo, pr.Number, shaErr)
 		}
-		// An empty-but-nil SHA is left unset on purpose: pipeline.Run resolves
-		// it again and fails closed if it still comes back empty, rather than
-		// storing an ambiguous empty-HeadSHA row. The in-process guard above
-		// covers concurrency for this no-claim path.
+		if strings.TrimSpace(sha) == "" {
+			publishErr("Could not resolve the current PR commit.")
+			return fmt.Errorf("trigger review: resolve HEAD SHA for %s#%d: empty SHA", pr.Repo, pr.Number)
+		}
+		ghPR.Head.SHA = strings.TrimSpace(sha)
 
-		// Persistent in-flight claim: keyed on (store pr_id, head_sha), the
+		repoHandle, repoErr := acquireRepoContext(
+			context.Background(), repoCtx, pr.Repo, &aiCfg, localDirBase, token,
+			repoctx.ModeRead, wtTokenFor("pr-review", pr.Number), ghPR.Head.SHA,
+			fmt.Sprintf("refs/pull/%d/head", pr.Number),
+		)
+		if repoErr != nil {
+			logRepoContextFallback("trigger review", pr.Repo, repoErr)
+			aiCfg.LocalDir = ""
+		}
+		if repoHandle != nil {
+			defer repoHandle.Release()
+		}
+		// Persistent in-flight claim: keyed on (GitHub pr_id, head_sha), the
 		// same mechanism as the poll loop so both paths share one guard across
 		// daemon restart / config reload. This is the ONLY duplicate-work
 		// defense left on the forced path: Force deliberately bypasses the
@@ -2037,7 +2176,7 @@ func main() {
 		// error: a transient SQLite blip must not block a manual re-review.
 		var triggerClaimed bool
 		if ghPR.Head.SHA != "" {
-			ok, err := s.ClaimInFlightReview(pr.ID, ghPR.Head.SHA)
+			ok, err := s.ClaimInFlightReview(pr.GithubID, ghPR.Head.SHA)
 			if err != nil {
 				slog.Warn("trigger review: claim inflight failed, proceeding", "err", err)
 			} else if !ok {
@@ -2055,9 +2194,9 @@ func main() {
 		}
 		defer func() {
 			if triggerClaimed {
-				if err := s.ReleaseInFlightReview(pr.ID, ghPR.Head.SHA); err != nil {
+				if err := s.ReleaseInFlightReview(pr.GithubID, ghPR.Head.SHA); err != nil {
 					slog.Warn("trigger review: release inflight failed", "err", err,
-						"pr_id", pr.ID, "head_sha", ghPR.Head.SHA)
+						"github_pr_id", pr.GithubID, "head_sha", ghPR.Head.SHA)
 				}
 			}
 		}()
@@ -2077,6 +2216,8 @@ func main() {
 		// claim taken above (keyed on the HEAD SHA resolved just before it).
 		// See pipeline.RunOptions.Force. The poll path never sets this.
 		runOpts := buildRunOpts(ghPR, aiCfg)
+		runOpts.ExecOpts.ExtraFiles = inheritedRepoLeaseFiles(repoHandle)
+		runOpts.ValidateSnapshot = repoSnapshotValidator(repoCtx, repoHandle)
 		runOpts.Force = true
 		rev, err := p.Run(ghPR, runOpts)
 		if err != nil {
@@ -2094,6 +2235,14 @@ func main() {
 			}
 			broker.Publish(sse.Event{Type: sse.EventReviewError, Data: sseData(map[string]any{"pr_id": prID, "error": err.Error()})})
 			return err
+		}
+		if rev != nil && rev.SuccessorPending {
+			if _, enrollErr := watchStore.EnrollIfAbsent(
+				context.Background(), "pr", pr.Repo, pr.Number, pr.GithubID,
+			); enrollErr != nil {
+				slog.Warn("trigger review: failed to enroll successor watch",
+					"review_id", rev.ID, "repo", pr.Repo, "pr", pr.Number, "err", enrollErr)
+			}
 		}
 		// rev == nil → pipeline already emitted EventReviewSkipped with
 		// the actual reason. rev != nil → pipeline already emitted
@@ -3278,6 +3427,36 @@ func (a *tier2Adapter) cachedAuthenticatedUser() string {
 	return *a.login
 }
 
+// cacheAuthenticatedUser keeps every long-lived consumer in sync when the
+// startup /user lookup was transiently unavailable. The setters are
+// concurrency-safe; invoke them after releasing loginMu so no pipeline path
+// can deadlock while taking its own read lock.
+func (a *tier2Adapter) cacheAuthenticatedUser(login string) string {
+	login = strings.TrimSpace(login)
+	if a == nil || login == "" {
+		return ""
+	}
+	if a.login != nil {
+		if a.loginMu == nil {
+			*a.login = login
+		} else {
+			a.loginMu.Lock()
+			*a.login = login
+			a.loginMu.Unlock()
+		}
+	}
+	if a.pipeline != nil {
+		a.pipeline.SetBotLogin(login)
+	}
+	if a.issuePipe != nil {
+		a.issuePipe.SetBotLogin(login)
+	}
+	if a.fetcher != nil {
+		a.fetcher.SetBotLogin(login)
+	}
+	return login
+}
+
 func (a *tier2Adapter) resolveAuthenticatedUser() string {
 	if authUser := a.cachedAuthenticatedUser(); authUser != "" {
 		return authUser
@@ -3289,16 +3468,7 @@ func (a *tier2Adapter) resolveAuthenticatedUser() string {
 	if err != nil {
 		return ""
 	}
-	if a.login != nil {
-		if a.loginMu == nil {
-			*a.login = u
-		} else {
-			a.loginMu.Lock()
-			*a.login = u
-			a.loginMu.Unlock()
-		}
-	}
-	return u
+	return a.cacheAuthenticatedUser(u)
 }
 
 type breakerTripKey struct {
@@ -3473,20 +3643,11 @@ func (a *tier2Adapter) FetchPRsToReview() ([]scheduler.Tier2PR, error) {
 	processDiscoveredRepos(added, reposSnap, nonMonSnap, a.store, a.broker, time.Now())
 
 	// Resolve bot login for the self-author guard.
-	a.loginMu.Lock()
-	botLogin := *a.login
-	a.loginMu.Unlock()
+	botLogin := a.resolveAuthenticatedUser()
 	if botLogin == "" {
-		if u, err := a.ghClient.AuthenticatedUser(); err == nil {
-			botLogin = u
-			a.loginMu.Lock()
-			*a.login = u
-			a.loginMu.Unlock()
-		} else {
-			// Empty botLogin silently disables the self-author guard for this
-			// cycle; log so operators can diagnose why it's not firing.
-			slog.Warn("adapter: failed to resolve bot login, self-author guard disabled this cycle", "err", err)
-		}
+		// Empty botLogin silently disables the self-author guard for this
+		// cycle; log so operators can diagnose why it's not firing.
+		slog.Warn("adapter: failed to resolve bot login, self-author guard disabled this cycle")
 	}
 
 	a.cfgMu.Lock()
@@ -3633,16 +3794,7 @@ func (a *tier2Adapter) ProcessPR(ctx context.Context, pr scheduler.Tier2PR) erro
 	a.cfgMu.Lock()
 	c := *a.cfg
 	aiCfg := c.AIForRepo(pr.Repo)
-	localDirBase := c.GitHub.LocalDirBase
 	a.cfgMu.Unlock()
-	repoHandle, err := acquireRepoContext(ctx, a.repoCtx, pr.Repo, &aiCfg, localDirBase, a.ghToken, repoctx.ModeRead, wtTokenFor("pr-tier2", pr.Number), "", "")
-	if err != nil {
-		logRepoContextFallback("tier2 PR", pr.Repo, err)
-		aiCfg.LocalDir = ""
-	}
-	if repoHandle != nil {
-		defer repoHandle.Release()
-	}
 
 	ghPR := &gh.PullRequest{
 		ID:        pr.ID,
@@ -3845,6 +3997,7 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 				DangerouslySkipPerms: agentCfg.DangerouslySkipPerms,
 				NoSessionPersistence: agentCfg.NoSessionPersistence,
 				Timeout:              execTimeout,
+				ExtraFiles:           inheritedRepoLeaseFiles(repoHandle),
 			},
 			IssuePromptOverride:         issuePrompt,
 			IssueInstructions:           issueInstructions,
@@ -3951,6 +4104,14 @@ func promoteIssueTrackingKey(it config.IssueTrackingConfig) string {
 	return string(b)
 }
 
+func (a *tier2Adapter) publishedSuccessorPending(prID int64) bool {
+	if a == nil || a.store == nil || prID == 0 {
+		return false
+	}
+	latest, err := a.store.LatestReviewForPR(prID)
+	return err == nil && latest.SuccessorPending && latest.GitHubReviewID > 0
+}
+
 // PRAlreadyReviewed implements scheduler.Tier2Store.
 func (a *tier2Adapter) PRAlreadyReviewed(githubID int64, repo string, number int, updatedAt time.Time, headSHA string) bool {
 	existing, _ := a.store.GetPRByGithubID(githubID)
@@ -3967,6 +4128,12 @@ func (a *tier2Adapter) PRAlreadyReviewed(githubID int64, repo string, number int
 	// Skip PRs the user has dismissed
 	if existing.Dismissed {
 		return true
+	}
+	// A successful review POST can race a push or a later request and consume
+	// GitHub's pending-reviewer bit. Its durable successor flag outranks the
+	// normal updated_at/circuit-breaker dedup until a replacement row exists.
+	if a.publishedSuccessorPending(existing.ID) {
+		return false
 	}
 	// NOTE: The former 2-minute PublishedAt grace window (GraceDefault) has
 	// been removed. The tier-2 FetchPRsToReview loop now confirms the bot is
@@ -4105,7 +4272,13 @@ func (a *tier2Adapter) CheckItem(ctx context.Context, item *scheduler.WatchItem)
 			}
 			return false, nil, nil
 		}
-		if !snap.UpdatedAt.After(item.LastSeen) {
+		// GitHub updated_at is second-granularity. A rapid push can therefore
+		// produce a new commit with the same timestamp as the snapshot just
+		// handled. The persisted SHA is an independent change signal.
+		headChanged := snap.HeadSHA != "" && snap.HeadSHA != item.LastHeadSHA
+		stored, storeErr := a.store.GetPRByGithubID(item.GithubID)
+		successorPending := stored != nil && a.publishedSuccessorPending(stored.ID)
+		if !snap.UpdatedAt.After(item.LastSeen) && !headChanged && !successorPending {
 			return false, nil, nil
 		}
 		// Review-state vigilance branch (#482): for PRs that
@@ -4115,7 +4288,6 @@ func (a *tier2Adapter) CheckItem(ctx context.Context, item *scheduler.WatchItem)
 		// standard review codepath — the daemon's own PRs would be
 		// rejected by SkipReasonSelfAuthored anyway, but routing them
 		// here keeps the observation layer's intent explicit.
-		stored, storeErr := a.store.GetPRByGithubID(item.GithubID)
 		if storeErr != nil {
 			// A non-ErrNoRows failure means SQLite is unhappy
 			// (corruption, FS error). Logging it makes operational
@@ -4144,12 +4316,15 @@ func (a *tier2Adapter) CheckItem(ctx context.Context, item *scheduler.WatchItem)
 				// without re-emitting the event.
 				return false, nil, err
 			}
-			// Success: signal `changed=true` so the StateWorker resets
-			// backoff and advances LastSeen. A nil snap means
-			// HandleChange's first guard short-circuits — we already
-			// handled dispatch inline inside refresh, the standard
-			// review codepath has nothing to do here.
-			return true, nil, nil
+			// Success: preserve the exact remote updated_at that was handled.
+			// The StateWorker must not replace it with time.Now: a push that
+			// lands while this branch runs must remain newer on the next tick.
+			// Handled tells HandleChange that dispatch already happened inline.
+			return true, &scheduler.ItemSnapshot{
+				UpdatedAt: snap.UpdatedAt,
+				HeadSHA:   snap.HeadSHA,
+				Handled:   true,
+			}, nil
 		}
 		// Forward HeadSHA so HandleChange can feed it into runReview's
 		// persistent in-flight claim (#258, theburrowhub/heimdallm#264).
@@ -4195,7 +4370,7 @@ func (a *tier2Adapter) CheckItem(ctx context.Context, item *scheduler.WatchItem)
 // HandleChange implements scheduler.Tier3ItemChecker.
 func (a *tier2Adapter) HandleChange(ctx context.Context, item *scheduler.WatchItem, snap *scheduler.ItemSnapshot) error {
 	if item.Type == "pr" {
-		if snap == nil {
+		if snap == nil || snap.Handled {
 			return nil
 		}
 
@@ -4285,13 +4460,27 @@ func (a *tier2Adapter) HandleChange(ctx context.Context, item *scheduler.WatchIt
 			ghPR.User = gh.User{Login: snap.Author}
 		}
 		rev := a.runReview(ghPR, aiCfg)
+		if rev == nil && stored != nil && a.publishedSuccessorPending(stored.ID) {
+			// runReview reports skips/errors as nil for its legacy callers.
+			// Do not acknowledge this watched snapshot while the durable
+			// predecessor still says a successor is owed; StateWorker will
+			// retain LastSeen/HeadSHA and retry with backoff.
+			return fmt.Errorf(
+				"tier3: successor review for %s#%d was not completed",
+				item.Repo, item.Number,
+			)
+		}
 		if rev != nil && rev.GitHubReviewID == 0 && a.publishPub != nil {
 			if err := a.publishPub.PublishPRPublish(context.Background(), rev.ID); err != nil {
 				slog.Warn("HandleChange: failed to enqueue publish", "review_id", rev.ID, "err", err)
 			}
 		}
 		if a.watchStore != nil {
-			if err := a.watchStore.Enroll(ctx, "pr", item.Repo, item.Number, item.GithubID); err != nil {
+			// This item is already in Tier 3. Re-enrolling with Enroll would
+			// overwrite LastSeen with time.Now before StateWorker persists the
+			// snapshot's remote UpdatedAt, recreating a crash window where a
+			// concurrent push is treated as already seen.
+			if _, err := a.watchStore.EnrollIfAbsent(ctx, "pr", item.Repo, item.Number, item.GithubID); err != nil {
 				slog.Warn("HandleChange: failed to enroll watch", "repo", item.Repo, "pr", item.Number, "err", err)
 			}
 		}
@@ -4526,6 +4715,7 @@ func buildRefinementRunOptions(
 			DangerouslySkipPerms: agentCfg.DangerouslySkipPerms,
 			NoSessionPersistence: agentCfg.NoSessionPersistence,
 			Timeout:              resolveRefinementTimeout(aiCfg.RefinementTimeout, globalTimeout, agentCfg.ExecutionTimeout),
+			ExtraFiles:           inheritedRepoLeaseFiles(repoHandle),
 		},
 		IssuePromptOverride:         issuePrompt,
 		IssueInstructions:           issueInstructions,
@@ -4762,7 +4952,7 @@ func acquireRepoContext(
 	mode repoctx.Mode,
 	wtToken string,
 	wtBaseRef string,
-	branch string,
+	wtFetchRef string,
 ) (*repoctx.Handle, error) {
 	if manager == nil {
 		return nil, fmt.Errorf("repoctx: nil manager")
@@ -4776,7 +4966,7 @@ func acquireRepoContext(
 		Mode:               mode,
 		WorktreeToken:      wtToken,
 		WorktreeBaseRef:    wtBaseRef,
-		Branch:             branch,
+		WorktreeFetchRef:   wtFetchRef,
 	})
 	if err != nil {
 		return nil, err
@@ -4788,12 +4978,32 @@ func acquireRepoContext(
 	return h, nil
 }
 
-// wtTokenFor produces a sanitisation-safe worktree token for a
+// wtTokenFor produces a sanitisation-safe isolated-checkout token for a
 // pipeline stage. The prefix names the stage (`pr-review`, `triage`,
 // `develop`, `refinement`, `pr-tier2`) so operators can correlate
-// `<clone>/.worktrees/<token>/` with the running execution.
+// the external `<token>.<random-id>/checkout` path with the running execution.
 func wtTokenFor(prefix string, n int) string {
 	return fmt.Sprintf("%s-%d", prefix, n)
+}
+
+func inheritedRepoLeaseFiles(h *repoctx.Handle) *executor.InheritedFileSet {
+	if h == nil {
+		return nil
+	}
+	files := h.LeaseFiles()
+	if len(files) == 0 {
+		return nil
+	}
+	return executor.NewInheritedFileSet(files...)
+}
+
+func repoSnapshotValidator(manager *repoctx.Manager, h *repoctx.Handle) func() error {
+	if manager == nil || h == nil || h.CommitSHA() == "" {
+		return nil
+	}
+	return func() error {
+		return manager.ValidateSnapshot(context.Background(), h)
+	}
 }
 
 func ensureRepoContextFullHistory(ctx context.Context, manager *repoctx.Manager, h *repoctx.Handle, token, scope, repo string) {
@@ -5135,10 +5345,10 @@ func deferPublishIfUnmonitored(repo string, isMonitored func(string) bool) bool 
 }
 
 // pendingReviewInvalidReason protects retry/deferred publication from live PR
-// drift. Empty review SHAs are legacy rows whose provenance cannot be checked;
-// they retain the pre-existing retry behavior rather than being destroyed by
-// an upgrade. A non-empty current SHA is required before classifying a commit
-// mismatch so transient/incomplete API responses retry instead of orphaning.
+// drift. Legacy rows with empty review SHAs are rejected by the publish worker
+// before this helper: their provenance cannot be checked. A non-empty current
+// SHA is required before classifying a commit mismatch so transient/incomplete
+// API responses retry instead of orphaning.
 func pendingReviewInvalidReason(rev *store.Review, snapshot *gh.PRSnapshot) pipeline.SkipReason {
 	if rev == nil || snapshot == nil {
 		return pipeline.SkipReasonNone
@@ -5148,6 +5358,9 @@ func pendingReviewInvalidReason(rev *store.Review, snapshot *gh.PRSnapshot) pipe
 	}
 	if rev.HeadSHA != "" && snapshot.HeadSHA != "" && rev.HeadSHA != snapshot.HeadSHA {
 		return pipeline.SkipReasonHeadChanged
+	}
+	if rev.BaseSHA != "" && snapshot.BaseSHA != "" && rev.BaseSHA != snapshot.BaseSHA {
+		return pipeline.SkipReasonBaseChanged
 	}
 	return pipeline.SkipReasonNone
 }

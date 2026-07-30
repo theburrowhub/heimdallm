@@ -46,10 +46,11 @@ func (p *Pipeline) runRefinement(ctx context.Context, issue *github.Issue, issue
 			"repo", issue.Repo, "number", issue.Number, "err", err)
 		comments = nil
 	}
+	botLogin := p.currentBotLogin()
 
 	var humanComments []github.Comment
 	for _, c := range comments {
-		if p.botLogin != "" && strings.EqualFold(c.Author, p.botLogin) {
+		if botLogin != "" && strings.EqualFold(c.Author, botLogin) {
 			continue
 		}
 		humanComments = append(humanComments, c)
@@ -58,7 +59,7 @@ func (p *Pipeline) runRefinement(ctx context.Context, issue *github.Issue, issue
 	prevContext := ""
 	prevReview, _ := p.store.LatestIssueReview(issueID)
 	if prevReview != nil {
-		prevContext = buildIssueRunContext(prevReview, comments, p.botLogin)
+		prevContext = buildIssueRunContext(prevReview, comments, botLogin)
 	}
 
 	prompt := BuildRefinementPrompt(PromptContext{

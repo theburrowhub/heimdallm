@@ -20,7 +20,3 @@ func tryExclusiveFileLock(file *os.File) (bool, error) {
 		return false, err
 	}
 }
-
-func unlockFile(file *os.File) error {
-	return unix.Flock(int(file.Fd()), unix.LOCK_UN)
-}

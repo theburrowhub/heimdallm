@@ -296,11 +296,14 @@ func (r *autonomousStageRunner) RunStage(ctx context.Context, stage string, c au
 	implPrompt, implInstructions := resolveImplementPrompt(r.store, aiCfg.ImplementPrompt, agentCfg.PromptID)
 
 	execOpts := executor.ExecOptions{
-		Model:                agentCfg.Model,
-		MaxTurns:             agentCfg.MaxTurns,
-		ApprovalMode:         agentCfg.ApprovalMode,
-		ExtraFlags:           extraFlags,
-		WorkDir:              aiCfg.LocalDir,
+		Model:        agentCfg.Model,
+		MaxTurns:     agentCfg.MaxTurns,
+		ApprovalMode: agentCfg.ApprovalMode,
+		ExtraFlags:   extraFlags,
+		// Never pass an operator-owned checkout directly to an AI process.
+		// A read/write snapshot is acquired below when repository context is
+		// configured for this stage.
+		WorkDir:              "",
 		Effort:               agentCfg.Effort,
 		PermissionMode:       agentCfg.PermissionMode,
 		Bare:                 agentCfg.Bare,
@@ -335,12 +338,20 @@ func (r *autonomousStageRunner) RunStage(ctx context.Context, stage string, c au
 		InFlightSalt: stage,
 	}
 
-	// The refinement and development stages need a writable repo checkout. The
-	// pipeline treats ExecOpts.WorkDir as the single source of truth for "is
-	// there a checkout"; acquireRepoContext rewrites aiCfg.LocalDir to the
-	// handle path, which we then copy into ExecOpts.WorkDir.
-	if mode == config.IssueModeDevelop || mode == config.IssueModeRefinement {
-		stagePrefix := "develop"
+	// Development/refinement need a writable snapshot. Review-only/triage use
+	// a read-mode snapshot when full-repo context is configured; they must
+	// never inherit aiCfg.LocalDir directly because that is the operator's live
+	// checkout and may be in use by Codex, Gemini, Claude Code, or a human.
+	writeMode := mode == config.IssueModeDevelop || mode == config.IssueModeRefinement
+	hasConfiguredRepo := strings.TrimSpace(aiCfg.LocalDir) != "" ||
+		config.ResolveLocalDir("", c.Repo, localDirBase) != ""
+	if writeMode || hasConfiguredRepo {
+		stagePrefix := "triage"
+		repoMode := repoctx.ModeRead
+		if writeMode {
+			stagePrefix = "develop"
+			repoMode = repoctx.ModeWrite
+		}
 		if mode == config.IssueModeRefinement {
 			stagePrefix = "refinement"
 			opts.RequireWorkDirForRefinement = true
@@ -364,7 +375,7 @@ func (r *autonomousStageRunner) RunStage(ctx context.Context, stage string, c au
 			}
 		}
 
-		repoHandle, err := acquireRepoContext(ctx, r.repoCtx, c.Repo, &aiCfg, localDirBase, r.token, repoctx.ModeWrite, wtTokenFor(stagePrefix, c.Number), "", "")
+		repoHandle, err := acquireRepoContext(ctx, r.repoCtx, c.Repo, &aiCfg, localDirBase, r.token, repoMode, wtTokenFor(stagePrefix, c.Number), "", "")
 		if err != nil {
 			return autonomous.StageOutcome{}, fmt.Errorf("autonomous: prepare repo context %s#%d: %w", c.Repo, c.Number, err)
 		}
@@ -373,6 +384,7 @@ func (r *autonomousStageRunner) RunStage(ctx context.Context, stage string, c au
 		}
 		// acquireRepoContext rewrote aiCfg.LocalDir to the live handle path.
 		opts.ExecOpts.WorkDir = aiCfg.LocalDir
+		opts.ExecOpts.ExtraFiles = inheritedRepoLeaseFiles(repoHandle)
 	}
 
 	rev, err := r.issuePipe.Run(ctx, ghIssue, opts)

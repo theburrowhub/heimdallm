@@ -442,8 +442,8 @@ type AIConfig struct {
 	AutoPromoteTriage     *bool  `toml:"auto_promote_triage,omitempty"`
 	AutoPromoteRefinement *bool  `toml:"auto_promote_refinement,omitempty"`
 
-	// MaxWorktreesPerRepo caps how many per-execution git worktrees the
-	// daemon will hold concurrently for a single repository (#461). A
+	// MaxWorktreesPerRepo caps how many per-execution independent snapshots
+	// the daemon will hold concurrently for a single repository (#461). A
 	// fresh value of 0 inherits the daemon default (5). Set higher if
 	// the repo has many independent stages running in parallel; lower
 	// if disk pressure dominates.
@@ -696,8 +696,8 @@ func ShortRepoName(repo string) string {
 	return repo
 }
 
-// ResolveLocalDir picks the effective working directory the AI agent
-// should run in for a given repo, using this precedence:
+// ResolveLocalDir picks the effective operator-owned repository source for a
+// given repo, using this precedence:
 //
 //  1. The explicit `local_dir` from config (the `configured` argument).
 //  2. Each path in `localDirBases` checked in order — first match wins.
@@ -707,7 +707,8 @@ func ShortRepoName(repo string) string {
 //     lets an operator drop a single HEIMDALLM_LOCAL_DIR_BASE into
 //     docker/.env and have every monitored repo picked up without also
 //     touching the per-repo override in the UI.
-//  4. Empty string — the agent runs in its default CWD (diff-only mode).
+//  4. Empty string — no local source is available (diff-only mode unless the
+//     caller prepares a managed clone).
 //
 // Calls `os.Stat` on the candidate path, so callers should invoke it
 // outside any config-mutex critical section. The result is not cached;

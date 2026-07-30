@@ -24,7 +24,7 @@ func timelineServer(t *testing.T, raw string) *httptest.Server {
 
 // TestGetPRTimelineEventsForReviewer_SameSecondReRequestWins is the
 // regression guard for the intermittent re-review drop (#602). When a
-// review_dismissed and a review_requested for the bot share the same
+// review_request_removed and a review_requested for the bot share the same
 // whole-second created_at (GitHub timestamps and our stored anchor are
 // both RFC3339 second-granularity), the slice MUST be ordered so the
 // review_requested is last — i.e. the operator's explicit re-request
@@ -35,27 +35,27 @@ func timelineServer(t *testing.T, raw string) *httptest.Server {
 // Both raw input orderings are exercised to prove the result is
 // order-independent (a non-stable sort would pass one and fail the
 // other).
-// reqEventAt / disEventAt build raw timeline JSON for a review_requested /
-// review_dismissed event targeting heimdallm-bot at the given created_at.
+// reqEventAt / remEventAt build raw timeline JSON for a review_requested /
+// review_request_removed event targeting heimdallm-bot at the given created_at.
 func reqEventAt(ts string) string {
 	return fmt.Sprintf(`{"event":"review_requested","created_at":%q,"actor":{"login":"alice"},"requested_reviewer":{"login":"heimdallm-bot"}}`, ts)
 }
 
-func disEventAt(ts string) string {
-	return fmt.Sprintf(`{"event":"review_dismissed","created_at":%q,"actor":{"login":"alice"},"dismissed_review":{"user":{"login":"heimdallm-bot"}}}`, ts)
+func remEventAt(ts string) string {
+	return fmt.Sprintf(`{"event":"review_request_removed","created_at":%q,"actor":{"login":"alice"},"requested_reviewer":{"login":"heimdallm-bot"}}`, ts)
 }
 
 func TestGetPRTimelineEventsForReviewer_SameSecondReRequestWins(t *testing.T) {
 	const ts = "2026-06-24T11:00:00Z"
 	reqEvent := reqEventAt(ts)
-	disEvent := disEventAt(ts)
+	remEvent := remEventAt(ts)
 
 	cases := []struct {
 		name string
 		raw  string
 	}{
-		{"request_then_dismiss_in_payload", "[" + reqEvent + "," + disEvent + "]"},
-		{"dismiss_then_request_in_payload", "[" + disEvent + "," + reqEvent + "]"},
+		{"request_then_removal_in_payload", "[" + reqEvent + "," + remEvent + "]"},
+		{"removal_then_request_in_payload", "[" + remEvent + "," + reqEvent + "]"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -94,8 +94,8 @@ func TestGetPRTimelineEventsForReviewer_SameSecondDuplicateTypes(t *testing.T) {
 		wantLast string
 	}{
 		{
-			name:     "two_dismissed_then_request",
-			raw:      "[" + disEventAt(ts) + "," + disEventAt(ts) + "," + reqEventAt(ts) + "]",
+			name:     "two_removals_then_request",
+			raw:      "[" + remEventAt(ts) + "," + remEventAt(ts) + "," + reqEventAt(ts) + "]",
 			wantLen:  3,
 			wantLast: "review_requested",
 		},
@@ -106,8 +106,8 @@ func TestGetPRTimelineEventsForReviewer_SameSecondDuplicateTypes(t *testing.T) {
 			wantLast: "review_requested",
 		},
 		{
-			name:     "request_between_dismissals",
-			raw:      "[" + disEventAt(ts) + "," + reqEventAt(ts) + "," + disEventAt(ts) + "]",
+			name:     "request_between_removals",
+			raw:      "[" + remEventAt(ts) + "," + reqEventAt(ts) + "," + remEventAt(ts) + "]",
 			wantLen:  3,
 			wantLast: "review_requested",
 		},
@@ -129,5 +129,30 @@ func TestGetPRTimelineEventsForReviewer_SameSecondDuplicateTypes(t *testing.T) {
 				t.Errorf("most-recent event = %q, want %q", last.Event, tc.wantLast)
 			}
 		})
+	}
+}
+
+func TestGetPRTimelineEventsForReviewer_PreservesSameSecondIDOrder(t *testing.T) {
+	const ts = "2026-06-24T11:00:00Z"
+	raw := fmt.Sprintf(`[
+		{"id":101,"event":"review_requested","created_at":%q,"actor":{"login":"alice"},"requested_reviewer":{"login":"heimdallm-bot"}},
+		{"id":102,"event":"review_request_removed","created_at":%q,"actor":{"login":"alice"},"requested_reviewer":{"login":"heimdallm-bot"}}
+	]`, ts, ts)
+	srv := timelineServer(t, raw)
+	defer srv.Close()
+
+	c := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	events, err := c.GetPRTimelineEventsForReviewer("org/repo", 7, "heimdallm-bot")
+	if err != nil {
+		t.Fatalf("GetPRTimelineEventsForReviewer: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("len(events) = %d, want 2", len(events))
+	}
+	if events[0].ID != 101 || events[0].Event != "review_requested" {
+		t.Fatalf("events[0] = %+v, want request id 101", events[0])
+	}
+	if events[1].ID != 102 || events[1].Event != "review_request_removed" {
+		t.Fatalf("events[1] = %+v, want removal id 102", events[1])
 	}
 }

@@ -46,7 +46,7 @@ repositories = ["org/repo1", "org/repo2"]
 # Available: claude, gemini, codex, opencode
 primary = "claude"
 # fallback = "gemini"
-review_mode = "single"   # "single" or "multi"
+review_mode = "single"   # "multi" is retained as a consolidated-review compatibility alias
 # execution_timeout = "20m"   # default: 5m; increase for complex auto_implement
 # refinement_timeout = "30m"  # deep issue refinement
 # triage_owner = "muriano"
@@ -71,6 +71,16 @@ review_mode = "single"   # "single" or "multi"
 # downgrades). With "medium", reviews whose findings are all low-severity nits
 # still approve. Overridable per org and per repo.
 # never_approve_min_severity = "low"
+
+# local_dir / github.local_dir_base are read-only repository sources. Each AI
+# run gets a fresh independent checkout at the selected commit; the source
+# branch, index, dirty files, refs and Git object maintenance are untouched.
+# PR pushes during analysis discard the stale result and the next review
+# request creates a new checkout at the replacement SHA.
+# This is Git isolation, not an OS sandbox. Untrusted prompts require the AI
+# invocation to run under a separate UID/container with only the snapshot
+# mounted; the bundled Compose service shares its UID with the daemon.
+# LFS objects and submodules are not hydrated.
 
 # Per-CLI settings (optional)
 # [ai.agents.claude]

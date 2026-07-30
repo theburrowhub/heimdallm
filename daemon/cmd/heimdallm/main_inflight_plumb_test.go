@@ -45,11 +45,12 @@ func TestTier2Adapter_FetchPRsToReview_PopulatesHeadSHA(t *testing.T) {
 			result := struct {
 				Items []gh.PullRequest `json:"items"`
 			}{Items: []gh.PullRequest{{
-				ID:     4242,
-				Number: 7,
-				Title:  "open non-draft PR",
-				State:  "open",
-				User:   gh.User{Login: "alice"},
+				ID:            4242,
+				Number:        7,
+				Title:         "open non-draft PR",
+				State:         "open",
+				User:          gh.User{Login: "alice"},
+				RepositoryURL: "https://api.github.com/repos/org/repo",
 				Head: gh.Branch{
 					Repo: gh.Repo{FullName: "org/repo"},
 					// SHA intentionally empty — Search API does not populate it.
@@ -129,9 +130,10 @@ func TestTier2Adapter_FetchPRsToReview_EmptyHeadSHAWhenResolverFails(t *testing.
 				Items []gh.PullRequest `json:"items"`
 			}{Items: []gh.PullRequest{{
 				ID: 4242, Number: 7, Title: "t", State: "open",
-				User:      gh.User{Login: "alice"},
-				Head:      gh.Branch{Repo: gh.Repo{FullName: "org/repo"}},
-				UpdatedAt: updatedAt,
+				User:          gh.User{Login: "alice"},
+				Head:          gh.Branch{Repo: gh.Repo{FullName: "org/repo"}},
+				RepositoryURL: "https://api.github.com/repos/org/repo",
+				UpdatedAt:     updatedAt,
 			}}}
 			_ = json.NewEncoder(w).Encode(result)
 		case r.URL.Path == "/repos/org/repo/pulls/7":

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/heimdallm/daemon/internal/executor"
@@ -39,6 +40,23 @@ type DiffFetcher interface {
 	FetchDiffForCommit(repo string, number int, headSHA string) (string, error)
 }
 
+// DiffSnapshotFetcher is the stronger production contract: it returns the base
+// SHA that actually participated in the immutable comparison.
+type DiffSnapshotFetcher interface {
+	FetchDiffSnapshot(repo string, number int, headSHA string) (github.PRDiffSnapshot, error)
+}
+
+// RevisionResolver fetches both live PR diff operands in one API snapshot.
+type RevisionResolver interface {
+	GetPRRevision(repo string, number int) (github.PRRevision, error)
+}
+
+// PRSnapshotResolver returns the live policy/revision fields needed for the
+// final guard immediately before a stored result is published.
+type PRSnapshotResolver interface {
+	GetPRSnapshot(repo string, number int) (*github.PRSnapshot, error)
+}
+
 // HeadSHAResolver fetches a PR's current HEAD commit SHA. The Search Issues
 // API (used by Tier 2 to discover review requests) does not populate head.sha,
 // so the pipeline needs an explicit lookup before it can dedup by commit.
@@ -69,10 +87,10 @@ type CommentFetcher interface {
 	FetchComments(repo string, number int) ([]github.Comment, error)
 }
 
-// TimelineFetcher returns the review_requested / review_dismissed events
-// targeting a specific reviewer login on a PR. Used by the SHA-skip
-// path to detect explicit re-request review actions that the user
-// performed via the GitHub UI even though the HEAD SHA is unchanged.
+// TimelineFetcher returns review-request state changes targeting a specific
+// reviewer login on a PR. The pipeline persists the last event ID it observed
+// so a later request is detected by identity, independent of clock skew and
+// GitHub's second-granularity timestamps.
 // See theburrowhub/heimdallm#322 Bug 5.
 //
 // Optional dependency: when not set (nil), the pipeline falls back to
@@ -128,7 +146,11 @@ type Pipeline struct {
 	}
 	executor CLIExecutor
 	notify   Notifier
-	botLogin string
+	// botLogin is resolved lazily when GitHub is temporarily unavailable at
+	// startup. Reviews run concurrently, so later recovery must not race the
+	// re-request and comment-filtering paths.
+	botLoginMu sync.RWMutex
+	botLogin   string
 	// breaker caps the number of reviews per PR and per repo. Nil disables
 	// all caps (the pre-issue-243 behaviour). Populated at daemon startup via
 	// SetCircuitBreakerLimits.
@@ -160,7 +182,23 @@ func New(s *store.Store, gh interface {
 
 // SetBotLogin sets the GitHub login of the bot account. Used to filter
 // the bot's own comments from re-review discussion context.
-func (p *Pipeline) SetBotLogin(login string) { p.botLogin = login }
+func (p *Pipeline) SetBotLogin(login string) {
+	if p == nil {
+		return
+	}
+	p.botLoginMu.Lock()
+	p.botLogin = strings.TrimSpace(login)
+	p.botLoginMu.Unlock()
+}
+
+func (p *Pipeline) currentBotLogin() string {
+	if p == nil {
+		return ""
+	}
+	p.botLoginMu.RLock()
+	defer p.botLoginMu.RUnlock()
+	return p.botLogin
+}
 
 // SetCircuitBreakerLimits enables the per-PR and per-repo caps. Nil
 // disables all caps. Captured by pointer at wiring time — config reloads
@@ -243,47 +281,233 @@ func (p *Pipeline) publishSkipped(pr *github.PullRequest, reason SkipReason) {
 	})
 }
 
-// shouldBypassSHASkipForReReview returns true iff the operator
-// explicitly re-requested a review on this PR after the previous
-// review's CreatedAt and that re-request is still in effect (not
-// superseded by a later dismissal). All preconditions fail closed:
-// missing dependencies (nil timeline / empty bot login / nil
-// prevReview) or a timeline API error keep the SHA skip in place so a
-// transient outage cannot widen the cost surface. See
-// theburrowhub/heimdallm#322 Bug 5.
-func (p *Pipeline) shouldBypassSHASkipForReReview(pr *github.PullRequest, prevReview *store.Review) bool {
-	if p.timeline == nil || p.botLogin == "" || prevReview == nil {
-		return false
-	}
-	events, err := p.timeline.GetPRTimelineEventsForReviewer(pr.Repo, pr.Number, p.botLogin)
-	if err != nil {
-		slog.Warn("pipeline: re-request timeline lookup failed, keeping SHA skip (fail-closed)",
-			"repo", pr.Repo, "pr", pr.Number, "err", err)
-		return false
-	}
-	// events is sorted ascending by CreatedAt. We need the LAST event
-	// whose timestamp is strictly newer than prevReview.CreatedAt — by
-	// definition the tail of the slice — so iterate backward and stop
-	// at the first qualifying entry. Marginally faster than a forward
-	// walk for active PRs (which is exactly when this runs hot) and
-	// reads more clearly: "is the most recent re-review-relevant event
-	// still a request?".
-	for i := len(events) - 1; i >= 0; i-- {
-		ev := &events[i]
-		if !ev.CreatedAt.After(prevReview.CreatedAt) {
-			// Past the cutoff: everything earlier is already-satisfied
-			// (events are sorted ascending), so no need to continue.
-			return false
+func (p *Pipeline) currentRevision(repo string, number int) (github.PRRevision, error) {
+	if resolver, ok := p.gh.(RevisionResolver); ok {
+		revision, err := resolver.GetPRRevision(repo, number)
+		if err != nil {
+			return github.PRRevision{}, err
 		}
-		return ev.Event == "review_requested"
+		revision.HeadSHA = strings.TrimSpace(revision.HeadSHA)
+		revision.BaseSHA = strings.TrimSpace(revision.BaseSHA)
+		return revision, nil
 	}
-	return false
+	headSHA, err := p.gh.GetPRHeadSHA(repo, number)
+	if err != nil {
+		return github.PRRevision{}, err
+	}
+	return github.PRRevision{HeadSHA: strings.TrimSpace(headSHA)}, nil
+}
+
+type timelineIntent uint8
+
+const (
+	timelineUnavailable timelineIntent = iota
+	timelineNoChange
+	timelineRequested
+	timelineCancelled
+	timelineFailed
+)
+
+// timelineEmptyCursorID distinguishes a successfully-observed empty timeline
+// from a legacy row that predates cursor persistence (zero). Any future event
+// is necessarily after this sentinel, including one that arrived while the AI
+// was running but whose second-granularity timestamp predates the local row.
+const timelineEmptyCursorID int64 = -1
+
+type timelineObservation struct {
+	cursorID        int64
+	intent          timelineIntent
+	observed        bool
+	legacyAmbiguous bool
+	events          []github.TimelineEvent
+}
+
+// observeReviewTimeline snapshots the current review-request cursor before AI
+// execution. Rows created after this migration use the exact GitHub event ID.
+// Legacy rows retain a strict timestamp fallback for one transition only; when
+// no newer event exists their cursor is backfilled on the skip path.
+func (p *Pipeline) observeReviewTimeline(pr *github.PullRequest, prevReview *store.Review) timelineObservation {
+	botLogin := p.currentBotLogin()
+	if p.timeline == nil {
+		return timelineObservation{intent: timelineUnavailable}
+	}
+	if botLogin == "" {
+		slog.Warn("pipeline: timeline configured but bot login unresolved (fail-closed)",
+			"repo", pr.Repo, "pr", pr.Number)
+		return timelineObservation{intent: timelineFailed}
+	}
+	events, err := p.timeline.GetPRTimelineEventsForReviewer(pr.Repo, pr.Number, botLogin)
+	if err != nil {
+		slog.Warn("pipeline: re-request timeline lookup failed (fail-closed)",
+			"repo", pr.Repo, "pr", pr.Number, "err", err)
+		return timelineObservation{intent: timelineFailed}
+	}
+	obs := timelineObservation{intent: timelineNoChange, observed: true, events: events}
+	if len(events) > 0 {
+		obs.cursorID = events[len(events)-1].ID
+	}
+	if prevReview == nil {
+		return obs
+	}
+
+	var latest *github.TimelineEvent
+	if prevReview.TimelineCursorID == timelineEmptyCursorID {
+		if len(events) > 0 {
+			latest = &events[len(events)-1]
+		}
+	} else if prevReview.TimelineCursorID != 0 {
+		cursorIndex := -1
+		for i := range events {
+			if events[i].ID == prevReview.TimelineCursorID {
+				cursorIndex = i
+				break
+			}
+		}
+		if cursorIndex < 0 {
+			slog.Warn("pipeline: stored timeline cursor missing, keeping re-review skip (fail-closed)",
+				"repo", pr.Repo, "pr", pr.Number,
+				"review_id", prevReview.ID, "cursor_id", prevReview.TimelineCursorID)
+			obs.intent = timelineFailed
+			return obs
+		}
+		if cursorIndex+1 < len(events) {
+			latest = &events[len(events)-1]
+		}
+	} else {
+		// Legacy rows have no remote cursor. Use their pre-existing strict
+		// timestamp rule once, never >=: treating the original request at the
+		// same second as new would duplicate reviews during migration.
+		for i := len(events) - 1; i >= 0; i-- {
+			if events[i].CreatedAt.Unix() == prevReview.CreatedAt.Unix() {
+				// GitHub timestamps have only second precision while the local
+				// row normally has finer precision. If they are exactly equal,
+				// there is no safe way to distinguish the request that
+				// initiated the old review from a new same-second request.
+				// Keep the cursor unset so a later event remains visible.
+				obs.legacyAmbiguous = true
+			}
+			if events[i].CreatedAt.After(prevReview.CreatedAt) {
+				latest = &events[i]
+				break
+			}
+		}
+	}
+	if latest == nil {
+		return obs
+	}
+	switch latest.Event {
+	case "review_requested":
+		obs.intent = timelineRequested
+	case "review_request_removed":
+		obs.intent = timelineCancelled
+	default:
+		// The GitHub client currently filters the timeline down to the two
+		// reviewer-intent events above. Treat an unexpected future event as
+		// unavailable instead of silently converting it into a cancellation.
+		slog.Warn("pipeline: unexpected review timeline event (fail-closed)",
+			"repo", pr.Repo, "pr", pr.Number, "event", latest.Event,
+			"event_id", latest.ID)
+		obs.intent = timelineFailed
+	}
+	return obs
+}
+
+// observeTimelineAfter compares a fresh timeline with the exact snapshot taken
+// before AI execution. Production events carry IDs; the timestamp fallback is
+// retained solely for legacy/fixture payloads that omit them.
+func (p *Pipeline) observeTimelineAfter(pr *github.PullRequest, before timelineObservation) timelineObservation {
+	if !before.observed {
+		return timelineObservation{intent: timelineUnavailable}
+	}
+	prev := &store.Review{TimelineCursorID: persistedTimelineCursor(before)}
+	if before.cursorID == 0 && len(before.events) > 0 {
+		prev.CreatedAt = before.events[len(before.events)-1].CreatedAt
+	}
+	return p.observeReviewTimeline(pr, prev)
+}
+
+func (p *Pipeline) backfillTimelineCursorIfSafe(review *store.Review, obs timelineObservation) {
+	if review == nil || review.TimelineCursorID != 0 || obs.cursorID == 0 || obs.legacyAmbiguous {
+		return
+	}
+	if obs.intent != timelineNoChange && obs.intent != timelineCancelled {
+		return
+	}
+	if err := p.store.SetReviewTimelineCursor(review.ID, obs.cursorID); err != nil {
+		slog.Warn("pipeline: failed to backfill legacy timeline cursor",
+			"review_id", review.ID, "cursor_id", obs.cursorID, "err", err)
+		return
+	}
+	review.TimelineCursorID = obs.cursorID
+}
+
+func persistedTimelineCursor(obs timelineObservation) int64 {
+	if obs.observed && obs.cursorID == 0 && len(obs.events) == 0 {
+		return timelineEmptyCursorID
+	}
+	return obs.cursorID
+}
+
+// PendingReviewIntentChange is the durable disposition of a deferred review
+// relative to its saved timeline cursor.
+type PendingReviewIntentChange uint8
+
+const (
+	PendingIntentUnchanged PendingReviewIntentChange = iota
+	PendingIntentRequested
+	PendingIntentCancelled
+)
+
+const (
+	ReviewAuthorizationRequested = "requested"
+	ReviewAuthorizationSuccessor = "successor"
+	ReviewAuthorizationManual    = "manual"
+)
+
+func ReviewRequiresCurrentRequest(review *store.Review) bool {
+	if review == nil {
+		return true
+	}
+	switch review.AuthorizationSource {
+	case ReviewAuthorizationManual, ReviewAuthorizationSuccessor:
+		return false
+	default:
+		// Empty legacy and unknown future values fail closed.
+		return true
+	}
+}
+
+// PendingReviewIntent reports whether a deferred result still precedes no
+// newer request/removal event. Keeping request and cancellation distinct is
+// essential: a new request retires the old result for regeneration, while a
+// removal must remain as a terminal predecessor until a later request appears.
+func (p *Pipeline) PendingReviewIntent(repo string, number int, review *store.Review) (PendingReviewIntentChange, error) {
+	if review == nil {
+		return PendingIntentUnchanged, fmt.Errorf("pipeline: nil pending review")
+	}
+	if review.AuthorizationSource == ReviewAuthorizationManual {
+		return PendingIntentUnchanged, nil
+	}
+	if p.timeline != nil && p.currentBotLogin() == "" {
+		return PendingIntentUnchanged, fmt.Errorf("pipeline: pending review bot login unresolved")
+	}
+	obs := p.observeReviewTimeline(&github.PullRequest{Repo: repo, Number: number}, review)
+	switch obs.intent {
+	case timelineFailed:
+		return PendingIntentUnchanged, fmt.Errorf("pipeline: pending review timeline unavailable")
+	case timelineRequested:
+		return PendingIntentRequested, nil
+	case timelineCancelled:
+		return PendingIntentCancelled, nil
+	default:
+		return PendingIntentUnchanged, nil
+	}
 }
 
 // shouldReReviewNewCommitsAsRequestedReviewer returns true when the PR's HEAD
 // has advanced past the last reviewed commit AND the bot is currently a
 // requested reviewer. This catches re-reviews that leave no review_requested
-// timeline event (so shouldBypassSHASkipForReReview is blind to them): GitHub
+// timeline event (so observeReviewTimeline is blind to them): GitHub
 // re-adds the bot to requested_reviewers on some flows without emitting an
 // event — observed on ai-bumblebee-proxy#1532, where the bot is a pending
 // reviewer on unreviewed commits yet the timeline has no fresh request.
@@ -299,7 +523,8 @@ func (p *Pipeline) shouldBypassSHASkipForReReview(pr *github.PullRequest, prevRe
 // prevReview / empty prevReview.HeadSHA) or an API error, matching the
 // timeline bypass's posture.
 func (p *Pipeline) shouldReReviewNewCommitsAsRequestedReviewer(pr *github.PullRequest, prevReview *store.Review) bool {
-	if p.reviewers == nil || p.botLogin == "" || prevReview == nil {
+	botLogin := p.currentBotLogin()
+	if p.reviewers == nil || botLogin == "" || prevReview == nil {
 		return false
 	}
 	// New code only: the HEAD must have advanced past the reviewed commit.
@@ -314,7 +539,38 @@ func (p *Pipeline) shouldReReviewNewCommitsAsRequestedReviewer(pr *github.PullRe
 			"repo", pr.Repo, "pr", pr.Number, "err", err)
 		return false
 	}
-	return info.ReviewRequestedFor(p.botLogin)
+	return info.ReviewRequestedFor(botLogin)
+}
+
+// ReviewRequestCurrent revalidates the live requested_reviewers list. Timeline
+// events preserve intent across revisions, but this current-state check closes
+// the queue/analysis window where a first request can be removed before there
+// is any persisted predecessor cursor.
+func (p *Pipeline) ReviewRequestCurrent(repo string, number int, expectedHead string) (bool, error) {
+	if p.reviewers == nil {
+		// Embeddings/tests may intentionally omit reviewer-state support.
+		// Production always wires the GitHub client.
+		return true, nil
+	}
+	botLogin := p.currentBotLogin()
+	if botLogin == "" {
+		return false, fmt.Errorf("pipeline: requested-reviewer bot login unresolved")
+	}
+	info, err := p.reviewers.GetPRHeadInfo(repo, number)
+	if err != nil {
+		return false, fmt.Errorf("pipeline: fetch current requested reviewers: %w", err)
+	}
+	expectedHead = strings.TrimSpace(expectedHead)
+	if expectedHead != "" {
+		infoHead := strings.TrimSpace(info.HeadSHA)
+		if infoHead == "" {
+			return false, fmt.Errorf("pipeline: current requested-reviewer lookup returned empty HEAD SHA")
+		}
+		if infoHead != expectedHead {
+			return false, nil
+		}
+	}
+	return info.ReviewRequestedFor(botLogin), nil
 }
 
 // applyPrompt resolves a prompt with priority: repoPromptID > agentPromptID > global default.
@@ -409,6 +665,10 @@ type RunOptions struct {
 	// execution/publication boundaries so a config reload can stop an in-flight
 	// review. Nil intentionally allows explicit/manual calls to proceed.
 	RepoEligible func(string) bool
+	// ValidateSnapshot revalidates an optional local read-only checkout after
+	// the AI process exits. A failure discards the result before any store or
+	// GitHub write.
+	ValidateSnapshot func() error
 	// Force marks an explicit operator-initiated re-review (the app's
 	// "Re-review" button → POST /prs/{id}/review). It bypasses the two
 	// cost-control gates that exist to suppress the AUTOMATIC poll path:
@@ -444,7 +704,6 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	primary := opts.Primary
 	fallback := opts.Fallback
 	promptOverride := opts.PromptOverride
-	reviewMode := opts.ReviewMode
 	slog.Info("pipeline: starting review", "repo", pr.Repo, "pr", pr.Number)
 
 	// 1. Upsert PR record
@@ -525,7 +784,24 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	// live PR still points at targetSHA before comparing captured base/head
 	// SHAs. A stale queued job is a normal skip; a later poll will schedule the
 	// replacement commit.
-	diff, err := p.gh.FetchDiffForCommit(pr.Repo, pr.Number, targetSHA)
+	var (
+		diff          string
+		targetBaseSHA string
+	)
+	if snapshotFetcher, ok := p.gh.(DiffSnapshotFetcher); ok {
+		snapshot, fetchErr := snapshotFetcher.FetchDiffSnapshot(pr.Repo, pr.Number, targetSHA)
+		err = fetchErr
+		diff = snapshot.Diff
+		targetBaseSHA = strings.TrimSpace(snapshot.BaseSHA)
+		if err == nil && strings.TrimSpace(snapshot.HeadSHA) != targetSHA {
+			err = fmt.Errorf("pipeline: diff snapshot returned head %q, want %q", snapshot.HeadSHA, targetSHA)
+		}
+		if err == nil && targetBaseSHA == "" {
+			err = fmt.Errorf("pipeline: diff snapshot returned empty base SHA")
+		}
+	} else {
+		diff, err = p.gh.FetchDiffForCommit(pr.Repo, pr.Number, targetSHA)
+	}
 	if err != nil {
 		var headChanged *github.HeadChangedError
 		if errors.As(err, &headChanged) {
@@ -546,17 +822,19 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	// If the last stored review is for the same HEAD SHA, return it unchanged.
 	//
 	prevReview, _ := p.store.LatestReviewForPR(prID)
-	// A superseded pending review was generated for an older HEAD while the
-	// repo was temporarily disabled. It was never published, so it must not
-	// act like a completed prior review and require a fresh review_requested
-	// event. Treat it as absent; the current request can evaluate the new HEAD.
-	// Permanent/orphaned rows use a different sentinel and retain the existing
-	// fail-closed dedup behavior.
-	if prevReview != nil && prevReview.GitHubReviewID == SupersededReviewID {
-		slog.Info("pipeline: ignoring superseded unpublished review",
-			"repo", pr.Repo, "pr", pr.Number, "review_id", prevReview.ID,
-			"review_head_sha", prevReview.HeadSHA, "head_sha", pr.Head.SHA)
-		prevReview = nil
+	// Superseded unpublished rows remain as timeline predecessors. Discarding
+	// them here would also discard a later review_request_removed event and let
+	// Tier 3 regenerate without authorization. Their result is ignored for
+	// dedup only after current intent has been validated below.
+	regenerablePredecessor := prevReview != nil &&
+		prevReview.GitHubReviewID == SupersededReviewID
+	// Capture the remote request cursor before any lengthy AI work. If a new
+	// request lands during analysis, it remains after this cursor and is
+	// therefore visible on the next run instead of being swallowed by the
+	// review being published now.
+	timelineObs := p.observeReviewTimeline(pr, prevReview)
+	if !opts.Force && prevReview == nil && p.timeline != nil && timelineObs.intent == timelineFailed {
+		return nil, fmt.Errorf("pipeline: initial review-request timeline unavailable")
 	}
 	// Legacy rows (before the head_sha column was populated) have empty
 	// HeadSHA and would otherwise bypass the guard because "" never equals a
@@ -588,6 +866,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		}
 		// Only the automatic path skips here; a forced re-review proceeds.
 		if !opts.Force {
+			p.backfillTimelineCursorIfSafe(prevReview, timelineObs)
 			p.publishSkipped(pr, SkipReasonLegacyBackfill)
 			return nil, nil
 		}
@@ -622,6 +901,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 			"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA,
 			"has_prev_review", prevReview != nil)
 	}
+	carryForwardAuthorized := false
 	if !opts.Force && prevReview != nil && pr.Head.SHA != "" {
 		// Regardless of whether the HEAD SHA changed, the bot must not
 		// re-review unless the operator explicitly re-requested it. The
@@ -636,20 +916,62 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		// PR timeline for a review_requested event newer than the
 		// previous review.
 		//
-		// Decision rule (same for both SHA states): proceed iff the
-		// most recent review_requested or review_dismissed event for
-		// the bot login is a review_requested newer than
-		// prevReview.CreatedAt. A later review_dismissed (or any other
-		// state) cancels the bypass — dismiss-then-no-new-request
-		// means the operator no longer wants our review. Fail-closed
+		// Decision rule (same for both SHA states): proceed iff the most
+		// recent review_requested event for the bot login is newer than the
+		// persisted cursor. Only review_request_removed cancels it:
+		// review_dismissed describes an existing review and may be emitted
+		// automatically after a push, so it is not reviewer intent. Fail-closed
 		// posture (same as #245 and #322): a missing dependency or
 		// timeline API error keeps the skip in place rather than
 		// widening the cost surface on a transient outage.
+		// An unpublished row merely has its pre-submit safety marker armed;
+		// PublishPending owns it. A published predecessor needs a successor only
+		// when the revision changed; a same-revision flag is conservative residue
+		// from an ambiguous post-check unless the timeline says a new request
+		// arrived (handled by the first switch case).
+		successorRevisionChanged := prevReview.HeadSHA != pr.Head.SHA ||
+			(prevReview.BaseSHA != "" && targetBaseSHA != "" && prevReview.BaseSHA != targetBaseSHA)
+		successorRequired := prevReview.SuccessorPending &&
+			prevReview.GitHubReviewID > 0 && successorRevisionChanged
 		switch {
-		case p.shouldBypassSHASkipForReReview(pr, prevReview):
+		case timelineObs.intent == timelineRequested:
+			carryForwardAuthorized = true
 			slog.Info("pipeline: explicit re-request detected — proceeding with review",
 				"repo", pr.Repo, "pr", pr.Number,
 				"prev_head_sha", prevReview.HeadSHA, "head_sha", pr.Head.SHA)
+		case timelineObs.intent == timelineCancelled:
+			// An explicit request removal after our cursor wins over both the
+			// requested_reviewers fallback (which can lag) and a successor flag.
+			if prevReview.SuccessorPending {
+				if err := p.store.SetReviewSuccessorPending(prevReview.ID, false); err != nil {
+					slog.Warn("pipeline: failed to clear cancelled successor flag",
+						"review_id", prevReview.ID, "err", err)
+				} else {
+					prevReview.SuccessorPending = false
+				}
+			}
+			p.backfillTimelineCursorIfSafe(prevReview, timelineObs)
+			slog.Info("pipeline: explicit review-request cancellation detected, skipping",
+				"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA)
+			p.publishSkipped(pr, SkipReasonNoReReviewRequest)
+			return nil, nil
+		case timelineObs.intent == timelineFailed:
+			slog.Info("pipeline: timeline state unavailable, keeping re-review skip (fail-closed)",
+				"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA)
+			p.publishSkipped(pr, SkipReasonNoReReviewRequest)
+			return nil, nil
+		case successorRequired:
+			carryForwardAuthorized = true
+			slog.Info("pipeline: publication raced a newer HEAD — carrying review forward",
+				"repo", pr.Repo, "pr", pr.Number,
+				"prev_head_sha", prevReview.HeadSHA, "head_sha", pr.Head.SHA)
+		case regenerablePredecessor:
+			// This result never reached GitHub, so the original request should
+			// still be live. The current requested_reviewers check immediately
+			// below is the authorization; if the user removed it, fail closed.
+			slog.Info("pipeline: regenerating superseded unpublished review after live authorization",
+				"repo", pr.Repo, "pr", pr.Number,
+				"review_id", prevReview.ID, "head_sha", pr.Head.SHA)
 		case p.shouldReReviewNewCommitsAsRequestedReviewer(pr, prevReview):
 			// New unreviewed commits AND the bot is a current requested
 			// reviewer, but GitHub emitted no review_requested timeline event
@@ -658,7 +980,26 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 			slog.Info("pipeline: new commits + bot is a requested reviewer — proceeding with review",
 				"repo", pr.Repo, "pr", pr.Number,
 				"prev_head_sha", prevReview.HeadSHA, "head_sha", pr.Head.SHA)
+		case prevReview.SuccessorPending && prevReview.SuccessorEventID > 0:
+			// A prior read observed a concrete review_requested event, but
+			// this eventually-consistent timeline read has not caught up yet.
+			// Keep the evidence until the event or a later removal is visible.
+			slog.Info("pipeline: successor request evidence not yet visible; keeping pending",
+				"repo", pr.Repo, "pr", pr.Number,
+				"review_id", prevReview.ID,
+				"successor_event_id", prevReview.SuccessorEventID)
+			p.publishSkipped(pr, SkipReasonNoReReviewRequest)
+			return nil, nil
 		default:
+			if prevReview.SuccessorPending && prevReview.GitHubReviewID > 0 {
+				if clearErr := p.store.SetReviewSuccessorPending(prevReview.ID, false); clearErr != nil {
+					slog.Warn("pipeline: failed to clear same-revision successor residue",
+						"review_id", prevReview.ID, "err", clearErr)
+				} else {
+					prevReview.SuccessorPending = false
+				}
+			}
+			p.backfillTimelineCursorIfSafe(prevReview, timelineObs)
 			reason := SkipReasonSHAUnchanged
 			if prevReview.HeadSHA != pr.Head.SHA {
 				reason = SkipReasonNoReReviewRequest
@@ -668,6 +1009,18 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 				"prev_head_sha", prevReview.HeadSHA, "head_sha", pr.Head.SHA,
 				"reason", string(reason))
 			p.publishSkipped(pr, reason)
+			return nil, nil
+		}
+	}
+	if !opts.Force && p.reviewers != nil && !carryForwardAuthorized {
+		requested, requestErr := p.ReviewRequestCurrent(pr.Repo, pr.Number, targetSHA)
+		if requestErr != nil {
+			return nil, fmt.Errorf("pipeline: revalidate review request before execute: %w", requestErr)
+		}
+		if !requested {
+			slog.Info("pipeline: review request no longer current, skipping before analysis",
+				"repo", pr.Repo, "pr", pr.Number, "head_sha", targetSHA)
+			p.publishSkipped(pr, SkipReasonNoReReviewRequest)
 			return nil, nil
 		}
 	}
@@ -687,13 +1040,13 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 
 	// 2e. Build re-review context if a previous review exists for this PR.
 	var reviewCtx string
-	if prevReview != nil {
+	if prevReview != nil && !regenerablePredecessor {
 		reviewCtx = buildReviewContext(
 			prevReview.Issues,
 			prevReview.Severity,
 			prevReview.CreatedAt,
 			prComments,
-			p.botLogin,
+			p.currentBotLogin(),
 			pr.User.Login,
 		)
 	}
@@ -790,19 +1143,37 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	if err != nil {
 		return nil, fmt.Errorf("pipeline: execute %s: %w", cli, err)
 	}
-
-	// 5b. Revalidate the live HEAD after analysis and before any GitHub write.
-	// The worktree and diff remain a coherent snapshot even when a push lands
-	// during Execute, but findings for the superseded commit must not be emitted
-	// as current PR feedback. A subsequent poll/re-request will create a fresh
-	// execution and worktree for the replacement SHA.
-	currentSHA, err := p.gh.GetPRHeadSHA(pr.Repo, pr.Number)
-	if err != nil {
-		return nil, fmt.Errorf("pipeline: revalidate HEAD SHA after execute: %w", err)
+	if opts.ValidateSnapshot != nil {
+		if err := opts.ValidateSnapshot(); err != nil {
+			slog.Warn("pipeline: local review snapshot changed during analysis, discarding result",
+				"repo", pr.Repo, "pr", pr.Number, "head_sha", targetSHA, "err", err)
+			p.publishSkipped(pr, SkipReasonSnapshotChanged)
+			return nil, nil
+		}
 	}
-	currentSHA = strings.TrimSpace(currentSHA)
+	if !opts.Force && p.reviewers != nil && !carryForwardAuthorized {
+		requested, requestErr := p.ReviewRequestCurrent(pr.Repo, pr.Number, targetSHA)
+		if requestErr != nil {
+			return nil, fmt.Errorf("pipeline: revalidate review request after execute: %w", requestErr)
+		}
+		if !requested {
+			slog.Info("pipeline: review request removed during analysis, discarding result",
+				"repo", pr.Repo, "pr", pr.Number, "head_sha", targetSHA)
+			p.publishSkipped(pr, SkipReasonNoReReviewRequest)
+			return nil, nil
+		}
+	}
+
+	// 5b. Revalidate both live diff operands after analysis and before any
+	// GitHub write. A base-branch advance changes the effective diff even when
+	// the PR branch itself is unchanged.
+	currentRevision, err := p.currentRevision(pr.Repo, pr.Number)
+	if err != nil {
+		return nil, fmt.Errorf("pipeline: revalidate PR revision after execute: %w", err)
+	}
+	currentSHA := strings.TrimSpace(currentRevision.HeadSHA)
 	if currentSHA == "" {
-		return nil, fmt.Errorf("pipeline: revalidate HEAD SHA after execute: empty SHA returned")
+		return nil, fmt.Errorf("pipeline: revalidate PR revision after execute: empty HEAD SHA returned")
 	}
 	if currentSHA != targetSHA {
 		slog.Info("pipeline: HEAD changed during analysis, discarding stale review",
@@ -810,6 +1181,45 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 			"review_head_sha", targetSHA, "current_head_sha", currentSHA)
 		p.publishSkipped(pr, SkipReasonHeadChanged)
 		return nil, nil
+	}
+	if targetBaseSHA != "" && strings.TrimSpace(currentRevision.BaseSHA) != targetBaseSHA {
+		slog.Info("pipeline: base changed during analysis, discarding stale review",
+			"repo", pr.Repo, "pr", pr.Number,
+			"review_base_sha", targetBaseSHA, "current_base_sha", currentRevision.BaseSHA)
+		p.publishSkipped(pr, SkipReasonBaseChanged)
+		return nil, nil
+	}
+
+	// Re-observe operator intent after AI execution. A cancellation that lands
+	// while the agent is working must stop publication. A new request is not
+	// consumed by this in-flight run: the row keeps the earlier cursor and its
+	// successor flag remains armed after publication, scheduling one fresh pass.
+	preserveSuccessor := false
+	var preserveSuccessorEventID int64
+	if timelineObs.observed {
+		lateTimeline := p.observeTimelineAfter(pr, timelineObs)
+		switch lateTimeline.intent {
+		case timelineFailed, timelineUnavailable:
+			return nil, fmt.Errorf("pipeline: revalidate review-request timeline after execute")
+		case timelineCancelled:
+			if prevReview != nil && prevReview.SuccessorPending {
+				if clearErr := p.store.SetReviewSuccessorPending(prevReview.ID, false); clearErr != nil {
+					slog.Warn("pipeline: failed to clear successor after late cancellation",
+						"review_id", prevReview.ID, "err", clearErr)
+				}
+			}
+			slog.Info("pipeline: review request cancelled during analysis, discarding result",
+				"repo", pr.Repo, "pr", pr.Number, "head_sha", targetSHA)
+			p.publishSkipped(pr, SkipReasonNoReReviewRequest)
+			return nil, nil
+		case timelineRequested:
+			preserveSuccessor = true
+			if lateTimeline.cursorID > 0 {
+				preserveSuccessorEventID = lateTimeline.cursorID
+			}
+			slog.Info("pipeline: new review request arrived during analysis; preserving successor",
+				"repo", pr.Repo, "pr", pr.Number, "head_sha", targetSHA)
+		}
 	}
 
 	// 5c. Reconcile severity: ensure top-level severity >= max(issues[].severity).
@@ -824,7 +1234,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	// Filter out the bot's own comments before extraction — Heimdallm's prior
 	// review bodies often contain blocker keywords ("security issue",
 	// "must fix", etc.) that would otherwise self-trigger escalation.
-	signalComments := filterBotComments(prComments, p.botLogin)
+	signalComments := filterBotComments(prComments, p.currentBotLogin())
 	commentSignals := ExtractCommentSignals(signalComments, pr.User.Login)
 	finalSeverity := ApplySignalEscalation(reconciledSeverity, commentSignals)
 	reviewEvent := ReviewEvent(finalSeverity, MaxIssueSeverity(result.Issues),
@@ -840,21 +1250,42 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	// Suggestions were dropped from the review agent (a review either raises an
 	// issue or it doesn't); the DB column is retained for backward compatibility
 	// with historical rows and always written as an empty array.
+	authorizationSource := ReviewAuthorizationRequested
+	if opts.Force {
+		authorizationSource = ReviewAuthorizationManual
+	} else if carryForwardAuthorized {
+		authorizationSource = ReviewAuthorizationSuccessor
+	}
 	rev := &store.Review{
-		PRID:           prID,
-		CLIUsed:        cli,
-		Summary:        result.Summary,
-		Issues:         string(issuesJSON),
-		Suggestions:    "[]",
-		Severity:       finalSeverity,
-		Event:          reviewEvent,
-		CreatedAt:      time.Now().UTC(),
-		GitHubReviewID: 0, // will be set after GitHub publish
-		HeadSHA:        targetSHA,
+		PRID:             prID,
+		CLIUsed:          cli,
+		Summary:          result.Summary,
+		Issues:           string(issuesJSON),
+		Suggestions:      "[]",
+		Severity:         finalSeverity,
+		Event:            reviewEvent,
+		CreatedAt:        time.Now().UTC(),
+		GitHubReviewID:   0, // will be set after GitHub publish
+		HeadSHA:          targetSHA,
+		BaseSHA:          targetBaseSHA,
+		TimelineCursorID: persistedTimelineCursor(timelineObs),
+		// Set before SubmitReview. The flag is cleared only after a
+		// post-submit HEAD read proves the PR still points at targetSHA.
+		SuccessorPending:    true,
+		SuccessorEventID:    preserveSuccessorEventID,
+		AuthorizationSource: authorizationSource,
 	}
 	rev.ID, err = p.store.InsertReview(rev)
 	if err != nil {
 		return nil, fmt.Errorf("pipeline: store review: %w", err)
+	}
+	if prevReview != nil && prevReview.SuccessorPending {
+		if clearErr := p.store.SetReviewSuccessorPending(prevReview.ID, false); clearErr != nil {
+			slog.Warn("pipeline: failed to clear consumed predecessor successor flag",
+				"review_id", prevReview.ID, "successor_review_id", rev.ID, "err", clearErr)
+		} else {
+			prevReview.SuccessorPending = false
+		}
 	}
 	slog.Info("pipeline: review stored locally", "review_id", rev.ID)
 	if stopped, err := p.stopIfRepoBecameIneligible(pr, opts.RepoEligible); stopped {
@@ -862,25 +1293,95 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	}
 
 	// 8. Publish review to GitHub
-	var reviewBody string
-	if reviewMode == "multi" && len(result.Issues) > 0 {
-		// Post one comment per issue (best-effort — failures are logged but don't abort)
-		for _, issue := range result.Issues {
-			if stopped, err := p.stopIfRepoBecameIneligible(pr, opts.RepoEligible); stopped {
-				return nil, err
-			}
-			if _, err := p.gh.PostComment(pr.Repo, pr.Number, buildIssueComment(issue)); err != nil {
-				slog.Warn("pipeline: failed to post issue comment", "pr", pr.Number, "err", err)
-			}
-		}
-		reviewBody = buildMultiSummaryBody(result)
-	} else {
-		reviewBody = BuildGitHubBody(result)
-	}
+	// Keep every finding inside the formal commit-addressed review. Standalone
+	// issue comments cannot carry a commit_id, so a push in the narrow window
+	// between the HEAD recheck and publication could make them look current
+	// even though they describe the previous revision. ReviewMode "multi" is
+	// retained as a configuration value for compatibility, but publication is
+	// intentionally consolidated into this one immutable review.
+	reviewBody := BuildGitHubBody(result)
 
 	if stopped, err := p.stopIfRepoBecameIneligible(pr, opts.RepoEligible); stopped {
 		return nil, err
 	}
+
+	// Final live policy/revision guard. The earlier checks protect AI spend;
+	// this one protects the external side effect if the PR became draft,
+	// closed, self-authored under current policy, or moved after the row was
+	// stored.
+	if resolver, ok := p.gh.(PRSnapshotResolver); ok {
+		snapshot, snapErr := resolver.GetPRSnapshot(pr.Repo, pr.Number)
+		if snapErr != nil {
+			return rev, fmt.Errorf("pipeline: refresh PR immediately before publish: %w", snapErr)
+		}
+		if reason := Evaluate(PRGate{
+			State:  snapshot.State,
+			Draft:  snapshot.Draft,
+			Author: snapshot.Author,
+		}, opts.Guards); reason != SkipReasonNone {
+			if markErr := p.store.MarkReviewPublished(rev.ID, orphanedReviewID, "", time.Now().UTC()); markErr != nil {
+				return rev, fmt.Errorf("pipeline: retire ineligible stored review: %w", markErr)
+			}
+			_ = p.store.SetReviewSuccessorPending(rev.ID, false)
+			p.publishSkipped(pr, reason)
+			return nil, nil
+		}
+		liveHead := strings.TrimSpace(snapshot.HeadSHA)
+		liveBase := strings.TrimSpace(snapshot.BaseSHA)
+		if liveHead == "" || liveBase == "" {
+			return rev, fmt.Errorf("pipeline: refresh PR immediately before publish returned empty revision")
+		}
+		if liveHead != rev.HeadSHA || liveBase != rev.BaseSHA {
+			if markErr := p.store.MarkReviewPublished(rev.ID, SupersededReviewID, "", time.Now().UTC()); markErr != nil {
+				return rev, fmt.Errorf("pipeline: retire revision-stale stored review: %w", markErr)
+			}
+			_ = p.store.SetReviewSuccessorPending(rev.ID, false)
+			reason := SkipReasonHeadChanged
+			if liveHead == rev.HeadSHA {
+				reason = SkipReasonBaseChanged
+			}
+			p.publishSkipped(pr, reason)
+			return nil, nil
+		}
+	}
+
+	if rev.AuthorizationSource != ReviewAuthorizationManual {
+		finalIntent := p.observeReviewTimeline(pr, rev)
+		switch finalIntent.intent {
+		case timelineFailed:
+			return rev, fmt.Errorf("pipeline: refresh review-request timeline immediately before publish")
+		case timelineCancelled:
+			if markErr := p.store.MarkReviewPublished(rev.ID, orphanedReviewID, "", time.Now().UTC()); markErr != nil {
+				return rev, fmt.Errorf("pipeline: retire cancelled stored review: %w", markErr)
+			}
+			_ = p.store.SetReviewSuccessorPending(rev.ID, false)
+			p.publishSkipped(pr, SkipReasonNoReReviewRequest)
+			return nil, nil
+		case timelineRequested:
+			if finalIntent.cursorID > 0 {
+				if evidenceErr := p.store.SetReviewSuccessorEvidence(rev.ID, finalIntent.cursorID); evidenceErr != nil {
+					return rev, fmt.Errorf("pipeline: persist final successor evidence: %w", evidenceErr)
+				}
+				rev.SuccessorPending = true
+				rev.SuccessorEventID = finalIntent.cursorID
+			}
+		}
+	}
+	if ReviewRequiresCurrentRequest(rev) {
+		requested, requestErr := p.ReviewRequestCurrent(pr.Repo, pr.Number, rev.HeadSHA)
+		if requestErr != nil {
+			return rev, fmt.Errorf("pipeline: refresh requested-reviewer immediately before publish: %w", requestErr)
+		}
+		if !requested {
+			if markErr := p.store.MarkReviewPublished(rev.ID, orphanedReviewID, "", time.Now().UTC()); markErr != nil {
+				return rev, fmt.Errorf("pipeline: retire unrequested stored review: %w", markErr)
+			}
+			_ = p.store.SetReviewSuccessorPending(rev.ID, false)
+			p.publishSkipped(pr, SkipReasonNoReReviewRequest)
+			return nil, nil
+		}
+	}
+
 	ghReviewID, ghReviewState, publishErr := p.gh.SubmitReviewForCommit(
 		pr.Repo, pr.Number,
 		AnnotateBodyForEvent(reviewBody, reviewEvent, len(result.Issues)),
@@ -922,6 +1423,11 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 			"pr", pr.Number,
 			"github_review_id", ghReviewID,
 			"github_review_state", ghReviewState)
+		if preserveSuccessor {
+			slog.Info("pipeline: request received during analysis; verifying it again after publication",
+				"review_id", rev.ID, "repo", pr.Repo, "pr", pr.Number)
+		}
+		p.ReconcilePublishedReview(pr.Repo, pr.Number, rev, preserveSuccessor)
 	}
 
 	p.notify.Notify("PR Review Complete",
@@ -950,6 +1456,101 @@ const orphanedReviewID = -1
 // re-request. It is exported for the NATS publish worker in cmd/heimdallm.
 const SupersededReviewID int64 = -2
 
+// ReconcilePublishedReview closes the unavoidable validation→POST race. It
+// rechecks both the request timeline and the base/head revision after GitHub
+// accepted the commit-addressed review. True means a successor remains owed.
+func (p *Pipeline) ReconcilePublishedReview(
+	repo string,
+	number int,
+	rev *store.Review,
+	preserveRequestedEvidence ...bool,
+) bool {
+	if rev == nil || strings.TrimSpace(rev.HeadSHA) == "" {
+		return false
+	}
+	preserveSuccessor := len(preserveRequestedEvidence) > 0 && preserveRequestedEvidence[0]
+	postIntent := p.observeReviewTimeline(
+		&github.PullRequest{Repo: repo, Number: number},
+		rev,
+	)
+	switch postIntent.intent {
+	case timelineRequested:
+		if postIntent.cursorID > 0 {
+			if err := p.store.SetReviewSuccessorEvidence(rev.ID, postIntent.cursorID); err != nil {
+				slog.Warn("pipeline: failed to persist successor request evidence",
+					"review_id", rev.ID, "event_id", postIntent.cursorID, "err", err)
+			} else {
+				rev.SuccessorEventID = postIntent.cursorID
+				rev.SuccessorPending = true
+			}
+		}
+		slog.Info("pipeline: review request arrived during publication; successor remains pending",
+			"review_id", rev.ID, "repo", repo, "pr", number)
+		return true
+	case timelineFailed:
+		slog.Warn("pipeline: post-publish timeline check failed; successor remains pending",
+			"review_id", rev.ID, "repo", repo, "pr", number)
+		return true
+	case timelineUnavailable:
+		// Production config wires a timeline fetcher. If it becomes
+		// unavailable, never turn an armed successor marker into "done".
+		// Tests and embeddings that intentionally omit the feature retain the
+		// revision-only reconciliation below.
+		if p.timeline != nil {
+			slog.Warn("pipeline: post-publish timeline unavailable; successor remains pending",
+				"review_id", rev.ID, "repo", repo, "pr", number)
+			return true
+		}
+	case timelineCancelled:
+		// A request removal observed after publication is newer evidence than
+		// a request seen during analysis and intentionally cancels it.
+		if err := p.store.SetReviewSuccessorPending(rev.ID, false); err != nil {
+			slog.Warn("pipeline: failed to clear successor after post-publish cancellation",
+				"review_id", rev.ID, "repo", repo, "pr", number, "err", err)
+			return true
+		}
+		rev.SuccessorPending = false
+		rev.SuccessorEventID = 0
+		return false
+	}
+	current, err := p.currentRevision(repo, number)
+	if err != nil {
+		slog.Warn("pipeline: post-publish revision check failed; successor remains pending",
+			"review_id", rev.ID, "repo", repo, "pr", number, "err", err)
+		return true
+	}
+	currentSHA := strings.TrimSpace(current.HeadSHA)
+	if currentSHA == "" {
+		slog.Warn("pipeline: post-publish HEAD check returned empty SHA; successor remains pending",
+			"review_id", rev.ID, "repo", repo, "pr", number)
+		return true
+	}
+	if currentSHA != rev.HeadSHA {
+		slog.Info("pipeline: HEAD advanced during review publication; successor remains pending",
+			"review_id", rev.ID, "repo", repo, "pr", number,
+			"review_head_sha", rev.HeadSHA, "current_head_sha", currentSHA)
+		return true
+	}
+	if rev.BaseSHA != "" && strings.TrimSpace(current.BaseSHA) != rev.BaseSHA {
+		slog.Info("pipeline: base advanced during review publication; successor remains pending",
+			"review_id", rev.ID, "repo", repo, "pr", number,
+			"review_base_sha", rev.BaseSHA, "current_base_sha", current.BaseSHA)
+		return true
+	}
+	if preserveSuccessor {
+		slog.Info("pipeline: preserving successor from request observed during analysis",
+			"review_id", rev.ID, "repo", repo, "pr", number)
+		return true
+	}
+	if err := p.store.SetReviewSuccessorPending(rev.ID, false); err != nil {
+		slog.Warn("pipeline: failed to clear successor flag after stable publication",
+			"review_id", rev.ID, "head_sha", rev.HeadSHA, "err", err)
+		return true
+	}
+	rev.SuccessorPending = false
+	return false
+}
+
 // markOrphanIfPermanent inspects the error returned by SubmitReview and,
 // when it is a *github.PermanentSubmitError, marks the local review row
 // as orphaned via the (-1, "") sentinel that PublishPending also uses
@@ -973,6 +1574,10 @@ func (p *Pipeline) markOrphanIfPermanent(reviewID int64, submitErr error, source
 			"review_id", reviewID, "source", source, "reason", permErr.Reason, "err", mErr)
 		return true
 	}
+	if mErr := p.store.SetReviewSuccessorPending(reviewID, false); mErr != nil {
+		slog.Warn("pipeline: failed to clear successor flag on orphaned review",
+			"review_id", reviewID, "source", source, "err", mErr)
+	}
 	slog.Info("pipeline: review marked orphan (permanent submit failure, will not retry)",
 		"review_id", reviewID, "source", source, "reason", permErr.Reason, "status", permErr.StatusCode)
 	return true
@@ -994,6 +1599,7 @@ func (p *Pipeline) PublishPending() {
 		// Mark them as permanently published (orphanedReviewID, empty state) to stop retry noise.
 		if pr.Repo == "" {
 			_ = p.store.MarkReviewPublished(rev.ID, orphanedReviewID, "", time.Now().UTC())
+			_ = p.store.SetReviewSuccessorPending(rev.ID, false)
 			slog.Info("pipeline: skipping pending review for PR with no repo", "review_id", rev.ID)
 			continue
 		}
@@ -1006,6 +1612,7 @@ func (p *Pipeline) PublishPending() {
 				slog.Warn("pipeline: failed to orphan pending review with empty HeadSHA, will retry next tick",
 					"review_id", rev.ID, "err", err)
 			} else {
+				_ = p.store.SetReviewSuccessorPending(rev.ID, false)
 				slog.Info("pipeline: pending review has no HeadSHA, marking orphaned",
 					"review_id", rev.ID, "repo", pr.Repo, "pr", pr.Number)
 			}
@@ -1013,16 +1620,18 @@ func (p *Pipeline) PublishPending() {
 		}
 		// Rebuild a minimal result from stored JSON for the body. The daemon
 		// always writes well-formed JSON here, so a decode failure means the
-		// stored row is corrupt and the issue list is unrecoverable. Don't
-		// publish a misleading review missing its findings, and don't retry a
-		// deterministic failure forever — orphan it like the no-repo case above.
+		// stored row is corrupt and the issue list is unrecoverable. Retire it
+		// as regenerable rather than orphaning it: GitHub never received this
+		// review, so the outstanding request may safely produce a fresh row.
 		var issues []executor.Issue
 		if err := json.Unmarshal([]byte(rev.Issues), &issues); err != nil {
 			slog.Warn("pipeline: skipping pending review with corrupt issues JSON",
 				"review_id", rev.ID, "pr", pr.Number, "repo", pr.Repo, "err", err)
-			if mErr := p.store.MarkReviewPublished(rev.ID, orphanedReviewID, "", time.Now().UTC()); mErr != nil {
-				slog.Warn("pipeline: failed to orphan corrupt review, will retry next tick",
+			if mErr := p.store.MarkReviewPublished(rev.ID, SupersededReviewID, "", time.Now().UTC()); mErr != nil {
+				slog.Warn("pipeline: failed to retire corrupt review, will retry next tick",
 					"review_id", rev.ID, "err", mErr)
+			} else {
+				_ = p.store.SetReviewSuccessorPending(rev.ID, false)
 			}
 			continue
 		}
@@ -1031,13 +1640,131 @@ func (p *Pipeline) PublishPending() {
 			Issues:   issues,
 			Severity: rev.Severity,
 		}
-		// PublishPending always uses single-mode body (individual comments were
-		// already posted when the review first ran; we only retry the formal review).
+		currentRevision, err := p.currentRevision(pr.Repo, pr.Number)
+		if err != nil {
+			slog.Warn("pipeline: cannot revalidate pending review revision, leaving pending",
+				"review_id", rev.ID, "repo", pr.Repo, "pr", pr.Number, "err", err)
+			continue
+		}
+		if strings.TrimSpace(rev.BaseSHA) == "" {
+			if err := p.store.MarkReviewPublished(rev.ID, SupersededReviewID, "", time.Now().UTC()); err != nil {
+				slog.Warn("pipeline: failed to retire pending review with unknown base, will retry next tick",
+					"review_id", rev.ID, "err", err)
+			} else {
+				_ = p.store.SetReviewSuccessorPending(rev.ID, false)
+				slog.Info("pipeline: pending review has no BaseSHA, retiring for regeneration",
+					"review_id", rev.ID, "repo", pr.Repo, "pr", pr.Number)
+			}
+			continue
+		}
+		currentSHA := strings.TrimSpace(currentRevision.HeadSHA)
+		if currentSHA == "" {
+			slog.Warn("pipeline: pending review HEAD resolved empty, leaving pending",
+				"review_id", rev.ID, "repo", pr.Repo, "pr", pr.Number)
+			continue
+		}
+		if currentSHA != rev.HeadSHA {
+			if err := p.store.MarkReviewPublished(rev.ID, SupersededReviewID, "", time.Now().UTC()); err != nil {
+				slog.Warn("pipeline: failed to retire superseded pending review",
+					"review_id", rev.ID, "review_head_sha", rev.HeadSHA,
+					"current_head_sha", currentSHA, "err", err)
+			} else {
+				_ = p.store.SetReviewSuccessorPending(rev.ID, false)
+				slog.Info("pipeline: pending review superseded by newer HEAD",
+					"review_id", rev.ID, "repo", pr.Repo, "pr", pr.Number,
+					"review_head_sha", rev.HeadSHA, "current_head_sha", currentSHA)
+			}
+			continue
+		}
+		currentBaseSHA := strings.TrimSpace(currentRevision.BaseSHA)
+		if currentBaseSHA == "" {
+			slog.Warn("pipeline: pending review base resolved empty, leaving pending",
+				"review_id", rev.ID, "repo", pr.Repo, "pr", pr.Number)
+			continue
+		}
+		if currentBaseSHA != rev.BaseSHA {
+			if err := p.store.MarkReviewPublished(rev.ID, SupersededReviewID, "", time.Now().UTC()); err != nil {
+				slog.Warn("pipeline: failed to retire base-superseded pending review",
+					"review_id", rev.ID, "review_base_sha", rev.BaseSHA,
+					"current_base_sha", currentBaseSHA, "err", err)
+			} else {
+				_ = p.store.SetReviewSuccessorPending(rev.ID, false)
+				slog.Info("pipeline: pending review superseded by newer base",
+					"review_id", rev.ID, "repo", pr.Repo, "pr", pr.Number,
+					"review_base_sha", rev.BaseSHA, "current_base_sha", currentBaseSHA)
+			}
+			continue
+		}
+		if rev.AuthorizationSource != ReviewAuthorizationManual {
+			intent := p.observeReviewTimeline(&github.PullRequest{
+				Repo: pr.Repo, Number: pr.Number,
+			}, rev)
+			switch intent.intent {
+			case timelineFailed:
+				slog.Warn("pipeline: cannot revalidate pending review intent, leaving pending",
+					"review_id", rev.ID, "repo", pr.Repo, "pr", pr.Number)
+				continue
+			case timelineRequested:
+				// A newer request belongs to a successor. Retire this stale
+				// result with the regenerable sentinel.
+				if err := p.store.MarkReviewPublished(rev.ID, SupersededReviewID, "", time.Now().UTC()); err != nil {
+					slog.Warn("pipeline: failed to retire pending review after intent change",
+						"review_id", rev.ID, "err", err)
+					continue
+				}
+				_ = p.store.SetReviewSuccessorPending(rev.ID, false)
+				slog.Info("pipeline: pending review retired for a newer request",
+					"review_id", rev.ID, "repo", pr.Repo, "pr", pr.Number)
+				continue
+			case timelineCancelled:
+				// A removal is terminal, not regenerable. Preserve the row as
+				// predecessor until a later explicit request appears.
+				if err := p.store.MarkReviewPublished(rev.ID, orphanedReviewID, "", time.Now().UTC()); err != nil {
+					slog.Warn("pipeline: failed to retire cancelled pending review",
+						"review_id", rev.ID, "err", err)
+					continue
+				}
+				_ = p.store.SetReviewSuccessorPending(rev.ID, false)
+				slog.Info("pipeline: pending review cancelled by request removal",
+					"review_id", rev.ID, "repo", pr.Repo, "pr", pr.Number)
+				continue
+			}
+		}
+		if ReviewRequiresCurrentRequest(rev) {
+			requested, requestErr := p.ReviewRequestCurrent(pr.Repo, pr.Number, rev.HeadSHA)
+			if requestErr != nil {
+				slog.Warn("pipeline: cannot revalidate pending requested-reviewer state, leaving pending",
+					"review_id", rev.ID, "repo", pr.Repo, "pr", pr.Number, "err", requestErr)
+				continue
+			}
+			if !requested {
+				if err := p.store.MarkReviewPublished(rev.ID, orphanedReviewID, "", time.Now().UTC()); err != nil {
+					slog.Warn("pipeline: failed to retire pending review after request removal",
+						"review_id", rev.ID, "err", err)
+					continue
+				}
+				_ = p.store.SetReviewSuccessorPending(rev.ID, false)
+				slog.Info("pipeline: pending review no longer requested, retiring",
+					"review_id", rev.ID, "repo", pr.Repo, "pr", pr.Number)
+				continue
+			}
+		}
+		// Pending reviews always use the same consolidated formal-review body
+		// as the initial publication.
 		// The stored event already incorporates signal escalation and the
 		// never-approve-with-issues decision from the initial review; legacy
 		// rows without a stored event fall back to SeverityToEvent via
 		// publishEventFor.
 		retryEvent := PublishEventFor(rev)
+		// Persist the carry-forward marker before the external side effect.
+		// If this write fails, do not POST: we could otherwise consume a
+		// request for a concurrently-pushed successor with no durable trace.
+		if err := p.store.SetReviewSuccessorPending(rev.ID, true); err != nil {
+			slog.Warn("pipeline: failed to arm successor flag, leaving review pending",
+				"review_id", rev.ID, "err", err)
+			continue
+		}
+		rev.SuccessorPending = true
 		ghID, ghState, err := p.gh.SubmitReviewForCommit(
 			pr.Repo, pr.Number,
 			AnnotateBodyForEvent(BuildGitHubBody(result), retryEvent, len(result.Issues)),
@@ -1072,6 +1799,7 @@ func (p *Pipeline) PublishPending() {
 			"review_id", rev.ID,
 			"github_review_id", ghID,
 			"github_review_state", ghState)
+		p.ReconcilePublishedReview(pr.Repo, pr.Number, rev)
 	}
 }
 

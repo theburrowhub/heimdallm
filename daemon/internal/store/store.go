@@ -62,7 +62,12 @@ CREATE TABLE IF NOT EXISTS reviews (
   github_review_id    INTEGER NOT NULL DEFAULT 0,
   github_review_state TEXT NOT NULL DEFAULT '',
   head_sha            TEXT NOT NULL DEFAULT '',
-  event               TEXT NOT NULL DEFAULT ''
+  base_sha            TEXT NOT NULL DEFAULT '',
+  event               TEXT NOT NULL DEFAULT '',
+  timeline_cursor_id  INTEGER NOT NULL DEFAULT 0,
+  successor_pending   INTEGER NOT NULL DEFAULT 0,
+  successor_event_id  INTEGER NOT NULL DEFAULT 0,
+  authorization_source TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS configs (
@@ -196,6 +201,7 @@ func Open(dsn string) (*Store, error) {
 	db.Exec("ALTER TABLE reviews ADD COLUMN github_review_id INTEGER NOT NULL DEFAULT 0")
 	db.Exec("ALTER TABLE reviews ADD COLUMN github_review_state TEXT NOT NULL DEFAULT ''")
 	db.Exec("ALTER TABLE reviews ADD COLUMN head_sha TEXT NOT NULL DEFAULT ''")
+	db.Exec("ALTER TABLE reviews ADD COLUMN base_sha TEXT NOT NULL DEFAULT ''")
 	// published_at anchors the updated_at dedup window on the actual
 	// post-to-GitHub time. Stored as TEXT (sqlite datetime format, see
 	// sqliteTimeFormat) with empty-string default so legacy rows read as
@@ -206,6 +212,14 @@ func Open(dsn string) (*Store, error) {
 	// so retry/publish paths reproduce the decision. Empty default => legacy
 	// rows fall back to SeverityToEvent(severity).
 	db.Exec("ALTER TABLE reviews ADD COLUMN event TEXT NOT NULL DEFAULT ''")
+	// timeline_cursor_id anchors re-review intent to a stable remote timeline
+	// event instead of comparing second-granularity timestamps from different
+	// clocks. successor_pending durably records that a newer HEAD still needs
+	// review after the commit-addressed publication completes.
+	db.Exec("ALTER TABLE reviews ADD COLUMN timeline_cursor_id INTEGER NOT NULL DEFAULT 0")
+	db.Exec("ALTER TABLE reviews ADD COLUMN successor_pending INTEGER NOT NULL DEFAULT 0")
+	db.Exec("ALTER TABLE reviews ADD COLUMN successor_event_id INTEGER NOT NULL DEFAULT 0")
+	db.Exec("ALTER TABLE reviews ADD COLUMN authorization_source TEXT NOT NULL DEFAULT ''")
 	db.Exec("ALTER TABLE agents ADD COLUMN instructions TEXT NOT NULL DEFAULT ''")
 	db.Exec("ALTER TABLE agents ADD COLUMN cli_flags TEXT NOT NULL DEFAULT ''")
 	db.Exec("ALTER TABLE agents RENAME COLUMN prompt TO prompt") // no-op, ensures column exists
@@ -329,7 +343,8 @@ func Open(dsn string) (*Store, error) {
 		github_id  INTEGER NOT NULL,
 		next_check TEXT NOT NULL,
 		backoff_ns INTEGER NOT NULL,
-		last_seen  TEXT NOT NULL
+		last_seen  TEXT NOT NULL,
+		head_sha   TEXT NOT NULL DEFAULT ''
 	)`)
 	// Enforce single-flight per issue at the schema level (#458). The
 	// claim SQL already uses INSERT ... WHERE NOT EXISTS, but a UNIQUE

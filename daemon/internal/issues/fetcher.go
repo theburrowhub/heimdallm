@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/heimdallm/daemon/internal/config"
@@ -88,12 +89,13 @@ type OptionsFn func(issue *github.Issue) (opts RunOptions, ok bool)
 // Fetcher orchestrates: fetch issues for a repo, skip those already processed
 // without new activity, dispatch the rest to the pipeline.
 type Fetcher struct {
-	client    IssuesFetcher
-	comments  issueMarkerFetcher
-	store     issueDedupStore
-	pipeline  PipelineRunner
-	publisher IssuePublisher // optional — when set, publishes to NATS instead of running pipeline
-	botLogin  string         // GitHub login of the bot — used to ignore self-triggered updated_at bumps
+	client     IssuesFetcher
+	comments   issueMarkerFetcher
+	store      issueDedupStore
+	pipeline   PipelineRunner
+	publisher  IssuePublisher // optional — when set, publishes to NATS instead of running pipeline
+	botLoginMu sync.RWMutex
+	botLogin   string // GitHub login of the bot — used to ignore self-triggered updated_at bumps
 
 	stageClient StageTransitionClient
 	stageBroker Publisher
@@ -117,7 +119,21 @@ func (f *Fetcher) SetPublisher(p IssuePublisher) {
 // dedup check ignores updated_at bumps caused by the bot's own comments,
 // breaking the re-triage loop described in #362.
 func (f *Fetcher) SetBotLogin(login string) {
-	f.botLogin = login
+	if f == nil {
+		return
+	}
+	f.botLoginMu.Lock()
+	f.botLogin = strings.TrimSpace(login)
+	f.botLoginMu.Unlock()
+}
+
+func (f *Fetcher) currentBotLogin() string {
+	if f == nil {
+		return ""
+	}
+	f.botLoginMu.RLock()
+	defer f.botLoginMu.RUnlock()
+	return f.botLogin
 }
 
 // SetStageTransitioner enables audit + normalization when a user manually
@@ -300,9 +316,10 @@ func (f *Fetcher) alreadyProcessed(issue *github.Issue) (bool, string, error) {
 	// (e.g. review_only → develop after a label swap), reprocess even if
 	// the last comment is from the bot. This breaks the re-triage loop
 	// (#362) without blocking mode transitions.
-	if f.botLogin != "" && len(cachedComments) > 0 {
+	botLogin := f.currentBotLogin()
+	if botLogin != "" && len(cachedComments) > 0 {
 		last := cachedComments[len(cachedComments)-1]
-		if strings.EqualFold(last.Author, f.botLogin) && latest.ActionTaken == string(issue.Mode) {
+		if strings.EqualFold(last.Author, botLogin) && latest.ActionTaken == string(issue.Mode) {
 			return true, "last comment is from bot, same mode (self-triggered update)", nil
 		}
 	}

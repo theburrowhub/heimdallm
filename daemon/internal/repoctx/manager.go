@@ -13,7 +13,6 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/heimdallm/daemon/internal/config"
@@ -39,13 +38,12 @@ var worktreeTokenPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 type Mode int
 
 const (
-	// ModeRead gives the AI CLI repository context. Existing local_dir and
-	// local_dir_base checkouts are accepted because the manager never mutates
-	// them.
+	// ModeRead gives the AI CLI repository context. For isolated executions,
+	// local_dir and local_dir_base are read-only sources only; the AI receives
+	// a fresh detached checkout with an independent object store.
 	ModeRead Mode = iota
-	// ModeWrite is for auto_implement. Only an explicit local_dir or a
-	// Heimdallm-managed clone is returned, because local_dir_base mounts are
-	// treated as read-only shared context.
+	// ModeWrite is for auto_implement. It uses the same isolated-worktree
+	// boundary, so agent writes never land in the operator's checkout.
 	ModeWrite
 )
 
@@ -58,23 +56,25 @@ type Request struct {
 	Token              string
 	Mode               Mode
 
-	// WorktreeToken identifies the execution and becomes the subdirectory
-	// name under `<clone>/.worktrees/<WorktreeToken>/`. Callers are
-	// expected to derive a deterministic value (e.g. `triage-42`,
-	// `pr-review-1234`) so that retries land on the same path and
-	// concurrent operations on different keys never collide. Sanitised
-	// against path traversal and unsafe characters.
+	// WorktreeToken identifies the execution and becomes the readable prefix
+	// of an external, randomly-unique checkout directory. Callers derive a
+	// deterministic stage label (e.g. `triage-42`, `pr-review-1234`), while
+	// the manager adds a cryptographic execution ID so retries and processes
+	// never reuse a mutable checkout.
 	WorktreeToken string
 
 	// WorktreeBaseRef, when set, becomes the ref the worktree is
-	// created at (`git worktree add <path> --detach <ref>`). Empty
-	// means HEAD of the clone.
+	// created at (`git worktree add <path> --detach <ref>`). For PR
+	// reviews this MUST be the immutable commit SHA that the diff and
+	// published review are anchored to. Empty snapshots the source
+	// repository's current HEAD.
 	WorktreeBaseRef string
 
-	// Branch, when non-empty, creates the worktree with a fresh local
-	// branch (`git worktree add <path> -b <Branch> <BaseRef>`). Only
-	// meaningful for ModeWrite executions that need to push to GitHub.
-	Branch string
+	// WorktreeFetchRef is an optional remote ref used only to make
+	// WorktreeBaseRef available locally (for example
+	// refs/pull/123/head). The worktree is still created from, and
+	// verified against, WorktreeBaseRef -- never this movable ref.
+	WorktreeFetchRef string
 
 	// Inspect skips worktree creation and returns a handle pointing at
 	// the clone root. Used by the read-only `/config/clones` endpoint
@@ -84,10 +84,16 @@ type Request struct {
 
 // Handle owns a repo-context lock until Release is called.
 type Handle struct {
-	path    string
-	managed bool
-	once    sync.Once
-	release func()
+	path          string
+	managed       bool
+	repo          string
+	commitSHA     string
+	fetchRef      string
+	sourceRoot    string
+	sourceManaged bool
+	leaseFiles    []*os.File
+	once          sync.Once
+	release       func()
 }
 
 // Path returns the working directory to pass to the executor.
@@ -104,6 +110,28 @@ func (h *Handle) Managed() bool {
 		return false
 	}
 	return h.managed
+}
+
+// CommitSHA returns the immutable commit checked out for this handle. It is
+// empty only for legacy/inspection handles that do not own an isolated
+// worktree.
+func (h *Handle) CommitSHA() string {
+	if h == nil {
+		return ""
+	}
+	return h.commitSHA
+}
+
+// LeaseFiles returns descriptors that callers should inherit into
+// any child process using this worktree. Keeping the lease open in the child
+// prevents another Heimdallm process from reaping the checkout if the daemon
+// itself is killed while the child is still running. The caller must not close
+// these descriptors; Handle.Release owns their lifecycle.
+func (h *Handle) LeaseFiles() []*os.File {
+	if h == nil || len(h.leaseFiles) == 0 {
+		return nil
+	}
+	return append([]*os.File(nil), h.leaseFiles...)
 }
 
 // Release frees the per-repo lock. It is safe to call more than once.
@@ -133,6 +161,8 @@ type repoCap struct {
 
 type gitRunner interface {
 	Run(ctx context.Context, dir string, env []string, args ...string) error
+	RunWithExtraFiles(ctx context.Context, dir string, env []string, extraFiles []*os.File, args ...string) error
+	Output(ctx context.Context, dir string, env []string, args ...string) ([]byte, error)
 }
 
 // PurgeReport summarizes managed clone cleanup without exposing local paths to
@@ -149,37 +179,31 @@ type managedClone struct {
 }
 
 // Manager resolves and prepares repository working directories for AI
-// runs. Concurrency uses a two-tier lock model:
-//   - A binary critical-section lock per repo (`locks`) is held while
-//     mutating the shared clone — fetch/reset/clean and worktree
-//     add/remove. It is short-lived for worktree callers (released
-//     once the worktree exists) and long-lived for legacy callers
-//     that operate directly on the clone.
-//   - A counting semaphore per repo (`caps`) bounds the number of
-//     concurrent worktrees per repo to MaxWorktreesPerRepo. It is held
-//     across the entire AI run and released after `worktree remove`.
+// runs. Its coordination model has three parts:
+//   - A binary critical-section lock per repo (`locks`) protects source
+//     preparation and isolated-checkout creation/removal. A kernel-backed
+//     operations lock supplies the same exclusion across daemon processes.
+//   - A counting semaphore per repo (`caps`) bounds concurrent isolated
+//     checkouts to MaxWorktreesPerRepo. It is held across the AI run.
+//   - A per-checkout file lease is held across the AI run and inherited by
+//     the child process. Cleanup additionally requires cleanup.ready, so an
+//     ambiguous crash leftover is retained fail-closed.
 type Manager struct {
-	mu      sync.Mutex
-	locks   map[string]*repoLock
-	caps    map[string]*repoCap
-	active  map[string]struct{} // absolute worktree paths currently held
-	git     gitRunner
-	tempDir func() string
+	mu       sync.Mutex
+	locks    map[string]*repoLock
+	caps     map[string]*repoCap
+	active   map[string]struct{} // absolute worktree paths currently held
+	git      gitRunner
+	tempDir  func() string
+	coordDir func() string
 
 	maxWorktrees int
 
-	// wtSeq disambiguates concurrent worktrees that share the same
-	// caller-supplied WorktreeToken (e.g. when poll review-worker and
-	// manual trigger-review fire for the same PR). It is monotonic
-	// across the manager's lifetime so paths stay stable for the
-	// duration of a single execution.
-	wtSeq atomic.Uint64
-
 	// releaseTimeout caps how long a Handle.Release will wait for the
 	// critical-section lock when running `git worktree remove`. Beyond
-	// this, release falls back to a filesystem-only cleanup so the cap
-	// semaphore is never held hostage by a stuck lock. Tests override
-	// this; production keeps the default at gitTimeout.
+	// this, release leaves a lease-aware orphan for a later safe sweep so
+	// it never deletes a checkout that an inherited child may still use.
+	// Tests override this; production keeps the default at gitTimeout.
 	releaseTimeout time.Duration
 }
 
@@ -206,6 +230,7 @@ func NewManagerWithOptions(opts ManagerOptions) *Manager {
 		active:         make(map[string]struct{}),
 		git:            execGit{},
 		tempDir:        os.TempDir,
+		coordDir:       defaultCoordinationDir,
 		maxWorktrees:   opts.MaxWorktreesPerRepo,
 		releaseTimeout: gitTimeout,
 	}
@@ -240,7 +265,7 @@ func (m *Manager) Acquire(ctx context.Context, req Request) (*Handle, error) {
 		return m.acquireInspect(ctx, req, owner, name)
 	}
 	if req.WorktreeToken == "" {
-		return m.acquireClone(ctx, req, owner, name)
+		return nil, fmt.Errorf("repoctx: worktree token is required for executable repository context")
 	}
 	return m.acquireWorktree(ctx, req, owner, name)
 }
@@ -257,51 +282,22 @@ func (m *Manager) acquireInspect(ctx context.Context, req Request, owner, name s
 	defer unlock()
 
 	if local := resolveLocal(req); local != "" {
-		return &Handle{path: local, managed: false, release: func() {}}, nil
+		return &Handle{path: local, sourceRoot: local, managed: false, release: func() {}}, nil
 	}
+	target, err := m.cloneTarget(req.CloneDir, owner, name)
+	if err != nil {
+		return nil, err
+	}
+	opsLock, err := m.acquireOpsLock(ctx, canonicalPathForKey(target))
+	if err != nil {
+		return nil, fmt.Errorf("repoctx: lock managed repository inspection: %w", err)
+	}
+	defer opsLock.Close()
 	path, err := m.ensureManagedClone(ctx, owner, name, req)
 	if err != nil {
 		return nil, err
 	}
-	return &Handle{path: path, managed: true, release: func() {}}, nil
-}
-
-// acquireClone is the legacy single-lock path used by callers that did
-// not opt into worktrees yet. It mirrors the pre-#461 behaviour: hold
-// the per-repo critical-section lock for the duration of the handle.
-func (m *Manager) acquireClone(ctx context.Context, req Request, owner, name string) (*Handle, error) {
-	unlock, err := m.acquireRepoLock(ctx, req.Repo)
-	if err != nil {
-		return nil, err
-	}
-	released := false
-	release := func() {
-		if !released {
-			released = true
-			unlock()
-		}
-	}
-	defer func() {
-		if !released && err != nil {
-			release()
-		}
-	}()
-
-	if local := resolveLocal(req); local != "" {
-		return &Handle{path: local, managed: false, release: release}, nil
-	}
-
-	path, err := m.ensureManagedClone(ctx, owner, name, req)
-	if err != nil {
-		return nil, err
-	}
-	if req.Mode == ModeWrite {
-		cloneHandle := &Handle{path: path, managed: true}
-		if err = m.EnsureFullHistory(ctx, cloneHandle, req.Token); err != nil {
-			return nil, fmt.Errorf("%w; retry after fixing Git access or purge the managed clone via DELETE /config/clones/{repo}", err)
-		}
-	}
-	return &Handle{path: path, managed: true, release: release}, nil
+	return &Handle{path: path, sourceRoot: path, sourceManaged: true, managed: true, release: func() {}}, nil
 }
 
 // acquireWorktree creates a per-execution worktree under the managed
@@ -348,108 +344,201 @@ func (m *Manager) acquireWorktree(ctx context.Context, req Request, owner, name 
 		}
 	}()
 
-	if local := resolveLocal(req); local != "" {
-		// User-mapped repos sidestep worktree creation until the
-		// gitignore bootstrap step lands; release the crit lock now
-		// and keep the cap so concurrency is still bounded.
-		releaseCrit()
-		return &Handle{path: local, managed: false, release: releaseCap}, nil
-	}
-
-	var cloneRoot string
-	cloneRoot, err = m.ensureManagedClone(ctx, owner, name, req)
+	var source *worktreeSource
+	var opsLock *fileLock
+	source, opsLock, err = m.prepareWorktreeSource(ctx, req, owner, name)
 	if err != nil {
 		return nil, err
 	}
+	opsReleased := false
+	releaseOps := func() {
+		if !opsReleased {
+			opsReleased = true
+			_ = opsLock.Close()
+		}
+	}
+	defer func() {
+		if !opsReleased {
+			releaseOps()
+		}
+	}()
+
+	var commitSHA string
+	commitSHA, err = m.resolveWorktreeCommit(ctx, source, req)
+	if err != nil {
+		return nil, err
+	}
+
+	var lease *worktreeLease
+	lease, err = m.createWorktreeLease(source, req, commitSHA)
+	if err != nil {
+		return nil, err
+	}
+	materialized := false
+	defer func() {
+		if err != nil {
+			m.rollbackFailedMaterialization(source, lease, materialized)
+		}
+	}()
+	if materialized, err = m.materializeIsolatedWorktree(ctx, source, req, commitSHA, lease, opsLock); err != nil {
+		return nil, err
+	}
 	if req.Mode == ModeWrite {
-		cloneHandle := &Handle{path: cloneRoot, managed: true}
-		if err = m.EnsureFullHistory(ctx, cloneHandle, req.Token); err != nil {
+		provisional := &Handle{
+			path:          lease.path,
+			managed:       true,
+			repo:          req.Repo,
+			commitSHA:     commitSHA,
+			fetchRef:      strings.TrimSpace(req.WorktreeFetchRef),
+			sourceRoot:    source.root,
+			sourceManaged: source.managed,
+			leaseFiles:    []*os.File{lease.lock.File()},
+		}
+		if err = m.ensureSnapshotFullHistory(ctx, provisional, req.Token, mutationGuardFiles(lease, opsLock)); err != nil {
 			return nil, fmt.Errorf("%w; retry after fixing Git access or purge the managed clone via DELETE /config/clones/{repo}", err)
 		}
 	}
+	m.markActive(lease.path)
 
-	seq := m.wtSeq.Add(1)
-	wtName := fmt.Sprintf("%s.%d", req.WorktreeToken, seq)
-	wtPath := filepath.Join(cloneRoot, ".worktrees", wtName)
-	if err = os.MkdirAll(filepath.Dir(wtPath), 0o755); err != nil {
-		return nil, fmt.Errorf("repoctx: create worktrees root: %w", err)
-	}
-	addArgs := buildWorktreeAddArgs(wtPath, req.Branch, req.WorktreeBaseRef)
-	if err = m.runner().Run(ctx, cloneRoot, nil, addArgs...); err != nil {
-		return nil, fmt.Errorf("repoctx: worktree add %s: %w", wtPath, err)
-	}
-	m.markActive(wtPath)
-
+	releaseOps()
 	releaseCrit()
 
 	release := func() {
-		// Re-acquire the critical-section lock briefly to serialise
-		// the worktree-registry mutation. Use a fresh background ctx
-		// so a cancelled caller ctx never leaves a worktree on disk.
-		bgCtx, cancel := context.WithTimeout(context.Background(), m.releaseTimeout)
-		defer cancel()
-		// In-memory bookkeeping must clear regardless of whether the
-		// git/filesystem cleanup succeeded — otherwise a single
-		// lock-acquire timeout would pin an orphan in m.active
-		// forever and PruneStaleWorktrees would never remove it.
-		defer releaseCap()
-		defer m.unmarkActive(wtPath)
-		unlockRm, lockErr := m.acquireRepoLock(bgCtx, req.Repo)
-		if lockErr != nil {
-			slog.Warn("repoctx: worktree release lock unavailable; falling back to filesystem cleanup",
-				"repo", req.Repo, "path", wtPath, "err", lockErr)
-			// Git's worktree registry entry survives in `.git/worktrees/`,
-			// but the next `git worktree prune` (issued by
-			// PruneStaleWorktrees on startup) reaps it. Removing the
-			// on-disk directory here is enough to keep `.worktrees/`
-			// tidy and prevent collisions with a re-issued seq.
-			if rmErr := os.RemoveAll(wtPath); rmErr != nil {
-				slog.Warn("repoctx: worktree filesystem remove failed",
-					"path", wtPath, "err", rmErr)
+		// Drop only the daemon's descriptor, then probe the lease using a new
+		// open-file description. If a child inherited that descriptor, cleanup
+		// waits until the kernel reports that the final copy has closed.
+		closeWorktreeLease(lease, false)
+		cleanup := func(probe *fileLock) {
+			// Only a normal Release that has observed every inherited lease
+			// descriptor closed may authorise crash recovery.
+			if readyErr := markWorktreeCleanupReady(lease.runDir); readyErr != nil {
+				slog.Warn("repoctx: could not mark worktree cleanup ready; direct cleanup only",
+					"repo", req.Repo, "path", lease.path, "err", readyErr)
 			}
+
+			// Re-acquire the critical-section lock briefly to serialise the
+			// worktree-registry mutation. Use a fresh background ctx so a
+			// cancelled caller never prevents lease-aware cleanup.
+			bgCtx, cancel := context.WithTimeout(context.Background(), m.releaseTimeout)
+			defer cancel()
+			defer probe.Close()
+			defer releaseCap()
+			defer m.unmarkActive(lease.path)
+			unlockRm, lockErr := m.acquireRepoLock(bgCtx, req.Repo)
+			if lockErr != nil {
+				slog.Warn("repoctx: worktree release lock unavailable; leaving leased orphan",
+					"repo", req.Repo, "path", lease.path, "err", lockErr)
+				return
+			}
+			defer unlockRm()
+			if rmErr := m.removeIsolatedWorktree(bgCtx, source, lease); rmErr != nil {
+				slog.Warn("repoctx: worktree remove failed; leaving leased orphan",
+					"path", lease.path, "err", rmErr)
+				return
+			}
+			// Canonicalise while the path still exists. On macOS /var resolves
+			// to /private/var; after RemoveAll the spelling cannot be recovered.
+			m.unmarkActive(lease.path)
+			if rmErr := os.RemoveAll(lease.runDir); rmErr != nil {
+				slog.Warn("repoctx: remove released worktree lease directory failed",
+					"path", lease.runDir, "err", rmErr)
+			}
+		}
+
+		probe, acquired, probeErr := tryFileLock(filepath.Join(lease.runDir, worktreeLeaseFile))
+		if probeErr != nil {
+			slog.Warn("repoctx: worktree lease probe failed; leaving orphan",
+				"repo", req.Repo, "path", lease.path, "err", probeErr)
+			releaseCap()
+			m.unmarkActive(lease.path)
 			return
 		}
-		defer unlockRm()
-		if rmErr := m.runner().Run(bgCtx, cloneRoot, nil, "worktree", "remove", "--force", wtPath); rmErr != nil {
-			slog.Warn("repoctx: worktree remove failed", "path", wtPath, "err", rmErr)
+		if !acquired {
+			slog.Info("repoctx: inherited child still holds worktree lease; deferring cleanup",
+				"repo", req.Repo, "path", lease.path)
+			// Keep the per-repo capacity reservation while the child lives so
+			// detached descendants cannot cause unbounded snapshot growth.
+			go func() {
+				waiter, waitErr := acquireFileLock(
+					context.Background(),
+					filepath.Join(lease.runDir, worktreeLeaseFile),
+				)
+				if waitErr != nil {
+					slog.Warn("repoctx: deferred worktree lease wait failed; leaving orphan",
+						"repo", req.Repo, "path", lease.path, "err", waitErr)
+					releaseCap()
+					m.unmarkActive(lease.path)
+					return
+				}
+				cleanup(waiter)
+			}()
+			return
 		}
+		cleanup(probe)
 	}
 	slog.Info("repoctx: worktree acquired",
-		"repo", req.Repo, "token", req.WorktreeToken, "seq", seq, "path", wtPath)
-	return &Handle{path: wtPath, managed: true, release: release}, nil
+		"repo", req.Repo, "token", req.WorktreeToken,
+		"commit_sha", commitSHA, "path", lease.path)
+	return &Handle{
+		path:          lease.path,
+		managed:       true,
+		repo:          req.Repo,
+		commitSHA:     commitSHA,
+		fetchRef:      strings.TrimSpace(req.WorktreeFetchRef),
+		sourceRoot:    source.root,
+		sourceManaged: source.managed,
+		leaseFiles:    []*os.File{lease.lock.File()},
+		release:       release,
+	}, nil
 }
 
-// EnsureFullHistory upgrades a managed shallow clone in-place. It assumes the
-// caller still owns the handle lock returned by Acquire.
+// EnsureFullHistory upgrades the isolated snapshot itself. The operator-owned
+// source and Heimdallm's managed source clone remain read-only inputs, so a
+// concurrent branch switch, fetch, maintenance task, or second daemon cannot
+// change the object graph visible to the running AI process.
 func (m *Manager) EnsureFullHistory(ctx context.Context, h *Handle, token string) error {
 	if m == nil {
 		return fmt.Errorf("repoctx: nil manager")
 	}
-	if h == nil || h.Path() == "" || !h.Managed() {
+	if h == nil || h.Path() == "" || !h.Managed() || h.CommitSHA() == "" {
 		return nil
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if token == "" {
-		return fmt.Errorf("repoctx: full-history fetch requires a non-empty token")
+	return m.ensureSnapshotFullHistory(ctx, h, token, h.LeaseFiles())
+}
+
+// ValidateSnapshot verifies that a read-only execution neither switched HEAD
+// nor changed files after the immutable worktree was created. Review callers
+// run this immediately after the AI process exits and discard its result on
+// failure.
+func (m *Manager) ValidateSnapshot(ctx context.Context, h *Handle) error {
+	if m == nil {
+		return fmt.Errorf("repoctx: nil manager")
 	}
-	shallow := filepath.Join(h.Path(), ".git", "shallow")
-	if _, err := os.Stat(shallow); errors.Is(err, os.ErrNotExist) {
+	if h == nil || strings.TrimSpace(h.CommitSHA()) == "" {
 		return nil
-	} else if err != nil {
-		return fmt.Errorf("repoctx: inspect shallow marker: %w", err)
 	}
-	env, cleanup, err := buildAskPassEnv(token)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	headOut, err := m.runner().Output(ctx, h.Path(), nil,
+		"rev-parse", "--verify", "HEAD^{commit}")
 	if err != nil {
-		return fmt.Errorf("repoctx: setup askpass: %w", err)
+		return fmt.Errorf("%w: inspect HEAD: %v", ErrSnapshotChanged, err)
 	}
-	defer cleanup()
-	if err := m.runner().Run(ctx, h.Path(), env, "fetch", "--unshallow", "--prune", "origin"); err != nil {
-		return fmt.Errorf("repoctx: unshallow %s: %w", h.Path(), err)
+	head := strings.ToLower(strings.TrimSpace(string(headOut)))
+	if head != strings.ToLower(h.CommitSHA()) {
+		return fmt.Errorf("%w: HEAD is %s, want %s", ErrSnapshotChanged, head, h.CommitSHA())
 	}
-	if err := touchMarker(h.Path()); err != nil {
-		return err
+	statusOut, err := m.runner().Output(ctx, h.Path(), nil,
+		"status", "--porcelain=v1", "--untracked-files=normal")
+	if err != nil {
+		return fmt.Errorf("%w: inspect worktree status: %v", ErrSnapshotChanged, err)
+	}
+	if status := strings.TrimSpace(string(statusOut)); status != "" {
+		return fmt.Errorf("%w: worktree is dirty", ErrSnapshotChanged)
 	}
 	return nil
 }
@@ -483,6 +572,18 @@ func (m *Manager) Purge(ctx context.Context, repo, cloneDir string) error {
 		return fmt.Errorf("repoctx: stat clone target %q: %w", target, err)
 	}
 	if err := validateMarker(target, repo); err != nil {
+		return err
+	}
+	sourceKey := canonicalPathForKey(target)
+	opsLock, err := m.acquireOpsLock(ctx, sourceKey)
+	if err != nil {
+		return fmt.Errorf("repoctx: lock clone purge: %w", err)
+	}
+	defer opsLock.Close()
+	if err := m.cleanupExternalRunsForSourceLocked(ctx, target, sourceKey); err != nil {
+		return err
+	}
+	if err := m.refuseUnknownLinkedWorktrees(ctx, target); err != nil {
 		return err
 	}
 	if err := os.RemoveAll(target); err != nil {
@@ -798,6 +899,18 @@ func (m *Manager) purgeTarget(ctx context.Context, repo, target string) error {
 	if err := validateMarker(target, repo); err != nil {
 		return err
 	}
+	sourceKey := canonicalPathForKey(target)
+	opsLock, err := m.acquireOpsLock(ctx, sourceKey)
+	if err != nil {
+		return fmt.Errorf("repoctx: lock clone purge: %w", err)
+	}
+	defer opsLock.Close()
+	if err := m.cleanupExternalRunsForSourceLocked(ctx, target, sourceKey); err != nil {
+		return err
+	}
+	if err := m.refuseUnknownLinkedWorktrees(ctx, target); err != nil {
+		return err
+	}
 	if err := os.RemoveAll(target); err != nil {
 		return fmt.Errorf("repoctx: purge %q: %w", target, err)
 	}
@@ -945,12 +1058,11 @@ func (m *Manager) PruneStaleWorktreesUnder(ctx context.Context, cloneBase string
 	return total, errors.Join(errs...)
 }
 
-// PruneStaleWorktrees removes any subdirectory under
-// `<cloneDir>/.worktrees/` that the manager does not currently track
-// as active and then runs `git worktree prune` so git's own registry
-// matches the on-disk state. Intended for daemon startup (where any
-// leftover worktree is by definition stale) and for periodic sweeps
-// that catch leaks from crashed releases.
+// PruneStaleWorktrees deliberately leaves legacy `.worktrees` directories
+// untouched. Older releases did not create cross-process leases, so absence
+// from this Manager's in-memory active set cannot prove that another daemon
+// or inherited AI child is not using one. New worktrees live in the external
+// v2 root and are cleaned by PruneStaleExternalWorktrees using kernel locks.
 func (m *Manager) PruneStaleWorktrees(ctx context.Context, cloneDir string) (int, error) {
 	if m == nil {
 		return 0, fmt.Errorf("repoctx: nil manager")
@@ -966,7 +1078,7 @@ func (m *Manager) PruneStaleWorktrees(ctx context.Context, cloneDir string) (int
 	if err != nil {
 		return 0, fmt.Errorf("repoctx: list worktrees %q: %w", root, err)
 	}
-	pruned := 0
+	unknown := 0
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -979,21 +1091,15 @@ func (m *Manager) PruneStaleWorktrees(ctx context.Context, cloneDir string) (int
 		if live {
 			continue
 		}
-		// Try git's tooling first so the registry stays consistent;
-		// fall back to filesystem removal if git refuses (e.g., the
-		// registry entry already vanished).
-		if err := m.runner().Run(ctx, cloneDir, nil, "worktree", "remove", "--force", path); err != nil {
-			slog.Warn("repoctx: prune worktree via git failed, falling back to rm", "path", path, "err", err)
-			if rmErr := os.RemoveAll(path); rmErr != nil {
-				return pruned, fmt.Errorf("repoctx: prune worktree %q: %w", path, rmErr)
-			}
-		}
-		pruned++
+		unknown++
+		slog.Warn("repoctx: retaining unleased legacy worktree (ownership cannot be proven)",
+			"path", path)
 	}
-	if err := m.runner().Run(ctx, cloneDir, nil, "worktree", "prune"); err != nil {
-		slog.Warn("repoctx: git worktree prune", "dir", cloneDir, "err", err)
+	if unknown > 0 {
+		slog.Warn("repoctx: legacy worktrees require manual cleanup after confirming no process uses them",
+			"dir", cloneDir, "count", unknown)
 	}
-	return pruned, nil
+	return 0, nil
 }
 
 func (m *Manager) releaseCapRef(repo string, c *repoCap) {
@@ -1145,7 +1251,7 @@ func buildAskPassEnv(token string) ([]string, func(), error) {
 		os.RemoveAll(dir)
 		return nil, nil, fmt.Errorf("write askpass script: %w", err)
 	}
-	env := append(os.Environ(),
+	env := append(cleanGitEnvironment(os.Environ()),
 		"GIT_ASKPASS="+helperPath,
 		"GIT_TERMINAL_PROMPT=0",
 		"HEIMDALLM_GIT_TOKEN="+token,
@@ -1157,22 +1263,118 @@ func buildAskPassEnv(token string) ([]string, func(), error) {
 type execGit struct{}
 
 func (execGit) Run(ctx context.Context, dir string, env []string, args ...string) error {
+	_, err := (execGit{}).run(ctx, dir, env, nil, false, args...)
+	return err
+}
+
+func (execGit) RunWithExtraFiles(
+	ctx context.Context,
+	dir string,
+	env []string,
+	extraFiles []*os.File,
+	args ...string,
+) error {
+	_, err := (execGit{}).run(ctx, dir, env, extraFiles, false, args...)
+	return err
+}
+
+func (execGit) Output(ctx context.Context, dir string, env []string, args ...string) ([]byte, error) {
+	return (execGit{}).run(ctx, dir, env, nil, true, args...)
+}
+
+func (execGit) run(
+	ctx context.Context,
+	dir string,
+	env []string,
+	extraFiles []*os.File,
+	captureStdout bool,
+	args ...string,
+) ([]byte, error) {
 	runCtx, cancel := context.WithTimeout(ctx, gitTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(runCtx, "git", args...)
 	cmd.Dir = dir
-	cmd.Env = os.Environ()
+	cmd.Env = cleanGitEnvironment(os.Environ())
 	if env != nil {
+		// Callers construct explicit environments through buildAskPassEnv or
+		// gitSafeDirectoryEnv; both start from cleanGitEnvironment and then add
+		// the narrowly-scoped variables their operation needs.
 		cmd.Env = env
 	}
+	cmd.ExtraFiles = append([]*os.File(nil), extraFiles...)
+	var stdout bytes.Buffer
 	var stderr bytes.Buffer
+	if captureStdout {
+		cmd.Stdout = &stdout
+	}
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		errText := stderr.String()
 		if len(errText) > maxGitStderrBytes {
 			errText = errText[:maxGitStderrBytes] + "\n... (stderr truncated)"
 		}
-		return fmt.Errorf("%w (stderr: %s)", err, strings.TrimSpace(errText))
+		return nil, fmt.Errorf("%w (stderr: %s)", err, strings.TrimSpace(errText))
 	}
-	return nil
+	return stdout.Bytes(), nil
+}
+
+// cleanGitEnvironment prevents ambient repository-routing and configuration
+// variables from redirecting a command or activating operator-owned hooks.
+// Repository-local config is still readable where Git needs it, but the
+// command-scope hooksPath override prevents checkout/commit hooks from running.
+func cleanGitEnvironment(env []string) []string {
+	out := make([]string, 0, len(env)+7)
+	for _, entry := range env {
+		key, _, _ := strings.Cut(entry, "=")
+		switch {
+		case key == "GIT_DIR",
+			key == "GIT_COMMON_DIR",
+			key == "GIT_WORK_TREE",
+			key == "GIT_INDEX_FILE",
+			key == "GIT_OBJECT_DIRECTORY",
+			key == "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+			key == "GIT_NAMESPACE",
+			key == "GIT_CONFIG",
+			key == "GIT_CONFIG_GLOBAL",
+			key == "GIT_CONFIG_SYSTEM",
+			key == "GIT_CONFIG_NOSYSTEM",
+			key == "GIT_CONFIG_PARAMETERS",
+			key == "GIT_IMPLICIT_WORK_TREE",
+			key == "GIT_GRAFT_FILE",
+			key == "GIT_REPLACE_REF_BASE",
+			key == "GIT_NO_REPLACE_OBJECTS",
+			key == "GIT_PREFIX",
+			key == "GIT_INTERNAL_SUPER_PREFIX",
+			key == "GIT_SHALLOW_FILE",
+			key == "GIT_CEILING_DIRECTORIES",
+			key == "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+			key == "GIT_ATTR_NOSYSTEM",
+			key == "GIT_EXEC_PATH",
+			key == "GIT_EXTERNAL_DIFF",
+			key == "GIT_TEMPLATE_DIR",
+			strings.HasPrefix(key, "GIT_TRACE"),
+			key == "GIT_CURL_VERBOSE",
+			key == "GIT_SSL_NO_VERIFY",
+			key == "GIT_SSH",
+			key == "GIT_SSH_COMMAND",
+			key == "GIT_SSH_VARIANT",
+			key == "GIT_CONFIG_COUNT",
+			strings.HasPrefix(key, "GIT_CONFIG_KEY_"),
+			strings.HasPrefix(key, "GIT_CONFIG_VALUE_"):
+			continue
+		default:
+			out = append(out, entry)
+		}
+	}
+	return append(out,
+		"GIT_ALTERNATE_OBJECT_DIRECTORIES=",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_SYSTEM="+os.DevNull,
+		"GIT_CONFIG_GLOBAL="+os.DevNull,
+		"GIT_NO_REPLACE_OBJECTS=1",
+		"GIT_ATTR_NOSYSTEM=1",
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=core.hooksPath",
+		"GIT_CONFIG_VALUE_0="+os.DevNull,
+	)
 }

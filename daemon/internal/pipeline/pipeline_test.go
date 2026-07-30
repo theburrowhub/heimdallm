@@ -21,6 +21,8 @@ type fakeGH struct {
 	comments           []github.Comment
 	headSHA            string
 	submittedCommitIDs []string
+	submittedBodies    []string
+	postedComments     int
 }
 
 func (f *fakeGH) FetchDiffForCommit(repo string, number int, headSHA string) (string, error) {
@@ -30,6 +32,7 @@ func (f *fakeGH) FetchDiffForCommit(repo string, number int, headSHA string) (st
 
 func (f *fakeGH) SubmitReviewForCommit(repo string, number int, body, event, commitID string) (int64, string, error) {
 	f.submittedCommitIDs = append(f.submittedCommitIDs, commitID)
+	f.submittedBodies = append(f.submittedBodies, body)
 	// Mirror GitHub's actual mapping from the submitted event to the
 	// returned state so pipeline tests that inspect GitHubReviewState see
 	// something realistic rather than a hardcoded constant.
@@ -44,6 +47,7 @@ func (f *fakeGH) SubmitReviewForCommit(repo string, number int, body, event, com
 }
 
 func (f *fakeGH) PostComment(repo string, number int, body string) (time.Time, error) {
+	f.postedComments++
 	return time.Now().UTC(), nil
 }
 
@@ -105,12 +109,12 @@ type fakeTimeline struct {
 
 func (f *fakeTimeline) GetPRTimelineEventsForReviewer(_ string, _ int, _ string) ([]github.TimelineEvent, error) {
 	f.callsMu.Lock()
+	defer f.callsMu.Unlock()
 	f.calls++
-	f.callsMu.Unlock()
 	if f.err != nil {
 		return nil, f.err
 	}
-	return f.events, nil
+	return append([]github.TimelineEvent(nil), f.events...), nil
 }
 
 func (f *fakeTimeline) callCount() int {
@@ -119,16 +123,52 @@ func (f *fakeTimeline) callCount() int {
 	return f.calls
 }
 
+func (f *fakeTimeline) setEvents(events []github.TimelineEvent) {
+	f.callsMu.Lock()
+	f.events = append([]github.TimelineEvent(nil), events...)
+	f.callsMu.Unlock()
+}
+
 // fakeReviewerFetcher is a ReviewerFetcher stub returning a canned
 // PRHeadInfo (or an error) so the requested-reviewer bypass can be driven
 // deterministically. Used by the #1532 tests.
 type fakeReviewerFetcher struct {
+	mu   sync.Mutex
 	info github.PRHeadInfo
 	err  error
 }
 
 func (f *fakeReviewerFetcher) GetPRHeadInfo(_ string, _ int) (github.PRHeadInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.info, f.err
+}
+
+func (f *fakeReviewerFetcher) setInfo(info github.PRHeadInfo) {
+	f.mu.Lock()
+	f.info = info
+	f.mu.Unlock()
+}
+
+func TestPipeline_ReviewRequestCurrentRejectsEmptyHead(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	p := pipeline.New(s, &fakeGHCounter{}, &fakeExecCounter{}, &fakeNotify{})
+	p.SetBotLogin("heimdallm-bot")
+	p.SetReviewerFetcher(&fakeReviewerFetcher{info: github.PRHeadInfo{
+		RequestedReviewers: []string{"heimdallm-bot"},
+	}})
+	requested, err := p.ReviewRequestCurrent("org/repo", 1, "expected-head")
+	if err == nil {
+		t.Fatal("empty live HEAD was accepted without an error")
+	}
+	if requested {
+		t.Fatal("empty live HEAD authorized a review")
+	}
 }
 
 // fakePublisher records every SSE event the pipeline emits so lifecycle
@@ -207,6 +247,39 @@ func TestPipeline_Run(t *testing.T) {
 	}
 	if len(gh.submittedCommitIDs) != 1 || gh.submittedCommitIDs[0] != "sha1" {
 		t.Errorf("submitted commit IDs = %v, want [sha1]", gh.submittedCommitIDs)
+	}
+}
+
+func TestPipeline_Run_MultiModeKeepsFindingsInCommitAnchoredReview(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	ghClient := &fakeGH{diff: "+new line"}
+	p := pipeline.New(s, ghClient, &fakeExec{}, &fakeNotify{})
+	pr := &github.PullRequest{
+		ID: 91, Number: 91, Title: "Fork-safe feedback", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/91",
+		Head: github.Branch{SHA: "sha-multi"},
+	}
+
+	if _, err := p.Run(pr, pipeline.RunOptions{
+		Primary: "claude", Fallback: "gemini", ReviewMode: "multi",
+	}); err != nil {
+		t.Fatalf("pipeline run: %v", err)
+	}
+
+	if ghClient.postedComments != 0 {
+		t.Fatalf("standalone issue comments = %d, want 0", ghClient.postedComments)
+	}
+	if len(ghClient.submittedCommitIDs) != 1 || ghClient.submittedCommitIDs[0] != "sha-multi" {
+		t.Fatalf("submitted commit IDs = %v, want [sha-multi]", ghClient.submittedCommitIDs)
+	}
+	if len(ghClient.submittedBodies) != 1 || !strings.Contains(ghClient.submittedBodies[0], "test") {
+		t.Fatalf("commit-anchored review body does not contain finding: %v", ghClient.submittedBodies)
 	}
 }
 
@@ -465,8 +538,8 @@ func TestPipeline_Run_HydratesHeadSHAWhenMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if gh.shaCalls != 2 {
-		t.Errorf("expected hydration + post-execute HEAD checks, got %d calls", gh.shaCalls)
+	if gh.shaCalls != 3 {
+		t.Errorf("expected hydration + pre/post-publish HEAD checks, got %d calls", gh.shaCalls)
 	}
 	if rev.HeadSHA != "abc123" {
 		t.Errorf("stored HeadSHA = %q, want %q", rev.HeadSHA, "abc123")
@@ -479,7 +552,7 @@ func TestPipeline_Run_HydratesHeadSHAWhenMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second run: %v", err)
 	}
-	if gh.shaCalls != 2 {
+	if gh.shaCalls != 3 {
 		t.Errorf("GetPRHeadSHA called redundantly: %d", gh.shaCalls)
 	}
 	if gh.submits != 1 {
@@ -513,6 +586,7 @@ type fakeGHCounter struct {
 	headSHA            string
 	submits            int
 	submittedCommitIDs []string
+	onSubmit           func()
 }
 
 func (f *fakeGHCounter) FetchDiffForCommit(repo string, number int, headSHA string) (string, error) {
@@ -522,6 +596,9 @@ func (f *fakeGHCounter) FetchDiffForCommit(repo string, number int, headSHA stri
 func (f *fakeGHCounter) SubmitReviewForCommit(repo string, number int, body, event, commitID string) (int64, string, error) {
 	f.submits++
 	f.submittedCommitIDs = append(f.submittedCommitIDs, commitID)
+	if f.onSubmit != nil {
+		f.onSubmit()
+	}
 	return 1, "COMMENTED", nil
 }
 func (f *fakeGHCounter) PostComment(repo string, number int, body string) (time.Time, error) {
@@ -848,6 +925,323 @@ func TestPipeline_Run_RespectsExplicitReReviewOnSameSHA(t *testing.T) {
 	}
 }
 
+func TestPipeline_Run_UsesTimelineIDsForSameSecondReRequest(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	at := time.Date(2026, 7, 30, 10, 0, 0, 0, time.UTC)
+	timeline := &fakeTimeline{events: []github.TimelineEvent{
+		{ID: 101, Event: "review_requested", CreatedAt: at},
+	}}
+	exec := &fakeExecCounter{}
+	gh := &fakeGHCounter{diff: "+line"}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	p.SetBotLogin("heimdallm-bot")
+	p.SetTimelineFetcher(timeline)
+	pr := &github.PullRequest{
+		ID: 558, Number: 558, Title: "feat: cursor", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: at, Head: github.Branch{SHA: "same-head"},
+	}
+
+	first, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"})
+	if err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	if first.TimelineCursorID != 101 {
+		t.Fatalf("first cursor = %d, want 101", first.TimelineCursorID)
+	}
+
+	timeline.setEvents([]github.TimelineEvent{
+		{ID: 101, Event: "review_requested", CreatedAt: at},
+		{ID: 102, Event: "review_requested", CreatedAt: at},
+	})
+	second, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"})
+	if err != nil {
+		t.Fatalf("same-second re-request run: %v", err)
+	}
+	if second == nil || second.TimelineCursorID != 102 {
+		t.Fatalf("second review = %+v, want cursor 102", second)
+	}
+	if third, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"}); err != nil {
+		t.Fatalf("third run: %v", err)
+	} else if third != nil {
+		t.Fatalf("third review = %+v, want dedup skip", third)
+	}
+	if exec.calls != 2 || gh.submits != 2 {
+		t.Fatalf("exec/submits = %d/%d, want exactly 2/2", exec.calls, gh.submits)
+	}
+}
+
+func TestPipeline_Run_RequestArrivingDuringSubmitRemainsPending(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	at := time.Date(2026, 7, 30, 10, 0, 0, 0, time.UTC)
+	timeline := &fakeTimeline{events: []github.TimelineEvent{
+		{ID: 201, Event: "review_requested", CreatedAt: at},
+	}}
+	exec := &fakeExecCounter{}
+	gh := &fakeGHCounter{diff: "+line"}
+	gh.onSubmit = func() {
+		timeline.setEvents([]github.TimelineEvent{
+			{ID: 201, Event: "review_requested", CreatedAt: at},
+			{ID: 202, Event: "review_requested", CreatedAt: at},
+		})
+		gh.onSubmit = nil
+	}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	p.SetBotLogin("heimdallm-bot")
+	p.SetTimelineFetcher(timeline)
+	pr := &github.PullRequest{
+		ID: 559, Number: 559, Title: "feat: publication race", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: at, Head: github.Branch{SHA: "same-head"},
+	}
+
+	first, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"})
+	if err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	if first == nil || !first.SuccessorPending || first.TimelineCursorID != 201 {
+		t.Fatalf("first review = %+v, want cursor 201 with pending successor", first)
+	}
+	second, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"})
+	if err != nil {
+		t.Fatalf("successor run: %v", err)
+	}
+	if second == nil || second.TimelineCursorID != 202 || second.SuccessorPending {
+		t.Fatalf("second review = %+v, want stable cursor 202", second)
+	}
+}
+
+func TestPipeline_Run_FirstRequestRemovedBeforeAnalysisDoesNotPublish(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	at := time.Date(2026, 7, 30, 10, 0, 0, 0, time.UTC)
+	timeline := &fakeTimeline{events: []github.TimelineEvent{
+		{ID: 211, Event: "review_requested", CreatedAt: at},
+		{ID: 212, Event: "review_request_removed", CreatedAt: at.Add(time.Second)},
+	}}
+	reviewer := &fakeReviewerFetcher{info: github.PRHeadInfo{HeadSHA: "head"}}
+	exec := &fakeExecCounter{}
+	gh := &fakeGHCounter{diff: "+line"}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	p.SetBotLogin("heimdallm-bot")
+	p.SetTimelineFetcher(timeline)
+	p.SetReviewerFetcher(reviewer)
+	pr := &github.PullRequest{
+		ID: 560, Number: 560, Title: "feat: cancelled", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: at, Head: github.Branch{SHA: "head"},
+	}
+
+	rev, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if rev != nil {
+		t.Fatalf("review = %+v, want cancellation skip", rev)
+	}
+	if exec.calls != 0 || gh.submits != 0 {
+		t.Fatalf("exec/submits = %d/%d, want 0/0", exec.calls, gh.submits)
+	}
+}
+
+func TestPipeline_Run_RequestRemovedDuringAnalysisDoesNotPublish(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	at := time.Date(2026, 7, 30, 10, 0, 0, 0, time.UTC)
+	timeline := &fakeTimeline{events: []github.TimelineEvent{
+		{ID: 221, Event: "review_requested", CreatedAt: at},
+	}}
+	reviewer := &fakeReviewerFetcher{info: github.PRHeadInfo{
+		HeadSHA: "head", RequestedReviewers: []string{"heimdallm-bot"},
+	}}
+	exec := &fakeExecCounter{}
+	exec.onExecute = func() {
+		timeline.setEvents([]github.TimelineEvent{
+			{ID: 221, Event: "review_requested", CreatedAt: at},
+			{ID: 222, Event: "review_request_removed", CreatedAt: at.Add(time.Second)},
+		})
+		reviewer.setInfo(github.PRHeadInfo{HeadSHA: "head"})
+	}
+	gh := &fakeGHCounter{diff: "+line"}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	p.SetBotLogin("heimdallm-bot")
+	p.SetTimelineFetcher(timeline)
+	p.SetReviewerFetcher(reviewer)
+	pr := &github.PullRequest{
+		ID: 561, Number: 561, Title: "feat: cancelled while running", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: at, Head: github.Branch{SHA: "head"},
+	}
+
+	rev, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if rev != nil {
+		t.Fatalf("review = %+v, want discarded result", rev)
+	}
+	if exec.calls != 1 || gh.submits != 0 {
+		t.Fatalf("exec/submits = %d/%d, want 1/0", exec.calls, gh.submits)
+	}
+}
+
+func TestPipeline_Run_LateSameRevisionRequestSurvivesStaleTimeline(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	at := time.Date(2026, 7, 30, 10, 0, 0, 0, time.UTC)
+	initial := []github.TimelineEvent{
+		{ID: 231, Event: "review_requested", CreatedAt: at},
+	}
+	withSuccessor := []github.TimelineEvent{
+		{ID: 231, Event: "review_requested", CreatedAt: at},
+		{ID: 232, Event: "review_requested", CreatedAt: at.Add(time.Second)},
+	}
+	timeline := &fakeTimeline{events: initial}
+	reviewer := &fakeReviewerFetcher{info: github.PRHeadInfo{
+		HeadSHA: "head", RequestedReviewers: []string{"heimdallm-bot"},
+	}}
+	exec := &fakeExecCounter{onExecute: func() {
+		timeline.setEvents(withSuccessor)
+	}}
+	gh := &fakeGHCounter{diff: "+line"}
+	gh.onSubmit = func() {
+		// GitHub consumes requested_reviewers when the first review is posted,
+		// and an eventually-consistent timeline read can briefly omit the
+		// already-observed successor event.
+		reviewer.setInfo(github.PRHeadInfo{HeadSHA: "head"})
+		timeline.setEvents(initial)
+		gh.onSubmit = nil
+	}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	p.SetBotLogin("heimdallm-bot")
+	p.SetTimelineFetcher(timeline)
+	p.SetReviewerFetcher(reviewer)
+	pr := &github.PullRequest{
+		ID: 562, Number: 562, Title: "feat: durable successor", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: at, Head: github.Branch{SHA: "head"},
+	}
+
+	first, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"})
+	if err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	if first == nil || !first.SuccessorPending || first.SuccessorEventID != 232 {
+		t.Fatalf("first review = %+v, want durable successor event 232", first)
+	}
+
+	// The stale read must not erase positive evidence or execute a review.
+	exec.onExecute = nil
+	if stale, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"}); err != nil {
+		t.Fatalf("stale timeline run: %v", err)
+	} else if stale != nil {
+		t.Fatalf("stale timeline review = %+v, want wait", stale)
+	}
+	if exec.calls != 1 || gh.submits != 1 {
+		t.Fatalf("after stale read exec/submits = %d/%d, want 1/1", exec.calls, gh.submits)
+	}
+	stored, err := s.GetReview(first.ID)
+	if err != nil {
+		t.Fatalf("get first review: %v", err)
+	}
+	if !stored.SuccessorPending || stored.SuccessorEventID != 232 {
+		t.Fatalf("stale timeline erased successor evidence: %+v", stored)
+	}
+
+	// Once the event becomes visible again, it authorizes the successor even
+	// though the previous POST already consumed requested_reviewers.
+	timeline.setEvents(withSuccessor)
+	second, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"})
+	if err != nil {
+		t.Fatalf("successor run: %v", err)
+	}
+	if second == nil || second.AuthorizationSource != pipeline.ReviewAuthorizationSuccessor {
+		t.Fatalf("second review = %+v, want successor authorization", second)
+	}
+	if exec.calls != 2 || gh.submits != 2 {
+		t.Fatalf("final exec/submits = %d/%d, want 2/2", exec.calls, gh.submits)
+	}
+}
+
+func TestPipeline_Run_SupersededReviewRemovalDoesNotRegenerate(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	at := time.Date(2026, 7, 30, 10, 0, 0, 0, time.UTC)
+	prID, err := s.UpsertPR(&store.PR{
+		GithubID: 563, Repo: "org/repo", Number: 563, Title: "feat: cancelled pending",
+		Author: "alice", State: "open", UpdatedAt: at, FetchedAt: at,
+	})
+	if err != nil {
+		t.Fatalf("upsert PR: %v", err)
+	}
+	seedID, err := s.InsertReview(&store.Review{
+		PRID: prID, CLIUsed: "claude", Summary: "superseded",
+		Issues: "[]", Suggestions: "[]", Severity: "low",
+		CreatedAt: at, HeadSHA: "head", GitHubReviewID: pipeline.SupersededReviewID,
+		TimelineCursorID: 241, AuthorizationSource: pipeline.ReviewAuthorizationRequested,
+		SuccessorPending: true,
+	})
+	if err != nil {
+		t.Fatalf("insert superseded review: %v", err)
+	}
+	timeline := &fakeTimeline{events: []github.TimelineEvent{
+		{ID: 241, Event: "review_requested", CreatedAt: at},
+		{ID: 242, Event: "review_request_removed", CreatedAt: at.Add(time.Second)},
+	}}
+	exec := &fakeExecCounter{}
+	gh := &fakeGHCounter{diff: "+line"}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	p.SetBotLogin("heimdallm-bot")
+	p.SetTimelineFetcher(timeline)
+	p.SetReviewerFetcher(&fakeReviewerFetcher{info: github.PRHeadInfo{HeadSHA: "head"}})
+	pr := &github.PullRequest{
+		ID: 563, Number: 563, Title: "feat: cancelled pending", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: at, Head: github.Branch{SHA: "head"},
+	}
+
+	rev, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if rev != nil || exec.calls != 0 || gh.submits != 0 {
+		t.Fatalf("review/exec/submits = %+v/%d/%d, want nil/0/0", rev, exec.calls, gh.submits)
+	}
+	seed, err := s.GetReview(seedID)
+	if err != nil {
+		t.Fatalf("get seed: %v", err)
+	}
+	if seed.SuccessorPending {
+		t.Fatal("request removal did not clear the superseded row's successor flag")
+	}
+}
+
 // TestPipeline_Run_ForceReReviewsSameSHAWithoutReRequest is the regression
 // guard for the "manual Re-review never runs" bug. Heimdallm authenticates as
 // the operator's own GitHub account, which cannot request a review from
@@ -946,6 +1340,182 @@ func TestPipeline_Run_DiscardsReviewWhenHeadChangesDuringAnalysis(t *testing.T) 
 	}
 	if payload.Reason != string(pipeline.SkipReasonHeadChanged) {
 		t.Fatalf("skip reason = %q, want %q", payload.Reason, pipeline.SkipReasonHeadChanged)
+	}
+}
+
+type fakeGHRevision struct {
+	diff            string
+	baseSHA         string
+	headSHA         string
+	baseAfterSubmit string
+	submits         int
+	onSubmit        func()
+}
+
+func (f *fakeGHRevision) FetchDiffForCommit(_ string, _ int, _ string) (string, error) {
+	return f.diff, nil
+}
+func (f *fakeGHRevision) FetchDiffSnapshot(_ string, _ int, headSHA string) (github.PRDiffSnapshot, error) {
+	return github.PRDiffSnapshot{Diff: f.diff, BaseSHA: f.baseSHA, HeadSHA: headSHA}, nil
+}
+func (f *fakeGHRevision) SubmitReviewForCommit(_ string, _ int, _, _, _ string) (int64, string, error) {
+	f.submits++
+	if f.baseAfterSubmit != "" {
+		f.baseSHA = f.baseAfterSubmit
+		f.baseAfterSubmit = ""
+	}
+	if f.onSubmit != nil {
+		f.onSubmit()
+	}
+	return int64(f.submits), "COMMENTED", nil
+}
+func (f *fakeGHRevision) PostComment(_ string, _ int, _ string) (time.Time, error) {
+	return time.Now().UTC(), nil
+}
+func (f *fakeGHRevision) FetchComments(_ string, _ int) ([]github.Comment, error) {
+	return nil, nil
+}
+func (f *fakeGHRevision) GetPRHeadSHA(_ string, _ int) (string, error) {
+	return f.headSHA, nil
+}
+func (f *fakeGHRevision) GetPRRevision(_ string, _ int) (github.PRRevision, error) {
+	return github.PRRevision{BaseSHA: f.baseSHA, HeadSHA: f.headSHA}, nil
+}
+
+func TestPipeline_Run_DiscardsReviewWhenBaseChangesDuringAnalysis(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	gh := &fakeGHRevision{diff: "+line", baseSHA: "base-a", headSHA: "head"}
+	exec := &fakeExecCounter{onExecute: func() { gh.baseSHA = "base-b" }}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	pr := &github.PullRequest{
+		ID: 201, Number: 201, Title: "t", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now(), Head: github.Branch{SHA: "head"},
+	}
+
+	rev, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if rev != nil {
+		t.Fatalf("review = %+v, want discarded result", rev)
+	}
+	if gh.submits != 0 {
+		t.Fatalf("submits = %d, want 0 after base changed", gh.submits)
+	}
+}
+
+func TestPipeline_Run_BaseChangeDuringSubmitCarriesSuccessor(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	gh := &fakeGHRevision{
+		diff: "+line", baseSHA: "base-a", headSHA: "head", baseAfterSubmit: "base-b",
+	}
+	exec := &fakeExecCounter{}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	reviewer := &fakeReviewerFetcher{info: github.PRHeadInfo{
+		HeadSHA: "head", RequestedReviewers: []string{"heimdallm-bot"},
+	}}
+	p.SetBotLogin("heimdallm-bot")
+	p.SetReviewerFetcher(reviewer)
+	gh.onSubmit = func() {
+		// A successful GitHub review consumes requested_reviewers. The base
+		// revision that raced that POST still needs one carry-forward pass.
+		reviewer.setInfo(github.PRHeadInfo{HeadSHA: "head"})
+		gh.onSubmit = nil
+	}
+	pr := &github.PullRequest{
+		ID: 202, Number: 202, Title: "t", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now(), Head: github.Branch{SHA: "head"},
+	}
+
+	first, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"})
+	if err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	if first == nil || !first.SuccessorPending || first.BaseSHA != "base-a" {
+		t.Fatalf("first review = %+v, want pending successor from base-a", first)
+	}
+
+	second, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"})
+	if err != nil {
+		t.Fatalf("successor run: %v", err)
+	}
+	if second == nil || second.BaseSHA != "base-b" || second.SuccessorPending {
+		t.Fatalf("second review = %+v, want stable base-b review", second)
+	}
+	if exec.calls != 2 || gh.submits != 2 {
+		t.Fatalf("exec/submits = %d/%d, want 2/2", exec.calls, gh.submits)
+	}
+	storedFirst, err := s.GetReview(first.ID)
+	if err != nil {
+		t.Fatalf("get first review: %v", err)
+	}
+	if storedFirst.SuccessorPending {
+		t.Fatal("predecessor successor flag was not cleared after replacement row")
+	}
+}
+
+func TestPipeline_Run_DiscardsReviewWhenLocalSnapshotChanges(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	gh := &fakeGHCounter{diff: "+line"}
+	pub := &fakePublisher{}
+	p := pipeline.New(s, gh, &fakeExecCounter{}, &fakeNotify{})
+	p.SetPublisher(pub)
+
+	pr := &github.PullRequest{
+		ID: 101, Number: 101, Title: "t", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/101",
+		Head: github.Branch{SHA: "analysed-head"},
+	}
+	rev, err := p.Run(pr, pipeline.RunOptions{
+		Primary: "claude",
+		ValidateSnapshot: func() error {
+			return errors.New("checkout became dirty")
+		},
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if rev != nil {
+		t.Fatalf("review = %+v, want nil after local snapshot changed", rev)
+	}
+	if gh.submits != 0 {
+		t.Fatalf("SubmitReviewForCommit calls = %d, want 0", gh.submits)
+	}
+	if pending, err := s.ListUnpublishedReviews(); err != nil {
+		t.Fatalf("ListUnpublishedReviews: %v", err)
+	} else if len(pending) != 0 {
+		t.Fatalf("unpublished reviews = %d, want 0", len(pending))
+	}
+	ev, ok := pub.firstOf(sse.EventReviewSkipped)
+	if !ok {
+		t.Fatal("review_skipped event not emitted")
+	}
+	var payload struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal([]byte(ev.Data), &payload); err != nil {
+		t.Fatalf("decode review_skipped: %v", err)
+	}
+	if payload.Reason != string(pipeline.SkipReasonSnapshotChanged) {
+		t.Fatalf("skip reason = %q, want %q", payload.Reason, pipeline.SkipReasonSnapshotChanged)
 	}
 }
 
@@ -1069,9 +1639,10 @@ func TestPipeline_Run_ReReviewsNewCommitsWhenRequestedReviewer(t *testing.T) {
 	p.SetBotLogin("heimdallm-bot")
 	// No timeline fetcher wired: mirrors "no review_requested event exists".
 	// The bot IS a current requested reviewer per the reviewer fetcher.
-	p.SetReviewerFetcher(&fakeReviewerFetcher{
-		info: github.PRHeadInfo{RequestedReviewers: []string{"heimdallm-bot"}},
-	})
+	reviewer := &fakeReviewerFetcher{info: github.PRHeadInfo{
+		HeadSHA: "oldsha", RequestedReviewers: []string{"heimdallm-bot"},
+	}}
+	p.SetReviewerFetcher(reviewer)
 
 	pr := &github.PullRequest{
 		ID: 1532, Number: 1532, Title: "t", Repo: "org/repo",
@@ -1088,6 +1659,9 @@ func TestPipeline_Run_ReReviewsNewCommitsWhenRequestedReviewer(t *testing.T) {
 	// New commits pushed → HEAD advances. No review_requested event, but the
 	// bot is still a requested reviewer → must re-review.
 	pr.Head.SHA = "newsha"
+	reviewer.setInfo(github.PRHeadInfo{
+		HeadSHA: "newsha", RequestedReviewers: []string{"heimdallm-bot"},
+	})
 	pr.UpdatedAt = time.Now()
 	if _, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"}); err != nil {
 		t.Fatalf("re-review run: %v", err)
@@ -1115,11 +1689,6 @@ func TestPipeline_Run_SkipsNewCommitsWhenNotRequestedReviewer(t *testing.T) {
 	gh := &fakeGHCounter{diff: "+line"}
 	p := pipeline.New(s, gh, exec, &fakeNotify{})
 	p.SetBotLogin("heimdallm-bot")
-	// Bot is NOT in requested_reviewers (someone else is).
-	p.SetReviewerFetcher(&fakeReviewerFetcher{
-		info: github.PRHeadInfo{RequestedReviewers: []string{"alice"}},
-	})
-
 	pr := &github.PullRequest{
 		ID: 1, Number: 1, Title: "t", Repo: "org/repo",
 		User: github.User{Login: "alice"}, State: "open",
@@ -1128,6 +1697,11 @@ func TestPipeline_Run_SkipsNewCommitsWhenNotRequestedReviewer(t *testing.T) {
 		Head:      github.Branch{SHA: "oldsha"},
 	}
 	runFirstReview(t, p, pr)
+	// Bot is NOT in requested_reviewers (someone else is) after the seed
+	// review has established the predecessor.
+	p.SetReviewerFetcher(&fakeReviewerFetcher{
+		info: github.PRHeadInfo{HeadSHA: "newsha", RequestedReviewers: []string{"alice"}},
+	})
 
 	pr.Head.SHA = "newsha" // new commits, but no pending request for the bot
 	pr.UpdatedAt = time.Now()
@@ -1155,7 +1729,7 @@ func TestPipeline_Run_SkipsSameSHAEvenWhenRequestedReviewer(t *testing.T) {
 	p := pipeline.New(s, gh, exec, &fakeNotify{})
 	p.SetBotLogin("heimdallm-bot")
 	p.SetReviewerFetcher(&fakeReviewerFetcher{
-		info: github.PRHeadInfo{RequestedReviewers: []string{"heimdallm-bot"}},
+		info: github.PRHeadInfo{HeadSHA: "samesha", RequestedReviewers: []string{"heimdallm-bot"}},
 	})
 
 	pr := &github.PullRequest{
@@ -1217,10 +1791,10 @@ func TestPipeline_Run_IgnoresStaleReviewRequest(t *testing.T) {
 	}
 }
 
-// TestPipeline_Run_DismissAfterReRequestKeepsSkip covers the layered
-// case: re-request was followed by a dismiss, so the operator no
+// TestPipeline_Run_RemovalAfterReRequestKeepsSkip covers the layered
+// case: re-request was followed by a removal, so the operator no
 // longer wants our review on this SHA. Newest event wins; skip stays.
-func TestPipeline_Run_DismissAfterReRequestKeepsSkip(t *testing.T) {
+func TestPipeline_Run_RemovalAfterReRequestKeepsSkip(t *testing.T) {
 	s, err := store.Open(":memory:")
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -1244,7 +1818,7 @@ func TestPipeline_Run_DismissAfterReRequestKeepsSkip(t *testing.T) {
 	now := time.Now()
 	tl := &fakeTimeline{events: []github.TimelineEvent{
 		{Event: "review_requested", Actor: "alice", CreatedAt: now.Add(-10 * time.Minute)},
-		{Event: "review_dismissed", Actor: "alice", CreatedAt: now.Add(-5 * time.Minute)},
+		{Event: "review_request_removed", Actor: "alice", CreatedAt: now.Add(-5 * time.Minute)},
 	}}
 	p.SetTimelineFetcher(tl)
 
@@ -1253,7 +1827,7 @@ func TestPipeline_Run_DismissAfterReRequestKeepsSkip(t *testing.T) {
 		t.Fatalf("second run: %v", err)
 	}
 	if exec.calls != 1 {
-		t.Errorf("dismiss after re-request must keep the skip, got exec.calls=%d", exec.calls)
+		t.Errorf("removal after re-request must keep the skip, got exec.calls=%d", exec.calls)
 	}
 }
 

@@ -43,11 +43,11 @@ func TestStateWorker_ConsumesAndCallsHandler(t *testing.T) {
 
 	var mu sync.Mutex
 	var calls []bus.StateCheckMsg
-	handler := func(_ context.Context, msg bus.StateCheckMsg) (bool, error) {
+	handler := func(_ context.Context, msg bus.StateCheckMsg) (bool, time.Time, string, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		calls = append(calls, msg)
-		return false, nil // no change
+		return false, time.Time{}, "", nil // no change
 	}
 
 	w := worker.NewStateWorker(conn, 3, ws, handler)
@@ -98,12 +98,12 @@ func TestStateWorker_DeletedWatchDoesNotLogBackoffFailure(t *testing.T) {
 	t.Cleanup(func() { slog.SetDefault(previousLogger) })
 
 	handled := make(chan struct{})
-	handler := func(ctx context.Context, _ bus.StateCheckMsg) (bool, error) {
+	handler := func(ctx context.Context, _ bus.StateCheckMsg) (bool, time.Time, string, error) {
 		if err := ws.Delete(ctx, "pr.9876"); err != nil {
-			return false, err
+			return false, time.Time{}, "", err
 		}
 		close(handled)
-		return false, nil
+		return false, time.Time{}, "", nil
 	}
 
 	w := worker.NewStateWorker(conn, 1, ws, handler)
@@ -128,5 +128,55 @@ func TestStateWorker_DeletedWatchDoesNotLogBackoffFailure(t *testing.T) {
 	}
 	if _, err := ws.Get(ctx, "pr.9876"); err == nil {
 		t.Fatal("deleted watch was unexpectedly recreated")
+	}
+}
+
+func TestStateWorker_RecordsRemoteObservationTimeNotCompletionTime(t *testing.T) {
+	b := newTestBus(t)
+	conn := b.Conn()
+	ws := newTestWatch(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := ws.Enroll(ctx, "pr", "org/repo", 42, 2468); err != nil {
+		t.Fatalf("Enroll: %v", err)
+	}
+	observedAt := time.Date(2026, 7, 30, 9, 12, 13, 0, time.UTC)
+	handled := make(chan struct{})
+	handler := func(_ context.Context, _ bus.StateCheckMsg) (bool, time.Time, string, error) {
+		close(handled)
+		return true, observedAt, "new-head", nil
+	}
+
+	w := worker.NewStateWorker(conn, 1, ws, handler)
+	go func() { _ = w.Start(ctx) }()
+	time.Sleep(100 * time.Millisecond)
+
+	pub := bus.NewStateCheckPublisher(conn)
+	if err := pub.PublishStateCheck(ctx, "pr", "org/repo", 42, 2468); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	select {
+	case <-handled:
+	case <-ctx.Done():
+		t.Fatal("state handler was not called")
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		entry, err := ws.Get(ctx, "pr.2468")
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if entry.LastSeen.Equal(observedAt) {
+			if entry.HeadSHA != "new-head" {
+				t.Fatalf("HeadSHA = %q, want new-head", entry.HeadSHA)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("LastSeen = %s, want remote observation %s", entry.LastSeen, observedAt)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

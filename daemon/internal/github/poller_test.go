@@ -18,7 +18,7 @@ func TestFetchPRs(t *testing.T) {
 	prs := []gh.PullRequest{
 		{ID: 1, Number: 42, Title: "Fix bug", HTMLURL: "https://github.com/org/repo/pull/42",
 			User: gh.User{Login: "alice"}, State: "open",
-			Head: gh.Branch{Repo: gh.Repo{FullName: "org/repo"}},
+			Head: gh.Branch{Repo: gh.Repo{FullName: "org/repo"}}, RepositoryURL: "https://api.github.com/repos/org/repo",
 		},
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -53,11 +53,11 @@ func TestFetchPRsToReviewFiltersSelfAuthored(t *testing.T) {
 	prs := []gh.PullRequest{
 		{ID: 1, Number: 41, Title: "Own PR", HTMLURL: "https://github.com/org/repo/pull/41",
 			User: gh.User{Login: "alice"}, State: "open",
-			Head: gh.Branch{Repo: gh.Repo{FullName: "org/repo"}},
+			Head: gh.Branch{Repo: gh.Repo{FullName: "org/repo"}}, RepositoryURL: "https://api.github.com/repos/org/repo",
 		},
 		{ID: 2, Number: 42, Title: "Team PR", HTMLURL: "https://github.com/org/repo/pull/42",
 			User: gh.User{Login: "bob"}, State: "open",
-			Head: gh.Branch{Repo: gh.Repo{FullName: "org/repo"}},
+			Head: gh.Branch{Repo: gh.Repo{FullName: "org/repo"}}, RepositoryURL: "https://api.github.com/repos/org/repo",
 		},
 	}
 	var searchQuery string
@@ -90,6 +90,57 @@ func TestFetchPRsToReviewFiltersSelfAuthored(t *testing.T) {
 	}
 	if !strings.Contains(searchQuery, "review-requested:alice") {
 		t.Fatalf("search query = %q, want review-requested:alice", searchQuery)
+	}
+}
+
+func TestFetchPRsToReviewPaginatesPastFirstHundred(t *testing.T) {
+	var searchCalls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/user":
+			_ = json.NewEncoder(w).Encode(map[string]string{"login": "heimdallm-bot"})
+		case "/search/issues":
+			atomic.AddInt32(&searchCalls, 1)
+			page := r.URL.Query().Get("page")
+			items := make([]gh.PullRequest, 0, 100)
+			switch page {
+			case "1":
+				for i := 1; i <= 100; i++ {
+					items = append(items, gh.PullRequest{
+						ID: int64(i), Number: i, User: gh.User{Login: "alice"}, State: "open",
+					})
+				}
+			case "2":
+				items = append(items, gh.PullRequest{
+					ID: 101, Number: 101, User: gh.User{Login: "bob"}, State: "open",
+				})
+			default:
+				t.Fatalf("unexpected search page %q", page)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"total_count":        101,
+				"incomplete_results": false,
+				"items":              items,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	got, err := client.FetchPRsToReview()
+	if err != nil {
+		t.Fatalf("FetchPRsToReview: %v", err)
+	}
+	if len(got) != 101 {
+		t.Fatalf("got %d PRs, want 101", len(got))
+	}
+	if got[100].ID != 101 {
+		t.Fatalf("last PR id = %d, want 101", got[100].ID)
+	}
+	if calls := atomic.LoadInt32(&searchCalls); calls != 2 {
+		t.Fatalf("search calls = %d, want 2", calls)
 	}
 }
 
@@ -138,12 +189,12 @@ func TestFetchDiffForCommitUsesExactBaseAndHeadSHAs(t *testing.T) {
 	defer srv.Close()
 
 	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
-	got, err := client.FetchDiffForCommit("org/repo", 42, headSHA)
+	snapshot, err := client.FetchDiffSnapshot("org/repo", 42, headSHA)
 	if err != nil {
-		t.Fatalf("FetchDiffForCommit: %v", err)
+		t.Fatalf("FetchDiffSnapshot: %v", err)
 	}
-	if got != diff {
-		t.Fatalf("diff = %q, want %q", got, diff)
+	if snapshot.Diff != diff || snapshot.BaseSHA != baseSHA || snapshot.HeadSHA != headSHA {
+		t.Fatalf("snapshot = %+v, want diff/base/head pair", snapshot)
 	}
 	if compareCalls != 1 {
 		t.Fatalf("compare calls = %d, want 1", compareCalls)
@@ -177,6 +228,86 @@ func TestFetchDiffForCommitRejectsChangedHeadBeforeCompare(t *testing.T) {
 	}
 	if compareCalls != 0 {
 		t.Fatalf("compare calls = %d, want 0 for stale target", compareCalls)
+	}
+}
+
+func TestFetchDiffForCommitFallsBackOn406AndRevalidatesSnapshot(t *testing.T) {
+	const (
+		baseSHA = "base123"
+		headSHA = "head456"
+	)
+	var prReads int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/org/repo/pulls/42":
+			prReads++
+			_ = json.NewEncoder(w).Encode(gh.PullRequest{
+				Head: gh.Branch{SHA: headSHA},
+				Base: gh.Branch{SHA: baseSHA},
+			})
+		case "/repos/org/repo/compare/base123...head456":
+			http.Error(w, `{"message":"diff too large"}`, http.StatusNotAcceptable)
+		case "/repos/org/repo/pulls/42/files":
+			_ = json.NewEncoder(w).Encode([]map[string]any{{
+				"filename": "main.go",
+				"status":   "modified",
+				"patch":    "@@ -1 +1 @@\n-old\n+new",
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	diff, err := client.FetchDiffForCommit("org/repo", 42, headSHA)
+	if err != nil {
+		t.Fatalf("FetchDiffForCommit: %v", err)
+	}
+	if !strings.Contains(diff, "diff --git a/main.go b/main.go") {
+		t.Fatalf("fallback diff = %q, want reconstructed file", diff)
+	}
+	if prReads != 2 {
+		t.Fatalf("PR snapshot reads = %d, want pre/post fallback revalidation", prReads)
+	}
+}
+
+func TestFetchDiffForCommitDiscardsFallbackWhenHeadChanges(t *testing.T) {
+	const (
+		baseSHA = "base123"
+		headSHA = "head456"
+	)
+	var prReads int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/org/repo/pulls/42":
+			prReads++
+			currentHead := headSHA
+			if prReads > 1 {
+				currentHead = "head789"
+			}
+			_ = json.NewEncoder(w).Encode(gh.PullRequest{
+				Head: gh.Branch{SHA: currentHead},
+				Base: gh.Branch{SHA: baseSHA},
+			})
+		case "/repos/org/repo/compare/base123...head456":
+			w.WriteHeader(http.StatusNotAcceptable)
+		case "/repos/org/repo/pulls/42/files":
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	_, err := client.FetchDiffForCommit("org/repo", 42, headSHA)
+	var changed *gh.HeadChangedError
+	if !errors.As(err, &changed) {
+		t.Fatalf("error = %v, want HeadChangedError", err)
+	}
+	if changed.Actual != "head789" {
+		t.Fatalf("changed.Actual = %q, want head789", changed.Actual)
 	}
 }
 
@@ -1010,8 +1141,9 @@ func TestFetchIssueCommentsOnly_PropagatesRealErrors(t *testing.T) {
 // must only return events that target the given reviewer login. Mixed
 // payload exercises (a) a review_requested for the bot, (b) a
 // review_requested for a different user (must be ignored), (c) a
-// review_dismissed for the bot, and (d) an unrelated event type
-// (commented).
+// review_request_removed for the bot, (d) a review_dismissed for the bot
+// (must be ignored because it is review state, not request intent), and
+// (e) an unrelated event type (commented).
 func TestGetPRTimelineEventsForReviewer_FiltersByLogin(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/repos/org/repo/issues/7/timeline" {
@@ -1020,20 +1152,26 @@ func TestGetPRTimelineEventsForReviewer_FiltersByLogin(t *testing.T) {
 		}
 		json.NewEncoder(w).Encode([]map[string]any{
 			{
-				"event":      "review_requested",
-				"created_at": "2026-04-24T07:00:00Z",
-				"actor":      map[string]string{"login": "alice"},
+				"event":              "review_requested",
+				"created_at":         "2026-04-24T07:00:00Z",
+				"actor":              map[string]string{"login": "alice"},
 				"requested_reviewer": map[string]string{"login": "heimdallm-bot"},
 			},
 			{
-				"event":      "review_requested",
-				"created_at": "2026-04-24T07:01:00Z",
-				"actor":      map[string]string{"login": "alice"},
+				"event":              "review_requested",
+				"created_at":         "2026-04-24T07:01:00Z",
+				"actor":              map[string]string{"login": "alice"},
 				"requested_reviewer": map[string]string{"login": "someone-else"},
 			},
 			{
+				"event":              "review_request_removed",
+				"created_at":         "2026-04-24T07:02:00Z",
+				"actor":              map[string]string{"login": "alice"},
+				"requested_reviewer": map[string]string{"login": "heimdallm-bot"},
+			},
+			{
 				"event":      "review_dismissed",
-				"created_at": "2026-04-24T07:02:00Z",
+				"created_at": "2026-04-24T07:02:30Z",
 				"actor":      map[string]string{"login": "alice"},
 				"dismissed_review": map[string]any{
 					"user": map[string]string{"login": "heimdallm-bot"},
@@ -1059,14 +1197,14 @@ func TestGetPRTimelineEventsForReviewer_FiltersByLogin(t *testing.T) {
 	if events[0].Event != "review_requested" || !events[0].CreatedAt.Equal(mustTime("2026-04-24T07:00:00Z")) {
 		t.Errorf("event[0] mismatch: %+v", events[0])
 	}
-	if events[1].Event != "review_dismissed" || !events[1].CreatedAt.Equal(mustTime("2026-04-24T07:02:00Z")) {
+	if events[1].Event != "review_request_removed" || !events[1].CreatedAt.Equal(mustTime("2026-04-24T07:02:00Z")) {
 		t.Errorf("event[1] mismatch: %+v", events[1])
 	}
 }
 
 // TestGetPRTimelineEventsForReviewer_RejectsEmptyLogin guards against
 // callers that forget to set the bot login: without a target login the
-// filter would let through every review_requested / review_dismissed in
+// filter would let through every review_requested / review_request_removed in
 // the timeline, defeating the point.
 func TestGetPRTimelineEventsForReviewer_RejectsEmptyLogin(t *testing.T) {
 	client := gh.NewClient("fake-token", gh.WithBaseURL("http://invalid"))
@@ -1318,6 +1456,36 @@ func TestSubmitReview_TransientErrorIsNotPermanent(t *testing.T) {
 	var permErr *gh.PermanentSubmitError
 	if errors.As(err, &permErr) {
 		t.Errorf("503 must NOT classify as PermanentSubmitError, got %+v", permErr)
+	}
+}
+
+func TestSubmitReview_RateLimitIsTransientAndOpensBreaker(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"message":"API rate limit exceeded"}`))
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	_, _, err := client.SubmitReviewForCommit("org/repo", 1, "body", "COMMENT", "abc123")
+	if err == nil {
+		t.Fatal("first rate-limited submit returned nil error")
+	}
+	var permanent *gh.PermanentSubmitError
+	if errors.As(err, &permanent) {
+		t.Fatalf("403 rate limit classified permanent: %+v", permanent)
+	}
+
+	_, _, err = client.SubmitReviewForCommit("org/repo", 1, "body", "COMMENT", "abc123")
+	var rateLimited *gh.RateLimitError
+	if !errors.As(err, &rateLimited) {
+		t.Fatalf("second submit error = %v, want *RateLimitError", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("server calls = %d, want 1 after breaker opened", got)
 	}
 }
 

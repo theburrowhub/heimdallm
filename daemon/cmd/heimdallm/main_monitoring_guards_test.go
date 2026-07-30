@@ -75,6 +75,12 @@ func TestPendingReviewInvalidReason(t *testing.T) {
 			want:     pipeline.SkipReasonHeadChanged,
 		},
 		{
+			name:     "changed base retires stale review",
+			review:   &store.Review{HeadSHA: "abc", BaseSHA: "base-a"},
+			snapshot: &gh.PRSnapshot{State: "open", HeadSHA: "abc", BaseSHA: "base-b"},
+			want:     pipeline.SkipReasonBaseChanged,
+		},
+		{
 			name:     "closed PR wins over head mismatch",
 			review:   &store.Review{HeadSHA: "abc"},
 			snapshot: &gh.PRSnapshot{State: "closed", HeadSHA: "def"},

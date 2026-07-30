@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -30,7 +31,8 @@ CREATE TABLE IF NOT EXISTS watch_state (
     github_id  INTEGER NOT NULL,
     next_check TEXT NOT NULL,
     backoff_ns INTEGER NOT NULL,
-    last_seen  TEXT NOT NULL
+    last_seen  TEXT NOT NULL,
+    head_sha   TEXT NOT NULL DEFAULT ''
 );
 `
 
@@ -43,6 +45,7 @@ type WatchEntry struct {
 	NextCheck time.Time `json:"next_check"`
 	BackoffNs int64     `json:"backoff_ns"`
 	LastSeen  time.Time `json:"last_seen"`
+	HeadSHA   string    `json:"head_sha"`
 }
 
 // Backoff returns the current backoff duration.
@@ -62,6 +65,13 @@ func NewWatchStore(db *sql.DB) (*WatchStore, error) {
 	if _, err := db.Exec(watchStateSchema); err != nil {
 		return nil, fmt.Errorf("watch: create table: %w", err)
 	}
+	// Existing installations predate head_sha. SQLite lacks a portable
+	// ADD COLUMN IF NOT EXISTS across all supported versions, so tolerate only
+	// the precise duplicate-column migration result.
+	if _, err := db.Exec("ALTER TABLE watch_state ADD COLUMN head_sha TEXT NOT NULL DEFAULT ''"); err != nil &&
+		!strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		return nil, fmt.Errorf("watch: add head_sha column: %w", err)
+	}
 	return &WatchStore{db: db}, nil
 }
 
@@ -73,8 +83,8 @@ func (w *WatchStore) Enroll(_ context.Context, typ, repo string, number int, git
 	now := time.Now()
 	nextCheck := now.Add(InitialBackoff)
 	_, err := w.db.Exec(`
-		INSERT INTO watch_state (key, type, repo, number, github_id, next_check, backoff_ns, last_seen)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO watch_state (key, type, repo, number, github_id, next_check, backoff_ns, last_seen, head_sha)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, '')
 		ON CONFLICT(key) DO UPDATE SET
 			repo = excluded.repo,
 			number = excluded.number,
@@ -97,8 +107,8 @@ func (w *WatchStore) EnrollIfAbsent(_ context.Context, typ, repo string, number 
 	now := time.Now()
 	nextCheck := now.Add(InitialBackoff)
 	res, err := w.db.Exec(`
-		INSERT OR IGNORE INTO watch_state (key, type, repo, number, github_id, next_check, backoff_ns, last_seen)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT OR IGNORE INTO watch_state (key, type, repo, number, github_id, next_check, backoff_ns, last_seen, head_sha)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, '')`,
 		key, typ, repo, number, githubID,
 		nextCheck.Format(timeFormat), int64(InitialBackoff), now.Format(timeFormat),
 	)
@@ -114,10 +124,10 @@ func (w *WatchStore) Get(_ context.Context, key string) (*WatchEntry, error) {
 	var entry WatchEntry
 	var nextCheckStr, lastSeenStr string
 	err := w.db.QueryRow(`
-		SELECT type, repo, number, github_id, next_check, backoff_ns, last_seen
+		SELECT type, repo, number, github_id, next_check, backoff_ns, last_seen, head_sha
 		FROM watch_state WHERE key = ?`, key,
 	).Scan(&entry.Type, &entry.Repo, &entry.Number, &entry.GithubID,
-		&nextCheckStr, &entry.BackoffNs, &lastSeenStr)
+		&nextCheckStr, &entry.BackoffNs, &lastSeenStr, &entry.HeadSHA)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("%w: %s", ErrWatchNotFound, key)
@@ -130,15 +140,16 @@ func (w *WatchStore) Get(_ context.Context, key string) (*WatchEntry, error) {
 }
 
 // ResetBackoff resets an entry's backoff to InitialBackoff and updates LastSeen.
-func (w *WatchStore) ResetBackoff(_ context.Context, key string, observedAt time.Time) error {
+func (w *WatchStore) ResetBackoff(_ context.Context, key string, observedAt time.Time, headSHA string) error {
 	nextCheck := time.Now().Add(InitialBackoff)
 	res, err := w.db.Exec(`
 		UPDATE watch_state SET
 			backoff_ns = ?,
 			next_check = ?,
-			last_seen = ?
+			last_seen = ?,
+			head_sha = ?
 		WHERE key = ?`,
-		int64(InitialBackoff), nextCheck.Format(timeFormat), observedAt.Format(timeFormat), key,
+		int64(InitialBackoff), nextCheck.Format(timeFormat), observedAt.Format(timeFormat), headSHA, key,
 	)
 	if err != nil {
 		return fmt.Errorf("watch: reset %s: %w", key, err)
@@ -180,8 +191,8 @@ func (w *WatchStore) Delete(_ context.Context, key string) error {
 // ForceUpdate writes the entry directly (used in tests to set arbitrary state).
 func (w *WatchStore) ForceUpdate(_ context.Context, entry *WatchEntry) error {
 	_, err := w.db.Exec(`
-		INSERT INTO watch_state (key, type, repo, number, github_id, next_check, backoff_ns, last_seen)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO watch_state (key, type, repo, number, github_id, next_check, backoff_ns, last_seen, head_sha)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(key) DO UPDATE SET
 			type = excluded.type,
 			repo = excluded.repo,
@@ -189,9 +200,10 @@ func (w *WatchStore) ForceUpdate(_ context.Context, entry *WatchEntry) error {
 			github_id = excluded.github_id,
 			next_check = excluded.next_check,
 			backoff_ns = excluded.backoff_ns,
-			last_seen = excluded.last_seen`,
+			last_seen = excluded.last_seen,
+			head_sha = excluded.head_sha`,
 		entry.Key(), entry.Type, entry.Repo, entry.Number, entry.GithubID,
-		entry.NextCheck.Format(timeFormat), entry.BackoffNs, entry.LastSeen.Format(timeFormat),
+		entry.NextCheck.Format(timeFormat), entry.BackoffNs, entry.LastSeen.Format(timeFormat), entry.HeadSHA,
 	)
 	if err != nil {
 		return fmt.Errorf("watch: force update %s: %w", entry.Key(), err)
@@ -203,7 +215,7 @@ func (w *WatchStore) ForceUpdate(_ context.Context, entry *WatchEntry) error {
 func (w *WatchStore) ScanReady(_ context.Context) ([]WatchEntry, error) {
 	now := time.Now().Format(timeFormat)
 	rows, err := w.db.Query(`
-		SELECT type, repo, number, github_id, next_check, backoff_ns, last_seen
+		SELECT type, repo, number, github_id, next_check, backoff_ns, last_seen, head_sha
 		FROM watch_state WHERE next_check <= ?`, now,
 	)
 	if err != nil {
@@ -216,7 +228,7 @@ func (w *WatchStore) ScanReady(_ context.Context) ([]WatchEntry, error) {
 		var entry WatchEntry
 		var nextCheckStr, lastSeenStr string
 		if err := rows.Scan(&entry.Type, &entry.Repo, &entry.Number, &entry.GithubID,
-			&nextCheckStr, &entry.BackoffNs, &lastSeenStr); err != nil {
+			&nextCheckStr, &entry.BackoffNs, &lastSeenStr, &entry.HeadSHA); err != nil {
 			continue
 		}
 		entry.NextCheck, _ = time.Parse(timeFormat, nextCheckStr)

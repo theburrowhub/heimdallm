@@ -29,6 +29,14 @@ const (
 	// would misrepresent stale findings, so the pending row is retired and a
 	// later review request can evaluate the new commit.
 	SkipReasonHeadChanged SkipReason = "head_changed"
+	// SkipReasonBaseChanged is emitted when the PR's base commit changes after
+	// the diff snapshot was captured. The head is still immutable, but the
+	// effective review diff is no longer the one the agent analysed.
+	SkipReasonBaseChanged SkipReason = "base_changed"
+	// SkipReasonSnapshotChanged is emitted when the local read-only checkout
+	// changed HEAD or became dirty during AI execution. Its findings are
+	// discarded because they no longer have provable commit provenance.
+	SkipReasonSnapshotChanged SkipReason = "snapshot_changed"
 	// SkipReasonNoReReviewRequest is emitted when pipeline.Run skips a
 	// review because the HEAD SHA changed (push) but no explicit
 	// review_requested event was found in the timeline after the

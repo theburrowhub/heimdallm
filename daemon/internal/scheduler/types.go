@@ -115,6 +115,11 @@ type ItemSnapshot struct {
 	Author    string
 	UpdatedAt time.Time
 	HeadSHA   string
+	// Handled is true when CheckItem completed a specialised path inline
+	// (currently auto-implement review-state vigilance). HandleChange then
+	// performs no second action, while the worker can still persist UpdatedAt
+	// instead of advancing LastSeen to its own wall clock.
+	Handled bool
 }
 
 // Tier3ItemChecker checks a single item for state changes.
@@ -139,4 +144,7 @@ type WatchItem struct {
 	Number   int
 	GithubID int64
 	LastSeen time.Time // last detected activity
+	// LastHeadSHA disambiguates pushes that GitHub timestamps in the same
+	// second. Empty for issues and legacy watch rows.
+	LastHeadSHA string
 }

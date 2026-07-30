@@ -166,6 +166,43 @@ func TestTier3Adapter_HandleChange_SkipsNonMonitoredRepo(t *testing.T) {
 	}
 }
 
+func TestTier3Adapter_CheckItemDetectsNewHeadWithSameUpdatedAt(t *testing.T) {
+	observedAt := time.Date(2026, 7, 30, 10, 0, 0, 0, time.UTC)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/org/repo/pulls/42" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"state":      "open",
+			"draft":      false,
+			"user":       map[string]string{"login": "alice"},
+			"updated_at": observedAt.Format(time.RFC3339),
+			"head":       map[string]string{"sha": "head-b"},
+		})
+	}))
+	defer srv.Close()
+
+	a := &tier2Adapter{
+		ghClient: gh.NewClient("fake-token", gh.WithBaseURL(srv.URL)),
+		store:    newMemStore(t),
+	}
+	changed, snap, err := a.CheckItem(context.Background(), &scheduler.WatchItem{
+		Type:        "pr",
+		Repo:        "org/repo",
+		Number:      42,
+		GithubID:    4242,
+		LastSeen:    observedAt,
+		LastHeadSHA: "head-a",
+	})
+	if err != nil {
+		t.Fatalf("CheckItem: %v", err)
+	}
+	if !changed || snap == nil || snap.HeadSHA != "head-b" {
+		t.Fatalf("changed=%v snap=%+v, want same-second head-b detected", changed, snap)
+	}
+}
+
 // TestTier2Adapter_FetchPRsToReview_DedupsSkipEvents verifies that when a
 // draft PR appears in consecutive GitHub search results with the same
 // updated_at, FetchPRsToReview emits EventReviewSkipped only ONCE (on the
@@ -183,12 +220,13 @@ func TestTier2Adapter_FetchPRsToReview_DedupsSkipEvents(t *testing.T) {
 				Items []gh.PullRequest `json:"items"`
 			}{Items: []gh.PullRequest{
 				{
-					ID:     101,
-					Number: 7,
-					Title:  "WIP: draft PR",
-					Draft:  true,
-					State:  "open",
-					User:   gh.User{Login: "alice"},
+					ID:            101,
+					Number:        7,
+					Title:         "WIP: draft PR",
+					Draft:         true,
+					State:         "open",
+					User:          gh.User{Login: "alice"},
+					RepositoryURL: "https://api.github.com/repos/org/repo",
 					Head: gh.Branch{
 						Repo: gh.Repo{FullName: "org/repo"},
 					},

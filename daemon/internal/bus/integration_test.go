@@ -235,9 +235,9 @@ func TestIntegration_StateCheckFlow(t *testing.T) {
 	}
 
 	called := make(chan struct{}, 1)
-	handler := func(_ context.Context, msg bus.StateCheckMsg) (bool, error) {
+	handler := func(_ context.Context, msg bus.StateCheckMsg) (bool, time.Time, string, error) {
 		called <- struct{}{}
-		return false, nil // no change detected
+		return false, time.Time{}, "", nil // no change detected
 	}
 
 	w := worker.NewStateWorker(conn, 3, ws, handler)

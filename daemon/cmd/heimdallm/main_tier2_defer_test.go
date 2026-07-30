@@ -33,13 +33,14 @@ func TestTier2Adapter_FetchPRsToReview_DefersNewlyDiscoveredRepo(t *testing.T) {
 			result := struct {
 				Items []gh.PullRequest `json:"items"`
 			}{Items: []gh.PullRequest{{
-				ID:        9001,
-				Number:    11,
-				Title:     "fresh PR on a brand-new repo",
-				State:     "open",
-				User:      gh.User{Login: "alice"},
-				Head:      gh.Branch{Repo: gh.Repo{FullName: repo}},
-				UpdatedAt: updatedAt,
+				ID:            9001,
+				Number:        11,
+				Title:         "fresh PR on a brand-new repo",
+				State:         "open",
+				User:          gh.User{Login: "alice"},
+				Head:          gh.Branch{Repo: gh.Repo{FullName: repo}},
+				RepositoryURL: "https://api.github.com/repos/" + repo,
+				UpdatedAt:     updatedAt,
 			}}}
 			_ = json.NewEncoder(w).Encode(result)
 		case r.URL.Path == "/repos/"+repo+"/pulls/11":
@@ -118,4 +119,3 @@ drain:
 		t.Fatalf("second cycle expected 1 PR for %q, got %+v", repo, out2)
 	}
 }
-

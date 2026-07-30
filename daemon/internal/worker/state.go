@@ -13,10 +13,15 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-// StateHandler is invoked for each state check message. Returns whether
-// a change was detected. The handler is responsible for calling
-// HandleChange when changed==true.
-type StateHandler func(ctx context.Context, msg bus.StateCheckMsg) (changed bool, err error)
+// StateHandler is invoked for each state check message. When changed is true,
+// observedAt and headSHA identify the remote snapshot that was actually
+// handled. Persisting the pair (rather than time.Now alone) ensures a push
+// that lands while handling snapshot A remains detectable as snapshot B, even
+// when GitHub gives both updates the same second-granularity timestamp.
+type StateHandler func(
+	ctx context.Context,
+	msg bus.StateCheckMsg,
+) (changed bool, observedAt time.Time, headSHA string, err error)
 
 // StateWorker consumes state check requests from NATS.
 type StateWorker struct {
@@ -63,7 +68,7 @@ func (w *StateWorker) Start(ctx context.Context) error {
 				"type", checkMsg.Type, "repo", checkMsg.Repo,
 				"number", checkMsg.Number, "github_id", checkMsg.GithubID)
 
-			changed, handlerErr := w.safeHandle(ctx, checkMsg)
+			changed, observedAt, headSHA, handlerErr := w.safeHandle(ctx, checkMsg)
 
 			key := fmt.Sprintf("%s.%d", checkMsg.Type, checkMsg.GithubID)
 			if handlerErr != nil {
@@ -77,7 +82,15 @@ func (w *StateWorker) Start(ctx context.Context) error {
 				slog.Info("state-worker: change detected",
 					"type", checkMsg.Type, "repo", checkMsg.Repo,
 					"number", checkMsg.Number)
-				if kvErr := w.watchKV.ResetBackoff(ctx, key, time.Now()); kvErr != nil && !errors.Is(kvErr, bus.ErrWatchNotFound) {
+				if observedAt.IsZero() {
+					slog.Warn("state-worker: changed result omitted observed_at; retaining LastSeen for retry",
+						"key", key)
+					if kvErr := w.watchKV.IncreaseBackoff(ctx, key); kvErr != nil && !errors.Is(kvErr, bus.ErrWatchNotFound) {
+						slog.Warn("state-worker: increase backoff failed", "key", key, "err", kvErr)
+					}
+					return
+				}
+				if kvErr := w.watchKV.ResetBackoff(ctx, key, observedAt, headSHA); kvErr != nil && !errors.Is(kvErr, bus.ErrWatchNotFound) {
 					slog.Warn("state-worker: reset backoff failed", "key", key, "err", kvErr)
 				}
 			} else {
@@ -96,7 +109,10 @@ func (w *StateWorker) Start(ctx context.Context) error {
 	return nil
 }
 
-func (w *StateWorker) safeHandle(ctx context.Context, msg bus.StateCheckMsg) (changed bool, err error) {
+func (w *StateWorker) safeHandle(
+	ctx context.Context,
+	msg bus.StateCheckMsg,
+) (changed bool, observedAt time.Time, headSHA string, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("state-worker: handler panic",

@@ -15,6 +15,7 @@ import (
 
 const (
 	fileLockHelperEnv       = "HEIMDALLM_FILELOCK_HELPER"
+	fileLockInheritedEnv    = "HEIMDALLM_FILELOCK_INHERITED_HELPER"
 	fileLockHelperPathEnv   = "HEIMDALLM_FILELOCK_PATH"
 	fileLockHelperReadyEnv  = "HEIMDALLM_FILELOCK_READY"
 	fileLockHelperWaitEnv   = "HEIMDALLM_FILELOCK_WAIT"
@@ -220,6 +221,89 @@ func TestFileLockReleasedWhenOwnerProcessDies(t *testing.T) {
 	if err := recovered.Close(); err != nil {
 		t.Fatalf("recovered Close: %v", err)
 	}
+}
+
+func TestInheritedDescriptorKeepsLockAfterParentCloses(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "repo.lock")
+	ready := filepath.Join(dir, "ready")
+
+	owner, err := acquireFileLock(context.Background(), path)
+	if err != nil {
+		t.Fatalf("acquire owner: %v", err)
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestInheritedFileLockHelperProcess$")
+	cmd.Env = append(os.Environ(),
+		fileLockInheritedEnv+"=1",
+		fileLockHelperReadyEnv+"="+ready,
+	)
+	cmd.ExtraFiles = []*os.File{owner.File()}
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		owner.Close()
+		t.Fatalf("helper stdin: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		owner.Close()
+		t.Fatalf("start helper: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = stdin.Close()
+		if cmd.ProcessState == nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	})
+	waitForHelperReady(t, cmd, ready)
+
+	if err := owner.Close(); err != nil {
+		t.Fatalf("close parent descriptor: %v", err)
+	}
+	contender, acquired, err := tryFileLock(path)
+	if err != nil {
+		t.Fatalf("try while child inherited descriptor: %v", err)
+	}
+	if acquired || contender != nil {
+		if contender != nil {
+			contender.Close()
+		}
+		t.Fatal("parent Close released a lock still inherited by the child")
+	}
+
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatalf("kill inherited-descriptor helper: %v", err)
+	}
+	if err := cmd.Wait(); err == nil {
+		t.Fatal("killed inherited-descriptor helper exited successfully")
+	}
+
+	recovered, err := acquireFileLock(context.Background(), path)
+	if err != nil {
+		t.Fatalf("acquire after inherited child exits: %v", err)
+	}
+	if err := recovered.Close(); err != nil {
+		t.Fatalf("close recovered lock: %v", err)
+	}
+}
+
+func TestInheritedFileLockHelperProcess(t *testing.T) {
+	if os.Getenv(fileLockInheritedEnv) != "1" {
+		return
+	}
+	inherited := os.NewFile(3, "inherited-worktree-lease")
+	if inherited == nil {
+		t.Fatal("helper did not inherit fd 3")
+	}
+	if _, err := inherited.Stat(); err != nil {
+		t.Fatalf("stat inherited fd: %v", err)
+	}
+	ready := os.Getenv(fileLockHelperReadyEnv)
+	if err := os.WriteFile(ready, []byte("ready\n"), 0o600); err != nil {
+		t.Fatalf("helper ready: %v", err)
+	}
+	var oneByte [1]byte
+	_, _ = os.Stdin.Read(oneByte[:])
 }
 
 func TestFileLockHelperProcess(t *testing.T) {

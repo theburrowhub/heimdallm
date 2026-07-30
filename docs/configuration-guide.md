@@ -257,6 +257,66 @@ volumes:
 
 After `make down && make up`, any repo at `/Users/you/projects/api` is automatically accessible at `/home/heimdallm/repos/api` inside the container. On Docker the env var must be a single path (compose volumes take one source — commas in the value break the mount); on desktop the daemon reads the same env var and accepts a comma-separated list of paths for multi-workspace setups.
 
+### Isolation and refresh semantics
+
+`local_dir` and `local_dir_base` identify an operator-owned repository source,
+not the directory passed to an AI process. Each execution receives a fresh,
+randomly named checkout:
+
+- For an operator-owned path, Heimdallm initialises an independent repository
+  outside the source and fetches only the selected commit with depth 1. It has
+  no alternate object store and no `origin` pointing at the source, so source
+  GC, branch switches, dirty files, Git maintenance, and concurrent
+  Codex/Claude/Gemini sessions cannot change the snapshot.
+- When no operator-owned source resolves, Heimdallm keeps a shallow managed
+  clone as a download cache. The AI still receives a fresh independent
+  repository; managed sources do not use linked worktrees either.
+- Docker read-only mounts are supported. The source checkout's refs, index,
+  files, `.git/worktrees`, and `.git/shallow` are never written.
+
+PR reviews are pinned to the exact HEAD SHA captured at dispatch. A push during
+analysis makes the result stale, so it is discarded before any GitHub review is
+published. The watcher records both `updated_at` and `head_sha`; the replacement
+commit is detected even if two pushes share the same GitHub timestamp. A new
+poll or re-request creates a new checkout at the new SHA—Heimdallm never updates
+an in-flight checkout in place.
+
+Normal checkouts are removed immediately. Cleanup retries run periodically for
+releases that were already proven idle. A checkout left by a hard crash without
+that proof is retained fail-closed instead of risking deletion underneath a
+surviving child process.
+
+With `local_dir` or a matching `local_dir_base`, no second persistent clone is
+created: disk duplication is limited to the per-execution object closure and
+working files, which are deleted after the AI process and its inherited-lease
+descendants exit. Without a local source, the managed clone is the persistent
+download cache and the same ephemeral snapshot rule still applies.
+
+This boundary protects Git state and prevents concurrent Codex, Claude, Gemini,
+Git maintenance, branch switches, and dirty files from changing an in-flight
+review. It is not an operating-system sandbox:
+
+- A process running as the same OS user may still read other paths it can
+  discover; on desktop it may also write them if filesystem permissions allow.
+  Docker makes the configured source mount read-only, but not unreadable.
+- For hostile or untrusted prompts, the **AI invocation itself** must run in a
+  separate sandbox container/VM or dedicated OS account with only the snapshot
+  mounted. The bundled Compose service runs the daemon and AI CLI as the same
+  user: it protects unmounted host paths and makes the source read-only, but the
+  CLI can still read daemon-mounted `/data` and `/config`.
+- Heimdallm removes its GitHub/daemon secrets and ambient Git routing, tracing,
+  TLS-bypass, hooks, alternates, and SSH-agent variables from the AI process
+  environment. Provider credentials required by the selected AI CLI remain.
+- Run one daemon instance per SQLite database/configuration. Cross-process Git
+  leases coordinate snapshots, but the review scheduler/store is not a
+  multi-daemon cluster.
+- Git LFS content and submodules are not hydrated in the isolated snapshot;
+  LFS-managed files remain pointer files and submodule directories remain
+  uninitialised.
+
+Accordingly, the snapshot mechanism is race-safe for normal cooperating tools,
+but “100% safe” against a malicious same-UID process requires OS isolation.
+
 ---
 
 ## 5. PR Review Pipeline
@@ -267,8 +327,8 @@ Controls how the AI's findings are posted back to GitHub:
 
 | Mode | Behaviour |
 |---|---|
-| `single` | One consolidated review body (default) |
-| `multi` | One GitHub comment per issue, plus a summary |
+| `single` | One consolidated, commit-addressed formal review (default) |
+| `multi` | Compatibility alias; findings remain in the same commit-addressed review |
 
 ```bash
 HEIMDALLM_REVIEW_MODE=single
@@ -276,7 +336,7 @@ HEIMDALLM_REVIEW_MODE=single
 
 ```toml
 [ai]
-review_mode = "single"   # "single" or "multi"
+review_mode = "single"   # "multi" is a consolidated-review compatibility alias
 ```
 
 Override per-repo:
@@ -441,7 +501,7 @@ auto_promote_refinement = true   # unset = true only when develop_labels is conf
 > These defenses reduce blast radius but do not eliminate it. Two operational guidelines still apply:
 >
 > 1. Restrict `auto_implement` (the `develop` stage) to repositories where **all issue authors are trusted collaborators**. Public repositories accepting issues from anonymous reporters should keep `develop` disabled and rely on `triage` / `refinement` for visibility instead.
-> 2. The daemon's worktree contains only the cloned repository, so the AI cannot read files outside it. Keep operator secrets (HEIMDALLM token, GitHub PAT, etc.) outside any monitored clone.
+> 2. The AI's current directory contains only the isolated repository, but a current-directory boundary is not an OS sandbox. A same-UID process may read other filesystem paths it can discover. For untrusted inputs, run the AI invocation in a separate sandbox container/VM or dedicated account with only the snapshot mounted. The bundled Compose service is not that boundary because daemon and AI share one UID and the `/data` and `/config` mounts.
 
 > **Review-state vigilance on `auto_implement` PRs**
 >
@@ -847,34 +907,16 @@ The `web` service depends on the daemon's healthcheck (`/health`) before accepti
 | `heimdallm-data` (named) | `/data` | SQLite database and API token |
 | `heimdallm-config` (named) | `/config` | `config.toml` (daemon-owned, web UI edits here) |
 | `$HEIMDALLM_LOCAL_DIR_BASE` | `/home/heimdallm/repos` (read-only) | Host repos root for full-repo analysis |
-| SSH agent socket | `/ssh-agent` (read-only) | SSH agent for git operations in `auto_implement` |
 
 The config volume is a **named volume** (not a bind mount). This is intentional — a bind mount would be owned by root on the host, which blocked the daemon from writing `config.toml`. The image chowns `/config` to the `heimdallm` user during build.
 
-### SSH agent forwarding
+### Git credentials
 
-`auto_implement` pushes branches over SSH. Forward your host's SSH agent into the container:
-
-**macOS (Docker Desktop):**
-
-Docker Desktop exposes the host agent at a fixed path. The compose file uses it by default:
-
-```yaml
-- ${HEIMDALLM_SSH_AUTH_SOCK:-/run/host-services/ssh-auth.sock}:/ssh-agent:ro
-```
-
-No extra configuration needed on macOS.
-
-**Linux:**
-
-Set `HEIMDALLM_SSH_AUTH_SOCK` to your agent socket path in `docker/.env`:
-
-```bash
-# docker/.env
-HEIMDALLM_SSH_AUTH_SOCK=/run/user/1000/keyring/ssh
-# or
-HEIMDALLM_SSH_AUTH_SOCK=$SSH_AUTH_SOCK
-```
+Fetch and push operations use an explicit HTTPS GitHub URL plus a short-lived
+`GIT_ASKPASS` helper backed by `GITHUB_TOKEN`. The token is not stored in a Git
+remote or passed on the command line. The Compose deployment deliberately does
+not forward the host SSH-agent socket, and the executor strips GitHub,
+Heimdallm, askpass, and SSH-agent variables before launching an AI CLI.
 
 ### Day-to-day commands
 
@@ -1275,7 +1317,7 @@ primary  = "claude"   # env: HEIMDALLM_AI_PRIMARY
 # fallback = "gemini" # env: HEIMDALLM_AI_FALLBACK
 
 # Review feedback mode.
-review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
+review_mode = "single"   # "multi" remains a consolidated-review compatibility alias
 
 # Global execution timeout for AI CLI calls.
 # execution_timeout = "20m"   # default: 5m — env: HEIMDALLM_EXECUTION_TIMEOUT
@@ -1303,12 +1345,17 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # ([ai.repos.*]).
 # never_approve_min_severity = "low"
 
-# When local_dir is unset, Heimdallm prepares a managed shallow clone for agent
-# context under clone_dir. If clone_dir is also unset, the default is
+# local_dir and local_dir_base are operator-owned repository sources, never AI
+# working directories. Every run gets a fresh isolated checkout outside the
+# source. Operator-owned sources use an independent depth-1 snapshot of the
+# selected commit (no alternates, no local origin, no source writes); managed
+# clones are download caches, but AI runs still use independent snapshots.
+#
+# When no operator source is configured, Heimdallm prepares a managed shallow
+# clone under clone_dir. If clone_dir is also unset, the default is
 # os.TempDir()/heimdallm/<org>/<repo>. Existing directories are mutated only
-# when they contain Heimdallm's .heimdallm-managed marker; local_dir and
-# local_dir_base checkouts are treated as operator-owned.
-# AI CLIs always run with this directory as their process cwd. When the
+# when they contain Heimdallm's .heimdallm-managed marker.
+# AI CLIs always run with the per-execution snapshot as their process cwd. When the
 # installed CLI advertises a supported repo-context flag in --help, Heimdallm
 # also passes that flag (for example Claude --add-dir, Gemini
 # --include-directories, Codex --cd); otherwise it safely falls back to cwd.

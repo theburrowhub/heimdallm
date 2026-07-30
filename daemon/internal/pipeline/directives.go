@@ -111,6 +111,7 @@ func formatStandingInstructions(items []store.RepoInstruction) string {
 // is applied at most once across poll cycles. All failures are logged and never
 // abort the surrounding review.
 func (p *Pipeline) processDirectives(pr *github.PullRequest, comments []github.Comment, allowlist []string) {
+	botLogin := p.currentBotLogin()
 	for _, c := range comments {
 		// Dedup is keyed on the GitHub comment ID. Directives are normally
 		// top-level issue comments; review-comment and issue-comment IDs are
@@ -121,7 +122,7 @@ func (p *Pipeline) processDirectives(pr *github.PullRequest, comments []github.C
 		if c.ID == 0 {
 			continue // cannot dedup without a stable id
 		}
-		verb, scope, payload, ok := parseDirective(c.Body, p.botLogin)
+		verb, scope, payload, ok := parseDirective(c.Body, botLogin)
 		if !ok {
 			continue
 		}
@@ -143,15 +144,15 @@ func (p *Pipeline) processDirectives(pr *github.PullRequest, comments []github.C
 			// Authorized user, but only repo scope is implemented. Reply so the
 			// maintainer knows why nothing happened, then burn the comment.
 			slog.Info("pipeline: ignoring directive with unsupported scope", "scope", scope, "repo", pr.Repo)
-			p.reply(pr, fmt.Sprintf("⚠️ Only repo-scoped instructions are supported. Drop the scope (e.g. `@%s %s: …`) to apply it to %s.", p.botLogin, verb, pr.Repo))
+			p.reply(pr, fmt.Sprintf("⚠️ Only repo-scoped instructions are supported. Drop the scope (e.g. `@%s %s: …`) to apply it to %s.", botLogin, verb, pr.Repo))
 		default:
-			p.applyDirective(pr, verb, payload, c)
+			p.applyDirective(pr, botLogin, verb, payload, c)
 		}
 		p.markDirective(c.ID, verb)
 	}
 }
 
-func (p *Pipeline) applyDirective(pr *github.PullRequest, verb, payload string, c github.Comment) {
+func (p *Pipeline) applyDirective(pr *github.PullRequest, botLogin, verb, payload string, c github.Comment) {
 	switch verb {
 	case directiveRemember:
 		id, err := p.store.AddRepoInstruction(pr.Repo, payload, c.Author, c.ID)
@@ -163,7 +164,7 @@ func (p *Pipeline) applyDirective(pr *github.PullRequest, verb, payload string, 
 	case directiveForget:
 		id, perr := strconv.ParseInt(strings.TrimSpace(payload), 10, 64)
 		if perr != nil {
-			p.reply(pr, fmt.Sprintf("⚠️ `forget` expects a numeric instruction id; got %q. Use `@%s list` to see ids.", payload, p.botLogin))
+			p.reply(pr, fmt.Sprintf("⚠️ `forget` expects a numeric instruction id; got %q. Use `@%s list` to see ids.", payload, botLogin))
 			return
 		}
 		removed, err := p.store.DeleteRepoInstruction(pr.Repo, id)

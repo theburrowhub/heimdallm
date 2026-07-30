@@ -62,6 +62,47 @@ func TestWatchStore_EnrollAndGet(t *testing.T) {
 	}
 }
 
+func TestWatchStore_MigratesLegacySchemaWithHeadSHA(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec(`
+		CREATE TABLE watch_state (
+			key TEXT PRIMARY KEY,
+			type TEXT NOT NULL,
+			repo TEXT NOT NULL,
+			number INTEGER NOT NULL,
+			github_id INTEGER NOT NULL,
+			next_check TEXT NOT NULL,
+			backoff_ns INTEGER NOT NULL,
+			last_seen TEXT NOT NULL
+		)`); err != nil {
+		t.Fatalf("create legacy schema: %v", err)
+	}
+	w, err := bus.NewWatchStore(db)
+	if err != nil {
+		t.Fatalf("NewWatchStore migration: %v", err)
+	}
+	ctx := context.Background()
+	if err := w.Enroll(ctx, "pr", "owner/repo", 1, 101); err != nil {
+		t.Fatalf("Enroll after migration: %v", err)
+	}
+	observedAt := time.Now().UTC()
+	if err := w.ResetBackoff(ctx, "pr.101", observedAt, "head-after-migration"); err != nil {
+		t.Fatalf("ResetBackoff after migration: %v", err)
+	}
+	entry, err := w.Get(ctx, "pr.101")
+	if err != nil {
+		t.Fatalf("Get after migration: %v", err)
+	}
+	if entry.HeadSHA != "head-after-migration" {
+		t.Fatalf("HeadSHA = %q, want migrated value", entry.HeadSHA)
+	}
+}
+
 func TestWatchStore_ResetBackoff(t *testing.T) {
 	w := newTestWatch(t)
 	ctx := context.Background()
@@ -88,7 +129,7 @@ func TestWatchStore_ResetBackoff(t *testing.T) {
 
 	// Reset and verify.
 	now := time.Now()
-	if err := w.ResetBackoff(ctx, "pr.100", now); err != nil {
+	if err := w.ResetBackoff(ctx, "pr.100", now, "abc123"); err != nil {
 		t.Fatalf("ResetBackoff: %v", err)
 	}
 	entry, err = w.Get(ctx, "pr.100")
@@ -100,6 +141,9 @@ func TestWatchStore_ResetBackoff(t *testing.T) {
 	}
 	if entry.LastSeen.Before(now.Add(-time.Second)) {
 		t.Errorf("LastSeen not updated: %v", entry.LastSeen)
+	}
+	if entry.HeadSHA != "abc123" {
+		t.Errorf("HeadSHA = %q, want abc123", entry.HeadSHA)
 	}
 }
 

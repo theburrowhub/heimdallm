@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -13,21 +14,49 @@ import (
 )
 
 type gitCall struct {
-	Dir  string
-	Args []string
-	Env  []string
+	Dir        string
+	Args       []string
+	Env        []string
+	ExtraFiles []*os.File
 }
 
 type fakeGit struct {
-	mu      sync.Mutex
-	calls   []gitCall
-	runErr  error
-	onRun   func(call gitCall) error
-	blockCh chan struct{}
+	mu       sync.Mutex
+	calls    []gitCall
+	heads    map[string]string
+	runErr   error
+	onRun    func(call gitCall) error
+	onOutput func(call gitCall) ([]byte, error)
+	blockCh  chan struct{}
 }
 
 func (f *fakeGit) Run(ctx context.Context, dir string, env []string, args ...string) error {
-	call := gitCall{Dir: dir, Args: append([]string(nil), args...), Env: append([]string(nil), env...)}
+	return f.run(ctx, dir, env, nil, args...)
+}
+
+func (f *fakeGit) RunWithExtraFiles(
+	ctx context.Context,
+	dir string,
+	env []string,
+	extraFiles []*os.File,
+	args ...string,
+) error {
+	return f.run(ctx, dir, env, extraFiles, args...)
+}
+
+func (f *fakeGit) run(
+	ctx context.Context,
+	dir string,
+	env []string,
+	extraFiles []*os.File,
+	args ...string,
+) error {
+	call := gitCall{
+		Dir:        dir,
+		Args:       append([]string(nil), args...),
+		Env:        append([]string(nil), env...),
+		ExtraFiles: append([]*os.File(nil), extraFiles...),
+	}
 	f.mu.Lock()
 	f.calls = append(f.calls, call)
 	f.mu.Unlock()
@@ -44,6 +73,40 @@ func (f *fakeGit) Run(ctx context.Context, dir string, env []string, args ...str
 			return err
 		}
 	}
+	if len(args) >= 5 && args[0] == "worktree" && args[1] == "add" {
+		f.mu.Lock()
+		if f.heads == nil {
+			f.heads = make(map[string]string)
+		}
+		f.heads[args[2]] = args[4]
+		f.mu.Unlock()
+	}
+	if len(args) == 3 && args[0] == "checkout" && args[1] == "--detach" {
+		f.mu.Lock()
+		if f.heads == nil {
+			f.heads = make(map[string]string)
+		}
+		f.heads[dir] = args[2]
+		f.mu.Unlock()
+	}
+	if len(args) > 0 && args[0] == "init" {
+		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+			return err
+		}
+	}
+	if len(args) > 0 && args[0] == "fetch" {
+		shallowPath := filepath.Join(dir, ".git", "shallow")
+		switch {
+		case slices.Contains(args, "--depth=1"):
+			if err := os.WriteFile(shallowPath, []byte("boundary\n"), 0o644); err != nil {
+				return err
+			}
+		case slices.Contains(args, "--unshallow"):
+			if err := os.Remove(shallowPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
+	}
 	if len(args) > 0 && args[0] == "clone" {
 		target := args[len(args)-1]
 		if err := os.MkdirAll(filepath.Join(target, ".git"), 0o755); err != nil {
@@ -54,6 +117,44 @@ func (f *fakeGit) Run(ctx context.Context, dir string, env []string, args ...str
 		}
 	}
 	return f.runErr
+}
+
+func (f *fakeGit) Output(ctx context.Context, dir string, env []string, args ...string) ([]byte, error) {
+	call := gitCall{Dir: dir, Args: append([]string(nil), args...), Env: append([]string(nil), env...)}
+	f.mu.Lock()
+	f.calls = append(f.calls, call)
+	f.mu.Unlock()
+	if f.onOutput != nil {
+		return f.onOutput(call)
+	}
+	if len(args) >= 2 && args[0] == "rev-parse" {
+		switch args[1] {
+		case "--git-common-dir":
+			return []byte(".git\n"), nil
+		case "--is-shallow-repository":
+			if _, err := os.Stat(filepath.Join(dir, ".git", "shallow")); err == nil {
+				return []byte("true\n"), nil
+			}
+			return []byte("false\n"), nil
+		case "--verify":
+			f.mu.Lock()
+			head := f.heads[dir]
+			f.mu.Unlock()
+			if head == "" {
+				ref := strings.TrimSuffix(args[len(args)-1], "^{commit}")
+				if commitSHAPattern.MatchString(ref) {
+					head = strings.ToLower(ref)
+				} else {
+					head = strings.Repeat("a", 40)
+				}
+			}
+			return []byte(head + "\n"), nil
+		}
+	}
+	if len(args) >= 4 && args[0] == "remote" && args[1] == "get-url" {
+		return []byte("https://github.com/org/repo.git\n"), nil
+	}
+	return nil, nil
 }
 
 func (f *fakeGit) snapshot() []gitCall {
@@ -69,6 +170,7 @@ func newTestManager(t *testing.T) (*Manager, *fakeGit, string) {
 	m := NewManager()
 	m.git = git
 	m.tempDir = func() string { return base }
+	m.coordDir = func() string { return base }
 	return m, git, base
 }
 
@@ -80,6 +182,7 @@ func TestAcquireUsesExplicitLocalDirWithoutGit(t *testing.T) {
 		ConfiguredLocalDir: "/tmp/user-worktree",
 		Token:              "secret",
 		Mode:               ModeWrite,
+		Inspect:            true,
 	})
 	if err != nil {
 		t.Fatalf("Acquire: %v", err)
@@ -94,6 +197,83 @@ func TestAcquireUsesExplicitLocalDirWithoutGit(t *testing.T) {
 	}
 }
 
+func TestAcquireIsolatesExplicitLocalDirWhenWorktreeRequested(t *testing.T) {
+	m, git, base := newTestManagerWithCap(t, 0)
+	local := filepath.Join(base, "operator-repo")
+	if err := os.MkdirAll(local, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	h, err := m.Acquire(context.Background(), Request{
+		Repo:               "org/repo",
+		ConfiguredLocalDir: local,
+		Token:              "secret",
+		Mode:               ModeWrite,
+		WorktreeToken:      "develop-7",
+	})
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	defer h.Release()
+
+	if !h.Managed() || h.Path() == local || pathWithin(local, h.Path()) {
+		t.Fatalf("handle = (%q, managed=%v), want external owned worktree", h.Path(), h.Managed())
+	}
+	if !strings.HasPrefix(filepath.Base(filepath.Dir(h.Path())), "develop-7.") {
+		t.Fatalf("worktree path lost token prefix: %q", h.Path())
+	}
+	metadata, err := os.ReadFile(filepath.Join(filepath.Dir(h.Path()), worktreeMetaFile))
+	if err != nil {
+		t.Fatalf("read snapshot lease metadata: %v", err)
+	}
+	metadataText := string(metadata)
+	if strings.Contains(metadataText, local) ||
+		strings.Contains(metadataText, `"source_root"`) ||
+		strings.Contains(metadataText, `"source_key"`) {
+		t.Fatalf("AI-visible lease metadata exposes operator source: %s", metadataText)
+	}
+	sawSafeHeadResolution := false
+	for _, call := range git.snapshot() {
+		joined := strings.Join(call.Args, " ")
+		if strings.Contains(joined, "reset --hard") || strings.HasPrefix(joined, "clean ") ||
+			strings.HasPrefix(joined, "remote set-url") {
+			t.Fatalf("operator checkout was targeted by mutating clone prep: %v", call)
+		}
+		if call.Dir == local && joined == "rev-parse --verify HEAD^{commit}" {
+			sawSafeHeadResolution = slices.Contains(call.Env, "GIT_CONFIG_COUNT=2") &&
+				slices.Contains(call.Env, "GIT_CONFIG_KEY_0=core.hooksPath") &&
+				slices.Contains(call.Env, "GIT_CONFIG_KEY_1=safe.directory") &&
+				slices.Contains(call.Env, "GIT_CONFIG_VALUE_1="+local)
+		}
+	}
+	if !sawSafeHeadResolution {
+		t.Fatal("operator HEAD resolution did not authorise the exact bind-mounted safe.directory")
+	}
+}
+
+func TestCleanGitEnvironmentRemovesTraceAndTLSOverrides(t *testing.T) {
+	got := strings.Join(cleanGitEnvironment([]string{
+		"PATH=/usr/bin",
+		"GIT_TRACE=/operator/trace.log",
+		"GIT_TRACE_PACKET=/operator/packets.log",
+		"GIT_TRACE_CURL=1",
+		"GIT_TRACE_REDACT=0",
+		"GIT_CURL_VERBOSE=1",
+		"GIT_SSL_NO_VERIFY=1",
+	}), "\n")
+	for _, forbidden := range []string{
+		"GIT_TRACE=", "GIT_TRACE_PACKET=", "GIT_TRACE_CURL=",
+		"GIT_TRACE_REDACT=", "GIT_CURL_VERBOSE=", "GIT_SSL_NO_VERIFY=",
+	} {
+		if strings.Contains(got, forbidden) {
+			t.Errorf("sanitized Git environment still contains %q:\n%s", forbidden, got)
+		}
+	}
+	if !strings.Contains(got, "PATH=/usr/bin") {
+		t.Fatalf("sanitized Git environment removed PATH:\n%s", got)
+	}
+}
+
 func TestAcquireNilManagerIsError(t *testing.T) {
 	var m *Manager
 	_, err := m.Acquire(context.Background(), Request{Repo: "org/repo", Token: "secret"})
@@ -102,11 +282,11 @@ func TestAcquireNilManagerIsError(t *testing.T) {
 	}
 }
 
-func TestAcquireUsesLocalDirBaseOnlyForReadMode(t *testing.T) {
-	m, git, cloneBase := newTestManager(t)
+func TestAcquireUsesLocalDirBaseAsObjectStoreForBothModes(t *testing.T) {
+	m, _, _ := newTestManager(t)
 	localBase := t.TempDir()
 	localRepo := filepath.Join(localBase, "repo")
-	if err := os.MkdirAll(localRepo, 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(localRepo, ".git"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -115,12 +295,13 @@ func TestAcquireUsesLocalDirBaseOnlyForReadMode(t *testing.T) {
 		LocalDirBases: []string{localBase},
 		Token:         "secret",
 		Mode:          ModeRead,
+		WorktreeToken: "read-1",
 	})
 	if err != nil {
 		t.Fatalf("read Acquire: %v", err)
 	}
-	if readHandle.Path() != localRepo || readHandle.Managed() {
-		t.Fatalf("read handle = (%q, managed=%v), want local_dir_base unmanaged", readHandle.Path(), readHandle.Managed())
+	if readHandle.Path() == localRepo || !readHandle.Managed() || pathWithin(localRepo, readHandle.Path()) {
+		t.Fatalf("read handle = (%q, managed=%v), want external isolated worktree", readHandle.Path(), readHandle.Managed())
 	}
 	readHandle.Release()
 
@@ -129,19 +310,15 @@ func TestAcquireUsesLocalDirBaseOnlyForReadMode(t *testing.T) {
 		LocalDirBases: []string{localBase},
 		Token:         "secret",
 		Mode:          ModeWrite,
+		WorktreeToken: "write-1",
 	})
 	if err != nil {
 		t.Fatalf("write Acquire: %v", err)
 	}
 	defer writeHandle.Release()
 
-	wantManaged := filepath.Join(cloneBase, "heimdallm", "org", "repo")
-	if writeHandle.Path() != wantManaged || !writeHandle.Managed() {
-		t.Fatalf("write handle = (%q, managed=%v), want managed clone %q", writeHandle.Path(), writeHandle.Managed(), wantManaged)
-	}
-	calls := git.snapshot()
-	if len(calls) != 2 || calls[0].Args[0] != "clone" || strings.Join(calls[1].Args, " ") != "fetch --unshallow --prune origin" {
-		t.Fatalf("git calls = %v, want clone then unshallow", calls)
+	if writeHandle.Path() == localRepo || !writeHandle.Managed() || pathWithin(localRepo, writeHandle.Path()) {
+		t.Fatalf("write handle = (%q, managed=%v), want external isolated worktree", writeHandle.Path(), writeHandle.Managed())
 	}
 }
 
@@ -149,9 +326,10 @@ func TestAcquireClonesShallowWithOwnershipMarker(t *testing.T) {
 	m, git, base := newTestManager(t)
 
 	h, err := m.Acquire(context.Background(), Request{
-		Repo:  "org/repo",
-		Token: "top-secret-token",
-		Mode:  ModeRead,
+		Repo:    "org/repo",
+		Token:   "top-secret-token",
+		Mode:    ModeRead,
+		Inspect: true,
 	})
 	if err != nil {
 		t.Fatalf("Acquire: %v", err)
@@ -198,22 +376,38 @@ func TestAcquireModeWriteEnsuresFullHistory(t *testing.T) {
 	}
 
 	h, err := m.Acquire(context.Background(), Request{
-		Repo:  "org/repo",
-		Token: "secret",
-		Mode:  ModeWrite,
+		Repo:          "org/repo",
+		Token:         "secret",
+		Mode:          ModeWrite,
+		WorktreeToken: "develop-1",
 	})
 	if err != nil {
 		t.Fatalf("Acquire: %v", err)
 	}
+	snapshot := h.Path()
 	h.Release()
 
 	calls := git.snapshot()
-	got := make([]string, 0, len(calls))
+	var unshallow *gitCall
 	for _, c := range calls {
-		got = append(got, strings.Join(c.Args, " "))
+		if len(c.Args) > 0 && c.Args[0] == "fetch" &&
+			slices.Contains(c.Args, "--unshallow") {
+			call := c
+			unshallow = &call
+			break
+		}
 	}
-	if got[len(got)-1] != "fetch --unshallow --prune origin" {
-		t.Fatalf("last git call = %q, want unshallow; all calls = %v", got[len(got)-1], got)
+	if unshallow == nil {
+		t.Fatalf("git calls = %v, want isolated-snapshot unshallow", calls)
+	}
+	if unshallow.Dir != snapshot {
+		t.Fatalf("unshallow dir = %q, want isolated snapshot %q", unshallow.Dir, snapshot)
+	}
+	if !slices.Contains(unshallow.Args, target) {
+		t.Fatalf("unshallow args = %v, want managed clone used only as fetch source", unshallow.Args)
+	}
+	if len(unshallow.ExtraFiles) != 2 {
+		t.Fatalf("unshallow inherited %d guards, want lease + operations lock", len(unshallow.ExtraFiles))
 	}
 }
 
@@ -231,9 +425,10 @@ func TestAcquireCloneFailureRemovesPartialManagedTarget(t *testing.T) {
 	}
 
 	_, err := m.Acquire(context.Background(), Request{
-		Repo:  "org/repo",
-		Token: "secret",
-		Mode:  ModeRead,
+		Repo:    "org/repo",
+		Token:   "secret",
+		Mode:    ModeRead,
+		Inspect: true,
 	})
 	if err == nil || !strings.Contains(err.Error(), "network down") {
 		t.Fatalf("Acquire err = %v, want clone failure", err)
@@ -251,7 +446,7 @@ func TestAcquireRefusesExistingUnmanagedTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := m.Acquire(context.Background(), Request{Repo: "org/repo", Token: "secret"})
+	_, err := m.Acquire(context.Background(), Request{Repo: "org/repo", Token: "secret", Inspect: true})
 	if err == nil || !strings.Contains(err.Error(), "not managed") {
 		t.Fatalf("Acquire err = %v, want unmanaged-target error", err)
 	}
@@ -283,7 +478,7 @@ func TestAcquireUpdatesExistingManagedClone(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h, err := m.Acquire(context.Background(), Request{Repo: "org/repo", Token: "secret"})
+	h, err := m.Acquire(context.Background(), Request{Repo: "org/repo", Token: "secret", Inspect: true})
 	if err != nil {
 		t.Fatalf("Acquire: %v", err)
 	}
@@ -308,45 +503,18 @@ func TestAcquireUpdatesExistingManagedClone(t *testing.T) {
 	}
 }
 
-func TestAcquireSerializesByRepoUntilRelease(t *testing.T) {
-	m, _, _ := newTestManager(t)
-	h, err := m.Acquire(context.Background(), Request{
+func TestAcquireRejectsSharedCheckoutWithoutWorktreeToken(t *testing.T) {
+	m, git, _ := newTestManager(t)
+	_, err := m.Acquire(context.Background(), Request{
 		Repo:               "org/repo",
 		ConfiguredLocalDir: "/tmp/worktree",
 	})
-	if err != nil {
-		t.Fatalf("first Acquire: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "worktree token is required") {
+		t.Fatalf("Acquire err = %v, want required worktree token", err)
 	}
-
-	acquired := make(chan struct{})
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		h2, err := m.Acquire(context.Background(), Request{
-			Repo:               "org/repo",
-			ConfiguredLocalDir: "/tmp/worktree",
-		})
-		if err != nil {
-			t.Errorf("second Acquire: %v", err)
-			return
-		}
-		close(acquired)
-		h2.Release()
-	}()
-
-	select {
-	case <-acquired:
-		t.Fatal("second Acquire completed before first handle was released")
-	case <-time.After(50 * time.Millisecond):
+	if calls := git.snapshot(); len(calls) != 0 {
+		t.Fatalf("git calls = %v, want none before fail-closed rejection", calls)
 	}
-
-	h.Release()
-	select {
-	case <-acquired:
-	case <-time.After(time.Second):
-		t.Fatal("second Acquire did not complete after release")
-	}
-	<-done
 }
 
 func TestPurgeOnlyRemovesManagedClone(t *testing.T) {
@@ -519,6 +687,7 @@ func newTestManagerWithCap(t *testing.T, cap int) (*Manager, *fakeGit, string) {
 	m := NewManagerWithOptions(ManagerOptions{MaxWorktreesPerRepo: cap})
 	m.git = git
 	m.tempDir = func() string { return base }
+	m.coordDir = func() string { return base }
 	return m, git, base
 }
 
@@ -534,7 +703,7 @@ func setupManagedClone(t *testing.T, base string) string {
 	return target
 }
 
-func TestPruneStaleWorktreesRemovesOrphans(t *testing.T) {
+func TestPruneStaleWorktreesRetainsUnleasedLegacyEntries(t *testing.T) {
 	m, _, base := newTestManagerWithCap(t, 0)
 	target := setupManagedClone(t, base)
 
@@ -557,14 +726,14 @@ func TestPruneStaleWorktreesRemovesOrphans(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PruneStaleWorktrees: %v", err)
 	}
-	if n != 1 {
-		t.Fatalf("pruned = %d, want 1", n)
+	if n != 0 {
+		t.Fatalf("pruned = %d, want 0 for ownership-unknown legacy entry", n)
 	}
-	if _, err := os.Stat(orphan); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("orphan still present or stat failed: %v", err)
+	if _, err := os.Stat(orphan); err != nil {
+		t.Fatalf("unleased legacy entry must be retained: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(target, ".worktrees", "live.1")); err != nil {
-		t.Fatalf("live worktree should remain: %v", err)
+	if _, err := os.Stat(h.Path()); err != nil {
+		t.Fatalf("leased external worktree should remain: %v", err)
 	}
 }
 
@@ -586,9 +755,10 @@ func TestBootstrapAddsWorktreesToInfoExclude(t *testing.T) {
 
 	// Fresh clone path — ensureManagedClone takes the bootstrap branch.
 	h, err := m.Acquire(context.Background(), Request{
-		Repo:  "org/repo",
-		Token: "secret",
-		Mode:  ModeRead,
+		Repo:    "org/repo",
+		Token:   "secret",
+		Mode:    ModeRead,
+		Inspect: true,
 	})
 	if err != nil {
 		t.Fatalf("Acquire bootstrap: %v", err)
@@ -608,9 +778,10 @@ func TestBootstrapAddsWorktreesToInfoExclude(t *testing.T) {
 	// Second Acquire takes the update-existing branch. The entry
 	// must not be duplicated.
 	h2, err := m.Acquire(context.Background(), Request{
-		Repo:  "org/repo",
-		Token: "secret",
-		Mode:  ModeRead,
+		Repo:    "org/repo",
+		Token:   "secret",
+		Mode:    ModeRead,
+		Inspect: true,
 	})
 	if err != nil {
 		t.Fatalf("Acquire update: %v", err)
@@ -651,9 +822,10 @@ func TestBootstrapPreservesExistingInfoExclude(t *testing.T) {
 	}
 
 	h, err := m.Acquire(context.Background(), Request{
-		Repo:  "org/repo",
-		Token: "secret",
-		Mode:  ModeRead,
+		Repo:    "org/repo",
+		Token:   "secret",
+		Mode:    ModeRead,
+		Inspect: true,
 	})
 	if err != nil {
 		t.Fatalf("Acquire: %v", err)
@@ -673,64 +845,56 @@ func TestBootstrapPreservesExistingInfoExclude(t *testing.T) {
 	}
 }
 
-func TestAcquireWorktreeWithBaseRefDetaches(t *testing.T) {
+func TestAcquireSnapshotWithBaseRefDetaches(t *testing.T) {
 	m, git, base := newTestManagerWithCap(t, 0)
 	target := setupManagedClone(t, base)
-	_ = target
 
+	wantSHA := strings.Repeat("a", 40)
 	h, err := m.Acquire(context.Background(), Request{
 		Repo:            "org/repo",
 		Token:           "secret",
 		WorktreeToken:   "pr-review-1234",
-		WorktreeBaseRef: "abcdef1234567890",
+		WorktreeBaseRef: wantSHA,
 	})
 	if err != nil {
 		t.Fatalf("Acquire: %v", err)
 	}
 	defer h.Release()
 
-	var addArgs []string
+	var (
+		initCall     *gitCall
+		fetchCall    *gitCall
+		checkoutCall *gitCall
+	)
 	for _, c := range git.snapshot() {
-		if len(c.Args) >= 2 && c.Args[0] == "worktree" && c.Args[1] == "add" {
-			addArgs = c.Args
-			break
+		call := c
+		switch {
+		case len(c.Args) > 0 && c.Args[0] == "init" && c.Dir == h.Path():
+			initCall = &call
+		case len(c.Args) > 0 && c.Args[0] == "fetch" && c.Dir == h.Path():
+			fetchCall = &call
+		case len(c.Args) == 3 && c.Args[0] == "checkout" && c.Args[1] == "--detach":
+			checkoutCall = &call
+		case len(c.Args) >= 2 && c.Args[0] == "worktree":
+			t.Fatalf("independent snapshot must not mutate Git's shared worktree registry: %v", c.Args)
 		}
 	}
-	if addArgs == nil {
-		t.Fatalf("expected worktree add call; got %v", git.snapshot())
+	if initCall == nil || fetchCall == nil || checkoutCall == nil {
+		t.Fatalf("snapshot materialisation calls incomplete: init=%v fetch=%v checkout=%v calls=%v",
+			initCall, fetchCall, checkoutCall, git.snapshot())
 	}
-	want := []string{"worktree", "add", filepath.Join(target, ".worktrees", "pr-review-1234.1"), "--detach", "abcdef1234567890"}
-	if !reflect.DeepEqual(addArgs, want) {
-		t.Fatalf("worktree add args = %v, want %v", addArgs, want)
+	if !slices.Contains(fetchCall.Args, target) || fetchCall.Args[len(fetchCall.Args)-1] != wantSHA {
+		t.Fatalf("snapshot fetch args = %v, want source %q at exact SHA %s",
+			fetchCall.Args, target, wantSHA)
 	}
-}
-
-func TestAcquireWorktreeWithBranchCreatesAndChecksOut(t *testing.T) {
-	m, git, base := newTestManagerWithCap(t, 0)
-	target := setupManagedClone(t, base)
-
-	h, err := m.Acquire(context.Background(), Request{
-		Repo:            "org/repo",
-		Token:           "secret",
-		WorktreeToken:   "develop-7",
-		WorktreeBaseRef: "main",
-		Branch:          "heimdallm/issue-7",
-	})
-	if err != nil {
-		t.Fatalf("Acquire: %v", err)
+	if !reflect.DeepEqual(checkoutCall.Args, []string{"checkout", "--detach", wantSHA}) {
+		t.Fatalf("checkout args = %v, want detached exact SHA", checkoutCall.Args)
 	}
-	defer h.Release()
-
-	var addArgs []string
-	for _, c := range git.snapshot() {
-		if len(c.Args) >= 2 && c.Args[0] == "worktree" && c.Args[1] == "add" {
-			addArgs = c.Args
-			break
-		}
+	if h.CommitSHA() != wantSHA {
+		t.Fatalf("CommitSHA = %q, want %q", h.CommitSHA(), wantSHA)
 	}
-	want := []string{"worktree", "add", filepath.Join(target, ".worktrees", "develop-7.1"), "-b", "heimdallm/issue-7", "main"}
-	if !reflect.DeepEqual(addArgs, want) {
-		t.Fatalf("worktree add args = %v, want %v", addArgs, want)
+	if pathWithin(target, h.Path()) {
+		t.Fatalf("isolated snapshot %q must be outside source clone %q", h.Path(), target)
 	}
 }
 
@@ -824,9 +988,17 @@ func TestReleaseClearsBookkeepingEvenWhenLockTimesOut(t *testing.T) {
 	}
 	h2.Release()
 
-	// Best-effort filesystem cleanup ran since git wasn't reachable.
-	if _, err := os.Stat(wtPath); err == nil {
-		t.Fatalf("worktree dir %q still on disk after release-with-failed-lock", wtPath)
+	// Fail-closed release leaves the checkout for the lease-aware sweeper.
+	if _, err := os.Stat(wtPath); err != nil {
+		t.Fatalf("worktree dir %q should remain as a recoverable orphan: %v", wtPath, err)
+	}
+	if n, err := m.PruneStaleExternalWorktrees(context.Background()); err != nil {
+		t.Fatalf("prune released orphan: %v", err)
+	} else if n != 1 {
+		t.Fatalf("pruned released orphans = %d, want 1", n)
+	}
+	if _, err := os.Stat(wtPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("pruned orphan still exists: %v", err)
 	}
 	_ = target
 }
@@ -858,10 +1030,37 @@ func TestAcquireSameTokenProducesDistinctWorktrees(t *testing.T) {
 	if h1.Path() == h2.Path() {
 		t.Fatalf("same-token acquires resolved to same path %q", h1.Path())
 	}
-	if !strings.HasPrefix(filepath.Base(h1.Path()), "pr-review-99.") ||
-		!strings.HasPrefix(filepath.Base(h2.Path()), "pr-review-99.") {
+	if !strings.HasPrefix(filepath.Base(filepath.Dir(h1.Path())), "pr-review-99.") ||
+		!strings.HasPrefix(filepath.Base(filepath.Dir(h2.Path())), "pr-review-99.") {
 		t.Fatalf("paths lost the token prefix: %q, %q", h1.Path(), h2.Path())
 	}
+}
+
+func TestPruneRetainsUnlockedRunWithoutCleanupReadyMarker(t *testing.T) {
+	m, _, base := newTestManagerWithCap(t, 0)
+	setupManagedClone(t, base)
+	h, err := m.Acquire(context.Background(), Request{
+		Repo: "org/repo", Token: "secret", WorktreeToken: "crash-window",
+	})
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	// Model a killed daemon (or a CLI that closed unknown descriptors): the
+	// kernel lease is absent, but normal Release never authorised deletion.
+	if err := h.leaseFiles[0].Close(); err != nil {
+		t.Fatalf("close simulated crashed lease: %v", err)
+	}
+	n, err := m.PruneStaleExternalWorktrees(context.Background())
+	if err != nil {
+		t.Fatalf("PruneStaleExternalWorktrees: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("pruned unmarked crash run = %d, want 0", n)
+	}
+	if _, err := os.Stat(h.Path()); err != nil {
+		t.Fatalf("unmarked crash run was removed: %v", err)
+	}
+	h.Release()
 }
 
 func TestAcquireBlocksWhenAtMaxWorktreesPerRepo(t *testing.T) {
@@ -956,7 +1155,7 @@ func TestAcquireCancelDuringCapQueueReturnsCtxErr(t *testing.T) {
 	h3.Release()
 }
 
-func TestAcquireCreatesWorktreeForManagedClone(t *testing.T) {
+func TestAcquireCreatesIndependentSnapshotForManagedClone(t *testing.T) {
 	m, git, base := newTestManager(t)
 	target := filepath.Join(base, "heimdallm", "org", "repo")
 	if err := os.MkdirAll(filepath.Join(target, ".git"), 0o755); err != nil {
@@ -964,14 +1163,6 @@ func TestAcquireCreatesWorktreeForManagedClone(t *testing.T) {
 	}
 	if err := writeMarker(target, "org/repo"); err != nil {
 		t.Fatal(err)
-	}
-	git.onRun = func(call gitCall) error {
-		// Pretend `git worktree add <path>` materialises the worktree
-		// directory so the manager's post-conditions hold.
-		if len(call.Args) >= 3 && call.Args[0] == "worktree" && call.Args[1] == "add" {
-			return os.MkdirAll(call.Args[2], 0o755)
-		}
-		return nil
 	}
 
 	h, err := m.Acquire(context.Background(), Request{
@@ -984,46 +1175,42 @@ func TestAcquireCreatesWorktreeForManagedClone(t *testing.T) {
 		t.Fatalf("Acquire: %v", err)
 	}
 
-	// The manager appends a monotonic seq to disambiguate concurrent
-	// same-token acquires; the first acquire on a fresh manager is .1.
-	wantWT := filepath.Join(target, ".worktrees", "triage-42.1")
-	if h.Path() != wantWT {
-		t.Fatalf("handle path = %q, want %q", h.Path(), wantWT)
+	// The checkout is outside the source clone and its run directory carries
+	// a random cross-process identifier.
+	wantWT := h.Path()
+	if pathWithin(target, wantWT) {
+		t.Fatalf("handle path = %q, must be outside source clone %q", wantWT, target)
+	}
+	if !strings.HasPrefix(filepath.Base(filepath.Dir(wantWT)), "triage-42.") {
+		t.Fatalf("handle path = %q, want token-prefixed run directory", wantWT)
 	}
 	if info, err := os.Stat(wantWT); err != nil {
-		t.Fatalf("worktree dir missing: %v", err)
+		t.Fatalf("snapshot dir missing: %v", err)
 	} else if !info.IsDir() {
-		t.Fatalf("worktree path is not a directory")
+		t.Fatalf("snapshot path is not a directory")
 	}
 
-	var addCall *gitCall
-	for i, c := range git.snapshot() {
-		if len(c.Args) >= 2 && c.Args[0] == "worktree" && c.Args[1] == "add" {
-			calls := git.snapshot()
-			addCall = &calls[i]
-			break
+	var initSeen, exactFetchSeen bool
+	for _, c := range git.snapshot() {
+		switch {
+		case len(c.Args) > 0 && c.Args[0] == "init" && c.Dir == wantWT:
+			initSeen = true
+		case len(c.Args) > 0 && c.Args[0] == "fetch" && c.Dir == wantWT &&
+			slices.Contains(c.Args, target) &&
+			c.Args[len(c.Args)-1] == h.CommitSHA():
+			exactFetchSeen = true
+		case len(c.Args) >= 2 && c.Args[0] == "worktree":
+			t.Fatalf("managed source registry was mutated: %v", c.Args)
 		}
 	}
-	if addCall == nil {
-		t.Fatalf("expected `git worktree add` call; calls = %v", git.snapshot())
-	}
-	if addCall.Dir != target {
-		t.Fatalf("worktree add run from %q, want clone root %q", addCall.Dir, target)
+	if !initSeen || !exactFetchSeen {
+		t.Fatalf("independent snapshot calls incomplete: init=%v exact_fetch=%v calls=%v",
+			initSeen, exactFetchSeen, git.snapshot())
 	}
 
 	h.Release()
-
-	foundRemove := false
-	for _, c := range git.snapshot() {
-		if len(c.Args) >= 2 && c.Args[0] == "worktree" && c.Args[1] == "remove" {
-			foundRemove = true
-			if c.Dir != target {
-				t.Fatalf("worktree remove run from %q, want clone root %q", c.Dir, target)
-			}
-		}
-	}
-	if !foundRemove {
-		t.Fatalf("expected `git worktree remove` on release; calls = %v", git.snapshot())
+	if _, err := os.Stat(wantWT); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("released snapshot still exists or stat failed unexpectedly: %v", err)
 	}
 }
 
@@ -1084,22 +1271,255 @@ func TestAcquireAcceptsValidWorktreeToken(t *testing.T) {
 	}
 }
 
-func TestEnsureFullHistoryUnshallowsManagedClone(t *testing.T) {
+func TestCanonicalPathForKeyStableBeforeAndAfterNestedPathExists(t *testing.T) {
+	realRoot := t.TempDir()
+	aliasRoot := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(realRoot, aliasRoot); err != nil {
+		t.Fatalf("symlink temp root: %v", err)
+	}
+
+	target := filepath.Join(aliasRoot, "missing-owner", "missing-repo")
+	before := canonicalPathForKey(target)
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	after := canonicalPathForKey(target)
+
+	if before != after {
+		t.Fatalf("canonical key changed after path creation: before=%q after=%q", before, after)
+	}
+	want := filepath.Join(realRoot, "missing-owner", "missing-repo")
+	if before != want {
+		t.Fatalf("canonical key = %q, want %q", before, want)
+	}
+}
+
+func TestImmutableFetchWritesOnlyIndependentSnapshot(t *testing.T) {
+	m, git, base := newTestManagerWithCap(t, 0)
+	local := filepath.Join(base, "operator-repo")
+	if err := os.MkdirAll(filepath.Join(local, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wantSHA := strings.Repeat("b", 40)
+	catChecks := 0
+	git.onRun = func(call gitCall) error {
+		if len(call.Args) >= 2 && call.Args[0] == "cat-file" {
+			catChecks++
+			if catChecks == 1 {
+				return errors.New("object missing")
+			}
+		}
+		return nil
+	}
+
+	h, err := m.Acquire(context.Background(), Request{
+		Repo:               "org/repo",
+		ConfiguredLocalDir: local,
+		Token:              "secret",
+		Mode:               ModeRead,
+		WorktreeToken:      "pr-review-55",
+		WorktreeBaseRef:    wantSHA,
+		WorktreeFetchRef:   "refs/pull/55/head",
+	})
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	defer h.Release()
+
+	var fetch gitCall
+	for _, call := range git.snapshot() {
+		if len(call.Args) > 0 && call.Args[0] == "fetch" {
+			fetch = call
+			break
+		}
+	}
+	if len(fetch.Args) == 0 {
+		t.Fatal("expected immutable commit fetch")
+	}
+	if fetch.Dir != h.Path() {
+		t.Fatalf("immutable fetch dir = %q, want isolated checkout %q", fetch.Dir, h.Path())
+	}
+	if !slices.Contains(fetch.Args, "--no-write-fetch-head") {
+		t.Fatalf("immutable fetch unexpectedly updates FETCH_HEAD: %v", fetch.Args)
+	}
+	if len(fetch.ExtraFiles) != 2 {
+		t.Fatalf("materialisation fetch inherited %d guards, want lease + operations lock", len(fetch.ExtraFiles))
+	}
+	if _, err := os.Stat(filepath.Join(local, ".git", "shallow")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("operator repository shallow boundary was created: %v", err)
+	}
+}
+
+func TestValidateSnapshotRejectsChangedHeadAndDirtyTree(t *testing.T) {
+	wantSHA := strings.Repeat("a", 40)
+	tests := []struct {
+		name   string
+		head   string
+		status string
+	}{
+		{name: "changed head", head: strings.Repeat("b", 40)},
+		{name: "dirty tracked file", head: wantSHA, status: " M tracked.go\n"},
+		{name: "untracked file", head: wantSHA, status: "?? scratch.txt\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, git, _ := newTestManager(t)
+			git.onOutput = func(call gitCall) ([]byte, error) {
+				if len(call.Args) >= 2 && call.Args[0] == "rev-parse" {
+					return []byte(tt.head + "\n"), nil
+				}
+				if len(call.Args) > 0 && call.Args[0] == "status" {
+					return []byte(tt.status), nil
+				}
+				return nil, nil
+			}
+			err := m.ValidateSnapshot(context.Background(), &Handle{
+				path:      "/tmp/review",
+				commitSHA: wantSHA,
+			})
+			if !errors.Is(err, ErrSnapshotChanged) {
+				t.Fatalf("ValidateSnapshot err = %v, want ErrSnapshotChanged", err)
+			}
+		})
+	}
+}
+
+func TestEnsureFullHistoryDoesNotMutateOperatorOwnedSource(t *testing.T) {
 	m, git, base := newTestManager(t)
-	target := filepath.Join(base, "heimdallm", "org", "repo")
-	if err := os.MkdirAll(filepath.Join(target, ".git"), 0o755); err != nil {
+	source := filepath.Join(base, "operator-repo")
+	if err := os.MkdirAll(filepath.Join(source, ".git"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(target, ".git", "shallow"), []byte("x"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(source, ".git", "shallow"), []byte("boundary\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	h := &Handle{path: target, managed: true}
+
+	err := m.EnsureFullHistory(context.Background(), &Handle{
+		path:          filepath.Join(base, "external-checkout"),
+		managed:       true,
+		sourceRoot:    source,
+		sourceManaged: false,
+	}, "secret")
+	if err != nil {
+		t.Fatalf("EnsureFullHistory: %v", err)
+	}
+	if calls := git.snapshot(); len(calls) != 0 {
+		t.Fatalf("operator-owned shallow source was inspected or mutated: %v", calls)
+	}
+	if got := string(mustReadFile(t, filepath.Join(source, ".git", "shallow"))); got != "boundary\n" {
+		t.Fatalf("operator shallow boundary changed: %q", got)
+	}
+}
+
+func TestAcquireRemovesIndependentSnapshotWhenVerificationFails(t *testing.T) {
+	m, git, base := newTestManagerWithCap(t, 0)
+	target := setupManagedClone(t, base)
+	var snapshot string
+	git.onRun = func(call gitCall) error {
+		if len(call.Args) > 0 && call.Args[0] == "init" {
+			snapshot = call.Dir
+		}
+		return nil
+	}
+	git.onOutput = func(call gitCall) ([]byte, error) {
+		if len(call.Args) >= 2 && call.Args[0] == "rev-parse" && call.Args[1] == "--verify" {
+			if call.Dir != target {
+				return nil, errors.New("verification failed")
+			}
+			return []byte(strings.Repeat("a", 40) + "\n"), nil
+		}
+		return nil, nil
+	}
+
+	_, err := m.Acquire(context.Background(), Request{
+		Repo: "org/repo", Token: "secret", WorktreeToken: "verify-failure",
+	})
+	if err == nil || !strings.Contains(err.Error(), "verification failed") {
+		t.Fatalf("Acquire err = %v, want verification failure", err)
+	}
+	if snapshot == "" {
+		t.Fatalf("snapshot path was not captured; calls=%v", git.snapshot())
+	}
+	if _, statErr := os.Stat(snapshot); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("failed snapshot still exists or stat failed unexpectedly: %v", statErr)
+	}
+	for _, call := range git.snapshot() {
+		if len(call.Args) >= 2 && call.Args[0] == "worktree" {
+			t.Fatalf("independent snapshot rollback mutated shared worktree registry: %v", call.Args)
+		}
+	}
+}
+
+func TestPurgeRefusesGitRegisteredWorktreeOutsideLeaseRoot(t *testing.T) {
+	m, _, base := newTestManager(t)
+	target := setupManagedClone(t, base)
+	registryEntry := filepath.Join(target, ".git", "worktrees", "foreign")
+	if err := os.MkdirAll(registryEntry, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	err := m.Purge(context.Background(), "org/repo", "")
+	if !errors.Is(err, ErrRepoBusy) {
+		t.Fatalf("Purge err = %v, want ErrRepoBusy", err)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("busy clone was removed: %v", err)
+	}
+}
+
+func TestEnsureFullHistoryUnshallowsIndependentSnapshot(t *testing.T) {
+	m, git, base := newTestManager(t)
+	source := filepath.Join(base, "heimdallm", "org", "repo")
+	snapshot := filepath.Join(base, "snapshot")
+	for _, dir := range []string{source, snapshot} {
+		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(source, ".git", "shallow"), []byte("source-boundary\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(snapshot, ".git", "shallow"), []byte("snapshot-boundary\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wantSHA := strings.Repeat("a", 40)
+	h := &Handle{
+		path:          snapshot,
+		managed:       true,
+		repo:          "org/repo",
+		commitSHA:     wantSHA,
+		sourceRoot:    source,
+		sourceManaged: true,
+	}
 
 	if err := m.EnsureFullHistory(context.Background(), h, "secret"); err != nil {
 		t.Fatalf("EnsureFullHistory: %v", err)
 	}
 	calls := git.snapshot()
-	if len(calls) != 1 || strings.Join(calls[0].Args, " ") != "fetch --unshallow --prune origin" {
-		t.Fatalf("git calls = %v, want unshallow fetch", calls)
+	var unshallow *gitCall
+	for _, c := range calls {
+		if len(c.Args) > 0 && c.Args[0] == "fetch" &&
+			slices.Contains(c.Args, "--unshallow") {
+			call := c
+			unshallow = &call
+		}
+		if c.Dir == source {
+			t.Fatalf("full-history upgrade executed inside source clone: %v", c)
+		}
+	}
+	if unshallow == nil {
+		t.Fatalf("git calls = %v, want snapshot-local unshallow fetch", calls)
+	}
+	if unshallow.Dir != snapshot ||
+		!reflect.DeepEqual(unshallow.Args, []string{
+			"fetch", "--unshallow", "--no-tags", "--no-write-fetch-head", source, wantSHA,
+		}) {
+		t.Fatalf("unshallow call = %+v, want isolated snapshot fetching %s from source", unshallow, wantSHA)
+	}
+	if got := string(mustReadFile(t, filepath.Join(source, ".git", "shallow"))); got != "source-boundary\n" {
+		t.Fatalf("source shallow boundary changed: %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(snapshot, ".git", "shallow")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("snapshot remained shallow: %v", err)
 	}
 }

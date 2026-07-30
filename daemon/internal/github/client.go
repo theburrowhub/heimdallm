@@ -132,8 +132,8 @@ func (c *Client) do(method, path string, accept string) (*http.Response, error) 
 // this helper so auth, Accept headers, and the pinned API version stay in
 // one place.
 //
-// TODO: migrate SubmitReview and PostComment to doWithBody as well — they
-// still build their request inline, duplicating the header setup.
+// TODO: migrate PostComment to doWithBody as well — it still builds its
+// request inline, duplicating the header setup.
 func (c *Client) doWithBody(method, path, accept, contentType string, body io.Reader) (*http.Response, error) {
 	// Circuit breaker: while a rate-limit cooldown is active, fail fast without
 	// touching GitHub. Sending more traffic during a secondary/abuse block only
@@ -304,28 +304,62 @@ func (c *Client) fetchByQualifier(username, qualifier string, repos []string) ([
 		repoFilter = " repo:" + strings.Join(repos, " repo:")
 	}
 	query := fmt.Sprintf("is:pr is:open %s:%s%s", qualifier, username, repoFilter)
-	params := url.Values{}
-	params.Set("q", query)
-	params.Set("per_page", "100")
+	// GitHub's Search API returns at most 100 items per page and exposes only
+	// the first 1,000 results for a query. A review request on page two must not
+	// disappear from discovery, so walk every accessible page and fail
+	// explicitly if the result set exceeds GitHub's hard search window.
+	const maxSearchPages = 10
+	var all []*PullRequest
+	seen := make(map[int64]struct{})
+	for page := 1; page <= maxSearchPages; page++ {
+		params := url.Values{}
+		params.Set("q", query)
+		params.Set("per_page", strconv.Itoa(perPage))
+		params.Set("page", strconv.Itoa(page))
 
-	resp, err := c.do("GET", "/search/issues?"+params.Encode(), "application/vnd.github+json")
-	if err != nil {
-		return nil, fmt.Errorf("github: search PRs (%s): %w", qualifier, err)
+		resp, err := c.do("GET", "/search/issues?"+params.Encode(), "application/vnd.github+json")
+		if err != nil {
+			return nil, fmt.Errorf("github: search PRs (%s), page %d: %w", qualifier, page, err)
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxPaginatedPageBytes))
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			errBody := safeTruncate(string(body), maxErrBodyLen)
+			return nil, fmt.Errorf("github: search PRs (%s), page %d: status %d: %s", qualifier, page, resp.StatusCode, errBody)
+		}
+		var result struct {
+			TotalCount        int            `json:"total_count"`
+			IncompleteResults bool           `json:"incomplete_results"`
+			Items             []*PullRequest `json:"items"`
+		}
+		if err := json.Unmarshal(body, &result); err != nil {
+			return nil, fmt.Errorf("github: decode search (%s), page %d: %w", qualifier, page, err)
+		}
+		if result.IncompleteResults {
+			return nil, fmt.Errorf("github: search PRs (%s): GitHub returned incomplete results", qualifier)
+		}
+		if result.TotalCount > maxSearchPages*perPage {
+			return nil, fmt.Errorf(
+				"github: search PRs (%s): %d results exceed GitHub's %d-result search window",
+				qualifier, result.TotalCount, maxSearchPages*perPage,
+			)
+		}
+		for _, pr := range result.Items {
+			if pr == nil {
+				continue
+			}
+			if _, duplicate := seen[pr.ID]; duplicate {
+				continue
+			}
+			seen[pr.ID] = struct{}{}
+			all = append(all, pr)
+		}
+		if len(result.Items) < perPage ||
+			(result.TotalCount > 0 && len(all) >= result.TotalCount) {
+			return all, nil
+		}
 	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
-	resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		errBody := safeTruncate(string(body), maxErrBodyLen)
-		return nil, fmt.Errorf("github: search PRs (%s): status %d: %s", qualifier, resp.StatusCode, errBody)
-	}
-	var result struct {
-		Items []*PullRequest `json:"items"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("github: decode search (%s): %w", qualifier, err)
-	}
-	return result.Items, nil
+	return nil, fmt.Errorf("github: search PRs (%s): pagination exceeded %d pages", qualifier, maxSearchPages)
 }
 
 // APIError is an HTTP error from the GitHub API with a typed StatusCode.
@@ -436,16 +470,10 @@ func (c *Client) submitReview(repo string, number int, body, event, commitID str
 	}
 
 	data, _ := json.Marshal(payload)
-	req, err := http.NewRequest("POST", c.baseURL+path, strings.NewReader(string(data)))
-	if err != nil {
-		return 0, "", fmt.Errorf("github: submit review: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-
-	resp, err := c.http.Do(req)
+	resp, err := c.doWithBody(
+		"POST", path, "application/vnd.github+json", "application/json",
+		strings.NewReader(string(data)),
+	)
 	if err != nil {
 		return 0, "", fmt.Errorf("github: submit review: %w", err)
 	}
@@ -719,6 +747,14 @@ type PRHeadInfo struct {
 	RequestedReviewers []string // lowercased logins
 }
 
+// PRRevision is the immutable pair that defines a pull request diff at one
+// instant. Head alone is insufficient: advancing the base branch changes the
+// effective diff even when the PR branch does not move.
+type PRRevision struct {
+	BaseSHA string
+	HeadSHA string
+}
+
 // ReviewRequestedFor reports whether login (case-insensitive) is still in the
 // PR's requested_reviewers list. Returns false when the list is empty (which
 // happens after the bot submits a review).
@@ -766,6 +802,18 @@ func (c *Client) GetPRHeadSHA(repo string, number int) (string, error) {
 	return pr.Head.SHA, nil
 }
 
+// GetPRRevision returns the current base/head pair from one Pulls API read.
+func (c *Client) GetPRRevision(repo string, number int) (PRRevision, error) {
+	pr, err := c.getPR(repo, number)
+	if err != nil {
+		return PRRevision{}, err
+	}
+	return PRRevision{
+		BaseSHA: strings.TrimSpace(pr.Base.SHA),
+		HeadSHA: strings.TrimSpace(pr.Head.SHA),
+	}, nil
+}
+
 // GetPRHeadInfo returns the HEAD SHA and pending reviewer logins for a PR.
 // Used by the tier-2 adapter to (a) resolve the HEAD SHA and (b) confirm the
 // bot is still in requested_reviewers before enqueuing a review — without an
@@ -794,6 +842,7 @@ type PRSnapshot struct {
 	Author    string
 	UpdatedAt time.Time
 	HeadSHA   string
+	BaseSHA   string
 }
 
 // GetPRSnapshot returns the current state, draft flag, author, updated_at,
@@ -822,6 +871,7 @@ func (c *Client) GetPRSnapshot(repo string, number int) (*PRSnapshot, error) {
 		Author:    pr.User.Login,
 		UpdatedAt: pr.UpdatedAt,
 		HeadSHA:   pr.Head.SHA,
+		BaseSHA:   pr.Base.SHA,
 	}, nil
 }
 
@@ -851,57 +901,106 @@ func (c *Client) GetPR(repo string, number int) (*PullRequest, error) {
 	return &pr, nil
 }
 
-// FetchDiffForCommit returns a diff tied to one immutable PR HEAD commit.
+// PRDiffSnapshot is the content and immutable base/head pair used to build it.
+type PRDiffSnapshot struct {
+	Diff    string
+	BaseSHA string
+	HeadSHA string
+}
+
+// FetchDiffForCommit returns a diff tied to one immutable PR revision.
+// Kept as the narrow compatibility API; callers that publish results should use
+// FetchDiffSnapshot so they can revalidate both operands.
+func (c *Client) FetchDiffForCommit(repo string, number int, expectedHeadSHA string) (string, error) {
+	snapshot, err := c.FetchDiffSnapshot(repo, number, expectedHeadSHA)
+	if err != nil {
+		return "", err
+	}
+	return snapshot.Diff, nil
+}
+
+// FetchDiffSnapshot returns a diff tied to one immutable base/head pair.
 //
 // FetchDiff cannot provide that guarantee because GET /pulls/{number} with a
 // diff media type always follows the PR's live refs. Here we first read the PR
 // snapshot, reject a stale expected HEAD, then compare the captured base SHA
 // with the expected head SHA. Both compare operands are content-addressed, so
 // a push after the snapshot cannot change the returned diff.
-func (c *Client) FetchDiffForCommit(repo string, number int, expectedHeadSHA string) (string, error) {
+func (c *Client) FetchDiffSnapshot(repo string, number int, expectedHeadSHA string) (PRDiffSnapshot, error) {
 	expectedHeadSHA = strings.TrimSpace(expectedHeadSHA)
 	if expectedHeadSHA == "" {
-		return "", fmt.Errorf("github: fetch diff for commit: empty expected HEAD SHA")
+		return PRDiffSnapshot{}, fmt.Errorf("github: fetch diff for commit: empty expected HEAD SHA")
 	}
 
 	pr, err := c.getPR(repo, number)
 	if err != nil {
-		return "", fmt.Errorf("github: fetch diff for commit: %w", err)
+		return PRDiffSnapshot{}, fmt.Errorf("github: fetch diff for commit: %w", err)
 	}
 	actualHeadSHA := strings.TrimSpace(pr.Head.SHA)
 	if actualHeadSHA == "" {
-		return "", fmt.Errorf("github: fetch diff for commit: PR returned empty HEAD SHA")
+		return PRDiffSnapshot{}, fmt.Errorf("github: fetch diff for commit: PR returned empty HEAD SHA")
 	}
 	if actualHeadSHA != expectedHeadSHA {
-		return "", &HeadChangedError{Expected: expectedHeadSHA, Actual: actualHeadSHA}
+		return PRDiffSnapshot{}, &HeadChangedError{Expected: expectedHeadSHA, Actual: actualHeadSHA}
 	}
 	baseSHA := strings.TrimSpace(pr.Base.SHA)
 	if baseSHA == "" {
-		return "", fmt.Errorf("github: fetch diff for commit: PR returned empty base SHA")
+		return PRDiffSnapshot{}, fmt.Errorf("github: fetch diff for commit: PR returned empty base SHA")
 	}
 
 	compare := url.PathEscape(baseSHA) + "..." + url.PathEscape(expectedHeadSHA)
 	path := fmt.Sprintf("/repos/%s/compare/%s", repo, compare)
 	resp, err := c.do("GET", path, "application/vnd.github.diff")
 	if err != nil {
-		return "", fmt.Errorf("github: fetch diff for commit: %w", err)
+		return PRDiffSnapshot{}, fmt.Errorf("github: fetch diff for commit: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotAcceptable {
+		// The compare diff media type inherits GitHub's large-diff limit.
+		// Reconstruct through the paginated PR-files endpoint, but bracket that
+		// live endpoint with the immutable base/head snapshot. If either ref
+		// moved, discard the reconstruction instead of mixing revisions.
+		_ = resp.Body.Close()
+		slog.Info("github: commit diff returned 406, reconstructing with snapshot guards",
+			"repo", repo, "pr", number, "base_sha", baseSHA, "head_sha", expectedHeadSHA)
+		diff, fallbackErr := c.fetchDiffViaFilesAPI(repo, number)
+		if fallbackErr != nil {
+			return PRDiffSnapshot{}, fmt.Errorf("github: fetch diff for commit fallback: %w", fallbackErr)
+		}
+		after, snapshotErr := c.getPR(repo, number)
+		if snapshotErr != nil {
+			return PRDiffSnapshot{}, fmt.Errorf("github: revalidate PR after diff fallback: %w", snapshotErr)
+		}
+		currentHead := strings.TrimSpace(after.Head.SHA)
+		if currentHead != expectedHeadSHA {
+			return PRDiffSnapshot{}, &HeadChangedError{Expected: expectedHeadSHA, Actual: currentHead}
+		}
+		currentBase := strings.TrimSpace(after.Base.SHA)
+		if currentBase != baseSHA {
+			return PRDiffSnapshot{}, fmt.Errorf(
+				"github: PR base changed during diff fallback: expected %s, current %s",
+				baseSHA, currentBase,
+			)
+		}
+		return PRDiffSnapshot{Diff: diff, BaseSHA: baseSHA, HeadSHA: expectedHeadSHA}, nil
+	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 		errBody := safeTruncate(string(body), maxErrBodyLen)
-		return "", fmt.Errorf("github: fetch diff for commit: status %d: %s", resp.StatusCode, errBody)
+		return PRDiffSnapshot{}, fmt.Errorf("github: fetch diff for commit: status %d: %s", resp.StatusCode, errBody)
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxDiffBodyBytes))
 	if err != nil {
-		return "", fmt.Errorf("github: fetch diff for commit (%s #%d): read: %w", repo, number, err)
+		return PRDiffSnapshot{}, fmt.Errorf("github: fetch diff for commit (%s #%d): read: %w", repo, number, err)
 	}
 	if int64(len(data)) >= maxDiffBodyBytes {
 		slog.Warn("github: commit diff truncated at size limit",
 			"repo", repo, "pr", number, "base_sha", baseSHA,
 			"head_sha", expectedHeadSHA, "limit_bytes", maxDiffBodyBytes)
 	}
-	return string(data), nil
+	return PRDiffSnapshot{
+		Diff: string(data), BaseSHA: baseSHA, HeadSHA: expectedHeadSHA,
+	}, nil
 }
 
 // FetchDiff returns the unified diff for a PR. PRs over GitHub's 300-file
@@ -1132,21 +1231,19 @@ func (c *Client) FetchIssueCommentsOnly(repo string, number int) ([]Comment, err
 	return c.fetchIssueComments(repo, number)
 }
 
-// TimelineEvent is a slim view of a GitHub PR timeline entry. Only the
-// two events the pipeline needs are surfaced: review_requested (someone
-// asked the reviewer for a review) and review_dismissed (someone
-// dismissed the reviewer's prior review). Other event types in the
-// timeline (commits, labels, comments, assignments…) are filtered out
-// at fetch time so callers don't have to reason about them.
+// TimelineEvent is a slim view of a GitHub PR timeline entry. Only events that
+// change whether the target reviewer is requested are surfaced. ID is GitHub's
+// stable event identity and lets callers persist an exact cursor instead of
+// comparing second-granularity timestamps against a different machine's clock.
 type TimelineEvent struct {
-	Event     string // "review_requested" or "review_dismissed"
+	ID        int64
+	Event     string // review_requested or review_request_removed
 	Actor     string // login of the user who triggered the event
 	CreatedAt time.Time
 }
 
-// GetPRTimelineEventsForReviewer returns the review_requested and
-// review_dismissed events on a PR that target the given reviewer login,
-// sorted ascending by created_at. Used by the pipeline to detect
+// GetPRTimelineEventsForReviewer returns review-request state changes on a PR
+// that target the given reviewer login, sorted in timeline order. Used to detect
 // explicit re-request review actions on PRs whose HEAD SHA hasn't
 // changed (theburrowhub/heimdallm#322 Bug 5): a re-request bumps
 // updated_at and re-adds the bot to requested_reviewers, but the SHA
@@ -1176,6 +1273,7 @@ func (c *Client) GetPRTimelineEventsForReviewer(repo string, number int, login s
 			return nil, fmt.Errorf("github: fetch timeline: status %d: %s", resp.StatusCode, errBody)
 		}
 		var raw []struct {
+			ID        int64     `json:"id"`
 			Event     string    `json:"event"`
 			CreatedAt time.Time `json:"created_at"`
 			Actor     struct {
@@ -1184,11 +1282,6 @@ func (c *Client) GetPRTimelineEventsForReviewer(repo string, number int, login s
 			RequestedReviewer *struct {
 				Login string `json:"login"`
 			} `json:"requested_reviewer,omitempty"`
-			DismissedReview *struct {
-				User struct {
-					Login string `json:"login"`
-				} `json:"user"`
-			} `json:"dismissed_review,omitempty"`
 		}
 		if err := json.Unmarshal(body, &raw); err != nil {
 			// Include the payload size: a decode failure right at the byte
@@ -1197,17 +1290,10 @@ func (c *Client) GetPRTimelineEventsForReviewer(repo string, number int, login s
 		}
 		for _, ev := range raw {
 			switch ev.Event {
-			case "review_requested":
+			case "review_requested", "review_request_removed":
 				if ev.RequestedReviewer != nil && strings.EqualFold(ev.RequestedReviewer.Login, login) {
 					out = append(out, TimelineEvent{
-						Event:     ev.Event,
-						Actor:     ev.Actor.Login,
-						CreatedAt: ev.CreatedAt,
-					})
-				}
-			case "review_dismissed":
-				if ev.DismissedReview != nil && strings.EqualFold(ev.DismissedReview.User.Login, login) {
-					out = append(out, TimelineEvent{
+						ID:        ev.ID,
 						Event:     ev.Event,
 						Actor:     ev.Actor.Login,
 						CreatedAt: ev.CreatedAt,
@@ -1219,31 +1305,42 @@ func (c *Client) GetPRTimelineEventsForReviewer(repo string, number int, login s
 		if len(raw) < perPage {
 			// Defensive re-sort: GitHub's timeline API documents ascending
 			// chronological order, but the contract is not load-bearing for us
-			// — pipeline.shouldBypassSHASkipForReReview relies on the slice
-			// being sorted to walk it backward in O(1) for the common case.
+			// — pipeline cursor logic relies on the slice being sorted.
 			// A single sort here is cheap (events is filtered down to just
-			// review_requested / review_dismissed for one login) and immunises
+			// review_requested / review_request_removed for one login) and immunises
 			// the caller against an undocumented re-ordering on GitHub's side.
 			//
-			// Stable sort + an explicit same-second tiebreak (#602): both
-			// GitHub's created_at and our stored review anchor are RFC3339
-			// second-granularity, so a dismiss and a re-request done back to
-			// back (or by automation) collapse to the same timestamp. The
-			// caller decides on the single most-recent relevant event, so a
-			// non-deterministic order silently dropped legitimate re-reviews
-			// about half the time. On a tie we order review_dismissed BEFORE
-			// review_requested — the explicit re-request wins and ends up last
-			// — because when we cannot recover the true sub-second order we
-			// honour the operator's intent to be re-reviewed. The tiebreak is
-			// kept total (a strict weak ordering): two same-second events of
-			// the same type compare as equal so the stable sort preserves
-			// their input order, rather than reporting both i<j and j<i.
+			// Preserve GitHub's payload order inside a timestamp whenever
+			// real event IDs are present: the persisted cursor locates the
+			// exact element, so inventing an ID comparison or type ordering
+			// would lose information. Old fixtures/enterprise payloads with
+			// no IDs retain the conservative #602 compatibility policy:
+			// removals sort before requests so an explicit request wins
+			// an otherwise unknowable same-second tie.
 			sort.SliceStable(out, func(i, j int) bool {
-				if out[i].CreatedAt.Equal(out[j].CreatedAt) {
-					return out[i].Event == "review_dismissed" && out[j].Event == "review_requested"
-				}
 				return out[i].CreatedAt.Before(out[j].CreatedAt)
 			})
+			for start := 0; start < len(out); {
+				end := start + 1
+				for end < len(out) && out[end].CreatedAt.Equal(out[start].CreatedAt) {
+					end++
+				}
+				allWithoutIDs := true
+				for i := start; i < end; i++ {
+					if out[i].ID != 0 {
+						allWithoutIDs = false
+						break
+					}
+				}
+				if allWithoutIDs {
+					sort.SliceStable(out[start:end], func(i, j int) bool {
+						left := out[start+i].Event
+						right := out[start+j].Event
+						return isTimelineCancellation(left) && right == "review_requested"
+					})
+				}
+				start = end
+			}
 			return out, nil
 		}
 	}
@@ -1258,6 +1355,10 @@ func (c *Client) GetPRTimelineEventsForReviewer(repo string, number int, login s
 		"repo", repo, "pr", number, "pages", maxPaginationPages)
 	return nil, fmt.Errorf("github: timeline pagination exceeded %d pages for %s#%d (per_page=%d, possible runaway)",
 		maxPaginationPages, repo, number, perPage)
+}
+
+func isTimelineCancellation(event string) bool {
+	return event == "review_request_removed"
 }
 
 // maxPaginationPages bounds the number of pages the paginated endpoints

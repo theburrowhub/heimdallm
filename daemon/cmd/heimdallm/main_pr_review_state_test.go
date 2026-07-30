@@ -464,9 +464,9 @@ func TestRefreshAutoImplementPRReviewState_FixPushed_NewCRReactivates(t *testing
 // must signal `changed=true` so the watch KV resets the backoff and
 // advances LastSeen. Returning false would re-poll on every tick
 // (same updated_at keeps looking new), burn API calls, and grow the
-// backoff despite the daemon doing real work. A nil snap is
-// returned alongside so HandleChange's first guard short-circuits
-// — we already handled the dispatch inline.
+// backoff despite the daemon doing real work. The returned snapshot
+// is marked Handled so HandleChange short-circuits while the worker
+// can persist the exact remote updated_at instead of time.Now.
 func TestCheckItem_AutoImplementPRBranch_ReturnsChangedSoLastSeenAdvances(t *testing.T) {
 	// Stub the Pulls + reviews endpoints. updated_at strictly newer
 	// than item.LastSeen so the standard "no change" gate falls
@@ -501,8 +501,9 @@ func TestCheckItem_AutoImplementPRBranch_ReturnsChangedSoLastSeenAdvances(t *tes
 	if !changed {
 		t.Fatal("CheckItem returned changed=false on auto-implement refresh — LastSeen will not advance, backoff will grow")
 	}
-	if snap != nil {
-		t.Errorf("snap must be nil so HandleChange short-circuits, got %+v", snap)
+	wantObservedAt := time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC)
+	if snap == nil || !snap.Handled || !snap.UpdatedAt.Equal(wantObservedAt) {
+		t.Errorf("snap = %+v, want handled snapshot at %s", snap, wantObservedAt)
 	}
 }
 

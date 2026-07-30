@@ -56,13 +56,13 @@ var _ issuepipeline.ResponderExecutor = (*prReviewExecutor)(nil)
 // to Pipeline.RunFix — the actual checkout + agent + commit + push
 // flow for #482 phase 3. Responsibilities split:
 //
-//   - This executor owns the worktree lifecycle (reserve via
+//   - This executor owns the snapshot lifecycle (reserve via
 //     repoctx, release on return) and the PR-head-ref fetch.
 //   - Pipeline.RunFix owns the git plumbing and the agent run.
 //   - issuepipeline.FixRunner owns the cap/cooldown/state-flip logic
 //     and only calls Run once the guards have passed.
 //
-// repoctx.Manager is the same per-execution worktree manager used by
+// repoctx.Manager is the same per-execution snapshot manager used by
 // auto_implement (#461), so concurrent fix runs on the same repo are
 // properly isolated.
 type prFixExecutor struct {
@@ -87,19 +87,25 @@ func (p *prFixExecutor) RunFix(ctx context.Context, req issuepipeline.FixRequest
 		return issuepipeline.FixResult{}, fmt.Errorf("pr %s#%d has no head ref (cross-fork PR?)", req.Repo, req.PRNumber)
 	}
 
-	primary, fallback := p.cliInputs(req.Repo)
+	primary, fallback, aiCfg, localDirBases, execOpts := p.repoInputs(req.Repo)
 
-	// Reserve a per-execution worktree (#461). The Acquire path
+	// Reserve a per-execution snapshot (#461). The Acquire path
 	// requires WorktreeToken so different runs on the same repo
 	// land on different paths; `fix-pr-N` is deterministic per PR
 	// and prevents accidental collision when the fix runner re-fires
 	// after a reviewer pushes another CR.
-	handle, err := p.repoCtx.Acquire(ctx, repoctx.Request{
-		Repo:          req.Repo,
-		Token:         p.ghToken,
-		Mode:          repoctx.ModeWrite,
-		WorktreeToken: fmt.Sprintf("fix-pr-%d", req.PRNumber),
-	})
+	handle, err := acquireRepoContext(
+		ctx,
+		p.repoCtx,
+		req.Repo,
+		&aiCfg,
+		localDirBases,
+		p.ghToken,
+		repoctx.ModeWrite,
+		fmt.Sprintf("fix-pr-%d", req.PRNumber),
+		full.Head.SHA,
+		fmt.Sprintf("refs/pull/%d/head", req.PRNumber),
+	)
 	if err != nil {
 		return issuepipeline.FixResult{}, fmt.Errorf("reserve worktree: %w", err)
 	}
@@ -107,18 +113,26 @@ func (p *prFixExecutor) RunFix(ctx context.Context, req issuepipeline.FixRequest
 
 	req.HeadRef = headRef
 	req.Token = p.ghToken
-	req.ExecOpts = executor.ExecOptions{WorkDir: handle.Path()}
+	execOpts.WorkDir = handle.Path()
+	execOpts.ExtraFiles = executor.NewInheritedFileSet(handle.LeaseFiles()...)
+	req.ExecOpts = execOpts
 	req.CLIPrimary = primary
 	req.CLIFallback = fallback
 
 	return p.pipeline.RunFix(ctx, req)
 }
 
-func (p *prFixExecutor) cliInputs(repo string) (primary, fallback string) {
+func (p *prFixExecutor) repoInputs(repo string) (
+	primary string,
+	fallback string,
+	aiCfg config.RepoAI,
+	localDirBases []string,
+	execOpts executor.ExecOptions,
+) {
 	p.cfgMu.Lock()
 	defer p.cfgMu.Unlock()
 	c := *p.cfg
-	aiCfg := c.AIForRepo(repo)
+	aiCfg = c.AIForRepo(repo)
 	primary = aiCfg.Primary
 	if primary == "" {
 		primary = c.AI.Primary
@@ -127,7 +141,27 @@ func (p *prFixExecutor) cliInputs(repo string) (primary, fallback string) {
 	if fallback == "" {
 		fallback = c.AI.Fallback
 	}
-	return primary, fallback
+	agentCfg := c.AgentConfigFor(primary)
+	extraFlags := agentCfg.ExtraFlags
+	if extraFlags != "" {
+		if err := executor.ValidateExtraFlagsForCLI(primary, extraFlags); err != nil {
+			extraFlags = ""
+		}
+	}
+	execOpts = executor.ExecOptions{
+		Model:                agentCfg.Model,
+		MaxTurns:             agentCfg.MaxTurns,
+		ApprovalMode:         agentCfg.ApprovalMode,
+		ExtraFlags:           extraFlags,
+		Effort:               agentCfg.Effort,
+		PermissionMode:       agentCfg.PermissionMode,
+		Bare:                 agentCfg.Bare,
+		DangerouslySkipPerms: agentCfg.DangerouslySkipPerms,
+		NoSessionPersistence: agentCfg.NoSessionPersistence,
+		Timeout:              resolveExecutionTimeout(c.AI.ExecutionTimeout, agentCfg.ExecutionTimeout),
+	}
+	localDirBases = append([]string(nil), c.GitHub.LocalDirBase...)
+	return primary, fallback, aiCfg, localDirBases, execOpts
 }
 
 // Compile-time check.

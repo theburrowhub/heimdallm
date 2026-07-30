@@ -27,18 +27,18 @@ type Label struct {
 // config-driven label classifier so downstream consumers (the pipeline in
 // #26 / #27) don't need to re-apply the precedence rules.
 type Issue struct {
-	ID          int64            `json:"id"`
-	Number      int              `json:"number"`
-	Title       string           `json:"title"`
-	Body        string           `json:"body"`
-	HTMLURL     string           `json:"html_url"`
-	User        User             `json:"user"`
-	Assignees   []User           `json:"assignees"`
-	Labels      []Label          `json:"labels"`
-	State       string           `json:"state"`
-	CreatedAt   time.Time        `json:"created_at"`
-	UpdatedAt   time.Time        `json:"updated_at"`
-	PullRequest *struct{}        `json:"pull_request,omitempty"`
+	ID          int64     `json:"id"`
+	Number      int       `json:"number"`
+	Title       string    `json:"title"`
+	Body        string    `json:"body"`
+	HTMLURL     string    `json:"html_url"`
+	User        User      `json:"user"`
+	Assignees   []User    `json:"assignees"`
+	Labels      []Label   `json:"labels"`
+	State       string    `json:"state"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	PullRequest *struct{} `json:"pull_request,omitempty"`
 	// Repository is populated by GitHub on endpoints that can return issues
 	// from more than one repo in a single response (e.g. the sub-issues
 	// endpoint — same-owner, possibly cross-repo children). Kept as a
@@ -126,8 +126,10 @@ type Comment struct {
 
 // ResolveRepo sets the Repo field from available data.
 func (pr *PullRequest) ResolveRepo() {
-	if pr.Head.Repo.FullName != "" {
-		pr.Repo = pr.Head.Repo.FullName
+	// A pull request belongs to the base repository. Head.Repo may be a fork;
+	// using it would fetch and publish against the wrong repository.
+	if pr.Base.Repo.FullName != "" {
+		pr.Repo = pr.Base.Repo.FullName
 		return
 	}
 	// Extract "org/repo" from "https://api.github.com/repos/org/repo".

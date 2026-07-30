@@ -351,7 +351,7 @@ func buildAskPassEnv(token string) ([]string, func(), error) {
 		return nil, nil, fmt.Errorf("write askpass script: %w", err)
 	}
 
-	env := append(os.Environ(),
+	env := append(cleanGitEnvironment(os.Environ()),
 		"GIT_ASKPASS="+helperPath,
 		"GIT_TERMINAL_PROMPT=0",
 		"HEIMDALLM_GIT_TOKEN="+token, // read by the helper script via env
@@ -376,9 +376,11 @@ func captureGit(ctx context.Context, dir string, env []string, args ...string) (
 	defer cancel()
 	cmd := exec.CommandContext(runCtx, "git", args...)
 	cmd.Dir = dir
+	effectiveEnv := os.Environ()
 	if env != nil {
-		cmd.Env = env
+		effectiveEnv = env
 	}
+	cmd.Env = cleanGitEnvironment(effectiveEnv)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -392,4 +394,66 @@ func captureGit(ctx context.Context, dir string, env []string, args ...string) (
 		return nil, fmt.Errorf("%w (stderr: %s)", err, strings.TrimSpace(errText))
 	}
 	return stdout.Bytes(), nil
+}
+
+// cleanGitEnvironment prevents ambient repository-routing/config variables
+// from redirecting a ModeWrite command or activating operator-owned hooks.
+// This applies to ordinary and askpass-authenticated commands alike.
+func cleanGitEnvironment(env []string) []string {
+	out := make([]string, 0, len(env)+7)
+	for _, entry := range env {
+		key, _, _ := strings.Cut(entry, "=")
+		switch {
+		case key == "GIT_DIR",
+			key == "GIT_COMMON_DIR",
+			key == "GIT_WORK_TREE",
+			key == "GIT_INDEX_FILE",
+			key == "GIT_OBJECT_DIRECTORY",
+			key == "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+			key == "GIT_NAMESPACE",
+			key == "GIT_CONFIG",
+			key == "GIT_CONFIG_GLOBAL",
+			key == "GIT_CONFIG_SYSTEM",
+			key == "GIT_CONFIG_NOSYSTEM",
+			key == "GIT_CONFIG_PARAMETERS",
+			key == "GIT_IMPLICIT_WORK_TREE",
+			key == "GIT_GRAFT_FILE",
+			key == "GIT_REPLACE_REF_BASE",
+			key == "GIT_NO_REPLACE_OBJECTS",
+			key == "GIT_PREFIX",
+			key == "GIT_INTERNAL_SUPER_PREFIX",
+			key == "GIT_SHALLOW_FILE",
+			key == "GIT_CEILING_DIRECTORIES",
+			key == "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+			key == "GIT_ATTR_NOSYSTEM",
+			key == "GIT_EXEC_PATH",
+			key == "GIT_EXTERNAL_DIFF",
+			key == "GIT_TEMPLATE_DIR",
+			strings.HasPrefix(key, "GIT_TRACE"),
+			key == "GIT_CURL_VERBOSE",
+			key == "GIT_SSL_NO_VERIFY",
+			key == "GIT_SSH",
+			key == "GIT_SSH_COMMAND",
+			key == "GIT_SSH_VARIANT",
+			key == "GIT_CONFIG_COUNT",
+			strings.HasPrefix(key, "GIT_CONFIG_KEY_"),
+			strings.HasPrefix(key, "GIT_CONFIG_VALUE_"):
+			continue
+		default:
+			out = append(out, entry)
+		}
+	}
+	// Explicit command-scope values defeat alternates and operator-global
+	// hooks while leaving ordinary non-Git environment variables untouched.
+	return append(out,
+		"GIT_ALTERNATE_OBJECT_DIRECTORIES=",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_SYSTEM="+os.DevNull,
+		"GIT_CONFIG_GLOBAL="+os.DevNull,
+		"GIT_NO_REPLACE_OBJECTS=1",
+		"GIT_ATTR_NOSYSTEM=1",
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=core.hooksPath",
+		"GIT_CONFIG_VALUE_0="+os.DevNull,
+	)
 }

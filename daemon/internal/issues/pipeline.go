@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/heimdallm/daemon/internal/config"
@@ -197,13 +198,11 @@ type RefinementSubtask struct {
 // RunOptions carries per-execution settings derived from global + repo +
 // agent config by the caller.
 //
-// The working directory — the repo-level `local_dir` in config.toml — is
-// passed as `ExecOpts.WorkDir`. That single field drives both the mode
-// downgrade (develop → review_only when absent) and the prompt context, so
-// they can never disagree. Callers mapping from `config.RepoAI.LocalDir`
-// assign it directly to `ExecOpts.WorkDir`; do not add a separate field
-// here (we had one in PR #44 review drafts — it caused exactly the
-// inconsistency the reviewers flagged).
+// ExecOpts.WorkDir is the per-execution isolated snapshot prepared by
+// repoctx. A configured local_dir is only a read-only source and must never be
+// assigned here directly. The single resolved snapshot field drives both the
+// mode downgrade (develop → review_only when absent) and prompt context, so
+// they cannot disagree.
 //
 // GitHubToken is required for the auto_implement path (git push). It is not
 // consulted in review_only runs, which is why it lives here rather than in
@@ -271,13 +270,14 @@ type RunOptions struct {
 
 // Pipeline runs a single issue triage or implementation end-to-end.
 type Pipeline struct {
-	store    issueStore
-	gh       issueGitHub
-	executor CLIExecutor
-	git      GitOps
-	broker   Publisher
-	notify   Notifier
-	botLogin string
+	store      issueStore
+	gh         issueGitHub
+	executor   CLIExecutor
+	git        GitOps
+	broker     Publisher
+	notify     Notifier
+	botLoginMu sync.RWMutex
+	botLogin   string
 
 	// breaker caps the number of triages per issue and per repo. Nil
 	// disables both axes (no limit). Configure at startup via
@@ -297,7 +297,23 @@ func (p *Pipeline) SetWatchEnroller(w WatchEnroller) { p.watch = w }
 
 // SetBotLogin sets the GitHub login of the bot account. Used to filter
 // the bot's own comments from the "new discussion" section in re-triages.
-func (p *Pipeline) SetBotLogin(login string) { p.botLogin = login }
+func (p *Pipeline) SetBotLogin(login string) {
+	if p == nil {
+		return
+	}
+	p.botLoginMu.Lock()
+	p.botLogin = strings.TrimSpace(login)
+	p.botLoginMu.Unlock()
+}
+
+func (p *Pipeline) currentBotLogin() string {
+	if p == nil {
+		return ""
+	}
+	p.botLoginMu.RLock()
+	defer p.botLoginMu.RUnlock()
+	return p.botLogin
+}
 
 // SetCircuitBreakerLimits enables the per-issue and per-repo triage
 // caps. Nil disables both axes; zero values within a non-nil struct
@@ -557,6 +573,7 @@ func (p *Pipeline) runReviewOnly(ctx context.Context, issue *github.Issue, issue
 		slog.Warn("issues pipeline: failed to fetch comments, proceeding without", "err", err)
 		comments = nil
 	}
+	botLogin := p.currentBotLogin()
 
 	// Build re-triage context if a previous review exists for this issue.
 	var triageCtx string
@@ -569,7 +586,7 @@ func (p *Pipeline) runReviewOnly(ctx context.Context, issue *github.Issue, issue
 			extractSeverity(prevReview.Triage),
 			prevReview.CreatedAt,
 			comments,
-			p.botLogin,
+			botLogin,
 		)
 	}
 
@@ -577,7 +594,7 @@ func (p *Pipeline) runReviewOnly(ctx context.Context, issue *github.Issue, issue
 	// previous output as "discussion" (confuses re-triage context).
 	var humanComments []github.Comment
 	for _, c := range comments {
-		if p.botLogin != "" && strings.EqualFold(c.Author, p.botLogin) {
+		if botLogin != "" && strings.EqualFold(c.Author, botLogin) {
 			continue
 		}
 		humanComments = append(humanComments, c)
@@ -718,6 +735,7 @@ func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, is
 		slog.Warn("issues pipeline: failed to fetch comments, proceeding without", "err", err)
 		comments = nil
 	}
+	botLogin := p.currentBotLogin()
 
 	cli, err := p.executor.Detect(opts.Primary, opts.Fallback)
 	if err != nil {
@@ -739,9 +757,9 @@ func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, is
 	var triageCtx string
 	prevRefinement, _ := p.store.LatestIssueReviewByAction(issueID, string(config.IssueModeRefinement))
 	if prevRefinement != nil {
-		triageCtx = buildIssueRunContext(prevRefinement, comments, p.botLogin)
+		triageCtx = buildIssueRunContext(prevRefinement, comments, botLogin)
 	} else if prevReview, _ := p.store.LatestIssueReview(issueID); prevReview != nil {
-		triageCtx = buildIssueRunContext(prevReview, comments, p.botLogin)
+		triageCtx = buildIssueRunContext(prevReview, comments, botLogin)
 	}
 
 	// Agent profile customization: ImplementPromptOverride replaces the entire
@@ -893,7 +911,7 @@ func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, is
 	// a metadata failure does not roll back the PR, which is already public.
 	metadataOpts := opts
 	metadataOpts.PRAssignee = resolveAutoImplementPRAssignee(issue, opts)
-	metadataOpts.PRReviewers = filterSelfPRReviewers(metadataOpts.PRReviewers, firstNonEmpty(p.botLogin, opts.AuthUser))
+	metadataOpts.PRReviewers = filterSelfPRReviewers(metadataOpts.PRReviewers, firstNonEmpty(p.currentBotLogin(), opts.AuthUser))
 	applyPRMetadata(p.gh, issue.Repo, prNumber, metadataOpts)
 
 	// Post a done-marker comment on the issue so watchers see the PR land

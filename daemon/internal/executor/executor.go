@@ -1337,7 +1337,7 @@ func buildArgs(cli string, opts ExecOptions, workDirFlags []string) []string {
 
 var (
 	loginPathOnce sync.Once
-	loginPathEnv  []string // os.Environ() + enriched PATH from login shell
+	loginPathEnv  []string // sanitized os.Environ() + enriched PATH from login shell
 	cliHelpCache  sync.Map // map[string]string, keyed by resolved CLI path
 )
 
@@ -1405,7 +1405,7 @@ func cliHelp(cliPath string) (string, bool) {
 // consumption bug where shell startup scripts read our prompt.
 func enrichEnvWithLoginPath() []string {
 	loginPathOnce.Do(func() {
-		base := os.Environ()
+		base := sanitizeExecutorEnvironment(os.Environ())
 		// Ask the login shell for its PATH without providing any stdin
 		// (pass /dev/null so startup scripts cannot accidentally consume stdin)
 		cmd := exec.Command("/bin/zsh", "-l", "-c", "echo $PATH")
@@ -1440,6 +1440,81 @@ func enrichEnvWithLoginPath() []string {
 		loginPathEnv = result
 	})
 	return loginPathEnv
+}
+
+// sanitizeExecutorEnvironment removes daemon secrets and ambient Git routing
+// before starting Codex/Gemini/Claude. The AI CLIs keep their own provider
+// credentials (OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, etc.), but
+// do not receive Heimdallm's GitHub token, data/config paths, askpass helper,
+// or variables capable of redirecting Git away from the isolated snapshot.
+//
+// This is defense in depth, not an OS sandbox: a same-UID process can still
+// inspect other readable paths unless the daemon itself runs in a container or
+// otherwise restricted account.
+func sanitizeExecutorEnvironment(env []string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, entry := range env {
+		key, _, _ := strings.Cut(entry, "=")
+		switch {
+		case strings.HasPrefix(key, "HEIMDALLM_"),
+			key == "GITHUB_TOKEN",
+			key == "GH_TOKEN",
+			key == "GITHUB_APP_PRIVATE_KEY",
+			key == "GITHUB_APP_CLIENT_SECRET",
+			key == "GIT_DIR",
+			key == "GIT_COMMON_DIR",
+			key == "GIT_WORK_TREE",
+			key == "GIT_IMPLICIT_WORK_TREE",
+			key == "GIT_INDEX_FILE",
+			key == "GIT_OBJECT_DIRECTORY",
+			key == "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+			key == "GIT_NAMESPACE",
+			key == "GIT_CONFIG",
+			key == "GIT_CONFIG_GLOBAL",
+			key == "GIT_CONFIG_SYSTEM",
+			key == "GIT_CONFIG_NOSYSTEM",
+			key == "GIT_CONFIG_PARAMETERS",
+			key == "GIT_CONFIG_COUNT",
+			strings.HasPrefix(key, "GIT_CONFIG_KEY_"),
+			strings.HasPrefix(key, "GIT_CONFIG_VALUE_"),
+			key == "GIT_GRAFT_FILE",
+			key == "GIT_REPLACE_REF_BASE",
+			key == "GIT_NO_REPLACE_OBJECTS",
+			key == "GIT_PREFIX",
+			key == "GIT_INTERNAL_SUPER_PREFIX",
+			key == "GIT_SHALLOW_FILE",
+			key == "GIT_CEILING_DIRECTORIES",
+			key == "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+			key == "GIT_ATTR_NOSYSTEM",
+			key == "GIT_EXEC_PATH",
+			key == "GIT_EXTERNAL_DIFF",
+			key == "GIT_TEMPLATE_DIR",
+			strings.HasPrefix(key, "GIT_TRACE"),
+			key == "GIT_CURL_VERBOSE",
+			key == "GIT_SSL_NO_VERIFY",
+			key == "GIT_SSH",
+			key == "GIT_SSH_COMMAND",
+			key == "GIT_SSH_VARIANT",
+			key == "GIT_ASKPASS",
+			key == "SSH_ASKPASS",
+			key == "SSH_AUTH_SOCK",
+			key == "SSH_AGENT_PID":
+			continue
+		default:
+			out = append(out, entry)
+		}
+	}
+	return append(out,
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_SYSTEM="+os.DevNull,
+		"GIT_CONFIG_GLOBAL="+os.DevNull,
+		"GIT_NO_REPLACE_OBJECTS=1",
+		"GIT_ATTR_NOSYSTEM=1",
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=core.hooksPath",
+		"GIT_CONFIG_VALUE_0="+os.DevNull,
+	)
 }
 
 // StripToJSON strips common LLM output wrappers (leading/trailing whitespace,

@@ -25,7 +25,7 @@ A Flutter Web dashboard (`:3000`) with Dashboard, PR list, Issue list, prompt/ag
 - **Issue pipeline** — label-driven triage, refinement planning, and optional auto-implement with branch/commit/PR cycle
 - **Issue dependencies** — mark downstream work with a `blocked` label; declare deps via a `## Depends on` body section *or* GitHub's native sub-issues; Heimdallm auto-promotes when all blockers close
 - **Configurable prompts** — general review, security audit, performance, architecture, or your own with `{diff}` `{title}` `{author}` `{comments}` placeholders, managed from the web UI at `/agents`
-- **Two feedback modes** — *single* (one consolidated review) or *multi* (one GitHub comment per issue + summary), globally and per repo
+- **Commit-anchored feedback** — findings are submitted as one formal review tied to the exact commit analysed; `multi` remains a compatibility alias
 - **Per-repo overrides** — different AI agent, prompt, and feedback mode per repository
 - **Topic-based auto-discovery** — tag repos with a GitHub topic and Heimdallm monitors them without editing config
 - **Severity gating** — only `high` severity triggers `REQUEST_CHANGES`; everything else approves with informational notes
@@ -243,7 +243,31 @@ make down && make up
 
 Then in the web UI, go to a repo's detail screen and under **Local directory** enter the path inside the container — typically `/home/heimdallm/repos/<repo-name>` (matching the sub-directory of your host's projects root). When unset, the compose file mounts an empty placeholder there so the feature is a silent no-op and doesn't break anything.
 
-The mount is read-only. The agent can read every file under that directory but cannot modify your working tree.
+The mount is read-only and is used only as a repository source. The agent never
+runs in your checkout. For every execution Heimdallm creates a random,
+independent snapshot outside the mounted repo, fetches only the object closure
+needed for the selected commit (not the full history), checks it out detached,
+and removes it after the agent exits. It does not add a linked worktree, alter
+refs, touch the index, rewrite a shallow boundary, or leave an `origin` that
+points back at your checkout.
+
+For PR reviews the snapshot is pinned to the exact GitHub HEAD SHA. If a push
+lands while analysis is running, that result is discarded before publication.
+The new SHA remains pending—even when GitHub gives both pushes the same
+second-level `updated_at`—and the next poll or review request creates a brand
+new snapshot. An existing snapshot is never updated in place.
+
+When a local source resolves, Heimdallm does not keep a second persistent clone;
+only the current execution's object closure and working files are duplicated,
+then removed. If no local source exists, a shallow managed clone acts as the
+download cache, while AI executions still use independent ephemeral snapshots.
+
+The snapshot is a Git-race boundary, not an OS sandbox. A same-user process can
+still access other readable paths. Untrusted issue content requires running the
+AI invocation in a separate sandbox container/VM or dedicated account with only
+the snapshot mounted. The bundled Compose service is not a hostile-CLI sandbox:
+daemon and AI share one UID and the `/data` and `/config` mounts. Git LFS
+objects and submodules are not hydrated in snapshots.
 
 On the desktop app this is automatic: the `Browse` button opens the native picker and stores the host path directly — no mount needed.
 

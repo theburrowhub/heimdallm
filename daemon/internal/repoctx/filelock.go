@@ -97,9 +97,28 @@ func openFileLock(path string) (*os.File, error) {
 	if path == "" {
 		return nil, fmt.Errorf("repoctx: file lock path is empty")
 	}
+	if before, err := os.Lstat(path); err == nil {
+		if before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
+			return nil, fmt.Errorf("repoctx: unsafe file lock %q", path)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("repoctx: inspect file lock %q: %w", path, err)
+	}
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("repoctx: open file lock %q: %w", path, err)
+	}
+	opened, statErr := file.Stat()
+	pathInfo, lstatErr := os.Lstat(path)
+	if statErr != nil || lstatErr != nil || !opened.Mode().IsRegular() ||
+		pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(opened, pathInfo) {
+		_ = file.Close()
+		return nil, fmt.Errorf("repoctx: file lock %q changed or is not a regular file", path)
+	}
+	if opened.Mode().Perm()&0o077 != 0 {
+		_ = file.Close()
+		return nil, fmt.Errorf("repoctx: file lock %q permissions are %03o, want no group/other access",
+			path, opened.Mode().Perm())
 	}
 	return file, nil
 }
@@ -116,9 +135,11 @@ func (l *fileLock) File() *os.File {
 	return l.file
 }
 
-// Close releases the advisory lock and closes its descriptor. It is safe to
-// call repeatedly or concurrently; every caller observes the first close
-// result.
+// Close closes this process's descriptor. It deliberately does not issue an
+// explicit LOCK_UN: descriptors inherited through exec share the same open-file
+// description, and unlocking here would also drop the child's lease. The
+// kernel releases the lock automatically after the last duplicate descriptor
+// is closed. It is safe to call repeatedly or concurrently.
 func (l *fileLock) Close() error {
 	if l == nil {
 		return nil
@@ -135,17 +156,8 @@ func (l *fileLock) Close() error {
 	if file == nil {
 		return nil
 	}
-	unlockErr := unlockFile(file)
 	closeErr := file.Close()
-	switch {
-	case unlockErr != nil && closeErr != nil:
-		l.closeErr = errors.Join(
-			fmt.Errorf("repoctx: unlock file lock %q: %w", file.Name(), unlockErr),
-			fmt.Errorf("repoctx: close file lock %q: %w", file.Name(), closeErr),
-		)
-	case unlockErr != nil:
-		l.closeErr = fmt.Errorf("repoctx: unlock file lock %q: %w", file.Name(), unlockErr)
-	case closeErr != nil:
+	if closeErr != nil {
 		l.closeErr = fmt.Errorf("repoctx: close file lock %q: %w", file.Name(), closeErr)
 	}
 	return l.closeErr
