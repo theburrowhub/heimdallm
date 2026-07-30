@@ -16,7 +16,8 @@ else
   APP_BUNDLE       := $(FLUTTER_BUILD)/bundle
 endif
 
-.PHONY: build-daemon build-app build-web build-cli test test-cli lint-cli test-web-tooling dev-cli test-docker dev dev-daemon dev-stop \
+.PHONY: build-daemon build-app build-web build-cli test test-cli lint-cli test-web-tooling test-compose-isolation \
+        test-smoke test-github test-e2e test-web dev-cli test-docker dev dev-daemon dev-stop \
         release-local package-macos install-service verify-linux run-linux test-install-macos \
         install-macos uninstall-macos install-linux uninstall-linux \
         setup up up-build up-daemon up-build-daemon down logs logs-daemon \
@@ -59,6 +60,23 @@ test-install-macos:
 
 test-web-tooling:
 	@sh docker/scripts/tests/test-web-tooling.sh
+
+# Static/fake-Docker regression suite for the destructive Compose test wrappers.
+# It does not build images, start containers, or touch daemon data.
+test-compose-isolation:
+	./docker/scripts/tests/test-compose-isolation.sh
+
+test-smoke:
+	./docker/scripts/test-local.sh smoke
+
+test-github:
+	./docker/scripts/test-local.sh github
+
+test-e2e:
+	./docker/scripts/test-local.sh e2e
+
+test-web:
+	./docker/scripts/test-web.sh
 
 # ── Sandboxed Go tests (EDR-safe) ─────────────────────────────────────────────
 #

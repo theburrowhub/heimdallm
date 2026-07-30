@@ -6,7 +6,12 @@ services:
     container_name: heimdallm
     restart: unless-stopped
     ports:
-      - "${HEIMDALLM_PORT:-7842}:${HEIMDALLM_PORT:-7842}"
+      # Compose-only host binding knobs let the isolated test runners request
+      # a loopback ephemeral port without adding a second merged port entry.
+      # When HOST_IP is unset the mapping remains exactly the original
+      # host-port:container-port form, preserving Docker's default bind
+      # semantics. Tests set it to 127.0.0.1 and the host port to 0.
+      - "${HEIMDALLM_COMPOSE_DAEMON_HOST_IP:+${HEIMDALLM_COMPOSE_DAEMON_HOST_IP}:}${HEIMDALLM_COMPOSE_DAEMON_HOST_PORT:-${HEIMDALLM_PORT:-7842}}:${HEIMDALLM_PORT:-7842}"
     environment:
       # ── Heimdallm config ───────────────────────────────────────────────
       - GITHUB_TOKEN=${GITHUB_TOKEN}
@@ -139,7 +144,7 @@ services:
     container_name: heimdallm-web
     restart: unless-stopped
     ports:
-      - "${HEIMDALLM_WEB_PORT:-3000}:3000"
+      - "${HEIMDALLM_COMPOSE_WEB_HOST_IP:+${HEIMDALLM_COMPOSE_WEB_HOST_IP}:}${HEIMDALLM_COMPOSE_WEB_HOST_PORT:-${HEIMDALLM_WEB_PORT:-3000}}:3000"
     environment:
       # Upstream daemon URL inside the compose network. Host + port line
       # up with the heimdallm service above.

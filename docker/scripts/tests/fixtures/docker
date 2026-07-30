@@ -1,0 +1,54 @@
+#!/bin/sh
+set -eu
+
+: "${FAKE_DOCKER_LOG:?FAKE_DOCKER_LOG must point to the test log}"
+
+{
+    printf 'docker'
+    for arg in "$@"; do
+        printf '\t%s' "$arg"
+    done
+    printf '\n'
+} >>"$FAKE_DOCKER_LOG"
+
+case "$*" in
+    *" ps -q web")
+        printf 'fake-web-container\n'
+        ;;
+    *" port web 3000")
+        if [ "${FAKE_DOCKER_FAIL_PORT:-0}" = "1" ]; then
+            printf 'simulated published-port lookup failure\n' >&2
+            exit 43
+        fi
+        printf '127.0.0.1:1\n'
+        ;;
+    *" port heimdallm "*)
+        if [ "${FAKE_DOCKER_FAIL_PORT:-0}" = "1" ]; then
+            printf 'simulated published-port lookup failure\n' >&2
+            exit 43
+        fi
+        printf '127.0.0.1:1\n'
+        ;;
+    *" exec -T heimdallm cat /data/api_token")
+        if [ "${FAKE_DOCKER_EMPTY_TOKEN:-0}" != "1" ]; then
+            printf '0123456789abcdef0123456789abcdef\n'
+        fi
+        ;;
+    *" logs"*)
+        printf 'daemon started\n'
+        printf 'github poll fetch\n'
+        ;;
+esac
+
+if [ "${1:-}" = "inspect" ]; then
+    printf 'healthy\n'
+fi
+
+case "$*" in
+    *" down -v --remove-orphans")
+        if [ "${FAKE_DOCKER_FAIL_DOWN:-0}" = "1" ]; then
+            printf 'simulated Compose cleanup failure\n' >&2
+            exit 42
+        fi
+        ;;
+esac

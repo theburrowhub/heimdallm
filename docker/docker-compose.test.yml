@@ -1,23 +1,22 @@
-# Override for local testing.
-# Usage:
-#   DOCKER_BUILDKIT=1 docker compose \
-#     -f docker/docker-compose.yml -f docker/docker-compose.test.yml up
+# Override for isolated local testing.
+#
+# Do not invoke this file directly. docker/scripts/test-local.sh and
+# docker/scripts/test-web.sh generate a unique Compose project and required
+# container names for every run.
 services:
   heimdallm:
-    container_name: heimdallm-test
+    container_name: "${HEIMDALLM_TEST_DAEMON_CONTAINER_NAME:?use an isolated Docker test runner}"
     restart: "no"
-    ports:
-      - "${HEIMDALLM_PORT:-7842}:${HEIMDALLM_PORT:-7842}"
     environment:
       - HEIMDALLM_POLL_INTERVAL=${HEIMDALLM_POLL_INTERVAL:-1m}
     volumes:
       - heimdallm-test-data:/data
-      - ./config:/config
+      - heimdallm-test-config:/config
       # Gemini OAuth tokens from host (uncomment for Level 3 E2E test):
       # - ~/.gemini:/home/heimdallm/.gemini:ro
 
   web:
-    container_name: heimdallm-web-test
+    container_name: "${HEIMDALLM_TEST_WEB_CONTAINER_NAME:?use an isolated Docker test runner}"
     restart: "no"
     # Set HEIMDALLM_API_TOKEN to empty (the entrypoint's `[ -n "$VAR" ]`
     # check treats empty and unset the same, falling through to the file
@@ -35,4 +34,6 @@ services:
 
 volumes:
   heimdallm-test-data:
+    driver: local
+  heimdallm-test-config:
     driver: local
