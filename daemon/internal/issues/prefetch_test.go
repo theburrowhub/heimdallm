@@ -253,7 +253,10 @@ func TestProcessRepo_FallsBackToFetchIssuesWhenNoPrefetch(t *testing.T) {
 // API returned 0 results for that repo (e.g., over the 1000-issue cap within
 // its group).
 func TestProcessRepo_FallsBackWhenPrefetchMapNonNilButKeyAbsent(t *testing.T) {
-	// Prefetch is warm for org/other-repo but NOT for org/repo.
+	// Prefetch is warm for org/other-repo but NOT for org/repo. A repo is
+	// genuinely absent only when it was never in the search scope — repos that
+	// WERE searched get a present-but-empty entry (see the seeding test below),
+	// because "no results" is a real answer for them, not a gap.
 	searcher := &fakeSearcher{
 		issues: []*github.Issue{
 			makeIssue(10, 10, "org/other-repo", []string{"bug"}, []string{"alice"}),
@@ -271,9 +274,9 @@ func TestProcessRepo_FallsBackWhenPrefetchMapNonNilButKeyAbsent(t *testing.T) {
 	cfg := searchCfg()
 	cfg.Assignees = []string{"alice"}
 
-	// Prefetch covers org/other-repo, not org/repo.
-	repos := []string{"org/other-repo", "org/repo"}
-	if _, err := fetcher.PrefetchIssues(simpleEligibleFn(cfg, repos), "alice", repos); err != nil {
+	// Prefetch scope deliberately excludes org/repo.
+	searched := []string{"org/other-repo"}
+	if _, err := fetcher.PrefetchIssues(simpleEligibleFn(cfg, searched), "alice", searched); err != nil {
 		t.Fatalf("PrefetchIssues failed: %v", err)
 	}
 

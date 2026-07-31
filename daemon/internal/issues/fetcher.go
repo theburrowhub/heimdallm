@@ -257,11 +257,33 @@ func (f *Fetcher) PrefetchIssues(
 			lastErr = err
 			continue
 		}
+		// Seed every repo in the group with a present-but-empty entry. The
+		// search covered them all, so "no results for this repo" is a real
+		// answer — without the seed, ProcessRepo's `_, ok := prefetched[repo]`
+		// misses and spends a per-repo REST call every cycle on exactly the
+		// idle repos the aggregation exists to eliminate. Only repos in a
+		// group whose search FAILED are left absent, so they still fall back.
+		//
+		// canon maps the lowercased configured name back to the configured
+		// name so results keyed by GitHub's canonical full_name land on the
+		// key ProcessRepo will look up. Without it a case difference would
+		// hit the empty seed and silently report zero issues for the repo.
+		canon := make(map[string]string, len(g.repos))
+		for _, r := range g.repos {
+			canon[strings.ToLower(r)] = r
+			if _, exists := byRepo[r]; !exists {
+				byRepo[r] = nil
+			}
+		}
 		for _, issue := range raw {
 			if issue.Repo == "" {
 				continue
 			}
-			byRepo[issue.Repo] = append(byRepo[issue.Repo], issue)
+			key := issue.Repo
+			if configured, ok := canon[strings.ToLower(issue.Repo)]; ok {
+				key = configured
+			}
+			byRepo[key] = append(byRepo[key], issue)
 		}
 		totalRepos += len(g.repos)
 		totalIssues += len(raw)

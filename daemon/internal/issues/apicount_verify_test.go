@@ -1,7 +1,9 @@
 package issues_test
 
 import (
+	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/heimdallm/daemon/internal/config"
@@ -13,39 +15,46 @@ import (
 // contrast the aggregated Search path against the per-repo baseline.
 type countingFetcher struct {
 	calls int
+	repos []string
 }
 
 func (c *countingFetcher) FetchIssues(repo string, cfg config.IssueTrackingConfig, user string) ([]*github.Issue, error) {
 	c.calls++
+	c.repos = append(c.repos, repo)
 	return nil, nil
 }
 
-// TestAPICallCount_PrefetchCollapsesPerRepoCalls measures the point of the
-// gh-api-efficiency work: with the aggregated Search prefetch enabled, a poll
-// cycle over N repos sharing one assignee set issues ONE API call instead of N.
+// TestAPICallCount_PrefetchCoversIdleRepos is the load-bearing test for the
+// aggregated-search work, and it deliberately models the shape of the real
+// deployment that motivated it: 47 monitored repos of which only 16 actually
+// have open assigned issues.
 //
-// 47 repos mirrors the real deployment (discovery over freepik-company +
-// theburrowhub), so the numbers map onto the production rate-limit budget:
-// at poll_interval=1m that is 47*60=2820 calls/hour vs 60 calls/hour.
-func TestAPICallCount_PrefetchCollapsesPerRepoCalls(t *testing.T) {
-	const numRepos = 47
+// The idle majority is the whole point. An earlier version of this test gave
+// every repo an issue, which made it pass while hiding the defect that repos
+// absent from the search results fell through to a per-repo REST call every
+// cycle — i.e. 31 of 47 repos kept paying the cost the aggregation exists to
+// remove. Keep the asymmetry here.
+func TestAPICallCount_PrefetchCoversIdleRepos(t *testing.T) {
+	const (
+		numRepos        = 47
+		reposWithIssues = 16
+	)
 
 	repos := make([]string, numRepos)
 	for i := range repos {
 		repos[i] = fmt.Sprintf("org/repo-%02d", i)
 	}
 
-	// Give the searcher one issue per repo so the prefetch map is populated
-	// for every repo — otherwise ProcessRepo would fall back to REST.
-	all := make([]*github.Issue, 0, numRepos)
-	for i, r := range repos {
-		all = append(all, makeIssue(int64(i+1), i+1, r, []string{"bug"}, nil))
+	// Only the first 16 repos have issues; the other 31 are idle.
+	var all []*github.Issue
+	for i := 0; i < reposWithIssues; i++ {
+		all = append(all, makeIssue(int64(i+1), i+1, repos[i], []string{"bug"}, nil))
 	}
 
 	searcher := &fakeSearcher{issues: all}
 	rest := &countingFetcher{}
 
-	fetcher := issues.NewFetcher(rest, nil, &fakeDedup{}, nil)
+	fetcher := issues.NewFetcher(rest, nil, &fakeDedup{}, &fakePipeline{})
 	fetcher.SetSearcher(searcher)
 
 	byRepo, err := fetcher.PrefetchIssues(simpleEligibleFn(searchCfg(), repos), "alice", repos)
@@ -53,18 +62,65 @@ func TestAPICallCount_PrefetchCollapsesPerRepoCalls(t *testing.T) {
 		t.Fatalf("PrefetchIssues: %v", err)
 	}
 
-	t.Logf("prefetch ON : %d aggregated search call(s) covering %d repos", searcher.calls, numRepos)
-	t.Logf("prefetch OFF: %d per-repo REST call(s) would be needed", numRepos)
-	t.Logf("reduction   : %dx fewer calls per poll cycle", numRepos/max(searcher.calls, 1))
-
 	if searcher.calls != 1 {
 		t.Errorf("expected 1 aggregated search call, got %d", searcher.calls)
 	}
-	if rest.calls != 0 {
-		t.Errorf("prefetch path must not touch the per-repo REST endpoint, got %d calls", rest.calls)
-	}
+
+	// Every searched repo must be present — idle ones with an empty slice.
+	// A missing key here is a per-repo REST call every poll cycle.
 	if len(byRepo) != numRepos {
-		t.Errorf("prefetch map covers %d repos, want %d — uncovered repos fall back to REST",
-			len(byRepo), numRepos)
+		var missing []string
+		for _, r := range repos {
+			if _, ok := byRepo[r]; !ok {
+				missing = append(missing, r)
+			}
+		}
+		t.Errorf("prefetch map covers %d/%d repos; %d missing would fall back to REST: %s",
+			len(byRepo), numRepos, len(missing), strings.Join(missing, " "))
+	}
+
+	// Drive the real consumer: no repo, idle or not, may touch per-repo REST.
+	optsFor := func(_ *github.Issue) (issues.RunOptions, bool) { return issues.RunOptions{}, true }
+	for _, r := range repos {
+		if _, err := fetcher.ProcessRepo(context.Background(), r, searchCfg(), "alice", optsFor); err != nil {
+			t.Fatalf("ProcessRepo(%s): %v", r, err)
+		}
+	}
+
+	t.Logf("prefetch ON : %d aggregated search call(s) covering %d repos (%d idle)",
+		searcher.calls, numRepos, numRepos-reposWithIssues)
+	t.Logf("prefetch OFF: %d per-repo REST call(s) would be needed", numRepos)
+
+	if rest.calls != 0 {
+		t.Errorf("per-repo REST must not be touched, got %d calls: %s",
+			rest.calls, strings.Join(rest.repos, " "))
+	}
+}
+
+// TestPrefetchIssues_FailedGroupStillFallsBack guards the other side of the
+// seeding change: repos are seeded only for groups whose search SUCCEEDED, so a
+// failed search must still leave its repos absent and fall back to REST rather
+// than silently reporting zero issues for them.
+func TestPrefetchIssues_FailedGroupStillFallsBack(t *testing.T) {
+	searcher := &fakeSearcher{err: fmt.Errorf("search unavailable")}
+	rest := &countingFetcher{}
+
+	fetcher := issues.NewFetcher(rest, nil, &fakeDedup{}, &fakePipeline{})
+	fetcher.SetSearcher(searcher)
+
+	repos := []string{"org/a", "org/b"}
+	if _, err := fetcher.PrefetchIssues(simpleEligibleFn(searchCfg(), repos), "alice", repos); err == nil {
+		t.Fatal("expected the search error to propagate")
+	}
+
+	optsFor := func(_ *github.Issue) (issues.RunOptions, bool) { return issues.RunOptions{}, true }
+	for _, r := range repos {
+		if _, err := fetcher.ProcessRepo(context.Background(), r, searchCfg(), "alice", optsFor); err != nil {
+			t.Fatalf("ProcessRepo(%s): %v", r, err)
+		}
+	}
+	if rest.calls != len(repos) {
+		t.Errorf("failed search must fall back to REST for every repo; got %d of %d",
+			rest.calls, len(repos))
 	}
 }

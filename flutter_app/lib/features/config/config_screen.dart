@@ -415,7 +415,10 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
       TextFormField(
         initialValue: _polling.pollInterval,
         decoration: const InputDecoration(
-          labelText: 'Poll interval',
+          // Deliberately distinct from the 'Poll interval' field in Settings:
+          // two fields sharing a label make find.text() ambiguous and break
+          // the existing widget test.
+          labelText: 'Tier-2 poll interval',
           helperText: 'Override global poll interval (e.g. 2m, 30s)',
           border: OutlineInputBorder(),
         ),
