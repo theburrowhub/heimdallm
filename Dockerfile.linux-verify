@@ -53,16 +53,25 @@ RUN cd flutter_app && flutter pub get
 RUN cd flutter_app && flutter test
 
 # 4. Build daemon
-RUN cd daemon && make build
+# VERSION is stamped into the binary (main.version); defaults to "dev" so a
+# bare `docker build` still works. `make verify-linux` passes the current
+# `git describe` output.
+ARG VERSION=dev
+RUN cd daemon && make build VERSION=$VERSION
 
 # 5. Build Flutter app (Linux release)
 RUN cd flutter_app && flutter build linux --release
 
-# 6. Verify output artifacts exist
+# 6. Verify output artifacts exist and the daemon reports the stamped version.
+# The version check guards the ldflags stamping: `go build -X` on a renamed or
+# missing symbol is NOT a build error, so without this a refactor could
+# silently regress every install back to reporting "dev" (#645).
 RUN test -f daemon/bin/heimdallm \
     && test -d flutter_app/build/linux/x64/release/bundle \
     && test -f flutter_app/build/linux/x64/release/bundle/heimdallm \
-    && echo "✓  All output artifacts verified"
+    && REPORTED="$(daemon/bin/heimdallm --version)" \
+    && { test "$REPORTED" = "$VERSION" || { echo "✗  Daemon reports '$REPORTED', expected '$VERSION' — version stamping is broken"; exit 1; }; } \
+    && echo "✓  All output artifacts verified (daemon version: $REPORTED)"
 
 # ── Runtime deps for `make run-linux` GUI testing ────────────────────────────
 # These are NOT needed for CI build verification — only for displaying the app

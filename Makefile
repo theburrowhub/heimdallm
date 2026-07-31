@@ -26,8 +26,20 @@ endif
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
+# Version of the current checkout, stamped into locally-built daemon binaries
+# (main.version). Distinct from VERSION below, which computes the NEXT release
+# tag for release-local. The leading "v" is stripped so all build paths report
+# the same format as goreleaser's {{.Version}} (e.g. "0.7.10", not "v0.7.10").
+# Release paths must override this with the version being released:
+#   make build-daemon GIT_VERSION=0.7.11
+# Only v-prefixed tags are considered (--match 'v*'): repos accumulate
+# non-version tags (backups, accidental `git tag list`) that would otherwise
+# win the describe and get stamped into the binary.
+# Lazily expanded (=) so git describe only runs for targets that use it.
+GIT_VERSION = $(shell (git describe --tags --match 'v*' --always --dirty 2>/dev/null || echo dev) | sed 's/^v//')
+
 build-daemon:
-	cd daemon && make build
+	cd daemon && make build VERSION=$(GIT_VERSION)
 
 build-app:
 	cd flutter_app && flutter build $(FLUTTER_DEVICE) --release
@@ -178,7 +190,10 @@ VERSION ?= $(shell \
 	PAT=$$(echo $$VER | cut -d. -f3); \
 	echo "v$$MAJ.$$MIN.$$((PAT+1))")
 
-release-local: _check-macos _check-signing _check-gh build-daemon
+release-local: _check-macos _check-signing _check-gh
+	@# Stamp the daemon with the version being released, not the checkout's
+	@# git-describe (which still points at the PREVIOUS tag at this point).
+	$(MAKE) build-daemon GIT_VERSION=$(VERSION:v%=%)
 	@echo ""
 	@echo "╔══════════════════════════════════════════════╗"
 	@echo "║  Heimdallm local release                     ║"
@@ -417,20 +432,20 @@ _post-up-hints:
 	@echo "Next: open http://localhost:$${HEIMDALLM_WEB_PORT:-3000}  ·  logs: \`make logs\`  ·  stop: \`make down\`"
 
 up: _check-env _check-buildkit
-	DOCKER_BUILDKIT=1 docker compose -f $(COMPOSE_FILE) up -d
+	DOCKER_BUILDKIT=1 HEIMDALLM_VERSION=$(GIT_VERSION) docker compose -f $(COMPOSE_FILE) up -d
 	@$(MAKE) --no-print-directory _post-up-hints
 
 # Like `up` but rebuilds images from local source (use after `git pull` on main).
 up-build: _check-env _check-buildkit
-	DOCKER_BUILDKIT=1 docker compose -f $(COMPOSE_FILE) up -d --build --pull always
+	DOCKER_BUILDKIT=1 HEIMDALLM_VERSION=$(GIT_VERSION) docker compose -f $(COMPOSE_FILE) up -d --build --pull always
 	@$(MAKE) --no-print-directory _post-up-hints
 
 up-daemon: _check-env
-	docker compose -f $(COMPOSE_FILE) up -d heimdallm
+	HEIMDALLM_VERSION=$(GIT_VERSION) docker compose -f $(COMPOSE_FILE) up -d heimdallm
 
 # Like `up-daemon` but rebuilds the daemon image from local source.
 up-build-daemon: _check-env
-	docker compose -f $(COMPOSE_FILE) up -d --build --pull always heimdallm
+	HEIMDALLM_VERSION=$(GIT_VERSION) docker compose -f $(COMPOSE_FILE) up -d --build --pull always heimdallm
 
 down: _check-docker
 	docker compose -f $(COMPOSE_FILE) down
@@ -502,7 +517,7 @@ uninstall-macos: _check-macos-user
 verify-linux:
 	@command -v docker >/dev/null || { echo "❌  Docker is required. Install it from https://docs.docker.com/get-docker/"; exit 1; }
 	@echo "▶  Building Linux verification image (this may take a few minutes on first run)..."
-	docker build -f Dockerfile.linux-verify -t heimdallm-verify .
+	docker build -f Dockerfile.linux-verify --build-arg VERSION=$(GIT_VERSION) -t heimdallm-verify .
 	@echo ""
 	@echo "✅  Linux build verification passed"
 
