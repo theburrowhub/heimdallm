@@ -723,7 +723,13 @@ func main() {
 	// Push the [polling] runtime knobs into the client, limiter and scheduler.
 	// Deferred to here rather than at client construction because it needs
 	// adaptiveSched; nothing issues requests before the pollers start.
-	applyClientRuntimeConfig(ghClient, limiter, adaptiveSched, cfg)
+	// Under cfgMu like every other cfg read: a reload can already be in flight
+	// by this point, and the adaptiveSched construction above locks for the
+	// same reason.
+	cfgMu.Lock()
+	startupCfg := cfg
+	cfgMu.Unlock()
+	applyClientRuntimeConfig(ghClient, limiter, adaptiveSched, startupCfg)
 
 	// startPollers launches all polling goroutines under the given context.
 	// Returns a cancel function and a WaitGroup that completes when all
@@ -2921,10 +2927,10 @@ func runTier2(
 	// its interval so active repos stay at min_interval while idle
 	// repos back off toward max_interval.
 	//
-	// The Search API prefetch always covers ALL currentRepos regardless
-	// of the adaptive filter. This keeps the C2 prefetch intact (one
-	// cheap search query per cycle) while the actual processing fan-out
-	// is limited to due repos. On search error the per-repo REST fallback
+	// The Search API prefetch is scoped to the repos this tick will
+	// actually process: adaptive gating runs first, and a tick with
+	// nothing due skips the prefetch entirely rather than warming a
+	// cache no one reads. On search error the per-repo REST fallback
 	// inside ProcessRepo is unaffected.
 	//
 	// When polling.adaptive is false (default) the behaviour is EXACTLY
@@ -2966,19 +2972,10 @@ func runTier2(
 			}
 		}
 
-		// Aggregated Search API prefetch: one query covers all eligible repos,
-		// using the separate search rate budget (30/min) instead of the core
-		// REST budget (5000/hr). On search error the per-repo REST fallback is
-		// still active inside ProcessRepo — no repos are skipped.
-		// The prefetch always covers ALL currentRepos even in adaptive mode so
-		// the search result cache is warm for whichever repos are due.
-		// Take the search budget through the limiter before spending it. The
-		// observer already records the "search" resource from
-		// X-RateLimit-Resource, but nothing consumed it: every acquire went to
-		// "core". Search is quoted at 30/min, so several assignee groups
-		// paginating on a 1m tick can exhaust it with no proactive contention
-		// at all — moving spend off the core bucket only helps if the new
-		// bucket is protected too.
+		// Aggregated Search API prefetch: one query per assignee group covers
+		// the repos this tick will process, spending the separate search
+		// budget (30/min) instead of the core REST one (5000/hr). On search
+		// error the per-repo REST fallback inside ProcessRepo is unaffected.
 		// Adaptive gating runs BEFORE the prefetch so a tick with nothing due
 		// spends no search query at all. The scheduler must be non-nil to be
 		// consulted: adaptiveFn and adaptiveSched are separate parameters and
@@ -3938,7 +3935,9 @@ func (a *tier2Adapter) reviewReadyForPublishRetry(rev *store.Review) (bool, erro
 // The method iterates repos to build the eligible list (skipping repos with
 // issue_tracking disabled or autonomous mode enabled — the same gating
 // ProcessRepo applies — so the search scope matches what would actually be
-// processed).
+// processed). That exclusion happens inside PrefetchIssues, which reads the
+// resolved config and autonomous flag eligibleFn returns; eligibleFn's own
+// third result is the "repo is known" flag and is always true here.
 func (a *tier2Adapter) PrefetchIssuesForCycle(repos []string) {
 	if a.fetcher == nil {
 		return
