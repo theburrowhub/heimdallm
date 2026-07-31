@@ -167,7 +167,7 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
 
     _setStatus('Starting Heimdallm…');
     try {
-      await _platform.spawnDaemon(binaryPath);
+      await _spawnDaemonUnlessRunning(api, binaryPath);
     } catch (e) {
       _setError(
         title: 'Could not start daemon',
@@ -180,6 +180,22 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
 
     _setStatus('Waiting for Heimdallm…');
     await _waitForHealth(api, retryBinary: binaryPath);
+  }
+
+  /// Spawns the daemon only when nothing is answering on its port.
+  ///
+  /// The single most important invariant of the boot path: never add a second
+  /// daemon. A daemon that loses the port bind used to stay alive and keep
+  /// polling GitHub on the same token, so every redundant spawn permanently
+  /// multiplied API consumption until the hourly quota was gone (#646). The
+  /// daemon now exits on a failed bind, but the app must not rely on that —
+  /// older daemons are still out there, and not spawning is free.
+  ///
+  /// Reachability, not health, is the right question here: see
+  /// [ApiClient.daemonReachable].
+  Future<void> _spawnDaemonUnlessRunning(ApiClient api, String binaryPath) async {
+    if (await api.daemonReachable()) return;
+    await _platform.spawnDaemon(binaryPath);
   }
 
   Future<void> _waitForHealth(ApiClient api, {String? retryBinary}) async {
@@ -202,7 +218,10 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
           return;
         }
         daemonRestarts++;
-        try { await _platform.spawnDaemon(retryBinary); } catch (_) {}
+        // Guarded: a daemon that is up but reporting degraded (503) keeps
+        // failing checkHealth above, and re-spawning on that signal is what
+        // stacked five daemons on one token in #646.
+        try { await _spawnDaemonUnlessRunning(api, retryBinary); } catch (_) {}
       }
     }
   }
