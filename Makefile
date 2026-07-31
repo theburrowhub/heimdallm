@@ -26,8 +26,13 @@ endif
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
+# Version of the current checkout, stamped into locally-built daemon binaries
+# (main.version). Distinct from VERSION below, which computes the NEXT release
+# tag for release-local.
+GIT_VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+
 build-daemon:
-	cd daemon && make build
+	cd daemon && make build VERSION=$(GIT_VERSION)
 
 build-app:
 	cd flutter_app && flutter build $(FLUTTER_DEVICE) --release
@@ -502,7 +507,7 @@ uninstall-macos: _check-macos-user
 verify-linux:
 	@command -v docker >/dev/null || { echo "❌  Docker is required. Install it from https://docs.docker.com/get-docker/"; exit 1; }
 	@echo "▶  Building Linux verification image (this may take a few minutes on first run)..."
-	docker build -f Dockerfile.linux-verify -t heimdallm-verify .
+	docker build -f Dockerfile.linux-verify --build-arg VERSION=$(GIT_VERSION) -t heimdallm-verify .
 	@echo ""
 	@echo "✅  Linux build verification passed"
 

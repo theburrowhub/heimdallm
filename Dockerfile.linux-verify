@@ -53,7 +53,11 @@ RUN cd flutter_app && flutter pub get
 RUN cd flutter_app && flutter test
 
 # 4. Build daemon
-RUN cd daemon && make build
+# VERSION is stamped into the binary (main.version); defaults to "dev" so a
+# bare `docker build` still works. `make verify-linux` passes the current
+# `git describe` output.
+ARG VERSION=dev
+RUN cd daemon && make build VERSION=$VERSION
 
 # 5. Build Flutter app (Linux release)
 RUN cd flutter_app && flutter build linux --release
