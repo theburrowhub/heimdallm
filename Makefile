@@ -32,7 +32,8 @@ endif
 # the same format as goreleaser's {{.Version}} (e.g. "0.7.10", not "v0.7.10").
 # Release paths must override this with the version being released:
 #   make build-daemon GIT_VERSION=0.7.11
-GIT_VERSION := $(shell (git describe --tags --always --dirty 2>/dev/null || echo dev) | sed 's/^v//')
+# Lazily expanded (=) so git describe only runs for targets that use it.
+GIT_VERSION = $(shell (git describe --tags --always --dirty 2>/dev/null || echo dev) | sed 's/^v//')
 
 build-daemon:
 	cd daemon && make build VERSION=$(GIT_VERSION)

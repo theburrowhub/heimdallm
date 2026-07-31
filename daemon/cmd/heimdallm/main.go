@@ -87,7 +87,7 @@ func main() {
 				os.Exit(1)
 			}
 			return
-		case "version", "--version":
+		case "version", "--version", "-version":
 			fmt.Println(versionString())
 			return
 		}

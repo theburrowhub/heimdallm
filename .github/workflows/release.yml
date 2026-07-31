@@ -252,7 +252,9 @@ jobs:
         # workflow_dispatch input cannot inject shell into this job.
         env:
           TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
-        run: make build-daemon GIT_VERSION="${TAG#v}"
+        run: |
+          test -n "$TAG" || { echo "release tag is empty — refusing to stamp a blank version"; exit 1; }
+          make build-daemon GIT_VERSION="${TAG#v}"
 
       - name: Build Flutter app (Linux release)
         working-directory: flutter_app
@@ -442,7 +444,9 @@ jobs:
         # workflow_dispatch input cannot inject shell into this job.
         env:
           TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
-        run: make build-daemon GIT_VERSION="${TAG#v}"
+        run: |
+          test -n "$TAG" || { echo "release tag is empty — refusing to stamp a blank version"; exit 1; }
+          make build-daemon GIT_VERSION="${TAG#v}"
 
       - name: Build Flutter app (release)
         working-directory: flutter_app
