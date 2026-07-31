@@ -372,20 +372,46 @@ func main() {
 		StartedAt: time.Now(),
 	})
 
-	// Claim the HTTP port before starting anything that costs GitHub API
-	// budget. A second daemon instance loses the bind, and until #646 it kept
-	// running anyway: no HTTP listener, so invisible to the app and to
-	// operators, yet polling GitHub on the same token as the instance that did
-	// win the port. Five of those quietly multiplied API consumption ~6x and
-	// exhausted the hourly quota for hours. Binding here, before the pollers
-	// and workers spin up, turns that silent duplication into an immediate
-	// non-zero exit.
+	// Claim the HTTP port before the pollers and workers spin up. A second
+	// daemon instance loses the bind, and until #646 it kept running anyway: no
+	// HTTP listener, so invisible to the app and to operators, yet polling
+	// GitHub on the same token as the instance that did win the port. Five of
+	// those quietly multiplied API consumption ~6x and exhausted the hourly
+	// quota for hours. Binding here turns that silent duplication into an
+	// immediate non-zero exit.
+	//
+	// (A losing instance still spends the one AuthenticatedUser call above plus
+	// store/NATS setup before it gets here. Cheap and bounded, unlike the
+	// per-tick polling this prevents.)
 	httpListener, err := srv.Listen(cfg.Server.Port, cfg.Server.BindAddr)
 	if err != nil {
 		slog.Error("daemon: cannot bind HTTP port — another instance is probably already running; exiting",
 			"port", cfg.Server.Port, "bind", cfg.Server.BindAddr, "err", err)
+		// os.Exit skips deferred cleanup, so release what is already open.
+		// Logging is unbuffered (server.RotatingWriter writes straight to the
+		// file), so the diagnostics above are already on disk.
+		eventBus.Stop()
+		s.Close()
+		if logCloser != nil {
+			logCloser.Close()
+		}
 		os.Exit(1)
 	}
+
+	// Serve straight away. A bound socket nobody serves is worse than a closed
+	// one: the kernel completes TCP handshakes into the accept backlog, so the
+	// app's probes hang for their full timeout instead of failing fast — and a
+	// timed-out reachability probe reads as "no daemon", which is exactly the
+	// redundant-spawn path #646 is about. /health answers 503 "starting" until
+	// MarkReady below, so callers get a real answer during the wiring window.
+	srv.MarkStarting()
+	slog.Info("daemon: HTTP listener bound", "port", cfg.Server.Port, "bind", cfg.Server.BindAddr)
+	serveFailed := make(chan error, 1)
+	go func() {
+		if err := srv.Serve(httpListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serveFailed <- err
+		}
+	}()
 
 	srv.SetNATSConn(eventBus.Conn())
 	srv.SetConfigPath(cfgPath)
@@ -2414,15 +2440,11 @@ func main() {
 		return nil
 	})
 
-	// The listener is already bound (see srv.Listen above), so this log line
-	// now means what it says: the daemon is reachable.
+	// Every dependency is wired: /health can run its deep checks now. The
+	// listener has been bound and served since srv.Listen above, so this log
+	// line means what it says — the daemon is reachable and ready.
+	srv.MarkReady()
 	slog.Info("daemon started", "port", cfg.Server.Port, "bind", cfg.Server.BindAddr)
-	serveFailed := make(chan error, 1)
-	go func() {
-		if err := srv.Serve(httpListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			serveFailed <- err
-		}
-	}()
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -2463,6 +2485,13 @@ func main() {
 	}, exec.TerminateAll, producerSettleDelay)
 	broker.Stop()
 	if serveDied {
+		// Same as the bind-failure path: os.Exit skips the deferred cleanup, so
+		// release the resources that matter before reporting failure.
+		eventBus.Stop()
+		s.Close()
+		if logCloser != nil {
+			logCloser.Close()
+		}
 		os.Exit(1)
 	}
 }
