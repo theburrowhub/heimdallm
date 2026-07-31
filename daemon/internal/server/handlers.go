@@ -442,8 +442,16 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
+// HeaderDaemon marks a response as coming from a Heimdallm daemon. The app uses
+// it on /health to tell us apart from an unrelated process squatting on the
+// port: `{"status": ...}` alone is the shape of half the health endpoints in the
+// industry (Spring Boot Actuator, most Node/Go services), so matching on the
+// body would classify those as ours and silently never spawn a daemon.
+const HeaderDaemon = "X-Heimdallm-Daemon"
+
 func (srv *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
+	w.Header().Set(HeaderDaemon, "1")
 	// Serving starts right after the bind, long before the pollers, workers and
 	// event bus are wired, so answer honestly during that window instead of
 	// running deep checks against half-built dependencies. 503 keeps

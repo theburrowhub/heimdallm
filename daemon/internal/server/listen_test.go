@@ -240,6 +240,28 @@ func TestHealth_ReportsStartingUntilMarkReady(t *testing.T) {
 	}
 }
 
+// The app identifies our daemon by this header, so every /health response must
+// carry it — including the 503s. Without it the app falls back to sniffing the
+// body, and a bare {"status": ...} is the shape of most health endpoints in the
+// wild, so a foreign service would be mistaken for the daemon and no daemon
+// would ever be spawned.
+func TestHealth_AlwaysCarriesDaemonHeader(t *testing.T) {
+	srv := newListenTestServer(t)
+
+	for _, state := range []string{"starting", "ready"} {
+		if state == "starting" {
+			srv.MarkStarting()
+		} else {
+			srv.MarkReady()
+		}
+		w := httptest.NewRecorder()
+		srv.Router().ServeHTTP(w, httptest.NewRequest("GET", "/health", nil))
+		if got := w.Header().Get(server.HeaderDaemon); got != "1" {
+			t.Errorf("%s: %s header = %q, want \"1\"", state, server.HeaderDaemon, got)
+		}
+	}
+}
+
 func httpGetWithRetry(url string) (*http.Response, error) {
 	var lastErr error
 	for i := 0; i < 50; i++ {

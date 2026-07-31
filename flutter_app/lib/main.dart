@@ -173,7 +173,7 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
     try {
       await _spawnDaemonUnlessRunning(api, binaryPath);
     } on _ForeignPortException {
-      _setForeignPortError();
+      _setForeignPortError(api.daemonPort);
       return;
     } catch (e) {
       _setError(
@@ -218,7 +218,13 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
 
   Future<void> _waitForHealth(ApiClient api, {String? retryBinary}) async {
     const maxDaemonRestarts = 3;
+    // How many spawn windows to allow a daemon that owns the port but is not
+    // healthy before offering the user a way out. A "starting" daemon clears in
+    // seconds; a rate-limited one can stay degraded for hours, and blocking the
+    // splash on that locks the user out of the app entirely.
+    const maxDegradedWindows = 3;
     var daemonRestarts = 0;
+    var degradedWindows = 0;
     for (var attempt = 0; ; attempt++) {
       await Future.delayed(const Duration(milliseconds: 400));
       if (await api.checkHealth()) {
@@ -226,6 +232,20 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
         return;
       }
       if (attempt > 0 && attempt % 25 == 0 && retryBinary != null) {
+        // Check the budget BEFORE spawning: counting the spawn first and then
+        // testing the limit fires the terminal error immediately after the last
+        // daemon was launched, denying it the health window the retry exists to
+        // provide.
+        if (daemonRestarts >= maxDaemonRestarts) {
+          _setError(
+            title: 'Daemon failed to start',
+            details: 'Heimdallm could not start after $maxDaemonRestarts attempts.',
+            hint: 'Try restarting the app. If the problem persists, check your installation:\n'
+                'xattr -cr /Applications/Heimdallm.app',
+          );
+          return;
+        }
+
         // A daemon that owns the port but answers 503 keeps failing
         // checkHealth: it is degraded (rate-limited, stale last_poll) or still
         // wiring up, not absent. Re-spawning on that signal is what stacked
@@ -236,40 +256,50 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
         try {
           spawned = await _spawnDaemonUnlessRunning(api, retryBinary);
         } on _ForeignPortException {
-          _setForeignPortError();
+          _setForeignPortError(api.daemonPort);
           return;
         } catch (_) {
           continue;
         }
+
         if (!spawned) {
+          degradedWindows++;
+          if (degradedWindows >= maxDegradedWindows) {
+            _setDegradedDaemonError();
+            return;
+          }
           // Tell the user what we are actually waiting on, instead of leaving
           // the splash on a generic message while nothing appears to happen.
           _setStatus('Heimdallm is running but not ready yet — waiting…');
           continue;
         }
-
         daemonRestarts++;
-        if (daemonRestarts >= maxDaemonRestarts) {
-          _setError(
-            title: 'Daemon failed to start',
-            details: 'Heimdallm could not start after $maxDaemonRestarts attempts.',
-            hint: 'Try restarting the app. If the problem persists, check your installation:\n'
-                'xattr -cr /Applications/Heimdallm.app',
-          );
-          return;
-        }
       }
     }
   }
 
-  void _setForeignPortError() {
+  void _setForeignPortError(int port) {
     _setError(
-      title: 'Port 7842 is in use by another process',
+      title: 'Port $port is in use by another process',
       details: 'Something is answering on Heimdallm\'s port, but it is not the '
           'Heimdallm daemon. Heimdallm will not start a daemon that cannot bind '
           'the port.',
       hint: 'Find the process and stop it, then relaunch:\n'
-          'lsof -nP -iTCP:7842 -sTCP:LISTEN',
+          'lsof -nP -iTCP:$port -sTCP:LISTEN',
+    );
+  }
+
+  /// The daemon owns the port and answers, but never reports healthy. Most
+  /// often a GitHub rate-limit episode leaving `last_poll` stale, which can
+  /// last hours — so give the user an exit instead of an endless splash.
+  void _setDegradedDaemonError() {
+    _setError(
+      title: 'Heimdallm is running but not ready',
+      details: 'The daemon is answering but reports itself unhealthy. This is '
+          'usually a GitHub rate-limit episode leaving the last poll stale, '
+          'which can take a while to clear.',
+      hint: 'Retry to keep waiting, or check the daemon log:\n'
+          '~/.local/share/heimdallm/heimdallm.log',
     );
   }
 

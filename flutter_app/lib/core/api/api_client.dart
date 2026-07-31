@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../models/activity.dart';
@@ -73,26 +74,58 @@ class ApiClient {
       final resp =
           await _client.get(_uri('/health')).timeout(const Duration(seconds: 3));
       return _looksLikeHeimdallm(resp) ? PortOwner.daemon : PortOwner.foreign;
-    } catch (_) {
+    } on TimeoutException {
       return PortOwner.none;
+    } catch (e) {
+      // Connection refused / host unreachable means nothing is listening.
+      // Matched by name rather than `on SocketException` because this file is
+      // shared with the web build, where importing dart:io does not compile.
+      if (_isSocketFailure(e)) return PortOwner.none;
+      // Otherwise we reached something that failed to speak HTTP properly (raw
+      // TCP service, malformed response, TLS on a plaintext port). Someone holds
+      // the port, so spawning would only fail on the bind — report it as foreign
+      // so the user gets the "free the port" guidance instead of a generic
+      // start failure.
+      return PortOwner.foreign;
     }
   }
+
+  static bool _isSocketFailure(Object e) =>
+      e.runtimeType.toString() == 'SocketException';
 
   /// Distinguishes our daemon from an unrelated process squatting on the port.
   /// Without this the app would silently never spawn, exhaust its retries and
   /// report a generic health failure with no hint that something else holds the
-  /// port. Every daemon response — healthy, degraded or starting — carries a
-  /// `status` field; 401 has no body to inspect but only our daemon enforces
-  /// the API token, so treat it as ours.
+  /// port.
+  ///
+  /// The [HeaderDaemon] header is the authoritative signal. The body fallback
+  /// exists only for daemons predating that header, and deliberately requires
+  /// `checks` or `version` alongside `status`: a bare `{"status": "..."}` is the
+  /// shape of most health endpoints in the wild (`{"status":"UP"}` from Spring
+  /// Boot Actuator, `{"status":"ok"}` from countless Node/Go services), and
+  /// accepting it would classify a foreign service as ours.
+  ///
+  /// A 401/403 has no body worth inspecting, but only our daemon enforces the
+  /// API token on this port, so treat it as ours. Documented tradeoff: a foreign
+  /// auth-protected service would be misread as the daemon.
+  static const _daemonHeader = 'x-heimdallm-daemon';
+
   static bool _looksLikeHeimdallm(http.Response resp) {
+    if (resp.headers.containsKey(_daemonHeader)) return true;
     if (resp.statusCode == 401 || resp.statusCode == 403) return true;
     try {
       final body = jsonDecode(resp.body);
-      return body is Map<String, dynamic> && body['status'] is String;
+      if (body is! Map<String, dynamic>) return false;
+      if (body['status'] is! String) return false;
+      return body.containsKey('checks') || body.containsKey('version');
     } catch (_) {
       return false;
     }
   }
+
+  /// The daemon port, derived from the configured base URL so error messages and
+  /// diagnostics never hardcode the default.
+  int get daemonPort => Uri.parse(_platform.apiBaseUrl).port;
 
   /// Returns the full /health payload, or null if the daemon is unreachable.
   /// Includes status, version (optional), started_at (optional, RFC3339).
