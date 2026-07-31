@@ -39,6 +39,13 @@ type IssuesFetcher interface {
 	FetchIssues(repo string, cfg config.IssueTrackingConfig, authenticatedUser string) ([]*github.Issue, error)
 }
 
+// IssueSearcher is the optional Search API back-end used by PrefetchIssues.
+// Keeping it separate from IssuesFetcher lets tests that only need FetchIssues
+// inject a nil searcher without changes.
+type IssueSearcher interface {
+	SearchIssues(query string) ([]*github.Issue, error)
+}
+
 // PipelineRunner is the subset of *Pipeline the fetcher uses. Takes a
 // context so shutdown cancellation propagates through the whole dispatch
 // path down to the git / HTTP calls inside the pipeline.
@@ -97,6 +104,12 @@ type Fetcher struct {
 
 	stageClient StageTransitionClient
 	stageBroker Publisher
+
+	// searcher is optional. When set, PrefetchIssues uses the Search API to
+	// aggregate issue results across repos in a single call, populating
+	// prefetched so ProcessRepo can skip the per-repo REST call.
+	searcher   IssueSearcher
+	prefetched map[string][]*github.Issue // set by PrefetchIssues; read by ProcessRepo
 }
 
 // NewFetcher wires the orchestrator. All dependencies are interfaces so
@@ -128,6 +141,192 @@ func (f *Fetcher) SetStageTransitioner(client StageTransitionClient, broker Publ
 	f.stageBroker = broker
 }
 
+// SetSearcher enables the aggregated Search API prefetch path. When set,
+// PrefetchIssues is available for callers to warm the prefetch map before
+// calling ProcessRepo.
+func (f *Fetcher) SetSearcher(s IssueSearcher) {
+	f.searcher = s
+}
+
+// EligibleFn is the per-repo eligibility callback passed to PrefetchIssues.
+// It returns the effective IssueTrackingConfig for repo, whether autonomous
+// mode is enabled (which disables issue processing), and whether the repo
+// should be included at all (ok=false skips the repo silently).
+type EligibleFn func(repo string) (it config.IssueTrackingConfig, autonomousEnabled bool, ok bool)
+
+// assigneeKey builds a canonical string key for a resolved assignee set so
+// repos that share the same effective assignees end up in the same search
+// group. The key is the sorted, joined assignee list (case-preserved to match
+// the GitHub login convention).
+func assigneeKey(assignees []string) string {
+	if len(assignees) == 0 {
+		return ""
+	}
+	sorted := make([]string, len(assignees))
+	copy(sorted, assignees)
+	// simple insertion sort — lists are always tiny (1–5 entries)
+	for i := 1; i < len(sorted); i++ {
+		for j := i; j > 0 && sorted[j] < sorted[j-1]; j-- {
+			sorted[j], sorted[j-1] = sorted[j-1], sorted[j]
+		}
+	}
+	return strings.Join(sorted, "\x00")
+}
+
+// PrefetchIssues runs one aggregated GET /search/issues query PER DISTINCT
+// ASSIGNEE SET covering all eligible repos, builds a per-repo map of raw
+// []*github.Issue, and stores it internally so subsequent ProcessRepo calls for
+// any of those repos can skip the per-repo REST GET.
+//
+// eligibleFn(repo) returns (effectiveIssueTrackingConfig, autonomousEnabled,
+// ok). Repos for which autonomousEnabled==true or ok==false are excluded from
+// the search scope (matching the gating in ProcessRepo).
+//
+// Grouping by assignee set is necessary because per-repo IssueTracking
+// overrides can specify different Assignees than the global config. Running a
+// single global-assignee query and storing results under a repo whose effective
+// assignees differ would silently drop issues assigned to the override assignees.
+//
+// Label qualifiers are intentionally omitted from the aggregated queries
+// (BuildAggregatedSearchQuery). The per-repo client-side ClassifyAndFilterIssues
+// step (called in ProcessRepo) already applies classification and label/filter
+// filtering precisely, so the aggregated query only needs to narrow by assignee
+// and repo scope.
+//
+// On search error for any group, PrefetchIssues logs a warning, clears the
+// internal prefetch map for that group's repos (leaving them absent so
+// ProcessRepo falls back to per-repo FetchIssues), and returns the last error.
+//
+// PrefetchIssues is NOT goroutine-safe; call it BEFORE the parallel ProcessRepo
+// fan-out and do not write the prefetch map again until all ProcessRepo calls
+// for that cycle have returned.
+func (f *Fetcher) PrefetchIssues(
+	eligibleFn EligibleFn,
+	authUser string,
+	repos []string,
+) (map[string][]*github.Issue, error) {
+	if f.searcher == nil {
+		return nil, nil
+	}
+
+	// Build groups: assigneeKey → (assignees, []repo)
+	type group struct {
+		assignees []string
+		repos     []string
+	}
+	groups := make(map[string]*group)
+	groupOrder := make([]string, 0) // preserve deterministic iteration order
+
+	for _, r := range repos {
+		if r == "" {
+			continue
+		}
+		it, autonomous, ok := eligibleFn(r)
+		if !ok || autonomous || !it.Enabled {
+			continue
+		}
+		// Resolve effective assignees the same way ProcessRepo / FetchIssues does.
+		resolved := it.WithDefaultAssignee(authUser).Assignees
+		key := assigneeKey(resolved)
+		if _, exists := groups[key]; !exists {
+			groups[key] = &group{assignees: resolved}
+			groupOrder = append(groupOrder, key)
+		}
+		groups[key].repos = append(groups[key].repos, r)
+	}
+
+	if len(groups) == 0 {
+		return nil, nil
+	}
+
+	byRepo := make(map[string][]*github.Issue)
+	var lastErr error
+	totalRepos := 0
+	totalIssues := 0
+
+	for _, key := range groupOrder {
+		g := groups[key]
+		query := github.BuildAggregatedSearchQuery(g.assignees, g.repos)
+		if query == "" {
+			continue
+		}
+		raw, err := f.searcher.SearchIssues(query)
+		// Truncation arrives as partial results plus a signal, not as a plain
+		// failure — handled separately below.
+		truncated := errors.Is(err, github.ErrSearchTruncated)
+		if err != nil && !truncated {
+			slog.Warn("issues fetcher: search prefetch failed for assignee group, will fall back to per-repo fetch",
+				"err", err, "repos", len(g.repos))
+			lastErr = err
+			continue
+		}
+		if truncated {
+			// Discard the whole group. Skipping only the repos with no results
+			// is not enough: a repo can have some issues inside the first 1000
+			// and the rest beyond it, and serving that partial list from the
+			// prefetch reports it as complete — the same silent loss, just
+			// narrower. Past the cap the only honest answer for every repo in
+			// the group is a per-repo fetch.
+			//
+			// This costs a full REST cycle for the group, but truncation means
+			// >1000 open issues in one assignee scope, which is already far
+			// outside the shape this optimisation targets.
+			slog.Warn("issues fetcher: search prefetch truncated, falling back to per-repo fetch for the whole group",
+				"repos", len(g.repos), "issues_seen", len(raw), "cap", 1000)
+			continue
+		}
+
+		// canon maps the lowercased configured name back to the configured
+		// name so results keyed by GitHub's canonical full_name land on the
+		// key ProcessRepo will look up. Without it a case difference would
+		// hit the empty seed and silently report zero issues for the repo.
+		canon := make(map[string]string, len(g.repos))
+		for _, r := range g.repos {
+			canon[strings.ToLower(r)] = r
+		}
+
+		// Seed every repo in the group with a present-but-empty entry. The
+		// search covered them all and was not truncated, so "no results for
+		// this repo" is a real answer — without the seed, ProcessRepo's
+		// `_, ok := prefetched[repo]` misses and spends a per-repo REST call
+		// every cycle on exactly the idle repos the aggregation exists to
+		// eliminate. Groups whose search failed or truncated returned above,
+		// so their repos stay absent and still fall back.
+		for _, r := range g.repos {
+			if _, exists := byRepo[r]; !exists {
+				byRepo[r] = nil
+			}
+		}
+		for _, issue := range raw {
+			if issue.Repo == "" {
+				continue
+			}
+			key := issue.Repo
+			if configured, ok := canon[strings.ToLower(issue.Repo)]; ok {
+				key = configured
+			}
+			byRepo[key] = append(byRepo[key], issue)
+		}
+		totalRepos += len(g.repos)
+		totalIssues += len(raw)
+	}
+
+	if len(byRepo) == 0 && lastErr != nil {
+		return nil, lastErr
+	}
+
+	slog.Info("issues fetcher: search prefetch complete",
+		"groups", len(groups), "repos", totalRepos, "issues", totalIssues)
+	f.prefetched = byRepo
+	return byRepo, lastErr
+}
+
+// ClearPrefetch discards the prefetch map. Call once per cycle after all
+// ProcessRepo calls have completed so stale data cannot leak into the next cycle.
+func (f *Fetcher) ClearPrefetch() {
+	f.prefetched = nil
+}
+
 // ProcessRepo fetches every eligible issue for one repo and dispatches it to
 // the pipeline. Returns the number of issues actually handed off and a
 // non-nil error only when the fetch itself failed — per-issue pipeline
@@ -153,9 +352,25 @@ func (f *Fetcher) ProcessRepo(ctx context.Context, repo string, cfg config.Issue
 		ctx = context.Background()
 	}
 
-	issues, err := f.client.FetchIssues(repo, cfg, authUser)
-	if err != nil {
-		return 0, fmt.Errorf("issues fetcher: fetch %s: %w", repo, err)
+	// Use prefetched search results when available; fall back to per-repo REST.
+	// The prefetch map is populated by PrefetchIssues before the parallel
+	// ProcessRepo fan-out begins and is read-only during that fan-out, so no
+	// locking is needed here.
+	var issues []*github.Issue
+	var fetchErr error
+	if prefetchedSlice, ok := f.prefetched[repo]; ok {
+		slog.Debug("issues fetcher: using prefetched search results",
+			"repo", repo, "count", len(prefetchedSlice))
+		// The raw search results still need to go through the same
+		// classification + filter pipeline that FetchIssues applies.
+		// ClassifyAndFilterIssues is the exported version of that logic.
+		issues = github.ClassifyAndFilterIssues(prefetchedSlice, repo, cfg, authUser)
+	} else {
+		// No prefetch for this repo — use the per-repo REST endpoint.
+		issues, fetchErr = f.client.FetchIssues(repo, cfg, authUser)
+		if fetchErr != nil {
+			return 0, fmt.Errorf("issues fetcher: fetch %s: %w", repo, fetchErr)
+		}
 	}
 
 	processed := 0

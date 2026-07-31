@@ -844,6 +844,8 @@ func TestRunTier2PublishesPendingWhenLiveRepoSetIsEmpty(t *testing.T) {
 			nil,
 			func() []string { return nil },
 			nil,
+			nil, // adaptiveFn — adaptive gating off for this test
+			nil, // adaptiveSched — unused while adaptiveFn is nil
 			make(chan []string),
 			time.Hour,
 			true,

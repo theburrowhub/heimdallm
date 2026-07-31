@@ -21,7 +21,8 @@ Full reference for all settings, environment variables, and deployment options.
 13. [Distribution Formats](#13-distribution-formats)
 14. [Circuit Breakers](#14-circuit-breakers)
 15. [Autonomous Mode](#15-autonomous-mode)
-16. [Full config.toml Reference](#16-full-configtoml-reference)
+16. [Polling](#16-polling)
+17. [Full config.toml Reference](#17-full-configtoml-reference)
 
 ---
 
@@ -1203,7 +1204,58 @@ With this setup, Heimdallm will autonomously triage issues and implement them in
 
 ---
 
-## 16. Full config.toml Reference
+## 16. Polling
+
+The `[polling]` table tunes how the daemon schedules its fetch cycles. All fields are optional — omitting the section entirely reproduces the prior behaviour with no change in how the daemon polls.
+
+```toml
+[polling]
+poll_interval              = "5m"   # inherits [github].poll_interval when unset
+min_interval               = "1m"
+max_interval               = "15m"
+adaptive                   = false
+discovery_interval         = "5m"
+tier3_interval             = "30s"
+rate_limit_safety_threshold = 100
+use_etag                   = true
+use_graphql                = false
+```
+
+| Field | Default | Description |
+|---|---|---|
+| `poll_interval` | inherits `[github].poll_interval` | Base poll cadence. When unset, the value from `[github].poll_interval` (or its env var `HEIMDALLM_POLL_INTERVAL`) is used. Setting `[polling].poll_interval` overrides the `[github]` field for the polling subsystem. |
+| `min_interval` | `"1m"` | Shortest interval the adaptive scheduler will use for an actively-changing repo. Has no effect when `adaptive = false`. |
+| `max_interval` | `"15m"` | Longest interval the adaptive scheduler will back off to for idle repos. Has no effect when `adaptive = false`. |
+| `adaptive` | `false` | When `true`, repos that have seen no new events for several consecutive cycles gradually back off from `min_interval` toward `max_interval`. Repos that receive new events reset to `min_interval`. This reduces rate-limit consumption when monitoring many quiet repos. |
+| `discovery_interval` | `"5m"` | How often the topic-discovery pass runs to find newly-tagged repos. Independent of `poll_interval`. |
+| `tier3_interval` | `"30s"` | Cadence of the Tier 3 observation loop (review-state polling on `auto_implement` PRs). |
+| `rate_limit_safety_threshold` | `100` | Core-remaining floor. When the GitHub core rate-limit remaining count drops below this number, non-critical polling (discovery, Tier 3 observation, adaptive back-off checks) is throttled until the rate-limit window resets. Critical paths (PR review, issue triage) are not blocked by this threshold. |
+| `use_etag` | `true` | Send `If-None-Match` / `ETag` conditional-request headers on list endpoints. A `304 Not Modified` response reuses the cached body without counting against the rate limit. Disable only if your GitHub proxy strips ETag headers. |
+| `use_graphql` | `false` | Fetch issue lists via the GraphQL `search(type:ISSUE)` API instead of REST `/search/issues`. GraphQL requests consume from the separate GraphQL rate-limit budget (5,000 points/hour), leaving the core REST budget for other operations. Falls back to REST automatically on any GraphQL error. |
+
+> **Reload behaviour:** Every field takes effect on the next `PUT /config` or file reload, without a restart. `use_etag`, `use_graphql` and `rate_limit_safety_threshold` are re-applied to the live GitHub client and rate limiter; `tier3_interval` resets its ticker in place (the new value is picked up on the next tick, so shortening a long interval takes effect after at most one more tick at the old cadence); `min_interval`/`max_interval` update the adaptive scheduler's bounds in place, so accumulated per-repo back-off state is preserved and each repo's current interval is clamped into the new range on its next cycle.
+
+> **Validation:** All five durations are validated at load and on reload. `poll_interval`, `min_interval`, `max_interval` and `discovery_interval` must be between `1m` and `24h` — the same floor `[github].poll_interval` enforces, since `[polling].poll_interval` takes precedence over it and would otherwise be a way around the quota guard. `tier3_interval` accepts `1s`–`1h` (it drives a local scan, not GitHub traffic). `rate_limit_safety_threshold` must not be negative, and `min_interval` must not exceed `max_interval`. An invalid value fails the reload with an error rather than silently falling back to the default.
+
+> **Unconfigured = no change:** A missing `[polling]` section is equivalent to setting every field to its default. There is no opt-in required — existing deployments that do not add this section continue to behave exactly as before.
+
+### Example: adaptive polling with GraphQL enabled (conservative)
+
+```toml
+[polling]
+min_interval               = "2m"
+max_interval               = "20m"
+adaptive                   = true
+rate_limit_safety_threshold = 200   # throttle earlier on rate-constrained installations
+use_etag                   = true
+use_graphql                = true
+```
+
+This setup lets idle repos drift to a 20-minute cycle, saving roughly 80 % of poll calls on dormant repos, while keeping active repos at the 2-minute minimum. GraphQL consumes from the separate 5,000-point budget, and ETags ensure 304s on unchanged endpoints cost zero REST points.
+
+---
+
+## 17. Full config.toml Reference
 
 ```toml
 # Heimdallm configuration

@@ -76,6 +76,7 @@ type Config struct {
 	ActivityLog    ActivityLogConfig    `toml:"activity_log"`
 	CircuitBreaker CircuitBreakerConfig `toml:"circuit_breaker"`
 	Autonomous     AutonomousConfig     `toml:"autonomous"`
+	Polling        PollingConfig        `toml:"polling"`
 }
 
 type ServerConfig struct {
@@ -1107,6 +1108,7 @@ func (c *Config) applyDefaults() {
 		c.CircuitBreaker.PerImplRepoHr = 5
 	}
 	c.applyAutonomousDefaults()
+	c.applyPollingDefaults()
 }
 
 // applyEnvOverrides applies HEIMDALLM_* environment variable overrides.
@@ -1289,6 +1291,12 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("config: ai.primary is required")
 	}
 	if err := ValidatePollInterval(c.GitHub.PollInterval); err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+	// [polling] takes precedence over [github].poll_interval at resolution
+	// time, so it has to clear the same bar — otherwise the newer section is a
+	// way around the quota guard the older one enforces.
+	if err := c.ValidatePolling(); err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
 	// Validate every persisted execution option before it reaches Executor.

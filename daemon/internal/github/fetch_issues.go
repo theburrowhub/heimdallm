@@ -157,6 +157,37 @@ func (c *Client) fetchIssuesPage(repo string, page int) ([]*Issue, error) {
 	return batch, nil
 }
 
+// ClassifyAndFilterIssues applies the same classification + filter pipeline
+// that FetchIssues applies to a page, producing a sorted slice ready for the
+// issue processing pipeline. It is intended for the Search API prefetch path
+// where issues are already in memory and need only the client-side processing.
+//
+// The returned slice is sorted by sortIssuesByPriority with the given
+// authenticatedUser.
+func ClassifyAndFilterIssues(issues []*Issue, repo string, cfg config.IssueTrackingConfig, authenticatedUser string) []*Issue {
+	// A fresh slice, never issues[:0:0] — the input can be the prefetch's
+	// shared slice, and writing through an aliased backing array would corrupt
+	// the results of every other repo in the group.
+	kept := make([]*Issue, 0, len(issues))
+	for _, issue := range issues {
+		if issue == nil || issue.IsPullRequest() {
+			continue
+		}
+		issue.Repo = repo
+		mode := cfg.Classify(issue.LabelNames())
+		if mode == config.IssueModeIgnore || mode == config.IssueModeBlocked {
+			continue
+		}
+		if !issueMatchesFilters(issue, repo, cfg) {
+			continue
+		}
+		issue.Mode = mode
+		kept = append(kept, issue)
+	}
+	sortIssuesByPriority(kept, authenticatedUser)
+	return kept
+}
+
 // issueMatchesFilters applies organizations + assignees + filter_mode.
 // The label dimension is handled up-stream (cfg.Classify + ignore short-
 // circuit), so by the time we get here the issue is known to be

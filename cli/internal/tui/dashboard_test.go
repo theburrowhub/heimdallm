@@ -476,3 +476,66 @@ func TestIssuesSortedByDate(t *testing.T) {
 			d.issues[0].Number, d.issues[1].Number, d.issues[2].Number)
 	}
 }
+
+func TestBuildConfigLinesPollingSection(t *testing.T) {
+	d := NewDashboard("http://localhost:0", "", "test")
+	d.config = map[string]any{
+		"polling": map[string]any{
+			"adaptive":                    true,
+			"poll_interval":               "30s",
+			"min_interval":                "10s",
+			"max_interval":                "5m",
+			"discovery_interval":          "15m",
+			"tier3_interval":              "1h",
+			"rate_limit_safety_threshold": float64(20),
+			"use_etag":                    true,
+			"use_graphql":                 false,
+		},
+	}
+
+	lines := d.buildConfigLines()
+
+	// Collect all lines into a single string for easy substring checks.
+	combined := ""
+	for _, l := range lines {
+		combined += l + "\n"
+	}
+
+	expectations := []string{
+		"Polling / Rate Limit",
+		"Adaptive",
+		"true",
+		"Poll interval",
+		"30s",
+		"Min interval",
+		"10s",
+		"Max interval",
+		"5m",
+		"Discovery interval",
+		"15m",
+		"Tier3 interval",
+		"1h",
+		"Rate-limit safety threshold",
+		"20",
+		"ETag/304 caching",
+		"GraphQL batching",
+		"false",
+	}
+	for _, want := range expectations {
+		if !strings.Contains(combined, want) {
+			t.Fatalf("buildConfigLines() missing %q in Polling section.\nGot:\n%s", want, combined)
+		}
+	}
+}
+
+func TestBuildConfigLinesPollingAbsentWhenMissing(t *testing.T) {
+	d := NewDashboard("http://localhost:0", "", "test")
+	d.config = map[string]any{} // no "polling" key
+
+	lines := d.buildConfigLines()
+	for _, l := range lines {
+		if strings.Contains(l, "Polling / Rate Limit") {
+			t.Fatal("Polling section should not appear when polling key is absent from config")
+		}
+	}
+}
