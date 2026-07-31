@@ -89,6 +89,15 @@ jobs:
         working-directory: daemon
         run: go vet ./...
 
+      # Guards the -X main.version stamping: go build silently ignores -X on a
+      # renamed/missing symbol, so without this a refactor could regress every
+      # install back to reporting "dev" (#645).
+      - name: Version stamping guard
+        run: |
+          make build-daemon GIT_VERSION=ci-probe
+          REPORTED="$(daemon/bin/heimdallm --version)"
+          test "$REPORTED" = "ci-probe" || { echo "daemon reports '$REPORTED', expected 'ci-probe'"; exit 1; }
+
   cli:
     name: CLI (Go)
     runs-on: macos-14

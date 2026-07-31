@@ -3,6 +3,10 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+      args:
+        # Version stamped into the daemon binary (shown in /health and the
+        # web UI). The Makefile wrappers set HEIMDALLM_VERSION=GIT_VERSION.
+        VERSION: ${HEIMDALLM_VERSION:-dev}
     container_name: heimdallm
     restart: unless-stopped
     ports:

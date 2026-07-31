@@ -248,9 +248,11 @@ jobs:
         # Pass the release version explicitly: the checkout is shallow and
         # untagged (git describe would yield a bare SHA), and earlier steps
         # can dirty the worktree (pubspec.lock / Podfile.lock regeneration).
-        run: |
-          TAG="${{ inputs.tag || needs.release-please.outputs.tag_name }}"
-          make build-daemon GIT_VERSION="${TAG#v}"
+        # TAG goes through env, not inline ${{ }} interpolation, so a crafted
+        # workflow_dispatch input cannot inject shell into this job.
+        env:
+          TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
+        run: make build-daemon GIT_VERSION="${TAG#v}"
 
       - name: Build Flutter app (Linux release)
         working-directory: flutter_app
@@ -436,9 +438,11 @@ jobs:
         # Pass the release version explicitly: the checkout is shallow and
         # untagged (git describe would yield a bare SHA), and earlier steps
         # can dirty the worktree (pubspec.lock / Podfile.lock regeneration).
-        run: |
-          TAG="${{ inputs.tag || needs.release-please.outputs.tag_name }}"
-          make build-daemon GIT_VERSION="${TAG#v}"
+        # TAG goes through env, not inline ${{ }} interpolation, so a crafted
+        # workflow_dispatch input cannot inject shell into this job.
+        env:
+          TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
+        run: make build-daemon GIT_VERSION="${TAG#v}"
 
       - name: Build Flutter app (release)
         working-directory: flutter_app

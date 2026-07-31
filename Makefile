@@ -428,20 +428,20 @@ _post-up-hints:
 	@echo "Next: open http://localhost:$${HEIMDALLM_WEB_PORT:-3000}  ·  logs: \`make logs\`  ·  stop: \`make down\`"
 
 up: _check-env _check-buildkit
-	DOCKER_BUILDKIT=1 docker compose -f $(COMPOSE_FILE) up -d
+	DOCKER_BUILDKIT=1 HEIMDALLM_VERSION=$(GIT_VERSION) docker compose -f $(COMPOSE_FILE) up -d
 	@$(MAKE) --no-print-directory _post-up-hints
 
 # Like `up` but rebuilds images from local source (use after `git pull` on main).
 up-build: _check-env _check-buildkit
-	DOCKER_BUILDKIT=1 docker compose -f $(COMPOSE_FILE) up -d --build --pull always
+	DOCKER_BUILDKIT=1 HEIMDALLM_VERSION=$(GIT_VERSION) docker compose -f $(COMPOSE_FILE) up -d --build --pull always
 	@$(MAKE) --no-print-directory _post-up-hints
 
 up-daemon: _check-env
-	docker compose -f $(COMPOSE_FILE) up -d heimdallm
+	HEIMDALLM_VERSION=$(GIT_VERSION) docker compose -f $(COMPOSE_FILE) up -d heimdallm
 
 # Like `up-daemon` but rebuilds the daemon image from local source.
 up-build-daemon: _check-env
-	docker compose -f $(COMPOSE_FILE) up -d --build --pull always heimdallm
+	HEIMDALLM_VERSION=$(GIT_VERSION) docker compose -f $(COMPOSE_FILE) up -d --build --pull always heimdallm
 
 down: _check-docker
 	docker compose -f $(COMPOSE_FILE) down

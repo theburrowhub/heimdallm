@@ -8,7 +8,10 @@ COPY daemon/go.mod daemon/go.sum ./
 RUN go mod download
 
 COPY daemon/ .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /heimdallm ./cmd/heimdallm
+# Stamped into main.version; compose passes ${HEIMDALLM_VERSION} via build args
+# (see docker-compose.yml), the Makefile wrappers set it to GIT_VERSION.
+ARG VERSION=dev
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w -X main.version=$VERSION" -o /heimdallm ./cmd/heimdallm
 
 # ─── Stage 2: Runtime with AI CLIs ───────────────────────────────────────────
 FROM node:20-alpine
