@@ -259,8 +259,10 @@ func (c *Client) SearchIssuesGraphQL(searchQuery string) ([]*Issue, error) {
 			break
 		}
 		if page == maxSearchIssuePages {
+			// hasNextPage is still true, so GitHub had more to give. Report
+			// the truncation with the partial results — see ErrSearchTruncated.
 			slog.Warn("github: SearchIssuesGraphQL reached result cap", "cap", maxSearchIssuePages*100)
-			break
+			return all, ErrSearchTruncated
 		}
 		end := result.Search.PageInfo.EndCursor
 		cursor = &end

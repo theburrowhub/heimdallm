@@ -19,6 +19,17 @@ import (
 // empty or error response.
 const maxSearchIssuePages = 10
 
+// ErrSearchTruncated is returned ALONGSIDE partial results when a search hit
+// the 1000-item cap, so the caller can tell "these are all the matches" from
+// "these are the first 1000 of an unknown number".
+//
+// The distinction is load-bearing for the aggregated prefetch: it seeds an
+// empty entry for every repo a successful search covered, which suppresses the
+// per-repo REST fallback. Doing that on a truncated result set would turn
+// "issues we never saw" into "repo has no issues" — silent data loss. Callers
+// that cannot act on partial results should treat this like any other error.
+var ErrSearchTruncated = errors.New("github: search results truncated at the 1000-item cap")
+
 // SearchIssues fetches open issues matching query. When GraphQL is enabled via
 // SetGraphQLEnabled(true), it dispatches to SearchIssuesGraphQL first; on any
 // error it falls back to the REST /search/issues path automatically (the caller
@@ -39,6 +50,12 @@ func (c *Client) SearchIssues(query string) ([]*Issue, error) {
 			var rlErr *RateLimitError
 			if errors.As(err, &rlErr) {
 				return nil, err
+			}
+			// Truncation is not a GraphQL fault either — the REST path shares
+			// the same 1000-item cap and would truncate identically. Pass the
+			// partial results and the signal through.
+			if errors.Is(err, ErrSearchTruncated) {
+				return issues, err
 			}
 			slog.Warn("github: SearchIssuesGraphQL failed, falling back to REST",
 				"err", err)
@@ -117,7 +134,11 @@ func (c *Client) searchIssuesREST(query string) ([]*Issue, error) {
 			break // last (partial) page
 		}
 		if page == maxSearchIssuePages {
+			// A full final page means GitHub had more to give. Report the
+			// truncation with the partial results so the caller does not
+			// mistake "first 1000" for "all of them".
 			slog.Warn("github: SearchIssues reached result cap", "cap", maxSearchIssuePages*100)
+			return all, ErrSearchTruncated
 		}
 	}
 	return all, nil

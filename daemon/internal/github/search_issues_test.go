@@ -2,6 +2,7 @@ package github_test
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -178,10 +179,14 @@ func TestSearchIssues_StopsAtPageCap(t *testing.T) {
 
 	client := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
 	issues, err := client.SearchIssues("is:issue is:open")
-	if err != nil {
-		t.Fatalf("cap should not surface an error, got: %v", err)
+	// The cap must be reported, not swallowed: callers cannot otherwise tell
+	// "these are all the matches" from "these are the first 1000". The
+	// aggregated prefetch relies on that distinction to decide whether a repo
+	// with no results really has no issues.
+	if !errors.Is(err, gh.ErrSearchTruncated) {
+		t.Fatalf("cap should surface ErrSearchTruncated, got: %v", err)
 	}
-	// Should have exactly 10 pages × 100 = 1000 issues.
+	// Partial results are still returned alongside the signal.
 	if len(issues) != 1000 {
 		t.Errorf("expected 1000 issues at cap, got %d", len(issues))
 	}

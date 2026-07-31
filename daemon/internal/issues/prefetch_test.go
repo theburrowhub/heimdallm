@@ -26,21 +26,25 @@ type fakeSearcher struct {
 	// perQueryIssues maps query index (0-based) to a custom result. When set,
 	// the corresponding call returns that slice instead of f.issues.
 	perQueryIssues map[int][]*github.Issue
+	// errWithResults is returned ALONGSIDE the results rather than instead of
+	// them, modelling the partial-success shape of ErrSearchTruncated. Takes
+	// precedence over err.
+	errWithResults error
 }
 
 func (s *fakeSearcher) SearchIssues(query string) ([]*github.Issue, error) {
 	idx := s.calls
 	s.calls++
 	s.queries = append(s.queries, query)
-	if s.err != nil {
+	if s.errWithResults == nil && s.err != nil {
 		return nil, s.err
 	}
 	if s.perQueryIssues != nil {
 		if specific, ok := s.perQueryIssues[idx]; ok {
-			return specific, nil
+			return specific, s.errWithResults
 		}
 	}
-	return s.issues, nil
+	return s.issues, s.errWithResults
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -253,10 +257,12 @@ func TestProcessRepo_FallsBackToFetchIssuesWhenNoPrefetch(t *testing.T) {
 // API returned 0 results for that repo (e.g., over the 1000-issue cap within
 // its group).
 func TestProcessRepo_FallsBackWhenPrefetchMapNonNilButKeyAbsent(t *testing.T) {
-	// Prefetch is warm for org/other-repo but NOT for org/repo. A repo is
-	// genuinely absent only when it was never in the search scope — repos that
-	// WERE searched get a present-but-empty entry (see the seeding test below),
-	// because "no results" is a real answer for them, not a gap.
+	// Prefetch is warm for org/other-repo but NOT for org/repo. A repo ends up
+	// absent when it was never in the search scope, when its group's search
+	// failed, or when its group's search was truncated — in all three cases
+	// "no results" does not mean "no issues", so the REST fallback must fire.
+	// Repos in a group that searched cleanly get a present-but-empty entry
+	// instead, because there "no results" IS the answer.
 	searcher := &fakeSearcher{
 		issues: []*github.Issue{
 			makeIssue(10, 10, "org/other-repo", []string{"bug"}, []string{"alice"}),

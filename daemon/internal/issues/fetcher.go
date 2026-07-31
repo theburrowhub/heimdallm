@@ -251,19 +251,20 @@ func (f *Fetcher) PrefetchIssues(
 			continue
 		}
 		raw, err := f.searcher.SearchIssues(query)
-		if err != nil {
+		// Truncation returns partial results with a signal. Those results are
+		// still usable, but the group must NOT be seeded: see below.
+		truncated := errors.Is(err, github.ErrSearchTruncated)
+		if err != nil && !truncated {
 			slog.Warn("issues fetcher: search prefetch failed for assignee group, will fall back to per-repo fetch",
 				"err", err, "repos", len(g.repos))
 			lastErr = err
 			continue
 		}
-		// Seed every repo in the group with a present-but-empty entry. The
-		// search covered them all, so "no results for this repo" is a real
-		// answer — without the seed, ProcessRepo's `_, ok := prefetched[repo]`
-		// misses and spends a per-repo REST call every cycle on exactly the
-		// idle repos the aggregation exists to eliminate. Only repos in a
-		// group whose search FAILED are left absent, so they still fall back.
-		//
+		if truncated {
+			slog.Warn("issues fetcher: search prefetch truncated, repos without results will fall back to per-repo fetch",
+				"repos", len(g.repos), "issues", len(raw))
+		}
+
 		// canon maps the lowercased configured name back to the configured
 		// name so results keyed by GitHub's canonical full_name land on the
 		// key ProcessRepo will look up. Without it a case difference would
@@ -271,8 +272,26 @@ func (f *Fetcher) PrefetchIssues(
 		canon := make(map[string]string, len(g.repos))
 		for _, r := range g.repos {
 			canon[strings.ToLower(r)] = r
-			if _, exists := byRepo[r]; !exists {
-				byRepo[r] = nil
+		}
+
+		// Seed every repo in the group with a present-but-empty entry. The
+		// search covered them all, so "no results for this repo" is a real
+		// answer — without the seed, ProcessRepo's `_, ok := prefetched[repo]`
+		// misses and spends a per-repo REST call every cycle on exactly the
+		// idle repos the aggregation exists to eliminate. Only repos in a
+		// group whose search FAILED are left absent, so they still fall back.
+		//
+		// Skipped when the result set was truncated: past the 1000-item cap
+		// "no results" no longer means "no issues", it means "we stopped
+		// looking". Seeding there would suppress the REST fallback and drop
+		// those issues silently, so a truncated group keeps the pre-seeding
+		// behaviour — repos WITH results are served from the prefetch, repos
+		// without stay absent and pay for a correct per-repo fetch.
+		if !truncated {
+			for _, r := range g.repos {
+				if _, exists := byRepo[r]; !exists {
+					byRepo[r] = nil
+				}
 			}
 		}
 		for _, issue := range raw {

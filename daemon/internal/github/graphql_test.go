@@ -2,6 +2,7 @@ package github_test
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -220,8 +221,10 @@ func TestSearchIssuesGraphQL_StopsAtPageCap(t *testing.T) {
 
 	client := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
 	issues, err := client.SearchIssuesGraphQL("is:issue is:open")
-	if err != nil {
-		t.Fatalf("cap should not surface an error, got: %v", err)
+	// Same contract as the REST path: report the cap alongside the partial
+	// results so callers can distinguish "all matches" from "first 1000".
+	if !errors.Is(err, gh.ErrSearchTruncated) {
+		t.Fatalf("cap should surface ErrSearchTruncated, got: %v", err)
 	}
 	// Should stop at maxSearchIssuePages (10) × 100 = 1000 issues.
 	if len(issues) != 1000 {

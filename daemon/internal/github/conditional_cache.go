@@ -7,9 +7,14 @@ import (
 )
 
 // maxCacheEntries is the maximum number of entries the ConditionalCache will
-// hold before evicting the oldest entries. This bounds memory usage to
-// roughly maxCacheEntries × average-body-size (≤1 MiB each in practice).
+// hold before evicting the oldest entries.
 const maxCacheEntries = 2000
+
+// maxCacheBytes is the aggregate body budget across all entries. The entry
+// count alone does not bound memory: at the ≤1 MiB per-body ceiling,
+// maxCacheEntries would permit ~2 GiB resident in a daemon that runs for weeks.
+// Whichever limit is reached first drives eviction.
+const maxCacheBytes = 128 * 1024 * 1024 // 128 MiB
 
 // condEntry stores the ETag and response body for one cached GET response.
 type condEntry struct {
@@ -23,6 +28,9 @@ type condEntry struct {
 type ConditionalCache struct {
 	mu      sync.RWMutex
 	entries map[string]condEntry
+	// bytes is the running sum of len(body) across entries, maintained under
+	// mu so eviction can enforce maxCacheBytes without walking the map.
+	bytes int
 
 	// Observability counters — incremented atomically from doWithBody.
 	cacheHits   atomic.Int64
@@ -54,15 +62,36 @@ func (c *ConditionalCache) Put(key, etag string, body []byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Evict the oldest entry if we're at the cap and this is a new key.
-	if _, exists := c.entries[key]; !exists && len(c.entries) >= maxCacheEntries {
+	// Replacing a key releases its old body before the new one is accounted.
+	if prev, exists := c.entries[key]; exists {
+		c.bytes -= len(prev.body)
+		delete(c.entries, key)
+	}
+
+	// Evict oldest-first until both limits accommodate the incoming entry.
+	// The byte budget is checked in a loop because one large body can displace
+	// several small ones. The guard on len(c.entries) keeps this terminating
+	// even if a single body somehow exceeds the whole budget — in that case the
+	// cache ends up holding just that entry rather than spinning.
+	for len(c.entries) >= maxCacheEntries ||
+		(len(c.entries) > 0 && c.bytes+len(body) > maxCacheBytes) {
 		c.evictOldestLocked()
 	}
+
 	c.entries[key] = condEntry{
 		etag:     etag,
 		body:     body,
 		storedAt: time.Now(),
 	}
+	c.bytes += len(body)
+}
+
+// Bytes returns the aggregate size of all cached bodies. Intended for
+// observability and tests.
+func (c *ConditionalCache) Bytes() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.bytes
 }
 
 // evictOldestLocked removes the entry with the earliest storedAt timestamp.
@@ -77,6 +106,7 @@ func (c *ConditionalCache) evictOldestLocked() {
 		}
 	}
 	if oldestKey != "" {
+		c.bytes -= len(c.entries[oldestKey].body)
 		delete(c.entries, oldestKey)
 	}
 }
