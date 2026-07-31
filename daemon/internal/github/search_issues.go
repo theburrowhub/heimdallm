@@ -2,6 +2,7 @@ package github
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -31,6 +32,14 @@ func (c *Client) SearchIssues(query string) ([]*Issue, error) {
 	if c.useGraphQL.Load() {
 		issues, err := c.SearchIssuesGraphQL(query)
 		if err != nil {
+			// A rate-limit cooldown is not a GraphQL problem: the breaker is
+			// shared, so the REST path would fail fast on the same pause.
+			// Surface it instead of logging a misleading fallback warning on
+			// every call for the duration of the block.
+			var rlErr *RateLimitError
+			if errors.As(err, &rlErr) {
+				return nil, err
+			}
 			slog.Warn("github: SearchIssuesGraphQL failed, falling back to REST",
 				"err", err)
 			return c.searchIssuesREST(query)

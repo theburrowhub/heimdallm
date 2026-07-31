@@ -28,6 +28,14 @@ func (c *Client) graphqlURL() string {
 // contains a top-level "errors" array, an error is returned containing all
 // error messages joined with "; ". The body is limited to maxBodyBytes.
 func (c *Client) graphQL(query string, variables map[string]any, out any) error {
+	// Circuit breaker: while a rate-limit cooldown is active, fail fast without
+	// touching GitHub. GraphQL needs this as much as do()/doWithBody — GitHub
+	// penalises requests sent during a secondary/abuse block, so traffic on
+	// this path would keep a block alive that going quiet lets clear.
+	if until, paused := c.rateLimitPaused(); paused {
+		return &RateLimitError{RetryAt: until}
+	}
+
 	payload, err := json.Marshal(map[string]any{
 		"query":     query,
 		"variables": variables,
@@ -53,6 +61,13 @@ func (c *Client) graphQL(query string, variables map[string]any, out any) error 
 	// Notify the rate-limit observer — mirrors doWithBody so GraphQL
 	// responses also update the live budget.
 	c.notifyRateObserver(resp)
+
+	// Open the breaker when GitHub rejects this call for rate limiting, so the
+	// rest of the cycle stops hammering. Mirrors do()/doWithBody; the response
+	// is still handled below exactly as before.
+	if wait, limited := rateLimitDelay(resp); limited {
+		c.pauseRateLimit(wait)
+	}
 	defer resp.Body.Close()
 
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
