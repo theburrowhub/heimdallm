@@ -959,7 +959,88 @@ func resolveCLIPath(name string) string {
 		return path
 	}
 	// Fall back to the user's login shell.
-	return loginShellLookPath(name)
+	if path := loginShellLookPath(name); path != "" {
+		return path
+	}
+	// Last resort: installer directories commonly missing from both launchd's
+	// minimal PATH and non-interactive login shells.
+	if path := lookInWellKnownDirs(name); path != "" {
+		return path
+	}
+	slog.Debug("executor: CLI not found on PATH, login shell, or well-known dirs", "cli", name)
+	return ""
+}
+
+// appendDirToPath returns env (the process environment when nil) with dir
+// appended to PATH when missing. The resolved CLI may live in a directory that
+// is absent from both the process and login-shell PATH (the well-known-dir
+// fallback); without this, a CLI that re-invokes itself or a sibling tool by
+// bare name would still fail in the launchd environment even though Heimdallm
+// launched it by absolute path. Appending (not prepending) means resolution of
+// every other binary is unchanged.
+func appendDirToPath(env []string, dir string) []string {
+	if dir == "" || dir == "." {
+		return env
+	}
+	if env == nil {
+		env = os.Environ()
+	}
+	for i, kv := range env {
+		if !strings.HasPrefix(kv, "PATH=") {
+			continue
+		}
+		path := strings.TrimPrefix(kv, "PATH=")
+		for _, p := range filepath.SplitList(path) {
+			if p == dir {
+				return env
+			}
+		}
+		out := append([]string(nil), env...)
+		if path == "" {
+			// "PATH=:" + dir would create a leading empty element, which
+			// POSIX interprets as the current directory.
+			out[i] = "PATH=" + dir
+		} else {
+			out[i] = kv + string(os.PathListSeparator) + dir
+		}
+		return out
+	}
+	// No PATH entry at all — unreachable via os.Environ()/the enriched env,
+	// both of which always carry PATH. Setting the CLI's own dir is still
+	// strictly more capable than leaving the child with no PATH.
+	return append(append([]string(nil), env...), "PATH="+dir)
+}
+
+// wellKnownBinDirs returns the installer directories probed when neither the
+// process PATH nor the login shell resolves a CLI. Package-level var so tests
+// can stub it and stay hermetic on dev machines with real CLIs installed.
+//
+// ~/.local/bin is where the Claude Code native installer places its binary,
+// exporting it only in ~/.zshrc — which non-interactive login shells never
+// source, so the login-shell probe cannot see it either (issue #643).
+var wellKnownBinDirs = func() []string {
+	dirs := make([]string, 0, 3)
+	if home, err := os.UserHomeDir(); err == nil {
+		dirs = append(dirs, filepath.Join(home, ".local", "bin"))
+	}
+	return append(dirs, "/opt/homebrew/bin", "/usr/local/bin")
+}
+
+// lookInWellKnownDirs returns the path of an executable named name inside the
+// well-known installer directories, or "" if none qualifies. exec.LookPath on
+// a path containing a separator checks that exact file with the same
+// effective-user executability test (eaccess X_OK) the PATH lookup applies, so
+// a candidate the daemon cannot actually execute (e.g. a root-owned 0700 file)
+// is skipped rather than selected and failed at exec time.
+func lookInWellKnownDirs(name string) string {
+	for _, dir := range wellKnownBinDirs() {
+		candidate := filepath.Join(dir, name)
+		if path, err := exec.LookPath(candidate); err == nil {
+			slog.Debug("executor: CLI resolved from well-known installer dir", "cli", name, "path", path)
+			return path
+		}
+	}
+	return ""
 }
 
 // loginShellLookPath resolves name via the user's login shell, which sources
@@ -1160,6 +1241,11 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 	if enrichedEnv != nil {
 		cmd.Env = enrichedEnv
 	}
+	// Make sure the CLI's own directory is on the child's PATH — it may have
+	// been resolved from a well-known installer dir that no PATH source knows.
+	if filepath.IsAbs(cliPath) {
+		cmd.Env = appendDirToPath(cmd.Env, filepath.Dir(cliPath))
+	}
 	if opts.WorkDir != "" {
 		cmd.Dir = opts.WorkDir
 	}
@@ -1345,6 +1431,11 @@ func cliHelp(cliPath string) (string, bool) {
 	cmd := exec.CommandContext(ctx, cliPath, "--help")
 	if env := enrichEnvWithLoginPath(); env != nil {
 		cmd.Env = env
+	}
+	// Same PATH enrichment as ExecuteRaw: a CLI resolved from a well-known
+	// dir may exec a sibling tool by bare name while printing --help.
+	if filepath.IsAbs(cliPath) {
+		cmd.Env = appendDirToPath(cmd.Env, filepath.Dir(cliPath))
 	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
