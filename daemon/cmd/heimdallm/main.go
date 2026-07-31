@@ -634,8 +634,6 @@ func main() {
 	// on secondary limits (Retry-After).
 	ghClient.SetRateObserver(&rateLimitAdapter{limiter: limiter})
 
-	applyClientRuntimeConfig(ghClient, limiter, cfg)
-
 	// tier2Adapter bridges main.go's concrete types to the polling logic.
 	adapter := &tier2Adapter{
 		ghClient:             ghClient,
@@ -713,12 +711,19 @@ func main() {
 	// adaptiveSched is the per-repo adaptive interval engine (C5). It is
 	// constructed once at daemon start and intentionally outlives config
 	// reloads — accumulated backoff state must not be lost when the operator
-	// tweaks an unrelated setting. It is passed to runTier2 which uses it
-	// when cfg.Polling.Adaptive is true; when Adaptive is false the scheduler
-	// is allocated but never consulted, so the overhead is negligible.
+	// tweaks an unrelated setting. Bound changes are applied in place by
+	// applyClientRuntimeConfig instead of by recreating it. It is passed to
+	// runTier2 which uses it when cfg.Polling.Adaptive is true; when Adaptive
+	// is false the scheduler is allocated but never consulted, so the overhead
+	// is negligible.
 	cfgMu.Lock()
 	adaptiveSched := scheduler.NewAdaptiveScheduler(cfg.ResolvedMinInterval(), cfg.ResolvedMaxInterval())
 	cfgMu.Unlock()
+
+	// Push the [polling] runtime knobs into the client, limiter and scheduler.
+	// Deferred to here rather than at client construction because it needs
+	// adaptiveSched; nothing issues requests before the pollers start.
+	applyClientRuntimeConfig(ghClient, limiter, adaptiveSched, cfg)
 
 	// startPollers launches all polling goroutines under the given context.
 	// Returns a cancel function and a WaitGroup that completes when all
@@ -1955,7 +1960,7 @@ func main() {
 			cfgMu.Unlock()
 			// The kill-switches live on the client and limiter, not the
 			// pollers, so they need applying even when nothing restarts.
-			applyClientRuntimeConfig(ghClient, limiter, newCfg)
+			applyClientRuntimeConfig(ghClient, limiter, adaptiveSched, newCfg)
 			slog.Info("config reload: applied without poller restart")
 			return nil
 		}
@@ -1966,7 +1971,7 @@ func main() {
 		cfgMu.Lock()
 		cfg = newCfg
 		cfgMu.Unlock()
-		applyClientRuntimeConfig(ghClient, limiter, newCfg)
+		applyClientRuntimeConfig(ghClient, limiter, adaptiveSched, newCfg)
 
 		// Restart the pollers in the BACKGROUND. oldWg.Wait() can block for
 		// tens of seconds (an in-flight poll cycle or agent review must finish
@@ -2792,7 +2797,7 @@ schedule:
 //
 // Safe to call from any goroutine: the client flags are atomics and the
 // limiter guards its threshold with its own mutex.
-func applyClientRuntimeConfig(ghClient *gh.Client, limiter *scheduler.RateLimiter, cfg *config.Config) {
+func applyClientRuntimeConfig(ghClient *gh.Client, limiter *scheduler.RateLimiter, adaptiveSched *scheduler.AdaptiveScheduler, cfg *config.Config) {
 	// ETag cache (C1): enabled by default; operator can disable via use_etag=false.
 	ghClient.SetCacheEnabled(cfg.ETagEnabled())
 	// GraphQL issue search (C4): disabled by default; operator enables via
@@ -2802,6 +2807,11 @@ func applyClientRuntimeConfig(ghClient *gh.Client, limiter *scheduler.RateLimite
 	// Rate-limit safety threshold: drives how eagerly each tier backs off.
 	// Default 100 matches the hardcoded tierSafetyThreshold[TierDiscovery].
 	limiter.SetDiscoverySafetyThreshold(cfg.Polling.RateLimitSafetyThreshold)
+	// Adaptive bounds: updated in place rather than by recreating the
+	// scheduler, so per-repo back-off state survives the reload.
+	if adaptiveSched != nil {
+		adaptiveSched.SetBounds(cfg.ResolvedMinInterval(), cfg.ResolvedMaxInterval())
+	}
 }
 
 func runTier2(

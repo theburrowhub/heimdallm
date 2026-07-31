@@ -19,11 +19,13 @@ type repoState struct {
 //
 // All methods are safe for concurrent use.
 type AdaptiveScheduler struct {
-	min    time.Duration
-	max    time.Duration
 	factor float64
 
+	// min/max are mutable via SetBounds and are read by every scheduling
+	// method, so they live under mu alongside state.
 	mu    sync.Mutex
+	min   time.Duration
+	max   time.Duration
 	state map[string]*repoState
 }
 
@@ -43,6 +45,30 @@ func NewAdaptiveScheduler(min, max time.Duration) *AdaptiveScheduler {
 		factor: 2.0,
 		state:  make(map[string]*repoState),
 	}
+}
+
+// SetBounds updates the min/max interval bounds in place.
+//
+// The scheduler deliberately outlives config reloads so per-repo back-off state
+// is not lost, which meant min_interval/max_interval changes never took effect
+// — not even with a poller restart, since the scheduler is not recreated there
+// — while GET /config and the UI already showed the new values. Updating the
+// bounds in place fixes that divergence without discarding the accumulated
+// state: existing per-repo intervals are clamped into the new range on their
+// next MarkActive/MarkIdle.
+//
+// Mirrors NewAdaptiveScheduler's guards: a non-positive min is ignored, and max
+// is clamped up to min.
+func (a *AdaptiveScheduler) SetBounds(min, max time.Duration) {
+	if min <= 0 {
+		return
+	}
+	if max < min {
+		max = min
+	}
+	a.mu.Lock()
+	a.min, a.max = min, max
+	a.mu.Unlock()
 }
 
 // Due returns the subset of keys whose next scheduled poll is at or before now.
