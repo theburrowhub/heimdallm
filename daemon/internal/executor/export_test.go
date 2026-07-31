@@ -35,6 +35,12 @@ func AppendDirToPathForTest(env []string, dir string) []string {
 // and leaks one test's $PATH into every later subprocess. It resets
 // immediately and returns a func to defer so the test also cleans up after
 // itself, keeping tests order- and shuffle-independent.
+//
+// NOT safe for parallel tests: it reassigns the sync.Once guarding
+// enrichEnvWithLoginPath without synchronization, so a t.Parallel() test
+// running ExecuteRaw/cliHelp concurrently with a reset is a data race. All
+// tests in this package run sequentially; keep it that way for any test that
+// touches this helper (or $PATH at all — t.Setenv forbids t.Parallel anyway).
 func ResetLoginPathCacheForTest() func() {
 	reset := func() {
 		loginPathOnce = sync.Once{}

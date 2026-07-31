@@ -1992,6 +1992,14 @@ func httpJSONErr(w http.ResponseWriter, code int, msg string) {
 // below) so the two sides cannot drift.
 const DaemonLogFileName = "heimdallm.log"
 
+// launchAgentLogRecencyMargin is how much fresher the data-dir log must be
+// than the LaunchAgent stderr file before the latter is considered a leftover
+// from a previous install rather than the active sink. Sequential writes from
+// setupLogging's MultiWriter (plus any buffering) keep the two files within
+// milliseconds of each other while the daemon runs under the agent; a daemon
+// running outside launchd leaves the agent file behind by hours or days.
+const launchAgentLogRecencyMargin = 2 * time.Minute
+
 // daemonLogPath returns the path to the daemon log file the /logs stream
 // tails. Priority (matches cmd/heimdallm/main.go's dataDir() ordering, which
 // is the directory setupLogging writes to):
@@ -1999,12 +2007,12 @@ const DaemonLogFileName = "heimdallm.log"
 //  1. $HEIMDALLM_DATA_DIR/heimdallm.log — explicit override (native or Docker).
 //  2. /data/heimdallm.log — Docker convention, used when /data exists as a
 //     directory (the compose file mounts the heimdallm-data volume there).
-//  3. macOS: the fresher of ~/Library/Logs/heimdallm/heimdallm-daemon-error.log
-//     (LaunchAgent convention — the plist redirects stderr there) and
-//     ~/.local/share/heimdallm/heimdallm.log (the file setupLogging always
-//     writes regardless of how the daemon was started). Recency, not mere
-//     existence, decides: a LaunchAgent file left behind from a previous
-//     install must not shadow the log the current daemon is writing.
+//  3. macOS: ~/Library/Logs/heimdallm/heimdallm-daemon-error.log (LaunchAgent
+//     convention — the plist redirects stderr there) unless the data-dir log
+//     (~/.local/share/heimdallm/heimdallm.log, always written by setupLogging)
+//     is fresher by more than launchAgentLogRecencyMargin — which marks the
+//     LaunchAgent file as a leftover from a previous install that must not
+//     shadow the log the current daemon is writing.
 //  4. Linux/other: $XDG_STATE_HOME/heimdallm/heimdallm.log, fallback
 //     ~/.local/share/heimdallm/heimdallm.log.
 //
@@ -2035,10 +2043,15 @@ func daemonLogPathFor(goos string, mtime func(string) (time.Time, bool)) string 
 		// Existence alone does not make the LaunchAgent file the active sink:
 		// it survives after the agent is uninstalled or bypassed (daemon later
 		// launched directly by the app), while setupLogging keeps writing
-		// <dataDir>/heimdallm.log. The active sink is the fresher file, so
-		// pick by recency; ties keep the LaunchAgent file (under the agent
-		// both files are written).
-		if launchdOK && (!dataOK || !dataTime.After(launchdTime)) {
+		// <dataDir>/heimdallm.log. But strict recency would be wrong in the
+		// other direction: under the agent, setupLogging's io.MultiWriter
+		// writes stderr (→ launchd file) first and the data-dir log after, so
+		// the data-dir file is ALWAYS marginally fresher and a plain mtime
+		// comparison would never serve the LaunchAgent file — losing its
+		// stderr-exclusive content (Go panics, crash traces, launchd
+		// messages). Hence the margin: only a data-dir log fresher by a clear
+		// gap marks the LaunchAgent file as a leftover.
+		if launchdOK && (!dataOK || !dataTime.After(launchdTime.Add(launchAgentLogRecencyMargin))) {
 			return launchd
 		}
 		return dataLog

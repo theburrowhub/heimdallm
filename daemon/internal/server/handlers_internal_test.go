@@ -76,7 +76,7 @@ func TestDaemonLogPath_FallsBackToNativeWhenDataDirUnset(t *testing.T) {
 		want := dataLog
 		if lInfo, lErr := os.Stat(launchd); lErr == nil {
 			dInfo, dErr := os.Stat(dataLog)
-			if dErr != nil || !dInfo.ModTime().After(lInfo.ModTime()) {
+			if dErr != nil || !dInfo.ModTime().After(lInfo.ModTime().Add(launchAgentLogRecencyMargin)) {
 				want = launchd
 			}
 		}
@@ -436,6 +436,34 @@ func TestDaemonLogPath_DarwinFallsBackToDataDirLogWithoutLaunchAgent(t *testing.
 	}
 }
 
+func TestDaemonLogPath_DarwinKeepsLaunchAgentLogWithinRecencyMargin(t *testing.T) {
+	// Under the LaunchAgent every slog line reaches both files within
+	// milliseconds (setupLogging's io.MultiWriter writes stderr first, then
+	// the data-dir log), so the data-dir file is always marginally fresher. A
+	// strict mtime comparison would never select the LaunchAgent file and
+	// would lose its stderr-exclusive content (panics, crash traces). A
+	// small freshness lead must therefore still resolve to the LaunchAgent
+	// file; only a clear margin means it is a leftover.
+	withEnv(t, "HEIMDALLM_DATA_DIR", "")
+	if _, err := os.Stat("/data"); err == nil {
+		t.Skip("/data exists on this host — Docker path wins, which is correct")
+	}
+	launchd, dataLog := darwinLogCandidates(t)
+
+	base := time.Unix(10_000, 0)
+	mtimes := map[string]time.Time{
+		launchd: base,
+		dataLog: base.Add(time.Second), // fresher, but well within the margin
+	}
+	probe := func(p string) (time.Time, bool) {
+		ts, ok := mtimes[p]
+		return ts, ok
+	}
+	if got := daemonLogPathFor("darwin", probe); got != launchd {
+		t.Fatalf("data-dir log 1s fresher: daemonLogPathFor(darwin) = %q, want LaunchAgent log %q", got, launchd)
+	}
+}
+
 func TestDaemonLogPath_DarwinPrefersFresherDataDirLogOverStaleLaunchAgent(t *testing.T) {
 	// The LaunchAgent stderr file survives after the agent is uninstalled or
 	// bypassed (daemon later launched directly by the app). Existence alone
@@ -447,10 +475,14 @@ func TestDaemonLogPath_DarwinPrefersFresherDataDirLogOverStaleLaunchAgent(t *tes
 	}
 	launchd, dataLog := darwinLogCandidates(t)
 
-	mtimes := map[string]int64{launchd: 1000, dataLog: 2000}
+	base := time.Unix(10_000, 0)
+	mtimes := map[string]time.Time{
+		launchd: base,
+		dataLog: base.Add(launchAgentLogRecencyMargin + time.Second),
+	}
 	probe := func(p string) (time.Time, bool) {
-		sec, ok := mtimes[p]
-		return time.Unix(sec, 0), ok
+		ts, ok := mtimes[p]
+		return ts, ok
 	}
 	if got := daemonLogPathFor("darwin", probe); got != dataLog {
 		t.Fatalf("stale launchd log: daemonLogPathFor(darwin) = %q, want fresher data-dir log %q", got, dataLog)
