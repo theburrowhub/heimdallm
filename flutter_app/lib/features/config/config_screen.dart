@@ -508,49 +508,52 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
         }),
       ),
       const SizedBox(height: 10),
-      Container(
-        decoration: BoxDecoration(
-          color: Theme.of(
-            context,
-          ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
-          borderRadius: BorderRadius.circular(6),
-        ),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
-        child: Column(
-          children: [
-            SwitchListTile(
-              title: const Text(
-                'Use ETag caching',
-                style: TextStyle(fontSize: 11),
+      Material(
+        // Material (not a colored Container) so the SwitchListTiles' ink/bg
+        // paint on it — a BoxDecoration color here throws a ListTile assertion
+        // in widget tests (same reason as _dangerousToggle below, c1eb4e7).
+        color: Theme.of(
+          context,
+        ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
+        borderRadius: BorderRadius.circular(6),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+          child: Column(
+            children: [
+              SwitchListTile(
+                title: const Text(
+                  'Use ETag caching',
+                  style: TextStyle(fontSize: 11),
+                ),
+                subtitle: Text(
+                  'Skip unchanged responses using HTTP ETags',
+                  style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+                ),
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                value: _polling.useEtag,
+                onChanged: (v) => setState(() {
+                  _polling = _polling.copyWith(useEtag: v);
+                }),
               ),
-              subtitle: Text(
-                'Skip unchanged responses using HTTP ETags',
-                style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+              SwitchListTile(
+                title: const Text(
+                  'Use GraphQL API',
+                  style: TextStyle(fontSize: 11),
+                ),
+                subtitle: Text(
+                  'Fetch PR/issue data via GraphQL instead of REST',
+                  style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+                ),
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                value: _polling.useGraphql,
+                onChanged: (v) => setState(() {
+                  _polling = _polling.copyWith(useGraphql: v);
+                }),
               ),
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-              value: _polling.useEtag,
-              onChanged: (v) => setState(() {
-                _polling = _polling.copyWith(useEtag: v);
-              }),
-            ),
-            SwitchListTile(
-              title: const Text(
-                'Use GraphQL API',
-                style: TextStyle(fontSize: 11),
-              ),
-              subtitle: Text(
-                'Fetch PR/issue data via GraphQL instead of REST',
-                style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
-              ),
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-              value: _polling.useGraphql,
-              onChanged: (v) => setState(() {
-                _polling = _polling.copyWith(useGraphql: v);
-              }),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     ]);
