@@ -374,6 +374,39 @@ func TestRejectUnsupportedScopedAgentPatchKeys(t *testing.T) {
 	}
 }
 
+func TestDaemonLogPath_DarwinPrefersLaunchAgentLogWhenPresent(t *testing.T) {
+	withEnv(t, "HEIMDALLM_DATA_DIR", "")
+	if _, err := os.Stat("/data"); err == nil {
+		t.Skip("/data exists on this host — Docker path wins, which is correct")
+	}
+
+	home, _ := os.UserHomeDir()
+	launchd := filepath.Join(home, "Library", "Logs", "heimdallm", "heimdallm-daemon-error.log")
+
+	got := daemonLogPathFor("darwin", func(p string) bool { return p == launchd })
+	if got != launchd {
+		t.Fatalf("daemonLogPathFor(darwin) = %q, want LaunchAgent log %q", got, launchd)
+	}
+}
+
+func TestDaemonLogPath_DarwinFallsBackToDataDirLogWithoutLaunchAgent(t *testing.T) {
+	// When the daemon is launched directly by the app (no LaunchAgent), the
+	// launchd stderr file never exists — but setupLogging always mirrors slog
+	// into <dataDir>/heimdallm.log, so the /logs stream must read that instead
+	// of reporting "log file not found".
+	withEnv(t, "HEIMDALLM_DATA_DIR", "")
+	if _, err := os.Stat("/data"); err == nil {
+		t.Skip("/data exists on this host — Docker path wins, which is correct")
+	}
+
+	home, _ := os.UserHomeDir()
+	got := daemonLogPathFor("darwin", func(string) bool { return false })
+	want := filepath.Join(home, ".local", "share", "heimdallm", DaemonLogFileName)
+	if got != want {
+		t.Fatalf("daemonLogPathFor(darwin) = %q, want data-dir fallback %q", got, want)
+	}
+}
+
 func TestDaemonLogPath_XDGStateHomeUsedWhenSet(t *testing.T) {
 	if runtime.GOOS == "darwin" {
 		t.Skip("XDG path only used on non-darwin when HEIMDALLM_DATA_DIR is unset")

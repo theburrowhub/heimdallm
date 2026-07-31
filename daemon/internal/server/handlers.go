@@ -2001,7 +2001,10 @@ const DaemonLogFileName = "heimdallm.log"
 //     directory (the compose file mounts the heimdallm-data volume there).
 //  3. macOS: ~/Library/Logs/heimdallm/heimdallm-daemon-error.log — LaunchAgent
 //     convention; the plist redirects stderr there so the file pre-exists
-//     without setupLogging having to write it.
+//     without setupLogging having to write it. When that file does not exist
+//     (daemon launched directly by the app, no LaunchAgent installed), fall
+//     back to ~/.local/share/heimdallm/heimdallm.log — the file setupLogging
+//     always writes regardless of how the daemon was started.
 //  4. Linux/other: $XDG_STATE_HOME/heimdallm/heimdallm.log, fallback
 //     ~/.local/share/heimdallm/heimdallm.log.
 //
@@ -2009,6 +2012,13 @@ const DaemonLogFileName = "heimdallm.log"
 // returned "file not found" under Docker because stderr was redirected to
 // `docker logs`, never to a file.
 func daemonLogPath() string {
+	return daemonLogPathFor(runtime.GOOS, fileExists)
+}
+
+// daemonLogPathFor is the testable core of daemonLogPath: goos and the
+// file-existence probe are parameters so the darwin-only branch can be
+// exercised by tests running on Linux (the test-docker sandbox).
+func daemonLogPathFor(goos string, exists func(string) bool) string {
 	if v := os.Getenv("HEIMDALLM_DATA_DIR"); v != "" {
 		return filepath.Join(v, DaemonLogFileName)
 	}
@@ -2016,15 +2026,27 @@ func daemonLogPath() string {
 		return filepath.Join("/data", DaemonLogFileName)
 	}
 	home, _ := os.UserHomeDir()
-	switch runtime.GOOS {
+	switch goos {
 	case "darwin":
-		return filepath.Join(home, "Library", "Logs", "heimdallm", "heimdallm-daemon-error.log")
+		launchd := filepath.Join(home, "Library", "Logs", "heimdallm", "heimdallm-daemon-error.log")
+		if exists(launchd) {
+			return launchd
+		}
+		// No LaunchAgent stderr file — the daemon was launched directly
+		// (e.g. by the app bundle). setupLogging always mirrors slog into
+		// <dataDir>/heimdallm.log, so serve that instead of "not found".
+		return filepath.Join(home, ".local", "share", "heimdallm", DaemonLogFileName)
 	default:
 		if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" {
 			return filepath.Join(xdg, "heimdallm", DaemonLogFileName)
 		}
 		return filepath.Join(home, ".local", "share", "heimdallm", DaemonLogFileName)
 	}
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 
 func (srv *Server) handleLogsStream(w http.ResponseWriter, r *http.Request) {
