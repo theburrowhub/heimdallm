@@ -43,6 +43,26 @@ class ApiClient {
     }
   }
 
+  /// Whether *something* is serving the daemon port, regardless of how healthy
+  /// it reports itself to be.
+  ///
+  /// Never use [checkHealth] to decide whether to spawn a daemon. A daemon that
+  /// is alive but degraded answers /health with 503 — which it does whenever
+  /// `last_poll` is older than twice the poll interval, i.e. exactly when
+  /// GitHub rate limits are slowing polls down. Treating that as "no daemon"
+  /// spawns a second one, which loses the port bind, keeps polling anyway and
+  /// pushes the quota further under: the feedback loop behind #646. Any HTTP
+  /// answer at all — 200, 401, 503 — means a daemon owns the port and we must
+  /// not start another.
+  Future<bool> daemonReachable() async {
+    try {
+      await _client.get(_uri('/health')).timeout(const Duration(seconds: 3));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// Returns the full /health payload, or null if the daemon is unreachable.
   /// Includes status, version (optional), started_at (optional, RFC3339).
   Future<Map<String, dynamic>?> fetchHealth() async {

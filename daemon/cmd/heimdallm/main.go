@@ -371,6 +371,22 @@ func main() {
 		Version:   versionString(),
 		StartedAt: time.Now(),
 	})
+
+	// Claim the HTTP port before starting anything that costs GitHub API
+	// budget. A second daemon instance loses the bind, and until #646 it kept
+	// running anyway: no HTTP listener, so invisible to the app and to
+	// operators, yet polling GitHub on the same token as the instance that did
+	// win the port. Five of those quietly multiplied API consumption ~6x and
+	// exhausted the hourly quota for hours. Binding here, before the pollers
+	// and workers spin up, turns that silent duplication into an immediate
+	// non-zero exit.
+	httpListener, err := srv.Listen(cfg.Server.Port, cfg.Server.BindAddr)
+	if err != nil {
+		slog.Error("daemon: cannot bind HTTP port — another instance is probably already running; exiting",
+			"port", cfg.Server.Port, "bind", cfg.Server.BindAddr, "err", err)
+		os.Exit(1)
+	}
+
 	srv.SetNATSConn(eventBus.Conn())
 	srv.SetConfigPath(cfgPath)
 	srv.SetHealthSnapshotFn(func() server.HealthSnapshot {
@@ -2398,20 +2414,31 @@ func main() {
 		return nil
 	})
 
+	// The listener is already bound (see srv.Listen above), so this log line
+	// now means what it says: the daemon is reachable.
+	slog.Info("daemon started", "port", cfg.Server.Port, "bind", cfg.Server.BindAddr)
+	serveFailed := make(chan error, 1)
 	go func() {
-		slog.Info("daemon started", "port", cfg.Server.Port, "bind", cfg.Server.BindAddr)
-		if err := srv.Start(cfg.Server.Port, cfg.Server.BindAddr); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("server stopped", "err", err)
+		if err := srv.Serve(httpListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serveFailed <- err
 		}
 	}()
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	serveDied := false
 	select {
 	case received := <-sig:
 		slog.Info("shutting down", "signal", received.String())
 	case <-shutdownReq:
 		slog.Info("shutting down via API")
+	case err := <-serveFailed:
+		// Losing the listener mid-flight leaves the same headless daemon the
+		// bind check above prevents at startup, so treat it the same way:
+		// shut down and exit non-zero instead of polling GitHub forever with
+		// nobody able to reach us (#646).
+		slog.Error("daemon: HTTP server stopped serving; shutting down", "err", err)
+		serveDied = true
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -2435,6 +2462,9 @@ func main() {
 		implementWCancel, statePollerCancel, stateWCancel,
 	}, exec.TerminateAll, producerSettleDelay)
 	broker.Stop()
+	if serveDied {
+		os.Exit(1)
+	}
 }
 
 // producerSettleDelay is how long the shutdown path waits between cancelling the

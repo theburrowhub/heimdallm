@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -320,9 +321,21 @@ func (srv *Server) Router() http.Handler {
 	return srv.router
 }
 
-// Start binds the HTTP server to the given port and begins serving.
-func (srv *Server) Start(port int, bindAddr string) error {
+// Listen binds the HTTP server's socket without serving on it, returning the
+// bound listener for a later Serve.
+//
+// The split exists so the daemon can fail fast on a bind error *before* it
+// starts any GitHub poller. ListenAndServe reports a port collision only after
+// the pollers are already running, and a daemon that swallows that error keeps
+// polling GitHub while serving nothing: invisible to the app, but spending the
+// same hourly API budget as the daemon that did win the port. Five such
+// headless daemons exhausted the quota for hours in #646.
+func (srv *Server) Listen(port int, bindAddr string) (net.Listener, error) {
 	addr := fmt.Sprintf("%s:%d", bindAddr, port)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
 	srv.httpServer = &http.Server{
 		Addr:         addr,
 		Handler:      srv.router,
@@ -330,7 +343,27 @@ func (srv *Server) Start(port int, bindAddr string) error {
 		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
-	return srv.httpServer.ListenAndServe()
+	return ln, nil
+}
+
+// Serve serves HTTP on a listener obtained from Listen. Returns
+// http.ErrServerClosed after a Shutdown.
+func (srv *Server) Serve(ln net.Listener) error {
+	if srv.httpServer == nil {
+		return errors.New("server: Serve called before Listen")
+	}
+	return srv.httpServer.Serve(ln)
+}
+
+// Start binds the HTTP server to the given port and begins serving. Callers
+// that need to distinguish a bind failure from a mid-flight serve failure
+// should use Listen + Serve instead.
+func (srv *Server) Start(port int, bindAddr string) error {
+	ln, err := srv.Listen(port, bindAddr)
+	if err != nil {
+		return err
+	}
+	return srv.Serve(ln)
 }
 
 // Shutdown gracefully shuts down the HTTP server.
