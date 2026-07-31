@@ -6,6 +6,20 @@ import '../models/review.dart';
 import '../models/tracked_issue.dart';
 import '../platform/platform_services.dart';
 
+/// Who, if anyone, is answering on the daemon port. Drives the boot-path spawn
+/// decision: only [PortOwner.none] justifies starting a daemon (#646).
+enum PortOwner {
+  /// Nothing is listening (connection refused) or it never answered in time.
+  none,
+
+  /// Our daemon answered — healthy, degraded or still starting.
+  daemon,
+
+  /// Something answered but it is not Heimdallm. Spawning would fail on the
+  /// bind, so surface this to the user instead of retrying silently.
+  foreign,
+}
+
 class ApiClient {
   final http.Client _client;
   final PlatformServices _platform;
@@ -49,15 +63,32 @@ class ApiClient {
   /// Never use [checkHealth] to decide whether to spawn a daemon. A daemon that
   /// is alive but degraded answers /health with 503 — which it does whenever
   /// `last_poll` is older than twice the poll interval, i.e. exactly when
-  /// GitHub rate limits are slowing polls down. Treating that as "no daemon"
-  /// spawns a second one, which loses the port bind, keeps polling anyway and
-  /// pushes the quota further under: the feedback loop behind #646. Any HTTP
-  /// answer at all — 200, 401, 503 — means a daemon owns the port and we must
-  /// not start another.
-  Future<bool> daemonReachable() async {
+  /// GitHub rate limits are slowing polls down, and also while it is still
+  /// wiring up at boot. Treating that as "no daemon" spawns a second one, which
+  /// loses the port bind, keeps polling anyway and pushes the quota further
+  /// under: the feedback loop behind #646. Any HTTP answer at all — 200, 401,
+  /// 503 — means the port is taken and we must not start another daemon.
+  Future<PortOwner> daemonReachable() async {
     try {
-      await _client.get(_uri('/health')).timeout(const Duration(seconds: 3));
-      return true;
+      final resp =
+          await _client.get(_uri('/health')).timeout(const Duration(seconds: 3));
+      return _looksLikeHeimdallm(resp) ? PortOwner.daemon : PortOwner.foreign;
+    } catch (_) {
+      return PortOwner.none;
+    }
+  }
+
+  /// Distinguishes our daemon from an unrelated process squatting on the port.
+  /// Without this the app would silently never spawn, exhaust its retries and
+  /// report a generic health failure with no hint that something else holds the
+  /// port. Every daemon response — healthy, degraded or starting — carries a
+  /// `status` field; 401 has no body to inspect but only our daemon enforces
+  /// the API token, so treat it as ours.
+  static bool _looksLikeHeimdallm(http.Response resp) {
+    if (resp.statusCode == 401 || resp.statusCode == 403) return true;
+    try {
+      final body = jsonDecode(resp.body);
+      return body is Map<String, dynamic> && body['status'] is String;
     } catch (_) {
       return false;
     }

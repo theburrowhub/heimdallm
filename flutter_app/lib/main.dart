@@ -88,6 +88,10 @@ void sendPRNotification({
   );
 }
 
+/// A non-Heimdallm process holds the daemon port. Distinct from a spawn failure
+/// because no amount of retrying fixes it — the user has to free the port.
+class _ForeignPortException implements Exception {}
+
 class _BootstrapApp extends ConsumerStatefulWidget {
   final GoRouter appRouter;
   const _BootstrapApp({required this.appRouter});
@@ -168,6 +172,9 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
     _setStatus('Starting Heimdallm…');
     try {
       await _spawnDaemonUnlessRunning(api, binaryPath);
+    } on _ForeignPortException {
+      _setForeignPortError();
+      return;
     } catch (e) {
       _setError(
         title: 'Could not start daemon',
@@ -193,9 +200,20 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
   ///
   /// Reachability, not health, is the right question here: see
   /// [ApiClient.daemonReachable].
-  Future<void> _spawnDaemonUnlessRunning(ApiClient api, String binaryPath) async {
-    if (await api.daemonReachable()) return;
-    await _platform.spawnDaemon(binaryPath);
+  /// Returns true when a daemon was actually spawned, false when the port was
+  /// already taken. Throws [_ForeignPortException] when a process that is not
+  /// Heimdallm holds the port — spawning would just fail on the bind, so that
+  /// case has to reach the user rather than be retried in silence.
+  Future<bool> _spawnDaemonUnlessRunning(ApiClient api, String binaryPath) async {
+    switch (await api.daemonReachable()) {
+      case PortOwner.daemon:
+        return false;
+      case PortOwner.foreign:
+        throw _ForeignPortException();
+      case PortOwner.none:
+        await _platform.spawnDaemon(binaryPath);
+        return true;
+    }
   }
 
   Future<void> _waitForHealth(ApiClient api, {String? retryBinary}) async {
@@ -208,6 +226,29 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
         return;
       }
       if (attempt > 0 && attempt % 25 == 0 && retryBinary != null) {
+        // A daemon that owns the port but answers 503 keeps failing
+        // checkHealth: it is degraded (rate-limited, stale last_poll) or still
+        // wiring up, not absent. Re-spawning on that signal is what stacked
+        // five daemons on one token in #646, so we skip the spawn — and must
+        // not spend the restart budget on a spawn that never happened, or the
+        // user gets a terminal "failed to start" for a daemon that is running.
+        final bool spawned;
+        try {
+          spawned = await _spawnDaemonUnlessRunning(api, retryBinary);
+        } on _ForeignPortException {
+          _setForeignPortError();
+          return;
+        } catch (_) {
+          continue;
+        }
+        if (!spawned) {
+          // Tell the user what we are actually waiting on, instead of leaving
+          // the splash on a generic message while nothing appears to happen.
+          _setStatus('Heimdallm is running but not ready yet — waiting…');
+          continue;
+        }
+
+        daemonRestarts++;
         if (daemonRestarts >= maxDaemonRestarts) {
           _setError(
             title: 'Daemon failed to start',
@@ -217,13 +258,19 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
           );
           return;
         }
-        daemonRestarts++;
-        // Guarded: a daemon that is up but reporting degraded (503) keeps
-        // failing checkHealth above, and re-spawning on that signal is what
-        // stacked five daemons on one token in #646.
-        try { await _spawnDaemonUnlessRunning(api, retryBinary); } catch (_) {}
       }
     }
+  }
+
+  void _setForeignPortError() {
+    _setError(
+      title: 'Port 7842 is in use by another process',
+      details: 'Something is answering on Heimdallm\'s port, but it is not the '
+          'Heimdallm daemon. Heimdallm will not start a daemon that cannot bind '
+          'the port.',
+      hint: 'Find the process and stop it, then relaunch:\n'
+          'lsof -nP -iTCP:7842 -sTCP:LISTEN',
+    );
   }
 
   void _setStatus(String s) { if (mounted) setState(() => _status = s); }
