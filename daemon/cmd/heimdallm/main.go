@@ -87,6 +87,9 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case "version", "--version", "-version":
+			fmt.Println(versionString())
+			return
 		}
 	}
 
@@ -343,6 +346,7 @@ func main() {
 	}
 	issueFetcher := issuepipeline.NewFetcher(ghClient, ghClient, s, issuePipe)
 	issueFetcher.SetBotLogin(resolvedBotLogin) // break re-triage loop (#362)
+	issueFetcher.SetSearcher(ghClient)         // enable aggregated Search API prefetch (separate rate budget)
 	// cfgMu protects cfg and the pipeline so reload is safe from any goroutine.
 	var cfgMu sync.Mutex
 	repoCurrentlyMonitored := func(repo string) bool {
@@ -362,7 +366,7 @@ func main() {
 	storePollInterval := func(interval time.Duration) {
 		atomic.StoreInt64(&pollIntervalNano, int64(interval))
 	}
-	storePollInterval(parsePollInterval(cfg.GitHub.PollInterval))
+	storePollInterval(cfg.ResolvedPollInterval())
 	recordPollCompleted := func(_ string, at time.Time) {
 		atomic.StoreInt64(&lastPollUnixNano, at.UTC().UnixNano())
 	}
@@ -684,6 +688,11 @@ func main() {
 	// Shared rate limiter (was Pipeline.limiter).
 	limiter := scheduler.NewRateLimiter(4500)
 
+	// Wire the GitHub client → rate limiter so every API response updates the
+	// live budget, enabling proactive throttle before a 403 and correct backoff
+	// on secondary limits (Retry-After).
+	ghClient.SetRateObserver(&rateLimitAdapter{limiter: limiter})
+
 	// tier2Adapter bridges main.go's concrete types to the polling logic.
 	adapter := &tier2Adapter{
 		ghClient:             ghClient,
@@ -758,12 +767,42 @@ func main() {
 	// consumes from NATS and forwards repo lists through this channel.
 	reposChan := make(chan []string, 1)
 
+	// adaptiveSched is the per-repo adaptive interval engine (C5). It is
+	// constructed once at daemon start and intentionally outlives config
+	// reloads — accumulated backoff state must not be lost when the operator
+	// tweaks an unrelated setting. Bound changes are applied in place by
+	// applyClientRuntimeConfig instead of by recreating it. It is passed to
+	// runTier2 which uses it when cfg.Polling.Adaptive is true; when Adaptive
+	// is false the scheduler is allocated but never consulted, so the overhead
+	// is negligible.
+	cfgMu.Lock()
+	adaptiveSched := scheduler.NewAdaptiveScheduler(cfg.ResolvedMinInterval(), cfg.ResolvedMaxInterval())
+	cfgMu.Unlock()
+
+	// Push the [polling] runtime knobs into the client, limiter and scheduler.
+	// Deferred to here rather than at client construction because it needs
+	// adaptiveSched; nothing issues requests before the pollers start.
+	// Under cfgMu like every other cfg read: a reload can already be in flight
+	// by this point, and the adaptiveSched construction above locks for the
+	// same reason.
+	cfgMu.Lock()
+	startupCfg := cfg
+	cfgMu.Unlock()
+	applyClientRuntimeConfig(ghClient, limiter, adaptiveSched, startupCfg)
+
 	// startPollers launches all polling goroutines under the given context.
 	// Returns a cancel function and a WaitGroup that completes when all
 	// goroutines have exited.
 	startPollers := func(ctx context.Context, coldStart bool) (context.CancelFunc, *sync.WaitGroup) {
 		ctx, cancel := context.WithCancel(ctx)
 		var wg sync.WaitGroup
+
+		// Meter the separate 30/min search budget per request. Rewired on every
+		// restart so the gate blocks on the CURRENT poller context and a
+		// shutdown cannot be held up waiting on a budget nobody will use.
+		ghClient.SetSearchGate(func() error {
+			return limiter.AcquireResource(ctx, scheduler.TierRepo, scheduler.SearchResource)
+		})
 
 		// Rate limiter hourly refill
 		wg.Add(1)
@@ -817,11 +856,10 @@ func main() {
 		}()
 
 		// Tier 1: Discovery — publishes to NATS
+		// [polling].discovery_interval takes precedence over [github].discovery_interval;
+		// both fall back to 5m (ResolvedDiscoveryInterval handles the full cascade).
 		cfgMu.Lock()
-		discoveryInterval := parseDiscoveryInterval(
-			cfg.GitHub.DiscoveryInterval,
-			cfg.GitHub.PollInterval,
-		)
+		discoveryInterval := cfg.ResolvedDiscoveryInterval()
 		cfgMu.Unlock()
 		wg.Add(1)
 		go func() {
@@ -871,9 +909,10 @@ func main() {
 			bridgeDiscovery(ctx, conn, reposChan)
 		}()
 
-		// Tier 2: PR / issue polling
+		// Tier 2: PR / issue polling — use the resolved interval which honours
+		// [polling].poll_interval > [github].poll_interval > 5m default.
 		cfgMu.Lock()
-		pollInterval := parsePollInterval(cfg.GitHub.PollInterval)
+		pollInterval := cfg.ResolvedPollInterval()
 		cfgMu.Unlock()
 		storePollInterval(pollInterval)
 		wg.Add(1)
@@ -893,7 +932,12 @@ func main() {
 				defer cfgMu.Unlock()
 				return cfg.AI.Tier2RepoConcurrency
 			}
-			runTier2(ctx, adapter, limiter, prReviewPublisher, broker, tier2ConfigFn, tier2RepoConcurrencyFn, reposChan, pollInterval, coldStart, recordPollCompleted)
+			tier2AdaptiveFn := func() bool {
+				cfgMu.Lock()
+				defer cfgMu.Unlock()
+				return cfg.Polling.Adaptive
+			}
+			runTier2(ctx, adapter, limiter, prReviewPublisher, broker, tier2ConfigFn, tier2RepoConcurrencyFn, tier2AdaptiveFn, adaptiveSched, reposChan, pollInterval, coldStart, recordPollCompleted)
 		}()
 
 		// Repo/org rename probe (#489). Detects when GitHub has
@@ -975,9 +1019,19 @@ func main() {
 			}
 		}()
 
+		// Every other cfg read in startPollers takes cfgMu; these two did not.
+		// startPollers re-runs on the restart goroutine after a reload, where a
+		// concurrent reload can reassign cfg under the same mutex — a data race
+		// that -race would flag.
+		cfgMu.Lock()
+		etagEnabled := cfg.ETagEnabled()
+		rateLimitThreshold := cfg.Polling.RateLimitSafetyThreshold
+		cfgMu.Unlock()
 		slog.Info("pollers: started",
 			"discovery", discoveryInterval,
-			"poll", pollInterval)
+			"poll", pollInterval,
+			"etag_cache", etagEnabled,
+			"rate_limit_threshold", rateLimitThreshold)
 
 		return cancel, &wg
 	}
@@ -1653,19 +1707,38 @@ func main() {
 	}()
 
 	// ── State check poller ──────────────────────────────────────────────
-	// Scans the NATS KV watch bucket every 30s and publishes StateCheckMsg
-	// for items due for a state check. Replaces the in-memory WatchQueue.
+	// Scans the NATS KV watch bucket on the configured Tier 3 interval and
+	// publishes StateCheckMsg for items due for a state check. Replaces the
+	// in-memory WatchQueue. Default: 30s (matches previous hardcoded value).
 	stateCheckPub := bus.NewStateCheckPublisher(conn)
 	statePollerCtx, statePollerCancel := context.WithCancel(context.Background())
 	defer statePollerCancel()
 	go func() {
-		ticker := time.NewTicker(30 * time.Second)
+		cfgMu.Lock()
+		tier3Interval := cfg.ResolvedTier3Interval()
+		cfgMu.Unlock()
+		ticker := time.NewTicker(tier3Interval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-statePollerCtx.Done():
 				return
 			case <-ticker.C:
+				// This goroutine lives outside startPollers and is only
+				// cancelled at shutdown, so a reload that changes
+				// tier3_interval would otherwise leave it ticking at the old
+				// cadence forever while GET /config reported the new one.
+				// Re-read and reset each tick instead.
+				cfgMu.Lock()
+				wantInterval := cfg.ResolvedTier3Interval()
+				cfgMu.Unlock()
+				if wantInterval != tier3Interval {
+					slog.Info("state-poller: tier3 interval changed, resetting ticker",
+						"from", tier3Interval, "to", wantInterval)
+					tier3Interval = wantInterval
+					ticker.Reset(tier3Interval)
+				}
+
 				// Gradually enroll one monitored open item not yet in watch_state per tick.
 				// Backfills items from before the NATS migration without blocking startup.
 				enrollOpenItems(statePollerCtx, s, watchStore, adapter.monitoredRepos())
@@ -1965,6 +2038,17 @@ func main() {
 			"per_issue_repo_hr": c.CircuitBreaker.PerIssueRepoHr,
 			"per_impl_repo_hr":  c.CircuitBreaker.PerImplRepoHr,
 		}
+		result["polling"] = map[string]any{
+			"poll_interval":               c.Polling.PollInterval,
+			"min_interval":                c.Polling.MinInterval,
+			"max_interval":                c.Polling.MaxInterval,
+			"adaptive":                    c.Polling.Adaptive,
+			"discovery_interval":          c.Polling.DiscoveryInterval,
+			"tier3_interval":              c.Polling.Tier3Interval,
+			"rate_limit_safety_threshold": c.Polling.RateLimitSafetyThreshold,
+			"use_etag":                    c.ETagEnabled(),
+			"use_graphql":                 c.GraphQLEnabled(),
+		}
 		return result
 	})
 
@@ -2024,6 +2108,9 @@ func main() {
 		if !restartPollers {
 			cfg = newCfg
 			cfgMu.Unlock()
+			// The kill-switches live on the client and limiter, not the
+			// pollers, so they need applying even when nothing restarts.
+			applyClientRuntimeConfig(ghClient, limiter, adaptiveSched, newCfg)
 			slog.Info("config reload: applied without poller restart")
 			return nil
 		}
@@ -2034,6 +2121,7 @@ func main() {
 		cfgMu.Lock()
 		cfg = newCfg
 		cfgMu.Unlock()
+		applyClientRuntimeConfig(ghClient, limiter, adaptiveSched, newCfg)
 
 		// Restart the pollers in the BACKGROUND. oldWg.Wait() can block for
 		// tens of seconds (an in-flight poll cycle or agent review must finish
@@ -2856,6 +2944,34 @@ schedule:
 	return int(total)
 }
 
+// applyClientRuntimeConfig pushes the [polling] kill-switches and safety knobs
+// into the live GitHub client, rate limiter and adaptive scheduler.
+//
+// This must run on every config change, not only at startup. The three
+// settings live on long-lived objects that outlive a poller restart, so
+// applying them once at boot left the runtime on the old values while
+// GET /config and the UI already reported the new ones — a silent divergence
+// precisely on the emergency knobs an operator reaches for during an incident.
+//
+// Safe to call from any goroutine: the client flags are atomics and the
+// limiter guards its threshold with its own mutex.
+func applyClientRuntimeConfig(ghClient *gh.Client, limiter *scheduler.RateLimiter, adaptiveSched *scheduler.AdaptiveScheduler, cfg *config.Config) {
+	// ETag cache (C1): enabled by default; operator can disable via use_etag=false.
+	ghClient.SetCacheEnabled(cfg.ETagEnabled())
+	// GraphQL issue search (C4): disabled by default; operator enables via
+	// use_graphql=true. When enabled, SearchIssues dispatches to GraphQL first
+	// and falls back to REST /search/issues — zero behaviour change when false.
+	ghClient.SetGraphQLEnabled(cfg.GraphQLEnabled())
+	// Rate-limit safety threshold: drives how eagerly each tier backs off.
+	// Default 100 matches the hardcoded tierSafetyThreshold[TierDiscovery].
+	limiter.SetDiscoverySafetyThreshold(cfg.Polling.RateLimitSafetyThreshold)
+	// Adaptive bounds: updated in place rather than by recreating the
+	// scheduler, so per-repo back-off state survives the reload.
+	if adaptiveSched != nil {
+		adaptiveSched.SetBounds(cfg.ResolvedMinInterval(), cfg.ResolvedMaxInterval())
+	}
+}
+
 // runTier2 runs the PR/issue polling loop. Replaces the old RunTier2 from
 // the scheduler package.
 //
@@ -2871,6 +2987,8 @@ func runTier2(
 	ssePub sse.Publisher,
 	configFn func() []string,
 	repoConcurrencyFn func() int,
+	adaptiveFn func() bool,
+	adaptiveSched *scheduler.AdaptiveScheduler,
 	reposChan <-chan []string,
 	interval time.Duration,
 	coldStart bool,
@@ -2955,6 +3073,21 @@ func runTier2(
 	// runIssueTier promotes ready issues and processes every repo's
 	// issue list in parallel, bounded by ai.tier2_repo_concurrency.
 	//
+	// When polling.adaptive is true (opt-in), only repos whose next
+	// scheduled poll is due are processed this tick. After each repo
+	// finishes, MarkActive (count>0) or MarkIdle (count==0) adjusts
+	// its interval so active repos stay at min_interval while idle
+	// repos back off toward max_interval.
+	//
+	// The Search API prefetch is scoped to the repos this tick will
+	// actually process: adaptive gating runs first, and a tick with
+	// nothing due skips the prefetch entirely rather than warming a
+	// cache no one reads. On search error the per-repo REST fallback
+	// inside ProcessRepo is unaffected.
+	//
+	// When polling.adaptive is false (default) the behaviour is EXACTLY
+	// unchanged: all currentRepos are processed every tick.
+	//
 	// NOTE: if NATS publishes are ever added to this tier, also call
 	// adapter.PublishPending() at the end — it is intentionally bound
 	// to the PR tick today (see prTick) because pending publishes
@@ -2990,7 +3123,41 @@ func runTier2(
 				concurrency = v
 			}
 		}
-		issueCount = processReposInParallel(ctx, currentRepos, concurrency, func(ctx context.Context, repo string) (int, error) {
+
+		// Aggregated Search API prefetch: one query per assignee group covers
+		// the repos this tick will process, spending the separate search
+		// budget (30/min) instead of the core REST one (5000/hr). On search
+		// error the per-repo REST fallback inside ProcessRepo is unaffected.
+		// Adaptive gating runs BEFORE the prefetch so a tick with nothing due
+		// spends no search query at all. The scheduler must be non-nil to be
+		// consulted: adaptiveFn and adaptiveSched are separate parameters and
+		// callers can pass them apart, so guard rather than assume the pair.
+		adaptive := adaptiveFn != nil && adaptiveFn() && adaptiveSched != nil
+		reposToProcess := currentRepos
+		if adaptive {
+			reposToProcess = adaptiveSched.Due(time.Now(), currentRepos)
+			if len(reposToProcess) < len(currentRepos) {
+				slog.Debug("tier2: adaptive mode — skipping idle repos",
+					"total", len(currentRepos), "due", len(reposToProcess))
+			}
+			// Prune repos that have been removed from monitoring so the
+			// scheduler's memory stays bounded.
+			adaptiveSched.PruneAbsent(currentRepos)
+		}
+
+		// Warm the aggregated search prefetch for the repos this tick will
+		// actually process. Skipped entirely when nothing is due — warming a
+		// cache no one reads costs a search query and a limiter token.
+		// Budget metering happens per request inside the client (see
+		// SetSearchGate) rather than once here: one prefetch issues a query per
+		// assignee group, each up to the 10-page cap, so a single permit per
+		// cycle counted one request and spent many.
+		if len(reposToProcess) > 0 {
+			adapter.PrefetchIssuesForCycle(reposToProcess)
+			defer adapter.ClearIssuePrefetch()
+		}
+
+		issueCount = processReposInParallel(ctx, reposToProcess, concurrency, func(ctx context.Context, repo string) (int, error) {
 			if err := limiter.Acquire(ctx, scheduler.TierRepo); err != nil {
 				return 0, err
 			}
@@ -3004,10 +3171,29 @@ func runTier2(
 				} else {
 					slog.Error("tier2: issue processing", "repo", repo, "err", err)
 				}
+				// On error we don't advance the adaptive schedule for
+				// this repo; it will be re-evaluated as due on the next
+				// tick (nextDue is not updated because MarkActive/MarkIdle
+				// are not called).
 				return 0, err
 			}
 			if n > 0 {
 				slog.Info("tier2: processed issues", "repo", repo, "count", n)
+			}
+			// Update adaptive cadence based on observed activity. Stamped with
+			// the time this repo FINISHED, not the cycle's start: with many
+			// repos and bounded concurrency a fan-out can outlast
+			// min_interval, and marking from a stale base put nextDue in the
+			// past — every repo came back due on the next tick and the
+			// back-off never accumulated, disabling adaptive mode in exactly
+			// the loaded scenario that justifies turning it on.
+			if adaptive {
+				done := time.Now()
+				if n > 0 {
+					adaptiveSched.MarkActive(repo, done)
+				} else {
+					adaptiveSched.MarkIdle(repo, done)
+				}
 			}
 			return n, nil
 		})
@@ -3351,6 +3537,29 @@ func (a *tier2Adapter) upsertDiscoveredFromTopics(repos []string) {
 	if len(added) > 0 {
 		slog.Info("tier2: persisting topic-discovered repos", "added", len(added), "repos", added)
 		processDiscoveredRepos(added, reposSnap, nonMonSnap, a.store, a.broker, time.Now())
+	}
+}
+
+// ── rateLimitAdapter bridges the GitHub client observer → scheduler limiter ──
+
+// rateLimitAdapter implements gh.RateLimitObserver. After every GitHub API
+// response it parses the X-RateLimit-* headers and forwards the live budget
+// to the scheduler limiter, enabling proactive throttle before hitting 403
+// and honoring Retry-After on secondary limits.
+type rateLimitAdapter struct {
+	limiter *scheduler.RateLimiter
+}
+
+func (a *rateLimitAdapter) ObserveResponse(resp *http.Response) {
+	parsed, ok := gh.ParseRateLimitHeaders(resp)
+	if !ok {
+		return
+	}
+	if parsed.Resource != "" {
+		a.limiter.Observe(parsed.Resource, parsed.Remaining, parsed.Reset)
+	}
+	if parsed.RetryAfter > 0 {
+		a.limiter.ObserveRetryAfter(parsed.RetryAfter)
 	}
 }
 
@@ -3871,6 +4080,50 @@ func (a *tier2Adapter) reviewReadyForPublishRetry(rev *store.Review) (bool, erro
 		return false, err
 	}
 	return !inFlight, nil
+}
+
+// PrefetchIssuesForCycle runs the aggregated Search API query for all eligible
+// repos, populating the Fetcher's per-cycle prefetch map. Must be called BEFORE
+// the parallel ProcessRepo fan-out. On search error it logs and returns so
+// per-repo FetchIssues fallback still applies inside ProcessRepo.
+//
+// The method iterates repos to build the eligible list (skipping repos with
+// issue_tracking disabled or autonomous mode enabled — the same gating
+// ProcessRepo applies — so the search scope matches what would actually be
+// processed). That exclusion happens inside PrefetchIssues, which reads the
+// resolved config and autonomous flag eligibleFn returns; eligibleFn's own
+// third result is the "repo is known" flag and is always true here.
+func (a *tier2Adapter) PrefetchIssuesForCycle(repos []string) {
+	if a.fetcher == nil {
+		return
+	}
+	a.cfgMu.Lock()
+	c := *a.cfg
+	a.cfgMu.Unlock()
+	authUser := a.resolveAuthenticatedUser()
+
+	// eligibleFn resolves the effective IssueTrackingConfig and autonomous flag
+	// for each repo. PrefetchIssues uses this to group repos by their resolved
+	// assignee set, running one search query per group. This ensures repos with
+	// per-repo assignee overrides are fetched with their own assignee scope
+	// rather than the global one, preventing silent issue drops.
+	eligibleFn := func(repo string) (config.IssueTrackingConfig, bool, bool) {
+		repoIT := c.IssueTrackingForRepo(repo)
+		autonomousEnabled := c.AutonomousForRepo(repo).Enabled
+		return repoIT, autonomousEnabled, true
+	}
+	if _, err := a.fetcher.PrefetchIssues(eligibleFn, authUser, repos); err != nil {
+		// Error already logged by PrefetchIssues; fallback is automatic.
+		return
+	}
+}
+
+// ClearIssuePrefetch discards the cycle-scoped prefetch map so stale results
+// cannot leak into the next cycle.
+func (a *tier2Adapter) ClearIssuePrefetch() {
+	if a.fetcher != nil {
+		a.fetcher.ClearPrefetch()
+	}
 }
 
 // ProcessRepo implements scheduler.Tier2IssueProcessor.

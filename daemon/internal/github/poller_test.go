@@ -95,6 +95,7 @@ func TestFetchPRsToReviewFiltersSelfAuthored(t *testing.T) {
 
 func TestFetchPRsToReviewPaginatesPastFirstHundred(t *testing.T) {
 	var searchCalls int32
+	var gateCalls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/user":
@@ -129,6 +130,10 @@ func TestFetchPRsToReviewPaginatesPastFirstHundred(t *testing.T) {
 	defer srv.Close()
 
 	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	client.SetSearchGate(func() error {
+		atomic.AddInt32(&gateCalls, 1)
+		return nil
+	})
 	got, err := client.FetchPRsToReview()
 	if err != nil {
 		t.Fatalf("FetchPRsToReview: %v", err)
@@ -141,6 +146,9 @@ func TestFetchPRsToReviewPaginatesPastFirstHundred(t *testing.T) {
 	}
 	if calls := atomic.LoadInt32(&searchCalls); calls != 2 {
 		t.Fatalf("search calls = %d, want 2", calls)
+	}
+	if calls := atomic.LoadInt32(&gateCalls); calls != 2 {
+		t.Fatalf("search gate calls = %d, want one per page", calls)
 	}
 }
 

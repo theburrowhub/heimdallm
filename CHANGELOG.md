@@ -10,6 +10,31 @@
 * **issues:** `auto_promote_triage` defaults on only when `refinement_labels` is configured. Repos without a refinement target keep their previous review-only behavior; set `auto_promote_triage = false` explicitly to keep refinement manual even when refinement labels exist.
 * **pipeline (PR reviews):** a push (new HEAD SHA) on a previously-reviewed PR no longer triggers an automatic re-review on its own. Heimdallm now requires an explicit `review_requested` event for the bot — i.e. someone (or some automation) pressing "Re-request review" — newer than the previous review's `CreatedAt`. The SHA-unchanged dedup (#322 Bug 5) and this SHA-changed gate now share the same predicate, so the contract is "review iff explicitly re-requested" regardless of whether the commit changed. Workflows that relied on push-triggered re-reviews — typically repos with "Dismiss stale reviews on push" or CODEOWNERS auto-request workflows that auto-re-added the bot to `requested_reviewers` — must now explicitly re-request the review (manually in the UI, or via a GitHub Action calling `gh pr edit --add-reviewer`). Skipped pushes surface as a `review_skipped` SSE with reason `no_rereview_request` (distinct from `sha_unchanged`) so dashboards can tell the two cases apart. Closes #509.
 
+## [0.7.12](https://github.com/theburrowhub/heimdallm/compare/v0.7.11...v0.7.12) (2026-07-31)
+
+
+### Features
+
+* **daemon:** GitHub API efficiency — ETag, aggregated search, GH-aware throttle, adaptive polling, GraphQL ([#651](https://github.com/theburrowhub/heimdallm/issues/651)) ([356c66c](https://github.com/theburrowhub/heimdallm/commit/356c66cd0c18bf19b6c74ae94573867113d640f0))
+
+## [0.7.11](https://github.com/theburrowhub/heimdallm/compare/v0.7.10...v0.7.11) (2026-07-31)
+
+
+### Bug Fixes
+
+* **build:** stamp daemon version into binaries (closes [#645](https://github.com/theburrowhub/heimdallm/issues/645)) ([#648](https://github.com/theburrowhub/heimdallm/issues/648)) ([25d10c4](https://github.com/theburrowhub/heimdallm/commit/25d10c47d2730538cc387b490b17a81b7eb22e00))
+
+## [0.7.10](https://github.com/theburrowhub/heimdallm/compare/v0.7.9...v0.7.10) (2026-07-31)
+
+
+### Bug Fixes
+
+* **executor:** resolve AI CLIs from well-known installer directories ([#644](https://github.com/theburrowhub/heimdallm/issues/644)) ([a37c140](https://github.com/theburrowhub/heimdallm/commit/a37c140daacc8e64e319e2448be22e62db6fbd46))
+* **security:** enforce AI execution policy at subprocess boundary ([#640](https://github.com/theburrowhub/heimdallm/issues/640)) ([3296bea](https://github.com/theburrowhub/heimdallm/commit/3296bea36fc68f1a972fea4d9f21b7c34a84b057))
+* **server:** serve the daemon's own log when the LaunchAgent log is absent or stale ([a37c140](https://github.com/theburrowhub/heimdallm/commit/a37c140daacc8e64e319e2448be22e62db6fbd46)), closes [#643](https://github.com/theburrowhub/heimdallm/issues/643)
+* **test:** isolate Compose integration runs from production volumes ([#638](https://github.com/theburrowhub/heimdallm/issues/638)) ([82bf2b5](https://github.com/theburrowhub/heimdallm/commit/82bf2b5d6e43779edf6475d5de7bddffe0bf714b))
+* **web:** include shared Flutter assets in the production Docker build ([#639](https://github.com/theburrowhub/heimdallm/issues/639)) ([695ed5e](https://github.com/theburrowhub/heimdallm/commit/695ed5e6300ac1636356829896b07f28647aaf14))
+
 ## [0.7.9](https://github.com/theburrowhub/heimdallm/compare/v0.7.8...v0.7.9) (2026-07-29)
 
 

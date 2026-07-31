@@ -1,6 +1,7 @@
 package github
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -37,6 +39,13 @@ const maxDiffBodyBytes = 10 * 1024 * 1024 // 10 MB for diffs
 // comfortably above anything observed, while still bounding exposure to a
 // misbehaving server.
 const maxPaginatedPageBytes = 5 * 1024 * 1024 // 5 MB for per_page=100 endpoints
+
+// maxCacheBodyBytes is the maximum body size that will be stored in the ETag
+// cache. Bodies larger than this limit are still served in full to the caller
+// (read up to maxDiffBodyBytes) but are not kept in memory across requests.
+// Set to maxBodyBytes (1 MiB) so the cached-entry memory budget is bounded
+// regardless of which Accept type was used to fetch the resource.
+const maxCacheBodyBytes = maxBodyBytes // 1 MB
 
 // maxErrBodyLen limits the number of bytes included in error messages to avoid
 // leaking sensitive GitHub diagnostic information (e.g. token details).
@@ -63,6 +72,14 @@ type Client struct {
 	token   string
 	baseURL string
 	http    *http.Client
+	cache   *ConditionalCache
+	rateObs atomic.Pointer[RateLimitObserver]
+	// searchGate, when set, is called before EVERY Search API request —
+	// including each page of a paginated result — so the caller can meter the
+	// separate 30/min search budget per request instead of per operation.
+	searchGate    atomic.Pointer[func() error]
+	cacheDisabled atomic.Bool // when true, ETag conditional-request layer is bypassed
+	useGraphQL    atomic.Bool // when true, SearchIssues dispatches to GraphQL with REST fallback
 
 	// rate-limit circuit breaker: when GitHub rejects a request with a rate
 	// limit (primary exhaustion or a secondary/abuse burst block), every
@@ -93,11 +110,74 @@ func NewClient(token string, opts ...Option) *Client {
 		token:   token,
 		baseURL: defaultBaseURL,
 		http:    &http.Client{Timeout: 30 * time.Second},
+		cache:   NewConditionalCache(),
 	}
 	for _, o := range opts {
 		o(c)
 	}
 	return c
+}
+
+// CacheStats returns the number of ETag cache hits (304→200 transparently
+// converted) and misses (200 responses stored) since this client was created.
+// Intended for observability / metrics; callers must not depend on exact values.
+func (c *Client) CacheStats() (hits, misses int64) {
+	return c.cache.CacheHits(), c.cache.CacheMisses()
+}
+
+// SetCacheEnabled enables or disables the conditional ETag cache. When
+// disabled every GET request is made without an If-None-Match header, forcing
+// a full 200 response from GitHub. Thread-safe; takes effect on the next
+// request. Defaults to enabled (true).
+func (c *Client) SetCacheEnabled(enabled bool) {
+	c.cacheDisabled.Store(!enabled)
+}
+
+// SetRateObserver registers an observer that will be called after every HTTP
+// response (success or error status) made through do() or doWithBody().
+// The observer receives the raw *http.Response to inspect headers.
+// Replaces any previously registered observer. Pass nil to disable.
+func (c *Client) SetRateObserver(o RateLimitObserver) {
+	if o == nil {
+		c.rateObs.Store(nil)
+		return
+	}
+	c.rateObs.Store(&o)
+}
+
+// SetSearchGate registers a hook invoked before every Search API request,
+// pagination included. Returning an error aborts the search.
+//
+// The gate exists because the search budget (30/min) is metered separately
+// from core and one aggregated prefetch can issue several requests: one query
+// per assignee group, each up to the 10-page cap. Acquiring a single permit per
+// poll cycle counted one and spent many. Pass nil to disable.
+func (c *Client) SetSearchGate(fn func() error) {
+	if fn == nil {
+		c.searchGate.Store(nil)
+		return
+	}
+	c.searchGate.Store(&fn)
+}
+
+// acquireSearch runs the registered search gate, if any.
+func (c *Client) acquireSearch() error {
+	if g := c.searchGate.Load(); g != nil {
+		return (*g)()
+	}
+	return nil
+}
+
+// notifyRateObserver calls the registered observer if one is set.
+// Must be called AFTER the response is ready but BEFORE the body is consumed
+// by this layer (headers are what the observer needs).
+func (c *Client) notifyRateObserver(resp *http.Response) {
+	if resp == nil {
+		return
+	}
+	if o := c.rateObs.Load(); o != nil {
+		(*o).ObserveResponse(resp)
+	}
 }
 
 // AuthenticatedUser returns the GitHub login of the token owner.
@@ -123,7 +203,127 @@ func (c *Client) AuthenticatedUser() (string, error) {
 }
 
 func (c *Client) do(method, path string, accept string) (*http.Response, error) {
-	return c.doWithBody(method, path, accept, "", nil)
+	if method != "GET" {
+		return c.doWithBody(method, path, accept, "", nil)
+	}
+
+	// Circuit breaker: while a rate-limit cooldown is active, fail fast without
+	// touching GitHub. GETs take their own path below (the ETag layer) instead
+	// of going through doWithBody, so the breaker has to be checked here too —
+	// GET polling is the bulk of the traffic a cooldown exists to suppress.
+	if until, paused := c.rateLimitPaused(); paused {
+		return nil, &RateLimitError{RetryAt: until}
+	}
+
+	// ── ETag conditional-request layer (GET only) ────────────────────────────
+	// When the cache is disabled via SetCacheEnabled(false), bypass the ETag
+	// layer entirely and make a plain unconditional GET. doWithBody already
+	// calls notifyRateObserver so all rate-limit accounting still applies.
+	if c.cacheDisabled.Load() {
+		return c.doWithBody(method, path, accept, "", nil)
+	}
+	// If we have a cached ETag for this path, send If-None-Match so GitHub can
+	// return 304 Not Modified (which does NOT count against the rate limit).
+	// On 304: swap the empty body for the cached bytes and re-report 200 so
+	// every caller transparently gets the data it already decoded once.
+	// On 200 with a new ETag: read+buffer the body, store it, hand the caller
+	// a fresh reader so it can decode normally.
+	// Any other status: passthrough without touching the cache.
+	//
+	// The key includes the Accept value because the same path can be requested
+	// with different Accept headers (e.g. application/vnd.github+json vs
+	// application/vnd.github.v3.diff for the pulls endpoint) and must produce
+	// separate cache entries. See cacheKey for details.
+	key := cacheKey(method, accept, path)
+	cachedETag, cachedBody, hasCached := c.cache.Get(key)
+
+	req, err := http.NewRequest(method, c.baseURL+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Accept", accept)
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if hasCached && cachedETag != "" {
+		req.Header.Set("If-None-Match", cachedETag)
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	// Notify the rate-limit observer with the raw response (headers only —
+	// the observer must not consume the body). Called before the ETag cache
+	// layer modifies the response so the observer sees the real status code
+	// and headers GitHub sent (including 304, which does not count against
+	// the budget and carries up-to-date X-RateLimit-* values).
+	c.notifyRateObserver(resp)
+
+	// Open the breaker if GitHub rejected this GET for rate limiting, so the
+	// rest of the poll cycle stops hammering. The response is still returned
+	// and handled by the switch below exactly as before.
+	if wait, limited := rateLimitDelay(resp); limited {
+		c.pauseRateLimit(wait)
+	}
+
+	switch resp.StatusCode {
+	case http.StatusNotModified: // 304
+		// Must drain and close the (empty) server body.
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+
+		if !hasCached || cachedBody == nil {
+			// Defensive: 304 with nothing cached — this shouldn't happen with a
+			// well-behaved server, but we must not return a nil body to callers.
+			// Treat it as a passthrough empty 304 that callers will handle as an
+			// error (non-200 status).
+			resp.Body = http.NoBody
+			return resp, nil
+		}
+
+		c.cache.cacheHits.Add(1)
+		resp.StatusCode = http.StatusOK
+		resp.Body = io.NopCloser(bytes.NewReader(cachedBody))
+		return resp, nil
+
+	case http.StatusOK:
+		newETag := resp.Header.Get("ETag")
+		if newETag == "" {
+			// No ETag — pass through without caching.
+			return resp, nil
+		}
+		// Do not cache paginated responses: a 304 re-serve would lose the
+		// Link header and break the caller's cursor-based pagination
+		// (e.g. FetchCollaborators). Serve the body normally without storing.
+		if resp.Header.Get("Link") != "" {
+			return resp, nil
+		}
+		// Buffer up to the largest body ceiling used by any GET caller. The PR
+		// files fallback accepts pages up to maxFilesPageBytes (20 MiB); using
+		// maxDiffBodyBytes here would truncate a valid 10–20 MiB JSON page before
+		// that caller can apply its own degradation policy. Smaller callers still
+		// enforce their own LimitReader after receiving this replayable body. Only
+		// entries within maxCacheBodyBytes are retained across requests.
+		data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxFilesPageBytes))
+		resp.Body.Close()
+		if readErr != nil {
+			// Return an error-wrapping response with a body so callers that
+			// do resp.Body.Close() don't panic.
+			resp.Body = http.NoBody
+			return resp, fmt.Errorf("github: etag cache: read body: %w", readErr)
+		}
+		if len(data) <= maxCacheBodyBytes {
+			c.cache.Put(key, newETag, data)
+			c.cache.cacheMisses.Add(1)
+		}
+		resp.Body = io.NopCloser(bytes.NewReader(data))
+		return resp, nil
+
+	default:
+		// Non-200/304 status — pass through unchanged; do not cache.
+		return resp, nil
+	}
 }
 
 // doWithBody is the POST/PUT/PATCH counterpart to do(). It accepts an
@@ -131,9 +331,6 @@ func (c *Client) do(method, path string, accept string) (*http.Response, error) 
 // set when a body is present. Every authenticated call should go through
 // this helper so auth, Accept headers, and the pinned API version stay in
 // one place.
-//
-// TODO: migrate PostComment to doWithBody as well — it still builds its
-// request inline, duplicating the header setup.
 func (c *Client) doWithBody(method, path, accept, contentType string, body io.Reader) (*http.Response, error) {
 	// Circuit breaker: while a rate-limit cooldown is active, fail fast without
 	// touching GitHub. Sending more traffic during a secondary/abuse block only
@@ -156,6 +353,10 @@ func (c *Client) doWithBody(method, path, accept, contentType string, body io.Re
 	if err != nil {
 		return nil, err
 	}
+
+	// Notify the rate-limit observer so POST/PUT/PATCH responses also update
+	// the live budget. The observer inspects headers only; the body is untouched.
+	c.notifyRateObserver(resp)
 
 	// If GitHub rate-limited this request, open the breaker so the rest of the
 	// poll cycle stops hammering. The current response is still returned so the
@@ -312,6 +513,9 @@ func (c *Client) fetchByQualifier(username, qualifier string, repos []string) ([
 	var all []*PullRequest
 	seen := make(map[int64]struct{})
 	for page := 1; page <= maxSearchPages; page++ {
+		if err := c.acquireSearch(); err != nil {
+			return nil, fmt.Errorf("github: search PRs (%s), page %d: acquire search budget: %w", qualifier, page, err)
+		}
 		params := url.Values{}
 		params.Set("q", query)
 		params.Set("per_page", strconv.Itoa(perPage))
@@ -513,15 +717,7 @@ func (c *Client) PostComment(repo string, number int, body string) (time.Time, e
 	path := fmt.Sprintf("/repos/%s/issues/%d/comments", repo, number)
 	payload := map[string]any{"body": body}
 	data, _ := json.Marshal(payload)
-	req, err := http.NewRequest("POST", c.baseURL+path, strings.NewReader(string(data)))
-	if err != nil {
-		return time.Time{}, fmt.Errorf("github: post comment: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	resp, err := c.http.Do(req)
+	resp, err := c.doWithBody("POST", path, "application/vnd.github+json", "application/json", strings.NewReader(string(data)))
 	if err != nil {
 		return time.Time{}, fmt.Errorf("github: post comment: %w", err)
 	}
@@ -618,6 +814,9 @@ func (c *Client) fetchReposForOrg(topic, org string) ([]string, error) {
 	var repos []string
 	totalFetched := 0
 	for page := 1; page <= maxDiscoveryPages; page++ {
+		if err := c.acquireSearch(); err != nil {
+			return nil, fmt.Errorf("search repositories, page %d: acquire search budget: %w", page, err)
+		}
 		params := url.Values{}
 		params.Set("q", query)
 		params.Set("per_page", "100")

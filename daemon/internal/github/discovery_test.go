@@ -142,6 +142,7 @@ func TestFetchReposByTopic_FiltersArchivedAndDisabled(t *testing.T) {
 
 func TestFetchReposByTopic_Pagination(t *testing.T) {
 	var calls int32
+	var gateCalls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&calls, 1)
 		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
@@ -164,6 +165,10 @@ func TestFetchReposByTopic_Pagination(t *testing.T) {
 	defer srv.Close()
 
 	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	client.SetSearchGate(func() error {
+		atomic.AddInt32(&gateCalls, 1)
+		return nil
+	})
 	got, err := client.FetchReposByTopic("topic", []string{"org"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -173,6 +178,9 @@ func TestFetchReposByTopic_Pagination(t *testing.T) {
 	}
 	if atomic.LoadInt32(&calls) != 2 {
 		t.Errorf("expected 2 API calls for pagination, got %d", calls)
+	}
+	if got := atomic.LoadInt32(&gateCalls); got != 2 {
+		t.Errorf("expected one search gate call per page, got %d", got)
 	}
 }
 

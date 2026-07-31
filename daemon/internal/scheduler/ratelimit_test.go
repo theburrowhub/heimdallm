@@ -57,3 +57,84 @@ func TestRateLimiter_Refill(t *testing.T) {
 		t.Errorf("after refill = %d, want 10", rl.Available())
 	}
 }
+
+// TestSetDiscoverySafetyThreshold verifies the override and its per-tier scaling.
+func TestSetDiscoverySafetyThreshold(t *testing.T) {
+	t.Run("default thresholds unchanged when override is zero", func(t *testing.T) {
+		rl := NewRateLimiter(100)
+		if got := rl.effectiveThreshold(TierDiscovery, "core"); got != 100 {
+			t.Errorf("TierDiscovery default = %d, want 100", got)
+		}
+		if got := rl.effectiveThreshold(TierRepo, "core"); got != 75 {
+			t.Errorf("TierRepo default = %d, want 75", got)
+		}
+		if got := rl.effectiveThreshold(TierWatch, "core"); got != 25 {
+			t.Errorf("TierWatch default = %d, want 25", got)
+		}
+	})
+
+	// The shares are proportional (1.0 / 0.75 / 0.25), not absolute offsets.
+	// With offsets, base 200 gave 200/175/125 — the gaps stayed 25 and 75 wide
+	// no matter how large the base, so raising the threshold barely changed the
+	// relative priority between tiers.
+	t.Run("override scales all tiers proportionally", func(t *testing.T) {
+		rl := NewRateLimiter(100)
+		rl.SetDiscoverySafetyThreshold(200)
+		if got := rl.effectiveThreshold(TierDiscovery, "core"); got != 200 {
+			t.Errorf("TierDiscovery with override 200 = %d, want 200", got)
+		}
+		if got := rl.effectiveThreshold(TierRepo, "core"); got != 150 {
+			t.Errorf("TierRepo with override 200 = %d, want 150", got)
+		}
+		if got := rl.effectiveThreshold(TierWatch, "core"); got != 50 {
+			t.Errorf("TierWatch with override 200 = %d, want 50", got)
+		}
+	})
+
+	t.Run("zero or negative override reverts to package default", func(t *testing.T) {
+		rl := NewRateLimiter(100)
+		rl.SetDiscoverySafetyThreshold(200)
+		rl.SetDiscoverySafetyThreshold(0) // revert
+		if got := rl.effectiveThreshold(TierDiscovery, "core"); got != 100 {
+			t.Errorf("TierDiscovery after revert = %d, want 100", got)
+		}
+	})
+
+	// The regression the proportional shares fix: with absolute offsets a small
+	// base collapsed TierRepo and TierWatch onto the same floor of 1, which
+	// erased tier prioritisation and left proactive throttling inert until the
+	// budget was completely gone.
+	t.Run("small base keeps tiers distinct and ordered", func(t *testing.T) {
+		rl := NewRateLimiter(100)
+		rl.SetDiscoverySafetyThreshold(20)
+		disc := rl.effectiveThreshold(TierDiscovery, "core")
+		repo := rl.effectiveThreshold(TierRepo, "core")
+		watch := rl.effectiveThreshold(TierWatch, "core")
+		if disc != 20 {
+			t.Errorf("TierDiscovery with base 20 = %d, want 20", disc)
+		}
+		if !(disc > repo && repo > watch) {
+			t.Errorf("tier ordering collapsed: discovery=%d repo=%d watch=%d", disc, repo, watch)
+		}
+		if watch < 1 {
+			t.Errorf("TierWatch = %d, want >= 1", watch)
+		}
+	})
+
+	// Search is quoted at 30 req/min, so X-RateLimit-Remaining tops out at 30.
+	// Reusing the core base of 100 would hold the budget permanently below
+	// threshold and stall every search call.
+	t.Run("search resource uses its own base, not the core one", func(t *testing.T) {
+		rl := NewRateLimiter(100)
+		rl.SetDiscoverySafetyThreshold(100)
+		for _, tier := range []Tier{TierDiscovery, TierRepo, TierWatch} {
+			got := rl.effectiveThreshold(tier, SearchResource)
+			if got > 30 {
+				t.Errorf("search threshold for tier %v = %d, exceeds the 30/min quota", tier, got)
+			}
+			if got < 1 {
+				t.Errorf("search threshold for tier %v = %d, want >= 1", tier, got)
+			}
+		}
+	})
+}

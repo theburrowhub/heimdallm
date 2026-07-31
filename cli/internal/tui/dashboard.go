@@ -1616,6 +1616,41 @@ func (d *Dashboard) buildConfigLines() []string {
 		}
 	}
 
+	// ── Polling / Rate Limit ──
+	if pRaw, ok := d.config["polling"]; ok {
+		if p, ok := pRaw.(map[string]any); ok {
+			section("Polling / Rate Limit")
+			if v, ok := p["adaptive"].(bool); ok {
+				kv("Adaptive", fmt.Sprintf("%v", v))
+			}
+			if v, ok := p["poll_interval"].(string); ok && v != "" {
+				kv("Poll interval", v)
+			}
+			if v, ok := p["min_interval"].(string); ok && v != "" {
+				kv("Min interval", v)
+			}
+			if v, ok := p["max_interval"].(string); ok && v != "" {
+				kv("Max interval", v)
+			}
+			if v, ok := p["discovery_interval"].(string); ok && v != "" {
+				kv("Discovery interval", v)
+			}
+			if v, ok := p["tier3_interval"].(string); ok && v != "" {
+				kv("Tier3 interval", v)
+			}
+			if v, ok := p["rate_limit_safety_threshold"].(float64); ok {
+				kv("Rate-limit safety threshold", fmt.Sprintf("%d", int(v)))
+			}
+			if v, ok := p["use_etag"].(bool); ok {
+				kv("ETag/304 caching", fmt.Sprintf("%v", v))
+			}
+			if v, ok := p["use_graphql"].(bool); ok {
+				kv("GraphQL batching", fmt.Sprintf("%v", v))
+			}
+			blank()
+		}
+	}
+
 	return lines
 }
 

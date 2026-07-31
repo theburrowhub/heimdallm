@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Regression coverage for #75: the /logs SSE stream reads from
@@ -55,9 +56,10 @@ func TestDaemonLogPath_FallsBackToNativeWhenDataDirUnset(t *testing.T) {
 	// the path rather than a hard-coded string so the test stays
 	// portable when run on both macOS and Linux CI.
 	if runtime.GOOS == "darwin" {
-		// macOS: ~/Library/Logs/heimdallm/heimdallm-daemon-error.log,
-		// unless /data happens to exist on the host (unusual on macOS
-		// dev machines but possible if something else mounted it).
+		// macOS: ~/Library/Logs/heimdallm/heimdallm-daemon-error.log when the
+		// LaunchAgent stderr file exists, otherwise the data-dir log the
+		// daemon itself writes. /data may also exist on the host (unusual on
+		// macOS dev machines but possible if something else mounted it).
 		dockerPath := filepath.Join("/data", DaemonLogFileName)
 		if _, err := os.Stat("/data"); err == nil {
 			if got != dockerPath {
@@ -65,8 +67,21 @@ func TestDaemonLogPath_FallsBackToNativeWhenDataDirUnset(t *testing.T) {
 			}
 			return
 		}
-		if !strings.Contains(got, filepath.Join("Library", "Logs", "heimdallm")) {
-			t.Fatalf("daemonLogPath() = %q, want macOS LaunchAgent path", got)
+		// Mirror the recency rule against the real host state: the fresher
+		// of the two candidate files wins; only-existing wins; neither means
+		// the data-dir path is reported. The hermetic stub tests below carry
+		// the behavioral coverage — this test just keeps daemonLogPath()'s
+		// real probe wired to that rule.
+		launchd, dataLog := darwinLogCandidates(t)
+		want := dataLog
+		if lInfo, lErr := os.Stat(launchd); lErr == nil {
+			dInfo, dErr := os.Stat(dataLog)
+			if dErr != nil || !dInfo.ModTime().After(lInfo.ModTime().Add(launchAgentLogRecencyMargin)) {
+				want = launchd
+			}
+		}
+		if got != want {
+			t.Fatalf("daemonLogPath() = %q, want %q", got, want)
 		}
 		return
 	}
@@ -371,6 +386,106 @@ func TestRejectUnsupportedScopedAgentPatchKeys(t *testing.T) {
 				t.Fatalf("unexpected scoped rejection: %v", err)
 			}
 		})
+	}
+}
+
+func darwinLogCandidates(t *testing.T) (launchd, dataLog string) {
+	t.Helper()
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "Library", "Logs", "heimdallm", "heimdallm-daemon-error.log"),
+		filepath.Join(home, ".local", "share", "heimdallm", DaemonLogFileName)
+}
+
+func TestDaemonLogPath_DarwinPrefersLaunchAgentLogWhenActive(t *testing.T) {
+	withEnv(t, "HEIMDALLM_DATA_DIR", "")
+	if _, err := os.Stat("/data"); err == nil {
+		t.Skip("/data exists on this host — Docker path wins, which is correct")
+	}
+	launchd, dataLog := darwinLogCandidates(t)
+
+	// LaunchAgent log is the only file, or is at least as fresh as the
+	// data-dir log (both are written while running under the LaunchAgent).
+	mtimes := map[string]int64{launchd: 2000}
+	probe := func(p string) (time.Time, bool) {
+		sec, ok := mtimes[p]
+		return time.Unix(sec, 0), ok
+	}
+	if got := daemonLogPathFor("darwin", probe); got != launchd {
+		t.Fatalf("launchd-only: daemonLogPathFor(darwin) = %q, want %q", got, launchd)
+	}
+	mtimes[dataLog] = 1000
+	if got := daemonLogPathFor("darwin", probe); got != launchd {
+		t.Fatalf("launchd fresher: daemonLogPathFor(darwin) = %q, want %q", got, launchd)
+	}
+}
+
+func TestDaemonLogPath_DarwinFallsBackToDataDirLogWithoutLaunchAgent(t *testing.T) {
+	// When the daemon is launched directly by the app (no LaunchAgent), the
+	// launchd stderr file never exists — but setupLogging always mirrors slog
+	// into <dataDir>/heimdallm.log, so the /logs stream must read that instead
+	// of reporting "log file not found".
+	withEnv(t, "HEIMDALLM_DATA_DIR", "")
+	if _, err := os.Stat("/data"); err == nil {
+		t.Skip("/data exists on this host — Docker path wins, which is correct")
+	}
+	_, dataLog := darwinLogCandidates(t)
+
+	got := daemonLogPathFor("darwin", func(string) (time.Time, bool) { return time.Time{}, false })
+	if got != dataLog {
+		t.Fatalf("daemonLogPathFor(darwin) = %q, want data-dir fallback %q", got, dataLog)
+	}
+}
+
+func TestDaemonLogPath_DarwinKeepsLaunchAgentLogWithinRecencyMargin(t *testing.T) {
+	// Under the LaunchAgent every slog line reaches both files within
+	// milliseconds (setupLogging's io.MultiWriter writes stderr first, then
+	// the data-dir log), so the data-dir file is always marginally fresher. A
+	// strict mtime comparison would never select the LaunchAgent file and
+	// would lose its stderr-exclusive content (panics, crash traces). A
+	// small freshness lead must therefore still resolve to the LaunchAgent
+	// file; only a clear margin means it is a leftover.
+	withEnv(t, "HEIMDALLM_DATA_DIR", "")
+	if _, err := os.Stat("/data"); err == nil {
+		t.Skip("/data exists on this host — Docker path wins, which is correct")
+	}
+	launchd, dataLog := darwinLogCandidates(t)
+
+	base := time.Unix(10_000, 0)
+	mtimes := map[string]time.Time{
+		launchd: base,
+		dataLog: base.Add(time.Second), // fresher, but well within the margin
+	}
+	probe := func(p string) (time.Time, bool) {
+		ts, ok := mtimes[p]
+		return ts, ok
+	}
+	if got := daemonLogPathFor("darwin", probe); got != launchd {
+		t.Fatalf("data-dir log 1s fresher: daemonLogPathFor(darwin) = %q, want LaunchAgent log %q", got, launchd)
+	}
+}
+
+func TestDaemonLogPath_DarwinPrefersFresherDataDirLogOverStaleLaunchAgent(t *testing.T) {
+	// The LaunchAgent stderr file survives after the agent is uninstalled or
+	// bypassed (daemon later launched directly by the app). Existence alone
+	// does not make it the active sink: the file the daemon is writing NOW is
+	// the fresher one, so /logs must serve by recency, not presence.
+	withEnv(t, "HEIMDALLM_DATA_DIR", "")
+	if _, err := os.Stat("/data"); err == nil {
+		t.Skip("/data exists on this host — Docker path wins, which is correct")
+	}
+	launchd, dataLog := darwinLogCandidates(t)
+
+	base := time.Unix(10_000, 0)
+	mtimes := map[string]time.Time{
+		launchd: base,
+		dataLog: base.Add(launchAgentLogRecencyMargin + time.Second),
+	}
+	probe := func(p string) (time.Time, bool) {
+		ts, ok := mtimes[p]
+		return ts, ok
+	}
+	if got := daemonLogPathFor("darwin", probe); got != dataLog {
+		t.Fatalf("stale launchd log: daemonLogPathFor(darwin) = %q, want fresher data-dir log %q", got, dataLog)
 	}
 }
 

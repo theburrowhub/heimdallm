@@ -36,6 +36,8 @@ func TestDetect_Fallback(t *testing.T) {
 	// the isolated $PATH, so the primary never "fails" and the fallback path is
 	// never exercised (the test then flakes on any dev box with codex present).
 	defer executor.SetLoginShellLookPathForTest(func(string) string { return "" })()
+	// Same for the well-known-dirs probe (e.g. codex in /opt/homebrew/bin).
+	defer executor.SetWellKnownBinDirsForTest(func() []string { return nil })()
 
 	e := executor.New()
 	cli, err := e.Detect("codex", "gemini")
@@ -44,6 +46,208 @@ func TestDetect_Fallback(t *testing.T) {
 	}
 	if cli != "gemini" {
 		t.Errorf("expected fake_gemini fallback, got %q", cli)
+	}
+}
+
+func TestDetect_WellKnownDirFallback(t *testing.T) {
+	// Neither the process PATH nor the login shell can resolve the CLI — the
+	// exact environment of a daemon started by launchd with the minimal system
+	// PATH and a CLI installed by an installer that only edits ~/.zshrc.
+	t.Setenv("PATH", t.TempDir())
+	defer executor.SetLoginShellLookPathForTest(func(string) string { return "" })()
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	defer executor.SetWellKnownBinDirsForTest(func() []string { return []string{binDir} })()
+
+	e := executor.New()
+	cli, err := e.Detect("claude", "")
+	if err != nil {
+		t.Fatalf("detect via well-known dir: %v", err)
+	}
+	if cli != "claude" {
+		t.Errorf("expected claude, got %q", cli)
+	}
+}
+
+func TestDetect_WellKnownDirSkipsNonExecutable(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	defer executor.SetLoginShellLookPathForTest(func(string) string { return "" })()
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte("not a binary"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	defer executor.SetWellKnownBinDirsForTest(func() []string { return []string{binDir} })()
+
+	e := executor.New()
+	if _, err := e.Detect("claude", ""); err == nil {
+		t.Error("expected error: a non-executable candidate must not be selected")
+	}
+}
+
+func TestDetect_WellKnownDirSkipsDirectoryNamedLikeCLI(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	defer executor.SetLoginShellLookPathForTest(func(string) string { return "" })()
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(filepath.Join(binDir, "claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	defer executor.SetWellKnownBinDirsForTest(func() []string { return []string{binDir} })()
+
+	e := executor.New()
+	if _, err := e.Detect("claude", ""); err == nil {
+		t.Error("expected error: a directory named like the CLI must not be selected")
+	}
+}
+
+func TestExecuteRawWellKnownDirPrecedence(t *testing.T) {
+	// System dirs, not an empty temp dir — see TestExecuteRawAddsWellKnownDirToChildPATH.
+	t.Setenv("PATH", "/usr/bin:/bin")
+	defer executor.SetLoginShellLookPathForTest(func(string) string { return "" })()
+	defer executor.ResetLoginPathCacheForTest()()
+
+	first := t.TempDir()
+	second := t.TempDir()
+	for dir, marker := range map[string]string{first: "first", second: "second"} {
+		script := "#!/bin/sh\nprintf '" + marker + "'\n"
+		if err := os.WriteFile(filepath.Join(dir, "claude"), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defer executor.SetWellKnownBinDirsForTest(func() []string { return []string{first, second} })()
+
+	e := executor.New()
+	out, err := e.ExecuteRaw("claude", "prompt", executor.ExecOptions{})
+	if err != nil {
+		t.Fatalf("ExecuteRaw: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "first" {
+		t.Errorf("expected the CLI from the first well-known dir to win, got %q", got)
+	}
+}
+
+func TestWellKnownBinDirsDefaults(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("HOME-based derivation is Unix-only; the daemon does not target Windows")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	dirs := executor.DefaultWellKnownBinDirsForTest()
+	want := []string{
+		filepath.Join(home, ".local", "bin"),
+		"/opt/homebrew/bin",
+		"/usr/local/bin",
+	}
+	for _, w := range want {
+		found := false
+		for _, d := range dirs {
+			if d == w {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("default well-known dirs %v missing %q", dirs, w)
+		}
+	}
+}
+
+func TestExecuteRawAddsWellKnownDirToChildPATH(t *testing.T) {
+	// The CLI is launched by absolute path, but if it re-invokes itself (or a
+	// sibling tool installed next to it) by bare name, the child's PATH must
+	// contain the well-known dir the CLI was resolved from — that dir is, by
+	// definition of this fallback, missing from both the process PATH and the
+	// login-shell PATH.
+	//
+	// Keep the system dirs (not an empty temp dir) on PATH: later tests' fake
+	// CLIs need coreutils (see the comment in TestExecute). The cache reset
+	// additionally guarantees this test's PATH snapshot cannot leak into other
+	// tests regardless of execution order.
+	t.Setenv("PATH", "/usr/bin:/bin")
+	defer executor.SetLoginShellLookPathForTest(func(string) string { return "" })()
+	defer executor.ResetLoginPathCacheForTest()()
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\nprintf '%s' \"$PATH\"\n"
+	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	defer executor.SetWellKnownBinDirsForTest(func() []string { return []string{binDir} })()
+
+	e := executor.New()
+	out, err := e.ExecuteRaw("claude", "prompt", executor.ExecOptions{})
+	if err != nil {
+		t.Fatalf("ExecuteRaw: %v", err)
+	}
+	for _, p := range filepath.SplitList(strings.TrimSpace(string(out))) {
+		if p == binDir {
+			return
+		}
+	}
+	t.Fatalf("child PATH %q does not contain the resolved CLI dir %q", out, binDir)
+}
+
+func TestAppendDirToPathHandlesEmptyPathValue(t *testing.T) {
+	// "PATH=" + ":" + dir would create a leading empty element, which POSIX
+	// PATH semantics interpret as the current directory.
+	env := executor.AppendDirToPathForTest([]string{"PATH="}, "/opt/tools")
+	if got, want := env[0], "PATH=/opt/tools"; got != want {
+		t.Errorf("appendDirToPath on empty PATH = %q, want %q", got, want)
+	}
+}
+
+func TestCliHelpChildPATHIncludesResolvedDir(t *testing.T) {
+	// The --help probe (cliHelp) must run with the same PATH enrichment as the
+	// real execution: a CLI resolved from a well-known dir may exec a sibling
+	// tool by bare name during --help. If that fails, detectWorkDirFlags
+	// silently degrades to cwd-only context and the CLI runs without
+	// --add-dir even though it supports it.
+	t.Setenv("PATH", "/usr/bin:/bin")
+	defer executor.SetLoginShellLookPathForTest(func(string) string { return "" })()
+	defer executor.ResetLoginPathCacheForTest()()
+
+	binDir := t.TempDir()
+	helper := "#!/bin/sh\nprintf 'Usage: claude\\n  --add-dir <directories...>\\n'\n"
+	if err := os.WriteFile(filepath.Join(binDir, "help-sibling"), []byte(helper), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	captureArgs := filepath.Join(t.TempDir(), "args.txt")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"--help\" ]; then\n" +
+		"  exec help-sibling\n" +
+		"fi\n" +
+		"printf '%s' \"$*\" > " + captureArgs + "\n" +
+		"printf '{}'\n"
+	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	defer executor.SetWellKnownBinDirsForTest(func() []string { return []string{binDir} })()
+
+	e := executor.New()
+	workDir := t.TempDir()
+	if _, err := e.ExecuteRaw("claude", "prompt", executor.ExecOptions{WorkDir: workDir}); err != nil {
+		t.Fatalf("ExecuteRaw: %v", err)
+	}
+	argsBytes, err := os.ReadFile(captureArgs)
+	if err != nil {
+		t.Fatalf("read captured args: %v", err)
+	}
+	if !strings.Contains(string(argsBytes), "--add-dir") {
+		t.Fatalf("args %q missing --add-dir — cliHelp could not resolve the sibling tool", string(argsBytes))
 	}
 }
 
