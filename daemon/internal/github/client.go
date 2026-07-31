@@ -69,11 +69,15 @@ func safeTruncate(s string, max int) string {
 }
 
 type Client struct {
-	token         string
-	baseURL       string
-	http          *http.Client
-	cache         *ConditionalCache
-	rateObs       atomic.Pointer[RateLimitObserver]
+	token   string
+	baseURL string
+	http    *http.Client
+	cache   *ConditionalCache
+	rateObs atomic.Pointer[RateLimitObserver]
+	// searchGate, when set, is called before EVERY Search API request —
+	// including each page of a paginated result — so the caller can meter the
+	// separate 30/min search budget per request instead of per operation.
+	searchGate    atomic.Pointer[func() error]
 	cacheDisabled atomic.Bool // when true, ETag conditional-request layer is bypassed
 	useGraphQL    atomic.Bool // when true, SearchIssues dispatches to GraphQL with REST fallback
 
@@ -139,6 +143,29 @@ func (c *Client) SetRateObserver(o RateLimitObserver) {
 		return
 	}
 	c.rateObs.Store(&o)
+}
+
+// SetSearchGate registers a hook invoked before every Search API request,
+// pagination included. Returning an error aborts the search.
+//
+// The gate exists because the search budget (30/min) is metered separately
+// from core and one aggregated prefetch can issue several requests: one query
+// per assignee group, each up to the 10-page cap. Acquiring a single permit per
+// poll cycle counted one and spent many. Pass nil to disable.
+func (c *Client) SetSearchGate(fn func() error) {
+	if fn == nil {
+		c.searchGate.Store(nil)
+		return
+	}
+	c.searchGate.Store(&fn)
+}
+
+// acquireSearch runs the registered search gate, if any.
+func (c *Client) acquireSearch() error {
+	if g := c.searchGate.Load(); g != nil {
+		return (*g)()
+	}
+	return nil
 }
 
 // notifyRateObserver calls the registered observer if one is set.

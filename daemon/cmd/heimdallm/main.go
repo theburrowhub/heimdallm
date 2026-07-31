@@ -732,6 +732,13 @@ func main() {
 		ctx, cancel := context.WithCancel(ctx)
 		var wg sync.WaitGroup
 
+		// Meter the separate 30/min search budget per request. Rewired on every
+		// restart so the gate blocks on the CURRENT poller context and a
+		// shutdown cannot be held up waiting on a budget nobody will use.
+		ghClient.SetSearchGate(func() error {
+			return limiter.AcquireResource(ctx, scheduler.TierRepo, scheduler.SearchResource)
+		})
+
 		// Rate limiter hourly refill
 		wg.Add(1)
 		go func() {
@@ -2972,27 +2979,14 @@ func runTier2(
 		// paginating on a 1m tick can exhaust it with no proactive contention
 		// at all — moving spend off the core bucket only helps if the new
 		// bucket is protected too.
-		prefetch := true
-		if limiter != nil {
-			if err := limiter.AcquireResource(ctx, scheduler.TierRepo, scheduler.SearchResource); err != nil {
-				// Cancelled while waiting on the budget. Skipping the prefetch
-				// is safe: ProcessRepo falls back to per-repo REST.
-				slog.Debug("tier2: search budget acquire cancelled, skipping prefetch", "err", err)
-				prefetch = false
-			}
-		}
-		if prefetch {
-			adapter.PrefetchIssuesForCycle(currentRepos)
-			defer adapter.ClearIssuePrefetch()
-		}
-
-		// Adaptive gating: narrow the work list to only repos that are due
-		// this tick. Falls back to all repos when adaptive is disabled.
-		adaptive := adaptiveFn != nil && adaptiveFn()
+		// Adaptive gating runs BEFORE the prefetch so a tick with nothing due
+		// spends no search query at all. The scheduler must be non-nil to be
+		// consulted: adaptiveFn and adaptiveSched are separate parameters and
+		// callers can pass them apart, so guard rather than assume the pair.
+		adaptive := adaptiveFn != nil && adaptiveFn() && adaptiveSched != nil
 		reposToProcess := currentRepos
-		now := time.Now()
 		if adaptive {
-			reposToProcess = adaptiveSched.Due(now, currentRepos)
+			reposToProcess = adaptiveSched.Due(time.Now(), currentRepos)
 			if len(reposToProcess) < len(currentRepos) {
 				slog.Debug("tier2: adaptive mode — skipping idle repos",
 					"total", len(currentRepos), "due", len(reposToProcess))
@@ -3000,6 +2994,18 @@ func runTier2(
 			// Prune repos that have been removed from monitoring so the
 			// scheduler's memory stays bounded.
 			adaptiveSched.PruneAbsent(currentRepos)
+		}
+
+		// Warm the aggregated search prefetch for the repos this tick will
+		// actually process. Skipped entirely when nothing is due — warming a
+		// cache no one reads costs a search query and a limiter token.
+		// Budget metering happens per request inside the client (see
+		// SetSearchGate) rather than once here: one prefetch issues a query per
+		// assignee group, each up to the 10-page cap, so a single permit per
+		// cycle counted one request and spent many.
+		if len(reposToProcess) > 0 {
+			adapter.PrefetchIssuesForCycle(reposToProcess)
+			defer adapter.ClearIssuePrefetch()
 		}
 
 		issueCount = processReposInParallel(ctx, reposToProcess, concurrency, func(ctx context.Context, repo string) (int, error) {
@@ -3025,12 +3031,19 @@ func runTier2(
 			if n > 0 {
 				slog.Info("tier2: processed issues", "repo", repo, "count", n)
 			}
-			// Update adaptive cadence based on observed activity.
+			// Update adaptive cadence based on observed activity. Stamped with
+			// the time this repo FINISHED, not the cycle's start: with many
+			// repos and bounded concurrency a fan-out can outlast
+			// min_interval, and marking from a stale base put nextDue in the
+			// past — every repo came back due on the next tick and the
+			// back-off never accumulated, disabling adaptive mode in exactly
+			// the loaded scenario that justifies turning it on.
 			if adaptive {
+				done := time.Now()
 				if n > 0 {
-					adaptiveSched.MarkActive(repo, now)
+					adaptiveSched.MarkActive(repo, done)
 				} else {
-					adaptiveSched.MarkIdle(repo, now)
+					adaptiveSched.MarkIdle(repo, done)
 				}
 			}
 			return n, nil

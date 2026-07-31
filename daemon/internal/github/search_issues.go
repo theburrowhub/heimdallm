@@ -86,6 +86,11 @@ func (c *Client) SearchIssues(query string) ([]*Issue, error) {
 func (c *Client) searchIssuesREST(query string) ([]*Issue, error) {
 	var all []*Issue
 	for page := 1; page <= maxSearchIssuePages; page++ {
+		// Meter every page, not just the first: the search budget is spent
+		// per request.
+		if err := c.acquireSearch(); err != nil {
+			return nil, fmt.Errorf("github: search budget: %w", err)
+		}
 		params := url.Values{}
 		params.Set("q", query)
 		params.Set("per_page", "100")

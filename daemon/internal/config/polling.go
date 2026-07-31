@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 )
 
@@ -42,6 +43,10 @@ type PollingConfig struct {
 
 	// RateLimitSafetyThreshold is the minimum X-RateLimit-Remaining for the
 	// "core" resource below which the TierDiscovery tier starts throttling.
+	//
+	// 0 means "unset" and is replaced by the default below — there is no way to
+	// express "disable proactive throttling" through this field, deliberately:
+	// the whole point of the section is to stop exhausting the quota.
 	// The scheduler already uses per-tier offsets (TierRepo = base-25,
 	// TierWatch = base-75). Default 100, matching the current hardcoded value
 	// of tierSafetyThreshold[TierDiscovery].
@@ -111,11 +116,29 @@ func parseDurationWithFallback(s string, fallback time.Duration) time.Duration {
 		// rejects these at load, so this is the defence-in-depth path (rows
 		// written before validation existed, or a caller that skipped it);
 		// warn rather than silently running at a cadence nobody asked for.
-		slog.Warn("config: ignoring invalid [polling] duration, using default",
-			"value", s, "default", fallback)
+		//
+		// Logged once per distinct value, not per call: the Resolved* helpers
+		// run hot — the tier3 poller calls ResolvedTier3Interval on every tick
+		// — so an unconditional warn would repeat forever every few seconds.
+		warnInvalidDurationOnce(s)
 		return fallback
 	}
 	return d
+}
+
+// invalidDurationWarned records which discarded values have already been
+// logged, so a hot-path caller cannot turn one bad config row into an endless
+// log stream.
+var invalidDurationWarned sync.Map
+
+func warnInvalidDurationOnce(value string) {
+	if _, loaded := invalidDurationWarned.LoadOrStore(value, struct{}{}); loaded {
+		return
+	}
+	// The effective value is resolved by the caller's own fallback chain (for
+	// poll_interval it continues on to [github].poll_interval), so the message
+	// deliberately does not claim to know it.
+	slog.Warn("config: ignoring invalid [polling] duration, falling back", "value", value)
 }
 
 // pollingDurationBounds are the accepted ranges for each [polling] duration.
