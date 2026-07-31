@@ -9,3 +9,16 @@ func SetLoginShellLookPathForTest(f func(string) string) func() {
 	loginShellLookPath = f
 	return func() { loginShellLookPath = old }
 }
+
+// SetWellKnownBinDirsForTest overrides the well-known installer directory
+// probe so tests can stay hermetic. Returns a restore func to defer.
+func SetWellKnownBinDirsForTest(f func() []string) func() {
+	old := wellKnownBinDirs
+	wellKnownBinDirs = f
+	return func() { wellKnownBinDirs = old }
+}
+
+// DefaultWellKnownBinDirsForTest exposes the production directory derivation.
+func DefaultWellKnownBinDirsForTest() []string {
+	return wellKnownBinDirs()
+}

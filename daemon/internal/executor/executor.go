@@ -959,7 +959,42 @@ func resolveCLIPath(name string) string {
 		return path
 	}
 	// Fall back to the user's login shell.
-	return loginShellLookPath(name)
+	if path := loginShellLookPath(name); path != "" {
+		return path
+	}
+	// Last resort: installer directories commonly missing from both launchd's
+	// minimal PATH and non-interactive login shells.
+	return lookInWellKnownDirs(name)
+}
+
+// wellKnownBinDirs returns the installer directories probed when neither the
+// process PATH nor the login shell resolves a CLI. Package-level var so tests
+// can stub it and stay hermetic on dev machines with real CLIs installed.
+//
+// ~/.local/bin is where the Claude Code native installer places its binary,
+// exporting it only in ~/.zshrc — which non-interactive login shells never
+// source, so the login-shell probe cannot see it either (issue #643).
+var wellKnownBinDirs = func() []string {
+	dirs := make([]string, 0, 3)
+	if home, err := os.UserHomeDir(); err == nil {
+		dirs = append(dirs, filepath.Join(home, ".local", "bin"))
+	}
+	return append(dirs, "/opt/homebrew/bin", "/usr/local/bin")
+}
+
+// lookInWellKnownDirs returns the path of an executable named name inside the
+// well-known installer directories, or "" if none qualifies. Mirrors
+// exec.LookPath's requirement that the candidate be an executable regular file.
+func lookInWellKnownDirs(name string) string {
+	for _, dir := range wellKnownBinDirs() {
+		candidate := filepath.Join(dir, name)
+		info, err := os.Stat(candidate)
+		if err != nil || info.IsDir() || info.Mode().Perm()&0o111 == 0 {
+			continue
+		}
+		return candidate
+	}
+	return ""
 }
 
 // loginShellLookPath resolves name via the user's login shell, which sources

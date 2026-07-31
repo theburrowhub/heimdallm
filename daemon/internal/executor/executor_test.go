@@ -36,6 +36,8 @@ func TestDetect_Fallback(t *testing.T) {
 	// the isolated $PATH, so the primary never "fails" and the fallback path is
 	// never exercised (the test then flakes on any dev box with codex present).
 	defer executor.SetLoginShellLookPathForTest(func(string) string { return "" })()
+	// Same for the well-known-dirs probe (e.g. codex in /opt/homebrew/bin).
+	defer executor.SetWellKnownBinDirsForTest(func() []string { return nil })()
 
 	e := executor.New()
 	cli, err := e.Detect("codex", "gemini")
@@ -44,6 +46,75 @@ func TestDetect_Fallback(t *testing.T) {
 	}
 	if cli != "gemini" {
 		t.Errorf("expected fake_gemini fallback, got %q", cli)
+	}
+}
+
+func TestDetect_WellKnownDirFallback(t *testing.T) {
+	// Neither the process PATH nor the login shell can resolve the CLI — the
+	// exact environment of a daemon started by launchd with the minimal system
+	// PATH and a CLI installed by an installer that only edits ~/.zshrc.
+	t.Setenv("PATH", t.TempDir())
+	defer executor.SetLoginShellLookPathForTest(func(string) string { return "" })()
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	defer executor.SetWellKnownBinDirsForTest(func() []string { return []string{binDir} })()
+
+	e := executor.New()
+	cli, err := e.Detect("claude", "")
+	if err != nil {
+		t.Fatalf("detect via well-known dir: %v", err)
+	}
+	if cli != "claude" {
+		t.Errorf("expected claude, got %q", cli)
+	}
+}
+
+func TestDetect_WellKnownDirSkipsNonExecutable(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	defer executor.SetLoginShellLookPathForTest(func(string) string { return "" })()
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte("not a binary"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	defer executor.SetWellKnownBinDirsForTest(func() []string { return []string{binDir} })()
+
+	e := executor.New()
+	if _, err := e.Detect("claude", ""); err == nil {
+		t.Error("expected error: a non-executable candidate must not be selected")
+	}
+}
+
+func TestWellKnownBinDirsDefaults(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	dirs := executor.DefaultWellKnownBinDirsForTest()
+	want := []string{
+		filepath.Join(home, ".local", "bin"),
+		"/opt/homebrew/bin",
+		"/usr/local/bin",
+	}
+	for _, w := range want {
+		found := false
+		for _, d := range dirs {
+			if d == w {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("default well-known dirs %v missing %q", dirs, w)
+		}
 	}
 }
 
