@@ -1999,12 +1999,12 @@ const DaemonLogFileName = "heimdallm.log"
 //  1. $HEIMDALLM_DATA_DIR/heimdallm.log — explicit override (native or Docker).
 //  2. /data/heimdallm.log — Docker convention, used when /data exists as a
 //     directory (the compose file mounts the heimdallm-data volume there).
-//  3. macOS: ~/Library/Logs/heimdallm/heimdallm-daemon-error.log — LaunchAgent
-//     convention; the plist redirects stderr there so the file pre-exists
-//     without setupLogging having to write it. When that file does not exist
-//     (daemon launched directly by the app, no LaunchAgent installed), fall
-//     back to ~/.local/share/heimdallm/heimdallm.log — the file setupLogging
-//     always writes regardless of how the daemon was started.
+//  3. macOS: the fresher of ~/Library/Logs/heimdallm/heimdallm-daemon-error.log
+//     (LaunchAgent convention — the plist redirects stderr there) and
+//     ~/.local/share/heimdallm/heimdallm.log (the file setupLogging always
+//     writes regardless of how the daemon was started). Recency, not mere
+//     existence, decides: a LaunchAgent file left behind from a previous
+//     install must not shadow the log the current daemon is writing.
 //  4. Linux/other: $XDG_STATE_HOME/heimdallm/heimdallm.log, fallback
 //     ~/.local/share/heimdallm/heimdallm.log.
 //
@@ -2012,13 +2012,13 @@ const DaemonLogFileName = "heimdallm.log"
 // returned "file not found" under Docker because stderr was redirected to
 // `docker logs`, never to a file.
 func daemonLogPath() string {
-	return daemonLogPathFor(runtime.GOOS, fileExists)
+	return daemonLogPathFor(runtime.GOOS, fileModTime)
 }
 
 // daemonLogPathFor is the testable core of daemonLogPath: goos and the
-// file-existence probe are parameters so the darwin-only branch can be
-// exercised by tests running on Linux (the test-docker sandbox).
-func daemonLogPathFor(goos string, exists func(string) bool) string {
+// file-modification-time probe are parameters so the darwin-only branch can
+// be exercised by tests running on Linux (the test-docker sandbox).
+func daemonLogPathFor(goos string, mtime func(string) (time.Time, bool)) string {
 	if v := os.Getenv("HEIMDALLM_DATA_DIR"); v != "" {
 		return filepath.Join(v, DaemonLogFileName)
 	}
@@ -2029,13 +2029,19 @@ func daemonLogPathFor(goos string, exists func(string) bool) string {
 	switch goos {
 	case "darwin":
 		launchd := filepath.Join(home, "Library", "Logs", "heimdallm", "heimdallm-daemon-error.log")
-		if exists(launchd) {
+		dataLog := filepath.Join(home, ".local", "share", "heimdallm", DaemonLogFileName)
+		launchdTime, launchdOK := mtime(launchd)
+		dataTime, dataOK := mtime(dataLog)
+		// Existence alone does not make the LaunchAgent file the active sink:
+		// it survives after the agent is uninstalled or bypassed (daemon later
+		// launched directly by the app), while setupLogging keeps writing
+		// <dataDir>/heimdallm.log. The active sink is the fresher file, so
+		// pick by recency; ties keep the LaunchAgent file (under the agent
+		// both files are written).
+		if launchdOK && (!dataOK || !dataTime.After(launchdTime)) {
 			return launchd
 		}
-		// No LaunchAgent stderr file — the daemon was launched directly
-		// (e.g. by the app bundle). setupLogging always mirrors slog into
-		// <dataDir>/heimdallm.log, so serve that instead of "not found".
-		return filepath.Join(home, ".local", "share", "heimdallm", DaemonLogFileName)
+		return dataLog
 	default:
 		if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" {
 			return filepath.Join(xdg, "heimdallm", DaemonLogFileName)
@@ -2044,9 +2050,12 @@ func daemonLogPathFor(goos string, exists func(string) bool) string {
 	}
 }
 
-func fileExists(path string) bool {
+func fileModTime(path string) (time.Time, bool) {
 	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
+	if err != nil || info.IsDir() {
+		return time.Time{}, false
+	}
+	return info.ModTime(), true
 }
 
 func (srv *Server) handleLogsStream(w http.ResponseWriter, r *http.Request) {

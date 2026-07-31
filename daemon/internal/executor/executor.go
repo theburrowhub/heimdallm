@@ -989,15 +989,25 @@ func appendDirToPath(env []string, dir string) []string {
 		if !strings.HasPrefix(kv, "PATH=") {
 			continue
 		}
-		for _, p := range filepath.SplitList(strings.TrimPrefix(kv, "PATH=")) {
+		path := strings.TrimPrefix(kv, "PATH=")
+		for _, p := range filepath.SplitList(path) {
 			if p == dir {
 				return env
 			}
 		}
 		out := append([]string(nil), env...)
-		out[i] = kv + string(os.PathListSeparator) + dir
+		if path == "" {
+			// "PATH=:" + dir would create a leading empty element, which
+			// POSIX interprets as the current directory.
+			out[i] = "PATH=" + dir
+		} else {
+			out[i] = kv + string(os.PathListSeparator) + dir
+		}
 		return out
 	}
+	// No PATH entry at all — unreachable via os.Environ()/the enriched env,
+	// both of which always carry PATH. Setting the CLI's own dir is still
+	// strictly more capable than leaving the child with no PATH.
 	return append(append([]string(nil), env...), "PATH="+dir)
 }
 
@@ -1421,6 +1431,11 @@ func cliHelp(cliPath string) (string, bool) {
 	cmd := exec.CommandContext(ctx, cliPath, "--help")
 	if env := enrichEnvWithLoginPath(); env != nil {
 		cmd.Env = env
+	}
+	// Same PATH enrichment as ExecuteRaw: a CLI resolved from a well-known
+	// dir may exec a sibling tool by bare name while printing --help.
+	if filepath.IsAbs(cliPath) {
+		cmd.Env = appendDirToPath(cmd.Env, filepath.Dir(cliPath))
 	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
