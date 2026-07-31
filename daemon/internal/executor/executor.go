@@ -964,7 +964,41 @@ func resolveCLIPath(name string) string {
 	}
 	// Last resort: installer directories commonly missing from both launchd's
 	// minimal PATH and non-interactive login shells.
-	return lookInWellKnownDirs(name)
+	if path := lookInWellKnownDirs(name); path != "" {
+		return path
+	}
+	slog.Debug("executor: CLI not found on PATH, login shell, or well-known dirs", "cli", name)
+	return ""
+}
+
+// appendDirToPath returns env (the process environment when nil) with dir
+// appended to PATH when missing. The resolved CLI may live in a directory that
+// is absent from both the process and login-shell PATH (the well-known-dir
+// fallback); without this, a CLI that re-invokes itself or a sibling tool by
+// bare name would still fail in the launchd environment even though Heimdallm
+// launched it by absolute path. Appending (not prepending) means resolution of
+// every other binary is unchanged.
+func appendDirToPath(env []string, dir string) []string {
+	if dir == "" || dir == "." {
+		return env
+	}
+	if env == nil {
+		env = os.Environ()
+	}
+	for i, kv := range env {
+		if !strings.HasPrefix(kv, "PATH=") {
+			continue
+		}
+		for _, p := range filepath.SplitList(strings.TrimPrefix(kv, "PATH=")) {
+			if p == dir {
+				return env
+			}
+		}
+		out := append([]string(nil), env...)
+		out[i] = kv + string(os.PathListSeparator) + dir
+		return out
+	}
+	return append(append([]string(nil), env...), "PATH="+dir)
 }
 
 // wellKnownBinDirs returns the installer directories probed when neither the
@@ -983,16 +1017,18 @@ var wellKnownBinDirs = func() []string {
 }
 
 // lookInWellKnownDirs returns the path of an executable named name inside the
-// well-known installer directories, or "" if none qualifies. Mirrors
-// exec.LookPath's requirement that the candidate be an executable regular file.
+// well-known installer directories, or "" if none qualifies. exec.LookPath on
+// a path containing a separator checks that exact file with the same
+// effective-user executability test (eaccess X_OK) the PATH lookup applies, so
+// a candidate the daemon cannot actually execute (e.g. a root-owned 0700 file)
+// is skipped rather than selected and failed at exec time.
 func lookInWellKnownDirs(name string) string {
 	for _, dir := range wellKnownBinDirs() {
 		candidate := filepath.Join(dir, name)
-		info, err := os.Stat(candidate)
-		if err != nil || info.IsDir() || info.Mode().Perm()&0o111 == 0 {
-			continue
+		if path, err := exec.LookPath(candidate); err == nil {
+			slog.Debug("executor: CLI resolved from well-known installer dir", "cli", name, "path", path)
+			return path
 		}
-		return candidate
 	}
 	return ""
 }
@@ -1194,6 +1230,11 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 	enrichedEnv := enrichEnvWithLoginPath()
 	if enrichedEnv != nil {
 		cmd.Env = enrichedEnv
+	}
+	// Make sure the CLI's own directory is on the child's PATH — it may have
+	// been resolved from a well-known installer dir that no PATH source knows.
+	if filepath.IsAbs(cliPath) {
+		cmd.Env = appendDirToPath(cmd.Env, filepath.Dir(cliPath))
 	}
 	if opts.WorkDir != "" {
 		cmd.Dir = opts.WorkDir
