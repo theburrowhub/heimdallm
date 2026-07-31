@@ -632,3 +632,22 @@ func TestBuildAggregatedSearchQuery_MultipleAssigneesAndRepos(t *testing.T) {
 		t.Errorf("no label qualifiers expected, got %q", q)
 	}
 }
+
+// TestBuildAggregatedSearchQuery_AssigneesAreOneUnionQuery pins the shape that
+// depends on GitHub Search treating repeated assignee: qualifiers as a UNION.
+// Verified against the live API: assignee:a → 36, assignee:b → 3, both
+// together → 39. Reading them as an intersection invites "fixing" this into one
+// query per assignee, which would multiply the search spend for the same rows.
+// The client-side MatchesAssignees narrows the superset afterwards.
+func TestBuildAggregatedSearchQuery_AssigneesAreOneUnionQuery(t *testing.T) {
+	q := github.BuildAggregatedSearchQuery(
+		[]string{"alice", "bob", "carol"},
+		[]string{"org/repo-a"},
+	)
+	if got := strings.Count(q, "assignee:"); got != 3 {
+		t.Errorf("expected all 3 assignees in a single query, got %d in %q", got, q)
+	}
+	if strings.Contains(q, " OR ") || strings.Contains(q, " AND ") {
+		t.Errorf("qualifiers combine implicitly; no explicit operators expected, got %q", q)
+	}
+}

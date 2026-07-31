@@ -191,6 +191,17 @@ func isValidRepo(s string) bool {
 // assignees must be the resolved set for the group (empty falls back to authUser
 // if provided via the caller; pass the already-resolved list here).
 // repos must be non-empty.
+// Multiple assignee: qualifiers are a UNION in GitHub Search, not an
+// intersection — verified against the live API:
+//
+//	assignee:a                 → 36 results
+//	assignee:b                 →  3 results
+//	assignee:a assignee:b      → 39 results
+//
+// That union is exactly what the prefetch needs: a superset that
+// ClassifyAndFilterIssues then narrows with MatchesAssignees (which requires
+// exactly one in-scope assignee). Do not "fix" this into one query per
+// assignee — it would multiply the search spend for identical results.
 func BuildAggregatedSearchQuery(assignees []string, repos []string) string {
 	var parts []string
 	parts = append(parts, "is:issue", "is:open")

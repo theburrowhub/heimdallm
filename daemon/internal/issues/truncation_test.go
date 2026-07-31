@@ -14,13 +14,15 @@ import (
 // meaning "we stopped looking". Seeding a truncated group would convert issues
 // we never saw into a confident zero, with no error and no per-repo log.
 //
-// So a truncated group keeps the pre-seeding behaviour: repos WITH results are
-// still served from the prefetch, repos without stay absent and pay for a
-// correct per-repo fetch.
+// Skipping only the repos with no results is not enough either: a repo can have
+// some issues inside the first 1000 and the rest beyond it, so serving its
+// partial list reports it as complete — the same loss, just narrower. A
+// truncated group is therefore discarded entirely and every repo in it falls
+// back to a per-repo fetch.
 
-func TestPrefetchIssues_TruncatedGroupIsNotSeeded(t *testing.T) {
-	// The search covered three repos but was truncated; only org/a appeared
-	// in the 1000 items we did get back.
+func TestPrefetchIssues_TruncatedGroupIsDiscardedEntirely(t *testing.T) {
+	// The search covered three repos but was truncated; org/a appeared in the
+	// 1000 items we did get back — its list may still be incomplete.
 	searcher := &fakeSearcher{
 		issues: []*github.Issue{
 			makeIssue(1, 1, "org/a", []string{"bug"}, nil),
@@ -37,27 +39,24 @@ func TestPrefetchIssues_TruncatedGroupIsNotSeeded(t *testing.T) {
 		t.Fatalf("truncation is a partial success, not a failure: %v", err)
 	}
 
-	// org/a came back in the results, so it is prefetched.
-	if _, ok := byRepo["org/a"]; !ok {
-		t.Error("org/a had results and must still be served from the prefetch")
-	}
-	// org/b and org/c must NOT be seeded — we never saw past the cap.
-	for _, r := range []string{"org/b", "org/c"} {
+	// No repo from a truncated group may be served from the prefetch —
+	// including the one that did return results.
+	for _, r := range repos {
 		if _, ok := byRepo[r]; ok {
-			t.Errorf("%s was seeded from a truncated search; its issues would be dropped silently", r)
+			t.Errorf("%s came from a truncated search; serving it would report a possibly partial list as complete", r)
 		}
 	}
 
-	// Drive the consumer: the unseeded repos must fall back to REST.
+	// Drive the consumer: every repo in the group must fall back to REST.
 	optsFor := func(_ *github.Issue) (issues.RunOptions, bool) { return issues.RunOptions{}, true }
 	for _, r := range repos {
 		if _, err := fetcher.ProcessRepo(context.Background(), r, searchCfg(), "alice", optsFor); err != nil {
 			t.Fatalf("ProcessRepo(%s): %v", r, err)
 		}
 	}
-	if rest.calls != 2 {
-		t.Errorf("expected the 2 repos absent from a truncated result set to fall back to REST, got %d calls (%v)",
-			rest.calls, rest.repos)
+	if rest.calls != len(repos) {
+		t.Errorf("expected all %d repos of a truncated group to fall back to REST, got %d calls (%v)",
+			len(repos), rest.calls, rest.repos)
 	}
 }
 
