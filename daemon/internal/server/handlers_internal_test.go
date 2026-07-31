@@ -55,9 +55,10 @@ func TestDaemonLogPath_FallsBackToNativeWhenDataDirUnset(t *testing.T) {
 	// the path rather than a hard-coded string so the test stays
 	// portable when run on both macOS and Linux CI.
 	if runtime.GOOS == "darwin" {
-		// macOS: ~/Library/Logs/heimdallm/heimdallm-daemon-error.log,
-		// unless /data happens to exist on the host (unusual on macOS
-		// dev machines but possible if something else mounted it).
+		// macOS: ~/Library/Logs/heimdallm/heimdallm-daemon-error.log when the
+		// LaunchAgent stderr file exists, otherwise the data-dir log the
+		// daemon itself writes. /data may also exist on the host (unusual on
+		// macOS dev machines but possible if something else mounted it).
 		dockerPath := filepath.Join("/data", DaemonLogFileName)
 		if _, err := os.Stat("/data"); err == nil {
 			if got != dockerPath {
@@ -65,8 +66,14 @@ func TestDaemonLogPath_FallsBackToNativeWhenDataDirUnset(t *testing.T) {
 			}
 			return
 		}
-		if !strings.Contains(got, filepath.Join("Library", "Logs", "heimdallm")) {
-			t.Fatalf("daemonLogPath() = %q, want macOS LaunchAgent path", got)
+		home, _ := os.UserHomeDir()
+		launchd := filepath.Join(home, "Library", "Logs", "heimdallm", "heimdallm-daemon-error.log")
+		want := launchd
+		if _, err := os.Stat(launchd); err != nil {
+			want = filepath.Join(home, ".local", "share", "heimdallm", DaemonLogFileName)
+		}
+		if got != want {
+			t.Fatalf("daemonLogPath() = %q, want %q", got, want)
 		}
 		return
 	}
