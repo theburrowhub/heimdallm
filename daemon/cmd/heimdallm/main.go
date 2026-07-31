@@ -405,6 +405,11 @@ func main() {
 	serveFailed := make(chan error, 1)
 	go func() {
 		if err := srv.Serve(httpListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			// Log here rather than only where the channel is consumed: that
+			// happens at the end of the wiring phase, so a listener that dies
+			// during init would leave no trace until main got there — the exact
+			// silent headless state this guards against.
+			slog.Error("daemon: HTTP server stopped serving", "err", err)
 			serveFailed <- err
 		}
 	}()
@@ -2360,8 +2365,8 @@ func main() {
 		// Losing the listener mid-flight leaves the same headless daemon the
 		// bind check above prevents at startup, so treat it the same way:
 		// shut down and exit non-zero instead of polling GitHub forever with
-		// nobody able to reach us (#646).
-		slog.Error("daemon: HTTP server stopped serving; shutting down", "err", err)
+		// nobody able to reach us (#646). Already logged in the serve goroutine.
+		slog.Error("daemon: shutting down after serve failure", "err", err)
 		serveDied = true
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
