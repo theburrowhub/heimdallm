@@ -634,16 +634,7 @@ func main() {
 	// on secondary limits (Retry-After).
 	ghClient.SetRateObserver(&rateLimitAdapter{limiter: limiter})
 
-	// Apply [polling] kill-switches and safety knobs from config.
-	// ETag cache (C1): enabled by default; operator can disable via use_etag=false.
-	ghClient.SetCacheEnabled(cfg.ETagEnabled())
-	// GraphQL issue search (C4): disabled by default; operator enables via use_graphql=true.
-	// When enabled, SearchIssues dispatches to the GraphQL API first and falls
-	// back to REST /search/issues on any error — zero behaviour change when false.
-	ghClient.SetGraphQLEnabled(cfg.GraphQLEnabled())
-	// Rate-limit safety threshold: drives how eagerly each tier backs off.
-	// Default 100 matches the current hardcoded tierSafetyThreshold[TierDiscovery].
-	limiter.SetDiscoverySafetyThreshold(cfg.Polling.RateLimitSafetyThreshold)
+	applyClientRuntimeConfig(ghClient, limiter, cfg)
 
 	// tier2Adapter bridges main.go's concrete types to the polling logic.
 	adapter := &tier2Adapter{
@@ -951,11 +942,19 @@ func main() {
 			}
 		}()
 
+		// Every other cfg read in startPollers takes cfgMu; these two did not.
+		// startPollers re-runs on the restart goroutine after a reload, where a
+		// concurrent reload can reassign cfg under the same mutex — a data race
+		// that -race would flag.
+		cfgMu.Lock()
+		etagEnabled := cfg.ETagEnabled()
+		rateLimitThreshold := cfg.Polling.RateLimitSafetyThreshold
+		cfgMu.Unlock()
 		slog.Info("pollers: started",
 			"discovery", discoveryInterval,
 			"poll", pollInterval,
-			"etag_cache", cfg.ETagEnabled(),
-			"rate_limit_threshold", cfg.Polling.RateLimitSafetyThreshold)
+			"etag_cache", etagEnabled,
+			"rate_limit_threshold", rateLimitThreshold)
 
 		return cancel, &wg
 	}
@@ -1574,6 +1573,21 @@ func main() {
 			case <-statePollerCtx.Done():
 				return
 			case <-ticker.C:
+				// This goroutine lives outside startPollers and is only
+				// cancelled at shutdown, so a reload that changes
+				// tier3_interval would otherwise leave it ticking at the old
+				// cadence forever while GET /config reported the new one.
+				// Re-read and reset each tick instead.
+				cfgMu.Lock()
+				wantInterval := cfg.ResolvedTier3Interval()
+				cfgMu.Unlock()
+				if wantInterval != tier3Interval {
+					slog.Info("state-poller: tier3 interval changed, resetting ticker",
+						"from", tier3Interval, "to", wantInterval)
+					tier3Interval = wantInterval
+					ticker.Reset(tier3Interval)
+				}
+
 				// Gradually enroll one monitored open item not yet in watch_state per tick.
 				// Backfills items from before the NATS migration without blocking startup.
 				enrollOpenItems(statePollerCtx, s, watchStore, adapter.monitoredRepos())
@@ -1939,6 +1953,9 @@ func main() {
 		if !restartPollers {
 			cfg = newCfg
 			cfgMu.Unlock()
+			// The kill-switches live on the client and limiter, not the
+			// pollers, so they need applying even when nothing restarts.
+			applyClientRuntimeConfig(ghClient, limiter, newCfg)
 			slog.Info("config reload: applied without poller restart")
 			return nil
 		}
@@ -1949,6 +1966,7 @@ func main() {
 		cfgMu.Lock()
 		cfg = newCfg
 		cfgMu.Unlock()
+		applyClientRuntimeConfig(ghClient, limiter, newCfg)
 
 		// Restart the pollers in the BACKGROUND. oldWg.Wait() can block for
 		// tens of seconds (an in-flight poll cycle or agent review must finish
@@ -2763,6 +2781,29 @@ schedule:
 // per-repo issue processing (`ai.tier2_repo_concurrency`). It is
 // evaluated on every tick so a config reload takes effect without
 // restarting the daemon.
+// applyClientRuntimeConfig pushes the [polling] kill-switches and safety knobs
+// into the live GitHub client and rate limiter.
+//
+// This must run on every config change, not only at startup. The three
+// settings live on long-lived objects that outlive a poller restart, so
+// applying them once at boot left the runtime on the old values while
+// GET /config and the UI already reported the new ones — a silent divergence
+// precisely on the emergency knobs an operator reaches for during an incident.
+//
+// Safe to call from any goroutine: the client flags are atomics and the
+// limiter guards its threshold with its own mutex.
+func applyClientRuntimeConfig(ghClient *gh.Client, limiter *scheduler.RateLimiter, cfg *config.Config) {
+	// ETag cache (C1): enabled by default; operator can disable via use_etag=false.
+	ghClient.SetCacheEnabled(cfg.ETagEnabled())
+	// GraphQL issue search (C4): disabled by default; operator enables via
+	// use_graphql=true. When enabled, SearchIssues dispatches to GraphQL first
+	// and falls back to REST /search/issues — zero behaviour change when false.
+	ghClient.SetGraphQLEnabled(cfg.GraphQLEnabled())
+	// Rate-limit safety threshold: drives how eagerly each tier backs off.
+	// Default 100 matches the hardcoded tierSafetyThreshold[TierDiscovery].
+	limiter.SetDiscoverySafetyThreshold(cfg.Polling.RateLimitSafetyThreshold)
+}
+
 func runTier2(
 	ctx context.Context,
 	adapter *tier2Adapter,
@@ -2914,8 +2955,26 @@ func runTier2(
 		// still active inside ProcessRepo — no repos are skipped.
 		// The prefetch always covers ALL currentRepos even in adaptive mode so
 		// the search result cache is warm for whichever repos are due.
-		adapter.PrefetchIssuesForCycle(currentRepos)
-		defer adapter.ClearIssuePrefetch()
+		// Take the search budget through the limiter before spending it. The
+		// observer already records the "search" resource from
+		// X-RateLimit-Resource, but nothing consumed it: every acquire went to
+		// "core". Search is quoted at 30/min, so several assignee groups
+		// paginating on a 1m tick can exhaust it with no proactive contention
+		// at all — moving spend off the core bucket only helps if the new
+		// bucket is protected too.
+		prefetch := true
+		if limiter != nil {
+			if err := limiter.AcquireResource(ctx, scheduler.TierRepo, scheduler.SearchResource); err != nil {
+				// Cancelled while waiting on the budget. Skipping the prefetch
+				// is safe: ProcessRepo falls back to per-repo REST.
+				slog.Debug("tier2: search budget acquire cancelled, skipping prefetch", "err", err)
+				prefetch = false
+			}
+		}
+		if prefetch {
+			adapter.PrefetchIssuesForCycle(currentRepos)
+			defer adapter.ClearIssuePrefetch()
+		}
 
 		// Adaptive gating: narrow the work list to only repos that are due
 		// this tick. Falls back to all repos when adaptive is disabled.

@@ -165,8 +165,10 @@ func (c *Client) fetchIssuesPage(repo string, page int) ([]*Issue, error) {
 // The returned slice is sorted by sortIssuesByPriority with the given
 // authenticatedUser.
 func ClassifyAndFilterIssues(issues []*Issue, repo string, cfg config.IssueTrackingConfig, authenticatedUser string) []*Issue {
-	kept := issues[:0:0]
-	kept = make([]*Issue, 0, len(issues))
+	// A fresh slice, never issues[:0:0] — the input can be the prefetch's
+	// shared slice, and writing through an aliased backing array would corrupt
+	// the results of every other repo in the group.
+	kept := make([]*Issue, 0, len(issues))
 	for _, issue := range issues {
 		if issue == nil || issue.IsPullRequest() {
 			continue

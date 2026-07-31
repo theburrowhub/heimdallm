@@ -1,6 +1,10 @@
 package config
 
-import "time"
+import (
+	"fmt"
+	"log/slog"
+	"time"
+)
 
 // PollingConfig is the [polling] TOML section that controls polling cadence,
 // rate-limit safety, and feature kill-switches for the GitHub API efficiency
@@ -103,9 +107,63 @@ func parseDurationWithFallback(s string, fallback time.Duration) time.Duration {
 	}
 	d, err := time.ParseDuration(s)
 	if err != nil || d <= 0 {
+		// Reaching here means a non-empty value was discarded. Validate()
+		// rejects these at load, so this is the defence-in-depth path (rows
+		// written before validation existed, or a caller that skipped it);
+		// warn rather than silently running at a cadence nobody asked for.
+		slog.Warn("config: ignoring invalid [polling] duration, using default",
+			"value", s, "default", fallback)
 		return fallback
 	}
 	return d
+}
+
+// pollingDurationBounds are the accepted ranges for each [polling] duration.
+// They differ per field: tier3_interval is a cheap local scan that legitimately
+// runs on a sub-minute tick, while poll_interval drives per-repo GitHub traffic
+// and shares the daemon-wide 1m floor that exists to protect the API quota.
+var pollingDurationBounds = []struct {
+	name     string
+	value    func(PollingConfig) string
+	min, max time.Duration
+}{
+	{"poll_interval", func(p PollingConfig) string { return p.PollInterval }, minPollInterval, maxPollInterval},
+	{"min_interval", func(p PollingConfig) string { return p.MinInterval }, minPollInterval, maxPollInterval},
+	{"max_interval", func(p PollingConfig) string { return p.MaxInterval }, minPollInterval, maxPollInterval},
+	{"discovery_interval", func(p PollingConfig) string { return p.DiscoveryInterval }, minPollInterval, maxPollInterval},
+	{"tier3_interval", func(p PollingConfig) string { return p.Tier3Interval }, time.Second, time.Hour},
+}
+
+// ValidatePolling checks every duration in the [polling] section and the
+// safety threshold.
+//
+// Without this, [polling].poll_interval bypassed the quota guard entirely:
+// ResolvedPollInterval gives it precedence over [github].poll_interval, which
+// IS validated, so `[polling] poll_interval = "1s"` was accepted and the new
+// section silently disabled the protection the old one enforced.
+func (c *Config) ValidatePolling() error {
+	for _, b := range pollingDurationBounds {
+		raw := b.value(c.Polling)
+		if raw == "" {
+			continue
+		}
+		d, err := time.ParseDuration(raw)
+		if err != nil {
+			return fmt.Errorf("invalid polling.%s %q: %w", b.name, raw, err)
+		}
+		if d < b.min || d > b.max {
+			return fmt.Errorf("polling.%s %q out of range (must be between %s and %s)",
+				b.name, raw, b.min, b.max)
+		}
+	}
+	if c.Polling.RateLimitSafetyThreshold < 0 {
+		return fmt.Errorf("polling.rate_limit_safety_threshold %d must not be negative",
+			c.Polling.RateLimitSafetyThreshold)
+	}
+	if min, max := c.ResolvedMinInterval(), c.ResolvedMaxInterval(); min > max {
+		return fmt.Errorf("polling.min_interval (%s) must not exceed polling.max_interval (%s)", min, max)
+	}
+	return nil
 }
 
 // ResolvedPollInterval returns the effective Tier 2 base poll interval.

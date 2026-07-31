@@ -36,6 +36,29 @@ var tierSafetyThreshold = map[Tier]int{
 	TierWatch:     25,
 }
 
+// tierShare is the fraction of the configured base threshold each tier
+// reserves, derived from the default table above (100/75/25). The offsets used
+// to be absolute (base-25, base-75), which collapsed every tier to the floor of
+// 1 once the base dropped below 75 — silently removing the tier prioritisation
+// the table exists to express, and disabling proactive throttling entirely
+// until the budget was fully exhausted.
+var tierShare = map[Tier]float64{
+	TierDiscovery: 1.0,
+	TierRepo:      0.75,
+	TierWatch:     0.25,
+}
+
+// searchSafetyThresholdBase is the TierDiscovery threshold for the "search"
+// resource. Search is quoted at 30 requests/minute, not 5000/hour, so
+// X-RateLimit-Remaining never exceeds 30 there — reusing the core base of 100
+// would put the budget permanently "below threshold" and stall every search.
+// The per-tier shares above apply to this base the same way.
+const searchSafetyThresholdBase = 6
+
+// SearchResource is the GitHub rate-limit resource name for the Search API.
+// Its budget is tracked and throttled separately from "core".
+const SearchResource = "search"
+
 // resourceBudget holds the live rate-limit state for a single GitHub resource
 // category (e.g. "core", "search").
 type resourceBudget struct {
@@ -183,43 +206,45 @@ func (r *RateLimiter) SetDiscoverySafetyThreshold(threshold int) {
 	r.mu.Unlock()
 }
 
-// effectiveThreshold returns the safety threshold for a given tier, taking
-// into account any SetDiscoverySafetyThreshold override.
-func (r *RateLimiter) effectiveThreshold(tier Tier) int {
+// effectiveThreshold returns the safety threshold for a tier on a resource,
+// honouring any SetDiscoverySafetyThreshold override.
+//
+// The base is per-resource because the quotas differ by two orders of
+// magnitude (core: 5000/hour, search: 30/minute), and the per-tier shares are
+// proportional so prioritisation survives at any base.
+func (r *RateLimiter) effectiveThreshold(tier Tier, resource string) int {
+	share, ok := tierShare[tier]
+	if !ok {
+		return tierSafetyThreshold[tier]
+	}
+
+	if resource == SearchResource {
+		return scaleThreshold(searchSafetyThresholdBase, share)
+	}
+
 	r.mu.Lock()
 	base := r.baseDiscThreshold
 	r.mu.Unlock()
 	if base <= 0 {
 		return tierSafetyThreshold[tier]
 	}
-	// Scale the tier offsets relative to the configured base:
-	//   TierDiscovery → base
-	//   TierRepo      → base - 25 (same delta as default 100→75)
-	//   TierWatch     → base - 75 (same delta as default 100→25)
-	switch tier {
-	case TierDiscovery:
-		return base
-	case TierRepo:
-		v := base - 25
-		if v < 1 {
-			return 1
-		}
-		return v
-	case TierWatch:
-		v := base - 75
-		if v < 1 {
-			return 1
-		}
-		return v
-	default:
-		return tierSafetyThreshold[tier]
+	return scaleThreshold(base, share)
+}
+
+// scaleThreshold applies a tier's proportional share to a base, with a floor of
+// 1 so a tier never ends up with a zero reserve.
+func scaleThreshold(base int, share float64) int {
+	v := int(float64(base)*share + 0.5)
+	if v < 1 {
+		return 1
 	}
+	return v
 }
 
 // waitForBudget blocks until the resource's remaining budget is above the
 // tier's safety threshold, or until the reset time passes, or ctx is done.
 func (r *RateLimiter) waitForBudget(ctx context.Context, tier Tier, resource string) error {
-	threshold := r.effectiveThreshold(tier)
+	threshold := r.effectiveThreshold(tier, resource)
 
 	r.mu.Lock()
 	b, ok := r.budgets[resource]

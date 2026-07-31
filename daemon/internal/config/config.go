@@ -1293,6 +1293,12 @@ func (c *Config) Validate() error {
 	if err := ValidatePollInterval(c.GitHub.PollInterval); err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
+	// [polling] takes precedence over [github].poll_interval at resolution
+	// time, so it has to clear the same bar — otherwise the newer section is a
+	// way around the quota guard the older one enforces.
+	if err := c.ValidatePolling(); err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
 	// Validate every persisted execution option before it reaches Executor.
 	// This catches legacy TOML/store rows during reload; ExecuteRaw repeats the
 	// same checks at the subprocess boundary as defense in depth.

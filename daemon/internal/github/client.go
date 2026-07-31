@@ -73,7 +73,7 @@ type Client struct {
 	baseURL       string
 	http          *http.Client
 	cache         *ConditionalCache
-	rateObs       RateLimitObserver
+	rateObs       atomic.Pointer[RateLimitObserver]
 	cacheDisabled atomic.Bool // when true, ETag conditional-request layer is bypassed
 	useGraphQL    atomic.Bool // when true, SearchIssues dispatches to GraphQL with REST fallback
 
@@ -134,15 +134,22 @@ func (c *Client) SetCacheEnabled(enabled bool) {
 // The observer receives the raw *http.Response to inspect headers.
 // Replaces any previously registered observer. Pass nil to disable.
 func (c *Client) SetRateObserver(o RateLimitObserver) {
-	c.rateObs = o
+	if o == nil {
+		c.rateObs.Store(nil)
+		return
+	}
+	c.rateObs.Store(&o)
 }
 
 // notifyRateObserver calls the registered observer if one is set.
 // Must be called AFTER the response is ready but BEFORE the body is consumed
 // by this layer (headers are what the observer needs).
 func (c *Client) notifyRateObserver(resp *http.Response) {
-	if c.rateObs != nil && resp != nil {
-		c.rateObs.ObserveResponse(resp)
+	if resp == nil {
+		return
+	}
+	if o := c.rateObs.Load(); o != nil {
+		(*o).ObserveResponse(resp)
 	}
 }
 
