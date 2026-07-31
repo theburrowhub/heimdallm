@@ -2779,15 +2779,8 @@ schedule:
 	return int(total)
 }
 
-// runTier2 runs the PR/issue polling loop. Replaces the old RunTier2 from
-// the scheduler package.
-//
-// repoConcurrencyFn returns the live per-tick cap on parallel
-// per-repo issue processing (`ai.tier2_repo_concurrency`). It is
-// evaluated on every tick so a config reload takes effect without
-// restarting the daemon.
 // applyClientRuntimeConfig pushes the [polling] kill-switches and safety knobs
-// into the live GitHub client and rate limiter.
+// into the live GitHub client, rate limiter and adaptive scheduler.
 //
 // This must run on every config change, not only at startup. The three
 // settings live on long-lived objects that outlive a poller restart, so
@@ -2814,6 +2807,13 @@ func applyClientRuntimeConfig(ghClient *gh.Client, limiter *scheduler.RateLimite
 	}
 }
 
+// runTier2 runs the PR/issue polling loop. Replaces the old RunTier2 from
+// the scheduler package.
+//
+// repoConcurrencyFn returns the live per-tick cap on parallel
+// per-repo issue processing (`ai.tier2_repo_concurrency`). It is
+// evaluated on every tick so a config reload takes effect without
+// restarting the daemon.
 func runTier2(
 	ctx context.Context,
 	adapter *tier2Adapter,
