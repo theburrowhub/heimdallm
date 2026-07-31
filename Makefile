@@ -28,8 +28,11 @@ endif
 
 # Version of the current checkout, stamped into locally-built daemon binaries
 # (main.version). Distinct from VERSION below, which computes the NEXT release
-# tag for release-local.
-GIT_VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+# tag for release-local. The leading "v" is stripped so all build paths report
+# the same format as goreleaser's {{.Version}} (e.g. "0.7.10", not "v0.7.10").
+# Release paths must override this with the version being released:
+#   make build-daemon GIT_VERSION=0.7.11
+GIT_VERSION := $(shell (git describe --tags --always --dirty 2>/dev/null || echo dev) | sed 's/^v//')
 
 build-daemon:
 	cd daemon && make build VERSION=$(GIT_VERSION)
@@ -183,7 +186,10 @@ VERSION ?= $(shell \
 	PAT=$$(echo $$VER | cut -d. -f3); \
 	echo "v$$MAJ.$$MIN.$$((PAT+1))")
 
-release-local: _check-macos _check-signing _check-gh build-daemon
+release-local: _check-macos _check-signing _check-gh
+	@# Stamp the daemon with the version being released, not the checkout's
+	@# git-describe (which still points at the PREVIOUS tag at this point).
+	$(MAKE) build-daemon GIT_VERSION=$(VERSION:v%=%)
 	@echo ""
 	@echo "╔══════════════════════════════════════════════╗"
 	@echo "║  Heimdallm local release                     ║"
