@@ -4466,6 +4466,7 @@ func (a *tier2Adapter) HandleChange(ctx context.Context, item *scheduler.WatchIt
 		c := *a.cfg
 		monitored := repoIsMonitored(c, item.Repo)
 		aiCfg := c.AIForRepo(item.Repo)
+		localDirBase := c.GitHub.LocalDirBase
 		a.cfgMu.Unlock()
 		if !monitored {
 			a.broker.Publish(sse.Event{
@@ -4537,6 +4538,21 @@ func (a *tier2Adapter) HandleChange(ctx context.Context, item *scheduler.WatchIt
 			ghPR.HTMLURL = stored.URL
 			ghPR.User = gh.User{Login: snap.Author}
 		}
+
+		// Reserve the checkout the same way review-worker and tier2 ProcessPR
+		// do. Without this the agent ran with no WorkDir and inherited the
+		// daemon's cwd — `/` under launchd — which aborts `codex exec` outright
+		// (#655). Acquired here, after every guard and the dedup above, so the
+		// paths that skip the review do not reserve a worktree they never use.
+		repoHandle, err := acquireRepoContext(ctx, a.repoCtx, item.Repo, &aiCfg, localDirBase, a.ghToken, repoctx.ModeRead, wtTokenFor("pr-tier3", item.Number), "", "")
+		if err != nil {
+			logRepoContextFallback("tier3 PR", item.Repo, err)
+			aiCfg.LocalDir = ""
+		}
+		if repoHandle != nil {
+			defer repoHandle.Release()
+		}
+
 		rev := a.runReview(ghPR, aiCfg)
 		if rev != nil && rev.GitHubReviewID == 0 && a.publishPub != nil {
 			if err := a.publishPub.PublishPRPublish(context.Background(), rev.ID); err != nil {
@@ -5042,7 +5058,7 @@ func acquireRepoContext(
 }
 
 // wtTokenFor produces a sanitisation-safe worktree token for a
-// pipeline stage. The prefix names the stage (`pr-review`, `triage`,
+// pipeline stage. The prefix names the stage (`pr-review`, `pr-tier3`, `triage`,
 // `develop`, `refinement`, `pr-tier2`) so operators can correlate
 // `<clone>/.worktrees/<token>/` with the running execution.
 func wtTokenFor(prefix string, n int) string {

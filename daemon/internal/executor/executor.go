@@ -12,11 +12,18 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
 const executionTimeout = 5 * time.Minute
 const cliHelpTimeout = 2 * time.Second
+
+// processGroupKillGrace bounds how long a cancelled execution may keep running
+// after SIGTERM before the group is killed outright. It also bounds how long
+// Wait blocks on inherited stdout/stderr pipes: a grandchild holding them open
+// used to stall the pipeline long past the timeout (see #614).
+const processGroupKillGrace = 3 * time.Second
 
 // ReviewResult is the parsed JSON response from the AI CLI.
 type ReviewResult struct {
@@ -1226,13 +1233,44 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 	}
 
 	var workDirFlags []string
-	if opts.WorkDir != "" {
+	switch {
+	case opts.WorkDir != "":
 		workDirFlags = detectWorkDirFlags(cli, cliPath, opts.WorkDir)
+	case cli == "codex":
+		// `codex exec` refuses to start outside a git repo or a directory
+		// trusted in ~/.codex/config.toml. With no checkout the child would
+		// inherit the daemon's cwd — `/` under launchd — and abort with "Not
+		// inside a trusted directory" (theburrowhub/heimdallm#655). A review
+		// needs no checkout at all (the diff travels in the prompt), so hand
+		// codex an empty per-execution directory and waive the repo check.
+		// Substituting `/` for an empty workspace also narrows what the agent
+		// can read, rather than widening it.
+		// The workspace is passed as cmd.Dir below rather than via --cd: the
+		// child's cwd is what codex inspects, and probing `--help` for --cd
+		// support would spend an extra subprocess per review for nothing.
+		ws, err := os.MkdirTemp("", "heimdallm-codex-ws-*")
+		if err != nil {
+			return nil, fmt.Errorf("executor: create codex workspace: %w", err)
+		}
+		defer os.RemoveAll(ws)
+		opts.WorkDir = ws
+		workDirFlags = []string{"--skip-git-repo-check"}
 	}
 
 	args := buildArgs(cli, opts, workDirFlags)
 	cmd := exec.CommandContext(ctx, cliPath, args...)
 	cmd.Stdin = strings.NewReader(prompt)
+	// Every supported CLI is a launcher: the process we start spawns the one
+	// that actually talks to the provider. exec.CommandContext signals only the
+	// direct child, so on timeout the launcher died while its grandchild was
+	// reparented to init and kept spending provider quota (#614). Give the
+	// execution its own process group and signal the whole group instead.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return signalProcessGroup(cmd, syscall.SIGTERM) }
+	// Bound the post-cancellation wait. Without this, Wait blocks until every
+	// inherited stdout/stderr pipe is closed — a grandchild ignoring SIGTERM
+	// stalled the pipeline for as long as it chose to run.
+	cmd.WaitDelay = processGroupKillGrace
 
 	// Augment PATH with paths from the login shell so the CLI can find its own
 	// dependencies, without running stdin THROUGH the shell (which would cause
@@ -1254,16 +1292,36 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	if err := cmd.Run(); err != nil {
+	runErr := cmd.Run()
+	// SIGTERM is a request; a wedged or signal-ignoring descendant answers to
+	// SIGKILL only. Sweep the group once the wait is over so no member outlives
+	// the execution, whatever the outcome.
+	if ctx.Err() != nil {
+		if err := signalProcessGroup(cmd, syscall.SIGKILL); err != nil {
+			slog.Debug("executor: process group already gone", "cli", cli, "err", err)
+		}
+	}
+	if runErr != nil {
 		// Some CLIs (e.g. claude) write errors to stdout rather than stderr.
 		errDetail := strings.TrimSpace(stderr.String())
 		if errDetail == "" {
 			errDetail = strings.TrimSpace(stdout.String())
 		}
-		return nil, fmt.Errorf("executor: run %s: %w (output: %s)", cli, err, errDetail)
+		return nil, fmt.Errorf("executor: run %s: %w (output: %s)", cli, runErr, errDetail)
 	}
 
 	return stdout.Bytes(), nil
+}
+
+// signalProcessGroup sends sig to the entire process group led by cmd's child.
+// Setpgid makes the child's PID the group ID, so negating it addresses the child
+// and every descendant that has not created a group of its own. Returns
+// os.ErrProcessDone when there is no process left to signal.
+func signalProcessGroup(cmd *exec.Cmd, sig syscall.Signal) error {
+	if cmd == nil || cmd.Process == nil {
+		return os.ErrProcessDone
+	}
+	return syscall.Kill(-cmd.Process.Pid, sig)
 }
 
 func validateExecutionRequest(cli string, opts ExecOptions) error {
