@@ -22,9 +22,14 @@ func TestStopProducersThenAgentsCancelsProducersFirst(t *testing.T) {
 	stopProducersThenAgents(
 		[]context.CancelFunc{producer("worker"), producer("triage"), producer("state")},
 		func() { order = append(order, "sweep") },
+		0,
 	)
 
-	want := []string{"worker", "triage", "state", "sweep"}
+	// Two sweeps: cancelling a context does not wait for the worker to notice.
+	// One that is already past its context check and about to call cmd.Start()
+	// would start an execution the first sweep has snapshotted past, so a second
+	// pass after a settle delay is what catches it.
+	want := []string{"worker", "triage", "state", "sweep", "sweep"}
 	if len(order) != len(want) {
 		t.Fatalf("order = %v, want %v", order, want)
 	}
@@ -39,8 +44,12 @@ func TestStopProducersThenAgentsCancelsProducersFirst(t *testing.T) {
 // producer was never started (its cancel is nil).
 func TestStopProducersThenAgentsToleratesNilCancels(t *testing.T) {
 	swept := false
-	stopProducersThenAgents([]context.CancelFunc{nil}, func() { swept = true })
+	sweeps := 0
+	stopProducersThenAgents([]context.CancelFunc{nil}, func() { sweeps++; swept = true }, 0)
 	if !swept {
 		t.Error("sweep did not run when a producer cancel was nil")
+	}
+	if sweeps != 2 {
+		t.Errorf("sweeps = %d, want 2", sweeps)
 	}
 }

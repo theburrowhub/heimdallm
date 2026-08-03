@@ -2423,8 +2423,42 @@ func main() {
 	stopProducersThenAgents([]context.CancelFunc{
 		workerCancel, publishWCancel, triageWCancel, refinementWCancel,
 		implementWCancel, statePollerCancel, stateWCancel,
-	}, exec.TerminateAll)
+	}, exec.TerminateAll, producerSettleDelay)
 	broker.Stop()
+}
+
+// producerSettleDelay is how long the shutdown path waits between cancelling the
+// work producers and its second sweep of in-flight agents. Cancelling a context
+// does not wait for the worker to act on it.
+const producerSettleDelay = 500 * time.Millisecond
+
+// stopProducersThenAgents runs the ordering the shutdown path depends on:
+// silence everything that can start an execution, then sweep the executions
+// still running. Reversing it leaves a window where a worker starts a CLI the
+// sweep has already snapshotted past, and that CLI — in its own process group
+// since #656 — outlives the daemon.
+//
+// It sweeps twice because cancellation is asynchronous: a worker already past its
+// context check and about to call cmd.Start() still starts an execution after the
+// first snapshot. The settle delay plus a second pass catches that one. This
+// narrows the window rather than closing it — closing it needs the workers to
+// report completion (a WaitGroup joined with a bounded wait), which is #614's
+// "shutdown ... waits for all goroutines" criterion. Nil cancels are skipped so a
+// producer that never started is not a special case at the call site.
+func stopProducersThenAgents(stopProducers []context.CancelFunc, terminateAgents func(), settle time.Duration) {
+	for _, stop := range stopProducers {
+		if stop != nil {
+			stop()
+		}
+	}
+	if terminateAgents == nil {
+		return
+	}
+	terminateAgents()
+	if settle > 0 {
+		time.Sleep(settle)
+	}
+	terminateAgents()
 }
 
 // logRotationConfig reads HEIMDALLM_LOG_MAX_MB and HEIMDALLM_LOG_KEEP from
@@ -5424,23 +5458,6 @@ func monitoredRepoSet(cfg *config.Config, discovered []string) map[string]struct
 // paths. Passing no discovered slice is sufficient after discovery has been
 // persisted into Repositories/NonMonitored; callers that own a fresh discovery
 // snapshot should use monitoredRepoSet directly.
-// stopProducersThenAgents runs the ordering the shutdown path depends on:
-// silence everything that can start an execution, and only then sweep the
-// executions still running. Reversing it leaves a window where a worker starts a
-// CLI the sweep has already snapshotted past, and that CLI — in its own process
-// group since #656 — outlives the daemon. Nil cancels are skipped so a producer
-// that never started is not a special case at the call site.
-func stopProducersThenAgents(stopProducers []context.CancelFunc, terminateAgents func()) {
-	for _, stop := range stopProducers {
-		if stop != nil {
-			stop()
-		}
-	}
-	if terminateAgents != nil {
-		terminateAgents()
-	}
-}
-
 func repoIsMonitored(cfg *config.Config, repo string) bool {
 	repo = strings.TrimSpace(repo)
 	if repo == "" {
