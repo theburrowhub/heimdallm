@@ -60,6 +60,97 @@ void main() {
     // Primary agent ('claude') moved to Agents tab — no longer in ConfigScreen
   });
 
+  testWidgets('AI defaults expose the never-approve severity threshold', (
+    tester,
+  ) async {
+    const config = AppConfig(
+      pollInterval: '5m',
+      aiPrimary: 'claude',
+      globalNeverApproveWithIssues: true,
+      globalNeverApproveMinSeverity: 'high',
+      repoConfigs: {'org/repo': RepoConfig(prEnabled: true)},
+    );
+
+    final mockApi = MockApiClient();
+    when(() => mockApi.fetchConfig()).thenAnswer((_) async => config.toJson());
+    when(() => mockApi.updateConfig(any())).thenAnswer((_) async {});
+    when(() => mockApi.checkHealth()).thenAnswer((_) async => false);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          apiClientProvider.overrideWithValue(mockApi),
+          configNotifierProvider.overrideWith(ConfigNotifier.new),
+          platformServicesProvider.overrideWithValue(FakePlatformServices()),
+        ],
+        child: MaterialApp.router(
+          routerConfig: GoRouter(
+            routes: [
+              GoRoute(path: '/', builder: (_, _) => const ConfigScreen()),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Never approve — minimum severity'), findsOneWidget);
+    // Shows the configured threshold, and is enabled because the toggle is on.
+    final dropdown = tester.widget<DropdownButtonFormField<String>>(
+      find.byWidgetPredicate(
+        (w) => w is DropdownButtonFormField<String> && w.initialValue == 'high',
+      ),
+    );
+    expect(dropdown.onChanged, isNotNull);
+  });
+
+  testWidgets('severity threshold is disabled when never-approve is off', (
+    tester,
+  ) async {
+    // The threshold has no effect with the toggle off; a live-looking control
+    // that changes nothing would read as a bug.
+    const config = AppConfig(
+      pollInterval: '5m',
+      aiPrimary: 'claude',
+      globalNeverApproveWithIssues: false,
+      globalNeverApproveMinSeverity: 'medium',
+      repoConfigs: {'org/repo': RepoConfig(prEnabled: true)},
+    );
+
+    final mockApi = MockApiClient();
+    when(() => mockApi.fetchConfig()).thenAnswer((_) async => config.toJson());
+    when(() => mockApi.updateConfig(any())).thenAnswer((_) async {});
+    when(() => mockApi.checkHealth()).thenAnswer((_) async => false);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          apiClientProvider.overrideWithValue(mockApi),
+          configNotifierProvider.overrideWith(ConfigNotifier.new),
+          platformServicesProvider.overrideWithValue(FakePlatformServices()),
+        ],
+        child: MaterialApp.router(
+          routerConfig: GoRouter(
+            routes: [
+              GoRoute(path: '/', builder: (_, _) => const ConfigScreen()),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final dropdown = tester.widget<DropdownButtonFormField<String>>(
+      find.byWidgetPredicate(
+        (w) =>
+            w is DropdownButtonFormField<String> &&
+            w.initialValue == 'medium' &&
+            w.decoration.labelText == 'Never approve — minimum severity',
+      ),
+    );
+    expect(dropdown.onChanged, isNull);
+  });
+
   testWidgets('Save is gated on a valid poll interval', (tester) async {
     const config = AppConfig(
       pollInterval: '5m',
@@ -885,6 +976,69 @@ void main() {
     final updated = oldCfg.copyWith(neverApproveWithIssues: true);
     final diff = computeRepoDiff(oldCfg, updated);
     expect(diff['never_approve_with_issues'], isTrue);
+  });
+
+  test('never_approve_min_severity round-trips (global + org + repo)', () {
+    final json = {
+      'never_approve_min_severity': 'high',
+      'repositories': <String>[],
+      'repo_overrides': {
+        'org/repo1': {'never_approve_min_severity': 'low'},
+      },
+      'org_overrides': {
+        'org': {'never_approve_min_severity': 'medium'},
+      },
+    };
+    final cfg = AppConfig.fromJson(json);
+    expect(cfg.globalNeverApproveMinSeverity, 'high');
+    expect(cfg.repoConfigs['org/repo1']!.neverApproveMinSeverity, 'low');
+    expect(cfg.orgConfigs['org']!.neverApproveMinSeverity, 'medium');
+    expect(cfg.toJson()['never_approve_min_severity'], 'high');
+  });
+
+  test('unset never_approve_min_severity surfaces the daemon default', () {
+    // The daemon serves "" when the operator never set the key; the dropdown
+    // must show the threshold actually in effect, not a blank option.
+    final cfg = AppConfig.fromJson({'repositories': <String>[]});
+    expect(cfg.globalNeverApproveMinSeverity, defaultNeverApproveMinSeverity);
+    expect(defaultNeverApproveMinSeverity, 'medium');
+
+    final empty = AppConfig.fromJson({
+      'never_approve_min_severity': '',
+      'repositories': <String>[],
+    });
+    expect(empty.globalNeverApproveMinSeverity, 'medium');
+  });
+
+  test('empty scoped never_approve_min_severity stays null (inherit)', () {
+    final cfg = AppConfig.fromJson({
+      'repositories': <String>[],
+      'repo_overrides': {
+        'org/repo1': {'never_approve_min_severity': ''},
+      },
+      'org_overrides': {
+        'org': {'never_approve_min_severity': ''},
+      },
+    });
+    expect(cfg.repoConfigs['org/repo1']!.neverApproveMinSeverity, isNull);
+    expect(cfg.orgConfigs['org']!.neverApproveMinSeverity, isNull);
+  });
+
+  test('never_approve_min_severity marks scoped overrides as present', () {
+    const org = OrgConfig(neverApproveMinSeverity: 'high');
+    expect(org.hasOverride, isTrue);
+    const repo = RepoConfig(neverApproveMinSeverity: 'high');
+    expect(repo.hasAiOverride, isTrue);
+  });
+
+  test('repo diff carries never_approve_min_severity, clearing with ""', () {
+    const oldCfg = RepoConfig();
+    final set = oldCfg.copyWith(neverApproveMinSeverity: 'high');
+    expect(computeRepoDiff(oldCfg, set)['never_approve_min_severity'], 'high');
+
+    // String overrides emit '' to clear (same contract as review_mode).
+    final cleared = set.copyWith(neverApproveMinSeverity: null);
+    expect(computeRepoDiff(set, cleared)['never_approve_min_severity'], '');
   });
 
   test('repo diff includes Pipeline overrides when set', () {

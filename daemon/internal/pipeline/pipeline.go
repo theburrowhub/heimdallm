@@ -1219,6 +1219,32 @@ func MaxIssueSeverity(issues []executor.Issue) string {
 	return rankToSeverity(maxRank)
 }
 
+// DefaultNeverApproveMinSeverity is the threshold applied when the operator
+// leaves never_approve_min_severity unset at every scope.
+//
+// It is "medium", not "low": a strong review model reports low-severity nits
+// (naming, doc-comment placement, cosmetic refactors) on essentially every
+// real diff, so a "low" threshold made the never-approve downgrade fire on
+// reviews that had nothing merge-relevant to say — the PR never converged on
+// an approval no matter how many fix commits landed. With "medium", all-low
+// reviews still approve and the findings stay visible in the review body;
+// only a finding the model rated medium or higher withholds the approval.
+//
+// Operators who want the old behavior set never_approve_min_severity = "low"
+// explicitly.
+const DefaultNeverApproveMinSeverity = "medium"
+
+// resolveNeverApproveMinSeverity maps the unset threshold to its default.
+// Non-empty values pass through untouched — Config.Validate has already
+// bounded them to low|medium|high, and severityRank ranks anything it does
+// not recognise as "low".
+func resolveNeverApproveMinSeverity(minSeverity string) string {
+	if strings.TrimSpace(minSeverity) == "" {
+		return DefaultNeverApproveMinSeverity
+	}
+	return minSeverity
+}
+
 // ReviewEvent decides the GitHub review event, honoring the
 // never-approve-with-issues setting. It builds on SeverityToEvent: when the
 // base decision would be APPROVE, the setting is on, and the review found at
@@ -1227,13 +1253,13 @@ func MaxIssueSeverity(issues []executor.Issue) string {
 // still approves.
 //
 // maxIssueSeverity is MaxIssueSeverity(issues): "" means no findings.
-// minSeverity is the never_approve_min_severity setting; empty means "low"
-// (any finding downgrades — the pre-#597 behavior), matching severityRank's
-// default rank for unknown values.
+// minSeverity is the never_approve_min_severity setting; empty resolves to
+// DefaultNeverApproveMinSeverity, so a review whose findings are all
+// low-severity keeps its approval.
 func ReviewEvent(finalSeverity, maxIssueSeverity string, neverApproveWithIssues bool, minSeverity string) string {
 	event := SeverityToEvent(finalSeverity)
 	if event == "APPROVE" && neverApproveWithIssues && maxIssueSeverity != "" &&
-		severityRank(maxIssueSeverity) >= severityRank(minSeverity) {
+		severityRank(maxIssueSeverity) >= severityRank(resolveNeverApproveMinSeverity(minSeverity)) {
 		return "COMMENT"
 	}
 	return event

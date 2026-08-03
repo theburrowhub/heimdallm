@@ -480,10 +480,10 @@ type AIConfig struct {
 
 	// NeverApproveMinSeverity is the minimum finding severity that triggers
 	// the NeverApproveWithIssues downgrade: "low", "medium" or "high".
-	// Empty defaults to "low" (any finding downgrades — backwards compat).
-	// With "medium", reviews whose findings are all low-severity nits still
-	// approve. Only meaningful when NeverApproveWithIssues is on.
-	// Overridable per-org and per-repo.
+	// Empty resolves to pipeline.DefaultNeverApproveMinSeverity ("medium"),
+	// so reviews whose findings are all low-severity nits still approve; set
+	// "low" explicitly to downgrade on any finding at all. Only meaningful
+	// when NeverApproveWithIssues is on. Overridable per-org and per-repo.
 	NeverApproveMinSeverity string `toml:"never_approve_min_severity"`
 
 	// ReviewResponse configures phase 2 of the PR review-state vigilance
@@ -1710,7 +1710,8 @@ func deleteLegacyAgentFieldAliases(m map[string]any, canonical string) {
 
 // validateNeverApproveMinSeverity bounds never_approve_min_severity to the
 // canonical severities at every scope. Empty means "inherit" (repo/org) or
-// "low" (global), so it is always accepted.
+// "use the default" (global — pipeline.DefaultNeverApproveMinSeverity), so it
+// is always accepted.
 func (c *Config) validateNeverApproveMinSeverity() error {
 	check := func(scope, v string) error {
 		switch v {
