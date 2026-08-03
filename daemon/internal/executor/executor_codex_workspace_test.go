@@ -23,11 +23,27 @@ func TestExecuteRawGivesCodexAnIsolatedWorkspaceWithoutWorkDir(t *testing.T) {
 	binDir := t.TempDir()
 	captureArgs := filepath.Join(t.TempDir(), "args.txt")
 	captureCWD := filepath.Join(t.TempDir(), "cwd.txt")
-	script := fakeCLIScript("Usage: codex\n  -C, --cd <DIR>\n", captureArgs, captureCWD)
+	captureEntries := filepath.Join(t.TempDir(), "entries.txt")
+	// The listing must be taken while the CLI runs: ExecuteRaw removes the
+	// workspace before returning, so inspecting it afterwards proves nothing.
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"--help\" ]; then\n" +
+		"  printf 'Usage: codex\\n  -C, --cd <DIR>\\n'\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"printf '%s\\n' \"$*\" > " + shellQuote(captureArgs) + "\n" +
+		"printf '%s\\n' \"$PWD\" > " + shellQuote(captureCWD) + "\n" +
+		"ls -A . > " + shellQuote(captureEntries) + "\n" +
+		"printf '{\"ok\":true}\\n'\n"
 	if err := os.WriteFile(filepath.Join(binDir, "codex"), []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake CLI: %v", err)
 	}
-	t.Setenv("PATH", binDir)
+	// Prepend rather than replace: the fake wins because binDir comes first,
+	// while `ls` stays resolvable. With a replaced PATH the listing command
+	// fails, the redirection still creates an empty file, and the emptiness
+	// assertion below would pass vacuously — see TestExecute for the same
+	// constraint around `cat`.
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	e := executor.New()
 	if _, err := e.ExecuteRaw("codex", "prompt", executor.ExecOptions{}); err != nil {
@@ -55,10 +71,14 @@ func TestExecuteRawGivesCodexAnIsolatedWorkspaceWithoutWorkDir(t *testing.T) {
 		t.Fatal("fake CLI captured an empty cwd")
 	}
 
-	entries, err := os.ReadDir(cwd)
-	if err == nil && len(entries) > 0 {
-		t.Errorf("workspace %q was not empty: %d entries", cwd, len(entries))
+	entriesBytes, err := os.ReadFile(captureEntries)
+	if err != nil {
+		t.Fatalf("read captured workspace listing: %v", err)
 	}
+	if listing := strings.TrimSpace(string(entriesBytes)); listing != "" {
+		t.Errorf("workspace was not empty during the run: %q", listing)
+	}
+
 	if _, err := os.Stat(cwd); !os.IsNotExist(err) {
 		t.Errorf("workspace %q still exists after the run (stat err = %v), want it removed", cwd, err)
 	}

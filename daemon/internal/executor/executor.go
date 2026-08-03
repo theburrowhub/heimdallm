@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -19,11 +20,14 @@ import (
 const executionTimeout = 5 * time.Minute
 const cliHelpTimeout = 2 * time.Second
 
-// processGroupKillGrace bounds how long a cancelled execution may keep running
-// after SIGTERM before the group is killed outright. It also bounds how long
-// Wait blocks on inherited stdout/stderr pipes: a grandchild holding them open
-// used to stall the pipeline long past the timeout (see #614).
-const processGroupKillGrace = 3 * time.Second
+// processGroupTermGrace is how long a cancelled execution may keep running
+// after SIGTERM before the whole group is killed outright (see #614).
+const processGroupTermGrace = time.Second
+
+// waitDelayAfterExit bounds how long Wait blocks on inherited stdout/stderr
+// pipes after the command itself is done: a descendant holding them open used to
+// stall the pipeline long past the timeout (see #614).
+const waitDelayAfterExit = 3 * time.Second
 
 // ReviewResult is the parsed JSON response from the AI CLI.
 type ReviewResult struct {
@@ -1246,8 +1250,12 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 		// Substituting `/` for an empty workspace also narrows what the agent
 		// can read, rather than widening it.
 		// The workspace is passed as cmd.Dir below rather than via --cd: the
-		// child's cwd is what codex inspects, and probing `--help` for --cd
-		// support would spend an extra subprocess per review for nothing.
+		// child's cwd is what codex inspects, so --cd would be redundant.
+		// --skip-git-repo-check is not gated behind cliHelpSupports like the
+		// other flags here: that probe reads the top-level `codex --help`, and
+		// the flag only appears under `codex exec --help` (verified on codex
+		// 0.146.0), so gating it would always resolve to false and reinstate the
+		// very failure this branch exists to prevent.
 		ws, err := os.MkdirTemp("", "heimdallm-codex-ws-*")
 		if err != nil {
 			return nil, fmt.Errorf("executor: create codex workspace: %w", err)
@@ -1266,11 +1274,29 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 	// reparented to init and kept spending provider quota (#614). Give the
 	// execution its own process group and signal the whole group instead.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return signalProcessGroup(cmd, syscall.SIGTERM) }
-	// Bound the post-cancellation wait. Without this, Wait blocks until every
-	// inherited stdout/stderr pipe is closed — a grandchild ignoring SIGTERM
-	// stalled the pipeline for as long as it chose to run.
-	cmd.WaitDelay = processGroupKillGrace
+	// Cancellation escalates within the group: SIGTERM, then SIGKILL for a
+	// descendant that ignores it. Both are sent while Wait is still in flight,
+	// i.e. before the child is reaped: once every member of a group has exited
+	// the kernel may hand that pgid to somebody else, so a sweep issued after
+	// Wait could SIGKILL an unrelated group.
+	runDone := make(chan struct{})
+	cmd.Cancel = func() error {
+		err := signalProcessGroup(cmd, syscall.SIGTERM)
+		go func() {
+			select {
+			case <-time.After(processGroupTermGrace):
+				if killErr := signalProcessGroup(cmd, syscall.SIGKILL); killErr != nil {
+					slog.Debug("executor: process group already gone", "cli", cli, "err", killErr)
+				}
+			case <-runDone:
+			}
+		}()
+		return err
+	}
+	// Bound the wait on inherited pipes. Without this, Wait blocks until every
+	// copy of stdout/stderr is closed — a descendant holding them stalled the
+	// pipeline for as long as it chose to run.
+	cmd.WaitDelay = waitDelayAfterExit
 
 	// Augment PATH with paths from the login shell so the CLI can find its own
 	// dependencies, without running stdin THROUGH the shell (which would cause
@@ -1293,13 +1319,18 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 	cmd.Stderr = &stderr
 
 	runErr := cmd.Run()
-	// SIGTERM is a request; a wedged or signal-ignoring descendant answers to
-	// SIGKILL only. Sweep the group once the wait is over so no member outlives
-	// the execution, whatever the outcome.
-	if ctx.Err() != nil {
-		if err := signalProcessGroup(cmd, syscall.SIGKILL); err != nil {
-			slog.Debug("executor: process group already gone", "cli", cli, "err", err)
-		}
+	close(runDone) // stop the escalation goroutine
+
+	// WaitDelay also fires when the command itself exited cleanly but a
+	// descendant still holds the inherited pipes — the exact shape of #614. The
+	// run succeeded and its output is already buffered, so return it instead of
+	// discarding a complete review. Such a descendant is not swept here: the
+	// child has been reaped, so its pgid may already belong to another group.
+	// Closing that remaining leak needs a wait-without-reap and belongs to #614.
+	if errors.Is(runErr, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.ExitCode() == 0 {
+		slog.Warn("executor: CLI exited 0 but a descendant held the output pipes; returning collected output",
+			"cli", cli, "bytes", stdout.Len())
+		return stdout.Bytes(), nil
 	}
 	if runErr != nil {
 		// Some CLIs (e.g. claude) write errors to stdout rather than stderr.

@@ -192,3 +192,11 @@ func readPIDFile(t *testing.T, path string) int {
 		time.Sleep(50 * time.Millisecond)
 	}
 }
+
+// killPID best-effort kills a PID captured by a fake CLI, keeping leaked test
+// descendants out of the rest of the suite.
+func killPID(pid string) {
+	if n, err := strconv.Atoi(strings.TrimSpace(pid)); err == nil && n > 0 {
+		_ = syscall.Kill(n, syscall.SIGKILL)
+	}
+}
