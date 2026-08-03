@@ -2412,8 +2412,18 @@ func main() {
 	// process group so a timeout can reach the CLI's grandchildren (#614), which
 	// also means a group-directed signal to the daemon no longer reaches them:
 	// without this sweep, in-flight agents survive the restart and keep spending
-	// provider quota. Ordered after the HTTP shutdown so no new work arrives.
-	exec.TerminateAll()
+	// provider quota.
+	//
+	// Every producer of work is cancelled first. srv.Shutdown above only stops
+	// HTTP traffic; the workers and tickers below run on their own contexts,
+	// whose cancels are deferred to main's return — i.e. after this point. A
+	// worker starting an execution between the sweep's snapshot and process exit
+	// would leave exactly the orphan this sweep exists to prevent. CancelFunc is
+	// idempotent, so the deferred cancels remain harmless.
+	stopProducersThenAgents([]context.CancelFunc{
+		workerCancel, publishWCancel, triageWCancel, refinementWCancel,
+		implementWCancel, statePollerCancel, stateWCancel,
+	}, exec.TerminateAll)
 	broker.Stop()
 }
 
@@ -5414,6 +5424,23 @@ func monitoredRepoSet(cfg *config.Config, discovered []string) map[string]struct
 // paths. Passing no discovered slice is sufficient after discovery has been
 // persisted into Repositories/NonMonitored; callers that own a fresh discovery
 // snapshot should use monitoredRepoSet directly.
+// stopProducersThenAgents runs the ordering the shutdown path depends on:
+// silence everything that can start an execution, and only then sweep the
+// executions still running. Reversing it leaves a window where a worker starts a
+// CLI the sweep has already snapshotted past, and that CLI — in its own process
+// group since #656 — outlives the daemon. Nil cancels are skipped so a producer
+// that never started is not a special case at the call site.
+func stopProducersThenAgents(stopProducers []context.CancelFunc, terminateAgents func()) {
+	for _, stop := range stopProducers {
+		if stop != nil {
+			stop()
+		}
+	}
+	if terminateAgents != nil {
+		terminateAgents()
+	}
+}
+
 func repoIsMonitored(cfg *config.Config, repo string) bool {
 	repo = strings.TrimSpace(repo)
 	if repo == "" {
