@@ -2408,7 +2408,57 @@ func main() {
 	if err := srv.Shutdown(ctx); err != nil {
 		slog.Warn("server shutdown failed", "err", err)
 	}
+	// Stop the agents this daemon started. Each execution runs in its own
+	// process group so a timeout can reach the CLI's grandchildren (#614), which
+	// also means a group-directed signal to the daemon no longer reaches them:
+	// without this sweep, in-flight agents survive the restart and keep spending
+	// provider quota.
+	//
+	// Every producer of work is cancelled first. srv.Shutdown above only stops
+	// HTTP traffic; the workers and tickers below run on their own contexts,
+	// whose cancels are deferred to main's return — i.e. after this point. A
+	// worker starting an execution between the sweep's snapshot and process exit
+	// would leave exactly the orphan this sweep exists to prevent. CancelFunc is
+	// idempotent, so the deferred cancels remain harmless.
+	stopProducersThenAgents([]context.CancelFunc{
+		workerCancel, publishWCancel, triageWCancel, refinementWCancel,
+		implementWCancel, statePollerCancel, stateWCancel,
+	}, exec.TerminateAll, producerSettleDelay)
 	broker.Stop()
+}
+
+// producerSettleDelay is how long the shutdown path waits between cancelling the
+// work producers and its second sweep of in-flight agents. Cancelling a context
+// does not wait for the worker to act on it.
+const producerSettleDelay = 500 * time.Millisecond
+
+// stopProducersThenAgents runs the ordering the shutdown path depends on:
+// silence everything that can start an execution, then sweep the executions
+// still running. Reversing it leaves a window where a worker starts a CLI the
+// sweep has already snapshotted past, and that CLI — in its own process group
+// since #656 — outlives the daemon.
+//
+// It sweeps twice because cancellation is asynchronous: a worker already past its
+// context check and about to call cmd.Start() still starts an execution after the
+// first snapshot. The settle delay plus a second pass catches that one. This
+// narrows the window rather than closing it — closing it needs the workers to
+// report completion (a WaitGroup joined with a bounded wait), which is #614's
+// "shutdown ... waits for all goroutines" criterion. Nil cancels are skipped so a
+// producer that never started is not a special case at the call site.
+func stopProducersThenAgents(stopProducers []context.CancelFunc, terminateAgents func(), settle time.Duration) {
+	for _, stop := range stopProducers {
+		if stop != nil {
+			stop()
+		}
+	}
+	if terminateAgents == nil {
+		return
+	}
+	terminateAgents()
+	if settle > 0 {
+		time.Sleep(settle)
+	}
+	terminateAgents()
 }
 
 // logRotationConfig reads HEIMDALLM_LOG_MAX_MB and HEIMDALLM_LOG_KEEP from
@@ -4466,6 +4516,7 @@ func (a *tier2Adapter) HandleChange(ctx context.Context, item *scheduler.WatchIt
 		c := *a.cfg
 		monitored := repoIsMonitored(c, item.Repo)
 		aiCfg := c.AIForRepo(item.Repo)
+		localDirBase := c.GitHub.LocalDirBase
 		a.cfgMu.Unlock()
 		if !monitored {
 			a.broker.Publish(sse.Event{
@@ -4537,6 +4588,43 @@ func (a *tier2Adapter) HandleChange(ctx context.Context, item *scheduler.WatchIt
 			ghPR.HTMLURL = stored.URL
 			ghPR.User = gh.User{Login: snap.Author}
 		}
+
+		// Reserve the checkout the same way review-worker and tier2 ProcessPR
+		// do. Without this the agent ran with no WorkDir and inherited the
+		// daemon's cwd — `/` under launchd — which aborts `codex exec` outright
+		// (#655). Acquired here, after every guard and the dedup above, so the
+		// paths that skip the review do not reserve a worktree they never use.
+		repoHandle, err := acquireRepoContext(ctx, a.repoCtx, item.Repo, &aiCfg, localDirBase, a.ghToken, repoctx.ModeRead, wtTokenFor("pr-tier3", item.Number), "", "")
+		if err != nil {
+			logRepoContextFallback("tier3 PR", item.Repo, err)
+			aiCfg.LocalDir = ""
+		}
+		if repoHandle != nil {
+			defer repoHandle.Release()
+		}
+		// Reserving the checkout can block for a long time — cloning, fetching,
+		// or queueing on the per-repo worktree cap — and the operator may disable
+		// the repo during that wait. Recheck at the execution boundary, mirroring
+		// review-worker's skipIfUnmonitored("post_acquire"), so a disable stops
+		// the CLI instead of spending provider quota on an un-monitored repo.
+		a.cfgMu.Lock()
+		stillMonitored := repoIsMonitored(*a.cfg, item.Repo)
+		a.cfgMu.Unlock()
+		if !stillMonitored {
+			a.broker.Publish(sse.Event{
+				Type: sse.EventReviewSkipped,
+				Data: sseData(map[string]any{
+					"repo":      item.Repo,
+					"pr_number": item.Number,
+					"pr_title":  title,
+					"reason":    string(pipeline.SkipReasonNotMonitored),
+				}),
+			})
+			slog.Info("tier3: repo un-monitored while reserving the checkout, skipping PR",
+				"repo", item.Repo, "pr", item.Number)
+			return nil
+		}
+
 		rev := a.runReview(ghPR, aiCfg)
 		if rev != nil && rev.GitHubReviewID == 0 && a.publishPub != nil {
 			if err := a.publishPub.PublishPRPublish(context.Background(), rev.ID); err != nil {
@@ -5042,7 +5130,7 @@ func acquireRepoContext(
 }
 
 // wtTokenFor produces a sanitisation-safe worktree token for a
-// pipeline stage. The prefix names the stage (`pr-review`, `triage`,
+// pipeline stage. The prefix names the stage (`pr-review`, `pr-tier3`, `triage`,
 // `develop`, `refinement`, `pr-tier2`) so operators can correlate
 // `<clone>/.worktrees/<token>/` with the running execution.
 func wtTokenFor(prefix string, n int) string {
