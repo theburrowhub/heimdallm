@@ -32,6 +32,9 @@ Map<String, dynamic> computeRepoDiff(RepoConfig old, RepoConfig updated) {
       updated.neverApproveWithIssues != null) {
     diff['never_approve_with_issues'] = updated.neverApproveWithIssues!;
   }
+  if (old.neverApproveMinSeverity != updated.neverApproveMinSeverity) {
+    diff['never_approve_min_severity'] = updated.neverApproveMinSeverity ?? '';
+  }
   if (old.developPromptId != updated.developPromptId) {
     diff['implement_prompt'] = updated.developPromptId ?? '';
   }

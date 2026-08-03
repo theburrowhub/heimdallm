@@ -1690,13 +1690,17 @@ func TestReviewEvent(t *testing.T) {
 		{"medium", "medium", false, "", "APPROVE"},
 		{"high", "high", false, "", "REQUEST_CHANGES"},
 		{"", "", false, "", "APPROVE"},
-		// flag ON, default threshold ("" = low: any finding downgrades)
-		{"low", "low", true, "", "COMMENT"},
+		// flag ON, default threshold ("" = medium: all-low reviews keep the
+		// approval, so a nit-only pass no longer blocks convergence)
+		{"low", "low", true, "", "APPROVE"},
 		{"medium", "medium", true, "", "COMMENT"},
-		{"", "low", true, "", "COMMENT"},
+		{"", "low", true, "", "APPROVE"},
 		{"high", "high", true, "", "REQUEST_CHANGES"}, // high never downgraded
 		{"low", "", true, "", "APPROVE"},              // clean review still approves
 		{"medium", "", true, "", "APPROVE"},
+		{"medium", "high", true, "", "COMMENT"}, // above the default threshold
+		// whitespace-only threshold resolves to the default, not to "low"
+		{"low", "low", true, "   ", "APPROVE"},
 		// flag ON, explicit "low" threshold — same as default
 		{"low", "low", true, "low", "COMMENT"},
 		// flag ON, "medium" threshold: low-only findings keep the approval
