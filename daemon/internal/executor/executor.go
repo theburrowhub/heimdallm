@@ -100,11 +100,76 @@ func OptionsForSelectedCLI(primary, selected string, opts ExecOptions) ExecOptio
 }
 
 // Executor runs AI CLI tools for code review.
-type Executor struct{}
+type Executor struct {
+	// groupsMu guards inFlightGroups, which records the process-group IDs of
+	// executions currently running. Each execution gets its own group so a
+	// timeout can reach the grandchild that holds the provider connection
+	// (#614) — but that also detaches it from any group-directed signal the
+	// daemon receives, so the shutdown path needs this registry to sweep what
+	// is still running. See TerminateAll.
+	groupsMu       sync.Mutex
+	inFlightGroups map[int]struct{}
+}
 
 // New creates a new Executor.
 func New() *Executor {
 	return &Executor{}
+}
+
+// trackGroup registers a running execution's process group.
+func (e *Executor) trackGroup(pgid int) {
+	e.groupsMu.Lock()
+	defer e.groupsMu.Unlock()
+	if e.inFlightGroups == nil {
+		e.inFlightGroups = make(map[int]struct{})
+	}
+	e.inFlightGroups[pgid] = struct{}{}
+}
+
+// untrackGroup forgets an execution's process group once Wait has returned.
+func (e *Executor) untrackGroup(pgid int) {
+	e.groupsMu.Lock()
+	defer e.groupsMu.Unlock()
+	delete(e.inFlightGroups, pgid)
+}
+
+// TerminateAll ends every execution this Executor still has in flight, SIGTERM
+// first and SIGKILL after a grace period. The daemon's shutdown path must call
+// it: ExecuteRaw derives its context from context.Background() rather than from
+// the SIGINT/SIGTERM handler, and each execution runs in its own process group,
+// so nothing else would reach an in-flight agent. Without this a restart leaves
+// agents running and spending provider quota — the #614 symptom. Safe to call
+// when nothing is running.
+func (e *Executor) TerminateAll() {
+	e.groupsMu.Lock()
+	pgids := make([]int, 0, len(e.inFlightGroups))
+	for pgid := range e.inFlightGroups {
+		pgids = append(pgids, pgid)
+	}
+	e.groupsMu.Unlock()
+
+	if len(pgids) == 0 {
+		return
+	}
+	slog.Info("executor: terminating in-flight executions", "groups", len(pgids))
+	for _, pgid := range pgids {
+		if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil {
+			slog.Debug("executor: process group already gone", "pgid", pgid, "err", err)
+		}
+	}
+	// The groups are still registered — their ExecuteRaw calls have not
+	// returned — so the pgids cannot have been recycled while we wait.
+	time.Sleep(processGroupTermGrace)
+	e.groupsMu.Lock()
+	defer e.groupsMu.Unlock()
+	for _, pgid := range pgids {
+		if _, stillRunning := e.inFlightGroups[pgid]; !stillRunning {
+			continue
+		}
+		if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
+			slog.Debug("executor: process group already gone", "pgid", pgid, "err", err)
+		}
+	}
 }
 
 // Detect returns the first available CLI (primary → fallback).
@@ -1263,6 +1328,14 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 		defer os.RemoveAll(ws)
 		opts.WorkDir = ws
 		workDirFlags = []string{"--skip-git-repo-check"}
+		// Loud on purpose. Only the review and triage paths reach this branch
+		// today (the write-mode callers abort when repoctx fails, so they never
+		// arrive with an empty WorkDir), and an agent asked to change code would
+		// silently succeed against an empty directory here. If this ever shows
+		// up alongside a develop/refinement run, that caller needs a checkout,
+		// not this workspace.
+		slog.Warn("executor: running codex without a checkout in a throwaway workspace",
+			"workspace", ws)
 	}
 
 	args := buildArgs(cli, opts, workDirFlags)
@@ -1318,7 +1391,16 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	runErr := cmd.Run()
+	// Start and Wait are split rather than calling Run so the process group can
+	// be registered while the execution is live — TerminateAll needs it to reach
+	// agents that are still running when the daemon shuts down.
+	runErr := cmd.Start()
+	if runErr == nil {
+		pgid := cmd.Process.Pid // Setpgid makes the child its own group leader
+		e.trackGroup(pgid)
+		runErr = cmd.Wait()
+		e.untrackGroup(pgid)
+	}
 	close(runDone) // stop the escalation goroutine
 
 	// WaitDelay also fires when the command itself exited cleanly but a

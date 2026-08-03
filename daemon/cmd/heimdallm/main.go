@@ -2408,6 +2408,12 @@ func main() {
 	if err := srv.Shutdown(ctx); err != nil {
 		slog.Warn("server shutdown failed", "err", err)
 	}
+	// Stop the agents this daemon started. Each execution runs in its own
+	// process group so a timeout can reach the CLI's grandchildren (#614), which
+	// also means a group-directed signal to the daemon no longer reaches them:
+	// without this sweep, in-flight agents survive the restart and keep spending
+	// provider quota. Ordered after the HTTP shutdown so no new work arrives.
+	exec.TerminateAll()
 	broker.Stop()
 }
 
