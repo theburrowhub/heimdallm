@@ -1,6 +1,9 @@
 package executor
 
-import "sync"
+import (
+	"sync"
+	"syscall"
+)
 
 // SetLoginShellLookPathForTest overrides the login-shell CLI probe so tests can
 // stay hermetic. The real probe sources the developer's shell profile and would
@@ -48,4 +51,10 @@ func ResetLoginPathCacheForTest() func() {
 	}
 	reset()
 	return reset
+}
+
+// KillGroupForTest exposes killGroup so the ESRCH → os.ErrProcessDone
+// translation that cmd.Cancel depends on can be tested directly.
+func KillGroupForTest(pgid int, sig syscall.Signal) error {
+	return killGroup(pgid, sig)
 }

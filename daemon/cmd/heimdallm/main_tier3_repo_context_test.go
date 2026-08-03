@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/heimdallm/daemon/internal/config"
 	gh "github.com/heimdallm/daemon/internal/github"
+	"github.com/heimdallm/daemon/internal/pipeline"
 	"github.com/heimdallm/daemon/internal/repoctx"
 	"github.com/heimdallm/daemon/internal/scheduler"
 	"github.com/heimdallm/daemon/internal/sse"
@@ -142,6 +144,76 @@ func TestTier3Adapter_HandleChange_ReleasesTheReservation(t *testing.T) {
 		t.Fatalf("reservation leaked: re-acquiring the repo failed: %v", err)
 	}
 	h.Release()
+}
+
+// TestTier3Adapter_HandleChange_RechecksMonitoredAfterAcquire mirrors the
+// post_acquire guard review-worker already has (main.go:1057). Reserving a
+// checkout can block for seconds or minutes — cloning, fetching, or waiting on
+// the per-repo worktree cap — and the operator may disable the repo during that
+// wait. Before this guard, HandleChange read repoIsMonitored only *before* the
+// acquisition, so a slow clone ended up spending provider quota on a repo that
+// was no longer monitored, with no review_skipped event to show for it.
+func TestTier3Adapter_HandleChange_RechecksMonitoredAfterAcquire(t *testing.T) {
+	localDir := t.TempDir()
+	mgr := repoctx.NewManagerWithOptions(repoctx.ManagerOptions{MaxWorktreesPerRepo: 1})
+
+	// Occupy the only slot so the acquisition inside HandleChange has to wait.
+	held, err := mgr.Acquire(context.Background(), repoctx.Request{
+		Repo:               "org/repo",
+		ConfiguredLocalDir: localDir,
+		Mode:               repoctx.ModeRead,
+		WorktreeToken:      "holder-1",
+	})
+	if err != nil {
+		t.Fatalf("seed acquire: %v", err)
+	}
+
+	var (
+		gotAI config.RepoAI
+		calls int
+	)
+	cfg := tier3ConfigWithLocalDir(localDir)
+	a := newTier3Adapter(t, cfg, mgr, &gotAI, &calls)
+	events := a.broker.Subscribe()
+	defer a.broker.Unsubscribe(events)
+
+	// Un-monitor the repo *before* releasing the slot, so the acquisition can
+	// only complete after the config has changed. No timing assumptions.
+	go func() {
+		a.cfgMu.Lock()
+		(*a.cfg).GitHub.NonMonitored = []string{"org/repo"}
+		a.cfgMu.Unlock()
+		held.Release()
+	}()
+
+	item, snap := tier3WatchItem()
+	if err := a.HandleChange(context.Background(), item, snap); err != nil {
+		t.Fatalf("HandleChange: %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("runReview called %d time(s), want 0: the repo was un-monitored while the checkout was being reserved", calls)
+	}
+
+	for {
+		select {
+		case ev := <-events:
+			if ev.Type != sse.EventReviewSkipped {
+				continue
+			}
+			var payload struct {
+				Reason string `json:"reason"`
+			}
+			if err := json.Unmarshal([]byte(ev.Data), &payload); err != nil {
+				t.Fatalf("decode event: %v", err)
+			}
+			if payload.Reason != string(pipeline.SkipReasonNotMonitored) {
+				t.Fatalf("reason = %q, want %q", payload.Reason, pipeline.SkipReasonNotMonitored)
+			}
+			return
+		case <-time.After(2 * time.Second):
+			t.Fatal("no review_skipped event emitted for the un-monitored repo")
+		}
+	}
 }
 
 // sameDir compares paths tolerating symlinked temp roots (macOS /var →

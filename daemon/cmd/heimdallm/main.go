@@ -4558,6 +4558,28 @@ func (a *tier2Adapter) HandleChange(ctx context.Context, item *scheduler.WatchIt
 		if repoHandle != nil {
 			defer repoHandle.Release()
 		}
+		// Reserving the checkout can block for a long time — cloning, fetching,
+		// or queueing on the per-repo worktree cap — and the operator may disable
+		// the repo during that wait. Recheck at the execution boundary, mirroring
+		// review-worker's skipIfUnmonitored("post_acquire"), so a disable stops
+		// the CLI instead of spending provider quota on an un-monitored repo.
+		a.cfgMu.Lock()
+		stillMonitored := repoIsMonitored(*a.cfg, item.Repo)
+		a.cfgMu.Unlock()
+		if !stillMonitored {
+			a.broker.Publish(sse.Event{
+				Type: sse.EventReviewSkipped,
+				Data: sseData(map[string]any{
+					"repo":      item.Repo,
+					"pr_number": item.Number,
+					"pr_title":  title,
+					"reason":    string(pipeline.SkipReasonNotMonitored),
+				}),
+			})
+			slog.Info("tier3: repo un-monitored while reserving the checkout, skipping PR",
+				"repo", item.Repo, "pr", item.Number)
+			return nil
+		}
 
 		rev := a.runReview(ghPR, aiCfg)
 		if rev != nil && rev.GitHubReviewID == 0 && a.publishPub != nil {
