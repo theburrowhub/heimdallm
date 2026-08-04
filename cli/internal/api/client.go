@@ -64,9 +64,10 @@ func (c *Client) do(method, path string) ([]byte, error) {
 	return data, nil
 }
 
-// Health checks daemon connectivity.
+// Health checks daemon connectivity. Shares GetHealth's transport, so a
+// degraded-but-reachable daemon is not reported as a connectivity failure.
 func (c *Client) Health() error {
-	_, err := c.do("GET", "/health")
+	_, err := c.GetHealth()
 	return err
 }
 
@@ -81,10 +82,29 @@ type Health struct {
 
 // GetHealth returns the daemon's health payload, including the version it was
 // built from — the authoritative server version, distinct from this CLI's.
+//
+// Deliberately does not go through do(), which errors on any status >= 400: the
+// daemon answers 503 with status "degraded" whenever a nats/sqlite/last_poll
+// check fails, and that response still carries the version — precisely the state
+// in which knowing the running build matters most. 200 and 503 both decode; the
+// caller reads Status to tell them apart. Everything else (401, a proxy's HTML
+// 502, an undecodable body) stays an error.
 func (c *Client) GetHealth() (*Health, error) {
-	data, err := c.do("GET", "/health")
+	req, err := c.newRequest("GET", "/health", nil)
 	if err != nil {
 		return nil, err
+	}
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusServiceUnavailable {
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
 	var h Health
 	if err := json.Unmarshal(data, &h); err != nil {

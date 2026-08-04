@@ -63,8 +63,12 @@ type Dashboard struct {
 	// version is this CLI binary's build version; daemonVersion is the
 	// server's, from /health. They are independent — a stamped CLI says
 	// nothing about the daemon it happens to be pointed at.
-	version       string
-	daemonVersion string
+	version         string
+	daemonVersion   string
+	daemonStartedAt time.Time
+	// Last /health failure. Kept so the Server section can say why the version
+	// is unknown: the fetch is best-effort and would otherwise leave no trail.
+	daemonHealthErr error
 
 	sseEvents    chan api.SSEEvent
 	sseCtx       context.Context
@@ -87,7 +91,11 @@ type dataMsg struct {
 	stats    *api.Stats
 	activity *api.ActivityResponse
 	health   *api.Health
-	err      error
+	// Set when the /health fetch itself failed. Distinct from health == nil,
+	// which also covers "not fetched yet"; the difference decides whether a
+	// previously known version is kept or cleared.
+	healthErr error
+	err       error
 }
 type sseMsg struct {
 	sessionID int64
@@ -154,9 +162,12 @@ func (d *Dashboard) fetchData() tea.Msg {
 	// Fetched first and best-effort: /health needs no token, so the Server tab
 	// can still report the daemon's version when the authenticated endpoints
 	// below fail with 401. A health failure is left to those endpoints to
-	// report rather than blanking the whole dashboard.
+	// report rather than blanking the whole dashboard — but it is recorded, so
+	// the Server section can explain an unknown version instead of going quiet.
 	if health, err := d.client.GetHealth(); err == nil {
 		msg.health = health
+	} else {
+		msg.healthErr = err
 	}
 
 	prs, err := d.client.ListPRs()
@@ -315,8 +326,17 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		d.refreshing = false
 		// Applied before the error branch: health is fetched best-effort and
 		// unauthenticated, so the daemon version survives a 401 on the rest.
+		// A failed fetch clears both — reporting a last-known version next to a
+		// stopped badge would misstate which build is running, and a daemon that
+		// restarted on a different version would keep showing the old one.
 		if msg.health != nil {
 			d.daemonVersion = msg.health.Version
+			d.daemonStartedAt = msg.health.StartedAt
+			d.daemonHealthErr = nil
+		} else if msg.healthErr != nil {
+			d.daemonVersion = ""
+			d.daemonStartedAt = time.Time{}
+			d.daemonHealthErr = msg.healthErr
 		}
 		if msg.err != nil {
 			d.err = msg.err
@@ -1097,14 +1117,20 @@ func (d *Dashboard) renderServer(height int) string {
 	// Status row
 	b.WriteString(fmt.Sprintf("  %-10s %s\n", "Status", d.serverStatusBadge()))
 
-	// Version row — the daemon's own version, reported by /health. Empty means
-	// either the daemon has not been reached yet or it predates version
-	// stamping (older builds omit the field).
+	// Daemon row — the daemon's own version, reported by /health. Labelled in
+	// parallel with the CLI row below: under a "Server" header a bare "Version"
+	// reads as the whole product's, which is the ambiguity this pair resolves.
+	// Empty means the daemon was unreachable, has not been reached yet, or
+	// predates version stamping (older builds omit the field).
 	daemonVersion := d.daemonVersion
 	if daemonVersion == "" {
 		daemonVersion = mutedNote.Render("(unknown)")
+		if d.daemonHealthErr != nil {
+			daemonVersion += mutedNote.Render(
+				" — " + truncateRunes(d.daemonHealthErr.Error(), 60))
+		}
 	}
-	b.WriteString(fmt.Sprintf("  %-10s %s\n", "Version", daemonVersion))
+	b.WriteString(fmt.Sprintf("  %-10s %s\n", "Daemon", daemonVersion))
 
 	// CLI row — this binary's build version, shown separately so a mismatch
 	// against the daemon is visible instead of being conflated with it.
@@ -1114,8 +1140,14 @@ func (d *Dashboard) renderServer(height int) string {
 	}
 	b.WriteString(fmt.Sprintf("  %-10s %s\n", "CLI", cliVersion))
 
-	// Uptime row
-	uptime := time.Since(d.startTime).Truncate(time.Second).String()
+	// Uptime row — the daemon's, from /health started_at. The CLI's own uptime
+	// belongs to the footer status bar; reporting it here next to a server-side
+	// version row would read as the server's. Unknown for daemons that omit
+	// started_at, and while unreachable.
+	uptime := mutedNote.Render("(unknown)")
+	if !d.daemonStartedAt.IsZero() {
+		uptime = time.Since(d.daemonStartedAt).Truncate(time.Second).String()
+	}
 	b.WriteString(fmt.Sprintf("  %-10s %s\n", "Uptime", uptime))
 
 	// Bind addr / port — sourced from d.config (last successful /config fetch)

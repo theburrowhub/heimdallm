@@ -540,8 +540,24 @@ func TestBuildConfigLinesPollingAbsentWhenMissing(t *testing.T) {
 	}
 }
 
-// The Server section describes the daemon, so its Version row must report the
-// daemon's version from /health — not the CLI binary's own build version.
+// serverRow returns the value of the Server section's "<label>" row. Anchored on
+// the label at the start of the trimmed line rather than a substring search, so
+// renaming one row cannot silently make another row's assertion vacuous.
+func serverRow(t *testing.T, out, label string) string {
+	t.Helper()
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 0 && fields[0] == label {
+			return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), label))
+		}
+	}
+	t.Fatalf("Server section has no %q row:\n%s", label, out)
+	return ""
+}
+
+// The Server section describes the daemon, so its Daemon row must report the
+// version from /health — not the CLI binary's own build version, which gets its
+// own row.
 func TestServerSectionShowsDaemonVersionNotCLIVersion(t *testing.T) {
 	d := NewDashboard("http://localhost:0", "", "9.9.9-cli")
 	d.width = 120
@@ -549,19 +565,14 @@ func TestServerSectionShowsDaemonVersionNotCLIVersion(t *testing.T) {
 	d.daemonVersion = "0.8.0"
 
 	out := d.renderServer(40)
-	if !strings.Contains(out, "0.8.0") {
-		t.Errorf("Server section omits daemon version 0.8.0:\n%s", out)
+	if got := serverRow(t, out, "Daemon"); !strings.Contains(got, "0.8.0") {
+		t.Errorf("Daemon row = %q, want the daemon version 0.8.0", got)
 	}
-	// The CLI's version must not be presented as the server's.
-	serverRow := ""
-	for _, line := range strings.Split(out, "\n") {
-		if strings.Contains(line, "Version") {
-			serverRow = line
-			break
-		}
+	if got := serverRow(t, out, "Daemon"); strings.Contains(got, "9.9.9-cli") {
+		t.Errorf("Daemon row reports the CLI version: %q", got)
 	}
-	if strings.Contains(serverRow, "9.9.9-cli") {
-		t.Errorf("Version row reports the CLI version, not the daemon's: %q", serverRow)
+	if got := serverRow(t, out, "CLI"); !strings.Contains(got, "9.9.9-cli") {
+		t.Errorf("CLI row = %q, want the CLI version 9.9.9-cli", got)
 	}
 }
 
@@ -572,25 +583,113 @@ func TestServerSectionUnknownDaemonVersion(t *testing.T) {
 	d.daemonVersion = ""
 
 	out := d.renderServer(40)
-	if !strings.Contains(out, "(unknown)") {
-		t.Errorf("missing daemon version should render (unknown):\n%s", out)
+	if got := serverRow(t, out, "Daemon"); !strings.Contains(got, "(unknown)") {
+		t.Errorf("Daemon row = %q, want (unknown)", got)
 	}
 }
 
-func TestDataMsgStoresDaemonVersion(t *testing.T) {
+func TestDataMsgStoresDaemonVersionAndStart(t *testing.T) {
 	d := NewDashboard("http://localhost:0", "", "test")
 	d.width = 120
 	d.height = 40
+	started := time.Date(2026, 8, 4, 9, 20, 26, 0, time.UTC)
 
 	msg := dataMsg{
 		config: map[string]any{},
 		stats:  &api.Stats{},
-		health: &api.Health{Status: "ok", Version: "0.8.0"},
+		health: &api.Health{Status: "ok", Version: "0.8.0", StartedAt: started},
 	}
 	model, _ := d.Update(msg)
 	d = model.(*Dashboard)
 
 	if d.daemonVersion != "0.8.0" {
 		t.Errorf("daemonVersion = %q, want 0.8.0", d.daemonVersion)
+	}
+	if !d.daemonStartedAt.Equal(started) {
+		t.Errorf("daemonStartedAt = %v, want %v", d.daemonStartedAt, started)
+	}
+}
+
+// A degraded daemon answers 503 but still reports its version, so the Daemon row
+// must show it — the operator needs the build precisely when things are broken.
+func TestServerSectionShowsVersionWhenDegraded(t *testing.T) {
+	d := NewDashboard("http://localhost:0", "", "test")
+	d.width = 120
+	d.height = 40
+
+	model, _ := d.Update(dataMsg{
+		config: map[string]any{},
+		stats:  &api.Stats{},
+		health: &api.Health{Status: "degraded", Version: "0.8.0"},
+	})
+	d = model.(*Dashboard)
+
+	if got := serverRow(t, d.renderServer(40), "Daemon"); !strings.Contains(got, "0.8.0") {
+		t.Errorf("Daemon row = %q, want 0.8.0 for a degraded daemon", got)
+	}
+}
+
+// Pairing a last-known version with a "stopped" badge misreports what is
+// running, so an unreachable daemon clears the version instead of keeping it.
+func TestUnreachableDaemonClearsVersion(t *testing.T) {
+	d := NewDashboard("http://localhost:0", "", "test")
+	d.width = 120
+	d.height = 40
+
+	model, _ := d.Update(dataMsg{
+		config: map[string]any{},
+		stats:  &api.Stats{},
+		health: &api.Health{Version: "0.8.0", StartedAt: time.Now()},
+	})
+	d = model.(*Dashboard)
+	if d.daemonVersion == "" {
+		t.Fatal("precondition: version should be set after a successful fetch")
+	}
+
+	model, _ = d.Update(dataMsg{healthErr: errors.New("connection refused"), err: errors.New("connection refused")})
+	d = model.(*Dashboard)
+
+	if d.daemonVersion != "" {
+		t.Errorf("daemonVersion = %q after the daemon became unreachable, want cleared", d.daemonVersion)
+	}
+	if !d.daemonStartedAt.IsZero() {
+		t.Errorf("daemonStartedAt = %v, want zero", d.daemonStartedAt)
+	}
+	out := d.renderServer(40)
+	if got := serverRow(t, out, "Daemon"); !strings.Contains(got, "(unknown)") {
+		t.Errorf("Daemon row = %q, want (unknown)", got)
+	}
+	// The swallowed error used to leave no trail; surface it on the row.
+	if !strings.Contains(out, "connection refused") {
+		t.Errorf("Server section gives no diagnostic for the failed health fetch:\n%s", out)
+	}
+}
+
+// Uptime in the Server section is the daemon's, derived from /health started_at,
+// not the CLI process's own age.
+func TestServerSectionUptimeIsDaemonUptime(t *testing.T) {
+	d := NewDashboard("http://localhost:0", "", "test")
+	d.width = 120
+	d.height = 40
+	d.startTime = time.Now().Add(-99 * time.Hour) // CLI running far longer
+	d.daemonStartedAt = time.Now().Add(-90 * time.Minute)
+
+	got := serverRow(t, d.renderServer(40), "Uptime")
+	if strings.Contains(got, "99h") {
+		t.Errorf("Uptime row = %q, reports the CLI's uptime instead of the daemon's", got)
+	}
+	if !strings.Contains(got, "1h30m") {
+		t.Errorf("Uptime row = %q, want the daemon's 1h30m", got)
+	}
+}
+
+func TestServerSectionUptimeUnknownWithoutStartedAt(t *testing.T) {
+	d := NewDashboard("http://localhost:0", "", "test")
+	d.width = 120
+	d.height = 40
+	d.daemonStartedAt = time.Time{}
+
+	if got := serverRow(t, d.renderServer(40), "Uptime"); !strings.Contains(got, "(unknown)") {
+		t.Errorf("Uptime row = %q, want (unknown) when the daemon reports no started_at", got)
 	}
 }
