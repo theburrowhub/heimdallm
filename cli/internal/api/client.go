@@ -70,6 +70,29 @@ func (c *Client) Health() error {
 	return err
 }
 
+// Health is the subset of /health the dashboard renders. Version is empty for
+// daemons built before version stamping (they omit the field), so callers must
+// treat "" as unknown rather than an error.
+type Health struct {
+	Status    string    `json:"status"`
+	Version   string    `json:"version"`
+	StartedAt time.Time `json:"started_at"`
+}
+
+// GetHealth returns the daemon's health payload, including the version it was
+// built from — the authoritative server version, distinct from this CLI's.
+func (c *Client) GetHealth() (*Health, error) {
+	data, err := c.do("GET", "/health")
+	if err != nil {
+		return nil, err
+	}
+	var h Health
+	if err := json.Unmarshal(data, &h); err != nil {
+		return nil, fmt.Errorf("decoding health: %w", err)
+	}
+	return &h, nil
+}
+
 // PR types matching daemon API responses.
 
 type Review struct {

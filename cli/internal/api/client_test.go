@@ -47,3 +47,42 @@ func TestStreamEventsReturnsWhenContextCanceledWithBlockedSend(t *testing.T) {
 		t.Fatal("StreamEvents did not return after context cancellation")
 	}
 }
+
+func TestGetHealthParsesDaemonVersion(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"status":"ok","version":"0.8.0","started_at":"2026-08-04T09:20:26Z"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	h, err := New(srv.URL, "").GetHealth()
+	if err != nil {
+		t.Fatalf("GetHealth: %v", err)
+	}
+	if h.Version != "0.8.0" {
+		t.Errorf("Version = %q, want 0.8.0", h.Version)
+	}
+	if h.Status != "ok" {
+		t.Errorf("Status = %q, want ok", h.Status)
+	}
+}
+
+// A daemon built before version stamping omits the field entirely; GetHealth
+// must succeed with an empty Version rather than failing the whole fetch.
+func TestGetHealthToleratesMissingVersion(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"status":"ok"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	h, err := New(srv.URL, "").GetHealth()
+	if err != nil {
+		t.Fatalf("GetHealth: %v", err)
+	}
+	if h.Version != "" {
+		t.Errorf("Version = %q, want empty", h.Version)
+	}
+}

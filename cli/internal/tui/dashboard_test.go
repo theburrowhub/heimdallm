@@ -539,3 +539,58 @@ func TestBuildConfigLinesPollingAbsentWhenMissing(t *testing.T) {
 		}
 	}
 }
+
+// The Server section describes the daemon, so its Version row must report the
+// daemon's version from /health — not the CLI binary's own build version.
+func TestServerSectionShowsDaemonVersionNotCLIVersion(t *testing.T) {
+	d := NewDashboard("http://localhost:0", "", "9.9.9-cli")
+	d.width = 120
+	d.height = 40
+	d.daemonVersion = "0.8.0"
+
+	out := d.renderServer(40)
+	if !strings.Contains(out, "0.8.0") {
+		t.Errorf("Server section omits daemon version 0.8.0:\n%s", out)
+	}
+	// The CLI's version must not be presented as the server's.
+	serverRow := ""
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "Version") {
+			serverRow = line
+			break
+		}
+	}
+	if strings.Contains(serverRow, "9.9.9-cli") {
+		t.Errorf("Version row reports the CLI version, not the daemon's: %q", serverRow)
+	}
+}
+
+func TestServerSectionUnknownDaemonVersion(t *testing.T) {
+	d := NewDashboard("http://localhost:0", "", "0.8.0")
+	d.width = 120
+	d.height = 40
+	d.daemonVersion = ""
+
+	out := d.renderServer(40)
+	if !strings.Contains(out, "(unknown)") {
+		t.Errorf("missing daemon version should render (unknown):\n%s", out)
+	}
+}
+
+func TestDataMsgStoresDaemonVersion(t *testing.T) {
+	d := NewDashboard("http://localhost:0", "", "test")
+	d.width = 120
+	d.height = 40
+
+	msg := dataMsg{
+		config: map[string]any{},
+		stats:  &api.Stats{},
+		health: &api.Health{Status: "ok", Version: "0.8.0"},
+	}
+	model, _ := d.Update(msg)
+	d = model.(*Dashboard)
+
+	if d.daemonVersion != "0.8.0" {
+		t.Errorf("daemonVersion = %q, want 0.8.0", d.daemonVersion)
+	}
+}

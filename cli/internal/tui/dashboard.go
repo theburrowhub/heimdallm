@@ -60,7 +60,11 @@ type Dashboard struct {
 	startTime         time.Time
 	lastUpdate        time.Time
 	lastSSEEvent      time.Time
-	version           string
+	// version is this CLI binary's build version; daemonVersion is the
+	// server's, from /health. They are independent — a stamped CLI says
+	// nothing about the daemon it happens to be pointed at.
+	version       string
+	daemonVersion string
 
 	sseEvents    chan api.SSEEvent
 	sseCtx       context.Context
@@ -82,6 +86,7 @@ type dataMsg struct {
 	config   map[string]any
 	stats    *api.Stats
 	activity *api.ActivityResponse
+	health   *api.Health
 	err      error
 }
 type sseMsg struct {
@@ -145,6 +150,14 @@ func sseWatchdogCmd() tea.Cmd {
 
 func (d *Dashboard) fetchData() tea.Msg {
 	msg := dataMsg{}
+
+	// Fetched first and best-effort: /health needs no token, so the Server tab
+	// can still report the daemon's version when the authenticated endpoints
+	// below fail with 401. A health failure is left to those endpoints to
+	// report rather than blanking the whole dashboard.
+	if health, err := d.client.GetHealth(); err == nil {
+		msg.health = health
+	}
 
 	prs, err := d.client.ListPRs()
 	if err != nil {
@@ -300,6 +313,11 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case dataMsg:
 		d.refreshing = false
+		// Applied before the error branch: health is fetched best-effort and
+		// unauthenticated, so the daemon version survives a 401 on the rest.
+		if msg.health != nil {
+			d.daemonVersion = msg.health.Version
+		}
 		if msg.err != nil {
 			d.err = msg.err
 			d.connected = false
@@ -1079,12 +1097,22 @@ func (d *Dashboard) renderServer(height int) string {
 	// Status row
 	b.WriteString(fmt.Sprintf("  %-10s %s\n", "Status", d.serverStatusBadge()))
 
-	// Version row — d.version is the build-time version passed into NewDashboard
-	version := d.version
-	if version == "" {
-		version = mutedNote.Render("(unknown)")
+	// Version row — the daemon's own version, reported by /health. Empty means
+	// either the daemon has not been reached yet or it predates version
+	// stamping (older builds omit the field).
+	daemonVersion := d.daemonVersion
+	if daemonVersion == "" {
+		daemonVersion = mutedNote.Render("(unknown)")
 	}
-	b.WriteString(fmt.Sprintf("  %-10s %s\n", "Version", version))
+	b.WriteString(fmt.Sprintf("  %-10s %s\n", "Version", daemonVersion))
+
+	// CLI row — this binary's build version, shown separately so a mismatch
+	// against the daemon is visible instead of being conflated with it.
+	cliVersion := d.version
+	if cliVersion == "" {
+		cliVersion = mutedNote.Render("(unknown)")
+	}
+	b.WriteString(fmt.Sprintf("  %-10s %s\n", "CLI", cliVersion))
 
 	// Uptime row
 	uptime := time.Since(d.startTime).Truncate(time.Second).String()
