@@ -57,6 +57,13 @@ jobs:
             echo "::error::the pkill guard skipped entirely — it must run on ubuntu-latest"
             exit 1
           fi
+          # Per-test skips are also coverage loss, not success: on this runner
+          # every assertion is meant to execute, so any "# SKIP" means the
+          # environment stopped reproducing what the guard exists to prove.
+          if printf '%s\n' "$output" | grep -q '# SKIP'; then
+            echo "::error::a pkill guard assertion skipped — coverage is incomplete"
+            exit 1
+          fi
 
       - name: macOS targets stop at the platform guard
         run: |

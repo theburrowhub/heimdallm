@@ -168,7 +168,8 @@ dev-stop:
 	@# aborts — taking `make dev` / `make dev-daemon` with it, whether or not a
 	@# daemon was running. The dev daemon is spawned with no arguments, so its
 	@# cmdline equals the pattern exactly. Guarded by scripts/test-linux-install.sh.
-	@DAEMON_RE=$$($(PKILL_ESCAPE) "$(DAEMON_BIN)"); \
+	@DAEMON_RE=$$($(PKILL_ESCAPE) "$(DAEMON_BIN)") || exit 1; \
+	[ -n "$$DAEMON_RE" ] || { echo "❌  pkill-escape.sh produced an empty pattern"; exit 1; }; \
 	pkill -x -f "$$DAEMON_RE" 2>/dev/null && echo "↓  Daemon parado" || true
 	@UI_PID_FILE="$$HOME/.local/share/heimdallm/ui.pid"; \
 	 if [ -f "$$UI_PID_FILE" ]; then \
@@ -780,7 +781,9 @@ install-linux: _check-linux verify-linux
 	@# cmdline equal the pattern, which the daemon satisfies (spawned with no
 	@# arguments) and the longer shell cmdline does not. Guarded by
 	@# scripts/test-linux-install.sh.
-	@DAEMON_RE=$$($(PKILL_ESCAPE) "$$HOME/.local/opt/heimdallm/heimdalld"); \
+	@DAEMON_RE=$$($(PKILL_ESCAPE) "$$HOME/.local/opt/heimdallm/heimdalld") || exit 1; \
+	[ -n "$$DAEMON_RE" ] || { echo "❌  pkill-escape.sh produced an empty pattern — the"; \
+	  echo "   previous daemon is still running; stop it before launching."; exit 1; }; \
 	if pkill -x -f "$$DAEMON_RE" 2>/dev/null; then \
 	  echo ""; \
 	  echo "↓  Stopped the previously running daemon (it was serving the old binary)."; \
@@ -854,10 +857,12 @@ uninstall-linux: _check-linux
 	@# its cmdline is longer than the pattern. Same rationale as above — the
 	@# rm -rf is safe against a running process — and plain -f never actually
 	@# reached that case anyway, because it killed this recipe's shell first.
-	@APP_RE=$$($(PKILL_ESCAPE) "$$HOME/.local/opt/heimdallm/heimdallm"); \
-	 pkill -x -f "$$APP_RE" 2>/dev/null || true
-	@DAEMON_RE=$$($(PKILL_ESCAPE) "$$HOME/.local/opt/heimdallm/heimdalld"); \
-	 pkill -x -f "$$DAEMON_RE" 2>/dev/null || true
+	@APP_RE=$$($(PKILL_ESCAPE) "$$HOME/.local/opt/heimdallm/heimdallm" 2>/dev/null); \
+	 if [ -n "$$APP_RE" ]; then pkill -x -f "$$APP_RE" 2>/dev/null || true; \
+	 else echo "⚠  could not build the app pattern; leaving any running app alone"; fi
+	@DAEMON_RE=$$($(PKILL_ESCAPE) "$$HOME/.local/opt/heimdallm/heimdalld" 2>/dev/null); \
+	 if [ -n "$$DAEMON_RE" ]; then pkill -x -f "$$DAEMON_RE" 2>/dev/null || true; \
+	 else echo "⚠  could not build the daemon pattern; leaving any running daemon alone"; fi
 	@rm -f "$$HOME/.local/share/heimdallm/ui.pid"
 	rm -f "$$HOME/.local/share/applications/com.theburrowhub.heimdallm.desktop"
 	@for SIZE in 48 128 256 512; do \

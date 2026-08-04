@@ -120,15 +120,20 @@ wait_gone() {
 # Flag-order independent: -x may appear anywhere among the invocation's flags,
 # bundled (-xf) or spelled --exact. Comment lines are excluded — the recipes
 # mention plain `pkill -f` on purpose, to explain why -x is required.
+# Every invocation on the line is checked, not just the last: extracting with a
+# greedy `.*` prefix would inspect only the final one, so a line carrying two
+# calls could hide a bare `pkill -f` behind a correct neighbour.
 offenders=$(
   grep -nE '(pkill|pgrep)[[:space:]]' "$MAKEFILE" |
     grep -vE '^[0-9]+:[[:space:]]*@?#' |
     while IFS= read -r line; do
-      flags=$(printf '%s' "$line" | sed -n 's/.*\(pkill\|pgrep\)\([^"]*\).*/\2/p')
-      case "$flags" in
-        *-x*|*--exact*) ;;
-        *) printf '%s\n' "$line" ;;
-      esac
+      printf '%s\n' "$line" | grep -oE '(pkill|pgrep)[^"]*' |
+        while IFS= read -r invocation; do
+          case "$invocation" in
+            *-x*|*--exact*) ;;
+            *) printf '%s\n' "$line" ;;
+          esac
+        done
     done
 )
 if [ -z "$offenders" ]; then
