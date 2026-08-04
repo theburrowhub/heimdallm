@@ -147,6 +147,11 @@ fi
 #
 # No target process exists here on purpose: the self-match is what ends the
 # recipe, so the bug reproduces against nothing at all.
+#
+# PAT goes through the ENVIRONMENT, not make's command line: a command-line
+# `PAT=…` lands in make's own /proc cmdline, so `pkill -f` would match the make
+# process too and the test would only prove "something in the chain self-matched"
+# rather than pinning it on the recipe shell.
 mkdir -p "$WORK/opt"
 : > "$WORK/opt/heimdalld"
 
@@ -160,7 +165,7 @@ with-x:
 	@echo RECIPE-COMPLETED
 EOF
 
-out=$(make -C "$WORK" without-x PAT="$WORK/opt/heimdalld" 2>/dev/null || true)
+out=$(PAT="$WORK/opt/heimdalld" make -C "$WORK" without-x 2>/dev/null || true)
 case "$out" in
   *RECIPE-COMPLETED*)
     # BusyBox and other non-procps pkill may not match ancestors this way. The
@@ -171,7 +176,7 @@ case "$out" in
     pass 'pkill -f alone kills its own recipe shell — -x is load-bearing' ;;
 esac
 
-out=$(make -C "$WORK" with-x PAT="$WORK/opt/heimdalld" 2>/dev/null || true)
+out=$(PAT="$WORK/opt/heimdalld" make -C "$WORK" with-x 2>/dev/null || true)
 case "$out" in
   *RECIPE-COMPLETED*) pass 'pkill -x -f leaves the recipe shell alone' ;;
   *) fail 'pkill -x -f killed its own recipe shell' "output: $out" ;;
@@ -185,7 +190,7 @@ if [ "$actual" != "$WORK/opt/heimdalld" ]; then
 elif ! kill -0 "$TARGET" 2>/dev/null; then
   fail 'fixture exited before the assertion' 'cannot verify -x matches the daemon shape'
 else
-  make -C "$WORK" with-x PAT="$WORK/opt/heimdalld" >/dev/null 2>&1 || true
+  PAT="$WORK/opt/heimdalld" make -C "$WORK" with-x >/dev/null 2>&1 || true
   if wait_gone "$TARGET"; then
     pass 'pkill -x -f signals a process whose cmdline is exactly the path'
   else

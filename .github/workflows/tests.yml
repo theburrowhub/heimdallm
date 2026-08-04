@@ -42,15 +42,21 @@ jobs:
       # semantics are executed, and ubuntu-latest has the /proc the guard needs.
       - name: pkill semantics in the Linux targets
         run: |
-          set -eu
+          # pipefail so a guard failure still fails the step through the tee.
+          set -euo pipefail
           for script in scripts/pkill-escape.sh scripts/test-linux-install.sh; do
             if [ ! -x "$script" ]; then
               echo "::error::$script must be executable"
               exit 1
             fi
           done
-          output="$(make test-install-linux)"
-          printf '%s\n' "$output"
+          # Streamed through tee rather than captured into a variable: with
+          # `output="$(make …)"` under set -e, a failing guard aborts the step
+          # before the echo runs, so the ok/not ok TAP lines never reach the log
+          # and only the stderr detail survives.
+          log="$RUNNER_TEMP/pkill-guard.log"
+          make test-install-linux 2>&1 | tee "$log"
+          output="$(cat "$log")"
           # A silent skip here would defeat the purpose: the guard exits 0 when it
           # cannot run, which is right locally on macOS but must never pass in CI.
           if printf '%s\n' "$output" | grep -q '^1\.\.0'; then
