@@ -38,8 +38,8 @@ func newStatusCmd() *cobra.Command {
 			fmt.Println("Heimdallm Daemon Status")
 			fmt.Println("═══════════════════════")
 			fmt.Printf("  Status:       %s\n", statusLine(health))
-			if health.Version != "" {
-				fmt.Printf("  Version:      %s\n", health.Version)
+			if v := health.DisplayVersion(); v != "" {
+				fmt.Printf("  Version:      %s\n", v)
 			}
 
 			if repos, ok := cfg["repositories"]; ok {

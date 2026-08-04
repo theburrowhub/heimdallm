@@ -81,29 +81,53 @@ type Health struct {
 	StartedAt time.Time `json:"started_at"`
 }
 
-// statusDisplayMax bounds the rendered status so one field cannot overrun a TUI
-// row. Comfortably above the daemon's "ok"/"degraded".
-const statusDisplayMax = 32
+// Caps for the rendered fields, in runes. Both sit comfortably above what the
+// daemon emits — "ok"/"degraded", and versions like "0.8.0-3-g86f49fa-dirty".
+const (
+	statusDisplayMax  = 32
+	versionDisplayMax = 48
+)
 
-// DisplayStatus returns Status reduced to something safe to print: the daemon's
-// value reaches a TUI row and a terminal line verbatim, where a control byte
-// would corrupt the layout and an unbounded string would overrun it. Today the
+// displayField reduces a daemon-supplied string to something safe to print: both
+// Status and Version reach a TUI row and a terminal line verbatim, where a
+// control byte would corrupt the layout and an unbounded string would overrun
+// it. The cap counts runes, not bytes, so multibyte input is not truncated far
+// short of it.
+//
+// Note what this does NOT do: dropping ESC is what defuses an ANSI sequence, so
+// the inert remainder ("[31m") is deliberately kept rather than parsed out.
+func displayField(s string, maxRunes int) string {
+	var b strings.Builder
+	kept := 0
+	for _, r := range s {
+		if r == '\t' || r == '\n' || r == '\r' || !unicode.IsPrint(r) {
+			continue
+		}
+		if kept >= maxRunes {
+			break
+		}
+		b.WriteRune(r)
+		kept++
+	}
+	return b.String()
+}
+
+// DisplayStatus returns Status bounded and stripped of control bytes. Today the
 // daemon only emits "ok" and "degraded", so this is about not depending on that.
 func (h *Health) DisplayStatus() string {
 	if h == nil {
 		return ""
 	}
-	var b strings.Builder
-	for _, r := range h.Status {
-		if r == '\t' || r == '\n' || r == '\r' || !unicode.IsPrint(r) {
-			continue
-		}
-		if b.Len() >= statusDisplayMax {
-			break
-		}
-		b.WriteRune(r)
+	return displayField(h.Status, statusDisplayMax)
+}
+
+// DisplayVersion is the same treatment for Version, which travels the same path
+// to the same rows and was previously printed raw and unbounded.
+func (h *Health) DisplayVersion() string {
+	if h == nil {
+		return ""
 	}
-	return b.String()
+	return displayField(h.Version, versionDisplayMax)
 }
 
 // GetHealth returns the daemon's health payload, including the version it was

@@ -183,3 +183,47 @@ func TestHealthDisplayStatus(t *testing.T) {
 		t.Errorf("nil receiver DisplayStatus() = %q, want empty", got)
 	}
 }
+
+// The cap is documented in runes, so it must count runes: a byte-based check
+// truncated multibyte input at ~11 characters and could still emit 32+ bytes.
+func TestDisplayFieldsCapInRunes(t *testing.T) {
+	multibyte := strings.Repeat("é", 80) // 2 bytes per rune
+	h := &Health{Status: multibyte, Version: multibyte}
+
+	gotStatus := h.DisplayStatus()
+	if n := len([]rune(gotStatus)); n != statusDisplayMax {
+		t.Errorf("DisplayStatus() kept %d runes, want %d", n, statusDisplayMax)
+	}
+	gotVersion := h.DisplayVersion()
+	if n := len([]rune(gotVersion)); n != versionDisplayMax {
+		t.Errorf("DisplayVersion() kept %d runes, want %d", n, versionDisplayMax)
+	}
+}
+
+// Version reaches the same TUI row and terminal line as Status, so it gets the
+// same treatment — it was previously printed raw and unbounded.
+func TestHealthDisplayVersion(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain", "0.8.0", "0.8.0"},
+		{"describe output", "0.8.0-3-g86f49fa-dirty", "0.8.0-3-g86f49fa-dirty"},
+		{"empty", "", ""},
+		{"drops control bytes", "0.8\x00.0\n", "0.8.0"},
+		{"caps length", strings.Repeat("v", 200), strings.Repeat("v", versionDisplayMax)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &Health{Version: tc.in}
+			if got := h.DisplayVersion(); got != tc.want {
+				t.Errorf("DisplayVersion() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	var nilH *Health
+	if got := nilH.DisplayVersion(); got != "" {
+		t.Errorf("nil receiver DisplayVersion() = %q, want empty", got)
+	}
+}

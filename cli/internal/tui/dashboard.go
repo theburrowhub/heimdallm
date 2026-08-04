@@ -334,7 +334,7 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// stopped badge would misstate which build is running, and a daemon that
 		// restarted on a different version would keep showing the old one.
 		if msg.health != nil {
-			d.daemonVersion = msg.health.Version
+			d.daemonVersion = msg.health.DisplayVersion()
 			d.daemonStartedAt = msg.health.StartedAt
 			d.daemonStatus = msg.health.Status
 			d.daemonHealthErr = nil
