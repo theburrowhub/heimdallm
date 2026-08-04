@@ -88,19 +88,21 @@ const (
 	versionDisplayMax = 48
 )
 
-// displayField reduces a daemon-supplied string to something safe to print: both
-// Status and Version reach a TUI row and a terminal line verbatim, where a
-// control byte would corrupt the layout and an unbounded string would overrun
-// it. The cap counts runes, not bytes, so multibyte input is not truncated far
-// short of it.
+// DisplayText reduces a daemon-supplied string to something safe to print. Every
+// such string reaching a TUI row or a terminal line goes through here: a control
+// byte would corrupt the layout and an unbounded string would overrun it. The cap
+// counts runes, not bytes, so multibyte input is not truncated far short of it.
+//
+// unicode.IsPrint already excludes tab, newline and carriage return, so they need
+// no separate test.
 //
 // Note what this does NOT do: dropping ESC is what defuses an ANSI sequence, so
 // the inert remainder ("[31m") is deliberately kept rather than parsed out.
-func displayField(s string, maxRunes int) string {
+func DisplayText(s string, maxRunes int) string {
 	var b strings.Builder
 	kept := 0
 	for _, r := range s {
-		if r == '\t' || r == '\n' || r == '\r' || !unicode.IsPrint(r) {
+		if !unicode.IsPrint(r) {
 			continue
 		}
 		if kept >= maxRunes {
@@ -118,7 +120,7 @@ func (h *Health) DisplayStatus() string {
 	if h == nil {
 		return ""
 	}
-	return displayField(h.Status, statusDisplayMax)
+	return DisplayText(h.Status, statusDisplayMax)
 }
 
 // DisplayVersion is the same treatment for Version, which travels the same path
@@ -127,7 +129,7 @@ func (h *Health) DisplayVersion() string {
 	if h == nil {
 		return ""
 	}
-	return displayField(h.Version, versionDisplayMax)
+	return DisplayText(h.Version, versionDisplayMax)
 }
 
 // GetHealth returns the daemon's health payload, including the version it was

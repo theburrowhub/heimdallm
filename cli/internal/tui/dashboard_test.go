@@ -798,3 +798,49 @@ func TestServerStatusBadgeStoppedWhenHealthUnreachable(t *testing.T) {
 		t.Errorf("Status row = %q, want stopped when /health is unreachable", got)
 	}
 }
+
+// The health error is the third daemon-supplied string on the Daemon row, and it
+// carries a raw response body: GetHealth formats `HTTP %d: %s` with the body,
+// TrimSpace touching only the ends. A proxy's HTML 502 with interior newlines or
+// an ESC byte would break the Server section's layout, so it is sanitised like
+// Status and Version rather than only length-truncated.
+func TestDaemonRowSanitisesHealthError(t *testing.T) {
+	d := NewDashboard("http://localhost:0", "", "test")
+	d.width = 120
+	d.height = 40
+
+	model, _ := d.Update(dataMsg{
+		healthErr: errors.New("HTTP 502: <html>\n<body>\x1b[2JBad Gateway\r\n</body>"),
+		err:       errors.New("HTTP 502"),
+	})
+	d = model.(*Dashboard)
+
+	out := d.renderServer(40)
+
+	// Asserted over the WHOLE section, not the Daemon row alone: a leaked newline
+	// splits the row, so the control bytes after it land on lines a row-scoped
+	// assertion would never inspect (this test passed against the unsanitised
+	// code when it only looked at the row).
+	// Only control bytes: printable remnants of the HTML ("<body>") are inert and
+	// deliberately kept, exactly as "[31m" is once its ESC is gone.
+	for _, bad := range []string{"\x1b", "\r"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("Server section leaks %q from the health error:\n%q", bad, out)
+		}
+	}
+
+	// A leaked newline would also add lines to the section. Compare against the
+	// same state with a single-line error.
+	clean := NewDashboard("http://localhost:0", "", "test")
+	clean.width, clean.height = 120, 40
+	m, _ := clean.Update(dataMsg{healthErr: errors.New("HTTP 502"), err: errors.New("HTTP 502")})
+	wantLines := len(strings.Split(m.(*Dashboard).renderServer(40), "\n"))
+	if got := len(strings.Split(out, "\n")); got != wantLines {
+		t.Errorf("Server section has %d lines, want %d — the error leaked a newline", got, wantLines)
+	}
+
+	// The useful part still survives.
+	if got := serverRow(t, out, "Daemon"); !strings.Contains(got, "HTTP 502") {
+		t.Errorf("Daemon row = %q, want the leading cause preserved", got)
+	}
+}

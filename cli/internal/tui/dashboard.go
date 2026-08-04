@@ -336,7 +336,7 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.health != nil {
 			d.daemonVersion = msg.health.DisplayVersion()
 			d.daemonStartedAt = msg.health.StartedAt
-			d.daemonStatus = msg.health.Status
+			d.daemonStatus = msg.health.DisplayStatus()
 			d.daemonHealthErr = nil
 		} else if msg.healthErr != nil {
 			d.daemonVersion = ""
@@ -1113,7 +1113,7 @@ func (d *Dashboard) serverStatusBadge() string {
 	if d.daemonHealthErr == nil && d.daemonStatus != "" {
 		if d.daemonStatus != "ok" {
 			return lipgloss.NewStyle().Foreground(colorWarning).Bold(true).
-				Render("● " + (&api.Health{Status: d.daemonStatus}).DisplayStatus())
+				Render("● " + d.daemonStatus)
 		}
 		return lipgloss.NewStyle().Foreground(colorSuccess).Bold(true).Render("● running")
 	}
@@ -1146,7 +1146,7 @@ func (d *Dashboard) renderServer(height int) string {
 		daemonVersion = mutedNote.Render("(unknown)")
 		if d.daemonHealthErr != nil {
 			daemonVersion += mutedNote.Render(
-				" — " + truncateRunes(d.daemonHealthErr.Error(), 60))
+				" — " + api.DisplayText(d.daemonHealthErr.Error(), 60))
 		}
 	}
 	b.WriteString(fmt.Sprintf("  %-10s %s\n", "Daemon", daemonVersion))

@@ -227,3 +227,30 @@ func TestHealthDisplayVersion(t *testing.T) {
 		t.Errorf("nil receiver DisplayVersion() = %q, want empty", got)
 	}
 }
+
+// GetHealth embeds the raw response body in its error (TrimSpace only touches the
+// ends), so a proxy's HTML 502 can carry interior newlines or ESC bytes. That
+// error is rendered on the same TUI row as Status and Version, so it needs the
+// same treatment — DisplayText is the entry point for that third string.
+func TestDisplayText(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		max  int
+		want string
+	}{
+		{"plain", "connection refused", 60, "connection refused"},
+		{"interior newlines", "HTTP 502: <html>\n<body>\nBad Gateway\n</html>", 60,
+			"HTTP 502: <html><body>Bad Gateway</html>"},
+		{"drops ESC", "HTTP 502: \x1b[2Jcleared", 60, "HTTP 502: [2Jcleared"},
+		{"caps in runes", "ééééé", 3, "ééé"},
+		{"empty", "", 60, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := DisplayText(tc.in, tc.max); got != tc.want {
+				t.Errorf("DisplayText(%q, %d) = %q, want %q", tc.in, tc.max, got, tc.want)
+			}
+		})
+	}
+}

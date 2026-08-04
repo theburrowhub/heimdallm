@@ -96,8 +96,9 @@ func statusLine(h *api.Health) string {
 	if h == nil || h.Status == "" {
 		return "online (status unreported)"
 	}
-	if h.Status == "ok" {
+	status := h.DisplayStatus()
+	if status == "ok" {
 		return "online"
 	}
-	return h.DisplayStatus()
+	return status
 }
