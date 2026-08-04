@@ -56,17 +56,21 @@ jobs:
           # and only the stderr detail survives.
           log="$RUNNER_TEMP/pkill-guard.log"
           make test-install-linux 2>&1 | tee "$log"
-          output="$(cat "$log")"
+          # greps read $log directly rather than piping a variable into grep -q:
+          # under pipefail, grep -q exiting on first match can SIGPIPE the writer
+          # and invert the condition. Unreachable at this output size, but the
+          # guard is built to be un-skippable, so the hole goes for free.
+          #
           # A silent skip here would defeat the purpose: the guard exits 0 when it
           # cannot run, which is right locally on macOS but must never pass in CI.
-          if printf '%s\n' "$output" | grep -q '^1\.\.0'; then
+          if grep -q '^1\.\.0' "$log"; then
             echo "::error::the pkill guard skipped entirely — it must run on ubuntu-latest"
             exit 1
           fi
           # Per-test skips are also coverage loss, not success: on this runner
           # every assertion is meant to execute, so any "# SKIP" means the
           # environment stopped reproducing what the guard exists to prove.
-          if printf '%s\n' "$output" | grep -q '# SKIP'; then
+          if grep -q '# SKIP' "$log"; then
             echo "::error::a pkill guard assertion skipped — coverage is incomplete"
             exit 1
           fi
