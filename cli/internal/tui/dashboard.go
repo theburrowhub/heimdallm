@@ -66,6 +66,10 @@ type Dashboard struct {
 	version         string
 	daemonVersion   string
 	daemonStartedAt time.Time
+	// The daemon's own view of its health ("ok", "degraded"). Distinct from
+	// connected, which only tracks whether the authenticated endpoints answered:
+	// a degraded daemon answers everything and would otherwise look healthy.
+	daemonStatus string
 	// Last /health failure. Kept so the Server section can say why the version
 	// is unknown: the fetch is best-effort and would otherwise leave no trail.
 	daemonHealthErr error
@@ -332,10 +336,12 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.health != nil {
 			d.daemonVersion = msg.health.Version
 			d.daemonStartedAt = msg.health.StartedAt
+			d.daemonStatus = msg.health.Status
 			d.daemonHealthErr = nil
 		} else if msg.healthErr != nil {
 			d.daemonVersion = ""
 			d.daemonStartedAt = time.Time{}
+			d.daemonStatus = ""
 			d.daemonHealthErr = msg.healthErr
 		}
 		if msg.err != nil {
@@ -1101,6 +1107,12 @@ func (d *Dashboard) serverStatusBadge() string {
 	if !d.connected {
 		return lipgloss.NewStyle().Foreground(colorMuted).Render("● stopped")
 	}
+	// A degraded daemon (/health 503) answers every endpoint, so connectedness
+	// alone would render it as plainly running. Its own word takes precedence.
+	if d.daemonStatus != "" && d.daemonStatus != "ok" {
+		return lipgloss.NewStyle().Foreground(colorWarning).Bold(true).
+			Render("● " + d.daemonStatus)
+	}
 	return lipgloss.NewStyle().Foreground(colorSuccess).Bold(true).Render("● running")
 }
 
@@ -1144,9 +1156,15 @@ func (d *Dashboard) renderServer(height int) string {
 	// belongs to the footer status bar; reporting it here next to a server-side
 	// version row would read as the server's. Unknown for daemons that omit
 	// started_at, and while unreachable.
+	// Clamped at zero: a daemon on another host whose clock runs ahead of ours
+	// reports a started_at in the future, which would render as a negative age.
 	uptime := mutedNote.Render("(unknown)")
 	if !d.daemonStartedAt.IsZero() {
-		uptime = time.Since(d.daemonStartedAt).Truncate(time.Second).String()
+		age := time.Since(d.daemonStartedAt).Truncate(time.Second)
+		if age < 0 {
+			age = 0
+		}
+		uptime = age.String()
 	}
 	b.WriteString(fmt.Sprintf("  %-10s %s\n", "Uptime", uptime))
 

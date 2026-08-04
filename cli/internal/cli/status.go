@@ -5,6 +5,8 @@ import (
 	"sort"
 
 	"github.com/spf13/cobra"
+
+	"github.com/theburrowhub/heimdallm/cli/internal/api"
 )
 
 func newStatusCmd() *cobra.Command {
@@ -13,7 +15,13 @@ func newStatusCmd() *cobra.Command {
 		Short: "Show daemon state, uptime, and monitored repos",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := clientFromContext(cmd.Context())
-			if err := c.Health(); err != nil {
+			// GetHealth rather than Health: the latter is only a reachability
+			// gate, and it treats a 503 "degraded" daemon as reachable so the
+			// dashboard can still read its version. Reporting that as a flat
+			// "online" would hide the fault in the state this command exists to
+			// diagnose, so the payload drives the Status line below.
+			health, err := c.GetHealth()
+			if err != nil {
 				return fmt.Errorf("daemon unreachable: %w", err)
 			}
 
@@ -29,7 +37,10 @@ func newStatusCmd() *cobra.Command {
 
 			fmt.Println("Heimdallm Daemon Status")
 			fmt.Println("═══════════════════════")
-			fmt.Printf("  Status:       online\n")
+			fmt.Printf("  Status:       %s\n", statusLine(health))
+			if health.Version != "" {
+				fmt.Printf("  Version:      %s\n", health.Version)
+			}
 
 			if repos, ok := cfg["repositories"]; ok {
 				if arr, ok := repos.([]any); ok {
@@ -74,4 +85,19 @@ func newStatusCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// statusLine renders the daemon's state for the status command. "ok" is spelled
+// "online" for continuity with the previous output; any other state the daemon
+// reports (notably "degraded", which /health returns with 503) is printed as-is
+// rather than flattened, and a payload without a status says so instead of
+// asserting health it cannot confirm.
+func statusLine(h *api.Health) string {
+	if h == nil || h.Status == "" {
+		return "online (status unreported)"
+	}
+	if h.Status == "ok" {
+		return "online"
+	}
+	return h.Status
 }

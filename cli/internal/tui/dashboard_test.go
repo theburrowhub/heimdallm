@@ -693,3 +693,60 @@ func TestServerSectionUptimeUnknownWithoutStartedAt(t *testing.T) {
 		t.Errorf("Uptime row = %q, want (unknown) when the daemon reports no started_at", got)
 	}
 }
+
+// api.Health.Status was parsed but never shown: a degraded daemon (503) rendered
+// a plain "● running" badge, because connectedness only tracks the authenticated
+// endpoints. The badge now reflects what the daemon says about itself.
+func TestServerStatusBadgeReflectsDegraded(t *testing.T) {
+	d := NewDashboard("http://localhost:0", "", "test")
+	d.width = 120
+	d.height = 40
+	d.connected = true
+
+	model, _ := d.Update(dataMsg{
+		config: map[string]any{},
+		stats:  &api.Stats{},
+		health: &api.Health{Status: "degraded", Version: "0.8.0"},
+	})
+	d = model.(*Dashboard)
+
+	got := serverRow(t, d.renderServer(40), "Status")
+	if !strings.Contains(got, "degraded") {
+		t.Errorf("Status row = %q, want it to report degraded", got)
+	}
+	if strings.Contains(got, "running") {
+		t.Errorf("Status row = %q, still claims running for a degraded daemon", got)
+	}
+}
+
+func TestServerStatusBadgeRunningWhenOK(t *testing.T) {
+	d := NewDashboard("http://localhost:0", "", "test")
+	d.width = 120
+	d.height = 40
+	d.connected = true
+
+	model, _ := d.Update(dataMsg{
+		config: map[string]any{},
+		stats:  &api.Stats{},
+		health: &api.Health{Status: "ok", Version: "0.8.0"},
+	})
+	d = model.(*Dashboard)
+
+	if got := serverRow(t, d.renderServer(40), "Status"); !strings.Contains(got, "running") {
+		t.Errorf("Status row = %q, want running for a healthy daemon", got)
+	}
+}
+
+// A daemon on another host with a clock ahead of ours yields a started_at in the
+// future; a raw time.Since would render a negative duration.
+func TestServerSectionUptimeNeverNegative(t *testing.T) {
+	d := NewDashboard("http://localhost:0", "", "test")
+	d.width = 120
+	d.height = 40
+	d.daemonStartedAt = time.Now().Add(2 * time.Hour)
+
+	got := serverRow(t, d.renderServer(40), "Uptime")
+	if strings.Contains(got, "-") {
+		t.Errorf("Uptime row = %q, want no negative duration for a skewed clock", got)
+	}
+}
