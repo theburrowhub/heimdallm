@@ -92,11 +92,16 @@ func newStatusCmd() *cobra.Command {
 // reports (notably "degraded", which /health returns with 503) is printed as-is
 // rather than flattened, and a payload without a status says so instead of
 // asserting health it cannot confirm.
+// Every branch reads the sanitised value, including the "unreported" guard: a
+// status of only non-printable bytes is non-empty, so testing the raw field let
+// it past the guard and then printed the sanitised "" as a blank Status line. The
+// dashboard avoids the same asymmetry by storing daemonStatus already sanitised.
+// DisplayStatus is nil-safe, so it also covers a nil payload.
 func statusLine(h *api.Health) string {
-	if h == nil || h.Status == "" {
+	status := h.DisplayStatus()
+	if status == "" {
 		return "online (status unreported)"
 	}
-	status := h.DisplayStatus()
 	if status == "ok" {
 		return "online"
 	}

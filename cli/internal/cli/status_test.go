@@ -19,6 +19,11 @@ func TestStatusLine(t *testing.T) {
 		{"degraded", &api.Health{Status: "degraded"}, "degraded"},
 		{"unknown word passes through", &api.Health{Status: "starting"}, "starting"},
 		{"no status reported", &api.Health{}, "online (status unreported)"},
+		// The guard must evaluate the SANITISED value: a status made only of
+		// non-printable bytes is non-empty, so a raw `h.Status == ""` check let it
+		// through and then printed the sanitised "" — a blank Status line.
+		{"only non-printable bytes", &api.Health{Status: "\n"}, "online (status unreported)"},
+		{"control bytes around ok", &api.Health{Status: "\nok\r"}, "online"},
 		{"nil payload", nil, "online (status unreported)"},
 	}
 	for _, tc := range cases {
