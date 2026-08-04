@@ -180,28 +180,39 @@ fi
 SPAWN_SITES="flutter_app/lib/core/daemon/daemon_lifecycle.dart
 flutter_app/lib/core/platform/platform_services_desktop.dart"
 spawn_offenders=""
-spawn_found=0
 for rel in $SPAWN_SITES; do
   f="$REPO_ROOT/$rel"
-  [ -f "$f" ] || { spawn_offenders="$spawn_offenders$rel: file not found
-"; continue; }
-  while IFS= read -r call; do
-    spawn_found=$((spawn_found + 1))
-    # Everything after the first argument must start with an empty list.
+  if [ ! -f "$f" ]; then
+    spawn_offenders="$spawn_offenders$rel: file not found
+"
+    continue
+  fi
+  # Counted PER FILE, not globally: a global counter would still pass if the
+  # daemon spawn moved to a new file while the other listed site kept its own.
+  # Each listed file must contribute at least one call.
+  calls=$(grep -c 'Process\.start(' "$f" || true)
+  if [ "${calls:-0}" -eq 0 ]; then
+    spawn_offenders="$spawn_offenders$rel: no Process.start call (did the spawn move?)
+"
+    continue
+  fi
+  # The argument list is read from the call site joined onto one logical line, so
+  # a call wrapped across lines — or written as `const []` — is judged on its
+  # arguments rather than on its formatting.
+  joined=$(tr '\n' ' ' < "$f" | sed 's/  */ /g')
+  offenders_here=$(printf '%s\n' "$joined" | grep -oE 'Process\.start\([^)]*' || true)
+  printf '%s\n' "$offenders_here" | while IFS= read -r call; do
+    [ -n "$call" ] || continue
     case "$call" in
-      *"Process.start("*", []"*) ;;
-      *) spawn_offenders="$spawn_offenders$rel: $call
-" ;;
+      *", []"*|*", const []"*) ;;
+      *) printf '%s: %s\n' "$rel" "$call" ;;
     esac
-  done <<EOF
-$(grep -n 'Process\.start(' "$f" || true)
-EOF
+  done >> "$WORK/spawn_offenders"
 done
-if [ "$spawn_found" -eq 0 ]; then
-  fail 'no Process.start call found at the known spawn sites' \
-    'the -x contract is unverified; update SPAWN_SITES if the code moved'
-elif [ -n "$(printf '%s' "$spawn_offenders" | tr -d '[:space:]')" ]; then
-  fail 'a daemon/app spawn passes arguments, which breaks the pkill -x contract' \
+[ -f "$WORK/spawn_offenders" ] || : > "$WORK/spawn_offenders"
+spawn_offenders="$spawn_offenders$(cat "$WORK/spawn_offenders")"
+if [ -n "$(printf '%s' "$spawn_offenders" | tr -d '[:space:]')" ]; then
+  fail 'a daemon/app spawn breaks the pkill -x contract (arguments, or site moved)' \
     "$spawn_offenders"
 else
   pass 'the daemon/app spawn sites still pass an empty argument list'
