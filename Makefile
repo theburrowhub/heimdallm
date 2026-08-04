@@ -3,6 +3,13 @@ OS := $(shell uname -s)
 
 DAEMON_BIN  := $(shell pwd)/daemon/bin/heimdallm
 
+# pkill/pgrep -f treat their pattern as an ERE, so a path containing regex
+# metacharacters silently fails to match — a $HOME or checkout directory with
+# `+`, `(` or `[` in it would leave the daemon running with no error. The script
+# is the single implementation, shared with scripts/test-linux-install.sh, which
+# asserts it against a metacharacter-laden path.
+PKILL_ESCAPE = ./scripts/pkill-escape.sh
+
 ifeq ($(OS),Darwin)
   FLUTTER_DEVICE   := macos
   FLUTTER_BUILD    := flutter_app/build/macos/Build/Products
@@ -161,7 +168,8 @@ dev-stop:
 	@# aborts — taking `make dev` / `make dev-daemon` with it, whether or not a
 	@# daemon was running. The dev daemon is spawned with no arguments, so its
 	@# cmdline equals the pattern exactly. Guarded by scripts/test-linux-install.sh.
-	@pkill -x -f "$(DAEMON_BIN)" 2>/dev/null && echo "↓  Daemon parado" || true
+	@DAEMON_RE=$$($(PKILL_ESCAPE) "$(DAEMON_BIN)"); \
+	pkill -x -f "$$DAEMON_RE" 2>/dev/null && echo "↓  Daemon parado" || true
 	@UI_PID_FILE="$$HOME/.local/share/heimdallm/ui.pid"; \
 	 if [ -f "$$UI_PID_FILE" ]; then \
 	   UI_PID=$$(cat "$$UI_PID_FILE"); \
@@ -772,15 +780,15 @@ install-linux: _check-linux verify-linux
 	@# cmdline equal the pattern, which the daemon satisfies (spawned with no
 	@# arguments) and the longer shell cmdline does not. Guarded by
 	@# scripts/test-linux-install.sh.
-	@DAEMON="$$HOME/.local/opt/heimdallm/heimdalld"; \
-	if pkill -x -f "$$DAEMON" 2>/dev/null; then \
+	@DAEMON_RE=$$($(PKILL_ESCAPE) "$$HOME/.local/opt/heimdallm/heimdalld"); \
+	if pkill -x -f "$$DAEMON_RE" 2>/dev/null; then \
 	  echo ""; \
 	  echo "↓  Stopped the previously running daemon (it was serving the old binary)."; \
 	  for _ in 1 2 3 4 5 6 7 8 9 10; do \
-	    pgrep -x -f "$$DAEMON" >/dev/null 2>&1 || break; \
+	    pgrep -x -f "$$DAEMON_RE" >/dev/null 2>&1 || break; \
 	    sleep 1; \
 	  done; \
-	  if pgrep -x -f "$$DAEMON" >/dev/null 2>&1; then \
+	  if pgrep -x -f "$$DAEMON_RE" >/dev/null 2>&1; then \
 	    echo "⚠  It has not exited after 10s — stop it manually, or it will keep"; \
 	    echo "   serving the old binary."; \
 	  else \
@@ -840,8 +848,16 @@ uninstall-linux: _check-linux
 	@# running process, and the user can close the window whenever. We
 	@# intentionally avoid a broader `-f 'heimdallm'` match to prevent
 	@# hitting unrelated dev processes (e.g. `flutter run` of this repo).
-	@pkill -x -f "$$HOME/.local/opt/heimdallm/heimdallm" 2>/dev/null || true
-	@pkill -x -f "$$HOME/.local/opt/heimdallm/heimdalld" 2>/dev/null || true
+	@#
+	@# -x narrows this further: an app launched WITH arguments (e.g.
+	@# `~/.local/opt/heimdallm/heimdallm --some-flag`) no longer matches, since
+	@# its cmdline is longer than the pattern. Same rationale as above — the
+	@# rm -rf is safe against a running process — and plain -f never actually
+	@# reached that case anyway, because it killed this recipe's shell first.
+	@APP_RE=$$($(PKILL_ESCAPE) "$$HOME/.local/opt/heimdallm/heimdallm"); \
+	 pkill -x -f "$$APP_RE" 2>/dev/null || true
+	@DAEMON_RE=$$($(PKILL_ESCAPE) "$$HOME/.local/opt/heimdallm/heimdalld"); \
+	 pkill -x -f "$$DAEMON_RE" 2>/dev/null || true
 	@rm -f "$$HOME/.local/share/heimdallm/ui.pid"
 	rm -f "$$HOME/.local/share/applications/com.theburrowhub.heimdallm.desktop"
 	@for SIZE in 48 128 256 512; do \

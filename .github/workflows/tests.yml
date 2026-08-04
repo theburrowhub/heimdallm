@@ -37,6 +37,27 @@ jobs:
           make -n install-linux >/dev/null
           make -n uninstall-linux >/dev/null
 
+      # The parse checks above cannot catch a dropped -x: `make -n` expands the
+      # recipe without ever running pkill. This job is the only place the pkill
+      # semantics are executed, and ubuntu-latest has the /proc the guard needs.
+      - name: pkill semantics in the Linux targets
+        run: |
+          set -eu
+          for script in scripts/pkill-escape.sh scripts/test-linux-install.sh; do
+            if [ ! -x "$script" ]; then
+              echo "::error::$script must be executable"
+              exit 1
+            fi
+          done
+          output="$(make test-install-linux)"
+          printf '%s\n' "$output"
+          # A silent skip here would defeat the purpose: the guard exits 0 when it
+          # cannot run, which is right locally on macOS but must never pass in CI.
+          if printf '%s\n' "$output" | grep -q '^1\.\.0'; then
+            echo "::error::the pkill guard skipped entirely — it must run on ubuntu-latest"
+            exit 1
+          fi
+
       - name: macOS targets stop at the platform guard
         run: |
           set -eu
