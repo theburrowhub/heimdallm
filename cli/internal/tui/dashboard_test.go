@@ -750,3 +750,51 @@ func TestServerSectionUptimeNeverNegative(t *testing.T) {
 		t.Errorf("Uptime row = %q, want no negative duration for a skewed clock", got)
 	}
 }
+
+// /health answering at all proves the daemon is up, so its own word outranks
+// connectedness — which only tracks the authenticated endpoints. fetchData can
+// read a 503 "degraded" payload and then fail on ListPRs/config/stats, which
+// sets connected=false while daemonStatus stays "degraded"; reporting "stopped"
+// there hides a known-degraded daemon behind a wrong state.
+func TestServerStatusBadgeDegradedOutranksDisconnected(t *testing.T) {
+	d := NewDashboard("http://localhost:0", "", "test")
+	d.width = 120
+	d.height = 40
+	d.connected = true
+
+	model, _ := d.Update(dataMsg{
+		health: &api.Health{Status: "degraded", Version: "0.8.0"},
+		err:    errors.New("GET /prs failed: 500"),
+	})
+	d = model.(*Dashboard)
+
+	if d.connected {
+		t.Fatal("precondition: a dataMsg error should mark the dashboard disconnected")
+	}
+	got := serverRow(t, d.renderServer(40), "Status")
+	if !strings.Contains(got, "degraded") {
+		t.Errorf("Status row = %q, want degraded (the daemon answered /health)", got)
+	}
+	if strings.Contains(got, "stopped") {
+		t.Errorf("Status row = %q, reports stopped for a daemon that answered /health", got)
+	}
+}
+
+// When /health itself fails there is no evidence the daemon is up, so the
+// disconnected badge is still correct.
+func TestServerStatusBadgeStoppedWhenHealthUnreachable(t *testing.T) {
+	d := NewDashboard("http://localhost:0", "", "test")
+	d.width = 120
+	d.height = 40
+	d.connected = true
+
+	model, _ := d.Update(dataMsg{
+		healthErr: errors.New("connection refused"),
+		err:       errors.New("connection refused"),
+	})
+	d = model.(*Dashboard)
+
+	if got := serverRow(t, d.renderServer(40), "Status"); !strings.Contains(got, "stopped") {
+		t.Errorf("Status row = %q, want stopped when /health is unreachable", got)
+	}
+}

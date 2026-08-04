@@ -1104,14 +1104,21 @@ func (d *Dashboard) serverStatusBadge() string {
 	if d.sseStale {
 		return lipgloss.NewStyle().Foreground(colorWarning).Bold(true).Render("● unresponsive")
 	}
+	// /health answering at all is proof the daemon is up, and its own word
+	// outranks connectedness, which only tracks the authenticated endpoints. This
+	// is checked BEFORE !connected on purpose: fetchData can read a 503
+	// "degraded" payload and then fail on /prs, /config or /stats, and reporting
+	// "stopped" for a daemon that just answered would hide the degradation behind
+	// an outright wrong state.
+	if d.daemonHealthErr == nil && d.daemonStatus != "" {
+		if d.daemonStatus != "ok" {
+			return lipgloss.NewStyle().Foreground(colorWarning).Bold(true).
+				Render("● " + (&api.Health{Status: d.daemonStatus}).DisplayStatus())
+		}
+		return lipgloss.NewStyle().Foreground(colorSuccess).Bold(true).Render("● running")
+	}
 	if !d.connected {
 		return lipgloss.NewStyle().Foreground(colorMuted).Render("● stopped")
-	}
-	// A degraded daemon (/health 503) answers every endpoint, so connectedness
-	// alone would render it as plainly running. Its own word takes precedence.
-	if d.daemonStatus != "" && d.daemonStatus != "ok" {
-		return lipgloss.NewStyle().Foreground(colorWarning).Bold(true).
-			Render("● " + d.daemonStatus)
 	}
 	return lipgloss.NewStyle().Foreground(colorSuccess).Bold(true).Render("● running")
 }

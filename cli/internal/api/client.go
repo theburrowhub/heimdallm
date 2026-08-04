@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode"
 )
 
 const DefaultHost = "http://localhost:7842"
@@ -78,6 +79,31 @@ type Health struct {
 	Status    string    `json:"status"`
 	Version   string    `json:"version"`
 	StartedAt time.Time `json:"started_at"`
+}
+
+// statusDisplayMax bounds the rendered status so one field cannot overrun a TUI
+// row. Comfortably above the daemon's "ok"/"degraded".
+const statusDisplayMax = 32
+
+// DisplayStatus returns Status reduced to something safe to print: the daemon's
+// value reaches a TUI row and a terminal line verbatim, where a control byte
+// would corrupt the layout and an unbounded string would overrun it. Today the
+// daemon only emits "ok" and "degraded", so this is about not depending on that.
+func (h *Health) DisplayStatus() string {
+	if h == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range h.Status {
+		if r == '\t' || r == '\n' || r == '\r' || !unicode.IsPrint(r) {
+			continue
+		}
+		if b.Len() >= statusDisplayMax {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // GetHealth returns the daemon's health payload, including the version it was

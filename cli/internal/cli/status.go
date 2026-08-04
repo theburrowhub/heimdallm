@@ -99,5 +99,5 @@ func statusLine(h *api.Health) string {
 	if h.Status == "ok" {
 		return "online"
 	}
-	return h.Status
+	return h.DisplayStatus()
 }

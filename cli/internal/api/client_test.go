@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -149,5 +150,36 @@ func TestGetHealthErrorsOnUnexpectedStatusAndGarbage(t *testing.T) {
 				t.Errorf("GetHealth on %s = nil error, want error", tc.name)
 			}
 		})
+	}
+}
+
+// Status is rendered into a TUI row and a terminal line, so control bytes would
+// corrupt the layout and an unbounded string would overrun it. The daemon only
+// emits "ok"/"degraded" today; this keeps a future value from breaking callers.
+func TestHealthDisplayStatus(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain", "degraded", "degraded"},
+		{"empty", "", ""},
+		// Dropping ESC is what defuses the sequence; the remaining "[31m" is
+		// inert literal text, so it is deliberately kept rather than parsed out.
+		{"defuses ANSI by dropping ESC", "deg\x1b[31mraded\n", "deg[31mraded"},
+		{"strips tabs and CR", "de\tgra\rded", "degraded"},
+		{"caps length", strings.Repeat("x", 80), strings.Repeat("x", 32)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &Health{Status: tc.in}
+			if got := h.DisplayStatus(); got != tc.want {
+				t.Errorf("DisplayStatus() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	var nilH *Health
+	if got := nilH.DisplayStatus(); got != "" {
+		t.Errorf("nil receiver DisplayStatus() = %q, want empty", got)
 	}
 }
