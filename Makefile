@@ -45,7 +45,7 @@ build-app:
 	cd flutter_app && flutter build $(FLUTTER_DEVICE) --release
 
 build-cli:
-	$(MAKE) -C cli build
+	$(MAKE) -C cli build VERSION=$(GIT_VERSION)
 
 # Flutter Web bundle, consumed by docker/Dockerfile.web (served via Nginx).
 # --base-href=/ matches the Nginx server block that expects assets at the root.
