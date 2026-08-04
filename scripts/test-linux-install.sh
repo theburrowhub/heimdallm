@@ -20,26 +20,16 @@
 #
 # Both are asserted behaviourally, not by inspection, because neither leaves any
 # trace in normal output.
+#
+# The static half also ties the Makefile to the invariant it depends on: `-x` only
+# matches while the daemon and app are exec'd with an empty argv, and that lives
+# in Dart. The static tests run everywhere; only the behavioural half needs Linux.
 
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && /bin/pwd -P)
 REPO_ROOT=$(CDPATH= cd "$SCRIPT_DIR/.." && /bin/pwd -P)
 MAKEFILE="$REPO_ROOT/Makefile"
-
-# The behavioural tests read /proc and rely on procps-style pkill semantics.
-# pkill and pgrep both exist on macOS/BSD — the platform this repo is primarily
-# developed on — while /proc does not, so guarding on the binaries alone would
-# make this target fail deterministically on a correct tree. A test that always
-# fails locally is a test people learn to ignore.
-if [ "$(uname -s)" != Linux ] || [ ! -d /proc ]; then
-  printf '1..0 # SKIP requires Linux /proc (pkill -f semantics under test)\n'
-  exit 0
-fi
-if ! command -v pkill >/dev/null 2>&1 || ! command -v pgrep >/dev/null 2>&1; then
-  printf '1..0 # SKIP pkill/pgrep unavailable\n'
-  exit 0
-fi
 
 TEST_COUNT=0
 FAIL_COUNT=0
@@ -62,6 +52,21 @@ fail() {
     printf '  %s\n' "$2" >&2
   fi
 }
+
+# The behavioural tests read /proc and rely on procps-style pkill semantics.
+# pkill and pgrep both exist on macOS/BSD — the platform this repo is primarily
+# developed on — while /proc does not. Only that half is gated: the static checks
+# below are portable, and they are the ones that catch a dropped -x or a changed
+# spawn site, which matters most on the platform where the rest cannot run.
+BEHAVIOURAL=yes
+SKIP_WHY=""
+if [ "$(uname -s)" != Linux ] || [ ! -d /proc ]; then
+  BEHAVIOURAL=no
+  SKIP_WHY="requires Linux /proc (pkill -f semantics under test)"
+elif ! command -v pkill >/dev/null 2>&1 || ! command -v pgrep >/dev/null 2>&1; then
+  BEHAVIOURAL=no
+  SKIP_WHY="pkill/pgrep unavailable"
+fi
 
 WORK=$(mktemp -d)
 : > "$WORK/writers"
@@ -123,27 +128,105 @@ wait_gone() {
 # Every invocation on the line is checked, not just the last: extracting with a
 # greedy `.*` prefix would inspect only the final one, so a line carrying two
 # calls could hide a bare `pkill -f` behind a correct neighbour.
+#
+# Quoted arguments are blanked out BEFORE extracting, for two reasons: an
+# extraction that stops at the first double quote would miss a flag written after
+# the pattern (`pkill -f "$PAT" -x`, legal under GNU getopt permutation) and
+# report it as an offender; and a bare `*-x*` glob over the raw text would accept
+# an "-x" appearing inside an argument rather than as a flag. Flags are then
+# matched as whole tokens beginning with "-".
 offenders=$(
   grep -nE '(pkill|pgrep)[[:space:]]' "$MAKEFILE" |
     grep -vE '^[0-9]+:[[:space:]]*@?#' |
     while IFS= read -r line; do
-      printf '%s\n' "$line" | grep -oE '(pkill|pgrep)[^"]*' |
+      # Replace every "…" with a placeholder token so quoted patterns cannot
+      # contribute flag-looking text, and cannot terminate the extraction.
+      unquoted=$(printf '%s\n' "$line" | sed 's/"[^"]*"/QUOTED/g')
+      printf '%s\n' "$unquoted" | grep -oE '(pkill|pgrep)[^;|&]*' |
         while IFS= read -r invocation; do
-          case "$invocation" in
-            *-x*|*--exact*) ;;
-            *) printf '%s\n' "$line" ;;
-          esac
+          exact=no
+          for token in $invocation; do
+            case "$token" in
+              --exact) exact=yes ;;
+              --*) ;;
+              -*x*) exact=yes ;;
+            esac
+          done
+          [ "$exact" = yes ] || printf '%s\n' "$line"
         done
     done
 )
-if [ -z "$offenders" ]; then
+if [ ! -r "$MAKEFILE" ]; then
+  fail 'the Makefile is not readable' "$MAKEFILE — the -x check would pass vacuously"
+elif [ -z "$(grep -cE '(pkill|pgrep)[[:space:]]' "$MAKEFILE")" ] ||
+  [ "$(grep -cE '(pkill|pgrep)[[:space:]]' "$MAKEFILE")" -eq 0 ]; then
+  fail 'no pkill/pgrep invocation found in the Makefile' \
+    'the -x check would pass vacuously; update this guard if the calls moved'
+elif [ -z "$offenders" ]; then
   pass 'every pkill/pgrep invocation in the Makefile passes -x'
 else
   fail 'a pkill/pgrep invocation is missing -x (it will kill its own recipe shell)' \
     "$offenders"
 fi
 
-# ── 2. Behavioural: -f alone kills the recipe, -x -f does not ─────────────────
+# ── 2. Static: the spawn sites must keep passing an empty argument list ───────
+#
+# `-x` requires the target's whole cmdline to equal the binary path, which holds
+# only while the daemon and app are exec'd with no arguments. That invariant lives
+# in Dart, far from the Makefile that depends on it: if a future change adds a
+# flag to either spawn, `pkill -x -f` silently stops matching and install-linux
+# again leaves the old daemon running with no error. Comments cannot catch that,
+# so it is asserted here.
+SPAWN_SITES="flutter_app/lib/core/daemon/daemon_lifecycle.dart
+flutter_app/lib/core/platform/platform_services_desktop.dart"
+spawn_offenders=""
+spawn_found=0
+for rel in $SPAWN_SITES; do
+  f="$REPO_ROOT/$rel"
+  [ -f "$f" ] || { spawn_offenders="$spawn_offenders$rel: file not found
+"; continue; }
+  while IFS= read -r call; do
+    spawn_found=$((spawn_found + 1))
+    # Everything after the first argument must start with an empty list.
+    case "$call" in
+      *"Process.start("*", []"*) ;;
+      *) spawn_offenders="$spawn_offenders$rel: $call
+" ;;
+    esac
+  done <<EOF
+$(grep -n 'Process\.start(' "$f" || true)
+EOF
+done
+if [ "$spawn_found" -eq 0 ]; then
+  fail 'no Process.start call found at the known spawn sites' \
+    'the -x contract is unverified; update SPAWN_SITES if the code moved'
+elif [ -n "$(printf '%s' "$spawn_offenders" | tr -d '[:space:]')" ]; then
+  fail 'a daemon/app spawn passes arguments, which breaks the pkill -x contract' \
+    "$spawn_offenders"
+else
+  pass 'the daemon/app spawn sites still pass an empty argument list'
+fi
+
+# ── Behavioural half (tests 3-7): gated on Linux + /proc ─────────────────────
+if [ "$BEHAVIOURAL" = no ]; then
+  skip 'pkill -f alone kills its own recipe shell — -x is load-bearing' "$SKIP_WHY"
+  skip 'pkill -x -f leaves the recipe shell alone' "$SKIP_WHY"
+  skip 'pkill -x -f signals a process whose cmdline is exactly the path' "$SKIP_WHY"
+  skip 'an unescaped metacharacter path fails to match (escaping is needed)' "$SKIP_WHY"
+  skip 'PKILL_ESCAPE makes a metacharacter path match' "$SKIP_WHY"
+  skip 'the escaped pattern does not match an unrelated path' "$SKIP_WHY"
+  printf '1..%d\n' "$TEST_COUNT"
+  # Honours FAIL_COUNT: an early exit that ignored it would let a failing static
+  # test report success on every non-Linux machine.
+  if [ "$FAIL_COUNT" -gt 0 ]; then
+    printf '# %d of %d tests failed\n' "$FAIL_COUNT" "$TEST_COUNT" >&2
+    exit 1
+  fi
+  printf '# static tests passed; behavioural tests skipped (%s)\n' "$SKIP_WHY"
+  exit 0
+fi
+
+# ── 3. Behavioural: -f alone kills the recipe, -x -f does not ─────────────────
 #
 # No target process exists here on purpose: the self-match is what ends the
 # recipe, so the bug reproduces against nothing at all.
@@ -182,7 +265,7 @@ case "$out" in
   *) fail 'pkill -x -f killed its own recipe shell' "output: $out" ;;
 esac
 
-# ── 3. Behavioural: -x -f signals the intended process ───────────────────────
+# ── 4. Behavioural: -x -f signals the intended process ───────────────────────
 TARGET=$(start_fixture "$WORK/opt/heimdalld")
 actual=$(cmdline_of "$TARGET")
 if [ "$actual" != "$WORK/opt/heimdalld" ]; then
@@ -199,7 +282,7 @@ else
   fi
 fi
 
-# ── 4. Behavioural: the Makefile's escaping survives regex metacharacters ────
+# ── 5. Behavioural: the Makefile's escaping survives regex metacharacters ────
 #
 # Calls the same scripts/pkill-escape.sh the Makefile uses, so this tracks the
 # real implementation rather than a copy of it.

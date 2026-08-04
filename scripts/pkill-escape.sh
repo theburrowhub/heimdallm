@@ -25,4 +25,16 @@ if [ "$#" -ne 1 ]; then
   exit 2
 fi
 
+# sed is line-oriented, so a path containing an embedded newline would be
+# escaped per line and the resulting pattern could never match the target's
+# cmdline — pkill would silently no-op, which is the failure this script exists to
+# prevent. Refuse it loudly instead.
+# Counted rather than glob-matched: "$(printf '\n')" collapses to an empty
+# string in a command substitution, so `case $1 in *""*)` matches everything.
+# printf '%s' adds no trailing newline, so wc -l counts only embedded ones.
+if [ "$(printf '%s' "$1" | wc -l)" -gt 0 ]; then
+  echo "$(basename "$0"): refusing a path containing a newline" >&2
+  exit 2
+fi
+
 printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/[]^$.*+?(){}|[]/\\&/g'

@@ -1,14 +1,23 @@
 # ── Platform detection ─────────────────────────────────────────────────────────
 OS := $(shell uname -s)
 
-DAEMON_BIN  := $(shell pwd)/daemon/bin/heimdallm
+# Anchored to this Makefile's directory for the same reason as PKILL_ESCAPE
+# below: with $(shell pwd) a `make -f /path/to/Makefile` from elsewhere pointed
+# dev-stop at a daemon path that does not exist. Identical from the repo root.
+DAEMON_BIN  := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))/daemon/bin/heimdallm
 
 # pkill/pgrep -f treat their pattern as an ERE, so a path containing regex
 # metacharacters silently fails to match — a $HOME or checkout directory with
 # `+`, `(` or `[` in it would leave the daemon running with no error. The script
 # is the single implementation, shared with scripts/test-linux-install.sh, which
 # asserts it against a metacharacter-laden path.
-PKILL_ESCAPE = ./scripts/pkill-escape.sh
+#
+# Anchored to this Makefile's own directory rather than the cwd: with a relative
+# path, `make -f /path/to/Makefile` from elsewhere cannot find the script, and
+# since the callers now abort on an empty pattern that would turn an unusual
+# invocation into a hard failure of dev-stop and install-linux.
+REPO_ROOT_DIR := $(dir $(lastword $(MAKEFILE_LIST)))
+PKILL_ESCAPE = $(REPO_ROOT_DIR)scripts/pkill-escape.sh
 
 ifeq ($(OS),Darwin)
   FLUTTER_DEVICE   := macos
