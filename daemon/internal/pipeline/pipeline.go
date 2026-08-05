@@ -866,7 +866,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	}
 	slog.Info("pipeline: using CLI", "cli", cli)
 
-	// 4b. Circuit breaker: hard cap on review count per PR HEAD / per repo.
+	// 4b. Circuit breaker: hard cap on review runs per PR HEAD / per repo.
 	// Runs AFTER all dedup layers so it only fires when the dedup failed but
 	// the caller is about to spend Claude credits anyway. See
 	// theburrowhub/heimdallm#243.
@@ -899,6 +899,51 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	if stopped, err := p.stopIfRepoBecameIneligible(pr, opts.RepoEligible); stopped {
 		return nil, err
 	}
+	// 4c. Record the attempt. Every remaining path leads to Execute, which is
+	// what makes this — and not a line earlier — the point at which the run
+	// becomes chargeable.
+	//
+	// Placement is load-bearing. This deliberately sits AFTER
+	// stopIfRepoBecameIneligible: that guard is a zero-spend, explicitly
+	// retryable exit ("deferring review"), so recording before it meant a repo
+	// toggled off mid-poll burned a ledger row per tick without touching the
+	// CLI. After PerPR24h such ticks the commit was capped for 24h and the
+	// legitimate review was refused once the repo came back, recoverable only
+	// via Force.
+	//
+	// It has to happen BEFORE Execute and must survive failure. Rows in the
+	// reviews table are only written on success (step 7), so a run that dies in
+	// between — a CLI whose output will not parse, say — used to leave no trace
+	// anywhere: the in-flight claim was released by the caller's defer, no
+	// review row existed, and the breaker's counter never moved. Every dedup
+	// layer keys off one of those two, so all of them were blind at once and the
+	// retry of the identical commit was unbounded, each iteration paying full
+	// price (theburrowhub/heimdallm#663).
+	//
+	// Forced runs are recorded too. Force bypasses the breaker CHECK because a
+	// human clicking "Re-review" is deliberate intent, but the spend is real and
+	// an unrecorded run would leave the same blind spot for whatever runs next.
+	//
+	// Known trade-off: the ledger cannot tell a failure that spent credits from
+	// one that did not (provider auth rejection, an execution timeout, context
+	// cancellation on daemon shutdown). Those count too, so a restart loop can
+	// cap a commit for 24h and report "N review runs" for runs that cost
+	// nothing. Accepted deliberately — classifying CLI errors by whether they
+	// billed is guesswork, and under-counting is what #663 was. Force is the
+	// operator's escape hatch.
+	//
+	// Fail-open on a write error, matching the breaker check above: a transient
+	// SQLite blip must not block a legitimate review. Logged at Error, not Warn:
+	// this single write is what the entire cost brake now rests on, so a
+	// persistent failure (read-only DB, disk full) silently restores the
+	// unbounded retry loop and must be visible in the logs rather than inferred
+	// from the bill.
+	if err := p.store.RecordReviewAttempt(prID, pr.Head.SHA); err != nil {
+		slog.Error("pipeline: could not record review attempt — the per-PR/per-repo "+
+			"cost cap is not counting this run",
+			"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA, "err", err)
+	}
+
 	p.notify.Notify("PR Review Started", fmt.Sprintf("%s #%d", pr.Repo, pr.Number))
 	p.publish(sse.EventPRDetected, map[string]any{
 		"pr_number": pr.Number,
