@@ -82,6 +82,16 @@ type worktreeLeaseMetadata struct {
 	CommitSHA string    `json:"commit_sha"`
 	Kind      string    `json:"kind"`
 	CreatedAt time.Time `json:"created_at"`
+	// BootID identifies the machine boot this lease was created under. It is the
+	// escape hatch for crash leftovers: cleanup.ready proves a normal Release
+	// happened, and its absence deliberately keeps a leftover because lock
+	// absence alone cannot prove no descendant of an arbitrary CLI is still
+	// using the checkout. A boot change CAN prove it — no process from a
+	// previous boot exists — so a leftover stamped with a different boot is
+	// collectable without reopening that race. Empty when the platform cannot
+	// report a boot identity, which keeps the pre-existing fail-closed
+	// behaviour rather than guessing.
+	BootID string `json:"boot_id,omitempty"`
 }
 
 // prepareWorktreeSource resolves either an operator-owned local repository or
@@ -473,6 +483,7 @@ func (m *Manager) createWorktreeLease(
 			CommitSHA: commitSHA,
 			Kind:      kind,
 			CreatedAt: time.Now().UTC(),
+			BootID:    bootIdentity(),
 		}
 		data, err := json.Marshal(meta)
 		if err == nil {
@@ -921,8 +932,20 @@ func (m *Manager) pruneExternalRoot(ctx context.Context, root string) (int, erro
 			errs = append(errs, err)
 			continue
 		}
-		if !ready {
+		if !ready && !bootLeftoverCollectable(meta.BootID) {
+			// No normal Release and same boot: keep it. A descendant of the CLI
+			// may still be using the checkout even with no lock held, which is
+			// why the marker protocol exists.
 			continue
+		}
+		if !ready {
+			// Crash leftover from a PREVIOUS boot. Nothing that held this lease
+			// can still be running, so the lock check below is conclusive here
+			// rather than merely suggestive, and reclaiming it is what keeps a
+			// per-execution snapshot design from turning every OOM-kill into
+			// permanent disk growth.
+			slog.Info("repoctx: reclaiming crash leftover from a previous boot",
+				"run_dir", runDir, "lease_boot_id", meta.BootID, "repo", meta.Repo)
 		}
 		leaseLock, acquired, err := tryFileLock(filepath.Join(runDir, worktreeLeaseFile))
 		if err != nil {
