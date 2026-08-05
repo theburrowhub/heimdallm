@@ -376,15 +376,29 @@ func (r *autonomousStageRunner) RunStage(ctx context.Context, stage string, c au
 		}
 
 		repoHandle, err := acquireRepoContext(ctx, r.repoCtx, c.Repo, &aiCfg, localDirBase, r.token, repoMode, wtTokenFor(stagePrefix, c.Number), "", "")
-		if err != nil {
+		switch {
+		case err != nil && writeMode:
+			// Develop and refinement WRITE through the checkout: without one there
+			// is nothing to commit, so failing the stage is the only honest answer.
 			return autonomous.StageOutcome{}, fmt.Errorf("autonomous: prepare repo context %s#%d: %w", c.Repo, c.Number, err)
+		case err != nil:
+			// Read mode — triage and review-only. These stages want a checkout for
+			// extra context but do not require one, and before the acquisition was
+			// widened to `writeMode || hasConfiguredRepo` they never touched repoctx
+			// and so could not fail for this reason at all. Aborting on git lock
+			// contention, disk pressure or a fetch timeout would be a pure
+			// availability regression, and it contradicts runReview a few hundred
+			// lines away, which degrades to diff-only through this same helper.
+			logRepoContextFallback("autonomous", c.Repo, err)
+			aiCfg.LocalDir = ""
+		default:
+			if repoHandle != nil {
+				defer repoHandle.Release()
+			}
+			// acquireRepoContext rewrote aiCfg.LocalDir to the live handle path.
+			opts.ExecOpts.ExtraFiles = inheritedRepoLeaseFiles(repoHandle)
 		}
-		if repoHandle != nil {
-			defer repoHandle.Release()
-		}
-		// acquireRepoContext rewrote aiCfg.LocalDir to the live handle path.
 		opts.ExecOpts.WorkDir = aiCfg.LocalDir
-		opts.ExecOpts.ExtraFiles = inheritedRepoLeaseFiles(repoHandle)
 	}
 
 	rev, err := r.issuePipe.Run(ctx, ghIssue, opts)

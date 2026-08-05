@@ -3755,12 +3755,25 @@ func (a *tier2Adapter) cacheAuthenticatedUser(login string) string {
 		return ""
 	}
 	if a.login != nil {
+		// Log an identity CHANGE. The overwrite is intentional (a rotated token
+		// should take effect without a restart), but this PR adds a new consumer
+		// of that identity — the publish-time review-guard evaluation — so a
+		// silent switch would make the self-author guard and the publish gate
+		// start judging against a different account with nothing in the log to
+		// explain it. Only a transition is logged; the steady state is silent.
+		var previous string
 		if a.loginMu == nil {
+			previous = *a.login
 			*a.login = login
 		} else {
 			a.loginMu.Lock()
+			previous = *a.login
 			*a.login = login
 			a.loginMu.Unlock()
+		}
+		if previous != "" && previous != login {
+			slog.Warn("authenticated GitHub identity changed mid-process",
+				"previous_login", previous, "new_login", login)
 		}
 	}
 	if a.pipeline != nil {

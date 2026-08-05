@@ -25,8 +25,8 @@ A Flutter Web dashboard (`:3000`) with Dashboard, PR list, Issue list, prompt/ag
 - **Issue pipeline** — label-driven triage, refinement planning, and optional auto-implement with branch/commit/PR cycle
 - **Issue dependencies** — mark downstream work with a `blocked` label; declare deps via a `## Depends on` body section *or* GitHub's native sub-issues; Heimdallm auto-promotes when all blockers close
 - **Configurable prompts** — general review, security audit, performance, architecture, or your own with `{diff}` `{title}` `{author}` `{comments}` placeholders, managed from the web UI at `/agents`
-- **Commit-anchored feedback** — findings are submitted as one formal review tied to the exact commit analysed; `multi` remains a compatibility alias
-- **Per-repo overrides** — different AI agent, prompt, and feedback mode per repository
+- **Commit-anchored feedback** — findings are submitted as one formal review tied to the exact commit analysed. `multi` is accepted as a compatibility alias but no longer changes anything: publication is always the single commit-addressed review, because standalone issue comments cannot carry a `commit_id`
+- **Per-repo overrides** — different AI agent and prompt per repository (the per-repo feedback-mode setting is inert, per the bullet above)
 - **Topic-based auto-discovery** — tag repos with a GitHub topic and Heimdallm monitors them without editing config
 - **Severity gating** — only `high` severity triggers `REQUEST_CHANGES`; everything else approves with informational notes
 - **Native desktop** — macOS menu-bar app, system notifications, dark mode, no Electron
