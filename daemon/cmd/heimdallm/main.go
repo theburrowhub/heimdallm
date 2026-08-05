@@ -1159,6 +1159,18 @@ func main() {
 		aiCfg := c.AIForRepo(pr.Repo)
 		cfgMu.Unlock()
 
+		// There used to be a skipIfUnmonitored("post_acquire") here, added
+		// deliberately because acquisition can clone/fetch for seconds and the
+		// operator may disable the repo during that wait. It is gone because the
+		// acquisition moved inside runReview, and the equivalent guard now lives
+		// where the spend actually happens: pipeline.Run calls
+		// stopIfRepoBecameIneligible(opts.RepoEligible) immediately before it
+		// records the attempt and calls executor.Execute — i.e. after the
+		// snapshot has been taken, at the chargeable boundary. runOpts sets
+		// RepoEligible = repoCurrentlyMonitored, so the check reads live config.
+		//
+		// Verified rather than assumed, because removing a deliberate guard on an
+		// unverified assumption is how the original bug came back.
 		rev := runReview(pr, aiCfg)
 
 		// If review succeeded but wasn't published to GitHub yet,
@@ -1331,9 +1343,31 @@ func main() {
 			return nil // ack; PublishPending re-enqueues it after the repo is re-enabled
 		}
 
+		// acquireGH takes a rate-limit token for one additional GitHub request in
+		// this handler.
+		//
+		// The Acquire above covers the snapshot fetch, which is all this path did
+		// when that comment was written ("uses the same rate-limit slot acquired
+		// above"). This PR added the intent, requested-reviewer and reconcile
+		// lookups on top, so one token was being stretched across five requests —
+		// the limiter's budget model then under-counts this path by 4x, which is
+		// worse than not throttling it, because the under-count is invisible.
+		// Failure is non-fatal: the guard it protects is a freshness check, so
+		// skipping the check is handled by the caller rather than losing the
+		// review.
+		acquireGH := func(stage string) bool {
+			if err := limiter.Acquire(ctx, scheduler.TierRepo); err != nil {
+				slog.Warn("publish-worker: rate limiter denied a pre-publish lookup",
+					"review_id", rev.ID, "repo", pr.Repo, "pr", pr.Number,
+					"stage", stage, "err", err)
+				return false
+			}
+			return true
+		}
+
 		// A deferred review is valid only for the commit it analysed. Re-fetch
 		// the live PR snapshot immediately before SubmitReview so re-enabling a
-		// repo cannot attach stale findings to a newer HEAD. This uses the same
+		// repo cannot attach stale findings to a newer HEAD. This uses the
 		// rate-limit slot acquired above and happens while the atomic publish
 		// claim is held, so duplicate messages cannot race this decision.
 		snapshot, err := ghClient.GetPRSnapshot(pr.Repo, pr.Number)
@@ -1398,6 +1432,7 @@ func main() {
 		if rev.BaseSHA != "" && snapshot.BaseSHA == "" {
 			return fmt.Errorf("refresh PR before publishing review: empty base SHA for %s #%d", pr.Repo, pr.Number)
 		}
+		acquireGH("pending_intent")
 		intentChange, intentErr := p.PendingReviewIntent(pr.Repo, pr.Number, rev)
 		if intentErr != nil {
 			return fmt.Errorf("refresh review-request intent before publishing review: %w", intentErr)
@@ -1416,6 +1451,7 @@ func main() {
 			return nil
 		}
 		if pipeline.ReviewRequiresCurrentRequest(rev) {
+			acquireGH("review_request_current")
 			requested, requestErr := p.ReviewRequestCurrent(pr.Repo, pr.Number, rev.HeadSHA)
 			if requestErr != nil {
 				return fmt.Errorf("refresh requested-reviewer state before publishing review: %w", requestErr)
@@ -1484,6 +1520,7 @@ func main() {
 			slog.Warn("publish-worker: failed to mark published",
 				"review_id", rev.ID, "err", err)
 		}
+		acquireGH("reconcile")
 		if p.ReconcilePublishedReview(pr.Repo, pr.Number, rev) {
 			if _, enrollErr := watchStore.EnrollIfAbsent(ctx, "pr", pr.Repo, pr.Number, pr.GithubID); enrollErr != nil {
 				slog.Warn("publish-worker: failed to enroll successor watch",
