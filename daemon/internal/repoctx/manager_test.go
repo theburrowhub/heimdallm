@@ -197,6 +197,13 @@ func TestAcquireUsesExplicitLocalDirWithoutGit(t *testing.T) {
 	}
 }
 
+// sameCanonicalDir compares two paths through canonicalPathForKey, so a test
+// assertion is not sensitive to whether the caller passed a path that traverses
+// a symlink (macOS /var → /private/var, or a bind mount alias).
+func sameCanonicalDir(a, b string) bool {
+	return a == b || canonicalPathForKey(a) == canonicalPathForKey(b)
+}
+
 func TestAcquireIsolatesExplicitLocalDirWhenWorktreeRequested(t *testing.T) {
 	m, git, base := newTestManagerWithCap(t, 0)
 	local := filepath.Join(base, "operator-repo")
@@ -239,11 +246,17 @@ func TestAcquireIsolatesExplicitLocalDirWhenWorktreeRequested(t *testing.T) {
 			strings.HasPrefix(joined, "remote set-url") {
 			t.Fatalf("operator checkout was targeted by mutating clone prep: %v", call)
 		}
-		if call.Dir == local && joined == "rev-parse --verify HEAD^{commit}" {
+		// Match on the resolved path: the manager canonicalises the operator dir
+		// before running git in it, and on macOS t.TempDir() lives under /var,
+		// a symlink to /private/var. Comparing against the raw path meant this
+		// branch never ran and the assertion below failed on every macOS run,
+		// CI included, without the isolation contract being wrong at all.
+		if sameCanonicalDir(call.Dir, local) && joined == "rev-parse --verify HEAD^{commit}" {
 			sawSafeHeadResolution = slices.Contains(call.Env, "GIT_CONFIG_COUNT=2") &&
 				slices.Contains(call.Env, "GIT_CONFIG_KEY_0=core.hooksPath") &&
 				slices.Contains(call.Env, "GIT_CONFIG_KEY_1=safe.directory") &&
-				slices.Contains(call.Env, "GIT_CONFIG_VALUE_1="+local)
+				(slices.Contains(call.Env, "GIT_CONFIG_VALUE_1="+local) ||
+					slices.Contains(call.Env, "GIT_CONFIG_VALUE_1="+canonicalPathForKey(local)))
 		}
 	}
 	if !sawSafeHeadResolution {
@@ -1288,7 +1301,18 @@ func TestCanonicalPathForKeyStableBeforeAndAfterNestedPathExists(t *testing.T) {
 	if before != after {
 		t.Fatalf("canonical key changed after path creation: before=%q after=%q", before, after)
 	}
-	want := filepath.Join(realRoot, "missing-owner", "missing-repo")
+	// Resolve realRoot before comparing: on macOS t.TempDir() itself sits under
+	// /var, which is a symlink to /private/var, so canonicalPathForKey resolves
+	// one more level than the raw TempDir string. Comparing against the
+	// unresolved value made this test fail on every macOS run — including CI,
+	// whose Daemon job is macos-14 — for a reason unrelated to what it asserts:
+	// that the key is stable across the target coming into existence, and that
+	// the alias is resolved to its target.
+	resolvedRoot, err := filepath.EvalSymlinks(realRoot)
+	if err != nil {
+		t.Fatalf("resolve real root: %v", err)
+	}
+	want := filepath.Join(resolvedRoot, "missing-owner", "missing-repo")
 	if before != want {
 		t.Fatalf("canonical key = %q, want %q", before, want)
 	}
