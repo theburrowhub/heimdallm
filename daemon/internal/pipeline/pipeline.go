@@ -712,7 +712,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	}
 	slog.Info("pipeline: using CLI", "cli", cli)
 
-	// 4b. Circuit breaker: hard cap on review count per PR HEAD / per repo.
+	// 4b. Circuit breaker: hard cap on review runs per PR HEAD / per repo.
 	// Runs AFTER all dedup layers so it only fires when the dedup failed but
 	// the caller is about to spend Claude credits anyway. See
 	// theburrowhub/heimdallm#243.
@@ -727,6 +727,32 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 				fmt.Sprintf("%s #%d: %s", pr.Repo, pr.Number, reason))
 			return nil, &CircuitBreakerError{Reason: reason}
 		}
+	}
+
+	// 4c. Record the attempt now: the breaker has cleared this run and every
+	// path from here leads to the CLI, so this is the moment the run becomes
+	// chargeable.
+	//
+	// It has to happen BEFORE Execute and must survive failure. `reviews` rows
+	// are only written on success (step 7), so a run that dies in between — a
+	// CLI whose output will not parse, say — used to leave no trace anywhere:
+	// the in-flight claim was released by the caller's defer, no review row
+	// existed, and the breaker's counter never moved. Every dedup layer keys off
+	// one of those two, so all of them were blind at once and the retry of the
+	// identical commit was unbounded, each iteration paying full price
+	// (theburrowhub/heimdallm#663).
+	//
+	// Forced runs are recorded too. Force bypasses the breaker CHECK because a
+	// human clicking "Re-review" is deliberate intent, but the spend is real and
+	// an unrecorded run would leave the same blind spot for whatever runs next.
+	//
+	// Fail-open on a write error, matching the breaker check just above: a
+	// transient SQLite blip must not block a legitimate review. The cost of
+	// being wrong is bounded by the caller's in-flight claim plus the dedup
+	// layers, which is the same posture the pre-existing code documents.
+	if err := p.store.RecordReviewAttempt(prID, pr.Head.SHA); err != nil {
+		slog.Warn("pipeline: could not record review attempt, proceeding",
+			"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA, "err", err)
 	}
 
 	// All early-exit paths above are exhausted (gate, SHA-skip,

@@ -778,6 +778,11 @@ func main() {
 			defer wg.Done()
 			const sweepInterval = 5 * time.Minute
 			const inflightSweepMaxAge = 30 * time.Minute
+			// The attempt ledger is only ever read through the breaker's
+			// windows (24h per-PR, 1h per-repo). 48h keeps a full margin over
+			// the widest of those: pruning anything still inside a window would
+			// silently reset a cap that is meant to be in force.
+			const attemptLedgerMaxAge = 48 * time.Hour
 			ticker := time.NewTicker(sweepInterval)
 			defer ticker.Stop()
 			for {
@@ -794,6 +799,11 @@ func main() {
 						slog.Warn("sweep: clear stale issue triage inflight failed", "err", err)
 					} else if n > 0 {
 						slog.Info("sweep: cleared stale issue triage inflight rows", "count", n)
+					}
+					if n, err := s.PruneReviewAttempts(attemptLedgerMaxAge); err != nil {
+						slog.Warn("sweep: prune review attempts failed", "err", err)
+					} else if n > 0 {
+						slog.Info("sweep: pruned review attempt rows", "count", n)
 					}
 				}
 			}

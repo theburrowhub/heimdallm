@@ -59,42 +59,83 @@ func (s *Store) CountReviewsForRepo(repo string, since time.Time) (int, error) {
 // CircuitBreakerLimits is the configured set of caps. Enforced by
 // CheckCircuitBreaker; zero values mean "unlimited" for that axis.
 type CircuitBreakerLimits struct {
-	PerPR24h  int // max reviews per PR HEAD SHA in any 24h window
-	PerRepoHr int // max reviews per repo in any 1h window
+	PerPR24h  int // max review runs per PR HEAD SHA in any 24h window
+	PerRepoHr int // max review runs per repo in any 1h window
+}
+
+// chargeableRuns returns how many review runs in the window should count against
+// a cap, given the attempt count from the ledger and the row count from
+// `reviews`.
+//
+// The larger of the two, deliberately:
+//
+//   - The ledger is authoritative going forward — it records every run that
+//     reached the point of spending credits, including the ones that failed
+//     before InsertReview and were therefore invisible to the old counter.
+//   - `reviews` still has to be consulted because a database upgraded in place
+//     has review history but no ledger rows for it. Counting attempts alone
+//     would treat that history as if it never happened and hand out a fresh
+//     full quota on the first tick after deploy.
+//   - max rather than sum: a successful run writes one ledger row AND one
+//     reviews row, so adding them would double-count every normal review and
+//     halve the operator's configured cap.
+func chargeableRuns(attempts, reviews int) int {
+	if attempts > reviews {
+		return attempts
+	}
+	return reviews
 }
 
 // CheckCircuitBreaker returns (tripped, reason, err). When tripped is true,
 // the caller MUST NOT proceed to spend Claude credits for this PR. reason is
 // a human-readable explanation suitable for logs and UI surfaces; it is
 // empty when tripped is false.
+//
+// The caps count review *runs*, not published reviews. Counting only the latter
+// was theburrowhub/heimdallm#663: a run whose CLI output failed to parse never
+// reached InsertReview, so it advanced no counter, and the immediate retry of
+// the same commit was unbounded. Callers must therefore record an attempt via
+// RecordReviewAttempt once this check passes and before invoking the CLI.
 func (s *Store) CheckCircuitBreaker(prID int64, repo, headSHA string, cfg CircuitBreakerLimits) (bool, string, error) {
 	if cfg.PerPR24h > 0 {
+		since := time.Now().Add(-24 * time.Hour)
 		var (
-			n   int
-			err error
+			attempts, reviews int
+			err               error
 		)
 		if headSHA != "" {
-			n, err = s.CountReviewsForPRHeadSHA(prID, headSHA, time.Now().Add(-24*time.Hour))
+			if attempts, err = s.CountReviewAttemptsForPRHeadSHA(prID, headSHA, since); err != nil {
+				return false, "", err
+			}
+			reviews, err = s.CountReviewsForPRHeadSHA(prID, headSHA, since)
 		} else {
-			n, err = s.CountReviewsForPR(prID, time.Now().Add(-24*time.Hour))
+			if attempts, err = s.CountReviewAttemptsForPR(prID, since); err != nil {
+				return false, "", err
+			}
+			reviews, err = s.CountReviewsForPR(prID, since)
 		}
 		if err != nil {
 			return false, "", err
 		}
-		if n >= cfg.PerPR24h {
+		if n := chargeableRuns(attempts, reviews); n >= cfg.PerPR24h {
 			if headSHA != "" {
-				return true, fmt.Sprintf("per-PR HEAD cap reached: %d reviews on this commit in last 24h (cap %d)", n, cfg.PerPR24h), nil
+				return true, fmt.Sprintf("per-PR HEAD cap reached: %d review runs on this commit in last 24h (cap %d)", n, cfg.PerPR24h), nil
 			}
-			return true, fmt.Sprintf("per-PR cap reached: %d reviews in last 24h (cap %d)", n, cfg.PerPR24h), nil
+			return true, fmt.Sprintf("per-PR cap reached: %d review runs in last 24h (cap %d)", n, cfg.PerPR24h), nil
 		}
 	}
 	if cfg.PerRepoHr > 0 && repo != "" {
-		n, err := s.CountReviewsForRepo(repo, time.Now().Add(-1*time.Hour))
+		since := time.Now().Add(-1 * time.Hour)
+		attempts, err := s.CountReviewAttemptsForRepo(repo, since)
 		if err != nil {
 			return false, "", err
 		}
-		if n >= cfg.PerRepoHr {
-			return true, fmt.Sprintf("per-repo cap reached: %d reviews on %s in last 1h (cap %d)", n, repo, cfg.PerRepoHr), nil
+		reviews, err := s.CountReviewsForRepo(repo, since)
+		if err != nil {
+			return false, "", err
+		}
+		if n := chargeableRuns(attempts, reviews); n >= cfg.PerRepoHr {
+			return true, fmt.Sprintf("per-repo cap reached: %d review runs on %s in last 1h (cap %d)", n, repo, cfg.PerRepoHr), nil
 		}
 	}
 	return false, "", nil
