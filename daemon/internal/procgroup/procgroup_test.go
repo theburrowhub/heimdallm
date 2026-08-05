@@ -19,6 +19,11 @@ import (
 // readPID reads one newline-terminated PID from r. The child prints its own PID
 // rather than the test reading cmd.Process, because procgroup.Run owns Start and
 // touching that field from the test goroutine would be a data race.
+//
+// r must be an ExtraFiles pipe, never cmd.StdoutPipe(): os/exec closes the
+// StdoutPipe read end from Wait, so a test racing a read against cancellation
+// would intermittently get os.ErrClosed instead of the PID and fail for reasons
+// unrelated to the behaviour under test.
 func readPID(t *testing.T, r io.Reader) int {
 	t.Helper()
 	line, err := bufio.NewReader(r).ReadString('\n')
@@ -42,38 +47,43 @@ func TestRun_KillsGrandchildOnTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 
-	// An inherited pipe is the liveness probe. fd 3 reaches both the shell and
-	// the sleep it backgrounds, and the kernel reports EOF on the read end only
-	// once every process holding the write end has exited.
+	// Two inherited pipes, both on ExtraFiles so neither races os/exec's
+	// handling of the stdout pipe:
+	//   fd 3 (pidW)   — the child announces the grandchild's PID here
+	//   fd 4 (probeW) — liveness probe; the kernel reports EOF on the read end
+	//                   only once every process holding the write end has exited
 	//
-	// A PID existence check (kill(pid, 0)) is unusable here: it also succeeds
-	// for a zombie, which is exactly the state this issue is about — the first
-	// version of this test passed a live grandchild and failed a correctly
-	// killed one for that reason. The pipe distinguishes "running" from
-	// "exited but not yet reaped"; kill(pid, 0) cannot.
+	// A PID existence check (kill(pid, 0)) is unusable as the probe: it also
+	// succeeds for a zombie, which is exactly the state this issue is about — an
+	// earlier version of this test passed a live grandchild and failed a
+	// correctly killed one for that reason.
+	pidR, pidW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pid pipe: %v", err)
+	}
+	defer pidR.Close()
 	probeR, probeW, err := os.Pipe()
 	if err != nil {
-		t.Fatalf("pipe: %v", err)
+		t.Fatalf("probe pipe: %v", err)
 	}
 	defer probeR.Close()
 
-	// Background a long sleep, announce its PID, then block. The parent must not
-	// exit by itself, otherwise the test would pass without cancellation having
-	// done any work.
-	cmd := exec.CommandContext(ctx, "sh", "-c", `sleep 60 & echo $!; wait`)
-	cmd.ExtraFiles = []*os.File{probeW}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatalf("stdout pipe: %v", err)
-	}
+	// Background a long sleep, announce its PID on fd 3, then block. The parent
+	// must not exit by itself, otherwise the test would pass without
+	// cancellation having done any work.
+	cmd := exec.CommandContext(ctx, "sh", "-c", `sleep 60 & echo $! >&3; wait`)
+	cmd.ExtraFiles = []*os.File{pidW, probeW}
 
-	// Run in a goroutine so the PID can be read while the child is still alive:
-	// Wait closes the stdout pipe once the command exits.
 	runErrCh := make(chan error, 1)
 	go func() { runErrCh <- procgroup.Run(cmd) }()
 
-	grandchild := readPID(t, stdout)
-	// The parent must drop its own copy or EOF can never arrive.
+	// The parent must drop its own copies or EOF can never arrive. Closing after
+	// Start has certainly happened — which reading the PID guarantees — keeps
+	// the descriptors valid for the child.
+	grandchild := readPID(t, pidR)
+	if err := pidW.Close(); err != nil {
+		t.Fatalf("close pid write end: %v", err)
+	}
 	if err := probeW.Close(); err != nil {
 		t.Fatalf("close probe write end: %v", err)
 	}
@@ -102,6 +112,81 @@ func TestRun_KillsGrandchildOnTimeout(t *testing.T) {
 		_ = syscall.Kill(grandchild, syscall.SIGKILL) // don't leak a stray process
 		t.Fatalf("grandchild %d still holds the inherited pipe — it outlived "+
 			"cancellation, so the process group was not signalled", grandchild)
+	}
+}
+
+// TestRun_EscalatesToSIGKILLWhenGroupIgnoresSIGTERM covers the escalation path,
+// which every other test skips because their children die on the first signal.
+// The whole tree traps SIGTERM, so only the SIGKILL aimed at the group can end
+// it; removing the escalation makes this test fail.
+//
+// What it does NOT pin: the termGrace-vs-waitDelay ordering. When those timers
+// are equal the outcome is a genuine race between this package's escalation
+// goroutine and os/exec's own WaitDelay expiry, and which side wins is
+// scheduling-dependent — verified by running this test against termGrace ==
+// waitDelay == 2s, where it still passes because the escalation happens to win.
+// The ordering is enforced by the invariant documented on the constants, not by
+// a test, because a probabilistic failure cannot be asserted reliably.
+func TestRun_EscalatesToSIGKILLWhenGroupIgnoresSIGTERM(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	pidR, pidW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pid pipe: %v", err)
+	}
+	defer pidR.Close()
+	probeR, probeW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("probe pipe: %v", err)
+	}
+	defer probeR.Close()
+
+	// BOTH levels must ignore SIGTERM for this to test what it claims. Trapping
+	// only in the parent shell is not enough: the group SIGTERM would still kill
+	// the grandchild directly, the probe would reach EOF, and the test would pass
+	// whether or not the escalation ever fired (an earlier version of this test
+	// did exactly that and passed against the buggy timers).
+	//
+	// os/exec's own WaitDelay always kills the DIRECT child, so the parent dies
+	// either way. The escalation is the only thing that can reach a grandchild
+	// which ignores SIGTERM — and SIGKILL cannot be trapped.
+	cmd := exec.CommandContext(ctx, "sh", "-c",
+		`trap '' TERM; sh -c "trap '' TERM; exec sleep 60" & echo $! >&3; wait`)
+	cmd.ExtraFiles = []*os.File{pidW, probeW}
+
+	runErrCh := make(chan error, 1)
+	go func() { runErrCh <- procgroup.Run(cmd) }()
+
+	grandchild := readPID(t, pidR)
+	if err := pidW.Close(); err != nil {
+		t.Fatalf("close pid write end: %v", err)
+	}
+	if err := probeW.Close(); err != nil {
+		t.Fatalf("close probe write end: %v", err)
+	}
+
+	select {
+	case <-runErrCh:
+	case <-time.After(20 * time.Second):
+		t.Fatal("Run never returned; the SIGKILL escalation did not fire")
+	}
+
+	eof := make(chan error, 1)
+	go func() {
+		b := make([]byte, 1)
+		_, readErr := probeR.Read(b)
+		eof <- readErr
+	}()
+	select {
+	case readErr := <-eof:
+		if !errors.Is(readErr, io.EOF) {
+			t.Fatalf("probe read returned %v, want io.EOF", readErr)
+		}
+	case <-time.After(10 * time.Second):
+		_ = syscall.Kill(grandchild, syscall.SIGKILL)
+		t.Fatalf("grandchild %d survived a SIGTERM-ignoring group — the SIGKILL "+
+			"escalation never reached the process group", grandchild)
 	}
 }
 
@@ -199,18 +284,66 @@ func TestRun_PreservesExistingSysProcAttr(t *testing.T) {
 	}
 }
 
+// TestRun_ReportsSuccessWhenCleanExitLeavesADescendantHoldingThePipes is the
+// regression test for the second review finding on #667.
+//
+// `git gc --auto` (spawned in the background after fetch/commit/merge) and an
+// ssh ControlMaster/ControlPersist mux both outlive the git command that started
+// them while still holding its inherited stdout/stderr. With WaitDelay armed,
+// os/exec surfaces exec.ErrWaitDelay from Wait even though the command exited 0.
+// Propagating that would report a `git push` that actually succeeded as a
+// failure and throw away its output, so the pipeline would retry or fail an
+// operation that already applied.
+func TestRun_ReportsSuccessWhenCleanExitLeavesADescendantHoldingThePipes(t *testing.T) {
+	// The shell writes its output and exits 0 immediately; the backgrounded
+	// sleep inherits stdout and holds it open well past waitDelay.
+	cmd := exec.CommandContext(context.Background(), "sh", "-c",
+		`sleep 30 & printf complete-output; exit 0`)
+	var out strings.Builder
+	cmd.Stdout = &out
+
+	start := time.Now()
+	err := procgroup.Run(cmd)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("run returned %v; a command that exited 0 must be reported as "+
+			"successful even when a descendant holds the pipes", err)
+	}
+	if out.String() != "complete-output" {
+		t.Errorf("stdout = %q, want %q — the buffered output must survive", out.String(), "complete-output")
+	}
+	// Confirms the test actually exercised the WaitDelay path rather than
+	// finishing before it could fire.
+	if elapsed < waitDelayForTest {
+		t.Errorf("returned after %s, faster than waitDelay — the ErrWaitDelay "+
+			"branch was not exercised, so this test proves nothing", elapsed)
+	}
+	if code := cmd.ProcessState.ExitCode(); code != 0 {
+		t.Errorf("exit code = %d, want 0", code)
+	}
+}
+
+// waitDelayForTest mirrors procgroup's unexported waitDelay. Kept as a separate
+// constant on purpose: if the production value shrinks below this, the timing
+// assertion above starts failing loudly instead of silently passing without
+// having exercised the branch.
+const waitDelayForTest = 3 * time.Second
+
 // TestRun_RejectsCommandWithoutContext documents the one precondition callers
-// must honour: os/exec refuses to start a command that has a Cancel hook but
-// was not created with CommandContext. Both git call sites use CommandContext,
-// and the failure is immediate and self-describing rather than silent — but pin
-// it so nobody "fixes" the requirement out of the doc comment by accident.
+// must honour: os/exec refuses to start a command that has a Cancel hook but was
+// not created with CommandContext. Both git call sites use CommandContext, and
+// the failure is immediate and self-describing rather than silent.
+//
+// Asserts only that Start failed. The review of #667 claimed the stdlib message
+// is "exec: command with Cancel requires a Context"; it is actually "exec:
+// command with a non-nil Cancel was not created with CommandContext"
+// (go1.25 os/exec/exec.go:692). Either way the text is Go's to reword, so
+// matching on it would be a fragile assertion — the precondition is what
+// matters, not its wording.
 func TestRun_RejectsCommandWithoutContext(t *testing.T) {
 	cmd := exec.Command("sh", "-c", "exit 0") //nolint:noctx // deliberate misuse
-	err := procgroup.Run(cmd)
-	if err == nil {
+	if err := procgroup.Run(cmd); err == nil {
 		t.Fatal("expected Run to fail for a command not created with CommandContext")
-	}
-	if !strings.Contains(err.Error(), "CommandContext") {
-		t.Errorf("error %q does not name the missing precondition", err)
 	}
 }

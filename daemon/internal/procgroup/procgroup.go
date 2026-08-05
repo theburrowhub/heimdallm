@@ -18,8 +18,10 @@
 //
 // Note for future readers: internal/executor carries a richer variant of this
 // logic (it also registers groups so TerminateAll can reach agents at shutdown,
-// and tolerates ErrWaitDelay when the payload is already complete). That was
-// deliberately left in place rather than folded in here — see #614.
+// and returns the collected payload alongside its ErrWaitDelay tolerance). That
+// was deliberately left in place rather than folded in here — see #614. The two
+// copies must agree on the timer ordering and on tolerating a clean exit whose
+// descendant holds the pipes; both are called out at their definitions.
 package procgroup
 
 import (
@@ -36,12 +38,22 @@ const (
 	// termGrace is how long the group gets to exit after SIGTERM before the
 	// escalation to SIGKILL. Short on purpose: cancellation here means a
 	// timeout has already elapsed, so the caller is past waiting politely.
-	termGrace = 2 * time.Second
+	//
+	// INVARIANT: termGrace must stay strictly — and comfortably — below
+	// waitDelay. On cancellation os/exec arms its own WaitDelay timer at the
+	// same moment Cancel fires, and when that timer expires os/exec kills only
+	// the DIRECT child and lets Wait return. If the two timers were equal (or
+	// termGrace were larger) the escalation goroutine would find `reaped`
+	// already true, skip kill(-pgid, SIGKILL), and leave alive precisely the
+	// descendant that ignored SIGTERM — reintroducing #665 on every timeout
+	// where the group does not die on the first signal. internal/executor
+	// encodes the same ordering as 1s vs 3s; keep both copies in step.
+	termGrace = 1 * time.Second
 	// waitDelay bounds Wait once the direct child has exited but a descendant
 	// still holds the inherited stdout/stderr pipes. Without it, Wait blocks
 	// until every copy of those descriptors is closed, which lets a stalled
-	// grandchild hang the caller indefinitely.
-	waitDelay = 2 * time.Second
+	// grandchild hang the caller indefinitely. See the termGrace invariant.
+	waitDelay = 3 * time.Second
 )
 
 // Run starts cmd in its own process group, waits for it, and on context
@@ -61,6 +73,9 @@ const (
 // when the child has been reaped, and a caller that forgot to do so would
 // eventually signal a pgid the kernel had already recycled onto an unrelated
 // process group.
+//
+// A clean exit whose descendant still holds the inherited pipes is reported as
+// success, not as exec.ErrWaitDelay — see the comment at that branch.
 //
 // The residual race is the same one documented in #614 and is narrowed, not
 // closed: `reaped` is set the instant Wait returns and is checked immediately
@@ -103,9 +118,38 @@ func Run(cmd *exec.Cmd) error {
 		close(runDone)
 		return err
 	}
+	pgid := cmd.Process.Pid // Setpgid makes the child its own group leader
 	err := cmd.Wait()
 	reaped.Store(true) // before closing runDone: no signal may follow the reap
 	close(runDone)
+
+	// WaitDelay also fires when the command itself exited cleanly but a
+	// descendant still holds the inherited pipes. That is common for git, not
+	// exotic: `git gc --auto` is spawned in the background after fetch/commit/
+	// merge, and an SSH remote using ControlMaster/ControlPersist leaves the mux
+	// master running on purpose. Returning ErrWaitDelay to the caller in that
+	// case would report a `git push` that actually succeeded as a failure and
+	// discard its output, so the pipeline would retry or fail an operation that
+	// already applied.
+	//
+	// Everything the command itself wrote is already buffered — it wrote it
+	// before exiting, and the copier drains concurrently — so the collected
+	// output is complete and the exit status is authoritative. Swallow the
+	// error and report success, matching internal/executor's handling of the
+	// identical case.
+	//
+	// The descendant is NOT swept here: the child has been reaped, so its pgid
+	// may already belong to another group and a signal would be aimed at
+	// strangers. Log its identity instead — this is the one place with positive
+	// evidence of a live leaked process, so it should be traceable while #614
+	// is open. With Setpgid the group ID is the leader's PID, so one number
+	// identifies both.
+	if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.ExitCode() == 0 {
+		slog.Warn("procgroup: command exited 0 but a descendant held the output pipes; "+
+			"reporting success and leaving the descendant running",
+			"path", cmd.Path, "pgid", pgid)
+		return nil
+	}
 	return err
 }
 
