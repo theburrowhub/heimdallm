@@ -46,6 +46,31 @@ type HeadSHAResolver interface {
 	GetPRHeadSHA(repo string, number int) (string, error)
 }
 
+// PRSnapshotFetcher returns the live state of a PR, not just its HEAD.
+//
+// Optional capability, discovered by type assertion on the pipeline's gh
+// dependency rather than added to the required set. *github.Client implements
+// it; the package's many test doubles do not, and widening the mandatory
+// interface would force every one of them to grow a method that most tests do
+// not exercise. When absent, the publish guard degrades to a HEAD-only check via
+// HeadSHAResolver.
+type PRSnapshotFetcher interface {
+	GetPRSnapshot(repo string, number int) (*github.PRSnapshot, error)
+}
+
+// CommitAnchoredReviewer submits a review pinned to an explicit commit.
+//
+// Optional for the same reason as PRSnapshotFetcher, and for the reason stated
+// on github.Client.SubmitReviewForCommit itself: keeping it off the
+// GitHubReviewer contract preserves the test doubles. Anchoring matters because
+// the plain SubmitReview lets GitHub attach the review to whatever is at HEAD
+// when the request lands, so a push racing the submit would misattribute
+// findings from the analysed commit to newer code. With the anchor, the worst
+// case degrades from "misattributed" to "shows as outdated".
+type CommitAnchoredReviewer interface {
+	SubmitReviewForCommit(repo string, number int, body, event, commitID string) (int64, string, error)
+}
+
 // CLIExecutor detects and runs an AI CLI tool.
 type CLIExecutor interface {
 	Detect(primary, fallback string) (string, error)
@@ -210,6 +235,135 @@ func (p *Pipeline) stopIfRepoBecameIneligible(
 		"repo", pr.Repo, "pr", pr.Number)
 	return true, nil
 }
+
+// retireIfPRMoved re-resolves the PR's live state immediately before anything is
+// written to GitHub and retires the freshly stored review when the PR has moved
+// on from what was analysed — either the commit is no longer at HEAD, or the PR
+// is no longer open.
+//
+// Why a re-check is needed at all: every dedup layer upstream decides whether to
+// *start* a review, and none of them can speak for what happens while the CLI
+// runs. That window is long — the review_timing stats carry a bucket_very_slow
+// tail out past 3000s — so an author who force-pushes, merges or closes inside it
+// gets a verdict describing code that is no longer there. Observed on
+// freepik-company/ai-bumblebee-proxy#1802: a REQUEST_CHANGES landed on a commit
+// that had already been approved and then superseded by two further pushes
+// (theburrowhub/heimdallm#664). At `high` severity that also blocks merge on
+// outdated code.
+//
+// This mirrors pendingReviewInvalidReason on the deferred publish path, which
+// checks both conditions for one API call. Checking only the SHA would have left
+// a PR merged mid-run still receiving its verdict.
+//
+// Marking the row is load-bearing, not bookkeeping: step 7 stored it with
+// GitHubReviewID == 0, which is exactly what ListUnpublishedReviews selects on.
+// Skipping the publish without retiring the row would simply hand the stale
+// verdict to the publish-worker to post later. The sentinel differs by reason,
+// matching the deferred path: SupersededReviewID for a moved HEAD (which Run
+// then treats as "no previous review", so the new commit can be reviewed), and
+// orphanedReviewID for a closed PR, which is terminal.
+//
+// Returns (true, …) when the caller must stop. Run then returns (nil, nil),
+// matching the other skip paths so main.go's `rev == nil` filter keeps the
+// review_completed SSE, the "review done" log line and the activity_log row
+// suppressed for a review that was never published (#322 Bug 4).
+func (p *Pipeline) retireIfPRMoved(rev *store.Review, pr *github.PullRequest) (bool, error) {
+	live, err := p.resolveLivePR(pr)
+	if err != nil {
+		// Deliberately fail-open. Deferring to the publish-worker instead would
+		// be safer in isolation but would delay every publish whenever the API
+		// has a blip, and needs a lifecycle state that does not exist yet.
+		// Publishing stale requires the PR to have moved AND this lookup to fail
+		// in the same run. The deferred path stays hardened regardless, because
+		// it re-validates under its own claim before submitting.
+		slog.Warn("pipeline: could not re-resolve PR before publishing, publishing anyway",
+			"repo", pr.Repo, "pr", pr.Number, "review_id", rev.ID,
+			"head_sha", pr.Head.SHA, "err", err)
+		return false, nil
+	}
+
+	reason := SkipReasonNone
+	terminalReviewID := SupersededReviewID
+	switch {
+	case live.stateKnown && live.state != "open":
+		reason, terminalReviewID = SkipReasonNotOpen, orphanedReviewID
+	case live.headSHA != "" && live.headSHA != pr.Head.SHA:
+		reason, terminalReviewID = SkipReasonHeadChanged, SupersededReviewID
+	}
+	if reason == SkipReasonNone {
+		return false, nil
+	}
+
+	if err := p.store.MarkReviewPublished(rev.ID, terminalReviewID, "", time.Now().UTC()); err != nil {
+		// Report rather than swallow, but still stop: an unretired row keeps
+		// GitHubReviewID == 0, so the publish-worker picks it up and applies its
+		// own re-validation. The stale verdict cannot reach GitHub either way —
+		// only the bookkeeping is left inconsistent.
+		return true, fmt.Errorf("pipeline: retire superseded review %d: %w", rev.ID, err)
+	}
+	slog.Info("pipeline: PR moved during review — retiring instead of publishing",
+		"repo", pr.Repo, "pr", pr.Number, "review_id", rev.ID, "reason", string(reason),
+		"reviewed_head_sha", pr.Head.SHA, "current_head_sha", live.headSHA,
+		"current_state", live.state, "event", rev.Event, "severity", rev.Severity)
+	p.publishSkipped(pr, reason)
+	return true, nil
+}
+
+// livePR is the freshness view the publish guard needs.
+type livePR struct {
+	state   string
+	headSHA string
+	// stateKnown distinguishes "the PR is open" from "state was never fetched".
+	// Without it the HEAD-only fallback would report an empty state and the
+	// caller would read that as a closed PR, retiring every review.
+	stateKnown bool
+}
+
+// resolveLivePR fetches the PR's current state, preferring the full snapshot and
+// falling back to a HEAD-only lookup when the gh dependency does not provide one.
+//
+// Both paths retry once after a short pause, matching the hydration lookup at the
+// top of Run: #243's failure mode was rate-limit 429s, and a back-to-back retry
+// is useless against those because the window is still active. A 429 during a
+// long review is the likeliest way this call fails, so the retry meaningfully
+// shrinks the fail-open window.
+func (p *Pipeline) resolveLivePR(pr *github.PullRequest) (livePR, error) {
+	if snapshotter, ok := p.gh.(PRSnapshotFetcher); ok {
+		snap, err := snapshotter.GetPRSnapshot(pr.Repo, pr.Number)
+		if err != nil {
+			time.Sleep(headResolveRetryDelay)
+			snap, err = snapshotter.GetPRSnapshot(pr.Repo, pr.Number)
+		}
+		if err != nil {
+			return livePR{}, err
+		}
+		if snap == nil {
+			return livePR{}, fmt.Errorf("pipeline: nil PR snapshot")
+		}
+		return livePR{state: snap.State, headSHA: snap.HeadSHA, stateKnown: true}, nil
+	}
+
+	sha, err := p.gh.GetPRHeadSHA(pr.Repo, pr.Number)
+	if err != nil {
+		time.Sleep(headResolveRetryDelay)
+		sha, err = p.gh.GetPRHeadSHA(pr.Repo, pr.Number)
+	}
+	if err != nil {
+		return livePR{}, err
+	}
+	if sha == "" {
+		// Empty-but-nil-error is a lookup failure, not "unchanged" — the same
+		// reading the hydration path at the top of Run applies to this value.
+		// Folding it into the error branch keeps the log honest about which case
+		// occurred instead of silently claiming the HEAD was confirmed.
+		return livePR{}, fmt.Errorf("pipeline: resolve HEAD SHA: empty SHA returned")
+	}
+	return livePR{headSHA: sha}, nil
+}
+
+// headResolveRetryDelay is the pause before the single retry of a HEAD/snapshot
+// lookup. Same value and rationale as the hydration lookup in Run.
+const headResolveRetryDelay = 500 * time.Millisecond
 
 // publish emits an SSE lifecycle event with the given payload. No-op
 // when no publisher is wired. A marshal failure on a map[string]any
@@ -823,7 +977,16 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		return nil, err
 	}
 
-	// 8. Publish review to GitHub
+	// 8. Publish review to GitHub.
+	//
+	// The freshness re-check goes here, ahead of the multi-mode comment loop —
+	// not immediately before SubmitReview. In multi mode that loop is already a
+	// write to the PR (one comment per issue), so guarding only the final
+	// SubmitReview would leave N inline comments about superseded code with no
+	// summary review to explain them: worse than the bug it fixes.
+	if superseded, err := p.retireIfPRMoved(rev, pr); superseded {
+		return nil, err
+	}
 	var reviewBody string
 	if reviewMode == "multi" && len(result.Issues) > 0 {
 		// Post one comment per issue (best-effort — failures are logged but don't abort)
@@ -843,11 +1006,26 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	if stopped, err := p.stopIfRepoBecameIneligible(pr, opts.RepoEligible); stopped {
 		return nil, err
 	}
-	ghReviewID, ghReviewState, publishErr := p.gh.SubmitReview(
-		pr.Repo, pr.Number,
-		AnnotateBodyForEvent(reviewBody, reviewEvent, len(result.Issues)),
-		reviewEvent,
-	)
+	// Anchor the submission to the commit that was analysed. The re-check above
+	// narrows the race but cannot close it: it is check-then-act, so a push
+	// landing between the check and this call would have GitHub attach the review
+	// to the new HEAD. With commit_id pinned, that worst case degrades from
+	// "findings misattributed to code they were not written about" to "review
+	// shows as outdated", which is what the deferred publish path already does.
+	annotatedBody := AnnotateBodyForEvent(reviewBody, reviewEvent, len(result.Issues))
+	var ghReviewID int64
+	var ghReviewState string
+	var publishErr error
+	if anchored, ok := p.gh.(CommitAnchoredReviewer); ok && pr.Head.SHA != "" {
+		ghReviewID, ghReviewState, publishErr = anchored.SubmitReviewForCommit(
+			pr.Repo, pr.Number, annotatedBody, reviewEvent, pr.Head.SHA,
+		)
+	} else {
+		// Test doubles and any adapter that predates the anchored method.
+		ghReviewID, ghReviewState, publishErr = p.gh.SubmitReview(
+			pr.Repo, pr.Number, annotatedBody, reviewEvent,
+		)
+	}
 	if publishErr != nil {
 		// Permanent submit failure (PR locked etc.): mark the freshly
 		// stored row as orphaned right now so it never enters the
