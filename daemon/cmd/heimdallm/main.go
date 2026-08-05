@@ -509,15 +509,57 @@ func main() {
 		}
 	}
 
+	// Forward-declared: runReview below needs to throttle its own GitHub lookup,
+	// but the limiter is constructed further down with the rest of the client
+	// wiring. runReview is only ever invoked by workers created after that point,
+	// so the variable is always set by the time the closure runs — the nil check
+	// inside is a guard against that ordering being changed silently, not an
+	// expected state.
+	var limiter *scheduler.RateLimiter
+
 	runReview := func(pr *gh.PullRequest, aiCfg config.RepoAI) *store.Review {
 		// Resolve and freeze the revision before taking any repository context.
 		// Every review execution gets a fresh independent snapshot at this exact
 		// SHA; a later push is detected again by pipeline.FetchDiffForCommit and
 		// the pre-publish guard.
+		// Throttle it like every other GitHub call in this file. Unacquired, this
+		// was one extra unthrottled request per PR per poll cycle, which is how a
+		// wide cycle trips a secondary rate limit.
+		//
+		// context.Background() rather than a cancellable ctx: runReview's signature
+		// has none to give (see the follow-up note in the PR discussion), and for
+		// the limiter specifically the cost of Background is bounded — it waits for
+		// a token instead of abandoning on shutdown. The uninterruptible-fetch half
+		// of that finding is the one that still needs the signature change.
+		if limiter == nil {
+			slog.Error("runReview: rate limiter not wired yet — refusing the HEAD lookup",
+				"repo", pr.Repo, "pr", pr.Number)
+			return nil
+		}
+		if err := limiter.Acquire(context.Background(), scheduler.TierRepo); err != nil {
+			slog.Warn("runReview: rate limiter denied the HEAD lookup — skipping",
+				"repo", pr.Repo, "pr", pr.Number, "err", err)
+			return nil
+		}
 		liveSHA, err := ghClient.GetPRHeadSHA(pr.Repo, pr.Number)
 		if err != nil || strings.TrimSpace(liveSHA) == "" {
+			// Fail closed, but not silently. This drops a review entirely, and a
+			// rate-limit blip is a routine cause, so an operator needs to see it
+			// somewhere other than a log line they were not tailing. The review is
+			// not requeued — a later change to the PR re-triggers it — and that
+			// gap is called out in the PR discussion rather than papered over.
 			slog.Warn("runReview: HEAD SHA unavailable — skipping fail-closed",
 				"repo", pr.Repo, "pr", pr.Number, "err", err)
+			broker.Publish(sse.Event{
+				Type: sse.EventReviewError,
+				Data: sseData(map[string]any{
+					"repo":      pr.Repo,
+					"pr_number": pr.Number,
+					"pr_title":  pr.Title,
+					"error": "review skipped: could not resolve the PR's current commit, " +
+						"so there is no revision to pin the analysis to",
+				}),
+			})
 			return nil
 		}
 		if pr.Head.SHA != "" && pr.Head.SHA != liveSHA {
@@ -690,8 +732,10 @@ func main() {
 	issueFetcher.SetPublisher(issuePublisher)
 	issueFetcher.SetStageTransitioner(ghClient, broker)
 
-	// Shared rate limiter (was Pipeline.limiter).
-	limiter := scheduler.NewRateLimiter(4500)
+	// Shared rate limiter (was Pipeline.limiter). Declared above runReview so that
+	// closure can throttle its own GitHub call; assigned here because that is
+	// where the rest of the wiring lives.
+	limiter = scheduler.NewRateLimiter(4500)
 
 	// Wire the GitHub client → rate limiter so every API response updates the
 	// live budget, enabling proactive throttle before a 403 and correct backoff
