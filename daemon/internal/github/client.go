@@ -623,13 +623,37 @@ func (e *PermanentSubmitError) Error() string {
 // out and let the retry loop run — it is rate-limited by the poll
 // interval and only burns 1 GitHub API call per cycle.
 func classifyPermanentSubmit422(status int, body []byte) (string, bool) {
-	if status != http.StatusUnprocessableEntity {
+	lower := strings.ToLower(string(body))
+
+	switch status {
+	case http.StatusNotFound:
+		// The PR, the repo, or our access to it is gone. Retrying cannot bring
+		// any of them back, and every redelivery holds a publish-worker slot.
+		return "not_found", true
+	case http.StatusGone:
+		return "gone", true
+	case http.StatusUnprocessableEntity:
+		if strings.Contains(lower, "lock prevents review") || strings.Contains(lower, "pull request is locked") {
+			return "pr_locked", true
+		}
+		// Reachable only since submissions pin commit_id: once the analysed
+		// commit is no longer part of the PR (force-push, rebase), GitHub can
+		// never accept this review again. Without this case the message is naked
+		// for NATS redelivery forever — the failure mode commit-anchoring added.
+		if strings.Contains(lower, "commit_id is not part of the pull request") ||
+			strings.Contains(lower, "not part of the pull request") {
+			return "commit_not_in_pr", true
+		}
 		return "", false
 	}
-	lower := strings.ToLower(string(body))
-	if strings.Contains(lower, "lock prevents review") || strings.Contains(lower, "pull request is locked") {
-		return "pr_locked", true
-	}
+
+	// Deliberately NOT classified:
+	//   - 403: GitHub returns it for secondary rate limits as well as for
+	//     permission problems, and the two are not reliably distinguishable from
+	//     the body. Classifying it would orphan recoverable reviews, which this
+	//     function's whole contract warns against — a false positive here loses a
+	//     paid-for review permanently. It stays retryable.
+	//   - 429: always transient by definition.
 	return "", false
 }
 

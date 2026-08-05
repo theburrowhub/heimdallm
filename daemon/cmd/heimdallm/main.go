@@ -1179,11 +1179,24 @@ func main() {
 			return nil
 		}
 		if strings.TrimSpace(rev.BaseSHA) == "" {
-			if err := s.MarkReviewPublished(rev.ID, pipeline.SupersededReviewID, "", time.Now().UTC()); err != nil {
-				return fmt.Errorf("retire review %d with unknown base: %w", rev.ID, err)
+			// Terminal (-1), not SupersededReviewID. Superseded means "re-review
+			// the new commit", and pipeline.Run treats that sentinel as "no prior
+			// review", so the next poll starts a fresh AI execution. For a client
+			// without a DiffSnapshotFetcher — the only producer of BaseSHA — that
+			// execution stores BaseSHA == "" again and lands right back here: an
+			// unbounded generate→retire→regenerate loop, one AI execution per
+			// cycle, never publishing.
+			//
+			// The HeadSHA branch immediately above already made this call for the
+			// same reason and self-limits because of it. A row with no provable
+			// base cannot be published with a provable base, and re-running the
+			// same client cannot produce one, so retire it for good. A genuine
+			// later re-review still creates its own row through the normal path.
+			if err := s.MarkReviewPublished(rev.ID, -1, "", time.Now().UTC()); err != nil {
+				return fmt.Errorf("mark review %d with unknown base orphaned: %w", rev.ID, err)
 			}
 			_ = s.SetReviewSuccessorPending(rev.ID, false)
-			slog.Info("publish-worker: review has no BaseSHA, retiring for regeneration",
+			slog.Info("publish-worker: review has no BaseSHA, marking orphaned",
 				"review_id", rev.ID, "repo", pr.Repo, "pr", pr.Number)
 			return nil
 		}

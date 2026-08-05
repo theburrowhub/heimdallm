@@ -1446,6 +1446,71 @@ func TestSubmitReview_LockedPRReturnsPermanentSubmitError(t *testing.T) {
 	}
 }
 
+// TestSubmitReview_TerminalStatusesArePermanent covers the classification gap
+// the review flagged: before this, only 422-with-two-specific-bodies was
+// permanent, so a deleted PR (404), a Gone repo, and — newly reachable because
+// submissions now pin commit_id — a commit that is no longer part of the PR all
+// returned a plain error and stayed naked for NATS redelivery forever, each one
+// holding a publish-worker slot.
+func TestSubmitReview_TerminalStatusesArePermanent(t *testing.T) {
+	cases := []struct {
+		name       string
+		status     int
+		body       string
+		wantReason string
+	}{
+		{"deleted pr or lost access", http.StatusNotFound,
+			`{"message":"Not Found"}`, "not_found"},
+		{"gone", http.StatusGone,
+			`{"message":"Gone"}`, "gone"},
+		{"analysed commit force-pushed away", http.StatusUnprocessableEntity,
+			`{"message":"Validation Failed","errors":[{"message":"commit_id is not part of the pull request"}]}`,
+			"commit_not_in_pr"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+			_, _, err := client.SubmitReview("org/repo", 1, "body", "COMMENT")
+			var permErr *gh.PermanentSubmitError
+			if !errors.As(err, &permErr) {
+				t.Fatalf("expected *PermanentSubmitError, got %T: %v", err, err)
+			}
+			if permErr.Reason != tc.wantReason {
+				t.Errorf("Reason = %q, want %q", permErr.Reason, tc.wantReason)
+			}
+		})
+	}
+}
+
+// TestSubmitReview_ForbiddenStaysRetryable pins the deliberate exclusion: GitHub
+// uses 403 for secondary rate limits as well as for permission problems, and the
+// body does not reliably distinguish them. Classifying it would orphan a
+// recoverable review, which costs more than a few extra retries.
+func TestSubmitReview_ForbiddenStaysRetryable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte(`{"message":"You have exceeded a secondary rate limit"}`))
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	_, _, err := client.SubmitReview("org/repo", 1, "body", "COMMENT")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	var permErr *gh.PermanentSubmitError
+	if errors.As(err, &permErr) {
+		t.Errorf("403 was classified permanent (%q); secondary rate limits use 403 and "+
+			"must stay retryable", permErr.Reason)
+	}
+}
+
 // TestSubmitReview_TransientErrorIsNotPermanent guards against
 // over-classification: a 5xx (or any non-422 status) MUST keep the
 // generic-error path so the retry loop still runs. Otherwise a
