@@ -211,6 +211,75 @@ func (p *Pipeline) stopIfRepoBecameIneligible(
 	return true, nil
 }
 
+// retireIfHeadMoved re-resolves the PR's live HEAD immediately before anything
+// is written to GitHub and retires the freshly stored review when the commit it
+// analysed is no longer at HEAD.
+//
+// Why a re-check is needed at all: every dedup layer upstream decides whether
+// to *start* a review, and none of them can speak for what happens while the
+// CLI runs. That window is long — the review_timing stats carry a
+// bucket_very_slow tail out past 3000s — so an author who force-pushes inside
+// it gets a verdict describing code that is no longer there. Observed on
+// freepik-company/ai-bumblebee-proxy#1802: a REQUEST_CHANGES landed on a commit
+// that had already been approved and then superseded by two further pushes
+// (theburrowhub/heimdallm#664). At `high` severity that also blocks merge on
+// outdated code.
+//
+// The deferred publish path in cmd/heimdallm already does exactly this
+// (GetPRSnapshot + pendingReviewInvalidReason immediately before SubmitReview);
+// only the hot path was missing it, so the two publish sites disagreed. This is
+// the hot-path half, and it reuses the same SupersededReviewID sentinel so both
+// retire a stale row identically.
+//
+// Marking the row is load-bearing, not bookkeeping: step 7 stored it with
+// GitHubReviewID == 0, which is exactly what ListUnpublishedReviews selects on.
+// Skipping the publish without retiring the row would simply hand the stale
+// verdict to the publish-worker to post later.
+//
+// Returns (true, …) when the caller must stop. Run then returns (nil, nil),
+// matching the other skip paths so main.go's `rev == nil` filter keeps the
+// review_completed SSE, the "review done" log line and the activity_log row
+// suppressed for a review that was never published (#322 Bug 4).
+func (p *Pipeline) retireIfHeadMoved(rev *store.Review, pr *github.PullRequest) (bool, error) {
+	if pr.Head.SHA == "" {
+		// Nothing to compare against. The empty-SHA/legacy-row handling
+		// upstream owns this case; re-deciding it here would duplicate it.
+		return false, nil
+	}
+	liveSHA, err := p.gh.GetPRHeadSHA(pr.Repo, pr.Number)
+	if err != nil {
+		// Deliberately fail-open. Deferring to the publish-worker instead
+		// would be safer in isolation but would delay every publish whenever
+		// the API has a blip, and needs a lifecycle state that does not exist
+		// yet. Publishing stale requires HEAD to have moved AND this call to
+		// fail in the same run; leaving the guard to the confirmable case
+		// keeps this change to a single behavioural difference. The deferred
+		// path stays hardened regardless, because it re-validates the SHA
+		// under its own claim before submitting.
+		slog.Warn("pipeline: could not re-resolve HEAD before publishing, publishing anyway",
+			"repo", pr.Repo, "pr", pr.Number, "review_id", rev.ID,
+			"head_sha", pr.Head.SHA, "err", err)
+		return false, nil
+	}
+	if liveSHA == "" || liveSHA == pr.Head.SHA {
+		return false, nil
+	}
+	if err := p.store.MarkReviewPublished(rev.ID, SupersededReviewID, "", time.Now().UTC()); err != nil {
+		// Report rather than swallow, but still stop: an unretired row keeps
+		// GitHubReviewID == 0, so the publish-worker picks it up and applies
+		// its own SHA re-validation. The stale verdict cannot reach GitHub
+		// either way — only the bookkeeping is left inconsistent.
+		return true, fmt.Errorf("pipeline: retire superseded review %d: %w", rev.ID, err)
+	}
+	rev.GitHubReviewID = SupersededReviewID
+	slog.Info("pipeline: HEAD moved during review — retiring instead of publishing",
+		"repo", pr.Repo, "pr", pr.Number, "review_id", rev.ID,
+		"reviewed_head_sha", pr.Head.SHA, "current_head_sha", liveSHA,
+		"event", rev.Event, "severity", rev.Severity)
+	p.publishSkipped(pr, SkipReasonHeadChanged)
+	return true, nil
+}
+
 // publish emits an SSE lifecycle event with the given payload. No-op
 // when no publisher is wired. A marshal failure on a map[string]any
 // of basic types should not happen in practice (every payload site
@@ -823,7 +892,16 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		return nil, err
 	}
 
-	// 8. Publish review to GitHub
+	// 8. Publish review to GitHub.
+	//
+	// The freshness re-check goes here, ahead of the multi-mode comment loop —
+	// not immediately before SubmitReview. In multi mode that loop is already a
+	// write to the PR (one comment per issue), so guarding only the final
+	// SubmitReview would leave N inline comments about superseded code with no
+	// summary review to explain them: worse than the bug it fixes.
+	if superseded, err := p.retireIfHeadMoved(rev, pr); superseded {
+		return nil, err
+	}
 	var reviewBody string
 	if reviewMode == "multi" && len(result.Issues) > 0 {
 		// Post one comment per issue (best-effort — failures are logged but don't abort)

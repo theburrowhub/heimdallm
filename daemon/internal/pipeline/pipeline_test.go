@@ -454,21 +454,28 @@ func TestPipeline_Run_HydratesHeadSHAWhenMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if gh.shaCalls != 1 {
-		t.Errorf("expected 1 GetPRHeadSHA call, got %d", gh.shaCalls)
+	// Two calls, and both are load-bearing: the hydration fetch at the top of
+	// Run (the subject of this test) plus the publish-time freshness re-check
+	// added for theburrowhub/heimdallm#664. They are not interchangeable — the
+	// first resolves an unknown SHA before any work happens, the second detects
+	// a force-push that landed while the CLI was running, so reusing the
+	// hydrated value there would defeat the guard.
+	if gh.shaCalls != 2 {
+		t.Errorf("expected 2 GetPRHeadSHA calls (hydration + publish re-check), got %d", gh.shaCalls)
 	}
 	if rev.HeadSHA != "abc123" {
 		t.Errorf("stored HeadSHA = %q, want %q", rev.HeadSHA, "abc123")
 	}
 
 	// Second run: the PR now has the SHA inline (as if hydrated upstream).
-	// Pipeline must NOT call GetPRHeadSHA again, and must skip on SHA match.
+	// Pipeline must NOT hydrate again, and must skip on SHA match — which also
+	// means it never reaches the publish block, so the call count is unchanged.
 	pr.Head.SHA = "abc123"
 	_, err = p.Run(pr, pipeline.RunOptions{Primary: "claude", Fallback: "gemini"})
 	if err != nil {
 		t.Fatalf("second run: %v", err)
 	}
-	if gh.shaCalls != 1 {
+	if gh.shaCalls != 2 {
 		t.Errorf("GetPRHeadSHA called redundantly: %d", gh.shaCalls)
 	}
 	if gh.submits != 1 {
