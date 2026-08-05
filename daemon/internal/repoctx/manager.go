@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/heimdallm/daemon/internal/config"
+	"github.com/heimdallm/daemon/internal/procgroup"
 )
 
 const (
@@ -1167,7 +1168,11 @@ func (execGit) Run(ctx context.Context, dir string, env []string, args ...string
 	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	// procgroup.Run rather than cmd.Run: git forks `ssh` for SSH remotes, and
+	// exec.CommandContext's cancellation reaches only git itself. On a
+	// gitTimeout the ssh child was orphaned onto PID 1 and became a zombie
+	// there (theburrowhub/heimdallm#665).
+	if err := procgroup.Run(cmd); err != nil {
 		errText := stderr.String()
 		if len(errText) > maxGitStderrBytes {
 			errText = errText[:maxGitStderrBytes] + "\n... (stderr truncated)"
