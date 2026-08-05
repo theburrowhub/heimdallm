@@ -2,6 +2,7 @@ package pipeline_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -116,9 +117,18 @@ func TestRun_FailedRunsCountTowardTheBreaker(t *testing.T) {
 	if attempts != 3 {
 		t.Errorf("ledger attempts = %d, want 3", attempts)
 	}
+	// Pin the premise rather than skip it on error: LatestReviewForPR reports
+	// "no rows" as an error, so swallowing that would leave the whole point of
+	// this test — that the count came from the ledger and not from a review row
+	// — unverified.
 	rev, err := s.LatestReviewForPR(storedPR.ID)
-	if err == nil && rev != nil {
+	switch {
+	case err == nil && rev != nil:
 		t.Errorf("a review row exists (id %d); the premise of this test is that none does", rev.ID)
+	case err == nil && rev == nil:
+		// Acceptable: no row, reported without an error.
+	case !strings.Contains(err.Error(), "no rows"):
+		t.Errorf("LatestReviewForPR failed for an unexpected reason: %v", err)
 	}
 }
 
@@ -172,3 +182,95 @@ func TestRun_ForcedRunIsRecordedEvenThoughItBypassesTheCheck(t *testing.T) {
 			"to the runs that follow it", attempts)
 	}
 }
+
+// TestRun_IneligibleRepoDoesNotConsumeLedgerQuota is the regression test for the
+// review finding on placement.
+//
+// stopIfRepoBecameIneligible is a zero-spend, explicitly retryable exit — it logs
+// "deferring review". Recording the attempt before it meant a repo toggled off
+// while a poll was in flight burned one ledger row per tick without ever
+// invoking the CLI; after PerPR24h such ticks the commit was capped for 24h and
+// the legitimate review was refused once the repo came back, recoverable only
+// via Force.
+func TestRun_IneligibleRepoDoesNotConsumeLedgerQuota(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	const sha = "cafebabe"
+	fexec := &failingExec{}
+	p := pipeline.New(s, &attemptGH{sha: sha}, fexec, &fakeNotify{})
+	p.SetBotLogin("heimdallm-bot")
+	p.SetCircuitBreakerLimits(&store.CircuitBreakerLimits{PerPR24h: 3, PerRepoHr: 999})
+
+	pr := &gh.PullRequest{
+		ID: 77, Number: 77, Title: "t", Repo: "org/repo",
+		User: gh.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/77",
+	}
+	pr.Head.SHA = sha
+
+	// The repo must be eligible for the EARLIER guards and ineligible only at the
+	// one just before Execute — that is the whole point, and a func that always
+	// returns false would exit at the first guard (pipeline.go:466) without ever
+	// reaching the record site, making this test vacuous. Verified: it passed
+	// against the buggy placement until this was fixed.
+	//
+	// eligibleUntilLastCheck reports true for every call except the final guard
+	// preceding Execute, reproducing a config reload that lands mid-poll.
+	var checks int
+	opts := pipeline.RunOptions{
+		Primary: "claude", Fallback: "gemini",
+		RepoEligible: func(string) bool {
+			checks++
+			return checks < eligibilityChecksBeforeExecute
+		},
+	}
+
+	// More ticks than the cap: if any of them charged the ledger, the commit
+	// would be capped afterwards.
+	for i := 0; i < 5; i++ {
+		checks = 0
+		rev, runErr := p.Run(pr, opts)
+		if runErr != nil {
+			t.Fatalf("tick %d: deferring a review must not error: %v", i, runErr)
+		}
+		if rev != nil {
+			t.Fatalf("tick %d: expected no review when the repo is ineligible", i)
+		}
+	}
+	if fexec.calls != 0 {
+		t.Fatalf("Execute was called %d times for an ineligible repo", fexec.calls)
+	}
+
+	storedPR, err := s.GetPRByGithubID(pr.ID)
+	if err != nil {
+		t.Fatalf("get pr: %v", err)
+	}
+	attempts, err := s.CountReviewAttemptsForPRHeadSHA(storedPR.ID, sha, time.Now().Add(-24*time.Hour))
+	if err != nil {
+		t.Fatalf("count attempts: %v", err)
+	}
+	if attempts != 0 {
+		t.Errorf("ledger charged %d attempts for runs that never reached the CLI; a "+
+			"disabled repo would cap the commit for 24h", attempts)
+	}
+
+	// The cap must still be intact, so the review lands when the repo returns.
+	tripped, reason, err := s.CheckCircuitBreaker(storedPR.ID, pr.Repo, sha,
+		store.CircuitBreakerLimits{PerPR24h: 3, PerRepoHr: 999})
+	if err != nil {
+		t.Fatalf("check breaker: %v", err)
+	}
+	if tripped {
+		t.Errorf("breaker tripped after only deferred runs (%s)", reason)
+	}
+}
+
+// eligibilityChecksBeforeExecute is the number of RepoEligible calls Run makes
+// up to and including the guard immediately before Execute. Pinned as a constant
+// so that if Run gains or loses a guard this test fails loudly rather than
+// quietly stopping to exercise the placement it exists to protect.
+const eligibilityChecksBeforeExecute = 2

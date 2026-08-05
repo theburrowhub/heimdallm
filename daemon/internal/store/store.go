@@ -163,9 +163,13 @@ CREATE TABLE IF NOT EXISTS reviews_in_flight (
 --
 -- Deliberately NOT keyed (pr_id, head_sha): the point is to count repeats, so
 -- every attempt needs its own row. See theburrowhub/heimdallm#663.
+-- pr_id mirrors reviews.pr_id, REFERENCES included: CountReviewAttemptsForRepo
+-- joins prs, so an orphaned row would silently drop off the per-repo axis while
+-- still counting on the per-PR axis, and the two axes are documented as reading
+-- the same data.
 CREATE TABLE IF NOT EXISTS review_attempts (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  pr_id       INTEGER NOT NULL,
+  pr_id       INTEGER NOT NULL REFERENCES prs(id),
   head_sha    TEXT    NOT NULL,
   started_at  DATETIME NOT NULL
 );
@@ -315,7 +319,7 @@ func Open(dsn string) (*Store, error) {
 	// are consulted.
 	db.Exec(`CREATE TABLE IF NOT EXISTS review_attempts (
 		id          INTEGER PRIMARY KEY AUTOINCREMENT,
-		pr_id       INTEGER NOT NULL,
+		pr_id       INTEGER NOT NULL REFERENCES prs(id),
 		head_sha    TEXT    NOT NULL,
 		started_at  DATETIME NOT NULL
 	)`)

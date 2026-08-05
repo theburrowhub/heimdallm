@@ -79,6 +79,14 @@ type CircuitBreakerLimits struct {
 //   - max rather than sum: a successful run writes one ledger row AND one
 //     reviews row, so adding them would double-count every normal review and
 //     halve the operator's configured cap.
+//
+// max is a floor, not an exact count, and it undercounts in one bounded case: a
+// commit carrying N legacy reviews rows inside the live window plus M new ledger
+// rows is charged max(N, M) rather than N+M, so up to 2*cap-1 runs can be
+// chargeable. That is confined to the first window after an upgrade, since from
+// then on every run writes a ledger row and the ledger dominates. Accepted in
+// exchange for never double-counting during normal operation, which would be
+// permanent.
 func chargeableRuns(attempts, reviews int) int {
 	if attempts > reviews {
 		return attempts
