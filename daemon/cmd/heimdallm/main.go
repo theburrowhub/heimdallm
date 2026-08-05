@@ -1196,8 +1196,26 @@ func main() {
 				return fmt.Errorf("mark review %d with unknown base orphaned: %w", rev.ID, err)
 			}
 			_ = s.SetReviewSuccessorPending(rev.ID, false)
-			slog.Info("publish-worker: review has no BaseSHA, marking orphaned",
-				"review_id", rev.ID, "repo", pr.Repo, "pr", pr.Number)
+			// Surface it. Terminal-retiring stops the regenerate loop, but on its
+			// own it turns that loop into a silent permanent discard: a full AI
+			// execution runs, the row is stored, and the verdict disappears with
+			// nothing but a log line. That is the same invisibility that hid the
+			// loop itself for two review rounds, so this path emits the same
+			// review_error surface the other terminal drops use — an operator has
+			// to be able to see that a paid-for review was thrown away.
+			broker.Publish(sse.Event{
+				Type: sse.EventReviewError,
+				Data: sseData(map[string]any{
+					"repo":      pr.Repo,
+					"pr_number": pr.Number,
+					"pr_title":  pr.Title,
+					"error": "review discarded: no base SHA was captured, so the diff it " +
+						"was written about cannot be proven — not published and not retried",
+				}),
+			})
+			slog.Warn("publish-worker: review has no BaseSHA, discarding permanently",
+				"review_id", rev.ID, "repo", pr.Repo, "pr", pr.Number,
+				"head_sha", rev.HeadSHA)
 			return nil
 		}
 		claimed, err := s.ClaimInFlightReview(pr.GithubID, rev.HeadSHA)
