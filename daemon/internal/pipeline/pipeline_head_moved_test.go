@@ -263,3 +263,186 @@ func TestPipeline_Run_NoRecheckWhenRunSkipsEarly(t *testing.T) {
 		t.Errorf("SubmitReview calls = %d, want 1", gh.submits)
 	}
 }
+
+// snapshotGH implements the optional PRSnapshotFetcher and CommitAnchoredReviewer
+// capabilities, so it exercises the production path rather than the degraded
+// fallback the other fakes in this file use.
+type snapshotGH struct {
+	diff  string
+	state string
+	sha   string
+	err   error
+
+	snapshotCalls int
+	submits       int
+	comments      int
+	// anchoredCommit records the commit_id the review was pinned to, which is
+	// the whole point of preferring SubmitReviewForCommit.
+	anchoredCommit string
+	usedUnanchored bool
+}
+
+func (f *snapshotGH) FetchDiff(string, int) (string, error) { return f.diff, nil }
+
+func (f *snapshotGH) FetchComments(string, int) ([]github.Comment, error) { return nil, nil }
+
+func (f *snapshotGH) PostComment(string, int, string) (time.Time, error) {
+	f.comments++
+	return time.Now().UTC(), nil
+}
+
+func (f *snapshotGH) GetPRHeadSHA(string, int) (string, error) { return f.sha, nil }
+
+func (f *snapshotGH) GetPRSnapshot(string, int) (*github.PRSnapshot, error) {
+	f.snapshotCalls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &github.PRSnapshot{State: f.state, HeadSHA: f.sha}, nil
+}
+
+func (f *snapshotGH) SubmitReview(_ string, _ int, _, _ string) (int64, string, error) {
+	f.submits++
+	f.usedUnanchored = true
+	return 1, "COMMENTED", nil
+}
+
+func (f *snapshotGH) SubmitReviewForCommit(_ string, _ int, _, _, commitID string) (int64, string, error) {
+	f.submits++
+	f.anchoredCommit = commitID
+	return 1, "COMMENTED", nil
+}
+
+// TestPipeline_Run_RetiresReviewWhenPRClosedDuringRun covers the parity gap
+// raised in review: pendingReviewInvalidReason retires a pending review on TWO
+// conditions, and only the HEAD one was implemented. A PR merged or closed during
+// a run — a window documented as reaching past 3000s — still got its verdict
+// posted.
+func TestPipeline_Run_RetiresReviewWhenPRClosedDuringRun(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	// HEAD is unchanged; only the state moved. The old SHA-only guard published.
+	gh := &snapshotGH{diff: "+line", state: "closed", sha: "306bfcc7"}
+	p := pipeline.New(s, gh, issuesExec{}, &fakeNotify{})
+
+	pr := headMovePR("306bfcc7")
+	rev, err := p.Run(pr, pipeline.RunOptions{Primary: "claude", Fallback: "gemini"})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if rev != nil {
+		t.Errorf("expected nil review for a closed PR, got %+v", rev)
+	}
+	if gh.submits != 0 {
+		t.Errorf("SubmitReview* called %d times on a closed PR; want 0", gh.submits)
+	}
+
+	storedPR, err := s.GetPRByGithubID(pr.ID)
+	if err != nil {
+		t.Fatalf("get pr: %v", err)
+	}
+	stored, err := s.LatestReviewForPR(storedPR.ID)
+	if err != nil {
+		t.Fatalf("latest review: %v", err)
+	}
+	// A closed PR is terminal, so it takes the orphan sentinel rather than
+	// Superseded — Superseded means "re-review the new commit", which is wrong
+	// here. -1 is the orphan value the deferred path uses for the same reason.
+	if stored.GitHubReviewID != -1 {
+		t.Errorf("stored github_review_id = %d, want -1 (terminal orphan) for a closed PR",
+			stored.GitHubReviewID)
+	}
+}
+
+// TestPipeline_Run_AnchorsPublishToAnalysedCommit pins the other half of the
+// review finding: the re-check is check-then-act, so the submit itself must pin
+// commit_id or a push racing it would have GitHub attach the findings to newer
+// code.
+func TestPipeline_Run_AnchorsPublishToAnalysedCommit(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	gh := &snapshotGH{diff: "+line", state: "open", sha: "306bfcc7"}
+	p := pipeline.New(s, gh, issuesExec{}, &fakeNotify{})
+
+	if _, err := p.Run(headMovePR("306bfcc7"), pipeline.RunOptions{
+		Primary: "claude", Fallback: "gemini",
+	}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if gh.submits != 1 {
+		t.Fatalf("submits = %d, want 1", gh.submits)
+	}
+	if gh.usedUnanchored {
+		t.Error("fell back to the unanchored SubmitReview even though the anchored " +
+			"variant was available")
+	}
+	if gh.anchoredCommit != "306bfcc7" {
+		t.Errorf("anchored commit = %q, want the analysed SHA %q",
+			gh.anchoredCommit, "306bfcc7")
+	}
+	// One snapshot call, replacing the previous GetPRHeadSHA call: covering the
+	// extra state condition costs no additional API request.
+	if gh.snapshotCalls != 1 {
+		t.Errorf("GetPRSnapshot calls = %d, want exactly 1", gh.snapshotCalls)
+	}
+}
+
+// TestPipeline_Run_FallsBackToUnanchoredSubmit keeps the optional-capability
+// design honest: a gh dependency without the anchored method must still publish
+// rather than fail.
+func TestPipeline_Run_FallsBackToUnanchoredSubmit(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	// headMoveGH implements neither optional capability.
+	gh := &headMoveGH{diff: "+line", shaSequence: []string{"306bfcc7"}}
+	p := pipeline.New(s, gh, issuesExec{}, &fakeNotify{})
+
+	rev, err := p.Run(headMovePR("306bfcc7"), pipeline.RunOptions{
+		Primary: "claude", Fallback: "gemini",
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if rev == nil {
+		t.Fatal("expected the review to publish through the fallback path")
+	}
+	if gh.submits != 1 {
+		t.Errorf("submits = %d, want 1", gh.submits)
+	}
+}
+
+// TestPipeline_Run_HeadOnlyFallbackDoesNotTreatUnknownStateAsClosed guards the
+// stateKnown flag. Without it the fallback would report an empty state, the
+// guard would read that as "not open", and every review on a gh dependency
+// lacking GetPRSnapshot would be retired instead of published.
+func TestPipeline_Run_HeadOnlyFallbackDoesNotTreatUnknownStateAsClosed(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	gh := &headMoveGH{diff: "+line", shaSequence: []string{"abc"}}
+	p := pipeline.New(s, gh, issuesExec{}, &fakeNotify{})
+
+	rev, err := p.Run(headMovePR("abc"), pipeline.RunOptions{Primary: "claude", Fallback: "gemini"})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if rev == nil || gh.submits != 1 {
+		t.Errorf("review was withheld on an unknown state (rev nil: %v, submits: %d)",
+			rev == nil, gh.submits)
+	}
+}
