@@ -1378,6 +1378,24 @@ func main() {
 				_ = s.SetReviewSuccessorPending(rev.ID, false)
 				return nil // permanent — ack
 			}
+			// Retryable: roll the arm back. It was set on the INTENT to submit,
+			// and nothing was published, so leaving it set would have downstream
+			// consumers treat this review as having consumed GitHub's pending
+			// reviewer request — trigger-review enrols a successor watch on it and
+			// ReviewRequiresCurrentRequest branches on it, so a never-published
+			// review would permanently suppress or misroute later reviews for this
+			// PR. NATS redelivers and the retry re-arms before its own attempt.
+			//
+			// The residual case is a submit that reached GitHub but whose response
+			// was lost: the retry's HEAD/intent re-checks and
+			// ReconcilePublishedReview cover it, which is where that reconciliation
+			// belongs anyway.
+			if clearErr := s.SetReviewSuccessorPending(rev.ID, false); clearErr != nil {
+				slog.Warn("publish-worker: could not roll back successor flag after a retryable submit failure",
+					"review_id", rev.ID, "err", clearErr)
+			} else {
+				rev.SuccessorPending = false
+			}
 			return fmt.Errorf("submit review to GitHub: %w", err)
 		}
 

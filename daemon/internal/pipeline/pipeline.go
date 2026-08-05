@@ -427,6 +427,12 @@ func (p *Pipeline) publish(eventType string, data map[string]any) {
 // pr_title, reason. Centralised so changes to the payload schema only
 // touch one site.
 func (p *Pipeline) publishSkipped(pr *github.PullRequest, reason SkipReason) {
+	// Log as well as emit. Several publish-time guards drop a fully paid-for AI
+	// review through this helper and used to leave nothing behind but an SSE
+	// event, which no operator reads after the fact — a review that vanished
+	// between "stored locally" and GitHub was undiagnosable from the log alone.
+	slog.Info("pipeline: review not published",
+		"repo", pr.Repo, "pr", pr.Number, "reason", string(reason))
 	p.publish(sse.EventReviewSkipped, map[string]any{
 		"repo":      pr.Repo,
 		"pr_number": pr.Number,
@@ -1540,7 +1546,15 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		if liveHead == "" || liveBase == "" {
 			return rev, fmt.Errorf("pipeline: refresh PR immediately before publish returned empty revision")
 		}
-		if liveHead != rev.HeadSHA || liveBase != rev.BaseSHA {
+		// Compare the base only when the row actually captured one. A client
+		// without a DiffSnapshotFetcher stores BaseSHA == "" (the snapshot path
+		// is the only producer, and it already fails closed on an empty base),
+		// so comparing "" against a live base would retire every such review as
+		// revision-stale and regenerate it forever — burning an AI execution per
+		// round and never publishing. This mirrors the post-execute revalidation,
+		// which already gates its base comparison on a non-empty captured value.
+		baseMoved := rev.BaseSHA != "" && liveBase != rev.BaseSHA
+		if liveHead != rev.HeadSHA || baseMoved {
 			if markErr := p.store.MarkReviewPublished(rev.ID, SupersededReviewID, "", time.Now().UTC()); markErr != nil {
 				return rev, fmt.Errorf("pipeline: retire revision-stale stored review: %w", markErr)
 			}

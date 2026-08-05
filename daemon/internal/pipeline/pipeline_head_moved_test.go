@@ -207,20 +207,38 @@ func TestPipeline_Run_PublishesWhenHeadUnchanged(t *testing.T) {
 	if gh.submits != 1 {
 		t.Errorf("SubmitReview calls = %d, want 1", gh.submits)
 	}
-	// The PR arrives with Head.SHA already set, so hydration is skipped and the
-	// only GetPRHeadSHA call is the publish-time re-check. Pinning this keeps
-	// the added API cost visible: one call per published review, no more.
-	if gh.shaCalls != 1 {
-		t.Errorf("GetPRHeadSHA calls = %d, want exactly 1 (the publish-time re-check)", gh.shaCalls)
+	// The PR arrives with Head.SHA already set, so hydration is skipped. Three
+	// calls remain, and pinning the number keeps the API cost of the isolation
+	// refactor visible for a client WITHOUT a snapshot resolver, which is the
+	// worst case:
+	//   1. the pre-publish HEAD re-check;
+	//   2. the post-execute revalidation this branch adds before storing;
+	//   3. retireIfPRMoved's freshness lookup, reached only because this double
+	//      is not a PRSnapshotResolver — real clients are, so production pays
+	//      one GetPRSnapshot here instead of calls 1 and 3.
+	// If this number grows, a guard was added without accounting for its cost.
+	if gh.shaCalls != 3 {
+		t.Errorf("GetPRHeadSHA calls = %d, want 3 (pre-publish + post-execute + retireIfPRMoved fallback)", gh.shaCalls)
 	}
 }
 
-// TestPipeline_Run_PublishesWhenHeadRecheckFails documents the deliberate
-// fail-open choice. Deferring on a transient API error would delay every
-// publish whenever GitHub blips, and publishing stale would additionally
-// require HEAD to have moved in the same run. The deferred publish path stays
-// hardened either way because it re-validates the SHA under its own claim.
-func TestPipeline_Run_PublishesWhenHeadRecheckFails(t *testing.T) {
+// TestPipeline_Run_DefersWhenRevisionRecheckFails records the posture flip this
+// branch makes deliberately.
+//
+// Before the isolation refactor this path was fail-OPEN: an unresolvable HEAD
+// published anyway, on the reasoning that deferring would delay every publish
+// during an API blip and that a lifecycle state for "analysed but unpublished"
+// did not exist. Both halves of that reasoning changed here. The revision
+// re-check is no longer advisory — it is what makes a commit-anchored review
+// honest — and the deferred publish path this branch hardens IS that lifecycle
+// state: the row persists with GitHubReviewID == 0, so the publish-worker picks
+// it up and re-validates under its own claim.
+//
+// So an unresolvable revision now returns an error rather than publishing. The
+// review is not lost; it is retried by a path that will re-check before
+// submitting. Publishing findings we cannot prove still describe HEAD is the
+// one outcome this PR exists to prevent.
+func TestPipeline_Run_DefersWhenRevisionRecheckFails(t *testing.T) {
 	s, err := store.Open(":memory:")
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -230,15 +248,14 @@ func TestPipeline_Run_PublishesWhenHeadRecheckFails(t *testing.T) {
 	gh := &headMoveGH{diff: "+line", shaErr: errors.New("502 bad gateway")}
 	p := pipeline.New(s, gh, issuesExec{}, &fakeNotify{})
 
-	rev, err := p.Run(headMovePR("306bfcc7"), pipeline.RunOptions{Primary: "claude", Fallback: "gemini", Force: true})
-	if err != nil {
-		t.Fatalf("run: %v", err)
+	_, err = p.Run(headMovePR("306bfcc7"), pipeline.RunOptions{Primary: "claude", Fallback: "gemini", Force: true})
+	if err == nil {
+		t.Fatal("expected an error when the revision re-check could not resolve, so the " +
+			"caller requeues instead of publishing an unverifiable review")
 	}
-	if rev == nil {
-		t.Fatal("expected the review to publish when the re-check could not resolve HEAD")
-	}
-	if gh.submits != 1 {
-		t.Errorf("SubmitReview calls = %d, want 1 (fail-open)", gh.submits)
+	if gh.submits != 0 {
+		t.Errorf("SubmitReview calls = %d, want 0 — nothing may reach GitHub while the "+
+			"analysed revision is unverifiable", gh.submits)
 	}
 }
 
@@ -338,6 +355,19 @@ func (f *snapshotGH) SubmitReviewForCommit(_ string, _ int, _, _, commitID strin
 
 func (f *snapshotGH) FetchDiffForCommit(repo string, number int, _ string) (string, error) {
 	return f.FetchDiff(repo, number)
+}
+
+// GetPRRevision makes this double a RevisionResolver. Without it the branch
+// resolves the review's revision through the degraded path, stores the row with
+// an empty BaseSHA, and the publish guard then retires it as revision-stale
+// against a snapshot that DOES carry a base — a silent generate/retire loop.
+// The same values back both resolvers on purpose: a client that reports one
+// base at analysis time and another at publish time is a moved PR, not a fake.
+func (f *snapshotGH) GetPRRevision(string, int) (github.PRRevision, error) {
+	if f.err != nil {
+		return github.PRRevision{}, f.err
+	}
+	return github.PRRevision{HeadSHA: f.sha, BaseSHA: f.baseSHA}, nil
 }
 
 // TestPipeline_Run_RetiresReviewWhenPRClosedDuringRun covers the parity gap
