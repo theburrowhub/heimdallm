@@ -560,7 +560,12 @@ func main() {
 
 		var claimed bool
 		var claimSHA string
-		if pr.Head.SHA != "" {
+		// claimPRID is pr.ID of a *github.PullRequest — the GitHub id, the same
+		// value the trigger path passes as store.PR.GithubID, which is why the two
+		// paths share a key space at all. Zero is not a valid GitHub id, and every
+		// row carrying zero would collide on one key and mutually block re-reviews,
+		// so skip the claim rather than take a key that means nothing.
+		if pr.Head.SHA != "" && claimPRID != 0 {
 			ok, err := s.ClaimInFlightReview(claimPRID, pr.Head.SHA)
 			if err != nil {
 				slog.Warn("runReview: claim inflight failed, proceeding", "err", err)
@@ -2322,7 +2327,13 @@ func main() {
 		// released via the defer) re-reviews as intended. Fail-open on Claim
 		// error: a transient SQLite blip must not block a manual re-review.
 		var triggerClaimed bool
-		if ghPR.Head.SHA != "" {
+		// GithubID must be non-zero for the same reason the SHA must be non-empty:
+		// it is half the claim key. This path switched from pr.ID to pr.GithubID to
+		// align with the poll path, which is correct, but a locally-created,
+		// imported or legacy row with GithubID == 0 would make every such PR share
+		// key 0 and mutually block each other's re-reviews. Skipping the claim
+		// degrades to the pre-claim behaviour for those rows instead.
+		if ghPR.Head.SHA != "" && pr.GithubID != 0 {
 			ok, err := s.ClaimInFlightReview(pr.GithubID, ghPR.Head.SHA)
 			if err != nil {
 				slog.Warn("trigger review: claim inflight failed, proceeding", "err", err)
