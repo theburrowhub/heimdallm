@@ -538,21 +538,33 @@ func TestPipeline_Run_HydratesHeadSHAWhenMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if gh.shaCalls != 3 {
-		t.Errorf("expected hydration + pre/post-publish HEAD checks, got %d calls", gh.shaCalls)
+	// Four calls, each load-bearing, for a client WITHOUT a snapshot resolver
+	// (fakeGH is one — see the retireIfPRMoved fallback in Run):
+	//   1. hydration at the top of Run — the subject of this test, resolves the
+	//      empty Head.SHA that the Search API payload omits;
+	//   2. the pre-publish HEAD re-check, which catches a force-push that landed
+	//      while the CLI was running (reusing the hydrated value would defeat it);
+	//   3. the post-execute revalidation this branch adds before storing;
+	//   4. retireIfPRMoved's freshness lookup (#664/#666), reached only because
+	//      this double does not implement PRSnapshotResolver. Real clients do, so
+	//      in production the richer HeadSHA+BaseSHA guard runs instead and this
+	//      fourth GetPRHeadSHA never happens.
+	if gh.shaCalls != 4 {
+		t.Errorf("expected 4 GetPRHeadSHA calls (hydration + pre-publish + post-execute + retireIfPRMoved fallback), got %d", gh.shaCalls)
 	}
 	if rev.HeadSHA != "abc123" {
 		t.Errorf("stored HeadSHA = %q, want %q", rev.HeadSHA, "abc123")
 	}
 
 	// Second run: the PR now has the SHA inline (as if hydrated upstream).
-	// Pipeline must skip on SHA match before the post-execute revalidation.
+	// Pipeline must NOT hydrate again, and must skip on SHA match — which also
+	// means it never reaches the publish block, so the call count is unchanged.
 	pr.Head.SHA = "abc123"
 	_, err = p.Run(pr, pipeline.RunOptions{Primary: "claude", Fallback: "gemini"})
 	if err != nil {
 		t.Fatalf("second run: %v", err)
 	}
-	if gh.shaCalls != 3 {
+	if gh.shaCalls != 4 {
 		t.Errorf("GetPRHeadSHA called redundantly: %d", gh.shaCalls)
 	}
 	if gh.submits != 1 {
@@ -2337,13 +2349,17 @@ func TestReviewEvent(t *testing.T) {
 		{"medium", "medium", false, "", "APPROVE"},
 		{"high", "high", false, "", "REQUEST_CHANGES"},
 		{"", "", false, "", "APPROVE"},
-		// flag ON, default threshold ("" = low: any finding downgrades)
-		{"low", "low", true, "", "COMMENT"},
+		// flag ON, default threshold ("" = medium: all-low reviews keep the
+		// approval, so a nit-only pass no longer blocks convergence)
+		{"low", "low", true, "", "APPROVE"},
 		{"medium", "medium", true, "", "COMMENT"},
-		{"", "low", true, "", "COMMENT"},
+		{"", "low", true, "", "APPROVE"},
 		{"high", "high", true, "", "REQUEST_CHANGES"}, // high never downgraded
 		{"low", "", true, "", "APPROVE"},              // clean review still approves
 		{"medium", "", true, "", "APPROVE"},
+		{"medium", "high", true, "", "COMMENT"}, // above the default threshold
+		// whitespace-only threshold resolves to the default, not to "low"
+		{"low", "low", true, "   ", "APPROVE"},
 		// flag ON, explicit "low" threshold — same as default
 		{"low", "low", true, "low", "COMMENT"},
 		// flag ON, "medium" threshold: low-only findings keep the approval

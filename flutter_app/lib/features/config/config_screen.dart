@@ -692,6 +692,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   String _globalPRAssignee = '';
   bool _globalPRDraft = false;
   bool _globalNeverApproveWithIssues = false;
+  String _globalNeverApproveMinSeverity = defaultNeverApproveMinSeverity;
   String _globalTriageOwner = '';
   String _globalCloneDir = '';
   bool _globalAutoPromoteTriage = false;
@@ -763,10 +764,35 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
       const SizedBox(height: 12),
       _globalSwitchTile(
         'Never approve PRs with issues',
-        "If the review finds any issue, it's posted as a comment on the PR "
-            'instead of an approval (high severity still requests changes)',
+        'If the review raises a finding at or above the threshold below, '
+            "it's posted as a comment on the PR instead of an approval "
+            '(high severity still requests changes)',
         _globalNeverApproveWithIssues,
         (v) => _globalNeverApproveWithIssues = v,
+      ),
+      const SizedBox(height: 12),
+      DropdownButtonFormField<String>(
+        initialValue: _globalNeverApproveMinSeverity,
+        decoration: const InputDecoration(
+          labelText: 'Never approve — minimum severity',
+          helperText:
+              'Findings below this severity keep the approval; they are still '
+              'listed in the review body. Default: medium (all-low reviews '
+              'approve).',
+          border: OutlineInputBorder(),
+          isDense: true,
+        ),
+        items: neverApproveMinSeverityOptions
+            .map((v) => DropdownMenuItem(value: v, child: Text(v)))
+            .toList(),
+        // Disabled while the toggle is off: the threshold has no effect then,
+        // and a live-looking control that changes nothing reads as a bug.
+        onChanged: _globalNeverApproveWithIssues
+            ? (v) => setState(
+                () => _globalNeverApproveMinSeverity =
+                    v ?? defaultNeverApproveMinSeverity,
+              )
+            : null,
       ),
     ]);
   }
@@ -779,6 +805,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     _globalPRAssignee = config.globalPRAssignee;
     _globalPRDraft = config.globalPRDraft;
     _globalNeverApproveWithIssues = config.globalNeverApproveWithIssues;
+    _globalNeverApproveMinSeverity = config.globalNeverApproveMinSeverity;
     _globalTriageOwner = config.globalTriageOwner;
     _globalCloneDir = config.globalCloneDir;
     _cloneDirController.text = config.globalCloneDir;
@@ -1405,6 +1432,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     globalPRAssignee: _globalPRAssignee,
     globalPRDraft: _globalPRDraft,
     globalNeverApproveWithIssues: _globalNeverApproveWithIssues,
+    globalNeverApproveMinSeverity: _globalNeverApproveMinSeverity,
     globalTriageOwner: _globalTriageOwner,
     globalCloneDir: _globalCloneDir,
     globalAutoPromoteTriage: _globalAutoPromoteTriage,

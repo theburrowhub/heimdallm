@@ -1,7 +1,23 @@
 # ── Platform detection ─────────────────────────────────────────────────────────
 OS := $(shell uname -s)
 
-DAEMON_BIN  := $(shell pwd)/daemon/bin/heimdallm
+# Anchored to this Makefile's directory for the same reason as PKILL_ESCAPE
+# below: with $(shell pwd) a `make -f /path/to/Makefile` from elsewhere pointed
+# dev-stop at a daemon path that does not exist. Identical from the repo root.
+DAEMON_BIN  := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))/daemon/bin/heimdallm
+
+# pkill/pgrep -f treat their pattern as an ERE, so a path containing regex
+# metacharacters silently fails to match — a $HOME or checkout directory with
+# `+`, `(` or `[` in it would leave the daemon running with no error. The script
+# is the single implementation, shared with scripts/test-linux-install.sh, which
+# asserts it against a metacharacter-laden path.
+#
+# Anchored to this Makefile's own directory rather than the cwd: with a relative
+# path, `make -f /path/to/Makefile` from elsewhere cannot find the script, and
+# since the callers now abort on an empty pattern that would turn an unusual
+# invocation into a hard failure of dev-stop and install-linux.
+REPO_ROOT_DIR := $(dir $(lastword $(MAKEFILE_LIST)))
+PKILL_ESCAPE = $(REPO_ROOT_DIR)scripts/pkill-escape.sh
 
 ifeq ($(OS),Darwin)
   FLUTTER_DEVICE   := macos
@@ -19,6 +35,7 @@ endif
 .PHONY: build-daemon build-app build-web build-cli test test-cli lint-cli test-web-tooling test-compose-isolation \
         test-smoke test-github test-e2e test-web dev-cli test-docker dev dev-daemon dev-stop \
         release-local package-macos install-service verify-linux run-linux test-install-macos \
+        test-install-linux \
         install-macos uninstall-macos install-linux uninstall-linux \
         setup up up-build up-daemon up-build-daemon down logs logs-daemon \
         ps restart clean clean-clones _check-docker _check-buildkit _check-env \
@@ -45,7 +62,7 @@ build-app:
 	cd flutter_app && flutter build $(FLUTTER_DEVICE) --release
 
 build-cli:
-	$(MAKE) -C cli build
+	$(MAKE) -C cli build VERSION=$(GIT_VERSION)
 
 # Flutter Web bundle, consumed by docker/Dockerfile.web (served via Nginx).
 # --base-href=/ matches the Nginx server block that expects assets at the root.
@@ -69,6 +86,12 @@ test-install-macos:
 	@sh -n scripts/macos-install.sh
 	@sh -n scripts/test-macos-install.sh
 	@./scripts/test-macos-install.sh
+
+# Guards the pkill invocations in dev-stop / install-linux / uninstall-linux.
+# Static-plus-behavioural; starts no daemon and touches no installed files.
+test-install-linux:
+	@sh -n scripts/test-linux-install.sh
+	@./scripts/test-linux-install.sh
 
 test-web-tooling:
 	@sh docker/scripts/tests/test-web-tooling.sh
@@ -149,7 +172,14 @@ dev-cli:
 	$(MAKE) -C cli dev
 
 dev-stop:
-	@pkill -f "$(DAEMON_BIN)" 2>/dev/null && echo "↓  Daemon parado" || true
+	@# -x is REQUIRED: without it the pattern also matches this recipe's own
+	@# `sh -c` command line, so pkill SIGTERMs the shell running it and dev-stop
+	@# aborts — taking `make dev` / `make dev-daemon` with it, whether or not a
+	@# daemon was running. The dev daemon is spawned with no arguments, so its
+	@# cmdline equals the pattern exactly. Guarded by scripts/test-linux-install.sh.
+	@DAEMON_RE=$$($(PKILL_ESCAPE) "$(DAEMON_BIN)") || exit 1; \
+	[ -n "$$DAEMON_RE" ] || { echo "❌  pkill-escape.sh produced an empty pattern"; exit 1; }; \
+	pkill -x -f "$$DAEMON_RE" 2>/dev/null && echo "↓  Daemon parado" || true
 	@UI_PID_FILE="$$HOME/.local/share/heimdallm/ui.pid"; \
 	 if [ -f "$$UI_PID_FILE" ]; then \
 	   UI_PID=$$(cat "$$UI_PID_FILE"); \
@@ -742,6 +772,41 @@ install-linux: _check-linux verify-linux
 	  update-desktop-database "$$HOME/.local/share/applications/" 2>/dev/null || true
 	@command -v gtk-update-icon-cache >/dev/null 2>&1 && \
 	  gtk-update-icon-cache -q -t "$$HOME/.local/share/icons/hicolor/" 2>/dev/null || true
+	@# Stop the outgoing daemon — see #661. Replacing the binary above does not
+	@# touch the process already serving it (Linux unlink-while-running), and
+	@# DaemonLifecycle.ensureRunning() adopts any healthy daemon on the port
+	@# instead of spawning the one just installed. Left alone, the previous
+	@# release keeps running indefinitely: stale review logic, stale version in
+	@# the Status tab, no indication anything is wrong.
+	@#
+	@# Runs last, so a failure earlier in this target never takes down a working
+	@# daemon. SIGTERM (pkill's default) is the daemon's own graceful path — it
+	@# drains HTTP and sweeps in-flight agents.
+	@#
+	@# -x is REQUIRED, not a refinement: with -f alone the pattern also matches
+	@# the recipe's own `sh -c` command line, which contains the path — pkill
+	@# SIGTERMs the shell running it and the target dies mid-recipe (`|| true`
+	@# does not help; the signal hits the shell, not pkill). -x demands the whole
+	@# cmdline equal the pattern, which the daemon satisfies (spawned with no
+	@# arguments) and the longer shell cmdline does not. Guarded by
+	@# scripts/test-linux-install.sh.
+	@DAEMON_RE=$$($(PKILL_ESCAPE) "$$HOME/.local/opt/heimdallm/heimdalld") || exit 1; \
+	[ -n "$$DAEMON_RE" ] || { echo "❌  pkill-escape.sh produced an empty pattern — the"; \
+	  echo "   previous daemon is still running; stop it before launching."; exit 1; }; \
+	if pkill -x -f "$$DAEMON_RE" 2>/dev/null; then \
+	  echo ""; \
+	  echo "↓  Stopped the previously running daemon (it was serving the old binary)."; \
+	  for _ in 1 2 3 4 5 6 7 8 9 10; do \
+	    pgrep -x -f "$$DAEMON_RE" >/dev/null 2>&1 || break; \
+	    sleep 1; \
+	  done; \
+	  if pgrep -x -f "$$DAEMON_RE" >/dev/null 2>&1; then \
+	    echo "⚠  It has not exited after 10s — stop it manually, or it will keep"; \
+	    echo "   serving the old binary."; \
+	  else \
+	    echo "   Start the new one from the app: Server → Status → Start server."; \
+	  fi; \
+	fi
 	@echo ""
 	@echo "✅  Heimdallm installed:"
 	@echo "    Bundle:  $$HOME/.local/opt/heimdallm/"
@@ -774,6 +839,13 @@ uninstall-linux: _check-linux
 	@echo "▶  Uninstalling Heimdallm from $$HOME/.local/..."
 	@# Stop running instances (best-effort — ignored if nothing is running).
 	@#
+	@# -x is REQUIRED: with -f alone the pattern also matches the recipe's own
+	@# `sh -c` command line, so pkill SIGTERMs the shell running it and this
+	@# target dies here — before the desktop entry, icons and symlink below are
+	@# removed (`|| true` does not help; the signal hits the shell, not pkill).
+	@# -x demands the whole cmdline equal the pattern, which the shell's longer
+	@# cmdline never does. Guarded by scripts/test-linux-install.sh.
+	@#
 	@# Coverage caveat: pkill -f matches against /proc/<pid>/cmdline. This
 	@# catches:
 	@#   - launcher-launched Flutter apps (desktop entry Exec= is absolute,
@@ -788,8 +860,18 @@ uninstall-linux: _check-linux
 	@# running process, and the user can close the window whenever. We
 	@# intentionally avoid a broader `-f 'heimdallm'` match to prevent
 	@# hitting unrelated dev processes (e.g. `flutter run` of this repo).
-	@pkill -f "$$HOME/.local/opt/heimdallm/heimdallm" 2>/dev/null || true
-	@pkill -f "$$HOME/.local/opt/heimdallm/heimdalld" 2>/dev/null || true
+	@#
+	@# -x narrows this further: an app launched WITH arguments (e.g.
+	@# `~/.local/opt/heimdallm/heimdallm --some-flag`) no longer matches, since
+	@# its cmdline is longer than the pattern. Same rationale as above — the
+	@# rm -rf is safe against a running process — and plain -f never actually
+	@# reached that case anyway, because it killed this recipe's shell first.
+	@APP_RE=$$($(PKILL_ESCAPE) "$$HOME/.local/opt/heimdallm/heimdallm" 2>/dev/null); \
+	 if [ -n "$$APP_RE" ]; then pkill -x -f "$$APP_RE" 2>/dev/null || true; \
+	 else echo "⚠  could not build the app pattern; leaving any running app alone"; fi
+	@DAEMON_RE=$$($(PKILL_ESCAPE) "$$HOME/.local/opt/heimdallm/heimdalld" 2>/dev/null); \
+	 if [ -n "$$DAEMON_RE" ]; then pkill -x -f "$$DAEMON_RE" 2>/dev/null || true; \
+	 else echo "⚠  could not build the daemon pattern; leaving any running daemon alone"; fi
 	@rm -f "$$HOME/.local/share/heimdallm/ui.pid"
 	rm -f "$$HOME/.local/share/applications/com.theburrowhub.heimdallm.desktop"
 	@for SIZE in 48 128 256 512; do \

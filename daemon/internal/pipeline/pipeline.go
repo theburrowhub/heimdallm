@@ -64,6 +64,31 @@ type HeadSHAResolver interface {
 	GetPRHeadSHA(repo string, number int) (string, error)
 }
 
+// PRSnapshotFetcher returns the live state of a PR, not just its HEAD.
+//
+// Optional capability, discovered by type assertion on the pipeline's gh
+// dependency rather than added to the required set. *github.Client implements
+// it; the package's many test doubles do not, and widening the mandatory
+// interface would force every one of them to grow a method that most tests do
+// not exercise. When absent, the publish guard degrades to a HEAD-only check via
+// HeadSHAResolver.
+type PRSnapshotFetcher interface {
+	GetPRSnapshot(repo string, number int) (*github.PRSnapshot, error)
+}
+
+// CommitAnchoredReviewer submits a review pinned to an explicit commit.
+//
+// Optional for the same reason as PRSnapshotFetcher, and for the reason stated
+// on github.Client.SubmitReviewForCommit itself: keeping it off the
+// GitHubReviewer contract preserves the test doubles. Anchoring matters because
+// the plain SubmitReview lets GitHub attach the review to whatever is at HEAD
+// when the request lands, so a push racing the submit would misattribute
+// findings from the analysed commit to newer code. With the anchor, the worst
+// case degrades from "misattributed" to "shows as outdated".
+type CommitAnchoredReviewer interface {
+	SubmitReviewForCommit(repo string, number int, body, event, commitID string) (int64, string, error)
+}
+
 // CLIExecutor detects and runs an AI CLI tool.
 type CLIExecutor interface {
 	Detect(primary, fallback string) (string, error)
@@ -248,6 +273,135 @@ func (p *Pipeline) stopIfRepoBecameIneligible(
 		"repo", pr.Repo, "pr", pr.Number)
 	return true, nil
 }
+
+// retireIfPRMoved re-resolves the PR's live state immediately before anything is
+// written to GitHub and retires the freshly stored review when the PR has moved
+// on from what was analysed — either the commit is no longer at HEAD, or the PR
+// is no longer open.
+//
+// Why a re-check is needed at all: every dedup layer upstream decides whether to
+// *start* a review, and none of them can speak for what happens while the CLI
+// runs. That window is long — the review_timing stats carry a bucket_very_slow
+// tail out past 3000s — so an author who force-pushes, merges or closes inside it
+// gets a verdict describing code that is no longer there. Observed on
+// freepik-company/ai-bumblebee-proxy#1802: a REQUEST_CHANGES landed on a commit
+// that had already been approved and then superseded by two further pushes
+// (theburrowhub/heimdallm#664). At `high` severity that also blocks merge on
+// outdated code.
+//
+// This mirrors pendingReviewInvalidReason on the deferred publish path, which
+// checks both conditions for one API call. Checking only the SHA would have left
+// a PR merged mid-run still receiving its verdict.
+//
+// Marking the row is load-bearing, not bookkeeping: step 7 stored it with
+// GitHubReviewID == 0, which is exactly what ListUnpublishedReviews selects on.
+// Skipping the publish without retiring the row would simply hand the stale
+// verdict to the publish-worker to post later. The sentinel differs by reason,
+// matching the deferred path: SupersededReviewID for a moved HEAD (which Run
+// then treats as "no previous review", so the new commit can be reviewed), and
+// orphanedReviewID for a closed PR, which is terminal.
+//
+// Returns (true, …) when the caller must stop. Run then returns (nil, nil),
+// matching the other skip paths so main.go's `rev == nil` filter keeps the
+// review_completed SSE, the "review done" log line and the activity_log row
+// suppressed for a review that was never published (#322 Bug 4).
+func (p *Pipeline) retireIfPRMoved(rev *store.Review, pr *github.PullRequest) (bool, error) {
+	live, err := p.resolveLivePR(pr)
+	if err != nil {
+		// Deliberately fail-open. Deferring to the publish-worker instead would
+		// be safer in isolation but would delay every publish whenever the API
+		// has a blip, and needs a lifecycle state that does not exist yet.
+		// Publishing stale requires the PR to have moved AND this lookup to fail
+		// in the same run. The deferred path stays hardened regardless, because
+		// it re-validates under its own claim before submitting.
+		slog.Warn("pipeline: could not re-resolve PR before publishing, publishing anyway",
+			"repo", pr.Repo, "pr", pr.Number, "review_id", rev.ID,
+			"head_sha", pr.Head.SHA, "err", err)
+		return false, nil
+	}
+
+	reason := SkipReasonNone
+	terminalReviewID := SupersededReviewID
+	switch {
+	case live.stateKnown && live.state != "open":
+		reason, terminalReviewID = SkipReasonNotOpen, orphanedReviewID
+	case live.headSHA != "" && live.headSHA != pr.Head.SHA:
+		reason, terminalReviewID = SkipReasonHeadChanged, SupersededReviewID
+	}
+	if reason == SkipReasonNone {
+		return false, nil
+	}
+
+	if err := p.store.MarkReviewPublished(rev.ID, terminalReviewID, "", time.Now().UTC()); err != nil {
+		// Report rather than swallow, but still stop: an unretired row keeps
+		// GitHubReviewID == 0, so the publish-worker picks it up and applies its
+		// own re-validation. The stale verdict cannot reach GitHub either way —
+		// only the bookkeeping is left inconsistent.
+		return true, fmt.Errorf("pipeline: retire superseded review %d: %w", rev.ID, err)
+	}
+	slog.Info("pipeline: PR moved during review — retiring instead of publishing",
+		"repo", pr.Repo, "pr", pr.Number, "review_id", rev.ID, "reason", string(reason),
+		"reviewed_head_sha", pr.Head.SHA, "current_head_sha", live.headSHA,
+		"current_state", live.state, "event", rev.Event, "severity", rev.Severity)
+	p.publishSkipped(pr, reason)
+	return true, nil
+}
+
+// livePR is the freshness view the publish guard needs.
+type livePR struct {
+	state   string
+	headSHA string
+	// stateKnown distinguishes "the PR is open" from "state was never fetched".
+	// Without it the HEAD-only fallback would report an empty state and the
+	// caller would read that as a closed PR, retiring every review.
+	stateKnown bool
+}
+
+// resolveLivePR fetches the PR's current state, preferring the full snapshot and
+// falling back to a HEAD-only lookup when the gh dependency does not provide one.
+//
+// Both paths retry once after a short pause, matching the hydration lookup at the
+// top of Run: #243's failure mode was rate-limit 429s, and a back-to-back retry
+// is useless against those because the window is still active. A 429 during a
+// long review is the likeliest way this call fails, so the retry meaningfully
+// shrinks the fail-open window.
+func (p *Pipeline) resolveLivePR(pr *github.PullRequest) (livePR, error) {
+	if snapshotter, ok := p.gh.(PRSnapshotFetcher); ok {
+		snap, err := snapshotter.GetPRSnapshot(pr.Repo, pr.Number)
+		if err != nil {
+			time.Sleep(headResolveRetryDelay)
+			snap, err = snapshotter.GetPRSnapshot(pr.Repo, pr.Number)
+		}
+		if err != nil {
+			return livePR{}, err
+		}
+		if snap == nil {
+			return livePR{}, fmt.Errorf("pipeline: nil PR snapshot")
+		}
+		return livePR{state: snap.State, headSHA: snap.HeadSHA, stateKnown: true}, nil
+	}
+
+	sha, err := p.gh.GetPRHeadSHA(pr.Repo, pr.Number)
+	if err != nil {
+		time.Sleep(headResolveRetryDelay)
+		sha, err = p.gh.GetPRHeadSHA(pr.Repo, pr.Number)
+	}
+	if err != nil {
+		return livePR{}, err
+	}
+	if sha == "" {
+		// Empty-but-nil-error is a lookup failure, not "unchanged" — the same
+		// reading the hydration path at the top of Run applies to this value.
+		// Folding it into the error branch keeps the log honest about which case
+		// occurred instead of silently claiming the HEAD was confirmed.
+		return livePR{}, fmt.Errorf("pipeline: resolve HEAD SHA: empty SHA returned")
+	}
+	return livePR{headSHA: sha}, nil
+}
+
+// headResolveRetryDelay is the pause before the single retry of a HEAD/snapshot
+// lookup. Same value and rationale as the hydration lookup in Run.
+const headResolveRetryDelay = 500 * time.Millisecond
 
 // publish emits an SSE lifecycle event with the given payload. No-op
 // when no publisher is wired. A marshal failure on a map[string]any
@@ -1082,7 +1236,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	}
 	slog.Info("pipeline: using CLI", "cli", cli)
 
-	// 4b. Circuit breaker: hard cap on review count per PR HEAD / per repo.
+	// 4b. Circuit breaker: hard cap on review runs per PR HEAD / per repo.
 	// Runs AFTER all dedup layers so it only fires when the dedup failed but
 	// the caller is about to spend Claude credits anyway. See
 	// theburrowhub/heimdallm#243.
@@ -1115,6 +1269,51 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	if stopped, err := p.stopIfRepoBecameIneligible(pr, opts.RepoEligible); stopped {
 		return nil, err
 	}
+	// 4c. Record the attempt. Every remaining path leads to Execute, which is
+	// what makes this — and not a line earlier — the point at which the run
+	// becomes chargeable.
+	//
+	// Placement is load-bearing. This deliberately sits AFTER
+	// stopIfRepoBecameIneligible: that guard is a zero-spend, explicitly
+	// retryable exit ("deferring review"), so recording before it meant a repo
+	// toggled off mid-poll burned a ledger row per tick without touching the
+	// CLI. After PerPR24h such ticks the commit was capped for 24h and the
+	// legitimate review was refused once the repo came back, recoverable only
+	// via Force.
+	//
+	// It has to happen BEFORE Execute and must survive failure. Rows in the
+	// reviews table are only written on success (step 7), so a run that dies in
+	// between — a CLI whose output will not parse, say — used to leave no trace
+	// anywhere: the in-flight claim was released by the caller's defer, no
+	// review row existed, and the breaker's counter never moved. Every dedup
+	// layer keys off one of those two, so all of them were blind at once and the
+	// retry of the identical commit was unbounded, each iteration paying full
+	// price (theburrowhub/heimdallm#663).
+	//
+	// Forced runs are recorded too. Force bypasses the breaker CHECK because a
+	// human clicking "Re-review" is deliberate intent, but the spend is real and
+	// an unrecorded run would leave the same blind spot for whatever runs next.
+	//
+	// Known trade-off: the ledger cannot tell a failure that spent credits from
+	// one that did not (provider auth rejection, an execution timeout, context
+	// cancellation on daemon shutdown). Those count too, so a restart loop can
+	// cap a commit for 24h and report "N review runs" for runs that cost
+	// nothing. Accepted deliberately — classifying CLI errors by whether they
+	// billed is guesswork, and under-counting is what #663 was. Force is the
+	// operator's escape hatch.
+	//
+	// Fail-open on a write error, matching the breaker check above: a transient
+	// SQLite blip must not block a legitimate review. Logged at Error, not Warn:
+	// this single write is what the entire cost brake now rests on, so a
+	// persistent failure (read-only DB, disk full) silently restores the
+	// unbounded retry loop and must be visible in the logs rather than inferred
+	// from the bill.
+	if err := p.store.RecordReviewAttempt(prID, pr.Head.SHA); err != nil {
+		slog.Error("pipeline: could not record review attempt — the per-PR/per-repo "+
+			"cost cap is not counting this run",
+			"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA, "err", err)
+	}
+
 	p.notify.Notify("PR Review Started", fmt.Sprintf("%s #%d", pr.Repo, pr.Number))
 	p.publish(sse.EventPRDetected, map[string]any{
 		"pr_number": pr.Number,
@@ -1299,6 +1498,16 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	// even though they describe the previous revision. ReviewMode "multi" is
 	// retained as a configuration value for compatibility, but publication is
 	// intentionally consolidated into this one immutable review.
+	//
+	// The multi-mode comment loop that used to sit here is gone with it, and so
+	// is the retireIfPRMoved call main added ahead of that loop (#664/#666):
+	// its freshness check is subsumed by the live policy/revision guard below,
+	// which compares BOTH HeadSHA and BaseSHA against the reviewed revision
+	// instead of HEAD alone, and clears successor-pending on every retire path.
+	// The guard is reached through a type assertion, so retireIfPRMoved stays as
+	// the fallback for clients that do not implement PRSnapshotResolver — that
+	// keeps #666's guarantee without paying for two freshness round-trips on the
+	// path that has the richer check.
 	reviewBody := BuildGitHubBody(result)
 
 	if stopped, err := p.stopIfRepoBecameIneligible(pr, opts.RepoEligible); stopped {
@@ -1343,6 +1552,11 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 			p.publishSkipped(pr, reason)
 			return nil, nil
 		}
+	} else if superseded, err := p.retireIfPRMoved(rev, pr); superseded {
+		// No snapshot resolver (test doubles, older adapters): fall back to the
+		// HEAD-only freshness check from #666 so this path is not left with no
+		// guard at all. Fail-open on lookup error, as that helper documents.
+		return nil, err
 	}
 
 	if rev.AuthorizationSource != ReviewAuthorizationManual {
@@ -1382,6 +1596,18 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		}
 	}
 
+	// Anchor the submission to the commit that was analysed. The guard above
+	// narrows the race but cannot close it: it is check-then-act, so a push
+	// landing between the check and this call would have GitHub attach the review
+	// to the new HEAD. With commit_id pinned, that worst case degrades from
+	// "findings misattributed to code they were not written about" to "review
+	// shows as outdated", which is what the deferred publish path already does.
+	//
+	// targetSHA, not pr.Head.SHA: this branch pins the review to the revision the
+	// snapshot was cut from, which is the code the findings were actually written
+	// about. main's CommitAnchoredReviewer type assertion is unnecessary here
+	// because SubmitReviewForCommit is part of the client interface on this
+	// branch, so every implementation — test doubles included — provides it.
 	ghReviewID, ghReviewState, publishErr := p.gh.SubmitReviewForCommit(
 		pr.Repo, pr.Number,
 		AnnotateBodyForEvent(reviewBody, reviewEvent, len(result.Issues)),
@@ -2001,6 +2227,32 @@ func MaxIssueSeverity(issues []executor.Issue) string {
 	return rankToSeverity(maxRank)
 }
 
+// DefaultNeverApproveMinSeverity is the threshold applied when the operator
+// leaves never_approve_min_severity unset at every scope.
+//
+// It is "medium", not "low": a strong review model reports low-severity nits
+// (naming, doc-comment placement, cosmetic refactors) on essentially every
+// real diff, so a "low" threshold made the never-approve downgrade fire on
+// reviews that had nothing merge-relevant to say — the PR never converged on
+// an approval no matter how many fix commits landed. With "medium", all-low
+// reviews still approve and the findings stay visible in the review body;
+// only a finding the model rated medium or higher withholds the approval.
+//
+// Operators who want the old behavior set never_approve_min_severity = "low"
+// explicitly.
+const DefaultNeverApproveMinSeverity = "medium"
+
+// resolveNeverApproveMinSeverity maps the unset threshold to its default.
+// Non-empty values pass through untouched — Config.Validate has already
+// bounded them to low|medium|high, and severityRank ranks anything it does
+// not recognise as "low".
+func resolveNeverApproveMinSeverity(minSeverity string) string {
+	if strings.TrimSpace(minSeverity) == "" {
+		return DefaultNeverApproveMinSeverity
+	}
+	return minSeverity
+}
+
 // ReviewEvent decides the GitHub review event, honoring the
 // never-approve-with-issues setting. It builds on SeverityToEvent: when the
 // base decision would be APPROVE, the setting is on, and the review found at
@@ -2009,13 +2261,13 @@ func MaxIssueSeverity(issues []executor.Issue) string {
 // still approves.
 //
 // maxIssueSeverity is MaxIssueSeverity(issues): "" means no findings.
-// minSeverity is the never_approve_min_severity setting; empty means "low"
-// (any finding downgrades — the pre-#597 behavior), matching severityRank's
-// default rank for unknown values.
+// minSeverity is the never_approve_min_severity setting; empty resolves to
+// DefaultNeverApproveMinSeverity, so a review whose findings are all
+// low-severity keeps its approval.
 func ReviewEvent(finalSeverity, maxIssueSeverity string, neverApproveWithIssues bool, minSeverity string) string {
 	event := SeverityToEvent(finalSeverity)
 	if event == "APPROVE" && neverApproveWithIssues && maxIssueSeverity != "" &&
-		severityRank(maxIssueSeverity) >= severityRank(minSeverity) {
+		severityRank(maxIssueSeverity) >= severityRank(resolveNeverApproveMinSeverity(minSeverity)) {
 		return "COMMENT"
 	}
 	return event

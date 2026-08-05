@@ -10,6 +10,33 @@
 * **issues:** `auto_promote_triage` defaults on only when `refinement_labels` is configured. Repos without a refinement target keep their previous review-only behavior; set `auto_promote_triage = false` explicitly to keep refinement manual even when refinement labels exist.
 * **pipeline (PR reviews):** a push (new HEAD SHA) on a previously-reviewed PR no longer triggers an automatic re-review on its own. Heimdallm now requires an explicit `review_requested` event for the bot — i.e. someone (or some automation) pressing "Re-request review" — newer than the previous review's `CreatedAt`. The SHA-unchanged dedup (#322 Bug 5) and this SHA-changed gate now share the same predicate, so the contract is "review iff explicitly re-requested" regardless of whether the commit changed. Workflows that relied on push-triggered re-reviews — typically repos with "Dismiss stale reviews on push" or CODEOWNERS auto-request workflows that auto-re-added the bot to `requested_reviewers` — must now explicitly re-request the review (manually in the UI, or via a GitHub Action calling `gh pr edit --add-reviewer`). Skipped pushes surface as a `review_skipped` SSE with reason `no_rereview_request` (distinct from `sha_unchanged`) so dashboards can tell the two cases apart. Closes #509.
 
+## [0.8.1](https://github.com/theburrowhub/heimdallm/compare/v0.8.0...v0.8.1) (2026-08-05)
+
+
+### Bug Fixes
+
+* **breaker:** count review runs, not published reviews ([#668](https://github.com/theburrowhub/heimdallm/issues/668)) ([17215c0](https://github.com/theburrowhub/heimdallm/commit/17215c0d797dea4a9d8e74fca43e71639112bee8))
+* **daemon:** kill git's process group on timeout and reap orphans in PID 1 ([#667](https://github.com/theburrowhub/heimdallm/issues/667)) ([4a9f8bf](https://github.com/theburrowhub/heimdallm/commit/4a9f8bf916b80d8139f89a5bb98111df05a656dc))
+* **pipeline:** re-check HEAD SHA before publishing a review ([#666](https://github.com/theburrowhub/heimdallm/issues/666)) ([d664aa8](https://github.com/theburrowhub/heimdallm/commit/d664aa871bd3ff39db40b1f221c23ea49eec9f41))
+
+## [0.8.0](https://github.com/theburrowhub/heimdallm/compare/v0.7.13...v0.8.0) (2026-08-03)
+
+
+### ⚠ BREAKING CHANGES
+
+* with never_approve_with_issues on and never_approve_min_severity unset, reviews whose findings are all low-severity now publish as APPROVE instead of COMMENT. Set never_approve_min_severity = "low" to keep the previous behaviour.
+
+### Features
+
+* expose never-approve severity threshold in the UI, default it to medium ([#658](https://github.com/theburrowhub/heimdallm/issues/658)) ([5ebe9c4](https://github.com/theburrowhub/heimdallm/commit/5ebe9c49d94c271ef03209dd07b2f6462a272d6a))
+
+## [0.7.13](https://github.com/theburrowhub/heimdallm/compare/v0.7.12...v0.7.13) (2026-08-03)
+
+
+### Bug Fixes
+
+* **review:** keep tier3 on repoctx, give codex a workspace, kill process groups ([#656](https://github.com/theburrowhub/heimdallm/issues/656)) ([2b9eb0a](https://github.com/theburrowhub/heimdallm/commit/2b9eb0aa8817416e924e04a74515f8de21e9ee21))
+
 ## [0.7.12](https://github.com/theburrowhub/heimdallm/compare/v0.7.11...v0.7.12) (2026-07-31)
 
 

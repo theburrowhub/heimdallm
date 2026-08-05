@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/heimdallm/daemon/internal/procgroup"
 )
 
 // gitTimeout caps each `git` invocation so a hung network or huge fetch
@@ -384,7 +386,12 @@ func captureGit(ctx context.Context, dir string, env []string, args ...string) (
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	// procgroup.Run rather than cmd.Run: this helper backs every git call in
+	// GitExec, including CheckoutNewBranch / Push / DeleteRemoteBranch, which
+	// fork `ssh` for SSH remotes. exec.CommandContext's cancellation reaches
+	// only git, leaving that ssh child orphaned onto PID 1 as a zombie
+	// (theburrowhub/heimdallm#665).
+	if err := procgroup.Run(cmd); err != nil {
 		// Cap stderr to protect against pathological output (e.g. huge
 		// merge-conflict reports, repeated progress lines, etc).
 		errText := stderr.String()

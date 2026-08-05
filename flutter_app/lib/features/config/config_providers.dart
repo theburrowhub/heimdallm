@@ -365,6 +365,11 @@ Map<String, dynamic> _computeGlobalDiff(AppConfig old, AppConfig updated) {
       updated.globalNeverApproveWithIssues) {
     aiDiff['never_approve_with_issues'] = updated.globalNeverApproveWithIssues;
   }
+  if (old.globalNeverApproveMinSeverity !=
+      updated.globalNeverApproveMinSeverity) {
+    aiDiff['never_approve_min_severity'] =
+        updated.globalNeverApproveMinSeverity;
+  }
 
   // Agent configs — diff each CLI agent's settings individually.
   final agentsDiff = <String, dynamic>{};

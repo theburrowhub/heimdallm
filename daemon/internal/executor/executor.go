@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -12,11 +13,22 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 )
 
 const executionTimeout = 5 * time.Minute
 const cliHelpTimeout = 2 * time.Second
+
+// processGroupTermGrace is how long a cancelled execution may keep running
+// after SIGTERM before the whole group is killed outright (see #614).
+const processGroupTermGrace = time.Second
+
+// waitDelayAfterExit bounds how long Wait blocks on inherited stdout/stderr
+// pipes after the command itself is done: a descendant holding them open used to
+// stall the pipeline long past the timeout (see #614).
+const waitDelayAfterExit = 3 * time.Second
 
 // ReviewResult is the parsed JSON response from the AI CLI.
 type ReviewResult struct {
@@ -116,11 +128,86 @@ func OptionsForSelectedCLI(primary, selected string, opts ExecOptions) ExecOptio
 }
 
 // Executor runs AI CLI tools for code review.
-type Executor struct{}
+type Executor struct {
+	// groupsMu guards inFlightGroups, which records the process-group IDs of
+	// executions currently running. Each execution gets its own group so a
+	// timeout can reach the grandchild that holds the provider connection
+	// (#614) — but that also detaches it from any group-directed signal the
+	// daemon receives, so the shutdown path needs this registry to sweep what
+	// is still running. See TerminateAll.
+	groupsMu       sync.Mutex
+	inFlightGroups map[int]*atomic.Bool
+}
 
 // New creates a new Executor.
 func New() *Executor {
 	return &Executor{}
+}
+
+// trackGroup registers a running execution's process group, along with the flag
+// that reports whether its child has been reaped.
+func (e *Executor) trackGroup(pgid int, reaped *atomic.Bool) {
+	e.groupsMu.Lock()
+	defer e.groupsMu.Unlock()
+	if e.inFlightGroups == nil {
+		e.inFlightGroups = make(map[int]*atomic.Bool)
+	}
+	e.inFlightGroups[pgid] = reaped
+}
+
+// untrackGroup forgets an execution's process group once Wait has returned.
+func (e *Executor) untrackGroup(pgid int) {
+	e.groupsMu.Lock()
+	defer e.groupsMu.Unlock()
+	delete(e.inFlightGroups, pgid)
+}
+
+// TerminateAll ends every execution this Executor still has in flight, SIGTERM
+// first and SIGKILL after a grace period. The daemon's shutdown path must call
+// it: ExecuteRaw derives its context from context.Background() rather than from
+// the SIGINT/SIGTERM handler, and each execution runs in its own process group,
+// so nothing else would reach an in-flight agent. Without this a restart leaves
+// agents running and spending provider quota — the #614 symptom. Safe to call
+// when nothing is running.
+func (e *Executor) TerminateAll() {
+	type liveGroup struct {
+		pgid   int
+		reaped *atomic.Bool
+	}
+	e.groupsMu.Lock()
+	groups := make([]liveGroup, 0, len(e.inFlightGroups))
+	for pgid, reaped := range e.inFlightGroups {
+		groups = append(groups, liveGroup{pgid: pgid, reaped: reaped})
+	}
+	e.groupsMu.Unlock()
+
+	if len(groups) == 0 {
+		return
+	}
+	slog.Info("executor: terminating in-flight executions", "groups", len(groups))
+	// Registration alone does not prove the group is still ours: untrackGroup
+	// runs after Wait has reaped the child, so a registered pgid can already be
+	// free. The per-execution reaped flag is set before that, so checking it
+	// immediately before each signal keeps the sweep off recycled pgids in all
+	// but the gap between those two statements — the same residual window
+	// documented for the cancellation path, and likewise #614's to close.
+	for _, g := range groups {
+		if g.reaped.Load() {
+			continue
+		}
+		if err := killGroup(g.pgid, syscall.SIGTERM); err != nil {
+			slog.Debug("executor: process group already gone", "pgid", g.pgid, "err", err)
+		}
+	}
+	time.Sleep(processGroupTermGrace)
+	for _, g := range groups {
+		if g.reaped.Load() {
+			continue
+		}
+		if err := killGroup(g.pgid, syscall.SIGKILL); err != nil {
+			slog.Debug("executor: process group already gone", "pgid", g.pgid, "err", err)
+		}
+	}
 }
 
 // Detect returns the first available CLI (primary → fallback).
@@ -1253,14 +1340,83 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 	}
 
 	var workDirFlags []string
-	if opts.WorkDir != "" {
+	switch {
+	case opts.WorkDir != "":
 		workDirFlags = detectWorkDirFlags(cli, cliPath, opts.WorkDir)
+	case cli == "codex":
+		// `codex exec` refuses to start outside a git repo or a directory
+		// trusted in ~/.codex/config.toml. With no checkout the child would
+		// inherit the daemon's cwd — `/` under launchd — and abort with "Not
+		// inside a trusted directory" (theburrowhub/heimdallm#655). A review
+		// needs no checkout at all (the diff travels in the prompt), so hand
+		// codex an empty per-execution directory and waive the repo check.
+		// Substituting `/` for an empty workspace also narrows what the agent
+		// can read, rather than widening it.
+		// The workspace is passed as cmd.Dir below rather than via --cd: the
+		// child's cwd is what codex inspects, so --cd would be redundant.
+		// --skip-git-repo-check is not gated behind cliHelpSupports like the
+		// other flags here: that probe reads the top-level `codex --help`, and
+		// the flag only appears under `codex exec --help` (verified on codex
+		// 0.146.0), so gating it would always resolve to false and reinstate the
+		// very failure this branch exists to prevent.
+		ws, err := os.MkdirTemp("", "heimdallm-codex-ws-*")
+		if err != nil {
+			return nil, fmt.Errorf("executor: create codex workspace: %w", err)
+		}
+		defer os.RemoveAll(ws)
+		opts.WorkDir = ws
+		workDirFlags = []string{"--skip-git-repo-check"}
+		// Loud on purpose. Only the review and triage paths reach this branch
+		// today (the write-mode callers abort when repoctx fails, so they never
+		// arrive with an empty WorkDir), and an agent asked to change code would
+		// silently succeed against an empty directory here. If this ever shows
+		// up alongside a develop/refinement run, that caller needs a checkout,
+		// not this workspace.
+		slog.Warn("executor: running codex without a checkout in a throwaway workspace",
+			"workspace", ws)
 	}
 
 	args := buildArgs(cli, opts, workDirFlags)
 	cmd := exec.CommandContext(ctx, cliPath, args...)
 	cmd.Stdin = strings.NewReader(prompt)
 	cmd.ExtraFiles = opts.ExtraFiles.cloneFiles()
+	// Every supported CLI is a launcher: the process we start spawns the one
+	// that actually talks to the provider. exec.CommandContext signals only the
+	// direct child, so on timeout the launcher died while its grandchild was
+	// reparented to init and kept spending provider quota (#614). Give the
+	// execution its own process group and signal the whole group instead.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Cancellation escalates within the group: SIGTERM, then SIGKILL for a
+	// descendant that ignores it. Both are aimed at the group while the
+	// execution is still live, because once every member has exited the kernel
+	// may hand that pgid to somebody else and a late signal would hit an
+	// unrelated group. `reaped` is set the instant Wait returns and checked
+	// immediately before the kill: that narrows the window to the gap between
+	// those two statements, it does not remove it. Closing it entirely requires
+	// reserving the pgid with a wait-without-reap (wait4(WNOWAIT)/pidfd), which
+	// belongs to #614.
+	runDone := make(chan struct{})
+	var reaped atomic.Bool
+	cmd.Cancel = func() error {
+		err := signalProcessGroup(cmd, syscall.SIGTERM)
+		go func() {
+			select {
+			case <-time.After(processGroupTermGrace):
+				if reaped.Load() {
+					return // the pgid may already be reused — leave it alone
+				}
+				if killErr := signalProcessGroup(cmd, syscall.SIGKILL); killErr != nil {
+					slog.Debug("executor: process group already gone", "cli", cli, "err", killErr)
+				}
+			case <-runDone:
+			}
+		}()
+		return err
+	}
+	// Bound the wait on inherited pipes. Without this, Wait blocks until every
+	// copy of stdout/stderr is closed — a descendant holding them stalled the
+	// pipeline for as long as it chose to run.
+	cmd.WaitDelay = waitDelayAfterExit
 
 	// Augment PATH with paths from the login shell so the CLI can find its own
 	// dependencies, without running stdin THROUGH the shell (which would cause
@@ -1282,16 +1438,71 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	if err := cmd.Run(); err != nil {
+	// Start and Wait are split rather than calling Run so the process group can
+	// be registered while the execution is live — TerminateAll needs it to reach
+	// agents that are still running when the daemon shuts down.
+	var pgid int
+	runErr := cmd.Start()
+	if runErr == nil {
+		pgid = cmd.Process.Pid // Setpgid makes the child its own group leader
+		e.trackGroup(pgid, &reaped)
+		runErr = cmd.Wait()
+		reaped.Store(true) // before untrackGroup: no signal must follow the reap
+		e.untrackGroup(pgid)
+	}
+	close(runDone) // stop the escalation goroutine
+
+	// WaitDelay also fires when the command itself exited cleanly but a
+	// descendant still holds the inherited pipes — the exact shape of #614. The
+	// run succeeded and its output is already buffered, so return it instead of
+	// discarding a complete review. Such a descendant is NOT swept here: the
+	// child has been reaped, so its pgid may already belong to another group, and
+	// closing that leak safely needs a wait-without-reap (#614). This is the one
+	// place with positive evidence of a live leaked process, so log its identity
+	// — pgid and leader PID — to make it traceable while #614 is open.
+	if errors.Is(runErr, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.ExitCode() == 0 {
+		slog.Warn("executor: CLI exited 0 but a descendant held the output pipes; returning collected output and leaving the descendant running",
+			// With Setpgid the group ID *is* the leader's PID, so one field
+			// identifies both the group and the process to look for.
+			"cli", cli, "bytes", stdout.Len(), "pgid", pgid)
+		return stdout.Bytes(), nil
+	}
+	if runErr != nil {
 		// Some CLIs (e.g. claude) write errors to stdout rather than stderr.
 		errDetail := strings.TrimSpace(stderr.String())
 		if errDetail == "" {
 			errDetail = strings.TrimSpace(stdout.String())
 		}
-		return nil, fmt.Errorf("executor: run %s: %w (output: %s)", cli, err, errDetail)
+		return nil, fmt.Errorf("executor: run %s: %w (output: %s)", cli, runErr, errDetail)
 	}
 
 	return stdout.Bytes(), nil
+}
+
+// signalProcessGroup sends sig to the entire process group led by cmd's child.
+// Setpgid makes the child's PID the group ID, so negating it addresses the child
+// and every descendant that has not created a group of its own. Returns
+// os.ErrProcessDone when there is no process left to signal.
+func signalProcessGroup(cmd *exec.Cmd, sig syscall.Signal) error {
+	if cmd == nil || cmd.Process == nil {
+		return os.ErrProcessDone
+	}
+	return killGroup(cmd.Process.Pid, sig)
+}
+
+// killGroup signals the process group led by pgid, reporting a group that has
+// already exited as os.ErrProcessDone. That translation matters for cmd.Cancel:
+// os/exec only ignores a Cancel error equivalent to os.ErrProcessDone, so a raw
+// ESRCH would come back out of Wait and mask a cancellation as
+// "executor: run <cli>: no such process".
+func killGroup(pgid int, sig syscall.Signal) error {
+	if err := syscall.Kill(-pgid, sig); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
+	}
+	return nil
 }
 
 func validateExecutionRequest(cli string, opts ExecOptions) error {

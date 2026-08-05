@@ -146,6 +146,10 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
         updated.neverApproveWithIssues != null) {
       diff['never_approve_with_issues'] = updated.neverApproveWithIssues!;
     }
+    if (old.neverApproveMinSeverity != updated.neverApproveMinSeverity) {
+      diff['never_approve_min_severity'] =
+          updated.neverApproveMinSeverity ?? '';
+    }
     if (!_listsEqual(old.prReviewers, updated.prReviewers)) {
       diff['pr_reviewers'] = updated.prReviewers ?? <String>[];
     }
@@ -314,6 +318,16 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
                       ),
                     ),
                     onReset: () => _resetField('never_approve_with_issues'),
+                  ),
+                  const SizedBox(height: 10),
+                  OverrideDropdown(
+                    label: 'Never approve — minimum severity',
+                    globalValue: appConfig.globalNeverApproveMinSeverity,
+                    overrideValue: _config.neverApproveMinSeverity,
+                    options: neverApproveMinSeverityOptions,
+                    onChanged: (v) =>
+                        _update(_config.copyWith(neverApproveMinSeverity: v)),
+                    onReset: () => _resetField('never_approve_min_severity'),
                   ),
                 ], accent: FeaturePalette.prReview),
                 _sectionCard('Issue Tracking', [

@@ -318,6 +318,21 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                     ),
                     onReset: () => _resetField('never_approve_with_issues'),
                   ),
+                  const SizedBox(height: 10),
+                  OverrideDropdown(
+                    label: 'Never approve — minimum severity',
+                    globalValue:
+                        orgConfig?.neverApproveMinSeverity ??
+                        appConfig.globalNeverApproveMinSeverity,
+                    inheritedLabel: source(
+                      orgConfig?.neverApproveMinSeverity != null,
+                    ),
+                    overrideValue: _config.neverApproveMinSeverity,
+                    options: neverApproveMinSeverityOptions,
+                    onChanged: (v) =>
+                        _update(_config.copyWith(neverApproveMinSeverity: v)),
+                    onReset: () => _resetField('never_approve_min_severity'),
+                  ),
                 ], accent: FeaturePalette.prReview),
 
                 // ── Section 3: Issue Tracking ──────────────────────────

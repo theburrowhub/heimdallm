@@ -1169,7 +1169,11 @@ drain:
 	if count != 1 {
 		t.Fatalf("circuit breaker events = %d, want 1", count)
 	}
-	if reason != "per-PR HEAD cap reached: 3 reviews on this commit in last 24h (cap 3)" {
+	// "review runs", not "reviews": the cap counts every run that spent CLI
+	// credits, including ones that failed before a review row was written
+	// (#663). Saying "3 reviews" when only one was ever published sent the
+	// operator looking for reviews that do not exist.
+	if reason != "per-PR HEAD cap reached: 3 review runs on this commit in last 24h (cap 3)" {
 		t.Fatalf("reason = %q", reason)
 	}
 }
