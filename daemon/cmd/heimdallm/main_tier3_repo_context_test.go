@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -16,6 +18,46 @@ import (
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
 )
+
+// newTier3LocalCheckout returns a real single-commit Git checkout to stand in
+// for the operator's configured local_dir.
+//
+// A bare t.TempDir() was enough when these tests were written: Acquire took the
+// path on trust. The isolation refactor validates that a configured local_dir is
+// actually a Git checkout before snapshotting it — snapshotting a non-repository
+// cannot produce a commit-pinned tree — so the seed acquire now fails with
+// "is not a Git checkout" unless the directory is real.
+func newTier3LocalCheckout(t *testing.T) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		// Matches the posture in repoctx's integration tests: the pinned Alpine
+		// test image ships only the Go toolchain.
+		t.Skipf("git is unavailable in this test environment: %v", err)
+	}
+	dir := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+	}
+	run("init", "-b", "main")
+	run("config", "user.name", "Heimdallm Test")
+	run("config", "user.email", "heimdallm@example.invalid")
+	if err := os.WriteFile(filepath.Join(dir, "tracked.txt"), []byte("seed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "tracked.txt")
+	run("commit", "-m", "seed")
+	// Acquire also inspects origin to confirm the checkout belongs to the repo it
+	// was handed, so the remote has to match the slug these tests use.
+	run("remote", "add", "origin", "https://github.com/org/repo.git")
+	return dir
+}
 
 // newTier3Adapter builds the minimal adapter the HandleChange review path needs,
 // with a capture hook standing in for runReview.
@@ -69,7 +111,7 @@ func tier3WatchItem() (*scheduler.WatchItem, *scheduler.ItemSnapshot) {
 // forwarded the configured local_dir without asking repoctx — the bug — would
 // hand the path over regardless and bypass the concurrency budget entirely.
 func TestTier3Adapter_HandleChange_RespectsWorktreeCap(t *testing.T) {
-	localDir := t.TempDir()
+	localDir := newTier3LocalCheckout(t)
 	mgr := repoctx.NewManagerWithOptions(repoctx.ManagerOptions{MaxWorktreesPerRepo: 1})
 
 	// Hold the repo's only slot for the duration of the call.
@@ -110,7 +152,7 @@ func TestTier3Adapter_HandleChange_RespectsWorktreeCap(t *testing.T) {
 // starves every later execution on the repo. With the cap free, runReview must
 // receive the reserved checkout, and the slot must be available again afterwards.
 func TestTier3Adapter_HandleChange_ReleasesTheReservation(t *testing.T) {
-	localDir := t.TempDir()
+	localDir := newTier3LocalCheckout(t)
 	mgr := repoctx.NewManagerWithOptions(repoctx.ManagerOptions{MaxWorktreesPerRepo: 1})
 
 	var (
@@ -126,8 +168,16 @@ func TestTier3Adapter_HandleChange_ReleasesTheReservation(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("runReview called %d time(s), want 1", calls)
 	}
-	if !sameDir(t, gotAI.LocalDir, localDir) {
-		t.Errorf("LocalDir = %q, want the reserved checkout %q", gotAI.LocalDir, localDir)
+	// The reservation now hands over an isolated snapshot, not the operator's
+	// live checkout — that substitution is what this PR exists to make. Assert
+	// the property that matters instead of a literal path: something was
+	// reserved, and it is NOT the working tree the operator is editing.
+	if gotAI.LocalDir == "" {
+		t.Error("LocalDir is empty: the cap was free, so a checkout should have been reserved")
+	}
+	if sameDir(t, gotAI.LocalDir, localDir) {
+		t.Errorf("LocalDir = %q: the execution was handed the operator's own checkout "+
+			"instead of an isolated snapshot", gotAI.LocalDir)
 	}
 
 	// The only slot must be free again: if the handle leaked, this blocks until
@@ -154,7 +204,7 @@ func TestTier3Adapter_HandleChange_ReleasesTheReservation(t *testing.T) {
 // acquisition, so a slow clone ended up spending provider quota on a repo that
 // was no longer monitored, with no review_skipped event to show for it.
 func TestTier3Adapter_HandleChange_RechecksMonitoredAfterAcquire(t *testing.T) {
-	localDir := t.TempDir()
+	localDir := newTier3LocalCheckout(t)
 	mgr := repoctx.NewManagerWithOptions(repoctx.ManagerOptions{MaxWorktreesPerRepo: 1})
 
 	// Occupy the only slot so the acquisition inside HandleChange has to wait.

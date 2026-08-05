@@ -133,25 +133,25 @@ func TestPipeline_Run_RetiresReviewWhenHeadMovedDuringRun(t *testing.T) {
 			gh.submits, gh.lastEvent)
 	}
 
-	// The reviews row is keyed on the internal PR id, not the GitHub id.
+	// Contract change, deliberate and worth reviewer attention: this branch
+	// revalidates the revision BEFORE writing the row, so a superseded run
+	// leaves no review row at all. #664 wrote the row and then retired it with
+	// SupersededReviewID, for two reasons — keeping the publish-worker
+	// (github_review_id == 0) from posting it later, and an audit trail.
+	//
+	// The first reason is satisfied more strongly here: there is no row to pick
+	// up. The second is not satisfied — the analysed-then-discarded verdict is
+	// now only visible in the log line above, not in the database. That is the
+	// trade being made, so assert the absence rather than paper over it.
 	storedPR, err := s.GetPRByGithubID(pr.ID)
 	if err != nil {
 		t.Fatalf("get pr: %v", err)
 	}
 	stored, err := s.LatestReviewForPR(storedPR.ID)
-	if err != nil {
-		t.Fatalf("latest review: %v", err)
-	}
-	if stored == nil {
-		t.Fatal("expected the analysed review to remain stored for auditing")
-	}
-	if stored.GitHubReviewID != pipeline.SupersededReviewID {
-		t.Errorf("stored github_review_id = %d, want SupersededReviewID (%d) so the "+
-			"publish-worker stops retrying it",
-			stored.GitHubReviewID, pipeline.SupersededReviewID)
-	}
-	if stored.HeadSHA != "306bfcc7" {
-		t.Errorf("stored head_sha = %q, want the analysed SHA %q", stored.HeadSHA, "306bfcc7")
+	if err == nil && stored != nil {
+		t.Errorf("expected no review row for a superseded run (the revalidation now "+
+			"runs before the write), got github_review_id=%d head_sha=%q",
+			stored.GitHubReviewID, stored.HeadSHA)
 	}
 }
 
@@ -280,7 +280,12 @@ func TestPipeline_Run_NoRecheckWhenRunSkipsEarly(t *testing.T) {
 
 	// Second run on the same SHA with no re-request: the dedup gate skips it
 	// before the CLI runs, so no further HEAD resolution should happen.
-	if _, err := p.Run(pr, pipeline.RunOptions{Primary: "claude", Fallback: "gemini", Force: true}); err != nil {
+	//
+	// Deliberately NOT forced, unlike the first run. Force exists to bypass the
+	// re-request dedup (and the circuit breaker), which is the very gate this
+	// test asserts — forcing here would re-execute and publish a second review,
+	// measuring nothing.
+	if _, err := p.Run(pr, pipeline.RunOptions{Primary: "claude", Fallback: "gemini"}); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
 	if gh.shaCalls != callsAfterPublish {
