@@ -10,6 +10,344 @@ import (
 	"time"
 )
 
+const apiContractToken = "contract-token"
+
+type contractRequest struct {
+	method string
+	path   string
+	accept string
+	token  string
+}
+
+func newContractServer(t *testing.T, status int, contentType, body string) (*httptest.Server, <-chan contractRequest) {
+	t.Helper()
+
+	requests := make(chan contractRequest, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- contractRequest{
+			method: r.Method,
+			path:   r.URL.RequestURI(),
+			accept: r.Header.Get("Accept"),
+			token:  r.Header.Get("X-Heimdallm-Token"),
+		}
+		w.Header().Set("Content-Type", contentType)
+		w.WriteHeader(status)
+		_, _ = fmt.Fprint(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, requests
+}
+
+func assertContractRequest(t *testing.T, requests <-chan contractRequest, method, path, accept string) {
+	t.Helper()
+
+	var got contractRequest
+	select {
+	case got = <-requests:
+	case <-time.After(time.Second):
+		t.Fatal("client did not send a request")
+	}
+
+	if got.method != method {
+		t.Errorf("request method = %q, want %q", got.method, method)
+	}
+	if got.path != path {
+		t.Errorf("request path = %q, want %q", got.path, path)
+	}
+	if got.accept != accept {
+		t.Errorf("Accept header = %q, want %q", got.accept, accept)
+	}
+	if got.token != apiContractToken {
+		t.Errorf("X-Heimdallm-Token header = %q, want %q", got.token, apiContractToken)
+	}
+
+	select {
+	case extra := <-requests:
+		t.Errorf("client sent an unexpected additional request: %s %s", extra.method, extra.path)
+	default:
+	}
+}
+
+func TestReadEndpointContracts(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		body string
+		call func(*Client) error
+	}{
+		{
+			name: "health",
+			path: "/health",
+			body: `{"status":"ok","version":"0.9.0"}`,
+			call: func(c *Client) error {
+				health, err := c.GetHealth()
+				if err != nil {
+					return err
+				}
+				if health.Status != "ok" || health.Version != "0.9.0" {
+					return fmt.Errorf("decoded health = %#v", health)
+				}
+				return nil
+			},
+		},
+		{
+			name: "PR list",
+			path: "/prs",
+			body: `[{"id":41,"repo":"acme/widget","number":7,"latest_review":{"id":5,"severity":"high"}}]`,
+			call: func(c *Client) error {
+				prs, err := c.ListPRs()
+				if err != nil {
+					return err
+				}
+				if len(prs) != 1 || prs[0].ID != 41 || prs[0].Repo != "acme/widget" ||
+					prs[0].LatestReview == nil || prs[0].LatestReview.Severity != "high" {
+					return fmt.Errorf("decoded PRs = %#v", prs)
+				}
+				return nil
+			},
+		},
+		{
+			name: "issue list",
+			path: "/issues",
+			body: `[{"id":42,"repo":"acme/widget","number":8,"latest_review":{"id":6,"action_taken":"review_only","triage":{"severity":"medium"}}}]`,
+			call: func(c *Client) error {
+				issues, err := c.ListIssues()
+				if err != nil {
+					return err
+				}
+				if len(issues) != 1 || issues[0].ID != 42 || issues[0].Repo != "acme/widget" ||
+					issues[0].LatestReview == nil || issues[0].LatestReview.ActionTaken != "review_only" {
+					return fmt.Errorf("decoded issues = %#v", issues)
+				}
+				return nil
+			},
+		},
+		{
+			name: "config",
+			path: "/config",
+			body: `{"server_port":7842,"repositories":["acme/widget"]}`,
+			call: func(c *Client) error {
+				cfg, err := c.GetConfig()
+				if err != nil {
+					return err
+				}
+				if cfg["server_port"] != float64(7842) {
+					return fmt.Errorf("decoded config = %#v", cfg)
+				}
+				return nil
+			},
+		},
+		{
+			name: "stats",
+			path: "/stats",
+			body: `{"total_reviews":9,"activity_count_24h":4,"by_severity":{"high":2}}`,
+			call: func(c *Client) error {
+				stats, err := c.GetStats()
+				if err != nil {
+					return err
+				}
+				if stats.TotalReviews != 9 || stats.ActivityCount24h != 4 || stats.BySeverity["high"] != 2 {
+					return fmt.Errorf("decoded stats = %#v", stats)
+				}
+				return nil
+			},
+		},
+		{
+			name: "activity",
+			path: "/activity",
+			body: `{"entries":[{"id":3,"repo":"acme/widget","action":"review"}],"count":1,"truncated":true}`,
+			call: func(c *Client) error {
+				activity, err := c.GetActivity()
+				if err != nil {
+					return err
+				}
+				if activity.Count != 1 || !activity.Truncated || len(activity.Entries) != 1 ||
+					activity.Entries[0].Repo != "acme/widget" {
+					return fmt.Errorf("decoded activity = %#v", activity)
+				}
+				return nil
+			},
+		},
+		{
+			name: "PR detail",
+			path: "/prs/41",
+			body: `{"pr":{"id":41,"number":7},"reviews":[{"id":5,"severity":"high"}]}`,
+			call: func(c *Client) error {
+				detail, err := c.GetPR(41)
+				if err != nil {
+					return err
+				}
+				if detail.PR.ID != 41 || len(detail.Reviews) != 1 || detail.Reviews[0].Severity != "high" {
+					return fmt.Errorf("decoded PR detail = %#v", detail)
+				}
+				return nil
+			},
+		},
+		{
+			name: "issue detail",
+			path: "/issues/42",
+			body: `{"issue":{"id":42,"number":8},"reviews":[{"id":6,"action_taken":"review_only"}]}`,
+			call: func(c *Client) error {
+				detail, err := c.GetIssue(42)
+				if err != nil {
+					return err
+				}
+				if detail.Issue.ID != 42 || len(detail.Reviews) != 1 ||
+					detail.Reviews[0].ActionTaken != "review_only" {
+					return fmt.Errorf("decoded issue detail = %#v", detail)
+				}
+				return nil
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			srv, requests := newContractServer(t, http.StatusOK, "application/json", tc.body)
+			client := New(srv.URL+"/", apiContractToken)
+
+			if err := tc.call(client); err != nil {
+				t.Fatalf("API call failed: %v", err)
+			}
+			assertContractRequest(t, requests, http.MethodGet, tc.path, "application/json")
+		})
+	}
+}
+
+func TestMutationEndpointContractsAndErrors(t *testing.T) {
+	tests := []struct {
+		name   string
+		path   string
+		status int
+		body   string
+		call   func(*Client) error
+	}{
+		{"queue PR review", "/prs/41/review", http.StatusAccepted, `{"status":"review queued"}`, func(c *Client) error {
+			return c.TriggerPRReview(41)
+		}},
+		{"queue issue review", "/issues/42/review", http.StatusAccepted, `{"status":"review queued"}`, func(c *Client) error {
+			return c.TriggerIssueReview(42)
+		}},
+		{"promote issue", "/issues/42/promote", http.StatusAccepted, `{"status":"promotion applied"}`, func(c *Client) error {
+			return c.PromoteIssue(42)
+		}},
+		{"dismiss issue", "/issues/42/dismiss", http.StatusOK, `{"status":"dismissed"}`, func(c *Client) error {
+			return c.DismissIssue(42)
+		}},
+		{"undismiss issue", "/issues/42/undismiss", http.StatusOK, `{"status":"undismissed"}`, func(c *Client) error {
+			return c.UndismissIssue(42)
+		}},
+		{"shutdown", "/shutdown", http.StatusAccepted, `{"status":"shutdown queued"}`, func(c *Client) error {
+			return c.Shutdown()
+		}},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Run("success", func(t *testing.T) {
+				srv, requests := newContractServer(t, tc.status, "application/json", tc.body)
+				client := New(srv.URL+"/", apiContractToken)
+
+				if err := tc.call(client); err != nil {
+					t.Fatalf("API call failed: %v", err)
+				}
+				assertContractRequest(t, requests, http.MethodPost, tc.path, "application/json")
+			})
+
+			t.Run("error", func(t *testing.T) {
+				srv, requests := newContractServer(t, http.StatusConflict, "text/plain", "  operation unavailable  \n")
+				client := New(srv.URL, apiContractToken)
+
+				err := tc.call(client)
+				if err == nil {
+					t.Fatal("API call error = nil, want conflict")
+				}
+				if got, want := err.Error(), "HTTP 409: operation unavailable"; got != want {
+					t.Errorf("API call error = %q, want %q", got, want)
+				}
+				assertContractRequest(t, requests, http.MethodPost, tc.path, "application/json")
+			})
+		})
+	}
+}
+
+func TestStreamEventsEndpointContract(t *testing.T) {
+	tests := []struct {
+		name        string
+		status      int
+		contentType string
+		body        string
+		wantEvents  []SSEEvent
+		wantErr     string
+	}{
+		{
+			name:        "comments and multiline data",
+			status:      http.StatusOK,
+			contentType: "text/event-stream",
+			body: ": keep-alive\n\n" +
+				"event: review_completed\n" +
+				"data: {\"repo\":\"acme/widget\",\n" +
+				"data: \"pr_number\":7}\n\n" +
+				"event: issue_review_completed\n" +
+				"data: {\"issue_number\":8}\n\n",
+			wantEvents: []SSEEvent{
+				{Type: "review_completed", Data: "{\"repo\":\"acme/widget\",\n\"pr_number\":7}"},
+				{Type: "issue_review_completed", Data: `{"issue_number":8}`},
+			},
+		},
+		{
+			name:        "unauthorized response",
+			status:      http.StatusUnauthorized,
+			contentType: "text/plain",
+			body:        "  invalid API token  \n",
+			wantErr:     "SSE HTTP 401: invalid API token",
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			srv, requests := newContractServer(t, tc.status, tc.contentType, tc.body)
+			events := make(chan SSEEvent, len(tc.wantEvents)+1)
+			client := New(srv.URL+"/", apiContractToken)
+
+			err := client.StreamEvents(context.Background(), events)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("StreamEvents() error = %v", err)
+				}
+			} else {
+				if err == nil {
+					t.Fatalf("StreamEvents() error = nil, want %q", tc.wantErr)
+				}
+				if err.Error() != tc.wantErr {
+					t.Errorf("StreamEvents() error = %q, want %q", err, tc.wantErr)
+				}
+			}
+
+			for i, want := range tc.wantEvents {
+				select {
+				case got := <-events:
+					if got != want {
+						t.Errorf("event %d = %#v, want %#v", i, got, want)
+					}
+				default:
+					t.Fatalf("event %d was not delivered", i)
+				}
+			}
+			select {
+			case extra := <-events:
+				t.Errorf("unexpected additional event: %#v", extra)
+			default:
+			}
+
+			assertContractRequest(t, requests, http.MethodGet, "/events", "text/event-stream")
+		})
+	}
+}
+
 func TestStreamEventsReturnsWhenContextCanceledWithBlockedSend(t *testing.T) {
 	eventFlushed := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
