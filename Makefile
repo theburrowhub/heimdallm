@@ -34,6 +34,7 @@ endif
 
 .PHONY: build-daemon build-app build-web build-cli test test-cli lint-cli test-web-tooling test-compose-isolation \
         test-smoke test-github test-e2e test-web dev-cli test-docker dev dev-daemon dev-stop \
+        coverage coverage-daemon coverage-cli coverage-flutter coverage-check coverage-ci test-coverage-gate \
         release-local package-macos install-service verify-linux run-linux test-install-macos \
         test-install-linux \
         install-macos uninstall-macos install-linux uninstall-linux \
@@ -137,22 +138,94 @@ test-web:
 
 GO_DOCKER_IMAGE ?= golang:1.25-alpine@sha256:f6751d823c26342f9506c03797d2527668d095b0a15f1862cddb4d927a7a4ced
 GO_TEST_ARGS    ?= -timeout 60s -count=1 ./...
+GO_COVERAGE_PROFILE ?=
+GO_CONTAINER_COVERAGE_PROFILE := /tmp/heimdallm-daemon-coverage.out
+GO_COVERAGE_ARGS := -timeout 60s -count=1 -covermode=atomic -coverpkg=./... \
+                    -coverprofile=$(GO_CONTAINER_COVERAGE_PROFILE) ./...
+
+# Single definition of the canonical, EDR-safe container boundary used by
+# every daemon test mode. In particular, coverage must not grow a second
+# docker invocation that can drift from test-docker's pinned/read-only setup.
+GO_DOCKER_RUN = docker run --rm \
+	--user "$(shell id -u):$(shell id -g)" \
+	-v "$(shell pwd):/src:ro" \
+	-v "/tmp/heimdallm-gocache:/tmp/.cache" \
+	-v "/tmp/heimdallm-home:/tmp/home" \
+	-w /src/daemon \
+	-e HOME=/tmp/home \
+	-e GOCACHE=/tmp/.cache/go-build \
+	-e GOMODCACHE=/tmp/.cache/gomod \
+	$(GO_DOCKER_IMAGE)
+
+# Coverage profiles share one stable location so the exact same gate command
+# can run locally and in CI. The daemon profile is the exception to native
+# generation: it is produced in the canonical pinned container below and
+# streamed out over stdout, so /src remains read-only.
+COVERAGE_DIR             ?= .coverage
+DAEMON_COVERAGE_PROFILE  ?= $(COVERAGE_DIR)/daemon.out
+CLI_COVERAGE_PROFILE     ?= $(COVERAGE_DIR)/cli.out
+FLUTTER_COVERAGE_PROFILE ?= $(COVERAGE_DIR)/flutter/lcov.info
+COVERAGE_BASELINE        ?= .github/coverage-baseline.json
+COVERAGE_BASE_REF        ?= origin/main
 
 test-docker:
 	@command -v docker >/dev/null || { echo "❌  Docker is required. Install from https://docs.docker.com/get-docker/"; exit 1; }
 	@mkdir -p /tmp/heimdallm-gocache /tmp/heimdallm-home
+ifeq ($(strip $(GO_COVERAGE_PROFILE)),)
 	@echo "▶  Running Go vet + tests inside $(GO_DOCKER_IMAGE)"
-	docker run --rm \
-	  --user "$(shell id -u):$(shell id -g)" \
-	  -v "$(shell pwd):/src:ro" \
-	  -v "/tmp/heimdallm-gocache:/tmp/.cache" \
-	  -v "/tmp/heimdallm-home:/tmp/home" \
-	  -w /src/daemon \
-	  -e HOME=/tmp/home \
-	  -e GOCACHE=/tmp/.cache/go-build \
-	  -e GOMODCACHE=/tmp/.cache/gomod \
-	  $(GO_DOCKER_IMAGE) \
-	  sh -c "go vet ./... && go test $(GO_TEST_ARGS)"
+	$(GO_DOCKER_RUN) sh -c "go vet ./... && go test $(GO_TEST_ARGS)"
+else
+	@mkdir -p "$(dir $(GO_COVERAGE_PROFILE))"
+	@echo "▶  Running Go vet + coverage inside $(GO_DOCKER_IMAGE)"
+	@set -eu; \
+	  tmp="$$(mktemp "$(GO_COVERAGE_PROFILE).tmp.XXXXXX")"; \
+	  trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
+	  $(GO_DOCKER_RUN) \
+	    sh -c "go vet ./... 1>&2 && go test $(GO_COVERAGE_ARGS) 1>&2 && cat $(GO_CONTAINER_COVERAGE_PROFILE)" \
+	    >"$$tmp"; \
+	  test -s "$$tmp"; \
+	  mv "$$tmp" "$(GO_COVERAGE_PROFILE)"
+endif
+
+# Produce all three profiles without running the policy gate. This is useful
+# when inspecting coverage locally or when updating the ratchet baseline.
+coverage: coverage-daemon coverage-cli coverage-flutter
+
+coverage-daemon:
+	@mkdir -p "$(dir $(DAEMON_COVERAGE_PROFILE))"
+	@$(MAKE) test-docker GO_COVERAGE_PROFILE="$(abspath $(DAEMON_COVERAGE_PROFILE))"
+
+coverage-cli:
+	$(MAKE) -C cli coverage COVERAGE_PROFILE="$(abspath $(CLI_COVERAGE_PROFILE))"
+
+coverage-flutter:
+	@mkdir -p "$(dir $(FLUTTER_COVERAGE_PROFILE))"
+	@echo "▶  Generating Flutter coverage"
+	@set -eu; \
+	  profile="$(abspath $(FLUTTER_COVERAGE_PROFILE))"; \
+	  tmp="$$(mktemp "$$profile.tmp.XXXXXX")"; \
+	  trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
+	  (cd flutter_app && flutter test --coverage --coverage-path="$$tmp"); \
+	  test -s "$$tmp"; \
+	  mv "$$tmp" "$$profile"
+
+test-coverage-gate:
+	python3 -m unittest discover -s scripts/tests -p 'test_coverage_gate.py' -v
+
+# Validate profiles that already exist. Keeping generation separate makes it
+# possible to rerun/debug the policy without paying for all three test suites.
+coverage-check:
+	python3 scripts/coverage_gate.py $(if $(strip $(GITHUB_STEP_SUMMARY)),--summary "$(GITHUB_STEP_SUMMARY)") \
+	  --base-ref "$(COVERAGE_BASE_REF)" \
+	  --daemon-profile "$(DAEMON_COVERAGE_PROFILE)" \
+	  --cli-profile "$(CLI_COVERAGE_PROFILE)" \
+	  --flutter-profile "$(FLUTTER_COVERAGE_PROFILE)" \
+	  --baseline "$(COVERAGE_BASELINE)"
+
+# One entry point for the complete local/CI coverage check. The recursive make
+# is intentional: it sequences the gate after every profile even under -j.
+coverage-ci: coverage
+	@$(MAKE) coverage-check
 
 # ── Local development ─────────────────────────────────────────────────────────
 #

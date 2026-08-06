@@ -90,10 +90,11 @@ void main() {
           reason: 'PR Review tab missing "${preset.name}"');
     }
 
-    // Switch to Issue Triage and assert its 5 presets render. Tap the Tab
-    // widget specifically — plain find.text('Issue Triage') is ambiguous
-    // now that the active banner shows the same label.
-    await tester.tap(find.widgetWithText(Tab, 'Issue Triage'));
+    // Drive the controller directly: Tab's label render object is not the
+    // pointer target, so tester.tap(Tab) emits a missed-hit warning even when
+    // the TabBar handles the gesture.
+    final tabs = DefaultTabController.of(tester.element(find.byType(TabBar)));
+    tabs.animateTo(1);
     await tester.pumpAndSettle();
     for (final preset in ReviewPrompt.issueTriagePresets) {
       expect(find.text(preset.name), findsOneWidget,
@@ -101,7 +102,7 @@ void main() {
     }
 
     // Switch to Development and assert its 5 presets render.
-    await tester.tap(find.widgetWithText(Tab, 'Development'));
+    tabs.animateTo(2);
     await tester.pumpAndSettle();
     for (final preset in ReviewPrompt.developmentPresets) {
       expect(find.text(preset.name), findsOneWidget,
