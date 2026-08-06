@@ -33,7 +33,8 @@ coverage:
 	@set -eu; \
 	  tmp="$$(mktemp "$(COVERAGE_PROFILE).tmp.XXXXXX")"; \
 	  trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
-	  go test -timeout 60s -count=1 -covermode=atomic -coverprofile="$$tmp" ./...; \
+	  go test -timeout 60s -count=1 -covermode=atomic -coverpkg=./... \
+	    -coverprofile="$$tmp" ./...; \
 	  test -s "$$tmp"; \
 	  mv "$$tmp" "$(COVERAGE_PROFILE)"
 
