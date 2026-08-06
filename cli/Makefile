@@ -14,7 +14,9 @@ ifeq ($(strip $(VERSION)),)
 override VERSION := dev
 endif
 
-.PHONY: build test test-race lint clean dev
+COVERAGE_PROFILE ?= $(abspath ../.coverage/cli.out)
+
+.PHONY: build test test-race coverage lint clean dev
 
 build:
 	@mkdir -p $(dir $(BINARY))
@@ -25,6 +27,16 @@ test:
 
 test-race:
 	go test -race -timeout 60s ./...
+
+coverage:
+	@mkdir -p "$(dir $(COVERAGE_PROFILE))"
+	@set -eu; \
+	  tmp="$$(mktemp "$(COVERAGE_PROFILE).tmp.XXXXXX")"; \
+	  trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
+	  go test -timeout 60s -count=1 -covermode=atomic -coverpkg=./... \
+	    -coverprofile="$$tmp" ./...; \
+	  test -s "$$tmp"; \
+	  mv "$$tmp" "$(COVERAGE_PROFILE)"
 
 lint:
 	go vet ./...

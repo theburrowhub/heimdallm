@@ -174,6 +174,84 @@ jobs:
         working-directory: cli
         run: go vet ./...
 
+  coverage:
+    name: Coverage ratchet (daemon / CLI / Flutter)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # This job deliberately generates all three instrumented profiles from
+      # one checkout. The regular test jobs do not produce coverage profiles,
+      # and keeping generation together makes the cross-module gate atomic.
+      # The gate diffs against the PR base (or the previous pushed commit), so
+      # a shallow checkout would silently hide changed executable lines.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Test the coverage policy parser and gate
+        run: make test-coverage-gate
+
+      - name: Set up Go for the native CLI profile
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.sum
+
+      # The daemon profile is generated in Docker, outside setup-go's native
+      # cache paths. Persist the read/write cache mounted by test-docker so the
+      # deliberate full-suite rerun does not rebuild every dependency per job.
+      - name: Cache containerized daemon Go data
+        uses: actions/cache@v4
+        with:
+          path: /tmp/heimdallm-gocache
+          key: ${{ runner.os }}-${{ runner.arch }}-daemon-coverage-v1-${{ hashFiles('daemon/go.mod', 'daemon/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-daemon-coverage-v1-
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.9'
+          channel: stable
+          cache: true
+
+      - name: Install Flutter dependencies
+        working-directory: flutter_app
+        run: flutter pub get
+
+      - name: Resolve coverage diff base
+        shell: bash
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            if [[ -z "$PR_BASE_SHA" ]]; then
+              echo "::error::pull_request event did not provide a base SHA"
+              exit 1
+            fi
+            base_ref="$PR_BASE_SHA"
+          elif [[ "$GITHUB_EVENT_NAME" == "push" &&
+                  -n "$BEFORE_SHA" &&
+                  "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]] &&
+               git rev-parse --verify --quiet "$BEFORE_SHA^{commit}" >/dev/null; then
+            base_ref="$BEFORE_SHA"
+          elif git rev-parse --verify --quiet origin/main >/dev/null; then
+            base_ref="origin/main"
+          elif git rev-parse --verify --quiet HEAD^ >/dev/null; then
+            base_ref="HEAD^"
+          else
+            echo "::error::unable to resolve a commit for the coverage diff"
+            exit 1
+          fi
+          git rev-parse --verify "$base_ref^{commit}" >/dev/null
+          echo "COVERAGE_BASE_REF=$base_ref" >> "$GITHUB_ENV"
+          echo "Coverage diff base: $base_ref"
+
+      - name: Generate profiles and enforce the coverage policy
+        run: make coverage-ci
+
   compose-isolation:
     name: Docker Compose test isolation
     runs-on: ubuntu-latest
@@ -192,7 +270,7 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.x'
+          flutter-version: '3.41.9'
           channel: stable
           cache: true
 

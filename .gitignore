@@ -1,4 +1,6 @@
 .worktrees/
+/.coverage/
+__pycache__/
 dist/*.dmg
 dist/*.zip
 daemon/bin/

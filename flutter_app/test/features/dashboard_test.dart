@@ -1,14 +1,17 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:mocktail/mocktail.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:heimdallm/core/api/api_client.dart';
 import 'package:heimdallm/core/models/pr.dart';
 import 'package:heimdallm/core/models/review.dart';
 import 'package:heimdallm/core/platform/platform_services_provider.dart';
 import 'package:heimdallm/features/config/config_providers.dart';
+import 'package:heimdallm/features/dashboard/activity_filters.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_screen.dart';
 import 'package:heimdallm/features/issues/issues_providers.dart';
@@ -89,6 +92,45 @@ Future<void> _pumpOfflineDashboard(
 }
 
 void main() {
+  test('SortNotifier handles preference load failures', () async {
+    TestWidgetsFlutterBinding.ensureInitialized();
+    const channel = MethodChannel('plugins.flutter.io/shared_preferences');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    final messages = <String>[];
+    final originalDebugPrint = debugPrint;
+
+    SharedPreferences.resetStatic();
+    messenger.setMockMethodCallHandler(
+      channel,
+      (_) async => throw StateError('preferences unavailable'),
+    );
+    debugPrint = (message, {wrapWidth}) {
+      if (message != null) messages.add(message);
+    };
+    addTearDown(() {
+      messenger.setMockMethodCallHandler(channel, null);
+      SharedPreferences.resetStatic();
+      debugPrint = originalDebugPrint;
+    });
+
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+
+    expect(container.read(reviewsSortProvider), SortMode.priority);
+    await pumpEventQueue();
+
+    final sortMessages = messages
+        .where((message) => message.startsWith('SortNotifier:'))
+        .toList();
+    expect(sortMessages, hasLength(1));
+    expect(
+      sortMessages.single,
+      startsWith('SortNotifier: failed to load preference:'),
+    );
+    expect(sortMessages.single, contains('preferences unavailable'));
+  });
+
   group('reconcileReviewing', () {
     test(
       'drops entry when first review lands (baseline=0, latestReview present)',
