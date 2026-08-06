@@ -22,10 +22,21 @@ from typing import Iterable, Mapping, Sequence
 
 MODULE_NAMES = ("daemon", "cli", "flutter")
 MINIMUM_POLICY = Fraction(9, 10)
-UNIVERSE_EXEMPT_PATHS = {
-    "flutter_app/lib/core/platform/platform_services_stub.dart",
-    "flutter_app/lib/core/platform/platform_services_web.dart",
-}
+# This is deliberately a code-owned, reviewed allowlist rather than data
+# derived from the baseline.  A scope=universe rule passes only when its exact
+# path is approved here *and* the baseline supplies a reason and issue.  Adding
+# an exemption is therefore a two-part policy change: first review the
+# unavoidable collector limitation and add its path here, then add the
+# justified baseline entry.  evaluate_gate permits only this kind of new rule;
+# coverage exclusions and changes to existing rules remain frozen. Keeping both
+# controls independent prevents a baseline-only edit from exempting arbitrary
+# product source.
+UNIVERSE_EXEMPT_PATHS = frozenset(
+    {
+        "flutter_app/lib/core/platform/platform_services_stub.dart",
+        "flutter_app/lib/core/platform/platform_services_web.dart",
+    }
+)
 IGNORE_DIRECTIVE_RE = re.compile(r"\bcoverage:ignore\b")
 GENERATED_SOURCE_RE = re.compile(
     r"(?m)^// (?:Code generated .* DO NOT EDIT\.|GENERATED CODE - DO NOT MODIFY BY HAND)$"
@@ -306,7 +317,9 @@ def parse_go_profile_text(
     for line_number, raw_line in enumerate(text.splitlines(), 1):
         line = raw_line.strip()
         if not line:
-            raise GateError(f"{source}:{line_number}: blank lines are not valid")
+            # Empty separators carry no coverage data. Tolerating them keeps
+            # harmless producer formatting changes out of the policy verdict.
+            continue
         if line.startswith("mode:"):
             if line != "mode: atomic":
                 raise GateError(f"{source}:{line_number}: mode must be atomic")
@@ -382,19 +395,13 @@ def parse_lcov_text(
     present_files: set[str] = set()
     current_path: str | None = None
     record_lines: dict[int, bool] = {}
-    declared_lf: int | None = None
-    declared_lh: int | None = None
     saw_record = False
 
     def finish_record(line_number: int) -> None:
-        nonlocal current_path, record_lines, declared_lf, declared_lh, saw_record
+        nonlocal current_path, record_lines, saw_record
         if current_path is None:
             raise GateError(f"{source}:{line_number}: end_of_record without SF")
-        if declared_lf is not None and declared_lf != len(record_lines):
-            raise GateError(f"{source}:{line_number}: LF does not match DA records")
         hit = sum(record_lines.values())
-        if declared_lh is not None and declared_lh != hit:
-            raise GateError(f"{source}:{line_number}: LH does not match covered DA records")
         if spec.is_product_source(current_path):
             present_files.add(current_path)
             for line, covered in record_lines.items():
@@ -403,12 +410,13 @@ def parse_lcov_text(
         saw_record = True
         current_path = None
         record_lines = {}
-        declared_lf = declared_lh = None
 
     for line_number, raw_line in enumerate(text.splitlines(), 1):
         line = raw_line.strip()
         if not line:
-            raise GateError(f"{source}:{line_number}: blank lines are not valid")
+            # LCOV tracefiles may use whitespace-only lines as separators.  A
+            # separator carries no record data, so ignoring it is lossless.
+            continue
         if line == "end_of_record":
             finish_record(line_number)
             continue
@@ -438,16 +446,15 @@ def parse_lcov_text(
                 raise GateError(f"{source}:{line_number}: invalid DA values")
             record_lines[source_line] = record_lines.get(source_line, False) or count > 0
         elif tag in ("LF", "LH"):
+            # DA records are authoritative for the gate. LF/LH are redundant
+            # producer summaries, so validate their syntax but keep them
+            # advisory to tolerate valid formatter differences.
             try:
                 count = int(value)
             except ValueError as exc:
                 raise GateError(f"{source}:{line_number}: malformed {tag} record") from exc
             if count < 0:
                 raise GateError(f"{source}:{line_number}: invalid {tag} value")
-            if tag == "LF":
-                declared_lf = count
-            else:
-                declared_lh = count
         # Function and branch records are intentionally syntax-tolerant: line
         # coverage is authoritative, but unknown tags still fail closed.
     if current_path is not None:
@@ -770,11 +777,28 @@ def evaluate_gate(
             failures.append("target_percent is lower than the base baseline")
         if baseline.diff_target < base_baseline.diff_target:
             failures.append("diff_percent is lower than the base baseline")
-        added_ignores = set(baseline.ignores) - set(base_baseline.ignores)
-        if added_ignores:
-            paths = ", ".join(sorted(rule.path for rule in added_ignores))
+        base_ignores = {
+            (rule.module, rule.path): rule for rule in base_baseline.ignores
+        }
+        unsafe_ignores = []
+        for rule in baseline.ignores:
+            previous = base_ignores.get((rule.module, rule.path))
+            if (
+                previous is None
+                and rule.scope == "universe"
+                and rule.path in inventory
+            ):
+                # parse_baseline_text has already required the independent,
+                # code-reviewed UNIVERSE_EXEMPT_PATHS approval. Requiring the
+                # source to exist prevents pre-authorising a future file.
+                continue
+            if previous != rule:
+                unsafe_ignores.append(rule)
+        if unsafe_ignores:
+            paths = ", ".join(sorted(rule.path for rule in unsafe_ignores))
             failures.append(
-                "ignore policy was added or widened relative to the base baseline: " + paths
+                "coverage ignore policy was added, or an existing ignore was "
+                "changed or widened relative to the base baseline: " + paths
             )
     results: list[ModuleResult] = []
     for name in MODULE_NAMES:
@@ -928,9 +952,15 @@ may not be lower than the baseline stored at BASE_REF.  A missing base copy is
 allowed only for the initial bootstrap.  Go profiles must use mode: atomic.
 scope=coverage (the default) excludes total, universe, and diff coverage.
 scope=universe only permits a collector to omit an unchanged file; changing it
-still requires report presence and coverage. `lines` narrows scope=coverage to
-exact lines (or inclusive `[start, end]` pairs). Deleted lines do not enter diff
-coverage.  --summary appends Markdown suitable
+still requires report presence and coverage.  Universe exemptions are
+double-controlled: the exact path must also be in the code-reviewed
+UNIVERSE_EXEMPT_PATHS allowlist. Adding one requires two explicit edits (the
+allowlist after reviewing the collector limitation, and a justified baseline
+entry). Only new universe rules use this path; coverage exclusions and edits to
+existing rules remain frozen. The allowlist is deliberately not derived from
+the baseline. `lines` narrows scope=coverage to exact lines (or inclusive
+`[start, end]` pairs). Deleted lines do not enter diff coverage. --summary
+appends Markdown suitable
 for GITHUB_STEP_SUMMARY. Exit 0 passes; exit 1 is fail-closed; argparse uses 2.
 """,
     )

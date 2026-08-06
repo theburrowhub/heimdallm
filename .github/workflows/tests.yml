@@ -178,6 +178,9 @@ jobs:
     name: Coverage ratchet (daemon / CLI / Flutter)
     runs-on: ubuntu-latest
     steps:
+      # This job deliberately generates all three instrumented profiles from
+      # one checkout. The regular test jobs do not produce coverage profiles,
+      # and keeping generation together makes the cross-module gate atomic.
       # The gate diffs against the PR base (or the previous pushed commit), so
       # a shallow checkout would silently hide changed executable lines.
       - uses: actions/checkout@v4
@@ -193,12 +196,27 @@ jobs:
           go-version-file: cli/go.mod
           cache-dependency-path: cli/go.sum
 
+      # The daemon profile is generated in Docker, outside setup-go's native
+      # cache paths. Persist the read/write cache mounted by test-docker so the
+      # deliberate full-suite rerun does not rebuild every dependency per job.
+      - name: Cache containerized daemon Go data
+        uses: actions/cache@v4
+        with:
+          path: /tmp/heimdallm-gocache
+          key: ${{ runner.os }}-${{ runner.arch }}-daemon-coverage-v1-${{ hashFiles('daemon/go.mod', 'daemon/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-daemon-coverage-v1-
+
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.41.9'
           channel: stable
           cache: true
+
+      - name: Install Flutter dependencies
+        working-directory: flutter_app
+        run: flutter pub get
 
       - name: Resolve coverage diff base
         shell: bash

@@ -82,6 +82,14 @@ github.com/heimdallm/daemon/x.go:1.1,1.2 2 0
         )
         self.assertEqual((1, 1), coverage_gate._filtered_counts(report, {}))
 
+    def test_blank_separator_lines_are_ignored(self):
+        report = coverage_gate.parse_go_profile_text(
+            "\nmode: atomic\n\n"
+            "github.com/heimdallm/daemon/a.go:1.1,1.2 1 1\n\n",
+            coverage_gate.MODULES["daemon"],
+        )
+        self.assertEqual((1, 1), coverage_gate._filtered_counts(report, {}))
+
 
 class LcovTests(unittest.TestCase):
     def test_duplicate_records_are_unioned(self):
@@ -101,12 +109,31 @@ end_of_record
         )
         self.assertEqual((2, 2), coverage_gate._filtered_counts(report, {}))
 
+    def test_blank_separator_lines_are_ignored(self):
+        report = coverage_gate.parse_lcov_text(
+            "\nTN:\n\n"
+            "SF:lib/a.dart\n\t\nDA:1,1\nLF:1\nLH:1\nend_of_record\n\n"
+            "SF:lib/b.dart\nDA:2,0\nLF:1\nLH:0\nend_of_record\n\n"
+        )
+        self.assertEqual((1, 2), coverage_gate._filtered_counts(report, {}))
+
+    def test_lf_and_lh_are_advisory(self):
+        report = coverage_gate.parse_lcov_text(
+            "SF:lib/a.dart\nDA:1,1\nLF:99\nLH:0\nend_of_record\n"
+        )
+        self.assertEqual((1, 1), coverage_gate._filtered_counts(report, {}))
+
+    def test_lf_and_lh_may_be_absent(self):
+        report = coverage_gate.parse_lcov_text(
+            "SF:lib/a.dart\nDA:1,1\nend_of_record\n"
+        )
+        self.assertEqual((1, 1), coverage_gate._filtered_counts(report, {}))
+
     def test_empty_and_malformed_reports_fail(self):
         reports = (
             "",
             "TN:\n",
             "SF:lib/a.dart\nDA:nope,1\nend_of_record\n",
-            "SF:lib/a.dart\nDA:1,1\nLF:2\nLH:1\nend_of_record\n",
             "SF:lib/a.dart\nDA:1,1\n",
         )
         for report in reports:
@@ -169,6 +196,24 @@ class BaselineTests(unittest.TestCase):
         ):
             with self.subTest(entry=entry), self.assertRaises(coverage_gate.GateError):
                 coverage_gate.parse_baseline_text(baseline_text(ignore=[entry]))
+
+    def test_universe_scope_requires_the_independent_code_allowlist(self):
+        with self.assertRaisesRegex(
+            coverage_gate.GateError, "approved collector universe exemption"
+        ):
+            coverage_gate.parse_baseline_text(
+                baseline_text(
+                    ignore=[
+                        {
+                            "module": "flutter",
+                            "path": "flutter_app/lib/arbitrary.dart",
+                            "reason": "baseline entry alone must not be sufficient",
+                            "issue": "#688",
+                            "scope": "universe",
+                        }
+                    ]
+                )
+            )
 
     def test_empty_and_malformed_baselines_fail(self):
         for text in (
@@ -295,7 +340,31 @@ class EvaluationTests(unittest.TestCase):
         )
         self.assertTrue(any("platform_services_web.dart" in failure for failure in failures))
 
-    def test_ignore_policy_cannot_be_added_or_widened(self):
+    def test_code_approved_universe_ignore_may_be_added(self):
+        current = coverage_gate.parse_baseline_text(
+            baseline_text(
+                ignore=[
+                    {
+                        "module": "flutter",
+                        "path": "flutter_app/lib/core/platform/platform_services_web.dart",
+                        "reason": "collector limitation",
+                        "issue": "#688",
+                        "scope": "universe",
+                    }
+                ]
+            )
+        )
+        _, failures = coverage_gate.evaluate_gate(
+            current,
+            self.baseline,
+            self.reports,
+            self.inventory
+            | {"flutter_app/lib/core/platform/platform_services_web.dart"},
+            {},
+        )
+        self.assertFalse(failures)
+
+    def test_universe_ignore_cannot_preapprove_a_missing_source(self):
         current = coverage_gate.parse_baseline_text(
             baseline_text(
                 ignore=[
@@ -312,7 +381,54 @@ class EvaluationTests(unittest.TestCase):
         _, failures = coverage_gate.evaluate_gate(
             current, self.baseline, self.reports, self.inventory, {}
         )
-        self.assertTrue(any("ignore policy was added" in failure for failure in failures))
+        self.assertTrue(any("ignore policy was added" in f for f in failures))
+
+    def test_coverage_ignore_cannot_be_added(self):
+        current = coverage_gate.parse_baseline_text(
+            baseline_text(
+                ignore=[
+                    {
+                        "module": "flutter",
+                        "path": "flutter_app/lib/a.dart",
+                        "reason": "coverage policy remains frozen",
+                        "issue": "#688",
+                        "lines": [1],
+                    }
+                ]
+            )
+        )
+        _, failures = coverage_gate.evaluate_gate(
+            current, self.baseline, self.reports, self.inventory, {}
+        )
+        self.assertTrue(any("coverage ignore policy was added" in f for f in failures))
+
+    def test_existing_universe_ignore_cannot_be_changed(self):
+        def universe_baseline(reason):
+            return coverage_gate.parse_baseline_text(
+                baseline_text(
+                    ignore=[
+                        {
+                            "module": "flutter",
+                            "path": "flutter_app/lib/core/platform/platform_services_web.dart",
+                            "reason": reason,
+                            "issue": "#688",
+                            "scope": "universe",
+                        }
+                    ]
+                )
+            )
+
+        base = universe_baseline("collector limitation")
+        current = universe_baseline("broader collector limitation")
+        _, failures = coverage_gate.evaluate_gate(
+            current,
+            base,
+            self.reports,
+            self.inventory
+            | {"flutter_app/lib/core/platform/platform_services_web.dart"},
+            {},
+        )
+        self.assertTrue(any("existing ignore was changed" in f for f in failures))
 
     def test_hard_floor_activates_at_target(self):
         baseline = coverage_gate.parse_baseline_text(

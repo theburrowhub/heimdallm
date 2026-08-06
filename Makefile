@@ -140,8 +140,8 @@ GO_DOCKER_IMAGE ?= golang:1.25-alpine@sha256:f6751d823c26342f9506c03797d2527668d
 GO_TEST_ARGS    ?= -timeout 60s -count=1 ./...
 GO_COVERAGE_PROFILE ?=
 GO_CONTAINER_COVERAGE_PROFILE := /tmp/heimdallm-daemon-coverage.out
-GO_COVERAGE_ARGS := -timeout 60s -count=1 -covermode=atomic -coverpkg=./... \
-                    -coverprofile=$(GO_CONTAINER_COVERAGE_PROFILE) ./...
+GO_COVERAGE_ARGS := -covermode=atomic -coverpkg=./... \
+                    -coverprofile=$(GO_CONTAINER_COVERAGE_PROFILE) $(GO_TEST_ARGS)
 
 # Single definition of the canonical, EDR-safe container boundary used by
 # every daemon test mode. In particular, coverage must not grow a second

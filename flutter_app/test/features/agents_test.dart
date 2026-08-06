@@ -90,11 +90,12 @@ void main() {
           reason: 'PR Review tab missing "${preset.name}"');
     }
 
-    // Drive the controller directly: Tab's label render object is not the
-    // pointer target, so tester.tap(Tab) emits a missed-hit warning even when
-    // the TabBar handles the gesture.
-    final tabs = DefaultTabController.of(tester.element(find.byType(TabBar)));
-    tabs.animateTo(1);
+    final issueTriageTab = find.descendant(
+      of: find.byType(TabBar),
+      matching: find.text('Issue Triage'),
+    );
+    expect(issueTriageTab, findsOneWidget);
+    await tester.tap(issueTriageTab);
     await tester.pumpAndSettle();
     for (final preset in ReviewPrompt.issueTriagePresets) {
       expect(find.text(preset.name), findsOneWidget,
@@ -102,7 +103,12 @@ void main() {
     }
 
     // Switch to Development and assert its 5 presets render.
-    tabs.animateTo(2);
+    final developmentTab = find.descendant(
+      of: find.byType(TabBar),
+      matching: find.text('Development'),
+    );
+    expect(developmentTab, findsOneWidget);
+    await tester.tap(developmentTab);
     await tester.pumpAndSettle();
     for (final preset in ReviewPrompt.developmentPresets) {
       expect(find.text(preset.name), findsOneWidget,

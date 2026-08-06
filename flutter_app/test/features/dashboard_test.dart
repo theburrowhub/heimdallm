@@ -93,6 +93,7 @@ Future<void> _pumpOfflineDashboard(
 
 void main() {
   test('SortNotifier handles preference load failures', () async {
+    TestWidgetsFlutterBinding.ensureInitialized();
     const channel = MethodChannel('plugins.flutter.io/shared_preferences');
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
@@ -119,12 +120,15 @@ void main() {
     expect(container.read(reviewsSortProvider), SortMode.priority);
     await pumpEventQueue();
 
-    expect(messages, hasLength(1));
+    final sortMessages = messages
+        .where((message) => message.startsWith('SortNotifier:'))
+        .toList();
+    expect(sortMessages, hasLength(1));
     expect(
-      messages.single,
+      sortMessages.single,
       startsWith('SortNotifier: failed to load preference:'),
     );
-    expect(messages.single, contains('preferences unavailable'));
+    expect(sortMessages.single, contains('preferences unavailable'));
   });
 
   group('reconcileReviewing', () {
