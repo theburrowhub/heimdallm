@@ -47,7 +47,7 @@ GO_BLOCK_RE = re.compile(
 HUNK_RE = re.compile(
     r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: .*)?$"
 )
-ISSUE_RE = re.compile(r"(?:#\d+|https://github\.com/[^/]+/[^/]+/(?:issues|pull)/\d+)$")
+ISSUE_RE = re.compile(r"(?:#\d+|https://github\.com/[^/]+/[^/]+/(?:issues|pull)/\d+)")
 
 
 class GateError(Exception):

@@ -177,6 +177,7 @@ jobs:
   coverage:
     name: Coverage ratchet (daemon / CLI / Flutter)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       # This job deliberately generates all three instrumented profiles from
       # one checkout. The regular test jobs do not produce coverage profiles,
@@ -233,7 +234,8 @@ jobs:
             base_ref="$PR_BASE_SHA"
           elif [[ "$GITHUB_EVENT_NAME" == "push" &&
                   -n "$BEFORE_SHA" &&
-                  "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]]; then
+                  "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]] &&
+               git rev-parse --verify --quiet "$BEFORE_SHA^{commit}" >/dev/null; then
             base_ref="$BEFORE_SHA"
           elif git rev-parse --verify --quiet origin/main >/dev/null; then
             base_ref="origin/main"
