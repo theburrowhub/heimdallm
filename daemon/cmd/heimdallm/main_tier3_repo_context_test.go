@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -62,6 +63,15 @@ func tier3WatchItem() (*scheduler.WatchItem, *scheduler.ItemSnapshot) {
 		&scheduler.ItemSnapshot{State: "open", Author: "alice", UpdatedAt: time.Now(), HeadSHA: "abc123"}
 }
 
+func tier3GitCheckout(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatalf("create checkout marker: %v", err)
+	}
+	return root
+}
+
 // TestTier3Adapter_HandleChange_RespectsWorktreeCap is the success-path
 // counterpart that actually pins the acquisition: with the per-repo worktree cap
 // already exhausted, a HandleChange that goes through repoctx cannot obtain a
@@ -69,7 +79,7 @@ func tier3WatchItem() (*scheduler.WatchItem, *scheduler.ItemSnapshot) {
 // forwarded the configured local_dir without asking repoctx — the bug — would
 // hand the path over regardless and bypass the concurrency budget entirely.
 func TestTier3Adapter_HandleChange_RespectsWorktreeCap(t *testing.T) {
-	localDir := t.TempDir()
+	localDir := tier3GitCheckout(t)
 	mgr := repoctx.NewManagerWithOptions(repoctx.ManagerOptions{MaxWorktreesPerRepo: 1})
 
 	// Hold the repo's only slot for the duration of the call.
@@ -110,7 +120,7 @@ func TestTier3Adapter_HandleChange_RespectsWorktreeCap(t *testing.T) {
 // starves every later execution on the repo. With the cap free, runReview must
 // receive the reserved checkout, and the slot must be available again afterwards.
 func TestTier3Adapter_HandleChange_ReleasesTheReservation(t *testing.T) {
-	localDir := t.TempDir()
+	localDir := tier3GitCheckout(t)
 	mgr := repoctx.NewManagerWithOptions(repoctx.ManagerOptions{MaxWorktreesPerRepo: 1})
 
 	var (
@@ -146,6 +156,35 @@ func TestTier3Adapter_HandleChange_ReleasesTheReservation(t *testing.T) {
 	h.Release()
 }
 
+// TestTier3Adapter_HandleChange_InvalidLocalDirFallsBackToDiffOnly covers the
+// final availability branch of #695. If an invalid configured workspace cannot
+// be replaced with the exact managed clone, a read-only PR review must clear
+// LocalDir. The executor then uses its isolated diff-only workspace instead of
+// handing Codex the unsafe multi-repo root.
+func TestTier3Adapter_HandleChange_InvalidLocalDirFallsBackToDiffOnly(t *testing.T) {
+	invalidLocalDir := t.TempDir()
+	// Force managed-clone acquisition to fail deterministically without a
+	// network call. The production adapter must still invoke runReview.
+	t.Setenv("PATH", t.TempDir())
+	mgr := repoctx.NewManagerWithOptions(repoctx.ManagerOptions{MaxWorktreesPerRepo: 1})
+
+	var (
+		gotAI config.RepoAI
+		calls int
+	)
+	a := newTier3Adapter(t, tier3ConfigWithLocalDir(invalidLocalDir), mgr, &gotAI, &calls)
+	item, snap := tier3WatchItem()
+	if err := a.HandleChange(context.Background(), item, snap); err != nil {
+		t.Fatalf("HandleChange: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("runReview called %d time(s), want 1", calls)
+	}
+	if gotAI.LocalDir != "" {
+		t.Fatalf("LocalDir = %q, want diff-only fallback after clone failure", gotAI.LocalDir)
+	}
+}
+
 // TestTier3Adapter_HandleChange_RechecksMonitoredAfterAcquire mirrors the
 // post_acquire guard review-worker already has (main.go:1057). Reserving a
 // checkout can block for seconds or minutes — cloning, fetching, or waiting on
@@ -154,7 +193,7 @@ func TestTier3Adapter_HandleChange_ReleasesTheReservation(t *testing.T) {
 // acquisition, so a slow clone ended up spending provider quota on a repo that
 // was no longer monitored, with no review_skipped event to show for it.
 func TestTier3Adapter_HandleChange_RechecksMonitoredAfterAcquire(t *testing.T) {
-	localDir := t.TempDir()
+	localDir := tier3GitCheckout(t)
 	mgr := repoctx.NewManagerWithOptions(repoctx.ManagerOptions{MaxWorktreesPerRepo: 1})
 
 	// Occupy the only slot so the acquisition inside HandleChange has to wait.
