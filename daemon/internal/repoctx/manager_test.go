@@ -734,6 +734,187 @@ func TestAcquireWorktreeWithBranchCreatesAndChecksOut(t *testing.T) {
 	}
 }
 
+// TestAcquireWorktreeRejectsInvalidConfiguredLocalDir covers #695. An
+// org-scoped local_dir may be a multi-repo workspace, while a repo override may
+// be stale or symlink outside its checkout. None may become the AI process CWD;
+// the fallback is the managed worktree for the exact requested repo.
+func TestAcquireWorktreeRejectsInvalidConfiguredLocalDir(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		makeLocal func(t *testing.T) string
+	}{
+		{
+			name: "workspace containing sibling repositories",
+			makeLocal: func(t *testing.T) string {
+				workspace := t.TempDir()
+				if err := os.MkdirAll(filepath.Join(workspace, "repo", ".git"), 0o755); err != nil {
+					t.Fatalf("create sibling repository: %v", err)
+				}
+				return workspace
+			},
+		},
+		{
+			name: "stale repo override",
+			makeLocal: func(t *testing.T) string {
+				return filepath.Join(t.TempDir(), "mobile")
+			},
+		},
+		{
+			name: "symlink from checkout to non-Git directory",
+			makeLocal: func(t *testing.T) string {
+				checkout := t.TempDir()
+				if err := os.Mkdir(filepath.Join(checkout, ".git"), 0o755); err != nil {
+					t.Fatalf("create .git directory: %v", err)
+				}
+				link := filepath.Join(checkout, "linked-workspace")
+				if err := os.Symlink(t.TempDir(), link); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+				return link
+			},
+		},
+		{
+			name: "subdirectory instead of checkout root",
+			makeLocal: func(t *testing.T) string {
+				checkout := t.TempDir()
+				if err := os.Mkdir(filepath.Join(checkout, ".git"), 0o755); err != nil {
+					t.Fatalf("create .git directory: %v", err)
+				}
+				subdir := filepath.Join(checkout, "packages", "service")
+				if err := os.MkdirAll(subdir, 0o755); err != nil {
+					t.Fatalf("create checkout subdirectory: %v", err)
+				}
+				return subdir
+			},
+		},
+		{
+			name: "checkout rejected by executor path policy",
+			makeLocal: func(t *testing.T) string {
+				checkout := filepath.Join(t.TempDir(), ".ssh", "repo")
+				if err := os.MkdirAll(filepath.Join(checkout, ".git"), 0o755); err != nil {
+					t.Fatalf("create sensitive checkout: %v", err)
+				}
+				return checkout
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, git, base := newTestManagerWithCap(t, 0)
+			managed := filepath.Join(base, "heimdallm", "org", "repo")
+			configured := tc.makeLocal(t)
+
+			h, err := m.Acquire(context.Background(), Request{
+				Repo:               "org/repo",
+				ConfiguredLocalDir: configured,
+				Token:              "secret",
+				Mode:               ModeRead,
+				WorktreeToken:      "pr-review-24",
+			})
+			if err != nil {
+				t.Fatalf("Acquire: %v", err)
+			}
+			defer h.Release()
+
+			want := filepath.Join(managed, ".worktrees", "pr-review-24.1")
+			if h.Path() != want || !h.Managed() {
+				t.Fatalf("handle = (%q, managed=%v), want repo-specific managed worktree %q", h.Path(), h.Managed(), want)
+			}
+			exactClone := false
+			for _, call := range git.snapshot() {
+				if call.Dir == configured || strings.HasPrefix(call.Dir, configured+string(filepath.Separator)) {
+					t.Fatalf("git call used invalid configured directory %q: %+v", configured, call)
+				}
+				if len(call.Args) == 4 && call.Args[0] == "clone" &&
+					call.Args[2] == "https://x-access-token@github.com/org/repo.git" && call.Args[3] == managed {
+					exactClone = true
+				}
+			}
+			if !exactClone {
+				t.Fatalf("managed fallback did not clone exact repo org/repo; calls = %v", git.snapshot())
+			}
+		})
+	}
+}
+
+// TestAcquireWorktreeKeepsValidConfiguredCheckout ensures the #695 fallback is
+// limited to invalid roots. Normal checkouts, linked worktrees and symlinks to
+// checkout roots remain operator-owned and are canonicalised before execution.
+func TestAcquireWorktreeKeepsValidConfiguredCheckout(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		makeLocal func(t *testing.T) (configured, canonical string)
+	}{
+		{
+			name: "checkout",
+			makeLocal: func(t *testing.T) (string, string) {
+				root := t.TempDir()
+				if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
+					t.Fatalf("create .git directory: %v", err)
+				}
+				return root, root
+			},
+		},
+		{
+			name: "linked worktree",
+			makeLocal: func(t *testing.T) (string, string) {
+				root := t.TempDir()
+				gitDir := t.TempDir()
+				if err := os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/test\n"), 0o644); err != nil {
+					t.Fatalf("create linked-worktree HEAD: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(root, ".git"), []byte("gitdir: "+gitDir+"\n"), 0o644); err != nil {
+					t.Fatalf("create .git file: %v", err)
+				}
+				return root, root
+			},
+		},
+		{
+			name: "symlink to checkout root",
+			makeLocal: func(t *testing.T) (string, string) {
+				root := t.TempDir()
+				if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
+					t.Fatalf("create .git directory: %v", err)
+				}
+				link := filepath.Join(t.TempDir(), "checkout-link")
+				if err := os.Symlink(root, link); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+				return link, root
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, git, _ := newTestManagerWithCap(t, 0)
+			configured, canonical := tc.makeLocal(t)
+			canonical, err := filepath.EvalSymlinks(canonical)
+			if err != nil {
+				t.Fatalf("resolve expected checkout: %v", err)
+			}
+			canonical, err = filepath.Abs(canonical)
+			if err != nil {
+				t.Fatalf("make expected checkout absolute: %v", err)
+			}
+
+			h, err := m.Acquire(context.Background(), Request{
+				Repo:               "org/repo",
+				ConfiguredLocalDir: configured,
+				WorktreeToken:      "pr-review-25",
+			})
+			if err != nil {
+				t.Fatalf("Acquire: %v", err)
+			}
+			defer h.Release()
+
+			if h.Path() != canonical || h.Managed() {
+				t.Fatalf("handle = (%q, managed=%v), want canonical operator checkout %q", h.Path(), h.Managed(), canonical)
+			}
+			if calls := git.snapshot(); len(calls) != 0 {
+				t.Fatalf("git calls = %v, want none for valid configured checkout", calls)
+			}
+		})
+	}
+}
+
 func TestAcquireInspectSkipsWorktreeAndCap(t *testing.T) {
 	// Inspect callers (HTTP /config/clones) want the clone path only.
 	// They must not take a cap slot — otherwise a single inspection

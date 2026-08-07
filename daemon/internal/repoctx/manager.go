@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/heimdallm/daemon/internal/config"
+	"github.com/heimdallm/daemon/internal/executor"
 	"github.com/heimdallm/daemon/internal/procgroup"
 )
 
@@ -350,11 +351,25 @@ func (m *Manager) acquireWorktree(ctx context.Context, req Request, owner, name 
 	}()
 
 	if local := resolveLocal(req); local != "" {
-		// User-mapped repos sidestep worktree creation until the
-		// gitignore bootstrap step lands; release the crit lock now
-		// and keep the cap so concurrency is still bounded.
-		releaseCrit()
-		return &Handle{path: local, managed: false, release: releaseCap}, nil
+		if checkout, ok := canonicalLocalGitWorkTree(local); ok {
+			if policyErr := executor.ValidateWorkDir(checkout); policyErr == nil {
+				// User-mapped repos sidestep worktree creation until the
+				// gitignore bootstrap step lands; release the crit lock now
+				// and keep the cap so concurrency is still bounded.
+				releaseCrit()
+				return &Handle{path: checkout, managed: false, release: releaseCap}, nil
+			} else {
+				slog.Warn("repoctx: resolved Git checkout violates executor WorkDir policy; using managed clone",
+					"repo", req.Repo, "path", checkout, "err", policyErr)
+			}
+		} else {
+			// An org-scoped local_dir is sometimes configured as a workspace
+			// containing many sibling repositories. Passing that root to an AI
+			// agent both breaks Codex's repository check and exposes unrelated
+			// checkouts. Fall through to the repo-specific managed clone instead.
+			slog.Warn("repoctx: resolved local directory is not a Git checkout root; using managed clone",
+				"repo", req.Repo, "path", local)
+		}
 	}
 
 	var cloneRoot string
@@ -564,6 +579,35 @@ func resolveLocal(req Request) string {
 		return ""
 	}
 	return config.ResolveLocalDir("", req.Repo, req.LocalDirBases)
+}
+
+// canonicalLocalGitWorkTree accepts only a checkout root and returns the
+// symlink-resolved path that the child process should enter. A configured
+// workspace may contain Git repositories below it, but descendants do not make
+// the workspace itself a checkout. Requiring .git at the resolved root also
+// keeps repository discovery and executor path validation on the same path.
+func canonicalLocalGitWorkTree(dir string) (string, bool) {
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		return "", false
+	}
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", false
+	}
+	workDir, err := filepath.Abs(resolved)
+	if err != nil {
+		return "", false
+	}
+	// Codex's repository guard only checks for a .git entry while walking the
+	// path. Restrict that entry to the two legitimate marker shapes without
+	// opening repository-controlled content: a directory for normal checkouts
+	// or a regular gitfile for linked worktrees and submodules.
+	gitInfo, err := os.Lstat(filepath.Join(workDir, ".git"))
+	if err != nil || (!gitInfo.IsDir() && !gitInfo.Mode().IsRegular()) {
+		return "", false
+	}
+	return workDir, true
 }
 
 func (m *Manager) ensureManagedClone(ctx context.Context, owner, name string, req Request) (string, error) {
