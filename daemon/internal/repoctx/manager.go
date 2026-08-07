@@ -592,13 +592,13 @@ func canonicalLocalGitWorkTree(dir string) (string, bool) {
 		return "", false
 	}
 	resolved, err := filepath.EvalSymlinks(dir)
+	if err == nil {
+		resolved, err = filepath.Abs(resolved)
+	}
 	if err != nil {
 		return "", false
 	}
-	workDir, err := filepath.Abs(resolved)
-	if err != nil {
-		return "", false
-	}
+	workDir := resolved
 	// Codex's repository guard only checks for a .git entry while walking the
 	// path. Restrict that entry to the two legitimate marker shapes without
 	// opening repository-controlled content: a directory for normal checkouts
