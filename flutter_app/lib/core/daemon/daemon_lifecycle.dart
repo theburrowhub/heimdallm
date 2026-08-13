@@ -1,44 +1,15 @@
 import 'dart:io';
-import '../api/api_client.dart';
-import '../platform/platform_services.dart';
 
+/// Locates the daemon binary. Spawning itself lives in
+/// `PlatformServices.spawnDaemon`, and the "is one already running?" guard
+/// lives in the boot path (`_spawnDaemonUnlessRunning` in main.dart).
+///
+/// This class used to also own an `ensureRunning()` with its own health check,
+/// but nothing called it — the boot path had grown a second, unguarded spawn
+/// instead, which is how five daemons ended up sharing one GitHub token and
+/// exhausting the API quota (#646). Keeping a single spawn guard means a future
+/// caller cannot pick the wrong one.
 class DaemonLifecycle {
-  final int port;
-  final String daemonBinaryPath;
-  final ApiClient _client;
-  Process? _process;
-
-  DaemonLifecycle({
-    this.port = 7842,
-    required this.daemonBinaryPath,
-    ApiClient? client,
-    required PlatformServices platform,
-  }) : _client = client ?? ApiClient(platform: platform);
-
-  Future<bool> isRunning() => _client.checkHealth();
-
-  Future<void> ensureRunning() async {
-    if (await isRunning()) return;
-
-    final binary = File(daemonBinaryPath);
-    if (!binary.existsSync()) {
-      throw DaemonException('Daemon binary not found: $daemonBinaryPath');
-    }
-
-    _process = await Process.start(daemonBinaryPath, []);
-
-    for (var i = 0; i < 50; i++) {
-      await Future.delayed(const Duration(milliseconds: 100));
-      if (await isRunning()) return;
-    }
-    throw DaemonException('Daemon did not become healthy within 5 seconds');
-  }
-
-  Future<void> stop() async {
-    _process?.kill();
-    _process = null;
-  }
-
   /// Returns the daemon binary path, or null if not found.
   ///
   /// Priority:

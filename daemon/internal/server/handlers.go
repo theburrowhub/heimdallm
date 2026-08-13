@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -41,6 +43,17 @@ type Server struct {
 	pipeline             *pipeline.Pipeline
 	router               chi.Router
 	httpServer           *http.Server
+	// starting suppresses the deep health checks while main is still wiring
+	// dependencies. Serve begins immediately after Listen so the socket is
+	// never bound-but-silent (a client would complete the TCP handshake and
+	// then hang until the whole init phase finished), so /health has to answer
+	// during a window where the pollers and event bus do not exist yet.
+	//
+	// The zero value means "ready": a Server built by New already has every
+	// dependency injected. Only main, which deliberately serves mid-wiring,
+	// calls MarkStarting. Atomic because Serve is already handling requests
+	// when main flips it back.
+	starting atomic.Bool
 	reloadFn             func() error
 	shutdownFn           func()
 	triggerReviewFn      func(prID int64) error
@@ -320,9 +333,29 @@ func (srv *Server) Router() http.Handler {
 	return srv.router
 }
 
-// Start binds the HTTP server to the given port and begins serving.
-func (srv *Server) Start(port int, bindAddr string) error {
+// Listen binds the HTTP server's socket without serving on it, returning the
+// bound listener for an immediately following Serve.
+//
+// The split exists so the daemon can fail fast on a bind error *before* it
+// starts any GitHub poller. ListenAndServe reports a port collision only after
+// the pollers are already running, and a daemon that swallows that error keeps
+// polling GitHub while serving nothing: invisible to the app, but spending the
+// same hourly API budget as the daemon that did win the port. Five such
+// headless daemons exhausted the quota for hours in #646.
+//
+// Callers must call Serve right away and use MarkReady to signal readiness. A
+// bound socket that nobody is serving is worse than a closed one: the kernel
+// completes the TCP handshake into the accept backlog, so probes hang for their
+// full timeout instead of failing fast with "connection refused".
+func (srv *Server) Listen(port int, bindAddr string) (net.Listener, error) {
+	if srv.httpServer != nil {
+		return nil, errors.New("server: Listen called twice")
+	}
 	addr := fmt.Sprintf("%s:%d", bindAddr, port)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
 	srv.httpServer = &http.Server{
 		Addr:         addr,
 		Handler:      srv.router,
@@ -330,8 +363,26 @@ func (srv *Server) Start(port int, bindAddr string) error {
 		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
-	return srv.httpServer.ListenAndServe()
+	return ln, nil
 }
+
+// Serve serves HTTP on a listener obtained from Listen. Returns
+// http.ErrServerClosed after a Shutdown.
+func (srv *Server) Serve(ln net.Listener) error {
+	if srv.httpServer == nil {
+		return errors.New("server: Serve called before Listen")
+	}
+	return srv.httpServer.Serve(ln)
+}
+
+// MarkStarting declares the server up but still wiring dependencies, so
+// /health answers 503 "starting" instead of running deep checks against
+// half-built dependencies. Call before Serve; pair with MarkReady.
+func (srv *Server) MarkStarting() { srv.starting.Store(true) }
+
+// MarkReady declares every dependency wired, restoring the normal /health
+// deep checks. Idempotent.
+func (srv *Server) MarkReady() { srv.starting.Store(false) }
 
 // Shutdown gracefully shuts down the HTTP server.
 func (srv *Server) Shutdown(ctx context.Context) error {
@@ -391,8 +442,30 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
+// HeaderDaemon marks a response as coming from a Heimdallm daemon. The app uses
+// it on /health to tell us apart from an unrelated process squatting on the
+// port: `{"status": ...}` alone is the shape of half the health endpoints in the
+// industry (Spring Boot Actuator, most Node/Go services), so matching on the
+// body would classify those as ours and silently never spawn a daemon.
+const HeaderDaemon = "X-Heimdallm-Daemon"
+
 func (srv *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
+	w.Header().Set(HeaderDaemon, "1")
+	// Serving starts right after the bind, long before the pollers, workers and
+	// event bus are wired, so answer honestly during that window instead of
+	// running deep checks against half-built dependencies. 503 keeps
+	// checkHealth() false (the app must not navigate into a half-ready daemon)
+	// while still being a real HTTP answer, so the app's reachability probe
+	// sees the port is taken and does not spawn a rival instance (#646).
+	if srv.starting.Load() {
+		resp := map[string]any{"status": "starting"}
+		if srv.version != "" {
+			resp["version"] = srv.version
+		}
+		writeJSON(w, http.StatusServiceUnavailable, resp)
+		return
+	}
 	checks := map[string]any{
 		"nats":      srv.natsHealthCheck(),
 		"sqlite":    srv.sqliteHealthCheck(r.Context()),

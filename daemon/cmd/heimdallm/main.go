@@ -371,6 +371,53 @@ func main() {
 		Version:   versionString(),
 		StartedAt: time.Now(),
 	})
+
+	// Claim the HTTP port before the pollers and workers spin up. A second
+	// daemon instance loses the bind, and until #646 it kept running anyway: no
+	// HTTP listener, so invisible to the app and to operators, yet polling
+	// GitHub on the same token as the instance that did win the port. Five of
+	// those quietly multiplied API consumption ~6x and exhausted the hourly
+	// quota for hours. Binding here turns that silent duplication into an
+	// immediate non-zero exit.
+	//
+	// (A losing instance still spends the one AuthenticatedUser call above plus
+	// store/NATS setup before it gets here. Cheap and bounded, unlike the
+	// per-tick polling this prevents.)
+	httpListener, err := srv.Listen(cfg.Server.Port, cfg.Server.BindAddr)
+	if err != nil {
+		slog.Error("daemon: cannot bind HTTP port — another instance is probably already running; exiting",
+			"port", cfg.Server.Port, "bind", cfg.Server.BindAddr, "err", err)
+		// os.Exit skips deferred cleanup, so release what is already open.
+		// Logging is unbuffered (server.RotatingWriter writes straight to the
+		// file), so the diagnostics above are already on disk.
+		eventBus.Stop()
+		s.Close()
+		if logCloser != nil {
+			logCloser.Close()
+		}
+		os.Exit(1)
+	}
+
+	// Serve straight away. A bound socket nobody serves is worse than a closed
+	// one: the kernel completes TCP handshakes into the accept backlog, so the
+	// app's probes hang for their full timeout instead of failing fast — and a
+	// timed-out reachability probe reads as "no daemon", which is exactly the
+	// redundant-spawn path #646 is about. /health answers 503 "starting" until
+	// MarkReady below, so callers get a real answer during the wiring window.
+	srv.MarkStarting()
+	slog.Info("daemon: HTTP listener bound", "port", cfg.Server.Port, "bind", cfg.Server.BindAddr)
+	serveFailed := make(chan error, 1)
+	go func() {
+		if err := srv.Serve(httpListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			// Log here rather than only where the channel is consumed: that
+			// happens at the end of the wiring phase, so a listener that dies
+			// during init would leave no trace until main got there — the exact
+			// silent headless state this guards against.
+			slog.Error("daemon: HTTP server stopped serving", "err", err)
+			serveFailed <- err
+		}
+	}()
+
 	srv.SetNATSConn(eventBus.Conn())
 	srv.SetConfigPath(cfgPath)
 	srv.SetHealthSnapshotFn(func() server.HealthSnapshot {
@@ -2398,20 +2445,27 @@ func main() {
 		return nil
 	})
 
-	go func() {
-		slog.Info("daemon started", "port", cfg.Server.Port, "bind", cfg.Server.BindAddr)
-		if err := srv.Start(cfg.Server.Port, cfg.Server.BindAddr); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("server stopped", "err", err)
-		}
-	}()
+	// Every dependency is wired: /health can run its deep checks now. The
+	// listener has been bound and served since srv.Listen above, so this log
+	// line means what it says — the daemon is reachable and ready.
+	srv.MarkReady()
+	slog.Info("daemon started", "port", cfg.Server.Port, "bind", cfg.Server.BindAddr)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	serveDied := false
 	select {
 	case received := <-sig:
 		slog.Info("shutting down", "signal", received.String())
 	case <-shutdownReq:
 		slog.Info("shutting down via API")
+	case err := <-serveFailed:
+		// Losing the listener mid-flight leaves the same headless daemon the
+		// bind check above prevents at startup, so treat it the same way:
+		// shut down and exit non-zero instead of polling GitHub forever with
+		// nobody able to reach us (#646). Already logged in the serve goroutine.
+		slog.Error("daemon: shutting down after serve failure", "err", err)
+		serveDied = true
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -2435,6 +2489,16 @@ func main() {
 		implementWCancel, statePollerCancel, stateWCancel,
 	}, exec.TerminateAll, producerSettleDelay)
 	broker.Stop()
+	if serveDied {
+		// Same as the bind-failure path: os.Exit skips the deferred cleanup, so
+		// release the resources that matter before reporting failure.
+		eventBus.Stop()
+		s.Close()
+		if logCloser != nil {
+			logCloser.Close()
+		}
+		os.Exit(1)
+	}
 }
 
 // producerSettleDelay is how long the shutdown path waits between cancelling the

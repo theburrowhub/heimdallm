@@ -88,6 +88,10 @@ void sendPRNotification({
   );
 }
 
+/// A non-Heimdallm process holds the daemon port. Distinct from a spawn failure
+/// because no amount of retrying fixes it — the user has to free the port.
+class _ForeignPortException implements Exception {}
+
 class _BootstrapApp extends ConsumerStatefulWidget {
   final GoRouter appRouter;
   const _BootstrapApp({required this.appRouter});
@@ -167,7 +171,10 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
 
     _setStatus('Starting Heimdallm…');
     try {
-      await _platform.spawnDaemon(binaryPath);
+      await _spawnDaemonUnlessRunning(api, binaryPath);
+    } on _ForeignPortException {
+      _setForeignPortError(api.daemonPort);
+      return;
     } catch (e) {
       _setError(
         title: 'Could not start daemon',
@@ -182,9 +189,42 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
     await _waitForHealth(api, retryBinary: binaryPath);
   }
 
+  /// Spawns the daemon only when nothing is answering on its port.
+  ///
+  /// The single most important invariant of the boot path: never add a second
+  /// daemon. A daemon that loses the port bind used to stay alive and keep
+  /// polling GitHub on the same token, so every redundant spawn permanently
+  /// multiplied API consumption until the hourly quota was gone (#646). The
+  /// daemon now exits on a failed bind, but the app must not rely on that —
+  /// older daemons are still out there, and not spawning is free.
+  ///
+  /// Reachability, not health, is the right question here: see
+  /// [ApiClient.daemonReachable].
+  /// Returns true when a daemon was actually spawned, false when the port was
+  /// already taken. Throws [_ForeignPortException] when a process that is not
+  /// Heimdallm holds the port — spawning would just fail on the bind, so that
+  /// case has to reach the user rather than be retried in silence.
+  Future<bool> _spawnDaemonUnlessRunning(ApiClient api, String binaryPath) async {
+    switch (await api.daemonReachable()) {
+      case PortOwner.daemon:
+        return false;
+      case PortOwner.foreign:
+        throw _ForeignPortException();
+      case PortOwner.none:
+        await _platform.spawnDaemon(binaryPath);
+        return true;
+    }
+  }
+
   Future<void> _waitForHealth(ApiClient api, {String? retryBinary}) async {
     const maxDaemonRestarts = 3;
+    // How many spawn windows to allow a daemon that owns the port but is not
+    // healthy before offering the user a way out. A "starting" daemon clears in
+    // seconds; a rate-limited one can stay degraded for hours, and blocking the
+    // splash on that locks the user out of the app entirely.
+    const maxDegradedWindows = 3;
     var daemonRestarts = 0;
+    var degradedWindows = 0;
     for (var attempt = 0; ; attempt++) {
       await Future.delayed(const Duration(milliseconds: 400));
       if (await api.checkHealth()) {
@@ -192,6 +232,10 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
         return;
       }
       if (attempt > 0 && attempt % 25 == 0 && retryBinary != null) {
+        // Check the budget BEFORE spawning: counting the spawn first and then
+        // testing the limit fires the terminal error immediately after the last
+        // daemon was launched, denying it the health window the retry exists to
+        // provide.
         if (daemonRestarts >= maxDaemonRestarts) {
           _setError(
             title: 'Daemon failed to start',
@@ -201,10 +245,62 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
           );
           return;
         }
+
+        // A daemon that owns the port but answers 503 keeps failing
+        // checkHealth: it is degraded (rate-limited, stale last_poll) or still
+        // wiring up, not absent. Re-spawning on that signal is what stacked
+        // five daemons on one token in #646, so we skip the spawn — and must
+        // not spend the restart budget on a spawn that never happened, or the
+        // user gets a terminal "failed to start" for a daemon that is running.
+        final bool spawned;
+        try {
+          spawned = await _spawnDaemonUnlessRunning(api, retryBinary);
+        } on _ForeignPortException {
+          _setForeignPortError(api.daemonPort);
+          return;
+        } catch (_) {
+          continue;
+        }
+
+        if (!spawned) {
+          degradedWindows++;
+          if (degradedWindows >= maxDegradedWindows) {
+            _setDegradedDaemonError();
+            return;
+          }
+          // Tell the user what we are actually waiting on, instead of leaving
+          // the splash on a generic message while nothing appears to happen.
+          _setStatus('Heimdallm is running but not ready yet — waiting…');
+          continue;
+        }
         daemonRestarts++;
-        try { await _platform.spawnDaemon(retryBinary); } catch (_) {}
       }
     }
+  }
+
+  void _setForeignPortError(int port) {
+    _setError(
+      title: 'Port $port is in use by another process',
+      details: 'Something is answering on Heimdallm\'s port, but it is not the '
+          'Heimdallm daemon. Heimdallm will not start a daemon that cannot bind '
+          'the port.',
+      hint: 'Find the process and stop it, then relaunch:\n'
+          'lsof -nP -iTCP:$port -sTCP:LISTEN',
+    );
+  }
+
+  /// The daemon owns the port and answers, but never reports healthy. Most
+  /// often a GitHub rate-limit episode leaving `last_poll` stale, which can
+  /// last hours — so give the user an exit instead of an endless splash.
+  void _setDegradedDaemonError() {
+    _setError(
+      title: 'Heimdallm is running but not ready',
+      details: 'The daemon is answering but reports itself unhealthy. This is '
+          'usually a GitHub rate-limit episode leaving the last poll stale, '
+          'which can take a while to clear.',
+      hint: 'Retry to keep waiting, or check the daemon log:\n'
+          '~/.local/share/heimdallm/heimdallm.log',
+    );
   }
 
   void _setStatus(String s) { if (mounted) setState(() => _status = s); }
