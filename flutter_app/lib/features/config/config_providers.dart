@@ -2,14 +2,19 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/api/api_client.dart';
 import '../../core/api/sse_client.dart';
+import '../../core/daemon/daemon_startup.dart';
 import '../../core/models/config_model.dart';
 import '../../core/platform/platform_services_provider.dart';
 import '../dashboard/dashboard_providers.dart';
 
 final daemonHealthProvider = FutureProvider<bool>((ref) async {
   final api = ref.watch(apiClientProvider);
-  return api.checkHealth();
+  // UI "running" state is ownership, not deep health. A degraded daemon still
+  // serves config/logs and must expose Stop/diagnostic controls instead of a
+  // misleading Start button that would attempt a duplicate (#646).
+  return await api.daemonReachable() == PortOwner.daemon;
 });
 
 final configProvider = FutureProvider<AppConfig>((ref) async {
@@ -157,18 +162,61 @@ class ConfigNotifier extends AsyncNotifier<AppConfig> {
       // 2. Write config
       await platform.writeDaemonConfig(config);
 
-      // 3. Launch daemon
-      await platform.spawnDaemon(daemonBinaryPath);
+      // 3. Guard daemon launch with the same ownership check as app startup.
+      // Only an explicitly closed port is allowed to reach spawnDaemon.
+      final api = ref.read(apiClientProvider);
+      final startup = DaemonStartupCoordinator(
+        api: api,
+        platform: platform,
+        binaryPath: daemonBinaryPath,
+        maxSpawnAttempts: 1,
+      );
+      final startupResult = await startup.ensureAvailable();
+      switch (startupResult.outcome) {
+        case DaemonStartupOutcome.spawned:
+        case DaemonStartupOutcome.daemonPresent:
+          break;
+        case DaemonStartupOutcome.portOccupied:
+          throw Exception(
+            'Port ${api.daemonPort} is already occupied or could not be '
+            'proven free. No daemon was started, to avoid duplicate workers. '
+            'Stop the process listening on that port and try again.',
+          );
+        case DaemonStartupOutcome.spawnFailedRetryable:
+        case DaemonStartupOutcome.spawnFailedTerminal:
+          throw Exception(
+            'Heimdallm could not launch its daemon: '
+            '${startupResult.error ?? 'unknown process error'}. '
+            'Check that the app is installed correctly and has permission '
+            'to run its background service.',
+          );
+        case DaemonStartupOutcome.spawnBudgetExhausted:
+          throw Exception(
+            'Heimdallm exhausted its guarded daemon start attempt. '
+            'Restart the app and check the daemon log if the problem persists.',
+          );
+      }
 
       // 4. Wait up to 8 seconds for the daemon to become healthy
-      final api = ref.read(apiClientProvider);
+      var healthy = false;
       for (var i = 0; i < 80; i++) {
         await Future.delayed(const Duration(milliseconds: 100));
-        if (await api.checkHealth()) break;
+        if (await api.checkHealth()) {
+          healthy = true;
+          break;
+        }
       }
-      if (!await api.checkHealth()) {
+      if (!healthy) {
+        final existingDaemon =
+            startupResult.outcome == DaemonStartupOutcome.daemonPresent;
         throw Exception(
-          'Heimdallm could not start. Check the app installation.',
+          existingDaemon
+              ? 'A Heimdallm daemon is already running on port '
+                    '${api.daemonPort}, but it did not become healthy within '
+                    '8 seconds. No second daemon was started. Check the '
+                    'daemon log and try again.'
+              : 'Heimdallm was launched but did not become healthy within '
+                    '8 seconds. Check the app installation and daemon log.',
         );
       }
       ref.invalidate(daemonHealthProvider);

@@ -17,9 +17,11 @@ import (
 	"github.com/heimdallm/daemon/internal/store"
 )
 
-// newListenTestServer builds the smallest Server that can bind: Listen only
-// needs the router, which New always wires.
 func newListenTestServer(t *testing.T) *server.Server {
+	return newListenTestServerWithToken(t, "")
+}
+
+func newListenTestServerWithToken(t *testing.T, token string) *server.Server {
 	t.Helper()
 	s, err := store.Open(":memory:")
 	if err != nil {
@@ -29,7 +31,7 @@ func newListenTestServer(t *testing.T) *server.Server {
 	broker := sse.NewBroker()
 	broker.Start()
 	t.Cleanup(broker.Stop)
-	return server.New(s, broker, nil, "")
+	return server.New(s, broker, nil, token)
 }
 
 // freePort returns a port number nothing is listening on. Racy by nature —
@@ -57,8 +59,7 @@ func TestListen_FailsWhenPortIsOccupied(t *testing.T) {
 	defer occupied.Close()
 	port := occupied.Addr().(*net.TCPAddr).Port
 
-	srv := newListenTestServer(t)
-	ln, err := srv.Listen(port, "127.0.0.1")
+	ln, err := server.Listen(port, "127.0.0.1")
 	if err == nil {
 		ln.Close()
 		t.Fatalf("Listen on occupied port %d returned no error; the daemon would run headless", port)
@@ -79,39 +80,96 @@ func TestListen_FailsWhenPortIsOccupied(t *testing.T) {
 	}
 }
 
-// A second Listen must not silently orphan the first listener/server pair by
-// overwriting srv.httpServer.
-func TestListen_RejectsSecondCall(t *testing.T) {
+// A second Serve must not silently replace the first http.Server.
+func TestServe_RejectsSecondCall(t *testing.T) {
 	srv := newListenTestServer(t)
-	first, err := srv.Listen(freePort(t), "127.0.0.1")
+	first, err := server.Listen(0, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("first Listen: %v", err)
 	}
 	defer first.Close()
-
-	second, err := srv.Listen(freePort(t), "127.0.0.1")
-	if err == nil {
-		second.Close()
-		t.Fatal("second Listen succeeded; the first listener would be orphaned")
+	firstErr := make(chan error, 1)
+	go func() { firstErr <- srv.Serve(first) }()
+	if _, err := httpGetWithRetry(fmt.Sprintf("http://%s/health", first.Addr())); err != nil {
+		t.Fatalf("first Serve never came up: %v", err)
 	}
-	if second != nil {
-		second.Close()
-		t.Fatal("second Listen returned a listener alongside an error")
+
+	second, err := server.Listen(0, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("second Listen: %v", err)
+	}
+	defer second.Close()
+	if err := srv.Serve(second); err == nil {
+		t.Fatal("second Serve succeeded; the first server would be orphaned")
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	<-firstErr
+}
+
+// Shutdown may be requested before the goroutine which calls Serve is
+// scheduled. Serve must preserve that decision, close the subsequently handed
+// listener, and report the normal graceful-shutdown sentinel rather than
+// briefly accepting traffic or leaving the daemon port bound.
+func TestShutdownBeforeServe_ClosesSubsequentListener(t *testing.T) {
+	srv := newListenTestServer(t)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("Shutdown before Serve: %v", err)
+	}
+
+	ln, err := server.Listen(0, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
+		t.Fatalf("Serve after Shutdown = %v, want http.ErrServerClosed", err)
+	}
+
+	conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+	if err == nil {
+		conn.Close()
+		t.Fatalf("listener %s still accepts connections after Shutdown won", addr)
 	}
 }
 
-// Serve without a prior Listen must report the misuse instead of panicking on
-// a nil httpServer.
-func TestServe_WithoutListen(t *testing.T) {
-	srv := newListenTestServer(t)
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+// Main creates a gated Server before the store and API token exist, then
+// injects them before MarkReady. Verify that the router observes both values
+// only after publication: authentication uses the late token and the handler
+// can use the late store without a nil dereference.
+func TestConfigure_PublishesDependenciesBeforeMarkReady(t *testing.T) {
+	s, err := store.Open(":memory:")
 	if err != nil {
-		t.Fatalf("listen: %v", err)
+		t.Fatalf("open store: %v", err)
 	}
-	defer ln.Close()
+	t.Cleanup(func() { s.Close() })
+	broker := sse.NewBroker()
+	broker.Start()
+	t.Cleanup(broker.Stop)
 
-	if err := srv.Serve(ln); err == nil {
-		t.Fatal("Serve without Listen returned nil error")
+	srv := server.New(nil, nil, nil, "")
+	srv.MarkStarting()
+	srv.Configure(s, broker, nil, "late-secret")
+	srv.MarkReady()
+
+	unauthenticated := httptest.NewRecorder()
+	srv.Router().ServeHTTP(unauthenticated, httptest.NewRequest(http.MethodGet, "/prs", nil))
+	if unauthenticated.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated /prs status = %d, want 401", unauthenticated.Code)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/prs", nil)
+	req.Header.Set("X-Heimdallm-Token", "late-secret")
+	authenticated := httptest.NewRecorder()
+	srv.Router().ServeHTTP(authenticated, req)
+	if authenticated.Code != http.StatusOK {
+		t.Fatalf("authenticated /prs status = %d, want 200; body=%s", authenticated.Code, authenticated.Body.String())
 	}
 }
 
@@ -120,7 +178,7 @@ func TestServe_WithoutListen(t *testing.T) {
 // future refactor could silently restore the headless-daemon behaviour of #646.
 func TestServe_ListenerDiesMidFlight_ReturnsNonClosedError(t *testing.T) {
 	srv := newListenTestServer(t)
-	ln, err := srv.Listen(freePort(t), "127.0.0.1")
+	ln, err := server.Listen(freePort(t), "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
@@ -153,7 +211,7 @@ func TestListen_BindsAndServeUsesTheListener(t *testing.T) {
 	srv := newListenTestServer(t)
 	port := freePort(t)
 
-	ln, err := srv.Listen(port, "127.0.0.1")
+	ln, err := server.Listen(port, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("Listen on free port %d: %v", port, err)
 	}
@@ -195,11 +253,70 @@ func TestListen_BindsAndServeUsesTheListener(t *testing.T) {
 // net.ipv4.ip_nonlocal_bind=1 is set (common in load-balancer and container
 // images), which made an earlier TEST-NET-3 version of this test flaky.
 func TestListen_FailsOnUnusableBindAddr(t *testing.T) {
-	srv := newListenTestServer(t)
-	ln, err := srv.Listen(freePort(t), "not a host")
+	ln, err := server.Listen(freePort(t), "not a host")
 	if err == nil {
 		ln.Close()
 		t.Fatal("Listen on an invalid bind address returned no error")
+	}
+}
+
+func TestStartingGate_BlocksEveryRouteExceptHealth(t *testing.T) {
+	srv := newListenTestServerWithToken(t, "secret")
+	srv.MarkStarting()
+	shutdownCalled := false
+	meCalled := false
+	srv.SetShutdownFn(func() { shutdownCalled = true })
+	srv.SetMeFn(func() (string, error) {
+		meCalled = true
+		return "bot", nil
+	})
+
+	tests := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/me"},
+		{http.MethodGet, "/prs"},
+		{http.MethodGet, "/events"},
+		{http.MethodGet, "/logs/stream"},
+		{http.MethodPatch, "/config"},
+		{http.MethodPost, "/shutdown"},
+		{http.MethodGet, "/not-a-route"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			w := httptest.NewRecorder()
+			srv.Router().ServeHTTP(w, req)
+			if w.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want 503", w.Code)
+			}
+			if got := w.Header().Get(server.HeaderDaemon); got != "1" {
+				t.Errorf("%s header = %q, want 1", server.HeaderDaemon, got)
+			}
+			if got := w.Header().Get("Retry-After"); got != "1" {
+				t.Errorf("Retry-After = %q, want 1", got)
+			}
+		})
+	}
+	if shutdownCalled {
+		t.Fatal("shutdown callback ran while server was starting")
+	}
+	if meCalled {
+		t.Fatal("me callback ran while server was starting")
+	}
+
+	// MarkReady publishes the callbacks and restores the normal router.
+	srv.MarkReady()
+	req := httptest.NewRequest(http.MethodGet, "/me", nil)
+	req.Header.Set("X-Heimdallm-Token", "secret")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("ready /me status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if !meCalled {
+		t.Fatal("ready /me did not invoke the published callback")
 	}
 }
 
@@ -237,6 +354,35 @@ func TestHealth_ReportsStartingUntilMarkReady(t *testing.T) {
 	}
 	if body["status"] == "starting" {
 		t.Error("ready: still reporting \"starting\" after MarkReady")
+	}
+}
+
+func TestMarkStopping_KeepsOwnershipVisibleAndGatesRoutes(t *testing.T) {
+	srv := newListenTestServerWithToken(t, "secret")
+	srv.MarkStopping()
+
+	health := httptest.NewRecorder()
+	srv.Router().ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if health.Code != http.StatusServiceUnavailable {
+		t.Fatalf("health status = %d, want 503", health.Code)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(health.Body).Decode(&body); err != nil {
+		t.Fatalf("decode health: %v", err)
+	}
+	if body["status"] != "stopping" {
+		t.Fatalf("health status field = %v, want stopping", body["status"])
+	}
+	if got := health.Header().Get(server.HeaderDaemon); got != "1" {
+		t.Fatalf("%s header = %q, want 1", server.HeaderDaemon, got)
+	}
+
+	mutation := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/shutdown", nil)
+	req.Header.Set("X-Heimdallm-Token", "secret")
+	srv.Router().ServeHTTP(mutation, req)
+	if mutation.Code != http.StatusServiceUnavailable {
+		t.Fatalf("gated mutation status = %d, want 503", mutation.Code)
 	}
 }
 

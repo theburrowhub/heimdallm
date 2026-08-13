@@ -8,6 +8,7 @@
 library;
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:heimdallm/core/platform/platform_services.dart';
 import 'package:heimdallm/core/platform/platform_services_web.dart';
 
 void main() {
@@ -35,6 +36,20 @@ void main() {
 
     test('defaultDaemonBinaryPath returns null', () {
       expect(WebPlatformServices().defaultDaemonBinaryPath(), isNull);
+    });
+
+    test(
+      'probeDaemonPort fails closed because browsers cannot open TCP sockets',
+      () async {
+        expect(
+          await WebPlatformServices().probeDaemonPort(),
+          TcpPortState.unknown,
+        );
+      },
+    );
+
+    test('isDaemonSupervised is false on web', () async {
+      expect(await WebPlatformServices().isDaemonSupervised(), isFalse);
     });
 
     test('spawnDaemon throws UnsupportedError', () async {

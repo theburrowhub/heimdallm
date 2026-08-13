@@ -15,6 +15,7 @@ import 'package:heimdallm/features/dashboard/activity_filters.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_screen.dart';
 import 'package:heimdallm/features/issues/issues_providers.dart';
+import 'package:heimdallm/features/server/server_actions.dart';
 import '../core/platform/fake_platform_services.dart';
 
 class MockApiClient extends Mock implements ApiClient {}
@@ -92,6 +93,128 @@ Future<void> _pumpOfflineDashboard(
 }
 
 void main() {
+  test(
+    'restart waits for daemon port release, not health degradation',
+    () async {
+      final api = MockApiClient();
+      final owners = <PortOwner>[
+        PortOwner.daemon,
+        PortOwner.daemon,
+        PortOwner.none,
+      ];
+      when(
+        () => api.daemonReachable(),
+      ).thenAnswer((_) async => owners.removeAt(0));
+
+      final owner = await waitForDaemonPortRelease(
+        api,
+        delays: const [Duration.zero, Duration.zero, Duration.zero],
+      );
+
+      expect(owner, PortOwner.none);
+      verify(() => api.daemonReachable()).called(3);
+      verifyNever(() => api.checkHealth());
+    },
+  );
+
+  testWidgets(
+    'restart accepts a LaunchAgent reappearance without detached spawn',
+    (tester) async {
+      final platform = FakePlatformServices(daemonBinaryPath: '/tmp/heimdallm');
+      final api = MockApiClient();
+      final owners = <PortOwner>[PortOwner.none, PortOwner.daemon];
+      when(() => api.shutdownDaemon()).thenAnswer((_) async {});
+      when(
+        () => api.daemonReachable(),
+      ).thenAnswer((_) async => owners.removeAt(0));
+      when(() => api.checkHealth()).thenAnswer((_) async => true);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            apiClientProvider.overrideWithValue(api),
+            platformServicesProvider.overrideWithValue(platform),
+          ],
+          child: MaterialApp(
+            home: Consumer(
+              builder: (context, ref, _) => Scaffold(
+                body: FilledButton(
+                  onPressed: () => restartDaemon(context, ref),
+                  child: const Text('Restart test daemon'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('Restart test daemon'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.pump();
+
+      expect(platform.spawnedDaemons, isEmpty);
+      expect(find.text('Server restarted'), findsOneWidget);
+      verify(() => api.daemonReachable()).called(2);
+      verify(() => api.checkHealth()).called(1);
+    },
+  );
+
+  testWidgets(
+    'restart accepts a supervised daemon that reappears before port release',
+    (tester) async {
+      final platform = FakePlatformServices(daemonSupervised: true);
+      final api = MockApiClient();
+      when(() => api.shutdownDaemon()).thenAnswer((_) async {});
+      when(
+        () => api.daemonReachable(),
+      ).thenAnswer((_) async => PortOwner.daemon);
+      when(() => api.checkHealth()).thenAnswer((_) async => true);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            apiClientProvider.overrideWithValue(api),
+            platformServicesProvider.overrideWithValue(platform),
+          ],
+          child: MaterialApp(
+            home: Consumer(
+              builder: (context, ref, _) => Scaffold(
+                body: FilledButton(
+                  onPressed: () => restartDaemon(context, ref),
+                  child: const Text('Restart supervised daemon'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('Restart supervised daemon'));
+      await tester.pump();
+      for (final delay in const [
+        Duration(milliseconds: 200),
+        Duration(milliseconds: 300),
+        Duration(milliseconds: 500),
+        Duration(milliseconds: 800),
+        Duration(milliseconds: 1200),
+        Duration(seconds: 2),
+      ]) {
+        await tester.pump(delay);
+        await tester.pump();
+      }
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.pump();
+
+      expect(platform.spawnedDaemons, isEmpty);
+      expect(find.text('Server restarted'), findsOneWidget);
+      verify(() => api.daemonReachable()).called(6);
+      verify(() => api.checkHealth()).called(1);
+    },
+  );
+
   test('SortNotifier handles preference load failures', () async {
     TestWidgetsFlutterBinding.ensureInitialized();
     const channel = MethodChannel('plugins.flutter.io/shared_preferences');
@@ -247,6 +370,7 @@ void main() {
     final platform = FakePlatformServices(daemonBinaryPath: '/tmp/heimdallm');
     final api = MockApiClient();
     var healthChecks = 0;
+    when(() => api.daemonReachable()).thenAnswer((_) async => PortOwner.none);
     when(() => api.checkHealth()).thenAnswer((_) async {
       healthChecks++;
       return healthChecks == 3;
@@ -287,7 +411,7 @@ void main() {
     await _pumpOfflineDashboard(tester, api: api, platform: platform);
 
     await tester.tap(find.text('Start Server'));
-    await tester.pump();
+    await tester.pumpAndSettle();
 
     expect(platform.spawnedDaemons, isEmpty);
     verifyNever(() => api.checkHealth());
@@ -300,6 +424,24 @@ void main() {
     expect(container.read(daemonStartingProvider), isFalse);
   });
 
+  testWidgets('offline dashboard accepts an already-present daemon', (
+    tester,
+  ) async {
+    final platform = FakePlatformServices(daemonBinaryPath: '/tmp/heimdallm');
+    final api = MockApiClient();
+    when(() => api.daemonReachable()).thenAnswer((_) async => PortOwner.daemon);
+    when(() => api.daemonPort).thenReturn(7842);
+
+    await _pumpOfflineDashboard(tester, api: api, platform: platform);
+
+    await tester.tap(find.text('Start Server'));
+    await tester.pumpAndSettle();
+
+    expect(platform.spawnedDaemons, isEmpty);
+    expect(find.text('Server is already running'), findsOneWidget);
+    verifyNever(() => api.checkHealth());
+  });
+
   testWidgets('offline dashboard resets start state when spawn fails', (
     tester,
   ) async {
@@ -308,15 +450,20 @@ void main() {
       spawnError: Exception('boom'),
     );
     final api = MockApiClient();
+    when(() => api.daemonReachable()).thenAnswer((_) async => PortOwner.none);
+    when(() => api.daemonPort).thenReturn(7842);
 
     await _pumpOfflineDashboard(tester, api: api, platform: platform);
 
     await tester.tap(find.text('Start Server'));
-    await tester.pump();
+    await tester.pumpAndSettle();
 
     expect(platform.spawnedDaemons, equals(['/tmp/heimdallm']));
     verifyNever(() => api.checkHealth());
-    expect(find.text('Error: Exception: boom'), findsOneWidget);
+    expect(
+      find.text('Could not start Heimdallm: Exception: boom'),
+      findsOneWidget,
+    );
 
     final container = ProviderScope.containerOf(
       tester.element(find.byType(DashboardScreen)),
@@ -328,6 +475,7 @@ void main() {
   testWidgets('offline dashboard reports daemon start timeout', (tester) async {
     final platform = FakePlatformServices(daemonBinaryPath: '/tmp/heimdallm');
     final api = MockApiClient();
+    when(() => api.daemonReachable()).thenAnswer((_) async => PortOwner.none);
     when(() => api.checkHealth()).thenAnswer((_) async => false);
 
     await _pumpOfflineDashboard(tester, api: api, platform: platform);

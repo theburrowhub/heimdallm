@@ -9,6 +9,7 @@ APP_UI_BIN="$APP_PATH/Contents/MacOS/Heimdallm"
 APP_DAEMON_BIN="$APP_PATH/Contents/MacOS/heimdalld"
 BUNDLE_PROCESS_PATTERN='^/Applications/Heimdallm[.]app/Contents/MacOS/(Heimdallm|heimdalld)([[:space:]]|$)'
 LAUNCHAGENT_LABEL="com.heimdallm.daemon"
+LEGACY_LAUNCHAGENT_LABEL="com.auto-pr.daemon"
 PORT="7842"
 SERVICE_READY_TIMEOUT_SECONDS="60"
 
@@ -92,21 +93,30 @@ set_user_paths() {
   DB_PATH="$DATA_DIR/heimdallm.db"
   UI_PID_PATH="$DATA_DIR/ui.pid"
   PLIST_PATH="$USER_HOME/Library/LaunchAgents/$LAUNCHAGENT_LABEL.plist"
+  LEGACY_PLIST_PATH="$USER_HOME/Library/LaunchAgents/$LEGACY_LAUNCHAGENT_LABEL.plist"
   return 0
 }
 
-# Arguments: listener PID, exact executable path, captured LaunchAgent PID.
+# Arguments: listener PID, exact executable path, captured current LaunchAgent
+# PID, captured legacy LaunchAgent PID, and the validated legacy executable.
 # Service ownership wins over bundle ownership so the classes are exclusive.
 classify_listener() {
   mi_listener_pid=${1-}
   mi_listener_executable=${2-}
   mi_launchagent_pid=${3-}
+  mi_legacy_launchagent_pid=${4-}
+  mi_legacy_launchagent_executable=${5-}
 
   if [ -z "$mi_listener_pid" ]; then
     printf '%s\n' "free"
   elif [ -n "$mi_launchagent_pid" ] &&
        [ "$mi_listener_pid" = "$mi_launchagent_pid" ]; then
     printf '%s\n' "service"
+  elif [ -n "$mi_legacy_launchagent_pid" ] &&
+       [ "$mi_listener_pid" = "$mi_legacy_launchagent_pid" ] &&
+       [ -n "$mi_legacy_launchagent_executable" ] &&
+       [ "$mi_listener_executable" = "$mi_legacy_launchagent_executable" ]; then
+    printf '%s\n' "legacy-service"
   elif [ "$mi_listener_executable" = "$APP_UI_BIN" ] ||
        [ "$mi_listener_executable" = "$APP_DAEMON_BIN" ]; then
     printf '%s\n' "bundle"
@@ -125,21 +135,25 @@ decide_install_policy() {
     absent:free) printf '%s\n' "proceed" ;;
     absent:bundle) printf '%s\n' "stop-bundle" ;;
     absent:service) printf '%s\n' "abort-inconsistent" ;;
+    absent:legacy-service) printf '%s\n' "retire-legacy" ;;
     absent:foreign) printf '%s\n' "warn" ;;
 
     present-unloaded:free) printf '%s\n' "migrate-unloaded" ;;
     present-unloaded:bundle) printf '%s\n' "stop-bundle+migrate-unloaded" ;;
     present-unloaded:service) printf '%s\n' "abort-inconsistent" ;;
+    present-unloaded:legacy-service) printf '%s\n' "retire-legacy+migrate-unloaded" ;;
     present-unloaded:foreign) printf '%s\n' "warn+migrate-unloaded" ;;
 
     loaded-enabled:free) printf '%s\n' "restart-service" ;;
     loaded-enabled:bundle) printf '%s\n' "stop-bundle+restart-service" ;;
     loaded-enabled:service) printf '%s\n' "restart-service" ;;
+    loaded-enabled:legacy-service) printf '%s\n' "retire-legacy+restart-service" ;;
     loaded-enabled:foreign) printf '%s\n' "abort-foreign" ;;
 
     loaded-disabled:free) printf '%s\n' "migrate-disabled" ;;
     loaded-disabled:bundle) printf '%s\n' "stop-bundle+migrate-disabled" ;;
     loaded-disabled:service) printf '%s\n' "migrate-disabled" ;;
+    loaded-disabled:legacy-service) printf '%s\n' "retire-legacy+migrate-disabled" ;;
     loaded-disabled:foreign) printf '%s\n' "warn+migrate-disabled" ;;
 
     *) return 1 ;;
@@ -160,6 +174,58 @@ rollback_new_move_detected() {
 
 rollback_required() {
   [ "${1-}" = "1" ] && [ "${2-}" != "1" ]
+}
+
+legacy_move_detected() {
+  [ "${1-}" = "1" ] ||
+    { [ "${2-}" = "1" ] &&
+      [ "${3-}" = "1" ] &&
+      [ "${4-}" = "1" ]; }
+}
+
+legacy_stop_detected() {
+  [ "${1-}" = "1" ] ||
+    { [ "${2-}" = "1" ] && [ "${3-}" = "1" ]; }
+}
+
+legacy_canonical_move_detected() {
+  [ "${1-}" = "1" ] ||
+    { [ "${2-}" = "1" ] &&
+      [ "${3-}" = "1" ] &&
+      [ "${4-}" = "1" ]; }
+}
+
+# Only the two historical install layouts and checkout-built daemon name are
+# accepted. A job merely reusing the old label is never enough to authorize a
+# bootout.
+validate_legacy_program_path() {
+  if [ "$#" -ne 1 ]; then
+    return 1
+  fi
+  case "$1" in
+    ""|[!/]*) return 1 ;;
+    *"//"*|*"/./"*|*"/."|*"/../"*|*"/.."|*/) return 1 ;;
+    *'
+'*) return 1 ;;
+  esac
+  case "$1" in
+    "$USER_HOME"/daemon/bin/auto-pr-daemon|\
+    "$USER_HOME"/*/daemon/bin/auto-pr-daemon|\
+    /Applications/auto-pr.app/Contents/MacOS/auto-pr-daemon|\
+    /Applications/auto_pr.app/Contents/MacOS/auto-pr-daemon)
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+safe_legacy_quarantine_path() {
+  case "${1-}" in
+    "$USER_HOME"/Library/LaunchAgents/.heimdallm-retired-auto-pr.??????)
+      [ "$1" != "$USER_HOME/Library/LaunchAgents" ]
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 # The captured service PID or exact installed executables are controlled by
@@ -219,10 +285,54 @@ init_runtime_state() {
   ORIGINAL_PLIST_BACKUP=""
   LAUNCHAGENT_STATE=""
 
+  LEGACY_PLIST_PRESENT=0
+  LEGACY_PLIST_MODE=""
+  LEGACY_PLIST_FINGERPRINT=""
+  LEGACY_PROGRAM_PATH=""
+  LEGACY_JOB_PLIST_PATH=""
+  LEGACY_LOADED=0
+  LEGACY_DISABLED=0
+  LEGACY_PID=""
+  LEGACY_PID_EXECUTABLE=""
+  LEGACY_STOP_INTENDED=0
+  LEGACY_STOPPED=0
+  LEGACY_PLIST_BACKUP=""
+  LEGACY_QUARANTINE_DIR=""
+  LEGACY_QUARANTINE_PATH=""
+  LEGACY_MOVE_INTENDED=0
+  LEGACY_MOVED=0
+  LEGACY_ROLLBACK_LEAVE_UNLOADED=0
+  LEGACY_CANONICAL_STAGED_PATH=""
+  LEGACY_CANONICAL_FINGERPRINT=""
+  LEGACY_CANONICAL_MOVE_INTENDED=0
+  LEGACY_CANONICAL_CREATED=0
+
   PORT_CLASS="free"
   PORT_FOREIGN_INFO=""
   PREFLIGHT_FOREIGN_INFO=""
   RESOLVED_RELEASE=""
+}
+
+# Small command seams keep the destructive legacy migration integration-testable
+# on Linux CI while production still uses the absolute macOS system tools.
+legacy_launchctl() {
+  /bin/launchctl "$@"
+}
+
+legacy_plist_uid() {
+  /usr/bin/stat -f '%u' "$1"
+}
+
+legacy_plist_mode() {
+  /usr/bin/stat -f '%Lp' "$1"
+}
+
+legacy_plist_fingerprint() {
+  /usr/bin/cksum < "$1"
+}
+
+replace_plist_string() {
+  /usr/bin/plutil -replace "$1" -string "$2" "$3"
 }
 
 # Runtime helpers ------------------------------------------------------------
@@ -251,6 +361,7 @@ require_common_commands() {
     /bin/mv \
     /bin/ps \
     /bin/rm \
+    /bin/rmdir \
     /bin/sleep \
     /usr/bin/awk \
     /usr/bin/cksum \
@@ -306,6 +417,7 @@ resolve_invoking_user() {
 
   LAUNCH_DOMAIN="gui/$USER_UID"
   SERVICE_TARGET="$LAUNCH_DOMAIN/$LAUNCHAGENT_LABEL"
+  LEGACY_SERVICE_TARGET="$LAUNCH_DOMAIN/$LEGACY_LAUNCHAGENT_LABEL"
 }
 
 process_executable() {
@@ -458,6 +570,283 @@ current_job_plist_path() {
   printf '%s\n' "$mi_job_path"
 }
 
+legacy_launchagent_job_state() {
+  if mi_legacy_state_output=$(
+    /bin/launchctl print "$LEGACY_SERVICE_TARGET" 2>&1
+  ); then
+    printf '%s\n' "loaded"
+    return 0
+  else
+    mi_legacy_state_status=$?
+  fi
+  if [ "$mi_legacy_state_status" -eq 113 ] ||
+     printf '%s\n' "$mi_legacy_state_output" |
+       /usr/bin/grep -q "Could not find service"; then
+    printf '%s\n' "unloaded"
+    return 0
+  fi
+  error "Cannot inspect legacy LaunchAgent job:"
+  printf '%s\n' "$mi_legacy_state_output" >&2
+  return 2
+}
+
+legacy_current_job_pid() {
+  if ! mi_legacy_job_output=$(
+    /bin/launchctl print "$LEGACY_SERVICE_TARGET" 2>/dev/null
+  ); then
+    return 1
+  fi
+  mi_legacy_job_pid=$(
+    printf '%s\n' "$mi_legacy_job_output" |
+      /usr/bin/awk '$1 == "pid" && $2 == "=" && $3 ~ /^[0-9]+$/ { print $3; exit }'
+  )
+  if [ -z "$mi_legacy_job_pid" ]; then
+    return 1
+  fi
+  printf '%s\n' "$mi_legacy_job_pid"
+}
+
+legacy_current_job_plist_path() {
+  if ! mi_legacy_job_output=$(
+    /bin/launchctl print "$LEGACY_SERVICE_TARGET" 2>/dev/null
+  ); then
+    return 1
+  fi
+  mi_legacy_job_path=$(
+    printf '%s\n' "$mi_legacy_job_output" |
+      /usr/bin/awk '$1 == "path" && $2 == "=" { sub(/^[^=]*=[[:space:]]*/, ""); print; exit }'
+  )
+  if [ -z "$mi_legacy_job_path" ]; then
+    return 1
+  fi
+  printf '%s\n' "$mi_legacy_job_path"
+}
+
+read_legacy_disabled_state() {
+  if ! mi_legacy_disabled_output=$(
+    /bin/launchctl print-disabled "$LAUNCH_DOMAIN" 2>&1
+  ); then
+    error "Cannot inspect disabled legacy LaunchAgent state:"
+    printf '%s\n' "$mi_legacy_disabled_output" >&2
+    return 1
+  fi
+
+  mi_legacy_disabled_line=$(
+    printf '%s\n' "$mi_legacy_disabled_output" |
+      /usr/bin/awk -v label="\"$LEGACY_LAUNCHAGENT_LABEL\"" \
+        'index($0, label) { print; exit }'
+  )
+  case "$mi_legacy_disabled_line" in
+    "") printf '%s\n' "0" ;;
+    *"=>"*"disabled"*|*"=>"*"true"*) printf '%s\n' "1" ;;
+    *"=>"*"enabled"*|*"=>"*"false"*) printf '%s\n' "0" ;;
+    *)
+      error "Unrecognized legacy launchctl disabled-state output: $mi_legacy_disabled_line"
+      return 1
+      ;;
+  esac
+}
+
+legacy_plist_identity_matches() {
+  if ! mi_legacy_label=$(
+    /usr/bin/plutil -extract Label raw -o - "$LEGACY_PLIST_PATH" 2>/dev/null
+  ) || [ "$mi_legacy_label" != "$LEGACY_LAUNCHAGENT_LABEL" ]; then
+    return 1
+  fi
+  if ! mi_legacy_program=$(
+    /usr/bin/plutil -extract ProgramArguments.0 raw -o - \
+      "$LEGACY_PLIST_PATH" 2>/dev/null
+  ) || ! validate_legacy_program_path "$mi_legacy_program"; then
+    return 1
+  fi
+  # The historical generator emitted exactly one argument. Extra arguments
+  # make this an unknown job even if the label and executable name look right.
+  if /usr/bin/plutil -extract ProgramArguments.1 raw -o - \
+    "$LEGACY_PLIST_PATH" >/dev/null 2>&1; then
+    return 1
+  fi
+  if ! mi_legacy_run_at_load=$(
+    /usr/bin/plutil -extract RunAtLoad raw -o - \
+      "$LEGACY_PLIST_PATH" 2>/dev/null
+  ) || [ "$mi_legacy_run_at_load" != "true" ]; then
+    return 1
+  fi
+  if ! mi_legacy_keep_alive=$(
+    /usr/bin/plutil -extract KeepAlive raw -o - \
+      "$LEGACY_PLIST_PATH" 2>/dev/null
+  ) || [ "$mi_legacy_keep_alive" != "true" ]; then
+    return 1
+  fi
+  if ! mi_legacy_stdout=$(
+    /usr/bin/plutil -extract StandardOutPath raw -o - \
+      "$LEGACY_PLIST_PATH" 2>/dev/null
+  ) ||
+     [ "$mi_legacy_stdout" != \
+       "$USER_HOME/Library/Logs/auto-pr/auto-pr-daemon.log" ]; then
+    return 1
+  fi
+  if ! mi_legacy_stderr=$(
+    /usr/bin/plutil -extract StandardErrorPath raw -o - \
+      "$LEGACY_PLIST_PATH" 2>/dev/null
+  ) ||
+     [ "$mi_legacy_stderr" != \
+       "$USER_HOME/Library/Logs/auto-pr/auto-pr-daemon-error.log" ]; then
+    return 1
+  fi
+
+  LEGACY_PROGRAM_PATH=$mi_legacy_program
+  return 0
+}
+
+legacy_process_matches() {
+  mi_legacy_process_pid=${1-}
+  mi_legacy_expected_executable=${2-}
+  case "$mi_legacy_process_pid" in
+    ""|*[!0-9]*) return 1 ;;
+  esac
+  if ! mi_legacy_process_uid=$(
+    process_uid "$mi_legacy_process_pid" 2>/dev/null
+  ) || [ "$mi_legacy_process_uid" != "$USER_UID" ]; then
+    return 1
+  fi
+  if ! mi_legacy_process_executable=$(
+    process_executable "$mi_legacy_process_pid" 2>/dev/null
+  ); then
+    return 1
+  fi
+  [ "$mi_legacy_process_executable" = "$mi_legacy_expected_executable" ]
+}
+
+snapshot_legacy_launchagent() {
+  if [ -L "$LEGACY_PLIST_PATH" ]; then
+    die "Legacy LaunchAgent plist is a symlink; refusing to touch it: $LEGACY_PLIST_PATH"
+  fi
+  if [ -e "$LEGACY_PLIST_PATH" ]; then
+    if [ ! -f "$LEGACY_PLIST_PATH" ]; then
+      die "Legacy LaunchAgent plist is not a regular file: $LEGACY_PLIST_PATH"
+    fi
+    if [ "$(legacy_plist_uid "$LEGACY_PLIST_PATH")" != "$USER_UID" ]; then
+      die "Legacy LaunchAgent plist is not owned by the invoking user: $LEGACY_PLIST_PATH"
+    fi
+    if [ ! -r "$LEGACY_PLIST_PATH" ] || [ ! -w "$LEGACY_PLIST_PATH" ]; then
+      die "Legacy LaunchAgent plist must be readable and writable: $LEGACY_PLIST_PATH"
+    fi
+    if ! legacy_plist_identity_matches; then
+      die "A plist named $LEGACY_LAUNCHAGENT_LABEL exists but does not match Heimdallm's historical generated plist; leaving it untouched."
+    fi
+    LEGACY_PLIST_PRESENT=1
+    LEGACY_PLIST_MODE=$(legacy_plist_mode "$LEGACY_PLIST_PATH")
+    LEGACY_PLIST_FINGERPRINT=$(legacy_plist_fingerprint "$LEGACY_PLIST_PATH")
+  fi
+
+  if mi_legacy_job_output=$(
+    /bin/launchctl print "$LEGACY_SERVICE_TARGET" 2>&1
+  ); then
+    LEGACY_LOADED=1
+    LEGACY_PID=$(
+      printf '%s\n' "$mi_legacy_job_output" |
+        /usr/bin/awk '$1 == "pid" && $2 == "=" && $3 ~ /^[0-9]+$/ { print $3; exit }'
+    )
+    LEGACY_JOB_PLIST_PATH=$(
+      printf '%s\n' "$mi_legacy_job_output" |
+        /usr/bin/awk '$1 == "path" && $2 == "=" { sub(/^[^=]*=[[:space:]]*/, ""); print; exit }'
+    )
+  else
+    mi_legacy_job_status=$?
+    if [ "$mi_legacy_job_status" -ne 113 ] &&
+       ! printf '%s\n' "$mi_legacy_job_output" |
+         /usr/bin/grep -q "Could not find service"; then
+      error "Cannot inspect legacy LaunchAgent job:"
+      printf '%s\n' "$mi_legacy_job_output" >&2
+      exit 1
+    fi
+  fi
+
+  if [ "$LEGACY_LOADED" = "1" ] &&
+     [ "$LEGACY_PLIST_PRESENT" != "1" ]; then
+    die "Legacy LaunchAgent is loaded but its canonical plist is missing; refusing to stop an unreconstructable job."
+  fi
+  if [ "$LEGACY_LOADED" = "1" ] &&
+     [ "$LEGACY_JOB_PLIST_PATH" != "$LEGACY_PLIST_PATH" ]; then
+    die "Legacy LaunchAgent came from '$LEGACY_JOB_PLIST_PATH', not '$LEGACY_PLIST_PATH'; leaving it untouched."
+  fi
+  if [ -n "$LEGACY_PID" ]; then
+    if ! legacy_process_matches "$LEGACY_PID" "$LEGACY_PROGRAM_PATH"; then
+      die "Legacy LaunchAgent PID $LEGACY_PID does not match the validated user-owned historical daemon; leaving it untouched."
+    fi
+    LEGACY_PID_EXECUTABLE=$LEGACY_PROGRAM_PATH
+  fi
+
+  if [ "$LEGACY_PLIST_PRESENT" = "1" ] ||
+     [ "$LEGACY_LOADED" = "1" ]; then
+    if ! LEGACY_DISABLED=$(read_legacy_disabled_state); then
+      exit 1
+    fi
+  fi
+}
+
+revalidate_legacy_launchagent() {
+  mi_expected_legacy_program=$LEGACY_PROGRAM_PATH
+  if [ -L "$LEGACY_PLIST_PATH" ]; then
+    return 1
+  fi
+  mi_current_legacy_plist_present=0
+  if [ -e "$LEGACY_PLIST_PATH" ]; then
+    mi_current_legacy_plist_present=1
+  fi
+  if [ "$mi_current_legacy_plist_present" != "$LEGACY_PLIST_PRESENT" ]; then
+    return 1
+  fi
+  if [ "$LEGACY_PLIST_PRESENT" = "1" ]; then
+    if [ ! -f "$LEGACY_PLIST_PATH" ] ||
+       [ "$(legacy_plist_uid "$LEGACY_PLIST_PATH")" != "$USER_UID" ] ||
+       [ "$(legacy_plist_mode "$LEGACY_PLIST_PATH")" != "$LEGACY_PLIST_MODE" ] ||
+       [ "$(legacy_plist_fingerprint "$LEGACY_PLIST_PATH")" != "$LEGACY_PLIST_FINGERPRINT" ] ||
+       ! legacy_plist_identity_matches ||
+       [ "$LEGACY_PROGRAM_PATH" != "$mi_expected_legacy_program" ]; then
+      LEGACY_PROGRAM_PATH=$mi_expected_legacy_program
+      return 1
+    fi
+    LEGACY_PROGRAM_PATH=$mi_expected_legacy_program
+  fi
+
+  if ! mi_current_legacy_job_state=$(legacy_launchagent_job_state); then
+    return 1
+  fi
+  mi_current_legacy_loaded=0
+  if [ "$mi_current_legacy_job_state" = "loaded" ]; then
+    mi_current_legacy_loaded=1
+  fi
+  if [ "$mi_current_legacy_loaded" != "$LEGACY_LOADED" ]; then
+    return 1
+  fi
+  if [ "$mi_current_legacy_loaded" = "1" ]; then
+    if ! mi_current_legacy_job_path=$(legacy_current_job_plist_path) ||
+       [ "$mi_current_legacy_job_path" != "$LEGACY_PLIST_PATH" ]; then
+      return 1
+    fi
+    if mi_current_legacy_pid=$(legacy_current_job_pid 2>/dev/null); then
+      if ! legacy_process_matches \
+        "$mi_current_legacy_pid" "$LEGACY_PROGRAM_PATH"; then
+        return 1
+      fi
+      LEGACY_PID=$mi_current_legacy_pid
+      LEGACY_PID_EXECUTABLE=$LEGACY_PROGRAM_PATH
+    else
+      LEGACY_PID=""
+      LEGACY_PID_EXECUTABLE=""
+    fi
+  fi
+  if [ "$LEGACY_PLIST_PRESENT" = "1" ] ||
+     [ "$LEGACY_LOADED" = "1" ]; then
+    if ! mi_current_legacy_disabled=$(read_legacy_disabled_state) ||
+       [ "$mi_current_legacy_disabled" != "$LEGACY_DISABLED" ]; then
+      return 1
+    fi
+  fi
+  return 0
+}
+
 read_disabled_state() {
   if ! mi_disabled_output=$(
     /bin/launchctl print-disabled "$LAUNCH_DOMAIN" 2>&1
@@ -579,6 +968,24 @@ inspect_port() {
       fi
     fi
   fi
+  if [ "${LEGACY_LOADED:-0}" = "1" ]; then
+    if ! mi_live_legacy_job_state=$(legacy_launchagent_job_state); then
+      return 1
+    fi
+    if [ "$mi_live_legacy_job_state" = "loaded" ] &&
+       mi_live_legacy_pid=$(legacy_current_job_pid 2>/dev/null); then
+      if legacy_process_matches \
+        "$mi_live_legacy_pid" "$LEGACY_PROGRAM_PATH"; then
+        LEGACY_PID=$mi_live_legacy_pid
+        LEGACY_PID_EXECUTABLE=$LEGACY_PROGRAM_PATH
+      else
+        # Never grant ownership to a replacement process that merely reused
+        # the historical label while the installer was staging.
+        LEGACY_PID=""
+        LEGACY_PID_EXECUTABLE=""
+      fi
+    fi
+  fi
 
   mi_port_lsof_error=$(
     /usr/bin/mktemp "/tmp/heimdallm-port-lsof.XXXXXX"
@@ -624,15 +1031,21 @@ inspect_port() {
 
   mi_saw_bundle=0
   mi_saw_service=0
+  mi_saw_legacy_service=0
   mi_saw_foreign=0
   for mi_port_pid in $mi_port_pids; do
     mi_port_executable=$(process_executable "$mi_port_pid" 2>/dev/null || true)
     mi_listener_class=$(
-      classify_listener "$mi_port_pid" "$mi_port_executable" "$ORIGINAL_PID"
+      classify_listener \
+        "$mi_port_pid" "$mi_port_executable" "$ORIGINAL_PID" \
+        "$LEGACY_PID" "$LEGACY_PROGRAM_PATH"
     )
     case "$mi_listener_class" in
       service)
         mi_saw_service=1
+        ;;
+      legacy-service)
+        mi_saw_legacy_service=1
         ;;
       bundle)
         mi_saw_bundle=1
@@ -654,6 +1067,8 @@ PID $mi_port_pid ($mi_display_executable)"
     PORT_CLASS="foreign"
   elif [ "$mi_saw_service" = "1" ]; then
     PORT_CLASS="service"
+  elif [ "$mi_saw_legacy_service" = "1" ]; then
+    PORT_CLASS="legacy-service"
   elif [ "$mi_saw_bundle" = "1" ]; then
     PORT_CLASS="bundle"
   fi
@@ -817,6 +1232,24 @@ wait_for_job_unloaded() {
     return 1
   fi
   [ "$mi_wait_job_state" = "unloaded" ]
+}
+
+wait_for_legacy_job_unloaded() {
+  mi_legacy_wait_count=0
+  while [ "$mi_legacy_wait_count" -lt 6 ]; do
+    if ! mi_legacy_wait_job_state=$(legacy_launchagent_job_state); then
+      return 1
+    fi
+    if [ "$mi_legacy_wait_job_state" = "unloaded" ]; then
+      return 0
+    fi
+    /bin/sleep 1
+    mi_legacy_wait_count=$((mi_legacy_wait_count + 1))
+  done
+  if ! mi_legacy_wait_job_state=$(legacy_launchagent_job_state); then
+    return 1
+  fi
+  [ "$mi_legacy_wait_job_state" = "unloaded" ]
 }
 
 bootout_current_job() {
@@ -994,6 +1427,132 @@ restore_plist_contents_and_flag() {
   [ "$mi_restore_ok" = "1" ]
 }
 
+restore_legacy_plist_and_flag() {
+  if [ "$LEGACY_PLIST_PRESENT" != "1" ] &&
+     [ "$LEGACY_LOADED" != "1" ]; then
+    return 0
+  fi
+
+  mi_legacy_quarantine_present=0
+  if [ -n "$LEGACY_QUARANTINE_PATH" ] &&
+     { [ -e "$LEGACY_QUARANTINE_PATH" ] ||
+       [ -L "$LEGACY_QUARANTINE_PATH" ]; }; then
+    mi_legacy_quarantine_present=1
+  fi
+  mi_legacy_source_missing=0
+  if [ ! -e "$LEGACY_PLIST_PATH" ] && [ ! -L "$LEGACY_PLIST_PATH" ]; then
+    mi_legacy_source_missing=1
+  fi
+  mi_legacy_was_moved=0
+  if legacy_move_detected \
+    "$LEGACY_MOVED" \
+    "$LEGACY_MOVE_INTENDED" \
+    "$mi_legacy_source_missing" \
+    "$mi_legacy_quarantine_present"; then
+    mi_legacy_was_moved=1
+  fi
+
+  if [ "$LEGACY_PLIST_PRESENT" = "1" ]; then
+    if [ "$mi_legacy_was_moved" = "1" ]; then
+      if [ -e "$LEGACY_PLIST_PATH" ] || [ -L "$LEGACY_PLIST_PATH" ] ||
+         [ "$mi_legacy_quarantine_present" != "1" ] ||
+         [ -L "$LEGACY_QUARANTINE_PATH" ] ||
+         [ ! -f "$LEGACY_QUARANTINE_PATH" ] ||
+         [ "$(legacy_plist_fingerprint "$LEGACY_QUARANTINE_PATH")" != "$LEGACY_PLIST_FINGERPRINT" ] ||
+         ! /bin/mv "$LEGACY_QUARANTINE_PATH" "$LEGACY_PLIST_PATH"; then
+        error "Could not restore the exact retired legacy LaunchAgent plist."
+        return 1
+      fi
+    elif [ ! -f "$LEGACY_PLIST_PATH" ] ||
+         [ -L "$LEGACY_PLIST_PATH" ] ||
+         [ "$(legacy_plist_fingerprint "$LEGACY_PLIST_PATH")" != "$LEGACY_PLIST_FINGERPRINT" ]; then
+      if [ -e "$LEGACY_PLIST_PATH" ] || [ -L "$LEGACY_PLIST_PATH" ] ||
+         [ -z "$LEGACY_PLIST_BACKUP" ] ||
+         [ ! -f "$LEGACY_PLIST_BACKUP" ] ||
+         [ "$(legacy_plist_fingerprint "$LEGACY_PLIST_BACKUP")" != "$LEGACY_PLIST_FINGERPRINT" ] ||
+         ! /bin/cp -p "$LEGACY_PLIST_BACKUP" "$LEGACY_PLIST_PATH"; then
+        error "Could not restore the backed-up legacy LaunchAgent plist."
+        return 1
+      fi
+    fi
+    if ! /bin/chmod "$LEGACY_PLIST_MODE" "$LEGACY_PLIST_PATH"; then
+      error "Could not restore legacy LaunchAgent plist permissions."
+      return 1
+    fi
+  fi
+
+  LEGACY_MOVED=0
+  LEGACY_MOVE_INTENDED=0
+  if [ -n "$LEGACY_QUARANTINE_DIR" ] &&
+     [ -d "$LEGACY_QUARANTINE_DIR" ]; then
+    if safe_legacy_quarantine_path "$LEGACY_QUARANTINE_DIR" &&
+       /bin/rmdir "$LEGACY_QUARANTINE_DIR"; then
+      LEGACY_QUARANTINE_DIR=""
+      LEGACY_QUARANTINE_PATH=""
+    else
+      warn "Could not remove empty legacy recovery directory: $LEGACY_QUARANTINE_DIR"
+    fi
+  fi
+
+  if [ "$LEGACY_DISABLED" = "1" ]; then
+    if ! legacy_launchctl disable "$LEGACY_SERVICE_TARGET"; then
+      error "Could not restore disabled legacy LaunchAgent flag."
+      return 1
+    fi
+  elif ! legacy_launchctl enable "$LEGACY_SERVICE_TARGET"; then
+    error "Could not restore enabled legacy LaunchAgent flag."
+    return 1
+  fi
+  return 0
+}
+
+print_manual_legacy_recovery() {
+  warn "The legacy $LEGACY_LAUNCHAGENT_LABEL plist was restored but left unloaded for safety."
+  warn "After PID/port $PORT is free, its original loaded state can be restored with:"
+  if [ "$LEGACY_DISABLED" = "1" ]; then
+    printf '   /bin/launchctl enable "%s"\n' "$LEGACY_SERVICE_TARGET" >&2
+    printf '   /bin/launchctl bootstrap "%s" "%s"\n' \
+      "$LAUNCH_DOMAIN" "$LEGACY_PLIST_PATH" >&2
+    printf '   /bin/launchctl disable "%s"\n' \
+      "$LEGACY_SERVICE_TARGET" >&2
+  else
+    printf '   /bin/launchctl bootstrap "%s" "%s"\n' \
+      "$LAUNCH_DOMAIN" "$LEGACY_PLIST_PATH" >&2
+  fi
+}
+
+restore_legacy_loaded_state() {
+  if [ "$LEGACY_LOADED" != "1" ]; then
+    return 0
+  fi
+  if [ "$LEGACY_ROLLBACK_LEAVE_UNLOADED" = "1" ] ||
+     [ "$ORIGINAL_LOADED" = "1" ] ||
+     ! inspect_port || [ "$PORT_CLASS" != "free" ]; then
+    print_manual_legacy_recovery
+    return 1
+  fi
+
+  if [ "$LEGACY_DISABLED" = "1" ]; then
+    if legacy_launchctl enable "$LEGACY_SERVICE_TARGET" &&
+       legacy_launchctl bootstrap "$LAUNCH_DOMAIN" "$LEGACY_PLIST_PATH" &&
+       legacy_launchctl disable "$LEGACY_SERVICE_TARGET"; then
+      return 0
+    fi
+  elif legacy_launchctl bootstrap \
+    "$LAUNCH_DOMAIN" "$LEGACY_PLIST_PATH"; then
+    return 0
+  fi
+
+  error "Could not reload the original legacy LaunchAgent during rollback."
+  if legacy_launchctl bootout "$LEGACY_SERVICE_TARGET" >/dev/null 2>&1 ||
+     [ "$(legacy_launchagent_job_state 2>/dev/null || true)" = "unloaded" ]; then
+    print_manual_legacy_recovery
+    return 1
+  fi
+  error "Could not return the legacy LaunchAgent to a verified unloaded state."
+  return 2
+}
+
 print_manual_service_recovery() {
   warn "The original LaunchAgent plist was restored but left unloaded for safety."
   warn "After PID/port $PORT is free, run:"
@@ -1024,6 +1583,20 @@ print_backup_recovery() {
     warn "Manual plist recovery:"
     printf '   /bin/cp -p "%s" "%s"\n' \
       "$ORIGINAL_PLIST_BACKUP" "$PLIST_PATH" >&2
+  fi
+  if [ "${PRESERVE_TEMP:-0}" = "1" ] &&
+     [ -n "${LEGACY_PLIST_BACKUP:-}" ] &&
+     [ -f "$LEGACY_PLIST_BACKUP" ]; then
+    warn "The exact legacy LaunchAgent plist backup was preserved at:"
+    printf '   %s\n' "$LEGACY_PLIST_BACKUP" >&2
+    warn "Manual legacy plist recovery:"
+    printf '   /bin/cp -p "%s" "%s"\n' \
+      "$LEGACY_PLIST_BACKUP" "$LEGACY_PLIST_PATH" >&2
+  fi
+  if [ -n "${LEGACY_QUARANTINE_PATH:-}" ] &&
+     [ -f "$LEGACY_QUARANTINE_PATH" ]; then
+    warn "The retired legacy LaunchAgent plist remains recoverable at:"
+    printf '   %s\n' "$LEGACY_QUARANTINE_PATH" >&2
   fi
 }
 
@@ -1123,11 +1696,59 @@ rollback_install() {
   OLD_MOVE_INTENDED=0
   NEW_MOVE_INTENDED=0
 
+  if ! remove_legacy_created_canonical; then
+    PRESERVE_TEMP=1
+    mi_rollback_ok=0
+  fi
+
   if ! restore_plist_contents_and_flag; then
     if [ -n "$ORIGINAL_PLIST_BACKUP" ]; then
       PRESERVE_TEMP=1
     fi
     mi_rollback_ok=0
+  fi
+
+  if ! restore_legacy_plist_and_flag; then
+    if [ -n "$LEGACY_PLIST_BACKUP" ]; then
+      PRESERVE_TEMP=1
+    fi
+    mi_rollback_ok=0
+  fi
+
+  # A signal can arrive after launchctl completed bootout but before the shell
+  # assigned LEGACY_STOPPED. Combine the pre-command intent with observed job
+  # state so rollback never silently leaves a previously loaded service down.
+  mi_legacy_job_is_unloaded=0
+  if [ "$LEGACY_STOPPED" != "1" ] &&
+     [ "$LEGACY_STOP_INTENDED" = "1" ]; then
+    if mi_legacy_rollback_state=$(legacy_launchagent_job_state); then
+      if [ "$mi_legacy_rollback_state" = "unloaded" ]; then
+        mi_legacy_job_is_unloaded=1
+      fi
+    else
+      LEGACY_ROLLBACK_LEAVE_UNLOADED=1
+    fi
+  fi
+  if legacy_stop_detected \
+    "$LEGACY_STOPPED" "$LEGACY_STOP_INTENDED" \
+    "$mi_legacy_job_is_unloaded"; then
+    LEGACY_STOPPED=1
+  fi
+  LEGACY_STOP_INTENDED=0
+
+  if [ "$LEGACY_LOADED" = "1" ] &&
+     [ "$LEGACY_STOPPED" = "1" ] &&
+     [ "$mi_rollback_ok" = "1" ]; then
+    if restore_legacy_loaded_state; then
+      :
+    else
+      mi_legacy_restore_status=$?
+      if [ "$mi_legacy_restore_status" -eq 1 ]; then
+        mi_rollback_partial=1
+      else
+        mi_rollback_ok=0
+      fi
+    fi
   fi
 
   if [ "$ORIGINAL_LOADED" = "1" ] &&
@@ -1415,6 +2036,16 @@ prepare_transaction() {
     die "LaunchAgent disabled state changed during staging; retry the install."
   fi
 
+  if ! revalidate_legacy_launchagent; then
+    die "Legacy LaunchAgent identity or state changed during staging; leaving it untouched."
+  fi
+  if [ "$LEGACY_PLIST_PRESENT" = "1" ]; then
+    LEGACY_PLIST_BACKUP="$TEMP_DIR/original-legacy-launchagent.plist"
+    if ! /bin/cp -p "$LEGACY_PLIST_PATH" "$LEGACY_PLIST_BACKUP"; then
+      die "Could not back up the legacy LaunchAgent plist."
+    fi
+  fi
+
   ROLLBACK_ARMED=1
 }
 
@@ -1457,6 +2088,96 @@ stop_original_launchagent() {
     ROLLBACK_LEAVE_UNLOADED=1
     die "LaunchAgent PID $ORIGINAL_PID remains alive; plist restored but service will stay unloaded."
   fi
+}
+
+retire_legacy_launchagent() {
+  if [ "$LEGACY_PLIST_PRESENT" != "1" ] &&
+     [ "$LEGACY_LOADED" != "1" ]; then
+    return 0
+  fi
+
+  if ! revalidate_legacy_launchagent; then
+    die "Legacy LaunchAgent identity or state changed immediately before retirement; leaving it untouched."
+  fi
+
+  if [ "$LEGACY_LOADED" = "1" ]; then
+    info "▶  Stopping the validated legacy $LEGACY_LAUNCHAGENT_LABEL LaunchAgent..."
+    if ! mi_current_legacy_path=$(legacy_current_job_plist_path) ||
+       [ "$mi_current_legacy_path" != "$LEGACY_PLIST_PATH" ]; then
+      die "Legacy LaunchAgent plist identity changed immediately before bootout."
+    fi
+    if mi_current_legacy_pid=$(legacy_current_job_pid 2>/dev/null); then
+      if ! legacy_process_matches \
+        "$mi_current_legacy_pid" "$LEGACY_PROGRAM_PATH"; then
+        die "Legacy LaunchAgent process identity changed immediately before bootout."
+      fi
+      LEGACY_PID=$mi_current_legacy_pid
+      LEGACY_PID_EXECUTABLE=$LEGACY_PROGRAM_PATH
+    else
+      LEGACY_PID=""
+      LEGACY_PID_EXECUTABLE=""
+    fi
+
+    LEGACY_STOP_INTENDED=1
+    if legacy_launchctl bootout "$LEGACY_SERVICE_TARGET" >/dev/null 2>&1; then
+      LEGACY_STOPPED=1
+      LEGACY_STOP_INTENDED=0
+    else
+      if ! mi_legacy_job_state=$(legacy_launchagent_job_state); then
+        LEGACY_ROLLBACK_LEAVE_UNLOADED=1
+        die "Could not verify legacy LaunchAgent state after bootout failed."
+      fi
+      if [ "$mi_legacy_job_state" = "loaded" ]; then
+        LEGACY_ROLLBACK_LEAVE_UNLOADED=1
+        die "Could not boot out the legacy LaunchAgent."
+      fi
+      LEGACY_STOPPED=1
+      LEGACY_STOP_INTENDED=0
+    fi
+    if ! wait_for_legacy_job_unloaded; then
+      LEGACY_ROLLBACK_LEAVE_UNLOADED=1
+      die "Legacy LaunchAgent remains loaded after bootout."
+    fi
+    if ! wait_for_pid_exit "$LEGACY_PID" "$LEGACY_PID_EXECUTABLE"; then
+      LEGACY_ROLLBACK_LEAVE_UNLOADED=1
+      die "Legacy LaunchAgent PID $LEGACY_PID remains alive; its plist was preserved and will stay unloaded."
+    fi
+  fi
+
+  if [ "$LEGACY_PLIST_PRESENT" != "1" ]; then
+    return 0
+  fi
+  if [ -L "$LEGACY_PLIST_PATH" ] ||
+     [ ! -f "$LEGACY_PLIST_PATH" ] ||
+     [ "$(legacy_plist_uid "$LEGACY_PLIST_PATH")" != "$USER_UID" ] ||
+     [ "$(legacy_plist_mode "$LEGACY_PLIST_PATH")" != "$LEGACY_PLIST_MODE" ] ||
+     [ "$(legacy_plist_fingerprint "$LEGACY_PLIST_PATH")" != "$LEGACY_PLIST_FINGERPRINT" ]; then
+    LEGACY_ROLLBACK_LEAVE_UNLOADED=1
+    die "Legacy LaunchAgent plist changed after bootout; refusing to move it."
+  fi
+
+  if ! LEGACY_QUARANTINE_DIR=$(
+    /usr/bin/mktemp -d \
+      "$USER_HOME/Library/LaunchAgents/.heimdallm-retired-auto-pr.XXXXXX"
+  ); then
+    LEGACY_ROLLBACK_LEAVE_UNLOADED=1
+    die "Could not create a private recovery directory for the legacy plist."
+  fi
+  if ! safe_legacy_quarantine_path "$LEGACY_QUARANTINE_DIR"; then
+    LEGACY_ROLLBACK_LEAVE_UNLOADED=1
+    die "System mktemp returned an unsafe legacy recovery path: $LEGACY_QUARANTINE_DIR"
+  fi
+  LEGACY_QUARANTINE_PATH="$LEGACY_QUARANTINE_DIR/$LEGACY_LAUNCHAGENT_LABEL.plist"
+  LEGACY_MOVE_INTENDED=1
+  if ! /bin/mv "$LEGACY_PLIST_PATH" "$LEGACY_QUARANTINE_PATH"; then
+    LEGACY_ROLLBACK_LEAVE_UNLOADED=1
+    die "Could not move the retired legacy LaunchAgent plist into recovery storage."
+  fi
+  LEGACY_MOVED=1
+  LEGACY_MOVE_INTENDED=0
+
+  info "↓  Retired legacy LaunchAgent; recoverable plist preserved at:"
+  info "   $LEGACY_QUARANTINE_PATH"
 }
 
 late_port_guard_before_swap() {
@@ -1537,6 +2258,119 @@ verify_plist_program_path() {
   [ "$mi_installed_program" = "$APP_DAEMON_BIN" ]
 }
 
+safe_legacy_quarantine_member() {
+  [ -n "${LEGACY_QUARANTINE_DIR:-}" ] &&
+    safe_legacy_quarantine_path "$LEGACY_QUARANTINE_DIR" &&
+    [ "${1-}" = \
+      "$LEGACY_QUARANTINE_DIR/$LAUNCHAGENT_LABEL.plist" ]
+}
+
+create_canonical_plist_from_legacy() {
+  if [ "$ORIGINAL_PLIST_PRESENT" = "1" ] ||
+     [ "$LEGACY_PLIST_PRESENT" != "1" ]; then
+    return 1
+  fi
+  if ! safe_legacy_quarantine_path "$LEGACY_QUARANTINE_DIR" ||
+     [ -L "$LEGACY_QUARANTINE_PATH" ] ||
+     [ ! -f "$LEGACY_QUARANTINE_PATH" ] ||
+     [ "$(legacy_plist_fingerprint "$LEGACY_QUARANTINE_PATH")" != \
+       "$LEGACY_PLIST_FINGERPRINT" ]; then
+    die "Retired legacy plist is unavailable or changed; cannot create the canonical LaunchAgent."
+  fi
+  if [ -e "$PLIST_PATH" ] || [ -L "$PLIST_PATH" ]; then
+    die "Canonical LaunchAgent appeared during legacy migration; refusing to overwrite it."
+  fi
+
+  LEGACY_CANONICAL_STAGED_PATH="$LEGACY_QUARANTINE_DIR/$LAUNCHAGENT_LABEL.plist"
+  if [ -e "$LEGACY_CANONICAL_STAGED_PATH" ] ||
+     [ -L "$LEGACY_CANONICAL_STAGED_PATH" ] ||
+     ! /bin/cp -p \
+       "$LEGACY_QUARANTINE_PATH" "$LEGACY_CANONICAL_STAGED_PATH"; then
+    die "Could not stage a canonical LaunchAgent from the retired legacy plist."
+  fi
+  if ! replace_plist_string Label "$LAUNCHAGENT_LABEL" \
+       "$LEGACY_CANONICAL_STAGED_PATH" ||
+     ! replace_plist_string ProgramArguments.0 "$APP_DAEMON_BIN" \
+       "$LEGACY_CANONICAL_STAGED_PATH" ||
+     ! replace_plist_string StandardOutPath \
+       "$LOG_DIR/heimdallm-daemon.log" "$LEGACY_CANONICAL_STAGED_PATH" ||
+     ! replace_plist_string StandardErrorPath \
+       "$LOG_DIR/heimdallm-daemon-error.log" \
+       "$LEGACY_CANONICAL_STAGED_PATH" ||
+     ! /bin/chmod 600 "$LEGACY_CANONICAL_STAGED_PATH"; then
+    die "Could not convert the legacy plist to the canonical LaunchAgent schema."
+  fi
+  LEGACY_CANONICAL_FINGERPRINT=$(
+    legacy_plist_fingerprint "$LEGACY_CANONICAL_STAGED_PATH"
+  )
+
+  if ! /bin/mkdir -p "$LOG_DIR" || ! /bin/chmod 700 "$LOG_DIR"; then
+    die "Could not prepare canonical Heimdallm logs for the migrated LaunchAgent."
+  fi
+  LEGACY_CANONICAL_MOVE_INTENDED=1
+  if ! /bin/mv "$LEGACY_CANONICAL_STAGED_PATH" "$PLIST_PATH"; then
+    die "Could not publish the canonical LaunchAgent plist."
+  fi
+  LEGACY_CANONICAL_CREATED=1
+  LEGACY_CANONICAL_MOVE_INTENDED=0
+  LEGACY_CANONICAL_STAGED_PATH=""
+
+  if ! verify_plist_program_path; then
+    die "Legacy-migrated LaunchAgent does not point at the installed daemon."
+  fi
+}
+
+remove_legacy_created_canonical() {
+  if [ "$ORIGINAL_PLIST_PRESENT" = "1" ]; then
+    return 0
+  fi
+
+  mi_canonical_present=0
+  if [ -e "$PLIST_PATH" ] || [ -L "$PLIST_PATH" ]; then
+    mi_canonical_present=1
+  fi
+  mi_canonical_stage_missing=0
+  if [ -z "$LEGACY_CANONICAL_STAGED_PATH" ] ||
+     { [ ! -e "$LEGACY_CANONICAL_STAGED_PATH" ] &&
+       [ ! -L "$LEGACY_CANONICAL_STAGED_PATH" ]; }; then
+    mi_canonical_stage_missing=1
+  fi
+  mi_canonical_was_created=0
+  if legacy_canonical_move_detected \
+    "$LEGACY_CANONICAL_CREATED" \
+    "$LEGACY_CANONICAL_MOVE_INTENDED" \
+    "$mi_canonical_stage_missing" "$mi_canonical_present"; then
+    mi_canonical_was_created=1
+  fi
+
+  if [ "$mi_canonical_was_created" = "1" ]; then
+    if [ -L "$PLIST_PATH" ] || [ ! -f "$PLIST_PATH" ] ||
+       [ -z "$LEGACY_CANONICAL_FINGERPRINT" ] ||
+       [ "$(legacy_plist_fingerprint "$PLIST_PATH")" != \
+         "$LEGACY_CANONICAL_FINGERPRINT" ] ||
+       ! /bin/rm -f "$PLIST_PATH"; then
+      error "Could not safely remove the canonical plist created from legacy state."
+      return 1
+    fi
+  fi
+
+  if [ -n "$LEGACY_CANONICAL_STAGED_PATH" ] &&
+     { [ -e "$LEGACY_CANONICAL_STAGED_PATH" ] ||
+       [ -L "$LEGACY_CANONICAL_STAGED_PATH" ]; }; then
+    if ! safe_legacy_quarantine_member "$LEGACY_CANONICAL_STAGED_PATH" ||
+       [ -L "$LEGACY_CANONICAL_STAGED_PATH" ] ||
+       [ ! -f "$LEGACY_CANONICAL_STAGED_PATH" ] ||
+       ! /bin/rm -f "$LEGACY_CANONICAL_STAGED_PATH"; then
+      error "Could not safely remove the staged canonical legacy migration plist."
+      return 1
+    fi
+  fi
+  LEGACY_CANONICAL_STAGED_PATH=""
+  LEGACY_CANONICAL_MOVE_INTENDED=0
+  LEGACY_CANONICAL_CREATED=0
+  return 0
+}
+
 wait_for_loaded_service_ready() {
   mi_service_wait=0
   while [ "$mi_service_wait" -lt "$SERVICE_READY_TIMEOUT_SECONDS" ]; do
@@ -1571,7 +2405,38 @@ wait_for_loaded_service_ready() {
 }
 
 migrate_launchagent() {
+  if [ "$ORIGINAL_PLIST_PRESENT" != "1" ] &&
+     [ "$LEGACY_PLIST_PRESENT" != "1" ]; then
+    return 0
+  fi
+
   if [ "$ORIGINAL_PLIST_PRESENT" != "1" ]; then
+    info "▶  Migrating the retired legacy LaunchAgent to the canonical service..."
+    create_canonical_plist_from_legacy
+    if [ "$LEGACY_DISABLED" = "1" ]; then
+      if ! legacy_launchctl disable "$SERVICE_TARGET"; then
+        die "Could not preserve the legacy disabled LaunchAgent state."
+      fi
+    elif ! legacy_launchctl enable "$SERVICE_TARGET"; then
+      die "Could not preserve the legacy enabled LaunchAgent state."
+    fi
+
+    if [ "$LEGACY_LOADED" = "1" ] &&
+       [ "$LEGACY_DISABLED" != "1" ]; then
+      if ! inspect_port || [ "$PORT_CLASS" != "free" ]; then
+        ROLLBACK_LEAVE_UNLOADED=1
+        die "Port $PORT is not free for the canonical replacement LaunchAgent."
+      fi
+      if ! legacy_launchctl bootstrap "$LAUNCH_DOMAIN" "$PLIST_PATH"; then
+        die "Could not bootstrap the canonical replacement LaunchAgent."
+      fi
+      if ! wait_for_loaded_service_ready; then
+        die "Canonical replacement LaunchAgent did not become ready on port $PORT."
+      fi
+    elif ! mi_legacy_migrated_state=$(launchagent_job_state) ||
+         [ "$mi_legacy_migrated_state" = "loaded" ]; then
+      die "Canonical replacement LaunchAgent was unexpectedly loaded."
+    fi
     return 0
   fi
 
@@ -1643,6 +2508,12 @@ finish_install() {
   info "      History:  $DATA_DIR"
   info "      Logs:     $LOG_DIR"
   info "      Keychain: service=heimdallm, account=github-token"
+  if [ -n "$LEGACY_QUARANTINE_PATH" ] &&
+     [ -f "$LEGACY_QUARANTINE_PATH" ]; then
+    info ""
+    info "    Retired legacy LaunchAgent backup:"
+    info "      $LEGACY_QUARANTINE_PATH"
+  fi
   if [ -n "$PREFLIGHT_FOREIGN_INFO" ]; then
     info ""
     print_foreign_warning "$PREFLIGHT_FOREIGN_INFO"
@@ -1653,6 +2524,7 @@ install_macos() {
   require_install_commands
   resolve_invoking_user
   snapshot_launchagent
+  snapshot_legacy_launchagent
 
   if ! inspect_port; then
     die "Cannot safely inspect port $PORT."
@@ -1687,6 +2559,7 @@ install_macos() {
   stage_bundle
   prepare_transaction
   stop_original_launchagent
+  retire_legacy_launchagent
 
   info "▶  Stopping running app-bundle processes..."
   if ! stop_bundle_processes; then
@@ -2118,6 +2991,11 @@ print_preserved_state() {
 uninstall_macos() {
   require_common_commands
   resolve_invoking_user
+  snapshot_legacy_launchagent
+  if [ "$LEGACY_PLIST_PRESENT" = "1" ] ||
+     [ "$LEGACY_LOADED" = "1" ]; then
+    die "A validated legacy $LEGACY_LAUNCHAGENT_LABEL service still exists. Run make install-macos first so it can be migrated safely, then retry uninstall."
+  fi
 
   if ! validate_purge_value "${PURGE-}"; then
     die "Invalid PURGE value; omit PURGE to preserve data or use PURGE=1 to delete it."

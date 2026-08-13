@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -6,10 +5,11 @@ import 'package:go_router/go_router.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:heimdallm/core/api/api_client.dart';
 import 'package:heimdallm/core/models/config_model.dart';
+import 'package:heimdallm/core/platform/platform_services.dart';
 import 'package:heimdallm/core/platform/platform_services_provider.dart';
 import 'package:heimdallm/core/setup/first_run_setup.dart';
 import 'package:heimdallm/features/config/config_providers.dart'
-    show ConfigNotifier, configNotifierProvider, computeGlobalDiffForTest;
+    show ConfigNotifier, configNotifierProvider, computeGlobalDiffForTest, daemonHealthProvider;
 import 'package:heimdallm/features/config/config_screen.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/features/repositories/repo_diff.dart';
@@ -25,6 +25,19 @@ void main() {
     registerFallbackValue(<String, dynamic>{});
   });
 
+  test('daemon running state includes degraded but reachable daemons', () async {
+    final mockApi = MockApiClient();
+    when(() => mockApi.daemonReachable())
+        .thenAnswer((_) async => PortOwner.daemon);
+    final container = ProviderContainer(
+      overrides: [apiClientProvider.overrideWithValue(mockApi)],
+    );
+    addTearDown(container.dispose);
+
+    expect(await container.read(daemonHealthProvider.future), isTrue);
+    verifyNever(() => mockApi.checkHealth());
+  });
+
   testWidgets('ConfigScreen shows current poll interval', (tester) async {
     const config = AppConfig(
       pollInterval: '5m',
@@ -35,7 +48,7 @@ void main() {
     final mockApi = MockApiClient();
     when(() => mockApi.fetchConfig()).thenAnswer((_) async => config.toJson());
     when(() => mockApi.updateConfig(any())).thenAnswer((_) async {});
-    when(() => mockApi.checkHealth()).thenAnswer((_) async => false);
+    when(() => mockApi.daemonReachable()).thenAnswer((_) async => PortOwner.none);
 
     await tester.pumpWidget(
       ProviderScope(
@@ -74,7 +87,7 @@ void main() {
     final mockApi = MockApiClient();
     when(() => mockApi.fetchConfig()).thenAnswer((_) async => config.toJson());
     when(() => mockApi.updateConfig(any())).thenAnswer((_) async {});
-    when(() => mockApi.checkHealth()).thenAnswer((_) async => false);
+    when(() => mockApi.daemonReachable()).thenAnswer((_) async => PortOwner.none);
 
     await tester.pumpWidget(
       ProviderScope(
@@ -120,7 +133,7 @@ void main() {
     final mockApi = MockApiClient();
     when(() => mockApi.fetchConfig()).thenAnswer((_) async => config.toJson());
     when(() => mockApi.updateConfig(any())).thenAnswer((_) async {});
-    when(() => mockApi.checkHealth()).thenAnswer((_) async => false);
+    when(() => mockApi.daemonReachable()).thenAnswer((_) async => PortOwner.none);
 
     await tester.pumpWidget(
       ProviderScope(
@@ -161,7 +174,7 @@ void main() {
     final mockApi = MockApiClient();
     when(() => mockApi.fetchConfig()).thenAnswer((_) async => config.toJson());
     when(() => mockApi.updateConfig(any())).thenAnswer((_) async {});
-    when(() => mockApi.checkHealth()).thenAnswer((_) async => false);
+    when(() => mockApi.daemonReachable()).thenAnswer((_) async => PortOwner.none);
 
     await tester.pumpWidget(
       ProviderScope(
@@ -474,7 +487,7 @@ void main() {
       ).toJson(),
     );
     when(() => mockApi.updateConfig(any())).thenAnswer((_) async {});
-    when(() => mockApi.checkHealth()).thenAnswer((_) async => false);
+    when(() => mockApi.daemonReachable()).thenAnswer((_) async => PortOwner.none);
 
     await tester.pumpWidget(
       ProviderScope(
@@ -671,78 +684,95 @@ void main() {
 
   // ── saveAndStartDaemon tests ───────────────────────────────────────────────
 
-  testWidgets('saveAndStartDaemon calls platform.spawnDaemon', (tester) async {
+  test('saveAndStartDaemon spawns only after ownership reports none', () async {
     final platform = FakePlatformServices(
       daemonBinaryPath: '/fake/bin/heimdalld',
       githubToken: 'fake-token',
+      tcpPortState: TcpPortState.closed,
     );
+    final mockApi = MockApiClient();
+    when(() => mockApi.fetchConfig())
+        .thenAnswer((_) async => const AppConfig().toJson());
+    when(() => mockApi.daemonReachable())
+        .thenAnswer((_) async => PortOwner.none);
+    when(() => mockApi.checkHealth()).thenAnswer((_) async => true);
     final container = ProviderContainer(
-      // Riverpod 3 retries failed providers by default; saveAndStartDaemon's
-      // health check is expected to fail in this test, so disable retries to
-      // avoid pending timers after the test body returns.
       retry: (_, _) => null,
-      overrides: [platformServicesProvider.overrideWithValue(platform)],
+      overrides: [
+        apiClientProvider.overrideWithValue(mockApi),
+        platformServicesProvider.overrideWithValue(platform),
+      ],
     );
     addTearDown(container.dispose);
+    await container.read(configNotifierProvider.future);
 
-    // Call saveAndStartDaemon via the notifier. We don't verify daemon health
-    // (the fake's ApiClient isn't wired), but we do verify the spawn reached
-    // the platform layer at least once before the health-check loop timed out.
-    final notifier = container.read(configNotifierProvider.notifier);
+    await container.read(configNotifierProvider.notifier).saveAndStartDaemon(
+      token: 'fake-gh-token',
+      config: const AppConfig(),
+      daemonBinaryPath: '/fake/bin/heimdalld',
+    );
 
-    // Run in real-async mode so Future.delayed works without fake-async leaks.
-    await tester.runAsync(() async {
-      unawaited(
-        notifier.saveAndStartDaemon(
-          token: 'fake-gh-token',
-          config: const AppConfig(),
-          daemonBinaryPath: '/fake/bin/heimdalld',
-        ),
-      );
-      // Allow the microtasks that lead to the first spawnDaemon to run.
-      await Future.delayed(const Duration(milliseconds: 50));
-    });
-
-    expect(platform.spawnedDaemons, contains('/fake/bin/heimdalld'));
+    expect(platform.spawnedDaemons, ['/fake/bin/heimdalld']);
+    expect(container.read(configNotifierProvider), isA<AsyncData<AppConfig>>());
   });
 
-  testWidgets(
-    'saveAndStartDaemon routes daemon spawn through PlatformServices',
-    (tester) async {
-      final platform = FakePlatformServices(
-        daemonBinaryPath: '/fake/bin/heimdalld',
-        githubToken: 'fake-token',
-      );
-      final container = ProviderContainer(
-        // Riverpod 3 retries failed providers by default; saveAndStartDaemon's
-        // health check is expected to fail in this test, so disable retries to
-        // avoid pending timers after the test body returns.
-        retry: (_, _) => null,
-        overrides: [platformServicesProvider.overrideWithValue(platform)],
-      );
-      addTearDown(container.dispose);
+  test('saveAndStartDaemon reuses an existing daemon without spawning', () async {
+    final platform = FakePlatformServices();
+    final mockApi = MockApiClient();
+    when(() => mockApi.fetchConfig())
+        .thenAnswer((_) async => const AppConfig().toJson());
+    when(() => mockApi.daemonReachable())
+        .thenAnswer((_) async => PortOwner.daemon);
+    when(() => mockApi.checkHealth()).thenAnswer((_) async => true);
+    final container = ProviderContainer(
+      retry: (_, _) => null,
+      overrides: [
+        apiClientProvider.overrideWithValue(mockApi),
+        platformServicesProvider.overrideWithValue(platform),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(configNotifierProvider.future);
 
-      // Call saveAndStartDaemon via the notifier. We don't verify daemon health
-      // (the fake's ApiClient isn't wired), but we do verify the spawn reached
-      // the platform layer at least once before the health-check loop timed out.
-      final notifier = container.read(configNotifierProvider.notifier);
-      // Kick off the call but ignore its completion — we only care about the
-      // side-effect of calling spawnDaemon.
-      await tester.runAsync(() async {
-        unawaited(
-          notifier.saveAndStartDaemon(
-            token: 'fake-gh-token',
-            config: const AppConfig(),
-            daemonBinaryPath: '/fake/bin/heimdalld',
-          ),
-        );
-        // Allow the microtasks that lead to the first spawnDaemon to run.
-        await Future.delayed(const Duration(milliseconds: 50));
-      });
+    await container.read(configNotifierProvider.notifier).saveAndStartDaemon(
+      token: 'fake-gh-token',
+      config: const AppConfig(),
+      daemonBinaryPath: '/fake/bin/heimdalld',
+    );
 
-      expect(platform.spawnedDaemons, contains('/fake/bin/heimdalld'));
-    },
-  );
+    expect(platform.spawnedDaemons, isEmpty);
+    expect(container.read(configNotifierProvider), isA<AsyncData<AppConfig>>());
+  });
+
+  test('saveAndStartDaemon refuses a foreign or ambiguous port', () async {
+    final platform = FakePlatformServices();
+    final mockApi = MockApiClient();
+    when(() => mockApi.fetchConfig())
+        .thenAnswer((_) async => const AppConfig().toJson());
+    when(() => mockApi.daemonReachable())
+        .thenAnswer((_) async => PortOwner.foreign);
+    when(() => mockApi.daemonPort).thenReturn(7842);
+    final container = ProviderContainer(
+      retry: (_, _) => null,
+      overrides: [
+        apiClientProvider.overrideWithValue(mockApi),
+        platformServicesProvider.overrideWithValue(platform),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(configNotifierProvider.future);
+
+    await container.read(configNotifierProvider.notifier).saveAndStartDaemon(
+      token: 'fake-gh-token',
+      config: const AppConfig(),
+      daemonBinaryPath: '/fake/bin/heimdalld',
+    );
+
+    final result = container.read(configNotifierProvider);
+    expect(platform.spawnedDaemons, isEmpty);
+    expect(result, isA<AsyncError<AppConfig>>());
+    expect(result.error.toString(), contains('No daemon was started'));
+  });
 
   // ── AutonomousConfig ───────────────────────────────────────────────────────
 

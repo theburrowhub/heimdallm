@@ -37,23 +37,34 @@ var ErrPromoteConflict = errors.New("issue promotion conflict")
 
 // Server holds the HTTP router, SSE broker, store, and optional pipeline.
 type Server struct {
-	store                *store.Store
-	broker               *sse.Broker
-	natsConn             *nats.Conn // when set, handleSSE reads from NATS instead of broker
-	pipeline             *pipeline.Pipeline
-	router               chi.Router
-	httpServer           *http.Server
-	// starting suppresses the deep health checks while main is still wiring
-	// dependencies. Serve begins immediately after Listen so the socket is
-	// never bound-but-silent (a client would complete the TCP handshake and
-	// then hang until the whole init phase finished), so /health has to answer
-	// during a window where the pollers and event bus do not exist yet.
+	store      *store.Store
+	broker     *sse.Broker
+	natsConn   *nats.Conn // when set, handleSSE reads from NATS instead of broker
+	pipeline   *pipeline.Pipeline
+	router     chi.Router
+	httpMu     sync.Mutex
+	httpServer *http.Server
+	// httpListener is tracked separately from httpServer because Shutdown can
+	// race with Serve after the listener has been published but before
+	// net/http has registered it internally. Closing it explicitly guarantees
+	// that the daemon never leaves a bound, unserved socket behind.
+	httpListener      net.Listener
+	shutdownRequested bool
+	// starting suppresses the deep health checks and gates every non-health
+	// route while main is still wiring dependencies. The listener is claimed
+	// before any mutable recovery work, then Serve begins as soon as this Server
+	// exists; /health therefore has to answer during a window where later
+	// callbacks and workers do not exist yet.
 	//
 	// The zero value means "ready": a Server built by New already has every
 	// dependency injected. Only main, which deliberately serves mid-wiring,
 	// calls MarkStarting. Atomic because Serve is already handling requests
 	// when main flips it back.
 	starting atomic.Bool
+	// stopping reuses the startup route gate while giving /health an honest
+	// lifecycle status. The listener remains owned during worker teardown so a
+	// launcher cannot race a replacement into the old process's cleanup window.
+	stopping             atomic.Bool
 	reloadFn             func() error
 	shutdownFn           func()
 	triggerReviewFn      func(prID int64) error
@@ -141,6 +152,18 @@ func NewWithOptions(s *store.Store, broker *sse.Broker, p *pipeline.Pipeline, ap
 	return srv
 }
 
+// Configure injects the dependencies which are unavailable when main first
+// creates the Server to claim and serve the daemon socket. It must be called
+// after MarkStarting and before MarkReady. The starting gate prevents every
+// dependency-consuming route from running while these fields are published;
+// MarkReady's atomic store then makes them visible to subsequent requests.
+func (srv *Server) Configure(s *store.Store, broker *sse.Broker, p *pipeline.Pipeline, apiToken string) {
+	srv.store = s
+	srv.broker = broker
+	srv.pipeline = p
+	srv.apiToken = apiToken
+}
+
 // SetNATSConn enables NATS-based SSE. When set, handleSSE subscribes to
 // NATS events instead of the in-memory broker, removing the 10-subscriber limit.
 func (srv *Server) SetNATSConn(conn *nats.Conn) {
@@ -172,26 +195,27 @@ var sensitiveGETPaths = []string{
 //     be readable by arbitrary browser tabs — see security issue #3).
 func (srv *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if srv.apiToken != "" {
-			needsAuth := false
-			switch r.Method {
-			case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
-				needsAuth = true
-			case http.MethodGet:
-				for _, p := range sensitiveGETPaths {
-					if r.URL.Path == p || strings.HasPrefix(r.URL.Path, p+"/") {
-						needsAuth = true
-						break
-					}
+		needsAuth := false
+		switch r.Method {
+		case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+			needsAuth = true
+		case http.MethodGet:
+			for _, p := range sensitiveGETPaths {
+				if r.URL.Path == p || strings.HasPrefix(r.URL.Path, p+"/") {
+					needsAuth = true
+					break
 				}
 			}
-			if needsAuth {
-				token := r.Header.Get("X-Heimdallm-Token")
-				// Constant-time comparison to prevent timing attacks.
-				if !hmac.Equal([]byte(token), []byte(srv.apiToken)) {
-					http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
-					return
-				}
+		}
+		// During startup only /health reaches this middleware. Avoid reading the
+		// late-injected token for a route which does not need it, so Configure can
+		// publish the token before MarkReady without racing a health request.
+		if needsAuth && srv.apiToken != "" {
+			token := r.Header.Get("X-Heimdallm-Token")
+			// Constant-time comparison to prevent timing attacks.
+			if !hmac.Equal([]byte(token), []byte(srv.apiToken)) {
+				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				return
 			}
 		}
 		next.ServeHTTP(w, r)
@@ -333,67 +357,118 @@ func (srv *Server) Router() http.Handler {
 	return srv.router
 }
 
-// Listen binds the HTTP server's socket without serving on it, returning the
-// bound listener for an immediately following Serve.
+// Listen claims the daemon's HTTP socket without starting any application
+// workers. Main calls this immediately after loading config, before opening the
+// store or running destructive restart recovery, so a losing second instance
+// cannot clear live claims or prune worktrees before discovering the conflict.
 //
-// The split exists so the daemon can fail fast on a bind error *before* it
-// starts any GitHub poller. ListenAndServe reports a port collision only after
-// the pollers are already running, and a daemon that swallows that error keeps
-// polling GitHub while serving nothing: invisible to the app, but spending the
-// same hourly API budget as the daemon that did win the port. Five such
-// headless daemons exhausted the quota for hours in #646.
-//
-// Callers must call Serve right away and use MarkReady to signal readiness. A
-// bound socket that nobody is serving is worse than a closed one: the kernel
-// completes the TCP handshake into the accept backlog, so probes hang for their
-// full timeout instead of failing fast with "connection refused".
-func (srv *Server) Listen(port int, bindAddr string) (net.Listener, error) {
-	if srv.httpServer != nil {
-		return nil, errors.New("server: Listen called twice")
-	}
+// The listener is the HTTP-port ownership token (separate from main's
+// data-directory process lock). Callers must keep it open until Serve takes
+// over or startup aborts.
+func Listen(port int, bindAddr string) (net.Listener, error) {
 	addr := fmt.Sprintf("%s:%d", bindAddr, port)
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, err
+	return net.Listen("tcp", addr)
+}
+
+// Serve serves the fully wired router on a listener obtained from Listen.
+// Calling Serve more than once is rejected so the original server cannot be
+// silently orphaned.
+func (srv *Server) Serve(ln net.Listener) error {
+	srv.httpMu.Lock()
+	if srv.shutdownRequested {
+		srv.httpMu.Unlock()
+		// Shutdown may run before Serve is called, when the Server has no way to
+		// know which listener main will hand it. Once it arrives, close it here so
+		// the losing startup cannot leave the ownership socket bound.
+		_ = ln.Close()
+		return http.ErrServerClosed
 	}
-	srv.httpServer = &http.Server{
-		Addr:         addr,
+	if srv.httpServer != nil {
+		srv.httpMu.Unlock()
+		return errors.New("server: Serve called twice")
+	}
+	httpServer := &http.Server{
+		Addr:         ln.Addr().String(),
 		Handler:      srv.router,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
-	return ln, nil
-}
+	srv.httpServer = httpServer
+	srv.httpListener = ln
+	srv.httpMu.Unlock()
 
-// Serve serves HTTP on a listener obtained from Listen. Returns
-// http.ErrServerClosed after a Shutdown.
-func (srv *Server) Serve(ln net.Listener) error {
-	if srv.httpServer == nil {
-		return errors.New("server: Serve called before Listen")
+	err := httpServer.Serve(ln)
+	srv.httpMu.Lock()
+	shutdownRequested := srv.shutdownRequested
+	srv.httpMu.Unlock()
+	if shutdownRequested {
+		// An explicit Shutdown can close the listener just before net/http starts
+		// tracking it, which otherwise surfaces as a raw accept error. Preserve
+		// the standard graceful-shutdown contract for every shutdown ordering.
+		return http.ErrServerClosed
 	}
-	return srv.httpServer.Serve(ln)
+	return err
 }
 
 // MarkStarting declares the server up but still wiring dependencies, so
 // /health answers 503 "starting" instead of running deep checks against
 // half-built dependencies. Call before Serve; pair with MarkReady.
-func (srv *Server) MarkStarting() { srv.starting.Store(true) }
+func (srv *Server) MarkStarting() {
+	srv.starting.Store(true)
+	srv.stopping.Store(false)
+}
 
 // MarkReady declares every dependency wired, restoring the normal /health
 // deep checks. Idempotent.
-func (srv *Server) MarkReady() { srv.starting.Store(false) }
+func (srv *Server) MarkReady() {
+	srv.stopping.Store(false)
+	srv.starting.Store(false)
+}
+
+// MarkStopping gates every dependency-consuming route while main drains work.
+// /health remains reachable and identifies the process as "stopping" until the
+// listener is finally closed.
+func (srv *Server) MarkStopping() {
+	srv.starting.Store(true)
+	// Publish the descriptive state only after the route gate is closed. A
+	// request racing this transition may briefly see "starting", but it can
+	// never slip through to dependencies after shutdown has begun.
+	srv.stopping.Store(true)
+}
 
 // Shutdown gracefully shuts down the HTTP server.
 func (srv *Server) Shutdown(ctx context.Context) error {
-	if srv.httpServer == nil {
-		return nil
+	srv.httpMu.Lock()
+	srv.shutdownRequested = true
+	httpServer := srv.httpServer
+	httpListener := srv.httpListener
+	srv.httpMu.Unlock()
+
+	var shutdownErr error
+	if httpServer != nil {
+		// Call net/http first so it marks the server as shutting down before a
+		// concurrently scheduled Serve can register the listener.
+		shutdownErr = httpServer.Shutdown(ctx)
 	}
-	return srv.httpServer.Shutdown(ctx)
+	if httpListener != nil {
+		// If Serve published the listener but had not yet registered it with
+		// net/http, Shutdown above had nothing to close. Close our tracked copy
+		// as the final ownership guarantee. net.ErrClosed is the normal case when
+		// net/http already closed it.
+		if err := httpListener.Close(); err != nil && !errors.Is(err, net.ErrClosed) && shutdownErr == nil {
+			shutdownErr = err
+		}
+	}
+	return shutdownErr
 }
 
 func (srv *Server) buildRouter() chi.Router {
 	r := chi.NewRouter()
+	// This must precede auth: while main is still wiring callbacks, /health is
+	// the only route allowed to run. In particular, no authenticated mutation
+	// may observe partially published Server fields.
+	r.Use(srv.startupMiddleware)
 	r.Use(srv.authMiddleware)
 	r.Get("/health", srv.handleHealth)
 	r.Get("/me", srv.handleMe)
@@ -436,6 +511,30 @@ func (srv *Server) buildRouter() chi.Router {
 	return r
 }
 
+// startupMiddleware exposes only the public health probe while main is wiring
+// dependencies. MarkReady's atomic Store publishes every preceding setter to
+// requests which subsequently observe starting=false.
+func (srv *Server) startupMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !srv.starting.Load() || (r.Method == http.MethodGet && r.URL.Path == "/health") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set(HeaderDaemon, "1")
+		w.Header().Set("Retry-After", "1")
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"status": srv.unavailableStatus(),
+		})
+	})
+}
+
+func (srv *Server) unavailableStatus() string {
+	if srv.stopping.Load() {
+		return "stopping"
+	}
+	return "starting"
+}
+
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -455,11 +554,12 @@ func (srv *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	// Serving starts right after the bind, long before the pollers, workers and
 	// event bus are wired, so answer honestly during that window instead of
 	// running deep checks against half-built dependencies. 503 keeps
-	// checkHealth() false (the app must not navigate into a half-ready daemon)
-	// while still being a real HTTP answer, so the app's reachability probe
-	// sees the port is taken and does not spawn a rival instance (#646).
+	// checkHealth() false for readiness consumers while still being a real HTTP
+	// answer, so the app's ownership probe sees the port is taken and does not
+	// spawn a rival instance. The UI may still enter its diagnostic surface
+	// while startup finishes (#646).
 	if srv.starting.Load() {
-		resp := map[string]any{"status": "starting"}
+		resp := map[string]any{"status": srv.unavailableStatus()}
 		if srv.version != "" {
 			resp["version"] = srv.version
 		}

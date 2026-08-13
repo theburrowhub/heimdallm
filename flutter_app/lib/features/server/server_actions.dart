@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/api/api_client.dart';
+import '../../core/daemon/daemon_startup.dart';
 import '../../core/platform/platform_services_provider.dart';
 import '../../shared/widgets/toast.dart';
 import '../activity/activity_providers.dart';
@@ -11,6 +13,45 @@ import '../issues/issues_providers.dart';
 
 const kDaemonStartHealthMaxAttempts = 80;
 const kDaemonStartHealthInterval = Duration(milliseconds: 100);
+
+String _startupFailureMessage(DaemonStartupResult result, int port) {
+  switch (result.outcome) {
+    case DaemonStartupOutcome.portOccupied:
+      return 'Port $port is occupied; no daemon was started.';
+    case DaemonStartupOutcome.daemonPresent:
+      return 'Heimdallm is already running but is not healthy yet.';
+    case DaemonStartupOutcome.spawnFailedRetryable:
+    case DaemonStartupOutcome.spawnFailedTerminal:
+      return 'Could not start Heimdallm: ${result.error ?? 'unknown error'}';
+    case DaemonStartupOutcome.spawnBudgetExhausted:
+      return 'Heimdallm exhausted its guarded start attempts.';
+    case DaemonStartupOutcome.spawned:
+      return '';
+  }
+}
+
+/// Waits for the daemon to relinquish its port, not merely to become
+/// unhealthy. A degraded daemon answers /health with 503; treating that as
+/// "stopped" lets a restart race its still-running predecessor (#646).
+Future<PortOwner> waitForDaemonPortRelease(
+  ApiClient api, {
+  List<Duration> delays = const [
+    Duration(milliseconds: 200),
+    Duration(milliseconds: 300),
+    Duration(milliseconds: 500),
+    Duration(milliseconds: 800),
+    Duration(milliseconds: 1200),
+    Duration(seconds: 2),
+  ],
+}) async {
+  var owner = PortOwner.daemon;
+  for (final delay in delays) {
+    await Future<void>.delayed(delay);
+    owner = await api.daemonReachable();
+    if (owner != PortOwner.daemon) return owner;
+  }
+  return owner;
+}
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
@@ -58,8 +99,29 @@ Future<void> startDaemon(BuildContext context, WidgetRef ref) async {
 
   ref.read(daemonStartingProvider.notifier).set(true);
   try {
-    await platform.spawnDaemon(binaryPath);
     final api = ref.read(apiClientProvider);
+    final startup = DaemonStartupCoordinator(
+      api: api,
+      platform: platform,
+      binaryPath: binaryPath,
+      maxSpawnAttempts: 1,
+    );
+    final result = await startup.ensureAvailable();
+    if (result.outcome == DaemonStartupOutcome.daemonPresent) {
+      _invalidateDashboardData(ref);
+      if (context.mounted) showToast(context, 'Server is already running');
+      return;
+    }
+    if (result.outcome != DaemonStartupOutcome.spawned) {
+      if (context.mounted) {
+        showToast(
+          context,
+          _startupFailureMessage(result, api.daemonPort),
+          isError: true,
+        );
+      }
+      return;
+    }
     var healthy = false;
     for (var i = 0; i < kDaemonStartHealthMaxAttempts; i++) {
       await Future<void>.delayed(kDaemonStartHealthInterval);
@@ -84,52 +146,82 @@ Future<void> startDaemon(BuildContext context, WidgetRef ref) async {
   }
 }
 
-Future<void> refreshWhenDaemonStops(
+Future<PortOwner?> refreshWhenDaemonStops(
   BuildContext context,
   WidgetRef ref,
 ) async {
   final api = ref.read(apiClientProvider);
-  const delays = [
-    Duration(milliseconds: 200),
-    Duration(milliseconds: 300),
-    Duration(milliseconds: 500),
-    Duration(milliseconds: 800),
-    Duration(milliseconds: 1200),
-    Duration(seconds: 2),
-  ];
-
-  for (final delay in delays) {
-    await Future<void>.delayed(delay);
-    if (!context.mounted) return;
-    final healthy = await api.checkHealth();
-    if (!context.mounted) return;
-    ref.invalidate(daemonHealthProvider);
-    if (!healthy) break;
-  }
-
-  if (!context.mounted) return;
+  final owner = await waitForDaemonPortRelease(api);
+  if (!context.mounted) return null;
+  ref.invalidate(daemonHealthProvider);
   _invalidateDashboardData(ref);
+  return owner;
 }
 
 /// Stop the daemon and immediately respawn it. Used by the Server screen's
 /// Restart banner after a Listen URL change.
 Future<void> restartDaemon(BuildContext context, WidgetRef ref) async {
   final api = ref.read(apiClientProvider);
+  final platform = ref.read(platformServicesProvider);
   ref.read(daemonStartingProvider.notifier).set(true);
   try {
+    // Resolve supervisor ownership before stopping anything. On macOS an
+    // ambiguous launchctl response fails closed here, while the current daemon
+    // is still running, instead of risking an unsupervised replacement.
+    final supervised = await platform.isDaemonSupervised();
     await api.shutdownDaemon();
     if (!context.mounted) return;
     showToast(context, 'Restarting…');
-    await refreshWhenDaemonStops(context, ref);
-    // refreshWhenDaemonStops returns once /health reports unreachable.
+    final stoppedAs = await refreshWhenDaemonStops(context, ref);
     if (!context.mounted) return;
-    final platform = ref.read(platformServicesProvider);
-    final binary = platform.defaultDaemonBinaryPath();
-    if (binary == null || binary.isEmpty) {
-      showToast(context, 'Daemon binary not found', isError: true);
+    if (stoppedAs == PortOwner.foreign) {
+      showToast(
+        context,
+        'The daemon stopped, but port ${api.daemonPort} is now occupied; restart cancelled.',
+        isError: true,
+      );
       return;
     }
-    await platform.spawnDaemon(binary);
+    if (stoppedAs == PortOwner.daemon && !supervised) {
+      showToast(
+        context,
+        'Daemon did not stop; restart cancelled.',
+        isError: true,
+      );
+      return;
+    }
+    DaemonStartupResult result;
+    if (stoppedAs == PortOwner.daemon) {
+      // A macOS LaunchAgent with KeepAlive can replace the old process between
+      // two ownership probes, so the port may never be observed as closed.
+      // That supervised reappearance is already the desired restart outcome;
+      // never race it with a detached child.
+      result = const DaemonStartupResult(DaemonStartupOutcome.daemonPresent);
+    } else {
+      final binary = platform.defaultDaemonBinaryPath();
+      if (binary == null || binary.isEmpty) {
+        showToast(context, 'Daemon binary not found', isError: true);
+        return;
+      }
+      final startup = DaemonStartupCoordinator(
+        api: api,
+        platform: platform,
+        binaryPath: binary,
+        maxSpawnAttempts: 1,
+      );
+      result = await startup.ensureAvailable();
+    }
+    if (result.outcome != DaemonStartupOutcome.spawned &&
+        result.outcome != DaemonStartupOutcome.daemonPresent) {
+      if (context.mounted) {
+        showToast(
+          context,
+          _startupFailureMessage(result, api.daemonPort),
+          isError: true,
+        );
+      }
+      return;
+    }
     var healthy = false;
     for (var i = 0; i < kDaemonStartHealthMaxAttempts; i++) {
       await Future<void>.delayed(kDaemonStartHealthInterval);
@@ -137,8 +229,11 @@ Future<void> restartDaemon(BuildContext context, WidgetRef ref) async {
       if (healthy) break;
     }
     if (!context.mounted) return;
-    showToast(context, healthy ? 'Server restarted' : 'Restart timed out',
-        isError: !healthy);
+    showToast(
+      context,
+      healthy ? 'Server restarted' : 'Restart timed out',
+      isError: !healthy,
+    );
   } catch (e) {
     if (context.mounted) showToast(context, 'Error: $e', isError: true);
   } finally {

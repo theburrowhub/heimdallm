@@ -1,8 +1,8 @@
 import 'dart:io';
 
 /// Locates the daemon binary. Spawning itself lives in
-/// `PlatformServices.spawnDaemon`, and the "is one already running?" guard
-/// lives in the boot path (`_spawnDaemonUnlessRunning` in main.dart).
+/// `PlatformServices.spawnDaemon`, and the single guarded startup policy lives
+/// in `DaemonStartupCoordinator`.
 ///
 /// This class used to also own an `ensureRunning()` with its own health check,
 /// but nothing called it — the boot path had grown a second, unguarded spawn

@@ -12,6 +12,14 @@ export 'platform_services_stub.dart'
     if (dart.library.io) 'platform_services_desktop.dart'
     if (dart.library.html) 'platform_services_web.dart';
 
+/// Result of probing the daemon's TCP port without making assumptions about
+/// the HTTP client's platform-specific exception wrappers.
+///
+/// Only [closed] is permission to spawn a daemon. Both [open] and [unknown]
+/// mean another process may own the port, so starting a second process would
+/// be unsafe.
+enum TcpPortState { open, closed, unknown }
+
 /// Platform-specific capabilities the rest of the app is free to call from
 /// shared (i.e. non-`dart:io`) code. The desktop impl wraps dart:io and the
 /// heavy packages (tray_manager, window_manager, local_notifier); the web
@@ -112,7 +120,25 @@ abstract class PlatformServices {
   Future<bool> daemonConfigExists();
   String? defaultDaemonBinaryPath();
 
-  /// Launches the daemon binary (detached). Throws `UnsupportedError` on web.
+  /// Probes the configured daemon port at TCP level.
+  ///
+  /// Desktop implementations return [TcpPortState.closed] only for an
+  /// explicit connection-refused result. Timeouts, routing failures and other
+  /// ambiguous errors return [TcpPortState.unknown], which deliberately fails
+  /// closed. Web cannot open raw sockets and therefore always returns unknown.
+  Future<TcpPortState> probeDaemonPort({
+    Duration timeout = const Duration(milliseconds: 500),
+  });
+
+  /// Whether the canonical native service supervisor currently owns daemon
+  /// startup. False on platforms/installations without such a service.
+  /// Implementations must throw rather than guess when ownership cannot be
+  /// determined safely.
+  Future<bool> isDaemonSupervised();
+
+  /// Starts the daemon. Desktop implementations may delegate to the native
+  /// service supervisor instead of launching a detached process. Throws
+  /// `UnsupportedError` on web.
   Future<void> spawnDaemon(String binaryPath);
 
   /// Rebuilds the system tray context menu with current PR data.

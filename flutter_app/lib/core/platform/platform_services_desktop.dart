@@ -1,6 +1,7 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:ui' show VoidCallback;
-import 'package:flutter/foundation.dart' show debugPrint;
+import 'package:flutter/foundation.dart' show debugPrint, visibleForTesting;
 import 'package:flutter/painting.dart' show Size;
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:tray_manager/tray_manager.dart';
@@ -15,6 +16,12 @@ import '../setup/repo_discovery.dart';
 import '../tray/tray_menu.dart';
 import 'platform_services.dart';
 
+@visibleForTesting
+typedef PlatformProcessRunner =
+    Future<ProcessResult> Function(String executable, List<String> arguments);
+@visibleForTesting
+typedef DetachedDaemonStarter = Future<void> Function(String binaryPath);
+
 /// Desktop implementation of [PlatformServices].
 ///
 /// Wraps dart:io, tray_manager, window_manager, flutter_local_notifications,
@@ -25,13 +32,32 @@ class DesktopPlatformServices with WindowListener implements PlatformServices {
     int apiPort = 7842,
     String? tokenPath,
     String? pidFilePath,
-  })  : _apiPort = apiPort,
-        _tokenPath = tokenPath,
-        _pidFilePath = pidFilePath;
+    @visibleForTesting bool? isMacOS,
+    @visibleForTesting PlatformProcessRunner? processRunner,
+    @visibleForTesting DetachedDaemonStarter? detachedDaemonStarter,
+  }) : _apiPort = apiPort,
+       _tokenPath = tokenPath,
+       _pidFilePath = pidFilePath,
+       _isMacOS = isMacOS ?? Platform.isMacOS,
+       _processRunner =
+           processRunner ??
+           ((executable, arguments) => Process.run(executable, arguments)),
+       _detachedDaemonStarter =
+           detachedDaemonStarter ??
+           ((binaryPath) async {
+             await Process.start(
+               binaryPath,
+               const [],
+               mode: ProcessStartMode.detached,
+             );
+           });
 
   final int _apiPort;
   final String? _tokenPath;
   final String? _pidFilePath;
+  final bool _isMacOS;
+  final PlatformProcessRunner _processRunner;
+  final DetachedDaemonStarter _detachedDaemonStarter;
   String? _cachedToken;
   void Function(String location)? _onTrayNavigate;
 
@@ -73,7 +99,9 @@ class DesktopPlatformServices with WindowListener implements PlatformServices {
       if (existing != null && existing != pid) {
         final check = await Process.run('kill', ['-0', '$existing']);
         if (check.exitCode == 0) {
-          debugPrint('Another Heimdallm instance is running (PID $existing), signalling it.');
+          debugPrint(
+            'Another Heimdallm instance is running (PID $existing), signalling it.',
+          );
           await Process.run('kill', ['-USR1', '$existing']);
           return false;
         }
@@ -88,6 +116,7 @@ class DesktopPlatformServices with WindowListener implements PlatformServices {
   void listenForActivationSignal(VoidCallback onActivate) {
     ProcessSignal.sigusr1.watch().listen((_) => onActivate());
   }
+
   @override
   Future<void> setupWindow({
     required String title,
@@ -121,11 +150,15 @@ class DesktopPlatformServices with WindowListener implements PlatformServices {
     await trayManager.setIcon(
       Platform.isLinux ? 'assets/tray_icon@2x.png' : 'assets/tray_icon.png',
     );
-    await trayManager.setContextMenu(Menu(items: [
-      MenuItem(key: 'open', label: 'Open Heimdallm'),
-      MenuItem.separator(),
-      MenuItem(key: 'quit', label: 'Quit'),
-    ]));
+    await trayManager.setContextMenu(
+      Menu(
+        items: [
+          MenuItem(key: 'open', label: 'Open Heimdallm'),
+          MenuItem.separator(),
+          MenuItem(key: 'quit', label: 'Quit'),
+        ],
+      ),
+    );
     // At this point the router isn't created yet, so we pass a no-op
     // navigation handler. main.dart calls setTrayNavigationHandler() later
     // with the real handler, which is forwarded into TrayMenu via rebind.
@@ -242,7 +275,8 @@ class DesktopPlatformServices with WindowListener implements PlatformServices {
   Future<String?> getStoredGitHubToken() => FirstRunSetup.getToken();
 
   @override
-  Future<void> storeGitHubToken(String token) => FirstRunSetup.storeToken(token);
+  Future<void> storeGitHubToken(String token) =>
+      FirstRunSetup.storeToken(token);
 
   @override
   Future<void> writeDaemonConfig(AppConfig config) =>
@@ -255,14 +289,106 @@ class DesktopPlatformServices with WindowListener implements PlatformServices {
   String? defaultDaemonBinaryPath() => DaemonLifecycle.defaultBinaryPath();
 
   @override
+  Future<TcpPortState> probeDaemonPort({
+    Duration timeout = const Duration(milliseconds: 500),
+  }) async {
+    Socket? socket;
+    try {
+      socket = await Socket.connect('127.0.0.1', _apiPort, timeout: timeout);
+      return TcpPortState.open;
+    } on SocketException catch (e) {
+      // These are ECONNREFUSED on macOS, Linux and Windows respectively. Only
+      // an explicit refusal proves no listener owns the port. Everything else
+      // (including ENETUNREACH/EHOSTUNREACH) is ambiguous and must not permit
+      // spawning a second daemon.
+      const connectionRefusedCodes = {61, 111, 10061};
+      return connectionRefusedCodes.contains(e.osError?.errorCode)
+          ? TcpPortState.closed
+          : TcpPortState.unknown;
+    } on TimeoutException {
+      return TcpPortState.unknown;
+    } catch (_) {
+      return TcpPortState.unknown;
+    } finally {
+      socket?.destroy();
+    }
+  }
+
+  @override
+  Future<bool> isDaemonSupervised() async {
+    if (!_isMacOS) return false;
+    return await _loadedCanonicalLaunchAgentTarget() != null;
+  }
+
+  @override
   Future<void> spawnDaemon(String binaryPath) async {
     final binary = File(binaryPath);
     if (!binary.existsSync()) {
       throw DaemonException('Daemon binary not found: $binaryPath');
     }
+
+    // A loaded LaunchAgent is the canonical owner on macOS. Starting a
+    // detached sibling here would move the daemon outside launchd supervision
+    // and leave the KeepAlive job retrying against the process-lifetime lock.
+    // Ask launchd to start the existing job instead. Any ambiguous inspection
+    // failure is fatal: falling back to Process.start would be unsafe because
+    // the job may still be loaded.
+    final launchAgentTarget = _isMacOS
+        ? await _loadedCanonicalLaunchAgentTarget()
+        : null;
+    if (launchAgentTarget != null) {
+      final result = await _processRunner('/bin/launchctl', [
+        'kickstart',
+        launchAgentTarget,
+      ]);
+      if (result.exitCode != 0) {
+        throw DaemonException(
+          'Could not start the supervised daemon: '
+          '${_processResultDetails(result)}',
+        );
+      }
+      return;
+    }
+
     // Detached: daemon outlives the Flutter process so in-flight reviews
     // survive window hides and dev restarts.
-    await Process.start(binaryPath, [], mode: ProcessStartMode.detached);
+    await _detachedDaemonStarter(binaryPath);
+  }
+
+  static const _canonicalLaunchAgentLabel = 'com.heimdallm.daemon';
+
+  Future<String> _canonicalLaunchAgentTarget() async {
+    final uidResult = await _processRunner('/usr/bin/id', const ['-u']);
+    final uid = '${uidResult.stdout}'.trim();
+    if (uidResult.exitCode != 0 || !RegExp(r'^\d+$').hasMatch(uid)) {
+      throw DaemonException(
+        'Could not determine the launchd user domain: '
+        '${_processResultDetails(uidResult)}',
+      );
+    }
+    return 'gui/$uid/$_canonicalLaunchAgentLabel';
+  }
+
+  Future<String?> _loadedCanonicalLaunchAgentTarget() async {
+    final target = await _canonicalLaunchAgentTarget();
+    final result = await _processRunner('/bin/launchctl', ['print', target]);
+    if (result.exitCode == 0) return target;
+
+    final details = '${result.stdout}\n${result.stderr}';
+    if (result.exitCode == 113 || details.contains('Could not find service')) {
+      return null;
+    }
+    throw DaemonException(
+      'Could not determine whether the supervised daemon is loaded: '
+      '${_processResultDetails(result)}',
+    );
+  }
+
+  static String _processResultDetails(ProcessResult result) {
+    final stderr = '${result.stderr}'.trim();
+    final stdout = '${result.stdout}'.trim();
+    final output = stderr.isNotEmpty ? stderr : stdout;
+    return output.isEmpty ? 'exit status ${result.exitCode}' : output;
   }
 
   @override

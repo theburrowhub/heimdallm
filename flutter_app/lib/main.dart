@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'core/api/api_client.dart';
+import 'core/daemon/daemon_startup.dart';
 import 'core/models/config_model.dart';
 import 'core/platform/platform_services.dart';
 import 'core/platform/platform_services_provider.dart';
@@ -61,12 +62,12 @@ Future<void> main() async {
     debugPrint('notifier init failed: $e');
   }
 
-  runApp(ProviderScope(
-    overrides: [
-      platformServicesProvider.overrideWithValue(platform),
-    ],
-    child: _BootstrapApp(appRouter: _appRouter),
-  ));
+  runApp(
+    ProviderScope(
+      overrides: [platformServicesProvider.overrideWithValue(platform)],
+      child: _BootstrapApp(appRouter: _appRouter),
+    ),
+  );
 }
 
 /// Public entry point for features to fire notifications.
@@ -87,10 +88,6 @@ void sendPRNotification({
     },
   );
 }
-
-/// A non-Heimdallm process holds the daemon port. Distinct from a spawn failure
-/// because no amount of retrying fixes it — the user has to free the port.
-class _ForeignPortException implements Exception {}
 
 class _BootstrapApp extends ConsumerStatefulWidget {
   final GoRouter appRouter;
@@ -120,9 +117,19 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
   Future<void> _boot() async {
     final api = ApiClient(platform: _platform);
 
-    if (await api.checkHealth()) {
-      _go('/');
-      return;
+    // Determine port ownership before asking for credentials, config or even a
+    // local daemon binary. A live daemon can legitimately answer 503 while
+    // starting, stopping or degraded; it is still the authoritative process
+    // and the dashboard remains useful for diagnosis (#646).
+    switch (await api.daemonReachable()) {
+      case PortOwner.daemon:
+        _go('/');
+        return;
+      case PortOwner.foreign:
+        _setForeignPortError(api.daemonPort);
+        return;
+      case PortOwner.none:
+        break;
     }
 
     _setStatus('Detecting credentials…');
@@ -149,7 +156,9 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
           .where((p) => p.isNotEmpty)
           .toList();
       final config = AppConfig(
-        repoConfigs: {for (final r in repos) r: const RepoConfig(prEnabled: true)},
+        repoConfigs: {
+          for (final r in repos) r: const RepoConfig(prEnabled: true),
+        },
         localDirBase: localDirBase,
       );
       await _platform.storeGitHubToken(token);
@@ -160,9 +169,11 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
     if (binaryPath == null) {
       _setError(
         title: 'Daemon binary not found',
-        details: 'Heimdallm could not locate its background service.\n'
+        details:
+            'Heimdallm could not locate its background service.\n'
             'This usually means the installation is incomplete.',
-        hint: 'If you installed from a DMG, open Terminal and run:\n'
+        hint:
+            'If you installed from a DMG, open Terminal and run:\n'
             'xattr -cr /Applications/Heimdallm.app\n'
             'then relaunch the app.',
       );
@@ -170,151 +181,136 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
     }
 
     _setStatus('Starting Heimdallm…');
-    try {
-      await _spawnDaemonUnlessRunning(api, binaryPath);
-    } on _ForeignPortException {
-      _setForeignPortError(api.daemonPort);
-      return;
-    } catch (e) {
-      _setError(
-        title: 'Could not start daemon',
-        details: e.toString(),
-        hint: 'Check that Heimdallm has permission to run sub-processes.\n'
-            'Try: xattr -cr /Applications/Heimdallm.app',
-      );
+    final startup = DaemonStartupCoordinator(
+      api: api,
+      platform: _platform,
+      binaryPath: binaryPath,
+    );
+    final initial = await startup.ensureAvailable();
+    if (!_handleStartupResult(initial, api.daemonPort)) {
       return;
     }
 
     _setStatus('Waiting for Heimdallm…');
-    await _waitForHealth(api, retryBinary: binaryPath);
+    await _waitForHealth(api, startup: startup);
   }
 
-  /// Spawns the daemon only when nothing is answering on its port.
-  ///
-  /// The single most important invariant of the boot path: never add a second
-  /// daemon. A daemon that loses the port bind used to stay alive and keep
-  /// polling GitHub on the same token, so every redundant spawn permanently
-  /// multiplied API consumption until the hourly quota was gone (#646). The
-  /// daemon now exits on a failed bind, but the app must not rely on that —
-  /// older daemons are still out there, and not spawning is free.
-  ///
-  /// Reachability, not health, is the right question here: see
-  /// [ApiClient.daemonReachable].
-  /// Returns true when a daemon was actually spawned, false when the port was
-  /// already taken. Throws [_ForeignPortException] when a process that is not
-  /// Heimdallm holds the port — spawning would just fail on the bind, so that
-  /// case has to reach the user rather than be retried in silence.
-  Future<bool> _spawnDaemonUnlessRunning(ApiClient api, String binaryPath) async {
-    switch (await api.daemonReachable()) {
-      case PortOwner.daemon:
-        return false;
-      case PortOwner.foreign:
-        throw _ForeignPortException();
-      case PortOwner.none:
-        await _platform.spawnDaemon(binaryPath);
-        return true;
-    }
-  }
-
-  Future<void> _waitForHealth(ApiClient api, {String? retryBinary}) async {
-    const maxDaemonRestarts = 3;
-    // How many spawn windows to allow a daemon that owns the port but is not
-    // healthy before offering the user a way out. A "starting" daemon clears in
-    // seconds; a rate-limited one can stay degraded for hours, and blocking the
-    // splash on that locks the user out of the app entirely.
-    const maxDegradedWindows = 3;
-    var daemonRestarts = 0;
-    var degradedWindows = 0;
+  Future<void> _waitForHealth(
+    ApiClient api, {
+    required DaemonStartupCoordinator startup,
+  }) async {
     for (var attempt = 0; ; attempt++) {
       await Future.delayed(const Duration(milliseconds: 400));
       if (await api.checkHealth()) {
         _go('/');
         return;
       }
-      if (attempt > 0 && attempt % 25 == 0 && retryBinary != null) {
-        // Check the budget BEFORE spawning: counting the spawn first and then
-        // testing the limit fires the terminal error immediately after the last
-        // daemon was launched, denying it the health window the retry exists to
-        // provide.
-        if (daemonRestarts >= maxDaemonRestarts) {
-          _setError(
-            title: 'Daemon failed to start',
-            details: 'Heimdallm could not start after $maxDaemonRestarts attempts.',
-            hint: 'Try restarting the app. If the problem persists, check your installation:\n'
-                'xattr -cr /Applications/Heimdallm.app',
-          );
-          return;
-        }
-
-        // A daemon that owns the port but answers 503 keeps failing
-        // checkHealth: it is degraded (rate-limited, stale last_poll) or still
-        // wiring up, not absent. Re-spawning on that signal is what stacked
-        // five daemons on one token in #646, so we skip the spawn — and must
-        // not spend the restart budget on a spawn that never happened, or the
-        // user gets a terminal "failed to start" for a daemon that is running.
-        final bool spawned;
-        try {
-          spawned = await _spawnDaemonUnlessRunning(api, retryBinary);
-        } on _ForeignPortException {
-          _setForeignPortError(api.daemonPort);
-          return;
-        } catch (_) {
-          continue;
-        }
-
-        if (!spawned) {
-          degradedWindows++;
-          if (degradedWindows >= maxDegradedWindows) {
-            _setDegradedDaemonError();
-            return;
-          }
-          // Tell the user what we are actually waiting on, instead of leaving
-          // the splash on a generic message while nothing appears to happen.
-          _setStatus('Heimdallm is running but not ready yet — waiting…');
-          continue;
-        }
-        daemonRestarts++;
+      if (attempt > 0 && attempt % 25 == 0) {
+        final result = await startup.ensureAvailable();
+        if (!_handleStartupResult(result, api.daemonPort)) return;
       }
     }
   }
 
-  void _setForeignPortError(int port) {
+  /// Handles every result from the shared guarded startup path. Returns true
+  /// while the health loop should keep waiting, false after surfacing a
+  /// terminal error.
+  bool _handleStartupResult(DaemonStartupResult result, int port) {
+    switch (result.outcome) {
+      case DaemonStartupOutcome.spawned:
+        _setStatus('Waiting for Heimdallm…');
+        return true;
+      case DaemonStartupOutcome.daemonPresent:
+        // Reachability is enough to enter the app. Health remains visible in
+        // the dashboard; blocking the splash on a stale last_poll was the local
+        // failure mode which triggered duplicate spawn attempts in #646.
+        _go('/');
+        return false;
+      case DaemonStartupOutcome.spawnFailedRetryable:
+        _setStatus('Could not launch Heimdallm — retrying…');
+        return true;
+      case DaemonStartupOutcome.portOccupied:
+        _setForeignPortError(port);
+        return false;
+      case DaemonStartupOutcome.spawnFailedTerminal:
+        _setSpawnFailureError(result.error);
+        return false;
+      case DaemonStartupOutcome.spawnBudgetExhausted:
+        _setError(
+          title: 'Daemon failed to start',
+          details:
+              'Heimdallm exhausted its guarded start attempts without '
+              'finding a daemon on the configured port.',
+          hint:
+              'Try restarting the app. If the problem persists, check your installation:\n'
+              'xattr -cr /Applications/Heimdallm.app',
+        );
+        return false;
+    }
+  }
+
+  void _setSpawnFailureError(Object? error) {
     _setError(
-      title: 'Port $port is in use by another process',
-      details: 'Something is answering on Heimdallm\'s port, but it is not the '
-          'Heimdallm daemon. Heimdallm will not start a daemon that cannot bind '
-          'the port.',
-      hint: 'Find the process and stop it, then relaunch:\n'
+      title: 'Could not start daemon',
+      details: error?.toString() ?? 'The daemon process could not be launched.',
+      hint:
+          'Check that Heimdallm has permission to run sub-processes.\n'
+          'Try: xattr -cr /Applications/Heimdallm.app',
+    );
+  }
+
+  void _setForeignPortError(int port) {
+    if (port <= 0) {
+      _setError(
+        title: 'Daemon endpoint unavailable',
+        details:
+            'Heimdallm could not identify a daemon at the configured API '
+            'endpoint. No local process was started.',
+        hint: 'Check the daemon or reverse-proxy logs, then retry.',
+      );
+      return;
+    }
+    _setError(
+      title: 'Port $port is already occupied',
+      details:
+          'Heimdallm could not prove that its port is free. Another '
+          'process is listening, or a service on the port did not answer the '
+          'health check. No daemon was started, to avoid duplicate workers.',
+      hint:
+          'Find the process and stop it, then relaunch:\n'
           'lsof -nP -iTCP:$port -sTCP:LISTEN',
     );
   }
 
-  /// The daemon owns the port and answers, but never reports healthy. Most
-  /// often a GitHub rate-limit episode leaving `last_poll` stale, which can
-  /// last hours — so give the user an exit instead of an endless splash.
-  void _setDegradedDaemonError() {
-    _setError(
-      title: 'Heimdallm is running but not ready',
-      details: 'The daemon is answering but reports itself unhealthy. This is '
-          'usually a GitHub rate-limit episode leaving the last poll stale, '
-          'which can take a while to clear.',
-      hint: 'Retry to keep waiting, or check the daemon log:\n'
-          '~/.local/share/heimdallm/heimdallm.log',
-    );
+  void _setStatus(String s) {
+    if (mounted) setState(() => _status = s);
   }
 
-  void _setStatus(String s) { if (mounted) setState(() => _status = s); }
-  void _setError({required String title, required String details, String? hint}) {
+  void _setError({
+    required String title,
+    required String details,
+    String? hint,
+  }) {
     if (mounted) {
-      setState(() { _errorTitle = title; _errorDetails = details; _errorHint = hint; });
+      setState(() {
+        _errorTitle = title;
+        _errorDetails = details;
+        _errorHint = hint;
+      });
     }
   }
-  void _go(String location) { if (mounted) setState(() => _destination = location); }
+
+  void _go(String location) {
+    if (mounted) setState(() => _destination = location);
+  }
 
   @override
   Widget build(BuildContext context) {
     if (_destination != null) {
-      return HeimdallmApp(router: widget.appRouter, initialLocation: _destination!);
+      return HeimdallmApp(
+        router: widget.appRouter,
+        initialLocation: _destination!,
+      );
     }
     if (_errorTitle != null) {
       return _ErrorApp(
@@ -322,7 +318,11 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
         details: _errorDetails ?? '',
         hint: _errorHint,
         onRetry: () {
-          setState(() { _errorTitle = null; _errorDetails = null; _errorHint = null; });
+          setState(() {
+            _errorTitle = null;
+            _errorDetails = null;
+            _errorHint = null;
+          });
           _boot();
         },
         onQuit: _platform.quitApp,
@@ -356,14 +356,21 @@ class _SplashApp extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Image.asset('assets/icon.png', width: 96, height: 96,
-                  errorBuilder: (_, _, _) => const Icon(Icons.shield, size: 96)),
+              Image.asset(
+                'assets/icon.png',
+                width: 96,
+                height: 96,
+                errorBuilder: (_, _, _) => const Icon(Icons.shield, size: 96),
+              ),
               const SizedBox(height: 24),
-              const Text('Heimdallm',
-                  style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold)),
+              const Text(
+                'Heimdallm',
+                style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
+              ),
               const SizedBox(height: 20),
               const SizedBox(
-                width: 24, height: 24,
+                width: 24,
+                height: 24,
                 child: CircularProgressIndicator(strokeWidth: 2.5),
               ),
               const SizedBox(height: 12),
@@ -417,13 +424,20 @@ class _ErrorApp extends StatelessWidget {
                 children: [
                   const Icon(Icons.error_outline, size: 56, color: Colors.red),
                   const SizedBox(height: 20),
-                  Text(title,
-                      style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-                      textAlign: TextAlign.center),
+                  Text(
+                    title,
+                    style: const TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
                   const SizedBox(height: 12),
-                  Text(details,
-                      style: const TextStyle(color: Colors.grey, fontSize: 13),
-                      textAlign: TextAlign.center),
+                  Text(
+                    details,
+                    style: const TextStyle(color: Colors.grey, fontSize: 13),
+                    textAlign: TextAlign.center,
+                  ),
                   if (hint != null) ...[
                     const SizedBox(height: 20),
                     Container(
@@ -431,12 +445,19 @@ class _ErrorApp extends StatelessWidget {
                       padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
                         color: Colors.orange.withValues(alpha: 0.1),
-                        border: Border.all(color: Colors.orange.withValues(alpha: 0.4)),
+                        border: Border.all(
+                          color: Colors.orange.withValues(alpha: 0.4),
+                        ),
                         borderRadius: BorderRadius.circular(8),
                       ),
-                      child: Text(hint!,
-                          style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
-                          textAlign: TextAlign.left),
+                      child: Text(
+                        hint!,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontFamily: 'monospace',
+                        ),
+                        textAlign: TextAlign.left,
+                      ),
                     ),
                   ],
                   const SizedBox(height: 28),

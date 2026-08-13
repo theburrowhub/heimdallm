@@ -16,6 +16,8 @@ class FakePlatformServices implements PlatformServices {
     this.configExistsValue = true,
     this.githubToken,
     this.daemonBinaryPath,
+    this.tcpPortState = TcpPortState.unknown,
+    this.daemonSupervised = false,
   }) : _env = env ?? const {};
 
   @override
@@ -25,6 +27,8 @@ class FakePlatformServices implements PlatformServices {
   bool configExistsValue;
   String? githubToken;
   String? daemonBinaryPath;
+  TcpPortState tcpPortState;
+  bool daemonSupervised;
 
   // Records of calls for assertions.
   int loadApiTokenCalls = 0;
@@ -40,6 +44,7 @@ class FakePlatformServices implements PlatformServices {
   int quitCalls = 0;
   final List<AppConfig> writtenConfigs = [];
   final List<String> spawnedDaemons = [];
+  int probeDaemonPortCalls = 0;
   void Function(String location)? trayNavigationHandler;
 
   @override
@@ -136,6 +141,17 @@ class FakePlatformServices implements PlatformServices {
   String? defaultDaemonBinaryPath() => daemonBinaryPath;
 
   @override
+  Future<TcpPortState> probeDaemonPort({
+    Duration timeout = const Duration(milliseconds: 500),
+  }) async {
+    probeDaemonPortCalls++;
+    return tcpPortState;
+  }
+
+  @override
+  Future<bool> isDaemonSupervised() async => daemonSupervised;
+
+  @override
   Future<void> spawnDaemon(String binaryPath) async {
     spawnedDaemons.add(binaryPath);
   }
@@ -143,7 +159,10 @@ class FakePlatformServices implements PlatformServices {
   final List<({List<PR> prs, String me})> trayRebuilds = [];
 
   @override
-  Future<void> rebuildTrayMenu({required List<PR> prs, required String me}) async {
+  Future<void> rebuildTrayMenu({
+    required List<PR> prs,
+    required String me,
+  }) async {
     trayRebuilds.add((prs: prs, me: me));
   }
 

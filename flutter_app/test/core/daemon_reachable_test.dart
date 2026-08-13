@@ -3,6 +3,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:heimdallm/core/api/api_client.dart';
+import 'package:heimdallm/core/platform/platform_services.dart';
+import 'package:heimdallm/core/platform/platform_services_desktop.dart';
 import 'platform/fake_platform_services.dart';
 
 /// Regression tests for the spawn guard behind #646.
@@ -19,9 +21,15 @@ void main() {
     platform: FakePlatformServices(apiBaseUrl: 'http://127.0.0.1:7842'),
   );
 
-  ApiClient clientThrowing(Object error) => ApiClient(
+  ApiClient clientThrowing(
+    Object error, {
+    TcpPortState tcpPortState = TcpPortState.closed,
+  }) => ApiClient(
     httpClient: MockClient((_) async => throw error),
-    platform: FakePlatformServices(apiBaseUrl: 'http://127.0.0.1:7842'),
+    platform: FakePlatformServices(
+      apiBaseUrl: 'http://127.0.0.1:7842',
+      tcpPortState: tcpPortState,
+    ),
   );
 
   /// Every real daemon response carries this header; it is the authoritative
@@ -31,54 +39,120 @@ void main() {
   group('daemonReachable vs checkHealth', () {
     test('503 degraded: unhealthy, but ours — must not spawn', () async {
       final client = clientReturning(
-        () => http.Response('{"status":"degraded","checks":{}}', 503,
-            headers: daemonHeaders),
+        () => http.Response(
+          '{"status":"degraded","checks":{}}',
+          503,
+          headers: daemonHeaders,
+        ),
       );
       expect(await client.checkHealth(), isFalse);
       expect(
         await client.daemonReachable(),
         PortOwner.daemon,
-        reason: 'a 503 from our daemon means the port is ours; spawning again is the #646 bug',
+        reason:
+            'a 503 from our daemon means the port is ours; spawning again is the #646 bug',
       );
     });
 
     test('503 starting: daemon serving mid-wiring is still ours', () async {
       final client = clientReturning(
-        () => http.Response('{"status":"starting"}', 503, headers: daemonHeaders),
+        () =>
+            http.Response('{"status":"starting"}', 503, headers: daemonHeaders),
       );
       expect(await client.checkHealth(), isFalse);
       expect(await client.daemonReachable(), PortOwner.daemon);
     });
 
-    test('401 unauthorized: only our daemon enforces the token', () async {
+    test('401 without daemon identity belongs to a foreign service', () async {
       final client = clientReturning(() => http.Response('unauthorized', 401));
-      expect(await client.daemonReachable(), PortOwner.daemon);
+      expect(await client.daemonReachable(), PortOwner.foreign);
     });
 
     test('200 healthy: ours and healthy', () async {
       final client = clientReturning(
-        () => http.Response('{"status":"ok","checks":{}}', 200,
-            headers: daemonHeaders),
+        () => http.Response(
+          '{"status":"ok","checks":{}}',
+          200,
+          headers: daemonHeaders,
+        ),
       );
       expect(await client.checkHealth(), isTrue);
       expect(await client.daemonReachable(), PortOwner.daemon);
     });
 
-    test('connection refused: genuinely absent, so spawning is correct', () async {
-      final client = clientThrowing(const SocketException('Connection refused'));
-      expect(await client.daemonReachable(), PortOwner.none);
-    });
+    test(
+      'connection refused: genuinely absent, so spawning is correct',
+      () async {
+        final client = clientThrowing(
+          const SocketException('Connection refused'),
+        );
+        expect(await client.daemonReachable(), PortOwner.none);
+      },
+    );
 
-    test('a daemon too slow to answer counts as absent, not as healthy', () async {
+    test(
+      'an HTTP timeout with an open TCP port must not authorize spawn',
+      () async {
+        final client = ApiClient(
+          httpClient: MockClient((_) async {
+            await Future<void>.delayed(const Duration(seconds: 30));
+            return http.Response('{"status":"ok"}', 200);
+          }),
+          platform: FakePlatformServices(
+            apiBaseUrl: 'http://127.0.0.1:7842',
+            tcpPortState: TcpPortState.open,
+          ),
+          daemonReachabilityTimeout: const Duration(milliseconds: 10),
+        );
+        expect(await client.daemonReachable(), PortOwner.foreign);
+      },
+    );
+
+    test(
+      'real package:http connection-refused wrapper is classified absent',
+      () async {
+        final reservation = await ServerSocket.bind(
+          InternetAddress.loopbackIPv4,
+          0,
+        );
+        final port = reservation.port;
+        await reservation.close();
+
+        final httpClient = http.Client();
+        addTearDown(httpClient.close);
+        final client = ApiClient(
+          httpClient: httpClient,
+          platform: DesktopPlatformServices(apiPort: port),
+          daemonReachabilityTimeout: const Duration(milliseconds: 250),
+          daemonTcpProbeTimeout: const Duration(milliseconds: 250),
+        );
+
+        expect(await client.daemonReachable(), PortOwner.none);
+      },
+    );
+
+    test('real silent TCP listener is occupied after HTTP timeout', () async {
+      final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      final accepted = <Socket>[];
+      final subscription = server.listen(accepted.add);
+      addTearDown(() async {
+        await subscription.cancel();
+        for (final socket in accepted) {
+          socket.destroy();
+        }
+        await server.close();
+      });
+
+      final httpClient = http.Client();
+      addTearDown(httpClient.close);
       final client = ApiClient(
-        httpClient: MockClient((_) async {
-          await Future<void>.delayed(const Duration(seconds: 30));
-          return http.Response('{"status":"ok"}', 200);
-        }),
-        platform: FakePlatformServices(apiBaseUrl: 'http://127.0.0.1:7842'),
+        httpClient: httpClient,
+        platform: DesktopPlatformServices(apiPort: server.port),
+        daemonReachabilityTimeout: const Duration(milliseconds: 50),
+        daemonTcpProbeTimeout: const Duration(milliseconds: 250),
       );
-      expect(await client.daemonReachable(), PortOwner.none);
-      expect(await client.checkHealth(), isFalse);
+
+      expect(await client.daemonReachable(), PortOwner.foreign);
     });
 
     group('identity: the header is authoritative', () {
@@ -89,39 +163,54 @@ void main() {
         expect(await client.daemonReachable(), PortOwner.daemon);
       });
 
-      test('older daemon without the header still matches via status+checks',
-          () async {
-        final client = clientReturning(
-          () => http.Response('{"status":"ok","checks":{}}', 200),
-        );
-        expect(await client.daemonReachable(), PortOwner.daemon);
-      });
+      test(
+        'older daemon without the header still matches via status+checks',
+        () async {
+          final client = clientReturning(
+            () => http.Response('{"status":"ok","checks":{}}', 200),
+          );
+          expect(await client.daemonReachable(), PortOwner.daemon);
+        },
+      );
 
-      test('older daemon without the header matches via status+version', () async {
-        final client = clientReturning(
-          () => http.Response('{"status":"starting","version":"0.7.10"}', 503),
-        );
-        expect(await client.daemonReachable(), PortOwner.daemon);
-      });
+      test(
+        'older daemon without the header matches via status+version',
+        () async {
+          final client = clientReturning(
+            () =>
+                http.Response('{"status":"starting","version":"0.7.10"}', 503),
+          );
+          expect(await client.daemonReachable(), PortOwner.daemon);
+        },
+      );
     });
 
     group('foreign process squatting on the port', () {
-      test('Spring Boot Actuator style {"status":"UP"} is NOT our daemon',
-          () async {
-        final client = clientReturning(() => http.Response('{"status":"UP"}', 200));
-        expect(
-          await client.daemonReachable(),
-          PortOwner.foreign,
-          reason: 'a bare status field is the shape of most health endpoints; '
-              'accepting it would silently prevent the daemon from ever spawning',
-        );
-      });
+      test(
+        'Spring Boot Actuator style {"status":"UP"} is NOT our daemon',
+        () async {
+          final client = clientReturning(
+            () => http.Response('{"status":"UP"}', 200),
+          );
+          expect(
+            await client.daemonReachable(),
+            PortOwner.foreign,
+            reason:
+                'a bare status field is the shape of most health endpoints; '
+                'accepting it would silently prevent the daemon from ever spawning',
+          );
+        },
+      );
 
-      test('a bare {"status":"ok"} from some other service is NOT our daemon',
-          () async {
-        final client = clientReturning(() => http.Response('{"status":"ok"}', 200));
-        expect(await client.daemonReachable(), PortOwner.foreign);
-      });
+      test(
+        'a bare {"status":"ok"} from some other service is NOT our daemon',
+        () async {
+          final client = clientReturning(
+            () => http.Response('{"status":"ok"}', 200),
+          );
+          expect(await client.daemonReachable(), PortOwner.foreign);
+        },
+      );
 
       test('HTML from an unrelated dev server is not our daemon', () async {
         final client = clientReturning(
@@ -131,7 +220,9 @@ void main() {
       });
 
       test('JSON without a status field is not our daemon', () async {
-        final client = clientReturning(() => http.Response('{"foo":"bar"}', 200));
+        final client = clientReturning(
+          () => http.Response('{"foo":"bar"}', 200),
+        );
         expect(await client.daemonReachable(), PortOwner.foreign);
       });
 
@@ -140,13 +231,19 @@ void main() {
         expect(await client.daemonReachable(), PortOwner.foreign);
       });
 
-      test('a process that does not speak HTTP is foreign, not absent', () async {
-        // Raw TCP service on the port: the GET fails, but someone holds the
-        // port, so spawning would just die on the bind. The user needs the
-        // "free the port" guidance, not a generic start failure.
-        final client = clientThrowing(http.ClientException('Invalid HTTP response'));
-        expect(await client.daemonReachable(), PortOwner.foreign);
-      });
+      test(
+        'a process that does not speak HTTP is foreign, not absent',
+        () async {
+          // Raw TCP service on the port: the GET fails, but someone holds the
+          // port, so spawning would just die on the bind. The user needs the
+          // "free the port" guidance, not a generic start failure.
+          final client = clientThrowing(
+            http.ClientException('Invalid HTTP response'),
+            tcpPortState: TcpPortState.open,
+          );
+          expect(await client.daemonReachable(), PortOwner.foreign);
+        },
+      );
     });
   });
 
