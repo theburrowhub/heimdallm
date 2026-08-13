@@ -1706,12 +1706,15 @@ func enrichEnvWithLoginPath() []string {
 // inner JSON bytes. Exported so downstream pipelines (issue triage, etc.)
 // can reuse the same cleanup without duplicating it.
 //
-// Known limitation: the function scans from the first '{' to the last '}',
-// which is not a balanced-brace parser. If an LLM emits multiple top-level
-// JSON objects the result will not be valid JSON and the caller's
-// json.Unmarshal will surface the error. Our prompts explicitly ask for a
-// single JSON object, so this has not been a problem in practice — but
-// worth noting before somebody feeds this bytes from a different source.
+// The scan returns the leftmost complete, valid JSON object, honouring string
+// literals and escapes so braces inside strings — or in the surrounding prose
+// — cannot move the boundaries. That matters because reviews routinely quote
+// template syntax: a diff mentioning ${{ matrix.env }} used to derail a naive
+// first-'{'-to-last-'}' slice and produce invalid JSON.
+//
+// If no valid object is found the old outer-slice behaviour applies, so the
+// caller's json.Unmarshal still surfaces a descriptive error with the most
+// relevant context rather than an empty string.
 func StripToJSON(data []byte) []byte {
 	s := strings.TrimSpace(string(data))
 
@@ -1737,12 +1740,82 @@ func StripToJSON(data []byte) []byte {
 		}
 	}
 
+	if obj, ok := firstJSONObject(s); ok {
+		return []byte(obj)
+	}
+
 	start := strings.Index(s, "{")
 	end := strings.LastIndex(s, "}")
 	if start >= 0 && end > start {
 		s = s[start : end+1]
 	}
 	return []byte(s)
+}
+
+// firstJSONObject returns the leftmost substring of s that is a complete,
+// valid JSON object.
+func firstJSONObject(s string) (string, bool) {
+	for i := 0; i < len(s); i++ {
+		if s[i] != '{' || !opensObject(s, i) {
+			continue
+		}
+		end, ok := matchObjectEnd(s, i)
+		if !ok {
+			continue
+		}
+		if candidate := s[i : end+1]; json.Valid([]byte(candidate)) {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
+// opensObject reports whether the '{' at i can begin a JSON object: the next
+// non-space byte has to start a string key or close an empty object. Runs
+// before the full scan and rejects the '{{' of template syntax outright.
+func opensObject(s string, i int) bool {
+	for j := i + 1; j < len(s); j++ {
+		switch s[j] {
+		case ' ', '\t', '\r', '\n':
+			continue
+		case '"', '}':
+			return true
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+// matchObjectEnd scans from the '{' at start to its balanced closing '}' and
+// returns that index. Braces inside string literals are literal characters,
+// and a backslash escapes the byte after it, so an escaped quote does not end
+// the string it appears in.
+func matchObjectEnd(s string, start int) (int, bool) {
+	depth := 0
+	inString := false
+	escaped := false
+	for i := start; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case escaped:
+			escaped = false
+		case inString && c == '\\':
+			escaped = true
+		case c == '"':
+			inString = !inString
+		case inString:
+			// Structural characters inside a string are just text.
+		case c == '{':
+			depth++
+		case c == '}':
+			depth--
+			if depth == 0 {
+				return i, true
+			}
+		}
+	}
+	return 0, false
 }
 
 func parseResult(data []byte) (*ReviewResult, error) {
