@@ -89,9 +89,46 @@ void sendPRNotification({
   );
 }
 
+/// Builds the real bootstrap state machine with deterministic dependencies.
+/// Production uses the private widget directly; tests use this entry point so
+/// every daemon-ownership outcome can be exercised without sockets, processes
+/// or wall-clock waits.
+@visibleForTesting
+Widget buildBootstrapAppForTest({
+  required GoRouter router,
+  required PlatformServices platform,
+  required ApiClient apiClient,
+  Duration healthPollInterval = Duration.zero,
+  int healthRetryEvery = 1,
+  int maxSpawnAttempts = 4,
+}) {
+  return ProviderScope(
+    overrides: [platformServicesProvider.overrideWithValue(platform)],
+    child: _BootstrapApp(
+      appRouter: router,
+      apiClient: apiClient,
+      healthPollInterval: healthPollInterval,
+      healthRetryEvery: healthRetryEvery,
+      maxSpawnAttempts: maxSpawnAttempts,
+    ),
+  );
+}
+
 class _BootstrapApp extends ConsumerStatefulWidget {
   final GoRouter appRouter;
-  const _BootstrapApp({required this.appRouter});
+  final ApiClient? apiClient;
+  final Duration healthPollInterval;
+  final int healthRetryEvery;
+  final int maxSpawnAttempts;
+
+  const _BootstrapApp({
+    required this.appRouter,
+    this.apiClient,
+    this.healthPollInterval = const Duration(milliseconds: 400),
+    this.healthRetryEvery = 25,
+    this.maxSpawnAttempts = 4,
+  }) : assert(healthRetryEvery > 0),
+       assert(maxSpawnAttempts > 0);
   @override
   ConsumerState<_BootstrapApp> createState() => _BootstrapAppState();
 }
@@ -115,7 +152,7 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
   }
 
   Future<void> _boot() async {
-    final api = ApiClient(platform: _platform);
+    final api = widget.apiClient ?? ApiClient(platform: _platform);
 
     // Determine port ownership before asking for credentials, config or even a
     // local daemon binary. A live daemon can legitimately answer 503 while
@@ -185,6 +222,7 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
       api: api,
       platform: _platform,
       binaryPath: binaryPath,
+      maxSpawnAttempts: widget.maxSpawnAttempts,
     );
     final initial = await startup.ensureAvailable();
     if (!_handleStartupResult(initial, api.daemonPort)) {
@@ -200,12 +238,12 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
     required DaemonStartupCoordinator startup,
   }) async {
     for (var attempt = 0; ; attempt++) {
-      await Future.delayed(const Duration(milliseconds: 400));
+      await Future.delayed(widget.healthPollInterval);
       if (await api.checkHealth()) {
         _go('/');
         return;
       }
-      if (attempt > 0 && attempt % 25 == 0) {
+      if (attempt > 0 && attempt % widget.healthRetryEvery == 0) {
         final result = await startup.ensureAvailable();
         if (!_handleStartupResult(result, api.daemonPort)) return;
       }
@@ -301,16 +339,15 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
   }
 
   void _go(String location) {
-    if (mounted) setState(() => _destination = location);
+    if (!mounted) return;
+    widget.appRouter.go(location);
+    setState(() => _destination = location);
   }
 
   @override
   Widget build(BuildContext context) {
     if (_destination != null) {
-      return HeimdallmApp(
-        router: widget.appRouter,
-        initialLocation: _destination!,
-      );
+      return HeimdallmApp(router: widget.appRouter);
     }
     if (_errorTitle != null) {
       return _ErrorApp(

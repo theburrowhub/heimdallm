@@ -6,17 +6,18 @@ import '../models/review.dart';
 import '../models/tracked_issue.dart';
 import '../platform/platform_services.dart';
 
-/// Who, if anyone, is answering on the daemon port. Drives the boot-path spawn
-/// decision: only [PortOwner.none] justifies starting a daemon (#646).
+/// Who, if anyone, answered the daemon HTTP endpoint. A [PortOwner.none]
+/// result only permits entering [PlatformServices.spawnDaemon]; that operation
+/// performs the authoritative TCP guard immediately before process creation.
 enum PortOwner {
-  /// Nothing is listening; confirmed by an explicit TCP connection refusal.
+  /// No native HTTP responder could be identified. The guarded spawn operation
+  /// still has to prove that the TCP port is free.
   none,
 
   /// Our daemon answered — healthy, degraded or still starting.
   daemon,
 
-  /// The port is open, owned by a foreign service, or could not be proven
-  /// closed. Spawning would be unsafe, so surface it instead of retrying.
+  /// A foreign HTTP service answered, or a web proxy endpoint was unreachable.
   foreign,
 }
 
@@ -24,17 +25,14 @@ class ApiClient {
   final http.Client _client;
   final PlatformServices _platform;
   final Duration _daemonReachabilityTimeout;
-  final Duration _daemonTcpProbeTimeout;
 
   ApiClient({
     http.Client? httpClient,
     required PlatformServices platform,
     Duration daemonReachabilityTimeout = const Duration(seconds: 3),
-    Duration daemonTcpProbeTimeout = const Duration(milliseconds: 500),
   }) : _client = httpClient ?? http.Client(),
        _platform = platform,
-       _daemonReachabilityTimeout = daemonReachabilityTimeout,
-       _daemonTcpProbeTimeout = daemonTcpProbeTimeout;
+       _daemonReachabilityTimeout = daemonReachabilityTimeout;
 
   Uri _uri(String path) => Uri.parse('${_platform.apiBaseUrl}$path');
 
@@ -78,9 +76,10 @@ class ApiClient {
   ///
   /// HTTP errors are deliberately not classified by exception type. The VM
   /// client wraps SocketException in a private `_ClientSocketException`, while
-  /// web uses a different hierarchy again. Instead, every HTTP failure is
-  /// followed by a platform TCP probe. Only an explicit connection refusal
-  /// means [PortOwner.none]; an open or ambiguous port fails closed.
+  /// web uses a different hierarchy again. Native callers may proceed only to
+  /// the guarded [PlatformServices.spawnDaemon], which performs a raw TCP probe
+  /// immediately before process creation. A relative web endpoint fails closed
+  /// because a browser cannot perform that native guard.
   Future<PortOwner> daemonReachable() async {
     try {
       final resp = await _client
@@ -88,10 +87,7 @@ class ApiClient {
           .timeout(_daemonReachabilityTimeout);
       return _looksLikeHeimdallm(resp) ? PortOwner.daemon : PortOwner.foreign;
     } catch (_) {
-      final tcpState = await _platform.probeDaemonPort(
-        timeout: _daemonTcpProbeTimeout,
-      );
-      return tcpState == TcpPortState.closed
+      return Uri.parse(_platform.apiBaseUrl).isAbsolute
           ? PortOwner.none
           : PortOwner.foreign;
     }

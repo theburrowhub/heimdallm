@@ -21,6 +21,8 @@ typedef PlatformProcessRunner =
     Future<ProcessResult> Function(String executable, List<String> arguments);
 @visibleForTesting
 typedef DetachedDaemonStarter = Future<void> Function(String binaryPath);
+@visibleForTesting
+typedef DaemonPortProbe = Future<TcpPortState> Function(Duration timeout);
 
 /// Desktop implementation of [PlatformServices].
 ///
@@ -35,6 +37,7 @@ class DesktopPlatformServices with WindowListener implements PlatformServices {
     @visibleForTesting bool? isMacOS,
     @visibleForTesting PlatformProcessRunner? processRunner,
     @visibleForTesting DetachedDaemonStarter? detachedDaemonStarter,
+    @visibleForTesting DaemonPortProbe? daemonPortProbe,
   }) : _apiPort = apiPort,
        _tokenPath = tokenPath,
        _pidFilePath = pidFilePath,
@@ -50,7 +53,8 @@ class DesktopPlatformServices with WindowListener implements PlatformServices {
                const [],
                mode: ProcessStartMode.detached,
              );
-           });
+           }),
+       _daemonPortProbe = daemonPortProbe;
 
   final int _apiPort;
   final String? _tokenPath;
@@ -58,6 +62,7 @@ class DesktopPlatformServices with WindowListener implements PlatformServices {
   final bool _isMacOS;
   final PlatformProcessRunner _processRunner;
   final DetachedDaemonStarter _detachedDaemonStarter;
+  final DaemonPortProbe? _daemonPortProbe;
   String? _cachedToken;
   void Function(String location)? _onTrayNavigate;
 
@@ -288,10 +293,10 @@ class DesktopPlatformServices with WindowListener implements PlatformServices {
   @override
   String? defaultDaemonBinaryPath() => DaemonLifecycle.defaultBinaryPath();
 
-  @override
-  Future<TcpPortState> probeDaemonPort({
-    Duration timeout = const Duration(milliseconds: 500),
-  }) async {
+  Future<TcpPortState> _probeDaemonPort(Duration timeout) async {
+    final injected = _daemonPortProbe;
+    if (injected != null) return injected(timeout);
+
     Socket? socket;
     try {
       socket = await Socket.connect('127.0.0.1', _apiPort, timeout: timeout);
@@ -315,16 +320,24 @@ class DesktopPlatformServices with WindowListener implements PlatformServices {
   }
 
   @override
-  Future<bool> isDaemonSupervised() async {
-    if (!_isMacOS) return false;
-    return await _loadedCanonicalLaunchAgentTarget() != null;
-  }
-
-  @override
   Future<void> spawnDaemon(String binaryPath) async {
     final binary = File(binaryPath);
     if (!binary.existsSync()) {
       throw DaemonException('Daemon binary not found: $binaryPath');
+    }
+
+    // This is the final spawn gate. ApiClient can identify a daemon response,
+    // but an HTTP transport error cannot prove the TCP port is free (a silent
+    // foreign process or a daemon between bind and HTTP readiness may own it).
+    // Only an explicit connection refusal permits process creation.
+    final portState = await _probeDaemonPort(const Duration(milliseconds: 500));
+    if (portState == TcpPortState.open) {
+      throw DaemonPortOccupiedException(_apiPort);
+    }
+    if (portState != TcpPortState.closed) {
+      throw DaemonException(
+        'Could not prove that port $_apiPort is free; no daemon was started.',
+      );
     }
 
     // A loaded LaunchAgent is the canonical owner on macOS. Starting a

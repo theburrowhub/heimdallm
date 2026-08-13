@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -54,6 +55,19 @@ var version = "dev"
 // which opts into deterministic release so multiple cases can share a process.
 var processLifetimeLock *singleinstance.Lock
 
+// processDependencies keeps process-boundary effects injectable for lifecycle
+// tests while production uses the concrete defaults below.
+type processDependencies struct {
+	newGitHubClient    func(string, ...gh.Option) *gh.Client
+	listen             func(int, string) (net.Listener, error)
+	afterPollerRestart func()
+}
+
+var defaultProcessDependencies = processDependencies{
+	newGitHubClient: gh.NewClient,
+	listen:          server.Listen,
+}
+
 func versionString() string { return version }
 
 // publishBridgeEvents re-publishes every SSE broker event to NATS so the SSE
@@ -92,6 +106,10 @@ func run() int {
 // Keeping os.Exit in main means every return executes deferred cleanup first,
 // including fatal bind and HTTP-serve failures.
 func runProcess(releaseLock bool) int {
+	return runProcessWithDependencies(releaseLock, defaultProcessDependencies)
+}
+
+func runProcessWithDependencies(releaseLock bool, deps processDependencies) int {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "install":
@@ -169,7 +187,7 @@ func runProcess(releaseLock bool) int {
 	// SQLite, clearing restart claims or pruning worktrees. The old ordering
 	// discovered EADDRINUSE only after those destructive recovery steps, so a
 	// losing second instance could corrupt the live daemon before exiting.
-	httpListener, err := server.Listen(cfg.Server.Port, cfg.Server.BindAddr)
+	httpListener, err := deps.listen(cfg.Server.Port, cfg.Server.BindAddr)
 	if err != nil {
 		slog.Error("daemon: cannot bind HTTP port — another instance is probably already running; exiting",
 			"port", cfg.Server.Port, "bind", cfg.Server.BindAddr, "err", err)
@@ -350,7 +368,7 @@ func runProcess(releaseLock bool) int {
 	}
 
 	notifier := notify.New()
-	ghClient := gh.NewClient(token)
+	ghClient := deps.newGitHubClient(token)
 	exec := executor.New()
 	repoCtx := repoctx.NewManagerWithOptions(repoctx.ManagerOptions{
 		MaxWorktreesPerRepo: cfg.AI.MaxWorktreesPerRepo,
@@ -2151,6 +2169,9 @@ func runProcess(releaseLock bool) int {
 			cfgMu.Unlock()
 
 			slog.Info("config reload: pollers restarted")
+			if deps.afterPollerRestart != nil {
+				deps.afterPollerRestart()
+			}
 		}()
 
 		return nil

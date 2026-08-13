@@ -147,6 +147,9 @@ class ConfigNotifier extends AsyncNotifier<AppConfig> {
     required String token,
     required AppConfig config,
     required String daemonBinaryPath,
+    int maxSpawnAttempts = 1,
+    int healthCheckMaxAttempts = 80,
+    Duration healthCheckInterval = const Duration(milliseconds: 100),
   }) async {
     _mutationGeneration++;
     _serverGeneration++;
@@ -169,7 +172,7 @@ class ConfigNotifier extends AsyncNotifier<AppConfig> {
         api: api,
         platform: platform,
         binaryPath: daemonBinaryPath,
-        maxSpawnAttempts: 1,
+        maxSpawnAttempts: maxSpawnAttempts,
       );
       final startupResult = await startup.ensureAvailable();
       switch (startupResult.outcome) {
@@ -199,8 +202,8 @@ class ConfigNotifier extends AsyncNotifier<AppConfig> {
 
       // 4. Wait up to 8 seconds for the daemon to become healthy
       var healthy = false;
-      for (var i = 0; i < 80; i++) {
-        await Future.delayed(const Duration(milliseconds: 100));
+      for (var i = 0; i < healthCheckMaxAttempts; i++) {
+        await Future.delayed(healthCheckInterval);
         if (await api.checkHealth()) {
           healthy = true;
           break;

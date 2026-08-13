@@ -14,7 +14,8 @@ import '../issues/issues_providers.dart';
 const kDaemonStartHealthMaxAttempts = 80;
 const kDaemonStartHealthInterval = Duration(milliseconds: 100);
 
-String _startupFailureMessage(DaemonStartupResult result, int port) {
+@visibleForTesting
+String daemonStartupFailureMessage(DaemonStartupResult result, int port) {
   switch (result.outcome) {
     case DaemonStartupOutcome.portOccupied:
       return 'Port $port is occupied; no daemon was started.';
@@ -116,7 +117,7 @@ Future<void> startDaemon(BuildContext context, WidgetRef ref) async {
       if (context.mounted) {
         showToast(
           context,
-          _startupFailureMessage(result, api.daemonPort),
+          daemonStartupFailureMessage(result, api.daemonPort),
           isError: true,
         );
       }
@@ -148,10 +149,18 @@ Future<void> startDaemon(BuildContext context, WidgetRef ref) async {
 
 Future<PortOwner?> refreshWhenDaemonStops(
   BuildContext context,
-  WidgetRef ref,
-) async {
+  WidgetRef ref, {
+  List<Duration> delays = const [
+    Duration(milliseconds: 200),
+    Duration(milliseconds: 300),
+    Duration(milliseconds: 500),
+    Duration(milliseconds: 800),
+    Duration(milliseconds: 1200),
+    Duration(seconds: 2),
+  ],
+}) async {
   final api = ref.read(apiClientProvider);
-  final owner = await waitForDaemonPortRelease(api);
+  final owner = await waitForDaemonPortRelease(api, delays: delays);
   if (!context.mounted) return null;
   ref.invalidate(daemonHealthProvider);
   _invalidateDashboardData(ref);
@@ -160,19 +169,32 @@ Future<PortOwner?> refreshWhenDaemonStops(
 
 /// Stop the daemon and immediately respawn it. Used by the Server screen's
 /// Restart banner after a Listen URL change.
-Future<void> restartDaemon(BuildContext context, WidgetRef ref) async {
+Future<void> restartDaemon(
+  BuildContext context,
+  WidgetRef ref, {
+  List<Duration> portReleaseDelays = const [
+    Duration(milliseconds: 200),
+    Duration(milliseconds: 300),
+    Duration(milliseconds: 500),
+    Duration(milliseconds: 800),
+    Duration(milliseconds: 1200),
+    Duration(seconds: 2),
+  ],
+}) async {
+  if (ref.read(daemonStartingProvider)) return;
+
   final api = ref.read(apiClientProvider);
   final platform = ref.read(platformServicesProvider);
   ref.read(daemonStartingProvider.notifier).set(true);
   try {
-    // Resolve supervisor ownership before stopping anything. On macOS an
-    // ambiguous launchctl response fails closed here, while the current daemon
-    // is still running, instead of risking an unsupervised replacement.
-    final supervised = await platform.isDaemonSupervised();
     await api.shutdownDaemon();
     if (!context.mounted) return;
     showToast(context, 'Restarting…');
-    final stoppedAs = await refreshWhenDaemonStops(context, ref);
+    final stoppedAs = await refreshWhenDaemonStops(
+      context,
+      ref,
+      delays: portReleaseDelays,
+    );
     if (!context.mounted) return;
     if (stoppedAs == PortOwner.foreign) {
       showToast(
@@ -182,20 +204,11 @@ Future<void> restartDaemon(BuildContext context, WidgetRef ref) async {
       );
       return;
     }
-    if (stoppedAs == PortOwner.daemon && !supervised) {
-      showToast(
-        context,
-        'Daemon did not stop; restart cancelled.',
-        isError: true,
-      );
-      return;
-    }
     DaemonStartupResult result;
     if (stoppedAs == PortOwner.daemon) {
-      // A macOS LaunchAgent with KeepAlive can replace the old process between
-      // two ownership probes, so the port may never be observed as closed.
-      // That supervised reappearance is already the desired restart outcome;
-      // never race it with a detached child.
+      // The old process may still be draining, or a service supervisor may
+      // already have replaced it. Either way, a daemon owns the port and is the
+      // only safe process to reuse; never race it with another child.
       result = const DaemonStartupResult(DaemonStartupOutcome.daemonPresent);
     } else {
       final binary = platform.defaultDaemonBinaryPath();
@@ -216,7 +229,7 @@ Future<void> restartDaemon(BuildContext context, WidgetRef ref) async {
       if (context.mounted) {
         showToast(
           context,
-          _startupFailureMessage(result, api.daemonPort),
+          daemonStartupFailureMessage(result, api.daemonPort),
           isError: true,
         );
       }

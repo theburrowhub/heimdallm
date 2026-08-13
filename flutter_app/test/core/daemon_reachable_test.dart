@@ -3,7 +3,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:heimdallm/core/api/api_client.dart';
-import 'package:heimdallm/core/platform/platform_services.dart';
 import 'package:heimdallm/core/platform/platform_services_desktop.dart';
 import 'platform/fake_platform_services.dart';
 
@@ -21,15 +20,9 @@ void main() {
     platform: FakePlatformServices(apiBaseUrl: 'http://127.0.0.1:7842'),
   );
 
-  ApiClient clientThrowing(
-    Object error, {
-    TcpPortState tcpPortState = TcpPortState.closed,
-  }) => ApiClient(
+  ApiClient clientThrowing(Object error) => ApiClient(
     httpClient: MockClient((_) async => throw error),
-    platform: FakePlatformServices(
-      apiBaseUrl: 'http://127.0.0.1:7842',
-      tcpPortState: tcpPortState,
-    ),
+    platform: FakePlatformServices(apiBaseUrl: 'http://127.0.0.1:7842'),
   );
 
   /// Every real daemon response carries this header; it is the authoritative
@@ -91,69 +84,58 @@ void main() {
     );
 
     test(
-      'an HTTP timeout with an open TCP port must not authorize spawn',
+      'a native HTTP timeout proceeds only to the guarded spawn operation',
       () async {
         final client = ApiClient(
           httpClient: MockClient((_) async {
             await Future<void>.delayed(const Duration(seconds: 30));
             return http.Response('{"status":"ok"}', 200);
           }),
-          platform: FakePlatformServices(
-            apiBaseUrl: 'http://127.0.0.1:7842',
-            tcpPortState: TcpPortState.open,
-          ),
+          platform: FakePlatformServices(apiBaseUrl: 'http://127.0.0.1:7842'),
           daemonReachabilityTimeout: const Duration(milliseconds: 10),
+        );
+        expect(await client.daemonReachable(), PortOwner.none);
+      },
+    );
+
+    test(
+      'a relative web endpoint fails closed after a transport error',
+      () async {
+        final client = ApiClient(
+          httpClient: MockClient(
+            (_) async => throw http.ClientException('proxy unavailable'),
+          ),
+          platform: FakePlatformServices(apiBaseUrl: '/api'),
         );
         expect(await client.daemonReachable(), PortOwner.foreign);
       },
     );
 
     test(
-      'real package:http connection-refused wrapper is classified absent',
+      'a silent TCP listener reaches the native guarded spawn path',
       () async {
-        final reservation = await ServerSocket.bind(
-          InternetAddress.loopbackIPv4,
-          0,
-        );
-        final port = reservation.port;
-        await reservation.close();
+        final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+        final accepted = <Socket>[];
+        final subscription = server.listen(accepted.add);
+        addTearDown(() async {
+          await subscription.cancel();
+          for (final socket in accepted) {
+            socket.destroy();
+          }
+          await server.close();
+        });
 
         final httpClient = http.Client();
         addTearDown(httpClient.close);
         final client = ApiClient(
           httpClient: httpClient,
-          platform: DesktopPlatformServices(apiPort: port),
-          daemonReachabilityTimeout: const Duration(milliseconds: 250),
-          daemonTcpProbeTimeout: const Duration(milliseconds: 250),
+          platform: DesktopPlatformServices(apiPort: server.port),
+          daemonReachabilityTimeout: const Duration(milliseconds: 50),
         );
 
         expect(await client.daemonReachable(), PortOwner.none);
       },
     );
-
-    test('real silent TCP listener is occupied after HTTP timeout', () async {
-      final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
-      final accepted = <Socket>[];
-      final subscription = server.listen(accepted.add);
-      addTearDown(() async {
-        await subscription.cancel();
-        for (final socket in accepted) {
-          socket.destroy();
-        }
-        await server.close();
-      });
-
-      final httpClient = http.Client();
-      addTearDown(httpClient.close);
-      final client = ApiClient(
-        httpClient: httpClient,
-        platform: DesktopPlatformServices(apiPort: server.port),
-        daemonReachabilityTimeout: const Duration(milliseconds: 50),
-        daemonTcpProbeTimeout: const Duration(milliseconds: 250),
-      );
-
-      expect(await client.daemonReachable(), PortOwner.foreign);
-    });
 
     group('identity: the header is authoritative', () {
       test('header alone identifies the daemon, whatever the body', () async {
@@ -232,16 +214,12 @@ void main() {
       });
 
       test(
-        'a process that does not speak HTTP is foreign, not absent',
+        'a process that does not speak HTTP is deferred to the spawn guard',
         () async {
-          // Raw TCP service on the port: the GET fails, but someone holds the
-          // port, so spawning would just die on the bind. The user needs the
-          // "free the port" guidance, not a generic start failure.
           final client = clientThrowing(
             http.ClientException('Invalid HTTP response'),
-            tcpPortState: TcpPortState.open,
           );
-          expect(await client.daemonReachable(), PortOwner.foreign);
+          expect(await client.daemonReachable(), PortOwner.none);
         },
       );
     });

@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -354,6 +355,88 @@ func TestHealth_ReportsStartingUntilMarkReady(t *testing.T) {
 	}
 	if body["status"] == "starting" {
 		t.Error("ready: still reporting \"starting\" after MarkReady")
+	}
+}
+
+func TestHealth_StartingIncludesVersion(t *testing.T) {
+	srv := server.NewWithOptions(nil, nil, nil, "", server.Options{Version: "v-test"})
+	srv.MarkStarting()
+
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/health", nil))
+	var body map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode health: %v", err)
+	}
+	if body["version"] != "v-test" {
+		t.Fatalf("starting health version = %v, want v-test", body["version"])
+	}
+}
+
+var errSecondListenerClose = errors.New("second listener close failed")
+
+type secondCloseErrorListener struct {
+	addr          net.Addr
+	acceptStarted chan struct{}
+	closed        chan struct{}
+	acceptOnce    sync.Once
+	closeOnce     sync.Once
+	mu            sync.Mutex
+	closeCount    int
+}
+
+func newSecondCloseErrorListener() *secondCloseErrorListener {
+	return &secondCloseErrorListener{
+		addr:          testListenerAddr("127.0.0.1:0"),
+		acceptStarted: make(chan struct{}),
+		closed:        make(chan struct{}),
+	}
+}
+
+func (l *secondCloseErrorListener) Accept() (net.Conn, error) {
+	l.acceptOnce.Do(func() { close(l.acceptStarted) })
+	<-l.closed
+	return nil, net.ErrClosed
+}
+
+func (l *secondCloseErrorListener) Close() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.closeCount++
+	if l.closeCount == 1 {
+		l.closeOnce.Do(func() { close(l.closed) })
+		return nil
+	}
+	return errSecondListenerClose
+}
+
+func (l *secondCloseErrorListener) Addr() net.Addr { return l.addr }
+
+type testListenerAddr string
+
+func (a testListenerAddr) Network() string { return "tcp" }
+func (a testListenerAddr) String() string  { return string(a) }
+
+func TestShutdownReturnsTrackedListenerCloseError(t *testing.T) {
+	srv := newListenTestServer(t)
+	ln := newSecondCloseErrorListener()
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Serve(ln) }()
+	select {
+	case <-ln.acceptStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Serve never entered Accept")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); !errors.Is(err, errSecondListenerClose) {
+		t.Fatalf("Shutdown error = %v, want %v", err, errSecondListenerClose)
+	}
+	select {
+	case <-serveErr:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Serve did not finish after Shutdown")
 	}
 }
 

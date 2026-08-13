@@ -65,26 +65,55 @@ void main() {
     });
 
     test(
-      'probeDaemonPort reports open while a listener owns the port',
+      'spawnDaemon refuses a port already owned by another process',
       () async {
-        final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
-        addTearDown(server.close);
-        final services = DesktopPlatformServices(apiPort: server.port);
+        final binary = File('${tempDir.path}/heimdalld')..writeAsStringSync('');
+        final listener = await ServerSocket.bind(
+          InternetAddress.loopbackIPv4,
+          0,
+        );
+        addTearDown(listener.close);
+        var detachedStarts = 0;
+        final services = DesktopPlatformServices(
+          apiPort: listener.port,
+          isMacOS: false,
+          detachedDaemonStarter: (_) async => detachedStarts++,
+        );
 
-        expect(await services.probeDaemonPort(), TcpPortState.open);
+        await expectLater(
+          services.spawnDaemon(binary.path),
+          throwsA(
+            isA<DaemonPortOccupiedException>().having(
+              (error) => error.port,
+              'port',
+              listener.port,
+            ),
+          ),
+        );
+        expect(detachedStarts, 0);
       },
     );
 
-    test('probeDaemonPort reports closed after an explicit refusal', () async {
-      final reservation = await ServerSocket.bind(
-        InternetAddress.loopbackIPv4,
-        0,
+    test('spawnDaemon fails closed when port ownership is ambiguous', () async {
+      final binary = File('${tempDir.path}/heimdalld')..writeAsStringSync('');
+      var detachedStarts = 0;
+      final services = DesktopPlatformServices(
+        isMacOS: false,
+        daemonPortProbe: (_) async => TcpPortState.unknown,
+        detachedDaemonStarter: (_) async => detachedStarts++,
       );
-      final port = reservation.port;
-      await reservation.close();
-      final services = DesktopPlatformServices(apiPort: port);
 
-      expect(await services.probeDaemonPort(), TcpPortState.closed);
+      await expectLater(
+        services.spawnDaemon(binary.path),
+        throwsA(
+          isA<DaemonException>().having(
+            (error) => error.message,
+            'message',
+            contains('Could not prove'),
+          ),
+        ),
+      );
+      expect(detachedStarts, 0);
     });
 
     test(
@@ -136,6 +165,7 @@ void main() {
         var detachedStarts = 0;
         final services = DesktopPlatformServices(
           isMacOS: true,
+          daemonPortProbe: (_) async => TcpPortState.closed,
           processRunner: (executable, arguments) async {
             calls.add('$executable ${arguments.join(' ')}');
             if (executable == '/usr/bin/id') {
@@ -164,6 +194,7 @@ void main() {
         final detached = <String>[];
         final services = DesktopPlatformServices(
           isMacOS: true,
+          daemonPortProbe: (_) async => TcpPortState.closed,
           processRunner: (executable, arguments) async {
             if (executable == '/usr/bin/id') {
               return ProcessResult(1, 0, '501\n', '');
@@ -186,6 +217,7 @@ void main() {
         var detachedStarts = 0;
         final services = DesktopPlatformServices(
           isMacOS: true,
+          daemonPortProbe: (_) async => TcpPortState.closed,
           processRunner: (executable, arguments) async {
             if (executable == '/usr/bin/id') {
               return ProcessResult(1, 0, '501\n', '');
@@ -216,6 +248,7 @@ void main() {
         var detachedStarts = 0;
         final services = DesktopPlatformServices(
           isMacOS: true,
+          daemonPortProbe: (_) async => TcpPortState.closed,
           processRunner: (executable, arguments) async {
             if (executable == '/usr/bin/id') {
               return ProcessResult(1, 0, '501\n', '');

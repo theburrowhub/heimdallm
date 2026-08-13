@@ -81,6 +81,11 @@ class DaemonStartupCoordinator {
     try {
       await platform.spawnDaemon(binaryPath);
       return const DaemonStartupResult(DaemonStartupOutcome.spawned);
+    } on DaemonPortOccupiedException catch (error) {
+      return DaemonStartupResult(
+        DaemonStartupOutcome.portOccupied,
+        error: error,
+      );
     } catch (error) {
       return DaemonStartupResult(
         _spawnAttempts >= maxSpawnAttempts

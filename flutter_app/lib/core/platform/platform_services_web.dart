@@ -78,7 +78,8 @@ class WebPlatformServices implements PlatformServices {
     try {
       var permission = web.Notification.permission;
       if (permission == 'default') {
-        permission = (await web.Notification.requestPermission().toDart).toDart;
+        permission =
+            (await web.Notification.requestPermission().toDart).toDart;
       }
       if (permission != 'granted') return;
 
@@ -155,23 +156,12 @@ class WebPlatformServices implements PlatformServices {
   String? defaultDaemonBinaryPath() => null;
 
   @override
-  Future<TcpPortState> probeDaemonPort({
-    Duration timeout = const Duration(milliseconds: 500),
-  }) async => TcpPortState.unknown;
-
-  @override
-  Future<bool> isDaemonSupervised() async => false;
-
-  @override
   Future<void> spawnDaemon(String binaryPath) async {
     throw UnsupportedError('spawnDaemon is not supported on web');
   }
 
   @override
-  Future<void> rebuildTrayMenu({
-    required List<PR> prs,
-    required String me,
-  }) async {}
+  Future<void> rebuildTrayMenu({required List<PR> prs, required String me}) async {}
 
   @override
   Future<List<String>> discoverReposFromPRs(String token) =>

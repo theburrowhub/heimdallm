@@ -7,6 +7,7 @@ import 'package:go_router/go_router.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:heimdallm/core/api/api_client.dart';
+import 'package:heimdallm/core/daemon/daemon_startup.dart';
 import 'package:heimdallm/core/models/pr.dart';
 import 'package:heimdallm/core/models/review.dart';
 import 'package:heimdallm/core/platform/platform_services_provider.dart';
@@ -92,7 +93,74 @@ Future<void> _pumpOfflineDashboard(
   await tester.pumpAndSettle();
 }
 
+Future<void> _pumpRestartHarness(
+  WidgetTester tester, {
+  required MockApiClient api,
+  required FakePlatformServices platform,
+}) async {
+  await tester.pumpWidget(
+    ProviderScope(
+      overrides: [
+        apiClientProvider.overrideWithValue(api),
+        platformServicesProvider.overrideWithValue(platform),
+      ],
+      child: MaterialApp(
+        home: Consumer(
+          builder: (context, ref, _) => Scaffold(
+            body: FilledButton(
+              onPressed: () => restartDaemon(
+                context,
+                ref,
+                portReleaseDelays: const [Duration.zero],
+              ),
+              child: const Text('Restart harness'),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
 void main() {
+  test('daemon startup failure messages cover every guarded outcome', () {
+    expect(
+      daemonStartupFailureMessage(
+        const DaemonStartupResult(DaemonStartupOutcome.portOccupied),
+        9000,
+      ),
+      contains('Port 9000'),
+    );
+    expect(
+      daemonStartupFailureMessage(
+        const DaemonStartupResult(DaemonStartupOutcome.daemonPresent),
+        9000,
+      ),
+      contains('already running'),
+    );
+    expect(
+      daemonStartupFailureMessage(
+        const DaemonStartupResult(DaemonStartupOutcome.spawnFailedRetryable),
+        9000,
+      ),
+      contains('unknown error'),
+    );
+    expect(
+      daemonStartupFailureMessage(
+        const DaemonStartupResult(DaemonStartupOutcome.spawnBudgetExhausted),
+        9000,
+      ),
+      contains('exhausted'),
+    );
+    expect(
+      daemonStartupFailureMessage(
+        const DaemonStartupResult(DaemonStartupOutcome.spawned),
+        9000,
+      ),
+      isEmpty,
+    );
+  });
+
   test(
     'restart waits for daemon port release, not health degradation',
     () async {
@@ -165,7 +233,7 @@ void main() {
   testWidgets(
     'restart accepts a supervised daemon that reappears before port release',
     (tester) async {
-      final platform = FakePlatformServices(daemonSupervised: true);
+      final platform = FakePlatformServices();
       final api = MockApiClient();
       when(() => api.shutdownDaemon()).thenAnswer((_) async {});
       when(
@@ -214,6 +282,101 @@ void main() {
       verify(() => api.checkHealth()).called(1);
     },
   );
+
+  testWidgets('restart cancels when a foreign process claims the port', (
+    tester,
+  ) async {
+    final api = MockApiClient();
+    when(() => api.shutdownDaemon()).thenAnswer((_) async {});
+    when(
+      () => api.daemonReachable(),
+    ).thenAnswer((_) async => PortOwner.foreign);
+    when(() => api.daemonPort).thenReturn(8123);
+    final platform = FakePlatformServices(daemonBinaryPath: '/tmp/heimdallm');
+    await _pumpRestartHarness(tester, api: api, platform: platform);
+
+    await tester.tap(find.text('Restart harness'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('port 8123 is now occupied'), findsOneWidget);
+    expect(platform.spawnedDaemons, isEmpty);
+  });
+
+  testWidgets('restart ignores a concurrent second request', (tester) async {
+    final api = MockApiClient();
+    final releaseShutdown = Completer<void>();
+    when(() => api.shutdownDaemon()).thenAnswer((_) => releaseShutdown.future);
+    when(() => api.daemonReachable()).thenAnswer((_) async => PortOwner.none);
+    when(() => api.checkHealth()).thenAnswer((_) async => true);
+    final platform = FakePlatformServices(
+      daemonBinaryPath: '/tmp/heimdallm',
+    );
+    await _pumpRestartHarness(tester, api: api, platform: platform);
+
+    await tester.tap(find.text('Restart harness'));
+    await tester.pump();
+    await tester.tap(find.text('Restart harness'));
+    await tester.pump();
+
+    verify(() => api.shutdownDaemon()).called(1);
+    releaseShutdown.complete();
+    await tester.pumpAndSettle();
+    expect(platform.spawnedDaemons, ['/tmp/heimdallm']);
+  });
+
+  testWidgets('restart reuses a daemon that still owns the port', (
+    tester,
+  ) async {
+    final api = MockApiClient();
+    when(() => api.shutdownDaemon()).thenAnswer((_) async {});
+    when(() => api.daemonReachable()).thenAnswer((_) async => PortOwner.daemon);
+    when(() => api.checkHealth()).thenAnswer((_) async => true);
+    final platform = FakePlatformServices(daemonBinaryPath: '/tmp/heimdallm');
+    await _pumpRestartHarness(tester, api: api, platform: platform);
+
+    await tester.tap(find.text('Restart harness'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Server restarted'), findsOneWidget);
+    expect(platform.spawnedDaemons, isEmpty);
+  });
+
+  testWidgets('restart reports a missing binary after the port is released', (
+    tester,
+  ) async {
+    final api = MockApiClient();
+    when(() => api.shutdownDaemon()).thenAnswer((_) async {});
+    when(() => api.daemonReachable()).thenAnswer((_) async => PortOwner.none);
+    final platform = FakePlatformServices();
+    await _pumpRestartHarness(tester, api: api, platform: platform);
+
+    await tester.tap(find.text('Restart harness'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Daemon binary not found'), findsOneWidget);
+    expect(platform.spawnedDaemons, isEmpty);
+  });
+
+  testWidgets('restart surfaces a guarded startup refusal', (tester) async {
+    final api = MockApiClient();
+    final owners = [PortOwner.none, PortOwner.foreign];
+    when(() => api.shutdownDaemon()).thenAnswer((_) async {});
+    when(
+      () => api.daemonReachable(),
+    ).thenAnswer((_) async => owners.removeAt(0));
+    when(() => api.daemonPort).thenReturn(8123);
+    final platform = FakePlatformServices(daemonBinaryPath: '/tmp/heimdallm');
+    await _pumpRestartHarness(tester, api: api, platform: platform);
+
+    await tester.tap(find.text('Restart harness'));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('Port 8123 is occupied; no daemon was started.'),
+      findsOneWidget,
+    );
+    expect(platform.spawnedDaemons, isEmpty);
+  });
 
   test('SortNotifier handles preference load failures', () async {
     TestWidgetsFlutterBinding.ensureInitialized();

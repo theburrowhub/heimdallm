@@ -20,6 +20,19 @@ export 'platform_services_stub.dart'
 /// be unsafe.
 enum TcpPortState { open, closed, unknown }
 
+/// Raised by [PlatformServices.spawnDaemon] when another process owns the
+/// daemon port. The guarded spawn operation is the final authority: an HTTP
+/// request can fail while a silent or still-starting process already owns the
+/// socket.
+class DaemonPortOccupiedException implements Exception {
+  const DaemonPortOccupiedException(this.port);
+
+  final int port;
+
+  @override
+  String toString() => 'Port $port is already occupied; no daemon was started.';
+}
+
 /// Platform-specific capabilities the rest of the app is free to call from
 /// shared (i.e. non-`dart:io`) code. The desktop impl wraps dart:io and the
 /// heavy packages (tray_manager, window_manager, local_notifier); the web
@@ -120,25 +133,10 @@ abstract class PlatformServices {
   Future<bool> daemonConfigExists();
   String? defaultDaemonBinaryPath();
 
-  /// Probes the configured daemon port at TCP level.
-  ///
-  /// Desktop implementations return [TcpPortState.closed] only for an
-  /// explicit connection-refused result. Timeouts, routing failures and other
-  /// ambiguous errors return [TcpPortState.unknown], which deliberately fails
-  /// closed. Web cannot open raw sockets and therefore always returns unknown.
-  Future<TcpPortState> probeDaemonPort({
-    Duration timeout = const Duration(milliseconds: 500),
-  });
-
-  /// Whether the canonical native service supervisor currently owns daemon
-  /// startup. False on platforms/installations without such a service.
-  /// Implementations must throw rather than guess when ownership cannot be
-  /// determined safely.
-  Future<bool> isDaemonSupervised();
-
-  /// Starts the daemon. Desktop implementations may delegate to the native
-  /// service supervisor instead of launching a detached process. Throws
-  /// `UnsupportedError` on web.
+  /// Starts the daemon only after proving its TCP port is free. Desktop
+  /// implementations may delegate to the native service supervisor instead of
+  /// launching a detached process. Throws [DaemonPortOccupiedException] when
+  /// the port is owned and `UnsupportedError` on web.
   Future<void> spawnDaemon(String binaryPath);
 
   /// Rebuilds the system tray context menu with current PR data.

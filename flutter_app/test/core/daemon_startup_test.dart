@@ -9,8 +9,7 @@ import 'package:heimdallm/core/platform/platform_services.dart';
 import 'platform/fake_platform_services.dart';
 
 class _ThrowingPlatformServices extends FakePlatformServices {
-  _ThrowingPlatformServices({required this.spawnError})
-    : super(tcpPortState: TcpPortState.closed);
+  _ThrowingPlatformServices({required this.spawnError});
 
   final Object spawnError;
 
@@ -28,11 +27,17 @@ ApiClient _apiFor(
   httpClient: MockClient((_) => response()),
   platform: platform,
   daemonReachabilityTimeout: const Duration(milliseconds: 20),
-  daemonTcpProbeTimeout: const Duration(milliseconds: 20),
 );
 
 void main() {
   const daemonHeaders = {'x-heimdallm-daemon': '1'};
+
+  test('occupied-port failures are actionable', () {
+    expect(
+      const DaemonPortOccupiedException(8123).toString(),
+      'Port 8123 is already occupied; no daemon was started.',
+    );
+  });
 
   test('an existing degraded daemon is never spawned again', () async {
     final platform = FakePlatformServices();
@@ -56,7 +61,7 @@ void main() {
   });
 
   test('a proven-closed port permits exactly one spawn attempt', () async {
-    final platform = FakePlatformServices(tcpPortState: TcpPortState.closed);
+    final platform = FakePlatformServices();
     final coordinator = DaemonStartupCoordinator(
       api: _apiFor(
         platform,
@@ -74,7 +79,7 @@ void main() {
   });
 
   test('concurrent callers share one ownership probe and one spawn', () async {
-    final platform = FakePlatformServices(tcpPortState: TcpPortState.closed);
+    final platform = FakePlatformServices();
     var probes = 0;
     final releaseProbe = Completer<void>();
     final coordinator = DaemonStartupCoordinator(
@@ -101,22 +106,27 @@ void main() {
     expect(coordinator.spawnAttempts, 1);
   });
 
-  test('an ambiguous TCP probe fails closed and never spawns', () async {
-    final platform = FakePlatformServices(tcpPortState: TcpPortState.unknown);
-    final coordinator = DaemonStartupCoordinator(
-      api: _apiFor(
-        platform,
-        () async => throw http.ClientException('timed out'),
-      ),
-      platform: platform,
-      binaryPath: '/daemon',
-    );
+  test(
+    'the final spawn guard maps an occupied port without starting',
+    () async {
+      final platform = _ThrowingPlatformServices(
+        spawnError: const DaemonPortOccupiedException(7842),
+      );
+      final coordinator = DaemonStartupCoordinator(
+        api: _apiFor(
+          platform,
+          () async => throw http.ClientException('timed out'),
+        ),
+        platform: platform,
+        binaryPath: '/daemon',
+      );
 
-    final result = await coordinator.ensureAvailable();
+      final result = await coordinator.ensureAvailable();
 
-    expect(result.outcome, DaemonStartupOutcome.portOccupied);
-    expect(platform.spawnedDaemons, isEmpty);
-  });
+      expect(result.outcome, DaemonStartupOutcome.portOccupied);
+      expect(platform.spawnedDaemons, ['/daemon']);
+    },
+  );
 
   test(
     'persistent spawn failures consume a bounded budget and keep the error',
@@ -151,7 +161,7 @@ void main() {
 
   test('reachability wins over an exhausted spawn budget', () async {
     var daemonNowOwnsPort = false;
-    final platform = FakePlatformServices(tcpPortState: TcpPortState.closed);
+    final platform = FakePlatformServices();
     final api = _apiFor(platform, () async {
       if (daemonNowOwnsPort) {
         return http.Response(
@@ -184,7 +194,7 @@ void main() {
   test(
     'successful spawns that never bind exhaust the budget without an N+1 call',
     () async {
-      final platform = FakePlatformServices(tcpPortState: TcpPortState.closed);
+      final platform = FakePlatformServices();
       final coordinator = DaemonStartupCoordinator(
         api: _apiFor(
           platform,
