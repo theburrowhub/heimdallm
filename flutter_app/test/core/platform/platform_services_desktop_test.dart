@@ -1,5 +1,7 @@
 import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:heimdallm/core/daemon/daemon_lifecycle.dart';
+import 'package:heimdallm/core/platform/platform_services.dart';
 import 'package:heimdallm/core/platform/platform_services_desktop.dart';
 
 void main() {
@@ -23,22 +25,27 @@ void main() {
     });
 
     test('loadApiToken returns null when the file does not exist', () async {
-      final services = DesktopPlatformServices(tokenPath: '${tempDir.path}/missing');
+      final services = DesktopPlatformServices(
+        tokenPath: '${tempDir.path}/missing',
+      );
       expect(await services.loadApiToken(), isNull);
     });
 
-    test('loadApiToken caches the token; clearApiTokenCache forces re-read', () async {
-      final tokenFile = File('${tempDir.path}/api_token')
-        ..writeAsStringSync('first');
-      final services = DesktopPlatformServices(tokenPath: tokenFile.path);
+    test(
+      'loadApiToken caches the token; clearApiTokenCache forces re-read',
+      () async {
+        final tokenFile = File('${tempDir.path}/api_token')
+          ..writeAsStringSync('first');
+        final services = DesktopPlatformServices(tokenPath: tokenFile.path);
 
-      expect(await services.loadApiToken(), 'first');
-      tokenFile.writeAsStringSync('second');
-      expect(await services.loadApiToken(), 'first'); // cached
+        expect(await services.loadApiToken(), 'first');
+        tokenFile.writeAsStringSync('second');
+        expect(await services.loadApiToken(), 'first'); // cached
 
-      services.clearApiTokenCache();
-      expect(await services.loadApiToken(), 'second');
-    });
+        services.clearApiTokenCache();
+        expect(await services.loadApiToken(), 'second');
+      },
+    );
 
     test('readEnv returns the value from Platform.environment', () {
       final services = DesktopPlatformServices();
@@ -57,29 +64,90 @@ void main() {
       expect(services.apiBaseUrl, 'http://127.0.0.1:9999');
     });
 
-    test('ensureSingleInstance writes a PID file and returns true on fresh start', () async {
-      final pidFile = File('${tempDir.path}/ui.pid');
-      final services = DesktopPlatformServices(pidFilePath: pidFile.path);
-      expect(await services.ensureSingleInstance(), isTrue);
-      expect(pidFile.existsSync(), isTrue);
-      expect(int.parse(pidFile.readAsStringSync().trim()), pid);
+    test(
+      'spawnDaemon refuses a port already owned by another process',
+      () async {
+        final binary = File('${tempDir.path}/heimdalld')..writeAsStringSync('');
+        final listener = await ServerSocket.bind(
+          InternetAddress.loopbackIPv4,
+          0,
+        );
+        addTearDown(listener.close);
+        var detachedStarts = 0;
+        final services = DesktopPlatformServices(
+          apiPort: listener.port,
+          isMacOS: false,
+          detachedDaemonStarter: (_) async => detachedStarts++,
+        );
+
+        await expectLater(
+          services.spawnDaemon(binary.path),
+          throwsA(
+            isA<DaemonPortOccupiedException>().having(
+              (error) => error.port,
+              'port',
+              listener.port,
+            ),
+          ),
+        );
+        expect(detachedStarts, 0);
+      },
+    );
+
+    test('spawnDaemon fails closed when port ownership is ambiguous', () async {
+      final binary = File('${tempDir.path}/heimdalld')..writeAsStringSync('');
+      var detachedStarts = 0;
+      final services = DesktopPlatformServices(
+        isMacOS: false,
+        daemonPortProbe: (_) async => TcpPortState.unknown,
+        detachedDaemonStarter: (_) async => detachedStarts++,
+      );
+
+      await expectLater(
+        services.spawnDaemon(binary.path),
+        throwsA(
+          isA<DaemonException>().having(
+            (error) => error.message,
+            'message',
+            contains('Could not prove'),
+          ),
+        ),
+      );
+      expect(detachedStarts, 0);
     });
 
-    test('ensureSingleInstance overwrites a stale PID file (process gone)', () async {
-      final pidFile = File('${tempDir.path}/ui.pid')
-        // Use an impossible high PID that is extremely unlikely to exist.
-        ..writeAsStringSync('999999999');
-      final services = DesktopPlatformServices(pidFilePath: pidFile.path);
-      expect(await services.ensureSingleInstance(), isTrue);
-      expect(int.parse(pidFile.readAsStringSync().trim()), pid);
-    });
+    test(
+      'ensureSingleInstance writes a PID file and returns true on fresh start',
+      () async {
+        final pidFile = File('${tempDir.path}/ui.pid');
+        final services = DesktopPlatformServices(pidFilePath: pidFile.path);
+        expect(await services.ensureSingleInstance(), isTrue);
+        expect(pidFile.existsSync(), isTrue);
+        expect(int.parse(pidFile.readAsStringSync().trim()), pid);
+      },
+    );
 
-    test('defaultDaemonBinaryPath returns null when HEIMDALLM_DAEMON_PATH is unset and no bundled binary', () {
-      // This matches the default test environment (no bundled binary next to
-      // the Flutter test runner). Covers the "not found" path.
-      final services = DesktopPlatformServices();
-      expect(services.defaultDaemonBinaryPath(), isNull);
-    });
+    test(
+      'ensureSingleInstance overwrites a stale PID file (process gone)',
+      () async {
+        final pidFile = File('${tempDir.path}/ui.pid')
+          // Use an impossible high PID that is extremely unlikely to exist.
+          ..writeAsStringSync('999999999');
+        final services = DesktopPlatformServices(pidFilePath: pidFile.path);
+        expect(await services.ensureSingleInstance(), isTrue);
+        expect(int.parse(pidFile.readAsStringSync().trim()), pid);
+      },
+    );
+
+    test(
+      'defaultDaemonBinaryPath returns null when HEIMDALLM_DAEMON_PATH is unset and no bundled binary',
+      () {
+        // This matches the default test environment (no bundled binary next to
+        // the Flutter test runner). Covers the "not found" path.
+        final services = DesktopPlatformServices();
+        expect(services.defaultDaemonBinaryPath(), isNull);
+      },
+    );
 
     test('spawnDaemon rejects when the binary does not exist', () async {
       final services = DesktopPlatformServices();
@@ -88,5 +156,123 @@ void main() {
         throwsA(isA<Exception>()),
       );
     });
+
+    test(
+      'spawnDaemon uses the loaded canonical LaunchAgent on macOS',
+      () async {
+        final binary = File('${tempDir.path}/heimdalld')..writeAsStringSync('');
+        final calls = <String>[];
+        var detachedStarts = 0;
+        final services = DesktopPlatformServices(
+          isMacOS: true,
+          daemonPortProbe: (_) async => TcpPortState.closed,
+          processRunner: (executable, arguments) async {
+            calls.add('$executable ${arguments.join(' ')}');
+            if (executable == '/usr/bin/id') {
+              return ProcessResult(1, 0, '501\n', '');
+            }
+            return ProcessResult(1, 0, '', '');
+          },
+          detachedDaemonStarter: (_) async => detachedStarts++,
+        );
+
+        await services.spawnDaemon(binary.path);
+
+        expect(calls, [
+          '/usr/bin/id -u',
+          '/bin/launchctl print gui/501/com.heimdallm.daemon',
+          '/bin/launchctl kickstart gui/501/com.heimdallm.daemon',
+        ]);
+        expect(detachedStarts, 0);
+      },
+    );
+
+    test(
+      'spawnDaemon falls back to detached when LaunchAgent is absent',
+      () async {
+        final binary = File('${tempDir.path}/heimdalld')..writeAsStringSync('');
+        final detached = <String>[];
+        final services = DesktopPlatformServices(
+          isMacOS: true,
+          daemonPortProbe: (_) async => TcpPortState.closed,
+          processRunner: (executable, arguments) async {
+            if (executable == '/usr/bin/id') {
+              return ProcessResult(1, 0, '501\n', '');
+            }
+            return ProcessResult(1, 113, '', 'Could not find service');
+          },
+          detachedDaemonStarter: (path) async => detached.add(path),
+        );
+
+        await services.spawnDaemon(binary.path);
+
+        expect(detached, [binary.path]);
+      },
+    );
+
+    test(
+      'spawnDaemon fails closed when LaunchAgent inspection is ambiguous',
+      () async {
+        final binary = File('${tempDir.path}/heimdalld')..writeAsStringSync('');
+        var detachedStarts = 0;
+        final services = DesktopPlatformServices(
+          isMacOS: true,
+          daemonPortProbe: (_) async => TcpPortState.closed,
+          processRunner: (executable, arguments) async {
+            if (executable == '/usr/bin/id') {
+              return ProcessResult(1, 0, '501\n', '');
+            }
+            return ProcessResult(1, 1, '', 'Operation not permitted');
+          },
+          detachedDaemonStarter: (_) async => detachedStarts++,
+        );
+
+        await expectLater(
+          services.spawnDaemon(binary.path),
+          throwsA(
+            isA<DaemonException>().having(
+              (error) => error.message,
+              'message',
+              contains('Could not determine whether'),
+            ),
+          ),
+        );
+        expect(detachedStarts, 0);
+      },
+    );
+
+    test(
+      'spawnDaemon never falls back when launchctl kickstart fails',
+      () async {
+        final binary = File('${tempDir.path}/heimdalld')..writeAsStringSync('');
+        var detachedStarts = 0;
+        final services = DesktopPlatformServices(
+          isMacOS: true,
+          daemonPortProbe: (_) async => TcpPortState.closed,
+          processRunner: (executable, arguments) async {
+            if (executable == '/usr/bin/id') {
+              return ProcessResult(1, 0, '501\n', '');
+            }
+            if (arguments.first == 'print') {
+              return ProcessResult(1, 0, '', '');
+            }
+            return ProcessResult(1, 5, '', 'kickstart failed');
+          },
+          detachedDaemonStarter: (_) async => detachedStarts++,
+        );
+
+        await expectLater(
+          services.spawnDaemon(binary.path),
+          throwsA(
+            isA<DaemonException>().having(
+              (error) => error.message,
+              'message',
+              contains('Could not start the supervised daemon'),
+            ),
+          ),
+        );
+        expect(detachedStarts, 0);
+      },
+    );
   });
 }

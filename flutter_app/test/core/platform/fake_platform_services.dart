@@ -143,7 +143,10 @@ class FakePlatformServices implements PlatformServices {
   final List<({List<PR> prs, String me})> trayRebuilds = [];
 
   @override
-  Future<void> rebuildTrayMenu({required List<PR> prs, required String me}) async {
+  Future<void> rebuildTrayMenu({
+    required List<PR> prs,
+    required String me,
+  }) async {
     trayRebuilds.add((prs: prs, me: me));
   }
 

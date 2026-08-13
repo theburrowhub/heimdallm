@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -9,7 +8,11 @@ import 'package:heimdallm/core/models/config_model.dart';
 import 'package:heimdallm/core/platform/platform_services_provider.dart';
 import 'package:heimdallm/core/setup/first_run_setup.dart';
 import 'package:heimdallm/features/config/config_providers.dart'
-    show ConfigNotifier, configNotifierProvider, computeGlobalDiffForTest;
+    show
+        ConfigNotifier,
+        configNotifierProvider,
+        computeGlobalDiffForTest,
+        daemonHealthProvider;
 import 'package:heimdallm/features/config/config_screen.dart';
 import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/features/repositories/repo_diff.dart';
@@ -20,10 +23,39 @@ import '../core/platform/fake_platform_services.dart';
 
 class MockApiClient extends Mock implements ApiClient {}
 
+class ThrowingPlatformServices extends FakePlatformServices {
+  ThrowingPlatformServices({required this.error});
+
+  final Object error;
+
+  @override
+  Future<void> spawnDaemon(String binaryPath) async {
+    spawnedDaemons.add(binaryPath);
+    throw error;
+  }
+}
+
 void main() {
   setUpAll(() {
     registerFallbackValue(<String, dynamic>{});
   });
+
+  test(
+    'daemon running state includes degraded but reachable daemons',
+    () async {
+      final mockApi = MockApiClient();
+      when(
+        () => mockApi.daemonReachable(),
+      ).thenAnswer((_) async => PortOwner.daemon);
+      final container = ProviderContainer(
+        overrides: [apiClientProvider.overrideWithValue(mockApi)],
+      );
+      addTearDown(container.dispose);
+
+      expect(await container.read(daemonHealthProvider.future), isTrue);
+      verifyNever(() => mockApi.checkHealth());
+    },
+  );
 
   testWidgets('ConfigScreen shows current poll interval', (tester) async {
     const config = AppConfig(
@@ -35,7 +67,9 @@ void main() {
     final mockApi = MockApiClient();
     when(() => mockApi.fetchConfig()).thenAnswer((_) async => config.toJson());
     when(() => mockApi.updateConfig(any())).thenAnswer((_) async {});
-    when(() => mockApi.checkHealth()).thenAnswer((_) async => false);
+    when(
+      () => mockApi.daemonReachable(),
+    ).thenAnswer((_) async => PortOwner.none);
 
     await tester.pumpWidget(
       ProviderScope(
@@ -74,7 +108,9 @@ void main() {
     final mockApi = MockApiClient();
     when(() => mockApi.fetchConfig()).thenAnswer((_) async => config.toJson());
     when(() => mockApi.updateConfig(any())).thenAnswer((_) async {});
-    when(() => mockApi.checkHealth()).thenAnswer((_) async => false);
+    when(
+      () => mockApi.daemonReachable(),
+    ).thenAnswer((_) async => PortOwner.none);
 
     await tester.pumpWidget(
       ProviderScope(
@@ -120,7 +156,9 @@ void main() {
     final mockApi = MockApiClient();
     when(() => mockApi.fetchConfig()).thenAnswer((_) async => config.toJson());
     when(() => mockApi.updateConfig(any())).thenAnswer((_) async {});
-    when(() => mockApi.checkHealth()).thenAnswer((_) async => false);
+    when(
+      () => mockApi.daemonReachable(),
+    ).thenAnswer((_) async => PortOwner.none);
 
     await tester.pumpWidget(
       ProviderScope(
@@ -161,7 +199,9 @@ void main() {
     final mockApi = MockApiClient();
     when(() => mockApi.fetchConfig()).thenAnswer((_) async => config.toJson());
     when(() => mockApi.updateConfig(any())).thenAnswer((_) async {});
-    when(() => mockApi.checkHealth()).thenAnswer((_) async => false);
+    when(
+      () => mockApi.daemonReachable(),
+    ).thenAnswer((_) async => PortOwner.none);
 
     await tester.pumpWidget(
       ProviderScope(
@@ -213,14 +253,22 @@ void main() {
 
     test('rejects values below the 1m floor', () {
       for (final v in ['59s', '30s', '0s', '1ms']) {
-        expect(validatePollInterval(v), 'Must be between 1m and 24h', reason: v);
+        expect(
+          validatePollInterval(v),
+          'Must be between 1m and 24h',
+          reason: v,
+        );
       }
     });
 
     test('rejects values above the 24h ceiling', () {
       // Parseable but out of range → the range message, not a parse error.
       for (final v in ['25h', '1441m']) {
-        expect(validatePollInterval(v), 'Must be between 1m and 24h', reason: v);
+        expect(
+          validatePollInterval(v),
+          'Must be between 1m and 24h',
+          reason: v,
+        );
       }
     });
 
@@ -474,7 +522,9 @@ void main() {
       ).toJson(),
     );
     when(() => mockApi.updateConfig(any())).thenAnswer((_) async {});
-    when(() => mockApi.checkHealth()).thenAnswer((_) async => false);
+    when(
+      () => mockApi.daemonReachable(),
+    ).thenAnswer((_) async => PortOwner.none);
 
     await tester.pumpWidget(
       ProviderScope(
@@ -595,11 +645,14 @@ void main() {
     expect(cfg.useGraphql, isFalse);
   });
 
-  test('PollingConfig.fromJson parses rate_limit_safety_threshold as int via num', () {
-    // The daemon may send it as a JSON number (double or int)
-    final cfg = PollingConfig.fromJson({'rate_limit_safety_threshold': 150});
-    expect(cfg.rateLimitSafetyThreshold, 150);
-  });
+  test(
+    'PollingConfig.fromJson parses rate_limit_safety_threshold as int via num',
+    () {
+      // The daemon may send it as a JSON number (double or int)
+      final cfg = PollingConfig.fromJson({'rate_limit_safety_threshold': 150});
+      expect(cfg.rateLimitSafetyThreshold, 150);
+    },
+  );
 
   test('AppConfig.fromJson parses nested polling object', () {
     final json = {
@@ -630,21 +683,24 @@ void main() {
     expect(cfg.polling.rateLimitSafetyThreshold, 50);
   });
 
-  test('AppConfig.fromJson uses PollingConfig defaults when polling key absent', () {
-    final json = {
-      'repositories': <String>[],
-      'server_port': 7842,
-      'poll_interval': '5m',
-      'retention_days': 90,
-      'ai_primary': 'claude',
-      'ai_fallback': '',
-      'review_mode': 'single',
-      'issue_tracking': {'enabled': false},
-    };
-    final cfg = AppConfig.fromJson(json);
-    expect(cfg.polling.adaptive, isFalse);
-    expect(cfg.polling.useEtag, isTrue);
-  });
+  test(
+    'AppConfig.fromJson uses PollingConfig defaults when polling key absent',
+    () {
+      final json = {
+        'repositories': <String>[],
+        'server_port': 7842,
+        'poll_interval': '5m',
+        'retention_days': 90,
+        'ai_primary': 'claude',
+        'ai_fallback': '',
+        'review_mode': 'single',
+        'issue_tracking': {'enabled': false},
+      };
+      final cfg = AppConfig.fromJson(json);
+      expect(cfg.polling.adaptive, isFalse);
+      expect(cfg.polling.useEtag, isTrue);
+    },
+  );
 
   test('_computeGlobalDiff emits polling diff only for changed fields', () {
     const old = AppConfig();
@@ -671,78 +727,214 @@ void main() {
 
   // ── saveAndStartDaemon tests ───────────────────────────────────────────────
 
-  testWidgets('saveAndStartDaemon calls platform.spawnDaemon', (tester) async {
+  test('saveAndStartDaemon spawns only after ownership reports none', () async {
     final platform = FakePlatformServices(
       daemonBinaryPath: '/fake/bin/heimdalld',
       githubToken: 'fake-token',
     );
+    final mockApi = MockApiClient();
+    when(
+      () => mockApi.fetchConfig(),
+    ).thenAnswer((_) async => const AppConfig().toJson());
+    when(
+      () => mockApi.daemonReachable(),
+    ).thenAnswer((_) async => PortOwner.none);
+    when(() => mockApi.checkHealth()).thenAnswer((_) async => true);
     final container = ProviderContainer(
-      // Riverpod 3 retries failed providers by default; saveAndStartDaemon's
-      // health check is expected to fail in this test, so disable retries to
-      // avoid pending timers after the test body returns.
       retry: (_, _) => null,
-      overrides: [platformServicesProvider.overrideWithValue(platform)],
+      overrides: [
+        apiClientProvider.overrideWithValue(mockApi),
+        platformServicesProvider.overrideWithValue(platform),
+      ],
     );
     addTearDown(container.dispose);
+    await container.read(configNotifierProvider.future);
 
-    // Call saveAndStartDaemon via the notifier. We don't verify daemon health
-    // (the fake's ApiClient isn't wired), but we do verify the spawn reached
-    // the platform layer at least once before the health-check loop timed out.
-    final notifier = container.read(configNotifierProvider.notifier);
-
-    // Run in real-async mode so Future.delayed works without fake-async leaks.
-    await tester.runAsync(() async {
-      unawaited(
-        notifier.saveAndStartDaemon(
+    await container
+        .read(configNotifierProvider.notifier)
+        .saveAndStartDaemon(
           token: 'fake-gh-token',
           config: const AppConfig(),
           daemonBinaryPath: '/fake/bin/heimdalld',
-        ),
-      );
-      // Allow the microtasks that lead to the first spawnDaemon to run.
-      await Future.delayed(const Duration(milliseconds: 50));
-    });
+        );
 
-    expect(platform.spawnedDaemons, contains('/fake/bin/heimdalld'));
+    expect(platform.spawnedDaemons, ['/fake/bin/heimdalld']);
+    expect(container.read(configNotifierProvider), isA<AsyncData<AppConfig>>());
   });
 
-  testWidgets(
-    'saveAndStartDaemon routes daemon spawn through PlatformServices',
-    (tester) async {
-      final platform = FakePlatformServices(
-        daemonBinaryPath: '/fake/bin/heimdalld',
-        githubToken: 'fake-token',
-      );
+  test(
+    'saveAndStartDaemon reuses an existing daemon without spawning',
+    () async {
+      final platform = FakePlatformServices();
+      final mockApi = MockApiClient();
+      when(
+        () => mockApi.fetchConfig(),
+      ).thenAnswer((_) async => const AppConfig().toJson());
+      when(
+        () => mockApi.daemonReachable(),
+      ).thenAnswer((_) async => PortOwner.daemon);
+      when(() => mockApi.checkHealth()).thenAnswer((_) async => true);
       final container = ProviderContainer(
-        // Riverpod 3 retries failed providers by default; saveAndStartDaemon's
-        // health check is expected to fail in this test, so disable retries to
-        // avoid pending timers after the test body returns.
         retry: (_, _) => null,
-        overrides: [platformServicesProvider.overrideWithValue(platform)],
+        overrides: [
+          apiClientProvider.overrideWithValue(mockApi),
+          platformServicesProvider.overrideWithValue(platform),
+        ],
       );
       addTearDown(container.dispose);
+      await container.read(configNotifierProvider.future);
 
-      // Call saveAndStartDaemon via the notifier. We don't verify daemon health
-      // (the fake's ApiClient isn't wired), but we do verify the spawn reached
-      // the platform layer at least once before the health-check loop timed out.
-      final notifier = container.read(configNotifierProvider.notifier);
-      // Kick off the call but ignore its completion — we only care about the
-      // side-effect of calling spawnDaemon.
-      await tester.runAsync(() async {
-        unawaited(
-          notifier.saveAndStartDaemon(
+      await container
+          .read(configNotifierProvider.notifier)
+          .saveAndStartDaemon(
             token: 'fake-gh-token',
             config: const AppConfig(),
             daemonBinaryPath: '/fake/bin/heimdalld',
-          ),
-        );
-        // Allow the microtasks that lead to the first spawnDaemon to run.
-        await Future.delayed(const Duration(milliseconds: 50));
-      });
+          );
 
-      expect(platform.spawnedDaemons, contains('/fake/bin/heimdalld'));
+      expect(platform.spawnedDaemons, isEmpty);
+      expect(
+        container.read(configNotifierProvider),
+        isA<AsyncData<AppConfig>>(),
+      );
     },
   );
+
+  test('saveAndStartDaemon refuses a foreign or ambiguous port', () async {
+    final platform = FakePlatformServices();
+    final mockApi = MockApiClient();
+    when(
+      () => mockApi.fetchConfig(),
+    ).thenAnswer((_) async => const AppConfig().toJson());
+    when(
+      () => mockApi.daemonReachable(),
+    ).thenAnswer((_) async => PortOwner.foreign);
+    when(() => mockApi.daemonPort).thenReturn(7842);
+    final container = ProviderContainer(
+      retry: (_, _) => null,
+      overrides: [
+        apiClientProvider.overrideWithValue(mockApi),
+        platformServicesProvider.overrideWithValue(platform),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(configNotifierProvider.future);
+
+    await container
+        .read(configNotifierProvider.notifier)
+        .saveAndStartDaemon(
+          token: 'fake-gh-token',
+          config: const AppConfig(),
+          daemonBinaryPath: '/fake/bin/heimdalld',
+        );
+
+    final result = container.read(configNotifierProvider);
+    expect(platform.spawnedDaemons, isEmpty);
+    expect(result, isA<AsyncError<AppConfig>>());
+    expect(result.error.toString(), contains('No daemon was started'));
+  });
+
+  test('saveAndStartDaemon reports retryable process failures', () async {
+    final platform = ThrowingPlatformServices(error: StateError('blocked'));
+    final mockApi = MockApiClient();
+    when(
+      () => mockApi.fetchConfig(),
+    ).thenAnswer((_) async => const AppConfig().toJson());
+    when(
+      () => mockApi.daemonReachable(),
+    ).thenAnswer((_) async => PortOwner.none);
+    final container = ProviderContainer(
+      retry: (_, _) => null,
+      overrides: [
+        apiClientProvider.overrideWithValue(mockApi),
+        platformServicesProvider.overrideWithValue(platform),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(configNotifierProvider.future);
+
+    await container
+        .read(configNotifierProvider.notifier)
+        .saveAndStartDaemon(
+          token: 'fake-gh-token',
+          config: const AppConfig(),
+          daemonBinaryPath: '/fake/bin/heimdalld',
+          maxSpawnAttempts: 2,
+        );
+
+    final result = container.read(configNotifierProvider);
+    expect(result, isA<AsyncError<AppConfig>>());
+    expect(result.error.toString(), contains('blocked'));
+  });
+
+  test('saveAndStartDaemon reports terminal process failures', () async {
+    final platform = ThrowingPlatformServices(error: StateError('terminal'));
+    final mockApi = MockApiClient();
+    when(
+      () => mockApi.fetchConfig(),
+    ).thenAnswer((_) async => const AppConfig().toJson());
+    when(
+      () => mockApi.daemonReachable(),
+    ).thenAnswer((_) async => PortOwner.none);
+    final container = ProviderContainer(
+      retry: (_, _) => null,
+      overrides: [
+        apiClientProvider.overrideWithValue(mockApi),
+        platformServicesProvider.overrideWithValue(platform),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(configNotifierProvider.future);
+
+    await container
+        .read(configNotifierProvider.notifier)
+        .saveAndStartDaemon(
+          token: 'fake-gh-token',
+          config: const AppConfig(),
+          daemonBinaryPath: '/fake/bin/heimdalld',
+        );
+
+    final result = container.read(configNotifierProvider);
+    expect(result, isA<AsyncError<AppConfig>>());
+    expect(result.error.toString(), contains('terminal'));
+  });
+
+  test('saveAndStartDaemon explains an existing unhealthy daemon', () async {
+    final platform = FakePlatformServices();
+    final mockApi = MockApiClient();
+    when(
+      () => mockApi.fetchConfig(),
+    ).thenAnswer((_) async => const AppConfig().toJson());
+    when(
+      () => mockApi.daemonReachable(),
+    ).thenAnswer((_) async => PortOwner.daemon);
+    when(() => mockApi.daemonPort).thenReturn(7842);
+    when(() => mockApi.checkHealth()).thenAnswer((_) async => false);
+    final container = ProviderContainer(
+      retry: (_, _) => null,
+      overrides: [
+        apiClientProvider.overrideWithValue(mockApi),
+        platformServicesProvider.overrideWithValue(platform),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(configNotifierProvider.future);
+
+    await container
+        .read(configNotifierProvider.notifier)
+        .saveAndStartDaemon(
+          token: 'fake-gh-token',
+          config: const AppConfig(),
+          daemonBinaryPath: '/fake/bin/heimdalld',
+          healthCheckMaxAttempts: 1,
+          healthCheckInterval: Duration.zero,
+        );
+
+    final result = container.read(configNotifierProvider);
+    expect(result, isA<AsyncError<AppConfig>>());
+    expect(result.error.toString(), contains('already running on port 7842'));
+    expect(platform.spawnedDaemons, isEmpty);
+  });
 
   // ── AutonomousConfig ───────────────────────────────────────────────────────
 
@@ -847,10 +1039,7 @@ void main() {
         'merge_method': 'merge',
         'dev_effort': 'low',
       },
-      'circuit_breaker': {
-        'per_pr_24h': 10,
-        'per_repo_hr': 50,
-      },
+      'circuit_breaker': {'per_pr_24h': 10, 'per_repo_hr': 50},
     };
 
     final cfg = AppConfig.fromJson(json);
@@ -863,86 +1052,101 @@ void main() {
     expect(cfg.circuitBreaker.perIssue24h, 3);
   });
 
-  test('AppConfig.fromJson uses defaults when autonomous/circuit_breaker absent', () {
-    final json = {
-      'repositories': <String>[],
-      'server_port': 7842,
-      'poll_interval': '5m',
-      'retention_days': 90,
-      'ai_primary': 'claude',
-      'ai_fallback': '',
-      'review_mode': 'single',
-      'issue_tracking': {'enabled': false},
-    };
+  test(
+    'AppConfig.fromJson uses defaults when autonomous/circuit_breaker absent',
+    () {
+      final json = {
+        'repositories': <String>[],
+        'server_port': 7842,
+        'poll_interval': '5m',
+        'retention_days': 90,
+        'ai_primary': 'claude',
+        'ai_fallback': '',
+        'review_mode': 'single',
+        'issue_tracking': {'enabled': false},
+      };
 
-    final cfg = AppConfig.fromJson(json);
-    expect(cfg.autonomous.enabled, isFalse);
-    expect(cfg.autonomous.mergeMethod, 'squash');
-    expect(cfg.circuitBreaker.perPr24h, 3);
-  });
+      final cfg = AppConfig.fromJson(json);
+      expect(cfg.autonomous.enabled, isFalse);
+      expect(cfg.autonomous.mergeMethod, 'squash');
+      expect(cfg.circuitBreaker.perPr24h, 3);
+    },
+  );
 
   // ── _computeGlobalDiff via ConfigNotifier.save ────────────────────────────
 
-  test('_computeGlobalDiff emits autonomous diff when enabled changes', () async {
-    final mockApi = MockApiClient();
-    Map<String, dynamic>? capturedPatch;
+  test(
+    '_computeGlobalDiff emits autonomous diff when enabled changes',
+    () async {
+      final mockApi = MockApiClient();
+      Map<String, dynamic>? capturedPatch;
 
-    const initialConfig = AppConfig();
-    when(() => mockApi.fetchConfig()).thenAnswer((_) async => initialConfig.toJson());
-    when(() => mockApi.patchConfig(any())).thenAnswer((invocation) async {
-      capturedPatch = invocation.positionalArguments[0] as Map<String, dynamic>;
-      return initialConfig.copyWith(
+      const initialConfig = AppConfig();
+      when(
+        () => mockApi.fetchConfig(),
+      ).thenAnswer((_) async => initialConfig.toJson());
+      when(() => mockApi.patchConfig(any())).thenAnswer((invocation) async {
+        capturedPatch =
+            invocation.positionalArguments[0] as Map<String, dynamic>;
+        return initialConfig
+            .copyWith(autonomous: const AutonomousConfig(enabled: true))
+            .toJson();
+      });
+
+      final container = ProviderContainer(
+        overrides: [apiClientProvider.overrideWithValue(mockApi)],
+      );
+      addTearDown(container.dispose);
+
+      // Wait for the provider to load
+      await container.read(configNotifierProvider.future);
+
+      final updated = initialConfig.copyWith(
         autonomous: const AutonomousConfig(enabled: true),
-      ).toJson();
-    });
+      );
+      await container.read(configNotifierProvider.notifier).save(updated);
 
-    final container = ProviderContainer(
-      overrides: [apiClientProvider.overrideWithValue(mockApi)],
-    );
-    addTearDown(container.dispose);
+      expect(capturedPatch, isNotNull);
+      expect(capturedPatch!['autonomous'], isNotNull);
+      expect(capturedPatch!['autonomous']['enabled'], isTrue);
+    },
+  );
 
-    // Wait for the provider to load
-    await container.read(configNotifierProvider.future);
+  test(
+    '_computeGlobalDiff emits circuit_breaker diff when a field changes',
+    () async {
+      final mockApi = MockApiClient();
+      Map<String, dynamic>? capturedPatch;
 
-    final updated = initialConfig.copyWith(
-      autonomous: const AutonomousConfig(enabled: true),
-    );
-    await container.read(configNotifierProvider.notifier).save(updated);
+      const initialConfig = AppConfig();
+      when(
+        () => mockApi.fetchConfig(),
+      ).thenAnswer((_) async => initialConfig.toJson());
+      when(() => mockApi.patchConfig(any())).thenAnswer((invocation) async {
+        capturedPatch =
+            invocation.positionalArguments[0] as Map<String, dynamic>;
+        return initialConfig
+            .copyWith(circuitBreaker: const CircuitBreakerConfig(perPr24h: 10))
+            .toJson();
+      });
 
-    expect(capturedPatch, isNotNull);
-    expect(capturedPatch!['autonomous'], isNotNull);
-    expect(capturedPatch!['autonomous']['enabled'], isTrue);
-  });
+      final container = ProviderContainer(
+        overrides: [apiClientProvider.overrideWithValue(mockApi)],
+      );
+      addTearDown(container.dispose);
 
-  test('_computeGlobalDiff emits circuit_breaker diff when a field changes', () async {
-    final mockApi = MockApiClient();
-    Map<String, dynamic>? capturedPatch;
+      await container.read(configNotifierProvider.future);
 
-    const initialConfig = AppConfig();
-    when(() => mockApi.fetchConfig()).thenAnswer((_) async => initialConfig.toJson());
-    when(() => mockApi.patchConfig(any())).thenAnswer((invocation) async {
-      capturedPatch = invocation.positionalArguments[0] as Map<String, dynamic>;
-      return initialConfig.copyWith(
+      final updated = initialConfig.copyWith(
         circuitBreaker: const CircuitBreakerConfig(perPr24h: 10),
-      ).toJson();
-    });
+      );
+      await container.read(configNotifierProvider.notifier).save(updated);
 
-    final container = ProviderContainer(
-      overrides: [apiClientProvider.overrideWithValue(mockApi)],
-    );
-    addTearDown(container.dispose);
-
-    await container.read(configNotifierProvider.future);
-
-    final updated = initialConfig.copyWith(
-      circuitBreaker: const CircuitBreakerConfig(perPr24h: 10),
-    );
-    await container.read(configNotifierProvider.notifier).save(updated);
-
-    expect(capturedPatch, isNotNull);
-    expect(capturedPatch!['circuit_breaker'], isNotNull);
-    expect(capturedPatch!['circuit_breaker']['per_pr_24h'], 10);
-  });
+      expect(capturedPatch, isNotNull);
+      expect(capturedPatch!['circuit_breaker'], isNotNull);
+      expect(capturedPatch!['circuit_breaker']['per_pr_24h'], 10);
+    },
+  );
 
   test('never_approve_with_issues round-trips (global + repo override)', () {
     final json = {
@@ -966,10 +1170,13 @@ void main() {
     expect(cleared.neverApproveWithIssues, isNull);
   });
 
-  test('OrgConfig.hasOverride true when only never_approve_with_issues set', () {
-    const org = OrgConfig(neverApproveWithIssues: true);
-    expect(org.hasOverride, isTrue);
-  });
+  test(
+    'OrgConfig.hasOverride true when only never_approve_with_issues set',
+    () {
+      const org = OrgConfig(neverApproveWithIssues: true);
+      expect(org.hasOverride, isTrue);
+    },
+  );
 
   test('repo diff includes never_approve_with_issues when set', () {
     const oldCfg = RepoConfig();
@@ -1062,9 +1269,6 @@ void main() {
     const oldCfg = RepoConfig();
     final updated = oldCfg.copyWith(issueOrganizations: ['acme']);
     final diff = computeRepoDiff(oldCfg, updated);
-    expect(
-      (diff['issue_tracking'] as Map)['organizations'],
-      ['acme'],
-    );
+    expect((diff['issue_tracking'] as Map)['organizations'], ['acme']);
   });
 }

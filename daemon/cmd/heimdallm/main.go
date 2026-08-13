@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -37,6 +38,7 @@ import (
 	"github.com/heimdallm/daemon/internal/repoctx"
 	"github.com/heimdallm/daemon/internal/scheduler"
 	"github.com/heimdallm/daemon/internal/server"
+	"github.com/heimdallm/daemon/internal/singleinstance"
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
 	"github.com/heimdallm/daemon/internal/worker"
@@ -46,6 +48,25 @@ import (
 
 // version is overridden via -ldflags "-X main.version=..." at build time.
 var version = "dev"
+
+// processLifetimeLock keeps the production lock descriptor reachable until
+// os.Exit. Closing it in run's last defer would still leave a tiny handoff gap
+// where other goroutines exist between return and os.Exit. Tests use run(),
+// which opts into deterministic release so multiple cases can share a process.
+var processLifetimeLock *singleinstance.Lock
+
+// processDependencies keeps process-boundary effects injectable for lifecycle
+// tests while production uses the concrete defaults below.
+type processDependencies struct {
+	newGitHubClient    func(string, ...gh.Option) *gh.Client
+	listen             func(int, string) (net.Listener, error)
+	afterPollerRestart func()
+}
+
+var defaultProcessDependencies = processDependencies{
+	newGitHubClient: gh.NewClient,
+	listen:          server.Listen,
+}
 
 func versionString() string { return version }
 
@@ -72,32 +93,69 @@ func publishBridgeEvents(events <-chan sse.Event, publish func(subject string, d
 }
 
 func main() {
+	os.Exit(runProcess(false))
+}
+
+// run is the test-friendly lifecycle entry point. Production calls runProcess
+// directly and lets the OS release the instance lock atomically with exit.
+func run() int {
+	return runProcess(true)
+}
+
+// runProcess owns the daemon lifecycle and returns its process exit code.
+// Keeping os.Exit in main means every return executes deferred cleanup first,
+// including fatal bind and HTTP-serve failures.
+func runProcess(releaseLock bool) int {
+	return runProcessWithDependencies(releaseLock, defaultProcessDependencies)
+}
+
+func runProcessWithDependencies(releaseLock bool, deps processDependencies) int {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "install":
 			bin, _ := os.Executable()
 			if err := launchagent.Install(bin); err != nil {
 				fmt.Fprintf(os.Stderr, "install: %v\n", err)
-				os.Exit(1)
+				return 1
 			}
-			return
+			return 0
 		case "uninstall":
 			if err := launchagent.Uninstall(); err != nil {
 				fmt.Fprintf(os.Stderr, "uninstall: %v\n", err)
-				os.Exit(1)
+				return 1
 			}
-			return
+			return 0
 		case "version", "--version", "-version":
 			fmt.Println(versionString())
-			return
+			return 0
 		}
 	}
 
-	// Resolve the data directory first so setupLogging can mirror the
-	// daemon's slog output into <dataDir>/heimdallm.log. The web UI's
+	// Resolve the data directory first and acquire a process-lifetime lock before
+	// opening even the shared log. Unlike the HTTP port, this ownership token is
+	// retained through every deferred worker/store cleanup, closing the teardown
+	// window where a replacement could otherwise mutate the same state while the
+	// old process was still alive (#646).
+	logDir := dataDir()
+	instanceLock, err := singleinstance.Acquire(filepath.Join(logDir, "daemon.lock"))
+	if err != nil {
+		slog.Error("daemon: another instance owns the data directory; exiting", "dir", logDir, "err", err)
+		return 1
+	}
+	if releaseLock {
+		defer func() {
+			if err := instanceLock.Close(); err != nil {
+				slog.Warn("daemon: release instance lock", "err", err)
+			}
+		}()
+	} else {
+		processLifetimeLock = instanceLock
+	}
+
+	// setupLogging mirrors the daemon's slog output into
+	// <dataDir>/heimdallm.log. The web UI's
 	// /logs stream reads that file; writing only to stderr (as we used
 	// to) left the stream empty under Docker — see #75.
-	logDir := dataDir()
 	logCloser := setupLogging(logDir)
 	if logCloser != nil {
 		// Flush buffered writes on shutdown so the last lines reach
@@ -122,20 +180,78 @@ func main() {
 	cfg, err := loadConfig(cfgPath)
 	if err != nil {
 		slog.Error("config load failed", "path", cfgPath, "err", err)
-		os.Exit(1)
+		return 1
+	}
+
+	// Claim single-instance ownership before reading credentials, opening
+	// SQLite, clearing restart claims or pruning worktrees. The old ordering
+	// discovered EADDRINUSE only after those destructive recovery steps, so a
+	// losing second instance could corrupt the live daemon before exiting.
+	httpListener, err := deps.listen(cfg.Server.Port, cfg.Server.BindAddr)
+	if err != nil {
+		slog.Error("daemon: cannot bind HTTP port — another instance is probably already running; exiting",
+			"port", cfg.Server.Port, "bind", cfg.Server.BindAddr, "err", err)
+		return 1
+	}
+	defer httpListener.Close()
+
+	// Start serving the claimed listener immediately. During the remainder of
+	// startup only GET /health is exposed, as a daemon-identifying 503 response;
+	// every other route is gated by startupMiddleware until Configure +
+	// MarkReady publish the fully wired dependencies. This avoids both failure
+	// modes from #646: a losing process cannot mutate shared state, and the
+	// winning process never leaves launchers staring at a bound-but-silent port.
+	runtimeCtx, runtimeCancel := context.WithCancel(context.Background())
+	defer runtimeCancel()
+	srv := server.NewWithOptions(nil, nil, nil, "", server.Options{
+		Version:   versionString(),
+		StartedAt: time.Now(),
+	})
+	srv.MarkStarting()
+	slog.Info("daemon: HTTP listener claimed", "port", cfg.Server.Port, "bind", cfg.Server.BindAddr)
+	serveFailed := make(chan error, 1)
+	go func() {
+		if err := srv.Serve(httpListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			// Cancel every producer immediately. The main goroutine may still be
+			// inside a bounded startup operation, but no poller/worker derived from
+			// runtimeCtx can remain alive as a headless daemon.
+			slog.Error("daemon: HTTP server stopped serving", "err", err)
+			select {
+			case serveFailed <- err:
+			default:
+			}
+			runtimeCancel()
+		}
+	}()
+	// Early startup failures must also stop the HTTP goroutine. Shutdown is
+	// idempotent; the normal path calls it explicitly for graceful draining.
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			slog.Warn("server shutdown failed", "err", err)
+		}
+	}()
+	takeServeFailure := func() error {
+		select {
+		case err := <-serveFailed:
+			return err
+		default:
+			return nil
+		}
 	}
 
 	token, err := keychain.Get()
 	if err != nil {
 		slog.Error("token not found", "err", err)
-		os.Exit(1)
+		return 1
 	}
 
 	dbPath := filepath.Join(dataDir(), "heimdallm.db")
 	s, err := store.Open(dbPath)
 	if err != nil {
 		slog.Error("store open failed", "err", err)
-		os.Exit(1)
+		return 1
 	}
 	defer s.Close()
 
@@ -191,9 +307,9 @@ func main() {
 	eventBus := bus.New(bus.Config{
 		MaxConcurrentWorkers: cfg.Server.MaxConcurrentWorkers,
 	})
-	if err := eventBus.Start(context.Background()); err != nil {
+	if err := eventBus.Start(runtimeCtx); err != nil {
 		slog.Error("nats bus failed to start", "err", err)
-		os.Exit(1)
+		return 1
 	}
 	defer eventBus.Stop()
 
@@ -201,11 +317,12 @@ func main() {
 	watchStore, err := bus.NewWatchStore(s.DB())
 	if err != nil {
 		slog.Error("watch store failed to initialize", "err", err)
-		os.Exit(1)
+		return 1
 	}
 
 	broker := sse.NewBroker()
 	broker.Start()
+	defer broker.Stop()
 
 	// ── Bridge: SSE broker → NATS events ────────────────────────────────
 	// Re-publishes every broker event to NATS so the SSE handler (which
@@ -231,7 +348,7 @@ func main() {
 		if rec == nil {
 			slog.Warn("activity: broker subscriber cap reached; activity log will not record this session")
 		} else {
-			activityCtx, activityCancel := context.WithCancel(context.Background())
+			activityCtx, activityCancel := context.WithCancel(runtimeCtx)
 			defer activityCancel()
 			go rec.Start(activityCtx)
 			slog.Info("activity recorder started")
@@ -251,7 +368,7 @@ func main() {
 	}
 
 	notifier := notify.New()
-	ghClient := gh.NewClient(token)
+	ghClient := deps.newGitHubClient(token)
 	exec := executor.New()
 	repoCtx := repoctx.NewManagerWithOptions(repoctx.ManagerOptions{
 		MaxWorktreesPerRepo: cfg.AI.MaxWorktreesPerRepo,
@@ -262,7 +379,7 @@ func main() {
 	// under `<clone>/.worktrees/` is by definition stale and safe to
 	// remove. Mirrors the in-flight DB sweeps above. (#461)
 	{
-		ctx := context.Background()
+		ctx := runtimeCtx
 		for _, cloneDir := range managedCloneDirs(cfg) {
 			if n, err := repoCtx.PruneStaleWorktreesUnder(ctx, cloneDir); err != nil {
 				slog.Warn("startup: prune stale worktrees", "dir", cloneDir, "err", err)
@@ -277,7 +394,7 @@ func main() {
 	apiToken, err := loadOrCreateAPIToken(dataDir())
 	if err != nil {
 		slog.Error("could not create API token — refusing to start without authentication", "err", err)
-		os.Exit(1)
+		return 1
 	}
 
 	p := pipeline.New(s, ghClient, exec, &notifyWithSSE{notifier: notifier})
@@ -367,10 +484,10 @@ func main() {
 		atomic.StoreInt64(&lastPollUnixNano, at.UTC().UnixNano())
 	}
 
-	srv := server.NewWithOptions(s, broker, p, apiToken, server.Options{
-		Version:   versionString(),
-		StartedAt: time.Now(),
-	})
+	// Publish the dependencies before lifting the startup gate. The atomic
+	// MarkReady transition makes the fully configured server visible to HTTP
+	// handlers as one lifecycle step.
+	srv.Configure(s, broker, p, apiToken)
 	srv.SetNATSConn(eventBus.Conn())
 	srv.SetConfigPath(cfgPath)
 	srv.SetHealthSnapshotFn(func() server.HealthSnapshot {
@@ -419,7 +536,7 @@ func main() {
 			discovered = discoverySvc.Discovered()
 		}
 		cfgMu.Unlock()
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		ctx, cancel := context.WithTimeout(runtimeCtx, 5*time.Minute)
 		defer cancel()
 		removed, err := purgeStaleManagedClones(ctx, repoCtx, cfgSnap, discovered)
 		if err != nil {
@@ -993,7 +1110,11 @@ func main() {
 	// Initial daemon start → coldStart=true so Tier 2 fires its first tick
 	// immediately; operators see polling activity without waiting an entire
 	// PollInterval. The reload path below passes false.
-	pollerCancel, pollerWg := startPollers(context.Background(), true)
+	if err := takeServeFailure(); err != nil {
+		slog.Error("daemon: aborting startup after HTTP serve failure", "err", err)
+		return 1
+	}
+	pollerCancel, pollerWg := startPollers(runtimeCtx, true)
 
 	// ── NATS PR review worker ───────────────────────────────────────────
 	// Consumes PR review requests published by Tier 2 and runs the
@@ -1087,7 +1208,7 @@ func main() {
 	}
 
 	reviewWorker := worker.NewReviewWorker(conn, maxWorkers, reviewHandler)
-	workerCtx, workerCancel := context.WithCancel(context.Background())
+	workerCtx, workerCancel := context.WithCancel(runtimeCtx)
 	defer workerCancel()
 	go func() {
 		if err := reviewWorker.Start(workerCtx); err != nil {
@@ -1271,7 +1392,7 @@ func main() {
 	}
 
 	publishW := worker.NewPublishWorker(conn, maxWorkers, publishHandler)
-	publishWCtx, publishWCancel := context.WithCancel(context.Background())
+	publishWCtx, publishWCancel := context.WithCancel(runtimeCtx)
 	defer publishWCancel()
 	go func() {
 		if err := publishW.Start(publishWCtx); err != nil {
@@ -1384,7 +1505,7 @@ func main() {
 	}
 
 	triageW := worker.NewTriageWorker(conn, maxWorkers, triageHandler)
-	triageWCtx, triageWCancel := context.WithCancel(context.Background())
+	triageWCtx, triageWCancel := context.WithCancel(runtimeCtx)
 	defer triageWCancel()
 	go func() {
 		if err := triageW.Start(triageWCtx); err != nil {
@@ -1462,7 +1583,7 @@ func main() {
 	}
 
 	refinementW := worker.NewRefinementWorker(conn, maxWorkers, refinementHandler)
-	refinementWCtx, refinementWCancel := context.WithCancel(context.Background())
+	refinementWCtx, refinementWCancel := context.WithCancel(runtimeCtx)
 	defer refinementWCancel()
 	go func() {
 		if err := refinementW.Start(refinementWCtx); err != nil {
@@ -1578,7 +1699,7 @@ func main() {
 	}
 
 	implementW := worker.NewImplementWorker(conn, maxWorkers, implementHandler)
-	implementWCtx, implementWCancel := context.WithCancel(context.Background())
+	implementWCtx, implementWCancel := context.WithCancel(runtimeCtx)
 	defer implementWCancel()
 	go func() {
 		if err := implementW.Start(implementWCtx); err != nil {
@@ -1591,7 +1712,7 @@ func main() {
 	// publishes StateCheckMsg for items due for a state check. Replaces the
 	// in-memory WatchQueue. Default: 30s (matches previous hardcoded value).
 	stateCheckPub := bus.NewStateCheckPublisher(conn)
-	statePollerCtx, statePollerCancel := context.WithCancel(context.Background())
+	statePollerCtx, statePollerCancel := context.WithCancel(runtimeCtx)
 	defer statePollerCancel()
 	go func() {
 		cfgMu.Lock()
@@ -1717,7 +1838,7 @@ func main() {
 	}
 
 	stateW := worker.NewStateWorker(conn, maxWorkers*2, watchStore, stateHandler)
-	stateWCtx, stateWCancel := context.WithCancel(context.Background())
+	stateWCtx, stateWCancel := context.WithCancel(runtimeCtx)
 	defer stateWCancel()
 	go func() {
 		if err := stateW.Start(stateWCtx); err != nil {
@@ -1731,6 +1852,13 @@ func main() {
 	// defer would stop the already-halted original set and leak the
 	// post-reload ones.
 	defer func() {
+		// A reload restart owns restartMu across old-poller teardown and new-
+		// poller publication. Cancel the shared parent first, then wait for that
+		// critical section before snapshotting, so shutdown can never miss a
+		// newly published poller set.
+		runtimeCancel()
+		restartMu.Lock()
+		defer restartMu.Unlock()
 		cfgMu.Lock()
 		cancel := pollerCancel
 		wg := pollerWg
@@ -2022,7 +2150,18 @@ func main() {
 			oldCancel()
 			oldWg.Wait()
 
-			newCancel, newWg := startPollers(context.Background(), false)
+			if runtimeCtx.Err() != nil {
+				slog.Info("config reload: poller restart skipped during shutdown")
+				return
+			}
+
+			newCancel, newWg := startPollers(runtimeCtx, false)
+			if runtimeCtx.Err() != nil {
+				newCancel()
+				newWg.Wait()
+				slog.Info("config reload: new pollers stopped during shutdown")
+				return
+			}
 
 			cfgMu.Lock()
 			pollerCancel = newCancel
@@ -2030,6 +2169,9 @@ func main() {
 			cfgMu.Unlock()
 
 			slog.Info("config reload: pollers restarted")
+			if deps.afterPollerRestart != nil {
+				deps.afterPollerRestart()
+			}
 		}()
 
 		return nil
@@ -2077,7 +2219,7 @@ func main() {
 		aiCfg := cfg.AIForRepo(pr.Repo)
 		localDirBase := cfg.GitHub.LocalDirBase
 		cfgMu.Unlock()
-		repoHandle, err := acquireRepoContext(context.Background(), repoCtx, pr.Repo, &aiCfg, localDirBase, token, repoctx.ModeRead, wtTokenFor("pr-review", pr.Number), "", "")
+		repoHandle, err := acquireRepoContext(runtimeCtx, repoCtx, pr.Repo, &aiCfg, localDirBase, token, repoctx.ModeRead, wtTokenFor("pr-review", pr.Number), "", "")
 		if err != nil {
 			logRepoContextFallback("trigger review", pr.Repo, err)
 			aiCfg.LocalDir = ""
@@ -2222,7 +2364,7 @@ func main() {
 		// so r.Context() would be cancelled as soon as the response is
 		// written. Use an explicit operation timeout instead so the
 		// GitHub refetch and NATS publish remain bounded.
-		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+		ctx, cancel := context.WithTimeout(runtimeCtx, 1*time.Minute)
 		defer cancel()
 
 		publishIssueErr := func(msg string) {
@@ -2270,7 +2412,7 @@ func main() {
 
 	// Wire the issue-refinement trigger callback: run deep repo investigation on a stored issue.
 	srv.SetTriggerIssueRefineFn(func(issueID int64, force bool) error {
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(runtimeCtx)
 		defer cancel()
 
 		publishIssueErr := func(msg string) {
@@ -2328,7 +2470,7 @@ func main() {
 	// Wire the promote callback. Promotion only changes GitHub stage labels and
 	// records an audit comment; the next poll executes the newly-visible stage.
 	srv.SetTriggerPromoteFn(func(issueID int64) error {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(runtimeCtx, 30*time.Second)
 		defer cancel()
 
 		publishIssueErr := func(msg string) {
@@ -2398,43 +2540,76 @@ func main() {
 		return nil
 	})
 
-	go func() {
+	serveDied := false
+	if err := takeServeFailure(); err != nil {
+		// Workers now exist, so do not return directly: the common shutdown path
+		// below must cancel every producer and terminate any child CLI already
+		// launched during startup.
+		slog.Error("daemon: aborting startup after HTTP serve failure", "err", err)
+		serveDied = true
+	} else {
+		// Every dependency is wired: /health can run its deep checks now. The
+		// listener has been bound since the start of run and is actively served,
+		// so this log line means what it says — the daemon is reachable and ready.
+		srv.MarkReady()
 		slog.Info("daemon started", "port", cfg.Server.Port, "bind", cfg.Server.BindAddr)
-		if err := srv.Start(cfg.Server.Port, cfg.Server.BindAddr); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("server stopped", "err", err)
-		}
-	}()
+	}
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	select {
-	case received := <-sig:
-		slog.Info("shutting down", "signal", received.String())
-	case <-shutdownReq:
-		slog.Info("shutting down via API")
+	defer signal.Stop(sig)
+	if !serveDied {
+		select {
+		case received := <-sig:
+			slog.Info("shutting down", "signal", received.String())
+		case <-shutdownReq:
+			slog.Info("shutting down via API")
+		case err := <-serveFailed:
+			// Losing the listener mid-flight leaves the same headless daemon the
+			// bind check above prevents at startup, so treat it the same way:
+			// shut down and exit non-zero instead of polling GitHub forever with
+			// nobody able to reach us (#646). Already logged in the serve goroutine.
+			slog.Error("daemon: shutting down after serve failure", "err", err)
+			serveDied = true
+		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
-		slog.Warn("server shutdown failed", "err", err)
-	}
+	// Keep the HTTP ownership socket open but gate dependency-consuming routes
+	// while producers drain. The independent data-dir lock remains held even
+	// longer — through every deferred Wait/Close — so a replacement cannot
+	// overlap SQLite/worktree cleanup with this process.
+	srv.MarkStopping()
+	runtimeCancel()
 	// Stop the agents this daemon started. Each execution runs in its own
 	// process group so a timeout can reach the CLI's grandchildren (#614), which
 	// also means a group-directed signal to the daemon no longer reaches them:
 	// without this sweep, in-flight agents survive the restart and keep spending
 	// provider quota.
 	//
-	// Every producer of work is cancelled first. srv.Shutdown above only stops
-	// HTTP traffic; the workers and tickers below run on their own contexts,
+	// Every producer of work is cancelled first. The workers and tickers below
+	// run on their own contexts,
 	// whose cancels are deferred to main's return — i.e. after this point. A
 	// worker starting an execution between the sweep's snapshot and process exit
 	// would leave exactly the orphan this sweep exists to prevent. CancelFunc is
 	// idempotent, so the deferred cancels remain harmless.
 	stopProducersThenAgents([]context.CancelFunc{
+		func() {
+			cfgMu.Lock()
+			cancel := pollerCancel
+			cfgMu.Unlock()
+			cancel()
+		},
 		workerCancel, publishWCancel, triageWCancel, refinementWCancel,
 		implementWCancel, statePollerCancel, stateWCancel,
 	}, exec.TerminateAll, producerSettleDelay)
-	broker.Stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		slog.Warn("server shutdown failed", "err", err)
+	}
+	if serveDied {
+		return 1
+	}
+	return 0
 }
 
 // producerSettleDelay is how long the shutdown path waits between cancelling the

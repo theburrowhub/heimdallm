@@ -62,10 +62,23 @@ void main() {
     test('checkHealth returns true when daemon up', () async {
       final platform = FakePlatformServices(token: 'abc-123');
       final mockClient = MockClient(
-        (_) async => http.Response(jsonEncode({'status': 'ok'}), 200),
+        (_) async => http.Response(
+          jsonEncode({'status': 'ok', 'checks': {}}),
+          200,
+          headers: {'x-heimdallm-daemon': '1'},
+        ),
       );
       final client = ApiClient(httpClient: mockClient, platform: platform);
       expect(await client.checkHealth(), isTrue);
+    });
+
+    test('checkHealth rejects a foreign 200 health endpoint', () async {
+      final platform = FakePlatformServices(token: 'abc-123');
+      final mockClient = MockClient(
+        (_) async => http.Response(jsonEncode({'status': 'ok'}), 200),
+      );
+      final client = ApiClient(httpClient: mockClient, platform: platform);
+      expect(await client.checkHealth(), isFalse);
     });
 
     test('checkHealth returns false when daemon down', () async {
@@ -75,6 +88,38 @@ void main() {
       );
       final client = ApiClient(httpClient: mockClient, platform: platform);
       expect(await client.checkHealth(), isFalse);
+    });
+
+    test('fetchHealth preserves identified degraded diagnostics', () async {
+      final platform = FakePlatformServices(token: 'abc-123');
+      final mockClient = MockClient(
+        (_) async => http.Response(
+          jsonEncode({
+            'status': 'degraded',
+            'checks': {
+              'last_poll': {'ok': false},
+            },
+          }),
+          503,
+          headers: {'x-heimdallm-daemon': '1'},
+        ),
+      );
+      final client = ApiClient(httpClient: mockClient, platform: platform);
+
+      final health = await client.fetchHealth();
+
+      expect(health?['status'], 'degraded');
+      expect(health?['checks'], isA<Map<String, dynamic>>());
+    });
+
+    test('fetchHealth rejects a foreign successful endpoint', () async {
+      final platform = FakePlatformServices(token: 'abc-123');
+      final mockClient = MockClient(
+        (_) async => http.Response(jsonEncode({'status': 'ok'}), 200),
+      );
+      final client = ApiClient(httpClient: mockClient, platform: platform);
+
+      expect(await client.fetchHealth(), isNull);
     });
 
     test('patchOrgConfig uses encoded org route and PATCH body', () async {

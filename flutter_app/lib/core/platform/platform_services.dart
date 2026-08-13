@@ -12,6 +12,27 @@ export 'platform_services_stub.dart'
     if (dart.library.io) 'platform_services_desktop.dart'
     if (dart.library.html) 'platform_services_web.dart';
 
+/// Result of probing the daemon's TCP port without making assumptions about
+/// the HTTP client's platform-specific exception wrappers.
+///
+/// Only [closed] is permission to spawn a daemon. Both [open] and [unknown]
+/// mean another process may own the port, so starting a second process would
+/// be unsafe.
+enum TcpPortState { open, closed, unknown }
+
+/// Raised by [PlatformServices.spawnDaemon] when another process owns the
+/// daemon port. The guarded spawn operation is the final authority: an HTTP
+/// request can fail while a silent or still-starting process already owns the
+/// socket.
+class DaemonPortOccupiedException implements Exception {
+  const DaemonPortOccupiedException(this.port);
+
+  final int port;
+
+  @override
+  String toString() => 'Port $port is already occupied; no daemon was started.';
+}
+
 /// Platform-specific capabilities the rest of the app is free to call from
 /// shared (i.e. non-`dart:io`) code. The desktop impl wraps dart:io and the
 /// heavy packages (tray_manager, window_manager, local_notifier); the web
@@ -112,7 +133,10 @@ abstract class PlatformServices {
   Future<bool> daemonConfigExists();
   String? defaultDaemonBinaryPath();
 
-  /// Launches the daemon binary (detached). Throws `UnsupportedError` on web.
+  /// Starts the daemon only after proving its TCP port is free. Desktop
+  /// implementations may delegate to the native service supervisor instead of
+  /// launching a detached process. Throws [DaemonPortOccupiedException] when
+  /// the port is owned and `UnsupportedError` on web.
   Future<void> spawnDaemon(String binaryPath);
 
   /// Rebuilds the system tray context menu with current PR data.

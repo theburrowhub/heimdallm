@@ -22,8 +22,8 @@
 # trace in normal output.
 #
 # The static half also ties the Makefile to the invariant it depends on: `-x` only
-# matches while the daemon and app are exec'd with an empty argv, and that lives
-# in Dart. The static tests run everywhere; only the behavioural half needs Linux.
+# matches while the daemon is exec'd with an empty argv, and that lives in Dart.
+# The static tests run everywhere; only the behavioural half needs Linux.
 
 set -eu
 
@@ -169,16 +169,15 @@ else
     "$offenders"
 fi
 
-# ── 2. Static: the spawn sites must keep passing an empty argument list ───────
+# ── 2. Static: the spawn site must keep passing an empty argument list ────────
 #
 # `-x` requires the target's whole cmdline to equal the binary path, which holds
-# only while the daemon and app are exec'd with no arguments. That invariant lives
+# only while the daemon is exec'd with no arguments. That invariant lives
 # in Dart, far from the Makefile that depends on it: if a future change adds a
-# flag to either spawn, `pkill -x -f` silently stops matching and install-linux
+# flag to the spawn, `pkill -x -f` silently stops matching and install-linux
 # again leaves the old daemon running with no error. Comments cannot catch that,
 # so it is asserted here.
-SPAWN_SITES="flutter_app/lib/core/daemon/daemon_lifecycle.dart
-flutter_app/lib/core/platform/platform_services_desktop.dart"
+SPAWN_SITES="flutter_app/lib/core/platform/platform_services_desktop.dart"
 spawn_offenders=""
 for rel in $SPAWN_SITES; do
   f="$REPO_ROOT/$rel"
@@ -187,9 +186,9 @@ for rel in $SPAWN_SITES; do
 "
     continue
   fi
-  # Counted PER FILE, not globally: a global counter would still pass if the
-  # daemon spawn moved to a new file while the other listed site kept its own.
-  # Each listed file must contribute at least one call.
+  # Counted per canonical spawn file so moving the daemon launch elsewhere
+  # cannot make this guard pass vacuously. DaemonLifecycle deliberately no
+  # longer starts processes: PlatformServices owns the single launch boundary.
   calls=$(grep -c 'Process\.start(' "$f" || true)
   if [ "${calls:-0}" -eq 0 ]; then
     spawn_offenders="$spawn_offenders$rel: no Process.start call (did the spawn move?)
@@ -212,10 +211,10 @@ done
 [ -f "$WORK/spawn_offenders" ] || : > "$WORK/spawn_offenders"
 spawn_offenders="$spawn_offenders$(cat "$WORK/spawn_offenders")"
 if [ -n "$(printf '%s' "$spawn_offenders" | tr -d '[:space:]')" ]; then
-  fail 'a daemon/app spawn breaks the pkill -x contract (arguments, or site moved)' \
+  fail 'the daemon spawn breaks the pkill -x contract (arguments, or site moved)' \
     "$spawn_offenders"
 else
-  pass 'the daemon/app spawn sites still pass an empty argument list'
+  pass 'the daemon spawn site still passes an empty argument list'
 fi
 
 # ── Behavioural half (tests 3-7): gated on Linux + /proc ─────────────────────
