@@ -26,6 +26,22 @@ class _ThrowingPlatformServices extends FakePlatformServices {
   }
 }
 
+class _DuplicatePlatformServices extends FakePlatformServices {
+  @override
+  Future<bool> ensureSingleInstance() async {
+    ensureSingleInstanceCalls++;
+    return false;
+  }
+}
+
+class _UpdaterFailurePlatformServices extends FakePlatformServices {
+  @override
+  Future<void> setupAppUpdater() async {
+    setupAppUpdaterCalls++;
+    throw StateError('updater unavailable');
+  }
+}
+
 GoRouter _router() => GoRouter(
   routes: [
     GoRoute(
@@ -52,6 +68,30 @@ Future<void> _pumpUntil(
 }
 
 void main() {
+  test(
+    'platform initialization terminates a duplicate before updater setup',
+    () async {
+      final platform = _DuplicatePlatformServices();
+
+      expect(await initializePlatformForApp(platform), isFalse);
+      expect(platform.ensureSingleInstanceCalls, 1);
+      expect(platform.quitDuplicateInstanceCalls, 1);
+      expect(platform.setupAppUpdaterCalls, 0);
+    },
+  );
+
+  test(
+    'updater initialization failure does not block normal startup',
+    () async {
+      final platform = _UpdaterFailurePlatformServices();
+
+      expect(await initializePlatformForApp(platform), isTrue);
+      expect(platform.ensureSingleInstanceCalls, 1);
+      expect(platform.setupAppUpdaterCalls, 1);
+      expect(platform.quitDuplicateInstanceCalls, 0);
+    },
+  );
+
   testWidgets('reachable daemon enters the application without spawning', (
     tester,
   ) async {
@@ -92,6 +132,38 @@ void main() {
 
     expect(platform.completeAppUpdateCalls, 1);
     expect(platform.pendingUpdateVersion, isNull);
+  });
+
+  testWidgets('pending update waits when the daemon appears during startup', (
+    tester,
+  ) async {
+    final api = _MockApiClient();
+    final platform = FakePlatformServices(
+      pendingUpdateVersion: '0.8.4',
+      githubToken: 'token',
+      daemonBinaryPath: '/bundled/heimdalld',
+    );
+    final owners = [PortOwner.none, PortOwner.daemon];
+    when(
+      () => api.daemonReachable(),
+    ).thenAnswer((_) async => owners.removeAt(0));
+    when(() => api.daemonPort).thenReturn(7842);
+    when(() => api.checkHealth()).thenAnswer((_) async => true);
+    when(
+      () => api.fetchHealth(),
+    ).thenAnswer((_) async => {'status': 'ok', 'version': '0.8.4'});
+
+    await tester.pumpWidget(
+      buildBootstrapAppForTest(
+        router: _router(),
+        platform: platform,
+        apiClient: api,
+      ),
+    );
+    await _pumpUntil(tester, find.text('Dashboard target'));
+
+    expect(platform.spawnedDaemons, isEmpty);
+    expect(platform.completeAppUpdateCalls, 1);
   });
 
   testWidgets('mixed app and daemon versions fail closed after update', (

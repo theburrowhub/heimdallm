@@ -1,12 +1,15 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/core/daemon/daemon_lifecycle.dart';
 import 'package:heimdallm/core/platform/platform_services.dart';
 import 'package:heimdallm/core/platform/platform_services_desktop.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   group('DesktopPlatformServices', () {
     late Directory tempDir;
 
@@ -64,6 +67,98 @@ void main() {
     test('apiBaseUrl uses the configured port', () {
       final services = DesktopPlatformServices(apiPort: 9999);
       expect(services.apiBaseUrl, 'http://127.0.0.1:9999');
+    });
+
+    test('default process runner preserves exit status and output', () async {
+      final result = await runDefaultPlatformProcess('/bin/sh', [
+        '-c',
+        'printf stdout; printf stderr >&2; exit 7',
+      ]);
+
+      expect(result.exitCode, 7);
+      expect(result.stdout, 'stdout');
+      expect(result.stderr, 'stderr');
+      expect(result.pid, greaterThan(0));
+    });
+
+    test('default process runner terminates a timed-out child', () async {
+      await expectLater(
+        runDefaultPlatformProcess(
+          '/bin/sh',
+          ['-c', "trap 'exit 0' TERM; while :; do :; done"],
+          timeout: const Duration(milliseconds: 100),
+          killGrace: const Duration(milliseconds: 200),
+        ),
+        throwsA(
+          isA<DaemonException>().having(
+            (error) => error.message,
+            'message',
+            contains('Timed out running /bin/sh'),
+          ),
+        ),
+      );
+    });
+
+    test('default process runner escalates from TERM to KILL', () async {
+      await expectLater(
+        runDefaultPlatformProcess(
+          '/bin/sh',
+          ['-c', "trap '' TERM; while :; do :; done"],
+          timeout: const Duration(milliseconds: 100),
+          killGrace: const Duration(milliseconds: 100),
+        ),
+        throwsA(isA<DaemonException>()),
+      );
+    });
+
+    test('environment paths drive singleton and updater state', () async {
+      final pidFile = File('${tempDir.path}/env/ui.pid');
+      final dataDir = Directory('${tempDir.path}/env/data')
+        ..createSync(recursive: true);
+      final tokenFile = File('${dataDir.path}/api_token')
+        ..writeAsStringSync('env-token');
+      dynamic configuration;
+      final environment = {
+        'HEIMDALLM_UI_PID_FILE': pidFile.path,
+        'HEIMDALLM_DATA_DIR': dataDir.path,
+        'HOME': tempDir.path,
+      };
+      final services = DesktopPlatformServices(
+        isMacOS: true,
+        enableNativeAppUpdates: true,
+        environmentReader: (name) => environment[name],
+        methodInvoker: (method, arguments) async {
+          if (method == 'configure') configuration = arguments;
+          return null;
+        },
+      );
+      try {
+        expect(await services.ensureSingleInstance(), isTrue);
+        await services.setupAppUpdater();
+      } finally {
+        await services.releaseSingleInstanceForTesting();
+      }
+
+      expect(pidFile.existsSync(), isTrue);
+      expect(configuration['apiToken'], 'env-token');
+      expect(configuration['apiTokenPath'], tokenFile.path);
+      expect(configuration['dataDir'], dataDir.path);
+    });
+
+    test('XCTest gets an isolated singleton path', () async {
+      final configurationPath = '${tempDir.path}/suite.xctestconfiguration';
+      final pidFile = File('$configurationPath.heimdallm-ui.pid');
+      final services = DesktopPlatformServices(
+        environmentReader: (name) =>
+            name == 'XCTestConfigurationFilePath' ? configurationPath : null,
+      );
+      try {
+        expect(await services.ensureSingleInstance(), isTrue);
+      } finally {
+        await services.releaseSingleInstanceForTesting();
+      }
+
+      expect(pidFile.existsSync(), isTrue);
     });
 
     test(
@@ -217,6 +312,173 @@ else:
         expect(released.exitCode, 0);
       },
     );
+
+    test(
+      'activation queued before listener is delivered exactly once',
+      () async {
+        final pidFile = File('${tempDir.path}/queued/ui.pid');
+        final services = DesktopPlatformServices(pidFilePath: pidFile.path);
+        var activations = 0;
+        try {
+          expect(await services.ensureSingleInstance(), isTrue);
+          final record = jsonDecode(pidFile.readAsStringSync());
+          final socket = await Socket.connect(
+            InternetAddress(
+              record['activation_socket'],
+              type: InternetAddressType.unix,
+            ),
+            0,
+          );
+          await socket.close();
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+
+          services.listenForActivationSignal(() => activations++);
+          await Future<void>.delayed(Duration.zero);
+          expect(activations, 1);
+        } finally {
+          await services.releaseSingleInstanceForTesting();
+        }
+      },
+    );
+
+    test('activation reaches an already registered listener', () async {
+      final pidFile = File('${tempDir.path}/direct/ui.pid');
+      final services = DesktopPlatformServices(pidFilePath: pidFile.path);
+      final activation = Completer<void>();
+      try {
+        expect(await services.ensureSingleInstance(), isTrue);
+        services.listenForActivationSignal(() => activation.complete());
+        final record = jsonDecode(pidFile.readAsStringSync());
+        final socket = await Socket.connect(
+          InternetAddress(
+            record['activation_socket'],
+            type: InternetAddressType.unix,
+          ),
+          0,
+        );
+        await socket.close();
+
+        await activation.future.timeout(const Duration(seconds: 1));
+      } finally {
+        await services.releaseSingleInstanceForTesting();
+      }
+    });
+
+    test('authenticated duplicate activates the lock owner', () async {
+      final activationDirectory = Directory('${tempDir.path}/owner')
+        ..createSync();
+      final activationPath = '${activationDirectory.path}/activate.sock';
+      final server = await ServerSocket.bind(
+        InternetAddress(activationPath, type: InternetAddressType.unix),
+        0,
+      );
+      addTearDown(server.close);
+      final activated = Completer<void>();
+      server.listen((socket) {
+        socket.destroy();
+        if (!activated.isCompleted) activated.complete();
+      });
+      final executable = File(
+        Platform.resolvedExecutable,
+      ).resolveSymbolicLinksSync();
+      final pidFile = File('${tempDir.path}/duplicate/ui.pid')
+        ..createSync(recursive: true)
+        ..writeAsStringSync(
+          jsonEncode({
+            'schema_version': 1,
+            'pid': pid + 1,
+            'executable': executable,
+            'activation_socket': activationPath,
+          }),
+        );
+      final services = DesktopPlatformServices(
+        pidFilePath: pidFile.path,
+        instanceLockAcquirer: (_) async {
+          throw const FileSystemException('simulated competing lock');
+        },
+      );
+
+      expect(await services.ensureSingleInstance(), isFalse);
+      await activated.future.timeout(const Duration(seconds: 1));
+    });
+
+    test(
+      'corrupt duplicate metadata fails closed without signalling',
+      () async {
+        final pidFile = File('${tempDir.path}/corrupt-duplicate/ui.pid')
+          ..createSync(recursive: true)
+          ..writeAsStringSync('{');
+        final services = DesktopPlatformServices(
+          pidFilePath: pidFile.path,
+          instanceLockAcquirer: (_) async {
+            throw const FileSystemException('simulated competing lock');
+          },
+        );
+
+        expect(await services.ensureSingleInstance(), isFalse);
+      },
+    );
+
+    test('valid stale activation directory is safely reused', () async {
+      final reusable = await Directory.systemTemp.createTemp('heimdallm-ui-');
+      final staleSocket = File('${reusable.path}/activate.sock')
+        ..writeAsStringSync('stale');
+      final pidFile = File('${tempDir.path}/reuse/ui.pid')
+        ..createSync(recursive: true)
+        ..writeAsStringSync(
+          jsonEncode({
+            'schema_version': 1,
+            'activation_socket': staleSocket.path,
+          }),
+        );
+      final services = DesktopPlatformServices(pidFilePath: pidFile.path);
+      try {
+        expect(await services.ensureSingleInstance(), isTrue);
+        final record = jsonDecode(pidFile.readAsStringSync());
+        expect(record['activation_socket'], staleSocket.path);
+      } finally {
+        await services.releaseSingleInstanceForTesting();
+      }
+      expect(reusable.existsSync(), isFalse);
+    });
+
+    test('failed activation bind releases lock and temporary state', () async {
+      final pidFile = File('${tempDir.path}/bind-failure/ui.pid');
+      String? socketPath;
+      final failing = DesktopPlatformServices(
+        pidFilePath: pidFile.path,
+        activationSocketBinder: (path) async {
+          socketPath = path;
+          throw StateError('bind rejected');
+        },
+      );
+
+      await expectLater(
+        failing.ensureSingleInstance(),
+        throwsA(isA<StateError>()),
+      );
+      expect(Directory(File(socketPath!).parent.path).existsSync(), isFalse);
+
+      final replacement = DesktopPlatformServices(pidFilePath: pidFile.path);
+      try {
+        expect(await replacement.ensureSingleInstance(), isTrue);
+      } finally {
+        await replacement.releaseSingleInstanceForTesting();
+      }
+    });
+
+    test('malformed singleton metadata is replaced safely', () async {
+      final pidFile = File('${tempDir.path}/malformed/ui.pid')
+        ..createSync(recursive: true)
+        ..writeAsStringSync('{');
+      final services = DesktopPlatformServices(pidFilePath: pidFile.path);
+      try {
+        expect(await services.ensureSingleInstance(), isTrue);
+      } finally {
+        await services.releaseSingleInstanceForTesting();
+      }
+      expect(jsonDecode(pidFile.readAsStringSync())['schema_version'], 1);
+    });
 
     test(
       'defaultDaemonBinaryPath returns null when HEIMDALLM_DAEMON_PATH is unset and no bundled binary',
@@ -398,6 +660,96 @@ else:
       },
     );
 
+    test('default method channel configures the signed updater', () async {
+      const channel = MethodChannel('com.theburrowhub.heimdallm/app_updater');
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        expect(call.method, 'configure');
+        return true;
+      });
+      addTearDown(() {
+        messenger.setMockMethodCallHandler(channel, null);
+        channel.setMethodCallHandler(null);
+      });
+      final services = DesktopPlatformServices(
+        isMacOS: true,
+        enableNativeAppUpdates: true,
+        dataDir: tempDir.path,
+      );
+
+      await services.setupAppUpdater();
+
+      expect(services.appUpdateSupport, AppUpdateSupport.native);
+    });
+
+    test('updater callback ignores unrelated native methods', () async {
+      final services = DesktopPlatformServices(isMacOS: true);
+
+      expect(
+        await services.handleAppUpdaterCallForTesting(
+          const MethodCall('unrelated'),
+        ),
+        isNull,
+      );
+    });
+
+    test('updater callback fails closed without a bundled daemon', () async {
+      final services = DesktopPlatformServices(
+        isMacOS: true,
+        daemonBinaryPathResolver: () => null,
+      );
+
+      await expectLater(
+        services.handleAppUpdaterCallForTesting(
+          const MethodCall('restartDaemonAfterUpdateAbort'),
+        ),
+        throwsA(
+          isA<DaemonException>().having(
+            (error) => error.message,
+            'message',
+            contains('Bundled daemon is unavailable'),
+          ),
+        ),
+      );
+    });
+
+    test('updater callback restarts only the configured daemon', () async {
+      final binary = File('${tempDir.path}/heimdalld')..writeAsStringSync('');
+      final starts = <String>[];
+      final services = DesktopPlatformServices(
+        isMacOS: false,
+        daemonBinaryPathResolver: () => binary.path,
+        daemonPortProbe: (_) async => TcpPortState.closed,
+        detachedDaemonStarter: (path) async => starts.add(path),
+      );
+
+      expect(
+        await services.handleAppUpdaterCallForTesting(
+          const MethodCall('restartDaemonAfterUpdateAbort'),
+        ),
+        isNull,
+      );
+      expect(starts, [binary.path]);
+    });
+
+    test('updater callback propagates guarded restart failure', () async {
+      final binary = File('${tempDir.path}/heimdalld')..writeAsStringSync('');
+      final services = DesktopPlatformServices(
+        isMacOS: false,
+        daemonBinaryPathResolver: () => binary.path,
+        daemonPortProbe: (_) async => TcpPortState.closed,
+        detachedDaemonStarter: (_) async => throw StateError('spawn rejected'),
+      );
+
+      await expectLater(
+        services.handleAppUpdaterCallForTesting(
+          const MethodCall('restartDaemonAfterUpdateAbort'),
+        ),
+        throwsA(isA<StateError>()),
+      );
+    });
+
     test('debug macOS builds leave the production updater disabled', () async {
       var calls = 0;
       final services = DesktopPlatformServices(
@@ -535,6 +887,38 @@ else:
 
       // Reaching this assertion proves quitApp did not fall back to exit(0).
       expect(terminateCalls, 1);
+    });
+
+    test('Linux quit paths delegate to the injected process exit', () {
+      final exitCodes = <int>[];
+      final services = DesktopPlatformServices(
+        isMacOS: false,
+        processExit: exitCodes.add,
+      );
+
+      services.quitApp();
+      services.quitDuplicateInstance();
+
+      expect(exitCodes, [0, 0]);
+    });
+
+    test('failed duplicate termination exits only the duplicate', () async {
+      final exitCodes = <int>[];
+      final services = DesktopPlatformServices(
+        isMacOS: true,
+        processExit: exitCodes.add,
+        methodInvoker: (method, arguments) async {
+          if (method == 'terminateDuplicateApplication') {
+            throw StateError('native bridge unavailable');
+          }
+          return null;
+        },
+      );
+
+      services.quitDuplicateInstance();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(exitCodes, [0]);
     });
 
     test('Linux reports native updates unavailable', () async {

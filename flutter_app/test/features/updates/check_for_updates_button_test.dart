@@ -35,6 +35,23 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byIcon(Icons.system_update_alt), findsOneWidget);
   });
+
+  testWidgets('reports native updater failures and becomes retryable', (
+    tester,
+  ) async {
+    final platform = _FailingUpdatePlatform();
+    await tester.pumpWidget(_app(platform));
+
+    await tester.tap(find.byKey(const Key('check-for-updates')));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('Could not check for updates: Bad state: bridge unavailable'),
+      findsOneWidget,
+    );
+    expect(find.byIcon(Icons.system_update_alt), findsOneWidget);
+    expect(platform.checkForAppUpdatesCalls, 1);
+  });
 }
 
 Widget _app(FakePlatformServices platform) => ProviderScope(
@@ -52,5 +69,15 @@ class _BlockingUpdatePlatform extends FakePlatformServices {
   Future<void> checkForAppUpdates() {
     checkForAppUpdatesCalls++;
     return completion.future;
+  }
+}
+
+class _FailingUpdatePlatform extends FakePlatformServices {
+  _FailingUpdatePlatform() : super(appUpdateSupport: AppUpdateSupport.native);
+
+  @override
+  Future<void> checkForAppUpdates() async {
+    checkForAppUpdatesCalls++;
+    throw StateError('bridge unavailable');
   }
 }
