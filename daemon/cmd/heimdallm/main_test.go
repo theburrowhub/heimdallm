@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"github.com/heimdallm/daemon/internal/repoctx"
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
+	"github.com/heimdallm/daemon/internal/workgate"
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 )
@@ -35,6 +37,38 @@ func newMemStore(t *testing.T) *store.Store {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	return s
+}
+
+func TestRunStartupWorktreePruneHonorsRestoredDrain(t *testing.T) {
+	gate := workgate.New(time.Minute)
+	if _, err := gate.Prepare("updater-owner"); err != nil {
+		t.Fatalf("prepare drain: %v", err)
+	}
+	called := false
+	err := runStartupWorktreePrune(t.Context(), gate, func(context.Context) {
+		called = true
+	})
+	if !errors.Is(err, workgate.ErrDraining) {
+		t.Fatalf("startup prune during drain error = %v, want ErrDraining", err)
+	}
+	if called {
+		t.Fatal("startup prune ran while updater owned the persistent drain")
+	}
+
+	if _, err := gate.Cancel("updater-owner"); err != nil {
+		t.Fatalf("cancel drain: %v", err)
+	}
+	if err := runStartupWorktreePrune(t.Context(), gate, func(context.Context) {
+		called = true
+	}); err != nil {
+		t.Fatalf("startup prune after drain: %v", err)
+	}
+	if !called {
+		t.Fatal("startup prune did not run after drain cancellation")
+	}
+	if got := gate.Status().Total(); got != 0 {
+		t.Fatalf("active permits after startup prune = %d, want 0", got)
+	}
 }
 
 func TestAcquireRepoContextNilManagerIsError(t *testing.T) {
@@ -965,6 +999,27 @@ func TestTier2AdapterPromoteReadyUsesOrgScopedIssueTracking(t *testing.T) {
 	}
 }
 
+func TestTier2AdapterPromoteReadyDefersDuringUpdateDrain(t *testing.T) {
+	gate := workgate.New(time.Minute)
+	if _, err := gate.Prepare("updater-owner"); err != nil {
+		t.Fatalf("prepare drain: %v", err)
+	}
+	cfg := &config.Config{}
+	cfgRef := cfg
+	var cfgMu sync.Mutex
+	a := &tier2Adapter{
+		cfgMu:    &cfgMu,
+		cfg:      &cfgRef,
+		broker:   sse.NewBroker(),
+		workGate: gate,
+	}
+
+	n, err := a.PromoteReady(t.Context(), []string{"org/repo"})
+	if n != 0 || !errors.Is(err, workgate.ErrDraining) {
+		t.Fatalf("PromoteReady during drain = (%d, %v), want (0, ErrDraining)", n, err)
+	}
+}
+
 func TestTier2AdapterPromoteReadyBatchesReposWithSameIssueTracking(t *testing.T) {
 	sharedGets := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1406,6 +1461,31 @@ func tokenPerm(t *testing.T, path string) os.FileMode {
 		t.Fatalf("stat %s: %v", path, err)
 	}
 	return fi.Mode().Perm()
+}
+
+func TestLoadExistingAPITokenRecoveryPathNeverCreatesOrMutates(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := loadExistingAPIToken(dir); err == nil {
+		t.Fatal("loadExistingAPIToken created or accepted a missing credential")
+	}
+	path := filepath.Join(dir, "api_token")
+	token := strings.Repeat("r", 64)
+	if err := os.WriteFile(path, []byte(token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadExistingAPIToken(dir)
+	if err != nil || got != token {
+		t.Fatalf("loadExistingAPIToken = (%q, %v), want existing token", got, err)
+	}
+	if mode := tokenPerm(t, path); mode != 0o600 {
+		t.Fatalf("recovery token mode changed to %o, want 600", mode)
+	}
+	if err := os.WriteFile(path, []byte("short\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadExistingAPIToken(dir); err == nil {
+		t.Fatal("loadExistingAPIToken accepted an invalid credential")
+	}
 }
 
 func TestLoadOrCreateAPIToken_NewFileIsWorldReadable(t *testing.T) {

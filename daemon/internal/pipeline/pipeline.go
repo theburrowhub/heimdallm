@@ -12,6 +12,7 @@ import (
 	"github.com/heimdallm/daemon/internal/github"
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
+	"github.com/heimdallm/daemon/internal/workgate"
 )
 
 // ErrCircuitBreakerTripped is returned by Run when a review was skipped
@@ -20,6 +21,10 @@ import (
 // reason for telemetry/UI, or via errors.Is(err, ErrCircuitBreakerTripped)
 // when the reason is not needed.
 var ErrCircuitBreakerTripped = errors.New("pipeline: circuit breaker tripped")
+
+// ErrUpdateDraining is returned before any review work starts while the
+// desktop updater is draining the daemon for a safe bundle replacement.
+var ErrUpdateDraining = workgate.ErrDraining
 
 // CircuitBreakerError wraps ErrCircuitBreakerTripped with the specific
 // reason the breaker returned ("per-PR HEAD cap reached: ...", etc). Use
@@ -171,6 +176,9 @@ type Pipeline struct {
 	// review_completed, review_skipped) at the same semantic point Run
 	// makes the actual decision. Nil disables emission (legacy contract).
 	publisher Publisher
+	// workGate prevents new long-running reviews from racing an application
+	// update. Nil preserves the standalone/test behaviour.
+	workGate *workgate.Gate
 }
 
 // New creates a new Pipeline with the provided dependencies.
@@ -216,6 +224,12 @@ func (p *Pipeline) SetReviewerFetcher(r ReviewerFetcher) {
 // callers must handle lifecycle themselves — legacy contract.
 func (p *Pipeline) SetPublisher(pub Publisher) {
 	p.publisher = pub
+}
+
+// SetWorkGate coordinates the complete review transaction (fetch, agent,
+// persistence and publication) with desktop application updates.
+func (p *Pipeline) SetWorkGate(gate *workgate.Gate) {
+	p.workGate = gate
 }
 
 // stopIfRepoBecameIneligible is called at side-effect boundaries. A review
@@ -578,6 +592,9 @@ type RunOptions struct {
 	// pollers, so the automatic path keeps every protection intact. The
 	// state guards (opts.Guards: closed / draft / self-authored) still apply.
 	Force bool
+	// WorkPermit carries admission acquired at the outer worker boundary. When
+	// nil, Run acquires its own permit for backwards-compatible direct callers.
+	WorkPermit *workgate.Permit
 }
 
 // Run executes the full review pipeline for one PR and publishes the review to GitHub.
@@ -595,6 +612,15 @@ type RunOptions struct {
 //     Skip-event publication is the caller's responsibility; the pipeline
 //     only logs on this path so missed caller-side filtering is diagnosable.
 func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, error) {
+	if p.workGate != nil {
+		if !p.workGate.Accepts(opts.WorkPermit) {
+			permit, err := p.workGate.Acquire(workgate.KindReview)
+			if err != nil {
+				return nil, ErrUpdateDraining
+			}
+			defer permit.Release()
+		}
+	}
 	primary := opts.Primary
 	fallback := opts.Fallback
 	promptOverride := opts.PromptOverride
@@ -1165,6 +1191,19 @@ func (p *Pipeline) markOrphanIfPermanent(reviewID int64, submitErr error, source
 // PublishPending re-submits locally stored reviews that failed to publish to GitHub.
 // Call this on scheduler ticks to retry failed publications.
 func (p *Pipeline) PublishPending() {
+	permit, err := p.workGate.Acquire(workgate.KindPublish)
+	if err != nil {
+		if errors.Is(err, workgate.ErrDraining) {
+			slog.Debug("pipeline: pending publication deferred while application update drains")
+		} else {
+			slog.Warn("pipeline: pending publication could not acquire update permit", "err", err)
+		}
+		return
+	}
+	if permit != nil {
+		defer permit.Release()
+	}
+
 	reviews, err := p.store.ListUnpublishedReviews()
 	if err != nil || len(reviews) == 0 {
 		return

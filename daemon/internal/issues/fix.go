@@ -12,6 +12,7 @@ import (
 	"github.com/heimdallm/daemon/internal/github"
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
+	"github.com/heimdallm/daemon/internal/workgate"
 )
 
 // FixRunner drives phase 3 of the PR review-state vigilance feature
@@ -40,14 +41,20 @@ import (
 //   - The CHANGES_REQUESTED review's body is sanitised through the
 //     same untrusted-text fence the issue triage pipeline uses.
 type FixRunner struct {
-	store   fixStore
-	gh      fixGH
-	exec    FixExecutor
-	broker  eventPublisher
-	cfgFn   func() config.ReviewFixConfig
-	loginFn func() string
-	nowFn   func() time.Time
+	store    fixStore
+	gh       fixGH
+	exec     FixExecutor
+	broker   eventPublisher
+	cfgFn    func() config.ReviewFixConfig
+	loginFn  func() string
+	nowFn    func() time.Time
+	workGate *workgate.Gate
 }
+
+// SetWorkGate admits a complete review-fix transaction. A Tier 3 outer permit
+// is reused through ctx so the nested runner never self-rejects after draining
+// has started.
+func (r *FixRunner) SetWorkGate(gate *workgate.Gate) { r.workGate = gate }
 
 type fixStore interface {
 	IncrementPRReviewFixCount(prID int64) (int, error)
@@ -108,6 +115,13 @@ func (r *FixRunner) Run(ctx context.Context, pr *store.PR, originIssueID int64) 
 	cfg := r.cfgFn()
 	if !cfg.Enabled {
 		return nil
+	}
+	ctx, permit, owned, err := r.workGate.AcquireContext(ctx, workgate.KindReviewFix)
+	if err != nil {
+		return ErrUpdateDraining
+	}
+	if owned {
+		defer permit.Release()
 	}
 
 	bot := r.loginFn()

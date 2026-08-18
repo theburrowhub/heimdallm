@@ -338,6 +338,123 @@ func waitForRemoteRequest(t *testing.T, requests <-chan string, want string) {
 	}
 }
 
+func TestRunProcessPreparingJournalBlocksStatefulBootstrapBeforeConfirmation(t *testing.T) {
+	dataDir := t.TempDir()
+	localDirBase := filepath.Join(dataDir, "repos")
+	if err := os.MkdirAll(localDirBase, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configPath, _ := writeLifecycleConfig(t, dataDir, localDirBase, "1h")
+	const (
+		leaseID = "018f6d3e-91aa-7a45-b2c0-1d8c3b4a5968"
+		apiKey  = "0123456789abcdef0123456789abcdef"
+	)
+	if err := os.WriteFile(filepath.Join(dataDir, "api_token"), []byte(apiKey), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	journal, err := json.Marshal(map[string]any{
+		"schemaVersion":          1,
+		"expectedVersion":        "recovery-next-version",
+		"phase":                  "preparing",
+		"leaseID":                leaseID,
+		"daemonPID":              4242,
+		"daemonBootID":           "boot-before-crash",
+		"daemonVersion":          "recovery-test-version",
+		"launchAgentWasLoaded":   true,
+		"launchAgentWasDisabled": false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(dataDir, "app-update-recovery.json"),
+		journal,
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	expiredMarker := []byte(`{"lease_id":"` + leaseID + `","expires_at":"2000-01-01T00:00:00Z"}`)
+	if err := os.WriteFile(filepath.Join(dataDir, "update-drain.json"), expiredMarker, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("HEIMDALLM_DATA_DIR", dataDir)
+	t.Setenv("HEIMDALLM_CONFIG_PATH", configPath)
+	t.Setenv("GITHUB_TOKEN", "recovery-test-token")
+	originalArgs := os.Args
+	originalLogger := slog.Default()
+	originalVersion := version
+	os.Args = []string{"heimdallm"}
+	version = "recovery-test-version"
+
+	listenerCh := make(chan net.Listener, 1)
+	result := make(chan int, 1)
+	deps := processDependencies{
+		newGitHubClient: gh.NewClient,
+		listen: func(_ int, bindAddr string) (net.Listener, error) {
+			listener, listenErr := server.Listen(0, bindAddr)
+			if listenErr == nil {
+				listenerCh <- listener
+			}
+			return listener, listenErr
+		},
+	}
+	go func() { result <- runProcessWithDependencies(true, deps) }()
+
+	var listener net.Listener
+	select {
+	case listener = <-listenerCh:
+	case <-time.After(lifecycleTestTimeout):
+		os.Args = originalArgs
+		slog.SetDefault(originalLogger)
+		version = originalVersion
+		t.Fatal("recovery daemon did not expose its minimal listener")
+	}
+	t.Cleanup(func() {
+		_ = listener.Close()
+		select {
+		case <-result:
+		case <-time.After(3 * time.Second):
+		}
+		os.Args = originalArgs
+		slog.SetDefault(originalLogger)
+		version = originalVersion
+	})
+
+	baseURL := "http://" + listener.Addr().String()
+	response, body := getHealth(t, baseURL)
+	if response.StatusCode != http.StatusServiceUnavailable || body["status"] != "starting" {
+		t.Fatalf("recovery health = %d %#v, want starting 503", response.StatusCode, body)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "heimdallm.db")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stateful SQLite opened before bootstrap confirmation: %v", err)
+	}
+
+	request, err := http.NewRequest(http.MethodPost, baseURL+"/update/prepare", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("X-Heimdallm-Token", apiKey)
+	request.Header.Set(server.HeaderUpdateLease, leaseID)
+	prepareResponse, err := (&http.Client{Timeout: 2 * time.Second}).Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepareResponse.Body.Close()
+	var status server.UpdatePreparationStatus
+	if err := json.NewDecoder(prepareResponse.Body).Decode(&status); err != nil {
+		t.Fatal(err)
+	}
+	if prepareResponse.StatusCode != http.StatusOK || !status.Sealed ||
+		status.BootstrapAuthorized || status.LeaseID != leaseID {
+		t.Fatalf("restored prepare status = %d %+v, want sealed unconfirmed owner",
+			prepareResponse.StatusCode, status)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "heimdallm.db")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("minimal update handshake opened SQLite: %v", err)
+	}
+}
+
 func TestRunProcessFullLifecycleStartingReloadManualOperationsAndAPIShutdown(t *testing.T) {
 	fixture, userRequested := startLifecycleFixture(t, true)
 

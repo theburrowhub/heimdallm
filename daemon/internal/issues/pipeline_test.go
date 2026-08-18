@@ -17,7 +17,26 @@ import (
 	"github.com/heimdallm/daemon/internal/issues"
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
+	"github.com/heimdallm/daemon/internal/workgate"
 )
+
+func TestRunRejectsNewIssueWorkDuringUpdateDrain(t *testing.T) {
+	p := issues.New(nil, nil, nil, nil, nil, nil)
+	gate := workgate.New(time.Minute)
+	if _, err := gate.Prepare("test-owner"); err != nil {
+		t.Fatal(err)
+	}
+	p.SetWorkGate(gate)
+
+	review, err := p.Run(
+		context.Background(),
+		&github.Issue{Mode: config.IssueModeDevelop},
+		issues.RunOptions{},
+	)
+	if review != nil || !errors.Is(err, issues.ErrUpdateDraining) {
+		t.Fatalf("Run during drain = (%v, %v), want (nil, ErrUpdateDraining)", review, err)
+	}
+}
 
 // ── fakes ────────────────────────────────────────────────────────────────────
 

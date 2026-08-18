@@ -14,7 +14,22 @@ import (
 	"github.com/heimdallm/daemon/internal/pipeline"
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
+	"github.com/heimdallm/daemon/internal/workgate"
 )
+
+func TestRunRejectsNewReviewDuringUpdateDrain(t *testing.T) {
+	p := pipeline.New(nil, nil, nil, nil)
+	gate := workgate.New(time.Minute)
+	if _, err := gate.Prepare("test-owner"); err != nil {
+		t.Fatal(err)
+	}
+	p.SetWorkGate(gate)
+
+	review, err := p.Run(&github.PullRequest{}, pipeline.RunOptions{})
+	if review != nil || !errors.Is(err, pipeline.ErrUpdateDraining) {
+		t.Fatalf("Run during drain = (%v, %v), want (nil, ErrUpdateDraining)", review, err)
+	}
+}
 
 type fakeGH struct {
 	diff     string

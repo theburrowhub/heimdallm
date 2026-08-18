@@ -13,22 +13,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/heimdallm/daemon/internal/procgroup"
 )
 
 const executionTimeout = 5 * time.Minute
 const cliHelpTimeout = 2 * time.Second
-
-// processGroupTermGrace is how long a cancelled execution may keep running
-// after SIGTERM before the whole group is killed outright (see #614).
-const processGroupTermGrace = time.Second
-
-// waitDelayAfterExit bounds how long Wait blocks on inherited stdout/stderr
-// pipes after the command itself is done: a descendant holding them open used to
-// stall the pipeline long past the timeout (see #614).
-const waitDelayAfterExit = 3 * time.Second
 
 // ReviewResult is the parsed JSON response from the AI CLI.
 type ReviewResult struct {
@@ -102,14 +94,11 @@ func OptionsForSelectedCLI(primary, selected string, opts ExecOptions) ExecOptio
 
 // Executor runs AI CLI tools for code review.
 type Executor struct {
-	// groupsMu guards inFlightGroups, which records the process-group IDs of
-	// executions currently running. Each execution gets its own group so a
-	// timeout can reach the grandchild that holds the provider connection
-	// (#614) — but that also detaches it from any group-directed signal the
-	// daemon receives, so the shutdown path needs this registry to sweep what
-	// is still running. See TerminateAll.
+	// groupsMu guards inFlightGroups. Each handle owns a sentinel-led process
+	// group whose PGID remains reserved through TERM/KILL cleanup, so the
+	// shutdown path can sweep in-flight agents without a recycled-PGID race.
 	groupsMu       sync.Mutex
-	inFlightGroups map[int]*atomic.Bool
+	inFlightGroups map[int]*procgroup.Process
 }
 
 // New creates a new Executor.
@@ -117,15 +106,14 @@ func New() *Executor {
 	return &Executor{}
 }
 
-// trackGroup registers a running execution's process group, along with the flag
-// that reports whether its child has been reaped.
-func (e *Executor) trackGroup(pgid int, reaped *atomic.Bool) {
+// trackGroup registers a running execution's owned process group.
+func (e *Executor) trackGroup(process *procgroup.Process) {
 	e.groupsMu.Lock()
 	defer e.groupsMu.Unlock()
 	if e.inFlightGroups == nil {
-		e.inFlightGroups = make(map[int]*atomic.Bool)
+		e.inFlightGroups = make(map[int]*procgroup.Process)
 	}
-	e.inFlightGroups[pgid] = reaped
+	e.inFlightGroups[process.ID()] = process
 }
 
 // untrackGroup forgets an execution's process group once Wait has returned.
@@ -143,14 +131,10 @@ func (e *Executor) untrackGroup(pgid int) {
 // agents running and spending provider quota — the #614 symptom. Safe to call
 // when nothing is running.
 func (e *Executor) TerminateAll() {
-	type liveGroup struct {
-		pgid   int
-		reaped *atomic.Bool
-	}
 	e.groupsMu.Lock()
-	groups := make([]liveGroup, 0, len(e.inFlightGroups))
-	for pgid, reaped := range e.inFlightGroups {
-		groups = append(groups, liveGroup{pgid: pgid, reaped: reaped})
+	groups := make([]*procgroup.Process, 0, len(e.inFlightGroups))
+	for _, process := range e.inFlightGroups {
+		groups = append(groups, process)
 	}
 	e.groupsMu.Unlock()
 
@@ -158,27 +142,18 @@ func (e *Executor) TerminateAll() {
 		return
 	}
 	slog.Info("executor: terminating in-flight executions", "groups", len(groups))
-	// Registration alone does not prove the group is still ours: untrackGroup
-	// runs after Wait has reaped the child, so a registered pgid can already be
-	// free. The per-execution reaped flag is set before that, so checking it
-	// immediately before each signal keeps the sweep off recycled pgids in all
-	// but the gap between those two statements — the same residual window
-	// documented for the cancellation path, and likewise #614's to close.
-	for _, g := range groups {
-		if g.reaped.Load() {
-			continue
-		}
-		if err := killGroup(g.pgid, syscall.SIGTERM); err != nil {
-			slog.Debug("executor: process group already gone", "pgid", g.pgid, "err", err)
+	// Terminate is idempotent and keeps the sentinel unreaped while escalation
+	// is pending. A process concurrently completing can therefore never turn a
+	// snapshot entry into a signal aimed at an unrelated, recycled PGID.
+	for _, process := range groups {
+		if err := process.Terminate(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			slog.Debug("executor: terminate process group", "pgid", process.ID(), "err", err)
 		}
 	}
-	time.Sleep(processGroupTermGrace)
-	for _, g := range groups {
-		if g.reaped.Load() {
-			continue
-		}
-		if err := killGroup(g.pgid, syscall.SIGKILL); err != nil {
-			slog.Debug("executor: process group already gone", "pgid", g.pgid, "err", err)
+	time.Sleep(procgroup.TermGrace)
+	for _, process := range groups {
+		if err := process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			slog.Debug("executor: kill process group", "pgid", process.ID(), "err", err)
 		}
 	}
 }
@@ -1352,43 +1327,6 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 	args := buildArgs(cli, opts, workDirFlags)
 	cmd := exec.CommandContext(ctx, cliPath, args...)
 	cmd.Stdin = strings.NewReader(prompt)
-	// Every supported CLI is a launcher: the process we start spawns the one
-	// that actually talks to the provider. exec.CommandContext signals only the
-	// direct child, so on timeout the launcher died while its grandchild was
-	// reparented to init and kept spending provider quota (#614). Give the
-	// execution its own process group and signal the whole group instead.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	// Cancellation escalates within the group: SIGTERM, then SIGKILL for a
-	// descendant that ignores it. Both are aimed at the group while the
-	// execution is still live, because once every member has exited the kernel
-	// may hand that pgid to somebody else and a late signal would hit an
-	// unrelated group. `reaped` is set the instant Wait returns and checked
-	// immediately before the kill: that narrows the window to the gap between
-	// those two statements, it does not remove it. Closing it entirely requires
-	// reserving the pgid with a wait-without-reap (wait4(WNOWAIT)/pidfd), which
-	// belongs to #614.
-	runDone := make(chan struct{})
-	var reaped atomic.Bool
-	cmd.Cancel = func() error {
-		err := signalProcessGroup(cmd, syscall.SIGTERM)
-		go func() {
-			select {
-			case <-time.After(processGroupTermGrace):
-				if reaped.Load() {
-					return // the pgid may already be reused — leave it alone
-				}
-				if killErr := signalProcessGroup(cmd, syscall.SIGKILL); killErr != nil {
-					slog.Debug("executor: process group already gone", "cli", cli, "err", killErr)
-				}
-			case <-runDone:
-			}
-		}()
-		return err
-	}
-	// Bound the wait on inherited pipes. Without this, Wait blocks until every
-	// copy of stdout/stderr is closed — a descendant holding them stalled the
-	// pipeline for as long as it chose to run.
-	cmd.WaitDelay = waitDelayAfterExit
 
 	// Augment PATH with paths from the login shell so the CLI can find its own
 	// dependencies, without running stdin THROUGH the shell (which would cause
@@ -1410,32 +1348,25 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	// Start and Wait are split rather than calling Run so the process group can
-	// be registered while the execution is live — TerminateAll needs it to reach
-	// agents that are still running when the daemon shuts down.
+	// procgroup.Start creates a sentinel-led group before starting the CLI. The
+	// sentinel reserves the PGID until Process.Wait has completed TERM/KILL
+	// cleanup, including the clean-exit/ErrWaitDelay case.
 	var pgid int
-	runErr := cmd.Start()
+	process, runErr := procgroup.Start(cmd)
 	if runErr == nil {
-		pgid = cmd.Process.Pid // Setpgid makes the child its own group leader
-		e.trackGroup(pgid, &reaped)
-		runErr = cmd.Wait()
-		reaped.Store(true) // before untrackGroup: no signal must follow the reap
+		pgid = process.ID()
+		e.trackGroup(process)
+		runErr = process.Wait()
 		e.untrackGroup(pgid)
 	}
-	close(runDone) // stop the escalation goroutine
 
 	// WaitDelay also fires when the command itself exited cleanly but a
 	// descendant still holds the inherited pipes — the exact shape of #614. The
-	// run succeeded and its output is already buffered, so return it instead of
-	// discarding a complete review. Such a descendant is NOT swept here: the
-	// child has been reaped, so its pgid may already belong to another group, and
-	// closing that leak safely needs a wait-without-reap (#614). This is the one
-	// place with positive evidence of a live leaked process, so log its identity
-	// — pgid and leader PID — to make it traceable while #614 is open.
+	// run succeeded and its output is already buffered. Process.Wait has already
+	// terminated and reaped the owned group, so return the successful payload
+	// without leaving background agent work behind.
 	if errors.Is(runErr, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.ExitCode() == 0 {
-		slog.Warn("executor: CLI exited 0 but a descendant held the output pipes; returning collected output and leaving the descendant running",
-			// With Setpgid the group ID *is* the leader's PID, so one field
-			// identifies both the group and the process to look for.
+		slog.Warn("executor: CLI exited 0 but a descendant held the output pipes; returning collected output after cleaning its process group",
 			"cli", cli, "bytes", stdout.Len(), "pgid", pgid)
 		return stdout.Bytes(), nil
 	}
@@ -1451,22 +1382,9 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 	return stdout.Bytes(), nil
 }
 
-// signalProcessGroup sends sig to the entire process group led by cmd's child.
-// Setpgid makes the child's PID the group ID, so negating it addresses the child
-// and every descendant that has not created a group of its own. Returns
-// os.ErrProcessDone when there is no process left to signal.
-func signalProcessGroup(cmd *exec.Cmd, sig syscall.Signal) error {
-	if cmd == nil || cmd.Process == nil {
-		return os.ErrProcessDone
-	}
-	return killGroup(cmd.Process.Pid, sig)
-}
-
-// killGroup signals the process group led by pgid, reporting a group that has
-// already exited as os.ErrProcessDone. That translation matters for cmd.Cancel:
-// os/exec only ignores a Cancel error equivalent to os.ErrProcessDone, so a raw
-// ESRCH would come back out of Wait and mask a cancellation as
-// "executor: run <cli>: no such process".
+// killGroup is retained for the low-level translation tests in this package.
+// Runtime execution-group signaling is centralized in procgroup, which also
+// owns the sentinel that makes signaling safe.
 func killGroup(pgid int, sig syscall.Signal) error {
 	if err := syscall.Kill(-pgid, sig); err != nil {
 		if errors.Is(err, syscall.ESRCH) {

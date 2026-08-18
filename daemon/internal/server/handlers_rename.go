@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/heimdallm/daemon/internal/pipeline"
 )
 
 // renameRequestTimeout caps the reconciler call so a stuck SQLite
@@ -47,6 +49,10 @@ func (srv *Server) handleAdminRepoRename(w http.ResponseWriter, r *http.Request)
 	ctx, cancel := context.WithTimeout(r.Context(), renameRequestTimeout)
 	defer cancel()
 	if err := srv.repoRenameFn(ctx, req.OldRepo, req.NewRepo); err != nil {
+		if errors.Is(err, pipeline.ErrUpdateDraining) {
+			writeUpdateDrainConflict(w)
+			return
+		}
 		slog.Error("POST /admin/repo-rename failed",
 			"old_repo", req.OldRepo, "new_repo", req.NewRepo, "err", err)
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {

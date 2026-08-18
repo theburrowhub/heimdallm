@@ -19,6 +19,7 @@ import (
 	"github.com/heimdallm/daemon/internal/github"
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
+	"github.com/heimdallm/daemon/internal/workgate"
 )
 
 // ErrCircuitBreakerTripped is returned by Run when a triage was skipped
@@ -28,6 +29,10 @@ import (
 // errors.Is(err, ErrCircuitBreakerTripped) when the reason is not needed.
 // See theburrowhub/heimdallm#292.
 var ErrCircuitBreakerTripped = errors.New("issues pipeline: circuit breaker tripped")
+
+// ErrUpdateDraining is returned before an issue run starts while the desktop
+// updater is draining the daemon for a safe bundle replacement.
+var ErrUpdateDraining = workgate.ErrDraining
 
 // CircuitBreakerError wraps ErrCircuitBreakerTripped with the specific
 // reason the breaker returned. Use errors.As on this type to read Reason
@@ -267,6 +272,10 @@ type RunOptions struct {
 	// change collapse semantics — it is diagnostic only. Default (empty) leaves
 	// the key purely issue.UpdatedAt, preserving existing caller behaviour.
 	InFlightSalt string
+
+	// WorkPermit carries admission acquired before caller preflight/checkout.
+	// Nil keeps direct callers safe by making Run acquire its own permit.
+	WorkPermit *workgate.Permit
 }
 
 // Pipeline runs a single issue triage or implementation end-to-end.
@@ -288,6 +297,10 @@ type Pipeline struct {
 	// the new review-state checker observes external reviews on them
 	// (#482). Nil-safe: single-tier setups (some tests) leave it unset.
 	watch WatchEnroller
+
+	// workGate covers the complete triage/refinement/implementation
+	// transaction. Nil preserves standalone and unit-test behaviour.
+	workGate *workgate.Gate
 }
 
 // SetWatchEnroller wires the Tier 3 watch enroller so auto_implement
@@ -305,6 +318,9 @@ func (p *Pipeline) SetBotLogin(login string) { p.botLogin = login }
 func (p *Pipeline) SetCircuitBreakerLimits(limits *store.IssueCircuitBreakerLimits) {
 	p.breaker = limits
 }
+
+// SetWorkGate coordinates complete issue runs with desktop app updates.
+func (p *Pipeline) SetWorkGate(gate *workgate.Gate) { p.workGate = gate }
 
 // issueStore is the subset of *store.Store the pipeline needs. Kept narrow
 // so tests can substitute a fake without bringing in SQLite.
@@ -373,14 +389,31 @@ func New(s issueStore, gh issueGitHub, exec CLIExecutor, git GitOps, broker Publ
 // passes a context so long-running network operations (git fetch / push,
 // CLI invocation) can be cancelled on daemon shutdown.
 func (p *Pipeline) Run(ctx context.Context, issue *github.Issue, opts RunOptions) (*store.IssueReview, error) {
-	if opts.ReleaseRepoContext != nil {
-		defer opts.ReleaseRepoContext()
-	}
 	if issue == nil {
 		return nil, fmt.Errorf("issues pipeline: nil issue")
 	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if p.workGate != nil {
+		kind := workgate.KindIssue
+		if issue.Mode == config.IssueModeDevelop {
+			kind = workgate.KindImplementation
+		}
+		if !p.workGate.Accepts(opts.WorkPermit) {
+			permit, err := p.workGate.Acquire(kind)
+			if err != nil {
+				return nil, ErrUpdateDraining
+			}
+			defer permit.Release()
+		}
+	}
+	// Keep the admission permit until the caller-owned checkout cleanup has
+	// completed. This ordering matters for direct pipeline callers that do not
+	// already carry an outer permit: Prepare must still see the transaction as
+	// active while its temporary worktree is being released.
+	if opts.ReleaseRepoContext != nil {
+		defer opts.ReleaseRepoContext()
 	}
 
 	// Single-flight in-flight claim keyed on github_issue_id (#458). Any

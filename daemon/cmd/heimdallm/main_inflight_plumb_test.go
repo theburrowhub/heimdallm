@@ -192,7 +192,7 @@ func TestTier2Adapter_ProcessPR_PlumbsHeadSHAIntoGhPR(t *testing.T) {
 		sawGhPR   *gh.PullRequest
 		callCount int
 	)
-	runReview := func(pr *gh.PullRequest, aiCfg config.RepoAI) *store.Review {
+	runReview := func(_ context.Context, pr *gh.PullRequest, aiCfg config.RepoAI) *store.Review {
 		mu.Lock()
 		defer mu.Unlock()
 		sawGhPR = pr
@@ -263,7 +263,7 @@ func TestTier2Adapter_HandleChange_PlumbsHeadSHAIntoGhPR(t *testing.T) {
 		sawGhPR   *gh.PullRequest
 		callCount int
 	)
-	runReview := func(pr *gh.PullRequest, aiCfg config.RepoAI) *store.Review {
+	runReview := func(_ context.Context, pr *gh.PullRequest, aiCfg config.RepoAI) *store.Review {
 		mu.Lock()
 		defer mu.Unlock()
 		sawGhPR = pr
@@ -388,7 +388,7 @@ func TestTier2Adapter_ProcessPR_ConcurrentCallsCollapseToOneReview(t *testing.T)
 	var claimSignaler sync.Once
 
 	var reviewBody int32
-	runReview := func(pr *gh.PullRequest, aiCfg config.RepoAI) *store.Review {
+	runReview := func(_ context.Context, pr *gh.PullRequest, aiCfg config.RepoAI) *store.Review {
 		// Mirror the production claim logic from runReview in main.go. If
 		// the caller forgot to set Head.SHA (the #264 bug) OR the PR is
 		// not yet upserted, we still return without running — matches the

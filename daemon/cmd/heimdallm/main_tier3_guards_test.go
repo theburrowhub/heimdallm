@@ -42,7 +42,7 @@ func TestTier3Adapter_HandleChange_SkipsClosedPR(t *testing.T) {
 	)
 
 	runReviewCalls := 0
-	runReview := func(pr *gh.PullRequest, aiCfg config.RepoAI) *store.Review {
+	runReview := func(_ context.Context, pr *gh.PullRequest, aiCfg config.RepoAI) *store.Review {
 		runReviewCalls++
 		return nil
 	}
@@ -129,7 +129,7 @@ func TestTier3Adapter_HandleChange_SkipsNonMonitoredRepo(t *testing.T) {
 		cfg:     &cfg,
 		loginMu: &loginMu,
 		login:   &login,
-		runReview: func(*gh.PullRequest, config.RepoAI) *store.Review {
+		runReview: func(context.Context, *gh.PullRequest, config.RepoAI) *store.Review {
 			runReviewCalls++
 			return nil
 		},

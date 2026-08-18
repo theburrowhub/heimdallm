@@ -40,7 +40,7 @@ func newTier3Adapter(t *testing.T, cfg *config.Config, mgr *repoctx.Manager, got
 		login:   &login,
 		repoCtx: mgr,
 		ghToken: "test-token",
-		runReview: func(_ *gh.PullRequest, aiCfg config.RepoAI) *store.Review {
+		runReview: func(_ context.Context, _ *gh.PullRequest, aiCfg config.RepoAI) *store.Review {
 			*calls++
 			*got = aiCfg
 			return nil
@@ -316,7 +316,7 @@ func TestTier3Adapter_HandleChange_ResolvesWorkDirThroughRepoContext(t *testing.
 		loginMu: &loginMu,
 		login:   &login,
 		repoCtx: nil, // acquisition fails — exercises the fallback contract
-		runReview: func(_ *gh.PullRequest, aiCfg config.RepoAI) *store.Review {
+		runReview: func(_ context.Context, _ *gh.PullRequest, aiCfg config.RepoAI) *store.Review {
 			called++
 			gotAI = aiCfg
 			return nil

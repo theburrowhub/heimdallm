@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/heimdallm/daemon/internal/workgate"
 )
 
 func TestHandleAdminRepoRename_RequiresAuth(t *testing.T) {
@@ -46,6 +48,25 @@ func TestHandleAdminRepoRename_DispatchesReconciler(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), `"status":"ok"`) {
 		t.Errorf("body = %s, want status ok", w.Body.String())
+	}
+}
+
+func TestHandleAdminRepoRename_ReportsUpdateDrainAsConflict(t *testing.T) {
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetRepoRenameFn(func(context.Context, string, string) error {
+		return workgate.ErrDraining
+	})
+
+	req := httptest.NewRequest("POST", "/admin/repo-rename",
+		strings.NewReader(`{"old_repo":"acme/old","new_repo":"acme/new"}`))
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", w.Code)
+	}
+	if w.Header().Get("Retry-After") == "" {
+		t.Fatal("missing Retry-After header")
 	}
 }
 

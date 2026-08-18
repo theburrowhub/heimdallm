@@ -54,4 +54,8 @@ func TestExecuteRawKeepsOutputWhenDescendantHoldsPipesAfterSuccess(t *testing.T)
 	if got := strings.TrimSpace(string(out)); got != "agent output" {
 		t.Errorf("stdout = %q, want %q", got, "agent output")
 	}
+	pid := readPIDFile(t, pidFile)
+	if processRunning(pid) {
+		t.Fatalf("descendant %d was still running when ExecuteRaw returned", pid)
+	}
 }
