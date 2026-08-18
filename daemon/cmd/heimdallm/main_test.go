@@ -65,6 +65,53 @@ func TestUpdateServerErrorMapsEveryUpdaterProtocolFailure(t *testing.T) {
 	}
 }
 
+func TestSnapshotUpdatePreparationReportsEveryLifecycleState(t *testing.T) {
+	expiresAt := time.Now().UTC().Add(time.Minute)
+	tests := []struct {
+		name     string
+		snapshot workgate.Snapshot
+		want     string
+	}{
+		{name: "running", snapshot: workgate.Snapshot{}, want: "running"},
+		{
+			name: "draining active work",
+			snapshot: workgate.Snapshot{
+				Draining:       true,
+				LeaseID:        "owner",
+				LeaseExpiresAt: expiresAt,
+				Active:         map[workgate.Kind]int{workgate.KindReview: 2},
+			},
+			want: "draining",
+		},
+		{
+			name: "sealed ready",
+			snapshot: workgate.Snapshot{
+				Draining:            true,
+				Sealed:              true,
+				BootstrapAuthorized: true,
+				LeaseID:             "owner",
+			},
+			want: "ready",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := snapshotUpdatePreparation(tt.snapshot, "boot-id")
+			if got.State != tt.want || got.BootID != "boot-id" || got.PID <= 0 {
+				t.Fatalf("status = %+v, want state %q and process identity", got, tt.want)
+			}
+			if got.ActiveTotal != tt.snapshot.Total() || got.LeaseID != tt.snapshot.LeaseID ||
+				got.Sealed != tt.snapshot.Sealed || got.BootstrapAuthorized != tt.snapshot.BootstrapAuthorized ||
+				!got.LeaseExpiresAt.Equal(tt.snapshot.LeaseExpiresAt) {
+				t.Fatalf("status did not preserve snapshot: got %+v, source %+v", got, tt.snapshot)
+			}
+			if len(tt.snapshot.Active) > 0 && got.Active[string(workgate.KindReview)] != 2 {
+				t.Fatalf("active map = %#v, want reviews=2", got.Active)
+			}
+		})
+	}
+}
+
 func TestAcquireUpdateWorkOwnsOnlyTopLevelPermit(t *testing.T) {
 	ctx, releaseNilGate, err := acquireUpdateWork(nil, nil, workgate.KindReview)
 	if err != nil {
@@ -106,6 +153,63 @@ func TestAcquireUpdateWorkOwnsOnlyTopLevelPermit(t *testing.T) {
 	}
 	if releaseDraining != nil {
 		t.Fatal("acquire during drain returned a cleanup for unadmitted work")
+	}
+}
+
+func TestGuardUpdateHandlersCarryPermitAndDeferDuringDrain(t *testing.T) {
+	gate := workgate.New(time.Minute)
+	voidCalls := 0
+	voidHandler := guardUpdateVoidHandler(
+		gate,
+		workgate.KindReview,
+		"test void deferred",
+		func(ctx context.Context, message string) {
+			voidCalls++
+			if message != "review" {
+				t.Errorf("void message = %q, want review", message)
+			}
+			if workgate.PermitFromContext(ctx) == nil {
+				t.Error("void handler did not receive its update permit")
+			}
+			if got := gate.Status().Total(); got != 1 {
+				t.Errorf("active permits inside void handler = %d, want 1", got)
+			}
+		},
+	)
+	voidHandler(t.Context(), "review")
+	if voidCalls != 1 || gate.Status().Total() != 0 {
+		t.Fatalf("void handler cleanup = calls %d, active %d; want 1, 0",
+			voidCalls, gate.Status().Total())
+	}
+
+	resultHandler := guardUpdateResultHandler(
+		gate,
+		workgate.KindPublish,
+		"test result deferred",
+		-1,
+		func(ctx context.Context, message int) int {
+			if workgate.PermitFromContext(ctx) == nil {
+				t.Error("result handler did not receive its update permit")
+			}
+			return message + 1
+		},
+	)
+	if got := resultHandler(t.Context(), 41); got != 42 {
+		t.Fatalf("result handler = %d, want 42", got)
+	}
+	if got := gate.Status().Total(); got != 0 {
+		t.Fatalf("active permits after result handler = %d, want 0", got)
+	}
+
+	if _, err := gate.Prepare("updater-owner"); err != nil {
+		t.Fatalf("prepare drain: %v", err)
+	}
+	voidHandler(t.Context(), "deferred")
+	if voidCalls != 1 {
+		t.Fatalf("void handler ran during drain: calls = %d, want 1", voidCalls)
+	}
+	if got := resultHandler(t.Context(), 99); got != -1 {
+		t.Fatalf("result during drain = %d, want deferred sentinel -1", got)
 	}
 }
 

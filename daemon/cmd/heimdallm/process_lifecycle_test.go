@@ -708,6 +708,21 @@ func TestRunProcessFullLifecycleStartingReloadManualOperationsAndAPIShutdown(t *
 		t.Fatalf("cancel live update = %d %+v, want running 200", cancelResponse.StatusCode, cancelledStatus)
 	}
 
+	response = doLifecycleRequest(t, http.MethodDelete,
+		fixture.apiBaseURL+"/config/clones/"+url.PathEscape("org/repo"), apiToken)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("single clone cleanup after update = %d, want 200", response.StatusCode)
+	}
+	response = doLifecycleRequest(t, http.MethodDelete, fixture.apiBaseURL+"/config/clones", apiToken)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("all clone cleanup after update = %d, want 200", response.StatusCode)
+	}
+	response = doLifecycleJSONRequest(t, http.MethodPost, fixture.apiBaseURL+"/admin/repo-rename",
+		apiToken, `{"old_repo":"org/repo","new_repo":"org/repo"}`)
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("rename validation after update = %d, want 400", response.StatusCode)
+	}
+
 	response = doLifecycleRequest(t, http.MethodPost, fixture.apiBaseURL+"/shutdown", apiToken)
 	if response.StatusCode != http.StatusAccepted {
 		t.Fatalf("shutdown status = %d, want 202", response.StatusCode)
@@ -822,6 +837,71 @@ func TestRunProcessRejectsMalformedConfigAndReleasesLock(t *testing.T) {
 	}
 	if code := run(); code != 1 {
 		t.Fatalf("second run malformed config = %d, want 1 after lock release", code)
+	}
+}
+
+func TestRunProcessRejectsMalformedUpdateRecoveryFiles(t *testing.T) {
+	originalArgs := os.Args
+	originalLogger := slog.Default()
+	os.Args = []string{"heimdallm"}
+	t.Cleanup(func() {
+		os.Args = originalArgs
+		slog.SetDefault(originalLogger)
+	})
+
+	for _, fileName := range []string{"app-update-recovery.json", "update-drain.json"} {
+		t.Run(fileName, func(t *testing.T) {
+			dataDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dataDir, fileName), []byte("not-json"), 0o600); err != nil {
+				t.Fatalf("write malformed %s: %v", fileName, err)
+			}
+			t.Setenv("HEIMDALLM_DATA_DIR", dataDir)
+			t.Setenv("HEIMDALLM_CONFIG_PATH", filepath.Join(dataDir, "config.toml"))
+
+			if code := runProcessWithDependencies(true, processDependencies{}); code != 1 {
+				t.Fatalf("run with malformed %s = %d, want 1", fileName, code)
+			}
+		})
+	}
+}
+
+func TestRunProcessRestoredBarrierRequiresExistingAPIToken(t *testing.T) {
+	dataDir := t.TempDir()
+	configPath, _ := writeLifecycleConfig(t, dataDir, filepath.Join(dataDir, "repos"), "1h")
+	journal := []byte(`{
+		"schemaVersion":1,
+		"expectedVersion":"next-version",
+		"phase":"sealed",
+		"leaseID":"018f6d3e-91aa-7a45-b2c0-1d8c3b4a5968",
+		"daemonPID":4242,
+		"daemonBootID":"previous-boot",
+		"daemonVersion":"previous-version",
+		"launchAgentWasLoaded":true,
+		"launchAgentWasDisabled":false
+	}`)
+	if err := os.WriteFile(filepath.Join(dataDir, "app-update-recovery.json"), journal, 0o600); err != nil {
+		t.Fatalf("write recovery journal: %v", err)
+	}
+	t.Setenv("HEIMDALLM_DATA_DIR", dataDir)
+	t.Setenv("HEIMDALLM_CONFIG_PATH", configPath)
+	originalArgs := os.Args
+	originalLogger := slog.Default()
+	os.Args = []string{"heimdallm"}
+	t.Cleanup(func() {
+		os.Args = originalArgs
+		slog.SetDefault(originalLogger)
+	})
+
+	deps := processDependencies{
+		listen: func(_ int, bindAddr string) (net.Listener, error) {
+			return server.Listen(0, bindAddr)
+		},
+	}
+	if code := runProcessWithDependencies(true, deps); code != 1 {
+		t.Fatalf("run restored barrier without API token = %d, want 1", code)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "heimdallm.db")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("restored barrier opened SQLite without its authentication token: %v", err)
 	}
 }
 
