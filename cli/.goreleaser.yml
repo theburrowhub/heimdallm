@@ -18,14 +18,16 @@ builds:
       - -s -w -X main.version={{.Version}}
 
 archives:
-  - format: tar.gz
+  - formats:
+      - tar.gz
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     format_overrides:
       - goos: windows
-        format: zip
+        formats:
+          - zip
 
 checksum:
-  name_template: "checksums.txt"
+  name_template: "cli-checksums.txt"
 
 changelog:
   sort: asc
@@ -41,6 +43,9 @@ brews:
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     directory: Formula
+    # Generate the formula in dist, but publish it only after the GitHub draft
+    # is atomically promoted by the final release job.
+    skip_upload: true
     homepage: https://github.com/theburrowhub/heimdallm
     description: "CLI client for Heimdallm — monitor PRs, issues, and activity from the terminal"
     license: MIT
@@ -53,5 +58,9 @@ release:
   github:
     owner: theburrowhub
     name: heimdallm
+  draft: true
+  use_existing_draft: true
+  replace_existing_artifacts: true
+  make_latest: false
   mode: keep-existing
   extra_files: []

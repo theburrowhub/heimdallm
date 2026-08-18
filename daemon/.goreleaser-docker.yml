@@ -21,10 +21,9 @@ dockers:
   - ids:
       - daemon
     image_templates:
+      # Publish only immutable references in the build job. Major, minor, and
+      # latest are promoted by the release finalizer after every asset passes.
       - "ghcr.io/theburrowhub/heimdallm:{{ .Version }}"
-      - "ghcr.io/theburrowhub/heimdallm:{{ .Major }}.{{ .Minor }}"
-      - "ghcr.io/theburrowhub/heimdallm:{{ .Major }}"
-      - "ghcr.io/theburrowhub/heimdallm:latest"
       - "ghcr.io/theburrowhub/heimdallm:{{ .ShortCommit }}"
     dockerfile: ../docker/Dockerfile.goreleaser
     use: buildx
@@ -42,8 +41,6 @@ changelog:
   disable: true
 
 release:
-  github:
-    owner: theburrowhub
-    name: heimdallm
-  mode: keep-existing
-  extra_files: []
+  # This config only publishes OCI images. It must never create, mutate, or
+  # prematurely publish the GitHub release used by desktop/package artifacts.
+  disable: true

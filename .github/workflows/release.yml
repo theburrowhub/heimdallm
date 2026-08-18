@@ -8,12 +8,26 @@ on:
       tag:
         description: 'Existing tag to build assets for (e.g. v0.6.0)'
         required: true
+      channels_only:
+        description: 'Repair mutable GHCR aliases for an already published release'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
   # Opt-in to Node.js 24 for all JavaScript actions (Node 20 deprecated Sep 2026)
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+# A release mutates one shared draft, GHCR aliases, and the Homebrew tap. Never
+# let a manual repair and a main-branch release race those shared boundaries.
+concurrency:
+  group: heimdallm-release-pipeline
+  cancel-in-progress: false
 
 jobs:
   release-please:
@@ -28,7 +42,7 @@ jobs:
     steps:
       - name: Run release-please
         id: release
-        uses: googleapis/release-please-action@v4
+        uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
         with:
           # Prefer a PAT (RELEASE_PLEASE_TOKEN) so the release PR's commits are
           # attributed to a user and DO trigger the Tests / Docker workflows.
@@ -48,15 +62,39 @@ jobs:
     if: >-
       always() &&
       (needs.release-please.outputs.release_created == 'true' ||
-       github.event_name == 'workflow_dispatch')
+       (github.event_name == 'workflow_dispatch' && inputs.channels_only != true))
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
 
+      - name: Validate draft release target
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
+            echo "::error::Invalid release tag: $TAG"
+            exit 1
+          }
+          TAG_COMMIT=$(git rev-parse "${TAG}^{commit}")
+          test "$TAG_COMMIT" = "$(git rev-parse HEAD)" || {
+            echo "::error::$TAG does not resolve to the checked-out commit"
+            exit 1
+          }
+          IS_DRAFT=$(gh release view "$TAG" --json isDraft --jq .isDraft) || {
+            echo "::error::Release $TAG does not exist; manual runs only repair an existing draft"
+            exit 1
+          }
+          test "$IS_DRAFT" = true || {
+            echo "::error::Release $TAG is already published and immutable"
+            exit 1
+          }
+
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: daemon/go.mod
           cache-dependency-path: |
@@ -64,7 +102,7 @@ jobs:
             cli/go.sum
 
       - name: Set up Flutter
-        uses: subosito/flutter-action@v2
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           flutter-version: '3.41.9'
           channel: stable
@@ -116,16 +154,18 @@ jobs:
       - name: Summary
         if: always()
         run: |
-          echo "## Test Results" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Suite | Status |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|-------|--------|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Daemon (go test) | ${{ steps.daemon-tests.outcome || '—' }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Daemon (go vet)  | ${{ steps.daemon-vet.outcome || '—' }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| CLI (go test)    | ${{ steps.cli-tests.outcome || '—' }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| CLI (go vet)     | ${{ steps.cli-vet.outcome || '—' }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Flutter analyze  | ${{ steps.flutter-analyze.outcome || '—' }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Flutter test     | ${{ steps.flutter-tests.outcome || '—' }} |" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Test Results"
+            echo ""
+            echo "| Suite | Status |"
+            echo "|-------|--------|"
+            echo "| Daemon (go test) | ${{ steps.daemon-tests.outcome || '—' }} |"
+            echo "| Daemon (go vet)  | ${{ steps.daemon-vet.outcome || '—' }} |"
+            echo "| CLI (go test)    | ${{ steps.cli-tests.outcome || '—' }} |"
+            echo "| CLI (go vet)     | ${{ steps.cli-vet.outcome || '—' }} |"
+            echo "| Flutter analyze  | ${{ steps.flutter-analyze.outcome || '—' }} |"
+            echo "| Flutter test     | ${{ steps.flutter-tests.outcome || '—' }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ═══════════════════════════════════════════════════════════════════════════
   # Docker image — GoReleaser → GHCR
@@ -142,50 +182,58 @@ jobs:
       id-token: write
     env:
       TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
+    outputs:
+      digest: ${{ steps.docker-digest.outputs.digest }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: daemon/go.mod
           cache-dependency-path: daemon/go.sum
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: GoReleaser — build daemon + push Docker image
-        uses: goreleaser/goreleaser-action@v6
+        uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
         with:
           distribution: goreleaser
-          version: '~> v2'
-          args: release --clean --config .goreleaser-docker.yml --skip=archive
+          version: 'v2.17.1'
+          args: >-
+            release --clean --config .goreleaser-docker.yml --skip=archive
+            ${{ github.event_name == 'workflow_dispatch' && '--skip=publish' || '' }}
           workdir: daemon
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GORELEASER_CURRENT_TAG: ${{ env.TAG }}
 
       - name: Get Docker image digest
+        if: github.event_name == 'push'
         id: docker-digest
         run: |
+          set -euo pipefail
           VERSION="${TAG#v}"
           DIGEST=$(docker buildx imagetools inspect \
             "ghcr.io/theburrowhub/heimdallm:${VERSION}" 2>&1 \
             | grep -m1 'Digest:' | awk '{print $2}')
+          test -n "$DIGEST"
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
 
       - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@v2
+        if: github.event_name == 'push'
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.docker-digest.outputs.digest }}
@@ -206,22 +254,24 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       contents: write
+    env:
+      TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
           fetch-depth: 0
 
       # ── Toolchains ──────────────────────────────────────────────────────────
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: daemon/go.mod
           cache-dependency-path: daemon/go.sum
 
       - name: Set up Flutter
-        uses: subosito/flutter-action@v2
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           flutter-version: '3.41.9'
           channel: stable
@@ -250,20 +300,29 @@ jobs:
         # can dirty the worktree (pubspec.lock / Podfile.lock regeneration).
         # TAG goes through env, not inline ${{ }} interpolation, so a crafted
         # workflow_dispatch input cannot inject shell into this job.
-        env:
-          TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
         run: |
+          set -euo pipefail
           test -n "$TAG" || { echo "release tag is empty — refusing to stamp a blank version"; exit 1; }
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
+            echo "::error::Invalid release tag: $TAG"
+            exit 1
+          }
+          git rev-parse --verify "${TAG}^{commit}" >/dev/null
+          BUILD_NUMBER=$(git rev-list --count "${TAG}^{commit}")
+          [[ "$BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::Could not derive a deterministic build number for $TAG"
+            exit 1
+          }
+          echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
           make build-daemon GIT_VERSION="${TAG#v}"
 
       - name: Build Flutter app (Linux release)
         working-directory: flutter_app
         run: |
-          VERSION="${{ inputs.tag || needs.release-please.outputs.tag_name }}"
-          VERSION="${VERSION#v}"
+          VERSION="${TAG#v}"
           flutter build linux --release \
             --build-name="$VERSION" \
-            --build-number="${GITHUB_RUN_NUMBER}"
+            --build-number="$BUILD_NUMBER"
 
       # ── Prepare staging tree (for GoReleaser nfpms) ──────────────────────────
       # The staging directory contains the Flutter GUI bundle, icons, and desktop
@@ -321,15 +380,16 @@ jobs:
 
       # ── .deb + .rpm (GoReleaser nfpms) ──────────────────────────────────────
       - name: GoReleaser — build .deb + .rpm
-        uses: goreleaser/goreleaser-action@v6
+        uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
         with:
           distribution: goreleaser
-          version: '~> v2'
-          args: release --clean --skip=archive,validate
+          version: 'v2.17.1'
+          args: >-
+            release --clean --skip=archive,validate
           workdir: daemon
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GORELEASER_CURRENT_TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
+          GORELEASER_CURRENT_TAG: ${{ env.TAG }}
 
       # ── .AppImage (stays separate — no GoReleaser support) ──────────────────
       - name: Build AppImage
@@ -342,6 +402,8 @@ jobs:
 
           cp -r "$BUNDLE/." "$APPDIR/"
 
+          # The single quotes deliberately preserve runtime variables in AppRun.
+          # shellcheck disable=SC2016
           printf '%s\n' \
             '#!/bin/bash' \
             'SELF="$(readlink -f "$0")"' \
@@ -367,6 +429,9 @@ jobs:
           wget -q \
             "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage" \
             -O appimagetool
+          echo \
+            "b90f4a8b18967545fda78a445b27680a1642f1ef9488ced28b65398f2be7add2  appimagetool" \
+            | sha256sum --check --strict
           chmod +x appimagetool
 
           APPIMAGE_EXTRACT_AND_RUN=1 ARCH=x86_64 \
@@ -377,16 +442,19 @@ jobs:
 
       # ── Publish ──────────────────────────────────────────────────────────────
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: Heimdallm-linux-${{ env.VERSION }}
           path: dist/
           retention-days: 90
 
       - name: Upload AppImage to GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
+          draft: true
+          overwrite_files: true
+          fail_on_unmatched_files: true
           files: ${{ env.APPIMAGE_PATH }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -395,7 +463,8 @@ jobs:
   # macOS .dmg
   #
   # Stays separate from GoReleaser: requires macOS runner, Flutter build,
-  # ad-hoc code signing, and create-dmg — none of which GoReleaser supports.
+  # Developer ID signing, notarization, and Sparkle appcast generation — none
+  # of which GoReleaser supports.
   # See docs/release-pipeline.md for rationale.
   # ═══════════════════════════════════════════════════════════════════════════
   build-macos:
@@ -405,26 +474,35 @@ jobs:
     runs-on: macos-14
     permissions:
       contents: write
+    env:
+      TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
           fetch-depth: 0
 
       # ── Toolchains ──────────────────────────────────────────────────────────
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: daemon/go.mod
           cache-dependency-path: daemon/go.sum
 
       - name: Set up Flutter
-        uses: subosito/flutter-action@v2
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           flutter-version: '3.41.9'
           channel: stable
           cache: true
+
+      - name: Set up Ruby and pinned CocoaPods
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+          working-directory: flutter_app/macos
 
       # ── Dependencies ────────────────────────────────────────────────────────
       - name: Flutter pub get
@@ -433,36 +511,76 @@ jobs:
 
       - name: CocoaPods
         working-directory: flutter_app/macos
-        run: pod install --repo-update
+        run: bundle exec pod install --deployment --clean-install
+
+      - name: Native updater tests
+        working-directory: flutter_app/macos
+        run: |
+          set -euo pipefail
+          xcodebuild test \
+            -workspace Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            -parallel-testing-enabled NO \
+            -only-testing:RunnerTests \
+            HEIMDALLM_BUNDLE_IDENTIFIER=com.theburrowhub.heimdallm.ci
 
       # ── Build ───────────────────────────────────────────────────────────────
-      - name: Build daemon
-        # Pass the release version explicitly: the checkout is shallow and
-        # untagged (git describe would yield a bare SHA), and earlier steps
-        # can dirty the worktree (pubspec.lock / Podfile.lock regeneration).
-        # TAG goes through env, not inline ${{ }} interpolation, so a crafted
-        # workflow_dispatch input cannot inject shell into this job.
-        env:
-          TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
+      - name: Build universal daemon
         run: |
+          set -euo pipefail
           test -n "$TAG" || { echo "release tag is empty — refusing to stamp a blank version"; exit 1; }
-          make build-daemon GIT_VERSION="${TAG#v}"
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
+            echo "::error::Invalid release tag: $TAG"
+            exit 1
+          }
+          VERSION="${TAG#v}"
+          BUILD_NUMBER=$(git rev-list --count "${TAG}^{commit}")
+          [[ "$BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::Could not derive a deterministic build number for $TAG"
+            exit 1
+          }
+          mkdir -p daemon/bin/macos
+          for ARCH in arm64 amd64; do
+            (
+              cd daemon
+              CGO_ENABLED=0 GOOS=darwin GOARCH="$ARCH" \
+                go build -trimpath \
+                  -ldflags "-s -w -X main.version=$VERSION" \
+                  -o "bin/macos/heimdalld-$ARCH" \
+                  ./cmd/heimdallm
+            )
+          done
+          lipo -create \
+            daemon/bin/macos/heimdalld-arm64 \
+            daemon/bin/macos/heimdalld-amd64 \
+            -output daemon/bin/heimdalld-universal
+          lipo -verify_arch arm64 x86_64 daemon/bin/heimdalld-universal
+          DAEMON_VERSION=$(daemon/bin/heimdalld-universal version)
+          test "$DAEMON_VERSION" = "$VERSION" || {
+            echo "::error::Bundled daemon reports $DAEMON_VERSION, expected $VERSION"
+            exit 1
+          }
+          {
+            echo "VERSION=$VERSION"
+            echo "BUILD_NUMBER=$BUILD_NUMBER"
+          } >> "$GITHUB_ENV"
 
       - name: Build Flutter app (release)
         working-directory: flutter_app
         run: |
-          VERSION="${{ inputs.tag || needs.release-please.outputs.tag_name }}"
-          VERSION="${VERSION#v}"
           flutter build macos --release \
             --build-name="$VERSION" \
-            --build-number="${GITHUB_RUN_NUMBER}"
+            --build-number="$BUILD_NUMBER"
 
       # ── Bundle ──────────────────────────────────────────────────────────────
       - name: Locate .app and embed daemon
         run: |
+          set -euo pipefail
           RELEASE_DIR="flutter_app/build/macos/Build/Products/Release"
 
-          APP=$(find "$RELEASE_DIR" -maxdepth 1 -name "*.app" | head -1)
+          APP=$(find "$RELEASE_DIR" -maxdepth 1 -name "*.app" -print -quit)
           if [ -z "$APP" ]; then
             echo "::error::No .app bundle found in $RELEASE_DIR"
             ls -la "$RELEASE_DIR" || true
@@ -470,12 +588,12 @@ jobs:
           fi
           echo "Found bundle: $APP"
 
-          if [ ! -f "daemon/bin/heimdallm" ]; then
-            echo "::error::daemon/bin/heimdallm not found"
+          if [ ! -f "daemon/bin/heimdalld-universal" ]; then
+            echo "::error::universal daemon binary not found"
             exit 1
           fi
 
-          cp "daemon/bin/heimdallm" "$APP/Contents/MacOS/heimdalld"
+          cp "daemon/bin/heimdalld-universal" "$APP/Contents/MacOS/heimdalld"
           chmod +x "$APP/Contents/MacOS/heimdalld"
 
           echo "Bundle contents after embedding:"
@@ -500,41 +618,148 @@ jobs:
           echo "Daemon binary:  ${DAEMON_SIZE} bytes"
           echo "Both binaries embedded and distinct"
 
+          lipo -verify_arch arm64 x86_64 "$APP/Contents/MacOS/Heimdallm"
+          lipo -verify_arch arm64 x86_64 "$APP/Contents/MacOS/heimdalld"
+          BUNDLE_VERSION=$(/usr/libexec/PlistBuddy \
+            -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")
+          test "$BUNDLE_VERSION" = "$VERSION" || {
+            echo "::error::App version $BUNDLE_VERSION does not match release $VERSION"
+            exit 1
+          }
+          test -d "$APP/Contents/Frameworks/Sparkle.framework" || {
+            echo "::error::Sparkle.framework is missing from the app bundle"
+            exit 1
+          }
+
           echo "APP=$APP" >> "$GITHUB_ENV"
 
-      - name: Ad-hoc codesign (preserving entitlements)
+      # Download and verify every executable build dependency before exposing
+      # signing material to the job.
+      - name: Install pinned create-dmg
         run: |
-          ENTITLEMENTS="flutter_app/macos/Runner/Release.entitlements"
+          set -euo pipefail
+          ARCHIVE="$RUNNER_TEMP/create-dmg-v1.3.0.tar.gz"
+          TOOL_DIR="$RUNNER_TEMP/create-dmg-v1.3.0"
+          curl --fail --location --silent --show-error \
+            'https://github.com/create-dmg/create-dmg/archive/refs/tags/v1.3.0.tar.gz' \
+            --output "$ARCHIVE"
+          echo \
+            'c50d2bc97c3d6292642bac55f530d247eaf4bf65ee605f26b4caf339383e381c  '"$ARCHIVE" \
+            | shasum -a 256 --check
+          mkdir -p "$TOOL_DIR"
+          tar -xzf "$ARCHIVE" --strip-components=1 -C "$TOOL_DIR"
+          test -x "$TOOL_DIR/create-dmg"
+          echo "CREATE_DMG=$TOOL_DIR/create-dmg" >> "$GITHUB_ENV"
 
-          echo "Entitlements file:"
-          cat "$ENTITLEMENTS"
-
-          find "$APP/Contents" -type f \( -name "*.dylib" -o -name "*.framework" \) | while read f; do
-            codesign --force --sign - "$f" 2>/dev/null || true
+      # ── Signing identity ───────────────────────────────────────────────────
+      - name: Require macOS release credentials
+        env:
+          MACOS_DEVELOPER_ID_P12: ${{ secrets.MACOS_DEVELOPER_ID_P12 }}
+          MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
+          APPLE_NOTARIZATION_APPLE_ID: ${{ secrets.APPLE_NOTARIZATION_APPLE_ID }}
+          APPLE_NOTARIZATION_PASSWORD: ${{ secrets.APPLE_NOTARIZATION_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          SPARKLE_EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in \
+            MACOS_DEVELOPER_ID_P12 \
+            MACOS_DEVELOPER_ID_P12_PASSWORD \
+            APPLE_NOTARIZATION_APPLE_ID \
+            APPLE_NOTARIZATION_PASSWORD \
+            APPLE_TEAM_ID \
+            SPARKLE_EDDSA_PRIVATE_KEY; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::Required GitHub Actions secret $name is missing"
+              missing=1
+            fi
           done
+          exit "$missing"
 
-          codesign --force --deep \
-            --sign - \
-            --entitlements "$ENTITLEMENTS" \
-            "$APP"
+      - name: Import, use, and destroy Developer ID identity
+        env:
+          MACOS_DEVELOPER_ID_P12: ${{ secrets.MACOS_DEVELOPER_ID_P12 }}
+          MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          umask 077
+          KEYCHAIN_PATH="$RUNNER_TEMP/heimdallm-signing.keychain-db"
+          CERTIFICATE_PATH="$RUNNER_TEMP/heimdallm-developer-id.p12"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          cleanup_signing_material() {
+            rm -f "$CERTIFICATE_PATH"
+            security delete-keychain "$KEYCHAIN_PATH" >/dev/null 2>&1 || true
+          }
+          trap cleanup_signing_material EXIT
 
-          echo "Signature info:"
-          codesign --display --verbose=2 "$APP" 2>&1
-          codesign --verify --verbose "$APP"
+          printf '%s' "$MACOS_DEVELOPER_ID_P12" | \
+            base64 --decode > "$CERTIFICATE_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 900 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$MACOS_DEVELOPER_ID_P12_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          rm -f "$CERTIFICATE_PATH"
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -s \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH"
+
+          IDENTITIES=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH")
+          SIGNING_IDENTITY=$(printf '%s\n' "$IDENTITIES" \
+            | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' \
+            | sed -n '1p')
+          test -n "$SIGNING_IDENTITY" || {
+            echo "::error::P12 does not contain a Developer ID Application identity"
+            exit 1
+          }
+
+          ENTITLEMENTS="flutter_app/macos/Runner/Release.entitlements"
+          SIGNING_KEYCHAIN="$KEYCHAIN_PATH" \
+            scripts/sign-macos-app.sh "$APP" "$SIGNING_IDENTITY" "$ENTITLEMENTS"
+          SIGNED_TEAM=$(
+            codesign --display --verbose=4 "$APP" 2>&1 \
+              | sed -n 's/^TeamIdentifier=//p'
+          )
+          test "$SIGNED_TEAM" = "$APPLE_TEAM_ID" || {
+            echo "::error::Signed TeamIdentifier $SIGNED_TEAM does not match APPLE_TEAM_ID"
+            exit 1
+          }
+
+      - name: Notarize and staple app
+        env:
+          APPLE_NOTARIZATION_APPLE_ID: ${{ secrets.APPLE_NOTARIZATION_APPLE_ID }}
+          APPLE_NOTARIZATION_PASSWORD: ${{ secrets.APPLE_NOTARIZATION_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          APP_ZIP="$RUNNER_TEMP/Heimdallm.app.zip"
+          ditto -c -k --keepParent "$APP" "$APP_ZIP"
+          xcrun notarytool submit "$APP_ZIP" \
+            --apple-id "$APPLE_NOTARIZATION_APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_NOTARIZATION_PASSWORD" \
+            --wait
+          xcrun stapler staple "$APP"
+          xcrun stapler validate "$APP"
+          spctl --assess --type execute --verbose=4 "$APP"
 
       # ── Package ─────────────────────────────────────────────────────────────
-      - name: Install create-dmg
-        run: brew install create-dmg
 
       - name: Create DMG
         run: |
-          APP="${APP}"
-          VERSION="${{ inputs.tag || needs.release-please.outputs.tag_name }}"
-          DMG="dist/Heimdallm-${VERSION}.dmg"
+          set -euo pipefail
+          DMG="dist/Heimdallm-${TAG}.dmg"
           mkdir -p dist
 
           CREATE_DMG_ARGS=(
-            --volname "Heimdallm ${VERSION}"
+            --volname "Heimdallm ${TAG}"
             --window-pos 200 120
             --window-size 660 400
             --icon-size 128
@@ -547,25 +772,139 @@ jobs:
             CREATE_DMG_ARGS+=(--background "assets/dmg-background.png")
           fi
 
-          create-dmg "${CREATE_DMG_ARGS[@]}" "$DMG" "$APP"
+          "$CREATE_DMG" "${CREATE_DMG_ARGS[@]}" "$DMG" "$APP"
 
           ls -lh "$DMG"
-          echo "DMG_PATH=$DMG"   >> "$GITHUB_ENV"
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "DMG_PATH=$DMG" >> "$GITHUB_ENV"
+
+      - name: Notarize and staple DMG
+        env:
+          APPLE_NOTARIZATION_APPLE_ID: ${{ secrets.APPLE_NOTARIZATION_APPLE_ID }}
+          APPLE_NOTARIZATION_PASSWORD: ${{ secrets.APPLE_NOTARIZATION_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          xcrun notarytool submit "$DMG_PATH" \
+            --apple-id "$APPLE_NOTARIZATION_APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_NOTARIZATION_PASSWORD" \
+            --wait
+          xcrun stapler staple "$DMG_PATH"
+          xcrun stapler validate "$DMG_PATH"
+
+      - name: Generate signed Sparkle appcast and checksum
+        env:
+          SPARKLE_EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          SPARKLE_TOOL="flutter_app/macos/Pods/Sparkle/bin/generate_appcast"
+          SIGN_TOOL="flutter_app/macos/Pods/Sparkle/bin/sign_update"
+          DOWNLOAD_PREFIX="https://github.com/theburrowhub/heimdallm/releases/download/${TAG}/"
+
+          PRIVATE_KEY_BYTES=$(
+            printf '%s' "$SPARKLE_EDDSA_PRIVATE_KEY" \
+              | openssl base64 -d -A \
+              | wc -c \
+              | tr -d '[:space:]'
+          )
+          test "$PRIVATE_KEY_BYTES" = 32 || {
+            echo "::error::SPARKLE_EDDSA_PRIVATE_KEY is not a 32-byte Sparkle Ed25519 seed"
+            exit 1
+          }
+          DERIVED_PUBLIC_KEY=$(
+            {
+              printf '302e020100300506032b657004220420' | xxd -r -p
+              printf '%s' "$SPARKLE_EDDSA_PRIVATE_KEY" | openssl base64 -d -A
+            } \
+              | openssl pkey -inform DER -pubout -outform DER 2>/dev/null \
+              | tail -c 32 \
+              | openssl base64 -A
+          )
+          EMBEDDED_PUBLIC_KEY=$(
+            /usr/libexec/PlistBuddy \
+              -c 'Print :SUPublicEDKey' \
+              "$APP/Contents/Info.plist"
+          )
+          test "$DERIVED_PUBLIC_KEY" = "$EMBEDDED_PUBLIC_KEY" || {
+            echo "::error::Sparkle private key does not match the public key embedded in the app"
+            exit 1
+          }
+
+          printf '%s' "$SPARKLE_EDDSA_PRIVATE_KEY" | \
+            "$SPARKLE_TOOL" \
+              --ed-key-file - \
+              --download-url-prefix "$DOWNLOAD_PREFIX" \
+              --link "https://github.com/theburrowhub/heimdallm/releases/tag/${TAG}" \
+              --maximum-versions 1 \
+              --maximum-deltas 0 \
+              -o "$PWD/dist/appcast.xml" \
+              "$PWD/dist"
+
+          printf '%s' "$SPARKLE_EDDSA_PRIVATE_KEY" | \
+            "$SIGN_TOOL" --verify --ed-key-file - dist/appcast.xml
+
+          ENCLOSURE_COUNT=$(xmllint --xpath \
+            'count(//*[local-name()="enclosure"])' dist/appcast.xml)
+          test "$ENCLOSURE_COUNT" = 1 || {
+            echo "::error::Expected one Sparkle enclosure, found $ENCLOSURE_COUNT"
+            exit 1
+          }
+          APPCAST_URL=$(xmllint --xpath \
+            'string(//*[local-name()="enclosure"]/@*[local-name()="url"])' \
+            dist/appcast.xml)
+          APPCAST_VERSION=$(xmllint --xpath \
+            'string((//*[local-name()="item"]/*[local-name()="shortVersionString"])[1])' \
+            dist/appcast.xml)
+          APPCAST_BUILD=$(xmllint --xpath \
+            'string((//*[local-name()="item"]/*[local-name()="version"])[1])' \
+            dist/appcast.xml)
+          APPCAST_LENGTH=$(xmllint --xpath \
+            'string(//*[local-name()="enclosure"]/@length)' dist/appcast.xml)
+          APPCAST_SIGNATURE=$(xmllint --xpath \
+            'string(//*[local-name()="enclosure"]/@*[local-name()="edSignature"])' \
+            dist/appcast.xml)
+          EXPECTED_URL="${DOWNLOAD_PREFIX}$(basename "$DMG_PATH")"
+          EXPECTED_LENGTH=$(stat -f%z "$DMG_PATH")
+          test "$APPCAST_URL" = "$EXPECTED_URL"
+          test "$APPCAST_VERSION" = "$VERSION"
+          test "$APPCAST_BUILD" = "$BUILD_NUMBER"
+          test "$APPCAST_LENGTH" = "$EXPECTED_LENGTH"
+          test -n "$APPCAST_SIGNATURE"
+          printf '%s' "$SPARKLE_EDDSA_PRIVATE_KEY" | \
+            "$SIGN_TOOL" --verify --ed-key-file - "$DMG_PATH" "$APPCAST_SIGNATURE"
+
+          DMG_BASENAME=$(basename "$DMG_PATH")
+          (
+            cd "$(dirname "$DMG_PATH")"
+            shasum -a 256 "$DMG_BASENAME" > "${DMG_BASENAME}.sha256"
+          )
+          {
+            echo "APPCAST_PATH=dist/appcast.xml"
+            echo "CHECKSUM_PATH=${DMG_PATH}.sha256"
+          } >> "$GITHUB_ENV"
 
       # ── Publish ─────────────────────────────────────────────────────────────
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: Heimdallm-macos-${{ env.VERSION }}
-          path: ${{ env.DMG_PATH }}
+          path: |
+            ${{ env.DMG_PATH }}
+            ${{ env.CHECKSUM_PATH }}
+            ${{ env.APPCAST_PATH }}
           retention-days: 90
 
       - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
-          files: ${{ env.DMG_PATH }}
+          draft: true
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          files: |
+            ${{ env.DMG_PATH }}
+            ${{ env.CHECKSUM_PATH }}
+            ${{ env.APPCAST_PATH }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -579,33 +918,317 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
           fetch-depth: 0
 
-      - name: Verify Homebrew tap token
-        if: github.event_name != 'workflow_dispatch'
-        run: |
-          if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
-            echo "::error::HOMEBREW_TAP_TOKEN is empty. Ensure the org secret TAP_GITHUB_TOKEN is granted to this repository."
-            exit 1
-          fi
-          echo "Homebrew tap token is available"
-        env:
-          HOMEBREW_TAP_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
-
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: cli/go.mod
-      - uses: goreleaser/goreleaser-action@v6
+      - uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
         with:
           distribution: goreleaser
-          version: '~> v2'
-          args: release --clean ${{ github.event_name == 'workflow_dispatch' && '--skip=homebrew' || '' }}
+          version: 'v2.17.1'
+          args: >-
+            release --clean
           workdir: cli
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HOMEBREW_TAP_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
-          GORELEASER_CURRENT_TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
+          GORELEASER_CURRENT_TAG: ${{ env.TAG }}
+
+      - name: Stage generated Homebrew formula
+        run: |
+          set -euo pipefail
+          mapfile -d '' formulas < <(find cli/dist -type f -name '*.rb' -print0)
+          test "${#formulas[@]}" -eq 1 || {
+            echo "::error::Expected exactly one generated Homebrew formula, found ${#formulas[@]}"
+            exit 1
+          }
+          mkdir -p staged-homebrew
+          cp "${formulas[0]}" staged-homebrew/heimdallm-cli.rb
+
+      - name: Upload staged Homebrew formula
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cli-homebrew-formula-${{ env.TAG }}
+          path: staged-homebrew/heimdallm-cli.rb
+          if-no-files-found: error
+          retention-days: 7
+
+  # The GitHub release remains a draft until every independently built asset
+  # has passed. A channels-only manual run never rebuilds or mutates assets; it
+  # only reconciles GHCR aliases for the current, already-published release.
+  publish-release:
+    name: Publish release and reconcile Docker aliases
+    needs:
+      - release-please
+      - tests
+      - goreleaser-daemon
+      - build-linux
+      - build-macos
+      - goreleaser-cli
+    if: >-
+      always() &&
+      ((github.event_name == 'push' &&
+        needs.release-please.outputs.release_created == 'true' &&
+        needs.tests.result == 'success' &&
+        needs.goreleaser-daemon.result == 'success' &&
+        needs.build-linux.result == 'success' &&
+        needs.build-macos.result == 'success' &&
+        needs.goreleaser-cli.result == 'success') ||
+       (github.event_name == 'workflow_dispatch' && inputs.channels_only == true))
+    runs-on: ubuntu-latest
+    permissions:
+      attestations: read
+      contents: write
+      packages: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
+      IMAGE_DIGEST: ${{ needs.goreleaser-daemon.outputs.digest }}
+      EXPECTED_COMMIT: ${{ github.sha }}
+    steps:
+      - name: Download staged Homebrew formula
+        if: github.event_name == 'push'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cli-homebrew-formula-${{ needs.release-please.outputs.tag_name }}
+          path: staged-homebrew
+
+      - name: Verify staged Homebrew formula
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          test -f staged-homebrew/heimdallm-cli.rb
+          grep -Fq "$TAG" staged-homebrew/heimdallm-cli.rb
+
+      - name: Verify release identity and exact asset set
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
+            echo "::error::Invalid release tag: $TAG"
+            exit 1
+          }
+          RELEASE_JSON=$(gh release view "$TAG" \
+            --json tagName,isDraft,isPrerelease,targetCommitish)
+          test "$(jq -r .tagName <<< "$RELEASE_JSON")" = "$TAG"
+          test "$(jq -r .isPrerelease <<< "$RELEASE_JSON")" = false || {
+            echo "::error::Prereleases must not mutate the stable distribution channels"
+            exit 1
+          }
+          TAG_COMMIT=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/commits/${TAG}" --jq .sha)
+          echo "RELEASE_COMMIT=$TAG_COMMIT" >> "$GITHUB_ENV"
+          RELEASE_TARGET=$(jq -r .targetCommitish <<< "$RELEASE_JSON")
+          test "$RELEASE_TARGET" = "$TAG_COMMIT" || {
+            echo "::error::Release target $RELEASE_TARGET does not match $TAG ($TAG_COMMIT)"
+            exit 1
+          }
+          IS_DRAFT=$(jq -r .isDraft <<< "$RELEASE_JSON")
+          LATEST_TAG=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/releases/latest" \
+            --jq .tag_name 2>/dev/null || true)
+          if [ "${{ github.event_name }}" = workflow_dispatch ]; then
+            test "$IS_DRAFT" = false || {
+              echo "::error::channels_only requires an already-published release"
+              exit 1
+            }
+            test "$LATEST_TAG" = "$TAG" || {
+              echo "::error::$TAG is not the current latest release ($LATEST_TAG); refusing alias rollback"
+              exit 1
+            }
+          else
+            test "$TAG_COMMIT" = "$EXPECTED_COMMIT" || {
+              echo "::error::$TAG does not point at this release workflow commit"
+              exit 1
+            }
+            if [ -n "$LATEST_TAG" ] && [ "$LATEST_TAG" != "$TAG" ]; then
+              COMPARE_STATUS=$(gh api \
+                "repos/${GITHUB_REPOSITORY}/compare/${LATEST_TAG}...${TAG}" \
+                --jq .status)
+              test "$COMPARE_STATUS" = ahead || {
+                echo "::error::$TAG is not ahead of latest release $LATEST_TAG; refusing rollback"
+                exit 1
+              }
+            fi
+          fi
+
+          VERSION="${TAG#v}"
+          EXPECTED_ASSETS=(
+            appcast.xml
+            "Heimdallm-${TAG}.dmg"
+            "Heimdallm-${TAG}.dmg.sha256"
+            "Heimdallm-${VERSION}-x86_64.AppImage"
+            "heimdallm_${VERSION}_amd64.deb"
+            "heimdallm_${VERSION}_amd64.rpm"
+            daemon-checksums.txt
+            cli-checksums.txt
+            "heimdallm-cli_${VERSION}_darwin_amd64.tar.gz"
+            "heimdallm-cli_${VERSION}_darwin_arm64.tar.gz"
+            "heimdallm-cli_${VERSION}_linux_amd64.tar.gz"
+            "heimdallm-cli_${VERSION}_linux_arm64.tar.gz"
+            "heimdallm-cli_${VERSION}_windows_amd64.zip"
+            "heimdallm-cli_${VERSION}_windows_arm64.zip"
+          )
+          mapfile -t ACTUAL_ASSETS < <(
+            gh release view "$TAG" --json assets --jq '.assets[].name'
+          )
+          if [ "${#ACTUAL_ASSETS[@]}" -ne "${#EXPECTED_ASSETS[@]}" ]; then
+            echo "::error::Release $TAG has ${#ACTUAL_ASSETS[@]} assets; expected ${#EXPECTED_ASSETS[@]}"
+            printf 'actual asset: %s\n' "${ACTUAL_ASSETS[@]}"
+            exit 1
+          fi
+          for EXPECTED_ASSET in "${EXPECTED_ASSETS[@]}"; do
+            MATCHES=0
+            for ACTUAL_ASSET in "${ACTUAL_ASSETS[@]}"; do
+              if [ "$ACTUAL_ASSET" = "$EXPECTED_ASSET" ]; then
+                MATCHES=$((MATCHES + 1))
+              fi
+            done
+            test "$MATCHES" -eq 1 || {
+              echo "::error::Expected exactly one $EXPECTED_ASSET, found $MATCHES"
+              printf 'actual asset: %s\n' "${ACTUAL_ASSETS[@]}"
+              exit 1
+            }
+          done
+
+      - name: Set up Docker Buildx for tag promotion
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Verify immutable Docker image
+        id: immutable-image
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          IMAGE="ghcr.io/${IMAGE_NAME}"
+          printf '%s' "$GHCR_TOKEN" | \
+            docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          RESOLVED_DIGEST=$(docker buildx imagetools inspect \
+            "${IMAGE}:${VERSION}" 2>&1 \
+            | grep -m1 'Digest:' | awk '{print $2}')
+          [[ "$RESOLVED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "::error::Could not resolve immutable image ${IMAGE}:${VERSION}"
+            exit 1
+          }
+          if [ -n "$IMAGE_DIGEST" ]; then
+            test "$RESOLVED_DIGEST" = "$IMAGE_DIGEST" || {
+              echo "::error::Immutable image resolves to $RESOLVED_DIGEST, build reported $IMAGE_DIGEST"
+              exit 1
+            }
+          fi
+          echo "digest=${RESOLVED_DIGEST}" >> "$GITHUB_OUTPUT"
+          gh attestation verify \
+            "oci://${IMAGE}@${RESOLVED_DIGEST}" \
+            --repo "$GITHUB_REPOSITORY"
+          docker pull "${IMAGE}@${RESOLVED_DIGEST}" >/dev/null
+          IMAGE_VERSION=$(docker image inspect \
+            --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' \
+            "${IMAGE}@${RESOLVED_DIGEST}")
+          IMAGE_REVISION=$(docker image inspect \
+            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+            "${IMAGE}@${RESOLVED_DIGEST}")
+          test "$IMAGE_VERSION" = "$VERSION" || {
+            echo "::error::Immutable image version $IMAGE_VERSION does not match $VERSION"
+            exit 1
+          }
+          test "$IMAGE_REVISION" = "$RELEASE_COMMIT" || {
+            echo "::error::Immutable image revision $IMAGE_REVISION does not match $RELEASE_COMMIT"
+            exit 1
+          }
+
+      # Publishing first leaves a fully usable GitHub release and immutable
+      # Docker version tag even if an alias update fails. The operation is
+      # idempotent so a failed finalizer can safely be rerun.
+      - name: Publish or verify GitHub release
+        run: |
+          set -euo pipefail
+          IS_DRAFT=$(gh release view "$TAG" --json isDraft --jq .isDraft)
+          LATEST_TAG=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/releases/latest" \
+            --jq .tag_name 2>/dev/null || true)
+          if [ "$IS_DRAFT" = true ]; then
+            test "${{ github.event_name }}" = push
+            gh release edit "$TAG" --draft=false --latest
+          elif [ "$LATEST_TAG" != "$TAG" ]; then
+            test "${{ github.event_name }}" = push
+            gh release edit "$TAG" --latest
+          fi
+          for _ in $(seq 1 12); do
+            IS_DRAFT=$(gh release view "$TAG" --json isDraft --jq .isDraft)
+            LATEST_TAG=$(gh api \
+              "repos/${GITHUB_REPOSITORY}/releases/latest" \
+              --jq .tag_name 2>/dev/null || true)
+            if [ "$IS_DRAFT" = false ] && [ "$LATEST_TAG" = "$TAG" ]; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::Release $TAG was not observable as the latest published release"
+          exit 1
+
+      - name: Promote and verify mutable Docker tags
+        run: |
+          set -euo pipefail
+          IMAGE_DIGEST="${{ steps.immutable-image.outputs.digest }}"
+          test -n "$IMAGE_DIGEST"
+          VERSION="${TAG#v}"
+          CORE_VERSION="${VERSION%%-*}"
+          IFS=. read -r MAJOR MINOR PATCH <<< "$CORE_VERSION"
+          [[ "$MAJOR" =~ ^[0-9]+$ && "$MINOR" =~ ^[0-9]+$ && "$PATCH" =~ ^[0-9]+$ ]] || {
+            echo "::error::Cannot derive mutable Docker tags from $TAG"
+            exit 1
+          }
+          IMAGE="ghcr.io/${IMAGE_NAME}"
+          docker buildx imagetools create --prefer-index=false \
+            --tag "${IMAGE}:${MAJOR}.${MINOR}" \
+            --tag "${IMAGE}:${MAJOR}" \
+            --tag "${IMAGE}:latest" \
+            "${IMAGE}@${IMAGE_DIGEST}"
+          for MUTABLE_TAG in "${MAJOR}.${MINOR}" "$MAJOR" latest; do
+            PROMOTED_DIGEST=$(docker buildx imagetools inspect \
+              "${IMAGE}:${MUTABLE_TAG}" 2>&1 \
+              | grep -m1 'Digest:' | awk '{print $2}')
+            test "$PROMOTED_DIGEST" = "$IMAGE_DIGEST" || {
+              echo "::error::${IMAGE}:${MUTABLE_TAG} points to $PROMOTED_DIGEST, expected $IMAGE_DIGEST"
+              exit 1
+            }
+          done
+
+      # Updating the tap after publication cannot expose a formula whose assets
+      # are still private. This is deliberately best-effort: if it fails, the
+      # previous formula remains valid and the published release is usable.
+      - name: Publish Homebrew formula
+        if: github.event_name == 'push'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::TAP_GITHUB_TOKEN is unavailable; keeping the previous formula"
+            exit 0
+          fi
+          FORMULA=staged-homebrew/heimdallm-cli.rb
+          test -f "$FORMULA"
+          CONTENT=$(base64 -w 0 "$FORMULA")
+          EXISTING_SHA=$(
+            gh api \
+              repos/theburrowhub/homebrew-tap/contents/Formula/heimdallm-cli.rb \
+              --jq .sha 2>/dev/null || true
+          )
+          API_ARGS=(
+            --method PUT
+            repos/theburrowhub/homebrew-tap/contents/Formula/heimdallm-cli.rb
+            -f "message=chore: update heimdallm-cli to $TAG"
+            -f "content=$CONTENT"
+          )
+          if [ -n "$EXISTING_SHA" ]; then
+            API_ARGS+=(-f "sha=$EXISTING_SHA")
+          fi
+          gh api "${API_ARGS[@]}" >/dev/null
