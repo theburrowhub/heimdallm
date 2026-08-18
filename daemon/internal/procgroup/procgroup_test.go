@@ -303,7 +303,13 @@ func TestProcessGroupOwnerCrashHelper(t *testing.T) {
 	_ = pidW.Close()
 	_ = probeW.Close()
 
-	select {}
+	// An empty select can be diagnosed as a runtime deadlock once Start has
+	// returned, which lets this helper exit before the outer process can crash
+	// it on macOS. A live timer keeps the helper schedulable while preserving
+	// the intended behaviour: only the outer test's SIGKILL can end it.
+	for {
+		time.Sleep(time.Hour)
+	}
 }
 
 // TestStart_DaemonSIGKILLCleansOnlyItsOwnedGroup covers the shutdown path that
@@ -330,6 +336,17 @@ func TestStart_DaemonSIGKILLCleansOnlyItsOwnedGroup(t *testing.T) {
 	}
 	helperDone := make(chan error, 1)
 	go func() { helperDone <- helper.Wait() }()
+	helperReaped := false
+	t.Cleanup(func() {
+		if helperReaped {
+			return
+		}
+		_ = helper.Process.Kill()
+		select {
+		case <-helperDone:
+		case <-time.After(10 * time.Second):
+		}
+	})
 
 	commandPID := readPID(t, pidR)
 	if err := pidW.Close(); err != nil {
@@ -344,6 +361,7 @@ func TestStart_DaemonSIGKILLCleansOnlyItsOwnedGroup(t *testing.T) {
 	if err := unrelated.Start(); err != nil {
 		_ = helper.Process.Kill()
 		<-helperDone
+		helperReaped = true
 		t.Fatalf("start unrelated process: %v", err)
 	}
 	defer func() {
@@ -360,6 +378,7 @@ func TestStart_DaemonSIGKILLCleansOnlyItsOwnedGroup(t *testing.T) {
 	}
 	select {
 	case waitErr := <-helperDone:
+		helperReaped = true
 		if waitErr == nil {
 			t.Fatal("daemon-crash helper exited cleanly; want SIGKILL")
 		}
