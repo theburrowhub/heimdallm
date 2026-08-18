@@ -21,6 +21,7 @@ import '../issues/issues_providers.dart';
 import '../repositories/repos_screen.dart';
 import '../organizations/orgs_screen.dart';
 import '../stats/stats_screen.dart';
+import '../updates/check_for_updates_button.dart';
 import 'activity_filter_bar.dart';
 import 'activity_filters.dart';
 import 'dashboard_providers.dart';
@@ -43,6 +44,7 @@ class DashboardScreen extends ConsumerWidget {
         appBar: AppBar(
           title: const Text('Heimdallm'),
           actions: [
+            const CheckForUpdatesButton(),
             IconButton(
               icon: daemonStarting
                   ? const SizedBox(

@@ -16,6 +16,10 @@ class FakePlatformServices implements PlatformServices {
     this.configExistsValue = true,
     this.githubToken,
     this.daemonBinaryPath,
+    this.appUpdateSupport = AppUpdateSupport.unavailable,
+    this.pendingUpdateVersion,
+    this.pendingUpdateError,
+    this.completeUpdateError,
   }) : _env = env ?? const {};
 
   @override
@@ -25,6 +29,11 @@ class FakePlatformServices implements PlatformServices {
   bool configExistsValue;
   String? githubToken;
   String? daemonBinaryPath;
+  @override
+  final AppUpdateSupport appUpdateSupport;
+  String? pendingUpdateVersion;
+  Object? pendingUpdateError;
+  Object? completeUpdateError;
 
   // Records of calls for assertions.
   int loadApiTokenCalls = 0;
@@ -38,6 +47,10 @@ class FakePlatformServices implements PlatformServices {
   int showAndFocusCalls = 0;
   int hideCalls = 0;
   int quitCalls = 0;
+  int quitDuplicateInstanceCalls = 0;
+  int setupAppUpdaterCalls = 0;
+  int checkForAppUpdatesCalls = 0;
+  int completeAppUpdateCalls = 0;
   final List<AppConfig> writtenConfigs = [];
   final List<String> spawnedDaemons = [];
   void Function(String location)? trayNavigationHandler;
@@ -108,9 +121,34 @@ class FakePlatformServices implements PlatformServices {
   Future<void> hideWindow() async => hideCalls++;
 
   @override
-  Never quitApp() {
+  void quitApp() {
     quitCalls++;
-    throw _FakeQuitException();
+  }
+
+  @override
+  void quitDuplicateInstance() {
+    quitDuplicateInstanceCalls++;
+  }
+
+  @override
+  Future<void> setupAppUpdater() async => setupAppUpdaterCalls++;
+
+  @override
+  Future<void> checkForAppUpdates() async => checkForAppUpdatesCalls++;
+
+  @override
+  Future<String?> pendingAppUpdateVersion() async {
+    final error = pendingUpdateError;
+    if (error != null) throw error;
+    return pendingUpdateVersion;
+  }
+
+  @override
+  Future<void> completeAppUpdate() async {
+    completeAppUpdateCalls++;
+    final error = completeUpdateError;
+    if (error != null) throw error;
+    pendingUpdateVersion = null;
   }
 
   @override
@@ -156,7 +194,3 @@ class FakePlatformServices implements PlatformServices {
   Future<List<String>> discoverReposFromPRs(String token) async =>
       discoveredRepos;
 }
-
-/// Thrown by [FakePlatformServices.quitApp] to replace `exit(0)` in tests.
-/// Tests catch it to assert the app tried to exit.
-class _FakeQuitException implements Exception {}

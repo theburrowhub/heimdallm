@@ -71,6 +71,105 @@ void main() {
     expect(platform.spawnedDaemons, isEmpty);
   });
 
+  testWidgets('completed native update requires matching daemon version', (
+    tester,
+  ) async {
+    final api = _MockApiClient();
+    final platform = FakePlatformServices(pendingUpdateVersion: '0.8.4');
+    when(() => api.daemonReachable()).thenAnswer((_) async => PortOwner.daemon);
+    when(
+      () => api.fetchHealth(),
+    ).thenAnswer((_) async => {'status': 'ok', 'version': '0.8.4'});
+
+    await tester.pumpWidget(
+      buildBootstrapAppForTest(
+        router: _router(),
+        platform: platform,
+        apiClient: api,
+      ),
+    );
+    await _pumpUntil(tester, find.text('Dashboard target'));
+
+    expect(platform.completeAppUpdateCalls, 1);
+    expect(platform.pendingUpdateVersion, isNull);
+  });
+
+  testWidgets('mixed app and daemon versions fail closed after update', (
+    tester,
+  ) async {
+    final api = _MockApiClient();
+    final platform = FakePlatformServices(pendingUpdateVersion: '0.8.4');
+    when(() => api.daemonReachable()).thenAnswer((_) async => PortOwner.daemon);
+    when(
+      () => api.fetchHealth(),
+    ).thenAnswer((_) async => {'status': 'ok', 'version': '0.8.3'});
+
+    await tester.pumpWidget(
+      buildBootstrapAppForTest(
+        router: _router(),
+        platform: platform,
+        apiClient: api,
+      ),
+    );
+    await _pumpUntil(tester, find.text('Update validation failed'));
+
+    expect(find.textContaining('0.8.3'), findsOneWidget);
+    // Native completion owns the sealed version/PID check before Dart performs
+    // its independent post-release health assertion.
+    expect(platform.completeAppUpdateCalls, 1);
+    expect(find.text('Dashboard target'), findsNothing);
+  });
+
+  testWidgets('failed update acknowledgement retains the recovery marker', (
+    tester,
+  ) async {
+    final api = _MockApiClient();
+    final platform = FakePlatformServices(
+      pendingUpdateVersion: '0.8.4',
+      completeUpdateError: StateError('lease owner mismatch'),
+    );
+    when(() => api.daemonReachable()).thenAnswer((_) async => PortOwner.daemon);
+    when(
+      () => api.fetchHealth(),
+    ).thenAnswer((_) async => {'status': 'ok', 'version': '0.8.4'});
+
+    await tester.pumpWidget(
+      buildBootstrapAppForTest(
+        router: _router(),
+        platform: platform,
+        apiClient: api,
+      ),
+    );
+    await _pumpUntil(tester, find.text('Update acknowledgement failed'));
+
+    expect(platform.completeAppUpdateCalls, 1);
+    expect(platform.pendingUpdateVersion, '0.8.4');
+    expect(find.textContaining('lease owner mismatch'), findsOneWidget);
+    expect(find.text('Dashboard target'), findsNothing);
+  });
+
+  testWidgets('failed native update recovery blocks daemon startup', (
+    tester,
+  ) async {
+    final api = _MockApiClient();
+    final platform = FakePlatformServices(
+      pendingUpdateError: StateError('LaunchAgent restore failed'),
+    );
+
+    await tester.pumpWidget(
+      buildBootstrapAppForTest(
+        router: _router(),
+        platform: platform,
+        apiClient: api,
+      ),
+    );
+    await _pumpUntil(tester, find.text('Update recovery failed'));
+
+    expect(find.textContaining('LaunchAgent restore failed'), findsOneWidget);
+    expect(platform.spawnedDaemons, isEmpty);
+    verifyNever(() => api.daemonReachable());
+  });
+
   testWidgets('foreign port shows diagnostics and Retry probes again', (
     tester,
   ) async {

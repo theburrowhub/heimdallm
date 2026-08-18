@@ -20,6 +20,15 @@ export 'platform_services_stub.dart'
 /// be unsafe.
 enum TcpPortState { open, closed, unknown }
 
+/// Native update capability of the current application build.
+enum AppUpdateSupport {
+  /// Sparkle verifies and atomically replaces the complete macOS app bundle.
+  native,
+
+  /// Updates belong to the package/deployment owner on this platform.
+  unavailable,
+}
+
 /// Raised by [PlatformServices.spawnDaemon] when another process owns the
 /// daemon port. The guarded spawn operation is the final authority: an HTTP
 /// request can fail while a silent or still-starting process already owns the
@@ -75,12 +84,13 @@ abstract class PlatformServices {
   // ── Single-instance + signals ───────────────────────────────────────────
 
   /// Returns true if this is the only running instance.
-  /// Returns false if another instance was found (and signalled);
+  /// Returns false if another instance owns the lifetime lock (and was asked
+  /// to activate over local IPC);
   /// the caller should then exit the process. Always true on web.
   Future<bool> ensureSingleInstance();
 
-  /// Registers a listener that fires when another instance attempts to
-  /// start (on desktop: SIGUSR1). No-op on web.
+  /// Registers a listener that fires when another instance attempts to start.
+  /// No-op on web.
   void listenForActivationSignal(VoidCallback onActivate);
 
   // ── Window / tray / notifier ────────────────────────────────────────────
@@ -121,8 +131,32 @@ abstract class PlatformServices {
   /// Hide the main window (tray workflows). No-op on web.
   Future<void> hideWindow();
 
-  /// Process-level quit. On desktop: `exit(0)`. On web: no-op.
-  Never quitApp();
+  /// Requests normal application termination. macOS must go through AppKit so
+  /// Sparkle and Flutter can postpone termination while the daemon drains.
+  void quitApp();
+
+  /// Terminates a process that has already proved it does not own the desktop
+  /// singleton. This bypasses update recovery only for that duplicate process.
+  void quitDuplicateInstance();
+
+  // ── Application updates ────────────────────────────────────────────────
+
+  AppUpdateSupport get appUpdateSupport;
+
+  /// Supplies native update coordination with the daemon endpoint, token and
+  /// data directory. Safe to call on unsupported platforms (no-op).
+  Future<void> setupAppUpdater();
+
+  /// Opens the platform update UI. Only valid when [appUpdateSupport] is
+  /// [AppUpdateSupport.native].
+  Future<void> checkForAppUpdates();
+
+  /// Expected daemon display version after a native update relaunch, or null
+  /// during a normal launch.
+  Future<String?> pendingAppUpdateVersion();
+
+  /// Acknowledges that the relaunched daemon matches the updated app bundle.
+  Future<void> completeAppUpdate();
 
   // ── First-run setup / daemon spawn ──────────────────────────────────────
 

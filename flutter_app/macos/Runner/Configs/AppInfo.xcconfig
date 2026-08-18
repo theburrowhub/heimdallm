@@ -8,7 +8,8 @@
 PRODUCT_NAME = Heimdallm
 
 // The application's bundle identifier
-PRODUCT_BUNDLE_IDENTIFIER = com.theburrowhub.heimdallm
+HEIMDALLM_BUNDLE_IDENTIFIER = com.theburrowhub.heimdallm
+PRODUCT_BUNDLE_IDENTIFIER = $(HEIMDALLM_BUNDLE_IDENTIFIER)
 
 // The copyright displayed in application information
 PRODUCT_COPYRIGHT = Copyright © 2026 theburrowhub. All rights reserved.

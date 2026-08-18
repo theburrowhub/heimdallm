@@ -19,7 +19,15 @@ Future<void> main() async {
   final platform = PlatformServices.create();
 
   if (!await platform.ensureSingleInstance()) {
-    platform.quitApp();
+    platform.quitDuplicateInstance();
+    return;
+  }
+
+  try {
+    await platform.setupAppUpdater();
+  } catch (e) {
+    // Update infrastructure must never delay or prevent daemon startup.
+    debugPrint('app updater init failed: $e');
   }
 
   platform.listenForActivationSignal(() async {
@@ -139,6 +147,7 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
   String? _errorTitle;
   String? _errorDetails;
   String? _errorHint;
+  String? _pendingUpdateVersion;
 
   PlatformServices get _platform => ref.read(platformServicesProvider);
 
@@ -153,6 +162,20 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
 
   Future<void> _boot() async {
     final api = widget.apiClient ?? ApiClient(platform: _platform);
+    try {
+      _pendingUpdateVersion = await _platform.pendingAppUpdateVersion();
+    } catch (e) {
+      _setError(
+        title: 'Update recovery failed',
+        details:
+            'Heimdallm could not restore the daemon service after an app '
+            'update: $e',
+        hint:
+            'Quit Heimdallm and reopen it. If the problem persists, reinstall '
+            'the latest signed release.',
+      );
+      return;
+    }
 
     // Determine port ownership before asking for credentials, config or even a
     // local daemon binary. A live daemon can legitimately answer 503 while
@@ -160,6 +183,7 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
     // and the dashboard remains useful for diagnosis (#646).
     switch (await api.daemonReachable()) {
       case PortOwner.daemon:
+        if (!await _validatePendingUpdate(api)) return;
         _go('/');
         return;
       case PortOwner.foreign:
@@ -240,6 +264,7 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
     for (var attempt = 0; ; attempt++) {
       await Future.delayed(widget.healthPollInterval);
       if (await api.checkHealth()) {
+        if (!await _validatePendingUpdate(api)) return;
         _go('/');
         return;
       }
@@ -262,6 +287,10 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
         // Reachability is enough to enter the app. Health remains visible in
         // the dashboard; blocking the splash on a stale last_poll was the local
         // failure mode which triggered duplicate spawn attempts in #646.
+        if (_pendingUpdateVersion != null) {
+          _setStatus('Validating updated Heimdallm…');
+          return true;
+        }
         _go('/');
         return false;
       case DaemonStartupOutcome.spawnFailedRetryable:
@@ -285,6 +314,47 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
         );
         return false;
     }
+  }
+
+  Future<bool> _validatePendingUpdate(ApiClient api) async {
+    final expected = _pendingUpdateVersion;
+    if (expected == null) return true;
+    try {
+      // Native recovery first authenticates the sealed daemon version/PID,
+      // confirms bootstrap, waits for exact health, and only then releases the
+      // lease. Asking /health before this call deadlocks a deliberately sealed
+      // replacement daemon in its minimal bootstrap router.
+      await _platform.completeAppUpdate();
+    } catch (e) {
+      _setError(
+        title: 'Update acknowledgement failed',
+        details:
+            'Heimdallm could not verify daemon version $expected and release '
+            'the protected update lease: $e',
+        hint:
+            'Keep Heimdallm open and retry. Do not force quit while update '
+            'recovery is pending.',
+      );
+      return false;
+    }
+
+    final health = await api.fetchHealth();
+    final actual = health?['version']?.toString();
+    if (actual != expected) {
+      _setError(
+        title: 'Update validation failed',
+        details:
+            'The app was updated to $expected, but the running daemon reports '
+            '${actual ?? 'no version'}. Heimdallm will not continue with a '
+            'mixed-version installation.',
+        hint:
+            'Quit Heimdallm, stop the daemon, then reopen the app. If the '
+            'versions still differ, reinstall the latest signed release.',
+      );
+      return false;
+    }
+    _pendingUpdateVersion = null;
+    return true;
   }
 
   void _setSpawnFailureError(Object? error) {
