@@ -69,6 +69,43 @@ var defaultProcessDependencies = processDependencies{
 	listen:          server.Listen,
 }
 
+// updateServerError keeps the HTTP contract independent from workgate's
+// internal error vocabulary. Every updater transition passes through this one
+// mapping so prepare/cancel/seal/confirm cannot drift into different status
+// codes as new recovery paths are added.
+func updateServerError(err error) error {
+	switch {
+	case errors.Is(err, workgate.ErrLeaseIDRequired):
+		return server.ErrUpdateLeaseRequired
+	case errors.Is(err, workgate.ErrLeaseIDInvalid):
+		return server.ErrUpdateLeaseInvalid
+	case errors.Is(err, workgate.ErrLeaseConflict):
+		return server.ErrUpdateLeaseConflict
+	case errors.Is(err, workgate.ErrWorkActive):
+		return server.ErrUpdateNotReady
+	case errors.Is(err, workgate.ErrLeaseNotSealed):
+		return server.ErrUpdateNotSealed
+	case errors.Is(err, workgate.ErrBootstrapNotAuthorized):
+		return server.ErrUpdateBootstrapNotAuthorized
+	default:
+		return err
+	}
+}
+
+// acquireUpdateWork centralizes ownership of update-drain permits. Nested
+// operations inherit the outer permit and receive a no-op release, while
+// top-level work always gets a matching cleanup function.
+func acquireUpdateWork(ctx context.Context, gate *workgate.Gate, kind workgate.Kind) (context.Context, func(), error) {
+	ctx, permit, owned, err := gate.AcquireContext(ctx, kind)
+	if err != nil {
+		return ctx, nil, err
+	}
+	if !owned {
+		return ctx, func() {}, nil
+	}
+	return ctx, permit.Release, nil
+}
+
 func versionString() string { return version }
 
 // publishBridgeEvents re-publishes every SSE broker event to NATS so the SSE
@@ -289,35 +326,14 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		func(leaseID string) (server.UpdatePreparationStatus, error) {
 			snapshot, err := updateWorkGate.Prepare(leaseID)
 			if err != nil {
-				if errors.Is(err, workgate.ErrLeaseIDRequired) {
-					return server.UpdatePreparationStatus{}, server.ErrUpdateLeaseRequired
-				}
-				if errors.Is(err, workgate.ErrLeaseIDInvalid) {
-					return server.UpdatePreparationStatus{}, server.ErrUpdateLeaseInvalid
-				}
-				if errors.Is(err, workgate.ErrLeaseConflict) {
-					return server.UpdatePreparationStatus{}, server.ErrUpdateLeaseConflict
-				}
-				return server.UpdatePreparationStatus{}, err
+				return server.UpdatePreparationStatus{}, updateServerError(err)
 			}
 			return snapshotUpdatePreparation(snapshot), nil
 		},
 		func(leaseID string) (server.UpdatePreparationStatus, error) {
 			snapshot, err := updateWorkGate.Cancel(leaseID)
 			if err != nil {
-				if errors.Is(err, workgate.ErrLeaseIDRequired) {
-					return server.UpdatePreparationStatus{}, server.ErrUpdateLeaseRequired
-				}
-				if errors.Is(err, workgate.ErrLeaseIDInvalid) {
-					return server.UpdatePreparationStatus{}, server.ErrUpdateLeaseInvalid
-				}
-				if errors.Is(err, workgate.ErrLeaseConflict) {
-					return server.UpdatePreparationStatus{}, server.ErrUpdateLeaseConflict
-				}
-				if errors.Is(err, workgate.ErrBootstrapNotAuthorized) {
-					return server.UpdatePreparationStatus{}, server.ErrUpdateBootstrapNotAuthorized
-				}
-				return server.UpdatePreparationStatus{}, err
+				return server.UpdatePreparationStatus{}, updateServerError(err)
 			}
 			return snapshotUpdatePreparation(snapshot), nil
 		},
@@ -325,38 +341,14 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	srv.SetUpdateSealFn(func(leaseID string) (server.UpdatePreparationStatus, error) {
 		snapshot, err := updateWorkGate.Seal(leaseID)
 		if err != nil {
-			if errors.Is(err, workgate.ErrLeaseIDRequired) {
-				return server.UpdatePreparationStatus{}, server.ErrUpdateLeaseRequired
-			}
-			if errors.Is(err, workgate.ErrLeaseIDInvalid) {
-				return server.UpdatePreparationStatus{}, server.ErrUpdateLeaseInvalid
-			}
-			if errors.Is(err, workgate.ErrLeaseConflict) {
-				return server.UpdatePreparationStatus{}, server.ErrUpdateLeaseConflict
-			}
-			if errors.Is(err, workgate.ErrWorkActive) {
-				return server.UpdatePreparationStatus{}, server.ErrUpdateNotReady
-			}
-			return server.UpdatePreparationStatus{}, err
+			return server.UpdatePreparationStatus{}, updateServerError(err)
 		}
 		return snapshotUpdatePreparation(snapshot), nil
 	})
 	srv.SetUpdateConfirmFn(func(leaseID string) (server.UpdatePreparationStatus, error) {
 		snapshot, err := updateWorkGate.ConfirmBootstrap(leaseID)
 		if err != nil {
-			if errors.Is(err, workgate.ErrLeaseIDRequired) {
-				return server.UpdatePreparationStatus{}, server.ErrUpdateLeaseRequired
-			}
-			if errors.Is(err, workgate.ErrLeaseIDInvalid) {
-				return server.UpdatePreparationStatus{}, server.ErrUpdateLeaseInvalid
-			}
-			if errors.Is(err, workgate.ErrLeaseConflict) {
-				return server.UpdatePreparationStatus{}, server.ErrUpdateLeaseConflict
-			}
-			if errors.Is(err, workgate.ErrLeaseNotSealed) {
-				return server.UpdatePreparationStatus{}, server.ErrUpdateNotSealed
-			}
-			return server.UpdatePreparationStatus{}, err
+			return server.UpdatePreparationStatus{}, updateServerError(err)
 		}
 		return snapshotUpdatePreparation(snapshot), nil
 	})
@@ -669,13 +661,11 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	discoverySvc := discovery.NewService(ghClient)
 
 	srv.SetCleanCloneFn(func(ctx context.Context, repo string) error {
-		ctx, permit, owned, err := updateWorkGate.AcquireContext(ctx, workgate.KindMaintenance)
+		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, updateWorkGate, workgate.KindMaintenance)
 		if err != nil {
 			return err
 		}
-		if owned {
-			defer permit.Release()
-		}
+		defer releaseUpdateWork()
 		cfgMu.Lock()
 		aiCfg := cfg.AIForRepo(repo)
 		cfgMu.Unlock()
@@ -687,24 +677,20 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	// guarantees end-to-end. Reuses srv.TOMLMu() so the rewrite races
 	// safely with concurrent PATCH /config writes.
 	srv.SetRepoRenameFn(func(ctx context.Context, oldRepo, newRepo string) error {
-		ctx, permit, owned, err := updateWorkGate.AcquireContext(ctx, workgate.KindMaintenance)
+		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, updateWorkGate, workgate.KindMaintenance)
 		if err != nil {
 			return err
 		}
-		if owned {
-			defer permit.Release()
-		}
+		defer releaseUpdateWork()
 		reconciler := newRenameReconciler(cfg, &cfgMu, srv.TOMLMu(), s, repoCtx, broker, cfgPath)
 		return reconciler.Run(ctx, oldRepo, newRepo)
 	})
 	srv.SetCleanClonesFn(func(ctx context.Context) (int, error) {
-		ctx, permit, owned, err := updateWorkGate.AcquireContext(ctx, workgate.KindMaintenance)
+		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, updateWorkGate, workgate.KindMaintenance)
 		if err != nil {
 			return 0, err
 		}
-		if owned {
-			defer permit.Release()
-		}
+		defer releaseUpdateWork()
 		cfgMu.Lock()
 		cfgSnap := cfg
 		cfgMu.Unlock()
@@ -714,14 +700,12 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	runCloneRetention := func(reason string) {
 		ctx, cancel := context.WithTimeout(runtimeCtx, 5*time.Minute)
 		defer cancel()
-		ctx, permit, owned, err := updateWorkGate.AcquireContext(ctx, workgate.KindMaintenance)
+		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, updateWorkGate, workgate.KindMaintenance)
 		if err != nil {
 			slog.Debug("clone retention deferred while application update drains", "reason", reason)
 			return
 		}
-		if owned {
-			defer permit.Release()
-		}
+		defer releaseUpdateWork()
 		cfgMu.Lock()
 		cfgSnap := cfg
 		var discovered []string
@@ -800,14 +784,12 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	}
 
 	runReview := func(ctx context.Context, pr *gh.PullRequest, aiCfg config.RepoAI) *store.Review {
-		ctx, permit, owned, err := updateWorkGate.AcquireContext(ctx, workgate.KindReview)
+		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, updateWorkGate, workgate.KindReview)
 		if err != nil {
 			slog.Debug("review deferred while application update drains", "repo", pr.Repo, "pr", pr.Number)
 			return nil
 		}
-		if owned {
-			defer permit.Release()
-		}
+		defer releaseUpdateWork()
 		// Persistent in-flight claim: survives daemon restart and config reload.
 		// Keyed on (pr_id, head_sha) so a new commit on the same PR is not
 		// gated by a stale in-flight row from a prior HEAD. See
@@ -1327,15 +1309,13 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	// existing review pipeline. This replaces the goroutine-per-PR
 	// pattern that Tier 2 used to use.
 	reviewHandler := func(ctx context.Context, msg bus.PRReviewMsg) {
-		ctx, permit, owned, err := updateWorkGate.AcquireContext(ctx, workgate.KindReview)
+		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, updateWorkGate, workgate.KindReview)
 		if err != nil {
 			slog.Debug("review-worker: deferred while application update drains",
 				"repo", msg.Repo, "pr", msg.Number)
 			return
 		}
-		if owned {
-			defer permit.Release()
-		}
+		defer releaseUpdateWork()
 		skipIfUnmonitored := func(stage string) bool {
 			if repoCurrentlyMonitored(msg.Repo) {
 				return false
@@ -1436,14 +1416,12 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	// Replaces the manual retry loop in PublishPending with NATS retry
 	// semantics (NakWithDelay for transient GitHub errors).
 	publishHandler := func(ctx context.Context, msg bus.PRPublishMsg) error {
-		ctx, permit, owned, err := updateWorkGate.AcquireContext(ctx, workgate.KindPublish)
+		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, updateWorkGate, workgate.KindPublish)
 		if err != nil {
 			slog.Debug("publish-worker: deferred while application update drains", "review_id", msg.ReviewID)
 			return nil // PublishPending re-enqueues the still-unpublished row.
 		}
-		if owned {
-			defer permit.Release()
-		}
+		defer releaseUpdateWork()
 		rev, err := s.GetReview(msg.ReviewID)
 		if err != nil {
 			slog.Warn("publish-worker: review not found, skipping",
@@ -1628,15 +1606,13 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	// an issue as review_only. Fetches the issue from GitHub for fresh data,
 	// resolves per-repo config, and runs the issue pipeline.
 	triageHandler := func(ctx context.Context, msg bus.IssueMsg) {
-		ctx, permit, owned, err := updateWorkGate.AcquireContext(ctx, workgate.KindIssue)
+		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, updateWorkGate, workgate.KindIssue)
 		if err != nil {
 			slog.Debug("triage-worker: deferred while application update drains",
 				"repo", msg.Repo, "number", msg.Number)
 			return
 		}
-		if owned {
-			defer permit.Release()
-		}
+		defer releaseUpdateWork()
 		ghIssue, err := ghClient.GetIssue(msg.Repo, msg.Number)
 		if err != nil {
 			slog.Error("triage-worker: fetch issue from GitHub",
@@ -1751,15 +1727,13 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	// an issue as refinement. Refinement is read-only but requires a full local
 	// checkout so the agent can inspect code and git history.
 	refinementHandler := func(ctx context.Context, msg bus.IssueMsg) {
-		ctx, permit, owned, err := updateWorkGate.AcquireContext(ctx, workgate.KindIssue)
+		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, updateWorkGate, workgate.KindIssue)
 		if err != nil {
 			slog.Debug("refinement-worker: deferred while application update drains",
 				"repo", msg.Repo, "number", msg.Number)
 			return
 		}
-		if owned {
-			defer permit.Release()
-		}
+		defer releaseUpdateWork()
 		ghIssue, err := ghClient.GetIssue(msg.Repo, msg.Number)
 		if err != nil {
 			slog.Error("refinement-worker: fetch issue from GitHub",
@@ -1838,15 +1812,13 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	// Consumes implement requests published by the Fetcher when it classifies
 	// an issue as develop. Same config resolution as triage, different mode.
 	implementHandler := func(ctx context.Context, msg bus.IssueMsg) {
-		ctx, permit, owned, err := updateWorkGate.AcquireContext(ctx, workgate.KindImplementation)
+		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, updateWorkGate, workgate.KindImplementation)
 		if err != nil {
 			slog.Debug("implement-worker: deferred while application update drains",
 				"repo", msg.Repo, "number", msg.Number)
 			return
 		}
-		if owned {
-			defer permit.Release()
-		}
+		defer releaseUpdateWork()
 		ghIssue, err := ghClient.GetIssue(msg.Repo, msg.Number)
 		if err != nil {
 			slog.Error("implement-worker: fetch issue from GitHub",
@@ -2438,14 +2410,12 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	// trigger invocations via the closure below.
 	manualReviewGuard := newTriggerGuard()
 	srv.SetTriggerReviewFn(func(prID int64) error {
-		ctx, permit, owned, err := updateWorkGate.AcquireContext(runtimeCtx, workgate.KindReview)
+		ctx, releaseUpdateWork, err := acquireUpdateWork(runtimeCtx, updateWorkGate, workgate.KindReview)
 		if err != nil {
 			slog.Debug("trigger review deferred while application update drains", "pr_id", prID)
 			return nil
 		}
-		if owned {
-			defer permit.Release()
-		}
+		defer releaseUpdateWork()
 		publishErr := func(msg string) {
 			broker.Publish(sse.Event{
 				Type: sse.EventReviewError,
@@ -2629,14 +2599,12 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		// GitHub refetch and NATS publish remain bounded.
 		ctx, cancel := context.WithTimeout(runtimeCtx, 1*time.Minute)
 		defer cancel()
-		ctx, permit, owned, err := updateWorkGate.AcquireContext(ctx, workgate.KindIssue)
+		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, updateWorkGate, workgate.KindIssue)
 		if err != nil {
 			slog.Debug("trigger issue review deferred while application update drains", "issue_id", issueID)
 			return nil
 		}
-		if owned {
-			defer permit.Release()
-		}
+		defer releaseUpdateWork()
 
 		publishIssueErr := func(msg string) {
 			broker.Publish(sse.Event{
@@ -2685,14 +2653,12 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	srv.SetTriggerIssueRefineFn(func(issueID int64, force bool) error {
 		ctx, cancel := context.WithCancel(runtimeCtx)
 		defer cancel()
-		ctx, permit, owned, err := updateWorkGate.AcquireContext(ctx, workgate.KindIssue)
+		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, updateWorkGate, workgate.KindIssue)
 		if err != nil {
 			slog.Debug("trigger issue refinement deferred while application update drains", "issue_id", issueID)
 			return nil
 		}
-		if owned {
-			defer permit.Release()
-		}
+		defer releaseUpdateWork()
 
 		publishIssueErr := func(msg string) {
 			broker.Publish(sse.Event{
@@ -2752,13 +2718,11 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	srv.SetTriggerPromoteFn(func(issueID int64) error {
 		ctx, cancel := context.WithTimeout(runtimeCtx, 30*time.Second)
 		defer cancel()
-		ctx, permit, owned, err := updateWorkGate.AcquireContext(ctx, workgate.KindMaintenance)
+		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, updateWorkGate, workgate.KindMaintenance)
 		if err != nil {
 			return err
 		}
-		if owned {
-			defer permit.Release()
-		}
+		defer releaseUpdateWork()
 
 		publishIssueErr := func(msg string) {
 			broker.Publish(sse.Event{
@@ -4366,14 +4330,12 @@ func (a *tier2Adapter) FetchPRsToReview() ([]scheduler.Tier2PR, error) {
 
 // ProcessPR implements scheduler.Tier2PRProcessor.
 func (a *tier2Adapter) ProcessPR(ctx context.Context, pr scheduler.Tier2PR) error {
-	ctx, permit, owned, err := a.workGate.AcquireContext(ctx, workgate.KindReview)
+	ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, a.workGate, workgate.KindReview)
 	if err != nil {
 		slog.Debug("tier2 PR deferred while application update drains", "repo", pr.Repo, "pr", pr.Number)
 		return nil
 	}
-	if owned {
-		defer permit.Release()
-	}
+	defer releaseUpdateWork()
 	a.cfgMu.Lock()
 	c := *a.cfg
 	aiCfg := c.AIForRepo(pr.Repo)
@@ -4511,14 +4473,12 @@ func (a *tier2Adapter) ClearIssuePrefetch() {
 
 // ProcessRepo implements scheduler.Tier2IssueProcessor.
 func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error) {
-	ctx, permit, owned, err := a.workGate.AcquireContext(ctx, workgate.KindIssue)
+	ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, a.workGate, workgate.KindIssue)
 	if err != nil {
 		slog.Debug("tier2 issue scan deferred while application update drains", "repo", repo)
 		return 0, nil
 	}
-	if owned {
-		defer permit.Release()
-	}
+	defer releaseUpdateWork()
 	a.cfgMu.Lock()
 	c := *a.cfg
 	repoIT := c.IssueTrackingForRepo(repo)
@@ -4667,13 +4627,11 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 
 // PromoteReady implements scheduler.Tier2Promoter.
 func (a *tier2Adapter) PromoteReady(ctx context.Context, repos []string) (int, error) {
-	ctx, permit, owned, err := a.workGate.AcquireContext(ctx, workgate.KindMaintenance)
+	ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, a.workGate, workgate.KindMaintenance)
 	if err != nil {
 		return 0, err
 	}
-	if owned {
-		defer permit.Release()
-	}
+	defer releaseUpdateWork()
 
 	type promoteGroup struct {
 		it    config.IssueTrackingConfig
@@ -5925,13 +5883,11 @@ func runStartupWorktreePrune(
 	gate *workgate.Gate,
 	prune func(context.Context),
 ) error {
-	ctx, permit, owned, err := gate.AcquireContext(ctx, workgate.KindMaintenance)
+	ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, gate, workgate.KindMaintenance)
 	if err != nil {
 		return err
 	}
-	if owned {
-		defer permit.Release()
-	}
+	defer releaseUpdateWork()
 	prune(ctx)
 	return nil
 }

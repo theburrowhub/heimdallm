@@ -18,6 +18,8 @@ import (
 	gh "github.com/heimdallm/daemon/internal/github"
 	issuepipeline "github.com/heimdallm/daemon/internal/issues"
 	"github.com/heimdallm/daemon/internal/repoctx"
+	"github.com/heimdallm/daemon/internal/scheduler"
+	"github.com/heimdallm/daemon/internal/server"
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
 	"github.com/heimdallm/daemon/internal/workgate"
@@ -37,6 +39,74 @@ func newMemStore(t *testing.T) *store.Store {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	return s
+}
+
+func TestUpdateServerErrorMapsEveryUpdaterProtocolFailure(t *testing.T) {
+	unknown := errors.New("storage unavailable")
+	tests := []struct {
+		name string
+		in   error
+		want error
+	}{
+		{name: "lease required", in: workgate.ErrLeaseIDRequired, want: server.ErrUpdateLeaseRequired},
+		{name: "lease invalid", in: workgate.ErrLeaseIDInvalid, want: server.ErrUpdateLeaseInvalid},
+		{name: "lease conflict", in: workgate.ErrLeaseConflict, want: server.ErrUpdateLeaseConflict},
+		{name: "work active", in: workgate.ErrWorkActive, want: server.ErrUpdateNotReady},
+		{name: "lease not sealed", in: workgate.ErrLeaseNotSealed, want: server.ErrUpdateNotSealed},
+		{name: "bootstrap not authorized", in: workgate.ErrBootstrapNotAuthorized, want: server.ErrUpdateBootstrapNotAuthorized},
+		{name: "unknown preserved", in: unknown, want: unknown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := updateServerError(tt.in); got != tt.want {
+				t.Fatalf("updateServerError(%v) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAcquireUpdateWorkOwnsOnlyTopLevelPermit(t *testing.T) {
+	ctx, releaseNilGate, err := acquireUpdateWork(nil, nil, workgate.KindReview)
+	if err != nil {
+		t.Fatalf("acquire with nil gate: %v", err)
+	}
+	if ctx == nil || releaseNilGate == nil {
+		t.Fatal("nil gate did not return a usable context and cleanup")
+	}
+	releaseNilGate()
+
+	gate := workgate.New(time.Minute)
+	outerCtx, releaseOuter, err := acquireUpdateWork(t.Context(), gate, workgate.KindReview)
+	if err != nil {
+		t.Fatalf("acquire outer work: %v", err)
+	}
+	if got := gate.Status().Total(); got != 1 {
+		t.Fatalf("active permits after outer acquire = %d, want 1", got)
+	}
+
+	_, releaseNested, err := acquireUpdateWork(outerCtx, gate, workgate.KindIssue)
+	if err != nil {
+		t.Fatalf("acquire nested work: %v", err)
+	}
+	releaseNested()
+	if got := gate.Status().Total(); got != 1 {
+		t.Fatalf("nested cleanup released outer permit: total = %d, want 1", got)
+	}
+	releaseOuter()
+	if got := gate.Status().Total(); got != 0 {
+		t.Fatalf("active permits after outer cleanup = %d, want 0", got)
+	}
+
+	if _, err := gate.Prepare("updater-owner"); err != nil {
+		t.Fatalf("prepare drain: %v", err)
+	}
+	_, releaseDraining, err := acquireUpdateWork(t.Context(), gate, workgate.KindMaintenance)
+	if !errors.Is(err, workgate.ErrDraining) {
+		t.Fatalf("acquire during drain error = %v, want ErrDraining", err)
+	}
+	if releaseDraining != nil {
+		t.Fatal("acquire during drain returned a cleanup for unadmitted work")
+	}
 }
 
 func TestRunStartupWorktreePruneHonorsRestoredDrain(t *testing.T) {
@@ -1017,6 +1087,36 @@ func TestTier2AdapterPromoteReadyDefersDuringUpdateDrain(t *testing.T) {
 	n, err := a.PromoteReady(t.Context(), []string{"org/repo"})
 	if n != 0 || !errors.Is(err, workgate.ErrDraining) {
 		t.Fatalf("PromoteReady during drain = (%d, %v), want (0, ErrDraining)", n, err)
+	}
+}
+
+func TestTier2AdapterProcessorsDeferBeforeDependenciesDuringUpdateDrain(t *testing.T) {
+	gate := workgate.New(time.Minute)
+	if _, err := gate.Prepare("updater-owner"); err != nil {
+		t.Fatalf("prepare drain: %v", err)
+	}
+	reviewCalled := false
+	a := &tier2Adapter{
+		workGate: gate,
+		runReview: func(context.Context, *gh.PullRequest, config.RepoAI) *store.Review {
+			reviewCalled = true
+			return nil
+		},
+	}
+
+	if err := a.ProcessPR(t.Context(), scheduler.Tier2PR{Repo: "org/repo", Number: 7}); err != nil {
+		t.Fatalf("ProcessPR during drain: %v", err)
+	}
+	if reviewCalled {
+		t.Fatal("ProcessPR reached review dependencies during update drain")
+	}
+
+	processed, err := a.ProcessRepo(t.Context(), "org/repo")
+	if err != nil || processed != 0 {
+		t.Fatalf("ProcessRepo during drain = (%d, %v), want (0, nil)", processed, err)
+	}
+	if got := gate.Status().Total(); got != 0 {
+		t.Fatalf("active permits after deferred processors = %d, want 0", got)
 	}
 }
 
