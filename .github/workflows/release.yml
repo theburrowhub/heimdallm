@@ -476,6 +476,7 @@ jobs:
       contents: write
     env:
       TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
+      BUNDLE_GEMFILE: ${{ github.workspace }}/flutter_app/macos/Gemfile
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -504,27 +505,16 @@ jobs:
           bundler-cache: true
           working-directory: flutter_app/macos
 
-      # Flutter invokes `pod` itself during both configuration and the release
-      # build. Keep those implicit installs on the exact Bundler-pinned version
-      # instead of the older CocoaPods preinstalled on the runner.
-      - name: Use pinned CocoaPods from Flutter
-        working-directory: flutter_app/macos
-        run: |
-          set -euo pipefail
-          export BUNDLE_GEMFILE="$PWD/Gemfile"
-          POD_BIN_DIR=$(dirname "$(bundle exec which pod)")
-          test "$("$POD_BIN_DIR/pod" --version)" = "1.17.0"
-          echo "$POD_BIN_DIR" >> "$GITHUB_PATH"
-          echo "BUNDLE_GEMFILE=$BUNDLE_GEMFILE" >> "$GITHUB_ENV"
-
       # ── Dependencies ────────────────────────────────────────────────────────
       - name: Flutter pub get
         working-directory: flutter_app
         run: flutter pub get
 
+      # Both Flutter macOS builds invoke `pod` internally. `bundle exec` makes
+      # those subprocesses use the locked CocoaPods instead of the runner copy.
       - name: Generate macOS Flutter configuration
         working-directory: flutter_app
-        run: flutter build macos --debug --config-only
+        run: bundle exec flutter build macos --debug --config-only
 
       - name: CocoaPods
         working-directory: flutter_app/macos
@@ -587,7 +577,7 @@ jobs:
       - name: Build Flutter app (release)
         working-directory: flutter_app
         run: |
-          flutter build macos --release \
+          bundle exec flutter build macos --release \
             --build-name="$VERSION" \
             --build-number="$BUILD_NUMBER"
 
