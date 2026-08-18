@@ -78,7 +78,8 @@ class WebPlatformServices implements PlatformServices {
     try {
       var permission = web.Notification.permission;
       if (permission == 'default') {
-        permission = (await web.Notification.requestPermission().toDart).toDart;
+        permission =
+            (await web.Notification.requestPermission().toDart).toDart;
       }
       if (permission != 'granted') return;
 
@@ -129,34 +130,12 @@ class WebPlatformServices implements PlatformServices {
   Future<void> hideWindow() async {}
 
   @override
-  void quitApp() {
+  Never quitApp() {
     // Cannot actually exit a browser tab from JS without a user gesture.
-    // The browser owns its tab lifecycle, so this is deliberately a no-op.
+    // Throwing gives tests something to catch and desktop callers never
+    // reach this branch.
+    throw UnsupportedError('quitApp is not supported on web');
   }
-
-  @override
-  void quitDuplicateInstance() {
-    // Browser tabs do not share the desktop singleton mechanism.
-  }
-
-  @override
-  AppUpdateSupport get appUpdateSupport => AppUpdateSupport.unavailable;
-
-  @override
-  Future<void> setupAppUpdater() async {}
-
-  @override
-  Future<void> checkForAppUpdates() async {
-    throw UnsupportedError(
-      'Web updates are managed by the Heimdallm deployment',
-    );
-  }
-
-  @override
-  Future<String?> pendingAppUpdateVersion() async => null;
-
-  @override
-  Future<void> completeAppUpdate() async {}
 
   @override
   Future<String?> detectGitHubToken() async => null;
@@ -182,10 +161,7 @@ class WebPlatformServices implements PlatformServices {
   }
 
   @override
-  Future<void> rebuildTrayMenu({
-    required List<PR> prs,
-    required String me,
-  }) async {}
+  Future<void> rebuildTrayMenu({required List<PR> prs, required String me}) async {}
 
   @override
   Future<List<String>> discoverReposFromPRs(String token) =>

@@ -135,28 +135,7 @@ abstract class PlatformServices {
   /// Sparkle and Flutter can postpone termination while the daemon drains.
   void quitApp();
 
-  /// Terminates a process that has already proved it does not own the desktop
-  /// singleton. This bypasses update recovery only for that duplicate process.
-  void quitDuplicateInstance();
-
   // ── Application updates ────────────────────────────────────────────────
-
-  AppUpdateSupport get appUpdateSupport;
-
-  /// Supplies native update coordination with the daemon endpoint, token and
-  /// data directory. Safe to call on unsupported platforms (no-op).
-  Future<void> setupAppUpdater();
-
-  /// Opens the platform update UI. Only valid when [appUpdateSupport] is
-  /// [AppUpdateSupport.native].
-  Future<void> checkForAppUpdates();
-
-  /// Expected daemon display version after a native update relaunch, or null
-  /// during a normal launch.
-  Future<String?> pendingAppUpdateVersion();
-
-  /// Acknowledges that the relaunched daemon matches the updated app bundle.
-  Future<void> completeAppUpdate();
 
   // ── First-run setup / daemon spawn ──────────────────────────────────────
 
@@ -181,4 +160,77 @@ abstract class PlatformServices {
   /// Returns user's repos, with gh CLI preferred on desktop and HTTP API
   /// fallback. Safe to call from shared code; on web it's HTTP-only.
   Future<List<String>> discoverReposFromPRs(String token);
+}
+
+/// Optional application-update boundary implemented only by platforms that
+/// own an in-process updater. Package- and deployment-managed platforms do not
+/// have to pretend they can update themselves merely to satisfy the main
+/// platform interface.
+abstract interface class AppUpdatePlatformCapability {
+  AppUpdateSupport get appUpdateSupport;
+
+  Future<void> setupAppUpdater();
+  Future<void> checkForAppUpdates();
+  Future<String?> pendingAppUpdateVersion();
+  Future<void> completeAppUpdate();
+}
+
+/// Optional termination path for a process that has already disproved desktop
+/// singleton ownership. It is separate from normal application termination so
+/// an update-owning process can still drain safely through
+/// [PlatformServices.quitApp].
+abstract interface class DuplicateInstancePlatformCapability {
+  void quitDuplicateInstance();
+}
+
+/// Safe defaults for optional native capabilities.
+///
+/// Keeping these defaults in VM-loadable shared code means the browser adapter
+/// stays independent of the macOS updater and remains covered by its existing
+/// browser-only contract.
+extension OptionalPlatformCapabilities on PlatformServices {
+  AppUpdateSupport get appUpdateSupport {
+    final platform = this;
+    return platform is AppUpdatePlatformCapability
+        ? (platform as AppUpdatePlatformCapability).appUpdateSupport
+        : AppUpdateSupport.unavailable;
+  }
+
+  Future<void> setupAppUpdater() async {
+    final platform = this;
+    if (platform is AppUpdatePlatformCapability) {
+      await (platform as AppUpdatePlatformCapability).setupAppUpdater();
+    }
+  }
+
+  Future<void> checkForAppUpdates() async {
+    final platform = this;
+    if (platform is! AppUpdatePlatformCapability) {
+      throw UnsupportedError(
+        'Application updates are managed outside this Heimdallm process',
+      );
+    }
+    await (platform as AppUpdatePlatformCapability).checkForAppUpdates();
+  }
+
+  Future<String?> pendingAppUpdateVersion() async {
+    final platform = this;
+    return platform is AppUpdatePlatformCapability
+        ? (platform as AppUpdatePlatformCapability).pendingAppUpdateVersion()
+        : null;
+  }
+
+  Future<void> completeAppUpdate() async {
+    final platform = this;
+    if (platform is AppUpdatePlatformCapability) {
+      await (platform as AppUpdatePlatformCapability).completeAppUpdate();
+    }
+  }
+
+  void quitDuplicateInstance() {
+    final platform = this;
+    if (platform is DuplicateInstancePlatformCapability) {
+      (platform as DuplicateInstancePlatformCapability).quitDuplicateInstance();
+    }
+  }
 }

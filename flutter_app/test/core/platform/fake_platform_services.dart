@@ -8,7 +8,11 @@ import 'package:heimdallm/core/platform/platform_services.dart';
 /// In-memory fake used by every non-platform-specific test. Every method
 /// records its calls so assertions stay tight — no unexpected interactions
 /// should slip past a test.
-class FakePlatformServices implements PlatformServices {
+class FakePlatformServices
+    implements
+        PlatformServices,
+        AppUpdatePlatformCapability,
+        DuplicateInstancePlatformCapability {
   FakePlatformServices({
     this.apiBaseUrl = 'http://127.0.0.1:7842',
     this.token,

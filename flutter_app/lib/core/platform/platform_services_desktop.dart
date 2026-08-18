@@ -29,19 +29,32 @@ typedef DaemonPortProbe = Future<TcpPortState> Function(Duration timeout);
 @visibleForTesting
 typedef PlatformMethodInvoker =
     Future<dynamic> Function(String method, dynamic arguments);
+@visibleForTesting
+typedef PlatformEnvironmentReader = String? Function(String name);
+@visibleForTesting
+typedef PlatformProcessExit = void Function(int code);
+@visibleForTesting
+typedef InstanceLockAcquirer = Future<void> Function(RandomAccessFile lock);
+@visibleForTesting
+typedef ActivationSocketBinder = Future<ServerSocket> Function(String path);
+@visibleForTesting
+typedef DaemonBinaryPathResolver = String? Function();
 
 const _defaultProcessTimeout = Duration(seconds: 7);
 const _processKillGrace = Duration(seconds: 1);
 
-Future<ProcessResult> _runDefaultPlatformProcess(
+@visibleForTesting
+Future<ProcessResult> runDefaultPlatformProcess(
   String executable,
-  List<String> arguments,
-) async {
+  List<String> arguments, {
+  Duration timeout = _defaultProcessTimeout,
+  Duration killGrace = _processKillGrace,
+}) async {
   final process = await Process.start(executable, arguments);
   final stdoutFuture = process.stdout.transform(systemEncoding.decoder).join();
   final stderrFuture = process.stderr.transform(systemEncoding.decoder).join();
   try {
-    final exitCode = await process.exitCode.timeout(_defaultProcessTimeout);
+    final exitCode = await process.exitCode.timeout(timeout);
     return ProcessResult(
       process.pid,
       exitCode,
@@ -51,11 +64,11 @@ Future<ProcessResult> _runDefaultPlatformProcess(
   } on TimeoutException {
     process.kill(ProcessSignal.sigterm);
     try {
-      await process.exitCode.timeout(_processKillGrace);
+      await process.exitCode.timeout(killGrace);
     } on TimeoutException {
       process.kill(ProcessSignal.sigkill);
       try {
-        await process.exitCode.timeout(_processKillGrace);
+        await process.exitCode.timeout(killGrace);
       } on TimeoutException {
         // The caller still receives a bounded failure. SIGKILL cannot be
         // ignored; a second timeout means the OS has not reaped the child yet.
@@ -70,7 +83,12 @@ Future<ProcessResult> _runDefaultPlatformProcess(
 /// Wraps dart:io, tray_manager, window_manager, flutter_local_notifications,
 /// and the existing FirstRunSetup / DaemonLifecycle helpers so that shared
 /// code never has to import them directly.
-class DesktopPlatformServices with WindowListener implements PlatformServices {
+class DesktopPlatformServices
+    with WindowListener
+    implements
+        PlatformServices,
+        AppUpdatePlatformCapability,
+        DuplicateInstancePlatformCapability {
   DesktopPlatformServices({
     int apiPort = 7842,
     String? tokenPath,
@@ -81,6 +99,11 @@ class DesktopPlatformServices with WindowListener implements PlatformServices {
     @visibleForTesting DetachedDaemonStarter? detachedDaemonStarter,
     @visibleForTesting DaemonPortProbe? daemonPortProbe,
     @visibleForTesting PlatformMethodInvoker? methodInvoker,
+    @visibleForTesting PlatformEnvironmentReader? environmentReader,
+    @visibleForTesting PlatformProcessExit? processExit,
+    @visibleForTesting InstanceLockAcquirer? instanceLockAcquirer,
+    @visibleForTesting ActivationSocketBinder? activationSocketBinder,
+    @visibleForTesting DaemonBinaryPathResolver? daemonBinaryPathResolver,
     @visibleForTesting bool? enableNativeAppUpdates,
     @visibleForTesting Duration processTimeout = const Duration(seconds: 10),
   }) : _apiPort = apiPort,
@@ -88,7 +111,7 @@ class DesktopPlatformServices with WindowListener implements PlatformServices {
        _dataDir = dataDir,
        _pidFilePath = pidFilePath,
        _isMacOS = isMacOS ?? Platform.isMacOS,
-       _processRunner = processRunner ?? _runDefaultPlatformProcess,
+       _processRunner = processRunner ?? runDefaultPlatformProcess,
        _processTimeout = processTimeout,
        _detachedDaemonStarter =
            detachedDaemonStarter ??
@@ -100,6 +123,20 @@ class DesktopPlatformServices with WindowListener implements PlatformServices {
              );
            }),
        _daemonPortProbe = daemonPortProbe,
+       _environmentReader =
+           environmentReader ?? ((name) => Platform.environment[name]),
+       _processExit = processExit ?? exit,
+       _instanceLockAcquirer =
+           instanceLockAcquirer ?? ((lock) => lock.lock(FileLock.exclusive)),
+       _activationSocketBinder =
+           activationSocketBinder ??
+           ((path) => ServerSocket.bind(
+             InternetAddress(path, type: InternetAddressType.unix),
+             0,
+             shared: false,
+           )),
+       _daemonBinaryPathResolver =
+           daemonBinaryPathResolver ?? DaemonLifecycle.defaultBinaryPath,
        _methodInvoker =
            methodInvoker ??
            ((method, arguments) =>
@@ -118,6 +155,11 @@ class DesktopPlatformServices with WindowListener implements PlatformServices {
   final Duration _processTimeout;
   final DetachedDaemonStarter _detachedDaemonStarter;
   final DaemonPortProbe? _daemonPortProbe;
+  final PlatformEnvironmentReader _environmentReader;
+  final PlatformProcessExit _processExit;
+  final InstanceLockAcquirer _instanceLockAcquirer;
+  final ActivationSocketBinder _activationSocketBinder;
+  final DaemonBinaryPathResolver _daemonBinaryPathResolver;
   final PlatformMethodInvoker _methodInvoker;
   final bool _usesDefaultMethodChannel;
   final bool _nativeAppUpdatesRequested;
@@ -138,7 +180,7 @@ class DesktopPlatformServices with WindowListener implements PlatformServices {
       _pidFilePath ??
       readEnv('HEIMDALLM_UI_PID_FILE') ??
       _xctestPidFilePath ??
-      '${Platform.environment['HOME'] ?? ''}/.local/share/heimdallm/ui.pid';
+      '${readEnv('HOME') ?? ''}/.local/share/heimdallm/ui.pid';
 
   String? get _xctestPidFilePath {
     final configurationPath = readEnv('XCTestConfigurationFilePath');
@@ -151,7 +193,7 @@ class DesktopPlatformServices with WindowListener implements PlatformServices {
   String get _resolvedDataDir =>
       _dataDir ??
       readEnv('HEIMDALLM_DATA_DIR') ??
-      '${Platform.environment['HOME'] ?? ''}/.local/share/heimdallm';
+      '${readEnv('HOME') ?? ''}/.local/share/heimdallm';
 
   static const MethodChannel _appUpdateChannel = MethodChannel(
     'com.theburrowhub.heimdallm/app_updater',
@@ -176,7 +218,7 @@ class DesktopPlatformServices with WindowListener implements PlatformServices {
   }
 
   @override
-  String? readEnv(String name) => Platform.environment[name];
+  String? readEnv(String name) => _environmentReader(name);
   @override
   Future<bool> ensureSingleInstance() async {
     if (_instanceLock != null) return true;
@@ -189,7 +231,7 @@ class DesktopPlatformServices with WindowListener implements PlatformServices {
     // JSON record is only authenticated activation routing metadata.
     final lock = await pidFile.open(mode: FileMode.append);
     try {
-      await lock.lock(FileLock.exclusive);
+      await _instanceLockAcquirer(lock);
     } on FileSystemException {
       await lock.close();
       await _activateLockOwner(pidFile);
@@ -203,11 +245,7 @@ class DesktopPlatformServices with WindowListener implements PlatformServices {
       final previousRecord = await _readInstanceRecord(lock);
       socketDirectory = await _reusableSocketDirectory(previousRecord);
       final socketPath = '${socketDirectory.path}/activate.sock';
-      server = await ServerSocket.bind(
-        InternetAddress(socketPath, type: InternetAddressType.unix),
-        0,
-        shared: false,
-      );
+      server = await _activationSocketBinder(socketPath);
       subscription = server.listen((socket) {
         socket.destroy();
         final callback = _activationCallback;
@@ -524,7 +562,8 @@ class DesktopPlatformServices with WindowListener implements PlatformServices {
   @override
   void quitApp() {
     if (!_isMacOS) {
-      exit(0);
+      _processExit(0);
+      return;
     }
     // AppKit termination is asynchronous and may legitimately be postponed
     // while Sparkle drains the daemon. A raw exit would bypass both AppDelegate
@@ -539,7 +578,8 @@ class DesktopPlatformServices with WindowListener implements PlatformServices {
   @override
   void quitDuplicateInstance() {
     if (!_isMacOS) {
-      exit(0);
+      _processExit(0);
+      return;
     }
     unawaited(
       _methodInvoker('terminateDuplicateApplication', null).catchError((
@@ -548,7 +588,7 @@ class DesktopPlatformServices with WindowListener implements PlatformServices {
         // Singleton ownership has already been disproved. A native-channel
         // failure cannot risk daemon/update state because this process owns
         // neither; make sure the duplicate does not linger indefinitely.
-        exit(0);
+        _processExit(0);
       }),
     );
   }
@@ -565,7 +605,7 @@ class DesktopPlatformServices with WindowListener implements PlatformServices {
     if (!_isMacOS) return;
     try {
       if (_usesDefaultMethodChannel) {
-        _appUpdateChannel.setMethodCallHandler(_handleAppUpdaterCall);
+        _appUpdateChannel.setMethodCallHandler(handleAppUpdaterCallForTesting);
       }
       final effective = await _methodInvoker('configure', {
         'updatesEnabled': _nativeAppUpdatesRequested,
@@ -583,7 +623,8 @@ class DesktopPlatformServices with WindowListener implements PlatformServices {
     }
   }
 
-  Future<dynamic> _handleAppUpdaterCall(MethodCall call) async {
+  @visibleForTesting
+  Future<dynamic> handleAppUpdaterCallForTesting(MethodCall call) async {
     if (call.method != 'restartDaemonAfterUpdateAbort') return null;
     final binaryPath = defaultDaemonBinaryPath();
     if (binaryPath == null) {
@@ -659,7 +700,7 @@ class DesktopPlatformServices with WindowListener implements PlatformServices {
   Future<bool> daemonConfigExists() => FirstRunSetup.configExists();
 
   @override
-  String? defaultDaemonBinaryPath() => DaemonLifecycle.defaultBinaryPath();
+  String? defaultDaemonBinaryPath() => _daemonBinaryPathResolver();
 
   Future<TcpPortState> _probeDaemonPort(Duration timeout) async {
     final injected = _daemonPortProbe;

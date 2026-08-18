@@ -13,14 +13,11 @@ import 'shared/router.dart';
 final _appRouter = createRouter(initialLocation: '/');
 GoRouter get appRouter => _appRouter;
 
-Future<void> main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-
-  final platform = PlatformServices.create();
-
+@visibleForTesting
+Future<bool> initializePlatformForApp(PlatformServices platform) async {
   if (!await platform.ensureSingleInstance()) {
     platform.quitDuplicateInstance();
-    return;
+    return false;
   }
 
   try {
@@ -29,6 +26,14 @@ Future<void> main() async {
     // Update infrastructure must never delay or prevent daemon startup.
     debugPrint('app updater init failed: $e');
   }
+  return true;
+}
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  final platform = PlatformServices.create();
+  if (!await initializePlatformForApp(platform)) return;
 
   platform.listenForActivationSignal(() async {
     await platform.showAndFocusWindow();
