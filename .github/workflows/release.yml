@@ -509,6 +509,10 @@ jobs:
         working-directory: flutter_app
         run: flutter pub get
 
+      - name: Generate macOS Flutter configuration
+        working-directory: flutter_app
+        run: flutter build macos --debug --config-only
+
       - name: CocoaPods
         working-directory: flutter_app/macos
         run: bundle exec pod install --deployment --clean-install
