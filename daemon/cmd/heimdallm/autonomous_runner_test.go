@@ -217,6 +217,7 @@ type recordingAutonomousStageRunner struct {
 	prNumber      int
 	calls         []string
 	permitMissing bool
+	onStage       func(string)
 }
 
 func (r *recordingAutonomousStageRunner) RunStage(
@@ -225,6 +226,9 @@ func (r *recordingAutonomousStageRunner) RunStage(
 	_ autonomous.Candidate,
 ) (autonomous.StageOutcome, error) {
 	r.calls = append(r.calls, stage)
+	if r.onStage != nil {
+		r.onStage(stage)
+	}
 	if workgate.PermitFromContext(ctx) == nil {
 		r.permitMissing = true
 	}
@@ -443,5 +447,106 @@ func TestAutonomousPollerDisabledAndFetchFailureArePermitSafe(t *testing.T) {
 	}
 	if total := fixture.gate.Status().Total(); total != 0 {
 		t.Fatalf("fetch failure leaked %d active permits", total)
+	}
+}
+
+func TestAutonomousPollerNoCandidatesReleasesPermit(t *testing.T) {
+	runner := &recordingAutonomousStageRunner{}
+	fixture := newAutonomousPollerFixture(t, http.StatusOK, `[]`, runner)
+
+	fixture.poller.runRepo(context.Background(), "org/repo", "heimdallm-bot")
+
+	if len(runner.calls) != 0 {
+		t.Fatalf("stages for empty candidate list = %v", runner.calls)
+	}
+	if total := fixture.gate.Status().Total(); total != 0 {
+		t.Fatalf("empty candidate list leaked %d active permits", total)
+	}
+}
+
+func TestAutonomousPollerActiveClaimLeaseSkipsCandidate(t *testing.T) {
+	runner := &recordingAutonomousStageRunner{}
+	fixture := newAutonomousPollerFixture(t, http.StatusOK, autonomousIssueFixture, runner)
+	now := time.Now().UTC()
+	issueID, err := fixture.store.UpsertIssue(&store.Issue{
+		GithubID:  9001,
+		Repo:      "org/repo",
+		Number:    42,
+		Title:     "Ship safely",
+		Author:    "alice",
+		State:     "open",
+		CreatedAt: now,
+		FetchedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.store.SetAutonomousClaimUntil(issueID, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	fixture.poller.runRepo(context.Background(), "org/repo", "heimdallm-bot")
+
+	if len(runner.calls) != 0 {
+		t.Fatalf("stages for actively claimed candidate = %v", runner.calls)
+	}
+	if total := fixture.gate.Status().Total(); total != 0 {
+		t.Fatalf("skipped candidate leaked %d active permits", total)
+	}
+}
+
+func TestAutonomousPollerSelectorFailureReleasesPermit(t *testing.T) {
+	runner := &recordingAutonomousStageRunner{}
+	fixture := newAutonomousPollerFixture(t, http.StatusOK, autonomousIssueFixture, runner)
+	if err := fixture.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	fixture.poller.runRepo(context.Background(), "org/repo", "heimdallm-bot")
+
+	if len(runner.calls) != 0 {
+		t.Fatalf("stages after selector store failure = %v", runner.calls)
+	}
+	if total := fixture.gate.Status().Total(); total != 0 {
+		t.Fatalf("selector failure leaked %d active permits", total)
+	}
+}
+
+const autonomousOthersIssueFixture = `[{"id":9002,"number":43,"title":"Coordinate safely","body":"Take over politely","user":{"login":"alice"},"assignees":[{"login":"alice"}],"labels":[],"state":"open","created_at":"2026-08-01T10:00:00Z","updated_at":"2026-08-01T11:00:00Z"}]`
+
+func TestAutonomousPollerClaimFailureStopsBeforeDriveAndReleasesPermit(t *testing.T) {
+	runner := &recordingAutonomousStageRunner{}
+	fixture := newAutonomousPollerFixture(t, http.StatusOK, autonomousOthersIssueFixture, runner)
+	fixture.config.GitHub.IssueTracking.Assignees = []string{"alice"}
+	fixture.config.Autonomous.TakeOthersTasks = true
+	fixture.config.Autonomous.ReassignOnTake = false
+
+	fixture.poller.runRepo(context.Background(), "org/repo", "heimdallm-bot")
+
+	if len(runner.calls) != 0 {
+		t.Fatalf("stages after claim failure = %v", runner.calls)
+	}
+	if total := fixture.gate.Status().Total(); total != 0 {
+		t.Fatalf("claim failure leaked %d active permits", total)
+	}
+}
+
+func TestAutonomousPollerLeaseClearFailureStillReleasesPermit(t *testing.T) {
+	fixture := newAutonomousPollerFixture(t, http.StatusOK, autonomousIssueFixture, nil)
+	runner := &recordingAutonomousStageRunner{prNumber: 77}
+	runner.onStage = func(stage string) {
+		if stage == autonomous.StageDevelopment {
+			_ = fixture.store.Close()
+		}
+	}
+	fixture.poller.orch = autonomous.NewOrchestrator(runner, autonomous.NewPhaseGuard())
+
+	fixture.poller.runRepo(context.Background(), "org/repo", "heimdallm-bot")
+
+	if len(runner.calls) != 3 {
+		t.Fatalf("stages before lease-clear failure = %v", runner.calls)
+	}
+	if total := fixture.gate.Status().Total(); total != 0 {
+		t.Fatalf("lease-clear failure leaked %d active permits", total)
 	}
 }
