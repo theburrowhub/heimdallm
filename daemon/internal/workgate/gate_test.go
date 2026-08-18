@@ -591,3 +591,213 @@ func TestPersistentCorruptLeaseFailsClosedAtConstruction(t *testing.T) {
 		t.Fatal("NewPersistent accepted corrupt marker")
 	}
 }
+
+func TestContextHelpersAndConstructorsHandleNilAndInvalidInputs(t *testing.T) {
+	ctx := WithPermit(nil, nil)
+	if ctx == nil {
+		t.Fatal("WithPermit(nil, nil) returned a nil context")
+	}
+	if permit := PermitFromContext(nil); permit != nil {
+		t.Fatalf("PermitFromContext(nil) = %p, want nil", permit)
+	}
+
+	var nilGate *Gate
+	ctx, permit, owned, err := nilGate.AcquireContext(nil, KindReview)
+	if err != nil || ctx == nil || permit != nil || owned {
+		t.Fatalf("nil gate AcquireContext = (%v, %p, %v, %v)", ctx, permit, owned, err)
+	}
+
+	if _, err := NewPersistent(time.Minute, " \t "); err == nil {
+		t.Fatal("NewPersistent accepted an empty state path")
+	}
+	deferredPanic := func() (recovered any) {
+		defer func() { recovered = recover() }()
+		_ = New(0)
+		return nil
+	}()
+	if deferredPanic == nil {
+		t.Fatal("New accepted a non-positive lease TTL")
+	}
+
+	if err := New(time.Minute).WaitUntilBootstrapAuthorized(nil); err != nil {
+		t.Fatalf("open gate wait with nil context: %v", err)
+	}
+}
+
+func TestSealConfirmAndCancelValidateLeaseIDsAndSealIsIdempotent(t *testing.T) {
+	g := New(time.Minute)
+	oversized := strings.Repeat("x", maxLeaseIDBytes+1)
+	if _, err := g.Seal(""); !errors.Is(err, ErrLeaseIDRequired) {
+		t.Fatalf("Seal empty lease error = %v, want ErrLeaseIDRequired", err)
+	}
+	if _, err := g.Seal(oversized); !errors.Is(err, ErrLeaseIDInvalid) {
+		t.Fatalf("Seal oversized lease error = %v, want ErrLeaseIDInvalid", err)
+	}
+	if _, err := g.ConfirmBootstrap(""); !errors.Is(err, ErrLeaseIDRequired) {
+		t.Fatalf("ConfirmBootstrap empty lease error = %v, want ErrLeaseIDRequired", err)
+	}
+	if _, err := g.Cancel(""); !errors.Is(err, ErrLeaseIDRequired) {
+		t.Fatalf("Cancel empty lease error = %v, want ErrLeaseIDRequired", err)
+	}
+	if _, err := g.Prepare("owner-a"); err != nil {
+		t.Fatal(err)
+	}
+	first, err := g.Seal("owner-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := g.Seal("owner-a")
+	if err != nil || !second.Sealed || second.LeaseID != first.LeaseID {
+		t.Fatalf("idempotent Seal = (%+v, %v), first = %+v", second, err, first)
+	}
+}
+
+func TestPersistentSealFailsClosedOnDirectorySyncFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "update-drain.json")
+	g, err := NewPersistent(time.Minute, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Prepare("owner-a"); err != nil {
+		t.Fatal(err)
+	}
+	g.syncDir = func(string) error { return errors.New("injected seal sync failure") }
+	if _, err := g.Seal("owner-a"); err == nil || !strings.Contains(err.Error(), "sync persistent lease directory") {
+		t.Fatalf("Seal directory sync error = %v", err)
+	}
+	if snapshot := g.Status(); snapshot.Sealed {
+		t.Fatalf("failed durable Seal changed in-memory state: %+v", snapshot)
+	}
+}
+
+func TestExpiredLeaseIgnoresMarkerRemovalFailureAndReopensAdmission(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "update-drain.json")
+	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	g, err := NewPersistent(time.Second, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.now = func() time.Time { return now }
+	if _, err := g.Prepare("owner-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "keeps-directory-non-empty"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(2 * time.Second)
+	if snapshot := g.Status(); snapshot.Draining {
+		t.Fatalf("expired lease stayed closed after best-effort cleanup failure: %+v", snapshot)
+	}
+}
+
+func TestPersistentRestoreRejectsIncompleteState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "update-drain.json")
+	if err := os.WriteFile(path, []byte(`{"lease_id":"owner-a"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewPersistent(time.Minute, path); err == nil || !strings.Contains(err.Error(), "persistent lease is incomplete") {
+		t.Fatalf("incomplete persistent lease error = %v", err)
+	}
+}
+
+func TestPersistentRestoreSurfacesExpiryRemovalAndRenewalFailures(t *testing.T) {
+	t.Run("expired marker cannot be removed", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "update-drain.json")
+		body := `{"lease_id":"owner-a","expires_at":"2000-01-01T00:00:00Z"}`
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(dir, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = os.Chmod(dir, 0o700) }()
+		g := &Gate{
+			active:    make(map[Kind]int),
+			leaseTTL:  time.Minute,
+			statePath: path,
+			now:       time.Now,
+			syncDir:   syncDirectory,
+		}
+		if err := g.restore(); err == nil || !strings.Contains(err.Error(), "remove expired persistent lease") {
+			t.Fatalf("expired marker removal error = %v", err)
+		}
+	})
+
+	t.Run("live marker cannot be renewed durably", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "update-drain.json")
+		expires := time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano)
+		body := `{"lease_id":"owner-a","expires_at":"` + expires + `"}`
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		g := &Gate{
+			active:    make(map[Kind]int),
+			leaseTTL:  time.Minute,
+			statePath: path,
+			now:       time.Now,
+			syncDir:   func(string) error { return errors.New("injected renewal sync failure") },
+		}
+		if err := g.restore(); err == nil || !strings.Contains(err.Error(), "renew restored persistent lease") {
+			t.Fatalf("live marker renewal error = %v", err)
+		}
+	})
+}
+
+func TestPersistentFilesystemFailurePaths(t *testing.T) {
+	t.Run("create directory", func(t *testing.T) {
+		parentFile := filepath.Join(t.TempDir(), "not-a-directory")
+		if err := os.WriteFile(parentFile, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		g := New(time.Minute)
+		g.statePath = filepath.Join(parentFile, "update-drain.json")
+		if _, err := g.Prepare("owner-a"); err == nil || !strings.Contains(err.Error(), "create persistent lease directory") {
+			t.Fatalf("persistent directory creation error = %v", err)
+		}
+	})
+
+	t.Run("replace marker", func(t *testing.T) {
+		dir := t.TempDir()
+		targetDir := filepath.Join(dir, "update-drain.json")
+		if err := os.Mkdir(targetDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(targetDir, "child"), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		g := New(time.Minute)
+		g.statePath = targetDir
+		if _, err := g.Prepare("owner-a"); err == nil || !strings.Contains(err.Error(), "replace persistent lease") {
+			t.Fatalf("persistent marker replacement error = %v", err)
+		}
+	})
+
+	t.Run("remove marker", func(t *testing.T) {
+		targetDir := filepath.Join(t.TempDir(), "update-drain.json")
+		if err := os.Mkdir(targetDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(targetDir, "child"), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		g := New(time.Minute)
+		g.statePath = targetDir
+		if err := g.removeStateLocked(); err == nil || !strings.Contains(err.Error(), "remove persistent lease") {
+			t.Fatalf("persistent marker removal error = %v", err)
+		}
+	})
+
+	t.Run("open sync directory", func(t *testing.T) {
+		if err := syncDirectory(filepath.Join(t.TempDir(), "missing")); err == nil {
+			t.Fatal("syncDirectory accepted a missing directory")
+		}
+	})
+}

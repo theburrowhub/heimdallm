@@ -1,12 +1,23 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/heimdallm/daemon/internal/autonomous"
+	"github.com/heimdallm/daemon/internal/config"
+	"github.com/heimdallm/daemon/internal/executor"
 	gh "github.com/heimdallm/daemon/internal/github"
+	"github.com/heimdallm/daemon/internal/sse"
+	"github.com/heimdallm/daemon/internal/store"
+	"github.com/heimdallm/daemon/internal/workgate"
 )
 
 func TestToReviewInputs_PreservesOrderAndFields(t *testing.T) {
@@ -198,5 +209,239 @@ func TestStripCodeFences(t *testing.T) {
 	}
 	if !strings.Contains(out, "before") || !strings.Contains(out, "after") {
 		t.Errorf("expected surrounding text preserved, got %q", out)
+	}
+}
+
+type recordingAutonomousStageRunner struct {
+	err           error
+	prNumber      int
+	calls         []string
+	permitMissing bool
+}
+
+func (r *recordingAutonomousStageRunner) RunStage(
+	ctx context.Context,
+	stage string,
+	_ autonomous.Candidate,
+) (autonomous.StageOutcome, error) {
+	r.calls = append(r.calls, stage)
+	if workgate.PermitFromContext(ctx) == nil {
+		r.permitMissing = true
+	}
+	if r.err != nil {
+		return autonomous.StageOutcome{}, r.err
+	}
+	outcome := autonomous.StageOutcome{Success: true}
+	if stage == autonomous.StageDevelopment {
+		outcome.PRNumber = r.prNumber
+	}
+	return outcome, nil
+}
+
+type autonomousPollerFixture struct {
+	poller      *AutonomousPoller
+	store       *store.Store
+	gate        *workgate.Gate
+	config      *config.Config
+	githubCalls *atomic.Int32
+	events      <-chan sse.Event
+}
+
+func newAutonomousPollerFixture(
+	t *testing.T,
+	issueStatus int,
+	issueBody string,
+	stageRunner autonomous.StageRunner,
+) *autonomousPollerFixture {
+	t.Helper()
+	var githubCalls atomic.Int32
+	githubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		githubCalls.Add(1)
+		switch {
+		case r.URL.Path == "/repos/org/repo/issues":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(issueStatus)
+			_, _ = w.Write([]byte(issueBody))
+		case strings.HasPrefix(r.URL.Path, "/repos/org/repo/branches/"):
+			http.NotFound(w, r)
+		default:
+			http.Error(w, "unexpected autonomous test request", http.StatusInternalServerError)
+		}
+	}))
+	t.Cleanup(githubServer.Close)
+
+	st := newMemStore(t)
+	broker := sse.NewBroker()
+	broker.Start()
+	t.Cleanup(broker.Stop)
+	events := broker.Subscribe()
+	if events == nil {
+		t.Fatal("subscribe autonomous events")
+	}
+	t.Cleanup(func() { broker.Unsubscribe(events) })
+
+	cfg := &config.Config{}
+	cfg.GitHub.IssueTracking = config.IssueTrackingConfig{
+		Enabled:       true,
+		FilterMode:    config.FilterModeExclusive,
+		Assignees:     []string{"heimdallm-bot"},
+		DefaultAction: string(config.IssueModeReviewOnly),
+	}
+	cfg.Autonomous = config.AutonomousConfig{
+		Enabled:    true,
+		ClaimLease: "30m",
+	}
+	var cfgMu sync.Mutex
+	gate := workgate.New(time.Minute)
+	poller := &AutonomousPoller{
+		ghClient: gh.NewClient("test-token", gh.WithBaseURL(githubServer.URL)),
+		store:    st,
+		broker:   broker,
+		orch:     autonomous.NewOrchestrator(stageRunner, autonomous.NewPhaseGuard()),
+		runner:   executor.New(),
+		workGate: gate,
+		cfg:      &cfg,
+		cfgMu:    &cfgMu,
+		botLogin: func() string { return "heimdallm-bot" },
+		reposFn:  func() []string { return []string{"org/repo"} },
+	}
+	return &autonomousPollerFixture{
+		poller:      poller,
+		store:       st,
+		gate:        gate,
+		config:      cfg,
+		githubCalls: &githubCalls,
+		events:      events,
+	}
+}
+
+const autonomousIssueFixture = `[{"id":9001,"number":42,"title":"Ship safely","body":"Add the updater","user":{"login":"alice"},"assignees":[{"login":"heimdallm-bot"}],"labels":[],"state":"open","created_at":"2026-08-01T10:00:00Z","updated_at":"2026-08-01T11:00:00Z"}]`
+
+func TestAutonomousPollerRunDefersBeforeGitHubAndClaimSideEffects(t *testing.T) {
+	runner := &recordingAutonomousStageRunner{prNumber: 77}
+	fixture := newAutonomousPollerFixture(t, http.StatusOK, autonomousIssueFixture, runner)
+	if _, err := fixture.gate.Prepare("updater-owner"); err != nil {
+		t.Fatalf("prepare update drain: %v", err)
+	}
+
+	fixture.poller.Run(context.Background())
+
+	if got := fixture.githubCalls.Load(); got != 0 {
+		t.Fatalf("GitHub calls during update drain = %d, want 0", got)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("autonomous stages during update drain = %v, want none", runner.calls)
+	}
+	if _, err := fixture.store.GetIssueByGithubID(9001); err == nil {
+		t.Fatal("update drain persisted a candidate before returning")
+	}
+}
+
+func TestAutonomousPollerRunDrivesCandidateUnderOnePermitAndClearsLease(t *testing.T) {
+	runner := &recordingAutonomousStageRunner{prNumber: 77}
+	fixture := newAutonomousPollerFixture(t, http.StatusOK, autonomousIssueFixture, runner)
+
+	fixture.poller.Run(context.Background())
+
+	wantStages := []string{
+		autonomous.StageTriage,
+		autonomous.StageRefinement,
+		autonomous.StageDevelopment,
+	}
+	if strings.Join(runner.calls, ",") != strings.Join(wantStages, ",") {
+		t.Fatalf("stages = %v, want %v", runner.calls, wantStages)
+	}
+	if runner.permitMissing {
+		t.Fatal("stage runner did not receive the runRepo admission permit")
+	}
+	if total := fixture.gate.Status().Total(); total != 0 {
+		t.Fatalf("active permits after runRepo = %d, want 0", total)
+	}
+	storedIssue, err := fixture.store.GetIssueByGithubID(9001)
+	if err != nil {
+		t.Fatalf("load selected issue: %v", err)
+	}
+	claimed, err := fixture.store.IsIssueClaimedByAutonomous(storedIssue.ID)
+	if err != nil {
+		t.Fatalf("load autonomous claim flag: %v", err)
+	}
+	if !claimed {
+		t.Fatal("selected issue was not marked claimed")
+	}
+	active, err := fixture.store.IsAutonomousClaimActive(storedIssue.ID, time.Now())
+	if err != nil {
+		t.Fatalf("load autonomous claim lease: %v", err)
+	}
+	if active {
+		t.Fatal("successful development left its cooldown lease active")
+	}
+	select {
+	case event := <-fixture.events:
+		if event.Type != sse.EventAutonomousTaskSelected {
+			t.Fatalf("first autonomous event = %q, want %q", event.Type, sse.EventAutonomousTaskSelected)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("autonomous selection event was not published")
+	}
+}
+
+func TestAutonomousPollerExpectedDrainDuringDriveClearsCooldown(t *testing.T) {
+	runner := &recordingAutonomousStageRunner{err: workgate.ErrDraining}
+	fixture := newAutonomousPollerFixture(t, http.StatusOK, autonomousIssueFixture, runner)
+
+	fixture.poller.runRepo(context.Background(), "org/repo", "heimdallm-bot")
+
+	storedIssue, err := fixture.store.GetIssueByGithubID(9001)
+	if err != nil {
+		t.Fatalf("load selected issue: %v", err)
+	}
+	active, err := fixture.store.IsAutonomousClaimActive(storedIssue.ID, time.Now())
+	if err != nil {
+		t.Fatalf("load autonomous claim lease: %v", err)
+	}
+	if active {
+		t.Fatal("expected updater drain was charged as a failure cooldown")
+	}
+	if total := fixture.gate.Status().Total(); total != 0 {
+		t.Fatalf("active permits after expected drain = %d, want 0", total)
+	}
+}
+
+func TestAutonomousPollerRealDriveFailureKeepsFallbackCooldown(t *testing.T) {
+	runner := &recordingAutonomousStageRunner{err: errors.New("agent unavailable")}
+	fixture := newAutonomousPollerFixture(t, http.StatusOK, autonomousIssueFixture, runner)
+	fixture.config.Autonomous.ClaimLease = "not-a-duration"
+
+	fixture.poller.runRepo(context.Background(), "org/repo", "heimdallm-bot")
+
+	storedIssue, err := fixture.store.GetIssueByGithubID(9001)
+	if err != nil {
+		t.Fatalf("load selected issue: %v", err)
+	}
+	active, err := fixture.store.IsAutonomousClaimActive(storedIssue.ID, time.Now())
+	if err != nil {
+		t.Fatalf("load autonomous claim lease: %v", err)
+	}
+	if !active {
+		t.Fatal("real drive failure did not retain its fallback cooldown lease")
+	}
+}
+
+func TestAutonomousPollerDisabledAndFetchFailureArePermitSafe(t *testing.T) {
+	runner := &recordingAutonomousStageRunner{}
+	fixture := newAutonomousPollerFixture(t, http.StatusInternalServerError, `{"message":"boom"}`, runner)
+	fixture.config.Autonomous.Enabled = false
+	fixture.poller.runRepo(context.Background(), "org/repo", "heimdallm-bot")
+	if got := fixture.githubCalls.Load(); got != 0 {
+		t.Fatalf("disabled repo made %d GitHub calls", got)
+	}
+
+	fixture.config.Autonomous.Enabled = true
+	fixture.poller.runRepo(context.Background(), "org/repo", "heimdallm-bot")
+	if got := fixture.githubCalls.Load(); got != 1 {
+		t.Fatalf("fetch failure GitHub calls = %d, want 1", got)
+	}
+	if total := fixture.gate.Status().Total(); total != 0 {
+		t.Fatalf("fetch failure leaked %d active permits", total)
 	}
 }
