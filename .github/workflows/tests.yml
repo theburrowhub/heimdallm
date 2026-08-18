@@ -284,6 +284,21 @@ jobs:
           bundler-cache: true
           working-directory: flutter_app/macos
 
+      # Flutter shells out to `pod` directly. The macOS runner also ships an
+      # older system CocoaPods, so merely using `bundle exec` in the next step
+      # is too late: `flutter build` has already run pod install and rewritten
+      # Podfile.lock. Put the Gemfile-pinned executable first for every later
+      # Flutter invocation in this job.
+      - name: Use pinned CocoaPods from Flutter
+        working-directory: flutter_app/macos
+        run: |
+          set -euo pipefail
+          export BUNDLE_GEMFILE="$PWD/Gemfile"
+          POD_BIN_DIR=$(dirname "$(bundle exec which pod)")
+          test "$("$POD_BIN_DIR/pod" --version)" = "1.17.0"
+          echo "$POD_BIN_DIR" >> "$GITHUB_PATH"
+          echo "BUNDLE_GEMFILE=$BUNDLE_GEMFILE" >> "$GITHUB_ENV"
+
       - name: Dependencies
         working-directory: flutter_app
         run: flutter pub get

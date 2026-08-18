@@ -504,6 +504,19 @@ jobs:
           bundler-cache: true
           working-directory: flutter_app/macos
 
+      # Flutter invokes `pod` itself during both configuration and the release
+      # build. Keep those implicit installs on the exact Bundler-pinned version
+      # instead of the older CocoaPods preinstalled on the runner.
+      - name: Use pinned CocoaPods from Flutter
+        working-directory: flutter_app/macos
+        run: |
+          set -euo pipefail
+          export BUNDLE_GEMFILE="$PWD/Gemfile"
+          POD_BIN_DIR=$(dirname "$(bundle exec which pod)")
+          test "$("$POD_BIN_DIR/pod" --version)" = "1.17.0"
+          echo "$POD_BIN_DIR" >> "$GITHUB_PATH"
+          echo "BUNDLE_GEMFILE=$BUNDLE_GEMFILE" >> "$GITHUB_ENV"
+
       # ── Dependencies ────────────────────────────────────────────────────────
       - name: Flutter pub get
         working-directory: flutter_app
