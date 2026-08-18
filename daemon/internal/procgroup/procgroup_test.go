@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -295,7 +296,8 @@ func TestProcessGroupOwnerCrashHelper(t *testing.T) {
 	cmd := exec.CommandContext(context.Background(), "sh", "-c",
 		`trap '' TERM; echo $$ >&3; exec sleep 60`)
 	cmd.ExtraFiles = []*os.File{pidW, probeW}
-	if _, err := procgroup.Start(cmd); err != nil {
+	process, err := procgroup.Start(cmd)
+	if err != nil {
 		t.Fatalf("start owned command: %v", err)
 	}
 	// Only the command keeps these descriptors now. The helper retains the
@@ -309,6 +311,9 @@ func TestProcessGroupOwnerCrashHelper(t *testing.T) {
 	// the intended behaviour: only the outer test's SIGKILL can end it.
 	for {
 		time.Sleep(time.Hour)
+		// Process owns the sentinel's hold pipe. Keep it reachable so its file
+		// finalizer cannot simulate a daemon exit before the SIGKILL above.
+		runtime.KeepAlive(process)
 	}
 }
 
@@ -345,16 +350,20 @@ func TestStart_DaemonSIGKILLCleansOnlyItsOwnedGroup(t *testing.T) {
 		select {
 		case <-helperDone:
 		case <-time.After(10 * time.Second):
+			t.Errorf("daemon-crash helper did not exit during cleanup")
 		}
 	})
 
-	commandPID := readPID(t, pidR)
+	// Start duplicated these descriptors into the helper. Drop the parent's
+	// copies before reading so a helper that exits before announcing its command
+	// produces EOF instead of leaving this test blocked on its own write end.
 	if err := pidW.Close(); err != nil {
 		t.Fatalf("close pid write end: %v", err)
 	}
 	if err := probeW.Close(); err != nil {
 		t.Fatalf("close probe write end: %v", err)
 	}
+	commandPID := readPID(t, pidR)
 
 	unrelated := exec.Command("sleep", "60") //nolint:noctx // cleaned up exactly by PID below
 	unrelated.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
