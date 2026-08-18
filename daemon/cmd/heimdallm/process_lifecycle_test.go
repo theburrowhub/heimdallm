@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -309,6 +310,51 @@ func doLifecycleRequest(t *testing.T, method, url, token string) *http.Response 
 	return response
 }
 
+func doLifecycleJSONRequest(t *testing.T, method, url, token, body string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(method, url, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("create %s %s: %v", method, url, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("X-Heimdallm-Token", token)
+	}
+	response, err := (&http.Client{Timeout: 2 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, url, err)
+	}
+	_, _ = io.Copy(io.Discard, response.Body)
+	response.Body.Close()
+	return response
+}
+
+func doUpdateLifecycleRequest(
+	t *testing.T,
+	method, baseURL, token, leaseID, expectedBootID string,
+) (*http.Response, server.UpdatePreparationStatus) {
+	t.Helper()
+	req, err := http.NewRequest(method, baseURL, nil)
+	if err != nil {
+		t.Fatalf("create %s %s: %v", method, baseURL, err)
+	}
+	req.Header.Set("X-Heimdallm-Token", token)
+	req.Header.Set(server.HeaderUpdateLease, leaseID)
+	if expectedBootID != "" {
+		req.Header.Set(server.HeaderExpectedUpdateBootID, expectedBootID)
+	}
+	response, err := (&http.Client{Timeout: 2 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, baseURL, err)
+	}
+	defer response.Body.Close()
+	var status server.UpdatePreparationStatus
+	if err := json.NewDecoder(response.Body).Decode(&status); err != nil {
+		t.Fatalf("decode %s %s response: %v", method, baseURL, err)
+	}
+	return response, status
+}
+
 func postWhenReviewSlotIsFree(t *testing.T, url, token string) *http.Response {
 	t.Helper()
 	deadline := time.Now().Add(lifecycleTestTimeout)
@@ -389,8 +435,19 @@ func TestRunProcessPreparingJournalBlocksStatefulBootstrapBeforeConfirmation(t *
 
 	listenerCh := make(chan net.Listener, 1)
 	result := make(chan int, 1)
+	fakeGitHub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/user" {
+			_, _ = io.WriteString(w, `{"login":"heimdallm-recovery-test"}`)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"message":"not found"}`)
+	}))
 	deps := processDependencies{
-		newGitHubClient: gh.NewClient,
+		newGitHubClient: func(token string, _ ...gh.Option) *gh.Client {
+			return gh.NewClient(token, gh.WithBaseURL(fakeGitHub.URL))
+		},
 		listen: func(_ int, bindAddr string) (net.Listener, error) {
 			listener, listenErr := server.Listen(0, bindAddr)
 			if listenErr == nil {
@@ -408,6 +465,7 @@ func TestRunProcessPreparingJournalBlocksStatefulBootstrapBeforeConfirmation(t *
 		os.Args = originalArgs
 		slog.SetDefault(originalLogger)
 		version = originalVersion
+		fakeGitHub.Close()
 		t.Fatal("recovery daemon did not expose its minimal listener")
 	}
 	t.Cleanup(func() {
@@ -419,6 +477,7 @@ func TestRunProcessPreparingJournalBlocksStatefulBootstrapBeforeConfirmation(t *
 		os.Args = originalArgs
 		slog.SetDefault(originalLogger)
 		version = originalVersion
+		fakeGitHub.Close()
 	})
 
 	baseURL := "http://" + listener.Addr().String()
@@ -430,21 +489,8 @@ func TestRunProcessPreparingJournalBlocksStatefulBootstrapBeforeConfirmation(t *
 		t.Fatalf("stateful SQLite opened before bootstrap confirmation: %v", err)
 	}
 
-	request, err := http.NewRequest(http.MethodPost, baseURL+"/update/prepare", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request.Header.Set("X-Heimdallm-Token", apiKey)
-	request.Header.Set(server.HeaderUpdateLease, leaseID)
-	prepareResponse, err := (&http.Client{Timeout: 2 * time.Second}).Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer prepareResponse.Body.Close()
-	var status server.UpdatePreparationStatus
-	if err := json.NewDecoder(prepareResponse.Body).Decode(&status); err != nil {
-		t.Fatal(err)
-	}
+	prepareResponse, status := doUpdateLifecycleRequest(t, http.MethodPost,
+		baseURL+"/update/prepare", apiKey, leaseID, "")
 	if prepareResponse.StatusCode != http.StatusOK || !status.Sealed ||
 		status.BootstrapAuthorized || status.LeaseID != leaseID {
 		t.Fatalf("restored prepare status = %d %+v, want sealed unconfirmed owner",
@@ -452,6 +498,38 @@ func TestRunProcessPreparingJournalBlocksStatefulBootstrapBeforeConfirmation(t *
 	}
 	if _, err := os.Stat(filepath.Join(dataDir, "heimdallm.db")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("minimal update handshake opened SQLite: %v", err)
+	}
+
+	sealResponse, sealedStatus := doUpdateLifecycleRequest(t, http.MethodPost,
+		baseURL+"/update/seal", apiKey, leaseID, "")
+	if sealResponse.StatusCode != http.StatusOK || !sealedStatus.Sealed {
+		t.Fatalf("restored seal status = %d %+v, want sealed 200", sealResponse.StatusCode, sealedStatus)
+	}
+	confirmResponse, confirmedStatus := doUpdateLifecycleRequest(t, http.MethodPost,
+		baseURL+"/update/confirm", apiKey, leaseID, status.BootID)
+	if confirmResponse.StatusCode != http.StatusOK || !confirmedStatus.BootstrapAuthorized {
+		t.Fatalf("bootstrap confirmation = %d %+v, want authorized 200",
+			confirmResponse.StatusCode, confirmedStatus)
+	}
+	waitForReadyHealth(t, baseURL)
+	if _, err := os.Stat(filepath.Join(dataDir, "heimdallm.db")); err != nil {
+		t.Fatalf("stateful SQLite was not opened after bootstrap confirmation: %v", err)
+	}
+
+	foreignCancel, _ := doUpdateLifecycleRequest(t, http.MethodDelete,
+		baseURL+"/update/prepare", apiKey, leaseID+"-foreign", status.BootID)
+	if foreignCancel.StatusCode != http.StatusConflict {
+		t.Fatalf("foreign cancellation status = %d, want 409", foreignCancel.StatusCode)
+	}
+	cancelResponse, cancelledStatus := doUpdateLifecycleRequest(t, http.MethodDelete,
+		baseURL+"/update/prepare", apiKey, leaseID, status.BootID)
+	if cancelResponse.StatusCode != http.StatusOK || cancelledStatus.State != "running" {
+		t.Fatalf("verified cancellation = %d %+v, want running 200",
+			cancelResponse.StatusCode, cancelledStatus)
+	}
+	shutdownResponse := doLifecycleRequest(t, http.MethodPost, baseURL+"/shutdown", apiKey)
+	if shutdownResponse.StatusCode != http.StatusAccepted {
+		t.Fatalf("recovery daemon shutdown = %d, want 202", shutdownResponse.StatusCode)
 	}
 }
 
@@ -529,6 +607,106 @@ func TestRunProcessFullLifecycleStartingReloadManualOperationsAndAPIShutdown(t *
 		t.Fatalf("manual issue promotion status = %d, want 500 from fake GitHub", response.StatusCode)
 	}
 	waitForRemoteRequest(t, fixture.remoteRequest, "/repos/org/repo/issues/2")
+
+	// Exercise the complete live-daemon update protocol and every main-layer
+	// mutation guard. Once prepare closes admission, these endpoints must defer
+	// before touching repositories, GitHub, or an AI process.
+	const updateLeaseID = "0190fdd2-f1f2-7d73-b2a4-79f988c14d57"
+	var updateStatus server.UpdatePreparationStatus
+	deadline := time.Now().Add(lifecycleTestTimeout)
+	for {
+		response, updateStatus = doUpdateLifecycleRequest(t, http.MethodPost,
+			fixture.apiBaseURL+"/update/prepare", apiToken, updateLeaseID, "")
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("prepare live update status = %d, want 200", response.StatusCode)
+		}
+		if updateStatus.State == "ready" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("live update drain did not become ready: %+v", updateStatus)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if updateStatus.BootID == "" {
+		t.Fatal("live update status did not identify the daemon process")
+	}
+
+	foreignPrepare, _ := doUpdateLifecycleRequest(t, http.MethodPost,
+		fixture.apiBaseURL+"/update/prepare", apiToken, updateLeaseID+"-foreign", "")
+	if foreignPrepare.StatusCode != http.StatusConflict {
+		t.Fatalf("foreign prepare status = %d, want 409", foreignPrepare.StatusCode)
+	}
+	prematureConfirm, _ := doUpdateLifecycleRequest(t, http.MethodPost,
+		fixture.apiBaseURL+"/update/confirm", apiToken, updateLeaseID, updateStatus.BootID)
+	if prematureConfirm.StatusCode != http.StatusConflict {
+		t.Fatalf("confirmation before seal status = %d, want 409", prematureConfirm.StatusCode)
+	}
+
+	for _, endpoint := range []string{
+		"/config/clones",
+		"/config/clones/" + url.PathEscape("org/repo"),
+	} {
+		response = doLifecycleRequest(t, http.MethodDelete, fixture.apiBaseURL+endpoint, apiToken)
+		if response.StatusCode != http.StatusConflict {
+			t.Fatalf("guarded DELETE %s status = %d, want 409", endpoint, response.StatusCode)
+		}
+	}
+	response = doLifecycleJSONRequest(t, http.MethodPost, fixture.apiBaseURL+"/admin/repo-rename",
+		apiToken, `{"old_repo":"org/repo","new_repo":"org/renamed"}`)
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("guarded repo rename status = %d, want 409", response.StatusCode)
+	}
+	response = doLifecycleRequest(t, http.MethodPost,
+		fmt.Sprintf("%s/issues/%d/promote", fixture.apiBaseURL, fixture.issueID), apiToken)
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("guarded promotion status = %d, want 409", response.StatusCode)
+	}
+	response = postWhenReviewSlotIsFree(t,
+		fmt.Sprintf("%s/prs/%d/review", fixture.apiBaseURL, fixture.prID), apiToken)
+	if response.StatusCode != http.StatusAccepted {
+		t.Fatalf("guarded PR review status = %d, want 202", response.StatusCode)
+	}
+	response = postWhenReviewSlotIsFree(t,
+		fmt.Sprintf("%s/issues/%d/review", fixture.apiBaseURL, fixture.issueID), apiToken)
+	if response.StatusCode != http.StatusAccepted {
+		t.Fatalf("guarded issue review status = %d, want 202", response.StatusCode)
+	}
+	response = postWhenReviewSlotIsFree(t,
+		fmt.Sprintf("%s/issues/%d/refine?force=true", fixture.apiBaseURL, fixture.issueID), apiToken)
+	if response.StatusCode != http.StatusAccepted {
+		t.Fatalf("guarded issue refinement status = %d, want 202", response.StatusCode)
+	}
+	// The async callbacks return immediately on the closed admission gate. Let
+	// the final goroutine release the shared review semaphore before reopening.
+	time.Sleep(25 * time.Millisecond)
+
+	foreignSeal, _ := doUpdateLifecycleRequest(t, http.MethodPost,
+		fixture.apiBaseURL+"/update/seal", apiToken, updateLeaseID+"-foreign", "")
+	if foreignSeal.StatusCode != http.StatusConflict {
+		t.Fatalf("foreign seal status = %d, want 409", foreignSeal.StatusCode)
+	}
+	sealResponse, sealedStatus := doUpdateLifecycleRequest(t, http.MethodPost,
+		fixture.apiBaseURL+"/update/seal", apiToken, updateLeaseID, "")
+	if sealResponse.StatusCode != http.StatusOK || !sealedStatus.Sealed {
+		t.Fatalf("seal live update = %d %+v, want sealed 200", sealResponse.StatusCode, sealedStatus)
+	}
+	prematureCancel, _ := doUpdateLifecycleRequest(t, http.MethodDelete,
+		fixture.apiBaseURL+"/update/prepare", apiToken, updateLeaseID, updateStatus.BootID)
+	if prematureCancel.StatusCode != http.StatusConflict {
+		t.Fatalf("cancellation before bootstrap confirmation = %d, want 409", prematureCancel.StatusCode)
+	}
+	confirmResponse, confirmedStatus := doUpdateLifecycleRequest(t, http.MethodPost,
+		fixture.apiBaseURL+"/update/confirm", apiToken, updateLeaseID, updateStatus.BootID)
+	if confirmResponse.StatusCode != http.StatusOK || !confirmedStatus.BootstrapAuthorized {
+		t.Fatalf("confirm live update = %d %+v, want authorized 200",
+			confirmResponse.StatusCode, confirmedStatus)
+	}
+	cancelResponse, cancelledStatus := doUpdateLifecycleRequest(t, http.MethodDelete,
+		fixture.apiBaseURL+"/update/prepare", apiToken, updateLeaseID, updateStatus.BootID)
+	if cancelResponse.StatusCode != http.StatusOK || cancelledStatus.State != "running" {
+		t.Fatalf("cancel live update = %d %+v, want running 200", cancelResponse.StatusCode, cancelledStatus)
+	}
 
 	response = doLifecycleRequest(t, http.MethodPost, fixture.apiBaseURL+"/shutdown", apiToken)
 	if response.StatusCode != http.StatusAccepted {
