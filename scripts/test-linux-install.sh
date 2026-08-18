@@ -186,27 +186,24 @@ for rel in $SPAWN_SITES; do
 "
     continue
   fi
-  # Counted per canonical spawn file so moving the daemon launch elsewhere
-  # cannot make this guard pass vacuously. DaemonLifecycle deliberately no
-  # longer starts processes: PlatformServices owns the single launch boundary.
-  calls=$(grep -c 'Process\.start(' "$f" || true)
-  if [ "${calls:-0}" -eq 0 ]; then
-    spawn_offenders="$spawn_offenders$rel: no Process.start call (did the spawn move?)
-"
+  # Read the canonical daemon call from one logical line so wrapping does not
+  # affect the assertion. Other Process.start sites in this file are allowed:
+  # the platform command runner intentionally passes arguments to launchctl.
+  # `binaryPath` identifies the one detached daemon boundary whose empty argv
+  # is coupled to the Makefile's pkill -x pattern.
+  joined=$(tr '\n' ' ' < "$f" | sed 's/  */ /g')
+  daemon_calls=$(printf '%s\n' "$joined" |
+    grep -oE 'Process\.start\([[:space:]]*binaryPath,[^)]*' || true)
+  call_count=$(printf '%s\n' "$daemon_calls" | sed '/^[[:space:]]*$/d' | wc -l | tr -d '[:space:]')
+  if [ "${call_count:-0}" -ne 1 ]; then
+    printf '%s: found %s daemon Process.start(binaryPath, ...) calls, want exactly 1\n' \
+      "$rel" "${call_count:-0}" >> "$WORK/spawn_offenders"
     continue
   fi
-  # The argument list is read from the call site joined onto one logical line, so
-  # a call wrapped across lines — or written as `const []` — is judged on its
-  # arguments rather than on its formatting.
-  joined=$(tr '\n' ' ' < "$f" | sed 's/  */ /g')
-  offenders_here=$(printf '%s\n' "$joined" | grep -oE 'Process\.start\([^)]*' || true)
-  printf '%s\n' "$offenders_here" | while IFS= read -r call; do
-    [ -n "$call" ] || continue
-    case "$call" in
-      *", []"*|*", const []"*) ;;
-      *) printf '%s: %s\n' "$rel" "$call" ;;
-    esac
-  done >> "$WORK/spawn_offenders"
+  case "$daemon_calls" in
+    *", []"*|*", const []"*) ;;
+    *) printf '%s: %s\n' "$rel" "$daemon_calls" >> "$WORK/spawn_offenders" ;;
+  esac
 done
 [ -f "$WORK/spawn_offenders" ] || : > "$WORK/spawn_offenders"
 spawn_offenders="$spawn_offenders$(cat "$WORK/spawn_offenders")"
