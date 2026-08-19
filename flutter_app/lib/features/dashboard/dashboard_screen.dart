@@ -98,6 +98,7 @@ class DashboardScreen extends ConsumerWidget {
         ),
         body: Column(
           children: [
+            const AppUpdateBanner(),
             if (cbMessage != null)
               CircuitBreakerBanner(
                 message: cbMessage,

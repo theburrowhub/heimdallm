@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:ui' show VoidCallback;
 import 'package:flutter/painting.dart' show Size;
 import 'package:heimdallm/core/api/api_client.dart';
@@ -24,7 +25,9 @@ class FakePlatformServices
     this.pendingUpdateVersion,
     this.pendingUpdateError,
     this.completeUpdateError,
-  }) : _env = env ?? const {};
+    AppUpdateStatus? appUpdateStatus,
+  }) : _env = env ?? const {},
+       _appUpdateStatus = appUpdateStatus ?? const AppUpdateStatus.idle();
 
   @override
   final String apiBaseUrl;
@@ -38,6 +41,9 @@ class FakePlatformServices
   String? pendingUpdateVersion;
   Object? pendingUpdateError;
   Object? completeUpdateError;
+  AppUpdateStatus _appUpdateStatus;
+  final StreamController<AppUpdateStatus> _appUpdateEvents =
+      StreamController<AppUpdateStatus>.broadcast();
 
   // Records of calls for assertions.
   int loadApiTokenCalls = 0;
@@ -54,7 +60,9 @@ class FakePlatformServices
   int quitDuplicateInstanceCalls = 0;
   int setupAppUpdaterCalls = 0;
   int checkForAppUpdatesCalls = 0;
+  int installAppUpdateCalls = 0;
   int completeAppUpdateCalls = 0;
+  int finalizeAppUpdateCalls = 0;
   final List<AppConfig> writtenConfigs = [];
   final List<String> spawnedDaemons = [];
   void Function(String location)? trayNavigationHandler;
@@ -138,7 +146,21 @@ class FakePlatformServices
   Future<void> setupAppUpdater() async => setupAppUpdaterCalls++;
 
   @override
+  AppUpdateStatus get appUpdateStatus => _appUpdateStatus;
+
+  @override
+  Stream<AppUpdateStatus> get appUpdateEvents => _appUpdateEvents.stream;
+
+  void emitAppUpdateStatus(AppUpdateStatus status) {
+    _appUpdateStatus = status;
+    _appUpdateEvents.add(status);
+  }
+
+  @override
   Future<void> checkForAppUpdates() async => checkForAppUpdatesCalls++;
+
+  @override
+  Future<void> installAppUpdate() async => installAppUpdateCalls++;
 
   @override
   Future<String?> pendingAppUpdateVersion() async {
@@ -153,6 +175,11 @@ class FakePlatformServices
     final error = completeUpdateError;
     if (error != null) throw error;
     pendingUpdateVersion = null;
+  }
+
+  @override
+  Future<void> finalizeAppUpdate() async {
+    finalizeAppUpdateCalls++;
   }
 
   @override

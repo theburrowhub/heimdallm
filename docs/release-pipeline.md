@@ -43,6 +43,33 @@ promotes the mutable GHCR aliases.
 | Linux `.AppImage` | appimagetool (manual) | No |
 | macOS `.dmg` + Sparkle appcast | Developer ID, notarytool, create-dmg, Sparkle | No |
 
+## Integrated desktop updates
+
+Release builds check once every 24 hours. A newer stable release is announced
+with a persistent dashboard banner, a desktop notification, and an **Update
+now** action in both the app and the system-tray menu.
+
+- **macOS** uses Sparkle's signed appcast, Developer ID validation, and atomic
+  bundle replacement.
+- **Linux AppImage** downloads and checksum-verifies the new AppImage, keeps the
+  previous image as a rollback copy, then atomically replaces and relaunches it.
+- **Linux `.deb` / `.rpm`** downloads the matching package, verifies it against
+  the Ed25519-signed `linux-checksums.txt`, and invokes the native package tool
+  through PolicyKit.
+  The update still starts with one click; the OS may show its normal
+  administrator-authentication prompt.
+
+Source builds and user-local `make install-linux` builds are intentionally not
+self-modifying because they have no published package owner to replace. Docker
+and web deployments remain image-managed.
+
+Every desktop installation uses the same daemon handoff: stop admitting new
+work, drain active transactions, persist and seal the update lease, stop the
+exact daemon PID, install, then verify the replacement daemon's version and
+boot identity before reopening admission. The process-lifetime data lock and
+the UI's guarded port probe independently prevent a second daemon from being
+started during that transition.
+
 ## Why AppImage stays outside GoReleaser
 
 GoReleaser has no AppImage packager. AppImage requires:
@@ -197,6 +224,11 @@ The `.deb`, `.rpm`, and `.AppImage` packages all include:
 /usr/share/applications/com.theburrowhub.heimdallm.desktop
 /usr/share/icons/hicolor/{48,128,256,512}x{48,128,256,512}/apps/heimdallm.png
 ```
+
+The release also contains `linux-checksums.txt`, with one SHA-256 entry for
+each of those three package formats, plus `linux-checksums.txt.sig`. The latter
+is an Ed25519 signature made with the Sparkle release key. The app verifies the
+embedded public key, then the manifest signature, then the exact asset digest.
 
 ### Dependencies
 

@@ -1,3 +1,4 @@
+import 'dart:async' show Stream;
 import 'dart:ui' show VoidCallback;
 import 'package:flutter/painting.dart' show Size;
 import '../api/api_client.dart';
@@ -22,11 +23,42 @@ enum TcpPortState { open, closed, unknown }
 
 /// Native update capability of the current application build.
 enum AppUpdateSupport {
-  /// Sparkle verifies and atomically replaces the complete macOS app bundle.
+  /// The desktop build can verify and replace its complete installation.
   native,
 
   /// Updates belong to the package/deployment owner on this platform.
   unavailable,
+}
+
+/// User-visible lifecycle of the desktop application updater.
+enum AppUpdatePhase { idle, checking, available, installing, restarting, error }
+
+/// Platform-neutral update state consumed by the dashboard and system tray.
+class AppUpdateStatus {
+  const AppUpdateStatus({required this.phase, this.version, this.message});
+
+  const AppUpdateStatus.idle({String? message})
+    : this(phase: AppUpdatePhase.idle, message: message);
+
+  final AppUpdatePhase phase;
+  final String? version;
+  final String? message;
+
+  bool get updateAvailable => phase == AppUpdatePhase.available;
+  bool get busy =>
+      phase == AppUpdatePhase.checking ||
+      phase == AppUpdatePhase.installing ||
+      phase == AppUpdatePhase.restarting;
+
+  factory AppUpdateStatus.fromMap(Map<Object?, Object?> value) {
+    final rawPhase = value['phase']?.toString();
+    final phase = AppUpdatePhase.values.where((item) => item.name == rawPhase);
+    return AppUpdateStatus(
+      phase: phase.isEmpty ? AppUpdatePhase.idle : phase.first,
+      version: value['version']?.toString(),
+      message: value['message']?.toString(),
+    );
+  }
 }
 
 /// Raised by [PlatformServices.spawnDaemon] when another process owns the
@@ -168,11 +200,15 @@ abstract class PlatformServices {
 /// platform interface.
 abstract interface class AppUpdatePlatformCapability {
   AppUpdateSupport get appUpdateSupport;
+  AppUpdateStatus get appUpdateStatus;
+  Stream<AppUpdateStatus> get appUpdateEvents;
 
   Future<void> setupAppUpdater();
   Future<void> checkForAppUpdates();
+  Future<void> installAppUpdate();
   Future<String?> pendingAppUpdateVersion();
   Future<void> completeAppUpdate();
+  Future<void> finalizeAppUpdate();
 }
 
 /// Optional termination path for a process that has already disproved desktop
@@ -203,6 +239,20 @@ extension OptionalPlatformCapabilities on PlatformServices {
     }
   }
 
+  AppUpdateStatus get appUpdateStatus {
+    final platform = this;
+    return platform is AppUpdatePlatformCapability
+        ? (platform as AppUpdatePlatformCapability).appUpdateStatus
+        : const AppUpdateStatus.idle();
+  }
+
+  Stream<AppUpdateStatus> get appUpdateEvents {
+    final platform = this;
+    return platform is AppUpdatePlatformCapability
+        ? (platform as AppUpdatePlatformCapability).appUpdateEvents
+        : const Stream<AppUpdateStatus>.empty();
+  }
+
   Future<void> checkForAppUpdates() async {
     final platform = this;
     if (platform is! AppUpdatePlatformCapability) {
@@ -211,6 +261,16 @@ extension OptionalPlatformCapabilities on PlatformServices {
       );
     }
     await (platform as AppUpdatePlatformCapability).checkForAppUpdates();
+  }
+
+  Future<void> installAppUpdate() async {
+    final platform = this;
+    if (platform is! AppUpdatePlatformCapability) {
+      throw UnsupportedError(
+        'Application updates are managed outside this Heimdallm process',
+      );
+    }
+    await (platform as AppUpdatePlatformCapability).installAppUpdate();
   }
 
   Future<String?> pendingAppUpdateVersion() async {
@@ -224,6 +284,13 @@ extension OptionalPlatformCapabilities on PlatformServices {
     final platform = this;
     if (platform is AppUpdatePlatformCapability) {
       await (platform as AppUpdatePlatformCapability).completeAppUpdate();
+    }
+  }
+
+  Future<void> finalizeAppUpdate() async {
+    final platform = this;
+    if (platform is AppUpdatePlatformCapability) {
+      await (platform as AppUpdatePlatformCapability).finalizeAppUpdate();
     }
   }
 

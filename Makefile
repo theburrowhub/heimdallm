@@ -620,7 +620,7 @@ uninstall-macos: _check-macos-user
 verify-linux:
 	@command -v docker >/dev/null || { echo "❌  Docker is required. Install it from https://docs.docker.com/get-docker/"; exit 1; }
 	@echo "▶  Building Linux verification image (this may take a few minutes on first run)..."
-	docker build -f Dockerfile.linux-verify --build-arg VERSION=$(GIT_VERSION) -t heimdallm-verify .
+	docker build --platform linux/amd64 -f Dockerfile.linux-verify --build-arg VERSION=$(GIT_VERSION) -t heimdallm-verify .
 	@echo ""
 	@echo "✅  Linux build verification passed"
 

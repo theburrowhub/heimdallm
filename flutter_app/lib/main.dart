@@ -254,6 +254,11 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
       maxSpawnAttempts: widget.maxSpawnAttempts,
     );
     final initial = await startup.ensureAvailable();
+    if (initial.outcome == DaemonStartupOutcome.daemonPresent &&
+        _pendingUpdateVersion != null) {
+      if (await _validatePendingUpdate(api)) _go('/');
+      return;
+    }
     if (!_handleStartupResult(initial, api.daemonPort)) {
       return;
     }
@@ -268,6 +273,19 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
   }) async {
     for (var attempt = 0; ; attempt++) {
       await Future.delayed(widget.healthPollInterval);
+      if (_pendingUpdateVersion != null) {
+        switch (await api.daemonReachable()) {
+          case PortOwner.daemon:
+            if (!await _validatePendingUpdate(api)) return;
+            _go('/');
+            return;
+          case PortOwner.foreign:
+            _setForeignPortError(api.daemonPort);
+            return;
+          case PortOwner.none:
+            break;
+        }
+      }
       if (await api.checkHealth()) {
         if (!await _validatePendingUpdate(api)) return;
         _go('/');
@@ -355,6 +373,18 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
         hint:
             'Quit Heimdallm, stop the daemon, then reopen the app. If the '
             'versions still differ, reinstall the latest signed release.',
+      );
+      return false;
+    }
+    try {
+      await _platform.finalizeAppUpdate();
+    } catch (e) {
+      _setError(
+        title: 'Update finalization failed',
+        details:
+            'Heimdallm validated version $expected but could not clear its '
+            'recovery state: $e',
+        hint: 'Keep Heimdallm open and retry before starting new work.',
       );
       return false;
     }

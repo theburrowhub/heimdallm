@@ -1012,6 +1012,127 @@ enum UpdateLeaseCompletionBoundary {
   }
 }
 
+/// Bridges Sparkle's update lifecycle into Heimdallm's own UI. A scheduled
+/// check can leave this driver waiting on the update banner; the user's single
+/// click then becomes Sparkle's install choice without an extra Sparkle dialog.
+@MainActor
+private final class IntegratedUpdateUserDriver: NSObject, SPUUserDriver {
+  typealias StatusPublisher = (_ phase: String, _ version: String?, _ message: String?) -> Void
+
+  private let publish: StatusPublisher
+  private var updateChoice: CheckedContinuation<SPUUserUpdateChoice, Never>?
+  private var installRequested = false
+
+  init(publish: @escaping StatusPublisher) {
+    self.publish = publish
+  }
+
+  /// Returns true when an already-presented Sparkle session was resumed.
+  func requestInstall() -> Bool {
+    installRequested = true
+    guard let updateChoice else { return false }
+    self.updateChoice = nil
+    installRequested = false
+    updateChoice.resume(returning: .install)
+    return true
+  }
+
+  func cancelInstallRequest() {
+    installRequested = false
+  }
+
+  func show(_ request: SPUUpdatePermissionRequest) async -> SUUpdatePermissionResponse {
+    SUUpdatePermissionResponse(
+      automaticUpdateChecks: true,
+      automaticUpdateDownloading: false,
+      sendSystemProfile: false
+    )
+  }
+
+  func showUserInitiatedUpdateCheck(cancellation: @escaping () -> Void) {
+    publish("checking", nil, "Checking for updates…")
+  }
+
+  func showUpdateFound(
+    with appcastItem: SUAppcastItem,
+    state: SPUUserUpdateState
+  ) async -> SPUUserUpdateChoice {
+    let version = appcastItem.displayVersionString
+    if appcastItem.isInformationOnlyUpdate {
+      installRequested = false
+      publish(
+        "error",
+        version,
+        "Heimdallm \(version) cannot be installed automatically."
+      )
+      return .dismiss
+    }
+    publish(
+      "available",
+      version,
+      "Heimdallm \(version) is ready to install."
+    )
+    if installRequested {
+      installRequested = false
+      return .install
+    }
+    return await withCheckedContinuation { continuation in
+      updateChoice = continuation
+    }
+  }
+
+  func showUpdateReleaseNotes(with downloadData: SPUDownloadData) {}
+
+  func showUpdateReleaseNotesFailedToDownloadWithError(_ error: any Error) {}
+
+  func showUpdateNotFoundWithError(_ error: any Error) async {
+    installRequested = false
+    publish("idle", nil, "Heimdallm is up to date.")
+  }
+
+  func showUpdaterError(_ error: any Error) async {
+    installRequested = false
+    publish("error", nil, "Update failed: \(error.localizedDescription)")
+  }
+
+  func showDownloadInitiated(cancellation: @escaping () -> Void) {
+    publish("installing", nil, "Downloading the Heimdallm update…")
+  }
+
+  func showDownloadDidReceiveExpectedContentLength(_ expectedContentLength: UInt64) {}
+
+  func showDownloadDidReceiveData(ofLength length: UInt64) {}
+
+  func showDownloadDidStartExtractingUpdate() {
+    publish("installing", nil, "Verifying the Heimdallm update…")
+  }
+
+  func showExtractionReceivedProgress(_ progress: Double) {}
+
+  func showReadyToInstallAndRelaunch() async -> SPUUserUpdateChoice {
+    .install
+  }
+
+  func showInstallingUpdate(
+    withApplicationTerminated applicationTerminated: Bool,
+    retryTerminatingApplication: @escaping () -> Void
+  ) {
+    publish("restarting", nil, "Restarting Heimdallm to finish the update…")
+  }
+
+  func showUpdateInstalledAndRelaunched(_ relaunched: Bool) async {}
+
+  func dismissUpdateInstallation() {
+    installRequested = false
+    if let updateChoice {
+      self.updateChoice = nil
+      updateChoice.resume(returning: .dismiss)
+    }
+  }
+
+  func showUpdateInFocus() {}
+}
+
 /// Serializes Sparkle installation with the daemon's durable update lease.
 /// No bundle replacement is allowed until all daemon work has drained, the
 /// canonical process has stopped, and its process-lifetime lock is available.
@@ -1110,10 +1231,15 @@ final class DaemonUpdateCoordinator: NSObject, SPUUpdaterDelegate {
   private let stopPollAttempts = 150
   private let commandTimeout: TimeInterval = 10
 
-  private lazy var updaterController = SPUStandardUpdaterController(
-    startingUpdater: false,
-    updaterDelegate: self,
-    userDriverDelegate: nil
+  private lazy var updateUserDriver = IntegratedUpdateUserDriver { [weak self] phase, version,
+    message in
+    self?.publishUpdateState(phase: phase, version: version, message: message)
+  }
+  private lazy var updater = SPUUpdater(
+    hostBundle: Bundle.main,
+    applicationBundle: Bundle.main,
+    userDriver: updateUserDriver,
+    delegate: self
   )
 
   private var channel: FlutterMethodChannel?
@@ -1142,6 +1268,7 @@ final class DaemonUpdateCoordinator: NSObject, SPUUpdaterDelegate {
   private let buildTrustAllowsNativeUpdates: Bool
   private var nativeUpdatesEnabled = false
   private var duplicateInstanceTermination = false
+  private var lastUpdateCheckFoundNoUpdate = false
 
   override init() {
     let trustedBuild = Self.defaultNativeUpdatesEnabled()
@@ -1396,7 +1523,7 @@ final class DaemonUpdateCoordinator: NSObject, SPUUpdaterDelegate {
         )
         return
       }
-      guard updaterController.updater.canCheckForUpdates else {
+      guard updater.canCheckForUpdates else {
         result(
           FlutterError(
             code: "update_check_busy",
@@ -1406,7 +1533,36 @@ final class DaemonUpdateCoordinator: NSObject, SPUUpdaterDelegate {
         )
         return
       }
-      updaterController.checkForUpdates(nil)
+      publishUpdateState(phase: "checking", message: "Checking for updates…")
+      lastUpdateCheckFoundNoUpdate = false
+      updater.checkForUpdateInformation()
+      result(nil)
+
+    case "installUpdate":
+      guard nativeUpdatesEnabled, updaterStarted else {
+        result(
+          FlutterError(
+            code: "updater_not_ready",
+            message: "Update recovery has not completed yet.",
+            details: nil
+          )
+        )
+        return
+      }
+      if !updateUserDriver.requestInstall() {
+        guard updater.canCheckForUpdates else {
+          updateUserDriver.cancelInstallRequest()
+          result(
+            FlutterError(
+              code: "update_check_busy",
+              message: "The update is still being checked. Try again shortly.",
+              details: nil
+            )
+          )
+          return
+        }
+        updater.checkForUpdates()
+      }
       result(nil)
 
     case "pendingUpdateVersion":
@@ -1460,6 +1616,20 @@ final class DaemonUpdateCoordinator: NSObject, SPUUpdaterDelegate {
 
   // MARK: - Sparkle lifecycle
 
+  func updater(_ updater: SPUUpdater, didFindValidUpdate item: SUAppcastItem) {
+    lastUpdateCheckFoundNoUpdate = false
+    publishUpdateState(
+      phase: "available",
+      version: item.displayVersionString,
+      message: "Heimdallm \(item.displayVersionString) is ready to install."
+    )
+  }
+
+  func updaterDidNotFindUpdate(_ updater: SPUUpdater) {
+    lastUpdateCheckFoundNoUpdate = true
+    publishUpdateState(phase: "idle", message: "Heimdallm is up to date.")
+  }
+
   func updater(_ updater: SPUUpdater, didExtractUpdate item: SUAppcastItem) {
     recordPendingInstall(item)
   }
@@ -1494,14 +1664,31 @@ final class DaemonUpdateCoordinator: NSObject, SPUUpdaterDelegate {
   }
 
   func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {
-    guard updatePending || preparationInProgress || daemonStoppedForUpdate else { return }
+    guard updatePending || preparationInProgress || daemonStoppedForUpdate else {
+      if lastUpdateCheckFoundNoUpdate {
+        lastUpdateCheckFoundNoUpdate = false
+        return
+      }
+      publishUpdateState(
+        phase: "error",
+        message: "Update check failed: \(error.localizedDescription)"
+      )
+      return
+    }
     abortPreparation(reason: error.localizedDescription)
   }
 
   private func startUpdaterIfNeeded() {
     guard nativeUpdatesEnabled, !updaterStarted else { return }
-    updaterController.startUpdater()
-    updaterStarted = true
+    do {
+      try updater.start()
+      updaterStarted = true
+    } catch {
+      publishUpdateState(
+        phase: "error",
+        message: "The native updater could not start: \(error.localizedDescription)"
+      )
+    }
   }
 
   func allowDuplicateInstanceTermination() {
@@ -1517,6 +1704,11 @@ final class DaemonUpdateCoordinator: NSObject, SPUUpdaterDelegate {
   }
 
   private func recordPendingInstall(_ item: SUAppcastItem) {
+    publishUpdateState(
+      phase: "installing",
+      version: item.displayVersionString,
+      message: "Installing Heimdallm \(item.displayVersionString)…"
+    )
     markUpdatePendingInMemory(expectedVersion: item.displayVersionString)
     do {
       _ = try ensurePendingJournal(expectedVersion: item.displayVersionString)
@@ -1525,6 +1717,17 @@ final class DaemonUpdateCoordinator: NSObject, SPUUpdaterDelegate {
       pendingPersistenceError = error
       NSLog("Heimdallm updater could not persist pending installation: \(error)")
     }
+  }
+
+  private func publishUpdateState(
+    phase: String,
+    version: String? = nil,
+    message: String? = nil
+  ) {
+    var arguments: [String: Any] = ["phase": phase]
+    if let version { arguments["version"] = version }
+    if let message { arguments["message"] = message }
+    channel?.invokeMethod("appUpdateStateChanged", arguments: arguments)
   }
 
   func markUpdatePendingInMemory(expectedVersion: String) {

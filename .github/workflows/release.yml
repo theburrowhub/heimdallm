@@ -440,6 +440,63 @@ jobs:
           ls -lh "dist/Heimdallm-${VERSION}-x86_64.AppImage"
           echo "APPIMAGE_PATH=dist/Heimdallm-${VERSION}-x86_64.AppImage" >> "$GITHUB_ENV"
 
+      - name: Generate Linux desktop checksums
+        env:
+          SPARKLE_EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$SPARKLE_EDDSA_PRIVATE_KEY" || {
+            echo "::error::Required GitHub Actions secret SPARKLE_EDDSA_PRIVATE_KEY is missing"
+            exit 1
+          }
+          DEB=$(find daemon/dist -type f -name "heimdallm_${VERSION}_amd64.deb" -print -quit)
+          RPM=$(find daemon/dist -type f -name "heimdallm_${VERSION}_amd64.rpm" -print -quit)
+          test -f "$DEB"
+          test -f "$RPM"
+          test -f "$APPIMAGE_PATH"
+          : > dist/linux-checksums.txt
+          for ASSET in "$DEB" "$RPM" "$APPIMAGE_PATH"; do
+            SHA256=$(sha256sum "$ASSET" | awk '{print $1}')
+            printf '%s  %s\n' "$SHA256" "$(basename "$ASSET")" \
+              >> dist/linux-checksums.txt
+          done
+          test "$(wc -l < dist/linux-checksums.txt)" -eq 3
+          sha256sum --check --strict <(
+            while read -r SHA NAME; do
+              case "$NAME" in
+                *.deb) PATHNAME="$DEB" ;;
+                *.rpm) PATHNAME="$RPM" ;;
+                *.AppImage) PATHNAME="$APPIMAGE_PATH" ;;
+                *) exit 1 ;;
+              esac
+              printf '%s  %s\n' "$SHA" "$PATHNAME"
+            done < dist/linux-checksums.txt
+          )
+          PRIVATE_KEY="$RUNNER_TEMP/heimdallm-linux-update-key.der"
+          cleanup_update_key() { rm -f "$PRIVATE_KEY"; }
+          trap cleanup_update_key EXIT
+          {
+            printf '302e020100300506032b657004220420' | xxd -r -p
+            printf '%s' "$SPARKLE_EDDSA_PRIVATE_KEY" | openssl base64 -d -A
+          } > "$PRIVATE_KEY"
+          test "$(wc -c < "$PRIVATE_KEY" | tr -d '[:space:]')" = 48
+          DERIVED_PUBLIC_KEY=$(
+            openssl pkey -in "$PRIVATE_KEY" -inform DER -pubout -outform DER \
+              2>/dev/null \
+              | tail -c 32 \
+              | openssl base64 -A
+          )
+          test "$DERIVED_PUBLIC_KEY" = \
+            'eBiLZ1yDuQ/NVCx7VJoQZJm6FpB8S0yH9WHtxaRfEDw=' || {
+            echo "::error::Linux update signing key does not match the embedded public key"
+            exit 1
+          }
+          openssl pkeyutl -sign -rawin \
+            -inkey "$PRIVATE_KEY" -keyform DER \
+            -in dist/linux-checksums.txt \
+            | openssl base64 -A > dist/linux-checksums.txt.sig
+          test "$(openssl base64 -d -A < dist/linux-checksums.txt.sig | wc -c | tr -d '[:space:]')" = 64
+
       # ── Publish ──────────────────────────────────────────────────────────────
       - name: Upload artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -448,14 +505,17 @@ jobs:
           path: dist/
           retention-days: 90
 
-      - name: Upload AppImage to GitHub Release
+      - name: Upload AppImage and signed desktop checksums to GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
           draft: true
           overwrite_files: true
           fail_on_unmatched_files: true
-          files: ${{ env.APPIMAGE_PATH }}
+          files: |
+            ${{ env.APPIMAGE_PATH }}
+            dist/linux-checksums.txt
+            dist/linux-checksums.txt.sig
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -1073,6 +1133,8 @@ jobs:
             "heimdallm_${VERSION}_amd64.deb"
             "heimdallm_${VERSION}_amd64.rpm"
             daemon-checksums.txt
+            linux-checksums.txt
+            linux-checksums.txt.sig
             cli-checksums.txt
             "heimdallm-cli_${VERSION}_darwin_amd64.tar.gz"
             "heimdallm-cli_${VERSION}_darwin_arm64.tar.gz"

@@ -32,6 +32,7 @@ void main() {
     expect(platform.checkForAppUpdatesCalls, 1);
 
     completion.complete();
+    platform.emitAppUpdateStatus(const AppUpdateStatus.idle());
     await tester.pumpAndSettle();
     expect(find.byIcon(Icons.system_update_alt), findsOneWidget);
   });
@@ -47,10 +48,46 @@ void main() {
 
     expect(
       find.text('Could not check for updates: Bad state: bridge unavailable'),
+      findsNothing,
+    );
+    expect(
+      find.text('Could not update Heimdallm: Bad state: bridge unavailable'),
       findsOneWidget,
     );
     expect(find.byIcon(Icons.system_update_alt), findsOneWidget);
     expect(platform.checkForAppUpdatesCalls, 1);
+  });
+
+  testWidgets('banner and app-bar action install an available update', (
+    tester,
+  ) async {
+    final platform = FakePlatformServices(
+      appUpdateSupport: AppUpdateSupport.native,
+      appUpdateStatus: const AppUpdateStatus(
+        phase: AppUpdatePhase.available,
+        version: '1.2.3',
+        message: 'Heimdallm 1.2.3 is ready to install.',
+      ),
+    );
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [platformServicesProvider.overrideWithValue(platform)],
+        child: const MaterialApp(
+          home: Scaffold(
+            body: Column(
+              children: [AppUpdateBanner(), CheckForUpdatesButton()],
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.byKey(const Key('app-update-banner')), findsOneWidget);
+    expect(find.text('Heimdallm 1.2.3 is ready to install.'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('install-app-update')));
+    await tester.pump();
+    expect(platform.installAppUpdateCalls, 1);
   });
 }
 
@@ -68,6 +105,12 @@ class _BlockingUpdatePlatform extends FakePlatformServices {
   @override
   Future<void> checkForAppUpdates() {
     checkForAppUpdatesCalls++;
+    emitAppUpdateStatus(
+      const AppUpdateStatus(
+        phase: AppUpdatePhase.checking,
+        message: 'Checking for updates…',
+      ),
+    );
     return completion.future;
   }
 }

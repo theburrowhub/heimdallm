@@ -2,6 +2,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/core/api/api_client.dart';
 import 'package:heimdallm/core/models/pr.dart';
+import 'package:heimdallm/core/platform/platform_services.dart';
 import 'package:heimdallm/core/tray/tray_menu.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:tray_manager/tray_manager.dart';
@@ -66,6 +67,32 @@ void main() {
       );
     },
   );
+
+  test('available update invokes the one-click tray action', () async {
+    var installCalls = 0;
+    TrayMenu.instance.init(
+      apiClient: _MockApiClient(),
+      onNavigate: (_) {},
+      onQuit: () {},
+      onCheckForUpdates: () {},
+      onInstallUpdate: () => installCalls++,
+    );
+
+    await TrayMenu.instance.setUpdateState(
+      const AppUpdateStatus(
+        phase: AppUpdatePhase.available,
+        version: '1.2.3',
+        message: 'Heimdallm 1.2.3 is ready to install.',
+      ),
+    );
+    TrayMenu.instance.onTrayMenuItemClick(MenuItem(key: 'update_now'));
+
+    expect(installCalls, 1);
+    expect(
+      trayCalls.where((call) => call.method == 'setContextMenu'),
+      hasLength(1),
+    );
+  });
 }
 
 class _MockApiClient extends Mock implements ApiClient {}

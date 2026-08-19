@@ -4,50 +4,137 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/platform/platform_services.dart';
 import '../../core/platform/platform_services_provider.dart';
 
-/// Manual entry point for Sparkle. Scheduled checks remain native so they keep
-/// working while the main Heimdallm window is hidden in the tray.
-class CheckForUpdatesButton extends ConsumerStatefulWidget {
+final appUpdateStatusProvider = StreamProvider<AppUpdateStatus>((ref) async* {
+  final platform = ref.watch(platformServicesProvider);
+  yield platform.appUpdateStatus;
+  yield* platform.appUpdateEvents;
+});
+
+/// Compact app-bar entry point. When an update is known, the same control
+/// installs it instead of starting another network check.
+class CheckForUpdatesButton extends ConsumerWidget {
   const CheckForUpdatesButton({super.key});
 
   @override
-  ConsumerState<CheckForUpdatesButton> createState() =>
-      _CheckForUpdatesButtonState();
-}
-
-class _CheckForUpdatesButtonState extends ConsumerState<CheckForUpdatesButton> {
-  bool _checking = false;
-
-  @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final platform = ref.watch(platformServicesProvider);
     if (platform.appUpdateSupport != AppUpdateSupport.native) {
       return const SizedBox.shrink();
     }
+    final status =
+        ref.watch(appUpdateStatusProvider).value ?? platform.appUpdateStatus;
+    final available = status.updateAvailable;
+    final busy = status.busy;
     return IconButton(
       key: const Key('check-for-updates'),
-      tooltip: 'Check for updates',
-      onPressed: _checking ? null : () => _check(platform),
-      icon: _checking
+      tooltip: available
+          ? 'Update to ${status.version ?? 'the latest version'}'
+          : 'Check for updates',
+      onPressed: busy
+          ? null
+          : () => _run(
+              context,
+              available
+                  ? platform.installAppUpdate
+                  : platform.checkForAppUpdates,
+            ),
+      icon: busy
           ? const SizedBox(
               width: 20,
               height: 20,
               child: CircularProgressIndicator(strokeWidth: 2),
             )
-          : const Icon(Icons.system_update_alt),
+          : Icon(
+              available ? Icons.system_update : Icons.system_update_alt,
+              color: available ? Theme.of(context).colorScheme.primary : null,
+            ),
     );
   }
 
-  Future<void> _check(PlatformServices platform) async {
-    setState(() => _checking = true);
+  Future<void> _run(
+    BuildContext context,
+    Future<void> Function() action,
+  ) async {
     try {
-      await platform.checkForAppUpdates();
+      await action();
     } catch (error) {
-      if (!mounted) return;
+      if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Could not check for updates: $error')),
+        SnackBar(content: Text('Could not update Heimdallm: $error')),
       );
-    } finally {
-      if (mounted) setState(() => _checking = false);
     }
+  }
+}
+
+/// Persistent, non-modal update notice shared by macOS and Linux.
+class AppUpdateBanner extends ConsumerWidget {
+  const AppUpdateBanner({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final platform = ref.watch(platformServicesProvider);
+    if (platform.appUpdateSupport != AppUpdateSupport.native) {
+      return const SizedBox.shrink();
+    }
+    final status =
+        ref.watch(appUpdateStatusProvider).value ?? platform.appUpdateStatus;
+    if (!status.updateAvailable &&
+        status.phase != AppUpdatePhase.installing &&
+        status.phase != AppUpdatePhase.restarting) {
+      return const SizedBox.shrink();
+    }
+
+    final theme = Theme.of(context);
+    final busy =
+        status.phase == AppUpdatePhase.installing ||
+        status.phase == AppUpdatePhase.restarting;
+    return Material(
+      key: const Key('app-update-banner'),
+      color: theme.colorScheme.primaryContainer,
+      child: SafeArea(
+        bottom: false,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: Row(
+            children: [
+              if (busy)
+                const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              else
+                Icon(Icons.system_update, color: theme.colorScheme.primary),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  status.message ??
+                      'Heimdallm ${status.version ?? ''} is available.',
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              if (!busy)
+                FilledButton.icon(
+                  key: const Key('install-app-update'),
+                  onPressed: () async {
+                    try {
+                      await platform.installAppUpdate();
+                    } catch (error) {
+                      if (!context.mounted) return;
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('Update failed: $error')),
+                      );
+                    }
+                  },
+                  icon: const Icon(Icons.restart_alt),
+                  label: const Text('Update now'),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }

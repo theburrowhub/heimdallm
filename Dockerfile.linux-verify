@@ -43,8 +43,12 @@ COPY . .
 # ── Verification pipeline ────────────────────────────────────────────────────
 # Each RUN is a separate layer so failures are easy to pinpoint.
 
-# 1. Daemon tests
+# 1. Daemon tests. Permission-boundary tests must not run as root because root
+# can write through the deliberately read-only recovery fixtures.
+RUN useradd --create-home --uid 10001 heimdallm-test
+USER heimdallm-test
 RUN cd daemon && go test ./... -timeout 60s
+USER root
 
 # 2. Flutter dependencies
 RUN cd flutter_app && flutter pub get

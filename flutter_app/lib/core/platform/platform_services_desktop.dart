@@ -17,6 +17,7 @@ import '../setup/desktop_repo_discovery.dart';
 import '../setup/first_run_setup.dart';
 import '../setup/repo_discovery.dart';
 import '../tray/tray_menu.dart';
+import 'linux_app_updater.dart';
 import 'platform_services.dart';
 
 @visibleForTesting
@@ -39,6 +40,9 @@ typedef InstanceLockAcquirer = Future<void> Function(RandomAccessFile lock);
 typedef ActivationSocketBinder = Future<ServerSocket> Function(String path);
 @visibleForTesting
 typedef DaemonBinaryPathResolver = String? Function();
+@visibleForTesting
+typedef DetachedAppRestarter =
+    Future<void> Function(int currentPID, String executablePath);
 
 const _defaultProcessTimeout = Duration(seconds: 7);
 const _processKillGrace = Duration(seconds: 1);
@@ -95,6 +99,7 @@ class DesktopPlatformServices
     @visibleForTesting String? dataDir,
     String? pidFilePath,
     @visibleForTesting bool? isMacOS,
+    @visibleForTesting bool? isLinux,
     @visibleForTesting PlatformProcessRunner? processRunner,
     @visibleForTesting DetachedDaemonStarter? detachedDaemonStarter,
     @visibleForTesting DaemonPortProbe? daemonPortProbe,
@@ -105,12 +110,15 @@ class DesktopPlatformServices
     @visibleForTesting ActivationSocketBinder? activationSocketBinder,
     @visibleForTesting DaemonBinaryPathResolver? daemonBinaryPathResolver,
     @visibleForTesting bool? enableNativeAppUpdates,
+    @visibleForTesting LinuxAppUpdater? linuxAppUpdater,
+    @visibleForTesting DetachedAppRestarter? detachedAppRestarter,
     @visibleForTesting Duration processTimeout = const Duration(seconds: 10),
   }) : _apiPort = apiPort,
        _tokenPath = tokenPath,
        _dataDir = dataDir,
        _pidFilePath = pidFilePath,
-       _isMacOS = isMacOS ?? Platform.isMacOS,
+       _isMacOS = isMacOS ?? (isLinux == true ? false : Platform.isMacOS),
+       _isLinux = isLinux ?? (isMacOS == true ? false : Platform.isLinux),
        _processRunner = processRunner ?? runDefaultPlatformProcess,
        _processTimeout = processTimeout,
        _detachedDaemonStarter =
@@ -137,6 +145,9 @@ class DesktopPlatformServices
            )),
        _daemonBinaryPathResolver =
            daemonBinaryPathResolver ?? DaemonLifecycle.defaultBinaryPath,
+       _linuxAppUpdater = linuxAppUpdater,
+       _detachedAppRestarter =
+           detachedAppRestarter ?? _startAppAfterCurrentProcessExits,
        _methodInvoker =
            methodInvoker ??
            ((method, arguments) =>
@@ -144,13 +155,15 @@ class DesktopPlatformServices
        _usesDefaultMethodChannel = methodInvoker == null,
        _nativeAppUpdatesRequested =
            enableNativeAppUpdates ??
-           ((isMacOS ?? Platform.isMacOS) && kReleaseMode);
+           (((isMacOS ?? Platform.isMacOS) || (isLinux ?? Platform.isLinux)) &&
+               kReleaseMode);
 
   final int _apiPort;
   final String? _tokenPath;
   final String? _dataDir;
   final String? _pidFilePath;
   final bool _isMacOS;
+  final bool _isLinux;
   final PlatformProcessRunner _processRunner;
   final Duration _processTimeout;
   final DetachedDaemonStarter _detachedDaemonStarter;
@@ -160,11 +173,16 @@ class DesktopPlatformServices
   final InstanceLockAcquirer _instanceLockAcquirer;
   final ActivationSocketBinder _activationSocketBinder;
   final DaemonBinaryPathResolver _daemonBinaryPathResolver;
+  LinuxAppUpdater? _linuxAppUpdater;
+  final DetachedAppRestarter _detachedAppRestarter;
   final PlatformMethodInvoker _methodInvoker;
   final bool _usesDefaultMethodChannel;
   final bool _nativeAppUpdatesRequested;
   bool _nativeAppUpdatesEnabled = false;
   Object? _appUpdaterSetupError;
+  AppUpdateStatus _appUpdateStatus = const AppUpdateStatus.idle();
+  final StreamController<AppUpdateStatus> _appUpdateEvents =
+      StreamController<AppUpdateStatus>.broadcast();
   RandomAccessFile? _instanceLock;
   ServerSocket? _activationServer;
   StreamSubscription<Socket>? _activationSubscription;
@@ -198,6 +216,22 @@ class DesktopPlatformServices
   static const MethodChannel _appUpdateChannel = MethodChannel(
     'com.theburrowhub.heimdallm/app_updater',
   );
+
+  static Future<void> _startAppAfterCurrentProcessExits(
+    int currentPID,
+    String executablePath,
+  ) async {
+    await Process.start(
+      '/bin/sh',
+      const [
+            '-c',
+            r'while /bin/kill -0 "$1" 2>/dev/null; do sleep 0.1; done; exec "$2"',
+            'heimdallm-update-restart',
+          ] +
+          ['$currentPID', executablePath],
+      mode: ProcessStartMode.detached,
+    );
+  }
 
   @override
   String get apiBaseUrl => 'http://127.0.0.1:$_apiPort';
@@ -459,7 +493,14 @@ class DesktopPlatformServices
       apiClient: apiClient,
       onNavigate: _onTrayNavigate ?? (_) {},
       onQuit: quitApp,
+      onCheckForUpdates: appUpdateSupport == AppUpdateSupport.native
+          ? () => _runTrayUpdateAction(checkForAppUpdates)
+          : null,
+      onInstallUpdate: appUpdateSupport == AppUpdateSupport.native
+          ? () => _runTrayUpdateAction(installAppUpdate)
+          : null,
     );
+    await TrayMenu.instance.setUpdateState(_appUpdateStatus);
   }
 
   @override
@@ -481,6 +522,8 @@ class DesktopPlatformServices
       FlutterLocalNotificationsPlugin();
   final Map<int, VoidCallback> _notifierHandlers = {};
   int _nextNotifierId = 0;
+  bool _notifierReady = false;
+  String? _notifiedUpdateVersion;
 
   @override
   Future<void> setupNotifier({required String appName}) async {
@@ -507,6 +550,8 @@ class DesktopPlatformServices
         handler?.call();
       },
     );
+    _notifierReady = true;
+    _notifyAvailableUpdateIfNeeded(_appUpdateStatus);
   }
 
   @override
@@ -599,9 +644,36 @@ class DesktopPlatformServices
       : AppUpdateSupport.unavailable;
 
   @override
+  AppUpdateStatus get appUpdateStatus => _appUpdateStatus;
+
+  @override
+  Stream<AppUpdateStatus> get appUpdateEvents => _appUpdateEvents.stream;
+
+  @override
   Future<void> setupAppUpdater() async {
     _nativeAppUpdatesEnabled = false;
     _appUpdaterSetupError = null;
+    if (_isLinux) {
+      if (!_nativeAppUpdatesRequested) return;
+      try {
+        final updater = _linuxAppUpdater ??= LinuxAppUpdater(
+          apiBaseURL: Uri.parse(apiBaseUrl),
+          apiTokenPath: _resolvedTokenPath,
+          dataDirectory: _resolvedDataDir,
+          executablePath: Platform.resolvedExecutable,
+          environment: {'APPIMAGE': readEnv('APPIMAGE') ?? ''},
+          processRunner: (executable, arguments) =>
+              _runPlatformProcess(executable, arguments),
+          daemonStarter: _detachedDaemonStarter,
+          onStatus: _publishAppUpdateStatus,
+        );
+        _nativeAppUpdatesEnabled = await updater.initialize();
+        return;
+      } catch (error) {
+        _appUpdaterSetupError = error;
+        rethrow;
+      }
+    }
     if (!_isMacOS) return;
     try {
       if (_usesDefaultMethodChannel) {
@@ -625,6 +697,13 @@ class DesktopPlatformServices
 
   @visibleForTesting
   Future<dynamic> handleAppUpdaterCallForTesting(MethodCall call) async {
+    if (call.method == 'appUpdateStateChanged') {
+      final arguments = call.arguments;
+      if (arguments is Map<Object?, Object?>) {
+        _publishAppUpdateStatus(AppUpdateStatus.fromMap(arguments));
+      }
+      return null;
+    }
     if (call.method != 'restartDaemonAfterUpdateAbort') return null;
     final binaryPath = defaultDaemonBinaryPath();
     if (binaryPath == null) {
@@ -647,13 +726,45 @@ class DesktopPlatformServices
   @override
   Future<void> checkForAppUpdates() async {
     if (appUpdateSupport != AppUpdateSupport.native) {
-      throw UnsupportedError('Native app updates are only available on macOS');
+      throw UnsupportedError(
+        'Native app updates are unavailable in this build',
+      );
     }
+    if (_isLinux) {
+      await _linuxAppUpdater!.checkForUpdates();
+      return;
+    }
+    _publishAppUpdateStatus(
+      const AppUpdateStatus(
+        phase: AppUpdatePhase.checking,
+        message: 'Checking for updates…',
+      ),
+    );
     await _methodInvoker('checkForUpdates', null);
   }
 
   @override
+  Future<void> installAppUpdate() async {
+    if (appUpdateSupport != AppUpdateSupport.native) {
+      throw UnsupportedError(
+        'Native app updates are unavailable in this build',
+      );
+    }
+    if (_isLinux) {
+      final result = await _linuxAppUpdater!.installAvailableUpdate();
+      await _detachedAppRestarter(pid, result.restartPath);
+      _processExit(0);
+      return;
+    }
+    await _methodInvoker('installUpdate', null);
+  }
+
+  @override
   Future<String?> pendingAppUpdateVersion() async {
+    if (_isLinux) {
+      final updater = _linuxAppUpdater;
+      return updater == null ? null : await updater.pendingUpdateVersion();
+    }
     if (!_isMacOS) return null;
     if (appUpdateSupport != AppUpdateSupport.native) {
       final recoveryPath = '$_resolvedDataDir/app-update-recovery.json';
@@ -678,8 +789,59 @@ class DesktopPlatformServices
 
   @override
   Future<void> completeAppUpdate() async {
+    if (_isLinux) {
+      await _linuxAppUpdater?.completePendingUpdate();
+      return;
+    }
     if (appUpdateSupport != AppUpdateSupport.native) return;
     await _methodInvoker('completeUpdate', null);
+  }
+
+  @override
+  Future<void> finalizeAppUpdate() async {
+    if (_isLinux) {
+      await _linuxAppUpdater?.finalizePendingUpdate();
+      return;
+    }
+    if (appUpdateSupport != AppUpdateSupport.native) return;
+  }
+
+  void _runTrayUpdateAction(Future<void> Function() action) {
+    unawaited(
+      action().catchError((Object error) {
+        _publishAppUpdateStatus(
+          AppUpdateStatus(
+            phase: AppUpdatePhase.error,
+            message: 'Update failed: $error',
+          ),
+        );
+      }),
+    );
+  }
+
+  void _publishAppUpdateStatus(AppUpdateStatus status) {
+    final previous = _appUpdateStatus;
+    _appUpdateStatus = status;
+    _appUpdateEvents.add(status);
+    unawaited(TrayMenu.instance.setUpdateState(status));
+    if (status.updateAvailable &&
+        (!previous.updateAvailable || previous.version != status.version)) {
+      _notifyAvailableUpdateIfNeeded(status);
+    }
+  }
+
+  void _notifyAvailableUpdateIfNeeded(AppUpdateStatus status) {
+    if (!_notifierReady ||
+        !status.updateAvailable ||
+        _notifiedUpdateVersion == status.version) {
+      return;
+    }
+    _notifiedUpdateVersion = status.version;
+    showNotification(
+      title: 'Heimdallm update available',
+      body: 'Version ${status.version ?? 'new'} is ready to install.',
+      onClick: () => unawaited(showAndFocusWindow()),
+    );
   }
 
   @override
