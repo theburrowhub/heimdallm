@@ -1417,8 +1417,14 @@ func (srv *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
 }
 
 func (srv *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
+	controller := http.NewResponseController(w)
+	// Server.Serve applies a 60-second WriteTimeout to ordinary responses. That
+	// deadline is absolute for the lifetime of a request, so periodic heartbeats
+	// do not extend it and every SSE connection would otherwise die at one minute.
+	// Clear it only for this long-lived response; normal endpoints keep the
+	// server-wide timeout.
+	if err := controller.SetWriteDeadline(time.Time{}); err != nil {
+		slog.Error("SSE: clear write deadline", "err", err)
 		http.Error(w, "SSE not supported", http.StatusInternalServerError)
 		return
 	}
@@ -1428,7 +1434,7 @@ func (srv *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 
 	// When NATS is available, subscribe directly — no subscriber limit.
 	if srv.natsConn != nil {
-		srv.handleSSEViaNATS(w, r, flusher)
+		srv.handleSSEViaNATS(w, r, controller)
 		return
 	}
 
@@ -1440,9 +1446,15 @@ func (srv *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	}
 	defer srv.broker.Unsubscribe(ch)
 
-	fmt.Fprintf(w, ": connected\n\n")
-	fmt.Fprint(w, srv.heartbeatEvent(time.Now()).Format())
-	flusher.Flush()
+	if _, err := fmt.Fprintf(w, ": connected\n\n"); err != nil {
+		return
+	}
+	if _, err := fmt.Fprint(w, srv.heartbeatEvent(time.Now()).Format()); err != nil {
+		return
+	}
+	if err := controller.Flush(); err != nil {
+		return
+	}
 
 	heartbeat := time.NewTicker(heartbeatInterval)
 	defer heartbeat.Stop()
@@ -1453,18 +1465,26 @@ func (srv *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			fmt.Fprint(w, event.Format())
-			flusher.Flush()
+			if _, err := fmt.Fprint(w, event.Format()); err != nil {
+				return
+			}
+			if err := controller.Flush(); err != nil {
+				return
+			}
 		case <-heartbeat.C:
-			fmt.Fprint(w, srv.heartbeatEvent(time.Now()).Format())
-			flusher.Flush()
+			if _, err := fmt.Fprint(w, srv.heartbeatEvent(time.Now()).Format()); err != nil {
+				return
+			}
+			if err := controller.Flush(); err != nil {
+				return
+			}
 		case <-r.Context().Done():
 			return
 		}
 	}
 }
 
-func (srv *Server) handleSSEViaNATS(w http.ResponseWriter, r *http.Request, flusher http.Flusher) {
+func (srv *Server) handleSSEViaNATS(w http.ResponseWriter, r *http.Request, controller *http.ResponseController) {
 	// Core NATS subscription (not JetStream) — ephemeral fan-out, no persistence.
 	ch := make(chan *nats.Msg, 64)
 	sub, err := srv.natsConn.ChanSubscribe("heimdallm.events.>", ch)
@@ -1475,9 +1495,15 @@ func (srv *Server) handleSSEViaNATS(w http.ResponseWriter, r *http.Request, flus
 	}
 	defer sub.Unsubscribe()
 
-	fmt.Fprintf(w, ": connected\n\n")
-	fmt.Fprint(w, srv.heartbeatEvent(time.Now()).Format())
-	flusher.Flush()
+	if _, err := fmt.Fprintf(w, ": connected\n\n"); err != nil {
+		return
+	}
+	if _, err := fmt.Fprint(w, srv.heartbeatEvent(time.Now()).Format()); err != nil {
+		return
+	}
+	if err := controller.Flush(); err != nil {
+		return
+	}
 
 	// Heartbeat prevents idle connection drops and gives clients observable liveness.
 	heartbeat := time.NewTicker(heartbeatInterval)
@@ -1485,13 +1511,24 @@ func (srv *Server) handleSSEViaNATS(w http.ResponseWriter, r *http.Request, flus
 
 	for {
 		select {
-		case msg := <-ch:
+		case msg, ok := <-ch:
+			if !ok || msg == nil {
+				return
+			}
 			eventType := strings.TrimPrefix(msg.Subject, "heimdallm.events.")
-			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, string(msg.Data))
-			flusher.Flush()
+			if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, string(msg.Data)); err != nil {
+				return
+			}
+			if err := controller.Flush(); err != nil {
+				return
+			}
 		case <-heartbeat.C:
-			fmt.Fprint(w, srv.heartbeatEvent(time.Now()).Format())
-			flusher.Flush()
+			if _, err := fmt.Fprint(w, srv.heartbeatEvent(time.Now()).Format()); err != nil {
+				return
+			}
+			if err := controller.Flush(); err != nil {
+				return
+			}
 		case <-r.Context().Done():
 			return
 		}
@@ -2245,34 +2282,45 @@ func fileModTime(path string) (time.Time, bool) {
 }
 
 func (srv *Server) handleLogsStream(w http.ResponseWriter, r *http.Request) {
+	controller := http.NewResponseController(w)
+	// Like /events, this is an intentionally long-lived response and must not
+	// inherit the server's absolute 60-second write deadline.
+	if err := controller.SetWriteDeadline(time.Time{}); err != nil {
+		slog.Error("logs stream: clear write deadline", "err", err)
+		http.Error(w, "log streaming not supported", http.StatusInternalServerError)
+		return
+	}
 	logPath := daemonLogPath()
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	flush := func() {
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
+	emit := func(line string) bool {
+		escaped, err := json.Marshal(line)
+		if err != nil {
+			slog.Warn("logs stream: marshal line", "err", err)
+			return false
 		}
-	}
-	emit := func(line string) {
-		escaped, _ := json.Marshal(line)
-		fmt.Fprintf(w, "event: log_line\ndata: {\"line\":%s}\n\n", escaped)
-		flush()
+		if _, err := fmt.Fprintf(w, "event: log_line\ndata: {\"line\":%s}\n\n", escaped); err != nil {
+			return false
+		}
+		return controller.Flush() == nil
 	}
 
 	// Check if file exists.
 	f, err := os.Open(logPath)
 	if err != nil {
-		emit(fmt.Sprintf("(log file not found at %s — daemon may be running in dev mode or log path differs)", logPath))
+		_ = emit(fmt.Sprintf("(log file not found at %s — daemon may be running in dev mode or log path differs)", logPath))
 		return
 	}
 	defer f.Close()
 
 	// Read last 300 lines.
 	for _, line := range tailLines(f, 300) {
-		emit(line)
+		if !emit(line) {
+			return
+		}
 	}
 
 	// Get current offset.
@@ -2300,14 +2348,19 @@ func (srv *Server) handleLogsStream(w http.ResponseWriter, r *http.Request) {
 			}
 			f2.Seek(offset, io.SeekStart) //nolint:errcheck
 			scanner := bufio.NewScanner(f2)
+			streamOK := true
 			for scanner.Scan() {
 				line := scanner.Text()
-				if line != "" {
-					emit(line)
+				if line != "" && !emit(line) {
+					streamOK = false
+					break
 				}
 			}
 			offset, _ = f2.Seek(0, io.SeekCurrent)
 			f2.Close()
+			if !streamOK {
+				return
+			}
 		}
 	}
 }

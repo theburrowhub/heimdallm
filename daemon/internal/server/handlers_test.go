@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -33,6 +34,38 @@ func setupServer(t *testing.T) (*server.Server, *store.Store) {
 	t.Cleanup(broker.Stop)
 	srv := server.New(s, broker, nil, "")
 	return srv, s
+}
+
+func newStreamingTestServer(t *testing.T, handler http.Handler, writeTimeout time.Duration) *httptest.Server {
+	t.Helper()
+	ts := httptest.NewUnstartedServer(handler)
+	ts.Config.WriteTimeout = writeTimeout
+	ts.Start()
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+func nextSSEEvent(scanner *bufio.Scanner) (string, string, error) {
+	eventType := "message"
+	var data []string
+	for scanner.Scan() {
+		line := scanner.Text()
+		switch {
+		case line == "":
+			if len(data) > 0 {
+				return eventType, strings.Join(data, "\n"), nil
+			}
+			eventType = "message"
+		case strings.HasPrefix(line, "event:"):
+			eventType = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		case strings.HasPrefix(line, "data:"):
+			data = append(data, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", "", err
+	}
+	return "", "", io.EOF
 }
 
 func TestHandlerHealth(t *testing.T) {
@@ -199,6 +232,53 @@ func TestEventsEmitsObservableHeartbeat(t *testing.T) {
 	}
 	if payload["last_poll_at"] != "2026-01-02T03:04:05Z" {
 		t.Fatalf("last_poll_at: got %v", payload["last_poll_at"])
+	}
+}
+
+func TestEventsStreamSurvivesServerWriteTimeout(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	broker := sse.NewBroker()
+	broker.Start()
+	t.Cleanup(broker.Stop)
+	srv := server.New(s, broker, nil, "")
+
+	const writeTimeout = 75 * time.Millisecond
+	ts := newStreamingTestServer(t, srv.Router(), writeTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/events", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /events: %v", err)
+	}
+	defer resp.Body.Close()
+
+	scanner := bufio.NewScanner(resp.Body)
+	eventType, _, err := nextSSEEvent(scanner)
+	if err != nil {
+		t.Fatalf("read initial heartbeat: %v", err)
+	}
+	if eventType != sse.EventHeartbeat {
+		t.Fatalf("initial event = %q, want %q", eventType, sse.EventHeartbeat)
+	}
+
+	// The server deadline is absolute, not idle-based. Publishing after it has
+	// expired reproduces the production one-minute EOF in a fraction of a second.
+	time.Sleep(2 * writeTimeout)
+	broker.Publish(sse.Event{Type: "after_deadline", Data: `{"ok":true}`})
+	eventType, data, err := nextSSEEvent(scanner)
+	if err != nil {
+		t.Fatalf("read event after server write timeout: %v", err)
+	}
+	if eventType != "after_deadline" || data != `{"ok":true}` {
+		t.Fatalf("event after deadline = (%q, %q), want (after_deadline, {\"ok\":true})", eventType, data)
 	}
 }
 
@@ -510,23 +590,85 @@ func TestHandlerLogsStream_RequiresAuth(t *testing.T) {
 
 func TestHandlerLogsStream_WithToken(t *testing.T) {
 	srv := setupServerWithToken(t, "secret-token")
+	t.Setenv("HEIMDALLM_DATA_DIR", t.TempDir())
+	ts := httptest.NewServer(srv.Router())
+	t.Cleanup(ts.Close)
 
-	// Use a context with a short deadline so the polling loop exits.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	req := httptest.NewRequest("GET", "/logs/stream", nil).WithContext(ctx)
-	req.Header.Set("X-Heimdallm-Token", "secret-token")
-	w := httptest.NewRecorder()
-	srv.Router().ServeHTTP(w, req)
-
-	// Log file won't exist in CI/test env; endpoint should return 200 with SSE not-found message
-	// and exit cleanly. If the log file DOES exist (dev machine), the handler exits when ctx is done.
-	if w.Code != http.StatusOK {
-		t.Errorf("expected 200 with valid token, got %d", w.Code)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/logs/stream", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
 	}
-	if ct := w.Header().Get("Content-Type"); ct != "text/event-stream" {
+	req.Header.Set("X-Heimdallm-Token", "secret-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /logs/stream: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// The isolated data directory has no log file, so the endpoint emits its
+	// diagnostic SSE line and closes cleanly.
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 with valid token, got %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
 		t.Errorf("expected Content-Type text/event-stream, got %q", ct)
+	}
+}
+
+func TestLogsStreamSurvivesServerWriteTimeout(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("HEIMDALLM_DATA_DIR", dataDir)
+	logPath := filepath.Join(dataDir, server.DaemonLogFileName)
+	if err := os.WriteFile(logPath, []byte("before deadline\n"), 0o600); err != nil {
+		t.Fatalf("write initial log: %v", err)
+	}
+
+	srv, _ := setupServer(t)
+	const writeTimeout = 75 * time.Millisecond
+	ts := newStreamingTestServer(t, srv.Router(), writeTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/logs/stream", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /logs/stream: %v", err)
+	}
+	defer resp.Body.Close()
+
+	scanner := bufio.NewScanner(resp.Body)
+	eventType, data, err := nextSSEEvent(scanner)
+	if err != nil {
+		t.Fatalf("read initial log line: %v", err)
+	}
+	if eventType != "log_line" || !strings.Contains(data, "before deadline") {
+		t.Fatalf("initial log event = (%q, %q)", eventType, data)
+	}
+
+	time.Sleep(2 * writeTimeout)
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open log for append: %v", err)
+	}
+	if _, err := f.WriteString("after deadline\n"); err != nil {
+		_ = f.Close()
+		t.Fatalf("append log: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close appended log: %v", err)
+	}
+
+	eventType, data, err = nextSSEEvent(scanner)
+	if err != nil {
+		t.Fatalf("read log line after server write timeout: %v", err)
+	}
+	if eventType != "log_line" || !strings.Contains(data, "after deadline") {
+		t.Fatalf("log event after deadline = (%q, %q)", eventType, data)
 	}
 }
 

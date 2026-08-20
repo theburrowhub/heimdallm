@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -22,7 +23,10 @@ Color _levelColor(String line) {
 }
 
 class LogsView extends ConsumerStatefulWidget {
-  const LogsView({super.key});
+  const LogsView({super.key, @visibleForTesting this.client});
+
+  final SseClient? client;
+
   @override
   ConsumerState<LogsView> createState() => _LogsViewState();
 }
@@ -54,10 +58,12 @@ class _LogsViewState extends ConsumerState<LogsView> {
   }
 
   void _connect() {
-    _sseClient = SseClient(
-      platform: ref.read(platformServicesProvider),
-      path: '/logs/stream',
-    );
+    _sseClient =
+        widget.client ??
+        SseClient(
+          platform: ref.read(platformServicesProvider),
+          path: '/logs/stream',
+        );
     _sub = _sseClient!.connect().listen(
       (event) {
         if (event.type == 'log_line') {
@@ -69,14 +75,24 @@ class _LogsViewState extends ConsumerState<LogsView> {
           }
         }
       },
-      onError: (_) => setState(() => _connected = false),
-      onDone: () => setState(() => _connected = false),
+      onError: (_) => _setConnected(false),
+      onDone: () => _setConnected(false),
     );
-    setState(() => _connected = true);
+    _connected = true;
+  }
+
+  void _setConnected(bool value) {
+    if (!mounted || _connected == value) return;
+    setState(() => _connected = value);
   }
 
   void _appendLine(String line) {
+    if (!mounted) return;
     setState(() {
+      // SseClient keeps the public stream alive while reconnecting. Receiving
+      // a fresh log line is therefore the positive signal that the replacement
+      // transport is live again after onError marked it disconnected.
+      _connected = true;
       _lines.add(line);
       if (_lines.length > _maxLines) {
         _lines.removeRange(0, _lines.length - _maxLines);
@@ -133,6 +149,7 @@ class _LogsViewState extends ConsumerState<LogsView> {
                 child: Row(
                   children: [
                     Container(
+                      key: const ValueKey('logs-connection-indicator'),
                       width: 7,
                       height: 7,
                       decoration: BoxDecoration(
