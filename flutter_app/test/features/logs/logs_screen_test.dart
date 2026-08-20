@@ -65,7 +65,27 @@ void main() {
     expect(find.text('stream recovered'), findsOneWidget);
     expect(_indicatorColor(tester), const Color(0xFF3FB950));
 
+    client.disconnect();
+    await tester.pump();
+    expect(_indicatorColor(tester), const Color(0xFFFF6B6B));
+
     await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('LogsView creates its production stream client', (tester) async {
+    final platform = FakePlatformServices(apiBaseUrl: 'http://127.0.0.1:1');
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [platformServicesProvider.overrideWithValue(platform)],
+        child: const MaterialApp(home: Scaffold(body: LogsView())),
+      ),
+    );
+
+    expect(_indicatorColor(tester), const Color(0xFF3FB950));
+
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump();
   });
 }
 

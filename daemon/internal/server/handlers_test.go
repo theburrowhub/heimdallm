@@ -282,6 +282,18 @@ func TestEventsStreamSurvivesServerWriteTimeout(t *testing.T) {
 	}
 }
 
+func TestEventsRejectsWriterWithoutDeadlineControl(t *testing.T) {
+	srv, _ := setupServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/events", nil)
+	w := httptest.NewRecorder()
+
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want %d", w.Code, http.StatusInternalServerError)
+	}
+}
+
 func TestHandlerListPRs(t *testing.T) {
 	srv, s := setupServer(t)
 	s.UpsertPR(&store.PR{GithubID: 1, Repo: "org/r", Number: 1, Title: "t", Author: "a", URL: "u", State: "open", UpdatedAt: time.Now(), FetchedAt: time.Now()})
@@ -669,6 +681,19 @@ func TestLogsStreamSurvivesServerWriteTimeout(t *testing.T) {
 	}
 	if eventType != "log_line" || !strings.Contains(data, "after deadline") {
 		t.Fatalf("log event after deadline = (%q, %q)", eventType, data)
+	}
+}
+
+func TestLogsStreamRejectsWriterWithoutDeadlineControl(t *testing.T) {
+	srv := setupServerWithToken(t, "secret-token")
+	req := httptest.NewRequest(http.MethodGet, "/logs/stream", nil)
+	req.Header.Set("X-Heimdallm-Token", "secret-token")
+	w := httptest.NewRecorder()
+
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want %d", w.Code, http.StatusInternalServerError)
 	}
 }
 
