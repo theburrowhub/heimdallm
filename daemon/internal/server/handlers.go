@@ -1417,11 +1417,22 @@ func (srv *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
 }
 
 func (srv *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	stream, err := newStreamResponseWriter(w, cancel)
+	// Server.Serve applies a 60-second WriteTimeout to ordinary responses. That
+	// deadline is absolute for the lifetime of a request, so periodic heartbeats
+	// do not extend it and every SSE connection would otherwise die at one minute.
+	// The stream writer replaces it with a deadline per write; normal endpoints
+	// keep the server-wide timeout.
+	if err != nil {
+		slog.Error("SSE: configure rolling write deadline", "err", err)
 		http.Error(w, "SSE not supported", http.StatusInternalServerError)
 		return
 	}
+	w = stream
+	r = r.WithContext(ctx)
+	flusher := http.Flusher(stream)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -2245,6 +2256,19 @@ func fileModTime(path string) (time.Time, bool) {
 }
 
 func (srv *Server) handleLogsStream(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	stream, err := newStreamResponseWriter(w, cancel)
+	// Like /events, this is an intentionally long-lived response and must not
+	// inherit the server's absolute 60-second write deadline. Each actual write
+	// gets its own bounded deadline instead.
+	if err != nil {
+		slog.Error("logs stream: configure rolling write deadline", "err", err)
+		http.Error(w, "log streaming not supported", http.StatusInternalServerError)
+		return
+	}
+	w = stream
+	r = r.WithContext(ctx)
 	logPath := daemonLogPath()
 
 	w.Header().Set("Content-Type", "text/event-stream")

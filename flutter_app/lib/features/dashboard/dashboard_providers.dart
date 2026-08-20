@@ -93,8 +93,8 @@ class DaemonConnectionNotifier extends Notifier<DaemonConnectionStatus> {
         // long-lived connection resets for many benign reasons (idle timeout,
         // the daemon momentarily busy, a network blip). Going straight to
         // "offline" here is what flashes a bogus "Server unavailable" while the
-        // daemon is perfectly healthy. Instead show "reconnecting" and verify
-        // health first — _verifyAndReconnect reconnects when the daemon answers
+        // daemon is still reachable. Instead show "reconnecting" and verify
+        // ownership first — _verifyAndReconnect reconnects when the daemon answers
         // and only falls back to offline when it genuinely doesn't.
         if (state.phase != DaemonConnectionPhase.offline &&
             state.phase != DaemonConnectionPhase.connecting) {
@@ -142,16 +142,18 @@ class DaemonConnectionNotifier extends Notifier<DaemonConnectionStatus> {
     if (_checkingHealth) return;
     _checkingHealth = true;
     try {
-      final healthy = await ref.read(apiClientProvider).checkHealth();
+      final reachable =
+          await ref.read(apiClientProvider).daemonReachable() ==
+          PortOwner.daemon;
       if (!ref.mounted) return;
-      if (healthy) {
+      if (reachable) {
         _reconnectAttempts++;
         state = DaemonConnectionStatus(
           phase: DaemonConnectionPhase.connecting,
           lastEventAt: DateTime.now(),
         );
         // Back off before reconnecting so a stream that errors instantly
-        // (daemon healthy but the SSE endpoint flapping) can't hot-loop:
+        // (daemon reachable but the SSE endpoint flapping) can't hot-loop:
         // 1s, 2s, 4s… capped. _checkingHealth stays true across the delay,
         // so overlapping error emissions collapse into this one attempt.
         final backoffShift = _reconnectAttempts > 4 ? 4 : _reconnectAttempts;
@@ -162,7 +164,7 @@ class DaemonConnectionNotifier extends Notifier<DaemonConnectionStatus> {
         state = DaemonConnectionStatus(
           phase: DaemonConnectionPhase.offline,
           lastEventAt: state.lastEventAt,
-          message: 'Health check failed',
+          message: 'Daemon reachability check failed',
         );
       }
     } finally {
