@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -20,11 +21,12 @@ import (
 
 type requestBudgetPRPublisher struct {
 	published chan scheduler.Tier2PR
+	err       error
 }
 
 func (p *requestBudgetPRPublisher) PublishPRReviewCandidate(_ context.Context, repo string, number int, githubID int64) error {
 	p.published <- scheduler.Tier2PR{Repo: repo, Number: number, ID: githubID}
-	return nil
+	return p.err
 }
 
 func TestTier2AdapterPRIngestionRequestBudget(t *testing.T) {
@@ -143,7 +145,10 @@ func TestRunTier2PRSearchConsumesOneSearchPermitWithoutExtraCorePermit(t *testin
 		cfg: &cfg, cfgMu: &cfgMu, login: &login, loginMu: &loginMu,
 		lastSkippedUpdatedAt: make(map[int64]time.Time),
 	}
-	publisher := &requestBudgetPRPublisher{published: make(chan scheduler.Tier2PR, 1)}
+	publisher := &requestBudgetPRPublisher{
+		published: make(chan scheduler.Tier2PR, 1),
+		err:       errors.New("simulated enqueue failure"),
+	}
 	reposCh := make(chan []string, 1)
 	reposCh <- []string{"org/repo"}
 

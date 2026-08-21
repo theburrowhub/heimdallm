@@ -362,6 +362,49 @@ func TestSearchIssuesGraphQLUsesGraphQLGateNotRESTSearchGate(t *testing.T) {
 
 // ── Dispatch / fallback tests ─────────────────────────────────────────────────
 
+func TestSearchIssuesGraphQLGateErrorStopsRequest(t *testing.T) {
+	gateErr := errors.New("graphql budget exhausted")
+	requestCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	client.SetGraphQLGate(func() error { return gateErr })
+
+	_, err := client.SearchIssuesGraphQL("is:issue is:open")
+	if !errors.Is(err, gateErr) {
+		t.Fatalf("SearchIssuesGraphQL error = %v, want wrapped gate error", err)
+	}
+	if requestCount != 0 {
+		t.Fatalf("GraphQL requests = %d, want 0 when gate rejects", requestCount)
+	}
+}
+
+func TestSetGraphQLGateNilDisablesGate(t *testing.T) {
+	body := gqlSearchEnvelope(nil, false, "")
+	requestCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	client.SetGraphQLGate(func() error { return errors.New("stale gate") })
+	client.SetGraphQLGate(nil)
+
+	if _, err := client.SearchIssuesGraphQL("is:issue is:open"); err != nil {
+		t.Fatalf("SearchIssuesGraphQL after SetGraphQLGate(nil): %v", err)
+	}
+	if requestCount != 1 {
+		t.Fatalf("GraphQL requests = %d, want 1 after disabling gate", requestCount)
+	}
+}
+
 // TestSearchIssues_GraphQLDisabledNeverCallsGraphQLEndpoint asserts that when
 // useGraphQL is false (the default), /graphql is never hit.
 func TestSearchIssues_GraphQLDisabledNeverCallsGraphQLEndpoint(t *testing.T) {

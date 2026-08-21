@@ -99,6 +99,17 @@ func publishBridgeEvents(events <-chan sse.Event, publish func(subject string, d
 	}
 }
 
+func newOrderedNATSEventPublisher(conn *nats.Conn) func([]sse.Event) error {
+	return func(events []sse.Event) error {
+		for _, event := range events {
+			if err := conn.Publish(bus.SubjEventPrefix+event.Type, []byte(event.Data)); err != nil {
+				return err
+			}
+		}
+		return conn.FlushTimeout(2 * time.Second)
+	}
+}
+
 func main() {
 	os.Exit(runProcess(false))
 }
@@ -763,22 +774,15 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 
 	// tier2Adapter bridges main.go's concrete types to the polling logic.
 	adapter := &tier2Adapter{
-		ghClient:  ghClient,
-		ghToken:   token,
-		pipeline:  p,
-		issuePipe: issuePipe,
-		fetcher:   issueFetcher,
-		repoCtx:   repoCtx,
-		store:     s,
-		broker:    broker,
-		publishOrderedEvents: func(events []sse.Event) error {
-			for _, event := range events {
-				if err := conn.Publish(bus.SubjEventPrefix+event.Type, []byte(event.Data)); err != nil {
-					return err
-				}
-			}
-			return conn.FlushTimeout(2 * time.Second)
-		},
+		ghClient:             ghClient,
+		ghToken:              token,
+		pipeline:             p,
+		issuePipe:            issuePipe,
+		fetcher:              issueFetcher,
+		repoCtx:              repoCtx,
+		store:                s,
+		broker:               broker,
+		publishOrderedEvents: newOrderedNATSEventPublisher(conn),
 		cfgMu:                &cfgMu,
 		cfg:                  &cfg,
 		loginMu:              &loginMu,
@@ -3169,6 +3173,10 @@ func applyClientRuntimeConfig(ghClient *gh.Client, limiter *scheduler.RateLimite
 	}
 }
 
+type tier2PRCandidatePublisher interface {
+	PublishPRReviewCandidate(ctx context.Context, repo string, number int, githubID int64) error
+}
+
 // runTier2 runs the PR/issue polling loop. Replaces the old RunTier2 from
 // the scheduler package.
 //
@@ -3180,7 +3188,7 @@ func runTier2(
 	ctx context.Context,
 	adapter *tier2Adapter,
 	limiter *scheduler.RateLimiter,
-	prPublisher scheduler.Tier2PRPublisher,
+	prPublisher tier2PRCandidatePublisher,
 	ssePub sse.Publisher,
 	configFn func() []string,
 	repoConcurrencyFn func() int,

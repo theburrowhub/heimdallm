@@ -136,6 +136,55 @@ func TestFetchPRsToReviewCachesUserAndMetersSearch(t *testing.T) {
 	}
 }
 
+func TestFetchPRsToReviewSearchGateErrorStopsSearchRequest(t *testing.T) {
+	gateErr := errors.New("search budget exhausted")
+	var searchCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/user":
+			_ = json.NewEncoder(w).Encode(map[string]string{"login": "alice"})
+		case "/search/issues":
+			searchCalls.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []gh.PullRequest{}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	client.SetSearchGate(func() error { return gateErr })
+
+	_, err := client.FetchPRsToReview()
+	if !errors.Is(err, gateErr) {
+		t.Fatalf("FetchPRsToReview error = %v, want wrapped gate error", err)
+	}
+	if got := searchCalls.Load(); got != 0 {
+		t.Fatalf("GET /search/issues calls = %d, want 0 when gate rejects", got)
+	}
+}
+
+func TestFetchPRsToReviewReportsTruncatedSearchBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/user":
+			_ = json.NewEncoder(w).Encode(map[string]string{"login": "alice"})
+		case "/search/issues":
+			w.Header().Set("Content-Length", "100")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"items":`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	if _, err := client.FetchPRsToReview(); err == nil || !strings.Contains(err.Error(), "read PR search") {
+		t.Fatalf("FetchPRsToReview() error = %v, want response read error", err)
+	}
+}
+
 func TestFetchDiff(t *testing.T) {
 	diff := "diff --git a/main.go b/main.go\n+added line\n"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -2,6 +2,8 @@ package bus_test
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -120,6 +122,21 @@ func TestPRReviewPublisher_CandidateAllowsWorkerHydration(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for candidate")
+	}
+}
+
+func TestPRReviewPublisher_CandidateClosedConnection(t *testing.T) {
+	env := newTestEnv(t)
+	conn := env.bus.Conn()
+	pub := bus.NewPRReviewPublisher(conn)
+	conn.Close()
+
+	err := pub.PublishPRReviewCandidate(context.Background(), "org/repo", 7, 42)
+	if !errors.Is(err, nats.ErrConnectionClosed) {
+		t.Fatalf("PublishPRReviewCandidate error = %v, want nats.ErrConnectionClosed", err)
+	}
+	if !strings.Contains(err.Error(), "publish pr review candidate") {
+		t.Fatalf("PublishPRReviewCandidate error lacks operation context: %v", err)
 	}
 }
 

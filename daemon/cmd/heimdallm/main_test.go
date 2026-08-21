@@ -882,6 +882,61 @@ func TestRunTier2PublishesPendingWhenLiveRepoSetIsEmpty(t *testing.T) {
 	}
 }
 
+func TestRunTier2ColdStartStopsWhenContextEndsBeforeSnapshot(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	runTier2(
+		ctx,
+		&tier2Adapter{},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		make(chan []string),
+		time.Hour,
+		true,
+		nil,
+	)
+}
+
+func TestRunTier2ReceiverStopsWhenRepoChannelCloses(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	reposCh := make(chan []string)
+	close(reposCh)
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		runTier2(
+			ctx,
+			&tier2Adapter{},
+			nil,
+			nil,
+			nil,
+			nil,
+			nil,
+			nil,
+			nil,
+			reposCh,
+			time.Hour,
+			false,
+			nil,
+		)
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("runTier2 did not stop after cancellation")
+	}
+}
+
 func TestTier2AdapterPromoteReadyUsesOrgScopedIssueTracking(t *testing.T) {
 	var addedLabels [][]string
 	removedLabels := 0
