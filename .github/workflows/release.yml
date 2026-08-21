@@ -23,11 +23,19 @@ env:
   # Opt-in to Node.js 24 for all JavaScript actions (Node 20 deprecated Sep 2026)
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
-# A release mutates one shared draft, GHCR aliases, and the Homebrew tap. Never
-# let a manual repair and a main-branch release race those shared boundaries.
+# Merged release-please commits contain `chore(main): release`. Keep those and
+# manual repairs serialized because they mutate a shared draft, GHCR aliases,
+# and the Homebrew tap. Ordinary pushes use a separate coalescing group, so they
+# cannot evict or delay a pending release.
 concurrency:
-  group: heimdallm-release-pipeline
-  cancel-in-progress: false
+  group: >-
+    ${{ (github.event_name == 'workflow_dispatch' ||
+         contains(github.event.head_commit.message, 'chore(main): release '))
+        && 'heimdallm-release-pipeline'
+        || 'heimdallm-release-please' }}
+  cancel-in-progress: >-
+    ${{ github.event_name == 'push' &&
+        !contains(github.event.head_commit.message, 'chore(main): release ') }}
 
 jobs:
   release-please:
