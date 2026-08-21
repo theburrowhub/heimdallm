@@ -87,6 +87,18 @@ type Server struct {
 	configFn func() map[string]any
 	// healthSnapshotFn returns live daemon liveness metadata for /health and SSE heartbeat.
 	healthSnapshotFn func() HealthSnapshot
+	// prepareUpdateFn atomically prevents new long-running work and returns
+	// the operations still draining. cancelUpdateFn abandons that lease when
+	// the native updater aborts before replacing the application.
+	prepareUpdateFn func(leaseID string) (UpdatePreparationStatus, error)
+	cancelUpdateFn  func(leaseID string) (UpdatePreparationStatus, error)
+	sealUpdateFn    func(leaseID string) (UpdatePreparationStatus, error)
+	confirmUpdateFn func(leaseID string) (UpdatePreparationStatus, error)
+	// updateBootID is a cryptographically random, process-local identity used
+	// by the replacement handshake. The updater must echo the ID it observed
+	// while verifying the daemon before confirmation can cross the stateful
+	// bootstrap boundary.
+	updateBootID string
 	// repoMetaFns fetch repo metadata from GitHub for autocomplete.
 	fetchLabelsFn        func(repo string) ([]string, error)
 	fetchCollaboratorsFn func(repo string) ([]string, error)
@@ -112,6 +124,10 @@ type Options struct {
 	Version string
 	// StartedAt is the time the server process started. Optional.
 	StartedAt time.Time
+	// UpdateBootID identifies this exact daemon process during application
+	// replacement. It must be non-empty when the update confirmation callback
+	// is configured.
+	UpdateBootID string
 }
 
 const defaultMaxConcurrentReviews = 5
@@ -123,6 +139,48 @@ type HealthSnapshot struct {
 	LastPollAt   time.Time
 	PollInterval time.Duration
 }
+
+// UpdatePreparationStatus is returned to the native desktop updater. Active
+// contains complete transactions, not merely child CLI processes.
+type UpdatePreparationStatus struct {
+	State               string         `json:"state"`
+	PID                 int            `json:"pid"`
+	Version             string         `json:"version"`
+	LeaseID             string         `json:"lease_id"`
+	Sealed              bool           `json:"sealed"`
+	BootstrapAuthorized bool           `json:"bootstrap_authorized"`
+	BootID              string         `json:"boot_id"`
+	Active              map[string]int `json:"active"`
+	ActiveTotal         int            `json:"active_total"`
+	LeaseExpiresAt      time.Time      `json:"lease_expires_at,omitempty"`
+}
+
+// HeaderUpdateLease carries the client-generated, cryptographically random
+// owner ID for every prepare renewal and cancellation request.
+const HeaderUpdateLease = "X-Heimdallm-Update-Lease"
+
+// HeaderExpectedUpdateBootID binds bootstrap confirmation and lease deletion
+// to the exact daemon process whose PID, executable and version the native
+// updater verified. A respawn receives a new ID, so a delayed request cannot
+// authorize or open it.
+const HeaderExpectedUpdateBootID = "X-Heimdallm-Expected-Boot-ID"
+
+var (
+	// ErrUpdateLeaseRequired maps a missing updater owner to HTTP 400.
+	ErrUpdateLeaseRequired = errors.New("update lease id required")
+	// ErrUpdateLeaseInvalid maps an oversized or malformed owner to HTTP 400.
+	ErrUpdateLeaseInvalid = errors.New("update lease id invalid")
+	// ErrUpdateLeaseConflict maps a stale or foreign owner to HTTP 409.
+	ErrUpdateLeaseConflict = errors.New("update lease conflict")
+	// ErrUpdateNotReady maps an early seal attempt to HTTP 409.
+	ErrUpdateNotReady = errors.New("update drain still has active work")
+	// ErrUpdateNotSealed maps an attempt to authorize replacement bootstrap
+	// without the durable non-expiring barrier to HTTP 409.
+	ErrUpdateNotSealed = errors.New("update drain is not sealed")
+	// ErrUpdateBootstrapNotAuthorized maps a late cancellation aimed at a
+	// respawn which has not itself completed the owner confirmation handshake.
+	ErrUpdateBootstrapNotAuthorized = errors.New("replacement bootstrap is not authorized")
+)
 
 // New creates a new Server. p may be nil if the pipeline is not yet configured.
 // apiToken must be the value returned by LoadOrCreateAPIToken — it is required
@@ -138,11 +196,12 @@ func NewWithOptions(s *store.Store, broker *sse.Broker, p *pipeline.Pipeline, ap
 		max = defaultMaxConcurrentReviews
 	}
 	srv := &Server{
-		store:     s,
-		broker:    broker,
-		pipeline:  p,
-		apiToken:  apiToken,
-		reviewSem: make(chan struct{}, max),
+		store:        s,
+		broker:       broker,
+		pipeline:     p,
+		apiToken:     apiToken,
+		reviewSem:    make(chan struct{}, max),
+		updateBootID: opts.UpdateBootID,
 	}
 	srv.version = opts.Version
 	if !opts.StartedAt.IsZero() {
@@ -158,10 +217,19 @@ func NewWithOptions(s *store.Store, broker *sse.Broker, p *pipeline.Pipeline, ap
 // dependency-consuming route from running while these fields are published;
 // MarkReady's atomic store then makes them visible to subsequent requests.
 func (srv *Server) Configure(s *store.Store, broker *sse.Broker, p *pipeline.Pipeline, apiToken string) {
+	srv.ConfigureDependencies(s, broker, p)
+	srv.apiToken = apiToken
+}
+
+// ConfigureDependencies publishes the late-bound runtime graph without
+// rewriting the authentication token that was fixed before Serve. Main uses
+// this variant because startup lease renewals can already be authenticating
+// concurrently; Configure remains for tests and callers that configure before
+// serving.
+func (srv *Server) ConfigureDependencies(s *store.Store, broker *sse.Broker, p *pipeline.Pipeline) {
 	srv.store = s
 	srv.broker = broker
 	srv.pipeline = p
-	srv.apiToken = apiToken
 }
 
 // SetNATSConn enables NATS-based SSE. When set, handleSSE subscribes to
@@ -285,6 +353,34 @@ func (srv *Server) SetConfigFn(fn func() map[string]any) { srv.configFn = fn }
 
 // SetHealthSnapshotFn wires live liveness metadata for GET /health and heartbeat SSE.
 func (srv *Server) SetHealthSnapshotFn(fn func() HealthSnapshot) { srv.healthSnapshotFn = fn }
+
+// SetUpdatePreparationFns wires the updater drain lease. Both callbacks are
+// required; a partially configured drain fails closed with HTTP 503.
+func (srv *Server) SetUpdatePreparationFns(
+	prepare func(leaseID string) (UpdatePreparationStatus, error),
+	cancel func(leaseID string) (UpdatePreparationStatus, error),
+) {
+	srv.prepareUpdateFn = prepare
+	srv.cancelUpdateFn = cancel
+}
+
+// SetUpdateSealFn wires the durable, non-expiring replacement barrier. It is
+// separate from SetUpdatePreparationFns so existing embedders can continue to
+// expose ordinary leased drains without authorizing application replacement.
+func (srv *Server) SetUpdateSealFn(
+	seal func(leaseID string) (UpdatePreparationStatus, error),
+) {
+	srv.sealUpdateFn = seal
+}
+
+// SetUpdateConfirmFn wires the owner-authenticated second phase of replacement
+// startup. Confirmation permits dependency bootstrap but deliberately leaves
+// work admission sealed until the owner cancels after a healthy version check.
+func (srv *Server) SetUpdateConfirmFn(
+	confirm func(leaseID string) (UpdatePreparationStatus, error),
+) {
+	srv.confirmUpdateFn = confirm
+}
 
 // SetRepoMetaFns wires GitHub metadata fetchers for autocomplete endpoints.
 func (srv *Server) SetRepoMetaFns(labels func(string) ([]string, error), collabs func(string) ([]string, error)) {
@@ -465,9 +561,9 @@ func (srv *Server) Shutdown(ctx context.Context) error {
 
 func (srv *Server) buildRouter() chi.Router {
 	r := chi.NewRouter()
-	// This must precede auth: while main is still wiring callbacks, /health is
-	// the only route allowed to run. In particular, no authenticated mutation
-	// may observe partially published Server fields.
+	// This must precede auth: while main is still wiring callbacks, only /health
+	// and the pre-wired update lease route may run. Auth still protects the lease;
+	// no other mutation can observe partially published Server fields.
 	r.Use(srv.startupMiddleware)
 	r.Use(srv.authMiddleware)
 	r.Get("/health", srv.handleHealth)
@@ -505,18 +601,29 @@ func (srv *Server) buildRouter() chi.Router {
 	r.Delete("/config/clones/{repo}", srv.handleDeleteManagedClone)
 	r.Post("/reload", srv.handleReload)
 	r.Post("/shutdown", srv.handleShutdown)
+	r.Post("/update/prepare", srv.handlePrepareUpdate)
+	r.Delete("/update/prepare", srv.handleCancelUpdatePreparation)
+	r.Post("/update/seal", srv.handleSealUpdate)
+	r.Post("/update/confirm", srv.handleConfirmUpdate)
 	r.Post("/admin/repo-rename", srv.handleAdminRepoRename)
 	r.Get("/events", srv.handleSSE)
 	r.Get("/logs/stream", srv.handleLogsStream)
 	return r
 }
 
-// startupMiddleware exposes only the public health probe while main is wiring
-// dependencies. MarkReady's atomic Store publishes every preceding setter to
-// requests which subsequently observe starting=false.
+// startupMiddleware exposes the public health probe and the authenticated
+// update handshake while main is wiring dependencies. A replacement daemon
+// must let the updater renew or seal a restored ordinary lease and then
+// authorize bootstrap; every other route remains closed until MarkReady
+// publishes the full graph.
 func (srv *Server) startupMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !srv.starting.Load() || (r.Method == http.MethodGet && r.URL.Path == "/health") {
+		isHealth := r.Method == http.MethodGet && r.URL.Path == "/health"
+		isUpdateHandshake := (r.URL.Path == "/update/prepare" &&
+			(r.Method == http.MethodPost || r.Method == http.MethodDelete)) ||
+			(r.URL.Path == "/update/seal" && r.Method == http.MethodPost) ||
+			(r.URL.Path == "/update/confirm" && r.Method == http.MethodPost)
+		if !srv.starting.Load() || isHealth || (!srv.stopping.Load() && isUpdateHandshake) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -1358,6 +1465,10 @@ func (srv *Server) handleDeleteManagedClone(w http.ResponseWriter, r *http.Reque
 	ctx, cancel := context.WithTimeout(r.Context(), cloneCleanupTimeout)
 	defer cancel()
 	if err := srv.cleanCloneFn(ctx, repo); err != nil {
+		if errors.Is(err, pipeline.ErrUpdateDraining) {
+			writeUpdateDrainConflict(w)
+			return
+		}
 		slog.Error("DELETE /config/clones failed", "repo", repo, "err", err)
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			http.Error(w, `{"error":"clone cleanup timed out"}`, http.StatusGatewayTimeout)
@@ -1378,6 +1489,10 @@ func (srv *Server) handleDeleteManagedClones(w http.ResponseWriter, r *http.Requ
 	defer cancel()
 	removed, err := srv.cleanClonesFn(ctx)
 	if err != nil {
+		if errors.Is(err, pipeline.ErrUpdateDraining) {
+			writeUpdateDrainConflict(w)
+			return
+		}
 		slog.Error("DELETE /config/clones failed", "err", err)
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			http.Error(w, `{"error":"clone cleanup timed out"}`, http.StatusGatewayTimeout)
@@ -1414,6 +1529,134 @@ func (srv *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 	go srv.shutdownFn()
+}
+
+func (srv *Server) handlePrepareUpdate(w http.ResponseWriter, r *http.Request) {
+	if srv.prepareUpdateFn == nil || srv.cancelUpdateFn == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "update preparation not available"})
+		return
+	}
+	leaseID := strings.TrimSpace(r.Header.Get(HeaderUpdateLease))
+	if leaseID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "update lease id required"})
+		return
+	}
+	status, err := srv.prepareUpdateFn(leaseID)
+	if err != nil {
+		writeUpdateLeaseError(w, err)
+		return
+	}
+	slog.Debug("application update drain prepared or renewed", "active", status.ActiveTotal)
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (srv *Server) handleCancelUpdatePreparation(w http.ResponseWriter, r *http.Request) {
+	if srv.prepareUpdateFn == nil || srv.cancelUpdateFn == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "update preparation not available"})
+		return
+	}
+	leaseID := strings.TrimSpace(r.Header.Get(HeaderUpdateLease))
+	if leaseID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "update lease id required"})
+		return
+	}
+	if !srv.verifyExpectedUpdateBootID(w, r) {
+		return
+	}
+	status, err := srv.cancelUpdateFn(leaseID)
+	if err != nil {
+		writeUpdateLeaseError(w, err)
+		return
+	}
+	slog.Info("application update drain cancelled")
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (srv *Server) handleSealUpdate(w http.ResponseWriter, r *http.Request) {
+	if srv.sealUpdateFn == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "update seal not available"})
+		return
+	}
+	leaseID := strings.TrimSpace(r.Header.Get(HeaderUpdateLease))
+	if leaseID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "update lease id required"})
+		return
+	}
+	status, err := srv.sealUpdateFn(leaseID)
+	if err != nil {
+		writeUpdateLeaseError(w, err)
+		return
+	}
+	slog.Info("application update drain sealed", "active", status.ActiveTotal)
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (srv *Server) handleConfirmUpdate(w http.ResponseWriter, r *http.Request) {
+	if srv.confirmUpdateFn == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "update confirmation not available"})
+		return
+	}
+	leaseID := strings.TrimSpace(r.Header.Get(HeaderUpdateLease))
+	if leaseID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "update lease id required"})
+		return
+	}
+	if !srv.verifyExpectedUpdateBootID(w, r) {
+		return
+	}
+	status, err := srv.confirmUpdateFn(leaseID)
+	if err != nil {
+		writeUpdateLeaseError(w, err)
+		return
+	}
+	slog.Info("replacement daemon bootstrap authorized under sealed drain")
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (srv *Server) verifyExpectedUpdateBootID(w http.ResponseWriter, r *http.Request) bool {
+	expectedBootID := strings.TrimSpace(r.Header.Get(HeaderExpectedUpdateBootID))
+	if expectedBootID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "expected daemon boot id required"})
+		return false
+	}
+	if srv.updateBootID == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "update process identity not available"})
+		return false
+	}
+	if !hmac.Equal([]byte(expectedBootID), []byte(srv.updateBootID)) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "replacement daemon identity changed"})
+		return false
+	}
+	return true
+}
+
+func writeUpdateLeaseError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ErrUpdateLeaseRequired):
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "update lease id required"})
+	case errors.Is(err, ErrUpdateLeaseInvalid):
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "update lease id invalid"})
+	case errors.Is(err, ErrUpdateLeaseConflict):
+		// Deliberately do not disclose the current owner ID.
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "update lease conflict"})
+	case errors.Is(err, ErrUpdateNotReady):
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "update drain still has active work"})
+	case errors.Is(err, ErrUpdateNotSealed):
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "update drain is not sealed"})
+	case errors.Is(err, ErrUpdateBootstrapNotAuthorized):
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "replacement bootstrap is not authorized"})
+	default:
+		slog.Error("update lease operation failed", "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "update lease operation failed"})
+	}
+}
+
+// writeUpdateDrainConflict reports an expected pause without logging it as an
+// operational failure. The client can retry after the updater either completes
+// or abandons its lease.
+func writeUpdateDrainConflict(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", "5")
+	writeJSON(w, http.StatusConflict, map[string]string{"error": "application update in progress"})
 }
 
 func (srv *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
@@ -1867,6 +2110,10 @@ func (srv *Server) handlePromoteIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := srv.triggerPromoteFn(id); err != nil {
+		if errors.Is(err, pipeline.ErrUpdateDraining) {
+			writeUpdateDrainConflict(w)
+			return
+		}
 		slog.Error("promote issue failed", "issue_id", id, "err", err)
 		if errors.Is(err, ErrPromoteConflict) {
 			http.Error(w, err.Error(), http.StatusConflict)

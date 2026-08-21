@@ -42,6 +42,7 @@ import (
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
 	"github.com/heimdallm/daemon/internal/worker"
+	"github.com/heimdallm/daemon/internal/workgate"
 	"github.com/heimdallm/daemon/launchagent"
 	"github.com/nats-io/nats.go"
 )
@@ -66,6 +67,110 @@ type processDependencies struct {
 var defaultProcessDependencies = processDependencies{
 	newGitHubClient: gh.NewClient,
 	listen:          server.Listen,
+}
+
+// updateServerError keeps the HTTP contract independent from workgate's
+// internal error vocabulary. Every updater transition passes through this one
+// mapping so prepare/cancel/seal/confirm cannot drift into different status
+// codes as new recovery paths are added.
+func updateServerError(err error) error {
+	switch {
+	case errors.Is(err, workgate.ErrLeaseIDRequired):
+		return server.ErrUpdateLeaseRequired
+	case errors.Is(err, workgate.ErrLeaseIDInvalid):
+		return server.ErrUpdateLeaseInvalid
+	case errors.Is(err, workgate.ErrLeaseConflict):
+		return server.ErrUpdateLeaseConflict
+	case errors.Is(err, workgate.ErrWorkActive):
+		return server.ErrUpdateNotReady
+	case errors.Is(err, workgate.ErrLeaseNotSealed):
+		return server.ErrUpdateNotSealed
+	case errors.Is(err, workgate.ErrBootstrapNotAuthorized):
+		return server.ErrUpdateBootstrapNotAuthorized
+	default:
+		return err
+	}
+}
+
+func snapshotUpdatePreparation(snapshot workgate.Snapshot, bootID string) server.UpdatePreparationStatus {
+	active := make(map[string]int, len(snapshot.Active))
+	for kind, count := range snapshot.Active {
+		active[string(kind)] = count
+	}
+	state := "running"
+	if snapshot.Draining {
+		state = "draining"
+		if snapshot.Total() == 0 {
+			state = "ready"
+		}
+	}
+	return server.UpdatePreparationStatus{
+		State:               state,
+		PID:                 os.Getpid(),
+		Version:             versionString(),
+		LeaseID:             snapshot.LeaseID,
+		Sealed:              snapshot.Sealed,
+		BootstrapAuthorized: snapshot.BootstrapAuthorized,
+		BootID:              bootID,
+		Active:              active,
+		ActiveTotal:         snapshot.Total(),
+		LeaseExpiresAt:      snapshot.LeaseExpiresAt,
+	}
+}
+
+// acquireUpdateWork centralizes ownership of update-drain permits. Nested
+// operations inherit the outer permit and receive a no-op release, while
+// top-level work always gets a matching cleanup function.
+func acquireUpdateWork(ctx context.Context, gate *workgate.Gate, kind workgate.Kind) (context.Context, func(), error) {
+	ctx, permit, owned, err := gate.AcquireContext(ctx, kind)
+	if err != nil {
+		return ctx, nil, err
+	}
+	if !owned {
+		return ctx, func() {}, nil
+	}
+	return ctx, permit.Release, nil
+}
+
+// guardUpdateVoidHandler applies the updater admission protocol to message
+// handlers that do not return a result. Keeping this boundary outside each
+// worker makes it impossible to admit the fetch but forget to carry the permit
+// into the nested pipeline.
+func guardUpdateVoidHandler[M any](
+	gate *workgate.Gate,
+	kind workgate.Kind,
+	deferredMessage string,
+	next func(context.Context, M),
+) func(context.Context, M) {
+	return func(ctx context.Context, message M) {
+		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, gate, kind)
+		if err != nil {
+			slog.Debug(deferredMessage, "work", message)
+			return
+		}
+		defer releaseUpdateWork()
+		next(ctx, message)
+	}
+}
+
+// guardUpdateResultHandler is the result-returning variant used by workers
+// whose queue protocol distinguishes ack/retry through their return value.
+func guardUpdateResultHandler[M, R any](
+	gate *workgate.Gate,
+	kind workgate.Kind,
+	deferredMessage string,
+	deferredResult R,
+	next func(context.Context, M) R,
+) func(context.Context, M) R {
+	return func(ctx context.Context, message M) R {
+		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, gate, kind)
+		if err != nil {
+			slog.Debug(deferredMessage, "work", message)
+			return deferredResult
+		}
+		defer releaseUpdateWork()
+		return next(ctx, message)
+	}
 }
 
 func versionString() string { return version }
@@ -181,6 +286,32 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		defer logCloser.Close()
 	}
 
+	// Restore an updater barrier before loading any stateful subsystem. A sealed
+	// marker represents the interval in which Sparkle may have replaced the app
+	// bundle; until the native app verifies the exact bundled daemon version,
+	// startup must not create configuration, open/migrate SQLite, clear claims,
+	// start NATS, or prune worktrees.
+	const updateLeaseTTL = 2 * time.Minute
+	updateDrainPath := filepath.Join(logDir, "update-drain.json")
+	recoveredDesktopIntent, err := workgate.RestoreDesktopRecoveryBarrier(
+		updateLeaseTTL,
+		updateDrainPath,
+		filepath.Join(logDir, "app-update-recovery.json"),
+	)
+	if err != nil {
+		slog.Error("desktop update recovery intent could not be restored safely", "err", err)
+		return 1
+	}
+	if recoveredDesktopIntent {
+		slog.Info("daemon: sealed barrier restored from desktop recovery intent")
+	}
+	updateWorkGate, err := workgate.NewPersistent(updateLeaseTTL, updateDrainPath)
+	if err != nil {
+		slog.Error("update drain state could not be restored safely", "err", err)
+		return 1
+	}
+	restoredUpdateBarrier := updateWorkGate.Status().Draining
+
 	cfgPath := configPath()
 
 	// loadConfig is captured once at startup so the reload path further
@@ -191,7 +322,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	// have written the TOML before the daemon starts, so ENOENT is a real
 	// error there.
 	loadConfig := config.Load
-	if os.Getenv("HEIMDALLM_DATA_DIR") != "" {
+	if os.Getenv("HEIMDALLM_DATA_DIR") != "" && !restoredUpdateBarrier {
 		loadConfig = config.LoadOrCreate
 	}
 
@@ -221,9 +352,65 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	// winning process never leaves launchers staring at a bound-but-silent port.
 	runtimeCtx, runtimeCancel := context.WithCancel(context.Background())
 	defer runtimeCancel()
-	srv := server.NewWithOptions(nil, nil, nil, "", server.Options{
-		Version:   versionString(),
-		StartedAt: time.Now(),
+
+	// Load authentication and restore the updater lease before Serve exposes
+	// even the startup router. This lets the updater renew a lease throughout a
+	// slow respawn without opening any other mutation endpoint.
+	var apiToken string
+	if restoredUpdateBarrier {
+		apiToken, err = loadExistingAPIToken(dataDir())
+	} else {
+		apiToken, err = loadOrCreateAPIToken(dataDir())
+	}
+	if err != nil {
+		slog.Error("could not load API token — refusing to start without authentication", "err", err)
+		return 1
+	}
+	updateBootIDBytes := make([]byte, 32)
+	if _, err := rand.Read(updateBootIDBytes); err != nil {
+		slog.Error("could not create update process identity — refusing unsafe replacement bootstrap", "err", err)
+		return 1
+	}
+	updateBootID := hex.EncodeToString(updateBootIDBytes)
+	// Read-only Tier 1 discovery and Core NATS enqueue hints stay outside the
+	// gate; their source rows are durable in SQLite and every side-effecting
+	// consumer acquires a permit. Brief single-SQLite retention/claim sweeps are
+	// serialized by SQLite Close. External, multi-resource, agent, and
+	// filesystem-destructive transactions are all protected.
+	srv := server.NewWithOptions(nil, nil, nil, apiToken, server.Options{
+		Version:      versionString(),
+		StartedAt:    time.Now(),
+		UpdateBootID: updateBootID,
+	})
+	srv.SetUpdatePreparationFns(
+		func(leaseID string) (server.UpdatePreparationStatus, error) {
+			snapshot, err := updateWorkGate.Prepare(leaseID)
+			if err != nil {
+				return server.UpdatePreparationStatus{}, updateServerError(err)
+			}
+			return snapshotUpdatePreparation(snapshot, updateBootID), nil
+		},
+		func(leaseID string) (server.UpdatePreparationStatus, error) {
+			snapshot, err := updateWorkGate.Cancel(leaseID)
+			if err != nil {
+				return server.UpdatePreparationStatus{}, updateServerError(err)
+			}
+			return snapshotUpdatePreparation(snapshot, updateBootID), nil
+		},
+	)
+	srv.SetUpdateSealFn(func(leaseID string) (server.UpdatePreparationStatus, error) {
+		snapshot, err := updateWorkGate.Seal(leaseID)
+		if err != nil {
+			return server.UpdatePreparationStatus{}, updateServerError(err)
+		}
+		return snapshotUpdatePreparation(snapshot, updateBootID), nil
+	})
+	srv.SetUpdateConfirmFn(func(leaseID string) (server.UpdatePreparationStatus, error) {
+		snapshot, err := updateWorkGate.ConfirmBootstrap(leaseID)
+		if err != nil {
+			return server.UpdatePreparationStatus{}, updateServerError(err)
+		}
+		return snapshotUpdatePreparation(snapshot, updateBootID), nil
 	})
 	srv.MarkStarting()
 	slog.Info("daemon: HTTP listener claimed", "port", cfg.Server.Port, "bind", cfg.Server.BindAddr)
@@ -257,6 +444,16 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		default:
 			return nil
 		}
+	}
+	if restoredUpdateBarrier {
+		slog.Info("daemon: updater barrier restored; deferring stateful bootstrap until owner verification",
+			"sealed", updateWorkGate.Status().Sealed)
+		if err := updateWorkGate.WaitUntilBootstrapAuthorized(runtimeCtx); err != nil {
+			slog.Error("daemon: updater barrier wait failed", "err", err)
+			return 1
+		}
+		slog.Info("daemon: stateful bootstrap authorized; update admission remains sealed",
+			"draining", updateWorkGate.Status().Draining)
 	}
 
 	token, err := keychain.Get()
@@ -396,8 +593,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	// startup the manager has no active worktrees, so every directory
 	// under `<clone>/.worktrees/` is by definition stale and safe to
 	// remove. Mirrors the in-flight DB sweeps above. (#461)
-	{
-		ctx := runtimeCtx
+	if err := runStartupWorktreePrune(runtimeCtx, updateWorkGate, func(ctx context.Context) {
 		for _, cloneDir := range managedCloneDirs(cfg) {
 			if n, err := repoCtx.PruneStaleWorktreesUnder(ctx, cloneDir); err != nil {
 				slog.Warn("startup: prune stale worktrees", "dir", cloneDir, "err", err)
@@ -405,17 +601,16 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 				slog.Info("startup: pruned stale worktrees", "dir", cloneDir, "count", n)
 			}
 		}
-	}
-
-	// Load or create the per-daemon API token.  All mutating HTTP endpoints
-	// require this token in X-Heimdallm-Token (security issue #3).
-	apiToken, err := loadOrCreateAPIToken(dataDir())
-	if err != nil {
-		slog.Error("could not create API token — refusing to start without authentication", "err", err)
-		return 1
+	}); err != nil {
+		if errors.Is(err, workgate.ErrDraining) {
+			slog.Debug("startup: stale worktree prune deferred while application update drains")
+		} else {
+			slog.Warn("startup: stale worktree prune could not acquire update permit", "err", err)
+		}
 	}
 
 	p := pipeline.New(s, ghClient, exec, &notifyWithSSE{notifier: notifier})
+	p.SetWorkGate(updateWorkGate)
 
 	// Circuit-breaker caps (see theburrowhub/heimdallm#243). The defaults are
 	// populated by config.applyDefaults so the caps are always set; nil disables
@@ -459,6 +654,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	// an issue that is classified as review_only, so this dep is harmless
 	// when auto_implement is not in use.
 	issuePipe := issuepipeline.New(s, ghClient, exec, issuepipeline.NewGitExec(), broker, &notifyWithSSE{notifier: notifier})
+	issuePipe.SetWorkGate(updateWorkGate)
 	issuePipe.SetCircuitBreakerLimits(&issueCBLimits)
 	// Wire the Tier 3 watch enroller so auto_implement-created PRs are
 	// picked up by the new review-state checker (#482). watchStore
@@ -505,7 +701,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	// Publish the dependencies before lifting the startup gate. The atomic
 	// MarkReady transition makes the fully configured server visible to HTTP
 	// handlers as one lifecycle step.
-	srv.Configure(s, broker, p, apiToken)
+	srv.ConfigureDependencies(s, broker, p)
 	srv.SetNATSConn(eventBus.Conn())
 	srv.SetConfigPath(cfgPath)
 	srv.SetHealthSnapshotFn(func() server.HealthSnapshot {
@@ -525,6 +721,11 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	discoverySvc := discovery.NewService(ghClient)
 
 	srv.SetCleanCloneFn(func(ctx context.Context, repo string) error {
+		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, updateWorkGate, workgate.KindMaintenance)
+		if err != nil {
+			return err
+		}
+		defer releaseUpdateWork()
 		cfgMu.Lock()
 		aiCfg := cfg.AIForRepo(repo)
 		cfgMu.Unlock()
@@ -536,10 +737,20 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	// guarantees end-to-end. Reuses srv.TOMLMu() so the rewrite races
 	// safely with concurrent PATCH /config writes.
 	srv.SetRepoRenameFn(func(ctx context.Context, oldRepo, newRepo string) error {
+		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, updateWorkGate, workgate.KindMaintenance)
+		if err != nil {
+			return err
+		}
+		defer releaseUpdateWork()
 		reconciler := newRenameReconciler(cfg, &cfgMu, srv.TOMLMu(), s, repoCtx, broker, cfgPath)
 		return reconciler.Run(ctx, oldRepo, newRepo)
 	})
 	srv.SetCleanClonesFn(func(ctx context.Context) (int, error) {
+		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, updateWorkGate, workgate.KindMaintenance)
+		if err != nil {
+			return 0, err
+		}
+		defer releaseUpdateWork()
 		cfgMu.Lock()
 		cfgSnap := cfg
 		cfgMu.Unlock()
@@ -547,6 +758,14 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	})
 
 	runCloneRetention := func(reason string) {
+		ctx, cancel := context.WithTimeout(runtimeCtx, 5*time.Minute)
+		defer cancel()
+		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, updateWorkGate, workgate.KindMaintenance)
+		if err != nil {
+			slog.Debug("clone retention deferred while application update drains", "reason", reason)
+			return
+		}
+		defer releaseUpdateWork()
 		cfgMu.Lock()
 		cfgSnap := cfg
 		var discovered []string
@@ -554,8 +773,6 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			discovered = discoverySvc.Discovered()
 		}
 		cfgMu.Unlock()
-		ctx, cancel := context.WithTimeout(runtimeCtx, 5*time.Minute)
-		defer cancel()
 		removed, err := purgeStaleManagedClones(ctx, repoCtx, cfgSnap, discovered)
 		if err != nil {
 			slog.Warn("clone retention purge failed", "reason", reason, "err", err)
@@ -626,7 +843,13 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		}
 	}
 
-	runReview := func(pr *gh.PullRequest, aiCfg config.RepoAI) *store.Review {
+	runReview := func(ctx context.Context, pr *gh.PullRequest, aiCfg config.RepoAI) *store.Review {
+		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, updateWorkGate, workgate.KindReview)
+		if err != nil {
+			slog.Debug("review deferred while application update drains", "repo", pr.Repo, "pr", pr.Number)
+			return nil
+		}
+		defer releaseUpdateWork()
 		// Persistent in-flight claim: survives daemon restart and config reload.
 		// Keyed on (pr_id, head_sha) so a new commit on the same PR is not
 		// gated by a stale in-flight row from a prior HEAD. See
@@ -725,6 +948,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		// Bugs 3+4 for the regression that made emitting from here unsafe.
 		runOpts := buildRunOpts(pr, aiCfg)
 		runOpts.RepoEligible = repoCurrentlyMonitored
+		runOpts.WorkPermit = workgate.PermitFromContext(ctx)
 		rev, err := p.Run(pr, runOpts)
 		if err != nil {
 			slog.Error("pipeline run failed", "repo", pr.Repo, "pr", pr.Number, "err", err)
@@ -790,6 +1014,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		runReview:            runReview,
 		publishPub:           publishPub,
 		watchStore:           watchStore,
+		workGate:             updateWorkGate,
 		lastSkippedUpdatedAt: make(map[int64]time.Time),
 		lastBreakerTrips:     make(map[breakerTripKey]breakerTripDedup),
 	}
@@ -809,7 +1034,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		defer loginMu.Unlock()
 		return cachedLogin
 	}
-	adapter.responder = issuepipeline.NewResponder(
+	responder := issuepipeline.NewResponder(
 		s, ghClient,
 		&prReviewExecutor{runner: exec, cfg: &cfg, cfgMu: &cfgMu},
 		broker,
@@ -820,7 +1045,9 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		},
 		botLoginAccessor,
 	)
-	adapter.fixRunner = issuepipeline.NewFixRunner(
+	responder.SetWorkGate(updateWorkGate)
+	adapter.responder = responder
+	fixRunner := issuepipeline.NewFixRunner(
 		s, ghClient,
 		&prFixExecutor{
 			pipeline: issuePipe,
@@ -838,6 +1065,8 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		},
 		botLoginAccessor,
 	)
+	fixRunner.SetWorkGate(updateWorkGate)
+	adapter.fixRunner = fixRunner
 
 	repoPublisher := bus.NewRepoPublisher(conn)
 	prReviewPublisher := bus.NewPRReviewPublisher(conn)
@@ -1064,7 +1293,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				probe := newRenameProbe(ctx, cfg, &cfgMu, srv.TOMLMu(), ghClient, s, repoCtx, broker, cfgPath, renameInterval)
+				probe := newRenameProbe(ctx, cfg, &cfgMu, srv.TOMLMu(), ghClient, s, repoCtx, broker, cfgPath, renameInterval, updateWorkGate)
 				probe.Run(ctx)
 			}()
 			slog.Info("rename probe: started", "interval", renameInterval)
@@ -1100,6 +1329,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			broker:   broker,
 			orch:     autonomous.NewOrchestrator(autonomousStageR, autonomous.NewPhaseGuard()),
 			runner:   exec,
+			workGate: updateWorkGate,
 			cfg:      &cfg,
 			cfgMu:    &cfgMu,
 			botLogin: botLoginAccessor,
@@ -1158,7 +1388,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	// Consumes PR review requests published by Tier 2 and runs the
 	// existing review pipeline. This replaces the goroutine-per-PR
 	// pattern that Tier 2 used to use.
-	reviewHandler := func(ctx context.Context, msg bus.PRReviewMsg) {
+	reviewHandlerCore := func(ctx context.Context, msg bus.PRReviewMsg) {
 		skipIfUnmonitored := func(stage string) bool {
 			if repoCurrentlyMonitored(msg.Repo) {
 				return false
@@ -1243,7 +1473,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			return
 		}
 
-		rev := runReview(pr, aiCfg)
+		rev := runReview(ctx, pr, aiCfg)
 
 		// If review succeeded but wasn't published to GitHub yet,
 		// enqueue for the publish worker.
@@ -1261,6 +1491,12 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		}
 	}
 
+	reviewHandler := guardUpdateVoidHandler(
+		updateWorkGate,
+		workgate.KindReview,
+		"review-worker: deferred while application update drains",
+		reviewHandlerCore,
+	)
 	reviewWorker := worker.NewReviewWorker(conn, maxWorkers, reviewHandler)
 	workerCtx, workerCancel := context.WithCancel(runtimeCtx)
 	defer workerCancel()
@@ -1274,7 +1510,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	// Consumes publish requests and submits stored reviews to GitHub.
 	// Replaces the manual retry loop in PublishPending with NATS retry
 	// semantics (NakWithDelay for transient GitHub errors).
-	publishHandler := func(ctx context.Context, msg bus.PRPublishMsg) error {
+	publishHandlerCore := func(ctx context.Context, msg bus.PRPublishMsg) error {
 		rev, err := s.GetReview(msg.ReviewID)
 		if err != nil {
 			slog.Warn("publish-worker: review not found, skipping",
@@ -1445,6 +1681,13 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		return nil // success — ack
 	}
 
+	publishHandler := guardUpdateResultHandler(
+		updateWorkGate,
+		workgate.KindPublish,
+		"publish-worker: deferred while application update drains",
+		error(nil), // PublishPending re-enqueues the still-unpublished row.
+		publishHandlerCore,
+	)
 	publishW := worker.NewPublishWorker(conn, maxWorkers, publishHandler)
 	publishWCtx, publishWCancel := context.WithCancel(runtimeCtx)
 	defer publishWCancel()
@@ -1458,7 +1701,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	// Consumes triage requests published by the Fetcher when it classifies
 	// an issue as review_only. Fetches the issue from GitHub for fresh data,
 	// resolves per-repo config, and runs the issue pipeline.
-	triageHandler := func(ctx context.Context, msg bus.IssueMsg) {
+	triageHandlerCore := func(ctx context.Context, msg bus.IssueMsg) {
 		ghIssue, err := ghClient.GetIssue(msg.Repo, msg.Number)
 		if err != nil {
 			slog.Error("triage-worker: fetch issue from GitHub",
@@ -1539,6 +1782,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			PRDraft:                 aiCfg.PRDraft != nil && *aiCfg.PRDraft,
 			GeneratePRDescription:   aiCfg.GeneratePRDescription != nil && *aiCfg.GeneratePRDescription,
 			AuthUser:                authUser,
+			WorkPermit:              workgate.PermitFromContext(ctx),
 		}
 
 		rev, err := issuePipe.Run(ctx, ghIssue, opts)
@@ -1558,6 +1802,12 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		}
 	}
 
+	triageHandler := guardUpdateVoidHandler(
+		updateWorkGate,
+		workgate.KindIssue,
+		"triage-worker: deferred while application update drains",
+		triageHandlerCore,
+	)
 	triageW := worker.NewTriageWorker(conn, maxWorkers, triageHandler)
 	triageWCtx, triageWCancel := context.WithCancel(runtimeCtx)
 	defer triageWCancel()
@@ -1571,7 +1821,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	// Consumes refinement requests published by the Fetcher when it classifies
 	// an issue as refinement. Refinement is read-only but requires a full local
 	// checkout so the agent can inspect code and git history.
-	refinementHandler := func(ctx context.Context, msg bus.IssueMsg) {
+	refinementHandlerCore := func(ctx context.Context, msg bus.IssueMsg) {
 		ghIssue, err := ghClient.GetIssue(msg.Repo, msg.Number)
 		if err != nil {
 			slog.Error("refinement-worker: fetch issue from GitHub",
@@ -1618,6 +1868,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		if releaseRepoContext != nil {
 			defer releaseRepoContext()
 		}
+		opts.WorkPermit = workgate.PermitFromContext(ctx)
 
 		rev, err := issuePipe.Run(ctx, ghIssue, opts)
 		if err != nil {
@@ -1636,6 +1887,12 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		}
 	}
 
+	refinementHandler := guardUpdateVoidHandler(
+		updateWorkGate,
+		workgate.KindIssue,
+		"refinement-worker: deferred while application update drains",
+		refinementHandlerCore,
+	)
 	refinementW := worker.NewRefinementWorker(conn, maxWorkers, refinementHandler)
 	refinementWCtx, refinementWCancel := context.WithCancel(runtimeCtx)
 	defer refinementWCancel()
@@ -1648,7 +1905,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	// ── NATS issue implement worker ─────────────────────────────────────
 	// Consumes implement requests published by the Fetcher when it classifies
 	// an issue as develop. Same config resolution as triage, different mode.
-	implementHandler := func(ctx context.Context, msg bus.IssueMsg) {
+	implementHandlerCore := func(ctx context.Context, msg bus.IssueMsg) {
 		ghIssue, err := ghClient.GetIssue(msg.Repo, msg.Number)
 		if err != nil {
 			slog.Error("implement-worker: fetch issue from GitHub",
@@ -1736,6 +1993,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			GeneratePRDescription:    aiCfg.GeneratePRDescription != nil && *aiCfg.GeneratePRDescription,
 			AuthUser:                 authUser,
 			RequireWorkDirForDevelop: true,
+			WorkPermit:               workgate.PermitFromContext(ctx),
 		}
 
 		if _, err := issuePipe.Run(ctx, ghIssue, opts); err != nil {
@@ -1752,6 +2010,12 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		}
 	}
 
+	implementHandler := guardUpdateVoidHandler(
+		updateWorkGate,
+		workgate.KindImplementation,
+		"implement-worker: deferred while application update drains",
+		implementHandlerCore,
+	)
 	implementW := worker.NewImplementWorker(conn, maxWorkers, implementHandler)
 	implementWCtx, implementWCancel := context.WithCancel(runtimeCtx)
 	defer implementWCancel()
@@ -1892,6 +2156,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	}
 
 	stateW := worker.NewStateWorker(conn, maxWorkers*2, watchStore, stateHandler)
+	stateW.SetWorkGate(updateWorkGate)
 	stateWCtx, stateWCancel := context.WithCancel(runtimeCtx)
 	defer stateWCancel()
 	go func() {
@@ -2256,6 +2521,12 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	// trigger invocations via the closure below.
 	manualReviewGuard := newTriggerGuard()
 	srv.SetTriggerReviewFn(func(prID int64) error {
+		ctx, releaseUpdateWork, err := acquireUpdateWork(runtimeCtx, updateWorkGate, workgate.KindReview)
+		if err != nil {
+			slog.Debug("trigger review deferred while application update drains", "pr_id", prID)
+			return nil
+		}
+		defer releaseUpdateWork()
 		publishErr := func(msg string) {
 			broker.Publish(sse.Event{
 				Type: sse.EventReviewError,
@@ -2291,7 +2562,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		aiCfg := cfg.AIForRepo(pr.Repo)
 		localDirBase := cfg.GitHub.LocalDirBase
 		cfgMu.Unlock()
-		repoHandle, err := acquireRepoContext(runtimeCtx, repoCtx, pr.Repo, &aiCfg, localDirBase, token, repoctx.ModeRead, wtTokenFor("pr-review", pr.Number), "", "")
+		repoHandle, err := acquireRepoContext(ctx, repoCtx, pr.Repo, &aiCfg, localDirBase, token, repoctx.ModeRead, wtTokenFor("pr-review", pr.Number), "", "")
 		if err != nil {
 			logRepoContextFallback("trigger review", pr.Repo, err)
 			aiCfg.LocalDir = ""
@@ -2390,6 +2661,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		// See pipeline.RunOptions.Force. The poll path never sets this.
 		runOpts := buildRunOpts(ghPR, aiCfg)
 		runOpts.Force = true
+		runOpts.WorkPermit = workgate.PermitFromContext(ctx)
 		rev, err := p.Run(ghPR, runOpts)
 		if err != nil {
 			var cbErr *pipeline.CircuitBreakerError
@@ -2438,6 +2710,12 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		// GitHub refetch and NATS publish remain bounded.
 		ctx, cancel := context.WithTimeout(runtimeCtx, 1*time.Minute)
 		defer cancel()
+		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, updateWorkGate, workgate.KindIssue)
+		if err != nil {
+			slog.Debug("trigger issue review deferred while application update drains", "issue_id", issueID)
+			return nil
+		}
+		defer releaseUpdateWork()
 
 		publishIssueErr := func(msg string) {
 			broker.Publish(sse.Event{
@@ -2486,6 +2764,12 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	srv.SetTriggerIssueRefineFn(func(issueID int64, force bool) error {
 		ctx, cancel := context.WithCancel(runtimeCtx)
 		defer cancel()
+		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, updateWorkGate, workgate.KindIssue)
+		if err != nil {
+			slog.Debug("trigger issue refinement deferred while application update drains", "issue_id", issueID)
+			return nil
+		}
+		defer releaseUpdateWork()
 
 		publishIssueErr := func(msg string) {
 			broker.Publish(sse.Event{
@@ -2525,6 +2809,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		if releaseRepoContext != nil {
 			defer releaseRepoContext()
 		}
+		opts.WorkPermit = workgate.PermitFromContext(ctx)
 
 		slog.Info("trigger issue refinement: running pipeline",
 			"store_issue_id", issueID, "repo", iss.Repo, "number", iss.Number, "force", force)
@@ -2544,6 +2829,11 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	srv.SetTriggerPromoteFn(func(issueID int64) error {
 		ctx, cancel := context.WithTimeout(runtimeCtx, 30*time.Second)
 		defer cancel()
+		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, updateWorkGate, workgate.KindMaintenance)
+		if err != nil {
+			return err
+		}
+		defer releaseUpdateWork()
 
 		publishIssueErr := func(msg string) {
 			broker.Publish(sse.Event{
@@ -3382,7 +3672,11 @@ func runTier2(
 				}
 			}
 			if n, err := adapter.PromoteReady(ctx, currentRepos); err != nil {
-				slog.Error("tier2: promotion", "err", err)
+				if errors.Is(err, workgate.ErrDraining) {
+					slog.Debug("tier2: promotion deferred while application update drains")
+				} else {
+					slog.Error("tier2: promotion", "err", err)
+				}
 			} else if n > 0 {
 				slog.Info("tier2: promoted issues", "count", n)
 			}
@@ -3816,7 +4110,8 @@ type tier2Adapter struct {
 	cfg                  **config.Config
 	loginMu              *sync.Mutex
 	login                *string
-	runReview            func(pr *gh.PullRequest, aiCfg config.RepoAI) *store.Review
+	runReview            func(ctx context.Context, pr *gh.PullRequest, aiCfg config.RepoAI) *store.Review
+	workGate             *workgate.Gate
 	publishPub           *bus.PRPublishPublisher
 	watchStore           *bus.WatchStore
 	// Review-state vigilance dispatch (#482). Optional — nil-safe so a
@@ -4197,6 +4492,12 @@ func (a *tier2Adapter) FetchPRsToReview() ([]scheduler.Tier2PR, error) {
 
 // ProcessPR implements scheduler.Tier2PRProcessor.
 func (a *tier2Adapter) ProcessPR(ctx context.Context, pr scheduler.Tier2PR) error {
+	ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, a.workGate, workgate.KindReview)
+	if err != nil {
+		slog.Debug("tier2 PR deferred while application update drains", "repo", pr.Repo, "pr", pr.Number)
+		return nil
+	}
+	defer releaseUpdateWork()
 	a.cfgMu.Lock()
 	c := *a.cfg
 	aiCfg := c.AIForRepo(pr.Repo)
@@ -4226,7 +4527,7 @@ func (a *tier2Adapter) ProcessPR(ctx context.Context, pr scheduler.Tier2PR) erro
 		// runReview with that fresh SHA instead.
 		Head: gh.Branch{SHA: pr.HeadSHA},
 	}
-	rev := a.runReview(ghPR, aiCfg)
+	rev := a.runReview(ctx, ghPR, aiCfg)
 	if rev != nil && rev.GitHubReviewID == 0 && a.publishPub != nil {
 		if err := a.publishPub.PublishPRPublish(context.Background(), rev.ID); err != nil {
 			slog.Warn("ProcessPR: failed to enqueue publish", "review_id", rev.ID, "err", err)
@@ -4408,6 +4709,12 @@ func (a *tier2Adapter) ClearIssuePrefetch() {
 
 // ProcessRepo implements scheduler.Tier2IssueProcessor.
 func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error) {
+	ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, a.workGate, workgate.KindIssue)
+	if err != nil {
+		slog.Debug("tier2 issue scan deferred while application update drains", "repo", repo)
+		return 0, nil
+	}
+	defer releaseUpdateWork()
 	a.cfgMu.Lock()
 	c := *a.cfg
 	repoIT := c.IssueTrackingForRepo(repo)
@@ -4545,6 +4852,7 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 			RequireWorkDirForDevelop:    requireWorkDir,
 			RequireWorkDirForRefinement: requireRefinementWorkDir,
 			ReleaseRepoContext:          releaseRepoContext,
+			WorkPermit:                  workgate.PermitFromContext(ctx),
 		}
 		releaseOnReturn = false
 		return opts, true
@@ -4555,6 +4863,12 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 
 // PromoteReady implements scheduler.Tier2Promoter.
 func (a *tier2Adapter) PromoteReady(ctx context.Context, repos []string) (int, error) {
+	ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, a.workGate, workgate.KindMaintenance)
+	if err != nil {
+		return 0, err
+	}
+	defer releaseUpdateWork()
+
 	type promoteGroup struct {
 		it    config.IssueTrackingConfig
 		repos []string
@@ -5011,7 +5325,7 @@ func (a *tier2Adapter) HandleChange(ctx context.Context, item *scheduler.WatchIt
 			return nil
 		}
 
-		rev := a.runReview(ghPR, aiCfg)
+		rev := a.runReview(ctx, ghPR, aiCfg)
 		if rev != nil && rev.GitHubReviewID == 0 && a.publishPub != nil {
 			if err := a.publishPub.PublishPRPublish(context.Background(), rev.ID); err != nil {
 				slog.Warn("HandleChange: failed to enqueue publish", "review_id", rev.ID, "err", err)
@@ -5049,6 +5363,24 @@ func (n *notifyWithSSE) Notify(title, message string) {
 // blocked the web container from reading the token via the shared volume,
 // forcing operators to run `make setup` as a manual workaround. See #71.
 const tokenFileMode = 0644
+
+// loadExistingAPIToken is the recovery-only counterpart to
+// loadOrCreateAPIToken. While an updater barrier is restored, rotating or
+// creating the credential would strand the native owner that must verify and
+// release that barrier. Read the already-established token without mutating
+// the filesystem and fail closed if it is missing or invalid.
+func loadExistingAPIToken(dir string) (string, error) {
+	path := filepath.Join(dir, "api_token")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("api_token: read existing %s: %w", path, err)
+	}
+	token := strings.TrimSpace(string(data))
+	if len(token) < 32 {
+		return "", fmt.Errorf("api_token: existing token in %s is invalid", path)
+	}
+	return token, nil
+}
 
 // loadOrCreateAPIToken reads an existing token from <dataDir>/api_token, or
 // generates a new cryptographically-random one and writes it with
@@ -5780,6 +6112,24 @@ func purgeAllManagedClones(ctx context.Context, manager *repoctx.Manager, cfg *c
 		}
 	}
 	return total, errors.Join(errs...)
+}
+
+// runStartupWorktreePrune protects the filesystem-destructive startup sweep.
+// A replacement daemon may start while the updater still owns a persistent
+// drain lease; in that case it must leave every checkout untouched until the
+// verified new application cancels the lease.
+func runStartupWorktreePrune(
+	ctx context.Context,
+	gate *workgate.Gate,
+	prune func(context.Context),
+) error {
+	ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, gate, workgate.KindMaintenance)
+	if err != nil {
+		return err
+	}
+	defer releaseUpdateWork()
+	prune(ctx)
+	return nil
 }
 
 func purgeStaleManagedClones(ctx context.Context, manager *repoctx.Manager, cfg *config.Config, discovered []string) (int, error) {

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -190,11 +191,11 @@ func TestRun_EscalatesToSIGKILLWhenGroupIgnoresSIGTERM(t *testing.T) {
 	}
 }
 
-// TestRun_ChildLeadsItsOwnGroup pins the precondition that makes the fix work:
-// the child must lead its own group, so kill(-pid) reaches its descendants. If
-// Setpgid were dropped the child would inherit the daemon's group and a
-// negated-PID signal would be aimed at the daemon itself.
-func TestRun_ChildLeadsItsOwnGroup(t *testing.T) {
+// TestRun_ChildJoinsAnIsolatedSentinelGroup pins both parts of the ownership
+// invariant: the child must not share the daemon's group, and it must not be
+// the leader. The separate leader is the sentinel whose unreaped PID reserves
+// the PGID until cleanup is complete.
+func TestRun_ChildJoinsAnIsolatedSentinelGroup(t *testing.T) {
 	cmd := exec.CommandContext(context.Background(), "sh", "-c", `echo $$; exec sleep 60`)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -211,8 +212,8 @@ func TestRun_ChildLeadsItsOwnGroup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("getpgid(%d): %v", child, err)
 	}
-	if pgid != child {
-		t.Errorf("pgid = %d, want %d (the child must lead its own group)", pgid, child)
+	if pgid == child {
+		t.Errorf("pgid = child PID %d; want a distinct sentinel leader", child)
 	}
 	if pgid == syscall.Getpgrp() {
 		t.Error("child shares the test process group; kill(-pgid) would signal the daemon itself")
@@ -236,11 +237,203 @@ func TestRun_SucceedsAndPropagatesOutput(t *testing.T) {
 	var out strings.Builder
 	cmd.Stdout = &out
 
+	start := time.Now()
 	if err := procgroup.Run(cmd); err != nil {
 		t.Fatalf("run: %v", err)
 	}
+	elapsed := time.Since(start)
 	if out.String() != "hello" {
 		t.Errorf("stdout = %q, want %q", out.String(), "hello")
+	}
+	if elapsed >= procgroup.TermGrace {
+		t.Errorf("clean command took %s, want less than TermGrace %s; normal completion must not wait for escalation",
+			elapsed, procgroup.TermGrace)
+	}
+}
+
+// TestRun_CleansDetachedDescendantAfterOrdinarySuccess covers the case that
+// does not produce exec.ErrWaitDelay: a background process can close its
+// stdout/stderr and still outlive the command. Run must drain the owned group
+// on every return, not only when os/exec reports an inherited pipe.
+func TestRun_CleansDetachedDescendantAfterOrdinarySuccess(t *testing.T) {
+	pidR, pidW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pid pipe: %v", err)
+	}
+	defer pidR.Close()
+
+	cmd := exec.CommandContext(context.Background(), "sh", "-c",
+		`sleep 30 >/dev/null 2>&1 & echo $! >&3; exit 0`)
+	cmd.ExtraFiles = []*os.File{pidW}
+	if err := procgroup.Run(cmd); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if err := pidW.Close(); err != nil {
+		t.Fatalf("close pid write end: %v", err)
+	}
+	descendant := readPID(t, pidR)
+	if processRunning(descendant) {
+		_ = syscall.Kill(descendant, syscall.SIGKILL)
+		t.Fatalf("detached descendant %d was still running when Run returned", descendant)
+	}
+}
+
+// TestProcessGroupOwnerCrashHelper is launched as a separate test process by
+// TestStart_DaemonSIGKILLCleansOnlyItsOwnedGroup. It deliberately never calls
+// Wait: killing this process models a daemon crash at the exact point where an
+// AI command is still running.
+func TestProcessGroupOwnerCrashHelper(t *testing.T) {
+	if os.Getenv("HEIMDALLM_PROCGROUP_CRASH_HELPER") != "1" {
+		t.Skip("subprocess helper")
+	}
+
+	pidW := os.NewFile(3, "command-pid")
+	probeW := os.NewFile(4, "command-liveness")
+	if pidW == nil || probeW == nil {
+		t.Fatal("expected inherited helper descriptors 3 and 4")
+	}
+
+	cmd := exec.CommandContext(context.Background(), "sh", "-c",
+		`trap '' TERM; echo $$ >&3; exec sleep 60`)
+	cmd.ExtraFiles = []*os.File{pidW, probeW}
+	process, err := procgroup.Start(cmd)
+	if err != nil {
+		t.Fatalf("start owned command: %v", err)
+	}
+	// Only the command keeps these descriptors now. The helper retains the
+	// procgroup sentinel's private hold pipe until the outer test SIGKILLs it.
+	_ = pidW.Close()
+	_ = probeW.Close()
+
+	// An empty select can be diagnosed as a runtime deadlock once Start has
+	// returned, which lets this helper exit before the outer process can crash
+	// it on macOS. A live timer keeps the helper schedulable while preserving
+	// the intended behaviour: only the outer test's SIGKILL can end it.
+	for {
+		time.Sleep(time.Hour)
+		// Process owns the sentinel's hold pipe. Keep it reachable so its file
+		// finalizer cannot simulate a daemon exit before the SIGKILL above.
+		runtime.KeepAlive(process)
+	}
+}
+
+// TestStart_DaemonSIGKILLCleansOnlyItsOwnedGroup covers the shutdown path that
+// no in-process cleanup can handle. The sentinel must observe EOF on its
+// private pipe when the daemon is SIGKILLed, TERM and then KILL only its own
+// reserved group, and leave an unrelated process group alive.
+func TestStart_DaemonSIGKILLCleansOnlyItsOwnedGroup(t *testing.T) {
+	pidR, pidW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pid pipe: %v", err)
+	}
+	defer pidR.Close()
+	probeR, probeW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("probe pipe: %v", err)
+	}
+	defer probeR.Close()
+
+	helper := exec.Command(os.Args[0], "-test.run=^TestProcessGroupOwnerCrashHelper$") //nolint:noctx // killed explicitly below
+	helper.Env = append(os.Environ(), "HEIMDALLM_PROCGROUP_CRASH_HELPER=1")
+	helper.ExtraFiles = []*os.File{pidW, probeW}
+	if err := helper.Start(); err != nil {
+		t.Fatalf("start daemon-crash helper: %v", err)
+	}
+	helperDone := make(chan error, 1)
+	go func() { helperDone <- helper.Wait() }()
+	helperReaped := false
+	t.Cleanup(func() {
+		if helperReaped {
+			return
+		}
+		_ = helper.Process.Kill()
+		select {
+		case <-helperDone:
+		case <-time.After(10 * time.Second):
+			t.Errorf("daemon-crash helper did not exit during cleanup")
+		}
+	})
+
+	// Start duplicated these descriptors into the helper. Drop the parent's
+	// copies before reading so a helper that exits before announcing its command
+	// produces EOF instead of leaving this test blocked on its own write end.
+	if err := pidW.Close(); err != nil {
+		t.Fatalf("close pid write end: %v", err)
+	}
+	if err := probeW.Close(); err != nil {
+		t.Fatalf("close probe write end: %v", err)
+	}
+	commandPID := readPID(t, pidR)
+
+	unrelated := exec.Command("sleep", "60") //nolint:noctx // cleaned up exactly by PID below
+	unrelated.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := unrelated.Start(); err != nil {
+		_ = helper.Process.Kill()
+		<-helperDone
+		helperReaped = true
+		t.Fatalf("start unrelated process: %v", err)
+	}
+	defer func() {
+		_ = unrelated.Process.Kill()
+		_ = unrelated.Wait()
+	}()
+	if pgid, err := syscall.Getpgid(unrelated.Process.Pid); err != nil || pgid != unrelated.Process.Pid {
+		t.Fatalf("unrelated process group = %d, %v; want its own PGID %d",
+			pgid, err, unrelated.Process.Pid)
+	}
+
+	if err := helper.Process.Kill(); err != nil {
+		t.Fatalf("SIGKILL daemon-crash helper: %v", err)
+	}
+	select {
+	case waitErr := <-helperDone:
+		helperReaped = true
+		if waitErr == nil {
+			t.Fatal("daemon-crash helper exited cleanly; want SIGKILL")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("daemon-crash helper did not exit after SIGKILL")
+	}
+
+	eof := make(chan error, 1)
+	go func() {
+		b := make([]byte, 1)
+		_, readErr := probeR.Read(b)
+		eof <- readErr
+	}()
+	select {
+	case readErr := <-eof:
+		if !errors.Is(readErr, io.EOF) {
+			t.Fatalf("command probe read returned %v, want io.EOF", readErr)
+		}
+	case <-time.After(10 * time.Second):
+		_ = syscall.Kill(commandPID, syscall.SIGKILL)
+		t.Fatalf("owned command %d survived its daemon's SIGKILL", commandPID)
+	}
+
+	if !processRunning(unrelated.Process.Pid) {
+		t.Fatal("sentinel cleanup signalled an unrelated process group")
+	}
+}
+
+// TestProcess_LateSignalsAfterWaitAreNoOps pins the other half of PGID
+// ownership. Wait reaps the sentinel and releases the numeric ID, so later
+// Terminate/Kill calls must return the result of the already-delivered signals
+// without issuing a new syscall against a potentially recycled group.
+func TestProcess_LateSignalsAfterWaitAreNoOps(t *testing.T) {
+	cmd := exec.CommandContext(context.Background(), "sh", "-c", "exit 0")
+	process, err := procgroup.Start(cmd)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if err := process.Wait(); err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	if err := process.Terminate(); !errors.Is(err, os.ErrProcessDone) {
+		t.Fatalf("late Terminate = %v, want os.ErrProcessDone without a syscall", err)
+	}
+	if err := process.Kill(); err != nil {
+		t.Fatalf("late Kill = %v, want the cached successful result", err)
 	}
 }
 
@@ -295,16 +488,28 @@ func TestRun_PreservesExistingSysProcAttr(t *testing.T) {
 // failure and throw away its output, so the pipeline would retry or fail an
 // operation that already applied.
 func TestRun_ReportsSuccessWhenCleanExitLeavesADescendantHoldingThePipes(t *testing.T) {
+	pidR, pidW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pid pipe: %v", err)
+	}
+	defer pidR.Close()
+
 	// The shell writes its output and exits 0 immediately; the backgrounded
-	// sleep inherits stdout and holds it open well past waitDelay.
+	// sleep inherits stdout and holds it open well past waitDelay. fd 3 records
+	// the descendant so the test can assert that Run cleaned it before return.
 	cmd := exec.CommandContext(context.Background(), "sh", "-c",
-		`sleep 30 & printf complete-output; exit 0`)
+		`sleep 30 & echo $! >&3; printf complete-output; exit 0`)
+	cmd.ExtraFiles = []*os.File{pidW}
 	var out strings.Builder
 	cmd.Stdout = &out
 
 	start := time.Now()
-	err := procgroup.Run(cmd)
+	err = procgroup.Run(cmd)
 	elapsed := time.Since(start)
+	if closeErr := pidW.Close(); closeErr != nil {
+		t.Fatalf("close pid write end: %v", closeErr)
+	}
+	descendant := readPID(t, pidR)
 
 	if err != nil {
 		t.Fatalf("run returned %v; a command that exited 0 must be reported as "+
@@ -322,10 +527,14 @@ func TestRun_ReportsSuccessWhenCleanExitLeavesADescendantHoldingThePipes(t *test
 	if code := cmd.ProcessState.ExitCode(); code != 0 {
 		t.Errorf("exit code = %d, want 0", code)
 	}
+	if processRunning(descendant) {
+		_ = syscall.Kill(descendant, syscall.SIGKILL)
+		t.Fatalf("descendant %d was still running when Run returned", descendant)
+	}
 }
 
-// waitDelayForTest mirrors procgroup's unexported waitDelay. Kept as a separate
-// constant on purpose: if the production value shrinks below this, the timing
+// waitDelayForTest mirrors procgroup.WaitDelay. Kept as a separate constant on
+// purpose: if the production value shrinks below this, the timing
 // assertion above starts failing loudly instead of silently passing without
 // having exercised the branch.
 const waitDelayForTest = 3 * time.Second
@@ -346,4 +555,34 @@ func TestRun_RejectsCommandWithoutContext(t *testing.T) {
 	if err := procgroup.Run(cmd); err == nil {
 		t.Fatal("expected Run to fail for a command not created with CommandContext")
 	}
+}
+
+// processRunning treats a zombie as dead. The Docker test environment's PID 1
+// may not reap an orphan immediately, but a zombie cannot execute work or keep
+// an update drain unsafe.
+func processRunning(pid int) bool {
+	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err == nil {
+		if idx := strings.LastIndex(string(data), ")"); idx >= 0 {
+			rest := strings.Fields(string(data)[idx+1:])
+			if len(rest) > 0 {
+				return rest[0] != "Z"
+			}
+		}
+		return true
+	}
+	if os.IsNotExist(err) {
+		// /proc is not mounted on macOS. Ask ps for the state so a zombie is
+		// not mistaken for a running process by kill(pid, 0).
+		out, psErr := exec.Command("ps", "-o", "state=", "-p", strconv.Itoa(pid)).Output() //nolint:noctx // bounded local probe
+		if psErr == nil {
+			state := strings.TrimSpace(string(out))
+			return state != "" && !strings.HasPrefix(strings.ToUpper(state), "Z")
+		}
+		var exitErr *exec.ExitError
+		if errors.As(psErr, &exitErr) {
+			return false
+		}
+	}
+	return syscall.Kill(pid, 0) == nil
 }

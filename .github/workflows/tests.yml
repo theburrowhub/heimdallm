@@ -10,6 +10,9 @@ on:
   # from GITHUB_TOKEN and therefore never trigger pull_request workflows.
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: tests-${{ github.ref }}
   cancel-in-progress: true
@@ -19,7 +22,7 @@ jobs:
     name: macOS installer shell (Linux)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Syntax and pure-logic tests
         run: |
@@ -111,10 +114,10 @@ jobs:
     name: Daemon (Go)
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: daemon/go.mod
           cache-dependency-path: daemon/go.sum
@@ -146,7 +149,7 @@ jobs:
     name: Docker image version stamping
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Build builder stage and check reported version
         run: |
@@ -158,10 +161,10 @@ jobs:
     name: CLI (Go)
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: cli/go.mod
           cache-dependency-path: cli/go.sum
@@ -184,7 +187,7 @@ jobs:
       # and keeping generation together makes the cross-module gate atomic.
       # The gate diffs against the PR base (or the previous pushed commit), so
       # a shallow checkout would silently hide changed executable lines.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
@@ -192,7 +195,7 @@ jobs:
         run: make test-coverage-gate
 
       - name: Set up Go for the native CLI profile
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: cli/go.mod
           cache-dependency-path: cli/go.sum
@@ -201,7 +204,7 @@ jobs:
       # cache paths. Persist the read/write cache mounted by test-docker so the
       # deliberate full-suite rerun does not rebuild every dependency per job.
       - name: Cache containerized daemon Go data
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: /tmp/heimdallm-gocache
           key: ${{ runner.os }}-${{ runner.arch }}-daemon-coverage-v1-${{ hashFiles('daemon/go.mod', 'daemon/go.sum') }}
@@ -209,7 +212,7 @@ jobs:
             ${{ runner.os }}-${{ runner.arch }}-daemon-coverage-v1-
 
       - name: Set up Flutter
-        uses: subosito/flutter-action@v2
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           flutter-version: '3.41.9'
           channel: stable
@@ -256,7 +259,7 @@ jobs:
     name: Docker Compose test isolation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Test destructive-command guards without starting services
         run: make test-compose-isolation
@@ -264,19 +267,39 @@ jobs:
   flutter:
     name: Flutter
     runs-on: macos-14
+    env:
+      BUNDLE_GEMFILE: ${{ github.workspace }}/flutter_app/macos/Gemfile
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Flutter
-        uses: subosito/flutter-action@v2
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           flutter-version: '3.41.9'
           channel: stable
           cache: true
 
+      - name: Set up Ruby and pinned CocoaPods
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+          working-directory: flutter_app/macos
+
       - name: Dependencies
         working-directory: flutter_app
         run: flutter pub get
+
+      # Flutter shells out to `pod` itself. Keep that subprocess inside the
+      # pinned bundle; otherwise the runner's older system CocoaPods rewrites
+      # Podfile.lock before the explicit deployment check below can run.
+      - name: Generate macOS Flutter configuration
+        working-directory: flutter_app
+        run: bundle exec flutter build macos --debug --config-only
+
+      - name: CocoaPods
+        working-directory: flutter_app/macos
+        run: bundle exec pod install --deployment --clean-install
 
       - name: Analyze
         working-directory: flutter_app
@@ -285,3 +308,16 @@ jobs:
       - name: Test
         working-directory: flutter_app
         run: flutter test
+
+      - name: Native updater tests
+        working-directory: flutter_app/macos
+        run: |
+          set -euo pipefail
+          xcodebuild test \
+            -workspace Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            -parallel-testing-enabled NO \
+            -only-testing:RunnerTests \
+            HEIMDALLM_BUNDLE_IDENTIFIER=com.theburrowhub.heimdallm.ci

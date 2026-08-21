@@ -1,7 +1,9 @@
 package executor_test
 
 import (
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -70,8 +72,8 @@ func TestExecuteRawTimeoutKillsGrandchildren(t *testing.T) {
 // zombie must count as dead: the test container's PID 1 is a plain shell that
 // never reaps orphans, so a killed grandchild lingers as a zombie and signal 0
 // keeps succeeding on it — which would make the group-kill assertion pass or
-// fail for the wrong reason. On Linux the state comes from /proc; elsewhere fall
-// back to signal 0, where the test's own shell reaps promptly.
+// fail for the wrong reason. On Linux the state comes from /proc; on macOS ps
+// supplies the equivalent state before the final signal-0 fallback.
 func processRunning(pid int) bool {
 	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
 	if err == nil {
@@ -86,7 +88,15 @@ func processRunning(pid int) bool {
 		return true
 	}
 	if os.IsNotExist(err) {
-		return false
+		out, psErr := exec.Command("ps", "-o", "state=", "-p", strconv.Itoa(pid)).Output() //nolint:noctx // bounded local probe
+		if psErr == nil {
+			state := strings.TrimSpace(string(out))
+			return state != "" && !strings.HasPrefix(strings.ToUpper(state), "Z")
+		}
+		var exitErr *exec.ExitError
+		if errors.As(psErr, &exitErr) {
+			return false
+		}
 	}
 	return syscall.Kill(pid, 0) == nil
 }

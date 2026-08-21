@@ -5,6 +5,8 @@ dist/*.dmg
 dist/*.zip
 daemon/bin/
 cli/bin/
+cli/dist/
+daemon/dist/
 
 # Local Docker runtime state
 # - docker/.env holds GITHUB_TOKEN + provider credentials; never commit.

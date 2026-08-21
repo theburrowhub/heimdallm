@@ -20,6 +20,7 @@ import (
 	"github.com/heimdallm/daemon/internal/server"
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
+	"github.com/heimdallm/daemon/internal/workgate"
 )
 
 func setupServer(t *testing.T) (*server.Server, *store.Store) {
@@ -573,6 +574,279 @@ func TestHandlerShutdownRequiresAuthWhenTokenSet(t *testing.T) {
 	}
 }
 
+func TestUpdatePreparationLifecycle(t *testing.T) {
+	srv := setupServerWithToken(t, "secret-token")
+	prepareCalls := 0
+	cancelCalls := 0
+	sealCalls := 0
+	confirmCalls := 0
+	srv.SetUpdatePreparationFns(
+		func(leaseID string) (server.UpdatePreparationStatus, error) {
+			prepareCalls++
+			return server.UpdatePreparationStatus{
+				State:       "draining",
+				PID:         42,
+				LeaseID:     leaseID,
+				Active:      map[string]int{"reviews": 1},
+				ActiveTotal: 1,
+			}, nil
+		},
+		func(leaseID string) (server.UpdatePreparationStatus, error) {
+			cancelCalls++
+			return server.UpdatePreparationStatus{
+				State:   "running",
+				PID:     42,
+				LeaseID: leaseID,
+				Active:  map[string]int{},
+			}, nil
+		},
+	)
+	srv.SetUpdateSealFn(func(leaseID string) (server.UpdatePreparationStatus, error) {
+		sealCalls++
+		return server.UpdatePreparationStatus{
+			State:   "ready",
+			PID:     42,
+			LeaseID: leaseID,
+			Sealed:  true,
+			Active:  map[string]int{},
+		}, nil
+	})
+	srv.SetUpdateConfirmFn(func(leaseID string) (server.UpdatePreparationStatus, error) {
+		confirmCalls++
+		return server.UpdatePreparationStatus{
+			State:               "ready",
+			PID:                 84,
+			Version:             "v1.2.3",
+			LeaseID:             leaseID,
+			Sealed:              true,
+			BootstrapAuthorized: true,
+			BootID:              "test-boot-id",
+			Active:              map[string]int{},
+		}, nil
+	})
+
+	for _, method := range []string{http.MethodPost, http.MethodDelete} {
+		req := httptest.NewRequest(method, "/update/prepare", nil)
+		w := httptest.NewRecorder()
+		srv.Router().ServeHTTP(w, req)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("%s without token: status = %d, want 401", method, w.Code)
+		}
+	}
+	unauthorizedSeal := httptest.NewRequest(http.MethodPost, "/update/seal", nil)
+	unauthorizedSeal.Header.Set(server.HeaderUpdateLease, "owner-a")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, unauthorizedSeal)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("seal without token: status = %d, want 401", w.Code)
+	}
+	unauthorizedConfirm := httptest.NewRequest(http.MethodPost, "/update/confirm", nil)
+	unauthorizedConfirm.Header.Set(server.HeaderUpdateLease, "owner-a")
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, unauthorizedConfirm)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("confirm without token: status = %d, want 401", w.Code)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/update/prepare", nil)
+	req.Header.Set("X-Heimdallm-Token", "secret-token")
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("prepare without lease id: status = %d, want 400", w.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/update/prepare", nil)
+	req.Header.Set("X-Heimdallm-Token", "secret-token")
+	req.Header.Set(server.HeaderUpdateLease, "owner-a")
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("prepare: status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var prepared server.UpdatePreparationStatus
+	if err := json.NewDecoder(w.Body).Decode(&prepared); err != nil {
+		t.Fatalf("decode prepare: %v", err)
+	}
+	if prepared.State != "draining" || prepared.PID != 42 || prepared.LeaseID != "owner-a" || prepared.ActiveTotal != 1 {
+		t.Fatalf("prepare response = %+v", prepared)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/update/seal", nil)
+	req.Header.Set("X-Heimdallm-Token", "secret-token")
+	req.Header.Set(server.HeaderUpdateLease, "owner-a")
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("seal: status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var sealed server.UpdatePreparationStatus
+	if err := json.NewDecoder(w.Body).Decode(&sealed); err != nil {
+		t.Fatalf("decode seal: %v", err)
+	}
+	if sealed.State != "ready" || !sealed.Sealed || sealed.LeaseID != "owner-a" {
+		t.Fatalf("seal response = %+v", sealed)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/update/confirm", nil)
+	req.Header.Set("X-Heimdallm-Token", "secret-token")
+	req.Header.Set(server.HeaderUpdateLease, "owner-a")
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest || confirmCalls != 0 {
+		t.Fatalf("confirm without expected boot id: status = %d, calls = %d; want 400 and 0", w.Code, confirmCalls)
+	}
+
+	req.Header.Set(server.HeaderExpectedUpdateBootID, "stale-process")
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusConflict || confirmCalls != 0 {
+		t.Fatalf("confirm for stale process: status = %d, calls = %d; want 409 and 0", w.Code, confirmCalls)
+	}
+
+	req.Header.Set(server.HeaderExpectedUpdateBootID, "test-boot-id")
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("confirm: status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var confirmed server.UpdatePreparationStatus
+	if err := json.NewDecoder(w.Body).Decode(&confirmed); err != nil {
+		t.Fatalf("decode confirm: %v", err)
+	}
+	if !confirmed.BootstrapAuthorized || !confirmed.Sealed || confirmed.LeaseID != "owner-a" || confirmed.PID != 84 || confirmed.BootID != "test-boot-id" {
+		t.Fatalf("confirm response = %+v", confirmed)
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/update/prepare", nil)
+	req.Header.Set("X-Heimdallm-Token", "secret-token")
+	req.Header.Set(server.HeaderUpdateLease, "owner-a")
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest || cancelCalls != 0 {
+		t.Fatalf("cancel without expected boot id: status = %d, calls = %d; want 400 and 0", w.Code, cancelCalls)
+	}
+	req.Header.Set(server.HeaderExpectedUpdateBootID, "stale-process")
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusConflict || cancelCalls != 0 {
+		t.Fatalf("cancel for stale process: status = %d, calls = %d; want 409 and 0", w.Code, cancelCalls)
+	}
+	req.Header.Set(server.HeaderExpectedUpdateBootID, "test-boot-id")
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("cancel: status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var cancelled server.UpdatePreparationStatus
+	if err := json.NewDecoder(w.Body).Decode(&cancelled); err != nil {
+		t.Fatalf("decode cancel: %v", err)
+	}
+	if cancelled.State != "running" || cancelled.LeaseID != "owner-a" {
+		t.Fatalf("cancel response = %+v, want running with echoed owner", cancelled)
+	}
+	if prepareCalls != 1 || sealCalls != 1 || confirmCalls != 1 || cancelCalls != 1 {
+		t.Fatalf("callback calls = prepare %d, seal %d, confirm %d, cancel %d; want 1 each", prepareCalls, sealCalls, confirmCalls, cancelCalls)
+	}
+}
+
+func TestUpdatePreparationMapsLeaseConflictWithoutLeakingOwner(t *testing.T) {
+	srv := setupServerWithToken(t, "secret-token")
+	srv.SetUpdatePreparationFns(
+		func(string) (server.UpdatePreparationStatus, error) {
+			return server.UpdatePreparationStatus{}, server.ErrUpdateLeaseConflict
+		},
+		func(string) (server.UpdatePreparationStatus, error) {
+			return server.UpdatePreparationStatus{}, server.ErrUpdateLeaseConflict
+		},
+	)
+	for _, method := range []string{http.MethodPost, http.MethodDelete} {
+		req := httptest.NewRequest(method, "/update/prepare", nil)
+		req.Header.Set("X-Heimdallm-Token", "secret-token")
+		req.Header.Set(server.HeaderUpdateLease, "stale-owner-that-must-not-leak")
+		req.Header.Set(server.HeaderExpectedUpdateBootID, "test-boot-id")
+		w := httptest.NewRecorder()
+		srv.Router().ServeHTTP(w, req)
+		if w.Code != http.StatusConflict {
+			t.Fatalf("%s status = %d, want 409", method, w.Code)
+		}
+		if strings.Contains(w.Body.String(), "stale-owner") {
+			t.Fatalf("%s response leaked lease owner: %s", method, w.Body.String())
+		}
+	}
+}
+
+func TestUpdatePreparationMapsInvalidLeaseToBadRequest(t *testing.T) {
+	srv := setupServerWithToken(t, "secret-token")
+	srv.SetUpdatePreparationFns(
+		func(string) (server.UpdatePreparationStatus, error) {
+			return server.UpdatePreparationStatus{}, server.ErrUpdateLeaseInvalid
+		},
+		func(string) (server.UpdatePreparationStatus, error) {
+			return server.UpdatePreparationStatus{}, server.ErrUpdateLeaseInvalid
+		},
+	)
+	for _, method := range []string{http.MethodPost, http.MethodDelete} {
+		req := httptest.NewRequest(method, "/update/prepare", nil)
+		req.Header.Set("X-Heimdallm-Token", "secret-token")
+		req.Header.Set(server.HeaderUpdateLease, "invalid-owner")
+		req.Header.Set(server.HeaderExpectedUpdateBootID, "test-boot-id")
+		w := httptest.NewRecorder()
+		srv.Router().ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("%s status = %d, want 400", method, w.Code)
+		}
+	}
+}
+
+func TestUpdateCancellationRejectsUnconfirmedReplacement(t *testing.T) {
+	srv := setupServerWithToken(t, "secret-token")
+	srv.SetUpdatePreparationFns(
+		func(string) (server.UpdatePreparationStatus, error) {
+			return server.UpdatePreparationStatus{}, nil
+		},
+		func(string) (server.UpdatePreparationStatus, error) {
+			return server.UpdatePreparationStatus{}, server.ErrUpdateBootstrapNotAuthorized
+		},
+	)
+	req := httptest.NewRequest(http.MethodDelete, "/update/prepare", nil)
+	req.Header.Set("X-Heimdallm-Token", "secret-token")
+	req.Header.Set(server.HeaderUpdateLease, "owner-that-must-not-leak")
+	req.Header.Set(server.HeaderExpectedUpdateBootID, "test-boot-id")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("cancel unconfirmed replacement status = %d, want 409", w.Code)
+	}
+	if strings.Contains(w.Body.String(), "owner-that-must-not-leak") {
+		t.Fatalf("cancellation response leaked lease owner: %s", w.Body.String())
+	}
+}
+
+func TestUpdatePreparationUnavailable(t *testing.T) {
+	srv, _ := setupServer(t)
+	for _, method := range []string{http.MethodPost, http.MethodDelete} {
+		req := httptest.NewRequest(method, "/update/prepare", nil)
+		w := httptest.NewRecorder()
+		srv.Router().ServeHTTP(w, req)
+		if w.Code != http.StatusServiceUnavailable {
+			t.Fatalf("%s status = %d, want 503", method, w.Code)
+		}
+	}
+	req := httptest.NewRequest(http.MethodPost, "/update/seal", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("POST /update/seal status = %d, want 503", w.Code)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/update/confirm", nil)
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("POST /update/confirm status = %d, want 503", w.Code)
+	}
+}
+
 func itoa(n int64) string {
 	return fmt.Sprintf("%d", n)
 }
@@ -587,7 +861,7 @@ func setupServerWithToken(t *testing.T, token string) *server.Server {
 	broker := sse.NewBroker()
 	broker.Start()
 	t.Cleanup(broker.Stop)
-	return server.New(s, broker, nil, token)
+	return server.NewWithOptions(s, broker, nil, token, server.Options{UpdateBootID: "test-boot-id"})
 }
 
 func TestHandlerLogsStream_RequiresAuth(t *testing.T) {
@@ -1095,6 +1369,29 @@ func TestHandlerPromoteIssue_Conflict(t *testing.T) {
 	srv.Router().ServeHTTP(w, req)
 	if w.Code != http.StatusConflict {
 		t.Fatalf("promote issue: status %d, want 409; body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandlerPromoteIssue_UpdateDrainIsRetryableConflict(t *testing.T) {
+	srv, s := setupServer(t)
+	now := time.Now()
+	id, _ := s.UpsertIssue(&store.Issue{
+		GithubID: 803, Repo: "org/r", Number: 23, Title: "t",
+		Body: "b", Author: "a", Assignees: `[]`, Labels: `[]`,
+		State: "open", CreatedAt: now, FetchedAt: now,
+	})
+	srv.SetTriggerPromoteFn(func(int64) error {
+		return workgate.ErrDraining
+	})
+
+	req := httptest.NewRequest("POST", "/issues/"+itoa(id)+"/promote", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("promote during update: status %d, want 409; body: %s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Retry-After"); got != "5" {
+		t.Fatalf("Retry-After = %q, want 5", got)
 	}
 }
 
@@ -2844,6 +3141,20 @@ func TestHandleDeleteManagedCloneSurfacesCallbackError(t *testing.T) {
 	}
 	if strings.Contains(w.Body.String(), "/tmp/heimdallm") {
 		t.Fatalf("response leaked clone path: %s", w.Body.String())
+	}
+}
+
+func TestHandleDeleteManagedCloneReportsUpdateDrainAsConflict(t *testing.T) {
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetCleanCloneFn(func(context.Context, string) error {
+		return workgate.ErrDraining
+	})
+	req := httptest.NewRequest("DELETE", "/config/clones/"+url.PathEscape("org/repo"), nil)
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", w.Code)
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 	"github.com/heimdallm/daemon/internal/server"
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
+	"github.com/heimdallm/daemon/internal/workgate"
 )
 
 func newListenTestServer(t *testing.T) *server.Server {
@@ -32,7 +33,7 @@ func newListenTestServerWithToken(t *testing.T, token string) *server.Server {
 	broker := sse.NewBroker()
 	broker.Start()
 	t.Cleanup(broker.Stop)
-	return server.New(s, broker, nil, token)
+	return server.NewWithOptions(s, broker, nil, token, server.Options{UpdateBootID: "test-boot-id"})
 }
 
 // freePort returns a port number nothing is listening on. Racy by nature —
@@ -318,6 +319,250 @@ func TestStartingGate_BlocksEveryRouteExceptHealth(t *testing.T) {
 	}
 	if !meCalled {
 		t.Fatal("ready /me did not invoke the published callback")
+	}
+}
+
+func TestStartingGateAllowsAuthenticatedUpdateLeaseRenewal(t *testing.T) {
+	srv := newListenTestServerWithToken(t, "secret")
+	srv.SetUpdatePreparationFns(
+		func(leaseID string) (server.UpdatePreparationStatus, error) {
+			return server.UpdatePreparationStatus{
+				State:   "ready",
+				LeaseID: leaseID,
+				PID:     42,
+			}, nil
+		},
+		func(leaseID string) (server.UpdatePreparationStatus, error) {
+			return server.UpdatePreparationStatus{State: "running", LeaseID: leaseID, PID: 42}, nil
+		},
+	)
+	srv.SetUpdateConfirmFn(func(leaseID string) (server.UpdatePreparationStatus, error) {
+		return server.UpdatePreparationStatus{
+			State:               "ready",
+			LeaseID:             leaseID,
+			PID:                 42,
+			Sealed:              true,
+			BootstrapAuthorized: true,
+		}, nil
+	})
+	srv.SetUpdateSealFn(func(leaseID string) (server.UpdatePreparationStatus, error) {
+		return server.UpdatePreparationStatus{
+			State:   "ready",
+			LeaseID: leaseID,
+			PID:     42,
+			Sealed:  true,
+		}, nil
+	})
+	srv.MarkStarting()
+
+	unauthorized := httptest.NewRequest(http.MethodPost, "/update/prepare", nil)
+	unauthorized.Header.Set(server.HeaderUpdateLease, "updater-owner")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, unauthorized)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated startup renewal status = %d, want 401", w.Code)
+	}
+
+	renew := httptest.NewRequest(http.MethodPost, "/update/prepare", nil)
+	renew.Header.Set("X-Heimdallm-Token", "secret")
+	renew.Header.Set(server.HeaderUpdateLease, "updater-owner")
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, renew)
+	if w.Code != http.StatusOK {
+		t.Fatalf("authenticated startup renewal status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+
+	seal := httptest.NewRequest(http.MethodPost, "/update/seal", nil)
+	seal.Header.Set("X-Heimdallm-Token", "secret")
+	seal.Header.Set(server.HeaderUpdateLease, "updater-owner")
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, seal)
+	if w.Code != http.StatusOK {
+		t.Fatalf("authenticated startup seal status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+
+	confirm := httptest.NewRequest(http.MethodPost, "/update/confirm", nil)
+	confirm.Header.Set("X-Heimdallm-Token", "secret")
+	confirm.Header.Set(server.HeaderUpdateLease, "updater-owner")
+	confirm.Header.Set(server.HeaderExpectedUpdateBootID, "test-boot-id")
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, confirm)
+	if w.Code != http.StatusOK {
+		t.Fatalf("authenticated startup confirmation status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+
+	// MarkStopping reuses the startup gate, but must not reopen lease mutations
+	// while the listener is being torn down.
+	srv.MarkStopping()
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, renew)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("renewal while stopping status = %d, want 503", w.Code)
+	}
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, confirm)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("confirmation while stopping status = %d, want 503", w.Code)
+	}
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, seal)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("seal while stopping status = %d, want 503", w.Code)
+	}
+}
+
+func TestReplacementBootstrapHandshakeConvergesRestoredLeaseAndKeepsWorkSealedUntilHealthy(t *testing.T) {
+	gate := workgate.New(time.Minute)
+	if _, err := gate.Prepare("updater-owner"); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := newListenTestServerWithToken(t, "secret")
+	toStatus := func(snapshot workgate.Snapshot) server.UpdatePreparationStatus {
+		return server.UpdatePreparationStatus{
+			State:               "ready",
+			PID:                 42,
+			Version:             "v1.2.3",
+			LeaseID:             snapshot.LeaseID,
+			Sealed:              snapshot.Sealed,
+			BootstrapAuthorized: snapshot.BootstrapAuthorized,
+			BootID:              "test-boot-id",
+			ActiveTotal:         snapshot.Total(),
+			Active:              map[string]int{},
+		}
+	}
+	srv.SetUpdatePreparationFns(
+		func(leaseID string) (server.UpdatePreparationStatus, error) {
+			snapshot, err := gate.Prepare(leaseID)
+			return toStatus(snapshot), err
+		},
+		func(leaseID string) (server.UpdatePreparationStatus, error) {
+			snapshot, err := gate.Cancel(leaseID)
+			return toStatus(snapshot), err
+		},
+	)
+	srv.SetUpdateConfirmFn(func(leaseID string) (server.UpdatePreparationStatus, error) {
+		snapshot, err := gate.ConfirmBootstrap(leaseID)
+		return toStatus(snapshot), err
+	})
+	srv.SetUpdateSealFn(func(leaseID string) (server.UpdatePreparationStatus, error) {
+		snapshot, err := gate.Seal(leaseID)
+		return toStatus(snapshot), err
+	})
+	srv.MarkStarting()
+
+	bootstrap := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { bootstrap <- gate.WaitUntilBootstrapAuthorized(ctx) }()
+
+	health := httptest.NewRequest(http.MethodGet, "/health", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, health)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("health before confirmation = %d, want 503", w.Code)
+	}
+
+	// A crash can restore an ordinary lease rather than a sealed marker. The
+	// authenticated owner can converge that state to the durable barrier while
+	// the minimal startup router is still active.
+	seal := httptest.NewRequest(http.MethodPost, "/update/seal", nil)
+	seal.Header.Set("X-Heimdallm-Token", "secret")
+	seal.Header.Set(server.HeaderUpdateLease, "updater-owner")
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, seal)
+	if w.Code != http.StatusOK {
+		t.Fatalf("seal restored ordinary lease = %d, body=%s", w.Code, w.Body.String())
+	}
+	if snapshot := gate.Status(); !snapshot.Sealed || snapshot.BootstrapAuthorized {
+		t.Fatalf("state after startup seal = %+v", snapshot)
+	}
+
+	// A delayed confirmation for a daemon process that has already died must
+	// not authorize this replacement process to touch stateful dependencies.
+	staleConfirm := httptest.NewRequest(http.MethodPost, "/update/confirm", nil)
+	staleConfirm.Header.Set("X-Heimdallm-Token", "secret")
+	staleConfirm.Header.Set(server.HeaderUpdateLease, "updater-owner")
+	staleConfirm.Header.Set(server.HeaderExpectedUpdateBootID, "previous-process-boot-id")
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, staleConfirm)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("stale-process confirm status = %d, want 409; body=%s", w.Code, w.Body.String())
+	}
+	if snapshot := gate.Status(); snapshot.BootstrapAuthorized {
+		t.Fatalf("stale-process confirmation authorized bootstrap: %+v", snapshot)
+	}
+	select {
+	case err := <-bootstrap:
+		t.Fatalf("stale-process confirmation unblocked bootstrap: %v", err)
+	default:
+	}
+
+	confirm := httptest.NewRequest(http.MethodPost, "/update/confirm", nil)
+	confirm.Header.Set("X-Heimdallm-Token", "secret")
+	confirm.Header.Set(server.HeaderUpdateLease, "updater-owner")
+	confirm.Header.Set(server.HeaderExpectedUpdateBootID, "test-boot-id")
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, confirm)
+	if w.Code != http.StatusOK {
+		t.Fatalf("confirm status = %d, body=%s", w.Code, w.Body.String())
+	}
+	select {
+	case err := <-bootstrap:
+		if err != nil {
+			t.Fatalf("bootstrap authorization: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("bootstrap did not unblock after confirmation")
+	}
+	if _, err := gate.Acquire(workgate.KindReview); !errors.Is(err, workgate.ErrDraining) {
+		t.Fatalf("confirmation opened work admission: %v", err)
+	}
+
+	// This models successful dependency wiring. Readiness becomes visible while
+	// admission is still sealed; only the subsequent owner cancellation opens it.
+	srv.MarkReady()
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, health)
+	if w.Code != http.StatusOK {
+		t.Fatalf("health after bootstrap = %d, body=%s", w.Code, w.Body.String())
+	}
+	cancelRequest := httptest.NewRequest(http.MethodDelete, "/update/prepare", nil)
+	cancelRequest.Header.Set("X-Heimdallm-Token", "secret")
+	cancelRequest.Header.Set(server.HeaderUpdateLease, "updater-owner")
+	cancelRequest.Header.Set(server.HeaderExpectedUpdateBootID, "test-boot-id")
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, cancelRequest)
+	if w.Code != http.StatusOK {
+		t.Fatalf("cancel after health = %d, body=%s", w.Code, w.Body.String())
+	}
+	permit, err := gate.Acquire(workgate.KindReview)
+	if err != nil {
+		t.Fatalf("work admission stayed closed after verified cancellation: %v", err)
+	}
+	permit.Release()
+}
+
+func TestReplacementBootstrapFailureLeavesAdmissionSealed(t *testing.T) {
+	gate := workgate.New(time.Minute)
+	if _, err := gate.Prepare("updater-owner"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gate.Seal("updater-owner"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gate.ConfirmBootstrap("updater-owner"); err != nil {
+		t.Fatal(err)
+	}
+
+	// A failed initialization exits without owner cancellation. The durable
+	// sealed marker remains closed and its process-local authorization is not
+	// sufficient to admit work.
+	if snapshot := gate.Status(); !snapshot.Draining || !snapshot.Sealed || !snapshot.BootstrapAuthorized {
+		t.Fatalf("failed-bootstrap snapshot = %+v", snapshot)
+	}
+	if _, err := gate.Acquire(workgate.KindReview); !errors.Is(err, workgate.ErrDraining) {
+		t.Fatalf("failed bootstrap opened work admission: %v", err)
 	}
 }
 

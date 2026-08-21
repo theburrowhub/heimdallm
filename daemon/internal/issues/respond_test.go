@@ -14,6 +14,7 @@ import (
 	"github.com/heimdallm/daemon/internal/issues"
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
+	"github.com/heimdallm/daemon/internal/workgate"
 )
 
 // ── Responder fakes ───────────────────────────────────────────────────────────
@@ -150,6 +151,29 @@ func samplePR() *store.PR {
 }
 
 // ── tests ────────────────────────────────────────────────────────────────────
+
+func TestResponder_UpdateDrainRejectsBeforeSideEffects(t *testing.T) {
+	st := &fakeResponderStore{}
+	gh := &fakeResponderGH{reviews: []github.PRReview{
+		commentedReview("alice", "please respond", time.Now()),
+	}}
+	exec := &fakeResponderExec{body: "reply"}
+	r := makeResponder(t, st, gh, exec, &fakeResponderBroker{}, config.ReviewResponseConfig{
+		Enabled: true, PerPRLifetime: 5,
+	})
+	gate := workgate.New(time.Minute)
+	if _, err := gate.Prepare("update-owner"); err != nil {
+		t.Fatal(err)
+	}
+	r.SetWorkGate(gate)
+
+	if err := r.Run(context.Background(), samplePR(), 99); !errors.Is(err, issues.ErrUpdateDraining) {
+		t.Fatalf("Run error = %v, want ErrUpdateDraining", err)
+	}
+	if exec.called || gh.postCalled || st.count != 0 {
+		t.Fatalf("draining responder had side effects: exec=%v post=%v count=%d", exec.called, gh.postCalled, st.count)
+	}
+}
 
 // TestResponder_DisabledByDefault_NoOp pins the most important
 // property: when the config flag is off, the Responder never fetches

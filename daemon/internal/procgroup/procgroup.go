@@ -1,170 +1,322 @@
-// Package procgroup runs an *exec.Cmd in its own process group so that
-// cancelling the command's context terminates the whole process tree rather
-// than just the direct child.
+// Package procgroup runs an *exec.Cmd in a process group owned by Heimdallm so
+// cancellation and shutdown can terminate the command and every descendant
+// that remains in that group.
 //
-// The problem it solves: exec.CommandContext's default cancellation kills only
-// the process it started. Anything that process forked survives, gets reparented
-// to PID 1, and — because nothing calls wait() on a process it did not spawn —
-// becomes a permanent zombie once it exits. For `git` over SSH the forked child
-// is `ssh`, which is how a container accumulated 13 [ssh] + 2 [git] zombies in
-// 23h of uptime (theburrowhub/heimdallm#665). The same shape was already
-// diagnosed for the AI CLI launchers in #614.
+// A dedicated sentinel is the group leader. The command joins that group and
+// the sentinel is deliberately not reaped until the final group signal has
+// been delivered. Cancellation uses SIGTERM, a grace period, then SIGKILL;
+// ordinary completion kills residual helpers immediately. Keeping the leader
+// as a live process or an unreaped zombie reserves both its PID and the PGID,
+// so a late escalation can never be delivered to an unrelated process group
+// that happened to reuse the numeric ID.
 //
-// Killing the group is only half of the fix. A descendant that is already
-// orphaned still needs PID 1 to reap it, and the kernel does not do that
-// automatically for PID 1 — hence the init process in docker/Dockerfile. This
-// package stops the daemon from leaking live processes; the init stops the dead
-// ones from piling up as zombies.
+// Descendants that have already died still need PID 1 to reap them. The init
+// process in docker/Dockerfile handles that container concern; this package's
+// responsibility is to leave no live Heimdallm-owned group member behind.
 //
-// Note for future readers: internal/executor carries a richer variant of this
-// logic (it also registers groups so TerminateAll can reach agents at shutdown,
-// and returns the collected payload alongside its ErrWaitDelay tolerance). That
-// was deliberately left in place rather than folded in here — see #614. The two
-// copies must agree on the timer ordering and on tolerating a clean exit whose
-// descendant holds the pipes; both are called out at their definitions.
+// The ownership boundary is deliberately the process group, not arbitrary
+// ancestry: a program that explicitly calls setsid or setpgid has opted out of
+// the group and cannot be reached by kill(-pgid, ...). Shared services such as
+// an SSH ControlPersist master may have that independent lifetime; they do not
+// keep the git transaction or its repository work registered as in flight.
 package procgroup
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
-	"sync/atomic"
+	"sync"
 	"syscall"
 	"time"
 )
 
 const (
-	// termGrace is how long the group gets to exit after SIGTERM before the
-	// escalation to SIGKILL. Short on purpose: cancellation here means a
-	// timeout has already elapsed, so the caller is past waiting politely.
-	//
-	// INVARIANT: termGrace must stay strictly — and comfortably — below
-	// waitDelay. On cancellation os/exec arms its own WaitDelay timer at the
-	// same moment Cancel fires, and when that timer expires os/exec kills only
-	// the DIRECT child and lets Wait return. If the two timers were equal (or
-	// termGrace were larger) the escalation goroutine would find `reaped`
-	// already true, skip kill(-pgid, SIGKILL), and leave alive precisely the
-	// descendant that ignored SIGTERM — reintroducing #665 on every timeout
-	// where the group does not die on the first signal. internal/executor
-	// encodes the same ordering as 1s vs 3s; keep both copies in step.
-	termGrace = 1 * time.Second
-	// waitDelay bounds Wait once the direct child has exited but a descendant
-	// still holds the inherited stdout/stderr pipes. Without it, Wait blocks
-	// until every copy of those descriptors is closed, which lets a stalled
-	// grandchild hang the caller indefinitely. See the termGrace invariant.
-	waitDelay = 3 * time.Second
+	// TermGrace is how long a process group gets to handle SIGTERM before it is
+	// killed outright. It is exported for Executor.TerminateAll, which sends
+	// TERM to all groups before escalating them together.
+	TermGrace = 1 * time.Second
+	// WaitDelay bounds exec.Cmd.Wait after the direct child exits while a
+	// descendant still holds an inherited stdout or stderr pipe.
+	WaitDelay = 3 * time.Second
 )
 
-// Run starts cmd in its own process group, waits for it, and on context
-// cancellation signals the entire group (SIGTERM, then SIGKILL after
-// termGrace).
-//
-// cmd MUST have been created with exec.CommandContext. Run installs a
-// cmd.Cancel hook, and os/exec refuses to start a command that has one without
-// an associated context — so misuse fails immediately at Start with an explicit
-// error rather than silently losing the group kill. The requirement is
-// semantic, not incidental: with no context there is nothing to cancel and
-// nothing for this package to do.
-//
-// Run replaces cmd.Run and takes ownership of cmd.SysProcAttr.Setpgid,
-// cmd.Cancel and cmd.WaitDelay. It deliberately wraps Start+Wait instead of
-// exposing a "configure this cmd" helper: the escalation goroutine must be told
-// when the child has been reaped, and a caller that forgot to do so would
-// eventually signal a pgid the kernel had already recycled onto an unrelated
-// process group.
-//
-// A clean exit whose descendant still holds the inherited pipes is reported as
-// success, not as exec.ErrWaitDelay — see the comment at that branch.
-//
-// The residual race is the same one documented in #614 and is narrowed, not
-// closed: `reaped` is set the instant Wait returns and is checked immediately
-// before the kill, so the window is the gap between those two statements.
-// Closing it entirely needs a wait-without-reap (wait4(WNOWAIT) or pidfd).
-func Run(cmd *exec.Cmd) error {
-	// Setpgid makes the child the leader of a new group whose ID is its own
-	// PID, which is what lets a single negated PID address every descendant
-	// that has not created a group of its own.
+// Process is a started command and its Heimdallm-owned process group. A
+// Process must be completed with Wait. Terminate and Kill are safe to call
+// concurrently with Wait and with each other, which lets the daemon shutdown
+// path sweep executions without racing their normal completion.
+type Process struct {
+	cmd   *exec.Cmd
+	group *ownedGroup
+}
+
+// ownedGroup keeps the sentinel around until the final group signal has been
+// delivered. All lifecycle transitions and signals are serialized by mu. That
+// is more than bookkeeping: after finish reaps the sentinel, a late
+// Terminate/Kill call must perform no syscall at all because the numeric PGID
+// is then free to be reused.
+type ownedGroup struct {
+	pgid       int
+	sentinel   *exec.Cmd
+	hold       *os.File
+	mu         sync.Mutex
+	termSent   bool
+	killSent   bool
+	finalizing bool
+	closed     bool
+	killDone   chan struct{}
+	waitOnce   sync.Once
+	sentinelCh chan struct{}
+
+	termErr error
+	killErr error
+}
+
+// Start launches a sentinel, makes cmd join the sentinel's process group, and
+// starts cmd. cmd must have been created with exec.CommandContext: Start owns
+// cmd.Cancel and cmd.WaitDelay, and os/exec rejects a Cancel hook on a command
+// without an associated context.
+func Start(cmd *exec.Cmd) (*Process, error) {
+	group, err := startOwnedGroup()
+	if err != nil {
+		return nil, err
+	}
+
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
 	cmd.SysProcAttr.Setpgid = true
+	cmd.SysProcAttr.Pgid = group.pgid
 
-	runDone := make(chan struct{})
-	var reaped atomic.Bool
-
-	cmd.Cancel = func() error {
-		err := signalGroup(cmd, syscall.SIGTERM)
-		go func() {
-			select {
-			case <-time.After(termGrace):
-				if reaped.Load() {
-					// The pgid may already have been handed to somebody else;
-					// a late signal would hit an unrelated group.
-					return
-				}
-				if killErr := signalGroup(cmd, syscall.SIGKILL); killErr != nil {
-					slog.Debug("procgroup: group already gone before SIGKILL",
-						"path", cmd.Path, "err", killErr)
-				}
-			case <-runDone:
-			}
-		}()
-		return err
-	}
-	cmd.WaitDelay = waitDelay
+	process := &Process{cmd: cmd, group: group}
+	cmd.Cancel = process.Terminate
+	cmd.WaitDelay = WaitDelay
 
 	if err := cmd.Start(); err != nil {
-		close(runDone)
+		group.abort()
+		return nil, err
+	}
+	return process, nil
+}
+
+// startOwnedGroup starts a shell blocked on an inherited pipe. The shell is a
+// tiny, portable sentinel available on both supported Unix platforms; using a
+// pipe avoids a busy loop or a timer that could expire during a long AI run.
+// The parent alone retains the write end until reapSentinel, so EOF is also a
+// process-lifetime signal: if the daemon crashes or is SIGKILLed before normal
+// cleanup, the sentinel terminates only its own reserved group and escalates to
+// SIGKILL after TermGrace. This closes the one path TerminateAll cannot run.
+func startOwnedGroup() (*ownedGroup, error) {
+	readEnd, hold, err := os.Pipe()
+	if err != nil {
+		return nil, fmt.Errorf("procgroup: create sentinel pipe: %w", err)
+	}
+
+	const sentinelScript = `
+trap '' TERM
+if IFS= read -r _ <&3; then
+  exit 0
+fi
+kill -TERM "-$$" 2>/dev/null || true
+sleep "$1"
+kill -KILL "-$$" 2>/dev/null || true
+`
+	sentinel := exec.Command( //nolint:noctx // lifetime is owned explicitly below
+		"/bin/sh",
+		"-c",
+		sentinelScript,
+		"heimdallm-procgroup-sentinel",
+		fmt.Sprintf("%.3f", TermGrace.Seconds()),
+	)
+	sentinel.ExtraFiles = []*os.File{readEnd}
+	sentinel.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := sentinel.Start(); err != nil {
+		_ = readEnd.Close()
+		_ = hold.Close()
+		return nil, fmt.Errorf("procgroup: start process-group sentinel: %w", err)
+	}
+	_ = readEnd.Close()
+
+	return &ownedGroup{
+		pgid:       sentinel.Process.Pid,
+		sentinel:   sentinel,
+		hold:       hold,
+		killDone:   make(chan struct{}),
+		sentinelCh: make(chan struct{}),
+	}, nil
+}
+
+// ID returns the reserved process-group ID.
+func (p *Process) ID() int {
+	if p == nil || p.group == nil {
+		return 0
+	}
+	return p.group.pgid
+}
+
+// Wait waits for cmd and then fully drains its owned group before returning.
+// Explicit cancellation and ErrWaitDelay receive TERM plus TermGrace; an
+// ordinary completion immediately kills any residual sentinel/helper. The
+// latter avoids adding one second to every successful git command while still
+// covering descendants that detached their output pipes.
+func (p *Process) Wait() error {
+	err := p.cmd.Wait()
+	p.group.finish(errors.Is(err, exec.ErrWaitDelay))
+	return err
+}
+
+// Terminate sends SIGTERM once and schedules SIGKILL after TermGrace. Because
+// the sentinel is not reaped until Wait finishes, the scheduled signal cannot
+// hit a recycled PGID even when the direct command exits during the grace
+// period.
+func (p *Process) Terminate() error {
+	if p == nil || p.group == nil {
+		return os.ErrProcessDone
+	}
+	return p.group.terminate()
+}
+
+// Kill immediately escalates the owned group to SIGKILL. It is safe after Wait
+// has returned: the closed lifecycle state prevents any syscall after the
+// sentinel was reaped.
+func (p *Process) Kill() error {
+	if p == nil || p.group == nil {
+		return os.ErrProcessDone
+	}
+	return p.group.kill()
+}
+
+func (g *ownedGroup) terminate() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.termSent {
+		return g.termErr
+	}
+	if g.finalizing || g.closed {
+		return os.ErrProcessDone
+	}
+	g.startTerminationLocked()
+	return g.termErr
+}
+
+func (g *ownedGroup) kill() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.killSent {
+		return g.killErr
+	}
+	if g.closed {
+		return os.ErrProcessDone
+	}
+	g.finalizing = true
+	g.killLocked()
+	return g.killErr
+}
+
+func (g *ownedGroup) startTerminationLocked() {
+	g.termSent = true
+	g.termErr = sendGroupSignal(g.pgid, syscall.SIGTERM)
+	go func() {
+		timer := time.NewTimer(TermGrace)
+		defer timer.Stop()
+		<-timer.C
+		_ = g.kill()
+	}()
+}
+
+func (g *ownedGroup) killLocked() {
+	g.killSent = true
+	g.killErr = sendGroupSignal(g.pgid, syscall.SIGKILL)
+	close(g.killDone)
+}
+
+func (g *ownedGroup) finish(useTermGrace bool) {
+	g.mu.Lock()
+	switch {
+	case g.killSent:
+		// An external shutdown already escalated the group.
+	case g.termSent:
+		// Cancellation already started the grace timer.
+	case useTermGrace:
+		// The direct child exited cleanly but an inherited pipe proves that a
+		// descendant remains. Give it the same graceful shutdown as cancel.
+		g.startTerminationLocked()
+	default:
+		// Normal completion: the direct child is already gone. Kill the
+		// sentinel and any detached helper immediately so ordinary git calls
+		// do not all pay TermGrace.
+		g.finalizing = true
+		g.killLocked()
+	}
+	done := g.killDone
+	g.mu.Unlock()
+
+	<-done
+	g.reapSentinel()
+}
+
+// abort is used when the real command never started. No untrusted process ever
+// joined the group, so there is no reason to spend the TERM grace period.
+func (g *ownedGroup) abort() {
+	g.mu.Lock()
+	if !g.killSent {
+		g.finalizing = true
+		g.killLocked()
+	}
+	done := g.killDone
+	g.mu.Unlock()
+	<-done
+	g.reapSentinel()
+}
+
+func (g *ownedGroup) reapSentinel() {
+	g.waitOnce.Do(func() {
+		// Keep mu locked across Wait. sentinel.Wait is the exact instant at
+		// which the numeric PID/PGID becomes reusable; a concurrent late
+		// Terminate/Kill must observe closed before it can issue a syscall.
+		g.mu.Lock()
+		_ = g.hold.Close()
+		err := g.sentinel.Wait()
+		g.closed = true
+		g.mu.Unlock()
+		if err != nil {
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				slog.Debug("procgroup: wait for sentinel", "pgid", g.pgid, "err", err)
+			}
+		}
+		close(g.sentinelCh)
+	})
+	<-g.sentinelCh
+}
+
+// Run starts cmd, waits for it, and guarantees that no live member of its
+// Heimdallm-owned process group remains when it returns. A clean direct-child
+// exit whose descendant held an output pipe still reports success; the output
+// is already buffered and the descendant has been terminated before return.
+func Run(cmd *exec.Cmd) error {
+	process, err := Start(cmd)
+	if err != nil {
 		return err
 	}
-	pgid := cmd.Process.Pid // Setpgid makes the child its own group leader
-	err := cmd.Wait()
-	reaped.Store(true) // before closing runDone: no signal may follow the reap
-	close(runDone)
-
-	// WaitDelay also fires when the command itself exited cleanly but a
-	// descendant still holds the inherited pipes. That is common for git, not
-	// exotic: `git gc --auto` is spawned in the background after fetch/commit/
-	// merge, and an SSH remote using ControlMaster/ControlPersist leaves the mux
-	// master running on purpose. Returning ErrWaitDelay to the caller in that
-	// case would report a `git push` that actually succeeded as a failure and
-	// discard its output, so the pipeline would retry or fail an operation that
-	// already applied.
-	//
-	// Everything the command itself wrote is already buffered — it wrote it
-	// before exiting, and the copier drains concurrently — so the collected
-	// output is complete and the exit status is authoritative. Swallow the
-	// error and report success, matching internal/executor's handling of the
-	// identical case.
-	//
-	// The descendant is NOT swept here: the child has been reaped, so its pgid
-	// may already belong to another group and a signal would be aimed at
-	// strangers. Log its identity instead — this is the one place with positive
-	// evidence of a live leaked process, so it should be traceable while #614
-	// is open. With Setpgid the group ID is the leader's PID, so one number
-	// identifies both.
+	err = process.Wait()
 	if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.ExitCode() == 0 {
 		slog.Warn("procgroup: command exited 0 but a descendant held the output pipes; "+
-			"reporting success and leaving the descendant running",
-			"path", cmd.Path, "pgid", pgid)
+			"reporting success after cleaning its process group",
+			"path", cmd.Path, "pgid", process.ID())
 		return nil
 	}
 	return err
 }
 
-// signalGroup sends sig to the whole group led by cmd's child, reporting an
-// already-exited group as os.ErrProcessDone.
-//
-// That translation is required, not cosmetic: os/exec only tolerates a
-// cmd.Cancel error that is os.ErrProcessDone, so a raw ESRCH would surface out
-// of Wait and disguise a normal cancellation as a bogus "no such process"
-// failure on the caller's error path.
-func signalGroup(cmd *exec.Cmd, sig syscall.Signal) error {
-	if cmd == nil || cmd.Process == nil {
+// signalGroup signals pgid and translates ESRCH to os.ErrProcessDone, the
+// value os/exec accepts from a Cancel hook when the process is already gone.
+func signalGroup(pgid int, sig syscall.Signal) error {
+	if pgid <= 0 {
 		return os.ErrProcessDone
 	}
-	if err := syscall.Kill(-cmd.Process.Pid, sig); err != nil {
+	if err := syscall.Kill(-pgid, sig); err != nil {
 		if errors.Is(err, syscall.ESRCH) {
 			return os.ErrProcessDone
 		}
@@ -172,3 +324,7 @@ func signalGroup(cmd *exec.Cmd, sig syscall.Signal) error {
 	}
 	return nil
 }
+
+// sendGroupSignal is a test seam for proving that closed groups reject late
+// signals without entering the kernel. Production always points at signalGroup.
+var sendGroupSignal = signalGroup

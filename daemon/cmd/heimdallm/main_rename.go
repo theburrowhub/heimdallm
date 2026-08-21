@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/heimdallm/daemon/internal/repoctx"
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
+	"github.com/heimdallm/daemon/internal/workgate"
 )
 
 // minRenameProbeInterval is the lower bound enforced on operator
@@ -106,16 +108,42 @@ func newRenameProbe(
 	broker *sse.Broker,
 	cfgPath string,
 	interval time.Duration,
+	gate *workgate.Gate,
 ) *rename.Probe {
 	reconciler := newRenameReconciler(cfg, cfgMu, tomlMu, s, repoCtx, broker, cfgPath)
 	return rename.NewProbe(rename.ProbeDeps{
 		Probe:        ghClient,
-		Dispatcher:   reconciler,
+		Dispatcher:   gatedRenameDispatcher{gate: gate, next: reconciler},
 		Repos:        renameRepoListFn(cfg, cfgMu),
 		NonMonitored: renameNonMonitoredListFn(cfg, cfgMu),
 		Publisher:    broker,
 		Interval:     interval,
 	})
+}
+
+// gatedRenameDispatcher makes the reconciler's SQLite, TOML, in-memory config
+// and clone-worktree mutations one update-safe transaction. Canonical-name
+// probes may continue while draining because they are read-only; a mismatch is
+// simply retried by the next probe (including the immediate probe on restart).
+type gatedRenameDispatcher struct {
+	gate *workgate.Gate
+	next rename.Dispatcher
+}
+
+func (d gatedRenameDispatcher) Run(ctx context.Context, oldRepo, newRepo string) error {
+	ctx, permit, owned, err := d.gate.AcquireContext(ctx, workgate.KindMaintenance)
+	if err != nil {
+		if errors.Is(err, workgate.ErrDraining) {
+			slog.Debug("rename probe: reconciliation deferred while application update drains",
+				"old_repo", oldRepo, "new_repo", newRepo)
+			return nil
+		}
+		return err
+	}
+	if owned {
+		defer permit.Release()
+	}
+	return d.next.Run(ctx, oldRepo, newRepo)
 }
 
 // newRenameReconciler is the constructor seam that the admin endpoint

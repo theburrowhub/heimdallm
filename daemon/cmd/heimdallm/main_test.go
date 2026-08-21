@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,8 +18,11 @@ import (
 	gh "github.com/heimdallm/daemon/internal/github"
 	issuepipeline "github.com/heimdallm/daemon/internal/issues"
 	"github.com/heimdallm/daemon/internal/repoctx"
+	"github.com/heimdallm/daemon/internal/scheduler"
+	"github.com/heimdallm/daemon/internal/server"
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
+	"github.com/heimdallm/daemon/internal/workgate"
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 )
@@ -35,6 +39,210 @@ func newMemStore(t *testing.T) *store.Store {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	return s
+}
+
+func TestUpdateServerErrorMapsEveryUpdaterProtocolFailure(t *testing.T) {
+	unknown := errors.New("storage unavailable")
+	tests := []struct {
+		name string
+		in   error
+		want error
+	}{
+		{name: "lease required", in: workgate.ErrLeaseIDRequired, want: server.ErrUpdateLeaseRequired},
+		{name: "lease invalid", in: workgate.ErrLeaseIDInvalid, want: server.ErrUpdateLeaseInvalid},
+		{name: "lease conflict", in: workgate.ErrLeaseConflict, want: server.ErrUpdateLeaseConflict},
+		{name: "work active", in: workgate.ErrWorkActive, want: server.ErrUpdateNotReady},
+		{name: "lease not sealed", in: workgate.ErrLeaseNotSealed, want: server.ErrUpdateNotSealed},
+		{name: "bootstrap not authorized", in: workgate.ErrBootstrapNotAuthorized, want: server.ErrUpdateBootstrapNotAuthorized},
+		{name: "unknown preserved", in: unknown, want: unknown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := updateServerError(tt.in); got != tt.want {
+				t.Fatalf("updateServerError(%v) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSnapshotUpdatePreparationReportsEveryLifecycleState(t *testing.T) {
+	expiresAt := time.Now().UTC().Add(time.Minute)
+	tests := []struct {
+		name     string
+		snapshot workgate.Snapshot
+		want     string
+	}{
+		{name: "running", snapshot: workgate.Snapshot{}, want: "running"},
+		{
+			name: "draining active work",
+			snapshot: workgate.Snapshot{
+				Draining:       true,
+				LeaseID:        "owner",
+				LeaseExpiresAt: expiresAt,
+				Active:         map[workgate.Kind]int{workgate.KindReview: 2},
+			},
+			want: "draining",
+		},
+		{
+			name: "sealed ready",
+			snapshot: workgate.Snapshot{
+				Draining:            true,
+				Sealed:              true,
+				BootstrapAuthorized: true,
+				LeaseID:             "owner",
+			},
+			want: "ready",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := snapshotUpdatePreparation(tt.snapshot, "boot-id")
+			if got.State != tt.want || got.BootID != "boot-id" || got.PID <= 0 {
+				t.Fatalf("status = %+v, want state %q and process identity", got, tt.want)
+			}
+			if got.ActiveTotal != tt.snapshot.Total() || got.LeaseID != tt.snapshot.LeaseID ||
+				got.Sealed != tt.snapshot.Sealed || got.BootstrapAuthorized != tt.snapshot.BootstrapAuthorized ||
+				!got.LeaseExpiresAt.Equal(tt.snapshot.LeaseExpiresAt) {
+				t.Fatalf("status did not preserve snapshot: got %+v, source %+v", got, tt.snapshot)
+			}
+			if len(tt.snapshot.Active) > 0 && got.Active[string(workgate.KindReview)] != 2 {
+				t.Fatalf("active map = %#v, want reviews=2", got.Active)
+			}
+		})
+	}
+}
+
+func TestAcquireUpdateWorkOwnsOnlyTopLevelPermit(t *testing.T) {
+	ctx, releaseNilGate, err := acquireUpdateWork(nil, nil, workgate.KindReview)
+	if err != nil {
+		t.Fatalf("acquire with nil gate: %v", err)
+	}
+	if ctx == nil || releaseNilGate == nil {
+		t.Fatal("nil gate did not return a usable context and cleanup")
+	}
+	releaseNilGate()
+
+	gate := workgate.New(time.Minute)
+	outerCtx, releaseOuter, err := acquireUpdateWork(t.Context(), gate, workgate.KindReview)
+	if err != nil {
+		t.Fatalf("acquire outer work: %v", err)
+	}
+	if got := gate.Status().Total(); got != 1 {
+		t.Fatalf("active permits after outer acquire = %d, want 1", got)
+	}
+
+	_, releaseNested, err := acquireUpdateWork(outerCtx, gate, workgate.KindIssue)
+	if err != nil {
+		t.Fatalf("acquire nested work: %v", err)
+	}
+	releaseNested()
+	if got := gate.Status().Total(); got != 1 {
+		t.Fatalf("nested cleanup released outer permit: total = %d, want 1", got)
+	}
+	releaseOuter()
+	if got := gate.Status().Total(); got != 0 {
+		t.Fatalf("active permits after outer cleanup = %d, want 0", got)
+	}
+
+	if _, err := gate.Prepare("updater-owner"); err != nil {
+		t.Fatalf("prepare drain: %v", err)
+	}
+	_, releaseDraining, err := acquireUpdateWork(t.Context(), gate, workgate.KindMaintenance)
+	if !errors.Is(err, workgate.ErrDraining) {
+		t.Fatalf("acquire during drain error = %v, want ErrDraining", err)
+	}
+	if releaseDraining != nil {
+		t.Fatal("acquire during drain returned a cleanup for unadmitted work")
+	}
+}
+
+func TestGuardUpdateHandlersCarryPermitAndDeferDuringDrain(t *testing.T) {
+	gate := workgate.New(time.Minute)
+	voidCalls := 0
+	voidHandler := guardUpdateVoidHandler(
+		gate,
+		workgate.KindReview,
+		"test void deferred",
+		func(ctx context.Context, message string) {
+			voidCalls++
+			if message != "review" {
+				t.Errorf("void message = %q, want review", message)
+			}
+			if workgate.PermitFromContext(ctx) == nil {
+				t.Error("void handler did not receive its update permit")
+			}
+			if got := gate.Status().Total(); got != 1 {
+				t.Errorf("active permits inside void handler = %d, want 1", got)
+			}
+		},
+	)
+	voidHandler(t.Context(), "review")
+	if voidCalls != 1 || gate.Status().Total() != 0 {
+		t.Fatalf("void handler cleanup = calls %d, active %d; want 1, 0",
+			voidCalls, gate.Status().Total())
+	}
+
+	resultHandler := guardUpdateResultHandler(
+		gate,
+		workgate.KindPublish,
+		"test result deferred",
+		-1,
+		func(ctx context.Context, message int) int {
+			if workgate.PermitFromContext(ctx) == nil {
+				t.Error("result handler did not receive its update permit")
+			}
+			return message + 1
+		},
+	)
+	if got := resultHandler(t.Context(), 41); got != 42 {
+		t.Fatalf("result handler = %d, want 42", got)
+	}
+	if got := gate.Status().Total(); got != 0 {
+		t.Fatalf("active permits after result handler = %d, want 0", got)
+	}
+
+	if _, err := gate.Prepare("updater-owner"); err != nil {
+		t.Fatalf("prepare drain: %v", err)
+	}
+	voidHandler(t.Context(), "deferred")
+	if voidCalls != 1 {
+		t.Fatalf("void handler ran during drain: calls = %d, want 1", voidCalls)
+	}
+	if got := resultHandler(t.Context(), 99); got != -1 {
+		t.Fatalf("result during drain = %d, want deferred sentinel -1", got)
+	}
+}
+
+func TestRunStartupWorktreePruneHonorsRestoredDrain(t *testing.T) {
+	gate := workgate.New(time.Minute)
+	if _, err := gate.Prepare("updater-owner"); err != nil {
+		t.Fatalf("prepare drain: %v", err)
+	}
+	called := false
+	err := runStartupWorktreePrune(t.Context(), gate, func(context.Context) {
+		called = true
+	})
+	if !errors.Is(err, workgate.ErrDraining) {
+		t.Fatalf("startup prune during drain error = %v, want ErrDraining", err)
+	}
+	if called {
+		t.Fatal("startup prune ran while updater owned the persistent drain")
+	}
+
+	if _, err := gate.Cancel("updater-owner"); err != nil {
+		t.Fatalf("cancel drain: %v", err)
+	}
+	if err := runStartupWorktreePrune(t.Context(), gate, func(context.Context) {
+		called = true
+	}); err != nil {
+		t.Fatalf("startup prune after drain: %v", err)
+	}
+	if !called {
+		t.Fatal("startup prune did not run after drain cancellation")
+	}
+	if got := gate.Status().Total(); got != 0 {
+		t.Fatalf("active permits after startup prune = %d, want 0", got)
+	}
 }
 
 func TestAcquireRepoContextNilManagerIsError(t *testing.T) {
@@ -1031,6 +1239,57 @@ func TestTier2AdapterPromoteReadyUsesOrgScopedIssueTracking(t *testing.T) {
 	}
 }
 
+func TestTier2AdapterPromoteReadyDefersDuringUpdateDrain(t *testing.T) {
+	gate := workgate.New(time.Minute)
+	if _, err := gate.Prepare("updater-owner"); err != nil {
+		t.Fatalf("prepare drain: %v", err)
+	}
+	cfg := &config.Config{}
+	cfgRef := cfg
+	var cfgMu sync.Mutex
+	a := &tier2Adapter{
+		cfgMu:    &cfgMu,
+		cfg:      &cfgRef,
+		broker:   sse.NewBroker(),
+		workGate: gate,
+	}
+
+	n, err := a.PromoteReady(t.Context(), []string{"org/repo"})
+	if n != 0 || !errors.Is(err, workgate.ErrDraining) {
+		t.Fatalf("PromoteReady during drain = (%d, %v), want (0, ErrDraining)", n, err)
+	}
+}
+
+func TestTier2AdapterProcessorsDeferBeforeDependenciesDuringUpdateDrain(t *testing.T) {
+	gate := workgate.New(time.Minute)
+	if _, err := gate.Prepare("updater-owner"); err != nil {
+		t.Fatalf("prepare drain: %v", err)
+	}
+	reviewCalled := false
+	a := &tier2Adapter{
+		workGate: gate,
+		runReview: func(context.Context, *gh.PullRequest, config.RepoAI) *store.Review {
+			reviewCalled = true
+			return nil
+		},
+	}
+
+	if err := a.ProcessPR(t.Context(), scheduler.Tier2PR{Repo: "org/repo", Number: 7}); err != nil {
+		t.Fatalf("ProcessPR during drain: %v", err)
+	}
+	if reviewCalled {
+		t.Fatal("ProcessPR reached review dependencies during update drain")
+	}
+
+	processed, err := a.ProcessRepo(t.Context(), "org/repo")
+	if err != nil || processed != 0 {
+		t.Fatalf("ProcessRepo during drain = (%d, %v), want (0, nil)", processed, err)
+	}
+	if got := gate.Status().Total(); got != 0 {
+		t.Fatalf("active permits after deferred processors = %d, want 0", got)
+	}
+}
+
 func TestTier2AdapterPromoteReadyBatchesReposWithSameIssueTracking(t *testing.T) {
 	sharedGets := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1472,6 +1731,31 @@ func tokenPerm(t *testing.T, path string) os.FileMode {
 		t.Fatalf("stat %s: %v", path, err)
 	}
 	return fi.Mode().Perm()
+}
+
+func TestLoadExistingAPITokenRecoveryPathNeverCreatesOrMutates(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := loadExistingAPIToken(dir); err == nil {
+		t.Fatal("loadExistingAPIToken created or accepted a missing credential")
+	}
+	path := filepath.Join(dir, "api_token")
+	token := strings.Repeat("r", 64)
+	if err := os.WriteFile(path, []byte(token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadExistingAPIToken(dir)
+	if err != nil || got != token {
+		t.Fatalf("loadExistingAPIToken = (%q, %v), want existing token", got, err)
+	}
+	if mode := tokenPerm(t, path); mode != 0o600 {
+		t.Fatalf("recovery token mode changed to %o, want 600", mode)
+	}
+	if err := os.WriteFile(path, []byte("short\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadExistingAPIToken(dir); err == nil {
+		t.Fatal("loadExistingAPIToken accepted an invalid credential")
+	}
 }
 
 func TestLoadOrCreateAPIToken_NewFileIsWorldReadable(t *testing.T) {

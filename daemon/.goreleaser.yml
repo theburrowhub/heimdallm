@@ -20,12 +20,13 @@ builds:
 # Requires: staging/ prepared by the workflow (Flutter bundle + icons + desktop entry)
 nfpms:
   - id: linux-packages
-    builds:
+    ids:
       - daemon
     bindir: /opt/heimdallm
     package_name: heimdallm
     file_name_template: "{{ .PackageName }}_{{ .Version }}_{{ .Arch }}"
     vendor: The Burrow Hub
+    maintainer: The Burrow Hub <theburrowhub@users.noreply.github.com>
     homepage: https://github.com/theburrowhub/heimdallm
     description: "AI-powered GitHub PR review agent"
     license: MIT
@@ -59,6 +60,9 @@ nfpms:
         dst: /usr/share/icons
         type: tree
 
+checksum:
+  name_template: "daemon-checksums.txt"
+
 changelog:
   disable: true
 
@@ -66,5 +70,9 @@ release:
   github:
     owner: theburrowhub
     name: heimdallm
+  draft: true
+  use_existing_draft: true
+  replace_existing_artifacts: true
+  make_latest: false
   mode: keep-existing
   extra_files: []

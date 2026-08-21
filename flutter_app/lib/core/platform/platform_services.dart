@@ -1,3 +1,4 @@
+import 'dart:async' show Stream;
 import 'dart:ui' show VoidCallback;
 import 'package:flutter/painting.dart' show Size;
 import '../api/api_client.dart';
@@ -19,6 +20,46 @@ export 'platform_services_stub.dart'
 /// mean another process may own the port, so starting a second process would
 /// be unsafe.
 enum TcpPortState { open, closed, unknown }
+
+/// Native update capability of the current application build.
+enum AppUpdateSupport {
+  /// The desktop build can verify and replace its complete installation.
+  native,
+
+  /// Updates belong to the package/deployment owner on this platform.
+  unavailable,
+}
+
+/// User-visible lifecycle of the desktop application updater.
+enum AppUpdatePhase { idle, checking, available, installing, restarting, error }
+
+/// Platform-neutral update state consumed by the dashboard and system tray.
+class AppUpdateStatus {
+  const AppUpdateStatus({required this.phase, this.version, this.message});
+
+  const AppUpdateStatus.idle({String? message})
+    : this(phase: AppUpdatePhase.idle, message: message);
+
+  final AppUpdatePhase phase;
+  final String? version;
+  final String? message;
+
+  bool get updateAvailable => phase == AppUpdatePhase.available;
+  bool get busy =>
+      phase == AppUpdatePhase.checking ||
+      phase == AppUpdatePhase.installing ||
+      phase == AppUpdatePhase.restarting;
+
+  factory AppUpdateStatus.fromMap(Map<Object?, Object?> value) {
+    final rawPhase = value['phase']?.toString();
+    final phase = AppUpdatePhase.values.where((item) => item.name == rawPhase);
+    return AppUpdateStatus(
+      phase: phase.isEmpty ? AppUpdatePhase.idle : phase.first,
+      version: value['version']?.toString(),
+      message: value['message']?.toString(),
+    );
+  }
+}
 
 /// Raised by [PlatformServices.spawnDaemon] when another process owns the
 /// daemon port. The guarded spawn operation is the final authority: an HTTP
@@ -75,12 +116,13 @@ abstract class PlatformServices {
   // ── Single-instance + signals ───────────────────────────────────────────
 
   /// Returns true if this is the only running instance.
-  /// Returns false if another instance was found (and signalled);
+  /// Returns false if another instance owns the lifetime lock (and was asked
+  /// to activate over local IPC);
   /// the caller should then exit the process. Always true on web.
   Future<bool> ensureSingleInstance();
 
-  /// Registers a listener that fires when another instance attempts to
-  /// start (on desktop: SIGUSR1). No-op on web.
+  /// Registers a listener that fires when another instance attempts to start.
+  /// No-op on web.
   void listenForActivationSignal(VoidCallback onActivate);
 
   // ── Window / tray / notifier ────────────────────────────────────────────
@@ -121,8 +163,11 @@ abstract class PlatformServices {
   /// Hide the main window (tray workflows). No-op on web.
   Future<void> hideWindow();
 
-  /// Process-level quit. On desktop: `exit(0)`. On web: no-op.
-  Never quitApp();
+  /// Requests normal application termination. macOS must go through AppKit so
+  /// Sparkle and Flutter can postpone termination while the daemon drains.
+  void quitApp();
+
+  // ── Application updates ────────────────────────────────────────────────
 
   // ── First-run setup / daemon spawn ──────────────────────────────────────
 
@@ -147,4 +192,112 @@ abstract class PlatformServices {
   /// Returns user's repos, with gh CLI preferred on desktop and HTTP API
   /// fallback. Safe to call from shared code; on web it's HTTP-only.
   Future<List<String>> discoverReposFromPRs(String token);
+}
+
+/// Optional application-update boundary implemented only by platforms that
+/// own an in-process updater. Package- and deployment-managed platforms do not
+/// have to pretend they can update themselves merely to satisfy the main
+/// platform interface.
+abstract interface class AppUpdatePlatformCapability {
+  AppUpdateSupport get appUpdateSupport;
+  AppUpdateStatus get appUpdateStatus;
+  Stream<AppUpdateStatus> get appUpdateEvents;
+
+  Future<void> setupAppUpdater();
+  Future<void> checkForAppUpdates();
+  Future<void> installAppUpdate();
+  Future<String?> pendingAppUpdateVersion();
+  Future<void> completeAppUpdate();
+  Future<void> finalizeAppUpdate();
+}
+
+/// Optional termination path for a process that has already disproved desktop
+/// singleton ownership. It is separate from normal application termination so
+/// an update-owning process can still drain safely through
+/// [PlatformServices.quitApp].
+abstract interface class DuplicateInstancePlatformCapability {
+  void quitDuplicateInstance();
+}
+
+/// Safe defaults for optional native capabilities.
+///
+/// Keeping these defaults in VM-loadable shared code means the browser adapter
+/// stays independent of the macOS updater and remains covered by its existing
+/// browser-only contract.
+extension OptionalPlatformCapabilities on PlatformServices {
+  AppUpdateSupport get appUpdateSupport {
+    final platform = this;
+    return platform is AppUpdatePlatformCapability
+        ? (platform as AppUpdatePlatformCapability).appUpdateSupport
+        : AppUpdateSupport.unavailable;
+  }
+
+  Future<void> setupAppUpdater() async {
+    final platform = this;
+    if (platform is AppUpdatePlatformCapability) {
+      await (platform as AppUpdatePlatformCapability).setupAppUpdater();
+    }
+  }
+
+  AppUpdateStatus get appUpdateStatus {
+    final platform = this;
+    return platform is AppUpdatePlatformCapability
+        ? (platform as AppUpdatePlatformCapability).appUpdateStatus
+        : const AppUpdateStatus.idle();
+  }
+
+  Stream<AppUpdateStatus> get appUpdateEvents {
+    final platform = this;
+    return platform is AppUpdatePlatformCapability
+        ? (platform as AppUpdatePlatformCapability).appUpdateEvents
+        : const Stream<AppUpdateStatus>.empty();
+  }
+
+  Future<void> checkForAppUpdates() async {
+    final platform = this;
+    if (platform is! AppUpdatePlatformCapability) {
+      throw UnsupportedError(
+        'Application updates are managed outside this Heimdallm process',
+      );
+    }
+    await (platform as AppUpdatePlatformCapability).checkForAppUpdates();
+  }
+
+  Future<void> installAppUpdate() async {
+    final platform = this;
+    if (platform is! AppUpdatePlatformCapability) {
+      throw UnsupportedError(
+        'Application updates are managed outside this Heimdallm process',
+      );
+    }
+    await (platform as AppUpdatePlatformCapability).installAppUpdate();
+  }
+
+  Future<String?> pendingAppUpdateVersion() async {
+    final platform = this;
+    return platform is AppUpdatePlatformCapability
+        ? (platform as AppUpdatePlatformCapability).pendingAppUpdateVersion()
+        : null;
+  }
+
+  Future<void> completeAppUpdate() async {
+    final platform = this;
+    if (platform is AppUpdatePlatformCapability) {
+      await (platform as AppUpdatePlatformCapability).completeAppUpdate();
+    }
+  }
+
+  Future<void> finalizeAppUpdate() async {
+    final platform = this;
+    if (platform is AppUpdatePlatformCapability) {
+      await (platform as AppUpdatePlatformCapability).finalizeAppUpdate();
+    }
+  }
+
+  void quitDuplicateInstance() {
+    final platform = this;
+    if (platform is DuplicateInstancePlatformCapability) {
+      (platform as DuplicateInstancePlatformCapability).quitDuplicateInstance();
+    }
+  }
 }

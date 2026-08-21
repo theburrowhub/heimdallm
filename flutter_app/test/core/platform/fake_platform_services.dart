@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:ui' show VoidCallback;
 import 'package:flutter/painting.dart' show Size;
 import 'package:heimdallm/core/api/api_client.dart';
@@ -8,7 +9,11 @@ import 'package:heimdallm/core/platform/platform_services.dart';
 /// In-memory fake used by every non-platform-specific test. Every method
 /// records its calls so assertions stay tight — no unexpected interactions
 /// should slip past a test.
-class FakePlatformServices implements PlatformServices {
+class FakePlatformServices
+    implements
+        PlatformServices,
+        AppUpdatePlatformCapability,
+        DuplicateInstancePlatformCapability {
   FakePlatformServices({
     this.apiBaseUrl = 'http://127.0.0.1:7842',
     this.token,
@@ -16,7 +21,13 @@ class FakePlatformServices implements PlatformServices {
     this.configExistsValue = true,
     this.githubToken,
     this.daemonBinaryPath,
-  }) : _env = env ?? const {};
+    this.appUpdateSupport = AppUpdateSupport.unavailable,
+    this.pendingUpdateVersion,
+    this.pendingUpdateError,
+    this.completeUpdateError,
+    AppUpdateStatus? appUpdateStatus,
+  }) : _env = env ?? const {},
+       _appUpdateStatus = appUpdateStatus ?? const AppUpdateStatus.idle();
 
   @override
   final String apiBaseUrl;
@@ -25,6 +36,14 @@ class FakePlatformServices implements PlatformServices {
   bool configExistsValue;
   String? githubToken;
   String? daemonBinaryPath;
+  @override
+  final AppUpdateSupport appUpdateSupport;
+  String? pendingUpdateVersion;
+  Object? pendingUpdateError;
+  Object? completeUpdateError;
+  AppUpdateStatus _appUpdateStatus;
+  final StreamController<AppUpdateStatus> _appUpdateEvents =
+      StreamController<AppUpdateStatus>.broadcast();
 
   // Records of calls for assertions.
   int loadApiTokenCalls = 0;
@@ -38,6 +57,12 @@ class FakePlatformServices implements PlatformServices {
   int showAndFocusCalls = 0;
   int hideCalls = 0;
   int quitCalls = 0;
+  int quitDuplicateInstanceCalls = 0;
+  int setupAppUpdaterCalls = 0;
+  int checkForAppUpdatesCalls = 0;
+  int installAppUpdateCalls = 0;
+  int completeAppUpdateCalls = 0;
+  int finalizeAppUpdateCalls = 0;
   final List<AppConfig> writtenConfigs = [];
   final List<String> spawnedDaemons = [];
   void Function(String location)? trayNavigationHandler;
@@ -108,9 +133,53 @@ class FakePlatformServices implements PlatformServices {
   Future<void> hideWindow() async => hideCalls++;
 
   @override
-  Never quitApp() {
+  void quitApp() {
     quitCalls++;
-    throw _FakeQuitException();
+  }
+
+  @override
+  void quitDuplicateInstance() {
+    quitDuplicateInstanceCalls++;
+  }
+
+  @override
+  Future<void> setupAppUpdater() async => setupAppUpdaterCalls++;
+
+  @override
+  AppUpdateStatus get appUpdateStatus => _appUpdateStatus;
+
+  @override
+  Stream<AppUpdateStatus> get appUpdateEvents => _appUpdateEvents.stream;
+
+  void emitAppUpdateStatus(AppUpdateStatus status) {
+    _appUpdateStatus = status;
+    _appUpdateEvents.add(status);
+  }
+
+  @override
+  Future<void> checkForAppUpdates() async => checkForAppUpdatesCalls++;
+
+  @override
+  Future<void> installAppUpdate() async => installAppUpdateCalls++;
+
+  @override
+  Future<String?> pendingAppUpdateVersion() async {
+    final error = pendingUpdateError;
+    if (error != null) throw error;
+    return pendingUpdateVersion;
+  }
+
+  @override
+  Future<void> completeAppUpdate() async {
+    completeAppUpdateCalls++;
+    final error = completeUpdateError;
+    if (error != null) throw error;
+    pendingUpdateVersion = null;
+  }
+
+  @override
+  Future<void> finalizeAppUpdate() async {
+    finalizeAppUpdateCalls++;
   }
 
   @override
@@ -156,7 +225,3 @@ class FakePlatformServices implements PlatformServices {
   Future<List<String>> discoverReposFromPRs(String token) async =>
       discoveredRepos;
 }
-
-/// Thrown by [FakePlatformServices.quitApp] to replace `exit(0)` in tests.
-/// Tests catch it to assert the app tried to exit.
-class _FakeQuitException implements Exception {}

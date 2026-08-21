@@ -30,5 +30,23 @@
 	<string>NSApplication</string>
 	<key>LSMultipleInstancesProhibited</key>
 	<true/>
+	<key>SUFeedURL</key>
+	<string>https://github.com/theburrowhub/heimdallm/releases/latest/download/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>eBiLZ1yDuQ/NVCx7VJoQZJm6FpB8S0yH9WHtxaRfEDw=</string>
+	<key>SURequireSignedFeed</key>
+	<true/>
+	<key>SUSignedFeedFailureExpirationInterval</key>
+	<integer>0</integer>
+	<key>SUVerifyUpdateBeforeExtraction</key>
+	<true/>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
+	<key>SUAllowsAutomaticUpdates</key>
+	<false/>
+	<key>SUAutomaticallyUpdate</key>
+	<false/>
 </dict>
 </plist>

@@ -13,6 +13,7 @@ import (
 	"github.com/heimdallm/daemon/internal/issues"
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
+	"github.com/heimdallm/daemon/internal/workgate"
 )
 
 // ── FixRunner fakes ──────────────────────────────────────────────────────────
@@ -113,6 +114,27 @@ func crReview(login, body string, at time.Time) github.PRReview {
 }
 
 // ── tests ────────────────────────────────────────────────────────────────────
+
+func TestFixRunner_UpdateDrainRejectsBeforeSideEffects(t *testing.T) {
+	st := &fakeFixStore{}
+	gh := &fakeFixGH{reviews: []github.PRReview{crReview("alice", "rename", time.Now())}}
+	exec := &fakeFixExec{result: pushedResult()}
+	r := makeFixRunner(t, st, gh, exec, &fakeResponderBroker{}, config.ReviewFixConfig{
+		Enabled: true, PerPRLifetime: 3,
+	})
+	gate := workgate.New(time.Minute)
+	if _, err := gate.Prepare("update-owner"); err != nil {
+		t.Fatal(err)
+	}
+	r.SetWorkGate(gate)
+
+	if err := r.Run(context.Background(), samplePR(), 99); !errors.Is(err, issues.ErrUpdateDraining) {
+		t.Fatalf("Run error = %v, want ErrUpdateDraining", err)
+	}
+	if exec.called || gh.postCalled || st.count != 0 {
+		t.Fatalf("draining fix had side effects: exec=%v post=%v count=%d", exec.called, gh.postCalled, st.count)
+	}
+}
 
 // pushedResult is the canonical "happy path" result the production
 // executor returns when the agent produced changes that were

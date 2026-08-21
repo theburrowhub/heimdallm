@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/heimdallm/daemon/internal/bus"
+	"github.com/heimdallm/daemon/internal/workgate"
 	"github.com/nats-io/nats.go"
 )
 
@@ -24,7 +25,13 @@ type StateWorker struct {
 	watchKV   *bus.WatchStore
 	handler   StateHandler
 	semaphore chan struct{}
+	workGate  *workgate.Gate
 }
+
+// SetWorkGate admits a complete state transaction, including handler side
+// effects and the final watch backoff write, before an updater may stop the
+// daemon.
+func (w *StateWorker) SetWorkGate(gate *workgate.Gate) { w.workGate = gate }
 
 // NewStateWorker creates a worker that subscribes to the state check subject.
 // After each handler call, it updates the SQLite backoff state: reset on
@@ -58,30 +65,39 @@ func (w *StateWorker) Start(ctx context.Context, ready ...chan<- error) error {
 
 		go func() {
 			defer func() { <-w.semaphore }()
+			handleCtx, permit, owned, err := w.workGate.AcquireContext(ctx, workgate.KindState)
+			if err != nil {
+				slog.Debug("state-worker: deferred while application update drains",
+					"type", checkMsg.Type, "repo", checkMsg.Repo, "number", checkMsg.Number)
+				return
+			}
+			if owned {
+				defer permit.Release()
+			}
 
 			slog.Debug("state-worker: checking",
 				"type", checkMsg.Type, "repo", checkMsg.Repo,
 				"number", checkMsg.Number, "github_id", checkMsg.GithubID)
 
-			changed, handlerErr := w.safeHandle(ctx, checkMsg)
+			changed, handlerErr := w.safeHandle(handleCtx, checkMsg)
 
 			key := fmt.Sprintf("%s.%d", checkMsg.Type, checkMsg.GithubID)
 			if handlerErr != nil {
 				slog.Warn("state-worker: check failed",
 					"type", checkMsg.Type, "repo", checkMsg.Repo,
 					"number", checkMsg.Number, "err", handlerErr)
-				if kvErr := w.watchKV.IncreaseBackoff(ctx, key); kvErr != nil && !errors.Is(kvErr, bus.ErrWatchNotFound) {
+				if kvErr := w.watchKV.IncreaseBackoff(handleCtx, key); kvErr != nil && !errors.Is(kvErr, bus.ErrWatchNotFound) {
 					slog.Warn("state-worker: increase backoff failed", "key", key, "err", kvErr)
 				}
 			} else if changed {
 				slog.Info("state-worker: change detected",
 					"type", checkMsg.Type, "repo", checkMsg.Repo,
 					"number", checkMsg.Number)
-				if kvErr := w.watchKV.ResetBackoff(ctx, key, time.Now()); kvErr != nil && !errors.Is(kvErr, bus.ErrWatchNotFound) {
+				if kvErr := w.watchKV.ResetBackoff(handleCtx, key, time.Now()); kvErr != nil && !errors.Is(kvErr, bus.ErrWatchNotFound) {
 					slog.Warn("state-worker: reset backoff failed", "key", key, "err", kvErr)
 				}
 			} else {
-				if kvErr := w.watchKV.IncreaseBackoff(ctx, key); kvErr != nil && !errors.Is(kvErr, bus.ErrWatchNotFound) {
+				if kvErr := w.watchKV.IncreaseBackoff(handleCtx, key); kvErr != nil && !errors.Is(kvErr, bus.ErrWatchNotFound) {
 					slog.Warn("state-worker: increase backoff failed", "key", key, "err", kvErr)
 				}
 			}

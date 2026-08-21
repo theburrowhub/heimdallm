@@ -95,6 +95,12 @@ Installs to `/opt/heimdallm/` with a desktop entry and `/usr/bin/heimdallm` syml
 
 > **Requires**: `gh` CLI authenticated (`gh auth login`). Token stored via GNOME Keyring / KDE Wallet (`secret-tool`), or `~/.config/heimdallm/.token` as fallback.
 
+Signed release builds check for updates once a day. When one is available,
+Heimdallm shows a dashboard banner and a system-tray action that updates the
+complete app plus daemon with one click (`.deb` / `.rpm` may show the normal OS
+authorization prompt). Docker/web and source-built installs remain managed by
+their deployment or checkout.
+
 ### Linux (from source, Docker-built)
 
 Developers with a clone of this repo who want a native install without the full Flutter toolchain on the host:
