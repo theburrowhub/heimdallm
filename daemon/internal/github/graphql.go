@@ -201,10 +201,10 @@ func (c *Client) SearchIssuesGraphQL(searchQuery string) ([]*Issue, error) {
 	var cursor *string // nil on first page
 
 	for page := 1; page <= maxSearchIssuePages; page++ {
-		// Same metering as the REST path — GraphQL search spends its own
-		// budget per request too.
-		if err := c.acquireSearch(); err != nil {
-			return nil, fmt.Errorf("github: search budget: %w", err)
+		// GraphQL has its own GitHub rate-limit resource. Do not let an
+		// exhausted REST Search budget stall a healthy GraphQL query.
+		if err := c.acquireGraphQL(); err != nil {
+			return nil, fmt.Errorf("github: graphql budget: %w", err)
 		}
 		vars := map[string]any{"q": searchQuery}
 		if cursor != nil {

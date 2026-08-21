@@ -20,7 +20,9 @@ import (
 // an HTTP server standing in.
 type fakePromoteClient struct {
 	open      map[string][]*github.Issue // repo → open issues (listed)
-	byRef     map[string]*github.Issue   // "repo#N" → issue (for GetIssue)
+	listCalls int
+	byRef     map[string]*github.Issue // "repo#N" → issue (for GetIssue)
+	getCalls  []string
 	subIssues map[string][]*github.Issue // "repo#N" → children (for ListSubIssues)
 	added     []struct {
 		Repo   string
@@ -51,16 +53,186 @@ type fakePromoteClient struct {
 }
 
 func (f *fakePromoteClient) ListOpenIssues(repo string) ([]*github.Issue, error) {
+	f.listCalls++
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
 	return f.open[repo], nil
 }
+
+func TestPromoteReadyWithPrefetchSkipsPerRepoList(t *testing.T) {
+	issue := mkIssue("org/r", 10, "open", "", "blocked")
+	fake := &fakePromoteClient{
+		open:      map[string][]*github.Issue{"org/r": {mkIssue("org/r", 99, "open", "", "blocked")}},
+		byRef:     map[string]*github.Issue{"org/r#10": issue},
+		subIssues: map[string][]*github.Issue{"org/r#10": {}},
+	}
+
+	n, err := PromoteReadyWithPrefetch(
+		context.Background(), fake, baseCfg(), []string{"org/r"},
+		map[string][]*github.Issue{"org/r": {issue}}, nil,
+	)
+	if err != nil {
+		t.Fatalf("PromoteReadyWithPrefetch: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("promotions = %d, want 0 for blocked issue without dependencies", n)
+	}
+	if fake.listCalls != 0 {
+		t.Fatalf("ListOpenIssues calls = %d, want 0 with complete snapshot", fake.listCalls)
+	}
+}
+
+func TestPromoteReadyWithPrefetchSkipsNilSnapshotIssue(t *testing.T) {
+	fake := &fakePromoteClient{
+		// If a nil snapshot entry accidentally triggered REST fallback, this
+		// issue would make the mistake observable through listCalls.
+		open: map[string][]*github.Issue{
+			"org/r": {mkIssue("org/r", 99, "open", "## Depends on\n- #5\n", "blocked")},
+		},
+	}
+
+	n, err := PromoteReadyWithPrefetch(
+		context.Background(), fake, baseCfg(), []string{"org/r"},
+		map[string][]*github.Issue{"org/r": {nil}}, nil,
+	)
+	if err != nil {
+		t.Fatalf("PromoteReadyWithPrefetch: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("promotions = %d, want 0 for a nil snapshot entry", n)
+	}
+	if fake.listCalls != 0 || len(fake.getCalls) != 0 {
+		t.Fatalf("unexpected reads: ListOpenIssues=%d GetIssue=%v", fake.listCalls, fake.getCalls)
+	}
+	if len(fake.removed) != 0 || len(fake.added) != 0 {
+		t.Fatalf("nil snapshot entry mutated labels: removed=%v added=%v", fake.removed, fake.added)
+	}
+}
+
+func TestPromoteReadyWithPrefetchSkipsUnavailableFreshCandidate(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		getErr error
+		fresh  *github.Issue
+	}{
+		{name: "get error", getErr: errors.New("fresh lookup failed")},
+		{name: "nil result", fresh: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stale := mkIssue("org/r", 10, "open", "## Depends on\n- #5\n", "blocked")
+			fake := &fakePromoteClient{
+				byRef:  map[string]*github.Issue{"org/r#10": tc.fresh},
+				getErr: tc.getErr,
+			}
+
+			n, err := PromoteReadyWithPrefetch(
+				context.Background(), fake, baseCfg(), []string{"org/r"},
+				map[string][]*github.Issue{"org/r": {stale}}, nil,
+			)
+			if err != nil {
+				t.Fatalf("PromoteReadyWithPrefetch: %v", err)
+			}
+			if n != 0 {
+				t.Fatalf("promotions = %d, want 0 when fresh candidate is unavailable", n)
+			}
+			if len(fake.getCalls) != 1 || fake.getCalls[0] != "org/r#10" {
+				t.Fatalf("GetIssue calls = %v, want [org/r#10]", fake.getCalls)
+			}
+			if len(fake.removed) != 0 || len(fake.added) != 0 || len(fake.comments) != 0 {
+				t.Fatalf("unvalidated candidate caused side effects: removed=%v added=%v comments=%v",
+					fake.removed, fake.added, fake.comments)
+			}
+		})
+	}
+}
+
+func TestPromoteReadyWithPrefetchSkipsNonBlockedSnapshotWithoutRefresh(t *testing.T) {
+	candidate := mkIssue("org/r", 10, "open", "## Depends on\n- #5\n", "ready")
+	fake := &fakePromoteClient{}
+
+	n, err := PromoteReadyWithPrefetch(
+		context.Background(), fake, baseCfg(), []string{"org/r"},
+		map[string][]*github.Issue{"org/r": {candidate}}, nil,
+	)
+	if err != nil {
+		t.Fatalf("PromoteReadyWithPrefetch: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("promotions = %d, want 0 for an issue without a blocked label", n)
+	}
+	if len(fake.getCalls) != 0 {
+		t.Fatalf("GetIssue calls = %v, want none for a non-candidate", fake.getCalls)
+	}
+}
+
+func TestPromoteReadyWithPrefetchRevalidatesBeforeMutation(t *testing.T) {
+	stale := mkIssue("org/r", 10, "open", "## Depends on\n- #5\n", "blocked")
+	fake := &fakePromoteClient{
+		byRef: map[string]*github.Issue{
+			"org/r#5":  mkIssue("org/r", 5, "closed", ""),
+			"org/r#10": mkIssue("org/r", 10, "open", ""), // blocked label was removed after Search indexed it
+		},
+		subIssues: map[string][]*github.Issue{"org/r#10": {}},
+	}
+
+	n, err := PromoteReadyWithPrefetch(
+		context.Background(), fake, baseCfg(), []string{"org/r"},
+		map[string][]*github.Issue{"org/r": {stale}}, nil,
+	)
+	if err != nil {
+		t.Fatalf("PromoteReadyWithPrefetch: %v", err)
+	}
+	if n != 0 || len(fake.removed) != 0 || len(fake.added) != 0 {
+		t.Fatalf("stale Search result mutated labels: promotions=%d removed=%v added=%v", n, fake.removed, fake.added)
+	}
+	if fake.listCalls != 0 {
+		t.Fatalf("ListOpenIssues calls = %d, want 0 with complete snapshot", fake.listCalls)
+	}
+}
+
+func TestPromoteReadyWithPrefetchUpdatesSameCycleSnapshot(t *testing.T) {
+	prefetched := mkIssue("org/r", 10, "open", "## Depends on\n- #5\n", "blocked")
+	// GitHub's single-issue response does not carry our synthetic Repo field;
+	// promotion must restore it before copying the fresh object into the shared
+	// same-cycle Search snapshot.
+	fresh := mkIssue("", 10, "open", prefetched.Body, "blocked")
+	fresh.UpdatedAt = time.Unix(1_700_000_000, 0).UTC()
+	fake := &fakePromoteClient{
+		byRef: map[string]*github.Issue{
+			"org/r#5":  mkIssue("org/r", 5, "closed", ""),
+			"org/r#10": fresh,
+		},
+		subIssues: map[string][]*github.Issue{"org/r#10": {}},
+	}
+
+	n, err := PromoteReadyWithPrefetch(
+		context.Background(), fake, baseCfg(), []string{"org/r"},
+		map[string][]*github.Issue{"org/r": {prefetched}}, nil,
+	)
+	if err != nil {
+		t.Fatalf("PromoteReadyWithPrefetch: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("promotions = %d, want 1", n)
+	}
+	if got := prefetched.LabelNames(); len(got) != 1 || got[0] != "ready" {
+		t.Fatalf("same-cycle snapshot labels = %v, want [ready]", got)
+	}
+	if prefetched.Repo != "org/r" {
+		t.Fatalf("same-cycle snapshot repo = %q, want org/r", prefetched.Repo)
+	}
+	if !prefetched.UpdatedAt.After(fresh.UpdatedAt) {
+		t.Fatalf("same-cycle snapshot updated_at = %s, want after fresh validation %s", prefetched.UpdatedAt, fresh.UpdatedAt)
+	}
+}
+
 func (f *fakePromoteClient) GetIssue(repo string, number int) (*github.Issue, error) {
+	key := fmt.Sprintf("%s#%d", repo, number)
+	f.getCalls = append(f.getCalls, key)
 	if f.getErr != nil {
 		return nil, f.getErr
 	}
-	key := fmt.Sprintf("%s#%d", repo, number)
 	if got, ok := f.byRef[key]; ok {
 		return got, nil
 	}
@@ -128,6 +300,33 @@ func baseCfg() config.IssueTrackingConfig {
 		DefaultAction: string(config.IssueModeIgnore),
 		BlockedLabels: []string{"blocked"},
 		DevelopLabels: []string{"ready"}, // acts as implicit promote-to
+	}
+}
+
+func TestReflectPromotionInSnapshot_NilNoop(t *testing.T) {
+	reflectPromotionInSnapshot(nil, []string{"blocked"}, "ready")
+}
+
+func TestReflectPromotionInSnapshot_NoBlockedLabelAddsTarget(t *testing.T) {
+	issue := mkIssue("org/r", 10, "open", "", "keep")
+
+	reflectPromotionInSnapshot(issue, []string{"blocked"}, "ready")
+
+	if got := issue.LabelNames(); !equalSorted(got, []string{"keep", "ready"}) {
+		t.Fatalf("labels = %v, want [keep ready]", got)
+	}
+	if issue.UpdatedAt.IsZero() {
+		t.Fatal("UpdatedAt was not refreshed")
+	}
+}
+
+func TestReflectPromotionInSnapshot_DoesNotDuplicateExistingTarget(t *testing.T) {
+	issue := mkIssue("org/r", 10, "open", "", "blocked", "ready")
+
+	reflectPromotionInSnapshot(issue, []string{"blocked"}, "ready")
+
+	if got := issue.LabelNames(); len(got) != 1 || got[0] != "ready" {
+		t.Fatalf("labels = %v, want one existing ready label", got)
 	}
 }
 

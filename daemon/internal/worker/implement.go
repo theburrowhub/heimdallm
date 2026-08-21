@@ -31,7 +31,7 @@ func NewImplementWorker(conn *nats.Conn, maxConcurrent int, handler func(context
 }
 
 // Start subscribes and blocks until ctx is cancelled.
-func (w *ImplementWorker) Start(ctx context.Context) error {
+func (w *ImplementWorker) Start(ctx context.Context, ready ...chan<- error) error {
 	sub, err := w.conn.Subscribe(bus.SubjIssueImplement, func(msg *nats.Msg) {
 		var issueMsg bus.IssueMsg
 		if err := bus.Decode(msg.Data, &issueMsg); err != nil {
@@ -55,9 +55,13 @@ func (w *ImplementWorker) Start(ctx context.Context) error {
 		}()
 	})
 	if err != nil {
+		_ = reportSubscriptionReady(w.conn, ready, err)
 		return err
 	}
 	defer sub.Unsubscribe()
+	if err := reportSubscriptionReady(w.conn, ready, nil); err != nil {
+		return err
+	}
 
 	<-ctx.Done()
 	return nil

@@ -3,6 +3,7 @@ package issues_test
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -51,7 +52,7 @@ func TestAPICallCount_PrefetchCoversIdleRepos(t *testing.T) {
 		all = append(all, makeIssue(int64(i+1), i+1, repos[i], []string{"bug"}, nil))
 	}
 
-	searcher := &fakeSearcher{issues: all}
+	searcher := &fakeSearcher{perQueryIssues: map[int][]*github.Issue{0: all, 1: nil}}
 	rest := &countingFetcher{}
 
 	fetcher := issues.NewFetcher(rest, nil, &fakeDedup{}, &fakePipeline{})
@@ -62,8 +63,16 @@ func TestAPICallCount_PrefetchCoversIdleRepos(t *testing.T) {
 		t.Fatalf("PrefetchIssues: %v", err)
 	}
 
-	if searcher.calls != 1 {
-		t.Errorf("expected 1 aggregated search call, got %d", searcher.calls)
+	if searcher.calls != 2 {
+		t.Errorf("expected 2 bounded search chunks, got %d", searcher.calls)
+	}
+	for i, query := range searcher.queries {
+		if reposInQuery := strings.Count(query, "repo:"); reposInQuery > 25 {
+			t.Errorf("query %d contains %d repos, want <=25", i, reposInQuery)
+		}
+		if encoded := len(url.QueryEscape(query)); encoded > 1024 {
+			t.Errorf("query %d encoded length = %d, want <=1024", i, encoded)
+		}
 	}
 
 	// Every searched repo must be present — idle ones with an empty slice.
@@ -94,6 +103,37 @@ func TestAPICallCount_PrefetchCoversIdleRepos(t *testing.T) {
 	if rest.calls != 0 {
 		t.Errorf("per-repo REST must not be touched, got %d calls: %s",
 			rest.calls, strings.Join(rest.repos, " "))
+	}
+}
+
+func TestPrefetchIssues_FailedChunkFallsBackOnlyForThatChunk(t *testing.T) {
+	const numRepos = 47
+	repos := make([]string, numRepos)
+	for i := range repos {
+		repos[i] = fmt.Sprintf("org/repo-%02d", i)
+	}
+
+	searcher := &fakeSearcher{perQueryErr: map[int]error{1: fmt.Errorf("second chunk failed")}}
+	rest := &countingFetcher{}
+	fetcher := issues.NewFetcher(rest, nil, &fakeDedup{}, &fakePipeline{})
+	fetcher.SetSearcher(searcher)
+
+	byRepo, err := fetcher.PrefetchIssues(simpleEligibleFn(searchCfg(), repos), "alice", repos)
+	if err == nil {
+		t.Fatal("expected partial prefetch error")
+	}
+	if len(byRepo) != 25 {
+		t.Fatalf("successful chunk coverage = %d, want 25", len(byRepo))
+	}
+
+	optsFor := func(_ *github.Issue) (issues.RunOptions, bool) { return issues.RunOptions{}, true }
+	for _, repo := range repos {
+		if _, processErr := fetcher.ProcessRepo(context.Background(), repo, searchCfg(), "alice", optsFor); processErr != nil {
+			t.Fatalf("ProcessRepo(%s): %v", repo, processErr)
+		}
+	}
+	if rest.calls != numRepos-25 {
+		t.Fatalf("REST fallbacks = %d, want %d for failed chunk only", rest.calls, numRepos-25)
 	}
 }
 

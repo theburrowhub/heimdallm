@@ -7,8 +7,9 @@ type DiscoveryMsg struct {
 	Repos []string `json:"repos"`
 }
 
-// PRReviewMsg is published by the PR poller on SubjPRReview.
-// The Nats-Msg-Id for dedup is "{GithubID}:{HeadSHA}".
+// PRReviewMsg is published by the PR poller on SubjPRReview. HeadSHA is
+// optional for search candidates: the worker hydrates the PR exactly once and
+// applies the current reviewer/SHA guards before starting the pipeline.
 type PRReviewMsg struct {
 	Repo     string `json:"repo"`
 	Number   int    `json:"number"`

@@ -82,6 +82,11 @@ const maxSubscribers = 10
 type Event struct {
 	Type string
 	Data string
+	// NATSForwarded is internal delivery metadata. Producers that synchronously
+	// publish an event to NATS set it before copying the event to the local
+	// broker, preventing a duplicate bridge publish while preserving fallback
+	// when the synchronous handoff fails.
+	NATSForwarded bool
 }
 
 // Format returns the SSE wire format for this event.
