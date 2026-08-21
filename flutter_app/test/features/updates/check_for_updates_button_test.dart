@@ -16,6 +16,38 @@ void main() {
     expect(find.byKey(const Key('check-for-updates')), findsNothing);
   });
 
+  testWidgets('banner stays hidden when no update is actionable', (
+    tester,
+  ) async {
+    final platform = FakePlatformServices(
+      appUpdateSupport: AppUpdateSupport.native,
+    );
+
+    await tester.pumpWidget(_bannerApp(platform));
+    await tester.pump();
+
+    expect(find.byKey(const Key('app-update-banner')), findsNothing);
+  });
+
+  for (final phase in [AppUpdatePhase.installing, AppUpdatePhase.restarting]) {
+    testWidgets('banner renders the busy $phase lifecycle without an action', (
+      tester,
+    ) async {
+      final platform = FakePlatformServices(
+        appUpdateSupport: AppUpdateSupport.native,
+        appUpdateStatus: AppUpdateStatus(phase: phase),
+      );
+
+      await tester.pumpWidget(_bannerApp(platform));
+      await tester.pump();
+
+      expect(find.byKey(const Key('app-update-banner')), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+      expect(find.text('Heimdallm  is available.'), findsOneWidget);
+      expect(find.byKey(const Key('install-app-update')), findsNothing);
+    });
+  }
+
   testWidgets('opens the native updater and prevents duplicate checks', (
     tester,
   ) async {
@@ -88,12 +120,35 @@ void main() {
     await tester.tap(find.byKey(const Key('install-app-update')));
     await tester.pump();
     expect(platform.installAppUpdateCalls, 1);
+
+    await tester.tap(find.byKey(const Key('check-for-updates')));
+    await tester.pump();
+    expect(platform.installAppUpdateCalls, 2);
+  });
+
+  testWidgets('banner surfaces installation failures', (tester) async {
+    final platform = _FailingInstallPlatform();
+    await tester.pumpWidget(_bannerApp(platform));
+
+    await tester.tap(find.byKey(const Key('install-app-update')));
+    await tester.pumpAndSettle();
+
+    expect(platform.installAppUpdateCalls, 1);
+    expect(
+      find.text('Update failed: Bad state: replacement failed'),
+      findsOneWidget,
+    );
   });
 }
 
 Widget _app(FakePlatformServices platform) => ProviderScope(
   overrides: [platformServicesProvider.overrideWithValue(platform)],
   child: const MaterialApp(home: Scaffold(body: CheckForUpdatesButton())),
+);
+
+Widget _bannerApp(FakePlatformServices platform) => ProviderScope(
+  overrides: [platformServicesProvider.overrideWithValue(platform)],
+  child: const MaterialApp(home: Scaffold(body: AppUpdateBanner())),
 );
 
 class _BlockingUpdatePlatform extends FakePlatformServices {
@@ -122,5 +177,22 @@ class _FailingUpdatePlatform extends FakePlatformServices {
   Future<void> checkForAppUpdates() async {
     checkForAppUpdatesCalls++;
     throw StateError('bridge unavailable');
+  }
+}
+
+class _FailingInstallPlatform extends FakePlatformServices {
+  _FailingInstallPlatform()
+    : super(
+        appUpdateSupport: AppUpdateSupport.native,
+        appUpdateStatus: const AppUpdateStatus(
+          phase: AppUpdatePhase.available,
+          version: '1.2.3',
+        ),
+      );
+
+  @override
+  Future<void> installAppUpdate() async {
+    installAppUpdateCalls++;
+    throw StateError('replacement failed');
   }
 }

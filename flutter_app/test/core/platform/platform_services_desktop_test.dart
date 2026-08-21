@@ -4,8 +4,67 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/core/daemon/daemon_lifecycle.dart';
+import 'package:heimdallm/core/platform/linux_app_updater.dart';
 import 'package:heimdallm/core/platform/platform_services.dart';
 import 'package:heimdallm/core/platform/platform_services_desktop.dart';
+
+class _FakeLinuxAppUpdater extends LinuxAppUpdater {
+  _FakeLinuxAppUpdater({
+    this.initializeError,
+    this.installError,
+    this.pendingVersion = '2.0.0',
+    this.restartPath = '/opt/heimdallm/heimdallm',
+  }) : super(
+         apiBaseURL: Uri.parse('http://127.0.0.1:7842'),
+         apiTokenPath: '/tmp/heimdallm-test-token',
+         dataDirectory: '/tmp/heimdallm-test-data',
+         executablePath: '/opt/heimdallm/heimdallm',
+         environment: const {},
+         processRunner: Process.run,
+         daemonStarter: (_) async {},
+         onStatus: (_) {},
+       );
+
+  final Object? initializeError;
+  final Object? installError;
+  final String? pendingVersion;
+  final String restartPath;
+  int checkCalls = 0;
+  int installCalls = 0;
+  int completeCalls = 0;
+  int finalizeCalls = 0;
+
+  @override
+  Future<bool> initialize() async {
+    if (initializeError != null) throw initializeError!;
+    return true;
+  }
+
+  @override
+  Future<void> checkForUpdates({bool silent = false}) async {
+    checkCalls++;
+  }
+
+  @override
+  Future<LinuxInstallResult> installAvailableUpdate() async {
+    installCalls++;
+    if (installError != null) throw installError!;
+    return LinuxInstallResult(version: '2.0.0', restartPath: restartPath);
+  }
+
+  @override
+  Future<String?> pendingUpdateVersion() async => pendingVersion;
+
+  @override
+  Future<void> completePendingUpdate() async {
+    completeCalls++;
+  }
+
+  @override
+  Future<void> finalizePendingUpdate() async {
+    finalizeCalls++;
+  }
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -211,6 +270,24 @@ void main() {
         ),
       );
       expect(detachedStarts, 0);
+    });
+
+    test('spawnDaemon treats an explicit connection refusal as free', () async {
+      final binary = File('${tempDir.path}/heimdalld')..writeAsStringSync('');
+      final listener = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      final port = listener.port;
+      await listener.close();
+      final starts = <String>[];
+      final services = DesktopPlatformServices(
+        apiPort: port,
+        isMacOS: false,
+        isLinux: false,
+        detachedDaemonStarter: (path) async => starts.add(path),
+      );
+
+      await services.spawnDaemon(binary.path);
+
+      expect(starts, [binary.path]);
     });
 
     test('spawnDaemon bounds a stalled LaunchAgent command', () async {
@@ -616,6 +693,27 @@ else:
       },
     );
 
+    test('spawnDaemon rejects an invalid launchd user identity', () async {
+      final binary = File('${tempDir.path}/heimdalld')..writeAsStringSync('');
+      final services = DesktopPlatformServices(
+        isMacOS: true,
+        daemonPortProbe: (_) async => TcpPortState.closed,
+        processRunner: (_, _) async => ProcessResult(1, 0, 'not-a-uid\n', ''),
+        detachedDaemonStarter: (_) async {},
+      );
+
+      await expectLater(
+        services.spawnDaemon(binary.path),
+        throwsA(
+          isA<DaemonException>().having(
+            (error) => error.message,
+            'message',
+            contains('not-a-uid'),
+          ),
+        ),
+      );
+    });
+
     test(
       'macOS updater bridge receives auth and exposes lifecycle methods',
       () async {
@@ -639,14 +737,17 @@ else:
         await services.setupAppUpdater();
         expect(services.appUpdateSupport, AppUpdateSupport.native);
         await services.checkForAppUpdates();
+        await services.installAppUpdate();
         expect(await services.pendingAppUpdateVersion(), '0.8.4');
         await services.completeAppUpdate();
+        await services.finalizeAppUpdate();
         services.quitApp();
         await Future<void>.delayed(Duration.zero);
 
         expect(calls.map((call) => call.method), [
           'configure',
           'checkForUpdates',
+          'installUpdate',
           'pendingUpdateVersion',
           'completeUpdate',
           'terminateApplication',
@@ -692,6 +793,23 @@ else:
         ),
         isNull,
       );
+    });
+
+    test('updater callback publishes native status changes', () async {
+      final services = DesktopPlatformServices(isMacOS: true);
+      final event = services.appUpdateEvents.first;
+
+      await services.handleAppUpdaterCallForTesting(
+        const MethodCall('appUpdateStateChanged', {
+          'phase': 'available',
+          'version': '2.0.0',
+          'message': 'Ready to install',
+        }),
+      );
+
+      expect(services.appUpdateStatus.phase, AppUpdatePhase.available);
+      expect(services.appUpdateStatus.version, '2.0.0');
+      expect((await event).message, 'Ready to install');
     });
 
     test('updater callback fails closed without a bundled daemon', () async {
@@ -921,25 +1039,122 @@ else:
       expect(exitCodes, [0]);
     });
 
-    test('Linux reports native updates unavailable', () async {
-      var calls = 0;
+    test(
+      'disabled Linux updater leaves every update action unavailable',
+      () async {
+        var calls = 0;
+        final services = DesktopPlatformServices(
+          isMacOS: false,
+          isLinux: true,
+          enableNativeAppUpdates: false,
+          methodInvoker: (method, arguments) async {
+            calls++;
+            return null;
+          },
+        );
+
+        expect(services.appUpdateSupport, AppUpdateSupport.unavailable);
+        await services.setupAppUpdater();
+        expect(await services.pendingAppUpdateVersion(), isNull);
+        await services.completeAppUpdate();
+        await services.finalizeAppUpdate();
+        await expectLater(
+          services.checkForAppUpdates(),
+          throwsA(isA<UnsupportedError>()),
+        );
+        await expectLater(
+          services.installAppUpdate(),
+          throwsA(isA<UnsupportedError>()),
+        );
+        expect(calls, 0);
+      },
+    );
+
+    test('Linux updater exposes its complete successful lifecycle', () async {
+      final updater = _FakeLinuxAppUpdater(
+        pendingVersion: '2.0.0',
+        restartPath: '${tempDir.path}/updated-heimdallm',
+      );
+      final restarts = <({int pid, String path})>[];
+      final exits = <int>[];
       final services = DesktopPlatformServices(
         isMacOS: false,
-        methodInvoker: (method, arguments) async {
-          calls++;
-          return null;
+        isLinux: true,
+        enableNativeAppUpdates: true,
+        linuxAppUpdater: updater,
+        detachedAppRestarter: (currentPID, executablePath) async {
+          restarts.add((pid: currentPID, path: executablePath));
         },
+        processExit: exits.add,
       );
 
-      expect(services.appUpdateSupport, AppUpdateSupport.unavailable);
       await services.setupAppUpdater();
-      expect(await services.pendingAppUpdateVersion(), isNull);
+      expect(services.appUpdateSupport, AppUpdateSupport.native);
+      await services.checkForAppUpdates();
+      expect(await services.pendingAppUpdateVersion(), '2.0.0');
       await services.completeAppUpdate();
-      await expectLater(
-        services.checkForAppUpdates(),
-        throwsA(isA<UnsupportedError>()),
+      await services.finalizeAppUpdate();
+      await services.installAppUpdate();
+
+      expect(updater.checkCalls, 1);
+      expect(updater.completeCalls, 1);
+      expect(updater.finalizeCalls, 1);
+      expect(updater.installCalls, 1);
+      expect(restarts, [(pid: pid, path: '${tempDir.path}/updated-heimdallm')]);
+      expect(exits, [0]);
+    });
+
+    test('Linux updater setup preserves initialization failures', () async {
+      final failure = StateError('invalid signed updater configuration');
+      final services = DesktopPlatformServices(
+        isMacOS: false,
+        isLinux: true,
+        enableNativeAppUpdates: true,
+        linuxAppUpdater: _FakeLinuxAppUpdater(initializeError: failure),
       );
-      expect(calls, 0);
+
+      await expectLater(services.setupAppUpdater(), throwsA(same(failure)));
+      expect(services.appUpdateSupport, AppUpdateSupport.unavailable);
+    });
+
+    test('Linux install failure never restarts or exits the app', () async {
+      final failure = StateError('verified install rejected');
+      final updater = _FakeLinuxAppUpdater(installError: failure);
+      var restartCalls = 0;
+      final exits = <int>[];
+      final services = DesktopPlatformServices(
+        isMacOS: false,
+        isLinux: true,
+        enableNativeAppUpdates: true,
+        linuxAppUpdater: updater,
+        detachedAppRestarter: (_, _) async => restartCalls++,
+        processExit: exits.add,
+      );
+      await services.setupAppUpdater();
+
+      await expectLater(services.installAppUpdate(), throwsA(same(failure)));
+
+      expect(updater.installCalls, 1);
+      expect(restartCalls, 0);
+      expect(exits, isEmpty);
+    });
+
+    test('Linux setup wires environment into the concrete updater', () async {
+      final appImage = File('${tempDir.path}/Heimdallm.AppImage')
+        ..writeAsStringSync('test image');
+      final services = DesktopPlatformServices(
+        isMacOS: false,
+        isLinux: true,
+        enableNativeAppUpdates: true,
+        dataDir: tempDir.path,
+        environmentReader: (name) => name == 'APPIMAGE' ? appImage.path : null,
+      );
+
+      await services.setupAppUpdater();
+
+      // The test runner has no bundled heimdalld, so the concrete updater must
+      // reject native support after successfully detecting the AppImage.
+      expect(services.appUpdateSupport, AppUpdateSupport.unavailable);
     });
   });
 }

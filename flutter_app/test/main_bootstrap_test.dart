@@ -42,6 +42,16 @@ class _UpdaterFailurePlatformServices extends FakePlatformServices {
   }
 }
 
+class _FinalizationFailurePlatformServices extends FakePlatformServices {
+  _FinalizationFailurePlatformServices({required super.pendingUpdateVersion});
+
+  @override
+  Future<void> finalizeAppUpdate() async {
+    finalizeAppUpdateCalls++;
+    throw StateError('recovery marker is locked');
+  }
+}
+
 GoRouter _router() => GoRouter(
   routes: [
     GoRoute(
@@ -218,6 +228,169 @@ void main() {
     expect(platform.pendingUpdateVersion, '0.8.4');
     expect(find.textContaining('lease owner mismatch'), findsOneWidget);
     expect(find.text('Dashboard target'), findsNothing);
+  });
+
+  testWidgets('failed update finalization blocks mixed recovery state', (
+    tester,
+  ) async {
+    final api = _MockApiClient();
+    final platform = _FinalizationFailurePlatformServices(
+      pendingUpdateVersion: '0.8.4',
+    );
+    when(() => api.daemonReachable()).thenAnswer((_) async => PortOwner.daemon);
+    when(
+      () => api.fetchHealth(),
+    ).thenAnswer((_) async => {'status': 'ok', 'version': '0.8.4'});
+
+    await tester.pumpWidget(
+      buildBootstrapAppForTest(
+        router: _router(),
+        platform: platform,
+        apiClient: api,
+      ),
+    );
+    await _pumpUntil(tester, find.text('Update finalization failed'));
+
+    expect(platform.completeAppUpdateCalls, 1);
+    expect(platform.finalizeAppUpdateCalls, 1);
+    expect(find.textContaining('recovery marker is locked'), findsOneWidget);
+    expect(find.text('Dashboard target'), findsNothing);
+  });
+
+  testWidgets('pending update validates when daemon binds after spawning', (
+    tester,
+  ) async {
+    final api = _MockApiClient();
+    final platform = FakePlatformServices(
+      pendingUpdateVersion: '0.8.4',
+      githubToken: 'token',
+      daemonBinaryPath: '/bundled/heimdalld',
+    );
+    final owners = [PortOwner.none, PortOwner.none, PortOwner.daemon];
+    when(
+      () => api.daemonReachable(),
+    ).thenAnswer((_) async => owners.removeAt(0));
+    when(() => api.daemonPort).thenReturn(7842);
+    when(
+      () => api.fetchHealth(),
+    ).thenAnswer((_) async => {'status': 'ok', 'version': '0.8.4'});
+
+    await tester.pumpWidget(
+      buildBootstrapAppForTest(
+        router: _router(),
+        platform: platform,
+        apiClient: api,
+      ),
+    );
+    await _pumpUntil(tester, find.text('Dashboard target'));
+
+    expect(platform.spawnedDaemons, ['/bundled/heimdalld']);
+    expect(platform.completeAppUpdateCalls, 1);
+    expect(platform.finalizeAppUpdateCalls, 1);
+    expect(owners, isEmpty);
+  });
+
+  testWidgets('pending update rejects a foreign owner after spawning', (
+    tester,
+  ) async {
+    final api = _MockApiClient();
+    final platform = FakePlatformServices(
+      pendingUpdateVersion: '0.8.4',
+      githubToken: 'token',
+      daemonBinaryPath: '/bundled/heimdalld',
+    );
+    final owners = [PortOwner.none, PortOwner.none, PortOwner.foreign];
+    when(
+      () => api.daemonReachable(),
+    ).thenAnswer((_) async => owners.removeAt(0));
+    when(() => api.daemonPort).thenReturn(7842);
+
+    await tester.pumpWidget(
+      buildBootstrapAppForTest(
+        router: _router(),
+        platform: platform,
+        apiClient: api,
+      ),
+    );
+    await _pumpUntil(tester, find.text('Port 7842 is already occupied'));
+
+    expect(platform.spawnedDaemons, ['/bundled/heimdalld']);
+    expect(platform.completeAppUpdateCalls, 0);
+    expect(owners, isEmpty);
+  });
+
+  testWidgets('pending update validates through the health fallback', (
+    tester,
+  ) async {
+    final api = _MockApiClient();
+    final platform = FakePlatformServices(
+      pendingUpdateVersion: '0.8.4',
+      githubToken: 'token',
+      daemonBinaryPath: '/bundled/heimdalld',
+    );
+    final owners = [PortOwner.none, PortOwner.none, PortOwner.none];
+    when(
+      () => api.daemonReachable(),
+    ).thenAnswer((_) async => owners.removeAt(0));
+    when(() => api.daemonPort).thenReturn(7842);
+    when(() => api.checkHealth()).thenAnswer((_) async => true);
+    when(
+      () => api.fetchHealth(),
+    ).thenAnswer((_) async => {'status': 'ok', 'version': '0.8.4'});
+
+    await tester.pumpWidget(
+      buildBootstrapAppForTest(
+        router: _router(),
+        platform: platform,
+        apiClient: api,
+      ),
+    );
+    await _pumpUntil(tester, find.text('Dashboard target'));
+
+    expect(platform.spawnedDaemons, ['/bundled/heimdalld']);
+    expect(platform.completeAppUpdateCalls, 1);
+    expect(owners, isEmpty);
+  });
+
+  testWidgets('daemon retry preserves pending-update validation state', (
+    tester,
+  ) async {
+    final api = _MockApiClient();
+    final platform = FakePlatformServices(
+      pendingUpdateVersion: '0.8.4',
+      githubToken: 'token',
+      daemonBinaryPath: '/bundled/heimdalld',
+    );
+    final owners = [
+      PortOwner.none,
+      PortOwner.none,
+      PortOwner.none,
+      PortOwner.none,
+      PortOwner.daemon,
+      PortOwner.daemon,
+    ];
+    when(
+      () => api.daemonReachable(),
+    ).thenAnswer((_) async => owners.removeAt(0));
+    when(() => api.daemonPort).thenReturn(7842);
+    when(() => api.checkHealth()).thenAnswer((_) async => false);
+    when(
+      () => api.fetchHealth(),
+    ).thenAnswer((_) async => {'status': 'ok', 'version': '0.8.4'});
+
+    await tester.pumpWidget(
+      buildBootstrapAppForTest(
+        router: _router(),
+        platform: platform,
+        apiClient: api,
+        healthRetryEvery: 1,
+      ),
+    );
+    await _pumpUntil(tester, find.text('Dashboard target'), frames: 100);
+
+    expect(platform.spawnedDaemons, ['/bundled/heimdalld']);
+    expect(platform.completeAppUpdateCalls, 1);
+    expect(owners, isEmpty);
   });
 
   testWidgets('failed native update recovery blocks daemon startup', (

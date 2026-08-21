@@ -14,6 +14,8 @@ typedef LinuxUpdateProcessRunner =
 typedef LinuxUpdateDaemonStarter = Future<void> Function(String binaryPath);
 typedef LinuxUpdateClock = DateTime Function();
 typedef LinuxUpdateReleaseLoader = Future<LinuxUpdateRelease?> Function();
+typedef LinuxUpdateDaemonIdentityVerifier =
+    Future<void> Function(int pid, String daemonPath);
 
 enum LinuxInstallKind { appImage, deb, rpm, unsupported }
 
@@ -177,13 +179,17 @@ class LinuxAppUpdater {
     @visibleForTesting LinuxInstallKind? installKind,
     @visibleForTesting String? currentVersion,
     @visibleForTesting LinuxUpdateReleaseLoader? releaseLoader,
+    @visibleForTesting List<int>? releasePublicKey,
+    @visibleForTesting LinuxUpdateDaemonIdentityVerifier? identityVerifier,
     Duration checkInterval = const Duration(days: 1),
   }) : _httpClientFactory = httpClientFactory ?? HttpClient.new,
        _clock = clock ?? DateTime.now,
        _checkInterval = checkInterval,
        _forcedInstallKind = installKind,
        _forcedCurrentVersion = currentVersion,
-       _releaseLoader = releaseLoader;
+       _releaseLoader = releaseLoader,
+       _injectedReleasePublicKey = releasePublicKey,
+       _identityVerifier = identityVerifier;
 
   static const _repository = 'theburrowhub/heimdallm';
   static const _releaseAPI =
@@ -213,6 +219,8 @@ class LinuxAppUpdater {
   final LinuxInstallKind? _forcedInstallKind;
   final String? _forcedCurrentVersion;
   final LinuxUpdateReleaseLoader? _releaseLoader;
+  final List<int>? _injectedReleasePublicKey;
+  final LinuxUpdateDaemonIdentityVerifier? _identityVerifier;
 
   LinuxInstallKind _installKind = LinuxInstallKind.unsupported;
   String? _currentVersion;
@@ -359,6 +367,7 @@ class LinuxAppUpdater {
       await verifyManifestSignature(
         manifest: checksumBytes,
         encodedSignature: encodedSignature,
+        publicKey: _injectedReleasePublicKey,
       );
       await verifyChecksum(
         asset: asset,
@@ -778,6 +787,11 @@ class LinuxAppUpdater {
   }
 
   Future<void> _verifyDaemonIdentity(_DrainStatus status) async {
+    final injected = _identityVerifier;
+    if (injected != null) {
+      await injected(status.pid, _daemonPath);
+      return;
+    }
     final procLink = Link('/proc/${status.pid}/exe');
     final actual = await procLink.resolveSymbolicLinks();
     final expected = await File(_daemonPath).resolveSymbolicLinks();
