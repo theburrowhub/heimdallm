@@ -26,6 +26,8 @@ type fakeSearcher struct {
 	// perQueryIssues maps query index (0-based) to a custom result. When set,
 	// the corresponding call returns that slice instead of f.issues.
 	perQueryIssues map[int][]*github.Issue
+	// perQueryErr overrides err for a specific query index.
+	perQueryErr map[int]error
 	// errWithResults is returned ALONGSIDE the results rather than instead of
 	// them, modelling the partial-success shape of ErrSearchTruncated. Takes
 	// precedence over err.
@@ -36,6 +38,9 @@ func (s *fakeSearcher) SearchIssues(query string) ([]*github.Issue, error) {
 	idx := s.calls
 	s.calls++
 	s.queries = append(s.queries, query)
+	if err, ok := s.perQueryErr[idx]; ok {
+		return nil, err
+	}
 	if s.errWithResults == nil && s.err != nil {
 		return nil, s.err
 	}

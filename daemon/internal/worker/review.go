@@ -33,7 +33,7 @@ func NewReviewWorker(conn *nats.Conn, maxConcurrent int, handler func(context.Co
 
 // Start subscribes to the NATS PR review subject and blocks until ctx
 // is cancelled. Core NATS is fire-and-forget — no ack/nak.
-func (w *ReviewWorker) Start(ctx context.Context) error {
+func (w *ReviewWorker) Start(ctx context.Context, ready ...chan<- error) error {
 	sub, err := w.conn.Subscribe(bus.SubjPRReview, func(msg *nats.Msg) {
 		var prMsg bus.PRReviewMsg
 		if err := bus.Decode(msg.Data, &prMsg); err != nil {
@@ -58,9 +58,13 @@ func (w *ReviewWorker) Start(ctx context.Context) error {
 		}()
 	})
 	if err != nil {
+		_ = reportSubscriptionReady(w.conn, ready, err)
 		return err
 	}
 	defer sub.Unsubscribe()
+	if err := reportSubscriptionReady(w.conn, ready, nil); err != nil {
+		return err
+	}
 
 	<-ctx.Done()
 	return nil

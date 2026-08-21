@@ -20,6 +20,7 @@ import (
 // an HTTP server standing in.
 type fakePromoteClient struct {
 	open      map[string][]*github.Issue // repo → open issues (listed)
+	listCalls int
 	byRef     map[string]*github.Issue   // "repo#N" → issue (for GetIssue)
 	subIssues map[string][]*github.Issue // "repo#N" → children (for ListSubIssues)
 	added     []struct {
@@ -51,11 +52,91 @@ type fakePromoteClient struct {
 }
 
 func (f *fakePromoteClient) ListOpenIssues(repo string) ([]*github.Issue, error) {
+	f.listCalls++
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
 	return f.open[repo], nil
 }
+
+func TestPromoteReadyWithPrefetchSkipsPerRepoList(t *testing.T) {
+	issue := mkIssue("org/r", 10, "open", "", "blocked")
+	fake := &fakePromoteClient{
+		open:      map[string][]*github.Issue{"org/r": {mkIssue("org/r", 99, "open", "", "blocked")}},
+		byRef:     map[string]*github.Issue{"org/r#10": issue},
+		subIssues: map[string][]*github.Issue{"org/r#10": {}},
+	}
+
+	n, err := PromoteReadyWithPrefetch(
+		context.Background(), fake, baseCfg(), []string{"org/r"},
+		map[string][]*github.Issue{"org/r": {issue}}, nil,
+	)
+	if err != nil {
+		t.Fatalf("PromoteReadyWithPrefetch: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("promotions = %d, want 0 for blocked issue without dependencies", n)
+	}
+	if fake.listCalls != 0 {
+		t.Fatalf("ListOpenIssues calls = %d, want 0 with complete snapshot", fake.listCalls)
+	}
+}
+
+func TestPromoteReadyWithPrefetchRevalidatesBeforeMutation(t *testing.T) {
+	stale := mkIssue("org/r", 10, "open", "## Depends on\n- #5\n", "blocked")
+	fake := &fakePromoteClient{
+		byRef: map[string]*github.Issue{
+			"org/r#5":  mkIssue("org/r", 5, "closed", ""),
+			"org/r#10": mkIssue("org/r", 10, "open", ""), // blocked label was removed after Search indexed it
+		},
+		subIssues: map[string][]*github.Issue{"org/r#10": {}},
+	}
+
+	n, err := PromoteReadyWithPrefetch(
+		context.Background(), fake, baseCfg(), []string{"org/r"},
+		map[string][]*github.Issue{"org/r": {stale}}, nil,
+	)
+	if err != nil {
+		t.Fatalf("PromoteReadyWithPrefetch: %v", err)
+	}
+	if n != 0 || len(fake.removed) != 0 || len(fake.added) != 0 {
+		t.Fatalf("stale Search result mutated labels: promotions=%d removed=%v added=%v", n, fake.removed, fake.added)
+	}
+	if fake.listCalls != 0 {
+		t.Fatalf("ListOpenIssues calls = %d, want 0 with complete snapshot", fake.listCalls)
+	}
+}
+
+func TestPromoteReadyWithPrefetchUpdatesSameCycleSnapshot(t *testing.T) {
+	prefetched := mkIssue("org/r", 10, "open", "## Depends on\n- #5\n", "blocked")
+	fresh := mkIssue("org/r", 10, "open", prefetched.Body, "blocked")
+	fresh.UpdatedAt = time.Unix(1_700_000_000, 0).UTC()
+	fake := &fakePromoteClient{
+		byRef: map[string]*github.Issue{
+			"org/r#5":  mkIssue("org/r", 5, "closed", ""),
+			"org/r#10": fresh,
+		},
+		subIssues: map[string][]*github.Issue{"org/r#10": {}},
+	}
+
+	n, err := PromoteReadyWithPrefetch(
+		context.Background(), fake, baseCfg(), []string{"org/r"},
+		map[string][]*github.Issue{"org/r": {prefetched}}, nil,
+	)
+	if err != nil {
+		t.Fatalf("PromoteReadyWithPrefetch: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("promotions = %d, want 1", n)
+	}
+	if got := prefetched.LabelNames(); len(got) != 1 || got[0] != "ready" {
+		t.Fatalf("same-cycle snapshot labels = %v, want [ready]", got)
+	}
+	if !prefetched.UpdatedAt.After(fresh.UpdatedAt) {
+		t.Fatalf("same-cycle snapshot updated_at = %s, want after fresh validation %s", prefetched.UpdatedAt, fresh.UpdatedAt)
+	}
+}
+
 func (f *fakePromoteClient) GetIssue(repo string, number int) (*github.Issue, error) {
 	if f.getErr != nil {
 		return nil, f.getErr

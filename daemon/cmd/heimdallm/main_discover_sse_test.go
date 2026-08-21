@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"sort"
 	"testing"
 	"time"
@@ -107,6 +108,75 @@ func TestProcessDiscoveredRepos_PublishesSSEEvent(t *testing.T) {
 		t.Fatalf("unexpected extra event after len(added): %+v", ev)
 	case <-time.After(50 * time.Millisecond):
 		// good — channel quiescent
+	}
+}
+
+func TestProcessDiscoveredReposOrderedPublishesOneBatch(t *testing.T) {
+	broker := sse.NewBroker()
+	broker.Start()
+	defer broker.Stop()
+	ch := broker.Subscribe()
+	if ch == nil {
+		t.Fatal("subscribe returned nil")
+	}
+	defer broker.Unsubscribe(ch)
+
+	calls := 0
+	batchSize := 0
+	processDiscoveredReposOrdered(
+		[]string{"org/a", "org/b"},
+		[]string{"org/a", "org/b"},
+		[]string{},
+		newMemStore(t),
+		broker,
+		time.Unix(1_700_000_000, 0),
+		func(events []sse.Event) error {
+			calls++
+			batchSize = len(events)
+			return nil
+		},
+	)
+	if calls != 1 || batchSize != 2 {
+		t.Fatalf("ordered publish calls=%d batch=%d, want one batch of 2", calls, batchSize)
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case event := <-ch:
+			if !event.NATSForwarded {
+				t.Fatalf("event %d was not marked as synchronously forwarded", i)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timeout waiting for broker copy %d", i)
+		}
+	}
+}
+
+func TestProcessDiscoveredReposOrderedKeepsBridgeFallbackOnPublishFailure(t *testing.T) {
+	broker := sse.NewBroker()
+	broker.Start()
+	defer broker.Stop()
+	ch := broker.Subscribe()
+	if ch == nil {
+		t.Fatal("subscribe returned nil")
+	}
+	defer broker.Unsubscribe(ch)
+
+	processDiscoveredReposOrdered(
+		[]string{"org/a"},
+		[]string{"org/a"},
+		[]string{},
+		newMemStore(t),
+		broker,
+		time.Unix(1_700_000_000, 0),
+		func([]sse.Event) error { return errors.New("nats unavailable") },
+	)
+	select {
+	case event := <-ch:
+		if event.NATSForwarded {
+			t.Fatal("failed synchronous publish suppressed the asynchronous bridge fallback")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for fallback broker event")
 	}
 }
 

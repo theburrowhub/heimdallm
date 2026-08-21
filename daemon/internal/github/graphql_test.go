@@ -336,6 +336,30 @@ func TestGraphQLLowLevel_RateObserverNotified(t *testing.T) {
 	}
 }
 
+func TestSearchIssuesGraphQLUsesGraphQLGateNotRESTSearchGate(t *testing.T) {
+	body := gqlSearchEnvelope(nil, false, "")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	client.SetSearchGate(func() error { return errors.New("REST search exhausted") })
+	graphqlCalls := 0
+	client.SetGraphQLGate(func() error {
+		graphqlCalls++
+		return nil
+	})
+
+	if _, err := client.SearchIssuesGraphQL("is:issue is:open"); err != nil {
+		t.Fatalf("GraphQL should not be blocked by REST Search: %v", err)
+	}
+	if graphqlCalls != 1 {
+		t.Fatalf("GraphQL gate calls = %d, want 1", graphqlCalls)
+	}
+}
+
 // ── Dispatch / fallback tests ─────────────────────────────────────────────────
 
 // TestSearchIssues_GraphQLDisabledNeverCallsGraphQLEndpoint asserts that when

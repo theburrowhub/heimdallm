@@ -93,6 +93,49 @@ func TestFetchPRsToReviewFiltersSelfAuthored(t *testing.T) {
 	}
 }
 
+func TestFetchPRsToReviewCachesUserAndMetersSearch(t *testing.T) {
+	var userCalls, searchCalls, gateCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/user":
+			userCalls.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]string{"login": "alice"})
+		case "/search/issues":
+			searchCalls.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []gh.PullRequest{{
+				ID: 1, Number: 1, User: gh.User{Login: "bob"},
+			}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	client := gh.NewClient("fake-token", gh.WithBaseURL(srv.URL))
+	client.SetSearchGate(func() error {
+		gateCalls.Add(1)
+		return nil
+	})
+	for cycle := 0; cycle < 2; cycle++ {
+		got, err := client.FetchPRsToReview()
+		if err != nil {
+			t.Fatalf("cycle %d: %v", cycle+1, err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("cycle %d returned %d PRs, want 1", cycle+1, len(got))
+		}
+	}
+	if got := userCalls.Load(); got != 1 {
+		t.Fatalf("GET /user calls = %d, want 1 across two cycles", got)
+	}
+	if got := searchCalls.Load(); got != 2 {
+		t.Fatalf("search calls = %d, want one per cycle", got)
+	}
+	if got := gateCalls.Load(); got != searchCalls.Load() {
+		t.Fatalf("search gate calls = %d, want one per request (%d)", got, searchCalls.Load())
+	}
+}
+
 func TestFetchDiff(t *testing.T) {
 	diff := "diff --git a/main.go b/main.go\n+added line\n"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

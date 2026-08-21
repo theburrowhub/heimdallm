@@ -82,3 +82,24 @@ func TestPublishBridgeEvents_ContinuesAfterPublishError(t *testing.T) {
 		t.Fatalf("expected both events attempted despite errors, got %d", attempts)
 	}
 }
+
+func TestPublishBridgeEventsSkipsOnlySuccessfullyForwardedRepoDiscovery(t *testing.T) {
+	events := make(chan sse.Event, 3)
+	events <- sse.Event{Type: sse.EventRepoDiscovered, Data: `{"repo":"org/already"}`, NATSForwarded: true}
+	events <- sse.Event{Type: sse.EventRepoDiscovered, Data: `{"repo":"org/fallback"}`}
+	events <- sse.Event{Type: sse.EventReviewStarted, Data: `{}`}
+	close(events)
+
+	var got []string
+	publishBridgeEvents(events, func(subject string, _ []byte) error {
+		got = append(got, subject)
+		return nil
+	})
+	want := []string{
+		bus.SubjEventPrefix + sse.EventRepoDiscovered,
+		bus.SubjEventPrefix + sse.EventReviewStarted,
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("bridged subjects = %v, want %v", got, want)
+	}
+}

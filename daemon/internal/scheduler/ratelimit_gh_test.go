@@ -238,6 +238,18 @@ func TestRateLimiter_SearchResourceIndependentOfCore(t *testing.T) {
 	}
 }
 
+func TestRateLimiter_GraphQLResourceIndependentOfSearch(t *testing.T) {
+	rl := NewRateLimiter(2)
+	rl.Observe(SearchResource, 0, time.Now().Add(time.Hour))
+	rl.Observe(GraphQLResource, 5000, time.Now().Add(time.Hour))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := rl.AcquireResource(ctx, TierRepo, GraphQLResource); err != nil {
+		t.Fatalf("healthy GraphQL resource was blocked by depleted Search: %v", err)
+	}
+}
+
 // TestRateLimiter_ResetAlreadyPassedProceedsImmediately verifies that if the
 // reset time is already in the past, Acquire does NOT wait.
 func TestRateLimiter_ResetAlreadyPassedProceedsImmediately(t *testing.T) {

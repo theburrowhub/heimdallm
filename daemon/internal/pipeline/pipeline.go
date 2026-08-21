@@ -637,13 +637,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 		return nil, nil
 	}
 
-	// 2. Fetch diff
-	diff, err := p.gh.FetchDiff(pr.Repo, pr.Number)
-	if err != nil {
-		return nil, fmt.Errorf("pipeline: fetch diff: %w", err)
-	}
-
-	// 2a. Authoritative dedup by HEAD commit SHA. The Tier 2/3 dedup uses
+	// 2. Authoritative dedup by HEAD commit SHA. The Tier 2/3 dedup uses
 	// updated_at — but any peer reviewer submitting a review (human or another
 	// heimdallm instance) bumps updated_at, which would otherwise cause us to
 	// re-review the same commit indefinitely (see theburrowhub/heimdallm#139).
@@ -807,6 +801,14 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 			p.publishSkipped(pr, reason)
 			return nil, nil
 		}
+	}
+
+	// The PR survived every SHA/re-request dedup gate, so the diff will be
+	// consumed. Fetching it earlier paid a potentially large GitHub response
+	// for every unchanged PR and even when HEAD resolution had already failed.
+	diff, err := p.gh.FetchDiff(pr.Repo, pr.Number)
+	if err != nil {
+		return nil, fmt.Errorf("pipeline: fetch diff: %w", err)
 	}
 
 	// 2b. Fetch PR comments for context (non-fatal: proceed without if unavailable).

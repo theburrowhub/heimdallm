@@ -40,21 +40,11 @@ type Tier2PRFetcher interface {
 	FetchPRsToReview() ([]Tier2PR, error)
 }
 
-// Tier2PR carries the PR fields that the review pipeline needs.
-// FetchPRsToReview already fetches these from the GitHub Search API;
-// passing them through avoids a per-PR re-fetch and prevents silent
-// zero-value bugs in the pipeline's UpsertPR call.
-//
-// HeadSHA is resolved by the adapter after the review-guard filter (the
-// Search Issues API does not populate head.sha, so it costs one extra
-// /pulls/N lookup per PR that passed the gate). Carrying it through this
-// struct is load-bearing: the persistent in-flight claim (#258) is keyed
-// on (pr_id, head_sha), and an empty SHA silently bypasses the claim —
-// which is exactly how theburrowhub/heimdallm#264 reproduced the #243
-// double-review pattern. An empty HeadSHA here means the resolve failed;
-// the downstream claim will log and fall back to the other layered
-// defenses (fail-closed SHA in pipeline.Run, circuit breaker, PublishedAt
-// grace) rather than block a review.
+// Tier2PR carries the fields returned by GitHub Search. HeadSHA is optional:
+// Search candidates are intentionally enqueued without a serial /pulls/N
+// hydration, and the bounded NATS worker supplies the single fresh SHA before
+// applying persistent in-flight and dedup guards. Legacy/direct ProcessPR
+// callers can still populate HeadSHA explicitly.
 type Tier2PR struct {
 	ID        int64
 	Number    int
@@ -86,7 +76,7 @@ type Tier2Promoter interface {
 
 // Tier2PRPublisher publishes PR review requests to NATS.
 type Tier2PRPublisher interface {
-	PublishPRReview(ctx context.Context, repo string, number int, githubID int64, headSHA string) error
+	PublishPRReviewCandidate(ctx context.Context, repo string, number int, githubID int64) error
 }
 
 // Tier2Store checks if a PR has already been reviewed recently.

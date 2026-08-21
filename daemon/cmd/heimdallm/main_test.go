@@ -834,6 +834,7 @@ func TestRunTier2PublishesPendingWhenLiveRepoSetIsEmpty(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+	reposCh := make(chan []string)
 	go func() {
 		defer close(done)
 		runTier2(
@@ -846,7 +847,7 @@ func TestRunTier2PublishesPendingWhenLiveRepoSetIsEmpty(t *testing.T) {
 			nil,
 			nil, // adaptiveFn — adaptive gating off for this test
 			nil, // adaptiveSched — unused while adaptiveFn is nil
-			make(chan []string),
+			reposCh,
 			time.Hour,
 			true,
 			nil,
@@ -857,6 +858,16 @@ func TestRunTier2PublishesPendingWhenLiveRepoSetIsEmpty(t *testing.T) {
 		<-done
 	}()
 
+	// A cold poll must wait for an actual Tier 1 snapshot, not guess with a
+	// timer. This also models discovery taking longer than an arbitrary startup
+	// grace period without losing the entire first poll.
+	select {
+	case msg := <-ch:
+		t.Fatalf("published before first discovery snapshot: %q", msg.Data)
+	case <-time.After(100 * time.Millisecond):
+	}
+	reposCh <- []string{}
+
 	select {
 	case msg := <-ch:
 		var got bus.PRPublishMsg
@@ -866,8 +877,8 @@ func TestRunTier2PublishesPendingWhenLiveRepoSetIsEmpty(t *testing.T) {
 		if got.ReviewID != reviewID {
 			t.Fatalf("published review ID = %d, want pending review %d", got.ReviewID, reviewID)
 		}
-	case <-time.After(4 * time.Second):
-		t.Fatal("PublishPending was skipped when the live repo set was empty")
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("PublishPending did not run promptly after the first empty snapshot")
 	}
 }
 

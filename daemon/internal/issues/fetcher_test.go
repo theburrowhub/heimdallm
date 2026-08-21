@@ -28,9 +28,11 @@ type fakeClient struct {
 type fakeMarkerFetcher struct {
 	commentsByKey map[string][]github.Comment
 	err           error
+	calls         int
 }
 
 func (f *fakeMarkerFetcher) FetchIssueCommentsOnly(repo string, number int) ([]github.Comment, error) {
+	f.calls++
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -1042,6 +1044,9 @@ func TestFetcher_ManualStageLabelChangeAuditsAndDispatchesNewStage(t *testing.T)
 	}
 	if len(stage.comments) != 1 || !strings.Contains(stage.comments[0], "manual GitHub label change") {
 		t.Fatalf("stage audit comment = %q, want manual GitHub trigger", stage.comments)
+	}
+	if mf.calls != 1 {
+		t.Fatalf("comment fetches = %d, want 1 shared by marker scan and stage audit", mf.calls)
 	}
 }
 
