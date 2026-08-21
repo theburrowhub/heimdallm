@@ -78,8 +78,17 @@ type Client struct {
 	// including each page of a paginated result — so the caller can meter the
 	// separate 30/min search budget per request instead of per operation.
 	searchGate    atomic.Pointer[func() error]
+	graphqlGate   atomic.Pointer[func() error]
 	cacheDisabled atomic.Bool // when true, ETag conditional-request layer is bypassed
 	useGraphQL    atomic.Bool // when true, SearchIssues dispatches to GraphQL with REST fallback
+
+	// The authenticated login is immutable for the lifetime of a client (the
+	// token is immutable too). Cache it after the first successful lookup so
+	// every poll cycle does not spend another network round trip on GET /user.
+	// Holding the mutex across the cold request also coalesces concurrent first
+	// callers; failures are deliberately not cached and can be retried.
+	authMu            sync.Mutex
+	authenticatedUser string
 
 	// rate-limit circuit breaker: when GitHub rejects a request with a rate
 	// limit (primary exhaustion or a secondary/abuse burst block), every
@@ -160,9 +169,28 @@ func (c *Client) SetSearchGate(fn func() error) {
 	c.searchGate.Store(&fn)
 }
 
+// SetGraphQLGate registers a hook invoked before every GraphQL request made
+// by the issue-search path. GitHub accounts GraphQL separately from REST
+// Search, so sharing the search gate can block a healthy GraphQL budget when
+// the much smaller REST Search budget is low.
+func (c *Client) SetGraphQLGate(fn func() error) {
+	if fn == nil {
+		c.graphqlGate.Store(nil)
+		return
+	}
+	c.graphqlGate.Store(&fn)
+}
+
 // acquireSearch runs the registered search gate, if any.
 func (c *Client) acquireSearch() error {
 	if g := c.searchGate.Load(); g != nil {
+		return (*g)()
+	}
+	return nil
+}
+
+func (c *Client) acquireGraphQL() error {
+	if g := c.graphqlGate.Load(); g != nil {
 		return (*g)()
 	}
 	return nil
@@ -183,6 +211,12 @@ func (c *Client) notifyRateObserver(resp *http.Response) {
 // AuthenticatedUser returns the GitHub login of the token owner.
 // Used to resolve the actual username instead of @me (which some token types reject).
 func (c *Client) AuthenticatedUser() (string, error) {
+	c.authMu.Lock()
+	defer c.authMu.Unlock()
+	if c.authenticatedUser != "" {
+		return c.authenticatedUser, nil
+	}
+
 	resp, err := c.do("GET", "/user", "application/vnd.github+json")
 	if err != nil {
 		return "", fmt.Errorf("github: get user: %w", err)
@@ -199,6 +233,7 @@ func (c *Client) AuthenticatedUser() (string, error) {
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBodyBytes)).Decode(&u); err != nil {
 		return "", fmt.Errorf("github: decode user: %w", err)
 	}
+	c.authenticatedUser = u.Login
 	return u.Login, nil
 }
 
@@ -506,6 +541,12 @@ func (c *Client) fetchByQualifier(username, qualifier string, repos []string) ([
 		repoFilter = " repo:" + strings.Join(repos, " repo:")
 	}
 	query := fmt.Sprintf("is:pr is:open %s:%s%s", qualifier, username, repoFilter)
+	// PR discovery uses the Search API. Meter the request against Search's
+	// separate budget rather than consuming an unrelated core permit.
+	if err := c.acquireSearch(); err != nil {
+		return nil, fmt.Errorf("github: search PR budget: %w", err)
+	}
+
 	params := url.Values{}
 	params.Set("q", query)
 	params.Set("per_page", "100")
@@ -514,8 +555,11 @@ func (c *Client) fetchByQualifier(username, qualifier string, repos []string) ([
 	if err != nil {
 		return nil, fmt.Errorf("github: search PRs (%s): %w", qualifier, err)
 	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 	resp.Body.Close()
+	if readErr != nil {
+		return nil, fmt.Errorf("github: read PR search (%s): %w", qualifier, readErr)
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		errBody := safeTruncate(string(body), maxErrBodyLen)

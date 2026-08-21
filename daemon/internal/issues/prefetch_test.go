@@ -26,6 +26,8 @@ type fakeSearcher struct {
 	// perQueryIssues maps query index (0-based) to a custom result. When set,
 	// the corresponding call returns that slice instead of f.issues.
 	perQueryIssues map[int][]*github.Issue
+	// perQueryErr overrides err for a specific query index.
+	perQueryErr map[int]error
 	// errWithResults is returned ALONGSIDE the results rather than instead of
 	// them, modelling the partial-success shape of ErrSearchTruncated. Takes
 	// precedence over err.
@@ -36,6 +38,9 @@ func (s *fakeSearcher) SearchIssues(query string) ([]*github.Issue, error) {
 	idx := s.calls
 	s.calls++
 	s.queries = append(s.queries, query)
+	if err, ok := s.perQueryErr[idx]; ok {
+		return nil, err
+	}
 	if s.errWithResults == nil && s.err != nil {
 		return nil, s.err
 	}
@@ -139,6 +144,81 @@ func TestPrefetchIssues_NilSearcherReturnsNil(t *testing.T) {
 	}
 	if byRepo != nil {
 		t.Errorf("expected nil map when no searcher, got %v", byRepo)
+	}
+}
+
+func TestPrefetchedIssues_NilBeforeSuccessfulPrefetch(t *testing.T) {
+	fetcher := issues.NewFetcher(&fakeClient{}, nil, &fakeDedup{}, nil)
+
+	if got := fetcher.PrefetchedIssues(); got != nil {
+		t.Fatalf("PrefetchedIssues() = %#v, want nil before a successful prefetch", got)
+	}
+}
+
+func TestPrefetchedIssues_CopiesContainersAndSharesIssuePointers(t *testing.T) {
+	original := makeIssue(1, 1, "org/repo", []string{"bug"}, []string{"alice"})
+	searcher := &fakeSearcher{issues: []*github.Issue{original}}
+	fetcher := issues.NewFetcher(&fakeClient{}, nil, &fakeDedup{}, nil)
+	fetcher.SetSearcher(searcher)
+
+	repos := []string{"org/repo"}
+	if _, err := fetcher.PrefetchIssues(simpleEligibleFn(searchCfg(), repos), "alice", repos); err != nil {
+		t.Fatalf("PrefetchIssues: %v", err)
+	}
+
+	copyOne := fetcher.PrefetchedIssues()
+	if len(copyOne["org/repo"]) != 1 || copyOne["org/repo"][0] != original {
+		t.Fatalf("first copy = %#v, want the original issue pointer", copyOne)
+	}
+
+	// Pointer identity is intentionally shared so promotion can refresh the
+	// authoritative issue in place for ProcessRepo later in the same cycle.
+	copyOne["org/repo"][0].Title = "refreshed in place"
+	// Map and slice containers, on the other hand, must be independent: a
+	// promotion caller may replace/delete entries without corrupting Fetcher's
+	// private snapshot.
+	copyOne["org/repo"][0] = makeIssue(2, 2, "org/repo", []string{"bug"}, []string{"alice"})
+	delete(copyOne, "org/repo")
+	copyOne["external/repo"] = []*github.Issue{original}
+
+	copyTwo := fetcher.PrefetchedIssues()
+	if len(copyTwo) != 1 {
+		t.Fatalf("second copy has %d repos, want only the internal snapshot", len(copyTwo))
+	}
+	items := copyTwo["org/repo"]
+	if len(items) != 1 || items[0] != original {
+		t.Fatalf("second copy items = %#v, want unchanged slice containing original pointer", items)
+	}
+	if items[0].Title != "refreshed in place" {
+		t.Fatalf("shared issue title = %q, want pointer mutation to remain visible", items[0].Title)
+	}
+}
+
+func TestPrefetchIssues_NilAndExternalResultsRemainKnownEmpty(t *testing.T) {
+	searcher := &fakeSearcher{issues: []*github.Issue{
+		nil,
+		makeIssue(2, 2, "external/repo", []string{"bug"}, []string{"alice"}),
+	}}
+	fetcher := issues.NewFetcher(&fakeClient{}, nil, &fakeDedup{}, nil)
+	fetcher.SetSearcher(searcher)
+
+	repos := []string{"org/repo"}
+	byRepo, err := fetcher.PrefetchIssues(simpleEligibleFn(searchCfg(), repos), "alice", repos)
+	if err != nil {
+		t.Fatalf("PrefetchIssues: %v", err)
+	}
+	items, ok := byRepo["org/repo"]
+	if !ok {
+		t.Fatal("monitored repo missing: successful search must seed a known-empty entry")
+	}
+	if len(items) != 0 {
+		t.Fatalf("monitored repo contains %d issue(s), want none from nil/external results", len(items))
+	}
+	if len(byRepo) != 1 {
+		t.Fatalf("prefetch map = %#v, want only the monitored repo", byRepo)
+	}
+	if _, leaked := byRepo["external/repo"]; leaked {
+		t.Fatal("out-of-scope Search result leaked into the cycle snapshot")
 	}
 }
 

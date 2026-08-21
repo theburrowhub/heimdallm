@@ -39,6 +39,22 @@ type PromoteIssueClient interface {
 // labels are configured, or when every repo in the list is empty — keeps
 // default installs unaffected.
 func PromoteReady(ctx context.Context, c PromoteIssueClient, cfg config.IssueTrackingConfig, repos []string, broker Publisher) (int, error) {
+	return PromoteReadyWithPrefetch(ctx, c, cfg, repos, nil, broker)
+}
+
+// PromoteReadyWithPrefetch is PromoteReady with an optional per-repo raw issue
+// snapshot from the cycle's aggregated Search call. A present key, including a
+// nil slice, is complete and avoids ListOpenIssues; an absent key falls back to
+// REST so a failed or truncated search chunk cannot lose issues. Search finds
+// candidates, but a ready issue is fetched fresh before any label mutation.
+func PromoteReadyWithPrefetch(
+	ctx context.Context,
+	c PromoteIssueClient,
+	cfg config.IssueTrackingConfig,
+	repos []string,
+	prefetched map[string][]*github.Issue,
+	broker Publisher,
+) (int, error) {
 	if !cfg.Enabled || len(cfg.BlockedLabels) == 0 {
 		return 0, nil
 	}
@@ -63,13 +79,21 @@ func PromoteReady(ctx context.Context, c PromoteIssueClient, cfg config.IssueTra
 		if err := ctx.Err(); err != nil {
 			return promoted, err
 		}
-		issues, err := c.ListOpenIssues(repo)
-		if err != nil {
-			slog.Warn("issues promote: list failed, skipping repo this cycle", "repo", repo, "err", err)
-			continue
+		issues, prefetchedRepo := prefetched[repo]
+		if !prefetchedRepo {
+			var err error
+			issues, err = c.ListOpenIssues(repo)
+			if err != nil {
+				slog.Warn("issues promote: list failed, skipping repo this cycle", "repo", repo, "err", err)
+				continue
+			}
 		}
 
 		for _, issue := range issues {
+			if issue == nil {
+				continue
+			}
+			snapshotIssue := issue
 			// Per-issue cancellation check. A daemon shutdown mid-repo
 			// should not churn through every blocked issue just because
 			// we already entered the repo loop.
@@ -85,6 +109,32 @@ func PromoteReady(ctx context.Context, c PromoteIssueClient, cfg config.IssueTra
 			blockedOnIssue := intersectLabels(issue.LabelNames(), blockedSet)
 			if len(blockedOnIssue) == 0 {
 				continue
+			}
+			if prefetchedRepo {
+				// Search is eventually consistent. Use it to cheaply find the
+				// small blocked subset, then refresh each such candidate before
+				// trusting its labels, assignees, body or dependency declarations.
+				fresh, err := c.GetIssue(repo, issue.Number)
+				if err != nil {
+					slog.Warn("issues promote: fresh candidate validation failed, skipping promotion",
+						"repo", repo, "issue", issue.Number, "err", err)
+					continue
+				}
+				if fresh == nil || fresh.State != "open" || !cfg.MatchesAssignees(fresh.AssigneeLogins()) {
+					continue
+				}
+				blockedOnIssue = intersectLabels(fresh.LabelNames(), blockedSet)
+				if len(blockedOnIssue) == 0 {
+					continue
+				}
+				// PrefetchedIssues copies map/slice containers but deliberately
+				// shares issue pointers. Refresh that shared object so normal issue
+				// processing later in this cycle sees authoritative fields.
+				if fresh.Repo == "" {
+					fresh.Repo = repo
+				}
+				*snapshotIssue = *fresh
+				issue = snapshotIssue
 			}
 			// Collect deps from BOTH sources: the `## Depends on` body
 			// parser (cross-org-capable) AND GitHub's native sub-issues
@@ -134,6 +184,7 @@ func PromoteReady(ctx context.Context, c PromoteIssueClient, cfg config.IssueTra
 					"repo", repo, "issue", issue.Number, "err", err)
 				continue
 			}
+			reflectPromotionInSnapshot(issue, blockedOnIssue, promoteTo)
 			promoted++
 			slog.Info("issues promote: promoted issue",
 				"repo", repo, "issue", issue.Number,
@@ -154,6 +205,34 @@ func PromoteReady(ctx context.Context, c PromoteIssueClient, cfg config.IssueTra
 		}
 	}
 	return promoted, nil
+}
+
+// reflectPromotionInSnapshot makes the successful GitHub mutation immediately
+// visible to ProcessRepo, which consumes the shared cycle snapshot after the
+// promotion pass. Without this local update, a freshly-ready issue would wait
+// another poll (and potentially Search index propagation) before ingestion.
+func reflectPromotionInSnapshot(issue *github.Issue, blockedLabels []string, promoteTo string) {
+	if issue == nil {
+		return
+	}
+	blocked := lowerSet(blockedLabels)
+	labels := make([]github.Label, 0, len(issue.Labels)+1)
+	hasPromoteTo := false
+	for _, label := range issue.Labels {
+		name := strings.ToLower(strings.TrimSpace(label.Name))
+		if _, remove := blocked[name]; remove {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(label.Name), strings.TrimSpace(promoteTo)) {
+			hasPromoteTo = true
+		}
+		labels = append(labels, label)
+	}
+	if !hasPromoteTo {
+		labels = append(labels, github.Label{Name: promoteTo})
+	}
+	issue.Labels = labels
+	issue.UpdatedAt = time.Now().UTC()
 }
 
 // depState records a dependency reference paired with the GitHub state

@@ -49,7 +49,7 @@ func NewStateWorker(conn *nats.Conn, maxConcurrent int, watchKV *bus.WatchStore,
 }
 
 // Start subscribes and blocks until ctx is cancelled.
-func (w *StateWorker) Start(ctx context.Context) error {
+func (w *StateWorker) Start(ctx context.Context, ready ...chan<- error) error {
 	sub, err := w.conn.Subscribe(bus.SubjStateCheck, func(msg *nats.Msg) {
 		var checkMsg bus.StateCheckMsg
 		if err := bus.Decode(msg.Data, &checkMsg); err != nil {
@@ -104,9 +104,13 @@ func (w *StateWorker) Start(ctx context.Context) error {
 		}()
 	})
 	if err != nil {
+		_ = reportSubscriptionReady(w.conn, ready, err)
 		return err
 	}
 	defer sub.Unsubscribe()
+	if err := reportSubscriptionReady(w.conn, ready, nil); err != nil {
+		return err
+	}
 
 	<-ctx.Done()
 	return nil

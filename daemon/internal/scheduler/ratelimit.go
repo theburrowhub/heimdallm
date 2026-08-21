@@ -59,6 +59,9 @@ const searchSafetyThresholdBase = 6
 // Its budget is tracked and throttled separately from "core".
 const SearchResource = "search"
 
+// GraphQLResource is GitHub's independent GraphQL rate-limit resource.
+const GraphQLResource = "graphql"
+
 // resourceBudget holds the live rate-limit state for a single GitHub resource
 // category (e.g. "core", "search").
 type resourceBudget struct {

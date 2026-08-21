@@ -25,8 +25,9 @@ func newMemStore(t *testing.T) *store.Store {
 
 // fakeGHReloop implements the subset of the pipeline's github dependency
 // needed to exercise the HEAD-SHA fail-closed path. It records whether the
-// diff/submit steps ran so tests can assert the pipeline short-circuits
-// before executing a review when the SHA resolver fails.
+// diff/submit steps ran so tests can assert the pipeline short-circuits before
+// spending either network bandwidth on a diff or credits on a review when the
+// SHA resolver fails.
 type fakeGHReloop struct {
 	headSHAErr   error
 	headSHAValue string
@@ -95,12 +96,8 @@ func TestRun_FailClosedWhenHeadSHALookupFails(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected fail-closed error, got nil")
 	}
-	// Cost-boundary contract: FetchDiff IS allowed to run (it happens before
-	// the SHA check at pipeline.go:192) — it's a cheap GitHub API call. What
-	// must NOT run is the Claude executor or the review submission, because
-	// those are the expensive steps that burned €1,300 in #243.
-	if !fgh.diffCalled {
-		t.Errorf("expected FetchDiff to run before the SHA check (documents cost boundary)")
+	if fgh.diffCalled {
+		t.Errorf("FetchDiff must not run when HEAD resolution already failed")
 	}
 	if fexec.calls != 0 {
 		t.Errorf("executor must not be called when HEAD SHA resolver fails (calls=%d)", fexec.calls)

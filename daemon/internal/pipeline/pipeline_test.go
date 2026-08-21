@@ -33,11 +33,12 @@ func TestRunRejectsNewReviewDuringUpdateDrain(t *testing.T) {
 
 type fakeGH struct {
 	diff     string
+	diffErr  error
 	comments []github.Comment
 }
 
 func (f *fakeGH) FetchDiff(repo string, number int) (string, error) {
-	return f.diff, nil
+	return f.diff, f.diffErr
 }
 
 func (f *fakeGH) SubmitReview(repo string, number int, body, event string) (int64, string, error) {
@@ -214,6 +215,27 @@ func TestPipeline_Run(t *testing.T) {
 	}
 	if len(notify.events) < 2 {
 		t.Errorf("expected at least 2 notifications, got %d", len(notify.events))
+	}
+}
+
+func TestPipeline_RunReturnsDiffFetchErrorAfterDedupGates(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	want := errors.New("diff unavailable")
+	p := pipeline.New(s, &fakeGH{diffErr: want}, &fakeExec{}, &fakeNotify{})
+	pr := &github.PullRequest{
+		ID: 91, Number: 91, Title: "Diff failure", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/91",
+		Head: github.Branch{SHA: "sha91"},
+	}
+
+	if _, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"}); !errors.Is(err, want) {
+		t.Fatalf("Run() error = %v, want wrapped diff error", err)
 	}
 }
 

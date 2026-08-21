@@ -36,7 +36,7 @@ func NewPublishWorker(conn *nats.Conn, maxConcurrent int, handler func(context.C
 }
 
 // Start subscribes and blocks until ctx is cancelled.
-func (w *PublishWorker) Start(ctx context.Context) error {
+func (w *PublishWorker) Start(ctx context.Context, ready ...chan<- error) error {
 	sub, err := w.conn.Subscribe(bus.SubjPRPublish, func(msg *nats.Msg) {
 		var pubMsg bus.PRPublishMsg
 		if err := bus.Decode(msg.Data, &pubMsg); err != nil {
@@ -62,9 +62,13 @@ func (w *PublishWorker) Start(ctx context.Context) error {
 		}()
 	})
 	if err != nil {
+		_ = reportSubscriptionReady(w.conn, ready, err)
 		return err
 	}
 	defer sub.Unsubscribe()
+	if err := reportSubscriptionReady(w.conn, ready, nil); err != nil {
+		return err
+	}
 
 	<-ctx.Done()
 	return nil

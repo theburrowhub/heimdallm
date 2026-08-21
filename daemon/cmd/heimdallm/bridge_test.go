@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/heimdallm/daemon/internal/bus"
 	"github.com/heimdallm/daemon/internal/sse"
+	"github.com/nats-io/nats.go"
 )
 
 // A panic while publishing one event must not propagate (which, in the real
@@ -80,5 +82,62 @@ func TestPublishBridgeEvents_ContinuesAfterPublishError(t *testing.T) {
 
 	if attempts != 2 {
 		t.Fatalf("expected both events attempted despite errors, got %d", attempts)
+	}
+}
+
+func TestPublishBridgeEventsSkipsOnlySuccessfullyForwardedRepoDiscovery(t *testing.T) {
+	events := make(chan sse.Event, 3)
+	events <- sse.Event{Type: sse.EventRepoDiscovered, Data: `{"repo":"org/already"}`, NATSForwarded: true}
+	events <- sse.Event{Type: sse.EventRepoDiscovered, Data: `{"repo":"org/fallback"}`}
+	events <- sse.Event{Type: sse.EventReviewStarted, Data: `{}`}
+	close(events)
+
+	var got []string
+	publishBridgeEvents(events, func(subject string, _ []byte) error {
+		got = append(got, subject)
+		return nil
+	})
+	want := []string{
+		bus.SubjEventPrefix + sse.EventRepoDiscovered,
+		bus.SubjEventPrefix + sse.EventReviewStarted,
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("bridged subjects = %v, want %v", got, want)
+	}
+}
+
+func TestOrderedNATSEventPublisherFlushesBatchInOrder(t *testing.T) {
+	conn := newInProcessNATS(t)
+	messages := make(chan *nats.Msg, 2)
+	sub, err := conn.ChanSubscribe(bus.SubjEventPrefix+">", messages)
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+	if err := conn.Flush(); err != nil {
+		t.Fatalf("flush subscription: %v", err)
+	}
+
+	publish := newOrderedNATSEventPublisher(conn)
+	if err := publish([]sse.Event{{Type: "first", Data: "1"}, {Type: "second", Data: "2"}}); err != nil {
+		t.Fatalf("publish ordered batch: %v", err)
+	}
+	for _, want := range []string{"first", "second"} {
+		select {
+		case got := <-messages:
+			if got.Subject != bus.SubjEventPrefix+want {
+				t.Fatalf("subject = %q, want %q", got.Subject, bus.SubjEventPrefix+want)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timeout waiting for %s event", want)
+		}
+	}
+}
+
+func TestOrderedNATSEventPublisherReturnsPublishError(t *testing.T) {
+	conn := newInProcessNATS(t)
+	conn.Close()
+	if err := newOrderedNATSEventPublisher(conn)([]sse.Event{{Type: "event", Data: "payload"}}); err == nil {
+		t.Fatal("publish on closed NATS connection returned nil")
 	}
 }
