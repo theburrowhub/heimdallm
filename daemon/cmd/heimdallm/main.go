@@ -1168,6 +1168,9 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			defer wg.Done()
 			const sweepInterval = 5 * time.Minute
 			const inflightSweepMaxAge = 30 * time.Minute
+			// Retry cooldown tops out at 6h. Keeping state for 48h leaves a wide
+			// safety margin while bounding rows left by abandoned PR HEADs.
+			const reviewRetryMaxAge = 48 * time.Hour
 			ticker := time.NewTicker(sweepInterval)
 			defer ticker.Stop()
 			for {
@@ -1184,6 +1187,11 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 						slog.Warn("sweep: clear stale issue triage inflight failed", "err", err)
 					} else if n > 0 {
 						slog.Info("sweep: cleared stale issue triage inflight rows", "count", n)
+					}
+					if n, err := s.PruneReviewRetryBackoffs(time.Now().Add(-reviewRetryMaxAge)); err != nil {
+						slog.Warn("sweep: prune review retry cooldowns failed", "err", err)
+					} else if n > 0 {
+						slog.Info("sweep: pruned review retry cooldown rows", "count", n)
 					}
 				}
 			}

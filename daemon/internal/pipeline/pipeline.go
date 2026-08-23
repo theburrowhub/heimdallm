@@ -398,7 +398,7 @@ func (p *Pipeline) publish(eventType string, data map[string]any) {
 	p.publisher.Publish(sse.Event{Type: eventType, Data: string(b)})
 }
 
-// publishSkipped is a small helper for the four skip paths in Run that
+// publishSkipped is a small helper for the skip paths in Run that
 // need to emit EventReviewSkipped with the same shape: repo, pr_number,
 // pr_title, reason. Centralised so changes to the payload schema only
 // touch one site.
@@ -588,6 +588,9 @@ type RunOptions struct {
 	//      silently skipped.
 	//   2. the circuit breaker (per-PR/per-repo cap, #243) — a human clicking
 	//      the button is deliberate intent, not a runaway loop.
+	//   3. the failed-execution retry cooldown — the same explicit intent may
+	//      retry immediately, while a failure still extends the next automatic
+	//      run's cooldown.
 	// Force must ONLY be set by the manual-trigger callback, never by the
 	// pollers, so the automatic path keeps every protection intact. The
 	// state guards (opts.Guards: closed / draft / self-authored) still apply.
@@ -769,13 +772,14 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 
 	if opts.Force {
 		// Explicit operator-initiated review (app "Re-review" button).
-		// Bypasses the SHA/re-request dedup gate below AND the circuit
-		// breaker (see RunOptions.Force). Logged unconditionally — NOT gated
-		// on prevReview — because the breaker bypass at the check further
-		// down also covers a forced FIRST review whose per-repo cap is
-		// tripped, which would otherwise be suppressed silently in a
+		// Bypasses the SHA/re-request dedup gate below, the circuit breaker,
+		// and the failed-execution retry cooldown (see RunOptions.Force).
+		// Logged unconditionally — NOT gated on prevReview — because the
+		// breaker bypass at the check further down also covers a forced FIRST
+		// review whose per-repo cap is tripped, which would otherwise be
+		// suppressed silently in a
 		// cost-sensitive path.
-		slog.Info("pipeline: forced review — bypassing re-request dedup + circuit breaker",
+		slog.Info("pipeline: forced review — bypassing re-request dedup + circuit breaker + retry cooldown",
 			"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA,
 			"has_prev_review", prevReview != nil)
 	}
@@ -927,6 +931,50 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	if stopped, err := p.stopIfRepoBecameIneligible(pr, opts.RepoEligible); stopped {
 		return nil, err
 	}
+
+	// Failed executions are rate-limited independently from the review circuit
+	// breaker. The breaker counts only durable reviews; this persistent,
+	// per-HEAD exponential cooldown bounds a CLI/provider failure loop without
+	// claiming that those failures were reviews. Manual Force is explicit
+	// operator intent and bypasses the check, but its execution is still armed
+	// below so a failed manual retry protects the next automatic tick.
+	now := time.Now().UTC()
+	if !opts.Force {
+		blocked, retryAt, attempts, err := p.store.CheckReviewRetryBackoff(
+			prID, pr.Head.SHA, now,
+		)
+		if err != nil {
+			slog.Warn("pipeline: review retry cooldown check failed, proceeding",
+				"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA, "err", err)
+		} else if blocked {
+			slog.Info("pipeline: review retry cooldown active — deferring execution",
+				"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA,
+				"attempts", attempts, "retry_at", retryAt,
+				"retry_in", retryAt.Sub(now))
+			p.publishSkipped(pr, SkipReasonRetryCooldown)
+			return nil, nil
+		}
+	}
+	// Arm immediately before the lifecycle-start events and Execute. A daemon
+	// death leaves this start marker in force; a normally returned failure moves
+	// the delay origin to the return time. Clearing happens only after
+	// InsertReview succeeds.
+	retryBackoffArmed := false
+	if err := p.store.AdvanceReviewRetryBackoff(prID, pr.Head.SHA, now); err != nil {
+		slog.Error("pipeline: could not advance review retry cooldown — failed runs may retry too quickly",
+			"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA, "err", err)
+	} else {
+		retryBackoffArmed = true
+		defer func() {
+			if !retryBackoffArmed {
+				return
+			}
+			if err := p.store.MarkReviewRetryFailure(prID, pr.Head.SHA, time.Now().UTC()); err != nil {
+				slog.Warn("pipeline: could not refresh review retry cooldown after failure",
+					"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA, "err", err)
+			}
+		}()
+	}
 	p.notify.Notify("PR Review Started", fmt.Sprintf("%s #%d", pr.Repo, pr.Number))
 	p.publish(sse.EventPRDetected, map[string]any{
 		"pr_number": pr.Number,
@@ -999,6 +1047,13 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	rev.ID, err = p.store.InsertReview(rev)
 	if err != nil {
 		return nil, fmt.Errorf("pipeline: store review: %w", err)
+	}
+	retryBackoffArmed = false
+	if err := p.store.ClearReviewRetryBackoff(prID, pr.Head.SHA); err != nil {
+		// The durable review row already protects subsequent automatic runs.
+		// Failing to clear only leaves stale advisory state, so log and proceed.
+		slog.Warn("pipeline: failed to clear review retry cooldown",
+			"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA, "err", err)
 	}
 	slog.Info("pipeline: review stored locally", "review_id", rev.ID)
 	if stopped, err := p.stopIfRepoBecameIneligible(pr, opts.RepoEligible); stopped {

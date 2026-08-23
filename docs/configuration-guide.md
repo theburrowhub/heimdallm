@@ -1081,7 +1081,7 @@ architecture.
 
 ## 14. Circuit Breakers
 
-Circuit breakers cap completed PR reviews, issue triages, and development runs to prevent cost-runaway loops. Failed PR-review executions do not consume review quota because they did not produce a review. The defaults are deliberately conservative — high-volume workflows must raise caps explicitly. There is currently no way to express "unlimited" through TOML; set a large value (e.g. `99999`) if you need near-unbounded behaviour.
+Circuit breakers cap completed PR reviews, issue triages, and development runs to prevent cost-runaway loops. Failed PR-review executions do not consume review quota because they did not produce a review. Instead, automatic retries on the same PR HEAD use a persistent exponential cooldown: 5 minutes after the first incomplete execution, doubling to a maximum of 6 hours. A manual **Re-review** bypasses the wait, but another failure still extends the next automatic retry. The defaults are deliberately conservative — high-volume workflows must raise caps explicitly. There is currently no way to express "unlimited" through TOML; set a large value (e.g. `99999`) if you need near-unbounded behaviour.
 
 ```toml
 [circuit_breaker]

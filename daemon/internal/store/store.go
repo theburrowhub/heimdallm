@@ -149,6 +149,20 @@ CREATE TABLE IF NOT EXISTS reviews_in_flight (
   PRIMARY KEY (pr_id, head_sha)
 );
 
+-- Persistent exponential-backoff state for review executions that started but
+-- have not produced a durable review row yet. This is intentionally separate
+-- from the review circuit breaker: it limits retry frequency without claiming
+-- that a failed execution was a completed review.
+CREATE TABLE IF NOT EXISTS review_retry_backoff (
+  pr_id                 INTEGER NOT NULL REFERENCES prs(id),
+  head_sha              TEXT    NOT NULL,
+  consecutive_attempts  INTEGER NOT NULL,
+  last_attempt_at       DATETIME NOT NULL,
+  PRIMARY KEY (pr_id, head_sha)
+);
+CREATE INDEX IF NOT EXISTS idx_review_retry_backoff_attempt
+  ON review_retry_backoff(last_attempt_at);
+
 -- Mirror of reviews_in_flight for the issue-triage pipeline. The updated_at
 -- column stores the issue's UpdatedAt truncated to an ISO-seconds string so
 -- two fetcher ticks observing the same snapshot collapse onto the same row.
@@ -286,6 +300,18 @@ func Open(dsn string) (*Store, error) {
 		started_at  DATETIME NOT NULL,
 		PRIMARY KEY (issue_id, updated_at)
 	)`)
+	// Failed PR-review executions are rate-limited separately from the review
+	// circuit breaker. Existing databases may still have the legacy
+	// review_attempts table from #663; it is deliberately ignored because its
+	// rows cannot distinguish successful reviews from failed executions.
+	db.Exec(`CREATE TABLE IF NOT EXISTS review_retry_backoff (
+		pr_id                 INTEGER NOT NULL REFERENCES prs(id),
+		head_sha              TEXT    NOT NULL,
+		consecutive_attempts  INTEGER NOT NULL,
+		last_attempt_at       DATETIME NOT NULL,
+		PRIMARY KEY (pr_id, head_sha)
+	)`)
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_review_retry_backoff_attempt ON review_retry_backoff(last_attempt_at)")
 	// Repo rename audit table (#489). RenameRepo writes a row here
 	// in the same TX that bulk-renames prs/issues/activity_log/
 	// watch_state. The audit table is informational — it is NOT

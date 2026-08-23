@@ -275,6 +275,7 @@ func (r *Recorder) recordIssueReviewError(ev sse.Event) error {
 var dedupSkipReasons = map[string]bool{
 	"sha_unchanged":   true,
 	"legacy_backfill": true,
+	"retry_cooldown":  true,
 }
 
 func (r *Recorder) recordReviewSkipped(ev sse.Event) error {

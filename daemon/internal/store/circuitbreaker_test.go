@@ -258,4 +258,11 @@ func TestCircuitBreaker_IgnoresLegacyFailedAttempts(t *testing.T) {
 	if tripped {
 		t.Fatalf("legacy failed attempts tripped the breaker without reviews: %s", reason)
 	}
+	blocked, _, attempts, err := s.CheckReviewRetryBackoff(prID, "sha", time.Now())
+	if err != nil {
+		t.Fatalf("check retry backoff: %v", err)
+	}
+	if blocked || attempts != 0 {
+		t.Fatalf("legacy ambiguous attempts seeded retry state: blocked %v, attempts %d", blocked, attempts)
+	}
 }
