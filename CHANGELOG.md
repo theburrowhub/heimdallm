@@ -10,6 +10,21 @@
 * **issues:** `auto_promote_triage` defaults on only when `refinement_labels` is configured. Repos without a refinement target keep their previous review-only behavior; set `auto_promote_triage = false` explicitly to keep refinement manual even when refinement labels exist.
 * **pipeline (PR reviews):** a push (new HEAD SHA) on a previously-reviewed PR no longer triggers an automatic re-review on its own. Heimdallm now requires an explicit `review_requested` event for the bot — i.e. someone (or some automation) pressing "Re-request review" — newer than the previous review's `CreatedAt`. The SHA-unchanged dedup (#322 Bug 5) and this SHA-changed gate now share the same predicate, so the contract is "review iff explicitly re-requested" regardless of whether the commit changed. Workflows that relied on push-triggered re-reviews — typically repos with "Dismiss stale reviews on push" or CODEOWNERS auto-request workflows that auto-re-added the bot to `requested_reviewers` — must now explicitly re-request the review (manually in the UI, or via a GitHub Action calling `gh pr edit --add-reviewer`). Skipped pushes surface as a `review_skipped` SSE with reason `no_rereview_request` (distinct from `sha_unchanged`) so dashboards can tell the two cases apart. Closes #509.
 
+## [0.8.4](https://github.com/theburrowhub/heimdallm/compare/v0.8.3...v0.8.4) (2026-08-23)
+
+
+### Features
+
+* **activity:** "ADD" — add a PR by GitHub link and review it now ([#603](https://github.com/theburrowhub/heimdallm/issues/603)) ([8ccc903](https://github.com/theburrowhub/heimdallm/commit/8ccc9031cd68cf5240779b6e77d4fb80c9c8f8b0))
+* add integrated cross-platform auto-updates ([#704](https://github.com/theburrowhub/heimdallm/issues/704)) ([75cebfd](https://github.com/theburrowhub/heimdallm/commit/75cebfd55162a1a1143354120b5cd343b4cd369e))
+
+
+### Bug Fixes
+
+* **daemon:** enforce a single supervised lifecycle ([#700](https://github.com/theburrowhub/heimdallm/issues/700)) ([613a16e](https://github.com/theburrowhub/heimdallm/commit/613a16e706057072ac4f8705e703851e96e215f2))
+* keep GUI-daemon streams connected ([#705](https://github.com/theburrowhub/heimdallm/issues/705)) ([db35fa9](https://github.com/theburrowhub/heimdallm/commit/db35fa9e54c61b66e4a9d6cb171649cab66365df))
+* reduce PR ingestion latency ([#706](https://github.com/theburrowhub/heimdallm/issues/706)) ([efd9adc](https://github.com/theburrowhub/heimdallm/commit/efd9adc7a6fb1ea9246ea6f4a919a6875990a38b))
+
 ## [0.8.3](https://github.com/theburrowhub/heimdallm/compare/v0.8.2...v0.8.3) (2026-08-13)
 
 
