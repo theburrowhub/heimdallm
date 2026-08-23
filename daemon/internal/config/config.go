@@ -1098,6 +1098,9 @@ func (c *Config) applyDefaults() {
 	if c.CircuitBreaker.PerRepoHr == 0 {
 		c.CircuitBreaker.PerRepoHr = 20
 	}
+	if c.CircuitBreaker.PerReviewFailureRepoHr == 0 {
+		c.CircuitBreaker.PerReviewFailureRepoHr = 20
+	}
 	if c.CircuitBreaker.PerIssue24h == 0 {
 		c.CircuitBreaker.PerIssue24h = 3
 	}
@@ -2044,6 +2047,9 @@ func mergeCircuitBreaker(base, override CircuitBreakerConfig) CircuitBreakerConf
 	}
 	if override.PerRepoHr != 0 {
 		base.PerRepoHr = override.PerRepoHr
+	}
+	if override.PerReviewFailureRepoHr != 0 {
+		base.PerReviewFailureRepoHr = override.PerReviewFailureRepoHr
 	}
 	if override.PerIssue24h != 0 {
 		base.PerIssue24h = override.PerIssue24h

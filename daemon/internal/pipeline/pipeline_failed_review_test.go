@@ -14,14 +14,18 @@ import (
 )
 
 type retryExec struct {
-	calls int
-	err   error
+	calls     int
+	err       error
+	onExecute func()
 }
 
 func (f *retryExec) Detect(_, _ string) (string, error) { return "codex", nil }
 
 func (f *retryExec) Execute(_, _ string, _ executor.ExecOptions) (*executor.ReviewResult, error) {
 	f.calls++
+	if f.onExecute != nil {
+		f.onExecute()
+	}
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -53,6 +57,15 @@ func retryPR(sha string) *gh.PullRequest {
 		HTMLURL: "https://github.com/org/repo/pull/73",
 	}
 	pr.Head.SHA = sha
+	return pr
+}
+
+func retryPRFor(id int64, repo, sha string) *gh.PullRequest {
+	pr := retryPR(sha)
+	pr.ID = id
+	pr.Number = int(id)
+	pr.Repo = repo
+	pr.HTMLURL = "https://github.com/" + repo + "/pull/test"
 	return pr
 }
 
@@ -213,5 +226,159 @@ func TestRun_IneligibleRepoDoesNotArmRetryBackoff(t *testing.T) {
 	}
 	if blocked || attempts != 0 {
 		t.Fatalf("zero-spend exit armed retry state: blocked %v, attempts %d", blocked, attempts)
+	}
+}
+
+func TestRun_RepoFailureLimitBoundsDifferentPRsWithoutTrippingBreaker(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	exec := &retryExec{err: errors.New("provider unavailable")}
+	ghClient := &failedReviewGH{}
+	pub := &fakePublisher{}
+	p := pipeline.New(s, ghClient, exec, &fakeNotify{})
+	p.SetPublisher(pub)
+	p.SetCircuitBreakerLimits(&store.CircuitBreakerLimits{PerPR24h: 1, PerRepoHr: 1})
+	p.SetReviewRetryRepoHourlyLimit(2)
+
+	for _, run := range []struct {
+		id  int64
+		sha string
+	}{{301, "sha-1"}, {302, "sha-2"}} {
+		_, runErr := p.Run(retryPRFor(run.id, "org/repo", run.sha), pipeline.RunOptions{Primary: "codex"})
+		if runErr == nil || !strings.Contains(runErr.Error(), "provider unavailable") {
+			t.Fatalf("failed run %d error = %v", run.id, runErr)
+		}
+	}
+	if exec.calls != 2 {
+		t.Fatalf("Execute calls before cap = %d, want 2", exec.calls)
+	}
+
+	blockedPR := retryPRFor(303, "org/repo", "sha-3")
+	review, runErr := p.Run(blockedPR, pipeline.RunOptions{Primary: "codex"})
+	if runErr != nil || review != nil {
+		t.Fatalf("repo-limit run = review %#v, error %v", review, runErr)
+	}
+	if exec.calls != 2 {
+		t.Fatalf("repo-limit run called Execute; calls = %d", exec.calls)
+	}
+	var breakerErr *pipeline.CircuitBreakerError
+	if errors.As(runErr, &breakerErr) || errors.Is(runErr, pipeline.ErrCircuitBreakerTripped) {
+		t.Fatalf("retry repo limit surfaced as circuit breaker: %v", runErr)
+	}
+	skip, ok := pub.firstOf(sse.EventReviewSkipped)
+	if !ok || !strings.Contains(skip.Data, `"reason":"retry_repo_limit"`) {
+		t.Fatalf("repo-limit skip event = %#v", skip)
+	}
+	storedPR, err := s.GetPRByGithubID(blockedPR.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tripped, reason, err := s.CheckCircuitBreaker(storedPR.ID, blockedPR.Repo, blockedPR.Head.SHA,
+		store.CircuitBreakerLimits{PerPR24h: 1, PerRepoHr: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tripped {
+		t.Fatalf("completed-review breaker tripped on failures: %s", reason)
+	}
+
+	// Repository scope and explicit operator intent remain independent. A
+	// different repo proceeds automatically; Force proceeds in the capped repo
+	// and its failure remains charged to later automatic retries.
+	_, runErr = p.Run(retryPRFor(304, "org/other", "sha-4"), pipeline.RunOptions{Primary: "codex"})
+	if runErr == nil || exec.calls != 3 {
+		t.Fatalf("other repo run error = %v, calls = %d", runErr, exec.calls)
+	}
+	_, runErr = p.Run(retryPRFor(305, "org/repo", "sha-5"), pipeline.RunOptions{Primary: "codex", Force: true})
+	if runErr == nil || exec.calls != 4 {
+		t.Fatalf("forced capped-repo run error = %v, calls = %d", runErr, exec.calls)
+	}
+}
+
+func TestRun_SuccessfulReviewsDoNotConsumeRepoFailureLimit(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	exec := &retryExec{}
+	p := pipeline.New(s, &failedReviewGH{}, exec, &fakeNotify{})
+	p.SetReviewRetryRepoHourlyLimit(1)
+
+	for _, run := range []struct {
+		id  int64
+		sha string
+	}{{401, "sha-1"}, {402, "sha-2"}} {
+		review, runErr := p.Run(retryPRFor(run.id, "org/repo", run.sha), pipeline.RunOptions{
+			Primary:                      "codex",
+			ReviewFailureRepoHourlyLimit: 1,
+		})
+		if runErr != nil || review == nil {
+			t.Fatalf("successful run %d = review %#v, error %v", run.id, review, runErr)
+		}
+	}
+	if exec.calls != 2 {
+		t.Fatalf("second successful PR was aggregate-limited; Execute calls = %d", exec.calls)
+	}
+}
+
+func TestRun_RetryStateStorageFailuresRemainFailOpen(t *testing.T) {
+	tests := []struct {
+		name       string
+		beforeRun  func(*testing.T, *store.Store)
+		duringExec func(*testing.T, *store.Store)
+	}{
+		{
+			name: "aggregate reservation",
+			beforeRun: func(t *testing.T, s *store.Store) {
+				if _, err := s.DB().Exec("DROP TABLE review_retry_attempts"); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "per-head cooldown",
+			beforeRun: func(t *testing.T, s *store.Store) {
+				if _, err := s.DB().Exec("DROP TABLE review_retry_backoff"); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "successful reservation cleanup",
+			duringExec: func(t *testing.T, s *store.Store) {
+				if _, err := s.DB().Exec("DROP TABLE review_retry_attempts"); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := store.Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { s.Close() })
+			if tc.beforeRun != nil {
+				tc.beforeRun(t, s)
+			}
+			exec := &retryExec{}
+			if tc.duringExec != nil {
+				exec.onExecute = func() { tc.duringExec(t, s) }
+			}
+			p := pipeline.New(s, &failedReviewGH{}, exec, &fakeNotify{})
+			review, runErr := p.Run(
+				retryPRFor(int64(501+i), "org/repo", "sha"),
+				pipeline.RunOptions{Primary: "codex"},
+			)
+			if runErr != nil || review == nil || exec.calls != 1 {
+				t.Fatalf("storage failure discarded review: review %#v, error %v, calls %d", review, runErr, exec.calls)
+			}
+		})
 	}
 }

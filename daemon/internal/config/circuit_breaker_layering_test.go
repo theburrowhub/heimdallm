@@ -3,11 +3,12 @@ package config
 import "testing"
 
 func TestCircuitBreakerForRepo_GlobalOrgRepoPrecedence(t *testing.T) {
-	repoCB := CircuitBreakerConfig{PerImplRepoHr: 9}
-	orgCB := CircuitBreakerConfig{PerImplRepoHr: 7, PerRepoHr: 50}
+	repoCB := CircuitBreakerConfig{PerImplRepoHr: 9, PerReviewFailureRepoHr: 70}
+	orgCB := CircuitBreakerConfig{PerImplRepoHr: 7, PerRepoHr: 50, PerReviewFailureRepoHr: 60}
 	c := &Config{
 		CircuitBreaker: CircuitBreakerConfig{
-			PerPR24h: 3, PerRepoHr: 20, PerIssue24h: 3, PerIssueRepoHr: 10, PerImplRepoHr: 5,
+			PerPR24h: 3, PerRepoHr: 20, PerReviewFailureRepoHr: 20,
+			PerIssue24h: 3, PerIssueRepoHr: 10, PerImplRepoHr: 5,
 		},
 		AI: AIConfig{
 			Orgs:  map[string]OrgAI{"acme": {CircuitBreaker: &orgCB}},
@@ -25,6 +26,9 @@ func TestCircuitBreakerForRepo_GlobalOrgRepoPrecedence(t *testing.T) {
 	if got.PerPR24h != 3 {
 		t.Errorf("PerPR24h: want 3 (global), got %d", got.PerPR24h)
 	}
+	if got.PerReviewFailureRepoHr != 70 {
+		t.Errorf("PerReviewFailureRepoHr: want 70 (repo), got %d", got.PerReviewFailureRepoHr)
+	}
 	// Fields present only in global must survive the merge unchanged — the
 	// repo/org overlays must not zero unrelated axes.
 	if got.PerIssue24h != 3 {
@@ -38,9 +42,15 @@ func TestCircuitBreakerForRepo_GlobalOrgRepoPrecedence(t *testing.T) {
 	if gotOrg.PerImplRepoHr != 7 {
 		t.Errorf("org repo PerImplRepoHr: want 7, got %d", gotOrg.PerImplRepoHr)
 	}
+	if gotOrg.PerReviewFailureRepoHr != 60 {
+		t.Errorf("org repo PerReviewFailureRepoHr: want 60, got %d", gotOrg.PerReviewFailureRepoHr)
+	}
 
 	gotGlobal := c.CircuitBreakerForRepo("none/none")
 	if gotGlobal.PerImplRepoHr != 5 {
 		t.Errorf("global PerImplRepoHr: want 5, got %d", gotGlobal.PerImplRepoHr)
+	}
+	if gotGlobal.PerReviewFailureRepoHr != 20 {
+		t.Errorf("global PerReviewFailureRepoHr: want 20, got %d", gotGlobal.PerReviewFailureRepoHr)
 	}
 }

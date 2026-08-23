@@ -33,6 +33,15 @@ func TestApplyDefaults(t *testing.T) {
 	if cfg.AI.ReviewMode != "single" {
 		t.Errorf("ReviewMode = %q, want %q", cfg.AI.ReviewMode, "single")
 	}
+	if cfg.CircuitBreaker.PerReviewFailureRepoHr != 20 {
+		t.Errorf("PerReviewFailureRepoHr = %d, want 20", cfg.CircuitBreaker.PerReviewFailureRepoHr)
+	}
+}
+
+func TestDefaultCircuitBreakerConfigIncludesReviewFailureLimit(t *testing.T) {
+	if got := DefaultCircuitBreakerConfig().PerReviewFailureRepoHr; got != 20 {
+		t.Fatalf("PerReviewFailureRepoHr = %d, want 20", got)
+	}
 }
 
 func TestApplyDefaults_PreservesExisting(t *testing.T) {
@@ -42,6 +51,7 @@ func TestApplyDefaults_PreservesExisting(t *testing.T) {
 	cfg.GitHub.PollInterval = "1m"
 	cfg.Retention.MaxDays = 30
 	cfg.AI.ReviewMode = "multi"
+	cfg.CircuitBreaker.PerReviewFailureRepoHr = 37
 
 	cfg.applyDefaults()
 
@@ -59,6 +69,9 @@ func TestApplyDefaults_PreservesExisting(t *testing.T) {
 	}
 	if cfg.AI.ReviewMode != "multi" {
 		t.Errorf("ReviewMode overwritten: %q", cfg.AI.ReviewMode)
+	}
+	if cfg.CircuitBreaker.PerReviewFailureRepoHr != 37 {
+		t.Errorf("PerReviewFailureRepoHr overwritten: %d", cfg.CircuitBreaker.PerReviewFailureRepoHr)
 	}
 }
 

@@ -163,6 +163,21 @@ CREATE TABLE IF NOT EXISTS review_retry_backoff (
 CREATE INDEX IF NOT EXISTS idx_review_retry_backoff_attempt
   ON review_retry_backoff(last_attempt_at);
 
+-- Reservations for review executions that have not produced a
+-- durable review. A successful execution deletes its own row; failures and
+-- daemon deaths leave theirs behind so the retry layer can bound aggregate
+-- spend across different PRs of the same repository.
+CREATE TABLE IF NOT EXISTS review_retry_attempts (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  pr_id       INTEGER NOT NULL REFERENCES prs(id),
+  head_sha    TEXT    NOT NULL,
+  started_at  DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_review_retry_attempts_started
+  ON review_retry_attempts(started_at);
+CREATE INDEX IF NOT EXISTS idx_review_retry_attempts_pr_started
+  ON review_retry_attempts(pr_id, started_at);
+
 -- Mirror of reviews_in_flight for the issue-triage pipeline. The updated_at
 -- column stores the issue's UpdatedAt truncated to an ISO-seconds string so
 -- two fetcher ticks observing the same snapshot collapse onto the same row.
@@ -312,6 +327,18 @@ func Open(dsn string) (*Store, error) {
 		PRIMARY KEY (pr_id, head_sha)
 	)`)
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_review_retry_backoff_attempt ON review_retry_backoff(last_attempt_at)")
+	// Aggregate failed/in-flight execution ledger. This is a new table rather
+	// than the legacy review_attempts table: old rows cannot distinguish
+	// successful reviews from failures and must not reintroduce false limits on
+	// upgrade.
+	db.Exec(`CREATE TABLE IF NOT EXISTS review_retry_attempts (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		pr_id       INTEGER NOT NULL REFERENCES prs(id),
+		head_sha    TEXT    NOT NULL,
+		started_at  DATETIME NOT NULL
+	)`)
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_review_retry_attempts_started ON review_retry_attempts(started_at)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_review_retry_attempts_pr_started ON review_retry_attempts(pr_id, started_at)")
 	// Repo rename audit table (#489). RenameRepo writes a row here
 	// in the same TX that bulk-renames prs/issues/activity_log/
 	// watch_state. The audit table is informational — it is NOT

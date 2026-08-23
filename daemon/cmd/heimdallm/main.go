@@ -805,6 +805,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		cfgMu.Lock()
 		agentCfg := cfg.AgentConfigFor(cli)
 		globalTimeout := cfg.AI.ExecutionTimeout
+		reviewFailureRepoHourlyLimit := cfg.CircuitBreakerForRepo(pr.Repo).PerReviewFailureRepoHr
 		// Convert config.ResolvedReviewGuards to pipeline.GateConfig via same-shape cast.
 		// config cannot import pipeline (import cycle), so the helper returns a shadow
 		// type that callers cast here.
@@ -818,14 +819,15 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			}
 		}
 		return pipeline.RunOptions{
-			Primary:                 aiCfg.Primary,
-			Fallback:                aiCfg.Fallback,
-			PromptOverride:          aiCfg.Prompt,
-			AgentPromptID:           agentCfg.PromptID,
-			ReviewMode:              aiCfg.ReviewMode,
-			InstructionAuthors:      aiCfg.InstructionAuthors,
-			NeverApproveWithIssues:  aiCfg.NeverApproveWithIssues != nil && *aiCfg.NeverApproveWithIssues,
-			NeverApproveMinSeverity: aiCfg.NeverApproveMinSeverity,
+			Primary:                      aiCfg.Primary,
+			Fallback:                     aiCfg.Fallback,
+			PromptOverride:               aiCfg.Prompt,
+			AgentPromptID:                agentCfg.PromptID,
+			ReviewMode:                   aiCfg.ReviewMode,
+			InstructionAuthors:           aiCfg.InstructionAuthors,
+			NeverApproveWithIssues:       aiCfg.NeverApproveWithIssues != nil && *aiCfg.NeverApproveWithIssues,
+			NeverApproveMinSeverity:      aiCfg.NeverApproveMinSeverity,
+			ReviewFailureRepoHourlyLimit: reviewFailureRepoHourlyLimit,
 			ExecOpts: executor.ExecOptions{
 				Model:                agentCfg.Model,
 				MaxTurns:             agentCfg.MaxTurns,
@@ -1192,6 +1194,11 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 						slog.Warn("sweep: prune review retry cooldowns failed", "err", err)
 					} else if n > 0 {
 						slog.Info("sweep: pruned review retry cooldown rows", "count", n)
+					}
+					if n, err := s.PruneReviewRetryAttempts(time.Now().Add(-reviewRetryMaxAge)); err != nil {
+						slog.Warn("sweep: prune review retry attempt rows failed", "err", err)
+					} else if n > 0 {
+						slog.Info("sweep: pruned review retry attempt rows", "count", n)
 					}
 				}
 			}
@@ -2364,11 +2371,12 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			"repos":             autonomousRepos,
 		}
 		result["circuit_breaker"] = map[string]any{
-			"per_pr_24h":        c.CircuitBreaker.PerPR24h,
-			"per_repo_hr":       c.CircuitBreaker.PerRepoHr,
-			"per_issue_24h":     c.CircuitBreaker.PerIssue24h,
-			"per_issue_repo_hr": c.CircuitBreaker.PerIssueRepoHr,
-			"per_impl_repo_hr":  c.CircuitBreaker.PerImplRepoHr,
+			"per_pr_24h":                 c.CircuitBreaker.PerPR24h,
+			"per_repo_hr":                c.CircuitBreaker.PerRepoHr,
+			"per_review_failure_repo_hr": c.CircuitBreaker.PerReviewFailureRepoHr,
+			"per_issue_24h":              c.CircuitBreaker.PerIssue24h,
+			"per_issue_repo_hr":          c.CircuitBreaker.PerIssueRepoHr,
+			"per_impl_repo_hr":           c.CircuitBreaker.PerImplRepoHr,
 		}
 		result["polling"] = map[string]any{
 			"poll_interval":               c.Polling.PollInterval,

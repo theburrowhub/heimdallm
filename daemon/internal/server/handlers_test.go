@@ -3331,11 +3331,12 @@ func TestHandlerGetConfig_ExposesAutonomousAndCircuitBreaker(t *testing.T) {
 				"repos":             map[string]any{},
 			},
 			"circuit_breaker": map[string]any{
-				"per_pr_24h":        3,
-				"per_repo_hr":       20,
-				"per_issue_24h":     3,
-				"per_issue_repo_hr": 10,
-				"per_impl_repo_hr":  5,
+				"per_pr_24h":                 3,
+				"per_repo_hr":                20,
+				"per_review_failure_repo_hr": 20,
+				"per_issue_24h":              3,
+				"per_issue_repo_hr":          10,
+				"per_impl_repo_hr":           5,
 			},
 		}
 	})
@@ -3388,6 +3389,9 @@ func TestHandlerGetConfig_ExposesAutonomousAndCircuitBreaker(t *testing.T) {
 	if cb["per_repo_hr"].(float64) != 20 {
 		t.Errorf("circuit_breaker.per_repo_hr = %v, want 20", cb["per_repo_hr"])
 	}
+	if cb["per_review_failure_repo_hr"].(float64) != 20 {
+		t.Errorf("circuit_breaker.per_review_failure_repo_hr = %v, want 20", cb["per_review_failure_repo_hr"])
+	}
 	if cb["per_impl_repo_hr"].(float64) != 5 {
 		t.Errorf("circuit_breaker.per_impl_repo_hr = %v, want 5", cb["per_impl_repo_hr"])
 	}
@@ -3438,7 +3442,7 @@ func TestHandlePatchConfig_CircuitBreakerGlobalPersists(t *testing.T) {
 	srv := setupServerWithToken(t, "test-token")
 	srv.SetConfigPath(tomlPath)
 
-	body := `{"circuit_breaker":{"per_impl_repo_hr":9}}`
+	body := `{"circuit_breaker":{"per_impl_repo_hr":9,"per_review_failure_repo_hr":27}}`
 	req := httptest.NewRequest("PATCH", "/config", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Heimdallm-Token", "test-token")
@@ -3459,6 +3463,9 @@ func TestHandlePatchConfig_CircuitBreakerGlobalPersists(t *testing.T) {
 	}
 	if cb["per_impl_repo_hr"] != int64(9) {
 		t.Errorf("circuit_breaker.per_impl_repo_hr = %v (%T), want 9", cb["per_impl_repo_hr"], cb["per_impl_repo_hr"])
+	}
+	if cb["per_review_failure_repo_hr"] != int64(27) {
+		t.Errorf("circuit_breaker.per_review_failure_repo_hr = %v (%T), want 27", cb["per_review_failure_repo_hr"], cb["per_review_failure_repo_hr"])
 	}
 }
 
