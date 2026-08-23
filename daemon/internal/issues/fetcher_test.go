@@ -28,9 +28,11 @@ type fakeClient struct {
 type fakeMarkerFetcher struct {
 	commentsByKey map[string][]github.Comment
 	err           error
+	calls         int
 }
 
 func (f *fakeMarkerFetcher) FetchIssueCommentsOnly(repo string, number int) ([]github.Comment, error) {
+	f.calls++
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -120,6 +122,7 @@ type fakeStageTransitionClient struct {
 	added    []string
 	removed  []string
 	comments []string
+	addErr   error
 }
 
 func (f *fakeStageTransitionClient) CreateLabel(repo, name, color, description string) error {
@@ -129,7 +132,7 @@ func (f *fakeStageTransitionClient) CreateLabel(repo, name, color, description s
 
 func (f *fakeStageTransitionClient) AddLabels(repo string, number int, labels []string) error {
 	f.added = append(f.added, strings.Join(labels, ","))
-	return nil
+	return f.addErr
 }
 
 func (f *fakeStageTransitionClient) RemoveLabels(repo string, number int, labels []string) error {
@@ -1042,6 +1045,49 @@ func TestFetcher_ManualStageLabelChangeAuditsAndDispatchesNewStage(t *testing.T)
 	}
 	if len(stage.comments) != 1 || !strings.Contains(stage.comments[0], "manual GitHub label change") {
 		t.Fatalf("stage audit comment = %q, want manual GitHub trigger", stage.comments)
+	}
+	if mf.calls != 1 {
+		t.Fatalf("comment fetches = %d, want 1 shared by marker scan and stage audit", mf.calls)
+	}
+}
+
+func TestFetcher_ManualStageAuditFailureDoesNotBlockDispatch(t *testing.T) {
+	now := time.Now()
+	issue := &github.Issue{
+		ID:        1099,
+		Number:    99,
+		Repo:      "org/repo",
+		Title:     "Needs plan",
+		UpdatedAt: now,
+		Mode:      config.IssueModeRefinement,
+	}
+	dedup := &fakeDedup{byGithubID: map[int64]dedupEntry{
+		issue.ID: {
+			row: &store.Issue{ID: 99, GithubID: issue.ID},
+			review: &store.IssueReview{
+				IssueID:     99,
+				CommentedAt: now.Add(-2 * time.Minute),
+				ActionTaken: string(config.IssueModeReviewOnly),
+			},
+		},
+	}}
+	pub := &fakeIssuePublisher{}
+	stage := &fakeStageTransitionClient{addErr: errors.New("labels unavailable")}
+	f := issues.NewFetcher(
+		&fakeClient{issues: []*github.Issue{issue}},
+		&fakeMarkerFetcher{commentsByKey: map[string][]github.Comment{"org/repo#99": {}}},
+		dedup,
+		&fakePipeline{},
+	)
+	f.SetPublisher(pub)
+	f.SetStageTransitioner(stage, nil)
+
+	processed, err := f.ProcessRepo(context.Background(), "org/repo", stagePipelineCfg(), "alice", noOpts)
+	if err != nil {
+		t.Fatalf("ProcessRepo() error = %v, want non-fatal audit failure", err)
+	}
+	if processed != 1 || len(pub.refinement) != 1 || pub.refinement[0] != 99 {
+		t.Fatalf("audit failure blocked dispatch: processed=%d refinement=%v", processed, pub.refinement)
 	}
 }
 

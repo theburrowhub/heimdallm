@@ -10,6 +10,93 @@
 * **issues:** `auto_promote_triage` defaults on only when `refinement_labels` is configured. Repos without a refinement target keep their previous review-only behavior; set `auto_promote_triage = false` explicitly to keep refinement manual even when refinement labels exist.
 * **pipeline (PR reviews):** a push (new HEAD SHA) on a previously-reviewed PR no longer triggers an automatic re-review on its own. Heimdallm now requires an explicit `review_requested` event for the bot — i.e. someone (or some automation) pressing "Re-request review" — newer than the previous review's `CreatedAt`. The SHA-unchanged dedup (#322 Bug 5) and this SHA-changed gate now share the same predicate, so the contract is "review iff explicitly re-requested" regardless of whether the commit changed. Workflows that relied on push-triggered re-reviews — typically repos with "Dismiss stale reviews on push" or CODEOWNERS auto-request workflows that auto-re-added the bot to `requested_reviewers` — must now explicitly re-request the review (manually in the UI, or via a GitHub Action calling `gh pr edit --add-reviewer`). Skipped pushes surface as a `review_skipped` SSE with reason `no_rereview_request` (distinct from `sha_unchanged`) so dashboards can tell the two cases apart. Closes #509.
 
+## [0.8.3](https://github.com/theburrowhub/heimdallm/compare/v0.8.2...v0.8.3) (2026-08-13)
+
+
+### Bug Fixes
+
+* **executor:** extract JSON with a balanced object scan ([#698](https://github.com/theburrowhub/heimdallm/issues/698)) ([203af11](https://github.com/theburrowhub/heimdallm/commit/203af118c8e91f24d0264b2f2ef9f270247ef6d2))
+
+## [0.8.2](https://github.com/theburrowhub/heimdallm/compare/v0.8.1...v0.8.2) (2026-08-07)
+
+
+### Bug Fixes
+
+* **repoctx:** reject non-git review workdirs ([#696](https://github.com/theburrowhub/heimdallm/issues/696)) ([4e5a17c](https://github.com/theburrowhub/heimdallm/commit/4e5a17c6c513382cf9bf9546e031b6533510d37f)), closes [#695](https://github.com/theburrowhub/heimdallm/issues/695)
+
+## [0.8.1](https://github.com/theburrowhub/heimdallm/compare/v0.8.0...v0.8.1) (2026-08-05)
+
+
+### Bug Fixes
+
+* **breaker:** count review runs, not published reviews ([#668](https://github.com/theburrowhub/heimdallm/issues/668)) ([17215c0](https://github.com/theburrowhub/heimdallm/commit/17215c0d797dea4a9d8e74fca43e71639112bee8))
+* **daemon:** kill git's process group on timeout and reap orphans in PID 1 ([#667](https://github.com/theburrowhub/heimdallm/issues/667)) ([4a9f8bf](https://github.com/theburrowhub/heimdallm/commit/4a9f8bf916b80d8139f89a5bb98111df05a656dc))
+* **pipeline:** re-check HEAD SHA before publishing a review ([#666](https://github.com/theburrowhub/heimdallm/issues/666)) ([d664aa8](https://github.com/theburrowhub/heimdallm/commit/d664aa871bd3ff39db40b1f221c23ea49eec9f41))
+
+## [0.8.0](https://github.com/theburrowhub/heimdallm/compare/v0.7.13...v0.8.0) (2026-08-03)
+
+
+### ⚠ BREAKING CHANGES
+
+* with never_approve_with_issues on and never_approve_min_severity unset, reviews whose findings are all low-severity now publish as APPROVE instead of COMMENT. Set never_approve_min_severity = "low" to keep the previous behaviour.
+
+### Features
+
+* expose never-approve severity threshold in the UI, default it to medium ([#658](https://github.com/theburrowhub/heimdallm/issues/658)) ([5ebe9c4](https://github.com/theburrowhub/heimdallm/commit/5ebe9c49d94c271ef03209dd07b2f6462a272d6a))
+
+## [0.7.13](https://github.com/theburrowhub/heimdallm/compare/v0.7.12...v0.7.13) (2026-08-03)
+
+
+### Bug Fixes
+
+* **review:** keep tier3 on repoctx, give codex a workspace, kill process groups ([#656](https://github.com/theburrowhub/heimdallm/issues/656)) ([2b9eb0a](https://github.com/theburrowhub/heimdallm/commit/2b9eb0aa8817416e924e04a74515f8de21e9ee21))
+
+## [0.7.12](https://github.com/theburrowhub/heimdallm/compare/v0.7.11...v0.7.12) (2026-07-31)
+
+
+### Features
+
+* **daemon:** GitHub API efficiency — ETag, aggregated search, GH-aware throttle, adaptive polling, GraphQL ([#651](https://github.com/theburrowhub/heimdallm/issues/651)) ([356c66c](https://github.com/theburrowhub/heimdallm/commit/356c66cd0c18bf19b6c74ae94573867113d640f0))
+
+## [0.7.11](https://github.com/theburrowhub/heimdallm/compare/v0.7.10...v0.7.11) (2026-07-31)
+
+
+### Bug Fixes
+
+* **build:** stamp daemon version into binaries (closes [#645](https://github.com/theburrowhub/heimdallm/issues/645)) ([#648](https://github.com/theburrowhub/heimdallm/issues/648)) ([25d10c4](https://github.com/theburrowhub/heimdallm/commit/25d10c47d2730538cc387b490b17a81b7eb22e00))
+
+## [0.7.10](https://github.com/theburrowhub/heimdallm/compare/v0.7.9...v0.7.10) (2026-07-31)
+
+
+### Bug Fixes
+
+* **executor:** resolve AI CLIs from well-known installer directories ([#644](https://github.com/theburrowhub/heimdallm/issues/644)) ([a37c140](https://github.com/theburrowhub/heimdallm/commit/a37c140daacc8e64e319e2448be22e62db6fbd46))
+* **security:** enforce AI execution policy at subprocess boundary ([#640](https://github.com/theburrowhub/heimdallm/issues/640)) ([3296bea](https://github.com/theburrowhub/heimdallm/commit/3296bea36fc68f1a972fea4d9f21b7c34a84b057))
+* **server:** serve the daemon's own log when the LaunchAgent log is absent or stale ([a37c140](https://github.com/theburrowhub/heimdallm/commit/a37c140daacc8e64e319e2448be22e62db6fbd46)), closes [#643](https://github.com/theburrowhub/heimdallm/issues/643)
+* **test:** isolate Compose integration runs from production volumes ([#638](https://github.com/theburrowhub/heimdallm/issues/638)) ([82bf2b5](https://github.com/theburrowhub/heimdallm/commit/82bf2b5d6e43779edf6475d5de7bddffe0bf714b))
+* **web:** include shared Flutter assets in the production Docker build ([#639](https://github.com/theburrowhub/heimdallm/issues/639)) ([695ed5e](https://github.com/theburrowhub/heimdallm/commit/695ed5e6300ac1636356829896b07f28647aaf14))
+
+## [0.7.9](https://github.com/theburrowhub/heimdallm/compare/v0.7.8...v0.7.9) (2026-07-29)
+
+
+### Bug Fixes
+
+* launch installed macOS bundle by exact path ([#636](https://github.com/theburrowhub/heimdallm/issues/636)) ([62663c9](https://github.com/theburrowhub/heimdallm/commit/62663c96a4a6ca725827a240d68a6df60899685b))
+
+## [0.7.8](https://github.com/theburrowhub/heimdallm/compare/v0.7.7...v0.7.8) (2026-07-29)
+
+
+### Features
+
+* **makefile:** add macOS install and uninstall targets ([#635](https://github.com/theburrowhub/heimdallm/issues/635)) ([858a802](https://github.com/theburrowhub/heimdallm/commit/858a8026ada67453c35ea92d219876410c654c32))
+* **review:** clearer never-approve downgrade note + min-severity threshold (closes [#597](https://github.com/theburrowhub/heimdallm/issues/597)) ([#602](https://github.com/theburrowhub/heimdallm/issues/602)) ([4b6704e](https://github.com/theburrowhub/heimdallm/commit/4b6704ed37c0247668b6be21c94504ef768e98d8))
+
+
+### Bug Fixes
+
+* **pipeline:** manual "Re-review" button now forces a re-review ([#601](https://github.com/theburrowhub/heimdallm/issues/601)) ([9fe0e89](https://github.com/theburrowhub/heimdallm/commit/9fe0e89b731117ae1b03207c50d9f7d3dae24ccc))
+* prevent automatic reviews for non-monitored repositories ([#598](https://github.com/theburrowhub/heimdallm/issues/598)) ([46dafc5](https://github.com/theburrowhub/heimdallm/commit/46dafc5639be647d8502fdf7988a7b3769d096f5))
+
 ## [0.7.7](https://github.com/theburrowhub/heimdallm/compare/v0.7.6...v0.7.7) (2026-07-10)
 
 

@@ -1,14 +1,20 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/api/api_client.dart';
 import '../../core/api/sse_client.dart';
+import '../../core/daemon/daemon_startup.dart';
 import '../../core/models/config_model.dart';
 import '../../core/platform/platform_services_provider.dart';
 import '../dashboard/dashboard_providers.dart';
 
 final daemonHealthProvider = FutureProvider<bool>((ref) async {
   final api = ref.watch(apiClientProvider);
-  return api.checkHealth();
+  // UI "running" state is ownership, not deep health. A degraded daemon still
+  // serves config/logs and must expose Stop/diagnostic controls instead of a
+  // misleading Start button that would attempt a duplicate (#646).
+  return await api.daemonReachable() == PortOwner.daemon;
 });
 
 final configProvider = FutureProvider<AppConfig>((ref) async {
@@ -141,6 +147,9 @@ class ConfigNotifier extends AsyncNotifier<AppConfig> {
     required String token,
     required AppConfig config,
     required String daemonBinaryPath,
+    int maxSpawnAttempts = 1,
+    int healthCheckMaxAttempts = 80,
+    Duration healthCheckInterval = const Duration(milliseconds: 100),
   }) async {
     _mutationGeneration++;
     _serverGeneration++;
@@ -156,18 +165,61 @@ class ConfigNotifier extends AsyncNotifier<AppConfig> {
       // 2. Write config
       await platform.writeDaemonConfig(config);
 
-      // 3. Launch daemon
-      await platform.spawnDaemon(daemonBinaryPath);
+      // 3. Guard daemon launch with the same ownership check as app startup.
+      // Only an explicitly closed port is allowed to reach spawnDaemon.
+      final api = ref.read(apiClientProvider);
+      final startup = DaemonStartupCoordinator(
+        api: api,
+        platform: platform,
+        binaryPath: daemonBinaryPath,
+        maxSpawnAttempts: maxSpawnAttempts,
+      );
+      final startupResult = await startup.ensureAvailable();
+      switch (startupResult.outcome) {
+        case DaemonStartupOutcome.spawned:
+        case DaemonStartupOutcome.daemonPresent:
+          break;
+        case DaemonStartupOutcome.portOccupied:
+          throw Exception(
+            'Port ${api.daemonPort} is already occupied or could not be '
+            'proven free. No daemon was started, to avoid duplicate workers. '
+            'Stop the process listening on that port and try again.',
+          );
+        case DaemonStartupOutcome.spawnFailedRetryable:
+        case DaemonStartupOutcome.spawnFailedTerminal:
+          throw Exception(
+            'Heimdallm could not launch its daemon: '
+            '${startupResult.error ?? 'unknown process error'}. '
+            'Check that the app is installed correctly and has permission '
+            'to run its background service.',
+          );
+        case DaemonStartupOutcome.spawnBudgetExhausted:
+          throw Exception(
+            'Heimdallm exhausted its guarded daemon start attempt. '
+            'Restart the app and check the daemon log if the problem persists.',
+          );
+      }
 
       // 4. Wait up to 8 seconds for the daemon to become healthy
-      final api = ref.read(apiClientProvider);
-      for (var i = 0; i < 80; i++) {
-        await Future.delayed(const Duration(milliseconds: 100));
-        if (await api.checkHealth()) break;
+      var healthy = false;
+      for (var i = 0; i < healthCheckMaxAttempts; i++) {
+        await Future.delayed(healthCheckInterval);
+        if (await api.checkHealth()) {
+          healthy = true;
+          break;
+        }
       }
-      if (!await api.checkHealth()) {
+      if (!healthy) {
+        final existingDaemon =
+            startupResult.outcome == DaemonStartupOutcome.daemonPresent;
         throw Exception(
-          'Heimdallm could not start. Check the app installation.',
+          existingDaemon
+              ? 'A Heimdallm daemon is already running on port '
+                    '${api.daemonPort}, but it did not become healthy within '
+                    '8 seconds. No second daemon was started. Check the '
+                    'daemon log and try again.'
+              : 'Heimdallm was launched but did not become healthy within '
+                    '8 seconds. Check the app installation and daemon log.',
         );
       }
       ref.invalidate(daemonHealthProvider);
@@ -364,6 +416,11 @@ Map<String, dynamic> _computeGlobalDiff(AppConfig old, AppConfig updated) {
       updated.globalNeverApproveWithIssues) {
     aiDiff['never_approve_with_issues'] = updated.globalNeverApproveWithIssues;
   }
+  if (old.globalNeverApproveMinSeverity !=
+      updated.globalNeverApproveMinSeverity) {
+    aiDiff['never_approve_min_severity'] =
+        updated.globalNeverApproveMinSeverity;
+  }
 
   // Agent configs — diff each CLI agent's settings individually.
   final agentsDiff = <String, dynamic>{};
@@ -385,8 +442,16 @@ Map<String, dynamic> _computeGlobalDiff(AppConfig old, AppConfig updated) {
       ad['permission_mode'] = n.permissionMode;
     }
     if (o.bare != n.bare) ad['bare'] = n.bare;
-    if (o.dangerouslySkipPerms != n.dangerouslySkipPerms) {
-      ad['dangerously_skip_perms'] = n.dangerouslySkipPerms;
+    // HTTP is deliberately asymmetric for this capability: the UI may reduce
+    // privilege, but enabling it requires a trusted config.toml edit.
+    if (!o.dangerouslySkipPerms && n.dangerouslySkipPerms) {
+      throw StateError(
+        'dangerously_skip_perms cannot be enabled via the HTTP API; '
+        'edit config.toml directly',
+      );
+    }
+    if (o.dangerouslySkipPerms && !n.dangerouslySkipPerms) {
+      ad['dangerously_skip_perms'] = false;
     }
     if (o.noSessionPersistence != n.noSessionPersistence) {
       ad['no_session_persistence'] = n.noSessionPersistence;
@@ -494,6 +559,38 @@ Map<String, dynamic> _computeGlobalDiff(AppConfig old, AppConfig updated) {
     cbDiff['per_impl_repo_hr'] = updated.circuitBreaker.perImplRepoHr;
   }
   if (cbDiff.isNotEmpty) diff['circuit_breaker'] = cbDiff;
+  // Polling
+  final pollingDiff = <String, dynamic>{};
+  if (old.polling.adaptive != updated.polling.adaptive) {
+    pollingDiff['adaptive'] = updated.polling.adaptive;
+  }
+  if (old.polling.pollInterval != updated.polling.pollInterval) {
+    pollingDiff['poll_interval'] = updated.polling.pollInterval;
+  }
+  if (old.polling.minInterval != updated.polling.minInterval) {
+    pollingDiff['min_interval'] = updated.polling.minInterval;
+  }
+  if (old.polling.maxInterval != updated.polling.maxInterval) {
+    pollingDiff['max_interval'] = updated.polling.maxInterval;
+  }
+  if (old.polling.discoveryInterval != updated.polling.discoveryInterval) {
+    pollingDiff['discovery_interval'] = updated.polling.discoveryInterval;
+  }
+  if (old.polling.tier3Interval != updated.polling.tier3Interval) {
+    pollingDiff['tier3_interval'] = updated.polling.tier3Interval;
+  }
+  if (old.polling.rateLimitSafetyThreshold !=
+      updated.polling.rateLimitSafetyThreshold) {
+    pollingDiff['rate_limit_safety_threshold'] =
+        updated.polling.rateLimitSafetyThreshold;
+  }
+  if (old.polling.useEtag != updated.polling.useEtag) {
+    pollingDiff['use_etag'] = updated.polling.useEtag;
+  }
+  if (old.polling.useGraphql != updated.polling.useGraphql) {
+    pollingDiff['use_graphql'] = updated.polling.useGraphql;
+  }
+  if (pollingDiff.isNotEmpty) diff['polling'] = pollingDiff;
 
   return diff;
 }
@@ -540,3 +637,10 @@ bool _listsDiffer(List<String> a, List<String> b) {
   }
   return false;
 }
+
+/// Thin wrapper that exposes [_computeGlobalDiff] to unit tests.
+@visibleForTesting
+Map<String, dynamic> computeGlobalDiffForTest(
+  AppConfig old,
+  AppConfig updated,
+) => _computeGlobalDiff(old, updated);

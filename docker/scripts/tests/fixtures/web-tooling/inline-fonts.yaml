@@ -1,0 +1,6 @@
+name: web_tooling_inline_fonts_fixture
+
+flutter:
+  assets:
+    - assets/icon.png
+  fonts: []

@@ -2,6 +2,8 @@ package bus_test
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -86,6 +88,55 @@ func TestPRReviewPublisher_EmptyHeadSHA(t *testing.T) {
 	err := pub.PublishPRReview(ctx, "org/repo", 1, 100, "")
 	if err == nil {
 		t.Fatal("expected error for empty headSHA")
+	}
+}
+
+func TestPRReviewPublisher_CandidateAllowsWorkerHydration(t *testing.T) {
+	env := newTestEnv(t)
+	conn := env.bus.Conn()
+	ch := make(chan *nats.Msg, 1)
+	sub, err := conn.ChanSubscribe(bus.SubjPRReview, ch)
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	defer sub.Unsubscribe()
+	if err := conn.Flush(); err != nil {
+		t.Fatalf("flush subscribe: %v", err)
+	}
+
+	pub := bus.NewPRReviewPublisher(conn)
+	if err := pub.PublishPRReviewCandidate(context.Background(), "org/repo", 7, 42); err != nil {
+		t.Fatalf("PublishPRReviewCandidate: %v", err)
+	}
+	if err := conn.Flush(); err != nil {
+		t.Fatalf("flush publish: %v", err)
+	}
+	select {
+	case raw := <-ch:
+		var got bus.PRReviewMsg
+		if err := bus.Decode(raw.Data, &got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if got.Repo != "org/repo" || got.Number != 7 || got.GithubID != 42 || got.HeadSHA != "" {
+			t.Fatalf("candidate = %+v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for candidate")
+	}
+}
+
+func TestPRReviewPublisher_CandidateClosedConnection(t *testing.T) {
+	env := newTestEnv(t)
+	conn := env.bus.Conn()
+	pub := bus.NewPRReviewPublisher(conn)
+	conn.Close()
+
+	err := pub.PublishPRReviewCandidate(context.Background(), "org/repo", 7, 42)
+	if !errors.Is(err, nats.ErrConnectionClosed) {
+		t.Fatalf("PublishPRReviewCandidate error = %v, want nats.ErrConnectionClosed", err)
+	}
+	if !strings.Contains(err.Error(), "publish pr review candidate") {
+		t.Fatalf("PublishPRReviewCandidate error lacks operation context: %v", err)
 	}
 }
 

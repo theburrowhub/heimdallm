@@ -112,6 +112,23 @@ type PullRequest struct {
 	Repo string `json:"-"`
 }
 
+// ReviewRequestedFor reports whether the current Pulls API representation
+// still lists login as a pending reviewer. Search can lag behind this source
+// of truth, so workers call it after their fresh hydration.
+func (pr *PullRequest) ReviewRequestedFor(login string) bool {
+	want := strings.TrimSpace(strings.TrimLeft(login, "@"))
+	if pr == nil || want == "" {
+		return false
+	}
+	for _, reviewer := range pr.RequestedReviewers {
+		got := strings.TrimSpace(strings.TrimLeft(reviewer.Login, "@"))
+		if strings.EqualFold(got, want) {
+			return true
+		}
+	}
+	return false
+}
+
 // Comment represents a single comment on a PR — either an inline review comment
 // (File and Line are set) or a general issue comment (File and Line are zero values).
 type Comment struct {

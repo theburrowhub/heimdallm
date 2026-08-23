@@ -3,10 +3,19 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+      args:
+        # Version stamped into the daemon binary (shown in /health and the
+        # web UI). The Makefile wrappers set HEIMDALLM_VERSION=GIT_VERSION.
+        VERSION: ${HEIMDALLM_VERSION:-dev}
     container_name: heimdallm
     restart: unless-stopped
     ports:
-      - "${HEIMDALLM_PORT:-7842}:${HEIMDALLM_PORT:-7842}"
+      # Compose-only host binding knobs let the isolated test runners request
+      # a loopback ephemeral port without adding a second merged port entry.
+      # When HOST_IP is unset the mapping remains exactly the original
+      # host-port:container-port form, preserving Docker's default bind
+      # semantics. Tests set it to 127.0.0.1 and the host port to 0.
+      - "${HEIMDALLM_COMPOSE_DAEMON_HOST_IP:+${HEIMDALLM_COMPOSE_DAEMON_HOST_IP}:}${HEIMDALLM_COMPOSE_DAEMON_HOST_PORT:-${HEIMDALLM_PORT:-7842}}:${HEIMDALLM_PORT:-7842}"
     environment:
       # ── Heimdallm config ───────────────────────────────────────────────
       - GITHUB_TOKEN=${GITHUB_TOKEN}
@@ -78,9 +87,10 @@ services:
       # this version, otherwise the daemon will regenerate from env vars
       # and your manual edits are lost silently:
       #
-      #   docker compose up --no-start heimdallm     # create container
+      #   DOCKER_BUILDKIT=1 docker compose up --no-start heimdallm
+      #                                                   # create container
       #   docker cp docker/config/config.toml heimdallm:/config/config.toml
-      #   docker compose up -d                        # start with the file in place
+      #   DOCKER_BUILDKIT=1 docker compose up -d     # start with the file in place
       #
       # Env-driven setups (HEIMDALLM_* in docker/.env) and saves you made
       # via the web UI Configuration screen are unaffected; both flow
@@ -129,12 +139,16 @@ services:
   # it into proxied /api/* requests so the browser never handles it.
   web:
     build:
-      context: ../flutter_app
-      dockerfile: Dockerfile.web
+      # The Flutter project shares the repository-root assets directory via
+      # flutter_app/assets -> ../assets. Use the repo root as context; the
+      # BuildKit-only Dockerfile-specific ignore file keeps the transferred
+      # context minimal. Make wrappers set DOCKER_BUILDKIT=1 explicitly.
+      context: ..
+      dockerfile: flutter_app/Dockerfile.web
     container_name: heimdallm-web
     restart: unless-stopped
     ports:
-      - "${HEIMDALLM_WEB_PORT:-3000}:3000"
+      - "${HEIMDALLM_COMPOSE_WEB_HOST_IP:+${HEIMDALLM_COMPOSE_WEB_HOST_IP}:}${HEIMDALLM_COMPOSE_WEB_HOST_PORT:-${HEIMDALLM_WEB_PORT:-3000}}:3000"
     environment:
       # Upstream daemon URL inside the compose network. Host + port line
       # up with the heimdallm service above.

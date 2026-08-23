@@ -483,12 +483,18 @@ class _AgentSectionState extends State<_AgentSection> {
               onChanged: (v) { setState(() => s.noSessionPersistence = v); widget.onChanged(s); },
             ),
             _tipToggle(
+              switchKey: ValueKey('dangerously-skip-permissions-${widget.name}'),
               label: '--dangerously-skip-permissions',
               value: s.dangerouslySkipPerms,
               tooltip: '⚠️ Bypasses ALL permission checks.\n'
-                  'Only use in sandboxed or trusted environments '
-                  'where security is handled externally.',
-              onChanged: (v) { setState(() => s.dangerouslySkipPerms = v); widget.onChanged(s); },
+                  'This screen can only disable it. To enable it, edit '
+                  'config.toml directly in a sandboxed or trusted environment.',
+              onChanged: s.dangerouslySkipPerms
+                  ? (v) {
+                      setState(() => s.dangerouslySkipPerms = v);
+                      widget.onChanged(s);
+                    }
+                  : null,
               danger: true,
             ),
           ],
@@ -522,10 +528,11 @@ class _AgentSectionState extends State<_AgentSection> {
   }
 
   Widget _tipToggle({
+    Key? switchKey,
     required String label,
     required bool value,
     required String tooltip,
-    required ValueChanged<bool> onChanged,
+    required ValueChanged<bool>? onChanged,
     bool danger = false,
   }) {
     return Tooltip(
@@ -533,6 +540,7 @@ class _AgentSectionState extends State<_AgentSection> {
       waitDuration: const Duration(milliseconds: 600),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
         Switch(
+          key: switchKey,
           value: value,
           onChanged: onChanged,
           // ignore: deprecated_member_use

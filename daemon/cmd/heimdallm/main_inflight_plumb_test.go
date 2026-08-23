@@ -17,22 +17,15 @@ import (
 	"github.com/heimdallm/daemon/internal/store"
 )
 
-// These tests lock in the fix for theburrowhub/heimdallm#264: the persistent
-// in-flight claim (#258) is keyed on (pr_id, head_sha), but both callers of
-// runReview (tier2 ProcessPR and tier3 HandleChange) used to construct the
-// gh.PullRequest with an empty Head.SHA, silently bypassing the claim guard
-// and letting two poll ticks review the same PR concurrently — reopening the
-// #243 double-review pattern. The fix plumbs HeadSHA through scheduler.Tier2PR
-// and scheduler.ItemSnapshot. These tests fail if that plumbing regresses.
+// These tests protect the HEAD-SHA plumbing behind the persistent in-flight
+// claim. Search candidates are intentionally unhydrated; the NATS worker gets
+// a fresh PR once. Legacy Tier2 ProcessPR and Tier3 snapshot paths still carry
+// an explicit SHA into runReview.
 
-// TestTier2Adapter_FetchPRsToReview_PopulatesHeadSHA verifies the adapter
-// resolves HEAD SHA via /pulls/N for every PR that cleared the review gate,
-// so Tier2PR.HeadSHA arrives at ProcessPR non-empty.
-//
-// The Search Issues API used by FetchPRsToReview does not populate head.sha
-// (see github/client.go:379), so the adapter must make one extra /pulls/N
-// call per passing PR. This test drives that contract.
-func TestTier2Adapter_FetchPRsToReview_PopulatesHeadSHA(t *testing.T) {
+// Search candidates stay unhydrated in the adapter. The NATS worker performs
+// the one fresh Pulls lookup under its existing bounded concurrency, applies
+// reviewer/SHA/dedup guards there, and passes that SHA into runReview.
+func TestTier2AdapterFetchPRsToReviewDefersHydrationToWorker(t *testing.T) {
 	updatedAt := time.Date(2026, 4, 23, 10, 0, 0, 0, time.UTC)
 	const wantSHA = "deadbeef1234567890abcdef"
 
@@ -79,9 +72,8 @@ func TestTier2Adapter_FetchPRsToReview_PopulatesHeadSHA(t *testing.T) {
 		loginMu sync.Mutex
 		login   = "heimdallm-bot"
 		cfgMu   sync.Mutex
-		// Pre-register org/repo so the deferred-discovery filter (#481)
-		// does not withhold this test's PR — this scenario exercises
-		// HeadSHA plumbing, not auto-discovery.
+		// Pre-register org/repo so this scenario exercises hydration ownership,
+		// not auto-discovery.
 		cfg = &config.Config{GitHub: config.GitHubConfig{Repositories: []string{"org/repo"}}}
 	)
 
@@ -103,80 +95,11 @@ func TestTier2Adapter_FetchPRsToReview_PopulatesHeadSHA(t *testing.T) {
 	if len(out) != 1 {
 		t.Fatalf("expected 1 PR, got %d", len(out))
 	}
-	if out[0].HeadSHA != wantSHA {
-		t.Errorf("Tier2PR.HeadSHA = %q, want %q — SHA is load-bearing for the in-flight claim (#264)",
-			out[0].HeadSHA, wantSHA)
-	}
-	if got := atomic.LoadInt32(&pullsHits); got != 1 {
-		t.Errorf("/pulls/7 fetched %d time(s), want 1 (one resolve per passing PR)", got)
-	}
-}
-
-// TestTier2Adapter_FetchPRsToReview_EmptyHeadSHAWhenResolverFails proves the
-// fail-open posture: if /pulls/N returns a transient error, the PR still goes
-// through to ProcessPR (with empty HeadSHA) rather than being dropped. The
-// other layered defenses (fail-closed SHA in pipeline.Run, circuit breaker,
-// PublishedAt grace) cap the worst-case cost when this fallback triggers.
-func TestTier2Adapter_FetchPRsToReview_EmptyHeadSHAWhenResolverFails(t *testing.T) {
-	updatedAt := time.Date(2026, 4, 23, 10, 0, 0, 0, time.UTC)
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/user":
-			_ = json.NewEncoder(w).Encode(map[string]string{"login": "heimdallm-bot"})
-		case r.URL.Path == "/search/issues":
-			result := struct {
-				Items []gh.PullRequest `json:"items"`
-			}{Items: []gh.PullRequest{{
-				ID: 4242, Number: 7, Title: "t", State: "open",
-				User:      gh.User{Login: "alice"},
-				Head:      gh.Branch{Repo: gh.Repo{FullName: "org/repo"}},
-				UpdatedAt: updatedAt,
-			}}}
-			_ = json.NewEncoder(w).Encode(result)
-		case r.URL.Path == "/repos/org/repo/pulls/7":
-			// Simulate a persistent GitHub outage on the /pulls endpoint.
-			http.Error(w, "upstream unavailable", http.StatusServiceUnavailable)
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer srv.Close()
-
-	s := newMemStore(t)
-	broker := sse.NewBroker()
-	broker.Start()
-	defer broker.Stop()
-
-	var (
-		loginMu sync.Mutex
-		login   = "heimdallm-bot"
-		cfgMu   sync.Mutex
-		// Pre-register so the deferred-discovery filter (#481) does
-		// not withhold this test's PR.
-		cfg = &config.Config{GitHub: config.GitHubConfig{Repositories: []string{"org/repo"}}}
-	)
-
-	a := &tier2Adapter{
-		ghClient:             gh.NewClient("fake-token", gh.WithBaseURL(srv.URL)),
-		store:                s,
-		broker:               broker,
-		cfgMu:                &cfgMu,
-		cfg:                  &cfg,
-		loginMu:              &loginMu,
-		login:                &login,
-		lastSkippedUpdatedAt: make(map[int64]time.Time),
-	}
-
-	out, err := a.FetchPRsToReview()
-	if err != nil {
-		t.Fatalf("FetchPRsToReview should not fail when /pulls errors (got %v)", err)
-	}
-	if len(out) != 1 {
-		t.Fatalf("expected 1 PR passed through on resolver error, got %d", len(out))
-	}
 	if out[0].HeadSHA != "" {
-		t.Errorf("Tier2PR.HeadSHA = %q, want empty on resolver error (fail-open)", out[0].HeadSHA)
+		t.Errorf("Tier2PR.HeadSHA = %q, want empty Search candidate", out[0].HeadSHA)
+	}
+	if got := atomic.LoadInt32(&pullsHits); got != 0 {
+		t.Errorf("adapter /pulls/7 calls = %d, want 0 (worker owns hydration)", got)
 	}
 }
 
@@ -192,7 +115,7 @@ func TestTier2Adapter_ProcessPR_PlumbsHeadSHAIntoGhPR(t *testing.T) {
 		sawGhPR   *gh.PullRequest
 		callCount int
 	)
-	runReview := func(pr *gh.PullRequest, aiCfg config.RepoAI) *store.Review {
+	runReview := func(_ context.Context, pr *gh.PullRequest, aiCfg config.RepoAI) *store.Review {
 		mu.Lock()
 		defer mu.Unlock()
 		sawGhPR = pr
@@ -263,7 +186,7 @@ func TestTier2Adapter_HandleChange_PlumbsHeadSHAIntoGhPR(t *testing.T) {
 		sawGhPR   *gh.PullRequest
 		callCount int
 	)
-	runReview := func(pr *gh.PullRequest, aiCfg config.RepoAI) *store.Review {
+	runReview := func(_ context.Context, pr *gh.PullRequest, aiCfg config.RepoAI) *store.Review {
 		mu.Lock()
 		defer mu.Unlock()
 		sawGhPR = pr
@@ -388,7 +311,7 @@ func TestTier2Adapter_ProcessPR_ConcurrentCallsCollapseToOneReview(t *testing.T)
 	var claimSignaler sync.Once
 
 	var reviewBody int32
-	runReview := func(pr *gh.PullRequest, aiCfg config.RepoAI) *store.Review {
+	runReview := func(_ context.Context, pr *gh.PullRequest, aiCfg config.RepoAI) *store.Review {
 		// Mirror the production claim logic from runReview in main.go. If
 		// the caller forgot to set Head.SHA (the #264 bug) OR the PR is
 		// not yet upserted, we still return without running — matches the

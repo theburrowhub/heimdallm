@@ -63,6 +63,21 @@ func (p *PRReviewPublisher) PublishPRReview(_ context.Context, repo string, numb
 	return nil
 }
 
+// PublishPRReviewCandidate enqueues an unhydrated Search result. The review
+// worker owns the single fresh Pulls API lookup, removing the former serial
+// adapter lookup plus duplicate worker lookup while keeping PublishPRReview's
+// strict non-empty-SHA contract for already-hydrated callers.
+func (p *PRReviewPublisher) PublishPRReviewCandidate(_ context.Context, repo string, number int, githubID int64) error {
+	data, err := Encode(PRReviewMsg{Repo: repo, Number: number, GithubID: githubID})
+	if err != nil {
+		return fmt.Errorf("bus: encode pr review candidate: %w", err)
+	}
+	if err := p.conn.Publish(SubjPRReview, data); err != nil {
+		return fmt.Errorf("bus: publish pr review candidate: %w", err)
+	}
+	return nil
+}
+
 // PRPublishPublisher publishes review publish requests to NATS.
 type PRPublishPublisher struct {
 	conn *nats.Conn

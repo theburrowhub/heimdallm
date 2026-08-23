@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -35,12 +37,34 @@ var ErrPromoteConflict = errors.New("issue promotion conflict")
 
 // Server holds the HTTP router, SSE broker, store, and optional pipeline.
 type Server struct {
-	store                *store.Store
-	broker               *sse.Broker
-	natsConn             *nats.Conn // when set, handleSSE reads from NATS instead of broker
-	pipeline             *pipeline.Pipeline
-	router               chi.Router
-	httpServer           *http.Server
+	store      *store.Store
+	broker     *sse.Broker
+	natsConn   *nats.Conn // when set, handleSSE reads from NATS instead of broker
+	pipeline   *pipeline.Pipeline
+	router     chi.Router
+	httpMu     sync.Mutex
+	httpServer *http.Server
+	// httpListener is tracked separately from httpServer because Shutdown can
+	// race with Serve after the listener has been published but before
+	// net/http has registered it internally. Closing it explicitly guarantees
+	// that the daemon never leaves a bound, unserved socket behind.
+	httpListener      net.Listener
+	shutdownRequested bool
+	// starting suppresses the deep health checks and gates every non-health
+	// route while main is still wiring dependencies. The listener is claimed
+	// before any mutable recovery work, then Serve begins as soon as this Server
+	// exists; /health therefore has to answer during a window where later
+	// callbacks and workers do not exist yet.
+	//
+	// The zero value means "ready": a Server built by New already has every
+	// dependency injected. Only main, which deliberately serves mid-wiring,
+	// calls MarkStarting. Atomic because Serve is already handling requests
+	// when main flips it back.
+	starting atomic.Bool
+	// stopping reuses the startup route gate while giving /health an honest
+	// lifecycle status. The listener remains owned during worker teardown so a
+	// launcher cannot race a replacement into the old process's cleanup window.
+	stopping             atomic.Bool
 	reloadFn             func() error
 	shutdownFn           func()
 	triggerReviewFn      func(prID int64) error
@@ -67,6 +91,18 @@ type Server struct {
 	configFn func() map[string]any
 	// healthSnapshotFn returns live daemon liveness metadata for /health and SSE heartbeat.
 	healthSnapshotFn func() HealthSnapshot
+	// prepareUpdateFn atomically prevents new long-running work and returns
+	// the operations still draining. cancelUpdateFn abandons that lease when
+	// the native updater aborts before replacing the application.
+	prepareUpdateFn func(leaseID string) (UpdatePreparationStatus, error)
+	cancelUpdateFn  func(leaseID string) (UpdatePreparationStatus, error)
+	sealUpdateFn    func(leaseID string) (UpdatePreparationStatus, error)
+	confirmUpdateFn func(leaseID string) (UpdatePreparationStatus, error)
+	// updateBootID is a cryptographically random, process-local identity used
+	// by the replacement handshake. The updater must echo the ID it observed
+	// while verifying the daemon before confirmation can cross the stateful
+	// bootstrap boundary.
+	updateBootID string
 	// repoMetaFns fetch repo metadata from GitHub for autocomplete.
 	fetchLabelsFn        func(repo string) ([]string, error)
 	fetchCollaboratorsFn func(repo string) ([]string, error)
@@ -92,6 +128,10 @@ type Options struct {
 	Version string
 	// StartedAt is the time the server process started. Optional.
 	StartedAt time.Time
+	// UpdateBootID identifies this exact daemon process during application
+	// replacement. It must be non-empty when the update confirmation callback
+	// is configured.
+	UpdateBootID string
 }
 
 const defaultMaxConcurrentReviews = 5
@@ -103,6 +143,48 @@ type HealthSnapshot struct {
 	LastPollAt   time.Time
 	PollInterval time.Duration
 }
+
+// UpdatePreparationStatus is returned to the native desktop updater. Active
+// contains complete transactions, not merely child CLI processes.
+type UpdatePreparationStatus struct {
+	State               string         `json:"state"`
+	PID                 int            `json:"pid"`
+	Version             string         `json:"version"`
+	LeaseID             string         `json:"lease_id"`
+	Sealed              bool           `json:"sealed"`
+	BootstrapAuthorized bool           `json:"bootstrap_authorized"`
+	BootID              string         `json:"boot_id"`
+	Active              map[string]int `json:"active"`
+	ActiveTotal         int            `json:"active_total"`
+	LeaseExpiresAt      time.Time      `json:"lease_expires_at,omitempty"`
+}
+
+// HeaderUpdateLease carries the client-generated, cryptographically random
+// owner ID for every prepare renewal and cancellation request.
+const HeaderUpdateLease = "X-Heimdallm-Update-Lease"
+
+// HeaderExpectedUpdateBootID binds bootstrap confirmation and lease deletion
+// to the exact daemon process whose PID, executable and version the native
+// updater verified. A respawn receives a new ID, so a delayed request cannot
+// authorize or open it.
+const HeaderExpectedUpdateBootID = "X-Heimdallm-Expected-Boot-ID"
+
+var (
+	// ErrUpdateLeaseRequired maps a missing updater owner to HTTP 400.
+	ErrUpdateLeaseRequired = errors.New("update lease id required")
+	// ErrUpdateLeaseInvalid maps an oversized or malformed owner to HTTP 400.
+	ErrUpdateLeaseInvalid = errors.New("update lease id invalid")
+	// ErrUpdateLeaseConflict maps a stale or foreign owner to HTTP 409.
+	ErrUpdateLeaseConflict = errors.New("update lease conflict")
+	// ErrUpdateNotReady maps an early seal attempt to HTTP 409.
+	ErrUpdateNotReady = errors.New("update drain still has active work")
+	// ErrUpdateNotSealed maps an attempt to authorize replacement bootstrap
+	// without the durable non-expiring barrier to HTTP 409.
+	ErrUpdateNotSealed = errors.New("update drain is not sealed")
+	// ErrUpdateBootstrapNotAuthorized maps a late cancellation aimed at a
+	// respawn which has not itself completed the owner confirmation handshake.
+	ErrUpdateBootstrapNotAuthorized = errors.New("replacement bootstrap is not authorized")
+)
 
 // New creates a new Server. p may be nil if the pipeline is not yet configured.
 // apiToken must be the value returned by LoadOrCreateAPIToken — it is required
@@ -118,11 +200,12 @@ func NewWithOptions(s *store.Store, broker *sse.Broker, p *pipeline.Pipeline, ap
 		max = defaultMaxConcurrentReviews
 	}
 	srv := &Server{
-		store:     s,
-		broker:    broker,
-		pipeline:  p,
-		apiToken:  apiToken,
-		reviewSem: make(chan struct{}, max),
+		store:        s,
+		broker:       broker,
+		pipeline:     p,
+		apiToken:     apiToken,
+		reviewSem:    make(chan struct{}, max),
+		updateBootID: opts.UpdateBootID,
 	}
 	srv.version = opts.Version
 	if !opts.StartedAt.IsZero() {
@@ -130,6 +213,27 @@ func NewWithOptions(s *store.Store, broker *sse.Broker, p *pipeline.Pipeline, ap
 	}
 	srv.router = srv.buildRouter()
 	return srv
+}
+
+// Configure injects the dependencies which are unavailable when main first
+// creates the Server to claim and serve the daemon socket. It must be called
+// after MarkStarting and before MarkReady. The starting gate prevents every
+// dependency-consuming route from running while these fields are published;
+// MarkReady's atomic store then makes them visible to subsequent requests.
+func (srv *Server) Configure(s *store.Store, broker *sse.Broker, p *pipeline.Pipeline, apiToken string) {
+	srv.ConfigureDependencies(s, broker, p)
+	srv.apiToken = apiToken
+}
+
+// ConfigureDependencies publishes the late-bound runtime graph without
+// rewriting the authentication token that was fixed before Serve. Main uses
+// this variant because startup lease renewals can already be authenticating
+// concurrently; Configure remains for tests and callers that configure before
+// serving.
+func (srv *Server) ConfigureDependencies(s *store.Store, broker *sse.Broker, p *pipeline.Pipeline) {
+	srv.store = s
+	srv.broker = broker
+	srv.pipeline = p
 }
 
 // SetNATSConn enables NATS-based SSE. When set, handleSSE subscribes to
@@ -163,26 +267,27 @@ var sensitiveGETPaths = []string{
 //     be readable by arbitrary browser tabs — see security issue #3).
 func (srv *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if srv.apiToken != "" {
-			needsAuth := false
-			switch r.Method {
-			case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
-				needsAuth = true
-			case http.MethodGet:
-				for _, p := range sensitiveGETPaths {
-					if r.URL.Path == p || strings.HasPrefix(r.URL.Path, p+"/") {
-						needsAuth = true
-						break
-					}
+		needsAuth := false
+		switch r.Method {
+		case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+			needsAuth = true
+		case http.MethodGet:
+			for _, p := range sensitiveGETPaths {
+				if r.URL.Path == p || strings.HasPrefix(r.URL.Path, p+"/") {
+					needsAuth = true
+					break
 				}
 			}
-			if needsAuth {
-				token := r.Header.Get("X-Heimdallm-Token")
-				// Constant-time comparison to prevent timing attacks.
-				if !hmac.Equal([]byte(token), []byte(srv.apiToken)) {
-					http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
-					return
-				}
+		}
+		// During startup only /health reaches this middleware. Avoid reading the
+		// late-injected token for a route which does not need it, so Configure can
+		// publish the token before MarkReady without racing a health request.
+		if needsAuth && srv.apiToken != "" {
+			token := r.Header.Get("X-Heimdallm-Token")
+			// Constant-time comparison to prevent timing attacks.
+			if !hmac.Equal([]byte(token), []byte(srv.apiToken)) {
+				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				return
 			}
 		}
 		next.ServeHTTP(w, r)
@@ -260,6 +365,34 @@ func (srv *Server) SetConfigFn(fn func() map[string]any) { srv.configFn = fn }
 // SetHealthSnapshotFn wires live liveness metadata for GET /health and heartbeat SSE.
 func (srv *Server) SetHealthSnapshotFn(fn func() HealthSnapshot) { srv.healthSnapshotFn = fn }
 
+// SetUpdatePreparationFns wires the updater drain lease. Both callbacks are
+// required; a partially configured drain fails closed with HTTP 503.
+func (srv *Server) SetUpdatePreparationFns(
+	prepare func(leaseID string) (UpdatePreparationStatus, error),
+	cancel func(leaseID string) (UpdatePreparationStatus, error),
+) {
+	srv.prepareUpdateFn = prepare
+	srv.cancelUpdateFn = cancel
+}
+
+// SetUpdateSealFn wires the durable, non-expiring replacement barrier. It is
+// separate from SetUpdatePreparationFns so existing embedders can continue to
+// expose ordinary leased drains without authorizing application replacement.
+func (srv *Server) SetUpdateSealFn(
+	seal func(leaseID string) (UpdatePreparationStatus, error),
+) {
+	srv.sealUpdateFn = seal
+}
+
+// SetUpdateConfirmFn wires the owner-authenticated second phase of replacement
+// startup. Confirmation permits dependency bootstrap but deliberately leaves
+// work admission sealed until the owner cancels after a healthy version check.
+func (srv *Server) SetUpdateConfirmFn(
+	confirm func(leaseID string) (UpdatePreparationStatus, error),
+) {
+	srv.confirmUpdateFn = confirm
+}
+
 // SetRepoMetaFns wires GitHub metadata fetchers for autocomplete endpoints.
 func (srv *Server) SetRepoMetaFns(labels func(string) ([]string, error), collabs func(string) ([]string, error)) {
 	srv.fetchLabelsFn = labels
@@ -307,20 +440,15 @@ func (srv *Server) writeTOMLUnderLock(mutateFn func(m map[string]any) error) (ma
 	if err != nil {
 		return nil, err
 	}
+	// Migrate only the trusted TOML base before applying the request. Every
+	// PATCH payload has already passed the strict HTTP policy, so legacy typed
+	// flags can no longer block an unrelated edit without creating a path for a
+	// new payload to smuggle those flags into ExtraFlags.
+	if err := config.SanitizeLegacyAgentExecutionPolicyMap(m, "toml PATCH base"); err != nil {
+		return nil, &config.ValidationError{Err: err}
+	}
 	if err := mutateFn(m); err != nil {
 		return nil, err
-	}
-	// Defense-in-depth (security gate M-5): every PATCH path that
-	// touches ai.agents.* must drop dangerously_skip_perms before the
-	// merged map is validated and persisted. PUT rejects the key with
-	// a 400 via normalizeAgentConfigsForPut, but PATCH deep-merges
-	// arbitrary JSON, so the gate has to be enforced here regardless
-	// of which handler invoked patchTOML. Audit-log non-zero strips so
-	// operators can detect bypass attempts even though they're now
-	// neutralized.
-	if stripped := stripDangerousAgentFlags(m); stripped > 0 {
-		slog.Warn("config: PATCH attempted to set dangerously_skip_perms; stripped (M-5 gate)",
-			"count", stripped)
 	}
 	if err := config.ValidateMap(m); err != nil {
 		return nil, err
@@ -336,29 +464,118 @@ func (srv *Server) Router() http.Handler {
 	return srv.router
 }
 
-// Start binds the HTTP server to the given port and begins serving.
-func (srv *Server) Start(port int, bindAddr string) error {
+// Listen claims the daemon's HTTP socket without starting any application
+// workers. Main calls this immediately after loading config, before opening the
+// store or running destructive restart recovery, so a losing second instance
+// cannot clear live claims or prune worktrees before discovering the conflict.
+//
+// The listener is the HTTP-port ownership token (separate from main's
+// data-directory process lock). Callers must keep it open until Serve takes
+// over or startup aborts.
+func Listen(port int, bindAddr string) (net.Listener, error) {
 	addr := fmt.Sprintf("%s:%d", bindAddr, port)
-	srv.httpServer = &http.Server{
-		Addr:         addr,
+	return net.Listen("tcp", addr)
+}
+
+// Serve serves the fully wired router on a listener obtained from Listen.
+// Calling Serve more than once is rejected so the original server cannot be
+// silently orphaned.
+func (srv *Server) Serve(ln net.Listener) error {
+	srv.httpMu.Lock()
+	if srv.shutdownRequested {
+		srv.httpMu.Unlock()
+		// Shutdown may run before Serve is called, when the Server has no way to
+		// know which listener main will hand it. Once it arrives, close it here so
+		// the losing startup cannot leave the ownership socket bound.
+		_ = ln.Close()
+		return http.ErrServerClosed
+	}
+	if srv.httpServer != nil {
+		srv.httpMu.Unlock()
+		return errors.New("server: Serve called twice")
+	}
+	httpServer := &http.Server{
+		Addr:         ln.Addr().String(),
 		Handler:      srv.router,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
-	return srv.httpServer.ListenAndServe()
+	srv.httpServer = httpServer
+	srv.httpListener = ln
+	srv.httpMu.Unlock()
+
+	err := httpServer.Serve(ln)
+	srv.httpMu.Lock()
+	shutdownRequested := srv.shutdownRequested
+	srv.httpMu.Unlock()
+	if shutdownRequested {
+		// An explicit Shutdown can close the listener just before net/http starts
+		// tracking it, which otherwise surfaces as a raw accept error. Preserve
+		// the standard graceful-shutdown contract for every shutdown ordering.
+		return http.ErrServerClosed
+	}
+	return err
+}
+
+// MarkStarting declares the server up but still wiring dependencies, so
+// /health answers 503 "starting" instead of running deep checks against
+// half-built dependencies. Call before Serve; pair with MarkReady.
+func (srv *Server) MarkStarting() {
+	srv.starting.Store(true)
+	srv.stopping.Store(false)
+}
+
+// MarkReady declares every dependency wired, restoring the normal /health
+// deep checks. Idempotent.
+func (srv *Server) MarkReady() {
+	srv.stopping.Store(false)
+	srv.starting.Store(false)
+}
+
+// MarkStopping gates every dependency-consuming route while main drains work.
+// /health remains reachable and identifies the process as "stopping" until the
+// listener is finally closed.
+func (srv *Server) MarkStopping() {
+	srv.starting.Store(true)
+	// Publish the descriptive state only after the route gate is closed. A
+	// request racing this transition may briefly see "starting", but it can
+	// never slip through to dependencies after shutdown has begun.
+	srv.stopping.Store(true)
 }
 
 // Shutdown gracefully shuts down the HTTP server.
 func (srv *Server) Shutdown(ctx context.Context) error {
-	if srv.httpServer == nil {
-		return nil
+	srv.httpMu.Lock()
+	srv.shutdownRequested = true
+	httpServer := srv.httpServer
+	httpListener := srv.httpListener
+	srv.httpMu.Unlock()
+
+	var shutdownErr error
+	if httpServer != nil {
+		// Call net/http first so it marks the server as shutting down before a
+		// concurrently scheduled Serve can register the listener.
+		shutdownErr = httpServer.Shutdown(ctx)
 	}
-	return srv.httpServer.Shutdown(ctx)
+	if httpListener != nil {
+		// If Serve published the listener but had not yet registered it with
+		// net/http, Shutdown above had nothing to close. Close our tracked copy
+		// as the final ownership guarantee. net.ErrClosed is the normal case when
+		// net/http already closed it.
+		if err := httpListener.Close(); err != nil && !errors.Is(err, net.ErrClosed) && shutdownErr == nil {
+			shutdownErr = err
+		}
+	}
+	return shutdownErr
 }
 
 func (srv *Server) buildRouter() chi.Router {
 	r := chi.NewRouter()
+	// This must precede auth: while main is still wiring callbacks, only /health
+	// and the pre-wired update lease route may run. Auth still protects the lease;
+	// no other mutation can observe partially published Server fields.
+	r.Use(srv.startupMiddleware)
 	r.Use(srv.authMiddleware)
 	r.Get("/health", srv.handleHealth)
 	r.Get("/me", srv.handleMe)
@@ -396,10 +613,45 @@ func (srv *Server) buildRouter() chi.Router {
 	r.Delete("/config/clones/{repo}", srv.handleDeleteManagedClone)
 	r.Post("/reload", srv.handleReload)
 	r.Post("/shutdown", srv.handleShutdown)
+	r.Post("/update/prepare", srv.handlePrepareUpdate)
+	r.Delete("/update/prepare", srv.handleCancelUpdatePreparation)
+	r.Post("/update/seal", srv.handleSealUpdate)
+	r.Post("/update/confirm", srv.handleConfirmUpdate)
 	r.Post("/admin/repo-rename", srv.handleAdminRepoRename)
 	r.Get("/events", srv.handleSSE)
 	r.Get("/logs/stream", srv.handleLogsStream)
 	return r
+}
+
+// startupMiddleware exposes the public health probe and the authenticated
+// update handshake while main is wiring dependencies. A replacement daemon
+// must let the updater renew or seal a restored ordinary lease and then
+// authorize bootstrap; every other route remains closed until MarkReady
+// publishes the full graph.
+func (srv *Server) startupMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		isHealth := r.Method == http.MethodGet && r.URL.Path == "/health"
+		isUpdateHandshake := (r.URL.Path == "/update/prepare" &&
+			(r.Method == http.MethodPost || r.Method == http.MethodDelete)) ||
+			(r.URL.Path == "/update/seal" && r.Method == http.MethodPost) ||
+			(r.URL.Path == "/update/confirm" && r.Method == http.MethodPost)
+		if !srv.starting.Load() || isHealth || (!srv.stopping.Load() && isUpdateHandshake) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set(HeaderDaemon, "1")
+		w.Header().Set("Retry-After", "1")
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"status": srv.unavailableStatus(),
+		})
+	})
+}
+
+func (srv *Server) unavailableStatus() string {
+	if srv.stopping.Load() {
+		return "stopping"
+	}
+	return "starting"
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -408,8 +660,31 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
+// HeaderDaemon marks a response as coming from a Heimdallm daemon. The app uses
+// it on /health to tell us apart from an unrelated process squatting on the
+// port: `{"status": ...}` alone is the shape of half the health endpoints in the
+// industry (Spring Boot Actuator, most Node/Go services), so matching on the
+// body would classify those as ours and silently never spawn a daemon.
+const HeaderDaemon = "X-Heimdallm-Daemon"
+
 func (srv *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
+	w.Header().Set(HeaderDaemon, "1")
+	// Serving starts right after the bind, long before the pollers, workers and
+	// event bus are wired, so answer honestly during that window instead of
+	// running deep checks against half-built dependencies. 503 keeps
+	// checkHealth() false for readiness consumers while still being a real HTTP
+	// answer, so the app's ownership probe sees the port is taken and does not
+	// spawn a rival instance. The UI may still enter its diagnostic surface
+	// while startup finishes (#646).
+	if srv.starting.Load() {
+		resp := map[string]any{"status": srv.unavailableStatus()}
+		if srv.version != "" {
+			resp["version"] = srv.version
+		}
+		writeJSON(w, http.StatusServiceUnavailable, resp)
+		return
+	}
 	checks := map[string]any{
 		"nats":      srv.natsHealthCheck(),
 		"sqlite":    srv.sqliteHealthCheck(r.Context()),
@@ -820,10 +1095,9 @@ var readOnlyConfigKeys = map[string]struct{}{
 }
 
 // allowedAgentConfigSubkeys is the per-agent allowlist for PUT /config.
-// Mirrors CLIAgentConfig fields exposed via the Flutter UI. Note the deliberate
-// omission of dangerously_skip_perms (M-5): toggling --dangerously-skip-permissions
-// at runtime over HTTP would let an attacker with API access escalate the
-// agent's effective permissions. That field stays TOML/env-only.
+// Mirrors CLIAgentConfig fields exposed via the Flutter UI. The asymmetric
+// dangerously_skip_perms gate is handled separately: HTTP may persist false
+// to reduce privilege, but true remains TOML/env-only.
 var allowedAgentConfigSubkeys = map[string]struct{}{
 	"model":                  {},
 	"max_turns":              {},
@@ -995,6 +1269,10 @@ func (srv *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
 		return
 	}
+	if err := validateCanonicalConfigPatchKeys(patch); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	if err := config.ContainsNull(patch); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": "null values not allowed in PATCH — use DELETE to remove fields",
@@ -1046,6 +1324,10 @@ func (srv *Server) handlePatchRepoConfig(w http.ResponseWriter, r *http.Request)
 	var patch map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
 		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+		return
+	}
+	if err := rejectUnsupportedScopedAgentPatchKeys(patch, "ai.repos"); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	if err := config.ContainsNull(patch); err != nil {
@@ -1107,6 +1389,10 @@ func (srv *Server) handlePatchOrgConfig(w http.ResponseWriter, r *http.Request) 
 	var patch map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
 		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
+		return
+	}
+	if err := rejectUnsupportedScopedAgentPatchKeys(patch, "ai.orgs"); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	if err := config.ContainsNull(patch); err != nil {
@@ -1185,6 +1471,10 @@ func (srv *Server) patchAutonomousSubKey(w http.ResponseWriter, r *http.Request,
 	var patch map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	if err := rejectAutonomousAgentPatch(patch, "autonomous."+subKey+"."+id); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	if err := config.ContainsNull(patch); err != nil {
@@ -1315,6 +1605,10 @@ func (srv *Server) handleDeleteManagedClone(w http.ResponseWriter, r *http.Reque
 	ctx, cancel := context.WithTimeout(r.Context(), cloneCleanupTimeout)
 	defer cancel()
 	if err := srv.cleanCloneFn(ctx, repo); err != nil {
+		if errors.Is(err, pipeline.ErrUpdateDraining) {
+			writeUpdateDrainConflict(w)
+			return
+		}
 		slog.Error("DELETE /config/clones failed", "repo", repo, "err", err)
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			http.Error(w, `{"error":"clone cleanup timed out"}`, http.StatusGatewayTimeout)
@@ -1335,6 +1629,10 @@ func (srv *Server) handleDeleteManagedClones(w http.ResponseWriter, r *http.Requ
 	defer cancel()
 	removed, err := srv.cleanClonesFn(ctx)
 	if err != nil {
+		if errors.Is(err, pipeline.ErrUpdateDraining) {
+			writeUpdateDrainConflict(w)
+			return
+		}
 		slog.Error("DELETE /config/clones failed", "err", err)
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			http.Error(w, `{"error":"clone cleanup timed out"}`, http.StatusGatewayTimeout)
@@ -1373,12 +1671,151 @@ func (srv *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
 	go srv.shutdownFn()
 }
 
+func (srv *Server) handlePrepareUpdate(w http.ResponseWriter, r *http.Request) {
+	if srv.prepareUpdateFn == nil || srv.cancelUpdateFn == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "update preparation not available"})
+		return
+	}
+	leaseID := strings.TrimSpace(r.Header.Get(HeaderUpdateLease))
+	if leaseID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "update lease id required"})
+		return
+	}
+	status, err := srv.prepareUpdateFn(leaseID)
+	if err != nil {
+		writeUpdateLeaseError(w, err)
+		return
+	}
+	slog.Debug("application update drain prepared or renewed", "active", status.ActiveTotal)
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (srv *Server) handleCancelUpdatePreparation(w http.ResponseWriter, r *http.Request) {
+	if srv.prepareUpdateFn == nil || srv.cancelUpdateFn == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "update preparation not available"})
+		return
+	}
+	leaseID := strings.TrimSpace(r.Header.Get(HeaderUpdateLease))
+	if leaseID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "update lease id required"})
+		return
+	}
+	if !srv.verifyExpectedUpdateBootID(w, r) {
+		return
+	}
+	status, err := srv.cancelUpdateFn(leaseID)
+	if err != nil {
+		writeUpdateLeaseError(w, err)
+		return
+	}
+	slog.Info("application update drain cancelled")
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (srv *Server) handleSealUpdate(w http.ResponseWriter, r *http.Request) {
+	if srv.sealUpdateFn == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "update seal not available"})
+		return
+	}
+	leaseID := strings.TrimSpace(r.Header.Get(HeaderUpdateLease))
+	if leaseID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "update lease id required"})
+		return
+	}
+	status, err := srv.sealUpdateFn(leaseID)
+	if err != nil {
+		writeUpdateLeaseError(w, err)
+		return
+	}
+	slog.Info("application update drain sealed", "active", status.ActiveTotal)
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (srv *Server) handleConfirmUpdate(w http.ResponseWriter, r *http.Request) {
+	if srv.confirmUpdateFn == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "update confirmation not available"})
+		return
+	}
+	leaseID := strings.TrimSpace(r.Header.Get(HeaderUpdateLease))
+	if leaseID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "update lease id required"})
+		return
+	}
+	if !srv.verifyExpectedUpdateBootID(w, r) {
+		return
+	}
+	status, err := srv.confirmUpdateFn(leaseID)
+	if err != nil {
+		writeUpdateLeaseError(w, err)
+		return
+	}
+	slog.Info("replacement daemon bootstrap authorized under sealed drain")
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (srv *Server) verifyExpectedUpdateBootID(w http.ResponseWriter, r *http.Request) bool {
+	expectedBootID := strings.TrimSpace(r.Header.Get(HeaderExpectedUpdateBootID))
+	if expectedBootID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "expected daemon boot id required"})
+		return false
+	}
+	if srv.updateBootID == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "update process identity not available"})
+		return false
+	}
+	if !hmac.Equal([]byte(expectedBootID), []byte(srv.updateBootID)) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "replacement daemon identity changed"})
+		return false
+	}
+	return true
+}
+
+func writeUpdateLeaseError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ErrUpdateLeaseRequired):
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "update lease id required"})
+	case errors.Is(err, ErrUpdateLeaseInvalid):
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "update lease id invalid"})
+	case errors.Is(err, ErrUpdateLeaseConflict):
+		// Deliberately do not disclose the current owner ID.
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "update lease conflict"})
+	case errors.Is(err, ErrUpdateNotReady):
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "update drain still has active work"})
+	case errors.Is(err, ErrUpdateNotSealed):
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "update drain is not sealed"})
+	case errors.Is(err, ErrUpdateBootstrapNotAuthorized):
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "replacement bootstrap is not authorized"})
+	default:
+		slog.Error("update lease operation failed", "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "update lease operation failed"})
+	}
+}
+
+// writeUpdateDrainConflict reports an expected pause without logging it as an
+// operational failure. The client can retry after the updater either completes
+// or abandons its lease.
+func writeUpdateDrainConflict(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", "5")
+	writeJSON(w, http.StatusConflict, map[string]string{"error": "application update in progress"})
+}
+
 func (srv *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	stream, err := newStreamResponseWriter(w, cancel)
+	// Server.Serve applies a 60-second WriteTimeout to ordinary responses. That
+	// deadline is absolute for the lifetime of a request, so periodic heartbeats
+	// do not extend it and every SSE connection would otherwise die at one minute.
+	// The stream writer replaces it with a deadline per write; normal endpoints
+	// keep the server-wide timeout.
+	if err != nil {
+		slog.Error("SSE: configure rolling write deadline", "err", err)
 		http.Error(w, "SSE not supported", http.StatusInternalServerError)
 		return
 	}
+	w = stream
+	r = r.WithContext(ctx)
+	flusher := http.Flusher(stream)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -1513,7 +1950,11 @@ func (srv *Server) handleUpsertAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	// Validate CLIFlags to reject dangerous flags before persisting.
 	if a.CLIFlags != "" {
-		if err := executor.ValidateExtraFlags(a.CLIFlags); err != nil {
+		if a.CLI == "" {
+			http.Error(w, "cli is required when cli_flags is set", http.StatusBadRequest)
+			return
+		}
+		if _, _, err := executor.NormalizeLegacyCLIFlagsForCLI(a.CLI, a.CLIFlags); err != nil {
 			http.Error(w, fmt.Sprintf("invalid cli_flags: %v", err), http.StatusBadRequest)
 			return
 		}
@@ -1809,6 +2250,10 @@ func (srv *Server) handlePromoteIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := srv.triggerPromoteFn(id); err != nil {
+		if errors.Is(err, pipeline.ErrUpdateDraining) {
+			writeUpdateDrainConflict(w)
+			return
+		}
 		slog.Error("promote issue failed", "issue_id", id, "err", err)
 		if errors.Is(err, ErrPromoteConflict) {
 			http.Error(w, err.Error(), http.StatusConflict)
@@ -2118,6 +2563,14 @@ func httpJSONErr(w http.ResponseWriter, code int, msg string) {
 // below) so the two sides cannot drift.
 const DaemonLogFileName = "heimdallm.log"
 
+// launchAgentLogRecencyMargin is how much fresher the data-dir log must be
+// than the LaunchAgent stderr file before the latter is considered a leftover
+// from a previous install rather than the active sink. Sequential writes from
+// setupLogging's MultiWriter (plus any buffering) keep the two files within
+// milliseconds of each other while the daemon runs under the agent; a daemon
+// running outside launchd leaves the agent file behind by hours or days.
+const launchAgentLogRecencyMargin = 2 * time.Minute
+
 // daemonLogPath returns the path to the daemon log file the /logs stream
 // tails. Priority (matches cmd/heimdallm/main.go's dataDir() ordering, which
 // is the directory setupLogging writes to):
@@ -2125,9 +2578,12 @@ const DaemonLogFileName = "heimdallm.log"
 //  1. $HEIMDALLM_DATA_DIR/heimdallm.log — explicit override (native or Docker).
 //  2. /data/heimdallm.log — Docker convention, used when /data exists as a
 //     directory (the compose file mounts the heimdallm-data volume there).
-//  3. macOS: ~/Library/Logs/heimdallm/heimdallm-daemon-error.log — LaunchAgent
-//     convention; the plist redirects stderr there so the file pre-exists
-//     without setupLogging having to write it.
+//  3. macOS: ~/Library/Logs/heimdallm/heimdallm-daemon-error.log (LaunchAgent
+//     convention — the plist redirects stderr there) unless the data-dir log
+//     (~/.local/share/heimdallm/heimdallm.log, always written by setupLogging)
+//     is fresher by more than launchAgentLogRecencyMargin — which marks the
+//     LaunchAgent file as a leftover from a previous install that must not
+//     shadow the log the current daemon is writing.
 //  4. Linux/other: $XDG_STATE_HOME/heimdallm/heimdallm.log, fallback
 //     ~/.local/share/heimdallm/heimdallm.log.
 //
@@ -2135,6 +2591,13 @@ const DaemonLogFileName = "heimdallm.log"
 // returned "file not found" under Docker because stderr was redirected to
 // `docker logs`, never to a file.
 func daemonLogPath() string {
+	return daemonLogPathFor(runtime.GOOS, fileModTime)
+}
+
+// daemonLogPathFor is the testable core of daemonLogPath: goos and the
+// file-modification-time probe are parameters so the darwin-only branch can
+// be exercised by tests running on Linux (the test-docker sandbox).
+func daemonLogPathFor(goos string, mtime func(string) (time.Time, bool)) string {
 	if v := os.Getenv("HEIMDALLM_DATA_DIR"); v != "" {
 		return filepath.Join(v, DaemonLogFileName)
 	}
@@ -2142,9 +2605,27 @@ func daemonLogPath() string {
 		return filepath.Join("/data", DaemonLogFileName)
 	}
 	home, _ := os.UserHomeDir()
-	switch runtime.GOOS {
+	switch goos {
 	case "darwin":
-		return filepath.Join(home, "Library", "Logs", "heimdallm", "heimdallm-daemon-error.log")
+		launchd := filepath.Join(home, "Library", "Logs", "heimdallm", "heimdallm-daemon-error.log")
+		dataLog := filepath.Join(home, ".local", "share", "heimdallm", DaemonLogFileName)
+		launchdTime, launchdOK := mtime(launchd)
+		dataTime, dataOK := mtime(dataLog)
+		// Existence alone does not make the LaunchAgent file the active sink:
+		// it survives after the agent is uninstalled or bypassed (daemon later
+		// launched directly by the app), while setupLogging keeps writing
+		// <dataDir>/heimdallm.log. But strict recency would be wrong in the
+		// other direction: under the agent, setupLogging's io.MultiWriter
+		// writes stderr (→ launchd file) first and the data-dir log after, so
+		// the data-dir file is ALWAYS marginally fresher and a plain mtime
+		// comparison would never serve the LaunchAgent file — losing its
+		// stderr-exclusive content (Go panics, crash traces, launchd
+		// messages). Hence the margin: only a data-dir log fresher by a clear
+		// gap marks the LaunchAgent file as a leftover.
+		if launchdOK && (!dataOK || !dataTime.After(launchdTime.Add(launchAgentLogRecencyMargin))) {
+			return launchd
+		}
+		return dataLog
 	default:
 		if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" {
 			return filepath.Join(xdg, "heimdallm", DaemonLogFileName)
@@ -2153,7 +2634,28 @@ func daemonLogPath() string {
 	}
 }
 
+func fileModTime(path string) (time.Time, bool) {
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return time.Time{}, false
+	}
+	return info.ModTime(), true
+}
+
 func (srv *Server) handleLogsStream(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	stream, err := newStreamResponseWriter(w, cancel)
+	// Like /events, this is an intentionally long-lived response and must not
+	// inherit the server's absolute 60-second write deadline. Each actual write
+	// gets its own bounded deadline instead.
+	if err != nil {
+		slog.Error("logs stream: configure rolling write deadline", "err", err)
+		http.Error(w, "log streaming not supported", http.StatusInternalServerError)
+		return
+	}
+	w = stream
+	r = r.WithContext(ctx)
 	logPath := daemonLogPath()
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -2267,87 +2769,271 @@ func tailLines(f *os.File, n int) []string {
 }
 
 // dangerousAgentFlagKey names the security-gated flag that grants
-// `--dangerously-skip-permissions` to the AI CLI. Both
-// normalizeAgentConfigsForPut and stripDangerousAgentFlags reference
-// this constant so the M-5 denylist has a single source of truth.
+// `--dangerously-skip-permissions` to the AI CLI. HTTP callers may explicitly
+// disable it, but enabling it requires trusted TOML/env access.
 const dangerousAgentFlagKey = "dangerously_skip_perms"
 
-// stripDangerousAgentFlags removes the HTTP-forbidden
-// dangerously_skip_perms flag from every agent map reachable in the
-// merged config: top-level ai.agents.<cli>, per-repo
-// ai.repos.<repo>.agents.<cli>, and per-org ai.orgs.<org>.agents.<cli>.
-// The flag is still settable via direct edits to config.toml
-// (security gate M-5: only filesystem-trusted inputs can grant the
-// permission-sandbox bypass), but never via the HTTP API.
-//
-// Returns the number of entries stripped so callers can audit-log
-// bypass attempts. Key comparison is case-insensitive because the
-// downstream koanf/mapstructure decoder is case-insensitive when
-// mapping into CLIAgentConfig.DangerouslySkipPerms — an exact-case
-// match would leave Dangerously_Skip_Perms / DANGEROUSLY_SKIP_PERMS
-// shaped payloads as a live bypass.
-//
-// Invoked from patchTOML so every PATCH endpoint (global, per-repo,
-// per-org) inherits the gate without each handler having to remember
-// to call it.
-func stripDangerousAgentFlags(m map[string]any) int {
-	if m == nil {
-		return 0
+var canonicalAgentConfigKeys = []string{
+	"model",
+	"max_turns",
+	"approval_mode",
+	"extra_flags",
+	"prompt",
+	"effort",
+	"permission_mode",
+	"bare",
+	"no_session_persistence",
+	"execution_timeout",
+}
+
+// canonicalMapChild returns a map stored at canonicalKey and rejects aliases
+// that differ only by case. JSON object keys are case-sensitive, while the
+// downstream config decoder is not; accepting both spellings would let an
+// HTTP PATCH bypass validation performed against the canonical tree.
+func canonicalMapChild(m map[string]any, canonicalKey, path string) (map[string]any, bool, error) {
+	var raw any
+	found := false
+	for key, value := range m {
+		if !strings.EqualFold(key, canonicalKey) {
+			continue
+		}
+		if key != canonicalKey {
+			return nil, false, fmt.Errorf(
+				"config PATCH key %q must use canonical casing %q",
+				path+"."+key, path+"."+canonicalKey,
+			)
+		}
+		raw = value
+		found = true
 	}
-	stripped := 0
-	scrub := func(agents map[string]any) {
-		for _, raw := range agents {
-			inner, ok := raw.(map[string]any)
+	if !found {
+		return nil, false, nil
+	}
+	child, ok := raw.(map[string]any)
+	if !ok {
+		return nil, false, fmt.Errorf("config PATCH key %q must be an object", path+"."+canonicalKey)
+	}
+	return child, true, nil
+}
+
+func validateCanonicalAgentConfigKeys(cli string, agent map[string]any, path string) error {
+	for key, value := range agent {
+		if strings.EqualFold(key, dangerousAgentFlagKey) {
+			if key != dangerousAgentFlagKey {
+				return fmt.Errorf(
+					"config PATCH key %q must use canonical casing %q",
+					path+"."+key, path+"."+dangerousAgentFlagKey,
+				)
+			}
+			requested, ok := value.(bool)
 			if !ok {
+				return fmt.Errorf("config PATCH key %q must be a boolean", path+"."+key)
+			}
+			if requested {
+				return fmt.Errorf(
+					"config PATCH key %q cannot be enabled via HTTP API; "+
+						"configure it directly in config.toml (security gate M-5)",
+					path+"."+key,
+				)
+			}
+			continue
+		}
+		for _, canonical := range canonicalAgentConfigKeys {
+			if strings.EqualFold(key, canonical) && key != canonical {
+				return fmt.Errorf(
+					"config PATCH key %q must use canonical casing %q",
+					path+"."+key, path+"."+canonical,
+				)
+			}
+		}
+		switch key {
+		case "model":
+			model, ok := value.(string)
+			if !ok {
+				return fmt.Errorf("config PATCH key %q must be a string", path+"."+key)
+			}
+			model = strings.TrimSpace(model)
+			if err := executor.ValidateModel(model); err != nil {
+				return fmt.Errorf("config PATCH key %q: %w", path+"."+key, err)
+			}
+			agent[key] = model
+		case "effort":
+			effort, ok := value.(string)
+			if !ok {
+				return fmt.Errorf("config PATCH key %q must be a string", path+"."+key)
+			}
+			canonicalValue, err := executor.NormalizeEffort(effort)
+			if err != nil {
+				return fmt.Errorf("config PATCH key %q: %w", path+"."+key, err)
+			}
+			agent[key] = canonicalValue
+		case "extra_flags":
+			flags, ok := value.(string)
+			if !ok {
+				return fmt.Errorf("config PATCH key %q must be a string", path+"."+key)
+			}
+			if err := executor.ValidateExtraFlagsForCLI(cli, flags); err != nil {
+				return fmt.Errorf("config PATCH key %q: %w", path+"."+key, err)
+			}
+		case "permission_mode":
+			mode, ok := value.(string)
+			if !ok {
+				return fmt.Errorf("config PATCH key %q must be a string", path+"."+key)
+			}
+			canonicalValue, err := executor.NormalizePermissionMode(mode)
+			if err != nil {
+				return fmt.Errorf("config PATCH key %q: %w", path+"."+key, err)
+			}
+			agent[key] = canonicalValue
+		case "approval_mode":
+			mode, ok := value.(string)
+			if !ok {
+				return fmt.Errorf("config PATCH key %q must be a string", path+"."+key)
+			}
+			canonicalValue, err := executor.NormalizeApprovalModeForCLI(cli, mode)
+			if err != nil {
+				return fmt.Errorf("config PATCH key %q: %w", path+"."+key, err)
+			}
+			agent[key] = canonicalValue
+		}
+	}
+	return nil
+}
+
+func validateCanonicalAgentCollection(agents map[string]any, path string) error {
+	for cli, raw := range agents {
+		for _, canonical := range []string{"claude", "gemini", "codex", "opencode"} {
+			if strings.EqualFold(cli, canonical) && cli != canonical {
+				return fmt.Errorf(
+					"config PATCH key %q must use canonical casing %q",
+					path+"."+cli, path+"."+canonical,
+				)
+			}
+		}
+		if err := executor.ValidateCLIName(cli); err != nil {
+			return fmt.Errorf("config PATCH key %q: %w", path+"."+cli, err)
+		}
+		agent, ok := raw.(map[string]any)
+		if !ok {
+			return fmt.Errorf("config PATCH key %q must be an object", path+"."+cli)
+		}
+		if err := validateCanonicalAgentConfigKeys(cli, agent, path+"."+cli); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateCanonicalAgentPatchKeysAtPath(patch map[string]any, path string) error {
+	agents, ok, err := canonicalMapChild(patch, "agents", path)
+	if err != nil || !ok {
+		return err
+	}
+	return validateCanonicalAgentCollection(agents, path+".agents")
+}
+
+func rejectUnsupportedScopedAgentPatchKeys(patch map[string]any, path string) error {
+	agents, present, err := canonicalMapChild(patch, "agents", path)
+	if err != nil || !present {
+		return err
+	}
+	// Validate first so attempts to enable the dangerous gate and casing
+	// aliases retain their precise security error. A valid-looking false is
+	// still rejected: repo/org agent execution profiles are not consumed by
+	// AgentConfigFor, so persisting one would falsely imply a safety downgrade.
+	if err := validateCanonicalAgentCollection(agents, path+".agents"); err != nil {
+		return err
+	}
+	return fmt.Errorf(
+		"config PATCH key %q is not supported; configure execution options under ai.agents",
+		path+".agents",
+	)
+}
+
+// validateCanonicalConfigPatchKeys rejects case-variant structural aliases
+// before DeepMerge. This makes the HTTP policy operate on exactly the same
+// tree that is persisted and decoded, including global, repo and org agents.
+func validateCanonicalConfigPatchKeys(patch map[string]any) error {
+	ai, ok, err := canonicalMapChild(patch, "ai", "config")
+	if err != nil {
+		return err
+	}
+	if ok {
+		if err := validateCanonicalAgentPatchKeysAtPath(ai, "ai"); err != nil {
+			return err
+		}
+		for _, scope := range []string{"repos", "orgs"} {
+			overrides, present, childErr := canonicalMapChild(ai, scope, "ai")
+			if childErr != nil {
+				return childErr
+			}
+			if !present {
 				continue
 			}
-			for k := range inner {
-				if strings.EqualFold(k, dangerousAgentFlagKey) {
-					delete(inner, k)
-					stripped++
+			for id, raw := range overrides {
+				override, mapOK := raw.(map[string]any)
+				if !mapOK {
+					continue
+				}
+				if err := rejectUnsupportedScopedAgentPatchKeys(override, "ai."+scope+"."+id); err != nil {
+					return err
 				}
 			}
 		}
 	}
-	ai, ok := m["ai"].(map[string]any)
-	if !ok {
-		return 0
+	return validateCanonicalAutonomousPatchKeys(patch)
+}
+
+func validateCanonicalAutonomousPatchKeys(patch map[string]any) error {
+	autonomous, present, err := canonicalMapChild(patch, "autonomous", "config")
+	if err != nil || !present {
+		return err
 	}
-	if agents, ok := ai["agents"].(map[string]any); ok {
-		scrub(agents)
+	if err := rejectAutonomousAgentPatch(autonomous, "autonomous"); err != nil {
+		return err
 	}
-	if repos, ok := ai["repos"].(map[string]any); ok {
-		for _, raw := range repos {
-			repo, ok := raw.(map[string]any)
+	for _, scope := range []string{"repos", "orgs"} {
+		overrides, scoped, childErr := canonicalMapChild(autonomous, scope, "autonomous")
+		if childErr != nil {
+			return childErr
+		}
+		if !scoped {
+			continue
+		}
+		for id, raw := range overrides {
+			override, ok := raw.(map[string]any)
 			if !ok {
 				continue
 			}
-			if agents, ok := repo["agents"].(map[string]any); ok {
-				scrub(agents)
+			if err := rejectAutonomousAgentPatch(override, "autonomous."+scope+"."+id); err != nil {
+				return err
 			}
 		}
 	}
-	if orgs, ok := ai["orgs"].(map[string]any); ok {
-		for _, raw := range orgs {
-			org, ok := raw.(map[string]any)
-			if !ok {
-				continue
-			}
-			if agents, ok := org["agents"].(map[string]any); ok {
-				scrub(agents)
-			}
-		}
+	return nil
+}
+
+func rejectAutonomousAgentPatch(patch map[string]any, path string) error {
+	agents, present, err := canonicalMapChild(patch, "agents", path)
+	if err != nil || !present {
+		return err
 	}
-	return stripped
+	if err := validateCanonicalAgentCollection(agents, path+".agents"); err != nil {
+		return err
+	}
+	return fmt.Errorf(
+		"config PATCH key %q is not supported; configure execution options under ai.agents",
+		path+".agents",
+	)
 }
 
 // normalizeAgentConfigsForPut validates the agent_configs payload from PUT
 // /config. The payload must be a JSON object keyed by CLI name (claude, gemini,
 // codex, opencode), where each value is itself an object whose keys are in
-// allowedAgentConfigSubkeys. Subkeys outside that set — including the
-// security-gated dangerously_skip_perms — return a 400 with a descriptive
-// message. permission_mode / approval_mode / extra_flags get value validation
-// against the executor allowlists.
+// allowedAgentConfigSubkeys. dangerously_skip_perms is the sole asymmetric
+// exception: false is accepted to reduce privilege, while true returns a 400.
+// permission_mode / approval_mode / extra_flags get value validation against
+// the executor allowlists.
 //
 // The returned map is shaped for json.Marshal so the persisted row deserializes
 // cleanly into map[string]CLIAgentConfig in ApplyStore.
@@ -2368,10 +3054,25 @@ func normalizeAgentConfigsForPut(v any) (map[string]map[string]any, error) {
 		normalized := make(map[string]any, len(inner))
 		for k, val := range inner {
 			if strings.EqualFold(k, dangerousAgentFlagKey) {
-				return nil, fmt.Errorf(
-					"agent_configs[%q].%s cannot be set via HTTP API; "+
-						"configure it in config.toml under [ai.agents.%s] (security gate M-5)",
-					cli, dangerousAgentFlagKey, cli)
+				if k != dangerousAgentFlagKey {
+					return nil, fmt.Errorf(
+						"agent_configs[%q].%s must use canonical casing %q",
+						cli, k, dangerousAgentFlagKey)
+				}
+				requested, isBool := val.(bool)
+				if !isBool {
+					return nil, fmt.Errorf(
+						"agent_configs[%q].%s must be a boolean",
+						cli, dangerousAgentFlagKey)
+				}
+				if requested {
+					return nil, fmt.Errorf(
+						"agent_configs[%q].%s cannot be enabled via HTTP API; "+
+							"configure it in config.toml under [ai.agents.%s] (security gate M-5)",
+						cli, dangerousAgentFlagKey, cli)
+				}
+				normalized[dangerousAgentFlagKey] = false
+				continue
 			}
 			if _, allowed := allowedAgentConfigSubkeys[k]; !allowed {
 				return nil, fmt.Errorf("agent_configs[%q]: unknown key %q", cli, k)
@@ -2382,8 +3083,21 @@ func normalizeAgentConfigsForPut(v any) (map[string]map[string]any, error) {
 				if !isStr {
 					return nil, fmt.Errorf("agent_configs[%q].%s must be a string", cli, k)
 				}
+				if k == "model" {
+					s = strings.TrimSpace(s)
+					if err := executor.ValidateModel(s); err != nil {
+						return nil, fmt.Errorf("agent_configs[%q].model: %v", cli, err)
+					}
+				}
+				if k == "effort" {
+					canonicalValue, err := executor.NormalizeEffort(s)
+					if err != nil {
+						return nil, fmt.Errorf("agent_configs[%q].effort: %v", cli, err)
+					}
+					s = canonicalValue
+				}
 				if k == "extra_flags" && s != "" {
-					if err := executor.ValidateExtraFlags(s); err != nil {
+					if err := executor.ValidateExtraFlagsForCLI(cli, s); err != nil {
 						return nil, fmt.Errorf("agent_configs[%q].extra_flags: %v", cli, err)
 					}
 				}
@@ -2398,19 +3112,21 @@ func normalizeAgentConfigsForPut(v any) (map[string]map[string]any, error) {
 				if !isStr {
 					return nil, fmt.Errorf("agent_configs[%q].permission_mode must be a string", cli)
 				}
-				if err := executor.ValidatePermissionMode(s); err != nil {
+				canonicalValue, err := executor.NormalizePermissionMode(s)
+				if err != nil {
 					return nil, fmt.Errorf("agent_configs[%q].permission_mode: %v", cli, err)
 				}
-				normalized[k] = s
+				normalized[k] = canonicalValue
 			case "approval_mode":
 				s, isStr := val.(string)
 				if !isStr {
 					return nil, fmt.Errorf("agent_configs[%q].approval_mode must be a string", cli)
 				}
-				if err := executor.ValidateApprovalMode(s); err != nil {
+				canonicalValue, err := executor.NormalizeApprovalModeForCLI(cli, s)
+				if err != nil {
 					return nil, fmt.Errorf("agent_configs[%q].approval_mode: %v", cli, err)
 				}
-				normalized[k] = s
+				normalized[k] = canonicalValue
 			case "max_turns":
 				n, isNum := val.(float64) // JSON numbers decode as float64
 				if !isNum || n < 0 || n != float64(int(n)) {

@@ -9,6 +9,7 @@ import (
 	gh "github.com/heimdallm/daemon/internal/github"
 	"github.com/heimdallm/daemon/internal/pipeline"
 	"github.com/heimdallm/daemon/internal/store"
+	"github.com/heimdallm/daemon/internal/workgate"
 )
 
 // fakeGHLockedSubmit is a github dependency stub whose SubmitReview
@@ -152,6 +153,23 @@ func TestPublishPending_LockedPRStopsRetrying(t *testing.T) {
 	}
 	if fgh.submitCalls != 1 {
 		t.Errorf("PublishPending re-attempted on orphaned row across %d extra ticks: total calls=%d, want 1", 3, fgh.submitCalls)
+	}
+}
+
+func TestPublishPendingDefersDuringUpdateDrain(t *testing.T) {
+	fgh := &fakeGHLockedSubmit{}
+	p := pipeline.New(nil, fgh, &fakeExecOrphan{}, &fakeNotify{})
+	gate := workgate.New(time.Minute)
+	if _, err := gate.Prepare("updater-owner"); err != nil {
+		t.Fatalf("prepare drain: %v", err)
+	}
+	p.SetWorkGate(gate)
+
+	// A nil store is intentional: admission must happen before even reading the
+	// pending rows, and therefore before any GitHub or SQLite side effect.
+	p.PublishPending()
+	if fgh.submitCalls != 0 {
+		t.Fatalf("SubmitReview calls during update drain = %d, want 0", fgh.submitCalls)
 	}
 }
 

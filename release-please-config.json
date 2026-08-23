@@ -1,4 +1,6 @@
 {
+  "draft": true,
+  "force-tag-creation": true,
   "packages": {
     ".": {
       "release-type": "simple",
@@ -6,7 +8,8 @@
       "bump-minor-pre-major": true,
       "bump-patch-for-minor-pre-major": true,
       "extra-files": [
-        { "type": "generic", "path": "docs/index.html" }
+        { "type": "generic", "path": "docs/index.html" },
+        { "type": "generic", "path": "flutter_app/pubspec.yaml" }
       ],
       "changelog-sections": [
         { "type": "feat", "section": "Features" },

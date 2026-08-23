@@ -66,6 +66,12 @@ review_mode = "single"   # "single" or "multi"
 # Default: false.
 # never_approve_with_issues = false
 
+# Minimum finding severity that triggers the never_approve_with_issues
+# downgrade: "low", "medium" or "high". Unset/empty = "low" (any finding
+# downgrades). With "medium", reviews whose findings are all low-severity nits
+# still approve. Overridable per org and per repo.
+# never_approve_min_severity = "low"
+
 # Per-CLI settings (optional)
 # [ai.agents.claude]
 # model = "claude-sonnet-4-20250514"

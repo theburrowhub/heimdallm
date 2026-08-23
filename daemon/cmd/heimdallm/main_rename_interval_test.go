@@ -1,11 +1,45 @@
 package main
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/heimdallm/daemon/internal/rename"
+	"github.com/heimdallm/daemon/internal/workgate"
 )
+
+type recordingRenameDispatcher struct{ calls int }
+
+func (d *recordingRenameDispatcher) Run(context.Context, string, string) error {
+	d.calls++
+	return nil
+}
+
+func TestGatedRenameDispatcherDefersMutationDuringUpdateDrain(t *testing.T) {
+	gate := workgate.New(time.Minute)
+	if _, err := gate.Prepare("update-owner"); err != nil {
+		t.Fatal(err)
+	}
+	next := &recordingRenameDispatcher{}
+	dispatcher := gatedRenameDispatcher{gate: gate, next: next}
+
+	if err := dispatcher.Run(context.Background(), "acme/old", "acme/new"); err != nil {
+		t.Fatalf("Run during drain: %v", err)
+	}
+	if next.calls != 0 {
+		t.Fatalf("reconciler calls during drain = %d, want 0", next.calls)
+	}
+	if _, err := gate.Cancel("update-owner"); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatcher.Run(context.Background(), "acme/old", "acme/new"); err != nil {
+		t.Fatalf("Run after drain: %v", err)
+	}
+	if next.calls != 1 {
+		t.Fatalf("reconciler calls after drain = %d, want 1", next.calls)
+	}
+}
 
 // TestParseRenameProbeInterval_DisabledByZero pins the operator
 // escape hatch — "0" returns 0 so the wiring in main.go knows to

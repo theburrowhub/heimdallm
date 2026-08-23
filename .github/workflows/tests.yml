@@ -10,19 +10,114 @@ on:
   # from GITHUB_TOKEN and therefore never trigger pull_request workflows.
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: tests-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  installer-shell:
+    name: macOS installer shell (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Syntax and pure-logic tests
+        run: |
+          set -eu
+          for script in scripts/macos-install.sh scripts/test-macos-install.sh; do
+            if [ ! -x "$script" ]; then
+              echo "::error::$script must be executable"
+              exit 1
+            fi
+          done
+          make test-install-macos
+
+      - name: Existing Linux install targets still parse
+        run: |
+          make -n install-linux >/dev/null
+          make -n uninstall-linux >/dev/null
+
+      # The parse checks above cannot catch a dropped -x: `make -n` expands the
+      # recipe without ever running pkill. This job is the only place the pkill
+      # semantics are executed, and ubuntu-latest has the /proc the guard needs.
+      - name: pkill semantics in the Linux targets
+        run: |
+          # pipefail so a guard failure still fails the step through the tee.
+          set -euo pipefail
+          for script in scripts/pkill-escape.sh scripts/test-linux-install.sh; do
+            if [ ! -x "$script" ]; then
+              echo "::error::$script must be executable"
+              exit 1
+            fi
+          done
+          # Streamed through tee rather than captured into a variable: with
+          # `output="$(make …)"` under set -e, a failing guard aborts the step
+          # before the echo runs, so the ok/not ok TAP lines never reach the log
+          # and only the stderr detail survives.
+          log="$RUNNER_TEMP/pkill-guard.log"
+          make test-install-linux 2>&1 | tee "$log"
+          # greps read $log directly rather than piping a variable into grep -q:
+          # under pipefail, grep -q exiting on first match can SIGPIPE the writer
+          # and invert the condition. Unreachable at this output size, but the
+          # guard is built to be un-skippable, so the hole goes for free.
+          #
+          # A silent skip here would defeat the purpose: the guard exits 0 when it
+          # cannot run, which is right locally on macOS but must never pass in CI.
+          if grep -q '^1\.\.0' "$log"; then
+            echo "::error::the pkill guard skipped entirely — it must run on ubuntu-latest"
+            exit 1
+          fi
+          # Per-test skips are also coverage loss, not success: on this runner
+          # every assertion is meant to execute, so any "# SKIP" means the
+          # environment stopped reproducing what the guard exists to prove.
+          if grep -q '# SKIP' "$log"; then
+            echo "::error::a pkill guard assertion skipped — coverage is incomplete"
+            exit 1
+          fi
+
+      - name: macOS targets stop at the platform guard
+        run: |
+          set -eu
+          for target in install-macos uninstall-macos; do
+            if output="$(make "$target" 2>&1)"; then
+              echo "::error::$target unexpectedly succeeded on Linux"
+              exit 1
+            fi
+            printf '%s\n' "$output"
+            if ! printf '%s\n' "$output" |
+              grep -Fq "This target requires macOS."; then
+              echo "::error::$target did not stop at the expected macOS guard"
+              exit 1
+            fi
+          done
+
+      - name: Direct helper invocation is also harmless on Linux
+        run: |
+          set -eu
+          for operation in install uninstall; do
+            if output="$(./scripts/macos-install.sh "$operation" 2>&1)"; then
+              echo "::error::direct $operation unexpectedly succeeded on Linux"
+              exit 1
+            fi
+            printf '%s\n' "$output"
+            if ! printf '%s\n' "$output" |
+              grep -Fq "This installer requires macOS."; then
+              echo "::error::direct $operation did not stop at the expected Linux guard"
+              exit 1
+            fi
+          done
+
   daemon:
     name: Daemon (Go)
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: daemon/go.mod
           cache-dependency-path: daemon/go.sum
@@ -35,14 +130,41 @@ jobs:
         working-directory: daemon
         run: go vet ./...
 
+      # Guards the -X main.version stamping through the Makefile path (which
+      # dev, release-local, verify-linux and the CI release jobs all funnel
+      # through): go build silently ignores -X on a renamed/missing symbol, so
+      # without this a refactor could regress installs back to reporting "dev"
+      # (#645). The docker/Dockerfile path has its own guard job below; the
+      # goreleaser ldflags are only exercised at release time.
+      - name: Version stamping guard
+        run: |
+          make build-daemon GIT_VERSION=ci-probe
+          REPORTED="$(daemon/bin/heimdallm --version)"
+          test "$REPORTED" = "ci-probe" || { echo "daemon reports '$REPORTED', expected 'ci-probe'"; exit 1; }
+
+  # Same stamping guard for the self-hosted image (docker/Dockerfile), which
+  # wires -X main.version through ARG VERSION instead of the Makefile. Runs on
+  # ubuntu because the daemon job's macOS runner has no Docker.
+  docker-version-guard:
+    name: Docker image version stamping
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Build builder stage and check reported version
+        run: |
+          docker build -f docker/Dockerfile --target builder --build-arg VERSION=ci-probe -t heimdallm-builder-probe .
+          REPORTED="$(docker run --rm heimdallm-builder-probe /heimdallm --version)"
+          test "$REPORTED" = "ci-probe" || { echo "daemon reports '$REPORTED', expected 'ci-probe'"; exit 1; }
+
   cli:
     name: CLI (Go)
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: cli/go.mod
           cache-dependency-path: cli/go.sum
@@ -55,22 +177,129 @@ jobs:
         working-directory: cli
         run: go vet ./...
 
+  coverage:
+    name: Coverage ratchet (daemon / CLI / Flutter)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # This job deliberately generates all three instrumented profiles from
+      # one checkout. The regular test jobs do not produce coverage profiles,
+      # and keeping generation together makes the cross-module gate atomic.
+      # The gate diffs against the PR base (or the previous pushed commit), so
+      # a shallow checkout would silently hide changed executable lines.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Test the coverage policy parser and gate
+        run: make test-coverage-gate
+
+      - name: Set up Go for the native CLI profile
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.sum
+
+      # The daemon profile is generated in Docker, outside setup-go's native
+      # cache paths. Persist the read/write cache mounted by test-docker so the
+      # deliberate full-suite rerun does not rebuild every dependency per job.
+      - name: Cache containerized daemon Go data
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: /tmp/heimdallm-gocache
+          key: ${{ runner.os }}-${{ runner.arch }}-daemon-coverage-v1-${{ hashFiles('daemon/go.mod', 'daemon/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-daemon-coverage-v1-
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: '3.41.9'
+          channel: stable
+          cache: true
+
+      - name: Install Flutter dependencies
+        working-directory: flutter_app
+        run: flutter pub get
+
+      - name: Resolve coverage diff base
+        shell: bash
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            if [[ -z "$PR_BASE_SHA" ]]; then
+              echo "::error::pull_request event did not provide a base SHA"
+              exit 1
+            fi
+            base_ref="$PR_BASE_SHA"
+          elif [[ "$GITHUB_EVENT_NAME" == "push" &&
+                  -n "$BEFORE_SHA" &&
+                  "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]] &&
+               git rev-parse --verify --quiet "$BEFORE_SHA^{commit}" >/dev/null; then
+            base_ref="$BEFORE_SHA"
+          elif git rev-parse --verify --quiet origin/main >/dev/null; then
+            base_ref="origin/main"
+          elif git rev-parse --verify --quiet HEAD^ >/dev/null; then
+            base_ref="HEAD^"
+          else
+            echo "::error::unable to resolve a commit for the coverage diff"
+            exit 1
+          fi
+          git rev-parse --verify "$base_ref^{commit}" >/dev/null
+          echo "COVERAGE_BASE_REF=$base_ref" >> "$GITHUB_ENV"
+          echo "Coverage diff base: $base_ref"
+
+      - name: Generate profiles and enforce the coverage policy
+        run: make coverage-ci
+
+  compose-isolation:
+    name: Docker Compose test isolation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Test destructive-command guards without starting services
+        run: make test-compose-isolation
+
   flutter:
     name: Flutter
     runs-on: macos-14
+    env:
+      BUNDLE_GEMFILE: ${{ github.workspace }}/flutter_app/macos/Gemfile
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Flutter
-        uses: subosito/flutter-action@v2
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
-          flutter-version: '3.x'
+          flutter-version: '3.41.9'
           channel: stable
           cache: true
+
+      - name: Set up Ruby and pinned CocoaPods
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+          working-directory: flutter_app/macos
 
       - name: Dependencies
         working-directory: flutter_app
         run: flutter pub get
+
+      # Flutter shells out to `pod` itself. Keep that subprocess inside the
+      # pinned bundle; otherwise the runner's older system CocoaPods rewrites
+      # Podfile.lock before the explicit deployment check below can run.
+      - name: Generate macOS Flutter configuration
+        working-directory: flutter_app
+        run: bundle exec flutter build macos --debug --config-only
+
+      - name: CocoaPods
+        working-directory: flutter_app/macos
+        run: bundle exec pod install --deployment --clean-install
 
       - name: Analyze
         working-directory: flutter_app
@@ -79,3 +308,16 @@ jobs:
       - name: Test
         working-directory: flutter_app
         run: flutter test
+
+      - name: Native updater tests
+        working-directory: flutter_app/macos
+        run: |
+          set -euo pipefail
+          xcodebuild test \
+            -workspace Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            -parallel-testing-enabled NO \
+            -only-testing:RunnerTests \
+            HEIMDALLM_BUNDLE_IDENTIFIER=com.theburrowhub.heimdallm.ci

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -19,6 +20,7 @@ import (
 	"github.com/heimdallm/daemon/internal/server"
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
+	"github.com/heimdallm/daemon/internal/workgate"
 )
 
 func setupServer(t *testing.T) (*server.Server, *store.Store) {
@@ -33,6 +35,38 @@ func setupServer(t *testing.T) (*server.Server, *store.Store) {
 	t.Cleanup(broker.Stop)
 	srv := server.New(s, broker, nil, "")
 	return srv, s
+}
+
+func newStreamingTestServer(t *testing.T, handler http.Handler, writeTimeout time.Duration) *httptest.Server {
+	t.Helper()
+	ts := httptest.NewUnstartedServer(handler)
+	ts.Config.WriteTimeout = writeTimeout
+	ts.Start()
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+func nextSSEEvent(scanner *bufio.Scanner) (string, string, error) {
+	eventType := "message"
+	var data []string
+	for scanner.Scan() {
+		line := scanner.Text()
+		switch {
+		case line == "":
+			if len(data) > 0 {
+				return eventType, strings.Join(data, "\n"), nil
+			}
+			eventType = "message"
+		case strings.HasPrefix(line, "event:"):
+			eventType = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		case strings.HasPrefix(line, "data:"):
+			data = append(data, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", "", err
+	}
+	return "", "", io.EOF
 }
 
 func TestHandlerHealth(t *testing.T) {
@@ -199,6 +233,65 @@ func TestEventsEmitsObservableHeartbeat(t *testing.T) {
 	}
 	if payload["last_poll_at"] != "2026-01-02T03:04:05Z" {
 		t.Fatalf("last_poll_at: got %v", payload["last_poll_at"])
+	}
+}
+
+func TestEventsStreamSurvivesServerWriteTimeout(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	broker := sse.NewBroker()
+	broker.Start()
+	t.Cleanup(broker.Stop)
+	srv := server.New(s, broker, nil, "")
+
+	const writeTimeout = 75 * time.Millisecond
+	ts := newStreamingTestServer(t, srv.Router(), writeTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/events", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /events: %v", err)
+	}
+	defer resp.Body.Close()
+
+	scanner := bufio.NewScanner(resp.Body)
+	eventType, _, err := nextSSEEvent(scanner)
+	if err != nil {
+		t.Fatalf("read initial heartbeat: %v", err)
+	}
+	if eventType != sse.EventHeartbeat {
+		t.Fatalf("initial event = %q, want %q", eventType, sse.EventHeartbeat)
+	}
+
+	// The server deadline is absolute, not idle-based. Publishing after it has
+	// expired reproduces the production one-minute EOF in a fraction of a second.
+	time.Sleep(2 * writeTimeout)
+	broker.Publish(sse.Event{Type: "after_deadline", Data: `{"ok":true}`})
+	eventType, data, err := nextSSEEvent(scanner)
+	if err != nil {
+		t.Fatalf("read event after server write timeout: %v", err)
+	}
+	if eventType != "after_deadline" || data != `{"ok":true}` {
+		t.Fatalf("event after deadline = (%q, %q), want (after_deadline, {\"ok\":true})", eventType, data)
+	}
+}
+
+func TestEventsRejectsWriterWithoutDeadlineControl(t *testing.T) {
+	srv, _ := setupServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/events", nil)
+	w := httptest.NewRecorder()
+
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want %d", w.Code, http.StatusInternalServerError)
 	}
 }
 
@@ -481,6 +574,279 @@ func TestHandlerShutdownRequiresAuthWhenTokenSet(t *testing.T) {
 	}
 }
 
+func TestUpdatePreparationLifecycle(t *testing.T) {
+	srv := setupServerWithToken(t, "secret-token")
+	prepareCalls := 0
+	cancelCalls := 0
+	sealCalls := 0
+	confirmCalls := 0
+	srv.SetUpdatePreparationFns(
+		func(leaseID string) (server.UpdatePreparationStatus, error) {
+			prepareCalls++
+			return server.UpdatePreparationStatus{
+				State:       "draining",
+				PID:         42,
+				LeaseID:     leaseID,
+				Active:      map[string]int{"reviews": 1},
+				ActiveTotal: 1,
+			}, nil
+		},
+		func(leaseID string) (server.UpdatePreparationStatus, error) {
+			cancelCalls++
+			return server.UpdatePreparationStatus{
+				State:   "running",
+				PID:     42,
+				LeaseID: leaseID,
+				Active:  map[string]int{},
+			}, nil
+		},
+	)
+	srv.SetUpdateSealFn(func(leaseID string) (server.UpdatePreparationStatus, error) {
+		sealCalls++
+		return server.UpdatePreparationStatus{
+			State:   "ready",
+			PID:     42,
+			LeaseID: leaseID,
+			Sealed:  true,
+			Active:  map[string]int{},
+		}, nil
+	})
+	srv.SetUpdateConfirmFn(func(leaseID string) (server.UpdatePreparationStatus, error) {
+		confirmCalls++
+		return server.UpdatePreparationStatus{
+			State:               "ready",
+			PID:                 84,
+			Version:             "v1.2.3",
+			LeaseID:             leaseID,
+			Sealed:              true,
+			BootstrapAuthorized: true,
+			BootID:              "test-boot-id",
+			Active:              map[string]int{},
+		}, nil
+	})
+
+	for _, method := range []string{http.MethodPost, http.MethodDelete} {
+		req := httptest.NewRequest(method, "/update/prepare", nil)
+		w := httptest.NewRecorder()
+		srv.Router().ServeHTTP(w, req)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("%s without token: status = %d, want 401", method, w.Code)
+		}
+	}
+	unauthorizedSeal := httptest.NewRequest(http.MethodPost, "/update/seal", nil)
+	unauthorizedSeal.Header.Set(server.HeaderUpdateLease, "owner-a")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, unauthorizedSeal)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("seal without token: status = %d, want 401", w.Code)
+	}
+	unauthorizedConfirm := httptest.NewRequest(http.MethodPost, "/update/confirm", nil)
+	unauthorizedConfirm.Header.Set(server.HeaderUpdateLease, "owner-a")
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, unauthorizedConfirm)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("confirm without token: status = %d, want 401", w.Code)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/update/prepare", nil)
+	req.Header.Set("X-Heimdallm-Token", "secret-token")
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("prepare without lease id: status = %d, want 400", w.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/update/prepare", nil)
+	req.Header.Set("X-Heimdallm-Token", "secret-token")
+	req.Header.Set(server.HeaderUpdateLease, "owner-a")
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("prepare: status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var prepared server.UpdatePreparationStatus
+	if err := json.NewDecoder(w.Body).Decode(&prepared); err != nil {
+		t.Fatalf("decode prepare: %v", err)
+	}
+	if prepared.State != "draining" || prepared.PID != 42 || prepared.LeaseID != "owner-a" || prepared.ActiveTotal != 1 {
+		t.Fatalf("prepare response = %+v", prepared)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/update/seal", nil)
+	req.Header.Set("X-Heimdallm-Token", "secret-token")
+	req.Header.Set(server.HeaderUpdateLease, "owner-a")
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("seal: status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var sealed server.UpdatePreparationStatus
+	if err := json.NewDecoder(w.Body).Decode(&sealed); err != nil {
+		t.Fatalf("decode seal: %v", err)
+	}
+	if sealed.State != "ready" || !sealed.Sealed || sealed.LeaseID != "owner-a" {
+		t.Fatalf("seal response = %+v", sealed)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/update/confirm", nil)
+	req.Header.Set("X-Heimdallm-Token", "secret-token")
+	req.Header.Set(server.HeaderUpdateLease, "owner-a")
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest || confirmCalls != 0 {
+		t.Fatalf("confirm without expected boot id: status = %d, calls = %d; want 400 and 0", w.Code, confirmCalls)
+	}
+
+	req.Header.Set(server.HeaderExpectedUpdateBootID, "stale-process")
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusConflict || confirmCalls != 0 {
+		t.Fatalf("confirm for stale process: status = %d, calls = %d; want 409 and 0", w.Code, confirmCalls)
+	}
+
+	req.Header.Set(server.HeaderExpectedUpdateBootID, "test-boot-id")
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("confirm: status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var confirmed server.UpdatePreparationStatus
+	if err := json.NewDecoder(w.Body).Decode(&confirmed); err != nil {
+		t.Fatalf("decode confirm: %v", err)
+	}
+	if !confirmed.BootstrapAuthorized || !confirmed.Sealed || confirmed.LeaseID != "owner-a" || confirmed.PID != 84 || confirmed.BootID != "test-boot-id" {
+		t.Fatalf("confirm response = %+v", confirmed)
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/update/prepare", nil)
+	req.Header.Set("X-Heimdallm-Token", "secret-token")
+	req.Header.Set(server.HeaderUpdateLease, "owner-a")
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest || cancelCalls != 0 {
+		t.Fatalf("cancel without expected boot id: status = %d, calls = %d; want 400 and 0", w.Code, cancelCalls)
+	}
+	req.Header.Set(server.HeaderExpectedUpdateBootID, "stale-process")
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusConflict || cancelCalls != 0 {
+		t.Fatalf("cancel for stale process: status = %d, calls = %d; want 409 and 0", w.Code, cancelCalls)
+	}
+	req.Header.Set(server.HeaderExpectedUpdateBootID, "test-boot-id")
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("cancel: status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var cancelled server.UpdatePreparationStatus
+	if err := json.NewDecoder(w.Body).Decode(&cancelled); err != nil {
+		t.Fatalf("decode cancel: %v", err)
+	}
+	if cancelled.State != "running" || cancelled.LeaseID != "owner-a" {
+		t.Fatalf("cancel response = %+v, want running with echoed owner", cancelled)
+	}
+	if prepareCalls != 1 || sealCalls != 1 || confirmCalls != 1 || cancelCalls != 1 {
+		t.Fatalf("callback calls = prepare %d, seal %d, confirm %d, cancel %d; want 1 each", prepareCalls, sealCalls, confirmCalls, cancelCalls)
+	}
+}
+
+func TestUpdatePreparationMapsLeaseConflictWithoutLeakingOwner(t *testing.T) {
+	srv := setupServerWithToken(t, "secret-token")
+	srv.SetUpdatePreparationFns(
+		func(string) (server.UpdatePreparationStatus, error) {
+			return server.UpdatePreparationStatus{}, server.ErrUpdateLeaseConflict
+		},
+		func(string) (server.UpdatePreparationStatus, error) {
+			return server.UpdatePreparationStatus{}, server.ErrUpdateLeaseConflict
+		},
+	)
+	for _, method := range []string{http.MethodPost, http.MethodDelete} {
+		req := httptest.NewRequest(method, "/update/prepare", nil)
+		req.Header.Set("X-Heimdallm-Token", "secret-token")
+		req.Header.Set(server.HeaderUpdateLease, "stale-owner-that-must-not-leak")
+		req.Header.Set(server.HeaderExpectedUpdateBootID, "test-boot-id")
+		w := httptest.NewRecorder()
+		srv.Router().ServeHTTP(w, req)
+		if w.Code != http.StatusConflict {
+			t.Fatalf("%s status = %d, want 409", method, w.Code)
+		}
+		if strings.Contains(w.Body.String(), "stale-owner") {
+			t.Fatalf("%s response leaked lease owner: %s", method, w.Body.String())
+		}
+	}
+}
+
+func TestUpdatePreparationMapsInvalidLeaseToBadRequest(t *testing.T) {
+	srv := setupServerWithToken(t, "secret-token")
+	srv.SetUpdatePreparationFns(
+		func(string) (server.UpdatePreparationStatus, error) {
+			return server.UpdatePreparationStatus{}, server.ErrUpdateLeaseInvalid
+		},
+		func(string) (server.UpdatePreparationStatus, error) {
+			return server.UpdatePreparationStatus{}, server.ErrUpdateLeaseInvalid
+		},
+	)
+	for _, method := range []string{http.MethodPost, http.MethodDelete} {
+		req := httptest.NewRequest(method, "/update/prepare", nil)
+		req.Header.Set("X-Heimdallm-Token", "secret-token")
+		req.Header.Set(server.HeaderUpdateLease, "invalid-owner")
+		req.Header.Set(server.HeaderExpectedUpdateBootID, "test-boot-id")
+		w := httptest.NewRecorder()
+		srv.Router().ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("%s status = %d, want 400", method, w.Code)
+		}
+	}
+}
+
+func TestUpdateCancellationRejectsUnconfirmedReplacement(t *testing.T) {
+	srv := setupServerWithToken(t, "secret-token")
+	srv.SetUpdatePreparationFns(
+		func(string) (server.UpdatePreparationStatus, error) {
+			return server.UpdatePreparationStatus{}, nil
+		},
+		func(string) (server.UpdatePreparationStatus, error) {
+			return server.UpdatePreparationStatus{}, server.ErrUpdateBootstrapNotAuthorized
+		},
+	)
+	req := httptest.NewRequest(http.MethodDelete, "/update/prepare", nil)
+	req.Header.Set("X-Heimdallm-Token", "secret-token")
+	req.Header.Set(server.HeaderUpdateLease, "owner-that-must-not-leak")
+	req.Header.Set(server.HeaderExpectedUpdateBootID, "test-boot-id")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("cancel unconfirmed replacement status = %d, want 409", w.Code)
+	}
+	if strings.Contains(w.Body.String(), "owner-that-must-not-leak") {
+		t.Fatalf("cancellation response leaked lease owner: %s", w.Body.String())
+	}
+}
+
+func TestUpdatePreparationUnavailable(t *testing.T) {
+	srv, _ := setupServer(t)
+	for _, method := range []string{http.MethodPost, http.MethodDelete} {
+		req := httptest.NewRequest(method, "/update/prepare", nil)
+		w := httptest.NewRecorder()
+		srv.Router().ServeHTTP(w, req)
+		if w.Code != http.StatusServiceUnavailable {
+			t.Fatalf("%s status = %d, want 503", method, w.Code)
+		}
+	}
+	req := httptest.NewRequest(http.MethodPost, "/update/seal", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("POST /update/seal status = %d, want 503", w.Code)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/update/confirm", nil)
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("POST /update/confirm status = %d, want 503", w.Code)
+	}
+}
+
 func itoa(n int64) string {
 	return fmt.Sprintf("%d", n)
 }
@@ -495,7 +861,7 @@ func setupServerWithToken(t *testing.T, token string) *server.Server {
 	broker := sse.NewBroker()
 	broker.Start()
 	t.Cleanup(broker.Stop)
-	return server.New(s, broker, nil, token)
+	return server.NewWithOptions(s, broker, nil, token, server.Options{UpdateBootID: "test-boot-id"})
 }
 
 func TestHandlerLogsStream_RequiresAuth(t *testing.T) {
@@ -510,23 +876,98 @@ func TestHandlerLogsStream_RequiresAuth(t *testing.T) {
 
 func TestHandlerLogsStream_WithToken(t *testing.T) {
 	srv := setupServerWithToken(t, "secret-token")
+	t.Setenv("HEIMDALLM_DATA_DIR", t.TempDir())
+	ts := httptest.NewServer(srv.Router())
+	t.Cleanup(ts.Close)
 
-	// Use a context with a short deadline so the polling loop exits.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	req := httptest.NewRequest("GET", "/logs/stream", nil).WithContext(ctx)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/logs/stream", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("X-Heimdallm-Token", "secret-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /logs/stream: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// The isolated data directory has no log file, so the endpoint emits its
+	// diagnostic SSE line and closes cleanly.
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 with valid token, got %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
+		t.Errorf("expected Content-Type text/event-stream, got %q", ct)
+	}
+}
+
+func TestLogsStreamSurvivesServerWriteTimeout(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("HEIMDALLM_DATA_DIR", dataDir)
+	logPath := filepath.Join(dataDir, server.DaemonLogFileName)
+	if err := os.WriteFile(logPath, []byte("before deadline\n"), 0o600); err != nil {
+		t.Fatalf("write initial log: %v", err)
+	}
+
+	srv, _ := setupServer(t)
+	const writeTimeout = 75 * time.Millisecond
+	ts := newStreamingTestServer(t, srv.Router(), writeTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/logs/stream", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /logs/stream: %v", err)
+	}
+	defer resp.Body.Close()
+
+	scanner := bufio.NewScanner(resp.Body)
+	eventType, data, err := nextSSEEvent(scanner)
+	if err != nil {
+		t.Fatalf("read initial log line: %v", err)
+	}
+	if eventType != "log_line" || !strings.Contains(data, "before deadline") {
+		t.Fatalf("initial log event = (%q, %q)", eventType, data)
+	}
+
+	time.Sleep(2 * writeTimeout)
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open log for append: %v", err)
+	}
+	if _, err := f.WriteString("after deadline\n"); err != nil {
+		_ = f.Close()
+		t.Fatalf("append log: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close appended log: %v", err)
+	}
+
+	eventType, data, err = nextSSEEvent(scanner)
+	if err != nil {
+		t.Fatalf("read log line after server write timeout: %v", err)
+	}
+	if eventType != "log_line" || !strings.Contains(data, "after deadline") {
+		t.Fatalf("log event after deadline = (%q, %q)", eventType, data)
+	}
+}
+
+func TestLogsStreamRejectsWriterWithoutDeadlineControl(t *testing.T) {
+	srv := setupServerWithToken(t, "secret-token")
+	req := httptest.NewRequest(http.MethodGet, "/logs/stream", nil)
 	req.Header.Set("X-Heimdallm-Token", "secret-token")
 	w := httptest.NewRecorder()
+
 	srv.Router().ServeHTTP(w, req)
 
-	// Log file won't exist in CI/test env; endpoint should return 200 with SSE not-found message
-	// and exit cleanly. If the log file DOES exist (dev machine), the handler exits when ctx is done.
-	if w.Code != http.StatusOK {
-		t.Errorf("expected 200 with valid token, got %d", w.Code)
-	}
-	if ct := w.Header().Get("Content-Type"); ct != "text/event-stream" {
-		t.Errorf("expected Content-Type text/event-stream, got %q", ct)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want %d", w.Code, http.StatusInternalServerError)
 	}
 }
 
@@ -931,6 +1372,29 @@ func TestHandlerPromoteIssue_Conflict(t *testing.T) {
 	}
 }
 
+func TestHandlerPromoteIssue_UpdateDrainIsRetryableConflict(t *testing.T) {
+	srv, s := setupServer(t)
+	now := time.Now()
+	id, _ := s.UpsertIssue(&store.Issue{
+		GithubID: 803, Repo: "org/r", Number: 23, Title: "t",
+		Body: "b", Author: "a", Assignees: `[]`, Labels: `[]`,
+		State: "open", CreatedAt: now, FetchedAt: now,
+	})
+	srv.SetTriggerPromoteFn(func(int64) error {
+		return workgate.ErrDraining
+	})
+
+	req := httptest.NewRequest("POST", "/issues/"+itoa(id)+"/promote", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("promote during update: status %d, want 409; body: %s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Retry-After"); got != "5" {
+		t.Fatalf("Retry-After = %q, want 5", got)
+	}
+}
+
 func TestHandlerPromoteIssue_NotConfigured(t *testing.T) {
 	srv, s := setupServer(t)
 	now := time.Now()
@@ -1189,9 +1653,9 @@ func TestHandlerPutConfig_WritableAndReadOnly_Mixed(t *testing.T) {
 }
 
 func TestHandlerPutConfig_AgentConfigs_RejectsDangerouslySkipPerms(t *testing.T) {
-	// Security gate M-5: --dangerously-skip-permissions cannot be flipped
+	// Security gate M-5: --dangerously-skip-permissions cannot be enabled
 	// over HTTP. The handler must 400 with a message that points the
-	// operator at config.toml so the toggle never lands in sqlite.
+	// operator at config.toml so true never lands in sqlite.
 	srv, _ := setupServer(t)
 	body := `{"agent_configs":{"claude":{"dangerously_skip_perms":true}}}`
 	w := httptest.NewRecorder()
@@ -1204,6 +1668,23 @@ func TestHandlerPutConfig_AgentConfigs_RejectsDangerouslySkipPerms(t *testing.T)
 	}
 }
 
+func TestHandlerPutConfig_AgentConfigs_AllowsDisablingDangerouslySkipPerms(t *testing.T) {
+	srv, s := setupServer(t)
+	body := `{"agent_configs":{"claude":{"dangerously_skip_perms":false}}}`
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, putConfigRequest(body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+	rows, err := s.ListConfigs()
+	if err != nil {
+		t.Fatalf("ListConfigs: %v", err)
+	}
+	if got := rows["agent_configs"]; !strings.Contains(got, `"dangerously_skip_perms":false`) {
+		t.Fatalf("explicit safety downgrade was not persisted: %q", got)
+	}
+}
+
 func TestHandlerPutConfig_AgentConfigs_RejectsBadPermissionMode(t *testing.T) {
 	srv, _ := setupServer(t)
 	body := `{"agent_configs":{"claude":{"permission_mode":"bypassPermissions"}}}`
@@ -1211,6 +1692,108 @@ func TestHandlerPutConfig_AgentConfigs_RejectsBadPermissionMode(t *testing.T) {
 	srv.Router().ServeHTTP(w, putConfigRequest(body))
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+func TestHandlerPutConfig_AgentConfigs_EnforcesProviderPolicy(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		wantStatus int
+	}{
+		{
+			name:       "Codex sandbox override rejected",
+			body:       `{"agent_configs":{"codex":{"extra_flags":"--sandbox danger-full-access"}}}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "Gemini yolo approval rejected",
+			body:       `{"agent_configs":{"gemini":{"approval_mode":"yolo"}}}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "Gemini typed auto edit accepted",
+			body:       `{"agent_configs":{"gemini":{"approval_mode":"auto_edit"}}}`,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "Option-shaped model rejected",
+			body:       `{"agent_configs":{"claude":{"model":"--dangerously-skip-permissions"}}}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "Option-shaped effort rejected",
+			body:       `{"agent_configs":{"claude":{"effort":"--dangerously-skip-permissions"}}}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "Legacy free-form model rejected in new config writes",
+			body:       `{"agent_configs":{"claude":{"extra_flags":"--model opus"}}}`,
+			wantStatus: http.StatusBadRequest,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := setupServer(t)
+			w := httptest.NewRecorder()
+			srv.Router().ServeHTTP(w, putConfigRequest(tc.body))
+			if w.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d (body: %s)", w.Code, tc.wantStatus, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestHandlerUpsertAgent_RejectsProviderPolicyFlags(t *testing.T) {
+	srv, _ := setupServer(t)
+	body := `{"id":"unsafe-codex","name":"Unsafe Codex","cli":"codex","cli_flags":"--sandbox=danger-full-access"}`
+	req := httptest.NewRequest("POST", "/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (body: %s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "--sandbox") {
+		t.Fatalf("error must identify rejected flag, got: %s", w.Body.String())
+	}
+}
+
+func TestHandlerUpsertAgent_AcceptsSafeLegacyTypedProfileFlags(t *testing.T) {
+	srv, s := setupServer(t)
+	body := `{"id":"legacy-claude","name":"Legacy Claude","cli":"claude","cli_flags":"--model opus --max-turns 5 --effort HIGH --verbose"}`
+	req := httptest.NewRequest("POST", "/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+	agents, err := s.ListAgents()
+	if err != nil {
+		t.Fatalf("list agents: %v", err)
+	}
+	if len(agents) != 1 || agents[0].CLIFlags != "--model opus --max-turns 5 --effort HIGH --verbose" {
+		t.Fatalf("legacy profile flags were not preserved for runtime migration: %+v", agents)
+	}
+}
+
+func TestHandlerUpsertAgent_RequiresCLIForFlags(t *testing.T) {
+	srv, _ := setupServer(t)
+	body := `{"id":"missing-cli","name":"Missing CLI","cli_flags":"--model safe-model"}`
+	req := httptest.NewRequest("POST", "/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d (body: %s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "cli is required") {
+		t.Fatalf("error must explain the effective-provider requirement, got: %s", w.Body.String())
 	}
 }
 
@@ -1707,13 +2290,9 @@ func TestHandlePatchConfig_RepoListsWriteTOML(t *testing.T) {
 	}
 }
 
-func TestHandlePatchConfig_StripsDangerouslySkipPerms(t *testing.T) {
-	// Security gate M-5: PUT /config rejects dangerously_skip_perms with
-	// a 400. PATCH /config deep-merges arbitrary JSON; before this fix it
-	// silently persisted the flag, granting AI runs --dangerously-skip-
-	// permissions on the next reload. The PATCH path must scrub the flag
-	// out of every agent under ai.agents before validating + writing TOML
-	// so HTTP can never flip the toggle.
+func TestHandlePatchConfig_RejectsDangerouslySkipPermsEnable(t *testing.T) {
+	// Security gate M-5 must be explicit: HTTP callers cannot enable the
+	// bypass, and a rejected payload must not partially apply safe siblings.
 	tomlContent := "[ai]\nprimary = \"claude\"\n"
 	tomlPath := writeTempTOML(t, tomlContent)
 
@@ -1727,34 +2306,185 @@ func TestHandlePatchConfig_StripsDangerouslySkipPerms(t *testing.T) {
 	w := httptest.NewRecorder()
 	srv.Router().ServeHTTP(w, req)
 
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("PATCH enable = %d, want 400 (body: %s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "cannot be enabled") {
+		t.Fatalf("PATCH error is not actionable: %s", w.Body.String())
+	}
+	got, err := os.ReadFile(tomlPath)
+	if err != nil {
+		t.Fatalf("read TOML after rejected PATCH: %v", err)
+	}
+	if string(got) != tomlContent {
+		t.Fatalf("rejected PATCH partially changed TOML:\n%s", got)
+	}
+}
+
+func TestHandlePatchConfig_DisablesAndCanonicalizesTrustedDangerousAlias(t *testing.T) {
+	tomlContent := "[AI]\n" +
+		"primary = \"claude\"\n" +
+		"[AI.Agents.claude]\n" +
+		"DANGEROUSLY_SKIP_PERMS = true\n" +
+		"permission_mode = \"default\"\n"
+	tomlPath := writeTempTOML(t, tomlContent)
+
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+
+	// HTTP may reduce privilege. False must persist rather than being silently
+	// stripped, while legal sibling fields still apply atomically.
+	body := `{"ai":{"agents":{"claude":{"dangerously_skip_perms":false,"permission_mode":"acceptEdits"}}}}`
+	req := httptest.NewRequest("PATCH", "/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
 	if w.Code != http.StatusOK {
-		t.Fatalf("PATCH should succeed (other fields land), got %d (body: %s)", w.Code, w.Body.String())
+		t.Fatalf("PATCH should succeed, got %d (body: %s)", w.Code, w.Body.String())
 	}
 
 	m, err := config.ReadTOMLMap(tomlPath)
 	if err != nil {
 		t.Fatalf("read TOML after PATCH: %v", err)
 	}
+	for key := range m {
+		if strings.EqualFold(key, "ai") && key != "ai" {
+			t.Fatalf("legacy structural alias %q survived PATCH: %v", key, m)
+		}
+	}
 	ai, _ := m["ai"].(map[string]any)
+	for key := range ai {
+		if strings.EqualFold(key, "agents") && key != "agents" {
+			t.Fatalf("legacy agents alias %q survived PATCH: %v", key, ai)
+		}
+	}
 	agents, _ := ai["agents"].(map[string]any)
-	claude, ok := agents["claude"].(map[string]any)
-	if !ok {
-		t.Fatalf("ai.agents.claude missing after PATCH: %v", agents)
+	claude, _ := agents["claude"].(map[string]any)
+	if got, ok := claude["dangerously_skip_perms"].(bool); !ok || got {
+		t.Fatalf("dangerously_skip_perms was not disabled by HTTP PATCH: %v", claude)
 	}
-	if _, present := claude["dangerously_skip_perms"]; present {
-		t.Fatalf("dangerously_skip_perms persisted via PATCH (M-5 bypass): %v", claude)
+	for key := range claude {
+		if strings.EqualFold(key, "dangerously_skip_perms") && key != "dangerously_skip_perms" {
+			t.Fatalf("legacy dangerous alias %q survived PATCH: %v", key, claude)
+		}
 	}
-	// Sanity: other legal fields landed so the strip is targeted, not nuking the whole section.
 	if claude["permission_mode"] != "acceptEdits" {
-		t.Errorf("permission_mode = %v, want acceptEdits (legal fields must still land)", claude["permission_mode"])
+		t.Fatalf("legal sibling field did not land: %v", claude)
+	}
+	for i := 0; i < 32; i++ {
+		loaded, err := config.Load(tomlPath)
+		if err != nil {
+			t.Fatalf("Load iteration %d after PATCH: %v", i, err)
+		}
+		if loaded.AI.Agents["claude"].DangerouslySkipPerms {
+			t.Fatalf("Load iteration %d re-enabled dangerously_skip_perms", i)
+		}
 	}
 }
 
-func TestHandlePatchConfig_StripsDangerouslySkipPermsCaseInsensitive(t *testing.T) {
-	// JSON preserves key casing; the merged map then feeds into a
-	// Go struct via mapstructure/koanf, which is case-insensitive
-	// by default — so a payload using mixed/upper casing would
-	// otherwise bypass an exact-match strip.
+func TestHandlePatchConfig_MigratesLegacyTOMLBaseBeforeInnocuousPatch(t *testing.T) {
+	tomlContent := "[github]\n" +
+		"poll_interval = \"5m\"\n\n" +
+		"[ai]\n" +
+		"primary = \"codex\"\n\n" +
+		"[ai.agents.codex]\n" +
+		"extra_flags = \"--model gpt-5 --json\"\n"
+	tomlPath := writeTempTOML(t, tomlContent)
+
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+
+	req := httptest.NewRequest("PATCH", "/config", strings.NewReader(`{"github":{"poll_interval":"10m"}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("innocuous PATCH over legacy TOML = %d, want 200 (body: %s)", w.Code, w.Body.String())
+	}
+	m, err := config.ReadTOMLMap(tomlPath)
+	if err != nil {
+		t.Fatalf("read migrated TOML: %v", err)
+	}
+	githubConfig, _ := m["github"].(map[string]any)
+	if githubConfig["poll_interval"] != "10m" {
+		t.Fatalf("innocuous PATCH did not land: %v", githubConfig)
+	}
+	ai, _ := m["ai"].(map[string]any)
+	agents, _ := ai["agents"].(map[string]any)
+	codex, _ := agents["codex"].(map[string]any)
+	if codex["model"] != "gpt-5" || codex["extra_flags"] != "--json" {
+		t.Fatalf("legacy TOML base was not migrated safely: %v", codex)
+	}
+}
+
+func TestHandlePatchConfig_ReportsAmbiguousTrustedAliases(t *testing.T) {
+	tomlContent := "[ai]\n" +
+		"primary = \"codex\"\n" +
+		"[ai.agents.codex]\n" +
+		"Model = \"first\"\n" +
+		"MODEL = \"second\"\n"
+	tomlPath := writeTempTOML(t, tomlContent)
+
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+	req := httptest.NewRequest(
+		"PATCH",
+		"/config",
+		strings.NewReader(`{"github":{"poll_interval":"10m"}}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("ambiguous trusted base PATCH = %d, want 400 (body: %s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "ambiguous aliases") {
+		t.Fatalf("ambiguous trusted base error is not actionable: %s", w.Body.String())
+	}
+	got, err := os.ReadFile(tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != tomlContent {
+		t.Fatalf("rejected PATCH changed ambiguous TOML:\n%s", got)
+	}
+}
+
+func TestHandlePatchConfig_RejectsNewLegacyTypedFlagWithoutChangingTOML(t *testing.T) {
+	tomlContent := "[ai]\nprimary = \"codex\"\n"
+	tomlPath := writeTempTOML(t, tomlContent)
+
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+
+	body := `{"ai":{"agents":{"codex":{"extra_flags":"--model gpt-5"}}}}`
+	req := httptest.NewRequest("PATCH", "/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("new legacy typed flag PATCH = %d, want 400 (body: %s)", w.Code, w.Body.String())
+	}
+	got, err := os.ReadFile(tomlPath)
+	if err != nil {
+		t.Fatalf("read TOML after rejected PATCH: %v", err)
+	}
+	if string(got) != tomlContent {
+		t.Fatalf("rejected PATCH changed TOML:\n%s", got)
+	}
+}
+
+func TestHandlePatchConfig_RejectsDangerouslySkipPermsCaseAliases(t *testing.T) {
+	// JSON preserves key casing while downstream decoding is case-insensitive.
+	// Reject aliases explicitly instead of relying on a silent scrub.
 	tomlContent := "[ai]\nprimary = \"claude\"\n"
 	tomlPath := writeTempTOML(t, tomlContent)
 
@@ -1772,31 +2502,169 @@ func TestHandlePatchConfig_StripsDangerouslySkipPermsCaseInsensitive(t *testing.
 	w := httptest.NewRecorder()
 	srv.Router().ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("PATCH should succeed, got %d (body: %s)", w.Code, w.Body.String())
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("PATCH aliases = %d, want 400 (body: %s)", w.Code, w.Body.String())
 	}
-
-	m, _ := config.ReadTOMLMap(tomlPath)
-	ai, _ := m["ai"].(map[string]any)
-	agents, _ := ai["agents"].(map[string]any)
-	for _, name := range []string{"claude", "gemini", "codex"} {
-		inner, ok := agents[name].(map[string]any)
-		if !ok {
-			continue
-		}
-		for k := range inner {
-			if strings.EqualFold(k, "dangerously_skip_perms") {
-				t.Errorf("case-variant %q persisted for %s (M-5 bypass)", k, name)
-			}
-		}
+	got, err := os.ReadFile(tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != tomlContent {
+		t.Fatalf("rejected alias PATCH changed TOML:\n%s", got)
 	}
 }
 
-func TestHandlePatchConfig_StripsDangerouslySkipPermsInRepoOverride(t *testing.T) {
-	// Per-repo overrides land at ai.repos.<repo>.agents.<cli>.* in
-	// the merged map. The scrubber must walk those too so a buggy
-	// future schema or a koanf-style alias can't grant the flag via
-	// a non-top-level path.
+func TestHandlePatchConfig_RejectsCaseVariantAgentTree(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "top-level AI",
+			body: `{"AI":{"agents":{"claude":{"dangerously_skip_perms":true}}}}`,
+		},
+		{
+			name: "global Agents",
+			body: `{"ai":{"Agents":{"claude":{"dangerously_skip_perms":true}}}}`,
+		},
+		{
+			name: "repo Agents",
+			body: `{"ai":{"repos":{"org/repo":{"Agents":{"claude":{"dangerously_skip_perms":true}}}}}}`,
+		},
+		{
+			name: "org Agents",
+			body: `{"ai":{"orgs":{"org":{"Agents":{"claude":{"dangerously_skip_perms":true}}}}}}`,
+		},
+		{
+			name: "CLI name",
+			body: `{"ai":{"agents":{"Codex":{"extra_flags":"--sandbox danger-full-access"}}}}`,
+		},
+		{
+			name: "agent field",
+			body: `{"ai":{"agents":{"codex":{"Extra_Flags":"--sandbox danger-full-access"}}}}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tomlPath := writeTempTOML(t, "[ai]\nprimary = \"claude\"\n")
+			srv := setupServerWithToken(t, "test-token")
+			srv.SetConfigPath(tomlPath)
+
+			req := httptest.NewRequest("PATCH", "/config", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Heimdallm-Token", "test-token")
+			w := httptest.NewRecorder()
+			srv.Router().ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400 for case-variant config tree, got %d (body: %s)", w.Code, w.Body.String())
+			}
+			got, err := os.ReadFile(tomlPath)
+			if err != nil {
+				t.Fatalf("read config after rejected PATCH: %v", err)
+			}
+			if string(got) != "[ai]\nprimary = \"claude\"\n" {
+				t.Fatalf("rejected PATCH changed config:\n%s", got)
+			}
+		})
+	}
+}
+
+func TestHandleScopedPatchConfig_RejectsCaseVariantAgentTree(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+	}{
+		{
+			name: "repo",
+			path: "/config/repos/" + url.PathEscape("org/repo"),
+		},
+		{
+			name: "org",
+			path: "/config/orgs/" + url.PathEscape("org"),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tomlPath := writeTempTOML(t, "[ai]\nprimary = \"claude\"\n")
+			srv := setupServerWithToken(t, "test-token")
+			srv.SetConfigPath(tomlPath)
+
+			body := `{"Agents":{"claude":{"dangerously_skip_perms":true}}}`
+			req := httptest.NewRequest("PATCH", tc.path, strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Heimdallm-Token", "test-token")
+			w := httptest.NewRecorder()
+			srv.Router().ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400 for case-variant scoped tree, got %d (body: %s)", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestHandlePatchConfig_RejectsUnsupportedScopedAgentSafetyDowngrade(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		body string
+	}{
+		{
+			name: "repo endpoint",
+			path: "/config/repos/" + url.PathEscape("org/repo"),
+			body: `{"agents":{"claude":{"dangerously_skip_perms":false}}}`,
+		},
+		{
+			name: "org endpoint",
+			path: "/config/orgs/" + url.PathEscape("org"),
+			body: `{"agents":{"claude":{"dangerously_skip_perms":false}}}`,
+		},
+		{
+			name: "repo in global endpoint",
+			path: "/config",
+			body: `{"ai":{"repos":{"org/repo":{"agents":{"claude":{"dangerously_skip_perms":false}}}}}}`,
+		},
+		{
+			name: "org in global endpoint",
+			path: "/config",
+			body: `{"ai":{"orgs":{"org":{"agents":{"claude":{"dangerously_skip_perms":false}}}}}}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tomlContent := "[ai]\nprimary = \"claude\"\n"
+			tomlPath := writeTempTOML(t, tomlContent)
+			srv := setupServerWithToken(t, "test-token")
+			srv.SetConfigPath(tomlPath)
+
+			req := httptest.NewRequest("PATCH", tc.path, strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Heimdallm-Token", "test-token")
+			w := httptest.NewRecorder()
+			srv.Router().ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("scoped agent PATCH = %d, want 400 (body: %s)", w.Code, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), "not supported") {
+				t.Fatalf("scoped rejection is not actionable: %s", w.Body.String())
+			}
+			got, err := os.ReadFile(tomlPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != tomlContent {
+				t.Fatalf("rejected scoped PATCH changed TOML:\n%s", got)
+			}
+		})
+	}
+}
+
+func TestHandlePatchConfig_RejectsDangerouslySkipPermsInRepoOverride(t *testing.T) {
 	tomlContent := "[ai]\nprimary = \"claude\"\n"
 	tomlPath := writeTempTOML(t, tomlContent)
 
@@ -1810,31 +2678,19 @@ func TestHandlePatchConfig_StripsDangerouslySkipPermsInRepoOverride(t *testing.T
 	w := httptest.NewRecorder()
 	srv.Router().ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("PATCH should succeed, got %d (body: %s)", w.Code, w.Body.String())
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("repo PATCH enable = %d, want 400 (body: %s)", w.Code, w.Body.String())
 	}
-
-	m, _ := config.ReadTOMLMap(tomlPath)
-	ai, _ := m["ai"].(map[string]any)
-	repos, _ := ai["repos"].(map[string]any)
-	repo, ok := repos["org/repo"].(map[string]any)
-	if !ok {
-		return
+	got, err := os.ReadFile(tomlPath)
+	if err != nil {
+		t.Fatal(err)
 	}
-	agents, ok := repo["agents"].(map[string]any)
-	if !ok {
-		return
-	}
-	claude, ok := agents["claude"].(map[string]any)
-	if !ok {
-		return
-	}
-	if _, present := claude["dangerously_skip_perms"]; present {
-		t.Fatalf("repo-level dangerously_skip_perms persisted (M-5 bypass): %v", claude)
+	if string(got) != tomlContent {
+		t.Fatalf("rejected repo PATCH changed TOML:\n%s", got)
 	}
 }
 
-func TestHandlePatchConfig_StripsDangerouslySkipPermsInOrgOverride(t *testing.T) {
+func TestHandlePatchConfig_RejectsDangerouslySkipPermsInOrgOverride(t *testing.T) {
 	tomlContent := "[ai]\nprimary = \"claude\"\n"
 	tomlPath := writeTempTOML(t, tomlContent)
 
@@ -1848,31 +2704,19 @@ func TestHandlePatchConfig_StripsDangerouslySkipPermsInOrgOverride(t *testing.T)
 	w := httptest.NewRecorder()
 	srv.Router().ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("PATCH should succeed, got %d (body: %s)", w.Code, w.Body.String())
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("org PATCH enable = %d, want 400 (body: %s)", w.Code, w.Body.String())
 	}
-
-	m, _ := config.ReadTOMLMap(tomlPath)
-	ai, _ := m["ai"].(map[string]any)
-	orgs, _ := ai["orgs"].(map[string]any)
-	org, ok := orgs["org"].(map[string]any)
-	if !ok {
-		return
+	got, err := os.ReadFile(tomlPath)
+	if err != nil {
+		t.Fatal(err)
 	}
-	agents, ok := org["agents"].(map[string]any)
-	if !ok {
-		return
-	}
-	claude, ok := agents["claude"].(map[string]any)
-	if !ok {
-		return
-	}
-	if _, present := claude["dangerously_skip_perms"]; present {
-		t.Fatalf("org-level dangerously_skip_perms persisted (M-5 bypass): %v", claude)
+	if string(got) != tomlContent {
+		t.Fatalf("rejected org PATCH changed TOML:\n%s", got)
 	}
 }
 
-func TestHandlePatchConfig_StripsDangerouslySkipPermsAcrossAllAgents(t *testing.T) {
+func TestHandlePatchConfig_RejectsDangerouslySkipPermsAcrossAllAgents(t *testing.T) {
 	// Same gate applied to every CLI under ai.agents — an attacker may
 	// try flipping the flag on a less-watched agent.
 	tomlContent := "[ai]\nprimary = \"claude\"\n"
@@ -1893,21 +2737,15 @@ func TestHandlePatchConfig_StripsDangerouslySkipPermsAcrossAllAgents(t *testing.
 	w := httptest.NewRecorder()
 	srv.Router().ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("PATCH failed: %d (body: %s)", w.Code, w.Body.String())
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("multi-agent PATCH enable = %d, want 400 (body: %s)", w.Code, w.Body.String())
 	}
-
-	m, _ := config.ReadTOMLMap(tomlPath)
-	ai, _ := m["ai"].(map[string]any)
-	agents, _ := ai["agents"].(map[string]any)
-	for _, name := range []string{"claude", "gemini", "codex", "opencode"} {
-		inner, ok := agents[name].(map[string]any)
-		if !ok {
-			continue
-		}
-		if _, present := inner["dangerously_skip_perms"]; present {
-			t.Errorf("dangerously_skip_perms persisted for %s (M-5 bypass)", name)
-		}
+	got, err := os.ReadFile(tomlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != tomlContent {
+		t.Fatalf("rejected multi-agent PATCH changed TOML:\n%s", got)
 	}
 }
 
@@ -2306,6 +3144,20 @@ func TestHandleDeleteManagedCloneSurfacesCallbackError(t *testing.T) {
 	}
 }
 
+func TestHandleDeleteManagedCloneReportsUpdateDrainAsConflict(t *testing.T) {
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetCleanCloneFn(func(context.Context, string) error {
+		return workgate.ErrDraining
+	})
+	req := httptest.NewRequest("DELETE", "/config/clones/"+url.PathEscape("org/repo"), nil)
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", w.Code)
+	}
+}
+
 func TestHandleDeleteManagedClonesRequiresAuthAndCallsCallback(t *testing.T) {
 	srv := setupServerWithToken(t, "test-token")
 	called := false
@@ -2695,5 +3547,189 @@ func TestHandlePatchAutonomousOrgConfig(t *testing.T) {
 	}
 	if myorg["dev_max_turns"] != int64(10) {
 		t.Errorf("autonomous.orgs[myorg].dev_max_turns = %v (%T), want 10", myorg["dev_max_turns"], myorg["dev_max_turns"])
+	}
+}
+
+func TestHandlePatchAutonomousConfigRejectsAgentsWithoutPersisting(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		body string
+	}{
+		{
+			name: "global config repo override",
+			path: "/config",
+			body: `{"autonomous":{"repos":{"org/repo":{"agents":{"codex":{"extra_flags":"--sandbox danger-full-access"}}}}}}`,
+		},
+		{
+			name: "repo endpoint",
+			path: "/config/autonomous/repos/" + url.PathEscape("org/repo"),
+			body: `{"agents":{"codex":{"extra_flags":"--sandbox danger-full-access"}}}`,
+		},
+		{
+			name: "org endpoint",
+			path: "/config/autonomous/orgs/org",
+			body: `{"agents":{"codex":{"extra_flags":"--sandbox danger-full-access"}}}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			const tomlContent = "[ai]\nprimary = \"claude\"\n\n[autonomous]\nenabled = true\n"
+			tomlPath := writeTempTOML(t, tomlContent)
+			srv := setupServerWithToken(t, "test-token")
+			srv.SetConfigPath(tomlPath)
+
+			req := httptest.NewRequest(http.MethodPatch, tc.path, strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Heimdallm-Token", "test-token")
+			w := httptest.NewRecorder()
+			srv.Router().ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d (body: %s)", w.Code, http.StatusBadRequest, w.Body.String())
+			}
+			got, err := os.ReadFile(tomlPath)
+			if err != nil {
+				t.Fatalf("read TOML after rejected PATCH: %v", err)
+			}
+			if string(got) != tomlContent {
+				t.Fatalf("rejected PATCH changed TOML:\n%s", got)
+			}
+		})
+	}
+}
+
+// TestHandlerGetConfig_ExposesPolling guards the [polling] section in the GET
+// /config response. The Flutter UI and CLI Config tab read these keys, so a
+// silent rename or re-nesting would break consumers.
+func TestHandlerGetConfig_ExposesPolling(t *testing.T) {
+	srv, _ := setupServer(t)
+	srv.SetConfigFn(func() map[string]any {
+		return map[string]any{
+			"polling": map[string]any{
+				"poll_interval":               "3m",
+				"min_interval":                "1m",
+				"max_interval":                "15m",
+				"adaptive":                    true,
+				"discovery_interval":          "5m",
+				"tier3_interval":              "30s",
+				"rate_limit_safety_threshold": int64(100),
+				"use_etag":                    true,
+				"use_graphql":                 false,
+			},
+		}
+	})
+
+	req := httptest.NewRequest("GET", "/config", nil)
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v (body: %s)", err, w.Body.String())
+	}
+	polling, ok := body["polling"].(map[string]any)
+	if !ok {
+		t.Fatalf("polling missing or wrong type: %T: %v", body["polling"], body["polling"])
+	}
+
+	checks := map[string]any{
+		"poll_interval":               "3m",
+		"min_interval":                "1m",
+		"max_interval":                "15m",
+		"adaptive":                    true,
+		"discovery_interval":          "5m",
+		"tier3_interval":              "30s",
+		"rate_limit_safety_threshold": float64(100), // JSON numbers decode to float64
+		"use_etag":                    true,
+		"use_graphql":                 false,
+	}
+	for key, want := range checks {
+		got := polling[key]
+		if got != want {
+			t.Errorf("polling[%q] = %v (%T), want %v (%T)", key, got, got, want, want)
+		}
+	}
+}
+
+// TestHandlePatchConfig_PollingSectionPersists verifies that PATCH /config
+// with {"polling":{...}} round-trips to TOML correctly. Mirrors the pattern
+// used by TestHandlePatchConfig and its siblings.
+func TestHandlePatchConfig_PollingSectionPersists(t *testing.T) {
+	tomlContent := "[ai]\nprimary = \"claude\"\n"
+	tomlPath := writeTempTOML(t, tomlContent)
+
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+
+	body := `{"polling":{"adaptive":true,"max_interval":"30m"}}`
+	req := httptest.NewRequest("PATCH", "/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	m, err := config.ReadTOMLMap(tomlPath)
+	if err != nil {
+		t.Fatalf("read TOML after PATCH: %v", err)
+	}
+	polling, ok := m["polling"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected [polling] section in TOML, got %v", m)
+	}
+	if polling["adaptive"] != true {
+		t.Errorf("adaptive = %v, want true", polling["adaptive"])
+	}
+	if polling["max_interval"] != "30m" {
+		t.Errorf("max_interval = %v, want 30m", polling["max_interval"])
+	}
+}
+
+// TestHandlePatchConfig_PollingIntAndBoolFields verifies that integer
+// (rate_limit_safety_threshold) and pointer-bool (use_etag) fields in the
+// [polling] section persist to TOML via PATCH /config.
+func TestHandlePatchConfig_PollingIntAndBoolFields(t *testing.T) {
+	tomlContent := "[ai]\nprimary = \"claude\"\n"
+	tomlPath := writeTempTOML(t, tomlContent)
+
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+
+	body := `{"polling":{"rate_limit_safety_threshold":200,"use_etag":false}}`
+	req := httptest.NewRequest("PATCH", "/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	m, err := config.ReadTOMLMap(tomlPath)
+	if err != nil {
+		t.Fatalf("read TOML after PATCH: %v", err)
+	}
+	polling, ok := m["polling"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected [polling] section in TOML, got %v", m)
+	}
+	// TOML round-trip: JSON integers arrive as float64 after NormalizeNumbers
+	// converts them to int64; TOML writes int64; reads back as int64.
+	threshold := polling["rate_limit_safety_threshold"]
+	if threshold != int64(200) {
+		t.Errorf("rate_limit_safety_threshold = %v (%T), want int64(200)", threshold, threshold)
+	}
+	if polling["use_etag"] != false {
+		t.Errorf("use_etag = %v, want false", polling["use_etag"])
 	}
 }

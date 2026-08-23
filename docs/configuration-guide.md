@@ -21,7 +21,8 @@ Full reference for all settings, environment variables, and deployment options.
 13. [Distribution Formats](#13-distribution-formats)
 14. [Circuit Breakers](#14-circuit-breakers)
 15. [Autonomous Mode](#15-autonomous-mode)
-16. [Full config.toml Reference](#16-full-configtoml-reference)
+16. [Polling](#16-polling)
+17. [Full config.toml Reference](#17-full-configtoml-reference)
 
 ---
 
@@ -406,7 +407,7 @@ auto_promote_refinement = true   # unset = true only when develop_labels is conf
 >
 > Per-repo issue polling inside a single Tier 2 issue tick runs in parallel up to `ai.tier2_repo_concurrency` repos at a time (default `5`). The GitHub API rate limiter still throttles network usage; this knob controls wall-clock parallelism. Set higher on a fast network with many monitored repos; set to `1` to force the legacy sequential behaviour. PR fetch and issue processing also run on independent tickers — each tier has its own goroutine with its own `time.Ticker`, and a `time.Ticker` drops redundant ticks when the previous run is still in flight. So a slow issue cycle never delays PR detection, and one tier never blocks the other even if its run exceeds `poll_interval`.
 >
-> Newly auto-discovered repos have their first PR review **deferred by one poll cycle** so the Flutter UI receives `repo_discovered` before `review_started`. The cost is one tick of latency on the very first review of a brand-new repo; the alternative was a race where the UI rendered "review in progress" for a repo it had not yet learned about.
+> Newly auto-discovered repos are reviewed in the **same poll cycle**. The daemon publishes and flushes `repo_discovered` to NATS before it enqueues the corresponding PR candidate, so the UI ordering no longer costs a full polling interval.
 
 > **Example of a safe, explicit configuration:**
 >
@@ -566,7 +567,8 @@ no_session_persistence = false          # --no-session-persistence
 execution_timeout      = "20m"          # per-agent override
 
 [ai.agents.gemini]
-model = "gemini-2.5-pro"
+model         = "gemini-2.5-pro"
+approval_mode = "auto_edit"    # default | auto_edit | plan (yolo is forbidden)
 
 [ai.agents.codex]
 model         = "codex-mini"
@@ -578,7 +580,21 @@ model = "anthropic/claude-sonnet-4"
 
 **Important:** `bare = true` disables OAuth authentication. Use it only when authenticating via `ANTHROPIC_API_KEY`, never with `CLAUDE_CODE_OAUTH_TOKEN`.
 
-`dangerously_skip_perms` cannot be set via the HTTP API for security reasons — it must be set in `config.toml` directly.
+For security reasons, the HTTP API can only set `dangerously_skip_perms` to
+`false` (reducing privilege). Enabling it requires a direct edit to
+`config.toml`.
+
+`extra_flags` uses a fail-closed allowlist per CLI. Only reviewed presentation,
+output, resource-tuning and restrictive options are accepted; unknown flags and options
+that can alter approval, sandbox, permissions, sessions, trusted directories,
+files, tools, policy or external configuration are rejected. Heimdallm validates
+the list while loading configuration and again immediately before creating the
+subprocess. Model, effort, turn-limit, permission and approval settings must use
+their typed fields; legacy model/effort/turn flags are migrated on load with a
+warning. Unsafe legacy fields are ignored individually rather than preventing
+startup or discarding unrelated stored settings. When execution falls back to a
+different CLI, provider-specific options from the unavailable primary are not
+forwarded.
 
 ### Prompt categories
 
@@ -671,7 +687,8 @@ clone_dir = "/home/heimdallm/repos/myorg-worktrees"
 auto_promote_triage = true
 auto_promote_refinement = false
 generate_pr_description = true
-never_approve_with_issues = false   # true = comment instead of approving when any issue is found
+never_approve_with_issues = false      # true = comment instead of approving when a finding is raised
+never_approve_min_severity = "medium"  # findings below this severity don't trigger the downgrade (default: medium)
 
 pr_reviewers = ["alice", "bob", "carol"]
 pr_labels    = ["auto-generated", "ai-platform"]
@@ -1187,7 +1204,58 @@ With this setup, Heimdallm will autonomously triage issues and implement them in
 
 ---
 
-## 16. Full config.toml Reference
+## 16. Polling
+
+The `[polling]` table tunes how the daemon schedules its fetch cycles. All fields are optional — omitting the section entirely reproduces the prior behaviour with no change in how the daemon polls.
+
+```toml
+[polling]
+poll_interval              = "5m"   # inherits [github].poll_interval when unset
+min_interval               = "1m"
+max_interval               = "15m"
+adaptive                   = false
+discovery_interval         = "5m"
+tier3_interval             = "30s"
+rate_limit_safety_threshold = 100
+use_etag                   = true
+use_graphql                = false
+```
+
+| Field | Default | Description |
+|---|---|---|
+| `poll_interval` | inherits `[github].poll_interval` | Base poll cadence. When unset, the value from `[github].poll_interval` (or its env var `HEIMDALLM_POLL_INTERVAL`) is used. Setting `[polling].poll_interval` overrides the `[github]` field for the polling subsystem. |
+| `min_interval` | `"1m"` | Shortest interval the adaptive scheduler will use for an actively-changing repo. Has no effect when `adaptive = false`. |
+| `max_interval` | `"15m"` | Longest interval the adaptive scheduler will back off to for idle repos. Has no effect when `adaptive = false`. |
+| `adaptive` | `false` | When `true`, repos that have seen no new events for several consecutive cycles gradually back off from `min_interval` toward `max_interval`. Repos that receive new events reset to `min_interval`. This reduces rate-limit consumption when monitoring many quiet repos. |
+| `discovery_interval` | `"5m"` | How often the topic-discovery pass runs to find newly-tagged repos. Independent of `poll_interval`. |
+| `tier3_interval` | `"30s"` | Cadence of the Tier 3 observation loop (review-state polling on `auto_implement` PRs). |
+| `rate_limit_safety_threshold` | `100` | Core-remaining floor. When the GitHub core rate-limit remaining count drops below this number, non-critical polling (discovery, Tier 3 observation, adaptive back-off checks) is throttled until the rate-limit window resets. Critical paths (PR review, issue triage) are not blocked by this threshold. |
+| `use_etag` | `true` | Send `If-None-Match` / `ETag` conditional-request headers on list endpoints. A `304 Not Modified` response reuses the cached body without counting against the rate limit. Disable only if your GitHub proxy strips ETag headers. |
+| `use_graphql` | `false` | Fetch issue lists via the GraphQL `search(type:ISSUE)` API instead of REST `/search/issues`. GraphQL requests consume from the separate GraphQL rate-limit budget (5,000 points/hour), leaving the core REST budget for other operations. Falls back to REST automatically on any GraphQL error. |
+
+> **Reload behaviour:** Every field takes effect on the next `PUT /config` or file reload, without a restart. `use_etag`, `use_graphql` and `rate_limit_safety_threshold` are re-applied to the live GitHub client and rate limiter; `tier3_interval` resets its ticker in place (the new value is picked up on the next tick, so shortening a long interval takes effect after at most one more tick at the old cadence); `min_interval`/`max_interval` update the adaptive scheduler's bounds in place, so accumulated per-repo back-off state is preserved and each repo's current interval is clamped into the new range on its next cycle.
+
+> **Validation:** All five durations are validated at load and on reload. `poll_interval`, `min_interval`, `max_interval` and `discovery_interval` must be between `1m` and `24h` — the same floor `[github].poll_interval` enforces, since `[polling].poll_interval` takes precedence over it and would otherwise be a way around the quota guard. `tier3_interval` accepts `1s`–`1h` (it drives a local scan, not GitHub traffic). `rate_limit_safety_threshold` must not be negative, and `min_interval` must not exceed `max_interval`. An invalid value fails the reload with an error rather than silently falling back to the default.
+
+> **Unconfigured = no change:** A missing `[polling]` section is equivalent to setting every field to its default. There is no opt-in required — existing deployments that do not add this section continue to behave exactly as before.
+
+### Example: adaptive polling with GraphQL enabled (conservative)
+
+```toml
+[polling]
+min_interval               = "2m"
+max_interval               = "20m"
+adaptive                   = true
+rate_limit_safety_threshold = 200   # throttle earlier on rate-constrained installations
+use_etag                   = true
+use_graphql                = true
+```
+
+This setup lets idle repos drift to a 20-minute cycle, saving roughly 80 % of poll calls on dormant repos, while keeping active repos at the 2-minute minimum. GraphQL consumes from the separate 5,000-point budget, and ETags ensure 304s on unchanged endpoints cost zero REST points.
+
+---
+
+## 17. Full config.toml Reference
 
 ```toml
 # Heimdallm configuration
@@ -1280,6 +1348,13 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # Default: false.
 # never_approve_with_issues = false
 
+# Minimum finding severity that triggers the never_approve_with_issues
+# downgrade: "low", "medium" or "high". Unset/empty = "medium", so reviews
+# whose findings are all low-severity nits still approve and the findings
+# stay visible in the review body. Set "low" to downgrade on any finding at
+# all. Overridable per org ([ai.orgs.*]) and per repo ([ai.repos.*]).
+# never_approve_min_severity = "medium"
+
 # When local_dir is unset, Heimdallm prepares a managed shallow clone for agent
 # context under clone_dir. If clone_dir is also unset, the default is
 # os.TempDir()/heimdallm/<org>/<repo>. Existing directories are mutated only
@@ -1302,12 +1377,13 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # effort                 = "high"         # low | medium | high | max
 # permission_mode        = "auto"         # default | auto | acceptEdits | dontAsk
 # bare                   = false          # WARNING: disables OAuth — use ANTHROPIC_API_KEY
-# dangerously_skip_perms = false          # cannot be set via HTTP API
+# dangerously_skip_perms = false          # HTTP may disable; enable only in config.toml
 # no_session_persistence = false
 # execution_timeout      = "20m"          # per-agent override (overrides [ai].execution_timeout)
 
 # [ai.agents.gemini]
-# model = "gemini-2.5-pro"
+# model         = "gemini-2.5-pro"
+# approval_mode = "auto_edit"    # default | auto_edit | plan (yolo is forbidden)
 
 # [ai.agents.codex]
 # model         = "codex-mini"
@@ -1345,6 +1421,7 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # auto_promote_refinement = false
 # generate_pr_description = true
 # never_approve_with_issues = false
+# never_approve_min_severity = "medium"
 # pr_reviewers = ["alice", "bob"]
 # pr_labels    = ["auto-generated", "myorg-team"]
 # pr_assignee  = "myusername"

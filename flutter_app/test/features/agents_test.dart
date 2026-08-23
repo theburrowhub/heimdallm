@@ -90,10 +90,12 @@ void main() {
           reason: 'PR Review tab missing "${preset.name}"');
     }
 
-    // Switch to Issue Triage and assert its 5 presets render. Tap the Tab
-    // widget specifically — plain find.text('Issue Triage') is ambiguous
-    // now that the active banner shows the same label.
-    await tester.tap(find.widgetWithText(Tab, 'Issue Triage'));
+    final issueTriageTab = find.descendant(
+      of: find.byType(TabBar),
+      matching: find.text('Issue Triage'),
+    );
+    expect(issueTriageTab, findsOneWidget);
+    await tester.tap(issueTriageTab);
     await tester.pumpAndSettle();
     for (final preset in ReviewPrompt.issueTriagePresets) {
       expect(find.text(preset.name), findsOneWidget,
@@ -101,7 +103,12 @@ void main() {
     }
 
     // Switch to Development and assert its 5 presets render.
-    await tester.tap(find.widgetWithText(Tab, 'Development'));
+    final developmentTab = find.descendant(
+      of: find.byType(TabBar),
+      matching: find.text('Development'),
+    );
+    expect(developmentTab, findsOneWidget);
+    await tester.tap(developmentTab);
     await tester.pumpAndSettle();
     for (final preset in ReviewPrompt.developmentPresets) {
       expect(find.text(preset.name), findsOneWidget,

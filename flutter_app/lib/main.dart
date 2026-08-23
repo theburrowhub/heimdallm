@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'core/api/api_client.dart';
+import 'core/daemon/daemon_startup.dart';
 import 'core/models/config_model.dart';
 import 'core/platform/platform_services.dart';
 import 'core/platform/platform_services_provider.dart';
@@ -12,14 +13,27 @@ import 'shared/router.dart';
 final _appRouter = createRouter(initialLocation: '/');
 GoRouter get appRouter => _appRouter;
 
+@visibleForTesting
+Future<bool> initializePlatformForApp(PlatformServices platform) async {
+  if (!await platform.ensureSingleInstance()) {
+    platform.quitDuplicateInstance();
+    return false;
+  }
+
+  try {
+    await platform.setupAppUpdater();
+  } catch (e) {
+    // Update infrastructure must never delay or prevent daemon startup.
+    debugPrint('app updater init failed: $e');
+  }
+  return true;
+}
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   final platform = PlatformServices.create();
-
-  if (!await platform.ensureSingleInstance()) {
-    platform.quitApp();
-  }
+  if (!await initializePlatformForApp(platform)) return;
 
   platform.listenForActivationSignal(() async {
     await platform.showAndFocusWindow();
@@ -61,12 +75,12 @@ Future<void> main() async {
     debugPrint('notifier init failed: $e');
   }
 
-  runApp(ProviderScope(
-    overrides: [
-      platformServicesProvider.overrideWithValue(platform),
-    ],
-    child: _BootstrapApp(appRouter: _appRouter),
-  ));
+  runApp(
+    ProviderScope(
+      overrides: [platformServicesProvider.overrideWithValue(platform)],
+      child: _BootstrapApp(appRouter: _appRouter),
+    ),
+  );
 }
 
 /// Public entry point for features to fire notifications.
@@ -88,9 +102,46 @@ void sendPRNotification({
   );
 }
 
+/// Builds the real bootstrap state machine with deterministic dependencies.
+/// Production uses the private widget directly; tests use this entry point so
+/// every daemon-ownership outcome can be exercised without sockets, processes
+/// or wall-clock waits.
+@visibleForTesting
+Widget buildBootstrapAppForTest({
+  required GoRouter router,
+  required PlatformServices platform,
+  required ApiClient apiClient,
+  Duration healthPollInterval = Duration.zero,
+  int healthRetryEvery = 1,
+  int maxSpawnAttempts = 4,
+}) {
+  return ProviderScope(
+    overrides: [platformServicesProvider.overrideWithValue(platform)],
+    child: _BootstrapApp(
+      appRouter: router,
+      apiClient: apiClient,
+      healthPollInterval: healthPollInterval,
+      healthRetryEvery: healthRetryEvery,
+      maxSpawnAttempts: maxSpawnAttempts,
+    ),
+  );
+}
+
 class _BootstrapApp extends ConsumerStatefulWidget {
   final GoRouter appRouter;
-  const _BootstrapApp({required this.appRouter});
+  final ApiClient? apiClient;
+  final Duration healthPollInterval;
+  final int healthRetryEvery;
+  final int maxSpawnAttempts;
+
+  const _BootstrapApp({
+    required this.appRouter,
+    this.apiClient,
+    this.healthPollInterval = const Duration(milliseconds: 400),
+    this.healthRetryEvery = 25,
+    this.maxSpawnAttempts = 4,
+  }) : assert(healthRetryEvery > 0),
+       assert(maxSpawnAttempts > 0);
   @override
   ConsumerState<_BootstrapApp> createState() => _BootstrapAppState();
 }
@@ -101,6 +152,7 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
   String? _errorTitle;
   String? _errorDetails;
   String? _errorHint;
+  String? _pendingUpdateVersion;
 
   PlatformServices get _platform => ref.read(platformServicesProvider);
 
@@ -114,11 +166,36 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
   }
 
   Future<void> _boot() async {
-    final api = ApiClient(platform: _platform);
-
-    if (await api.checkHealth()) {
-      _go('/');
+    final api = widget.apiClient ?? ApiClient(platform: _platform);
+    try {
+      _pendingUpdateVersion = await _platform.pendingAppUpdateVersion();
+    } catch (e) {
+      _setError(
+        title: 'Update recovery failed',
+        details:
+            'Heimdallm could not restore the daemon service after an app '
+            'update: $e',
+        hint:
+            'Quit Heimdallm and reopen it. If the problem persists, reinstall '
+            'the latest signed release.',
+      );
       return;
+    }
+
+    // Determine port ownership before asking for credentials, config or even a
+    // local daemon binary. A live daemon can legitimately answer 503 while
+    // starting, stopping or degraded; it is still the authoritative process
+    // and the dashboard remains useful for diagnosis (#646).
+    switch (await api.daemonReachable()) {
+      case PortOwner.daemon:
+        if (!await _validatePendingUpdate(api)) return;
+        _go('/');
+        return;
+      case PortOwner.foreign:
+        _setForeignPortError(api.daemonPort);
+        return;
+      case PortOwner.none:
+        break;
     }
 
     _setStatus('Detecting credentials…');
@@ -145,7 +222,9 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
           .where((p) => p.isNotEmpty)
           .toList();
       final config = AppConfig(
-        repoConfigs: {for (final r in repos) r: const RepoConfig(prEnabled: true)},
+        repoConfigs: {
+          for (final r in repos) r: const RepoConfig(prEnabled: true),
+        },
         localDirBase: localDirBase,
       );
       await _platform.storeGitHubToken(token);
@@ -156,9 +235,11 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
     if (binaryPath == null) {
       _setError(
         title: 'Daemon binary not found',
-        details: 'Heimdallm could not locate its background service.\n'
+        details:
+            'Heimdallm could not locate its background service.\n'
             'This usually means the installation is incomplete.',
-        hint: 'If you installed from a DMG, open Terminal and run:\n'
+        hint:
+            'If you installed from a DMG, open Terminal and run:\n'
             'xattr -cr /Applications/Heimdallm.app\n'
             'then relaunch the app.',
       );
@@ -166,59 +247,212 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
     }
 
     _setStatus('Starting Heimdallm…');
-    try {
-      await _platform.spawnDaemon(binaryPath);
-    } catch (e) {
-      _setError(
-        title: 'Could not start daemon',
-        details: e.toString(),
-        hint: 'Check that Heimdallm has permission to run sub-processes.\n'
-            'Try: xattr -cr /Applications/Heimdallm.app',
-      );
+    final startup = DaemonStartupCoordinator(
+      api: api,
+      platform: _platform,
+      binaryPath: binaryPath,
+      maxSpawnAttempts: widget.maxSpawnAttempts,
+    );
+    final initial = await startup.ensureAvailable();
+    if (initial.outcome == DaemonStartupOutcome.daemonPresent &&
+        _pendingUpdateVersion != null) {
+      if (await _validatePendingUpdate(api)) _go('/');
+      return;
+    }
+    if (!_handleStartupResult(initial, api.daemonPort)) {
       return;
     }
 
     _setStatus('Waiting for Heimdallm…');
-    await _waitForHealth(api, retryBinary: binaryPath);
+    await _waitForHealth(api, startup: startup);
   }
 
-  Future<void> _waitForHealth(ApiClient api, {String? retryBinary}) async {
-    const maxDaemonRestarts = 3;
-    var daemonRestarts = 0;
+  Future<void> _waitForHealth(
+    ApiClient api, {
+    required DaemonStartupCoordinator startup,
+  }) async {
     for (var attempt = 0; ; attempt++) {
-      await Future.delayed(const Duration(milliseconds: 400));
+      await Future.delayed(widget.healthPollInterval);
+      if (_pendingUpdateVersion != null) {
+        switch (await api.daemonReachable()) {
+          case PortOwner.daemon:
+            if (!await _validatePendingUpdate(api)) return;
+            _go('/');
+            return;
+          case PortOwner.foreign:
+            _setForeignPortError(api.daemonPort);
+            return;
+          case PortOwner.none:
+            break;
+        }
+      }
       if (await api.checkHealth()) {
+        if (!await _validatePendingUpdate(api)) return;
         _go('/');
         return;
       }
-      if (attempt > 0 && attempt % 25 == 0 && retryBinary != null) {
-        if (daemonRestarts >= maxDaemonRestarts) {
-          _setError(
-            title: 'Daemon failed to start',
-            details: 'Heimdallm could not start after $maxDaemonRestarts attempts.',
-            hint: 'Try restarting the app. If the problem persists, check your installation:\n'
-                'xattr -cr /Applications/Heimdallm.app',
-          );
-          return;
-        }
-        daemonRestarts++;
-        try { await _platform.spawnDaemon(retryBinary); } catch (_) {}
+      if (attempt > 0 && attempt % widget.healthRetryEvery == 0) {
+        final result = await startup.ensureAvailable();
+        if (!_handleStartupResult(result, api.daemonPort)) return;
       }
     }
   }
 
-  void _setStatus(String s) { if (mounted) setState(() => _status = s); }
-  void _setError({required String title, required String details, String? hint}) {
-    if (mounted) {
-      setState(() { _errorTitle = title; _errorDetails = details; _errorHint = hint; });
+  /// Handles every result from the shared guarded startup path. Returns true
+  /// while the health loop should keep waiting, false after surfacing a
+  /// terminal error.
+  bool _handleStartupResult(DaemonStartupResult result, int port) {
+    switch (result.outcome) {
+      case DaemonStartupOutcome.spawned:
+        _setStatus('Waiting for Heimdallm…');
+        return true;
+      case DaemonStartupOutcome.daemonPresent:
+        // Reachability is enough to enter the app. Health remains visible in
+        // the dashboard; blocking the splash on a stale last_poll was the local
+        // failure mode which triggered duplicate spawn attempts in #646.
+        if (_pendingUpdateVersion != null) {
+          _setStatus('Validating updated Heimdallm…');
+          return true;
+        }
+        _go('/');
+        return false;
+      case DaemonStartupOutcome.spawnFailedRetryable:
+        _setStatus('Could not launch Heimdallm — retrying…');
+        return true;
+      case DaemonStartupOutcome.portOccupied:
+        _setForeignPortError(port);
+        return false;
+      case DaemonStartupOutcome.spawnFailedTerminal:
+        _setSpawnFailureError(result.error);
+        return false;
+      case DaemonStartupOutcome.spawnBudgetExhausted:
+        _setError(
+          title: 'Daemon failed to start',
+          details:
+              'Heimdallm exhausted its guarded start attempts without '
+              'finding a daemon on the configured port.',
+          hint:
+              'Try restarting the app. If the problem persists, check your installation:\n'
+              'xattr -cr /Applications/Heimdallm.app',
+        );
+        return false;
     }
   }
-  void _go(String location) { if (mounted) setState(() => _destination = location); }
+
+  Future<bool> _validatePendingUpdate(ApiClient api) async {
+    final expected = _pendingUpdateVersion;
+    if (expected == null) return true;
+    try {
+      // Native recovery first authenticates the sealed daemon version/PID,
+      // confirms bootstrap, waits for exact health, and only then releases the
+      // lease. Asking /health before this call deadlocks a deliberately sealed
+      // replacement daemon in its minimal bootstrap router.
+      await _platform.completeAppUpdate();
+    } catch (e) {
+      _setError(
+        title: 'Update acknowledgement failed',
+        details:
+            'Heimdallm could not verify daemon version $expected and release '
+            'the protected update lease: $e',
+        hint:
+            'Keep Heimdallm open and retry. Do not force quit while update '
+            'recovery is pending.',
+      );
+      return false;
+    }
+
+    final health = await api.fetchHealth();
+    final actual = health?['version']?.toString();
+    if (actual != expected) {
+      _setError(
+        title: 'Update validation failed',
+        details:
+            'The app was updated to $expected, but the running daemon reports '
+            '${actual ?? 'no version'}. Heimdallm will not continue with a '
+            'mixed-version installation.',
+        hint:
+            'Quit Heimdallm, stop the daemon, then reopen the app. If the '
+            'versions still differ, reinstall the latest signed release.',
+      );
+      return false;
+    }
+    try {
+      await _platform.finalizeAppUpdate();
+    } catch (e) {
+      _setError(
+        title: 'Update finalization failed',
+        details:
+            'Heimdallm validated version $expected but could not clear its '
+            'recovery state: $e',
+        hint: 'Keep Heimdallm open and retry before starting new work.',
+      );
+      return false;
+    }
+    _pendingUpdateVersion = null;
+    return true;
+  }
+
+  void _setSpawnFailureError(Object? error) {
+    _setError(
+      title: 'Could not start daemon',
+      details: error?.toString() ?? 'The daemon process could not be launched.',
+      hint:
+          'Check that Heimdallm has permission to run sub-processes.\n'
+          'Try: xattr -cr /Applications/Heimdallm.app',
+    );
+  }
+
+  void _setForeignPortError(int port) {
+    if (port <= 0) {
+      _setError(
+        title: 'Daemon endpoint unavailable',
+        details:
+            'Heimdallm could not identify a daemon at the configured API '
+            'endpoint. No local process was started.',
+        hint: 'Check the daemon or reverse-proxy logs, then retry.',
+      );
+      return;
+    }
+    _setError(
+      title: 'Port $port is already occupied',
+      details:
+          'Heimdallm could not prove that its port is free. Another '
+          'process is listening, or a service on the port did not answer the '
+          'health check. No daemon was started, to avoid duplicate workers.',
+      hint:
+          'Find the process and stop it, then relaunch:\n'
+          'lsof -nP -iTCP:$port -sTCP:LISTEN',
+    );
+  }
+
+  void _setStatus(String s) {
+    if (mounted) setState(() => _status = s);
+  }
+
+  void _setError({
+    required String title,
+    required String details,
+    String? hint,
+  }) {
+    if (mounted) {
+      setState(() {
+        _errorTitle = title;
+        _errorDetails = details;
+        _errorHint = hint;
+      });
+    }
+  }
+
+  void _go(String location) {
+    if (!mounted) return;
+    widget.appRouter.go(location);
+    setState(() => _destination = location);
+  }
 
   @override
   Widget build(BuildContext context) {
     if (_destination != null) {
-      return HeimdallmApp(router: widget.appRouter, initialLocation: _destination!);
+      return HeimdallmApp(router: widget.appRouter);
     }
     if (_errorTitle != null) {
       return _ErrorApp(
@@ -226,7 +460,11 @@ class _BootstrapAppState extends ConsumerState<_BootstrapApp> {
         details: _errorDetails ?? '',
         hint: _errorHint,
         onRetry: () {
-          setState(() { _errorTitle = null; _errorDetails = null; _errorHint = null; });
+          setState(() {
+            _errorTitle = null;
+            _errorDetails = null;
+            _errorHint = null;
+          });
           _boot();
         },
         onQuit: _platform.quitApp,
@@ -260,14 +498,21 @@ class _SplashApp extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Image.asset('assets/icon.png', width: 96, height: 96,
-                  errorBuilder: (_, _, _) => const Icon(Icons.shield, size: 96)),
+              Image.asset(
+                'assets/icon.png',
+                width: 96,
+                height: 96,
+                errorBuilder: (_, _, _) => const Icon(Icons.shield, size: 96),
+              ),
               const SizedBox(height: 24),
-              const Text('Heimdallm',
-                  style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold)),
+              const Text(
+                'Heimdallm',
+                style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
+              ),
               const SizedBox(height: 20),
               const SizedBox(
-                width: 24, height: 24,
+                width: 24,
+                height: 24,
                 child: CircularProgressIndicator(strokeWidth: 2.5),
               ),
               const SizedBox(height: 12),
@@ -321,13 +566,20 @@ class _ErrorApp extends StatelessWidget {
                 children: [
                   const Icon(Icons.error_outline, size: 56, color: Colors.red),
                   const SizedBox(height: 20),
-                  Text(title,
-                      style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-                      textAlign: TextAlign.center),
+                  Text(
+                    title,
+                    style: const TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
                   const SizedBox(height: 12),
-                  Text(details,
-                      style: const TextStyle(color: Colors.grey, fontSize: 13),
-                      textAlign: TextAlign.center),
+                  Text(
+                    details,
+                    style: const TextStyle(color: Colors.grey, fontSize: 13),
+                    textAlign: TextAlign.center,
+                  ),
                   if (hint != null) ...[
                     const SizedBox(height: 20),
                     Container(
@@ -335,12 +587,19 @@ class _ErrorApp extends StatelessWidget {
                       padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
                         color: Colors.orange.withValues(alpha: 0.1),
-                        border: Border.all(color: Colors.orange.withValues(alpha: 0.4)),
+                        border: Border.all(
+                          color: Colors.orange.withValues(alpha: 0.4),
+                        ),
                         borderRadius: BorderRadius.circular(8),
                       ),
-                      child: Text(hint!,
-                          style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
-                          textAlign: TextAlign.left),
+                      child: Text(
+                        hint!,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontFamily: 'monospace',
+                        ),
+                        textAlign: TextAlign.left,
+                      ),
                     ),
                   ],
                   const SizedBox(height: 28),

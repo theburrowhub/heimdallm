@@ -63,6 +63,11 @@ var githubOrgPattern = regexp.MustCompile(`^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-z
 // are rejected separately by ValidateRepoSlug to avoid path-traversal tokens.
 var repoNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
+// Config is the schema root used by the deterministic TOML projection in
+// canonical_map.go. Every exported field in this graph must have a unique
+// case-insensitive toml tag. Embedded fields, interface values and slices of
+// composite structs/maps are deliberately unsupported; the schema invariant
+// test fails before such a change can turn into a runtime Load failure.
 type Config struct {
 	Server         ServerConfig         `toml:"server"`
 	GitHub         GitHubConfig         `toml:"github"`
@@ -71,6 +76,7 @@ type Config struct {
 	ActivityLog    ActivityLogConfig    `toml:"activity_log"`
 	CircuitBreaker CircuitBreakerConfig `toml:"circuit_breaker"`
 	Autonomous     AutonomousConfig     `toml:"autonomous"`
+	Polling        PollingConfig        `toml:"polling"`
 }
 
 type ServerConfig struct {
@@ -377,7 +383,7 @@ func labelSetIntersects(set map[string]struct{}, list []string) bool {
 type CLIAgentConfig struct {
 	Model        string `toml:"model" json:"model,omitempty"`                 // e.g. "claude-opus-4-6"
 	MaxTurns     int    `toml:"max_turns" json:"max_turns,omitempty"`         // claude: --max-turns (0 = not set)
-	ApprovalMode string `toml:"approval_mode" json:"approval_mode,omitempty"` // codex: --ask-for-approval
+	ApprovalMode string `toml:"approval_mode" json:"approval_mode,omitempty"` // codex/gemini typed approval mode
 	ExtraFlags   string `toml:"extra_flags" json:"extra_flags,omitempty"`     // free-form additional CLI flags
 	PromptID     string `toml:"prompt" json:"prompt,omitempty"`               // agent-level prompt override
 
@@ -385,7 +391,7 @@ type CLIAgentConfig struct {
 	Effort               string `toml:"effort" json:"effort,omitempty"`                       // low|medium|high|max
 	PermissionMode       string `toml:"permission_mode" json:"permission_mode,omitempty"`     // default|auto|acceptEdits|dontAsk (bypassPermissions is explicitly forbidden)
 	Bare                 bool   `toml:"bare" json:"bare"`                                     // --bare
-	DangerouslySkipPerms bool   `toml:"dangerously_skip_perms" json:"dangerously_skip_perms"` // --dangerously-skip-permissions (cannot be set via HTTP API, see M-5)
+	DangerouslySkipPerms bool   `toml:"dangerously_skip_perms" json:"dangerously_skip_perms"` // --dangerously-skip-permissions (HTTP may only disable it, see M-5)
 	NoSessionPersistence bool   `toml:"no_session_persistence" json:"no_session_persistence"` // --no-session-persistence
 	ExecutionTimeout     string `toml:"execution_timeout" json:"execution_timeout,omitempty"` // per-agent override, e.g. "20m"
 }
@@ -471,6 +477,14 @@ type AIConfig struct {
 	// severity) is unaffected. Default: false (backwards compat). Overridable
 	// per-org and per-repo.
 	NeverApproveWithIssues bool `toml:"never_approve_with_issues"`
+
+	// NeverApproveMinSeverity is the minimum finding severity that triggers
+	// the NeverApproveWithIssues downgrade: "low", "medium" or "high".
+	// Empty resolves to pipeline.DefaultNeverApproveMinSeverity ("medium"),
+	// so reviews whose findings are all low-severity nits still approve; set
+	// "low" explicitly to downgrade on any finding at all. Only meaningful
+	// when NeverApproveWithIssues is on. Overridable per-org and per-repo.
+	NeverApproveMinSeverity string `toml:"never_approve_min_severity"`
 
 	// ReviewResponse configures phase 2 of the PR review-state vigilance
 	// feature (#482): the daemon optionally posts an AI-generated reply
@@ -565,6 +579,10 @@ type RepoAI struct {
 	// repo. nil = inherit from org/global.
 	NeverApproveWithIssues *bool `toml:"never_approve_with_issues,omitempty"`
 
+	// NeverApproveMinSeverity overrides ai.never_approve_min_severity for
+	// this repo. Empty = inherit from org/global.
+	NeverApproveMinSeverity string `toml:"never_approve_min_severity,omitempty"`
+
 	// Per-repo issue tracking override. Nil fields inherit from org/global.
 	IssueTracking *IssueTrackingOverride `toml:"issue_tracking,omitempty" json:"issue_tracking,omitempty"`
 	// CircuitBreaker overrides circuit-breaker caps for this repo.
@@ -625,9 +643,10 @@ type OrgAI struct {
 	PRDraft            *bool    `toml:"pr_draft,omitempty"`
 	InstructionAuthors []string `toml:"instruction_authors"` // see RepoAI.InstructionAuthors (#383)
 
-	GeneratePRDescription  *bool                  `toml:"generate_pr_description,omitempty"`
-	NeverApproveWithIssues *bool                  `toml:"never_approve_with_issues,omitempty"`
-	IssueTracking          *IssueTrackingOverride `toml:"issue_tracking,omitempty" json:"issue_tracking,omitempty"`
+	GeneratePRDescription   *bool                  `toml:"generate_pr_description,omitempty"`
+	NeverApproveWithIssues  *bool                  `toml:"never_approve_with_issues,omitempty"`
+	NeverApproveMinSeverity string                 `toml:"never_approve_min_severity,omitempty"`
+	IssueTracking           *IssueTrackingOverride `toml:"issue_tracking,omitempty" json:"issue_tracking,omitempty"`
 	// CircuitBreaker overrides circuit-breaker caps for all repos in this org.
 	// nil = inherit from global. Present fields overlay the global baseline.
 	CircuitBreaker *CircuitBreakerConfig `toml:"circuit_breaker,omitempty"`
@@ -765,23 +784,24 @@ func (c *Config) AIForRepo(repo string) RepoAI {
 	gGenDesc := c.AI.GeneratePRDescription
 	gNever := c.AI.NeverApproveWithIssues
 	out := RepoAI{
-		Primary:                c.AI.Primary,
-		Fallback:               c.AI.Fallback,
-		ReviewMode:             c.AI.ReviewMode,
-		IssuePrompt:            c.AI.IssuePrompt,
-		ImplementPrompt:        c.AI.ImplementPrompt,
-		RefinementTimeout:      c.AI.RefinementTimeout,
-		PRReviewers:            gReviewers,
-		PRLabels:               gLabels,
-		PRAssignee:             gAssignee,
-		PRDraft:                gDraft,
-		GeneratePRDescription:  &gGenDesc,
-		NeverApproveWithIssues: &gNever,
-		TriageOwner:            c.AI.TriageOwner,
-		CloneDir:               c.AI.CloneDir,
-		AutoPromoteTriage:      c.AI.AutoPromoteTriage,
-		AutoPromoteRefinement:  c.AI.AutoPromoteRefinement,
-		InstructionAuthors:     c.AI.InstructionAuthors,
+		Primary:                 c.AI.Primary,
+		Fallback:                c.AI.Fallback,
+		ReviewMode:              c.AI.ReviewMode,
+		IssuePrompt:             c.AI.IssuePrompt,
+		ImplementPrompt:         c.AI.ImplementPrompt,
+		RefinementTimeout:       c.AI.RefinementTimeout,
+		PRReviewers:             gReviewers,
+		PRLabels:                gLabels,
+		PRAssignee:              gAssignee,
+		PRDraft:                 gDraft,
+		GeneratePRDescription:   &gGenDesc,
+		NeverApproveWithIssues:  &gNever,
+		NeverApproveMinSeverity: c.AI.NeverApproveMinSeverity,
+		TriageOwner:             c.AI.TriageOwner,
+		CloneDir:                c.AI.CloneDir,
+		AutoPromoteTriage:       c.AI.AutoPromoteTriage,
+		AutoPromoteRefinement:   c.AI.AutoPromoteRefinement,
+		InstructionAuthors:      c.AI.InstructionAuthors,
 	}
 	if org := repoOrg(repo); org != "" && c.AI.Orgs != nil {
 		if o, ok := c.AI.Orgs[org]; ok {
@@ -798,72 +818,75 @@ func (c *Config) AIForRepo(repo string) RepoAI {
 
 func applyOrgAI(out *RepoAI, o OrgAI) {
 	applyScopedAI(out, scopedAIFields{
-		Primary:                o.Primary,
-		Fallback:               o.Fallback,
-		ReviewMode:             o.ReviewMode,
-		Prompt:                 o.Prompt,
-		IssuePrompt:            o.IssuePrompt,
-		ImplementPrompt:        o.ImplementPrompt,
-		RefinementTimeout:      o.RefinementTimeout,
-		LocalDir:               o.LocalDir,
-		TriageOwner:            o.TriageOwner,
-		CloneDir:               o.CloneDir,
-		AutoPromoteTriage:      o.AutoPromoteTriage,
-		AutoPromoteRefinement:  o.AutoPromoteRefinement,
-		PRReviewers:            o.PRReviewers,
-		PRLabels:               o.PRLabels,
-		PRAssignee:             o.PRAssignee,
-		PRDraft:                o.PRDraft,
-		GeneratePRDescription:  o.GeneratePRDescription,
-		NeverApproveWithIssues: o.NeverApproveWithIssues,
-		InstructionAuthors:     o.InstructionAuthors,
+		Primary:                 o.Primary,
+		Fallback:                o.Fallback,
+		ReviewMode:              o.ReviewMode,
+		Prompt:                  o.Prompt,
+		IssuePrompt:             o.IssuePrompt,
+		ImplementPrompt:         o.ImplementPrompt,
+		RefinementTimeout:       o.RefinementTimeout,
+		LocalDir:                o.LocalDir,
+		TriageOwner:             o.TriageOwner,
+		CloneDir:                o.CloneDir,
+		AutoPromoteTriage:       o.AutoPromoteTriage,
+		AutoPromoteRefinement:   o.AutoPromoteRefinement,
+		PRReviewers:             o.PRReviewers,
+		PRLabels:                o.PRLabels,
+		PRAssignee:              o.PRAssignee,
+		PRDraft:                 o.PRDraft,
+		GeneratePRDescription:   o.GeneratePRDescription,
+		NeverApproveWithIssues:  o.NeverApproveWithIssues,
+		NeverApproveMinSeverity: o.NeverApproveMinSeverity,
+		InstructionAuthors:      o.InstructionAuthors,
 	})
 }
 
 func applyRepoAI(out *RepoAI, r RepoAI) {
 	applyScopedAI(out, scopedAIFields{
-		Primary:                r.Primary,
-		Fallback:               r.Fallback,
-		ReviewMode:             r.ReviewMode,
-		Prompt:                 r.Prompt,
-		IssuePrompt:            r.IssuePrompt,
-		ImplementPrompt:        r.ImplementPrompt,
-		RefinementTimeout:      r.RefinementTimeout,
-		LocalDir:               r.LocalDir,
-		TriageOwner:            r.TriageOwner,
-		CloneDir:               r.CloneDir,
-		AutoPromoteTriage:      r.AutoPromoteTriage,
-		AutoPromoteRefinement:  r.AutoPromoteRefinement,
-		PRReviewers:            r.PRReviewers,
-		PRLabels:               r.PRLabels,
-		PRAssignee:             r.PRAssignee,
-		PRDraft:                r.PRDraft,
-		GeneratePRDescription:  r.GeneratePRDescription,
-		NeverApproveWithIssues: r.NeverApproveWithIssues,
-		InstructionAuthors:     r.InstructionAuthors,
+		Primary:                 r.Primary,
+		Fallback:                r.Fallback,
+		ReviewMode:              r.ReviewMode,
+		Prompt:                  r.Prompt,
+		IssuePrompt:             r.IssuePrompt,
+		ImplementPrompt:         r.ImplementPrompt,
+		RefinementTimeout:       r.RefinementTimeout,
+		LocalDir:                r.LocalDir,
+		TriageOwner:             r.TriageOwner,
+		CloneDir:                r.CloneDir,
+		AutoPromoteTriage:       r.AutoPromoteTriage,
+		AutoPromoteRefinement:   r.AutoPromoteRefinement,
+		PRReviewers:             r.PRReviewers,
+		PRLabels:                r.PRLabels,
+		PRAssignee:              r.PRAssignee,
+		PRDraft:                 r.PRDraft,
+		GeneratePRDescription:   r.GeneratePRDescription,
+		NeverApproveWithIssues:  r.NeverApproveWithIssues,
+		NeverApproveMinSeverity: r.NeverApproveMinSeverity,
+		InstructionAuthors:      r.InstructionAuthors,
 	})
 }
 
 type scopedAIFields struct {
-	Primary                string
-	Fallback               string
-	ReviewMode             string
-	Prompt                 string
-	IssuePrompt            string
-	ImplementPrompt        string
-	RefinementTimeout      string
-	LocalDir               string
-	TriageOwner            string
-	CloneDir               string
-	AutoPromoteTriage      *bool
-	AutoPromoteRefinement  *bool
-	PRReviewers            []string
-	PRLabels               []string
-	PRAssignee             string
-	PRDraft                *bool
-	GeneratePRDescription  *bool
-	NeverApproveWithIssues *bool
-	InstructionAuthors     []string
+	Primary                 string
+	Fallback                string
+	ReviewMode              string
+	Prompt                  string
+	IssuePrompt             string
+	ImplementPrompt         string
+	RefinementTimeout       string
+	LocalDir                string
+	TriageOwner             string
+	CloneDir                string
+	AutoPromoteTriage       *bool
+	AutoPromoteRefinement   *bool
+	PRReviewers             []string
+	PRLabels                []string
+	PRAssignee              string
+	PRDraft                 *bool
+	GeneratePRDescription   *bool
+	NeverApproveWithIssues  *bool
+	NeverApproveMinSeverity string
+	InstructionAuthors      []string
 }
 
 func applyScopedAI(out *RepoAI, fields scopedAIFields) {
@@ -920,6 +943,9 @@ func applyScopedAI(out *RepoAI, fields scopedAIFields) {
 	}
 	if fields.NeverApproveWithIssues != nil {
 		out.NeverApproveWithIssues = fields.NeverApproveWithIssues
+	}
+	if fields.NeverApproveMinSeverity != "" {
+		out.NeverApproveMinSeverity = fields.NeverApproveMinSeverity
 	}
 	if fields.InstructionAuthors != nil {
 		out.InstructionAuthors = fields.InstructionAuthors
@@ -1082,6 +1108,7 @@ func (c *Config) applyDefaults() {
 		c.CircuitBreaker.PerImplRepoHr = 5
 	}
 	c.applyAutonomousDefaults()
+	c.applyPollingDefaults()
 }
 
 // applyEnvOverrides applies HEIMDALLM_* environment variable overrides.
@@ -1266,13 +1293,40 @@ func (c *Config) Validate() error {
 	if err := ValidatePollInterval(c.GitHub.PollInterval); err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
-	// Validate per-CLI agent configs: permission_mode and approval_mode must be in their allowlists.
+	// [polling] takes precedence over [github].poll_interval at resolution
+	// time, so it has to clear the same bar — otherwise the newer section is a
+	// way around the quota guard the older one enforces.
+	if err := c.ValidatePolling(); err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+	// Validate every persisted execution option before it reaches Executor.
+	// This catches legacy TOML/store rows during reload; ExecuteRaw repeats the
+	// same checks at the subprocess boundary as defense in depth.
 	for name, a := range c.AI.Agents {
+		// Preserve unknown legacy profiles as inert configuration. They cannot
+		// be selected by Detect/ExecuteRaw, and every HTTP write still rejects
+		// unknown CLI names, but an unused historical section must not prevent
+		// the daemon from starting after an upgrade.
+		if err := executor.ValidateCLIName(name); err != nil {
+			continue
+		}
+		if err := executor.ValidateModel(a.Model); err != nil {
+			return fmt.Errorf("config: agents[%s].model: %w", name, err)
+		}
+		if a.MaxTurns < 0 {
+			return fmt.Errorf("config: agents[%s].max_turns must be non-negative", name)
+		}
+		if err := executor.ValidateEffort(a.Effort); err != nil {
+			return fmt.Errorf("config: agents[%s].effort: %w", name, err)
+		}
 		if err := executor.ValidatePermissionMode(a.PermissionMode); err != nil {
 			return fmt.Errorf("config: agents[%s].permission_mode: %w", name, err)
 		}
-		if err := executor.ValidateApprovalMode(a.ApprovalMode); err != nil {
+		if err := executor.ValidateApprovalModeForCLI(name, a.ApprovalMode); err != nil {
 			return fmt.Errorf("config: agents[%s].approval_mode: %w", name, err)
+		}
+		if err := executor.ValidateExtraFlagsForCLI(name, a.ExtraFlags); err != nil {
+			return fmt.Errorf("config: agents[%s].extra_flags: %w", name, err)
 		}
 	}
 	if err := c.validateRefinementTimeouts(); err != nil {
@@ -1290,6 +1344,9 @@ func (c *Config) Validate() error {
 	if err := c.validateScopedIssueTracking(); err != nil {
 		return err
 	}
+	if err := c.validateNeverApproveMinSeverity(); err != nil {
+		return err
+	}
 	// Bound the review-retention window for the TOML and env paths (the HTTP
 	// PUT /config validator covers its own path). A negative value would push
 	// PurgeOldReviews' cutoff into the future and wipe all reviews (#551).
@@ -1300,6 +1357,381 @@ func (c *Config) Validate() error {
 		d := *c.ActivityLog.RetentionDays
 		if d < 0 || d > MaxRetentionDays {
 			return fmt.Errorf("config: activity_log.retention_days must be between 0 and %d, got %d", MaxRetentionDays, d)
+		}
+	}
+	return nil
+}
+
+// sanitizeLegacyAgentExecutionPolicy keeps trusted TOML/env configurations
+// from becoming a startup regression when Heimdallm learns about a newly
+// dangerous provider flag. HTTP writes remain strict and ExecuteRaw validates
+// again at the subprocess boundary; this compatibility path only canonicalizes
+// safe values and removes the individual unsafe field with an actionable log.
+//
+// Unknown profiles are preserved but inert. Detect and ExecuteRaw only accept
+// the four supported CLI names, while retaining the map entry avoids deleting
+// a user's dormant configuration during an upgrade.
+func (c *Config) sanitizeLegacyAgentExecutionPolicy(source string) {
+	for name, agent := range c.AI.Agents {
+		if err := executor.ValidateCLIName(name); err != nil {
+			slog.Warn("config: preserving inert legacy agent profile for unknown CLI",
+				"source", source, "agent", name, "err", err)
+			continue
+		}
+		c.AI.Agents[name] = sanitizeLegacyAgentConfig(name, agent, source)
+	}
+}
+
+func sanitizeLegacyAgentConfig(name string, agent CLIAgentConfig, source string) CLIAgentConfig {
+	agent = sanitizeAgentExecutionFields(name, agent, source, "legacy")
+	if normalized, err := executor.NormalizePermissionMode(agent.PermissionMode); err != nil {
+		slog.Warn("config: ignored unsafe legacy agent field",
+			"source", source, "agent", name, "field", "permission_mode", "err", err)
+		agent.PermissionMode = ""
+	} else {
+		agent.PermissionMode = normalized
+	}
+	if normalized, err := executor.NormalizeApprovalModeForCLI(name, agent.ApprovalMode); err != nil {
+		slog.Warn("config: ignored unsafe legacy agent field",
+			"source", source, "agent", name, "field", "approval_mode", "err", err)
+		agent.ApprovalMode = ""
+	} else {
+		agent.ApprovalMode = normalized
+	}
+
+	opts, migrated := executor.MigrateLegacyTypedExtraFlagsForCLI(name, executor.ExecOptions{
+		Model:      agent.Model,
+		MaxTurns:   agent.MaxTurns,
+		ExtraFlags: agent.ExtraFlags,
+		Effort:     agent.Effort,
+	})
+	if len(migrated) > 0 {
+		slog.Warn("config: migrated legacy extra_flags to typed agent fields",
+			"source", source, "agent", name, "fields", migrated)
+	}
+	agent.Model = opts.Model
+	agent.MaxTurns = opts.MaxTurns
+	agent.Effort = opts.Effort
+	agent.ExtraFlags = opts.ExtraFlags
+	// MigrateLegacyTypedExtraFlagsForCLI currently emits only validated
+	// values. Keep the compatibility boundary defensive nevertheless: a
+	// future migration must not turn a formerly survivable legacy config into
+	// a startup failure by returning an unsafe typed value.
+	agent = sanitizeAgentExecutionFields(name, agent, source, "migrated")
+	if err := executor.ValidateExtraFlagsForCLI(name, agent.ExtraFlags); err != nil {
+		slog.Warn("config: ignored unsafe legacy agent field",
+			"source", source, "agent", name, "field", "extra_flags", "err", err)
+		agent.ExtraFlags = ""
+	}
+	return agent
+}
+
+func sanitizeAgentExecutionFields(
+	name string,
+	agent CLIAgentConfig,
+	source string,
+	provenance string,
+) CLIAgentConfig {
+	unsafeMessage := "config: ignored unsafe " + provenance + " agent field"
+	invalidMessage := "config: ignored invalid " + provenance + " agent field"
+	agent.Model = strings.TrimSpace(agent.Model)
+	if err := executor.ValidateModel(agent.Model); err != nil {
+		slog.Warn(unsafeMessage,
+			"source", source, "agent", name, "field", "model", "err", err)
+		agent.Model = ""
+	}
+	if agent.MaxTurns < 0 {
+		slog.Warn(invalidMessage,
+			"source", source, "agent", name, "field", "max_turns",
+			"err", "value must be non-negative")
+		agent.MaxTurns = 0
+	}
+	if normalized, err := executor.NormalizeEffort(agent.Effort); err != nil {
+		slog.Warn(unsafeMessage,
+			"source", source, "agent", name, "field", "effort", "err", err)
+		agent.Effort = ""
+	} else {
+		agent.Effort = normalized
+	}
+	return agent
+}
+
+// SanitizeLegacyAgentExecutionPolicyMap migrates only the trusted agent
+// settings already present in a TOML map. HTTP handlers call this before
+// applying their separately validated payload, so an old local --model flag
+// cannot make an unrelated PATCH fail while a new HTTP --model flag remains a
+// strict 400. Known CLIAgentConfig leaves for supported providers are
+// canonicalized before any typed decode; unknown fields and inert provider
+// profiles remain untouched. Trusted dangerously_skip_perms values are
+// preserved, with conflicting aliases resolved fail-closed.
+func SanitizeLegacyAgentExecutionPolicyMap(m map[string]any, source string) error {
+	ai, present, err := canonicalizeLegacyMapChild(m, "ai", "config")
+	if err != nil || !present {
+		return err
+	}
+	agents, present, err := canonicalizeLegacyMapChild(ai, "agents", "config.ai")
+	if err != nil || !present {
+		return err
+	}
+	for name, rawAgent := range agents {
+		if err := executor.ValidateCLIName(name); err != nil {
+			// Unknown profiles are intentionally inert and preserved exactly.
+			// Do not let newly introduced validation for supported providers
+			// turn a dormant future/legacy profile into a startup regression.
+			continue
+		}
+		agentMap, ok := rawAgent.(map[string]any)
+		if !ok {
+			continue
+		}
+		agentPath := fmt.Sprintf(`config.ai.agents[%q]`, name)
+		before, rewrite, err := legacyAgentConfigFromMap(agentMap, agentPath)
+		if err != nil {
+			return fmt.Errorf("config: sanitize legacy TOML agent %q: %w", name, err)
+		}
+		after := sanitizeLegacyAgentConfig(name, before, source)
+		syncLegacyAgentStringField(agentMap, "model", before.Model, after.Model, rewrite["model"])
+		syncLegacyAgentIntField(agentMap, "max_turns", before.MaxTurns, after.MaxTurns, rewrite["max_turns"])
+		syncLegacyAgentStringField(agentMap, "approval_mode", before.ApprovalMode, after.ApprovalMode, rewrite["approval_mode"])
+		syncLegacyAgentStringField(agentMap, "extra_flags", before.ExtraFlags, after.ExtraFlags, rewrite["extra_flags"])
+		syncLegacyAgentStringField(agentMap, "effort", before.Effort, after.Effort, rewrite["effort"])
+		syncLegacyAgentStringField(agentMap, "permission_mode", before.PermissionMode, after.PermissionMode, rewrite["permission_mode"])
+		syncLegacyAgentTrustedStringField(agentMap, "prompt", before.PromptID, after.PromptID, rewrite["prompt"])
+		syncLegacyAgentTrustedStringField(agentMap, "execution_timeout", before.ExecutionTimeout, after.ExecutionTimeout, rewrite["execution_timeout"])
+		syncLegacyAgentBoolField(agentMap, "bare", before.Bare, after.Bare, rewrite["bare"])
+		syncLegacyAgentBoolField(agentMap, "dangerously_skip_perms", before.DangerouslySkipPerms, after.DangerouslySkipPerms, rewrite["dangerously_skip_perms"])
+		syncLegacyAgentBoolField(agentMap, "no_session_persistence", before.NoSessionPersistence, after.NoSessionPersistence, rewrite["no_session_persistence"])
+	}
+	return nil
+}
+
+func canonicalizeLegacyMapChild(m map[string]any, canonical, path string) (map[string]any, bool, error) {
+	aliases := caseFoldedMapKeys(m, canonical)
+	switch len(aliases) {
+	case 0:
+		return nil, false, nil
+	case 1:
+		key := aliases[0]
+		child, ok := m[key].(map[string]any)
+		if !ok {
+			return nil, false, fmt.Errorf("legacy TOML key %q must be a table", path+"."+key)
+		}
+		if key != canonical {
+			delete(m, key)
+			m[canonical] = child
+		}
+		return child, true, nil
+	default:
+		return nil, false, fmt.Errorf(
+			"ambiguous structural aliases at %q for %q (%s); keep a single canonical %q key",
+			path, canonical, strings.Join(aliases, ", "), canonical,
+		)
+	}
+}
+
+func legacyAgentConfigFromMap(m map[string]any, path string) (CLIAgentConfig, map[string]bool, error) {
+	var agent CLIAgentConfig
+	rewrite := make(map[string]bool)
+	stringField := func(canonical string, target *string) error {
+		raw, present, canonicalize, err := legacyMapValue(m, canonical, path)
+		if err != nil {
+			return err
+		}
+		rewrite[canonical] = canonicalize
+		if !present {
+			return nil
+		}
+		value, ok := raw.(string)
+		if !ok {
+			return fmt.Errorf("%s must be a string", canonical)
+		}
+		*target = value
+		return nil
+	}
+	boolField := func(canonical string, target *bool) error {
+		raw, present, canonicalize, err := legacyMapValue(m, canonical, path)
+		if err != nil {
+			return err
+		}
+		rewrite[canonical] = canonicalize
+		if !present {
+			return nil
+		}
+		value, ok := raw.(bool)
+		if !ok {
+			return fmt.Errorf("%s must be a boolean", canonical)
+		}
+		*target = value
+		return nil
+	}
+	if err := stringField("model", &agent.Model); err != nil {
+		return CLIAgentConfig{}, nil, err
+	}
+	if err := stringField("approval_mode", &agent.ApprovalMode); err != nil {
+		return CLIAgentConfig{}, nil, err
+	}
+	if err := stringField("extra_flags", &agent.ExtraFlags); err != nil {
+		return CLIAgentConfig{}, nil, err
+	}
+	if err := stringField("effort", &agent.Effort); err != nil {
+		return CLIAgentConfig{}, nil, err
+	}
+	if err := stringField("permission_mode", &agent.PermissionMode); err != nil {
+		return CLIAgentConfig{}, nil, err
+	}
+	if err := stringField("prompt", &agent.PromptID); err != nil {
+		return CLIAgentConfig{}, nil, err
+	}
+	if err := stringField("execution_timeout", &agent.ExecutionTimeout); err != nil {
+		return CLIAgentConfig{}, nil, err
+	}
+	if err := boolField("bare", &agent.Bare); err != nil {
+		return CLIAgentConfig{}, nil, err
+	}
+	if err := boolField("no_session_persistence", &agent.NoSessionPersistence); err != nil {
+		return CLIAgentConfig{}, nil, err
+	}
+	raw, present, canonicalize, err := legacyMapValue(m, "max_turns", path)
+	if err != nil {
+		return CLIAgentConfig{}, nil, err
+	}
+	if present {
+		rewrite["max_turns"] = canonicalize
+		value, err := legacyMapInt(raw)
+		if err != nil {
+			return CLIAgentConfig{}, nil, fmt.Errorf("max_turns: %w", err)
+		}
+		agent.MaxTurns = value
+	} else {
+		rewrite["max_turns"] = canonicalize
+	}
+	dangerous, present, canonicalize, err := legacyDangerousBoolValue(m)
+	if err != nil {
+		return CLIAgentConfig{}, nil, err
+	}
+	rewrite["dangerously_skip_perms"] = canonicalize
+	if present {
+		// This is trusted TOML state. Preserve true exactly; the HTTP boundary
+		// separately prevents untrusted callers from granting the capability.
+		// Conflicting trusted aliases resolve fail-closed: any false wins.
+		agent.DangerouslySkipPerms = dangerous
+	}
+	return agent, rewrite, nil
+}
+
+func legacyDangerousBoolValue(m map[string]any) (value bool, present, canonicalize bool, err error) {
+	const canonical = "dangerously_skip_perms"
+	aliases := caseFoldedMapKeys(m, canonical)
+	if len(aliases) == 0 {
+		return false, false, false, nil
+	}
+	value, err = resolveFailClosedBool(m, aliases, canonical)
+	if err != nil {
+		return false, false, false, err
+	}
+	return value, true, len(aliases) != 1 || aliases[0] != canonical, nil
+}
+
+func legacyMapValue(m map[string]any, canonical, path string) (value any, present, canonicalize bool, err error) {
+	aliases := caseFoldedMapKeys(m, canonical)
+	if len(aliases) == 0 {
+		return nil, false, false, nil
+	}
+	selected, discarded, err := selectCanonicalMapKey(aliases, canonical)
+	if err != nil {
+		return nil, false, false, err
+	}
+	warnDiscardedAliases(path, canonical, discarded)
+	return m[selected], true, selected != canonical || len(discarded) > 0, nil
+}
+
+func legacyMapInt(raw any) (int, error) {
+	switch value := raw.(type) {
+	case int:
+		return value, nil
+	case int64:
+		converted := int(value)
+		if int64(converted) != value {
+			return 0, fmt.Errorf("value is outside the supported integer range")
+		}
+		return converted, nil
+	case float64:
+		converted := int(value)
+		if float64(converted) != value {
+			return 0, fmt.Errorf("value must be an integer")
+		}
+		return converted, nil
+	default:
+		return 0, fmt.Errorf("value must be an integer")
+	}
+}
+
+func syncLegacyAgentStringField(m map[string]any, canonical, before, after string, canonicalize bool) {
+	if before == after && !canonicalize {
+		return
+	}
+	deleteLegacyAgentFieldAliases(m, canonical)
+	if after != "" {
+		m[canonical] = after
+	}
+}
+
+func syncLegacyAgentTrustedStringField(m map[string]any, canonical, before, after string, canonicalize bool) {
+	if before == after && !canonicalize {
+		return
+	}
+	deleteLegacyAgentFieldAliases(m, canonical)
+	m[canonical] = after
+}
+
+func syncLegacyAgentIntField(m map[string]any, canonical string, before, after int, canonicalize bool) {
+	if before == after && !canonicalize {
+		return
+	}
+	deleteLegacyAgentFieldAliases(m, canonical)
+	if after != 0 {
+		m[canonical] = int64(after)
+	}
+}
+
+func syncLegacyAgentBoolField(m map[string]any, canonical string, before, after bool, canonicalize bool) {
+	if before == after && !canonicalize {
+		return
+	}
+	deleteLegacyAgentFieldAliases(m, canonical)
+	m[canonical] = after
+}
+
+func deleteLegacyAgentFieldAliases(m map[string]any, canonical string) {
+	for _, key := range caseFoldedMapKeys(m, canonical) {
+		delete(m, key)
+	}
+}
+
+// validateNeverApproveMinSeverity bounds never_approve_min_severity to the
+// canonical severities at every scope. Empty means "inherit" (repo/org) or
+// "use the default" (global — pipeline.DefaultNeverApproveMinSeverity), so it
+// is always accepted.
+func (c *Config) validateNeverApproveMinSeverity() error {
+	check := func(scope, v string) error {
+		switch v {
+		case "", "low", "medium", "high":
+			return nil
+		default:
+			return fmt.Errorf("config: %s.never_approve_min_severity must be one of: low, medium, high; got %q", scope, v)
+		}
+	}
+	if err := check("ai", c.AI.NeverApproveMinSeverity); err != nil {
+		return err
+	}
+	for org, o := range c.AI.Orgs {
+		if err := check(fmt.Sprintf("ai.orgs[%s]", org), o.NeverApproveMinSeverity); err != nil {
+			return err
+		}
+	}
+	for repo, r := range c.AI.Repos {
+		if err := check(fmt.Sprintf("ai.repos[%s]", repo), r.NeverApproveMinSeverity); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -1485,12 +1917,31 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("config: read %s: %w", path, err)
 	}
+	// Decode through a generic map first. BurntSushi's struct decoder matches
+	// TOML keys case-insensitively, so aliases that differ only in casing can
+	// otherwise race on Go map iteration. Project only schema-known fields
+	// under canonical names before the typed decode. Unknown TOML remains
+	// accepted and never passes through the encoder, which cannot re-emit
+	// every valid value its decoder accepts (for example mixed-type arrays).
+	var raw map[string]any
+	if err := toml.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("config: parse %s: %w", path, err)
+	}
+	known, err := projectKnownConfigMap(raw)
+	if err != nil {
+		return nil, fmt.Errorf("config: canonicalize %s: %w", path, err)
+	}
+	var canonical strings.Builder
+	if err := toml.NewEncoder(&canonical).Encode(known); err != nil {
+		return nil, fmt.Errorf("config: canonicalize %s: %w", path, err)
+	}
 	var cfg Config
-	if err := toml.Unmarshal(data, &cfg); err != nil {
+	if err := toml.Unmarshal([]byte(canonical.String()), &cfg); err != nil {
 		return nil, fmt.Errorf("config: parse %s: %w", path, err)
 	}
 	cfg.applyDefaults()
 	cfg.applyEnvOverrides()
+	cfg.sanitizeLegacyAgentExecutionPolicy("toml/env")
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -1521,6 +1972,7 @@ func LoadOrCreate(path string) (*Config, error) {
 	cfg := &Config{}
 	cfg.applyDefaults()
 	cfg.applyEnvOverrides()
+	cfg.sanitizeLegacyAgentExecutionPolicy("generated env")
 	if cfg.AI.Primary == "" {
 		return nil, fmt.Errorf("no config file and HEIMDALLM_AI_PRIMARY not set")
 	}

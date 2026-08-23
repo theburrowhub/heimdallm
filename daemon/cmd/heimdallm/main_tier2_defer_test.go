@@ -14,14 +14,10 @@ import (
 	"github.com/heimdallm/daemon/internal/sse"
 )
 
-// TestTier2Adapter_FetchPRsToReview_DefersNewlyDiscoveredRepo pins
-// the fix for the third symptom in #481: on the tick that
-// auto-discovers a new repo, FetchPRsToReview must publish
-// EventRepoDiscovered *and* withhold the PR for that repo from the
-// returned slice. The next tick — once the UI has had time to
-// receive repo_discovered — includes the PR normally so the review
-// proceeds.
-func TestTier2Adapter_FetchPRsToReview_DefersNewlyDiscoveredRepo(t *testing.T) {
+// A newly discovered repo must emit repo_discovered and return its PR in the
+// same cycle. The former one-tick deferral added five minutes at the default
+// interval and did not actually guarantee event delivery.
+func TestTier2Adapter_FetchPRsToReviewProcessesNewlyDiscoveredRepoSameCycle(t *testing.T) {
 	updatedAt := time.Date(2026, 5, 13, 10, 0, 0, 0, time.UTC)
 	const repo = "newco/newrepo"
 
@@ -42,12 +38,6 @@ func TestTier2Adapter_FetchPRsToReview_DefersNewlyDiscoveredRepo(t *testing.T) {
 				UpdatedAt: updatedAt,
 			}}}
 			_ = json.NewEncoder(w).Encode(result)
-		case r.URL.Path == "/repos/"+repo+"/pulls/11":
-			_ = json.NewEncoder(w).Encode(gh.PullRequest{
-				ID: 9001, Number: 11, State: "open",
-				Head:               gh.Branch{SHA: "abc"},
-				RequestedReviewers: []gh.User{{Login: "heimdallm-bot"}},
-			})
 		default:
 			http.NotFound(w, r)
 		}
@@ -68,27 +58,36 @@ func TestTier2Adapter_FetchPRsToReview_DefersNewlyDiscoveredRepo(t *testing.T) {
 		login   = "heimdallm-bot"
 		cfgMu   sync.Mutex
 		cfg     = &config.Config{}
+		ordered bool
 	)
 
 	a := &tier2Adapter{
-		ghClient:             gh.NewClient("fake-token", gh.WithBaseURL(srv.URL)),
-		store:                s,
-		broker:               broker,
-		cfgMu:                &cfgMu,
-		cfg:                  &cfg,
-		loginMu:              &loginMu,
-		login:                &login,
+		ghClient: gh.NewClient("fake-token", gh.WithBaseURL(srv.URL)),
+		store:    s,
+		broker:   broker,
+		cfgMu:    &cfgMu,
+		cfg:      &cfg,
+		loginMu:  &loginMu,
+		login:    &login,
+		publishOrderedEvents: func(events []sse.Event) error {
+			if len(events) == 1 && events[0].Type == sse.EventRepoDiscovered {
+				ordered = true
+			}
+			return nil
+		},
 		lastSkippedUpdatedAt: make(map[int64]time.Time),
 	}
 
-	// First cycle: repo is brand new. Adapter must publish
-	// EventRepoDiscovered and withhold the PR.
+	// First cycle: repo is brand new. Discovery and ingestion both happen now.
 	out, err := a.FetchPRsToReview()
 	if err != nil {
 		t.Fatalf("first FetchPRsToReview: %v", err)
 	}
-	if len(out) != 0 {
-		t.Fatalf("first cycle returned %d PR(s), want 0 (newly-discovered repo must defer review one tick)", len(out))
+	if len(out) != 1 || out[0].Repo != repo {
+		t.Fatalf("first cycle expected 1 PR for %q, got %+v", repo, out)
+	}
+	if !ordered {
+		t.Fatal("repo_discovered was not handed off before same-cycle PR return")
 	}
 
 	// Drain SSE events; we should see exactly one repo_discovered for `repo`.
@@ -108,14 +107,4 @@ drain:
 	if !gotRepoDiscovered {
 		t.Fatalf("expected EventRepoDiscovered for %q on first cycle", repo)
 	}
-
-	// Second cycle: repo is now known. The PR makes it through.
-	out2, err := a.FetchPRsToReview()
-	if err != nil {
-		t.Fatalf("second FetchPRsToReview: %v", err)
-	}
-	if len(out2) != 1 || out2[0].Repo != repo {
-		t.Fatalf("second cycle expected 1 PR for %q, got %+v", repo, out2)
-	}
 }
-

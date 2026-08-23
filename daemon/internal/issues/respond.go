@@ -13,6 +13,7 @@ import (
 	"github.com/heimdallm/daemon/internal/github"
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
+	"github.com/heimdallm/daemon/internal/workgate"
 )
 
 // marshalEvent renders the SSE payload. A failure here is unreachable
@@ -34,14 +35,20 @@ func marshalEvent(m map[string]any) string {
 // cooldown, bot-author skip) lives here so Tier 3's HandleChange
 // branch can route blindly and trust the no-op path.
 type Responder struct {
-	store   responderStore
-	gh      responderGH
-	exec    ResponderExecutor
-	broker  eventPublisher
-	cfgFn   func() config.ReviewResponseConfig
-	loginFn func() string
-	nowFn   func() time.Time
+	store    responderStore
+	gh       responderGH
+	exec     ResponderExecutor
+	broker   eventPublisher
+	cfgFn    func() config.ReviewResponseConfig
+	loginFn  func() string
+	nowFn    func() time.Time
+	workGate *workgate.Gate
 }
+
+// SetWorkGate admits complete response transactions before any counter,
+// executor, GitHub, or store side effect. Nested Tier 3 callers reuse the
+// permit carried in ctx.
+func (r *Responder) SetWorkGate(gate *workgate.Gate) { r.workGate = gate }
 
 // responderStore captures the slice of *store.Store the Responder
 // touches. Narrowed so the unit test can fake every method without
@@ -115,6 +122,13 @@ func (r *Responder) Run(ctx context.Context, pr *store.PR, originIssueID int64) 
 	cfg := r.cfgFn()
 	if !cfg.Enabled {
 		return nil
+	}
+	ctx, permit, owned, err := r.workGate.AcquireContext(ctx, workgate.KindReviewResponse)
+	if err != nil {
+		return ErrUpdateDraining
+	}
+	if owned {
+		defer permit.Release()
 	}
 
 	// The trigger state COMMENTED is computed from the Reviews API,

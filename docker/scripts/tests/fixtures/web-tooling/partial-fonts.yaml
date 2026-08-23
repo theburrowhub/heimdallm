@@ -1,0 +1,10 @@
+name: web_tooling_partial_fonts_fixture
+
+flutter:
+  assets:
+    - assets/icon.png
+  fonts:
+    - family: PartiallySupported
+      fonts:
+        - asset: fonts/Supported.ttf
+        - path: fonts/SilentlySkippedBefore.ttf

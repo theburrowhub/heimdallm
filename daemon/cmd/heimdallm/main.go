@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -37,15 +38,140 @@ import (
 	"github.com/heimdallm/daemon/internal/repoctx"
 	"github.com/heimdallm/daemon/internal/scheduler"
 	"github.com/heimdallm/daemon/internal/server"
+	"github.com/heimdallm/daemon/internal/singleinstance"
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
 	"github.com/heimdallm/daemon/internal/worker"
+	"github.com/heimdallm/daemon/internal/workgate"
 	"github.com/heimdallm/daemon/launchagent"
 	"github.com/nats-io/nats.go"
 )
 
 // version is overridden via -ldflags "-X main.version=..." at build time.
 var version = "dev"
+
+// processLifetimeLock keeps the production lock descriptor reachable until
+// os.Exit. Closing it in run's last defer would still leave a tiny handoff gap
+// where other goroutines exist between return and os.Exit. Tests use run(),
+// which opts into deterministic release so multiple cases can share a process.
+var processLifetimeLock *singleinstance.Lock
+
+// processDependencies keeps process-boundary effects injectable for lifecycle
+// tests while production uses the concrete defaults below.
+type processDependencies struct {
+	newGitHubClient    func(string, ...gh.Option) *gh.Client
+	listen             func(int, string) (net.Listener, error)
+	afterPollerRestart func()
+}
+
+var defaultProcessDependencies = processDependencies{
+	newGitHubClient: gh.NewClient,
+	listen:          server.Listen,
+}
+
+// updateServerError keeps the HTTP contract independent from workgate's
+// internal error vocabulary. Every updater transition passes through this one
+// mapping so prepare/cancel/seal/confirm cannot drift into different status
+// codes as new recovery paths are added.
+func updateServerError(err error) error {
+	switch {
+	case errors.Is(err, workgate.ErrLeaseIDRequired):
+		return server.ErrUpdateLeaseRequired
+	case errors.Is(err, workgate.ErrLeaseIDInvalid):
+		return server.ErrUpdateLeaseInvalid
+	case errors.Is(err, workgate.ErrLeaseConflict):
+		return server.ErrUpdateLeaseConflict
+	case errors.Is(err, workgate.ErrWorkActive):
+		return server.ErrUpdateNotReady
+	case errors.Is(err, workgate.ErrLeaseNotSealed):
+		return server.ErrUpdateNotSealed
+	case errors.Is(err, workgate.ErrBootstrapNotAuthorized):
+		return server.ErrUpdateBootstrapNotAuthorized
+	default:
+		return err
+	}
+}
+
+func snapshotUpdatePreparation(snapshot workgate.Snapshot, bootID string) server.UpdatePreparationStatus {
+	active := make(map[string]int, len(snapshot.Active))
+	for kind, count := range snapshot.Active {
+		active[string(kind)] = count
+	}
+	state := "running"
+	if snapshot.Draining {
+		state = "draining"
+		if snapshot.Total() == 0 {
+			state = "ready"
+		}
+	}
+	return server.UpdatePreparationStatus{
+		State:               state,
+		PID:                 os.Getpid(),
+		Version:             versionString(),
+		LeaseID:             snapshot.LeaseID,
+		Sealed:              snapshot.Sealed,
+		BootstrapAuthorized: snapshot.BootstrapAuthorized,
+		BootID:              bootID,
+		Active:              active,
+		ActiveTotal:         snapshot.Total(),
+		LeaseExpiresAt:      snapshot.LeaseExpiresAt,
+	}
+}
+
+// acquireUpdateWork centralizes ownership of update-drain permits. Nested
+// operations inherit the outer permit and receive a no-op release, while
+// top-level work always gets a matching cleanup function.
+func acquireUpdateWork(ctx context.Context, gate *workgate.Gate, kind workgate.Kind) (context.Context, func(), error) {
+	ctx, permit, owned, err := gate.AcquireContext(ctx, kind)
+	if err != nil {
+		return ctx, nil, err
+	}
+	if !owned {
+		return ctx, func() {}, nil
+	}
+	return ctx, permit.Release, nil
+}
+
+// guardUpdateVoidHandler applies the updater admission protocol to message
+// handlers that do not return a result. Keeping this boundary outside each
+// worker makes it impossible to admit the fetch but forget to carry the permit
+// into the nested pipeline.
+func guardUpdateVoidHandler[M any](
+	gate *workgate.Gate,
+	kind workgate.Kind,
+	deferredMessage string,
+	next func(context.Context, M),
+) func(context.Context, M) {
+	return func(ctx context.Context, message M) {
+		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, gate, kind)
+		if err != nil {
+			slog.Debug(deferredMessage, "work", message)
+			return
+		}
+		defer releaseUpdateWork()
+		next(ctx, message)
+	}
+}
+
+// guardUpdateResultHandler is the result-returning variant used by workers
+// whose queue protocol distinguishes ack/retry through their return value.
+func guardUpdateResultHandler[M, R any](
+	gate *workgate.Gate,
+	kind workgate.Kind,
+	deferredMessage string,
+	deferredResult R,
+	next func(context.Context, M) R,
+) func(context.Context, M) R {
+	return func(ctx context.Context, message M) R {
+		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, gate, kind)
+		if err != nil {
+			slog.Debug(deferredMessage, "work", message)
+			return deferredResult
+		}
+		defer releaseUpdateWork()
+		return next(ctx, message)
+	}
+}
 
 func versionString() string { return version }
 
@@ -57,6 +183,13 @@ func versionString() string { return version }
 // nor permanently kill the bridge that feeds every SSE client.
 func publishBridgeEvents(events <-chan sse.Event, publish func(subject string, data []byte) error) {
 	for event := range events {
+		// Discovery publishes this event synchronously so NATS confirms it
+		// before the related PR can be enqueued. The broker copy remains for
+		// legacy subscribers and delivery fallback; bridging a confirmed copy
+		// again would duplicate the UI event.
+		if event.NATSForwarded {
+			continue
+		}
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
@@ -71,36 +204,113 @@ func publishBridgeEvents(events <-chan sse.Event, publish func(subject string, d
 	}
 }
 
+func newOrderedNATSEventPublisher(conn *nats.Conn) func([]sse.Event) error {
+	return func(events []sse.Event) error {
+		for _, event := range events {
+			if err := conn.Publish(bus.SubjEventPrefix+event.Type, []byte(event.Data)); err != nil {
+				return err
+			}
+		}
+		return conn.FlushTimeout(2 * time.Second)
+	}
+}
+
 func main() {
+	os.Exit(runProcess(false))
+}
+
+// run is the test-friendly lifecycle entry point. Production calls runProcess
+// directly and lets the OS release the instance lock atomically with exit.
+func run() int {
+	return runProcess(true)
+}
+
+// runProcess owns the daemon lifecycle and returns its process exit code.
+// Keeping os.Exit in main means every return executes deferred cleanup first,
+// including fatal bind and HTTP-serve failures.
+func runProcess(releaseLock bool) int {
+	return runProcessWithDependencies(releaseLock, defaultProcessDependencies)
+}
+
+func runProcessWithDependencies(releaseLock bool, deps processDependencies) int {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "install":
 			bin, _ := os.Executable()
 			if err := launchagent.Install(bin); err != nil {
 				fmt.Fprintf(os.Stderr, "install: %v\n", err)
-				os.Exit(1)
+				return 1
 			}
-			return
+			return 0
 		case "uninstall":
 			if err := launchagent.Uninstall(); err != nil {
 				fmt.Fprintf(os.Stderr, "uninstall: %v\n", err)
-				os.Exit(1)
+				return 1
 			}
-			return
+			return 0
+		case "version", "--version", "-version":
+			fmt.Println(versionString())
+			return 0
 		}
 	}
 
-	// Resolve the data directory first so setupLogging can mirror the
-	// daemon's slog output into <dataDir>/heimdallm.log. The web UI's
+	// Resolve the data directory first and acquire a process-lifetime lock before
+	// opening even the shared log. Unlike the HTTP port, this ownership token is
+	// retained through every deferred worker/store cleanup, closing the teardown
+	// window where a replacement could otherwise mutate the same state while the
+	// old process was still alive (#646).
+	logDir := dataDir()
+	instanceLock, err := singleinstance.Acquire(filepath.Join(logDir, "daemon.lock"))
+	if err != nil {
+		slog.Error("daemon: another instance owns the data directory; exiting", "dir", logDir, "err", err)
+		return 1
+	}
+	if releaseLock {
+		defer func() {
+			if err := instanceLock.Close(); err != nil {
+				slog.Warn("daemon: release instance lock", "err", err)
+			}
+		}()
+	} else {
+		processLifetimeLock = instanceLock
+	}
+
+	// setupLogging mirrors the daemon's slog output into
+	// <dataDir>/heimdallm.log. The web UI's
 	// /logs stream reads that file; writing only to stderr (as we used
 	// to) left the stream empty under Docker — see #75.
-	logDir := dataDir()
 	logCloser := setupLogging(logDir)
 	if logCloser != nil {
 		// Flush buffered writes on shutdown so the last lines reach
 		// disk even when the daemon is killed mid-log.
 		defer logCloser.Close()
 	}
+
+	// Restore an updater barrier before loading any stateful subsystem. A sealed
+	// marker represents the interval in which Sparkle may have replaced the app
+	// bundle; until the native app verifies the exact bundled daemon version,
+	// startup must not create configuration, open/migrate SQLite, clear claims,
+	// start NATS, or prune worktrees.
+	const updateLeaseTTL = 2 * time.Minute
+	updateDrainPath := filepath.Join(logDir, "update-drain.json")
+	recoveredDesktopIntent, err := workgate.RestoreDesktopRecoveryBarrier(
+		updateLeaseTTL,
+		updateDrainPath,
+		filepath.Join(logDir, "app-update-recovery.json"),
+	)
+	if err != nil {
+		slog.Error("desktop update recovery intent could not be restored safely", "err", err)
+		return 1
+	}
+	if recoveredDesktopIntent {
+		slog.Info("daemon: sealed barrier restored from desktop recovery intent")
+	}
+	updateWorkGate, err := workgate.NewPersistent(updateLeaseTTL, updateDrainPath)
+	if err != nil {
+		slog.Error("update drain state could not be restored safely", "err", err)
+		return 1
+	}
+	restoredUpdateBarrier := updateWorkGate.Status().Draining
 
 	cfgPath := configPath()
 
@@ -112,27 +322,151 @@ func main() {
 	// have written the TOML before the daemon starts, so ENOENT is a real
 	// error there.
 	loadConfig := config.Load
-	if os.Getenv("HEIMDALLM_DATA_DIR") != "" {
+	if os.Getenv("HEIMDALLM_DATA_DIR") != "" && !restoredUpdateBarrier {
 		loadConfig = config.LoadOrCreate
 	}
 
 	cfg, err := loadConfig(cfgPath)
 	if err != nil {
 		slog.Error("config load failed", "path", cfgPath, "err", err)
-		os.Exit(1)
+		return 1
+	}
+
+	// Claim single-instance ownership before reading credentials, opening
+	// SQLite, clearing restart claims or pruning worktrees. The old ordering
+	// discovered EADDRINUSE only after those destructive recovery steps, so a
+	// losing second instance could corrupt the live daemon before exiting.
+	httpListener, err := deps.listen(cfg.Server.Port, cfg.Server.BindAddr)
+	if err != nil {
+		slog.Error("daemon: cannot bind HTTP port — another instance is probably already running; exiting",
+			"port", cfg.Server.Port, "bind", cfg.Server.BindAddr, "err", err)
+		return 1
+	}
+	defer httpListener.Close()
+
+	// Start serving the claimed listener immediately. During the remainder of
+	// startup only GET /health is exposed, as a daemon-identifying 503 response;
+	// every other route is gated by startupMiddleware until Configure +
+	// MarkReady publish the fully wired dependencies. This avoids both failure
+	// modes from #646: a losing process cannot mutate shared state, and the
+	// winning process never leaves launchers staring at a bound-but-silent port.
+	runtimeCtx, runtimeCancel := context.WithCancel(context.Background())
+	defer runtimeCancel()
+
+	// Load authentication and restore the updater lease before Serve exposes
+	// even the startup router. This lets the updater renew a lease throughout a
+	// slow respawn without opening any other mutation endpoint.
+	var apiToken string
+	if restoredUpdateBarrier {
+		apiToken, err = loadExistingAPIToken(dataDir())
+	} else {
+		apiToken, err = loadOrCreateAPIToken(dataDir())
+	}
+	if err != nil {
+		slog.Error("could not load API token — refusing to start without authentication", "err", err)
+		return 1
+	}
+	updateBootIDBytes := make([]byte, 32)
+	if _, err := rand.Read(updateBootIDBytes); err != nil {
+		slog.Error("could not create update process identity — refusing unsafe replacement bootstrap", "err", err)
+		return 1
+	}
+	updateBootID := hex.EncodeToString(updateBootIDBytes)
+	// Read-only Tier 1 discovery and Core NATS enqueue hints stay outside the
+	// gate; their source rows are durable in SQLite and every side-effecting
+	// consumer acquires a permit. Brief single-SQLite retention/claim sweeps are
+	// serialized by SQLite Close. External, multi-resource, agent, and
+	// filesystem-destructive transactions are all protected.
+	srv := server.NewWithOptions(nil, nil, nil, apiToken, server.Options{
+		Version:      versionString(),
+		StartedAt:    time.Now(),
+		UpdateBootID: updateBootID,
+	})
+	srv.SetUpdatePreparationFns(
+		func(leaseID string) (server.UpdatePreparationStatus, error) {
+			snapshot, err := updateWorkGate.Prepare(leaseID)
+			if err != nil {
+				return server.UpdatePreparationStatus{}, updateServerError(err)
+			}
+			return snapshotUpdatePreparation(snapshot, updateBootID), nil
+		},
+		func(leaseID string) (server.UpdatePreparationStatus, error) {
+			snapshot, err := updateWorkGate.Cancel(leaseID)
+			if err != nil {
+				return server.UpdatePreparationStatus{}, updateServerError(err)
+			}
+			return snapshotUpdatePreparation(snapshot, updateBootID), nil
+		},
+	)
+	srv.SetUpdateSealFn(func(leaseID string) (server.UpdatePreparationStatus, error) {
+		snapshot, err := updateWorkGate.Seal(leaseID)
+		if err != nil {
+			return server.UpdatePreparationStatus{}, updateServerError(err)
+		}
+		return snapshotUpdatePreparation(snapshot, updateBootID), nil
+	})
+	srv.SetUpdateConfirmFn(func(leaseID string) (server.UpdatePreparationStatus, error) {
+		snapshot, err := updateWorkGate.ConfirmBootstrap(leaseID)
+		if err != nil {
+			return server.UpdatePreparationStatus{}, updateServerError(err)
+		}
+		return snapshotUpdatePreparation(snapshot, updateBootID), nil
+	})
+	srv.MarkStarting()
+	slog.Info("daemon: HTTP listener claimed", "port", cfg.Server.Port, "bind", cfg.Server.BindAddr)
+	serveFailed := make(chan error, 1)
+	go func() {
+		if err := srv.Serve(httpListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			// Cancel every producer immediately. The main goroutine may still be
+			// inside a bounded startup operation, but no poller/worker derived from
+			// runtimeCtx can remain alive as a headless daemon.
+			slog.Error("daemon: HTTP server stopped serving", "err", err)
+			select {
+			case serveFailed <- err:
+			default:
+			}
+			runtimeCancel()
+		}
+	}()
+	// Early startup failures must also stop the HTTP goroutine. Shutdown is
+	// idempotent; the normal path calls it explicitly for graceful draining.
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			slog.Warn("server shutdown failed", "err", err)
+		}
+	}()
+	takeServeFailure := func() error {
+		select {
+		case err := <-serveFailed:
+			return err
+		default:
+			return nil
+		}
+	}
+	if restoredUpdateBarrier {
+		slog.Info("daemon: updater barrier restored; deferring stateful bootstrap until owner verification",
+			"sealed", updateWorkGate.Status().Sealed)
+		if err := updateWorkGate.WaitUntilBootstrapAuthorized(runtimeCtx); err != nil {
+			slog.Error("daemon: updater barrier wait failed", "err", err)
+			return 1
+		}
+		slog.Info("daemon: stateful bootstrap authorized; update admission remains sealed",
+			"draining", updateWorkGate.Status().Draining)
 	}
 
 	token, err := keychain.Get()
 	if err != nil {
 		slog.Error("token not found", "err", err)
-		os.Exit(1)
+		return 1
 	}
 
 	dbPath := filepath.Join(dataDir(), "heimdallm.db")
 	s, err := store.Open(dbPath)
 	if err != nil {
 		slog.Error("store open failed", "err", err)
-		os.Exit(1)
+		return 1
 	}
 	defer s.Close()
 
@@ -188,9 +522,9 @@ func main() {
 	eventBus := bus.New(bus.Config{
 		MaxConcurrentWorkers: cfg.Server.MaxConcurrentWorkers,
 	})
-	if err := eventBus.Start(context.Background()); err != nil {
+	if err := eventBus.Start(runtimeCtx); err != nil {
 		slog.Error("nats bus failed to start", "err", err)
-		os.Exit(1)
+		return 1
 	}
 	defer eventBus.Stop()
 
@@ -198,11 +532,12 @@ func main() {
 	watchStore, err := bus.NewWatchStore(s.DB())
 	if err != nil {
 		slog.Error("watch store failed to initialize", "err", err)
-		os.Exit(1)
+		return 1
 	}
 
 	broker := sse.NewBroker()
 	broker.Start()
+	defer broker.Stop()
 
 	// ── Bridge: SSE broker → NATS events ────────────────────────────────
 	// Re-publishes every broker event to NATS so the SSE handler (which
@@ -228,7 +563,7 @@ func main() {
 		if rec == nil {
 			slog.Warn("activity: broker subscriber cap reached; activity log will not record this session")
 		} else {
-			activityCtx, activityCancel := context.WithCancel(context.Background())
+			activityCtx, activityCancel := context.WithCancel(runtimeCtx)
 			defer activityCancel()
 			go rec.Start(activityCtx)
 			slog.Info("activity recorder started")
@@ -248,7 +583,7 @@ func main() {
 	}
 
 	notifier := notify.New()
-	ghClient := gh.NewClient(token)
+	ghClient := deps.newGitHubClient(token)
 	exec := executor.New()
 	repoCtx := repoctx.NewManagerWithOptions(repoctx.ManagerOptions{
 		MaxWorktreesPerRepo: cfg.AI.MaxWorktreesPerRepo,
@@ -258,8 +593,7 @@ func main() {
 	// startup the manager has no active worktrees, so every directory
 	// under `<clone>/.worktrees/` is by definition stale and safe to
 	// remove. Mirrors the in-flight DB sweeps above. (#461)
-	{
-		ctx := context.Background()
+	if err := runStartupWorktreePrune(runtimeCtx, updateWorkGate, func(ctx context.Context) {
 		for _, cloneDir := range managedCloneDirs(cfg) {
 			if n, err := repoCtx.PruneStaleWorktreesUnder(ctx, cloneDir); err != nil {
 				slog.Warn("startup: prune stale worktrees", "dir", cloneDir, "err", err)
@@ -267,17 +601,16 @@ func main() {
 				slog.Info("startup: pruned stale worktrees", "dir", cloneDir, "count", n)
 			}
 		}
-	}
-
-	// Load or create the per-daemon API token.  All mutating HTTP endpoints
-	// require this token in X-Heimdallm-Token (security issue #3).
-	apiToken, err := loadOrCreateAPIToken(dataDir())
-	if err != nil {
-		slog.Error("could not create API token — refusing to start without authentication", "err", err)
-		os.Exit(1)
+	}); err != nil {
+		if errors.Is(err, workgate.ErrDraining) {
+			slog.Debug("startup: stale worktree prune deferred while application update drains")
+		} else {
+			slog.Warn("startup: stale worktree prune could not acquire update permit", "err", err)
+		}
 	}
 
 	p := pipeline.New(s, ghClient, exec, &notifyWithSSE{notifier: notifier})
+	p.SetWorkGate(updateWorkGate)
 
 	// Circuit-breaker caps (see theburrowhub/heimdallm#243). The defaults are
 	// populated by config.applyDefaults so the caps are always set; nil disables
@@ -321,6 +654,7 @@ func main() {
 	// an issue that is classified as review_only, so this dep is harmless
 	// when auto_implement is not in use.
 	issuePipe := issuepipeline.New(s, ghClient, exec, issuepipeline.NewGitExec(), broker, &notifyWithSSE{notifier: notifier})
+	issuePipe.SetWorkGate(updateWorkGate)
 	issuePipe.SetCircuitBreakerLimits(&issueCBLimits)
 	// Wire the Tier 3 watch enroller so auto_implement-created PRs are
 	// picked up by the new review-state checker (#482). watchStore
@@ -339,6 +673,7 @@ func main() {
 	}
 	issueFetcher := issuepipeline.NewFetcher(ghClient, ghClient, s, issuePipe)
 	issueFetcher.SetBotLogin(resolvedBotLogin) // break re-triage loop (#362)
+	issueFetcher.SetSearcher(ghClient)         // enable aggregated Search API prefetch (separate rate budget)
 	// cfgMu protects cfg and the pipeline so reload is safe from any goroutine.
 	var cfgMu sync.Mutex
 	repoCurrentlyMonitored := func(repo string) bool {
@@ -358,15 +693,15 @@ func main() {
 	storePollInterval := func(interval time.Duration) {
 		atomic.StoreInt64(&pollIntervalNano, int64(interval))
 	}
-	storePollInterval(parsePollInterval(cfg.GitHub.PollInterval))
+	storePollInterval(cfg.ResolvedPollInterval())
 	recordPollCompleted := func(_ string, at time.Time) {
 		atomic.StoreInt64(&lastPollUnixNano, at.UTC().UnixNano())
 	}
 
-	srv := server.NewWithOptions(s, broker, p, apiToken, server.Options{
-		Version:   versionString(),
-		StartedAt: time.Now(),
-	})
+	// Publish the dependencies before lifting the startup gate. The atomic
+	// MarkReady transition makes the fully configured server visible to HTTP
+	// handlers as one lifecycle step.
+	srv.ConfigureDependencies(s, broker, p)
 	srv.SetNATSConn(eventBus.Conn())
 	srv.SetConfigPath(cfgPath)
 	srv.SetHealthSnapshotFn(func() server.HealthSnapshot {
@@ -386,6 +721,11 @@ func main() {
 	discoverySvc := discovery.NewService(ghClient)
 
 	srv.SetCleanCloneFn(func(ctx context.Context, repo string) error {
+		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, updateWorkGate, workgate.KindMaintenance)
+		if err != nil {
+			return err
+		}
+		defer releaseUpdateWork()
 		cfgMu.Lock()
 		aiCfg := cfg.AIForRepo(repo)
 		cfgMu.Unlock()
@@ -397,10 +737,20 @@ func main() {
 	// guarantees end-to-end. Reuses srv.TOMLMu() so the rewrite races
 	// safely with concurrent PATCH /config writes.
 	srv.SetRepoRenameFn(func(ctx context.Context, oldRepo, newRepo string) error {
+		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, updateWorkGate, workgate.KindMaintenance)
+		if err != nil {
+			return err
+		}
+		defer releaseUpdateWork()
 		reconciler := newRenameReconciler(cfg, &cfgMu, srv.TOMLMu(), s, repoCtx, broker, cfgPath)
 		return reconciler.Run(ctx, oldRepo, newRepo)
 	})
 	srv.SetCleanClonesFn(func(ctx context.Context) (int, error) {
+		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, updateWorkGate, workgate.KindMaintenance)
+		if err != nil {
+			return 0, err
+		}
+		defer releaseUpdateWork()
 		cfgMu.Lock()
 		cfgSnap := cfg
 		cfgMu.Unlock()
@@ -408,6 +758,14 @@ func main() {
 	})
 
 	runCloneRetention := func(reason string) {
+		ctx, cancel := context.WithTimeout(runtimeCtx, 5*time.Minute)
+		defer cancel()
+		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, updateWorkGate, workgate.KindMaintenance)
+		if err != nil {
+			slog.Debug("clone retention deferred while application update drains", "reason", reason)
+			return
+		}
+		defer releaseUpdateWork()
 		cfgMu.Lock()
 		cfgSnap := cfg
 		var discovered []string
@@ -415,8 +773,6 @@ func main() {
 			discovered = discoverySvc.Discovered()
 		}
 		cfgMu.Unlock()
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
 		removed, err := purgeStaleManagedClones(ctx, repoCtx, cfgSnap, discovered)
 		if err != nil {
 			slog.Warn("clone retention purge failed", "reason", reason, "err", err)
@@ -456,19 +812,20 @@ func main() {
 		cfgMu.Unlock()
 		extraFlags := agentCfg.ExtraFlags
 		if extraFlags != "" {
-			if err := executor.ValidateExtraFlags(extraFlags); err != nil {
+			if err := executor.ValidateExtraFlagsForCLI(cli, extraFlags); err != nil {
 				slog.Warn("buildRunOpts: extra_flags from config rejected", "err", err)
 				extraFlags = ""
 			}
 		}
 		return pipeline.RunOptions{
-			Primary:                aiCfg.Primary,
-			Fallback:               aiCfg.Fallback,
-			PromptOverride:         aiCfg.Prompt,
-			AgentPromptID:          agentCfg.PromptID,
-			ReviewMode:             aiCfg.ReviewMode,
-			InstructionAuthors:     aiCfg.InstructionAuthors,
-			NeverApproveWithIssues: aiCfg.NeverApproveWithIssues != nil && *aiCfg.NeverApproveWithIssues,
+			Primary:                 aiCfg.Primary,
+			Fallback:                aiCfg.Fallback,
+			PromptOverride:          aiCfg.Prompt,
+			AgentPromptID:           agentCfg.PromptID,
+			ReviewMode:              aiCfg.ReviewMode,
+			InstructionAuthors:      aiCfg.InstructionAuthors,
+			NeverApproveWithIssues:  aiCfg.NeverApproveWithIssues != nil && *aiCfg.NeverApproveWithIssues,
+			NeverApproveMinSeverity: aiCfg.NeverApproveMinSeverity,
 			ExecOpts: executor.ExecOptions{
 				Model:                agentCfg.Model,
 				MaxTurns:             agentCfg.MaxTurns,
@@ -486,7 +843,13 @@ func main() {
 		}
 	}
 
-	runReview := func(pr *gh.PullRequest, aiCfg config.RepoAI) *store.Review {
+	runReview := func(ctx context.Context, pr *gh.PullRequest, aiCfg config.RepoAI) *store.Review {
+		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, updateWorkGate, workgate.KindReview)
+		if err != nil {
+			slog.Debug("review deferred while application update drains", "repo", pr.Repo, "pr", pr.Number)
+			return nil
+		}
+		defer releaseUpdateWork()
 		// Persistent in-flight claim: survives daemon restart and config reload.
 		// Keyed on (pr_id, head_sha) so a new commit on the same PR is not
 		// gated by a stale in-flight row from a prior HEAD. See
@@ -585,6 +948,7 @@ func main() {
 		// Bugs 3+4 for the regression that made emitting from here unsafe.
 		runOpts := buildRunOpts(pr, aiCfg)
 		runOpts.RepoEligible = repoCurrentlyMonitored
+		runOpts.WorkPermit = workgate.PermitFromContext(ctx)
 		rev, err := p.Run(pr, runOpts)
 		if err != nil {
 			slog.Error("pipeline run failed", "repo", pr.Repo, "pr", pr.Number, "err", err)
@@ -627,6 +991,11 @@ func main() {
 	// Shared rate limiter (was Pipeline.limiter).
 	limiter := scheduler.NewRateLimiter(4500)
 
+	// Wire the GitHub client → rate limiter so every API response updates the
+	// live budget, enabling proactive throttle before a 403 and correct backoff
+	// on secondary limits (Retry-After).
+	ghClient.SetRateObserver(&rateLimitAdapter{limiter: limiter})
+
 	// tier2Adapter bridges main.go's concrete types to the polling logic.
 	adapter := &tier2Adapter{
 		ghClient:             ghClient,
@@ -637,6 +1006,7 @@ func main() {
 		repoCtx:              repoCtx,
 		store:                s,
 		broker:               broker,
+		publishOrderedEvents: newOrderedNATSEventPublisher(conn),
 		cfgMu:                &cfgMu,
 		cfg:                  &cfg,
 		loginMu:              &loginMu,
@@ -644,6 +1014,7 @@ func main() {
 		runReview:            runReview,
 		publishPub:           publishPub,
 		watchStore:           watchStore,
+		workGate:             updateWorkGate,
 		lastSkippedUpdatedAt: make(map[int64]time.Time),
 		lastBreakerTrips:     make(map[breakerTripKey]breakerTripDedup),
 	}
@@ -663,7 +1034,7 @@ func main() {
 		defer loginMu.Unlock()
 		return cachedLogin
 	}
-	adapter.responder = issuepipeline.NewResponder(
+	responder := issuepipeline.NewResponder(
 		s, ghClient,
 		&prReviewExecutor{runner: exec, cfg: &cfg, cfgMu: &cfgMu},
 		broker,
@@ -674,7 +1045,9 @@ func main() {
 		},
 		botLoginAccessor,
 	)
-	adapter.fixRunner = issuepipeline.NewFixRunner(
+	responder.SetWorkGate(updateWorkGate)
+	adapter.responder = responder
+	fixRunner := issuepipeline.NewFixRunner(
 		s, ghClient,
 		&prFixExecutor{
 			pipeline: issuePipe,
@@ -692,6 +1065,8 @@ func main() {
 		},
 		botLoginAccessor,
 	)
+	fixRunner.SetWorkGate(updateWorkGate)
+	adapter.fixRunner = fixRunner
 
 	repoPublisher := bus.NewRepoPublisher(conn)
 	prReviewPublisher := bus.NewPRReviewPublisher(conn)
@@ -701,12 +1076,67 @@ func main() {
 	// consumes from NATS and forwards repo lists through this channel.
 	reposChan := make(chan []string, 1)
 
+	// adaptiveSched is the per-repo adaptive interval engine (C5). It is
+	// constructed once at daemon start and intentionally outlives config
+	// reloads — accumulated backoff state must not be lost when the operator
+	// tweaks an unrelated setting. Bound changes are applied in place by
+	// applyClientRuntimeConfig instead of by recreating it. It is passed to
+	// runTier2 which uses it when cfg.Polling.Adaptive is true; when Adaptive
+	// is false the scheduler is allocated but never consulted, so the overhead
+	// is negligible.
+	cfgMu.Lock()
+	adaptiveSched := scheduler.NewAdaptiveScheduler(cfg.ResolvedMinInterval(), cfg.ResolvedMaxInterval())
+	cfgMu.Unlock()
+
+	// Push the [polling] runtime knobs into the client, limiter and scheduler.
+	// Deferred to here rather than at client construction because it needs
+	// adaptiveSched; nothing issues requests before the pollers start.
+	// Under cfgMu like every other cfg read: a reload can already be in flight
+	// by this point, and the adaptiveSched construction above locks for the
+	// same reason.
+	cfgMu.Lock()
+	startupCfg := cfg
+	cfgMu.Unlock()
+	applyClientRuntimeConfig(ghClient, limiter, adaptiveSched, startupCfg)
+
 	// startPollers launches all polling goroutines under the given context.
 	// Returns a cancel function and a WaitGroup that completes when all
 	// goroutines have exited.
-	startPollers := func(ctx context.Context, coldStart bool) (context.CancelFunc, *sync.WaitGroup) {
+	startPollers := func(ctx context.Context, coldStart bool) (context.CancelFunc, *sync.WaitGroup, error) {
 		ctx, cancel := context.WithCancel(ctx)
 		var wg sync.WaitGroup
+
+		// Meter the separate 30/min search budget per request. Rewired on every
+		// restart so the gate blocks on the CURRENT poller context and a
+		// shutdown cannot be held up waiting on a budget nobody will use.
+		ghClient.SetSearchGate(func() error {
+			return limiter.AcquireResource(ctx, scheduler.TierRepo, scheduler.SearchResource)
+		})
+		ghClient.SetGraphQLGate(func() error {
+			return limiter.AcquireResource(ctx, scheduler.TierRepo, scheduler.GraphQLResource)
+		})
+
+		// Core NATS has no persistence. Establish and flush the discovery
+		// subscription before Tier 1 can publish its initial snapshot; otherwise
+		// a fast producer wins the race and Tier 2 waits a full poll interval.
+		bridgeReady := make(chan error, 1)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			bridgeDiscovery(ctx, conn, reposChan, bridgeReady)
+		}()
+		select {
+		case err := <-bridgeReady:
+			if err != nil {
+				cancel()
+				wg.Wait()
+				return nil, nil, fmt.Errorf("start discovery bridge: %w", err)
+			}
+		case <-ctx.Done():
+			cancel()
+			wg.Wait()
+			return nil, nil, ctx.Err()
+		}
 
 		// Rate limiter hourly refill
 		wg.Add(1)
@@ -738,6 +1168,11 @@ func main() {
 			defer wg.Done()
 			const sweepInterval = 5 * time.Minute
 			const inflightSweepMaxAge = 30 * time.Minute
+			// The attempt ledger is only ever read through the breaker's
+			// windows (24h per-PR, 1h per-repo). 48h keeps a full margin over
+			// the widest of those: pruning anything still inside a window would
+			// silently reset a cap that is meant to be in force.
+			const attemptLedgerMaxAge = 48 * time.Hour
 			ticker := time.NewTicker(sweepInterval)
 			defer ticker.Stop()
 			for {
@@ -755,16 +1190,20 @@ func main() {
 					} else if n > 0 {
 						slog.Info("sweep: cleared stale issue triage inflight rows", "count", n)
 					}
+					if n, err := s.PruneReviewAttempts(attemptLedgerMaxAge); err != nil {
+						slog.Warn("sweep: prune review attempts failed", "err", err)
+					} else if n > 0 {
+						slog.Info("sweep: pruned review attempt rows", "count", n)
+					}
 				}
 			}
 		}()
 
 		// Tier 1: Discovery — publishes to NATS
+		// [polling].discovery_interval takes precedence over [github].discovery_interval;
+		// both fall back to 5m (ResolvedDiscoveryInterval handles the full cascade).
 		cfgMu.Lock()
-		discoveryInterval := parseDiscoveryInterval(
-			cfg.GitHub.DiscoveryInterval,
-			cfg.GitHub.PollInterval,
-		)
+		discoveryInterval := cfg.ResolvedDiscoveryInterval()
 		cfgMu.Unlock()
 		wg.Add(1)
 		go func() {
@@ -807,16 +1246,10 @@ func main() {
 			}
 		}()
 
-		// Bridge: NATS discovery subscription → reposChan
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			bridgeDiscovery(ctx, conn, reposChan)
-		}()
-
-		// Tier 2: PR / issue polling
+		// Tier 2: PR / issue polling — use the resolved interval which honours
+		// [polling].poll_interval > [github].poll_interval > 5m default.
 		cfgMu.Lock()
-		pollInterval := parsePollInterval(cfg.GitHub.PollInterval)
+		pollInterval := cfg.ResolvedPollInterval()
 		cfgMu.Unlock()
 		storePollInterval(pollInterval)
 		wg.Add(1)
@@ -836,7 +1269,12 @@ func main() {
 				defer cfgMu.Unlock()
 				return cfg.AI.Tier2RepoConcurrency
 			}
-			runTier2(ctx, adapter, limiter, prReviewPublisher, broker, tier2ConfigFn, tier2RepoConcurrencyFn, reposChan, pollInterval, coldStart, recordPollCompleted)
+			tier2AdaptiveFn := func() bool {
+				cfgMu.Lock()
+				defer cfgMu.Unlock()
+				return cfg.Polling.Adaptive
+			}
+			runTier2(ctx, adapter, limiter, prReviewPublisher, broker, tier2ConfigFn, tier2RepoConcurrencyFn, tier2AdaptiveFn, adaptiveSched, reposChan, pollInterval, coldStart, recordPollCompleted)
 		}()
 
 		// Repo/org rename probe (#489). Detects when GitHub has
@@ -855,7 +1293,7 @@ func main() {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				probe := newRenameProbe(ctx, cfg, &cfgMu, srv.TOMLMu(), ghClient, s, repoCtx, broker, cfgPath, renameInterval)
+				probe := newRenameProbe(ctx, cfg, &cfgMu, srv.TOMLMu(), ghClient, s, repoCtx, broker, cfgPath, renameInterval, updateWorkGate)
 				probe.Run(ctx)
 			}()
 			slog.Info("rename probe: started", "interval", renameInterval)
@@ -891,6 +1329,7 @@ func main() {
 			broker:   broker,
 			orch:     autonomous.NewOrchestrator(autonomousStageR, autonomous.NewPhaseGuard()),
 			runner:   exec,
+			workGate: updateWorkGate,
 			cfg:      &cfg,
 			cfgMu:    &cfgMu,
 			botLogin: botLoginAccessor,
@@ -918,23 +1357,38 @@ func main() {
 			}
 		}()
 
+		// Every other cfg read in startPollers takes cfgMu; these two did not.
+		// startPollers re-runs on the restart goroutine after a reload, where a
+		// concurrent reload can reassign cfg under the same mutex — a data race
+		// that -race would flag.
+		cfgMu.Lock()
+		etagEnabled := cfg.ETagEnabled()
+		rateLimitThreshold := cfg.Polling.RateLimitSafetyThreshold
+		cfgMu.Unlock()
 		slog.Info("pollers: started",
 			"discovery", discoveryInterval,
-			"poll", pollInterval)
+			"poll", pollInterval,
+			"etag_cache", etagEnabled,
+			"rate_limit_threshold", rateLimitThreshold)
 
-		return cancel, &wg
+		return cancel, &wg, nil
 	}
 
 	// Initial daemon start → coldStart=true so Tier 2 fires its first tick
 	// immediately; operators see polling activity without waiting an entire
 	// PollInterval. The reload path below passes false.
-	pollerCancel, pollerWg := startPollers(context.Background(), true)
+	if err := takeServeFailure(); err != nil {
+		slog.Error("daemon: aborting startup after HTTP serve failure", "err", err)
+		return 1
+	}
+	const coreWorkerCount = 6
+	workerReady := make(chan error, coreWorkerCount)
 
 	// ── NATS PR review worker ───────────────────────────────────────────
 	// Consumes PR review requests published by Tier 2 and runs the
 	// existing review pipeline. This replaces the goroutine-per-PR
 	// pattern that Tier 2 used to use.
-	reviewHandler := func(ctx context.Context, msg bus.PRReviewMsg) {
+	reviewHandlerCore := func(ctx context.Context, msg bus.PRReviewMsg) {
 		skipIfUnmonitored := func(stage string) bool {
 			if repoCurrentlyMonitored(msg.Repo) {
 				return false
@@ -980,6 +1434,22 @@ func main() {
 				"msg_sha", msg.HeadSHA, "current_sha", pr.Head.SHA)
 			return
 		}
+		loginMu.Lock()
+		botLogin := cachedLogin
+		loginMu.Unlock()
+		if botLogin != "" && !pr.ReviewRequestedFor(botLogin) {
+			// Search is eventually consistent; the fresh Pulls response is the
+			// source of truth. Keeping this guard in the worker removes the old
+			// duplicate serial hydration without admitting ghost results.
+			slog.Debug("review-worker: bot no longer requested, skipping stale search result",
+				"repo", msg.Repo, "pr", msg.Number, "bot", botLogin)
+			return
+		}
+		if adapter.PRAlreadyReviewed(pr.ID, pr.Repo, pr.Number, pr.UpdatedAt, pr.Head.SHA) {
+			slog.Debug("review-worker: fresh PR already handled, skipping",
+				"repo", msg.Repo, "pr", msg.Number, "head_sha", pr.Head.SHA)
+			return
+		}
 		if skipIfUnmonitored("pre_run") {
 			return
 		}
@@ -1003,7 +1473,7 @@ func main() {
 			return
 		}
 
-		rev := runReview(pr, aiCfg)
+		rev := runReview(ctx, pr, aiCfg)
 
 		// If review succeeded but wasn't published to GitHub yet,
 		// enqueue for the publish worker.
@@ -1021,11 +1491,17 @@ func main() {
 		}
 	}
 
+	reviewHandler := guardUpdateVoidHandler(
+		updateWorkGate,
+		workgate.KindReview,
+		"review-worker: deferred while application update drains",
+		reviewHandlerCore,
+	)
 	reviewWorker := worker.NewReviewWorker(conn, maxWorkers, reviewHandler)
-	workerCtx, workerCancel := context.WithCancel(context.Background())
+	workerCtx, workerCancel := context.WithCancel(runtimeCtx)
 	defer workerCancel()
 	go func() {
-		if err := reviewWorker.Start(workerCtx); err != nil {
+		if err := reviewWorker.Start(workerCtx, workerReady); err != nil {
 			slog.Error("review worker stopped", "err", err)
 		}
 	}()
@@ -1034,7 +1510,7 @@ func main() {
 	// Consumes publish requests and submits stored reviews to GitHub.
 	// Replaces the manual retry loop in PublishPending with NATS retry
 	// semantics (NakWithDelay for transient GitHub errors).
-	publishHandler := func(ctx context.Context, msg bus.PRPublishMsg) error {
+	publishHandlerCore := func(ctx context.Context, msg bus.PRPublishMsg) error {
 		rev, err := s.GetReview(msg.ReviewID)
 		if err != nil {
 			slog.Warn("publish-worker: review not found, skipping",
@@ -1167,7 +1643,7 @@ func main() {
 		if deferForMonitoringChange("before_submit") {
 			return nil
 		}
-		reviewBody := pipeline.AnnotateBodyForEvent(pipeline.BuildGitHubBody(result), publishEvent)
+		reviewBody := pipeline.AnnotateBodyForEvent(pipeline.BuildGitHubBody(result), publishEvent, len(result.Issues))
 		var ghID int64
 		var ghState string
 		if rev.HeadSHA != "" {
@@ -1205,11 +1681,18 @@ func main() {
 		return nil // success — ack
 	}
 
+	publishHandler := guardUpdateResultHandler(
+		updateWorkGate,
+		workgate.KindPublish,
+		"publish-worker: deferred while application update drains",
+		error(nil), // PublishPending re-enqueues the still-unpublished row.
+		publishHandlerCore,
+	)
 	publishW := worker.NewPublishWorker(conn, maxWorkers, publishHandler)
-	publishWCtx, publishWCancel := context.WithCancel(context.Background())
+	publishWCtx, publishWCancel := context.WithCancel(runtimeCtx)
 	defer publishWCancel()
 	go func() {
-		if err := publishW.Start(publishWCtx); err != nil {
+		if err := publishW.Start(publishWCtx, workerReady); err != nil {
 			slog.Error("publish worker stopped", "err", err)
 		}
 	}()
@@ -1218,7 +1701,7 @@ func main() {
 	// Consumes triage requests published by the Fetcher when it classifies
 	// an issue as review_only. Fetches the issue from GitHub for fresh data,
 	// resolves per-repo config, and runs the issue pipeline.
-	triageHandler := func(ctx context.Context, msg bus.IssueMsg) {
+	triageHandlerCore := func(ctx context.Context, msg bus.IssueMsg) {
 		ghIssue, err := ghClient.GetIssue(msg.Repo, msg.Number)
 		if err != nil {
 			slog.Error("triage-worker: fetch issue from GitHub",
@@ -1262,7 +1745,7 @@ func main() {
 
 		extraFlags := agentCfg.ExtraFlags
 		if extraFlags != "" {
-			if err := executor.ValidateExtraFlags(extraFlags); err != nil {
+			if err := executor.ValidateExtraFlagsForCLI(aiCfg.Primary, extraFlags); err != nil {
 				slog.Warn("triage-worker: extra_flags rejected", "err", err)
 				extraFlags = ""
 			}
@@ -1299,6 +1782,7 @@ func main() {
 			PRDraft:                 aiCfg.PRDraft != nil && *aiCfg.PRDraft,
 			GeneratePRDescription:   aiCfg.GeneratePRDescription != nil && *aiCfg.GeneratePRDescription,
 			AuthUser:                authUser,
+			WorkPermit:              workgate.PermitFromContext(ctx),
 		}
 
 		rev, err := issuePipe.Run(ctx, ghIssue, opts)
@@ -1318,11 +1802,17 @@ func main() {
 		}
 	}
 
+	triageHandler := guardUpdateVoidHandler(
+		updateWorkGate,
+		workgate.KindIssue,
+		"triage-worker: deferred while application update drains",
+		triageHandlerCore,
+	)
 	triageW := worker.NewTriageWorker(conn, maxWorkers, triageHandler)
-	triageWCtx, triageWCancel := context.WithCancel(context.Background())
+	triageWCtx, triageWCancel := context.WithCancel(runtimeCtx)
 	defer triageWCancel()
 	go func() {
-		if err := triageW.Start(triageWCtx); err != nil {
+		if err := triageW.Start(triageWCtx, workerReady); err != nil {
 			slog.Error("triage worker stopped", "err", err)
 		}
 	}()
@@ -1331,7 +1821,7 @@ func main() {
 	// Consumes refinement requests published by the Fetcher when it classifies
 	// an issue as refinement. Refinement is read-only but requires a full local
 	// checkout so the agent can inspect code and git history.
-	refinementHandler := func(ctx context.Context, msg bus.IssueMsg) {
+	refinementHandlerCore := func(ctx context.Context, msg bus.IssueMsg) {
 		ghIssue, err := ghClient.GetIssue(msg.Repo, msg.Number)
 		if err != nil {
 			slog.Error("refinement-worker: fetch issue from GitHub",
@@ -1378,6 +1868,7 @@ func main() {
 		if releaseRepoContext != nil {
 			defer releaseRepoContext()
 		}
+		opts.WorkPermit = workgate.PermitFromContext(ctx)
 
 		rev, err := issuePipe.Run(ctx, ghIssue, opts)
 		if err != nil {
@@ -1396,11 +1887,17 @@ func main() {
 		}
 	}
 
+	refinementHandler := guardUpdateVoidHandler(
+		updateWorkGate,
+		workgate.KindIssue,
+		"refinement-worker: deferred while application update drains",
+		refinementHandlerCore,
+	)
 	refinementW := worker.NewRefinementWorker(conn, maxWorkers, refinementHandler)
-	refinementWCtx, refinementWCancel := context.WithCancel(context.Background())
+	refinementWCtx, refinementWCancel := context.WithCancel(runtimeCtx)
 	defer refinementWCancel()
 	go func() {
-		if err := refinementW.Start(refinementWCtx); err != nil {
+		if err := refinementW.Start(refinementWCtx, workerReady); err != nil {
 			slog.Error("refinement worker stopped", "err", err)
 		}
 	}()
@@ -1408,7 +1905,7 @@ func main() {
 	// ── NATS issue implement worker ─────────────────────────────────────
 	// Consumes implement requests published by the Fetcher when it classifies
 	// an issue as develop. Same config resolution as triage, different mode.
-	implementHandler := func(ctx context.Context, msg bus.IssueMsg) {
+	implementHandlerCore := func(ctx context.Context, msg bus.IssueMsg) {
 		ghIssue, err := ghClient.GetIssue(msg.Repo, msg.Number)
 		if err != nil {
 			slog.Error("implement-worker: fetch issue from GitHub",
@@ -1458,7 +1955,7 @@ func main() {
 
 		extraFlags := agentCfg.ExtraFlags
 		if extraFlags != "" {
-			if err := executor.ValidateExtraFlags(extraFlags); err != nil {
+			if err := executor.ValidateExtraFlagsForCLI(aiCfg.Primary, extraFlags); err != nil {
 				slog.Warn("implement-worker: extra_flags rejected", "err", err)
 				extraFlags = ""
 			}
@@ -1496,6 +1993,7 @@ func main() {
 			GeneratePRDescription:    aiCfg.GeneratePRDescription != nil && *aiCfg.GeneratePRDescription,
 			AuthUser:                 authUser,
 			RequireWorkDirForDevelop: true,
+			WorkPermit:               workgate.PermitFromContext(ctx),
 		}
 
 		if _, err := issuePipe.Run(ctx, ghIssue, opts); err != nil {
@@ -1512,29 +2010,54 @@ func main() {
 		}
 	}
 
+	implementHandler := guardUpdateVoidHandler(
+		updateWorkGate,
+		workgate.KindImplementation,
+		"implement-worker: deferred while application update drains",
+		implementHandlerCore,
+	)
 	implementW := worker.NewImplementWorker(conn, maxWorkers, implementHandler)
-	implementWCtx, implementWCancel := context.WithCancel(context.Background())
+	implementWCtx, implementWCancel := context.WithCancel(runtimeCtx)
 	defer implementWCancel()
 	go func() {
-		if err := implementW.Start(implementWCtx); err != nil {
+		if err := implementW.Start(implementWCtx, workerReady); err != nil {
 			slog.Error("implement worker stopped", "err", err)
 		}
 	}()
 
 	// ── State check poller ──────────────────────────────────────────────
-	// Scans the NATS KV watch bucket every 30s and publishes StateCheckMsg
-	// for items due for a state check. Replaces the in-memory WatchQueue.
+	// Scans the NATS KV watch bucket on the configured Tier 3 interval and
+	// publishes StateCheckMsg for items due for a state check. Replaces the
+	// in-memory WatchQueue. Default: 30s (matches previous hardcoded value).
 	stateCheckPub := bus.NewStateCheckPublisher(conn)
-	statePollerCtx, statePollerCancel := context.WithCancel(context.Background())
+	statePollerCtx, statePollerCancel := context.WithCancel(runtimeCtx)
 	defer statePollerCancel()
 	go func() {
-		ticker := time.NewTicker(30 * time.Second)
+		cfgMu.Lock()
+		tier3Interval := cfg.ResolvedTier3Interval()
+		cfgMu.Unlock()
+		ticker := time.NewTicker(tier3Interval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-statePollerCtx.Done():
 				return
 			case <-ticker.C:
+				// This goroutine lives outside startPollers and is only
+				// cancelled at shutdown, so a reload that changes
+				// tier3_interval would otherwise leave it ticking at the old
+				// cadence forever while GET /config reported the new one.
+				// Re-read and reset each tick instead.
+				cfgMu.Lock()
+				wantInterval := cfg.ResolvedTier3Interval()
+				cfgMu.Unlock()
+				if wantInterval != tier3Interval {
+					slog.Info("state-poller: tier3 interval changed, resetting ticker",
+						"from", tier3Interval, "to", wantInterval)
+					tier3Interval = wantInterval
+					ticker.Reset(tier3Interval)
+				}
+
 				// Gradually enroll one monitored open item not yet in watch_state per tick.
 				// Backfills items from before the NATS migration without blocking startup.
 				enrollOpenItems(statePollerCtx, s, watchStore, adapter.monitoredRepos())
@@ -1633,13 +2156,28 @@ func main() {
 	}
 
 	stateW := worker.NewStateWorker(conn, maxWorkers*2, watchStore, stateHandler)
-	stateWCtx, stateWCancel := context.WithCancel(context.Background())
+	stateW.SetWorkGate(updateWorkGate)
+	stateWCtx, stateWCancel := context.WithCancel(runtimeCtx)
 	defer stateWCancel()
 	go func() {
-		if err := stateW.Start(stateWCtx); err != nil {
+		if err := stateW.Start(stateWCtx, workerReady); err != nil {
 			slog.Error("state worker stopped", "err", err)
 		}
 	}()
+
+	// All six work subjects use Core NATS. Confirm their subscriptions have
+	// reached the server before a cold poll can publish; otherwise startup can
+	// lose review/issue messages until the next poll just as discovery could.
+	if err := waitForWorkerReadiness(runtimeCtx, workerReady, coreWorkerCount, 5*time.Second); err != nil {
+		slog.Error("workers: subscriptions not ready", "err", err)
+		return 1
+	}
+
+	pollerCancel, pollerWg, err := startPollers(runtimeCtx, true)
+	if err != nil {
+		slog.Error("pollers: startup failed", "err", err)
+		return 1
+	}
 
 	// Use a closure so the defer reads the current cancel/wg at shutdown
 	// time, not the initial values captured at defer-statement time. After a
@@ -1647,6 +2185,13 @@ func main() {
 	// defer would stop the already-halted original set and leak the
 	// post-reload ones.
 	defer func() {
+		// A reload restart owns restartMu across old-poller teardown and new-
+		// poller publication. Cancel the shared parent first, then wait for that
+		// critical section before snapshotting, so shutdown can never miss a
+		// newly published poller set.
+		runtimeCancel()
+		restartMu.Lock()
+		defer restartMu.Unlock()
 		cfgMu.Lock()
 		cancel := pollerCancel
 		wg := pollerWg
@@ -1773,6 +2318,7 @@ func main() {
 			"clone_dir":                   c.AI.CloneDir,
 			"generate_pr_description":     c.AI.GeneratePRDescription,
 			"never_approve_with_issues":   c.AI.NeverApproveWithIssues,
+			"never_approve_min_severity":  c.AI.NeverApproveMinSeverity,
 		}
 		if c.AI.AutoPromoteTriage != nil {
 			result["auto_promote_triage"] = *c.AI.AutoPromoteTriage
@@ -1825,6 +2371,17 @@ func main() {
 			"per_issue_24h":     c.CircuitBreaker.PerIssue24h,
 			"per_issue_repo_hr": c.CircuitBreaker.PerIssueRepoHr,
 			"per_impl_repo_hr":  c.CircuitBreaker.PerImplRepoHr,
+		}
+		result["polling"] = map[string]any{
+			"poll_interval":               c.Polling.PollInterval,
+			"min_interval":                c.Polling.MinInterval,
+			"max_interval":                c.Polling.MaxInterval,
+			"adaptive":                    c.Polling.Adaptive,
+			"discovery_interval":          c.Polling.DiscoveryInterval,
+			"tier3_interval":              c.Polling.Tier3Interval,
+			"rate_limit_safety_threshold": c.Polling.RateLimitSafetyThreshold,
+			"use_etag":                    c.ETagEnabled(),
+			"use_graphql":                 c.GraphQLEnabled(),
 		}
 		return result
 	})
@@ -1888,6 +2445,9 @@ func main() {
 		if !restartPollers {
 			cfg = newCfg
 			cfgMu.Unlock()
+			// The kill-switches live on the client and limiter, not the
+			// pollers, so they need applying even when nothing restarts.
+			applyClientRuntimeConfig(ghClient, limiter, adaptiveSched, newCfg)
 			slog.Info("config reload: applied without poller restart")
 			return nil
 		}
@@ -1898,6 +2458,7 @@ func main() {
 		cfgMu.Lock()
 		cfg = newCfg
 		cfgMu.Unlock()
+		applyClientRuntimeConfig(ghClient, limiter, adaptiveSched, newCfg)
 
 		// Restart the pollers in the BACKGROUND. oldWg.Wait() can block for
 		// tens of seconds (an in-flight poll cycle or agent review must finish
@@ -1922,7 +2483,22 @@ func main() {
 			oldCancel()
 			oldWg.Wait()
 
-			newCancel, newWg := startPollers(context.Background(), false)
+			if runtimeCtx.Err() != nil {
+				slog.Info("config reload: poller restart skipped during shutdown")
+				return
+			}
+
+			newCancel, newWg, err := startPollers(runtimeCtx, false)
+			if err != nil {
+				slog.Error("config reload: poller restart failed", "err", err)
+				return
+			}
+			if runtimeCtx.Err() != nil {
+				newCancel()
+				newWg.Wait()
+				slog.Info("config reload: new pollers stopped during shutdown")
+				return
+			}
 
 			cfgMu.Lock()
 			pollerCancel = newCancel
@@ -1930,6 +2506,9 @@ func main() {
 			cfgMu.Unlock()
 
 			slog.Info("config reload: pollers restarted")
+			if deps.afterPollerRestart != nil {
+				deps.afterPollerRestart()
+			}
 		}()
 
 		return nil
@@ -1942,6 +2521,12 @@ func main() {
 	// trigger invocations via the closure below.
 	manualReviewGuard := newTriggerGuard()
 	srv.SetTriggerReviewFn(func(prID int64) error {
+		ctx, releaseUpdateWork, err := acquireUpdateWork(runtimeCtx, updateWorkGate, workgate.KindReview)
+		if err != nil {
+			slog.Debug("trigger review deferred while application update drains", "pr_id", prID)
+			return nil
+		}
+		defer releaseUpdateWork()
 		publishErr := func(msg string) {
 			broker.Publish(sse.Event{
 				Type: sse.EventReviewError,
@@ -1977,7 +2562,7 @@ func main() {
 		aiCfg := cfg.AIForRepo(pr.Repo)
 		localDirBase := cfg.GitHub.LocalDirBase
 		cfgMu.Unlock()
-		repoHandle, err := acquireRepoContext(context.Background(), repoCtx, pr.Repo, &aiCfg, localDirBase, token, repoctx.ModeRead, wtTokenFor("pr-review", pr.Number), "", "")
+		repoHandle, err := acquireRepoContext(ctx, repoCtx, pr.Repo, &aiCfg, localDirBase, token, repoctx.ModeRead, wtTokenFor("pr-review", pr.Number), "", "")
 		if err != nil {
 			logRepoContextFallback("trigger review", pr.Repo, err)
 			aiCfg.LocalDir = ""
@@ -2076,6 +2661,7 @@ func main() {
 		// See pipeline.RunOptions.Force. The poll path never sets this.
 		runOpts := buildRunOpts(ghPR, aiCfg)
 		runOpts.Force = true
+		runOpts.WorkPermit = workgate.PermitFromContext(ctx)
 		rev, err := p.Run(ghPR, runOpts)
 		if err != nil {
 			var cbErr *pipeline.CircuitBreakerError
@@ -2153,8 +2739,14 @@ func main() {
 		// so r.Context() would be cancelled as soon as the response is
 		// written. Use an explicit operation timeout instead so the
 		// GitHub refetch and NATS publish remain bounded.
-		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+		ctx, cancel := context.WithTimeout(runtimeCtx, 1*time.Minute)
 		defer cancel()
+		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, updateWorkGate, workgate.KindIssue)
+		if err != nil {
+			slog.Debug("trigger issue review deferred while application update drains", "issue_id", issueID)
+			return nil
+		}
+		defer releaseUpdateWork()
 
 		publishIssueErr := func(msg string) {
 			broker.Publish(sse.Event{
@@ -2201,8 +2793,14 @@ func main() {
 
 	// Wire the issue-refinement trigger callback: run deep repo investigation on a stored issue.
 	srv.SetTriggerIssueRefineFn(func(issueID int64, force bool) error {
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(runtimeCtx)
 		defer cancel()
+		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, updateWorkGate, workgate.KindIssue)
+		if err != nil {
+			slog.Debug("trigger issue refinement deferred while application update drains", "issue_id", issueID)
+			return nil
+		}
+		defer releaseUpdateWork()
 
 		publishIssueErr := func(msg string) {
 			broker.Publish(sse.Event{
@@ -2242,6 +2840,7 @@ func main() {
 		if releaseRepoContext != nil {
 			defer releaseRepoContext()
 		}
+		opts.WorkPermit = workgate.PermitFromContext(ctx)
 
 		slog.Info("trigger issue refinement: running pipeline",
 			"store_issue_id", issueID, "repo", iss.Repo, "number", iss.Number, "force", force)
@@ -2259,8 +2858,13 @@ func main() {
 	// Wire the promote callback. Promotion only changes GitHub stage labels and
 	// records an audit comment; the next poll executes the newly-visible stage.
 	srv.SetTriggerPromoteFn(func(issueID int64) error {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(runtimeCtx, 30*time.Second)
 		defer cancel()
+		ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, updateWorkGate, workgate.KindMaintenance)
+		if err != nil {
+			return err
+		}
+		defer releaseUpdateWork()
 
 		publishIssueErr := func(msg string) {
 			broker.Publish(sse.Event{
@@ -2329,27 +2933,110 @@ func main() {
 		return nil
 	})
 
-	go func() {
+	serveDied := false
+	if err := takeServeFailure(); err != nil {
+		// Workers now exist, so do not return directly: the common shutdown path
+		// below must cancel every producer and terminate any child CLI already
+		// launched during startup.
+		slog.Error("daemon: aborting startup after HTTP serve failure", "err", err)
+		serveDied = true
+	} else {
+		// Every dependency is wired: /health can run its deep checks now. The
+		// listener has been bound since the start of run and is actively served,
+		// so this log line means what it says — the daemon is reachable and ready.
+		srv.MarkReady()
 		slog.Info("daemon started", "port", cfg.Server.Port, "bind", cfg.Server.BindAddr)
-		if err := srv.Start(cfg.Server.Port, cfg.Server.BindAddr); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("server stopped", "err", err)
-		}
-	}()
+	}
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	select {
-	case received := <-sig:
-		slog.Info("shutting down", "signal", received.String())
-	case <-shutdownReq:
-		slog.Info("shutting down via API")
+	defer signal.Stop(sig)
+	if !serveDied {
+		select {
+		case received := <-sig:
+			slog.Info("shutting down", "signal", received.String())
+		case <-shutdownReq:
+			slog.Info("shutting down via API")
+		case err := <-serveFailed:
+			// Losing the listener mid-flight leaves the same headless daemon the
+			// bind check above prevents at startup, so treat it the same way:
+			// shut down and exit non-zero instead of polling GitHub forever with
+			// nobody able to reach us (#646). Already logged in the serve goroutine.
+			slog.Error("daemon: shutting down after serve failure", "err", err)
+			serveDied = true
+		}
 	}
+	// Keep the HTTP ownership socket open but gate dependency-consuming routes
+	// while producers drain. The independent data-dir lock remains held even
+	// longer — through every deferred Wait/Close — so a replacement cannot
+	// overlap SQLite/worktree cleanup with this process.
+	srv.MarkStopping()
+	runtimeCancel()
+	// Stop the agents this daemon started. Each execution runs in its own
+	// process group so a timeout can reach the CLI's grandchildren (#614), which
+	// also means a group-directed signal to the daemon no longer reaches them:
+	// without this sweep, in-flight agents survive the restart and keep spending
+	// provider quota.
+	//
+	// Every producer of work is cancelled first. The workers and tickers below
+	// run on their own contexts,
+	// whose cancels are deferred to main's return — i.e. after this point. A
+	// worker starting an execution between the sweep's snapshot and process exit
+	// would leave exactly the orphan this sweep exists to prevent. CancelFunc is
+	// idempotent, so the deferred cancels remain harmless.
+	stopProducersThenAgents([]context.CancelFunc{
+		func() {
+			cfgMu.Lock()
+			cancel := pollerCancel
+			cfgMu.Unlock()
+			cancel()
+		},
+		workerCancel, publishWCancel, triageWCancel, refinementWCancel,
+		implementWCancel, statePollerCancel, stateWCancel,
+	}, exec.TerminateAll, producerSettleDelay)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		slog.Warn("server shutdown failed", "err", err)
 	}
-	broker.Stop()
+	if serveDied {
+		return 1
+	}
+	return 0
+}
+
+// producerSettleDelay is how long the shutdown path waits between cancelling the
+// work producers and its second sweep of in-flight agents. Cancelling a context
+// does not wait for the worker to act on it.
+const producerSettleDelay = 500 * time.Millisecond
+
+// stopProducersThenAgents runs the ordering the shutdown path depends on:
+// silence everything that can start an execution, then sweep the executions
+// still running. Reversing it leaves a window where a worker starts a CLI the
+// sweep has already snapshotted past, and that CLI — in its own process group
+// since #656 — outlives the daemon.
+//
+// It sweeps twice because cancellation is asynchronous: a worker already past its
+// context check and about to call cmd.Start() still starts an execution after the
+// first snapshot. The settle delay plus a second pass catches that one. This
+// narrows the window rather than closing it — closing it needs the workers to
+// report completion (a WaitGroup joined with a bounded wait), which is #614's
+// "shutdown ... waits for all goroutines" criterion. Nil cancels are skipped so a
+// producer that never started is not a special case at the call site.
+func stopProducersThenAgents(stopProducers []context.CancelFunc, terminateAgents func(), settle time.Duration) {
+	for _, stop := range stopProducers {
+		if stop != nil {
+			stop()
+		}
+	}
+	if terminateAgents == nil {
+		return
+	}
+	terminateAgents()
+	if settle > 0 {
+		time.Sleep(settle)
+	}
+	terminateAgents()
 }
 
 // logRotationConfig reads HEIMDALLM_LOG_MAX_MB and HEIMDALLM_LOG_KEEP from
@@ -2510,6 +3197,7 @@ func configReloadRestartSnapshot(c *config.Config) config.Config {
 	snap.AI.Tier2RepoConcurrency = 0
 	snap.AI.GeneratePRDescription = false
 	snap.AI.NeverApproveWithIssues = false
+	snap.AI.NeverApproveMinSeverity = ""
 	snap.AI.ReviewResponse = config.ReviewResponseConfig{}
 	snap.AI.ReviewFix = config.ReviewFixConfig{}
 
@@ -2647,20 +3335,36 @@ func sendDiscoveryRepos(
 
 // bridgeDiscovery subscribes to the NATS discovery subject and forwards
 // repo lists to the reposChan that Tier 2 reads. Uses core NATS (no JetStream).
-func bridgeDiscovery(ctx context.Context, conn *nats.Conn, out chan<- []string) {
+func bridgeDiscovery(ctx context.Context, conn *nats.Conn, out chan<- []string, ready chan<- error) {
 	ch := make(chan *nats.Msg, 8)
 	sub, err := conn.ChanSubscribe(bus.SubjDiscoveryRepos, ch)
 	if err != nil {
 		slog.Error("bridge: subscribe to discovery subject failed", "err", err)
+		if ready != nil {
+			ready <- err
+		}
 		return
 	}
 	defer sub.Unsubscribe()
+	if err := conn.FlushTimeout(2 * time.Second); err != nil {
+		slog.Error("bridge: flush discovery subscription failed", "err", err)
+		if ready != nil {
+			ready <- err
+		}
+		return
+	}
+	if ready != nil {
+		ready <- nil
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case msg := <-ch:
+		case msg, ok := <-ch:
+			if !ok {
+				return
+			}
 			var dm bus.DiscoveryMsg
 			if err := bus.Decode(msg.Data, &dm); err != nil {
 				slog.Error("bridge: decode discovery msg", "err", err)
@@ -2673,6 +3377,33 @@ func bridgeDiscovery(ctx context.Context, conn *nats.Conn, out chan<- []string) 
 			}
 		}
 	}
+}
+
+// waitForWorkerReadiness collects one explicit post-Subscribe+Flush result per
+// Core NATS worker. The timeout is only a startup failure bound, never a fixed
+// delay on the happy path.
+func waitForWorkerReadiness(ctx context.Context, ready <-chan error, count int, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for i := 0; i < count; i++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			return fmt.Errorf("timed out waiting for Core NATS workers: ready %d of %d", i, count)
+		case err, ok := <-ready:
+			if !ok {
+				return fmt.Errorf("Core NATS worker readiness channel closed after %d of %d", i, count)
+			}
+			if err != nil {
+				return fmt.Errorf("Core NATS worker subscription: %w", err)
+			}
+		}
+	}
+	return nil
 }
 
 // processReposInParallel runs workFn for every repo in repos with at
@@ -2735,6 +3466,38 @@ schedule:
 	return int(total)
 }
 
+// applyClientRuntimeConfig pushes the [polling] kill-switches and safety knobs
+// into the live GitHub client, rate limiter and adaptive scheduler.
+//
+// This must run on every config change, not only at startup. The three
+// settings live on long-lived objects that outlive a poller restart, so
+// applying them once at boot left the runtime on the old values while
+// GET /config and the UI already reported the new ones — a silent divergence
+// precisely on the emergency knobs an operator reaches for during an incident.
+//
+// Safe to call from any goroutine: the client flags are atomics and the
+// limiter guards its threshold with its own mutex.
+func applyClientRuntimeConfig(ghClient *gh.Client, limiter *scheduler.RateLimiter, adaptiveSched *scheduler.AdaptiveScheduler, cfg *config.Config) {
+	// ETag cache (C1): enabled by default; operator can disable via use_etag=false.
+	ghClient.SetCacheEnabled(cfg.ETagEnabled())
+	// GraphQL issue search (C4): disabled by default; operator enables via
+	// use_graphql=true. When enabled, SearchIssues dispatches to GraphQL first
+	// and falls back to REST /search/issues — zero behaviour change when false.
+	ghClient.SetGraphQLEnabled(cfg.GraphQLEnabled())
+	// Rate-limit safety threshold: drives how eagerly each tier backs off.
+	// Default 100 matches the hardcoded tierSafetyThreshold[TierDiscovery].
+	limiter.SetDiscoverySafetyThreshold(cfg.Polling.RateLimitSafetyThreshold)
+	// Adaptive bounds: updated in place rather than by recreating the
+	// scheduler, so per-repo back-off state survives the reload.
+	if adaptiveSched != nil {
+		adaptiveSched.SetBounds(cfg.ResolvedMinInterval(), cfg.ResolvedMaxInterval())
+	}
+}
+
+type tier2PRCandidatePublisher interface {
+	PublishPRReviewCandidate(ctx context.Context, repo string, number int, githubID int64) error
+}
+
 // runTier2 runs the PR/issue polling loop. Replaces the old RunTier2 from
 // the scheduler package.
 //
@@ -2746,18 +3509,22 @@ func runTier2(
 	ctx context.Context,
 	adapter *tier2Adapter,
 	limiter *scheduler.RateLimiter,
-	prPublisher scheduler.Tier2PRPublisher,
+	prPublisher tier2PRCandidatePublisher,
 	ssePub sse.Publisher,
 	configFn func() []string,
 	repoConcurrencyFn func() int,
+	adaptiveFn func() bool,
+	adaptiveSched *scheduler.AdaptiveScheduler,
 	reposChan <-chan []string,
 	interval time.Duration,
 	coldStart bool,
 	pollCompletedFn func(kind string, at time.Time),
 ) {
 	var (
-		mu    sync.Mutex
-		repos []string
+		mu                sync.Mutex
+		repos             []string
+		firstSnapshotOnce sync.Once
+		firstSnapshot     = make(chan struct{})
 	)
 
 	// Goroutine to receive repo updates from Tier 1
@@ -2766,23 +3533,31 @@ func runTier2(
 			select {
 			case <-ctx.Done():
 				return
-			case r := <-reposChan:
+			case r, ok := <-reposChan:
+				if !ok {
+					return
+				}
 				// Classify first so live eligibility callbacks can never observe a
 				// raw topic result before auto-enable=false records it disabled.
 				adapter.upsertDiscoveredFromTopics(r)
 				mu.Lock()
 				repos = r
 				mu.Unlock()
+				firstSnapshotOnce.Do(func() { close(firstSnapshot) })
 				slog.Info("tier2: received repo list", "count", len(r))
 			}
 		}
 	}()
 
-	// Brief delay for Tier 1 to send first batch
-	select {
-	case <-time.After(2 * time.Second):
-	case <-ctx.Done():
-		return
+	// A cold tick is useful only after Tier 1's first snapshot, including an
+	// explicitly empty one. Event readiness removes the fixed 2 s delay and,
+	// unlike a timer, cannot fire early and defer real work for a full interval.
+	if coldStart {
+		select {
+		case <-firstSnapshot:
+		case <-ctx.Done():
+			return
+		}
 	}
 
 	snapshotRepos := func() []string {
@@ -2805,9 +3580,10 @@ func runTier2(
 			}
 			sse.EmitPollingCompleted(ssePub, "prs", prCount, completedAt.Sub(prStart))
 		}()
-		if err := limiter.Acquire(ctx, scheduler.TierRepo); err != nil {
-			return
-		}
+		// FetchPRsToReview meters each Search page against GitHub's Search
+		// resource. A generic core acquire here charged the same operation a
+		// second time and could stall a healthy Search budget behind an unrelated
+		// core threshold.
 		prs, err := adapter.FetchPRsToReview()
 		if err != nil {
 			slog.Error("tier2: fetch PRs", "err", err)
@@ -2821,11 +3597,15 @@ func runTier2(
 			if _, ok := monitoredSet[pr.Repo]; !ok {
 				continue
 			}
-			if adapter.PRAlreadyReviewed(pr.ID, pr.Repo, pr.Number, pr.UpdatedAt, pr.HeadSHA) {
+			// Search candidates normally have no HEAD SHA. Let the worker's
+			// single fresh hydration run the SHA-scoped dedup/circuit breaker;
+			// calling it here with an empty SHA would broaden a per-head cap to
+			// every commit on the PR and could suppress legitimate new work.
+			if pr.HeadSHA != "" && adapter.PRAlreadyReviewed(pr.ID, pr.Repo, pr.Number, pr.UpdatedAt, pr.HeadSHA) {
 				continue
 			}
 			prCount++
-			if err := prPublisher.PublishPRReview(ctx, pr.Repo, pr.Number, pr.ID, pr.HeadSHA); err != nil {
+			if err := prPublisher.PublishPRReviewCandidate(ctx, pr.Repo, pr.Number, pr.ID); err != nil {
 				slog.Error("tier2: publish PR review", "repo", pr.Repo, "pr", pr.Number, "err", err)
 			}
 		}
@@ -2833,6 +3613,21 @@ func runTier2(
 
 	// runIssueTier promotes ready issues and processes every repo's
 	// issue list in parallel, bounded by ai.tier2_repo_concurrency.
+	//
+	// When polling.adaptive is true (opt-in), only repos whose next
+	// scheduled poll is due are processed this tick. After each repo
+	// finishes, MarkActive (count>0) or MarkIdle (count==0) adjusts
+	// its interval so active repos stay at min_interval while idle
+	// repos back off toward max_interval.
+	//
+	// The Search API prefetch is scoped to the repos this tick will
+	// actually process: adaptive gating runs first, and a tick with
+	// nothing due skips the prefetch entirely rather than warming a
+	// cache no one reads. On search error the per-repo REST fallback
+	// inside ProcessRepo is unaffected.
+	//
+	// When polling.adaptive is false (default) the behaviour is EXACTLY
+	// unchanged: all currentRepos are processed every tick.
 	//
 	// NOTE: if NATS publishes are ever added to this tier, also call
 	// adapter.PublishPending() at the end — it is intentionally bound
@@ -2855,23 +3650,77 @@ func runTier2(
 			}
 			sse.EmitPollingCompleted(ssePub, "issues", issueCount, completedAt.Sub(issueStart))
 		}()
-		if err := limiter.Acquire(ctx, scheduler.TierRepo); err != nil {
-			return
-		}
-		if n, err := adapter.PromoteReady(ctx, currentRepos); err != nil {
-			slog.Error("tier2: promotion", "err", err)
-		} else if n > 0 {
-			slog.Info("tier2: promoted issues", "count", n)
-		}
 		concurrency := config.DefaultTier2RepoConcurrency
 		if repoConcurrencyFn != nil {
 			if v := repoConcurrencyFn(); v > 0 {
 				concurrency = v
 			}
 		}
-		issueCount = processReposInParallel(ctx, currentRepos, concurrency, func(ctx context.Context, repo string) (int, error) {
-			if err := limiter.Acquire(ctx, scheduler.TierRepo); err != nil {
-				return 0, err
+
+		// Aggregated Search API prefetch: one query per assignee group covers
+		// the repos this tick will process, spending the separate search
+		// budget (30/min) instead of the core REST one (5000/hr). On search
+		// error the per-repo REST fallback inside ProcessRepo is unaffected.
+		// Adaptive gating runs BEFORE the prefetch so a tick with nothing due
+		// spends no search query at all. The scheduler must be non-nil to be
+		// consulted: adaptiveFn and adaptiveSched are separate parameters and
+		// callers can pass them apart, so guard rather than assume the pair.
+		adaptive := adaptiveFn != nil && adaptiveFn() && adaptiveSched != nil
+		reposToProcess := currentRepos
+		if adaptive {
+			reposToProcess = adaptiveSched.Due(time.Now(), currentRepos)
+			if len(reposToProcess) < len(currentRepos) {
+				slog.Debug("tier2: adaptive mode — skipping idle repos",
+					"total", len(currentRepos), "due", len(reposToProcess))
+			}
+			// Prune repos that have been removed from monitoring so the
+			// scheduler's memory stays bounded.
+			adaptiveSched.PruneAbsent(currentRepos)
+		}
+
+		// Warm one raw Search snapshot for normal processing and promotion.
+		// Promotion may need repos which adaptive polling would otherwise skip,
+		// so add only those with an enabled blocked-label rule. Successful
+		// chunks are then classified locally by ProcessRepo and reused by
+		// PromoteReady; failed/truncated chunks retain their exact REST fallback.
+		// Budget metering happens per request inside the client (see
+		// SetSearchGate) rather than once here: one prefetch issues a query per
+		// bounded assignee/repo chunk and page.
+		prefetchRepos, promotionConfigured := adapter.IssuePrefetchPlan(currentRepos, reposToProcess)
+		if len(prefetchRepos) > 0 {
+			adapter.PrefetchIssuesForCycle(prefetchRepos)
+			defer adapter.ClearIssuePrefetch()
+		}
+
+		// Promotion still performs dependency reads and label/comment writes,
+		// so retain one core permit when it is configured. The expensive open-
+		// issue listing itself is served from the shared snapshot above whenever
+		// that chunk succeeded.
+		if promotionConfigured {
+			if limiter != nil {
+				if err := limiter.Acquire(ctx, scheduler.TierRepo); err != nil {
+					return
+				}
+			}
+			if n, err := adapter.PromoteReady(ctx, currentRepos); err != nil {
+				if errors.Is(err, workgate.ErrDraining) {
+					slog.Debug("tier2: promotion deferred while application update drains")
+				} else {
+					slog.Error("tier2: promotion", "err", err)
+				}
+			} else if n > 0 {
+				slog.Info("tier2: promoted issues", "count", n)
+			}
+		}
+
+		issueCount = processReposInParallel(ctx, reposToProcess, concurrency, func(ctx context.Context, repo string) (int, error) {
+			// A successful prefetch makes ProcessRepo entirely local until it
+			// publishes work. Charge a core token only for the per-repo REST
+			// fallback, eliminating the 4500-token/hour phantom cliff at 75 repos.
+			if adapter.IssueRepoNeedsCoreFetch(repo) && limiter != nil {
+				if err := limiter.Acquire(ctx, scheduler.TierRepo); err != nil {
+					return 0, err
+				}
 			}
 			n, err := adapter.ProcessRepo(ctx, repo)
 			if err != nil {
@@ -2883,10 +3732,29 @@ func runTier2(
 				} else {
 					slog.Error("tier2: issue processing", "repo", repo, "err", err)
 				}
+				// On error we don't advance the adaptive schedule for
+				// this repo; it will be re-evaluated as due on the next
+				// tick (nextDue is not updated because MarkActive/MarkIdle
+				// are not called).
 				return 0, err
 			}
 			if n > 0 {
 				slog.Info("tier2: processed issues", "repo", repo, "count", n)
+			}
+			// Update adaptive cadence based on observed activity. Stamped with
+			// the time this repo FINISHED, not the cycle's start: with many
+			// repos and bounded concurrency a fan-out can outlast
+			// min_interval, and marking from a stale base put nextDue in the
+			// past — every repo came back due on the next tick and the
+			// back-off never accumulated, disabling adaptive mode in exactly
+			// the loaded scenario that justifies turning it on.
+			if adaptive {
+				done := time.Now()
+				if n > 0 {
+					adaptiveSched.MarkActive(repo, done)
+				} else {
+					adaptiveSched.MarkIdle(repo, done)
+				}
 			}
 			return n, nil
 		})
@@ -3229,28 +4097,54 @@ func (a *tier2Adapter) upsertDiscoveredFromTopics(repos []string) {
 	// mutated above; the snapshots capture the post-mutation state.
 	if len(added) > 0 {
 		slog.Info("tier2: persisting topic-discovered repos", "added", len(added), "repos", added)
-		processDiscoveredRepos(added, reposSnap, nonMonSnap, a.store, a.broker, time.Now())
+		processDiscoveredReposOrdered(added, reposSnap, nonMonSnap, a.store, a.broker, time.Now(), a.publishOrderedEvents)
+	}
+}
+
+// ── rateLimitAdapter bridges the GitHub client observer → scheduler limiter ──
+
+// rateLimitAdapter implements gh.RateLimitObserver. After every GitHub API
+// response it parses the X-RateLimit-* headers and forwards the live budget
+// to the scheduler limiter, enabling proactive throttle before hitting 403
+// and honoring Retry-After on secondary limits.
+type rateLimitAdapter struct {
+	limiter *scheduler.RateLimiter
+}
+
+func (a *rateLimitAdapter) ObserveResponse(resp *http.Response) {
+	parsed, ok := gh.ParseRateLimitHeaders(resp)
+	if !ok {
+		return
+	}
+	if parsed.Resource != "" {
+		a.limiter.Observe(parsed.Resource, parsed.Remaining, parsed.Reset)
+	}
+	if parsed.RetryAfter > 0 {
+		a.limiter.ObserveRetryAfter(parsed.RetryAfter)
 	}
 }
 
 // ── tier2Adapter bridges main.go's concrete types to Pipeline interfaces ──
 
 type tier2Adapter struct {
-	ghClient   *gh.Client
-	ghToken    string
-	pipeline   *pipeline.Pipeline
-	issuePipe  *issuepipeline.Pipeline
-	fetcher    *issuepipeline.Fetcher
-	repoCtx    *repoctx.Manager
-	store      *store.Store
-	broker     *sse.Broker
-	cfgMu      *sync.Mutex
-	cfg        **config.Config
-	loginMu    *sync.Mutex
-	login      *string
-	runReview  func(pr *gh.PullRequest, aiCfg config.RepoAI) *store.Review
-	publishPub *bus.PRPublishPublisher
-	watchStore *bus.WatchStore
+	ghClient  *gh.Client
+	ghToken   string
+	pipeline  *pipeline.Pipeline
+	issuePipe *issuepipeline.Pipeline
+	fetcher   *issuepipeline.Fetcher
+	repoCtx   *repoctx.Manager
+	store     *store.Store
+	broker    *sse.Broker
+	// Synchronous NATS handoff for discovery ordering. Optional in tests.
+	publishOrderedEvents func([]sse.Event) error
+	cfgMu                *sync.Mutex
+	cfg                  **config.Config
+	loginMu              *sync.Mutex
+	login                *string
+	runReview            func(ctx context.Context, pr *gh.PullRequest, aiCfg config.RepoAI) *store.Review
+	workGate             *workgate.Gate
+	publishPub           *bus.PRPublishPublisher
+	watchStore           *bus.WatchStore
 	// Review-state vigilance dispatch (#482). Optional — nil-safe so a
 	// daemon configured without the opt-in feature flags simply skips
 	// the dispatch and the new CheckItem branch remains observational.
@@ -3364,6 +4258,18 @@ func processDiscoveredRepos(
 	broker *sse.Broker,
 	now time.Time,
 ) {
+	processDiscoveredReposOrdered(added, reposSnap, nonMonSnap, st, broker, now, nil)
+}
+
+func processDiscoveredReposOrdered(
+	added []string,
+	reposSnap []string,
+	nonMonSnap []string,
+	st discoveryStore,
+	broker *sse.Broker,
+	now time.Time,
+	publishOrdered func([]sse.Event) error,
+) {
 	if len(added) == 0 {
 		return
 	}
@@ -3436,12 +4342,25 @@ func processDiscoveredRepos(
 		}
 	}
 
+	events := make([]sse.Event, 0, len(added))
 	for _, r := range added {
-		broker.Publish(sse.Event{
+		events = append(events, sse.Event{
 			Type: sse.EventRepoDiscovered,
 			Data: sseData(map[string]any{"repo": r}),
 		})
-		slog.Info("poll: auto-discovered repo", "repo", r)
+	}
+	if publishOrdered != nil {
+		if err := publishOrdered(events); err != nil {
+			slog.Warn("poll: publish ordered repo discovery batch failed", "repos", len(events), "err", err)
+		} else {
+			for i := range events {
+				events[i].NATSForwarded = true
+			}
+		}
+	}
+	for i, event := range events {
+		broker.Publish(event)
+		slog.Info("poll: auto-discovered repo", "repo", added[i])
 	}
 }
 
@@ -3476,20 +4395,6 @@ func (a *tier2Adapter) FetchPRsToReview() ([]scheduler.Tier2PR, error) {
 	nonMonSnap := append([]string(nil), cfg.GitHub.NonMonitored...)
 	a.cfgMu.Unlock()
 
-	// Defer reviews on repos discovered THIS call to upsertDiscoveredRepos
-	// by one tick so the UI receives `repo_discovered` before
-	// `review_started` (#481). The guarantee is "one tick relative to
-	// upsertDiscoveredRepos", not "guaranteed UI delivery": if the SSE
-	// bridge to NATS is stalled, the UI may still see the events out of
-	// order despite the deferral. On the next tick
-	// `upsertDiscoveredRepos` returns an empty `added` list for these
-	// repos (they're already in the config), and the same PR flows
-	// through normally.
-	addedThisTick := make(map[string]struct{}, len(added))
-	for _, r := range added {
-		addedThisTick[r] = struct{}{}
-	}
-
 	// Benign race window: between the Unlock above and the SetConfig calls
 	// inside processDiscoveredRepos, a config reload can swap *a.cfg to a
 	// fresh Config that does not contain the just-appended repos. On the
@@ -3498,7 +4403,7 @@ func (a *tier2Adapter) FetchPRsToReview() ([]scheduler.Tier2PR, error) {
 	// reloaded Config picks up "repositories"/"non_monitored" from it),
 	// so we accept the duplicate rather than hold cfgMu across the
 	// blocking store I/O below.
-	processDiscoveredRepos(added, reposSnap, nonMonSnap, a.store, a.broker, time.Now())
+	processDiscoveredReposOrdered(added, reposSnap, nonMonSnap, a.store, a.broker, time.Now(), a.publishOrderedEvents)
 
 	// Resolve bot login for the self-author guard.
 	a.loginMu.Lock()
@@ -3549,14 +4454,6 @@ func (a *tier2Adapter) FetchPRsToReview() ([]scheduler.Tier2PR, error) {
 				continue
 			}
 		}
-		// Defer reviews for repos that were auto-discovered this tick;
-		// the next tick picks them up after `repo_discovered` has
-		// reached the UI. See #481.
-		if _, justDiscovered := addedThisTick[pr.Repo]; justDiscovered {
-			slog.Info("tier2: deferring review for newly-discovered repo to next tick",
-				"repo", pr.Repo, "pr", pr.Number)
-			continue
-		}
 		seenIDs[pr.ID] = struct{}{}
 		reason := pipeline.Evaluate(pipeline.PRGate{
 			State:  pr.State,
@@ -3596,38 +4493,6 @@ func (a *tier2Adapter) FetchPRsToReview() ([]scheduler.Tier2PR, error) {
 		delete(a.lastSkippedUpdatedAt, pr.ID)
 		a.skipMu.Unlock()
 
-		// Resolve the HEAD SHA and confirm the bot is still a pending
-		// reviewer via the Pulls API (same call, zero extra cost). The
-		// Search Issues API does NOT populate head.sha, and its index
-		// can lag behind the actual requested_reviewers list — a PR may
-		// still appear in review-requested:<bot> results for up to ~2 min
-		// after the bot submits a review. Checking requested_reviewers
-		// here eliminates those "ghost" enqueues at the source, replacing
-		// the former 2-minute PublishedAt grace in PRAlreadyReviewed.
-		//
-		// See theburrowhub/heimdallm#264 for the SHA plumbing bug this
-		// closes, and theburrowhub/heimdallm#243 for the cost-runaway
-		// that the grace window originally mitigated.
-		//
-		// Fail-open on resolver error: empty HeadSHA makes runReview fall
-		// back to the other layered defenses (fail-closed SHA in
-		// pipeline.Run, circuit breaker). Blocking a review on a
-		// transient lookup blip would be worse than leaning on those
-		// defenses for one cycle.
-		info, shaErr := a.ghClient.GetPRHeadInfo(pr.Repo, pr.Number)
-		if shaErr != nil {
-			slog.Warn("tier2: HEAD info lookup failed, in-flight claim will be skipped for this tick",
-				"repo", pr.Repo, "pr", pr.Number, "err", shaErr)
-		} else if botLogin != "" && !info.ReviewRequestedFor(botLogin) {
-			// The bot is no longer in requested_reviewers — this is a
-			// ghost result from the Search API's replication lag. Skip
-			// silently; the PR will drop out of search results soon.
-			slog.Debug("tier2: bot not in requested_reviewers, skipping search-index ghost",
-				"repo", pr.Repo, "pr", pr.Number, "bot", botLogin)
-			continue
-		}
-		headSHA := info.HeadSHA
-
 		out = append(out, scheduler.Tier2PR{
 			ID:        pr.ID,
 			Number:    pr.Number,
@@ -3638,7 +4503,7 @@ func (a *tier2Adapter) FetchPRsToReview() ([]scheduler.Tier2PR, error) {
 			State:     pr.State,
 			Draft:     pr.Draft,
 			UpdatedAt: pr.UpdatedAt,
-			HeadSHA:   headSHA,
+			HeadSHA:   pr.Head.SHA,
 		})
 	}
 
@@ -3658,6 +4523,12 @@ func (a *tier2Adapter) FetchPRsToReview() ([]scheduler.Tier2PR, error) {
 
 // ProcessPR implements scheduler.Tier2PRProcessor.
 func (a *tier2Adapter) ProcessPR(ctx context.Context, pr scheduler.Tier2PR) error {
+	ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, a.workGate, workgate.KindReview)
+	if err != nil {
+		slog.Debug("tier2 PR deferred while application update drains", "repo", pr.Repo, "pr", pr.Number)
+		return nil
+	}
+	defer releaseUpdateWork()
 	a.cfgMu.Lock()
 	c := *a.cfg
 	aiCfg := c.AIForRepo(pr.Repo)
@@ -3682,14 +4553,12 @@ func (a *tier2Adapter) ProcessPR(ctx context.Context, pr scheduler.Tier2PR) erro
 		State:     pr.State,
 		Draft:     pr.Draft,
 		UpdatedAt: pr.UpdatedAt,
-		// Head.SHA is populated by FetchPRsToReview (after the review-guard
-		// filter). Passing it here is what lets runReview's persistent
-		// in-flight claim actually fire; before theburrowhub/heimdallm#264
-		// this field was zero-valued and the claim guard silently skipped,
-		// allowing two concurrent reviews on the same PR (#243 pattern).
+		// Legacy/direct callers may provide HeadSHA here. The current NATS
+		// ingestion path hydrates the PullRequest in its worker and calls
+		// runReview with that fresh SHA instead.
 		Head: gh.Branch{SHA: pr.HeadSHA},
 	}
-	rev := a.runReview(ghPR, aiCfg)
+	rev := a.runReview(ctx, ghPR, aiCfg)
 	if rev != nil && rev.GitHubReviewID == 0 && a.publishPub != nil {
 		if err := a.publishPub.PublishPRPublish(context.Background(), rev.ID); err != nil {
 			slog.Warn("ProcessPR: failed to enqueue publish", "review_id", rev.ID, "err", err)
@@ -3749,8 +4618,134 @@ func (a *tier2Adapter) reviewReadyForPublishRetry(rev *store.Review) (bool, erro
 	return !inFlight, nil
 }
 
+// PrefetchIssuesForCycle runs the aggregated Search API query for all eligible
+// repos, populating the Fetcher's per-cycle prefetch map. Must be called BEFORE
+// the parallel ProcessRepo fan-out. On search error it logs and returns so
+// per-repo FetchIssues fallback still applies inside ProcessRepo.
+//
+// The method iterates repos to build the eligible list (skipping repos with
+// issue_tracking disabled or autonomous mode enabled — the same gating
+// ProcessRepo applies — so the search scope matches what would actually be
+// processed). That exclusion happens inside PrefetchIssues, which reads the
+// resolved config and autonomous flag eligibleFn returns; eligibleFn's own
+// third result is the "repo is known" flag and is always true here.
+func (a *tier2Adapter) PrefetchIssuesForCycle(repos []string) {
+	if a.fetcher == nil {
+		return
+	}
+	var c *config.Config
+	if a.cfgMu == nil {
+		c = *a.cfg
+	} else {
+		a.cfgMu.Lock()
+		c = *a.cfg
+		a.cfgMu.Unlock()
+	}
+	authUser := a.resolveAuthenticatedUser()
+
+	// eligibleFn resolves the effective IssueTrackingConfig and autonomous flag
+	// for each repo. PrefetchIssues uses this to group repos by their resolved
+	// assignee set, running one search query per group. This ensures repos with
+	// per-repo assignee overrides are fetched with their own assignee scope
+	// rather than the global one, preventing silent issue drops.
+	eligibleFn := func(repo string) (config.IssueTrackingConfig, bool, bool) {
+		repoIT := c.IssueTrackingForRepo(repo)
+		autonomousEnabled := c.AutonomousForRepo(repo).Enabled
+		return repoIT, autonomousEnabled, true
+	}
+	if _, err := a.fetcher.PrefetchIssues(eligibleFn, authUser, repos); err != nil {
+		// Error already logged by PrefetchIssues; fallback is automatic.
+		return
+	}
+}
+
+// IssuePrefetchPlan returns the deterministic union of repos due for normal
+// issue processing and repos whose dependency-promotion rules must run even
+// when adaptive polling has backed them off. The bool reports whether any
+// promotion pass is configured, allowing runTier2 to avoid both the pass and
+// its core limiter permit on the common no-blocked-label path.
+func (a *tier2Adapter) IssuePrefetchPlan(currentRepos, reposToProcess []string) ([]string, bool) {
+	if a == nil || a.cfg == nil {
+		return append([]string(nil), reposToProcess...), false
+	}
+	var c *config.Config
+	if a.cfgMu == nil {
+		c = *a.cfg
+	} else {
+		a.cfgMu.Lock()
+		c = *a.cfg
+		a.cfgMu.Unlock()
+	}
+
+	seen := make(map[string]struct{}, len(currentRepos)+len(reposToProcess))
+	out := make([]string, 0, len(reposToProcess))
+	for _, repo := range reposToProcess {
+		if repo == "" {
+			continue
+		}
+		if _, ok := seen[repo]; ok {
+			continue
+		}
+		seen[repo] = struct{}{}
+		out = append(out, repo)
+	}
+
+	promotionConfigured := false
+	for _, repo := range currentRepos {
+		if repo == "" || c.AutonomousForRepo(repo).Enabled {
+			continue
+		}
+		it := c.IssueTrackingForRepo(repo)
+		if !it.Enabled || len(it.BlockedLabels) == 0 {
+			continue
+		}
+		promotionConfigured = true
+		if _, ok := seen[repo]; ok {
+			continue
+		}
+		seen[repo] = struct{}{}
+		out = append(out, repo)
+	}
+	return out, promotionConfigured
+}
+
+// IssueRepoNeedsCoreFetch distinguishes a genuine per-repo REST fallback from
+// local classification of the cycle snapshot. Disabled/autonomous repos are
+// no-ops and therefore need no permit either.
+func (a *tier2Adapter) IssueRepoNeedsCoreFetch(repo string) bool {
+	if a == nil || a.cfg == nil {
+		return false
+	}
+	var c *config.Config
+	if a.cfgMu == nil {
+		c = *a.cfg
+	} else {
+		a.cfgMu.Lock()
+		c = *a.cfg
+		a.cfgMu.Unlock()
+	}
+	if !c.IssueTrackingForRepo(repo).Enabled || c.AutonomousForRepo(repo).Enabled {
+		return false
+	}
+	return a.fetcher == nil || !a.fetcher.HasPrefetchedIssues(repo)
+}
+
+// ClearIssuePrefetch discards the cycle-scoped prefetch map so stale results
+// cannot leak into the next cycle.
+func (a *tier2Adapter) ClearIssuePrefetch() {
+	if a.fetcher != nil {
+		a.fetcher.ClearPrefetch()
+	}
+}
+
 // ProcessRepo implements scheduler.Tier2IssueProcessor.
 func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error) {
+	ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, a.workGate, workgate.KindIssue)
+	if err != nil {
+		slog.Debug("tier2 issue scan deferred while application update drains", "repo", repo)
+		return 0, nil
+	}
+	defer releaseUpdateWork()
 	a.cfgMu.Lock()
 	c := *a.cfg
 	repoIT := c.IssueTrackingForRepo(repo)
@@ -3844,7 +4839,7 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 
 		extraFlags := agentCfg.ExtraFlags
 		if extraFlags != "" {
-			if err := executor.ValidateExtraFlags(extraFlags); err != nil {
+			if err := executor.ValidateExtraFlagsForCLI(aiCfg.Primary, extraFlags); err != nil {
 				slog.Warn("issue poll: extra_flags rejected", "err", err)
 				extraFlags = ""
 			}
@@ -3888,6 +4883,7 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 			RequireWorkDirForDevelop:    requireWorkDir,
 			RequireWorkDirForRefinement: requireRefinementWorkDir,
 			ReleaseRepoContext:          releaseRepoContext,
+			WorkPermit:                  workgate.PermitFromContext(ctx),
 		}
 		releaseOnReturn = false
 		return opts, true
@@ -3898,6 +4894,12 @@ func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error
 
 // PromoteReady implements scheduler.Tier2Promoter.
 func (a *tier2Adapter) PromoteReady(ctx context.Context, repos []string) (int, error) {
+	ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, a.workGate, workgate.KindMaintenance)
+	if err != nil {
+		return 0, err
+	}
+	defer releaseUpdateWork()
+
 	type promoteGroup struct {
 		it    config.IssueTrackingConfig
 		repos []string
@@ -3941,9 +4943,13 @@ func (a *tier2Adapter) PromoteReady(ctx context.Context, repos []string) (int, e
 
 	total := 0
 	var promoteErr error
+	var prefetched map[string][]*gh.Issue
+	if a.fetcher != nil {
+		prefetched = a.fetcher.PrefetchedIssues()
+	}
 	for _, key := range groupOrder {
 		item := groups[key]
-		n, err := issuepipeline.PromoteReady(ctx, a.ghClient, item.it, item.repos, a.broker)
+		n, err := issuepipeline.PromoteReadyWithPrefetch(ctx, a.ghClient, item.it, item.repos, prefetched, a.broker)
 		total += n
 		if err != nil {
 			promoteErr = errors.Join(promoteErr, fmt.Errorf("issues promote for %s: %w", strings.Join(item.repos, ","), err))
@@ -3997,14 +5003,14 @@ func (a *tier2Adapter) PRAlreadyReviewed(githubID int64, repo string, number int
 		return true
 	}
 	// NOTE: The former 2-minute PublishedAt grace window (GraceDefault) has
-	// been removed. The tier-2 FetchPRsToReview loop now confirms the bot is
-	// still in requested_reviewers via the Pulls API before a PR reaches this
-	// point. That check eliminates "ghost" enqueues from the Search API's
+	// been removed. The review worker now confirms the bot is still in
+	// requested_reviewers using its single fresh Pulls API hydration before a
+	// PR reaches the pipeline. That check eliminates "ghost" Search results and
 	// replication lag — the only scenario the grace protected against. Without
 	// the grace, a push + re-request-review within 2 minutes of the last
 	// review is picked up immediately instead of being suppressed until the
 	// grace expired. See theburrowhub/heimdallm#243 for the original incident
-	// and the commit that added GetPRHeadInfo for the replacement check.
+	// and the worker hydration that replaced the duplicate adapter lookup.
 	//
 	// The circuit breaker remains as the emergency brake for cross-bot review
 	// loops and per-PR/per-repo rate caps.
@@ -4241,6 +5247,7 @@ func (a *tier2Adapter) HandleChange(ctx context.Context, item *scheduler.WatchIt
 		c := *a.cfg
 		monitored := repoIsMonitored(c, item.Repo)
 		aiCfg := c.AIForRepo(item.Repo)
+		localDirBase := c.GitHub.LocalDirBase
 		a.cfgMu.Unlock()
 		if !monitored {
 			a.broker.Publish(sse.Event{
@@ -4312,7 +5319,44 @@ func (a *tier2Adapter) HandleChange(ctx context.Context, item *scheduler.WatchIt
 			ghPR.HTMLURL = stored.URL
 			ghPR.User = gh.User{Login: snap.Author}
 		}
-		rev := a.runReview(ghPR, aiCfg)
+
+		// Reserve the checkout the same way review-worker and tier2 ProcessPR
+		// do. Without this the agent ran with no WorkDir and inherited the
+		// daemon's cwd — `/` under launchd — which aborts `codex exec` outright
+		// (#655). Acquired here, after every guard and the dedup above, so the
+		// paths that skip the review do not reserve a worktree they never use.
+		repoHandle, err := acquireRepoContext(ctx, a.repoCtx, item.Repo, &aiCfg, localDirBase, a.ghToken, repoctx.ModeRead, wtTokenFor("pr-tier3", item.Number), "", "")
+		if err != nil {
+			logRepoContextFallback("tier3 PR", item.Repo, err)
+			aiCfg.LocalDir = ""
+		}
+		if repoHandle != nil {
+			defer repoHandle.Release()
+		}
+		// Reserving the checkout can block for a long time — cloning, fetching,
+		// or queueing on the per-repo worktree cap — and the operator may disable
+		// the repo during that wait. Recheck at the execution boundary, mirroring
+		// review-worker's skipIfUnmonitored("post_acquire"), so a disable stops
+		// the CLI instead of spending provider quota on an un-monitored repo.
+		a.cfgMu.Lock()
+		stillMonitored := repoIsMonitored(*a.cfg, item.Repo)
+		a.cfgMu.Unlock()
+		if !stillMonitored {
+			a.broker.Publish(sse.Event{
+				Type: sse.EventReviewSkipped,
+				Data: sseData(map[string]any{
+					"repo":      item.Repo,
+					"pr_number": item.Number,
+					"pr_title":  title,
+					"reason":    string(pipeline.SkipReasonNotMonitored),
+				}),
+			})
+			slog.Info("tier3: repo un-monitored while reserving the checkout, skipping PR",
+				"repo", item.Repo, "pr", item.Number)
+			return nil
+		}
+
+		rev := a.runReview(ctx, ghPR, aiCfg)
 		if rev != nil && rev.GitHubReviewID == 0 && a.publishPub != nil {
 			if err := a.publishPub.PublishPRPublish(context.Background(), rev.ID); err != nil {
 				slog.Warn("HandleChange: failed to enqueue publish", "review_id", rev.ID, "err", err)
@@ -4350,6 +5394,24 @@ func (n *notifyWithSSE) Notify(title, message string) {
 // blocked the web container from reading the token via the shared volume,
 // forcing operators to run `make setup` as a manual workaround. See #71.
 const tokenFileMode = 0644
+
+// loadExistingAPIToken is the recovery-only counterpart to
+// loadOrCreateAPIToken. While an updater barrier is restored, rotating or
+// creating the credential would strand the native owner that must verify and
+// release that barrier. Read the already-established token without mutating
+// the filesystem and fail closed if it is missing or invalid.
+func loadExistingAPIToken(dir string) (string, error) {
+	path := filepath.Join(dir, "api_token")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("api_token: read existing %s: %w", path, err)
+	}
+	token := strings.TrimSpace(string(data))
+	if len(token) < 32 {
+		return "", fmt.Errorf("api_token: existing token in %s is invalid", path)
+	}
+	return token, nil
+}
 
 // loadOrCreateAPIToken reads an existing token from <dataDir>/api_token, or
 // generates a new cryptographically-random one and writes it with
@@ -4529,7 +5591,7 @@ func buildRefinementRunOptions(
 
 	extraFlags := agentCfg.ExtraFlags
 	if extraFlags != "" {
-		if err := executor.ValidateExtraFlags(extraFlags); err != nil {
+		if err := executor.ValidateExtraFlagsForCLI(aiCfg.Primary, extraFlags); err != nil {
 			slog.Warn(scope+": extra_flags rejected", "err", err)
 			extraFlags = ""
 		}
@@ -4817,7 +5879,7 @@ func acquireRepoContext(
 }
 
 // wtTokenFor produces a sanitisation-safe worktree token for a
-// pipeline stage. The prefix names the stage (`pr-review`, `triage`,
+// pipeline stage. The prefix names the stage (`pr-review`, `pr-tier3`, `triage`,
 // `develop`, `refinement`, `pr-tier2`) so operators can correlate
 // `<clone>/.worktrees/<token>/` with the running execution.
 func wtTokenFor(prefix string, n int) string {
@@ -4901,20 +5963,21 @@ func repoAIOverrideMap(ai config.RepoAI) map[string]any {
 		"local_dir":   ai.LocalDir,
 	}
 	addCommonAIOverrideFields(out, aiOverrideFields{
-		Prompt:                 ai.Prompt,
-		IssuePrompt:            ai.IssuePrompt,
-		ImplementPrompt:        ai.ImplementPrompt,
-		RefinementTimeout:      ai.RefinementTimeout,
-		TriageOwner:            ai.TriageOwner,
-		CloneDir:               ai.CloneDir,
-		AutoPromoteTriage:      ai.AutoPromoteTriage,
-		AutoPromoteRefinement:  ai.AutoPromoteRefinement,
-		PRReviewers:            ai.PRReviewers,
-		PRAssignee:             ai.PRAssignee,
-		PRLabels:               ai.PRLabels,
-		PRDraft:                ai.PRDraft,
-		GeneratePRDescription:  ai.GeneratePRDescription,
-		NeverApproveWithIssues: ai.NeverApproveWithIssues,
+		Prompt:                  ai.Prompt,
+		IssuePrompt:             ai.IssuePrompt,
+		ImplementPrompt:         ai.ImplementPrompt,
+		RefinementTimeout:       ai.RefinementTimeout,
+		TriageOwner:             ai.TriageOwner,
+		CloneDir:                ai.CloneDir,
+		AutoPromoteTriage:       ai.AutoPromoteTriage,
+		AutoPromoteRefinement:   ai.AutoPromoteRefinement,
+		PRReviewers:             ai.PRReviewers,
+		PRAssignee:              ai.PRAssignee,
+		PRLabels:                ai.PRLabels,
+		PRDraft:                 ai.PRDraft,
+		GeneratePRDescription:   ai.GeneratePRDescription,
+		NeverApproveWithIssues:  ai.NeverApproveWithIssues,
+		NeverApproveMinSeverity: ai.NeverApproveMinSeverity,
 	})
 	if ai.IssueTracking != nil {
 		out["issue_tracking"] = issueTrackingOverrideMap(ai.IssueTracking)
@@ -4937,20 +6000,21 @@ func orgAIOverrideMap(ai config.OrgAI) map[string]any {
 		out["local_dir"] = ai.LocalDir
 	}
 	addCommonAIOverrideFields(out, aiOverrideFields{
-		Prompt:                 ai.Prompt,
-		IssuePrompt:            ai.IssuePrompt,
-		ImplementPrompt:        ai.ImplementPrompt,
-		RefinementTimeout:      ai.RefinementTimeout,
-		TriageOwner:            ai.TriageOwner,
-		CloneDir:               ai.CloneDir,
-		AutoPromoteTriage:      ai.AutoPromoteTriage,
-		AutoPromoteRefinement:  ai.AutoPromoteRefinement,
-		PRReviewers:            ai.PRReviewers,
-		PRAssignee:             ai.PRAssignee,
-		PRLabels:               ai.PRLabels,
-		PRDraft:                ai.PRDraft,
-		GeneratePRDescription:  ai.GeneratePRDescription,
-		NeverApproveWithIssues: ai.NeverApproveWithIssues,
+		Prompt:                  ai.Prompt,
+		IssuePrompt:             ai.IssuePrompt,
+		ImplementPrompt:         ai.ImplementPrompt,
+		RefinementTimeout:       ai.RefinementTimeout,
+		TriageOwner:             ai.TriageOwner,
+		CloneDir:                ai.CloneDir,
+		AutoPromoteTriage:       ai.AutoPromoteTriage,
+		AutoPromoteRefinement:   ai.AutoPromoteRefinement,
+		PRReviewers:             ai.PRReviewers,
+		PRAssignee:              ai.PRAssignee,
+		PRLabels:                ai.PRLabels,
+		PRDraft:                 ai.PRDraft,
+		GeneratePRDescription:   ai.GeneratePRDescription,
+		NeverApproveWithIssues:  ai.NeverApproveWithIssues,
+		NeverApproveMinSeverity: ai.NeverApproveMinSeverity,
 	})
 	if ai.IssueTracking != nil {
 		out["issue_tracking"] = issueTrackingOverrideMap(ai.IssueTracking)
@@ -4959,20 +6023,21 @@ func orgAIOverrideMap(ai config.OrgAI) map[string]any {
 }
 
 type aiOverrideFields struct {
-	Prompt                 string
-	IssuePrompt            string
-	ImplementPrompt        string
-	RefinementTimeout      string
-	TriageOwner            string
-	CloneDir               string
-	AutoPromoteTriage      *bool
-	AutoPromoteRefinement  *bool
-	PRReviewers            []string
-	PRAssignee             string
-	PRLabels               []string
-	PRDraft                *bool
-	GeneratePRDescription  *bool
-	NeverApproveWithIssues *bool
+	Prompt                  string
+	IssuePrompt             string
+	ImplementPrompt         string
+	RefinementTimeout       string
+	TriageOwner             string
+	CloneDir                string
+	AutoPromoteTriage       *bool
+	AutoPromoteRefinement   *bool
+	PRReviewers             []string
+	PRAssignee              string
+	PRLabels                []string
+	PRDraft                 *bool
+	GeneratePRDescription   *bool
+	NeverApproveWithIssues  *bool
+	NeverApproveMinSeverity string
 }
 
 func addCommonAIOverrideFields(out map[string]any, fields aiOverrideFields) {
@@ -5017,6 +6082,9 @@ func addCommonAIOverrideFields(out map[string]any, fields aiOverrideFields) {
 	}
 	if fields.NeverApproveWithIssues != nil {
 		out["never_approve_with_issues"] = *fields.NeverApproveWithIssues
+	}
+	if fields.NeverApproveMinSeverity != "" {
+		out["never_approve_min_severity"] = fields.NeverApproveMinSeverity
 	}
 }
 
@@ -5075,6 +6143,24 @@ func purgeAllManagedClones(ctx context.Context, manager *repoctx.Manager, cfg *c
 		}
 	}
 	return total, errors.Join(errs...)
+}
+
+// runStartupWorktreePrune protects the filesystem-destructive startup sweep.
+// A replacement daemon may start while the updater still owns a persistent
+// drain lease; in that case it must leave every checkout untouched until the
+// verified new application cancels the lease.
+func runStartupWorktreePrune(
+	ctx context.Context,
+	gate *workgate.Gate,
+	prune func(context.Context),
+) error {
+	ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, gate, workgate.KindMaintenance)
+	if err != nil {
+		return err
+	}
+	defer releaseUpdateWork()
+	prune(ctx)
+	return nil
 }
 
 func purgeStaleManagedClones(ctx context.Context, manager *repoctx.Manager, cfg *config.Config, discovered []string) (int, error) {

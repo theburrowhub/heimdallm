@@ -37,7 +37,39 @@ A Flutter Web dashboard (`:3000`) with Dashboard, PR list, Issue list, prompt/ag
 
 ## Installation
 
-### macOS (DMG)
+### macOS
+
+From a checkout of this repository, use the Make targets (preferred):
+
+```bash
+make install-macos                  # install the latest release
+make install-macos RELEASE=v0.7.5   # install a specific release
+make uninstall-macos                # remove app + service; keep user state
+make uninstall-macos PURGE=1        # also delete config, history, and logs
+```
+
+Run these targets as your normal user, never with `sudo make`. If
+`/Applications` needs elevated permissions, the installer requests a sudo
+ticket once and limits it to the app-bundle operations. A pre-existing
+LaunchAgent is migrated to the installed bundle; uninstall always removes the
+LaunchAgent so `launchd` cannot keep retrying a missing executable.
+
+Migration of a loaded, enabled LaunchAgent regenerates its canonical plist from
+the bundled daemon, so manual plist edits are discarded. If the LaunchAgent
+was unloaded or disabled, install changes only its daemon executable path and
+preserves the other plist keys.
+
+Normal uninstall preserves config, review history, logs, and the macOS
+Keychain credential. `PURGE=1` irreversibly removes only the canonical
+`~/.config/heimdallm`, `~/.local/share/heimdallm`, and
+`~/Library/Logs/heimdallm` directories. It does not follow custom config/data
+path overrides, and it still preserves the Keychain credential. Remove that
+separately, if desired, with
+`security delete-generic-password -s heimdallm -a github-token`.
+An empty `PURGE` means normal uninstall; any non-empty value other than exact
+`PURGE=1` is rejected before the LaunchAgent, app, or user data is changed.
+
+Without a checkout, use the manual DMG fallback:
 
 1. Download `Heimdallm-vX.Y.Z.dmg` from [Releases](https://github.com/theburrowhub/heimdallm/releases)
 2. Open the DMG and drag **Heimdallm** to **Applications**
@@ -62,6 +94,12 @@ Download from [Releases](https://github.com/theburrowhub/heimdallm/releases) and
 Installs to `/opt/heimdallm/` with a desktop entry and `/usr/bin/heimdallm` symlink.
 
 > **Requires**: `gh` CLI authenticated (`gh auth login`). Token stored via GNOME Keyring / KDE Wallet (`secret-tool`), or `~/.config/heimdallm/.token` as fallback.
+
+Signed release builds check for updates once a day. When one is available,
+Heimdallm shows a dashboard banner and a system-tray action that updates the
+complete app plus daemon with one click (`.deb` / `.rpm` may show the normal OS
+authorization prompt). Docker/web and source-built installs remain managed by
+their deployment or checkout.
 
 ### Linux (from source, Docker-built)
 
@@ -425,6 +463,19 @@ For iterating on the Flutter Web bundle against a running daemon:
 ```bash
 make build-web    # compile Flutter → web/; then `make up-build` to bake into the Nginx image
 ```
+The production web image requires BuildKit: its Dockerfile-specific
+`.dockerignore` is what keeps the repository-root context minimal. The Make
+wrappers enforce this requirement. For direct validation, run these commands
+from the repository root (`flutter_app/assets` links to the shared `assets/`
+directory):
+```bash
+sh docker/scripts/test-web-build-context.sh
+docker buildx build --load --target build -t heimdallm-web-build:test -f flutter_app/Dockerfile.web .
+DOCKER_BUILDKIT=1 docker compose -f docker/docker-compose.yml build web
+```
+Do not use the legacy `docker build` backend for this Dockerfile: it ignores
+`flutter_app/Dockerfile.web.dockerignore` and can transfer unrelated repository
+files to the builder.
 
 **CLI / TUI** — terminal client against a running daemon:
 ```bash
@@ -456,6 +507,9 @@ make restart       # Docker: bounce both containers
 make ps            # Docker: container status
 make setup         # Docker: copy daemon API token into docker/.env (optional)
 make release-local # Build signed + notarized DMG and publish GitHub release
+make install-macos     # macOS: install the latest release into /Applications
+make uninstall-macos   # macOS: remove app + LaunchAgent (add PURGE=1 to wipe user state)
+make test-install-macos # macOS installer: run portable shell logic tests
 make verify-linux      # Linux: build the heimdallm-verify Docker image (full CI pipeline inside)
 make run-linux         # Linux: launch the Flutter bundle from inside the Docker image (X11)
 make install-linux     # Linux: native install to ~/.local/ (no sudo, Docker-built)

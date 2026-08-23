@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"time"
 
@@ -37,6 +38,13 @@ const MaxAutoImplementFailures = 3
 // server standing in.
 type IssuesFetcher interface {
 	FetchIssues(repo string, cfg config.IssueTrackingConfig, authenticatedUser string) ([]*github.Issue, error)
+}
+
+// IssueSearcher is the optional Search API back-end used by PrefetchIssues.
+// Keeping it separate from IssuesFetcher lets tests that only need FetchIssues
+// inject a nil searcher without changes.
+type IssueSearcher interface {
+	SearchIssues(query string) ([]*github.Issue, error)
 }
 
 // PipelineRunner is the subset of *Pipeline the fetcher uses. Takes a
@@ -97,6 +105,12 @@ type Fetcher struct {
 
 	stageClient StageTransitionClient
 	stageBroker Publisher
+
+	// searcher is optional. When set, PrefetchIssues uses the Search API to
+	// aggregate issue results across repos in a single call, populating
+	// prefetched so ProcessRepo can skip the per-repo REST call.
+	searcher   IssueSearcher
+	prefetched map[string][]*github.Issue // set by PrefetchIssues; read by ProcessRepo
 }
 
 // NewFetcher wires the orchestrator. All dependencies are interfaces so
@@ -128,6 +142,230 @@ func (f *Fetcher) SetStageTransitioner(client StageTransitionClient, broker Publ
 	f.stageBroker = broker
 }
 
+// SetSearcher enables the aggregated Search API prefetch path. When set,
+// PrefetchIssues is available for callers to warm the prefetch map before
+// calling ProcessRepo.
+func (f *Fetcher) SetSearcher(s IssueSearcher) {
+	f.searcher = s
+}
+
+// EligibleFn is the per-repo eligibility callback passed to PrefetchIssues.
+// It returns the effective IssueTrackingConfig for repo, whether autonomous
+// mode is enabled (which disables issue processing), and whether the repo
+// should be included at all (ok=false skips the repo silently).
+type EligibleFn func(repo string) (it config.IssueTrackingConfig, autonomousEnabled bool, ok bool)
+
+const (
+	// A single giant list of repo: qualifiers has already crossed GitHub
+	// Search's practical request-size limit in deployments with 40+ repos.
+	// Stay below that observed cliff and also protect unusually long names.
+	maxAggregatedSearchRepos      = 25
+	maxAggregatedSearchQueryBytes = 1024
+)
+
+// chunkAggregatedSearchRepos greedily creates deterministic, bounded queries.
+// A single overlong repo is still emitted alone so the normal chunk fallback
+// handles it instead of silently omitting it.
+func chunkAggregatedSearchRepos(assignees, repos []string) [][]string {
+	var chunks [][]string
+	current := make([]string, 0, min(len(repos), maxAggregatedSearchRepos))
+	for _, repo := range repos {
+		candidate := append(append([]string(nil), current...), repo)
+		query := github.BuildAggregatedSearchQuery(assignees, candidate)
+		tooLarge := len(candidate) > maxAggregatedSearchRepos || len(url.QueryEscape(query)) > maxAggregatedSearchQueryBytes
+		if tooLarge && len(current) > 0 {
+			chunks = append(chunks, current)
+			current = []string{repo}
+			continue
+		}
+		current = candidate
+	}
+	if len(current) > 0 {
+		chunks = append(chunks, current)
+	}
+	return chunks
+}
+
+// assigneeKey builds a canonical string key for a resolved assignee set so
+// repos that share the same effective assignees end up in the same search
+// group. The key is the sorted, joined assignee list (case-preserved to match
+// the GitHub login convention).
+func assigneeKey(assignees []string) string {
+	if len(assignees) == 0 {
+		return ""
+	}
+	sorted := make([]string, len(assignees))
+	copy(sorted, assignees)
+	// simple insertion sort — lists are always tiny (1–5 entries)
+	for i := 1; i < len(sorted); i++ {
+		for j := i; j > 0 && sorted[j] < sorted[j-1]; j-- {
+			sorted[j], sorted[j-1] = sorted[j-1], sorted[j]
+		}
+	}
+	return strings.Join(sorted, "\x00")
+}
+
+// PrefetchIssues runs one aggregated GET /search/issues query PER DISTINCT
+// ASSIGNEE SET covering all eligible repos, builds a per-repo map of raw
+// []*github.Issue, and stores it internally so subsequent ProcessRepo calls for
+// any of those repos can skip the per-repo REST GET.
+//
+// eligibleFn(repo) returns (effectiveIssueTrackingConfig, autonomousEnabled,
+// ok). Repos for which autonomousEnabled==true or ok==false are excluded from
+// the search scope (matching the gating in ProcessRepo).
+//
+// Grouping by assignee set is necessary because per-repo IssueTracking
+// overrides can specify different Assignees than the global config. Running a
+// single global-assignee query and storing results under a repo whose effective
+// assignees differ would silently drop issues assigned to the override assignees.
+//
+// Label qualifiers are intentionally omitted from the aggregated queries
+// (BuildAggregatedSearchQuery). The per-repo client-side ClassifyAndFilterIssues
+// step (called in ProcessRepo) already applies classification and label/filter
+// filtering precisely, so the aggregated query only needs to narrow by assignee
+// and repo scope.
+//
+// On search error for any group, PrefetchIssues logs a warning, clears the
+// internal prefetch map for that group's repos (leaving them absent so
+// ProcessRepo falls back to per-repo FetchIssues), and returns the last error.
+//
+// PrefetchIssues is NOT goroutine-safe; call it BEFORE the parallel ProcessRepo
+// fan-out and do not write the prefetch map again until all ProcessRepo calls
+// for that cycle have returned.
+func (f *Fetcher) PrefetchIssues(
+	eligibleFn EligibleFn,
+	authUser string,
+	repos []string,
+) (map[string][]*github.Issue, error) {
+	// Never retain a previous cycle's snapshot when this refresh fails.
+	f.prefetched = nil
+	if f.searcher == nil {
+		return nil, nil
+	}
+
+	// Build groups: assigneeKey → (assignees, []repo)
+	type group struct {
+		assignees []string
+		repos     []string
+	}
+	groups := make(map[string]*group)
+	groupOrder := make([]string, 0) // preserve deterministic iteration order
+
+	for _, r := range repos {
+		if r == "" {
+			continue
+		}
+		it, autonomous, ok := eligibleFn(r)
+		if !ok || autonomous || !it.Enabled {
+			continue
+		}
+		// Resolve effective assignees the same way ProcessRepo / FetchIssues does.
+		resolved := it.WithDefaultAssignee(authUser).Assignees
+		key := assigneeKey(resolved)
+		if _, exists := groups[key]; !exists {
+			groups[key] = &group{assignees: resolved}
+			groupOrder = append(groupOrder, key)
+		}
+		groups[key].repos = append(groups[key].repos, r)
+	}
+
+	if len(groups) == 0 {
+		return nil, nil
+	}
+
+	byRepo := make(map[string][]*github.Issue)
+	var lastErr error
+	totalRepos := 0
+	totalIssues := 0
+	totalQueries := 0
+
+	for _, key := range groupOrder {
+		g := groups[key]
+		for _, chunk := range chunkAggregatedSearchRepos(g.assignees, g.repos) {
+			query := github.BuildAggregatedSearchQuery(g.assignees, chunk)
+			if query == "" {
+				continue
+			}
+			totalQueries++
+			raw, err := f.searcher.SearchIssues(query)
+			truncated := errors.Is(err, github.ErrSearchTruncated)
+			if err != nil && !truncated {
+				slog.Warn("issues fetcher: search prefetch chunk failed, falling back only for that chunk",
+					"err", err, "repos", len(chunk))
+				lastErr = err
+				continue
+			}
+			if truncated {
+				// Serving a partial chunk would turn unseen issues into a false
+				// complete result. Other successful chunks remain safe to reuse.
+				slog.Warn("issues fetcher: search prefetch chunk truncated, falling back for that chunk",
+					"repos", len(chunk), "issues_seen", len(raw), "cap", 1000)
+				continue
+			}
+
+			canon := make(map[string]string, len(chunk))
+			for _, r := range chunk {
+				canon[strings.ToLower(r)] = r
+				// A present empty slice is a complete, known-empty result.
+				if _, exists := byRepo[r]; !exists {
+					byRepo[r] = nil
+				}
+			}
+			for _, issue := range raw {
+				if issue == nil || issue.Repo == "" {
+					continue
+				}
+				configured, ok := canon[strings.ToLower(issue.Repo)]
+				if !ok {
+					// Never leak an eventually-consistent or broadly-scoped
+					// result outside the monitored chunk.
+					continue
+				}
+				byRepo[configured] = append(byRepo[configured], issue)
+			}
+			totalRepos += len(chunk)
+			totalIssues += len(raw)
+		}
+	}
+
+	if len(byRepo) == 0 && lastErr != nil {
+		return nil, lastErr
+	}
+
+	slog.Info("issues fetcher: search prefetch complete",
+		"groups", len(groups), "queries", totalQueries, "repos", totalRepos, "issues", totalIssues)
+	f.prefetched = byRepo
+	return byRepo, lastErr
+}
+
+// HasPrefetchedIssues reports whether this cycle has a complete Search
+// snapshot for repo, including a known-empty result.
+func (f *Fetcher) HasPrefetchedIssues(repo string) bool {
+	_, ok := f.prefetched[repo]
+	return ok
+}
+
+// PrefetchedIssues copies the current map/slice containers for the promotion
+// pass. Issue pointers remain shared intentionally: after a successful label
+// promotion, PromoteReady updates that object so ProcessRepo sees the new stage
+// in the same cycle instead of waiting for another Search refresh.
+func (f *Fetcher) PrefetchedIssues() map[string][]*github.Issue {
+	if f.prefetched == nil {
+		return nil
+	}
+	out := make(map[string][]*github.Issue, len(f.prefetched))
+	for repo, items := range f.prefetched {
+		out[repo] = append([]*github.Issue(nil), items...)
+	}
+	return out
+}
+
+// ClearPrefetch discards the prefetch map. Call once per cycle after all
+// ProcessRepo calls have completed so stale data cannot leak into the next cycle.
+func (f *Fetcher) ClearPrefetch() {
+	f.prefetched = nil
+}
+
 // ProcessRepo fetches every eligible issue for one repo and dispatches it to
 // the pipeline. Returns the number of issues actually handed off and a
 // non-nil error only when the fetch itself failed — per-issue pipeline
@@ -153,9 +391,25 @@ func (f *Fetcher) ProcessRepo(ctx context.Context, repo string, cfg config.Issue
 		ctx = context.Background()
 	}
 
-	issues, err := f.client.FetchIssues(repo, cfg, authUser)
-	if err != nil {
-		return 0, fmt.Errorf("issues fetcher: fetch %s: %w", repo, err)
+	// Use prefetched search results when available; fall back to per-repo REST.
+	// The prefetch map is populated by PrefetchIssues before the parallel
+	// ProcessRepo fan-out begins and is read-only during that fan-out, so no
+	// locking is needed here.
+	var issues []*github.Issue
+	var fetchErr error
+	if prefetchedSlice, ok := f.prefetched[repo]; ok {
+		slog.Debug("issues fetcher: using prefetched search results",
+			"repo", repo, "count", len(prefetchedSlice))
+		// The raw search results still need to go through the same
+		// classification + filter pipeline that FetchIssues applies.
+		// ClassifyAndFilterIssues is the exported version of that logic.
+		issues = github.ClassifyAndFilterIssues(prefetchedSlice, repo, cfg, authUser)
+	} else {
+		// No prefetch for this repo — use the per-repo REST endpoint.
+		issues, fetchErr = f.client.FetchIssues(repo, cfg, authUser)
+		if fetchErr != nil {
+			return 0, fmt.Errorf("issues fetcher: fetch %s: %w", repo, fetchErr)
+		}
 	}
 
 	processed := 0
@@ -169,7 +423,8 @@ func (f *Fetcher) ProcessRepo(ctx context.Context, repo string, cfg config.Issue
 		// A dedup lookup error intentionally falls through to "treat as
 		// unprocessed" so a flaky store never stops the pipeline from running;
 		// the explicit if / else if makes that control flow obvious.
-		skip, reason, err := f.alreadyProcessed(issue)
+		commentCache := &issueCommentCache{}
+		skip, reason, err := f.alreadyProcessed(issue, commentCache)
 		if err != nil {
 			slog.Warn("issues fetcher: dedup check failed, treating as unprocessed",
 				"repo", repo, "number", issue.Number, "err", err)
@@ -178,7 +433,7 @@ func (f *Fetcher) ProcessRepo(ctx context.Context, repo string, cfg config.Issue
 				"repo", repo, "number", issue.Number, "reason", reason)
 			continue
 		}
-		if err := f.auditManualStageChange(ctx, issue, cfg); err != nil {
+		if err := f.auditManualStageChange(ctx, issue, cfg, commentCache); err != nil {
 			slog.Warn("issues fetcher: manual stage transition audit failed",
 				"repo", repo, "number", issue.Number, "err", err)
 		}
@@ -229,7 +484,28 @@ func (f *Fetcher) ProcessRepo(ctx context.Context, repo string, cfg config.Issue
 // The err return signals a lookup failure — the caller logs it and proceeds
 // as if the issue were unprocessed, so a flaky store never stops the
 // pipeline from running.
-func (f *Fetcher) alreadyProcessed(issue *github.Issue) (bool, string, error) {
+type issueCommentCache struct {
+	loaded   bool
+	comments []github.Comment
+}
+
+// loadIssueComments shares one successful comment fetch between marker
+// scanning and manual-stage auditing for the same issue. Errors are not cached,
+// preserving the audit path's existing opportunity to retry a transient
+// marker-scan failure.
+func (f *Fetcher) loadIssueComments(issue *github.Issue, cache *issueCommentCache) ([]github.Comment, error) {
+	if cache != nil && cache.loaded {
+		return cache.comments, nil
+	}
+	comments, err := f.comments.FetchIssueCommentsOnly(issue.Repo, issue.Number)
+	if err == nil && cache != nil {
+		cache.loaded = true
+		cache.comments = comments
+	}
+	return comments, err
+}
+
+func (f *Fetcher) alreadyProcessed(issue *github.Issue, commentCache *issueCommentCache) (bool, string, error) {
 	row, err := f.store.GetIssueByGithubID(issue.ID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -248,7 +524,7 @@ func (f *Fetcher) alreadyProcessed(issue *github.Issue) (bool, string, error) {
 	var cachedComments []github.Comment
 
 	if f.comments != nil {
-		comments, cmErr := f.comments.FetchIssueCommentsOnly(issue.Repo, issue.Number)
+		comments, cmErr := f.loadIssueComments(issue, commentCache)
 		if cmErr != nil {
 			slog.Warn("issues fetcher: marker scan failed, falling through to dedup checks",
 				"repo", issue.Repo, "number", issue.Number, "err", cmErr)
@@ -336,7 +612,7 @@ func (f *Fetcher) alreadyProcessed(issue *github.Issue) (bool, string, error) {
 	return false, "", nil
 }
 
-func (f *Fetcher) auditManualStageChange(ctx context.Context, issue *github.Issue, cfg config.IssueTrackingConfig) error {
+func (f *Fetcher) auditManualStageChange(ctx context.Context, issue *github.Issue, cfg config.IssueTrackingConfig, commentCache *issueCommentCache) error {
 	if f.stageClient == nil || issue == nil {
 		return nil
 	}
@@ -368,7 +644,7 @@ func (f *Fetcher) auditManualStageChange(ctx context.Context, issue *github.Issu
 
 	var comments []github.Comment
 	if f.comments != nil {
-		got, err := f.comments.FetchIssueCommentsOnly(issue.Repo, issue.Number)
+		got, err := f.loadIssueComments(issue, commentCache)
 		if err != nil {
 			slog.Warn("issues fetcher: manual stage audit comment fetch failed, continuing without dedup context",
 				"repo", issue.Repo, "number", issue.Number, "err", err)

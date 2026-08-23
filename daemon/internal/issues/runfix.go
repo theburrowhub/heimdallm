@@ -8,6 +8,7 @@ import (
 
 	"github.com/heimdallm/daemon/internal/executor"
 	"github.com/heimdallm/daemon/internal/store"
+	"github.com/heimdallm/daemon/internal/workgate"
 )
 
 // FixRequest is the full input the Pipeline needs to address a
@@ -82,6 +83,13 @@ type FixResult struct {
 // `SanitiseUntrustedFreeText` (reviewer text + issue body fences),
 // and the `sensitivePathPatterns` denylist inside CommitAll.
 func (p *Pipeline) RunFix(ctx context.Context, req FixRequest) (FixResult, error) {
+	ctx, permit, owned, err := p.workGate.AcquireContext(ctx, workgate.KindReviewFix)
+	if err != nil {
+		return FixResult{}, ErrUpdateDraining
+	}
+	if owned {
+		defer permit.Release()
+	}
 	if p.git == nil {
 		return FixResult{}, fmt.Errorf("issues fix: git dependency not wired")
 	}
@@ -110,7 +118,8 @@ func (p *Pipeline) RunFix(ctx context.Context, req FixRequest) (FixResult, error
 
 	// Promote CLI flags into write mode — same posture as
 	// runAutoImplement so the agent can actually edit files.
-	execOpts := ensureAutoImplementWritePerms(cli, req.ExecOpts)
+	execOpts := executor.OptionsForSelectedCLI(req.CLIPrimary, cli, req.ExecOpts)
+	execOpts = ensureAutoImplementWritePerms(cli, execOpts)
 
 	prompt := buildFixAgentPrompt(req)
 	if _, err := p.executor.ExecuteRaw(cli, prompt, execOpts); err != nil {

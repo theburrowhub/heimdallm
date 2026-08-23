@@ -19,6 +19,7 @@ import (
 	"github.com/heimdallm/daemon/internal/github"
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
+	"github.com/heimdallm/daemon/internal/workgate"
 )
 
 // ErrCircuitBreakerTripped is returned by Run when a triage was skipped
@@ -28,6 +29,10 @@ import (
 // errors.Is(err, ErrCircuitBreakerTripped) when the reason is not needed.
 // See theburrowhub/heimdallm#292.
 var ErrCircuitBreakerTripped = errors.New("issues pipeline: circuit breaker tripped")
+
+// ErrUpdateDraining is returned before an issue run starts while the desktop
+// updater is draining the daemon for a safe bundle replacement.
+var ErrUpdateDraining = workgate.ErrDraining
 
 // CircuitBreakerError wraps ErrCircuitBreakerTripped with the specific
 // reason the breaker returned. Use errors.As on this type to read Reason
@@ -267,6 +272,10 @@ type RunOptions struct {
 	// change collapse semantics — it is diagnostic only. Default (empty) leaves
 	// the key purely issue.UpdatedAt, preserving existing caller behaviour.
 	InFlightSalt string
+
+	// WorkPermit carries admission acquired before caller preflight/checkout.
+	// Nil keeps direct callers safe by making Run acquire its own permit.
+	WorkPermit *workgate.Permit
 }
 
 // Pipeline runs a single issue triage or implementation end-to-end.
@@ -288,6 +297,10 @@ type Pipeline struct {
 	// the new review-state checker observes external reviews on them
 	// (#482). Nil-safe: single-tier setups (some tests) leave it unset.
 	watch WatchEnroller
+
+	// workGate covers the complete triage/refinement/implementation
+	// transaction. Nil preserves standalone and unit-test behaviour.
+	workGate *workgate.Gate
 }
 
 // SetWatchEnroller wires the Tier 3 watch enroller so auto_implement
@@ -305,6 +318,9 @@ func (p *Pipeline) SetBotLogin(login string) { p.botLogin = login }
 func (p *Pipeline) SetCircuitBreakerLimits(limits *store.IssueCircuitBreakerLimits) {
 	p.breaker = limits
 }
+
+// SetWorkGate coordinates complete issue runs with desktop app updates.
+func (p *Pipeline) SetWorkGate(gate *workgate.Gate) { p.workGate = gate }
 
 // issueStore is the subset of *store.Store the pipeline needs. Kept narrow
 // so tests can substitute a fake without bringing in SQLite.
@@ -373,14 +389,31 @@ func New(s issueStore, gh issueGitHub, exec CLIExecutor, git GitOps, broker Publ
 // passes a context so long-running network operations (git fetch / push,
 // CLI invocation) can be cancelled on daemon shutdown.
 func (p *Pipeline) Run(ctx context.Context, issue *github.Issue, opts RunOptions) (*store.IssueReview, error) {
-	if opts.ReleaseRepoContext != nil {
-		defer opts.ReleaseRepoContext()
-	}
 	if issue == nil {
 		return nil, fmt.Errorf("issues pipeline: nil issue")
 	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if p.workGate != nil {
+		kind := workgate.KindIssue
+		if issue.Mode == config.IssueModeDevelop {
+			kind = workgate.KindImplementation
+		}
+		if !p.workGate.Accepts(opts.WorkPermit) {
+			permit, err := p.workGate.Acquire(kind)
+			if err != nil {
+				return nil, ErrUpdateDraining
+			}
+			defer permit.Release()
+		}
+	}
+	// Keep the admission permit until the caller-owned checkout cleanup has
+	// completed. This ordering matters for direct pipeline callers that do not
+	// already carry an outer permit: Prepare must still see the transaction as
+	// active while its temporary worktree is being released.
+	if opts.ReleaseRepoContext != nil {
+		defer opts.ReleaseRepoContext()
 	}
 
 	// Single-flight in-flight claim keyed on github_issue_id (#458). Any
@@ -607,7 +640,8 @@ func (p *Pipeline) runReviewOnly(ctx context.Context, issue *github.Issue, issue
 		p.publishError(issueID, issue, fmt.Errorf("detect CLI: %w", err))
 		return nil, fmt.Errorf("issues pipeline: detect CLI: %w", err)
 	}
-	raw, err := p.executor.ExecuteRaw(cli, prompt, opts.ExecOpts)
+	execOpts := executor.OptionsForSelectedCLI(opts.Primary, cli, opts.ExecOpts)
+	raw, err := p.executor.ExecuteRaw(cli, prompt, execOpts)
 	if err != nil {
 		p.publishError(issueID, issue, fmt.Errorf("execute %s: %w", cli, err))
 		return nil, fmt.Errorf("issues pipeline: execute %s: %w", cli, err)
@@ -723,6 +757,7 @@ func (p *Pipeline) runAutoImplement(ctx context.Context, issue *github.Issue, is
 		p.publishError(issueID, issue, fmt.Errorf("detect CLI: %w", err))
 		return nil, fmt.Errorf("issues pipeline: detect CLI: %w", err)
 	}
+	opts.ExecOpts = executor.OptionsForSelectedCLI(opts.Primary, cli, opts.ExecOpts)
 
 	// Auto_implement requires the CLI to be allowed to write files. When the
 	// operator has not configured a permission/approval flag explicitly, fall
@@ -1008,10 +1043,6 @@ func (p *Pipeline) autoImplementNoChangesFallback(issue *github.Issue, issueID i
 // every issue degrades to the no-changes fallback comment (#433). Any
 // explicit operator setting wins; this only fills the gap when *nothing* is
 // configured.
-//
-// gemini has no equivalent non-interactive write flag today: callers must
-// configure --include-directories plus an approval bypass in extra_flags
-// themselves. We log a warn so the operator sees why writes are no-op.
 func ensureAutoImplementWritePerms(cli string, opts executor.ExecOptions) executor.ExecOptions {
 	switch cli {
 	case "claude":
@@ -1027,9 +1058,11 @@ func ensureAutoImplementWritePerms(cli string, opts executor.ExecOptions) execut
 				"cli", cli)
 		}
 	case "gemini":
-		slog.Warn("issues pipeline: gemini has no built-in write-permission default; "+
-			"configure approval bypass via extra_flags or expect no-changes runs",
-			"cli", cli)
+		if strings.TrimSpace(opts.ApprovalMode) == "" {
+			opts.ApprovalMode = "auto_edit"
+			slog.Info("issues pipeline: defaulting gemini approval_mode to auto_edit for auto_implement",
+				"cli", cli)
+		}
 	}
 	return opts
 }

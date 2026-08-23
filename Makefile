@@ -1,7 +1,23 @@
 # ── Platform detection ─────────────────────────────────────────────────────────
 OS := $(shell uname -s)
 
-DAEMON_BIN  := $(shell pwd)/daemon/bin/heimdallm
+# Anchored to this Makefile's directory for the same reason as PKILL_ESCAPE
+# below: with $(shell pwd) a `make -f /path/to/Makefile` from elsewhere pointed
+# dev-stop at a daemon path that does not exist. Identical from the repo root.
+DAEMON_BIN  := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))/daemon/bin/heimdallm
+
+# pkill/pgrep -f treat their pattern as an ERE, so a path containing regex
+# metacharacters silently fails to match — a $HOME or checkout directory with
+# `+`, `(` or `[` in it would leave the daemon running with no error. The script
+# is the single implementation, shared with scripts/test-linux-install.sh, which
+# asserts it against a metacharacter-laden path.
+#
+# Anchored to this Makefile's own directory rather than the cwd: with a relative
+# path, `make -f /path/to/Makefile` from elsewhere cannot find the script, and
+# since the callers now abort on an empty pattern that would turn an unusual
+# invocation into a hard failure of dev-stop and install-linux.
+REPO_ROOT_DIR := $(dir $(lastword $(MAKEFILE_LIST)))
+PKILL_ESCAPE = $(REPO_ROOT_DIR)scripts/pkill-escape.sh
 
 ifeq ($(OS),Darwin)
   FLUTTER_DEVICE   := macos
@@ -16,22 +32,38 @@ else
   APP_BUNDLE       := $(FLUTTER_BUILD)/bundle
 endif
 
-.PHONY: build-daemon build-app build-web build-cli test test-cli lint-cli dev-cli test-docker dev dev-daemon dev-stop \
-        release-local package-macos install-service verify-linux run-linux \
-        install-linux uninstall-linux \
+.PHONY: build-daemon build-app build-web build-cli test test-cli lint-cli test-web-tooling test-compose-isolation \
+        test-smoke test-github test-e2e test-web dev-cli test-docker dev dev-daemon dev-stop \
+        coverage coverage-daemon coverage-cli coverage-flutter coverage-check coverage-ci test-coverage-gate \
+        release-local package-macos install-service verify-linux run-linux test-install-macos \
+        test-install-linux \
+        install-macos uninstall-macos install-linux uninstall-linux \
         setup up up-build up-daemon up-build-daemon down logs logs-daemon \
-        ps restart clean clean-clones _check-docker _check-env _check-linux _post-up-hints
+        ps restart clean clean-clones _check-docker _check-buildkit _check-env \
+        _check-macos _check-macos-user _check-linux _post-up-hints
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
+# Version of the current checkout, stamped into locally-built daemon binaries
+# (main.version). Distinct from VERSION below, which computes the NEXT release
+# tag for release-local. The leading "v" is stripped so all build paths report
+# the same format as goreleaser's {{.Version}} (e.g. "0.7.10", not "v0.7.10").
+# Release paths must override this with the version being released:
+#   make build-daemon GIT_VERSION=0.7.11
+# Only v-prefixed tags are considered (--match 'v*'): repos accumulate
+# non-version tags (backups, accidental `git tag list`) that would otherwise
+# win the describe and get stamped into the binary.
+# Lazily expanded (=) so git describe only runs for targets that use it.
+GIT_VERSION = $(shell (git describe --tags --match 'v*' --always --dirty 2>/dev/null || echo dev) | sed 's/^v//')
+
 build-daemon:
-	cd daemon && make build
+	cd daemon && make build VERSION=$(GIT_VERSION)
 
 build-app:
 	cd flutter_app && flutter build $(FLUTTER_DEVICE) --release
 
 build-cli:
-	$(MAKE) -C cli build
+	$(MAKE) -C cli build VERSION=$(GIT_VERSION)
 
 # Flutter Web bundle, consumed by docker/Dockerfile.web (served via Nginx).
 # --base-href=/ matches the Nginx server block that expects assets at the root.
@@ -50,6 +82,37 @@ test-cli:
 
 lint-cli:
 	$(MAKE) -C cli lint
+
+test-install-macos:
+	@sh -n scripts/macos-install.sh
+	@sh -n scripts/test-macos-install.sh
+	@./scripts/test-macos-install.sh
+
+# Guards the pkill invocations in dev-stop / install-linux / uninstall-linux.
+# Static-plus-behavioural; starts no daemon and touches no installed files.
+test-install-linux:
+	@sh -n scripts/test-linux-install.sh
+	@./scripts/test-linux-install.sh
+
+test-web-tooling:
+	@sh docker/scripts/tests/test-web-tooling.sh
+
+# Static/fake-Docker regression suite for the destructive Compose test wrappers.
+# It does not build images, start containers, or touch daemon data.
+test-compose-isolation:
+	./docker/scripts/tests/test-compose-isolation.sh
+
+test-smoke:
+	./docker/scripts/test-local.sh smoke
+
+test-github:
+	./docker/scripts/test-local.sh github
+
+test-e2e:
+	./docker/scripts/test-local.sh e2e
+
+test-web:
+	./docker/scripts/test-web.sh
 
 # ── Sandboxed Go tests (EDR-safe) ─────────────────────────────────────────────
 #
@@ -75,22 +138,94 @@ lint-cli:
 
 GO_DOCKER_IMAGE ?= golang:1.25-alpine@sha256:f6751d823c26342f9506c03797d2527668d095b0a15f1862cddb4d927a7a4ced
 GO_TEST_ARGS    ?= -timeout 60s -count=1 ./...
+GO_COVERAGE_PROFILE ?=
+GO_CONTAINER_COVERAGE_PROFILE := /tmp/heimdallm-daemon-coverage.out
+GO_COVERAGE_ARGS := -covermode=atomic -coverpkg=./... \
+                    -coverprofile=$(GO_CONTAINER_COVERAGE_PROFILE) $(GO_TEST_ARGS)
+
+# Single definition of the canonical, EDR-safe container boundary used by
+# every daemon test mode. In particular, coverage must not grow a second
+# docker invocation that can drift from test-docker's pinned/read-only setup.
+GO_DOCKER_RUN = docker run --rm \
+	--user "$(shell id -u):$(shell id -g)" \
+	-v "$(shell pwd):/src:ro" \
+	-v "/tmp/heimdallm-gocache:/tmp/.cache" \
+	-v "/tmp/heimdallm-home:/tmp/home" \
+	-w /src/daemon \
+	-e HOME=/tmp/home \
+	-e GOCACHE=/tmp/.cache/go-build \
+	-e GOMODCACHE=/tmp/.cache/gomod \
+	$(GO_DOCKER_IMAGE)
+
+# Coverage profiles share one stable location so the exact same gate command
+# can run locally and in CI. The daemon profile is the exception to native
+# generation: it is produced in the canonical pinned container below and
+# streamed out over stdout, so /src remains read-only.
+COVERAGE_DIR             ?= .coverage
+DAEMON_COVERAGE_PROFILE  ?= $(COVERAGE_DIR)/daemon.out
+CLI_COVERAGE_PROFILE     ?= $(COVERAGE_DIR)/cli.out
+FLUTTER_COVERAGE_PROFILE ?= $(COVERAGE_DIR)/flutter/lcov.info
+COVERAGE_BASELINE        ?= .github/coverage-baseline.json
+COVERAGE_BASE_REF        ?= origin/main
 
 test-docker:
 	@command -v docker >/dev/null || { echo "❌  Docker is required. Install from https://docs.docker.com/get-docker/"; exit 1; }
 	@mkdir -p /tmp/heimdallm-gocache /tmp/heimdallm-home
+ifeq ($(strip $(GO_COVERAGE_PROFILE)),)
 	@echo "▶  Running Go vet + tests inside $(GO_DOCKER_IMAGE)"
-	docker run --rm \
-	  --user "$(shell id -u):$(shell id -g)" \
-	  -v "$(shell pwd):/src:ro" \
-	  -v "/tmp/heimdallm-gocache:/tmp/.cache" \
-	  -v "/tmp/heimdallm-home:/tmp/home" \
-	  -w /src/daemon \
-	  -e HOME=/tmp/home \
-	  -e GOCACHE=/tmp/.cache/go-build \
-	  -e GOMODCACHE=/tmp/.cache/gomod \
-	  $(GO_DOCKER_IMAGE) \
-	  sh -c "go vet ./... && go test $(GO_TEST_ARGS)"
+	$(GO_DOCKER_RUN) sh -c "go vet ./... && go test $(GO_TEST_ARGS)"
+else
+	@mkdir -p "$(dir $(GO_COVERAGE_PROFILE))"
+	@echo "▶  Running Go vet + coverage inside $(GO_DOCKER_IMAGE)"
+	@set -eu; \
+	  tmp="$$(mktemp "$(GO_COVERAGE_PROFILE).tmp.XXXXXX")"; \
+	  trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
+	  $(GO_DOCKER_RUN) \
+	    sh -c "go vet ./... 1>&2 && go test $(GO_COVERAGE_ARGS) 1>&2 && cat $(GO_CONTAINER_COVERAGE_PROFILE)" \
+	    >"$$tmp"; \
+	  test -s "$$tmp"; \
+	  mv "$$tmp" "$(GO_COVERAGE_PROFILE)"
+endif
+
+# Produce all three profiles without running the policy gate. This is useful
+# when inspecting coverage locally or when updating the ratchet baseline.
+coverage: coverage-daemon coverage-cli coverage-flutter
+
+coverage-daemon:
+	@mkdir -p "$(dir $(DAEMON_COVERAGE_PROFILE))"
+	@$(MAKE) test-docker GO_COVERAGE_PROFILE="$(abspath $(DAEMON_COVERAGE_PROFILE))"
+
+coverage-cli:
+	$(MAKE) -C cli coverage COVERAGE_PROFILE="$(abspath $(CLI_COVERAGE_PROFILE))"
+
+coverage-flutter:
+	@mkdir -p "$(dir $(FLUTTER_COVERAGE_PROFILE))"
+	@echo "▶  Generating Flutter coverage"
+	@set -eu; \
+	  profile="$(abspath $(FLUTTER_COVERAGE_PROFILE))"; \
+	  tmp="$$(mktemp "$$profile.tmp.XXXXXX")"; \
+	  trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
+	  (cd flutter_app && flutter test --coverage --coverage-path="$$tmp"); \
+	  test -s "$$tmp"; \
+	  mv "$$tmp" "$$profile"
+
+test-coverage-gate:
+	python3 -m unittest discover -s scripts/tests -p 'test_coverage_gate.py' -v
+
+# Validate profiles that already exist. Keeping generation separate makes it
+# possible to rerun/debug the policy without paying for all three test suites.
+coverage-check:
+	python3 scripts/coverage_gate.py $(if $(strip $(GITHUB_STEP_SUMMARY)),--summary "$(GITHUB_STEP_SUMMARY)") \
+	  --base-ref "$(COVERAGE_BASE_REF)" \
+	  --daemon-profile "$(DAEMON_COVERAGE_PROFILE)" \
+	  --cli-profile "$(CLI_COVERAGE_PROFILE)" \
+	  --flutter-profile "$(FLUTTER_COVERAGE_PROFILE)" \
+	  --baseline "$(COVERAGE_BASELINE)"
+
+# One entry point for the complete local/CI coverage check. The recursive make
+# is intentional: it sequences the gate after every profile even under -j.
+coverage-ci: coverage
+	@$(MAKE) coverage-check
 
 # ── Local development ─────────────────────────────────────────────────────────
 #
@@ -110,7 +245,14 @@ dev-cli:
 	$(MAKE) -C cli dev
 
 dev-stop:
-	@pkill -f "$(DAEMON_BIN)" 2>/dev/null && echo "↓  Daemon parado" || true
+	@# -x is REQUIRED: without it the pattern also matches this recipe's own
+	@# `sh -c` command line, so pkill SIGTERMs the shell running it and dev-stop
+	@# aborts — taking `make dev` / `make dev-daemon` with it, whether or not a
+	@# daemon was running. The dev daemon is spawned with no arguments, so its
+	@# cmdline equals the pattern exactly. Guarded by scripts/test-linux-install.sh.
+	@DAEMON_RE=$$($(PKILL_ESCAPE) "$(DAEMON_BIN)") || exit 1; \
+	[ -n "$$DAEMON_RE" ] || { echo "❌  pkill-escape.sh produced an empty pattern"; exit 1; }; \
+	pkill -x -f "$$DAEMON_RE" 2>/dev/null && echo "↓  Daemon parado" || true
 	@UI_PID_FILE="$$HOME/.local/share/heimdallm/ui.pid"; \
 	 if [ -f "$$UI_PID_FILE" ]; then \
 	   UI_PID=$$(cat "$$UI_PID_FILE"); \
@@ -151,7 +293,10 @@ VERSION ?= $(shell \
 	PAT=$$(echo $$VER | cut -d. -f3); \
 	echo "v$$MAJ.$$MIN.$$((PAT+1))")
 
-release-local: _check-macos _check-signing _check-gh build-daemon
+release-local: _check-macos _check-signing _check-gh
+	@# Stamp the daemon with the version being released, not the checkout's
+	@# git-describe (which still points at the PREVIOUS tag at this point).
+	$(MAKE) build-daemon GIT_VERSION=$(VERSION:v%=%)
 	@echo ""
 	@echo "╔══════════════════════════════════════════════╗"
 	@echo "║  Heimdallm local release                     ║"
@@ -233,6 +378,13 @@ release-local: _check-macos _check-signing _check-gh build-daemon
 _check-macos:
 	@if [ "$$(uname -s)" != "Darwin" ]; then \
 	  echo "❌  This target requires macOS."; \
+	  exit 1; \
+	fi
+
+_check-macos-user: _check-macos
+	@if [ "$$(id -u)" -eq 0 ]; then \
+	  echo "❌  Do not install or uninstall Heimdallm as root."; \
+	  echo "    Run the macOS target as your normal user, without 'sudo make'."; \
 	  exit 1; \
 	fi
 
@@ -324,6 +476,19 @@ setup:
 _check-docker:
 	@command -v docker >/dev/null || { echo "❌  Docker is required. Install from https://docs.docker.com/get-docker/"; exit 1; }
 
+_check-buildkit: _check-docker
+	@docker compose version >/dev/null 2>&1 || { \
+	  echo "❌  Docker Compose v2 is required for Flutter Web builds."; \
+	  exit 1; \
+	}
+	@docker buildx version >/dev/null 2>&1 || { \
+	  echo "❌  Docker Buildx/BuildKit is required for Flutter Web builds."; \
+	  exit 1; \
+	}
+	@if [ "$${DOCKER_BUILDKIT:-1}" = "0" ]; then \
+	  echo "⚠  DOCKER_BUILDKIT=0 is overridden with 1 for the Flutter Web build."; \
+	fi
+
 _check-env: _check-docker
 	@test -f $(DOCKER_ENV) || { \
 	  echo "❌  $(DOCKER_ENV) missing."; \
@@ -369,21 +534,21 @@ _post-up-hints:
 	@echo ""
 	@echo "Next: open http://localhost:$${HEIMDALLM_WEB_PORT:-3000}  ·  logs: \`make logs\`  ·  stop: \`make down\`"
 
-up: _check-env
-	docker compose -f $(COMPOSE_FILE) up -d
+up: _check-env _check-buildkit
+	DOCKER_BUILDKIT=1 HEIMDALLM_VERSION=$(GIT_VERSION) docker compose -f $(COMPOSE_FILE) up -d
 	@$(MAKE) --no-print-directory _post-up-hints
 
 # Like `up` but rebuilds images from local source (use after `git pull` on main).
-up-build: _check-env
-	docker compose -f $(COMPOSE_FILE) up -d --build --pull always
+up-build: _check-env _check-buildkit
+	DOCKER_BUILDKIT=1 HEIMDALLM_VERSION=$(GIT_VERSION) docker compose -f $(COMPOSE_FILE) up -d --build --pull always
 	@$(MAKE) --no-print-directory _post-up-hints
 
 up-daemon: _check-env
-	docker compose -f $(COMPOSE_FILE) up -d heimdallm
+	HEIMDALLM_VERSION=$(GIT_VERSION) docker compose -f $(COMPOSE_FILE) up -d heimdallm
 
 # Like `up-daemon` but rebuilds the daemon image from local source.
 up-build-daemon: _check-env
-	docker compose -f $(COMPOSE_FILE) up -d --build --pull always heimdallm
+	HEIMDALLM_VERSION=$(GIT_VERSION) docker compose -f $(COMPOSE_FILE) up -d --build --pull always heimdallm
 
 down: _check-docker
 	docker compose -f $(COMPOSE_FILE) down
@@ -418,6 +583,29 @@ package-macos: _check-macos build-daemon build-app
 	  -ov -format UDZO \
 	  "dist/Heimdallm.dmg"
 
+# ── Native macOS install / uninstall (release DMG) ────────────────────────────
+#
+# Downloads a release DMG and installs the validated app bundle transactionally
+# into /Applications. The helper owns launchd state, rollback, selective sudo,
+# and cleanup; keep these recipes thin so Make never evaluates macOS commands at
+# parse time.
+#
+# Usage:
+#   make install-macos
+#   make install-macos RELEASE=v0.7.5
+#   make uninstall-macos
+#   make uninstall-macos PURGE=1
+#
+# RELEASE/PURGE supplied on the make command line or inherited from the
+# environment already reach the recipe environment; do not export them
+# globally, where they could leak into unrelated targets.
+
+install-macos: _check-macos-user
+	@./scripts/macos-install.sh install
+
+uninstall-macos: _check-macos-user
+	@./scripts/macos-install.sh uninstall
+
 # ── Docker-based Linux build verification ─────────────────────────────────────
 #
 # Runs the full CI-equivalent pipeline inside a Docker container:
@@ -432,7 +620,7 @@ package-macos: _check-macos build-daemon build-app
 verify-linux:
 	@command -v docker >/dev/null || { echo "❌  Docker is required. Install it from https://docs.docker.com/get-docker/"; exit 1; }
 	@echo "▶  Building Linux verification image (this may take a few minutes on first run)..."
-	docker build -f Dockerfile.linux-verify -t heimdallm-verify .
+	docker build --platform linux/amd64 -f Dockerfile.linux-verify --build-arg VERSION=$(GIT_VERSION) -t heimdallm-verify .
 	@echo ""
 	@echo "✅  Linux build verification passed"
 
@@ -657,6 +845,41 @@ install-linux: _check-linux verify-linux
 	  update-desktop-database "$$HOME/.local/share/applications/" 2>/dev/null || true
 	@command -v gtk-update-icon-cache >/dev/null 2>&1 && \
 	  gtk-update-icon-cache -q -t "$$HOME/.local/share/icons/hicolor/" 2>/dev/null || true
+	@# Stop the outgoing daemon — see #661. Replacing the binary above does not
+	@# touch the process already serving it (Linux unlink-while-running), and
+	@# DaemonLifecycle.ensureRunning() adopts any healthy daemon on the port
+	@# instead of spawning the one just installed. Left alone, the previous
+	@# release keeps running indefinitely: stale review logic, stale version in
+	@# the Status tab, no indication anything is wrong.
+	@#
+	@# Runs last, so a failure earlier in this target never takes down a working
+	@# daemon. SIGTERM (pkill's default) is the daemon's own graceful path — it
+	@# drains HTTP and sweeps in-flight agents.
+	@#
+	@# -x is REQUIRED, not a refinement: with -f alone the pattern also matches
+	@# the recipe's own `sh -c` command line, which contains the path — pkill
+	@# SIGTERMs the shell running it and the target dies mid-recipe (`|| true`
+	@# does not help; the signal hits the shell, not pkill). -x demands the whole
+	@# cmdline equal the pattern, which the daemon satisfies (spawned with no
+	@# arguments) and the longer shell cmdline does not. Guarded by
+	@# scripts/test-linux-install.sh.
+	@DAEMON_RE=$$($(PKILL_ESCAPE) "$$HOME/.local/opt/heimdallm/heimdalld") || exit 1; \
+	[ -n "$$DAEMON_RE" ] || { echo "❌  pkill-escape.sh produced an empty pattern — the"; \
+	  echo "   previous daemon is still running; stop it before launching."; exit 1; }; \
+	if pkill -x -f "$$DAEMON_RE" 2>/dev/null; then \
+	  echo ""; \
+	  echo "↓  Stopped the previously running daemon (it was serving the old binary)."; \
+	  for _ in 1 2 3 4 5 6 7 8 9 10; do \
+	    pgrep -x -f "$$DAEMON_RE" >/dev/null 2>&1 || break; \
+	    sleep 1; \
+	  done; \
+	  if pgrep -x -f "$$DAEMON_RE" >/dev/null 2>&1; then \
+	    echo "⚠  It has not exited after 10s — stop it manually, or it will keep"; \
+	    echo "   serving the old binary."; \
+	  else \
+	    echo "   Start the new one from the app: Server → Status → Start server."; \
+	  fi; \
+	fi
 	@echo ""
 	@echo "✅  Heimdallm installed:"
 	@echo "    Bundle:  $$HOME/.local/opt/heimdallm/"
@@ -689,6 +912,13 @@ uninstall-linux: _check-linux
 	@echo "▶  Uninstalling Heimdallm from $$HOME/.local/..."
 	@# Stop running instances (best-effort — ignored if nothing is running).
 	@#
+	@# -x is REQUIRED: with -f alone the pattern also matches the recipe's own
+	@# `sh -c` command line, so pkill SIGTERMs the shell running it and this
+	@# target dies here — before the desktop entry, icons and symlink below are
+	@# removed (`|| true` does not help; the signal hits the shell, not pkill).
+	@# -x demands the whole cmdline equal the pattern, which the shell's longer
+	@# cmdline never does. Guarded by scripts/test-linux-install.sh.
+	@#
 	@# Coverage caveat: pkill -f matches against /proc/<pid>/cmdline. This
 	@# catches:
 	@#   - launcher-launched Flutter apps (desktop entry Exec= is absolute,
@@ -703,8 +933,18 @@ uninstall-linux: _check-linux
 	@# running process, and the user can close the window whenever. We
 	@# intentionally avoid a broader `-f 'heimdallm'` match to prevent
 	@# hitting unrelated dev processes (e.g. `flutter run` of this repo).
-	@pkill -f "$$HOME/.local/opt/heimdallm/heimdallm" 2>/dev/null || true
-	@pkill -f "$$HOME/.local/opt/heimdallm/heimdalld" 2>/dev/null || true
+	@#
+	@# -x narrows this further: an app launched WITH arguments (e.g.
+	@# `~/.local/opt/heimdallm/heimdallm --some-flag`) no longer matches, since
+	@# its cmdline is longer than the pattern. Same rationale as above — the
+	@# rm -rf is safe against a running process — and plain -f never actually
+	@# reached that case anyway, because it killed this recipe's shell first.
+	@APP_RE=$$($(PKILL_ESCAPE) "$$HOME/.local/opt/heimdallm/heimdallm" 2>/dev/null); \
+	 if [ -n "$$APP_RE" ]; then pkill -x -f "$$APP_RE" 2>/dev/null || true; \
+	 else echo "⚠  could not build the app pattern; leaving any running app alone"; fi
+	@DAEMON_RE=$$($(PKILL_ESCAPE) "$$HOME/.local/opt/heimdallm/heimdalld" 2>/dev/null); \
+	 if [ -n "$$DAEMON_RE" ]; then pkill -x -f "$$DAEMON_RE" 2>/dev/null || true; \
+	 else echo "⚠  could not build the daemon pattern; leaving any running daemon alone"; fi
 	@rm -f "$$HOME/.local/share/heimdallm/ui.pid"
 	rm -f "$$HOME/.local/share/applications/com.theburrowhub.heimdallm.desktop"
 	@for SIZE in 48 128 256 512; do \

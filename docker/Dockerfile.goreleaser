@@ -8,7 +8,12 @@
 
 FROM node:20-alpine
 
-RUN apk add --no-cache ca-certificates tzdata bash curl coreutils git openssh-client
+# tini is PID 1 (see ENTRYPOINT): the daemon spawns git, which forks ssh, and an
+# orphaned grandchild is reparented onto PID 1. The kernel does not auto-reap on
+# PID 1's behalf, so without a real init those grandchildren pile up as zombies
+# until the container hits its PID limit — 13 [ssh] + 2 [git] in 23h of uptime
+# on 0.8.0 (theburrowhub/heimdallm#665).
+RUN apk add --no-cache ca-certificates tzdata bash curl coreutils git openssh-client tini
 
 # ── Install AI CLI tools ──────────────────────────────────────────────────────
 # Claude Code CLI (Anthropic) — requires ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN at runtime
@@ -78,4 +83,8 @@ WORKDIR /home/heimdallm
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD wget -qO- http://localhost:7842/health || exit 1
 
-ENTRYPOINT ["/usr/local/bin/heimdallm"]
+# tini reaps orphaned grandchildren and forwards signals to the daemon, so
+# graceful shutdown (and the daemon's own agent termination) is unchanged.
+# No `-g`: SIGTERM must reach the daemon alone so it can run its own shutdown
+# sequence rather than having the whole group killed underneath it.
+ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/heimdallm"]

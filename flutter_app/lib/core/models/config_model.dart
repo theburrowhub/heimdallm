@@ -1,3 +1,12 @@
+/// Severities `never_approve_min_severity` accepts, in ascending order.
+/// Mirrors the daemon's validator (config.validateNeverApproveMinSeverity).
+const neverApproveMinSeverityOptions = ['low', 'medium', 'high'];
+
+/// Threshold the daemon applies when `never_approve_min_severity` is unset at
+/// every scope. Mirrors pipeline.DefaultNeverApproveMinSeverity — keep both in
+/// sync, otherwise the dropdown shows a value the daemon is not using.
+const defaultNeverApproveMinSeverity = 'medium';
+
 /// Per-agent CLI execution settings.
 /// Stored under `ai.agents.<name>` in config.toml.
 class CLIAgentConfig {
@@ -150,6 +159,7 @@ class RepoConfig {
   final List<String>? prLabels;
   final bool? prDraft;
   final bool? neverApproveWithIssues;
+  final String? neverApproveMinSeverity;
 
   const RepoConfig({
     this.prEnabled,
@@ -180,6 +190,7 @@ class RepoConfig {
     this.prLabels,
     this.prDraft,
     this.neverApproveWithIssues,
+    this.neverApproveMinSeverity,
     this.firstSeenAt,
   });
 
@@ -229,7 +240,8 @@ class RepoConfig {
       prAssignee != null ||
       prLabels != null ||
       prDraft != null ||
-      neverApproveWithIssues != null;
+      neverApproveWithIssues != null ||
+      neverApproveMinSeverity != null;
 
   /// LED status for each feature: 'off', 'global', 'repo'
   String prLedStatus(bool globalMonitored) {
@@ -289,6 +301,7 @@ class RepoConfig {
     Object? prLabels = _sentinel,
     Object? prDraft = _sentinel,
     Object? neverApproveWithIssues = _sentinel,
+    Object? neverApproveMinSeverity = _sentinel,
     Object? firstSeenAt = _sentinel,
   }) {
     return RepoConfig(
@@ -362,6 +375,9 @@ class RepoConfig {
       neverApproveWithIssues: neverApproveWithIssues == _sentinel
           ? this.neverApproveWithIssues
           : neverApproveWithIssues as bool?,
+      neverApproveMinSeverity: neverApproveMinSeverity == _sentinel
+          ? this.neverApproveMinSeverity
+          : neverApproveMinSeverity as String?,
       firstSeenAt: firstSeenAt == _sentinel
           ? this.firstSeenAt
           : firstSeenAt as DateTime?,
@@ -398,6 +414,7 @@ class OrgConfig {
   final List<String>? prLabels;
   final bool? prDraft;
   final bool? neverApproveWithIssues;
+  final String? neverApproveMinSeverity;
 
   const OrgConfig({
     this.aiPrimary,
@@ -427,6 +444,7 @@ class OrgConfig {
     this.prLabels,
     this.prDraft,
     this.neverApproveWithIssues,
+    this.neverApproveMinSeverity,
   });
 
   bool get hasOverride =>
@@ -441,6 +459,7 @@ class OrgConfig {
       autoPromoteRefinement != null ||
       generatePRDescription != null ||
       neverApproveWithIssues != null ||
+      neverApproveMinSeverity != null ||
       issuePromptId != null ||
       developPromptId != null ||
       itEnabled != null ||
@@ -486,6 +505,7 @@ class OrgConfig {
     Object? prLabels = _sentinel,
     Object? prDraft = _sentinel,
     Object? neverApproveWithIssues = _sentinel,
+    Object? neverApproveMinSeverity = _sentinel,
   }) => OrgConfig(
     aiPrimary: aiPrimary == _sentinel ? this.aiPrimary : aiPrimary as String?,
     aiFallback: aiFallback == _sentinel
@@ -552,6 +572,9 @@ class OrgConfig {
     neverApproveWithIssues: neverApproveWithIssues == _sentinel
         ? this.neverApproveWithIssues
         : neverApproveWithIssues as bool?,
+    neverApproveMinSeverity: neverApproveMinSeverity == _sentinel
+        ? this.neverApproveMinSeverity
+        : neverApproveMinSeverity as String?,
   );
 
   factory OrgConfig.fromJson(Map<String, dynamic> json) {
@@ -612,6 +635,7 @@ class OrgConfig {
       prLabels: _nullableStringListAllowEmpty(json['pr_labels']),
       prDraft: json['pr_draft'] as bool?,
       neverApproveWithIssues: json['never_approve_with_issues'] as bool?,
+      neverApproveMinSeverity: _nonEmpty(json['never_approve_min_severity']),
     );
   }
 }
@@ -764,6 +788,79 @@ class CircuitBreakerConfig {
   };
 }
 
+/// Adaptive polling / rate-limit configuration (mirrors [polling] TOML section).
+class PollingConfig {
+  final bool adaptive;
+  final String pollInterval;
+  final String minInterval;
+  final String maxInterval;
+  final String discoveryInterval;
+  final String tier3Interval;
+  final int rateLimitSafetyThreshold;
+  final bool useEtag;
+  final bool useGraphql;
+
+  const PollingConfig({
+    this.adaptive = false,
+    this.pollInterval = '',
+    this.minInterval = '1m',
+    this.maxInterval = '15m',
+    this.discoveryInterval = '5m',
+    this.tier3Interval = '30s',
+    this.rateLimitSafetyThreshold = 100,
+    this.useEtag = true,
+    this.useGraphql = false,
+  });
+
+  PollingConfig copyWith({
+    bool? adaptive,
+    String? pollInterval,
+    String? minInterval,
+    String? maxInterval,
+    String? discoveryInterval,
+    String? tier3Interval,
+    int? rateLimitSafetyThreshold,
+    bool? useEtag,
+    bool? useGraphql,
+  }) => PollingConfig(
+    adaptive: adaptive ?? this.adaptive,
+    pollInterval: pollInterval ?? this.pollInterval,
+    minInterval: minInterval ?? this.minInterval,
+    maxInterval: maxInterval ?? this.maxInterval,
+    discoveryInterval: discoveryInterval ?? this.discoveryInterval,
+    tier3Interval: tier3Interval ?? this.tier3Interval,
+    rateLimitSafetyThreshold:
+        rateLimitSafetyThreshold ?? this.rateLimitSafetyThreshold,
+    useEtag: useEtag ?? this.useEtag,
+    useGraphql: useGraphql ?? this.useGraphql,
+  );
+
+  factory PollingConfig.fromJson(Map<String, dynamic> json) => PollingConfig(
+    adaptive: (json['adaptive'] as bool?) ?? false,
+    pollInterval: (json['poll_interval'] as String?) ?? '',
+    minInterval: (json['min_interval'] as String?) ?? '1m',
+    maxInterval: (json['max_interval'] as String?) ?? '15m',
+    discoveryInterval: (json['discovery_interval'] as String?) ?? '5m',
+    tier3Interval: (json['tier3_interval'] as String?) ?? '30s',
+    rateLimitSafetyThreshold:
+        ((json['rate_limit_safety_threshold'] as num?)?.toInt()) ?? 100,
+    useEtag: (json['use_etag'] as bool?) ?? true,
+    useGraphql: (json['use_graphql'] as bool?) ?? false,
+  );
+
+  Map<String, dynamic> toJson() => {
+    'adaptive': adaptive,
+    'poll_interval': pollInterval,
+    'min_interval': minInterval,
+    'max_interval': maxInterval,
+    'discovery_interval': discoveryInterval,
+    'tier3_interval': tier3Interval,
+    'rate_limit_safety_threshold': rateLimitSafetyThreshold,
+    'use_etag': useEtag,
+    'use_graphql': useGraphql,
+  };
+}
+
 /// Issue tracking pipeline configuration.
 class IssueTrackingConfig {
   final bool enabled;
@@ -874,8 +971,15 @@ class AppConfig {
   final bool globalGeneratePRDescription;
   final bool globalNeverApproveWithIssues;
 
+  /// Minimum finding severity that triggers the never-approve downgrade:
+  /// 'low', 'medium' or 'high'. The daemon resolves an empty value to
+  /// [defaultNeverApproveMinSeverity], so the UI seeds the dropdown with that
+  /// same default rather than showing a blank selection.
+  final String globalNeverApproveMinSeverity;
+
   final AutonomousConfig autonomous;
   final CircuitBreakerConfig circuitBreaker;
+  final PollingConfig polling;
 
   /// Host paths the daemon scans (in order) when a repo has no explicit
   /// `local_dir` set — first match at `{base}/{short-repo-name}` wins.
@@ -916,6 +1020,8 @@ class AppConfig {
     this.autonomous = const AutonomousConfig(),
     this.circuitBreaker = const CircuitBreakerConfig(),
     this.globalNeverApproveWithIssues = false,
+    this.globalNeverApproveMinSeverity = defaultNeverApproveMinSeverity,
+    this.polling = const PollingConfig(),
     this.localDirBase = const [],
     this.localDirsDetected = const {},
   });
@@ -993,6 +1099,8 @@ class AppConfig {
     AutonomousConfig? autonomous,
     CircuitBreakerConfig? circuitBreaker,
     bool? globalNeverApproveWithIssues,
+    String? globalNeverApproveMinSeverity,
+    PollingConfig? polling,
     List<String>? localDirBase,
     Map<String, String>? localDirsDetected,
   }) {
@@ -1029,6 +1137,9 @@ class AppConfig {
       circuitBreaker: circuitBreaker ?? this.circuitBreaker,
       globalNeverApproveWithIssues:
           globalNeverApproveWithIssues ?? this.globalNeverApproveWithIssues,
+      globalNeverApproveMinSeverity:
+          globalNeverApproveMinSeverity ?? this.globalNeverApproveMinSeverity,
+      polling: polling ?? this.polling,
       localDirBase: localDirBase ?? this.localDirBase,
       localDirsDetected: localDirsDetected ?? this.localDirsDetected,
     );
@@ -1050,6 +1161,7 @@ class AppConfig {
     'auto_promote_refinement': globalAutoPromoteRefinement,
     'generate_pr_description': globalGeneratePRDescription,
     'never_approve_with_issues': globalNeverApproveWithIssues,
+    'never_approve_min_severity': globalNeverApproveMinSeverity,
   };
 
   factory AppConfig.fromJson(Map<String, dynamic> json) {
@@ -1141,6 +1253,7 @@ class AppConfig {
           prLabels: _nullableStringListAllowEmpty(ov['pr_labels']),
           prDraft: ov['pr_draft'] as bool?,
           neverApproveWithIssues: ov['never_approve_with_issues'] as bool?,
+          neverApproveMinSeverity: _nonEmpty(ov['never_approve_min_severity']),
           firstSeenAt: firstSeen,
         );
       }
@@ -1225,6 +1338,14 @@ class AppConfig {
           : const CircuitBreakerConfig(),
       globalNeverApproveWithIssues:
           (json['never_approve_with_issues'] as bool?) ?? false,
+      // The daemon serves "" when unset; surface the default it will actually
+      // apply so the dropdown never renders an out-of-range empty value.
+      globalNeverApproveMinSeverity:
+          _nonEmpty(json['never_approve_min_severity']) ??
+          defaultNeverApproveMinSeverity,
+      polling: json['polling'] != null
+          ? PollingConfig.fromJson(json['polling'] as Map<String, dynamic>)
+          : const PollingConfig(),
       localDirBase: _parseStringList(json['local_dir_base']),
       localDirsDetected: localDirsDetected,
     );

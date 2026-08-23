@@ -149,6 +149,33 @@ CREATE TABLE IF NOT EXISTS reviews_in_flight (
   PRIMARY KEY (pr_id, head_sha)
 );
 
+-- Append-only ledger of review attempts: one row per run that got far enough to
+-- spend CLI credits, written BEFORE the CLI is invoked and never deleted on
+-- failure. This is what the circuit breaker counts.
+--
+-- Why a separate table rather than counting the reviews table: a row there only
+-- exists once a run succeeded (InsertReview is step 7, after the CLI returns a
+-- parseable result). A run that died earlier — e.g. the CLI output failed to
+-- parse — left no trace anywhere, so the breaker's counter never advanced and
+-- the next tick re-ran a full-price review of the same commit, without limit.
+-- reviews_in_flight could not serve either: it is released when the run ends,
+-- by design, since its job is to dedup CONCURRENT runs.
+--
+-- Deliberately NOT keyed (pr_id, head_sha): the point is to count repeats, so
+-- every attempt needs its own row. See theburrowhub/heimdallm#663.
+-- pr_id mirrors reviews.pr_id, REFERENCES included: CountReviewAttemptsForRepo
+-- joins prs, so an orphaned row would silently drop off the per-repo axis while
+-- still counting on the per-PR axis, and the two axes are documented as reading
+-- the same data.
+CREATE TABLE IF NOT EXISTS review_attempts (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  pr_id       INTEGER NOT NULL REFERENCES prs(id),
+  head_sha    TEXT    NOT NULL,
+  started_at  DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_review_attempts_pr_sha ON review_attempts(pr_id, head_sha, started_at);
+CREATE INDEX IF NOT EXISTS idx_review_attempts_started ON review_attempts(started_at);
+
 -- Mirror of reviews_in_flight for the issue-triage pipeline. The updated_at
 -- column stores the issue's UpdatedAt truncated to an ISO-seconds string so
 -- two fetcher ticks observing the same snapshot collapse onto the same row.
@@ -286,6 +313,18 @@ func Open(dsn string) (*Store, error) {
 		started_at  DATETIME NOT NULL,
 		PRIMARY KEY (issue_id, updated_at)
 	)`)
+	// Review-attempt ledger (#663). Same pattern again. Existing DBs pick the
+	// table up empty, so the breaker keeps counting their historical reviews
+	// rows until attempts accumulate — see chargeableRuns for why both sources
+	// are consulted.
+	db.Exec(`CREATE TABLE IF NOT EXISTS review_attempts (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		pr_id       INTEGER NOT NULL REFERENCES prs(id),
+		head_sha    TEXT    NOT NULL,
+		started_at  DATETIME NOT NULL
+	)`)
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_review_attempts_pr_sha ON review_attempts(pr_id, head_sha, started_at)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_review_attempts_started ON review_attempts(started_at)")
 	// Repo rename audit table (#489). RenameRepo writes a row here
 	// in the same TX that bulk-renames prs/issues/activity_log/
 	// watch_state. The audit table is informational — it is NOT

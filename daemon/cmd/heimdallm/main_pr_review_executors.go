@@ -32,6 +32,7 @@ func (p *prReviewExecutor) GenerateReviewResponse(_ context.Context, prompt stri
 	if err != nil {
 		return "", err
 	}
+	opts = executor.OptionsForSelectedCLI(primary, cli, opts)
 	raw, err := p.runner.ExecuteRaw(cli, prompt, opts)
 	if err != nil {
 		return "", err
@@ -65,12 +66,12 @@ var _ issuepipeline.ResponderExecutor = (*prReviewExecutor)(nil)
 // auto_implement (#461), so concurrent fix runs on the same repo are
 // properly isolated.
 type prFixExecutor struct {
-	pipeline   *issuepipeline.Pipeline
-	repoCtx    *repoctx.Manager
-	ghClient   *gh.Client
-	ghToken    string
-	cfg        **config.Config
-	cfgMu      *sync.Mutex
+	pipeline *issuepipeline.Pipeline
+	repoCtx  *repoctx.Manager
+	ghClient *gh.Client
+	ghToken  string
+	cfg      **config.Config
+	cfgMu    *sync.Mutex
 }
 
 func (p *prFixExecutor) RunFix(ctx context.Context, req issuepipeline.FixRequest) (issuepipeline.FixResult, error) {

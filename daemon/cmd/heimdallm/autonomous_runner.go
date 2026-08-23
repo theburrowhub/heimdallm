@@ -19,6 +19,7 @@ import (
 	"github.com/heimdallm/daemon/internal/repoctx"
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
+	"github.com/heimdallm/daemon/internal/workgate"
 )
 
 // ── Pure helpers (unit-tested in autonomous_runner_test.go) ─────────────────
@@ -286,7 +287,7 @@ func (r *autonomousStageRunner) RunStage(ctx context.Context, stage string, c au
 
 	extraFlags := agentCfg.ExtraFlags
 	if extraFlags != "" {
-		if err := executor.ValidateExtraFlags(extraFlags); err != nil {
+		if err := executor.ValidateExtraFlagsForCLI(aiCfg.Primary, extraFlags); err != nil {
 			slog.Warn("autonomous: extra_flags rejected", "err", err)
 			extraFlags = ""
 		}
@@ -333,6 +334,7 @@ func (r *autonomousStageRunner) RunStage(ctx context.Context, stage string, c au
 		// updated_at column with the originating stage. Default (empty) keeps
 		// every existing caller's behaviour unchanged.
 		InFlightSalt: stage,
+		WorkPermit:   workgate.PermitFromContext(ctx),
 	}
 
 	// The refinement and development stages need a writable repo checkout. The
@@ -465,6 +467,7 @@ type AutonomousPoller struct {
 	broker   *sse.Broker
 	orch     *autonomous.Orchestrator
 	runner   *executor.Executor
+	workGate *workgate.Gate
 
 	cfg      **config.Config
 	cfgMu    *sync.Mutex
@@ -506,110 +509,123 @@ func (p *AutonomousPoller) Run(ctx context.Context) {
 		if err := ctx.Err(); err != nil {
 			return
 		}
-		p.cfgMu.Lock()
-		c := *p.cfg
-		auto := c.AutonomousForRepo(repo)
-		it := c.IssueTrackingForRepo(repo)
-		p.cfgMu.Unlock()
-		if !auto.Enabled {
-			continue
-		}
-
-		cands, err := p.candidatesForRepo(repo, it, authUser)
-		if err != nil {
-			slog.Warn("autonomous: fetch candidates failed", "repo", repo, "err", err)
-			continue
-		}
-		if len(cands) == 0 {
-			continue
-		}
-
-		skipLabels := append(append([]string(nil), it.SkipLabels...), it.BlockedLabels...)
-		sel := autonomous.NewSelector(
-			p.store,
-			selectorGHAdapter{client: p.ghClient},
-			authUser,
-			"heimdallm/issue-",
-			&coordinationCommentGen{runner: p.runner, cfg: p.cfg, cfgMu: p.cfgMu},
-		)
-		sel.Configure(auto.TakeOthersTasks, auto.ReassignOnTake, skipLabels)
-
-		picked, bucket, err := sel.Pick(ctx, cands)
-		if err != nil {
-			slog.Warn("autonomous: pick failed", "repo", repo, "err", err)
-			continue
-		}
-		if picked == nil {
-			continue // nothing eligible this tick
-		}
-
-		if p.broker != nil {
-			p.broker.Publish(sse.Event{
-				Type: sse.EventAutonomousTaskSelected,
-				Data: sseData(map[string]any{
-					"repo": picked.Repo, "number": picked.Number, "bucket": bucket.String(),
-				}),
-			})
-		}
-
-		if err := sel.Claim(ctx, *picked, bucket); err != nil {
-			slog.Warn("autonomous: claim failed", "repo", repo, "number", picked.Number, "err", err)
-			continue
-		}
-		// Set a time-based claim lease that doubles as the failure/no-progress
-		// cooldown. Selector.Claim already flagged claimed_by_autonomous=true as
-		// a coarse audit signal; the lease (not the boolean) is the eligibility
-		// gate. It MUST exceed the longest possible Drive so it never expires
-		// mid-Drive; on parse failure we fall back to 2h.
-		lease := 2 * time.Hour
-		if d, err := time.ParseDuration(strings.TrimSpace(auto.ClaimLease)); err == nil && d > 0 {
-			lease = d
-		} else if strings.TrimSpace(auto.ClaimLease) != "" {
-			slog.Warn("autonomous: invalid claim_lease, falling back to 2h",
-				"repo", repo, "number", picked.Number, "value", auto.ClaimLease)
-		}
-		if picked.StoreID != 0 {
-			if e := p.store.SetAutonomousClaimUntil(picked.StoreID, time.Now().Add(lease)); e != nil {
-				slog.Warn("autonomous: set claim lease failed",
-					"repo", picked.Repo, "number", picked.Number, "err", e)
-			}
-		}
-		if bucket == autonomous.BucketOthers && p.broker != nil {
-			p.broker.Publish(sse.Event{
-				Type: sse.EventAutonomousTaskReassigned,
-				Data: sseData(map[string]any{
-					"repo": picked.Repo, "number": picked.Number, "assignee": authUser,
-				}),
-			})
-		}
-
-		res, driveErr := p.orch.Drive(ctx, *picked)
-
-		// Claim-lease lifecycle after Drive:
-		//   - PR created (res.PRNumber != 0): CLEAR the lease. Re-selection is
-		//     now guarded by HasOpenAutoImplementPR, which takes over the job of
-		//     keeping the issue out of the cascade, so the lease is redundant.
-		//   - failure OR no-progress (no PR): LEAVE the lease in place so it acts
-		//     as a cooldown until it expires — this prevents the retry-storm
-		//     where a persistently failing issue is re-picked every tick and
-		//     burns tokens. The issue auto-recovers once the lease window passes.
-		//   - crash mid-Drive: the lease was set before Drive and simply expires
-		//     on its own — no permanent stuck claim, no manual operator step.
-		if picked.StoreID != 0 && res.PRNumber != 0 {
-			if e := p.store.SetAutonomousClaimUntil(picked.StoreID, time.Time{}); e != nil {
-				slog.Warn("autonomous: clear claim lease failed",
-					"repo", picked.Repo, "number", picked.Number, "err", e)
-			}
-		}
-
-		if driveErr != nil {
-			slog.Warn("autonomous: drive failed", "repo", repo, "number", picked.Number, "err", driveErr)
-			continue
-		}
-		slog.Info("autonomous: drove task",
-			"repo", picked.Repo, "number", picked.Number, "bucket", bucket.String(),
-			"started", res.Started, "last_done", res.LastDone, "pr", res.PRNumber)
+		p.runRepo(ctx, repo, authUser)
 	}
+}
+
+func (p *AutonomousPoller) runRepo(ctx context.Context, repo, authUser string) {
+	p.cfgMu.Lock()
+	c := *p.cfg
+	auto := c.AutonomousForRepo(repo)
+	it := c.IssueTrackingForRepo(repo)
+	p.cfgMu.Unlock()
+	if !auto.Enabled {
+		return
+	}
+
+	ctx, permit, owned, err := p.workGate.AcquireContext(ctx, workgate.KindAutonomous)
+	if err != nil {
+		slog.Debug("autonomous: deferred while application update drains", "repo", repo)
+		return
+	}
+	if owned {
+		defer permit.Release()
+	}
+
+	cands, err := p.candidatesForRepo(repo, it, authUser)
+	if err != nil {
+		slog.Warn("autonomous: fetch candidates failed", "repo", repo, "err", err)
+		return
+	}
+	if len(cands) == 0 {
+		return
+	}
+
+	skipLabels := append(append([]string(nil), it.SkipLabels...), it.BlockedLabels...)
+	sel := autonomous.NewSelector(
+		p.store,
+		selectorGHAdapter{client: p.ghClient},
+		authUser,
+		"heimdallm/issue-",
+		&coordinationCommentGen{runner: p.runner, cfg: p.cfg, cfgMu: p.cfgMu},
+	)
+	sel.Configure(auto.TakeOthersTasks, auto.ReassignOnTake, skipLabels)
+
+	picked, bucket, err := sel.Pick(ctx, cands)
+	if err != nil {
+		slog.Warn("autonomous: pick failed", "repo", repo, "err", err)
+		return
+	}
+	if picked == nil {
+		return
+	}
+
+	if p.broker != nil {
+		p.broker.Publish(sse.Event{
+			Type: sse.EventAutonomousTaskSelected,
+			Data: sseData(map[string]any{
+				"repo": picked.Repo, "number": picked.Number, "bucket": bucket.String(),
+			}),
+		})
+	}
+
+	if err := sel.Claim(ctx, *picked, bucket); err != nil {
+		slog.Warn("autonomous: claim failed", "repo", repo, "number", picked.Number, "err", err)
+		return
+	}
+	// Set a time-based claim lease that doubles as the failure/no-progress
+	// cooldown. The outer update permit was acquired before selection and claim,
+	// so an expected updater drain can never create this expensive lease.
+	lease := 2 * time.Hour
+	if d, err := time.ParseDuration(strings.TrimSpace(auto.ClaimLease)); err == nil && d > 0 {
+		lease = d
+	} else if strings.TrimSpace(auto.ClaimLease) != "" {
+		slog.Warn("autonomous: invalid claim_lease, falling back to 2h",
+			"repo", repo, "number", picked.Number, "value", auto.ClaimLease)
+	}
+	if picked.StoreID != 0 {
+		if e := p.store.SetAutonomousClaimUntil(picked.StoreID, time.Now().Add(lease)); e != nil {
+			slog.Warn("autonomous: set claim lease failed",
+				"repo", picked.Repo, "number", picked.Number, "err", e)
+		}
+	}
+	if bucket == autonomous.BucketOthers && p.broker != nil {
+		p.broker.Publish(sse.Event{
+			Type: sse.EventAutonomousTaskReassigned,
+			Data: sseData(map[string]any{
+				"repo": picked.Repo, "number": picked.Number, "assignee": authUser,
+			}),
+		})
+	}
+
+	res, driveErr := p.orch.Drive(ctx, *picked)
+	if errors.Is(driveErr, workgate.ErrDraining) {
+		// Defensive fallback for a future stage runner that forgets to reuse the
+		// outer permit: maintenance is not a costly failure and earns no cooldown.
+		if picked.StoreID != 0 {
+			_ = p.store.SetAutonomousClaimUntil(picked.StoreID, time.Time{})
+		}
+		slog.Debug("autonomous: drive deferred while application update drains",
+			"repo", repo, "number", picked.Number)
+		return
+	}
+
+	// Claim-lease lifecycle after Drive:
+	//   - PR created: clear it; the open PR becomes the eligibility guard.
+	//   - real failure/no-progress: keep it as the configured cooldown.
+	if picked.StoreID != 0 && res.PRNumber != 0 {
+		if e := p.store.SetAutonomousClaimUntil(picked.StoreID, time.Time{}); e != nil {
+			slog.Warn("autonomous: clear claim lease failed",
+				"repo", picked.Repo, "number", picked.Number, "err", e)
+		}
+	}
+	if driveErr != nil {
+		slog.Warn("autonomous: drive failed", "repo", repo, "number", picked.Number, "err", driveErr)
+		return
+	}
+	slog.Info("autonomous: drove task",
+		"repo", picked.Repo, "number", picked.Number, "bucket", bucket.String(),
+		"started", res.Started, "last_done", res.LastDone, "pr", res.PRNumber)
 }
 
 // candidatesForRepo fetches monitored issues for a repo and maps them to

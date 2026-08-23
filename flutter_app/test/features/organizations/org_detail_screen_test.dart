@@ -37,6 +37,7 @@ void main() {
             'auto_promote_refinement': true,
             'generate_pr_description': true,
             'never_approve_with_issues': true,
+            'never_approve_min_severity': 'high',
             'issue_tracking': {
               'organizations': ['acme'],
               'assignees': ['alice'],
@@ -66,6 +67,10 @@ void main() {
     expect(find.text('Refinement labels'), findsOneWidget);
     expect(find.text('Generate PR description'), findsOneWidget);
     expect(find.text('Never approve PRs with issues'), findsOneWidget);
+    // The severity threshold sits next to the toggle it qualifies, and renders
+    // the org's stored override rather than the global default.
+    expect(find.text('Never approve — minimum severity'), findsOneWidget);
+    expect(find.text('high'), findsWidgets);
     // "Organizations" now names both the new review-policy section header and
     // the Issue Tracking org filter; target the filter by its unique helper.
     expect(find.text('GitHub org names to filter issues'), findsOneWidget);

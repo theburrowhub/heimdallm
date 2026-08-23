@@ -4,13 +4,12 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:window_manager/window_manager.dart';
 import '../api/api_client.dart';
 import '../models/pr.dart';
+import '../platform/platform_services.dart';
 
 /// Convenience accessor for rebuilding the tray from providers.
 class TrayMenuRef {
-  static Future<void> rebuild({
-    required List<PR> prs,
-    required String me,
-  }) => TrayMenu.instance.rebuild(prs: prs, me: me);
+  static Future<void> rebuild({required List<PR> prs, required String me}) =>
+      TrayMenu.instance.rebuild(prs: prs, me: me);
 }
 
 /// Manages the system tray context menu.
@@ -21,7 +20,12 @@ class TrayMenu with TrayListener {
 
   ApiClient? _api;
   List<PR> _prs = [];
+  String _me = '';
   void Function(String location)? _onNavigate;
+  void Function()? _onQuit;
+  void Function()? _onCheckForUpdates;
+  void Function()? _onInstallUpdate;
+  AppUpdateStatus _updateStatus = const AppUpdateStatus.idle();
 
   /// Initialises the tray listener.
   /// [apiClient] must be the shared instance from the app's provider so that
@@ -31,9 +35,15 @@ class TrayMenu with TrayListener {
   void init({
     required ApiClient apiClient,
     required void Function(String location) onNavigate,
+    required void Function() onQuit,
+    void Function()? onCheckForUpdates,
+    void Function()? onInstallUpdate,
   }) {
     _api = apiClient;
     _onNavigate = onNavigate;
+    _onQuit = onQuit;
+    _onCheckForUpdates = onCheckForUpdates;
+    _onInstallUpdate = onInstallUpdate;
     trayManager.addListener(this);
   }
 
@@ -44,18 +54,18 @@ class TrayMenu with TrayListener {
   }
 
   /// Rebuilds the tray context menu with current data.
-  Future<void> rebuild({
-    required List<PR> prs,
-    required String me,
-  }) async {
+  Future<void> rebuild({required List<PR> prs, required String me}) async {
     _prs = prs;
+    _me = me;
 
     // Pending = reviews where I'm the reviewer and there's no review yet
     final pending = prs
-        .where((p) =>
-            p.repo.isNotEmpty &&
-            p.author.toLowerCase() != me.toLowerCase() &&
-            p.latestReview == null)
+        .where(
+          (p) =>
+              p.repo.isNotEmpty &&
+              p.author.toLowerCase() != me.toLowerCase() &&
+              p.latestReview == null,
+        )
         .toList();
 
     // Reviewed today (any review created today)
@@ -75,8 +85,11 @@ class TrayMenu with TrayListener {
     if (pending.isEmpty) {
       items.add(_info('✓  No pending reviews'));
     } else {
-      items.add(_info(
-          '⏳  ${pending.length} pending review${pending.length == 1 ? '' : 's'}'));
+      items.add(
+        _info(
+          '⏳  ${pending.length} pending review${pending.length == 1 ? '' : 's'}',
+        ),
+      );
     }
     if (reviewedToday > 0) {
       items.add(_info('✓  $reviewedToday reviewed today'));
@@ -91,20 +104,47 @@ class TrayMenu with TrayListener {
         items.add(_pendingItem(pr));
       }
       if (pending.length > maxShown) {
-        items.add(MenuItem(
-          key: 'open',
-          label: '   + ${pending.length - maxShown} more…',
-        ));
+        items.add(
+          MenuItem(
+            key: 'open',
+            label: '   + ${pending.length - maxShown} more…',
+          ),
+        );
       }
       items.add(MenuItem.separator());
     }
 
     // ── App controls ────────────────────────────────────────────────────
     items.add(MenuItem(key: 'open', label: 'Open Heimdallm'));
+    if (_onCheckForUpdates != null) {
+      if (_updateStatus.updateAvailable) {
+        items.add(
+          MenuItem(
+            key: 'update_now',
+            label: 'Update to ${_updateStatus.version ?? 'the latest version'}',
+          ),
+        );
+      } else if (_updateStatus.busy) {
+        items.add(
+          MenuItem(
+            key: 'update_busy',
+            label: _updateStatus.message ?? 'Updating Heimdallm…',
+            disabled: true,
+          ),
+        );
+      } else {
+        items.add(MenuItem(key: 'check_updates', label: 'Check for Updates…'));
+      }
+    }
     items.add(MenuItem.separator());
     items.add(MenuItem(key: 'quit', label: 'Quit'));
 
     await trayManager.setContextMenu(Menu(items: items));
+  }
+
+  Future<void> setUpdateState(AppUpdateStatus status) async {
+    _updateStatus = status;
+    if (_api != null) await rebuild(prs: _prs, me: _me);
   }
 
   // ── Item builders ──────────────────────────────────────────────────────
@@ -115,15 +155,17 @@ class TrayMenu with TrayListener {
       key: 'pr_${pr.id}',
       label: '○   #${pr.number}  $short',
       toolTip: pr.title,
-      submenu: Menu(items: [
-        MenuItem(key: 'pr_title_${pr.id}', label: pr.title, disabled: true),
-        _info(pr.repo),
-        MenuItem.separator(),
-        MenuItem(key: 'open_pr_${pr.id}', label: 'Open in Heimdallm'),
-        MenuItem(key: 'view_${pr.id}',    label: 'View on GitHub'),
-        MenuItem.separator(),
-        MenuItem(key: 'review_${pr.id}',  label: 'Review Now'),
-      ]),
+      submenu: Menu(
+        items: [
+          MenuItem(key: 'pr_title_${pr.id}', label: pr.title, disabled: true),
+          _info(pr.repo),
+          MenuItem.separator(),
+          MenuItem(key: 'open_pr_${pr.id}', label: 'Open in Heimdallm'),
+          MenuItem(key: 'view_${pr.id}', label: 'View on GitHub'),
+          MenuItem.separator(),
+          MenuItem(key: 'review_${pr.id}', label: 'Review Now'),
+        ],
+      ),
     );
   }
 
@@ -162,9 +204,25 @@ class TrayMenu with TrayListener {
   void onTrayMenuItemClick(MenuItem menuItem) {
     final key = menuItem.key ?? '';
 
-    if (key == 'quit') { exit(0); }
+    if (key == 'quit') {
+      _onQuit?.call();
+      return;
+    }
 
-    if (key == 'open') { _showApp(); return; }
+    if (key == 'open') {
+      _showApp();
+      return;
+    }
+
+    if (key == 'check_updates') {
+      _onCheckForUpdates?.call();
+      return;
+    }
+
+    if (key == 'update_now') {
+      _onInstallUpdate?.call();
+      return;
+    }
 
     if (key.startsWith('view_')) {
       final prId = int.tryParse(key.substring(5));

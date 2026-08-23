@@ -47,7 +47,7 @@ void main() {
           'review_mode': 'single',
           'issue_tracking': {'enabled': false},
         });
-    when(() => api.checkHealth()).thenAnswer((_) async => true);
+    when(() => api.daemonReachable()).thenAnswer((_) async => PortOwner.daemon);
     when(() => api.fetchHealth()).thenAnswer((_) async => {'status': 'ok'});
 
     await _pump(tester, api);
@@ -70,7 +70,7 @@ void main() {
           'review_mode': 'single',
           'issue_tracking': {'enabled': false},
         });
-    when(() => api.checkHealth()).thenAnswer((_) async => true);
+    when(() => api.daemonReachable()).thenAnswer((_) async => PortOwner.daemon);
     when(() => api.fetchHealth()).thenAnswer((_) async => {'status': 'ok'});
 
     await _pump(tester, api);
@@ -93,7 +93,7 @@ void main() {
           'review_mode': 'single',
           'issue_tracking': {'enabled': false},
         });
-    when(() => api.checkHealth()).thenAnswer((_) async => false);
+    when(() => api.daemonReachable()).thenAnswer((_) async => PortOwner.none);
     when(() => api.fetchHealth()).thenAnswer((_) async => null);
 
     await _pump(tester, api);
@@ -115,7 +115,7 @@ void main() {
           'review_mode': 'single',
           'issue_tracking': {'enabled': false},
         });
-    when(() => api.checkHealth()).thenAnswer((_) async => true);
+    when(() => api.daemonReachable()).thenAnswer((_) async => PortOwner.daemon);
     when(() => api.fetchHealth()).thenAnswer((_) async => {'status': 'ok'});
 
     await _pump(tester, api, initialTab: 'events');

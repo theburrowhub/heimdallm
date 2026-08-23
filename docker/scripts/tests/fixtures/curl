@@ -1,0 +1,107 @@
+#!/bin/sh
+set -eu
+
+output_file=
+method=GET
+url=
+write_status=false
+headers_only=false
+has_token=false
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -o)
+            output_file=$2
+            shift 2
+            ;;
+        -w)
+            write_status=true
+            shift 2
+            ;;
+        -X)
+            method=$2
+            shift 2
+            ;;
+        -H)
+            case "$2" in
+                X-Heimdallm-Token:*)
+                    token_value=${2#X-Heimdallm-Token: }
+                    [ -n "$token_value" ] && has_token=true
+                    ;;
+            esac
+            shift 2
+            ;;
+        -sI|-Is|-I)
+            headers_only=true
+            shift
+            ;;
+        --max-time|-D)
+            shift 2
+            ;;
+        -*)
+            shift
+            ;;
+        *)
+            url=$1
+            shift
+            ;;
+    esac
+done
+
+if [ "$headers_only" = "true" ]; then
+    if [ "$has_token" = "true" ]; then
+        printf 'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n'
+    else
+        printf 'HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\n\r\n'
+    fi
+    exit 0
+fi
+
+status=200
+body='{}'
+case "$url" in
+    */health)
+        body='{"status":"ok"}'
+        ;;
+    */config)
+        if [ "$has_token" = "true" ]; then
+            body='{"ai_primary":"gemini"}'
+        else
+            status=401
+            body='{"error":"unauthorized"}'
+        fi
+        ;;
+    */prs|*/agents)
+        if [ "$has_token" = "true" ]; then
+            body='[]'
+        else
+            status=401
+            body='{"error":"unauthorized"}'
+        fi
+        ;;
+    */stats)
+        if [ "$has_token" = "true" ]; then
+            body='{}'
+        else
+            status=401
+            body='{"error":"unauthorized"}'
+        fi
+        ;;
+    */reload)
+        if [ "$method" = "POST" ] && [ "$has_token" = "false" ]; then
+            status=401
+            body='{"error":"unauthorized"}'
+        else
+            body='{"status":"reloaded"}'
+        fi
+        ;;
+esac
+
+if [ -n "$output_file" ]; then
+    printf '%s' "$body" >"$output_file"
+else
+    printf '%s' "$body"
+fi
+if [ "$write_status" = "true" ]; then
+    printf '%s' "$status"
+fi

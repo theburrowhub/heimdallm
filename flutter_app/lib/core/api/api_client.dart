@@ -6,13 +6,33 @@ import '../models/review.dart';
 import '../models/tracked_issue.dart';
 import '../platform/platform_services.dart';
 
+/// Who, if anyone, answered the daemon HTTP endpoint. A [PortOwner.none]
+/// result only permits entering [PlatformServices.spawnDaemon]; that operation
+/// performs the authoritative TCP guard immediately before process creation.
+enum PortOwner {
+  /// No native HTTP responder could be identified. The guarded spawn operation
+  /// still has to prove that the TCP port is free.
+  none,
+
+  /// Our daemon answered — healthy, degraded or still starting.
+  daemon,
+
+  /// A foreign HTTP service answered, or a web proxy endpoint was unreachable.
+  foreign,
+}
+
 class ApiClient {
   final http.Client _client;
   final PlatformServices _platform;
+  final Duration _daemonReachabilityTimeout;
 
-  ApiClient({http.Client? httpClient, required PlatformServices platform})
-    : _client = httpClient ?? http.Client(),
-      _platform = platform;
+  ApiClient({
+    http.Client? httpClient,
+    required PlatformServices platform,
+    Duration daemonReachabilityTimeout = const Duration(seconds: 3),
+  }) : _client = httpClient ?? http.Client(),
+       _platform = platform,
+       _daemonReachabilityTimeout = daemonReachabilityTimeout;
 
   Uri _uri(String path) => Uri.parse('${_platform.apiBaseUrl}$path');
 
@@ -37,19 +57,86 @@ class ApiClient {
       final resp = await _client
           .get(_uri('/health'))
           .timeout(const Duration(seconds: 3));
-      return resp.statusCode == 200;
+      return resp.statusCode == 200 && _looksLikeHeimdallm(resp);
     } catch (_) {
       return false;
     }
   }
 
-  /// Returns the full /health payload, or null if the daemon is unreachable.
+  /// Whether *something* is serving the daemon port, regardless of how healthy
+  /// it reports itself to be.
+  ///
+  /// Never use [checkHealth] to decide whether to spawn a daemon. A daemon that
+  /// is alive but degraded answers /health with 503 — which it does whenever
+  /// `last_poll` is older than twice the poll interval, i.e. exactly when
+  /// GitHub rate limits are slowing polls down, and also while it is still
+  /// wiring up at boot. Treating that as "no daemon" spawns a second one, which
+  /// loses the port bind, keeps polling anyway and pushes the quota further
+  /// under: the feedback loop behind #646.
+  ///
+  /// HTTP errors are deliberately not classified by exception type. The VM
+  /// client wraps SocketException in a private `_ClientSocketException`, while
+  /// web uses a different hierarchy again. Native callers may proceed only to
+  /// the guarded [PlatformServices.spawnDaemon], which performs a raw TCP probe
+  /// immediately before process creation. A relative web endpoint fails closed
+  /// because a browser cannot perform that native guard.
+  Future<PortOwner> daemonReachable() async {
+    try {
+      final resp = await _client
+          .get(_uri('/health'))
+          .timeout(_daemonReachabilityTimeout);
+      return _looksLikeHeimdallm(resp) ? PortOwner.daemon : PortOwner.foreign;
+    } catch (_) {
+      return Uri.parse(_platform.apiBaseUrl).isAbsolute
+          ? PortOwner.none
+          : PortOwner.foreign;
+    }
+  }
+
+  /// Distinguishes our daemon from an unrelated process squatting on the port.
+  /// Without this the app would silently never spawn, exhaust its retries and
+  /// report a generic health failure with no hint that something else holds the
+  /// port.
+  ///
+  /// The [HeaderDaemon] header is the authoritative signal. The body fallback
+  /// exists only for daemons predating that header, and deliberately requires
+  /// `checks` or `version` alongside `status`: a bare `{"status": "..."}` is the
+  /// shape of most health endpoints in the wild (`{"status":"UP"}` from Spring
+  /// Boot Actuator, `{"status":"ok"}` from countless Node/Go services), and
+  /// accepting it would classify a foreign service as ours.
+  ///
+  static const _daemonHeader = 'x-heimdallm-daemon';
+
+  static bool _looksLikeHeimdallm(http.Response resp) {
+    if (resp.headers.containsKey(_daemonHeader)) return true;
+    try {
+      final body = jsonDecode(resp.body);
+      if (body is! Map<String, dynamic>) return false;
+      if (body['status'] is! String) return false;
+      return body.containsKey('checks') || body.containsKey('version');
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// The daemon port, derived from the configured base URL so error messages and
+  /// diagnostics never hardcode the default.
+  int get daemonPort => Uri.parse(_platform.apiBaseUrl).port;
+
+  /// Returns the full identified /health payload, including 503
+  /// starting/stopping/degraded responses, or null if the responder is not a
+  /// Heimdallm daemon. Diagnostics must remain available precisely when deep
+  /// health is failing.
   /// Includes status, version (optional), started_at (optional, RFC3339).
   Future<Map<String, dynamic>?> fetchHealth() async {
     try {
-      final resp = await _client.get(_uri('/health'), headers: await _authHeaders());
-      if (resp.statusCode != 200) return null;
-      return jsonDecode(resp.body) as Map<String, dynamic>;
+      final resp = await _client.get(
+        _uri('/health'),
+        headers: await _authHeaders(),
+      );
+      if (!_looksLikeHeimdallm(resp)) return null;
+      final body = jsonDecode(resp.body);
+      return body is Map<String, dynamic> ? body : null;
     } catch (_) {
       return null;
     }

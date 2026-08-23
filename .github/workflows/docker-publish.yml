@@ -21,6 +21,12 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Verify Flutter Web tooling guards
+        run: make test-web-tooling
+
+      - name: Verify Flutter Web build-context exclusions
+        run: sh docker/scripts/test-web-build-context.sh
+
       - name: Build Docker image (validation only)
         uses: docker/build-push-action@v6
         with:
@@ -31,3 +37,17 @@ jobs:
           tags: heimdallm:test
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Build Flutter Web image (validation only)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: flutter_app/Dockerfile.web
+          push: false
+          load: true
+          tags: heimdallm-web:test
+          cache-from: type=gha,scope=flutter-web
+          cache-to: type=gha,mode=max,scope=flutter-web
+
+      - name: Smoke-test Flutter Web image contents and runtime
+        run: sh docker/scripts/test-web-image.sh heimdallm-web:test
