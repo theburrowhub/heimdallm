@@ -59,6 +59,102 @@ void main() {
       await expectLater(client.triggerReview(1), completes);
     });
 
+    test('addPRByUrl posts the URL and returns the stored PR id', () async {
+      final platform = FakePlatformServices(
+        apiBaseUrl: 'http://127.0.0.1:7842',
+        token: 'abc-123',
+      );
+      http.Request? captured;
+      final client = ApiClient(
+        httpClient: MockClient((request) async {
+          captured = request;
+          return http.Response(
+            jsonEncode({
+              'status': 'pr added; review queued',
+              'pr': {'id': 73},
+            }),
+            202,
+          );
+        }),
+        platform: platform,
+      );
+
+      final id = await client.addPRByUrl(
+        'https://github.com/acme/widgets/pull/42',
+      );
+
+      expect(id, 73);
+      expect(captured!.method, 'POST');
+      expect(captured!.url.toString(), 'http://127.0.0.1:7842/prs/add');
+      expect(captured!.headers['X-Heimdallm-Token'], 'abc-123');
+      expect(jsonDecode(captured!.body), {
+        'url': 'https://github.com/acme/widgets/pull/42',
+      });
+    });
+
+    test('addPRByUrl surfaces a structured daemon error', () async {
+      final client = ApiClient(
+        httpClient: MockClient(
+          (_) async =>
+              http.Response(jsonEncode({'error': 'PR not found'}), 502),
+        ),
+        platform: FakePlatformServices(token: 'abc-123'),
+      );
+
+      await expectLater(
+        client.addPRByUrl('https://github.com/acme/widgets/pull/404'),
+        throwsA(
+          isA<ApiException>().having(
+            (error) => error.message,
+            'message',
+            'PR not found',
+          ),
+        ),
+      );
+    });
+
+    test(
+      'addPRByUrl falls back to status when error JSON is malformed',
+      () async {
+        final client = ApiClient(
+          httpClient: MockClient(
+            (_) async => http.Response('bad gateway', 500),
+          ),
+          platform: FakePlatformServices(token: 'abc-123'),
+        );
+
+        await expectLater(
+          client.addPRByUrl('https://github.com/acme/widgets/pull/42'),
+          throwsA(
+            isA<ApiException>().having(
+              (error) => error.message,
+              'message',
+              'POST /prs/add failed: 500',
+            ),
+          ),
+        );
+      },
+    );
+
+    test('addPRByUrl returns zero when a 202 omits a usable PR id', () async {
+      var response = http.Response(jsonEncode({'status': 'deferred'}), 202);
+      final client = ApiClient(
+        httpClient: MockClient((_) async => response),
+        platform: FakePlatformServices(token: 'abc-123'),
+      );
+
+      expect(
+        await client.addPRByUrl('https://github.com/acme/widgets/pull/42'),
+        0,
+      );
+
+      response = http.Response('not json', 202);
+      expect(
+        await client.addPRByUrl('https://github.com/acme/widgets/pull/42'),
+        0,
+      );
+    });
+
     test('checkHealth returns true when daemon up', () async {
       final platform = FakePlatformServices(token: 'abc-123');
       final mockClient = MockClient(

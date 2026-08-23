@@ -1,6 +1,7 @@
 package server_test
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -63,7 +64,7 @@ func TestHandleAddPR_AddsRepoFetchesAndReviews(t *testing.T) {
 	srv.SetTriggerReviewFn(func(prID int64) error {
 		atomic.StoreInt64(&reviewedID, prID)
 		close(done)
-		return nil
+		return errors.New("review trigger failed")
 	})
 
 	rr := httptest.NewRecorder()
@@ -131,6 +132,76 @@ func TestHandleAddPR_RejectsBadURL(t *testing.T) {
 
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status: got %d want 400, body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandleAddPR_RejectsMalformedJSON(t *testing.T) {
+	srv := server.NewWithOptions(nil, nil, nil, "", server.Options{})
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/prs/add", strings.NewReader(`{"url":`))
+	srv.Router().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d want 400, body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandleAddPR_RejectsWhenCallbacksAreMissing(t *testing.T) {
+	srv := server.NewWithOptions(nil, nil, nil, "", server.Options{})
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/prs/add",
+		strings.NewReader(`{"url":"https://github.com/org/repo/pull/123"}`))
+	srv.Router().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status: got %d want 503, body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandleAddPR_ReportsConfigWriteFailure(t *testing.T) {
+	srv := server.NewWithOptions(nil, nil, nil, "", server.Options{})
+	srv.SetConfigPath(filepath.Join(t.TempDir(), "missing", "config.toml"))
+	srv.SetAddPRFn(func(string, int) (*store.PR, error) {
+		t.Fatal("addPRFn must not be called when config update fails")
+		return nil, nil
+	})
+	srv.SetTriggerReviewFn(func(int64) error {
+		t.Fatal("triggerReviewFn must not be called when config update fails")
+		return nil
+	})
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/prs/add",
+		strings.NewReader(`{"url":"https://github.com/org/repo/pull/123"}`))
+	srv.Router().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want 500, body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandleAddPR_ReportsFetchFailure(t *testing.T) {
+	srv := server.NewWithOptions(nil, nil, nil, "", server.Options{})
+	srv.SetAddPRFn(func(repo string, number int) (*store.PR, error) {
+		if repo != "org/repo" || number != 123 {
+			t.Fatalf("addPRFn got %s#%d, want org/repo#123", repo, number)
+		}
+		return nil, errors.New("not found")
+	})
+	srv.SetTriggerReviewFn(func(int64) error {
+		t.Fatal("triggerReviewFn must not be called when fetch fails")
+		return nil
+	})
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/prs/add",
+		strings.NewReader(`{"url":"https://github.com/org/repo/pull/123"}`))
+	srv.Router().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status: got %d want 502, body=%s", rr.Code, rr.Body.String())
 	}
 }
 
