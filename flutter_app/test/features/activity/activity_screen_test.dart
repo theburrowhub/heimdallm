@@ -1,9 +1,16 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:heimdallm/core/api/api_client.dart';
 import 'package:heimdallm/core/models/activity.dart';
 import 'package:heimdallm/features/activity/activity_providers.dart';
 import 'package:heimdallm/features/activity/activity_screen.dart';
+import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
+import 'package:mocktail/mocktail.dart';
+
+class MockApiClient extends Mock implements ApiClient {}
 
 ActivityEntry _mk(
   int n,
@@ -25,7 +32,10 @@ ActivityEntry _mk(
   details: const {},
 );
 
-ProviderScope _scope({required AsyncValue<ActivityPage> value}) {
+ProviderScope _scope({
+  required AsyncValue<ActivityPage> value,
+  ApiClient? api,
+}) {
   Future<ActivityPage> resolve() async {
     if (value is AsyncError) {
       throw (value as AsyncError).error;
@@ -37,12 +47,17 @@ ProviderScope _scope({required AsyncValue<ActivityPage> value}) {
     overrides: [
       activityEntriesProvider.overrideWith((ref) => resolve()),
       activityOptionsProvider.overrideWith((ref) => resolve()),
+      if (api != null) apiClientProvider.overrideWithValue(api),
     ],
     child: const MaterialApp(home: Scaffold(body: ActivityScreen())),
   );
 }
 
 void main() {
+  const emptyPage = AsyncData(
+    ActivityPage(entries: [], truncated: false, count: 0),
+  );
+
   testWidgets('empty state when no entries', (tester) async {
     await tester.pumpWidget(
       _scope(
@@ -198,5 +213,94 @@ void main() {
         .toList();
     expect((tiles[0].title as Text).data, 'acme');
     expect((tiles[1].title as Text).data, 'zeta');
+  });
+
+  testWidgets('ADD dialog validates a PR URL submitted from the keyboard', (
+    tester,
+  ) async {
+    final api = MockApiClient();
+    await tester.pumpWidget(_scope(value: emptyPage, api: api));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('ADD'));
+    await tester.pumpAndSettle();
+    expect(find.text('Add a pull request'), findsOneWidget);
+
+    await tester.enterText(find.byType(TextField), 'not a GitHub PR');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pump();
+
+    expect(find.textContaining('Enter a GitHub PR link'), findsOneWidget);
+    verifyNever(() => api.addPRByUrl(any()));
+  });
+
+  testWidgets('ADD dialog shows daemon errors and allows retry', (
+    tester,
+  ) async {
+    final api = MockApiClient();
+    when(() => api.addPRByUrl(any())).thenThrow(ApiException('PR not found'));
+    await tester.pumpWidget(_scope(value: emptyPage, api: api));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('ADD'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byType(TextField),
+      'https://github.com/acme/widgets/pull/404',
+    );
+    await tester.tap(find.text('Add & review'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('PR not found'), findsOneWidget);
+    final submit = tester.widget<FilledButton>(find.byType(FilledButton));
+    expect(submit.onPressed, isNotNull);
+    verify(
+      () => api.addPRByUrl('https://github.com/acme/widgets/pull/404'),
+    ).called(1);
+  });
+
+  testWidgets('ADD dialog closes and confirms a successful submission', (
+    tester,
+  ) async {
+    final api = MockApiClient();
+    final result = Completer<int>();
+    when(() => api.addPRByUrl(any())).thenAnswer((_) => result.future);
+    await tester.pumpWidget(_scope(value: emptyPage, api: api));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('ADD'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byType(TextField),
+      'https://github.com/acme/widgets/pull/42',
+    );
+    await tester.tap(find.text('Add & review'));
+    await tester.pump();
+
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(tester.widget<TextField>(find.byType(TextField)).enabled, isFalse);
+
+    result.complete(73);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Add a pull request'), findsNothing);
+    expect(
+      find.text('PR added — repository monitored and review started.'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('ADD dialog can be cancelled', (tester) async {
+    final api = MockApiClient();
+    await tester.pumpWidget(_scope(value: emptyPage, api: api));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('ADD'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Add a pull request'), findsNothing);
+    verifyNever(() => api.addPRByUrl(any()));
   });
 }

@@ -2689,6 +2689,37 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		return nil
 	})
 
+	// Manual PR add (Activity view "ADD" action → POST /prs/add): fetch the PR
+	// from GitHub by (repo, number) and upsert it into the store. The server
+	// handler adds the repo to the monitored list and triggers the review;
+	// this callback owns only the GitHub fetch + store write. The base repo
+	// from the URL is authoritative for the stored Repo (GetPR would otherwise
+	// use head.repo.full_name, which is the fork for cross-repo PRs).
+	srv.SetAddPRFn(func(repo string, number int) (*store.PR, error) {
+		ghPR, err := ghClient.GetPR(repo, number)
+		if err != nil {
+			return nil, err
+		}
+		storePR := &store.PR{
+			GithubID:  ghPR.ID,
+			Repo:      repo,
+			Number:    ghPR.Number,
+			Title:     ghPR.Title,
+			Author:    ghPR.User.Login,
+			URL:       ghPR.HTMLURL,
+			State:     ghPR.State,
+			UpdatedAt: ghPR.UpdatedAt,
+			FetchedAt: time.Now().UTC(),
+		}
+		id, err := s.UpsertPR(storePR)
+		if err != nil {
+			return nil, fmt.Errorf("upsert pr: %w", err)
+		}
+		storePR.ID = id
+		slog.Info("manual PR add: stored", "repo", repo, "number", number, "store_pr_id", id, "github_id", ghPR.ID)
+		return storePR, nil
+	})
+
 	// Wire the issue-review trigger callback: re-run the issue at its
 	// CURRENT stage. Triggered by POST /issues/{id}/review (the GUI's
 	// "Re-review" button). The endpoint path is historical — when it was

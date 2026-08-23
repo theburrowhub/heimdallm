@@ -203,6 +203,33 @@ class ApiClient {
     }
   }
 
+  /// Adds a PR by its GitHub URL. The daemon adds the PR's repository to the
+  /// monitored list (persisted to config) and reviews the PR immediately.
+  /// Returns the created PR's store id (0 if the daemon deferred/omitted it).
+  Future<int> addPRByUrl(String url) async {
+    final resp = await _client.post(
+      _uri('/prs/add'),
+      headers: await _authHeaders(),
+      body: jsonEncode({'url': url}),
+    );
+    if (resp.statusCode != 202) {
+      String msg = 'POST /prs/add failed: ${resp.statusCode}';
+      try {
+        final err = (jsonDecode(resp.body) as Map<String, dynamic>)['error'];
+        if (err is String && err.isNotEmpty) msg = err;
+      } catch (_) {}
+      throw ApiException(msg);
+    }
+    try {
+      final pr =
+          (jsonDecode(resp.body) as Map<String, dynamic>)['pr']
+              as Map<String, dynamic>?;
+      return (pr?['id'] as num?)?.toInt() ?? 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+
   Future<void> dismissPR(int prId) async {
     final resp = await _client.post(
       _uri('/prs/$prId/dismiss'),
