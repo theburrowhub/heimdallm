@@ -140,8 +140,5 @@ func reviewRetryDelay(attempts int) time.Duration {
 		}
 		delay *= 2
 	}
-	if delay > reviewRetryMaxDelay {
-		return reviewRetryMaxDelay
-	}
 	return delay
 }

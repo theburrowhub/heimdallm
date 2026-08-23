@@ -3,6 +3,7 @@ package store_test
 import (
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -117,6 +118,33 @@ func TestCircuitBreaker_TripsOnPerPRCap(t *testing.T) {
 	}
 	if reason == "" {
 		t.Errorf("tripped must include a human-readable reason")
+	}
+}
+
+func TestCircuitBreaker_TripsWithoutHeadSHAAndOnRepoCap(t *testing.T) {
+	s := newTestStore(t)
+	prID, err := s.UpsertPR(&store.PR{GithubID: 9, Repo: "org/r", Number: 9,
+		Title: "t", State: "open", UpdatedAt: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.InsertReview(&store.Review{
+		PRID: prID, CLIUsed: "codex", Issues: "[]", Suggestions: "[]",
+		Severity: "low", CreatedAt: time.Now(), HeadSHA: "abc",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	tripped, reason, err := s.CheckCircuitBreaker(prID, "org/r", "",
+		store.CircuitBreakerLimits{PerPR24h: 1})
+	if err != nil || !tripped || !strings.Contains(reason, "per-PR cap reached") {
+		t.Fatalf("empty-SHA breaker = tripped %v, reason %q, error %v", tripped, reason, err)
+	}
+
+	tripped, reason, err = s.CheckCircuitBreaker(prID, "org/r", "abc",
+		store.CircuitBreakerLimits{PerRepoHr: 1})
+	if err != nil || !tripped || !strings.Contains(reason, "per-repo cap reached") {
+		t.Fatalf("repo breaker = tripped %v, reason %q, error %v", tripped, reason, err)
 	}
 }
 

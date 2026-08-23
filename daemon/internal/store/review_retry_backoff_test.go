@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -122,6 +123,64 @@ func TestReviewRetryBackoff_FailureRefreshesDelayOrigin(t *testing.T) {
 	if !blocked || attempts != 1 || !retryAt.Equal(failedAt.Add(5*time.Minute)) {
 		t.Fatalf("refreshed cooldown = blocked %v, retryAt %v, attempts %d", blocked, retryAt, attempts)
 	}
+}
+
+func TestReviewRetryBackoff_EmptySHAIsNoop(t *testing.T) {
+	s := newTestStore(t)
+	now := time.Now().UTC()
+
+	if blocked, retryAt, attempts, err := s.CheckReviewRetryBackoff(1, "", now); err != nil ||
+		blocked || !retryAt.IsZero() || attempts != 0 {
+		t.Fatalf("empty-SHA check = blocked %v, retryAt %v, attempts %d, error %v", blocked, retryAt, attempts, err)
+	}
+	if err := s.AdvanceReviewRetryBackoff(1, "", now); err != nil {
+		t.Fatalf("empty-SHA advance: %v", err)
+	}
+	if err := s.MarkReviewRetryFailure(1, "", now); err != nil {
+		t.Fatalf("empty-SHA failure mark: %v", err)
+	}
+	if err := s.ClearReviewRetryBackoff(1, ""); err != nil {
+		t.Fatalf("empty-SHA clear: %v", err)
+	}
+}
+
+func TestReviewRetryBackoff_ReportsStoredTimestampAndDatabaseErrors(t *testing.T) {
+	t.Run("malformed timestamp", func(t *testing.T) {
+		s := newTestStore(t)
+		prID := seedRetryPR(t, s, 14)
+		if _, err := s.DB().Exec(`
+			INSERT INTO review_retry_backoff (
+				pr_id, head_sha, consecutive_attempts, last_attempt_at
+			) VALUES (?, ?, ?, ?)`, prID, "sha", 1, "not-a-time"); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, _, err := s.CheckReviewRetryBackoff(prID, "sha", time.Now()); err == nil || !strings.Contains(err.Error(), "parse review retry last_attempt_at") {
+			t.Fatalf("malformed timestamp error = %v", err)
+		}
+	})
+
+	t.Run("closed database", func(t *testing.T) {
+		s := newTestStore(t)
+		if err := s.Close(); err != nil {
+			t.Fatal(err)
+		}
+		now := time.Now().UTC()
+		if _, _, _, err := s.CheckReviewRetryBackoff(1, "sha", now); err == nil {
+			t.Fatal("check on closed database returned nil error")
+		}
+		if err := s.AdvanceReviewRetryBackoff(1, "sha", now); err == nil {
+			t.Fatal("advance on closed database returned nil error")
+		}
+		if err := s.MarkReviewRetryFailure(1, "sha", now); err == nil {
+			t.Fatal("failure mark on closed database returned nil error")
+		}
+		if err := s.ClearReviewRetryBackoff(1, "sha"); err == nil {
+			t.Fatal("clear on closed database returned nil error")
+		}
+		if _, err := s.PruneReviewRetryBackoffs(now); err == nil {
+			t.Fatal("prune on closed database returned nil error")
+		}
+	})
 }
 
 func TestReviewRetryBackoff_PersistsAcrossReopen(t *testing.T) {
