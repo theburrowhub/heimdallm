@@ -64,10 +64,10 @@ type Server struct {
 	// stopping reuses the startup route gate while giving /health an honest
 	// lifecycle status. The listener remains owned during worker teardown so a
 	// launcher cannot race a replacement into the old process's cleanup window.
-	stopping             atomic.Bool
-	reloadFn             func() error
-	shutdownFn           func()
-	triggerReviewFn      func(prID int64) error
+	stopping        atomic.Bool
+	reloadFn        func() error
+	shutdownFn      func()
+	triggerReviewFn func(prID int64) error
 	// addPRFn fetches a PR from GitHub by (repo, number), upserts it into the
 	// store, and returns the stored row. Wired by main (needs the GitHub
 	// client + store). Nil disables POST /prs/add.
@@ -937,7 +937,15 @@ func (srv *Server) handleAddPR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Ensure the repo is monitored: add to github.repositories (and strip
+	// 1. Fetch the PR from GitHub and store it. Validate the PR before changing
+	// config so a typo or inaccessible repository is not monitored forever.
+	pr, err := srv.addPRFn(repo, number)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": fmt.Sprintf("fetch PR %s#%d: %v", repo, number, err)})
+		return
+	}
+
+	// 2. Ensure the repo is monitored: add to github.repositories (and strip
 	// from non_monitored) in config.toml, then reload so the poller tracks it.
 	if srv.configPath != "" {
 		if _, err := srv.patchTOML(func(m map[string]any) error {
@@ -947,13 +955,6 @@ func (srv *Server) handleAddPR(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("add repo to config: %v", err)})
 			return
 		}
-	}
-
-	// 2. Fetch the PR from GitHub and store it.
-	pr, err := srv.addPRFn(repo, number)
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": fmt.Sprintf("fetch PR %s#%d: %v", repo, number, err)})
-		return
 	}
 
 	// 3. Review it now (async, bounded by the shared review semaphore). If all

@@ -163,9 +163,10 @@ func TestHandleAddPR_RejectsWhenCallbacksAreMissing(t *testing.T) {
 func TestHandleAddPR_ReportsConfigWriteFailure(t *testing.T) {
 	srv := server.NewWithOptions(nil, nil, nil, "", server.Options{})
 	srv.SetConfigPath(filepath.Join(t.TempDir(), "missing", "config.toml"))
+	addCalled := false
 	srv.SetAddPRFn(func(string, int) (*store.PR, error) {
-		t.Fatal("addPRFn must not be called when config update fails")
-		return nil, nil
+		addCalled = true
+		return &store.PR{ID: 1, Repo: "org/repo", Number: 123}, nil
 	})
 	srv.SetTriggerReviewFn(func(int64) error {
 		t.Fatal("triggerReviewFn must not be called when config update fails")
@@ -180,10 +181,24 @@ func TestHandleAddPR_ReportsConfigWriteFailure(t *testing.T) {
 	if rr.Code != http.StatusInternalServerError {
 		t.Fatalf("status: got %d want 500, body=%s", rr.Code, rr.Body.String())
 	}
+	if !addCalled {
+		t.Fatal("addPRFn was not called before the config update")
+	}
 }
 
-func TestHandleAddPR_ReportsFetchFailure(t *testing.T) {
+func TestHandleAddPR_FetchFailureLeavesConfigUnchanged(t *testing.T) {
 	srv := server.NewWithOptions(nil, nil, nil, "", server.Options{})
+	initial := "[github]\nrepositories = [\"org/existing\"]\n"
+	cfgPath := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(cfgPath, []byte(initial), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	srv.SetConfigPath(cfgPath)
+	var reloadCalls int32
+	srv.SetReloadFn(func() error {
+		atomic.AddInt32(&reloadCalls, 1)
+		return nil
+	})
 	srv.SetAddPRFn(func(repo string, number int) (*store.PR, error) {
 		if repo != "org/repo" || number != 123 {
 			t.Fatalf("addPRFn got %s#%d, want org/repo#123", repo, number)
@@ -202,6 +217,16 @@ func TestHandleAddPR_ReportsFetchFailure(t *testing.T) {
 
 	if rr.Code != http.StatusBadGateway {
 		t.Fatalf("status: got %d want 502, body=%s", rr.Code, rr.Body.String())
+	}
+	got, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if string(got) != initial {
+		t.Fatalf("config changed after fetch failure:\n%s", got)
+	}
+	if calls := atomic.LoadInt32(&reloadCalls); calls != 0 {
+		t.Fatalf("reload called %d times after fetch failure, want 0", calls)
 	}
 }
 
