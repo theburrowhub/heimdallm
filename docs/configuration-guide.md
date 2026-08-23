@@ -1081,7 +1081,7 @@ architecture.
 
 ## 14. Circuit Breakers
 
-Circuit breakers cap AI invocations to prevent cost-runaway loops. The defaults are deliberately conservative — high-volume workflows must raise caps explicitly. There is currently no way to express "unlimited" through TOML; set a large value (e.g. `99999`) if you need near-unbounded behaviour.
+Circuit breakers cap completed PR reviews, issue triages, and development runs to prevent cost-runaway loops. Failed PR-review executions do not consume review quota because they did not produce a review. The defaults are deliberately conservative — high-volume workflows must raise caps explicitly. There is currently no way to express "unlimited" through TOML; set a large value (e.g. `99999`) if you need near-unbounded behaviour.
 
 ```toml
 [circuit_breaker]
@@ -1463,7 +1463,7 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # per_impl_repo_hr = 3
 
 # ── Circuit breakers ──────────────────────────────────────────────────────────
-# Caps AI invocations to prevent cost-runaway loops. 0 = use the default.
+# Caps completed reviews/triages and development runs. 0 = use the default.
 # There is no "unlimited" setting — use a large value (e.g. 99999) if needed.
 # See §14 Circuit Breakers in the guide for per-org/per-repo override syntax.
 
