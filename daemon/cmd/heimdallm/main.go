@@ -805,6 +805,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		cfgMu.Lock()
 		agentCfg := cfg.AgentConfigFor(cli)
 		globalTimeout := cfg.AI.ExecutionTimeout
+		reviewFailureRepoHourlyLimit := cfg.CircuitBreakerForRepo(pr.Repo).PerReviewFailureRepoHr
 		// Convert config.ResolvedReviewGuards to pipeline.GateConfig via same-shape cast.
 		// config cannot import pipeline (import cycle), so the helper returns a shadow
 		// type that callers cast here.
@@ -818,14 +819,15 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			}
 		}
 		return pipeline.RunOptions{
-			Primary:                 aiCfg.Primary,
-			Fallback:                aiCfg.Fallback,
-			PromptOverride:          aiCfg.Prompt,
-			AgentPromptID:           agentCfg.PromptID,
-			ReviewMode:              aiCfg.ReviewMode,
-			InstructionAuthors:      aiCfg.InstructionAuthors,
-			NeverApproveWithIssues:  aiCfg.NeverApproveWithIssues != nil && *aiCfg.NeverApproveWithIssues,
-			NeverApproveMinSeverity: aiCfg.NeverApproveMinSeverity,
+			Primary:                      aiCfg.Primary,
+			Fallback:                     aiCfg.Fallback,
+			PromptOverride:               aiCfg.Prompt,
+			AgentPromptID:                agentCfg.PromptID,
+			ReviewMode:                   aiCfg.ReviewMode,
+			InstructionAuthors:           aiCfg.InstructionAuthors,
+			NeverApproveWithIssues:       aiCfg.NeverApproveWithIssues != nil && *aiCfg.NeverApproveWithIssues,
+			NeverApproveMinSeverity:      aiCfg.NeverApproveMinSeverity,
+			ReviewFailureRepoHourlyLimit: reviewFailureRepoHourlyLimit,
 			ExecOpts: executor.ExecOptions{
 				Model:                agentCfg.Model,
 				MaxTurns:             agentCfg.MaxTurns,
@@ -1168,11 +1170,9 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			defer wg.Done()
 			const sweepInterval = 5 * time.Minute
 			const inflightSweepMaxAge = 30 * time.Minute
-			// The attempt ledger is only ever read through the breaker's
-			// windows (24h per-PR, 1h per-repo). 48h keeps a full margin over
-			// the widest of those: pruning anything still inside a window would
-			// silently reset a cap that is meant to be in force.
-			const attemptLedgerMaxAge = 48 * time.Hour
+			// Retry cooldown tops out at 6h. Keeping state for 48h leaves a wide
+			// safety margin while bounding rows left by abandoned PR HEADs.
+			const reviewRetryMaxAge = 48 * time.Hour
 			ticker := time.NewTicker(sweepInterval)
 			defer ticker.Stop()
 			for {
@@ -1190,10 +1190,15 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 					} else if n > 0 {
 						slog.Info("sweep: cleared stale issue triage inflight rows", "count", n)
 					}
-					if n, err := s.PruneReviewAttempts(attemptLedgerMaxAge); err != nil {
-						slog.Warn("sweep: prune review attempts failed", "err", err)
+					if n, err := s.PruneReviewRetryBackoffs(time.Now().Add(-reviewRetryMaxAge)); err != nil {
+						slog.Warn("sweep: prune review retry cooldowns failed", "err", err)
 					} else if n > 0 {
-						slog.Info("sweep: pruned review attempt rows", "count", n)
+						slog.Info("sweep: pruned review retry cooldown rows", "count", n)
+					}
+					if n, err := s.PruneReviewRetryAttempts(time.Now().Add(-reviewRetryMaxAge)); err != nil {
+						slog.Warn("sweep: prune review retry attempt rows failed", "err", err)
+					} else if n > 0 {
+						slog.Info("sweep: pruned review retry attempt rows", "count", n)
 					}
 				}
 			}
@@ -2366,11 +2371,12 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			"repos":             autonomousRepos,
 		}
 		result["circuit_breaker"] = map[string]any{
-			"per_pr_24h":        c.CircuitBreaker.PerPR24h,
-			"per_repo_hr":       c.CircuitBreaker.PerRepoHr,
-			"per_issue_24h":     c.CircuitBreaker.PerIssue24h,
-			"per_issue_repo_hr": c.CircuitBreaker.PerIssueRepoHr,
-			"per_impl_repo_hr":  c.CircuitBreaker.PerImplRepoHr,
+			"per_pr_24h":                 c.CircuitBreaker.PerPR24h,
+			"per_repo_hr":                c.CircuitBreaker.PerRepoHr,
+			"per_review_failure_repo_hr": c.CircuitBreaker.PerReviewFailureRepoHr,
+			"per_issue_24h":              c.CircuitBreaker.PerIssue24h,
+			"per_issue_repo_hr":          c.CircuitBreaker.PerIssueRepoHr,
+			"per_impl_repo_hr":           c.CircuitBreaker.PerImplRepoHr,
 		}
 		result["polling"] = map[string]any{
 			"poll_interval":               c.Polling.PollInterval,

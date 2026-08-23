@@ -1,6 +1,9 @@
 package store_test
 
 import (
+	"database/sql"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -118,6 +121,33 @@ func TestCircuitBreaker_TripsOnPerPRCap(t *testing.T) {
 	}
 }
 
+func TestCircuitBreaker_TripsWithoutHeadSHAAndOnRepoCap(t *testing.T) {
+	s := newTestStore(t)
+	prID, err := s.UpsertPR(&store.PR{GithubID: 9, Repo: "org/r", Number: 9,
+		Title: "t", State: "open", UpdatedAt: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.InsertReview(&store.Review{
+		PRID: prID, CLIUsed: "codex", Issues: "[]", Suggestions: "[]",
+		Severity: "low", CreatedAt: time.Now(), HeadSHA: "abc",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	tripped, reason, err := s.CheckCircuitBreaker(prID, "org/r", "",
+		store.CircuitBreakerLimits{PerPR24h: 1})
+	if err != nil || !tripped || !strings.Contains(reason, "per-PR cap reached") {
+		t.Fatalf("empty-SHA breaker = tripped %v, reason %q, error %v", tripped, reason, err)
+	}
+
+	tripped, reason, err = s.CheckCircuitBreaker(prID, "org/r", "abc",
+		store.CircuitBreakerLimits{PerRepoHr: 1})
+	if err != nil || !tripped || !strings.Contains(reason, "per-repo cap reached") {
+		t.Fatalf("repo breaker = tripped %v, reason %q, error %v", tripped, reason, err)
+	}
+}
+
 func TestCircuitBreaker_AllowsDifferentHeadSHAUnderPerPRCap(t *testing.T) {
 	s := newTestStore(t)
 	prID, _ := s.UpsertPR(&store.PR{GithubID: 4, Repo: "org/r", Number: 4,
@@ -192,5 +222,75 @@ func TestCircuitBreaker_ZeroCapMeansUnlimited(t *testing.T) {
 	}
 	if tripped {
 		t.Errorf("PerPR24h=0 must be unlimited, got tripped")
+	}
+}
+
+// TestCircuitBreaker_IgnoresLegacyFailedAttempts covers upgrades from the
+// attempt-ledger release. Existing databases can contain rows for terminated
+// executions that never produced a review; those rows must stop blocking both
+// breaker axes immediately after this version starts.
+func TestCircuitBreaker_IgnoresLegacyFailedAttempts(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy-attempts.db")
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	prID, err := s.UpsertPR(&store.PR{
+		GithubID: 73, Repo: "org/repo", Number: 73, Title: "t", State: "open",
+		UpdatedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("upsert pr: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	legacyDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open legacy db: %v", err)
+	}
+	if _, err := legacyDB.Exec(`CREATE TABLE review_attempts (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		pr_id INTEGER NOT NULL REFERENCES prs(id),
+		head_sha TEXT NOT NULL,
+		started_at DATETIME NOT NULL
+	)`); err != nil {
+		legacyDB.Close()
+		t.Fatalf("create legacy attempt table: %v", err)
+	}
+	for i := 0; i < 5; i++ {
+		if _, err := legacyDB.Exec(
+			"INSERT INTO review_attempts (pr_id, head_sha, started_at) VALUES (?, ?, ?)",
+			prID, "sha", time.Now().UTC().Format(time.RFC3339),
+		); err != nil {
+			legacyDB.Close()
+			t.Fatalf("insert legacy attempt %d: %v", i, err)
+		}
+	}
+	if err := legacyDB.Close(); err != nil {
+		t.Fatalf("close legacy db: %v", err)
+	}
+
+	s, err = store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen upgraded store: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	tripped, reason, err := s.CheckCircuitBreaker(prID, "org/repo", "sha",
+		store.CircuitBreakerLimits{PerPR24h: 3, PerRepoHr: 3})
+	if err != nil {
+		t.Fatalf("check breaker: %v", err)
+	}
+	if tripped {
+		t.Fatalf("legacy failed attempts tripped the breaker without reviews: %s", reason)
+	}
+	blocked, _, attempts, err := s.CheckReviewRetryBackoff(prID, "sha", time.Now())
+	if err != nil {
+		t.Fatalf("check retry backoff: %v", err)
+	}
+	if blocked || attempts != 0 {
+		t.Fatalf("legacy ambiguous attempts seeded retry state: blocked %v, attempts %d", blocked, attempts)
 	}
 }

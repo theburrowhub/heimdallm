@@ -1081,12 +1081,13 @@ architecture.
 
 ## 14. Circuit Breakers
 
-Circuit breakers cap AI invocations to prevent cost-runaway loops. The defaults are deliberately conservative — high-volume workflows must raise caps explicitly. There is currently no way to express "unlimited" through TOML; set a large value (e.g. `99999`) if you need near-unbounded behaviour.
+Circuit breakers cap completed PR reviews, issue triages, and development runs to prevent cost-runaway loops. Failed PR-review executions do not consume review quota because they did not produce a review. Instead, automatic retries on the same PR HEAD use a persistent exponential cooldown: 5 minutes after the first incomplete execution, doubling to a maximum of 6 hours. Failed or still-running executions are also limited to 20 starts per repository in a rolling hour by default, independently from completed reviews; reaching that limit defers automatic work without emitting a circuit-breaker trip. A manual **Re-review** bypasses both retry waits, but another failure still extends and consumes the protections for the next automatic retry. The defaults are deliberately conservative — high-volume workflows must raise caps explicitly. There is currently no way to express "unlimited" through TOML; set a large value (e.g. `99999`) if you need near-unbounded behaviour.
 
 ```toml
 [circuit_breaker]
 per_pr_24h       = 3    # max reviews on the same PR HEAD SHA in any 24 h window
 per_repo_hr      = 20   # max PR reviews on the same repo in any 1 h window
+per_review_failure_repo_hr = 20 # max failed/in-flight review executions per repo in any 1 h window
 per_issue_24h    = 3    # max triages on the same issue in any 24 h window
 per_issue_repo_hr = 10  # max issue triages on the same repo in any 1 h window
 per_impl_repo_hr  = 5   # max auto_implement (development) runs per repo in any 1 h window
@@ -1096,6 +1097,7 @@ per_impl_repo_hr  = 5   # max auto_implement (development) runs per repo in any 
 |---|---|---|
 | `per_pr_24h` | `3` | Reviews on the same PR HEAD SHA over a 24 h window. A new commit gets its own allowance. |
 | `per_repo_hr` | `20` | PR reviews across the same repo over a 1 h window. |
+| `per_review_failure_repo_hr` | `20` | Failed or still-running PR-review executions across the same repo over a 1 h window. This retry-only limit never emits `circuit_breaker_tripped`. |
 | `per_issue_24h` | `3` | Issue triages on the same issue over a 24 h window. |
 | `per_issue_repo_hr` | `10` | Issue triages across the same repo over a 1 h window. Tighter than the PR cap because each triage is a full-context agent run. |
 | `per_impl_repo_hr` | `5` | Auto-implement (development) runs per repo in any 1 h window. The per-issue breaker only counts triages (`review_only`), leaving development uncapped at the issue level; this field is the breadth guard for autonomous mode. |
@@ -1104,7 +1106,7 @@ All zero values are treated as "unset" and substituted with the defaults above. 
 
 ### Per-org and per-repo circuit breaker overrides
 
-All five fields are resolvable per org and per repo via `[ai.orgs."org".circuit_breaker]` and `[ai.repos."org/repo".circuit_breaker]`, following the same `repo > org > global` precedence as all other `[ai.*]` overrides. Only fields present in the override section are applied; absent fields inherit from the next level.
+All six fields are resolvable per org and per repo via `[ai.orgs."org".circuit_breaker]` and `[ai.repos."org/repo".circuit_breaker]`, following the same `repo > org > global` precedence as all other `[ai.*]` overrides. Only fields present in the override section are applied; absent fields inherit from the next level.
 
 ```toml
 # Tighten the development breadth guard for a high-activity repo
@@ -1463,13 +1465,14 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # per_impl_repo_hr = 3
 
 # ── Circuit breakers ──────────────────────────────────────────────────────────
-# Caps AI invocations to prevent cost-runaway loops. 0 = use the default.
+# Caps completed reviews/triages and development runs. 0 = use the default.
 # There is no "unlimited" setting — use a large value (e.g. 99999) if needed.
 # See §14 Circuit Breakers in the guide for per-org/per-repo override syntax.
 
 # [circuit_breaker]
 # per_pr_24h        = 3    # max reviews on the same PR HEAD SHA in any 24 h window
 # per_repo_hr       = 20   # max PR reviews on the same repo in any 1 h window
+# per_review_failure_repo_hr = 20 # max failed/in-flight review executions per repo in any 1 h window
 # per_issue_24h     = 3    # max triages on the same issue in any 24 h window
 # per_issue_repo_hr = 10   # max issue triages on the same repo in any 1 h window
 # per_impl_repo_hr  = 5    # max auto_implement (development) runs per repo in any 1 h window

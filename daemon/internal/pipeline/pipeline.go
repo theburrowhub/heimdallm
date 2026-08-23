@@ -22,6 +22,12 @@ import (
 // when the reason is not needed.
 var ErrCircuitBreakerTripped = errors.New("pipeline: circuit breaker tripped")
 
+// Failed and in-flight review executions are bounded separately from completed
+// reviews. Twenty failures per repository in a rolling hour preserves the
+// previous aggregate cost ceiling without consuming review quota or emitting a
+// circuit-breaker trip for work that never produced a review.
+const defaultReviewRetryRepoHourlyLimit = 20
+
 // ErrUpdateDraining is returned before any review work starts while the
 // desktop updater is draining the daemon for a safe bundle replacement.
 var ErrUpdateDraining = workgate.ErrDraining
@@ -163,6 +169,10 @@ type Pipeline struct {
 	// all caps (the pre-issue-243 behaviour). Populated at daemon startup via
 	// SetCircuitBreakerLimits.
 	breaker *store.CircuitBreakerLimits
+	// reviewRetryRepoHourlyLimit caps failed/in-flight executions across PRs of
+	// one repo. Zero disables only this aggregate check; per-HEAD exponential
+	// backoff remains active.
+	reviewRetryRepoHourlyLimit int
 	// timeline is the optional event-history fetcher used to bypass the
 	// SHA-skip path on explicit re-request review actions. Nil keeps the
 	// pre-#322 behaviour (skip on SHA match regardless of user intent).
@@ -188,7 +198,10 @@ func New(s *store.Store, gh interface {
 	CommentFetcher
 	HeadSHAResolver
 }, exec CLIExecutor, n Notifier) *Pipeline {
-	return &Pipeline{store: s, gh: gh, executor: exec, notify: n}
+	return &Pipeline{
+		store: s, gh: gh, executor: exec, notify: n,
+		reviewRetryRepoHourlyLimit: defaultReviewRetryRepoHourlyLimit,
+	}
 }
 
 // SetBotLogin sets the GitHub login of the bot account. Used to filter
@@ -201,6 +214,14 @@ func (p *Pipeline) SetBotLogin(login string) { p.botLogin = login }
 // and the follow-up ticket for re-plumbing via a getter.
 func (p *Pipeline) SetCircuitBreakerLimits(limits *store.CircuitBreakerLimits) {
 	p.breaker = limits
+}
+
+// SetReviewRetryRepoHourlyLimit configures the aggregate failed/in-flight
+// execution budget. It is deliberately separate from SetCircuitBreakerLimits:
+// reaching it defers automatic retries but never claims a failed run was a
+// completed review. Zero disables the aggregate limit.
+func (p *Pipeline) SetReviewRetryRepoHourlyLimit(limit int) {
+	p.reviewRetryRepoHourlyLimit = limit
 }
 
 // SetTimelineFetcher enables the explicit-re-request-review bypass for
@@ -398,7 +419,7 @@ func (p *Pipeline) publish(eventType string, data map[string]any) {
 	p.publisher.Publish(sse.Event{Type: eventType, Data: string(b)})
 }
 
-// publishSkipped is a small helper for the four skip paths in Run that
+// publishSkipped is a small helper for the skip paths in Run that
 // need to emit EventReviewSkipped with the same shape: repo, pr_number,
 // pr_title, reason. Centralised so changes to the payload schema only
 // touch one site.
@@ -573,12 +594,16 @@ type RunOptions struct {
 	// the NeverApproveWithIssues downgrade ("low"|"medium"|"high"). Empty is
 	// equivalent to "low": any finding downgrades (see ReviewEvent).
 	NeverApproveMinSeverity string
+	// ReviewFailureRepoHourlyLimit bounds failed/in-flight review executions
+	// across this repository in a rolling hour. It is resolved independently
+	// from completed-review breaker limits. Zero uses the pipeline default.
+	ReviewFailureRepoHourlyLimit int
 	// RepoEligible is a live gate for automatic work. It is checked again at
 	// execution/publication boundaries so a config reload can stop an in-flight
 	// review. Nil intentionally allows explicit/manual calls to proceed.
 	RepoEligible func(string) bool
 	// Force marks an explicit operator-initiated re-review (the app's
-	// "Re-review" button → POST /prs/{id}/review). It bypasses the two
+	// "Re-review" button → POST /prs/{id}/review). It bypasses the three
 	// cost-control gates that exist to suppress the AUTOMATIC poll path:
 	//   1. the re-review dedup gate — SHA-unchanged / no-new-review_requested
 	//      (see #139/#245/#509). The app cannot create a GitHub
@@ -588,6 +613,9 @@ type RunOptions struct {
 	//      silently skipped.
 	//   2. the circuit breaker (per-PR/per-repo cap, #243) — a human clicking
 	//      the button is deliberate intent, not a runaway loop.
+	//   3. the failed-execution retry protections — the same explicit intent may
+	//      retry immediately despite the per-HEAD cooldown or repository-wide
+	//      hourly limit, while a failure still protects the next automatic run.
 	// Force must ONLY be set by the manual-trigger callback, never by the
 	// pollers, so the automatic path keeps every protection intact. The
 	// state guards (opts.Guards: closed / draft / self-authored) still apply.
@@ -769,13 +797,14 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 
 	if opts.Force {
 		// Explicit operator-initiated review (app "Re-review" button).
-		// Bypasses the SHA/re-request dedup gate below AND the circuit
-		// breaker (see RunOptions.Force). Logged unconditionally — NOT gated
-		// on prevReview — because the breaker bypass at the check further
-		// down also covers a forced FIRST review whose per-repo cap is
-		// tripped, which would otherwise be suppressed silently in a
+		// Bypasses the SHA/re-request dedup gate below, the circuit breaker,
+		// and the failed-execution retry cooldown (see RunOptions.Force).
+		// Logged unconditionally — NOT gated on prevReview — because the
+		// breaker bypass at the check further down also covers a forced FIRST
+		// review whose per-repo cap is tripped, which would otherwise be
+		// suppressed silently in a
 		// cost-sensitive path.
-		slog.Info("pipeline: forced review — bypassing re-request dedup + circuit breaker",
+		slog.Info("pipeline: forced review — bypassing re-request dedup + circuit breaker + retry cooldown",
 			"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA,
 			"has_prev_review", prevReview != nil)
 	}
@@ -894,7 +923,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	}
 	slog.Info("pipeline: using CLI", "cli", cli)
 
-	// 4b. Circuit breaker: hard cap on review runs per PR HEAD / per repo.
+	// 4b. Circuit breaker: hard cap on completed reviews per PR HEAD / per repo.
 	// Runs AFTER all dedup layers so it only fires when the dedup failed but
 	// the caller is about to spend Claude credits anyway. See
 	// theburrowhub/heimdallm#243.
@@ -927,51 +956,79 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	if stopped, err := p.stopIfRepoBecameIneligible(pr, opts.RepoEligible); stopped {
 		return nil, err
 	}
-	// 4c. Record the attempt. Every remaining path leads to Execute, which is
-	// what makes this — and not a line earlier — the point at which the run
-	// becomes chargeable.
-	//
-	// Placement is load-bearing. This deliberately sits AFTER
-	// stopIfRepoBecameIneligible: that guard is a zero-spend, explicitly
-	// retryable exit ("deferring review"), so recording before it meant a repo
-	// toggled off mid-poll burned a ledger row per tick without touching the
-	// CLI. After PerPR24h such ticks the commit was capped for 24h and the
-	// legitimate review was refused once the repo came back, recoverable only
-	// via Force.
-	//
-	// It has to happen BEFORE Execute and must survive failure. Rows in the
-	// reviews table are only written on success (step 7), so a run that dies in
-	// between — a CLI whose output will not parse, say — used to leave no trace
-	// anywhere: the in-flight claim was released by the caller's defer, no
-	// review row existed, and the breaker's counter never moved. Every dedup
-	// layer keys off one of those two, so all of them were blind at once and the
-	// retry of the identical commit was unbounded, each iteration paying full
-	// price (theburrowhub/heimdallm#663).
-	//
-	// Forced runs are recorded too. Force bypasses the breaker CHECK because a
-	// human clicking "Re-review" is deliberate intent, but the spend is real and
-	// an unrecorded run would leave the same blind spot for whatever runs next.
-	//
-	// Known trade-off: the ledger cannot tell a failure that spent credits from
-	// one that did not (provider auth rejection, an execution timeout, context
-	// cancellation on daemon shutdown). Those count too, so a restart loop can
-	// cap a commit for 24h and report "N review runs" for runs that cost
-	// nothing. Accepted deliberately — classifying CLI errors by whether they
-	// billed is guesswork, and under-counting is what #663 was. Force is the
-	// operator's escape hatch.
-	//
-	// Fail-open on a write error, matching the breaker check above: a transient
-	// SQLite blip must not block a legitimate review. Logged at Error, not Warn:
-	// this single write is what the entire cost brake now rests on, so a
-	// persistent failure (read-only DB, disk full) silently restores the
-	// unbounded retry loop and must be visible in the logs rather than inferred
-	// from the bill.
-	if err := p.store.RecordReviewAttempt(prID, pr.Head.SHA); err != nil {
-		slog.Error("pipeline: could not record review attempt — the per-PR/per-repo "+
-			"cost cap is not counting this run",
-			"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA, "err", err)
+
+	// Failed executions are rate-limited independently from the review circuit
+	// breaker. The breaker counts only durable reviews; this persistent,
+	// per-HEAD exponential cooldown bounds a CLI/provider failure loop without
+	// claiming that those failures were reviews. Manual Force is explicit
+	// operator intent and bypasses the check, but its execution is still armed
+	// below so a failed manual retry protects the next automatic tick.
+	now := time.Now().UTC()
+	if !opts.Force {
+		blocked, retryAt, attempts, err := p.store.CheckReviewRetryBackoff(
+			prID, pr.Head.SHA, now,
+		)
+		if err != nil {
+			slog.Warn("pipeline: review retry cooldown check failed, proceeding",
+				"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA, "err", err)
+		} else if blocked {
+			slog.Info("pipeline: review retry cooldown active — deferring execution",
+				"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA,
+				"attempts", attempts, "retry_at", retryAt,
+				"retry_in", retryAt.Sub(now))
+			p.publishSkipped(pr, SkipReasonRetryCooldown)
+			return nil, nil
+		}
 	}
 
+	// Reserve aggregate failure budget before starting the CLI. The reservation
+	// is cleared only after InsertReview succeeds, so a returned failure or a
+	// daemon death remains chargeable to this retry-only rolling window. Force
+	// bypasses the limit but still records its execution, protecting subsequent
+	// automatic work if the manual retry also fails.
+	retryRepoLimit := p.reviewRetryRepoHourlyLimit
+	if opts.ReviewFailureRepoHourlyLimit > 0 {
+		retryRepoLimit = opts.ReviewFailureRepoHourlyLimit
+	}
+	if opts.Force {
+		retryRepoLimit = 0
+	}
+	retryReservation, err := p.store.ReserveReviewRetryAttempt(
+		prID, pr.Repo, pr.Head.SHA, now, retryRepoLimit,
+	)
+	if err != nil {
+		slog.Warn("pipeline: review retry aggregate reservation failed, proceeding",
+			"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA, "err", err)
+	} else if retryReservation.Blocked {
+		slog.Info("pipeline: repository review retry limit active — deferring execution",
+			"repo", pr.Repo, "pr", pr.Number,
+			"failures", retryReservation.FailureCount,
+			"limit", retryRepoLimit,
+			"retry_at", retryReservation.RetryAt,
+			"retry_in", retryReservation.RetryAt.Sub(now))
+		p.publishSkipped(pr, SkipReasonRetryRepoLimit)
+		return nil, nil
+	}
+	// Arm immediately before the lifecycle-start events and Execute. A daemon
+	// death leaves this start marker in force; a normally returned failure moves
+	// the delay origin to the return time. Clearing happens only after
+	// InsertReview succeeds.
+	retryBackoffArmed := false
+	if err := p.store.AdvanceReviewRetryBackoff(prID, pr.Head.SHA, now); err != nil {
+		slog.Error("pipeline: could not advance review retry cooldown — failed runs may retry too quickly",
+			"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA, "err", err)
+	} else {
+		retryBackoffArmed = true
+		defer func() {
+			if !retryBackoffArmed {
+				return
+			}
+			if err := p.store.MarkReviewRetryFailure(prID, pr.Head.SHA, time.Now().UTC()); err != nil {
+				slog.Warn("pipeline: could not refresh review retry cooldown after failure",
+					"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA, "err", err)
+			}
+		}()
+	}
 	p.notify.Notify("PR Review Started", fmt.Sprintf("%s #%d", pr.Repo, pr.Number))
 	p.publish(sse.EventPRDetected, map[string]any{
 		"pr_number": pr.Number,
@@ -1044,6 +1101,20 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	rev.ID, err = p.store.InsertReview(rev)
 	if err != nil {
 		return nil, fmt.Errorf("pipeline: store review: %w", err)
+	}
+	retryBackoffArmed = false
+	if err := p.store.ClearReviewRetryBackoff(prID, pr.Head.SHA); err != nil {
+		// The durable review row already protects subsequent automatic runs.
+		// Failing to clear only leaves stale advisory state, so log and proceed.
+		slog.Warn("pipeline: failed to clear review retry cooldown",
+			"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA, "err", err)
+	}
+	if err := p.store.ClearReviewRetryAttempt(retryReservation.ID); err != nil {
+		// This successful execution should not consume failure budget. A stale row
+		// expires naturally after one hour, so logging is safer than failing a
+		// review that has already been persisted.
+		slog.Warn("pipeline: failed to clear successful review retry reservation",
+			"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA, "err", err)
 	}
 	slog.Info("pipeline: review stored locally", "review_id", rev.ID)
 	if stopped, err := p.stopIfRepoBecameIneligible(pr, opts.RepoEligible); stopped {

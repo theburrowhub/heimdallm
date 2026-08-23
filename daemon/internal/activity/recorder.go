@@ -273,8 +273,10 @@ func (r *Recorder) recordIssueReviewError(ev sse.Event) error {
 // self_authored) recorded — those reflect the bot deciding not to
 // review and are useful in the audit trail.
 var dedupSkipReasons = map[string]bool{
-	"sha_unchanged":   true,
-	"legacy_backfill": true,
+	"sha_unchanged":    true,
+	"legacy_backfill":  true,
+	"retry_cooldown":   true,
+	"retry_repo_limit": true,
 }
 
 func (r *Recorder) recordReviewSkipped(ev sse.Event) error {

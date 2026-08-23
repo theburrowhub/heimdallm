@@ -392,15 +392,17 @@ func TestRecorder_ReviewSkipped(t *testing.T) {
 
 // TestRecorder_ReviewSkippedDedupReasonsAreNotRecorded locks in the
 // fix from theburrowhub/heimdallm#322 review feedback: dedup-flavoured
-// skips (sha_unchanged, legacy_backfill) MUST NOT generate activity_log
-// rows even though they fire as review_skipped SSE events. They run on
+// skips (sha_unchanged, legacy_backfill, retry cooldowns) MUST NOT generate
+// activity_log rows even though they fire as review_skipped SSE events. They run on
 // every poll cycle on stable PRs — recording them would produce one
 // spam row per minute per stable PR, which is the activity-log spam
 // regression Bug 4 was supposed to close.
 func TestRecorder_ReviewSkippedDedupReasonsAreNotRecorded(t *testing.T) {
 	_, fs, events := newTestRecorder(t)
 
-	for _, reason := range []string{"sha_unchanged", "legacy_backfill"} {
+	for _, reason := range []string{
+		"sha_unchanged", "legacy_backfill", "retry_cooldown", "retry_repo_limit",
+	} {
 		events <- sse.Event{
 			Type: sse.EventReviewSkipped,
 			Data: `{"repo":"org/name","pr_number":42,"pr_title":"Fix X","reason":"` + reason + `"}`,

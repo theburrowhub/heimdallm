@@ -24,6 +24,15 @@ const (
 	// is now backfilled from the current snapshot. The user must trigger
 	// a re-review manually to score that exact commit.
 	SkipReasonLegacyBackfill SkipReason = "legacy_backfill"
+	// SkipReasonRetryCooldown is emitted when an earlier execution on this
+	// exact PR HEAD failed before producing a durable review and its persistent
+	// exponential retry delay has not elapsed. Manual Force runs bypass it.
+	SkipReasonRetryCooldown SkipReason = "retry_cooldown"
+	// SkipReasonRetryRepoLimit is emitted when failed or still-running review
+	// executions across different PRs have exhausted the repository's rolling
+	// retry budget. It is not a review circuit-breaker trip: no failed execution
+	// consumes completed-review quota, and manual Force runs bypass it.
+	SkipReasonRetryRepoLimit SkipReason = "retry_repo_limit"
 	// SkipReasonHeadChanged is emitted when a stored unpublished review was
 	// generated for an older commit. Publishing it against the current HEAD
 	// would misrepresent stale findings, so the pending row is retired and a
