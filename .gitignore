@@ -27,6 +27,7 @@ docker/config/
 daemon/heimdallm
 cli/heimdallm-cli
 .superpowers/
+.remember/
 .claude/scheduled_tasks.lock
 # repox dev-tool artifacts — local-only cleanup script and lock dir; the script
 # hardcodes a developer's absolute home path, so never commit either.
