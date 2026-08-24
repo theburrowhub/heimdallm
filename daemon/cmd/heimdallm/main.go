@@ -5669,7 +5669,10 @@ func reviewErrorEventData(
 		data["reason"] = "manual_cancelled"
 	}
 	if prID == 0 && repo != "" && prNumber > 0 {
-		if pr, lookupErr := s.GetPRByRepoNumber(repo, prNumber); lookupErr == nil {
+		if pr, lookupErr := s.GetPRByRepoNumber(repo, prNumber); lookupErr != nil {
+			slog.Warn("review error event: PR lookup failed",
+				"repo", repo, "pr_number", prNumber, "err", lookupErr)
+		} else {
 			prID = pr.ID
 		}
 	}
