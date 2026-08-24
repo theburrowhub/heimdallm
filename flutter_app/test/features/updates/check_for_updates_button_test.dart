@@ -10,10 +10,77 @@ import 'package:heimdallm/features/updates/check_for_updates_button.dart';
 import '../../core/platform/fake_platform_services.dart';
 
 void main() {
-  testWidgets('is hidden when native updates are unavailable', (tester) async {
-    final platform = FakePlatformServices();
-    await tester.pumpWidget(_app(platform));
-    expect(find.byKey(const Key('check-for-updates')), findsNothing);
+  testWidgets(
+    'explains unavailable updates instead of hiding the app-bar entry',
+    (tester) async {
+      final platform = FakePlatformServices(
+        appUpdateUnavailableReason: 'Requires an official signed build.',
+      );
+      await tester.pumpWidget(_app(platform));
+      final button = tester.widget<IconButton>(
+        find.byKey(const Key('check-for-updates')),
+      );
+      expect(button.onPressed, isNull);
+      expect(button.tooltip, 'Requires an official signed build.');
+    },
+  );
+
+  testWidgets('settings show version and the Developer ID trust-gate reason', (
+    tester,
+  ) async {
+    final platform = FakePlatformServices(
+      appVersion: const AppVersionInfo(version: '0.8.4', buildNumber: '546'),
+      appUpdateUnavailableReason:
+          'This app is not signed with Developer ID Application.',
+    );
+
+    await tester.pumpWidget(_settingsApp(platform));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Version 0.8.4 (build 546)'), findsOneWidget);
+    expect(find.text('Updates unavailable'), findsOneWidget);
+    expect(
+      find.text('This app is not signed with Developer ID Application.'),
+      findsOneWidget,
+    );
+    expect(find.byKey(const Key('settings-update-action')), findsNothing);
+  });
+
+  testWidgets('signed build reports up-to-date and remains checkable', (
+    tester,
+  ) async {
+    final platform = _UpToDatePlatform();
+
+    await tester.pumpWidget(_settingsApp(platform));
+    await tester.pumpAndSettle();
+    expect(find.text('Ready to check for updates'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('settings-update-action')));
+    await tester.pumpAndSettle();
+
+    expect(platform.checkForAppUpdatesCalls, 1);
+    expect(find.text('Heimdallm is up to date.'), findsOneWidget);
+    expect(find.text('Check for updates'), findsOneWidget);
+  });
+
+  testWidgets('settings install the update that is ready', (tester) async {
+    final platform = FakePlatformServices(
+      appUpdateSupport: AppUpdateSupport.native,
+      appUpdateStatus: const AppUpdateStatus(
+        phase: AppUpdatePhase.available,
+        version: '0.9.0',
+        message: 'Heimdallm 0.9.0 is ready to install.',
+      ),
+    );
+
+    await tester.pumpWidget(_settingsApp(platform));
+    await tester.pumpAndSettle();
+    expect(find.text('Heimdallm 0.9.0 is ready to install.'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('settings-update-action')));
+    await tester.pump();
+
+    expect(platform.installAppUpdateCalls, 1);
   });
 
   testWidgets('banner stays hidden when no update is actionable', (
@@ -151,6 +218,11 @@ Widget _bannerApp(FakePlatformServices platform) => ProviderScope(
   child: const MaterialApp(home: Scaffold(body: AppUpdateBanner())),
 );
 
+Widget _settingsApp(FakePlatformServices platform) => ProviderScope(
+  overrides: [platformServicesProvider.overrideWithValue(platform)],
+  child: const MaterialApp(home: Scaffold(body: AppUpdateSettingsCard())),
+);
+
 class _BlockingUpdatePlatform extends FakePlatformServices {
   _BlockingUpdatePlatform(this.completion)
     : super(appUpdateSupport: AppUpdateSupport.native);
@@ -167,6 +239,22 @@ class _BlockingUpdatePlatform extends FakePlatformServices {
       ),
     );
     return completion.future;
+  }
+}
+
+class _UpToDatePlatform extends FakePlatformServices {
+  _UpToDatePlatform()
+    : super(
+        appUpdateSupport: AppUpdateSupport.native,
+        appVersion: const AppVersionInfo(version: '0.8.4'),
+      );
+
+  @override
+  Future<void> checkForAppUpdates() async {
+    checkForAppUpdatesCalls++;
+    emitAppUpdateStatus(
+      const AppUpdateStatus.idle(message: 'Heimdallm is up to date.'),
+    );
   }
 }
 

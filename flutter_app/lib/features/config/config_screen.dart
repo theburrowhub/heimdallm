@@ -9,6 +9,7 @@ import '../../shared/widgets/autocomplete_chip_field.dart';
 import '../../shared/widgets/toast.dart';
 import '../agents/agents_screen.dart' show agentsProvider;
 import '../dashboard/dashboard_providers.dart';
+import '../updates/check_for_updates_button.dart';
 import 'config_providers.dart';
 
 // Poll-interval bounds, mirrored from the daemon's config.ValidatePollInterval
@@ -255,6 +256,8 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             if (!daemonRunning) _setupBanner(),
+            const AppUpdateSettingsCard(),
+            const SizedBox(height: 8),
             _tokenSection(),
             const SizedBox(height: 20),
             _pollSection(),

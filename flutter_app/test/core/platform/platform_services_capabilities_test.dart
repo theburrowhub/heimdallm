@@ -30,6 +30,10 @@ void main() {
       final PlatformServices platform = _PlatformOnly();
 
       expect(platform.appUpdateSupport, AppUpdateSupport.unavailable);
+      expect(
+        platform.appUpdateUnavailableReason,
+        contains('package or deployment'),
+      );
       expect(platform.appUpdateStatus.phase, AppUpdatePhase.idle);
       expect(await platform.appUpdateEvents.toList(), isEmpty);
       await platform.setupAppUpdater();
@@ -59,6 +63,7 @@ void main() {
         final PlatformServices platform = fake;
 
         expect(platform.appUpdateSupport, AppUpdateSupport.native);
+        expect(platform.appUpdateUnavailableReason, isNull);
         await platform.setupAppUpdater();
         await platform.checkForAppUpdates();
         await platform.installAppUpdate();

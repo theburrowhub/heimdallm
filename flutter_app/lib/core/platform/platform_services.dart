@@ -30,6 +30,21 @@ enum AppUpdateSupport {
   unavailable,
 }
 
+/// Version metadata of the running application bundle/package.
+class AppVersionInfo {
+  const AppVersionInfo({required this.version, this.buildNumber});
+
+  final String version;
+  final String? buildNumber;
+
+  String get displayVersion {
+    final build = buildNumber?.trim();
+    return build == null || build.isEmpty || build == version
+        ? version
+        : '$version (build $build)';
+  }
+}
+
 /// User-visible lifecycle of the desktop application updater.
 enum AppUpdatePhase { idle, checking, available, installing, restarting, error }
 
@@ -169,6 +184,9 @@ abstract class PlatformServices {
 
   // ── Application updates ────────────────────────────────────────────────
 
+  /// Returns the version metadata embedded in the running app.
+  Future<AppVersionInfo> loadAppVersion();
+
   // ── First-run setup / daemon spawn ──────────────────────────────────────
 
   Future<String?> detectGitHubToken();
@@ -200,6 +218,7 @@ abstract class PlatformServices {
 /// platform interface.
 abstract interface class AppUpdatePlatformCapability {
   AppUpdateSupport get appUpdateSupport;
+  String? get appUpdateUnavailableReason;
   AppUpdateStatus get appUpdateStatus;
   Stream<AppUpdateStatus> get appUpdateEvents;
 
@@ -230,6 +249,13 @@ extension OptionalPlatformCapabilities on PlatformServices {
     return platform is AppUpdatePlatformCapability
         ? (platform as AppUpdatePlatformCapability).appUpdateSupport
         : AppUpdateSupport.unavailable;
+  }
+
+  String? get appUpdateUnavailableReason {
+    final platform = this;
+    return platform is AppUpdatePlatformCapability
+        ? (platform as AppUpdatePlatformCapability).appUpdateUnavailableReason
+        : 'Updates are managed by this installation\'s package or deployment.';
   }
 
   Future<void> setupAppUpdater() async {

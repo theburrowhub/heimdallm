@@ -3,6 +3,7 @@ import 'dart:js_interop';
 import 'dart:ui' show VoidCallback;
 
 import 'package:flutter/painting.dart' show Size;
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:web/web.dart' as web;
 
 import '../api/api_client.dart';
@@ -135,6 +136,15 @@ class WebPlatformServices implements PlatformServices {
     // Throwing gives tests something to catch and desktop callers never
     // reach this branch.
     throw UnsupportedError('quitApp is not supported on web');
+  }
+
+  @override
+  Future<AppVersionInfo> loadAppVersion() async {
+    final info = await PackageInfo.fromPlatform();
+    return AppVersionInfo(
+      version: info.version,
+      buildNumber: info.buildNumber,
+    );
   }
 
   @override

@@ -91,6 +91,8 @@ void main() {
 
     // Poll interval is still shown in Settings
     expect(find.text('5m'), findsAtLeastNWidgets(1));
+    expect(find.byKey(const Key('app-update-settings')), findsOneWidget);
+    expect(find.text('Version 0.8.4'), findsOneWidget);
     // Primary agent ('claude') moved to Agents tab — no longer in ConfigScreen
   });
 

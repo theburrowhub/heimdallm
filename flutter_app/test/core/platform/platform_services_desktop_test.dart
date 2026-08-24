@@ -882,6 +882,13 @@ else:
       await services.setupAppUpdater();
       expect(await services.pendingAppUpdateVersion(), isNull);
       expect(calls, 1);
+      expect(
+        services.appUpdateUnavailableReason,
+        allOf(
+          contains('Development builds'),
+          contains('Developer ID Application'),
+        ),
+      );
     });
 
     test(
@@ -902,6 +909,13 @@ else:
 
         await services.setupAppUpdater();
         expect(services.appUpdateSupport, AppUpdateSupport.unavailable);
+        expect(
+          services.appUpdateUnavailableReason,
+          allOf(
+            contains('not signed with Developer ID Application'),
+            contains('official notarized release'),
+          ),
+        );
         await expectLater(
           services.checkForAppUpdates(),
           throwsA(isA<UnsupportedError>()),
@@ -1067,6 +1081,10 @@ else:
           throwsA(isA<UnsupportedError>()),
         );
         expect(calls, 0);
+        expect(
+          services.appUpdateUnavailableReason,
+          contains('official AppImage or packaged release'),
+        );
       },
     );
 
