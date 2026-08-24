@@ -25,43 +25,92 @@ void main() {
     },
   );
 
-  testWidgets('settings show version and the Developer ID trust-gate reason', (
+  testWidgets(
+    'settings explain an incomplete updater integrity configuration',
+    (tester) async {
+      final platform = FakePlatformServices(
+        appVersion: const AppVersionInfo(version: '0.8.4', buildNumber: '546'),
+        appUpdateUnavailableReason:
+            'The embedded Sparkle signature configuration is incomplete.',
+      );
+
+      await tester.pumpWidget(_settingsApp(platform));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Version 0.8.4 (build 546)'), findsOneWidget);
+      expect(find.text('Updates unavailable'), findsOneWidget);
+      expect(
+        find.text(
+          'The embedded Sparkle signature configuration is incomplete.',
+        ),
+        findsOneWidget,
+      );
+      expect(find.byKey(const Key('settings-update-action')), findsNothing);
+    },
+  );
+
+  testWidgets(
+    'official signed build reports up-to-date and remains checkable',
+    (tester) async {
+      final platform = _UpToDatePlatform();
+
+      await tester.pumpWidget(_settingsApp(platform));
+      await tester.pumpAndSettle();
+      expect(find.text('Ready to check for updates'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('settings-update-action')));
+      await tester.pumpAndSettle();
+
+      expect(platform.checkForAppUpdatesCalls, 1);
+      expect(find.text('Heimdallm is up to date.'), findsOneWidget);
+      expect(find.text('Check for updates'), findsOneWidget);
+    },
+  );
+
+  testWidgets('ad-hoc build exposes the same normal update controls', (
     tester,
   ) async {
     final platform = FakePlatformServices(
-      appVersion: const AppVersionInfo(version: '0.8.4', buildNumber: '546'),
-      appUpdateUnavailableReason:
-          'This app is not signed with Developer ID Application.',
+      appUpdateSupport: AppUpdateSupport.native,
+      appVersion: const AppVersionInfo(version: '0.8.4-dev'),
     );
 
     await tester.pumpWidget(_settingsApp(platform));
     await tester.pumpAndSettle();
 
-    expect(find.text('Version 0.8.4 (build 546)'), findsOneWidget);
-    expect(find.text('Updates unavailable'), findsOneWidget);
-    expect(
-      find.text('This app is not signed with Developer ID Application.'),
-      findsOneWidget,
-    );
-    expect(find.byKey(const Key('settings-update-action')), findsNothing);
-  });
-
-  testWidgets('signed build reports up-to-date and remains checkable', (
-    tester,
-  ) async {
-    final platform = _UpToDatePlatform();
-
-    await tester.pumpWidget(_settingsApp(platform));
-    await tester.pumpAndSettle();
+    expect(find.text('Version 0.8.4-dev'), findsOneWidget);
     expect(find.text('Ready to check for updates'), findsOneWidget);
+    expect(find.text('Check for updates'), findsOneWidget);
+    expect(find.text('Updates unavailable'), findsNothing);
 
     await tester.tap(find.byKey(const Key('settings-update-action')));
-    await tester.pumpAndSettle();
-
+    await tester.pump();
     expect(platform.checkForAppUpdatesCalls, 1);
-    expect(find.text('Heimdallm is up to date.'), findsOneWidget);
-    expect(find.text('Check for updates'), findsOneWidget);
   });
+
+  testWidgets(
+    'missing signed appcast stays visible and retryable in settings',
+    (tester) async {
+      final platform = FakePlatformServices(
+        appUpdateSupport: AppUpdateSupport.native,
+        appUpdateStatus: const AppUpdateStatus(
+          phase: AppUpdatePhase.error,
+          message: 'Could not load the signed update feed (HTTP 404).',
+        ),
+      );
+
+      await tester.pumpWidget(_settingsAndBannerApp(platform));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('Could not load the signed update feed (HTTP 404).'),
+        findsOneWidget,
+      );
+      expect(find.text('Try checking again.'), findsOneWidget);
+      expect(find.text('Check for updates'), findsOneWidget);
+      expect(find.byKey(const Key('app-update-banner')), findsNothing);
+    },
+  );
 
   testWidgets('settings install the update that is ready', (tester) async {
     final platform = FakePlatformServices(
@@ -221,6 +270,15 @@ Widget _bannerApp(FakePlatformServices platform) => ProviderScope(
 Widget _settingsApp(FakePlatformServices platform) => ProviderScope(
   overrides: [platformServicesProvider.overrideWithValue(platform)],
   child: const MaterialApp(home: Scaffold(body: AppUpdateSettingsCard())),
+);
+
+Widget _settingsAndBannerApp(FakePlatformServices platform) => ProviderScope(
+  overrides: [platformServicesProvider.overrideWithValue(platform)],
+  child: const MaterialApp(
+    home: Scaffold(
+      body: Column(children: [AppUpdateSettingsCard(), AppUpdateBanner()]),
+    ),
+  ),
 );
 
 class _BlockingUpdatePlatform extends FakePlatformServices {

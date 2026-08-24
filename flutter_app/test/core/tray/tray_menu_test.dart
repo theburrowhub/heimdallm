@@ -105,28 +105,31 @@ void main() {
     );
   });
 
-  test('idle updater exposes a check action and dispatches it', () async {
-    var checkCalls = 0;
-    TrayMenu.instance.init(
-      apiClient: _MockApiClient(),
-      onNavigate: (_) {},
-      onQuit: () {},
-      onCheckForUpdates: () => checkCalls++,
-      onInstallUpdate: () {},
-      currentVersion: '0.8.4 (build 546)',
-    );
+  test(
+    'official signed build exposes a check action and dispatches it',
+    () async {
+      var checkCalls = 0;
+      TrayMenu.instance.init(
+        apiClient: _MockApiClient(),
+        onNavigate: (_) {},
+        onQuit: () {},
+        onCheckForUpdates: () => checkCalls++,
+        onInstallUpdate: () {},
+        currentVersion: '0.8.4 (build 546)',
+      );
 
-    await TrayMenu.instance.setUpdateState(const AppUpdateStatus.idle());
-    final items = _latestMenuItems(trayCalls);
+      await TrayMenu.instance.setUpdateState(const AppUpdateStatus.idle());
+      final items = _latestMenuItems(trayCalls);
 
-    expect(
-      items,
-      contains(containsPair('label', 'Heimdallm 0.8.4 (build 546)')),
-    );
-    expect(items, contains(containsPair('label', 'Check for Updates…')));
-    TrayMenu.instance.onTrayMenuItemClick(MenuItem(key: 'check_updates'));
-    expect(checkCalls, 1);
-  });
+      expect(
+        items,
+        contains(containsPair('label', 'Heimdallm 0.8.4 (build 546)')),
+      );
+      expect(items, contains(containsPair('label', 'Check for Updates…')));
+      TrayMenu.instance.onTrayMenuItemClick(MenuItem(key: 'check_updates'));
+      expect(checkCalls, 1);
+    },
+  );
 
   test('tray keeps the successful up-to-date result visible', () async {
     TrayMenu.instance.init(
@@ -150,34 +153,59 @@ void main() {
     expect(items, contains(containsPair('label', 'Check for Updates…')));
   });
 
-  test('tray explains why an unsigned build cannot update', () async {
+  test(
+    'tray keeps a missing signed appcast error visible and retryable',
+    () async {
+      TrayMenu.instance.init(
+        apiClient: _MockApiClient(),
+        onNavigate: (_) {},
+        onQuit: () {},
+        onCheckForUpdates: () {},
+        onInstallUpdate: () {},
+        currentVersion: '0.8.4',
+      );
+
+      await TrayMenu.instance.setUpdateState(
+        const AppUpdateStatus(
+          phase: AppUpdatePhase.error,
+          message: 'Could not load the signed update feed (HTTP 404).',
+        ),
+      );
+      final items = _latestMenuItems(trayCalls);
+
+      expect(
+        items,
+        contains(
+          containsPair(
+            'label',
+            '⚠  Could not load the signed update feed (HTTP 404).',
+          ),
+        ),
+      );
+      expect(items, contains(containsPair('key', 'check_updates')));
+    },
+  );
+
+  test('ad-hoc build exposes normal update controls in the tray', () async {
+    var checkCalls = 0;
     TrayMenu.instance.init(
       apiClient: _MockApiClient(),
       onNavigate: (_) {},
       onQuit: () {},
+      onCheckForUpdates: () => checkCalls++,
+      onInstallUpdate: () {},
       currentVersion: '0.8.4',
-      updateUnavailableReason:
-          'This app is not signed with Developer ID Application.',
     );
 
     await TrayMenu.instance.setUpdateState(const AppUpdateStatus.idle());
     final items = _latestMenuItems(trayCalls);
 
     expect(items, contains(containsPair('label', 'Heimdallm 0.8.4')));
-    expect(
-      items,
-      contains(
-        allOf(
-          containsPair('key', 'updates_unavailable'),
-          containsPair(
-            'label',
-            'Updates unavailable — This app is not signed with Developer ID Application.',
-          ),
-          containsPair('disabled', true),
-        ),
-      ),
-    );
-    expect(items, isNot(contains(containsPair('key', 'check_updates'))));
+    expect(items, contains(containsPair('key', 'check_updates')));
+    expect(items, isNot(contains(containsPair('key', 'updates_unavailable'))));
+
+    TrayMenu.instance.onTrayMenuItemClick(MenuItem(key: 'check_updates'));
+    expect(checkCalls, 1);
   });
 
   test('busy updater exposes a disabled progress item', () async {

@@ -160,8 +160,8 @@ class DesktopPlatformServices
        _usesDefaultMethodChannel = methodInvoker == null,
        _nativeAppUpdatesRequested =
            enableNativeAppUpdates ??
-           (((isMacOS ?? Platform.isMacOS) || (isLinux ?? Platform.isLinux)) &&
-               kReleaseMode);
+           ((isMacOS ?? Platform.isMacOS) ||
+               ((isLinux ?? Platform.isLinux) && kReleaseMode));
 
   final int _apiPort;
   final String? _tokenPath;
@@ -672,11 +672,10 @@ class DesktopPlatformServices
     }
     if (_isMacOS) {
       if (!_nativeAppUpdatesRequested) {
-        return 'Development builds cannot update themselves. Install the '
-            'official notarized release signed with Developer ID Application.';
+        return 'Automatic updates are disabled for this build.';
       }
-      return 'This app is not signed with Developer ID Application. Install '
-          'the official notarized release to enable automatic updates.';
+      return 'Automatic updates are unavailable because the embedded Sparkle '
+          'signature configuration is incomplete.';
     }
     if (_isLinux) {
       return 'This Linux installation cannot update itself. Install the '
@@ -839,11 +838,11 @@ class DesktopPlatformServices
       );
       if (recoveryType != FileSystemEntityType.notFound) {
         final setupDetail = _appUpdaterSetupError == null
-            ? 'the native updater was rejected by its signing/configuration gate'
+            ? 'the native updater was rejected by its integrity configuration gate'
             : 'native updater setup failed: $_appUpdaterSetupError';
         throw StateError(
           'A protected app-update recovery journal exists at $recoveryPath, '
-          'but $setupDetail. Daemon startup is blocked until the signed '
+          'but $setupDetail. Daemon startup is blocked until the verified '
           'updater can resume recovery.',
         );
       }

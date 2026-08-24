@@ -79,8 +79,8 @@ class CheckForUpdatesButton extends ConsumerWidget {
 /// Global Settings surface for application version and update management.
 ///
 /// This card is intentionally present even when native updates are unavailable:
-/// development/ad-hoc builds must explain the trust gate instead of making the
-/// feature disappear.
+/// unsupported deployments must explain why instead of making the feature
+/// disappear. macOS ad-hoc builds use the normal native-update path.
 class AppUpdateSettingsCard extends ConsumerWidget {
   const AppUpdateSettingsCard({super.key});
 

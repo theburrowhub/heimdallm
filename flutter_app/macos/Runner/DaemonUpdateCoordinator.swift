@@ -1,7 +1,6 @@
 import Cocoa
 import Darwin
 import FlutterMacOS
-import Security
 import Sparkle
 
 private final class RunningProcess: @unchecked Sendable {
@@ -1193,6 +1192,7 @@ final class DaemonUpdateCoordinator: NSObject, SPUUpdaterDelegate {
     case daemonDidNotRecover(String)
     case journal(String)
     case processTimedOut(String)
+    case updateIntegrity(String)
 
     var errorDescription: String? {
       switch self {
@@ -1216,6 +1216,8 @@ final class DaemonUpdateCoordinator: NSObject, SPUUpdaterDelegate {
         return "The update recovery journal is invalid: \(detail)"
       case .processTimedOut(let executable):
         return "The updater command timed out: \(executable)"
+      case .updateIntegrity(let detail):
+        return "Update integrity verification failed: \(detail)"
       }
     }
   }
@@ -1265,16 +1267,16 @@ final class DaemonUpdateCoordinator: NSObject, SPUUpdaterDelegate {
   private var terminationAllowedAfterRecoveryFailure = false
   private var updaterStarted = false
   private var pendingPersistenceError: Error?
-  private let buildTrustAllowsNativeUpdates: Bool
+  private let updateIntegrityAllowsNativeUpdates: Bool
   private var nativeUpdatesEnabled = false
   private var duplicateInstanceTermination = false
   private var lastUpdateCheckFoundNoUpdate = false
 
   override init() {
-    let trustedBuild = Self.defaultNativeUpdatesEnabled()
-    buildTrustAllowsNativeUpdates = trustedBuild
+    let integrityConfigured = Self.defaultNativeUpdatesEnabled()
+    updateIntegrityAllowsNativeUpdates = integrityConfigured
     super.init()
-    nativeUpdatesEnabled = trustedBuild
+    nativeUpdatesEnabled = integrityConfigured
     initializeFilesystemConfiguration(
       dataDirectory: Self.defaultDataDirectory(),
       armRecovery: nativeUpdatesEnabled
@@ -1283,10 +1285,9 @@ final class DaemonUpdateCoordinator: NSObject, SPUUpdaterDelegate {
 
 #if DEBUG
   init(initialDataDirectory: URL) {
-    // RunnerTests use an isolated data directory and must exercise recovery
-    // without requiring a Developer ID signature. This initializer does not
-    // exist in production builds.
-    buildTrustAllowsNativeUpdates = true
+    // RunnerTests use an isolated data directory and exercise recovery without
+    // depending on Bundle.main. This initializer does not exist in production.
+    updateIntegrityAllowsNativeUpdates = true
     super.init()
     nativeUpdatesEnabled = true
     initializeFilesystemConfiguration(dataDirectory: initialDataDirectory, armRecovery: true)
@@ -1307,50 +1308,35 @@ final class DaemonUpdateCoordinator: NSObject, SPUUpdaterDelegate {
   }
 
   private nonisolated static func defaultNativeUpdatesEnabled() -> Bool {
-    var code: SecCode?
-    guard SecCodeCopySelf(SecCSFlags(), &code) == errSecSuccess, let code else { return false }
-    var staticCode: SecStaticCode?
-    guard SecCodeCopyStaticCode(code, SecCSFlags(), &staticCode) == errSecSuccess,
-      let staticCode
-    else { return false }
-    var rawInformation: CFDictionary?
+    hasRequiredUpdateIntegrityConfiguration(Bundle.main.infoDictionary ?? [:])
+  }
+
+  /// Ad-hoc host builds are safe to update when Sparkle's independent Ed25519
+  /// trust chain is fully configured. Fail closed if any part is missing: the
+  /// public key, signed feed, non-expiring signature failures, pre-extraction
+  /// archive verification, or an HTTPS feed URL.
+  nonisolated static func hasRequiredUpdateIntegrityConfiguration(
+    _ information: [String: Any]
+  ) -> Bool {
     guard
-      SecCodeCopySigningInformation(
-        staticCode,
-        SecCSFlags(rawValue: kSecCSSigningInformation),
-        &rawInformation
-      ) == errSecSuccess,
-      let information = rawInformation as? [String: Any],
-      let certificates = information[kSecCodeInfoCertificates as String] as? [SecCertificate],
-      let leaf = certificates.first
+      let encodedKey = information["SUPublicEDKey"] as? String,
+      let publicKey = Data(base64Encoded: encodedKey),
+      publicKey.count == 32,
+      (information["SURequireSignedFeed"] as? NSNumber)?.boolValue == true,
+      (information["SUSignedFeedFailureExpirationInterval"] as? NSNumber)?.doubleValue == 0,
+      (information["SUVerifyUpdateBeforeExtraction"] as? NSNumber)?.boolValue == true,
+      let feedValue = information["SUFeedURL"] as? String,
+      let feedURL = URL(string: feedValue),
+      feedURL.scheme?.lowercased() == "https"
     else { return false }
-    var rawCommonName: CFString?
-    guard SecCertificateCopyCommonName(leaf, &rawCommonName) == errSecSuccess,
-      let commonName = rawCommonName as String?,
-      commonName.hasPrefix("Developer ID Application:")
-    else {
-      // Unsigned, ad-hoc, and Apple Development builds never consume the
-      // production feed, even if someone runs Flutter in release mode locally.
-      return false
-    }
-    let task = SecTaskCreateFromSelf(nil)
-    let allowsJIT = task.flatMap {
-      SecTaskCopyValueForEntitlement(
-        $0,
-        "com.apple.security.cs.allow-jit" as CFString,
-        nil
-      ) as? Bool
-    } ?? false
-    // Debug and Profile use DebugProfile.entitlements (allow-jit=true).
-    // The notarized Release entitlement set deliberately omits it.
-    return !allowsJIT
+    return true
   }
 
   nonisolated static func effectiveNativeUpdatesEnabled(
-    buildTrustAllows: Bool,
+    updateIntegrityAllows: Bool,
     requested: Bool
   ) -> Bool {
-    buildTrustAllows && requested
+    updateIntegrityAllows && requested
   }
 
   nonisolated static func compareInstalledVersion(
@@ -1469,7 +1455,7 @@ final class DaemonUpdateCoordinator: NSObject, SPUUpdaterDelegate {
         apiBaseURL = baseURL
         let updatesRequested = arguments["updatesEnabled"] as? Bool ?? false
         nativeUpdatesEnabled = Self.effectiveNativeUpdatesEnabled(
-          buildTrustAllows: buildTrustAllowsNativeUpdates,
+          updateIntegrityAllows: updateIntegrityAllowsNativeUpdates,
           requested: updatesRequested
         )
         fallbackAPIToken = (arguments["apiToken"] as? String)?.trimmingCharacters(
@@ -1494,9 +1480,10 @@ final class DaemonUpdateCoordinator: NSObject, SPUUpdaterDelegate {
         } else {
           resetAfterCompletedUpdateState()
         }
-        // Dart must expose the updater only when the native signature gate also
-        // accepted this build. A release-mode ad-hoc build therefore remains
-        // fail-closed in both layers.
+        // Dart exposes the updater only when the bundle has Sparkle's complete
+        // Ed25519 trust configuration. Host code signing is deliberately not
+        // an eligibility gate: Sparkle supports ad-hoc builds by authenticating
+        // the signed feed and archive independently.
         result(nativeUpdatesEnabled)
       } catch {
         result(flutterError(error))
@@ -1615,6 +1602,29 @@ final class DaemonUpdateCoordinator: NSObject, SPUUpdaterDelegate {
   }
 
   // MARK: - Sparkle lifecycle
+
+  nonisolated static func appcastSignatureAllowsUpdate(
+    _ status: SPUAppcastSigningValidationStatus
+  ) -> Bool {
+    status == .succeeded
+  }
+
+  func updater(
+    _ updater: SPUUpdater,
+    shouldProceedWithUpdate updateItem: SUAppcastItem,
+    updateCheck: SPUUpdateCheck
+  ) throws {
+    guard Self.appcastSignatureAllowsUpdate(updateItem.signingValidationStatus) else {
+      throw CoordinatorError.updateIntegrity(
+        "the Sparkle appcast did not pass Ed25519 signature validation"
+      )
+    }
+    if let downloadURL = updateItem.fileURL,
+      downloadURL.scheme?.lowercased() != "https"
+    {
+      throw CoordinatorError.updateIntegrity("the update archive URL is not HTTPS")
+    }
+  }
 
   func updater(_ updater: SPUUpdater, didFindValidUpdate item: SUAppcastItem) {
     lastUpdateCheckFoundNoUpdate = false
