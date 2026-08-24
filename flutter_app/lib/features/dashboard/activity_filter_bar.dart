@@ -8,12 +8,14 @@ class ActivityFilterBar extends ConsumerStatefulWidget {
   final Set<String> allRepos;
   final SortMode sort;
   final ValueChanged<SortMode> onSortChanged;
+  final VoidCallback onAddPR;
 
   const ActivityFilterBar({
     super.key,
     required this.allRepos,
     required this.sort,
     required this.onSortChanged,
+    required this.onAddPR,
   });
 
   @override
@@ -53,9 +55,7 @@ class _ActivityFilterBarState extends ConsumerState<ActivityFilterBar> {
       _searchController.text = filters.search;
     }
 
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-      child: Wrap(
+    final filterControls = Wrap(
         spacing: 6,
         runSpacing: 6,
         crossAxisAlignment: WrapCrossAlignment.center,
@@ -185,6 +185,23 @@ class _ActivityFilterBarState extends ConsumerState<ActivityFilterBar> {
             onPressed: () => ref
                 .read(activityFiltersProvider.notifier)
                 .update(filters.copyWith(viewMode: 'grid')),
+          ),
+        ],
+    );
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+      child: Row(
+        key: const Key('activity-filter-toolbar-row'),
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(child: filterControls),
+          const SizedBox(width: 12),
+          FilledButton.icon(
+            key: const Key('dashboard-add-pr-button'),
+            icon: const Icon(Icons.add_link, size: 18),
+            label: const Text('Add PR'),
+            onPressed: widget.onAddPR,
           ),
         ],
       ),

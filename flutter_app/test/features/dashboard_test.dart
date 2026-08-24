@@ -493,6 +493,9 @@ void main() {
   });
 
   testWidgets('DashboardScreen shows PR title', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1800, 700));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
     final pr = PR(
       id: 1,
       githubId: 101,
@@ -524,6 +527,43 @@ void main() {
 
     expect(find.textContaining('Fix critical bug'), findsOneWidget);
     expect(find.textContaining('org/repo'), findsOneWidget);
+
+    final toolbarFinder = find.byKey(
+      const Key('activity-filter-toolbar-row'),
+    );
+    final toolbar = tester.getRect(toolbarFinder);
+    final addButton = tester.getRect(
+      find.byKey(const Key('dashboard-add-pr-button')),
+    );
+    final searchField = tester.getRect(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is TextField && widget.decoration?.hintText == 'Search...',
+      ),
+    );
+
+    expect(addButton.right, closeTo(toolbar.right, 0.1));
+    expect(addButton.left, greaterThan(searchField.right));
+    for (final label in [
+      'Priority',
+      'Newest',
+      'PR',
+      'IT',
+      'DEV',
+      'Open',
+      'Closed',
+      'Org',
+      'Repo',
+    ]) {
+      final control = tester.getRect(
+        find.descendant(of: toolbarFinder, matching: find.text(label)),
+      );
+      expect(
+        (control.center.dy - addButton.center.dy).abs(),
+        lessThan(10),
+        reason: '$label and Add PR must share the toolbar row',
+      );
+    }
   });
 
   testWidgets(
@@ -701,6 +741,7 @@ void main() {
       ),
     );
     await tester.pump();
+    expect(find.byKey(const Key('dashboard-add-pr-button')), findsOneWidget);
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
   });
 

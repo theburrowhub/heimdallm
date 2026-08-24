@@ -396,24 +396,18 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
     final issuesAsync = ref.watch(issuesProvider);
     final sort = ref.watch(reviewsSortProvider);
     final filters = ref.watch(activityFiltersProvider);
-    final addPRControl = Padding(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-      child: Align(
-        alignment: Alignment.centerLeft,
-        child: FilledButton.icon(
-          key: const Key('dashboard-add-pr-button'),
-          icon: const Icon(Icons.add_link, size: 18),
-          label: const Text('Add PR'),
-          onPressed: () => showAddPRDialog(context),
-        ),
-      ),
+    final emptyToolbar = ActivityFilterBar(
+      allRepos: const {},
+      sort: sort,
+      onSortChanged: (mode) => ref.read(reviewsSortProvider.notifier).set(mode),
+      onAddPR: () => showAddPRDialog(context),
     );
 
     // Combine loading states
     if (prsAsync.isLoading && issuesAsync.isLoading) {
       return Column(
         children: [
-          addPRControl,
+          emptyToolbar,
           const Expanded(child: Center(child: CircularProgressIndicator())),
         ],
       );
@@ -421,7 +415,7 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
     if (prsAsync.hasError && issuesAsync.hasError) {
       return Column(
         children: [
-          addPRControl,
+          emptyToolbar,
           Expanded(child: _errorView(context, prsAsync.error!)),
         ],
       );
@@ -454,12 +448,12 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
 
     // Build filter bar + count header (shared between list and grid)
     final header = [
-      addPRControl,
       ActivityFilterBar(
         allRepos: allRepos,
         sort: sort,
         onSortChanged: (mode) =>
             ref.read(reviewsSortProvider.notifier).set(mode),
+        onAddPR: () => showAddPRDialog(context),
       ),
       if (filters.hasFilters)
         Padding(
