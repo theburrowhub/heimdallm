@@ -59,6 +59,47 @@ void main() {
       await expectLater(client.triggerReview(1), completes);
     });
 
+    test(
+      'cancelReview hits the scoped POST and surfaces daemon errors',
+      () async {
+        final platform = FakePlatformServices(
+          apiBaseUrl: 'http://127.0.0.1:7842',
+          token: 'abc-123',
+        );
+        var active = true;
+        final mockClient = MockClient((request) async {
+          if (request.url.path != '/prs/73/cancel' ||
+              request.method != 'POST') {
+            return http.Response('not found', 404);
+          }
+          if (active) {
+            return http.Response(
+              jsonEncode({'status': 'cancellation requested'}),
+              202,
+            );
+          }
+          return http.Response(
+            jsonEncode({'error': 'no active review for this PR'}),
+            409,
+          );
+        });
+        final client = ApiClient(httpClient: mockClient, platform: platform);
+
+        await expectLater(client.cancelReview(73), completes);
+        active = false;
+        await expectLater(
+          client.cancelReview(73),
+          throwsA(
+            isA<ApiException>().having(
+              (error) => error.message,
+              'message',
+              'no active review for this PR',
+            ),
+          ),
+        );
+      },
+    );
+
     test('addPRByUrl posts the URL and returns the stored PR id', () async {
       final platform = FakePlatformServices(
         apiBaseUrl: 'http://127.0.0.1:7842',

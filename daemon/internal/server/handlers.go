@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/hmac"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -68,6 +69,7 @@ type Server struct {
 	reloadFn        func() error
 	shutdownFn      func()
 	triggerReviewFn func(prID int64) error
+	cancelReviewFn  func(prID int64) (bool, error)
 	// addPRFn fetches a PR from GitHub by (repo, number), upserts it into the
 	// store, and returns the stored row. Wired by main (needs the GitHub
 	// client + store). Nil disables POST /prs/add.
@@ -302,6 +304,13 @@ func (srv *Server) SetShutdownFn(fn func()) { srv.shutdownFn = fn }
 
 // SetTriggerReviewFn wires the review-trigger callback called by POST /prs/{id}/review.
 func (srv *Server) SetTriggerReviewFn(fn func(prID int64) error) { srv.triggerReviewFn = fn }
+
+// SetCancelReviewFn wires exact-process cancellation for
+// POST /prs/{id}/cancel. The bool reports whether that PR had an active
+// execution; implementations must never fall back to cancelling other work.
+func (srv *Server) SetCancelReviewFn(fn func(prID int64) (bool, error)) {
+	srv.cancelReviewFn = fn
+}
 
 // SetAddPRFn wires the manual-add callback called by POST /prs/add: it fetches
 // a PR from GitHub by (repo, number), upserts it into the store, and returns
@@ -583,6 +592,7 @@ func (srv *Server) buildRouter() chi.Router {
 	r.Post("/prs/add", srv.handleAddPR)
 	r.Get("/prs/{id}", srv.handleGetPR)
 	r.Post("/prs/{id}/review", srv.handleTriggerReview)
+	r.Post("/prs/{id}/cancel", srv.handleCancelReview)
 	r.Post("/prs/{id}/dismiss", srv.handleDismissPR)
 	r.Post("/prs/{id}/undismiss", srv.handleUndismissPR)
 	r.Get("/issues", srv.handleListIssues)
@@ -803,20 +813,15 @@ func (srv *Server) handleListPRs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	type prWithReview struct {
-		*store.PR
-		LatestReview *store.Review `json:"latest_review,omitempty"`
-	}
 	authLogin := srv.authenticatedLoginForPRListing()
 	skippedSelf := 0
-	result := make([]prWithReview, 0, len(prs))
+	result := make([]prResponse, 0, len(prs))
 	for _, pr := range prs {
 		if authLogin != "" && githubLoginsEqual(pr.Author, authLogin) {
 			skippedSelf++
 			continue
 		}
-		rev, _ := srv.store.LatestReviewForPR(pr.ID)
-		result = append(result, prWithReview{PR: pr, LatestReview: rev})
+		result = append(result, srv.buildPRResponse(pr))
 	}
 	if skippedSelf > 0 {
 		slog.Info("handleListPRs: self-authored PRs hidden from review listing", "count", skippedSelf, "user", authLogin)
@@ -846,6 +851,31 @@ func normalizeGitHubLoginForCompare(login string) string {
 	return strings.TrimSpace(strings.TrimLeft(login, "@"))
 }
 
+type prResponse struct {
+	*store.PR
+	LatestReview *store.Review                `json:"latest_review,omitempty"`
+	ReviewStatus *store.ReviewExecutionStatus `json:"review_status,omitempty"`
+}
+
+func (srv *Server) buildPRResponse(pr *store.PR) prResponse {
+	rev, revErr := srv.store.LatestReviewForPR(pr.ID)
+	if revErr != nil && !errors.Is(revErr, sql.ErrNoRows) {
+		slog.Warn("PR response: latest review lookup failed", "pr_id", pr.ID, "err", revErr)
+	}
+	status, statusErr := srv.store.LatestReviewExecutionStatusForPR(pr.ID)
+	if statusErr != nil {
+		slog.Warn("PR response: latest review execution lookup failed", "pr_id", pr.ID, "err", statusErr)
+		status = nil
+	}
+	// A later durable review resolved an older failure, including one stored
+	// against a previous HEAD whose retry row is intentionally retained until
+	// pruning. Do not resurrect that stale failure in the UI.
+	if status != nil && !status.Active && rev != nil && !status.FailedAt.After(rev.CreatedAt) {
+		status = nil
+	}
+	return prResponse{PR: pr, LatestReview: rev, ReviewStatus: status}
+}
+
 func (srv *Server) handleGetPR(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
@@ -858,7 +888,9 @@ func (srv *Server) handleGetPR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	reviews, _ := srv.store.ListReviewsForPR(id)
-	writeJSON(w, http.StatusOK, map[string]any{"pr": pr, "reviews": reviews})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"pr": srv.buildPRResponse(pr), "reviews": reviews,
+	})
 }
 
 func (srv *Server) handleDismissPR(w http.ResponseWriter, r *http.Request) {
@@ -913,6 +945,37 @@ func (srv *Server) handleTriggerReview(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "review queued"})
+}
+
+func (srv *Server) handleCancelReview(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid id"})
+		return
+	}
+	if srv.cancelReviewFn == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "review cancellation not configured",
+		})
+		return
+	}
+	active, err := srv.cancelReviewFn(id)
+	if err != nil {
+		slog.Error("cancel review failed", "pr_id", id, "err", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "could not cancel review",
+		})
+		return
+	}
+	if !active {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "no active review for this PR",
+		})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{
+		"status": "cancellation requested",
+	})
 }
 
 // handleAddPR accepts a GitHub pull-request URL, adds its repository to the

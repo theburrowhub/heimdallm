@@ -1,5 +1,6 @@
 import 'package:json_annotation/json_annotation.dart';
 import 'review.dart';
+import 'review_status.dart';
 part 'pr.g.dart';
 
 @JsonSerializable()
@@ -17,6 +18,8 @@ class PR {
   final DateTime updatedAt;
   @JsonKey(name: 'latest_review', includeIfNull: false)
   final Review? latestReview;
+  @JsonKey(name: 'review_status', includeIfNull: false)
+  final ReviewExecutionStatus? reviewStatus;
   @JsonKey(name: 'dismissed', defaultValue: false)
   final bool dismissed;
 
@@ -31,6 +34,7 @@ class PR {
     required this.state,
     required this.updatedAt,
     this.latestReview,
+    this.reviewStatus,
     this.dismissed = false,
   });
 

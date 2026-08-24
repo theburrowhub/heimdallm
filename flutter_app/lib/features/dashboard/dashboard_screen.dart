@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/models/pr.dart';
+import '../../core/models/review_status.dart';
 import '../../core/models/tracked_issue.dart';
 import '../../shared/widgets/keep_alive_tab.dart';
 import '../../shared/widgets/attention_badge.dart';
@@ -597,6 +598,7 @@ class _PRTile extends ConsumerStatefulWidget {
 
 class _PRTileState extends ConsumerState<_PRTile> {
   String get _reviewKey => '${widget.pr.repo}:${widget.pr.number}';
+  bool _cancelling = false;
 
   Future<void> _triggerReview() async {
     // Optimistically mark as reviewing before the SSE event arrives.
@@ -638,11 +640,51 @@ class _PRTileState extends ConsumerState<_PRTile> {
     }
   }
 
+  Future<void> _cancelReview() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Cancel this review?'),
+        content: Text(
+          'The active agent process for ${widget.pr.repo} #${widget.pr.number} '
+          'will be terminated. Other reviews will continue running.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Keep running'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Cancel review'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => _cancelling = true);
+    try {
+      await ref.read(apiClientProvider).cancelReview(widget.pr.id);
+      if (mounted) showToast(context, 'Cancellation requested');
+    } catch (e) {
+      if (mounted) {
+        setState(() => _cancelling = false);
+        showToast(context, 'Error: $e', isError: true);
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final pr = widget.pr;
     final reviewed = pr.latestReview != null;
-    final isReviewing = ref.watch(reviewingPRsProvider).containsKey(_reviewKey);
+    final status = pr.reviewStatus;
+    final failure = status != null && !status.active && status.error.isNotEmpty
+        ? status
+        : null;
+    final isReviewing =
+        (status?.active ?? false) ||
+        ref.watch(reviewingPRsProvider).containsKey(_reviewKey);
 
     return Opacity(
       opacity: pr.state == 'open' ? 1.0 : 0.6,
@@ -658,11 +700,13 @@ class _PRTileState extends ConsumerState<_PRTile> {
                 // Severity bar on the left
                 Container(
                   width: 4,
-                  height: 48,
+                  height: failure == null ? 48 : 62,
                   margin: const EdgeInsets.only(right: 12),
                   decoration: BoxDecoration(
                     color: isReviewing
                         ? Theme.of(context).colorScheme.primary
+                        : failure != null
+                        ? Theme.of(context).colorScheme.error
                         : reviewed
                         ? _severityColor(pr.latestReview!.severity)
                         : Colors.grey.shade600,
@@ -695,6 +739,21 @@ class _PRTileState extends ConsumerState<_PRTile> {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),
+                      if (failure != null && !isReviewing) ...[
+                        const SizedBox(height: 3),
+                        Tooltip(
+                          message: failure.error,
+                          child: Text(
+                            reviewFailureSummary(failure),
+                            style: Theme.of(context).textTheme.bodySmall
+                                ?.copyWith(
+                                  color: Theme.of(context).colorScheme.error,
+                                ),
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
                     ],
                   ),
                 ),
@@ -713,13 +772,40 @@ class _PRTileState extends ConsumerState<_PRTile> {
                           color: Theme.of(context).colorScheme.primary,
                         ),
                       )
+                    else if (failure != null)
+                      Tooltip(
+                        message: failure.error,
+                        child: _chip(
+                          failure.isCancelled ? 'CANCELLED' : 'FAILED',
+                          Theme.of(context).colorScheme.error,
+                        ),
+                      )
                     else if (reviewed)
                       SeverityBadge(severity: pr.latestReview!.severity)
                     else
                       _chip('PENDING', Colors.grey.shade700),
                     const SizedBox(width: 8),
-                    // Review button (hidden while reviewing)
-                    if (!isReviewing)
+                    if (isReviewing)
+                      SizedBox(
+                        height: 28,
+                        child: OutlinedButton.icon(
+                          icon: _cancelling
+                              ? const SizedBox(
+                                  width: 12,
+                                  height: 12,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(
+                                  Icons.stop_circle_outlined,
+                                  size: 15,
+                                ),
+                          label: Text(_cancelling ? 'Cancelling…' : 'Cancel'),
+                          onPressed: _cancelling ? null : _cancelReview,
+                        ),
+                      )
+                    else
                       SizedBox(
                         height: 28,
                         child: ElevatedButton(
@@ -728,7 +814,7 @@ class _PRTileState extends ConsumerState<_PRTile> {
                             textStyle: const TextStyle(fontSize: 12),
                           ),
                           onPressed: _triggerReview,
-                          child: const Text('Review'),
+                          child: Text(failure == null ? 'Review' : 'Retry'),
                         ),
                       ),
                     // Dismiss

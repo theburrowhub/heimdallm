@@ -17,12 +17,14 @@ type retryExec struct {
 	calls     int
 	err       error
 	onExecute func()
+	options   []executor.ExecOptions
 }
 
 func (f *retryExec) Detect(_, _ string) (string, error) { return "codex", nil }
 
-func (f *retryExec) Execute(_, _ string, _ executor.ExecOptions) (*executor.ReviewResult, error) {
+func (f *retryExec) Execute(_, _ string, opts executor.ExecOptions) (*executor.ReviewResult, error) {
 	f.calls++
+	f.options = append(f.options, opts)
 	if f.onExecute != nil {
 		f.onExecute()
 	}
@@ -100,6 +102,20 @@ func TestRun_FailedExecutionsBackOffWithoutConsumingReviewQuota(t *testing.T) {
 	if fexec.calls != 1 {
 		t.Fatalf("Execute calls after first run = %d, want 1", fexec.calls)
 	}
+	storedPR, err := s.GetPRByGithubID(pr.ID)
+	if err != nil {
+		t.Fatalf("get pr after failure: %v", err)
+	}
+	if got := fexec.options[0].ExecutionID; got != pipeline.ReviewExecutionID(storedPR.ID) {
+		t.Fatalf("execution ID = %q, want %q", got, pipeline.ReviewExecutionID(storedPR.ID))
+	}
+	status, err := s.LatestReviewExecutionStatusForPR(storedPR.ID)
+	if err != nil {
+		t.Fatalf("get failure status: %v", err)
+	}
+	if status == nil || status.Active || status.Error != "Review process was terminated before completion." {
+		t.Fatalf("durable failure status = %#v", status)
+	}
 
 	rev, runErr := p.Run(pr, pipeline.RunOptions{Primary: "codex", Fallback: "claude"})
 	if runErr != nil || rev != nil {
@@ -134,7 +150,7 @@ func TestRun_FailedExecutionsBackOffWithoutConsumingReviewQuota(t *testing.T) {
 		t.Fatalf("automatic retry after failed Force called Execute; calls = %d", fexec.calls)
 	}
 
-	storedPR, err := s.GetPRByGithubID(pr.ID)
+	storedPR, err = s.GetPRByGithubID(pr.ID)
 	if err != nil {
 		t.Fatalf("get pr: %v", err)
 	}
@@ -156,6 +172,87 @@ func TestRun_FailedExecutionsBackOffWithoutConsumingReviewQuota(t *testing.T) {
 	}
 	if !blocked || attempts != 2 {
 		t.Fatalf("retry state = blocked %v, attempts %d; want two failed executions", blocked, attempts)
+	}
+}
+
+func TestRun_ManualCancellationIsVisibleWithoutCountingAsReview(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	const sha = "cancelled-head"
+	fexec := &retryExec{err: executor.ErrExecutionCancelled}
+	pr := retryPR(sha)
+	p := pipeline.New(s, &failedReviewGH{sha: sha}, fexec, &fakeNotify{})
+	p.SetCircuitBreakerLimits(&store.CircuitBreakerLimits{PerPR24h: 1, PerRepoHr: 1})
+
+	if _, err := p.Run(pr, pipeline.RunOptions{Primary: "codex", Force: true}); !errors.Is(err, executor.ErrExecutionCancelled) {
+		t.Fatalf("cancelled run error = %v, want ErrExecutionCancelled", err)
+	}
+	storedPR, err := s.GetPRByGithubID(pr.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := s.LatestReviewExecutionStatusForPR(storedPR.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status == nil || status.Active || status.Error != "Review cancelled manually." {
+		t.Fatalf("cancelled status = %#v", status)
+	}
+	if latest, latestErr := s.LatestReviewForPR(storedPR.ID); latest != nil || latestErr == nil {
+		t.Fatalf("cancelled execution created a review: %#v, error %v", latest, latestErr)
+	}
+	tripped, reason, err := s.CheckCircuitBreaker(
+		storedPR.ID, pr.Repo, sha,
+		store.CircuitBreakerLimits{PerPR24h: 1, PerRepoHr: 1},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tripped {
+		t.Fatalf("manual cancellation tripped completed-review breaker: %s", reason)
+	}
+	blocked, _, attempts, err := s.CheckReviewRetryBackoff(storedPR.ID, sha, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !blocked || attempts != 1 {
+		t.Fatalf("cancel cooldown = blocked %v, attempts %d; want preserved", blocked, attempts)
+	}
+}
+
+func TestUserFacingReviewErrorIsBoundedAndClassified(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"manual cancellation", executor.ErrExecutionCancelled, "Review cancelled manually."},
+		{"configured deadline", executor.ErrExecutionTimedOut, "Review timed out before completion."},
+		{"legacy deadline text", errors.New("context deadline exceeded"), "Review timed out before completion."},
+		{"terminated", errors.New("executor: run codex: signal: terminated"), "Review process was terminated before completion."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := pipeline.UserFacingReviewError(tt.err); got != tt.want {
+				t.Fatalf("UserFacingReviewError() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+
+	secret := strings.Repeat("FULL PROMPT AND DIFF ", 5000)
+	got := pipeline.UserFacingReviewError(errors.New("executor: run codex: signal: exit 1 (output: " + secret + ")"))
+	if strings.Contains(got, "FULL PROMPT") || len([]rune(got)) > 280 {
+		t.Fatalf("sanitized error leaked or exceeded bound: length=%d value=%q", len([]rune(got)), got)
+	}
+	got = pipeline.UserFacingReviewError(errors.New(
+		"executor: run codex: exit status 1 (output: prompt text mentioning timeout handling)",
+	))
+	if got != "executor: run codex: exit status 1" {
+		t.Fatalf("timeout word in captured output changed classification: %q", got)
 	}
 }
 

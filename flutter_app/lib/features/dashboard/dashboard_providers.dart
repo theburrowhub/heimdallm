@@ -283,6 +283,17 @@ void _handleSseEvent(Ref ref, SseEvent event) {
                 .update((s) => Map.of(s)..remove(k));
           }
         }
+        final error = data['error'] as String? ?? 'Review failed.';
+        final manuallyCancelled = data['reason'] == 'manual_cancelled';
+        sendPRNotification(
+          platform: ref.read(platformServicesProvider),
+          title: manuallyCancelled ? 'Review Cancelled' : 'Review Failed',
+          body: key != null ? '$repo #$prNumber — $error' : error,
+          prId: prId,
+        );
+        // The durable retry/failure state is attached to GET /prs. Refresh it
+        // immediately instead of returning the tile to a silent PENDING badge.
+        ref.read(prListRefreshProvider.notifier).update((s) => s + 1);
 
       case 'review_skipped':
         // Manual trigger on a PR with unchanged HEAD SHA (re-request,
@@ -464,10 +475,11 @@ void _reconcileReviewingPRs(Ref ref, List<PR> prs) {
 
 /// Pure helper: given the current reviewing map and the latest PR list,
 /// returns the map with stale entries removed. An entry is stale when the
-/// PR's current `latestReview.id` differs from the baseline stored at
-/// review start (a new review has landed). PRs not present in `prs` keep
-/// their entry — a missing PR may just mean the list is filtered, and
-/// dropping the key would flicker the spinner off prematurely.
+/// daemon reports a terminal failed/cancelled execution or the PR's current
+/// `latestReview.id` differs from the baseline stored at review start (a new
+/// review has landed). PRs not present in `prs` keep their entry — a missing
+/// PR may just mean the list is filtered, and dropping the key would flicker
+/// the spinner off prematurely.
 @visibleForTesting
 Map<String, int> reconcileReviewing(Map<String, int> current, List<PR> prs) {
   if (current.isEmpty) return current;
@@ -479,6 +491,10 @@ Map<String, int> reconcileReviewing(Map<String, int> current, List<PR> prs) {
     final pr = byKey[entry.key];
     if (pr == null) {
       next[entry.key] = entry.value;
+      continue;
+    }
+    final execution = pr.reviewStatus;
+    if (execution != null && !execution.active) {
       continue;
     }
     final currentId = pr.latestReview?.id ?? 0;

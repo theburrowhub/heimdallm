@@ -113,7 +113,14 @@ func TestReviewRetryBackoff_FailureRefreshesDelayOrigin(t *testing.T) {
 	if err := s.AdvanceReviewRetryBackoff(prID, "sha", startedAt); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.MarkReviewRetryFailure(prID, "sha", failedAt); err != nil {
+	active, err := s.LatestReviewExecutionStatusForPR(prID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active == nil || !active.Active || active.Attempts != 1 || active.Error != "" {
+		t.Fatalf("active status = %#v", active)
+	}
+	if err := s.MarkReviewRetryFailure(prID, "sha", failedAt, "provider unavailable"); err != nil {
 		t.Fatal(err)
 	}
 	blocked, retryAt, attempts, err := s.CheckReviewRetryBackoff(prID, "sha", failedAt)
@@ -122,6 +129,21 @@ func TestReviewRetryBackoff_FailureRefreshesDelayOrigin(t *testing.T) {
 	}
 	if !blocked || attempts != 1 || !retryAt.Equal(failedAt.Add(5*time.Minute)) {
 		t.Fatalf("refreshed cooldown = blocked %v, retryAt %v, attempts %d", blocked, retryAt, attempts)
+	}
+	failed, err := s.LatestReviewExecutionStatusForPR(prID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed == nil || failed.Active || failed.Error != "provider unavailable" ||
+		!failed.FailedAt.Equal(failedAt) || !failed.RetryAt.Equal(retryAt) {
+		t.Fatalf("failed status = %#v", failed)
+	}
+	if err := s.ClearReviewRetryBackoff(prID, "sha"); err != nil {
+		t.Fatal(err)
+	}
+	cleared, err := s.LatestReviewExecutionStatusForPR(prID)
+	if err != nil || cleared != nil {
+		t.Fatalf("status after success clear = %#v, error %v", cleared, err)
 	}
 }
 
@@ -136,7 +158,7 @@ func TestReviewRetryBackoff_EmptySHAIsNoop(t *testing.T) {
 	if err := s.AdvanceReviewRetryBackoff(1, "", now); err != nil {
 		t.Fatalf("empty-SHA advance: %v", err)
 	}
-	if err := s.MarkReviewRetryFailure(1, "", now); err != nil {
+	if err := s.MarkReviewRetryFailure(1, "", now, "cancelled"); err != nil {
 		t.Fatalf("empty-SHA failure mark: %v", err)
 	}
 	if err := s.ClearReviewRetryBackoff(1, ""); err != nil {
@@ -171,7 +193,7 @@ func TestReviewRetryBackoff_ReportsStoredTimestampAndDatabaseErrors(t *testing.T
 		if err := s.AdvanceReviewRetryBackoff(1, "sha", now); err == nil {
 			t.Fatal("advance on closed database returned nil error")
 		}
-		if err := s.MarkReviewRetryFailure(1, "sha", now); err == nil {
+		if err := s.MarkReviewRetryFailure(1, "sha", now, "failed"); err == nil {
 			t.Fatal("failure mark on closed database returned nil error")
 		}
 		if err := s.ClearReviewRetryBackoff(1, "sha"); err == nil {
@@ -209,6 +231,13 @@ func TestReviewRetryBackoff_PersistsAcrossReopen(t *testing.T) {
 	}
 	if !blocked || attempts != 1 || !retryAt.Equal(now.Add(5*time.Minute)) {
 		t.Fatalf("reopened cooldown = blocked %v, retryAt %v, attempts %d", blocked, retryAt, attempts)
+	}
+	status, err := s.LatestReviewExecutionStatusForPR(prID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status == nil || status.Active || status.Error != "Review was interrupted when Heimdallm stopped or restarted." {
+		t.Fatalf("crash-stale status after reopen = %#v", status)
 	}
 }
 

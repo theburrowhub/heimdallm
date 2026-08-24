@@ -966,7 +966,12 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 				})
 				return nil
 			}
-			broker.Publish(sse.Event{Type: sse.EventReviewError, Data: sseData(map[string]any{"pr_number": pr.Number, "repo": pr.Repo, "error": err.Error()})})
+			broker.Publish(sse.Event{
+				Type: sse.EventReviewError,
+				Data: sseData(reviewErrorEventData(
+					s, 0, pr.Repo, pr.Number, pr.Title, err,
+				)),
+			})
 			return nil
 		}
 		if rev == nil {
@@ -2526,6 +2531,9 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	// triggerGuard and RunOptions.Force). One instance shared across all
 	// trigger invocations via the closure below.
 	manualReviewGuard := newTriggerGuard()
+	srv.SetCancelReviewFn(func(prID int64) (bool, error) {
+		return exec.TerminateExecution(pipeline.ReviewExecutionID(prID))
+	})
 	srv.SetTriggerReviewFn(func(prID int64) error {
 		ctx, releaseUpdateWork, err := acquireUpdateWork(runtimeCtx, updateWorkGate, workgate.KindReview)
 		if err != nil {
@@ -2682,7 +2690,12 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 				})
 				return err
 			}
-			broker.Publish(sse.Event{Type: sse.EventReviewError, Data: sseData(map[string]any{"pr_id": prID, "error": err.Error()})})
+			broker.Publish(sse.Event{
+				Type: sse.EventReviewError,
+				Data: sseData(reviewErrorEventData(
+					s, prID, pr.Repo, pr.Number, pr.Title, err,
+				)),
+			})
 			return err
 		}
 		// rev == nil → pipeline already emitted EventReviewSkipped with
@@ -5636,6 +5649,45 @@ func buildRefinementRunOptions(
 		RequireWorkDirForRefinement: true,
 	}
 	return opts, releaseRepoContext, nil
+}
+
+func reviewErrorEventData(
+	s *store.Store,
+	prID int64,
+	repo string,
+	prNumber int,
+	prTitle string,
+	err error,
+) map[string]any {
+	data := map[string]any{
+		"repo":      repo,
+		"pr_number": prNumber,
+		"pr_title":  prTitle,
+		"error":     pipeline.UserFacingReviewError(err),
+	}
+	if errors.Is(err, executor.ErrExecutionCancelled) {
+		data["reason"] = "manual_cancelled"
+	}
+	if prID == 0 && repo != "" && prNumber > 0 {
+		if pr, lookupErr := s.GetPRByRepoNumber(repo, prNumber); lookupErr == nil {
+			prID = pr.ID
+		}
+	}
+	if prID == 0 {
+		return data
+	}
+	data["pr_id"] = prID
+	status, statusErr := s.LatestReviewExecutionStatusForPR(prID)
+	if statusErr != nil {
+		slog.Warn("review error event: failure status lookup failed", "pr_id", prID, "err", statusErr)
+		return data
+	}
+	if status != nil {
+		data["attempts"] = status.Attempts
+		data["failed_at"] = status.FailedAt
+		data["retry_at"] = status.RetryAt
+	}
+	return data
 }
 
 // sseData serializes a map to a compact JSON string for SSE event Data fields.

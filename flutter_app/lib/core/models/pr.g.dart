@@ -19,6 +19,11 @@ PR _$PRFromJson(Map<String, dynamic> json) => PR(
   latestReview: json['latest_review'] == null
       ? null
       : Review.fromJson(json['latest_review'] as Map<String, dynamic>),
+  reviewStatus: json['review_status'] == null
+      ? null
+      : ReviewExecutionStatus.fromJson(
+          json['review_status'] as Map<String, dynamic>,
+        ),
   dismissed: json['dismissed'] as bool? ?? false,
 );
 
@@ -33,5 +38,6 @@ Map<String, dynamic> _$PRToJson(PR instance) => <String, dynamic>{
   'state': instance.state,
   'updated_at': instance.updatedAt.toIso8601String(),
   'latest_review': ?instance.latestReview,
+  'review_status': ?instance.reviewStatus,
   'dismissed': instance.dismissed,
 };

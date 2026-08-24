@@ -22,6 +22,51 @@ import (
 // when the reason is not needed.
 var ErrCircuitBreakerTripped = errors.New("pipeline: circuit breaker tripped")
 
+const maxUserFacingReviewErrorRunes = 280
+
+// ReviewExecutionID is the stable correlation key shared by the pipeline and
+// the manual-cancellation endpoint. It uses the local PR row ID because that is
+// what the HTTP API addresses and is never ambiguous across repositories.
+func ReviewExecutionID(prID int64) string { return fmt.Sprintf("pr-review:%d", prID) }
+
+// UserFacingReviewError removes captured CLI output (which can contain the
+// entire prompt/diff and grow past a megabyte) and maps common failures to a
+// short, safe status. Raw errors remain in daemon logs for diagnosis; this is
+// the only form allowed into SSE, SQLite status fields, and the Flutter UI.
+func UserFacingReviewError(err error) string {
+	if err == nil {
+		return "Review failed before producing a result."
+	}
+	if errors.Is(err, executor.ErrExecutionCancelled) {
+		return "Review cancelled manually."
+	}
+	if errors.Is(err, executor.ErrExecutionTimedOut) {
+		return "Review timed out before completion."
+	}
+	raw := strings.TrimSpace(err.Error())
+	if i := strings.Index(raw, " (output:"); i >= 0 {
+		raw = raw[:i]
+	}
+	lower := strings.ToLower(raw)
+	switch {
+	case strings.Contains(lower, "database is locked") || strings.Contains(lower, "sqlite_busy"):
+		return "Review could not start because the local database was busy."
+	case strings.Contains(lower, "deadline exceeded") || strings.Contains(lower, "timed out") || strings.Contains(lower, "timeout"):
+		return "Review timed out before completion."
+	case strings.Contains(lower, "signal: terminated"):
+		return "Review process was terminated before completion."
+	}
+	raw = strings.Join(strings.Fields(raw), " ")
+	if raw == "" {
+		return "Review failed before producing a result."
+	}
+	runes := []rune(raw)
+	if len(runes) > maxUserFacingReviewErrorRunes {
+		raw = string(runes[:maxUserFacingReviewErrorRunes-1]) + "…"
+	}
+	return raw
+}
+
 // Failed and in-flight review executions are bounded separately from completed
 // reviews. Twenty failures per repository in a rolling hour preserves the
 // previous aggregate cost ceiling without consuming review quota or emitting a
@@ -1014,6 +1059,7 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	// the delay origin to the return time. Clearing happens only after
 	// InsertReview succeeds.
 	retryBackoffArmed := false
+	reviewFailureReason := "Review ended before a result was stored."
 	if err := p.store.AdvanceReviewRetryBackoff(prID, pr.Head.SHA, now); err != nil {
 		slog.Error("pipeline: could not advance review retry cooldown — failed runs may retry too quickly",
 			"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA, "err", err)
@@ -1023,7 +1069,9 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 			if !retryBackoffArmed {
 				return
 			}
-			if err := p.store.MarkReviewRetryFailure(prID, pr.Head.SHA, time.Now().UTC()); err != nil {
+			if err := p.store.MarkReviewRetryFailure(
+				prID, pr.Head.SHA, time.Now().UTC(), reviewFailureReason,
+			); err != nil {
 				slog.Warn("pipeline: could not refresh review retry cooldown after failure",
 					"repo", pr.Repo, "pr", pr.Number, "head_sha", pr.Head.SHA, "err", err)
 			}
@@ -1053,9 +1101,12 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 			execOpts = migratedOpts
 		}
 	}
+	execOpts.ExecutionID = ReviewExecutionID(prID)
 	result, err := p.executor.Execute(cli, prompt, execOpts)
 	if err != nil {
-		return nil, fmt.Errorf("pipeline: execute %s: %w", cli, err)
+		runErr := fmt.Errorf("pipeline: execute %s: %w", cli, err)
+		reviewFailureReason = UserFacingReviewError(runErr)
+		return nil, runErr
 	}
 
 	// 5b. Reconcile severity: ensure top-level severity >= max(issues[].severity).

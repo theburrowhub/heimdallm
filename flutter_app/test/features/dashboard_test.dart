@@ -10,6 +10,7 @@ import 'package:heimdallm/core/api/api_client.dart';
 import 'package:heimdallm/core/daemon/daemon_startup.dart';
 import 'package:heimdallm/core/models/pr.dart';
 import 'package:heimdallm/core/models/review.dart';
+import 'package:heimdallm/core/models/review_status.dart';
 import 'package:heimdallm/core/platform/platform_services_provider.dart';
 import 'package:heimdallm/features/config/config_providers.dart';
 import 'package:heimdallm/features/dashboard/activity_filters.dart';
@@ -41,6 +42,7 @@ PR _pr({
   String repo = 'org/repo',
   int number = 42,
   Review? latestReview,
+  ReviewExecutionStatus? reviewStatus,
 }) => PR(
   id: id,
   githubId: 1000 + id,
@@ -52,6 +54,7 @@ PR _pr({
   state: 'open',
   updatedAt: DateTime.utc(2026, 1, 1),
   latestReview: latestReview,
+  reviewStatus: reviewStatus,
 );
 
 Review _review(int id) => Review(
@@ -456,6 +459,23 @@ void main() {
       expect(out, equals({'org/other:9': 5}));
     });
 
+    test('drops optimistic entry when daemon reports a terminal failure', () {
+      final pr = _pr(
+        repo: 'org/repo',
+        number: 1,
+        reviewStatus: ReviewExecutionStatus(
+          headSha: 'abc',
+          attempts: 1,
+          failedAt: DateTime(2026, 8, 24, 10, 30),
+          retryAt: DateTime(2026, 8, 24, 10, 35),
+          error: 'Review timed out before completion.',
+          active: false,
+        ),
+      );
+      final out = reconcileReviewing({'org/repo:1': 0}, [pr]);
+      expect(out, isEmpty);
+    });
+
     test('reconciles a mixed set (drops stale, keeps in-progress)', () {
       final stale = _pr(repo: 'org/a', number: 1, latestReview: _review(100));
       final fresh = _pr(
@@ -572,6 +592,94 @@ void main() {
       );
     },
   );
+
+  testWidgets('failed review is visible with timestamp and retry action', (
+    tester,
+  ) async {
+    final pr = _pr(
+      reviewStatus: ReviewExecutionStatus(
+        headSha: 'abc',
+        attempts: 2,
+        failedAt: DateTime(2026, 8, 24, 10, 35),
+        retryAt: DateTime(2099, 8, 24, 10, 45),
+        error: 'Review timed out before completion.',
+        active: false,
+      ),
+    );
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          prsProvider.overrideWith((ref) => Future.value([pr])),
+          sseStreamProvider.overrideWith((ref) => const Stream.empty()),
+        ],
+        child: MaterialApp.router(
+          routerConfig: GoRouter(
+            routes: [
+              GoRoute(path: '/', builder: (_, _) => const DashboardScreen()),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('FAILED'), findsOneWidget);
+    expect(find.text('Retry'), findsOneWidget);
+    expect(find.text('PENDING'), findsNothing);
+    expect(
+      find.textContaining('Review timed out before completion.'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('failed 2026-08-24 10:35'), findsOneWidget);
+  });
+
+  testWidgets('active daemon status offers scoped cancellation from PR list', (
+    tester,
+  ) async {
+    final api = MockApiClient();
+    when(() => api.cancelReview(1)).thenAnswer((_) async {});
+    final pr = _pr(
+      reviewStatus: ReviewExecutionStatus(
+        headSha: 'abc',
+        attempts: 1,
+        failedAt: DateTime(2026, 8, 24, 10, 30),
+        retryAt: DateTime(2026, 8, 24, 10, 35),
+        error: '',
+        active: true,
+      ),
+    );
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          apiClientProvider.overrideWithValue(api),
+          prsProvider.overrideWith((ref) => Future.value([pr])),
+          sseStreamProvider.overrideWith((ref) => const Stream.empty()),
+        ],
+        child: MaterialApp.router(
+          routerConfig: GoRouter(
+            routes: [
+              GoRoute(path: '/', builder: (_, _) => const DashboardScreen()),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.text('Cancel'), findsOneWidget);
+    expect(find.text('PENDING'), findsNothing);
+    await tester.tap(find.text('Cancel'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('Cancel this review?'), findsOneWidget);
+    await tester.tap(find.text('Cancel review'));
+    await tester.pump();
+
+    verify(() => api.cancelReview(1)).called(1);
+  });
 
   testWidgets('DashboardScreen shows loading indicator while fetching', (
     tester,

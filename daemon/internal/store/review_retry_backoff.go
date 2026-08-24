@@ -11,6 +11,19 @@ const (
 	reviewRetryMaxDelay  = 6 * time.Hour
 )
 
+// ReviewExecutionStatus is the durable state of the latest review execution
+// that is active or failed before producing a review row. It is derived from
+// the retry ledger so a newly connected UI sees active work and can cancel it
+// without having observed review_started over SSE.
+type ReviewExecutionStatus struct {
+	HeadSHA  string    `json:"head_sha"`
+	Attempts int       `json:"attempts"`
+	FailedAt time.Time `json:"failed_at"`
+	RetryAt  time.Time `json:"retry_at"`
+	Error    string    `json:"error"`
+	Active   bool      `json:"active"`
+}
+
 // CheckReviewRetryBackoff reports whether an automatic review of this exact PR
 // HEAD should be deferred after earlier executions failed to produce a durable
 // review. retryAt and attempts are populated whenever state exists, including
@@ -62,11 +75,12 @@ func (s *Store) AdvanceReviewRetryBackoff(prID int64, headSHA string, startedAt 
 	}
 	_, err := s.db.Exec(`
 		INSERT INTO review_retry_backoff (
-			pr_id, head_sha, consecutive_attempts, last_attempt_at
-		) VALUES (?, ?, 1, ?)
+			pr_id, head_sha, consecutive_attempts, last_attempt_at, active
+		) VALUES (?, ?, 1, ?, 1)
 		ON CONFLICT(pr_id, head_sha) DO UPDATE SET
 			consecutive_attempts = review_retry_backoff.consecutive_attempts + 1,
-			last_attempt_at = excluded.last_attempt_at`,
+			last_attempt_at = excluded.last_attempt_at,
+			active = 1`,
 		prID, headSHA, startedAt.UTC().Format(sqliteTimeFormat),
 	)
 	if err != nil {
@@ -79,20 +93,49 @@ func (s *Store) AdvanceReviewRetryBackoff(prID int64, headSHA string, startedAt 
 // failure was observed. AdvanceReviewRetryBackoff writes at execution start so
 // a daemon death still leaves protection; a normally returned failure should
 // wait for the full delay after the work actually stops.
-func (s *Store) MarkReviewRetryFailure(prID int64, headSHA string, failedAt time.Time) error {
+func (s *Store) MarkReviewRetryFailure(prID int64, headSHA string, failedAt time.Time, failure string) error {
 	if headSHA == "" {
 		return nil
 	}
 	_, err := s.db.Exec(`
 		UPDATE review_retry_backoff
-		SET last_attempt_at = ?
+		SET last_attempt_at = ?, last_error = ?, active = 0
 		WHERE pr_id = ? AND head_sha = ?`,
-		failedAt.UTC().Format(sqliteTimeFormat), prID, headSHA,
+		failedAt.UTC().Format(sqliteTimeFormat), failure, prID, headSHA,
 	)
 	if err != nil {
 		return fmt.Errorf("store: mark review retry failure: %w", err)
 	}
 	return nil
+}
+
+// LatestReviewExecutionStatusForPR returns the most recent active or completed
+// failed execution for a PR. Crash-only rows are inactive with no error after
+// Store startup and are omitted.
+func (s *Store) LatestReviewExecutionStatusForPR(prID int64) (*ReviewExecutionStatus, error) {
+	var (
+		status        ReviewExecutionStatus
+		lastAttemptAt string
+	)
+	err := s.db.QueryRow(`
+		SELECT head_sha, consecutive_attempts, last_attempt_at, last_error, active
+		FROM review_retry_backoff
+		WHERE pr_id = ? AND (active <> 0 OR last_error <> '')
+		ORDER BY last_attempt_at DESC
+		LIMIT 1`, prID,
+	).Scan(&status.HeadSHA, &status.Attempts, &lastAttemptAt, &status.Error, &status.Active)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("store: latest review execution status: %w", err)
+	}
+	status.FailedAt, err = time.Parse(sqliteTimeFormat, lastAttemptAt)
+	if err != nil {
+		return nil, fmt.Errorf("store: parse latest review execution time %q: %w", lastAttemptAt, err)
+	}
+	status.RetryAt = status.FailedAt.Add(reviewRetryDelay(status.Attempts))
+	return &status, nil
 }
 
 // ClearReviewRetryBackoff removes the failure state after a review has been

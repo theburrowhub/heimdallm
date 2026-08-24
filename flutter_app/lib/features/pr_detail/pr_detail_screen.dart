@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../core/models/pr.dart';
 import '../../core/models/review.dart';
+import '../../core/models/review_status.dart';
 import '../../shared/widgets/severity_badge.dart';
 import '../../shared/widgets/toast.dart';
 import '../dashboard/dashboard_providers.dart';
@@ -21,6 +22,7 @@ class PRDetailScreen extends ConsumerStatefulWidget {
 
 class _PRDetailScreenState extends ConsumerState<PRDetailScreen> {
   bool _reviewing = false;
+  bool _cancelling = false;
   Timer? _reviewTimeout;
 
   @override
@@ -40,7 +42,12 @@ class _PRDetailScreenState extends ConsumerState<PRDetailScreen> {
 
   void _stopReviewing() {
     _reviewTimeout?.cancel();
-    if (mounted) setState(() => _reviewing = false);
+    if (mounted) {
+      setState(() {
+        _reviewing = false;
+        _cancelling = false;
+      });
+    }
   }
 
   Future<void> _dismiss(BuildContext context) async {
@@ -76,6 +83,42 @@ class _PRDetailScreenState extends ConsumerState<PRDetailScreen> {
     }
   }
 
+  Future<void> _cancel() async {
+    final detail = ref.read(prDetailProvider(widget.prId)).value;
+    final pr = detail?['pr'] as PR?;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Cancel this review?'),
+        content: Text(
+          'The active agent process${pr == null ? '' : ' for ${pr.repo} #${pr.number}'} '
+          'will be terminated. Other reviews will continue running.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Keep running'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Cancel review'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => _cancelling = true);
+    try {
+      await ref.read(apiClientProvider).cancelReview(widget.prId);
+      if (mounted) showToast(context, 'Cancellation requested');
+    } catch (e) {
+      if (mounted) {
+        setState(() => _cancelling = false);
+        showToast(context, 'Error: $e', isError: true);
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final detailAsync = ref.watch(prDetailProvider(widget.prId));
@@ -97,15 +140,24 @@ class _PRDetailScreenState extends ConsumerState<PRDetailScreen> {
                 if (mounted) setState(() => _reviewing = true);
               }
             case 'review_completed':
-              if (prId == widget.prId) {
+              if (prId == widget.prId || prNumber == currentPrNumber) {
                 _stopReviewing();
                 ref.invalidate(prDetailProvider(widget.prId));
               }
             case 'review_error':
-              if (prId == widget.prId) {
+              if (prId == widget.prId || prNumber == currentPrNumber) {
                 _stopReviewing();
                 final error = data['error'] as String? ?? 'Unknown error';
-                if (mounted) showToast(context, 'Review failed: $error', isError: true);
+                if (mounted) {
+                  showToast(
+                    context,
+                    data['reason'] == 'manual_cancelled'
+                        ? error
+                        : 'Review failed: $error',
+                    isError: data['reason'] != 'manual_cancelled',
+                  );
+                }
+                ref.invalidate(prDetailProvider(widget.prId));
               }
           }
         } catch (_) {}
@@ -116,6 +168,10 @@ class _PRDetailScreenState extends ConsumerState<PRDetailScreen> {
     final reviews = detailData?['reviews'] as List<Review>? ?? [];
     final hasReviews = reviews.isNotEmpty;
     final pr = detailData?['pr'] as PR?;
+    final status = pr?.reviewStatus;
+    final failure = status != null && !status.active && status.error.isNotEmpty
+        ? status
+        : null;
     final repoMissing = pr != null && pr.repo.isEmpty;
 
     // Derive review key from loaded PR for shared in-progress state
@@ -123,7 +179,8 @@ class _PRDetailScreenState extends ConsumerState<PRDetailScreen> {
     final isReviewingShared = reviewKey != null &&
         ref.watch(reviewingPRsProvider).containsKey(reviewKey);
     // Combine local trigger state with shared provider
-    final reviewing = _reviewing || isReviewingShared;
+    final reviewing =
+        _reviewing || isReviewingShared || (status?.active ?? false);
 
     return Scaffold(
       appBar: AppBar(
@@ -133,12 +190,28 @@ class _PRDetailScreenState extends ConsumerState<PRDetailScreen> {
             onPressed: () => context.canPop() ? context.pop() : context.go('/')),
         actions: [
           if (reviewing)
-            const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 16),
-              child: SizedBox(
-                width: 20,
-                height: 20,
-                child: CircularProgressIndicator(strokeWidth: 2),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: Row(
+                children: [
+                  const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                  const SizedBox(width: 12),
+                  OutlinedButton.icon(
+                    icon: _cancelling
+                        ? const SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.stop_circle_outlined, size: 16),
+                    label: Text(_cancelling ? 'Cancelling…' : 'Cancel'),
+                    onPressed: _cancelling ? null : _cancel,
+                  ),
+                ],
               ),
             )
           else ...[
@@ -148,7 +221,13 @@ class _PRDetailScreenState extends ConsumerState<PRDetailScreen> {
                   : '',
               child: ElevatedButton.icon(
                 icon: const Icon(Icons.refresh, size: 16),
-                label: Text(hasReviews ? 'Re-review' : 'Review'),
+                label: Text(
+                  failure != null
+                      ? 'Retry'
+                      : hasReviews
+                      ? 'Re-review'
+                      : 'Review',
+                ),
                 onPressed: repoMissing ? null : _trigger,
               ),
             ),
@@ -169,6 +248,31 @@ class _PRDetailScreenState extends ConsumerState<PRDetailScreen> {
             LinearProgressIndicator(
               minHeight: 3,
               backgroundColor: Theme.of(context).colorScheme.surfaceContainerHighest,
+            ),
+          if (!reviewing && failure != null)
+            Container(
+              width: double.infinity,
+              color: Theme.of(context).colorScheme.errorContainer,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              child: Row(
+                children: [
+                  Icon(
+                    failure.isCancelled
+                        ? Icons.cancel_outlined
+                        : Icons.error_outline,
+                    color: Theme.of(context).colorScheme.onErrorContainer,
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      reviewFailureSummary(failure),
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.onErrorContainer,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
           Expanded(child: detailAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),

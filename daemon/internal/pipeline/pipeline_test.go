@@ -354,7 +354,10 @@ func TestPipeline_RunFallbackDropsPrimaryProviderOptions(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("pipeline run: %v", err)
 	}
-	want := executor.ExecOptions{WorkDir: "/tmp/repo", Timeout: 11 * time.Minute}
+	want := executor.ExecOptions{
+		WorkDir: "/tmp/repo", Timeout: 11 * time.Minute,
+		ExecutionID: pipeline.ReviewExecutionID(1),
+	}
 	if captured != want {
 		t.Fatalf("fallback options:\n got: %+v\nwant: %+v", captured, want)
 	}
@@ -403,12 +406,13 @@ func TestPipeline_RunMigratesStoredProfileCLIFlagsBeforeExecution(t *testing.T) 
 	}
 
 	want := executor.ExecOptions{
-		Model:      "profile-model",
-		MaxTurns:   7,
-		Effort:     "high",
-		ExtraFlags: "--verbose",
-		WorkDir:    "/tmp/repo",
-		Timeout:    3 * time.Minute,
+		Model:       "profile-model",
+		MaxTurns:    7,
+		Effort:      "high",
+		ExtraFlags:  "--verbose",
+		WorkDir:     "/tmp/repo",
+		Timeout:     3 * time.Minute,
+		ExecutionID: pipeline.ReviewExecutionID(1),
 	}
 	if captured != want {
 		t.Fatalf("stored profile options:\n got: %+v\nwant: %+v", captured, want)

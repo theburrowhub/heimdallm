@@ -27,6 +27,16 @@ import (
 const DefaultExecutionTimeout = 20 * time.Minute
 const cliHelpTimeout = 2 * time.Second
 
+// ErrExecutionCancelled marks an execution stopped by an explicit operator
+// request. It is distinct from a timeout or daemon shutdown so callers can
+// persist and display the correct terminal state.
+var ErrExecutionCancelled = errors.New("executor: execution cancelled manually")
+
+// ErrExecutionTimedOut marks an execution whose own configured deadline
+// expired. exec.CommandContext normally surfaces that as only "signal:
+// terminated", which is not enough for a durable user-facing diagnosis.
+var ErrExecutionTimedOut = errors.New("executor: execution timed out")
+
 // ReviewResult is the parsed JSON response from the AI CLI.
 type ReviewResult struct {
 	Summary  string  `json:"summary"`
@@ -72,6 +82,9 @@ type ExecOptions struct {
 	// Timeout overrides the default execution timeout for the CLI process.
 	// Zero = use DefaultExecutionTimeout.
 	Timeout time.Duration
+	// ExecutionID is an internal correlation key used for exact, operator-
+	// initiated cancellation. It is not forwarded to the CLI.
+	ExecutionID string
 }
 
 func effectiveExecutionTimeout(override time.Duration) time.Duration {
@@ -109,8 +122,15 @@ type Executor struct {
 	// groupsMu guards inFlightGroups. Each handle owns a sentinel-led process
 	// group whose PGID remains reserved through TERM/KILL cleanup, so the
 	// shutdown path can sweep in-flight agents without a recycled-PGID race.
-	groupsMu       sync.Mutex
-	inFlightGroups map[int]*procgroup.Process
+	groupsMu           sync.Mutex
+	inFlightGroups     map[int]*trackedExecution
+	inFlightExecutions map[string]*trackedExecution
+}
+
+type trackedExecution struct {
+	process           *procgroup.Process
+	executionID       string
+	manuallyCancelled bool
 }
 
 // New creates a new Executor.
@@ -119,20 +139,61 @@ func New() *Executor {
 }
 
 // trackGroup registers a running execution's owned process group.
-func (e *Executor) trackGroup(process *procgroup.Process) {
+func (e *Executor) trackGroup(process *procgroup.Process, executionID string) {
 	e.groupsMu.Lock()
 	defer e.groupsMu.Unlock()
 	if e.inFlightGroups == nil {
-		e.inFlightGroups = make(map[int]*procgroup.Process)
+		e.inFlightGroups = make(map[int]*trackedExecution)
 	}
-	e.inFlightGroups[process.ID()] = process
+	tracked := &trackedExecution{process: process, executionID: executionID}
+	e.inFlightGroups[process.ID()] = tracked
+	if executionID != "" {
+		if e.inFlightExecutions == nil {
+			e.inFlightExecutions = make(map[string]*trackedExecution)
+		}
+		e.inFlightExecutions[executionID] = tracked
+	}
 }
 
-// untrackGroup forgets an execution's process group once Wait has returned.
-func (e *Executor) untrackGroup(pgid int) {
+// untrackGroup forgets an execution's process group once Wait has returned and
+// reports whether an exact manual cancellation targeted it.
+func (e *Executor) untrackGroup(pgid int) bool {
 	e.groupsMu.Lock()
 	defer e.groupsMu.Unlock()
+	tracked := e.inFlightGroups[pgid]
 	delete(e.inFlightGroups, pgid)
+	if tracked == nil {
+		return false
+	}
+	if tracked.executionID != "" && e.inFlightExecutions[tracked.executionID] == tracked {
+		delete(e.inFlightExecutions, tracked.executionID)
+	}
+	return tracked.manuallyCancelled
+}
+
+// TerminateExecution sends SIGTERM (and the procgroup-owned delayed SIGKILL)
+// to exactly one correlated execution. The executor lock is held across the
+// signal so Wait cannot untrack the process between lookup and marking it as a
+// manual cancellation. It never falls back to TerminateAll.
+func (e *Executor) TerminateExecution(executionID string) (bool, error) {
+	executionID = strings.TrimSpace(executionID)
+	if executionID == "" {
+		return false, nil
+	}
+	e.groupsMu.Lock()
+	defer e.groupsMu.Unlock()
+	tracked := e.inFlightExecutions[executionID]
+	if tracked == nil {
+		return false, nil
+	}
+	if err := tracked.process.Terminate(); err != nil {
+		if errors.Is(err, os.ErrProcessDone) {
+			return false, nil
+		}
+		return false, err
+	}
+	tracked.manuallyCancelled = true
+	return true, nil
 }
 
 // TerminateAll ends every execution this Executor still has in flight, SIGTERM
@@ -145,8 +206,8 @@ func (e *Executor) untrackGroup(pgid int) {
 func (e *Executor) TerminateAll() {
 	e.groupsMu.Lock()
 	groups := make([]*procgroup.Process, 0, len(e.inFlightGroups))
-	for _, process := range e.inFlightGroups {
-		groups = append(groups, process)
+	for _, tracked := range e.inFlightGroups {
+		groups = append(groups, tracked.process)
 	}
 	e.groupsMu.Unlock()
 
@@ -1362,11 +1423,25 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 	// cleanup, including the clean-exit/ErrWaitDelay case.
 	var pgid int
 	process, runErr := procgroup.Start(cmd)
+	manuallyCancelled := false
 	if runErr == nil {
 		pgid = process.ID()
-		e.trackGroup(process)
+		e.trackGroup(process, opts.ExecutionID)
 		runErr = process.Wait()
-		e.untrackGroup(pgid)
+		manuallyCancelled = e.untrackGroup(pgid)
+	}
+	if manuallyCancelled {
+		return nil, fmt.Errorf("executor: run %s: %w", cli, ErrExecutionCancelled)
+	}
+	if runErr != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		errDetail := strings.TrimSpace(stderr.String())
+		if errDetail == "" {
+			errDetail = strings.TrimSpace(stdout.String())
+		}
+		return nil, fmt.Errorf(
+			"executor: run %s: %w (cause: %v) (output: %s)",
+			cli, ErrExecutionTimedOut, runErr, errDetail,
+		)
 	}
 
 	// WaitDelay also fires when the command itself exited cleanly but a
