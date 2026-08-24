@@ -55,6 +55,21 @@ func TestResolveRefinementTimeoutFallsBackToAgentThenGlobal(t *testing.T) {
 	}
 }
 
+func TestResolveExecutionTimeoutDefaultsToTwentyMinutes(t *testing.T) {
+	if got := resolveExecutionTimeout("", ""); got != 20*time.Minute {
+		t.Fatalf("resolveExecutionTimeout(empty, empty) = %v, want 20m", got)
+	}
+}
+
+func TestResolveExecutionTimeoutPrecedence(t *testing.T) {
+	if got := resolveExecutionTimeout("20m", "30m"); got != 30*time.Minute {
+		t.Fatalf("resolveExecutionTimeout(20m, 30m) = %v, want 30m", got)
+	}
+	if got := resolveExecutionTimeout("30m", ""); got != 30*time.Minute {
+		t.Fatalf("resolveExecutionTimeout(30m, empty) = %v, want 30m", got)
+	}
+}
+
 func TestConfigReloadRequiresPollerRestartSkipsDynamicOnlyChanges(t *testing.T) {
 	oldCfg := reloadRestartBaseConfig()
 	newCfg := cloneReloadRestartConfig(oldCfg)

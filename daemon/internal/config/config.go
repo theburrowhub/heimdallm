@@ -401,6 +401,11 @@ type CLIAgentConfig struct {
 // drift out of sync. See #481.
 const DefaultTier2RepoConcurrency = 5
 
+// DefaultAIExecutionTimeout is the user-facing representation of the
+// executor's default wall-clock budget. Keep this value aligned with
+// executor.DefaultExecutionTimeout; TestApplyDefaults locks the two together.
+const DefaultAIExecutionTimeout = "20m"
+
 type AIConfig struct {
 	Primary          string                    `toml:"primary"`
 	Fallback         string                    `toml:"fallback"`
@@ -1053,6 +1058,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.AI.ReviewMode == "" {
 		c.AI.ReviewMode = "single"
+	}
+	if c.AI.ExecutionTimeout == "" {
+		c.AI.ExecutionTimeout = DefaultAIExecutionTimeout
 	}
 	if c.AI.RefinementTimeout == "" {
 		c.AI.RefinementTimeout = "30m"

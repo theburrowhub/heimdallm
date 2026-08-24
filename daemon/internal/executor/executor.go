@@ -19,7 +19,12 @@ import (
 	"github.com/heimdallm/daemon/internal/procgroup"
 )
 
-const executionTimeout = 5 * time.Minute
+// DefaultExecutionTimeout is the wall-clock budget for an AI CLI invocation
+// when the operator has not configured a global or per-agent override.
+// Repository-aware Codex reviews routinely need more than five minutes at high
+// reasoning effort, so the default must leave enough room for a normal review
+// to complete instead of terminating healthy work mid-analysis.
+const DefaultExecutionTimeout = 20 * time.Minute
 const cliHelpTimeout = 2 * time.Second
 
 // ReviewResult is the parsed JSON response from the AI CLI.
@@ -65,8 +70,15 @@ type ExecOptions struct {
 	NoSessionPersistence bool // --no-session-persistence
 
 	// Timeout overrides the default execution timeout for the CLI process.
-	// Zero = use default (5 minutes).
+	// Zero = use DefaultExecutionTimeout.
 	Timeout time.Duration
+}
+
+func effectiveExecutionTimeout(override time.Duration) time.Duration {
+	if override > 0 {
+		return override
+	}
+	return DefaultExecutionTimeout
 }
 
 // OptionsForSelectedCLI removes provider-specific options when Detect falls
@@ -1274,10 +1286,7 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 		return nil, err
 	}
 
-	timeout := executionTimeout
-	if opts.Timeout > 0 {
-		timeout = opts.Timeout
-	}
+	timeout := effectiveExecutionTimeout(opts.Timeout)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 

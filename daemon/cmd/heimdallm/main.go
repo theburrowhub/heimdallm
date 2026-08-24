@@ -3221,8 +3221,8 @@ func normalizeReloadStringSlice(v []string) []string {
 }
 
 // resolveExecutionTimeout returns the effective execution timeout for the CLI
-// process. Per-agent timeout wins over the global timeout; zero means "use
-// executor default (5m)".
+// process. Per-agent timeout wins over the global timeout; absent or invalid
+// values fall back to the executor's normal 20-minute budget.
 func resolveExecutionTimeout(globalTimeout, agentTimeout string) time.Duration {
 	// Per-agent wins
 	if agentTimeout != "" {
@@ -3236,8 +3236,7 @@ func resolveExecutionTimeout(globalTimeout, agentTimeout string) time.Duration {
 			return d
 		}
 	}
-	// Zero = executor uses its default (5m)
-	return 0
+	return executor.DefaultExecutionTimeout
 }
 
 // resolveRefinementTimeout lets the stage-specific cap win over generic
