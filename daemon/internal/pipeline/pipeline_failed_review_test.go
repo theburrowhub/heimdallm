@@ -234,6 +234,7 @@ func TestUserFacingReviewErrorIsBoundedAndClassified(t *testing.T) {
 		{"manual cancellation", executor.ErrExecutionCancelled, "Review cancelled manually."},
 		{"configured deadline", executor.ErrExecutionTimedOut, "Review timed out before completion."},
 		{"legacy deadline text", errors.New("context deadline exceeded"), "Review timed out before completion."},
+		{"network timeout in cause", errors.New("pipeline: fetch PR failed (cause: connection timed out)"), "pipeline: fetch PR failed"},
 		{"terminated", errors.New("executor: run codex: signal: terminated"), "Review process was terminated before completion."},
 		{"database busy", errors.New("pipeline: store review: database is locked"), "Review could not start because the local database was busy."},
 		{"empty", errors.New(" \n\t "), "Review failed before producing a result."},
@@ -269,6 +270,12 @@ func TestUserFacingReviewErrorIsBoundedAndClassified(t *testing.T) {
 	}
 	if want := "pipeline: execute codex: executor: parse JSON result: invalid character 'x'"; got != want {
 		t.Fatalf("sanitized parse error = %q, want %q", got, want)
+	}
+	got = pipeline.UserFacingReviewError(errors.New(
+		"pipeline: fetch PR failed (cause: connection timed out with token " + secret + ")",
+	))
+	if got != "pipeline: fetch PR failed" {
+		t.Fatalf("sanitized cause changed classification or leaked details: %q", got)
 	}
 }
 

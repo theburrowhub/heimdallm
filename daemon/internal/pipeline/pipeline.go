@@ -44,11 +44,13 @@ func UserFacingReviewError(err error) string {
 		return "Review timed out before completion."
 	}
 	raw := strings.TrimSpace(err.Error())
-	// ExecuteRaw appends captured process output with an "output" marker, while
-	// Execute's JSON parser appends the unparseable model response with a "raw"
-	// marker. Both payloads can contain the full prompt or diff and must be
-	// removed before classification as well as before persistence.
-	for _, marker := range []string{" (output:", " (raw:"} {
+	// ExecuteRaw appends the process failure as a "cause" and captured process
+	// output with an "output" marker, while Execute's JSON parser appends the
+	// unparseable model response with a "raw" marker. These details can contain
+	// the full prompt or diff, and cause text must not influence the best-effort
+	// classification (for example, a network cause that says "timed out"). True
+	// execution deadlines were already identified above through errors.Is.
+	for _, marker := range []string{" (cause:", " (output:", " (raw:"} {
 		if i := strings.Index(raw, marker); i >= 0 {
 			raw = raw[:i]
 		}
