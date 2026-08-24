@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,6 +23,7 @@ if [ "$1" = "--help" ]; then
   printf 'Usage: claude\n'
   exit 0
 fi
+printf 'partial cancellation diagnostic\n' >&2
 echo $$ > "$PWD/review.pid"
 sleep 600
 `
@@ -71,6 +73,9 @@ sleep 600
 			if !errors.Is(err, executor.ErrExecutionCancelled) {
 				t.Fatalf("%s matching execution error = %v, want ErrExecutionCancelled", label, err)
 			}
+			if !strings.Contains(err.Error(), "(output: partial cancellation diagnostic)") {
+				t.Fatalf("%s matching execution error lost diagnostic output: %v", label, err)
+			}
 		case <-time.After(15 * time.Second):
 			t.Fatalf("%s matching execution did not return after cancellation", label)
 		}
@@ -97,6 +102,9 @@ sleep 600
 	case err := <-unrelatedDone:
 		if !errors.Is(err, executor.ErrExecutionCancelled) {
 			t.Fatalf("unrelated execution cleanup error = %v, want ErrExecutionCancelled", err)
+		}
+		if !strings.Contains(err.Error(), "(output: partial cancellation diagnostic)") {
+			t.Fatalf("unrelated execution cleanup error lost diagnostic output: %v", err)
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("unrelated execution did not return after cleanup cancellation")

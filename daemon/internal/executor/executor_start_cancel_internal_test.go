@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"os/exec"
@@ -14,6 +15,38 @@ import (
 
 	"github.com/heimdallm/daemon/internal/procgroup"
 )
+
+func TestCancelledExecutionOutputPrefersStderrAndBoundsItsTail(t *testing.T) {
+	stdout := bytes.NewBufferString("stdout must not replace stderr")
+	stderr := bytes.NewBufferString("discarded prefix\n" +
+		strings.Repeat("x", maxCancelledExecutionOutputRunes) + "diagnostic tail")
+
+	got := cancelledExecutionOutput(stdout, stderr)
+	if strings.Contains(got, "stdout must not replace stderr") {
+		t.Fatalf("cancelled output used stdout despite stderr: %q", got)
+	}
+	if strings.Contains(got, "discarded prefix") {
+		t.Fatalf("cancelled output retained the truncated prefix: %q", got)
+	}
+	if !strings.HasPrefix(got, "... (earlier output truncated)\n") {
+		t.Fatalf("cancelled output omitted truncation marker: %q", got)
+	}
+	if !strings.HasSuffix(got, "diagnostic tail") {
+		t.Fatalf("cancelled output lost the diagnostic tail: %q", got)
+	}
+	if tail := strings.TrimPrefix(got, "... (earlier output truncated)\n"); len([]rune(tail)) != maxCancelledExecutionOutputRunes {
+		t.Fatalf("cancelled output tail length = %d runes, want %d", len([]rune(tail)), maxCancelledExecutionOutputRunes)
+	}
+}
+
+func TestCancelledExecutionOutputFallsBackToStdout(t *testing.T) {
+	stdout := bytes.NewBufferString("partial stdout diagnostic\n")
+	stderr := &bytes.Buffer{}
+
+	if got := cancelledExecutionOutput(stdout, stderr); got != "partial stdout diagnostic" {
+		t.Fatalf("cancelled output = %q, want stdout fallback", got)
+	}
+}
 
 func TestExecuteRawHonorsCancellationWhileProcessIsStarting(t *testing.T) {
 	defer ResetLoginPathCacheForTest()()

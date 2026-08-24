@@ -27,6 +27,12 @@ import (
 const DefaultExecutionTimeout = 20 * time.Minute
 const cliHelpTimeout = 2 * time.Second
 
+// maxCancelledExecutionOutputRunes bounds the CLI detail retained in a manual
+// cancellation error. Cancellation is intentional, but the output written
+// immediately before termination is often the only useful operator diagnostic.
+// Keep the tail because CLIs conventionally emit their final error last.
+const maxCancelledExecutionOutputRunes = 4096
+
 // ErrExecutionCancelled marks an execution stopped by an explicit operator
 // request. It is distinct from a timeout or daemon shutdown so callers can
 // persist and display the correct terminal state.
@@ -1509,7 +1515,11 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 		manuallyCancelled = e.untrackExecution(tracked)
 	}
 	if manuallyCancelled {
-		return nil, fmt.Errorf("executor: run %s: %w", cli, ErrExecutionCancelled)
+		errDetail := cancelledExecutionOutput(&stdout, &stderr)
+		if errDetail == "" {
+			return nil, fmt.Errorf("executor: run %s: %w", cli, ErrExecutionCancelled)
+		}
+		return nil, fmt.Errorf("executor: run %s: %w (output: %s)", cli, ErrExecutionCancelled, errDetail)
 	}
 
 	// WaitDelay also fires when the command itself exited cleanly but a
@@ -1542,6 +1552,21 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 	}
 
 	return stdout.Bytes(), nil
+}
+
+func cancelledExecutionOutput(stdout, stderr *bytes.Buffer) string {
+	detail := strings.TrimSpace(stderr.String())
+	if detail == "" {
+		detail = strings.TrimSpace(stdout.String())
+	}
+	if detail == "" {
+		return ""
+	}
+	runes := []rune(detail)
+	if len(runes) <= maxCancelledExecutionOutputRunes {
+		return detail
+	}
+	return "... (earlier output truncated)\n" + string(runes[len(runes)-maxCancelledExecutionOutputRunes:])
 }
 
 // killGroup is retained for the low-level translation tests in this package.
