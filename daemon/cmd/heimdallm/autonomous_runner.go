@@ -67,10 +67,20 @@ func issueToCandidate(iss *gh.Issue, storeID int64) autonomous.Candidate {
 // prReviewExecutor). The untrusted issue body is fenced via the shared
 // SanitiseUntrustedFreeText sanitiser before prompting.
 type coordinationCommentGen struct {
-	runner *executor.Executor
+	runner coordinationCommentExecutor
 	cfg    **config.Config
 	cfgMu  *sync.Mutex
 }
+
+type coordinationCommentExecutor interface {
+	Detect(primary, fallback string) (string, error)
+	ExecuteRaw(cli, prompt string, opts executor.ExecOptions) ([]byte, error)
+}
+
+// Coordination comments are deliberately tiny (2-3 sentences), so they keep
+// the executor's former five-minute budget instead of inheriting the longer
+// default required by repository-aware PR reviews.
+const coordinationCommentTimeout = 5 * time.Minute
 
 func (g *coordinationCommentGen) GenerateCoordinationComment(_ context.Context, c autonomous.Candidate) (string, error) {
 	primary, fallback := g.cliInputs()
@@ -79,7 +89,9 @@ func (g *coordinationCommentGen) GenerateCoordinationComment(_ context.Context, 
 		return "", err
 	}
 	prompt := buildCoordinationPrompt(c)
-	raw, err := g.runner.ExecuteRaw(cli, prompt, executor.ExecOptions{})
+	raw, err := g.runner.ExecuteRaw(cli, prompt, executor.ExecOptions{
+		Timeout: coordinationCommentTimeout,
+	})
 	if err != nil {
 		return "", err
 	}

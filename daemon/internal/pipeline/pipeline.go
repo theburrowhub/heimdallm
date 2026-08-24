@@ -44,8 +44,14 @@ func UserFacingReviewError(err error) string {
 		return "Review timed out before completion."
 	}
 	raw := strings.TrimSpace(err.Error())
-	if i := strings.Index(raw, " (output:"); i >= 0 {
-		raw = raw[:i]
+	// ExecuteRaw appends captured process output with an "output" marker, while
+	// Execute's JSON parser appends the unparseable model response with a "raw"
+	// marker. Both payloads can contain the full prompt or diff and must be
+	// removed before classification as well as before persistence.
+	for _, marker := range []string{" (output:", " (raw:"} {
+		if i := strings.Index(raw, marker); i >= 0 {
+			raw = raw[:i]
+		}
 	}
 	lower := strings.ToLower(raw)
 	switch {
@@ -684,7 +690,7 @@ type RunOptions struct {
 //     PR. Callers MUST nil-check the returned review before dereferencing it.
 //     Skip-event publication is the caller's responsibility; the pipeline
 //     only logs on this path so missed caller-side filtering is diagnosable.
-func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, error) {
+func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review, returnedErr error) {
 	if p.workGate != nil {
 		if !p.workGate.Accepts(opts.WorkPermit) {
 			permit, err := p.workGate.Acquire(workgate.KindReview)
@@ -1069,6 +1075,13 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 			if !retryBackoffArmed {
 				return
 			}
+			// Preserve the concrete failure from any path after the retry ledger
+			// is armed (execution, result encoding, local persistence, or future
+			// additions). The fallback remains useful only when no error can be
+			// returned, such as a daemon death mid-review.
+			if returnedErr != nil {
+				reviewFailureReason = UserFacingReviewError(returnedErr)
+			}
 			if err := p.store.MarkReviewRetryFailure(
 				prID, pr.Head.SHA, time.Now().UTC(), reviewFailureReason,
 			); err != nil {
@@ -1105,7 +1118,6 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (*store.Review, 
 	result, err := p.executor.Execute(cli, prompt, execOpts)
 	if err != nil {
 		runErr := fmt.Errorf("pipeline: execute %s: %w", cli, err)
-		reviewFailureReason = UserFacingReviewError(runErr)
 		return nil, runErr
 	}
 

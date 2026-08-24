@@ -31,8 +31,8 @@ func (s *Store) ClaimInFlightReview(prID int64, headSHA string) (bool, error) {
 }
 
 // ReviewInFlight reports whether (prID, headSHA) is currently claimed. The PR
-// ID must use the same namespace as ClaimInFlightReview; the daemon passes the
-// GitHub PR ID for poll-driven reviews.
+// ID must use the same namespace as ClaimInFlightReview; every daemon review
+// path passes the GitHub PR ID rather than the local SQLite row ID.
 func (s *Store) ReviewInFlight(prID int64, headSHA string) (bool, error) {
 	if headSHA == "" {
 		return false, nil

@@ -10,12 +10,13 @@ import (
 	"github.com/heimdallm/daemon/internal/executor"
 )
 
-func TestTerminateExecutionCancelsOnlyMatchingProcessGroup(t *testing.T) {
+func TestTerminateExecutionCancelsEveryMatchingProcessGroupOnly(t *testing.T) {
 	defer executor.ResetLoginPathCacheForTest()()
 
 	binDir := t.TempDir()
 	firstDir := t.TempDir()
 	secondDir := t.TempDir()
+	unrelatedDir := t.TempDir()
 	script := `#!/bin/sh
 if [ "$1" = "--help" ]; then
   printf 'Usage: claude\n'
@@ -34,46 +35,57 @@ sleep 600
 	if active, err := e.TerminateExecution(" \t "); err != nil || active {
 		t.Fatalf("blank execution cancellation = active %v, error %v", active, err)
 	}
-	firstDone := make(chan error, 1)
-	secondDone := make(chan error, 1)
-	go func() {
-		_, err := e.ExecuteRaw("claude", "prompt", executor.ExecOptions{
-			WorkDir: firstDir, Timeout: 10 * time.Minute, ExecutionID: "pr-review:1",
-		})
-		firstDone <- err
-	}()
-	go func() {
-		_, err := e.ExecuteRaw("claude", "prompt", executor.ExecOptions{
-			WorkDir: secondDir, Timeout: 10 * time.Minute, ExecutionID: "pr-review:2",
-		})
-		secondDone <- err
-	}()
+	start := func(dir, executionID string) <-chan error {
+		done := make(chan error, 1)
+		go func() {
+			_, err := e.ExecuteRaw("claude", "prompt", executor.ExecOptions{
+				WorkDir: dir, Timeout: 10 * time.Minute, ExecutionID: executionID,
+			})
+			done <- err
+		}()
+		return done
+	}
+
+	// Two independent review runs intentionally share the same PR key. This
+	// happens when poll-triggered and manual review paths overlap.
+	firstDone := start(firstDir, "pr-review:1")
+	secondDone := start(secondDir, "pr-review:1")
+	unrelatedDone := start(unrelatedDir, "pr-review:2")
 
 	firstPID := readPIDFile(t, filepath.Join(firstDir, "review.pid"))
 	secondPID := readPIDFile(t, filepath.Join(secondDir, "review.pid"))
+	unrelatedPID := readPIDFile(t, filepath.Join(unrelatedDir, "review.pid"))
 	if active, err := e.TerminateExecution("pr-review:999"); err != nil || active {
 		t.Fatalf("unknown execution cancellation = active %v, error %v", active, err)
 	}
 	if active, err := e.TerminateExecution("pr-review:1"); err != nil || !active {
-		t.Fatalf("first execution cancellation = active %v, error %v", active, err)
+		t.Fatalf("matching executions cancellation = active %v, error %v", active, err)
 	}
 
-	select {
-	case err := <-firstDone:
-		if !errors.Is(err, executor.ErrExecutionCancelled) {
-			t.Fatalf("first execution error = %v, want ErrExecutionCancelled", err)
+	for label, done := range map[string]<-chan error{
+		"first":  firstDone,
+		"second": secondDone,
+	} {
+		select {
+		case err := <-done:
+			if !errors.Is(err, executor.ErrExecutionCancelled) {
+				t.Fatalf("%s matching execution error = %v, want ErrExecutionCancelled", label, err)
+			}
+		case <-time.After(15 * time.Second):
+			t.Fatalf("%s matching execution did not return after cancellation", label)
 		}
-	case <-time.After(15 * time.Second):
-		t.Fatal("matching execution did not return after cancellation")
 	}
 	if processRunning(firstPID) {
-		t.Fatalf("matching process %d survived cancellation", firstPID)
+		t.Fatalf("first matching process %d survived cancellation", firstPID)
 	}
-	if !processRunning(secondPID) {
-		t.Fatalf("unrelated process %d was killed by scoped cancellation", secondPID)
+	if processRunning(secondPID) {
+		t.Fatalf("second matching process %d survived cancellation", secondPID)
+	}
+	if !processRunning(unrelatedPID) {
+		t.Fatalf("unrelated process %d was killed by scoped cancellation", unrelatedPID)
 	}
 	select {
-	case err := <-secondDone:
+	case err := <-unrelatedDone:
 		t.Fatalf("unrelated execution returned after cancelling first: %v", err)
 	default:
 	}
@@ -82,12 +94,12 @@ sleep 600
 		t.Fatalf("cleanup cancellation = active %v, error %v", active, err)
 	}
 	select {
-	case err := <-secondDone:
+	case err := <-unrelatedDone:
 		if !errors.Is(err, executor.ErrExecutionCancelled) {
-			t.Fatalf("second execution error = %v, want ErrExecutionCancelled", err)
+			t.Fatalf("unrelated execution cleanup error = %v, want ErrExecutionCancelled", err)
 		}
 	case <-time.After(15 * time.Second):
-		t.Fatal("second execution did not return after cancellation")
+		t.Fatal("unrelated execution did not return after cleanup cancellation")
 	}
 }
 

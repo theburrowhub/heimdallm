@@ -2622,8 +2622,8 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		// storing an ambiguous empty-HeadSHA row. The in-process guard above
 		// covers concurrency for this no-claim path.
 
-		// Persistent in-flight claim: keyed on (store pr_id, head_sha), the
-		// same mechanism as the poll loop so both paths share one guard across
+		// Persistent in-flight claim: keyed on (GitHub pr_id, head_sha), the
+		// same namespace as the poll loop so both paths share one guard across
 		// daemon restart / config reload. This is the ONLY duplicate-work
 		// defense left on the forced path: Force deliberately bypasses the
 		// pipeline's SHA/re-request dedup and the circuit breaker (explicit
@@ -2634,7 +2634,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		// error: a transient SQLite blip must not block a manual re-review.
 		var triggerClaimed bool
 		if ghPR.Head.SHA != "" {
-			ok, err := s.ClaimInFlightReview(pr.ID, ghPR.Head.SHA)
+			ok, err := s.ClaimInFlightReview(pr.GithubID, ghPR.Head.SHA)
 			if err != nil {
 				slog.Warn("trigger review: claim inflight failed, proceeding", "err", err)
 			} else if !ok {
@@ -2652,9 +2652,9 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		}
 		defer func() {
 			if triggerClaimed {
-				if err := s.ReleaseInFlightReview(pr.ID, ghPR.Head.SHA); err != nil {
+				if err := s.ReleaseInFlightReview(pr.GithubID, ghPR.Head.SHA); err != nil {
 					slog.Warn("trigger review: release inflight failed", "err", err,
-						"pr_id", pr.ID, "head_sha", ghPR.Head.SHA)
+						"pr_id", pr.GithubID, "head_sha", ghPR.Head.SHA)
 				}
 			}
 		}()

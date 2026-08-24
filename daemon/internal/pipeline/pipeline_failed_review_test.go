@@ -230,10 +230,13 @@ func TestUserFacingReviewErrorIsBoundedAndClassified(t *testing.T) {
 		err  error
 		want string
 	}{
+		{"nil", nil, "Review failed before producing a result."},
 		{"manual cancellation", executor.ErrExecutionCancelled, "Review cancelled manually."},
 		{"configured deadline", executor.ErrExecutionTimedOut, "Review timed out before completion."},
 		{"legacy deadline text", errors.New("context deadline exceeded"), "Review timed out before completion."},
 		{"terminated", errors.New("executor: run codex: signal: terminated"), "Review process was terminated before completion."},
+		{"database busy", errors.New("pipeline: store review: database is locked"), "Review could not start because the local database was busy."},
+		{"empty", errors.New(" \n\t "), "Review failed before producing a result."},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -253,6 +256,62 @@ func TestUserFacingReviewErrorIsBoundedAndClassified(t *testing.T) {
 	))
 	if got != "executor: run codex: exit status 1" {
 		t.Fatalf("timeout word in captured output changed classification: %q", got)
+	}
+	got = pipeline.UserFacingReviewError(errors.New(strings.Repeat("x", 1000)))
+	if len([]rune(got)) != 280 || !strings.HasSuffix(got, "…") {
+		t.Fatalf("long generic error was not bounded to 280 runes: length=%d value=%q", len([]rune(got)), got)
+	}
+	got = pipeline.UserFacingReviewError(errors.New(
+		"pipeline: execute codex: executor: parse JSON result: invalid character 'x' (raw: " + secret + ")",
+	))
+	if strings.Contains(got, "FULL PROMPT") || strings.Contains(got, "(raw:") {
+		t.Fatalf("sanitized parse error leaked raw model output: %q", got)
+	}
+	if want := "pipeline: execute codex: executor: parse JSON result: invalid character 'x'"; got != want {
+		t.Fatalf("sanitized parse error = %q, want %q", got, want)
+	}
+}
+
+func TestRun_InsertReviewFailurePersistsConcreteReason(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	if _, err := s.DB().Exec(`
+		CREATE TRIGGER reject_review_insert
+		BEFORE INSERT ON reviews
+		BEGIN
+			SELECT RAISE(ABORT, 'forced review insert failure');
+		END`); err != nil {
+		t.Fatalf("create failing insert trigger: %v", err)
+	}
+
+	const sha = "insert-failure-head"
+	pr := retryPR(sha)
+	p := pipeline.New(s, &failedReviewGH{sha: sha}, &retryExec{}, &fakeNotify{})
+
+	_, runErr := p.Run(pr, pipeline.RunOptions{Primary: "codex", Force: true})
+	if runErr == nil || !strings.Contains(runErr.Error(), "forced review insert failure") {
+		t.Fatalf("Run error = %v, want forced review insert failure", runErr)
+	}
+	storedPR, err := s.GetPRByGithubID(pr.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := s.LatestReviewExecutionStatusForPR(storedPR.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status == nil || status.Active {
+		t.Fatalf("durable failure status = %#v, want completed failure", status)
+	}
+	want := pipeline.UserFacingReviewError(runErr)
+	if status.Error != want {
+		t.Fatalf("persisted failure = %q, want concrete sanitized error %q", status.Error, want)
+	}
+	if status.Error == "Review ended before a result was stored." {
+		t.Fatal("insert failure persisted the generic fallback")
 	}
 }
 
