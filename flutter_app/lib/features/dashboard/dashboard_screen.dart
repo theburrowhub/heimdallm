@@ -13,6 +13,7 @@ import '../../shared/widgets/toast.dart';
 import '../../shared/widgets/type_badge.dart';
 import '../activity/activity_screen.dart';
 import '../activity/activity_providers.dart';
+import '../activity/add_pr_dialog.dart';
 import '../agents/agents_screen.dart';
 import '../circuit_breaker/circuit_breaker_banner.dart';
 import '../cli_agents/cli_agents_screen.dart';
@@ -394,13 +395,35 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
     final issuesAsync = ref.watch(issuesProvider);
     final sort = ref.watch(reviewsSortProvider);
     final filters = ref.watch(activityFiltersProvider);
+    final addPRControl = Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: FilledButton.icon(
+          key: const Key('dashboard-add-pr-button'),
+          icon: const Icon(Icons.add_link, size: 18),
+          label: const Text('Add PR'),
+          onPressed: () => showAddPRDialog(context),
+        ),
+      ),
+    );
 
     // Combine loading states
     if (prsAsync.isLoading && issuesAsync.isLoading) {
-      return const Center(child: CircularProgressIndicator());
+      return Column(
+        children: [
+          addPRControl,
+          const Expanded(child: Center(child: CircularProgressIndicator())),
+        ],
+      );
     }
     if (prsAsync.hasError && issuesAsync.hasError) {
-      return _errorView(context, prsAsync.error!);
+      return Column(
+        children: [
+          addPRControl,
+          Expanded(child: _errorView(context, prsAsync.error!)),
+        ],
+      );
     }
 
     final prs = prsAsync.value ?? [];
@@ -426,14 +449,11 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
     // Sort.
     _sortItems(filtered, sort);
 
-    if (prs.isEmpty && issues.isEmpty) {
-      return const Center(child: Text('No activity yet'));
-    }
-
     final viewMode = filters.viewMode;
 
     // Build filter bar + count header (shared between list and grid)
     final header = [
+      addPRControl,
       ActivityFilterBar(
         allRepos: allRepos,
         sort: sort,
@@ -449,6 +469,15 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
           ),
         ),
     ];
+
+    if (prs.isEmpty && issues.isEmpty) {
+      return Column(
+        children: [
+          ...header,
+          const Expanded(child: Center(child: Text('No activity yet'))),
+        ],
+      );
+    }
 
     if (filtered.isEmpty && filters.hasFilters) {
       return Column(

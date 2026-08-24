@@ -292,7 +292,9 @@ void main() {
       () => api.daemonReachable(),
     ).thenAnswer((_) async => PortOwner.foreign);
     when(() => api.daemonPort).thenReturn(8123);
-    final platform = FakePlatformServices(daemonBinaryPath: '/tmp/heimdallm');
+    final platform = FakePlatformServices(
+      daemonBinaryPath: '/tmp/heimdallm',
+    );
     await _pumpRestartHarness(tester, api: api, platform: platform);
 
     await tester.tap(find.text('Restart harness'));
@@ -308,9 +310,7 @@ void main() {
     when(() => api.shutdownDaemon()).thenAnswer((_) => releaseShutdown.future);
     when(() => api.daemonReachable()).thenAnswer((_) async => PortOwner.none);
     when(() => api.checkHealth()).thenAnswer((_) async => true);
-    final platform = FakePlatformServices(
-      daemonBinaryPath: '/tmp/heimdallm',
-    );
+    final platform = FakePlatformServices(daemonBinaryPath: '/tmp/heimdallm');
     await _pumpRestartHarness(tester, api: api, platform: platform);
 
     await tester.tap(find.text('Restart harness'));
@@ -506,6 +506,73 @@ void main() {
     expect(find.textContaining('org/repo'), findsOneWidget);
   });
 
+  testWidgets(
+    'main Activity list Add PR control opens, validates, submits, and refreshes',
+    (tester) async {
+      final api = MockApiClient();
+      final platform = FakePlatformServices();
+      var prLoads = 0;
+      when(() => api.addPRByUrl(any())).thenAnswer((_) async => 73);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            apiClientProvider.overrideWithValue(api),
+            platformServicesProvider.overrideWithValue(platform),
+            daemonHealthProvider.overrideWith((ref) async => false),
+            prsProvider.overrideWith((ref) async {
+              prLoads++;
+              return <PR>[];
+            }),
+            issuesProvider.overrideWith((ref) async => []),
+            sseStreamProvider.overrideWith((ref) => const Stream.empty()),
+          ],
+          child: MaterialApp.router(
+            routerConfig: GoRouter(
+              routes: [
+                GoRoute(path: '/', builder: (_, _) => const DashboardScreen()),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final addControl = find.byKey(const Key('dashboard-add-pr-button'));
+      expect(addControl, findsOneWidget);
+      expect(find.text('Add PR'), findsOneWidget);
+      expect(find.text('No activity yet'), findsOneWidget);
+
+      await tester.tap(addControl);
+      await tester.pumpAndSettle();
+      expect(find.text('Add a pull request'), findsOneWidget);
+
+      final urlField = find.byKey(const Key('add-pr-url-field'));
+      await tester.enterText(urlField, 'not a GitHub PR');
+      await tester.tap(find.text('Add & review'));
+      await tester.pump();
+      expect(find.textContaining('Enter a GitHub PR link'), findsOneWidget);
+      verifyNever(() => api.addPRByUrl(any()));
+
+      await tester.enterText(
+        urlField,
+        'https://github.com/acme/widgets/pull/73',
+      );
+      await tester.tap(find.text('Add & review'));
+      await tester.pumpAndSettle();
+
+      verify(
+        () => api.addPRByUrl('https://github.com/acme/widgets/pull/73'),
+      ).called(1);
+      expect(prLoads, 2);
+      expect(find.text('Add a pull request'), findsNothing);
+      expect(
+        find.text('PR added — repository monitored and review started.'),
+        findsOneWidget,
+      );
+    },
+  );
+
   testWidgets('DashboardScreen shows loading indicator while fetching', (
     tester,
   ) async {
@@ -541,6 +608,7 @@ void main() {
 
     await _pumpOfflineDashboard(tester, api: api, platform: platform);
 
+    expect(find.byKey(const Key('dashboard-add-pr-button')), findsOneWidget);
     expect(find.text('Start Server'), findsOneWidget);
     await tester.tap(find.text('Start Server'));
     await tester.pump();

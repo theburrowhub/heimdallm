@@ -4,9 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import '../../core/api/api_client.dart';
 import '../../core/models/activity.dart';
-import '../dashboard/dashboard_providers.dart' show apiClientProvider;
+import 'add_pr_dialog.dart';
 import 'activity_providers.dart';
 import 'widgets/activity_entry_tile.dart';
 import 'widgets/activity_filter_chips.dart';
@@ -128,9 +127,10 @@ class _DatePickerBar extends ConsumerWidget {
       child: Row(
         children: [
           ElevatedButton.icon(
+            key: const Key('activity-log-add-pr-button'),
             icon: const Icon(Icons.add, size: 18),
-            label: const Text('ADD'),
-            onPressed: () => _showAddPRDialog(context),
+            label: const Text('Add PR'),
+            onPressed: () => showAddPRDialog(context),
           ),
           const SizedBox(width: 12),
           ChoiceChip(
@@ -432,131 +432,6 @@ class _ActivityDetailSheet extends StatelessWidget {
     final date =
         '${t.year.toString().padLeft(4, '0')}-${t.month.toString().padLeft(2, '0')}-${t.day.toString().padLeft(2, '0')}';
     return '$date ${activityTimeLabel(t)}';
-  }
-}
-
-Future<void> _showAddPRDialog(BuildContext context) {
-  return showDialog<void>(
-    context: context,
-    builder: (_) => const _AddPRDialog(),
-  );
-}
-
-/// Dialog for the Activity view "ADD" action: paste a GitHub PR URL. On submit
-/// the daemon adds the PR's repository to the monitored list and reviews the
-/// PR immediately.
-class _AddPRDialog extends ConsumerStatefulWidget {
-  const _AddPRDialog();
-
-  @override
-  ConsumerState<_AddPRDialog> createState() => _AddPRDialogState();
-}
-
-class _AddPRDialogState extends ConsumerState<_AddPRDialog> {
-  final _controller = TextEditingController();
-  bool _submitting = false;
-  String? _error;
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  static bool _looksLikePRUrl(String s) {
-    final t = s.trim();
-    return t.contains('github.com/') && t.contains('/pull/');
-  }
-
-  Future<void> _submit() async {
-    final url = _controller.text.trim();
-    if (!_looksLikePRUrl(url)) {
-      setState(
-        () => _error =
-            'Enter a GitHub PR link, e.g. https://github.com/owner/repo/pull/123',
-      );
-      return;
-    }
-    setState(() {
-      _submitting = true;
-      _error = null;
-    });
-    try {
-      await ref.read(apiClientProvider).addPRByUrl(url);
-      if (!mounted) return;
-      Navigator.of(context).pop();
-      ref.invalidate(activityEntriesProvider);
-      ref.invalidate(activityOptionsProvider);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('PR added — repository monitored and review started.'),
-        ),
-      );
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _submitting = false;
-        _error = e is ApiException ? e.message : e.toString();
-      });
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('Add a pull request'),
-      content: SizedBox(
-        width: 460,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Paste a GitHub PR link. Its repository is added to the '
-              'monitored list and the PR is reviewed right away.',
-            ),
-            const SizedBox(height: 14),
-            TextField(
-              controller: _controller,
-              autofocus: true,
-              enabled: !_submitting,
-              keyboardType: TextInputType.url,
-              decoration: const InputDecoration(
-                labelText: 'GitHub PR URL',
-                hintText: 'https://github.com/owner/repo/pull/123',
-                border: OutlineInputBorder(),
-              ),
-              onSubmitted: (_) {
-                if (!_submitting) _submit();
-              },
-            ),
-            if (_error != null) ...[
-              const SizedBox(height: 10),
-              Text(
-                _error!,
-                style: TextStyle(color: Theme.of(context).colorScheme.error),
-              ),
-            ],
-          ],
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: _submitting ? null : () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(
-          onPressed: _submitting ? null : _submit,
-          child: _submitting
-              ? const SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : const Text('Add & review'),
-        ),
-      ],
-    );
   }
 }
 
