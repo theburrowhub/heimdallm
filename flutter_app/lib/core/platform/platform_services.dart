@@ -30,6 +30,21 @@ enum AppUpdateSupport {
   unavailable,
 }
 
+/// Version metadata of the running application bundle/package.
+class AppVersionInfo {
+  const AppVersionInfo({required this.version, this.buildNumber});
+
+  final String version;
+  final String? buildNumber;
+
+  String get displayVersion {
+    final build = buildNumber?.trim();
+    return build == null || build.isEmpty || build == version
+        ? version
+        : '$version (build $build)';
+  }
+}
+
 /// User-visible lifecycle of the desktop application updater.
 enum AppUpdatePhase { idle, checking, available, installing, restarting, error }
 
@@ -167,8 +182,6 @@ abstract class PlatformServices {
   /// Sparkle and Flutter can postpone termination while the daemon drains.
   void quitApp();
 
-  // ── Application updates ────────────────────────────────────────────────
-
   // ── First-run setup / daemon spawn ──────────────────────────────────────
 
   Future<String?> detectGitHubToken();
@@ -194,12 +207,18 @@ abstract class PlatformServices {
   Future<List<String>> discoverReposFromPRs(String token);
 }
 
+/// Optional version-metadata boundary for installed application bundles.
+abstract interface class AppVersionPlatformCapability {
+  Future<AppVersionInfo> loadAppVersion();
+}
+
 /// Optional application-update boundary implemented only by platforms that
 /// own an in-process updater. Package- and deployment-managed platforms do not
 /// have to pretend they can update themselves merely to satisfy the main
 /// platform interface.
 abstract interface class AppUpdatePlatformCapability {
   AppUpdateSupport get appUpdateSupport;
+  String? get appUpdateUnavailableReason;
   AppUpdateStatus get appUpdateStatus;
   Stream<AppUpdateStatus> get appUpdateEvents;
 
@@ -225,11 +244,25 @@ abstract interface class DuplicateInstancePlatformCapability {
 /// stays independent of the macOS updater and remains covered by its existing
 /// browser-only contract.
 extension OptionalPlatformCapabilities on PlatformServices {
+  Future<AppVersionInfo> loadAppVersion() async {
+    final platform = this;
+    return platform is AppVersionPlatformCapability
+        ? (platform as AppVersionPlatformCapability).loadAppVersion()
+        : const AppVersionInfo(version: 'unknown');
+  }
+
   AppUpdateSupport get appUpdateSupport {
     final platform = this;
     return platform is AppUpdatePlatformCapability
         ? (platform as AppUpdatePlatformCapability).appUpdateSupport
         : AppUpdateSupport.unavailable;
+  }
+
+  String? get appUpdateUnavailableReason {
+    final platform = this;
+    return platform is AppUpdatePlatformCapability
+        ? (platform as AppUpdatePlatformCapability).appUpdateUnavailableReason
+        : 'Updates are managed by this installation\'s package or deployment.';
   }
 
   Future<void> setupAppUpdater() async {

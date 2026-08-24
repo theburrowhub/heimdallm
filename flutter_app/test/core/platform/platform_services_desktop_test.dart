@@ -7,6 +7,7 @@ import 'package:heimdallm/core/daemon/daemon_lifecycle.dart';
 import 'package:heimdallm/core/platform/linux_app_updater.dart';
 import 'package:heimdallm/core/platform/platform_services.dart';
 import 'package:heimdallm/core/platform/platform_services_desktop.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
 class _FakeLinuxAppUpdater extends LinuxAppUpdater {
   _FakeLinuxAppUpdater({
@@ -761,28 +762,79 @@ else:
       },
     );
 
-    test('default method channel configures the signed updater', () async {
-      const channel = MethodChannel('com.theburrowhub.heimdallm/app_updater');
-      final messenger =
-          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
-      messenger.setMockMethodCallHandler(channel, (call) async {
-        expect(call.method, 'configure');
-        return true;
-      });
-      addTearDown(() {
-        messenger.setMockMethodCallHandler(channel, null);
-        channel.setMethodCallHandler(null);
-      });
-      final services = DesktopPlatformServices(
-        isMacOS: true,
-        enableNativeAppUpdates: true,
-        dataDir: tempDir.path,
-      );
+    test(
+      'loads bundle version and preserves native bridge update failures',
+      () async {
+        PackageInfo.setMockInitialValues(
+          appName: 'Heimdallm',
+          packageName: 'com.theburrowhub.heimdallm',
+          version: '0.8.4',
+          buildNumber: '548',
+          buildSignature: '',
+        );
+        final services = DesktopPlatformServices(
+          isMacOS: true,
+          enableNativeAppUpdates: true,
+          methodInvoker: (method, arguments) async {
+            if (method == 'configure') return true;
+            if (method == 'checkForUpdates' || method == 'installUpdate') {
+              throw StateError('$method failed');
+            }
+            return null;
+          },
+        );
 
-      await services.setupAppUpdater();
+        final version = await services.loadAppVersion();
+        expect(version.displayVersion, '0.8.4 (build 548)');
+        await services.setupAppUpdater();
 
-      expect(services.appUpdateSupport, AppUpdateSupport.native);
-    });
+        await expectLater(
+          services.checkForAppUpdates(),
+          throwsA(isA<StateError>()),
+        );
+        expect(services.appUpdateStatus.phase, AppUpdatePhase.error);
+        expect(
+          services.appUpdateStatus.message,
+          contains('checkForUpdates failed'),
+        );
+
+        await expectLater(
+          services.installAppUpdate(),
+          throwsA(isA<StateError>()),
+        );
+        expect(services.appUpdateStatus.phase, AppUpdatePhase.error);
+        expect(
+          services.appUpdateStatus.message,
+          contains('installUpdate failed'),
+        );
+      },
+    );
+
+    test(
+      'default method channel configures the integrity-gated updater',
+      () async {
+        const channel = MethodChannel('com.theburrowhub.heimdallm/app_updater');
+        final messenger =
+            TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+        messenger.setMockMethodCallHandler(channel, (call) async {
+          expect(call.method, 'configure');
+          return true;
+        });
+        addTearDown(() {
+          messenger.setMockMethodCallHandler(channel, null);
+          channel.setMethodCallHandler(null);
+        });
+        final services = DesktopPlatformServices(
+          isMacOS: true,
+          enableNativeAppUpdates: true,
+          dataDir: tempDir.path,
+        );
+
+        await services.setupAppUpdater();
+
+        expect(services.appUpdateSupport, AppUpdateSupport.native);
+      },
+    );
 
     test('updater callback ignores unrelated native methods', () async {
       final services = DesktopPlatformServices(isMacOS: true);
@@ -868,24 +920,32 @@ else:
       );
     });
 
-    test('debug macOS builds leave the production updater disabled', () async {
+    test('ad-hoc macOS builds request and expose the secure updater', () async {
       var calls = 0;
+      dynamic configuration;
       final services = DesktopPlatformServices(
         isMacOS: true,
         methodInvoker: (method, arguments) async {
           calls++;
+          if (method == 'configure') {
+            configuration = arguments;
+            return true;
+          }
           return null;
         },
       );
 
       expect(services.appUpdateSupport, AppUpdateSupport.unavailable);
       await services.setupAppUpdater();
+      expect(services.appUpdateSupport, AppUpdateSupport.native);
       expect(await services.pendingAppUpdateVersion(), isNull);
-      expect(calls, 1);
+      expect(calls, 2);
+      expect(configuration['updatesEnabled'], isTrue);
+      expect(services.appUpdateUnavailableReason, isNull);
     });
 
     test(
-      'native signature gate can reject a requested release updater',
+      'native integrity gate can reject an insecure updater configuration',
       () async {
         final services = DesktopPlatformServices(
           isMacOS: true,
@@ -902,6 +962,13 @@ else:
 
         await services.setupAppUpdater();
         expect(services.appUpdateSupport, AppUpdateSupport.unavailable);
+        expect(
+          services.appUpdateUnavailableReason,
+          allOf(
+            contains('embedded Sparkle'),
+            contains('signature configuration is incomplete'),
+          ),
+        );
         await expectLater(
           services.checkForAppUpdates(),
           throwsA(isA<UnsupportedError>()),
@@ -1067,6 +1134,10 @@ else:
           throwsA(isA<UnsupportedError>()),
         );
         expect(calls, 0);
+        expect(
+          services.appUpdateUnavailableReason,
+          contains('official AppImage or packaged release'),
+        );
       },
     );
 

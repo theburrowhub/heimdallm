@@ -10,10 +10,170 @@ import 'package:heimdallm/features/updates/check_for_updates_button.dart';
 import '../../core/platform/fake_platform_services.dart';
 
 void main() {
-  testWidgets('is hidden when native updates are unavailable', (tester) async {
-    final platform = FakePlatformServices();
-    await tester.pumpWidget(_app(platform));
-    expect(find.byKey(const Key('check-for-updates')), findsNothing);
+  testWidgets(
+    'explains unavailable updates instead of hiding the app-bar entry',
+    (tester) async {
+      final platform = FakePlatformServices(
+        appUpdateUnavailableReason: 'Requires an official signed build.',
+      );
+      await tester.pumpWidget(_app(platform));
+      final button = tester.widget<IconButton>(
+        find.byKey(const Key('check-for-updates')),
+      );
+      expect(button.onPressed, isNull);
+      expect(button.tooltip, 'Requires an official signed build.');
+    },
+  );
+
+  testWidgets(
+    'settings explain an incomplete updater integrity configuration',
+    (tester) async {
+      final platform = FakePlatformServices(
+        appVersion: const AppVersionInfo(version: '0.8.4', buildNumber: '546'),
+        appUpdateUnavailableReason:
+            'The embedded Sparkle signature configuration is incomplete.',
+      );
+
+      await tester.pumpWidget(_settingsApp(platform));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Version 0.8.4 (build 546)'), findsOneWidget);
+      expect(find.text('Updates unavailable'), findsOneWidget);
+      expect(
+        find.text(
+          'The embedded Sparkle signature configuration is incomplete.',
+        ),
+        findsOneWidget,
+      );
+      expect(find.byKey(const Key('settings-update-action')), findsNothing);
+    },
+  );
+
+  testWidgets(
+    'official signed build reports up-to-date and remains checkable',
+    (tester) async {
+      final platform = _UpToDatePlatform();
+
+      await tester.pumpWidget(_settingsApp(platform));
+      await tester.pumpAndSettle();
+      expect(find.text('Ready to check for updates'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('settings-update-action')));
+      await tester.pumpAndSettle();
+
+      expect(platform.checkForAppUpdatesCalls, 1);
+      expect(find.text('Heimdallm is up to date.'), findsOneWidget);
+      expect(find.text('Check for updates'), findsOneWidget);
+    },
+  );
+
+  testWidgets('ad-hoc build exposes the same normal update controls', (
+    tester,
+  ) async {
+    final platform = FakePlatformServices(
+      appUpdateSupport: AppUpdateSupport.native,
+      appVersion: const AppVersionInfo(version: '0.8.4-dev'),
+    );
+
+    await tester.pumpWidget(_settingsApp(platform));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Version 0.8.4-dev'), findsOneWidget);
+    expect(find.text('Ready to check for updates'), findsOneWidget);
+    expect(find.text('Check for updates'), findsOneWidget);
+    expect(find.text('Updates unavailable'), findsNothing);
+
+    await tester.tap(find.byKey(const Key('settings-update-action')));
+    await tester.pump();
+    expect(platform.checkForAppUpdatesCalls, 1);
+  });
+
+  testWidgets(
+    'missing signed appcast stays visible and retryable in settings',
+    (tester) async {
+      final platform = FakePlatformServices(
+        appUpdateSupport: AppUpdateSupport.native,
+        appUpdateStatus: const AppUpdateStatus(
+          phase: AppUpdatePhase.error,
+          message: 'Could not load the signed update feed (HTTP 404).',
+        ),
+      );
+
+      await tester.pumpWidget(_settingsAndBannerApp(platform));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('Could not load the signed update feed (HTTP 404).'),
+        findsOneWidget,
+      );
+      expect(find.text('Try checking again.'), findsOneWidget);
+      expect(find.text('Check for updates'), findsOneWidget);
+      expect(find.byKey(const Key('app-update-banner')), findsNothing);
+    },
+  );
+
+  testWidgets('settings report an unavailable application version', (
+    tester,
+  ) async {
+    await tester.pumpWidget(_settingsApp(_FailingVersionPlatform()));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Version unavailable'), findsOneWidget);
+  });
+
+  testWidgets('settings surface update action failures', (tester) async {
+    final platform = _FailingUpdatePlatform();
+    await tester.pumpWidget(_settingsApp(platform));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('settings-update-action')));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('Could not update Heimdallm: Bad state: bridge unavailable'),
+      findsOneWidget,
+    );
+  });
+
+  for (final entry in <(AppUpdatePhase, String)>[
+    (AppUpdatePhase.checking, 'Checking for updates…'),
+    (AppUpdatePhase.installing, 'Installing the Heimdallm update…'),
+    (AppUpdatePhase.restarting, 'Restarting Heimdallm…'),
+  ]) {
+    testWidgets('settings render the ${entry.$1.name} lifecycle', (
+      tester,
+    ) async {
+      final platform = FakePlatformServices(
+        appUpdateSupport: AppUpdateSupport.native,
+        appUpdateStatus: AppUpdateStatus(phase: entry.$1),
+      );
+
+      await tester.pumpWidget(_settingsApp(platform));
+      await tester.pump();
+
+      expect(find.text(entry.$2), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    });
+  }
+
+  testWidgets('settings install the update that is ready', (tester) async {
+    final platform = FakePlatformServices(
+      appUpdateSupport: AppUpdateSupport.native,
+      appUpdateStatus: const AppUpdateStatus(
+        phase: AppUpdatePhase.available,
+        version: '0.9.0',
+        message: 'Heimdallm 0.9.0 is ready to install.',
+      ),
+    );
+
+    await tester.pumpWidget(_settingsApp(platform));
+    await tester.pumpAndSettle();
+    expect(find.text('Heimdallm 0.9.0 is ready to install.'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('settings-update-action')));
+    await tester.pump();
+
+    expect(platform.installAppUpdateCalls, 1);
   });
 
   testWidgets('banner stays hidden when no update is actionable', (
@@ -151,6 +311,20 @@ Widget _bannerApp(FakePlatformServices platform) => ProviderScope(
   child: const MaterialApp(home: Scaffold(body: AppUpdateBanner())),
 );
 
+Widget _settingsApp(FakePlatformServices platform) => ProviderScope(
+  overrides: [platformServicesProvider.overrideWithValue(platform)],
+  child: const MaterialApp(home: Scaffold(body: AppUpdateSettingsCard())),
+);
+
+Widget _settingsAndBannerApp(FakePlatformServices platform) => ProviderScope(
+  overrides: [platformServicesProvider.overrideWithValue(platform)],
+  child: const MaterialApp(
+    home: Scaffold(
+      body: Column(children: [AppUpdateSettingsCard(), AppUpdateBanner()]),
+    ),
+  ),
+);
+
 class _BlockingUpdatePlatform extends FakePlatformServices {
   _BlockingUpdatePlatform(this.completion)
     : super(appUpdateSupport: AppUpdateSupport.native);
@@ -170,6 +344,22 @@ class _BlockingUpdatePlatform extends FakePlatformServices {
   }
 }
 
+class _UpToDatePlatform extends FakePlatformServices {
+  _UpToDatePlatform()
+    : super(
+        appUpdateSupport: AppUpdateSupport.native,
+        appVersion: const AppVersionInfo(version: '0.8.4'),
+      );
+
+  @override
+  Future<void> checkForAppUpdates() async {
+    checkForAppUpdatesCalls++;
+    emitAppUpdateStatus(
+      const AppUpdateStatus.idle(message: 'Heimdallm is up to date.'),
+    );
+  }
+}
+
 class _FailingUpdatePlatform extends FakePlatformServices {
   _FailingUpdatePlatform() : super(appUpdateSupport: AppUpdateSupport.native);
 
@@ -177,6 +367,13 @@ class _FailingUpdatePlatform extends FakePlatformServices {
   Future<void> checkForAppUpdates() async {
     checkForAppUpdatesCalls++;
     throw StateError('bridge unavailable');
+  }
+}
+
+class _FailingVersionPlatform extends FakePlatformServices {
+  @override
+  Future<AppVersionInfo> loadAppVersion() async {
+    throw StateError('bundle metadata unavailable');
   }
 }
 

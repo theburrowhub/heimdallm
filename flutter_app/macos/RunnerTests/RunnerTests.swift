@@ -274,25 +274,81 @@ class RunnerTests: XCTestCase {
     XCTAssertEqual(coordinator.applicationShouldTerminate(), .terminateNow)
   }
 
-  func testNativeUpdateCapabilityCannotBeReenabledByDart() {
+  func testNativeUpdateCapabilityRequiresIntegrityConfigurationAndDartOptIn() {
     XCTAssertFalse(
       DaemonUpdateCoordinator.effectiveNativeUpdatesEnabled(
-        buildTrustAllows: false,
+        updateIntegrityAllows: false,
         requested: true
       )
     )
     XCTAssertFalse(
       DaemonUpdateCoordinator.effectiveNativeUpdatesEnabled(
-        buildTrustAllows: true,
+        updateIntegrityAllows: true,
         requested: false
       )
     )
     XCTAssertTrue(
       DaemonUpdateCoordinator.effectiveNativeUpdatesEnabled(
-        buildTrustAllows: true,
+        updateIntegrityAllows: true,
         requested: true
       )
     )
+  }
+
+  func testUpdateIntegrityConfigurationDoesNotRequireDeveloperIDHost() {
+    let information: [String: Any] = [
+      "SUPublicEDKey": "eBiLZ1yDuQ/NVCx7VJoQZJm6FpB8S0yH9WHtxaRfEDw=",
+      "SURequireSignedFeed": true,
+      "SUSignedFeedFailureExpirationInterval": 0,
+      "SUVerifyUpdateBeforeExtraction": true,
+      "SUFeedURL": "https://github.com/theburrowhub/heimdallm/releases/latest/download/appcast.xml",
+    ]
+
+    // Host code-signing identity is intentionally not an input. This same
+    // Ed25519 configuration protects Developer ID and ad-hoc builds.
+    XCTAssertTrue(
+      DaemonUpdateCoordinator.hasRequiredUpdateIntegrityConfiguration(information),
+      "the production integrity configuration must allow an ad-hoc host"
+    )
+  }
+
+  func testHostBundleCarriesRequiredUpdateIntegrityConfiguration() {
+    XCTAssertTrue(
+      DaemonUpdateCoordinator.hasRequiredUpdateIntegrityConfiguration(
+        Bundle.main.infoDictionary ?? [:]
+      )
+    )
+  }
+
+  func testUpdateIntegrityConfigurationFailsClosed() {
+    let valid: [String: Any] = [
+      "SUPublicEDKey": "eBiLZ1yDuQ/NVCx7VJoQZJm6FpB8S0yH9WHtxaRfEDw=",
+      "SURequireSignedFeed": true,
+      "SUSignedFeedFailureExpirationInterval": 0,
+      "SUVerifyUpdateBeforeExtraction": true,
+      "SUFeedURL": "https://github.com/theburrowhub/heimdallm/releases/latest/download/appcast.xml",
+    ]
+
+    for (key, value) in [
+      ("SUPublicEDKey", "not-a-key" as Any),
+      ("SURequireSignedFeed", false as Any),
+      ("SUSignedFeedFailureExpirationInterval", 1 as Any),
+      ("SUVerifyUpdateBeforeExtraction", false as Any),
+      ("SUFeedURL", "http://example.com/appcast.xml" as Any),
+    ] {
+      var invalid = valid
+      invalid[key] = value
+      XCTAssertFalse(
+        DaemonUpdateCoordinator.hasRequiredUpdateIntegrityConfiguration(invalid),
+        "\(key) must fail closed"
+      )
+    }
+  }
+
+  func testOnlySuccessfullySignedAppcastsCanProceed() {
+    XCTAssertTrue(DaemonUpdateCoordinator.appcastSignatureAllowsUpdate(.succeeded))
+    XCTAssertFalse(DaemonUpdateCoordinator.appcastSignatureAllowsUpdate(.skipped))
+    XCTAssertFalse(DaemonUpdateCoordinator.appcastSignatureAllowsUpdate(.failed))
   }
 
   func testInstalledVersionOrderingDistinguishesUpgradeFromDowngrade() {

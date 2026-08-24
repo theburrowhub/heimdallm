@@ -294,6 +294,9 @@ func TestTier2Adapter_ProcessPR_ConcurrentCallsCollapseToOneReview(t *testing.T)
 	if err != nil {
 		t.Fatalf("seed PR: %v", err)
 	}
+	if stored == prGithubID {
+		t.Fatalf("test setup needs distinct local and GitHub IDs; both were %d", stored)
+	}
 
 	// holdingClaim signals that a runReview call has just won the claim
 	// (immediately after ClaimInFlightReview returns ok). It is closed
@@ -322,7 +325,9 @@ func TestTier2Adapter_ProcessPR_ConcurrentCallsCollapseToOneReview(t *testing.T)
 		if storedPR == nil || pr.Head.SHA == "" {
 			return nil
 		}
-		ok, err := s.ClaimInFlightReview(storedPR.ID, pr.Head.SHA)
+		// Production keys both poll-triggered and manual claims by GitHub's
+		// stable global ID, never by the local SQLite row ID.
+		ok, err := s.ClaimInFlightReview(pr.ID, pr.Head.SHA)
 		if err != nil || !ok {
 			// Claim failed (err or row already held by the other goroutine) —
 			// this is the production "already in flight, skip" branch. Do
@@ -330,7 +335,7 @@ func TestTier2Adapter_ProcessPR_ConcurrentCallsCollapseToOneReview(t *testing.T)
 			// is that this path runs exactly once across both goroutines.
 			return nil
 		}
-		defer func() { _ = s.ReleaseInFlightReview(storedPR.ID, pr.Head.SHA) }()
+		defer func() { _ = s.ReleaseInFlightReview(pr.ID, pr.Head.SHA) }()
 
 		atomic.AddInt32(&reviewBody, 1)
 		// Signal the test that the claim is held, then block until the
@@ -450,7 +455,7 @@ func TestTier2Adapter_ProcessPR_ConcurrentCallsCollapseToOneReview(t *testing.T)
 	// Sanity: the claim row must have been released so a legitimate re-review
 	// on a new commit can proceed. ClaimInFlightReview returning true (ok)
 	// here proves the row is free.
-	ok, err := s.ClaimInFlightReview(stored, headSHA)
+	ok, err := s.ClaimInFlightReview(prGithubID, headSHA)
 	if err != nil {
 		t.Fatalf("re-claim after test: %v", err)
 	}
@@ -458,5 +463,5 @@ func TestTier2Adapter_ProcessPR_ConcurrentCallsCollapseToOneReview(t *testing.T)
 		t.Errorf("claim row not released — deferred Release in runReview is broken")
 	}
 	// Clean up to keep the in-memory store tidy for subsequent tests.
-	_ = s.ReleaseInFlightReview(stored, headSHA)
+	_ = s.ReleaseInFlightReview(prGithubID, headSHA)
 }

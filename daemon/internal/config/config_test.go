@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/heimdallm/daemon/internal/executor"
 )
 
 func testBoolPtr(v bool) *bool { return &v }
@@ -33,6 +36,14 @@ func TestApplyDefaults(t *testing.T) {
 	if cfg.AI.ReviewMode != "single" {
 		t.Errorf("ReviewMode = %q, want %q", cfg.AI.ReviewMode, "single")
 	}
+	if cfg.AI.ExecutionTimeout != DefaultAIExecutionTimeout {
+		t.Errorf("ExecutionTimeout = %q, want %q", cfg.AI.ExecutionTimeout, DefaultAIExecutionTimeout)
+	}
+	if parsed, err := time.ParseDuration(cfg.AI.ExecutionTimeout); err != nil {
+		t.Fatalf("parse default ExecutionTimeout: %v", err)
+	} else if parsed != executor.DefaultExecutionTimeout {
+		t.Errorf("config ExecutionTimeout = %v, executor default = %v", parsed, executor.DefaultExecutionTimeout)
+	}
 	if cfg.CircuitBreaker.PerReviewFailureRepoHr != 20 {
 		t.Errorf("PerReviewFailureRepoHr = %d, want 20", cfg.CircuitBreaker.PerReviewFailureRepoHr)
 	}
@@ -51,6 +62,7 @@ func TestApplyDefaults_PreservesExisting(t *testing.T) {
 	cfg.GitHub.PollInterval = "1m"
 	cfg.Retention.MaxDays = 30
 	cfg.AI.ReviewMode = "multi"
+	cfg.AI.ExecutionTimeout = "30m"
 	cfg.CircuitBreaker.PerReviewFailureRepoHr = 37
 
 	cfg.applyDefaults()
@@ -69,6 +81,9 @@ func TestApplyDefaults_PreservesExisting(t *testing.T) {
 	}
 	if cfg.AI.ReviewMode != "multi" {
 		t.Errorf("ReviewMode overwritten: %q", cfg.AI.ReviewMode)
+	}
+	if cfg.AI.ExecutionTimeout != "30m" {
+		t.Errorf("ExecutionTimeout overwritten: %q", cfg.AI.ExecutionTimeout)
 	}
 	if cfg.CircuitBreaker.PerReviewFailureRepoHr != 37 {
 		t.Errorf("PerReviewFailureRepoHr overwritten: %d", cfg.CircuitBreaker.PerReviewFailureRepoHr)

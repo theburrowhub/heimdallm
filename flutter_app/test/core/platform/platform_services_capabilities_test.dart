@@ -29,7 +29,12 @@ void main() {
     test('deployment-managed platforms get safe updater defaults', () async {
       final PlatformServices platform = _PlatformOnly();
 
+      expect((await platform.loadAppVersion()).version, 'unknown');
       expect(platform.appUpdateSupport, AppUpdateSupport.unavailable);
+      expect(
+        platform.appUpdateUnavailableReason,
+        contains('package or deployment'),
+      );
       expect(platform.appUpdateStatus.phase, AppUpdatePhase.idle);
       expect(await platform.appUpdateEvents.toList(), isEmpty);
       await platform.setupAppUpdater();
@@ -58,7 +63,9 @@ void main() {
         );
         final PlatformServices platform = fake;
 
+        expect((await platform.loadAppVersion()).version, '0.8.4');
         expect(platform.appUpdateSupport, AppUpdateSupport.native);
+        expect(platform.appUpdateUnavailableReason, isNull);
         await platform.setupAppUpdater();
         await platform.checkForAppUpdates();
         await platform.installAppUpdate();
@@ -68,6 +75,7 @@ void main() {
         platform.quitDuplicateInstance();
 
         expect(fake.setupAppUpdaterCalls, 1);
+        expect(fake.loadAppVersionCalls, 1);
         expect(fake.checkForAppUpdatesCalls, 1);
         expect(fake.installAppUpdateCalls, 1);
         expect(fake.completeAppUpdateCalls, 1);

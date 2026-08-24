@@ -12,6 +12,7 @@ import 'package:heimdallm/core/platform/platform_services.dart';
 class FakePlatformServices
     implements
         PlatformServices,
+        AppVersionPlatformCapability,
         AppUpdatePlatformCapability,
         DuplicateInstancePlatformCapability {
   FakePlatformServices({
@@ -22,11 +23,18 @@ class FakePlatformServices
     this.githubToken,
     this.daemonBinaryPath,
     this.appUpdateSupport = AppUpdateSupport.unavailable,
+    String? appUpdateUnavailableReason,
+    this.appVersion = const AppVersionInfo(version: '0.8.4'),
     this.pendingUpdateVersion,
     this.pendingUpdateError,
     this.completeUpdateError,
     AppUpdateStatus? appUpdateStatus,
   }) : _env = env ?? const {},
+       _appUpdateUnavailableReason =
+           appUpdateUnavailableReason ??
+           (appUpdateSupport == AppUpdateSupport.native
+               ? null
+               : 'This test build cannot update itself.'),
        _appUpdateStatus = appUpdateStatus ?? const AppUpdateStatus.idle();
 
   @override
@@ -38,6 +46,10 @@ class FakePlatformServices
   String? daemonBinaryPath;
   @override
   final AppUpdateSupport appUpdateSupport;
+  final String? _appUpdateUnavailableReason;
+  @override
+  String? get appUpdateUnavailableReason => _appUpdateUnavailableReason;
+  AppVersionInfo appVersion;
   String? pendingUpdateVersion;
   Object? pendingUpdateError;
   Object? completeUpdateError;
@@ -59,6 +71,7 @@ class FakePlatformServices
   int quitCalls = 0;
   int quitDuplicateInstanceCalls = 0;
   int setupAppUpdaterCalls = 0;
+  int loadAppVersionCalls = 0;
   int checkForAppUpdatesCalls = 0;
   int installAppUpdateCalls = 0;
   int completeAppUpdateCalls = 0;
@@ -144,6 +157,12 @@ class FakePlatformServices
 
   @override
   Future<void> setupAppUpdater() async => setupAppUpdaterCalls++;
+
+  @override
+  Future<AppVersionInfo> loadAppVersion() async {
+    loadAppVersionCalls++;
+    return appVersion;
+  }
 
   @override
   AppUpdateStatus get appUpdateStatus => _appUpdateStatus;

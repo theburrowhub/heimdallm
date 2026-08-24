@@ -349,6 +349,136 @@ func TestHandlerGetPR(t *testing.T) {
 	}
 }
 
+func TestPRResponsesExposeDurableActiveAndFailureStatus(t *testing.T) {
+	srv, s := setupServer(t)
+	now := time.Date(2026, 8, 24, 10, 30, 0, 0, time.UTC)
+	id, err := s.UpsertPR(&store.PR{
+		GithubID: 1025, Repo: "org/repo", Number: 1025, Title: "review me",
+		Author: "a", URL: "u", State: "open", UpdatedAt: now, FetchedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AdvanceReviewRetryBackoff(id, "head-sha", now); err != nil {
+		t.Fatal(err)
+	}
+
+	getListStatus := func() map[string]any {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/prs", nil)
+		w := httptest.NewRecorder()
+		srv.Router().ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET /prs status = %d, body %s", w.Code, w.Body.String())
+		}
+		var prs []map[string]any
+		if err := json.NewDecoder(w.Body).Decode(&prs); err != nil {
+			t.Fatal(err)
+		}
+		if len(prs) != 1 {
+			t.Fatalf("GET /prs count = %d, want 1", len(prs))
+		}
+		status, ok := prs[0]["review_status"].(map[string]any)
+		if !ok {
+			t.Fatalf("review_status missing from list response: %#v", prs[0])
+		}
+		return status
+	}
+
+	active := getListStatus()
+	if active["active"] != true || active["head_sha"] != "head-sha" || active["error"] != "" {
+		t.Fatalf("active list status = %#v", active)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/prs/"+itoa(id), nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /prs/{id} status = %d, body %s", w.Code, w.Body.String())
+	}
+	var detail map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&detail); err != nil {
+		t.Fatal(err)
+	}
+	detailPR, ok := detail["pr"].(map[string]any)
+	if !ok {
+		t.Fatalf("detail PR missing: %#v", detail)
+	}
+	detailStatus, ok := detailPR["review_status"].(map[string]any)
+	if !ok || detailStatus["active"] != true {
+		t.Fatalf("active detail status = %#v", detailStatus)
+	}
+
+	failedAt := now.Add(5 * time.Minute)
+	if err := s.MarkReviewRetryFailure(id, "head-sha", failedAt, "Review timed out before completion."); err != nil {
+		t.Fatal(err)
+	}
+	failed := getListStatus()
+	if failed["active"] != false || failed["error"] != "Review timed out before completion." ||
+		failed["failed_at"] != failedAt.Format(time.RFC3339) ||
+		failed["retry_at"] != failedAt.Add(5*time.Minute).Format(time.RFC3339) {
+		t.Fatalf("terminal list status = %#v", failed)
+	}
+}
+
+func TestHandlerCancelReviewIsScopedToRequestedPR(t *testing.T) {
+	srv, _ := setupServer(t)
+	var cancelledID int64
+	srv.SetCancelReviewFn(func(prID int64) (bool, error) {
+		cancelledID = prID
+		return prID == 73, nil
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/prs/73/cancel", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted || cancelledID != 73 {
+		t.Fatalf("cancel exact PR = status %d, callback id %d, body %s", w.Code, cancelledID, w.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/prs/74/cancel", nil)
+	w = httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusConflict || cancelledID != 74 {
+		t.Fatalf("inactive PR cancel = status %d, callback id %d, body %s", w.Code, cancelledID, w.Body.String())
+	}
+}
+
+func TestHandlerCancelReviewReportsUnavailableAndCallbackErrors(t *testing.T) {
+	t.Run("invalid id", func(t *testing.T) {
+		srv, _ := setupServer(t)
+		req := httptest.NewRequest(http.MethodPost, "/prs/not-a-number/cancel", nil)
+		w := httptest.NewRecorder()
+		srv.Router().ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", w.Code)
+		}
+	})
+
+	t.Run("not configured", func(t *testing.T) {
+		srv, _ := setupServer(t)
+		req := httptest.NewRequest(http.MethodPost, "/prs/1/cancel", nil)
+		w := httptest.NewRecorder()
+		srv.Router().ServeHTTP(w, req)
+		if w.Code != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want 503", w.Code)
+		}
+	})
+
+	t.Run("callback failure", func(t *testing.T) {
+		srv, _ := setupServer(t)
+		srv.SetCancelReviewFn(func(int64) (bool, error) {
+			return false, fmt.Errorf("signal failed")
+		})
+		req := httptest.NewRequest(http.MethodPost, "/prs/1/cancel", nil)
+		w := httptest.NewRecorder()
+		srv.Router().ServeHTTP(w, req)
+		if w.Code != http.StatusInternalServerError || strings.Contains(w.Body.String(), "signal failed") {
+			t.Fatalf("callback failure = status %d, body %s", w.Code, w.Body.String())
+		}
+	})
+}
+
 func TestHandlerGetConfig(t *testing.T) {
 	srv, _ := setupServer(t)
 	req := httptest.NewRequest("GET", "/config", nil)

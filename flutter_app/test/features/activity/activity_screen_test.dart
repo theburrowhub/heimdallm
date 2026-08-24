@@ -215,14 +215,14 @@ void main() {
     expect((tiles[1].title as Text).data, 'zeta');
   });
 
-  testWidgets('ADD dialog validates a PR URL submitted from the keyboard', (
+  testWidgets('Add PR dialog validates a PR URL submitted from the keyboard', (
     tester,
   ) async {
     final api = MockApiClient();
     await tester.pumpWidget(_scope(value: emptyPage, api: api));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('ADD'));
+    await tester.tap(find.text('Add PR'));
     await tester.pumpAndSettle();
     expect(find.text('Add a pull request'), findsOneWidget);
 
@@ -234,7 +234,7 @@ void main() {
     verifyNever(() => api.addPRByUrl(any()));
   });
 
-  testWidgets('ADD dialog shows daemon errors and allows retry', (
+  testWidgets('Add PR dialog shows daemon errors and allows retry', (
     tester,
   ) async {
     final api = MockApiClient();
@@ -242,7 +242,7 @@ void main() {
     await tester.pumpWidget(_scope(value: emptyPage, api: api));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('ADD'));
+    await tester.tap(find.text('Add PR'));
     await tester.pumpAndSettle();
     await tester.enterText(
       find.byType(TextField),
@@ -259,7 +259,7 @@ void main() {
     ).called(1);
   });
 
-  testWidgets('ADD dialog closes and confirms a successful submission', (
+  testWidgets('Add PR dialog closes and confirms a successful submission', (
     tester,
   ) async {
     final api = MockApiClient();
@@ -268,7 +268,7 @@ void main() {
     await tester.pumpWidget(_scope(value: emptyPage, api: api));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('ADD'));
+    await tester.tap(find.text('Add PR'));
     await tester.pumpAndSettle();
     await tester.enterText(
       find.byType(TextField),
@@ -290,12 +290,12 @@ void main() {
     );
   });
 
-  testWidgets('ADD dialog can be cancelled', (tester) async {
+  testWidgets('Add PR dialog can be cancelled', (tester) async {
     final api = MockApiClient();
     await tester.pumpWidget(_scope(value: emptyPage, api: api));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('ADD'));
+    await tester.tap(find.text('Add PR'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Cancel'));
     await tester.pumpAndSettle();

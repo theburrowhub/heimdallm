@@ -272,7 +272,7 @@ func TestRun_CleansDetachedDescendantAfterOrdinarySuccess(t *testing.T) {
 		t.Fatalf("close pid write end: %v", err)
 	}
 	descendant := readPID(t, pidR)
-	if processRunning(descendant) {
+	if !waitForProcessStop(descendant, time.Second) {
 		_ = syscall.Kill(descendant, syscall.SIGKILL)
 		t.Fatalf("detached descendant %d was still running when Run returned", descendant)
 	}
@@ -527,7 +527,7 @@ func TestRun_ReportsSuccessWhenCleanExitLeavesADescendantHoldingThePipes(t *test
 	if code := cmd.ProcessState.ExitCode(); code != 0 {
 		t.Errorf("exit code = %d, want 0", code)
 	}
-	if processRunning(descendant) {
+	if !waitForProcessStop(descendant, time.Second) {
 		_ = syscall.Kill(descendant, syscall.SIGKILL)
 		t.Fatalf("descendant %d was still running when Run returned", descendant)
 	}
@@ -585,4 +585,18 @@ func processRunning(pid int) bool {
 		}
 	}
 	return syscall.Kill(pid, 0) == nil
+}
+
+// A successful group signal can return just before the scheduler has delivered
+// SIGKILL to every member. Give that kernel transition a short bounded window
+// instead of turning ordinary CI load into a false survivor report.
+func waitForProcessStop(pid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for processRunning(pid) {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return true
 }

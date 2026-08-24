@@ -39,7 +39,10 @@ func TestExecuteRawKeepsOutputWhenDescendantHoldsPipesAfterSuccess(t *testing.T)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	e := executor.New()
-	out, err := e.ExecuteRaw("claude", "prompt", executor.ExecOptions{Timeout: time.Minute})
+	// The direct CLI exits before this deadline, then WaitDelay spends longer
+	// draining the inherited pipes. Expiring the wall clock during that drain
+	// must not turn the already-successful exit into a timeout.
+	out, err := e.ExecuteRaw("claude", "prompt", executor.ExecOptions{Timeout: time.Second})
 
 	// Clean up the descendant regardless of the outcome.
 	t.Cleanup(func() {

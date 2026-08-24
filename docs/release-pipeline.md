@@ -45,12 +45,14 @@ promotes the mutable GHCR aliases.
 
 ## Integrated desktop updates
 
-Release builds check once every 24 hours. A newer stable release is announced
-with a persistent dashboard banner, a desktop notification, and an **Update
-now** action in both the app and the system-tray menu.
+Desktop builds with a configured native updater check once every 24 hours. A
+newer stable release is announced with a persistent dashboard banner, a desktop
+notification, and an **Update now** action in both the app and the system-tray
+menu.
 
-- **macOS** uses Sparkle's signed appcast, Developer ID validation, and atomic
-  bundle replacement.
+- **macOS** uses Sparkle's Ed25519-signed appcast and archive, verifies the
+  archive before extraction, and performs atomic bundle replacement. Official
+  releases are additionally signed and notarized with Developer ID.
 - **Linux AppImage** downloads and checksum-verifies the new AppImage, keeps the
   previous image as a rollback copy, then atomically replaces and relaunches it.
 - **Linux `.deb` / `.rpm`** downloads the matching package, verifies it against
@@ -114,13 +116,23 @@ framework or exposing its release tools. Every release job:
 
 The app downloads only the appcast at
 `releases/latest/download/appcast.xml`. The appcast and archive both require the
-Ed25519 public key embedded in `Info.plist`; Sparkle also validates the Apple
-code-signing identity before replacement. Signed-feed failures never expire or
-fall back to an unsigned feed (`SUSignedFeedFailureExpirationInterval = 0`).
+Ed25519 public key embedded in `Info.plist`, and Sparkle validates the archive
+before extraction (`SUVerifyUpdateBeforeExtraction = true`). Signed-feed
+failures never expire or fall back to an unsigned feed
+(`SUSignedFeedFailureExpirationInterval = 0`). This Ed25519 trust chain also
+protects ad-hoc local builds, so they may consume the production updater without
+a Developer ID certificate on the currently installed bundle.
 
 The first release containing Sparkle must be installed manually from its signed
 DMG because older versions have no updater. Every later signed release can be
 installed in place from **Check for updates**.
+
+The updater becomes operational only after the release workflow publishes
+`appcast.xml` and its signed enclosure alongside the DMG. If the public
+`releases/latest/download/appcast.xml` URL is missing (for example, while the
+next release is still a draft), checks fail closed and the error remains visible
+in Settings and the system tray. Publish the next release through the current
+workflow; do not hand-author or upload an unsigned appcast as a workaround.
 
 ### Required GitHub Actions secrets
 

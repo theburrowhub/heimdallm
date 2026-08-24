@@ -10,6 +10,7 @@ import 'package:heimdallm/core/api/api_client.dart';
 import 'package:heimdallm/core/daemon/daemon_startup.dart';
 import 'package:heimdallm/core/models/pr.dart';
 import 'package:heimdallm/core/models/review.dart';
+import 'package:heimdallm/core/models/review_status.dart';
 import 'package:heimdallm/core/platform/platform_services_provider.dart';
 import 'package:heimdallm/features/config/config_providers.dart';
 import 'package:heimdallm/features/dashboard/activity_filters.dart';
@@ -41,6 +42,7 @@ PR _pr({
   String repo = 'org/repo',
   int number = 42,
   Review? latestReview,
+  ReviewExecutionStatus? reviewStatus,
 }) => PR(
   id: id,
   githubId: 1000 + id,
@@ -52,6 +54,7 @@ PR _pr({
   state: 'open',
   updatedAt: DateTime.utc(2026, 1, 1),
   latestReview: latestReview,
+  reviewStatus: reviewStatus,
 );
 
 Review _review(int id) => Review(
@@ -292,7 +295,9 @@ void main() {
       () => api.daemonReachable(),
     ).thenAnswer((_) async => PortOwner.foreign);
     when(() => api.daemonPort).thenReturn(8123);
-    final platform = FakePlatformServices(daemonBinaryPath: '/tmp/heimdallm');
+    final platform = FakePlatformServices(
+      daemonBinaryPath: '/tmp/heimdallm',
+    );
     await _pumpRestartHarness(tester, api: api, platform: platform);
 
     await tester.tap(find.text('Restart harness'));
@@ -308,9 +313,7 @@ void main() {
     when(() => api.shutdownDaemon()).thenAnswer((_) => releaseShutdown.future);
     when(() => api.daemonReachable()).thenAnswer((_) async => PortOwner.none);
     when(() => api.checkHealth()).thenAnswer((_) async => true);
-    final platform = FakePlatformServices(
-      daemonBinaryPath: '/tmp/heimdallm',
-    );
+    final platform = FakePlatformServices(daemonBinaryPath: '/tmp/heimdallm');
     await _pumpRestartHarness(tester, api: api, platform: platform);
 
     await tester.tap(find.text('Restart harness'));
@@ -456,6 +459,23 @@ void main() {
       expect(out, equals({'org/other:9': 5}));
     });
 
+    test('drops optimistic entry when daemon reports a terminal failure', () {
+      final pr = _pr(
+        repo: 'org/repo',
+        number: 1,
+        reviewStatus: ReviewExecutionStatus(
+          headSha: 'abc',
+          attempts: 1,
+          failedAt: DateTime(2026, 8, 24, 10, 30),
+          retryAt: DateTime(2026, 8, 24, 10, 35),
+          error: 'Review timed out before completion.',
+          active: false,
+        ),
+      );
+      final out = reconcileReviewing({'org/repo:1': 0}, [pr]);
+      expect(out, isEmpty);
+    });
+
     test('reconciles a mixed set (drops stale, keeps in-progress)', () {
       final stale = _pr(repo: 'org/a', number: 1, latestReview: _review(100));
       final fresh = _pr(
@@ -473,6 +493,9 @@ void main() {
   });
 
   testWidgets('DashboardScreen shows PR title', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1800, 700));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
     final pr = PR(
       id: 1,
       githubId: 101,
@@ -504,6 +527,198 @@ void main() {
 
     expect(find.textContaining('Fix critical bug'), findsOneWidget);
     expect(find.textContaining('org/repo'), findsOneWidget);
+
+    final toolbarFinder = find.byKey(
+      const Key('activity-filter-toolbar-row'),
+    );
+    final toolbar = tester.getRect(toolbarFinder);
+    final addButton = tester.getRect(
+      find.byKey(const Key('dashboard-add-pr-button')),
+    );
+    final searchField = tester.getRect(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is TextField && widget.decoration?.hintText == 'Search...',
+      ),
+    );
+
+    expect(addButton.right, closeTo(toolbar.right, 0.1));
+    expect(addButton.left, greaterThan(searchField.right));
+    for (final label in [
+      'Priority',
+      'Newest',
+      'PR',
+      'IT',
+      'DEV',
+      'Open',
+      'Closed',
+      'Org',
+      'Repo',
+    ]) {
+      final control = tester.getRect(
+        find.descendant(of: toolbarFinder, matching: find.text(label)),
+      );
+      expect(
+        (control.center.dy - addButton.center.dy).abs(),
+        lessThan(10),
+        reason: '$label and Add PR must share the toolbar row',
+      );
+    }
+  });
+
+  testWidgets(
+    'main Activity list Add PR control opens, validates, submits, and refreshes',
+    (tester) async {
+      final api = MockApiClient();
+      final platform = FakePlatformServices();
+      var prLoads = 0;
+      when(() => api.addPRByUrl(any())).thenAnswer((_) async => 73);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            apiClientProvider.overrideWithValue(api),
+            platformServicesProvider.overrideWithValue(platform),
+            daemonHealthProvider.overrideWith((ref) async => false),
+            prsProvider.overrideWith((ref) async {
+              prLoads++;
+              return <PR>[];
+            }),
+            issuesProvider.overrideWith((ref) async => []),
+            sseStreamProvider.overrideWith((ref) => const Stream.empty()),
+          ],
+          child: MaterialApp.router(
+            routerConfig: GoRouter(
+              routes: [
+                GoRoute(path: '/', builder: (_, _) => const DashboardScreen()),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final addControl = find.byKey(const Key('dashboard-add-pr-button'));
+      expect(addControl, findsOneWidget);
+      expect(find.text('Add PR'), findsOneWidget);
+      expect(find.text('No activity yet'), findsOneWidget);
+
+      await tester.tap(addControl);
+      await tester.pumpAndSettle();
+      expect(find.text('Add a pull request'), findsOneWidget);
+
+      final urlField = find.byKey(const Key('add-pr-url-field'));
+      await tester.enterText(urlField, 'not a GitHub PR');
+      await tester.tap(find.text('Add & review'));
+      await tester.pump();
+      expect(find.textContaining('Enter a GitHub PR link'), findsOneWidget);
+      verifyNever(() => api.addPRByUrl(any()));
+
+      await tester.enterText(
+        urlField,
+        'https://github.com/acme/widgets/pull/73',
+      );
+      await tester.tap(find.text('Add & review'));
+      await tester.pumpAndSettle();
+
+      verify(
+        () => api.addPRByUrl('https://github.com/acme/widgets/pull/73'),
+      ).called(1);
+      expect(prLoads, 2);
+      expect(find.text('Add a pull request'), findsNothing);
+      expect(
+        find.text('PR added — repository monitored and review started.'),
+        findsOneWidget,
+      );
+    },
+  );
+
+  testWidgets('failed review is visible with timestamp and retry action', (
+    tester,
+  ) async {
+    final pr = _pr(
+      reviewStatus: ReviewExecutionStatus(
+        headSha: 'abc',
+        attempts: 2,
+        failedAt: DateTime(2026, 8, 24, 10, 35),
+        retryAt: DateTime(2099, 8, 24, 10, 45),
+        error: 'Review timed out before completion.',
+        active: false,
+      ),
+    );
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          prsProvider.overrideWith((ref) => Future.value([pr])),
+          sseStreamProvider.overrideWith((ref) => const Stream.empty()),
+        ],
+        child: MaterialApp.router(
+          routerConfig: GoRouter(
+            routes: [
+              GoRoute(path: '/', builder: (_, _) => const DashboardScreen()),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('FAILED'), findsOneWidget);
+    expect(find.text('Retry'), findsOneWidget);
+    expect(find.text('PENDING'), findsNothing);
+    expect(
+      find.textContaining('Review timed out before completion.'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('failed 2026-08-24 10:35'), findsOneWidget);
+  });
+
+  testWidgets('active daemon status offers scoped cancellation from PR list', (
+    tester,
+  ) async {
+    final api = MockApiClient();
+    when(() => api.cancelReview(1)).thenAnswer((_) async {});
+    final pr = _pr(
+      reviewStatus: ReviewExecutionStatus(
+        headSha: 'abc',
+        attempts: 1,
+        failedAt: DateTime(2026, 8, 24, 10, 30),
+        retryAt: DateTime(2026, 8, 24, 10, 35),
+        error: '',
+        active: true,
+      ),
+    );
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          apiClientProvider.overrideWithValue(api),
+          prsProvider.overrideWith((ref) => Future.value([pr])),
+          sseStreamProvider.overrideWith((ref) => const Stream.empty()),
+        ],
+        child: MaterialApp.router(
+          routerConfig: GoRouter(
+            routes: [
+              GoRoute(path: '/', builder: (_, _) => const DashboardScreen()),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.text('Cancel'), findsOneWidget);
+    expect(find.text('PENDING'), findsNothing);
+    await tester.tap(find.text('Cancel'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('Cancel this review?'), findsOneWidget);
+    await tester.tap(find.text('Cancel review'));
+    await tester.pump();
+
+    verify(() => api.cancelReview(1)).called(1);
   });
 
   testWidgets('DashboardScreen shows loading indicator while fetching', (
@@ -526,6 +741,7 @@ void main() {
       ),
     );
     await tester.pump();
+    expect(find.byKey(const Key('dashboard-add-pr-button')), findsOneWidget);
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
   });
 
@@ -541,6 +757,7 @@ void main() {
 
     await _pumpOfflineDashboard(tester, api: api, platform: platform);
 
+    expect(find.byKey(const Key('dashboard-add-pr-button')), findsOneWidget);
     expect(find.text('Start Server'), findsOneWidget);
     await tester.tap(find.text('Start Server'));
     await tester.pump();

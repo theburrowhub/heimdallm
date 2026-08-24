@@ -203,6 +203,22 @@ class ApiClient {
     }
   }
 
+  Future<void> cancelReview(int prId) async {
+    final resp = await _client.post(
+      _uri('/prs/$prId/cancel'),
+      headers: await _authHeaders(),
+    );
+    if (resp.statusCode != 202) {
+      String message = 'POST /prs/$prId/cancel failed: ${resp.statusCode}';
+      try {
+        final body = jsonDecode(resp.body) as Map<String, dynamic>;
+        final error = body['error'] as String?;
+        if (error != null && error.isNotEmpty) message = error;
+      } catch (_) {}
+      throw ApiException(message);
+    }
+  }
+
   /// Adds a PR by its GitHub URL. The daemon adds the PR's repository to the
   /// monitored list (persisted to config) and reviews the PR immediately.
   /// Returns the created PR's store id (0 if the daemon deferred/omitted it).

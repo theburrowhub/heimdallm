@@ -19,8 +19,29 @@ import (
 	"github.com/heimdallm/daemon/internal/procgroup"
 )
 
-const executionTimeout = 5 * time.Minute
+// DefaultExecutionTimeout is the wall-clock budget for an AI CLI invocation
+// when the operator has not configured a global or per-agent override.
+// Repository-aware Codex reviews routinely need more than five minutes at high
+// reasoning effort, so the default must leave enough room for a normal review
+// to complete instead of terminating healthy work mid-analysis.
+const DefaultExecutionTimeout = 20 * time.Minute
 const cliHelpTimeout = 2 * time.Second
+
+// maxCancelledExecutionOutputRunes bounds the CLI detail retained in a manual
+// cancellation error. Cancellation is intentional, but the output written
+// immediately before termination is often the only useful operator diagnostic.
+// Keep the tail because CLIs conventionally emit their final error last.
+const maxCancelledExecutionOutputRunes = 4096
+
+// ErrExecutionCancelled marks an execution stopped by an explicit operator
+// request. It is distinct from a timeout or daemon shutdown so callers can
+// persist and display the correct terminal state.
+var ErrExecutionCancelled = errors.New("executor: execution cancelled manually")
+
+// ErrExecutionTimedOut marks an execution whose own configured deadline
+// expired. exec.CommandContext normally surfaces that as only "signal:
+// terminated", which is not enough for a durable user-facing diagnosis.
+var ErrExecutionTimedOut = errors.New("executor: execution timed out")
 
 // ReviewResult is the parsed JSON response from the AI CLI.
 type ReviewResult struct {
@@ -65,8 +86,18 @@ type ExecOptions struct {
 	NoSessionPersistence bool // --no-session-persistence
 
 	// Timeout overrides the default execution timeout for the CLI process.
-	// Zero = use default (5 minutes).
+	// Zero = use DefaultExecutionTimeout.
 	Timeout time.Duration
+	// ExecutionID is an internal correlation key used for exact, operator-
+	// initiated cancellation. It is not forwarded to the CLI.
+	ExecutionID string
+}
+
+func effectiveExecutionTimeout(override time.Duration) time.Duration {
+	if override > 0 {
+		return override
+	}
+	return DefaultExecutionTimeout
 }
 
 // OptionsForSelectedCLI removes provider-specific options when Detect falls
@@ -94,33 +125,137 @@ func OptionsForSelectedCLI(primary, selected string, opts ExecOptions) ExecOptio
 
 // Executor runs AI CLI tools for code review.
 type Executor struct {
-	// groupsMu guards inFlightGroups. Each handle owns a sentinel-led process
-	// group whose PGID remains reserved through TERM/KILL cleanup, so the
-	// shutdown path can sweep in-flight agents without a recycled-PGID race.
-	groupsMu       sync.Mutex
-	inFlightGroups map[int]*procgroup.Process
+	// groupsMu guards both in-flight indexes and every mutable trackedExecution
+	// field. Each handle owns a sentinel-led process group whose PGID remains
+	// reserved through TERM/KILL cleanup, so the shutdown path can sweep
+	// in-flight agents without a recycled-PGID race.
+	groupsMu           sync.Mutex
+	inFlightGroups     map[int]*trackedExecution
+	inFlightExecutions map[string]map[*trackedExecution]struct{}
+
+	// startProcess is a test seam for pausing between procgroup.Start returning
+	// and the process being attached to its already-registered execution. It is
+	// immutable after construction in production.
+	startProcess func(*exec.Cmd) (*procgroup.Process, error)
+}
+
+type trackedExecution struct {
+	process           *procgroup.Process
+	executionID       string
+	manuallyCancelled bool
 }
 
 // New creates a new Executor.
 func New() *Executor {
-	return &Executor{}
+	return &Executor{startProcess: procgroup.Start}
 }
 
-// trackGroup registers a running execution's owned process group.
-func (e *Executor) trackGroup(process *procgroup.Process) {
-	e.groupsMu.Lock()
-	defer e.groupsMu.Unlock()
-	if e.inFlightGroups == nil {
-		e.inFlightGroups = make(map[int]*procgroup.Process)
+// registerExecution makes an execution cancellable before procgroup.Start.
+// Multiple runs may intentionally share an execution ID (for example, a
+// manual review overlapping a poll-triggered review of the same PR), so the
+// correlation is one-to-many rather than a last-writer-wins map.
+func (e *Executor) registerExecution(executionID string) *trackedExecution {
+	executionID = strings.TrimSpace(executionID)
+	tracked := &trackedExecution{executionID: executionID}
+	if executionID == "" {
+		return tracked
 	}
-	e.inFlightGroups[process.ID()] = process
-}
 
-// untrackGroup forgets an execution's process group once Wait has returned.
-func (e *Executor) untrackGroup(pgid int) {
 	e.groupsMu.Lock()
 	defer e.groupsMu.Unlock()
-	delete(e.inFlightGroups, pgid)
+	if e.inFlightExecutions == nil {
+		e.inFlightExecutions = make(map[string]map[*trackedExecution]struct{})
+	}
+	correlated := e.inFlightExecutions[executionID]
+	if correlated == nil {
+		correlated = make(map[*trackedExecution]struct{})
+		e.inFlightExecutions[executionID] = correlated
+	}
+	correlated[tracked] = struct{}{}
+	return tracked
+}
+
+// attachGroup associates the process created by procgroup.Start with the
+// logical execution registered above. If cancellation won the startup race,
+// terminate the newly started group before returning it to the wait path.
+func (e *Executor) attachGroup(tracked *trackedExecution, process *procgroup.Process) error {
+	e.groupsMu.Lock()
+	defer e.groupsMu.Unlock()
+	tracked.process = process
+	if e.inFlightGroups == nil {
+		e.inFlightGroups = make(map[int]*trackedExecution)
+	}
+	e.inFlightGroups[process.ID()] = tracked
+	if !tracked.manuallyCancelled {
+		return nil
+	}
+	return process.Terminate()
+}
+
+// executionCancelled reports whether a cancellation arrived while the
+// execution was registered but before its subprocess was started.
+func (e *Executor) executionCancelled(tracked *trackedExecution) bool {
+	e.groupsMu.Lock()
+	defer e.groupsMu.Unlock()
+	return tracked.manuallyCancelled
+}
+
+// untrackExecution forgets an execution once Start failed or Wait returned,
+// and reports whether an exact manual cancellation targeted it.
+func (e *Executor) untrackExecution(tracked *trackedExecution) bool {
+	e.groupsMu.Lock()
+	defer e.groupsMu.Unlock()
+	if tracked.process != nil {
+		delete(e.inFlightGroups, tracked.process.ID())
+	}
+	if tracked.executionID != "" {
+		correlated := e.inFlightExecutions[tracked.executionID]
+		delete(correlated, tracked)
+		if len(correlated) == 0 {
+			delete(e.inFlightExecutions, tracked.executionID)
+		}
+	}
+	return tracked.manuallyCancelled
+}
+
+// TerminateExecution sends SIGTERM (and the procgroup-owned delayed SIGKILL)
+// to every execution with the requested correlation ID. The executor lock is
+// held across each signal so Wait cannot untrack a process between lookup and
+// marking it as a manual cancellation. Pending executions are marked before
+// procgroup.Start and terminated as soon as their group becomes available. It
+// never falls back to TerminateAll or touches another correlation ID.
+func (e *Executor) TerminateExecution(executionID string) (bool, error) {
+	executionID = strings.TrimSpace(executionID)
+	if executionID == "" {
+		return false, nil
+	}
+	e.groupsMu.Lock()
+	defer e.groupsMu.Unlock()
+	correlated := e.inFlightExecutions[executionID]
+	if len(correlated) == 0 {
+		return false, nil
+	}
+
+	var (
+		active bool
+		errs   []error
+	)
+	for tracked := range correlated {
+		if tracked.process == nil {
+			tracked.manuallyCancelled = true
+			active = true
+			continue
+		}
+		if err := tracked.process.Terminate(); err != nil {
+			if !errors.Is(err, os.ErrProcessDone) {
+				errs = append(errs, err)
+			}
+			continue
+		}
+		tracked.manuallyCancelled = true
+		active = true
+	}
+	return active, errors.Join(errs...)
 }
 
 // TerminateAll ends every execution this Executor still has in flight, SIGTERM
@@ -133,8 +268,8 @@ func (e *Executor) untrackGroup(pgid int) {
 func (e *Executor) TerminateAll() {
 	e.groupsMu.Lock()
 	groups := make([]*procgroup.Process, 0, len(e.inFlightGroups))
-	for _, process := range e.inFlightGroups {
-		groups = append(groups, process)
+	for _, tracked := range e.inFlightGroups {
+		groups = append(groups, tracked.process)
 	}
 	e.groupsMu.Unlock()
 
@@ -1274,10 +1409,7 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 		return nil, err
 	}
 
-	timeout := executionTimeout
-	if opts.Timeout > 0 {
-		timeout = opts.Timeout
-	}
+	timeout := effectiveExecutionTimeout(opts.Timeout)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
@@ -1348,16 +1480,46 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
+	// Register the logical execution before procgroup.Start. Starting a process
+	// is not atomic with publishing its cancellation handle; without this
+	// pending entry, a cancel request in that interval reports "not active" and
+	// the newly started agent continues running.
+	tracked := e.registerExecution(opts.ExecutionID)
+	if e.executionCancelled(tracked) {
+		e.untrackExecution(tracked)
+		return nil, fmt.Errorf("executor: run %s: %w", cli, ErrExecutionCancelled)
+	}
+
 	// procgroup.Start creates a sentinel-led group before starting the CLI. The
 	// sentinel reserves the PGID until Process.Wait has completed TERM/KILL
 	// cleanup, including the clean-exit/ErrWaitDelay case.
 	var pgid int
-	process, runErr := procgroup.Start(cmd)
+	startProcess := e.startProcess
+	if startProcess == nil {
+		startProcess = procgroup.Start
+	}
+	process, runErr := startProcess(cmd)
+	manuallyCancelled := false
 	if runErr == nil {
 		pgid = process.ID()
-		e.trackGroup(process)
+		if attachErr := e.attachGroup(tracked, process); attachErr != nil && !errors.Is(attachErr, os.ErrProcessDone) {
+			// A cancellation won the startup race but graceful termination
+			// failed. Escalate immediately so a failed signal cannot turn a
+			// successful Cancel response into a process that keeps running.
+			slog.Warn("executor: terminate process cancelled during startup", "pgid", pgid, "err", attachErr)
+			_ = process.Kill()
+		}
 		runErr = process.Wait()
-		e.untrackGroup(pgid)
+		manuallyCancelled = e.untrackExecution(tracked)
+	} else {
+		manuallyCancelled = e.untrackExecution(tracked)
+	}
+	if manuallyCancelled {
+		errDetail := cancelledExecutionOutput(&stdout, &stderr)
+		if errDetail == "" {
+			return nil, fmt.Errorf("executor: run %s: %w", cli, ErrExecutionCancelled)
+		}
+		return nil, fmt.Errorf("executor: run %s: %w (output: %s)", cli, ErrExecutionCancelled, errDetail)
 	}
 
 	// WaitDelay also fires when the command itself exited cleanly but a
@@ -1370,6 +1532,16 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 			"cli", cli, "bytes", stdout.Len(), "pgid", pgid)
 		return stdout.Bytes(), nil
 	}
+	if runErr != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		errDetail := strings.TrimSpace(stderr.String())
+		if errDetail == "" {
+			errDetail = strings.TrimSpace(stdout.String())
+		}
+		return nil, fmt.Errorf(
+			"executor: run %s: %w (cause: %v) (output: %s)",
+			cli, ErrExecutionTimedOut, runErr, errDetail,
+		)
+	}
 	if runErr != nil {
 		// Some CLIs (e.g. claude) write errors to stdout rather than stderr.
 		errDetail := strings.TrimSpace(stderr.String())
@@ -1380,6 +1552,21 @@ func (e *Executor) ExecuteRaw(cli, prompt string, opts ExecOptions) ([]byte, err
 	}
 
 	return stdout.Bytes(), nil
+}
+
+func cancelledExecutionOutput(stdout, stderr *bytes.Buffer) string {
+	detail := strings.TrimSpace(stderr.String())
+	if detail == "" {
+		detail = strings.TrimSpace(stdout.String())
+	}
+	if detail == "" {
+		return ""
+	}
+	runes := []rune(detail)
+	if len(runes) <= maxCancelledExecutionOutputRunes {
+		return detail
+	}
+	return "... (earlier output truncated)\n" + string(runes[len(runes)-maxCancelledExecutionOutputRunes:])
 }
 
 // killGroup is retained for the low-level translation tests in this package.

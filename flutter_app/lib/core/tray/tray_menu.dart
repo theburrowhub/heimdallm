@@ -26,6 +26,8 @@ class TrayMenu with TrayListener {
   void Function()? _onCheckForUpdates;
   void Function()? _onInstallUpdate;
   AppUpdateStatus _updateStatus = const AppUpdateStatus.idle();
+  String _currentVersion = 'unknown';
+  String? _updateUnavailableReason;
 
   /// Initialises the tray listener.
   /// [apiClient] must be the shared instance from the app's provider so that
@@ -38,12 +40,16 @@ class TrayMenu with TrayListener {
     required void Function() onQuit,
     void Function()? onCheckForUpdates,
     void Function()? onInstallUpdate,
+    String currentVersion = 'unknown',
+    String? updateUnavailableReason,
   }) {
     _api = apiClient;
     _onNavigate = onNavigate;
     _onQuit = onQuit;
     _onCheckForUpdates = onCheckForUpdates;
     _onInstallUpdate = onInstallUpdate;
+    _currentVersion = currentVersion;
+    _updateUnavailableReason = updateUnavailableReason;
     trayManager.addListener(this);
   }
 
@@ -116,6 +122,7 @@ class TrayMenu with TrayListener {
 
     // ── App controls ────────────────────────────────────────────────────
     items.add(MenuItem(key: 'open', label: 'Open Heimdallm'));
+    items.add(_info('Heimdallm $_currentVersion'));
     if (_onCheckForUpdates != null) {
       if (_updateStatus.updateAvailable) {
         items.add(
@@ -133,8 +140,30 @@ class TrayMenu with TrayListener {
           ),
         );
       } else {
+        final message = _updateStatus.message?.trim();
+        if (message != null && message.isNotEmpty) {
+          items.add(
+            _info(
+              _updateStatus.phase == AppUpdatePhase.error
+                  ? '⚠  $message'
+                  : '✓  $message',
+            ),
+          );
+        }
         items.add(MenuItem(key: 'check_updates', label: 'Check for Updates…'));
       }
+    } else {
+      final reason = _updateUnavailableReason?.trim();
+      items.add(
+        MenuItem(
+          key: 'updates_unavailable',
+          label: reason == null || reason.isEmpty
+              ? 'Updates unavailable'
+              : 'Updates unavailable — $reason',
+          toolTip: reason,
+          disabled: true,
+        ),
+      );
     }
     items.add(MenuItem.separator());
     items.add(MenuItem(key: 'quit', label: 'Quit'));

@@ -966,7 +966,12 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 				})
 				return nil
 			}
-			broker.Publish(sse.Event{Type: sse.EventReviewError, Data: sseData(map[string]any{"pr_number": pr.Number, "repo": pr.Repo, "error": err.Error()})})
+			broker.Publish(sse.Event{
+				Type: sse.EventReviewError,
+				Data: sseData(reviewErrorEventData(
+					s, 0, pr.Repo, pr.Number, pr.Title, err,
+				)),
+			})
 			return nil
 		}
 		if rev == nil {
@@ -2526,6 +2531,9 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	// triggerGuard and RunOptions.Force). One instance shared across all
 	// trigger invocations via the closure below.
 	manualReviewGuard := newTriggerGuard()
+	srv.SetCancelReviewFn(func(prID int64) (bool, error) {
+		return exec.TerminateExecution(pipeline.ReviewExecutionID(prID))
+	})
 	srv.SetTriggerReviewFn(func(prID int64) error {
 		ctx, releaseUpdateWork, err := acquireUpdateWork(runtimeCtx, updateWorkGate, workgate.KindReview)
 		if err != nil {
@@ -2614,8 +2622,8 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		// storing an ambiguous empty-HeadSHA row. The in-process guard above
 		// covers concurrency for this no-claim path.
 
-		// Persistent in-flight claim: keyed on (store pr_id, head_sha), the
-		// same mechanism as the poll loop so both paths share one guard across
+		// Persistent in-flight claim: keyed on (GitHub pr_id, head_sha), the
+		// same namespace as the poll loop so both paths share one guard across
 		// daemon restart / config reload. This is the ONLY duplicate-work
 		// defense left on the forced path: Force deliberately bypasses the
 		// pipeline's SHA/re-request dedup and the circuit breaker (explicit
@@ -2626,7 +2634,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		// error: a transient SQLite blip must not block a manual re-review.
 		var triggerClaimed bool
 		if ghPR.Head.SHA != "" {
-			ok, err := s.ClaimInFlightReview(pr.ID, ghPR.Head.SHA)
+			ok, err := s.ClaimInFlightReview(pr.GithubID, ghPR.Head.SHA)
 			if err != nil {
 				slog.Warn("trigger review: claim inflight failed, proceeding", "err", err)
 			} else if !ok {
@@ -2644,9 +2652,9 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		}
 		defer func() {
 			if triggerClaimed {
-				if err := s.ReleaseInFlightReview(pr.ID, ghPR.Head.SHA); err != nil {
+				if err := s.ReleaseInFlightReview(pr.GithubID, ghPR.Head.SHA); err != nil {
 					slog.Warn("trigger review: release inflight failed", "err", err,
-						"pr_id", pr.ID, "head_sha", ghPR.Head.SHA)
+						"pr_id", pr.GithubID, "head_sha", ghPR.Head.SHA)
 				}
 			}
 		}()
@@ -2682,7 +2690,12 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 				})
 				return err
 			}
-			broker.Publish(sse.Event{Type: sse.EventReviewError, Data: sseData(map[string]any{"pr_id": prID, "error": err.Error()})})
+			broker.Publish(sse.Event{
+				Type: sse.EventReviewError,
+				Data: sseData(reviewErrorEventData(
+					s, prID, pr.Repo, pr.Number, pr.Title, err,
+				)),
+			})
 			return err
 		}
 		// rev == nil → pipeline already emitted EventReviewSkipped with
@@ -3221,8 +3234,8 @@ func normalizeReloadStringSlice(v []string) []string {
 }
 
 // resolveExecutionTimeout returns the effective execution timeout for the CLI
-// process. Per-agent timeout wins over the global timeout; zero means "use
-// executor default (5m)".
+// process. Per-agent timeout wins over the global timeout; absent or invalid
+// values fall back to the executor's normal 20-minute budget.
 func resolveExecutionTimeout(globalTimeout, agentTimeout string) time.Duration {
 	// Per-agent wins
 	if agentTimeout != "" {
@@ -3236,8 +3249,7 @@ func resolveExecutionTimeout(globalTimeout, agentTimeout string) time.Duration {
 			return d
 		}
 	}
-	// Zero = executor uses its default (5m)
-	return 0
+	return executor.DefaultExecutionTimeout
 }
 
 // resolveRefinementTimeout lets the stage-specific cap win over generic
@@ -5637,6 +5649,48 @@ func buildRefinementRunOptions(
 		RequireWorkDirForRefinement: true,
 	}
 	return opts, releaseRepoContext, nil
+}
+
+func reviewErrorEventData(
+	s *store.Store,
+	prID int64,
+	repo string,
+	prNumber int,
+	prTitle string,
+	err error,
+) map[string]any {
+	data := map[string]any{
+		"repo":      repo,
+		"pr_number": prNumber,
+		"pr_title":  prTitle,
+		"error":     pipeline.UserFacingReviewError(err),
+	}
+	if errors.Is(err, executor.ErrExecutionCancelled) {
+		data["reason"] = "manual_cancelled"
+	}
+	if prID == 0 && repo != "" && prNumber > 0 {
+		if pr, lookupErr := s.GetPRByRepoNumber(repo, prNumber); lookupErr != nil {
+			slog.Warn("review error event: PR lookup failed",
+				"repo", repo, "pr_number", prNumber, "err", lookupErr)
+		} else {
+			prID = pr.ID
+		}
+	}
+	if prID == 0 {
+		return data
+	}
+	data["pr_id"] = prID
+	status, statusErr := s.LatestReviewExecutionStatusForPR(prID)
+	if statusErr != nil {
+		slog.Warn("review error event: failure status lookup failed", "pr_id", prID, "err", statusErr)
+		return data
+	}
+	if status != nil {
+		data["attempts"] = status.Attempts
+		data["failed_at"] = status.FailedAt
+		data["retry_at"] = status.RetryAt
+	}
+	return data
 }
 
 // sseData serializes a map to a compact JSON string for SSE event Data fields.

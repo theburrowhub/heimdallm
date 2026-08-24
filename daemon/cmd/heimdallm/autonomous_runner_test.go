@@ -212,6 +212,67 @@ func TestStripCodeFences(t *testing.T) {
 	}
 }
 
+type recordingCoordinationCommentExecutor struct {
+	primary  string
+	fallback string
+	cli      string
+	prompt   string
+	opts     executor.ExecOptions
+}
+
+func (r *recordingCoordinationCommentExecutor) Detect(primary, fallback string) (string, error) {
+	r.primary = primary
+	r.fallback = fallback
+	return "codex", nil
+}
+
+func (r *recordingCoordinationCommentExecutor) ExecuteRaw(
+	cli, prompt string,
+	opts executor.ExecOptions,
+) ([]byte, error) {
+	r.cli = cli
+	r.prompt = prompt
+	r.opts = opts
+	return []byte("  I can pick this up. Please chime in if you are already working on it.  "), nil
+}
+
+func TestCoordinationCommentGeneratorUsesShortExecutionTimeout(t *testing.T) {
+	cfg := &config.Config{AI: config.AIConfig{
+		Primary:  "codex",
+		Fallback: "claude",
+	}}
+	runner := &recordingCoordinationCommentExecutor{}
+	gen := &coordinationCommentGen{
+		runner: runner,
+		cfg:    &cfg,
+		cfgMu:  &sync.Mutex{},
+	}
+
+	comment, err := gen.GenerateCoordinationComment(context.Background(), autonomous.Candidate{
+		Repo:   "org/repo",
+		Number: 42,
+		Title:  "Coordinate safely",
+	})
+	if err != nil {
+		t.Fatalf("GenerateCoordinationComment() error = %v", err)
+	}
+	if runner.primary != "codex" || runner.fallback != "claude" {
+		t.Fatalf("Detect inputs = (%q, %q), want (codex, claude)", runner.primary, runner.fallback)
+	}
+	if runner.cli != "codex" {
+		t.Fatalf("ExecuteRaw CLI = %q, want codex", runner.cli)
+	}
+	if runner.opts.Timeout != 5*time.Minute {
+		t.Fatalf("coordination comment timeout = %v, want 5m", runner.opts.Timeout)
+	}
+	if !strings.Contains(runner.prompt, "Issue: #42") {
+		t.Fatalf("coordination prompt does not contain the candidate issue: %q", runner.prompt)
+	}
+	if want := "I can pick this up. Please chime in if you are already working on it."; comment != want {
+		t.Fatalf("comment = %q, want %q", comment, want)
+	}
+}
+
 type recordingAutonomousStageRunner struct {
 	err           error
 	prNumber      int

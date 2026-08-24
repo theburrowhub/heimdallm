@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart'
 import 'package:flutter/painting.dart' show Size;
 import 'package:flutter/services.dart' show MethodCall, MethodChannel;
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
 import '../api/api_client.dart';
@@ -43,6 +44,8 @@ typedef DaemonBinaryPathResolver = String? Function();
 @visibleForTesting
 typedef DetachedAppRestarter =
     Future<void> Function(int currentPID, String executablePath);
+@visibleForTesting
+typedef PlatformAppVersionLoader = Future<AppVersionInfo> Function();
 
 const _defaultProcessTimeout = Duration(seconds: 7);
 const _processKillGrace = Duration(seconds: 1);
@@ -91,6 +94,7 @@ class DesktopPlatformServices
     with WindowListener
     implements
         PlatformServices,
+        AppVersionPlatformCapability,
         AppUpdatePlatformCapability,
         DuplicateInstancePlatformCapability {
   DesktopPlatformServices({
@@ -112,6 +116,7 @@ class DesktopPlatformServices
     @visibleForTesting bool? enableNativeAppUpdates,
     @visibleForTesting LinuxAppUpdater? linuxAppUpdater,
     @visibleForTesting DetachedAppRestarter? detachedAppRestarter,
+    @visibleForTesting PlatformAppVersionLoader? appVersionLoader,
     @visibleForTesting Duration processTimeout = const Duration(seconds: 10),
   }) : _apiPort = apiPort,
        _tokenPath = tokenPath,
@@ -148,6 +153,7 @@ class DesktopPlatformServices
        _linuxAppUpdater = linuxAppUpdater,
        _detachedAppRestarter =
            detachedAppRestarter ?? _startAppAfterCurrentProcessExits,
+       _appVersionLoader = appVersionLoader ?? _loadPackageVersion,
        _methodInvoker =
            methodInvoker ??
            ((method, arguments) =>
@@ -155,8 +161,8 @@ class DesktopPlatformServices
        _usesDefaultMethodChannel = methodInvoker == null,
        _nativeAppUpdatesRequested =
            enableNativeAppUpdates ??
-           (((isMacOS ?? Platform.isMacOS) || (isLinux ?? Platform.isLinux)) &&
-               kReleaseMode);
+           ((isMacOS ?? Platform.isMacOS) ||
+               ((isLinux ?? Platform.isLinux) && kReleaseMode));
 
   final int _apiPort;
   final String? _tokenPath;
@@ -175,6 +181,7 @@ class DesktopPlatformServices
   final DaemonBinaryPathResolver _daemonBinaryPathResolver;
   LinuxAppUpdater? _linuxAppUpdater;
   final DetachedAppRestarter _detachedAppRestarter;
+  final PlatformAppVersionLoader _appVersionLoader;
   final PlatformMethodInvoker _methodInvoker;
   final bool _usesDefaultMethodChannel;
   final bool _nativeAppUpdatesRequested;
@@ -191,6 +198,11 @@ class DesktopPlatformServices
   bool _activationPending = false;
   String? _cachedToken;
   void Function(String location)? _onTrayNavigate;
+
+  static Future<AppVersionInfo> _loadPackageVersion() async {
+    final info = await PackageInfo.fromPlatform();
+    return AppVersionInfo(version: info.version, buildNumber: info.buildNumber);
+  }
 
   String get _resolvedTokenPath => _tokenPath ?? '$_resolvedDataDir/api_token';
 
@@ -474,6 +486,13 @@ class DesktopPlatformServices
 
   @override
   Future<void> setupTray({required ApiClient apiClient}) async {
+    AppVersionInfo version;
+    try {
+      version = await loadAppVersion();
+    } catch (error) {
+      debugPrint('could not read application version for tray: $error');
+      version = const AppVersionInfo(version: 'unknown');
+    }
     await trayManager.setIcon(
       Platform.isLinux ? 'assets/tray_icon@2x.png' : 'assets/tray_icon.png',
     );
@@ -499,6 +518,8 @@ class DesktopPlatformServices
       onInstallUpdate: appUpdateSupport == AppUpdateSupport.native
           ? () => _runTrayUpdateAction(installAppUpdate)
           : null,
+      currentVersion: version.displayVersion,
+      updateUnavailableReason: appUpdateUnavailableReason,
     );
     await TrayMenu.instance.setUpdateState(_appUpdateStatus);
   }
@@ -644,6 +665,30 @@ class DesktopPlatformServices
       : AppUpdateSupport.unavailable;
 
   @override
+  String? get appUpdateUnavailableReason {
+    if (_nativeAppUpdatesEnabled) return null;
+    final setupError = _appUpdaterSetupError;
+    if (setupError != null) {
+      return 'Automatic updates could not be initialized: $setupError';
+    }
+    if (_isMacOS) {
+      if (!_nativeAppUpdatesRequested) {
+        return 'Automatic updates are disabled for this build.';
+      }
+      return 'Automatic updates are unavailable because the embedded Sparkle '
+          'signature configuration is incomplete.';
+    }
+    if (_isLinux) {
+      return 'This Linux installation cannot update itself. Install the '
+          'official AppImage or packaged release to enable automatic updates.';
+    }
+    return 'Automatic updates are unavailable on this platform.';
+  }
+
+  @override
+  Future<AppVersionInfo> loadAppVersion() => _appVersionLoader();
+
+  @override
   AppUpdateStatus get appUpdateStatus => _appUpdateStatus;
 
   @override
@@ -740,7 +785,17 @@ class DesktopPlatformServices
         message: 'Checking for updates…',
       ),
     );
-    await _methodInvoker('checkForUpdates', null);
+    try {
+      await _methodInvoker('checkForUpdates', null);
+    } catch (error) {
+      _publishAppUpdateStatus(
+        AppUpdateStatus(
+          phase: AppUpdatePhase.error,
+          message: 'Could not check for updates: $error',
+        ),
+      );
+      rethrow;
+    }
   }
 
   @override
@@ -756,7 +811,17 @@ class DesktopPlatformServices
       _processExit(0);
       return;
     }
-    await _methodInvoker('installUpdate', null);
+    try {
+      await _methodInvoker('installUpdate', null);
+    } catch (error) {
+      _publishAppUpdateStatus(
+        AppUpdateStatus(
+          phase: AppUpdatePhase.error,
+          message: 'Update failed: $error',
+        ),
+      );
+      rethrow;
+    }
   }
 
   @override
@@ -774,11 +839,11 @@ class DesktopPlatformServices
       );
       if (recoveryType != FileSystemEntityType.notFound) {
         final setupDetail = _appUpdaterSetupError == null
-            ? 'the native updater was rejected by its signing/configuration gate'
+            ? 'the native updater was rejected by its integrity configuration gate'
             : 'native updater setup failed: $_appUpdaterSetupError';
         throw StateError(
           'A protected app-update recovery journal exists at $recoveryPath, '
-          'but $setupDetail. Daemon startup is blocked until the signed '
+          'but $setupDetail. Daemon startup is blocked until the verified '
           'updater can resume recovery.',
         );
       }

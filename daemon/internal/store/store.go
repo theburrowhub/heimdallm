@@ -158,6 +158,8 @@ CREATE TABLE IF NOT EXISTS review_retry_backoff (
   head_sha              TEXT    NOT NULL,
   consecutive_attempts  INTEGER NOT NULL,
   last_attempt_at       DATETIME NOT NULL,
+  last_error            TEXT    NOT NULL DEFAULT '',
+  active                INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (pr_id, head_sha)
 );
 CREATE INDEX IF NOT EXISTS idx_review_retry_backoff_attempt
@@ -324,8 +326,21 @@ func Open(dsn string) (*Store, error) {
 		head_sha              TEXT    NOT NULL,
 		consecutive_attempts  INTEGER NOT NULL,
 		last_attempt_at       DATETIME NOT NULL,
+		last_error            TEXT    NOT NULL DEFAULT '',
+		active                INTEGER NOT NULL DEFAULT 0,
 		PRIMARY KEY (pr_id, head_sha)
 	)`)
+	db.Exec("ALTER TABLE review_retry_backoff ADD COLUMN last_error TEXT NOT NULL DEFAULT ''")
+	db.Exec("ALTER TABLE review_retry_backoff ADD COLUMN active INTEGER NOT NULL DEFAULT 0")
+	// No execution survives construction of a new Store/daemon instance under
+	// this process's executor registry. Convert crash-stale active flags into a
+	// visible interrupted terminal state while retaining their cooldown.
+	db.Exec(`UPDATE review_retry_backoff
+		SET active = 0,
+			last_error = CASE WHEN last_error = ''
+				THEN 'Review was interrupted when Heimdallm stopped or restarted.'
+				ELSE last_error END
+		WHERE active <> 0`)
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_review_retry_backoff_attempt ON review_retry_backoff(last_attempt_at)")
 	// Aggregate failed/in-flight execution ledger. This is a new table rather
 	// than the legacy review_attempts table: old rows cannot distinguish

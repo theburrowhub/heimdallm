@@ -292,12 +292,12 @@ review_mode = "multi"
 How long the daemon waits for an AI CLI call to complete before killing it.
 
 ```bash
-HEIMDALLM_EXECUTION_TIMEOUT=20m   # default: 5m
+HEIMDALLM_EXECUTION_TIMEOUT=30m   # optional exceptional override; default: 20m
 ```
 
 ```toml
 [ai]
-execution_timeout = "20m"
+execution_timeout = "30m"
 ```
 
 The per-agent override takes precedence when set (see [AI Agents](#7-ai-agents)).
@@ -564,7 +564,7 @@ permission_mode        = "auto"         # default | auto | acceptEdits | dontAsk
 bare                   = false          # --bare (disables OAuth, requires API key)
 dangerously_skip_perms = false          # --dangerously-skip-permissions
 no_session_persistence = false          # --no-session-persistence
-execution_timeout      = "20m"          # per-agent override
+execution_timeout      = "30m"          # exceptional per-agent override
 
 [ai.agents.gemini]
 model         = "gemini-2.5-pro"
@@ -1332,7 +1332,7 @@ primary  = "claude"   # env: HEIMDALLM_AI_PRIMARY
 review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 
 # Global execution timeout for AI CLI calls.
-# execution_timeout = "20m"   # default: 5m — env: HEIMDALLM_EXECUTION_TIMEOUT
+# execution_timeout = "30m"   # default: 20m — env: HEIMDALLM_EXECUTION_TIMEOUT
 # refinement_timeout = "30m"  # deep issue refinement — env: HEIMDALLM_REFINEMENT_TIMEOUT
 
 # Issue pipeline ownership and promotion defaults.
@@ -1381,7 +1381,7 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # bare                   = false          # WARNING: disables OAuth — use ANTHROPIC_API_KEY
 # dangerously_skip_perms = false          # HTTP may disable; enable only in config.toml
 # no_session_persistence = false
-# execution_timeout      = "20m"          # per-agent override (overrides [ai].execution_timeout)
+# execution_timeout      = "30m"          # exceptional per-agent override
 
 # [ai.agents.gemini]
 # model         = "gemini-2.5-pro"
