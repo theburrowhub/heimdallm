@@ -112,6 +112,50 @@ void main() {
     },
   );
 
+  testWidgets('settings report an unavailable application version', (
+    tester,
+  ) async {
+    await tester.pumpWidget(_settingsApp(_FailingVersionPlatform()));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Version unavailable'), findsOneWidget);
+  });
+
+  testWidgets('settings surface update action failures', (tester) async {
+    final platform = _FailingUpdatePlatform();
+    await tester.pumpWidget(_settingsApp(platform));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('settings-update-action')));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('Could not update Heimdallm: Bad state: bridge unavailable'),
+      findsOneWidget,
+    );
+  });
+
+  for (final entry in <(AppUpdatePhase, String)>[
+    (AppUpdatePhase.checking, 'Checking for updates…'),
+    (AppUpdatePhase.installing, 'Installing the Heimdallm update…'),
+    (AppUpdatePhase.restarting, 'Restarting Heimdallm…'),
+  ]) {
+    testWidgets('settings render the ${entry.$1.name} lifecycle', (
+      tester,
+    ) async {
+      final platform = FakePlatformServices(
+        appUpdateSupport: AppUpdateSupport.native,
+        appUpdateStatus: AppUpdateStatus(phase: entry.$1),
+      );
+
+      await tester.pumpWidget(_settingsApp(platform));
+      await tester.pump();
+
+      expect(find.text(entry.$2), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    });
+  }
+
   testWidgets('settings install the update that is ready', (tester) async {
     final platform = FakePlatformServices(
       appUpdateSupport: AppUpdateSupport.native,
@@ -323,6 +367,13 @@ class _FailingUpdatePlatform extends FakePlatformServices {
   Future<void> checkForAppUpdates() async {
     checkForAppUpdatesCalls++;
     throw StateError('bridge unavailable');
+  }
+}
+
+class _FailingVersionPlatform extends FakePlatformServices {
+  @override
+  Future<AppVersionInfo> loadAppVersion() async {
+    throw StateError('bundle metadata unavailable');
   }
 }
 

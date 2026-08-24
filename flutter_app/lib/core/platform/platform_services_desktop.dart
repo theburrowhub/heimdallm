@@ -94,6 +94,7 @@ class DesktopPlatformServices
     with WindowListener
     implements
         PlatformServices,
+        AppVersionPlatformCapability,
         AppUpdatePlatformCapability,
         DuplicateInstancePlatformCapability {
   DesktopPlatformServices({

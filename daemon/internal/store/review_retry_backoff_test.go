@@ -172,12 +172,15 @@ func TestReviewRetryBackoff_ReportsStoredTimestampAndDatabaseErrors(t *testing.T
 		prID := seedRetryPR(t, s, 14)
 		if _, err := s.DB().Exec(`
 			INSERT INTO review_retry_backoff (
-				pr_id, head_sha, consecutive_attempts, last_attempt_at
-			) VALUES (?, ?, ?, ?)`, prID, "sha", 1, "not-a-time"); err != nil {
+				pr_id, head_sha, consecutive_attempts, last_attempt_at, active
+			) VALUES (?, ?, ?, ?, 1)`, prID, "sha", 1, "not-a-time"); err != nil {
 			t.Fatal(err)
 		}
 		if _, _, _, err := s.CheckReviewRetryBackoff(prID, "sha", time.Now()); err == nil || !strings.Contains(err.Error(), "parse review retry last_attempt_at") {
 			t.Fatalf("malformed timestamp error = %v", err)
+		}
+		if _, err := s.LatestReviewExecutionStatusForPR(prID); err == nil || !strings.Contains(err.Error(), "parse latest review execution time") {
+			t.Fatalf("malformed status timestamp error = %v", err)
 		}
 	})
 
@@ -195,6 +198,9 @@ func TestReviewRetryBackoff_ReportsStoredTimestampAndDatabaseErrors(t *testing.T
 		}
 		if err := s.MarkReviewRetryFailure(1, "sha", now, "failed"); err == nil {
 			t.Fatal("failure mark on closed database returned nil error")
+		}
+		if _, err := s.LatestReviewExecutionStatusForPR(1); err == nil {
+			t.Fatal("latest review execution status on closed database returned nil error")
 		}
 		if err := s.ClearReviewRetryBackoff(1, "sha"); err == nil {
 			t.Fatal("clear on closed database returned nil error")

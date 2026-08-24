@@ -31,6 +31,9 @@ sleep 600
 
 	e := executor.New()
 	defer e.TerminateAll()
+	if active, err := e.TerminateExecution(" \t "); err != nil || active {
+		t.Fatalf("blank execution cancellation = active %v, error %v", active, err)
+	}
 	firstDone := make(chan error, 1)
 	secondDone := make(chan error, 1)
 	go func() {

@@ -208,6 +208,29 @@ void main() {
     expect(checkCalls, 1);
   });
 
+  test('tray explains why application updates are unavailable', () async {
+    TrayMenu.instance.init(
+      apiClient: _MockApiClient(),
+      onNavigate: (_) {},
+      onQuit: () {},
+      currentVersion: '0.8.4',
+      updateUnavailableReason: 'Updater integrity configuration is incomplete.',
+    );
+
+    await TrayMenu.instance.setUpdateState(const AppUpdateStatus.idle());
+    final items = _latestMenuItems(trayCalls);
+
+    expect(
+      items,
+      contains(
+        containsPair(
+          'label',
+          'Updates unavailable — Updater integrity configuration is incomplete.',
+        ),
+      ),
+    );
+  });
+
   test('busy updater exposes a disabled progress item', () async {
     TrayMenu.instance.init(
       apiClient: _MockApiClient(),

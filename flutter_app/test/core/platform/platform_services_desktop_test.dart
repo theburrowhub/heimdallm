@@ -7,6 +7,7 @@ import 'package:heimdallm/core/daemon/daemon_lifecycle.dart';
 import 'package:heimdallm/core/platform/linux_app_updater.dart';
 import 'package:heimdallm/core/platform/platform_services.dart';
 import 'package:heimdallm/core/platform/platform_services_desktop.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
 class _FakeLinuxAppUpdater extends LinuxAppUpdater {
   _FakeLinuxAppUpdater({
@@ -758,6 +759,54 @@ else:
         expect(configuration['apiToken'], 'update-secret');
         expect(configuration['apiTokenPath'], tokenFile.path);
         expect(configuration['dataDir'], isNotEmpty);
+      },
+    );
+
+    test(
+      'loads bundle version and preserves native bridge update failures',
+      () async {
+        PackageInfo.setMockInitialValues(
+          appName: 'Heimdallm',
+          packageName: 'com.theburrowhub.heimdallm',
+          version: '0.8.4',
+          buildNumber: '548',
+          buildSignature: '',
+        );
+        final services = DesktopPlatformServices(
+          isMacOS: true,
+          enableNativeAppUpdates: true,
+          methodInvoker: (method, arguments) async {
+            if (method == 'configure') return true;
+            if (method == 'checkForUpdates' || method == 'installUpdate') {
+              throw StateError('$method failed');
+            }
+            return null;
+          },
+        );
+
+        final version = await services.loadAppVersion();
+        expect(version.displayVersion, '0.8.4 (build 548)');
+        await services.setupAppUpdater();
+
+        await expectLater(
+          services.checkForAppUpdates(),
+          throwsA(isA<StateError>()),
+        );
+        expect(services.appUpdateStatus.phase, AppUpdatePhase.error);
+        expect(
+          services.appUpdateStatus.message,
+          contains('checkForUpdates failed'),
+        );
+
+        await expectLater(
+          services.installAppUpdate(),
+          throwsA(isA<StateError>()),
+        );
+        expect(services.appUpdateStatus.phase, AppUpdatePhase.error);
+        expect(
+          services.appUpdateStatus.message,
+          contains('installUpdate failed'),
+        );
       },
     );
 

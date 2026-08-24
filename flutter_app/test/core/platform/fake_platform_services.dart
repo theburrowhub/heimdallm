@@ -12,6 +12,7 @@ import 'package:heimdallm/core/platform/platform_services.dart';
 class FakePlatformServices
     implements
         PlatformServices,
+        AppVersionPlatformCapability,
         AppUpdatePlatformCapability,
         DuplicateInstancePlatformCapability {
   FakePlatformServices({

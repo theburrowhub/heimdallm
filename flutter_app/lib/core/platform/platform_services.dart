@@ -182,11 +182,6 @@ abstract class PlatformServices {
   /// Sparkle and Flutter can postpone termination while the daemon drains.
   void quitApp();
 
-  // ── Application updates ────────────────────────────────────────────────
-
-  /// Returns the version metadata embedded in the running app.
-  Future<AppVersionInfo> loadAppVersion();
-
   // ── First-run setup / daemon spawn ──────────────────────────────────────
 
   Future<String?> detectGitHubToken();
@@ -210,6 +205,11 @@ abstract class PlatformServices {
   /// Returns user's repos, with gh CLI preferred on desktop and HTTP API
   /// fallback. Safe to call from shared code; on web it's HTTP-only.
   Future<List<String>> discoverReposFromPRs(String token);
+}
+
+/// Optional version-metadata boundary for installed application bundles.
+abstract interface class AppVersionPlatformCapability {
+  Future<AppVersionInfo> loadAppVersion();
 }
 
 /// Optional application-update boundary implemented only by platforms that
@@ -244,6 +244,13 @@ abstract interface class DuplicateInstancePlatformCapability {
 /// stays independent of the macOS updater and remains covered by its existing
 /// browser-only contract.
 extension OptionalPlatformCapabilities on PlatformServices {
+  Future<AppVersionInfo> loadAppVersion() async {
+    final platform = this;
+    return platform is AppVersionPlatformCapability
+        ? (platform as AppVersionPlatformCapability).loadAppVersion()
+        : const AppVersionInfo(version: 'unknown');
+  }
+
   AppUpdateSupport get appUpdateSupport {
     final platform = this;
     return platform is AppUpdatePlatformCapability

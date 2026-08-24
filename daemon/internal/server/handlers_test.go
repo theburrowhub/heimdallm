@@ -445,6 +445,16 @@ func TestHandlerCancelReviewIsScopedToRequestedPR(t *testing.T) {
 }
 
 func TestHandlerCancelReviewReportsUnavailableAndCallbackErrors(t *testing.T) {
+	t.Run("invalid id", func(t *testing.T) {
+		srv, _ := setupServer(t)
+		req := httptest.NewRequest(http.MethodPost, "/prs/not-a-number/cancel", nil)
+		w := httptest.NewRecorder()
+		srv.Router().ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", w.Code)
+		}
+	})
+
 	t.Run("not configured", func(t *testing.T) {
 		srv, _ := setupServer(t)
 		req := httptest.NewRequest(http.MethodPost, "/prs/1/cancel", nil)
