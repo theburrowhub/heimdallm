@@ -735,7 +735,13 @@ jobs:
       - name: Ad-hoc seal app bundle
         run: |
           set -euo pipefail
-          scripts/sign-macos-app.sh \
+          # A draft recovery checks out the historical tag for reproducible app
+          # sources, but release tooling must come from the workflow revision
+          # that was explicitly dispatched.
+          SIGN_TOOL="$RUNNER_TEMP/sign-macos-app.sh"
+          git show "${GITHUB_SHA}:scripts/sign-macos-app.sh" > "$SIGN_TOOL"
+          chmod +x "$SIGN_TOOL"
+          "$SIGN_TOOL" \
             "$APP" \
             - \
             flutter_app/macos/Runner/Release.entitlements
