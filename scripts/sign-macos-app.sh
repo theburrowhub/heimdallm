@@ -26,12 +26,16 @@ if [[ -n "${SIGNING_KEYCHAIN:-}" ]]; then
 fi
 
 timestamp_args=(--timestamp)
+runtime_args=(--options runtime)
 if [[ "$signing_identity" == "-" ]]; then
   timestamp_args=(--timestamp=none)
+  # Hardened runtime's library validation requires a real Team ID. Ad-hoc
+  # identities have none, so enabling it makes dyld reject bundled frameworks.
+  runtime_args=()
 fi
 
 # macOS still ships Bash 3.2, where expanding an empty array under `set -u`
-# fails. This guarded form expands to zero arguments when no keychain is used.
+# fails. These guarded forms expand to zero arguments when an option is unused.
 
 sign_nested() {
   local code_path=$1
@@ -44,7 +48,7 @@ sign_nested() {
       /usr/bin/codesign \
         --force \
         "${timestamp_args[@]}" \
-        --options runtime \
+        "${runtime_args[@]+"${runtime_args[@]}"}" \
         --preserve-metadata=entitlements \
         "${keychain_args[@]+"${keychain_args[@]}"}" \
         --sign "$signing_identity" \
@@ -54,7 +58,7 @@ sign_nested() {
     /usr/bin/codesign \
       --force \
       "${timestamp_args[@]}" \
-      --options runtime \
+      "${runtime_args[@]+"${runtime_args[@]}"}" \
       --preserve-metadata=identifier,entitlements \
       "${keychain_args[@]+"${keychain_args[@]}"}" \
       --sign "$signing_identity" \
@@ -64,7 +68,7 @@ sign_nested() {
   /usr/bin/codesign \
     --force \
     "${timestamp_args[@]}" \
-    --options runtime \
+    "${runtime_args[@]+"${runtime_args[@]}"}" \
     "${keychain_args[@]+"${keychain_args[@]}"}" \
     --sign "$signing_identity" \
     "$code_path"
@@ -109,7 +113,7 @@ done < <(
 /usr/bin/codesign \
   --force \
   "${timestamp_args[@]}" \
-  --options runtime \
+  "${runtime_args[@]+"${runtime_args[@]}"}" \
   --entitlements "$entitlements" \
   "${keychain_args[@]+"${keychain_args[@]}"}" \
   --sign "$signing_identity" \
