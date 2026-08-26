@@ -633,7 +633,7 @@ jobs:
             daemon/bin/macos/heimdalld-arm64 \
             daemon/bin/macos/heimdalld-amd64 \
             -output daemon/bin/heimdalld-universal
-          lipo -verify_arch arm64 x86_64 daemon/bin/heimdalld-universal
+          lipo daemon/bin/heimdalld-universal -verify_arch arm64 x86_64
           DAEMON_VERSION=$(daemon/bin/heimdalld-universal version)
           test "$DAEMON_VERSION" = "$VERSION" || {
             echo "::error::Bundled daemon reports $DAEMON_VERSION, expected $VERSION"
@@ -695,8 +695,8 @@ jobs:
           echo "Daemon binary:  ${DAEMON_SIZE} bytes"
           echo "Both binaries embedded and distinct"
 
-          lipo -verify_arch arm64 x86_64 "$APP/Contents/MacOS/Heimdallm"
-          lipo -verify_arch arm64 x86_64 "$APP/Contents/MacOS/heimdalld"
+          lipo "$APP/Contents/MacOS/Heimdallm" -verify_arch arm64 x86_64
+          lipo "$APP/Contents/MacOS/heimdalld" -verify_arch arm64 x86_64
           BUNDLE_VERSION=$(/usr/libexec/PlistBuddy \
             -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")
           test "$BUNDLE_VERSION" = "$VERSION" || {
