@@ -978,6 +978,7 @@ jobs:
       packages: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
       TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
       IMAGE_DIGEST: ${{ needs.goreleaser-daemon.outputs.digest }}
       EXPECTED_COMMIT: ${{ github.sha }}
