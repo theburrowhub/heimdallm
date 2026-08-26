@@ -1,5 +1,6 @@
 #!/bin/bash
-# Sign a Flutter + Sparkle app from the inside out with Developer ID.
+# Seal a Flutter + Sparkle app from the inside out with Developer ID or an
+# ad-hoc identity. Sparkle authenticates release updates with Ed25519.
 set -euo pipefail
 
 if [[ $# -ne 3 ]]; then
@@ -24,6 +25,14 @@ if [[ -n "${SIGNING_KEYCHAIN:-}" ]]; then
   keychain_args=(--keychain "$SIGNING_KEYCHAIN")
 fi
 
+timestamp_args=(--timestamp)
+if [[ "$signing_identity" == "-" ]]; then
+  timestamp_args=(--timestamp=none)
+fi
+
+# macOS still ships Bash 3.2, where expanding an empty array under `set -u`
+# fails. This guarded form expands to zero arguments when no keychain is used.
+
 sign_nested() {
   local code_path=$1
   if /usr/bin/codesign --display "$code_path" >/dev/null 2>&1; then
@@ -34,29 +43,29 @@ sign_nested() {
     if [[ "$code_path" == */Downloader.xpc ]]; then
       /usr/bin/codesign \
         --force \
-        --timestamp \
+        "${timestamp_args[@]}" \
         --options runtime \
         --preserve-metadata=entitlements \
-        "${keychain_args[@]}" \
+        "${keychain_args[@]+"${keychain_args[@]}"}" \
         --sign "$signing_identity" \
         "$code_path"
       return
     fi
     /usr/bin/codesign \
       --force \
-      --timestamp \
+      "${timestamp_args[@]}" \
       --options runtime \
       --preserve-metadata=identifier,entitlements \
-      "${keychain_args[@]}" \
+      "${keychain_args[@]+"${keychain_args[@]}"}" \
       --sign "$signing_identity" \
       "$code_path"
     return
   fi
   /usr/bin/codesign \
     --force \
-    --timestamp \
+    "${timestamp_args[@]}" \
     --options runtime \
-    "${keychain_args[@]}" \
+    "${keychain_args[@]+"${keychain_args[@]}"}" \
     --sign "$signing_identity" \
     "$code_path"
 }
@@ -99,10 +108,10 @@ done < <(
 # entitlements. --deep is verification-only; it is not used as a signing crutch.
 /usr/bin/codesign \
   --force \
-  --timestamp \
+  "${timestamp_args[@]}" \
   --options runtime \
   --entitlements "$entitlements" \
-  "${keychain_args[@]}" \
+  "${keychain_args[@]+"${keychain_args[@]}"}" \
   --sign "$signing_identity" \
   "$app_bundle"
 

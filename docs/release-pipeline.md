@@ -41,7 +41,7 @@ promotes the mutable GHCR aliases.
 | Docker image (GHCR) | GoReleaser `daemon/.goreleaser-docker.yml` | Yes |
 | Linux `.deb` / `.rpm` | GoReleaser nfpms `daemon/.goreleaser.yml` | Yes |
 | Linux `.AppImage` | appimagetool (manual) | No |
-| macOS `.dmg` + Sparkle appcast | Developer ID, notarytool, create-dmg, Sparkle | No |
+| macOS `.dmg` + Sparkle appcast | ad-hoc codesign, create-dmg, Sparkle | No |
 
 ## Integrated desktop updates
 
@@ -51,8 +51,9 @@ notification, and an **Update now** action in both the app and the system-tray
 menu.
 
 - **macOS** uses Sparkle's Ed25519-signed appcast and archive, verifies the
-  archive before extraction, and performs atomic bundle replacement. Official
-  releases are additionally signed and notarized with Developer ID.
+  archive before extraction, and performs atomic bundle replacement. The app
+  bundle is sealed with an ad-hoc code signature; release authenticity comes
+  from the embedded Ed25519 public key rather than an Apple certificate.
 - **Linux AppImage** downloads and checksum-verifies the new AppImage, keeps the
   previous image as a rollback copy, then atomically replaces and relaunches it.
 - **Linux `.deb` / `.rpm`** downloads the matching package, verifies it against
@@ -92,8 +93,7 @@ GoReleaser does not support DMG creation. The macOS build requires:
 - A **macOS runner** (GoReleaser runs on Linux)
 - A **Flutter build** for macOS (not a Go binary)
 - A universal (`arm64` + `x86_64`) bundled daemon
-- **Developer ID Application signing** with hardened runtime
-- Apple **notarization and stapling** for both the app and DMG
+- Ad-hoc code sealing for the complete app bundle
 - **`create-dmg`** for the installer image with custom window layout
 - Sparkle's **Ed25519-signed** archive and appcast tooling
 
@@ -109,8 +109,8 @@ archive SHA-256, so CocoaPods verifies the download before extracting the
 framework or exposing its release tools. Every release job:
 
 1. builds both daemon architectures and combines them into one universal binary;
-2. signs nested code from the inside out and seals the app with Developer ID;
-3. notarizes and staples the app, then the final DMG;
+2. ad-hoc signs nested code from the inside out and seals the app;
+3. packages the app in a DMG;
 4. generates `appcast.xml` with Sparkle's pinned `generate_appcast` tool;
 5. publishes the DMG, its SHA-256 checksum, and the signed appcast together.
 
@@ -123,8 +123,8 @@ failures never expire or fall back to an unsigned feed
 protects ad-hoc local builds, so they may consume the production updater without
 a Developer ID certificate on the currently installed bundle.
 
-The first release containing Sparkle must be installed manually from its signed
-DMG because older versions have no updater. Every later signed release can be
+The first release containing Sparkle must be installed manually from its DMG
+because older versions have no updater. Every later signed release can be
 installed in place from **Check for updates**.
 
 The updater becomes operational only after the release workflow publishes
@@ -138,26 +138,15 @@ workflow; do not hand-author or upload an unsigned appcast as a workaround.
 
 | Secret | Contents |
 |---|---|
-| `MACOS_DEVELOPER_ID_P12` | Base64-encoded Developer ID Application certificate plus private key (`.p12`) |
-| `MACOS_DEVELOPER_ID_P12_PASSWORD` | Password used when exporting the `.p12` |
-| `APPLE_NOTARIZATION_APPLE_ID` | Apple ID used by `notarytool` |
-| `APPLE_NOTARIZATION_PASSWORD` | App-specific password for that Apple ID |
-| `APPLE_TEAM_ID` | Ten-character Apple Developer team identifier |
 | `SPARKLE_EDDSA_PRIVATE_KEY` | Private Sparkle key exported by `generate_keys` |
 
 The Sparkle secret has already been generated as a project-specific key. The
-workflow refuses to create an ad-hoc or unsigned fallback if any credential is
-missing. It verifies executable build dependencies before materializing the
-P12; the P12 is written with `umask 077`, removed immediately after import, and
-the isolated signing keychain exists only for the signing step. Notarization
-credentials are scoped directly to the two `notarytool` steps.
+workflow verifies that it matches the public key embedded in the app before it
+publishes anything. No Apple signing identity, local Keychain access, Apple ID,
+or notarization credential is part of the update pipeline. The ad-hoc bundle
+signature provides code sealing; Sparkle's Ed25519 signature is the update
+trust root.
 
-Credential provisioning remains external: the workflow cannot manufacture a
-Developer ID identity or Apple notarization credentials. At the 2026-08-18
-audit, only `SPARKLE_EDDSA_PRIVATE_KEY` was present as a repository-level
-secret; the five Apple secrets above still had to be supplied at repository or
-organization scope before the first signed release. The macOS job does not use
-a GitHub environment, so environment-only secrets are not visible to it.
 `TAP_GITHUB_TOKEN` is optional and affects only the best-effort Homebrew update.
 
 ### Runtime handoff
