@@ -747,6 +747,11 @@ jobs:
             flutter_app/macos/Runner/Release.entitlements
           SIGNATURE=$(codesign --display --verbose=4 "$APP" 2>&1)
           grep -Fq 'Signature=adhoc' <<< "$SIGNATURE"
+          grep -Fq 'TeamIdentifier=not set' <<< "$SIGNATURE"
+          if grep -Eq 'flags=.*\(.*runtime.*\)' <<< "$SIGNATURE"; then
+            echo "::error::Ad-hoc app must not enable hardened runtime without a Team ID"
+            exit 1
+          fi
 
       # ── Package ─────────────────────────────────────────────────────────────
 
