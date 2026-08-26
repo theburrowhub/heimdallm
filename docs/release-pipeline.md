@@ -216,6 +216,12 @@ alias failure therefore leaves the release assets and immutable Docker version
 tag usable. Each boundary is idempotent, so rerunning the failed finalizer
 reconciles the aliases without duplicating assets.
 
+If the initial run fails while the release is still a draft, dispatch the
+release workflow with the existing `tag` and `channels_only=false`. This repeats
+the test and build gates, replaces the draft assets, and runs the same finalizer
+used by a normal release. The workflow refuses a missing or already-published
+release in this mode.
+
 For a later alias-only repair, dispatch the release workflow with the published
 latest `tag` and `channels_only=true`. It skips builds/uploads and refuses older
 tags, then reconciles GHCR aliases to the attested digest. Homebrew remains

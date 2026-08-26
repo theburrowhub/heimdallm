@@ -72,10 +72,15 @@ jobs:
       (needs.release-please.outputs.release_created == 'true' ||
        (github.event_name == 'workflow_dispatch' && inputs.channels_only != true))
     runs-on: ubuntu-22.04
+    # Draft releases are only visible to credentials with push access. Without
+    # contents: write, the recovery preflight sees an existing draft as a 404.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
+          persist-credentials: false
 
       - name: Validate draft release target
         env:
@@ -221,14 +226,12 @@ jobs:
           version: 'v2.17.1'
           args: >-
             release --clean --config .goreleaser-docker.yml --skip=archive
-            ${{ github.event_name == 'workflow_dispatch' && '--skip=publish' || '' }}
           workdir: daemon
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GORELEASER_CURRENT_TAG: ${{ env.TAG }}
 
       - name: Get Docker image digest
-        if: github.event_name == 'push'
         id: docker-digest
         run: |
           set -euo pipefail
@@ -240,7 +243,6 @@ jobs:
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
 
       - name: Generate artifact attestation
-        if: github.event_name == 'push'
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
@@ -1035,8 +1037,8 @@ jobs:
           retention-days: 7
 
   # The GitHub release remains a draft until every independently built asset
-  # has passed. A channels-only manual run never rebuilds or mutates assets; it
-  # only reconciles GHCR aliases for the current, already-published release.
+  # has passed. A normal manual run repairs an existing draft through the same
+  # gate; channels-only never rebuilds assets and only repairs mutable aliases.
   publish-release:
     name: Publish release and reconcile Docker aliases
     needs:
@@ -1055,6 +1057,13 @@ jobs:
         needs.build-linux.result == 'success' &&
         needs.build-macos.result == 'success' &&
         needs.goreleaser-cli.result == 'success') ||
+       (github.event_name == 'workflow_dispatch' &&
+        inputs.channels_only != true &&
+        needs.tests.result == 'success' &&
+        needs.goreleaser-daemon.result == 'success' &&
+        needs.build-linux.result == 'success' &&
+        needs.build-macos.result == 'success' &&
+        needs.goreleaser-cli.result == 'success') ||
        (github.event_name == 'workflow_dispatch' && inputs.channels_only == true))
     runs-on: ubuntu-latest
     permissions:
@@ -1068,14 +1077,14 @@ jobs:
       EXPECTED_COMMIT: ${{ github.sha }}
     steps:
       - name: Download staged Homebrew formula
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || inputs.channels_only != true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: cli-homebrew-formula-${{ needs.release-please.outputs.tag_name }}
+          name: cli-homebrew-formula-${{ inputs.tag || needs.release-please.outputs.tag_name }}
           path: staged-homebrew
 
       - name: Verify staged Homebrew formula
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || inputs.channels_only != true
         run: |
           set -euo pipefail
           test -f staged-homebrew/heimdallm-cli.rb
@@ -1107,7 +1116,8 @@ jobs:
           LATEST_TAG=$(gh api \
             "repos/${GITHUB_REPOSITORY}/releases/latest" \
             --jq .tag_name 2>/dev/null || true)
-          if [ "${{ github.event_name }}" = workflow_dispatch ]; then
+          if [ "${{ github.event_name }}" = workflow_dispatch ] && \
+             [ "${{ inputs.channels_only }}" = true ]; then
             test "$IS_DRAFT" = false || {
               echo "::error::channels_only requires an already-published release"
               exit 1
@@ -1117,10 +1127,27 @@ jobs:
               exit 1
             }
           else
-            test "$TAG_COMMIT" = "$EXPECTED_COMMIT" || {
-              echo "::error::$TAG does not point at this release workflow commit"
+            if [ "$IS_DRAFT" != true ] && [ "$LATEST_TAG" != "$TAG" ]; then
+              echo "::error::$TAG is published but is not the latest release; refusing recovery"
               exit 1
-            }
+            fi
+            if [ "${{ github.event_name }}" = push ]; then
+              test "$TAG_COMMIT" = "$EXPECTED_COMMIT" || {
+                echo "::error::$TAG does not point at this release workflow commit"
+                exit 1
+              }
+            else
+              WORKFLOW_STATUS=$(gh api \
+                "repos/${GITHUB_REPOSITORY}/compare/${TAG_COMMIT}...${EXPECTED_COMMIT}" \
+                --jq .status)
+              case "$WORKFLOW_STATUS" in
+                ahead|identical) ;;
+                *)
+                  echo "::error::$TAG is not on the workflow ref; refusing draft recovery"
+                  exit 1
+                  ;;
+              esac
+            fi
             if [ -n "$LATEST_TAG" ] && [ "$LATEST_TAG" != "$TAG" ]; then
               COMPARE_STATUS=$(gh api \
                 "repos/${GITHUB_REPOSITORY}/compare/${LATEST_TAG}...${TAG}" \
@@ -1230,10 +1257,10 @@ jobs:
             "repos/${GITHUB_REPOSITORY}/releases/latest" \
             --jq .tag_name 2>/dev/null || true)
           if [ "$IS_DRAFT" = true ]; then
-            test "${{ github.event_name }}" = push
+            test "${{ inputs.channels_only }}" != true
             gh release edit "$TAG" --draft=false --latest
           elif [ "$LATEST_TAG" != "$TAG" ]; then
-            test "${{ github.event_name }}" = push
+            test "${{ inputs.channels_only }}" != true
             gh release edit "$TAG" --latest
           fi
           for _ in $(seq 1 12); do
@@ -1281,7 +1308,7 @@ jobs:
       # are still private. This is deliberately best-effort: if it fails, the
       # previous formula remains valid and the published release is usable.
       - name: Publish Homebrew formula
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || inputs.channels_only != true
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
