@@ -533,8 +533,8 @@ jobs:
   # macOS .dmg
   #
   # Stays separate from GoReleaser: requires macOS runner, Flutter build,
-  # Developer ID signing, notarization, and Sparkle appcast generation — none
-  # of which GoReleaser supports.
+  # ad-hoc code sealing, create-dmg, and Sparkle appcast generation — none of
+  # which GoReleaser supports.
   # See docs/release-pipeline.md for rationale.
   # ═══════════════════════════════════════════════════════════════════════════
   build-macos:
@@ -613,7 +613,10 @@ jobs:
             exit 1
           }
           VERSION="${TAG#v}"
-          BUILD_NUMBER=$(git rev-list --count "${TAG}^{commit}")
+          # Keep official release builds above the historical commit-count
+          # builds so Sparkle can replace those installations in place.
+          SOURCE_BUILD_NUMBER=$(git rev-list --count "${TAG}^{commit}")
+          BUILD_NUMBER=$((100000 + SOURCE_BUILD_NUMBER))
           [[ "$BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]] || {
             echo "::error::Could not derive a deterministic build number for $TAG"
             exit 1
@@ -728,104 +731,16 @@ jobs:
           test -x "$TOOL_DIR/create-dmg"
           echo "CREATE_DMG=$TOOL_DIR/create-dmg" >> "$GITHUB_ENV"
 
-      # ── Signing identity ───────────────────────────────────────────────────
-      - name: Require macOS release credentials
-        env:
-          MACOS_DEVELOPER_ID_P12: ${{ secrets.MACOS_DEVELOPER_ID_P12 }}
-          MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
-          APPLE_NOTARIZATION_APPLE_ID: ${{ secrets.APPLE_NOTARIZATION_APPLE_ID }}
-          APPLE_NOTARIZATION_PASSWORD: ${{ secrets.APPLE_NOTARIZATION_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          SPARKLE_EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
+      # ── Code sealing ───────────────────────────────────────────────────────
+      - name: Ad-hoc seal app bundle
         run: |
           set -euo pipefail
-          missing=0
-          for name in \
-            MACOS_DEVELOPER_ID_P12 \
-            MACOS_DEVELOPER_ID_P12_PASSWORD \
-            APPLE_NOTARIZATION_APPLE_ID \
-            APPLE_NOTARIZATION_PASSWORD \
-            APPLE_TEAM_ID \
-            SPARKLE_EDDSA_PRIVATE_KEY; do
-            if [ -z "${!name:-}" ]; then
-              echo "::error::Required GitHub Actions secret $name is missing"
-              missing=1
-            fi
-          done
-          exit "$missing"
-
-      - name: Import, use, and destroy Developer ID identity
-        env:
-          MACOS_DEVELOPER_ID_P12: ${{ secrets.MACOS_DEVELOPER_ID_P12 }}
-          MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          set -euo pipefail
-          umask 077
-          KEYCHAIN_PATH="$RUNNER_TEMP/heimdallm-signing.keychain-db"
-          CERTIFICATE_PATH="$RUNNER_TEMP/heimdallm-developer-id.p12"
-          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
-          cleanup_signing_material() {
-            rm -f "$CERTIFICATE_PATH"
-            security delete-keychain "$KEYCHAIN_PATH" >/dev/null 2>&1 || true
-          }
-          trap cleanup_signing_material EXIT
-
-          printf '%s' "$MACOS_DEVELOPER_ID_P12" | \
-            base64 --decode > "$CERTIFICATE_PATH"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 900 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security import "$CERTIFICATE_PATH" \
-            -k "$KEYCHAIN_PATH" \
-            -P "$MACOS_DEVELOPER_ID_P12_PASSWORD" \
-            -T /usr/bin/codesign \
-            -T /usr/bin/security
-          rm -f "$CERTIFICATE_PATH"
-          security set-key-partition-list \
-            -S apple-tool:,apple: \
-            -s \
-            -k "$KEYCHAIN_PASSWORD" \
-            "$KEYCHAIN_PATH"
-
-          IDENTITIES=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH")
-          SIGNING_IDENTITY=$(printf '%s\n' "$IDENTITIES" \
-            | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' \
-            | sed -n '1p')
-          test -n "$SIGNING_IDENTITY" || {
-            echo "::error::P12 does not contain a Developer ID Application identity"
-            exit 1
-          }
-
-          ENTITLEMENTS="flutter_app/macos/Runner/Release.entitlements"
-          SIGNING_KEYCHAIN="$KEYCHAIN_PATH" \
-            scripts/sign-macos-app.sh "$APP" "$SIGNING_IDENTITY" "$ENTITLEMENTS"
-          SIGNED_TEAM=$(
-            codesign --display --verbose=4 "$APP" 2>&1 \
-              | sed -n 's/^TeamIdentifier=//p'
-          )
-          test "$SIGNED_TEAM" = "$APPLE_TEAM_ID" || {
-            echo "::error::Signed TeamIdentifier $SIGNED_TEAM does not match APPLE_TEAM_ID"
-            exit 1
-          }
-
-      - name: Notarize and staple app
-        env:
-          APPLE_NOTARIZATION_APPLE_ID: ${{ secrets.APPLE_NOTARIZATION_APPLE_ID }}
-          APPLE_NOTARIZATION_PASSWORD: ${{ secrets.APPLE_NOTARIZATION_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          set -euo pipefail
-          APP_ZIP="$RUNNER_TEMP/Heimdallm.app.zip"
-          ditto -c -k --keepParent "$APP" "$APP_ZIP"
-          xcrun notarytool submit "$APP_ZIP" \
-            --apple-id "$APPLE_NOTARIZATION_APPLE_ID" \
-            --team-id "$APPLE_TEAM_ID" \
-            --password "$APPLE_NOTARIZATION_PASSWORD" \
-            --wait
-          xcrun stapler staple "$APP"
-          xcrun stapler validate "$APP"
-          spctl --assess --type execute --verbose=4 "$APP"
+          scripts/sign-macos-app.sh \
+            "$APP" \
+            - \
+            flutter_app/macos/Runner/Release.entitlements
+          SIGNATURE=$(codesign --display --verbose=4 "$APP" 2>&1)
+          grep -Fq 'Signature=adhoc' <<< "$SIGNATURE"
 
       # ── Package ─────────────────────────────────────────────────────────────
 
@@ -853,21 +768,6 @@ jobs:
 
           ls -lh "$DMG"
           echo "DMG_PATH=$DMG" >> "$GITHUB_ENV"
-
-      - name: Notarize and staple DMG
-        env:
-          APPLE_NOTARIZATION_APPLE_ID: ${{ secrets.APPLE_NOTARIZATION_APPLE_ID }}
-          APPLE_NOTARIZATION_PASSWORD: ${{ secrets.APPLE_NOTARIZATION_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          set -euo pipefail
-          xcrun notarytool submit "$DMG_PATH" \
-            --apple-id "$APPLE_NOTARIZATION_APPLE_ID" \
-            --team-id "$APPLE_TEAM_ID" \
-            --password "$APPLE_NOTARIZATION_PASSWORD" \
-            --wait
-          xcrun stapler staple "$DMG_PATH"
-          xcrun stapler validate "$DMG_PATH"
 
       - name: Generate signed Sparkle appcast and checksum
         env:
