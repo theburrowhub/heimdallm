@@ -747,7 +747,7 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
                             controller: _flagsCtrl,
                             decoration: const InputDecoration(
                               labelText: 'Extra CLI flags (optional)',
-                              hintText: '--model claude-opus-4-6',
+                              hintText: '--model <model-id>',
                               border: OutlineInputBorder(),
                               isDense: true,
                               helperText:

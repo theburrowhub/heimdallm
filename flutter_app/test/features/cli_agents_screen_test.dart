@@ -20,6 +20,12 @@ void main() {
   Future<void> pumpScreen(
     WidgetTester tester, {
     required bool dangerouslySkipPerms,
+    String claudeModel = '',
+    Map<String, List<String>> modelCatalog = const {
+      'claude': <String>[],
+      'gemini': <String>[],
+      'codex': <String>[],
+    },
   }) async {
     // Keep only the first (Claude) card in the ListView build/cache extent.
     // The pre-existing fixed-width Codex approval dropdown overflows under
@@ -31,17 +37,24 @@ void main() {
 
     final config = AppConfig(
       agentConfigs: {
-        'claude': CLIAgentConfig(dangerouslySkipPerms: dangerouslySkipPerms),
+        'claude': CLIAgentConfig(
+          model: claudeModel,
+          dangerouslySkipPerms: dangerouslySkipPerms,
+        ),
       },
     );
     final configJson = {
       ...config.toJson(),
       'agent_configs': {
-        'claude': {'dangerously_skip_perms': dangerouslySkipPerms},
+        'claude': {
+          'model': claudeModel,
+          'dangerously_skip_perms': dangerouslySkipPerms,
+        },
       },
     };
     final api = _MockApiClient();
     when(api.fetchConfig).thenAnswer((_) async => configJson);
+    when(() => api.fetchAgentModels()).thenAnswer((_) async => modelCatalog);
     when(() => api.patchConfig(any())).thenAnswer((_) async => configJson);
 
     await tester.pumpWidget(
@@ -86,5 +99,43 @@ void main() {
     final disabled = tester.widget<Switch>(finder);
     expect(disabled.value, isFalse);
     expect(disabled.onChanged, isNull);
+  });
+
+  testWidgets('model suggestions come from the daemon catalog', (tester) async {
+    await pumpScreen(
+      tester,
+      dangerouslySkipPerms: false,
+      modelCatalog: const {
+        'claude': ['claude-live-model'],
+        'gemini': <String>[],
+        'codex': <String>[],
+      },
+    );
+
+    await tester.enterText(
+      find.byKey(const ValueKey('model-input-claude')),
+      'live',
+    );
+    await tester.pump();
+
+    expect(find.text('claude-live-model'), findsOneWidget);
+  });
+
+  testWidgets('configured model stays editable when absent from catalog', (tester) async {
+    await pumpScreen(
+      tester,
+      dangerouslySkipPerms: false,
+      claudeModel: 'private-model',
+      modelCatalog: const {
+        'claude': ['sonnet'],
+        'gemini': <String>[],
+        'codex': <String>[],
+      },
+    );
+
+    final field = tester.widget<TextFormField>(
+      find.byKey(const ValueKey('model-input-claude')),
+    );
+    expect(field.controller!.text, 'private-model');
   });
 }
