@@ -1703,11 +1703,16 @@ func downgradeNoteFor(findingCount int) string {
 		findingCount, findings)
 }
 
-// AnnotateBodyForEvent appends an explanatory note to the review body when the
-// event is COMMENT (the never-approve-with-issues downgrade); otherwise the
-// body is returned unchanged. findingCount is the number of findings the
-// review raised, quoted in the note.
+// AnnotateBodyForEvent keeps clean approvals terse and appends an explanatory
+// note when the event is COMMENT (the never-approve-with-issues downgrade).
+// The APPROVE check must include the event because comment signals can turn a
+// zero-finding review into REQUEST_CHANGES; those reviews retain the agent's
+// explanatory summary. findingCount is the number of findings the review
+// raised, quoted in the downgrade note.
 func AnnotateBodyForEvent(body, event string, findingCount int) string {
+	if event == "APPROVE" && findingCount == 0 {
+		return "LGTM"
+	}
 	if event == "COMMENT" {
 		return body + downgradeNoteFor(findingCount)
 	}

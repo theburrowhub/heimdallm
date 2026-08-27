@@ -1809,6 +1809,15 @@ func TestPublishEventFor(t *testing.T) {
 
 func TestAnnotateBodyForEvent(t *testing.T) {
 	const body = "## Review\nlgtm"
+	// A truly clean approval ignores the model's verbose summary.
+	if got := pipeline.AnnotateBodyForEvent(body, "APPROVE", 0); got != "LGTM" {
+		t.Errorf("clean APPROVE body = %q, want LGTM", got)
+	}
+	// A zero-finding blocker can result from comment-signal escalation, so it
+	// must retain the explanation instead of claiming that everything is good.
+	if got := pipeline.AnnotateBodyForEvent(body, "REQUEST_CHANGES", 0); got != body {
+		t.Errorf("clean REQUEST_CHANGES body should be unchanged, got %q", got)
+	}
 	// COMMENT keeps the original body and appends the downgrade note.
 	got := pipeline.AnnotateBodyForEvent(body, "COMMENT", 2)
 	if !strings.Contains(got, body) || !strings.Contains(got, "never_approve_with_issues") {
