@@ -201,6 +201,10 @@ void main() {
     expect(tester.state(find.byType(CLIAgentsScreen)), same(screenState));
     expect(tester.state(section), isNot(same(initialSectionState)));
     expect(dropdown, findsOneWidget);
+    expect(
+      tester.widget<DropdownButtonFormField<String>>(dropdown).initialValue,
+      'claude-sonnet-5',
+    );
 
     await tester.tap(dropdown);
     await tester.pumpAndSettle();

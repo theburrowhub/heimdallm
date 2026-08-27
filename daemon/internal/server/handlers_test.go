@@ -1860,12 +1860,32 @@ func TestHandlerPutConfig_AgentConfigs_RejectsBadPermissionMode(t *testing.T) {
 	}
 }
 
-func TestHandlerPutConfig_AgentConfigs_EnforcesProviderPolicy(t *testing.T) {
+func TestHandlerPutConfig_AgentConfigs_RejectsInvalidPayloadsAndProviderPolicy(t *testing.T) {
 	tests := []struct {
 		name       string
 		body       string
 		wantStatus int
 	}{
+		{
+			name:       "Agent configs must be an object",
+			body:       `{"agent_configs":[]}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "Agent config must be an object",
+			body:       `{"agent_configs":{"claude":true}}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "Dangerous flag requires canonical casing",
+			body:       `{"agent_configs":{"claude":{"Dangerously_Skip_Perms":false}}}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "Dangerous flag must be boolean",
+			body:       `{"agent_configs":{"claude":{"dangerously_skip_perms":"false"}}}`,
+			wantStatus: http.StatusBadRequest,
+		},
 		{
 			name:       "Codex sandbox override rejected",
 			body:       `{"agent_configs":{"codex":{"extra_flags":"--sandbox danger-full-access"}}}`,
@@ -1889,6 +1909,31 @@ func TestHandlerPutConfig_AgentConfigs_EnforcesProviderPolicy(t *testing.T) {
 		{
 			name:       "Non-string model rejected",
 			body:       `{"agent_configs":{"claude":{"model":42}}}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "Invalid execution timeout rejected",
+			body:       `{"agent_configs":{"claude":{"execution_timeout":"later"}}}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "Non-string permission mode rejected",
+			body:       `{"agent_configs":{"claude":{"permission_mode":true}}}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "Non-string approval mode rejected",
+			body:       `{"agent_configs":{"codex":{"approval_mode":true}}}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "Fractional max turns rejected",
+			body:       `{"agent_configs":{"claude":{"max_turns":1.5}}}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "Non-boolean bare rejected",
+			body:       `{"agent_configs":{"claude":{"bare":"true"}}}`,
 			wantStatus: http.StatusBadRequest,
 		},
 		{
@@ -2452,7 +2497,7 @@ func TestHandlePatchConfig_PersistsUnlistedModelAndEffort(t *testing.T) {
 	}
 }
 
-func TestHandlePatchConfig_RejectsInvalidModelAndEffort(t *testing.T) {
+func TestHandlePatchConfig_RejectsInvalidAgentExecutionFields(t *testing.T) {
 	tests := []struct {
 		name string
 		body string
@@ -2461,6 +2506,11 @@ func TestHandlePatchConfig_RejectsInvalidModelAndEffort(t *testing.T) {
 		{name: "option shaped model", body: `{"ai":{"agents":{"claude":{"model":"--sandbox"}}}}`},
 		{name: "effort type", body: `{"ai":{"agents":{"claude":{"effort":true}}}}`},
 		{name: "unsupported effort", body: `{"ai":{"agents":{"claude":{"effort":"maximum"}}}}`},
+		{name: "dangerous flag type", body: `{"ai":{"agents":{"claude":{"dangerously_skip_perms":"false"}}}}`},
+		{name: "extra flags type", body: `{"ai":{"agents":{"claude":{"extra_flags":true}}}}`},
+		{name: "permission mode type", body: `{"ai":{"agents":{"claude":{"permission_mode":true}}}}`},
+		{name: "unsupported permission mode", body: `{"ai":{"agents":{"claude":{"permission_mode":"bypassPermissions"}}}}`},
+		{name: "approval mode type", body: `{"ai":{"agents":{"codex":{"approval_mode":true}}}}`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
