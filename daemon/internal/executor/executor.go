@@ -133,6 +133,11 @@ type Executor struct {
 	inFlightGroups     map[int]*trackedExecution
 	inFlightExecutions map[string]map[*trackedExecution]struct{}
 
+	// modelDiscovery caches the short-lived CLI catalog and coalesces
+	// concurrent requests so opening multiple clients cannot fan out into a
+	// separate set of CLI subprocesses per request.
+	modelDiscovery modelDiscoveryState
+
 	// startProcess is a test seam for pausing between procgroup.Start returning
 	// and the process being attached to its already-registered execution. It is
 	// immutable after construction in production.
