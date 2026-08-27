@@ -1273,4 +1273,37 @@ void main() {
     final diff = computeRepoDiff(oldCfg, updated);
     expect((diff['issue_tracking'] as Map)['organizations'], ['acme']);
   });
+
+  test('temporary model catalogs expose current CLI choices', () {
+    expect(
+      CLIAgentConfig.modelOptions['claude'],
+      [
+        'claude-fable-5',
+        'claude-opus-5',
+        'claude-sonnet-5',
+        'claude-haiku-4-5-20251001',
+      ],
+    );
+    expect(
+      CLIAgentConfig.modelOptions['gemini'],
+      [
+        'gemini-3.1-pro-preview',
+        'gemini-3.5-flash',
+        'gemini-3.1-flash-lite',
+        'gemini-2.5-pro',
+        'gemini-2.5-flash',
+        'gemini-2.5-flash-lite',
+      ],
+    );
+    expect(
+      CLIAgentConfig.modelOptions['codex'],
+      [
+        'gpt-5.6-sol',
+        'gpt-5.6-terra',
+        'gpt-5.6-luna',
+        'gpt-5.5',
+        'gpt-5.2',
+      ],
+    );
+  });
 }

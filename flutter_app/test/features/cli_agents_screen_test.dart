@@ -111,12 +111,12 @@ void main() {
 
     await tester.tap(dropdown);
     await tester.pumpAndSettle();
-    await tester.tap(find.text('claude-sonnet-4-6').last);
+    await tester.tap(find.text('claude-sonnet-5').last);
     await tester.pump();
 
     expect(
       tester.widget<DropdownButtonFormField<String>>(dropdown).initialValue,
-      'claude-sonnet-4-6',
+      'claude-sonnet-5',
     );
   });
 

@@ -116,6 +116,42 @@ void main() {
     }
   });
 
+  testWidgets('custom PR prompt suggests an allowed extra CLI flag', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1200, 900);
+    tester.view.devicePixelRatio = 1;
+    // This assertion targets the CLI hint, not the dialog's fixed-width layout.
+    tester.platformDispatcher.textScaleFactorTestValue = 0.6;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          agentsProvider.overrideWith(
+            (ref) => Future.value(const <ReviewPrompt>[]),
+          ),
+        ],
+        child: const MaterialApp(home: Scaffold(body: AgentsScreen())),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.widgetWithText(TextButton, 'Custom').first);
+    await tester.pumpAndSettle();
+
+    final decorator = tester.widget<InputDecorator>(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is InputDecorator &&
+            widget.decoration.labelText == 'Extra CLI flags (optional)',
+      ),
+    );
+    expect(decorator.decoration.hintText, '--max-budget-usd 5');
+  });
+
   group('per-category activation', () {
     test('withActive flips only the targeted flag', () {
       const p = ReviewPrompt(id: 'x', name: 'X',
