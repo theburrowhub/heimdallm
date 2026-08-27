@@ -55,6 +55,22 @@ func TestHandlerAgentModelsNotConfigured(t *testing.T) {
 	}
 }
 
+func TestHandlerAgentModelsNormalizesNilCatalog(t *testing.T) {
+	srv, _ := setupServer(t)
+	srv.SetModelDiscoveryFn(func(context.Context) map[string][]string { return nil })
+	req := httptest.NewRequest(http.MethodGet, "/agents/models", nil)
+	w := httptest.NewRecorder()
+
+	srv.Router().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /agents/models status = %d, want 200", w.Code)
+	}
+	if got := w.Body.String(); got != "{}\n" {
+		t.Fatalf("GET /agents/models body = %q, want empty object", got)
+	}
+}
+
 func TestHandlerAgentModelsRequiresAuth(t *testing.T) {
 	srv := setupServerWithToken(t, "secret-token")
 	called := false

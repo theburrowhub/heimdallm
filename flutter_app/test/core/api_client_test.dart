@@ -75,6 +75,24 @@ void main() {
       expect(models['gemini'], isEmpty);
     });
 
+    test('fetchAgentModels surfaces daemon errors', () async {
+      final client = ApiClient(
+        httpClient: MockClient((_) async => http.Response('unavailable', 503)),
+        platform: FakePlatformServices(token: 'abc-123'),
+      );
+
+      await expectLater(
+        client.fetchAgentModels(),
+        throwsA(
+          isA<ApiException>().having(
+            (error) => error.message,
+            'message',
+            'GET /agents/models failed: 503',
+          ),
+        ),
+      );
+    });
+
     test('triggerReview hits POST and returns 202', () async {
       final platform = FakePlatformServices(
         apiBaseUrl: 'http://127.0.0.1:7842',
