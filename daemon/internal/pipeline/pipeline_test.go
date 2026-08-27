@@ -1847,24 +1847,44 @@ func TestPublishEventFor(t *testing.T) {
 	}
 }
 
-func TestFormatPublishedReviewBody(t *testing.T) {
+func TestBuildGitHubBodyUsesLGTMOnlyForCleanResult(t *testing.T) {
+	clean := &executor.ReviewResult{
+		Summary:  "Everything previously raised has been addressed.",
+		Severity: "low",
+	}
+	if got := pipeline.BuildGitHubBody(clean); got != "LGTM" {
+		t.Errorf("clean review body = %q, want LGTM", got)
+	}
+
+	medium := &executor.ReviewResult{
+		Summary:  "A reviewer concern remains unresolved.",
+		Severity: "medium",
+	}
+	if got := pipeline.BuildGitHubBody(medium); !strings.Contains(got, medium.Summary) {
+		t.Errorf("medium zero-finding body omitted its explanation: %q", got)
+	}
+
+	withFinding := &executor.ReviewResult{
+		Summary:  "One non-blocking finding.",
+		Severity: "low",
+		Issues: []executor.Issue{
+			{File: "README.md", Line: 12, Description: "The example is stale.", Severity: "low"},
+		},
+	}
+	if got := pipeline.BuildGitHubBody(withFinding); !strings.Contains(got, "The example is stale.") {
+		t.Errorf("low review with a finding omitted its detail: %q", got)
+	}
+}
+
+func TestAnnotateBodyForEvent(t *testing.T) {
 	const body = "## Review\nlgtm"
-	// A truly clean approval ignores the model's verbose summary.
-	if got := pipeline.FormatPublishedReviewBody(body, "APPROVE", "low", 0); got != "LGTM" {
-		t.Errorf("clean APPROVE body = %q, want LGTM", got)
-	}
-	// Medium with no structured findings can still describe unresolved reviewer
-	// concerns, so its summary must not be collapsed.
-	if got := pipeline.FormatPublishedReviewBody(body, "APPROVE", "medium", 0); got != body {
-		t.Errorf("medium zero-finding APPROVE body should be unchanged, got %q", got)
-	}
 	// A zero-finding blocker can result from comment-signal escalation, so it
 	// must retain the explanation instead of claiming that everything is good.
-	if got := pipeline.FormatPublishedReviewBody(body, "REQUEST_CHANGES", "high", 0); got != body {
+	if got := pipeline.AnnotateBodyForEvent(body, "REQUEST_CHANGES", 0); got != body {
 		t.Errorf("clean REQUEST_CHANGES body should be unchanged, got %q", got)
 	}
 	// COMMENT keeps the original body and appends the downgrade note.
-	got := pipeline.FormatPublishedReviewBody(body, "COMMENT", "medium", 2)
+	got := pipeline.AnnotateBodyForEvent(body, "COMMENT", 2)
 	if !strings.Contains(got, body) || !strings.Contains(got, "never_approve_with_issues") {
 		t.Errorf("COMMENT body should keep body and add the note, got %q", got)
 	}
@@ -1882,12 +1902,12 @@ func TestFormatPublishedReviewBody(t *testing.T) {
 		t.Errorf("note must not use the ambiguous \"issues were found\" wording, got %q", got)
 	}
 	// Singular form for a single finding.
-	if got := pipeline.FormatPublishedReviewBody(body, "COMMENT", "medium", 1); !strings.Contains(got, "raised 1 finding above") {
+	if got := pipeline.AnnotateBodyForEvent(body, "COMMENT", 1); !strings.Contains(got, "raised 1 finding above") {
 		t.Errorf("single-finding note should be singular, got %q", got)
 	}
 	// Non-downgrade events leave the body untouched.
 	for _, ev := range []string{"APPROVE", "REQUEST_CHANGES"} {
-		if got := pipeline.FormatPublishedReviewBody(body, ev, "low", 2); got != body {
+		if got := pipeline.AnnotateBodyForEvent(body, ev, 2); got != body {
 			t.Errorf("event %s: body should be unchanged, got %q", ev, got)
 		}
 	}

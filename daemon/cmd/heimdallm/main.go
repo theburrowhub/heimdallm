@@ -1653,9 +1653,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		if deferForMonitoringChange("before_submit") {
 			return nil
 		}
-		reviewBody := pipeline.FormatPublishedReviewBody(
-			pipeline.BuildGitHubBody(result), publishEvent, rev.Severity, len(result.Issues),
-		)
+		reviewBody := pipeline.AnnotateBodyForEvent(pipeline.BuildGitHubBody(result), publishEvent, len(result.Issues))
 		var ghID int64
 		var ghState string
 		if rev.HeadSHA != "" {
