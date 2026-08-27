@@ -32,9 +32,11 @@ func TestRunRejectsNewReviewDuringUpdateDrain(t *testing.T) {
 }
 
 type fakeGH struct {
-	diff     string
-	diffErr  error
-	comments []github.Comment
+	diff           string
+	diffErr        error
+	comments       []github.Comment
+	submittedBody  string
+	submittedEvent string
 }
 
 func (f *fakeGH) FetchDiff(repo string, number int) (string, error) {
@@ -42,6 +44,8 @@ func (f *fakeGH) FetchDiff(repo string, number int) (string, error) {
 }
 
 func (f *fakeGH) SubmitReview(repo string, number int, body, event string) (int64, string, error) {
+	f.submittedBody = body
+	f.submittedEvent = event
 	// Mirror GitHub's actual mapping from the submitted event to the
 	// returned state so pipeline tests that inspect GitHubReviewState see
 	// something realistic rather than a hardcoded constant.
@@ -244,6 +248,7 @@ type fakeExecCapture struct {
 	capturePrompt *string
 	captureOpts   *executor.ExecOptions
 	detectCLI     string
+	result        *executor.ReviewResult
 }
 
 func (f *fakeExecCapture) Detect(primary, fallback string) (string, error) {
@@ -259,6 +264,9 @@ func (f *fakeExecCapture) Execute(cli, prompt string, opts executor.ExecOptions)
 	}
 	if f.captureOpts != nil {
 		*f.captureOpts = opts
+	}
+	if f.result != nil {
+		return f.result, nil
 	}
 	return &executor.ReviewResult{Summary: "ok", Severity: "low"}, nil
 }
@@ -316,6 +324,38 @@ func TestPipeline_Run_CommentsInjectedIntoPrompt(t *testing.T) {
 	}
 	if !strings.Contains(capturedPrompt, "Please add error handling here") {
 		t.Errorf("expected comment body in prompt, got: %s", capturedPrompt)
+	}
+}
+
+func TestPipeline_Run_MediumApprovalWithoutFindingsKeepsSummary(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	const summary = "A reviewer concern remains unresolved."
+	gh := &fakeGH{diff: "+new line"}
+	exec := &fakeExecCapture{result: &executor.ReviewResult{
+		Summary:  summary,
+		Severity: "medium",
+	}}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	pr := &github.PullRequest{
+		ID: 22, Number: 22, Title: "Add feature", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/22",
+		Head: github.Branch{SHA: "sha22"},
+	}
+
+	if _, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"}); err != nil {
+		t.Fatalf("pipeline run: %v", err)
+	}
+	if gh.submittedEvent != "APPROVE" {
+		t.Fatalf("submitted event = %q, want APPROVE", gh.submittedEvent)
+	}
+	if gh.submittedBody == "LGTM" || !strings.Contains(gh.submittedBody, summary) {
+		t.Fatalf("medium zero-finding approval lost its explanation:\n%s", gh.submittedBody)
 	}
 }
 
@@ -1807,19 +1847,24 @@ func TestPublishEventFor(t *testing.T) {
 	}
 }
 
-func TestAnnotateBodyForEvent(t *testing.T) {
+func TestFormatPublishedReviewBody(t *testing.T) {
 	const body = "## Review\nlgtm"
 	// A truly clean approval ignores the model's verbose summary.
-	if got := pipeline.AnnotateBodyForEvent(body, "APPROVE", 0); got != "LGTM" {
+	if got := pipeline.FormatPublishedReviewBody(body, "APPROVE", "low", 0); got != "LGTM" {
 		t.Errorf("clean APPROVE body = %q, want LGTM", got)
+	}
+	// Medium with no structured findings can still describe unresolved reviewer
+	// concerns, so its summary must not be collapsed.
+	if got := pipeline.FormatPublishedReviewBody(body, "APPROVE", "medium", 0); got != body {
+		t.Errorf("medium zero-finding APPROVE body should be unchanged, got %q", got)
 	}
 	// A zero-finding blocker can result from comment-signal escalation, so it
 	// must retain the explanation instead of claiming that everything is good.
-	if got := pipeline.AnnotateBodyForEvent(body, "REQUEST_CHANGES", 0); got != body {
+	if got := pipeline.FormatPublishedReviewBody(body, "REQUEST_CHANGES", "high", 0); got != body {
 		t.Errorf("clean REQUEST_CHANGES body should be unchanged, got %q", got)
 	}
 	// COMMENT keeps the original body and appends the downgrade note.
-	got := pipeline.AnnotateBodyForEvent(body, "COMMENT", 2)
+	got := pipeline.FormatPublishedReviewBody(body, "COMMENT", "medium", 2)
 	if !strings.Contains(got, body) || !strings.Contains(got, "never_approve_with_issues") {
 		t.Errorf("COMMENT body should keep body and add the note, got %q", got)
 	}
@@ -1837,12 +1882,12 @@ func TestAnnotateBodyForEvent(t *testing.T) {
 		t.Errorf("note must not use the ambiguous \"issues were found\" wording, got %q", got)
 	}
 	// Singular form for a single finding.
-	if got := pipeline.AnnotateBodyForEvent(body, "COMMENT", 1); !strings.Contains(got, "raised 1 finding above") {
+	if got := pipeline.FormatPublishedReviewBody(body, "COMMENT", "medium", 1); !strings.Contains(got, "raised 1 finding above") {
 		t.Errorf("single-finding note should be singular, got %q", got)
 	}
 	// Non-downgrade events leave the body untouched.
 	for _, ev := range []string{"APPROVE", "REQUEST_CHANGES"} {
-		if got := pipeline.AnnotateBodyForEvent(body, ev, 2); got != body {
+		if got := pipeline.FormatPublishedReviewBody(body, ev, "low", 2); got != body {
 			t.Errorf("event %s: body should be unchanged, got %q", ev, got)
 		}
 	}

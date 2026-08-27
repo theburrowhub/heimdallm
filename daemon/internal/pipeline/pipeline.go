@@ -1221,18 +1221,18 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 	// to the new HEAD. With commit_id pinned, that worst case degrades from
 	// "findings misattributed to code they were not written about" to "review
 	// shows as outdated", which is what the deferred publish path already does.
-	annotatedBody := AnnotateBodyForEvent(reviewBody, reviewEvent, len(result.Issues))
+	publishedBody := FormatPublishedReviewBody(reviewBody, reviewEvent, finalSeverity, len(result.Issues))
 	var ghReviewID int64
 	var ghReviewState string
 	var publishErr error
 	if anchored, ok := p.gh.(CommitAnchoredReviewer); ok && pr.Head.SHA != "" {
 		ghReviewID, ghReviewState, publishErr = anchored.SubmitReviewForCommit(
-			pr.Repo, pr.Number, annotatedBody, reviewEvent, pr.Head.SHA,
+			pr.Repo, pr.Number, publishedBody, reviewEvent, pr.Head.SHA,
 		)
 	} else {
 		// Test doubles and any adapter that predates the anchored method.
 		ghReviewID, ghReviewState, publishErr = p.gh.SubmitReview(
-			pr.Repo, pr.Number, annotatedBody, reviewEvent,
+			pr.Repo, pr.Number, publishedBody, reviewEvent,
 		)
 	}
 	if publishErr != nil {
@@ -1387,7 +1387,7 @@ func (p *Pipeline) PublishPending() {
 		retryEvent := PublishEventFor(rev)
 		ghID, ghState, err := p.gh.SubmitReview(
 			pr.Repo, pr.Number,
-			AnnotateBodyForEvent(BuildGitHubBody(result), retryEvent, len(result.Issues)),
+			FormatPublishedReviewBody(BuildGitHubBody(result), retryEvent, rev.Severity, len(result.Issues)),
 			retryEvent,
 		)
 		if err != nil {
@@ -1703,14 +1703,13 @@ func downgradeNoteFor(findingCount int) string {
 		findingCount, findings)
 }
 
-// AnnotateBodyForEvent keeps clean approvals terse and appends an explanatory
-// note when the event is COMMENT (the never-approve-with-issues downgrade).
-// The APPROVE check must include the event because comment signals can turn a
-// zero-finding review into REQUEST_CHANGES; those reviews retain the agent's
-// explanatory summary. findingCount is the number of findings the review
-// raised, quoted in the downgrade note.
-func AnnotateBodyForEvent(body, event string, findingCount int) string {
-	if event == "APPROVE" && findingCount == 0 {
+// FormatPublishedReviewBody applies event-specific policy to a fully built
+// review body. Only a low-severity APPROVE with zero findings is truly clean;
+// medium can represent unresolved reviewer concerns even when the structured
+// findings list is empty. COMMENT receives the never-approve-with-issues note.
+func FormatPublishedReviewBody(body, event, finalSeverity string, findingCount int) string {
+	if event == "APPROVE" && findingCount == 0 &&
+		strings.EqualFold(strings.TrimSpace(finalSeverity), "low") {
 		return "LGTM"
 	}
 	if event == "COMMENT" {
