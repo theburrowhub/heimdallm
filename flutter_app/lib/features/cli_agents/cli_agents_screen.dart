@@ -143,7 +143,7 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
 class _AgentState {
   String model = '';
   // UI-only: survives disposal of a lazily built agent section.
-  String? unavailableModel;
+  String? unlistedModel;
   int maxTurns = 0;
   String approvalMode = '';
   String extraFlags = '';
@@ -162,7 +162,7 @@ class _AgentState {
     required List<String> modelOptions,
   }) {
     model               = ac.model;
-    unavailableModel = model.isNotEmpty && !modelOptions.contains(model)
+    unlistedModel = model.isNotEmpty && !modelOptions.contains(model)
         ? model
         : null;
     maxTurns            = ac.maxTurns;
@@ -284,10 +284,10 @@ class _AgentSectionState extends State<_AgentSection> {
     final name   = widget.name;
     final s      = widget.state;
     final models = CLIAgentConfig.modelOptions[name] ?? [];
-    final preservedUnavailableModel = s.unavailableModel;
-    final unavailableModel = preservedUnavailableModel != null &&
-            !models.contains(preservedUnavailableModel)
-        ? preservedUnavailableModel
+    final preservedUnlistedModel = s.unlistedModel;
+    final unlistedModel = preservedUnlistedModel != null &&
+            !models.contains(preservedUnlistedModel)
+        ? preservedUnlistedModel
         : null;
 
     return Column(
@@ -310,10 +310,10 @@ class _AgentSectionState extends State<_AgentSection> {
             decoration: const InputDecoration(labelText: 'Model', border: OutlineInputBorder()),
             items: [
               const DropdownMenuItem<String>(value: null, child: Text('CLI default')),
-              if (unavailableModel != null)
+              if (unlistedModel != null)
                 DropdownMenuItem(
-                  value: unavailableModel,
-                  child: Text('$unavailableModel (unavailable)'),
+                  value: unlistedModel,
+                  child: Text('$unlistedModel (not listed)'),
                 ),
               ...models.map((m) => DropdownMenuItem(value: m, child: Text(m))),
             ],

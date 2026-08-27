@@ -12,6 +12,11 @@ import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 
 class _MockApiClient extends Mock implements ApiClient {}
 
+class _TestConfigNotifier extends ConfigNotifier {
+  void showLoading() => state = const AsyncLoading();
+  void showData(AppConfig config) => state = AsyncData(config);
+}
+
 void main() {
   setUpAll(() {
     registerFallbackValue(<String, dynamic>{});
@@ -55,7 +60,7 @@ void main() {
       ProviderScope(
         overrides: [
           apiClientProvider.overrideWithValue(api),
-          configNotifierProvider.overrideWith(ConfigNotifier.new),
+          configNotifierProvider.overrideWith(_TestConfigNotifier.new),
           agentsProvider.overrideWith(
             (ref) => Future.value(const <ReviewPrompt>[]),
           ),
@@ -120,9 +125,7 @@ void main() {
     );
   });
 
-  testWidgets('keeps an unavailable configured model reversible', (
-    tester,
-  ) async {
+  testWidgets('keeps an unlisted configured model reversible', (tester) async {
     await pumpScreen(
       tester,
       dangerouslySkipPerms: false,
@@ -137,8 +140,8 @@ void main() {
 
     await tester.tap(dropdown);
     await tester.pumpAndSettle();
-    expect(find.text('claude-future-1 (unavailable)'), findsWidgets);
-    await tester.tap(find.text('claude-future-1 (unavailable)').last);
+    expect(find.text('claude-future-1 (not listed)'), findsWidgets);
+    await tester.tap(find.text('claude-future-1 (not listed)').last);
     await tester.pumpAndSettle();
 
     expect(
@@ -147,7 +150,7 @@ void main() {
     );
   });
 
-  testWidgets('keeps an unavailable model when its card is recreated', (
+  testWidgets('keeps an unlisted model after its card is recreated', (
     tester,
   ) async {
     await pumpScreen(
@@ -157,16 +160,12 @@ void main() {
     );
 
     final dropdown = find.byKey(const ValueKey('model-claude'));
-    final mountedDropdown = find.byKey(
-      const ValueKey('model-claude'),
-      skipOffstage: false,
-    );
 
     expect(
       tester.widget<DropdownButtonFormField<String>>(dropdown).initialValue,
       'claude-future-1',
     );
-    expect(find.text('claude-future-1 (unavailable)'), findsOneWidget);
+    expect(find.text('claude-future-1 (not listed)'), findsOneWidget);
 
     await tester.tap(dropdown);
     await tester.pumpAndSettle();
@@ -178,22 +177,40 @@ void main() {
       'claude-sonnet-5',
     );
 
-    final agentSection = tester.widget<Widget>(
-      find.byKey(const ValueKey('agent-section-claude')),
+    final section = find.byKey(const ValueKey('agent-section-claude'));
+    final screenState = tester.state(find.byType(CLIAgentsScreen));
+    final initialSectionState = tester.state(section);
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(CLIAgentsScreen)),
     );
-    await tester.pumpWidget(const MaterialApp(home: SizedBox.shrink()));
-    expect(mountedDropdown, findsNothing);
+    final config = container.read(configNotifierProvider).requireValue;
+    final notifier =
+        container.read(configNotifierProvider.notifier) as _TestConfigNotifier;
 
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(body: SingleChildScrollView(child: agentSection)),
-      ),
+    notifier.showLoading();
+    await tester.pump();
+    expect(screenState.mounted, isTrue);
+    expect(initialSectionState.mounted, isFalse);
+    expect(
+      find.byKey(const ValueKey('agent-section-claude'), skipOffstage: false),
+      findsNothing,
     );
+
+    notifier.showData(config);
     await tester.pumpAndSettle();
+    expect(tester.state(find.byType(CLIAgentsScreen)), same(screenState));
+    expect(tester.state(section), isNot(same(initialSectionState)));
     expect(dropdown, findsOneWidget);
 
     await tester.tap(dropdown);
     await tester.pumpAndSettle();
-    expect(find.text('claude-future-1 (unavailable)'), findsWidgets);
+    expect(find.text('claude-future-1 (not listed)'), findsWidgets);
+    await tester.tap(find.text('claude-future-1 (not listed)').last);
+    await tester.pumpAndSettle();
+
+    expect(
+      tester.widget<DropdownButtonFormField<String>>(dropdown).initialValue,
+      'claude-future-1',
+    );
   });
 }

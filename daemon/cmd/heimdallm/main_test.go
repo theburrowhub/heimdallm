@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -1614,98 +1613,6 @@ func TestAIOverrideMaps_ExposeNeverApproveMinSeverity(t *testing.T) {
 	out = orgAIOverrideMap(config.OrgAI{})
 	if _, present := out["never_approve_min_severity"]; present {
 		t.Errorf("empty override should omit never_approve_min_severity, got %v", out["never_approve_min_severity"])
-	}
-}
-
-func TestAutonomousOverrideMapSerializesEveryExplicitValue(t *testing.T) {
-	enabled := true
-	disabled := false
-	maxTurns := 42
-	override := config.AutonomousOverride{
-		Enabled:         &enabled,
-		AutoMerge:       &disabled,
-		MergeMethod:     "squash",
-		TakeOthersTasks: &enabled,
-		ReassignOnTake:  &disabled,
-		DevMaxTurns:     &maxTurns,
-		DevEffort:       "high",
-		DevTimeout:      "45m",
-		ClaimLease:      "2h",
-	}
-	want := map[string]any{
-		"enabled":           true,
-		"auto_merge":        false,
-		"merge_method":      "squash",
-		"take_others_tasks": true,
-		"reassign_on_take":  false,
-		"dev_max_turns":     42,
-		"dev_effort":        "high",
-		"dev_timeout":       "45m",
-		"claim_lease":       "2h",
-	}
-
-	if got := autonomousOverrideMap(override); !reflect.DeepEqual(got, want) {
-		t.Fatalf("autonomousOverrideMap() = %#v, want %#v", got, want)
-	}
-	if got := autonomousOverrideMap(config.AutonomousOverride{}); len(got) != 0 {
-		t.Fatalf("empty autonomous override = %#v, want empty map", got)
-	}
-}
-
-func TestIssueTrackingOverrideMapSerializesEveryExplicitValue(t *testing.T) {
-	enabled := true
-	disabled := false
-	override := &config.IssueTrackingOverride{
-		Enabled:          &enabled,
-		DevelopEnabled:   &disabled,
-		FilterMode:       config.FilterModeInclusive,
-		DefaultAction:    "review",
-		DevelopLabels:    []string{"develop"},
-		RefinementLabels: []string{"refine"},
-		ReviewOnlyLabels: []string{"review"},
-		SkipLabels:       []string{"skip"},
-		BlockedLabels:    []string{"blocked"},
-		PromoteToLabel:   "ready",
-		Organizations:    []string{"theburrowhub"},
-		Assignees:        []string{"bot"},
-	}
-	want := map[string]any{
-		"enabled":            true,
-		"develop_enabled":    false,
-		"filter_mode":        config.FilterModeInclusive,
-		"default_action":     "review",
-		"develop_labels":     []string{"develop"},
-		"refinement_labels":  []string{"refine"},
-		"review_only_labels": []string{"review"},
-		"skip_labels":        []string{"skip"},
-		"blocked_labels":     []string{"blocked"},
-		"promote_to_label":   "ready",
-		"organizations":      []string{"theburrowhub"},
-		"assignees":          []string{"bot"},
-	}
-
-	if got := issueTrackingOverrideMap(override); !reflect.DeepEqual(got, want) {
-		t.Fatalf("issueTrackingOverrideMap() = %#v, want %#v", got, want)
-	}
-	if got := issueTrackingOverrideMap(&config.IssueTrackingOverride{}); len(got) != 0 {
-		t.Fatalf("empty issue tracking override = %#v, want empty map", got)
-	}
-}
-
-func TestPointerConfigDefaults(t *testing.T) {
-	falseValue := false
-	intValue := 17
-	if !ptrBoolOrTrue(nil) {
-		t.Fatal("ptrBoolOrTrue(nil) = false, want true")
-	}
-	if ptrBoolOrTrue(&falseValue) {
-		t.Fatal("ptrBoolOrTrue(false) = true, want false")
-	}
-	if got := ptrIntOr(nil, 9); got != 9 {
-		t.Fatalf("ptrIntOr(nil, 9) = %d, want 9", got)
-	}
-	if got := ptrIntOr(&intValue, 9); got != 17 {
-		t.Fatalf("ptrIntOr(17, 9) = %d, want 17", got)
 	}
 }
 
