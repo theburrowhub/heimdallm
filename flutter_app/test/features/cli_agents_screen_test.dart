@@ -120,7 +120,7 @@ void main() {
     );
   });
 
-  testWidgets('preserves a configured model missing from the static catalog', (
+  testWidgets('keeps an unavailable configured model reversible', (
     tester,
   ) async {
     await pumpScreen(
@@ -142,5 +142,26 @@ void main() {
       'claude-future-1',
     );
     expect(find.text('claude-future-1 (unavailable)'), findsOneWidget);
+
+    await tester.tap(dropdown);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('claude-sonnet-5').last);
+    await tester.pumpAndSettle();
+
+    expect(
+      tester.widget<DropdownButtonFormField<String>>(dropdown).initialValue,
+      'claude-sonnet-5',
+    );
+
+    await tester.tap(dropdown);
+    await tester.pumpAndSettle();
+    expect(find.text('claude-future-1 (unavailable)'), findsWidgets);
+    await tester.tap(find.text('claude-future-1 (unavailable)').last);
+    await tester.pumpAndSettle();
+
+    expect(
+      tester.widget<DropdownButtonFormField<String>>(dropdown).initialValue,
+      'claude-future-1',
+    );
   });
 }

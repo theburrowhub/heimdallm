@@ -199,6 +199,7 @@ class _AgentSection extends StatefulWidget {
 
 class _AgentSectionState extends State<_AgentSection> {
   late List<String> _flags; // each element = one flag entry (may contain spaces)
+  String? _unavailableModel;
   final _newFlagCtrl = TextEditingController();
   int? _editingIndex;       // index of chip being edited (null = none)
   final _editCtrl = TextEditingController();
@@ -207,6 +208,16 @@ class _AgentSectionState extends State<_AgentSection> {
   void initState() {
     super.initState();
     _flags = _parseFlags(widget.state.extraFlags);
+    _unavailableModel = _configuredUnavailableModel();
+  }
+
+  @override
+  void didUpdateWidget(covariant _AgentSection oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.name != widget.name ||
+        !identical(oldWidget.state, widget.state)) {
+      _unavailableModel = _configuredUnavailableModel();
+    }
   }
 
   @override
@@ -266,13 +277,22 @@ class _AgentSectionState extends State<_AgentSection> {
 
   void _cancelEdit() => setState(() => _editingIndex = null);
 
+  String? _configuredUnavailableModel() {
+    final model = widget.state.model;
+    final models = CLIAgentConfig.modelOptions[widget.name] ?? const [];
+    return model.isNotEmpty && !models.contains(model) ? model : null;
+  }
+
   @override
   Widget build(BuildContext context) {
     final name   = widget.name;
     final s      = widget.state;
     final models = CLIAgentConfig.modelOptions[name] ?? [];
-    final unavailableModel =
-        s.model.isNotEmpty && !models.contains(s.model) ? s.model : null;
+    final preservedUnavailableModel = _unavailableModel;
+    final unavailableModel = preservedUnavailableModel != null &&
+            !models.contains(preservedUnavailableModel)
+        ? preservedUnavailableModel
+        : null;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
