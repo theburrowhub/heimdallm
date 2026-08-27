@@ -1465,6 +1465,10 @@ func buildMultiSummaryBody(r *executor.ReviewResult) string {
 
 // BuildGitHubBody formats the AI review as a GitHub-flavored markdown review body.
 func BuildGitHubBody(r *executor.ReviewResult) string {
+	if len(r.Issues) == 0 && strings.EqualFold(strings.TrimSpace(r.Severity), "low") {
+		return "LGTM"
+	}
+
 	var sb strings.Builder
 	sb.WriteString("## 🤖 Heimdallm AI Review\n\n")
 	sb.WriteString(r.Summary)
