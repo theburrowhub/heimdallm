@@ -76,40 +76,50 @@ func (e *Executor) discoverModelsCached(
 
 		if inFlight := e.modelDiscovery.inFlight; inFlight != nil {
 			e.modelDiscovery.mu.Unlock()
-			select {
-			case <-ctx.Done():
-				return emptyModelCatalog()
-			case <-inFlight.done:
-				if inFlight.completed {
-					return cloneModelCatalog(inFlight.models)
-				}
-				// The leader was cancelled. A waiter with a live context may
-				// start a fresh round rather than inherit a partial catalog.
-				continue
+			models, retry := waitForModelDiscovery(ctx, inFlight)
+			if !retry {
+				return models
 			}
+		} else {
+			inFlight := &modelDiscoveryCall{done: make(chan struct{})}
+			e.modelDiscovery.inFlight = inFlight
+			e.modelDiscovery.mu.Unlock()
+
+			models := load(ctx)
+			completed := ctx.Err() == nil
+
+			e.modelDiscovery.mu.Lock()
+			inFlight.models = cloneModelCatalog(models)
+			inFlight.completed = completed
+			if completed {
+				e.modelDiscovery.models = cloneModelCatalog(models)
+				e.modelDiscovery.expiresAt = time.Now().Add(modelDiscoveryCacheTTL)
+			}
+			if e.modelDiscovery.inFlight == inFlight {
+				e.modelDiscovery.inFlight = nil
+			}
+			close(inFlight.done)
+			e.modelDiscovery.mu.Unlock()
+
+			return cloneModelCatalog(models)
 		}
+	}
+}
 
-		inFlight := &modelDiscoveryCall{done: make(chan struct{})}
-		e.modelDiscovery.inFlight = inFlight
-		e.modelDiscovery.mu.Unlock()
-
-		models := load(ctx)
-		completed := ctx.Err() == nil
-
-		e.modelDiscovery.mu.Lock()
-		inFlight.models = cloneModelCatalog(models)
-		inFlight.completed = completed
-		if completed {
-			e.modelDiscovery.models = cloneModelCatalog(models)
-			e.modelDiscovery.expiresAt = time.Now().Add(modelDiscoveryCacheTTL)
+func waitForModelDiscovery(
+	ctx context.Context,
+	inFlight *modelDiscoveryCall,
+) (models map[string][]string, retry bool) {
+	select {
+	case <-ctx.Done():
+		return emptyModelCatalog(), false
+	case <-inFlight.done:
+		if inFlight.completed {
+			return cloneModelCatalog(inFlight.models), false
 		}
-		if e.modelDiscovery.inFlight == inFlight {
-			e.modelDiscovery.inFlight = nil
-		}
-		close(inFlight.done)
-		e.modelDiscovery.mu.Unlock()
-
-		return cloneModelCatalog(models)
+		// The leader was cancelled. A waiter with a live context may start a
+		// fresh round rather than inherit a partial catalog.
+		return nil, true
 	}
 }
 

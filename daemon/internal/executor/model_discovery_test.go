@@ -177,6 +177,45 @@ func TestDiscoverModelsCachesCatalogAndReturnsDefensiveCopies(t *testing.T) {
 	}
 }
 
+func TestWaitForModelDiscovery(t *testing.T) {
+	t.Run("completed leader", func(t *testing.T) {
+		call := &modelDiscoveryCall{
+			done:      make(chan struct{}),
+			models:    map[string][]string{"codex": {"gpt-current"}},
+			completed: true,
+		}
+		close(call.done)
+
+		got, retry := waitForModelDiscovery(context.Background(), call)
+		if retry || !reflect.DeepEqual(got, call.models) {
+			t.Fatalf("wait result = (%#v, %v), want completed models", got, retry)
+		}
+		got["codex"][0] = "mutated"
+		if call.models["codex"][0] != "gpt-current" {
+			t.Fatal("wait result aliases the shared discovery result")
+		}
+	})
+
+	t.Run("cancelled leader", func(t *testing.T) {
+		call := &modelDiscoveryCall{done: make(chan struct{})}
+		close(call.done)
+
+		got, retry := waitForModelDiscovery(context.Background(), call)
+		if !retry || got != nil {
+			t.Fatalf("wait result = (%#v, %v), want retry", got, retry)
+		}
+	})
+
+	t.Run("cancelled waiter", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		got, retry := waitForModelDiscovery(ctx, &modelDiscoveryCall{done: make(chan struct{})})
+		if retry || got == nil || len(got["claude"]) != 0 {
+			t.Fatalf("wait result = (%#v, %v), want an empty cancelled result", got, retry)
+		}
+	})
+}
+
 func TestDiscoverModelsCoalescesConcurrentRequests(t *testing.T) {
 	exec := New()
 	var calls atomic.Int32
