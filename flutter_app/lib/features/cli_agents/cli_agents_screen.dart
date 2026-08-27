@@ -39,7 +39,10 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
     _initialized = true;
     for (final name in _cliNames) {
       final ac = config.agentConfigs[name] ?? const CLIAgentConfig();
-      _agents[name] = _AgentState.from(ac);
+      _agents[name] = _AgentState.from(
+        ac,
+        modelOptions: CLIAgentConfig.modelOptions[name] ?? const <String>[],
+      );
     }
   }
 
@@ -99,6 +102,7 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
                   for (final name in _cliNames) ...[
                     const SizedBox(height: 16),
                     _AgentSection(
+                      key: ValueKey('agent-section-$name'),
                       name: name,
                       state: _agents[name]!,
                       prompts: prompts,
@@ -138,6 +142,8 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
 
 class _AgentState {
   String model = '';
+  // UI-only: survives disposal of a lazily built agent section.
+  String? unavailableModel;
   int maxTurns = 0;
   String approvalMode = '';
   String extraFlags = '';
@@ -151,8 +157,14 @@ class _AgentState {
 
   _AgentState();
 
-  _AgentState.from(CLIAgentConfig ac) {
+  _AgentState.from(
+    CLIAgentConfig ac, {
+    required List<String> modelOptions,
+  }) {
     model               = ac.model;
+    unavailableModel = model.isNotEmpty && !modelOptions.contains(model)
+        ? model
+        : null;
     maxTurns            = ac.maxTurns;
     approvalMode        = ac.approvalMode;
     extraFlags          = ac.extraFlags;
@@ -187,6 +199,7 @@ class _AgentSection extends StatefulWidget {
   final ValueChanged<_AgentState> onChanged;
 
   const _AgentSection({
+    super.key,
     required this.name,
     required this.state,
     required this.prompts,
@@ -199,7 +212,6 @@ class _AgentSection extends StatefulWidget {
 
 class _AgentSectionState extends State<_AgentSection> {
   late List<String> _flags; // each element = one flag entry (may contain spaces)
-  String? _unavailableModel;
   final _newFlagCtrl = TextEditingController();
   int? _editingIndex;       // index of chip being edited (null = none)
   final _editCtrl = TextEditingController();
@@ -208,16 +220,6 @@ class _AgentSectionState extends State<_AgentSection> {
   void initState() {
     super.initState();
     _flags = _parseFlags(widget.state.extraFlags);
-    _unavailableModel = _configuredUnavailableModel();
-  }
-
-  @override
-  void didUpdateWidget(covariant _AgentSection oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.name != widget.name ||
-        !identical(oldWidget.state, widget.state)) {
-      _unavailableModel = _configuredUnavailableModel();
-    }
   }
 
   @override
@@ -277,18 +279,12 @@ class _AgentSectionState extends State<_AgentSection> {
 
   void _cancelEdit() => setState(() => _editingIndex = null);
 
-  String? _configuredUnavailableModel() {
-    final model = widget.state.model;
-    final models = CLIAgentConfig.modelOptions[widget.name] ?? const [];
-    return model.isNotEmpty && !models.contains(model) ? model : null;
-  }
-
   @override
   Widget build(BuildContext context) {
     final name   = widget.name;
     final s      = widget.state;
     final models = CLIAgentConfig.modelOptions[name] ?? [];
-    final preservedUnavailableModel = _unavailableModel;
+    final preservedUnavailableModel = s.unavailableModel;
     final unavailableModel = preservedUnavailableModel != null &&
             !models.contains(preservedUnavailableModel)
         ? preservedUnavailableModel
@@ -308,6 +304,7 @@ class _AgentSectionState extends State<_AgentSection> {
         // Row 1: Model + CLI-specific field
         Row(children: [
           Expanded(child: DropdownButtonFormField<String>(
+            key: ValueKey('model-$name'),
             // ignore: deprecated_member_use
             value: s.model.isEmpty ? null : s.model,
             decoration: const InputDecoration(labelText: 'Model', border: OutlineInputBorder()),

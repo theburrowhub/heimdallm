@@ -129,13 +129,38 @@ void main() {
       model: 'claude-future-1',
     );
 
-    final dropdown = find
-        .byWidgetPredicate(
-          (widget) =>
-              widget is DropdownButtonFormField<String> &&
-              widget.decoration.labelText == 'Model',
-        )
-        .first;
+    final dropdown = find.byKey(const ValueKey('model-claude'));
+    await tester.tap(dropdown);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('claude-sonnet-5').last);
+    await tester.pumpAndSettle();
+
+    await tester.tap(dropdown);
+    await tester.pumpAndSettle();
+    expect(find.text('claude-future-1 (unavailable)'), findsWidgets);
+    await tester.tap(find.text('claude-future-1 (unavailable)').last);
+    await tester.pumpAndSettle();
+
+    expect(
+      tester.widget<DropdownButtonFormField<String>>(dropdown).initialValue,
+      'claude-future-1',
+    );
+  });
+
+  testWidgets('keeps an unavailable model when its card is recreated', (
+    tester,
+  ) async {
+    await pumpScreen(
+      tester,
+      dangerouslySkipPerms: false,
+      model: 'claude-future-1',
+    );
+
+    final dropdown = find.byKey(const ValueKey('model-claude'));
+    final mountedDropdown = find.byKey(
+      const ValueKey('model-claude'),
+      skipOffstage: false,
+    );
 
     expect(
       tester.widget<DropdownButtonFormField<String>>(dropdown).initialValue,
@@ -153,15 +178,22 @@ void main() {
       'claude-sonnet-5',
     );
 
+    final agentSection = tester.widget<Widget>(
+      find.byKey(const ValueKey('agent-section-claude')),
+    );
+    await tester.pumpWidget(const MaterialApp(home: SizedBox.shrink()));
+    expect(mountedDropdown, findsNothing);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: SingleChildScrollView(child: agentSection)),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(dropdown, findsOneWidget);
+
     await tester.tap(dropdown);
     await tester.pumpAndSettle();
     expect(find.text('claude-future-1 (unavailable)'), findsWidgets);
-    await tester.tap(find.text('claude-future-1 (unavailable)').last);
-    await tester.pumpAndSettle();
-
-    expect(
-      tester.widget<DropdownButtonFormField<String>>(dropdown).initialValue,
-      'claude-future-1',
-    );
   });
 }
