@@ -87,6 +87,16 @@ class CLIAgentConfig {
     noSessionPersistence: (json['no_session_persistence'] as bool?) ?? false,
   );
 
+  static const modelOptions = <String, List<String>>{
+    'claude': [
+      'claude-opus-4-6',
+      'claude-sonnet-4-6',
+      'claude-haiku-4-5-20251001',
+    ],
+    'gemini': ['gemini-2.5-pro', 'gemini-2.0-flash', 'gemini-1.5-pro'],
+    'codex': ['o4-mini', 'o3', 'gpt-4o'],
+  };
+
   static const approvalModeOptions = [
     'never',
     'on-request',

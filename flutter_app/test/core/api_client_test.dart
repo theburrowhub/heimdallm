@@ -44,55 +44,6 @@ void main() {
       expect(captured!.headers['X-Heimdallm-Token'], 'abc-123');
     });
 
-    test('fetchAgentModels returns the live CLI catalogs', () async {
-      final platform = FakePlatformServices(
-        apiBaseUrl: 'http://127.0.0.1:7842',
-        token: 'abc-123',
-      );
-      http.BaseRequest? captured;
-      final client = ApiClient(
-        httpClient: MockClient((request) async {
-          captured = request;
-          return http.Response(
-            jsonEncode({
-              'claude': ['sonnet', 'opus[1m]'],
-              'codex': ['gpt-current'],
-              'gemini': <String>[],
-            }),
-            200,
-          );
-        }),
-        platform: platform,
-      );
-
-      final models = await client.fetchAgentModels();
-
-      expect(captured!.method, 'GET');
-      expect(captured!.url.toString(), 'http://127.0.0.1:7842/agents/models');
-      expect(captured!.headers['X-Heimdallm-Token'], 'abc-123');
-      expect(models['claude'], ['sonnet', 'opus[1m]']);
-      expect(models['codex'], ['gpt-current']);
-      expect(models['gemini'], isEmpty);
-    });
-
-    test('fetchAgentModels surfaces daemon errors', () async {
-      final client = ApiClient(
-        httpClient: MockClient((_) async => http.Response('unavailable', 503)),
-        platform: FakePlatformServices(token: 'abc-123'),
-      );
-
-      await expectLater(
-        client.fetchAgentModels(),
-        throwsA(
-          isA<ApiException>().having(
-            (error) => error.message,
-            'message',
-            'GET /agents/models failed: 503',
-          ),
-        ),
-      );
-    });
-
     test('triggerReview hits POST and returns 202', () async {
       final platform = FakePlatformServices(
         apiBaseUrl: 'http://127.0.0.1:7842',

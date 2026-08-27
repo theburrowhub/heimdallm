@@ -5,14 +5,8 @@ import '../../core/models/config_model.dart';
 import '../../shared/widgets/toast.dart';
 import '../agents/agents_screen.dart' show agentsProvider;
 import '../config/config_providers.dart';
-import '../dashboard/dashboard_providers.dart' show apiClientProvider;
 
 const _cliNames = ['claude', 'gemini', 'codex'];
-
-final cliAgentModelsProvider =
-    FutureProvider.autoDispose<Map<String, List<String>>>((ref) {
-  return ref.watch(apiClientProvider).fetchAgentModels();
-});
 
 class CLIAgentsScreen extends ConsumerStatefulWidget {
   const CLIAgentsScreen({super.key});
@@ -88,7 +82,6 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
   @override
   Widget build(BuildContext context) {
     final configAsync = ref.watch(configNotifierProvider);
-    final modelsAsync = ref.watch(cliAgentModelsProvider);
     final prompts = ref.watch(agentsProvider).value ?? [];
 
     return configAsync.when(
@@ -102,36 +95,6 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
               child: ListView(
                 padding: const EdgeInsets.all(16),
                 children: [
-                  Row(children: [
-                    const Expanded(
-                      child: Text(
-                        'Available models are read from the installed CLIs. '
-                        'You can also type a model ID.',
-                        style: TextStyle(fontSize: 12, color: Colors.grey),
-                      ),
-                    ),
-                    if (modelsAsync.isLoading)
-                      const Padding(
-                        padding: EdgeInsets.all(12),
-                        child: SizedBox(width: 16, height: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2)),
-                      )
-                    else
-                      IconButton(
-                        key: const ValueKey('refresh-agent-models'),
-                        tooltip: 'Refresh available models',
-                        onPressed: () => ref.invalidate(cliAgentModelsProvider),
-                        icon: const Icon(Icons.refresh),
-                      ),
-                  ]),
-                  if (modelsAsync.hasError)
-                    const Padding(
-                      padding: EdgeInsets.only(top: 6),
-                      child: Text(
-                        'Model discovery is unavailable. Saved values are preserved.',
-                        style: TextStyle(fontSize: 12, color: Colors.orange),
-                      ),
-                    ),
                   // ── Per-agent sections ───────────────────────────────────
                   for (final name in _cliNames) ...[
                     const SizedBox(height: 16),
@@ -139,9 +102,6 @@ class _CLIAgentsScreenState extends ConsumerState<CLIAgentsScreen> {
                       name: name,
                       state: _agents[name]!,
                       prompts: prompts,
-                      models: modelsAsync.value?[name] ?? const <String>[],
-                      modelsLoading: modelsAsync.isLoading,
-                      modelsUnavailable: modelsAsync.hasError,
                       onChanged: (s) { setState(() => _agents[name] = s); _markDirty(); },
                     ),
                     const Divider(),
@@ -218,177 +178,18 @@ class _AgentState {
   );
 }
 
-// ── Dynamic model selector ─────────────────────────────────────────────────
-
-class _ModelField extends StatefulWidget {
-  final String cli;
-  final String value;
-  final List<String> options;
-  final bool loading;
-  final bool unavailable;
-  final ValueChanged<String> onChanged;
-
-  const _ModelField({
-    required this.cli,
-    required this.value,
-    required this.options,
-    required this.loading,
-    required this.unavailable,
-    required this.onChanged,
-  });
-
-  @override
-  State<_ModelField> createState() => _ModelFieldState();
-}
-
-class _ModelFieldState extends State<_ModelField> {
-  late final TextEditingController _controller;
-  late final FocusNode _focusNode;
-  bool _synchronizing = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = TextEditingController(text: widget.value);
-    _focusNode = FocusNode();
-    _controller.addListener(_textChanged);
-  }
-
-  @override
-  void didUpdateWidget(covariant _ModelField oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (widget.value != oldWidget.value && widget.value != _controller.text) {
-      _synchronizing = true;
-      _controller.value = TextEditingValue(
-        text: widget.value,
-        selection: TextSelection.collapsed(offset: widget.value.length),
-      );
-      _synchronizing = false;
-    }
-  }
-
-  @override
-  void dispose() {
-    _controller.removeListener(_textChanged);
-    _controller.dispose();
-    _focusNode.dispose();
-    super.dispose();
-  }
-
-  void _textChanged() {
-    if (_synchronizing) return;
-    setState(() {});
-    widget.onChanged(_controller.text.trim());
-  }
-
-  List<String> get _effectiveOptions {
-    final result = <String>[];
-    final seen = <String>{};
-    for (final raw in [...widget.options, widget.value]) {
-      final model = raw.trim();
-      if (model.isNotEmpty && seen.add(model)) result.add(model);
-    }
-    return result;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) => RawAutocomplete<String>(
-        textEditingController: _controller,
-        focusNode: _focusNode,
-        displayStringForOption: (option) => option,
-        optionsBuilder: (value) {
-          final query = value.text.trim().toLowerCase();
-          return _effectiveOptions.where(
-            (model) => query.isEmpty || model.toLowerCase().contains(query),
-          );
-        },
-        onSelected: (model) {
-          if (_controller.text != model) _controller.text = model;
-        },
-        fieldViewBuilder: (context, textController, focusNode, onFieldSubmitted) {
-          return TextFormField(
-            key: ValueKey('model-input-${widget.cli}'),
-            controller: textController,
-            focusNode: focusNode,
-            decoration: InputDecoration(
-              labelText: 'Model',
-              hintText: 'CLI default',
-              helperText: widget.unavailable
-                  ? 'Could not query this CLI; manual input is available'
-                  : null,
-              border: const OutlineInputBorder(),
-              suffixIcon: widget.loading
-                  ? const Padding(
-                      padding: EdgeInsets.all(14),
-                      child: SizedBox(width: 16, height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2)),
-                    )
-                  : _controller.text.isEmpty
-                      ? null
-                      : IconButton(
-                          tooltip: 'Use CLI default',
-                          onPressed: _controller.clear,
-                          icon: const Icon(Icons.clear),
-                        ),
-            ),
-            onFieldSubmitted: (_) => onFieldSubmitted(),
-          );
-        },
-        optionsViewBuilder: (context, onSelected, options) {
-          final values = options.toList(growable: false);
-          return Align(
-            alignment: Alignment.topLeft,
-            child: Material(
-              elevation: 4,
-              child: SizedBox(
-                width: constraints.maxWidth,
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxHeight: 240),
-                  child: ListView.builder(
-                    padding: EdgeInsets.zero,
-                    shrinkWrap: true,
-                    itemCount: values.length,
-                    itemBuilder: (context, index) {
-                      final model = values[index];
-                      return InkWell(
-                        onTap: () => onSelected(model),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                          child: Text(model, maxLines: 1, overflow: TextOverflow.ellipsis),
-                        ),
-                      );
-                    },
-                  ),
-                ),
-              ),
-            ),
-          );
-        },
-      ),
-    );
-  }
-}
-
 // ── Agent section card ──────────────────────────────────────────────────────
 
 class _AgentSection extends StatefulWidget {
   final String name;
   final _AgentState state;
   final List<dynamic> prompts;
-  final List<String> models;
-  final bool modelsLoading;
-  final bool modelsUnavailable;
   final ValueChanged<_AgentState> onChanged;
 
   const _AgentSection({
     required this.name,
     required this.state,
     required this.prompts,
-    required this.models,
-    required this.modelsLoading,
-    required this.modelsUnavailable,
     required this.onChanged,
   });
 
@@ -469,6 +270,7 @@ class _AgentSectionState extends State<_AgentSection> {
   Widget build(BuildContext context) {
     final name   = widget.name;
     final s      = widget.state;
+    final models = CLIAgentConfig.modelOptions[name] ?? [];
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -483,17 +285,15 @@ class _AgentSectionState extends State<_AgentSection> {
 
         // Row 1: Model + CLI-specific field
         Row(children: [
-          Expanded(child: _ModelField(
-            cli: name,
-            value: s.model,
-            options: widget.models,
-            loading: widget.modelsLoading,
-            unavailable: widget.modelsUnavailable,
-            onChanged: (value) {
-              if (value == s.model) return;
-              setState(() => s.model = value);
-              widget.onChanged(s);
-            },
+          Expanded(child: DropdownButtonFormField<String>(
+            // ignore: deprecated_member_use
+            value: s.model.isEmpty ? null : s.model,
+            decoration: const InputDecoration(labelText: 'Model', border: OutlineInputBorder()),
+            items: [
+              const DropdownMenuItem<String>(value: null, child: Text('CLI default')),
+              ...models.map((m) => DropdownMenuItem(value: m, child: Text(m))),
+            ],
+            onChanged: (v) { setState(() => s.model = v ?? ''); widget.onChanged(s); },
           )),
           if (name == 'claude') ...[
             const SizedBox(width: 12),

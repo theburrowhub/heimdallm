@@ -300,26 +300,6 @@ class ApiClient {
 
   // ── Agents ──────────────────────────────────────────────────────────────
 
-  Future<Map<String, List<String>>> fetchAgentModels() async {
-    final resp = await _client
-        .get(_uri('/agents/models'), headers: await _authHeaders())
-        .timeout(const Duration(seconds: 12));
-    if (resp.statusCode != 200) {
-      throw ApiException('GET /agents/models failed: ${resp.statusCode}');
-    }
-    final decoded = jsonDecode(resp.body);
-    if (decoded is! Map<String, dynamic>) {
-      throw const FormatException('Invalid agent model catalog');
-    }
-    return {
-      for (final entry in decoded.entries)
-        if (entry.value is List<dynamic>)
-          entry.key: (entry.value as List<dynamic>)
-              .whereType<String>()
-              .toList(),
-    };
-  }
-
   Future<List<Map<String, dynamic>>> fetchAgents() async {
     final resp = await _client.get(
       _uri('/agents'),
