@@ -87,4 +87,29 @@ void main() {
     expect(disabled.value, isFalse);
     expect(disabled.onChanged, isNull);
   });
+
+  testWidgets('static model dropdown updates the selected model', (
+    tester,
+  ) async {
+    await pumpScreen(tester, dangerouslySkipPerms: false);
+
+    final dropdown = find
+        .byWidgetPredicate(
+          (widget) =>
+              widget is DropdownButtonFormField<String> &&
+              widget.decoration.labelText == 'Model',
+        )
+        .first;
+    expect(dropdown, findsOneWidget);
+
+    await tester.tap(dropdown);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('claude-sonnet-4-6').last);
+    await tester.pump();
+
+    expect(
+      tester.widget<DropdownButtonFormField<String>>(dropdown).initialValue,
+      'claude-sonnet-4-6',
+    );
+  });
 }
