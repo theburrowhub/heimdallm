@@ -116,7 +116,7 @@ void main() {
     }
   });
 
-  testWidgets('custom PR prompt suggests an allowed extra CLI flag', (
+  testWidgets('custom PR prompt marks extra flags as CLI-specific', (
     tester,
   ) async {
     tester.view.physicalSize = const Size(1200, 900);
@@ -149,7 +149,9 @@ void main() {
             widget.decoration.labelText == 'Extra CLI flags (optional)',
       ),
     );
-    expect(decorator.decoration.hintText, '--max-budget-usd 5');
+    final hint = decorator.decoration.hintText!;
+    expect(hint, contains('configured CLI'));
+    expect(hint, isNot(contains('--')));
   });
 
   group('per-category activation', () {

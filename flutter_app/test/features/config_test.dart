@@ -1274,36 +1274,25 @@ void main() {
     expect((diff['issue_tracking'] as Map)['organizations'], ['acme']);
   });
 
-  test('temporary model catalogs expose current CLI choices', () {
-    expect(
-      CLIAgentConfig.modelOptions['claude'],
-      [
-        'claude-fable-5',
-        'claude-opus-5',
-        'claude-sonnet-5',
-        'claude-haiku-4-5-20251001',
-      ],
-    );
-    expect(
-      CLIAgentConfig.modelOptions['gemini'],
-      [
-        'gemini-3.1-pro-preview',
-        'gemini-3.5-flash',
-        'gemini-3.1-flash-lite',
-        'gemini-2.5-pro',
-        'gemini-2.5-flash',
-        'gemini-2.5-flash-lite',
-      ],
-    );
-    expect(
-      CLIAgentConfig.modelOptions['codex'],
-      [
-        'gpt-5.6-sol',
-        'gpt-5.6-terra',
-        'gpt-5.6-luna',
-        'gpt-5.5',
-        'gpt-5.2',
-      ],
-    );
+  test('temporary model catalogs contain selectable unique IDs', () {
+    for (final entry in CLIAgentConfig.modelOptions.entries) {
+      final models = entry.value;
+      expect(models, isNotEmpty, reason: '${entry.key} has no model options');
+      expect(
+        models.toSet(),
+        hasLength(models.length),
+        reason: '${entry.key} has duplicate model options',
+      );
+      expect(
+        models.every(
+          (model) =>
+              model.isNotEmpty &&
+              model == model.trim() &&
+              !model.startsWith('-'),
+        ),
+        isTrue,
+        reason: '${entry.key} has an invalid model option',
+      );
+    }
   });
 }

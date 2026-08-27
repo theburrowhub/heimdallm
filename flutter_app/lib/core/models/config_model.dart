@@ -96,8 +96,10 @@ class CLIAgentConfig {
       'claude-haiku-4-5-20251001',
     ],
     'gemini': [
+      // Newer bare Flash IDs are omitted while Gemini CLI substitutes 3.5.
       'gemini-3.1-pro-preview',
       'gemini-3.5-flash',
+      'gemini-3.5-flash-lite',
       'gemini-3.1-flash-lite',
       'gemini-2.5-pro',
       'gemini-2.5-flash',
@@ -108,7 +110,7 @@ class CLIAgentConfig {
       'gpt-5.6-terra',
       'gpt-5.6-luna',
       'gpt-5.5',
-      'gpt-5.2',
+      'gpt-5.3-codex-spark',
     ],
   };
 

@@ -747,7 +747,7 @@ class _PromptEditorDialogState extends State<_PromptEditorDialog>
                             controller: _flagsCtrl,
                             decoration: const InputDecoration(
                               labelText: 'Extra CLI flags (optional)',
-                              hintText: '--max-budget-usd 5',
+                              hintText: 'Flags allowed for the configured CLI',
                               border: OutlineInputBorder(),
                               isDense: true,
                               helperText:
