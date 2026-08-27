@@ -1782,6 +1782,41 @@ func TestHandlerPutConfig_WritableAndReadOnly_Mixed(t *testing.T) {
 	}
 }
 
+func TestHandlerPutConfig_AgentConfigs_PersistsCompleteStaticSelection(t *testing.T) {
+	srv, s := setupServer(t)
+	body := `{"agent_configs":{"claude":{"model":" provider/future-model ","max_turns":42,"extra_flags":"--verbose","prompt":"review","effort":"HIGH","permission_mode":"acceptedits","bare":true,"no_session_persistence":true,"execution_timeout":"45m"}}}`
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, putConfigRequest(body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	rows, err := s.ListConfigs()
+	if err != nil {
+		t.Fatalf("ListConfigs: %v", err)
+	}
+	var got map[string]map[string]any
+	if err := json.Unmarshal([]byte(rows["agent_configs"]), &got); err != nil {
+		t.Fatalf("decode persisted agent_configs: %v", err)
+	}
+	want := map[string]map[string]any{
+		"claude": {
+			"model":                  "provider/future-model",
+			"max_turns":              float64(42),
+			"extra_flags":            "--verbose",
+			"prompt":                 "review",
+			"effort":                 "high",
+			"permission_mode":        "acceptEdits",
+			"bare":                   true,
+			"no_session_persistence": true,
+			"execution_timeout":      "45m",
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("persisted agent_configs = %#v, want %#v", got, want)
+	}
+}
+
 func TestHandlerPutConfig_AgentConfigs_RejectsDangerouslySkipPerms(t *testing.T) {
 	// Security gate M-5: --dangerously-skip-permissions cannot be enabled
 	// over HTTP. The handler must 400 with a message that points the
@@ -1825,12 +1860,32 @@ func TestHandlerPutConfig_AgentConfigs_RejectsBadPermissionMode(t *testing.T) {
 	}
 }
 
-func TestHandlerPutConfig_AgentConfigs_EnforcesProviderPolicy(t *testing.T) {
+func TestHandlerPutConfig_AgentConfigs_RejectsInvalidPayloadsAndProviderPolicy(t *testing.T) {
 	tests := []struct {
 		name       string
 		body       string
 		wantStatus int
 	}{
+		{
+			name:       "Agent configs must be an object",
+			body:       `{"agent_configs":[]}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "Agent config must be an object",
+			body:       `{"agent_configs":{"claude":true}}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "Dangerous flag requires canonical casing",
+			body:       `{"agent_configs":{"claude":{"Dangerously_Skip_Perms":false}}}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "Dangerous flag must be boolean",
+			body:       `{"agent_configs":{"claude":{"dangerously_skip_perms":"false"}}}`,
+			wantStatus: http.StatusBadRequest,
+		},
 		{
 			name:       "Codex sandbox override rejected",
 			body:       `{"agent_configs":{"codex":{"extra_flags":"--sandbox danger-full-access"}}}`,
@@ -1849,6 +1904,36 @@ func TestHandlerPutConfig_AgentConfigs_EnforcesProviderPolicy(t *testing.T) {
 		{
 			name:       "Option-shaped model rejected",
 			body:       `{"agent_configs":{"claude":{"model":"--dangerously-skip-permissions"}}}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "Non-string model rejected",
+			body:       `{"agent_configs":{"claude":{"model":42}}}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "Invalid execution timeout rejected",
+			body:       `{"agent_configs":{"claude":{"execution_timeout":"later"}}}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "Non-string permission mode rejected",
+			body:       `{"agent_configs":{"claude":{"permission_mode":true}}}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "Non-string approval mode rejected",
+			body:       `{"agent_configs":{"codex":{"approval_mode":true}}}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "Fractional max turns rejected",
+			body:       `{"agent_configs":{"claude":{"max_turns":1.5}}}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "Non-boolean bare rejected",
+			body:       `{"agent_configs":{"claude":{"bare":"true"}}}`,
 			wantStatus: http.StatusBadRequest,
 		},
 		{
@@ -2381,6 +2466,74 @@ func TestHandlePatchConfig(t *testing.T) {
 	}
 	if ai["fallback"] != "gemini" {
 		t.Errorf("fallback = %v, want gemini (should be preserved)", ai["fallback"])
+	}
+}
+
+func TestHandlePatchConfig_PersistsUnlistedModelAndEffort(t *testing.T) {
+	tomlPath := writeTempTOML(t, "[ai]\nprimary = \"claude\"\n")
+	srv := setupServerWithToken(t, "test-token")
+	srv.SetConfigPath(tomlPath)
+
+	body := `{"ai":{"agents":{"claude":{"model":" provider/future-model ","effort":" HIGH "}}}}`
+	req := httptest.NewRequest("PATCH", "/config", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Heimdallm-Token", "test-token")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	loaded, err := config.Load(tomlPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := loaded.AI.Agents["claude"]
+	if got.Model != "provider/future-model" {
+		t.Fatalf("model = %q, want provider/future-model", got.Model)
+	}
+	if got.Effort != "high" {
+		t.Fatalf("effort = %q, want high", got.Effort)
+	}
+}
+
+func TestHandlePatchConfig_RejectsInvalidAgentExecutionFields(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "model type", body: `{"ai":{"agents":{"claude":{"model":true}}}}`},
+		{name: "option shaped model", body: `{"ai":{"agents":{"claude":{"model":"--sandbox"}}}}`},
+		{name: "effort type", body: `{"ai":{"agents":{"claude":{"effort":true}}}}`},
+		{name: "unsupported effort", body: `{"ai":{"agents":{"claude":{"effort":"maximum"}}}}`},
+		{name: "dangerous flag type", body: `{"ai":{"agents":{"claude":{"dangerously_skip_perms":"false"}}}}`},
+		{name: "extra flags type", body: `{"ai":{"agents":{"claude":{"extra_flags":true}}}}`},
+		{name: "permission mode type", body: `{"ai":{"agents":{"claude":{"permission_mode":true}}}}`},
+		{name: "unsupported permission mode", body: `{"ai":{"agents":{"claude":{"permission_mode":"bypassPermissions"}}}}`},
+		{name: "approval mode type", body: `{"ai":{"agents":{"codex":{"approval_mode":true}}}}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			const tomlContent = "[ai]\nprimary = \"claude\"\n"
+			tomlPath := writeTempTOML(t, tomlContent)
+			srv := setupServerWithToken(t, "test-token")
+			srv.SetConfigPath(tomlPath)
+			req := httptest.NewRequest("PATCH", "/config", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Heimdallm-Token", "test-token")
+			w := httptest.NewRecorder()
+			srv.Router().ServeHTTP(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d (body: %s)", w.Code, w.Body.String())
+			}
+			got, err := os.ReadFile(tomlPath)
+			if err != nil {
+				t.Fatalf("read TOML: %v", err)
+			}
+			if string(got) != tomlContent {
+				t.Fatalf("rejected PATCH changed TOML:\n%s", got)
+			}
+		})
 	}
 }
 

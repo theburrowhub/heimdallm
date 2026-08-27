@@ -585,7 +585,6 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	notifier := notify.New()
 	ghClient := deps.newGitHubClient(token)
 	exec := executor.New()
-	srv.SetModelDiscoveryFn(exec.DiscoverModels)
 	repoCtx := repoctx.NewManagerWithOptions(repoctx.ManagerOptions{
 		MaxWorktreesPerRepo: cfg.AI.MaxWorktreesPerRepo,
 	})

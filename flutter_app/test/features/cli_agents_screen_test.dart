@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -13,6 +12,11 @@ import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 
 class _MockApiClient extends Mock implements ApiClient {}
 
+class _TestConfigNotifier extends ConfigNotifier {
+  void showLoading() => state = const AsyncLoading();
+  void showData(AppConfig config) => state = AsyncData(config);
+}
+
 void main() {
   setUpAll(() {
     registerFallbackValue(<String, dynamic>{});
@@ -21,14 +25,7 @@ void main() {
   Future<void> pumpScreen(
     WidgetTester tester, {
     required bool dangerouslySkipPerms,
-    String claudeModel = '',
-    Map<String, List<String>> modelCatalog = const {
-      'claude': <String>[],
-      'gemini': <String>[],
-      'codex': <String>[],
-    },
-    Object? modelError,
-    Completer<Map<String, List<String>>>? modelCompleter,
+    String model = '',
   }) async {
     // Keep only the first (Claude) card in the ListView build/cache extent.
     // The pre-existing fixed-width Codex approval dropdown overflows under
@@ -41,7 +38,7 @@ void main() {
     final config = AppConfig(
       agentConfigs: {
         'claude': CLIAgentConfig(
-          model: claudeModel,
+          model: model,
           dangerouslySkipPerms: dangerouslySkipPerms,
         ),
       },
@@ -50,27 +47,20 @@ void main() {
       ...config.toJson(),
       'agent_configs': {
         'claude': {
-          'model': claudeModel,
+          'model': model,
           'dangerously_skip_perms': dangerouslySkipPerms,
         },
       },
     };
     final api = _MockApiClient();
     when(api.fetchConfig).thenAnswer((_) async => configJson);
-    if (modelError != null) {
-      when(() => api.fetchAgentModels()).thenAnswer((_) async => throw modelError);
-    } else if (modelCompleter != null) {
-      when(() => api.fetchAgentModels()).thenAnswer((_) => modelCompleter.future);
-    } else {
-      when(() => api.fetchAgentModels()).thenAnswer((_) async => modelCatalog);
-    }
     when(() => api.patchConfig(any())).thenAnswer((_) async => configJson);
 
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
           apiClientProvider.overrideWithValue(api),
-          configNotifierProvider.overrideWith(ConfigNotifier.new),
+          configNotifierProvider.overrideWith(_TestConfigNotifier.new),
           agentsProvider.overrideWith(
             (ref) => Future.value(const <ReviewPrompt>[]),
           ),
@@ -78,12 +68,7 @@ void main() {
         child: const MaterialApp(home: Scaffold(body: CLIAgentsScreen())),
       ),
     );
-    if (modelCompleter == null) {
-      await tester.pumpAndSettle();
-    } else {
-      await tester.pump();
-      await tester.pump();
-    }
+    await tester.pumpAndSettle();
   }
 
   testWidgets('dangerous switch cannot enable an inactive bypass', (
@@ -115,80 +100,121 @@ void main() {
     expect(disabled.onChanged, isNull);
   });
 
-  testWidgets('model suggestions come from the daemon catalog', (tester) async {
-    await pumpScreen(
-      tester,
-      dangerouslySkipPerms: false,
-      modelCatalog: const {
-        'claude': ['claude-live-model'],
-        'gemini': <String>[],
-        'codex': <String>[],
-      },
-    );
+  testWidgets('static model dropdown updates the selected model', (
+    tester,
+  ) async {
+    await pumpScreen(tester, dangerouslySkipPerms: false);
 
-    await tester.enterText(
-      find.byKey(const ValueKey('model-input-claude')),
-      'live',
-    );
-    await tester.pump();
+    final dropdown = find
+        .byWidgetPredicate(
+          (widget) =>
+              widget is DropdownButtonFormField<String> &&
+              widget.decoration.labelText == 'Model',
+        )
+        .first;
+    expect(dropdown, findsOneWidget);
 
-    expect(find.text('claude-live-model'), findsOneWidget);
-    await tester.tap(find.text('claude-live-model'));
-    await tester.pump();
-    final field = tester.widget<TextFormField>(
-      find.byKey(const ValueKey('model-input-claude')),
-    );
-    expect(field.controller!.text, 'claude-live-model');
-  });
-
-  testWidgets('shows loading while CLI model discovery is pending', (tester) async {
-    final completer = Completer<Map<String, List<String>>>();
-    await pumpScreen(
-      tester,
-      dangerouslySkipPerms: false,
-      modelCompleter: completer,
-    );
-
-    expect(find.textContaining('Available models are read'), findsOneWidget);
-    expect(find.byType(CircularProgressIndicator), findsWidgets);
-
-    completer.complete(const {'claude': <String>[]});
+    await tester.tap(dropdown);
     await tester.pumpAndSettle();
-  });
-
-  testWidgets('preserves manual input when model discovery fails', (tester) async {
-    await pumpScreen(
-      tester,
-      dangerouslySkipPerms: false,
-      claudeModel: 'private-model',
-      modelError: Exception('unavailable'),
-    );
+    await tester.tap(find.text('claude-sonnet-5').last);
+    await tester.pump();
 
     expect(
-      find.text('Model discovery is unavailable. Saved values are preserved.'),
-      findsOneWidget,
+      tester.widget<DropdownButtonFormField<String>>(dropdown).initialValue,
+      'claude-sonnet-5',
     );
-    final field = tester.widget<TextFormField>(
-      find.byKey(const ValueKey('model-input-claude')),
-    );
-    expect(field.controller!.text, 'private-model');
   });
 
-  testWidgets('configured model stays editable when absent from catalog', (tester) async {
+  testWidgets('keeps an unlisted configured model reversible', (tester) async {
     await pumpScreen(
       tester,
       dangerouslySkipPerms: false,
-      claudeModel: 'private-model',
-      modelCatalog: const {
-        'claude': ['sonnet'],
-        'gemini': <String>[],
-        'codex': <String>[],
-      },
+      model: 'claude-future-1',
     );
 
-    final field = tester.widget<TextFormField>(
-      find.byKey(const ValueKey('model-input-claude')),
+    final dropdown = find.byKey(const ValueKey('model-claude'));
+    await tester.tap(dropdown);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('claude-sonnet-5').last);
+    await tester.pumpAndSettle();
+
+    await tester.tap(dropdown);
+    await tester.pumpAndSettle();
+    expect(find.text('claude-future-1 (not listed)'), findsWidgets);
+    await tester.tap(find.text('claude-future-1 (not listed)').last);
+    await tester.pumpAndSettle();
+
+    expect(
+      tester.widget<DropdownButtonFormField<String>>(dropdown).initialValue,
+      'claude-future-1',
     );
-    expect(field.controller!.text, 'private-model');
+  });
+
+  testWidgets('keeps an unlisted model after its card is recreated', (
+    tester,
+  ) async {
+    await pumpScreen(
+      tester,
+      dangerouslySkipPerms: false,
+      model: 'claude-future-1',
+    );
+
+    final dropdown = find.byKey(const ValueKey('model-claude'));
+
+    expect(
+      tester.widget<DropdownButtonFormField<String>>(dropdown).initialValue,
+      'claude-future-1',
+    );
+    expect(find.text('claude-future-1 (not listed)'), findsOneWidget);
+
+    await tester.tap(dropdown);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('claude-sonnet-5').last);
+    await tester.pumpAndSettle();
+
+    expect(
+      tester.widget<DropdownButtonFormField<String>>(dropdown).initialValue,
+      'claude-sonnet-5',
+    );
+
+    final section = find.byKey(const ValueKey('agent-section-claude'));
+    final screenState = tester.state(find.byType(CLIAgentsScreen));
+    final initialSectionState = tester.state(section);
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(CLIAgentsScreen)),
+    );
+    final config = container.read(configNotifierProvider).requireValue;
+    final notifier =
+        container.read(configNotifierProvider.notifier) as _TestConfigNotifier;
+
+    notifier.showLoading();
+    await tester.pump();
+    expect(screenState.mounted, isTrue);
+    expect(initialSectionState.mounted, isFalse);
+    expect(
+      find.byKey(const ValueKey('agent-section-claude'), skipOffstage: false),
+      findsNothing,
+    );
+
+    notifier.showData(config);
+    await tester.pumpAndSettle();
+    expect(tester.state(find.byType(CLIAgentsScreen)), same(screenState));
+    expect(tester.state(section), isNot(same(initialSectionState)));
+    expect(dropdown, findsOneWidget);
+    expect(
+      tester.widget<DropdownButtonFormField<String>>(dropdown).initialValue,
+      'claude-sonnet-5',
+    );
+
+    await tester.tap(dropdown);
+    await tester.pumpAndSettle();
+    expect(find.text('claude-future-1 (not listed)'), findsWidgets);
+    await tester.tap(find.text('claude-future-1 (not listed)').last);
+    await tester.pumpAndSettle();
+
+    expect(
+      tester.widget<DropdownButtonFormField<String>>(dropdown).initialValue,
+      'claude-future-1',
+    );
   });
 }

@@ -483,6 +483,88 @@ func TestExecuteRawAddsDetectedWorkDirFlags(t *testing.T) {
 	}
 }
 
+func TestExecuteRawPassesConfiguredModelToEachCLI(t *testing.T) {
+	tests := []struct {
+		cli       string
+		modelFlag string
+	}{
+		{cli: "claude", modelFlag: "--model"},
+		{cli: "gemini", modelFlag: "--model"},
+		{cli: "codex", modelFlag: "--model"},
+		{cli: "opencode", modelFlag: "-m"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.cli, func(t *testing.T) {
+			binDir := t.TempDir()
+			captureArgs := filepath.Join(t.TempDir(), "args.txt")
+			captureCWD := filepath.Join(t.TempDir(), "cwd.txt")
+			path := filepath.Join(binDir, tc.cli)
+			if err := os.WriteFile(path, []byte(fakeCLIScript("", captureArgs, captureCWD)), 0o755); err != nil {
+				t.Fatalf("write fake CLI: %v", err)
+			}
+			t.Setenv("PATH", binDir)
+
+			if _, err := executor.New().ExecuteRaw(tc.cli, "prompt", executor.ExecOptions{Model: "provider/future-model"}); err != nil {
+				t.Fatalf("ExecuteRaw: %v", err)
+			}
+			argsBytes, err := os.ReadFile(captureArgs)
+			if err != nil {
+				t.Fatalf("read captured args: %v", err)
+			}
+			args := strings.Fields(string(argsBytes))
+			if !containsInOrder(args, tc.modelFlag, "provider/future-model") {
+				t.Fatalf("args = %v, want %s provider/future-model", args, tc.modelFlag)
+			}
+		})
+	}
+}
+
+func TestExecuteRawPassesCompleteClaudeConfiguration(t *testing.T) {
+	binDir := t.TempDir()
+	captureArgs := filepath.Join(t.TempDir(), "args.txt")
+	captureCWD := filepath.Join(t.TempDir(), "cwd.txt")
+	path := filepath.Join(binDir, "claude")
+	if err := os.WriteFile(path, []byte(fakeCLIScript("", captureArgs, captureCWD)), 0o755); err != nil {
+		t.Fatalf("write fake CLI: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	opts := executor.ExecOptions{
+		Model:                "provider/future-model",
+		MaxTurns:             42,
+		ExtraFlags:           "--verbose",
+		Effort:               "HIGH",
+		PermissionMode:       "ACCEPTEDITS",
+		Bare:                 true,
+		DangerouslySkipPerms: true,
+		NoSessionPersistence: true,
+	}
+	if _, err := executor.New().ExecuteRaw("claude", "prompt", opts); err != nil {
+		t.Fatalf("ExecuteRaw: %v", err)
+	}
+	argsBytes, err := os.ReadFile(captureArgs)
+	if err != nil {
+		t.Fatalf("read captured args: %v", err)
+	}
+	args := strings.Fields(string(argsBytes))
+	for _, pair := range [][2]string{
+		{"--model", "provider/future-model"},
+		{"--max-turns", "42"},
+		{"--effort", "high"},
+		{"--permission-mode", "acceptEdits"},
+	} {
+		if !containsInOrder(args, pair[0], pair[1]) {
+			t.Errorf("args = %v, want %s %s", args, pair[0], pair[1])
+		}
+	}
+	for _, flag := range []string{"--verbose", "--bare", "--dangerously-skip-permissions", "--no-session-persistence"} {
+		if indexOf(args, flag) < 0 {
+			t.Errorf("args = %v, want %s", args, flag)
+		}
+	}
+}
+
 func TestExecuteRawFallsBackToCWDWhenWorkDirFlagUnsupported(t *testing.T) {
 	binDir := t.TempDir()
 	captureArgs := filepath.Join(t.TempDir(), "args.txt")

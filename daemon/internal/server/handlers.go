@@ -91,9 +91,6 @@ type Server struct {
 	rateLimitFn func() (any, error)
 	// configFn returns the current running config as a JSON-serializable map.
 	configFn func() map[string]any
-	// modelDiscoveryFn returns the models currently available to each agent CLI.
-	// Wired by main; nil disables GET /agents/models.
-	modelDiscoveryFn func(context.Context) map[string][]string
 	// healthSnapshotFn returns live daemon liveness metadata for /health and SSE heartbeat.
 	healthSnapshotFn func() HealthSnapshot
 	// prepareUpdateFn atomically prevents new long-running work and returns
@@ -374,11 +371,6 @@ func (srv *Server) SetRateLimitFn(fn func() (any, error)) { srv.rateLimitFn = fn
 // SetConfigFn wires the callback that returns the live config for GET /config.
 func (srv *Server) SetConfigFn(fn func() map[string]any) { srv.configFn = fn }
 
-// SetModelDiscoveryFn wires model discovery for GET /agents/models.
-func (srv *Server) SetModelDiscoveryFn(fn func(context.Context) map[string][]string) {
-	srv.modelDiscoveryFn = fn
-}
-
 // SetHealthSnapshotFn wires live liveness metadata for GET /health and heartbeat SSE.
 func (srv *Server) SetHealthSnapshotFn(fn func() HealthSnapshot) { srv.healthSnapshotFn = fn }
 
@@ -616,7 +608,6 @@ func (srv *Server) buildRouter() chi.Router {
 	r.Get("/stats", srv.handleStats)
 	r.Get("/github/rate_limit", srv.handleGitHubRateLimit)
 	r.Get("/agents", srv.handleListAgents)
-	r.Get("/agents/models", srv.handleAgentModels)
 	r.Post("/agents", srv.handleUpsertAgent)
 	r.Delete("/agents/{id}", srv.handleDeleteAgent)
 	r.Get("/config", srv.handleGetConfig)
@@ -2001,21 +1992,6 @@ func (srv *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 		agents = []*store.Agent{}
 	}
 	writeJSON(w, http.StatusOK, agents)
-}
-
-func (srv *Server) handleAgentModels(w http.ResponseWriter, r *http.Request) {
-	if srv.modelDiscoveryFn == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
-			"error": "model discovery not available",
-		})
-		return
-	}
-
-	models := srv.modelDiscoveryFn(r.Context())
-	if models == nil {
-		models = map[string][]string{}
-	}
-	writeJSON(w, http.StatusOK, models)
 }
 
 func (srv *Server) handleUpsertAgent(w http.ResponseWriter, r *http.Request) {

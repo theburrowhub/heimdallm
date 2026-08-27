@@ -1273,4 +1273,26 @@ void main() {
     final diff = computeRepoDiff(oldCfg, updated);
     expect((diff['issue_tracking'] as Map)['organizations'], ['acme']);
   });
+
+  test('temporary model catalogs contain selectable unique IDs', () {
+    for (final entry in CLIAgentConfig.modelOptions.entries) {
+      final models = entry.value;
+      expect(models, isNotEmpty, reason: '${entry.key} has no model options');
+      expect(
+        models.toSet(),
+        hasLength(models.length),
+        reason: '${entry.key} has duplicate model options',
+      );
+      expect(
+        models.every(
+          (model) =>
+              model.isNotEmpty &&
+              model == model.trim() &&
+              !model.startsWith('-'),
+        ),
+        isTrue,
+        reason: '${entry.key} has an invalid model option',
+      );
+    }
+  });
 }
