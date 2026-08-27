@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -22,6 +23,7 @@ import (
 
 const (
 	modelDiscoveryTimeout  = 8 * time.Second
+	modelDiscoveryCacheTTL = time.Minute
 	maxDiscoveredModels    = 500
 	maxModelIdentifierSize = 256
 	maxModelOutputSize     = 4 << 20
@@ -35,6 +37,19 @@ type modelDiscoveryResult struct {
 	err    error
 }
 
+type modelDiscoveryCall struct {
+	done      chan struct{}
+	models    map[string][]string
+	completed bool
+}
+
+type modelDiscoveryState struct {
+	mu        sync.Mutex
+	models    map[string][]string
+	expiresAt time.Time
+	inFlight  *modelDiscoveryCall
+}
+
 type modelPathResolver func(string) string
 
 // DiscoverModels asks every installed AI CLI for the models available to the
@@ -42,14 +57,74 @@ type modelPathResolver func(string) string
 // an unavailable, unauthenticated, or slow CLI contributes an empty list
 // without hiding successful results from the other providers.
 func (e *Executor) DiscoverModels(ctx context.Context) map[string][]string {
-	return discoverModels(ctx, resolveCLIPath)
+	return e.discoverModelsCached(ctx, func(loadCtx context.Context) map[string][]string {
+		return discoverModels(loadCtx, resolveCLIPath)
+	})
+}
+
+func (e *Executor) discoverModelsCached(
+	ctx context.Context,
+	load func(context.Context) map[string][]string,
+) map[string][]string {
+	for {
+		e.modelDiscovery.mu.Lock()
+		if time.Now().Before(e.modelDiscovery.expiresAt) {
+			models := cloneModelCatalog(e.modelDiscovery.models)
+			e.modelDiscovery.mu.Unlock()
+			return models
+		}
+
+		if inFlight := e.modelDiscovery.inFlight; inFlight != nil {
+			e.modelDiscovery.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return emptyModelCatalog()
+			case <-inFlight.done:
+				if inFlight.completed {
+					return cloneModelCatalog(inFlight.models)
+				}
+				// The leader was cancelled. A waiter with a live context may
+				// start a fresh round rather than inherit a partial catalog.
+				continue
+			}
+		}
+
+		inFlight := &modelDiscoveryCall{done: make(chan struct{})}
+		e.modelDiscovery.inFlight = inFlight
+		e.modelDiscovery.mu.Unlock()
+
+		models := load(ctx)
+		completed := ctx.Err() == nil
+
+		e.modelDiscovery.mu.Lock()
+		inFlight.models = cloneModelCatalog(models)
+		inFlight.completed = completed
+		if completed {
+			e.modelDiscovery.models = cloneModelCatalog(models)
+			e.modelDiscovery.expiresAt = time.Now().Add(modelDiscoveryCacheTTL)
+		}
+		if e.modelDiscovery.inFlight == inFlight {
+			e.modelDiscovery.inFlight = nil
+		}
+		close(inFlight.done)
+		e.modelDiscovery.mu.Unlock()
+
+		return cloneModelCatalog(models)
+	}
 }
 
 func discoverModels(ctx context.Context, resolve modelPathResolver) map[string][]string {
-	result := make(map[string][]string, len(modelDiscoveryCLIs))
+	return discoverModelsWith(ctx, resolve, discoverModelsForCLI)
+}
+
+func discoverModelsWith(
+	ctx context.Context,
+	resolve modelPathResolver,
+	discover func(context.Context, string, string) ([]string, error),
+) map[string][]string {
+	result := emptyModelCatalog()
 	paths := make(map[string]string, len(modelDiscoveryCLIs))
 	for _, cli := range modelDiscoveryCLIs {
-		result[cli] = []string{}
 		paths[cli] = resolve(cli)
 	}
 
@@ -64,20 +139,46 @@ func discoverModels(ctx context.Context, resolve modelPathResolver) map[string][
 		go func(cli, path string) {
 			providerCtx, cancel := context.WithTimeout(ctx, modelDiscoveryTimeout)
 			defer cancel()
-			models, err := discoverModelsForCLI(providerCtx, cli, path)
+			models, err := discover(providerCtx, cli, path)
 			results <- modelDiscoveryResult{cli: cli, models: models, err: err}
 		}(cli, path)
 	}
 
-	for range started {
-		discovered := <-results
-		if discovered.err != nil {
-			slog.Debug("executor: model discovery unavailable", "cli", discovered.cli, "err", discovered.err)
-			continue
+	for remaining := started; remaining > 0; remaining-- {
+		select {
+		case <-ctx.Done():
+			return result
+		case discovered := <-results:
+			if discovered.err != nil {
+				slog.Debug("executor: model discovery unavailable", "cli", discovered.cli, "err", discovered.err)
+				continue
+			}
+			result[discovered.cli] = normalizeDiscoveredModels(discovered.models)
 		}
-		result[discovered.cli] = normalizeDiscoveredModels(discovered.models)
 	}
 	return result
+}
+
+func emptyModelCatalog() map[string][]string {
+	result := make(map[string][]string, len(modelDiscoveryCLIs))
+	for _, cli := range modelDiscoveryCLIs {
+		result[cli] = []string{}
+	}
+	return result
+}
+
+func cloneModelCatalog(models map[string][]string) map[string][]string {
+	if models == nil {
+		return nil
+	}
+	clone := make(map[string][]string, len(models))
+	for cli, values := range models {
+		clone[cli] = append([]string(nil), values...)
+		if values != nil && clone[cli] == nil {
+			clone[cli] = []string{}
+		}
+	}
+	return clone
 }
 
 func discoverModelsForCLI(ctx context.Context, cli, path string) ([]string, error) {

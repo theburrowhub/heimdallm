@@ -10,7 +10,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestDiscoverModelsUsesEachCLINativeCatalog(t *testing.T) {
@@ -93,6 +95,204 @@ func TestDiscoverModelsIgnoresProviderFailure(t *testing.T) {
 	})
 	if got["opencode"] == nil || len(got["opencode"]) != 0 {
 		t.Fatalf("opencode models = %#v, want a non-nil empty list", got["opencode"])
+	}
+}
+
+func TestDiscoverModelsReturnsWhenParentContextIsCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan struct{})
+	release := make(chan struct{})
+	workerDone := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+
+	result := make(chan map[string][]string, 1)
+	go func() {
+		result <- discoverModelsWith(
+			ctx,
+			func(cli string) string {
+				if cli == "codex" {
+					return "/fake/codex"
+				}
+				return ""
+			},
+			func(context.Context, string, string) ([]string, error) {
+				close(started)
+				defer close(workerDone)
+				<-release // Deliberately ignore cancellation like a stuck CLI.
+				return []string{"too-late"}, nil
+			},
+		)
+	}()
+
+	<-started
+	cancel()
+	select {
+	case got := <-result:
+		if len(got["codex"]) != 0 {
+			t.Fatalf("codex models = %#v, want cancellation before the late result", got["codex"])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("DiscoverModels did not return after its parent context was cancelled")
+	}
+
+	close(release)
+	<-workerDone
+}
+
+func TestDiscoverModelsCachesCatalogAndReturnsDefensiveCopies(t *testing.T) {
+	exec := New()
+	calls := 0
+	load := func(context.Context) map[string][]string {
+		calls++
+		return map[string][]string{"codex": {"gpt-current"}}
+	}
+
+	first := exec.discoverModelsCached(context.Background(), load)
+	first["codex"][0] = "mutated"
+	first["unexpected"] = []string{"value"}
+
+	second := exec.discoverModelsCached(context.Background(), load)
+	if calls != 1 {
+		t.Fatalf("discovery calls = %d, want 1 within TTL", calls)
+	}
+	if !reflect.DeepEqual(second, map[string][]string{"codex": {"gpt-current"}}) {
+		t.Fatalf("cached models = %#v, want an unmodified defensive copy", second)
+	}
+
+	exec.modelDiscovery.mu.Lock()
+	exec.modelDiscovery.expiresAt = time.Now().Add(-time.Second)
+	exec.modelDiscovery.mu.Unlock()
+	third := exec.discoverModelsCached(context.Background(), load)
+	if calls != 2 {
+		t.Fatalf("discovery calls = %d, want 2 after TTL expiry", calls)
+	}
+	if !reflect.DeepEqual(third, second) {
+		t.Fatalf("refreshed models = %#v, want %#v", third, second)
+	}
+}
+
+func TestDiscoverModelsCoalescesConcurrentRequests(t *testing.T) {
+	exec := New()
+	var calls atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	load := func(context.Context) map[string][]string {
+		if calls.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		return map[string][]string{"claude": {"sonnet"}}
+	}
+
+	const callers = 8
+	results := make(chan map[string][]string, callers)
+	go func() {
+		results <- exec.discoverModelsCached(context.Background(), load)
+	}()
+	<-started
+	for range callers - 1 {
+		go func() {
+			results <- exec.discoverModelsCached(context.Background(), load)
+		}()
+	}
+	close(release)
+
+	for range callers {
+		got := <-results
+		if !reflect.DeepEqual(got, map[string][]string{"claude": {"sonnet"}}) {
+			t.Fatalf("models = %#v", got)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("discovery calls = %d, want one shared round", got)
+	}
+}
+
+func TestDiscoverModelsCancelledWaiterReturnsWithoutStoppingLeader(t *testing.T) {
+	exec := New()
+	var calls atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	load := func(context.Context) map[string][]string {
+		calls.Add(1)
+		close(started)
+		<-release
+		return map[string][]string{"gemini": {"gemini-auto"}}
+	}
+
+	leaderDone := make(chan map[string][]string, 1)
+	go func() {
+		leaderDone <- exec.discoverModelsCached(context.Background(), load)
+	}()
+	<-started
+
+	waiterCtx, cancelWaiter := context.WithCancel(context.Background())
+	waiterDone := make(chan map[string][]string, 1)
+	go func() {
+		waiterDone <- exec.discoverModelsCached(waiterCtx, load)
+	}()
+	cancelWaiter()
+	select {
+	case got := <-waiterDone:
+		if got == nil || len(got["gemini"]) != 0 {
+			t.Fatalf("cancelled waiter models = %#v, want a non-nil empty catalog", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled waiter remained blocked behind model discovery")
+	}
+
+	close(release)
+	if got := <-leaderDone; !reflect.DeepEqual(got, map[string][]string{"gemini": {"gemini-auto"}}) {
+		t.Fatalf("leader models = %#v", got)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("discovery calls = %d, want one leader", got)
+	}
+}
+
+func TestDiscoverModelsLiveWaiterRetriesCancelledLeader(t *testing.T) {
+	exec := New()
+	var calls atomic.Int32
+	firstStarted := make(chan struct{})
+	load := func(ctx context.Context) map[string][]string {
+		if calls.Add(1) == 1 {
+			close(firstStarted)
+			<-ctx.Done()
+			return emptyModelCatalog()
+		}
+		return map[string][]string{"opencode": {"openai/gpt-current"}}
+	}
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	leaderDone := make(chan map[string][]string, 1)
+	go func() {
+		leaderDone <- exec.discoverModelsCached(leaderCtx, load)
+	}()
+	<-firstStarted
+
+	waiterDone := make(chan map[string][]string, 1)
+	go func() {
+		waiterDone <- exec.discoverModelsCached(context.Background(), load)
+	}()
+	cancelLeader()
+	<-leaderDone
+
+	select {
+	case got := <-waiterDone:
+		if !reflect.DeepEqual(got, map[string][]string{"opencode": {"openai/gpt-current"}}) {
+			t.Fatalf("waiter models = %#v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("live waiter did not retry after its leader was cancelled")
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("discovery calls = %d, want cancelled round plus retry", got)
 	}
 }
 
