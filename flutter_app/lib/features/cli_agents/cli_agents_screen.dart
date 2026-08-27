@@ -271,6 +271,8 @@ class _AgentSectionState extends State<_AgentSection> {
     final name   = widget.name;
     final s      = widget.state;
     final models = CLIAgentConfig.modelOptions[name] ?? [];
+    final unavailableModel =
+        s.model.isNotEmpty && !models.contains(s.model) ? s.model : null;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -291,6 +293,11 @@ class _AgentSectionState extends State<_AgentSection> {
             decoration: const InputDecoration(labelText: 'Model', border: OutlineInputBorder()),
             items: [
               const DropdownMenuItem<String>(value: null, child: Text('CLI default')),
+              if (unavailableModel != null)
+                DropdownMenuItem(
+                  value: unavailableModel,
+                  child: Text('$unavailableModel (unavailable)'),
+                ),
               ...models.map((m) => DropdownMenuItem(value: m, child: Text(m))),
             ],
             onChanged: (v) { setState(() => s.model = v ?? ''); widget.onChanged(s); },

@@ -20,6 +20,7 @@ void main() {
   Future<void> pumpScreen(
     WidgetTester tester, {
     required bool dangerouslySkipPerms,
+    String model = '',
   }) async {
     // Keep only the first (Claude) card in the ListView build/cache extent.
     // The pre-existing fixed-width Codex approval dropdown overflows under
@@ -31,13 +32,19 @@ void main() {
 
     final config = AppConfig(
       agentConfigs: {
-        'claude': CLIAgentConfig(dangerouslySkipPerms: dangerouslySkipPerms),
+        'claude': CLIAgentConfig(
+          model: model,
+          dangerouslySkipPerms: dangerouslySkipPerms,
+        ),
       },
     );
     final configJson = {
       ...config.toJson(),
       'agent_configs': {
-        'claude': {'dangerously_skip_perms': dangerouslySkipPerms},
+        'claude': {
+          'model': model,
+          'dangerously_skip_perms': dangerouslySkipPerms,
+        },
       },
     };
     final api = _MockApiClient();
@@ -111,5 +118,29 @@ void main() {
       tester.widget<DropdownButtonFormField<String>>(dropdown).initialValue,
       'claude-sonnet-4-6',
     );
+  });
+
+  testWidgets('preserves a configured model missing from the static catalog', (
+    tester,
+  ) async {
+    await pumpScreen(
+      tester,
+      dangerouslySkipPerms: false,
+      model: 'claude-future-1',
+    );
+
+    final dropdown = find
+        .byWidgetPredicate(
+          (widget) =>
+              widget is DropdownButtonFormField<String> &&
+              widget.decoration.labelText == 'Model',
+        )
+        .first;
+
+    expect(
+      tester.widget<DropdownButtonFormField<String>>(dropdown).initialValue,
+      'claude-future-1',
+    );
+    expect(find.text('claude-future-1 (unavailable)'), findsOneWidget);
   });
 }
