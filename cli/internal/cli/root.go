@@ -83,6 +83,8 @@ func NewRootCmd(version string) *cobra.Command {
 		newReposCmd(),
 		newPRsCmd(),
 		newPRDetailCmd(),
+		newMergesCmd(),
+		newMergeDetailCmd(),
 		newIssuesCmd(),
 		newIssueDetailCmd(),
 		newFollowCmd(),

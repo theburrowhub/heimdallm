@@ -4,8 +4,8 @@ import (
 	"fmt"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/theburrowhub/heimdallm/cli/internal/tui"
 	"github.com/spf13/cobra"
+	"github.com/theburrowhub/heimdallm/cli/internal/tui"
 )
 
 func newDashboardCmd() *cobra.Command {

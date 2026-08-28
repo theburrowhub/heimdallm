@@ -146,4 +146,3 @@ func TestToInt(t *testing.T) {
 		})
 	}
 }
-
