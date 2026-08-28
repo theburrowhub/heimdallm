@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -138,11 +139,11 @@ func (srv *Server) handleGetMergeTracking(w http.ResponseWriter, r *http.Request
 // door for the one feature that exists precisely for the operator's own PRs:
 // pasting a link there produced a `self_authored` skip and nothing else.
 //
-// This endpoint is the right door. It stores the PR, makes sure its repository
-// is monitored, enrols it in merge tracking and stops. No review is triggered
-// and no self-author guard applies. Whether the PR is really the operator's is
-// decided where it belongs — by the reconciler's next evaluation, against
-// GitHub's own view of author and assignees.
+// This endpoint is the right door. It stores the PR, validates and enrols it in
+// merge tracking, then makes sure its repository is monitored. No review is
+// triggered and no self-author guard applies. Whether the PR is really the
+// operator's is decided where it belongs — by the reconciler's next evaluation,
+// against GitHub's own view of author and assignees.
 //
 // Body: {"url": "https://github.com/owner/repo/pull/123"}.
 func (srv *Server) handleAddMergeTracking(w http.ResponseWriter, r *http.Request) {
@@ -171,6 +172,12 @@ func (srv *Server) handleAddMergeTracking(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{
 			"error": fmt.Sprintf("fetch PR %s#%d: %v", repo, number, err),
+		})
+		return
+	}
+	if pr.State != "" && !strings.EqualFold(pr.State, "open") {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": fmt.Sprintf("cannot enrol %s#%d: pull request is %s", repo, number, pr.State),
 		})
 		return
 	}

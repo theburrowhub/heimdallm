@@ -152,6 +152,54 @@ func TestHandleAddMergeTracking_SurfacesAnEnrolmentRefusal(t *testing.T) {
 	}
 }
 
+func TestHandleAddMergeTracking_RejectsAClosedPRWithoutMonitoring(t *testing.T) {
+	srv, s, _ := newMergeTrackingServer(t)
+	var calls addCalls
+	wireAdd(srv, s, &calls, nil)
+	srv.SetAddPRFn(func(repo string, number int) (*store.PR, error) {
+		now := time.Now().UTC()
+		pr := &store.PR{
+			GithubID: int64(9000 + number), Repo: repo, Number: number,
+			Title: "Already done", Author: "octocat", State: "closed",
+			URL: "https://github.com/" + repo + "/pull/42", UpdatedAt: now, FetchedAt: now,
+		}
+		id, err := s.UpsertPR(pr)
+		if err != nil {
+			return nil, err
+		}
+		pr.ID = id
+		return pr, nil
+	})
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	original := []byte("[ai]\nprimary = \"claude\"\n\n[github]\nnon_monitored = [\"acme/widgets\"]\n")
+	if err := os.WriteFile(cfgPath, original, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	srv.SetConfigPath(cfgPath)
+	srv.SetReloadFn(func() error { return nil })
+
+	code, body := postJSON(t, srv, "/merge-tracking/add",
+		`{"url":"https://github.com/acme/widgets/pull/42"}`)
+	if code != http.StatusConflict {
+		t.Fatalf("status = %d, body = %s", code, body)
+	}
+	if !strings.Contains(string(body), "pull request is closed") {
+		t.Errorf("body = %s, want the terminal state", body)
+	}
+	if len(calls.enrolled) != 0 {
+		t.Errorf("enrolled = %v, want no enrolment for a closed PR", calls.enrolled)
+	}
+	written, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if string(written) != string(original) {
+		t.Errorf("config changed after closed PR rejection:\n%s\nwant:\n%s", written, original)
+	}
+}
+
 func TestHandleAddMergeTracking_RejectsJunk(t *testing.T) {
 	srv, s, _ := newMergeTrackingServer(t)
 	var calls addCalls
