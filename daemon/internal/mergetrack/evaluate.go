@@ -43,6 +43,7 @@ func Evaluate(st *gh.MergeStatus, in Input) Decision {
 			MergeStateStatus:     st.MergeStateStatus,
 			Mergeable:            st.Mergeable,
 			ReviewDecision:       st.ReviewDecision,
+			BehindBase:           st.MergeStateStatus == gh.MergeStateBehind || st.BehindBase(),
 			InMergeQueue:         st.IsInMergeQueue,
 			ProtectionUnreadable: st.ProtectionUnreadable,
 		},
@@ -159,10 +160,9 @@ func Evaluate(st *gh.MergeStatus, in Input) Decision {
 		d.Blocks = []Block{{Reason: ReasonConflicts, Detail: "the head branch conflicts with " + orUnknown(st.BaseRef)}}
 		return d
 	}
-	// Out of date comes before every gating signal below, and deliberately so:
-	// checks that pass against a stale base prove nothing, and under strict
-	// status checks GitHub will demand the update anyway. Bringing the branch
-	// up to date first is the move that unblocks the rest.
+	// When branch updates are enabled, out of date comes before every gating
+	// signal below: checks that pass against a stale base prove nothing, and
+	// bringing the branch up to date first is the move that unblocks the rest.
 	//
 	// The condition cannot be mergeStateStatus alone. GitHub collapses its whole
 	// verdict into one value and ranks BLOCKED above BEHIND, so a PR that is
@@ -170,8 +170,12 @@ func Evaluate(st *gh.MergeStatus, in Input) Decision {
 	// verified against two open PRs in this repository, hundreds of commits
 	// behind, both reporting DIRTY. BehindBase() compares the commit the PR is
 	// based on with the current tip of the base branch, which is exactly the
-	// question, and costs no extra request.
-	if st.MergeStateStatus == gh.MergeStateBehind || st.BehindBase() {
+	// question, and costs no extra request. That comparison is only a blocking
+	// condition when the operator opted into update_branch: non-strict repos can
+	// legitimately merge a CLEAN PR after the base tip advances. GitHub's
+	// explicit BEHIND verdict remains a block because it means the repository
+	// itself requires the branch to be brought up to date.
+	if st.MergeStateStatus == gh.MergeStateBehind || (in.Cfg.UpdateBranch && d.Evidence.BehindBase) {
 		d.Blocks = []Block{{Reason: ReasonBehindBase, Detail: "the head branch is behind " + orUnknown(st.BaseRef)}}
 		return d
 	}

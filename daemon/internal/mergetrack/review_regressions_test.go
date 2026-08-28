@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/heimdallm/daemon/internal/config"
 	gh "github.com/heimdallm/daemon/internal/github"
 	"github.com/heimdallm/daemon/internal/mergetrack"
 	"github.com/heimdallm/daemon/internal/sse"
@@ -352,20 +353,34 @@ func TestReconcilePR_CleanStatusMergeTakesTheInFlightClaim(t *testing.T) {
 			Reason: gh.AutoMergeReasonCleanStatus,
 			Body:   "Pull request is in clean status",
 		},
-		mergeErr: errNetwork,
 	}
 	h := newHarness(t, cfg, gw)
 
-	// Fails inside the merge, so the claim is what we can observe afterwards:
-	// the row must have gone through 'merging', not stayed on the arming phase.
-	_, _ = h.r.ReconcilePR(context.Background(), h.prID, h.now, false)
-	if got := h.row(t).Phase; got != store.MergePhaseBlocked {
-		t.Errorf("phase = %q, want blocked after a failed merge", got)
+	// A second daemon reaches the row while the first is still waiting for the
+	// auto-merge mutation to answer. The arming phase is not an in-flight lock,
+	// so the competitor can take the merging claim. Once GitHub answers "clean",
+	// the first daemon must re-claim and stand down rather than merging too.
+	var competitorClaimed bool
+	gw.onEnableAutoMerge = func() {
+		var err error
+		competitorClaimed, err = h.st.ClaimMergeTrackingAction(
+			h.prID, headSHA, store.MergePhaseMerging, h.now)
+		if err != nil {
+			t.Fatalf("competitor claim: %v", err)
+		}
 	}
-	// And with the row parked, a fresh claim under the arming phase must not be
-	// able to sneak past the merge that just ran.
-	if h.gw.mergeCalls != 1 {
-		t.Errorf("merge calls = %d, want exactly 1", h.gw.mergeCalls)
+
+	if _, err := h.r.ReconcilePR(context.Background(), h.prID, h.now, false); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if !competitorClaimed {
+		t.Fatal("precondition: the competing daemon must take the in-flight claim")
+	}
+	if h.gw.mergeCalls != 0 {
+		t.Errorf("merge calls = %d, want 0: the competing claim owns the merge", h.gw.mergeCalls)
+	}
+	if got := h.row(t).Phase; got != store.MergePhaseMerging {
+		t.Errorf("phase = %q, want merging: the competing claim must remain intact", got)
 	}
 }
 
@@ -495,9 +510,67 @@ func TestEvaluate_OutOfDateWinsOverEveryGatingSignal(t *testing.T) {
 		{Name: "build", Kind: "check_run", State: gh.CheckStateFailure, Required: true},
 	}
 
-	d := mergetrack.Evaluate(st, baseInput(enabledCfg()))
+	cfg := enabledCfg()
+	cfg.UpdateBranch = true
+	d := mergetrack.Evaluate(st, baseInput(cfg))
 	if got := d.PrimaryReason(); got != mergetrack.ReasonBehindBase {
 		t.Fatalf("primary reason = %q, want behind_base: updating comes first", got)
+	}
+}
+
+// A moved base is not itself a merge requirement on a non-strict repository.
+// With branch updates disabled (the default), it must remain evidence rather
+// than suppressing whichever merge automation the operator explicitly chose;
+// enabling branch updates still gives that action precedence.
+func TestDecide_OutOfDateUsesConfiguredAutomation(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*config.MergeTrackingConfig)
+		want      mergetrack.Action
+	}{
+		{
+			name: "enable auto merge",
+			configure: func(cfg *config.MergeTrackingConfig) {
+				cfg.EnableAutoMerge = true
+			},
+			want: mergetrack.ActionArmAutoMerge,
+		},
+		{
+			name: "merge directly",
+			configure: func(cfg *config.MergeTrackingConfig) {
+				cfg.Merge = true
+			},
+			want: mergetrack.ActionMerge,
+		},
+		{
+			name: "update when enabled",
+			configure: func(cfg *config.MergeTrackingConfig) {
+				cfg.EnableAutoMerge = true
+				cfg.Merge = true
+				cfg.UpdateBranch = true
+			},
+			want: mergetrack.ActionUpdateBranchRemote,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := cleanStatus()
+			st.BaseOID = "base-old"
+			st.BaseTipOID = "base-new"
+
+			cfg := enabledCfg()
+			tt.configure(&cfg)
+			in := baseInput(cfg)
+			d := mergetrack.Decide(mergetrack.Evaluate(st, in), st, in)
+
+			if d.Action != tt.want {
+				t.Errorf("action = %q, want %q", d.Action, tt.want)
+			}
+			if !d.Evidence.BehindBase {
+				t.Error("the advanced base should remain visible in the decision evidence")
+			}
+		})
 	}
 }
 

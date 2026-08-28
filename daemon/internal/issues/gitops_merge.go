@@ -357,13 +357,3 @@ func (g *GitExec) PushForceWithLease(ctx context.Context, dir, repo, branch, exp
 	}
 	return nil
 }
-
-func splitLines(s string) []string {
-	var out []string
-	for _, line := range strings.Split(s, "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			out = append(out, line)
-		}
-	}
-	return out
-}

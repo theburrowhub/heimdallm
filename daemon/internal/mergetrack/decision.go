@@ -87,6 +87,10 @@ type Evidence struct {
 	MergeStateStatus string `json:"merge_state_status,omitempty"`
 	Mergeable        string `json:"mergeable,omitempty"`
 	ReviewDecision   string `json:"review_decision,omitempty"`
+	// BehindBase records that the base tip has advanced even when the repo does
+	// not require a branch update and the operator left update_branch disabled.
+	// In that case it is useful context, not a reason to suppress merging.
+	BehindBase bool `json:"behind_base"`
 
 	ApprovalsAtHead    int      `json:"approvals_at_head"`
 	RequiredApprovals  int      `json:"required_approvals"`
