@@ -386,8 +386,10 @@ class DesktopPlatformServices
           directoryName != null &&
           directoryName.startsWith('heimdallm-ui-')) {
         try {
-          if (await socket.exists()) await socket.delete();
-          return directory;
+          if (await directory.exists()) {
+            if (await socket.exists()) await socket.delete();
+            return directory;
+          }
         } on FileSystemException {
           // Fall through to a fresh private temporary directory.
         }

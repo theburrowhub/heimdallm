@@ -520,6 +520,41 @@ else:
       expect(reusable.existsSync(), isFalse);
     });
 
+    test('missing stale activation directory is replaced safely', () async {
+      final missing = await Directory.systemTemp.createTemp('heimdallm-ui-');
+      final staleSocketPath = '${missing.path}/activate.sock';
+      await missing.delete();
+      final pidFile = File('${tempDir.path}/missing-reuse/ui.pid')
+        ..createSync(recursive: true)
+        ..writeAsStringSync(
+          jsonEncode({
+            'schema_version': 1,
+            'activation_socket': staleSocketPath,
+          }),
+        );
+      final services = DesktopPlatformServices(pidFilePath: pidFile.path);
+
+      String? replacementSocketPath;
+      try {
+        expect(await services.ensureSingleInstance(), isTrue);
+        final record = jsonDecode(pidFile.readAsStringSync());
+        replacementSocketPath = record['activation_socket'];
+        expect(replacementSocketPath, isNot(staleSocketPath));
+        expect(
+          Directory(File(replacementSocketPath!).parent.path).existsSync(),
+          isTrue,
+        );
+      } finally {
+        await services.releaseSingleInstanceForTesting();
+      }
+
+      expect(missing.existsSync(), isFalse);
+      expect(
+        Directory(File(replacementSocketPath).parent.path).existsSync(),
+        isFalse,
+      );
+    });
+
     test('failed activation bind releases lock and temporary state', () async {
       final pidFile = File('${tempDir.path}/bind-failure/ui.pid');
       String? socketPath;
