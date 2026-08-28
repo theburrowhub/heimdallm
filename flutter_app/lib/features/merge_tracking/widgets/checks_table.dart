@@ -61,11 +61,16 @@ class _ChecksTableState extends State<ChecksTable> {
                       size: 18,
                     ),
                     const SizedBox(width: 4),
-                    Text(
-                      '${optional.length} optional '
-                      '${optional.length == 1 ? 'check' : 'checks'} '
-                      '(do not block the merge)',
-                      style: Theme.of(context).textTheme.bodySmall,
+                    // Flexible: the panel also renders in the PR detail's
+                    // narrow column, where this sentence does not fit on one
+                    // line and an unconstrained Text overflows the row.
+                    Flexible(
+                      child: Text(
+                        '${optional.length} optional '
+                        '${optional.length == 1 ? 'check' : 'checks'} '
+                        '(do not block the merge)',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
                     ),
                   ],
                 ),
