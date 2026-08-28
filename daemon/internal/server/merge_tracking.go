@@ -175,8 +175,18 @@ func (srv *Server) handleAddMergeTracking(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Enrolment also preflights the per-repo enabled switch. Do this before
+	// changing monitoring config so a refusal cannot start reviewing a whole
+	// repository as a side effect of a failed request.
+	if err := srv.mergeTrackEnrolFn(pr.ID, repo, number); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": fmt.Sprintf("enrol %s#%d: %v", repo, number, err),
+		})
+		return
+	}
+
 	// Discovery intersects with the monitored list, so a PR in an unmonitored
-	// repo would be enrolled now and dropped on the next cycle.
+	// repo would be dropped on the next cycle even after being enrolled here.
 	if srv.configPath != "" {
 		if _, err := srv.patchTOML(func(m map[string]any) error {
 			addRepoToTOMLMap(m, repo)
@@ -187,13 +197,6 @@ func (srv *Server) handleAddMergeTracking(w http.ResponseWriter, r *http.Request
 			})
 			return
 		}
-	}
-
-	if err := srv.mergeTrackEnrolFn(pr.ID, repo, number); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": fmt.Sprintf("enrol %s#%d: %v", repo, number, err),
-		})
-		return
 	}
 
 	row, err := srv.store.GetMergeTracking(pr.ID)

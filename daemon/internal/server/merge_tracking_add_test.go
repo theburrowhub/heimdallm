@@ -119,6 +119,19 @@ func TestHandleAddMergeTracking_SurfacesAnEnrolmentRefusal(t *testing.T) {
 	var calls addCalls
 	wireAdd(srv, s, &calls, errors.New("merge tracking is disabled for acme/widgets"))
 
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	original := []byte("[ai]\nprimary = \"claude\"\n\n[github]\nnon_monitored = [\"acme/widgets\"]\n")
+	if err := os.WriteFile(cfgPath, original, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	srv.SetConfigPath(cfgPath)
+	reloads := 0
+	srv.SetReloadFn(func() error {
+		reloads++
+		return nil
+	})
+
 	code, body := postJSON(t, srv, "/merge-tracking/add",
 		`{"url":"https://github.com/acme/widgets/pull/42"}`)
 	if code != http.StatusInternalServerError {
@@ -126,6 +139,16 @@ func TestHandleAddMergeTracking_SurfacesAnEnrolmentRefusal(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "disabled for acme/widgets") {
 		t.Errorf("body = %s, want the reason", body)
+	}
+	if reloads != 0 {
+		t.Errorf("reloads = %d, want no config reload after enrolment refusal", reloads)
+	}
+	written, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if string(written) != string(original) {
+		t.Errorf("config changed after enrolment refusal:\n%s\nwant:\n%s", written, original)
 	}
 }
 
