@@ -905,7 +905,10 @@ type RateLimit struct {
 // RateLimit queries GitHub's GET /rate_limit for the current token. This
 // endpoint does not itself count against the core rate limit.
 func (c *Client) RateLimit() (*RateLimit, error) {
-	resp, err := c.do("GET", "/rate_limit", "application/vnd.github+json")
+	// Rate-limit counters are live telemetry, not a stable resource. Bypass the
+	// generic ETag cache so a GitHub Enterprise instance or proxy that supplies
+	// an ETag cannot make a refresh reuse an older body.
+	resp, err := c.doWithBody("GET", "/rate_limit", "application/vnd.github+json", "", nil)
 	if err != nil {
 		return nil, fmt.Errorf("github: rate limit: %w", err)
 	}

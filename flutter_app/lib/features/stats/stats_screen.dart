@@ -1,3 +1,6 @@
+import 'dart:async';
+
+import 'package:clock/clock.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/models/pr.dart';
@@ -404,13 +407,40 @@ class _BarChart extends StatelessWidget {
 }
 
 /// Live GitHub API rate limits (core / search / graphql) for the daemon's
-/// token. Fetched on demand via [githubRateLimitProvider]; the refresh button
-/// re-queries GitHub.
-class _GitHubRateLimitCard extends ConsumerWidget {
+/// token. The countdown repaints every second, while a minute-level refresh
+/// keeps the remaining values current without adding meaningful API traffic.
+class _GitHubRateLimitCard extends ConsumerStatefulWidget {
   const _GitHubRateLimitCard();
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_GitHubRateLimitCard> createState() =>
+      _GitHubRateLimitCardState();
+}
+
+class _GitHubRateLimitCardState extends ConsumerState<_GitHubRateLimitCard> {
+  Timer? _countdownTimer;
+  Timer? _refreshTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
+    _refreshTimer = Timer.periodic(const Duration(minutes: 1), (_) {
+      if (mounted) ref.invalidate(githubRateLimitProvider);
+    });
+  }
+
+  @override
+  void dispose() {
+    _countdownTimer?.cancel();
+    _refreshTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final async = ref.watch(githubRateLimitProvider);
     return Card(
       margin: const EdgeInsets.fromLTRB(12, 8, 12, 4),
@@ -523,7 +553,7 @@ class _GitHubRateLimitCard extends ConsumerWidget {
   String _resetLabel(int resetUnixSecs) {
     if (resetUnixSecs <= 0) return '';
     final reset = DateTime.fromMillisecondsSinceEpoch(resetUnixSecs * 1000);
-    final diff = reset.difference(DateTime.now());
+    final diff = reset.difference(clock.now());
     if (diff.isNegative) return 'reset now';
     if (diff.inMinutes < 1) return 'resets ${diff.inSeconds}s';
     if (diff.inMinutes < 60) return 'resets ${diff.inMinutes}m';

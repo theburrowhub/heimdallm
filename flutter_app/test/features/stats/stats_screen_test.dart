@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:clock/clock.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -213,6 +214,51 @@ void main() {
       expect(find.text('GraphQL'), findsNothing);
     },
   );
+
+  testWidgets('rate limits count down and refresh automatically', (
+    tester,
+  ) async {
+    await _useWideViewport(tester);
+    var rateLimitLoads = 0;
+
+    await tester.pumpWidget(
+      _host(
+        loadStats: () async => <String, dynamic>{},
+        loadRateLimits: () async {
+          rateLimitLoads++;
+          final reset = clock.now().millisecondsSinceEpoch ~/ 1000 + 91;
+          return <String, dynamic>{
+            'core': <String, dynamic>{
+              'limit': 5000,
+              'remaining': 5000 - rateLimitLoads,
+              'reset': reset,
+            },
+          };
+        },
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(rateLimitLoads, 1);
+    expect(find.text('4999 / 5000'), findsOneWidget);
+    expect(find.text('resets 1m'), findsOneWidget);
+
+    await tester.pump(const Duration(seconds: 31));
+    final resetLabels = tester
+        .widgetList<Text>(find.byType(Text))
+        .map((widget) => widget.data)
+        .whereType<String>()
+        .where((text) => text.startsWith('resets '))
+        .toList();
+    expect(resetLabels, hasLength(1));
+    expect(resetLabels.single, matches(RegExp(r'^resets \d+s$')));
+    expect(rateLimitLoads, 1);
+
+    await tester.pump(const Duration(seconds: 29));
+    await tester.pump();
+    expect(rateLimitLoads, 2);
+    expect(find.text('4998 / 5000'), findsOneWidget);
+  });
 
   testWidgets(
     'full payload renders stats, repo sources, limits, and refreshes',
