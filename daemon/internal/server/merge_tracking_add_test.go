@@ -9,6 +9,7 @@ package server_test
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/heimdallm/daemon/internal/mergetrack"
 	"github.com/heimdallm/daemon/internal/server"
 	"github.com/heimdallm/daemon/internal/store"
 )
@@ -137,7 +139,7 @@ func TestHandleAddMergeTracking_ReportsAFetchFailureWithoutEnrolling(t *testing.
 func TestHandleAddMergeTracking_SurfacesAnEnrolmentRefusal(t *testing.T) {
 	srv, s, _ := newMergeTrackingServer(t)
 	var calls addCalls
-	wireAdd(srv, s, &calls, errors.New("merge tracking is disabled for acme/widgets"))
+	wireAdd(srv, s, &calls, fmt.Errorf("%w for acme/widgets", mergetrack.ErrTrackingDisabled))
 
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.toml")
@@ -154,7 +156,7 @@ func TestHandleAddMergeTracking_SurfacesAnEnrolmentRefusal(t *testing.T) {
 
 	code, body := postJSON(t, srv, "/merge-tracking/add",
 		`{"url":"https://github.com/acme/widgets/pull/42"}`)
-	if code != http.StatusInternalServerError {
+	if code != http.StatusConflict {
 		t.Fatalf("status = %d, body = %s", code, body)
 	}
 	if !strings.Contains(string(body), "disabled for acme/widgets") {

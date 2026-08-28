@@ -43,7 +43,7 @@ func Evaluate(st *gh.MergeStatus, in Input) Decision {
 			MergeStateStatus:     st.MergeStateStatus,
 			Mergeable:            st.Mergeable,
 			ReviewDecision:       st.ReviewDecision,
-			BehindBase:           st.MergeStateStatus == gh.MergeStateBehind || st.BehindBase(),
+			BehindBase:           st.BehindBase(),
 			InMergeQueue:         st.IsInMergeQueue,
 			ProtectionUnreadable: st.ProtectionUnreadable,
 		},

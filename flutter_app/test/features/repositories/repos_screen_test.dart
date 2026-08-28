@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:heimdallm/core/api/api_client.dart';
 import 'package:heimdallm/core/api/sse_client.dart';
 import 'package:heimdallm/core/models/config_model.dart';
 import 'package:heimdallm/core/platform/platform_services_provider.dart';
@@ -13,6 +14,7 @@ import 'package:heimdallm/features/repositories/widgets/bulk_actions_bar.dart';
 import 'package:heimdallm/features/repositories/widgets/repo_grid_tile.dart';
 import 'package:heimdallm/features/repositories/widgets/repo_list_tile.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:mocktail/mocktail.dart';
 import '../../core/platform/fake_platform_services.dart';
 
 Widget _host(AppConfig cfg) => ProviderScope(
@@ -24,18 +26,20 @@ Widget _host(AppConfig cfg) => ProviderScope(
   child: const MaterialApp(home: Scaffold(body: ReposScreen())),
 );
 
-Widget _hostWithConfig(_FakeConfig config) => ProviderScope(
+Widget _hostWithConfig(_FakeConfig config, {ApiClient? api}) => ProviderScope(
   overrides: [
     platformServicesProvider.overrideWithValue(FakePlatformServices()),
     configNotifierProvider.overrideWith(() => config),
     sseStreamProvider.overrideWith((_) => const Stream<SseEvent>.empty()),
+    if (api != null) apiClientProvider.overrideWithValue(api),
   ],
   child: const MaterialApp(home: Scaffold(body: ReposScreen())),
 );
 
 class _FakeConfig extends ConfigNotifier {
-  _FakeConfig(this.initial);
+  _FakeConfig(this.initial, {this.saveResponse});
   final AppConfig initial;
+  final AppConfig? saveResponse;
   final List<AppConfig> saves = [];
   Completer<void>? saveGate;
   @override
@@ -46,13 +50,15 @@ class _FakeConfig extends ConfigNotifier {
     final gate = saveGate;
     saveGate = null;
     if (gate != null) await gate.future;
-    state = AsyncData(next);
+    state = AsyncData(saveResponse ?? next);
   }
 
   void replace(AppConfig next) {
     state = AsyncData(next);
   }
 }
+
+class _MockApiClient extends Mock implements ApiClient {}
 
 Finder _bulkPrSwitch() => find
     .descendant(of: find.byType(BulkActionsBar), matching: find.byType(Switch))
@@ -73,6 +79,8 @@ AppConfig _cfg() => const AppConfig(
 );
 
 void main() {
+  setUpAll(() => registerFallbackValue(<String, dynamic>{}));
+
   testWidgets('bulk bar appears when a repo is selected', (tester) async {
     await tester.pumpWidget(_host(_cfg()));
     await tester.pumpAndSettle();
@@ -322,4 +330,64 @@ void main() {
 
     await tester.pump(const Duration(seconds: 2));
   });
+
+  testWidgets(
+    'bulk merge tracking keeps the scoped endpoint response as authoritative',
+    (tester) async {
+      SharedPreferences.setMockInitialValues({'repos_view': 'list'});
+      const initial = AppConfig(
+        repoConfigs: {
+          'a/existing': RepoConfig(prEnabled: false, mtEnabled: false),
+        },
+      );
+      const staleGlobalResponse = AppConfig(
+        repoConfigs: {
+          'a/existing': RepoConfig(prEnabled: true, mtEnabled: false),
+        },
+      );
+      final config = _FakeConfig(initial, saveResponse: staleGlobalResponse);
+      final api = _MockApiClient();
+      when(
+        () => api.patchMergeTrackingRepoConfig('a/existing', any()),
+      ).thenAnswer(
+        (_) async => {
+          'repositories': ['a/existing'],
+          'merge_tracking': {
+            'enabled': false,
+            'repos': {
+              'a/existing': {'enabled': true},
+            },
+          },
+        },
+      );
+
+      await tester.pumpWidget(_hostWithConfig(config, api: api));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('RepoListTile_checkbox')));
+      await tester.pump();
+
+      final bulkSwitches = find.descendant(
+        of: find.byType(BulkActionsBar),
+        matching: find.byType(Switch),
+      );
+      await tester.tap(bulkSwitches.first); // PR Review: changes membership.
+      await tester.tap(bulkSwitches.last); // Merge Tracking: scoped endpoint.
+      await tester.pump(const Duration(milliseconds: 401));
+      await tester.pumpAndSettle();
+
+      final patches = verify(
+        () => api.patchMergeTrackingRepoConfig('a/existing', captureAny()),
+      ).captured;
+      expect(patches, [
+        <String, dynamic>{'enabled': true},
+      ]);
+      final tile = tester.widget<RepoListTile>(
+        find.widgetWithText(RepoListTile, 'a/existing'),
+      );
+      expect(tile.config.prEnabled, isTrue);
+      expect(tile.config.mtEnabled, isTrue);
+
+      await tester.pump(const Duration(seconds: 2));
+    },
+  );
 }

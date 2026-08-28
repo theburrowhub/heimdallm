@@ -608,6 +608,9 @@ func TestEvaluate_BehindBaseReported(t *testing.T) {
 	if d.PrimaryReason() != mergetrack.ReasonBehindBase {
 		t.Errorf("reason = %q, want behind_base", d.PrimaryReason())
 	}
+	if d.Evidence.BehindBase {
+		t.Error("OID evidence must not be inferred from mergeStateStatus")
+	}
 }
 
 // Every mergeStateStatus value must map to a defined outcome. A new value

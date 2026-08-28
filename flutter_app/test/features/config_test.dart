@@ -466,6 +466,19 @@ void main() {
     expect(cfg.repoConfigs['acme/api']!.isMonitored, isTrue);
   });
 
+  test('a merge-tracking-only repo remains in the monitored list', () {
+    const cfg = AppConfig(
+      repoConfigs: {
+        'acme/widgets': RepoConfig(mtEnabled: true),
+        'acme/off': RepoConfig(mtEnabled: false),
+      },
+    );
+
+    expect(cfg.repoConfigs['acme/widgets']!.isMonitored, isTrue);
+    expect(cfg.repoConfigs['acme/off']!.isMonitored, isFalse);
+    expect(cfg.repositories, ['acme/widgets']);
+  });
+
   test('FirstRunSetup serializes refinement labels in all scopes', () {
     final toml = FirstRunSetup.buildTomlForTesting(
       const AppConfig(

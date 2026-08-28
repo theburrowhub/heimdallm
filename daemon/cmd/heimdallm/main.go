@@ -6060,10 +6060,6 @@ func logRepoContextFallback(scope, repo string, err error) {
 		"repo", repo, "err", err)
 }
 
-// autonomousOverrideMap serialises an AutonomousOverride into a map[string]any
-// for the GET /config DTO. Only fields that are explicitly set (non-nil pointer
-// or non-empty string) are included so the caller can distinguish "inherit" from
-// an explicit false/zero value.
 // mergeTrackingConfigMap renders the whole [merge_tracking] section for
 // GET /config, overrides included.
 //
@@ -6151,6 +6147,10 @@ func mergeTrackingOverrideMap(o config.MergeTrackingOverride) map[string]any {
 	return out
 }
 
+// autonomousOverrideMap serialises an AutonomousOverride into a map[string]any
+// for the GET /config DTO. Only fields that are explicitly set (non-nil pointer
+// or non-empty string) are included so the caller can distinguish "inherit" from
+// an explicit false/zero value.
 func autonomousOverrideMap(o config.AutonomousOverride) map[string]any {
 	out := map[string]any{}
 	if o.Enabled != nil {

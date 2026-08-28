@@ -227,7 +227,14 @@ class RepoConfig {
         (devEnabled != false &&
             developLabels != null &&
             developLabels!.isNotEmpty);
-    return (prEnabled ?? false) || issueActive || developActive;
+    // Merge tracking discovery intersects with github.repositories just like
+    // the other features. A repo-level merge-tracking opt-in therefore keeps
+    // the repo monitored even when PR review, issue tracking and Develop are
+    // all off.
+    return (prEnabled ?? false) ||
+        issueActive ||
+        developActive ||
+        mtEnabled == true;
   }
 
   /// Legacy getter — repos with any override need to be written to TOML.
@@ -1177,7 +1184,7 @@ class AppConfig {
   });
 
   /// Computed list of monitored repos — this is what the daemon uses.
-  /// A repo is monitored if any of its 3 features (PR, IT, Dev) is active.
+  /// A repo is monitored if any of its features is active.
   List<String> get repositories =>
       (repoConfigs.entries
           .where((e) => e.value.isMonitored)

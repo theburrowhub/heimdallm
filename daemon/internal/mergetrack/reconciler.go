@@ -77,6 +77,11 @@ type WorktreeRunner interface {
 	RebaseAndForcePush(ctx context.Context, req ConflictRequest) (string, error)
 }
 
+// ErrTrackingDisabled identifies an operator-resolvable enrolment refusal.
+// HTTP callers map it to a conflict instead of reporting an internal daemon
+// failure; wrapping preserves the repository name in the concrete error.
+var ErrTrackingDisabled = errors.New("mergetrack: merge tracking is disabled")
+
 // Reconciler drives tracked PRs towards merge.
 type Reconciler struct {
 	gw       Gateway
@@ -352,8 +357,12 @@ func (r *Reconciler) EnrolExistingPR(prID int64, repo string, number int) error 
 	if r == nil || r.st == nil {
 		return fmt.Errorf("mergetrack: reconciler not wired")
 	}
-	if r.cfgFor != nil && !r.cfgFor(repo).Enabled {
-		return fmt.Errorf("mergetrack: merge tracking is disabled for %s", repo)
+	if r.cfgFor != nil {
+		if !r.cfgFor(repo).Enabled {
+			return fmt.Errorf("%w for %s", ErrTrackingDisabled, repo)
+		}
+	} else if r.globalCfg != nil && !r.globalCfg().Enabled {
+		return fmt.Errorf("%w for %s", ErrTrackingDisabled, repo)
 	}
 	if _, err := r.st.EnsureMergeTracking(prID, repo, number); err != nil {
 		return fmt.Errorf("mergetrack: enrol %s#%d: %w", repo, number, err)

@@ -138,10 +138,36 @@ void _addAndOverrideEndpoints() {
     expect(entry.repo, 'acme/widgets');
   });
 
+  test('a committed 202 fallback is decoded as the enrolled PR', () async {
+    final entry = await _client(
+      MockClient(
+        (_) async => http.Response(
+          jsonEncode({
+            'status': 'pr enrolled',
+            'pr': {
+              'id': 91,
+              'repo': 'acme/widgets',
+              'number': 7,
+              'title': 'Add widget cache',
+              'url': 'https://github.com/acme/widgets/pull/7',
+              'author': 'octocat',
+            },
+          }),
+          202,
+        ),
+      ),
+    ).addMergeTracking('https://github.com/acme/widgets/pull/7');
+
+    expect(entry.prId, 91);
+    expect(entry.repo, 'acme/widgets');
+    expect(entry.number, 7);
+    expect(entry.phase, 'idle');
+  });
+
   test('a refusal is surfaced in the daemon\'s own words', () async {
     final client = _client(MockClient((_) async => http.Response(
           jsonEncode({'error': 'merge tracking is disabled for acme/widgets'}),
-          500,
+          409,
         )));
     await expectLater(
       client.addMergeTracking('https://github.com/acme/widgets/pull/7'),

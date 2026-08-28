@@ -30,7 +30,8 @@ bool featureIsOn({
     Feature.prReview => config.prLedStatus(inGlobalList) != 'off',
     Feature.issueTracking => _issueTrackingOn(config, orgConfig, appConfig),
     Feature.develop => hasDir && _developOn(config, orgConfig, appConfig),
-    Feature.mergeTracking => _mergeTrackingOn(config, orgConfig, appConfig),
+    Feature.mergeTracking =>
+      config.isMonitored && _mergeTrackingOn(config, orgConfig, appConfig),
   };
 }
 
@@ -110,6 +111,9 @@ String featureSourceLine({
           ? 'Source: inherited from global issue tracking'
           : 'Source: globally disabled';
     case Feature.mergeTracking:
+      if (!config.isMonitored) {
+        return 'Reason: repository is not monitored';
+      }
       if (config.mtEnabled == true) {
         return 'Source: repo-level (merge_tracking.repos)';
       }

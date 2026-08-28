@@ -487,8 +487,29 @@ func TestEnrolExistingPR_RefusesWhenTrackingIsOffForTheRepo(t *testing.T) {
 	if err == nil {
 		t.Fatal("enrolling into a disabled repo must be refused")
 	}
+	if !errors.Is(err, mergetrack.ErrTrackingDisabled) {
+		t.Errorf("error = %v, want ErrTrackingDisabled", err)
+	}
 	if !strings.Contains(err.Error(), "disabled") {
 		t.Errorf("error = %q, want it to name the reason", err)
+	}
+}
+
+// ConfigForRepo is optional for small embedders and tests. In that shape the
+// global switch still governs manual enrolment; nil must not bypass it.
+func TestEnrolExistingPR_FallsBackToTheGlobalEnabledSwitch(t *testing.T) {
+	h := newHarness(t, enabledCfg(), &fakeGateway{})
+	disabled := enabledCfg()
+	disabled.Enabled = false
+	h.r = mergetrack.NewReconciler(mergetrack.ReconcilerOptions{
+		Store:        h.st,
+		Publisher:    h.pub,
+		GlobalConfig: func() config.MergeTrackingConfig { return disabled },
+	})
+
+	err := h.r.EnrolExistingPR(h.prID, "acme/widgets", 7)
+	if !errors.Is(err, mergetrack.ErrTrackingDisabled) {
+		t.Fatalf("error = %v, want ErrTrackingDisabled", err)
 	}
 }
 

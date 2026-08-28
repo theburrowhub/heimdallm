@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/heimdallm/daemon/internal/mergetrack"
 	"github.com/heimdallm/daemon/internal/store"
 )
 
@@ -186,7 +188,11 @@ func (srv *Server) handleAddMergeTracking(w http.ResponseWriter, r *http.Request
 	// changing monitoring config so a refusal cannot start reviewing a whole
 	// repository as a side effect of a failed request.
 	if err := srv.mergeTrackEnrolFn(pr.ID, repo, number); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{
+		status := http.StatusInternalServerError
+		if errors.Is(err, mergetrack.ErrTrackingDisabled) {
+			status = http.StatusConflict
+		}
+		writeJSON(w, status, map[string]string{
 			"error": fmt.Sprintf("enrol %s#%d: %v", repo, number, err),
 		})
 		return

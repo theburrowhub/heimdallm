@@ -738,7 +738,9 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                       FeatureSwitch(
                         key: const Key('repo_merge_tracking_switch'),
                         feature: Feature.mergeTracking,
-                        value: _config.mtEnabled ?? inheritedMtEnabled,
+                        value:
+                            _config.isMonitored &&
+                            (_config.mtEnabled ?? inheritedMtEnabled),
                         onChanged: (v) =>
                             _update(_config.copyWith(mtEnabled: v)),
                       ),
@@ -749,7 +751,10 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                     children: [
                       Expanded(
                         child: Text(
-                          _config.mtEnabled != null
+                          !_config.isMonitored
+                              ? 'This repository is not monitored. Enable merge '
+                                    'tracking to add it to the monitored list.'
+                              : _config.mtEnabled != null
                               ? 'Overridden for this repository.'
                               : source(orgConfig?.mtEnabled != null),
                           style: Theme.of(context).textTheme.bodySmall,

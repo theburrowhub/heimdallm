@@ -123,14 +123,14 @@ void _mergeTrackingLed() {
     test('the repo override wins over the org and the global', () {
       expect(
         on(
-          const RepoConfig(mtEnabled: true),
+          const RepoConfig(prEnabled: true, mtEnabled: true),
           org: const OrgConfig(mtEnabled: false),
         ),
         isTrue,
       );
       expect(
         on(
-          const RepoConfig(mtEnabled: false),
+          const RepoConfig(prEnabled: true, mtEnabled: false),
           org: const OrgConfig(mtEnabled: true),
           global: true,
         ),
@@ -139,10 +139,16 @@ void _mergeTrackingLed() {
     });
 
     test('the org override wins over the global', () {
-      expect(on(const RepoConfig(), org: const OrgConfig(mtEnabled: true)), isTrue);
       expect(
         on(
-          const RepoConfig(),
+          const RepoConfig(prEnabled: true),
+          org: const OrgConfig(mtEnabled: true),
+        ),
+        isTrue,
+      );
+      expect(
+        on(
+          const RepoConfig(prEnabled: true),
           org: const OrgConfig(mtEnabled: false),
           global: true,
         ),
@@ -151,8 +157,21 @@ void _mergeTrackingLed() {
     });
 
     test('with nothing overridden it follows the global switch', () {
-      expect(on(const RepoConfig(), global: true), isTrue);
-      expect(on(const RepoConfig()), isFalse);
+      expect(on(const RepoConfig(prEnabled: true), global: true), isTrue);
+      expect(on(const RepoConfig(prEnabled: true)), isFalse);
+    });
+
+    test('an inherited setting stays off when the repo is not monitored', () {
+      expect(on(const RepoConfig(), global: true), isFalse);
+      expect(
+        featureSourceLine(
+          feature: Feature.mergeTracking,
+          repo: 'acme/widgets',
+          config: const RepoConfig(),
+          appConfig: cfg(global: true),
+        ),
+        contains('not monitored'),
+      );
     });
 
     test('the tooltip names where the answer came from', () {
@@ -167,19 +186,28 @@ void _mergeTrackingLed() {
           );
 
       expect(
-        source(const RepoConfig(mtEnabled: true)),
+        source(const RepoConfig(prEnabled: true, mtEnabled: true)),
         contains('repo-level'),
       );
       expect(
-        source(const RepoConfig(mtEnabled: false)),
+        source(const RepoConfig(prEnabled: true, mtEnabled: false)),
         contains('disabled per-repo'),
       );
       expect(
-        source(const RepoConfig(), org: const OrgConfig(mtEnabled: true)),
+        source(
+          const RepoConfig(prEnabled: true),
+          org: const OrgConfig(mtEnabled: true),
+        ),
         contains('org'),
       );
-      expect(source(const RepoConfig(), global: true), contains('global'));
-      expect(source(const RepoConfig()), contains('globally disabled'));
+      expect(
+        source(const RepoConfig(prEnabled: true), global: true),
+        contains('global'),
+      );
+      expect(
+        source(const RepoConfig(prEnabled: true)),
+        contains('globally disabled'),
+      );
     });
   });
 }

@@ -392,8 +392,32 @@ class ApiClient {
       } catch (_) {}
       throw ApiException(msg);
     }
-    return MergeTrackingEntry.fromJson(
-      jsonDecode(resp.body) as Map<String, dynamic>,
+    final decoded = jsonDecode(resp.body) as Map<String, dynamic>;
+    if (decoded['pr_id'] != null) {
+      return MergeTrackingEntry.fromJson(decoded);
+    }
+
+    // A successful enrolment can still race a failed read-back. Older daemons
+    // answer that committed 202 with {status, pr}; adapt it to the same entry
+    // shape so the dialog closes and refreshes instead of throwing a TypeError
+    // after an operation that already took effect.
+    final pr = decoded['pr'];
+    if (pr is Map<String, dynamic> &&
+        pr['id'] is num &&
+        pr['repo'] is String &&
+        pr['number'] is num) {
+      return MergeTrackingEntry.fromJson({
+        'pr_id': pr['id'],
+        'repo': pr['repo'],
+        'number': pr['number'],
+        'title': pr['title'] ?? '',
+        'url': pr['url'] ?? '',
+        'author': pr['author'] ?? '',
+        'phase': 'idle',
+      });
+    }
+    throw ApiException(
+      'POST /merge-tracking/add returned an invalid success response',
     );
   }
 

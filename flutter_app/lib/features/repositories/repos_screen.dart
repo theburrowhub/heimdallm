@@ -195,11 +195,15 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
     try {
       await ref.read(configNotifierProvider.notifier).save(updated);
       for (final change in mtChanges.entries) {
-        await ref
+        final response = await ref
             .read(apiClientProvider)
             .patchMergeTrackingRepoConfig(change.key, {
               'enabled': change.value,
             });
+        // The scoped endpoint returns the full authoritative config. Keep it
+        // instead of letting the earlier PATCH /config response (which cannot
+        // contain this just-written override) reset the LED until a refresh.
+        ref.read(configNotifierProvider.notifier).updateFromServer(response);
       }
       if (!mounted) return;
       final latest = ref.read(configNotifierProvider).value;

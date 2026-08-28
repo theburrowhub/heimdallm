@@ -16,8 +16,10 @@ const _repoName = 'theburrowhub/heimdallm';
 Map<String, dynamic> _configJson({
   bool globalMtEnabled = false,
   bool? repoMtEnabled,
+  bool monitored = true,
 }) => {
-  'repositories': [_repoName],
+  'repositories': [if (monitored) _repoName],
+  'non_monitored': [if (!monitored) _repoName],
   'server_port': 1,
   'poll_interval': '60s',
   'retention_days': 30,
@@ -38,12 +40,14 @@ Future<MockApiClient> _mountMergeTrackingDetail(
   WidgetTester tester, {
   bool globalMtEnabled = false,
   bool? repoMtEnabled,
+  bool monitored = true,
 }) async {
   final mockApi = MockApiClient();
   when(() => mockApi.fetchConfig()).thenAnswer(
     (_) async => _configJson(
       globalMtEnabled: globalMtEnabled,
       repoMtEnabled: repoMtEnabled,
+      monitored: monitored,
     ),
   );
   when(
@@ -58,6 +62,7 @@ Future<MockApiClient> _mountMergeTrackingDetail(
       return _configJson(
         globalMtEnabled: globalMtEnabled,
         repoMtEnabled: patch['enabled'] as bool?,
+        monitored: monitored,
       );
     },
   );
@@ -185,4 +190,24 @@ void main() {
 
     await tester.pump(const Duration(seconds: 4));
   });
+
+  testWidgets(
+    'a non-monitored repo does not show inherited merge tracking as active',
+    (tester) async {
+      await _mountMergeTrackingDetail(
+        tester,
+        globalMtEnabled: true,
+        monitored: false,
+      );
+
+      final switchFinder = find.descendant(
+        of: find.byKey(const Key('repo_merge_tracking_switch')),
+        matching: find.byType(Switch),
+      );
+      expect(tester.widget<Switch>(switchFinder).value, isFalse);
+      expect(find.textContaining('not monitored'), findsOneWidget);
+
+      await tester.pump(const Duration(seconds: 4));
+    },
+  );
 }
