@@ -731,23 +731,14 @@ func (c *Client) PostComment(repo string, number int, body string) (time.Time, e
 // MergePR merges a pull request using the given method ("squash"|"merge"|
 // "rebase"). Built for the autonomous merge gate, which is disabled by
 // default — this only runs when AutoMerge is explicitly enabled.
+//
+// It sends no expected head SHA, so a push landing between the caller's
+// decision and this request is merged silently. Merge tracking uses
+// MergePRAtSHA instead, which refuses that case. Migrating the autonomous gate
+// onto the same guard is tracked separately (see theburrowhub/heimdallm#674).
 func (c *Client) MergePR(repo string, number int, method string) error {
-	if method == "" {
-		method = "squash"
-	}
-	payload, err := json.Marshal(map[string]any{"merge_method": method})
-	if err != nil {
-		return fmt.Errorf("github: marshal merge: %w", err)
-	}
-	path := fmt.Sprintf("/repos/%s/pulls/%d/merge", repo, number)
-	resp, err := c.doWithBody("PUT", path, "application/vnd.github+json", "application/json", strings.NewReader(string(payload)))
-	if err != nil {
-		return fmt.Errorf("github: merge PR %s#%d: %w", repo, number, err)
-	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("github: merge PR %s#%d: status %d: %s", repo, number, resp.StatusCode, safeTruncate(string(body), maxErrBodyLen))
+	if _, err := c.mergePR(repo, number, method, ""); err != nil {
+		return err
 	}
 	return nil
 }

@@ -19,7 +19,8 @@ var ErrInvalidRepoSlug = errors.New("store: invalid repo slug")
 // in a single SQLite transaction, and writes an audit row to
 // `repo_renames`. Tables touched:
 //
-//   - prs.repo, issues.repo, watch_state.repo: straight UPDATE.
+//   - prs.repo, issues.repo, watch_state.repo, merge_tracking.repo:
+//     straight UPDATE.
 //   - activity_log: UPDATEs both repo AND org (when the org
 //     component differs between oldRepo and newRepo) so the
 //     ListActivity org-filter keeps surfacing historical entries
@@ -70,7 +71,7 @@ func (s *Store) RenameRepo(oldRepo, newRepo string) (applied bool, err error) {
 	}()
 
 	var totalMoved int64
-	for _, table := range []string{"prs", "issues", "watch_state"} {
+	for _, table := range []string{"prs", "issues", "watch_state", "merge_tracking"} {
 		res, err := tx.Exec(
 			`UPDATE `+table+` SET repo = ? WHERE repo = ?`,
 			newRepo, oldRepo,

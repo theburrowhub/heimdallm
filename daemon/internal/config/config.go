@@ -77,6 +77,7 @@ type Config struct {
 	CircuitBreaker CircuitBreakerConfig `toml:"circuit_breaker"`
 	Autonomous     AutonomousConfig     `toml:"autonomous"`
 	Polling        PollingConfig        `toml:"polling"`
+	MergeTracking  MergeTrackingConfig  `toml:"merge_tracking"`
 }
 
 type ServerConfig struct {
@@ -1119,6 +1120,7 @@ func (c *Config) applyDefaults() {
 		c.CircuitBreaker.PerImplRepoHr = 5
 	}
 	c.applyAutonomousDefaults()
+	c.applyMergeTrackingDefaults()
 	c.applyPollingDefaults()
 }
 
@@ -1309,6 +1311,12 @@ func (c *Config) Validate() error {
 	// way around the quota guard the older one enforces.
 	if err := c.ValidatePolling(); err != nil {
 		return fmt.Errorf("config: %w", err)
+	}
+	// [merge_tracking] drives write actions against the user's own PRs, so an
+	// invalid merge_method or duration must stop the daemon at boot rather
+	// than fail once per poll cycle against GitHub.
+	if err := c.validateMergeTracking(); err != nil {
+		return err
 	}
 	// Validate every persisted execution option before it reaches Executor.
 	// This catches legacy TOML/store rows during reload; ExecuteRaw repeats the

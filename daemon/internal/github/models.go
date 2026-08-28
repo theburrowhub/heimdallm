@@ -27,18 +27,18 @@ type Label struct {
 // config-driven label classifier so downstream consumers (the pipeline in
 // #26 / #27) don't need to re-apply the precedence rules.
 type Issue struct {
-	ID          int64            `json:"id"`
-	Number      int              `json:"number"`
-	Title       string           `json:"title"`
-	Body        string           `json:"body"`
-	HTMLURL     string           `json:"html_url"`
-	User        User             `json:"user"`
-	Assignees   []User           `json:"assignees"`
-	Labels      []Label          `json:"labels"`
-	State       string           `json:"state"`
-	CreatedAt   time.Time        `json:"created_at"`
-	UpdatedAt   time.Time        `json:"updated_at"`
-	PullRequest *struct{}        `json:"pull_request,omitempty"`
+	ID          int64     `json:"id"`
+	Number      int       `json:"number"`
+	Title       string    `json:"title"`
+	Body        string    `json:"body"`
+	HTMLURL     string    `json:"html_url"`
+	User        User      `json:"user"`
+	Assignees   []User    `json:"assignees"`
+	Labels      []Label   `json:"labels"`
+	State       string    `json:"state"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	PullRequest *struct{} `json:"pull_request,omitempty"`
 	// Repository is populated by GitHub on endpoints that can return issues
 	// from more than one repo in a single response (e.g. the sub-issues
 	// endpoint — same-owner, possibly cross-repo children). Kept as a
@@ -106,6 +106,13 @@ type PullRequest struct {
 	// bot is still a pending reviewer before enqueuing a review — the search
 	// index can lag behind the actual requested_reviewers list.
 	RequestedReviewers []User `json:"requested_reviewers"`
+	// Assignees is populated by both the Search Issues API and the Pulls API.
+	// Merge tracking needs it to decide whether the authenticated user is on
+	// the hook for a PR they did not author.
+	Assignees []User `json:"assignees"`
+	// Base is the target branch. Populated by the Pulls API only — the Search
+	// Issues API omits it.
+	Base Branch `json:"base"`
 	// repository_url is returned by the Search Issues API: "https://api.github.com/repos/org/repo"
 	RepositoryURL string `json:"repository_url"`
 	// Populated client-side from RepositoryURL or Head.Repo.FullName
@@ -122,6 +129,23 @@ func (pr *PullRequest) ReviewRequestedFor(login string) bool {
 	}
 	for _, reviewer := range pr.RequestedReviewers {
 		got := strings.TrimSpace(strings.TrimLeft(reviewer.Login, "@"))
+		if strings.EqualFold(got, want) {
+			return true
+		}
+	}
+	return false
+}
+
+// AssignedTo reports whether login is one of the PR's assignees. Login
+// comparison matches ReviewRequestedFor: case-insensitive, leading "@"
+// tolerated.
+func (pr *PullRequest) AssignedTo(login string) bool {
+	want := strings.TrimSpace(strings.TrimLeft(login, "@"))
+	if pr == nil || want == "" {
+		return false
+	}
+	for _, a := range pr.Assignees {
+		got := strings.TrimSpace(strings.TrimLeft(a.Login, "@"))
 		if strings.EqualFold(got, want) {
 			return true
 		}
