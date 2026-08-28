@@ -155,5 +155,25 @@ review_mode = "single"   # "single" or "multi"
 # pr_labels = ["team-x"]
 # pr_draft = false
 
+# ── Merge tracking ────────────────────────────────────────────────────────────
+# Watches the PRs you authored or are assigned to and reports exactly what is
+# blocking each merge. Every automation is off by default; omitting this whole
+# section is a full no-op. See §16 of docs/configuration-guide.md.
+#
+# [merge_tracking]
+# enabled           = true    # report only — no writes to any repository
+# include_assigned  = true
+#
+# Automations, each independent. resolve_conflicts FORCE-PUSHES to your branch.
+# enable_auto_merge = false
+# update_branch     = false
+# resolve_conflicts = false
+# merge             = false
+# merge_method      = "squash"
+#
+# [merge_tracking.repos."org/repo1"]
+# merge            = true
+# require_approval = true
+
 [retention]
 max_days = 90
