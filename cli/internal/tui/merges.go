@@ -43,9 +43,16 @@ func (d *Dashboard) viewportRange(total, height int) (int, int) {
 	if height <= 0 || total == 0 {
 		return 0, 0
 	}
+	// The list shrinks under the cursor when a PR merges and drops out between
+	// refreshes. An out-of-range cursor would put start past total, and the tab
+	// would render blank until the operator moved it.
+	cursor := d.cursor
+	if cursor >= total {
+		cursor = total - 1
+	}
 	start := 0
-	if d.cursor >= height {
-		start = d.cursor - height + 1
+	if cursor >= height {
+		start = cursor - height + 1
 	}
 	end := start + height
 	if end > total {

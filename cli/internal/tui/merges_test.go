@@ -146,6 +146,20 @@ func TestViewportRange_HandlesShortLists(t *testing.T) {
 	}
 }
 
+// The list shrinks under the cursor when a PR merges and drops out between two
+// refreshes. An out-of-range cursor put start past total, start > end made the
+// render loop a no-op, and the tab went blank until the operator moved.
+func TestViewportRange_SurvivesAListThatShrankUnderTheCursor(t *testing.T) {
+	d := &Dashboard{cursor: 12}
+	start, end := d.viewportRange(3, 5)
+	if start > end {
+		t.Fatalf("range = [%d,%d), which renders nothing", start, end)
+	}
+	if start != 0 || end != 3 {
+		t.Errorf("range = [%d,%d), want the whole short list [0,3)", start, end)
+	}
+}
+
 // The tab list and the enum must stay in step, or every tab after the new one
 // renders under the wrong name.
 func TestTabNames_MatchTheEnum(t *testing.T) {

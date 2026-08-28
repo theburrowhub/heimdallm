@@ -206,6 +206,11 @@ func mergeChecksHeadline(s api.MergeChecksSummary) string {
 	case s.OptionalFailing > 0 && s.RequiredTotal > 0:
 		return fmt.Sprintf("All %d required checks passed. %d optional %s failing, which does not block the merge.",
 			s.RequiredTotal, s.OptionalFailing, plural(s.OptionalFailing, "check is", "checks are"))
+	case s.OptionalFailing > 0:
+		// A repo with no required checks at all. Falling through to the default
+		// would announce "All N checks passed" over a red one.
+		return fmt.Sprintf("No required checks are configured. %d optional %s failing, which does not block the merge.",
+			s.OptionalFailing, plural(s.OptionalFailing, "check is", "checks are"))
 	case s.Total == 0:
 		return "This PR has no checks configured."
 	default:
@@ -268,6 +273,10 @@ func humanMergeReason(reason string) string {
 		return "required checks are still running"
 	case "required_check_missing":
 		return "a required check has not reported"
+	case "checks_unknown":
+		return "the check list could not be read in full"
+	case "threads_unknown":
+		return "the review threads could not be read in full"
 	case "mergeability_unknown":
 		return "GitHub is still computing mergeability"
 	case "blocked_by_protection":

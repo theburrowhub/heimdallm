@@ -417,3 +417,33 @@ func TestMergeCmd_SurfacesFetchFailures(t *testing.T) {
 		t.Error("a failed detail fetch must be reported")
 	}
 }
+
+// Regressions from the second review of PR #738.
+
+// A repo with no required checks and a red optional one used to fall through
+// to the default case and announce "All N checks passed" over a failure.
+func TestMergeChecksHeadline_OptionalFailureWithNoRequiredChecks(t *testing.T) {
+	got := mergeChecksHeadline(api.MergeChecksSummary{
+		Total: 2, RequiredTotal: 0, OptionalFailing: 1,
+	})
+	if strings.Contains(got, "passed") {
+		t.Errorf("headline = %q, must not claim everything passed", got)
+	}
+	if !strings.Contains(got, "optional") {
+		t.Errorf("headline = %q, want the optional failure named", got)
+	}
+}
+
+// The check-related reasons all get a sentence; leaving one to the underscore
+// fallback reads as an identifier next to its three siblings.
+func TestHumanMergeReason_CoversEveryCheckReason(t *testing.T) {
+	for _, reason := range []string{
+		"checks_failing", "checks_pending", "required_check_missing",
+		"checks_unknown", "threads_unknown",
+	} {
+		got := humanMergeReason(reason)
+		if got == "" || strings.Contains(got, "_") {
+			t.Errorf("humanMergeReason(%q) = %q, want a sentence", reason, got)
+		}
+	}
+}

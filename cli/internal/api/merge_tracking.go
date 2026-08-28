@@ -9,13 +9,13 @@ import (
 
 // MergeCheck is one CI check or commit status on a tracked PR's head commit.
 type MergeCheck struct {
-	Name        string    `json:"name"`
-	Kind        string    `json:"kind"`
-	State       string    `json:"state"` // success | pending | failure | neutral
-	Required    bool      `json:"required"`
-	Description string    `json:"description,omitempty"`
-	App         string    `json:"app,omitempty"`
-	URL         string    `json:"url,omitempty"`
+	Name        string `json:"name"`
+	Kind        string `json:"kind"`
+	State       string `json:"state"` // success | pending | failure | neutral
+	Required    bool   `json:"required"`
+	Description string `json:"description,omitempty"`
+	App         string `json:"app,omitempty"`
+	URL         string `json:"url,omitempty"`
 	// Pointers: `omitempty` is a no-op for a struct, so value timestamps would
 	// decode a queued check's absent ends as the zero time and read back as a
 	// run that took no time at all.

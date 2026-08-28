@@ -31,6 +31,8 @@ Widget _host(MergeDecision decision, {void Function(String)? onOpenUrl}) =>
     );
 
 void main() {
+  _optionalOnlyRegression();
+
   // The sentence is the point: a grid of coloured dots does not tell anyone
   // what to do next.
   testWidgets('a failing required check produces a plain-language headline', (
@@ -292,3 +294,41 @@ void main() {
     expect(find.text('5m 30s'), findsOneWidget);
   });
 }
+
+// Regression from the second review of PR #738: a repo with no required checks
+// and a red optional one fell through to the last branch and announced "All N
+// checks passed" over a failure.
+void _optionalOnlyRegression() {
+  testWidgets('a red optional check is not reported as everything passing', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ChecksTable(
+            decision: const MergeDecision(
+              ready: true,
+              checks: [
+                MergeCheck(name: 'coverage', state: 'failure'),
+                MergeCheck(name: 'lint', state: 'success'),
+              ],
+              checksSummary: MergeChecksSummary(
+                total: 2,
+                requiredTotal: 0,
+                optionalFailing: 1,
+              ),
+            ),
+            onOpenUrl: _noop,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('All 2 checks passed'), findsNothing);
+    expect(find.textContaining('No required checks are configured'), findsOneWidget);
+    expect(find.textContaining('does not block the merge'), findsOneWidget);
+  });
+}
+
+void _noop(String _) {}

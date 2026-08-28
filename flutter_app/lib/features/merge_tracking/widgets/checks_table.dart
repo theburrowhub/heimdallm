@@ -140,6 +140,16 @@ class _Headline extends StatelessWidget {
           '${s.optionalFailing == 1 ? 'check is' : 'checks are'} failing, '
           'which does not block the merge.';
       color = const Color(0xFF2E7D32);
+    } else if (s.optionalFailing > 0) {
+      // A repo with no required checks at all. Falling through to the last
+      // branch would announce "All N checks passed" over a red one.
+      text =
+          'No required checks are configured. '
+          '${s.optionalFailing} optional '
+          '${s.optionalFailing == 1 ? 'check is' : 'checks are'} failing, '
+          'which does not block the merge.';
+      color = scheme.onSurfaceVariant;
+      icon = Icons.info_outline;
     } else if (s.total == 0) {
       text = 'This PR has no checks configured.';
       color = scheme.onSurfaceVariant;
