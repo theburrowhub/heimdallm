@@ -41,7 +41,7 @@ Hardening details are inlined in the Makefile target. Summary:
 
 | Concern | Guarantee |
 |---|---|
-| Image | Official `golang:1.25-alpine`, **pinned by SHA256 digest** (not a mutable tag) |
+| Image | Official `golang:1.25` (Debian), **pinned by SHA256 digest** (not a mutable tag). Debian rather than alpine because the gitops tests need a real `git` binary; on alpine they skipped and the git layer scored zero coverage |
 | Host filesystem access | Single mount: repo at `/src`, **read-only** (`:ro`) |
 | Build cache | Redirected to `/tmp/heimdallm-gocache/` — does not touch `~/.cache` or `~/go` |
 | Privileges | Runs as invoking user (`--user $(id -u):$(id -g)`) — no root in the container |
