@@ -393,6 +393,62 @@ func TestDeleteMergeTrackingRepoConfigField_RemovesOnlyTheOverride(t *testing.T)
 	}
 }
 
+func TestDeleteMergeTrackingConfigField_RejectsInvalidOrUnavailableRequests(t *testing.T) {
+	tests := []struct {
+		name  string
+		path  string
+		setup func(*testing.T) *server.Server
+		want  int
+	}{
+		{
+			name: "invalid repo slug",
+			path: "/config/merge_tracking/repos/not-a-slug/enabled",
+			setup: func(t *testing.T) *server.Server {
+				srv, _ := newPatchServer(t)
+				return srv
+			},
+			want: http.StatusBadRequest,
+		},
+		{
+			name: "invalid org slug",
+			path: "/config/merge_tracking/orgs/bad%2Fslug/enabled",
+			setup: func(t *testing.T) *server.Server {
+				srv, _ := newPatchServer(t)
+				return srv
+			},
+			want: http.StatusBadRequest,
+		},
+		{
+			name: "config path unavailable",
+			path: "/config/merge_tracking/repos/acme%2Fwidgets/enabled",
+			setup: func(t *testing.T) *server.Server {
+				srv, _, _ := newMergeTrackingServer(t)
+				return srv
+			},
+			want: http.StatusServiceUnavailable,
+		},
+		{
+			name: "config write failure",
+			path: "/config/merge_tracking/repos/acme%2Fwidgets/enabled",
+			setup: func(t *testing.T) *server.Server {
+				srv, _ := newPatchServer(t)
+				srv.SetConfigPath(filepath.Join(t.TempDir(), "missing", "config.toml"))
+				return srv
+			},
+			want: http.StatusInternalServerError,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			code, body := doJSON(t, tt.setup(t), http.MethodDelete, tt.path)
+			if code != tt.want {
+				t.Errorf("status = %d, want %d (body %s)", code, tt.want, body)
+			}
+		})
+	}
+}
+
 func TestPatchMergeTrackingOrgConfig_WritesTheSection(t *testing.T) {
 	srv, cfgPath := newPatchServer(t)
 

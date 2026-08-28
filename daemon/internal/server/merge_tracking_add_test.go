@@ -89,6 +89,26 @@ func TestHandleAddMergeTracking_EnrolsWithoutTriggeringAReview(t *testing.T) {
 	}
 }
 
+// Enrolment is the committed side effect. If the row cannot be read back, the
+// endpoint must still report success instead of inviting the caller to retry an
+// operation that already took effect.
+func TestHandleAddMergeTracking_AcceptsWhenTheEnrolledRowCannotBeReadBack(t *testing.T) {
+	srv, _, _ := newMergeTrackingServer(t)
+	srv.SetAddPRFn(func(repo string, number int) (*store.PR, error) {
+		return &store.PR{ID: 9999, Repo: repo, Number: number, State: "open"}, nil
+	})
+	srv.SetMergeTrackEnrolFn(func(int64, string, int) error { return nil })
+
+	code, body := postJSON(t, srv, "/merge-tracking/add",
+		`{"url":"https://github.com/acme/widgets/pull/42"}`)
+	if code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body %s)", code, body)
+	}
+	if !strings.Contains(string(body), "pr enrolled") {
+		t.Errorf("body = %s, want the successful fallback response", body)
+	}
+}
+
 // A typo must not leave a repository monitored forever, so the PR is validated
 // against GitHub before anything is written.
 func TestHandleAddMergeTracking_ReportsAFetchFailureWithoutEnrolling(t *testing.T) {
