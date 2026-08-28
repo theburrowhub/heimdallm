@@ -130,6 +130,41 @@ void main() {
     expect(find.text('alice requested changes'), findsOneWidget);
   });
 
+  // A PR that is both behind its base and failing a check reports
+  // `behind_base` as its primary blocker — correct, that is the next action —
+  // but the failing check is the part a human has to fix, so it must still get
+  // the prominent warning rather than being buried.
+  testWidgets('a failing check warns even when it is not the primary blocker', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _host([
+        _entry(
+          blockReason: 'behind_base',
+          blockDetail: 'the head branch is behind main',
+          failing: 1,
+        ),
+      ]),
+    );
+    await tester.pumpAndSettle();
+
+    // Both facts are present: the check warning and the primary blocker.
+    expect(find.textContaining('1 required check is failing'), findsOneWidget);
+    expect(find.text('the head branch is behind main'), findsOneWidget);
+  });
+
+  // A merged PR keeps no warning, whatever its last recorded counts were.
+  testWidgets('a terminal PR shows no check warning', (tester) async {
+    await tester.pumpWidget(
+      _host([
+        _entry(phase: 'merged', blockReason: 'already_merged', failing: 3),
+      ]),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('required check'), findsNothing);
+  });
+
   testWidgets('phase is shown as a badge', (tester) async {
     await tester.pumpWidget(
       _host([_entry(phase: 'auto_merge_armed', blockReason: '')]),

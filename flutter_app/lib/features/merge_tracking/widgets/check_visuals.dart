@@ -152,7 +152,11 @@ class ChecksWarningBanner extends StatelessWidget {
     final Color bg = failing ? scheme.errorContainer : const Color(0xFFFFF3CD);
     final IconData icon = failing ? Icons.error : Icons.hourglass_top;
 
-    final detail = entry.blockDetail.isNotEmpty
+    // The daemon's detail names the check, but only when CI is the primary
+    // blocker. When something else is (a PR both behind its base and failing a
+    // check), the detail describes that instead — so fall back to the counts,
+    // which always describe the checks.
+    final detail = entry.blockReasonIsChecks && entry.blockDetail.isNotEmpty
         ? entry.blockDetail
         : _fallbackDetail();
 

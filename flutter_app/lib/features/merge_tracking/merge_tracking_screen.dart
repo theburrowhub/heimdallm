@@ -139,7 +139,13 @@ class _MergeTrackingCardState extends ConsumerState<_MergeTrackingCard> {
             if (entry.blockedByChecks) ...[
               const SizedBox(height: 10),
               ChecksWarningBanner(entry: entry),
-            ] else if (entry.blockReason.isNotEmpty && !entry.isMerged) ...[
+            ],
+            // The primary blocker still gets its line when it is something
+            // other than CI — a PR can be both behind its base and failing a
+            // check, and the reader needs both facts.
+            if (entry.blockReason.isNotEmpty &&
+                !entry.blockReasonIsChecks &&
+                !entry.isMerged) ...[
               const SizedBox(height: 8),
               _BlockLine(entry: entry),
             ],

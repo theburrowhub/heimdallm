@@ -264,14 +264,23 @@ class MergeTrackingEntry {
       _$MergeTrackingEntryFromJson(json);
   Map<String, dynamic> toJson() => _$MergeTrackingEntryToJson(this);
 
-  /// Whether CI is what is holding this PR up. Drives the prominent warning in
-  /// the listing and the check table in the PR detail view.
-  bool get blockedByChecks => const {
+  /// Whether the primary block reason is a CI problem.
+  bool get blockReasonIsChecks => const {
     'checks_failing',
     'checks_pending',
     'required_check_missing',
     'checks_unknown',
   }.contains(blockReason);
+
+  /// Whether the prominent CI warning should be shown.
+  ///
+  /// A failing required check earns the warning even when it is not the
+  /// *primary* blocker. A PR that is both behind its base and failing a check
+  /// reports `behind_base` — correct, because that is the next action — but the
+  /// failing check is the part a human has to fix, and burying it under a
+  /// milder message is exactly the outcome this feature exists to prevent.
+  bool get blockedByChecks =>
+      !isTerminal && (blockReasonIsChecks || checksRequiredFailing > 0);
 
   bool get hasFailingChecks => checksRequiredFailing > 0;
   bool get hasPendingChecks => checksRequiredPending > 0;
