@@ -748,3 +748,83 @@ func contains(list []string, want string) bool {
 	}
 	return false
 }
+
+// git C-quotes anything outside ASCII by default, so `café.txt` comes back from
+// a listing as `"caf\303\251.txt"` — a name no file has. WorktreeDigest then
+// read it as missing, mapped it to the empty string in BOTH snapshots, and
+// changedBetween concluded nothing had changed: an agent edit to any
+// non-ASCII-named file sailed past the scope guard and got pushed.
+func TestWorktreeDigest_SeesNonASCIIPaths(t *testing.T) {
+	requireGit(t)
+	dir := t.TempDir()
+	git(t, dir, "init", "-q", "-b", "main")
+	write(t, dir, "café.txt", "base\n")
+	git(t, dir, "add", ".")
+	git(t, dir, "commit", "-q", "-m", "base")
+	write(t, dir, "café.txt", "edited\n")
+
+	ctx := context.Background()
+	g := issues.NewGitExec()
+	before, err := g.WorktreeDigest(ctx, dir)
+	if err != nil {
+		t.Fatalf("WorktreeDigest: %v", err)
+	}
+	sum, ok := before["café.txt"]
+	if !ok {
+		t.Fatalf("the path must be reported verbatim, got %v", before)
+	}
+	if sum == "" {
+		t.Fatal("an existing file must hash to something: the digest read a quoted name")
+	}
+
+	// A newly created one, from the untracked listing.
+	write(t, dir, "niño.txt", "new\n")
+	after, err := g.WorktreeDigest(ctx, dir)
+	if err != nil {
+		t.Fatalf("WorktreeDigest: %v", err)
+	}
+	if got, ok := after["niño.txt"]; !ok || got == "" {
+		t.Errorf("an untracked non-ASCII file must be seen, got %v", after)
+	}
+}
+
+// The conflicted-file list is handed to the agent and to the marker scan, so a
+// quoted name there turns a resolvable conflict into a read failure.
+func TestConflictedFiles_ReportsNonASCIIPathsVerbatim(t *testing.T) {
+	requireGit(t)
+	dir := t.TempDir()
+	git(t, dir, "init", "-q", "-b", "main")
+	write(t, dir, "café.txt", "base\n")
+	git(t, dir, "add", ".")
+	git(t, dir, "commit", "-q", "-m", "base")
+
+	git(t, dir, "checkout", "-q", "-b", "feature")
+	write(t, dir, "café.txt", "feature\n")
+	git(t, dir, "commit", "-qam", "feature")
+	git(t, dir, "checkout", "-q", "main")
+	write(t, dir, "café.txt", "main\n")
+	git(t, dir, "commit", "-qam", "main")
+	mainSHA := git(t, dir, "rev-parse", "HEAD")
+	git(t, dir, "checkout", "-q", "feature")
+
+	ctx := context.Background()
+	g := issues.NewGitExec()
+	if _, err := g.RebaseOnto(ctx, dir, mainSHA); err != nil {
+		t.Fatalf("RebaseOnto: %v", err)
+	}
+	conflicts, err := g.ConflictedFiles(ctx, dir)
+	if err != nil {
+		t.Fatalf("ConflictedFiles: %v", err)
+	}
+	if len(conflicts) != 1 || conflicts[0] != "café.txt" {
+		t.Fatalf("conflicts = %v, want [café.txt]", conflicts)
+	}
+	// The marker scan reads the paths straight off the list.
+	withMarkers, err := g.FilesWithConflictMarkers(ctx, dir, conflicts)
+	if err != nil {
+		t.Fatalf("FilesWithConflictMarkers: %v", err)
+	}
+	if len(withMarkers) != 1 {
+		t.Errorf("markers = %v, want the conflicted file", withMarkers)
+	}
+}

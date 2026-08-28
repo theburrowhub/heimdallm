@@ -141,9 +141,20 @@ func (g *GitExec) MergeRef(ctx context.Context, dir, ontoSHA, message string) (R
 	return RebaseOutcome{Stderr: err.Error()}, fmt.Errorf("gitops: merge %s: %w", ontoSHA, err)
 }
 
+// literalPathArgs makes git print paths verbatim instead of C-quoting anything
+// outside ASCII: by default `café.txt` comes back as `"caf\303\251.txt"`, a
+// name no file has. Every listing whose output is fed back to the filesystem
+// needs this — without it the scope guard reads such a path as missing on both
+// sides of the agent run and concludes nothing changed, which is a fail-open on
+// exactly the file the agent touched.
+func literalPathArgs() []string {
+	return []string{"-c", "core.quotePath=false"}
+}
+
 // ConflictedFiles lists the paths git considers unmerged.
 func (g *GitExec) ConflictedFiles(ctx context.Context, dir string) ([]string, error) {
-	out, err := captureGit(ctx, dir, nil, "diff", "--name-only", "--diff-filter=U")
+	out, err := captureGit(ctx, dir, nil, append(literalPathArgs(),
+		"diff", "--name-only", "--diff-filter=U")...)
 	if err != nil {
 		return nil, fmt.Errorf("gitops: list conflicted files: %w", err)
 	}
@@ -168,12 +179,13 @@ func (g *GitExec) HasUnmergedPaths(ctx context.Context, dir string) (bool, error
 // agent touched outside the conflicted set is out of scope, and the run is
 // abandoned rather than pushed.
 func (g *GitExec) ChangedFiles(ctx context.Context, dir, sinceSHA string) ([]string, error) {
-	tracked, err := captureGit(ctx, dir, nil, "diff", "--name-only", sinceSHA)
+	tracked, err := captureGit(ctx, dir, nil, append(literalPathArgs(),
+		"diff", "--name-only", sinceSHA)...)
 	if err != nil {
 		return nil, fmt.Errorf("gitops: diff --name-only %s: %w", sinceSHA, err)
 	}
-	untracked, err := captureGit(ctx, dir, nil,
-		"ls-files", "--others", "--exclude-standard", "--", ".", ":(exclude)"+managedCloneMarkerFile)
+	untracked, err := captureGit(ctx, dir, nil, append(literalPathArgs(),
+		"ls-files", "--others", "--exclude-standard", "--", ".", ":(exclude)"+managedCloneMarkerFile)...)
 	if err != nil {
 		return nil, fmt.Errorf("gitops: list untracked files: %w", err)
 	}

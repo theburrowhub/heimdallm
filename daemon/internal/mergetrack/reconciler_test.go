@@ -192,6 +192,24 @@ func newHarness(t *testing.T, cfg config.MergeTrackingConfig, gw *fakeGateway) *
 	return h
 }
 
+// newHarnessWithConfigs builds a reconciler whose global and per-repo config
+// disagree — the shape that exposed the enrolment mismatch, since discovery
+// searches with the global value and everything downstream uses the repo's.
+func newHarnessWithConfigs(t *testing.T, global, perRepo config.MergeTrackingConfig, gw *fakeGateway) *harness {
+	t.Helper()
+	h := newHarness(t, global, gw)
+	h.r = mergetrack.NewReconciler(mergetrack.ReconcilerOptions{
+		Gateway:       gw,
+		Store:         h.st,
+		Publisher:     h.pub,
+		ConfigForRepo: func(string) config.MergeTrackingConfig { return perRepo },
+		GlobalConfig:  func() config.MergeTrackingConfig { return global },
+		Viewer:        func() string { return viewer },
+		Now:           func() time.Time { return h.now },
+	})
+	return h
+}
+
 func (h *harness) row(t *testing.T) *store.MergeTracking {
 	t.Helper()
 	row, err := h.st.GetMergeTracking(h.prID)

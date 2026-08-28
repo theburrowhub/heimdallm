@@ -245,7 +245,17 @@ func (r *Reconciler) discover(ctx context.Context, repos []string) int {
 		if _, ok := monitored[pr.Repo]; !ok {
 			continue
 		}
-		if !r.cfgFor(pr.Repo).Enabled {
+		cfg := r.cfgFor(pr.Repo)
+		if !cfg.Enabled {
+			continue
+		}
+		// include_assigned is overridable per org and repo, but the search that
+		// found this PR used the global value. Enrolling one the repo does not
+		// want costs a GraphQL query every tick to reach an Evaluate that
+		// abandons it again — and since discovery revives an abandoned row, the
+		// phase would flap idle↔abandoned forever on a budget shared with the
+		// review pipeline.
+		if !pr.IsAuthor && !cfg.IncludeAssigned {
 			continue
 		}
 		prID, isNew, err := r.enrol(pr)
@@ -539,32 +549,39 @@ func (r *Reconciler) performAction(ctx context.Context, prID int64, row *store.M
 		ctx = gateCtx
 	}
 
-	actionErr := r.dispatch(ctx, prID, row, st, d, in)
+	// dispatch reports the action it actually performed, which is not always
+	// the one Decide chose: arming can turn into a direct merge. The failure
+	// has to be counted against the budget of the action that ran.
+	performed, actionErr := r.dispatch(ctx, prID, row, st, d, in)
 	if actionErr != nil {
+		d.Action = performed
 		r.recordFailure(prID, row, d, actionErr)
 		return true, actionErr
 	}
 	return true, nil
 }
 
-func (r *Reconciler) dispatch(ctx context.Context, prID int64, row *store.MergeTracking, st *gh.MergeStatus, d Decision, in Input) error {
+func (r *Reconciler) dispatch(ctx context.Context, prID int64, row *store.MergeTracking, st *gh.MergeStatus, d Decision, in Input) (Action, error) {
 	switch d.Action {
 	case ActionArmAutoMerge:
 		return r.armAutoMerge(ctx, prID, row, st, d, in)
 	case ActionUpdateBranchRemote:
-		return r.updateBranch(ctx, prID, row, st, in)
+		return ActionUpdateBranchRemote, r.updateBranch(ctx, prID, row, st, in)
 	case ActionUpdateBranchLocal:
-		return r.rebaseLocally(ctx, prID, row, st, in)
+		return ActionUpdateBranchLocal, r.rebaseLocally(ctx, prID, row, st, in)
 	case ActionResolveConflicts:
-		return r.resolveConflicts(ctx, prID, row, st, in)
+		return ActionResolveConflicts, r.resolveConflicts(ctx, prID, row, st, in)
 	case ActionMerge:
-		return r.merge(ctx, prID, row, st, d, in)
+		return ActionMerge, r.merge(ctx, prID, row, st, d, in)
 	default:
-		return nil
+		return d.Action, nil
 	}
 }
 
-func (r *Reconciler) armAutoMerge(ctx context.Context, prID int64, row *store.MergeTracking, st *gh.MergeStatus, d Decision, in Input) error {
+// armAutoMerge returns the action it actually performed: normally
+// ActionArmAutoMerge, but ActionMerge when GitHub's refusal to arm turns out to
+// mean "merge it directly instead".
+func (r *Reconciler) armAutoMerge(ctx context.Context, prID int64, row *store.MergeTracking, st *gh.MergeStatus, d Decision, in Input) (Action, error) {
 	method := MergeMethodForGitHub(d.MergeMethod)
 	am, err := r.gw.EnableAutoMerge(st.NodeID, method, st.HeadOID)
 	if err != nil {
@@ -573,7 +590,7 @@ func (r *Reconciler) armAutoMerge(ctx context.Context, prID int64, row *store.Me
 			switch unavailable.Reason {
 			case gh.AutoMergeReasonAlreadyEnabled:
 				// The desired state already holds.
-				return r.st.ArmNativeAutoMerge(prID, st.HeadOID, method, r.now())
+				return ActionArmAutoMerge, r.st.ArmNativeAutoMerge(prID, st.HeadOID, method, r.now())
 			case gh.AutoMergeReasonCleanStatus:
 				// GitHub refuses to queue auto-merge on a PR it would merge
 				// right now. Arming is not the goal, merging is: if the
@@ -583,22 +600,37 @@ func (r *Reconciler) armAutoMerge(ctx context.Context, prID int64, row *store.Me
 				// landing after CI — and falling through to the generic error
 				// path would loop arm → fail → cooldown forever.
 				if in.Cfg.Merge {
-					return r.merge(ctx, prID, row, st, d, in)
+					// Re-claim under the merging phase before delegating. The
+					// row is currently claimed as auto_merge_armed, which is
+					// not an in-flight phase, so a direct merge run from here
+					// would have none of the single-flight protection
+					// ActionMerge gets — a second daemon could claim the same
+					// row and merge concurrently.
+					claimed, claimErr := r.st.ClaimMergeTrackingAction(
+						prID, st.HeadOID, store.MergePhaseMerging, r.now())
+					if claimErr != nil {
+						return ActionMerge, claimErr
+					}
+					if !claimed {
+						return ActionMerge, nil
+					}
+					d.Action = ActionMerge
+					return ActionMerge, r.merge(ctx, prID, row, st, d, in)
 				}
 				r.blockFor(prID, row, ReasonAutoMergeUnavailable,
 					"GitHub will not queue auto-merge on a PR that is already mergeable; "+
 						"enable merge_tracking.merge or merge it yourself", stableBlockRecheck)
-				return nil
+				return ActionArmAutoMerge, nil
 			case gh.AutoMergeReasonNotAllowedForRepo:
 				// Retrying every cycle would burn budget forever. Park it: the
 				// next evaluation reports the reason, and a config or repo
 				// change clears the cooldown naturally.
 				_ = r.st.ReleaseMergeTrackingAction(prID, store.MergePhaseBlocked,
 					r.now().Add(stableBlockRecheck), unavailable.Error())
-				return nil
+				return ActionArmAutoMerge, nil
 			}
 		}
-		return err
+		return ActionArmAutoMerge, err
 	}
 
 	at := am.EnabledAt
@@ -606,13 +638,13 @@ func (r *Reconciler) armAutoMerge(ctx context.Context, prID int64, row *store.Me
 		at = r.now()
 	}
 	if err := r.st.ArmNativeAutoMerge(prID, st.HeadOID, method, at); err != nil {
-		return err
+		return ActionArmAutoMerge, err
 	}
 	r.emit(sse.EventMergeTrackAutoMergeArmed, map[string]any{
 		"pr_id": prID, "repo": row.Repo, "number": row.Number,
 		"method": method, "head_sha": st.HeadOID,
 	})
-	return nil
+	return ActionArmAutoMerge, nil
 }
 
 func (r *Reconciler) updateBranch(ctx context.Context, prID int64, row *store.MergeTracking, st *gh.MergeStatus, in Input) error {

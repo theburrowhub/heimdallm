@@ -233,3 +233,136 @@ func TestReconcilePR_FailedAutomationEmitsAnErrorEvent(t *testing.T) {
 		t.Error("a failed automation must emit merge_track_error: it is the only event the UI gets")
 	}
 }
+
+// Second round of review findings on PR #738.
+
+// include_assigned is overridable per org and repo, but the search that finds
+// candidate PRs uses the global value. Enrolling one the repo does not want
+// costs a GraphQL query every tick to reach an Evaluate that abandons it again
+// — and because discovery revives an abandoned row, the phase flapped
+// idle↔abandoned forever on a budget shared with the review pipeline.
+func TestTick_DoesNotEnrolAnAssignedPRTheRepoExcludes(t *testing.T) {
+	global := enabledCfg()
+	global.IncludeAssigned = true
+	perRepo := enabledCfg()
+	perRepo.IncludeAssigned = false
+
+	gw := &fakeGateway{
+		prs: []*gh.TrackedPR{{
+			PullRequest: &gh.PullRequest{
+				ID: 222, Number: 9, Title: "Someone else's", State: "open",
+				HTMLURL: "https://github.com/acme/widgets/pull/9",
+				Repo:    "acme/widgets",
+			},
+			IsAssignee: true,
+		}},
+	}
+	h := newHarnessWithConfigs(t, global, perRepo, gw)
+
+	for i := 0; i < 3; i++ {
+		if stats := h.r.Tick(context.Background(), []string{"acme/widgets"}); stats.Discovered != 0 {
+			t.Fatalf("discovered = %d, want 0", stats.Discovered)
+		}
+	}
+
+	// The harness tracks its own PR, so the check is that number 9 never got a
+	// row: with one, every tick would spend a GetMergeStatus reaching an
+	// Evaluate that abandons it, and the revive would bring it back next tick.
+	rows, err := h.st.ListMergeTracking()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	for _, row := range rows {
+		if row.Number == 9 {
+			t.Fatalf("PR 9 was enrolled despite the repo excluding assignees: %+v", row)
+		}
+	}
+}
+
+// The author's own PRs are tracked whatever include_assigned says.
+func TestTick_StillEnrolsOwnPRsWhenAssigneesAreExcluded(t *testing.T) {
+	global := enabledCfg()
+	global.IncludeAssigned = true
+	perRepo := enabledCfg()
+	perRepo.IncludeAssigned = false
+
+	gw := &fakeGateway{
+		prs: []*gh.TrackedPR{{
+			PullRequest: &gh.PullRequest{
+				ID: 222, Number: 9, Title: "Mine", State: "open",
+				HTMLURL: "https://github.com/acme/widgets/pull/9",
+				Repo:    "acme/widgets",
+			},
+			IsAuthor: true,
+		}},
+		statuses: []*gh.MergeStatus{cleanStatus()},
+	}
+	h := newHarnessWithConfigs(t, global, perRepo, gw)
+
+	if stats := h.r.Tick(context.Background(), []string{"acme/widgets"}); stats.Discovered != 1 {
+		t.Errorf("discovered = %d, want 1", stats.Discovered)
+	}
+}
+
+// The clean-status fallback ran a direct merge while the decision still said
+// "arm": its failures were counted under arm_attempts, so max_merge_attempts —
+// checked before the arming branch — was never reached and the PR retried
+// arm → clean → merge at the backoff cap forever.
+func TestReconcilePR_CleanStatusMergeFailureCountsAsAMerge(t *testing.T) {
+	cfg := enabledCfg()
+	cfg.EnableAutoMerge = true
+	cfg.Merge = true
+
+	gw := &fakeGateway{
+		statuses: []*gh.MergeStatus{cleanStatus()},
+		autoErr: &gh.AutoMergeUnavailableError{
+			Reason: gh.AutoMergeReasonCleanStatus,
+			Body:   "Pull request is in clean status",
+		},
+		mergeErr: errNetwork,
+	}
+	h := newHarness(t, cfg, gw)
+
+	if _, err := h.r.ReconcilePR(context.Background(), h.prID, h.now, false); err == nil {
+		t.Fatal("the merge failure must be reported")
+	}
+	row := h.row(t)
+	if row.MergeAttempts != 1 {
+		t.Errorf("merge attempts = %d, want 1: the action that ran was a merge", row.MergeAttempts)
+	}
+	if row.ArmAttempts != 0 {
+		t.Errorf("arm attempts = %d, want 0: arming is not what failed", row.ArmAttempts)
+	}
+}
+
+// The row is claimed as auto_merge_armed when the fallback fires, and that is
+// not an in-flight phase — a direct merge run from there had none of the
+// single-flight protection ActionMerge gets, so a second daemon could claim the
+// same row and merge concurrently.
+func TestReconcilePR_CleanStatusMergeTakesTheInFlightClaim(t *testing.T) {
+	cfg := enabledCfg()
+	cfg.EnableAutoMerge = true
+	cfg.Merge = true
+
+	gw := &fakeGateway{
+		statuses: []*gh.MergeStatus{cleanStatus()},
+		autoErr: &gh.AutoMergeUnavailableError{
+			Reason: gh.AutoMergeReasonCleanStatus,
+			Body:   "Pull request is in clean status",
+		},
+		mergeErr: errNetwork,
+	}
+	h := newHarness(t, cfg, gw)
+
+	// Fails inside the merge, so the claim is what we can observe afterwards:
+	// the row must have gone through 'merging', not stayed on the arming phase.
+	_, _ = h.r.ReconcilePR(context.Background(), h.prID, h.now, false)
+	if got := h.row(t).Phase; got != store.MergePhaseBlocked {
+		t.Errorf("phase = %q, want blocked after a failed merge", got)
+	}
+	// And with the row parked, a fresh claim under the arming phase must not be
+	// able to sneak past the merge that just ran.
+	if h.gw.mergeCalls != 1 {
+		t.Errorf("merge calls = %d, want exactly 1", h.gw.mergeCalls)
+	}
+}
