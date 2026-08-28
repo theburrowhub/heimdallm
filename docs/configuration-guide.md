@@ -1268,7 +1268,7 @@ resolve_effort     = "high"  # low | medium | high | max
 | `require_approval` | `false` | Refuse to merge without an approving review at the current commit, even where the repository requires none. Useful on personal repos with no branch protection. |
 | `poll_interval` | inherit | Cadence of the reconciler. Empty inherits `[polling].poll_interval`, then `[github].poll_interval`. Re-read every cycle, so a change takes effect without a restart. |
 | `max_prs_per_tick` | `20` | How many PRs one cycle evaluates. Each costs one GraphQL query, so this is the knob that bounds API spend. |
-| `max_update_attempts` | `3` | Branch-update attempts for the currently observed head commit. Any successful update creates a new head and resets this counter; `action_cooldown` limits how often another base advance can trigger a fresh update. |
+| `max_update_attempts` | `3` | Branch-update attempts for the currently observed head commit. Any successful update creates a new head and resets this counter, so it caps repeated failures for one head rather than successful updates over the PR's lifetime. |
 | `max_resolve_attempts` | `2` | Conflict-resolution attempts per head commit. Reset by a push. |
 | `max_merge_attempts` | `3` | Merge attempts per head commit. Reset by a push. |
 | `action_cooldown` | `"10m"` | Minimum gap between write actions on one PR. |
@@ -1369,10 +1369,11 @@ refuses any pull request the authenticated account authored — and Heimdallm
 authenticates as *you*, so that is every PR you open. Pasting your own PR there
 records a `self_authored` skip and nothing else.
 
-`POST /merge-tracking/add` stores the PR, adds its repository to the monitored
-list, enrols it in merge tracking and stops. No review is triggered. Whether the
-PR is really yours is settled by the next evaluation, against GitHub's own view
-of author and assignees.
+`POST /merge-tracking/add` stores the PR, verifies the repository's effective
+merge-tracking configuration by enrolling it, adds the repository to the
+monitored list and stops. A disabled repository is rejected before that list is
+changed. No review is triggered. Whether the PR is really yours is settled by
+the next evaluation, against GitHub's own view of author and assignees.
 
 ### Per-repository and per-organisation overrides
 
