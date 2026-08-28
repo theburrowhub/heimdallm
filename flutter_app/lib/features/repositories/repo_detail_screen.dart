@@ -80,8 +80,19 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
     try {
       final repoDiff = computeRepoDiff(previous, _config);
       Map<String, dynamic>? lastResponse;
+      var didSave = false;
       if (repoDiff.isNotEmpty) {
         lastResponse = await api.patchRepoConfig(widget.repoName, repoDiff);
+        didSave = true;
+      }
+
+      if (previous.mtEnabled != _config.mtEnabled) {
+        lastResponse = await api.patchMergeTrackingRepoConfig(widget.repoName, {
+          // A null value is translated by ApiClient into DELETE so the repo
+          // inherits its org/global merge-tracking setting again.
+          'enabled': _config.mtEnabled,
+        });
+        didSave = true;
       }
 
       final monitoringChanged = previous.isMonitored != _config.isMonitored;
@@ -110,6 +121,7 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
               'non_monitored': nonMonitored,
             },
           });
+          didSave = true;
         }
       }
 
@@ -119,7 +131,7 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
             .updateFromServer(lastResponse);
       }
       _previousConfig = _config;
-      if (mounted) showToast(context, 'Saved');
+      if (mounted && didSave) showToast(context, 'Saved');
     } catch (e) {
       if (mounted) showToast(context, 'Error: $e', isError: true);
     }
@@ -207,6 +219,8 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
               ? widget.repoName.split('/').first
               : widget.repoName;
           final orgConfig = appConfig.orgConfigs[orgName];
+          final inheritedMtEnabled =
+              orgConfig?.mtEnabled ?? appConfig.mergeTracking.enabled;
           String source(bool hasOrgValue) =>
               hasOrgValue ? 'org: $orgName' : 'global';
 
@@ -722,22 +736,33 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                         ),
                       ),
                       FeatureSwitch(
+                        key: const Key('repo_merge_tracking_switch'),
                         feature: Feature.mergeTracking,
-                        value:
-                            _config.mtEnabled ??
-                            orgConfig?.mtEnabled ??
-                            appConfig.mergeTracking.enabled,
+                        value: _config.mtEnabled ?? inheritedMtEnabled,
                         onChanged: (v) =>
                             _update(_config.copyWith(mtEnabled: v)),
                       ),
                     ],
                   ),
                   const SizedBox(height: 6),
-                  Text(
-                    _config.mtEnabled != null
-                        ? 'Overridden for this repository.'
-                        : source(orgConfig?.mtEnabled != null),
-                    style: Theme.of(context).textTheme.bodySmall,
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          _config.mtEnabled != null
+                              ? 'Overridden for this repository.'
+                              : source(orgConfig?.mtEnabled != null),
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ),
+                      if (_config.mtEnabled != null)
+                        TextButton(
+                          key: const Key('repo_merge_tracking_reset'),
+                          onPressed: () =>
+                              _update(_config.copyWith(mtEnabled: null)),
+                          child: const Text('Use inherited'),
+                        ),
+                    ],
                   ),
                   const SizedBox(height: 8),
                   Text(

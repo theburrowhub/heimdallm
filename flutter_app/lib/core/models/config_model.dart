@@ -1532,9 +1532,12 @@ Map<String, RepoConfig> _withMergeTrackingOverrides(
   for (final entry in repos.entries) {
     final enabled = (entry.value as Map<String, dynamic>?)?['enabled'] as bool?;
     if (enabled == null) continue;
-    out[entry.key] = (out[entry.key] ?? const RepoConfig()).copyWith(
-      mtEnabled: enabled,
-    );
+    final existing = out[entry.key];
+    // This map also drives github.repositories/non_monitored writes. An
+    // override alone is not proof that the daemon considers the repo part of
+    // either list, so never synthesize membership from merge_tracking.repos.
+    if (existing == null) continue;
+    out[entry.key] = existing.copyWith(mtEnabled: enabled);
   }
   return out;
 }

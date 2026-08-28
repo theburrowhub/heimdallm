@@ -299,36 +299,74 @@ class ApiClient {
   /// Merge tracking keeps its overrides in `merge_tracking.repos.<repo>`, not
   /// in `repo_overrides`, so it cannot ride along with the rest of the per-repo
   /// config — it has its own endpoint on the daemon.
-  Future<void> patchMergeTrackingRepoConfig(
+  Future<Map<String, dynamic>> patchMergeTrackingRepoConfig(
     String repo,
     Map<String, dynamic> patch,
   ) => _patchMergeTrackingScope('repos', repo, patch);
 
   /// The org-level half of [patchMergeTrackingRepoConfig].
-  Future<void> patchMergeTrackingOrgConfig(
+  Future<Map<String, dynamic>> patchMergeTrackingOrgConfig(
     String org,
     Map<String, dynamic> patch,
   ) => _patchMergeTrackingScope('orgs', org, patch);
 
-  Future<void> _patchMergeTrackingScope(
+  Future<Map<String, dynamic>> _patchMergeTrackingScope(
     String scope,
     String id,
     Map<String, dynamic> patch,
   ) async {
-    final resp = await _client.patch(
-      _uri('/config/merge_tracking/$scope/${Uri.encodeComponent(id)}'),
-      headers: await _authHeaders(),
-      body: jsonEncode(patch),
-    );
-    if (resp.statusCode != 200) {
-      String msg =
-          'PATCH /config/merge_tracking/$scope/$id failed: ${resp.statusCode}';
-      try {
-        final err = (jsonDecode(resp.body) as Map<String, dynamic>)['error'];
-        if (err is String && err.isNotEmpty) msg = err;
-      } catch (_) {}
-      throw ApiException(msg);
+    final updates = <String, dynamic>{
+      for (final entry in patch.entries)
+        if (entry.value != null) entry.key: entry.value,
+    };
+    final removals = patch.entries
+        .where((entry) => entry.value == null)
+        .map((entry) => entry.key);
+    Map<String, dynamic> latest = {};
+
+    if (updates.isNotEmpty) {
+      final resp = await _client.patch(
+        _uri('/config/merge_tracking/$scope/${Uri.encodeComponent(id)}'),
+        headers: await _authHeaders(),
+        body: jsonEncode(updates),
+      );
+      if (resp.statusCode != 200) {
+        throw ApiException(
+          _configMutationError(
+            resp.body,
+            'PATCH /config/merge_tracking/$scope/$id failed: ${resp.statusCode}',
+          ),
+        );
+      }
+      latest = jsonDecode(resp.body) as Map<String, dynamic>;
     }
+
+    for (final field in removals) {
+      final resp = await _client.delete(
+        _uri(
+          '/config/merge_tracking/$scope/${Uri.encodeComponent(id)}/${Uri.encodeComponent(field)}',
+        ),
+        headers: await _authHeaders(),
+      );
+      if (resp.statusCode != 200) {
+        throw ApiException(
+          _configMutationError(
+            resp.body,
+            'DELETE /config/merge_tracking/$scope/$id/$field failed: ${resp.statusCode}',
+          ),
+        );
+      }
+      latest = jsonDecode(resp.body) as Map<String, dynamic>;
+    }
+    return latest;
+  }
+
+  String _configMutationError(String body, String fallback) {
+    try {
+      final err = (jsonDecode(body) as Map<String, dynamic>)['error'];
+      if (err is String && err.isNotEmpty) return err;
+    } catch (_) {}
+    return fallback;
   }
 
   /// Adds a pull request to merge tracking by URL.

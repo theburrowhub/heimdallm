@@ -360,6 +360,39 @@ func TestPatchMergeTrackingRepoConfig_WritesTheSection(t *testing.T) {
 	}
 }
 
+func TestDeleteMergeTrackingRepoConfigField_RemovesOnlyTheOverride(t *testing.T) {
+	srv, cfgPath := newPatchServer(t)
+
+	code, body := patch(t, srv, "/config/merge_tracking/repos/acme%2Fwidgets",
+		`{"enabled": true, "merge": true}`)
+	if code != http.StatusOK {
+		t.Fatalf("seed PATCH status = %d, body = %s", code, body)
+	}
+
+	req := httptest.NewRequest(
+		http.MethodDelete,
+		"/config/merge_tracking/repos/acme%2Fwidgets/enabled",
+		nil,
+	)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("DELETE status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	written := string(raw)
+	if strings.Contains(written, "enabled = true") {
+		t.Errorf("enabled override should have been removed:\n%s", written)
+	}
+	if !strings.Contains(written, "merge = true") {
+		t.Errorf("sibling override should be preserved:\n%s", written)
+	}
+}
+
 func TestPatchMergeTrackingOrgConfig_WritesTheSection(t *testing.T) {
 	srv, cfgPath := newPatchServer(t)
 

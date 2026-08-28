@@ -133,9 +133,34 @@ void _overrideParsing() {
 
     expect(cfg.mergeTracking.enabled, isTrue);
     expect(cfg.repoConfigs['acme/widgets']?.mtEnabled, isFalse);
-    // A repo that appears only in the override map still gets a config.
-    expect(cfg.repoConfigs['acme/gadgets']?.mtEnabled, isTrue);
+    // A merge-tracking override is not GitHub repository membership.
+    expect(cfg.repoConfigs, isNot(contains('acme/gadgets')));
     expect(cfg.orgConfigs['acme']?.mtEnabled, isFalse);
+  });
+
+  test('merge-tracking-only repos cannot leak into non_monitored', () {
+    final old = AppConfig.fromJson({
+      'repositories': ['acme/widgets'],
+      'merge_tracking': {
+        'repos': {
+          'acme/gadgets': {'enabled': true},
+        },
+      },
+    });
+    final updated = old.copyWith(
+      repoConfigs: {
+        ...old.repoConfigs,
+        'acme/widgets': old.repoConfigs['acme/widgets']!.copyWith(
+          prEnabled: false,
+        ),
+      },
+    );
+
+    final github =
+        computeGlobalDiffForTest(old, updated)['github']
+            as Map<String, dynamic>;
+    expect(github['non_monitored'], ['acme/widgets']);
+    expect(github['non_monitored'], isNot(contains('acme/gadgets')));
   });
 
   test('an override with no enabled key leaves the config inheriting', () {

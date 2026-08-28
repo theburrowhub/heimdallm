@@ -180,6 +180,32 @@ void _addAndOverrideEndpoints() {
     expect(jsonDecode(bodies.last), {'enabled': false});
   });
 
+  test('a null scoped override removes the field with DELETE', () async {
+    late http.Request captured;
+    final client = _client(
+      MockClient((request) async {
+        captured = request;
+        return http.Response(
+          jsonEncode({
+            'repositories': ['acme/widgets'],
+          }),
+          200,
+        );
+      }),
+    );
+
+    final response = await client.patchMergeTrackingRepoConfig('acme/widgets', {
+      'enabled': null,
+    });
+
+    expect(captured.method, 'DELETE');
+    expect(
+      captured.url.path,
+      '/config/merge_tracking/repos/acme%2Fwidgets/enabled',
+    );
+    expect(response['repositories'], ['acme/widgets']);
+  });
+
   test('a rejected override reports why', () async {
     final client = _client(MockClient((_) async => http.Response(
           jsonEncode({'error': 'merge_method "ff-only" must be one of squash, merge, rebase'}),
