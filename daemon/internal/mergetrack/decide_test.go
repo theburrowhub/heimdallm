@@ -342,3 +342,36 @@ func TestPhaseFor_MapsEveryMutatingAction(t *testing.T) {
 		}
 	}
 }
+
+// An operator asking "why is this stuck?" must get the PR's real blocker, not
+// the poller's own attempt pacing. Reporting `cooldown` there answers a
+// question nobody asked.
+func TestDecide_IgnoreCooldownReportsTheRealBlocker(t *testing.T) {
+	st := cleanStatus()
+	st.MergeStateStatus = gh.MergeStateBehind
+
+	in := baseInput(allOn())
+	in.State.CooldownUntil = in.Now.Add(5 * time.Minute)
+	in.IgnoreCooldown = true
+
+	d := decide(st, in)
+	if d.PrimaryReason() != mergetrack.ReasonBehindBase {
+		t.Errorf("reason = %q, want behind_base rather than the cooldown", d.PrimaryReason())
+	}
+	if d.Action != mergetrack.ActionUpdateBranchRemote {
+		t.Errorf("action = %q — an explicit evaluation should still choose the action", d.Action)
+	}
+}
+
+// Without the flag the cooldown still applies: it is what paces the poller.
+func TestDecide_CooldownAppliesToTheScheduledPass(t *testing.T) {
+	st := cleanStatus()
+	st.MergeStateStatus = gh.MergeStateBehind
+
+	in := baseInput(allOn())
+	in.State.CooldownUntil = in.Now.Add(5 * time.Minute)
+
+	if got := decide(st, in).PrimaryReason(); got != mergetrack.ReasonCooldown {
+		t.Errorf("reason = %q, want cooldown on a scheduled pass", got)
+	}
+}

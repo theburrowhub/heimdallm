@@ -39,9 +39,8 @@ func Decide(d Decision, st *gh.MergeStatus, in Input) Decision {
 		return d
 	}
 
-	// Respect the cooldown even when the caller did not filter on it (the
-	// manual "evaluate now" endpoint deliberately does not).
-	if !in.State.CooldownUntil.IsZero() && in.State.CooldownUntil.After(in.Now) {
+	// Respect the cooldown, except for an operator-initiated evaluation.
+	if !in.IgnoreCooldown && !in.State.CooldownUntil.IsZero() && in.State.CooldownUntil.After(in.Now) {
 		d.Action = ActionNone
 		d.Blocks = prependBlock(d.Blocks, Block{
 			Reason: ReasonCooldown,

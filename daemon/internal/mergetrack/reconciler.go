@@ -325,6 +325,9 @@ func (r *Reconciler) ReconcilePR(ctx context.Context, prID int64, tickStart time
 		State:       *row,
 		Now:         r.now(),
 		TickStart:   tickStart,
+		// A dry run is an operator asking a question, so it reports the PR's
+		// real blocker rather than our own attempt pacing.
+		IgnoreCooldown: dryRun,
 	}
 
 	d := Decide(Evaluate(st, in), st, in)

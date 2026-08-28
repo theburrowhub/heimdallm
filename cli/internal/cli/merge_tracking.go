@@ -112,7 +112,7 @@ func newMergeDetailCmd() *cobra.Command {
 // their full detail text, untruncated: the whole value of the line is the name
 // of the check that is failing.
 func printMergeTable(entries []api.MergeTrackingEntry) {
-	fmt.Printf("%-28s %-6s %-18s %s\n", "REPO", "PR", "STATE", "BLOCKED BY")
+	fmt.Printf("%-44s %-18s %s\n", "PULL REQUEST", "STATE", "BLOCKED BY")
 	for _, e := range entries {
 		marker := "  "
 		switch {
@@ -128,8 +128,8 @@ func printMergeTable(entries []api.MergeTrackingEntry) {
 		if e.Terminal() {
 			blocked = ""
 		}
-		fmt.Printf("%s%-26s %-6d %-18s %s\n",
-			marker, truncate(e.Repo, 26), e.Number, e.Phase, blocked)
+		fmt.Printf("%s%-42s %-18s %s\n",
+			marker, truncate(fmt.Sprintf("%s#%d", e.Repo, e.Number), 42), mergePhaseLabelCLI(e.Phase), blocked)
 	}
 	fmt.Println()
 	fmt.Println("  ! required check failing    ~ required check running")
@@ -210,6 +210,19 @@ func mergeChecksHeadline(s api.MergeChecksSummary) string {
 		return "This PR has no checks configured."
 	default:
 		return fmt.Sprintf("All %d checks passed.", s.Total)
+	}
+}
+
+// mergePhaseLabelCLI renders a persisted phase for a human. The stored values
+// are identifiers; "auto_merge_armed" is not a phrase.
+func mergePhaseLabelCLI(phase string) string {
+	switch phase {
+	case "auto_merge_armed":
+		return "auto-merge on"
+	case "abandoned":
+		return "not tracked"
+	default:
+		return phase
 	}
 }
 

@@ -1420,6 +1420,19 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			cfgMu.Unlock()
 			ticker := time.NewTicker(interval)
 			defer ticker.Stop()
+			// One cycle immediately: merge tracking is primarily a reporting
+			// surface, and a freshly started daemon showing an empty Merge tab
+			// for a full poll interval reads as broken. The cycle is a no-op
+			// when the feature is off, so this costs nothing by default.
+			runMergeTrackCycle := func() {
+				stats := mergeTrackReconciler.Tick(ctx, monitoredReposFn())
+				if stats.Evaluated > 0 || stats.Actions > 0 || stats.Errors > 0 {
+					slog.Info("merge tracking: cycle complete",
+						"discovered", stats.Discovered, "evaluated", stats.Evaluated,
+						"actions", stats.Actions, "errors", stats.Errors)
+				}
+			}
+			runMergeTrackCycle()
 			for {
 				select {
 				case <-ctx.Done():
@@ -1434,12 +1447,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 						interval = next
 						ticker.Reset(interval)
 					}
-					stats := mergeTrackReconciler.Tick(ctx, monitoredReposFn())
-					if stats.Evaluated > 0 || stats.Actions > 0 || stats.Errors > 0 {
-						slog.Info("merge tracking: cycle complete",
-							"discovered", stats.Discovered, "evaluated", stats.Evaluated,
-							"actions", stats.Actions, "errors", stats.Errors)
-					}
+					runMergeTrackCycle()
 				}
 			}
 		}()

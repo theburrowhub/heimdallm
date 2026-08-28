@@ -201,6 +201,11 @@ type Input struct {
 	// armed during this very cycle must not be promoted to a direct merge in
 	// the same cycle.
 	TickStart time.Time
+	// IgnoreCooldown skips the attempt-pacing gate. Set for an operator-
+	// initiated evaluation: the cooldown is the poller's own rhythm, and
+	// answering "why is this stuck?" with "because I am waiting to look again"
+	// tells the operator nothing about their PR.
+	IgnoreCooldown bool
 }
 
 func shortSHA(sha string) string {
