@@ -72,6 +72,21 @@ const (
 	EventAutonomousReviewClass    = "autonomous_review_classified" // {repo, number, decision}
 	EventAutonomousMergeSkipped   = "autonomous_merge_skipped"     // {repo, number, reason}
 	EventAutonomousMergeDone      = "autonomous_merge_done"        // {repo, number, method}
+
+	// Merge tracking for the operator's own PRs (spec 2026-08-28).
+	//
+	// EventMergeTrackEvaluated fires on every evaluation and carries the full
+	// explainable decision, including the per-check breakdown the UI renders.
+	// EventMergeTrackBlocked is emitted only when the blocking reason CHANGES,
+	// so a PR waiting an hour on CI produces one event, not one per cycle.
+	EventMergeTrackDetected         = "merge_track_detected"          // {pr_id, repo, number, is_author, is_assignee}
+	EventMergeTrackEvaluated        = "merge_track_evaluated"         // {pr_id, repo, number, ready, phase, reason, head_sha, checks}
+	EventMergeTrackBlocked          = "merge_track_blocked"           // {pr_id, repo, number, reason, detail}
+	EventMergeTrackAutoMergeArmed   = "merge_track_auto_merge_armed"  // {pr_id, repo, number, method, head_sha}
+	EventMergeTrackBranchUpdated    = "merge_track_branch_updated"    // {pr_id, repo, number, mode}
+	EventMergeTrackConflictResolved = "merge_track_conflict_resolved" // {pr_id, repo, number, pushed, files, pre_rebase_sha}
+	EventMergeTrackMerged           = "merge_track_merged"            // {pr_id, repo, number, method, sha}
+	EventMergeTrackError            = "merge_track_error"             // {pr_id, repo, number, action, err}
 )
 
 // maxSubscribers limits the number of concurrent SSE connections to prevent

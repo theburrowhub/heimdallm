@@ -449,3 +449,173 @@ func TestRecorder_PollingEventsAreIgnored(t *testing.T) {
 		t.Errorf("polling events should not produce rows; got %d", got)
 	}
 }
+
+// ── Merge tracking ─────────────────────────────────────────────────────────
+
+func TestRecorder_MergeTrackMerged(t *testing.T) {
+	_, fs, events := newTestRecorder(t)
+
+	payload, _ := json.Marshal(map[string]any{
+		"pr_id": 7, "repo": "acme/api", "number": 42,
+		"method": "squash", "sha": "abc123",
+	})
+	events <- sse.Event{Type: sse.EventMergeTrackMerged, Data: string(payload)}
+	waitFor(t, func() bool { return fs.count() == 1 })
+
+	got := fs.at(0)
+	if got.repo != "acme/api" || got.org != "acme" || got.itemNumber != 42 {
+		t.Errorf("row basics: %+v", got)
+	}
+	if got.action != "merge_track_merged" || got.outcome != "squash" {
+		t.Errorf("action/outcome = %q/%q", got.action, got.outcome)
+	}
+	if got.details["sha"] != "abc123" {
+		t.Errorf("details should record the merged sha: %v", got.details)
+	}
+}
+
+func TestRecorder_MergeTrackAutoMergeArmed(t *testing.T) {
+	_, fs, events := newTestRecorder(t)
+
+	payload, _ := json.Marshal(map[string]any{
+		"repo": "acme/api", "number": 42, "method": "rebase",
+	})
+	events <- sse.Event{Type: sse.EventMergeTrackAutoMergeArmed, Data: string(payload)}
+	waitFor(t, func() bool { return fs.count() == 1 })
+
+	got := fs.at(0)
+	if got.action != "merge_track_auto_merge_armed" || got.outcome != "rebase" {
+		t.Errorf("action/outcome = %q/%q", got.action, got.outcome)
+	}
+}
+
+func TestRecorder_MergeTrackBranchUpdated(t *testing.T) {
+	_, fs, events := newTestRecorder(t)
+
+	payload, _ := json.Marshal(map[string]any{
+		"repo": "acme/api", "number": 42, "mode": "local_rebase",
+	})
+	events <- sse.Event{Type: sse.EventMergeTrackBranchUpdated, Data: string(payload)}
+	waitFor(t, func() bool { return fs.count() == 1 })
+
+	got := fs.at(0)
+	if got.action != "merge_track_branch_updated" || got.outcome != "local_rebase" {
+		t.Errorf("action/outcome = %q/%q", got.action, got.outcome)
+	}
+}
+
+// Both outcomes are recorded. A resolution that was NOT pushed matters at
+// least as much: it means the agent looked at the conflicts and declined.
+func TestRecorder_MergeTrackConflictResolved(t *testing.T) {
+	for _, tc := range []struct {
+		pushed bool
+		want   string
+	}{{true, "pushed"}, {false, "not pushed"}} {
+		t.Run(tc.want, func(t *testing.T) {
+			_, fs, events := newTestRecorder(t)
+
+			payload, _ := json.Marshal(map[string]any{
+				"repo": "acme/api", "number": 42,
+				"pushed": tc.pushed, "files": []string{"a.go"},
+				"pre_rebase_sha": "abc123",
+			})
+			events <- sse.Event{Type: sse.EventMergeTrackConflictResolved, Data: string(payload)}
+			waitFor(t, func() bool { return fs.count() == 1 })
+
+			got := fs.at(0)
+			if got.outcome != tc.want {
+				t.Errorf("outcome = %q, want %q", got.outcome, tc.want)
+			}
+			// The pre-rebase SHA is the recovery path; losing it here loses it.
+			if got.details["pre_rebase_sha"] != "abc123" {
+				t.Errorf("details should record the pre-rebase sha: %v", got.details)
+			}
+		})
+	}
+}
+
+func TestRecorder_MergeTrackBlocked(t *testing.T) {
+	_, fs, events := newTestRecorder(t)
+
+	payload, _ := json.Marshal(map[string]any{
+		"repo": "acme/api", "number": 42,
+		"reason": "checks_failing",
+		"detail": "1 required check is failing: build (GitHub Actions)",
+	})
+	events <- sse.Event{Type: sse.EventMergeTrackBlocked, Data: string(payload)}
+	waitFor(t, func() bool { return fs.count() == 1 })
+
+	got := fs.at(0)
+	if got.action != "merge_track_blocked" || got.outcome != "checks_failing" {
+		t.Errorf("action/outcome = %q/%q", got.action, got.outcome)
+	}
+	// The detail names the check; a reason code alone is not actionable.
+	if got.details["detail"] != "1 required check is failing: build (GitHub Actions)" {
+		t.Errorf("details should carry the specific text: %v", got.details)
+	}
+}
+
+func TestRecorder_MergeTrackError(t *testing.T) {
+	_, fs, events := newTestRecorder(t)
+
+	payload, _ := json.Marshal(map[string]any{
+		"repo": "acme/api", "number": 42,
+		"action": "merge", "err": "connection reset",
+	})
+	events <- sse.Event{Type: sse.EventMergeTrackError, Data: string(payload)}
+	waitFor(t, func() bool { return fs.count() == 1 })
+
+	got := fs.at(0)
+	if got.action != "error" || got.outcome != "connection reset" {
+		t.Errorf("action/outcome = %q/%q", got.action, got.outcome)
+	}
+	if got.details["action"] != "merge" {
+		t.Errorf("details should record which action failed: %v", got.details)
+	}
+}
+
+// merge_track_evaluated fires for every PR on every cycle. Persisting it would
+// mean one activity row per PR per cycle, which drowns the log.
+func TestRecorder_MergeTrackEvaluatedIsNotPersisted(t *testing.T) {
+	_, fs, events := newTestRecorder(t)
+
+	payload, _ := json.Marshal(map[string]any{"repo": "acme/api", "number": 42})
+	events <- sse.Event{Type: sse.EventMergeTrackEvaluated, Data: string(payload)}
+	// Followed by an event that IS recorded, so we can tell "not yet" from
+	// "never" without sleeping on a negative.
+	events <- sse.Event{Type: sse.EventMergeTrackBlocked, Data: string(payload)}
+	waitFor(t, func() bool { return fs.count() == 1 })
+
+	if got := fs.at(0).action; got != "merge_track_blocked" {
+		t.Errorf("first recorded row = %q, want the blocked event only", got)
+	}
+	if fs.count() != 1 {
+		t.Errorf("recorded %d rows, want 1", fs.count())
+	}
+}
+
+func TestRecorder_MergeTrackMalformedPayloadIsSkipped(t *testing.T) {
+	_, fs, events := newTestRecorder(t)
+
+	events <- sse.Event{Type: sse.EventMergeTrackMerged, Data: "{not json"}
+	payload, _ := json.Marshal(map[string]any{"repo": "acme/api", "number": 1})
+	events <- sse.Event{Type: sse.EventMergeTrackMerged, Data: string(payload)}
+	waitFor(t, func() bool { return fs.count() == 1 })
+
+	if got := fs.at(0).repo; got != "acme/api" {
+		t.Errorf("a malformed payload must not stop the next event: got %q", got)
+	}
+}
+
+// A repo slug with no owner still has to produce a row rather than panic.
+func TestRecorder_MergeTrackHandlesAnOwnerlessRepo(t *testing.T) {
+	_, fs, events := newTestRecorder(t)
+
+	payload, _ := json.Marshal(map[string]any{"repo": "widgets", "number": 1, "reason": "draft"})
+	events <- sse.Event{Type: sse.EventMergeTrackBlocked, Data: string(payload)}
+	waitFor(t, func() bool { return fs.count() == 1 })
+
+	if got := fs.at(0).org; got != "widgets" {
+		t.Errorf("org = %q, want the slug itself when there is no owner", got)
+	}
+}

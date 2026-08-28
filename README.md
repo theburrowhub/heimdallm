@@ -8,7 +8,7 @@
 
 ## What it does
 
-Heimdallm runs in the background and does three things, in parallel, at your configured poll interval:
+Heimdallm runs in the background and does four things, in parallel, at your configured poll interval:
 
 ### 1. PR reviews
 Watches the PRs where you're requested as a reviewer, runs an AI code review, and submits it to GitHub as your account. No copy-pasting, no manual prompting.
@@ -16,12 +16,16 @@ Watches the PRs where you're requested as a reviewer, runs an AI code review, an
 ### 2. Issue triage & auto-implement
 Fetches issues from monitored repos, classifies them by label (`review_only` triage, `refinement`, `develop` / `auto_implement`, `skip`, `blocked`), and can move issues through triage -> refinement -> development. Develop-track issues optionally **create a branch, commit the change, and open a PR** against your default branch. Issues can declare dependencies on other issues/PRs; Heimdallm holds them in a `blocked` state until the prerequisites close, then promotes them automatically.
 
-### 3. Self-monitoring UI
-A Flutter Web dashboard (`:3000`) with Dashboard, PR list, Issue list, prompt/agent editor, live config editor, and a live log stream. Opens alongside the daemon in Docker mode.
+### 3. Merge tracking
+Watches the PRs **you** authored or are assigned to and works out exactly what is stopping each one from merging — which check is failing, which reviewer is waiting, which conversation is unresolved — and says so where you cannot miss it. Optionally moves them along too: arm GitHub's auto-merge, update branches that fall behind, have the agent resolve conflicts, and merge when everything is green. Every automation is off by default.
+
+### 4. Self-monitoring UI
+A Flutter Web dashboard (`:3000`) with Dashboard, PR list, Merge tab, Issue list, prompt/agent editor, live config editor, and a live log stream. Opens alongside the daemon in Docker mode.
 
 ### Headline features
 
 - **Automatic reviews** — polls `review-requested:@me` on GitHub and submits reviews as your account
+- **Merge tracking** — tells you which check is blocking each of your own PRs, and can arm auto-merge, update stale branches, resolve conflicts and merge, each behind its own switch
 - **Issue pipeline** — label-driven triage, refinement planning, and optional auto-implement with branch/commit/PR cycle
 - **Issue dependencies** — mark downstream work with a `blocked` label; declare deps via a `## Depends on` body section *or* GitHub's native sub-issues; Heimdallm auto-promotes when all blockers close
 - **Configurable prompts** — general review, security audit, performance, architecture, or your own with `{diff}` `{title}` `{author}` `{comments}` placeholders, managed from the web UI at `/agents`
@@ -533,6 +537,7 @@ heimdallm/
 │       ├── executor/        AI CLI runner (claude, gemini, codex, opencode)
 │       ├── pipeline/        PR-review orchestration (fase 1)
 │       ├── issues/          Issue triage + auto-implement (fase 2)
+│       ├── mergetrack/       Merge-readiness evaluator and reconciler
 │       ├── discovery/       Topic-based repo auto-discovery
 │       ├── store/           SQLite (prs, issues, reviews, agents)
 │       ├── scheduler/       Poll loop, grace windows
@@ -548,6 +553,7 @@ heimdallm/
 │   ├── lib/
 │   │   ├── features/
 │   │   │   ├── dashboard/   Reviews tab (My Reviews / My PRs)
+│   │   │   ├── merge_tracking/ Merge tab and per-check breakdown
 │   │   │   ├── repositories/Repo management + per-repo config
 │   │   │   ├── agents/      Review prompt library
 │   │   │   └── stats/       Review statistics

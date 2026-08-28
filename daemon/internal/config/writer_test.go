@@ -103,11 +103,11 @@ func TestDeepMerge_PatchMapOverScalar(t *testing.T) {
 
 func TestDeepMerge_DoesNotMutateBase(t *testing.T) {
 	base := map[string]any{
-		"a": "original",
+		"a":      "original",
 		"nested": map[string]any{"x": 1},
 	}
 	patch := map[string]any{
-		"a": "changed",
+		"a":      "changed",
 		"nested": map[string]any{"x": 99},
 	}
 

@@ -54,9 +54,9 @@ func TestProcessDiscoveredRepos_NilNonMonitoredNeverPersistsNull(t *testing.T) {
 	}
 
 	processDiscoveredRepos(
-		[]string{"org/new-repo"},                           // added — non-empty so we reach the persist block
-		[]string{"org/existing", "org/new-repo"},           // reposSnap — non-nil
-		nil,                                                // nonMonSnap — the race value
+		[]string{"org/new-repo"},                 // added — non-empty so we reach the persist block
+		[]string{"org/existing", "org/new-repo"}, // reposSnap — non-nil
+		nil,                                      // nonMonSnap — the race value
 		st,
 		broker,
 		time.Unix(1_700_000_000, 0),

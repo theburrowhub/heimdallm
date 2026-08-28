@@ -105,6 +105,9 @@ type Server struct {
 	// while verifying the daemon before confirmation can cross the stateful
 	// bootstrap boundary.
 	updateBootID string
+	// mergeTrackEvaluateFn re-evaluates one tracked PR on demand. Nil until
+	// main wires it, in which case the endpoint answers 503.
+	mergeTrackEvaluateFn func(ctx context.Context, prID int64, dryRun bool) error
 	// repoMetaFns fetch repo metadata from GitHub for autocomplete.
 	fetchLabelsFn        func(repo string) ([]string, error)
 	fetchCollaboratorsFn func(repo string) ([]string, error)
@@ -260,6 +263,8 @@ var sensitiveGETPaths = []string{
 	"/issues", // covers /issues and /issues/{id}
 	"/repos",  // covers /repos/{name}/labels and /repos/{name}/collaborators
 	"/github", // covers /github/rate_limit (live GitHub API usage)
+	// exposes PR titles, repos, block reasons and check names
+	"/merge-tracking",
 }
 
 // authMiddleware rejects:
@@ -317,6 +322,12 @@ func (srv *Server) SetCancelReviewFn(fn func(prID int64) (bool, error)) {
 // the stored row.
 func (srv *Server) SetAddPRFn(fn func(repo string, number int) (*store.PR, error)) {
 	srv.addPRFn = fn
+}
+
+// SetMergeTrackEvaluateFn wires the on-demand merge-tracking evaluation used by
+// POST /merge-tracking/{prID}/evaluate.
+func (srv *Server) SetMergeTrackEvaluateFn(fn func(ctx context.Context, prID int64, dryRun bool) error) {
+	srv.mergeTrackEvaluateFn = fn
 }
 
 // SetTriggerIssueReviewFn wires the issue-review-trigger callback called by POST /issues/{id}/review.
@@ -619,6 +630,13 @@ func (srv *Server) buildRouter() chi.Router {
 	r.Delete("/config/orgs/{org}/*", srv.handleDeleteOrgField)
 	r.Patch("/config/autonomous/repos/{repo}", srv.handlePatchAutonomousRepoConfig)
 	r.Patch("/config/autonomous/orgs/{org}", srv.handlePatchAutonomousOrgConfig)
+	r.Patch("/config/merge_tracking/repos/{repo}", srv.handlePatchMergeTrackingRepoConfig)
+	r.Patch("/config/merge_tracking/orgs/{org}", srv.handlePatchMergeTrackingOrgConfig)
+	r.Get("/merge-tracking", srv.handleListMergeTracking)
+	r.Get("/merge-tracking/{prID}", srv.handleGetMergeTracking)
+	r.Post("/merge-tracking/{prID}/evaluate", srv.handleEvaluateMergeTracking)
+	r.Post("/merge-tracking/{prID}/exclude", srv.handleExcludeMergeTracking(true))
+	r.Post("/merge-tracking/{prID}/include", srv.handleExcludeMergeTracking(false))
 	r.Delete("/config/clones", srv.handleDeleteManagedClones)
 	r.Delete("/config/clones/{repo}", srv.handleDeleteManagedClone)
 	r.Post("/reload", srv.handleReload)
@@ -1522,11 +1540,16 @@ func (srv *Server) handlePatchAutonomousOrgConfig(w http.ResponseWriter, r *http
 	srv.patchAutonomousSubKey(w, r, "orgs", org)
 }
 
-// patchAutonomousSubKey merges a PATCH body into autonomous.<subKey>.<id>
+// patchAutonomousSubKey merges a PATCH body into autonomous.<subKey>.<id>.
+func (srv *Server) patchAutonomousSubKey(w http.ResponseWriter, r *http.Request, subKey, id string) {
+	srv.patchSectionSubKey(w, r, "autonomous", subKey, id)
+}
+
+// patchSectionSubKey merges a PATCH body into <section>.<subKey>.<id>
 // (subKey is "repos" or "orgs"), pruning keys that the merge removed, the same
 // way the global config PATCH handlers do. Callers are responsible for
 // unescaping and validating id before calling.
-func (srv *Server) patchAutonomousSubKey(w http.ResponseWriter, r *http.Request, subKey, id string) {
+func (srv *Server) patchSectionSubKey(w http.ResponseWriter, r *http.Request, section, subKey, id string) {
 	if srv.configPath == "" {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "PATCH not available — configPath not set"})
 		return
@@ -1537,7 +1560,7 @@ func (srv *Server) patchAutonomousSubKey(w http.ResponseWriter, r *http.Request,
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
 	}
-	if err := rejectAutonomousAgentPatch(patch, "autonomous."+subKey+"."+id); err != nil {
+	if err := rejectAutonomousAgentPatch(patch, section+"."+subKey+"."+id); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -1550,7 +1573,7 @@ func (srv *Server) patchAutonomousSubKey(w http.ResponseWriter, r *http.Request,
 	config.NormalizeNumbers(patch)
 
 	globalPatch := map[string]any{
-		"autonomous": map[string]any{
+		section: map[string]any{
 			subKey: map[string]any{
 				id: patch,
 			},
@@ -1570,7 +1593,7 @@ func (srv *Server) patchAutonomousSubKey(w http.ResponseWriter, r *http.Request,
 		return nil
 	})
 	if err != nil {
-		slog.Error("PATCH /config/autonomous failed", "subkey", subKey, "id", id, "err", err)
+		slog.Error("PATCH /config section failed", "section", section, "subkey", subKey, "id", id, "err", err)
 		var ve *config.ValidationError
 		if errors.As(err, &ve) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -1580,6 +1603,32 @@ func (srv *Server) patchAutonomousSubKey(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (srv *Server) handlePatchMergeTrackingRepoConfig(w http.ResponseWriter, r *http.Request) {
+	repo, err := url.PathUnescape(chi.URLParam(r, "repo"))
+	if err != nil || repo == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo parameter"})
+		return
+	}
+	if err := config.ValidateRepoSlug(repo); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	srv.patchSectionSubKey(w, r, "merge_tracking", "repos", repo)
+}
+
+func (srv *Server) handlePatchMergeTrackingOrgConfig(w http.ResponseWriter, r *http.Request) {
+	org, err := url.PathUnescape(chi.URLParam(r, "org"))
+	if err != nil || org == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid org parameter"})
+		return
+	}
+	if err := config.ValidateOrgSlug(org); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	srv.patchSectionSubKey(w, r, "merge_tracking", "orgs", org)
 }
 
 func (srv *Server) handleDeleteRepoField(w http.ResponseWriter, r *http.Request) {

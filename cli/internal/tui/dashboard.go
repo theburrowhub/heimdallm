@@ -20,13 +20,14 @@ type tab int
 const (
 	tabActivity tab = iota
 	tabPRs
+	tabMerges
 	tabIssues
 	tabConfig
 	tabStats
 	tabServer
 )
 
-var tabNames = []string{"Activity", "PRs", "Issues", "Config", "Stats", "Server"}
+var tabNames = []string{"Activity", "PRs", "Merges", "Issues", "Config", "Stats", "Server"}
 
 type Dashboard struct {
 	client *api.Client
@@ -40,6 +41,7 @@ type Dashboard struct {
 
 	prs    []api.PR
 	issues []api.Issue
+	merges []api.MergeTrackingEntry
 	config map[string]any
 	stats  *api.Stats
 
@@ -90,6 +92,7 @@ type Dashboard struct {
 type tickMsg time.Time
 type dataMsg struct {
 	prs      []api.PR
+	merges   []api.MergeTrackingEntry
 	issues   []api.Issue
 	config   map[string]any
 	stats    *api.Stats
@@ -180,6 +183,12 @@ func (d *Dashboard) fetchData() tea.Msg {
 		return msg
 	}
 	msg.prs = prs
+
+	// Best-effort: a daemon predating merge tracking answers 404 here, and
+	// that must not blank every other tab.
+	if merges, mErr := d.client.ListMergeTracking(); mErr == nil {
+		msg.merges = merges
+	}
 
 	issues, err := d.client.ListIssues()
 	if err != nil {
@@ -360,6 +369,8 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			sort.Slice(d.prs, func(i, j int) bool {
 				return d.prs[i].LatestReview.CreatedAt.After(d.prs[j].LatestReview.CreatedAt)
 			})
+			// Kept in the daemon's order: it sorts PRs blocked by CI first.
+			d.merges = msg.merges
 			d.issues = nil
 			for _, iss := range msg.issues {
 				if iss.LatestReview != nil {
@@ -707,6 +718,10 @@ func (d *Dashboard) openDetail() {
 	switch d.activeTab {
 	case tabPRs:
 		d.detailLines = buildPRDetailLines(d.visiblePRs()[d.cursor], d.width)
+	case tabMerges:
+		if d.cursor < len(d.merges) {
+			d.detailLines = buildMergeDetailLines(d.merges[d.cursor], d.width)
+		}
 	case tabIssues:
 		d.detailLines = buildIssueDetailLines(d.visibleIssues()[d.cursor], d.width)
 	}
@@ -914,6 +929,8 @@ func (d *Dashboard) renderContent(height int) string {
 		return d.renderLogs(height)
 	case tabPRs:
 		return d.renderPRs(height)
+	case tabMerges:
+		return d.renderMerges(height)
 	case tabIssues:
 		return d.renderIssues(height)
 	case tabConfig:
@@ -1371,6 +1388,8 @@ func (d *Dashboard) tabItemCount() int {
 		return 0
 	case tabPRs:
 		return len(d.visiblePRs())
+	case tabMerges:
+		return len(d.merges)
 	case tabIssues:
 		return len(d.visibleIssues())
 	case tabConfig:

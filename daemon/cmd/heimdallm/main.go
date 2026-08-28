@@ -33,6 +33,7 @@ import (
 	gh "github.com/heimdallm/daemon/internal/github"
 	issuepipeline "github.com/heimdallm/daemon/internal/issues"
 	"github.com/heimdallm/daemon/internal/keychain"
+	"github.com/heimdallm/daemon/internal/mergetrack"
 	"github.com/heimdallm/daemon/internal/notify"
 	"github.com/heimdallm/daemon/internal/pipeline"
 	"github.com/heimdallm/daemon/internal/repoctx"
@@ -1317,7 +1318,10 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		// repo enumeration as Tier 2. The whole tick is a cheap no-op when no
 		// monitored repo has autonomous enabled, so it is always started; the
 		// per-repo Enabled flag (resolved under cfgMu each tick) is the gate.
-		autonomousReposFn := func() []string {
+		// Shared by the autonomous poller and merge tracking: both need the
+		// same "which repos are we monitoring right now" answer, resolved under
+		// cfgMu so a reload takes effect on the next tick.
+		monitoredReposFn := func() []string {
 			cfgMu.Lock()
 			defer cfgMu.Unlock()
 			return discovery.MergeRepos(cfg.GitHub.Repositories, aiRepoKeys(cfg), nil, cfg.GitHub.NonMonitored)
@@ -1343,7 +1347,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			cfg:      &cfg,
 			cfgMu:    &cfgMu,
 			botLogin: botLoginAccessor,
-			reposFn:  autonomousReposFn,
+			reposFn:  monitoredReposFn,
 		}
 		wg.Add(1)
 		go func() {
@@ -1363,6 +1367,89 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 					// flight behavior (bounded concurrency, no agent stampede),
 					// not a bug.
 					autonomousPoller.Run(ctx)
+				}
+			}
+		}()
+
+		// Merge tracking: reconciles the PRs the operator authored or is
+		// assigned to towards merge. Like the autonomous poller it is always
+		// started and gates itself per repo, so a cycle with the feature off
+		// everywhere costs nothing — AnyEnabled short-circuits before the first
+		// GitHub call.
+		// *issues.GitExec, *executor.Executor and *gh.Client satisfy the
+		// mergetrack interfaces directly — no adapters, so there is no
+		// untestable delegation layer sitting in main.
+		mergeTrackGit := issuepipeline.NewGitExec()
+		mergeTrackRunner := mergetrack.NewWorktreeOps(
+			&mergeTrackRepoContexts{manager: repoCtx, token: token, cfg: &cfg, cfgMu: &cfgMu},
+			mergeTrackGit,
+			mergetrack.NewConflictResolver(mergeTrackGit, exec),
+			token,
+			mergeTrackAgentSpec(&cfg, &cfgMu),
+		)
+
+		mergeTrackReconciler := mergetrack.NewReconciler(mergetrack.ReconcilerOptions{
+			Gateway:   ghClient,
+			Store:     s,
+			Publisher: broker,
+			Gate:      updateWorkGate,
+			Worktree:  mergeTrackRunner,
+			ConfigForRepo: func(repo string) config.MergeTrackingConfig {
+				cfgMu.Lock()
+				defer cfgMu.Unlock()
+				return cfg.MergeTrackingForRepo(repo)
+			},
+			GlobalConfig: func() config.MergeTrackingConfig {
+				cfgMu.Lock()
+				defer cfgMu.Unlock()
+				return cfg.MergeTracking
+			},
+			Viewer:          botLoginAccessor,
+			DefaultCooldown: pollInterval,
+		})
+
+		// The on-demand evaluation behind POST /merge-tracking/{prID}/evaluate.
+		srv.SetMergeTrackEvaluateFn(func(ctx context.Context, prID int64, dryRun bool) error {
+			_, err := mergeTrackReconciler.ReconcilePR(ctx, prID, time.Now().UTC(), dryRun)
+			return err
+		})
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cfgMu.Lock()
+			interval := mergeTrackInterval(cfg, pollInterval)
+			cfgMu.Unlock()
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			// One cycle immediately: merge tracking is primarily a reporting
+			// surface, and a freshly started daemon showing an empty Merge tab
+			// for a full poll interval reads as broken. The cycle is a no-op
+			// when the feature is off, so this costs nothing by default.
+			runMergeTrackCycle := func() {
+				stats := mergeTrackReconciler.Tick(ctx, monitoredReposFn())
+				if stats.Evaluated > 0 || stats.Actions > 0 || stats.Errors > 0 {
+					slog.Info("merge tracking: cycle complete",
+						"discovered", stats.Discovered, "evaluated", stats.Evaluated,
+						"actions", stats.Actions, "errors", stats.Errors)
+				}
+			}
+			runMergeTrackCycle()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					// Hot reload of the cadence, same pattern as tier 3: a
+					// config change must not need a daemon restart.
+					cfgMu.Lock()
+					next := mergeTrackInterval(cfg, pollInterval)
+					cfgMu.Unlock()
+					if next != interval {
+						interval = next
+						ticker.Reset(interval)
+					}
+					runMergeTrackCycle()
 				}
 			}
 		}()

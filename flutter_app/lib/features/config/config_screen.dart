@@ -106,10 +106,13 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
 
   // Autonomous mode
   AutonomousConfig _autonomous = const AutonomousConfig();
+  MergeTrackingConfig _mergeTracking = const MergeTrackingConfig();
   CircuitBreakerConfig _circuitBreaker = const CircuitBreakerConfig();
   late TextEditingController _devMaxTurnsController;
   late TextEditingController _devTimeoutController;
   late TextEditingController _claimLeaseController;
+  late TextEditingController _mtPollIntervalController;
+  late TextEditingController _mtResolveTimeoutController;
   late TextEditingController _perPr24hController;
   late TextEditingController _perRepoHrController;
   late TextEditingController _perIssue24hController;
@@ -125,6 +128,8 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     _devMaxTurnsController = TextEditingController();
     _devTimeoutController = TextEditingController();
     _claimLeaseController = TextEditingController();
+    _mtPollIntervalController = TextEditingController();
+    _mtResolveTimeoutController = TextEditingController();
     _perPr24hController = TextEditingController();
     _perRepoHrController = TextEditingController();
     _perIssue24hController = TextEditingController();
@@ -141,6 +146,8 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     _devMaxTurnsController.dispose();
     _devTimeoutController.dispose();
     _claimLeaseController.dispose();
+    _mtPollIntervalController.dispose();
+    _mtResolveTimeoutController.dispose();
     _perPr24hController.dispose();
     _perRepoHrController.dispose();
     _perIssue24hController.dispose();
@@ -193,15 +200,20 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     if (_autonomousControllersInitialized) return;
     _autonomousControllersInitialized = true;
     _autonomous = config.autonomous;
+    _mergeTracking = config.mergeTracking;
     _circuitBreaker = config.circuitBreaker;
     _devMaxTurnsController.text = config.autonomous.devMaxTurns.toString();
     _devTimeoutController.text = config.autonomous.devTimeout;
     _claimLeaseController.text = config.autonomous.claimLease;
+    _mtPollIntervalController.text = config.mergeTracking.pollInterval;
+    _mtResolveTimeoutController.text = config.mergeTracking.resolveTimeout;
     _perPr24hController.text = config.circuitBreaker.perPr24h.toString();
     _perRepoHrController.text = config.circuitBreaker.perRepoHr.toString();
     _perIssue24hController.text = config.circuitBreaker.perIssue24h.toString();
-    _perIssueRepoHrController.text = config.circuitBreaker.perIssueRepoHr.toString();
-    _perImplRepoHrController.text = config.circuitBreaker.perImplRepoHr.toString();
+    _perIssueRepoHrController.text = config.circuitBreaker.perIssueRepoHr
+        .toString();
+    _perImplRepoHrController.text = config.circuitBreaker.perImplRepoHr
+        .toString();
   }
 
   @override
@@ -275,6 +287,8 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
             const SizedBox(height: 20),
             _autonomousSection(),
             const SizedBox(height: 20),
+            _mergeTrackingSection(),
+            const SizedBox(height: 20),
             _circuitBreakerSection(),
             const SizedBox(height: 28),
             _saveButton(context, config, daemonRunning),
@@ -327,7 +341,6 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     );
   }
 
-
   // ── Poll interval ─────────────────────────────────────────────────────────
 
   Widget _pollSection() {
@@ -353,7 +366,12 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
         Wrap(
           spacing: 8,
           children: _pollIntervalSuggestions
-              .map((v) => ActionChip(label: Text(v), onPressed: () => _pickPollInterval(v)))
+              .map(
+                (v) => ActionChip(
+                  label: Text(v),
+                  onPressed: () => _pickPollInterval(v),
+                ),
+              )
               .toList(),
         ),
       ],
@@ -730,9 +748,11 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
           border: OutlineInputBorder(),
           isDense: true,
         ),
-        items: const ['claude', 'gemini', 'codex']
-            .map((v) => DropdownMenuItem(value: v, child: Text(v)))
-            .toList(),
+        items: const [
+          'claude',
+          'gemini',
+          'codex',
+        ].map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(),
         onChanged: (v) => setState(() => _aiPrimary = v ?? 'claude'),
       ),
       const SizedBox(height: 12),
@@ -743,9 +763,12 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
           border: OutlineInputBorder(),
           isDense: true,
         ),
-        items: const ['none', 'claude', 'gemini', 'codex']
-            .map((v) => DropdownMenuItem(value: v, child: Text(v)))
-            .toList(),
+        items: const [
+          'none',
+          'claude',
+          'gemini',
+          'codex',
+        ].map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(),
         onChanged: (v) =>
             setState(() => _aiFallback = (v == null || v == 'none') ? '' : v),
       ),
@@ -759,9 +782,10 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
           border: OutlineInputBorder(),
           isDense: true,
         ),
-        items: const ['single', 'multi']
-            .map((v) => DropdownMenuItem(value: v, child: Text(v)))
-            .toList(),
+        items: const [
+          'single',
+          'multi',
+        ].map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(),
         onChanged: (v) => setState(() => _reviewMode = v ?? 'single'),
       ),
       const SizedBox(height: 12),
@@ -997,7 +1021,10 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   Widget _autonomousSection() {
     return _settingsCard('Autonomous Mode', [
       SwitchListTile(
-        title: const Text('Enable autonomous mode', style: TextStyle(fontSize: 13)),
+        title: const Text(
+          'Enable autonomous mode',
+          style: TextStyle(fontSize: 13),
+        ),
         subtitle: const Text(
           'Allow Heimdallm to act autonomously on PRs and issues',
           style: TextStyle(fontSize: 11),
@@ -1012,7 +1039,10 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
       if (_autonomous.enabled) ...[
         const SizedBox(height: 8),
         SwitchListTile(
-          title: const Text('Auto-merge approved PRs', style: TextStyle(fontSize: 13)),
+          title: const Text(
+            'Auto-merge approved PRs',
+            style: TextStyle(fontSize: 13),
+          ),
           subtitle: const Text(
             'Automatically merge PRs that pass all checks',
             style: TextStyle(fontSize: 11),
@@ -1033,9 +1063,11 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
             border: OutlineInputBorder(),
             isDense: true,
           ),
-          items: ['squash', 'merge', 'rebase']
-              .map((v) => DropdownMenuItem(value: v, child: Text(v)))
-              .toList(),
+          items: [
+            'squash',
+            'merge',
+            'rebase',
+          ].map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(),
           onChanged: (v) => setState(() {
             _autonomous = _autonomous.copyWith(mergeMethod: v);
           }),
@@ -1050,9 +1082,12 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
             border: OutlineInputBorder(),
             isDense: true,
           ),
-          items: ['low', 'medium', 'high', 'max']
-              .map((v) => DropdownMenuItem(value: v, child: Text(v)))
-              .toList(),
+          items: [
+            'low',
+            'medium',
+            'high',
+            'max',
+          ].map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(),
           onChanged: (v) => setState(() {
             _autonomous = _autonomous.copyWith(devEffort: v);
           }),
@@ -1068,7 +1103,9 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
           keyboardType: TextInputType.number,
           inputFormatters: [FilteringTextInputFormatter.digitsOnly],
           onChanged: (v) => setState(() {
-            _autonomous = _autonomous.copyWith(devMaxTurns: int.tryParse(v) ?? 0);
+            _autonomous = _autonomous.copyWith(
+              devMaxTurns: int.tryParse(v) ?? 0,
+            );
           }),
         ),
         const SizedBox(height: 8),
@@ -1098,7 +1135,10 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
         ),
         const SizedBox(height: 8),
         SwitchListTile(
-          title: const Text("Take others' tasks", style: TextStyle(fontSize: 13)),
+          title: const Text(
+            "Take others' tasks",
+            style: TextStyle(fontSize: 13),
+          ),
           subtitle: const Text(
             'Claim issues assigned to other users',
             style: TextStyle(fontSize: 11),
@@ -1117,15 +1157,17 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
           const SizedBox(height: 4),
           Container(
             decoration: BoxDecoration(
-              color: Theme.of(context)
-                  .colorScheme
-                  .surfaceContainerHighest
-                  .withValues(alpha: 0.3),
+              color: Theme.of(
+                context,
+              ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
               borderRadius: BorderRadius.circular(6),
             ),
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
             child: SwitchListTile(
-              title: const Text('Reassign on take', style: TextStyle(fontSize: 11)),
+              title: const Text(
+                'Reassign on take',
+                style: TextStyle(fontSize: 11),
+              ),
               subtitle: Text(
                 'Reassign issue to the bot user when claiming',
                 style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
@@ -1137,6 +1179,217 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
                 _autonomous = _autonomous.copyWith(reassignOnTake: v);
               }),
             ),
+          ),
+        ],
+      ],
+    ]);
+  }
+
+  // ── Circuit breaker ────────────────────────────────────────────────────────
+
+  // ── Merge tracking ─────────────────────────────────────────────────────────
+
+  /// The four automation levels for the operator's own PRs.
+  ///
+  /// Each toggle is nested under the master switch and carries a subtitle that
+  /// says what Heimdallm will actually do — "Resolve conflicts" in particular
+  /// means an agent force-pushes to your branch, and that has to be stated on
+  /// the switch rather than buried in the docs.
+  Widget _mergeTrackingSection() {
+    return _settingsCard('Merge Tracking', [
+      SwitchListTile(
+        title: const Text(
+          'Track my pull requests',
+          style: TextStyle(fontSize: 13),
+        ),
+        subtitle: const Text(
+          'Watch the open PRs you authored or are assigned to, and report '
+          'exactly what is blocking each merge',
+          style: TextStyle(fontSize: 11),
+        ),
+        dense: true,
+        contentPadding: EdgeInsets.zero,
+        value: _mergeTracking.enabled,
+        onChanged: (v) => setState(() {
+          _mergeTracking = _mergeTracking.copyWith(enabled: v);
+        }),
+      ),
+      if (_mergeTracking.enabled) ...[
+        const SizedBox(height: 4),
+        SwitchListTile(
+          title: const Text(
+            'Include PRs assigned to me',
+            style: TextStyle(fontSize: 13),
+          ),
+          subtitle: const Text(
+            'Also track PRs someone else opened but assigned to you',
+            style: TextStyle(fontSize: 11),
+          ),
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+          value: _mergeTracking.includeAssigned,
+          onChanged: (v) => setState(() {
+            _mergeTracking = _mergeTracking.copyWith(includeAssigned: v);
+          }),
+        ),
+        const Divider(height: 20),
+        const Padding(
+          padding: EdgeInsets.only(bottom: 4),
+          child: Text(
+            'Automations',
+            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+          ),
+        ),
+        SwitchListTile(
+          title: const Text(
+            'Turn on auto-merge',
+            style: TextStyle(fontSize: 13),
+          ),
+          subtitle: const Text(
+            "Enable GitHub's own auto-merge so it merges the PR as soon as "
+            'every requirement is met',
+            style: TextStyle(fontSize: 11),
+          ),
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+          value: _mergeTracking.enableAutoMerge,
+          onChanged: (v) => setState(() {
+            _mergeTracking = _mergeTracking.copyWith(enableAutoMerge: v);
+          }),
+        ),
+        SwitchListTile(
+          title: const Text(
+            'Update stale branches',
+            style: TextStyle(fontSize: 13),
+          ),
+          subtitle: const Text(
+            'Bring a PR up to date with its base branch when it falls behind',
+            style: TextStyle(fontSize: 11),
+          ),
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+          value: _mergeTracking.updateBranch,
+          onChanged: (v) => setState(() {
+            _mergeTracking = _mergeTracking.copyWith(updateBranch: v);
+          }),
+        ),
+        SwitchListTile(
+          title: const Text(
+            'Resolve conflicts',
+            style: TextStyle(fontSize: 13),
+          ),
+          subtitle: const Text(
+            'Let the configured agent resolve merge conflicts and FORCE-PUSH '
+            'to your branch. The PR gets a comment naming the commit it was '
+            'at beforehand, so a bad resolution can be undone.',
+            style: TextStyle(fontSize: 11),
+          ),
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+          value: _mergeTracking.resolveConflicts,
+          onChanged: (v) => setState(() {
+            _mergeTracking = _mergeTracking.copyWith(resolveConflicts: v);
+          }),
+        ),
+        SwitchListTile(
+          title: const Text('Merge when ready', style: TextStyle(fontSize: 13)),
+          subtitle: const Text(
+            'Merge the PR yourself once every requirement is met. Heimdallm '
+            're-checks immediately before merging and refuses if anything '
+            'changed.',
+            style: TextStyle(fontSize: 11),
+          ),
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+          value: _mergeTracking.merge,
+          onChanged: (v) => setState(() {
+            _mergeTracking = _mergeTracking.copyWith(merge: v);
+          }),
+        ),
+        const Divider(height: 20),
+        SwitchListTile(
+          title: const Text(
+            'Require an approving review',
+            style: TextStyle(fontSize: 13),
+          ),
+          subtitle: const Text(
+            'Never merge without an approval, even where the repository does '
+            'not require one',
+            style: TextStyle(fontSize: 11),
+          ),
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+          value: _mergeTracking.requireApproval,
+          onChanged: (v) => setState(() {
+            _mergeTracking = _mergeTracking.copyWith(requireApproval: v);
+          }),
+        ),
+        const SizedBox(height: 8),
+        DropdownButtonFormField<String>(
+          // ignore: deprecated_member_use
+          value: _mergeTracking.mergeMethod,
+          decoration: const InputDecoration(
+            labelText: 'Merge method',
+            helperText: 'Must be enabled on the repository',
+            border: OutlineInputBorder(),
+            isDense: true,
+          ),
+          items: [
+            'squash',
+            'merge',
+            'rebase',
+          ].map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(),
+          onChanged: (v) => setState(() {
+            _mergeTracking = _mergeTracking.copyWith(mergeMethod: v);
+          }),
+        ),
+        const SizedBox(height: 8),
+        TextFormField(
+          controller: _mtPollIntervalController,
+          decoration: const InputDecoration(
+            labelText: 'Check interval',
+            helperText: 'e.g. 5m. Empty inherits the shared poll interval.',
+            border: OutlineInputBorder(),
+            isDense: true,
+          ),
+          onChanged: (v) => setState(() {
+            _mergeTracking = _mergeTracking.copyWith(pollInterval: v.trim());
+          }),
+        ),
+        if (_mergeTracking.resolveConflicts) ...[
+          const SizedBox(height: 8),
+          TextFormField(
+            controller: _mtResolveTimeoutController,
+            decoration: const InputDecoration(
+              labelText: 'Conflict-resolution timeout',
+              helperText: 'Wall clock for one agent run, e.g. 30m',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+            onChanged: (v) => setState(() {
+              _mergeTracking = _mergeTracking.copyWith(
+                resolveTimeout: v.trim(),
+              );
+            }),
+          ),
+          const SizedBox(height: 8),
+          DropdownButtonFormField<String>(
+            // ignore: deprecated_member_use
+            value: _mergeTracking.resolveEffort,
+            decoration: const InputDecoration(
+              labelText: 'Conflict-resolution effort',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+            items: [
+              'low',
+              'medium',
+              'high',
+              'max',
+            ].map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(),
+            onChanged: (v) => setState(() {
+              _mergeTracking = _mergeTracking.copyWith(resolveEffort: v);
+            }),
           ),
         ],
       ],
@@ -1444,6 +1697,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     globalIssuePrompt: _issuePromptId ?? '',
     globalImplementPrompt: _developPromptId ?? '',
     autonomous: _autonomous,
+    mergeTracking: _mergeTracking,
     circuitBreaker: _circuitBreaker,
     aiPrimary: _aiPrimary,
     aiFallback: _aiFallback,

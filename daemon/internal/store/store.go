@@ -211,6 +211,52 @@ CREATE TABLE IF NOT EXISTS directive_marks (
   verb         TEXT NOT NULL,
   processed_at DATETIME NOT NULL
 );
+
+-- Merge-readiness state for PRs the authenticated user authored or is assigned
+-- to (spec 2026-08-28 merge tracking). Kept out of the prs table on purpose:
+-- UpsertPR
+-- rewrites that row on every poll cycle, and this state has its own lifecycle
+-- (per-head-SHA attempt counters, cooldowns, an armed native auto-merge).
+--
+-- decision_json holds the full explainable decision, including the per-check
+-- breakdown, so the listing and the PR detail view can say exactly which check
+-- is blocking a merge without another call to GitHub.
+CREATE TABLE IF NOT EXISTS merge_tracking (
+  pr_id                   INTEGER PRIMARY KEY REFERENCES prs(id),
+  repo                    TEXT     NOT NULL,
+  number                  INTEGER  NOT NULL,
+  node_id                 TEXT     NOT NULL DEFAULT '',
+  phase                   TEXT     NOT NULL DEFAULT 'idle',
+  head_sha                TEXT     NOT NULL DEFAULT '',
+  base_ref                TEXT     NOT NULL DEFAULT '',
+  head_ref                TEXT     NOT NULL DEFAULT '',
+  is_author               INTEGER  NOT NULL DEFAULT 0,
+  is_assignee             INTEGER  NOT NULL DEFAULT 0,
+  excluded                INTEGER  NOT NULL DEFAULT 0,
+  auto_merge_armed_at     TEXT     NOT NULL DEFAULT '',
+  auto_merge_head_sha     TEXT     NOT NULL DEFAULT '',
+  auto_merge_method       TEXT     NOT NULL DEFAULT '',
+  block_reason            TEXT     NOT NULL DEFAULT '',
+  block_detail            TEXT     NOT NULL DEFAULT '',
+  decision_json           TEXT     NOT NULL DEFAULT '',
+  checks_required_failing INTEGER  NOT NULL DEFAULT 0,
+  checks_required_pending INTEGER  NOT NULL DEFAULT 0,
+  unknown_waits           INTEGER  NOT NULL DEFAULT 0,
+  arm_attempts            INTEGER  NOT NULL DEFAULT 0,
+  update_attempts         INTEGER  NOT NULL DEFAULT 0,
+  conflict_attempts       INTEGER  NOT NULL DEFAULT 0,
+  merge_attempts          INTEGER  NOT NULL DEFAULT 0,
+  pre_rebase_sha          TEXT     NOT NULL DEFAULT '',
+  last_attempt_at         TEXT     NOT NULL DEFAULT '',
+  cooldown_until          TEXT     NOT NULL DEFAULT '',
+  last_error              TEXT     NOT NULL DEFAULT '',
+  evaluated_at            TEXT     NOT NULL DEFAULT '',
+  merged_at               TEXT     NOT NULL DEFAULT '',
+  terminal_reason         TEXT     NOT NULL DEFAULT '',
+  updated_at              DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_merge_tracking_repo ON merge_tracking(repo);
+CREATE INDEX IF NOT EXISTS idx_merge_tracking_due ON merge_tracking(phase, cooldown_until);
 `
 
 // Open opens (or creates) a SQLite database at dsn and applies the schema.
@@ -332,6 +378,57 @@ func Open(dsn string) (*Store, error) {
 	)`)
 	db.Exec("ALTER TABLE review_retry_backoff ADD COLUMN last_error TEXT NOT NULL DEFAULT ''")
 	db.Exec("ALTER TABLE review_retry_backoff ADD COLUMN active INTEGER NOT NULL DEFAULT 0")
+	// Merge tracking (spec 2026-08-28). Idempotent on existing DBs; the schema
+	// constant above already carries this for fresh installs.
+	db.Exec(`CREATE TABLE IF NOT EXISTS merge_tracking (
+		pr_id                   INTEGER PRIMARY KEY REFERENCES prs(id),
+		repo                    TEXT     NOT NULL,
+		number                  INTEGER  NOT NULL,
+		node_id                 TEXT     NOT NULL DEFAULT '',
+		phase                   TEXT     NOT NULL DEFAULT 'idle',
+		head_sha                TEXT     NOT NULL DEFAULT '',
+		base_ref                TEXT     NOT NULL DEFAULT '',
+		head_ref                TEXT     NOT NULL DEFAULT '',
+		is_author               INTEGER  NOT NULL DEFAULT 0,
+		is_assignee             INTEGER  NOT NULL DEFAULT 0,
+		excluded                INTEGER  NOT NULL DEFAULT 0,
+		auto_merge_armed_at     TEXT     NOT NULL DEFAULT '',
+		auto_merge_head_sha     TEXT     NOT NULL DEFAULT '',
+		auto_merge_method       TEXT     NOT NULL DEFAULT '',
+		block_reason            TEXT     NOT NULL DEFAULT '',
+		block_detail            TEXT     NOT NULL DEFAULT '',
+		decision_json           TEXT     NOT NULL DEFAULT '',
+		checks_required_failing INTEGER  NOT NULL DEFAULT 0,
+		checks_required_pending INTEGER  NOT NULL DEFAULT 0,
+		unknown_waits           INTEGER  NOT NULL DEFAULT 0,
+		arm_attempts            INTEGER  NOT NULL DEFAULT 0,
+		update_attempts         INTEGER  NOT NULL DEFAULT 0,
+		conflict_attempts       INTEGER  NOT NULL DEFAULT 0,
+		merge_attempts          INTEGER  NOT NULL DEFAULT 0,
+		pre_rebase_sha          TEXT     NOT NULL DEFAULT '',
+		last_attempt_at         TEXT     NOT NULL DEFAULT '',
+		cooldown_until          TEXT     NOT NULL DEFAULT '',
+		last_error              TEXT     NOT NULL DEFAULT '',
+		evaluated_at            TEXT     NOT NULL DEFAULT '',
+		merged_at               TEXT     NOT NULL DEFAULT '',
+		terminal_reason         TEXT     NOT NULL DEFAULT '',
+		updated_at              DATETIME NOT NULL
+	)`)
+	db.Exec("ALTER TABLE merge_tracking ADD COLUMN arm_attempts INTEGER NOT NULL DEFAULT 0")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_merge_tracking_repo ON merge_tracking(repo)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_merge_tracking_due ON merge_tracking(phase, cooldown_until)")
+	// A process that died mid-action leaves a row parked in an in-flight phase
+	// that no one owns any more. Reset those to idle with a short cooldown so
+	// the reconciler picks them up again instead of the PR being stuck forever.
+	//
+	// auto_merge_armed is deliberately NOT reset: GitHub holds the real state,
+	// and the next tick re-verifies it against the snapshot.
+	db.Exec(`UPDATE merge_tracking
+		SET phase = 'idle',
+		    last_error = CASE WHEN last_error = ''
+		      THEN 'Interrupted when Heimdallm stopped or restarted.' ELSE last_error END,
+		    cooldown_until = strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '+5 minutes')
+		WHERE phase IN ('updating','resolving','merging')`)
 	// No execution survives construction of a new Store/daemon instance under
 	// this process's executor registry. Convert crash-stale active flags into a
 	// visible interrupted terminal state while retaining their cooldown.

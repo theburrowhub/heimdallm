@@ -201,9 +201,27 @@ func matchesSensitivePattern(path string) (string, bool) {
 // worktree to exfiltrate them via the PR, the commit is refused and
 // the index is reset so a retry from scratch is not poisoned.
 func (g *GitExec) CommitAll(ctx context.Context, dir, message string) error {
-	if err := runGit(ctx, dir, nil, "add", "-A", "--", ".", ":(exclude)"+managedCloneMarkerFile); err != nil {
-		return fmt.Errorf("gitops: add: %w", err)
+	if err := g.StageAll(ctx, dir); err != nil {
+		return err
 	}
+	if err := runGit(ctx, dir, nil,
+		"-c", "user.name="+CommitAuthorName,
+		"-c", "user.email="+CommitAuthorEmail,
+		"commit", "-m", message,
+	); err != nil {
+		return fmt.Errorf("gitops: commit: %w", err)
+	}
+	return nil
+}
+
+// enforceSensitivePathDenylist scans the already-staged file list and refuses
+// the whole operation when any path looks like a secret or is a symlink.
+//
+// Extracted from CommitAll so every path that stages files — the auto-implement
+// commit and the merge-conflict resolution alike — goes through the same
+// prompt-injection defense. A second, subtly different copy of this scan is
+// exactly the kind of drift that turns a defense into a false sense of one.
+func enforceSensitivePathDenylist(ctx context.Context, dir string) error {
 	// `-z` + NUL split: defeats core.quotepath=on (the git default)
 	// which would escape non-ASCII paths like `weird\303\251.pem` and
 	// make filepath.Match miss them. `-c core.quotepath=off` is
@@ -252,15 +270,8 @@ func (g *GitExec) CommitAll(ctx context.Context, dir, message string) error {
 					"path", p, "err", rmErr)
 			}
 		}
-		return fmt.Errorf("gitops: refusing commit — staged %d file(s) matched sensitive-path denylist (e.g. %q); prompt-injection defense aborted the auto-implement run",
+		return fmt.Errorf("gitops: refusing commit — staged %d file(s) matched sensitive-path denylist (e.g. %q); prompt-injection defense aborted the run",
 			len(refused), refused[0])
-	}
-	if err := runGit(ctx, dir, nil,
-		"-c", "user.name="+CommitAuthorName,
-		"-c", "user.email="+CommitAuthorEmail,
-		"commit", "-m", message,
-	); err != nil {
-		return fmt.Errorf("gitops: commit: %w", err)
 	}
 	return nil
 }

@@ -20,6 +20,8 @@ import '../circuit_breaker/circuit_breaker_banner.dart';
 import '../cli_agents/cli_agents_screen.dart';
 import '../config/config_providers.dart';
 import '../issues/issues_providers.dart';
+import '../merge_tracking/merge_tracking_providers.dart';
+import '../merge_tracking/merge_tracking_screen.dart';
 import '../repositories/repos_screen.dart';
 import '../organizations/orgs_screen.dart';
 import '../stats/stats_screen.dart';
@@ -40,8 +42,11 @@ class DashboardScreen extends ConsumerWidget {
     final connection = daemonRunning
         ? ref.watch(daemonConnectionProvider)
         : null;
+    // Surfaced on the Merge tab so a PR held up by CI is visible without
+    // opening the tab at all.
+    final checkProblems = ref.watch(mergeTrackingCheckProblemCountProvider);
     return DefaultTabController(
-      length: 7,
+      length: 8,
       child: Scaffold(
         appBar: AppBar(
           title: const Text('Heimdallm'),
@@ -80,6 +85,7 @@ class DashboardScreen extends ConsumerWidget {
               onPressed: () {
                 ref.invalidate(prsProvider);
                 ref.invalidate(issuesProvider);
+                ref.invalidate(mergeTrackingProvider);
                 ref.invalidate(statsProvider);
                 ref.invalidate(githubRateLimitProvider);
                 ref.invalidate(activityEntriesProvider);
@@ -87,15 +93,25 @@ class DashboardScreen extends ConsumerWidget {
               },
             ),
           ],
-          bottom: const TabBar(
+          bottom: TabBar(
             tabs: [
-              Tab(icon: Icon(Icons.dashboard), text: 'Activity'),
-              Tab(icon: Icon(Icons.timeline), text: 'Activity log'),
-              Tab(icon: Icon(Icons.folder_outlined), text: 'Repositories'),
-              Tab(icon: Icon(Icons.business_outlined), text: 'Organizations'),
-              Tab(icon: Icon(Icons.auto_awesome), text: 'Prompts'),
-              Tab(icon: Icon(Icons.smart_toy), text: 'Agents'),
-              Tab(icon: Icon(Icons.bar_chart), text: 'Stats'),
+              const Tab(icon: Icon(Icons.dashboard), text: 'Activity'),
+              const Tab(icon: Icon(Icons.timeline), text: 'Activity log'),
+              Tab(
+                icon: _MergeTabIcon(count: checkProblems),
+                text: 'Merge',
+              ),
+              const Tab(
+                icon: Icon(Icons.folder_outlined),
+                text: 'Repositories',
+              ),
+              const Tab(
+                icon: Icon(Icons.business_outlined),
+                text: 'Organizations',
+              ),
+              const Tab(icon: Icon(Icons.auto_awesome), text: 'Prompts'),
+              const Tab(icon: Icon(Icons.smart_toy), text: 'Agents'),
+              const Tab(icon: Icon(Icons.bar_chart), text: 'Stats'),
             ],
           ),
         ),
@@ -119,6 +135,7 @@ class DashboardScreen extends ConsumerWidget {
                 children: [
                   KeepAliveTab(child: _ActivityTab()),
                   KeepAliveTab(child: ActivityScreen()),
+                  KeepAliveTab(child: MergeTrackingScreen()),
                   KeepAliveTab(child: ReposScreen()),
                   KeepAliveTab(child: OrgsScreen()),
                   KeepAliveTab(child: AgentsScreen()),
@@ -1139,5 +1156,26 @@ class _ActivityGridTile extends StatelessWidget {
     if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
     if (diff.inHours < 24) return '${diff.inHours}h ago';
     return '${diff.inDays}d ago';
+  }
+}
+
+/// The Merge tab's icon, badged with the number of tracked PRs whose merge is
+/// held up by CI.
+///
+/// The badge exists so a failing check on your own PR is visible from any tab —
+/// the whole point of the feature is that you stop having to go looking.
+class _MergeTabIcon extends StatelessWidget {
+  final int count;
+
+  const _MergeTabIcon({required this.count});
+
+  @override
+  Widget build(BuildContext context) {
+    if (count == 0) return const Icon(Icons.merge_type);
+    return Badge.count(
+      count: count,
+      backgroundColor: Theme.of(context).colorScheme.error,
+      child: const Icon(Icons.merge_type),
+    );
   }
 }

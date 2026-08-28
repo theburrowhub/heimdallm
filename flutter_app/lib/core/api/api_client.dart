@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../models/activity.dart';
+import '../models/merge_tracking.dart';
 import '../models/pr.dart';
 import '../models/review.dart';
 import '../models/tracked_issue.dart';
@@ -253,6 +254,80 @@ class ApiClient {
     );
     if (resp.statusCode != 200) {
       throw ApiException('POST /prs/$prId/dismiss failed: ${resp.statusCode}');
+    }
+  }
+
+  /// Lists the PRs the authenticated user authored or is assigned to, with
+  /// their merge-readiness state.
+  ///
+  /// Served from the daemon's store, so opening the view is instant and costs
+  /// no GitHub API budget. The rows carry the check counts the listing needs
+  /// to render its warning; the full per-check breakdown comes from
+  /// [fetchMergeTracking].
+  Future<List<MergeTrackingEntry>> fetchMergeTrackingList() async {
+    final resp = await _client.get(
+      _uri('/merge-tracking'),
+      headers: await _authHeaders(),
+    );
+    if (resp.statusCode != 200) {
+      throw ApiException('GET /merge-tracking failed: ${resp.statusCode}');
+    }
+    final list = jsonDecode(resp.body) as List<dynamic>;
+    return list
+        .map((e) => MergeTrackingEntry.fromJson(e as Map<String, dynamic>))
+        .toList();
+  }
+
+  /// Fetches one tracked PR including the full per-check breakdown.
+  Future<MergeTrackingEntry> fetchMergeTracking(int prId) async {
+    final resp = await _client.get(
+      _uri('/merge-tracking/$prId'),
+      headers: await _authHeaders(),
+    );
+    if (resp.statusCode != 200) {
+      throw ApiException(
+        'GET /merge-tracking/$prId failed: ${resp.statusCode}',
+      );
+    }
+    return MergeTrackingEntry.fromJson(
+      jsonDecode(resp.body) as Map<String, dynamic>,
+    );
+  }
+
+  /// Re-evaluates one tracked PR against GitHub.
+  ///
+  /// [dryRun] records the decision without acting on it — the honest answer to
+  /// "why is this stuck?".
+  Future<MergeTrackingEntry> evaluateMergeTracking(
+    int prId, {
+    bool dryRun = false,
+  }) async {
+    final path = dryRun
+        ? '/merge-tracking/$prId/evaluate?dry_run=true'
+        : '/merge-tracking/$prId/evaluate';
+    final resp = await _client.post(_uri(path), headers: await _authHeaders());
+    if (resp.statusCode != 200) {
+      throw ApiException(
+        'POST /merge-tracking/$prId/evaluate failed: ${resp.statusCode}',
+      );
+    }
+    return MergeTrackingEntry.fromJson(
+      jsonDecode(resp.body) as Map<String, dynamic>,
+    );
+  }
+
+  /// Opts one PR out of (or back into) merge-tracking automation, without
+  /// touching the repo-level config.
+  Future<void> setMergeTrackingExcluded(int prId, bool excluded) async {
+    final action = excluded ? 'exclude' : 'include';
+    final resp = await _client.post(
+      _uri('/merge-tracking/$prId/$action'),
+      headers: await _authHeaders(),
+    );
+    if (resp.statusCode != 200) {
+      throw ApiException(
+        'POST /merge-tracking/$prId/$action failed: ${resp.statusCode}',
+      );
     }
   }
 

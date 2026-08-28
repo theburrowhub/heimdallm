@@ -136,7 +136,13 @@ test-web:
 #   make test-docker
 #   make test-docker GO_TEST_ARGS="-run TestFoo ./internal/config/..."
 
-GO_DOCKER_IMAGE ?= golang:1.25-alpine@sha256:f6751d823c26342f9506c03797d2527668d095b0a15f1862cddb4d927a7a4ced
+# Debian-based rather than alpine: the image needs a `git` binary. The gitops
+# tests drive real repositories, and on alpine they skipped — so the entire git
+# layer (checkout, rebase, conflict detection, force-with-lease) contributed
+# nothing to the coverage profile even though the native macOS job ran it.
+# Untested-in-coverage force-push code is not a trade worth making for a
+# smaller image. Same official golang family, still pinned by digest.
+GO_DOCKER_IMAGE ?= golang:1.25@sha256:699337d620559a59b4a2bb298ad59611e535d2ee755a34cf2d2a98f37578dc80
 GO_TEST_ARGS    ?= -timeout 60s -count=1 ./...
 GO_COVERAGE_PROFILE ?=
 GO_CONTAINER_COVERAGE_PROFILE := /tmp/heimdallm-daemon-coverage.out

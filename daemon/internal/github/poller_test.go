@@ -1043,15 +1043,15 @@ func TestGetPRTimelineEventsForReviewer_FiltersByLogin(t *testing.T) {
 		}
 		json.NewEncoder(w).Encode([]map[string]any{
 			{
-				"event":      "review_requested",
-				"created_at": "2026-04-24T07:00:00Z",
-				"actor":      map[string]string{"login": "alice"},
+				"event":              "review_requested",
+				"created_at":         "2026-04-24T07:00:00Z",
+				"actor":              map[string]string{"login": "alice"},
 				"requested_reviewer": map[string]string{"login": "heimdallm-bot"},
 			},
 			{
-				"event":      "review_requested",
-				"created_at": "2026-04-24T07:01:00Z",
-				"actor":      map[string]string{"login": "alice"},
+				"event":              "review_requested",
+				"created_at":         "2026-04-24T07:01:00Z",
+				"actor":              map[string]string{"login": "alice"},
 				"requested_reviewer": map[string]string{"login": "someone-else"},
 			},
 			{

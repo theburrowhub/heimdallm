@@ -730,17 +730,18 @@ class AutonomousConfig {
     claimLease: claimLease ?? this.claimLease,
   );
 
-  factory AutonomousConfig.fromJson(Map<String, dynamic> json) => AutonomousConfig(
-    enabled: json['enabled'] as bool? ?? false,
-    autoMerge: json['auto_merge'] as bool? ?? false,
-    mergeMethod: json['merge_method'] as String? ?? 'squash',
-    takeOthersTasks: json['take_others_tasks'] as bool? ?? false,
-    reassignOnTake: json['reassign_on_take'] as bool? ?? false,
-    devMaxTurns: (json['dev_max_turns'] as num?)?.toInt() ?? 0,
-    devEffort: json['dev_effort'] as String? ?? 'high',
-    devTimeout: json['dev_timeout'] as String? ?? '45m',
-    claimLease: json['claim_lease'] as String? ?? '2h',
-  );
+  factory AutonomousConfig.fromJson(Map<String, dynamic> json) =>
+      AutonomousConfig(
+        enabled: json['enabled'] as bool? ?? false,
+        autoMerge: json['auto_merge'] as bool? ?? false,
+        mergeMethod: json['merge_method'] as String? ?? 'squash',
+        takeOthersTasks: json['take_others_tasks'] as bool? ?? false,
+        reassignOnTake: json['reassign_on_take'] as bool? ?? false,
+        devMaxTurns: (json['dev_max_turns'] as num?)?.toInt() ?? 0,
+        devEffort: json['dev_effort'] as String? ?? 'high',
+        devTimeout: json['dev_timeout'] as String? ?? '45m',
+        claimLease: json['claim_lease'] as String? ?? '2h',
+      );
 
   Map<String, dynamic> toJson() => {
     'enabled': enabled,
@@ -752,6 +753,125 @@ class AutonomousConfig {
     'dev_effort': devEffort,
     'dev_timeout': devTimeout,
     'claim_lease': claimLease,
+  };
+}
+
+/// [merge_tracking]: the four automation levels for the PRs the operator
+/// authored or is assigned to.
+///
+/// Every boolean defaults to false. Enabling the feature is a deliberate act,
+/// and `merge` in particular means Heimdallm will merge your PRs for you.
+class MergeTrackingConfig {
+  final bool enabled;
+  final bool enableAutoMerge;
+  final bool updateBranch;
+  final bool resolveConflicts;
+  final bool merge;
+  final String mergeMethod; // 'squash' | 'merge' | 'rebase'
+  final bool includeAssigned;
+  final bool requireApproval;
+  final String pollInterval; // empty = inherit the shared poll interval
+  final int maxPrsPerTick;
+  final int maxUpdateAttempts;
+  final int maxResolveAttempts;
+  final int maxMergeAttempts;
+  final String actionCooldown;
+  final String resolveTimeout;
+  final String resolveEffort; // 'low' | 'medium' | 'high' | 'max'
+
+  const MergeTrackingConfig({
+    this.enabled = false,
+    this.enableAutoMerge = false,
+    this.updateBranch = false,
+    this.resolveConflicts = false,
+    this.merge = false,
+    this.mergeMethod = 'squash',
+    this.includeAssigned = false,
+    this.requireApproval = false,
+    this.pollInterval = '',
+    this.maxPrsPerTick = 20,
+    this.maxUpdateAttempts = 3,
+    this.maxResolveAttempts = 2,
+    this.maxMergeAttempts = 3,
+    this.actionCooldown = '10m',
+    this.resolveTimeout = '30m',
+    this.resolveEffort = 'high',
+  });
+
+  MergeTrackingConfig copyWith({
+    bool? enabled,
+    bool? enableAutoMerge,
+    bool? updateBranch,
+    bool? resolveConflicts,
+    bool? merge,
+    String? mergeMethod,
+    bool? includeAssigned,
+    bool? requireApproval,
+    String? pollInterval,
+    int? maxPrsPerTick,
+    int? maxUpdateAttempts,
+    int? maxResolveAttempts,
+    int? maxMergeAttempts,
+    String? actionCooldown,
+    String? resolveTimeout,
+    String? resolveEffort,
+  }) => MergeTrackingConfig(
+    enabled: enabled ?? this.enabled,
+    enableAutoMerge: enableAutoMerge ?? this.enableAutoMerge,
+    updateBranch: updateBranch ?? this.updateBranch,
+    resolveConflicts: resolveConflicts ?? this.resolveConflicts,
+    merge: merge ?? this.merge,
+    mergeMethod: mergeMethod ?? this.mergeMethod,
+    includeAssigned: includeAssigned ?? this.includeAssigned,
+    requireApproval: requireApproval ?? this.requireApproval,
+    pollInterval: pollInterval ?? this.pollInterval,
+    maxPrsPerTick: maxPrsPerTick ?? this.maxPrsPerTick,
+    maxUpdateAttempts: maxUpdateAttempts ?? this.maxUpdateAttempts,
+    maxResolveAttempts: maxResolveAttempts ?? this.maxResolveAttempts,
+    maxMergeAttempts: maxMergeAttempts ?? this.maxMergeAttempts,
+    actionCooldown: actionCooldown ?? this.actionCooldown,
+    resolveTimeout: resolveTimeout ?? this.resolveTimeout,
+    resolveEffort: resolveEffort ?? this.resolveEffort,
+  );
+
+  factory MergeTrackingConfig.fromJson(Map<String, dynamic> json) =>
+      MergeTrackingConfig(
+        enabled: json['enabled'] as bool? ?? false,
+        enableAutoMerge: json['enable_auto_merge'] as bool? ?? false,
+        updateBranch: json['update_branch'] as bool? ?? false,
+        resolveConflicts: json['resolve_conflicts'] as bool? ?? false,
+        merge: json['merge'] as bool? ?? false,
+        mergeMethod: json['merge_method'] as String? ?? 'squash',
+        includeAssigned: json['include_assigned'] as bool? ?? false,
+        requireApproval: json['require_approval'] as bool? ?? false,
+        pollInterval: json['poll_interval'] as String? ?? '',
+        maxPrsPerTick: (json['max_prs_per_tick'] as num?)?.toInt() ?? 20,
+        maxUpdateAttempts: (json['max_update_attempts'] as num?)?.toInt() ?? 3,
+        maxResolveAttempts:
+            (json['max_resolve_attempts'] as num?)?.toInt() ?? 2,
+        maxMergeAttempts: (json['max_merge_attempts'] as num?)?.toInt() ?? 3,
+        actionCooldown: json['action_cooldown'] as String? ?? '10m',
+        resolveTimeout: json['resolve_timeout'] as String? ?? '30m',
+        resolveEffort: json['resolve_effort'] as String? ?? 'high',
+      );
+
+  Map<String, dynamic> toJson() => {
+    'enabled': enabled,
+    'enable_auto_merge': enableAutoMerge,
+    'update_branch': updateBranch,
+    'resolve_conflicts': resolveConflicts,
+    'merge': merge,
+    'merge_method': mergeMethod,
+    'include_assigned': includeAssigned,
+    'require_approval': requireApproval,
+    'poll_interval': pollInterval,
+    'max_prs_per_tick': maxPrsPerTick,
+    'max_update_attempts': maxUpdateAttempts,
+    'max_resolve_attempts': maxResolveAttempts,
+    'max_merge_attempts': maxMergeAttempts,
+    'action_cooldown': actionCooldown,
+    'resolve_timeout': resolveTimeout,
+    'resolve_effort': resolveEffort,
   };
 }
 
@@ -788,13 +908,14 @@ class CircuitBreakerConfig {
     perImplRepoHr: perImplRepoHr ?? this.perImplRepoHr,
   );
 
-  factory CircuitBreakerConfig.fromJson(Map<String, dynamic> json) => CircuitBreakerConfig(
-    perPr24h: (json['per_pr_24h'] as num?)?.toInt() ?? 3,
-    perRepoHr: (json['per_repo_hr'] as num?)?.toInt() ?? 20,
-    perIssue24h: (json['per_issue_24h'] as num?)?.toInt() ?? 3,
-    perIssueRepoHr: (json['per_issue_repo_hr'] as num?)?.toInt() ?? 10,
-    perImplRepoHr: (json['per_impl_repo_hr'] as num?)?.toInt() ?? 5,
-  );
+  factory CircuitBreakerConfig.fromJson(Map<String, dynamic> json) =>
+      CircuitBreakerConfig(
+        perPr24h: (json['per_pr_24h'] as num?)?.toInt() ?? 3,
+        perRepoHr: (json['per_repo_hr'] as num?)?.toInt() ?? 20,
+        perIssue24h: (json['per_issue_24h'] as num?)?.toInt() ?? 3,
+        perIssueRepoHr: (json['per_issue_repo_hr'] as num?)?.toInt() ?? 10,
+        perImplRepoHr: (json['per_impl_repo_hr'] as num?)?.toInt() ?? 5,
+      );
 
   Map<String, dynamic> toJson() => {
     'per_pr_24h': perPr24h,
@@ -995,6 +1116,7 @@ class AppConfig {
   final String globalNeverApproveMinSeverity;
 
   final AutonomousConfig autonomous;
+  final MergeTrackingConfig mergeTracking;
   final CircuitBreakerConfig circuitBreaker;
   final PollingConfig polling;
 
@@ -1035,6 +1157,7 @@ class AppConfig {
     this.globalAutoPromoteRefinement,
     this.globalGeneratePRDescription = false,
     this.autonomous = const AutonomousConfig(),
+    this.mergeTracking = const MergeTrackingConfig(),
     this.circuitBreaker = const CircuitBreakerConfig(),
     this.globalNeverApproveWithIssues = false,
     this.globalNeverApproveMinSeverity = defaultNeverApproveMinSeverity,
@@ -1114,6 +1237,7 @@ class AppConfig {
     Object? globalAutoPromoteRefinement = _sentinel,
     bool? globalGeneratePRDescription,
     AutonomousConfig? autonomous,
+    MergeTrackingConfig? mergeTracking,
     CircuitBreakerConfig? circuitBreaker,
     bool? globalNeverApproveWithIssues,
     String? globalNeverApproveMinSeverity,
@@ -1151,6 +1275,7 @@ class AppConfig {
       globalGeneratePRDescription:
           globalGeneratePRDescription ?? this.globalGeneratePRDescription,
       autonomous: autonomous ?? this.autonomous,
+      mergeTracking: mergeTracking ?? this.mergeTracking,
       circuitBreaker: circuitBreaker ?? this.circuitBreaker,
       globalNeverApproveWithIssues:
           globalNeverApproveWithIssues ?? this.globalNeverApproveWithIssues,
@@ -1348,6 +1473,11 @@ class AppConfig {
               json['autonomous'] as Map<String, dynamic>,
             )
           : const AutonomousConfig(),
+      mergeTracking: json['merge_tracking'] != null
+          ? MergeTrackingConfig.fromJson(
+              json['merge_tracking'] as Map<String, dynamic>,
+            )
+          : const MergeTrackingConfig(),
       circuitBreaker: json['circuit_breaker'] != null
           ? CircuitBreakerConfig.fromJson(
               json['circuit_breaker'] as Map<String, dynamic>,

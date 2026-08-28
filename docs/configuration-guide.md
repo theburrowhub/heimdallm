@@ -21,8 +21,9 @@ Full reference for all settings, environment variables, and deployment options.
 13. [Distribution Formats](#13-distribution-formats)
 14. [Circuit Breakers](#14-circuit-breakers)
 15. [Autonomous Mode](#15-autonomous-mode)
-16. [Polling](#16-polling)
-17. [Full config.toml Reference](#17-full-configtoml-reference)
+16. [Merge Tracking](#16-merge-tracking)
+17. [Polling](#17-polling)
+18. [Full config.toml Reference](#18-full-configtoml-reference)
 
 ---
 
@@ -1206,7 +1207,169 @@ With this setup, Heimdallm will autonomously triage issues and implement them in
 
 ---
 
-## 16. Polling
+## 16. Merge Tracking
+
+Merge tracking watches the open pull requests **you** authored or are assigned to, works out exactly what is stopping each one from merging, and — at whatever level of automation you configure — moves them along.
+
+It is deliberately separate from [§15 Autonomous Mode](#15-autonomous-mode). Autonomous mode governs PRs the agent opened from issues; merge tracking governs your own. Sharing one section would mean enabling one dragged in the other's risks.
+
+> **Every automation is off by default.** A config that does not mention `[merge_tracking]` never touches a repository. Turning `enabled` on gives you the reporting — the four automations are separate switches on top of that.
+
+### What it reports
+
+For every tracked PR, Heimdallm records an explainable decision and shows it in the Merge tab, on the PR detail view, in `heimdallm-cli merges`, and in the TUI:
+
+- whether the PR is ready to merge, and if not, **why** — named specifically, not as a code;
+- the full list of CI checks with state, whether each one gates the merge, the app that ran it and a link to its log;
+- required checks that branch protection demands but which **never reported** — invisible in GitHub's own UI, and a common cause of a PR that seems stuck for no reason.
+
+A PR blocked by CI is called out prominently: a coloured band on its row naming the failing check, a count badge on the tab, and the affected rows sorted to the top.
+
+### The four automations
+
+| Setting | What Heimdallm does |
+|---|---|
+| `enable_auto_merge` | Turns on **GitHub's own** auto-merge, so GitHub merges the PR the moment every requirement is satisfied. Pinned to the commit that was evaluated. |
+| `update_branch` | Brings a PR up to date when it falls behind its base. Uses `PUT /pulls/{n}/update-branch`; if the base requires linear history GitHub refuses, and Heimdallm falls back to a local rebase and a lease-protected force-push. |
+| `resolve_conflicts` | Has the configured agent resolve merge conflicts in an ephemeral worktree, then force-pushes. **See the warning below.** |
+| `merge` | Merges the PR itself once every requirement is met. |
+
+### Configuration reference
+
+```toml
+[merge_tracking]
+enabled            = false   # master switch — false = merge tracking entirely off
+enable_auto_merge  = false   # arm GitHub's native auto-merge
+update_branch      = false   # bring out-of-date branches up to date
+resolve_conflicts  = false   # let the agent resolve conflicts (force-pushes!)
+merge              = false   # merge when every requirement is met
+merge_method       = "squash"  # squash | merge | rebase
+include_assigned   = false   # also track PRs assigned to you but authored by someone else
+require_approval   = false   # demand an approval even where the repo does not
+poll_interval      = ""      # empty inherits [polling]/[github].poll_interval
+max_prs_per_tick   = 20      # bounds the API spend of one cycle
+max_update_attempts  = 3     # per PR, per head commit
+max_resolve_attempts = 2     # per PR, per head commit
+max_merge_attempts   = 3     # per PR, per head commit
+action_cooldown    = "10m"   # between write actions on one PR
+resolve_timeout    = "30m"   # wall clock for one conflict-resolution agent run
+resolve_effort     = "high"  # low | medium | high | max
+```
+
+| Field | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Master switch and kill-switch. When `false` a poll cycle makes **zero** GitHub calls. |
+| `enable_auto_merge` | `false` | Arm GitHub's native auto-merge on PRs that do not have it. |
+| `update_branch` | `false` | Update a branch that has fallen behind its base. |
+| `resolve_conflicts` | `false` | Run the configured agent on merge conflicts. **This force-pushes to your branch.** |
+| `merge` | `false` | Merge directly once every requirement is met. |
+| `merge_method` | `"squash"` | `squash`, `merge` or `rebase`. Must also be enabled on the repository; if it is not, the PR is reported as blocked rather than failing on every attempt. Validated at boot — an invalid value stops the daemon rather than producing a 422 from GitHub once per cycle forever. |
+| `include_assigned` | `false` | Track PRs you did not author but are assigned to. Being an assignee usually comes from triage rather than authorship, so this is off by default. |
+| `require_approval` | `false` | Refuse to merge without an approving review at the current commit, even where the repository requires none. Useful on personal repos with no branch protection. |
+| `poll_interval` | inherit | Cadence of the reconciler. Empty inherits `[polling].poll_interval`, then `[github].poll_interval`. Re-read every cycle, so a change takes effect without a restart. |
+| `max_prs_per_tick` | `20` | How many PRs one cycle evaluates. Each costs one GraphQL query, so this is the knob that bounds API spend. |
+| `max_update_attempts` | `3` | Branch-update attempts per head commit. Reset by a push. |
+| `max_resolve_attempts` | `2` | Conflict-resolution attempts per head commit. Reset by a push. |
+| `max_merge_attempts` | `3` | Merge attempts per head commit. Reset by a push. |
+| `action_cooldown` | `"10m"` | Minimum gap between write actions on one PR. |
+| `resolve_timeout` | `"30m"` | Wall clock for one conflict-resolution agent run. |
+| `resolve_effort` | `"high"` | Agent effort for conflict resolution: `low`, `medium`, `high`, `max`. |
+
+### Per-org and per-repo overrides
+
+Every field except `poll_interval` and `max_prs_per_tick` — which bound the single reconciler loop, not a repo — supports the usual `repo > org > global` precedence.
+
+```toml
+[merge_tracking]
+enabled = true          # report everywhere
+merge   = false         # but merge nowhere
+
+# Update branches across the org, still no merging
+[merge_tracking.orgs."my-org"]
+update_branch = true
+
+# One repo we trust enough to merge on its own
+[merge_tracking.repos."my-org/my-repo"]
+merge        = true
+merge_method = "rebase"
+```
+
+These can also be set over HTTP: `PATCH /config/merge_tracking/repos/{repo}` and `PATCH /config/merge_tracking/orgs/{org}`.
+
+### ⚠️ About `resolve_conflicts`
+
+This is the highest-blast-radius setting in Heimdallm: an AI agent rewrites your branch and force-pushes it.
+
+What bounds it:
+
+- the agent works in an **ephemeral, Heimdallm-managed worktree** — never your own checkout;
+- the push uses `--force-with-lease` pinned to the exact commit the branch was at when Heimdallm started, so a push that landed meanwhile makes git refuse rather than overwrite it;
+- the attempt is **discarded without pushing** if the agent leaves unmerged paths, leaves conflict markers in the file contents, or touches any file that was not in conflict;
+- the PR gets a comment naming the commit the branch was at beforehand, so a bad resolution is one `git reset --hard` away from undone;
+- a PR whose head lives in someone else's fork is never written to at all.
+
+What it cannot do is judge whether the resolution is *correct*. Review the result. Pair it with `merge = false` until you trust it on a given repo.
+
+### Worked example: reporting only
+
+The safest useful setup. Heimdallm tells you why each of your PRs is stuck and never touches anything.
+
+```toml
+[merge_tracking]
+enabled          = true
+include_assigned = true
+```
+
+### Worked example: hands-off on one repo
+
+```toml
+[merge_tracking]
+enabled           = true
+enable_auto_merge = true   # let GitHub merge when it can, everywhere
+
+[merge_tracking.repos."my-org/my-repo"]
+update_branch     = true
+resolve_conflicts = true
+merge             = true
+require_approval  = true   # never merge this one without a human approval
+```
+
+### What blocks a merge
+
+The Merge tab and `heimdallm-cli merges` report one of these reasons. They are stable identifiers, and the UI renders each as a sentence.
+
+| Reason | Meaning | What to do |
+|---|---|---|
+| `checks_failing` | A required check is failing | Fix the check. The detail names it. |
+| `checks_pending` | Required checks are still running | Nothing — it merges on its own when they pass. |
+| `required_check_missing` | Branch protection requires a check that never reported | Usually a workflow that did not trigger. |
+| `checks_unknown` | More checks than Heimdallm reads in one pass | Nothing automatic will happen; merge by hand. |
+| `changes_requested` | A reviewer requested changes | Address them. Heimdallm blocks on a standing change request even where GitHub would not. |
+| `review_required` / `insufficient_approvals` | Not enough approvals at the current commit | Get a review. A push invalidates earlier approvals. |
+| `pending_reviewers` | A requested reviewer has not responded | Wait, or unrequest them. |
+| `unresolved_threads` | An open review conversation | Resolve it. Heimdallm blocks on these even without `requiresConversationResolution`. |
+| `conflicts` | Conflicts with the base branch | Enable `resolve_conflicts`, or fix it yourself. |
+| `behind_base` | Behind the base branch | Enable `update_branch`, or update it yourself. |
+| `draft` | The PR is a draft | Heimdallm never acts on drafts. Mark it ready. |
+| `blocked_by_protection` | GitHub says blocked and nothing above explains it | Usually CODEOWNERS or a rule the token cannot read. |
+| `in_merge_queue` / `merge_queue_configured` | The base branch uses a merge queue | Nothing — GitHub owns the merge. Heimdallm never merges directly past a queue. |
+| `cross_fork` | The head branch is in another fork | Reported only; Heimdallm cannot push there. |
+| `insufficient_permission` | No write access | Nothing Heimdallm can do. |
+| `merge_method_not_allowed` | `merge_method` is disabled on the repo | Change `merge_method`, or enable it on GitHub. |
+| `auto_merge_unavailable` | The repo has auto-merge switched off, or GitHub refuses to queue it on a PR it would merge right now | Enable auto-merge on the repo, or set `merge = true` so Heimdallm merges it directly. |
+| `mergeability_unknown` | GitHub has not finished computing | Transient; re-checked shortly. Never treated as mergeable. |
+| `head_sha_moved` | A commit landed mid-action | Transient; re-evaluated next cycle. |
+| `attempt_cap_reached` | The per-commit attempt cap was hit | A new push resets it. |
+
+### Token permissions
+
+Merge tracking reads `baseRef.branchProtectionRule`, which needs **admin** on the repository. Without it GitHub answers with the data plus a `FORBIDDEN` error on that one field; Heimdallm tolerates that, marks the protection as unreadable, and falls back to GitHub's own `mergeStateStatus` and `reviewDecision`, which are computed with the rules applied. Nothing breaks — it just cannot show the underlying rule.
+
+Everything else needs the same `repo` scope the rest of Heimdallm uses.
+
+---
+
+## 17. Polling
 
 The `[polling]` table tunes how the daemon schedules its fetch cycles. All fields are optional — omitting the section entirely reproduces the prior behaviour with no change in how the daemon polls.
 
@@ -1257,7 +1420,7 @@ This setup lets idle repos drift to a 20-minute cycle, saving roughly 80 % of po
 
 ---
 
-## 17. Full config.toml Reference
+## 18. Full config.toml Reference
 
 ```toml
 # Heimdallm configuration
@@ -1501,6 +1664,40 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # [autonomous.repos."my-org/my-repo"]
 # enabled    = true
 # auto_merge = true
+
+# ── Merge tracking ────────────────────────────────────────────────────────────
+# Watches the PRs you authored or are assigned to, reports exactly what is
+# blocking each merge, and — at whatever level you configure — moves them along.
+# Every automation defaults to false; omitting this section is a full no-op.
+# See §16 Merge Tracking in the guide for the block-reason reference and the
+# per-org/per-repo override syntax.
+
+# [merge_tracking]
+# enabled              = false    # master switch; false = zero GitHub calls
+# enable_auto_merge    = false    # arm GitHub's own auto-merge
+# update_branch        = false    # update branches that fall behind their base
+# resolve_conflicts    = false    # agent resolves conflicts — FORCE-PUSHES to your branch
+# merge                = false    # merge once every requirement is met
+# merge_method         = "squash" # squash | merge | rebase
+# include_assigned     = false    # also track PRs assigned to you but authored by others
+# require_approval     = false    # demand an approval even where the repo does not
+# poll_interval        = ""       # empty inherits [polling]/[github].poll_interval
+# max_prs_per_tick     = 20       # one GraphQL query per PR — this bounds API spend
+# max_update_attempts  = 3        # per PR, per head commit; reset by a push
+# max_resolve_attempts = 2
+# max_merge_attempts   = 3
+# action_cooldown      = "10m"    # between write actions on one PR
+# resolve_timeout      = "30m"    # wall clock for one conflict-resolution run
+# resolve_effort       = "high"   # low | medium | high | max
+
+# Per-org override example:
+# [merge_tracking.orgs."my-org"]
+# update_branch = true
+
+# Per-repo override example:
+# [merge_tracking.repos."my-org/my-repo"]
+# merge            = true
+# require_approval = true
 
 # ── Retention ─────────────────────────────────────────────────────────────────
 

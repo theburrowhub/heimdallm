@@ -989,6 +989,75 @@ void main() {
     expect(cfg.claimLease, '2h');
   });
 
+  // ── MergeTrackingConfig ────────────────────────────────────────────────────
+
+  test('MergeTrackingConfig.fromJson round-trip preserves all fields', () {
+    final json = {
+      'enabled': true,
+      'enable_auto_merge': true,
+      'update_branch': true,
+      'resolve_conflicts': true,
+      'merge': true,
+      'merge_method': 'rebase',
+      'include_assigned': true,
+      'require_approval': true,
+      'poll_interval': '3m',
+      'max_prs_per_tick': 5,
+      'max_update_attempts': 1,
+      'max_resolve_attempts': 1,
+      'max_merge_attempts': 1,
+      'action_cooldown': '7m',
+      'resolve_timeout': '12m',
+      'resolve_effort': 'medium',
+    };
+
+    final cfg = MergeTrackingConfig.fromJson(json);
+    expect(cfg.enabled, isTrue);
+    expect(cfg.enableAutoMerge, isTrue);
+    expect(cfg.updateBranch, isTrue);
+    expect(cfg.resolveConflicts, isTrue);
+    expect(cfg.merge, isTrue);
+    expect(cfg.mergeMethod, 'rebase');
+    expect(cfg.includeAssigned, isTrue);
+    expect(cfg.requireApproval, isTrue);
+    expect(cfg.pollInterval, '3m');
+    expect(cfg.maxPrsPerTick, 5);
+    expect(cfg.actionCooldown, '7m');
+    expect(cfg.resolveTimeout, '12m');
+    expect(cfg.resolveEffort, 'medium');
+
+    final roundTrip = MergeTrackingConfig.fromJson(cfg.toJson());
+    expect(roundTrip.toJson(), cfg.toJson());
+  });
+
+  // Every automation must be off unless the operator turned it on: the
+  // daemon-side default is false, and the UI must not disagree.
+  test('MergeTrackingConfig defaults keep every automation off', () {
+    final cfg = MergeTrackingConfig.fromJson({});
+    expect(cfg.enabled, isFalse);
+    expect(cfg.enableAutoMerge, isFalse);
+    expect(cfg.updateBranch, isFalse);
+    expect(cfg.resolveConflicts, isFalse);
+    expect(cfg.merge, isFalse);
+    expect(cfg.mergeMethod, 'squash');
+    expect(cfg.maxPrsPerTick, 20);
+    expect(cfg.resolveEffort, 'high');
+  });
+
+  test('AppConfig.fromJson reads the merge_tracking section', () {
+    final cfg = AppConfig.fromJson({
+      'merge_tracking': {'enabled': true, 'merge': true},
+    });
+    expect(cfg.mergeTracking.enabled, isTrue);
+    expect(cfg.mergeTracking.merge, isTrue);
+    expect(cfg.mergeTracking.updateBranch, isFalse);
+  });
+
+  test('AppConfig.fromJson defaults merge_tracking when absent', () {
+    final cfg = AppConfig.fromJson({});
+    expect(cfg.mergeTracking.enabled, isFalse);
+  });
+
   // ── CircuitBreakerConfig ───────────────────────────────────────────────────
 
   test('CircuitBreakerConfig.fromJson round-trip preserves all fields', () {
