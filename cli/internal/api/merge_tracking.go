@@ -16,8 +16,11 @@ type MergeCheck struct {
 	Description string    `json:"description,omitempty"`
 	App         string    `json:"app,omitempty"`
 	URL         string    `json:"url,omitempty"`
-	StartedAt   time.Time `json:"started_at,omitempty"`
-	CompletedAt time.Time `json:"completed_at,omitempty"`
+	// Pointers: `omitempty` is a no-op for a struct, so value timestamps would
+	// decode a queued check's absent ends as the zero time and read back as a
+	// run that took no time at all.
+	StartedAt   *time.Time `json:"started_at,omitempty"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
 }
 
 // MergeChecksSummary carries the counts the listing renders from.

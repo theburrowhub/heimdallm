@@ -408,3 +408,343 @@ func TestStageAll_RefusesSensitivePaths(t *testing.T) {
 		t.Errorf("err = %v, want the denylist refusal", err)
 	}
 }
+
+func TestFetchRefAndCheckoutRemoteBranch(t *testing.T) {
+	requireGit(t)
+	remote, local, slug := leaseRepos(t)
+	// Add a second branch on the remote for the checkout to land on.
+	other := t.TempDir()
+	git(t, other, "clone", "-q", remote, ".")
+	git(t, other, "checkout", "-q", "-b", "feature")
+	write(t, other, "feature.txt", "theirs\n")
+	git(t, other, "add", ".")
+	git(t, other, "commit", "-q", "-m", "feature")
+	git(t, other, "push", "-q", "origin", "feature")
+	want := git(t, other, "rev-parse", "HEAD")
+
+	g := issues.NewGitExec()
+	ctx := context.Background()
+
+	sha, err := g.FetchRef(ctx, local, slug, "feature", "token")
+	if err != nil {
+		t.Fatalf("FetchRef: %v", err)
+	}
+	if sha != want {
+		t.Errorf("FetchRef = %q, want %q", sha, want)
+	}
+
+	got, err := g.CheckoutRemoteBranch(ctx, local, slug, "feature", "token")
+	if err != nil {
+		t.Fatalf("CheckoutRemoteBranch: %v", err)
+	}
+	if got != want {
+		t.Errorf("CheckoutRemoteBranch = %q, want %q", got, want)
+	}
+	if branch := git(t, local, "rev-parse", "--abbrev-ref", "HEAD"); branch != "feature" {
+		t.Errorf("checked out %q, want feature", branch)
+	}
+	// -B, not -b: a retry must land on the freshly fetched tip rather than
+	// inheriting stale local state.
+	if head := git(t, local, "rev-parse", "HEAD"); head != want {
+		t.Errorf("HEAD = %q, want the fetched tip %q", head, want)
+	}
+}
+
+func TestFetchRefAndCheckoutRemoteBranch_RequireAToken(t *testing.T) {
+	requireGit(t)
+	g := issues.NewGitExec()
+	ctx := context.Background()
+	if _, err := g.FetchRef(ctx, t.TempDir(), "acme/widgets", "main", ""); err == nil {
+		t.Error("an empty token must be rejected")
+	}
+	if _, err := g.CheckoutRemoteBranch(ctx, t.TempDir(), "acme/widgets", "main", ""); err == nil {
+		t.Error("an empty token must be rejected")
+	}
+}
+
+func TestFetchRef_UnknownRefIsReported(t *testing.T) {
+	requireGit(t)
+	_, local, slug := leaseRepos(t)
+	g := issues.NewGitExec()
+	if _, err := g.FetchRef(context.Background(), local, slug, "no-such-branch", "token"); err == nil {
+		t.Fatal("fetching an unknown ref must be reported")
+	}
+}
+
+func TestMergeRef_CleanAndConflicting(t *testing.T) {
+	requireGit(t)
+	g := issues.NewGitExec()
+	ctx := context.Background()
+
+	t.Run("clean", func(t *testing.T) {
+		dir := t.TempDir()
+		git(t, dir, "init", "-q", "-b", "main")
+		write(t, dir, "a.txt", "base\n")
+		git(t, dir, "add", ".")
+		git(t, dir, "commit", "-q", "-m", "base")
+		git(t, dir, "checkout", "-q", "-b", "feature")
+		write(t, dir, "feature.txt", "new\n")
+		git(t, dir, "add", ".")
+		git(t, dir, "commit", "-q", "-m", "feature")
+		git(t, dir, "checkout", "-q", "main")
+		write(t, dir, "main.txt", "new\n")
+		git(t, dir, "add", ".")
+		git(t, dir, "commit", "-q", "-m", "main")
+		mainSHA := git(t, dir, "rev-parse", "HEAD")
+		git(t, dir, "checkout", "-q", "feature")
+
+		out, err := g.MergeRef(ctx, dir, mainSHA, "merge main")
+		if err != nil {
+			t.Fatalf("MergeRef: %v", err)
+		}
+		if !out.Clean {
+			t.Fatalf("expected a clean merge, got %+v", out)
+		}
+	})
+
+	t.Run("conflicting", func(t *testing.T) {
+		dir, mainSHA := diverged(t)
+		out, err := g.MergeRef(ctx, dir, mainSHA, "merge main")
+		if err != nil {
+			t.Fatalf("a conflicting merge must not return an error: %v", err)
+		}
+		if out.Clean || len(out.Conflicts) != 1 || out.Conflicts[0] != "shared.txt" {
+			t.Fatalf("outcome = %+v, want a conflict on shared.txt", out)
+		}
+
+		// Resolve and finish, the path the resolver takes for a merge strategy.
+		write(t, dir, "shared.txt", "both\n")
+		if err := g.StageAll(ctx, dir); err != nil {
+			t.Fatalf("StageAll: %v", err)
+		}
+		if err := g.CommitMerge(ctx, dir, "resolve"); err != nil {
+			t.Fatalf("CommitMerge: %v", err)
+		}
+		if unmerged, err := g.HasUnmergedPaths(ctx, dir); err != nil || unmerged {
+			t.Errorf("unmerged=%v err=%v after committing the merge", unmerged, err)
+		}
+		if committer := git(t, dir, "log", "-1", "--format=%cn"); committer != issues.CommitAuthorName {
+			t.Errorf("committer = %q, want %q", committer, issues.CommitAuthorName)
+		}
+	})
+}
+
+func TestAbortMerge_RestoresTheBranch(t *testing.T) {
+	requireGit(t)
+	dir, mainSHA := diverged(t)
+	g := issues.NewGitExec()
+	ctx := context.Background()
+
+	before := git(t, dir, "rev-parse", "HEAD")
+	if _, err := g.MergeRef(ctx, dir, mainSHA, "merge main"); err != nil {
+		t.Fatalf("MergeRef: %v", err)
+	}
+	if err := g.AbortMerge(ctx, dir); err != nil {
+		t.Fatalf("AbortMerge: %v", err)
+	}
+	if after := git(t, dir, "rev-parse", "HEAD"); after != before {
+		t.Errorf("HEAD = %s after abort, want %s", after, before)
+	}
+}
+
+// A deleted file is a legitimate resolution of a delete/modify conflict, so a
+// missing path must not fail the scan.
+func TestFilesWithConflictMarkers_ToleratesMissingFiles(t *testing.T) {
+	requireGit(t)
+	dir := t.TempDir()
+	git(t, dir, "init", "-q", "-b", "main")
+	write(t, dir, "a.txt", "one\n")
+	git(t, dir, "add", ".")
+	git(t, dir, "commit", "-q", "-m", "base")
+
+	g := issues.NewGitExec()
+	got, err := g.FilesWithConflictMarkers(context.Background(), dir, []string{"gone.txt", "a.txt"})
+	if err != nil {
+		t.Fatalf("FilesWithConflictMarkers: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("with markers = %v, want none", got)
+	}
+}
+
+func TestConflictedFiles_EmptyOnACleanTree(t *testing.T) {
+	requireGit(t)
+	dir := t.TempDir()
+	git(t, dir, "init", "-q", "-b", "main")
+	write(t, dir, "a.txt", "one\n")
+	git(t, dir, "add", ".")
+	git(t, dir, "commit", "-q", "-m", "base")
+
+	g := issues.NewGitExec()
+	files, err := g.ConflictedFiles(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("ConflictedFiles: %v", err)
+	}
+	if len(files) != 0 {
+		t.Errorf("conflicted files = %v, want none", files)
+	}
+}
+
+// A non-conflict rebase failure must leave no half-finished rebase for the next
+// caller to trip over.
+func TestRebaseOnto_UnknownBaseFailsAndLeavesNoRebaseInProgress(t *testing.T) {
+	requireGit(t)
+	dir := t.TempDir()
+	git(t, dir, "init", "-q", "-b", "main")
+	write(t, dir, "a.txt", "one\n")
+	git(t, dir, "add", ".")
+	git(t, dir, "commit", "-q", "-m", "base")
+
+	g := issues.NewGitExec()
+	out, err := g.RebaseOnto(context.Background(), dir, "0000000000000000000000000000000000000000")
+	if err == nil {
+		t.Fatal("rebasing onto a nonexistent commit must fail")
+	}
+	if out.Clean {
+		t.Error("a failed rebase is not clean")
+	}
+	if unmerged, uErr := g.HasUnmergedPaths(context.Background(), dir); uErr != nil || unmerged {
+		t.Errorf("tree left dirty: unmerged=%v err=%v", unmerged, uErr)
+	}
+}
+
+// The scope guard on the conflict-resolution agent used to diff the mid-rebase
+// working tree against the BASE commit. Mid-rebase, HEAD already carries the
+// PR's earlier replayed commits, so that diff lists every file the PR touches
+// and the guard fired on every genuine resolution: the agent's one legitimate
+// job — edit the conflicted file — was reported as "changed files outside the
+// conflicted set" before it had touched anything.
+//
+// WorktreeDigest answers the question that actually matters, so a snapshot
+// either side of the agent run isolates what the agent did.
+func TestWorktreeDigest_ExcludesCommitsAlreadyReplayedByTheRebase(t *testing.T) {
+	requireGit(t)
+	dir := t.TempDir()
+	git(t, dir, "init", "-q", "-b", "main")
+	write(t, dir, "shared.txt", "base\n")
+	write(t, dir, "carried.txt", "base\n")
+	git(t, dir, "add", ".")
+	git(t, dir, "commit", "-q", "-m", "base")
+
+	// A two-commit PR: the first commit is replayed cleanly, the second
+	// conflicts. This is the ordinary shape of a PR, not a corner case.
+	git(t, dir, "checkout", "-q", "-b", "feature")
+	write(t, dir, "carried.txt", "feature\n")
+	git(t, dir, "commit", "-qam", "carry")
+	write(t, dir, "shared.txt", "feature\n")
+	git(t, dir, "commit", "-qam", "conflict")
+
+	git(t, dir, "checkout", "-q", "main")
+	write(t, dir, "shared.txt", "main\n")
+	git(t, dir, "commit", "-qam", "main moves")
+	mainSHA := git(t, dir, "rev-parse", "HEAD")
+	git(t, dir, "checkout", "-q", "feature")
+
+	ctx := context.Background()
+	g := issues.NewGitExec()
+	out, err := g.RebaseOnto(ctx, dir, mainSHA)
+	if err != nil {
+		t.Fatalf("RebaseOnto: %v", err)
+	}
+	if out.Clean {
+		t.Fatal("expected the second commit to conflict")
+	}
+
+	// The old guard's view: carried.txt is in here purely because the rebase
+	// replayed it, and the agent has not run yet.
+	changed, err := g.ChangedFiles(ctx, dir, mainSHA)
+	if err != nil {
+		t.Fatalf("ChangedFiles: %v", err)
+	}
+	if !contains(changed, "carried.txt") {
+		t.Fatalf("precondition: a base diff should list the replayed file, got %v", changed)
+	}
+
+	before, err := g.WorktreeDigest(ctx, dir)
+	if err != nil {
+		t.Fatalf("WorktreeDigest before: %v", err)
+	}
+	if _, ok := before["carried.txt"]; ok {
+		t.Errorf("a commit the rebase already replayed is not a pending change: %v", before)
+	}
+	if _, ok := before["shared.txt"]; !ok {
+		t.Errorf("the conflicted file must be in the snapshot: %v", before)
+	}
+
+	// The agent resolves the conflict and touches nothing else.
+	write(t, dir, "shared.txt", "resolved\n")
+	after, err := g.WorktreeDigest(ctx, dir)
+	if err != nil {
+		t.Fatalf("WorktreeDigest after: %v", err)
+	}
+	if after["shared.txt"] == before["shared.txt"] {
+		t.Error("the resolved file must hash differently")
+	}
+	for path, sum := range after {
+		if path != "shared.txt" && before[path] != sum {
+			t.Errorf("%s changed but the agent never touched it", path)
+		}
+	}
+}
+
+// A file the agent edits behind the guard's back has to show up even when the
+// set of changed paths is unchanged — hence content hashes rather than names.
+func TestWorktreeDigest_NoticesAnEditThatChangesNoPathNames(t *testing.T) {
+	requireGit(t)
+	dir := t.TempDir()
+	git(t, dir, "init", "-q", "-b", "main")
+	write(t, dir, "a.txt", "base\n")
+	git(t, dir, "add", ".")
+	git(t, dir, "commit", "-q", "-m", "base")
+	write(t, dir, "a.txt", "edited\n")
+
+	ctx := context.Background()
+	g := issues.NewGitExec()
+	before, err := g.WorktreeDigest(ctx, dir)
+	if err != nil {
+		t.Fatalf("WorktreeDigest: %v", err)
+	}
+	write(t, dir, "a.txt", "edited again\n")
+	after, err := g.WorktreeDigest(ctx, dir)
+	if err != nil {
+		t.Fatalf("WorktreeDigest: %v", err)
+	}
+	if before["a.txt"] == after["a.txt"] {
+		t.Error("a content edit must change the digest even though the path set did not")
+	}
+}
+
+// A deletion is a change, and a path that is simply gone from the map would
+// read as "nothing happened here".
+func TestWorktreeDigest_RecordsDeletionsAsAValue(t *testing.T) {
+	requireGit(t)
+	dir := t.TempDir()
+	git(t, dir, "init", "-q", "-b", "main")
+	write(t, dir, "a.txt", "base\n")
+	git(t, dir, "add", ".")
+	git(t, dir, "commit", "-q", "-m", "base")
+	if err := os.Remove(filepath.Join(dir, "a.txt")); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+
+	digest, err := issues.NewGitExec().WorktreeDigest(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("WorktreeDigest: %v", err)
+	}
+	sum, ok := digest["a.txt"]
+	if !ok {
+		t.Fatalf("a deleted path must be present in the digest, got %v", digest)
+	}
+	if sum != "" {
+		t.Errorf("a deleted path hashes to the empty string, got %q", sum)
+	}
+}
+
+func contains(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}

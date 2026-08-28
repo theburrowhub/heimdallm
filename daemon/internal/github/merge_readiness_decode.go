@@ -109,8 +109,8 @@ func decodeCheckContexts(rollup *gqlRollup) []CheckContext {
 			cc.Kind = "check_run"
 			cc.Name = n.Name
 			cc.URL = n.DetailsURL
-			cc.StartedAt = parseGraphQLTime(n.StartedAt)
-			cc.CompletedAt = parseGraphQLTime(n.CompletedAt)
+			cc.StartedAt = optionalGraphQLTime(n.StartedAt)
+			cc.CompletedAt = optionalGraphQLTime(n.CompletedAt)
 			if n.CheckSuite != nil && n.CheckSuite.App != nil {
 				cc.App = n.CheckSuite.App.Name
 			}
@@ -120,7 +120,7 @@ func decodeCheckContexts(rollup *gqlRollup) []CheckContext {
 			cc.Name = n.Context
 			cc.URL = n.TargetURL
 			cc.Description = n.Description
-			cc.StartedAt = parseGraphQLTime(n.CreatedAt)
+			cc.StartedAt = optionalGraphQLTime(n.CreatedAt)
 			cc.State, cc.Raw = normalizeCheckState("status", "", "", n.State)
 		default:
 			// An unknown context type is not something to guess about: a check
@@ -294,4 +294,15 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// optionalGraphQLTime parses a timestamp GitHub may legitimately omit — a
+// queued check has no startedAt — and returns nil rather than the zero time so
+// "not yet" and "the epoch" stay distinguishable all the way to the UI.
+func optionalGraphQLTime(s string) *time.Time {
+	t := parseGraphQLTime(s)
+	if t.IsZero() {
+		return nil
+	}
+	return &t
 }

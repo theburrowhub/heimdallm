@@ -2,8 +2,11 @@ package issues
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -184,6 +187,41 @@ func (g *GitExec) ChangedFiles(ctx context.Context, dir, sinceSHA string) ([]str
 		out = append(out, name)
 	}
 	return out, nil
+}
+
+// WorktreeDigest fingerprints every path in the worktree that differs from
+// HEAD — modified, unmerged, deleted and untracked alike — as a map from path
+// to a content hash. A path that is not on disk maps to the empty string, so a
+// deletion is a value rather than an absence.
+//
+// It exists because the scope guard on the conflict-resolution agent cannot
+// diff against the base commit: mid-rebase, HEAD already carries the PR's
+// earlier replayed commits, so a diff against the base lists every file the PR
+// touches and the guard would fire on every genuine resolution. Two digests
+// taken either side of the agent run answer the question that actually
+// matters — what did the agent change?
+func (g *GitExec) WorktreeDigest(ctx context.Context, dir string) (map[string]string, error) {
+	paths, err := g.ChangedFiles(ctx, dir, "HEAD")
+	if err != nil {
+		return nil, err
+	}
+	digest := make(map[string]string, len(paths))
+	for _, rel := range paths {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		data, err := os.ReadFile(filepath.Join(dir, rel))
+		if err != nil {
+			if os.IsNotExist(err) {
+				digest[rel] = ""
+				continue
+			}
+			return nil, fmt.Errorf("gitops: read %s: %w", rel, err)
+		}
+		sum := sha256.Sum256(data)
+		digest[rel] = hex.EncodeToString(sum[:])
+	}
+	return digest, nil
 }
 
 // FilesWithConflictMarkers returns the subset of paths that still contain git

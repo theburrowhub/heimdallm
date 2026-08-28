@@ -1356,6 +1356,7 @@ The Merge tab and `heimdallm-cli merges` report one of these reasons. They are s
 | `cross_fork` | The head branch is in another fork | Reported only; Heimdallm cannot push there. |
 | `insufficient_permission` | No write access | Nothing Heimdallm can do. |
 | `merge_method_not_allowed` | `merge_method` is disabled on the repo | Change `merge_method`, or enable it on GitHub. |
+| `auto_merge_unavailable` | The repo has auto-merge switched off, or GitHub refuses to queue it on a PR it would merge right now | Enable auto-merge on the repo, or set `merge = true` so Heimdallm merges it directly. |
 | `mergeability_unknown` | GitHub has not finished computing | Transient; re-checked shortly. Never treated as mergeable. |
 | `head_sha_moved` | A commit landed mid-action | Transient; re-evaluated next cycle. |
 | `attempt_cap_reached` | The per-commit attempt cap was hit | A new push resets it. |

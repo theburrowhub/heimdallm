@@ -17,6 +17,11 @@ const unknownRecheck = 45 * time.Second
 // resolve does not consume a query every cycle forever.
 const maxUnknownWaits = 5
 
+// terminalRetention is how long a merged or abandoned row stays in the table
+// before it is pruned. Long enough that the Merge tab still shows what happened
+// yesterday, short enough that the table does not grow without bound.
+const terminalRetention = 7 * 24 * time.Hour
+
 // stableBlockRecheck is the cooldown for blocks that will not change without a
 // human doing something.
 const stableBlockRecheck = time.Hour

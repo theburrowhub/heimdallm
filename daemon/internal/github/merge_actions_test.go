@@ -324,3 +324,314 @@ func TestFetchMergeTrackingPRs_AuthorOnlyWhenAssigneesExcluded(t *testing.T) {
 		t.Errorf("query = %q, want author only", queries[0])
 	}
 }
+
+func TestMergePR_StillWorksWithoutASHA(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &gotBody)
+		_, _ = w.Write([]byte(`{"merged":true,"sha":"x"}`))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	if err := c.MergePR("acme/widgets", 7, ""); err != nil {
+		t.Fatalf("MergePR: %v", err)
+	}
+	// The autonomous gate's path is unchanged: no sha, and squash by default.
+	if _, present := gotBody["sha"]; present {
+		t.Error("MergePR must not send a sha — MergePRAtSHA is the guarded path")
+	}
+	if gotBody["merge_method"] != "squash" {
+		t.Errorf("merge_method = %v, want the squash default", gotBody["merge_method"])
+	}
+}
+
+func TestMergePR_PropagatesRejections(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_, _ = w.Write([]byte(`{"message":"Pull Request is not mergeable"}`))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	if err := c.MergePR("acme/widgets", 7, "squash"); err == nil {
+		t.Fatal("a rejection must be reported")
+	}
+}
+
+// A 200 whose body does not parse is still authoritative: GitHub merged it.
+func TestMergePRAtSHA_TrustsA200WithASurprisingBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("not json"))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	out, err := c.MergePRAtSHA("acme/widgets", 7, "squash", "abc123")
+	if err != nil {
+		t.Fatalf("MergePRAtSHA: %v", err)
+	}
+	if !out.Merged {
+		t.Error("a 200 means merged even when the body is unreadable")
+	}
+}
+
+func TestMergePRAtSHA_UnknownStatusIsClassifiedAsUnknown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+		_, _ = w.Write([]byte(`{"message":"?"}`))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	_, err := c.MergePRAtSHA("acme/widgets", 7, "squash", "abc123")
+	var rejected *gh.MergeRejectedError
+	if !errors.As(err, &rejected) || rejected.Reason != gh.MergeReasonUnknown {
+		t.Fatalf("err = %v, want an unknown-reason rejection", err)
+	}
+	if rejected.Terminal() {
+		t.Error("an unclassified status is not terminal")
+	}
+	if rejected.Error() == "" {
+		t.Error("the error should render")
+	}
+}
+
+func TestMergePRAtSHA_422WithoutASHAMentionIsNotMergeable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"message":"Validation failed"}`))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	_, err := c.MergePRAtSHA("acme/widgets", 7, "squash", "abc123")
+	var rejected *gh.MergeRejectedError
+	if !errors.As(err, &rejected) || rejected.Reason != gh.MergeReasonNotMergeable {
+		t.Fatalf("err = %v, want not_mergeable", err)
+	}
+}
+
+func TestMergePRAtSHA_422MentioningSHAIsAMismatch(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"message":"sha does not match"}`))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	_, err := c.MergePRAtSHA("acme/widgets", 7, "squash", "abc123")
+	var rejected *gh.MergeRejectedError
+	if !errors.As(err, &rejected) || rejected.Reason != gh.MergeReasonSHAMismatch {
+		t.Fatalf("err = %v, want sha_mismatch", err)
+	}
+}
+
+func TestUpdatePRBranch_ClassifiesEveryRejection(t *testing.T) {
+	cases := map[int]string{
+		http.StatusUnprocessableEntity: gh.UpdateBranchReasonUnprocessable,
+		http.StatusConflict:            gh.UpdateBranchReasonSHAMismatch,
+		http.StatusForbidden:           gh.UpdateBranchReasonForbidden,
+		http.StatusNotFound:            gh.UpdateBranchReasonNotFound,
+		http.StatusTeapot:              gh.UpdateBranchReasonUnknown,
+	}
+	for status, want := range cases {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(`{"message":"no"}`))
+		}))
+		c := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+		_, err := c.UpdatePRBranch("acme/widgets", 7, "abc123")
+		var rejected *gh.UpdateBranchRejectedError
+		if !errors.As(err, &rejected) || rejected.Reason != want {
+			t.Errorf("status %d: err = %v, want reason %q", status, err, want)
+		}
+		if rejected != nil && rejected.Error() == "" {
+			t.Errorf("status %d: the error should render", status)
+		}
+		srv.Close()
+	}
+}
+
+// A mutation that reports success but hands back no auto-merge request must not
+// be recorded as armed — we would then wait forever for a merge nobody queued.
+func TestEnableAutoMerge_EmptyResponseIsNotTreatedAsArmed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"enablePullRequestAutoMerge":{"pullRequest":{"id":"x"}}}}`))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	_, err := c.EnableAutoMerge("PR_kwDO", "squash", "abc123")
+	var unavailable *gh.AutoMergeUnavailableError
+	if !errors.As(err, &unavailable) || unavailable.Reason != gh.AutoMergeReasonUnknown {
+		t.Fatalf("err = %v, want an unknown-reason AutoMergeUnavailableError", err)
+	}
+	if unavailable.Error() == "" {
+		t.Error("the error should render")
+	}
+}
+
+// GitHub omitting enabledAt must not leave the armed timestamp at year zero,
+// or the "wait a pass before merging directly" rule loses its anchor.
+func TestEnableAutoMerge_DefaultsAMissingEnabledAt(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"enablePullRequestAutoMerge":{"pullRequest":{
+			"id":"x","autoMergeRequest":{"mergeMethod":"SQUASH"}}}}}`))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	am, err := c.EnableAutoMerge("PR_kwDO", "squash", "abc123")
+	if err != nil {
+		t.Fatalf("EnableAutoMerge: %v", err)
+	}
+	if am.EnabledAt.IsZero() {
+		t.Error("a missing enabledAt must be filled in, not left at the zero time")
+	}
+}
+
+// An unrecognised mutation failure stays a plain error: guessing at a reason
+// would make the caller act on a classification we did not earn.
+func TestEnableAutoMerge_UnknownFailureIsNotClassified(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"errors":[{"message":"Something else entirely"}]}`))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	_, err := c.EnableAutoMerge("PR_kwDO", "squash", "abc123")
+	var unavailable *gh.AutoMergeUnavailableError
+	if errors.As(err, &unavailable) {
+		t.Fatalf("err = %v, want a plain error for an unrecognised failure", err)
+	}
+	if err == nil {
+		t.Fatal("the failure must still be reported")
+	}
+}
+
+func TestEnableAutoMerge_ForbiddenIsClassified(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"errors":[{"message":"Resource not accessible: forbidden"}]}`))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	_, err := c.EnableAutoMerge("PR_kwDO", "squash", "abc123")
+	var unavailable *gh.AutoMergeUnavailableError
+	if !errors.As(err, &unavailable) || unavailable.Reason != gh.AutoMergeReasonForbidden {
+		t.Fatalf("err = %v, want forbidden", err)
+	}
+}
+
+func TestDisableAutoMerge_RequiresANodeIDAndReportsRealFailures(t *testing.T) {
+	c := gh.NewClient("fake", gh.WithBaseURL("http://unused"))
+	if err := c.DisableAutoMerge(""); err == nil {
+		t.Error("an empty node id must be rejected")
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"errors":[{"message":"Bad credentials"}]}`))
+	}))
+	defer srv.Close()
+	c2 := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	if err := c2.DisableAutoMerge("PR_x"); err == nil {
+		t.Error("a real failure must be reported")
+	}
+}
+
+func TestDisableAutoMerge_Succeeds(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"disablePullRequestAutoMerge":{"pullRequest":{"id":"x"}}}}`))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	if err := c.DisableAutoMerge("PR_kwDO"); err != nil {
+		t.Fatalf("DisableAutoMerge: %v", err)
+	}
+}
+
+// A search failure on one qualifier must not wipe the other's results.
+func TestFetchMergeTrackingPRs_PartialFailureKeepsWhatItGot(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/user" {
+			_, _ = w.Write([]byte(`{"login":"octocat"}`))
+			return
+		}
+		if strings.Contains(r.URL.Query().Get("q"), "assignee:") {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("boom"))
+			return
+		}
+		_, _ = w.Write([]byte(`{"items":[{"id":1,"number":7,"repository_url":"https://api.github.com/repos/acme/widgets"}]}`))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	prs, err := c.FetchMergeTrackingPRs(true)
+	if err == nil {
+		t.Error("the partial failure should be reported alongside the results")
+	}
+	if len(prs) != 1 {
+		t.Fatalf("got %d PRs, want the author results kept", len(prs))
+	}
+	if !prs[0].IsAuthor {
+		t.Error("the surviving result should carry its flag")
+	}
+}
+
+func TestFetchMergeTrackingPRs_ReportsAnUnresolvableUser(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"message":"Bad credentials"}`))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	if _, err := c.FetchMergeTrackingPRs(true); err == nil {
+		t.Fatal("an unresolvable user must be reported")
+	}
+}
+
+func TestPullRequest_AssignedTo(t *testing.T) {
+	pr := &gh.PullRequest{Assignees: []gh.User{{Login: "Octocat"}, {Login: "hubot"}}}
+	if !pr.AssignedTo("octocat") {
+		t.Error("comparison should be case-insensitive")
+	}
+	if !pr.AssignedTo("@hubot") {
+		t.Error("a leading @ should be tolerated")
+	}
+	if pr.AssignedTo("someone") {
+		t.Error("an unrelated login is not an assignee")
+	}
+	if pr.AssignedTo("") {
+		t.Error("an empty login matches nobody")
+	}
+	var nilPR *gh.PullRequest
+	if nilPR.AssignedTo("octocat") {
+		t.Error("a nil PR has no assignees")
+	}
+}
+
+// A null item in a search page must not panic the dedup.
+func TestFetchMergeTrackingPRs_SkipsNullSearchItems(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/user" {
+			_, _ = w.Write([]byte(`{"login":"octocat"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"items":[null,{"id":1,"number":7,"repository_url":"https://api.github.com/repos/acme/widgets"}]}`))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	prs, err := c.FetchMergeTrackingPRs(false)
+	if err != nil {
+		t.Fatalf("FetchMergeTrackingPRs: %v", err)
+	}
+	if len(prs) != 1 {
+		t.Fatalf("got %d PRs, want the null skipped", len(prs))
+	}
+}

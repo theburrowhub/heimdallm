@@ -15,9 +15,9 @@ import (
 
 type fakeStore struct {
 	calls    int
-	applied  bool          // value to return from RenameRepo
-	err      error         // error to return
-	gotPairs [][2]string   // (old, new) observed
+	applied  bool        // value to return from RenameRepo
+	err      error       // error to return
+	gotPairs [][2]string // (old, new) observed
 }
 
 func (f *fakeStore) RenameRepo(oldRepo, newRepo string) (bool, error) {
@@ -41,10 +41,10 @@ func (f *fakePersister) Rename(path, oldRepo, newRepo string) error {
 }
 
 type fakePurger struct {
-	calls    int
-	err      error
-	gotRepo  string
-	gotDir   string
+	calls   int
+	err     error
+	gotRepo string
+	gotDir  string
 }
 
 func (f *fakePurger) Purge(ctx context.Context, repo, cloneDir string) error {

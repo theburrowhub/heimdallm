@@ -270,8 +270,37 @@ func TestDecide_CooldownSuppressesAction(t *testing.T) {
 	if d.Action != mergetrack.ActionNone {
 		t.Errorf("action = %q, want none during a cooldown", d.Action)
 	}
+	// The PR here is otherwise ready, so the cooldown is the only block.
 	if d.PrimaryReason() != mergetrack.ReasonCooldown {
 		t.Errorf("reason = %q, want cooldown", d.PrimaryReason())
+	}
+}
+
+// The cooldown is our attempt pacing, not a property of the PR. It must not
+// displace the real blocker, or a PR waiting on a failing check starts
+// reporting "cooling down" and the operator loses the only useful fact.
+func TestDecide_CooldownDoesNotHideTheRealBlocker(t *testing.T) {
+	st := cleanStatus()
+	st.Checks = []gh.CheckContext{{Name: "build", State: gh.CheckStateFailure, Required: true}}
+
+	in := baseInput(allOn())
+	in.State.CooldownUntil = in.Now.Add(5 * time.Minute)
+
+	d := decide(st, in)
+	if d.PrimaryReason() != mergetrack.ReasonChecksFailing {
+		t.Errorf("reason = %q, want the failing check to stay primary", d.PrimaryReason())
+	}
+	if d.Action != mergetrack.ActionNone {
+		t.Errorf("action = %q, want none during a cooldown", d.Action)
+	}
+	var sawCooldown bool
+	for _, b := range d.Blocks {
+		if b.Reason == mergetrack.ReasonCooldown {
+			sawCooldown = true
+		}
+	}
+	if !sawCooldown {
+		t.Error("the cooldown should still be reported, just not first")
 	}
 }
 
@@ -371,7 +400,17 @@ func TestDecide_CooldownAppliesToTheScheduledPass(t *testing.T) {
 	in := baseInput(allOn())
 	in.State.CooldownUntil = in.Now.Add(5 * time.Minute)
 
-	if got := decide(st, in).PrimaryReason(); got != mergetrack.ReasonCooldown {
-		t.Errorf("reason = %q, want cooldown on a scheduled pass", got)
+	d := decide(st, in)
+	if d.Action != mergetrack.ActionNone {
+		t.Errorf("action = %q, want none on a scheduled pass inside the cooldown", d.Action)
+	}
+	var sawCooldown bool
+	for _, b := range d.Blocks {
+		if b.Reason == mergetrack.ReasonCooldown {
+			sawCooldown = true
+		}
+	}
+	if !sawCooldown {
+		t.Error("the cooldown should be reported on a scheduled pass")
 	}
 }

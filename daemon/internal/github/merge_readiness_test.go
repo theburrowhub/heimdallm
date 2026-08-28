@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	gh "github.com/heimdallm/daemon/internal/github"
 )
@@ -293,5 +294,314 @@ func TestGetMergeStatus_RejectsMalformedRepoSlug(t *testing.T) {
 		if _, err := c.GetMergeStatus(slug, 1); err == nil {
 			t.Errorf("slug %q should be rejected", slug)
 		}
+	}
+}
+
+// A PR with more checks than one page must not be evaluated on the first page
+// alone: a required check on page 2 would be invisible and the PR would read
+// as green.
+func TestGetMergeStatus_PaginatesCheckContexts(t *testing.T) {
+	page := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page++
+		body := mergeStatusJSON
+		if page == 1 {
+			// Ask for a second page.
+			body = strings.Replace(body,
+				`"pageInfo": {"hasNextPage": false, "endCursor": null},
+              "nodes": [
+                {"__typename": "CheckRun", "name": "build"`,
+				`"pageInfo": {"hasNextPage": true, "endCursor": "cursor1"},
+              "nodes": [
+                {"__typename": "CheckRun", "name": "build"`, 1)
+		} else {
+			body = strings.Replace(body, `"name": "build"`, `"name": "page2-check"`, 1)
+		}
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	st, err := c.GetMergeStatus("acme/widgets", 7)
+	if err != nil {
+		t.Fatalf("GetMergeStatus: %v", err)
+	}
+	if page < 2 {
+		t.Fatalf("requested %d pages, want the second page fetched", page)
+	}
+	var names []string
+	for _, ch := range st.Checks {
+		names = append(names, ch.Name)
+	}
+	found := false
+	for _, n := range names {
+		if n == "page2-check" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("checks = %v, want the second page merged in", names)
+	}
+	if st.ChecksTruncated {
+		t.Error("a fully paginated list is not truncated")
+	}
+}
+
+// A connection that keeps asking for more pages past the cap must be reported
+// as truncated, so the evaluator refuses to call the PR ready.
+func TestGetMergeStatus_ReportsTruncationPastThePageCap(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Always claims another page.
+		body := strings.Replace(mergeStatusJSON,
+			`"pageInfo": {"hasNextPage": false, "endCursor": null},
+          "nodes": [
+            {"id": "t1"`,
+			`"pageInfo": {"hasNextPage": true, "endCursor": "c"},
+          "nodes": [
+            {"id": "t1"`, 1)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	st, err := c.GetMergeStatus("acme/widgets", 7)
+	if err != nil {
+		t.Fatalf("GetMergeStatus: %v", err)
+	}
+	if !st.ThreadsTruncated {
+		t.Error("an endlessly paginating thread list must be reported as truncated")
+	}
+}
+
+func TestGetMergeStatus_HandlesAPRWithNoChecksAtAll(t *testing.T) {
+	body := strings.Replace(mergeStatusJSON,
+		`"statusCheckRollup": {`, `"statusCheckRollupRemoved": {`, 1)
+	body = strings.Replace(body, `"oid": "abc123",
+          "statusCheckRollupRemoved"`, `"oid": "abc123",
+          "statusCheckRollup": null,
+          "unused"`, 1)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	st, err := c.GetMergeStatus("acme/widgets", 7)
+	if err != nil {
+		t.Fatalf("GetMergeStatus: %v", err)
+	}
+	if len(st.Checks) != 0 {
+		t.Errorf("checks = %v, want none", st.Checks)
+	}
+	if st.ChecksTruncated {
+		t.Error("no checks is not truncation")
+	}
+}
+
+func TestGetMergeStatus_HTTPFailureIsReported(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("boom"))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	if _, err := c.GetMergeStatus("acme/widgets", 7); err == nil {
+		t.Fatal("a 500 must be reported")
+	}
+}
+
+func TestMergeStatus_IsTrackedFor(t *testing.T) {
+	st := &gh.MergeStatus{Author: "Octocat", Assignees: []string{"hubot", "@OctoCat"}}
+
+	author, assignee := st.IsTrackedFor("octocat")
+	if !author {
+		t.Error("author comparison should be case-insensitive")
+	}
+	if !assignee {
+		t.Error("assignee comparison should tolerate a leading @ and case")
+	}
+
+	if a, b := st.IsTrackedFor("someone"); a || b {
+		t.Error("an unrelated login is neither")
+	}
+	var nilStatus *gh.MergeStatus
+	if a, b := nilStatus.IsTrackedFor("octocat"); a || b {
+		t.Error("a nil status tracks nobody")
+	}
+}
+
+func TestMergeMethodSet_Allows(t *testing.T) {
+	s := gh.MergeMethodSet{Squash: true, Rebase: true}
+	for method, want := range map[string]bool{
+		"squash": true, "SQUASH": true, " rebase ": true,
+		"merge": false, "": false, "nonsense": false,
+	} {
+		if got := s.Allows(method); got != want {
+			t.Errorf("Allows(%q) = %v, want %v", method, got, want)
+		}
+	}
+}
+
+func TestCheckContext_Duration(t *testing.T) {
+	start := time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC)
+	at := func(t time.Time) *time.Time { return &t }
+	done := start.Add(90 * time.Second)
+	skewed := start.Add(time.Minute)
+	cases := map[string]struct {
+		c    gh.CheckContext
+		want time.Duration
+	}{
+		"complete":  {gh.CheckContext{StartedAt: at(start), CompletedAt: at(done)}, 90 * time.Second},
+		"running":   {gh.CheckContext{StartedAt: at(start)}, 0},
+		"unstarted": {gh.CheckContext{CompletedAt: at(start)}, 0},
+		"queued":    {gh.CheckContext{}, 0},
+		// Clock skew between GitHub's reporters is real; a negative duration is
+		// nonsense, not something to render.
+		"reversed": {gh.CheckContext{StartedAt: at(skewed), CompletedAt: at(start)}, 0},
+	}
+	for name, tc := range cases {
+		if got := tc.c.Duration(); got != tc.want {
+			t.Errorf("%s: duration = %v, want %v", name, got, tc.want)
+		}
+	}
+}
+
+func TestPartialGraphQLError_HasPath(t *testing.T) {
+	e := &gh.PartialGraphQLError{Paths: []string{"repository.pullRequest.baseRef.branchProtectionRule"}}
+	if !e.HasPath("branchProtectionRule") {
+		t.Error("HasPath should match a path segment")
+	}
+	if e.HasPath("commits") {
+		t.Error("HasPath must not match an absent segment")
+	}
+	var nilErr *gh.PartialGraphQLError
+	if nilErr.HasPath("anything") {
+		t.Error("a nil error has no paths")
+	}
+	if e.Error() == "" {
+		t.Error("the error message should not be empty")
+	}
+}
+
+// The pagination loops swallowed ANY partial error, not just the branch
+// protection one the first page tolerates. A tolerated field error landing on
+// the paginated connection itself decodes to an empty page with hasNextPage
+// false, so the loop exited normally, the truncation flag stayed clear, and the
+// evaluator could call a PR ready having seen only its first page of checks.
+// This is the fail-open path the package exists to prevent.
+func TestGetMergeStatus_UnexpectedPartialErrorMidPaginationMarksTruncated(t *testing.T) {
+	cases := map[string]struct {
+		firstPage  func(string) string
+		errPath    string
+		truncated  func(*gh.MergeStatus) bool
+		wantThread bool
+	}{
+		"checks": {
+			firstPage: func(body string) string {
+				return strings.Replace(body,
+					`"pageInfo": {"hasNextPage": false, "endCursor": null},
+              "nodes": [
+                {"__typename": "CheckRun", "name": "build"`,
+					`"pageInfo": {"hasNextPage": true, "endCursor": "cursor1"},
+              "nodes": [
+                {"__typename": "CheckRun", "name": "build"`, 1)
+			},
+			errPath:   `["repository","pullRequest","commits"]`,
+			truncated: func(st *gh.MergeStatus) bool { return st.ChecksTruncated },
+		},
+		"review threads": {
+			firstPage: func(body string) string {
+				return strings.Replace(body,
+					`"reviewThreads": {
+          "pageInfo": {"hasNextPage": false, "endCursor": null}`,
+					`"reviewThreads": {
+          "pageInfo": {"hasNextPage": true, "endCursor": "cursor1"}`, 1)
+			},
+			errPath:   `["repository","pullRequest","reviewThreads"]`,
+			truncated: func(st *gh.MergeStatus) bool { return st.ThreadsTruncated },
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			page := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				page++
+				if page == 1 {
+					_, _ = w.Write([]byte(tc.firstPage(mergeStatusJSON)))
+					return
+				}
+				// The second page comes back with the connection itself
+				// missing, reported as a tolerated field error.
+				_, _ = w.Write([]byte(strings.Replace(mergeStatusJSON,
+					`"data": {`,
+					`"errors": [{"type":"FORBIDDEN","message":"nope","path":`+tc.errPath+`}],
+					 "data": {`, 1)))
+			}))
+			defer srv.Close()
+
+			c := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+			st, err := c.GetMergeStatus("acme/widgets", 7)
+			if err != nil {
+				t.Fatalf("GetMergeStatus: %v", err)
+			}
+			if page < 2 {
+				t.Fatalf("requested %d pages, want the second fetched", page)
+			}
+			if !tc.truncated(st) {
+				t.Error("a page we could not read must be reported as truncated, not as an empty tail")
+			}
+		})
+	}
+}
+
+// The tolerated case still has to work across pages: a branch-protection
+// FORBIDDEN is expected on every request a non-admin token makes.
+func TestGetMergeStatus_ProtectionErrorMidPaginationIsStillTolerated(t *testing.T) {
+	page := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page++
+		body := mergeStatusJSON
+		if page == 1 {
+			body = strings.Replace(body,
+				`"pageInfo": {"hasNextPage": false, "endCursor": null},
+              "nodes": [
+                {"__typename": "CheckRun", "name": "build"`,
+				`"pageInfo": {"hasNextPage": true, "endCursor": "cursor1"},
+              "nodes": [
+                {"__typename": "CheckRun", "name": "build"`, 1)
+		} else {
+			body = strings.Replace(body, `"name": "build"`, `"name": "page2-check"`, 1)
+		}
+		body = strings.Replace(body,
+			`"data": {`,
+			`"errors": [{"type":"FORBIDDEN","message":"nope","path":["repository","pullRequest","baseRef","branchProtectionRule"]}],
+			 "data": {`, 1)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	st, err := c.GetMergeStatus("acme/widgets", 7)
+	if err != nil {
+		t.Fatalf("GetMergeStatus: %v", err)
+	}
+	if st.ChecksTruncated {
+		t.Error("an expected protection error must not be mistaken for an unreadable page")
+	}
+	var names []string
+	for _, ch := range st.Checks {
+		names = append(names, ch.Name)
+	}
+	found := false
+	for _, n := range names {
+		if n == "page2-check" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("checks = %v, want the second page merged in", names)
 	}
 }

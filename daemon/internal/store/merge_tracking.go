@@ -38,6 +38,10 @@ const (
 	MergeAttemptConflict = "conflict"
 	MergeAttemptMerge    = "merge"
 	MergeAttemptUnknown  = "unknown_wait"
+	// MergeAttemptArm counts failed attempts to arm GitHub's native auto-merge.
+	// Without a counter of its own, an arming failure would back off by a flat
+	// minute forever instead of growing.
+	MergeAttemptArm = "arm"
 )
 
 // inFlightMergePhases are the phases that represent work already running. A
@@ -83,6 +87,7 @@ type MergeTracking struct {
 	ChecksRequiredPending int `json:"checks_required_pending"`
 
 	UnknownWaits     int `json:"unknown_waits"`
+	ArmAttempts      int `json:"arm_attempts"`
 	UpdateAttempts   int `json:"update_attempts"`
 	ConflictAttempts int `json:"conflict_attempts"`
 	MergeAttempts    int `json:"merge_attempts"`
@@ -130,8 +135,13 @@ func (m *MergeTracking) Terminal() bool {
 // AutoMergeArmedFor reports whether native auto-merge is armed for headSHA.
 // An armed state anchored to a different commit is stale — a push cleared it —
 // and must not license a direct merge.
+//
+// The anchor is auto_merge_head_sha, deliberately NOT the phase: the phase is
+// rewritten by every evaluation, so reading it here meant that recording a
+// decision silently disarmed the row, and a PR whose auto-merge GitHub already
+// held would be re-anchored on every cycle and never promoted.
 func (m *MergeTracking) AutoMergeArmedFor(headSHA string) bool {
-	if m == nil || m.Phase != MergePhaseAutoMergeArmed {
+	if m == nil || headSHA == "" {
 		return false
 	}
 	return m.AutoMergeHeadSHA != "" && m.AutoMergeHeadSHA == headSHA
@@ -142,7 +152,7 @@ const mergeTrackingColumns = "pr_id, repo, number, node_id, phase, head_sha, bas
 	"auto_merge_armed_at, auto_merge_head_sha, auto_merge_method, " +
 	"block_reason, block_detail, decision_json, " +
 	"checks_required_failing, checks_required_pending, " +
-	"unknown_waits, update_attempts, conflict_attempts, merge_attempts, " +
+	"unknown_waits, arm_attempts, update_attempts, conflict_attempts, merge_attempts, " +
 	"pre_rebase_sha, last_attempt_at, cooldown_until, last_error, " +
 	"evaluated_at, merged_at, terminal_reason, updated_at"
 
@@ -166,7 +176,7 @@ func scanMergeTracking(row rowScanner) (*MergeTracking, error) {
 		&armedAt, &armedSHA, &armedMethod,
 		&blockReason, &blockDetail, &decisionJSON,
 		&m.ChecksRequiredFailing, &m.ChecksRequiredPending,
-		&m.UnknownWaits, &m.UpdateAttempts, &m.ConflictAttempts, &m.MergeAttempts,
+		&m.UnknownWaits, &m.ArmAttempts, &m.UpdateAttempts, &m.ConflictAttempts, &m.MergeAttempts,
 		&preRebase, &lastAttempt, &cooldown, &lastErr,
 		&evaluatedAt, &mergedAt, &terminalReason, &updated,
 	)
@@ -224,12 +234,29 @@ var ErrMergeTrackingNotFound = errors.New("store: merge tracking row not found")
 
 // EnsureMergeTracking returns the existing row for prID, creating an idle one
 // if there is none. Safe to call on every poll.
+//
+// An abandoned row is revived, because discovery only ever offers open PRs the
+// user still owns: the PR was reopened, include_assigned was turned back on, or
+// the snapshot that abandoned it was a transient GitHub failure. Without this
+// the row would be re-discovered every cycle and never evaluated again, and the
+// UI would show a PR Heimdallm can see as "not tracked" forever. A merged row
+// is left alone — that outcome does not come back.
 func (s *Store) EnsureMergeTracking(prID int64, repo string, number int) (*MergeTracking, error) {
 	now := time.Now().UTC()
 	_, err := s.db.Exec(`
 		INSERT INTO merge_tracking (pr_id, repo, number, phase, updated_at)
 		VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT(pr_id) DO UPDATE SET repo=excluded.repo, number=excluded.number
+		ON CONFLICT(pr_id) DO UPDATE SET
+		    repo = excluded.repo,
+		    number = excluded.number,
+		    phase = CASE WHEN merge_tracking.phase = 'abandoned'
+		                 THEN 'idle' ELSE merge_tracking.phase END,
+		    terminal_reason = CASE WHEN merge_tracking.phase = 'abandoned'
+		                          THEN '' ELSE merge_tracking.terminal_reason END,
+		    cooldown_until = CASE WHEN merge_tracking.phase = 'abandoned'
+		                          THEN '' ELSE merge_tracking.cooldown_until END,
+		    last_error = CASE WHEN merge_tracking.phase = 'abandoned'
+		                      THEN '' ELSE merge_tracking.last_error END
 	`, prID, repo, number, MergePhaseIdle, now.Format(sqliteTimeFormat))
 	if err != nil {
 		return nil, fmt.Errorf("store: ensure merge tracking: %w", err)
@@ -335,6 +362,7 @@ func (s *Store) ResetMergeTrackingForNewHead(prID int64, headSHA string, at time
 		UPDATE merge_tracking
 		SET head_sha = ?,
 		    unknown_waits = 0,
+		    arm_attempts = 0,
 		    update_attempts = 0,
 		    conflict_attempts = 0,
 		    merge_attempts = 0,
@@ -346,6 +374,7 @@ func (s *Store) ResetMergeTrackingForNewHead(prID int64, headSHA string, at time
 		    phase = CASE
 		              WHEN phase = 'auto_merge_armed' AND auto_merge_head_sha = ? THEN phase
 		              WHEN phase IN ('merged','abandoned') THEN phase
+		              WHEN phase IN ('updating','resolving','merging') THEN phase
 		              ELSE 'idle'
 		            END,
 		    auto_merge_head_sha  = CASE WHEN auto_merge_head_sha = ? THEN auto_merge_head_sha  ELSE '' END,
@@ -429,7 +458,8 @@ func (s *Store) BlockMergeTracking(prID int64, reason, detail string, cooldownUn
 func (s *Store) ArmNativeAutoMerge(prID int64, headSHA, method string, at time.Time) error {
 	_, err := s.db.Exec(`
 		UPDATE merge_tracking
-		SET phase = ?, auto_merge_armed_at = ?, auto_merge_head_sha = ?, auto_merge_method = ?,
+		SET phase = CASE WHEN phase IN ('updating','resolving','merging') THEN phase ELSE ? END,
+		    auto_merge_armed_at = ?, auto_merge_head_sha = ?, auto_merge_method = ?,
 		    last_error = '', updated_at = ?
 		WHERE pr_id = ?
 	`, MergePhaseAutoMergeArmed, at.UTC().Format(sqliteTimeFormat), headSHA, method,
@@ -458,12 +488,23 @@ func (s *Store) ClearNativeAutoMerge(prID int64) error {
 }
 
 // RecordMergeTrackingDecision persists the outcome of one evaluation.
+//
+// The phase and the cooldown are written only when no action is in flight. An
+// evaluation is derived from a snapshot read before the claim, so a concurrent
+// one — the manual evaluate endpoint, or a second daemon on the same database —
+// would otherwise write its stale 'idle' over a live 'merging' and release the
+// single-flight lock mid-action. Everything the UI explains a block with is
+// still refreshed either way.
 func (s *Store) RecordMergeTrackingDecision(prID int64, d MergeDecisionRecord) error {
 	_, err := s.db.Exec(`
 		UPDATE merge_tracking
-		SET phase = ?, head_sha = ?, block_reason = ?, block_detail = ?, decision_json = ?,
+		SET phase = CASE WHEN phase IN ('updating','resolving','merging') THEN phase ELSE ? END,
+		    head_sha = ?, block_reason = ?, block_detail = ?, decision_json = ?,
 		    checks_required_failing = ?, checks_required_pending = ?,
-		    evaluated_at = ?, cooldown_until = ?, updated_at = ?
+		    evaluated_at = ?,
+		    cooldown_until = CASE WHEN phase IN ('updating','resolving','merging')
+		                          THEN cooldown_until ELSE ? END,
+		    updated_at = ?
 		WHERE pr_id = ?
 	`, d.Phase, d.HeadSHA, d.BlockReason, d.BlockDetail, d.DecisionJSON,
 		d.ChecksRequiredFailing, d.ChecksRequiredPending,
@@ -503,6 +544,8 @@ func (s *Store) BumpMergeTrackingAttempt(prID int64, kind string, cooldownUntil 
 		column = "merge_attempts"
 	case MergeAttemptUnknown:
 		column = "unknown_waits"
+	case MergeAttemptArm:
+		column = "arm_attempts"
 	default:
 		return fmt.Errorf("store: bump merge tracking attempt: unknown kind %q", kind)
 	}
@@ -517,6 +560,20 @@ func (s *Store) BumpMergeTrackingAttempt(prID int64, kind string, cooldownUntil 
 		time.Now().UTC().Format(sqliteTimeFormat), time.Now().UTC().Format(sqliteTimeFormat), prID)
 	if err != nil {
 		return fmt.Errorf("store: bump merge tracking attempt: %w", err)
+	}
+	return nil
+}
+
+// ClearMergeTrackingUnknownWaits zeroes the unknown-mergeability counter once
+// GitHub answers with a real state. Without this the counter would only ever
+// reset on a push, and a long-lived PR whose base moves often would eventually
+// trip the cap on a head GitHub is perfectly willing to compute.
+func (s *Store) ClearMergeTrackingUnknownWaits(prID int64) error {
+	_, err := s.db.Exec(
+		"UPDATE merge_tracking SET unknown_waits = 0, updated_at = ? WHERE pr_id = ? AND unknown_waits != 0",
+		time.Now().UTC().Format(sqliteTimeFormat), prID)
+	if err != nil {
+		return fmt.Errorf("store: clear unknown waits: %w", err)
 	}
 	return nil
 }

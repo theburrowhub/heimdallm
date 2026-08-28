@@ -1376,18 +1376,20 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		// started and gates itself per repo, so a cycle with the feature off
 		// everywhere costs nothing — AnyEnabled short-circuits before the first
 		// GitHub call.
-		mergeTrackRunner := &mergeTrackWorktreeRunner{
-			repoCtx: repoCtx,
-			git:     mergeTrackGitAdapter{g: issuepipeline.NewGitExec()},
-			token:   token,
-			cfg:     &cfg,
-			cfgMu:   &cfgMu,
-		}
-		mergeTrackRunner.resolver = mergetrack.NewConflictResolver(
-			mergeTrackRunner.git, mergeTrackExecutor{e: exec})
+		// *issues.GitExec, *executor.Executor and *gh.Client satisfy the
+		// mergetrack interfaces directly — no adapters, so there is no
+		// untestable delegation layer sitting in main.
+		mergeTrackGit := issuepipeline.NewGitExec()
+		mergeTrackRunner := mergetrack.NewWorktreeOps(
+			&mergeTrackRepoContexts{manager: repoCtx, token: token, cfg: &cfg, cfgMu: &cfgMu},
+			mergeTrackGit,
+			mergetrack.NewConflictResolver(mergeTrackGit, exec),
+			token,
+			mergeTrackAgentSpec(&cfg, &cfgMu),
+		)
 
 		mergeTrackReconciler := mergetrack.NewReconciler(mergetrack.ReconcilerOptions{
-			Gateway:   mergeTrackGateway{c: ghClient},
+			Gateway:   ghClient,
 			Store:     s,
 			Publisher: broker,
 			Gate:      updateWorkGate,

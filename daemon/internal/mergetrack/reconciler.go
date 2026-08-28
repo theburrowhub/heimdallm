@@ -45,6 +45,8 @@ type StateStore interface {
 	ClearNativeAutoMerge(prID int64) error
 	RecordMergeTrackingDecision(prID int64, d store.MergeDecisionRecord) error
 	BumpMergeTrackingAttempt(prID int64, kind string, cooldownUntil time.Time, lastErr string) error
+	ClearMergeTrackingUnknownWaits(prID int64) error
+	PruneMergeTracking(before time.Time) (int, error)
 	SetMergeTrackingPreRebaseSHA(prID int64, sha string) error
 	BlockMergeTracking(prID int64, reason, detail string, cooldownUntil time.Time) error
 	MarkMergeTrackingMerged(prID int64, at time.Time) error
@@ -163,6 +165,15 @@ func (r *Reconciler) Tick(ctx context.Context, repos []string) TickStats {
 		return stats
 	}
 	tickStart := r.now()
+
+	// Terminal rows are kept for a week so a merge stays visible in the tab
+	// after the fact, then dropped. Without this the table — and the listing
+	// built from it — would grow for the life of the install.
+	if n, err := r.st.PruneMergeTracking(tickStart.Add(-terminalRetention)); err != nil {
+		slog.Warn("mergetrack: prune terminal rows", "err", err)
+	} else if n > 0 {
+		slog.Debug("mergetrack: pruned terminal rows", "count", n)
+	}
 
 	stats.Discovered = r.discover(ctx, repos)
 
@@ -367,14 +378,13 @@ func (r *Reconciler) syncRow(prID int64, row *store.MergeTracking, st *gh.MergeS
 		}
 	case st.AutoMerge != nil && row.AutoMergeHeadSHA != st.HeadOID && st.HeadOID != "":
 		// Auto-merge is on but our record points at another commit — GitHub
-		// keeps auto-merge across pushes. Re-anchor it, using GitHub's own
-		// enabledAt so the "wait a pass" rule measures from when it was really
-		// armed, not from now.
-		at := st.AutoMerge.EnabledAt
-		if at.IsZero() {
-			at = r.now()
-		}
-		if err := r.st.ArmNativeAutoMerge(prID, st.HeadOID, st.AutoMerge.MergeMethod, at); err != nil {
+		// keeps auto-merge across pushes. Re-anchor it to now, not to GitHub's
+		// enabledAt: the licence to merge directly is granted per commit, and
+		// GitHub has not yet had a pass at *this* one. Using the original
+		// enabledAt (typically well in the past) would let the very same cycle
+		// promote to a direct merge, which is exactly the race the "wait a
+		// pass" rule exists to avoid.
+		if err := r.st.ArmNativeAutoMerge(prID, st.HeadOID, st.AutoMerge.MergeMethod, r.now()); err != nil {
 			slog.Warn("mergetrack: re-anchor auto-merge", "pr_id", prID, "err", err)
 		}
 	}
@@ -401,8 +411,16 @@ func (r *Reconciler) persistDecision(prID int64, row *store.MergeTracking, d Dec
 		cooldown = r.now().Add(r.defaultCooldown)
 	}
 
+	phase := RestPhaseFor(d)
+	// An armed PR keeps reading as armed. Otherwise the badge flips to
+	// "blocked" the moment a decision is recorded, which is both wrong and the
+	// opposite of what the operator just saw happen.
+	if row.AutoMergeArmedFor(d.HeadSHA) && phase == store.MergePhaseBlocked {
+		phase = store.MergePhaseAutoMergeArmed
+	}
+
 	rec := store.MergeDecisionRecord{
-		Phase:                 RestPhaseFor(d),
+		Phase:                 phase,
 		HeadSHA:               d.HeadSHA,
 		BlockReason:           string(d.PrimaryReason()),
 		BlockDetail:           d.PrimaryDetail(),
@@ -450,6 +468,8 @@ func (r *Reconciler) persistDecision(prID int64, row *store.MergeTracking, d Dec
 
 // handleNonMutating applies the terminal transitions that need no GitHub call.
 func (r *Reconciler) handleNonMutating(prID int64, row *store.MergeTracking, st *gh.MergeStatus, d Decision) {
+	r.trackUnknownWaits(prID, row, d)
+
 	switch d.Action {
 	case ActionMarkMerged:
 		at := st.MergedAt
@@ -467,6 +487,28 @@ func (r *Reconciler) handleNonMutating(prID int64, row *store.MergeTracking, st 
 	case ActionAbandon:
 		if err := r.st.MarkMergeTrackingAbandoned(prID, string(d.PrimaryReason()), r.now()); err != nil {
 			slog.Warn("mergetrack: mark abandoned", "pr_id", prID, "err", err)
+		}
+	}
+}
+
+// trackUnknownWaits maintains the counter that bounds mergeability polling.
+//
+// GitHub computes mergeability asynchronously and a PR it never finishes —
+// a huge diff, a stuck background job — would otherwise be re-queried every 45
+// seconds forever, spending a GraphQL budget shared with the review pipeline.
+// The counter is cleared as soon as GitHub answers with a real state, so a
+// long-lived PR whose base moves often does not accumulate its way to the cap.
+func (r *Reconciler) trackUnknownWaits(prID int64, row *store.MergeTracking, d Decision) {
+	if d.Action == ActionWait && d.PrimaryReason() == ReasonMergeabilityUnknown {
+		cooldown := r.now().Add(unknownRecheck)
+		if err := r.st.BumpMergeTrackingAttempt(prID, store.MergeAttemptUnknown, cooldown, ""); err != nil {
+			slog.Warn("mergetrack: bump unknown wait", "pr_id", prID, "err", err)
+		}
+		return
+	}
+	if row.UnknownWaits > 0 {
+		if err := r.st.ClearMergeTrackingUnknownWaits(prID); err != nil {
+			slog.Warn("mergetrack: clear unknown waits", "pr_id", prID, "err", err)
 		}
 	}
 }
@@ -508,7 +550,7 @@ func (r *Reconciler) performAction(ctx context.Context, prID int64, row *store.M
 func (r *Reconciler) dispatch(ctx context.Context, prID int64, row *store.MergeTracking, st *gh.MergeStatus, d Decision, in Input) error {
 	switch d.Action {
 	case ActionArmAutoMerge:
-		return r.armAutoMerge(prID, row, st, d)
+		return r.armAutoMerge(ctx, prID, row, st, d, in)
 	case ActionUpdateBranchRemote:
 		return r.updateBranch(ctx, prID, row, st, in)
 	case ActionUpdateBranchLocal:
@@ -522,7 +564,7 @@ func (r *Reconciler) dispatch(ctx context.Context, prID int64, row *store.MergeT
 	}
 }
 
-func (r *Reconciler) armAutoMerge(prID int64, row *store.MergeTracking, st *gh.MergeStatus, d Decision) error {
+func (r *Reconciler) armAutoMerge(ctx context.Context, prID int64, row *store.MergeTracking, st *gh.MergeStatus, d Decision, in Input) error {
 	method := MergeMethodForGitHub(d.MergeMethod)
 	am, err := r.gw.EnableAutoMerge(st.NodeID, method, st.HeadOID)
 	if err != nil {
@@ -532,6 +574,21 @@ func (r *Reconciler) armAutoMerge(prID int64, row *store.MergeTracking, st *gh.M
 			case gh.AutoMergeReasonAlreadyEnabled:
 				// The desired state already holds.
 				return r.st.ArmNativeAutoMerge(prID, st.HeadOID, method, r.now())
+			case gh.AutoMergeReasonCleanStatus:
+				// GitHub refuses to queue auto-merge on a PR it would merge
+				// right now. Arming is not the goal, merging is: if the
+				// operator asked for that, do it directly. This is the ordinary
+				// case for any PR that is already green when it is first
+				// considered — daemon start, a repo just enabled, an approval
+				// landing after CI — and falling through to the generic error
+				// path would loop arm → fail → cooldown forever.
+				if in.Cfg.Merge {
+					return r.merge(ctx, prID, row, st, d, in)
+				}
+				r.blockFor(prID, row, ReasonAutoMergeUnavailable,
+					"GitHub will not queue auto-merge on a PR that is already mergeable; "+
+						"enable merge_tracking.merge or merge it yourself", stableBlockRecheck)
+				return nil
 			case gh.AutoMergeReasonNotAllowedForRepo:
 				// Retrying every cycle would burn budget forever. Park it: the
 				// next evaluation reports the reason, and a config or repo
@@ -734,6 +791,8 @@ func attemptsSoFar(row *store.MergeTracking, kind string) int {
 		return row.ConflictAttempts
 	case store.MergeAttemptMerge:
 		return row.MergeAttempts
+	case store.MergeAttemptArm:
+		return row.ArmAttempts
 	default:
 		return 0
 	}
@@ -794,7 +853,14 @@ func (r *Reconciler) emit(eventType string, data map[string]any) {
 // blocks discovered during an action, which the pre-action evaluation could not
 // have known about.
 func (r *Reconciler) block(prID int64, row *store.MergeTracking, reason Reason, detail string) {
-	if err := r.st.BlockMergeTracking(prID, string(reason), detail, r.now().Add(r.defaultCooldown)); err != nil {
+	r.blockFor(prID, row, reason, detail, r.defaultCooldown)
+}
+
+// blockFor is block with an explicit cooldown, for the blocks that nothing on
+// Heimdallm's side is going to change: retrying them on the ordinary cadence
+// spends budget to reach the same conclusion.
+func (r *Reconciler) blockFor(prID int64, row *store.MergeTracking, reason Reason, detail string, cooldown time.Duration) {
+	if err := r.st.BlockMergeTracking(prID, string(reason), detail, r.now().Add(cooldown)); err != nil {
 		slog.Warn("mergetrack: persist block", "pr_id", prID, "err", err)
 	}
 	r.emitBlock(prID, row, reason, detail)

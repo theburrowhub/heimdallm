@@ -1,6 +1,7 @@
 package store_test
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -395,5 +396,262 @@ func TestRenameRepo_MovesMergeTrackingRows(t *testing.T) {
 	}
 	if !row.AutoMergeArmedFor("abc123") {
 		t.Error("the armed state must survive a rename")
+	}
+}
+
+func TestMergeTracking_PhasePredicates(t *testing.T) {
+	for _, phase := range []string{store.MergePhaseUpdating, store.MergePhaseResolving, store.MergePhaseMerging} {
+		m := &store.MergeTracking{Phase: phase}
+		if !m.InFlight() {
+			t.Errorf("%q should report in flight", phase)
+		}
+		if m.Terminal() {
+			t.Errorf("%q must not report terminal", phase)
+		}
+	}
+	for _, phase := range []string{store.MergePhaseMerged, store.MergePhaseAbandoned} {
+		m := &store.MergeTracking{Phase: phase}
+		if !m.Terminal() {
+			t.Errorf("%q should report terminal", phase)
+		}
+		if m.InFlight() {
+			t.Errorf("%q must not report in flight", phase)
+		}
+	}
+	for _, phase := range []string{store.MergePhaseIdle, store.MergePhaseBlocked, store.MergePhaseAutoMergeArmed} {
+		m := &store.MergeTracking{Phase: phase}
+		if m.InFlight() || m.Terminal() {
+			t.Errorf("%q should be neither in flight nor terminal", phase)
+		}
+	}
+	// A nil row is what a miss looks like; the predicates must not panic.
+	var nilRow *store.MergeTracking
+	if nilRow.InFlight() || nilRow.Terminal() || nilRow.AutoMergeArmedFor("sha") {
+		t.Error("nil row predicates should all be false")
+	}
+}
+
+// The armed anchor is the SHA, not the phase — reading the phase here meant a
+// recorded decision silently disarmed the row.
+func TestMergeTracking_AutoMergeArmedForIgnoresThePhase(t *testing.T) {
+	m := &store.MergeTracking{Phase: store.MergePhaseBlocked, AutoMergeHeadSHA: "abc"}
+	if !m.AutoMergeArmedFor("abc") {
+		t.Error("armed state must survive a phase change")
+	}
+	if m.AutoMergeArmedFor("other") {
+		t.Error("an anchor on another commit is not armed for this one")
+	}
+	if m.AutoMergeArmedFor("") {
+		t.Error("an empty head sha cannot be armed")
+	}
+	if (&store.MergeTracking{}).AutoMergeArmedFor("abc") {
+		t.Error("a row with no anchor is not armed")
+	}
+}
+
+func TestGetMergeTracking_MissingRowIsTyped(t *testing.T) {
+	s, _ := newMergeTrackingStore(t)
+	_, err := s.GetMergeTracking(9999)
+	if !errors.Is(err, store.ErrMergeTrackingNotFound) {
+		t.Fatalf("err = %v, want ErrMergeTrackingNotFound", err)
+	}
+}
+
+func TestUpdateMergeTrackingIdentity_RoundTrips(t *testing.T) {
+	s, prID := newMergeTrackingStore(t)
+	if err := s.UpdateMergeTrackingIdentity(prID, "PR_node", "main", "feature", true, true); err != nil {
+		t.Fatalf("update identity: %v", err)
+	}
+	row, err := s.GetMergeTracking(prID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if row.NodeID != "PR_node" || row.BaseRef != "main" || row.HeadRef != "feature" {
+		t.Errorf("identity not stored: %+v", row)
+	}
+	if !row.IsAuthor || !row.IsAssignee {
+		t.Errorf("flags not stored: author=%v assignee=%v", row.IsAuthor, row.IsAssignee)
+	}
+}
+
+func TestRecordMergeTrackingDecision_StoresEverythingTheUINeeds(t *testing.T) {
+	s, prID := newMergeTrackingStore(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := s.RecordMergeTrackingDecision(prID, store.MergeDecisionRecord{
+		Phase:                 store.MergePhaseBlocked,
+		HeadSHA:               "abc123",
+		BlockReason:           "checks_failing",
+		BlockDetail:           "build is failing",
+		DecisionJSON:          `{"ready":false}`,
+		ChecksRequiredFailing: 2,
+		ChecksRequiredPending: 1,
+		CooldownUntil:         now.Add(time.Hour),
+		At:                    now,
+	}); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	row, err := s.GetMergeTracking(prID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if row.BlockReason != "checks_failing" || row.BlockDetail != "build is failing" {
+		t.Errorf("block not stored: %+v", row)
+	}
+	if row.DecisionJSON != `{"ready":false}` {
+		t.Errorf("decision json = %q", row.DecisionJSON)
+	}
+	if row.ChecksRequiredFailing != 2 || row.ChecksRequiredPending != 1 {
+		t.Errorf("check counts = %d/%d", row.ChecksRequiredFailing, row.ChecksRequiredPending)
+	}
+	if !row.EvaluatedAt.Equal(now) {
+		t.Errorf("evaluated at = %v, want %v", row.EvaluatedAt, now)
+	}
+	if !row.CooldownUntil.Equal(now.Add(time.Hour)) {
+		t.Errorf("cooldown = %v", row.CooldownUntil)
+	}
+}
+
+func TestMarkMergeTrackingAbandoned_RecordsTheReason(t *testing.T) {
+	s, prID := newMergeTrackingStore(t)
+	at := time.Now().UTC().Truncate(time.Second)
+	if err := s.MarkMergeTrackingAbandoned(prID, "not_tracked", at); err != nil {
+		t.Fatalf("abandon: %v", err)
+	}
+	row, err := s.GetMergeTracking(prID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if row.Phase != store.MergePhaseAbandoned || row.TerminalReason != "not_tracked" {
+		t.Errorf("row = %+v", row)
+	}
+	if !row.CooldownUntil.IsZero() {
+		t.Error("a terminal row needs no cooldown")
+	}
+}
+
+// The manual "re-check now" action depends on this.
+func TestClearMergeTrackingCooldown_MakesTheRowDue(t *testing.T) {
+	s, prID := newMergeTrackingStore(t)
+	now := time.Now().UTC()
+	if err := s.BumpMergeTrackingAttempt(prID, store.MergeAttemptUpdate, now.Add(time.Hour), "boom"); err != nil {
+		t.Fatalf("bump: %v", err)
+	}
+	if rows, err := s.ListMergeTrackingDue(now, 10); err != nil || len(rows) != 0 {
+		t.Fatalf("precondition: rows=%d err=%v", len(rows), err)
+	}
+	if err := s.ClearMergeTrackingCooldown(prID); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	rows, err := s.ListMergeTrackingDue(now, 10)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Errorf("due rows = %d, want 1 after clearing the cooldown", len(rows))
+	}
+}
+
+func TestListMergeTrackingDue_ZeroLimitReturnsNothing(t *testing.T) {
+	s, _ := newMergeTrackingStore(t)
+	rows, err := s.ListMergeTrackingDue(time.Now().UTC(), 0)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("rows = %d, want none for a zero limit", len(rows))
+	}
+}
+
+func TestClaimMergeTrackingAction_RequiresAHeadSHA(t *testing.T) {
+	s, prID := newMergeTrackingStore(t)
+	if _, err := s.ClaimMergeTrackingAction(prID, "", store.MergePhaseMerging, time.Now().UTC()); err == nil {
+		t.Fatal("an empty head sha must be rejected — the claim would not be anchored")
+	}
+}
+
+func TestClaimMergeTrackingAction_RefusesTerminalAndExcludedRows(t *testing.T) {
+	now := time.Now().UTC()
+	for _, tc := range []struct {
+		name  string
+		setup func(*store.Store, int64)
+	}{
+		{"merged", func(s *store.Store, id int64) { _ = s.MarkMergeTrackingMerged(id, now) }},
+		{"abandoned", func(s *store.Store, id int64) { _ = s.MarkMergeTrackingAbandoned(id, "closed", now) }},
+		{"excluded", func(s *store.Store, id int64) { _ = s.SetMergeTrackingExcluded(id, true) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, prID := newMergeTrackingStore(t)
+			if err := s.ResetMergeTrackingForNewHead(prID, "abc", now); err != nil {
+				t.Fatalf("anchor: %v", err)
+			}
+			tc.setup(s, prID)
+			ok, err := s.ClaimMergeTrackingAction(prID, "abc", store.MergePhaseMerging, now)
+			if err != nil {
+				t.Fatalf("claim: %v", err)
+			}
+			if ok {
+				t.Fatalf("a %s row must not be claimable", tc.name)
+			}
+		})
+	}
+}
+
+// A crash mid-action leaves a row parked in an in-flight phase nobody owns.
+// Opening the store must hand it back rather than stranding the PR forever.
+func TestOpen_ReconcilesInFlightRowsFromAPreviousProcess(t *testing.T) {
+	dir := t.TempDir()
+	dsn := dir + "/heimdallm.db"
+	now := time.Now().UTC()
+
+	s, err := store.Open(dsn)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	prID, err := s.UpsertPR(&store.PR{
+		GithubID: 1, Repo: "acme/widgets", Number: 7, Title: "t", Author: "octocat",
+		URL: "u", State: "open", UpdatedAt: now, FetchedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if _, err := s.EnsureMergeTracking(prID, "acme/widgets", 7); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if err := s.ResetMergeTrackingForNewHead(prID, "abc", now); err != nil {
+		t.Fatalf("anchor: %v", err)
+	}
+	// Armed state is deliberately preserved across a restart: GitHub holds the
+	// real state and the next tick re-verifies it.
+	if err := s.ArmNativeAutoMerge(prID, "abc", "squash", now); err != nil {
+		t.Fatalf("arm: %v", err)
+	}
+	if ok, err := s.ClaimMergeTrackingAction(prID, "abc", store.MergePhaseResolving, now); err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	reopened, err := store.Open(dsn)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer reopened.Close()
+
+	row, err := reopened.GetMergeTracking(prID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if row.Phase != store.MergePhaseIdle {
+		t.Errorf("phase = %q, want idle after a restart", row.Phase)
+	}
+	if row.LastError == "" {
+		t.Error("the interruption should be recorded so the operator can see it happened")
+	}
+	if row.CooldownUntil.IsZero() {
+		t.Error("a reconciled row should back off briefly rather than retry instantly")
+	}
+	if row.AutoMergeHeadSHA != "abc" {
+		t.Errorf("armed anchor = %q, want it preserved across the restart", row.AutoMergeHeadSHA)
 	}
 }

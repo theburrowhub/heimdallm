@@ -94,9 +94,9 @@ MergeDecision _$MergeDecisionFromJson(Map<String, dynamic> json) =>
 Map<String, dynamic> _$MergeDecisionToJson(MergeDecision instance) =>
     <String, dynamic>{
       'ready': instance.ready,
-      'blocks': instance.blocks,
-      'checks': instance.checks,
-      'checks_summary': instance.checksSummary,
+      'blocks': instance.blocks.map((e) => e.toJson()).toList(),
+      'checks': instance.checks.map((e) => e.toJson()).toList(),
+      'checks_summary': instance.checksSummary?.toJson(),
     };
 
 MergeTrackingEntry _$MergeTrackingEntryFromJson(Map<String, dynamic> json) =>
@@ -162,5 +162,5 @@ Map<String, dynamic> _$MergeTrackingEntryToJson(MergeTrackingEntry instance) =>
       'last_error': instance.lastError,
       'evaluated_at': ?instance.evaluatedAt?.toIso8601String(),
       'merged_at': ?instance.mergedAt?.toIso8601String(),
-      'decision': ?instance.decision,
+      'decision': ?instance.decision?.toJson(),
     };

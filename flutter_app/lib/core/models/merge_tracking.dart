@@ -134,7 +134,9 @@ class MergeBlock {
 }
 
 /// The explainable decision the daemon recorded for a tracked PR.
-@JsonSerializable()
+// explicitToJson so the nested blocks, checks and summary serialise as maps
+// rather than as objects Dart cannot encode.
+@JsonSerializable(explicitToJson: true)
 class MergeDecision {
   @JsonKey(defaultValue: false)
   final bool ready;
@@ -167,7 +169,7 @@ class MergeDecision {
 
 /// A PR the authenticated user authored or is assigned to, with its
 /// merge-readiness state.
-@JsonSerializable()
+@JsonSerializable(explicitToJson: true)
 class MergeTrackingEntry {
   @JsonKey(name: 'pr_id')
   final int prId;

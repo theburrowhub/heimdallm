@@ -133,6 +133,12 @@ func (srv *Server) handleGetMergeTracking(w http.ResponseWriter, r *http.Request
 // With ?dry_run=true it re-reads GitHub and records the decision without
 // acting, which is the honest answer to "why is this stuck?". Without it, the
 // PR becomes due immediately and the next cycle acts on it.
+//
+// The acting path deliberately does NOT run the action inside the request: an
+// arm, a merge or a half-hour conflict-resolution agent run has no business
+// being bound to an HTTP connection, where a client disconnect would cancel it
+// mid-rebase. Clearing the cooldown hands the work to the reconciler, which
+// owns the claim, the work gate and the retry accounting.
 func (srv *Server) handleEvaluateMergeTracking(w http.ResponseWriter, r *http.Request) {
 	prID, ok := mergeTrackingID(w, r)
 	if !ok {
@@ -144,9 +150,14 @@ func (srv *Server) handleEvaluateMergeTracking(w http.ResponseWriter, r *http.Re
 		})
 		return
 	}
-	dryRun := r.URL.Query().Get("dry_run") == "true"
-	if err := srv.mergeTrackEvaluateFn(r.Context(), prID, dryRun); err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+	if r.URL.Query().Get("dry_run") == "true" {
+		if err := srv.mergeTrackEvaluateFn(r.Context(), prID, true); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+	} else if err := srv.store.ClearMergeTrackingCooldown(prID); err != nil {
+		slog.Error("handleEvaluateMergeTracking: clear cooldown", "pr_id", prID, "err", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 	row, err := srv.store.GetMergeTracking(prID)

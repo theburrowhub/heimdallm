@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 
 	"github.com/heimdallm/daemon/internal/executor"
@@ -20,7 +21,7 @@ type GitOps interface {
 	RebaseOnto(ctx context.Context, dir, ontoSHA string) (issues.RebaseOutcome, error)
 	ConflictedFiles(ctx context.Context, dir string) ([]string, error)
 	HasUnmergedPaths(ctx context.Context, dir string) (bool, error)
-	ChangedFiles(ctx context.Context, dir, sinceSHA string) ([]string, error)
+	WorktreeDigest(ctx context.Context, dir string) (map[string]string, error)
 	FilesWithConflictMarkers(ctx context.Context, dir string, paths []string) ([]string, error)
 	StageAll(ctx context.Context, dir string) error
 	ContinueRebase(ctx context.Context, dir string) error
@@ -164,6 +165,17 @@ func (r *ConflictResolver) Resolve(ctx context.Context, req ConflictRequest) (Co
 			fmt.Errorf("mergetrack: rebase reported conflicts but listed no files")
 	}
 
+	// Snapshot the tree exactly as the rebase left it, before the agent runs.
+	// This is the baseline the scope guard compares against; diffing against
+	// the base commit instead would list every file the PR touches, because
+	// mid-rebase HEAD already carries the commits replayed so far.
+	before, err := r.git.WorktreeDigest(ctx, workDir)
+	if err != nil {
+		r.abort(ctx, workDir)
+		return ConflictResult{PreRebaseSHA: preSHA, Files: conflicts},
+			fmt.Errorf("mergetrack: snapshot worktree: %w", err)
+	}
+
 	execOpts := executor.OptionsForSelectedCLI(req.CLIPrimary, cli, req.ExecOpts)
 	execOpts = issues.EnsureWritePerms(cli, execOpts)
 
@@ -207,14 +219,15 @@ func (r *ConflictResolver) Resolve(ctx context.Context, req ConflictRequest) (Co
 		}, fmt.Errorf("%w: markers remain in %s", ErrConflictUnresolved, strings.Join(withMarkers, ", "))
 	}
 
-	// Guard 3: scope. Only the conflicted files may change.
-	changed, err := r.git.ChangedFiles(ctx, workDir, baseSHA)
+	// Guard 3: scope. Only the conflicted files may differ from the snapshot
+	// taken before the agent ran.
+	after, err := r.git.WorktreeDigest(ctx, workDir)
 	if err != nil {
 		r.abort(ctx, workDir)
 		return ConflictResult{PreRebaseSHA: preSHA, Files: conflicts},
-			fmt.Errorf("mergetrack: list changed files: %w", err)
+			fmt.Errorf("mergetrack: snapshot worktree: %w", err)
 	}
-	if extra := outOfScope(changed, conflicts); len(extra) > 0 {
+	if extra := outOfScope(changedBetween(before, after), conflicts); len(extra) > 0 {
 		r.abort(ctx, workDir)
 		return ConflictResult{
 			PreRebaseSHA: preSHA,
@@ -273,6 +286,26 @@ func (r *ConflictResolver) abort(ctx context.Context, workDir string) {
 }
 
 // outOfScope returns the changed paths that were not in conflict.
+// changedBetween lists the paths whose content differs between two worktree
+// digests, in a stable order. A path that vanished from the second digest
+// counts too: the agent reverting a file to its committed state is as much a
+// change as editing one.
+func changedBetween(before, after map[string]string) []string {
+	var out []string
+	for path, sum := range after {
+		if prev, ok := before[path]; !ok || prev != sum {
+			out = append(out, path)
+		}
+	}
+	for path := range before {
+		if _, ok := after[path]; !ok {
+			out = append(out, path)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 func outOfScope(changed, conflicts []string) []string {
 	allowed := make(map[string]struct{}, len(conflicts))
 	for _, c := range conflicts {

@@ -87,8 +87,17 @@ func TestGetMergeTracking_DecodesTheCheckBreakdown(t *testing.T) {
 		build.App != "GitHub Actions" || build.URL != "https://ci/build" {
 		t.Errorf("check decoded incompletely: %+v", build)
 	}
-	if build.CompletedAt.Sub(build.StartedAt).Minutes() != 5 {
-		t.Errorf("timestamps did not decode: %v → %v", build.StartedAt, build.CompletedAt)
+	if build.StartedAt == nil || build.CompletedAt == nil {
+		t.Fatalf("timestamps did not decode: %v → %v", build.StartedAt, build.CompletedAt)
+	}
+	if build.CompletedAt.Sub(*build.StartedAt).Minutes() != 5 {
+		t.Errorf("timestamps did not decode: %v → %v", *build.StartedAt, *build.CompletedAt)
+	}
+	// A check that has not started must stay distinguishable from one that
+	// finished the instant it began: pointers, not the zero time.
+	if queued := entry.Decision.Checks[1]; queued.StartedAt != nil || queued.CompletedAt != nil {
+		t.Errorf("a check with no reported ends must decode to nil, got %v → %v",
+			queued.StartedAt, queued.CompletedAt)
 	}
 	if got := entry.Decision.ChecksSummary.MissingRequired; len(got) != 1 || got[0] != "e2e" {
 		t.Errorf("missing required = %v, want [e2e]", got)

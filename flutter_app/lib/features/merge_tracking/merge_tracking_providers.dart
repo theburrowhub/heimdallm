@@ -54,6 +54,11 @@ const _refreshingEvents = {
   'merge_track_branch_updated',
   'merge_track_conflict_resolved',
   'merge_track_merged',
+  // A failed automation emits only this event — the row goes to blocked with a
+  // last_error and nothing else announces it. Leaving it out meant the tab kept
+  // showing the pre-failure state until a manual refresh, at exactly the moment
+  // the operator needs the explanation.
+  'merge_track_error',
 };
 
 /// Watches the SSE stream and refreshes the listing when something happened.

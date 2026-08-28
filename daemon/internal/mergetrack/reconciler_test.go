@@ -11,6 +11,7 @@ import (
 	"github.com/heimdallm/daemon/internal/mergetrack"
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
+	"github.com/heimdallm/daemon/internal/workgate"
 )
 
 // fakeGateway is scripted per call so a test can make the second GetMergeStatus
@@ -20,6 +21,7 @@ type fakeGateway struct {
 	t *testing.T
 
 	prs       []*gh.TrackedPR
+	prsErr    error
 	statuses  []*gh.MergeStatus // consumed in order; the last one repeats
 	statusErr error
 	mergeOut  gh.MergeOutcome
@@ -50,7 +52,7 @@ func (f *fakeGateway) guard(name string) {
 
 func (f *fakeGateway) FetchMergeTrackingPRs(bool) ([]*gh.TrackedPR, error) {
 	f.guard("FetchMergeTrackingPRs")
-	return f.prs, nil
+	return f.prs, f.prsErr
 }
 
 func (f *fakeGateway) GetMergeStatus(string, int) (*gh.MergeStatus, error) {
@@ -124,13 +126,23 @@ type capturingPublisher struct{ events []sse.Event }
 
 func (p *capturingPublisher) Publish(ev sse.Event) { p.events = append(p.events, ev) }
 
-func (p *capturingPublisher) has(t string) bool {
+func (p *capturingPublisher) has(t string) bool { return p.count(t) > 0 }
+
+func (p *capturingPublisher) count(t string) int {
+	n := 0
 	for _, ev := range p.events {
 		if ev.Type == t {
-			return true
+			n++
 		}
 	}
-	return false
+	return n
+}
+
+// drainingGate always reports that an application update owns the gate.
+type drainingGate struct{}
+
+func (drainingGate) AcquireContext(context.Context, workgate.Kind) (context.Context, *workgate.Permit, bool, error) {
+	return nil, nil, false, workgate.ErrDraining
 }
 
 // harness wires a real in-memory store to a fake gateway.

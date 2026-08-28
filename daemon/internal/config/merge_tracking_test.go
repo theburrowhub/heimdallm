@@ -286,3 +286,164 @@ func TestMergeTrackingOverride_CoversEveryOverridableField(t *testing.T) {
 		}
 	}
 }
+
+// Every override field must actually apply. A field added to the struct but
+// forgotten in applyMergeTrackingOverride is silently ignored, which is the
+// worst kind of config bug: it looks configured and is not.
+func TestMergeTrackingOverride_EveryFieldApplies(t *testing.T) {
+	global := config.MergeTrackingConfig{
+		Enabled: false, EnableAutoMerge: false, UpdateBranch: false,
+		ResolveConflicts: false, Merge: false,
+		MergeMethod: "squash", IncludeAssigned: false, RequireApproval: false,
+		MaxUpdateAttempts: 3, MaxResolveAttempts: 2, MaxMergeAttempts: 3,
+		ActionCooldown: "10m", ResolveTimeout: "30m", ResolveEffort: "high",
+	}
+	global.Repos = map[string]config.MergeTrackingOverride{
+		"acme/widgets": {
+			Enabled: boolPtr(true), EnableAutoMerge: boolPtr(true),
+			UpdateBranch: boolPtr(true), ResolveConflicts: boolPtr(true),
+			Merge: boolPtr(true), MergeMethod: "rebase",
+			IncludeAssigned: boolPtr(true), RequireApproval: boolPtr(true),
+			MaxUpdateAttempts: intPtr(9), MaxResolveAttempts: intPtr(8),
+			MaxMergeAttempts: intPtr(7),
+			ActionCooldown:   "1m", ResolveTimeout: "2m", ResolveEffort: "low",
+		},
+	}
+	cfg := &config.Config{MergeTracking: global}
+	got := cfg.MergeTrackingForRepo("acme/widgets")
+
+	checks := map[string]bool{
+		"enabled":           got.Enabled,
+		"enable_auto_merge": got.EnableAutoMerge,
+		"update_branch":     got.UpdateBranch,
+		"resolve_conflicts": got.ResolveConflicts,
+		"merge":             got.Merge,
+		"include_assigned":  got.IncludeAssigned,
+		"require_approval":  got.RequireApproval,
+	}
+	for name, on := range checks {
+		if !on {
+			t.Errorf("%s was not overridden", name)
+		}
+	}
+	if got.MergeMethod != "rebase" || got.ResolveEffort != "low" {
+		t.Errorf("string overrides not applied: %+v", got)
+	}
+	if got.ActionCooldown != "1m" || got.ResolveTimeout != "2m" {
+		t.Errorf("duration overrides not applied: %+v", got)
+	}
+	if got.MaxUpdateAttempts != 9 || got.MaxResolveAttempts != 8 || got.MaxMergeAttempts != 7 {
+		t.Errorf("int overrides not applied: %+v", got)
+	}
+}
+
+func TestMergeTrackingForRepo_NoOverridesReturnsTheGlobal(t *testing.T) {
+	cfg := &config.Config{MergeTracking: config.MergeTrackingConfig{Enabled: true, MergeMethod: "merge"}}
+	got := cfg.MergeTrackingForRepo("acme/widgets")
+	if !got.Enabled || got.MergeMethod != "merge" {
+		t.Errorf("got %+v", got)
+	}
+	// A slug with no owner has no org to look up; it must not panic.
+	if got := cfg.MergeTrackingForRepo("widgets"); !got.Enabled {
+		t.Errorf("ownerless slug = %+v", got)
+	}
+}
+
+func TestApplyDefaults_FillsOnlyZeroValues(t *testing.T) {
+	cfg := &config.Config{
+		AI: config.AIConfig{Primary: "claude"},
+		MergeTracking: config.MergeTrackingConfig{
+			MergeMethod: "rebase", MaxPRsPerTick: 3, MaxUpdateAttempts: 1,
+			MaxResolveAttempts: 1, MaxMergeAttempts: 1,
+			ActionCooldown: "1m", ResolveTimeout: "2m", ResolveEffort: "low",
+		},
+	}
+	// Load applies defaults; ApplyDefaults is not exported, so go through a
+	// round trip of the public surface instead.
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	got := cfg.MergeTracking
+	if got.MergeMethod != "rebase" || got.MaxPRsPerTick != 3 || got.ResolveEffort != "low" {
+		t.Errorf("explicit values must survive: %+v", got)
+	}
+}
+
+func TestValidateMergeTracking_AcceptsAFullyPopulatedSection(t *testing.T) {
+	cfg := &config.Config{
+		AI: config.AIConfig{Primary: "claude"},
+		MergeTracking: config.MergeTrackingConfig{
+			Enabled: true, EnableAutoMerge: true, UpdateBranch: true,
+			ResolveConflicts: true, Merge: true,
+			MergeMethod: "merge", PollInterval: "5m",
+			MaxPRsPerTick: 10, MaxUpdateAttempts: 1, MaxResolveAttempts: 1, MaxMergeAttempts: 1,
+			ActionCooldown: "10m", ResolveTimeout: "30m", ResolveEffort: "max",
+			Orgs: map[string]config.MergeTrackingOverride{
+				"acme": {MergeMethod: "squash", ActionCooldown: "1m", ResolveTimeout: "1m", ResolveEffort: "low"},
+			},
+			Repos: map[string]config.MergeTrackingOverride{
+				"acme/widgets": {MaxMergeAttempts: intPtr(0)},
+			},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("a fully populated section must validate: %v", err)
+	}
+}
+
+func TestValidateMergeTracking_RejectsBadOverrideValues(t *testing.T) {
+	cases := map[string]config.MergeTrackingOverride{
+		"bad cooldown":  {ActionCooldown: "nope"},
+		"bad timeout":   {ResolveTimeout: "-1m"},
+		"bad effort":    {ResolveEffort: "maximum"},
+		"negative caps": {MaxUpdateAttempts: intPtr(-1)},
+	}
+	for name, override := range cases {
+		t.Run(name, func(t *testing.T) {
+			cfg := &config.Config{
+				AI: config.AIConfig{Primary: "claude"},
+				MergeTracking: config.MergeTrackingConfig{
+					Repos: map[string]config.MergeTrackingOverride{"acme/widgets": override},
+				},
+			}
+			if err := cfg.Validate(); err == nil {
+				t.Fatalf("%s should fail validation", name)
+			}
+		})
+	}
+	// The same rules apply to an org override.
+	cfg := &config.Config{
+		AI: config.AIConfig{Primary: "claude"},
+		MergeTracking: config.MergeTrackingConfig{
+			Orgs: map[string]config.MergeTrackingOverride{"acme": {ResolveEffort: "maximum"}},
+		},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("an invalid org override should fail validation")
+	}
+}
+
+func TestValidateMergeMethod_IsExportedAndAcceptsEmpty(t *testing.T) {
+	for _, method := range []string{"", "squash", "merge", "rebase"} {
+		if err := config.ValidateMergeMethod("x", method); err != nil {
+			t.Errorf("ValidateMergeMethod(%q) = %v, want nil", method, err)
+		}
+	}
+	err := config.ValidateMergeMethod("merge_tracking.merge_method", "ff-only")
+	if err == nil {
+		t.Fatal("an unknown method must be rejected")
+	}
+	if !strings.Contains(err.Error(), "merge_tracking.merge_method") {
+		t.Errorf("error should name the field: %v", err)
+	}
+}
+
+func TestValidateMergeTracking_RejectsANegativeBatchSize(t *testing.T) {
+	cfg := &config.Config{
+		AI:            config.AIConfig{Primary: "claude"},
+		MergeTracking: config.MergeTrackingConfig{MaxPRsPerTick: -5},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("a negative batch size should fail validation")
+	}
+}

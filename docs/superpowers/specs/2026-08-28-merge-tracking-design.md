@@ -101,7 +101,7 @@ Three things about this were not obvious and cost real debugging:
 | 6 | Draft | `draft` — tracked and displayed, never acted on |
 | 7 | Head in someone else's fork | `cross_fork` — evaluated, never written to |
 | 8 | In a merge queue | `in_merge_queue` — GitHub owns it |
-| 9 | `mergeable`/`mergeStateStatus` `UNKNOWN` | `ActionWait`, short recheck, capped at 5 |
+| 9 | `mergeable`/`mergeStateStatus` `UNKNOWN` | `ActionWait`, short recheck, capped at 5 waits |
 | 10 | `HAS_HOOKS` | `ActionWait` |
 | 11 | `CONFLICTING` / `DIRTY` | `conflicts` |
 | 12 | `BEHIND` | `behind_base` |
@@ -161,6 +161,10 @@ Implemented in `Decide` with two independent facts, which can disagree:
 
 Promotion to a direct merge requires both, plus `AutoMergeArmedAt < TickStart` — so it can never happen in the same pass that armed it. When GitHub is armed but our record points at a different commit (after a push), the pass does nothing and the reconciler re-anchors the row; the next pass can promote. One extra cycle in a rare case, in exchange for never merging a commit on the strength of a licence granted for a different one.
 
+The re-anchor stamps `AutoMergeArmedAt` with **now**, not with GitHub's `enabledAt`. GitHub keeps auto-merge across pushes, so its `enabledAt` is typically well in the past; anchoring to it would satisfy "armed before this pass started" in the very same pass and defeat the rule above. The licence is granted per commit, and GitHub has not yet had a pass at the new one. The re-anchor only fires while the row points at another commit, so this cannot restart the clock cycle after cycle.
+
+**GitHub refuses to arm an already-mergeable PR.** `enablePullRequestAutoMerge` answers *"Pull request is in clean status"* when the PR could be merged right now — which is the ordinary case for any PR that is green the first time it is considered: daemon start, a repo just enabled, an approval landing after CI, fast CI. Arming is not the goal, merging is, so with `merge = true` that refusal falls straight through to the direct merge. With `merge = false` there is nothing left to automate and the row parks with `auto_merge_unavailable` and an explanation. Treating it as a generic failure instead produced an arm → fail → one-minute-cooldown loop in which the PR never merged.
+
 Three further guards, all from the plan review:
 
 - **`DisableAutoMerge` immediately before the direct merge.** With it still armed, GitHub could fire its own merge concurrently with ours.
@@ -190,16 +194,21 @@ checkout the head branch          → preSHA
 fetch the base                    → baseSHA
 rebase onto baseSHA
   clean?    → push, done
-  conflict? → run the agent
+  conflict? ↓
+snapshot the worktree (path → content hash) ← guard 3's baseline
+run the agent
 guard 1: unmerged paths remain          → abort, nothing pushed
 guard 2: conflict markers in the files  → abort, nothing pushed
-guard 3: any file outside the conflict set changed → abort, nothing pushed
+guard 3: anything but a conflicted file differs from the snapshot
+                                        → abort, nothing pushed
 stage (sensitive-path denylist) → rebase --continue
 push --force-with-lease=<branch>:<preSHA>
 comment on the PR, naming preSHA
 ```
 
 Guard 2 exists because an agent can "resolve" a conflict by deleting one side and leaving the markers, and git stages that without complaint — in some languages the result even compiles. Guard 3 is the cheapest possible signal that the agent did something unintended.
+
+Guard 3 compares **two snapshots taken either side of the agent run**, not a diff against the base commit. Mid-rebase, HEAD already carries the PR's earlier replayed commits, so `git diff <baseSHA>` lists every file the PR touches — the guard would fire on every genuine resolution of any PR whose commits touch more than the conflicted files, before the agent had touched anything. The snapshot is `path → content hash` rather than a set of names, so an edit that changes no path names is still caught, and a deletion is a value (the empty hash) rather than an absence.
 
 The lease is spelled out explicitly (`--force-with-lease=<branch>:<sha>`) rather than using the bare form, which compares against the local remote-tracking ref: a stale fetch makes the bare form wrong, and being wrong here means overwriting somebody's commits.
 

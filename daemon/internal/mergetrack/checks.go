@@ -40,6 +40,12 @@ func summariseChecks(st *gh.MergeStatus) ([]gh.CheckContext, ChecksSummary) {
 	summary := ChecksSummary{Truncated: st.ChecksTruncated}
 
 	for _, c := range st.Checks {
+		// A nameless check would render as a blank row and could not be acted
+		// on. The GitHub decoder already drops these; this is the guard at the
+		// layer that actually produces the display list.
+		if strings.TrimSpace(c.Name) == "" {
+			continue
+		}
 		// A context named by branch protection is required even if GitHub's
 		// isRequired said otherwise (it can lag a rule change).
 		if _, ok := requiredByName[c.Name]; ok {

@@ -128,9 +128,9 @@ func TestRenameProbe_404FromGH_DoesNotDispatch(t *testing.T) {
 	apiErr := &gh.APIError{StatusCode: http.StatusNotFound, Body: "Not Found"}
 	canonical := &fakeCanonical{
 		results: map[string]canonicalResult{
-			"acme/gone":      {err: apiErr},
-			"acme/healthy":   {canonical: "acme/healthy"},
-			"acme/renamed":   {canonical: "acme/new-name"},
+			"acme/gone":    {err: apiErr},
+			"acme/healthy": {canonical: "acme/healthy"},
+			"acme/renamed": {canonical: "acme/new-name"},
 		},
 	}
 	dispatcher := &fakeDispatcher{}

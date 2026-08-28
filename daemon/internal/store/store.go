@@ -242,6 +242,7 @@ CREATE TABLE IF NOT EXISTS merge_tracking (
   checks_required_failing INTEGER  NOT NULL DEFAULT 0,
   checks_required_pending INTEGER  NOT NULL DEFAULT 0,
   unknown_waits           INTEGER  NOT NULL DEFAULT 0,
+  arm_attempts            INTEGER  NOT NULL DEFAULT 0,
   update_attempts         INTEGER  NOT NULL DEFAULT 0,
   conflict_attempts       INTEGER  NOT NULL DEFAULT 0,
   merge_attempts          INTEGER  NOT NULL DEFAULT 0,
@@ -400,6 +401,7 @@ func Open(dsn string) (*Store, error) {
 		checks_required_failing INTEGER  NOT NULL DEFAULT 0,
 		checks_required_pending INTEGER  NOT NULL DEFAULT 0,
 		unknown_waits           INTEGER  NOT NULL DEFAULT 0,
+		arm_attempts            INTEGER  NOT NULL DEFAULT 0,
 		update_attempts         INTEGER  NOT NULL DEFAULT 0,
 		conflict_attempts       INTEGER  NOT NULL DEFAULT 0,
 		merge_attempts          INTEGER  NOT NULL DEFAULT 0,
@@ -412,6 +414,7 @@ func Open(dsn string) (*Store, error) {
 		terminal_reason         TEXT     NOT NULL DEFAULT '',
 		updated_at              DATETIME NOT NULL
 	)`)
+	db.Exec("ALTER TABLE merge_tracking ADD COLUMN arm_attempts INTEGER NOT NULL DEFAULT 0")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_merge_tracking_repo ON merge_tracking(repo)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_merge_tracking_due ON merge_tracking(phase, cooldown_until)")
 	// A process that died mid-action leaves a row parked in an in-flight phase

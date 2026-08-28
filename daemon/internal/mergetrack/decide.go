@@ -40,9 +40,14 @@ func Decide(d Decision, st *gh.MergeStatus, in Input) Decision {
 	}
 
 	// Respect the cooldown, except for an operator-initiated evaluation.
+	//
+	// The cooldown is APPENDED, never prepended: it is our own attempt pacing,
+	// not a reason the PR cannot merge. Making it the primary reason would
+	// overwrite the real blocker in the UI and in the persisted row, so a PR
+	// waiting on a failing check would start reporting "cooling down" instead.
 	if !in.IgnoreCooldown && !in.State.CooldownUntil.IsZero() && in.State.CooldownUntil.After(in.Now) {
 		d.Action = ActionNone
-		d.Blocks = prependBlock(d.Blocks, Block{
+		d.Blocks = append(d.Blocks, Block{
 			Reason: ReasonCooldown,
 			Detail: fmt.Sprintf("next attempt after %s", in.State.CooldownUntil.UTC().Format("15:04:05Z")),
 		})
@@ -261,6 +266,8 @@ func AttemptKindFor(a Action) string {
 		return store.MergeAttemptConflict
 	case ActionMerge:
 		return store.MergeAttemptMerge
+	case ActionArmAutoMerge:
+		return store.MergeAttemptArm
 	default:
 		return ""
 	}

@@ -77,17 +77,21 @@ type CheckContext struct {
 	Description string     `json:"description,omitempty"`
 	App         string     `json:"app,omitempty"`
 	URL         string     `json:"url,omitempty"`
-	StartedAt   time.Time  `json:"started_at,omitempty"`
-	CompletedAt time.Time  `json:"completed_at,omitempty"`
+	// Pointers rather than values: `omitempty` does nothing for a struct, so a
+	// time.Time here would serialise a queued check's unset ends as
+	// "0001-01-01T00:00:00Z" and every client would read two equal timestamps
+	// as a check that finished instantly.
+	StartedAt   *time.Time `json:"started_at,omitempty"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
 }
 
 // Duration reports how long the check took, or 0 when GitHub did not report
 // both ends.
 func (c CheckContext) Duration() time.Duration {
-	if c.StartedAt.IsZero() || c.CompletedAt.IsZero() || c.CompletedAt.Before(c.StartedAt) {
+	if c.StartedAt == nil || c.CompletedAt == nil || c.CompletedAt.Before(*c.StartedAt) {
 		return 0
 	}
-	return c.CompletedAt.Sub(c.StartedAt)
+	return c.CompletedAt.Sub(*c.StartedAt)
 }
 
 // OpinionatedReview is the latest opinionated review state per reviewer.
@@ -580,10 +584,8 @@ func (c *Client) GetMergeStatus(repo string, number int) (*MergeStatus, error) {
 		}
 		// Only branch protection is allowed to be missing. Anything else means
 		// we would be evaluating on incomplete gating data.
-		for _, p := range partial.Paths {
-			if !strings.Contains(p, "branchProtectionRule") {
-				return nil, fmt.Errorf("github: merge status %s#%d: unusable partial response: %w", repo, number, gqlErr)
-			}
+		if !onlyProtectionErrors(partial) {
+			return nil, fmt.Errorf("github: merge status %s#%d: unusable partial response: %w", repo, number, gqlErr)
 		}
 		protectionUnreadable = true
 	}
@@ -637,6 +639,14 @@ func (c *Client) paginateReviewThreads(owner, name string, number int, first *me
 			if !errors.As(err, &partial) {
 				return fmt.Errorf("github: merge status threads page %d: %w", page+1, err)
 			}
+			if !onlyProtectionErrors(partial) {
+				// A tolerated field error on the connection itself decodes to
+				// an empty page with hasNextPage false, which would end the
+				// loop as if the tail did not exist. Say so instead: the
+				// evaluator refuses to call a truncated PR ready.
+				st.ThreadsTruncated = true
+				return nil
+			}
 		}
 		if resp.Repository == nil || resp.Repository.PullRequest == nil {
 			st.ThreadsTruncated = true
@@ -678,6 +688,13 @@ func (c *Client) paginateCheckContexts(owner, name string, number int, first *me
 			if !errors.As(err, &partial) {
 				return fmt.Errorf("github: merge status checks page %d: %w", page+1, err)
 			}
+			if !onlyProtectionErrors(partial) {
+				// Same fail-safe as the thread loop: an unexpected field error
+				// on this page means we cannot see every check, and a check we
+				// cannot see is not a check we may declare green.
+				st.ChecksTruncated = true
+				return nil
+			}
 		}
 		next := firstRollup(&resp)
 		if next == nil {
@@ -689,4 +706,20 @@ func (c *Client) paginateCheckContexts(owner, name string, number int, first *me
 		page++
 	}
 	return nil
+}
+
+// onlyProtectionErrors reports whether every path in a partial response points
+// at branchProtectionRule — the one field a non-admin token is expected to be
+// refused. Any other missing field means the snapshot is incomplete somewhere
+// that matters for the merge decision.
+func onlyProtectionErrors(partial *PartialGraphQLError) bool {
+	if partial == nil {
+		return false
+	}
+	for _, p := range partial.Paths {
+		if !strings.Contains(p, "branchProtectionRule") {
+			return false
+		}
+	}
+	return len(partial.Paths) > 0
 }

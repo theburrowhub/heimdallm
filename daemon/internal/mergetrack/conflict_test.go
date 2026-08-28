@@ -21,11 +21,24 @@ type fakeGit struct {
 	rebase      issues.RebaseOutcome
 	rebaseErr   error
 
-	unmerged     bool
-	markerFiles  []string
+	unmerged    bool
+	markerFiles []string
+	// changedFiles is what the agent touched: the fake reports an empty
+	// worktree before the agent runs and one entry per path after, which is
+	// exactly the before/after pair the scope guard compares.
 	changedFiles []string
+	digestCalls  int
 	newHeadSHA   string
 	pushErr      error
+	checkoutErr  error
+	fetchErr     error
+	headErr      error
+	unmergedErr  error
+	markersErr   error
+	changedErr   error
+	stageErr     error
+	continueErr  error
+	abortErr     error
 
 	calls     []string
 	pushLease string
@@ -44,12 +57,12 @@ func (f *fakeGit) called(name string) bool {
 
 func (f *fakeGit) CheckoutRemoteBranch(_ context.Context, _, _, _, _ string) (string, error) {
 	f.record("checkout")
-	return f.checkoutSHA, nil
+	return f.checkoutSHA, f.checkoutErr
 }
 
 func (f *fakeGit) FetchRef(_ context.Context, _, _, _, _ string) (string, error) {
 	f.record("fetch")
-	return f.baseSHA, nil
+	return f.baseSHA, f.fetchErr
 }
 
 func (f *fakeGit) RebaseOnto(_ context.Context, _, _ string) (issues.RebaseOutcome, error) {
@@ -63,36 +76,47 @@ func (f *fakeGit) ConflictedFiles(_ context.Context, _ string) ([]string, error)
 
 func (f *fakeGit) HasUnmergedPaths(_ context.Context, _ string) (bool, error) {
 	f.record("has_unmerged")
-	return f.unmerged, nil
+	return f.unmerged, f.unmergedErr
 }
 
-func (f *fakeGit) ChangedFiles(_ context.Context, _, _ string) ([]string, error) {
-	f.record("changed_files")
-	return f.changedFiles, nil
+func (f *fakeGit) WorktreeDigest(_ context.Context, _ string) (map[string]string, error) {
+	f.record("digest")
+	if f.changedErr != nil {
+		return nil, f.changedErr
+	}
+	f.digestCalls++
+	if f.digestCalls == 1 {
+		return map[string]string{}, nil
+	}
+	digest := make(map[string]string, len(f.changedFiles))
+	for _, path := range f.changedFiles {
+		digest[path] = "sum-" + path
+	}
+	return digest, nil
 }
 
 func (f *fakeGit) FilesWithConflictMarkers(_ context.Context, _ string, _ []string) ([]string, error) {
 	f.record("markers")
-	return f.markerFiles, nil
+	return f.markerFiles, f.markersErr
 }
 
 func (f *fakeGit) StageAll(_ context.Context, _ string) error {
 	f.record("stage")
-	return nil
+	return f.stageErr
 }
 
 func (f *fakeGit) ContinueRebase(_ context.Context, _ string) error {
 	f.record("continue")
-	return nil
+	return f.continueErr
 }
 
 func (f *fakeGit) AbortRebase(_ context.Context, _ string) error {
 	f.record("abort")
-	return nil
+	return f.abortErr
 }
 
 func (f *fakeGit) HeadSHA(_ context.Context, _ string) (string, error) {
-	return f.newHeadSHA, nil
+	return f.newHeadSHA, f.headErr
 }
 
 func (f *fakeGit) PushForceWithLease(_ context.Context, _, _, _, expectedRemoteSHA, _ string) error {
@@ -102,11 +126,14 @@ func (f *fakeGit) PushForceWithLease(_ context.Context, _, _, _, expectedRemoteS
 }
 
 type fakeExec struct {
-	prompt string
-	err    error
+	prompt    string
+	err       error
+	detectErr error
 }
 
-func (f *fakeExec) Detect(primary, _ string) (string, error) { return primary, nil }
+func (f *fakeExec) Detect(primary, _ string) (string, error) {
+	return primary, f.detectErr
+}
 
 func (f *fakeExec) ExecuteRaw(_, prompt string, _ executor.ExecOptions) ([]byte, error) {
 	f.prompt = prompt
@@ -335,5 +362,149 @@ func TestConflictPrompt_FencesAndSanitisesUntrustedText(t *testing.T) {
 	}
 	if !strings.Contains(p, "leave its markers in place and stop") {
 		t.Error("the prompt must give the agent a safe way to decline")
+	}
+}
+
+// Every git failure between the checkout and the push has to abort cleanly and
+// leave the branch untouched. A half-finished rebase in a reused worktree is
+// how the next attempt inherits somebody else's mess.
+func TestResolve_EveryGitFailureAbortsWithoutPushing(t *testing.T) {
+	cases := map[string]*fakeGit{
+		"checkout": {checkoutErr: errors.New("boom")},
+		"fetch":    {checkoutSHA: headSHA, fetchErr: errors.New("boom")},
+		"rebase":   {checkoutSHA: headSHA, rebaseErr: errors.New("boom")},
+		"unmerged check": {
+			checkoutSHA: headSHA,
+			rebase:      issues.RebaseOutcome{Conflicts: []string{"a.go"}},
+			unmergedErr: errors.New("boom"),
+		},
+		"marker scan": {
+			checkoutSHA: headSHA,
+			rebase:      issues.RebaseOutcome{Conflicts: []string{"a.go"}},
+			markersErr:  errors.New("boom"),
+		},
+		"changed files": {
+			checkoutSHA: headSHA,
+			rebase:      issues.RebaseOutcome{Conflicts: []string{"a.go"}},
+			changedErr:  errors.New("boom"),
+		},
+		"stage": {
+			checkoutSHA:  headSHA,
+			rebase:       issues.RebaseOutcome{Conflicts: []string{"a.go"}},
+			changedFiles: []string{"a.go"},
+			stageErr:     errors.New("boom"),
+		},
+		"continue": {
+			checkoutSHA:  headSHA,
+			rebase:       issues.RebaseOutcome{Conflicts: []string{"a.go"}},
+			changedFiles: []string{"a.go"},
+			continueErr:  errors.New("boom"),
+		},
+	}
+	for name, git := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := mergetrack.NewConflictResolver(git, &fakeExec{}).Resolve(context.Background(), conflictReq())
+			if err == nil {
+				t.Fatalf("a %s failure must be reported", name)
+			}
+			if git.called("push") {
+				t.Fatalf("nothing may be pushed after a %s failure", name)
+			}
+		})
+	}
+}
+
+// A rebase reporting !Clean with no files would otherwise mean "run the agent
+// on nothing and push whatever it did".
+func TestResolve_ConflictWithNoFilesIsRefused(t *testing.T) {
+	git := &fakeGit{checkoutSHA: headSHA, rebase: issues.RebaseOutcome{Clean: false}}
+	exec := &fakeExec{}
+	_, err := mergetrack.NewConflictResolver(git, exec).Resolve(context.Background(), conflictReq())
+	if err == nil {
+		t.Fatal("a conflict with no files listed must be refused")
+	}
+	if exec.prompt != "" {
+		t.Error("the agent must not run when there is nothing to resolve")
+	}
+	if !git.called("abort") {
+		t.Error("the rebase must be aborted")
+	}
+}
+
+func TestResolve_PushFailureIsReported(t *testing.T) {
+	git := &fakeGit{
+		checkoutSHA:  headSHA,
+		rebase:       issues.RebaseOutcome{Conflicts: []string{"a.go"}},
+		changedFiles: []string{"a.go"},
+		newHeadSHA:   "newhead",
+		pushErr:      errors.New("remote rejected"),
+	}
+	res, err := mergetrack.NewConflictResolver(git, &fakeExec{}).Resolve(context.Background(), conflictReq())
+	if err == nil {
+		t.Fatal("a rejected push must be reported")
+	}
+	if res.Pushed {
+		t.Error("a rejected push is not a push")
+	}
+	// The pre-rebase SHA still comes back, so the caller can record it.
+	if res.PreRebaseSHA != headSHA {
+		t.Errorf("pre-rebase sha = %q, want it reported even on failure", res.PreRebaseSHA)
+	}
+}
+
+func TestResolve_HeadSHAFailureIsReported(t *testing.T) {
+	git := &fakeGit{
+		checkoutSHA:  headSHA,
+		rebase:       issues.RebaseOutcome{Conflicts: []string{"a.go"}},
+		changedFiles: []string{"a.go"},
+		headErr:      errors.New("boom"),
+	}
+	if _, err := mergetrack.NewConflictResolver(git, &fakeExec{}).Resolve(context.Background(), conflictReq()); err == nil {
+		t.Fatal("failing to read the new head must be reported")
+	}
+}
+
+func TestResolve_DetectFailureIsReportedBeforeTouchingGit(t *testing.T) {
+	git := &fakeGit{}
+	exec := &fakeExec{detectErr: errors.New("no CLI installed")}
+	if _, err := mergetrack.NewConflictResolver(git, exec).Resolve(context.Background(), conflictReq()); err == nil {
+		t.Fatal("a missing agent binary must be reported")
+	}
+	if git.called("checkout") {
+		t.Error("nothing should be checked out when no agent is available")
+	}
+}
+
+func TestResolve_RequiresRefsAndAWiredResolver(t *testing.T) {
+	r := mergetrack.NewConflictResolver(&fakeGit{}, &fakeExec{})
+
+	req := conflictReq()
+	req.HeadRef = ""
+	if _, err := r.Resolve(context.Background(), req); err == nil {
+		t.Error("an empty head ref must be rejected")
+	}
+	req = conflictReq()
+	req.BaseRef = ""
+	if _, err := r.Resolve(context.Background(), req); err == nil {
+		t.Error("an empty base ref must be rejected")
+	}
+
+	unwired := mergetrack.NewConflictResolver(nil, nil)
+	if _, err := unwired.Resolve(context.Background(), conflictReq()); err == nil {
+		t.Error("an unwired resolver must be reported")
+	}
+}
+
+// An abort that itself fails must not mask the original error.
+func TestResolve_AbortFailureDoesNotMaskTheRealError(t *testing.T) {
+	git := &fakeGit{
+		checkoutSHA: headSHA,
+		rebase:      issues.RebaseOutcome{Conflicts: []string{"a.go"}},
+		unmerged:    true,
+		abortErr:    errors.New("abort failed too"),
+	}
+	_, err := mergetrack.NewConflictResolver(git, &fakeExec{}).Resolve(context.Background(), conflictReq())
+	if !errors.Is(err, mergetrack.ErrConflictUnresolved) {
+		t.Fatalf("err = %v, want the original ErrConflictUnresolved", err)
 	}
 }
