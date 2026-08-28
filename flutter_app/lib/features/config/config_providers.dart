@@ -539,6 +539,60 @@ Map<String, dynamic> _computeGlobalDiff(AppConfig old, AppConfig updated) {
   }
   if (autonomousDiff.isNotEmpty) diff['autonomous'] = autonomousDiff;
 
+  // Merge tracking
+  final mtDiff = <String, dynamic>{};
+  final oldMt = old.mergeTracking;
+  final newMt = updated.mergeTracking;
+  if (oldMt.enabled != newMt.enabled) {
+    mtDiff['enabled'] = newMt.enabled;
+  }
+  if (oldMt.enableAutoMerge != newMt.enableAutoMerge) {
+    mtDiff['enable_auto_merge'] = newMt.enableAutoMerge;
+  }
+  if (oldMt.updateBranch != newMt.updateBranch) {
+    mtDiff['update_branch'] = newMt.updateBranch;
+  }
+  if (oldMt.resolveConflicts != newMt.resolveConflicts) {
+    mtDiff['resolve_conflicts'] = newMt.resolveConflicts;
+  }
+  if (oldMt.merge != newMt.merge) {
+    mtDiff['merge'] = newMt.merge;
+  }
+  if (oldMt.mergeMethod != newMt.mergeMethod) {
+    mtDiff['merge_method'] = newMt.mergeMethod;
+  }
+  if (oldMt.includeAssigned != newMt.includeAssigned) {
+    mtDiff['include_assigned'] = newMt.includeAssigned;
+  }
+  if (oldMt.requireApproval != newMt.requireApproval) {
+    mtDiff['require_approval'] = newMt.requireApproval;
+  }
+  if (oldMt.pollInterval != newMt.pollInterval) {
+    mtDiff['poll_interval'] = newMt.pollInterval;
+  }
+  if (oldMt.maxPrsPerTick != newMt.maxPrsPerTick) {
+    mtDiff['max_prs_per_tick'] = newMt.maxPrsPerTick;
+  }
+  if (oldMt.maxUpdateAttempts != newMt.maxUpdateAttempts) {
+    mtDiff['max_update_attempts'] = newMt.maxUpdateAttempts;
+  }
+  if (oldMt.maxResolveAttempts != newMt.maxResolveAttempts) {
+    mtDiff['max_resolve_attempts'] = newMt.maxResolveAttempts;
+  }
+  if (oldMt.maxMergeAttempts != newMt.maxMergeAttempts) {
+    mtDiff['max_merge_attempts'] = newMt.maxMergeAttempts;
+  }
+  if (oldMt.actionCooldown != newMt.actionCooldown) {
+    mtDiff['action_cooldown'] = newMt.actionCooldown;
+  }
+  if (oldMt.resolveTimeout != newMt.resolveTimeout) {
+    mtDiff['resolve_timeout'] = newMt.resolveTimeout;
+  }
+  if (oldMt.resolveEffort != newMt.resolveEffort) {
+    mtDiff['resolve_effort'] = newMt.resolveEffort;
+  }
+  if (mtDiff.isNotEmpty) diff['merge_tracking'] = mtDiff;
+
   // Circuit breaker
   final cbDiff = <String, dynamic>{};
   if (old.circuitBreaker.perPr24h != updated.circuitBreaker.perPr24h) {

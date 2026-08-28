@@ -34,30 +34,27 @@ Map<String, dynamic> _$TrackedIssueReviewToJson(TrackedIssueReview instance) =>
 
 TrackedIssueLinkedPR _$TrackedIssueLinkedPRFromJson(
   Map<String, dynamic> json,
-) =>
-    TrackedIssueLinkedPR(
-      number: (json['number'] as num).toInt(),
-      url: json['url'] as String,
-      state: json['state'] as String,
-      externalReviewState: json['external_review_state'] as String,
-      externalReviewer: json['external_reviewer'] as String,
-      externalReviewAt: json['external_review_at'] == null
-          ? null
-          : DateTime.parse(json['external_review_at'] as String),
-    );
+) => TrackedIssueLinkedPR(
+  number: (json['number'] as num).toInt(),
+  url: json['url'] as String,
+  state: json['state'] as String,
+  externalReviewState: json['external_review_state'] as String,
+  externalReviewer: json['external_reviewer'] as String,
+  externalReviewAt: json['external_review_at'] == null
+      ? null
+      : DateTime.parse(json['external_review_at'] as String),
+);
 
 Map<String, dynamic> _$TrackedIssueLinkedPRToJson(
   TrackedIssueLinkedPR instance,
-) =>
-    <String, dynamic>{
-      'number': instance.number,
-      'url': instance.url,
-      'state': instance.state,
-      'external_review_state': instance.externalReviewState,
-      'external_reviewer': instance.externalReviewer,
-      if (instance.externalReviewAt != null)
-        'external_review_at': instance.externalReviewAt!.toIso8601String(),
-    };
+) => <String, dynamic>{
+  'number': instance.number,
+  'url': instance.url,
+  'state': instance.state,
+  'external_review_state': instance.externalReviewState,
+  'external_reviewer': instance.externalReviewer,
+  'external_review_at': instance.externalReviewAt?.toIso8601String(),
+};
 
 TrackedIssue _$TrackedIssueFromJson(Map<String, dynamic> json) => TrackedIssue(
   id: (json['id'] as num).toInt(),

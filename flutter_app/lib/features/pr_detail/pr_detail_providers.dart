@@ -1,7 +1,10 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../dashboard/dashboard_providers.dart';
 
-final prDetailProvider = FutureProvider.family<Map<String, dynamic>, int>((ref, prId) async {
+final prDetailProvider = FutureProvider.family<Map<String, dynamic>, int>((
+  ref,
+  prId,
+) async {
   ref.watch(sseStreamProvider);
   final api = ref.watch(apiClientProvider);
   return api.fetchPR(prId);
@@ -25,6 +28,7 @@ class ReviewTriggerNotifier extends AsyncNotifier<void> {
   }
 }
 
-final reviewTriggerProvider = AsyncNotifierProvider.autoDispose<ReviewTriggerNotifier, void>(
-  ReviewTriggerNotifier.new,
-);
+final reviewTriggerProvider =
+    AsyncNotifierProvider.autoDispose<ReviewTriggerNotifier, void>(
+      ReviewTriggerNotifier.new,
+    );
