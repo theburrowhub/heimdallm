@@ -1408,6 +1408,13 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			DefaultCooldown: pollInterval,
 		})
 
+		// The Merge tab's own add-a-PR action. Separate from POST /prs/add,
+		// which routes through the review pipeline and therefore refuses the
+		// operator's own PRs — the very ones merge tracking exists for.
+		srv.SetMergeTrackEnrolFn(func(prID int64, repo string, number int) error {
+			return mergeTrackReconciler.EnrolExistingPR(prID, repo, number)
+		})
+
 		// The on-demand evaluation behind POST /merge-tracking/{prID}/evaluate.
 		srv.SetMergeTrackEvaluateFn(func(ctx context.Context, prID int64, dryRun bool) error {
 			_, err := mergeTrackReconciler.ReconcilePR(ctx, prID, time.Now().UTC(), dryRun)
@@ -2462,6 +2469,11 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			"orgs":              autonomousOrgs,
 			"repos":             autonomousRepos,
 		}
+		// Merge tracking. Without this projection the app PATCHes the section
+		// successfully, the daemon honours it, and the settings screen still
+		// reads it back as defaults on the next load — the toggle silently
+		// resets itself in front of the operator.
+		result["merge_tracking"] = mergeTrackingConfigMap(c.MergeTracking)
 		result["circuit_breaker"] = map[string]any{
 			"per_pr_24h":                 c.CircuitBreaker.PerPR24h,
 			"per_repo_hr":                c.CircuitBreaker.PerRepoHr,
@@ -6052,6 +6064,93 @@ func logRepoContextFallback(scope, repo string, err error) {
 // for the GET /config DTO. Only fields that are explicitly set (non-nil pointer
 // or non-empty string) are included so the caller can distinguish "inherit" from
 // an explicit false/zero value.
+// mergeTrackingConfigMap renders the whole [merge_tracking] section for
+// GET /config, overrides included.
+//
+// Without this projection the app PATCHes the section successfully, the daemon
+// honours it, and the settings screen still reads it back as defaults on the
+// next load — the toggle silently resets itself in front of the operator.
+func mergeTrackingConfigMap(c config.MergeTrackingConfig) map[string]any {
+	orgs := make(map[string]any, len(c.Orgs))
+	for org, o := range c.Orgs {
+		orgs[org] = mergeTrackingOverrideMap(o)
+	}
+	repos := make(map[string]any, len(c.Repos))
+	for repo, o := range c.Repos {
+		repos[repo] = mergeTrackingOverrideMap(o)
+	}
+	return map[string]any{
+		"enabled":              c.Enabled,
+		"enable_auto_merge":    c.EnableAutoMerge,
+		"update_branch":        c.UpdateBranch,
+		"resolve_conflicts":    c.ResolveConflicts,
+		"merge":                c.Merge,
+		"merge_method":         c.MergeMethod,
+		"include_assigned":     c.IncludeAssigned,
+		"require_approval":     c.RequireApproval,
+		"poll_interval":        c.PollInterval,
+		"max_prs_per_tick":     c.MaxPRsPerTick,
+		"max_update_attempts":  c.MaxUpdateAttempts,
+		"max_resolve_attempts": c.MaxResolveAttempts,
+		"max_merge_attempts":   c.MaxMergeAttempts,
+		"action_cooldown":      c.ActionCooldown,
+		"resolve_timeout":      c.ResolveTimeout,
+		"resolve_effort":       c.ResolveEffort,
+		"orgs":                 orgs,
+		"repos":                repos,
+	}
+}
+
+// mergeTrackingOverrideMap renders one per-org / per-repo override for
+// GET /config. Unset pointers are omitted so the client can tell "inherit" from
+// "explicitly false".
+func mergeTrackingOverrideMap(o config.MergeTrackingOverride) map[string]any {
+	out := map[string]any{}
+	if o.Enabled != nil {
+		out["enabled"] = *o.Enabled
+	}
+	if o.EnableAutoMerge != nil {
+		out["enable_auto_merge"] = *o.EnableAutoMerge
+	}
+	if o.UpdateBranch != nil {
+		out["update_branch"] = *o.UpdateBranch
+	}
+	if o.ResolveConflicts != nil {
+		out["resolve_conflicts"] = *o.ResolveConflicts
+	}
+	if o.Merge != nil {
+		out["merge"] = *o.Merge
+	}
+	if o.MergeMethod != "" {
+		out["merge_method"] = o.MergeMethod
+	}
+	if o.IncludeAssigned != nil {
+		out["include_assigned"] = *o.IncludeAssigned
+	}
+	if o.RequireApproval != nil {
+		out["require_approval"] = *o.RequireApproval
+	}
+	if o.MaxUpdateAttempts != nil {
+		out["max_update_attempts"] = *o.MaxUpdateAttempts
+	}
+	if o.MaxResolveAttempts != nil {
+		out["max_resolve_attempts"] = *o.MaxResolveAttempts
+	}
+	if o.MaxMergeAttempts != nil {
+		out["max_merge_attempts"] = *o.MaxMergeAttempts
+	}
+	if o.ActionCooldown != "" {
+		out["action_cooldown"] = o.ActionCooldown
+	}
+	if o.ResolveTimeout != "" {
+		out["resolve_timeout"] = o.ResolveTimeout
+	}
+	if o.ResolveEffort != "" {
+		out["resolve_effort"] = o.ResolveEffort
+	}
+	return out
+}
+
 func autonomousOverrideMap(o config.AutonomousOverride) map[string]any {
 	out := map[string]any{}
 	if o.Enabled != nil {

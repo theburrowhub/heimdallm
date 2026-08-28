@@ -294,6 +294,71 @@ class ApiClient {
     );
   }
 
+  /// Patches the per-repo merge-tracking override.
+  ///
+  /// Merge tracking keeps its overrides in `merge_tracking.repos.<repo>`, not
+  /// in `repo_overrides`, so it cannot ride along with the rest of the per-repo
+  /// config — it has its own endpoint on the daemon.
+  Future<void> patchMergeTrackingRepoConfig(
+    String repo,
+    Map<String, dynamic> patch,
+  ) => _patchMergeTrackingScope('repos', repo, patch);
+
+  /// The org-level half of [patchMergeTrackingRepoConfig].
+  Future<void> patchMergeTrackingOrgConfig(
+    String org,
+    Map<String, dynamic> patch,
+  ) => _patchMergeTrackingScope('orgs', org, patch);
+
+  Future<void> _patchMergeTrackingScope(
+    String scope,
+    String id,
+    Map<String, dynamic> patch,
+  ) async {
+    final resp = await _client.patch(
+      _uri('/config/merge_tracking/$scope/${Uri.encodeComponent(id)}'),
+      headers: await _authHeaders(),
+      body: jsonEncode(patch),
+    );
+    if (resp.statusCode != 200) {
+      String msg =
+          'PATCH /config/merge_tracking/$scope/$id failed: ${resp.statusCode}';
+      try {
+        final err = (jsonDecode(resp.body) as Map<String, dynamic>)['error'];
+        if (err is String && err.isNotEmpty) msg = err;
+      } catch (_) {}
+      throw ApiException(msg);
+    }
+  }
+
+  /// Adds a pull request to merge tracking by URL.
+  ///
+  /// Deliberately NOT [addPRByUrl]: that routes through the review pipeline,
+  /// which refuses a PR the authenticated account authored — and Heimdallm
+  /// authenticates as the operator, so that is every PR they open. Merge
+  /// tracking exists for exactly those PRs, so it needs its own door.
+  Future<MergeTrackingEntry> addMergeTracking(String url) async {
+    final resp = await _client.post(
+      _uri('/merge-tracking/add'),
+      headers: await _authHeaders(),
+      body: jsonEncode({'url': url}),
+    );
+    if (resp.statusCode != 200 && resp.statusCode != 202) {
+      // The daemon explains refusals in prose — "merge tracking is disabled for
+      // org/repo", "not a pull request URL" — and that text is the whole point
+      // of the dialog's error line.
+      String msg = 'POST /merge-tracking/add failed: ${resp.statusCode}';
+      try {
+        final err = (jsonDecode(resp.body) as Map<String, dynamic>)['error'];
+        if (err is String && err.isNotEmpty) msg = err;
+      } catch (_) {}
+      throw ApiException(msg);
+    }
+    return MergeTrackingEntry.fromJson(
+      jsonDecode(resp.body) as Map<String, dynamic>,
+    );
+  }
+
   /// Re-evaluates one tracked PR against GitHub.
   ///
   /// [dryRun] records the decision without acting on it — the honest answer to

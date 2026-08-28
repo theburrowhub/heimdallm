@@ -192,9 +192,11 @@ func buildMergeStatus(resp *mergeStatusResponse, repo string) *MergeStatus {
 
 		IsInMergeQueue: pr.IsInMergeQueue,
 
-		BaseRef: pr.BaseRefName,
-		HeadRef: pr.HeadRefName,
-		HeadOID: pr.HeadRefOid,
+		BaseRef:    pr.BaseRefName,
+		BaseOID:    pr.BaseRefOid,
+		BaseTipOID: baseTipOID(pr),
+		HeadRef:    pr.HeadRefName,
+		HeadOID:    pr.HeadRefOid,
 
 		RollupState: rollupState(resp),
 	}
@@ -305,4 +307,15 @@ func optionalGraphQLTime(s string) *time.Time {
 		return nil
 	}
 	return &t
+}
+
+// baseTipOID is the current head of the base branch, or "" when the ref is not
+// readable. Paired with the PR's baseRefOid it is the only reliable staleness
+// signal: mergeStateStatus ranks BLOCKED above BEHIND, so a PR that is both
+// out of date and waiting on a review or a check never reports BEHIND.
+func baseTipOID(pr *gqlPullRequest) string {
+	if pr == nil || pr.BaseRef == nil || pr.BaseRef.Target == nil {
+		return ""
+	}
+	return pr.BaseRef.Target.OID
 }

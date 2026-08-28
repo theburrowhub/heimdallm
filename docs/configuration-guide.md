@@ -1356,10 +1356,36 @@ The Merge tab and `heimdallm-cli merges` report one of these reasons. They are s
 | `cross_fork` | The head branch is in another fork | Reported only; Heimdallm cannot push there. |
 | `insufficient_permission` | No write access | Nothing Heimdallm can do. |
 | `merge_method_not_allowed` | `merge_method` is disabled on the repo | Change `merge_method`, or enable it on GitHub. |
+| `behind_base` (out of date) | Detected independently of `mergeStateStatus`: GitHub ranks `BLOCKED` and `DIRTY` above `BEHIND`, so a PR that is both out of date and waiting on a review or a check never reports `BEHIND` at all. Heimdallm compares the commit the PR is based on with the tip of its base branch, and updating the branch comes before every other automation — checks that pass against a stale base prove nothing. |
 | `auto_merge_unavailable` | The repo has auto-merge switched off, or GitHub refuses to queue it on a PR it would merge right now | Enable auto-merge on the repo, or set `merge = true` so Heimdallm merges it directly. |
 | `mergeability_unknown` | GitHub has not finished computing | Transient; re-checked shortly. Never treated as mergeable. |
 | `head_sha_moved` | A commit landed mid-action | Transient; re-evaluated next cycle. |
 | `attempt_cap_reached` | The per-commit attempt cap was hit | A new push resets it. |
+
+### Adding your own PR
+
+The **Merge** tab has its own **Track a PR** button. Use that one, not the Add PR
+action in Activity: that action routes through the review pipeline, which
+refuses any pull request the authenticated account authored — and Heimdallm
+authenticates as *you*, so that is every PR you open. Pasting your own PR there
+records a `self_authored` skip and nothing else.
+
+`POST /merge-tracking/add` stores the PR, adds its repository to the monitored
+list, enrols it in merge tracking and stops. No review is triggered. Whether the
+PR is really yours is settled by the next evaluation, against GitHub's own view
+of author and assignees.
+
+### Per-repository and per-organisation overrides
+
+Every field except `poll_interval` and `max_prs_per_tick` supports
+`repo > org > global` precedence. The **Merge Tracking** switch on a repository's
+detail page writes `merge_tracking.repos."owner/name".enabled`, and the repo
+list shows a green LED whose tooltip names where the answer came from.
+
+`include_assigned` is the one field whose *widening* direction costs something:
+discovery runs one search for every repository at once, so Heimdallm asks GitHub
+for assigned PRs whenever **any** enabled repository wants them, and drops the
+ones each repository does not.
 
 ### Token permissions
 

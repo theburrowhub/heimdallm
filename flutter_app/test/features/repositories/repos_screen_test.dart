@@ -264,11 +264,15 @@ void main() {
       );
       await tester.pump();
 
+      // skipOffstage: false because the assertion is about the merged config,
+      // not about what fits on screen: the bulk bar grew a row when merge
+      // tracking joined the feature set, and the second tile now starts just
+      // below the fold on this surface.
       final existing = tester.widget<RepoListTile>(
-        find.widgetWithText(RepoListTile, 'a/existing'),
+        find.widgetWithText(RepoListTile, 'a/existing', skipOffstage: false),
       );
       final discovered = tester.widget<RepoListTile>(
-        find.widgetWithText(RepoListTile, 'a/discovered'),
+        find.widgetWithText(RepoListTile, 'a/discovered', skipOffstage: false),
       );
       expect(existing.config.prEnabled, isTrue);
       expect(discovered.config.prEnabled, isFalse);

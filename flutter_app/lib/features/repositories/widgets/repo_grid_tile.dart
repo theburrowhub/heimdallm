@@ -121,6 +121,23 @@ class RepoGridTile extends StatelessWidget {
                 ),
                 size: 9,
               ),
+              const SizedBox(width: 4),
+              FeatureLed(
+                feature: Feature.mergeTracking,
+                isOn: featureIsOn(
+                  feature: Feature.mergeTracking,
+                  repo: repo,
+                  config: config,
+                  appConfig: appConfig,
+                ),
+                sourceLine: featureSourceLine(
+                  feature: Feature.mergeTracking,
+                  repo: repo,
+                  config: config,
+                  appConfig: appConfig,
+                ),
+                size: 9,
+              ),
             ]),
             const SizedBox(height: 10),
             Row(children: [

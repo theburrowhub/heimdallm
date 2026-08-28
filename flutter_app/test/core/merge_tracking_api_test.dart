@@ -41,6 +41,8 @@ ApiClient _client(MockClient mock) => ApiClient(
 );
 
 void main() {
+  _addAndOverrideEndpoints();
+
   test('fetchMergeTrackingList decodes the listing and authenticates', () async {
     http.BaseRequest? captured;
     final entries = await _client(MockClient((request) async {
@@ -112,6 +114,88 @@ void main() {
     await expectLater(
       client.setMergeTrackingExcluded(1, true),
       throwsA(isA<ApiException>()),
+    );
+  });
+}
+
+// The Merge tab's own add path. It must not be the review pipeline's: that one
+// refuses PRs the authenticated account authored, which is every PR the
+// operator opens.
+void _addAndOverrideEndpoints() {
+  test('addMergeTracking posts the URL and decodes the tracked row', () async {
+    String? gotBody;
+    String? gotPath;
+    final entry = await _client(MockClient((request) async {
+      gotPath = request.url.path;
+      gotBody = request.body;
+      return http.Response(jsonEncode(_entryJson), 202);
+    })).addMergeTracking('https://github.com/acme/widgets/pull/7');
+
+    expect(gotPath, '/merge-tracking/add');
+    expect(jsonDecode(gotBody!), {
+      'url': 'https://github.com/acme/widgets/pull/7',
+    });
+    expect(entry.repo, 'acme/widgets');
+  });
+
+  test('a refusal is surfaced in the daemon\'s own words', () async {
+    final client = _client(MockClient((_) async => http.Response(
+          jsonEncode({'error': 'merge tracking is disabled for acme/widgets'}),
+          500,
+        )));
+    await expectLater(
+      client.addMergeTracking('https://github.com/acme/widgets/pull/7'),
+      throwsA(
+        isA<ApiException>().having(
+          (e) => e.message,
+          'message',
+          contains('disabled for acme/widgets'),
+        ),
+      ),
+    );
+  });
+
+  // Merge tracking keeps its per-repo overrides in its own config section, so
+  // they cannot ride along with the rest of the per-repo config.
+  test('the per-repo and per-org overrides go to their own endpoints', () async {
+    final paths = <String>[];
+    final bodies = <String>[];
+    final client = _client(MockClient((request) async {
+      paths.add(request.url.path);
+      bodies.add(request.body);
+      expect(request.method, 'PATCH');
+      return http.Response('{}', 200);
+    }));
+
+    await client.patchMergeTrackingRepoConfig('acme/widgets', {
+      'enabled': true,
+    });
+    await client.patchMergeTrackingOrgConfig('acme', {'enabled': false});
+
+    expect(paths, [
+      '/config/merge_tracking/repos/acme%2Fwidgets',
+      '/config/merge_tracking/orgs/acme',
+    ]);
+    expect(jsonDecode(bodies.first), {'enabled': true});
+    expect(jsonDecode(bodies.last), {'enabled': false});
+  });
+
+  test('a rejected override reports why', () async {
+    final client = _client(MockClient((_) async => http.Response(
+          jsonEncode({'error': 'merge_method "ff-only" must be one of squash, merge, rebase'}),
+          400,
+        )));
+    await expectLater(
+      client.patchMergeTrackingRepoConfig('acme/widgets', {
+        'merge_method': 'ff-only',
+      }),
+      throwsA(
+        isA<ApiException>().having(
+          (e) => e.message,
+          'message',
+          contains('ff-only'),
+        ),
+      ),
     );
   });
 }

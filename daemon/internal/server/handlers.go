@@ -105,6 +105,10 @@ type Server struct {
 	// while verifying the daemon before confirmation can cross the stateful
 	// bootstrap boundary.
 	updateBootID string
+	// mergeTrackEnrolFn brings an already-stored PR into merge tracking. Nil
+	// until wired; the add-to-Merge endpoint answers 503 without it.
+	mergeTrackEnrolFn func(prID int64, repo string, number int) error
+
 	// mergeTrackEvaluateFn re-evaluates one tracked PR on demand. Nil until
 	// main wires it, in which case the endpoint answers 503.
 	mergeTrackEvaluateFn func(ctx context.Context, prID int64, dryRun bool) error
@@ -322,6 +326,13 @@ func (srv *Server) SetCancelReviewFn(fn func(prID int64) (bool, error)) {
 // the stored row.
 func (srv *Server) SetAddPRFn(fn func(repo string, number int) (*store.PR, error)) {
 	srv.addPRFn = fn
+}
+
+// SetMergeTrackEnrolFn wires the callback behind POST /merge-tracking/add: it
+// brings a stored PR into merge tracking without going anywhere near the review
+// pipeline.
+func (srv *Server) SetMergeTrackEnrolFn(fn func(prID int64, repo string, number int) error) {
+	srv.mergeTrackEnrolFn = fn
 }
 
 // SetMergeTrackEvaluateFn wires the on-demand merge-tracking evaluation used by
@@ -630,6 +641,7 @@ func (srv *Server) buildRouter() chi.Router {
 	r.Delete("/config/orgs/{org}/*", srv.handleDeleteOrgField)
 	r.Patch("/config/autonomous/repos/{repo}", srv.handlePatchAutonomousRepoConfig)
 	r.Patch("/config/autonomous/orgs/{org}", srv.handlePatchAutonomousOrgConfig)
+	r.Post("/merge-tracking/add", srv.handleAddMergeTracking)
 	r.Patch("/config/merge_tracking/repos/{repo}", srv.handlePatchMergeTrackingRepoConfig)
 	r.Patch("/config/merge_tracking/orgs/{org}", srv.handlePatchMergeTrackingOrgConfig)
 	r.Get("/merge-tracking", srv.handleListMergeTracking)

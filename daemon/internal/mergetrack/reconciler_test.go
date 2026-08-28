@@ -30,6 +30,13 @@ type fakeGateway struct {
 	autoMerge *gh.AutoMergeRequest
 	autoErr   error
 
+	// lastIncludeAssigned records the qualifier discovery searched with.
+	lastIncludeAssigned bool
+
+	// onEnableAutoMerge runs inside EnableAutoMerge, before it answers. Lets a
+	// test simulate what another actor does between the arm and the fallback.
+	onEnableAutoMerge func()
+
 	// failOnAnyCall makes every method fail the test. Used to prove that a
 	// disabled configuration costs zero GitHub calls.
 	failOnAnyCall bool
@@ -50,8 +57,9 @@ func (f *fakeGateway) guard(name string) {
 	}
 }
 
-func (f *fakeGateway) FetchMergeTrackingPRs(bool) ([]*gh.TrackedPR, error) {
+func (f *fakeGateway) FetchMergeTrackingPRs(includeAssigned bool) ([]*gh.TrackedPR, error) {
 	f.guard("FetchMergeTrackingPRs")
+	f.lastIncludeAssigned = includeAssigned
 	return f.prs, f.prsErr
 }
 
@@ -76,6 +84,9 @@ func (f *fakeGateway) GetMergeStatus(string, int) (*gh.MergeStatus, error) {
 func (f *fakeGateway) EnableAutoMerge(string, string, string) (*gh.AutoMergeRequest, error) {
 	f.guard("EnableAutoMerge")
 	f.enableCalls++
+	if f.onEnableAutoMerge != nil {
+		f.onEnableAutoMerge()
+	}
 	if f.autoErr != nil {
 		return nil, f.autoErr
 	}

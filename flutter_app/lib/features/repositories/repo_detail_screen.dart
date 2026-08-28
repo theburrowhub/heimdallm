@@ -710,6 +710,46 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                     onReset: () => _resetField('implement_prompt'),
                   ),
                 ], accent: FeaturePalette.develop),
+
+                // ── Section 6: Merge Tracking ──────────────────────────────
+                _sectionCard('Merge Tracking', [
+                  Row(
+                    children: [
+                      const Expanded(
+                        child: Text(
+                          'Track my pull requests',
+                          style: TextStyle(fontSize: 13),
+                        ),
+                      ),
+                      FeatureSwitch(
+                        feature: Feature.mergeTracking,
+                        value:
+                            _config.mtEnabled ??
+                            orgConfig?.mtEnabled ??
+                            appConfig.mergeTracking.enabled,
+                        onChanged: (v) =>
+                            _update(_config.copyWith(mtEnabled: v)),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    _config.mtEnabled != null
+                        ? 'Overridden for this repository.'
+                        : source(orgConfig?.mtEnabled != null),
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Which automations run — arm auto-merge, update the branch, '
+                    'resolve conflicts, merge — is configured globally in '
+                    'Settings. This switch decides whether they apply to this '
+                    'repository at all.',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ], accent: FeaturePalette.mergeTracking),
               ],
             ),
           );

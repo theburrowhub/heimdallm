@@ -2,6 +2,8 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -126,6 +128,83 @@ func (srv *Server) handleGetMergeTracking(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, http.StatusOK, srv.buildMergeTrackingEntry(row, true))
+}
+
+// handleAddMergeTracking serves POST /merge-tracking/add.
+//
+// The review pipeline refuses a PR the authenticated account authored — and
+// since Heimdallm authenticates as the operator's own account, that is every PR
+// they open. POST /prs/add routes through that pipeline, so it was the wrong
+// door for the one feature that exists precisely for the operator's own PRs:
+// pasting a link there produced a `self_authored` skip and nothing else.
+//
+// This endpoint is the right door. It stores the PR, makes sure its repository
+// is monitored, enrols it in merge tracking and stops. No review is triggered
+// and no self-author guard applies. Whether the PR is really the operator's is
+// decided where it belongs — by the reconciler's next evaluation, against
+// GitHub's own view of author and assignees.
+//
+// Body: {"url": "https://github.com/owner/repo/pull/123"}.
+func (srv *Server) handleAddMergeTracking(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		URL string `json:"url"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return
+	}
+	repo, number, err := parsePRURL(body.URL)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if srv.addPRFn == nil || srv.mergeTrackEnrolFn == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "merge tracking not configured",
+		})
+		return
+	}
+
+	// Validate against GitHub before touching config: a typo must not leave a
+	// repository monitored forever.
+	pr, err := srv.addPRFn(repo, number)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{
+			"error": fmt.Sprintf("fetch PR %s#%d: %v", repo, number, err),
+		})
+		return
+	}
+
+	// Discovery intersects with the monitored list, so a PR in an unmonitored
+	// repo would be enrolled now and dropped on the next cycle.
+	if srv.configPath != "" {
+		if _, err := srv.patchTOML(func(m map[string]any) error {
+			addRepoToTOMLMap(m, repo)
+			return nil
+		}); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": fmt.Sprintf("add repo to config: %v", err),
+			})
+			return
+		}
+	}
+
+	if err := srv.mergeTrackEnrolFn(pr.ID, repo, number); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": fmt.Sprintf("enrol %s#%d: %v", repo, number, err),
+		})
+		return
+	}
+
+	row, err := srv.store.GetMergeTracking(pr.ID)
+	if err != nil {
+		// Enrolled but unreadable: report the add as done rather than failing
+		// an operation that already took effect.
+		slog.Warn("handleAddMergeTracking: read back row", "pr_id", pr.ID, "err", err)
+		writeJSON(w, http.StatusAccepted, map[string]any{"status": "pr enrolled", "pr": pr})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, srv.buildMergeTrackingEntry(row, true))
 }
 
 // handleEvaluateMergeTracking serves POST /merge-tracking/{prID}/evaluate.
