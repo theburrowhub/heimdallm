@@ -32,7 +32,7 @@ type GitOps interface {
 // CLIExecutor runs the configured AI agent.
 type CLIExecutor interface {
 	Detect(primary, fallback string) (string, error)
-	ExecuteRaw(cli, prompt string, opts executor.ExecOptions) (string, error)
+	ExecuteRaw(cli, prompt string, opts executor.ExecOptions) ([]byte, error)
 }
 
 // ConflictRequest is the input to one conflict-resolution run. The caller owns

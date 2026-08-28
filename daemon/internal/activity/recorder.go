@@ -81,6 +81,18 @@ func (r *Recorder) handle(ev sse.Event) error {
 		return r.recordIssueReviewError(ev)
 	case sse.EventIssuePromoted:
 		return r.recordIssuePromoted(ev)
+	case sse.EventMergeTrackMerged:
+		return r.recordMergeTrackMerged(ev)
+	case sse.EventMergeTrackAutoMergeArmed:
+		return r.recordMergeTrackAutoMergeArmed(ev)
+	case sse.EventMergeTrackBranchUpdated:
+		return r.recordMergeTrackBranchUpdated(ev)
+	case sse.EventMergeTrackConflictResolved:
+		return r.recordMergeTrackConflictResolved(ev)
+	case sse.EventMergeTrackBlocked:
+		return r.recordMergeTrackBlocked(ev)
+	case sse.EventMergeTrackError:
+		return r.recordMergeTrackError(ev)
 	default:
 		return nil
 	}
@@ -339,5 +351,119 @@ func (r *Recorder) recordIssuePromoted(ev sse.Event) error {
 	_, err := r.store.InsertActivity(time.Now(), orgOf(p.Repo), p.Repo, "issue",
 		p.IssueNumber, p.IssueTitle, "promote",
 		from+" → "+to, details)
+	return err
+}
+
+// merge-tracking handlers --------------------------------------------------
+//
+// merge_track_evaluated is deliberately NOT recorded: it fires on every PR on
+// every cycle, and a per-cycle row per PR would drown the activity log. The
+// events below are the ones that represent something having happened —
+// including merge_track_blocked, which the reconciler only emits when the
+// blocking reason changes.
+
+// mergeTrackPayload is the common shape of the merge_track_* events.
+type mergeTrackPayload struct {
+	Repo         string   `json:"repo"`
+	Number       int      `json:"number"`
+	Reason       string   `json:"reason"`
+	Detail       string   `json:"detail"`
+	Method       string   `json:"method"`
+	SHA          string   `json:"sha"`
+	Mode         string   `json:"mode"`
+	Action       string   `json:"action"`
+	Err          string   `json:"err"`
+	Pushed       bool     `json:"pushed"`
+	Files        []string `json:"files"`
+	PreRebaseSHA string   `json:"pre_rebase_sha"`
+}
+
+func (r *Recorder) recordMergeTrackMerged(ev sse.Event) error {
+	var p mergeTrackPayload
+	if err := decode(ev.Data, &p); err != nil {
+		return err
+	}
+	_, err := r.store.InsertActivity(time.Now(), orgOf(p.Repo), p.Repo, "pr",
+		p.Number, "", "merge_track_merged", p.Method, map[string]any{
+			"item_type": "pr",
+			"method":    p.Method,
+			"sha":       p.SHA,
+		})
+	return err
+}
+
+func (r *Recorder) recordMergeTrackAutoMergeArmed(ev sse.Event) error {
+	var p mergeTrackPayload
+	if err := decode(ev.Data, &p); err != nil {
+		return err
+	}
+	_, err := r.store.InsertActivity(time.Now(), orgOf(p.Repo), p.Repo, "pr",
+		p.Number, "", "merge_track_auto_merge_armed", p.Method, map[string]any{
+			"item_type": "pr",
+			"method":    p.Method,
+		})
+	return err
+}
+
+func (r *Recorder) recordMergeTrackBranchUpdated(ev sse.Event) error {
+	var p mergeTrackPayload
+	if err := decode(ev.Data, &p); err != nil {
+		return err
+	}
+	_, err := r.store.InsertActivity(time.Now(), orgOf(p.Repo), p.Repo, "pr",
+		p.Number, "", "merge_track_branch_updated", p.Mode, map[string]any{
+			"item_type": "pr",
+			"mode":      p.Mode,
+		})
+	return err
+}
+
+// recordMergeTrackConflictResolved records both outcomes. A resolution that was
+// NOT pushed is at least as interesting as one that was: it means the agent
+// looked at the conflicts and declined, which the author needs to know.
+func (r *Recorder) recordMergeTrackConflictResolved(ev sse.Event) error {
+	var p mergeTrackPayload
+	if err := decode(ev.Data, &p); err != nil {
+		return err
+	}
+	summary := "not pushed"
+	if p.Pushed {
+		summary = "pushed"
+	}
+	_, err := r.store.InsertActivity(time.Now(), orgOf(p.Repo), p.Repo, "pr",
+		p.Number, "", "merge_track_conflict_resolved", summary, map[string]any{
+			"item_type":      "pr",
+			"pushed":         p.Pushed,
+			"files":          p.Files,
+			"pre_rebase_sha": p.PreRebaseSHA,
+		})
+	return err
+}
+
+func (r *Recorder) recordMergeTrackBlocked(ev sse.Event) error {
+	var p mergeTrackPayload
+	if err := decode(ev.Data, &p); err != nil {
+		return err
+	}
+	_, err := r.store.InsertActivity(time.Now(), orgOf(p.Repo), p.Repo, "pr",
+		p.Number, "", "merge_track_blocked", p.Reason, map[string]any{
+			"item_type": "pr",
+			"reason":    p.Reason,
+			"detail":    p.Detail,
+		})
+	return err
+}
+
+func (r *Recorder) recordMergeTrackError(ev sse.Event) error {
+	var p mergeTrackPayload
+	if err := decode(ev.Data, &p); err != nil {
+		return err
+	}
+	_, err := r.store.InsertActivity(time.Now(), orgOf(p.Repo), p.Repo, "pr",
+		p.Number, "", "error", p.Err, map[string]any{
+			"item_type": "pr",
+			"action":    p.Action,
+			"error":     p.Err,
+		})
 	return err
 }

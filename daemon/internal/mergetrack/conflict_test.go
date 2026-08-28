@@ -108,9 +108,9 @@ type fakeExec struct {
 
 func (f *fakeExec) Detect(primary, _ string) (string, error) { return primary, nil }
 
-func (f *fakeExec) ExecuteRaw(_, prompt string, _ executor.ExecOptions) (string, error) {
+func (f *fakeExec) ExecuteRaw(_, prompt string, _ executor.ExecOptions) ([]byte, error) {
 	f.prompt = prompt
-	return "", f.err
+	return nil, f.err
 }
 
 func conflictReq() mergetrack.ConflictRequest {
