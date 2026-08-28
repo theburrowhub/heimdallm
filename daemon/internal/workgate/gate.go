@@ -27,6 +27,7 @@ const (
 	KindPublish             Kind = "review_publications"
 	KindState               Kind = "state_checks"
 	KindMaintenance         Kind = "maintenance"
+	KindMergeTracking       Kind = "merge_tracking"
 	maxLeaseIDBytes              = 128
 	maxPersistentLeaseBytes      = 4 << 10
 	openPollInterval             = 25 * time.Millisecond

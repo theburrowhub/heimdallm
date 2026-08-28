@@ -351,7 +351,7 @@ func (s *Store) ResetMergeTrackingForNewHead(prID int64, headSHA string, at time
 		    auto_merge_head_sha  = CASE WHEN auto_merge_head_sha = ? THEN auto_merge_head_sha  ELSE '' END,
 		    updated_at = ?
 		WHERE pr_id = ?
-	`, headSHA, headSHA, headSHA, headSHA, at.UTC().Format(sqliteTimeFormat), prID)
+	`, headSHA, headSHA, headSHA, headSHA, headSHA, at.UTC().Format(sqliteTimeFormat), prID)
 	if err != nil {
 		return fmt.Errorf("store: reset merge tracking for new head: %w", err)
 	}
@@ -402,6 +402,25 @@ func (s *Store) ReleaseMergeTrackingAction(prID int64, phase string, cooldownUnt
 		time.Now().UTC().Format(sqliteTimeFormat), prID)
 	if err != nil {
 		return fmt.Errorf("store: release merge tracking action: %w", err)
+	}
+	return nil
+}
+
+// BlockMergeTracking parks a row with an explicit reason and cooldown.
+//
+// Distinct from ReleaseMergeTrackingAction, which only moves the phase: a block
+// discovered DURING an action — the head moved between evaluation and merge,
+// say — has a reason the earlier RecordMergeTrackingDecision could not know,
+// and the UI needs it as much as any other block.
+func (s *Store) BlockMergeTracking(prID int64, reason, detail string, cooldownUntil time.Time) error {
+	_, err := s.db.Exec(`
+		UPDATE merge_tracking
+		SET phase = ?, block_reason = ?, block_detail = ?, cooldown_until = ?, updated_at = ?
+		WHERE pr_id = ?
+	`, MergePhaseBlocked, reason, detail, formatStoredTime(cooldownUntil),
+		time.Now().UTC().Format(sqliteTimeFormat), prID)
+	if err != nil {
+		return fmt.Errorf("store: block merge tracking: %w", err)
 	}
 	return nil
 }

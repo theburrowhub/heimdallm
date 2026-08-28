@@ -1043,6 +1043,17 @@ func (p *Pipeline) autoImplementNoChangesFallback(issue *github.Issue, issueID i
 // every issue degrades to the no-changes fallback comment (#433). Any
 // explicit operator setting wins; this only fills the gap when *nothing* is
 // configured.
+// EnsureWritePerms promotes the CLI flags into write mode for a given agent
+// binary, defaulting each provider's approval/permission knob only when the
+// operator left it unset.
+//
+// Exported so other packages that run the agent against a checkout — the
+// merge-conflict resolver, for one — get exactly the same posture as
+// auto_implement rather than reinventing the mapping.
+func EnsureWritePerms(cli string, opts executor.ExecOptions) executor.ExecOptions {
+	return ensureAutoImplementWritePerms(cli, opts)
+}
+
 func ensureAutoImplementWritePerms(cli string, opts executor.ExecOptions) executor.ExecOptions {
 	switch cli {
 	case "claude":

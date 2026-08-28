@@ -299,6 +299,27 @@ const (
 	untrustedBodyFenceClose = "── END UNTRUSTED USER ISSUE BODY ──"
 )
 
+// untrustedRepoContentFence wraps text that came out of a repository — file
+// paths, branch names, conflict hunks — for prompts that operate on a checkout
+// rather than on an issue. Same contract as the issue-body fence: everything
+// inside is data, never instructions.
+const (
+	untrustedRepoContentFenceOpen  = "── BEGIN UNTRUSTED REPOSITORY CONTENT ──"
+	untrustedRepoContentFenceClose = "── END UNTRUSTED REPOSITORY CONTENT ──"
+)
+
+// FenceUntrustedRepoContent wraps repository-derived text in the untrusted
+// fence, sanitising the body first so it cannot forge a terminator.
+//
+// Exported so packages outside `issues` that build agent prompts (merge-conflict
+// resolution, for one) reuse this defense instead of growing a second, subtly
+// different copy of it.
+func FenceUntrustedRepoContent(body string) string {
+	return untrustedRepoContentFenceOpen + "\n" +
+		SanitiseUntrustedFreeText(body) + "\n" +
+		untrustedRepoContentFenceClose
+}
+
 // untrustedFenceKeywords are ASCII phrases that mark every Heimdallm
 // "this region is untrusted" fence. We sanitise against the keywords
 // rather than the full decorated fence so an attacker cannot bypass
@@ -311,6 +332,7 @@ const (
 var untrustedFenceKeywords = []string{
 	"untrusted user issue body",
 	"untrusted user comments",
+	"untrusted repository content",
 }
 
 // SanitiseUntrustedFreeText is a fence-terminator defense, not a
