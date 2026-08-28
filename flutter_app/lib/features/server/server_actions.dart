@@ -262,6 +262,7 @@ void _invalidateDashboardData(WidgetRef ref) {
   ref.invalidate(prsProvider);
   ref.invalidate(issuesProvider);
   ref.invalidate(statsProvider);
+  ref.invalidate(githubRateLimitProvider);
   ref.invalidate(activityEntriesProvider);
   ref.invalidate(activityOptionsProvider);
 }

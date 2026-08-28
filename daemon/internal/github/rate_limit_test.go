@@ -2,6 +2,7 @@ package github_test
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -43,6 +44,43 @@ func TestRateLimit(t *testing.T) {
 	}
 	if rl.GraphQL.Limit != 5000 || rl.GraphQL.Remaining != 5000 {
 		t.Errorf("graphql = %+v, want limit=5000 remaining=5000", rl.GraphQL)
+	}
+}
+
+func TestRateLimitBypassesETagCache(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := atomic.AddInt32(&calls, 1)
+		if got := r.Header.Get("If-None-Match"); got != "" {
+			t.Errorf("If-None-Match = %q, want empty for live rate-limit data", got)
+		}
+		w.Header().Set("ETag", `"unchanged"`)
+		_, _ = w.Write([]byte(`{
+			"resources": {
+				"core": {"limit": 5000, "remaining": ` + fmt.Sprint(5000-call) + `, "reset": 1700000000}
+			}
+		}`))
+	}))
+	defer srv.Close()
+
+	c := gh.NewClient("fake", gh.WithBaseURL(srv.URL))
+	first, err := c.RateLimit()
+	if err != nil {
+		t.Fatalf("first RateLimit: %v", err)
+	}
+	second, err := c.RateLimit()
+	if err != nil {
+		t.Fatalf("second RateLimit: %v", err)
+	}
+
+	if first.Core.Remaining != 4999 || second.Core.Remaining != 4998 {
+		t.Errorf("remaining values = %d, %d; want 4999, 4998", first.Core.Remaining, second.Core.Remaining)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Errorf("server calls = %d, want 2", got)
+	}
+	if hits, misses := c.CacheStats(); hits != 0 || misses != 0 {
+		t.Errorf("cache stats = (%d hits, %d misses), want (0, 0)", hits, misses)
 	}
 }
 
