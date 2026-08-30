@@ -30,6 +30,8 @@ bool featureIsOn({
     Feature.prReview => config.prLedStatus(inGlobalList) != 'off',
     Feature.issueTracking => _issueTrackingOn(config, orgConfig, appConfig),
     Feature.develop => hasDir && _developOn(config, orgConfig, appConfig),
+    Feature.mergeTracking =>
+      config.isMonitored && _mergeTrackingOn(config, orgConfig, appConfig),
   };
 }
 
@@ -108,7 +110,41 @@ String featureSourceLine({
       return appConfig.issueTracking.enabled
           ? 'Source: inherited from global issue tracking'
           : 'Source: globally disabled';
+    case Feature.mergeTracking:
+      if (!config.isMonitored) {
+        return 'Reason: repository is not monitored';
+      }
+      if (config.mtEnabled == true) {
+        return 'Source: repo-level (merge_tracking.repos)';
+      }
+      if (config.mtEnabled == false) {
+        return 'Source: disabled per-repo (merge_tracking.repos)';
+      }
+      if (orgConfig?.mtEnabled == true) {
+        return 'Source: inherited from org merge tracking';
+      }
+      if (orgConfig?.mtEnabled == false) {
+        return 'Source: disabled at org level';
+      }
+      return appConfig.mergeTracking.enabled
+          ? 'Source: inherited from global merge tracking'
+          : 'Source: globally disabled';
   }
+}
+
+/// repo > org > global, the same precedence the daemon resolves in
+/// MergeTrackingForRepo. Merge tracking has no label-based inference: it acts
+/// on who authored the PR, not on how it is labelled.
+bool _mergeTrackingOn(
+  RepoConfig config,
+  OrgConfig? orgConfig,
+  AppConfig appConfig,
+) {
+  if (config.mtEnabled == true) return true;
+  if (config.mtEnabled == false) return false;
+  if (orgConfig?.mtEnabled == true) return true;
+  if (orgConfig?.mtEnabled == false) return false;
+  return appConfig.mergeTracking.enabled;
 }
 
 String? _orgForRepo(String repo) {

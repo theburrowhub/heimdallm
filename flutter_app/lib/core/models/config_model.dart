@@ -139,6 +139,7 @@ class RepoConfig {
   final bool? prEnabled; // PR auto-review
   final bool? itEnabled; // Issue tracking (triage)
   final bool? devEnabled; // Develop (auto-implement)
+  final bool? mtEnabled; // Merge tracking (my own PRs)
 
   // General
   final String? localDir; // local repo directory for full-repo analysis
@@ -182,6 +183,7 @@ class RepoConfig {
     this.prEnabled,
     this.itEnabled,
     this.devEnabled,
+    this.mtEnabled,
     this.localDir,
     this.triageOwner,
     this.cloneDir,
@@ -225,7 +227,14 @@ class RepoConfig {
         (devEnabled != false &&
             developLabels != null &&
             developLabels!.isNotEmpty);
-    return (prEnabled ?? false) || issueActive || developActive;
+    // Merge tracking discovery intersects with github.repositories just like
+    // the other features. A repo-level merge-tracking opt-in therefore keeps
+    // the repo monitored even when PR review, issue tracking and Develop are
+    // all off.
+    return (prEnabled ?? false) ||
+        issueActive ||
+        developActive ||
+        mtEnabled == true;
   }
 
   /// Legacy getter — repos with any override need to be written to TOML.
@@ -233,6 +242,7 @@ class RepoConfig {
       prEnabled != null ||
       itEnabled != null ||
       devEnabled != null ||
+      mtEnabled != null ||
       aiPrimary != null ||
       aiFallback != null ||
       promptId != null ||
@@ -293,6 +303,7 @@ class RepoConfig {
     Object? prEnabled = _sentinel,
     Object? itEnabled = _sentinel,
     Object? devEnabled = _sentinel,
+    Object? mtEnabled = _sentinel,
     Object? localDir = _sentinel,
     Object? triageOwner = _sentinel,
     Object? cloneDir = _sentinel,
@@ -327,6 +338,7 @@ class RepoConfig {
       devEnabled: devEnabled == _sentinel
           ? this.devEnabled
           : devEnabled as bool?,
+      mtEnabled: mtEnabled == _sentinel ? this.mtEnabled : mtEnabled as bool?,
       localDir: localDir == _sentinel ? this.localDir : localDir as String?,
       triageOwner: triageOwner == _sentinel
           ? this.triageOwner
@@ -418,6 +430,7 @@ class OrgConfig {
   final String? developPromptId;
   final bool? itEnabled;
   final bool? devEnabled;
+  final bool? mtEnabled;
   final List<String>? reviewOnlyLabels;
   final List<String>? refinementLabels;
   final List<String>? developLabels;
@@ -448,6 +461,7 @@ class OrgConfig {
     this.developPromptId,
     this.itEnabled,
     this.devEnabled,
+    this.mtEnabled,
     this.reviewOnlyLabels,
     this.refinementLabels,
     this.developLabels,
@@ -481,6 +495,7 @@ class OrgConfig {
       developPromptId != null ||
       itEnabled != null ||
       devEnabled != null ||
+      mtEnabled != null ||
       reviewOnlyLabels != null ||
       refinementLabels != null ||
       developLabels != null ||
@@ -509,6 +524,7 @@ class OrgConfig {
     Object? developPromptId = _sentinel,
     Object? itEnabled = _sentinel,
     Object? devEnabled = _sentinel,
+    Object? mtEnabled = _sentinel,
     Object? reviewOnlyLabels = _sentinel,
     Object? refinementLabels = _sentinel,
     Object? developLabels = _sentinel,
@@ -554,6 +570,7 @@ class OrgConfig {
         : developPromptId as String?,
     itEnabled: itEnabled == _sentinel ? this.itEnabled : itEnabled as bool?,
     devEnabled: devEnabled == _sentinel ? this.devEnabled : devEnabled as bool?,
+    mtEnabled: mtEnabled == _sentinel ? this.mtEnabled : mtEnabled as bool?,
     reviewOnlyLabels: reviewOnlyLabels == _sentinel
         ? this.reviewOnlyLabels
         : reviewOnlyLabels as List<String>?,
@@ -1167,7 +1184,7 @@ class AppConfig {
   });
 
   /// Computed list of monitored repos — this is what the daemon uses.
-  /// A repo is monitored if any of its 3 features (PR, IT, Dev) is active.
+  /// A repo is monitored if any of its features is active.
   List<String> get repositories =>
       (repoConfigs.entries
           .where((e) => e.value.isMonitored)
@@ -1443,8 +1460,8 @@ class AppConfig {
       reviewMode: (json['review_mode'] as String?) ?? 'single',
       retentionDays: (json['retention_days'] as int?) ?? 90,
       agentConfigs: agentConfigs,
-      repoConfigs: configs,
-      orgConfigs: orgConfigs,
+      repoConfigs: _withMergeTrackingOverrides(configs, json),
+      orgConfigs: _withMergeTrackingOrgOverrides(orgConfigs, json),
       issueTracking: issueTracking,
       globalPRReviewers: _parseStringList(
         (json['pr_metadata'] as Map<String, dynamic>?)?['reviewers'],
@@ -1502,4 +1519,53 @@ class AppConfig {
     if (v is List) return v.cast<String>();
     return const [];
   }
+}
+
+/// Folds `merge_tracking.repos.<repo>.enabled` into each RepoConfig.
+///
+/// Merge tracking keeps its overrides in its own config section rather than in
+/// `repo_overrides`, so without this the per-repo switch would have nothing to
+/// read and the LED would always render inherited.
+Map<String, RepoConfig> _withMergeTrackingOverrides(
+  Map<String, RepoConfig> configs,
+  Map<String, dynamic> json,
+) {
+  final repos =
+      (json['merge_tracking'] as Map<String, dynamic>?)?['repos']
+          as Map<String, dynamic>?;
+  if (repos == null || repos.isEmpty) return configs;
+
+  final out = Map<String, RepoConfig>.from(configs);
+  for (final entry in repos.entries) {
+    final enabled = (entry.value as Map<String, dynamic>?)?['enabled'] as bool?;
+    if (enabled == null) continue;
+    final existing = out[entry.key];
+    // This map also drives github.repositories/non_monitored writes. An
+    // override alone is not proof that the daemon considers the repo part of
+    // either list, so never synthesize membership from merge_tracking.repos.
+    if (existing == null) continue;
+    out[entry.key] = existing.copyWith(mtEnabled: enabled);
+  }
+  return out;
+}
+
+/// The org-level half of [_withMergeTrackingOverrides].
+Map<String, OrgConfig> _withMergeTrackingOrgOverrides(
+  Map<String, OrgConfig> configs,
+  Map<String, dynamic> json,
+) {
+  final orgs =
+      (json['merge_tracking'] as Map<String, dynamic>?)?['orgs']
+          as Map<String, dynamic>?;
+  if (orgs == null || orgs.isEmpty) return configs;
+
+  final out = Map<String, OrgConfig>.from(configs);
+  for (final entry in orgs.entries) {
+    final enabled = (entry.value as Map<String, dynamic>?)?['enabled'] as bool?;
+    if (enabled == null) continue;
+    out[entry.key] = (out[entry.key] ?? const OrgConfig()).copyWith(
+      mtEnabled: enabled,
+    );
+  }
+  return out;
 }

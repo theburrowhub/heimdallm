@@ -7,19 +7,20 @@ Widget _host(Widget child) =>
     MaterialApp(home: Scaffold(body: child));
 
 void main() {
-  testWidgets('renders "N selected" and 3 switches', (tester) async {
+  testWidgets('renders "N selected" and one switch per feature', (tester) async {
     await tester.pumpWidget(_host(BulkActionsBar(
       selectedCount: 3,
       aggregates: const {
         Feature.prReview: true,
         Feature.issueTracking: null,
         Feature.develop: false,
+        Feature.mergeTracking: false,
       },
       onApply: (_, _) {},
       onClear: () {},
     )));
     expect(find.text('3 selected'), findsOneWidget);
-    expect(find.byType(Switch), findsNWidgets(2));   // two pure states
+    expect(find.byType(Switch), findsNWidgets(3));   // three pure states
     expect(find.byKey(const Key('FeatureSwitch_mixed')), findsOneWidget);
   });
 
@@ -30,6 +31,7 @@ void main() {
         Feature.prReview: true,
         Feature.issueTracking: null,
         Feature.develop: false,
+        Feature.mergeTracking: false,
       },
       onApply: (_, _) {},
       onClear: () {},
@@ -47,6 +49,7 @@ void main() {
         Feature.prReview: false,
         Feature.issueTracking: true,
         Feature.develop: false,
+        Feature.mergeTracking: false,
       },
       onApply: (f, v) { calledFeature = f; calledValue = v; },
       onClear: () {},
@@ -65,6 +68,7 @@ void main() {
         Feature.prReview: true,
         Feature.issueTracking: true,
         Feature.develop: true,
+        Feature.mergeTracking: true,
       },
       onApply: (_, _) {},
       onClear: () => cleared = true,

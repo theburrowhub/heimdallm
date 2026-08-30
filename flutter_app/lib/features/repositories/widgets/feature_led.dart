@@ -46,5 +46,7 @@ class FeatureLed extends StatelessWidget {
         (Feature.issueTracking, false) => 'The daemon ignores new issues in this repo.',
         (Feature.develop, true)        => 'The daemon can auto-implement issues in this repo.',
         (Feature.develop, false)       => 'The daemon cannot auto-implement issues in this repo.',
+        (Feature.mergeTracking, true)  => 'The daemon tracks your own PRs in this repo and reports what blocks each merge.',
+        (Feature.mergeTracking, false) => 'The daemon does not track your own PRs in this repo.',
       };
 }

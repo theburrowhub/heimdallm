@@ -1230,7 +1230,7 @@ A PR blocked by CI is called out prominently: a coloured band on its row naming 
 | Setting | What Heimdallm does |
 |---|---|
 | `enable_auto_merge` | Turns on **GitHub's own** auto-merge, so GitHub merges the PR the moment every requirement is satisfied. Pinned to the commit that was evaluated. |
-| `update_branch` | Brings a PR up to date when it falls behind its base. Uses `PUT /pulls/{n}/update-branch`; if the base requires linear history GitHub refuses, and Heimdallm falls back to a local rebase and a lease-protected force-push. |
+| `update_branch` | Brings a PR up to date when it falls behind its base. When enabled, Heimdallm detects that state independently of GitHub's aggregate merge verdict and updates the branch before other automation. It uses `PUT /pulls/{n}/update-branch`; if the base requires linear history GitHub refuses, Heimdallm falls back to a local rebase and a lease-protected force-push. |
 | `resolve_conflicts` | Has the configured agent resolve merge conflicts in an ephemeral worktree, then force-pushes. **See the warning below.** |
 | `merge` | Merges the PR itself once every requirement is met. |
 
@@ -1248,7 +1248,7 @@ include_assigned   = false   # also track PRs assigned to you but authored by so
 require_approval   = false   # demand an approval even where the repo does not
 poll_interval      = ""      # empty inherits [polling]/[github].poll_interval
 max_prs_per_tick   = 20      # bounds the API spend of one cycle
-max_update_attempts  = 3     # per PR, per head commit
+max_update_attempts  = 3     # per observed head; a successful update resets it
 max_resolve_attempts = 2     # per PR, per head commit
 max_merge_attempts   = 3     # per PR, per head commit
 action_cooldown    = "10m"   # between write actions on one PR
@@ -1260,7 +1260,7 @@ resolve_effort     = "high"  # low | medium | high | max
 |---|---|---|
 | `enabled` | `false` | Master switch and kill-switch. When `false` a poll cycle makes **zero** GitHub calls. |
 | `enable_auto_merge` | `false` | Arm GitHub's native auto-merge on PRs that do not have it. |
-| `update_branch` | `false` | Update a branch that has fallen behind its base. |
+| `update_branch` | `false` | Update a branch that has fallen behind its base. When disabled, an independently detected stale base does not by itself stop `enable_auto_merge` or `merge`; GitHub can still block them when branch protection requires an up-to-date branch. |
 | `resolve_conflicts` | `false` | Run the configured agent on merge conflicts. **This force-pushes to your branch.** |
 | `merge` | `false` | Merge directly once every requirement is met. |
 | `merge_method` | `"squash"` | `squash`, `merge` or `rebase`. Must also be enabled on the repository; if it is not, the PR is reported as blocked rather than failing on every attempt. Validated at boot — an invalid value stops the daemon rather than producing a 422 from GitHub once per cycle forever. |
@@ -1268,7 +1268,7 @@ resolve_effort     = "high"  # low | medium | high | max
 | `require_approval` | `false` | Refuse to merge without an approving review at the current commit, even where the repository requires none. Useful on personal repos with no branch protection. |
 | `poll_interval` | inherit | Cadence of the reconciler. Empty inherits `[polling].poll_interval`, then `[github].poll_interval`. Re-read every cycle, so a change takes effect without a restart. |
 | `max_prs_per_tick` | `20` | How many PRs one cycle evaluates. Each costs one GraphQL query, so this is the knob that bounds API spend. |
-| `max_update_attempts` | `3` | Branch-update attempts per head commit. Reset by a push. |
+| `max_update_attempts` | `3` | Branch-update attempts for the currently observed head commit. Any successful update creates a new head and resets this counter, so it caps repeated failures for one head rather than successful updates over the PR's lifetime. |
 | `max_resolve_attempts` | `2` | Conflict-resolution attempts per head commit. Reset by a push. |
 | `max_merge_attempts` | `3` | Merge attempts per head commit. Reset by a push. |
 | `action_cooldown` | `"10m"` | Minimum gap between write actions on one PR. |
@@ -1349,7 +1349,7 @@ The Merge tab and `heimdallm-cli merges` report one of these reasons. They are s
 | `pending_reviewers` | A requested reviewer has not responded | Wait, or unrequest them. |
 | `unresolved_threads` | An open review conversation | Resolve it. Heimdallm blocks on these even without `requiresConversationResolution`. |
 | `conflicts` | Conflicts with the base branch | Enable `resolve_conflicts`, or fix it yourself. |
-| `behind_base` | Behind the base branch | Enable `update_branch`, or update it yourself. |
+| `behind_base` | GitHub reports that a protected branch must be updated, or `update_branch` is enabled and Heimdallm independently detects that the head is behind the base. The independent check matters because GitHub can report `BLOCKED` or `DIRTY` instead of `BEHIND`. | Wait for the configured update, enable `update_branch`, or update the branch yourself. |
 | `draft` | The PR is a draft | Heimdallm never acts on drafts. Mark it ready. |
 | `blocked_by_protection` | GitHub says blocked and nothing above explains it | Usually CODEOWNERS or a rule the token cannot read. |
 | `in_merge_queue` / `merge_queue_configured` | The base branch uses a merge queue | Nothing — GitHub owns the merge. Heimdallm never merges directly past a queue. |
@@ -1360,6 +1360,32 @@ The Merge tab and `heimdallm-cli merges` report one of these reasons. They are s
 | `mergeability_unknown` | GitHub has not finished computing | Transient; re-checked shortly. Never treated as mergeable. |
 | `head_sha_moved` | A commit landed mid-action | Transient; re-evaluated next cycle. |
 | `attempt_cap_reached` | The per-commit attempt cap was hit | A new push resets it. |
+
+### Adding your own PR
+
+The **Merge** tab has its own **Track a PR** button. Use that one, not the Add PR
+action in Activity: that action routes through the review pipeline, which
+refuses any pull request the authenticated account authored — and Heimdallm
+authenticates as *you*, so that is every PR you open. Pasting your own PR there
+records a `self_authored` skip and nothing else.
+
+`POST /merge-tracking/add` stores the PR, verifies the repository's effective
+merge-tracking configuration by enrolling it, adds the repository to the
+monitored list and stops. A disabled repository is rejected before that list is
+changed. No review is triggered. Whether the PR is really yours is settled by
+the next evaluation, against GitHub's own view of author and assignees.
+
+### Per-repository and per-organisation overrides
+
+Every field except `poll_interval` and `max_prs_per_tick` supports
+`repo > org > global` precedence. The **Merge Tracking** switch on a repository's
+detail page writes `merge_tracking.repos."owner/name".enabled`, and the repo
+list shows a green LED whose tooltip names where the answer came from.
+
+`include_assigned` is the one field whose *widening* direction costs something:
+discovery runs one search for every repository at once, so Heimdallm asks GitHub
+for assigned PRs whenever **any** enabled repository wants them, and drops the
+ones each repository does not.
 
 ### Token permissions
 
@@ -1683,7 +1709,7 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 # require_approval     = false    # demand an approval even where the repo does not
 # poll_interval        = ""       # empty inherits [polling]/[github].poll_interval
 # max_prs_per_tick     = 20       # one GraphQL query per PR — this bounds API spend
-# max_update_attempts  = 3        # per PR, per head commit; reset by a push
+# max_update_attempts  = 3        # per observed head; a successful update resets it
 # max_resolve_attempts = 2
 # max_merge_attempts   = 3
 # action_cooldown      = "10m"    # between write actions on one PR

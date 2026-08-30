@@ -7,10 +7,13 @@ package mergetrack_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/heimdallm/daemon/internal/config"
 	gh "github.com/heimdallm/daemon/internal/github"
+	"github.com/heimdallm/daemon/internal/mergetrack"
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
 )
@@ -350,19 +353,294 @@ func TestReconcilePR_CleanStatusMergeTakesTheInFlightClaim(t *testing.T) {
 			Reason: gh.AutoMergeReasonCleanStatus,
 			Body:   "Pull request is in clean status",
 		},
-		mergeErr: errNetwork,
 	}
 	h := newHarness(t, cfg, gw)
 
-	// Fails inside the merge, so the claim is what we can observe afterwards:
-	// the row must have gone through 'merging', not stayed on the arming phase.
-	_, _ = h.r.ReconcilePR(context.Background(), h.prID, h.now, false)
-	if got := h.row(t).Phase; got != store.MergePhaseBlocked {
-		t.Errorf("phase = %q, want blocked after a failed merge", got)
+	// A second daemon reaches the row while the first is still waiting for the
+	// auto-merge mutation to answer. The arming phase is not an in-flight lock,
+	// so the competitor can take the merging claim. Once GitHub answers "clean",
+	// the first daemon must re-claim and stand down rather than merging too.
+	var competitorClaimed bool
+	gw.onEnableAutoMerge = func() {
+		var err error
+		competitorClaimed, err = h.st.ClaimMergeTrackingAction(
+			h.prID, headSHA, store.MergePhaseMerging, h.now)
+		if err != nil {
+			t.Fatalf("competitor claim: %v", err)
+		}
 	}
-	// And with the row parked, a fresh claim under the arming phase must not be
-	// able to sneak past the merge that just ran.
-	if h.gw.mergeCalls != 1 {
-		t.Errorf("merge calls = %d, want exactly 1", h.gw.mergeCalls)
+
+	if _, err := h.r.ReconcilePR(context.Background(), h.prID, h.now, false); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if !competitorClaimed {
+		t.Fatal("precondition: the competing daemon must take the in-flight claim")
+	}
+	if h.gw.mergeCalls != 0 {
+		t.Errorf("merge calls = %d, want 0: the competing claim owns the merge", h.gw.mergeCalls)
+	}
+	if got := h.row(t).Phase; got != store.MergePhaseMerging {
+		t.Errorf("phase = %q, want merging: the competing claim must remain intact", got)
+	}
+}
+
+// The documented precedence is repo > org > global, but the discovery search is
+// global: asking only the global include_assigned made the widening direction a
+// silent no-op, so `include_assigned = false` globally with `true` on one repo
+// never returned a single assigned-only PR for it.
+func TestTick_SearchesForAssigneesWhenOnlyOneRepoWantsThem(t *testing.T) {
+	global := enabledCfg()
+	global.IncludeAssigned = false
+	perRepo := enabledCfg()
+	perRepo.IncludeAssigned = true
+
+	gw := &fakeGateway{
+		prs: []*gh.TrackedPR{{
+			PullRequest: &gh.PullRequest{
+				ID: 222, Number: 9, Title: "Assigned to me", State: "open",
+				HTMLURL: "https://github.com/acme/widgets/pull/9",
+				Repo:    "acme/widgets",
+			},
+			IsAssignee: true,
+		}},
+		statuses: []*gh.MergeStatus{cleanStatus()},
+	}
+	h := newHarnessWithConfigs(t, global, perRepo, gw)
+
+	if stats := h.r.Tick(context.Background(), []string{"acme/widgets"}); stats.Discovered != 1 {
+		t.Fatalf("discovered = %d, want the repo's override to widen the search", stats.Discovered)
+	}
+	if !gw.lastIncludeAssigned {
+		t.Error("the search must carry the assignee qualifier when any repo wants it")
+	}
+}
+
+// And with nobody asking, the qualifier stays off: it doubles the search cost.
+func TestTick_OmitsTheAssigneeQualifierWhenNobodyWantsIt(t *testing.T) {
+	cfg := enabledCfg()
+	cfg.IncludeAssigned = false
+
+	gw := &fakeGateway{prs: nil}
+	h := newHarnessWithConfigs(t, cfg, cfg, gw)
+	h.r.Tick(context.Background(), []string{"acme/widgets"})
+
+	if gw.lastIncludeAssigned {
+		t.Error("no repo wants assignees; the qualifier must be omitted")
+	}
+}
+
+// The Merge tab needs its own way in. POST /prs/add routes through the review
+// pipeline, which refuses PRs the authenticated account authored — and since
+// Heimdallm authenticates as the operator, that is every PR they open. The
+// feature that exists for exactly those PRs had no door.
+func TestEnrolExistingPR_CreatesADueRowWithoutAReview(t *testing.T) {
+	h := newHarness(t, enabledCfg(), &fakeGateway{})
+
+	prID, err := h.st.UpsertPR(&store.PR{
+		GithubID: 999, Repo: "acme/widgets", Number: 12, State: "open",
+		URL: "https://github.com/acme/widgets/pull/12", UpdatedAt: h.now, FetchedAt: h.now,
+	})
+	if err != nil {
+		t.Fatalf("upsert pr: %v", err)
+	}
+
+	if err := h.r.EnrolExistingPR(prID, "acme/widgets", 12); err != nil {
+		t.Fatalf("enrol: %v", err)
+	}
+
+	row, err := h.st.GetMergeTracking(prID)
+	if err != nil {
+		t.Fatalf("get row: %v", err)
+	}
+	if row.Phase != store.MergePhaseIdle {
+		t.Errorf("phase = %q, want idle", row.Phase)
+	}
+	if !row.CooldownUntil.IsZero() {
+		t.Errorf("cooldown = %v, want none: the operator expects it evaluated now", row.CooldownUntil)
+	}
+	due, err := h.st.ListMergeTrackingDue(h.now, 10)
+	if err != nil {
+		t.Fatalf("list due: %v", err)
+	}
+	var found bool
+	for _, d := range due {
+		if d.PRID == prID {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("the freshly added PR must be due on the next cycle")
+	}
+	if !h.pub.has(sse.EventMergeTrackDetected) {
+		t.Error("the Merge tab refreshes on this event")
+	}
+}
+
+// A repo with merge tracking off must say so rather than silently creating a
+// row nothing will ever evaluate.
+func TestEnrolExistingPR_RefusesWhenTrackingIsOffForTheRepo(t *testing.T) {
+	cfg := enabledCfg()
+	cfg.Enabled = false
+	h := newHarness(t, cfg, &fakeGateway{})
+
+	err := h.r.EnrolExistingPR(h.prID, "acme/widgets", 7)
+	if err == nil {
+		t.Fatal("enrolling into a disabled repo must be refused")
+	}
+	if !errors.Is(err, mergetrack.ErrTrackingDisabled) {
+		t.Errorf("error = %v, want ErrTrackingDisabled", err)
+	}
+	if !strings.Contains(err.Error(), "disabled") {
+		t.Errorf("error = %q, want it to name the reason", err)
+	}
+}
+
+// ConfigForRepo is optional for small embedders and tests. In that shape the
+// global switch still governs manual enrolment; nil must not bypass it.
+func TestEnrolExistingPR_FallsBackToTheGlobalEnabledSwitch(t *testing.T) {
+	h := newHarness(t, enabledCfg(), &fakeGateway{})
+	disabled := enabledCfg()
+	disabled.Enabled = false
+	h.r = mergetrack.NewReconciler(mergetrack.ReconcilerOptions{
+		Store:        h.st,
+		Publisher:    h.pub,
+		GlobalConfig: func() config.MergeTrackingConfig { return disabled },
+	})
+
+	err := h.r.EnrolExistingPR(h.prID, "acme/widgets", 7)
+	if !errors.Is(err, mergetrack.ErrTrackingDisabled) {
+		t.Fatalf("error = %v, want ErrTrackingDisabled", err)
+	}
+}
+
+// GitHub collapses its whole verdict into one mergeStateStatus and ranks
+// BLOCKED above BEHIND, so a PR that is both out of date and waiting on a
+// review or a check never reports BEHIND. Verified against two open PRs in this
+// repository: hundreds of commits behind, both reporting DIRTY. Relying on that
+// field alone meant Heimdallm sat waiting for checks that were running against
+// a stale base, and never updated the branch.
+func TestEvaluate_OutOfDateWinsOverEveryGatingSignal(t *testing.T) {
+	st := cleanStatus()
+	// Behind, and blocked on a review — the shape GitHub reports as BLOCKED.
+	st.BaseOID = "base-old"
+	st.BaseTipOID = "base-new"
+	st.MergeStateStatus = gh.MergeStateBlocked
+	st.ReviewDecision = gh.ReviewDecisionReviewRequired
+	st.Reviews = nil
+	st.Checks = []gh.CheckContext{
+		{Name: "build", Kind: "check_run", State: gh.CheckStateFailure, Required: true},
+	}
+
+	cfg := enabledCfg()
+	cfg.UpdateBranch = true
+	d := mergetrack.Evaluate(st, baseInput(cfg))
+	if got := d.PrimaryReason(); got != mergetrack.ReasonBehindBase {
+		t.Fatalf("primary reason = %q, want behind_base: updating comes first", got)
+	}
+}
+
+// A moved base is not itself a merge requirement on a non-strict repository.
+// With branch updates disabled (the default), it must remain evidence rather
+// than suppressing whichever merge automation the operator explicitly chose;
+// enabling branch updates still gives that action precedence.
+func TestDecide_OutOfDateUsesConfiguredAutomation(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*config.MergeTrackingConfig)
+		want      mergetrack.Action
+	}{
+		{
+			name: "enable auto merge",
+			configure: func(cfg *config.MergeTrackingConfig) {
+				cfg.EnableAutoMerge = true
+			},
+			want: mergetrack.ActionArmAutoMerge,
+		},
+		{
+			name: "merge directly",
+			configure: func(cfg *config.MergeTrackingConfig) {
+				cfg.Merge = true
+			},
+			want: mergetrack.ActionMerge,
+		},
+		{
+			name: "update when enabled",
+			configure: func(cfg *config.MergeTrackingConfig) {
+				cfg.EnableAutoMerge = true
+				cfg.Merge = true
+				cfg.UpdateBranch = true
+			},
+			want: mergetrack.ActionUpdateBranchRemote,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := cleanStatus()
+			st.BaseOID = "base-old"
+			st.BaseTipOID = "base-new"
+
+			cfg := enabledCfg()
+			tt.configure(&cfg)
+			in := baseInput(cfg)
+			d := mergetrack.Decide(mergetrack.Evaluate(st, in), st, in)
+
+			if d.Action != tt.want {
+				t.Errorf("action = %q, want %q", d.Action, tt.want)
+			}
+			if !d.Evidence.BehindBase {
+				t.Error("the advanced base should remain visible in the decision evidence")
+			}
+		})
+	}
+}
+
+// And with update_branch on, the decision is to update rather than to report
+// the review or the check.
+func TestDecide_OutOfDatePRIsUpdatedBeforeAnythingElse(t *testing.T) {
+	st := cleanStatus()
+	st.BaseOID = "base-old"
+	st.BaseTipOID = "base-new"
+	st.MergeStateStatus = gh.MergeStateBlocked
+	st.ReviewDecision = gh.ReviewDecisionReviewRequired
+	st.Reviews = nil
+
+	cfg := enabledCfg()
+	cfg.UpdateBranch = true
+	in := baseInput(cfg)
+
+	d := mergetrack.Decide(mergetrack.Evaluate(st, in), st, in)
+	if d.Action != mergetrack.ActionUpdateBranchRemote {
+		t.Errorf("action = %q, want update_branch_remote", d.Action)
+	}
+}
+
+// A PR level with its base is not behind, whatever else is wrong with it.
+func TestEvaluate_UpToDatePRIsNotReportedBehind(t *testing.T) {
+	st := cleanStatus()
+	st.BaseOID = "same"
+	st.BaseTipOID = "same"
+	st.MergeStateStatus = gh.MergeStateBlocked
+	st.ReviewDecision = gh.ReviewDecisionReviewRequired
+	st.Reviews = nil
+
+	d := mergetrack.Evaluate(st, baseInput(enabledCfg()))
+	if got := d.PrimaryReason(); got == mergetrack.ReasonBehindBase {
+		t.Error("a PR level with its base must not be reported as behind")
+	}
+}
+
+// Missing either side is not evidence of staleness, and acting on a guess would
+// force-push a branch nobody asked to move.
+func TestBehindBase_UnknownWhenEitherSideIsMissing(t *testing.T) {
+	for name, st := range map[string]*gh.MergeStatus{
+		"no base oid": {BaseTipOID: "tip"},
+		"no tip":      {BaseOID: "base"},
+		"neither":     {},
+		"nil":         nil,
+	} {
+		if st.BehindBase() {
+			t.Errorf("%s: must not report behind without both sides", name)
+		}
 	}
 }

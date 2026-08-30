@@ -30,17 +30,21 @@ class RepoListTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final localDir = LocalDirResolution.resolve(
-      repo: repo, config: config, appConfig: appConfig,
+      repo: repo,
+      config: config,
+      appConfig: appConfig,
     );
     final theme = Theme.of(context);
-    final selectedBg = theme.colorScheme.primary.withValues(alpha:0.12);
+    final selectedBg = theme.colorScheme.primary.withValues(alpha: 0.12);
 
     return Card(
       color: selected ? selectedBg : null,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(10),
         side: selected
-            ? BorderSide(color: theme.colorScheme.primary.withValues(alpha:0.55))
+            ? BorderSide(
+                color: theme.colorScheme.primary.withValues(alpha: 0.55),
+              )
             : BorderSide.none,
       ),
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 3),
@@ -60,55 +64,84 @@ class RepoListTile extends StatelessWidget {
                   child: _CheckboxIcon(selected: selected),
                 ),
               ),
+              // Two by two rather than a single column: a fourth feature stacked
+              // vertically would make every row in the list taller, and the LEDs are
+              // an at-a-glance indicator, not a list to read top to bottom.
               Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  FeatureLed(
-                    feature: Feature.prReview,
-                    isOn: featureIsOn(
-                      feature: Feature.prReview,
-                      repo: repo,
-                      config: config,
-                      appConfig: appConfig,
-                    ),
-                    sourceLine: featureSourceLine(
-                      feature: Feature.prReview,
-                      repo: repo,
-                      config: config,
-                      appConfig: appConfig,
-                    ),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      FeatureLed(
+                        feature: Feature.prReview,
+                        isOn: featureIsOn(
+                          feature: Feature.prReview,
+                          repo: repo,
+                          config: config,
+                          appConfig: appConfig,
+                        ),
+                        sourceLine: featureSourceLine(
+                          feature: Feature.prReview,
+                          repo: repo,
+                          config: config,
+                          appConfig: appConfig,
+                        ),
+                      ),
+                      const SizedBox(width: 3),
+                      FeatureLed(
+                        feature: Feature.issueTracking,
+                        isOn: featureIsOn(
+                          feature: Feature.issueTracking,
+                          repo: repo,
+                          config: config,
+                          appConfig: appConfig,
+                        ),
+                        sourceLine: featureSourceLine(
+                          feature: Feature.issueTracking,
+                          repo: repo,
+                          config: config,
+                          appConfig: appConfig,
+                        ),
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 3),
-                  FeatureLed(
-                    feature: Feature.issueTracking,
-                    isOn: featureIsOn(
-                      feature: Feature.issueTracking,
-                      repo: repo,
-                      config: config,
-                      appConfig: appConfig,
-                    ),
-                    sourceLine: featureSourceLine(
-                      feature: Feature.issueTracking,
-                      repo: repo,
-                      config: config,
-                      appConfig: appConfig,
-                    ),
-                  ),
-                  const SizedBox(height: 3),
-                  FeatureLed(
-                    feature: Feature.develop,
-                    isOn: featureIsOn(
-                      feature: Feature.develop,
-                      repo: repo,
-                      config: config,
-                      appConfig: appConfig,
-                    ),
-                    sourceLine: featureSourceLine(
-                      feature: Feature.develop,
-                      repo: repo,
-                      config: config,
-                      appConfig: appConfig,
-                    ),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      FeatureLed(
+                        feature: Feature.develop,
+                        isOn: featureIsOn(
+                          feature: Feature.develop,
+                          repo: repo,
+                          config: config,
+                          appConfig: appConfig,
+                        ),
+                        sourceLine: featureSourceLine(
+                          feature: Feature.develop,
+                          repo: repo,
+                          config: config,
+                          appConfig: appConfig,
+                        ),
+                      ),
+                      const SizedBox(width: 3),
+                      FeatureLed(
+                        feature: Feature.mergeTracking,
+                        isOn: featureIsOn(
+                          feature: Feature.mergeTracking,
+                          repo: repo,
+                          config: config,
+                          appConfig: appConfig,
+                        ),
+                        sourceLine: featureSourceLine(
+                          feature: Feature.mergeTracking,
+                          repo: repo,
+                          config: config,
+                          appConfig: appConfig,
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ),
@@ -117,26 +150,32 @@ class RepoListTile extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Row(children: [
-                      Flexible(
-                        child: Text(
-                          repo,
-                          style: TextStyle(
-                            fontWeight: config.isMonitored
-                                ? FontWeight.w600
-                                : FontWeight.normal,
-                            color: config.isMonitored ? null : Colors.grey,
+                    Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            repo,
+                            style: TextStyle(
+                              fontWeight: config.isMonitored
+                                  ? FontWeight.w600
+                                  : FontWeight.normal,
+                              color: config.isMonitored ? null : Colors.grey,
+                            ),
+                            overflow: TextOverflow.ellipsis,
                           ),
-                          overflow: TextOverflow.ellipsis,
                         ),
-                      ),
-                      if (showNew) ...[
-                        const SizedBox(width: 6),
-                        const _NewBadge(),
+                        if (showNew) ...[
+                          const SizedBox(width: 6),
+                          const _NewBadge(),
+                        ],
                       ],
-                    ]),
+                    ),
                     const SizedBox(height: 2),
-                    LocalDirBadge(resolution: localDir, fontSize: 11, iconSize: 13),
+                    LocalDirBadge(
+                      resolution: localDir,
+                      fontSize: 11,
+                      iconSize: 13,
+                    ),
                   ],
                 ),
               ),
@@ -147,7 +186,6 @@ class RepoListTile extends StatelessWidget {
       ),
     );
   }
-
 }
 
 class _CheckboxIcon extends StatelessWidget {
@@ -158,7 +196,8 @@ class _CheckboxIcon extends StatelessWidget {
   Widget build(BuildContext context) {
     final primary = Theme.of(context).colorScheme.primary;
     return Container(
-      width: 16, height: 16,
+      width: 16,
+      height: 16,
       decoration: BoxDecoration(
         color: selected ? primary : Colors.transparent,
         border: Border.all(
@@ -182,7 +221,7 @@ class _NewBadge extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 1),
       decoration: BoxDecoration(
-        color: primary.withValues(alpha:0.22),
+        color: primary.withValues(alpha: 0.22),
         borderRadius: BorderRadius.circular(8),
       ),
       child: Text(

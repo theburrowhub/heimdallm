@@ -105,6 +105,10 @@ type Server struct {
 	// while verifying the daemon before confirmation can cross the stateful
 	// bootstrap boundary.
 	updateBootID string
+	// mergeTrackEnrolFn brings an already-stored PR into merge tracking. Nil
+	// until wired; the add-to-Merge endpoint answers 503 without it.
+	mergeTrackEnrolFn func(prID int64, repo string, number int) error
+
 	// mergeTrackEvaluateFn re-evaluates one tracked PR on demand. Nil until
 	// main wires it, in which case the endpoint answers 503.
 	mergeTrackEvaluateFn func(ctx context.Context, prID int64, dryRun bool) error
@@ -322,6 +326,13 @@ func (srv *Server) SetCancelReviewFn(fn func(prID int64) (bool, error)) {
 // the stored row.
 func (srv *Server) SetAddPRFn(fn func(repo string, number int) (*store.PR, error)) {
 	srv.addPRFn = fn
+}
+
+// SetMergeTrackEnrolFn wires the callback behind POST /merge-tracking/add: it
+// brings a stored PR into merge tracking without going anywhere near the review
+// pipeline.
+func (srv *Server) SetMergeTrackEnrolFn(fn func(prID int64, repo string, number int) error) {
+	srv.mergeTrackEnrolFn = fn
 }
 
 // SetMergeTrackEvaluateFn wires the on-demand merge-tracking evaluation used by
@@ -630,8 +641,11 @@ func (srv *Server) buildRouter() chi.Router {
 	r.Delete("/config/orgs/{org}/*", srv.handleDeleteOrgField)
 	r.Patch("/config/autonomous/repos/{repo}", srv.handlePatchAutonomousRepoConfig)
 	r.Patch("/config/autonomous/orgs/{org}", srv.handlePatchAutonomousOrgConfig)
+	r.Post("/merge-tracking/add", srv.handleAddMergeTracking)
 	r.Patch("/config/merge_tracking/repos/{repo}", srv.handlePatchMergeTrackingRepoConfig)
+	r.Delete("/config/merge_tracking/repos/{repo}/*", srv.handleDeleteMergeTrackingRepoConfigField)
 	r.Patch("/config/merge_tracking/orgs/{org}", srv.handlePatchMergeTrackingOrgConfig)
+	r.Delete("/config/merge_tracking/orgs/{org}/*", srv.handleDeleteMergeTrackingOrgConfigField)
 	r.Get("/merge-tracking", srv.handleListMergeTracking)
 	r.Get("/merge-tracking/{prID}", srv.handleGetMergeTracking)
 	r.Post("/merge-tracking/{prID}/evaluate", srv.handleEvaluateMergeTracking)
@@ -1629,6 +1643,64 @@ func (srv *Server) handlePatchMergeTrackingOrgConfig(w http.ResponseWriter, r *h
 		return
 	}
 	srv.patchSectionSubKey(w, r, "merge_tracking", "orgs", org)
+}
+
+func (srv *Server) handleDeleteMergeTrackingRepoConfigField(w http.ResponseWriter, r *http.Request) {
+	repo, err := url.PathUnescape(chi.URLParam(r, "repo"))
+	if err != nil || repo == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid repo parameter"})
+		return
+	}
+	if err := config.ValidateRepoSlug(repo); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	srv.deleteSectionSubKeyField(w, r, "merge_tracking", "repos", repo)
+}
+
+func (srv *Server) handleDeleteMergeTrackingOrgConfigField(w http.ResponseWriter, r *http.Request) {
+	org, err := url.PathUnescape(chi.URLParam(r, "org"))
+	if err != nil || org == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid org parameter"})
+		return
+	}
+	if err := config.ValidateOrgSlug(org); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	srv.deleteSectionSubKeyField(w, r, "merge_tracking", "orgs", org)
+}
+
+// deleteSectionSubKeyField removes one override from
+// <section>.<subKey>.<id>, pruning empty parent maps along the way. Callers are
+// responsible for unescaping and validating id before calling.
+func (srv *Server) deleteSectionSubKeyField(w http.ResponseWriter, r *http.Request, section, subKey, id string) {
+	if srv.configPath == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "DELETE not available — configPath not set"})
+		return
+	}
+	field := chi.URLParam(r, "*")
+	if field == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "field path required"})
+		return
+	}
+	segments := append([]string{section, subKey, id}, strings.Split(field, "/")...)
+
+	result, err := srv.patchTOML(func(m map[string]any) error {
+		config.DeleteNestedKey(m, segments)
+		return nil
+	})
+	if err != nil {
+		slog.Error("DELETE /config section field failed", "section", section, "subkey", subKey, "id", id, "field", field, "err", err)
+		var ve *config.ValidationError
+		if errors.As(err, &ve) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		} else {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (srv *Server) handleDeleteRepoField(w http.ResponseWriter, r *http.Request) {

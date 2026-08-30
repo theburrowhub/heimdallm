@@ -7,6 +7,8 @@ AppConfig _withMergeTracking(MergeTrackingConfig mt) =>
     AppConfig(pollInterval: '5m', aiPrimary: 'claude', mergeTracking: mt);
 
 void main() {
+  _overrideParsing();
+
   // Only what changed is sent. A field the diff forgets is a setting the
   // operator can flip in the UI and never see take effect — silently, because
   // the save still succeeds.
@@ -107,5 +109,77 @@ void main() {
     expect(cfg.merge, isFalse);
     expect(cfg.mergeMethod, 'squash');
     expect(cfg.maxPrsPerTick, 20);
+  });
+}
+
+// The daemon serves the section back on GET /config, and its per-repo and
+// per-org overrides live inside it rather than in repo_overrides. Without this
+// parsing the LED and the per-repo switch would have nothing to read.
+void _overrideParsing() {
+  test('per-repo and per-org overrides are folded into their configs', () {
+    final cfg = AppConfig.fromJson({
+      'repositories': ['acme/widgets'],
+      'merge_tracking': {
+        'enabled': true,
+        'repos': {
+          'acme/widgets': {'enabled': false},
+          'acme/gadgets': {'enabled': true},
+        },
+        'orgs': {
+          'acme': {'enabled': false},
+        },
+      },
+    });
+
+    expect(cfg.mergeTracking.enabled, isTrue);
+    expect(cfg.repoConfigs['acme/widgets']?.mtEnabled, isFalse);
+    // A merge-tracking override is not GitHub repository membership.
+    expect(cfg.repoConfigs, isNot(contains('acme/gadgets')));
+    expect(cfg.orgConfigs['acme']?.mtEnabled, isFalse);
+  });
+
+  test('merge-tracking-only repos cannot leak into non_monitored', () {
+    final old = AppConfig.fromJson({
+      'repositories': ['acme/widgets'],
+      'merge_tracking': {
+        'repos': {
+          'acme/gadgets': {'enabled': true},
+        },
+      },
+    });
+    final updated = old.copyWith(
+      repoConfigs: {
+        ...old.repoConfigs,
+        'acme/widgets': old.repoConfigs['acme/widgets']!.copyWith(
+          prEnabled: false,
+        ),
+      },
+    );
+
+    final github =
+        computeGlobalDiffForTest(old, updated)['github']
+            as Map<String, dynamic>;
+    expect(github['non_monitored'], ['acme/widgets']);
+    expect(github['non_monitored'], isNot(contains('acme/gadgets')));
+  });
+
+  test('an override with no enabled key leaves the config inheriting', () {
+    final cfg = AppConfig.fromJson({
+      'repositories': ['acme/widgets'],
+      'merge_tracking': {
+        'repos': {
+          'acme/widgets': {'merge_method': 'rebase'},
+        },
+      },
+    });
+    expect(cfg.repoConfigs['acme/widgets']?.mtEnabled, isNull);
+  });
+
+  // The settings screen reset itself every time it was reopened because the
+  // daemon never sent this section back at all.
+  test('a config without the section falls back to the defaults', () {
+    final cfg = AppConfig.fromJson({'repositories': ['acme/widgets']});
+    expect(cfg.mergeTracking.enabled, isFalse);
+    expect(cfg.repoConfigs['acme/widgets']?.mtEnabled, isNull);
   });
 }

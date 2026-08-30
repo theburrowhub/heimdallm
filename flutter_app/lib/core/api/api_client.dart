@@ -294,6 +294,133 @@ class ApiClient {
     );
   }
 
+  /// Patches the per-repo merge-tracking override.
+  ///
+  /// Merge tracking keeps its overrides in `merge_tracking.repos.<repo>`, not
+  /// in `repo_overrides`, so it cannot ride along with the rest of the per-repo
+  /// config — it has its own endpoint on the daemon.
+  Future<Map<String, dynamic>> patchMergeTrackingRepoConfig(
+    String repo,
+    Map<String, dynamic> patch,
+  ) => _patchMergeTrackingScope('repos', repo, patch);
+
+  /// The org-level half of [patchMergeTrackingRepoConfig].
+  Future<Map<String, dynamic>> patchMergeTrackingOrgConfig(
+    String org,
+    Map<String, dynamic> patch,
+  ) => _patchMergeTrackingScope('orgs', org, patch);
+
+  Future<Map<String, dynamic>> _patchMergeTrackingScope(
+    String scope,
+    String id,
+    Map<String, dynamic> patch,
+  ) async {
+    final updates = <String, dynamic>{
+      for (final entry in patch.entries)
+        if (entry.value != null) entry.key: entry.value,
+    };
+    final removals = patch.entries
+        .where((entry) => entry.value == null)
+        .map((entry) => entry.key);
+    Map<String, dynamic> latest = {};
+
+    if (updates.isNotEmpty) {
+      final resp = await _client.patch(
+        _uri('/config/merge_tracking/$scope/${Uri.encodeComponent(id)}'),
+        headers: await _authHeaders(),
+        body: jsonEncode(updates),
+      );
+      if (resp.statusCode != 200) {
+        throw ApiException(
+          _configMutationError(
+            resp.body,
+            'PATCH /config/merge_tracking/$scope/$id failed: ${resp.statusCode}',
+          ),
+        );
+      }
+      latest = jsonDecode(resp.body) as Map<String, dynamic>;
+    }
+
+    for (final field in removals) {
+      final resp = await _client.delete(
+        _uri(
+          '/config/merge_tracking/$scope/${Uri.encodeComponent(id)}/${Uri.encodeComponent(field)}',
+        ),
+        headers: await _authHeaders(),
+      );
+      if (resp.statusCode != 200) {
+        throw ApiException(
+          _configMutationError(
+            resp.body,
+            'DELETE /config/merge_tracking/$scope/$id/$field failed: ${resp.statusCode}',
+          ),
+        );
+      }
+      latest = jsonDecode(resp.body) as Map<String, dynamic>;
+    }
+    return latest;
+  }
+
+  String _configMutationError(String body, String fallback) {
+    try {
+      final err = (jsonDecode(body) as Map<String, dynamic>)['error'];
+      if (err is String && err.isNotEmpty) return err;
+    } catch (_) {}
+    return fallback;
+  }
+
+  /// Adds a pull request to merge tracking by URL.
+  ///
+  /// Deliberately NOT [addPRByUrl]: that routes through the review pipeline,
+  /// which refuses a PR the authenticated account authored — and Heimdallm
+  /// authenticates as the operator, so that is every PR they open. Merge
+  /// tracking exists for exactly those PRs, so it needs its own door.
+  Future<MergeTrackingEntry> addMergeTracking(String url) async {
+    final resp = await _client.post(
+      _uri('/merge-tracking/add'),
+      headers: await _authHeaders(),
+      body: jsonEncode({'url': url}),
+    );
+    if (resp.statusCode != 200 && resp.statusCode != 202) {
+      // The daemon explains refusals in prose — "merge tracking is disabled for
+      // org/repo", "not a pull request URL" — and that text is the whole point
+      // of the dialog's error line.
+      String msg = 'POST /merge-tracking/add failed: ${resp.statusCode}';
+      try {
+        final err = (jsonDecode(resp.body) as Map<String, dynamic>)['error'];
+        if (err is String && err.isNotEmpty) msg = err;
+      } catch (_) {}
+      throw ApiException(msg);
+    }
+    final decoded = jsonDecode(resp.body) as Map<String, dynamic>;
+    if (decoded['pr_id'] != null) {
+      return MergeTrackingEntry.fromJson(decoded);
+    }
+
+    // A successful enrolment can still race a failed read-back. Older daemons
+    // answer that committed 202 with {status, pr}; adapt it to the same entry
+    // shape so the dialog closes and refreshes instead of throwing a TypeError
+    // after an operation that already took effect.
+    final pr = decoded['pr'];
+    if (pr is Map<String, dynamic> &&
+        pr['id'] is num &&
+        pr['repo'] is String &&
+        pr['number'] is num) {
+      return MergeTrackingEntry.fromJson({
+        'pr_id': pr['id'],
+        'repo': pr['repo'],
+        'number': pr['number'],
+        'title': pr['title'] ?? '',
+        'url': pr['url'] ?? '',
+        'author': pr['author'] ?? '',
+        'phase': 'idle',
+      });
+    }
+    throw ApiException(
+      'POST /merge-tracking/add returned an invalid success response',
+    );
+  }
+
   /// Re-evaluates one tracked PR against GitHub.
   ///
   /// [dryRun] records the decision without acting on it — the honest answer to

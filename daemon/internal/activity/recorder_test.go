@@ -402,6 +402,11 @@ func TestRecorder_ReviewSkippedDedupReasonsAreNotRecorded(t *testing.T) {
 
 	for _, reason := range []string{
 		"sha_unchanged", "legacy_backfill", "retry_cooldown", "retry_repo_limit",
+		// self_authored joined this list once Heimdallm started authenticating
+		// as the operator's own account: the guard then fires on every PR they
+		// open, on every cycle, and the operator's own PRs have the Merge tab
+		// of their own. See TestRecorder_SelfAuthoredSkipsAreNotRecorded.
+		"self_authored",
 	} {
 		events <- sse.Event{
 			Type: sse.EventReviewSkipped,
@@ -413,6 +418,34 @@ func TestRecorder_ReviewSkippedDedupReasonsAreNotRecorded(t *testing.T) {
 	if got := fs.count(); got != 0 {
 		t.Errorf("dedup skips should NOT produce activity_log rows; got %d rows", got)
 	}
+}
+
+// Heimdallm authenticates as the operator's own GitHub account, so the
+// "self-authored" review guard fires on every pull request the operator opens,
+// on every poll cycle, for as long as it stays open. Recording those buried the
+// activity log under identical rows — the same PR, the same reason, once a
+// cycle — for PRs the operator manages from the Merge tab instead.
+func TestRecorder_SelfAuthoredSkipsAreNotRecorded(t *testing.T) {
+	_, fs, events := newTestRecorder(t)
+
+	// Three cycles over the same PR, exactly what the poller produces.
+	for i := 0; i < 3; i++ {
+		events <- sse.Event{
+			Type: sse.EventReviewSkipped,
+			Data: `{"repo":"org/name","pr_number":1224,"pr_title":"chore(pro): right-size resources","reason":"self_authored"}`,
+		}
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := fs.count(); got != 0 {
+		t.Errorf("a self-authored skip must not reach the activity log; got %d rows", got)
+	}
+
+	// A real policy decision still gets its row.
+	events <- sse.Event{
+		Type: sse.EventReviewSkipped,
+		Data: `{"repo":"org/name","pr_number":7,"pr_title":"Fix X","reason":"draft"}`,
+	}
+	waitFor(t, func() bool { return fs.count() == 1 })
 }
 
 func TestRecorder_StoreFailureIsLoggedAndDropped(t *testing.T) {

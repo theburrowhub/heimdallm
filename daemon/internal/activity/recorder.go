@@ -281,14 +281,25 @@ func (r *Recorder) recordIssueReviewError(ev sse.Event) error {
 // activity feed with one row per poll for every stable PR — exactly the
 // regression theburrowhub/heimdallm#322 Bug 4 was meant to close (the
 // pre-fix path emitted EventReviewCompleted on those skips, which was
-// then routed here). Keep policy skips (not_open / draft /
-// self_authored) recorded — those reflect the bot deciding not to
-// review and are useful in the audit trail.
+// then routed here). Keep policy skips (not_open / draft) recorded —
+// those reflect the bot deciding not to review and are useful in the
+// audit trail.
+//
+// self_authored is deduped WITH the routine skips, not with the policy
+// ones, because it does not mean what its name suggests any more.
+// Heimdallm authenticates as the operator's own account, so the
+// "self-authored" guard fires on every pull request the operator opens
+// — on every poll cycle, for as long as the PR is open. That is not an
+// audit trail, it is one row per PR per cycle burying everything else.
+// The operator's own PRs have their own surface now (the Merge tab), so
+// the skip is expected rather than notable. The SSE still goes out, so
+// a spinner watching that PR clears either way.
 var dedupSkipReasons = map[string]bool{
 	"sha_unchanged":    true,
 	"legacy_backfill":  true,
 	"retry_cooldown":   true,
 	"retry_repo_limit": true,
+	"self_authored":    true,
 }
 
 func (r *Recorder) recordReviewSkipped(ev sse.Event) error {

@@ -46,6 +46,7 @@ type StateStore interface {
 	RecordMergeTrackingDecision(prID int64, d store.MergeDecisionRecord) error
 	BumpMergeTrackingAttempt(prID int64, kind string, cooldownUntil time.Time, lastErr string) error
 	ClearMergeTrackingUnknownWaits(prID int64) error
+	ClearMergeTrackingCooldown(prID int64) error
 	PruneMergeTracking(before time.Time) (int, error)
 	SetMergeTrackingPreRebaseSHA(prID int64, sha string) error
 	BlockMergeTracking(prID int64, reason, detail string, cooldownUntil time.Time) error
@@ -75,6 +76,11 @@ type WorktreeRunner interface {
 	// typically because the base requires linear history. Returns the new head.
 	RebaseAndForcePush(ctx context.Context, req ConflictRequest) (string, error)
 }
+
+// ErrTrackingDisabled identifies an operator-resolvable enrolment refusal.
+// HTTP callers map it to a conflict instead of reporting an internal daemon
+// failure; wrapping preserves the repository name in the concrete error.
+var ErrTrackingDisabled = errors.New("mergetrack: merge tracking is disabled")
 
 // Reconciler drives tracked PRs towards merge.
 type Reconciler struct {
@@ -215,12 +221,35 @@ func (r *Reconciler) Tick(ctx context.Context, repos []string) TickStats {
 	return stats
 }
 
+// anyIncludesAssigned reports whether the assignee qualifier belongs in the
+// discovery search.
+//
+// The search is global — one query covering every repo — but include_assigned
+// is overridable per org and repo in BOTH directions. Asking only the global
+// value made the widening direction a silent no-op: with include_assigned off
+// globally and on for one repo, the search never returned a single assigned-only
+// PR, so the documented repo > org > global precedence did not hold. Searching
+// whenever ANY enabled repo wants assignees is correct because the per-PR filter
+// in discover() drops the ones each repo does not want.
+func (r *Reconciler) anyIncludesAssigned(repos []string) bool {
+	if r.globalCfg != nil && r.globalCfg().IncludeAssigned {
+		return true
+	}
+	if r.cfgFor == nil {
+		return false
+	}
+	for _, repo := range repos {
+		cfg := r.cfgFor(repo)
+		if cfg.Enabled && cfg.IncludeAssigned {
+			return true
+		}
+	}
+	return false
+}
+
 // discover finds PRs the user authors or is assigned to and enrols them.
 func (r *Reconciler) discover(ctx context.Context, repos []string) int {
-	includeAssigned := false
-	if r.globalCfg != nil {
-		includeAssigned = r.globalCfg().IncludeAssigned
-	}
+	includeAssigned := r.anyIncludesAssigned(repos)
 
 	prs, err := r.gw.FetchMergeTrackingPRs(includeAssigned)
 	if err != nil {
@@ -249,12 +278,12 @@ func (r *Reconciler) discover(ctx context.Context, repos []string) int {
 		if !cfg.Enabled {
 			continue
 		}
-		// include_assigned is overridable per org and repo, but the search that
-		// found this PR used the global value. Enrolling one the repo does not
-		// want costs a GraphQL query every tick to reach an Evaluate that
-		// abandons it again — and since discovery revives an abandoned row, the
-		// phase would flap idle↔abandoned forever on a budget shared with the
-		// review pipeline.
+		// The search covers every repo at once, so it returns assigned-only PRs
+		// as soon as ANY repo wants them. Enrolling one this repo does not want
+		// costs a GraphQL query every tick to reach an Evaluate that abandons it
+		// again — and since discovery revives an abandoned row, the phase would
+		// flap idle↔abandoned forever on a budget shared with the review
+		// pipeline. This filter is the other half of anyIncludesAssigned.
 		if !pr.IsAuthor && !cfg.IncludeAssigned {
 			continue
 		}
@@ -310,6 +339,42 @@ func (r *Reconciler) enrol(pr *gh.TrackedPR) (int64, bool, error) {
 		return row.ID, false, fmt.Errorf("ensure merge tracking: %w", err)
 	}
 	return row.ID, isNew, nil
+}
+
+// EnrolExistingPR brings a PR that is already stored into merge tracking and
+// makes it due immediately.
+//
+// This backs the Merge tab's own add-a-PR action. Discovery would find the PR
+// on its next pass anyway, but an operator who has just pasted a link expects
+// to see the row now, not in five minutes — and the review pipeline's add path
+// is closed to them, because it refuses PRs the authenticated account authored.
+//
+// It deliberately does NOT check whether the PR is really the operator's: that
+// is decided by the next evaluation against GitHub's own view of author and
+// assignees, which is the same judgement discovery gets. Enrolling a PR that
+// turns out not to qualify costs one query and ends in an abandoned row.
+func (r *Reconciler) EnrolExistingPR(prID int64, repo string, number int) error {
+	if r == nil || r.st == nil {
+		return fmt.Errorf("mergetrack: reconciler not wired")
+	}
+	if r.cfgFor != nil {
+		if !r.cfgFor(repo).Enabled {
+			return fmt.Errorf("%w for %s", ErrTrackingDisabled, repo)
+		}
+	} else if r.globalCfg != nil && !r.globalCfg().Enabled {
+		return fmt.Errorf("%w for %s", ErrTrackingDisabled, repo)
+	}
+	if _, err := r.st.EnsureMergeTracking(prID, repo, number); err != nil {
+		return fmt.Errorf("mergetrack: enrol %s#%d: %w", repo, number, err)
+	}
+	// A row revived from abandoned keeps whatever cooldown parked it.
+	if err := r.st.ClearMergeTrackingCooldown(prID); err != nil {
+		return fmt.Errorf("mergetrack: clear cooldown %s#%d: %w", repo, number, err)
+	}
+	r.emit(sse.EventMergeTrackDetected, map[string]any{
+		"pr_id": prID, "repo": repo, "number": number, "manual": true,
+	})
+	return nil
 }
 
 // ReconcilePR evaluates one tracked PR and performs the chosen action.

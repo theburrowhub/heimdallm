@@ -2,12 +2,17 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/heimdallm/daemon/internal/mergetrack"
 	"github.com/heimdallm/daemon/internal/store"
 )
 
@@ -126,6 +131,96 @@ func (srv *Server) handleGetMergeTracking(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, http.StatusOK, srv.buildMergeTrackingEntry(row, true))
+}
+
+// handleAddMergeTracking serves POST /merge-tracking/add.
+//
+// The review pipeline refuses a PR the authenticated account authored — and
+// since Heimdallm authenticates as the operator's own account, that is every PR
+// they open. POST /prs/add routes through that pipeline, so it was the wrong
+// door for the one feature that exists precisely for the operator's own PRs:
+// pasting a link there produced a `self_authored` skip and nothing else.
+//
+// This endpoint is the right door. It stores the PR, validates and enrols it in
+// merge tracking, then makes sure its repository is monitored. No review is
+// triggered and no self-author guard applies. Whether the PR is really the
+// operator's is decided where it belongs — by the reconciler's next evaluation,
+// against GitHub's own view of author and assignees.
+//
+// Body: {"url": "https://github.com/owner/repo/pull/123"}.
+func (srv *Server) handleAddMergeTracking(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		URL string `json:"url"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return
+	}
+	repo, number, err := parsePRURL(body.URL)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if srv.addPRFn == nil || srv.mergeTrackEnrolFn == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "merge tracking not configured",
+		})
+		return
+	}
+
+	// Validate against GitHub before touching config: a typo must not leave a
+	// repository monitored forever.
+	pr, err := srv.addPRFn(repo, number)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{
+			"error": fmt.Sprintf("fetch PR %s#%d: %v", repo, number, err),
+		})
+		return
+	}
+	if pr.State != "" && !strings.EqualFold(pr.State, "open") {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": fmt.Sprintf("cannot enrol %s#%d: pull request is %s", repo, number, pr.State),
+		})
+		return
+	}
+
+	// Enrolment also preflights the per-repo enabled switch. Do this before
+	// changing monitoring config so a refusal cannot start reviewing a whole
+	// repository as a side effect of a failed request.
+	if err := srv.mergeTrackEnrolFn(pr.ID, repo, number); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, mergetrack.ErrTrackingDisabled) {
+			status = http.StatusConflict
+		}
+		writeJSON(w, status, map[string]string{
+			"error": fmt.Sprintf("enrol %s#%d: %v", repo, number, err),
+		})
+		return
+	}
+
+	// Discovery intersects with the monitored list, so a PR in an unmonitored
+	// repo would be dropped on the next cycle even after being enrolled here.
+	if srv.configPath != "" {
+		if _, err := srv.patchTOML(func(m map[string]any) error {
+			addRepoToTOMLMap(m, repo)
+			return nil
+		}); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": fmt.Sprintf("add repo to config: %v", err),
+			})
+			return
+		}
+	}
+
+	row, err := srv.store.GetMergeTracking(pr.ID)
+	if err != nil {
+		// Enrolled but unreadable: report the add as done rather than failing
+		// an operation that already took effect.
+		slog.Warn("handleAddMergeTracking: read back row", "pr_id", pr.ID, "err", err)
+		writeJSON(w, http.StatusAccepted, map[string]any{"status": "pr enrolled", "pr": pr})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, srv.buildMergeTrackingEntry(row, true))
 }
 
 // handleEvaluateMergeTracking serves POST /merge-tracking/{prID}/evaluate.

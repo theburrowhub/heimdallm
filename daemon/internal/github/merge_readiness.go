@@ -94,6 +94,16 @@ func (c CheckContext) Duration() time.Duration {
 	return c.CompletedAt.Sub(*c.StartedAt)
 }
 
+// BehindBase reports whether the base branch has moved since the PR was last
+// brought up to date. Unknown (false) when either side is missing, because
+// guessing "behind" would push a branch nobody asked to move.
+func (s *MergeStatus) BehindBase() bool {
+	if s == nil || s.BaseOID == "" || s.BaseTipOID == "" {
+		return false
+	}
+	return s.BaseOID != s.BaseTipOID
+}
+
 // OpinionatedReview is the latest opinionated review state per reviewer.
 type OpinionatedReview struct {
 	Login       string    `json:"login"`
@@ -190,6 +200,17 @@ type MergeStatus struct {
 	BaseRef       string   `json:"base_ref"`
 	HeadRef       string   `json:"head_ref"`
 	HeadOID       string   `json:"head_oid"`
+	// BaseOID is the commit the PR is currently based on, and BaseTipOID the
+	// current tip of the base branch. They differ exactly when the PR is out of
+	// date.
+	//
+	// This is a signal of our own because mergeStateStatus cannot be one:
+	// GitHub collapses everything into a single value with BLOCKED ranked above
+	// BEHIND, so a PR that is both behind and waiting on a review or a check
+	// never reports BEHIND at all. Verified against this repository: two open
+	// PRs whose base was hundreds of commits back both reported DIRTY.
+	BaseOID    string `json:"base_oid"`
+	BaseTipOID string `json:"base_tip_oid"`
 	HeadRepo      string   `json:"head_repo"`
 	HeadIsFork    bool     `json:"head_is_fork"`
 	HeadRepoOwner string   `json:"head_repo_owner"`
@@ -274,6 +295,7 @@ query($owner:String!, $name:String!, $number:Int!, $threadCursor:String, $checkC
         enabledBy { login }
       }
       baseRefName
+      baseRefOid
       headRefName
       headRefOid
       headRepository { nameWithOwner isFork }
@@ -346,6 +368,7 @@ query($owner:String!, $name:String!, $number:Int!, $threadCursor:String, $checkC
       }
       baseRef {
         name
+        target { oid }
         branchProtectionRule {
           requiresApprovingReviews
           requiredApprovingReviewCount
@@ -482,6 +505,7 @@ type gqlPullRequest struct {
 	} `json:"autoMergeRequest"`
 
 	BaseRefName    string `json:"baseRefName"`
+	BaseRefOid     string `json:"baseRefOid"`
 	HeadRefName    string `json:"headRefName"`
 	HeadRefOid     string `json:"headRefOid"`
 	HeadRepository *struct {
@@ -525,7 +549,10 @@ type gqlPullRequest struct {
 	} `json:"commits"`
 
 	BaseRef *struct {
-		Name                 string                   `json:"name"`
+		Name   string `json:"name"`
+		Target *struct {
+			OID string `json:"oid"`
+		} `json:"target"`
 		BranchProtectionRule *gqlBranchProtectionRule `json:"branchProtectionRule"`
 	} `json:"baseRef"`
 }

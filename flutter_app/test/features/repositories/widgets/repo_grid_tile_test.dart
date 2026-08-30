@@ -29,7 +29,7 @@ void main() {
     )));
     expect(find.text('repo'), findsOneWidget);
     expect(find.text('a'), findsOneWidget);
-    expect(find.byType(FeatureLed), findsNWidgets(3));
+    expect(find.byType(FeatureLed), findsNWidgets(4));
   });
 
   testWidgets('tapping tile (outside checkbox) calls onTap', (tester) async {

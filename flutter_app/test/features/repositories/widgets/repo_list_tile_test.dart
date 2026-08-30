@@ -31,7 +31,7 @@ void main() {
       onSelectionToggle: () {},
       onTap: () {},
     )));
-    expect(find.byType(FeatureLed), findsNWidgets(3));
+    expect(find.byType(FeatureLed), findsNWidgets(4));
   });
 
   testWidgets('tapping checkbox calls onSelectionToggle', (tester) async {

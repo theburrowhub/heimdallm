@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/models/config_model.dart';
 import '../../shared/widgets/toast.dart';
 import '../config/config_providers.dart';
+import '../dashboard/dashboard_providers.dart';
 import 'widgets/bulk_actions_bar.dart';
 import 'widgets/feature_palette.dart';
 import 'widgets/filter_chips.dart';
@@ -96,6 +97,7 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
       Feature.prReview: agg((c) => c.prEnabled ?? false),
       Feature.issueTracking: agg((c) => c.itEnabled ?? false),
       Feature.develop: agg((c) => (c.devEnabled ?? false) && hasDir(c)),
+      Feature.mergeTracking: agg((c) => c.mtEnabled ?? false),
     };
   }
 
@@ -117,6 +119,7 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
           Feature.prReview => c.copyWith(prEnabled: enable),
           Feature.issueTracking => c.copyWith(itEnabled: enable),
           Feature.develop => c.copyWith(devEnabled: enable),
+          Feature.mergeTracking => c.copyWith(mtEnabled: enable),
         };
         _dirtyRepos.add(r);
       }
@@ -179,8 +182,29 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
     if (submitted.isEmpty) return;
     if (mounted) setState(() => _syncStatus = _SyncStatus.saving);
     final updated = current.copyWith(repoConfigs: Map.from(_repoConfigs));
+
+    // Merge tracking keeps its per-repo overrides in its own config section, so
+    // they travel by their own endpoint rather than inside repo_overrides.
+    final mtChanges = <String, bool>{};
+    for (final entry in submitted.entries) {
+      final before = current.repoConfigs[entry.key]?.mtEnabled;
+      final after = entry.value.mtEnabled;
+      if (before != after && after != null) mtChanges[entry.key] = after;
+    }
+
     try {
       await ref.read(configNotifierProvider.notifier).save(updated);
+      for (final change in mtChanges.entries) {
+        final response = await ref
+            .read(apiClientProvider)
+            .patchMergeTrackingRepoConfig(change.key, {
+              'enabled': change.value,
+            });
+        // The scoped endpoint returns the full authoritative config. Keep it
+        // instead of letting the earlier PATCH /config response (which cannot
+        // contain this just-written override) reset the LED until a refresh.
+        ref.read(configNotifierProvider.notifier).updateFromServer(response);
+      }
       if (!mounted) return;
       final latest = ref.read(configNotifierProvider).value;
       setState(() {
