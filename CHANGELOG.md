@@ -10,6 +10,16 @@
 * **issues:** `auto_promote_triage` defaults on only when `refinement_labels` is configured. Repos without a refinement target keep their previous review-only behavior; set `auto_promote_triage = false` explicitly to keep refinement manual even when refinement labels exist.
 * **pipeline (PR reviews):** a push (new HEAD SHA) on a previously-reviewed PR no longer triggers an automatic re-review on its own. Heimdallm now requires an explicit `review_requested` event for the bot — i.e. someone (or some automation) pressing "Re-request review" — newer than the previous review's `CreatedAt`. The SHA-unchanged dedup (#322 Bug 5) and this SHA-changed gate now share the same predicate, so the contract is "review iff explicitly re-requested" regardless of whether the commit changed. Workflows that relied on push-triggered re-reviews — typically repos with "Dismiss stale reviews on push" or CODEOWNERS auto-request workflows that auto-re-added the bot to `requested_reviewers` — must now explicitly re-request the review (manually in the UI, or via a GitHub Action calling `gh pr edit --add-reviewer`). Skipped pushes surface as a `review_skipped` SSE with reason `no_rereview_request` (distinct from `sha_unchanged`) so dashboards can tell the two cases apart. Closes #509.
 
+## [0.8.11](https://github.com/theburrowhub/heimdallm/compare/v0.8.10...v0.8.11) (2026-08-31)
+
+
+### Bug Fixes
+
+* **ci:** make daemon coverage deterministic ([#748](https://github.com/theburrowhub/heimdallm/issues/748)) ([0a931f3](https://github.com/theburrowhub/heimdallm/commit/0a931f3ea2be2fdbb8662b2ab51af47be68b9fc6))
+* **gui:** expose merge tracking overrides by scope ([#747](https://github.com/theburrowhub/heimdallm/issues/747)) ([da6a45d](https://github.com/theburrowhub/heimdallm/commit/da6a45d19ddcd0cad868be1f9e42b9f0b15fee37))
+* **macOS:** simplify updates to direct DMG replacement ([#746](https://github.com/theburrowhub/heimdallm/issues/746)) ([5469ef2](https://github.com/theburrowhub/heimdallm/commit/5469ef2b6987fa6a4530226f6735a2fc01abd4ab))
+* **merge-tracking:** keep branch sync responsive ([#744](https://github.com/theburrowhub/heimdallm/issues/744)) ([40fdfff](https://github.com/theburrowhub/heimdallm/commit/40fdfff65f4b63b590cc8438afd0cf7d285fdb36))
+
 ## [0.8.10](https://github.com/theburrowhub/heimdallm/compare/v0.8.9...v0.8.10) (2026-08-30)
 
 
