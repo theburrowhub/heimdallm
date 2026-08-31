@@ -7,6 +7,7 @@ import 'package:go_router/go_router.dart';
 import '../../core/models/agent.dart';
 import '../../core/models/config_model.dart';
 import '../../shared/widgets/autocomplete_chip_field.dart';
+import '../../shared/widgets/merge_tracking_override_editor.dart';
 import '../../shared/widgets/override_field.dart';
 import '../../shared/widgets/toast.dart';
 import '../agents/agents_screen.dart' show agentsProvider;
@@ -47,7 +48,12 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
     _saved = _config;
   }
 
-  bool get _dirty => _computeOrgDiff(_saved, _config).isNotEmpty;
+  bool get _dirty =>
+      _computeOrgDiff(_saved, _config).isNotEmpty ||
+      diffMergeTrackingOverrides(
+        _saved.mergeTracking,
+        _config.mergeTracking,
+      ).isNotEmpty;
 
   void _update(OrgConfig updated) {
     setState(() => _config = updated);
@@ -61,14 +67,28 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
   Future<void> _save() async {
     _debounce?.cancel();
     final diff = _computeOrgDiff(_saved, _config);
-    if (diff.isEmpty) return;
+    final mergeTrackingDiff = diffMergeTrackingOverrides(
+      _saved.mergeTracking,
+      _config.mergeTracking,
+    );
+    if (diff.isEmpty && mergeTrackingDiff.isEmpty) return;
     final target = _config;
     if (mounted) setState(() => _saving = true);
     try {
-      final freshJson = await ref
-          .read(apiClientProvider)
-          .patchOrgConfig(widget.orgName, diff);
-      ref.read(configNotifierProvider.notifier).updateFromServer(freshJson);
+      final api = ref.read(apiClientProvider);
+      Map<String, dynamic>? freshJson;
+      if (diff.isNotEmpty) {
+        freshJson = await api.patchOrgConfig(widget.orgName, diff);
+      }
+      if (mergeTrackingDiff.isNotEmpty) {
+        freshJson = await api.patchMergeTrackingOrgConfig(
+          widget.orgName,
+          mergeTrackingDiff,
+        );
+      }
+      if (freshJson != null) {
+        ref.read(configNotifierProvider.notifier).updateFromServer(freshJson);
+      }
       _saved = target;
       if (mounted) showToast(context, 'Saved');
     } catch (e) {
@@ -604,6 +624,16 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
                     onReset: () => _resetField('implement_prompt'),
                   ),
                 ], accent: FeaturePalette.develop),
+                _sectionCard('Merge Tracking', [
+                  MergeTrackingOverrideEditor(
+                    scopeKey: 'org',
+                    value: _config.mergeTracking,
+                    inherited: appConfig.mergeTracking,
+                    onChanged: (mergeTracking) => _update(
+                      _config.copyWith(mergeTracking: mergeTracking),
+                    ),
+                  ),
+                ], accent: FeaturePalette.mergeTracking),
               ],
             ),
           );
