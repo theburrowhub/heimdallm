@@ -837,6 +837,18 @@ else:
       );
     });
 
+    test('creates the default macOS updater', () async {
+      final services = DesktopPlatformServices(
+        isMacOS: true,
+        enableNativeAppUpdates: true,
+        dataDir: tempDir.path,
+      );
+
+      await services.setupAppUpdater();
+
+      expect(services.appUpdateSupport, AppUpdateSupport.unavailable);
+    });
+
     test('macOS updater setup preserves initialization failures', () async {
       final failure = StateError('updater initialization failed');
       final services = DesktopPlatformServices(

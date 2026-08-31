@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -77,6 +78,63 @@ void main() {
       expect(updater.availableRelease, isNull);
       expect(statuses.last.phase, AppUpdatePhase.idle);
       expect(statuses.last.message, contains('0.8.9 is up to date'));
+    });
+
+    test('starts polling as soon as it initializes', () async {
+      final secondRequest = Completer<void>();
+      var requestCount = 0;
+      final updater = MacOSAppUpdater(
+        executablePath: executable.path,
+        dataDirectory: '${temporaryDirectory.path}/data',
+        versionLoader: () async => const AppVersionInfo(version: '0.8.9'),
+        processRunner: Process.run,
+        onStatus: statuses.add,
+        client: MockClient((_) async {
+          requestCount++;
+          if (requestCount == 2) secondRequest.complete();
+          return _releaseResponse('0.8.10');
+        }),
+        pollInterval: const Duration(milliseconds: 10),
+      );
+      addTearDown(updater.dispose);
+
+      expect(await updater.initialize(), isTrue);
+      await secondRequest.future.timeout(const Duration(seconds: 1));
+
+      expect(requestCount, greaterThanOrEqualTo(2));
+    });
+
+    test('keeps automatic polling failures silent', () async {
+      final updater = _updater(
+        executable: executable,
+        temporaryDirectory: temporaryDirectory,
+        statuses: statuses,
+        client: MockClient(
+          (_) async => http.Response('unavailable', HttpStatus.badGateway),
+        ),
+      );
+      addTearDown(updater.dispose);
+      expect(await updater.initialize(), isTrue);
+
+      await updater.checkForUpdates(silent: true);
+
+      expect(statuses, isEmpty);
+    });
+
+    test('refuses installation before an update is available', () async {
+      final updater = _updater(
+        executable: executable,
+        temporaryDirectory: temporaryDirectory,
+        statuses: statuses,
+        client: MockClient((_) async => _releaseResponse('0.8.10')),
+      );
+      addTearDown(updater.dispose);
+      expect(await updater.initialize(), isTrue);
+
+      await expectLater(
+        updater.installAvailableUpdate(),
+        throwsA(isA<StateError>()),
+      );
     });
 
     test('downloads, mounts, stages, and launches one replacement', () async {
@@ -161,6 +219,123 @@ void main() {
         AppUpdatePhase.restarting,
       ]);
       expect(await workspace.exists(), isFalse);
+    });
+
+    test('cleans up when the mounted DMG has no app bundle', () async {
+      final workspace = Directory('${temporaryDirectory.path}/download');
+      final processCalls = <({String executable, List<String> arguments})>[];
+      final updater = MacOSAppUpdater(
+        executablePath: executable.path,
+        dataDirectory: '${temporaryDirectory.path}/data',
+        versionLoader: () async => const AppVersionInfo(version: '0.8.9'),
+        processRunner: (command, arguments) async {
+          processCalls.add((executable: command, arguments: [...arguments]));
+          return ProcessResult(1, 0, '', '');
+        },
+        onStatus: statuses.add,
+        client: MockClient((request) async {
+          if (request.url == MacOSAppUpdater.latestReleaseURL) {
+            return _releaseResponse('0.8.10');
+          }
+          return http.Response.bytes([1, 2, 3], HttpStatus.ok);
+        }),
+        tempDirectoryFactory: () async {
+          await workspace.create();
+          return workspace;
+        },
+        startPolling: false,
+      );
+      addTearDown(updater.dispose);
+      expect(await updater.initialize(), isTrue);
+      await updater.checkForUpdates();
+
+      await expectLater(
+        updater.installAvailableUpdate(),
+        throwsA(isA<StateError>()),
+      );
+
+      expect(
+        processCalls.map(
+          (call) => '${call.executable} ${call.arguments.first}',
+        ),
+        ['/usr/bin/hdiutil attach', '/usr/bin/hdiutil detach'],
+      );
+      expect(await workspace.exists(), isFalse);
+      expect(statuses.last.phase, AppUpdatePhase.error);
+      expect(statuses.last.message, contains('does not contain Heimdallm.app'));
+    });
+
+    test('reports a failed DMG download', () async {
+      final workspace = Directory('${temporaryDirectory.path}/download');
+      final updater = MacOSAppUpdater(
+        executablePath: executable.path,
+        dataDirectory: '${temporaryDirectory.path}/data',
+        versionLoader: () async => const AppVersionInfo(version: '0.8.9'),
+        processRunner: Process.run,
+        onStatus: statuses.add,
+        client: MockClient((request) async {
+          if (request.url == MacOSAppUpdater.latestReleaseURL) {
+            return _releaseResponse('0.8.10');
+          }
+          return http.Response('unavailable', HttpStatus.serviceUnavailable);
+        }),
+        tempDirectoryFactory: () async {
+          await workspace.create();
+          return workspace;
+        },
+        startPolling: false,
+      );
+      addTearDown(updater.dispose);
+      expect(await updater.initialize(), isTrue);
+      await updater.checkForUpdates();
+
+      await expectLater(
+        updater.installAvailableUpdate(),
+        throwsA(isA<HttpException>()),
+      );
+
+      expect(await workspace.exists(), isFalse);
+      expect(statuses.last.phase, AppUpdatePhase.error);
+      expect(statuses.last.message, contains('HTTP 503'));
+    });
+
+    test('reports a failed DMG mount command', () async {
+      final workspace = Directory('${temporaryDirectory.path}/download');
+      final updater = MacOSAppUpdater(
+        executablePath: executable.path,
+        dataDirectory: '${temporaryDirectory.path}/data',
+        versionLoader: () async => const AppVersionInfo(version: '0.8.9'),
+        processRunner: (_, _) async => ProcessResult(1, 7, '', ''),
+        onStatus: statuses.add,
+        client: MockClient((request) async {
+          if (request.url == MacOSAppUpdater.latestReleaseURL) {
+            return _releaseResponse('0.8.10');
+          }
+          return http.Response.bytes([1, 2, 3], HttpStatus.ok);
+        }),
+        tempDirectoryFactory: () async {
+          await workspace.create();
+          return workspace;
+        },
+        startPolling: false,
+      );
+      addTearDown(updater.dispose);
+      expect(await updater.initialize(), isTrue);
+      await updater.checkForUpdates();
+
+      await expectLater(
+        updater.installAvailableUpdate(),
+        throwsA(
+          isA<ProcessException>().having(
+            (error) => error.message,
+            'message',
+            'exit status 7',
+          ),
+        ),
+      );
+
+      expect(await workspace.exists(), isFalse);
+      expect(statuses.last.phase, AppUpdatePhase.error);
     });
 
     test('fails when the release has no matching DMG', () async {
