@@ -265,391 +265,379 @@ class _OrgDetailScreenState extends ConsumerState<OrgDetailScreen> {
           ],
         ),
         body: configAsync.when(
-          loading: () => const Center(child: CircularProgressIndicator()),
-          error: (_, _) => const Center(child: Text('Could not load config')),
-          data: (appConfig) {
-            _initFrom(appConfig);
-            final prompts = ref.watch(agentsProvider).value ?? <ReviewPrompt>[];
-            final promptOptions = prompts.map((p) => p.id).toList();
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error: (_, _) => const Center(child: Text('Could not load config')),
+        data: (appConfig) {
+          _initFrom(appConfig);
+          final prompts =
+              ref.watch(agentsProvider).value ?? <ReviewPrompt>[];
+          final promptOptions = prompts.map((p) => p.id).toList();
 
-            return SingleChildScrollView(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                children: [
-                  _sectionCard('General', [
-                    OverrideTextField(
-                      label: 'Local directory',
-                      globalValue: '',
-                      overrideValue: _config.localDir,
-                      isDirectory: true,
-                      onChanged: (v) => _update(_config.copyWith(localDir: v)),
-                      onReset: () => _resetField('local_dir'),
+          return SingleChildScrollView(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              children: [
+                _sectionCard('General', [
+                  OverrideTextField(
+                    label: 'Local directory',
+                    globalValue: '',
+                    overrideValue: _config.localDir,
+                    isDirectory: true,
+                    onChanged: (v) => _update(_config.copyWith(localDir: v)),
+                    onReset: () => _resetField('local_dir'),
+                  ),
+                ]),
+                _sectionCard('PR Review', [
+                  OverrideDropdown(
+                    label: 'Primary',
+                    globalValue: appConfig.aiPrimary,
+                    overrideValue: _config.aiPrimary,
+                    options: const ['claude', 'gemini', 'codex'],
+                    onChanged: (v) => _update(_config.copyWith(aiPrimary: v)),
+                    onReset: () => _resetField('primary'),
+                  ),
+                  const SizedBox(height: 10),
+                  OverrideDropdown(
+                    label: 'Fallback',
+                    globalValue: appConfig.aiFallback.isEmpty
+                        ? 'none'
+                        : appConfig.aiFallback,
+                    overrideValue: _config.aiFallback,
+                    options: const ['claude', 'gemini', 'codex'],
+                    onChanged: (v) => _update(_config.copyWith(aiFallback: v)),
+                    onReset: () => _resetField('fallback'),
+                  ),
+                  const SizedBox(height: 10),
+                  OverrideDropdown(
+                    label: 'Review mode',
+                    globalValue: appConfig.reviewMode,
+                    overrideValue: _config.reviewMode,
+                    options: const ['single', 'multi'],
+                    onChanged: (v) => _update(_config.copyWith(reviewMode: v)),
+                    onReset: () => _resetField('review_mode'),
+                  ),
+                  const SizedBox(height: 10),
+                  OverrideDropdown(
+                    label: 'Prompt',
+                    globalValue: 'default',
+                    overrideValue: _config.promptId,
+                    options: promptOptions,
+                    onChanged: (v) => _update(_config.copyWith(promptId: v)),
+                    onReset: () => _resetField('prompt'),
+                  ),
+                  const SizedBox(height: 10),
+                  OverrideDropdown(
+                    label: 'Never approve PRs with issues',
+                    globalValue: appConfig.globalNeverApproveWithIssues
+                        .toString(),
+                    overrideValue: _config.neverApproveWithIssues?.toString(),
+                    options: const ['true', 'false'],
+                    onChanged: (v) => _update(
+                      _config.copyWith(
+                        neverApproveWithIssues: v != null ? v == 'true' : null,
+                      ),
                     ),
-                  ]),
-                  _sectionCard('PR Review', [
-                    OverrideDropdown(
-                      label: 'Primary',
-                      globalValue: appConfig.aiPrimary,
-                      overrideValue: _config.aiPrimary,
-                      options: const ['claude', 'gemini', 'codex'],
-                      onChanged: (v) => _update(_config.copyWith(aiPrimary: v)),
-                      onReset: () => _resetField('primary'),
-                    ),
-                    const SizedBox(height: 10),
-                    OverrideDropdown(
-                      label: 'Fallback',
-                      globalValue: appConfig.aiFallback.isEmpty
-                          ? 'none'
-                          : appConfig.aiFallback,
-                      overrideValue: _config.aiFallback,
-                      options: const ['claude', 'gemini', 'codex'],
-                      onChanged: (v) =>
-                          _update(_config.copyWith(aiFallback: v)),
-                      onReset: () => _resetField('fallback'),
-                    ),
-                    const SizedBox(height: 10),
-                    OverrideDropdown(
-                      label: 'Review mode',
-                      globalValue: appConfig.reviewMode,
-                      overrideValue: _config.reviewMode,
-                      options: const ['single', 'multi'],
-                      onChanged: (v) =>
-                          _update(_config.copyWith(reviewMode: v)),
-                      onReset: () => _resetField('review_mode'),
-                    ),
-                    const SizedBox(height: 10),
-                    OverrideDropdown(
-                      label: 'Prompt',
-                      globalValue: 'default',
-                      overrideValue: _config.promptId,
-                      options: promptOptions,
-                      onChanged: (v) => _update(_config.copyWith(promptId: v)),
-                      onReset: () => _resetField('prompt'),
-                    ),
-                    const SizedBox(height: 10),
-                    OverrideDropdown(
-                      label: 'Never approve PRs with issues',
-                      globalValue: appConfig.globalNeverApproveWithIssues
-                          .toString(),
-                      overrideValue: _config.neverApproveWithIssues?.toString(),
-                      options: const ['true', 'false'],
-                      onChanged: (v) => _update(
-                        _config.copyWith(
-                          neverApproveWithIssues: v != null
-                              ? v == 'true'
-                              : null,
+                    onReset: () => _resetField('never_approve_with_issues'),
+                  ),
+                  const SizedBox(height: 10),
+                  OverrideDropdown(
+                    label: 'Never approve — minimum severity',
+                    globalValue: appConfig.globalNeverApproveMinSeverity,
+                    overrideValue: _config.neverApproveMinSeverity,
+                    options: neverApproveMinSeverityOptions,
+                    onChanged: (v) =>
+                        _update(_config.copyWith(neverApproveMinSeverity: v)),
+                    onReset: () => _resetField('never_approve_min_severity'),
+                  ),
+                ], accent: FeaturePalette.prReview),
+                _sectionCard('Issue Tracking', [
+                  Row(
+                    children: [
+                      const Expanded(
+                        child: Text(
+                          'Triage issues',
+                          style: TextStyle(fontSize: 13),
                         ),
                       ),
-                      onReset: () => _resetField('never_approve_with_issues'),
-                    ),
-                    const SizedBox(height: 10),
-                    OverrideDropdown(
-                      label: 'Never approve — minimum severity',
-                      globalValue: appConfig.globalNeverApproveMinSeverity,
-                      overrideValue: _config.neverApproveMinSeverity,
-                      options: neverApproveMinSeverityOptions,
-                      onChanged: (v) =>
-                          _update(_config.copyWith(neverApproveMinSeverity: v)),
-                      onReset: () => _resetField('never_approve_min_severity'),
-                    ),
-                  ], accent: FeaturePalette.prReview),
-                  _sectionCard('Issue Tracking', [
-                    Row(
-                      children: [
-                        const Expanded(
-                          child: Text(
-                            'Triage issues',
-                            style: TextStyle(fontSize: 13),
-                          ),
-                        ),
-                        FeatureSwitch(
-                          feature: Feature.issueTracking,
-                          value:
-                              _config.itEnabled ??
-                              appConfig.issueTracking.enabled,
-                          onChanged: (v) =>
-                              _update(_config.copyWith(itEnabled: v)),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
-                    AutocompleteChipField(
-                      label: 'Review-only labels',
-                      selectedValues:
-                          _config.reviewOnlyLabels ??
-                          appConfig.issueTracking.reviewOnlyLabels,
-                      availableOptions: const <String>[],
-                      isOverridden: _config.reviewOnlyLabels != null,
-                      globalHint: _joinList(
+                      FeatureSwitch(
+                        feature: Feature.issueTracking,
+                        value:
+                            _config.itEnabled ??
+                            appConfig.issueTracking.enabled,
+                        onChanged: (v) =>
+                            _update(_config.copyWith(itEnabled: v)),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  AutocompleteChipField(
+                    label: 'Review-only labels',
+                    selectedValues:
+                        _config.reviewOnlyLabels ??
                         appConfig.issueTracking.reviewOnlyLabels,
-                      ),
-                      onChanged: (v) =>
-                          _update(_config.copyWith(reviewOnlyLabels: v)),
-                      onReset: () =>
-                          _resetField('issue_tracking/review_only_labels'),
+                    availableOptions: const <String>[],
+                    isOverridden: _config.reviewOnlyLabels != null,
+                    globalHint: _joinList(
+                      appConfig.issueTracking.reviewOnlyLabels,
                     ),
-                    const SizedBox(height: 10),
-                    AutocompleteChipField(
-                      label: 'Refinement labels',
-                      helper:
-                          'Issues with these labels get a deep implementation plan',
-                      selectedValues:
-                          _config.refinementLabels ??
-                          appConfig.issueTracking.refinementLabels,
-                      availableOptions: const <String>[],
-                      isOverridden: _config.refinementLabels != null,
-                      globalHint: _joinList(
+                    onChanged: (v) =>
+                        _update(_config.copyWith(reviewOnlyLabels: v)),
+                    onReset: () =>
+                        _resetField('issue_tracking/review_only_labels'),
+                  ),
+                  const SizedBox(height: 10),
+                  AutocompleteChipField(
+                    label: 'Refinement labels',
+                    helper:
+                        'Issues with these labels get a deep implementation plan',
+                    selectedValues:
+                        _config.refinementLabels ??
                         appConfig.issueTracking.refinementLabels,
-                      ),
-                      onChanged: (v) =>
-                          _update(_config.copyWith(refinementLabels: v)),
-                      onReset: () =>
-                          _resetField('issue_tracking/refinement_labels'),
+                    availableOptions: const <String>[],
+                    isOverridden: _config.refinementLabels != null,
+                    globalHint: _joinList(
+                      appConfig.issueTracking.refinementLabels,
                     ),
-                    const SizedBox(height: 10),
-                    AutocompleteChipField(
-                      label: 'Skip labels',
-                      selectedValues:
-                          _config.skipLabels ??
-                          appConfig.issueTracking.skipLabels,
-                      availableOptions: const <String>[],
-                      isOverridden: _config.skipLabels != null,
-                      globalHint: _joinList(appConfig.issueTracking.skipLabels),
-                      onChanged: (v) =>
-                          _update(_config.copyWith(skipLabels: v)),
-                      onReset: () => _resetField('issue_tracking/skip_labels'),
-                    ),
-                    const SizedBox(height: 10),
-                    OverrideDropdown(
-                      label: 'Filter mode',
-                      globalValue: appConfig.issueTracking.filterMode,
-                      overrideValue: _config.issueFilterMode,
-                      options: const ['exclusive', 'inclusive'],
-                      onChanged: (v) =>
-                          _update(_config.copyWith(issueFilterMode: v)),
-                      onReset: () => _resetField('issue_tracking/filter_mode'),
-                    ),
-                    const SizedBox(height: 10),
-                    OverrideDropdown(
-                      label: 'Default action',
-                      globalValue: appConfig.issueTracking.defaultAction,
-                      overrideValue: _config.issueDefaultAction,
-                      options: const ['ignore', 'review_only'],
-                      onChanged: (v) =>
-                          _update(_config.copyWith(issueDefaultAction: v)),
-                      onReset: () =>
-                          _resetField('issue_tracking/default_action'),
-                    ),
-                    const SizedBox(height: 10),
-                    AutocompleteChipField(
-                      label: 'Organizations',
-                      helper: 'GitHub org names to filter issues',
-                      selectedValues:
-                          _config.issueOrganizations ??
-                          appConfig.issueTracking.organizations,
-                      availableOptions: appConfig.knownOrganizations,
-                      isOverridden: _config.issueOrganizations != null,
-                      globalHint: _joinList(
+                    onChanged: (v) =>
+                        _update(_config.copyWith(refinementLabels: v)),
+                    onReset: () =>
+                        _resetField('issue_tracking/refinement_labels'),
+                  ),
+                  const SizedBox(height: 10),
+                  AutocompleteChipField(
+                    label: 'Skip labels',
+                    selectedValues:
+                        _config.skipLabels ??
+                        appConfig.issueTracking.skipLabels,
+                    availableOptions: const <String>[],
+                    isOverridden: _config.skipLabels != null,
+                    globalHint: _joinList(appConfig.issueTracking.skipLabels),
+                    onChanged: (v) => _update(_config.copyWith(skipLabels: v)),
+                    onReset: () => _resetField('issue_tracking/skip_labels'),
+                  ),
+                  const SizedBox(height: 10),
+                  OverrideDropdown(
+                    label: 'Filter mode',
+                    globalValue: appConfig.issueTracking.filterMode,
+                    overrideValue: _config.issueFilterMode,
+                    options: const ['exclusive', 'inclusive'],
+                    onChanged: (v) =>
+                        _update(_config.copyWith(issueFilterMode: v)),
+                    onReset: () => _resetField('issue_tracking/filter_mode'),
+                  ),
+                  const SizedBox(height: 10),
+                  OverrideDropdown(
+                    label: 'Default action',
+                    globalValue: appConfig.issueTracking.defaultAction,
+                    overrideValue: _config.issueDefaultAction,
+                    options: const ['ignore', 'review_only'],
+                    onChanged: (v) =>
+                        _update(_config.copyWith(issueDefaultAction: v)),
+                    onReset: () => _resetField('issue_tracking/default_action'),
+                  ),
+                  const SizedBox(height: 10),
+                  AutocompleteChipField(
+                    label: 'Organizations',
+                    helper: 'GitHub org names to filter issues',
+                    selectedValues:
+                        _config.issueOrganizations ??
                         appConfig.issueTracking.organizations,
+                    availableOptions: appConfig.knownOrganizations,
+                    isOverridden: _config.issueOrganizations != null,
+                    globalHint: _joinList(
+                      appConfig.issueTracking.organizations,
+                    ),
+                    onChanged: (v) =>
+                        _update(_config.copyWith(issueOrganizations: v)),
+                    onReset: () => _resetField('issue_tracking/organizations'),
+                  ),
+                  const SizedBox(height: 10),
+                  AutocompleteChipField(
+                    label: 'Assignees',
+                    helper: 'Only process issues assigned to these users',
+                    selectedValues:
+                        _config.issueAssignees ??
+                        appConfig.issueTracking.assignees,
+                    availableOptions: appConfig.knownGitHubUsers,
+                    isOverridden: _config.issueAssignees != null,
+                    globalHint: _joinList(appConfig.issueTracking.assignees),
+                    onChanged: (v) =>
+                        _update(_config.copyWith(issueAssignees: v)),
+                    onReset: () => _resetField('issue_tracking/assignees'),
+                  ),
+                  const SizedBox(height: 10),
+                  OverrideDropdown(
+                    label: 'Prompt',
+                    globalValue: appConfig.globalIssuePrompt.isEmpty
+                        ? 'default'
+                        : appConfig.globalIssuePrompt,
+                    overrideValue: _config.issuePromptId,
+                    options: promptOptions,
+                    onChanged: (v) =>
+                        _update(_config.copyWith(issuePromptId: v)),
+                    onReset: () => _resetField('issue_prompt'),
+                  ),
+                ], accent: FeaturePalette.issueTracking),
+                _sectionCard('Pipeline', [
+                  OverrideTextField(
+                    label: 'Triage owner',
+                    globalValue: appConfig.globalTriageOwner,
+                    overrideValue: _config.triageOwner,
+                    onChanged: (v) => _update(_config.copyWith(triageOwner: v)),
+                    onReset: () => _resetField('triage_owner'),
+                  ),
+                  const SizedBox(height: 10),
+                  OverrideTextField(
+                    label: 'Clone directory',
+                    globalValue: appConfig.globalCloneDir,
+                    overrideValue: _config.cloneDir,
+                    onChanged: (v) => _update(_config.copyWith(cloneDir: v)),
+                    onReset: () => _resetField('clone_dir'),
+                  ),
+                  const SizedBox(height: 10),
+                  OverrideDropdown(
+                    label: 'Auto-promote triage',
+                    globalValue: (appConfig.globalAutoPromoteTriage ?? false)
+                        .toString(),
+                    overrideValue: _config.autoPromoteTriage?.toString(),
+                    options: const ['true', 'false'],
+                    onChanged: (v) => _update(
+                      _config.copyWith(
+                        autoPromoteTriage: v != null ? v == 'true' : null,
                       ),
-                      onChanged: (v) =>
-                          _update(_config.copyWith(issueOrganizations: v)),
-                      onReset: () =>
-                          _resetField('issue_tracking/organizations'),
                     ),
-                    const SizedBox(height: 10),
-                    AutocompleteChipField(
-                      label: 'Assignees',
-                      helper: 'Only process issues assigned to these users',
-                      selectedValues:
-                          _config.issueAssignees ??
-                          appConfig.issueTracking.assignees,
-                      availableOptions: appConfig.knownGitHubUsers,
-                      isOverridden: _config.issueAssignees != null,
-                      globalHint: _joinList(appConfig.issueTracking.assignees),
-                      onChanged: (v) =>
-                          _update(_config.copyWith(issueAssignees: v)),
-                      onReset: () => _resetField('issue_tracking/assignees'),
+                    onReset: () => _resetField('auto_promote_triage'),
+                  ),
+                  const SizedBox(height: 10),
+                  OverrideDropdown(
+                    label: 'Auto-promote refinement',
+                    globalValue:
+                        (appConfig.globalAutoPromoteRefinement ?? false)
+                            .toString(),
+                    overrideValue: _config.autoPromoteRefinement?.toString(),
+                    options: const ['true', 'false'],
+                    onChanged: (v) => _update(
+                      _config.copyWith(
+                        autoPromoteRefinement: v != null ? v == 'true' : null,
+                      ),
                     ),
-                    const SizedBox(height: 10),
-                    OverrideDropdown(
-                      label: 'Prompt',
-                      globalValue: appConfig.globalIssuePrompt.isEmpty
-                          ? 'default'
-                          : appConfig.globalIssuePrompt,
-                      overrideValue: _config.issuePromptId,
-                      options: promptOptions,
-                      onChanged: (v) =>
-                          _update(_config.copyWith(issuePromptId: v)),
-                      onReset: () => _resetField('issue_prompt'),
+                    onReset: () => _resetField('auto_promote_refinement'),
+                  ),
+                  const SizedBox(height: 10),
+                  OverrideDropdown(
+                    label: 'Generate PR description',
+                    globalValue: appConfig.globalGeneratePRDescription
+                        .toString(),
+                    overrideValue: _config.generatePRDescription?.toString(),
+                    options: const ['true', 'false'],
+                    onChanged: (v) => _update(
+                      _config.copyWith(
+                        generatePRDescription: v != null ? v == 'true' : null,
+                      ),
                     ),
-                  ], accent: FeaturePalette.issueTracking),
-                  _sectionCard('Pipeline', [
-                    OverrideTextField(
-                      label: 'Triage owner',
-                      globalValue: appConfig.globalTriageOwner,
-                      overrideValue: _config.triageOwner,
-                      onChanged: (v) =>
-                          _update(_config.copyWith(triageOwner: v)),
-                      onReset: () => _resetField('triage_owner'),
-                    ),
-                    const SizedBox(height: 10),
-                    OverrideTextField(
-                      label: 'Clone directory',
-                      globalValue: appConfig.globalCloneDir,
-                      overrideValue: _config.cloneDir,
-                      onChanged: (v) => _update(_config.copyWith(cloneDir: v)),
-                      onReset: () => _resetField('clone_dir'),
-                    ),
-                    const SizedBox(height: 10),
-                    OverrideDropdown(
-                      label: 'Auto-promote triage',
-                      globalValue: (appConfig.globalAutoPromoteTriage ?? false)
-                          .toString(),
-                      overrideValue: _config.autoPromoteTriage?.toString(),
-                      options: const ['true', 'false'],
-                      onChanged: (v) => _update(
-                        _config.copyWith(
-                          autoPromoteTriage: v != null ? v == 'true' : null,
+                    onReset: () => _resetField('generate_pr_description'),
+                  ),
+                ]),
+                _sectionCard('Develop', [
+                  Row(
+                    children: [
+                      const Expanded(
+                        child: Text(
+                          'Auto-implement issues',
+                          style: TextStyle(fontSize: 13),
                         ),
                       ),
-                      onReset: () => _resetField('auto_promote_triage'),
-                    ),
-                    const SizedBox(height: 10),
-                    OverrideDropdown(
-                      label: 'Auto-promote refinement',
-                      globalValue:
-                          (appConfig.globalAutoPromoteRefinement ?? false)
-                              .toString(),
-                      overrideValue: _config.autoPromoteRefinement?.toString(),
-                      options: const ['true', 'false'],
-                      onChanged: (v) => _update(
-                        _config.copyWith(
-                          autoPromoteRefinement: v != null ? v == 'true' : null,
-                        ),
+                      FeatureSwitch(
+                        feature: Feature.develop,
+                        value: _config.devEnabled ?? false,
+                        onChanged: (v) =>
+                            _update(_config.copyWith(devEnabled: v)),
                       ),
-                      onReset: () => _resetField('auto_promote_refinement'),
-                    ),
-                    const SizedBox(height: 10),
-                    OverrideDropdown(
-                      label: 'Generate PR description',
-                      globalValue: appConfig.globalGeneratePRDescription
-                          .toString(),
-                      overrideValue: _config.generatePRDescription?.toString(),
-                      options: const ['true', 'false'],
-                      onChanged: (v) => _update(
-                        _config.copyWith(
-                          generatePRDescription: v != null ? v == 'true' : null,
-                        ),
-                      ),
-                      onReset: () => _resetField('generate_pr_description'),
-                    ),
-                  ]),
-                  _sectionCard('Develop', [
-                    Row(
-                      children: [
-                        const Expanded(
-                          child: Text(
-                            'Auto-implement issues',
-                            style: TextStyle(fontSize: 13),
-                          ),
-                        ),
-                        FeatureSwitch(
-                          feature: Feature.develop,
-                          value: _config.devEnabled ?? false,
-                          onChanged: (v) =>
-                              _update(_config.copyWith(devEnabled: v)),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
-                    AutocompleteChipField(
-                      label: 'Develop labels',
-                      selectedValues:
-                          _config.developLabels ??
-                          appConfig.issueTracking.developLabels,
-                      availableOptions: const <String>[],
-                      isOverridden: _config.developLabels != null,
-                      globalHint: _joinList(
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  AutocompleteChipField(
+                    label: 'Develop labels',
+                    selectedValues:
+                        _config.developLabels ??
                         appConfig.issueTracking.developLabels,
-                      ),
-                      onChanged: (v) =>
-                          _update(_config.copyWith(developLabels: v)),
-                      onReset: () =>
-                          _resetField('issue_tracking/develop_labels'),
+                    availableOptions: const <String>[],
+                    isOverridden: _config.developLabels != null,
+                    globalHint: _joinList(
+                      appConfig.issueTracking.developLabels,
                     ),
-                    const SizedBox(height: 10),
-                    AutocompleteChipField(
-                      label: 'PR Reviewers',
-                      selectedValues:
-                          _config.prReviewers ?? appConfig.globalPRReviewers,
-                      availableOptions: const <String>[],
-                      isOverridden: _config.prReviewers != null,
-                      globalHint: _joinList(appConfig.globalPRReviewers),
-                      onChanged: (v) =>
-                          _update(_config.copyWith(prReviewers: v)),
-                      onReset: () => _resetField('pr_reviewers'),
+                    onChanged: (v) =>
+                        _update(_config.copyWith(developLabels: v)),
+                    onReset: () => _resetField('issue_tracking/develop_labels'),
+                  ),
+                  const SizedBox(height: 10),
+                  AutocompleteChipField(
+                    label: 'PR Reviewers',
+                    selectedValues:
+                        _config.prReviewers ?? appConfig.globalPRReviewers,
+                    availableOptions: const <String>[],
+                    isOverridden: _config.prReviewers != null,
+                    globalHint: _joinList(appConfig.globalPRReviewers),
+                    onChanged: (v) => _update(_config.copyWith(prReviewers: v)),
+                    onReset: () => _resetField('pr_reviewers'),
+                  ),
+                  const SizedBox(height: 10),
+                  AutocompleteChipField(
+                    label: 'PR Labels',
+                    selectedValues:
+                        _config.prLabels ?? appConfig.globalPRLabels,
+                    availableOptions: const <String>[],
+                    isOverridden: _config.prLabels != null,
+                    globalHint: _joinList(appConfig.globalPRLabels),
+                    onChanged: (v) => _update(_config.copyWith(prLabels: v)),
+                    onReset: () => _resetField('pr_labels'),
+                  ),
+                  const SizedBox(height: 10),
+                  OverrideTextField(
+                    label: 'PR Assignee',
+                    globalValue: appConfig.globalPRAssignee,
+                    overrideValue: _config.prAssignee,
+                    onChanged: (v) => _update(_config.copyWith(prAssignee: v)),
+                    onReset: () => _resetField('pr_assignee'),
+                  ),
+                  const SizedBox(height: 10),
+                  OverrideDropdown(
+                    label: 'Draft',
+                    globalValue: appConfig.globalPRDraft.toString(),
+                    overrideValue: _config.prDraft?.toString(),
+                    options: const ['true', 'false'],
+                    onChanged: (v) => _update(
+                      _config.copyWith(prDraft: v != null ? v == 'true' : null),
                     ),
-                    const SizedBox(height: 10),
-                    AutocompleteChipField(
-                      label: 'PR Labels',
-                      selectedValues:
-                          _config.prLabels ?? appConfig.globalPRLabels,
-                      availableOptions: const <String>[],
-                      isOverridden: _config.prLabels != null,
-                      globalHint: _joinList(appConfig.globalPRLabels),
-                      onChanged: (v) => _update(_config.copyWith(prLabels: v)),
-                      onReset: () => _resetField('pr_labels'),
+                    onReset: () => _resetField('pr_draft'),
+                  ),
+                  const SizedBox(height: 10),
+                  OverrideDropdown(
+                    label: 'Prompt',
+                    globalValue: appConfig.globalImplementPrompt.isEmpty
+                        ? 'default'
+                        : appConfig.globalImplementPrompt,
+                    overrideValue: _config.developPromptId,
+                    options: promptOptions,
+                    onChanged: (v) =>
+                        _update(_config.copyWith(developPromptId: v)),
+                    onReset: () => _resetField('implement_prompt'),
+                  ),
+                ], accent: FeaturePalette.develop),
+                _sectionCard('Merge Tracking', [
+                  MergeTrackingOverrideEditor(
+                    scopeKey: 'org',
+                    value: _config.mergeTracking,
+                    inherited: appConfig.mergeTracking,
+                    onChanged: (mergeTracking) => _update(
+                      _config.copyWith(mergeTracking: mergeTracking),
                     ),
-                    const SizedBox(height: 10),
-                    OverrideTextField(
-                      label: 'PR Assignee',
-                      globalValue: appConfig.globalPRAssignee,
-                      overrideValue: _config.prAssignee,
-                      onChanged: (v) =>
-                          _update(_config.copyWith(prAssignee: v)),
-                      onReset: () => _resetField('pr_assignee'),
-                    ),
-                    const SizedBox(height: 10),
-                    OverrideDropdown(
-                      label: 'Draft',
-                      globalValue: appConfig.globalPRDraft.toString(),
-                      overrideValue: _config.prDraft?.toString(),
-                      options: const ['true', 'false'],
-                      onChanged: (v) => _update(
-                        _config.copyWith(
-                          prDraft: v != null ? v == 'true' : null,
-                        ),
-                      ),
-                      onReset: () => _resetField('pr_draft'),
-                    ),
-                    const SizedBox(height: 10),
-                    OverrideDropdown(
-                      label: 'Prompt',
-                      globalValue: appConfig.globalImplementPrompt.isEmpty
-                          ? 'default'
-                          : appConfig.globalImplementPrompt,
-                      overrideValue: _config.developPromptId,
-                      options: promptOptions,
-                      onChanged: (v) =>
-                          _update(_config.copyWith(developPromptId: v)),
-                      onReset: () => _resetField('implement_prompt'),
-                    ),
-                  ], accent: FeaturePalette.develop),
-                  _sectionCard('Merge Tracking', [
-                    MergeTrackingOverrideEditor(
-                      scopeKey: 'org',
-                      value: _config.mergeTracking,
-                      inherited: appConfig.mergeTracking,
-                      onChanged: (mergeTracking) => _update(
-                        _config.copyWith(mergeTracking: mergeTracking),
-                      ),
-                    ),
-                  ], accent: FeaturePalette.mergeTracking),
-                ],
-              ),
-            );
-          },
+                  ),
+                ], accent: FeaturePalette.mergeTracking),
+              ],
+            ),
+          );
+        },
         ),
       ),
     );
