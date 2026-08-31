@@ -456,6 +456,9 @@ func TestReconcilePR_ArmedInThisPassDoesNotMerge(t *testing.T) {
 func TestReconcilePR_BehindBaseCallsUpdateBranchWithExpectedSHA(t *testing.T) {
 	st := cleanStatus()
 	st.MergeStateStatus = gh.MergeStateBehind
+	// A red check must not suppress the branch update: checks against a stale
+	// base are evidence for the old head and will rerun after synchronisation.
+	st.Checks = []gh.CheckContext{{Name: "build", State: gh.CheckStateFailure, Required: true}}
 
 	cfg := enabledCfg()
 	cfg.UpdateBranch = true
@@ -471,14 +474,24 @@ func TestReconcilePR_BehindBaseCallsUpdateBranchWithExpectedSHA(t *testing.T) {
 	if !h.pub.has(sse.EventMergeTrackBranchUpdated) {
 		t.Error("a branch-updated event should be emitted")
 	}
-	// 202 Accepted is asynchronous, so the row must go back to idle with a
-	// short cooldown rather than claiming the update finished.
+	// 202 Accepted is asynchronous. Keep a truthful observation state instead
+	// of making the immediate SSE refresh repaint the old blocker/checks.
 	row := h.row(t)
-	if row.Phase != store.MergePhaseIdle {
-		t.Errorf("phase = %q, want idle after an accepted async update", row.Phase)
+	if row.Phase != store.MergePhaseUpdatePending {
+		t.Errorf("phase = %q, want update_pending after an accepted async update", row.Phase)
 	}
 	if row.CooldownUntil.IsZero() {
 		t.Error("a cooldown should be set so the next pass can observe the new head")
+	}
+	if row.BlockReason != "" || row.ChecksRequiredFailing != 0 || row.DecisionJSON != "" {
+		t.Errorf("accepted update kept stale evidence: %+v", row)
+	}
+	due, err := h.st.ListMergeTrackingDue(h.now.Add(time.Minute), 1)
+	if err != nil {
+		t.Fatalf("list confirmation: %v", err)
+	}
+	if len(due) != 1 || due[0].PRID != h.prID {
+		t.Fatalf("confirmation row not due first: %+v", due)
 	}
 }
 

@@ -15,6 +15,12 @@ func TestRenderMerges_EmptyStateTellsTheOperatorWhatToDo(t *testing.T) {
 	}
 }
 
+func TestMergePhaseLabel_RendersPendingUpdateAsSyncing(t *testing.T) {
+	if got := mergePhaseLabel("update_pending"); got != "syncing" {
+		t.Fatalf("pending update label = %q, want syncing", got)
+	}
+}
+
 // The marker is what makes a CI problem visible while scanning a list.
 func TestRenderMerges_MarksRowsBlockedByChecks(t *testing.T) {
 	d := &Dashboard{

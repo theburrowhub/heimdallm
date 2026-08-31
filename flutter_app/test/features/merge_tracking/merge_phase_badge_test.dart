@@ -3,7 +3,9 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:heimdallm/features/merge_tracking/widgets/merge_phase_badge.dart';
 
 Widget _host(String phase) => MaterialApp(
-  home: Scaffold(body: Center(child: MergePhaseBadge(phase: phase))),
+  home: Scaffold(
+    body: Center(child: MergePhaseBadge(phase: phase)),
+  ),
 );
 
 void main() {
@@ -14,6 +16,7 @@ void main() {
       'merged': 'Merged',
       'auto_merge_armed': 'Auto-merge on',
       'updating': 'Updating',
+      'update_pending': 'Syncing',
       'resolving': 'Resolving',
       'merging': 'Merging',
       'blocked': 'Blocked',
@@ -74,8 +77,11 @@ void main() {
         isNot(contains('_')),
         reason: '$reason still reads as an identifier',
       );
-      expect(text.substring(0, 1), text.substring(0, 1).toUpperCase(),
-          reason: '$reason should start as a sentence');
+      expect(
+        text.substring(0, 1),
+        text.substring(0, 1).toUpperCase(),
+        reason: '$reason should start as a sentence',
+      );
     }
   });
 

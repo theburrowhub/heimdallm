@@ -274,6 +274,79 @@ func TestListMergeTrackingDue_HonoursTheLimit(t *testing.T) {
 	}
 }
 
+func TestMarkMergeTrackingUpdatePending_ClearsStaleEvidenceAndPrioritisesConfirmation(t *testing.T) {
+	s, pendingID := newMergeTrackingStore(t)
+	now := time.Date(2026, 8, 31, 8, 0, 0, 0, time.UTC)
+
+	if err := s.ResetMergeTrackingForNewHead(pendingID, "old-head", now); err != nil {
+		t.Fatalf("anchor pending row: %v", err)
+	}
+	if err := s.RecordMergeTrackingDecision(pendingID, store.MergeDecisionRecord{
+		Phase: store.MergePhaseIdle, HeadSHA: "old-head",
+		BlockReason: "behind_base", BlockDetail: "behind main",
+		DecisionJSON:          `{"action":"update_branch_remote"}`,
+		ChecksRequiredFailing: 1, ChecksRequiredPending: 1,
+		At: now.Add(-time.Hour),
+	}); err != nil {
+		t.Fatalf("record stale decision: %v", err)
+	}
+
+	ordinaryID, err := s.UpsertPR(&store.PR{
+		GithubID: 2, Repo: "acme/widgets", Number: 8, Title: "ordinary",
+		Author: "octocat", URL: "u", State: "open", UpdatedAt: now, FetchedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("upsert ordinary row: %v", err)
+	}
+	if _, err := s.EnsureMergeTracking(ordinaryID, "acme/widgets", 8); err != nil {
+		t.Fatalf("ensure ordinary row: %v", err)
+	}
+	// Ordinarily this older evaluation would be selected first.
+	if err := s.RecordMergeTrackingDecision(ordinaryID, store.MergeDecisionRecord{
+		Phase: store.MergePhaseBlocked, HeadSHA: "ordinary-head", At: now.Add(-2 * time.Hour),
+	}); err != nil {
+		t.Fatalf("record ordinary decision: %v", err)
+	}
+
+	confirmAt := now.Add(45 * time.Second)
+	if err := s.MarkMergeTrackingUpdatePending(pendingID, confirmAt); err != nil {
+		t.Fatalf("mark pending: %v", err)
+	}
+	row, err := s.GetMergeTracking(pendingID)
+	if err != nil {
+		t.Fatalf("get pending: %v", err)
+	}
+	if row.Phase != store.MergePhaseUpdatePending || row.BlockReason != "" ||
+		row.BlockDetail != "" || row.DecisionJSON != "" ||
+		row.ChecksRequiredFailing != 0 || row.ChecksRequiredPending != 0 {
+		t.Fatalf("pending row kept stale evidence: %+v", row)
+	}
+
+	rows, err := s.ListMergeTrackingDue(now, 1)
+	if err != nil {
+		t.Fatalf("list during observation cooldown: %v", err)
+	}
+	if len(rows) != 1 || rows[0].PRID != ordinaryID {
+		t.Fatalf("row due during cooldown = %+v, want ordinary row %d", rows, ordinaryID)
+	}
+	rows, err = s.ListMergeTrackingDue(confirmAt, 1)
+	if err != nil {
+		t.Fatalf("list after observation cooldown: %v", err)
+	}
+	if len(rows) != 1 || rows[0].PRID != pendingID {
+		t.Fatalf("first row after cooldown = %+v, want pending confirmation %d", rows, pendingID)
+	}
+
+	if err := s.ResetMergeTrackingForNewHead(pendingID, "new-head", confirmAt); err != nil {
+		t.Fatalf("observe new head: %v", err)
+	}
+	if row, err = s.GetMergeTracking(pendingID); err != nil {
+		t.Fatalf("get confirmed row: %v", err)
+	} else if row.Phase != store.MergePhaseIdle || row.HeadSHA != "new-head" {
+		t.Fatalf("confirmed row = %+v, want idle on new head", row)
+	}
+}
+
 // The listing sorts what needs human attention to the top.
 func TestListMergeTracking_SortsCheckProblemsFirst(t *testing.T) {
 	s, err := store.Open(":memory:")
@@ -418,7 +491,10 @@ func TestMergeTracking_PhasePredicates(t *testing.T) {
 			t.Errorf("%q must not report in flight", phase)
 		}
 	}
-	for _, phase := range []string{store.MergePhaseIdle, store.MergePhaseBlocked, store.MergePhaseAutoMergeArmed} {
+	for _, phase := range []string{
+		store.MergePhaseIdle, store.MergePhaseBlocked, store.MergePhaseUpdatePending,
+		store.MergePhaseAutoMergeArmed,
+	} {
 		m := &store.MergeTracking{Phase: phase}
 		if m.InFlight() || m.Terminal() {
 			t.Errorf("%q should be neither in flight nor terminal", phase)

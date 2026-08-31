@@ -182,8 +182,8 @@ class MergeTrackingEntry {
   @JsonKey(defaultValue: '')
   final String author;
 
-  /// idle | blocked | updating | resolving | auto_merge_armed | merging |
-  /// merged | abandoned.
+  /// idle | blocked | updating | update_pending | resolving |
+  /// auto_merge_armed | merging | merged | abandoned.
   @JsonKey(defaultValue: 'idle')
   final String phase;
 

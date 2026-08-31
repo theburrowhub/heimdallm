@@ -41,6 +41,7 @@ type StateStore interface {
 	ResetMergeTrackingForNewHead(prID int64, headSHA string, at time.Time) error
 	ClaimMergeTrackingAction(prID int64, headSHA, phase string, now time.Time) (bool, error)
 	ReleaseMergeTrackingAction(prID int64, phase string, cooldownUntil time.Time, lastErr string) error
+	MarkMergeTrackingUpdatePending(prID int64, cooldownUntil time.Time) error
 	ArmNativeAutoMerge(prID int64, headSHA, method string, at time.Time) error
 	ClearNativeAutoMerge(prID int64) error
 	RecordMergeTrackingDecision(prID int64, d store.MergeDecisionRecord) error
@@ -726,9 +727,14 @@ func (r *Reconciler) updateBranch(ctx context.Context, prID int64, row *store.Me
 		return err
 	}
 
-	// GitHub answers 202 and does the work asynchronously, so there is nothing
-	// to verify here. A short cooldown lets the next cycle observe the new head.
-	_ = r.st.ReleaseMergeTrackingAction(prID, store.MergePhaseIdle, r.now().Add(unknownRecheck), "")
+	// GitHub answers 202 and does the work asynchronously. The old decision and
+	// check evidence became stale the moment GitHub accepted the request, so
+	// persist an explicit observation state instead of making the SSE-triggered
+	// UI refresh repaint "behind" and the old red checks. Pending rows are first
+	// in the due queue after this short cooldown, even with a large backlog.
+	if err := r.st.MarkMergeTrackingUpdatePending(prID, r.now().Add(unknownRecheck)); err != nil {
+		return err
+	}
 	r.emit(sse.EventMergeTrackBranchUpdated, map[string]any{
 		"pr_id": prID, "repo": row.Repo, "number": row.Number, "mode": "github",
 	})

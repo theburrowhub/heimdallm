@@ -17,6 +17,11 @@ const (
 	MergePhaseBlocked = "blocked"
 	// MergePhaseUpdating means an update-branch or local rebase is in flight.
 	MergePhaseUpdating = "updating"
+	// MergePhaseUpdatePending means GitHub accepted an asynchronous branch
+	// update and the next evaluation must confirm the resulting head. It is not
+	// an in-flight phase: the HTTP request has finished, so the row is eligible
+	// for a later claim once its short observation cooldown expires.
+	MergePhaseUpdatePending = "update_pending"
 	// MergePhaseResolving means the conflict-resolution agent is running.
 	MergePhaseResolving = "resolving"
 	// MergePhaseAutoMergeArmed means GitHub's native auto-merge is enabled and
@@ -299,7 +304,10 @@ func (s *Store) ListMergeTracking() ([]*MergeTracking, error) {
 
 // ListMergeTrackingDue returns the rows eligible for evaluation now: not
 // terminal, not excluded, not already in flight, and past any cooldown.
-// Ordered so the longest-waiting rows go first, capped at limit.
+// Accepted asynchronous branch updates are confirmed first once their short
+// cooldown expires. Until that confirmation the persisted checks and blockers
+// belong to the old head and must not linger behind a large ordinary backlog.
+// Every other row keeps longest-waiting-first fairness, capped at limit.
 func (s *Store) ListMergeTrackingDue(now time.Time, limit int) ([]*MergeTracking, error) {
 	if limit <= 0 {
 		return nil, nil
@@ -310,7 +318,7 @@ func (s *Store) ListMergeTrackingDue(now time.Time, limit int) ([]*MergeTracking
 		WHERE excluded = 0
 		  AND phase NOT IN ('merged','abandoned','updating','resolving','merging')
 		  AND (cooldown_until = '' OR cooldown_until <= ?)
-		ORDER BY evaluated_at ASC, pr_id ASC
+		ORDER BY (phase = 'update_pending') DESC, evaluated_at ASC, pr_id ASC
 		LIMIT ?
 	`, now.UTC().Format(sqliteTimeFormat), limit)
 	if err != nil {
@@ -431,6 +439,26 @@ func (s *Store) ReleaseMergeTrackingAction(prID int64, phase string, cooldownUnt
 		time.Now().UTC().Format(sqliteTimeFormat), prID)
 	if err != nil {
 		return fmt.Errorf("store: release merge tracking action: %w", err)
+	}
+	return nil
+}
+
+// MarkMergeTrackingUpdatePending records that GitHub accepted an asynchronous
+// update-branch request. The previous decision, blocker and check counts were
+// evaluated against the old head, so keeping them would make an immediate SSE
+// refresh repaint information we already know is stale.
+func (s *Store) MarkMergeTrackingUpdatePending(prID int64, cooldownUntil time.Time) error {
+	_, err := s.db.Exec(`
+		UPDATE merge_tracking
+		SET phase = ?,
+		    block_reason = '', block_detail = '', decision_json = '',
+		    checks_required_failing = 0, checks_required_pending = 0,
+		    cooldown_until = ?, last_error = '', updated_at = ?
+		WHERE pr_id = ?
+	`, MergePhaseUpdatePending, formatStoredTime(cooldownUntil),
+		time.Now().UTC().Format(sqliteTimeFormat), prID)
+	if err != nil {
+		return fmt.Errorf("store: mark merge tracking update pending: %w", err)
 	}
 	return nil
 }
