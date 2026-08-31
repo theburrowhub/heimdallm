@@ -44,6 +44,8 @@ class MergePhaseBadge extends StatelessWidget {
         return ('Auto-merge on', const Color(0xFF00695C), Icons.schedule_send);
       case 'updating':
         return ('Updating', const Color(0xFF1565C0), Icons.sync);
+      case 'update_pending':
+        return ('Syncing', const Color(0xFF1565C0), Icons.sync);
       case 'resolving':
         return ('Resolving', const Color(0xFF1565C0), Icons.merge);
       case 'merging':

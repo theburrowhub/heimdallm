@@ -69,9 +69,11 @@ type resourceBudget struct {
 	reset     time.Time
 }
 
-// RateLimiter is a shared token pool that governs GitHub API usage across
-// all polling tiers. Higher-priority tiers (Watch) get shorter initial wait
-// times, meaning they acquire tokens faster when the pool is under pressure.
+// RateLimiter governs GitHub API usage across all polling tiers. Each GitHub
+// resource has its own token pool: core, search and GraphQL are independent
+// quotas, so exhausting one must not consume another's static allowance.
+// Higher-priority tiers (Watch) get shorter initial wait times, meaning they
+// acquire tokens faster when a resource's pool is under pressure.
 //
 // In addition to the token-pool burst guard, the limiter tracks GitHub's
 // live X-RateLimit-Remaining budget per resource category. When remaining
@@ -79,26 +81,52 @@ type resourceBudget struct {
 // time (respecting ctx cancellation). A secondary-limit cooldown (from
 // Retry-After on 403/429) overrides everything and makes all tiers wait.
 type RateLimiter struct {
-	pool chan struct{}
-	size int
-
 	mu                sync.Mutex
+	pools             map[string]chan struct{}   // independent static allowance per GitHub resource
+	size              int                        // capacity of each resource pool
 	budgets           map[string]*resourceBudget // keyed by resource name, e.g. "core", "search"
 	cooldown          time.Time                  // secondary-limit cooldown: block until this time
 	baseDiscThreshold int                        // override for TierDiscovery threshold (0 = use package default)
 }
 
-// NewRateLimiter creates a rate limiter with the given number of tokens.
+const coreResource = "core"
+
+// NewRateLimiter creates a rate limiter with the given number of tokens per
+// GitHub resource. The core pool is created eagerly to preserve Available's
+// historical meaning; other resource pools are allocated on first use.
 func NewRateLimiter(tokens int) *RateLimiter {
+	return &RateLimiter{
+		pools: map[string]chan struct{}{
+			coreResource: newTokenPool(tokens),
+		},
+		size:    tokens,
+		budgets: make(map[string]*resourceBudget),
+	}
+}
+
+func newTokenPool(tokens int) chan struct{} {
 	pool := make(chan struct{}, tokens)
 	for i := 0; i < tokens; i++ {
 		pool <- struct{}{}
 	}
-	return &RateLimiter{
-		pool:    pool,
-		size:    tokens,
-		budgets: make(map[string]*resourceBudget),
+	return pool
+}
+
+// tokenPool returns the independent static pool for resource. GitHub treats a
+// missing X-RateLimit-Resource header as core, so an empty resource name does
+// the same here rather than creating an accidental fourth quota.
+func (r *RateLimiter) tokenPool(resource string) chan struct{} {
+	if resource == "" {
+		resource = coreResource
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if pool, ok := r.pools[resource]; ok {
+		return pool
+	}
+	pool := newTokenPool(r.size)
+	r.pools[resource] = pool
+	return pool
 }
 
 // Observe records the live rate-limit state for a GitHub resource category.
@@ -138,7 +166,7 @@ func (r *RateLimiter) ObserveRetryAfter(d time.Duration) {
 // Tier priority determines the safety threshold: Watch backs off latest,
 // Discovery earliest, so critical polling can proceed while discovery idles.
 func (r *RateLimiter) Acquire(ctx context.Context, tier Tier) error {
-	return r.AcquireResource(ctx, tier, "core")
+	return r.AcquireResource(ctx, tier, coreResource)
 }
 
 // AcquireResource is the full form of Acquire: it checks budget for the
@@ -155,17 +183,20 @@ func (r *RateLimiter) AcquireResource(ctx context.Context, tier Tier, resource s
 		return err
 	}
 
-	// 3. Existing token-pool burst guard.
+	// 3. Per-resource token-pool burst guard. The live budget above was already
+	// resource-specific; the static allowance must be too, or a burst of core
+	// traffic can stall a healthy GraphQL quota (and vice versa).
+	pool := r.tokenPool(resource)
 	wait := tierWait[tier]
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
 
 	select {
-	case <-r.pool:
+	case <-pool:
 		return nil
 	case <-timer.C:
 		select {
-		case <-r.pool:
+		case <-pool:
 			return nil
 		case <-ctx.Done():
 			return ctx.Err()
@@ -278,20 +309,35 @@ func (r *RateLimiter) waitForBudget(ctx context.Context, tier Tier, resource str
 	}
 }
 
-// Refill restores the token pool to its original capacity.
+// Refill restores every resource token pool to its original capacity. Pools
+// created concurrently after the snapshot are already full by construction.
 func (r *RateLimiter) Refill() {
+	r.mu.Lock()
+	pools := make([]chan struct{}, 0, len(r.pools))
+	for _, pool := range r.pools {
+		pools = append(pools, pool)
+	}
+	r.mu.Unlock()
+
+	for _, pool := range pools {
+		refillTokenPool(pool)
+	}
+}
+
+func refillTokenPool(pool chan struct{}) {
 	for {
 		select {
-		case r.pool <- struct{}{}:
+		case pool <- struct{}{}:
 		default:
 			return
 		}
 	}
 }
 
-// Available returns the number of tokens currently in the pool.
+// Available returns the number of core tokens currently available, preserving
+// the method's behaviour from before resource pools were separated.
 func (r *RateLimiter) Available() int {
-	return len(r.pool)
+	return len(r.tokenPool(coreResource))
 }
 
 // BudgetRemaining returns the last-observed remaining count for the given

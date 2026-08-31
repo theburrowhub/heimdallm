@@ -250,6 +250,54 @@ func TestRateLimiter_GraphQLResourceIndependentOfSearch(t *testing.T) {
 	}
 }
 
+// The static allowance must be isolated in the same way as the observed live
+// budgets. GitHub accounts core and GraphQL separately; sharing one channel made
+// a core-heavy poller freeze merge tracking even while GraphQL had full quota.
+func TestRateLimiter_DepletedCorePoolDoesNotBlockGraphQL(t *testing.T) {
+	rl := NewRateLimiter(1)
+	if err := rl.Acquire(context.Background(), TierRepo); err != nil {
+		t.Fatalf("drain core: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := rl.AcquireResource(ctx, TierRepo, GraphQLResource); err != nil {
+		t.Fatalf("healthy GraphQL pool was blocked by depleted core: %v", err)
+	}
+}
+
+func TestRateLimiter_DepletedGraphQLPoolDoesNotBlockCore(t *testing.T) {
+	rl := NewRateLimiter(1)
+	if err := rl.AcquireResource(context.Background(), TierRepo, GraphQLResource); err != nil {
+		t.Fatalf("drain GraphQL: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := rl.Acquire(ctx, TierRepo); err != nil {
+		t.Fatalf("healthy core pool was blocked by depleted GraphQL: %v", err)
+	}
+}
+
+func TestRateLimiter_RefillRestoresEveryResourcePool(t *testing.T) {
+	rl := NewRateLimiter(1)
+	for _, resource := range []string{coreResource, SearchResource, GraphQLResource} {
+		if err := rl.AcquireResource(context.Background(), TierRepo, resource); err != nil {
+			t.Fatalf("drain %s: %v", resource, err)
+		}
+	}
+
+	rl.Refill()
+	for _, resource := range []string{coreResource, SearchResource, GraphQLResource} {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		err := rl.AcquireResource(ctx, TierRepo, resource)
+		cancel()
+		if err != nil {
+			t.Errorf("%s was not restored by Refill: %v", resource, err)
+		}
+	}
+}
+
 // TestRateLimiter_ResetAlreadyPassedProceedsImmediately verifies that if the
 // reset time is already in the past, Acquire does NOT wait.
 func TestRateLimiter_ResetAlreadyPassedProceedsImmediately(t *testing.T) {

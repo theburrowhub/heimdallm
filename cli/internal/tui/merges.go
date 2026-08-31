@@ -108,6 +108,8 @@ func mergePhaseLabel(phase string) string {
 		return "blocked"
 	case "updating":
 		return "updating"
+	case "update_pending":
+		return "syncing"
 	case "resolving":
 		return "resolving"
 	case "merging":

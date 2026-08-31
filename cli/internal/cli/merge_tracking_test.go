@@ -131,6 +131,7 @@ func TestPrintMergeTable_RendersThePhaseAsAPhrase(t *testing.T) {
 		printMergeTable([]api.MergeTrackingEntry{
 			entry(func(e *api.MergeTrackingEntry) { e.Phase = "auto_merge_armed" }),
 			entry(func(e *api.MergeTrackingEntry) { e.Number = 8; e.Phase = "abandoned" }),
+			entry(func(e *api.MergeTrackingEntry) { e.Number = 9; e.Phase = "update_pending" }),
 		})
 	})
 	if !strings.Contains(out, "auto-merge on") {
@@ -138,6 +139,9 @@ func TestPrintMergeTable_RendersThePhaseAsAPhrase(t *testing.T) {
 	}
 	if !strings.Contains(out, "not tracked") {
 		t.Errorf("abandoned should render as a phrase:\n%s", out)
+	}
+	if !strings.Contains(out, "syncing") {
+		t.Errorf("update_pending should render as a phrase:\n%s", out)
 	}
 }
 

@@ -224,6 +224,8 @@ func mergePhaseLabelCLI(phase string) string {
 	switch phase {
 	case "auto_merge_armed":
 		return "auto-merge on"
+	case "update_pending":
+		return "syncing"
 	case "abandoned":
 		return "not tracked"
 	default:
