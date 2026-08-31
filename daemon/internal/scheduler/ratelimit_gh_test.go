@@ -279,6 +279,16 @@ func TestRateLimiter_DepletedGraphQLPoolDoesNotBlockCore(t *testing.T) {
 	}
 }
 
+func TestRateLimiter_EmptyResourceUsesCorePool(t *testing.T) {
+	rl := NewRateLimiter(1)
+	if err := rl.AcquireResource(context.Background(), TierRepo, ""); err != nil {
+		t.Fatalf("acquire unnamed resource: %v", err)
+	}
+	if got := rl.Available(); got != 0 {
+		t.Fatalf("core tokens after unnamed acquire = %d, want 0", got)
+	}
+}
+
 func TestRateLimiter_RefillRestoresEveryResourcePool(t *testing.T) {
 	rl := NewRateLimiter(1)
 	for _, resource := range []string{coreResource, SearchResource, GraphQLResource} {
