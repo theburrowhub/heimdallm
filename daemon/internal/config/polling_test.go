@@ -1,6 +1,9 @@
 package config
 
 import (
+	"bytes"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 )
@@ -160,6 +163,29 @@ func TestResolvedPollInterval(t *testing.T) {
 				t.Errorf("ResolvedPollInterval() = %v, want %v", got, tc.wantDuration)
 			}
 		})
+	}
+}
+
+func TestParseDurationWithFallback_WarnsOncePerInvalidValue(t *testing.T) {
+	const value = "invalid-duration-warning-dedup-test"
+	invalidDurationWarned.Delete(value)
+	t.Cleanup(func() { invalidDurationWarned.Delete(value) })
+
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	fallback := 2 * time.Minute
+	for range 2 {
+		if got := parseDurationWithFallback(value, fallback); got != fallback {
+			t.Fatalf("parseDurationWithFallback() = %v, want %v", got, fallback)
+		}
+	}
+
+	const warning = "config: ignoring invalid [polling] duration, falling back"
+	if got := strings.Count(logs.String(), warning); got != 1 {
+		t.Fatalf("invalid duration warnings = %d, want 1:\n%s", got, logs.String())
 	}
 }
 
