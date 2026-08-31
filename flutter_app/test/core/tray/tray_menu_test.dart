@@ -106,7 +106,7 @@ void main() {
   });
 
   test(
-    'official signed build exposes a check action and dispatches it',
+    'enabled updater exposes a check action and dispatches it',
     () async {
       var checkCalls = 0;
       TrayMenu.instance.init(
@@ -154,7 +154,7 @@ void main() {
   });
 
   test(
-    'tray keeps a missing signed appcast error visible and retryable',
+    'tray keeps an update check error visible and retryable',
     () async {
       TrayMenu.instance.init(
         apiClient: _MockApiClient(),
@@ -186,7 +186,7 @@ void main() {
     },
   );
 
-  test('ad-hoc build exposes normal update controls in the tray', () async {
+  test('macOS installation exposes normal update controls in the tray', () async {
     var checkCalls = 0;
     TrayMenu.instance.init(
       apiClient: _MockApiClient(),
@@ -214,7 +214,7 @@ void main() {
       onNavigate: (_) {},
       onQuit: () {},
       currentVersion: '0.8.4',
-      updateUnavailableReason: 'Updater integrity configuration is incomplete.',
+      updateUnavailableReason: 'Updater initialization failed.',
     );
 
     await TrayMenu.instance.setUpdateState(const AppUpdateStatus.idle());
@@ -225,7 +225,7 @@ void main() {
       contains(
         containsPair(
           'label',
-          'Updates unavailable — Updater integrity configuration is incomplete.',
+          'Updates unavailable — Updater initialization failed.',
         ),
       ),
     );

@@ -5,7 +5,6 @@ import 'dart:ui' show VoidCallback;
 import 'package:flutter/foundation.dart'
     show debugPrint, kReleaseMode, visibleForTesting;
 import 'package:flutter/painting.dart' show Size;
-import 'package:flutter/services.dart' show MethodCall, MethodChannel;
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:tray_manager/tray_manager.dart';
@@ -19,6 +18,7 @@ import '../setup/first_run_setup.dart';
 import '../setup/repo_discovery.dart';
 import '../tray/tray_menu.dart';
 import 'linux_app_updater.dart';
+import 'macos_app_updater.dart';
 import 'platform_services.dart';
 
 @visibleForTesting
@@ -28,9 +28,6 @@ typedef PlatformProcessRunner =
 typedef DetachedDaemonStarter = Future<void> Function(String binaryPath);
 @visibleForTesting
 typedef DaemonPortProbe = Future<TcpPortState> Function(Duration timeout);
-@visibleForTesting
-typedef PlatformMethodInvoker =
-    Future<dynamic> Function(String method, dynamic arguments);
 @visibleForTesting
 typedef PlatformEnvironmentReader = String? Function(String name);
 @visibleForTesting
@@ -107,7 +104,6 @@ class DesktopPlatformServices
     @visibleForTesting PlatformProcessRunner? processRunner,
     @visibleForTesting DetachedDaemonStarter? detachedDaemonStarter,
     @visibleForTesting DaemonPortProbe? daemonPortProbe,
-    @visibleForTesting PlatformMethodInvoker? methodInvoker,
     @visibleForTesting PlatformEnvironmentReader? environmentReader,
     @visibleForTesting PlatformProcessExit? processExit,
     @visibleForTesting InstanceLockAcquirer? instanceLockAcquirer,
@@ -115,6 +111,7 @@ class DesktopPlatformServices
     @visibleForTesting DaemonBinaryPathResolver? daemonBinaryPathResolver,
     @visibleForTesting bool? enableNativeAppUpdates,
     @visibleForTesting LinuxAppUpdater? linuxAppUpdater,
+    @visibleForTesting MacOSAppUpdater? macOSAppUpdater,
     @visibleForTesting DetachedAppRestarter? detachedAppRestarter,
     @visibleForTesting PlatformAppVersionLoader? appVersionLoader,
     @visibleForTesting Duration processTimeout = const Duration(seconds: 10),
@@ -151,14 +148,10 @@ class DesktopPlatformServices
        _daemonBinaryPathResolver =
            daemonBinaryPathResolver ?? DaemonLifecycle.defaultBinaryPath,
        _linuxAppUpdater = linuxAppUpdater,
+       _macOSAppUpdater = macOSAppUpdater,
        _detachedAppRestarter =
            detachedAppRestarter ?? _startAppAfterCurrentProcessExits,
        _appVersionLoader = appVersionLoader ?? _loadPackageVersion,
-       _methodInvoker =
-           methodInvoker ??
-           ((method, arguments) =>
-               _appUpdateChannel.invokeMethod<dynamic>(method, arguments)),
-       _usesDefaultMethodChannel = methodInvoker == null,
        _nativeAppUpdatesRequested =
            enableNativeAppUpdates ??
            ((isMacOS ?? Platform.isMacOS) ||
@@ -180,10 +173,9 @@ class DesktopPlatformServices
   final ActivationSocketBinder _activationSocketBinder;
   final DaemonBinaryPathResolver _daemonBinaryPathResolver;
   LinuxAppUpdater? _linuxAppUpdater;
+  MacOSAppUpdater? _macOSAppUpdater;
   final DetachedAppRestarter _detachedAppRestarter;
   final PlatformAppVersionLoader _appVersionLoader;
-  final PlatformMethodInvoker _methodInvoker;
-  final bool _usesDefaultMethodChannel;
   final bool _nativeAppUpdatesRequested;
   bool _nativeAppUpdatesEnabled = false;
   Object? _appUpdaterSetupError;
@@ -224,10 +216,6 @@ class DesktopPlatformServices
       _dataDir ??
       readEnv('HEIMDALLM_DATA_DIR') ??
       '${readEnv('HOME') ?? ''}/.local/share/heimdallm';
-
-  static const MethodChannel _appUpdateChannel = MethodChannel(
-    'com.theburrowhub.heimdallm/app_updater',
-  );
 
   static Future<void> _startAppAfterCurrentProcessExits(
     int currentPID,
@@ -628,38 +616,10 @@ class DesktopPlatformServices
   }
 
   @override
-  void quitApp() {
-    if (!_isMacOS) {
-      _processExit(0);
-      return;
-    }
-    // AppKit termination is asynchronous and may legitimately be postponed
-    // while Sparkle drains the daemon. A raw exit would bypass both AppDelegate
-    // and Sparkle, so a broken native bridge must fail closed.
-    unawaited(
-      _methodInvoker('terminateApplication', null).catchError((Object error) {
-        debugPrint('native termination failed: $error');
-      }),
-    );
-  }
+  void quitApp() => _processExit(0);
 
   @override
-  void quitDuplicateInstance() {
-    if (!_isMacOS) {
-      _processExit(0);
-      return;
-    }
-    unawaited(
-      _methodInvoker('terminateDuplicateApplication', null).catchError((
-        Object error,
-      ) {
-        // Singleton ownership has already been disproved. A native-channel
-        // failure cannot risk daemon/update state because this process owns
-        // neither; make sure the duplicate does not linger indefinitely.
-        _processExit(0);
-      }),
-    );
-  }
+  void quitDuplicateInstance() => _processExit(0);
 
   @override
   AppUpdateSupport get appUpdateSupport => _nativeAppUpdatesEnabled
@@ -677,8 +637,7 @@ class DesktopPlatformServices
       if (!_nativeAppUpdatesRequested) {
         return 'Automatic updates are disabled for this build.';
       }
-      return 'Automatic updates are unavailable because the embedded Sparkle '
-          'signature configuration is incomplete.';
+      return 'Automatic updates are unavailable for this installation.';
     }
     if (_isLinux) {
       return 'This Linux installation cannot update itself. Install the '
@@ -722,52 +681,21 @@ class DesktopPlatformServices
       }
     }
     if (!_isMacOS) return;
+    if (!_nativeAppUpdatesRequested) return;
     try {
-      if (_usesDefaultMethodChannel) {
-        _appUpdateChannel.setMethodCallHandler(handleAppUpdaterCallForTesting);
-      }
-      final effective = await _methodInvoker('configure', {
-        'updatesEnabled': _nativeAppUpdatesRequested,
-        'apiBaseUrl': apiBaseUrl,
-        'apiToken': await loadApiToken(),
-        'apiTokenPath': _resolvedTokenPath,
-        'dataDir': _resolvedDataDir,
-      });
-      _nativeAppUpdatesEnabled = effective == true;
+      final updater = _macOSAppUpdater ??= MacOSAppUpdater(
+        executablePath: Platform.resolvedExecutable,
+        dataDirectory: _resolvedDataDir,
+        versionLoader: _appVersionLoader,
+        processRunner: (executable, arguments) =>
+            _runPlatformProcess(executable, arguments),
+        onStatus: _publishAppUpdateStatus,
+      );
+      _nativeAppUpdatesEnabled = await updater.initialize();
     } catch (error) {
-      // main() may continue when setup fails and no recovery exists. Retain
-      // the error so a durable recovery journal can still block bootstrap.
       _appUpdaterSetupError = error;
       rethrow;
     }
-  }
-
-  @visibleForTesting
-  Future<dynamic> handleAppUpdaterCallForTesting(MethodCall call) async {
-    if (call.method == 'appUpdateStateChanged') {
-      final arguments = call.arguments;
-      if (arguments is Map<Object?, Object?>) {
-        _publishAppUpdateStatus(AppUpdateStatus.fromMap(arguments));
-      }
-      return null;
-    }
-    if (call.method != 'restartDaemonAfterUpdateAbort') return null;
-    final binaryPath = defaultDaemonBinaryPath();
-    if (binaryPath == null) {
-      throw DaemonException(
-        'Bundled daemon is unavailable; update recovery cannot continue.',
-      );
-    }
-    try {
-      await spawnDaemon(binaryPath);
-    } catch (error) {
-      // The guarded spawn fails closed if any process still owns the daemon.
-      // Surface the failure across the method channel so native recovery keeps
-      // its durable journal and never claims the daemon was restored.
-      debugPrint('could not restore daemon after update abort: $error');
-      rethrow;
-    }
-    return null;
   }
 
   @override
@@ -781,23 +709,7 @@ class DesktopPlatformServices
       await _linuxAppUpdater!.checkForUpdates();
       return;
     }
-    _publishAppUpdateStatus(
-      const AppUpdateStatus(
-        phase: AppUpdatePhase.checking,
-        message: 'Checking for updates…',
-      ),
-    );
-    try {
-      await _methodInvoker('checkForUpdates', null);
-    } catch (error) {
-      _publishAppUpdateStatus(
-        AppUpdateStatus(
-          phase: AppUpdatePhase.error,
-          message: 'Could not check for updates: $error',
-        ),
-      );
-      rethrow;
-    }
+    await _macOSAppUpdater!.checkForUpdates();
   }
 
   @override
@@ -813,17 +725,8 @@ class DesktopPlatformServices
       _processExit(0);
       return;
     }
-    try {
-      await _methodInvoker('installUpdate', null);
-    } catch (error) {
-      _publishAppUpdateStatus(
-        AppUpdateStatus(
-          phase: AppUpdatePhase.error,
-          message: 'Update failed: $error',
-        ),
-      );
-      rethrow;
-    }
+    await _macOSAppUpdater!.installAvailableUpdate();
+    _processExit(0);
   }
 
   @override
@@ -832,26 +735,7 @@ class DesktopPlatformServices
       final updater = _linuxAppUpdater;
       return updater == null ? null : await updater.pendingUpdateVersion();
     }
-    if (!_isMacOS) return null;
-    if (appUpdateSupport != AppUpdateSupport.native) {
-      final recoveryPath = '$_resolvedDataDir/app-update-recovery.json';
-      final recoveryType = await FileSystemEntity.type(
-        recoveryPath,
-        followLinks: false,
-      );
-      if (recoveryType != FileSystemEntityType.notFound) {
-        final setupDetail = _appUpdaterSetupError == null
-            ? 'the native updater was rejected by its integrity configuration gate'
-            : 'native updater setup failed: $_appUpdaterSetupError';
-        throw StateError(
-          'A protected app-update recovery journal exists at $recoveryPath, '
-          'but $setupDetail. Daemon startup is blocked until the verified '
-          'updater can resume recovery.',
-        );
-      }
-      return null;
-    }
-    return await _methodInvoker('pendingUpdateVersion', null) as String?;
+    return null;
   }
 
   @override
@@ -860,8 +744,7 @@ class DesktopPlatformServices
       await _linuxAppUpdater?.completePendingUpdate();
       return;
     }
-    if (appUpdateSupport != AppUpdateSupport.native) return;
-    await _methodInvoker('completeUpdate', null);
+    return;
   }
 
   @override

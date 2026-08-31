@@ -41,7 +41,7 @@ promotes the mutable GHCR aliases.
 | Docker image (GHCR) | GoReleaser `daemon/.goreleaser-docker.yml` | Yes |
 | Linux `.deb` / `.rpm` | GoReleaser nfpms `daemon/.goreleaser.yml` | Yes |
 | Linux `.AppImage` | appimagetool (manual) | No |
-| macOS `.dmg` + Sparkle appcast | ad-hoc codesign, create-dmg, Sparkle | No |
+| macOS `.dmg` | ad-hoc codesign, create-dmg | No |
 
 ## Integrated desktop updates
 
@@ -50,10 +50,8 @@ newer stable release is announced with a persistent dashboard banner, a desktop
 notification, and an **Update now** action in both the app and the system-tray
 menu.
 
-- **macOS** uses Sparkle's Ed25519-signed appcast and archive, verifies the
-  archive before extraction, and performs atomic bundle replacement. The app
-  bundle is sealed with an ad-hoc code signature; release authenticity comes
-  from the embedded Ed25519 public key rather than an Apple certificate.
+- **macOS** polls GitHub's latest release, downloads its DMG, replaces the app
+  bundle, and relaunches. It does not use an appcast or update signature.
 - **Linux AppImage** downloads and checksum-verifies the new AppImage, keeps the
   previous image as a rollback copy, then atomically replaces and relaunches it.
 - **Linux `.deb` / `.rpm`** downloads the matching package, verifies it against
@@ -66,12 +64,9 @@ Source builds and user-local `make install-linux` builds are intentionally not
 self-modifying because they have no published package owner to replace. Docker
 and web deployments remain image-managed.
 
-Every desktop installation uses the same daemon handoff: stop admitting new
-work, drain active transactions, persist and seal the update lease, stop the
-exact daemon PID, install, then verify the replacement daemon's version and
-boot identity before reopening admission. The process-lifetime data lock and
-the UI's guarded port probe independently prevent a second daemon from being
-started during that transition.
+Linux installations retain their package-specific daemon handoff. The macOS
+updater stops the daemon immediately before replacing the app bundle and starts
+it again from the replacement.
 
 ## Why AppImage stays outside GoReleaser
 
@@ -95,106 +90,34 @@ GoReleaser does not support DMG creation. The macOS build requires:
 - A universal (`arm64` + `x86_64`) bundled daemon
 - Ad-hoc code sealing for the complete app bundle
 - **`create-dmg`** for the installer image with custom window layout
-- Sparkle's **Ed25519-signed** archive and appcast tooling
 
 None of these steps have GoReleaser equivalents. The `build-macos` job is
 self-contained on a `macos-14` runner and would not benefit from GoReleaser
 integration.
 
-## macOS updater trust chain
+## macOS updater
 
-The macOS app uses Sparkle 2.9.6 through the repository-owned
-`flutter_app/macos/Sparkle.podspec`. That podspec pins the upstream URL and
-archive SHA-256, so CocoaPods verifies the download before extracting the
-framework or exposing its release tools. Every release job:
+The release job builds the universal daemon and Flutter app, seals the bundle
+with an ad-hoc code signature so macOS can launch it, packages it as
+`Heimdallm-v<VERSION>.dmg`, and publishes that DMG. The code seal is a macOS
+packaging requirement; it is not an update signature and uses no release key.
 
-1. builds both daemon architectures and combines them into one universal binary;
-2. ad-hoc signs nested code from the inside out and seals the app;
-3. packages the app in a DMG;
-4. generates `appcast.xml` with Sparkle's pinned `generate_appcast` tool;
-5. publishes the DMG, its SHA-256 checksum, and the signed appcast together.
+Once a day, the running app requests GitHub's `releases/latest` endpoint. When
+a newer version exists, it downloads the matching DMG, mounts it, and copies
+`Heimdallm.app` to a staging path next to the current installation. A detached
+helper then stops the daemon, replaces the installed bundle, restarts the
+daemon, and opens the new app. A staging failure leaves the installed app
+untouched; a failed second rename restores the immediate backup.
 
-The app downloads only the appcast at
-`releases/latest/download/appcast.xml`. The appcast and archive both require the
-Ed25519 public key embedded in `Info.plist`, and Sparkle validates the archive
-before extraction (`SUVerifyUpdateBeforeExtraction = true`). Signed-feed
-failures never expire or fall back to an unsigned feed
-(`SUSignedFeedFailureExpirationInterval = 0`). This Ed25519 trust chain also
-protects ad-hoc local builds, so they may consume the production updater without
-a Developer ID certificate on the currently installed bundle.
+There is no Sparkle dependency, appcast, update signature, checksum gate, drain,
+lease, or recovery journal in the macOS update path.
 
-The first release containing Sparkle must be installed manually from its DMG
-because older versions have no updater. Every later signed release can be
-installed in place from **Check for updates**.
-
-The updater becomes operational only after the release workflow publishes
-`appcast.xml` and its signed enclosure alongside the DMG. If the public
-`releases/latest/download/appcast.xml` URL is missing (for example, while the
-next release is still a draft), checks fail closed and the error remains visible
-in Settings and the system tray. Publish the next release through the current
-workflow; do not hand-author or upload an unsigned appcast as a workaround.
-
-### Required GitHub Actions secrets
-
-| Secret | Contents |
-|---|---|
-| `SPARKLE_EDDSA_PRIVATE_KEY` | Private Sparkle key exported by `generate_keys` |
-
-The Sparkle secret has already been generated as a project-specific key. The
-workflow verifies that it matches the public key embedded in the app before it
-publishes anything. No Apple signing identity, local Keychain access, Apple ID,
-or notarization credential is part of the update pipeline. The ad-hoc bundle
-signature provides code sealing; Sparkle's Ed25519 signature is the update
-trust root.
+`SPARKLE_EDDSA_PRIVATE_KEY` remains required only for the signed Linux package
+manifest. It is consumed by the `Generate Linux desktop checksums` release
+step described under [Linux package contents](#linux-package-contents); the
+macOS build and updater do not read it.
 
 `TAP_GITHUB_TOKEN` is optional and affects only the best-effort Homebrew update.
-
-### Runtime handoff
-
-Before invoking Sparkle, the desktop app renews a short daemon drain lease. The
-daemon atomically refuses new review/issue/implementation runs while existing
-ones finish. Once idle, the app fsyncs a recovery journal and converts the lease
-to a durable, non-expiring seal before it unloads the canonical LaunchAgent
-(preventing its `KeepAlive` policy from respawning the old binary). It waits for
-both the PID and lifecycle lock to disappear before allowing bundle replacement.
-
-On relaunch, the app verifies the exact daemon path, PID, lease owner, bundled
-version and random process boot ID through the daemon's minimal startup surface.
-It then performs an authenticated two-phase handoff: `seal` (idempotent
-recovery), process-bound `confirm` (initialize dependencies while work admission
-remains closed), exact `/health.version` verification, and finally a
-process-bound owner-authenticated lease deletion. Both mutation requests echo
-the verified boot ID, so a request delayed across a daemon crash receives a 409
-before it can initialize dependencies or open the replacement gate.
-The recovery journal is removed only after that last acknowledgement. A crash,
-lost response or failed bootstrap therefore remains fail-closed and converges
-through the same sequence on the next launch, instead of admitting work to a
-mixed old/new installation or spawning a duplicate daemon.
-
-The daemon also consumes the native recovery intent before it loads config,
-opens/migrates SQLite, or starts NATS and workers. It accepts only a private,
-current-user, regular `app-update-recovery.json` opened without following
-symlinks. A `preparing` or `sealed` journal atomically promotes an absent or
-expired `update-drain.json` for the same owner to a non-expiring seal. This
-covers an autonomous `launchd` respawn before the desktop app has relaunched.
-`pendingInstall` never blocks normal work. An absent marker is not recreated
-for `installing`, because it may be the legitimate result of the final DELETE;
-an existing marker is still restored normally.
-
-Drain polling has one monotonic ten-minute deadline, including stalled HTTP
-requests; cancellation tears down the in-flight URL session task before
-rollback. Each recovery stage has a separate monotonic 60-second deadline, and
-native subprocesses are terminated and then killed on a bounded escalation.
-A `pendingInstall` journal may also coexist briefly with a new app and the old
-daemon after interrupted replacement. Recovery seals the exact old PID/boot
-ID/version it observed, stops it, and requires the new bundled version only
-after restart.
-
-If the native bridge fails to configure, an ordinary unsigned/debug run may
-continue only when no recovery journal exists. Desktop bootstrap checks for the
-journal independently and refuses to enter the UI against the daemon's minimal
-sealed router; the daemon-side reconciliation above remains authoritative even
-when the app is not running.
 
 ### Publication and retry semantics
 
@@ -215,7 +138,7 @@ For a later alias-only repair, dispatch the release workflow with the published
 latest `tag` and `channels_only=true`. It skips builds/uploads and refuses older
 tags, then reconciles GHCR aliases to the attested digest. Homebrew remains
 best-effort after normal publication: failure may leave the previous formula in
-place but does not affect signed desktop updates or immutable artifacts.
+place but does not affect Linux desktop updates or immutable artifacts.
 
 ## Linux package contents
 

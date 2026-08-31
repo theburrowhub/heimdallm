@@ -29,11 +29,6 @@ flutter_macos_podfile_setup
 target 'Runner' do
   use_frameworks!
 
-  # Whole-bundle, signed macOS updates. The repository-owned podspec pins both
-  # the exact release and its archive digest before CocoaPods extracts or runs
-  # the framework's generate_appcast/sign_update tools.
-  pod 'Sparkle', :podspec => 'Sparkle.podspec'
-
   flutter_install_all_macos_pods File.dirname(File.realpath(__FILE__))
   target 'RunnerTests' do
     inherit! :search_paths
