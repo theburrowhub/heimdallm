@@ -113,7 +113,9 @@ There is no Sparkle dependency, appcast, update signature, checksum gate, drain,
 lease, or recovery journal in the macOS update path.
 
 `SPARKLE_EDDSA_PRIVATE_KEY` remains required only for the signed Linux package
-manifest. The macOS build and updater do not read it.
+manifest. It is consumed by the `Generate Linux desktop checksums` release
+step described under [Linux package contents](#linux-package-contents); the
+macOS build and updater do not read it.
 
 `TAP_GITHUB_TOKEN` is optional and affects only the best-effort Homebrew update.
 

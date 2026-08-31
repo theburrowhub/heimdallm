@@ -344,21 +344,19 @@ class MacOSAppUpdater {
   }
 
   static bool _isNewer(String candidate, String current) {
-    List<int> parts(String value) => value
-        .split('-')
-        .first
-        .split('.')
-        .map((part) => int.tryParse(part) ?? 0)
-        .toList();
-    final left = parts(candidate);
-    final right = parts(current);
+    final candidateParts = candidate.split('-');
+    final currentParts = current.split('-');
+    List<int> parts(List<String> value) =>
+        value.first.split('.').map((part) => int.tryParse(part) ?? 0).toList();
+    final left = parts(candidateParts);
+    final right = parts(currentParts);
     final length = left.length > right.length ? left.length : right.length;
     for (var index = 0; index < length; index++) {
       final a = index < left.length ? left[index] : 0;
       final b = index < right.length ? right[index] : 0;
       if (a != b) return a > b;
     }
-    return false;
+    return candidateParts.length == 1 && currentParts.length > 1;
   }
 
   void dispose() {

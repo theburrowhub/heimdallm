@@ -80,6 +80,29 @@ void main() {
       expect(statuses.last.message, contains('0.8.9 is up to date'));
     });
 
+    test(
+      'offers a stable release to a matching prerelease installation',
+      () async {
+        final updater = MacOSAppUpdater(
+          executablePath: executable.path,
+          dataDirectory: '${temporaryDirectory.path}/data',
+          versionLoader: () async =>
+              const AppVersionInfo(version: '1.0.0-beta.1'),
+          processRunner: Process.run,
+          onStatus: statuses.add,
+          client: MockClient((_) async => _releaseResponse('1.0.0')),
+          startPolling: false,
+        );
+        addTearDown(updater.dispose);
+
+        expect(await updater.initialize(), isTrue);
+        await updater.checkForUpdates();
+
+        expect(updater.availableRelease?.version, '1.0.0');
+        expect(statuses.last.phase, AppUpdatePhase.available);
+      },
+    );
+
     test('starts polling as soon as it initializes', () async {
       final secondRequest = Completer<void>();
       var requestCount = 0;
