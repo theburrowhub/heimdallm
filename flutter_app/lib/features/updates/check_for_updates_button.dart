@@ -80,7 +80,7 @@ class CheckForUpdatesButton extends ConsumerWidget {
 ///
 /// This card is intentionally present even when native updates are unavailable:
 /// unsupported deployments must explain why instead of making the feature
-/// disappear. macOS ad-hoc builds use the normal native-update path.
+/// disappear. Supported macOS installations use the native-update path.
 class AppUpdateSettingsCard extends ConsumerWidget {
   const AppUpdateSettingsCard({super.key});
 
@@ -265,7 +265,7 @@ _UpdateSettingsPresentation _settingsPresentation({
         title: message == null || message.isEmpty
             ? 'Ready to check for updates'
             : message,
-        detail: 'Automatic updates are enabled for this signed build.',
+        detail: 'Automatic updates are enabled for this installation.',
         color: (colors) => message == null || message.isEmpty
             ? colors.onSurfaceVariant
             : Colors.green,

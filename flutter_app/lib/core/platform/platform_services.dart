@@ -23,7 +23,7 @@ enum TcpPortState { open, closed, unknown }
 
 /// Native update capability of the current application build.
 enum AppUpdateSupport {
-  /// The desktop build can verify and replace its complete installation.
+  /// The desktop build can replace its complete installation.
   native,
 
   /// Updates belong to the package/deployment owner on this platform.
@@ -178,8 +178,7 @@ abstract class PlatformServices {
   /// Hide the main window (tray workflows). No-op on web.
   Future<void> hideWindow();
 
-  /// Requests normal application termination. macOS must go through AppKit so
-  /// Sparkle and Flutter can postpone termination while the daemon drains.
+  /// Requests normal application termination.
   void quitApp();
 
   // ── First-run setup / daemon spawn ──────────────────────────────────────
@@ -231,9 +230,7 @@ abstract interface class AppUpdatePlatformCapability {
 }
 
 /// Optional termination path for a process that has already disproved desktop
-/// singleton ownership. It is separate from normal application termination so
-/// an update-owning process can still drain safely through
-/// [PlatformServices.quitApp].
+/// singleton ownership.
 abstract interface class DuplicateInstancePlatformCapability {
   void quitDuplicateInstance();
 }

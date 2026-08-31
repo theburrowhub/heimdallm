@@ -14,24 +14,24 @@ void main() {
     'explains unavailable updates instead of hiding the app-bar entry',
     (tester) async {
       final platform = FakePlatformServices(
-        appUpdateUnavailableReason: 'Requires an official signed build.',
+        appUpdateUnavailableReason: 'Updates are unavailable here.',
       );
       await tester.pumpWidget(_app(platform));
       final button = tester.widget<IconButton>(
         find.byKey(const Key('check-for-updates')),
       );
       expect(button.onPressed, isNull);
-      expect(button.tooltip, 'Requires an official signed build.');
+      expect(button.tooltip, 'Updates are unavailable here.');
     },
   );
 
   testWidgets(
-    'settings explain an incomplete updater integrity configuration',
+    'settings explain an updater initialization failure',
     (tester) async {
       final platform = FakePlatformServices(
         appVersion: const AppVersionInfo(version: '0.8.4', buildNumber: '546'),
         appUpdateUnavailableReason:
-            'The embedded Sparkle signature configuration is incomplete.',
+            'The updater could not be initialized.',
       );
 
       await tester.pumpWidget(_settingsApp(platform));
@@ -41,7 +41,7 @@ void main() {
       expect(find.text('Updates unavailable'), findsOneWidget);
       expect(
         find.text(
-          'The embedded Sparkle signature configuration is incomplete.',
+          'The updater could not be initialized.',
         ),
         findsOneWidget,
       );
@@ -50,7 +50,7 @@ void main() {
   );
 
   testWidgets(
-    'official signed build reports up-to-date and remains checkable',
+    'enabled updater reports up-to-date and remains checkable',
     (tester) async {
       final platform = _UpToDatePlatform();
 
@@ -67,7 +67,7 @@ void main() {
     },
   );
 
-  testWidgets('ad-hoc build exposes the same normal update controls', (
+  testWidgets('macOS installation exposes the normal update controls', (
     tester,
   ) async {
     final platform = FakePlatformServices(
@@ -89,7 +89,7 @@ void main() {
   });
 
   testWidgets(
-    'missing signed appcast stays visible and retryable in settings',
+    'update check failure stays visible and retryable in settings',
     (tester) async {
       final platform = FakePlatformServices(
         appUpdateSupport: AppUpdateSupport.native,

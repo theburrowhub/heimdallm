@@ -533,8 +533,7 @@ jobs:
   # macOS .dmg
   #
   # Stays separate from GoReleaser: requires macOS runner, Flutter build,
-  # ad-hoc code sealing, create-dmg, and Sparkle appcast generation — none of
-  # which GoReleaser supports.
+  # ad-hoc code sealing and create-dmg — neither of which GoReleaser supports.
   # See docs/release-pipeline.md for rationale.
   # ═══════════════════════════════════════════════════════════════════════════
   build-macos:
@@ -590,7 +589,7 @@ jobs:
         working-directory: flutter_app/macos
         run: bundle exec pod install --deployment --clean-install
 
-      - name: Native updater tests
+      - name: macOS runner tests
         working-directory: flutter_app/macos
         run: |
           set -euo pipefail
@@ -613,8 +612,7 @@ jobs:
             exit 1
           }
           VERSION="${TAG#v}"
-          # Keep official release builds above the historical commit-count
-          # builds so Sparkle can replace those installations in place.
+          # Keep official release build numbers above historical builds.
           SOURCE_BUILD_NUMBER=$(git rev-list --count "${TAG}^{commit}")
           BUILD_NUMBER=$((100000 + SOURCE_BUILD_NUMBER))
           [[ "$BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]] || {
@@ -706,15 +704,9 @@ jobs:
             echo "::error::App version $BUNDLE_VERSION does not match release $VERSION"
             exit 1
           }
-          test -d "$APP/Contents/Frameworks/Sparkle.framework" || {
-            echo "::error::Sparkle.framework is missing from the app bundle"
-            exit 1
-          }
-
           echo "APP=$APP" >> "$GITHUB_ENV"
 
-      # Download and verify every executable build dependency before exposing
-      # signing material to the job.
+      # Download and verify create-dmg before executing it.
       - name: Install pinned create-dmg
         run: |
           set -euo pipefail
@@ -780,106 +772,12 @@ jobs:
           ls -lh "$DMG"
           echo "DMG_PATH=$DMG" >> "$GITHUB_ENV"
 
-      - name: Generate signed Sparkle appcast and checksum
-        env:
-          SPARKLE_EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
-        run: |
-          set -euo pipefail
-          SPARKLE_TOOL="flutter_app/macos/Pods/Sparkle/bin/generate_appcast"
-          SIGN_TOOL="flutter_app/macos/Pods/Sparkle/bin/sign_update"
-          DOWNLOAD_PREFIX="https://github.com/theburrowhub/heimdallm/releases/download/${TAG}/"
-
-          PRIVATE_KEY_BYTES=$(
-            printf '%s' "$SPARKLE_EDDSA_PRIVATE_KEY" \
-              | openssl base64 -d -A \
-              | wc -c \
-              | tr -d '[:space:]'
-          )
-          test "$PRIVATE_KEY_BYTES" = 32 || {
-            echo "::error::SPARKLE_EDDSA_PRIVATE_KEY is not a 32-byte Sparkle Ed25519 seed"
-            exit 1
-          }
-          DERIVED_PUBLIC_KEY=$(
-            {
-              printf '302e020100300506032b657004220420' | xxd -r -p
-              printf '%s' "$SPARKLE_EDDSA_PRIVATE_KEY" | openssl base64 -d -A
-            } \
-              | openssl pkey -inform DER -pubout -outform DER 2>/dev/null \
-              | tail -c 32 \
-              | openssl base64 -A
-          )
-          EMBEDDED_PUBLIC_KEY=$(
-            /usr/libexec/PlistBuddy \
-              -c 'Print :SUPublicEDKey' \
-              "$APP/Contents/Info.plist"
-          )
-          test "$DERIVED_PUBLIC_KEY" = "$EMBEDDED_PUBLIC_KEY" || {
-            echo "::error::Sparkle private key does not match the public key embedded in the app"
-            exit 1
-          }
-
-          printf '%s' "$SPARKLE_EDDSA_PRIVATE_KEY" | \
-            "$SPARKLE_TOOL" \
-              --ed-key-file - \
-              --download-url-prefix "$DOWNLOAD_PREFIX" \
-              --link "https://github.com/theburrowhub/heimdallm/releases/tag/${TAG}" \
-              --maximum-versions 1 \
-              --maximum-deltas 0 \
-              -o "$PWD/dist/appcast.xml" \
-              "$PWD/dist"
-
-          printf '%s' "$SPARKLE_EDDSA_PRIVATE_KEY" | \
-            "$SIGN_TOOL" --verify --ed-key-file - dist/appcast.xml
-
-          ENCLOSURE_COUNT=$(xmllint --xpath \
-            'count(//*[local-name()="enclosure"])' dist/appcast.xml)
-          test "$ENCLOSURE_COUNT" = 1 || {
-            echo "::error::Expected one Sparkle enclosure, found $ENCLOSURE_COUNT"
-            exit 1
-          }
-          APPCAST_URL=$(xmllint --xpath \
-            'string(//*[local-name()="enclosure"]/@*[local-name()="url"])' \
-            dist/appcast.xml)
-          APPCAST_VERSION=$(xmllint --xpath \
-            'string((//*[local-name()="item"]/*[local-name()="shortVersionString"])[1])' \
-            dist/appcast.xml)
-          APPCAST_BUILD=$(xmllint --xpath \
-            'string((//*[local-name()="item"]/*[local-name()="version"])[1])' \
-            dist/appcast.xml)
-          APPCAST_LENGTH=$(xmllint --xpath \
-            'string(//*[local-name()="enclosure"]/@length)' dist/appcast.xml)
-          APPCAST_SIGNATURE=$(xmllint --xpath \
-            'string(//*[local-name()="enclosure"]/@*[local-name()="edSignature"])' \
-            dist/appcast.xml)
-          EXPECTED_URL="${DOWNLOAD_PREFIX}$(basename "$DMG_PATH")"
-          EXPECTED_LENGTH=$(stat -f%z "$DMG_PATH")
-          test "$APPCAST_URL" = "$EXPECTED_URL"
-          test "$APPCAST_VERSION" = "$VERSION"
-          test "$APPCAST_BUILD" = "$BUILD_NUMBER"
-          test "$APPCAST_LENGTH" = "$EXPECTED_LENGTH"
-          test -n "$APPCAST_SIGNATURE"
-          printf '%s' "$SPARKLE_EDDSA_PRIVATE_KEY" | \
-            "$SIGN_TOOL" --verify --ed-key-file - "$DMG_PATH" "$APPCAST_SIGNATURE"
-
-          DMG_BASENAME=$(basename "$DMG_PATH")
-          (
-            cd "$(dirname "$DMG_PATH")"
-            shasum -a 256 "$DMG_BASENAME" > "${DMG_BASENAME}.sha256"
-          )
-          {
-            echo "APPCAST_PATH=dist/appcast.xml"
-            echo "CHECKSUM_PATH=${DMG_PATH}.sha256"
-          } >> "$GITHUB_ENV"
-
       # ── Publish ─────────────────────────────────────────────────────────────
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: Heimdallm-macos-${{ env.VERSION }}
-          path: |
-            ${{ env.DMG_PATH }}
-            ${{ env.CHECKSUM_PATH }}
-            ${{ env.APPCAST_PATH }}
+          path: ${{ env.DMG_PATH }}
           retention-days: 90
 
       - name: Upload to GitHub Release
@@ -889,10 +787,7 @@ jobs:
           draft: true
           overwrite_files: true
           fail_on_unmatched_files: true
-          files: |
-            ${{ env.DMG_PATH }}
-            ${{ env.CHECKSUM_PATH }}
-            ${{ env.APPCAST_PATH }}
+          files: ${{ env.DMG_PATH }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -1073,9 +968,7 @@ jobs:
 
           VERSION="${TAG#v}"
           EXPECTED_ASSETS=(
-            appcast.xml
             "Heimdallm-${TAG}.dmg"
-            "Heimdallm-${TAG}.dmg.sha256"
             "Heimdallm-${VERSION}-x86_64.AppImage"
             "heimdallm_${VERSION}_amd64.deb"
             "heimdallm_${VERSION}_amd64.rpm"

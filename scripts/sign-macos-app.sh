@@ -1,6 +1,6 @@
 #!/bin/bash
-# Seal a Flutter + Sparkle app from the inside out with Developer ID or an
-# ad-hoc identity. Sparkle authenticates release updates with Ed25519.
+# Seal the macOS app from the inside out with Developer ID or an ad-hoc
+# identity so the bundle remains launchable after embedding the daemon.
 set -euo pipefail
 
 if [[ $# -ne 3 ]]; then
@@ -40,21 +40,6 @@ fi
 sign_nested() {
   local code_path=$1
   if /usr/bin/codesign --display "$code_path" >/dev/null 2>&1; then
-    # Sparkle's Downloader.xpc carries security-sensitive entitlements. Never
-    # preserve upstream designated requirements when replacing its signer:
-    # those requirements describe the old identity and can invalidate the new
-    # signature chain. This follows Sparkle's manual code-signing guidance.
-    if [[ "$code_path" == */Downloader.xpc ]]; then
-      /usr/bin/codesign \
-        --force \
-        "${timestamp_args[@]}" \
-        "${runtime_args[@]+"${runtime_args[@]}"}" \
-        --preserve-metadata=entitlements \
-        "${keychain_args[@]+"${keychain_args[@]}"}" \
-        --sign "$signing_identity" \
-        "$code_path"
-      return
-    fi
     /usr/bin/codesign \
       --force \
       "${timestamp_args[@]}" \
@@ -86,7 +71,7 @@ bundle_contains_macho() {
 }
 
 # Sign every Mach-O first. This includes the bundled Go daemon, Flutter's main
-# executable, dylibs, and the executables nested inside Sparkle helpers.
+# executable and dylibs.
 while IFS= read -r -d '' candidate; do
   if /usr/bin/file -b "$candidate" | /usr/bin/grep -q 'Mach-O'; then
     sign_nested "$candidate"
