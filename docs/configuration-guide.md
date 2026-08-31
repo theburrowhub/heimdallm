@@ -1378,9 +1378,11 @@ the next evaluation, against GitHub's own view of author and assignees.
 ### Per-repository and per-organisation overrides
 
 Every field except `poll_interval` and `max_prs_per_tick` supports
-`repo > org > global` precedence. The **Merge Tracking** switch on a repository's
-detail page writes `merge_tracking.repos."owner/name".enabled`, and the repo
-list shows a green LED whose tooltip names where the answer came from.
+`repo > org > global` precedence. The **Merge Tracking** cards on organization
+and repository detail pages expose every scoped field, show where each value is
+inherited from, and let each override be reset independently. The repo list
+shows a green LED whose tooltip names where the master `enabled` value came
+from.
 
 `include_assigned` is the one field whose *widening* direction costs something:
 discovery runs one search for every repository at once, so Heimdallm asks GitHub

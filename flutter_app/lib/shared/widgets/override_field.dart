@@ -316,6 +316,9 @@ class OverrideDropdown extends StatelessWidget {
           ),
           const SizedBox(height: 6),
           DropdownButtonFormField<String?>(
+            key: ValueKey(
+              '$label|${overrideValue ?? '<inherited>'}|$globalValue',
+            ),
             initialValue: overrideValue,
             decoration: const InputDecoration(
               isDense: true,

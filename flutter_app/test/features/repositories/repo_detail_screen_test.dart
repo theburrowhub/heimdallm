@@ -12,10 +12,13 @@ import 'package:mocktail/mocktail.dart';
 class MockApiClient extends Mock implements ApiClient {}
 
 const _repoName = 'theburrowhub/heimdallm';
+const _orgName = 'theburrowhub';
 
 Map<String, dynamic> _configJson({
   bool globalMtEnabled = false,
-  bool? repoMtEnabled,
+  Map<String, dynamic> globalMergeTracking = const {},
+  Map<String, dynamic> repoMergeTracking = const {},
+  Map<String, dynamic> orgMergeTracking = const {},
   bool monitored = true,
 }) => {
   'repositories': [if (monitored) _repoName],
@@ -29,24 +32,28 @@ Map<String, dynamic> _configJson({
   'issue_tracking': {'enabled': true},
   'merge_tracking': {
     'enabled': globalMtEnabled,
-    if (repoMtEnabled != null)
-      'repos': {
-        _repoName: {'enabled': repoMtEnabled},
-      },
+    ...globalMergeTracking,
+    if (orgMergeTracking.isNotEmpty) 'orgs': {_orgName: orgMergeTracking},
+    if (repoMergeTracking.isNotEmpty) 'repos': {_repoName: repoMergeTracking},
   },
 };
 
 Future<MockApiClient> _mountMergeTrackingDetail(
   WidgetTester tester, {
   bool globalMtEnabled = false,
-  bool? repoMtEnabled,
+  Map<String, dynamic> globalMergeTracking = const {},
+  Map<String, dynamic> repoMergeTracking = const {},
+  Map<String, dynamic> orgMergeTracking = const {},
   bool monitored = true,
 }) async {
   final mockApi = MockApiClient();
+  final currentRepoMergeTracking = Map<String, dynamic>.from(repoMergeTracking);
   when(() => mockApi.fetchConfig()).thenAnswer(
     (_) async => _configJson(
       globalMtEnabled: globalMtEnabled,
-      repoMtEnabled: repoMtEnabled,
+      globalMergeTracking: globalMergeTracking,
+      repoMergeTracking: currentRepoMergeTracking,
+      orgMergeTracking: orgMergeTracking,
       monitored: monitored,
     ),
   );
@@ -59,9 +66,18 @@ Future<MockApiClient> _mountMergeTrackingDetail(
   when(() => mockApi.patchMergeTrackingRepoConfig(_repoName, any())).thenAnswer(
     (invocation) async {
       final patch = invocation.positionalArguments[1] as Map<String, dynamic>;
+      for (final entry in patch.entries) {
+        if (entry.value == null) {
+          currentRepoMergeTracking.remove(entry.key);
+        } else {
+          currentRepoMergeTracking[entry.key] = entry.value;
+        }
+      }
       return _configJson(
         globalMtEnabled: globalMtEnabled,
-        repoMtEnabled: patch['enabled'] as bool?,
+        globalMergeTracking: globalMergeTracking,
+        repoMergeTracking: currentRepoMergeTracking,
+        orgMergeTracking: orgMergeTracking,
         monitored: monitored,
       );
     },
@@ -167,12 +183,148 @@ void main() {
     await tester.pump(const Duration(seconds: 4));
   });
 
+  testWidgets('merge tracking exposes every granular and advanced control', (
+    tester,
+  ) async {
+    await _mountMergeTrackingDetail(tester);
+
+    for (final suffix in [
+      'switch',
+      'include_assigned',
+      'enable_auto_merge',
+      'update_branch',
+      'resolve_conflicts',
+      'merge',
+      'require_approval',
+      'merge_method',
+      'resolve_timeout',
+      'resolve_effort',
+      'max_update_attempts',
+      'max_resolve_attempts',
+      'max_merge_attempts',
+      'action_cooldown',
+    ]) {
+      expect(
+        find.byKey(Key('repo_merge_tracking_$suffix')),
+        findsOneWidget,
+        reason: 'missing repo merge-tracking control: $suffix',
+      );
+    }
+    expect(find.text('Advanced limits'), findsOneWidget);
+
+    await tester.pump(const Duration(seconds: 4));
+  });
+
+  testWidgets('rapid merge-tracking changes are saved together', (
+    tester,
+  ) async {
+    final mockApi = await _mountMergeTrackingDetail(tester);
+    final autoMerge = find.byKey(
+      const Key('repo_merge_tracking_enable_auto_merge'),
+    );
+    final updateBranch = find.byKey(
+      const Key('repo_merge_tracking_update_branch'),
+    );
+    await tester.scrollUntilVisible(
+      autoMerge,
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+
+    await tester.tap(autoMerge);
+    await tester.pump();
+    await tester.tap(updateBranch);
+    await tester.pump(const Duration(milliseconds: 801));
+    await tester.pumpAndSettle();
+
+    final patches = verify(
+      () => mockApi.patchMergeTrackingRepoConfig(_repoName, captureAny()),
+    ).captured;
+    expect(patches, [
+      <String, dynamic>{'enable_auto_merge': true, 'update_branch': true},
+    ]);
+    verifyNever(() => mockApi.patchRepoConfig(any(), any()));
+
+    await tester.pump(const Duration(seconds: 4));
+  });
+
+  testWidgets('resetting one merge-tracking field preserves its siblings', (
+    tester,
+  ) async {
+    final mockApi = await _mountMergeTrackingDetail(
+      tester,
+      repoMergeTracking: const {
+        'enable_auto_merge': true,
+        'update_branch': true,
+      },
+    );
+    final resetAutoMerge = find.byKey(
+      const Key('repo_merge_tracking_enable_auto_merge_reset'),
+    );
+    await tester.scrollUntilVisible(
+      resetAutoMerge,
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+
+    await tester.tap(resetAutoMerge);
+    await tester.pump(const Duration(milliseconds: 801));
+    await tester.pumpAndSettle();
+
+    final patches = verify(
+      () => mockApi.patchMergeTrackingRepoConfig(_repoName, captureAny()),
+    ).captured;
+    expect(patches, [
+      <String, dynamic>{'enable_auto_merge': null},
+    ]);
+    expect(
+      find.byKey(const Key('repo_merge_tracking_update_branch_reset')),
+      findsOneWidget,
+    );
+    expect(
+      tester
+          .widget<Switch>(
+            find.byKey(const Key('repo_merge_tracking_update_branch')),
+          )
+          .value,
+      isTrue,
+    );
+
+    await tester.pump(const Duration(seconds: 4));
+  });
+
+  testWidgets('repo fields can inherit their effective value from the org', (
+    tester,
+  ) async {
+    await _mountMergeTrackingDetail(
+      tester,
+      globalMergeTracking: const {'enable_auto_merge': false},
+      orgMergeTracking: const {'enable_auto_merge': true},
+    );
+
+    expect(
+      tester
+          .widget<Switch>(
+            find.byKey(const Key('repo_merge_tracking_enable_auto_merge')),
+          )
+          .value,
+      isTrue,
+    );
+    expect(find.text('Inherited from org: $_orgName'), findsOneWidget);
+    expect(
+      find.byKey(const Key('repo_merge_tracking_enable_auto_merge_reset')),
+      findsNothing,
+    );
+
+    await tester.pump(const Duration(seconds: 4));
+  });
+
   testWidgets('resetting merge tracking removes the repo override', (
     tester,
   ) async {
     final mockApi = await _mountMergeTrackingDetail(
       tester,
-      repoMtEnabled: true,
+      repoMergeTracking: const {'enabled': true},
     );
 
     await tester.tap(find.byKey(const Key('repo_merge_tracking_reset')));
@@ -200,12 +352,9 @@ void main() {
         monitored: false,
       );
 
-      final switchFinder = find.descendant(
-        of: find.byKey(const Key('repo_merge_tracking_switch')),
-        matching: find.byType(Switch),
-      );
+      final switchFinder = find.byKey(const Key('repo_merge_tracking_switch'));
       expect(tester.widget<Switch>(switchFinder).value, isFalse);
-      expect(find.textContaining('not monitored'), findsOneWidget);
+      expect(find.text('Inherited from repository monitoring'), findsOneWidget);
 
       await tester.pump(const Duration(seconds: 4));
     },

@@ -7,6 +7,7 @@ import 'package:go_router/go_router.dart';
 import '../../core/models/config_model.dart';
 import '../../core/models/agent.dart';
 import '../../shared/widgets/autocomplete_chip_field.dart';
+import '../../shared/widgets/merge_tracking_override_editor.dart';
 import '../../shared/widgets/override_field.dart';
 import '../../shared/widgets/toast.dart';
 import '../agents/agents_screen.dart' show agentsProvider;
@@ -26,7 +27,6 @@ class RepoDetailScreen extends ConsumerStatefulWidget {
 
 class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
   RepoConfig _config = const RepoConfig();
-  // ignore: unused_field
   RepoConfig _previousConfig = const RepoConfig();
   bool _initialized = false;
   Timer? _debounce;
@@ -66,19 +66,17 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
   }
 
   void _update(RepoConfig updated) {
-    final previous = _config;
     setState(() => _config = updated);
     _debounce?.cancel();
-    _debounce = Timer(
-      const Duration(milliseconds: 800),
-      () => _autoSave(previous),
-    );
+    _debounce = Timer(const Duration(milliseconds: 800), _autoSave);
   }
 
-  Future<void> _autoSave(RepoConfig previous) async {
+  Future<void> _autoSave() async {
     final api = ref.read(apiClientProvider);
+    final previous = _previousConfig;
+    final target = _config;
     try {
-      final repoDiff = computeRepoDiff(previous, _config);
+      final repoDiff = computeRepoDiff(previous, target);
       Map<String, dynamic>? lastResponse;
       var didSave = false;
       if (repoDiff.isNotEmpty) {
@@ -86,23 +84,26 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
         didSave = true;
       }
 
-      if (previous.mtEnabled != _config.mtEnabled) {
-        lastResponse = await api.patchMergeTrackingRepoConfig(widget.repoName, {
-          // A null value is translated by ApiClient into DELETE so the repo
-          // inherits its org/global merge-tracking setting again.
-          'enabled': _config.mtEnabled,
-        });
+      final mergeTrackingDiff = diffMergeTrackingOverrides(
+        previous.mergeTracking,
+        target.mergeTracking,
+      );
+      if (mergeTrackingDiff.isNotEmpty) {
+        lastResponse = await api.patchMergeTrackingRepoConfig(
+          widget.repoName,
+          mergeTrackingDiff,
+        );
         didSave = true;
       }
 
-      final monitoringChanged = previous.isMonitored != _config.isMonitored;
+      final monitoringChanged = previous.isMonitored != target.isMonitored;
       if (monitoringChanged) {
         final current = ref.read(configNotifierProvider).value;
         if (current != null) {
           final updatedRepos = Map<String, RepoConfig>.from(
             current.repoConfigs,
           );
-          updatedRepos[widget.repoName] = _config;
+          updatedRepos[widget.repoName] = target;
           final monitored =
               updatedRepos.entries
                   .where((e) => e.value.isMonitored)
@@ -130,7 +131,7 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
             .read(configNotifierProvider.notifier)
             .updateFromServer(lastResponse);
       }
-      _previousConfig = _config;
+      _previousConfig = target;
       if (mounted && didSave) showToast(context, 'Saved');
     } catch (e) {
       if (mounted) showToast(context, 'Error: $e', isError: true);
@@ -213,14 +214,21 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
         error: (_, _) => const Center(child: Text('Could not load config')),
         data: (appConfig) {
           _initFrom(appConfig);
-          final prompts =
-              ref.watch(agentsProvider).value ?? <ReviewPrompt>[];
+          final prompts = ref.watch(agentsProvider).value ?? <ReviewPrompt>[];
           final orgName = widget.repoName.contains('/')
               ? widget.repoName.split('/').first
               : widget.repoName;
           final orgConfig = appConfig.orgConfigs[orgName];
-          final inheritedMtEnabled =
-              orgConfig?.mtEnabled ?? appConfig.mergeTracking.enabled;
+          final orgMergeTracking =
+              orgConfig?.mergeTracking ?? const MergeTrackingOverride();
+          final inheritedMergeTracking = appConfig.mergeTracking.applyOverride(
+            orgMergeTracking,
+          );
+          final editorInherited = inheritedMergeTracking.copyWith(
+            enabled: _config.isMonitored
+                ? inheritedMergeTracking.enabled
+                : false,
+          );
           String source(bool hasOrgValue) =>
               hasOrgValue ? 'org: $orgName' : 'global';
 
@@ -547,7 +555,9 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
                                 appConfig.globalAutoPromoteTriage ??
                                 false)
                             .toString(),
-                    inheritedLabel: source(orgConfig?.autoPromoteTriage != null),
+                    inheritedLabel: source(
+                      orgConfig?.autoPromoteTriage != null,
+                    ),
                     overrideValue: _config.autoPromoteTriage?.toString(),
                     options: const ['true', 'false'],
                     onChanged: (v) => _update(
@@ -727,57 +737,17 @@ class _RepoDetailScreenState extends ConsumerState<RepoDetailScreen> {
 
                 // ── Section 6: Merge Tracking ──────────────────────────────
                 _sectionCard('Merge Tracking', [
-                  Row(
-                    children: [
-                      const Expanded(
-                        child: Text(
-                          'Track my pull requests',
-                          style: TextStyle(fontSize: 13),
-                        ),
-                      ),
-                      FeatureSwitch(
-                        key: const Key('repo_merge_tracking_switch'),
-                        feature: Feature.mergeTracking,
-                        value:
-                            _config.isMonitored &&
-                            (_config.mtEnabled ?? inheritedMtEnabled),
-                        onChanged: (v) =>
-                            _update(_config.copyWith(mtEnabled: v)),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 6),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          !_config.isMonitored
-                              ? 'This repository is not monitored. Enable merge '
-                                    'tracking to add it to the monitored list.'
-                              : _config.mtEnabled != null
-                              ? 'Overridden for this repository.'
-                              : source(orgConfig?.mtEnabled != null),
-                          style: Theme.of(context).textTheme.bodySmall,
-                        ),
-                      ),
-                      if (_config.mtEnabled != null)
-                        TextButton(
-                          key: const Key('repo_merge_tracking_reset'),
-                          onPressed: () =>
-                              _update(_config.copyWith(mtEnabled: null)),
-                          child: const Text('Use inherited'),
-                        ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    'Which automations run — arm auto-merge, update the branch, '
-                    'resolve conflicts, merge — is configured globally in '
-                    'Settings. This switch decides whether they apply to this '
-                    'repository at all.',
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
-                    ),
+                  MergeTrackingOverrideEditor(
+                    scopeKey: 'repo',
+                    value: _config.mergeTracking,
+                    inherited: editorInherited,
+                    parentOverride: orgMergeTracking,
+                    parentLabel: 'org: $orgName',
+                    enabledInheritedLabel: !_config.isMonitored
+                        ? 'repository monitoring'
+                        : null,
+                    onChanged: (mergeTracking) =>
+                        _update(_config.copyWith(mergeTracking: mergeTracking)),
                   ),
                 ], accent: FeaturePalette.mergeTracking),
               ],

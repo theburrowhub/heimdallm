@@ -133,13 +133,223 @@ class CLIAgentConfig {
   ];
 }
 
+/// Per-organization / per-repository merge-tracking override.
+///
+/// Every null field means "inherit". Empty strings are treated the same way
+/// when parsing or serializing because the daemon uses an empty TOML string as
+/// the unset value for string overrides.
+class MergeTrackingOverride {
+  final bool? enabled;
+  final bool? enableAutoMerge;
+  final bool? updateBranch;
+  final bool? resolveConflicts;
+  final bool? merge;
+  final String? mergeMethod;
+  final bool? includeAssigned;
+  final bool? requireApproval;
+  final int? maxUpdateAttempts;
+  final int? maxResolveAttempts;
+  final int? maxMergeAttempts;
+  final String? actionCooldown;
+  final String? resolveTimeout;
+  final String? resolveEffort;
+
+  const MergeTrackingOverride({
+    this.enabled,
+    this.enableAutoMerge,
+    this.updateBranch,
+    this.resolveConflicts,
+    this.merge,
+    this.mergeMethod,
+    this.includeAssigned,
+    this.requireApproval,
+    this.maxUpdateAttempts,
+    this.maxResolveAttempts,
+    this.maxMergeAttempts,
+    this.actionCooldown,
+    this.resolveTimeout,
+    this.resolveEffort,
+  });
+
+  bool get isEmpty =>
+      enabled == null &&
+      enableAutoMerge == null &&
+      updateBranch == null &&
+      resolveConflicts == null &&
+      merge == null &&
+      _nonEmpty(mergeMethod) == null &&
+      includeAssigned == null &&
+      requireApproval == null &&
+      maxUpdateAttempts == null &&
+      maxResolveAttempts == null &&
+      maxMergeAttempts == null &&
+      _nonEmpty(actionCooldown) == null &&
+      _nonEmpty(resolveTimeout) == null &&
+      _nonEmpty(resolveEffort) == null;
+
+  MergeTrackingOverride copyWith({
+    Object? enabled = _sentinel,
+    Object? enableAutoMerge = _sentinel,
+    Object? updateBranch = _sentinel,
+    Object? resolveConflicts = _sentinel,
+    Object? merge = _sentinel,
+    Object? mergeMethod = _sentinel,
+    Object? includeAssigned = _sentinel,
+    Object? requireApproval = _sentinel,
+    Object? maxUpdateAttempts = _sentinel,
+    Object? maxResolveAttempts = _sentinel,
+    Object? maxMergeAttempts = _sentinel,
+    Object? actionCooldown = _sentinel,
+    Object? resolveTimeout = _sentinel,
+    Object? resolveEffort = _sentinel,
+  }) => MergeTrackingOverride(
+    enabled: enabled == _sentinel ? this.enabled : enabled as bool?,
+    enableAutoMerge: enableAutoMerge == _sentinel
+        ? this.enableAutoMerge
+        : enableAutoMerge as bool?,
+    updateBranch: updateBranch == _sentinel
+        ? this.updateBranch
+        : updateBranch as bool?,
+    resolveConflicts: resolveConflicts == _sentinel
+        ? this.resolveConflicts
+        : resolveConflicts as bool?,
+    merge: merge == _sentinel ? this.merge : merge as bool?,
+    mergeMethod: mergeMethod == _sentinel
+        ? this.mergeMethod
+        : mergeMethod as String?,
+    includeAssigned: includeAssigned == _sentinel
+        ? this.includeAssigned
+        : includeAssigned as bool?,
+    requireApproval: requireApproval == _sentinel
+        ? this.requireApproval
+        : requireApproval as bool?,
+    maxUpdateAttempts: maxUpdateAttempts == _sentinel
+        ? this.maxUpdateAttempts
+        : maxUpdateAttempts as int?,
+    maxResolveAttempts: maxResolveAttempts == _sentinel
+        ? this.maxResolveAttempts
+        : maxResolveAttempts as int?,
+    maxMergeAttempts: maxMergeAttempts == _sentinel
+        ? this.maxMergeAttempts
+        : maxMergeAttempts as int?,
+    actionCooldown: actionCooldown == _sentinel
+        ? this.actionCooldown
+        : actionCooldown as String?,
+    resolveTimeout: resolveTimeout == _sentinel
+        ? this.resolveTimeout
+        : resolveTimeout as String?,
+    resolveEffort: resolveEffort == _sentinel
+        ? this.resolveEffort
+        : resolveEffort as String?,
+  );
+
+  factory MergeTrackingOverride.fromJson(Map<String, dynamic> json) =>
+      MergeTrackingOverride(
+        enabled: json['enabled'] as bool?,
+        enableAutoMerge: json['enable_auto_merge'] as bool?,
+        updateBranch: json['update_branch'] as bool?,
+        resolveConflicts: json['resolve_conflicts'] as bool?,
+        merge: json['merge'] as bool?,
+        mergeMethod: _nonEmpty(json['merge_method']),
+        includeAssigned: json['include_assigned'] as bool?,
+        requireApproval: json['require_approval'] as bool?,
+        maxUpdateAttempts: (json['max_update_attempts'] as num?)?.toInt(),
+        maxResolveAttempts: (json['max_resolve_attempts'] as num?)?.toInt(),
+        maxMergeAttempts: (json['max_merge_attempts'] as num?)?.toInt(),
+        actionCooldown: _nonEmpty(json['action_cooldown']),
+        resolveTimeout: _nonEmpty(json['resolve_timeout']),
+        resolveEffort: _nonEmpty(json['resolve_effort']),
+      );
+
+  /// JSON accepted by the scoped PATCH endpoints. Unset values are omitted;
+  /// use [diffMergeTrackingOverrides] when nulls must be retained as deletes.
+  Map<String, dynamic> toJson() => {
+    if (enabled != null) 'enabled': enabled,
+    if (enableAutoMerge != null) 'enable_auto_merge': enableAutoMerge,
+    if (updateBranch != null) 'update_branch': updateBranch,
+    if (resolveConflicts != null) 'resolve_conflicts': resolveConflicts,
+    if (merge != null) 'merge': merge,
+    'merge_method': ?_nonEmpty(mergeMethod),
+    if (includeAssigned != null) 'include_assigned': includeAssigned,
+    if (requireApproval != null) 'require_approval': requireApproval,
+    if (maxUpdateAttempts != null) 'max_update_attempts': maxUpdateAttempts,
+    if (maxResolveAttempts != null) 'max_resolve_attempts': maxResolveAttempts,
+    if (maxMergeAttempts != null) 'max_merge_attempts': maxMergeAttempts,
+    'action_cooldown': ?_nonEmpty(actionCooldown),
+    'resolve_timeout': ?_nonEmpty(resolveTimeout),
+    'resolve_effort': ?_nonEmpty(resolveEffort),
+  };
+}
+
+/// Produces the scoped PATCH payload, retaining null for fields that changed
+/// back to inherited so [ApiClient] can translate them into DELETE requests.
+Map<String, dynamic> diffMergeTrackingOverrides(
+  MergeTrackingOverride before,
+  MergeTrackingOverride after,
+) {
+  final diff = <String, dynamic>{};
+
+  void add(String key, Object? oldValue, Object? newValue) {
+    if (oldValue != newValue) diff[key] = newValue;
+  }
+
+  add('enabled', before.enabled, after.enabled);
+  add('enable_auto_merge', before.enableAutoMerge, after.enableAutoMerge);
+  add('update_branch', before.updateBranch, after.updateBranch);
+  add('resolve_conflicts', before.resolveConflicts, after.resolveConflicts);
+  add('merge', before.merge, after.merge);
+  add(
+    'merge_method',
+    _nonEmpty(before.mergeMethod),
+    _nonEmpty(after.mergeMethod),
+  );
+  add('include_assigned', before.includeAssigned, after.includeAssigned);
+  add('require_approval', before.requireApproval, after.requireApproval);
+  add('max_update_attempts', before.maxUpdateAttempts, after.maxUpdateAttempts);
+  add(
+    'max_resolve_attempts',
+    before.maxResolveAttempts,
+    after.maxResolveAttempts,
+  );
+  add('max_merge_attempts', before.maxMergeAttempts, after.maxMergeAttempts);
+  add(
+    'action_cooldown',
+    _nonEmpty(before.actionCooldown),
+    _nonEmpty(after.actionCooldown),
+  );
+  add(
+    'resolve_timeout',
+    _nonEmpty(before.resolveTimeout),
+    _nonEmpty(after.resolveTimeout),
+  );
+  add(
+    'resolve_effort',
+    _nonEmpty(before.resolveEffort),
+    _nonEmpty(after.resolveEffort),
+  );
+  return diff;
+}
+
 /// Per-repo AI override. null fields mean "use global default".
 class RepoConfig {
   // Per-feature activation (null = inherit global behavior)
   final bool? prEnabled; // PR auto-review
   final bool? itEnabled; // Issue tracking (triage)
   final bool? devEnabled; // Develop (auto-implement)
-  final bool? mtEnabled; // Merge tracking (my own PRs)
+  final MergeTrackingOverride _mergeTracking;
+  final bool? _legacyMtEnabled;
+
+  /// Complete scoped override. The legacy constructor argument is folded in
+  /// lazily so existing const call sites can keep using `mtEnabled:`.
+  MergeTrackingOverride get mergeTracking {
+    if (_mergeTracking.enabled != null || _legacyMtEnabled == null) {
+      return _mergeTracking;
+    }
+    return _mergeTracking.copyWith(enabled: _legacyMtEnabled);
+  }
+
+  /// Compatibility alias used by the existing repo list and detail switch.
+  bool? get mtEnabled => _mergeTracking.enabled ?? _legacyMtEnabled;
 
   // General
   final String? localDir; // local repo directory for full-repo analysis
@@ -183,7 +393,8 @@ class RepoConfig {
     this.prEnabled,
     this.itEnabled,
     this.devEnabled,
-    this.mtEnabled,
+    bool? mtEnabled,
+    MergeTrackingOverride mergeTracking = const MergeTrackingOverride(),
     this.localDir,
     this.triageOwner,
     this.cloneDir,
@@ -211,7 +422,8 @@ class RepoConfig {
     this.neverApproveWithIssues,
     this.neverApproveMinSeverity,
     this.firstSeenAt,
-  });
+  }) : _legacyMtEnabled = mtEnabled,
+       _mergeTracking = mergeTracking;
 
   /// True if any feature is actively enabled (per-repo or inherited).
   /// Used by the repo list to classify monitored vs not-monitored,
@@ -242,7 +454,7 @@ class RepoConfig {
       prEnabled != null ||
       itEnabled != null ||
       devEnabled != null ||
-      mtEnabled != null ||
+      !mergeTracking.isEmpty ||
       aiPrimary != null ||
       aiFallback != null ||
       promptId != null ||
@@ -304,6 +516,7 @@ class RepoConfig {
     Object? itEnabled = _sentinel,
     Object? devEnabled = _sentinel,
     Object? mtEnabled = _sentinel,
+    Object? mergeTracking = _sentinel,
     Object? localDir = _sentinel,
     Object? triageOwner = _sentinel,
     Object? cloneDir = _sentinel,
@@ -332,13 +545,20 @@ class RepoConfig {
     Object? neverApproveMinSeverity = _sentinel,
     Object? firstSeenAt = _sentinel,
   }) {
+    final requestedMergeTracking = mergeTracking == _sentinel
+        ? this.mergeTracking
+        : (mergeTracking as MergeTrackingOverride?) ??
+              const MergeTrackingOverride();
+    final updatedMergeTracking = mtEnabled == _sentinel
+        ? requestedMergeTracking
+        : requestedMergeTracking.copyWith(enabled: mtEnabled as bool?);
     return RepoConfig(
       prEnabled: prEnabled == _sentinel ? this.prEnabled : prEnabled as bool?,
       itEnabled: itEnabled == _sentinel ? this.itEnabled : itEnabled as bool?,
       devEnabled: devEnabled == _sentinel
           ? this.devEnabled
           : devEnabled as bool?,
-      mtEnabled: mtEnabled == _sentinel ? this.mtEnabled : mtEnabled as bool?,
+      mergeTracking: updatedMergeTracking,
       localDir: localDir == _sentinel ? this.localDir : localDir as String?,
       triageOwner: triageOwner == _sentinel
           ? this.triageOwner
@@ -430,7 +650,19 @@ class OrgConfig {
   final String? developPromptId;
   final bool? itEnabled;
   final bool? devEnabled;
-  final bool? mtEnabled;
+  final MergeTrackingOverride _mergeTracking;
+  final bool? _legacyMtEnabled;
+
+  /// Complete scoped override. See the equivalent getter on [RepoConfig].
+  MergeTrackingOverride get mergeTracking {
+    if (_mergeTracking.enabled != null || _legacyMtEnabled == null) {
+      return _mergeTracking;
+    }
+    return _mergeTracking.copyWith(enabled: _legacyMtEnabled);
+  }
+
+  /// Compatibility alias used by existing organization/repository widgets.
+  bool? get mtEnabled => _mergeTracking.enabled ?? _legacyMtEnabled;
   final List<String>? reviewOnlyLabels;
   final List<String>? refinementLabels;
   final List<String>? developLabels;
@@ -461,7 +693,8 @@ class OrgConfig {
     this.developPromptId,
     this.itEnabled,
     this.devEnabled,
-    this.mtEnabled,
+    bool? mtEnabled,
+    MergeTrackingOverride mergeTracking = const MergeTrackingOverride(),
     this.reviewOnlyLabels,
     this.refinementLabels,
     this.developLabels,
@@ -476,7 +709,8 @@ class OrgConfig {
     this.prDraft,
     this.neverApproveWithIssues,
     this.neverApproveMinSeverity,
-  });
+  }) : _legacyMtEnabled = mtEnabled,
+       _mergeTracking = mergeTracking;
 
   bool get hasOverride =>
       aiPrimary != null ||
@@ -495,7 +729,7 @@ class OrgConfig {
       developPromptId != null ||
       itEnabled != null ||
       devEnabled != null ||
-      mtEnabled != null ||
+      !mergeTracking.isEmpty ||
       reviewOnlyLabels != null ||
       refinementLabels != null ||
       developLabels != null ||
@@ -525,6 +759,7 @@ class OrgConfig {
     Object? itEnabled = _sentinel,
     Object? devEnabled = _sentinel,
     Object? mtEnabled = _sentinel,
+    Object? mergeTracking = _sentinel,
     Object? reviewOnlyLabels = _sentinel,
     Object? refinementLabels = _sentinel,
     Object? developLabels = _sentinel,
@@ -539,77 +774,90 @@ class OrgConfig {
     Object? prDraft = _sentinel,
     Object? neverApproveWithIssues = _sentinel,
     Object? neverApproveMinSeverity = _sentinel,
-  }) => OrgConfig(
-    aiPrimary: aiPrimary == _sentinel ? this.aiPrimary : aiPrimary as String?,
-    aiFallback: aiFallback == _sentinel
-        ? this.aiFallback
-        : aiFallback as String?,
-    promptId: promptId == _sentinel ? this.promptId : promptId as String?,
-    reviewMode: reviewMode == _sentinel
-        ? this.reviewMode
-        : reviewMode as String?,
-    localDir: localDir == _sentinel ? this.localDir : localDir as String?,
-    triageOwner: triageOwner == _sentinel
-        ? this.triageOwner
-        : triageOwner as String?,
-    cloneDir: cloneDir == _sentinel ? this.cloneDir : cloneDir as String?,
-    autoPromoteTriage: autoPromoteTriage == _sentinel
-        ? this.autoPromoteTriage
-        : autoPromoteTriage as bool?,
-    autoPromoteRefinement: autoPromoteRefinement == _sentinel
-        ? this.autoPromoteRefinement
-        : autoPromoteRefinement as bool?,
-    generatePRDescription: generatePRDescription == _sentinel
-        ? this.generatePRDescription
-        : generatePRDescription as bool?,
-    issuePromptId: issuePromptId == _sentinel
-        ? this.issuePromptId
-        : issuePromptId as String?,
-    developPromptId: developPromptId == _sentinel
-        ? this.developPromptId
-        : developPromptId as String?,
-    itEnabled: itEnabled == _sentinel ? this.itEnabled : itEnabled as bool?,
-    devEnabled: devEnabled == _sentinel ? this.devEnabled : devEnabled as bool?,
-    mtEnabled: mtEnabled == _sentinel ? this.mtEnabled : mtEnabled as bool?,
-    reviewOnlyLabels: reviewOnlyLabels == _sentinel
-        ? this.reviewOnlyLabels
-        : reviewOnlyLabels as List<String>?,
-    refinementLabels: refinementLabels == _sentinel
-        ? this.refinementLabels
-        : refinementLabels as List<String>?,
-    developLabels: developLabels == _sentinel
-        ? this.developLabels
-        : developLabels as List<String>?,
-    skipLabels: skipLabels == _sentinel
-        ? this.skipLabels
-        : skipLabels as List<String>?,
-    issueFilterMode: issueFilterMode == _sentinel
-        ? this.issueFilterMode
-        : issueFilterMode as String?,
-    issueDefaultAction: issueDefaultAction == _sentinel
-        ? this.issueDefaultAction
-        : issueDefaultAction as String?,
-    issueOrganizations: issueOrganizations == _sentinel
-        ? this.issueOrganizations
-        : issueOrganizations as List<String>?,
-    issueAssignees: issueAssignees == _sentinel
-        ? this.issueAssignees
-        : issueAssignees as List<String>?,
-    prReviewers: prReviewers == _sentinel
-        ? this.prReviewers
-        : prReviewers as List<String>?,
-    prAssignee: prAssignee == _sentinel
-        ? this.prAssignee
-        : prAssignee as String?,
-    prLabels: prLabels == _sentinel ? this.prLabels : prLabels as List<String>?,
-    prDraft: prDraft == _sentinel ? this.prDraft : prDraft as bool?,
-    neverApproveWithIssues: neverApproveWithIssues == _sentinel
-        ? this.neverApproveWithIssues
-        : neverApproveWithIssues as bool?,
-    neverApproveMinSeverity: neverApproveMinSeverity == _sentinel
-        ? this.neverApproveMinSeverity
-        : neverApproveMinSeverity as String?,
-  );
+  }) {
+    final requestedMergeTracking = mergeTracking == _sentinel
+        ? this.mergeTracking
+        : (mergeTracking as MergeTrackingOverride?) ??
+              const MergeTrackingOverride();
+    final updatedMergeTracking = mtEnabled == _sentinel
+        ? requestedMergeTracking
+        : requestedMergeTracking.copyWith(enabled: mtEnabled as bool?);
+    return OrgConfig(
+      aiPrimary: aiPrimary == _sentinel ? this.aiPrimary : aiPrimary as String?,
+      aiFallback: aiFallback == _sentinel
+          ? this.aiFallback
+          : aiFallback as String?,
+      promptId: promptId == _sentinel ? this.promptId : promptId as String?,
+      reviewMode: reviewMode == _sentinel
+          ? this.reviewMode
+          : reviewMode as String?,
+      localDir: localDir == _sentinel ? this.localDir : localDir as String?,
+      triageOwner: triageOwner == _sentinel
+          ? this.triageOwner
+          : triageOwner as String?,
+      cloneDir: cloneDir == _sentinel ? this.cloneDir : cloneDir as String?,
+      autoPromoteTriage: autoPromoteTriage == _sentinel
+          ? this.autoPromoteTriage
+          : autoPromoteTriage as bool?,
+      autoPromoteRefinement: autoPromoteRefinement == _sentinel
+          ? this.autoPromoteRefinement
+          : autoPromoteRefinement as bool?,
+      generatePRDescription: generatePRDescription == _sentinel
+          ? this.generatePRDescription
+          : generatePRDescription as bool?,
+      issuePromptId: issuePromptId == _sentinel
+          ? this.issuePromptId
+          : issuePromptId as String?,
+      developPromptId: developPromptId == _sentinel
+          ? this.developPromptId
+          : developPromptId as String?,
+      itEnabled: itEnabled == _sentinel ? this.itEnabled : itEnabled as bool?,
+      devEnabled: devEnabled == _sentinel
+          ? this.devEnabled
+          : devEnabled as bool?,
+      mergeTracking: updatedMergeTracking,
+      reviewOnlyLabels: reviewOnlyLabels == _sentinel
+          ? this.reviewOnlyLabels
+          : reviewOnlyLabels as List<String>?,
+      refinementLabels: refinementLabels == _sentinel
+          ? this.refinementLabels
+          : refinementLabels as List<String>?,
+      developLabels: developLabels == _sentinel
+          ? this.developLabels
+          : developLabels as List<String>?,
+      skipLabels: skipLabels == _sentinel
+          ? this.skipLabels
+          : skipLabels as List<String>?,
+      issueFilterMode: issueFilterMode == _sentinel
+          ? this.issueFilterMode
+          : issueFilterMode as String?,
+      issueDefaultAction: issueDefaultAction == _sentinel
+          ? this.issueDefaultAction
+          : issueDefaultAction as String?,
+      issueOrganizations: issueOrganizations == _sentinel
+          ? this.issueOrganizations
+          : issueOrganizations as List<String>?,
+      issueAssignees: issueAssignees == _sentinel
+          ? this.issueAssignees
+          : issueAssignees as List<String>?,
+      prReviewers: prReviewers == _sentinel
+          ? this.prReviewers
+          : prReviewers as List<String>?,
+      prAssignee: prAssignee == _sentinel
+          ? this.prAssignee
+          : prAssignee as String?,
+      prLabels: prLabels == _sentinel
+          ? this.prLabels
+          : prLabels as List<String>?,
+      prDraft: prDraft == _sentinel ? this.prDraft : prDraft as bool?,
+      neverApproveWithIssues: neverApproveWithIssues == _sentinel
+          ? this.neverApproveWithIssues
+          : neverApproveWithIssues as bool?,
+      neverApproveMinSeverity: neverApproveMinSeverity == _sentinel
+          ? this.neverApproveMinSeverity
+          : neverApproveMinSeverity as String?,
+    );
+  }
 
   factory OrgConfig.fromJson(Map<String, dynamic> json) {
     final itRaw = json['issue_tracking'] as Map<String, dynamic>?;
@@ -795,6 +1043,8 @@ class MergeTrackingConfig {
   final String actionCooldown;
   final String resolveTimeout;
   final String resolveEffort; // 'low' | 'medium' | 'high' | 'max'
+  final Map<String, MergeTrackingOverride> orgs;
+  final Map<String, MergeTrackingOverride> repos;
 
   const MergeTrackingConfig({
     this.enabled = false,
@@ -813,6 +1063,8 @@ class MergeTrackingConfig {
     this.actionCooldown = '10m',
     this.resolveTimeout = '30m',
     this.resolveEffort = 'high',
+    this.orgs = const {},
+    this.repos = const {},
   });
 
   MergeTrackingConfig copyWith({
@@ -832,6 +1084,8 @@ class MergeTrackingConfig {
     String? actionCooldown,
     String? resolveTimeout,
     String? resolveEffort,
+    Map<String, MergeTrackingOverride>? orgs,
+    Map<String, MergeTrackingOverride>? repos,
   }) => MergeTrackingConfig(
     enabled: enabled ?? this.enabled,
     enableAutoMerge: enableAutoMerge ?? this.enableAutoMerge,
@@ -849,28 +1103,63 @@ class MergeTrackingConfig {
     actionCooldown: actionCooldown ?? this.actionCooldown,
     resolveTimeout: resolveTimeout ?? this.resolveTimeout,
     resolveEffort: resolveEffort ?? this.resolveEffort,
+    orgs: orgs ?? this.orgs,
+    repos: repos ?? this.repos,
   );
 
-  factory MergeTrackingConfig.fromJson(Map<String, dynamic> json) =>
-      MergeTrackingConfig(
-        enabled: json['enabled'] as bool? ?? false,
-        enableAutoMerge: json['enable_auto_merge'] as bool? ?? false,
-        updateBranch: json['update_branch'] as bool? ?? false,
-        resolveConflicts: json['resolve_conflicts'] as bool? ?? false,
-        merge: json['merge'] as bool? ?? false,
-        mergeMethod: json['merge_method'] as String? ?? 'squash',
-        includeAssigned: json['include_assigned'] as bool? ?? false,
-        requireApproval: json['require_approval'] as bool? ?? false,
-        pollInterval: json['poll_interval'] as String? ?? '',
-        maxPrsPerTick: (json['max_prs_per_tick'] as num?)?.toInt() ?? 20,
-        maxUpdateAttempts: (json['max_update_attempts'] as num?)?.toInt() ?? 3,
-        maxResolveAttempts:
-            (json['max_resolve_attempts'] as num?)?.toInt() ?? 2,
-        maxMergeAttempts: (json['max_merge_attempts'] as num?)?.toInt() ?? 3,
-        actionCooldown: json['action_cooldown'] as String? ?? '10m',
-        resolveTimeout: json['resolve_timeout'] as String? ?? '30m',
-        resolveEffort: json['resolve_effort'] as String? ?? 'high',
-      );
+  /// Resolves one scoped override on top of these global values. Poll cadence
+  /// and per-tick limits intentionally stay global-only, matching the daemon.
+  MergeTrackingConfig applyOverride(MergeTrackingOverride o) => copyWith(
+    enabled: o.enabled,
+    enableAutoMerge: o.enableAutoMerge,
+    updateBranch: o.updateBranch,
+    resolveConflicts: o.resolveConflicts,
+    merge: o.merge,
+    mergeMethod: _nonEmpty(o.mergeMethod),
+    includeAssigned: o.includeAssigned,
+    requireApproval: o.requireApproval,
+    maxUpdateAttempts: o.maxUpdateAttempts,
+    maxResolveAttempts: o.maxResolveAttempts,
+    maxMergeAttempts: o.maxMergeAttempts,
+    actionCooldown: _nonEmpty(o.actionCooldown),
+    resolveTimeout: _nonEmpty(o.resolveTimeout),
+    resolveEffort: _nonEmpty(o.resolveEffort),
+  );
+
+  factory MergeTrackingConfig.fromJson(Map<String, dynamic> json) {
+    Map<String, MergeTrackingOverride> parseOverrides(String key) {
+      final raw = json[key] as Map<String, dynamic>?;
+      if (raw == null || raw.isEmpty) return const {};
+      return {
+        for (final entry in raw.entries)
+          if (entry.value is Map<String, dynamic>)
+            entry.key: MergeTrackingOverride.fromJson(
+              entry.value as Map<String, dynamic>,
+            ),
+      };
+    }
+
+    return MergeTrackingConfig(
+      enabled: json['enabled'] as bool? ?? false,
+      enableAutoMerge: json['enable_auto_merge'] as bool? ?? false,
+      updateBranch: json['update_branch'] as bool? ?? false,
+      resolveConflicts: json['resolve_conflicts'] as bool? ?? false,
+      merge: json['merge'] as bool? ?? false,
+      mergeMethod: json['merge_method'] as String? ?? 'squash',
+      includeAssigned: json['include_assigned'] as bool? ?? false,
+      requireApproval: json['require_approval'] as bool? ?? false,
+      pollInterval: json['poll_interval'] as String? ?? '',
+      maxPrsPerTick: (json['max_prs_per_tick'] as num?)?.toInt() ?? 20,
+      maxUpdateAttempts: (json['max_update_attempts'] as num?)?.toInt() ?? 3,
+      maxResolveAttempts: (json['max_resolve_attempts'] as num?)?.toInt() ?? 2,
+      maxMergeAttempts: (json['max_merge_attempts'] as num?)?.toInt() ?? 3,
+      actionCooldown: json['action_cooldown'] as String? ?? '10m',
+      resolveTimeout: json['resolve_timeout'] as String? ?? '30m',
+      resolveEffort: json['resolve_effort'] as String? ?? 'high',
+      orgs: parseOverrides('orgs'),
+      repos: parseOverrides('repos'),
+    );
+  }
 
   Map<String, dynamic> toJson() => {
     'enabled': enabled,
@@ -889,6 +1178,10 @@ class MergeTrackingConfig {
     'action_cooldown': actionCooldown,
     'resolve_timeout': resolveTimeout,
     'resolve_effort': resolveEffort,
+    'orgs': {for (final entry in orgs.entries) entry.key: entry.value.toJson()},
+    'repos': {
+      for (final entry in repos.entries) entry.key: entry.value.toJson(),
+    },
   };
 }
 
@@ -1193,7 +1486,11 @@ class AppConfig {
         ..sort());
 
   List<String> get knownOrganizations {
-    final orgs = <String>{...orgConfigs.keys, ...issueTracking.organizations};
+    final orgs = <String>{
+      ...orgConfigs.keys,
+      ...mergeTracking.orgs.keys,
+      ...issueTracking.organizations,
+    };
     for (final repo in repoConfigs.keys) {
       final slash = repo.indexOf('/');
       if (slash > 0) orgs.add(repo.substring(0, slash));
@@ -1521,10 +1818,10 @@ class AppConfig {
   }
 }
 
-/// Folds `merge_tracking.repos.<repo>.enabled` into each RepoConfig.
+/// Folds `merge_tracking.repos.<repo>` into each RepoConfig.
 ///
 /// Merge tracking keeps its overrides in its own config section rather than in
-/// `repo_overrides`, so without this the per-repo switch would have nothing to
+/// `repo_overrides`, so without this the scoped editor would have nothing to
 /// read and the LED would always render inherited.
 Map<String, RepoConfig> _withMergeTrackingOverrides(
   Map<String, RepoConfig> configs,
@@ -1537,14 +1834,16 @@ Map<String, RepoConfig> _withMergeTrackingOverrides(
 
   final out = Map<String, RepoConfig>.from(configs);
   for (final entry in repos.entries) {
-    final enabled = (entry.value as Map<String, dynamic>?)?['enabled'] as bool?;
-    if (enabled == null) continue;
+    final raw = entry.value;
+    if (raw is! Map<String, dynamic>) continue;
     final existing = out[entry.key];
     // This map also drives github.repositories/non_monitored writes. An
     // override alone is not proof that the daemon considers the repo part of
     // either list, so never synthesize membership from merge_tracking.repos.
     if (existing == null) continue;
-    out[entry.key] = existing.copyWith(mtEnabled: enabled);
+    out[entry.key] = existing.copyWith(
+      mergeTracking: MergeTrackingOverride.fromJson(raw),
+    );
   }
   return out;
 }
@@ -1561,10 +1860,10 @@ Map<String, OrgConfig> _withMergeTrackingOrgOverrides(
 
   final out = Map<String, OrgConfig>.from(configs);
   for (final entry in orgs.entries) {
-    final enabled = (entry.value as Map<String, dynamic>?)?['enabled'] as bool?;
-    if (enabled == null) continue;
+    final raw = entry.value;
+    if (raw is! Map<String, dynamic>) continue;
     out[entry.key] = (out[entry.key] ?? const OrgConfig()).copyWith(
-      mtEnabled: enabled,
+      mergeTracking: MergeTrackingOverride.fromJson(raw),
     );
   }
   return out;
