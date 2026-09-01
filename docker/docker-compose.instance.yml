@@ -1,0 +1,54 @@
+# Runs an ADDITIONAL Heimdallm daemon alongside the main stack.
+#
+# The main docker-compose.yml pins container_name and its volume pair, so it
+# can only ever describe one daemon. This override parameterises both by
+# HEIMDALLM_STACK_NAME, letting several daemons coexist on one host — each with
+# its own data directory, config and port.
+#
+# There is deliberately no `web` service here: the GUI is served once, by the
+# hub, and reaches every other instance through the hub's authenticated proxy.
+# A second web container would be a second front end talking to the same fleet.
+#
+# Use the Makefile wrappers rather than invoking this directly:
+#
+#   make up-instance NAME=b PORT=7843
+#   make logs-instance NAME=b
+#   make down-instance NAME=b
+#
+# Then register it from the hub — the GUI's Instances screen, or:
+#
+#   heimdallm-cli instances
+#
+# The instance's API token is generated in its own data volume:
+#
+#   docker exec heimdallm-b cat /data/api_token
+
+services:
+  heimdallm:
+    container_name: "heimdallm-${HEIMDALLM_STACK_NAME:?set HEIMDALLM_STACK_NAME, or use make up-instance NAME=...}"
+    environment:
+      # Identity. Without a name the daemon falls back to the container
+      # hostname, which is a random hex string and unhelpful in the UI.
+      - HEIMDALLM_CLUSTER_ROLE=${HEIMDALLM_CLUSTER_ROLE:-worker}
+      - HEIMDALLM_INSTANCE_NAME=${HEIMDALLM_INSTANCE_NAME:-${HEIMDALLM_STACK_NAME}}
+      - HEIMDALLM_INSTANCE_ID=${HEIMDALLM_INSTANCE_ID:-}
+    volumes:
+      # Separate volumes: sharing /data would mean sharing the SQLite database
+      # and the API token, which is precisely what makes two daemons one.
+      - heimdallm-instance-data:/data
+      - heimdallm-instance-config:/config
+
+  # The main stack's web service is not part of an extra instance. Compose has
+  # no way to remove a service from a merged file, so it is scaled to zero —
+  # and renamed, so a bare `docker compose up` in this project cannot collide
+  # with the hub's web container instead of failing cleanly.
+  web:
+    container_name: "heimdallm-web-${HEIMDALLM_STACK_NAME}"
+    deploy:
+      replicas: 0
+
+volumes:
+  heimdallm-instance-data:
+    driver: local
+  heimdallm-instance-config:
+    driver: local

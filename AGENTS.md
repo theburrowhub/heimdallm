@@ -146,6 +146,35 @@ In the UI the path to enter is the container-side path (`/home/heimdallm/repos/<
 
 The web service (`docker/docker-compose.yml`) builds from `flutter_app/Dockerfile.web` — a multi-stage image that produces the Flutter Web bundle inside `ghcr.io/cirruslabs/flutter:stable` and serves it from `nginx:1.27-alpine`. The entrypoint at `flutter_app/docker-entrypoint.d/10-heimdallm-token.sh` reads the daemon's API token from `/data/api_token` (shared volume) and injects it as `X-Heimdallm-Token` on every `/api/*` call. A stale `HEIMDALLM_API_TOKEN` in `docker/.env` used to shadow this behavior; that env var is no longer passed through. If you need to override the token for a test, use `docker compose -e HEIMDALLM_API_TOKEN=... up web`.
 
+## Multi-instance control plane
+
+`daemon/internal/instances/` is the registry, the org/repo router, the HTTP
+client the hub uses to reach other daemons, the health prober and config
+propagation. Three rules when touching it:
+
+1. **Stay inert without `[cluster]`.** `Router.Owns` must return true for every
+   repo when routing is not configured, and the `/instances` and `/cluster`
+   routes must 404 on a non-hub daemon. There are tests for both; they are the
+   guarantee that this feature cannot regress a single-daemon install.
+2. **Never rebuild the Router per request.** The round-robin counters live
+   inside it, so a fresh `NewRouter` on every call resets the rotation and sends
+   every operation to the first instance in the pool. Update it in place via
+   `Router.Update` on config reload. `server.ClusterSnapshot` documents this.
+3. **The ownership filter belongs at the three existing choke points** — the
+   Tier 2 PR loop, `tier2Adapter.ProcessRepo`, and `monitoredReposFn` (which
+   feeds both merge tracking and the autonomous runner). Discovery deliberately
+   stays global: every instance learns about every repo so the UI shows the
+   whole estate; only acting is narrowed.
+
+The hub proxies the GUI's reads to other instances at
+`/instances/{id}/proxy/*`. The target is always looked up in the registry by id
+and never taken from the request, and the forwarded path list is an allowlist —
+keep it that way.
+
+On the Flutter side, `DaemonEndpoint` (`lib/core/api/daemon_endpoint.dart`) is
+what an `ApiClient` targets. `PlatformServices` still owns OS capabilities and
+supplies the local endpoint; do not put a second daemon URL back into it.
+
 ## Conventional commits
 
 `release-please` reads commit prefixes to bump semver and generate the

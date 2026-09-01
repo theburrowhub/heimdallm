@@ -468,6 +468,50 @@ if [ -n "$REAL_DOCKER" ] && "$REAL_DOCKER" compose version >/dev/null 2>&1; then
         "$TEST_TMP/config.json" >/dev/null ||
         fail "daemon config volume is not test-scoped"
     compose_test_release
+
+    printf '    extra instance stack keeps its own names and volumes\n'
+    (
+        unset HEIMDALLM_COMPOSE_DAEMON_HOST_IP
+        GITHUB_TOKEN=dummy \
+        HEIMDALLM_AI_PRIMARY=gemini \
+        HEIMDALLM_PORT=7842 \
+        HEIMDALLM_STACK_NAME=isolation-b \
+        HEIMDALLM_COMPOSE_DAEMON_HOST_PORT=7899 \
+            "$REAL_DOCKER" compose -p heimdallm-isolation-b \
+                -f "$REPO_ROOT/docker/docker-compose.yml" \
+                -f "$REPO_ROOT/docker/docker-compose.instance.yml" \
+                config --format json
+    ) >"$TEST_TMP/instance-config.json"
+
+    # An extra instance must not share a container name, a data volume or a
+    # config volume with the main stack: sharing /data would mean sharing the
+    # SQLite database and the API token, which is exactly what makes two
+    # daemons one.
+    jq -e '.services.heimdallm.container_name == "heimdallm-isolation-b"' \
+        "$TEST_TMP/instance-config.json" >/dev/null ||
+        fail "extra instance did not get its own container name"
+    jq -e '.services.web.container_name == "heimdallm-web-isolation-b"' \
+        "$TEST_TMP/instance-config.json" >/dev/null ||
+        fail "extra instance web container name could collide with the hub's"
+    jq -e '.services.web.deploy.replicas == 0' \
+        "$TEST_TMP/instance-config.json" >/dev/null ||
+        fail "extra instance would start a second web front end"
+    jq -e \
+        '[.services.heimdallm.volumes[] | select(.target == "/data")] |
+         length == 1 and .[0].source == "heimdallm-instance-data"' \
+        "$TEST_TMP/instance-config.json" >/dev/null ||
+        fail "extra instance shares the main stack's data volume"
+    jq -e \
+        '[.services.heimdallm.volumes[] | select(.target == "/config")] |
+         length == 1 and .[0].source == "heimdallm-instance-config"' \
+        "$TEST_TMP/instance-config.json" >/dev/null ||
+        fail "extra instance shares the main stack's config volume"
+    jq -e '.services.heimdallm.ports | length == 1 and .[0].published == "7899"' \
+        "$TEST_TMP/instance-config.json" >/dev/null ||
+        fail "extra instance did not take its own host port"
+    jq -e '.services.heimdallm.environment.HEIMDALLM_INSTANCE_NAME == "isolation-b"' \
+        "$TEST_TMP/instance-config.json" >/dev/null ||
+        fail "extra instance has no identity, so it would fall back to a random container hostname"
 else
     printf 'SKIP: Docker Compose is not installed; fake-binary checks still passed\n'
 fi

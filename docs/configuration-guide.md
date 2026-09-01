@@ -23,7 +23,8 @@ Full reference for all settings, environment variables, and deployment options.
 15. [Autonomous Mode](#15-autonomous-mode)
 16. [Merge Tracking](#16-merge-tracking)
 17. [Polling](#17-polling)
-18. [Full config.toml Reference](#18-full-configtoml-reference)
+18. [Multiple Instances](#18-multiple-instances)
+19. [Full config.toml Reference](#19-full-configtoml-reference)
 
 ---
 
@@ -1448,7 +1449,183 @@ This setup lets idle repos drift to a 20-minute cycle, saving roughly 80 % of po
 
 ---
 
-## 18. Full config.toml Reference
+## 18. Multiple Instances
+
+An **instance** is a Heimdallm daemon running on another machine or in another
+container. One instance acts as the **hub**: it holds the registry of the
+others, decides which instance owns which repositories, pushes shared
+configuration to the rest, and serves the single web UI.
+
+Everything in this section is opt-in. A `config.toml` with no `[cluster]`
+section behaves exactly as a single-daemon install always has — the routing
+layer reports that this daemon owns every repository, and the control-plane
+endpoints are not mounted at all.
+
+### 18.1 How the work is divided
+
+Each daemon polls GitHub for itself, but only **acts** on the repositories
+routed to it. Discovery stays global on purpose: every instance still learns
+about every repository, so the UI shows the whole estate, and only reviewing,
+merging and issue work is narrowed. That partition — not a distributed lock —
+is what stops two daemons reviewing the same pull request.
+
+Ownership resolves in this order:
+
+```
+repository rule  >  organization rule  >  round-robin pool  >  default_instance
+```
+
+A repository with no rule is handed to a pool member round-robin, and the
+assignment is then written back as an ordinary `[cluster.routing.repos]` entry —
+so it is sticky, visible in the UI, and editable like any other rule.
+
+### 18.2 Configuration
+
+```toml
+[cluster]
+role             = "hub"          # standalone (default) | hub | worker
+instance_id      = ""             # generated on first boot, kept in <data dir>/instance_id
+instance_name    = "main"         # defaults to the hostname
+default_instance = "hub-1"        # owns everything no rule claims
+probe_interval   = "30s"          # how often the hub health-checks the others
+
+# Instances are a TOML map keyed by id, not an array of tables: the config
+# schema validator rejects arrays of tables, and a map makes id uniqueness a
+# property of the format rather than something validation has to enforce.
+[cluster.instances.hub-1]
+name     = "Local hub"
+base_url = "http://127.0.0.1:7842"
+# Exactly one token source. token_env and token_file keep the secret out of a
+# file the UI rewrites.
+token_file = "~/.local/share/heimdallm/api_token"
+labels     = ["macos", "local"]
+
+[cluster.instances.srv-a]
+name      = "srv-a"
+base_url  = "http://10.0.0.11:7842"
+token_env = "HEIMDALLM_SRV_A_TOKEN"
+enabled   = true                  # omit or true to participate
+
+[cluster.routing]
+mode             = "assignment"   # assignment (default) | dispatch
+round_robin_pool = ["hub-1", "srv-a"]   # empty = every enabled instance
+round_robin_ops  = ["review", "merge", "issue"]
+
+[cluster.routing.orgs]
+theburrowhub = "srv-a"
+
+[cluster.routing.repos]
+"theburrowhub/heimdallm" = "hub-1"
+```
+
+Environment equivalents, for containers that should not carry a per-instance
+`config.toml`: `HEIMDALLM_CLUSTER_ROLE`, `HEIMDALLM_INSTANCE_ID`,
+`HEIMDALLM_INSTANCE_NAME`, `HEIMDALLM_CLUSTER_DEFAULT_INSTANCE`,
+`HEIMDALLM_CLUSTER_PROBE_INTERVAL`.
+
+### 18.3 Routing modes
+
+| Mode | What it does |
+|---|---|
+| `assignment` (default) | Repositories are partitioned; each daemon polls, reviews and merges only what it owns. Round robin is used to hand out repositories that have no rule yet. |
+| `dispatch` | Everything `assignment` does, plus: each operation triggered by hand rotates across the pool, regardless of which instance owns the repository. |
+
+**`dispatch` is not a distributed lock.** What keeps two daemons off the same
+repository is the ownership partition; what stops the hub sending the same work
+twice is a dispatch ledger keyed on `(operation, target, head SHA)`. Each
+daemon's own `reviews_in_flight` claims remain per-daemon. If you need two
+instances acting on the same repository concurrently, this feature does not
+provide that guarantee.
+
+### 18.4 What propagates, and what does not
+
+"Apply to all instances" pushes the settings every instance should agree on:
+`[ai]` prompts and overrides, `review_mode`, `[polling]`, `[circuit_breaker]`,
+`[merge_tracking]` (scoped overrides included), `[autonomous]`, `[retention]`
+and issue tracking.
+
+These are **never** sent, because they describe one machine:
+
+| Key | Why it stays local |
+|---|---|
+| `server.port`, `server.bind_addr`, `server.max_concurrent_workers` | Pushing a port to another host does not fail loudly; it silently breaks that daemon |
+| `github.token` | Each instance authenticates as itself |
+| `github.repositories`, `github.non_monitored` | Runtime discovery state, merged below the store layer — overwriting them fights the discovery loop on every push |
+| `ai.local_dir_base`, `ai.local_dirs_detected` | Filesystem paths that only exist on one host |
+| `cluster.*` | Identity and the registry itself; only the hub owns these |
+
+A push never aborts on the first failure: one machine rebooting must not hide
+that the others were updated, so the result is reported per instance and the
+API answers `207 Multi-Status`.
+
+### 18.5 The hub proxies; the UI talks to one origin
+
+The app never opens a connection to a remote daemon. Every read for another
+instance goes through the hub at `/instances/{id}/proxy/*`, which swaps in that
+instance's own token on the way out. The alternative — CORS enabled on every
+daemon plus every instance's token shipped to the browser — is more work and
+strictly worse for security. Aggregation still happens in the client: the UI
+fetches each instance's list through the proxy and merges them, so every row
+keeps its origin badge and one instance being down degrades the view instead of
+breaking it.
+
+Only a whitelist of paths is forwarded. `POST /shutdown` is deliberately not
+among them: the desktop app can respawn the daemon it manages, but nothing
+would bring a remote one back.
+
+### 18.6 GitHub API budget
+
+Rate-limit state, the ETag cache and the request breaker are **per process**.
+Several daemons sharing one GitHub token will each believe they have the full
+hourly budget. Give each instance its own token, or keep the combined poll rate
+under the shared quota.
+
+### 18.7 Running another instance with Docker
+
+The main `docker-compose.yml` pins its container name and volume pair, so it can
+only describe one daemon. `docker-compose.instance.yml` parameterises both:
+
+```bash
+make up-instance NAME=b PORT=7843
+docker exec heimdallm-b cat /data/api_token    # register it from the hub
+make logs-instance NAME=b
+make down-instance NAME=b
+```
+
+Each instance gets its own Compose project, hence its own containers and
+volumes. There is no second `web` service: the UI is served once, by the hub.
+
+### 18.8 CLI
+
+`cli.toml` gains an instance map alongside the flat `host`/`token` pair, which
+keeps working and is presented as an instance called `local`:
+
+```toml
+default_instance = "srv-a"
+
+[instances.srv-a]
+name  = "Server A"
+host  = "http://10.0.0.11:7842"
+token = "..."
+```
+
+```bash
+heimdallm-cli instances                       # the fleet, with health and versions
+heimdallm-cli instances use srv-a             # default target for later commands
+heimdallm-cli --instance srv-a prs            # one-off override
+heimdallm-cli routing                         # who owns what
+heimdallm-cli routing set-repo acme/tools srv-a
+heimdallm-cli routing set-repo acme/tools     # clear the rule
+heimdallm-cli propagate-config                # push shared config to the rest
+```
+
+With several instances configured and no `default_instance`, commands fail with
+an error naming the choices rather than guessing — sending a review to the wrong
+machine is worse than refusing to pick.
+
+---
+
+## 19. Full config.toml Reference
 
 ```toml
 # Heimdallm configuration
@@ -1731,4 +1908,41 @@ review_mode = "single"   # "single" | "multi" — env: HEIMDALLM_REVIEW_MODE
 
 [retention]
 max_days = 90   # env: HEIMDALLM_RETENTION_DAYS; set to 0 to disable purging
+
+# ── Multiple instances (see section 18) ───────────────────────────────────────
+#
+# Omit this section entirely for a single-daemon install: with no [cluster] the
+# routing layer reports that this daemon owns every repository and the
+# control-plane endpoints are not mounted.
+
+# [cluster]
+# role             = "hub"    # standalone (default) | hub | worker; env: HEIMDALLM_CLUSTER_ROLE
+# instance_id      = ""       # generated on first boot into <data dir>/instance_id
+# instance_name    = "main"   # env: HEIMDALLM_INSTANCE_NAME; defaults to the hostname
+# default_instance = "hub-1"  # owns every repository no rule claims
+# probe_interval   = "30s"    # how often the hub health-checks the others
+
+# One entry per instance, keyed by id. Exactly one token source each.
+# [cluster.instances.hub-1]
+# name       = "Local hub"
+# base_url   = "http://127.0.0.1:7842"
+# token_file = "~/.local/share/heimdallm/api_token"
+# labels     = ["macos"]
+
+# [cluster.instances.srv-a]
+# base_url  = "http://10.0.0.11:7842"
+# token_env = "HEIMDALLM_SRV_A_TOKEN"
+# enabled   = true
+
+# [cluster.routing]
+# mode             = "assignment"          # assignment | dispatch
+# round_robin_pool = ["hub-1", "srv-a"]    # empty = every enabled instance
+# round_robin_ops  = ["review", "merge", "issue"]
+
+# [cluster.routing.orgs]
+# "my-org" = "srv-a"
+
+# The hub writes round-robin assignments here, so they are sticky and editable.
+# [cluster.routing.repos]
+# "my-org/my-repo" = "hub-1"
 ```
