@@ -48,6 +48,13 @@ type Prober struct {
 	events    EventPublisher
 	interval  time.Duration
 	now       func() time.Time
+
+	// selfVersion and selfRole describe this daemon. The hub does not probe
+	// itself over the network, so without these its own row would be the only
+	// one in the listing with no version — which reads as a bug, not a design
+	// choice.
+	selfVersion string
+	selfRole    string
 }
 
 // NewProber builds a Prober. store and events may be nil.
@@ -85,6 +92,14 @@ func (p *Prober) restore() {
 	for _, s := range saved {
 		p.states[s.InstanceID] = s
 	}
+}
+
+// SetSelfInfo records what this daemon reports about itself, so the hub's own
+// row carries the same version and role as every other.
+func (p *Prober) SetSelfInfo(version, role string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.selfVersion, p.selfRole = version, role
 }
 
 // Update swaps in a new registry after a config reload and forgets the state of
@@ -180,12 +195,18 @@ func (p *Prober) ProbeAll(ctx context.Context) []State {
 }
 
 func (p *Prober) recordSelf(inst Instance) {
+	p.mu.RLock()
+	version, role := p.selfVersion, p.selfRole
+	p.mu.RUnlock()
 	p.record(State{
-		InstanceID: inst.ID,
-		Name:       inst.Name,
-		Reachable:  true,
-		Status:     "ok",
-		LastSeenAt: p.now(),
+		InstanceID:       inst.ID,
+		Name:             inst.Name,
+		Reachable:        true,
+		Status:           "ok",
+		Version:          version,
+		Role:             role,
+		RemoteInstanceID: inst.ID,
+		LastSeenAt:       p.now(),
 	})
 }
 

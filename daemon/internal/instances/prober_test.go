@@ -414,3 +414,21 @@ func TestProberHealthyIDsSkipsUnusableInstances(t *testing.T) {
 		t.Errorf("HealthyIDs() = %v, want the disabled instance excluded", p.HealthyIDs())
 	}
 }
+
+// The hub does not probe itself over the network, so without SetSelfInfo its
+// own row would be the only one with no version — which reads as a bug.
+func TestProberSelfRowCarriesVersionAndRole(t *testing.T) {
+	d := newToggleDaemon(t, "srv-a")
+	p := proberFixture(t, "hub", map[string]*toggleDaemon{"srv-a": d}, nil, nil)
+	p.SetSelfInfo("1.2.3", "hub")
+
+	p.ProbeAll(context.Background())
+
+	self := p.State("hub")
+	if !self.Reachable || self.Version != "1.2.3" || self.Role != "hub" {
+		t.Errorf("hub self state = %+v, want its own version and role", self)
+	}
+	if self.RemoteInstanceID != "hub" {
+		t.Errorf("RemoteInstanceID = %q, want the hub's own id", self.RemoteInstanceID)
+	}
+}

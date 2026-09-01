@@ -502,3 +502,94 @@ func TestDetectDriftRespectsTargets(t *testing.T) {
 		t.Errorf("drifts = %+v, want only srv-b", drifts)
 	}
 }
+
+// The hub builds its config from typed Go values; an instance's arrives decoded
+// from JSON. Comparing those with reflect.DeepEqual alone reported every nested
+// section as drift, which is enough noise to make the whole view useless.
+func TestEqualConfigValuesCanonicalisesThroughJSON(t *testing.T) {
+	type typedSection struct {
+		Enabled bool   `json:"enabled"`
+		Method  string `json:"merge_method"`
+	}
+
+	cases := []struct {
+		name string
+		hub  any
+		wire any
+		want bool
+	}{
+		{"empty typed map vs empty generic map", map[string]typedSection{}, map[string]any{}, true},
+		{
+			name: "typed struct vs decoded object",
+			hub:  typedSection{Enabled: true, Method: "squash"},
+			wire: map[string]any{"enabled": true, "merge_method": "squash"},
+			want: true,
+		},
+		{
+			name: "key order does not matter",
+			hub:  map[string]any{"a": 1, "b": 2},
+			wire: map[string]any{"b": 2.0, "a": 1.0},
+			want: true,
+		},
+		{
+			name: "a real difference is still reported",
+			hub:  typedSection{Enabled: true, Method: "squash"},
+			wire: map[string]any{"enabled": false, "merge_method": "squash"},
+			want: false,
+		},
+		{
+			name: "typed slice vs decoded array",
+			hub:  []string{"a", "b"},
+			wire: []any{"a", "b"},
+			want: true,
+		},
+		{
+			name: "different slice contents differ",
+			hub:  []string{"a"},
+			wire: []any{"b"},
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		if got := equalConfigValues(tc.hub, tc.wire); got != tc.want {
+			t.Errorf("%s: equalConfigValues = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestEqualConfigValuesUnmarshalable(t *testing.T) {
+	// A value JSON cannot represent must not be silently declared equal.
+	if equalConfigValues(make(chan int), map[string]any{}) {
+		t.Error("an unmarshalable value compared equal")
+	}
+}
+
+// Marshalling a struct emits fields in declaration order while marshalling a
+// map sorts the keys, so identical content on the two sides produced different
+// bytes and every nested section read as drift.
+func TestEqualConfigValuesIgnoresStructFieldOrder(t *testing.T) {
+	type section struct {
+		Zulu  string `json:"zulu"`
+		Alpha string `json:"alpha"`
+	}
+	hub := section{Zulu: "z", Alpha: "a"}
+	wire := map[string]any{"alpha": "a", "zulu": "z"}
+
+	if !equalConfigValues(hub, wire) {
+		t.Error("a struct and an equivalent decoded map compared unequal")
+	}
+	if equalConfigValues(hub, map[string]any{"alpha": "a", "zulu": "different"}) {
+		t.Error("a real difference was missed")
+	}
+}
+
+func TestCanonicalJSON(t *testing.T) {
+	if _, ok := canonicalJSON(make(chan int)); ok {
+		t.Error("canonicalJSON accepted an unmarshalable value")
+	}
+	a, aok := canonicalJSON(map[string]any{"b": 1, "a": 2})
+	b, bok := canonicalJSON(map[string]any{"a": 2, "b": 1})
+	if !aok || !bok || string(a) != string(b) {
+		t.Errorf("canonicalJSON is not order-independent: %q vs %q", a, b)
+	}
+}

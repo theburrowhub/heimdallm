@@ -551,6 +551,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		return 1
 	}
 	cfg.Cluster.InstanceID = instanceID
+	ensureSelfInstance(cfg, dataDir())
 	clusterSt := newClusterState(cfg, s, broker)
 	if cfg.ClusterEnabled() {
 		slog.Info("cluster: multi-instance mode active",
@@ -2592,6 +2593,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		// ownership live on every tick, so a routing-only change must take
 		// effect even on the fast path that does not restart them.
 		newCfg.Cluster.InstanceID = instanceID
+		ensureSelfInstance(newCfg, dataDir())
 		clusterSt.Update(newCfg)
 
 		cfgMu.Lock()

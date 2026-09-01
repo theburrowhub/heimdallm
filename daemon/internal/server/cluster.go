@@ -41,6 +41,7 @@ type ClusterSnapshot struct {
 type ClusterStore interface {
 	ClaimDispatch(op, targetKey, headSHA, instanceID string) (bool, error)
 	DispatchTarget(op, targetKey, headSHA string) (string, bool, error)
+	ReleaseDispatch(op, targetKey, headSHA string) error
 	DeleteInstanceState(instanceID string) error
 }
 
@@ -770,14 +771,16 @@ func (srv *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 	// Deduplicate: a retry, or two GUI clients clicking at once, must not send
 	// the same work twice. A new head SHA is genuinely a new operation.
 	key := dispatchKey(op, req)
-	if deps := srv.clusterDeps(); deps != nil && deps.Store != nil {
-		claimed, err := deps.Store.ClaimDispatch(op, key, req.HeadSHA, target)
+	deps := srv.clusterDeps()
+	claimed := false
+	if deps != nil && deps.Store != nil {
+		ok, err := deps.Store.ClaimDispatch(op, key, req.HeadSHA, target)
 		if err != nil {
 			slog.Error("cluster: dispatch claim failed", "op", op, "key", key, "err", err)
 			httpJSONErr(w, http.StatusInternalServerError, "internal server error")
 			return
 		}
-		if !claimed {
+		if !ok {
 			existing, _, _ := deps.Store.DispatchTarget(op, key, req.HeadSHA)
 			writeJSON(w, http.StatusOK, map[string]any{
 				"instance_id": existing,
@@ -786,10 +789,20 @@ func (srv *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		claimed = true
 	}
 
 	if err := srv.executeDispatch(r.Context(), op, inst, req); err != nil {
 		slog.Error("cluster: dispatch failed", "op", op, "instance", target, "err", err)
+		// Release the claim: the work did not happen, and keeping it would make
+		// a transient failure block this operation for this commit forever,
+		// with the retry answered as a duplicate of something that never ran.
+		if claimed {
+			if relErr := deps.Store.ReleaseDispatch(op, key, req.HeadSHA); relErr != nil {
+				slog.Warn("cluster: could not release a failed dispatch claim",
+					"op", op, "key", key, "err", relErr)
+			}
+		}
 		httpJSONErr(w, http.StatusBadGateway, err.Error())
 		return
 	}

@@ -40,6 +40,43 @@ type clusterState struct {
 	role     string
 }
 
+// ensureSelfInstance gives a hub an entry for itself when the operator has not
+// written one.
+//
+// A hub is an instance like any other: the UI lists it, repos route to it, and
+// its data is read through the same path. Requiring the operator to describe
+// their own machine in config.toml would also be a chicken-and-egg trap —
+// registering the first remote instance would fail validation because the hub
+// had not registered itself yet.
+//
+// The entry is in-memory only. It is deliberately not written to config.toml:
+// the file stays minimal, and an operator who does write an explicit entry
+// keeps full control (theirs wins).
+//
+// base_url is loopback because nothing ever dials it: the proxy short-circuits
+// the hub's own id and serves locally.
+func ensureSelfInstance(cfg *config.Config, dataDir string) {
+	id := cfg.Cluster.InstanceID
+	if !cfg.IsHub() || id == "" {
+		return
+	}
+	if _, exists := cfg.Cluster.Instances[id]; exists {
+		return
+	}
+	if cfg.Cluster.Instances == nil {
+		cfg.Cluster.Instances = map[string]config.InstanceConfig{}
+	}
+	port := cfg.Server.Port
+	if port == 0 {
+		port = 7842
+	}
+	cfg.Cluster.Instances[id] = config.InstanceConfig{
+		Name:      resolvedSelfName(cfg),
+		BaseURL:   fmt.Sprintf("http://127.0.0.1:%d", port),
+		TokenFile: filepath.Join(dataDir, "api_token"),
+	}
+}
+
 // newClusterState builds the control plane from the first loaded config.
 func newClusterState(cfg *config.Config, st *store.Store, broker *sse.Broker) *clusterState {
 	registry := instances.NewRegistry(cfg)
@@ -63,6 +100,7 @@ func newClusterState(cfg *config.Config, st *store.Store, broker *sse.Broker) *c
 		cs.prober = instances.NewProber(
 			registry, clusterProbeInterval(cfg), cs.factory, stateStore, newClusterEvents(broker),
 		)
+		cs.prober.SetSelfInfo(version, cfg.Cluster.Role)
 	}
 	return cs
 }

@@ -144,6 +144,23 @@ func (s *Store) DispatchTarget(op, targetKey, headSHA string) (string, bool, err
 	return instanceID, true, nil
 }
 
+// ReleaseDispatch removes a claim so the operation can be retried.
+//
+// Called when the dispatch itself failed: keeping the claim would make a
+// transient error — an instance mid-restart, a dropped connection — block that
+// operation for that commit permanently, with the retry answered as a duplicate
+// of work that never ran.
+func (s *Store) ReleaseDispatch(op, targetKey, headSHA string) error {
+	_, err := s.db.Exec(
+		"DELETE FROM instance_dispatch WHERE op = ? AND target_key = ? AND head_sha = ?",
+		op, targetKey, headSHA,
+	)
+	if err != nil {
+		return fmt.Errorf("store: release dispatch %s/%s: %w", op, targetKey, err)
+	}
+	return nil
+}
+
 // PruneDispatches deletes dispatch records older than cutoff. The ledger only
 // needs to cover the window in which a duplicate could plausibly arrive; it is
 // not an audit log, and the activity log already records what actually ran.

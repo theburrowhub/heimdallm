@@ -1,7 +1,9 @@
 package instances
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"sort"
@@ -299,10 +301,21 @@ func diffConfigs(inst Instance, reference, remote map[string]any) []Drift {
 	return drifts
 }
 
-// equalConfigValues compares two JSON-shaped config values. Numbers get special
-// treatment because a value that made a JSON round trip arrives as float64
-// while the hub's own copy may still be an int — reporting that as drift would
-// make every instance look permanently out of sync.
+// equalConfigValues compares two config values that reached us by different
+// routes: the hub's own copy is built from typed Go values, while an instance's
+// arrives decoded from JSON.
+//
+// Both differences would otherwise produce constant false positives:
+//
+//   - Numbers: an int on the hub against the float64 the same value becomes
+//     after a JSON round trip.
+//   - Composites: a typed map or struct on the hub against the generic
+//     map[string]any from the wire. reflect.DeepEqual compares types first, so
+//     it reported EVERY nested section as drift — enough noise to make the
+//     drift view useless.
+//
+// Canonicalising through JSON settles both. encoding/json sorts map keys, so
+// the comparison is order-independent.
 func equalConfigValues(a, b any) bool {
 	if an, aok := numericValue(a); aok {
 		if bn, bok := numericValue(b); bok {
@@ -310,7 +323,39 @@ func equalConfigValues(a, b any) bool {
 		}
 		return false
 	}
-	return reflect.DeepEqual(a, b)
+	if reflect.DeepEqual(a, b) {
+		return true
+	}
+	ab, aok := canonicalJSON(a)
+	bb, bok := canonicalJSON(b)
+	if !aok || !bok {
+		return false
+	}
+	return bytes.Equal(ab, bb)
+}
+
+// canonicalJSON renders a value in a form that does not depend on how it
+// reached us.
+//
+// The round trip through `any` is the point: marshalling a struct emits its
+// fields in declaration order, while marshalling a map sorts the keys. The hub
+// holds structs and the wire delivers maps, so a single Marshal on each side
+// produces different bytes for identical content. Decoding to maps first and
+// re-marshalling makes both sides sorted.
+func canonicalJSON(v any) ([]byte, bool) {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return nil, false
+	}
+	var generic any
+	if err := json.Unmarshal(raw, &generic); err != nil {
+		return nil, false
+	}
+	out, err := json.Marshal(generic)
+	if err != nil {
+		return nil, false
+	}
+	return out, true
 }
 
 func numericValue(v any) (float64, bool) {

@@ -579,3 +579,83 @@ func TestEnsureInstanceIDAdoptsAConcurrentWinner(t *testing.T) {
 		t.Errorf("id = %q, want the id already on disk", id)
 	}
 }
+
+func TestEnsureSelfInstanceSeedsTheHub(t *testing.T) {
+	// Registering the first remote instance must not fail because the hub has
+	// not described its own machine in config.toml.
+	cfg := &config.Config{}
+	cfg.AI.Primary = "claude"
+	cfg.Server.Port = 7842
+	cfg.Cluster.Role = config.RoleHub
+	cfg.Cluster.InstanceID = "hub-1"
+	cfg.Cluster.InstanceName = "Local hub"
+	cfg.Cluster.Instances = map[string]config.InstanceConfig{
+		"srv-a": {BaseURL: "http://10.0.0.11:7842", Token: "t"},
+	}
+
+	ensureSelfInstance(cfg, "/data")
+
+	self, ok := cfg.Cluster.Instances["hub-1"]
+	if !ok {
+		t.Fatal("the hub was not seeded into its own registry")
+	}
+	if self.Name != "Local hub" {
+		t.Errorf("name = %q, want the configured instance_name", self.Name)
+	}
+	// Loopback because nothing ever dials it: the proxy short-circuits the
+	// hub's own id and serves locally.
+	if self.BaseURL != "http://127.0.0.1:7842" {
+		t.Errorf("base_url = %q, want loopback on the configured port", self.BaseURL)
+	}
+	if self.TokenFile != "/data/api_token" {
+		t.Errorf("token_file = %q, want the daemon's own token", self.TokenFile)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("the seeded config does not validate: %v", err)
+	}
+}
+
+func TestEnsureSelfInstanceRespectsAnExplicitEntry(t *testing.T) {
+	// An operator who writes their own entry keeps full control.
+	cfg := &config.Config{}
+	cfg.Cluster.Role = config.RoleHub
+	cfg.Cluster.InstanceID = "hub-1"
+	cfg.Cluster.Instances = map[string]config.InstanceConfig{
+		"hub-1": {Name: "Mine", BaseURL: "http://10.0.0.1:9999", Token: "explicit"},
+	}
+
+	ensureSelfInstance(cfg, "/data")
+
+	if got := cfg.Cluster.Instances["hub-1"]; got.Token != "explicit" || got.BaseURL != "http://10.0.0.1:9999" {
+		t.Errorf("entry = %+v, want the operator's own", got)
+	}
+}
+
+func TestEnsureSelfInstanceNoOpOnANonHub(t *testing.T) {
+	// A worker has no registry of its own to appear in.
+	cfg := &config.Config{}
+	cfg.Cluster.Role = config.RoleWorker
+	cfg.Cluster.InstanceID = "srv-a"
+	ensureSelfInstance(cfg, "/data")
+	if len(cfg.Cluster.Instances) != 0 {
+		t.Errorf("instances = %v, want none on a worker", cfg.Cluster.Instances)
+	}
+
+	// And a hub with no identity has nothing to key an entry on.
+	hub := &config.Config{}
+	hub.Cluster.Role = config.RoleHub
+	ensureSelfInstance(hub, "/data")
+	if len(hub.Cluster.Instances) != 0 {
+		t.Errorf("instances = %v, want none without an instance_id", hub.Cluster.Instances)
+	}
+}
+
+func TestEnsureSelfInstanceDefaultsThePort(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Cluster.Role = config.RoleHub
+	cfg.Cluster.InstanceID = "hub-1"
+	ensureSelfInstance(cfg, "/data")
+	if got := cfg.Cluster.Instances["hub-1"].BaseURL; got != "http://127.0.0.1:7842" {
+		t.Errorf("base_url = %q, want the default port", got)
+	}
+}

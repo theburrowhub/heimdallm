@@ -77,6 +77,7 @@ type fakeClusterStore struct {
 	mu       sync.Mutex
 	claims   map[string]string
 	deleted  []string
+	released []string
 	claimErr error
 }
 
@@ -107,6 +108,14 @@ func (f *fakeClusterStore) DispatchTarget(op, target, sha string) (string, bool,
 	defer f.mu.Unlock()
 	id, ok := f.claims[f.key(op, target, sha)]
 	return id, ok, nil
+}
+
+func (f *fakeClusterStore) ReleaseDispatch(op, target, sha string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.claims, f.key(op, target, sha))
+	f.released = append(f.released, f.key(op, target, sha))
+	return nil
 }
 
 func (f *fakeClusterStore) DeleteInstanceState(id string) error {
@@ -1183,5 +1192,53 @@ func TestClusterEndpointsRejectBadJSON(t *testing.T) {
 		if rec := f.do(t, tc.method, tc.path, "{"); rec.Code != http.StatusBadRequest {
 			t.Errorf("%s %s with bad JSON = %d, want 400", tc.method, tc.path, rec.Code)
 		}
+	}
+}
+
+// A transient failure must not block the operation for that commit forever.
+func TestFailedDispatchReleasesItsClaim(t *testing.T) {
+	failing := newFakeInstance(t, "srv-a", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"status":"starting"}`))
+	})
+	f := newHub(t, map[string]*fakeInstance{"srv-a": failing}, config.RoutingConfig{
+		Repos: map[string]string{"acme/tools": "srv-a"},
+	})
+
+	body := `{"pr_id":42,"repo":"acme/tools","number":7,"head_sha":"sha1"}`
+	if rec := f.do(t, http.MethodPost, "/cluster/dispatch/review", body); rec.Code != http.StatusBadGateway {
+		t.Fatalf("first dispatch = %d, want 502", rec.Code)
+	}
+	if len(f.store.released) == 0 {
+		t.Error("the failed dispatch kept its claim")
+	}
+
+	// The retry must be a genuine new attempt, not "already dispatched".
+	rec := f.do(t, http.MethodPost, "/cluster/dispatch/review", body)
+	if rec.Code == http.StatusOK && decode(t, rec)["duplicate"] == true {
+		t.Error("the retry was refused as a duplicate of work that never ran")
+	}
+	if got := countRequests(failing.seen(), "POST /prs/42/review"); got != 2 {
+		t.Errorf("the instance was asked %d times, want 2 (the retry reached it)", got)
+	}
+}
+
+// A successful dispatch keeps its claim, so a duplicate click is still a no-op.
+func TestSuccessfulDispatchKeepsItsClaim(t *testing.T) {
+	a := newFakeInstance(t, "srv-a", nil)
+	f := newHub(t, map[string]*fakeInstance{"srv-a": a}, config.RoutingConfig{
+		Repos: map[string]string{"acme/tools": "srv-a"},
+	})
+
+	body := `{"pr_id":42,"repo":"acme/tools","number":7,"head_sha":"sha1"}`
+	if rec := f.do(t, http.MethodPost, "/cluster/dispatch/review", body); rec.Code != http.StatusAccepted {
+		t.Fatalf("dispatch = %d", rec.Code)
+	}
+	if len(f.store.released) != 0 {
+		t.Error("a successful dispatch released its claim")
+	}
+	rec := f.do(t, http.MethodPost, "/cluster/dispatch/review", body)
+	if decode(t, rec)["duplicate"] != true {
+		t.Error("the second click was not deduplicated")
 	}
 }

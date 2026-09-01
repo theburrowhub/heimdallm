@@ -355,15 +355,6 @@ func TestValidateClusterRejectsBadConfig(t *testing.T) {
 			},
 			want: "cluster.routing.repos key",
 		},
-		{
-			name: "hub missing from its own registry",
-			mut: func(c *Config) {
-				c.Cluster.Role = RoleHub
-				c.Cluster.InstanceID = "hub-1"
-				c.Cluster.Instances = map[string]InstanceConfig{"other": {BaseURL: "http://o:7842", Token: "t"}}
-			},
-			want: "has no entry for this daemon's instance_id",
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -586,5 +577,47 @@ theburrowhub = "hub-1"
 	}
 	if got := cfg.EnabledInstanceIDs(); len(got) != 1 || got[0] != "hub-1" {
 		t.Errorf("EnabledInstanceIDs() = %v, want only the enabled hub", got)
+	}
+}
+
+// Requiring the hub to list itself would be a chicken-and-egg trap: registering
+// the FIRST remote instance would fail validation because the hub had not
+// registered itself yet. The runtime seeds the entry instead.
+func TestValidateClusterAllowsAHubMissingFromItsOwnRegistry(t *testing.T) {
+	c := baseValidConfig()
+	c.Cluster.Role = RoleHub
+	c.Cluster.InstanceID = "hub-1"
+	c.Cluster.Instances = map[string]InstanceConfig{
+		"srv-a": {BaseURL: "http://10.0.0.11:7842", Token: "t"},
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate() = %v, want nil", err)
+	}
+}
+
+// A rule routing work to the hub must persist even when config.toml carries no
+// entry for it: the runtime seeds that entry, and refusing the write would make
+// the hub the one instance nothing can be routed to.
+func TestValidateClusterAcceptsRulesReferencingTheSelfID(t *testing.T) {
+	c := baseValidConfig()
+	c.Cluster.Role = RoleHub
+	c.Cluster.InstanceID = "hub-1"
+	c.Cluster.DefaultInstance = "hub-1"
+	c.Cluster.Instances = map[string]InstanceConfig{
+		"srv-a": {BaseURL: "http://10.0.0.11:7842", Token: "t"},
+	}
+	c.Cluster.Routing = RoutingConfig{
+		RoundRobinPool: []string{"hub-1", "srv-a"},
+		Orgs:           map[string]string{"acme": "hub-1"},
+		Repos:          map[string]string{"acme/tools": "hub-1"},
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate() = %v, want nil", err)
+	}
+
+	// An id that is neither registered nor this daemon is still rejected.
+	c.Cluster.Routing.Orgs["other"] = "ghost"
+	if err := c.Validate(); err == nil {
+		t.Error("Validate() = nil for a rule pointing at an unknown instance")
 	}
 }

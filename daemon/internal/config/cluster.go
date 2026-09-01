@@ -348,6 +348,13 @@ func (c *Config) validateCluster() error {
 	// (pushed by the hub) but no registry of its own still boots.
 	if len(cl.Instances) > 0 {
 		known := func(id, path string) error {
+			// This daemon's own id always counts as known, even when the
+			// operator has not written an entry for it: the runtime seeds one
+			// (see ensureSelfInstance), so a rule that routes work to the hub
+			// must not fail to persist just because config.toml is minimal.
+			if id == cl.InstanceID && cl.InstanceID != "" {
+				return nil
+			}
 			if _, ok := cl.Instances[id]; !ok {
 				return fmt.Errorf("config: %s references unknown instance %q", path, id)
 			}
@@ -381,14 +388,12 @@ func (c *Config) validateCluster() error {
 		}
 	}
 
-	// A hub with a registry must be in it: it is an instance like any other
-	// (the GUI lists it, routes repos to it and reads its data through the same
-	// code path), and its absence would make it invisible to itself.
-	if c.IsHub() && len(cl.Instances) > 0 && cl.InstanceID != "" {
-		if _, ok := cl.Instances[cl.InstanceID]; !ok {
-			return fmt.Errorf("config: cluster.role is %q but cluster.instances has no entry for this daemon's instance_id %q",
-				RoleHub, cl.InstanceID)
-		}
-	}
+	// A hub is an instance like any other — the UI lists it, routes repos to it
+	// and reads its data through the same code path — but requiring an explicit
+	// entry here would be a chicken-and-egg trap: registering the FIRST
+	// instance would fail validation because the hub had not registered itself
+	// yet. The runtime seeds a self entry instead (see ensureSelfInstance in
+	// cmd/heimdallm), so the hub is always visible without the operator having
+	// to describe their own machine to it.
 	return nil
 }

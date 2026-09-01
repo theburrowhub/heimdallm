@@ -238,3 +238,22 @@ func TestPruneDispatches(t *testing.T) {
 		t.Error("claim after pruning = false, want true")
 	}
 }
+
+func TestReleaseDispatch(t *testing.T) {
+	s := newInstanceStore(t)
+	if ok, _ := s.ClaimDispatch("review", "acme/a#1", "sha", "srv-a"); !ok {
+		t.Fatal("claim failed")
+	}
+	if err := s.ReleaseDispatch("review", "acme/a#1", "sha"); err != nil {
+		t.Fatalf("ReleaseDispatch: %v", err)
+	}
+	// Released means retryable: a transient failure must not block the
+	// operation for that commit forever.
+	if ok, _ := s.ClaimDispatch("review", "acme/a#1", "sha", "srv-b"); !ok {
+		t.Error("claim after release = false, want the operation retryable")
+	}
+	// Releasing something that is not there is not an error.
+	if err := s.ReleaseDispatch("review", "nothing/here#1", "sha"); err != nil {
+		t.Errorf("ReleaseDispatch on a missing row = %v, want nil", err)
+	}
+}
