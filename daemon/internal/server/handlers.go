@@ -126,6 +126,20 @@ type Server struct {
 	configPath string
 	// tomlMu serialises TOML read-merge-write operations.
 	tomlMu sync.Mutex
+
+	// clusterMu guards the multi-instance fields below, which main rewrites on
+	// every config reload while requests are already being served.
+	clusterMu sync.RWMutex
+	// cluster is the hub's control plane. Nil on a standalone daemon or a
+	// worker, in which case the /instances and /cluster routes are not mounted
+	// at all rather than merely answering an error.
+	cluster *ClusterDeps
+	// instanceID, instanceName and clusterRole are this daemon's own identity.
+	// Reported on GET /health — the one unauthenticated route — because that is
+	// how a hub recognises an instance it has just been asked to register.
+	instanceID   string
+	instanceName string
+	clusterRole  string
 }
 
 // Options holds optional configuration for the Server.
@@ -269,6 +283,10 @@ var sensitiveGETPaths = []string{
 	"/github", // covers /github/rate_limit (live GitHub API usage)
 	// exposes PR titles, repos, block reasons and check names
 	"/merge-tracking",
+	// the registry exposes every instance's base URL and the routing map
+	// exposes the whole topology
+	"/instances",
+	"/cluster",
 }
 
 // authMiddleware rejects:
@@ -662,6 +680,7 @@ func (srv *Server) buildRouter() chi.Router {
 	r.Post("/admin/repo-rename", srv.handleAdminRepoRename)
 	r.Get("/events", srv.handleSSE)
 	r.Get("/logs/stream", srv.handleLogsStream)
+	srv.mountClusterRoutes(r)
 	return r
 }
 
@@ -748,6 +767,20 @@ func (srv *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if !srv.startedAt.IsZero() {
 		resp["started_at"] = srv.startedAt.UTC().Format(time.RFC3339)
 		resp["uptime_seconds"] = int64(now.Sub(srv.startedAt.UTC()).Seconds())
+	}
+	// Cluster identity rides on /health because it is the only unauthenticated
+	// route: a hub registering a new instance has to be able to learn what that
+	// instance calls itself before it holds a token for it.
+	if id, name, role := srv.clusterIdentity(); id != "" || name != "" || role != "" {
+		if id != "" {
+			resp["instance_id"] = id
+		}
+		if name != "" {
+			resp["instance_name"] = name
+		}
+		if role != "" {
+			resp["role"] = role
+		}
 	}
 	writeJSON(w, statusCode, resp)
 }

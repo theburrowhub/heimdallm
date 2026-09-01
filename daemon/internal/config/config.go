@@ -78,6 +78,7 @@ type Config struct {
 	Autonomous     AutonomousConfig     `toml:"autonomous"`
 	Polling        PollingConfig        `toml:"polling"`
 	MergeTracking  MergeTrackingConfig  `toml:"merge_tracking"`
+	Cluster        ClusterConfig        `toml:"cluster"`
 }
 
 type ServerConfig struct {
@@ -1045,6 +1046,7 @@ func (c *Config) applyDefaults() {
 	if c.Server.MaxConcurrentWorkers == 0 {
 		c.Server.MaxConcurrentWorkers = 5
 	}
+	c.applyClusterDefaults()
 	if c.GitHub.PollInterval == "" {
 		c.GitHub.PollInterval = "5m"
 	}
@@ -1139,6 +1141,23 @@ func (c *Config) applyEnvOverrides() {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			c.Server.MaxConcurrentWorkers = n
 		}
+	}
+	// [cluster] identity via env, so a Docker instance can be told what it is
+	// without baking a per-container config.toml into the image.
+	if v := os.Getenv("HEIMDALLM_CLUSTER_ROLE"); v != "" {
+		c.Cluster.Role = v
+	}
+	if v := os.Getenv("HEIMDALLM_INSTANCE_ID"); v != "" {
+		c.Cluster.InstanceID = v
+	}
+	if v := os.Getenv("HEIMDALLM_INSTANCE_NAME"); v != "" {
+		c.Cluster.InstanceName = v
+	}
+	if v := os.Getenv("HEIMDALLM_CLUSTER_DEFAULT_INSTANCE"); v != "" {
+		c.Cluster.DefaultInstance = v
+	}
+	if v := os.Getenv("HEIMDALLM_CLUSTER_PROBE_INTERVAL"); v != "" {
+		c.Cluster.ProbeInterval = v
 	}
 	if v := os.Getenv("HEIMDALLM_POLL_INTERVAL"); v != "" {
 		c.GitHub.PollInterval = v
@@ -1316,6 +1335,13 @@ func (c *Config) Validate() error {
 	// invalid merge_method or duration must stop the daemon at boot rather
 	// than fail once per poll cycle against GitHub.
 	if err := c.validateMergeTracking(); err != nil {
+		return err
+	}
+	// [cluster] decides which daemon owns which repo. A bad instance id or a
+	// rule pointing at an unregistered instance is a routing hole (a repo that
+	// nobody polls), so it has to stop the daemon at boot instead of going
+	// unnoticed until someone wonders why a repo went quiet.
+	if err := c.validateCluster(); err != nil {
 		return err
 	}
 	// Validate every persisted execution option before it reaches Executor.
