@@ -3,6 +3,7 @@ package api_test
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -229,5 +230,57 @@ func TestClusterUnreachableDaemon(t *testing.T) {
 	client := api.New("http://127.0.0.1:1", "tok")
 	if _, err := client.ListInstances(); err == nil {
 		t.Error("ListInstances = nil error against a dead host")
+	}
+}
+
+// The daemon is semi-trusted — the operator pointed us at it — but with
+// instances it may be a machine someone else administers. An unbounded read
+// would let a single reply exhaust the CLI's memory.
+func TestClusterResponseIsSizeLimited(t *testing.T) {
+	// One byte over the cap, so the guard fires on the smallest possible
+	// violation rather than only on something absurd.
+	oversized := strings.Repeat("x", (10<<20)+1)
+	client, _ := newClusterServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(oversized))
+	})
+
+	_, err := client.ListInstances()
+	if err == nil {
+		t.Fatal("ListInstances = nil error for an oversized body")
+	}
+	if !strings.Contains(err.Error(), "limit") {
+		t.Errorf("error = %v, want it to name the limit", err)
+	}
+}
+
+func TestClusterResponseAtTheLimitIsAccepted(t *testing.T) {
+	// A body that merely fills the cap is legitimate and must still decode.
+	padding := strings.Repeat("x", (10<<20)-200)
+	client, _ := newClusterServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"self_id":   "hub-1",
+			"self_name": padding,
+			"instances": []map[string]any{{"id": "srv-a"}},
+		})
+	})
+
+	registry, err := client.ListInstances()
+	if err != nil {
+		t.Fatalf("ListInstances = %v, want a large but in-limit body accepted", err)
+	}
+	if len(registry.Instances) != 1 {
+		t.Errorf("instances = %+v", registry.Instances)
+	}
+}
+
+// ErrNotAHub is compared with errors.Is, so it has to be a stable sentinel
+// value rather than a freshly formatted error.
+func TestErrNotAHubIsAStableSentinel(t *testing.T) {
+	if !errors.Is(api.ErrNotAHub, api.ErrNotAHub) {
+		t.Error("ErrNotAHub does not match itself")
+	}
+	wrapped := fmt.Errorf("listing instances: %w", api.ErrNotAHub)
+	if !errors.Is(wrapped, api.ErrNotAHub) {
+		t.Error("a wrapped ErrNotAHub is not recognised")
 	}
 }

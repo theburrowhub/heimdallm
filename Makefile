@@ -41,6 +41,7 @@ endif
         setup up up-build up-daemon up-build-daemon down logs logs-daemon \
         ps restart clean clean-clones _check-docker _check-buildkit _check-env \
         up-instance down-instance logs-instance ps-instances _check-instance-name \
+        _check-instance-port \
         _check-macos _check-macos-user _check-linux _post-up-hints
 
 # ── Build ─────────────────────────────────────────────────────────────────────
@@ -595,8 +596,16 @@ _check-instance-name:
 	  || { echo "❌  NAME must be lowercase alphanumerics and hyphens (it becomes a container and volume name)"; exit 1; }
 	@test "$(NAME)" != "heimdallm" || { echo "❌  NAME 'heimdallm' collides with the main stack"; exit 1; }
 
-up-instance: _check-env _check-buildkit _check-instance-name
+_check-instance-port:
 	@test -n "$(PORT)" || { echo "❌  PORT is required, e.g. make up-instance NAME=b PORT=7843"; exit 1; }
+	@echo "$(PORT)" | grep -Eq '^[0-9]+$$' \
+	  || { echo "❌  PORT must be a number, got '$(PORT)'"; exit 1; }
+	@test "$(PORT)" -ge 1 -a "$(PORT)" -le 65535 \
+	  || { echo "❌  PORT must be in 1-65535, got '$(PORT)'"; exit 1; }
+	@test "$(PORT)" != "$${HEIMDALLM_PORT:-7842}" \
+	  || { echo "❌  PORT $(PORT) is the main stack's host port; pick another"; exit 1; }
+
+up-instance: _check-env _check-buildkit _check-instance-name _check-instance-port
 	DOCKER_BUILDKIT=1 HEIMDALLM_VERSION=$(GIT_VERSION) \
 	  HEIMDALLM_STACK_NAME=$(NAME) \
 	  HEIMDALLM_COMPOSE_DAEMON_HOST_PORT=$(PORT) \

@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -83,7 +84,7 @@ type PropagateReport struct {
 
 // ErrNotAHub is returned when the daemon has no control plane, which is the
 // normal answer on a plain single-daemon install rather than a failure.
-var ErrNotAHub = fmt.Errorf("this daemon is not a cluster hub")
+var ErrNotAHub = errors.New("this daemon is not a cluster hub")
 
 // ListInstances fetches the registry. Returns ErrNotAHub on a daemon without a
 // control plane so callers can print a helpful message instead of an HTTP code.
@@ -164,7 +165,7 @@ func (c *Client) doCluster(method, path string, body []byte) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 
-	data, err := io.ReadAll(resp.Body)
+	data, err := readLimited(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("reading response: %w", err)
 	}

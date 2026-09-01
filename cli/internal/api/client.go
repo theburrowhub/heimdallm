@@ -33,6 +33,29 @@ func New(host, token string) *Client {
 	}
 }
 
+// maxResponseBytes caps how much of a daemon's response the CLI will read into
+// memory. The daemon is semi-trusted — the operator pointed us at it — but it is
+// still a network peer, and with instances it may be a machine someone else
+// administers. Without a cap a misbehaving or compromised daemon could exhaust
+// the CLI's memory with a single reply.
+const maxResponseBytes = 10 << 20 // 10 MiB
+
+// readLimited reads a response body up to maxResponseBytes.
+//
+// A body at exactly the cap is reported as an error rather than silently
+// truncated: handing a caller a half-decoded JSON document would surface much
+// later as a confusing parse failure.
+func readLimited(body io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(body, maxResponseBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxResponseBytes {
+		return nil, fmt.Errorf("response exceeds the %d MiB limit", maxResponseBytes>>20)
+	}
+	return data, nil
+}
+
 func (c *Client) newRequest(method, path string, body io.Reader) (*http.Request, error) {
 	req, err := http.NewRequest(method, c.Host+path, body)
 	if err != nil {
@@ -55,7 +78,7 @@ func (c *Client) do(method, path string) ([]byte, error) {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
+	data, err := readLimited(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("reading response: %w", err)
 	}
@@ -151,7 +174,7 @@ func (c *Client) GetHealth() (*Health, error) {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
+	data, err := readLimited(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("reading response: %w", err)
 	}
@@ -441,7 +464,7 @@ func (c *Client) StreamEvents(ctx context.Context, events chan<- SSEEvent) error
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := readLimited(resp.Body)
 		return fmt.Errorf("SSE HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
