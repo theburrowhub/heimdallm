@@ -203,4 +203,176 @@ void main() {
       ),
     );
   });
+  test('registerInstance supports env and file token sources', () async {
+    final recorder = _Recorder();
+    final api = _api(recorder, (_) => {'id': 'srv-b'});
+
+    await api.registerInstance(
+      baseUrl: 'http://a:7842',
+      tokenEnv: 'HEIMDALLM_SRV_B',
+    );
+    var body = jsonDecode(recorder.bodies.last) as Map<String, dynamic>;
+    expect(body['token_env'], 'HEIMDALLM_SRV_B');
+    expect(body.containsKey('token'), isFalse);
+
+    await api.registerInstance(
+      baseUrl: 'http://a:7842',
+      tokenFile: '/data/api_token',
+      skipProbe: true,
+      id: 'forced',
+    );
+    body = jsonDecode(recorder.bodies.last) as Map<String, dynamic>;
+    expect(body['token_file'], '/data/api_token');
+    expect(body['skip_probe'], isTrue);
+    expect(body['id'], 'forced');
+  });
+
+  test('deleteInstance and probeInstance target the right paths', () async {
+    final recorder = _Recorder();
+    final api = _api(recorder, (_) => {'reachable': true, 'version': '0.9.0'});
+
+    await api.deleteInstance('srv a');
+    expect(recorder.requests.last.method, 'DELETE');
+    // The id is percent-encoded, so it can never break out of its path segment.
+    expect(recorder.requests.last.url.path, '/instances/srv%20a');
+
+    final state = await api.probeInstance('srv-a');
+    expect(state.reachable, isTrue);
+    expect(state.version, '0.9.0');
+    expect(recorder.requests.last.url.path, '/instances/srv-a/probe');
+  });
+
+  test('probeInstance tolerates an empty body', () async {
+    final client = MockClient((_) async => http.Response('', 200));
+    final api = ApiClient(
+      httpClient: client,
+      endpoint: DaemonEndpoint.raw(baseUrl: 'http://hub:7842', token: 't'),
+    );
+    expect((await api.probeInstance('srv-a')).reachable, isFalse);
+  });
+
+  test('patchInstance can rotate to each token source', () async {
+    final recorder = _Recorder();
+    final api = _api(recorder, (_) => const {});
+
+    await api.patchInstance('srv-a', tokenEnv: 'X');
+    expect(
+      (jsonDecode(recorder.bodies.last) as Map<String, dynamic>)['token_env'],
+      'X',
+    );
+    await api.patchInstance('srv-a', tokenFile: '/data/api_token');
+    expect(
+      (jsonDecode(recorder.bodies.last) as Map<String, dynamic>)['token_file'],
+      '/data/api_token',
+    );
+    await api.patchInstance('srv-a', labels: const ['linux']);
+    expect(
+      (jsonDecode(recorder.bodies.last) as Map<String, dynamic>)['labels'],
+      ['linux'],
+    );
+  });
+
+  test('putRouting omits fields that were not supplied', () async {
+    final recorder = _Recorder();
+    final api = _api(recorder, (_) => const {});
+
+    await api.putRouting(mode: 'dispatch');
+    final body = jsonDecode(recorder.bodies.single) as Map<String, dynamic>;
+    expect(body, {'mode': 'dispatch'});
+  });
+
+  test('putRouting can clear the pool and the ops list', () async {
+    final recorder = _Recorder();
+    final api = _api(recorder, (_) => const {});
+
+    await api.putRouting(
+      roundRobinPool: const [],
+      roundRobinOps: const [],
+      defaultInstance: '',
+    );
+    final body = jsonDecode(recorder.bodies.single) as Map<String, dynamic>;
+    expect(body['round_robin_pool'], isEmpty);
+    expect(body['round_robin_ops'], isEmpty);
+    expect(body['default_instance'], '');
+  });
+
+  test('assignRepo on an unrouted repo adds the rule', () async {
+    final recorder = _Recorder();
+    final api = _api(recorder, (_) => const {});
+    await api.assignRepo(RoutingRules.empty, 'acme/new', 'srv-a');
+    final body = jsonDecode(recorder.bodies.single) as Map<String, dynamic>;
+    expect(body['repos'], {'acme/new': 'srv-a'});
+  });
+
+  test('assignOrg can clear a rule', () async {
+    final recorder = _Recorder();
+    final api = _api(recorder, (_) => const {});
+    await api.assignOrg(const RoutingRules(orgs: {'acme': 'x'}), 'acme', null);
+    final body = jsonDecode(recorder.bodies.single) as Map<String, dynamic>;
+    expect(body['orgs'], isEmpty);
+  });
+
+  test('propagateConfig can target specific instances with a patch', () async {
+    final recorder = _Recorder();
+    final api = _api(recorder, (_) => {'failures': 0, 'results': []});
+
+    await api.propagateConfig(
+      targets: const ['srv-a'],
+      patch: const {'ai': {'review_mode': 'multi'}},
+    );
+    final body = jsonDecode(recorder.bodies.single) as Map<String, dynamic>;
+    expect(body['targets'], ['srv-a']);
+    expect(body['patch'], {'ai': {'review_mode': 'multi'}});
+  });
+
+  test('dispatch carries every optional field it is given', () async {
+    final recorder = _Recorder();
+    final api = _api(recorder, (_) => {'instance_id': 'srv-a'});
+
+    await api.dispatch(
+      'merge',
+      prId: 1,
+      issueId: 2,
+      repo: 'acme/tools',
+      number: 3,
+      headSha: 'sha',
+      prUrl: 'https://github.com/acme/tools/pull/3',
+      dryRun: true,
+      instance: 'srv-b',
+    );
+    final body = jsonDecode(recorder.bodies.single) as Map<String, dynamic>;
+    expect(body['issue_id'], 2);
+    expect(body['pr_url'], contains('pull/3'));
+    expect(body['dry_run'], isTrue);
+    expect(body['instance'], 'srv-b');
+  });
+
+  test('fetchConfigDrift parses per-instance entries', () async {
+    final recorder = _Recorder();
+    final api = _api(
+      recorder,
+      (_) => {
+        'instances': [
+          {
+            'instance_id': 'srv-a',
+            'ok': true,
+            'drifts': [
+              {'key': 'ai.review_mode', 'hub_value': 'multi'},
+            ],
+          },
+        ],
+      },
+    );
+
+    final drifts = await api.fetchConfigDrift();
+    expect(drifts.single.instanceId, 'srv-a');
+    expect(drifts.single.drifts.single.key, 'ai.review_mode');
+  });
+
+  test('decodeJsonObject tolerates junk', () {
+    expect(decodeJsonObject(''), isNull);
+    expect(decodeJsonObject('not json'), isNull);
+    expect(decodeJsonObject('[1,2]'), isNull);
+    expect(decodeJsonObject('{"a":1}'), {'a': 1});
+  });
 }

@@ -356,3 +356,61 @@ func TestNewProberDefaultsInterval(t *testing.T) {
 		t.Errorf("interval = %v, want the 30s default for a non-positive input", p.interval)
 	}
 }
+
+func TestProberRunPicksUpAChangedInterval(t *testing.T) {
+	d := newToggleDaemon(t, "srv-a")
+	p := proberFixture(t, "hub", map[string]*toggleDaemon{"srv-a": d}, nil, nil)
+	p.interval = 20 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		p.Run(ctx)
+		close(done)
+	}()
+
+	// Wait for at least one ticker cycle, then change the cadence: the loop
+	// must adopt it without being restarted.
+	time.Sleep(60 * time.Millisecond)
+	p.Update(p.registry, 30*time.Millisecond)
+	time.Sleep(80 * time.Millisecond)
+
+	p.mu.RLock()
+	got := p.interval
+	p.mu.RUnlock()
+	if got != 30*time.Millisecond {
+		t.Errorf("interval = %v, want the reloaded value", got)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not stop")
+	}
+}
+
+func TestProberUpdateKeepsIntervalWhenNotSupplied(t *testing.T) {
+	d := newToggleDaemon(t, "srv-a")
+	p := proberFixture(t, "hub", map[string]*toggleDaemon{"srv-a": d}, nil, nil)
+	p.Update(p.registry, 0)
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.interval != time.Minute {
+		t.Errorf("interval = %v, want the previous value kept", p.interval)
+	}
+}
+
+func TestProberHealthyIDsSkipsUnusableInstances(t *testing.T) {
+	cfg := cfgWith(config.RoleHub, "hub", "hub", map[string]config.InstanceConfig{
+		"hub": {BaseURL: "http://127.0.0.1:7842", Token: "t"},
+		"off": {BaseURL: "http://127.0.0.1:7843", Token: "t", Enabled: boolPtr(false)},
+	}, config.RoutingConfig{})
+	p := NewProber(NewRegistry(cfg), time.Minute, nil, nil, nil)
+
+	// A disabled instance is never a dispatch target, probed or not.
+	if containsID(p.HealthyIDs(), "off") {
+		t.Errorf("HealthyIDs() = %v, want the disabled instance excluded", p.HealthyIDs())
+	}
+}

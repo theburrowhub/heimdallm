@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	"github.com/heimdallm/daemon/internal/config"
 	gh "github.com/heimdallm/daemon/internal/github"
 	"github.com/heimdallm/daemon/internal/instances"
+	"github.com/heimdallm/daemon/internal/server"
 	"github.com/heimdallm/daemon/internal/sse"
 )
 
@@ -397,4 +399,183 @@ func containsRepo(haystack []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+func TestClusterStateSnapshotIsUsable(t *testing.T) {
+	cfg := clusterCfg(t, "hub-1", config.RoutingConfig{
+		Repos: map[string]string{"acme/x": "hub-1"},
+	})
+	cfg.Cluster.Role = config.RoleHub
+	cs := newClusterState(cfg, nil, nil)
+
+	snap := cs.Snapshot()
+	if snap.SelfID != "hub-1" || snap.Role != config.RoleHub {
+		t.Errorf("snapshot = %+v", snap)
+	}
+	if snap.Registry == nil || snap.Registry.Len() != 2 {
+		t.Errorf("snapshot registry = %+v", snap.Registry)
+	}
+	if snap.Propagator == nil {
+		t.Error("snapshot has no propagator")
+	}
+	// The Router must be the SAME object across snapshots: the round-robin
+	// counters live in it, so rebuilding it per request would reset the
+	// rotation and send every operation to the first pool member.
+	if snap.Router != cs.Snapshot().Router {
+		t.Error("Snapshot() returned a different Router; the rotation would reset on every request")
+	}
+	if snap.Router != cs.Router() {
+		t.Error("Snapshot().Router differs from Router()")
+	}
+}
+
+func TestClusterStateRunProberStopsOnCancel(t *testing.T) {
+	cfg := clusterCfg(t, "hub-1", config.RoutingConfig{})
+	cfg.Cluster.Role = config.RoleHub
+	cfg.Cluster.ProbeInterval = "10s"
+	cs := newClusterState(cfg, nil, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		cs.RunProber(ctx)
+		close(done)
+	}()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunProber did not return after cancellation")
+	}
+}
+
+// A worker has no prober, so the goroutine main starts for it must be a no-op
+// rather than blocking shutdown.
+func TestClusterStateRunProberNoOpOnWorker(t *testing.T) {
+	cs := newClusterState(clusterCfg(t, "srv-a", config.RoutingConfig{}), nil, nil)
+	done := make(chan struct{})
+	go func() {
+		cs.RunProber(context.Background())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunProber blocked on a daemon with no prober")
+	}
+}
+
+func TestWireClusterOnlyMountsTheControlPlaneOnAHub(t *testing.T) {
+	st := newMemStore(t)
+
+	worker := server.New(st, nil, nil, "tok")
+	wireCluster(worker, newClusterState(clusterCfg(t, "srv-a", config.RoutingConfig{}), nil, nil), st)
+
+	req := httptest.NewRequest(http.MethodGet, "/instances", nil)
+	req.Header.Set("X-Heimdallm-Token", "tok")
+	rec := httptest.NewRecorder()
+	worker.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("worker GET /instances = %d, want 404", rec.Code)
+	}
+	// Identity is still published: it is how a hub recognises this daemon.
+	healthReq := httptest.NewRequest(http.MethodGet, "/health", nil)
+	healthRec := httptest.NewRecorder()
+	worker.Router().ServeHTTP(healthRec, healthReq)
+	if !strings.Contains(healthRec.Body.String(), "srv-a") {
+		t.Errorf("/health = %s, want the instance identity", healthRec.Body)
+	}
+
+	hubCfg := clusterCfg(t, "hub-1", config.RoutingConfig{})
+	hubCfg.Cluster.Role = config.RoleHub
+	hub := server.New(st, nil, nil, "tok")
+	wireCluster(hub, newClusterState(hubCfg, st, nil), st)
+
+	hubRec := httptest.NewRecorder()
+	hubReq := httptest.NewRequest(http.MethodGet, "/instances", nil)
+	hubReq.Header.Set("X-Heimdallm-Token", "tok")
+	hub.Router().ServeHTTP(hubRec, hubReq)
+	if hubRec.Code != http.StatusOK {
+		t.Errorf("hub GET /instances = %d, want 200: %s", hubRec.Code, hubRec.Body)
+	}
+}
+
+func TestResolvedSelfName(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Cluster.InstanceID = "hub-1"
+	cfg.Cluster.InstanceName = "  Explicit  "
+	if got := resolvedSelfName(cfg); got != "Explicit" {
+		t.Errorf("resolvedSelfName = %q, want the trimmed explicit name", got)
+	}
+
+	// Falling back to the hostname means a second machine is recognisable
+	// without the operator naming it first.
+	cfg.Cluster.InstanceName = "   "
+	host, _ := os.Hostname()
+	if got := resolvedSelfName(cfg); got != host && got != "hub-1" {
+		t.Errorf("resolvedSelfName = %q, want the hostname or the id", got)
+	}
+}
+
+func TestInstanceIDPrefix(t *testing.T) {
+	prefix := instanceIDPrefix()
+	if prefix == "" || !strings.HasSuffix(prefix, "-") {
+		t.Errorf("instanceIDPrefix() = %q, want a hyphen-terminated prefix", prefix)
+	}
+	// The prefix has to be safe as the head of a validated instance id.
+	if err := config.ValidateInstanceID(prefix + "abcdef"); err != nil {
+		t.Errorf("prefix %q does not produce a valid id: %v", prefix, err)
+	}
+	if len(prefix) > 14 {
+		t.Errorf("prefix %q is longer than the 12-char cap plus separator", prefix)
+	}
+}
+
+func TestClusterStateNilReceiverIsPermissive(t *testing.T) {
+	// The pollers hold this by value through a closure; a nil state must mean
+	// "own everything" rather than panic or silently stop all work.
+	var cs *clusterState
+	if !cs.Owns("acme/tools") {
+		t.Error("nil clusterState.Owns = false, want true")
+	}
+	repos := []string{"a/b", "c/d"}
+	if got := cs.FilterOwned(repos); len(got) != 2 {
+		t.Errorf("nil clusterState.FilterOwned = %v, want everything", got)
+	}
+}
+
+func TestEnsureInstanceIDRejectsAnUnwritableDataDir(t *testing.T) {
+	// A data dir the daemon cannot write is a broken install, and the error
+	// has to name the path rather than surfacing later as a changing identity.
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Skip("cannot make the directory read-only in this environment")
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	cfg := &config.Config{}
+	cfg.Cluster.Role = config.RoleWorker
+	if _, err := ensureInstanceID(cfg, dir); err == nil {
+		t.Error("ensureInstanceID = nil on an unwritable data dir")
+	}
+}
+
+func TestEnsureInstanceIDAdoptsAConcurrentWinner(t *testing.T) {
+	// Two processes starting together must converge on one id instead of
+	// silently diverging.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "instance_id")
+	if err := os.WriteFile(path, []byte("winner-abc123\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{}
+	cfg.Cluster.Role = config.RoleWorker
+
+	id, err := ensureInstanceID(cfg, dir)
+	if err != nil {
+		t.Fatalf("ensureInstanceID: %v", err)
+	}
+	if id != "winner-abc123" {
+		t.Errorf("id = %q, want the id already on disk", id)
+	}
 }

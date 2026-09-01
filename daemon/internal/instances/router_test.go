@@ -414,3 +414,66 @@ func TestRouterConcurrentAccess(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestNormalizeOpAndRepoOrg(t *testing.T) {
+	for in, want := range map[string]string{
+		"":        "default",
+		"  ":      "default",
+		"Review":  "review",
+		" merge ": "merge",
+	} {
+		if got := normalizeOp(in); got != want {
+			t.Errorf("normalizeOp(%q) = %q, want %q", in, got, want)
+		}
+	}
+	for in, want := range map[string]string{
+		"acme/tools": "acme",
+		"noslash":    "",
+		"":           "",
+		"/leading":   "",
+	} {
+		if got := repoOrg(in); got != want {
+			t.Errorf("repoOrg(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestRouterRuleForEmptyRepo(t *testing.T) {
+	r := routerWith("a", []string{"a", "b"}, "a", config.RoutingConfig{
+		Orgs: map[string]string{"acme": "b"},
+	})
+	if got := r.RuleFor(""); got != "" {
+		t.Errorf("RuleFor(\"\") = %q, want empty", got)
+	}
+	// An org rule pointing at nothing must not be treated as a match.
+	empty := routerWith("a", []string{"a", "b"}, "a", config.RoutingConfig{
+		Orgs:  map[string]string{"acme": ""},
+		Repos: map[string]string{"acme/x": ""},
+	})
+	if got := empty.RuleFor("acme/x"); got != "" {
+		t.Errorf("RuleFor with empty targets = %q, want empty", got)
+	}
+}
+
+func TestRulesSnapshotIsACopy(t *testing.T) {
+	r := routerWith("a", []string{"a", "b"}, "a", config.RoutingConfig{
+		Orgs:  map[string]string{"acme": "b"},
+		Repos: map[string]string{"acme/x": "a"},
+	})
+	snap := r.RulesSnapshot()
+	// Callers render and serialise this while a reload may be swapping the
+	// live rules underneath, so mutating the copy must not reach the router.
+	snap.Orgs["acme"] = "hijacked"
+	snap.Repos["acme/x"] = "hijacked"
+	if r.OwnerFor("acme/y") != "b" {
+		t.Error("mutating the snapshot changed the live org rule")
+	}
+	if r.OwnerFor("acme/x") != "a" {
+		t.Error("mutating the snapshot changed the live repo rule")
+	}
+
+	empty := NewRouter(nil, nil).RulesSnapshot()
+	if empty.Orgs != nil || empty.Repos != nil {
+		t.Errorf("empty snapshot = %+v, want nil maps", empty)
+	}
+}

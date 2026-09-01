@@ -421,3 +421,84 @@ func TestFlattenKeys(t *testing.T) {
 		t.Errorf("flattenKeys() = %v, want sorted dotted leaves", got)
 	}
 }
+
+func TestNewPropagatorDefaultFactory(t *testing.T) {
+	// A nil factory must produce a working real-HTTP propagator rather than
+	// panicking at the first push.
+	cfg := cfgWith(config.RoleHub, "hub", "hub", map[string]config.InstanceConfig{
+		"hub":  {BaseURL: "http://127.0.0.1:7842", Token: "t"},
+		"down": {BaseURL: "http://127.0.0.1:1", Token: "t"},
+	}, config.RoutingConfig{})
+	prop := NewPropagator(NewRegistry(cfg), nil)
+
+	results := prop.Propagate(context.Background(), map[string]any{
+		"ai": map[string]any{"review_mode": "multi"},
+	}, nil)
+
+	var down Result
+	for _, r := range results {
+		if r.InstanceID == "down" {
+			down = r
+		}
+	}
+	if down.OK || down.Error == "" {
+		t.Errorf("unreachable instance = %+v, want a reported failure", down)
+	}
+}
+
+func TestEqualConfigValues(t *testing.T) {
+	// An int on the hub and a float64 off the wire are the same number;
+	// reporting that as drift would make every instance look out of sync.
+	if !equalConfigValues(90, 90.0) {
+		t.Error("90 and 90.0 should compare equal")
+	}
+	if !equalConfigValues(int64(5), float32(5)) {
+		t.Error("int64 5 and float32 5 should compare equal")
+	}
+	if equalConfigValues(90, 91.0) {
+		t.Error("different numbers should not compare equal")
+	}
+	if equalConfigValues(90, "90") {
+		t.Error("a number and a string are not equal")
+	}
+	if !equalConfigValues([]any{"a"}, []any{"a"}) {
+		t.Error("equal slices should compare equal")
+	}
+	if equalConfigValues("a", "b") {
+		t.Error("different strings should not compare equal")
+	}
+}
+
+func TestDetectDriftSkipsDisabledAndTokenlessInstances(t *testing.T) {
+	cfg := cfgWith(config.RoleHub, "hub", "hub", map[string]config.InstanceConfig{
+		"hub":   {BaseURL: "http://127.0.0.1:7842", Token: "t"},
+		"off":   {BaseURL: "http://127.0.0.1:7843", Token: "t", Enabled: boolPtr(false)},
+		"notok": {BaseURL: "http://127.0.0.1:7844", TokenEnv: "HEIMDALLM_TEST_UNSET_DRIFT"},
+	}, config.RoutingConfig{})
+	prop := NewPropagator(NewRegistry(cfg), func(inst Instance) *Client {
+		return NewClient(inst, nil)
+	})
+
+	byID := map[string]InstanceDrift{}
+	for _, d := range prop.DetectDrift(context.Background(), map[string]any{"x": 1}, nil) {
+		byID[d.InstanceID] = d
+	}
+	if !byID["off"].Skipped {
+		t.Errorf("off = %+v, want skipped", byID["off"])
+	}
+	if byID["notok"].Error == "" {
+		t.Errorf("notok = %+v, want the token error reported", byID["notok"])
+	}
+}
+
+func TestDetectDriftRespectsTargets(t *testing.T) {
+	f := newPropagatorFixture(t, "hub", []string{"hub", "srv-a", "srv-b"}, func(id string) func(http.ResponseWriter, *http.Request) {
+		return func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]any{"x": 1})
+		}
+	})
+	drifts := f.prop.DetectDrift(context.Background(), map[string]any{"x": 1}, []string{"srv-b"})
+	if len(drifts) != 1 || drifts[0].InstanceID != "srv-b" {
+		t.Errorf("drifts = %+v, want only srv-b", drifts)
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/heimdallm/daemon/internal/config"
 	"github.com/heimdallm/daemon/internal/instances"
@@ -962,4 +963,225 @@ func countRequests(haystack []string, needle string) int {
 		}
 	}
 	return n
+}
+
+func TestProbeInstanceEndpoint(t *testing.T) {
+	remote := newFakeInstance(t, "srv-a", nil)
+	f := newHub(t, map[string]*fakeInstance{"srv-a": remote}, config.RoutingConfig{})
+
+	prober := instances.NewProber(
+		instances.NewRegistry(f.cfg), time.Minute,
+		func(inst instances.Instance) *instances.Client {
+			return instances.NewClient(inst, remote.Client())
+		}, nil, nil,
+	)
+	f.srv.SetCluster(&server.ClusterDeps{
+		Snapshot: f.snapshot,
+		Store:    f.store,
+		Prober:   prober,
+		NewClient: func(inst instances.Instance) *instances.Client {
+			return instances.NewClient(inst, remote.Client())
+		},
+	})
+
+	rec := f.do(t, http.MethodPost, "/instances/srv-a/probe", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("probe = %d: %s", rec.Code, rec.Body)
+	}
+	body := decode(t, rec)
+	if body["reachable"] != true || body["version"] != "0.9.0" {
+		t.Errorf("probe result = %v", body)
+	}
+
+	if rec := f.do(t, http.MethodPost, "/instances/ghost/probe", ""); rec.Code != http.StatusNotFound {
+		t.Errorf("probe of an unknown instance = %d, want 404", rec.Code)
+	}
+
+	// The listing joins the prober's observations onto the registry.
+	listing := decode(t, f.do(t, http.MethodGet, "/instances", ""))
+	for _, entry := range listing["instances"].([]any) {
+		m := entry.(map[string]any)
+		if m["id"] != "srv-a" {
+			continue
+		}
+		state, ok := m["state"].(map[string]any)
+		if !ok || state["reachable"] != true {
+			t.Errorf("srv-a state = %v, want the probe result", m["state"])
+		}
+	}
+}
+
+func TestDispatchToTheHubItself(t *testing.T) {
+	f := newHub(t, nil, config.RoutingConfig{})
+
+	var reviewed int64
+	f.srv.SetTriggerReviewFn(func(prID int64) error {
+		reviewed = prID
+		return nil
+	})
+
+	rec := f.do(t, http.MethodPost, "/cluster/dispatch/review",
+		`{"pr_id":42,"repo":"acme/tools","number":7,"head_sha":"sha1"}`)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("dispatch = %d: %s", rec.Code, rec.Body)
+	}
+	// The hub runs its own work in process rather than looping back over HTTP.
+	if reviewed != 42 {
+		t.Errorf("local trigger got pr_id %d, want 42", reviewed)
+	}
+}
+
+func TestDispatchToTheHubWithoutATrigger(t *testing.T) {
+	// A daemon with no review trigger wired must say so rather than reporting
+	// success for work that will never run.
+	f := newHub(t, nil, config.RoutingConfig{})
+	rec := f.do(t, http.MethodPost, "/cluster/dispatch/review", `{"pr_id":42}`)
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("dispatch = %d, want 502", rec.Code)
+	}
+}
+
+func TestDispatchMergeAndIssueOps(t *testing.T) {
+	a := newFakeInstance(t, "srv-a", nil)
+	f := newHub(t, map[string]*fakeInstance{"srv-a": a}, config.RoutingConfig{
+		Repos: map[string]string{"acme/tools": "srv-a"},
+	})
+
+	if rec := f.do(t, http.MethodPost, "/cluster/dispatch/merge",
+		`{"pr_id":42,"repo":"acme/tools","number":7,"head_sha":"s1","dry_run":true}`); rec.Code != http.StatusAccepted {
+		t.Fatalf("merge dispatch = %d: %s", rec.Code, rec.Body)
+	}
+	if rec := f.do(t, http.MethodPost, "/cluster/dispatch/issue",
+		`{"issue_id":9,"repo":"acme/tools","number":9,"head_sha":"s1"}`); rec.Code != http.StatusAccepted {
+		t.Fatalf("issue dispatch = %d: %s", rec.Code, rec.Body)
+	}
+
+	seen := a.seen()
+	if !containsAny(seen, "POST /merge-tracking/42/evaluate") {
+		t.Errorf("requests = %v, want the merge evaluation", seen)
+	}
+	if !containsAny(seen, "POST /issues/9/review") {
+		t.Errorf("requests = %v, want the issue trigger", seen)
+	}
+}
+
+// An instance that does not own the repo has never seen the PR, so it adopts
+// it first.
+func TestDispatchAddsThePRBeforeReviewing(t *testing.T) {
+	a := newFakeInstance(t, "srv-a", nil)
+	f := newHub(t, map[string]*fakeInstance{"srv-a": a}, config.RoutingConfig{
+		Repos: map[string]string{"acme/tools": "srv-a"},
+	})
+
+	rec := f.do(t, http.MethodPost, "/cluster/dispatch/review",
+		`{"pr_id":42,"repo":"acme/tools","number":7,"head_sha":"s1","pr_url":"https://github.com/acme/tools/pull/7"}`)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("dispatch = %d: %s", rec.Code, rec.Body)
+	}
+	seen := a.seen()
+	if !containsAny(seen, "POST /prs/add") {
+		t.Errorf("requests = %v, want the PR adopted first", seen)
+	}
+	if !containsAny(seen, "POST /prs/42/review") {
+		t.Errorf("requests = %v, want the review triggered", seen)
+	}
+}
+
+func TestDispatchReportsTheInstanceFailure(t *testing.T) {
+	a := newFakeInstance(t, "srv-a", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"status":"starting"}`))
+	})
+	f := newHub(t, map[string]*fakeInstance{"srv-a": a}, config.RoutingConfig{
+		Repos: map[string]string{"acme/tools": "srv-a"},
+	})
+
+	rec := f.do(t, http.MethodPost, "/cluster/dispatch/review",
+		`{"pr_id":42,"repo":"acme/tools","number":7,"head_sha":"s1"}`)
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("dispatch to a starting instance = %d, want 502", rec.Code)
+	}
+}
+
+func TestConfigDriftWithoutAConfigSnapshot(t *testing.T) {
+	// A hub built without configFn cannot compare anything and must say so.
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	srv := server.New(st, nil, nil, testToken)
+	srv.SetCluster(&server.ClusterDeps{
+		Snapshot: func() server.ClusterSnapshot {
+			reg := instances.NewRegistry(nil)
+			return server.ClusterSnapshot{
+				Registry:   reg,
+				Router:     instances.NewRouter(reg, nil),
+				Propagator: instances.NewPropagator(reg, nil),
+			}
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/cluster/drift", nil)
+	req.Header.Set(instances.HeaderToken, testToken)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("drift without a config snapshot = %d, want 503", rec.Code)
+	}
+}
+
+func TestRegisterInstanceSkipProbe(t *testing.T) {
+	f := newHub(t, nil, config.RoutingConfig{})
+	// Registering a machine that is not up yet is legitimate, as long as it is
+	// explicit.
+	rec := f.do(t, http.MethodPost, "/instances",
+		`{"id":"later","base_url":"http://10.0.0.99:7842","token":"t","skip_probe":true}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST /instances = %d: %s", rec.Code, rec.Body)
+	}
+	raw, _ := os.ReadFile(f.configPath)
+	if !strings.Contains(string(raw), "later") {
+		t.Errorf("config.toml missing the entry:\n%s", raw)
+	}
+}
+
+func TestPutRoutingLeavesOmittedFieldsAlone(t *testing.T) {
+	remote := newFakeInstance(t, "srv-a", nil)
+	f := newHub(t, map[string]*fakeInstance{"srv-a": remote}, config.RoutingConfig{
+		Mode:  config.ModeDispatch,
+		Repos: map[string]string{"acme/tools": "srv-a"},
+	})
+
+	// Changing only the default must not wipe the repo rules.
+	if rec := f.do(t, http.MethodPut, "/cluster/routing", `{"default_instance":"srv-a"}`); rec.Code != http.StatusOK {
+		t.Fatalf("PUT = %d: %s", rec.Code, rec.Body)
+	}
+	body := decode(t, f.do(t, http.MethodGet, "/cluster/routing", ""))
+	if body["mode"] != config.ModeDispatch {
+		t.Errorf("mode = %v, want it untouched", body["mode"])
+	}
+	if body["repos"].(map[string]any)["acme/tools"] != "srv-a" {
+		t.Errorf("repos = %v, want them untouched", body["repos"])
+	}
+
+	// Clearing the default is expressed as an empty string.
+	if rec := f.do(t, http.MethodPut, "/cluster/routing", `{"default_instance":""}`); rec.Code != http.StatusOK {
+		t.Fatalf("PUT = %d: %s", rec.Code, rec.Body)
+	}
+}
+
+func TestClusterEndpointsRejectBadJSON(t *testing.T) {
+	remote := newFakeInstance(t, "srv-a", nil)
+	f := newHub(t, map[string]*fakeInstance{"srv-a": remote}, config.RoutingConfig{})
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodPost, "/instances"},
+		{http.MethodPatch, "/instances/srv-a"},
+		{http.MethodPut, "/cluster/routing"},
+		{http.MethodPost, "/cluster/dispatch/review"},
+	} {
+		if rec := f.do(t, tc.method, tc.path, "{"); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s %s with bad JSON = %d, want 400", tc.method, tc.path, rec.Code)
+		}
+	}
 }

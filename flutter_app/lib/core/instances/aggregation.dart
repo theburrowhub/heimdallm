@@ -78,13 +78,20 @@ Future<AggregatedResult<T>> aggregate<T>({
 }) async {
   if (targets.isEmpty) return const AggregatedResult();
 
+  // Resolve every client BEFORE the first await. clientFor reads Riverpod
+  // providers, and reading a provider across an async gap is an anti-pattern
+  // that leaves the caller's own provider stuck in its loading state.
+  final resolved = [
+    for (final instance in targets) (instance: instance, client: clientFor(instance.id)),
+  ];
+
   final settled = await Future.wait(
-    targets.map((instance) async {
+    resolved.map((target) async {
       try {
-        final values = await fetch(clientFor(instance.id));
-        return _Outcome<T>(instance: instance, values: values);
+        final values = await fetch(target.client);
+        return _Outcome<T>(instance: target.instance, values: values);
       } catch (error) {
-        return _Outcome<T>(instance: instance, error: error);
+        return _Outcome<T>(instance: target.instance, error: error);
       }
     }),
   );

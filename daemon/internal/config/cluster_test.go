@@ -470,3 +470,121 @@ func TestClusterEnvOverrides(t *testing.T) {
 		t.Errorf("probe_interval = %q, want 15s", c.Cluster.ProbeInterval)
 	}
 }
+
+func TestExpandTokenFilePath(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home directory in this environment")
+	}
+
+	expanded, err := expandTokenFilePath("~/heimdallm/api_token")
+	if err != nil {
+		t.Fatalf("expandTokenFilePath(~/...) = %v", err)
+	}
+	if !strings.HasPrefix(expanded, home) {
+		t.Errorf("expanded = %q, want it under %q", expanded, home)
+	}
+
+	if got, err := expandTokenFilePath("~"); err != nil || got != filepath.Clean(home) {
+		t.Errorf("expandTokenFilePath(~) = %q, %v", got, err)
+	}
+	if got, err := expandTokenFilePath("/etc/heimdallm/../api_token"); err != nil || got != "/etc/api_token" {
+		t.Errorf("expandTokenFilePath cleaned to %q, %v", got, err)
+	}
+	// A relative path would resolve against whatever directory the daemon
+	// happened to be started from.
+	if _, err := expandTokenFilePath("relative/api_token"); err == nil {
+		t.Error("expandTokenFilePath accepted a relative path")
+	}
+	if _, err := expandTokenFilePath(""); err == nil {
+		t.Error("expandTokenFilePath accepted an empty path")
+	}
+}
+
+func TestClusterDefaultsPreserveExplicitValues(t *testing.T) {
+	c := &Config{}
+	c.AI.Primary = "claude"
+	c.Cluster.Routing.Mode = ModeDispatch
+	c.Cluster.ProbeInterval = "5s"
+	c.applyDefaults()
+
+	if c.Cluster.Routing.Mode != ModeDispatch {
+		t.Errorf("mode = %q, want the explicit value preserved", c.Cluster.Routing.Mode)
+	}
+	if c.Cluster.ProbeInterval != "5s" {
+		t.Errorf("probe_interval = %q, want the explicit value preserved", c.Cluster.ProbeInterval)
+	}
+}
+
+// A [cluster] section must survive a TOML round trip, or the daemon would
+// silently drop the registry the first time it rewrote its own config.
+func TestClusterTOMLRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	contents := `
+[ai]
+primary = "claude"
+
+[cluster]
+role = "hub"
+instance_id = "hub-1"
+instance_name = "Local hub"
+default_instance = "hub-1"
+probe_interval = "45s"
+
+[cluster.instances.hub-1]
+name = "Local hub"
+base_url = "http://127.0.0.1:7842"
+token = "t"
+labels = ["macos", "local"]
+
+[cluster.instances."srv-a"]
+base_url = "http://10.0.0.11:7842"
+token_env = "HEIMDALLM_SRV_A"
+enabled = false
+
+[cluster.routing]
+mode = "dispatch"
+round_robin_pool = ["hub-1"]
+round_robin_ops = ["review", "merge"]
+
+[cluster.routing.orgs]
+theburrowhub = "hub-1"
+
+[cluster.routing.repos]
+"theburrowhub/heimdallm" = "hub-1"
+`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.IsHub() || cfg.Cluster.InstanceID != "hub-1" {
+		t.Errorf("cluster = %+v", cfg.Cluster)
+	}
+	if cfg.Cluster.ProbeInterval != "45s" {
+		t.Errorf("probe_interval = %q", cfg.Cluster.ProbeInterval)
+	}
+	if len(cfg.Cluster.Instances) != 2 {
+		t.Fatalf("instances = %v", cfg.Cluster.Instances)
+	}
+	hub := cfg.Cluster.Instances["hub-1"]
+	if hub.Token != "t" || len(hub.Labels) != 2 || !hub.IsEnabled() {
+		t.Errorf("hub entry = %+v", hub)
+	}
+	srv := cfg.Cluster.Instances["srv-a"]
+	if srv.TokenEnv != "HEIMDALLM_SRV_A" || srv.IsEnabled() {
+		t.Errorf("srv-a entry = %+v", srv)
+	}
+	if cfg.Cluster.Routing.Mode != ModeDispatch ||
+		cfg.Cluster.Routing.Orgs["theburrowhub"] != "hub-1" ||
+		cfg.Cluster.Routing.Repos["theburrowhub/heimdallm"] != "hub-1" {
+		t.Errorf("routing = %+v", cfg.Cluster.Routing)
+	}
+	if got := cfg.EnabledInstanceIDs(); len(got) != 1 || got[0] != "hub-1" {
+		t.Errorf("EnabledInstanceIDs() = %v, want only the enabled hub", got)
+	}
+}

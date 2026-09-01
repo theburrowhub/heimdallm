@@ -158,3 +158,44 @@ func TestNumericJumpIgnoresOutOfRangeDigits(t *testing.T) {
 		t.Errorf("key 9 changed the tab to %d, want it ignored", d.activeTab)
 	}
 }
+
+func TestRenderInstancesScrolls(t *testing.T) {
+	instances := make([]api.Instance, 0, 6)
+	for i := 0; i < 6; i++ {
+		instances = append(instances, api.Instance{
+			ID: string(rune('a'+i)) + "-node", Enabled: true,
+			State: &api.InstanceState{Reachable: true},
+		})
+	}
+	d := &Dashboard{registry: &api.ClusterRegistry{SelfID: "hub-1", Instances: instances}}
+
+	full := d.renderInstances(100)
+	if !strings.Contains(full, "Instances") {
+		t.Errorf("missing the header:\n%s", full)
+	}
+	if !strings.Contains(full, "f-node") {
+		t.Errorf("a tall viewport should show every instance:\n%s", full)
+	}
+
+	// A short viewport must clip rather than overflow the pane.
+	short := d.renderInstances(5)
+	if strings.Count(short, "\n") > 6 {
+		t.Errorf("short viewport rendered %d lines, want it clipped:\n%s",
+			strings.Count(short, "\n"), short)
+	}
+
+	// Scrolling follows the cursor, so a selection below the fold is visible.
+	d.cursor = len(d.buildInstanceLines()) - 1
+	scrolled := d.renderInstances(5)
+	if !strings.Contains(scrolled, "f-node") {
+		t.Errorf("the cursor row is not in view:\n%s", scrolled)
+	}
+}
+
+func TestRenderInstancesWithoutAHub(t *testing.T) {
+	d := &Dashboard{}
+	out := d.renderInstances(20)
+	if !strings.Contains(out, "not a cluster hub") {
+		t.Errorf("output = %q", out)
+	}
+}

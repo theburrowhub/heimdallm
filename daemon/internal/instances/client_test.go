@@ -275,3 +275,36 @@ func TestSanitize(t *testing.T) {
 		}
 	}
 }
+
+func TestClientInstanceAccessor(t *testing.T) {
+	inst := Instance{ID: "srv-a", Name: "Server A", BaseURL: "http://a:7842", Token: "t", Enabled: true}
+	if got := NewClient(inst, nil).Instance(); got.ID != "srv-a" || got.Name != "Server A" {
+		t.Errorf("Instance() = %+v", got)
+	}
+}
+
+func TestClientAddPRSendsTheURL(t *testing.T) {
+	f := newFakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":1}`))
+	})
+	body, err := NewClient(f.instance("a"), f.Client()).AddPR(
+		context.Background(), "https://github.com/acme/tools/pull/3")
+	if err != nil {
+		t.Fatalf("AddPR: %v", err)
+	}
+	if len(body) == 0 {
+		t.Error("AddPR returned no body")
+	}
+	if !strings.Contains(f.seen()[0].Body, "acme/tools/pull/3") {
+		t.Errorf("request body = %q, want the PR URL", f.seen()[0].Body)
+	}
+}
+
+func TestClientGetConfigUnparseable(t *testing.T) {
+	f := newFakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("not json"))
+	})
+	if _, err := NewClient(f.instance("a"), f.Client()).GetConfig(context.Background()); err == nil {
+		t.Error("GetConfig = nil error on a non-JSON body")
+	}
+}

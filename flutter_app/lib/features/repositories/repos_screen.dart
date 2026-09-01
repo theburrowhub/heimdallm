@@ -147,30 +147,36 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
   /// than one request per repo: the routing map is replaced wholesale, so a
   /// per-repo loop would make each write race the previous one's state.
   Future<void> _assignSelectionToInstance(String? instanceId) async {
-    final rules = ref.read(routingRulesProvider).value;
-    if (rules == null || _selected.isEmpty) return;
+    if (_selected.isEmpty) return;
+    final api = ref.read(hubApiClientProvider);
+    final messenger = ScaffoldMessenger.of(context);
 
-    final repos = Map<String, String>.from(rules.repos);
-    for (final repo in _selected) {
-      if (instanceId == null || instanceId.isEmpty) {
-        repos.remove(repo);
-      } else {
-        repos[repo] = instanceId;
-      }
-    }
     try {
-      await ref.read(hubApiClientProvider).putRouting(repos: repos);
-      if (mounted) {
-        final count = _selected.length;
-        showToast(
-          context,
-          instanceId == null
-              ? '$count repositories now inherit the default instance'
-              : '$count repositories routed to $instanceId',
-        );
+      // Read the rules from the hub rather than a cached provider: PUT
+      // replaces the map wholesale, so writing on top of a stale copy would
+      // silently undo a rule changed elsewhere in the meantime.
+      final rules = await api.fetchRouting();
+      final repos = Map<String, String>.from(rules.repos);
+      for (final repo in _selected) {
+        if (instanceId == null || instanceId.isEmpty) {
+          repos.remove(repo);
+        } else {
+          repos[repo] = instanceId;
+        }
       }
+      final count = _selected.length;
+      await api.putRouting(repos: repos);
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            instanceId == null || instanceId.isEmpty
+                ? '$count repositories now inherit the default instance'
+                : '$count repositories routed to $instanceId',
+          ),
+        ),
+      );
     } catch (e) {
-      if (mounted) showToast(context, 'Error: $e', isError: true);
+      messenger.showSnackBar(SnackBar(content: Text('Error: $e')));
     } finally {
       ref.invalidate(routingRulesProvider);
       ref.invalidate(daemonInstancesProvider);

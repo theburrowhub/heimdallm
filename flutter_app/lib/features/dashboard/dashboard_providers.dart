@@ -75,7 +75,7 @@ ApiClient clientForInstanceOf(WidgetRef ref, String instanceId) {
 /// form is preserved exactly for the empty instance id so single-daemon
 /// behaviour — and its tests — are unchanged.
 String reviewKeyFor(String instanceId, String repo, int number) =>
-    instanceId.isEmpty ? '\$repo:\$number' : '\$instanceId|\$repo:\$number';
+    instanceId.isEmpty ? '$repo:$number' : '$instanceId|$repo:$number';
 
 /// Latest circuit-breaker-tripped payload from the daemon. Null until the
 /// breaker fires or after the user dismisses the banner. Set by the
