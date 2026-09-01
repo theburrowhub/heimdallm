@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import '../../core/instances/instances_providers.dart';
+import '../instances/config_propagation_dialog.dart';
 import '../../core/models/config_model.dart';
 import '../../core/platform/platform_services_provider.dart';
 import '../../shared/widgets/autocomplete_chip_field.dart';
@@ -1596,7 +1598,10 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     final pollInvalid = validatePollInterval(_pollInterval) != null;
 
     if (daemonRunning) {
-      return SizedBox(
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SizedBox(
         width: double.infinity,
         child: ElevatedButton(
           onPressed: pollInvalid
@@ -1624,6 +1629,31 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
                 },
           child: const Text('Save'),
         ),
+          ),
+          // Only meaningful once more than one instance is registered, and
+          // hidden otherwise so a single-daemon install sees the same screen
+          // it always had.
+          if (ref.watch(daemonInstancesProvider).value?.isMultiInstance ??
+              false) ...[
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              icon: const Icon(Icons.sync_alt, size: 16),
+              label: const Text('Apply to all instances…'),
+              onPressed: () => showConfigPropagationDialog(context, ref),
+            ),
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                'Pushes the shared settings above to every registered '
+                'instance. Ports, tokens and local paths stay per-machine.',
+                style: TextStyle(
+                  fontSize: 11,
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+          ],
+        ],
       );
     }
 

@@ -12,12 +12,22 @@ class BulkActionsBar extends StatelessWidget {
   final void Function(Feature feature, bool enable) onApply;
   final VoidCallback onClear;
 
+  /// Instances the selection can be routed to. Empty on a single-daemon
+  /// install, where the whole row is hidden.
+  final List<({String id, String name})> instances;
+
+  /// Routes every selected repository to an instance. Null clears the rules so
+  /// they fall back to the default instance.
+  final void Function(String? instanceId)? onAssignInstance;
+
   const BulkActionsBar({
     super.key,
     required this.selectedCount,
     required this.aggregates,
     required this.onApply,
     required this.onClear,
+    this.instances = const [],
+    this.onAssignInstance,
   });
 
   @override
@@ -58,10 +68,54 @@ class BulkActionsBar extends StatelessWidget {
           ]),
           const Divider(height: 14, thickness: 0.5),
           for (final f in Feature.values) _row(f),
+          if (instances.isNotEmpty && onAssignInstance != null) ...[
+            const Divider(height: 14, thickness: 0.5),
+            _instanceRow(context),
+          ],
         ],
       ),
     );
   }
+
+  Widget _instanceRow(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        children: [
+          const Icon(Icons.dns_outlined, size: 14),
+          const SizedBox(width: 8),
+          const Text(
+            'Route to instance',
+            style: TextStyle(fontWeight: FontWeight.w600, fontSize: 12.5),
+          ),
+          const Spacer(),
+          PopupMenuButton<String>(
+            tooltip: 'Route the selected repositories',
+            onSelected: (value) =>
+                onAssignInstance!(value == _inheritValue ? null : value),
+            itemBuilder: (context) => [
+              const PopupMenuItem(
+                value: _inheritValue,
+                child: Text('Inherit (default instance)'),
+              ),
+              const PopupMenuDivider(),
+              for (final instance in instances)
+                PopupMenuItem(value: instance.id, child: Text(instance.name)),
+            ],
+            child: const Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('Choose…', style: TextStyle(fontSize: 12.5)),
+                Icon(Icons.arrow_drop_down, size: 18),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  static const _inheritValue = '__inherit__';
 
   Widget _row(Feature f) {
     final v = aggregates[f];

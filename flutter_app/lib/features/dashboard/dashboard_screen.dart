@@ -2,6 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../../core/api/api_client.dart';
+import '../../core/instances/aggregation.dart';
+import '../../core/instances/instances_providers.dart';
+import '../instances/widgets/instance_badge.dart';
+import '../instances/widgets/instance_selector.dart';
 import '../../core/models/pr.dart';
 import '../../core/models/review_status.dart';
 import '../../core/models/tracked_issue.dart';
@@ -51,6 +56,9 @@ class DashboardScreen extends ConsumerWidget {
         appBar: AppBar(
           title: const Text('Heimdallm'),
           actions: [
+            // Renders nothing unless more than one instance is registered, so a
+            // single-daemon install sees exactly the toolbar it always had.
+            const InstanceSelector(),
             const CheckForUpdatesButton(),
             IconButton(
               icon: daemonStarting
@@ -83,10 +91,14 @@ class DashboardScreen extends ConsumerWidget {
             IconButton(
               icon: const Icon(Icons.refresh),
               onPressed: () {
-                ref.invalidate(prsProvider);
-                ref.invalidate(issuesProvider);
-                ref.invalidate(mergeTrackingProvider);
-                ref.invalidate(statsProvider);
+                // Invalidate the aggregating providers: the flat lists derive
+                // from them, so refreshing only the derived ones would replay
+                // the same cached fan-out.
+                ref.invalidate(daemonInstancesProvider);
+                ref.invalidate(prsByInstanceProvider);
+                ref.invalidate(issuesByInstanceProvider);
+                ref.invalidate(mergeTrackingByInstanceProvider);
+                ref.invalidate(statsByInstanceProvider);
                 ref.invalidate(githubRateLimitProvider);
                 ref.invalidate(activityEntriesProvider);
                 ref.invalidate(activityOptionsProvider);
@@ -130,6 +142,12 @@ class DashboardScreen extends ConsumerWidget {
                 status: connection,
                 onRestart: () => server_actions.restartDaemon(context, ref),
               ),
+            InstanceFailureBanner(
+              failureLabels: ref
+                  .watch(instanceReadFailuresProvider)
+                  .map((f) => f.label)
+                  .toList(),
+            ),
             const Expanded(
               child: TabBarView(
                 children: [
@@ -267,19 +285,22 @@ class SortNotifier extends Notifier<SortMode> {
 // ── Unified activity item ────────────────────────────────────────────────────
 
 sealed class _ActivityItem {
-  const _ActivityItem();
-  factory _ActivityItem.pr(PR pr) = _PRItem;
-  factory _ActivityItem.issue(TrackedIssue issue) = _IssueItem;
+  const _ActivityItem({this.instanceId = '', this.instanceName = ''});
+
+  /// Which instance served this row. Empty on a single-daemon install, where
+  /// no badge is rendered at all.
+  final String instanceId;
+  final String instanceName;
 }
 
 class _PRItem extends _ActivityItem {
   final PR pr;
-  const _PRItem(this.pr);
+  const _PRItem(this.pr, {super.instanceId, super.instanceName});
 }
 
 class _IssueItem extends _ActivityItem {
   final TrackedIssue issue;
-  const _IssueItem(this.issue);
+  const _IssueItem(this.issue, {super.instanceId, super.instanceName});
 }
 
 String _itemType(_ActivityItem item) => switch (item) {
@@ -404,14 +425,16 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
       next.whenData((event) {
         if (event.type == 'pr_state_changed' ||
             event.type == 'issue_state_changed') {
-          ref.invalidate(prsProvider);
-          ref.invalidate(issuesProvider);
+          ref.invalidate(prsByInstanceProvider);
+          ref.invalidate(issuesByInstanceProvider);
         }
       });
     });
 
-    final prsAsync = ref.watch(prsProvider);
-    final issuesAsync = ref.watch(issuesProvider);
+    // Watch the aggregating providers so every row knows which instance
+    // served it; the flat lists below are just their values.
+    final prsAsync = ref.watch(prsByInstanceProvider);
+    final issuesAsync = ref.watch(issuesByInstanceProvider);
     final sort = ref.watch(reviewsSortProvider);
     final filters = ref.watch(activityFiltersProvider);
     final emptyToolbar = ActivityFilterBar(
@@ -439,8 +462,11 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
       );
     }
 
-    final prs = prsAsync.value ?? [];
-    final issues = issuesAsync.value ?? [];
+    final prScoped = prsAsync.value?.items ?? const <InstanceScoped<PR>>[];
+    final issueScoped =
+        issuesAsync.value?.items ?? const <InstanceScoped<TrackedIssue>>[];
+    final prs = prScoped.map((e) => e.value).toList();
+    final issues = issueScoped.map((e) => e.value).toList();
 
     // Collect all known repos for the filter bar.
     final allRepos = <String>{
@@ -450,8 +476,22 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
 
     // Build unified list of items.
     final List<_ActivityItem> items = [
-      ...prs.where((p) => p.repo.isNotEmpty).map((p) => _ActivityItem.pr(p)),
-      ...issues.map((i) => _ActivityItem.issue(i)),
+      ...prScoped
+          .where((e) => e.value.repo.isNotEmpty)
+          .map(
+            (e) => _PRItem(
+              e.value,
+              instanceId: e.instanceId,
+              instanceName: e.instanceName,
+            ),
+          ),
+      ...issueScoped.map(
+        (e) => _IssueItem(
+          e.value,
+          instanceId: e.instanceId,
+          instanceName: e.instanceName,
+        ),
+      ),
     ];
 
     // Apply filters.
@@ -531,8 +571,14 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
         ...header,
         ...filtered.map(
           (item) => switch (item) {
-            _PRItem(:final pr) => _PRTile(pr: pr),
-            _IssueItem(:final issue) => _IssueActivityTile(issue: issue),
+            _PRItem(:final pr, :final instanceId, :final instanceName) =>
+              _PRTile(
+                pr: pr,
+                instanceId: instanceId,
+                instanceName: instanceName,
+              ),
+            _IssueItem(:final issue, :final instanceId) =>
+              _IssueActivityTile(issue: issue, instanceId: instanceId),
           },
         ),
       ],
@@ -564,8 +610,8 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
             children: [
               TextButton(
                 onPressed: () {
-                  ref.invalidate(prsProvider);
-                  ref.invalidate(issuesProvider);
+                  ref.invalidate(prsByInstanceProvider);
+                  ref.invalidate(issuesByInstanceProvider);
                 },
                 child: const Text('Retry'),
               ),
@@ -602,14 +648,25 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
 
 class _PRTile extends ConsumerStatefulWidget {
   final PR pr;
-  const _PRTile({required this.pr});
+  final String instanceId;
+  final String instanceName;
+  const _PRTile({
+    required this.pr,
+    this.instanceId = '',
+    this.instanceName = '',
+  });
 
   @override
   ConsumerState<_PRTile> createState() => _PRTileState();
 }
 
 class _PRTileState extends ConsumerState<_PRTile> {
-  String get _reviewKey => '${widget.pr.repo}:${widget.pr.number}';
+  String get _reviewKey =>
+      reviewKeyFor(widget.instanceId, widget.pr.repo, widget.pr.number);
+
+  /// The client for the instance holding this PR, not whichever one the
+  /// dashboard is currently scoped to.
+  ApiClient get _api => clientForInstanceOf(ref, widget.instanceId);
   bool _cancelling = false;
 
   Future<void> _triggerReview() async {
@@ -621,7 +678,7 @@ class _PRTileState extends ConsumerState<_PRTile> {
         .read(reviewingPRsProvider.notifier)
         .update((s) => {...s, _reviewKey: baseline});
     try {
-      await ref.read(apiClientProvider).triggerReview(widget.pr.id);
+      await _api.triggerReview(widget.pr.id);
     } catch (e) {
       ref
           .read(reviewingPRsProvider.notifier)
@@ -631,10 +688,10 @@ class _PRTileState extends ConsumerState<_PRTile> {
   }
 
   Future<void> _dismiss() async {
-    final api = ref.read(apiClientProvider);
+    final api = _api;
     try {
       await api.dismissPR(widget.pr.id);
-      ref.invalidate(prsProvider);
+      ref.invalidate(prsByInstanceProvider);
       if (mounted) {
         showToast(
           context,
@@ -643,7 +700,7 @@ class _PRTileState extends ConsumerState<_PRTile> {
           actionLabel: 'Undo',
           onAction: () async {
             await api.undismissPR(widget.pr.id);
-            ref.invalidate(prsProvider);
+            ref.invalidate(prsByInstanceProvider);
           },
         );
       }
@@ -676,7 +733,7 @@ class _PRTileState extends ConsumerState<_PRTile> {
     if (confirmed != true || !mounted) return;
     setState(() => _cancelling = true);
     try {
-      await ref.read(apiClientProvider).cancelReview(widget.pr.id);
+      await _api.cancelReview(widget.pr.id);
       if (mounted) showToast(context, 'Cancellation requested');
     } catch (e) {
       if (mounted) {
@@ -704,7 +761,7 @@ class _PRTileState extends ConsumerState<_PRTile> {
         margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 3),
         child: InkWell(
           borderRadius: BorderRadius.circular(12),
-          onTap: () => context.push('/prs/${pr.id}'),
+          onTap: () => context.push(prDetailRoute(pr.id, widget.instanceId)),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
             child: Row(
@@ -745,11 +802,25 @@ class _PRTileState extends ConsumerState<_PRTile> {
                         overflow: TextOverflow.ellipsis,
                       ),
                       const SizedBox(height: 4),
-                      Text(
-                        '${pr.repo} · #${pr.number} · ${pr.author}',
-                        style: Theme.of(context).textTheme.bodySmall,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
+                      Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              '${pr.repo} · #${pr.number} · ${pr.author}',
+                              style: Theme.of(context).textTheme.bodySmall,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          if (widget.instanceId.isNotEmpty) ...[
+                            const SizedBox(width: 6),
+                            InstanceBadge(
+                              instanceId: widget.instanceId,
+                              instanceName: widget.instanceName,
+                              compact: true,
+                            ),
+                          ],
+                        ],
                       ),
                       if (failure != null && !isReviewing) ...[
                         const SizedBox(height: 3),
@@ -877,7 +948,8 @@ class _PRTileState extends ConsumerState<_PRTile> {
 
 class _IssueActivityTile extends ConsumerStatefulWidget {
   final TrackedIssue issue;
-  const _IssueActivityTile({required this.issue});
+  final String instanceId;
+  const _IssueActivityTile({required this.issue, this.instanceId = ''});
 
   @override
   ConsumerState<_IssueActivityTile> createState() => _IssueActivityTileState();
@@ -886,11 +958,14 @@ class _IssueActivityTile extends ConsumerStatefulWidget {
 class _IssueActivityTileState extends ConsumerState<_IssueActivityTile> {
   String get _type => _itemType(_IssueItem(widget.issue));
 
+  /// The client for the instance holding this issue.
+  ApiClient get _api => clientForInstanceOf(ref, widget.instanceId);
+
   Future<void> _dismiss() async {
-    final api = ref.read(apiClientProvider);
+    final api = _api;
     try {
       await api.dismissIssue(widget.issue.id);
-      ref.invalidate(issuesProvider);
+      ref.invalidate(issuesByInstanceProvider);
       if (mounted) {
         showToast(
           context,
@@ -899,7 +974,7 @@ class _IssueActivityTileState extends ConsumerState<_IssueActivityTile> {
           actionLabel: 'Undo',
           onAction: () async {
             await api.undismissIssue(widget.issue.id);
-            ref.invalidate(issuesProvider);
+            ref.invalidate(issuesByInstanceProvider);
           },
         );
       }
@@ -926,7 +1001,8 @@ class _IssueActivityTileState extends ConsumerState<_IssueActivityTile> {
         margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 3),
         child: InkWell(
           borderRadius: BorderRadius.circular(12),
-          onTap: () => context.push('/issues/${issue.id}'),
+          onTap: () =>
+              context.push(issueDetailRoute(issue.id, widget.instanceId)),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
             child: Row(

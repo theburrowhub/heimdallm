@@ -540,6 +540,25 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	broker.Start()
 	defer broker.Stop()
 
+	// ── Multi-instance control plane ────────────────────────────────────
+	// Resolve this daemon's stable identity, then build the registry, the
+	// org/repo router and (on a hub) the health prober. Everything below is a
+	// no-op on a config with no [cluster]: the router then reports that this
+	// daemon owns every repo, which is exactly the single-daemon behaviour.
+	instanceID, err := ensureInstanceID(cfg, dataDir())
+	if err != nil {
+		slog.Error("cluster: could not resolve instance identity", "err", err)
+		return 1
+	}
+	cfg.Cluster.InstanceID = instanceID
+	ensureSelfInstance(cfg, dataDir())
+	clusterSt := newClusterState(cfg, s, broker)
+	if cfg.ClusterEnabled() {
+		slog.Info("cluster: multi-instance mode active",
+			"instance_id", instanceID, "role", cfg.Cluster.Role,
+			"instances", len(cfg.Cluster.Instances))
+	}
+
 	// ── Bridge: SSE broker → NATS events ────────────────────────────────
 	// Re-publishes every broker event to NATS so the SSE handler (which
 	// now reads from NATS) receives events from all existing publishers.
@@ -705,6 +724,9 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	srv.ConfigureDependencies(s, broker, p)
 	srv.SetNATSConn(eventBus.Conn())
 	srv.SetConfigPath(cfgPath)
+	// Identity is published on every daemon (a worker has to be recognisable
+	// on /health); the /instances and /cluster routes only on a hub.
+	wireCluster(srv, clusterSt, s)
 	srv.SetHealthSnapshotFn(func() server.HealthSnapshot {
 		interval := time.Duration(atomic.LoadInt64(&pollIntervalNano))
 		var lastPoll time.Time
@@ -1025,6 +1047,7 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		workGate:             updateWorkGate,
 		lastSkippedUpdatedAt: make(map[int64]time.Time),
 		lastBreakerTrips:     make(map[breakerTripKey]breakerTripDedup),
+		owns:                 clusterSt.Owns,
 	}
 
 	// Phase 2/3 of #482: build the Responder and FixRunner with real
@@ -1257,6 +1280,15 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			}
 		}()
 
+		// Instance health probing (hub only). RunProber returns immediately on
+		// a worker or a standalone daemon, so this costs one no-op goroutine
+		// rather than needing a conditional around the whole block.
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			clusterSt.RunProber(ctx)
+		}()
+
 		// Tier 2: PR / issue polling — use the resolved interval which honours
 		// [polling].poll_interval > [github].poll_interval > 5m default.
 		cfgMu.Lock()
@@ -1323,8 +1355,15 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		// cfgMu so a reload takes effect on the next tick.
 		monitoredReposFn := func() []string {
 			cfgMu.Lock()
-			defer cfgMu.Unlock()
-			return discovery.MergeRepos(cfg.GitHub.Repositories, aiRepoKeys(cfg), nil, cfg.GitHub.NonMonitored)
+			repos := discovery.MergeRepos(cfg.GitHub.Repositories, aiRepoKeys(cfg), nil, cfg.GitHub.NonMonitored)
+			cfgMu.Unlock()
+			// Partition the work: with instances configured, each daemon acts
+			// only on the repos routed to it. Discovery deliberately stays
+			// global (every instance still learns about every repo, so the GUI
+			// sees the whole picture) — it is acting that is narrowed. Feeds
+			// both the autonomous poller and the merge-tracking reconciler, so
+			// one filter partitions both.
+			return clusterSt.FilterOwned(repos)
 		}
 		autonomousStageR := &autonomousStageRunner{
 			ghClient:  ghClient,
@@ -2549,6 +2588,13 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			return fmt.Errorf("reload: %w", err)
 		}
 		monitoringConflictWarner.warn(newCfg)
+
+		// Refresh routing before the restart decision below: the pollers read
+		// ownership live on every tick, so a routing-only change must take
+		// effect even on the fast path that does not restart them.
+		newCfg.Cluster.InstanceID = instanceID
+		ensureSelfInstance(newCfg, dataDir())
+		clusterSt.Update(newCfg)
 
 		cfgMu.Lock()
 		restartPollers := configReloadRequiresPollerRestart(cfg, newCfg)
@@ -4268,6 +4314,11 @@ type tier2Adapter struct {
 	responder reviewResponderDispatcher
 	fixRunner reviewFixDispatcher
 
+	// owns reports whether this daemon should act on a repo. Nil means "yes",
+	// which is the single-daemon behaviour and what every test that does not
+	// care about clustering gets for free.
+	owns func(repo string) bool
+
 	// skipMu protects the lightweight SSE dedup caches below.
 	skipMu               sync.Mutex
 	lastSkippedUpdatedAt map[int64]time.Time
@@ -4571,6 +4622,14 @@ func (a *tier2Adapter) FetchPRsToReview() ([]scheduler.Tier2PR, error) {
 				continue
 			}
 		}
+		// Skip PRs in repos routed to another instance. This runs AFTER
+		// upsertDiscoveredRepos on purpose: every instance still discovers
+		// every repo, so the GUI shows the whole estate, but only the owner
+		// reviews. Without instances configured this is always true and the
+		// loop behaves exactly as it did before.
+		if a.owns != nil && !a.owns(pr.Repo) {
+			continue
+		}
 		seenIDs[pr.ID] = struct{}{}
 		reason := pipeline.Evaluate(pipeline.PRGate{
 			State:  pr.State,
@@ -4857,6 +4916,11 @@ func (a *tier2Adapter) ClearIssuePrefetch() {
 
 // ProcessRepo implements scheduler.Tier2IssueProcessor.
 func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error) {
+	// Issue work is partitioned the same way PR review is: only the instance
+	// this repo is routed to acts on it. Always true without [cluster].
+	if a.owns != nil && !a.owns(repo) {
+		return 0, nil
+	}
 	ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, a.workGate, workgate.KindIssue)
 	if err != nil {
 		slog.Debug("tier2 issue scan deferred while application update drains", "repo", repo)

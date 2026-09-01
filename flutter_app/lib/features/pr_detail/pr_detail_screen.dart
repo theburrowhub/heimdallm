@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../../core/api/api_client.dart';
 import '../merge_tracking/merge_tracking_providers.dart';
 import '../merge_tracking/widgets/check_visuals.dart';
 import '../merge_tracking/widgets/checks_table.dart';
@@ -18,13 +19,25 @@ import 'pr_detail_providers.dart';
 
 class PRDetailScreen extends ConsumerStatefulWidget {
   final int prId;
-  const PRDetailScreen({super.key, required this.prId});
+
+  /// Which instance holds this record. Empty means the daemon this app
+  /// manages, which is every record on a single-daemon install.
+  final String instanceId;
+
+  const PRDetailScreen({super.key, required this.prId, this.instanceId = ''});
 
   @override
   ConsumerState<PRDetailScreen> createState() => _PRDetailScreenState();
 }
 
 class _PRDetailScreenState extends ConsumerState<PRDetailScreen> {
+  /// Key for the instance-scoped detail provider.
+  PRRef get _ref => (instanceId: widget.instanceId, prId: widget.prId);
+
+  /// The client for the instance holding this PR, not whichever one the
+  /// dashboard is currently scoped to.
+  ApiClient get _api => clientForInstanceOf(ref, widget.instanceId);
+
   bool _reviewing = false;
   bool _cancelling = false;
   Timer? _reviewTimeout;
@@ -55,10 +68,10 @@ class _PRDetailScreenState extends ConsumerState<PRDetailScreen> {
   }
 
   Future<void> _dismiss(BuildContext context) async {
-    final api = ref.read(apiClientProvider);
+    final api = _api;
     try {
       await api.dismissPR(widget.prId);
-      ref.invalidate(prsProvider);
+      ref.invalidate(prsByInstanceProvider);
       if (context.mounted) {
         context.canPop() ? context.pop() : context.go('/');
         showToast(
@@ -68,7 +81,7 @@ class _PRDetailScreenState extends ConsumerState<PRDetailScreen> {
           actionLabel: 'Undo',
           onAction: () async {
             await api.undismissPR(widget.prId);
-            ref.invalidate(prsProvider);
+            ref.invalidate(prsByInstanceProvider);
           },
         );
       }
@@ -80,10 +93,10 @@ class _PRDetailScreenState extends ConsumerState<PRDetailScreen> {
 
   Future<void> _trigger() async {
     _startReviewing();
-    final api = ref.read(apiClientProvider);
+    final api = _api;
     try {
       await api.triggerReview(widget.prId);
-      ref.invalidate(prDetailProvider(widget.prId));
+      ref.invalidate(prDetailProvider(_ref));
     } catch (e) {
       _stopReviewing();
       if (mounted) showToast(context, 'Error: $e', isError: true);
@@ -91,7 +104,7 @@ class _PRDetailScreenState extends ConsumerState<PRDetailScreen> {
   }
 
   Future<void> _cancel() async {
-    final detail = ref.read(prDetailProvider(widget.prId)).value;
+    final detail = ref.read(prDetailProvider(_ref)).value;
     final pr = detail?['pr'] as PR?;
     final confirmed = await showDialog<bool>(
       context: context,
@@ -116,7 +129,7 @@ class _PRDetailScreenState extends ConsumerState<PRDetailScreen> {
     if (confirmed != true || !mounted) return;
     setState(() => _cancelling = true);
     try {
-      await ref.read(apiClientProvider).cancelReview(widget.prId);
+      await _api.cancelReview(widget.prId);
       if (mounted) showToast(context, 'Cancellation requested');
     } catch (e) {
       if (mounted) {
@@ -128,7 +141,7 @@ class _PRDetailScreenState extends ConsumerState<PRDetailScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final detailAsync = ref.watch(prDetailProvider(widget.prId));
+    final detailAsync = ref.watch(prDetailProvider(_ref));
 
     // Listen to SSE events to update review state and surface errors
     ref.listen(sseStreamProvider, (_, next) {
@@ -149,7 +162,7 @@ class _PRDetailScreenState extends ConsumerState<PRDetailScreen> {
             case 'review_completed':
               if (prId == widget.prId || prNumber == currentPrNumber) {
                 _stopReviewing();
-                ref.invalidate(prDetailProvider(widget.prId));
+                ref.invalidate(prDetailProvider(_ref));
               }
             case 'review_error':
               if (prId == widget.prId || prNumber == currentPrNumber) {
@@ -164,7 +177,7 @@ class _PRDetailScreenState extends ConsumerState<PRDetailScreen> {
                     isError: data['reason'] != 'manual_cancelled',
                   );
                 }
-                ref.invalidate(prDetailProvider(widget.prId));
+                ref.invalidate(prDetailProvider(_ref));
               }
           }
         } catch (_) {}
@@ -182,7 +195,9 @@ class _PRDetailScreenState extends ConsumerState<PRDetailScreen> {
     final repoMissing = pr != null && pr.repo.isEmpty;
 
     // Derive review key from loaded PR for shared in-progress state
-    final reviewKey = pr != null ? '${pr.repo}:${pr.number}' : null;
+    final reviewKey = pr != null
+        ? reviewKeyFor(widget.instanceId, pr.repo, pr.number)
+        : null;
     final isReviewingShared =
         reviewKey != null &&
         ref.watch(reviewingPRsProvider).containsKey(reviewKey);

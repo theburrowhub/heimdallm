@@ -25,9 +25,12 @@ const (
 	tabConfig
 	tabStats
 	tabServer
+	tabInstances
 )
 
-var tabNames = []string{"Activity", "PRs", "Merges", "Issues", "Config", "Stats", "Server"}
+var tabNames = []string{
+	"Activity", "PRs", "Merges", "Issues", "Config", "Stats", "Server", "Instances",
+}
 
 type Dashboard struct {
 	client *api.Client
@@ -38,6 +41,10 @@ type Dashboard struct {
 	cursor    int
 
 	prRepoFilter string
+
+	// registry is the fleet, when this daemon is a hub. Nil on a plain
+	// single-daemon install.
+	registry *api.ClusterRegistry
 
 	prs    []api.PR
 	issues []api.Issue
@@ -92,6 +99,9 @@ type Dashboard struct {
 type tickMsg time.Time
 type dataMsg struct {
 	prs      []api.PR
+	// registry is nil when this daemon is not a hub, which is the normal
+	// answer on a single-daemon install rather than a failure.
+	registry *api.ClusterRegistry
 	merges   []api.MergeTrackingEntry
 	issues   []api.Issue
 	config   map[string]any
@@ -188,6 +198,12 @@ func (d *Dashboard) fetchData() tea.Msg {
 	// that must not blank every other tab.
 	if merges, mErr := d.client.ListMergeTracking(); mErr == nil {
 		msg.merges = merges
+	}
+
+	// Also best-effort: a daemon that is not a hub answers 404, which is the
+	// normal case on a single-daemon install and must not be an error.
+	if registry, rErr := d.client.ListInstances(); rErr == nil {
+		msg.registry = registry
 	}
 
 	issues, err := d.client.ListIssues()
@@ -382,6 +398,7 @@ func (d *Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			d.config = msg.config
 			d.stats = msg.stats
+			d.registry = msg.registry
 			if msg.activity != nil {
 				if !d.logSeeded {
 					entries := msg.activity.Entries
@@ -633,24 +650,14 @@ func (d *Dashboard) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			d.confirmShutdown = true
 			d.shutdownMessage = "Stop daemon? y/n"
 		}
-	case "1":
-		d.activeTab = tabActivity
-		d.cursor = 0
-	case "2":
-		d.activeTab = tabPRs
-		d.cursor = 0
-	case "3":
-		d.activeTab = tabIssues
-		d.cursor = 0
-	case "4":
-		d.activeTab = tabConfig
-		d.cursor = 0
-	case "5":
-		d.activeTab = tabStats
-		d.cursor = 0
-	case "6":
-		d.activeTab = tabServer
-		d.cursor = 0
+	case "1", "2", "3", "4", "5", "6", "7", "8":
+		// One key per tab, in tab order. The previous mapping skipped Merges
+		// outright, so that tab had no numeric jump at all while the help text
+		// advertised [1-6] for seven tabs.
+		if idx := int(msg.String()[0] - '1'); idx < len(tabNames) {
+			d.activeTab = tab(idx)
+			d.cursor = 0
+		}
 	}
 	return d, nil
 }
@@ -939,6 +946,8 @@ func (d *Dashboard) renderContent(height int) string {
 		return d.renderStats(height)
 	case tabServer:
 		return d.renderServer(height)
+	case tabInstances:
+		return d.renderInstances(height)
 	}
 	return ""
 }
@@ -1359,15 +1368,15 @@ func (d *Dashboard) renderHelp() string {
 		return helpStyle.Render("[esc]close  [j/k]scroll  [pgup/pgdn]page  [q]uit")
 	}
 	if d.activeTab == tabIssues {
-		return helpStyle.Render("[q]uit  [r]efresh  [s]top  [enter]detail  [p]romote  [f]ilter repo  [F]ilter action  [tab]switch  [j/k]scroll  [1-6]jump")
+		return helpStyle.Render("[q]uit  [r]efresh  [s]top  [enter]detail  [p]romote  [f]ilter repo  [F]ilter action  [tab]switch  [j/k]scroll  [1-8]jump")
 	}
 	if d.activeTab == tabPRs {
-		return helpStyle.Render("[q]uit  [r]efresh  [s]top  [enter]detail  [o]pen  [f]ilter repo  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-6]jump")
+		return helpStyle.Render("[q]uit  [r]efresh  [s]top  [enter]detail  [o]pen  [f]ilter repo  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-8]jump")
 	}
 	if d.activeTab == tabActivity {
-		return helpStyle.Render("[q]uit  [r]efresh  [s]top  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-6]jump  [G]follow")
+		return helpStyle.Render("[q]uit  [r]efresh  [s]top  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-8]jump  [G]follow")
 	}
-	return helpStyle.Render("[q]uit  [r]efresh  [s]top  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-6]jump")
+	return helpStyle.Render("[q]uit  [r]efresh  [s]top  [tab]switch  [j/k]scroll  [pgup/pgdn]page  [1-8]jump")
 }
 
 func (d *Dashboard) contentHeight() int {
@@ -1396,6 +1405,8 @@ func (d *Dashboard) tabItemCount() int {
 		return len(d.buildConfigLines())
 	case tabStats:
 		return len(d.buildStatsLines())
+	case tabInstances:
+		return len(d.buildInstanceLines())
 	default:
 		return 0
 	}

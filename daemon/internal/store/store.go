@@ -467,6 +467,44 @@ func Open(dsn string) (*Store, error) {
 		renamed_at  DATETIME NOT NULL
 	)`)
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_repo_renames_old ON repo_renames(old_repo)")
+	// Multi-instance control plane (hub only). Both tables are observed
+	// runtime state, NOT configuration: the registry and the routing rules
+	// live in config.toml where an operator can read and edit them, while
+	// what is stored here is only what the hub has seen happen.
+	//
+	// instance_state seeds the API right after a hub restart, so the GUI shows
+	// the last known version and reachability of each instance instead of an
+	// empty grid until the first probe cycle completes.
+	db.Exec(`CREATE TABLE IF NOT EXISTS instance_state (
+		instance_id          TEXT PRIMARY KEY,
+		name                 TEXT NOT NULL DEFAULT '',
+		reachable            INTEGER NOT NULL DEFAULT 0,
+		status               TEXT NOT NULL DEFAULT '',
+		version              TEXT NOT NULL DEFAULT '',
+		role                 TEXT NOT NULL DEFAULT '',
+		remote_instance_id   TEXT NOT NULL DEFAULT '',
+		uptime_seconds       REAL NOT NULL DEFAULT 0,
+		last_seen_at         TEXT NOT NULL DEFAULT '',
+		last_error           TEXT NOT NULL DEFAULT '',
+		consecutive_failures INTEGER NOT NULL DEFAULT 0,
+		updated_at           TEXT NOT NULL DEFAULT ''
+	)`)
+	// instance_dispatch deduplicates round-robin dispatch. The primary key is
+	// (op, target_key, head_sha) so re-dispatching the same operation for the
+	// same commit is a no-op, while a new push (new head SHA) is legitimately
+	// a new operation. This is deliberately NOT a distributed lock: it stops
+	// the hub from sending the same work twice, and repo partitioning is what
+	// stops two daemons acting on the same repo. See the note next to
+	// ClearAllInFlight in cmd/heimdallm/main.go.
+	db.Exec(`CREATE TABLE IF NOT EXISTS instance_dispatch (
+		op            TEXT NOT NULL,
+		target_key    TEXT NOT NULL,
+		head_sha      TEXT NOT NULL DEFAULT '',
+		instance_id   TEXT NOT NULL,
+		dispatched_at TEXT NOT NULL,
+		PRIMARY KEY (op, target_key, head_sha)
+	)`)
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_instance_dispatch_at ON instance_dispatch(dispatched_at)")
 	db.Exec(`CREATE TABLE IF NOT EXISTS repo_instructions (
 		id          INTEGER PRIMARY KEY AUTOINCREMENT,
 		repo        TEXT NOT NULL,

@@ -1,5 +1,7 @@
 import 'package:go_router/go_router.dart';
 import '../features/dashboard/dashboard_screen.dart';
+import '../features/instances/instances_screen.dart';
+import '../features/instances/routing_screen.dart';
 import '../features/issues/issue_detail_screen.dart';
 import '../features/pr_detail/pr_detail_screen.dart';
 import '../features/config/config_screen.dart';
@@ -15,14 +17,18 @@ GoRouter createRouter({String initialLocation = '/'}) => GoRouter(
       path: '/prs/:id',
       builder: (context, state) {
         final id = int.parse(state.pathParameters['id']!);
-        return PRDetailScreen(prId: id);
+        // Store ids are per-instance, so /prs/42 alone is ambiguous once more
+        // than one daemon is registered.
+        final instance = state.uri.queryParameters['instance'] ?? '';
+        return PRDetailScreen(prId: id, instanceId: instance);
       },
     ),
     GoRoute(
       path: '/issues/:id',
       builder: (context, state) {
         final id = int.parse(state.pathParameters['id']!);
-        return IssueDetailScreen(issueId: id);
+        final instance = state.uri.queryParameters['instance'] ?? '';
+        return IssueDetailScreen(issueId: id, instanceId: instance);
       },
     ),
     GoRoute(
@@ -40,6 +46,16 @@ GoRouter createRouter({String initialLocation = '/'}) => GoRouter(
       },
     ),
     GoRoute(path: '/config', builder: (context, state) => const ConfigScreen()),
+    GoRoute(
+      path: '/instances',
+      builder: (context, state) => const InstancesScreen(),
+      routes: [
+        GoRoute(
+          path: 'routing',
+          builder: (context, state) => const RoutingScreen(),
+        ),
+      ],
+    ),
     GoRoute(
       path: '/server',
       builder: (context, state) {

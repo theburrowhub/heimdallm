@@ -435,6 +435,41 @@ CLI / TUI   ─┘                       │
 
 In **Docker mode** the daemon runs standalone with the web UI container as an optional-but-recommended companion (brought up by default with `make up`). Configuration is via environment variables (`HEIMDALLM_*`) or a mounted `config.toml`, and can be edited live from the web UI at `/config`.
 
+### Multiple instances
+
+One daemon is the default and needs nothing configured. When you want more —
+a second machine, a container per team, a box with the GPU — you can run
+several daemons and manage them from a single UI. One acts as the **hub**:
+
+```
+Flutter app ─┐                          ┌──→ heimdalld (srv-a)  ──→ GitHub
+Web UI      ─┼──→ heimdalld (hub) ──────┼──→ heimdalld (srv-b)  ──→ GitHub
+CLI / TUI   ─┘        registry          └──→ heimdalld (hub)    ──→ GitHub
+                      routing rules
+                      config push
+```
+
+Repositories and organizations are routed to specific instances, so each daemon
+polls GitHub for everything but only **acts** on what it owns — that partition
+is what keeps two daemons from reviewing the same PR. Operations you trigger by
+hand can additionally be spread round-robin across the fleet.
+
+The UI never connects to a remote daemon directly: it reads every instance
+through the hub's authenticated proxy, so the browser keeps one origin and one
+credential. Shared configuration (prompts, review and merge policy, polling)
+pushes to every instance in one action; ports, tokens and local paths stay
+per-machine.
+
+```bash
+make up-instance NAME=b PORT=7843    # another daemon on this host
+heimdallm-cli instances              # the fleet, with health and versions
+heimdallm-cli routing                # who owns what
+```
+
+See [§18 Multiple Instances](docs/configuration-guide.md#18-multiple-instances)
+for the full configuration, the routing precedence, and what does and does not
+propagate.
+
 ---
 
 ## Development

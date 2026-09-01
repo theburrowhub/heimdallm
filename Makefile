@@ -40,6 +40,8 @@ endif
         install-macos uninstall-macos install-linux uninstall-linux \
         setup up up-build up-daemon up-build-daemon down logs logs-daemon \
         ps restart clean clean-clones _check-docker _check-buildkit _check-env \
+        up-instance down-instance logs-instance ps-instances _check-instance-name \
+        _check-instance-port \
         _check-macos _check-macos-user _check-linux _post-up-hints
 
 # ── Build ─────────────────────────────────────────────────────────────────────
@@ -570,6 +572,59 @@ ps: _check-docker
 
 restart: _check-docker
 	docker compose -f $(COMPOSE_FILE) restart
+
+# ── Extra daemon instances ────────────────────────────────────────────────────
+#
+# The main compose file pins container_name and one volume pair, so it can only
+# describe a single daemon. These wrappers layer docker-compose.instance.yml on
+# top, giving each extra instance its own Compose project (hence its own
+# containers and volumes) keyed on NAME.
+#
+#   make up-instance NAME=b PORT=7843
+#   make logs-instance NAME=b
+#   make down-instance NAME=b
+#   make ps-instances
+#
+# Register the result from the hub with `heimdallm-cli instances` or the GUI's
+# Instances screen; its API token is at `docker exec heimdallm-b cat
+# /data/api_token`.
+INSTANCE_COMPOSE_FILES := -f docker/docker-compose.yml -f docker/docker-compose.instance.yml
+
+_check-instance-name:
+	@test -n "$(NAME)" || { echo "❌  NAME is required, e.g. make up-instance NAME=b PORT=7843"; exit 1; }
+	@echo "$(NAME)" | grep -Eq '^[a-z0-9][a-z0-9-]*$$' \
+	  || { echo "❌  NAME must be lowercase alphanumerics and hyphens (it becomes a container and volume name)"; exit 1; }
+	@test "$(NAME)" != "heimdallm" || { echo "❌  NAME 'heimdallm' collides with the main stack"; exit 1; }
+
+_check-instance-port:
+	@test -n "$(PORT)" || { echo "❌  PORT is required, e.g. make up-instance NAME=b PORT=7843"; exit 1; }
+	@echo "$(PORT)" | grep -Eq '^[0-9]+$$' \
+	  || { echo "❌  PORT must be a number, got '$(PORT)'"; exit 1; }
+	@test "$(PORT)" -ge 1 -a "$(PORT)" -le 65535 \
+	  || { echo "❌  PORT must be in 1-65535, got '$(PORT)'"; exit 1; }
+	@test "$(PORT)" != "$${HEIMDALLM_PORT:-7842}" \
+	  || { echo "❌  PORT $(PORT) is the main stack's host port; pick another"; exit 1; }
+
+up-instance: _check-env _check-buildkit _check-instance-name _check-instance-port
+	DOCKER_BUILDKIT=1 HEIMDALLM_VERSION=$(GIT_VERSION) \
+	  HEIMDALLM_STACK_NAME=$(NAME) \
+	  HEIMDALLM_COMPOSE_DAEMON_HOST_PORT=$(PORT) \
+	  docker compose -p heimdallm-$(NAME) $(INSTANCE_COMPOSE_FILES) up -d heimdallm
+	@echo ""
+	@echo "▶  Instance '$(NAME)' is on http://localhost:$(PORT)"
+	@echo "   Token: docker exec heimdallm-$(NAME) cat /data/api_token"
+	@echo "   Register it from the hub: heimdallm-cli instances"
+
+down-instance: _check-docker _check-instance-name
+	HEIMDALLM_STACK_NAME=$(NAME) \
+	  docker compose -p heimdallm-$(NAME) $(INSTANCE_COMPOSE_FILES) down
+
+logs-instance: _check-docker _check-instance-name
+	HEIMDALLM_STACK_NAME=$(NAME) \
+	  docker compose -p heimdallm-$(NAME) $(INSTANCE_COMPOSE_FILES) logs -f heimdallm
+
+ps-instances: _check-docker
+	@docker ps --filter 'name=heimdallm' --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
 
 # ── CI packaging (used by GitHub Actions) ─────────────────────────────────────
 

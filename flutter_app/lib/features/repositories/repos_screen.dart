@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../../core/api/cluster_api.dart';
+import '../../core/instances/instances_providers.dart';
 import '../../core/models/config_model.dart';
 import '../../shared/widgets/toast.dart';
 import '../config/config_providers.dart';
@@ -129,6 +131,57 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
   }
 
   void _clearSelection() => setState(_selected.clear);
+
+  /// Instances the selection can be routed to. Empty on a single-daemon
+  /// install, which hides the whole control.
+  List<({String id, String name})> _routableInstances() {
+    final registry = ref.watch(daemonInstancesProvider).value;
+    if (registry == null || !registry.isMultiInstance) return const [];
+    return [
+      for (final instance in registry.instances)
+        (id: instance.id, name: instance.displayName),
+    ];
+  }
+
+  /// Routes every selected repository to one instance in a single PUT, rather
+  /// than one request per repo: the routing map is replaced wholesale, so a
+  /// per-repo loop would make each write race the previous one's state.
+  Future<void> _assignSelectionToInstance(String? instanceId) async {
+    if (_selected.isEmpty) return;
+    final api = ref.read(hubApiClientProvider);
+    final messenger = ScaffoldMessenger.of(context);
+
+    try {
+      // Read the rules from the hub rather than a cached provider: PUT
+      // replaces the map wholesale, so writing on top of a stale copy would
+      // silently undo a rule changed elsewhere in the meantime.
+      final rules = await api.fetchRouting();
+      final repos = Map<String, String>.from(rules.repos);
+      for (final repo in _selected) {
+        if (instanceId == null || instanceId.isEmpty) {
+          repos.remove(repo);
+        } else {
+          repos[repo] = instanceId;
+        }
+      }
+      final count = _selected.length;
+      await api.putRouting(repos: repos);
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            instanceId == null || instanceId.isEmpty
+                ? '$count repositories now inherit the default instance'
+                : '$count repositories routed to $instanceId',
+          ),
+        ),
+      );
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('Error: $e')));
+    } finally {
+      ref.invalidate(routingRulesProvider);
+      ref.invalidate(daemonInstancesProvider);
+    }
+  }
 
   String _emptyStateText() {
     if (_search.isNotEmpty) return 'No repos match “$_search”.';
@@ -367,6 +420,8 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
                 aggregates: _aggregate(),
                 onApply: _applyBulk,
                 onClear: _clearSelection,
+                instances: _routableInstances(),
+                onAssignInstance: _assignSelectionToInstance,
               ),
             // Repo list with section dividers
             Expanded(
