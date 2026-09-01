@@ -169,8 +169,9 @@ func TestViewportRange_SurvivesAListThatShrankUnderTheCursor(t *testing.T) {
 // The tab list and the enum must stay in step, or every tab after the new one
 // renders under the wrong name.
 func TestTabNames_MatchTheEnum(t *testing.T) {
-	if len(tabNames) != int(tabServer)+1 {
-		t.Fatalf("tabNames has %d entries but the enum has %d", len(tabNames), int(tabServer)+1)
+	// tabInstances is the last entry; update this alongside the enum.
+	if len(tabNames) != int(tabInstances)+1 {
+		t.Fatalf("tabNames has %d entries but the enum has %d", len(tabNames), int(tabInstances)+1)
 	}
 	if tabNames[tabMerges] != "Merges" {
 		t.Errorf("tabNames[tabMerges] = %q, want Merges", tabNames[tabMerges])
@@ -180,5 +181,8 @@ func TestTabNames_MatchTheEnum(t *testing.T) {
 	}
 	if tabNames[tabServer] != "Server" {
 		t.Errorf("tabNames[tabServer] = %q", tabNames[tabServer])
+	}
+	if tabNames[tabInstances] != "Instances" {
+		t.Errorf("tabNames[tabInstances] = %q", tabNames[tabInstances])
 	}
 }

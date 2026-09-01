@@ -16,15 +16,31 @@ type contextKey struct{}
 // clientKey is the context key for the API client.
 var clientKey = contextKey{}
 
+// instanceKey is the context key for the resolved instance id ("" when the CLI
+// is talking to a single unnamed daemon).
+type instanceKeyType struct{}
+
+var instanceKey = instanceKeyType{}
+
 // clientFromContext retrieves the *api.Client stored in the context.
 func clientFromContext(ctx context.Context) *api.Client {
 	return ctx.Value(clientKey).(*api.Client)
 }
 
+// instanceFromContext returns the instance the command is scoped to, or "" for
+// a plain single-daemon setup.
+func instanceFromContext(ctx context.Context) string {
+	if id, ok := ctx.Value(instanceKey).(string); ok {
+		return id
+	}
+	return ""
+}
+
 func NewRootCmd(version string) *cobra.Command {
 	var (
-		flagHost  string
-		flagToken string
+		flagHost     string
+		flagToken    string
+		flagInstance string
 	)
 
 	root := &cobra.Command{
@@ -44,13 +60,27 @@ func NewRootCmd(version string) *cobra.Command {
 			}
 
 			// 3. Config file (~/.config/heimdallm/cli.toml)
+			//
+			// --instance selects one of the [instances.*] entries; without it
+			// the resolver falls back to default_instance, then to the sole
+			// instance, then to the legacy flat host/token pair. That keeps
+			// every existing single-daemon config working untouched.
+			resolvedInstance := flagInstance
 			if flagHost == "" || flagToken == "" {
 				if cfg, err := loadCLIConfig(); err == nil {
-					if flagHost == "" && cfg.Host != "" {
-						flagHost = cfg.Host
+					host, token, resolveErr := cfg.resolve(flagInstance)
+					if resolveErr != nil {
+						fmt.Fprintln(os.Stderr, "heimdallm-cli:", resolveErr)
+						os.Exit(1)
 					}
-					if flagToken == "" && cfg.Token != "" {
-						flagToken = cfg.Token
+					if flagHost == "" && host != "" {
+						flagHost = host
+					}
+					if flagToken == "" && token != "" {
+						flagToken = token
+					}
+					if resolvedInstance == "" {
+						resolvedInstance = cfg.DefaultInstance
 					}
 				}
 			}
@@ -70,13 +100,16 @@ func NewRootCmd(version string) *cobra.Command {
 			}
 
 			c := api.New(flagHost, flagToken)
-			cmd.SetContext(context.WithValue(cmd.Context(), clientKey, c))
+			ctx := context.WithValue(cmd.Context(), clientKey, c)
+			ctx = context.WithValue(ctx, instanceKey, resolvedInstance)
+			cmd.SetContext(ctx)
 		},
 		SilenceUsage: true,
 	}
 
 	root.PersistentFlags().StringVar(&flagHost, "host", "", fmt.Sprintf("daemon URL (env: HEIMDALLM_HOST, default: %s)", api.DefaultHost))
 	root.PersistentFlags().StringVar(&flagToken, "token", "", "API token for mutating commands (env: HEIMDALLM_TOKEN; note: flag value may be visible in process listings)")
+	root.PersistentFlags().StringVarP(&flagInstance, "instance", "I", "", "instance to talk to, from [instances.*] in cli.toml")
 
 	root.AddCommand(
 		newStatusCmd(),
@@ -97,6 +130,9 @@ func NewRootCmd(version string) *cobra.Command {
 		newStatsCmd(),
 		newDashboardCmd(),
 		newConfigureCmd(),
+		newInstancesCmd(),
+		newRoutingCmd(),
+		newPropagateConfigCmd(),
 	)
 
 	return root
