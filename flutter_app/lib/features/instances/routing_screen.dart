@@ -59,10 +59,9 @@ class _RoutingBody extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final config = ref.watch(configNotifierProvider).value;
-    final repos = config?.repositories.toList() ?? const <String>[];
-    final orgs = config?.knownOrganizations.toList() ?? const <String>[];
-    repos.sort();
-    orgs.sort();
+    // List.of, not the const fallback: sorting a const list throws.
+    final repos = List.of(config?.repositories ?? const <String>[])..sort();
+    final orgs = List.of(config?.knownOrganizations ?? const <String>[])..sort();
 
     return ListView(
       padding: const EdgeInsets.all(12),

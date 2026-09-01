@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../../core/api/cluster_api.dart';
+import '../../core/instances/instances_providers.dart';
 import '../../core/models/config_model.dart';
 import '../../shared/widgets/toast.dart';
 import '../config/config_providers.dart';
@@ -129,6 +131,51 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
   }
 
   void _clearSelection() => setState(_selected.clear);
+
+  /// Instances the selection can be routed to. Empty on a single-daemon
+  /// install, which hides the whole control.
+  List<({String id, String name})> _routableInstances() {
+    final registry = ref.watch(daemonInstancesProvider).value;
+    if (registry == null || !registry.isMultiInstance) return const [];
+    return [
+      for (final instance in registry.instances)
+        (id: instance.id, name: instance.displayName),
+    ];
+  }
+
+  /// Routes every selected repository to one instance in a single PUT, rather
+  /// than one request per repo: the routing map is replaced wholesale, so a
+  /// per-repo loop would make each write race the previous one's state.
+  Future<void> _assignSelectionToInstance(String? instanceId) async {
+    final rules = ref.read(routingRulesProvider).value;
+    if (rules == null || _selected.isEmpty) return;
+
+    final repos = Map<String, String>.from(rules.repos);
+    for (final repo in _selected) {
+      if (instanceId == null || instanceId.isEmpty) {
+        repos.remove(repo);
+      } else {
+        repos[repo] = instanceId;
+      }
+    }
+    try {
+      await ref.read(hubApiClientProvider).putRouting(repos: repos);
+      if (mounted) {
+        final count = _selected.length;
+        showToast(
+          context,
+          instanceId == null
+              ? '$count repositories now inherit the default instance'
+              : '$count repositories routed to $instanceId',
+        );
+      }
+    } catch (e) {
+      if (mounted) showToast(context, 'Error: $e', isError: true);
+    } finally {
+      ref.invalidate(routingRulesProvider);
+      ref.invalidate(daemonInstancesProvider);
+    }
+  }
 
   String _emptyStateText() {
     if (_search.isNotEmpty) return 'No repos match “$_search”.';
@@ -367,6 +414,8 @@ class _ReposScreenState extends ConsumerState<ReposScreen> {
                 aggregates: _aggregate(),
                 onApply: _applyBulk,
                 onClear: _clearSelection,
+                instances: _routableInstances(),
+                onAssignInstance: _assignSelectionToInstance,
               ),
             // Repo list with section dividers
             Expanded(

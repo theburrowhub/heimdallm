@@ -52,6 +52,7 @@ class InstanceSelector extends ConsumerWidget {
               checked: active == instance.id,
               enabled: instance.usable,
               child: Row(
+                mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(
                     instance.reachable
@@ -84,10 +85,11 @@ class InstanceSelector extends ConsumerWidget {
           const PopupMenuItem<String>(
             value: manageValue,
             child: Row(
+              mainAxisSize: MainAxisSize.min,
               children: [
                 Icon(Icons.settings_ethernet, size: 18),
                 SizedBox(width: 8),
-                Text('Manage instances…'),
+                Flexible(child: Text('Manage instances…')),
               ],
             ),
           ),
