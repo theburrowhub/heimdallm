@@ -6,6 +6,7 @@ import '../models/pr.dart';
 import '../models/review.dart';
 import '../models/tracked_issue.dart';
 import '../platform/platform_services.dart';
+import 'daemon_endpoint.dart';
 
 /// Who, if anyone, answered the daemon HTTP endpoint. A [PortOwner.none]
 /// result only permits entering [PlatformServices.spawnDaemon]; that operation
@@ -24,29 +25,45 @@ enum PortOwner {
 
 class ApiClient {
   final http.Client _client;
-  final PlatformServices _platform;
+  final DaemonEndpoint _endpoint;
   final Duration _daemonReachabilityTimeout;
 
+  /// Builds a client for one daemon.
+  ///
+  /// Pass [endpoint] to target a specific instance. [platform] remains
+  /// supported and means "the daemon this app manages", which is what every
+  /// single-daemon call site wants and keeps them unchanged.
   ApiClient({
     http.Client? httpClient,
-    required PlatformServices platform,
+    PlatformServices? platform,
+    DaemonEndpoint? endpoint,
     Duration daemonReachabilityTimeout = const Duration(seconds: 3),
-  }) : _client = httpClient ?? http.Client(),
-       _platform = platform,
+  }) : assert(
+         platform != null || endpoint != null,
+         'ApiClient needs either a platform (local daemon) or an endpoint',
+       ),
+       _client = httpClient ?? http.Client(),
+       _endpoint = endpoint ?? DaemonEndpoint.local(platform!),
        _daemonReachabilityTimeout = daemonReachabilityTimeout;
 
-  Uri _uri(String path) => Uri.parse('${_platform.apiBaseUrl}$path');
+  /// The daemon this client talks to.
+  DaemonEndpoint get endpoint => _endpoint;
+
+  /// Identifies the instance, or empty for the daemon the app manages.
+  String get instanceId => _endpoint.instanceId;
+
+  Uri _uri(String path) => _endpoint.uri(path);
 
   /// Clears the cached API token, forcing the next request to re-read it.
   void clearTokenCache() {
-    _platform.clearApiTokenCache();
+    _endpoint.clearTokenCache();
   }
 
   /// Headers for mutating requests (POST/PUT/DELETE). Adds
   /// X-Heimdallm-Token when the platform provides one (desktop). On web
   /// the token is null and the header is omitted — Nginx injects it.
   Future<Map<String, String>> _authHeaders() async {
-    final token = await _platform.loadApiToken();
+    final token = await _endpoint.loadToken();
     return {
       'Content-Type': 'application/json',
       if (token != null && token.isNotEmpty) 'X-Heimdallm-Token': token,
@@ -88,7 +105,7 @@ class ApiClient {
           .timeout(_daemonReachabilityTimeout);
       return _looksLikeHeimdallm(resp) ? PortOwner.daemon : PortOwner.foreign;
     } catch (_) {
-      return Uri.parse(_platform.apiBaseUrl).isAbsolute
+      return Uri.parse(_endpoint.baseUrl).isAbsolute
           ? PortOwner.none
           : PortOwner.foreign;
     }
@@ -122,7 +139,7 @@ class ApiClient {
 
   /// The daemon port, derived from the configured base URL so error messages and
   /// diagnostics never hardcode the default.
-  int get daemonPort => Uri.parse(_platform.apiBaseUrl).port;
+  int get daemonPort => Uri.parse(_endpoint.baseUrl).port;
 
   /// Returns the full identified /health payload, including 503
   /// starting/stopping/degraded responses, or null if the responder is not a
@@ -359,6 +376,72 @@ class ApiClient {
       latest = jsonDecode(resp.body) as Map<String, dynamic>;
     }
     return latest;
+  }
+
+  /// GETs a JSON object.
+  ///
+  /// A 404 returns null rather than throwing. That is how the cluster UI stays
+  /// invisible on a plain single-daemon install: the control-plane routes
+  /// answer 404 there, and surfacing that as an error would put a failure
+  /// banner in front of every user who is not running instances.
+  Future<Map<String, dynamic>?> getJson(String path) async {
+    final resp = await _client.get(_uri(path), headers: await _authHeaders());
+    if (resp.statusCode == 404) return null;
+    if (resp.statusCode != 200) {
+      throw ApiException(
+        _configMutationError(resp.body, 'GET $path failed: ${resp.statusCode}'),
+      );
+    }
+    final decoded = jsonDecode(resp.body);
+    return decoded is Map<String, dynamic> ? decoded : null;
+  }
+
+  /// Sends a JSON request and decodes the object body, if any.
+  ///
+  /// [acceptStatuses] exists because some endpoints answer 202 (accepted) or
+  /// 207 (partial success) and those are not failures — a propagation where one
+  /// machine was rebooting still updated the others.
+  Future<Map<String, dynamic>?> sendJson(
+    String method,
+    String path, {
+    Map<String, dynamic>? body,
+    Set<int> acceptStatuses = const {200, 201, 202, 204},
+  }) async {
+    final uri = _uri(path);
+    final headers = await _authHeaders();
+    final encoded = body == null ? null : jsonEncode(body);
+
+    final http.Response resp;
+    switch (method.toUpperCase()) {
+      case 'POST':
+        resp = await _client.post(uri, headers: headers, body: encoded);
+      case 'PUT':
+        resp = await _client.put(uri, headers: headers, body: encoded);
+      case 'PATCH':
+        resp = await _client.patch(uri, headers: headers, body: encoded);
+      case 'DELETE':
+        resp = await _client.delete(uri, headers: headers, body: encoded);
+      default:
+        throw ArgumentError('unsupported method $method');
+    }
+    if (!acceptStatuses.contains(resp.statusCode)) {
+      throw ApiException(
+        _configMutationError(
+          resp.body,
+          '$method $path failed: ${resp.statusCode}',
+        ),
+      );
+    }
+    if (resp.body.isEmpty) return null;
+    try {
+      final decoded = jsonDecode(resp.body);
+      return decoded is Map<String, dynamic> ? decoded : null;
+    } catch (_) {
+      // A daemon that acted but answered with something we cannot parse did
+      // still act; treating that as a failure would make the operator retry a
+      // change that already landed.
+      return null;
+    }
   }
 
   String _configMutationError(String body, String fallback) {

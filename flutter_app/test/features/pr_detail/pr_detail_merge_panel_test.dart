@@ -37,7 +37,7 @@ final _review = Review(
 /// serve — or with a failure, for the paths where it serves none.
 Widget _host({MergeTrackingEntry? tracked, Object? detailError}) => ProviderScope(
   overrides: [
-    prDetailProvider(1).overrideWith(
+    prDetailProvider((instanceId: '', prId: 1)).overrideWith(
       (_) => Future.value({
         'pr': _pr,
         'reviews': [_review],

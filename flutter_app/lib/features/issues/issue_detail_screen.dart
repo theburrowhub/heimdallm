@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../../core/api/api_client.dart';
 import '../../core/models/tracked_issue.dart';
 import '../../shared/widgets/attention_badge.dart';
 import '../../shared/widgets/pr_review_state_badge.dart';
@@ -14,13 +15,24 @@ import 'issues_providers.dart';
 
 class IssueDetailScreen extends ConsumerStatefulWidget {
   final int issueId;
-  const IssueDetailScreen({super.key, required this.issueId});
+
+  /// Which instance holds this record. Empty means the daemon this app
+  /// manages, which is every record on a single-daemon install.
+  final String instanceId;
+
+  const IssueDetailScreen({super.key, required this.issueId, this.instanceId = ''});
 
   @override
   ConsumerState<IssueDetailScreen> createState() => _IssueDetailScreenState();
 }
 
 class _IssueDetailScreenState extends ConsumerState<IssueDetailScreen> {
+  /// Key for the instance-scoped detail provider.
+  IssueRef get _ref => (instanceId: widget.instanceId, issueId: widget.issueId);
+
+  /// The client for the instance holding this issue.
+  ApiClient get _api => clientForInstanceOf(ref, widget.instanceId);
+
   bool _reviewing = false;
   Timer? _reviewTimeout;
 
@@ -44,7 +56,7 @@ class _IssueDetailScreenState extends ConsumerState<IssueDetailScreen> {
   }
 
   Future<void> _dismiss(BuildContext context) async {
-    final api = ref.read(apiClientProvider);
+    final api = _api;
     try {
       await api.dismissIssue(widget.issueId);
       ref.invalidate(issuesProvider);
@@ -69,10 +81,10 @@ class _IssueDetailScreenState extends ConsumerState<IssueDetailScreen> {
 
   Future<void> _promote() async {
     _startReviewing();
-    final api = ref.read(apiClientProvider);
+    final api = _api;
     try {
       await api.promoteIssue(widget.issueId);
-      ref.invalidate(issueDetailProvider(widget.issueId));
+      ref.invalidate(issueDetailProvider(_ref));
       if (mounted) showToast(context, 'Stage promotion requested');
     } catch (e) {
       _stopReviewing();
@@ -82,10 +94,10 @@ class _IssueDetailScreenState extends ConsumerState<IssueDetailScreen> {
 
   Future<void> _trigger() async {
     _startReviewing();
-    final api = ref.read(apiClientProvider);
+    final api = _api;
     try {
       await api.triggerIssueReview(widget.issueId);
-      ref.invalidate(issueDetailProvider(widget.issueId));
+      ref.invalidate(issueDetailProvider(_ref));
     } catch (e) {
       _stopReviewing();
       if (mounted) showToast(context, 'Error: $e', isError: true);
@@ -94,7 +106,7 @@ class _IssueDetailScreenState extends ConsumerState<IssueDetailScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final detailAsync = ref.watch(issueDetailProvider(widget.issueId));
+    final detailAsync = ref.watch(issueDetailProvider(_ref));
 
     // SSE listener for real-time review updates
     ref.listen(sseStreamProvider, (_, next) {
@@ -111,22 +123,22 @@ class _IssueDetailScreenState extends ConsumerState<IssueDetailScreen> {
             case 'issue_review_completed':
               if (issueId == widget.issueId) {
                 _stopReviewing();
-                ref.invalidate(issueDetailProvider(widget.issueId));
+                ref.invalidate(issueDetailProvider(_ref));
               }
             case 'issue_refinement_done':
               if (issueId == widget.issueId) {
                 _stopReviewing();
-                ref.invalidate(issueDetailProvider(widget.issueId));
+                ref.invalidate(issueDetailProvider(_ref));
               }
             case 'issue_implemented':
               if (issueId == widget.issueId) {
                 _stopReviewing();
-                ref.invalidate(issueDetailProvider(widget.issueId));
+                ref.invalidate(issueDetailProvider(_ref));
               }
             case 'issue_promoted':
               if (issueId == widget.issueId) {
                 _stopReviewing();
-                ref.invalidate(issueDetailProvider(widget.issueId));
+                ref.invalidate(issueDetailProvider(_ref));
                 ref.invalidate(issuesProvider);
               }
             case 'issue_review_error':

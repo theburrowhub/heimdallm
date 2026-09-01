@@ -18,6 +18,8 @@ import 'package:heimdallm/features/dashboard/dashboard_providers.dart';
 import 'package:heimdallm/features/dashboard/dashboard_screen.dart';
 import 'package:heimdallm/features/issues/issues_providers.dart';
 import 'package:heimdallm/features/server/server_actions.dart';
+import 'package:heimdallm/core/instances/aggregation.dart';
+import 'package:heimdallm/core/models/tracked_issue.dart';
 import '../core/platform/fake_platform_services.dart';
 
 class MockApiClient extends Mock implements ApiClient {}
@@ -78,8 +80,8 @@ Future<void> _pumpOfflineDashboard(
         apiClientProvider.overrideWithValue(api),
         platformServicesProvider.overrideWithValue(platform),
         daemonHealthProvider.overrideWith((ref) => Future.value(false)),
-        prsProvider.overrideWith((ref) => Future.error(Exception('offline'))),
-        issuesProvider.overrideWith(
+        prsByInstanceProvider.overrideWith((ref) => Future.error(Exception('offline'))),
+        issuesByInstanceProvider.overrideWith(
           (ref) => Future.error(Exception('offline')),
         ),
         sseStreamProvider.overrideWith((ref) => const Stream.empty()),
@@ -511,7 +513,9 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
-          prsProvider.overrideWith((ref) => Future.value([pr])),
+          prsByInstanceProvider.overrideWith(
+            (ref) => Future.value(singleInstanceResult([pr])),
+          ),
           sseStreamProvider.overrideWith((ref) => const Stream.empty()),
         ],
         child: MaterialApp.router(
@@ -580,11 +584,13 @@ void main() {
             apiClientProvider.overrideWithValue(api),
             platformServicesProvider.overrideWithValue(platform),
             daemonHealthProvider.overrideWith((ref) async => false),
-            prsProvider.overrideWith((ref) async {
+            prsByInstanceProvider.overrideWith((ref) async {
               prLoads++;
-              return <PR>[];
+              return singleInstanceResult(<PR>[]);
             }),
-            issuesProvider.overrideWith((ref) async => []),
+            issuesByInstanceProvider.overrideWith(
+              (ref) async => singleInstanceResult(<TrackedIssue>[]),
+            ),
             sseStreamProvider.overrideWith((ref) => const Stream.empty()),
           ],
           child: MaterialApp.router(
@@ -650,7 +656,9 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
-          prsProvider.overrideWith((ref) => Future.value([pr])),
+          prsByInstanceProvider.overrideWith(
+            (ref) => Future.value(singleInstanceResult([pr])),
+          ),
           sseStreamProvider.overrideWith((ref) => const Stream.empty()),
         ],
         child: MaterialApp.router(
@@ -694,7 +702,9 @@ void main() {
       ProviderScope(
         overrides: [
           apiClientProvider.overrideWithValue(api),
-          prsProvider.overrideWith((ref) => Future.value([pr])),
+          prsByInstanceProvider.overrideWith(
+            (ref) => Future.value(singleInstanceResult([pr])),
+          ),
           sseStreamProvider.overrideWith((ref) => const Stream.empty()),
         ],
         child: MaterialApp.router(
@@ -728,7 +738,9 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
-          prsProvider.overrideWith((ref) => completer.future),
+          prsByInstanceProvider.overrideWith(
+            (ref) => completer.future.then(singleInstanceResult),
+          ),
           sseStreamProvider.overrideWith((ref) => const Stream.empty()),
         ],
         child: MaterialApp.router(

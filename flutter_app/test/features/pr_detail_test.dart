@@ -25,7 +25,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
-          prDetailProvider(1).overrideWith((_) => Future.value({'pr': pr, 'reviews': [review]})),
+          prDetailProvider((instanceId: '', prId: 1)).overrideWith((_) => Future.value({'pr': pr, 'reviews': [review]})),
           sseStreamProvider.overrideWith((ref) => const Stream.empty()),
         ],
         child: MaterialApp.router(
@@ -72,7 +72,7 @@ void main() {
       ProviderScope(
         overrides: [
           apiClientProvider.overrideWithValue(api),
-          prDetailProvider(1).overrideWith(
+          prDetailProvider((instanceId: '', prId: 1)).overrideWith(
             (_) => Future.value({'pr': pr, 'reviews': <Review>[]}),
           ),
           sseStreamProvider.overrideWith((ref) => const Stream.empty()),
@@ -133,7 +133,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
-          prDetailProvider(1).overrideWith(
+          prDetailProvider((instanceId: '', prId: 1)).overrideWith(
             (_) => Future.value({'pr': pr, 'reviews': <Review>[]}),
           ),
           sseStreamProvider.overrideWith((ref) => const Stream.empty()),

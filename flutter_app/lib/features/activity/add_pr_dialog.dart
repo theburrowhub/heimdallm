@@ -65,7 +65,7 @@ class _AddPRDialogState extends ConsumerState<AddPRDialog> {
 
       // The new PR must appear in the primary list immediately. Refresh the
       // activity log as well because adding a PR starts its review.
-      ref.invalidate(prsProvider);
+      ref.invalidate(prsByInstanceProvider);
       ref.invalidate(activityEntriesProvider);
       ref.invalidate(activityOptionsProvider);
       Navigator.of(context).pop(true);

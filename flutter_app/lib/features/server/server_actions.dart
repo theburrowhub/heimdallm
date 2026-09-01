@@ -259,8 +259,8 @@ Future<void> restartDaemon(
 void _invalidateDashboardData(WidgetRef ref) {
   ref.invalidate(sseStreamProvider);
   ref.invalidate(daemonHealthProvider);
-  ref.invalidate(prsProvider);
-  ref.invalidate(issuesProvider);
+  ref.invalidate(prsByInstanceProvider);
+  ref.invalidate(issuesByInstanceProvider);
   ref.invalidate(statsProvider);
   ref.invalidate(githubRateLimitProvider);
   ref.invalidate(activityEntriesProvider);

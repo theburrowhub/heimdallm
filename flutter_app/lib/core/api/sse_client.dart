@@ -2,11 +2,25 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../platform/platform_services.dart';
+import 'daemon_endpoint.dart';
 
 class SseEvent {
   final String type;
   final String data;
-  const SseEvent({required this.type, required this.data});
+
+  /// Which instance produced the event. Empty for the daemon the app manages,
+  /// which is every event on a single-daemon install — so existing listeners
+  /// that ignore this field keep behaving exactly as they did.
+  final String instanceId;
+
+  const SseEvent({
+    required this.type,
+    required this.data,
+    this.instanceId = '',
+  });
+
+  SseEvent withInstance(String id) =>
+      SseEvent(type: type, data: data, instanceId: id);
 }
 
 /// SSE client that maintains at most one active HTTP stream and one pending
@@ -14,7 +28,7 @@ class SseEvent {
 class SseClient {
   final String path;
   final http.Client _httpClient;
-  final PlatformServices _platform;
+  final DaemonEndpoint _endpoint;
   final Duration _errorReconnectDelay;
   final Duration _doneReconnectDelay;
   StreamController<SseEvent>? _controller;
@@ -23,12 +37,17 @@ class SseClient {
   bool _connecting = false;
 
   SseClient({
-    required PlatformServices platform,
+    PlatformServices? platform,
+    DaemonEndpoint? endpoint,
     this.path = '/events',
     http.Client? httpClient,
     Duration errorReconnectDelay = const Duration(seconds: 5),
     Duration doneReconnectDelay = const Duration(seconds: 3),
-  }) : _platform = platform,
+  }) : assert(
+         platform != null || endpoint != null,
+         'SseClient needs either a platform (local daemon) or an endpoint',
+       ),
+       _endpoint = endpoint ?? DaemonEndpoint.local(platform!),
        _httpClient = httpClient ?? http.Client(),
        _errorReconnectDelay = errorReconnectDelay,
        _doneReconnectDelay = doneReconnectDelay;
@@ -84,11 +103,11 @@ class SseClient {
     try {
       final request = http.Request(
         'GET',
-        Uri.parse('${_platform.apiBaseUrl}$path'),
+        _endpoint.uri(path),
       );
       request.headers['Accept'] = 'text/event-stream';
       request.headers['Cache-Control'] = 'no-cache';
-      final token = await _platform.loadApiToken();
+      final token = await _endpoint.loadToken();
       if (token != null && token.isNotEmpty) {
         request.headers['X-Heimdallm-Token'] = token;
       }

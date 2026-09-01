@@ -4,6 +4,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/api/api_client.dart';
 import '../../core/api/sse_client.dart';
+import '../../core/instances/aggregation.dart';
+import '../../core/instances/instances_providers.dart';
 import '../../core/models/pr.dart';
 import '../../core/platform/platform_services_provider.dart';
 import '../../core/state/local_state_notifier.dart';
@@ -12,19 +14,68 @@ import '../issues/issues_providers.dart';
 import '../stats/stats_filters.dart';
 import 'activity_filters.dart';
 
+/// The client for the currently selected instance.
+///
+/// On a single-daemon install (and whenever "all instances" is selected) this
+/// is the local daemon, so the ~20 call sites that watch it are unchanged.
+/// Mutating actions go here; aggregated reads use [prsByInstanceProvider] and
+/// friends, which fan out.
 final apiClientProvider = Provider<ApiClient>((ref) {
-  return ApiClient(platform: ref.watch(platformServicesProvider));
+  final active = ref.watch(activeInstanceProvider);
+  return ref.watch(apiClientForProvider(active ?? ''));
+});
+
+/// The hub's own client. Control-plane calls always go here, never to a
+/// selected instance.
+final localApiClientProvider = Provider<ApiClient>((ref) {
+  return ref.watch(hubApiClientProvider);
 });
 
 final sseClientProvider = Provider<SseClient>((ref) {
   return SseClient(platform: ref.watch(platformServicesProvider));
 });
 
+/// Events from every instance the UI is scoped to, merged into one stream and
+/// tagged with their origin.
+///
+/// Keeps the single-daemon `Stream<SseEvent>` shape so the dozen-plus existing
+/// listeners are untouched; only code that cares about provenance reads
+/// [SseEvent.instanceId].
 final sseStreamProvider = StreamProvider<SseEvent>((ref) {
-  final client = ref.watch(sseClientProvider);
-  ref.onDispose(() => client.disconnect());
-  return client.connect();
+  final clients = ref.watch(instanceSseClientsProvider);
+  return mergeInstanceEvents(clients);
 });
+
+/// Resolves the client for one instance during a fan-out.
+///
+/// The empty id is the daemon this app manages, and it deliberately goes
+/// through [apiClientProvider]: that is the single seam production wiring and
+/// tests both override, and bypassing it here would make an injected client
+/// silently ignored.
+ApiClient clientForInstance(Ref ref, String instanceId) {
+  return instanceId.isEmpty
+      ? ref.read(apiClientProvider)
+      : ref.read(apiClientForProvider(instanceId));
+}
+
+/// The [WidgetRef] overload, for widgets acting on a record held by a specific
+/// instance. Duplicated rather than generalised because Ref and WidgetRef share
+/// no common `read` interface to abstract over.
+ApiClient clientForInstanceOf(WidgetRef ref, String instanceId) {
+  return instanceId.isEmpty
+      ? ref.read(apiClientProvider)
+      : ref.read(apiClientForProvider(instanceId));
+}
+
+/// Builds the key used by [reviewingPRsProvider].
+///
+/// Instance-qualified when clustering is on: two instances can both hold the
+/// same repo and PR number (a PR added by hand to each), and an unqualified
+/// key would make one machine's spinner clear the other's. The unqualified
+/// form is preserved exactly for the empty instance id so single-daemon
+/// behaviour — and its tests — are unchanged.
+String reviewKeyFor(String instanceId, String repo, int number) =>
+    instanceId.isEmpty ? '\$repo:\$number' : '\$instanceId|\$repo:\$number';
 
 /// Latest circuit-breaker-tripped payload from the daemon. Null until the
 /// breaker fires or after the user dismisses the banner. Set by the
@@ -227,8 +278,11 @@ void _handleSseEvent(Ref ref, SseEvent event) {
     final repo = data['repo'] as String? ?? '';
     final prNumber = (data['pr_number'] as num?)?.toInt();
     final prId = (data['pr_id'] as num?)?.toInt();
+    // Qualify by the instance that emitted the event, so one machine's
+    // review_completed cannot clear another machine's spinner for the same
+    // repo and PR number.
     final key = (repo.isNotEmpty && prNumber != null)
-        ? '$repo:$prNumber'
+        ? reviewKeyFor(event.instanceId, repo, prNumber)
         : null;
 
     switch (event.type) {
@@ -274,10 +328,10 @@ void _handleSseEvent(Ref ref, SseEvent event) {
               .update((s) => Map.of(s)..remove(key));
         } else if (prId != null) {
           // Look up by store ID from cached PR list
-          final prs = ref.read(prsProvider).value ?? [];
+          final prs = cachedMergedPRs(ref);
           final pr = prs.where((p) => p.id == prId).firstOrNull;
           if (pr != null) {
-            final k = '${pr.repo}:${pr.number}';
+            final k = reviewKeyFor(event.instanceId, pr.repo, pr.number);
             ref
                 .read(reviewingPRsProvider.notifier)
                 .update((s) => Map.of(s)..remove(k));
@@ -425,17 +479,48 @@ final meProvider = FutureProvider<String>((ref) async {
   return api.fetchMe();
 });
 
-final prsProvider = FutureProvider<List<PR>>((ref) async {
+/// PRs from every instance the UI is scoped to, each tagged with its origin.
+///
+/// A failure on one instance does not fail the whole list: the others still
+/// render and the failure is reported separately, because a dashboard that
+/// silently drops one machine's PRs looks identical to one where that machine
+/// simply has no work.
+final prsByInstanceProvider = FutureProvider<AggregatedResult<PR>>((ref) async {
   ref.watch(prListRefreshProvider);
   // Watch meProvider so the tray is rebuilt (with correct author filter)
   // as soon as the username loads after startup.
   ref.watch(meProvider);
   final filters = ref.watch(activityFiltersProvider);
-  final api = ref.watch(apiClientProvider);
-  final prs = await api.fetchPRs(states: filters.states.toList());
+  final targets = ref.watch(targetInstancesProvider);
+
+  final result = await aggregate<PR>(
+    targets: targets,
+    clientFor: (id) => clientForInstance(ref, id),
+    fetch: (client) => client.fetchPRs(states: filters.states.toList()),
+  );
+  final prs = result.values;
   _rebuildTray(ref, prs);
   _reconcileReviewingPRs(ref, prs);
-  return prs;
+  return result;
+});
+
+/// The flat PR list. Derived from [prsByInstanceProvider] so every existing
+/// consumer keeps its `List<PR>` shape.
+final prsProvider = FutureProvider<List<PR>>((ref) async {
+  final aggregated = await ref.watch(prsByInstanceProvider.future);
+  return aggregated.values;
+});
+
+/// The merged PR list as currently cached, without awaiting. Used by the
+/// synchronous reconciliation and tray paths, which must see every instance's
+/// PRs and not just the selected one.
+List<PR> cachedMergedPRs(Ref ref) =>
+    ref.read(prsByInstanceProvider).value?.values ?? const <PR>[];
+
+/// Instances that could not be read on the last PR refresh. Drives the
+/// dashboard's degraded-state banner.
+final instanceReadFailuresProvider = Provider<List<InstanceFailure>>((ref) {
+  return ref.watch(prsByInstanceProvider).value?.failures ?? const [];
 });
 
 int _baselineReviewId(Ref ref, {required String repo, required int prNumber}) {
@@ -443,7 +528,7 @@ int _baselineReviewId(Ref ref, {required String repo, required int prNumber}) {
   // arrives before the initial /prs fetch). 0 is the same baseline used
   // for a first-review: as soon as the PR list populates with a non-zero
   // latestReview.id, reconciliation will clear the stale entry.
-  final prs = ref.read(prsProvider).value ?? const <PR>[];
+  final prs = cachedMergedPRs(ref);
   final pr = prs
       .where((p) => p.repo == repo && p.number == prNumber)
       .firstOrNull;
@@ -505,15 +590,50 @@ Map<String, int> reconcileReviewing(Map<String, int> current, List<PR> prs) {
   return next;
 }
 
+/// Stats per instance, so the Stats screen can show both the fleet total and
+/// the split.
+final statsByInstanceProvider =
+    FutureProvider<AggregatedResult<Map<String, dynamic>>>((ref) async {
+      ref.watch(prListRefreshProvider); // refresh stats when reviews complete
+      final filters = ref.watch(statsFiltersProvider);
+      return aggregateOne<Map<String, dynamic>>(
+        targets: ref.watch(targetInstancesProvider),
+        clientFor: (id) => clientForInstance(ref, id),
+        fetch: (client) => client.fetchStats(
+          repos: filters.repos.toList(),
+          orgs: filters.orgs.toList(),
+        ),
+      );
+    });
+
 final statsProvider = FutureProvider<Map<String, dynamic>>((ref) async {
-  ref.watch(prListRefreshProvider); // refresh stats when reviews complete
-  final filters = ref.watch(statsFiltersProvider);
-  final api = ref.watch(apiClientProvider);
-  return api.fetchStats(
-    repos: filters.repos.toList(),
-    orgs: filters.orgs.toList(),
-  );
+  final aggregated = await ref.watch(statsByInstanceProvider.future);
+  return mergeStatsMaps(aggregated.values);
 });
+
+/// Sums the numeric fields of per-instance stats into one fleet view.
+///
+/// Numbers add up; anything else (a label, a nested breakdown) is taken from
+/// the first instance that reports it, because averaging or concatenating a
+/// non-numeric field would invent a value nobody measured.
+@visibleForTesting
+Map<String, dynamic> mergeStatsMaps(List<Map<String, dynamic>> parts) {
+  if (parts.isEmpty) return const {};
+  if (parts.length == 1) return parts.first;
+  final merged = <String, dynamic>{};
+  for (final part in parts) {
+    for (final entry in part.entries) {
+      final existing = merged[entry.key];
+      final value = entry.value;
+      if (existing is num && value is num) {
+        merged[entry.key] = existing + value;
+      } else if (existing == null) {
+        merged[entry.key] = value;
+      }
+    }
+  }
+  return merged;
+}
 
 /// Live GitHub API rate limits. Fetched on demand (not polled); invalidate to
 /// refresh from the Stats screen.

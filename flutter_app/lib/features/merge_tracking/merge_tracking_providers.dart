@@ -2,18 +2,30 @@ import 'dart:convert';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/instances/aggregation.dart';
+import '../../core/instances/instances_providers.dart';
 import '../../core/api/sse_client.dart';
 import '../../core/models/merge_tracking.dart';
 import '../../core/state/local_state_notifier.dart';
 import '../dashboard/dashboard_providers.dart';
 
 /// The tracked PRs, ordered by the daemon: rows blocked by CI first.
+/// Tracked PRs from every instance the UI is scoped to, tagged with origin.
+final mergeTrackingByInstanceProvider =
+    FutureProvider<AggregatedResult<MergeTrackingEntry>>((ref) async {
+      ref.watch(mergeTrackingRefreshProvider);
+      return aggregate<MergeTrackingEntry>(
+        targets: ref.watch(targetInstancesProvider),
+        clientFor: (id) => ref.read(apiClientForProvider(id)),
+        fetch: (client) => client.fetchMergeTrackingList(),
+      );
+    });
+
 final mergeTrackingProvider = FutureProvider<List<MergeTrackingEntry>>((
   ref,
 ) async {
-  ref.watch(mergeTrackingRefreshProvider);
-  final api = ref.watch(apiClientProvider);
-  return api.fetchMergeTrackingList();
+  final aggregated = await ref.watch(mergeTrackingByInstanceProvider.future);
+  return aggregated.values;
 });
 
 /// Bumped to force a refetch. Incremented by the SSE listener below and by the
