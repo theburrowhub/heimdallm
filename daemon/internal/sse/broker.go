@@ -53,6 +53,22 @@ const (
 	// cached entries keyed on `old_repo`.
 	EventRepoRenamed = "repo_renamed"
 
+	// Multi-instance control plane (hub only). Only reachability TRANSITIONS
+	// are published: a probe ticker across N instances would otherwise flood
+	// the stream with events saying nothing changed. Payload:
+	// {"instance_id", "instance_name", "reachable", "version", "error"}.
+	EventInstanceUp   = "instance_up"
+	EventInstanceDown = "instance_down"
+
+	// EventRoutingChanged fires when the org/repo -> instance rules change, so
+	// every connected GUI refreshes its ownership view rather than showing a
+	// partition that no longer exists. Payload: {"mode"}.
+	EventRoutingChanged = "routing_changed"
+
+	// EventConfigPropagated fires after a push to the other instances.
+	// Payload: {"targets", "failures"}.
+	EventConfigPropagated = "config_propagated"
+
 	// EventRepoNonMonitoredStale fires when the rename probe detects
 	// that an entry in `github.non_monitored` has been renamed on
 	// GitHub (#493 follow-up to #489). The daemon deliberately does
