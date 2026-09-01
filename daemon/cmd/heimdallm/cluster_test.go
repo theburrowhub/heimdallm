@@ -509,11 +509,19 @@ func TestResolvedSelfName(t *testing.T) {
 	}
 
 	// Falling back to the hostname means a second machine is recognisable
-	// without the operator naming it first.
+	// without the operator naming it first — but only once clustering is on.
 	cfg.Cluster.InstanceName = "   "
+	cfg.Cluster.Role = config.RoleHub
 	host, _ := os.Hostname()
 	if got := resolvedSelfName(cfg); got != host && got != "hub-1" {
 		t.Errorf("resolvedSelfName = %q, want the hostname or the id", got)
+	}
+
+	// A daemon outside a cluster has no instance to label, so inventing a name
+	// would put an identity on /health for a feature nobody is using.
+	plain := &config.Config{}
+	if got := resolvedSelfName(plain); got != "" {
+		t.Errorf("resolvedSelfName on a non-cluster daemon = %q, want empty", got)
 	}
 }
 

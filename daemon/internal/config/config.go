@@ -78,7 +78,7 @@ type Config struct {
 	Autonomous     AutonomousConfig     `toml:"autonomous"`
 	Polling        PollingConfig        `toml:"polling"`
 	MergeTracking  MergeTrackingConfig  `toml:"merge_tracking"`
-	Cluster        ClusterConfig        `toml:"cluster"`
+	Cluster        ClusterConfig        `toml:"cluster,omitempty"`
 }
 
 type ServerConfig struct {

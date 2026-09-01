@@ -227,6 +227,10 @@ func resolvedSelfName(cfg *config.Config) string {
 	if name := strings.TrimSpace(cfg.Cluster.InstanceName); name != "" {
 		return name
 	}
+	// No identity to name: a daemon outside a cluster has no instance to label.
+	if !cfg.ClusterEnabled() {
+		return ""
+	}
 	if host, err := os.Hostname(); err == nil && host != "" {
 		return host
 	}
@@ -339,6 +343,12 @@ func instanceIDPrefix() string {
 // a hub.
 func wireCluster(srv *server.Server, cs *clusterState, st *store.Store) {
 	id, name, role := cs.Identity()
+	// A daemon that is not part of a cluster publishes nothing: /health must
+	// look exactly as it did before instances existed, with no identity fields
+	// for a feature the operator is not using.
+	if id == "" && role == "" {
+		return
+	}
 	srv.SetClusterIdentity(id, name, role)
 
 	if !strings.EqualFold(role, config.RoleHub) {

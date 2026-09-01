@@ -230,11 +230,21 @@ func expandTokenFilePath(raw string) (string, error) {
 	return filepath.Clean(path), nil
 }
 
-// applyClusterDefaults fills the zero-value scalars. Role is deliberately left
-// empty rather than defaulted to "standalone": ClusterEnabled treats empty and
-// "standalone" identically, and leaving it empty keeps a config the daemon
-// rewrites from growing a [cluster] section nobody asked for.
+// applyClusterDefaults fills the zero-value scalars, but only once the operator
+// has actually opted into clustering.
+//
+// Two deliberate omissions:
+//
+//   - Role is never defaulted to "standalone". ClusterEnabled treats empty and
+//     "standalone" identically, so filling it in would buy nothing.
+//   - Nothing is filled in at all when clustering is off, so a config.toml the
+//     daemon rewrites does not grow values for a feature the operator is not
+//     using. Every reader already handles the empty case: an empty routing mode
+//     means assignment, and clusterProbeInterval falls back to 30s.
 func (c *Config) applyClusterDefaults() {
+	if !c.ClusterEnabled() {
+		return
+	}
 	if c.Cluster.Routing.Mode == "" {
 		c.Cluster.Routing.Mode = ModeAssignment
 	}

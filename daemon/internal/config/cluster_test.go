@@ -16,18 +16,32 @@ func baseValidConfig() *Config {
 	return c
 }
 
-func TestClusterDefaults(t *testing.T) {
+// Nothing is filled in for a daemon that is not clustered, so a config.toml the
+// daemon rewrites does not grow values for a feature nobody is using.
+func TestClusterDefaultsAreNotAppliedWhenUnused(t *testing.T) {
 	c := baseValidConfig()
+	if c.Cluster.Routing.Mode != "" {
+		t.Errorf("routing mode = %q, want it left empty", c.Cluster.Routing.Mode)
+	}
+	if c.Cluster.ProbeInterval != "" {
+		t.Errorf("probe interval = %q, want it left empty", c.Cluster.ProbeInterval)
+	}
+	if c.Cluster.Role != "" {
+		t.Errorf("role = %q, want empty", c.Cluster.Role)
+	}
+}
+
+func TestClusterDefaultsAppliedOnceClusteringIsOn(t *testing.T) {
+	c := &Config{}
+	c.AI.Primary = "claude"
+	c.Cluster.Role = RoleHub
+	c.applyDefaults()
+
 	if c.Cluster.Routing.Mode != ModeAssignment {
 		t.Errorf("routing mode = %q, want %q", c.Cluster.Routing.Mode, ModeAssignment)
 	}
 	if c.Cluster.ProbeInterval != DefaultClusterProbeInterval {
 		t.Errorf("probe interval = %q, want %q", c.Cluster.ProbeInterval, DefaultClusterProbeInterval)
-	}
-	// Role must stay empty: defaulting it would make the daemon rewrite a
-	// [cluster] section into configs that never asked for one.
-	if c.Cluster.Role != "" {
-		t.Errorf("role = %q, want empty", c.Cluster.Role)
 	}
 }
 
