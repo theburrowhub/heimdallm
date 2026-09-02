@@ -243,6 +243,28 @@ func decodeHealth(t *testing.T, response *http.Response) map[string]any {
 	return body
 }
 
+func getConfig(t *testing.T, baseURL, token string) map[string]any {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, baseURL+"/config", nil)
+	if err != nil {
+		t.Fatalf("create GET /config: %v", err)
+	}
+	req.Header.Set("X-Heimdallm-Token", token)
+	resp, err := (&http.Client{Timeout: 2 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatalf("GET /config: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /config status = %d, want 200", resp.StatusCode)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+	return body
+}
+
 func getHealth(t *testing.T, baseURL string) (*http.Response, map[string]any) {
 	t.Helper()
 	client := &http.Client{Timeout: time.Second}
@@ -577,6 +599,22 @@ func TestRunProcessFullLifecycleStartingReloadManualOperationsAndAPIShutdown(t *
 	case <-fixture.pollersRestarted:
 	case <-time.After(lifecycleTestTimeout):
 		t.Fatal("pollers did not finish restarting")
+	}
+
+	// The [cluster] section must round-trip through GET /config, resolved to
+	// its effective defaults: this fixture's config.toml has no [cluster]
+	// table at all, which is exactly the "not a hub" case the Settings
+	// screen has to distinguish from a genuinely empty registry.
+	configResponse := getConfig(t, fixture.apiBaseURL, apiToken)
+	cluster, ok := configResponse["cluster"].(map[string]any)
+	if !ok {
+		t.Fatalf("GET /config missing cluster section: %#v", configResponse)
+	}
+	if cluster["role"] != "standalone" {
+		t.Fatalf("cluster.role = %v, want standalone", cluster["role"])
+	}
+	if cluster["routing_mode"] != "assignment" {
+		t.Fatalf("cluster.routing_mode = %v, want assignment", cluster["routing_mode"])
 	}
 
 	// Invoke every callback whose context was changed from Background to the

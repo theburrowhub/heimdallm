@@ -2532,6 +2532,10 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			"use_etag":                    c.ETagEnabled(),
 			"use_graphql":                 c.GraphQLEnabled(),
 		}
+		// Cluster. Without this projection the app can PATCH cluster.role but
+		// the Settings screen reads back "standalone" forever, looking like
+		// the change never took.
+		result["cluster"] = clusterConfigMap(c.Cluster)
 		return result
 	})
 
@@ -6158,6 +6162,38 @@ func mergeTrackingConfigMap(c config.MergeTrackingConfig) map[string]any {
 		"resolve_effort":       c.ResolveEffort,
 		"orgs":                 orgs,
 		"repos":                repos,
+	}
+}
+
+// clusterConfigMap renders the [cluster] section's own-identity fields for
+// GET /config.
+//
+// It deliberately does NOT include Instances: InstanceConfig.Token can hold an
+// inline secret, and this is the same generic settings-screen projection used
+// for every other section — the registry already has its own token-redacting
+// view (instanceView, in internal/server/cluster.go) for anything that needs
+// to list instances. A future "just marshal the whole struct" refactor here
+// would silently leak a token into the Config screen's response.
+//
+// Role and Routing.Mode are resolved to their effective defaults (the TOML
+// zero value for both is "", meaning standalone/assignment) so the Flutter
+// dropdown never receives a value outside its own item list.
+func clusterConfigMap(c config.ClusterConfig) map[string]any {
+	role := strings.ToLower(strings.TrimSpace(c.Role))
+	if role == "" {
+		role = config.RoleStandalone
+	}
+	routingMode := strings.ToLower(strings.TrimSpace(c.Routing.Mode))
+	if routingMode == "" {
+		routingMode = config.ModeAssignment
+	}
+	return map[string]any{
+		"role":             role,
+		"instance_id":      c.InstanceID,
+		"instance_name":    c.InstanceName,
+		"default_instance": c.DefaultInstance,
+		"probe_interval":   c.ProbeInterval,
+		"routing_mode":     routingMode,
 	}
 }
 

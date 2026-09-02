@@ -155,6 +155,62 @@ void main() {
       // nothing to talk to.
       expect(find.text('Remove…'), findsNothing);
     });
+
+    testWidgets('routing rules button pushes /instances/routing', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            daemonInstancesProvider.overrideWith((ref) async => _registry()),
+          ],
+          child: MaterialApp.router(
+            routerConfig: GoRouter(
+              initialLocation: '/instances',
+              routes: [
+                GoRoute(
+                  path: '/instances',
+                  builder: (_, _) => const InstancesScreen(),
+                  routes: [
+                    GoRoute(
+                      path: 'routing',
+                      builder: (_, _) =>
+                          const Scaffold(body: Text('Routing screen')),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('Routing rules'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Routing screen'), findsOneWidget);
+    });
+
+    testWidgets('propagate config button opens the configuration dialog', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            daemonInstancesProvider.overrideWith((ref) async => _registry()),
+            configDriftProvider.overrideWith((ref) async => const []),
+          ],
+          child: _app(const InstancesScreen()),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('Apply configuration to all instances'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Configuration across instances'), findsOneWidget);
+    });
   });
 
   group('InstancesTabView', () {

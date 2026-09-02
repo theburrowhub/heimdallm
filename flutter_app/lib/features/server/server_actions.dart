@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/api/api_client.dart';
 import '../../core/daemon/daemon_startup.dart';
+import '../../core/instances/instances_providers.dart';
 import '../../core/platform/platform_services_provider.dart';
 import '../../shared/widgets/toast.dart';
 import '../activity/activity_providers.dart';
@@ -265,4 +266,8 @@ void _invalidateDashboardData(WidgetRef ref) {
   ref.invalidate(githubRateLimitProvider);
   ref.invalidate(activityEntriesProvider);
   ref.invalidate(activityOptionsProvider);
+  // So a "restart required" cluster-role banner clears itself once the
+  // daemon comes back up, from whichever of the three entry points
+  // triggered the restart.
+  ref.invalidate(localClusterRoleProvider);
 }

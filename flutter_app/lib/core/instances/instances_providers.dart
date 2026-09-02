@@ -40,6 +40,37 @@ final hubApiClientProvider = Provider<ApiClient>((ref) {
   return ApiClient(endpoint: ref.watch(localEndpointProvider));
 });
 
+/// The local daemon's EFFECTIVE cluster role, straight from the
+/// unauthenticated `/health`.
+///
+/// `null` means "could not determine" (daemon unreachable, or not a
+/// Heimdallm responder); `''` means reachable and not clustered at all.
+/// Deliberately NOT derived from [daemonInstancesProvider]: that maps every
+/// failure — including "the daemon is simply down" — to
+/// [ClusterRegistry.empty], so it cannot tell a standalone daemon from a dead
+/// one.
+///
+/// This reports what the RUNNING process is wired as, not what config.toml
+/// says: the daemon only calls SetClusterIdentity from wireCluster at
+/// startup, so a saved-but-not-yet-restarted role change is visible here as
+/// (config says hub) != (health says standalone) — which is exactly the
+/// "restart required" signal the GUI needs.
+final localClusterRoleProvider = FutureProvider<String?>((ref) async {
+  final raw = await ref.watch(hubApiClientProvider).fetchHealth();
+  if (raw == null) return null;
+  return (raw['role'] as String?) ?? '';
+});
+
+/// True only when the running local daemon is confirmed to be a hub right
+/// now. Unknown (daemon unreachable) is treated as "not confirmed" rather
+/// than "not a hub", so no call-to-action is shown to someone whose daemon is
+/// simply offline.
+final localIsHubProvider = Provider<bool?>((ref) {
+  final role = ref.watch(localClusterRoleProvider).value;
+  if (role == null) return null;
+  return role.toLowerCase() == ClusterRole.hub;
+});
+
 /// Endpoint for one instance, routed through the hub's proxy.
 final instanceEndpointProvider = Provider.family<DaemonEndpoint, String>((
   ref,

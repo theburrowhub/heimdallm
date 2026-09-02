@@ -4,13 +4,16 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../core/instances/instances_providers.dart';
+import '../../core/instances/models.dart' show ClusterRole;
 import '../instances/config_propagation_dialog.dart';
 import '../../core/models/config_model.dart';
 import '../../core/platform/platform_services_provider.dart';
 import '../../shared/widgets/autocomplete_chip_field.dart';
+import '../../shared/widgets/restart_required_banner.dart';
 import '../../shared/widgets/toast.dart';
 import '../agents/agents_screen.dart' show agentsProvider;
 import '../dashboard/dashboard_providers.dart';
+import '../server/server_actions.dart' as server_actions;
 import '../updates/check_for_updates_button.dart';
 import 'config_providers.dart';
 
@@ -110,6 +113,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   AutonomousConfig _autonomous = const AutonomousConfig();
   MergeTrackingConfig _mergeTracking = const MergeTrackingConfig();
   CircuitBreakerConfig _circuitBreaker = const CircuitBreakerConfig();
+  String _clusterRole = ClusterRole.standalone;
   late TextEditingController _devMaxTurnsController;
   late TextEditingController _devTimeoutController;
   late TextEditingController _claimLeaseController;
@@ -195,6 +199,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     _developPromptId = config.globalImplementPrompt.isEmpty
         ? null
         : config.globalImplementPrompt;
+    _clusterRole = config.clusterRole;
     _initAutonomousFromConfig(config);
   }
 
@@ -292,6 +297,8 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
             _mergeTrackingSection(),
             const SizedBox(height: 20),
             _circuitBreakerSection(),
+            const SizedBox(height: 20),
+            _clusterSection(config),
             const SizedBox(height: 28),
             _saveButton(context, config, daemonRunning),
           ],
@@ -1484,6 +1491,107 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     ]);
   }
 
+  // ── Cluster ─────────────────────────────────────────────────────────────
+
+  /// Hidden while a remote instance is selected: this section edits the
+  /// LOCAL daemon's own role, and this app cannot restart a remote instance
+  /// from here, so scoping the dropdown to one would be a trap — it would
+  /// look like it worked and then nothing would ever restart.
+  Widget _clusterSection(AppConfig config) {
+    final activeInstance = ref.watch(activeInstanceProvider);
+    if (activeInstance != null && activeInstance.isNotEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    final liveRole = ref.watch(localClusterRoleProvider).value;
+    final effectiveLiveRole = (liveRole == null || liveRole.isEmpty)
+        ? ClusterRole.standalone
+        : liveRole.toLowerCase();
+    // Compares what was SAVED (config.clusterRole, optimistic once Save is
+    // tapped) against what the running process actually reports, not the
+    // unsaved dropdown value — so this survives navigating away and back,
+    // and also catches a role edited by hand in config.toml.
+    final restartPending =
+        liveRole != null && config.clusterRole != effectiveLiveRole;
+
+    return _settingsCard('Cluster', [
+      const Text(
+        'A hub manages other Heimdallm daemons — it registers them, routes '
+        'organizations and repositories to them, and can push this '
+        'configuration to all of them. A worker is managed by a hub. '
+        'Standalone is a single daemon on its own.',
+        style: TextStyle(fontSize: 11),
+      ),
+      const SizedBox(height: 8),
+      DropdownButtonFormField<String>(
+        // ignore: deprecated_member_use
+        value: _clusterRole,
+        decoration: const InputDecoration(
+          labelText: 'Role',
+          helperText: 'Changing this requires restarting the daemon',
+          border: OutlineInputBorder(),
+          isDense: true,
+        ),
+        items: ClusterRole.all
+            .map((v) => DropdownMenuItem(value: v, child: Text(v)))
+            .toList(),
+        onChanged: (v) => _onClusterRoleChanged(v),
+      ),
+      if (restartPending) ...[
+        const SizedBox(height: 12),
+        RestartRequiredBanner(
+          message:
+              'Cluster role saved as "${config.clusterRole}", but the '
+              'daemon is still running as "$effectiveLiveRole". Restart it '
+              'for the change to take effect.',
+          onRestart: () => server_actions.restartDaemon(context, ref),
+          starting: ref.watch(daemonStartingProvider),
+        ),
+      ],
+    ]);
+  }
+
+  Future<void> _onClusterRoleChanged(String? next) async {
+    if (next == null || next == _clusterRole) return;
+
+    // Demoting a hub that already has instances unmounts the control plane
+    // (ClusterDeps goes nil) while the registry stays in config.toml: every
+    // registered instance becomes unreachable from the GUI — Remove/Edit/
+    // Routing all 404 — until the role is set back to hub. Confirm first
+    // rather than let that happen silently.
+    final registeredCount =
+        ref.read(daemonInstancesProvider).value?.instances.length ?? 0;
+    if (_clusterRole == ClusterRole.hub &&
+        next != ClusterRole.hub &&
+        registeredCount > 1) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Stop being a hub?'),
+          content: Text(
+            'This hub currently manages $registeredCount instances. They '
+            'stay in config.toml, but become unmanageable from this app — '
+            'unreachable, unroutable, not removable — until the role is set '
+            'back to hub.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Change role'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true) return;
+    }
+
+    setState(() => _clusterRole = next);
+  }
+
   Widget _agentDropdown({
     required String label,
     required String helper,
@@ -1732,6 +1840,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     aiPrimary: _aiPrimary,
     aiFallback: _aiFallback,
     reviewMode: _reviewMode,
+    clusterRole: _clusterRole,
     // agentConfigs (per-CLI) managed in Agents tab
   );
 

@@ -1,3 +1,5 @@
+import '../instances/models.dart' show ClusterRole;
+
 /// Severities `never_approve_min_severity` accepts, in ascending order.
 /// Mirrors the daemon's validator (config.validateNeverApproveMinSeverity).
 const neverApproveMinSeverityOptions = ['low', 'medium', 'high'];
@@ -1443,6 +1445,12 @@ class AppConfig {
   /// will kick in without configuring anything. Keyed by "org/repo".
   final Map<String, String> localDirsDetected;
 
+  /// This daemon's cluster role — 'standalone' | 'hub' | 'worker' (see
+  /// [ClusterRole]). Changing it only takes effect after a daemon restart:
+  /// the control plane (SetCluster/SetClusterIdentity, the health prober) is
+  /// wired once at startup, never on config reload.
+  final String clusterRole;
+
   const AppConfig({
     this.bindAddr,
     this.serverPort = 7842,
@@ -1474,6 +1482,7 @@ class AppConfig {
     this.polling = const PollingConfig(),
     this.localDirBase = const [],
     this.localDirsDetected = const {},
+    this.clusterRole = ClusterRole.standalone,
   });
 
   /// Computed list of monitored repos — this is what the daemon uses.
@@ -1558,6 +1567,7 @@ class AppConfig {
     PollingConfig? polling,
     List<String>? localDirBase,
     Map<String, String>? localDirsDetected,
+    String? clusterRole,
   }) {
     return AppConfig(
       bindAddr: bindAddr == _sentinel ? this.bindAddr : bindAddr as String?,
@@ -1598,12 +1608,14 @@ class AppConfig {
       polling: polling ?? this.polling,
       localDirBase: localDirBase ?? this.localDirBase,
       localDirsDetected: localDirsDetected ?? this.localDirsDetected,
+      clusterRole: clusterRole ?? this.clusterRole,
     );
   }
 
   Map<String, dynamic> toJson() => {
     if (bindAddr != null) 'bind_addr': bindAddr,
     'server_port': serverPort,
+    'cluster': {'role': clusterRole},
     'poll_interval': pollInterval,
     'repositories': repositories,
     'ai_primary': aiPrimary,
@@ -1809,6 +1821,11 @@ class AppConfig {
           : const PollingConfig(),
       localDirBase: _parseStringList(json['local_dir_base']),
       localDirsDetected: localDirsDetected,
+      // Defensive against an older daemon that omits `cluster` entirely, or
+      // one that reports an empty role: both mean standalone.
+      clusterRole:
+          _nonEmpty((json['cluster'] as Map<String, dynamic>?)?['role']) ??
+          ClusterRole.standalone,
     );
   }
 

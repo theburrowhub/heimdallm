@@ -155,10 +155,12 @@ void main() {
       expect(find.textContaining('keeps running'), findsOneWidget);
       expect(find.textContaining('is unrouted'), findsOneWidget);
 
-      // Cancelling must not send anything.
+      // Cancelling must not send anything destructive. (The screen's own
+      // hub-status banner makes an incidental GET /health in the
+      // background — unrelated to this action.)
       await tester.tap(find.text('Cancel'));
       await tester.pumpAndSettle();
-      expect(recorder.requests, isEmpty);
+      expect(recorder.requests, isNot(contains('DELETE /instances/srv-a')));
     });
 
     testWidgets('confirmed removal deregisters the instance', (tester) async {

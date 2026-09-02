@@ -5,6 +5,7 @@ import '../../core/api/api_client.dart';
 import '../../core/api/cluster_api.dart';
 import '../../core/instances/instances_providers.dart';
 import '../../core/instances/models.dart';
+import 'enable_hub_action.dart';
 
 /// How an instance's API token is supplied.
 enum _TokenSource { inline, env, file }
@@ -186,13 +187,16 @@ class _InstanceDialogState extends ConsumerState<_InstanceDialog> {
                 ],
                 if (_error != null) ...[
                   const SizedBox(height: 12),
-                  Text(
-                    _error!,
-                    style: TextStyle(
-                      color: Theme.of(context).colorScheme.error,
-                      fontSize: 12,
+                  if (isNotAClusterHubError(_error))
+                    _NotAHubError(onEnable: _enableHubMode)
+                  else
+                    Text(
+                      _error!,
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.error,
+                        fontSize: 12,
+                      ),
                     ),
-                  ),
                 ],
               ],
             ),
@@ -292,5 +296,77 @@ class _InstanceDialogState extends ConsumerState<_InstanceDialog> {
         });
       }
     }
+  }
+
+  /// The dialog's own "not a hub" recovery action. Closes on success: the
+  /// restart tears down the daemon connection this form is talking to, so a
+  /// dialog holding stale form state over a restarting daemon is worse than
+  /// a clean re-open — the honest instruction is "enable it, then add the
+  /// instance again", not a promise to resume automatically.
+  Future<void> _enableHubMode() async {
+    final ok = await enableHubMode(context, ref);
+    if (ok && mounted) Navigator.pop(context);
+  }
+}
+
+/// Humanises the daemon's raw `hubOnly` refusal into an explanation plus a
+/// one-click fix, instead of showing the bare sentinel string.
+class _NotAHubError extends StatelessWidget {
+  const _NotAHubError({required this.onEnable});
+
+  final VoidCallback onEnable;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: Theme.of(
+          context,
+        ).colorScheme.errorContainer.withValues(alpha: 0.4),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                Icons.hub_outlined,
+                size: 16,
+                color: Theme.of(context).colorScheme.onErrorContainer,
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  'This daemon is not a cluster hub yet',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: Theme.of(context).colorScheme.onErrorContainer,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Only a hub can register other instances. Enabling hub mode '
+            'saves the setting and restarts the daemon; then add this '
+            'instance again.',
+            style: TextStyle(
+              fontSize: 11,
+              color: Theme.of(context).colorScheme.onErrorContainer,
+            ),
+          ),
+          const SizedBox(height: 8),
+          FilledButton.icon(
+            onPressed: onEnable,
+            icon: const Icon(Icons.hub, size: 16),
+            label: const Text('Enable hub mode'),
+          ),
+        ],
+      ),
+    );
   }
 }

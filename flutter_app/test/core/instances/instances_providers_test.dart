@@ -1,8 +1,14 @@
+import 'dart:convert';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:heimdallm/core/api/api_client.dart';
+import 'package:heimdallm/core/api/daemon_endpoint.dart';
 import 'package:heimdallm/core/instances/instances_providers.dart';
 import 'package:heimdallm/core/instances/models.dart';
 import 'package:heimdallm/core/platform/platform_services_provider.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../platform/fake_platform_services.dart';
@@ -220,6 +226,59 @@ void main() {
 
       final rules = await container.read(routingRulesProvider.future);
       expect(rules.enabled, isFalse);
+    });
+  });
+
+  group('localClusterRoleProvider', () {
+    ApiClient fakeHub(Map<String, dynamic> healthBody, {int status = 200}) {
+      return ApiClient(
+        httpClient: MockClient(
+          (request) async => http.Response(jsonEncode(healthBody), status),
+        ),
+        endpoint: DaemonEndpoint.raw(baseUrl: 'http://hub:7842', token: 't'),
+      );
+    }
+
+    test('reports the role the running daemon returns', () async {
+      final container = ProviderContainer(
+        overrides: [
+          hubApiClientProvider.overrideWithValue(
+            fakeHub({'status': 'ok', 'version': '0.9.0', 'role': 'hub'}),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      expect(await container.read(localClusterRoleProvider.future), 'hub');
+      expect(container.read(localIsHubProvider), isTrue);
+    });
+
+    test('a plain standalone daemon reports an empty role, not null', () async {
+      final container = ProviderContainer(
+        overrides: [
+          hubApiClientProvider.overrideWithValue(
+            fakeHub({'status': 'ok', 'version': '0.9.0'}),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      expect(await container.read(localClusterRoleProvider.future), '');
+      expect(container.read(localIsHubProvider), isFalse);
+    });
+
+    test('an unreachable daemon is unknown, not "not a hub"', () async {
+      final container = ProviderContainer(
+        overrides: [
+          hubApiClientProvider.overrideWithValue(
+            fakeHub({}, status: 500),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      expect(await container.read(localClusterRoleProvider.future), isNull);
+      expect(container.read(localIsHubProvider), isNull);
     });
   });
 
