@@ -157,6 +157,182 @@ void main() {
     });
   });
 
+  group('InstancesTabView', () {
+    testWidgets('shows the same empty state as the routed screen', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            daemonInstancesProvider.overrideWith((ref) async => _registry()),
+          ],
+          child: _app(const Scaffold(body: InstancesTabView())),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('No instances registered'), findsOneWidget);
+    });
+
+    testWidgets('inlines the toolbar actions since there is no AppBar here', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            daemonInstancesProvider.overrideWith(
+              (ref) async => _registry(
+                instances: [
+                  {'id': 'hub-1', 'name': 'Local hub', 'self': true},
+                ],
+              ),
+            ),
+          ],
+          child: _app(const Scaffold(body: InstancesTabView())),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Add instance'), findsOneWidget);
+      expect(find.byTooltip('Routing rules'), findsOneWidget);
+      expect(
+        find.byTooltip('Apply configuration to all instances'),
+        findsOneWidget,
+      );
+      expect(find.byTooltip('Refresh'), findsOneWidget);
+      // Body content still renders below the inline toolbar.
+      expect(find.text('Local hub'), findsWidgets);
+    });
+
+    testWidgets('routing rules button pushes /instances/routing', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            daemonInstancesProvider.overrideWith((ref) async => _registry()),
+          ],
+          child: MaterialApp.router(
+            routerConfig: GoRouter(
+              initialLocation: '/instances',
+              routes: [
+                GoRoute(
+                  path: '/instances',
+                  builder: (_, _) =>
+                      const Scaffold(body: InstancesTabView()),
+                  routes: [
+                    GoRoute(
+                      path: 'routing',
+                      builder: (_, _) =>
+                          const Scaffold(body: Text('Routing screen')),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('Routing rules'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Routing screen'), findsOneWidget);
+    });
+
+    testWidgets('add instance button opens the registration dialog', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            daemonInstancesProvider.overrideWith((ref) async => _registry()),
+          ],
+          child: _app(const Scaffold(body: InstancesTabView())),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Add instance'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.widgetWithText(AlertDialog, 'Add instance'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets(
+      'propagate config button opens the configuration dialog',
+      (tester) async {
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              daemonInstancesProvider.overrideWith(
+                (ref) async => _registry(),
+              ),
+              configDriftProvider.overrideWith((ref) async => const []),
+            ],
+            child: _app(const Scaffold(body: InstancesTabView())),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(
+          find.byTooltip('Apply configuration to all instances'),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.text('Configuration across instances'), findsOneWidget);
+      },
+    );
+
+    testWidgets('refresh button reloads the registry', (tester) async {
+      var loads = 0;
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            daemonInstancesProvider.overrideWith((ref) async {
+              loads++;
+              return _registry();
+            }),
+          ],
+          child: _app(const Scaffold(body: InstancesTabView())),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(loads, 1);
+
+      await tester.tap(find.byTooltip('Refresh'));
+      await tester.pumpAndSettle();
+
+      expect(loads, 2);
+    });
+
+    testWidgets('shows an error when the registry fails to load', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            daemonInstancesProvider.overrideWith(
+              (ref) async => throw Exception('daemon unreachable'),
+            ),
+          ],
+          child: _app(const Scaffold(body: InstancesTabView())),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.textContaining('Could not load instances:'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('daemon unreachable'), findsOneWidget);
+    });
+  });
+
   group('InstanceSelector', () {
     testWidgets('stays hidden with a single instance', (tester) async {
       // One instance is indistinguishable from a plain single-daemon install.

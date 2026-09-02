@@ -57,6 +57,63 @@ class InstancesScreen extends ConsumerWidget {
   }
 }
 
+/// Same content as [InstancesScreen], embedded directly as a dashboard tab
+/// instead of pushed as a route.
+///
+/// This is the entry point that actually makes instance management
+/// reachable: [InstanceSelector]'s "Manage instances…" item only appears
+/// once a second instance already exists, which nothing could ever satisfy
+/// without a way in. The tab has no such precondition.
+class InstancesTabView extends ConsumerWidget {
+  const InstancesTabView({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final registryAsync = ref.watch(daemonInstancesProvider);
+
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 8, 4),
+          child: Row(
+            children: [
+              const Spacer(),
+              TextButton.icon(
+                onPressed: () => showInstanceDialog(context, ref),
+                icon: const Icon(Icons.add, size: 18),
+                label: const Text('Add instance'),
+              ),
+              IconButton(
+                tooltip: 'Routing rules',
+                icon: const Icon(Icons.alt_route),
+                onPressed: () => context.push('/instances/routing'),
+              ),
+              IconButton(
+                tooltip: 'Apply configuration to all instances',
+                icon: const Icon(Icons.sync_alt),
+                onPressed: () => showConfigPropagationDialog(context, ref),
+              ),
+              IconButton(
+                tooltip: 'Refresh',
+                icon: const Icon(Icons.refresh),
+                onPressed: () => ref.invalidate(daemonInstancesProvider),
+              ),
+            ],
+          ),
+        ),
+        Expanded(
+          child: registryAsync.when(
+            loading: () => const Center(child: CircularProgressIndicator()),
+            error: (e, _) =>
+                Center(child: Text('Could not load instances: $e')),
+            data: (registry) => _InstanceList(registry: registry),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 class _InstanceList extends ConsumerWidget {
   const _InstanceList({required this.registry});
 
