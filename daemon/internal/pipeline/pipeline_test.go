@@ -359,6 +359,44 @@ func TestPipeline_Run_MediumApprovalWithoutFindingsKeepsSummary(t *testing.T) {
 	}
 }
 
+func TestPipeline_Run_PublishedBodyUsesReconciledSeverity(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
+	gh := &fakeGH{diff: "+new line"}
+	exec := &fakeExecCapture{result: &executor.ReviewResult{
+		Summary:  "Something serious was found.",
+		Severity: "low", // raw agent field understates the actual issue severity
+		Issues: []executor.Issue{
+			{File: "internal/auth.go", Line: 10, Description: "auth bypass", Severity: "high"},
+		},
+	}}
+	p := pipeline.New(s, gh, exec, &fakeNotify{})
+	pr := &github.PullRequest{
+		ID: 23, Number: 23, Title: "Add feature", Repo: "org/repo",
+		User: github.User{Login: "alice"}, State: "open",
+		UpdatedAt: time.Now(), HTMLURL: "https://github.com/org/repo/pull/23",
+		Head: github.Branch{SHA: "sha23"},
+	}
+
+	rev, err := p.Run(pr, pipeline.RunOptions{Primary: "claude"})
+	if err != nil {
+		t.Fatalf("pipeline run: %v", err)
+	}
+	// The severity reconciled from the issue list (high) must be both the
+	// stored value and the one quoted in the published footer — not the
+	// agent's raw understated field.
+	if rev.Severity != "high" {
+		t.Fatalf("stored severity = %q, want high", rev.Severity)
+	}
+	if !strings.Contains(gh.submittedBody, "🔴 *Severity: **HIGH***") {
+		t.Fatalf("published body should quote the reconciled high severity, got:\n%s", gh.submittedBody)
+	}
+}
+
 func TestPipeline_RunFallbackDropsPrimaryProviderOptions(t *testing.T) {
 	s, err := store.Open(":memory:")
 	if err != nil {
@@ -1852,8 +1890,15 @@ func TestBuildGitHubBodyUsesLGTMOnlyForCleanResult(t *testing.T) {
 		Summary:  "Everything previously raised has been addressed.",
 		Severity: "low",
 	}
-	if got := pipeline.BuildGitHubBody(clean); got != "LGTM" {
-		t.Errorf("clean review body = %q, want LGTM", got)
+	got := pipeline.BuildGitHubBody(clean)
+	if !strings.HasPrefix(got, "LGTM") {
+		t.Errorf("clean review body = %q, want LGTM prefix", got)
+	}
+	if !strings.Contains(got, "Reviewed by [Heimdallm]") {
+		t.Errorf("clean review body missing provenance footer: %q", got)
+	}
+	if strings.Contains(got, "Severity:") {
+		t.Errorf("clean review body should omit the severity line: %q", got)
 	}
 
 	medium := &executor.ReviewResult{
@@ -1873,6 +1918,23 @@ func TestBuildGitHubBodyUsesLGTMOnlyForCleanResult(t *testing.T) {
 	}
 	if got := pipeline.BuildGitHubBody(withFinding); !strings.Contains(got, "The example is stale.") {
 		t.Errorf("low review with a finding omitted its detail: %q", got)
+	}
+
+	highSeverity := &executor.ReviewResult{
+		Summary:  "Blocking concern found.",
+		Severity: "high",
+		Issues: []executor.Issue{
+			{File: "internal/auth.go", Line: 10, Description: "auth bypass", Severity: "high"},
+		},
+	}
+	if got := pipeline.BuildGitHubBody(highSeverity); !strings.HasSuffix(got, "🔴 *Severity: **HIGH***") {
+		t.Errorf("high severity body should end with the red severity badge: %q", got)
+	}
+
+	for _, r := range []*executor.ReviewResult{clean, medium, withFinding, highSeverity} {
+		if got := pipeline.BuildGitHubBody(r); strings.Contains(got, "## 🤖 Heimdallm AI Review") {
+			t.Errorf("body should not carry the old heading: %q", got)
+		}
 	}
 }
 

@@ -1140,6 +1140,12 @@ func (p *Pipeline) Run(pr *github.PullRequest, opts RunOptions) (_ *store.Review
 	finalSeverity := ApplySignalEscalation(reconciledSeverity, commentSignals)
 	reviewEvent := ReviewEvent(finalSeverity, MaxIssueSeverity(result.Issues),
 		opts.NeverApproveWithIssues, opts.NeverApproveMinSeverity)
+	// The published body must quote the severity that was actually decided and
+	// stored (reconciled + signal-escalated), not the agent's raw field: the
+	// footer badge would otherwise contradict the review event. The retry
+	// paths (PublishPending, NATS publish-worker) already build their body
+	// from the stored value, so this also aligns Run with them.
+	result.Severity = finalSeverity
 
 	// 6. Marshal issues to JSON for storage
 	issuesJSON, err := json.Marshal(result.Issues)
@@ -1421,20 +1427,56 @@ func (p *Pipeline) PublishPending() {
 	}
 }
 
+// heimdallmURL is the project page linked from every review footer.
+const heimdallmURL = "https://theburrowhub.github.io/heimdallm/"
+
+// severityIcon maps a severity to its badge emoji. Unknown values fall back
+// to the medium badge, matching severityLabel.
+func severityIcon(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "high":
+		return "🔴"
+	case "low":
+		return "🟡"
+	default:
+		return "⚠️"
+	}
+}
+
+// severityLabel renders a severity as its uppercase canonical name. Unknown
+// values fall back to MEDIUM, matching severityIcon.
+func severityLabel(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "high":
+		return "HIGH"
+	case "low":
+		return "LOW"
+	default:
+		return "MEDIUM"
+	}
+}
+
+// reviewFooter is the provenance block appended to every body Heimdallm posts
+// on a PR. The attribution lives at the bottom, out of the way of the
+// summary — GitHub already shows the bot's avatar and name above the body.
+// An empty severity omits the severity line (used for the LGTM body). No
+// leading blank line: callers own the spacing that precedes it.
+func reviewFooter(severity string) string {
+	footer := fmt.Sprintf("---\n🤖 *Reviewed by [Heimdallm](%s)*", heimdallmURL)
+	if strings.TrimSpace(severity) == "" {
+		return footer
+	}
+	// Two trailing spaces force a CommonMark hard line break so the severity
+	// line renders directly under the attribution line rather than as a
+	// separate paragraph.
+	return footer + fmt.Sprintf("  \n%s *Severity: **%s***",
+		severityIcon(severity), severityLabel(severity))
+}
+
 // buildIssueComment formats a single issue as a standalone PR comment (multi-feedback mode).
 func buildIssueComment(issue executor.Issue) string {
-	icon := "⚠️"
-	sev := "MEDIUM"
-	switch issue.Severity {
-	case "high":
-		icon = "🔴"
-		sev = "HIGH"
-	case "low":
-		icon = "🟡"
-		sev = "LOW"
-	}
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("## %s %s Issue\n\n", icon, sev))
+	sb.WriteString(fmt.Sprintf("## %s %s Issue\n\n", severityIcon(issue.Severity), severityLabel(issue.Severity)))
 	sb.WriteString(issue.Description)
 	if issue.File != "" {
 		sb.WriteString("\n\n**Location:** `")
@@ -1444,7 +1486,8 @@ func buildIssueComment(issue executor.Issue) string {
 			sb.WriteString(fmt.Sprintf(" line %d", issue.Line))
 		}
 	}
-	sb.WriteString("\n\n---\n*Posted by Heimdallm AI Review*")
+	sb.WriteString("\n\n")
+	sb.WriteString(reviewFooter(issue.Severity))
 	return sb.String()
 }
 
@@ -1452,45 +1495,35 @@ func buildIssueComment(issue executor.Issue) string {
 // Individual issues are already posted as separate comments; this is the formal review summary.
 func buildMultiSummaryBody(r *executor.ReviewResult) string {
 	var sb strings.Builder
-	sb.WriteString("## 🤖 Heimdallm AI Review — Summary\n\n")
 	sb.WriteString(r.Summary)
 	sb.WriteString("\n\n")
 	if len(r.Issues) > 0 {
 		sb.WriteString(fmt.Sprintf("**%d issue(s) found** — see individual comments above for details.\n\n", len(r.Issues)))
 	}
-	sb.WriteString(fmt.Sprintf("---\n*Severity: **%s** · Reviewed by Heimdallm*",
-		strings.ToUpper(r.Severity)))
+	sb.WriteString(reviewFooter(r.Severity))
 	return sb.String()
 }
 
 // BuildGitHubBody formats the AI review as a GitHub-flavored markdown review body.
 func BuildGitHubBody(r *executor.ReviewResult) string {
 	if len(r.Issues) == 0 && strings.EqualFold(strings.TrimSpace(r.Severity), "low") {
-		return "LGTM"
+		return "LGTM\n\n" + reviewFooter("")
 	}
 
 	var sb strings.Builder
-	sb.WriteString("## 🤖 Heimdallm AI Review\n\n")
 	sb.WriteString(r.Summary)
 	sb.WriteString("\n\n")
 
 	if len(r.Issues) > 0 {
 		sb.WriteString("### Issues\n\n")
 		for _, issue := range r.Issues {
-			icon := "⚠️"
-			if issue.Severity == "high" {
-				icon = "🔴"
-			} else if issue.Severity == "low" {
-				icon = "🟡"
-			}
 			sb.WriteString(fmt.Sprintf("%s **%s:%d** — %s\n",
-				icon, issue.File, issue.Line, issue.Description))
+				severityIcon(issue.Severity), issue.File, issue.Line, issue.Description))
 		}
 		sb.WriteString("\n")
 	}
 
-	sb.WriteString(fmt.Sprintf("---\n*Severity: **%s** · Reviewed by %s*",
-		strings.ToUpper(r.Severity), "Heimdallm"))
+	sb.WriteString(reviewFooter(r.Severity))
 	return sb.String()
 }
 
