@@ -19,6 +19,8 @@ import 'package:heimdallm/features/dashboard/dashboard_screen.dart';
 import 'package:heimdallm/features/issues/issues_providers.dart';
 import 'package:heimdallm/features/server/server_actions.dart';
 import 'package:heimdallm/core/instances/aggregation.dart';
+import 'package:heimdallm/core/instances/instances_providers.dart';
+import 'package:heimdallm/core/instances/models.dart';
 import 'package:heimdallm/core/models/tracked_issue.dart';
 import '../core/platform/fake_platform_services.dart';
 
@@ -569,6 +571,58 @@ void main() {
       );
     }
   });
+
+  testWidgets(
+    'DashboardScreen exposes an Instances tab reachable without a second '
+    'instance already registered',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1800, 700));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            prsByInstanceProvider.overrideWith(
+              (ref) => Future.value(singleInstanceResult(const [])),
+            ),
+            issuesByInstanceProvider.overrideWith(
+              (ref) async => singleInstanceResult(const <TrackedIssue>[]),
+            ),
+            sseStreamProvider.overrideWith((ref) => const Stream.empty()),
+            // A plain single-daemon install: no instances registered at all.
+            // The InstanceSelector's "Manage instances…" entry only appears
+            // once a second instance already exists, so it can never be the
+            // way in — the tab must work regardless of this state.
+            daemonInstancesProvider.overrideWith(
+              (ref) async => ClusterRegistry.fromJson({
+                'role': 'hub',
+                'self_id': 'hub-1',
+                'self_name': 'Local hub',
+                'instances': const [],
+              }),
+            ),
+          ],
+          child: MaterialApp.router(
+            routerConfig: GoRouter(
+              routes: [
+                GoRoute(path: '/', builder: (_, _) => const DashboardScreen()),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.widgetWithText(Tab, 'Instances'), findsOneWidget);
+      expect(find.text('Manage instances…'), findsNothing);
+
+      await tester.tap(find.widgetWithText(Tab, 'Instances'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('No instances registered'), findsOneWidget);
+      expect(find.text('Add instance'), findsOneWidget);
+    },
+  );
 
   testWidgets(
     'main Activity list Add PR control opens, validates, submits, and refreshes',

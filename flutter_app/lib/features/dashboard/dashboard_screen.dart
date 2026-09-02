@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/api/api_client.dart';
 import '../../core/instances/aggregation.dart';
 import '../../core/instances/instances_providers.dart';
+import '../instances/instances_screen.dart';
 import '../instances/widgets/instance_badge.dart';
 import '../instances/widgets/instance_selector.dart';
 import '../../core/models/pr.dart';
@@ -51,7 +52,7 @@ class DashboardScreen extends ConsumerWidget {
     // opening the tab at all.
     final checkProblems = ref.watch(mergeTrackingCheckProblemCountProvider);
     return DefaultTabController(
-      length: 8,
+      length: 9,
       child: Scaffold(
         appBar: AppBar(
           title: const Text('Heimdallm'),
@@ -124,6 +125,7 @@ class DashboardScreen extends ConsumerWidget {
               const Tab(icon: Icon(Icons.auto_awesome), text: 'Prompts'),
               const Tab(icon: Icon(Icons.smart_toy), text: 'Agents'),
               const Tab(icon: Icon(Icons.bar_chart), text: 'Stats'),
+              const Tab(icon: Icon(Icons.dns_outlined), text: 'Instances'),
             ],
           ),
         ),
@@ -159,6 +161,7 @@ class DashboardScreen extends ConsumerWidget {
                   KeepAliveTab(child: AgentsScreen()),
                   KeepAliveTab(child: CLIAgentsScreen()),
                   KeepAliveTab(child: StatsScreen()),
+                  KeepAliveTab(child: InstancesTabView()),
                 ],
               ),
             ),
