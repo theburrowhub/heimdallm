@@ -1589,6 +1589,10 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
       if (confirmed != true) return;
     }
 
+    // The confirm dialog is an await gap: the widget can be disposed while
+    // it's open (e.g. the user navigates away from Settings), and setState
+    // after dispose throws.
+    if (!mounted) return;
     setState(() => _clusterRole = next);
   }
 

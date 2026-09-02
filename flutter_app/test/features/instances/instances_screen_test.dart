@@ -366,6 +366,34 @@ void main() {
       expect(loads, 2);
     });
 
+    // localClusterRoleProvider has no polling of its own — this is the only
+    // thing that notices a daemon that recovered from being unreachable
+    // without going through the restart flow.
+    testWidgets('refresh button also re-checks the local hub role', (
+      tester,
+    ) async {
+      var roleChecks = 0;
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            daemonInstancesProvider.overrideWith((ref) async => _registry()),
+            localClusterRoleProvider.overrideWith((ref) async {
+              roleChecks++;
+              return '';
+            }),
+          ],
+          child: _app(const Scaffold(body: InstancesTabView())),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(roleChecks, 1);
+
+      await tester.tap(find.byTooltip('Refresh'));
+      await tester.pumpAndSettle();
+
+      expect(roleChecks, 2);
+    });
+
     testWidgets('shows an error when the registry fails to load', (
       tester,
     ) async {

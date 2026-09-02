@@ -51,7 +51,15 @@ class InstancesScreen extends ConsumerWidget {
           IconButton(
             tooltip: 'Refresh',
             icon: const Icon(Icons.refresh),
-            onPressed: () => ref.invalidate(daemonInstancesProvider),
+            onPressed: () {
+              ref.invalidate(daemonInstancesProvider);
+              // localClusterRoleProvider is a plain FutureProvider with no
+              // polling of its own (same shape as daemonHealthProvider) — if
+              // the daemon recovered from being unreachable without going
+              // through the restart flow, this is the only thing that
+              // notices.
+              ref.invalidate(localClusterRoleProvider);
+            },
           ),
         ],
       ),
@@ -127,7 +135,10 @@ class InstancesTabView extends ConsumerWidget {
               IconButton(
                 tooltip: 'Refresh',
                 icon: const Icon(Icons.refresh),
-                onPressed: () => ref.invalidate(daemonInstancesProvider),
+                onPressed: () {
+                  ref.invalidate(daemonInstancesProvider);
+                  ref.invalidate(localClusterRoleProvider);
+                },
               ),
             ],
           ),
