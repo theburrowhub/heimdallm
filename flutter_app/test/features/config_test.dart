@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:heimdallm/core/api/api_client.dart';
+import 'package:heimdallm/core/instances/models.dart' show ClusterRole;
 import 'package:heimdallm/core/models/config_model.dart';
 import 'package:heimdallm/core/platform/platform_services_provider.dart';
 import 'package:heimdallm/core/setup/first_run_setup.dart';
@@ -1070,6 +1071,34 @@ void main() {
     final cfg = AppConfig.fromJson({});
     expect(cfg.mergeTracking.enabled, isFalse);
   });
+
+  // ── cluster.role tolerance (mixed-version rollout) ──────────────────────────
+
+  test('AppConfig.fromJson reads cluster.role', () {
+    final cfg = AppConfig.fromJson({
+      'cluster': {'role': 'hub'},
+    });
+    expect(cfg.clusterRole, 'hub');
+  });
+
+  // A GUI talking to an older daemon that has never heard of [cluster] must
+  // not crash the whole Settings screen — it must degrade to standalone,
+  // same as a daemon that reports the section with an empty role.
+  test('AppConfig.fromJson defaults clusterRole to standalone when the '
+      'cluster key is entirely absent', () {
+    final cfg = AppConfig.fromJson({});
+    expect(cfg.clusterRole, ClusterRole.standalone);
+  });
+
+  test(
+    'AppConfig.fromJson defaults clusterRole to standalone when role is empty',
+    () {
+      final cfg = AppConfig.fromJson({
+        'cluster': {'role': ''},
+      });
+      expect(cfg.clusterRole, ClusterRole.standalone);
+    },
+  );
 
   // ── CircuitBreakerConfig ───────────────────────────────────────────────────
 

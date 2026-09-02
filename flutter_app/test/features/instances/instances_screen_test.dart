@@ -155,6 +155,62 @@ void main() {
       // nothing to talk to.
       expect(find.text('Remove…'), findsNothing);
     });
+
+    testWidgets('routing rules button pushes /instances/routing', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            daemonInstancesProvider.overrideWith((ref) async => _registry()),
+          ],
+          child: MaterialApp.router(
+            routerConfig: GoRouter(
+              initialLocation: '/instances',
+              routes: [
+                GoRoute(
+                  path: '/instances',
+                  builder: (_, _) => const InstancesScreen(),
+                  routes: [
+                    GoRoute(
+                      path: 'routing',
+                      builder: (_, _) =>
+                          const Scaffold(body: Text('Routing screen')),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('Routing rules'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Routing screen'), findsOneWidget);
+    });
+
+    testWidgets('propagate config button opens the configuration dialog', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            daemonInstancesProvider.overrideWith((ref) async => _registry()),
+            configDriftProvider.overrideWith((ref) async => const []),
+          ],
+          child: _app(const InstancesScreen()),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('Apply configuration to all instances'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Configuration across instances'), findsOneWidget);
+    });
   });
 
   group('InstancesTabView', () {
@@ -308,6 +364,34 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(loads, 2);
+    });
+
+    // localClusterRoleProvider has no polling of its own — this is the only
+    // thing that notices a daemon that recovered from being unreachable
+    // without going through the restart flow.
+    testWidgets('refresh button also re-checks the local hub role', (
+      tester,
+    ) async {
+      var roleChecks = 0;
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            daemonInstancesProvider.overrideWith((ref) async => _registry()),
+            localClusterRoleProvider.overrideWith((ref) async {
+              roleChecks++;
+              return '';
+            }),
+          ],
+          child: _app(const Scaffold(body: InstancesTabView())),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(roleChecks, 1);
+
+      await tester.tap(find.byTooltip('Refresh'));
+      await tester.pumpAndSettle();
+
+      expect(roleChecks, 2);
     });
 
     testWidgets('shows an error when the registry fails to load', (

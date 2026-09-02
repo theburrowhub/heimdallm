@@ -194,6 +194,41 @@ class RoutingOp {
   static const all = [review, merge, issue];
 }
 
+/// Cluster roles. Mirrors the daemon's config.Role* constants
+/// (daemon/internal/config/cluster.go).
+class ClusterRole {
+  /// A plain single-daemon install: no control plane, no /instances routes.
+  static const standalone = 'standalone';
+
+  /// Manages other Heimdallm daemons: registers them, routes work to them,
+  /// can push configuration to them.
+  static const hub = 'hub';
+
+  /// Managed by a hub. Not distinguished from standalone in this GUI today.
+  static const worker = 'worker';
+
+  static const all = [standalone, hub, worker];
+}
+
+/// The daemon's verbatim refusal, from hubOnly (daemon/internal/server/
+/// cluster.go), for any /instances or /cluster/* call made against a daemon
+/// that is not currently wired as a hub.
+///
+/// This is the only signal available to tell this specific failure apart from
+/// any other: [ApiException] carries just a `String message`, no status code
+/// and no error type. Kept as one named sentinel + helper so there is exactly
+/// one place to fix if the daemon's wording ever changes.
+const kNotAClusterHubError = 'this daemon is not a cluster hub';
+
+/// Whether [message] is the daemon's "not a cluster hub" refusal.
+///
+/// Substring + case-insensitive rather than exact match: robust to the
+/// message being wrapped or re-cased by an intermediate layer without
+/// silently regressing back to showing the raw string to the user.
+bool isNotAClusterHubError(String? message) =>
+    message != null &&
+    message.toLowerCase().contains(kNotAClusterHubError);
+
 /// The org/repo to instance rules.
 class RoutingRules {
   final String mode;

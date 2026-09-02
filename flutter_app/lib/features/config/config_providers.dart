@@ -646,6 +646,12 @@ Map<String, dynamic> _computeGlobalDiff(AppConfig old, AppConfig updated) {
   }
   if (pollingDiff.isNotEmpty) diff['polling'] = pollingDiff;
 
+  // Cluster. Only the role: instance identity and the registry are owned by
+  // the daemon and the control-plane endpoints, never by the settings form.
+  if (old.clusterRole != updated.clusterRole) {
+    diff['cluster'] = <String, dynamic>{'role': updated.clusterRole};
+  }
+
   return diff;
 }
 

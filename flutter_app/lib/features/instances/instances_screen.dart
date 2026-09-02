@@ -6,7 +6,12 @@ import '../../core/api/api_client.dart';
 import '../../core/api/cluster_api.dart';
 import '../../core/instances/instances_providers.dart';
 import '../../core/instances/models.dart';
+import '../../shared/widgets/restart_required_banner.dart';
+import '../config/config_providers.dart';
+import '../dashboard/dashboard_providers.dart';
+import '../server/server_actions.dart' as server_actions;
 import 'config_propagation_dialog.dart';
+import 'enable_hub_action.dart';
 import 'instance_dialog.dart';
 
 /// Manages the registered Heimdallm instances: health, versions, routing share,
@@ -17,6 +22,7 @@ class InstancesScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final registryAsync = ref.watch(daemonInstancesProvider);
+    final isHub = ref.watch(localIsHubProvider);
 
     return Scaffold(
       appBar: AppBar(
@@ -27,31 +33,53 @@ class InstancesScreen extends ConsumerWidget {
         ),
         actions: [
           IconButton(
-            tooltip: 'Routing rules',
+            tooltip: isHub == false ? 'Enable hub mode first' : 'Routing rules',
             icon: const Icon(Icons.alt_route),
-            onPressed: () => context.push('/instances/routing'),
+            onPressed: isHub == false
+                ? null
+                : () => context.push('/instances/routing'),
           ),
           IconButton(
-            tooltip: 'Apply configuration to all instances',
+            tooltip: isHub == false
+                ? 'Enable hub mode first'
+                : 'Apply configuration to all instances',
             icon: const Icon(Icons.sync_alt),
-            onPressed: () => showConfigPropagationDialog(context, ref),
+            onPressed: isHub == false
+                ? null
+                : () => showConfigPropagationDialog(context, ref),
           ),
           IconButton(
             tooltip: 'Refresh',
             icon: const Icon(Icons.refresh),
-            onPressed: () => ref.invalidate(daemonInstancesProvider),
+            onPressed: () {
+              ref.invalidate(daemonInstancesProvider);
+              // localClusterRoleProvider is a plain FutureProvider with no
+              // polling of its own (same shape as daemonHealthProvider) — if
+              // the daemon recovered from being unreachable without going
+              // through the restart flow, this is the only thing that
+              // notices.
+              ref.invalidate(localClusterRoleProvider);
+            },
           ),
         ],
       ),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => showInstanceDialog(context, ref),
+        onPressed: isHub == false ? null : () => showInstanceDialog(context, ref),
         icon: const Icon(Icons.add),
         label: const Text('Add instance'),
       ),
-      body: registryAsync.when(
-        loading: () => const Center(child: CircularProgressIndicator()),
-        error: (e, _) => Center(child: Text('Could not load instances: $e')),
-        data: (registry) => _InstanceList(registry: registry),
+      body: Column(
+        children: [
+          const _HubSetupBanner(),
+          Expanded(
+            child: registryAsync.when(
+              loading: () => const Center(child: CircularProgressIndicator()),
+              error: (e, _) =>
+                  Center(child: Text('Could not load instances: $e')),
+              data: (registry) => _InstanceList(registry: registry),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -70,33 +98,47 @@ class InstancesTabView extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final registryAsync = ref.watch(daemonInstancesProvider);
+    final isHub = ref.watch(localIsHubProvider);
 
     return Column(
       children: [
+        const _HubSetupBanner(),
         Padding(
           padding: const EdgeInsets.fromLTRB(12, 8, 8, 4),
           child: Row(
             children: [
               const Spacer(),
               TextButton.icon(
-                onPressed: () => showInstanceDialog(context, ref),
+                onPressed: isHub == false
+                    ? null
+                    : () => showInstanceDialog(context, ref),
                 icon: const Icon(Icons.add, size: 18),
                 label: const Text('Add instance'),
               ),
               IconButton(
-                tooltip: 'Routing rules',
+                tooltip:
+                    isHub == false ? 'Enable hub mode first' : 'Routing rules',
                 icon: const Icon(Icons.alt_route),
-                onPressed: () => context.push('/instances/routing'),
+                onPressed: isHub == false
+                    ? null
+                    : () => context.push('/instances/routing'),
               ),
               IconButton(
-                tooltip: 'Apply configuration to all instances',
+                tooltip: isHub == false
+                    ? 'Enable hub mode first'
+                    : 'Apply configuration to all instances',
                 icon: const Icon(Icons.sync_alt),
-                onPressed: () => showConfigPropagationDialog(context, ref),
+                onPressed: isHub == false
+                    ? null
+                    : () => showConfigPropagationDialog(context, ref),
               ),
               IconButton(
                 tooltip: 'Refresh',
                 icon: const Icon(Icons.refresh),
-                onPressed: () => ref.invalidate(daemonInstancesProvider),
+                onPressed: () {
+                  ref.invalidate(daemonInstancesProvider);
+                  ref.invalidate(localClusterRoleProvider);
+                },
               ),
             ],
           ),
@@ -110,6 +152,76 @@ class InstancesTabView extends ConsumerWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Proactive call-to-action shown above both [InstancesScreen] and
+/// [InstancesTabView], so the "this daemon isn't a hub" state is visible
+/// before the operator ever opens the add-instance dialog and hits a
+/// dead end.
+///
+/// One shared widget rather than one copy per surface, so the two screens
+/// cannot silently diverge in how they explain (or fail to explain) the
+/// same precondition.
+class _HubSetupBanner extends ConsumerWidget {
+  const _HubSetupBanner();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final isHub = ref.watch(localIsHubProvider);
+    // Unknown (daemon unreachable, or the health probe hasn't resolved yet)
+    // is treated as "not confirmed" rather than "not a hub" — no CTA for
+    // someone whose daemon is simply offline or starting up.
+    if (isHub == null || isHub) return const SizedBox.shrink();
+
+    final savedRole = ref.watch(configNotifierProvider).value?.clusterRole;
+    final padding = const EdgeInsets.fromLTRB(12, 8, 12, 0);
+
+    if (savedRole == ClusterRole.hub) {
+      // Enabled once already, but the daemon hasn't been restarted since
+      // (or the restart failed) — same restart affordance as the Config
+      // screen's Cluster section, not the "enable" card below.
+      return Padding(
+        padding: padding,
+        child: RestartRequiredBanner(
+          message:
+              'Hub mode is saved but not active yet. Restart the daemon '
+              'to start managing instances.',
+          onRestart: () => server_actions.restartDaemon(context, ref),
+          starting: ref.watch(daemonStartingProvider),
+        ),
+      );
+    }
+
+    return Padding(
+      padding: padding,
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.primaryContainer.withValues(alpha: 0.5),
+          borderRadius: BorderRadius.circular(6),
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.hub_outlined, size: 18),
+            const SizedBox(width: 8),
+            const Expanded(
+              child: Text(
+                'This daemon is not a cluster hub. Registering another '
+                'Heimdallm instance requires enabling hub mode first.',
+                style: TextStyle(fontSize: 12),
+              ),
+            ),
+            FilledButton.icon(
+              onPressed: () => enableHubMode(context, ref),
+              icon: const Icon(Icons.hub, size: 16),
+              label: const Text('Enable clustering'),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -134,11 +246,23 @@ class _InstanceList extends ConsumerWidget {
   }
 }
 
-class _EmptyState extends StatelessWidget {
+class _EmptyState extends ConsumerWidget {
   const _EmptyState();
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    // While not a hub, [_HubSetupBanner] above already carries the full
+    // explanation and the "Enable clustering" action — this copy would
+    // otherwise both repeat it and invite an action ("Register one") that
+    // cannot work yet.
+    final isHub = ref.watch(localIsHubProvider);
+    final body = isHub == false
+        ? 'Enable hub mode above to register your first instance.'
+        : 'An instance is a Heimdallm daemon running on another machine '
+              'or in a container. Register one to route organizations and '
+              'repositories to it, apply the same configuration everywhere, '
+              'and spread reviews and merges across the fleet.';
+
     return Center(
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 460),
@@ -154,13 +278,10 @@ class _EmptyState extends StatelessWidget {
                 style: Theme.of(context).textTheme.titleMedium,
               ),
               const SizedBox(height: 8),
-              const Text(
-                'An instance is a Heimdallm daemon running on another machine '
-                'or in a container. Register one to route organizations and '
-                'repositories to it, apply the same configuration everywhere, '
-                'and spread reviews and merges across the fleet.',
+              Text(
+                body,
                 textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 12),
+                style: const TextStyle(fontSize: 12),
               ),
             ],
           ),

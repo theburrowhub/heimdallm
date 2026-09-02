@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../shared/widgets/restart_required_banner.dart';
 import '../../../shared/widgets/toast.dart';
 import '../../config/config_providers.dart';
 import '../../dashboard/dashboard_providers.dart';
@@ -74,8 +75,12 @@ class _StatusTabState extends ConsumerState<StatusTab> {
               ),
               if (_showBanner) ...[
                 const SizedBox(height: 16),
-                _RestartBanner(
-                  portChanged: _portChanged,
+                RestartRequiredBanner(
+                  message:
+                      'Listen URL changed. Restart the server for it to take effect.',
+                  detail: _portChanged
+                      ? 'Port change also requires restarting the desktop app for the GUI to reconnect.'
+                      : null,
                   onRestart: () => server_actions.restartDaemon(context, ref),
                   starting: daemonStarting,
                 ),
@@ -191,53 +196,6 @@ class _ListenUrlEditorState extends State<_ListenUrlEditor> {
           ),
         ),
       ],
-    );
-  }
-}
-
-class _RestartBanner extends StatelessWidget {
-  const _RestartBanner({required this.portChanged, required this.onRestart, required this.starting});
-  final bool portChanged;
-  final VoidCallback onRestart;
-  final bool starting;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: const Color(0xFFFFF4D6),
-        border: Border.all(color: const Color(0xFFE8C547)),
-        borderRadius: BorderRadius.circular(6),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const Icon(Icons.warning_amber, size: 18),
-              const SizedBox(width: 8),
-              const Expanded(
-                child: Text(
-                  'Listen URL changed. Restart the server for it to take effect.',
-                  style: TextStyle(fontSize: 13),
-                ),
-              ),
-              FilledButton(
-                onPressed: starting ? null : onRestart,
-                child: const Text('Restart server'),
-              ),
-            ],
-          ),
-          if (portChanged) ...[
-            const SizedBox(height: 6),
-            const Text(
-              'Port change also requires restarting the desktop app for the GUI to reconnect.',
-              style: TextStyle(fontSize: 12),
-            ),
-          ],
-        ],
-      ),
     );
   }
 }
