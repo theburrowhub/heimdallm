@@ -1022,9 +1022,14 @@ func (srv *Server) patchClusterTOML(mutate func(cluster map[string]any) error) (
 	if srv.configPath == "" {
 		return nil, errors.New("configPath not set")
 	}
-	selfID, _, _ := srv.clusterIdentity()
 	return srv.patchTOML(func(m map[string]any) error {
 		cluster := childTable(m, "cluster")
+		// Read identity inside the callback, not before: patchTOML re-reads
+		// config.toml from disk right before this closure runs, so capturing
+		// selfID any earlier would open a window (however small in practice,
+		// since identity is set once at startup) for it to be stale relative
+		// to the file this closure is about to mutate.
+		selfID, _, _ := srv.clusterIdentity()
 		// The runtime derives this daemon's id from <dataDir>/instance_id and
 		// seeds its own registry entry in memory (ensureSelfInstance), so
 		// neither is visible to config.ValidateMap, which only ever sees the
