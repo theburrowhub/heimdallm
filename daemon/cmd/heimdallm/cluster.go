@@ -141,7 +141,10 @@ func (cs *clusterState) Update(cfg *config.Config) (proberBuilt bool) {
 	cs.mu.Unlock()
 
 	router.Update(registry, cfg)
-	if prober != nil {
+	// A prober built above this tick (proberBuilt) already has this exact
+	// registry and interval from its NewProber call; updating it again would
+	// be a harmless but pointless no-op.
+	if prober != nil && !proberBuilt {
 		prober.Update(registry, clusterProbeInterval(cfg))
 	}
 	return proberBuilt
@@ -153,6 +156,16 @@ func (cs *clusterState) Update(cfg *config.Config) (proberBuilt bool) {
 // would be unsafe: no configured owner, an owner that resolves to self
 // (nothing to hand off — Owns(repo) would already be true), an owner that was
 // never registered, or one currently reported unreachable.
+//
+// Fail-open, by design, in two cases: a nil prober (this daemon is not a
+// hub — only a hub ever builds one, see newClusterState/Update) skips health
+// verification entirely, and a non-nil prober that has not probed owner yet
+// treats it as healthy too (Prober.HealthyIDs' own contract — refusing an
+// unprobed instance would stall every dispatch for the first probe interval
+// after a promotion or restart). Both converge on the same safety net:
+// dispatch()'s caller falls back to handling the work locally the moment the
+// RPC itself fails, so an owner that turns out to be genuinely unreachable
+// never loses the work — it costs one extra round trip, not a dropped review.
 func (cs *clusterState) resolveHealthyOwner(repo string) (inst instances.Instance, ok bool) {
 	if cs == nil {
 		return instances.Instance{}, false
