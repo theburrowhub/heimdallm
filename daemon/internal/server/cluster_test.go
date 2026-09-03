@@ -227,6 +227,91 @@ func newHub(t *testing.T, remotes map[string]*fakeInstance, routing config.Routi
 	return f
 }
 
+// newHubNoSelfEntry is like newHub, but its config.toml carries no
+// cluster.instance_id and no explicit [cluster.instances.hub-1] entry —
+// mirroring an install where the operator never touched instance_id and the
+// runtime derives it from <dataDir>/instance_id purely in memory (see
+// ensureInstanceID and ensureSelfInstance in cmd/heimdallm/cluster.go).
+// Regression coverage: any cluster.* value that round-trips through
+// config.toml (default_instance, routing.orgs/repos, round_robin_pool)
+// referencing this daemon's own id must be accepted even before that id is
+// persisted on disk.
+func newHubNoSelfEntry(t *testing.T, remotes map[string]*fakeInstance) *hubFixture {
+	t.Helper()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+
+	var b strings.Builder
+	b.WriteString("[ai]\nprimary = \"claude\"\n\n[cluster]\nrole = \"hub\"\n\n")
+	for id, remote := range remotes {
+		fmt.Fprintf(&b, "[cluster.instances.%s]\nname = %q\nbase_url = %q\ntoken = \"remote-%s\"\n\n", id, "Remote "+id, remote.URL, id)
+	}
+	if err := os.WriteFile(cfgPath, []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	srv := server.New(st, nil, nil, testToken)
+	srv.SetConfigPath(cfgPath)
+
+	f := &hubFixture{srv: srv, configPath: cfgPath, store: newFakeClusterStore(), remotes: remotes}
+	f.reloadSelfSeeded(t)
+
+	srv.SetClusterIdentity("hub-1", "Local hub", config.RoleHub)
+	srv.SetCluster(&server.ClusterDeps{
+		Snapshot: f.snapshot,
+		Store:    f.store,
+		NewClient: func(inst instances.Instance) *instances.Client {
+			for id, remote := range remotes {
+				if inst.ID == id {
+					return instances.NewClient(inst, remote.Client())
+				}
+			}
+			return instances.NewClient(inst, nil)
+		},
+	})
+	srv.SetReloadFn(func() error { f.reloadSelfSeeded(t); return nil })
+	return f
+}
+
+// reloadSelfSeeded reloads config.toml from disk and then replays what
+// main.go does to every freshly loaded config before the control plane ever
+// sees it: pin cluster.instance_id and seed the self registry entry
+// (ensureInstanceID / ensureSelfInstance), neither of which touches the file.
+func (f *hubFixture) reloadSelfSeeded(t *testing.T) {
+	t.Helper()
+	cfg, err := config.Load(f.configPath)
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	cfg.Cluster.InstanceID = "hub-1"
+	if cfg.Cluster.Instances == nil {
+		cfg.Cluster.Instances = map[string]config.InstanceConfig{}
+	}
+	if _, exists := cfg.Cluster.Instances["hub-1"]; !exists {
+		cfg.Cluster.Instances["hub-1"] = config.InstanceConfig{
+			Name:    "Local hub",
+			BaseURL: "http://127.0.0.1:7842",
+			Token:   "hub-token",
+		}
+	}
+	reg := instances.NewRegistry(cfg)
+	f.mu.Lock()
+	f.cfg = cfg
+	if f.router == nil {
+		f.router = instances.NewRouter(reg, cfg)
+	} else {
+		f.router.Update(reg, cfg)
+	}
+	f.mu.Unlock()
+}
+
 func quoteList(in []string) string {
 	parts := make([]string, 0, len(in))
 	for _, s := range in {
@@ -621,6 +706,71 @@ func TestPutRoutingValidatesReferences(t *testing.T) {
 	// None of the rejected writes may have touched the file.
 	if _, err := config.Load(f.configPath); err != nil {
 		t.Errorf("config.toml damaged by rejected writes: %v", err)
+	}
+}
+
+// TestPutRoutingAcceptsSelfBeforeInstanceIDIsPersisted is the regression test:
+// on a hub whose config.toml has never had cluster.instance_id written to it,
+// routing a value to this daemon's own (in-memory-only) id must succeed and
+// leave a config.toml the next boot can load on its own.
+func TestPutRoutingAcceptsSelfBeforeInstanceIDIsPersisted(t *testing.T) {
+	remote := newFakeInstance(t, "srv-a", nil)
+
+	tests := map[string]string{
+		"default_instance": `{"default_instance":"hub-1"}`,
+		"orgs":             `{"orgs":{"acme":"hub-1"}}`,
+		"repos":            `{"repos":{"acme/tools":"hub-1"}}`,
+		"round_robin_pool": `{"round_robin_pool":["hub-1","srv-a"]}`,
+	}
+	for name, body := range tests {
+		t.Run(name, func(t *testing.T) {
+			f := newHubNoSelfEntry(t, map[string]*fakeInstance{"srv-a": remote})
+
+			rec := f.do(t, http.MethodPut, "/cluster/routing", body)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("PUT /cluster/routing = %d: %s", rec.Code, rec.Body)
+			}
+
+			raw, err := config.ReadTOMLMap(f.configPath)
+			if err != nil {
+				t.Fatalf("read config.toml: %v", err)
+			}
+			cluster, _ := raw["cluster"].(map[string]any)
+			if cluster == nil {
+				t.Fatalf("cluster table missing from config.toml: %#v", raw)
+			}
+			if got, _ := cluster["instance_id"].(string); got != "hub-1" {
+				t.Errorf("cluster.instance_id = %q, want %q", got, "hub-1")
+			}
+
+			// The whole point of sealing instance_id is that the NEXT boot's
+			// config.Load (validateCluster's self exemption) accepts this file
+			// on its own, without any in-memory help from ensureSelfInstance.
+			if _, err := config.Load(f.configPath); err != nil {
+				t.Errorf("config.Load after persisting self id: %v", err)
+			}
+		})
+	}
+}
+
+// TestPutRoutingNeverOverwritesAnExplicitInstanceID guards the "only when
+// absent" half of the fix: an operator-set cluster.instance_id must never be
+// silently replaced by whatever id this process resolved to.
+func TestPutRoutingNeverOverwritesAnExplicitInstanceID(t *testing.T) {
+	remote := newFakeInstance(t, "srv-a", nil)
+	f := newHub(t, map[string]*fakeInstance{"srv-a": remote}, config.RoutingConfig{})
+
+	if rec := f.do(t, http.MethodPut, "/cluster/routing", `{"default_instance":"hub-1"}`); rec.Code != http.StatusOK {
+		t.Fatalf("PUT /cluster/routing = %d: %s", rec.Code, rec.Body)
+	}
+
+	raw, err := config.ReadTOMLMap(f.configPath)
+	if err != nil {
+		t.Fatalf("read config.toml: %v", err)
+	}
+	cluster := raw["cluster"].(map[string]any)
+	if got, _ := cluster["instance_id"].(string); got != "hub-1" {
+		t.Errorf("cluster.instance_id = %q, want the explicit %q left untouched", got, "hub-1")
 	}
 }
 

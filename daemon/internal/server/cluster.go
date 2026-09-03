@@ -1022,8 +1022,22 @@ func (srv *Server) patchClusterTOML(mutate func(cluster map[string]any) error) (
 	if srv.configPath == "" {
 		return nil, errors.New("configPath not set")
 	}
+	selfID, _, _ := srv.clusterIdentity()
 	return srv.patchTOML(func(m map[string]any) error {
-		return mutate(childTable(m, "cluster"))
+		cluster := childTable(m, "cluster")
+		// The runtime derives this daemon's id from <dataDir>/instance_id and
+		// seeds its own registry entry in memory (ensureSelfInstance), so
+		// neither is visible to config.ValidateMap, which only ever sees the
+		// file. Sealing the id into config.toml the first time the operator
+		// edits cluster config lets a rule that names this daemon — "owner of
+		// everything unrouted", an org, a repo — pass here and on the next
+		// boot, instead of being rejected as an unknown instance.
+		if selfID != "" {
+			if cur, _ := cluster["instance_id"].(string); strings.TrimSpace(cur) == "" {
+				cluster["instance_id"] = selfID
+			}
+		}
+		return mutate(cluster)
 	})
 }
 
