@@ -1048,6 +1048,10 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		lastSkippedUpdatedAt: make(map[int64]time.Time),
 		lastBreakerTrips:     make(map[breakerTripKey]breakerTripDedup),
 		owns:                 clusterSt.Owns,
+		dispatchPR: func(repo string, prID int64, prURL string) bool {
+			return clusterSt.DispatchPRReview(runtimeCtx, repo, prID, prURL)
+		},
+		ownerCanHandleIssues: clusterSt.OwnerCanHandle,
 	}
 
 	// Phase 2/3 of #482: build the Responder and FixRunner with real
@@ -2596,9 +2600,37 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		// Refresh routing before the restart decision below: the pollers read
 		// ownership live on every tick, so a routing-only change must take
 		// effect even on the fast path that does not restart them.
+		//
+		// instanceID may still be "" if [cluster] did not exist when this
+		// daemon booted (ensureInstanceID is boot-only otherwise). Re-resolve
+		// it here so enabling clustering via a reload — no restart — does not
+		// leave selfID empty forever, which made Router.Owns fail open and
+		// the hub silently keep every repo it had just routed away.
+		resolvedID, idErr := resolveReloadInstanceID(instanceID, newCfg, dataDir())
+		if idErr != nil {
+			return fmt.Errorf("reload: cluster: could not resolve instance identity: %w", idErr)
+		}
+		instanceID = resolvedID
 		newCfg.Cluster.InstanceID = instanceID
 		ensureSelfInstance(newCfg, dataDir())
-		clusterSt.Update(newCfg)
+		proberJustBuilt := clusterSt.Update(newCfg)
+		// wireCluster is otherwise boot-only (main.go's call happens once,
+		// before Serve). Re-running it here is what lets a worker/standalone
+		// daemon promoted to hub purely by this reload get /instances and
+		// /cluster mounted without a restart.
+		wireCluster(srv, clusterSt, s)
+		if proberJustBuilt {
+			go clusterSt.RunProber(runtimeCtx)
+		}
+
+		// Keep the fleet in sync automatically: every save on the hub pushes
+		// the shared config to the other instances instead of waiting for an
+		// operator to remember the manual propagate dialog. Backgrounded so a
+		// slow or unreachable instance never delays the reload that triggered
+		// it; each instance's own PatchConfig/reload cycle applies it.
+		if newCfg.IsHub() {
+			go propagateClusterConfig(runtimeCtx, cfgPath, clusterSt, broker)
+		}
 
 		cfgMu.Lock()
 		restartPollers := configReloadRequiresPollerRestart(cfg, newCfg)
@@ -4323,6 +4355,21 @@ type tier2Adapter struct {
 	// care about clustering gets for free.
 	owns func(repo string) bool
 
+	// dispatchPR hands a PR review to the instance repo is routed to. Called
+	// only when owns(repo) is false. Returning true means the remote accepted
+	// it and this daemon must not also review it; false (including a nil
+	// dispatchPR) means fall back to reviewing it locally — a PR must never go
+	// unreviewed just because its routed owner is unavailable.
+	dispatchPR func(repo string, prID int64, prURL string) bool
+
+	// ownerCanHandleIssues reports whether repo's routed owner is healthy
+	// enough to be trusted with its own issue processing. Unlike PR review,
+	// issue triage has no single id to dispatch at this decision point (the
+	// individual issues are not known yet), so this only answers "is it safe
+	// to skip", not "hand this specific item off". false (including nil)
+	// means process the repo locally rather than leave it unattended.
+	ownerCanHandleIssues func(repo string) bool
+
 	// skipMu protects the lightweight SSE dedup caches below.
 	skipMu               sync.Mutex
 	lastSkippedUpdatedAt map[int64]time.Time
@@ -4626,13 +4673,22 @@ func (a *tier2Adapter) FetchPRsToReview() ([]scheduler.Tier2PR, error) {
 				continue
 			}
 		}
-		// Skip PRs in repos routed to another instance. This runs AFTER
-		// upsertDiscoveredRepos on purpose: every instance still discovers
-		// every repo, so the GUI shows the whole estate, but only the owner
-		// reviews. Without instances configured this is always true and the
-		// loop behaves exactly as it did before.
+		// Repos routed to another instance: this runs AFTER
+		// upsertDiscoveredRepos on purpose, so every instance still discovers
+		// every repo (the GUI shows the whole estate) while only the owner
+		// acts. Without instances configured this is always true and the loop
+		// behaves exactly as it did before.
+		//
+		// A repo we don't own is not simply skipped: try to dispatch it to
+		// its owner first. Only `continue` (skip local review) when that
+		// dispatch actually succeeds — dispatchPR being nil, or the owner
+		// being down/unreachable/erroring, must fall through to reviewing it
+		// here instead. Silently dropping it (the old behaviour) is what let
+		// PRs in a routed org disappear from the queue entirely.
 		if a.owns != nil && !a.owns(pr.Repo) {
-			continue
+			if a.dispatchPR != nil && a.dispatchPR(pr.Repo, pr.ID, pr.HTMLURL) {
+				continue
+			}
 		}
 		seenIDs[pr.ID] = struct{}{}
 		reason := pipeline.Evaluate(pipeline.PRGate{
@@ -4918,11 +4974,31 @@ func (a *tier2Adapter) ClearIssuePrefetch() {
 	}
 }
 
+// tier2ShouldProcessLocally decides, given ownership and dispatch-capability
+// signals, whether this daemon must process repo's issues itself rather than
+// trusting a routed-away owner to do it. Extracted as a pure function so the
+// decision is directly unit-testable without ProcessRepo's full issue
+// pipeline (repo context acquisition, agent execution, etc.).
+//
+// Issue work is partitioned the same way PR review is: normally only the
+// instance repo is routed to acts on it (owns==nil or owns(repo)==true means
+// "yes, process here" — the single-daemon default every non-clustered test
+// gets for free). But unlike PR review, there is no single issue id to
+// dispatch at this point, so when the repo IS routed away this only decides
+// whether it is safe to skip — trusting the owner — or not. It is safe to
+// skip only when ownerCanHandle reports the routed owner is healthy; a nil
+// ownerCanHandle or an unhealthy owner means process locally instead of
+// leaving the repo's issues completely unattended.
+func tier2ShouldProcessLocally(owns func(string) bool, ownerCanHandle func(string) bool, repo string) bool {
+	if owns == nil || owns(repo) {
+		return true
+	}
+	return ownerCanHandle == nil || !ownerCanHandle(repo)
+}
+
 // ProcessRepo implements scheduler.Tier2IssueProcessor.
 func (a *tier2Adapter) ProcessRepo(ctx context.Context, repo string) (int, error) {
-	// Issue work is partitioned the same way PR review is: only the instance
-	// this repo is routed to acts on it. Always true without [cluster].
-	if a.owns != nil && !a.owns(repo) {
+	if !tier2ShouldProcessLocally(a.owns, a.ownerCanHandleIssues, repo) {
 		return 0, nil
 	}
 	ctx, releaseUpdateWork, err := acquireUpdateWork(ctx, a.workGate, workgate.KindIssue)

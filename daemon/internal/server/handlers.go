@@ -65,7 +65,21 @@ type Server struct {
 	// stopping reuses the startup route gate while giving /health an honest
 	// lifecycle status. The listener remains owned during worker teardown so a
 	// launcher cannot race a replacement into the old process's cleanup window.
-	stopping        atomic.Bool
+	stopping atomic.Bool
+
+	// streamMu/streamNextID/activeStreams track cancel funcs for every
+	// long-lived SSE handler currently blocked in its event loop (handleSSE,
+	// handleLogsStream). http.Server.Shutdown only closes idle connections and
+	// then waits indefinitely for active ones to return on their own — it
+	// never cancels an in-flight handler's own request context. Shutdown below
+	// cancels every registered stream directly instead of waiting for the
+	// shutdown ctx's deadline to expire, which is what previously logged
+	// "server shutdown failed: context deadline exceeded" on every restart
+	// that had /events or /logs/stream open.
+	streamMu      sync.Mutex
+	streamNextID  int
+	activeStreams map[int]context.CancelFunc
+
 	reloadFn        func() error
 	shutdownFn      func()
 	triggerReviewFn func(prID int64) error
@@ -593,6 +607,43 @@ func (srv *Server) MarkStopping() {
 	srv.stopping.Store(true)
 }
 
+// registerStream records cancel so cancelActiveStreams can end this stream
+// immediately on shutdown instead of leaving it to hang until the shutdown
+// ctx's deadline expires. Returns an unregister func the handler must call
+// (via defer) when it returns on its own — most commonly the client just
+// disconnecting — so a finished stream is not tracked (and cannot be
+// double-cancelled) after that.
+func (srv *Server) registerStream(cancel context.CancelFunc) (unregister func()) {
+	srv.streamMu.Lock()
+	id := srv.streamNextID
+	srv.streamNextID++
+	if srv.activeStreams == nil {
+		srv.activeStreams = make(map[int]context.CancelFunc)
+	}
+	srv.activeStreams[id] = cancel
+	srv.streamMu.Unlock()
+
+	return func() {
+		srv.streamMu.Lock()
+		delete(srv.activeStreams, id)
+		srv.streamMu.Unlock()
+	}
+}
+
+// cancelActiveStreams ends every currently registered long-lived stream.
+func (srv *Server) cancelActiveStreams() {
+	srv.streamMu.Lock()
+	cancels := make([]context.CancelFunc, 0, len(srv.activeStreams))
+	for _, cancel := range srv.activeStreams {
+		cancels = append(cancels, cancel)
+	}
+	srv.streamMu.Unlock()
+
+	for _, cancel := range cancels {
+		cancel()
+	}
+}
+
 // Shutdown gracefully shuts down the HTTP server.
 func (srv *Server) Shutdown(ctx context.Context) error {
 	srv.httpMu.Lock()
@@ -600,6 +651,11 @@ func (srv *Server) Shutdown(ctx context.Context) error {
 	httpServer := srv.httpServer
 	httpListener := srv.httpListener
 	srv.httpMu.Unlock()
+
+	// End every open SSE/log stream now rather than let http.Server.Shutdown
+	// wait on them: see the activeStreams field doc for why it would
+	// otherwise hang until ctx's deadline.
+	srv.cancelActiveStreams()
 
 	var shutdownErr error
 	if httpServer != nil {
@@ -2020,6 +2076,8 @@ func writeUpdateDrainConflict(w http.ResponseWriter) {
 func (srv *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
+	unregister := srv.registerStream(cancel)
+	defer unregister()
 	stream, err := newStreamResponseWriter(w, cancel)
 	// Server.Serve applies a 60-second WriteTimeout to ordinary responses. That
 	// deadline is absolute for the lifetime of a request, so periodic heartbeats
@@ -2863,6 +2921,8 @@ func fileModTime(path string) (time.Time, bool) {
 func (srv *Server) handleLogsStream(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
+	unregister := srv.registerStream(cancel)
+	defer unregister()
 	stream, err := newStreamResponseWriter(w, cancel)
 	// Like /events, this is an intentionally long-lived response and must not
 	// inherit the server's absolute 60-second write deadline. Each actual write

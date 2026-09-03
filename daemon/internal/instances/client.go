@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -68,11 +69,24 @@ type Health struct {
 }
 
 // Health probes GET /health.
+//
+// A non-2xx response is not automatically unreachable: the daemon answers 503
+// while starting, or whenever a dependency (SQLite, NATS, a stale poll) is
+// degraded, and in both cases the body is still a valid, parseable Health
+// payload proving this instance is up and answering. Only a transport
+// failure (no response at all) or a body that does not even decode as a
+// daemon's counts as an error — that is the signal Prober uses to flip an
+// instance to unreachable. Without this, a hub's own /health going 503 for a
+// lagging poll cycle would make it flap itself "unreachable" on every probe.
 func (c *Client) Health(ctx context.Context) (Health, error) {
 	var h Health
-	body, _, err := c.do(ctx, http.MethodGet, "/health", nil, false)
-	if err != nil {
-		return h, err
+	body, _, doErr := c.do(ctx, http.MethodGet, "/health", nil, false)
+	if doErr != nil {
+		var statusErr *StatusError
+		if !errors.As(doErr, &statusErr) || len(body) == 0 {
+			return h, doErr
+		}
+		// A non-2xx WITH a body: fall through and try to decode it below.
 	}
 	if err := json.Unmarshal(body, &h); err != nil {
 		return h, fmt.Errorf("instances: %s returned an unparseable /health body: %w", c.instance.ID, err)

@@ -36,6 +36,25 @@ class SseClient {
   Timer? _reconnectTimer;
   bool _connecting = false;
 
+  // Consecutive connection failures (a non-2xx status, or a transport
+  // error), reset on every successful connection. Without this a persistent
+  // failure — a rotated token, a routed instance's cert not being trusted —
+  // retried forever at the flat _errorReconnectDelay: one incident logged
+  // ~17,500 attempts roughly every 3s. _errorBackoff grows the delay
+  // exponentially, capped at _maxReconnectDelay, so a stuck connection backs
+  // off instead of hot-looping while a transient blip still recovers fast.
+  int _consecutiveFailures = 0;
+  static const _maxBackoffShift = 5; // caps growth at base * 32
+  static const _maxReconnectDelay = Duration(minutes: 5);
+
+  Duration _errorBackoff() {
+    final shift = _consecutiveFailures > _maxBackoffShift
+        ? _maxBackoffShift
+        : _consecutiveFailures;
+    final delay = _errorReconnectDelay * (1 << shift);
+    return delay > _maxReconnectDelay ? _maxReconnectDelay : delay;
+  }
+
   SseClient({
     PlatformServices? platform,
     DaemonEndpoint? endpoint,
@@ -117,6 +136,25 @@ class SseClient {
         unawaited(response.stream.drain<void>().catchError((_) {}));
         return;
       }
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        // The response body here is an error page or JSON error, never SSE
+        // wire format — handing it to the line parser below would just
+        // silently produce zero events and hit onDone, masking a real,
+        // possibly persistent failure (auth, routing, an untrusted cert on
+        // a proxied instance) as a benign disconnect.
+        unawaited(response.stream.drain<void>().catchError((_) {}));
+        _controller?.addError(
+          http.ClientException(
+            'SSE endpoint returned HTTP ${response.statusCode}',
+            request.url,
+          ),
+        );
+        final delay = _errorBackoff();
+        _consecutiveFailures++;
+        _scheduleReconnect(delay);
+        return;
+      }
+      _consecutiveFailures = 0;
 
       String buffer = '';
       _subscription = response.stream
@@ -128,7 +166,9 @@ class SseClient {
               if (buffer.length > _maxBufferSize) {
                 buffer = '';
                 _cancelSubscription();
-                _scheduleReconnect(_errorReconnectDelay);
+                final delay = _errorBackoff();
+                _consecutiveFailures++;
+                _scheduleReconnect(delay);
                 return;
               }
               while (buffer.contains('\n\n')) {
@@ -146,7 +186,9 @@ class SseClient {
               // catch below) so the UI can reflect the dropped connection,
               // then reconnect after a delay rather than giving up.
               _controller?.addError(e);
-              _scheduleReconnect(_errorReconnectDelay);
+              final delay = _errorBackoff();
+              _consecutiveFailures++;
+              _scheduleReconnect(delay);
             },
             onDone: () {
               _subscription = null;
@@ -157,7 +199,9 @@ class SseClient {
     } catch (e) {
       _connecting = false;
       _controller?.addError(e);
-      _scheduleReconnect(_errorReconnectDelay);
+      final delay = _errorBackoff();
+      _consecutiveFailures++;
+      _scheduleReconnect(delay);
     }
   }
 
@@ -183,6 +227,7 @@ class SseClient {
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
     _connecting = false;
+    _consecutiveFailures = 0;
     _cancelSubscription();
     _controller?.close();
     _controller = null;

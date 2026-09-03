@@ -919,6 +919,14 @@ var proxyAllowedPrefixes = []string{
 	"/repos", "/events", "/logs/stream", "/reload",
 }
 
+// isStreamProxyPath reports whether path is one of the long-lived SSE routes.
+// Proxying one of these to another instance must not be cut off by the
+// server's absolute 60-second WriteTimeout — the same deadline handleSSE
+// itself neutralizes (via streamResponseWriter) for a local stream.
+func isStreamProxyPath(path string) bool {
+	return path == "/events" || path == "/logs/stream"
+}
+
 func proxyPathAllowed(path string) bool {
 	for _, prefix := range proxyAllowedPrefixes {
 		if path == prefix || strings.HasPrefix(path, prefix+"/") || strings.HasPrefix(path, prefix+"?") {
@@ -1011,6 +1019,25 @@ func (srv *Server) handleInstanceProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	if deps != nil && deps.HTTPClient != nil {
 		proxy.Transport = deps.HTTPClient.Transport
+	}
+
+	if isStreamProxyPath(rest) {
+		// Without this, a proxied /events or /logs/stream connection dies at
+		// exactly 60s — http.Server's absolute WriteTimeout, which periodic
+		// SSE heartbeats never extend because it's a deadline on the whole
+		// response, not on each write. Same fix handleSSE already applies to
+		// a local stream; a graceful fallback (log and proceed unmodified) if
+		// the writer doesn't support deadlines rather than fail the proxy —
+		// real connections always do, so this only degrades in tests.
+		ctx, cancel := context.WithCancel(r.Context())
+		defer cancel()
+		if stream, err := newStreamResponseWriter(w, cancel); err != nil {
+			slog.Warn("cluster: could not neutralize write deadline for proxied stream",
+				"instance", id, "path", rest, "err", err)
+		} else {
+			w = stream
+			r = r.WithContext(ctx)
+		}
 	}
 	proxy.ServeHTTP(w, r)
 }
