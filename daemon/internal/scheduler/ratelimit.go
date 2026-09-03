@@ -65,8 +65,23 @@ const GraphQLResource = "graphql"
 // resourceBudget holds the live rate-limit state for a single GitHub resource
 // category (e.g. "core", "search").
 type resourceBudget struct {
-	remaining int
-	reset     time.Time
+	limit      int
+	remaining  int
+	used       int
+	reset      time.Time
+	observedAt time.Time
+}
+
+// RateSnapshot is a point-in-time read of a resource's live rate-limit state,
+// as last observed from GitHub's X-RateLimit-* response headers. Exposed via
+// Snapshots() for callers that report the raw budget (e.g. the GET
+// /github/rate_limit HTTP handler) rather than just gating on it.
+type RateSnapshot struct {
+	Limit      int
+	Remaining  int
+	Used       int
+	Reset      time.Time
+	ObservedAt time.Time
 }
 
 // RateLimiter governs GitHub API usage across all polling tiers. Each GitHub
@@ -131,13 +146,33 @@ func (r *RateLimiter) tokenPool(resource string) chan struct{} {
 
 // Observe records the live rate-limit state for a GitHub resource category.
 // Called by the client-side observer after every API response that carries
-// X-RateLimit-* headers (resource, remaining, reset).
-func (r *RateLimiter) Observe(resource string, remaining int, reset time.Time) {
+// X-RateLimit-* headers.
+//
+// Limit/Used are merged rather than overwritten when the new observation
+// doesn't carry them (snapshot.Limit <= 0): some responses (e.g. certain 304s
+// behind a proxy) can omit X-RateLimit-Limit, and losing the last-known limit
+// would leave observability callers unable to report a denominator even
+// though the resource has been observed before.
+func (r *RateLimiter) Observe(resource string, snapshot RateSnapshot) {
 	if resource == "" {
 		return
 	}
 	r.mu.Lock()
-	r.budgets[resource] = &resourceBudget{remaining: remaining, reset: reset}
+	limit := snapshot.Limit
+	used := snapshot.Used
+	if limit <= 0 {
+		if prev, ok := r.budgets[resource]; ok {
+			limit = prev.limit
+			used = prev.used
+		}
+	}
+	r.budgets[resource] = &resourceBudget{
+		limit:      limit,
+		remaining:  snapshot.Remaining,
+		used:       used,
+		reset:      snapshot.Reset,
+		observedAt: snapshot.ObservedAt,
+	}
 	r.mu.Unlock()
 }
 
@@ -353,4 +388,25 @@ func (r *RateLimiter) BudgetRemaining(resource string) (remaining int, ok bool) 
 	remaining = b.remaining
 	r.mu.Unlock()
 	return remaining, true
+}
+
+// Snapshots returns a copy of the last-observed rate-limit state for every
+// resource that has received at least one Observe() call. Used by the GET
+// /github/rate_limit HTTP handler to report real, measured budgets instead of
+// GitHub's separate (and, for some tokens, always-pristine) GET /rate_limit
+// endpoint.
+func (r *RateLimiter) Snapshots() map[string]RateSnapshot {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make(map[string]RateSnapshot, len(r.budgets))
+	for resource, b := range r.budgets {
+		out[resource] = RateSnapshot{
+			Limit:      b.limit,
+			Remaining:  b.remaining,
+			Used:       b.used,
+			Reset:      b.reset,
+			ObservedAt: b.observedAt,
+		}
+	}
+	return out
 }

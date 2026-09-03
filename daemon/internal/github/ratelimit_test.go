@@ -137,6 +137,64 @@ func TestParseRateLimitHeaders_No403RetryAfterOn200(t *testing.T) {
 	}
 }
 
+func TestParseRateLimitHeaders_LimitAndUsedParsed(t *testing.T) {
+	resp := makeResp(http.StatusOK, map[string]string{
+		"X-RateLimit-Limit":     "5000",
+		"X-RateLimit-Remaining": "4321",
+		"X-RateLimit-Used":      "679",
+		"X-RateLimit-Reset":     "1700000000",
+		"X-RateLimit-Resource":  "core",
+	})
+
+	parsed, ok := gh.ParseRateLimitHeaders(resp)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if parsed.Limit != 5000 {
+		t.Errorf("Limit = %d, want 5000", parsed.Limit)
+	}
+	if parsed.Used != 679 {
+		t.Errorf("Used = %d, want 679", parsed.Used)
+	}
+}
+
+func TestParseRateLimitHeaders_UsedDerivedWhenAbsent(t *testing.T) {
+	// GitHub always sends X-RateLimit-Used, but derive it defensively from
+	// Limit - Remaining when a proxy strips the header.
+	resp := makeResp(http.StatusOK, map[string]string{
+		"X-RateLimit-Limit":     "5000",
+		"X-RateLimit-Remaining": "4321",
+		"X-RateLimit-Reset":     "1700000000",
+		"X-RateLimit-Resource":  "core",
+	})
+
+	parsed, ok := gh.ParseRateLimitHeaders(resp)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if parsed.Used != 679 {
+		t.Errorf("Used = %d, want 679 (derived from Limit-Remaining)", parsed.Used)
+	}
+}
+
+func TestParseRateLimitHeaders_LimitAbsentDoesNotBreakOK(t *testing.T) {
+	resp := makeResp(http.StatusOK, map[string]string{
+		"X-RateLimit-Remaining": "100",
+		"X-RateLimit-Reset":     "1700000000",
+	})
+
+	parsed, ok := gh.ParseRateLimitHeaders(resp)
+	if !ok {
+		t.Fatal("expected ok=true even without X-RateLimit-Limit")
+	}
+	if parsed.Limit != 0 {
+		t.Errorf("Limit = %d, want 0 (absent)", parsed.Limit)
+	}
+	if parsed.Used != 0 {
+		t.Errorf("Used = %d, want 0 (no Limit to derive from)", parsed.Used)
+	}
+}
+
 func TestParseRateLimitHeaders_AbsentHeadersReturnsFalse(t *testing.T) {
 	resp := makeResp(http.StatusOK, map[string]string{})
 	_, ok := gh.ParseRateLimitHeaders(resp)

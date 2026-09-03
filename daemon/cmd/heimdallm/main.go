@@ -2351,8 +2351,14 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	// Expose live config for GET /config
 	srv.SetRepoMetaFns(ghClient.FetchLabels, ghClient.FetchCollaborators)
 
-	// Live GitHub API rate-limit lookup for GET /github/rate_limit.
-	srv.SetRateLimitFn(func() (any, error) { return ghClient.RateLimit() })
+	// Live GitHub API rate-limit lookup for GET /github/rate_limit. Served from
+	// the scheduler's tracker (real X-RateLimit-* headers observed on every
+	// API call), falling back to GitHub's GET /rate_limit only for a bucket
+	// that hasn't been observed yet. See buildRateLimitView's doc comment for
+	// why the tracker — not GitHub's own endpoint — must be the primary source.
+	srv.SetRateLimitFn(func() (any, error) {
+		return buildRateLimitView(time.Now(), limiter.Snapshots(), ghClient.RateLimit)
+	})
 
 	srv.SetConfigFn(func() map[string]any {
 		// Snapshot the mutable slice fields under cfgMu. The poll-cycle
@@ -4316,7 +4322,13 @@ func (a *rateLimitAdapter) ObserveResponse(resp *http.Response) {
 		return
 	}
 	if parsed.Resource != "" {
-		a.limiter.Observe(parsed.Resource, parsed.Remaining, parsed.Reset)
+		a.limiter.Observe(parsed.Resource, scheduler.RateSnapshot{
+			Limit:      parsed.Limit,
+			Remaining:  parsed.Remaining,
+			Used:       parsed.Used,
+			Reset:      parsed.Reset,
+			ObservedAt: time.Now(),
+		})
 	}
 	if parsed.RetryAfter > 0 {
 		a.limiter.ObserveRetryAfter(parsed.RetryAfter)
