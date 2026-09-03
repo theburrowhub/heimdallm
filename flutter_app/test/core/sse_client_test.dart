@@ -304,6 +304,158 @@ void main() {
       await responseBody.close();
     });
 
+    // Before this, a persistent non-2xx response (an auth failure, a routed
+    // instance's untrusted cert surfacing through the proxy as an error page)
+    // was never checked: the client just handed the error body to the SSE
+    // line parser, got nothing out of it, hit onDone, and reconnected at a
+    // flat interval forever — 17,581 attempts roughly every 3s in the
+    // incident that motivated this fix. These verify the status code is
+    // checked and that repeated failures back off instead of hot-looping.
+    test(
+      'a non-2xx status is treated as a connection failure, not silently parsed',
+      () async {
+        final platform = FakePlatformServices(
+          apiBaseUrl: 'http://127.0.0.1:7842',
+        );
+        final mockClient = MockClient.streaming((request, _) async {
+          return http.StreamedResponse(
+            Stream<List<int>>.value(utf8.encode('{"error":"unauthorized"}')),
+            401,
+          );
+        });
+        final client = SseClient(
+          httpClient: mockClient,
+          platform: platform,
+          path: '/events',
+          errorReconnectDelay: const Duration(milliseconds: 200),
+        );
+
+        Object? forwarded;
+        final sub = client.connect().listen(
+          (_) {},
+          onError: (e) => forwarded = e,
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+
+        expect(
+          forwarded,
+          isNotNull,
+          reason: 'a 401 must surface as a connection error to listeners',
+        );
+
+        await sub.cancel();
+      },
+    );
+
+    test(
+      'persistent connection failures back off instead of retrying at a '
+      'flat interval',
+      () async {
+        final platform = FakePlatformServices(
+          apiBaseUrl: 'http://127.0.0.1:7842',
+        );
+        var requests = 0;
+        final mockClient = MockClient.streaming((request, _) async {
+          requests++;
+          return http.StreamedResponse(
+            Stream<List<int>>.value(utf8.encode('{"error":"unauthorized"}')),
+            401,
+          );
+        });
+        final client = SseClient(
+          httpClient: mockClient,
+          platform: platform,
+          path: '/events',
+          errorReconnectDelay: const Duration(milliseconds: 20),
+        );
+
+        final sub = client.connect().listen((_) {}, onError: (_) {});
+
+        // Request 1 fires ~immediately; its failure schedules a reconnect
+        // after ~1x the base delay (20ms) -> request 2 at ~20ms.
+        await Future<void>.delayed(const Duration(milliseconds: 35));
+        expect(
+          requests,
+          2,
+          reason: 'first failure reconnects at ~1x the base delay',
+        );
+
+        // Request 2 also fails. A flat delay would retry ~20ms after that
+        // (~40ms total, already passed); backoff (2x) pushes the next
+        // attempt to ~60ms instead — confirm it has not fired yet.
+        await Future<void>.delayed(const Duration(milliseconds: 15));
+        expect(
+          requests,
+          2,
+          reason: 'second reconnect must be backed off past the flat interval',
+        );
+
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+        expect(
+          requests,
+          3,
+          reason: 'the backed-off reconnect eventually fires',
+        );
+
+        await sub.cancel();
+      },
+    );
+
+    test('a successful connection resets the backoff to the base delay', () async {
+      final platform = FakePlatformServices(
+        apiBaseUrl: 'http://127.0.0.1:7842',
+      );
+      var requests = 0;
+      final controllers = <StreamController<List<int>>>[];
+      final mockClient = MockClient.streaming((request, _) async {
+        requests++;
+        if (requests == 1) {
+          return http.StreamedResponse(
+            Stream<List<int>>.value(utf8.encode('unauthorized')),
+            401,
+          );
+        }
+        final controller = StreamController<List<int>>();
+        controllers.add(controller);
+        return http.StreamedResponse(
+          controller.stream,
+          200,
+          headers: {'content-type': 'text/event-stream'},
+        );
+      });
+      final client = SseClient(
+        httpClient: mockClient,
+        platform: platform,
+        path: '/events',
+        errorReconnectDelay: const Duration(milliseconds: 20),
+      );
+
+      final sub = client.connect().listen((_) {}, onError: (_) {});
+      // Request 1 (401) reconnects after ~20ms; request 2 succeeds and stays
+      // connected.
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(requests, 2);
+
+      // Break the now-established connection. Because it succeeded, the
+      // backoff counter must have reset — the next reconnect should happen
+      // at ~1x the base delay again, not at a leftover doubled delay.
+      controllers.first.addError(Exception('dropped'));
+      await controllers.first.close();
+      await Future<void>.delayed(const Duration(milliseconds: 45));
+      expect(
+        requests,
+        3,
+        reason:
+            'post-success failure reconnects at the base delay, not a '
+            'leftover backoff',
+      );
+
+      await sub.cancel();
+      for (final c in controllers) {
+        if (!c.isClosed) await c.close();
+      }
+    });
+
     test('buffer overflow reconnects after the error delay', () async {
       final platform = FakePlatformServices(
         apiBaseUrl: 'http://127.0.0.1:7842',

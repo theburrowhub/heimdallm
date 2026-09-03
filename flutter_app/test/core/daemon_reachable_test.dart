@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:heimdallm/core/api/api_client.dart';
+import 'package:heimdallm/core/api/daemon_endpoint.dart';
 import 'package:heimdallm/core/platform/platform_services_desktop.dart';
 import 'platform/fake_platform_services.dart';
 
@@ -223,6 +224,91 @@ void main() {
         },
       );
     });
+  });
+
+  // checkHealth/daemonReachable are the only two calls in the whole client
+  // that sent no auth token. Against a local endpoint that costs nothing
+  // (the daemon's unauthenticated /health answers the same either way), but
+  // against a viaHub endpoint (any non-self instance, including the local
+  // one whenever the app's "active instance" preference names a remote id)
+  // the request actually goes through /instances/{id}/proxy/health, which
+  // DOES require the token — so it always came back 401, which
+  // _looksLikeHeimdallm treats as "not our daemon", flipping the UI to
+  // "Server unavailable" on every 5s watchdog tick even though the daemon
+  // was demonstrably up and answering.
+  group('auth token on health checks', () {
+    test('checkHealth sends the token', () async {
+      http.Request? captured;
+      final client = ApiClient(
+        httpClient: MockClient((req) async {
+          captured = req;
+          return http.Response(
+            '{"status":"ok","checks":{}}',
+            200,
+            headers: daemonHeaders,
+          );
+        }),
+        endpoint: DaemonEndpoint.raw(
+          baseUrl: 'http://127.0.0.1:7842/instances/srv-a/proxy',
+          instanceId: 'srv-a',
+          token: 'secret-token',
+        ),
+      );
+
+      expect(await client.checkHealth(), isTrue);
+      expect(captured?.headers['X-Heimdallm-Token'], 'secret-token');
+    });
+
+    test('daemonReachable sends the token', () async {
+      http.Request? captured;
+      final client = ApiClient(
+        httpClient: MockClient((req) async {
+          captured = req;
+          return http.Response(
+            '{"status":"ok","checks":{}}',
+            200,
+            headers: daemonHeaders,
+          );
+        }),
+        endpoint: DaemonEndpoint.raw(
+          baseUrl: 'http://127.0.0.1:7842/instances/srv-a/proxy',
+          instanceId: 'srv-a',
+          token: 'secret-token',
+        ),
+      );
+
+      expect(await client.daemonReachable(), PortOwner.daemon);
+      expect(captured?.headers['X-Heimdallm-Token'], 'secret-token');
+    });
+
+    test(
+      'a viaHub-shaped endpoint without the token 401s and must not be '
+      'mistaken for a foreign service',
+      () async {
+        // Reproduces the bug directly: no token sent means the hub's own
+        // auth middleware answers 401 with no daemon header and a body that
+        // doesn't look like a daemon's, so an unfixed client here would
+        // report PortOwner.foreign.
+        final client = ApiClient(
+          httpClient: MockClient(
+            (req) async => req.headers.containsKey('X-Heimdallm-Token')
+                ? http.Response(
+                    '{"status":"ok","checks":{}}',
+                    200,
+                    headers: daemonHeaders,
+                  )
+                : http.Response('{"error":"unauthorized"}', 401),
+          ),
+          endpoint: DaemonEndpoint.raw(
+            baseUrl: 'http://127.0.0.1:7842/instances/srv-a/proxy',
+            instanceId: 'srv-a',
+            token: 'secret-token',
+          ),
+        );
+
+        expect(await client.daemonReachable(), PortOwner.daemon);
+      },
+    );
   });
 
   group('daemonPort', () {

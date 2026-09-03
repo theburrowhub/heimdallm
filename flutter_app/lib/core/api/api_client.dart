@@ -70,11 +70,36 @@ class ApiClient {
     };
   }
 
+  /// GET /health, with the auth token attached only when it is actually
+  /// required.
+  ///
+  /// /health is deliberately the one unauthenticated route on the daemon
+  /// itself — a rotated token must still show the local daemon as reachable
+  /// — so the local endpoint skips the token load entirely, unchanged from
+  /// before. A non-local (viaHub) endpoint's /health is different: it is
+  /// reached through /instances/{id}/proxy/health, which lives under the
+  /// same auth-gated prefix as every other /instances/* route and DOES
+  /// require the token. checkHealth/daemonReachable were the only two calls
+  /// in this whole client that never sent it, so every health check against
+  /// a routed instance — including the local one whenever the app's "active
+  /// instance" preference names a remote id — came back 401 and was misread
+  /// as "not our daemon", flipping the UI to "Server unavailable".
+  ///
+  /// Extracted so checkHealth/daemonReachable can bound the token load *and*
+  /// the request in one [Future.timeout]: putting `await _authHeaders()`
+  /// directly in an argument list happens before the call it's an argument
+  /// to even starts, so a `.timeout()` chained onto that call would not
+  /// cover it.
+  Future<http.Response> _getHealthWithAuth() async {
+    if (_endpoint.isLocal) return _client.get(_uri('/health'));
+    return _client.get(_uri('/health'), headers: await _authHeaders());
+  }
+
   Future<bool> checkHealth() async {
     try {
-      final resp = await _client
-          .get(_uri('/health'))
-          .timeout(const Duration(seconds: 3));
+      final resp = await _getHealthWithAuth().timeout(
+        const Duration(seconds: 3),
+      );
       return resp.statusCode == 200 && _looksLikeHeimdallm(resp);
     } catch (_) {
       return false;
@@ -100,9 +125,9 @@ class ApiClient {
   /// because a browser cannot perform that native guard.
   Future<PortOwner> daemonReachable() async {
     try {
-      final resp = await _client
-          .get(_uri('/health'))
-          .timeout(_daemonReachabilityTimeout);
+      final resp = await _getHealthWithAuth().timeout(
+        _daemonReachabilityTimeout,
+      );
       return _looksLikeHeimdallm(resp) ? PortOwner.daemon : PortOwner.foreign;
     } catch (_) {
       return Uri.parse(_endpoint.baseUrl).isAbsolute

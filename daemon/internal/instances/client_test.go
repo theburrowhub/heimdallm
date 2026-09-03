@@ -119,6 +119,54 @@ func TestClientHealthUnparseableBody(t *testing.T) {
 	}
 }
 
+// The daemon answers /health with 503 while starting or whenever a dependency
+// (SQLite, NATS, a stale poll) is unhealthy — that still IS the daemon
+// answering, with a valid body proving it. Treating this the same as a
+// connection failure is what made a hub's own health check flip it to
+// "unreachable" every time its last_poll lagged, even though it was serving
+// the very request asking the question.
+func TestClientHealthTreatsDegradedResponseAsReachable(t *testing.T) {
+	f := newFakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "degraded", "version": "0.8.15", "instance_id": "srv-a", "role": "hub",
+		})
+	})
+	h, err := NewClient(f.instance("srv-a"), f.Client()).Health(context.Background())
+	if err != nil {
+		t.Fatalf("Health() = %v, want nil: a 503 with a decodable body is a live daemon", err)
+	}
+	if h.Status != "degraded" {
+		t.Errorf("Status = %q, want %q", h.Status, "degraded")
+	}
+	if h.Version != "0.8.15" || h.InstanceID != "srv-a" {
+		t.Errorf("Health() = %+v, want the degraded body's values", h)
+	}
+}
+
+// A non-2xx with no body at all cannot be proven to be our daemon; keep
+// treating that as unreachable.
+func TestClientHealthUnreachableOnStatusErrorWithEmptyBody(t *testing.T) {
+	f := newFakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	if _, err := NewClient(f.instance("a"), f.Client()).Health(context.Background()); err == nil {
+		t.Error("Health() = nil error on a 503 with no body")
+	}
+}
+
+// A non-2xx with a body that is not even JSON (an intermediary's error page,
+// not the daemon itself) must not be mistaken for a degraded daemon.
+func TestClientHealthUnreachableOnNonJSONErrorBody(t *testing.T) {
+	f := newFakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte("<html>502 Bad Gateway</html>"))
+	})
+	if _, err := NewClient(f.instance("a"), f.Client()).Health(context.Background()); err == nil {
+		t.Error("Health() = nil error on a non-JSON 502 body")
+	}
+}
+
 func TestClientPatchConfigSendsTokenAndBody(t *testing.T) {
 	f := newFakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})

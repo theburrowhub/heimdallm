@@ -26,6 +26,7 @@ dependencies:
   # web build's platform_services_web.dart. Already pulled in transitively
   # by flutter; declare it explicitly so the analyzer is happy.
   web: ^1.1.0
+  toml: ^0.18.0
 
 dev_dependencies:
   flutter_test:

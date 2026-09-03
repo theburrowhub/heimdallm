@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:toml/toml.dart';
 import '../models/config_model.dart';
 import 'gh_cli.dart';
 
@@ -166,16 +167,107 @@ class FirstRunSetup {
 
   // ── Config file ──────────────────────────────────────────────────────────
 
-  /// Writes the daemon config file to ~/.config/heimdallm/config.toml
-  static Future<void> writeConfig(AppConfig config) async {
-    final home = Platform.environment['HOME'] ?? '';
-    if (home.isEmpty) throw Exception('HOME environment variable not set');
+  /// Writes the daemon config file to ~/.config/heimdallm/config.toml.
+  ///
+  /// [configPathOverride] exists only for tests — production callers always
+  /// use the real path derived from $HOME.
+  ///
+  /// If a config.toml already exists, this is a MERGE, not an overwrite:
+  /// [AppConfig] models only a subset of the daemon's schema ([server]'s
+  /// port, [github], [ai], [retention]). Everything else — [cluster] and its
+  /// instances/tokens/routing, [polling], [merge_tracking],
+  /// [circuit_breaker], [autonomous], [activity_log], server.bind_addr,
+  /// github.token, any operator-only key — is preserved from the file on
+  /// disk untouched. Before this, "Save and start Heimdallm" (shown
+  /// precisely when the daemon is down and GET /config could not populate
+  /// the real values) blindly wrote AppConfig's mostly-default view over the
+  /// whole file, silently deleting every section it didn't model. That is
+  /// what actually emptied config.toml in the incident this fixes.
+  static Future<void> writeConfig(
+    AppConfig config, {
+    @visibleForTesting String? configPathOverride,
+  }) async {
+    String path;
+    if (configPathOverride != null) {
+      path = configPathOverride;
+    } else {
+      final home = Platform.environment['HOME'] ?? '';
+      if (home.isEmpty) throw Exception('HOME environment variable not set');
+      path = '$home/.config/heimdallm/config.toml';
+    }
 
-    final dir = Directory('$home/.config/heimdallm');
-    await dir.create(recursive: true);
+    await Directory(File(path).parent.path).create(recursive: true);
 
-    final content = _buildToml(config);
-    await File('$home/.config/heimdallm/config.toml').writeAsString(content);
+    final content = await _mergedTomlFor(config, path);
+    await _writeConfigAtomically(path, content);
+  }
+
+  /// Builds the TOML to write at [path]: AppConfig's own sections deep-merged
+  /// over whatever is already on disk there, so keys AppConfig does not model
+  /// survive. With no existing file (first run) or an empty one, this is just
+  /// AppConfig's own TOML — nothing to merge with.
+  static Future<String> _mergedTomlFor(AppConfig config, String path) async {
+    final appToml = _buildToml(config);
+    final file = File(path);
+    if (!await file.exists()) return appToml;
+
+    final existingText = await file.readAsString();
+    if (existingText.trim().isEmpty) return appToml;
+
+    final Map<String, dynamic> existingMap;
+    try {
+      existingMap = TomlDocument.parse(existingText).toMap();
+    } catch (e) {
+      // A config.toml this app cannot parse (hand-edited, a version skew, an
+      // in-progress write from the daemon) must never be silently discarded.
+      // The whole point of merging is to never destroy what's on disk — so
+      // refuse rather than guess.
+      throw Exception(
+        'config.toml exists at $path but could not be parsed for a safe '
+        'merge; refusing to overwrite it. Fix or remove the file manually, '
+        'then try again. ($e)',
+      );
+    }
+    final appMap = TomlDocument.parse(appToml).toMap();
+    final merged = _deepMergeToml(existingMap, appMap);
+    return TomlDocument.fromMap(merged).toString();
+  }
+
+  /// Deep-merges [patch] over [base]: recurses when both sides have a map at
+  /// the same key, otherwise [patch]'s value wins. Mirrors the daemon's own
+  /// config.DeepMerge (internal/config/writer.go) so both sides of the
+  /// save path agree on what "merge" means.
+  static Map<String, dynamic> _deepMergeToml(Map base, Map patch) {
+    final merged = <String, dynamic>{
+      for (final entry in base.entries) entry.key as String: entry.value,
+    };
+    for (final entry in patch.entries) {
+      final key = entry.key as String;
+      final patchValue = entry.value;
+      final baseValue = merged[key];
+      merged[key] = (baseValue is Map && patchValue is Map)
+          ? _deepMergeToml(baseValue, patchValue)
+          : patchValue;
+    }
+    return merged;
+  }
+
+  /// Writes via temp file + rename so a reader (the daemon, or this same
+  /// method racing a future call) never observes a truncated file — the
+  /// original `writeAsString` truncated in place first.
+  static Future<void> _writeConfigAtomically(String path, String content) async {
+    final tmpPath = '$path.tmp.$pid';
+    final tmpFile = File(tmpPath);
+    try {
+      await tmpFile.writeAsString(content, flush: true);
+      await tmpFile.rename(path);
+    } catch (e) {
+      // Best-effort cleanup; the rename failing is the error that matters.
+      if (await tmpFile.exists()) {
+        await tmpFile.delete().catchError((_) => tmpFile);
+      }
+      rethrow;
+    }
   }
 
   /// Escapes backslashes, double-quotes, and newline characters in a

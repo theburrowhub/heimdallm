@@ -99,6 +99,24 @@ func (td *toggleDaemon) setDown(down bool) {
 	td.mu.Unlock()
 }
 
+// degradedDaemon answers /health with 503 and a valid body, the way a real
+// daemon does when its last_poll check lags — as opposed to toggleDaemon's
+// "down", which is a hard 500 with no body.
+type degradedDaemon struct {
+	*fakeDaemon
+}
+
+func newDegradedDaemon(t *testing.T, id string) *degradedDaemon {
+	dd := &degradedDaemon{}
+	dd.fakeDaemon = newFakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "degraded", "version": "0.9.0", "instance_id": id, "role": "hub",
+		})
+	})
+	return dd
+}
+
 func proberFixture(t *testing.T, selfID string, daemons map[string]*toggleDaemon, store StateStore, events EventPublisher) *Prober {
 	t.Helper()
 	insts := map[string]config.InstanceConfig{
@@ -197,6 +215,46 @@ func TestProberCountsConsecutiveFailuresAndKeepsLastKnown(t *testing.T) {
 
 // Only transitions are published. A 30s ticker across N instances would
 // otherwise flood the SSE stream with events saying nothing changed.
+// A degraded-but-responding instance (503 with a valid body, e.g. its own
+// last_poll check lagging) must not be flagged unreachable, must not fire
+// instance_down, and must not log "became unreachable" — that flapping is
+// exactly what made the hub's own row in the Instances tab look like it kept
+// disconnecting while it was demonstrably serving the very health check.
+func TestProberDoesNotFlagDegradedInstanceUnreachable(t *testing.T) {
+	d := newDegradedDaemon(t, "srv-a")
+	insts := map[string]config.InstanceConfig{
+		"hub":   {Name: "hub", BaseURL: "http://127.0.0.1:7842", Token: "t"},
+		"srv-a": {Name: "srv-a", BaseURL: d.URL, Token: "secret"},
+	}
+	cfg := cfgWith(config.RoleHub, "hub", "hub", insts, config.RoutingConfig{})
+	reg := NewRegistry(cfg)
+	events := &fakeEvents{}
+	p := NewProber(reg, time.Minute, func(inst Instance) *Client {
+		if inst.ID == "srv-a" {
+			return NewClient(inst, d.Client())
+		}
+		return NewClient(inst, nil)
+	}, nil, events)
+
+	p.ProbeAll(context.Background())
+	p.ProbeAll(context.Background())
+
+	s := p.State("srv-a")
+	if !s.Reachable {
+		t.Errorf("srv-a = %+v, want reachable despite the 503", s)
+	}
+	if s.Status != "degraded" {
+		t.Errorf("Status = %q, want %q", s.Status, "degraded")
+	}
+	// First ProbeAll publishes one event per instance's first sighting (self +
+	// srv-a = 2, matching TestProberPublishesOnlyTransitions). The second
+	// ProbeAll, with srv-a steadily degraded, must publish nothing more —
+	// never an unreachable/recovered flap in between.
+	if got := events.count(); got != 2 {
+		t.Errorf("published %d events across two degraded probes, want exactly 2 (first observation of each instance, no flapping after)", got)
+	}
+}
+
 func TestProberPublishesOnlyTransitions(t *testing.T) {
 	d := newToggleDaemon(t, "srv-a")
 	events := &fakeEvents{}

@@ -348,6 +348,9 @@ func TestTier2FetchFiltersUnownedRepos(t *testing.T) {
 	mine, theirs := "acme/mine", "acme/theirs"
 	a := tier2OwnershipHarness(t, []string{mine, theirs})
 	a.owns = func(repo string) bool { return repo == mine }
+	// theirs is routed away AND successfully dispatched: it must not also be
+	// reviewed here.
+	a.dispatchPR = func(repo string, prID int64, prURL string) bool { return repo == theirs }
 
 	out, err := a.FetchPRsToReview()
 	if err != nil {
@@ -367,6 +370,42 @@ func TestTier2FetchFiltersUnownedRepos(t *testing.T) {
 	}
 }
 
+// The core guarantee behind routing: a PR whose repo is routed away must
+// never simply vanish. If there is no working way to hand it to its owner —
+// no dispatch function wired, or the dispatch call itself reports it could
+// not be handled (owner down, unreachable, dispatch failed) — this instance
+// must review it locally instead of dropping it. This is exactly what let
+// overmind-swarm PRs disappear from the queue entirely once routing engaged.
+func TestTier2FetchFallsBackToLocalWhenDispatchUnavailable(t *testing.T) {
+	theirs := "acme/theirs"
+	a := tier2OwnershipHarness(t, []string{theirs})
+	a.owns = func(string) bool { return false }
+	a.dispatchPR = nil // no dispatch capability wired at all
+
+	out, err := a.FetchPRsToReview()
+	if err != nil {
+		t.Fatalf("FetchPRsToReview: %v", err)
+	}
+	if len(out) != 1 || out[0].Repo != theirs {
+		t.Fatalf("returned %+v, want the PR reviewed locally when dispatch is unavailable", out)
+	}
+}
+
+func TestTier2FetchFallsBackToLocalWhenDispatchFails(t *testing.T) {
+	theirs := "acme/theirs"
+	a := tier2OwnershipHarness(t, []string{theirs})
+	a.owns = func(string) bool { return false }
+	a.dispatchPR = func(string, int64, string) bool { return false } // owner down/unreachable
+
+	out, err := a.FetchPRsToReview()
+	if err != nil {
+		t.Fatalf("FetchPRsToReview: %v", err)
+	}
+	if len(out) != 1 || out[0].Repo != theirs {
+		t.Fatalf("returned %+v, want the PR reviewed locally when dispatch fails", out)
+	}
+}
+
 // A nil predicate is the single-daemon path and must change nothing.
 func TestTier2FetchWithoutOwnershipFilter(t *testing.T) {
 	a := tier2OwnershipHarness(t, []string{"acme/one", "acme/two"})
@@ -382,13 +421,47 @@ func TestTier2FetchWithoutOwnershipFilter(t *testing.T) {
 func TestTier2ProcessRepoSkipsUnowned(t *testing.T) {
 	a := tier2OwnershipHarness(t, nil)
 	a.owns = func(string) bool { return false }
+	// A healthy, trusted owner: safe to skip and let it process its own issues.
+	a.ownerCanHandleIssues = func(string) bool { return true }
 
 	n, err := a.ProcessRepo(t.Context(), "acme/not-mine")
 	if err != nil {
 		t.Fatalf("ProcessRepo: %v", err)
 	}
 	if n != 0 {
-		t.Errorf("processed %d issues on an unowned repo, want 0", n)
+		t.Errorf("processed %d issues on an unowned repo with a healthy owner, want 0", n)
+	}
+}
+
+// The routing decision behind ProcessRepo's guard — "process locally" vs
+// "trust the routed owner" — as a pure predicate, exercised directly rather
+// than through ProcessRepo's full issue-processing machinery (whose (0, nil)
+// return on this harness's zero-value config would be indistinguishable
+// between "skipped due to routing" and "skipped, issue tracking disabled").
+//
+// A repo routed away with no healthy owner to trust must not simply be
+// abandoned: that is exactly what let issues on a repo routed to a down
+// instance go completely unattended before this existed.
+func TestTier2ShouldProcessLocally(t *testing.T) {
+	tests := []struct {
+		name           string
+		owns           func(string) bool
+		ownerCanHandle func(string) bool
+		wantSkip       bool
+	}{
+		{"owned", func(string) bool { return true }, nil, false},
+		{"unowned, no dispatch wired", func(string) bool { return false }, nil, false},
+		{"unowned, owner unhealthy", func(string) bool { return false }, func(string) bool { return false }, false},
+		{"unowned, owner healthy", func(string) bool { return false }, func(string) bool { return true }, true},
+		{"single-daemon (owns nil)", nil, nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			skip := !tier2ShouldProcessLocally(tt.owns, tt.ownerCanHandle, "acme/repo")
+			if skip != tt.wantSkip {
+				t.Errorf("skip = %v, want %v", skip, tt.wantSkip)
+			}
+		})
 	}
 }
 
@@ -655,6 +728,496 @@ func TestEnsureSelfInstanceNoOpOnANonHub(t *testing.T) {
 	ensureSelfInstance(hub, "/data")
 	if len(hub.Cluster.Instances) != 0 {
 		t.Errorf("instances = %v, want none without an instance_id", hub.Cluster.Instances)
+	}
+}
+
+// ------------------------------------------------- Reload-time identity
+
+// A daemon that booted before [cluster] existed freezes instanceID at "" for
+// its whole lifetime unless a reload re-resolves it. This is what let a hub
+// silently own every repo (Router.Owns fails open on selfID=="") after an
+// operator turned clustering on without restarting.
+func TestResolveReloadInstanceIDKeepsExistingWhenAlreadySet(t *testing.T) {
+	dir := t.TempDir()
+	newCfg := &config.Config{}
+	newCfg.Cluster.Role = config.RoleHub
+
+	got, err := resolveReloadInstanceID("hub-1", newCfg, dir)
+	if err != nil {
+		t.Fatalf("resolveReloadInstanceID: %v", err)
+	}
+	if got != "hub-1" {
+		t.Errorf("id = %q, want the already-resolved value unchanged", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "instance_id")); !os.IsNotExist(err) {
+		t.Error("instance_id file was written despite an already-resolved id")
+	}
+}
+
+func TestResolveReloadInstanceIDNoOpWhenClusterStaysDisabled(t *testing.T) {
+	dir := t.TempDir()
+	newCfg := &config.Config{} // no [cluster] at all
+
+	got, err := resolveReloadInstanceID("", newCfg, dir)
+	if err != nil {
+		t.Fatalf("resolveReloadInstanceID: %v", err)
+	}
+	if got != "" {
+		t.Errorf("id = %q, want empty when clustering is still disabled", got)
+	}
+}
+
+func TestResolveReloadInstanceIDGeneratesWhenClusterNewlyEnabled(t *testing.T) {
+	dir := t.TempDir()
+	newCfg := &config.Config{}
+	newCfg.Cluster.Role = config.RoleHub // just turned on in this reload's TOML
+
+	got, err := resolveReloadInstanceID("", newCfg, dir)
+	if err != nil {
+		t.Fatalf("resolveReloadInstanceID: %v", err)
+	}
+	if err := config.ValidateInstanceID(got); err != nil {
+		t.Errorf("resolved id %q is not valid: %v", got, err)
+	}
+	// Must persist so this identity survives a real restart too.
+	if _, err := os.Stat(filepath.Join(dir, "instance_id")); err != nil {
+		t.Errorf("instance_id file was not written: %v", err)
+	}
+}
+
+func TestResolveReloadInstanceIDPicksUpExplicitConfiguredID(t *testing.T) {
+	dir := t.TempDir()
+	newCfg := &config.Config{}
+	newCfg.Cluster.Role = config.RoleHub
+	newCfg.Cluster.InstanceID = "operator-chosen"
+
+	got, err := resolveReloadInstanceID("", newCfg, dir)
+	if err != nil {
+		t.Fatalf("resolveReloadInstanceID: %v", err)
+	}
+	if got != "operator-chosen" {
+		t.Errorf("id = %q, want the operator's explicit id from this reload", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "instance_id")); !os.IsNotExist(err) {
+		t.Error("instance_id file was written despite an explicit id in the new config")
+	}
+}
+
+// ------------------------------------------------- Prober built on reload
+
+// A daemon that booted as a worker/standalone and is promoted to hub by a
+// reload (not a restart) must get a prober so /instances stops 404ing and
+// health probing actually starts — not just the next full process restart.
+func TestClusterStateUpdateBuildsProberOnRoleTransition(t *testing.T) {
+	workerCfg := clusterCfg(t, "hub-1", config.RoutingConfig{})
+	workerCfg.Cluster.Role = config.RoleWorker
+	cs := newClusterState(workerCfg, nil, nil)
+	if cs.Prober() != nil {
+		t.Fatal("precondition: a worker must not have a prober")
+	}
+
+	hubCfg := clusterCfg(t, "hub-1", config.RoutingConfig{})
+	hubCfg.Cluster.Role = config.RoleHub
+	built := cs.Update(hubCfg)
+
+	if !built {
+		t.Error("Update() = false, want true when a prober was just built")
+	}
+	if cs.Prober() == nil {
+		t.Error("Update() did not build a prober on the worker->hub transition")
+	}
+}
+
+// The reverse and steady-state cases must not rebuild or report a spurious
+// transition on every ordinary reload.
+func TestClusterStateUpdateNoOpProberOutsideTransition(t *testing.T) {
+	hubCfg := clusterCfg(t, "hub-1", config.RoutingConfig{})
+	hubCfg.Cluster.Role = config.RoleHub
+	cs := newClusterState(hubCfg, nil, nil)
+	original := cs.Prober()
+	if original == nil {
+		t.Fatal("precondition: a hub must have a prober")
+	}
+
+	built := cs.Update(hubCfg)
+	if built {
+		t.Error("Update() = true on a daemon that was already a hub")
+	}
+	if cs.Prober() != original {
+		t.Error("Update() replaced an already-built prober")
+	}
+
+	worker := newClusterState(clusterCfg(t, "srv-a", config.RoutingConfig{}), nil, nil)
+	if got := worker.Update(clusterCfg(t, "srv-a", config.RoutingConfig{})); got {
+		t.Error("Update() = true on a daemon that stayed a worker")
+	}
+}
+
+// ------------------------------------------------- Dispatch with local fallback
+
+// dispatchRemote is a fake worker instance that records what it received and
+// can be made to fail on demand, for the dispatch tests below.
+type dispatchRemote struct {
+	*httptest.Server
+	mu        sync.Mutex
+	healthy   bool
+	addPR     []string
+	reviewed  []int64
+	triaged   []int64
+	failNext  bool
+	failCount int
+}
+
+func newDispatchRemote(t *testing.T) *dispatchRemote {
+	t.Helper()
+	d := &dispatchRemote{healthy: true}
+	d.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		switch {
+		case r.URL.Path == "/health":
+			if !d.healthy {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "instance_id": "srv-a", "role": "worker"})
+		case r.URL.Path == "/prs/add":
+			d.addPR = append(d.addPR, "called")
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		case strings.HasPrefix(r.URL.Path, "/prs/") && strings.HasSuffix(r.URL.Path, "/review"):
+			if d.failNext {
+				d.failCount++
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			d.reviewed = append(d.reviewed, 1)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		case strings.HasPrefix(r.URL.Path, "/issues/") && strings.HasSuffix(r.URL.Path, "/review"):
+			if d.failNext {
+				d.failCount++
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			d.triaged = append(d.triaged, 1)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(d.Close)
+	return d
+}
+
+func (d *dispatchRemote) setHealthy(v bool) {
+	d.mu.Lock()
+	d.healthy = v
+	d.mu.Unlock()
+}
+
+func (d *dispatchRemote) setFailNext(v bool) {
+	d.mu.Lock()
+	d.failNext = v
+	d.mu.Unlock()
+}
+
+func (d *dispatchRemote) reviewCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.reviewed)
+}
+
+func (d *dispatchRemote) triageCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.triaged)
+}
+
+func (d *dispatchRemote) addPRCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.addPR)
+}
+
+// dispatchHub builds a hub clusterState routing "theirs/*" to a live fake
+// remote, with a real prober so HealthyIDs() reflects the remote's actual
+// health rather than the unprobed fail-open default.
+func dispatchHub(t *testing.T, remote *dispatchRemote) *clusterState {
+	t.Helper()
+	cfg := &config.Config{}
+	cfg.AI.Primary = "claude"
+	cfg.Cluster.Role = config.RoleHub
+	cfg.Cluster.InstanceID = "hub-1"
+	cfg.Cluster.Instances = map[string]config.InstanceConfig{
+		"hub-1": {Name: "hub", BaseURL: "http://127.0.0.1:7842", Token: "t"},
+		"srv-a": {Name: "srv-a", BaseURL: remote.URL, Token: "secret"},
+	}
+	cfg.Cluster.Routing = config.RoutingConfig{Orgs: map[string]string{"theirs": "srv-a"}}
+	cfg.GitHub.PollInterval = "5m"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config invalid: %v", err)
+	}
+	cs := newClusterState(cfg, nil, nil)
+	cs.Prober().ProbeAll(context.Background()) // establish real health, not the unprobed fail-open default
+	return cs
+}
+
+func TestClusterStateDispatchPRReviewToHealthyOwner(t *testing.T) {
+	remote := newDispatchRemote(t)
+	cs := dispatchHub(t, remote)
+
+	handled := cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "https://github.com/theirs/repo/pull/1")
+	if !handled {
+		t.Fatal("DispatchPRReview() = false, want true when the owner is healthy")
+	}
+	if remote.addPRCount() != 1 {
+		t.Errorf("AddPR calls = %d, want 1", remote.addPRCount())
+	}
+	if remote.reviewCount() != 1 {
+		t.Errorf("review calls = %d, want 1", remote.reviewCount())
+	}
+}
+
+// The whole point of dispatch-with-fallback: an owner that is down must never
+// make a PR go unreviewed. This is the exact gap that let overmind-swarm PRs
+// disappear from the queue entirely once routing engaged.
+func TestClusterStateDispatchPRReviewFallsBackWhenOwnerUnhealthy(t *testing.T) {
+	remote := newDispatchRemote(t)
+	cs := dispatchHub(t, remote)
+	remote.setHealthy(false)
+	cs.Prober().ProbeAll(context.Background()) // observe the outage
+
+	handled := cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "")
+	if handled {
+		t.Error("DispatchPRReview() = true, want false when the owner is unreachable")
+	}
+	if remote.reviewCount() != 0 {
+		t.Errorf("review calls = %d, want 0 on an unhealthy owner", remote.reviewCount())
+	}
+}
+
+// A nominally healthy owner whose review call itself fails (transient error,
+// auth rotated, disk full) must also fall back rather than silently drop the
+// PR — the same guarantee, one layer deeper.
+func TestClusterStateDispatchPRReviewFallsBackOnRemoteError(t *testing.T) {
+	remote := newDispatchRemote(t)
+	cs := dispatchHub(t, remote)
+	remote.setFailNext(true)
+
+	handled := cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "")
+	if handled {
+		t.Error("DispatchPRReview() = true, want false when the remote call itself fails")
+	}
+}
+
+func TestClusterStateDispatchIssueReviewToHealthyOwner(t *testing.T) {
+	remote := newDispatchRemote(t)
+	cs := dispatchHub(t, remote)
+
+	handled := cs.DispatchIssueReview(context.Background(), "theirs/repo", 99)
+	if !handled {
+		t.Fatal("DispatchIssueReview() = false, want true when the owner is healthy")
+	}
+	if remote.triageCount() != 1 {
+		t.Errorf("triage calls = %d, want 1", remote.triageCount())
+	}
+}
+
+// A repo this daemon already owns (or that has no configured owner at all)
+// has nothing to dispatch — the caller is expected not to even ask, but the
+// method must still degrade to "handle locally" rather than erroring.
+func TestClusterStateDispatchNoOpWhenNotRouted(t *testing.T) {
+	remote := newDispatchRemote(t)
+	cs := dispatchHub(t, remote)
+
+	if handled := cs.DispatchPRReview(context.Background(), "ours/repo", 1, ""); handled {
+		t.Error("DispatchPRReview() = true for a repo with no configured remote owner")
+	}
+	if remote.reviewCount() != 0 {
+		t.Errorf("review calls = %d, want 0", remote.reviewCount())
+	}
+}
+
+// OwnerCanHandle backs the issue-processing path, which has no single issue
+// id to dispatch at the point it decides whether to skip a repo. It must
+// agree with DispatchPRReview's notion of "safe to hand off" so a repo is
+// never left completely unattended just because its routed owner is down.
+func TestClusterStateOwnerCanHandleReflectsHealth(t *testing.T) {
+	remote := newDispatchRemote(t)
+	cs := dispatchHub(t, remote)
+
+	if !cs.OwnerCanHandle("theirs/repo") {
+		t.Error("OwnerCanHandle() = false, want true for a routed, healthy owner")
+	}
+	if cs.OwnerCanHandle("ours/repo") {
+		t.Error("OwnerCanHandle() = true for a repo with no configured remote owner")
+	}
+
+	remote.setHealthy(false)
+	cs.Prober().ProbeAll(context.Background())
+	if cs.OwnerCanHandle("theirs/repo") {
+		t.Error("OwnerCanHandle() = true for an unreachable owner")
+	}
+}
+
+func TestClusterStateDispatchNilReceiverIsPermissive(t *testing.T) {
+	var cs *clusterState
+	if cs.DispatchPRReview(context.Background(), "any/repo", 1, "") {
+		t.Error("nil clusterState.DispatchPRReview = true, want false (fall back to local)")
+	}
+	if cs.DispatchIssueReview(context.Background(), "any/repo", 1) {
+		t.Error("nil clusterState.DispatchIssueReview = true, want false (fall back to local)")
+	}
+}
+
+// ------------------------------------------------- Automatic config propagation
+
+// propagateTarget is a fake worker that records PATCH /config bodies.
+type propagateTarget struct {
+	*httptest.Server
+	mu      sync.Mutex
+	patches []map[string]any
+}
+
+func newPropagateTarget(t *testing.T) *propagateTarget {
+	t.Helper()
+	pt := &propagateTarget{}
+	pt.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/health":
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "instance_id": "srv-a", "role": "worker"})
+		case r.URL.Path == "/config" && r.Method == http.MethodPatch:
+			var patch map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&patch)
+			pt.mu.Lock()
+			pt.patches = append(pt.patches, patch)
+			pt.mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(pt.Close)
+	return pt
+}
+
+func (pt *propagateTarget) received() []map[string]any {
+	pt.mu.Lock()
+	defer pt.mu.Unlock()
+	return append([]map[string]any(nil), pt.patches...)
+}
+
+func propagateHub(t *testing.T, remote *propagateTarget) *clusterState {
+	t.Helper()
+	cfg := &config.Config{}
+	cfg.AI.Primary = "claude"
+	cfg.Cluster.Role = config.RoleHub
+	cfg.Cluster.InstanceID = "hub-1"
+	cfg.Cluster.Instances = map[string]config.InstanceConfig{
+		"hub-1": {Name: "hub", BaseURL: "http://127.0.0.1:7842", Token: "t"},
+		"srv-a": {Name: "srv-a", BaseURL: remote.URL, Token: "secret"},
+	}
+	cfg.GitHub.PollInterval = "5m"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config invalid: %v", err)
+	}
+	cs := newClusterState(cfg, nil, nil)
+	cs.Prober().ProbeAll(context.Background())
+	return cs
+}
+
+func writeTestConfigTOML(t *testing.T, contents string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestPropagateClusterConfigPushesToHealthyRemote(t *testing.T) {
+	remote := newPropagateTarget(t)
+	cs := propagateHub(t, remote)
+	cfgPath := writeTestConfigTOML(t, `
+[ai]
+primary = "codex"
+review_mode = "single"
+`)
+	broker := sse.NewBroker()
+	broker.Start()
+	defer broker.Stop()
+	sub := broker.Subscribe()
+
+	propagateClusterConfig(context.Background(), cfgPath, cs, broker)
+
+	got := remote.received()
+	if len(got) != 1 {
+		t.Fatalf("remote received %d PATCH /config calls, want 1", len(got))
+	}
+	ai, ok := got[0]["ai"].(map[string]any)
+	if !ok || ai["primary"] != "codex" {
+		t.Errorf("patch = %+v, want ai.primary=codex from the file on disk", got[0])
+	}
+
+	select {
+	case ev := <-sub:
+		if ev.Type != sse.EventConfigPropagated {
+			t.Errorf("event type = %q, want %q", ev.Type, sse.EventConfigPropagated)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("no config_propagated event published")
+	}
+}
+
+// cluster.instance_id must never leak to a worker: propagating it back would
+// let the hub silently overwrite the identity ensureSelfInstance seeded on
+// the other side.
+func TestPropagateClusterConfigOmitsLocalOnlyKeys(t *testing.T) {
+	remote := newPropagateTarget(t)
+	cs := propagateHub(t, remote)
+	cfgPath := writeTestConfigTOML(t, `
+[ai]
+primary = "codex"
+
+[cluster]
+role = "hub"
+instance_id = "hub-1"
+
+[github]
+repositories = ["acme/one"]
+`)
+	broker := sse.NewBroker()
+	broker.Start()
+	defer broker.Stop()
+
+	propagateClusterConfig(context.Background(), cfgPath, cs, broker)
+
+	got := remote.received()
+	if len(got) != 1 {
+		t.Fatalf("remote received %d PATCH /config calls, want 1", len(got))
+	}
+	if _, present := got[0]["cluster"]; present {
+		t.Errorf("patch = %+v, want no [cluster] section propagated", got[0])
+	}
+	if gh, ok := got[0]["github"].(map[string]any); ok {
+		if _, present := gh["repositories"]; present {
+			t.Errorf("patch.github = %+v, want repositories not propagated", gh)
+		}
+	}
+}
+
+func TestPropagateClusterConfigToleratesUnreadableFile(t *testing.T) {
+	remote := newPropagateTarget(t)
+	cs := propagateHub(t, remote)
+	broker := sse.NewBroker()
+	broker.Start()
+	defer broker.Stop()
+
+	// Must not panic on a missing/unreadable config file.
+	propagateClusterConfig(context.Background(), filepath.Join(t.TempDir(), "missing.toml"), cs, broker)
+
+	if len(remote.received()) != 0 {
+		t.Error("propagation was attempted despite an unreadable config file")
 	}
 }
 

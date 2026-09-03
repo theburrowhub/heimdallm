@@ -1084,6 +1084,29 @@ func TestProxyToSelfIsServedLocally(t *testing.T) {
 	}
 }
 
+// Proxying a stream route must still work end-to-end. httptest's
+// ResponseRecorder cannot support a real write deadline, so this exercises
+// the graceful-fallback branch (log and proceed) rather than the deadline
+// neutralization itself — that mechanism is covered directly by
+// TestStreamResponseWriterBoundsEachWriteAndClearsIdleDeadline against a
+// writer that does support it. What matters here is that wrapping never
+// breaks the proxy response.
+func TestProxyStreamPathStillWorks(t *testing.T) {
+	a := newFakeInstance(t, "srv-a", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(": connected\n\n"))
+	})
+	f := newHub(t, map[string]*fakeInstance{"srv-a": a}, config.RoutingConfig{})
+
+	rec := f.do(t, http.MethodGet, "/instances/srv-a/proxy/events", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("proxy /events = %d: %s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "connected") {
+		t.Errorf("proxy /events body = %q, want the stream's bytes", rec.Body.String())
+	}
+}
+
 func TestProxyReportsUnreachableInstance(t *testing.T) {
 	dead := newFakeInstance(t, "dead", nil)
 	f := newHub(t, map[string]*fakeInstance{"dead": dead}, config.RoutingConfig{})

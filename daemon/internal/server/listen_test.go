@@ -662,6 +662,68 @@ type testListenerAddr string
 func (a testListenerAddr) Network() string { return "tcp" }
 func (a testListenerAddr) String() string  { return string(a) }
 
+// Before registerStream/cancelActiveStreams existed, http.Server.Shutdown had
+// to wait for handleSSE's handler to return on its own — which it never did
+// on a select blocked on the broker channel — so Shutdown hung until the
+// caller's ctx deadline expired ("server shutdown failed: context deadline
+// exceeded" on every restart that had /events open). This proves Shutdown
+// now returns promptly with a real open SSE connection.
+func TestShutdownEndsOpenSSEStreamPromptly(t *testing.T) {
+	srv := newListenTestServer(t)
+	ln, err := server.Listen(0, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Serve(ln) }()
+
+	// Open a real, long-lived GET /events connection and wait for the
+	// preamble so we know the handler is actually blocked in its event loop.
+	respCh := make(chan *http.Response, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		resp, err := http.Get("http://" + addr + "/events")
+		if err != nil {
+			errCh <- err
+			return
+		}
+		respCh <- resp
+	}()
+
+	var resp *http.Response
+	select {
+	case resp = <-respCh:
+	case err := <-errCh:
+		t.Fatalf("GET /events: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("GET /events never got a response")
+	}
+	defer resp.Body.Close()
+	preamble := make([]byte, len(": connected\n\n"))
+	if _, err := io.ReadFull(resp.Body, preamble); err != nil {
+		t.Fatalf("reading SSE preamble: %v", err)
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	start := time.Now()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("Shutdown with an open SSE stream: %v", err)
+	}
+	// The old bug hung for the full shutdown deadline (this test uses 3s to
+	// give it room to fail loudly); the fix returns in well under one.
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("Shutdown took %v with an open SSE stream, want well under 1s", elapsed)
+	}
+
+	select {
+	case <-serveErr:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Serve did not finish after Shutdown")
+	}
+}
+
 func TestShutdownReturnsTrackedListenerCloseError(t *testing.T) {
 	srv := newListenTestServer(t)
 	ln := newSecondCloseErrorListener()
