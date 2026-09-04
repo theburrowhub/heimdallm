@@ -3237,10 +3237,6 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		workerCancel, publishWCancel, triageWCancel, refinementWCancel,
 		implementWCancel, statePollerCancel, stateWCancel,
 	}, exec.TerminateAll, producerSettleDelay)
-	// After the producers, so the advertiser's Run has already returned and
-	// sent its mDNS goodbye. Closing the socket first would swallow it and
-	// leave this daemon in its peers' listings until the record expired.
-	clusterSt.CloseDiscovery()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {

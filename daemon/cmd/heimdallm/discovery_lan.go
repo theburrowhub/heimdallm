@@ -7,15 +7,31 @@ import (
 	"net/netip"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/heimdallm/daemon/internal/config"
 	"github.com/heimdallm/daemon/internal/instances"
 	"github.com/heimdallm/daemon/internal/lan"
 )
 
-// discoverySignature is everything this daemon advertises about itself, plus
-// whether it browses. Update rebuilds the sockets only when this changes, so an
-// unrelated config reload does not tear down and re-join the multicast group.
+// discoveryRetryMin and discoveryRetryMax bound the wait between attempts to
+// join the multicast group.
+//
+// Retrying matters more than it looks. The commonest reason to fail is that the
+// daemon started before the network did — a laptop resuming, a container
+// racing its bridge, a machine booting with a slow DHCP lease. Giving up there
+// would leave discovery dead for the life of the process even though the
+// interface came up two seconds later, and nothing in the config changed to
+// prompt another attempt.
+const (
+	discoveryRetryMin = 5 * time.Second
+	discoveryRetryMax = 2 * time.Minute
+)
+
+// discoverySignature is what this daemon would advertise, and whether it
+// browses. The loops read it to decide what to build; a reload that changes it
+// restarts them (see applyDiscovery).
 type discoverySignature struct {
 	enabled bool
 	hub     bool
@@ -36,62 +52,124 @@ func newDiscoverySignature(cfg *config.Config, port int) discoverySignature {
 	}
 }
 
-// buildLANDiscovery prepares this daemon's mDNS advertiser and, on a hub, its
-// browser. Both are nil when discovery is off, which is the default.
+// discoverySignatureNow reads the current signature.
+func (cs *clusterState) discoverySignatureNow() discoverySignature {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.discoverySig
+}
+
+// RunAdvertiser answers mDNS queries for this daemon until ctx is cancelled.
+// No-op when cluster.discovery is off.
 //
-// A failure to join the multicast group is logged and swallowed rather than
-// fatal. Discovery is a convenience layered on a registry that works without
-// it: a daemon that cannot advertise itself still reviews pull requests, and
-// refusing to start over it would turn a nice-to-have into a single point of
-// failure.
-func buildLANDiscovery(sig discoverySignature) (*lan.Advertiser, *lan.Browser) {
+// The socket is owned by this loop, not by clusterState. That is deliberate:
+// a socket held elsewhere has to be closed by whoever notices the config
+// changed, and on this daemon that happens on the reload goroutine while this
+// loop is still reading — closing a connection out from under it and losing the
+// goodbye. Owning it here means the only thing that ever closes it is the loop
+// that was using it, after Run has returned and its goodbye is on the wire.
+func (cs *clusterState) RunAdvertiser(ctx context.Context) {
+	sig := cs.discoverySignatureNow()
 	if !sig.enabled {
-		return nil, nil
+		return
 	}
 	warnIfDiscoveryIsContainerised()
 
-	advertiser := buildAdvertiser(sig)
-
-	// Only a hub browses. A worker knowing about its peers would be duplicated
-	// effort and a second source of truth for the same question — the same
-	// reason only a hub probes.
-	var browser *lan.Browser
-	if sig.hub {
-		conn, err := lan.MulticastConn(nil)
-		if err != nil {
-			slog.Warn("cluster: mDNS discovery is on but the network could not be browsed",
-				"err", err)
-		} else if b, err := lan.NewBrowser(conn, slog.Default()); err != nil {
-			slog.Warn("cluster: could not start the mDNS browser", "err", err)
-			_ = conn.Close()
-		} else {
-			browser = b
-		}
+	conn, ok := dialMulticast(ctx, "advertise on")
+	if !ok {
+		return
 	}
-	return advertiser, browser
-}
 
-func buildAdvertiser(sig discoverySignature) *lan.Advertiser {
-	conn, err := lan.MulticastConn(nil)
-	if err != nil {
-		slog.Warn("cluster: mDNS discovery is on but this daemon could not be advertised",
-			"err", err)
-		return nil
-	}
 	advertiser, err := lan.NewAdvertiser(conn, lan.Advertisement{
 		InstanceID:   sig.id,
 		InstanceName: sig.name,
 		Role:         sig.role,
 		Version:      version,
 		Port:         sig.port,
-		Addrs:        localAddresses(),
+		Addrs:        localAddresses,
 	}, slog.Default())
 	if err != nil {
+		// Not retried: this is a malformed advertisement, not a network that
+		// is not ready. Waiting will not make the instance id valid.
 		slog.Warn("cluster: could not start advertising on the local network", "err", err)
 		_ = conn.Close()
-		return nil
+		return
 	}
-	return advertiser
+
+	advertiser.Run(ctx)
+	// After Run, so the TTL-0 goodbye it sends on the way out has already been
+	// written rather than racing this close.
+	_ = advertiser.Close()
+}
+
+// RunDiscoverer browses for peers until ctx is cancelled. No-op on a worker, or
+// when discovery is off.
+//
+// The Discoverer itself outlives this loop — the HTTP handler holds it, and its
+// cached view should survive a poller restart — so only the socket is scoped
+// here, handed over with SetBrowser and taken back on the way out.
+func (cs *clusterState) RunDiscoverer(ctx context.Context) {
+	discoverer := cs.Discoverer()
+	if discoverer == nil {
+		return
+	}
+
+	conn, ok := dialMulticast(ctx, "browse")
+	if !ok {
+		return
+	}
+	browser, err := lan.NewBrowser(conn, slog.Default())
+	if err != nil {
+		slog.Warn("cluster: could not start the mDNS browser", "err", err)
+		_ = conn.Close()
+		return
+	}
+
+	discoverer.SetBrowser(browser)
+	defer func() {
+		// Cleared before the socket closes, so a scan triggered by the API
+		// cannot reach a browser whose connection is going away.
+		discoverer.SetBrowser(nil)
+		_ = browser.Close()
+	}()
+	discoverer.Run(ctx)
+}
+
+// dialMulticast joins the mDNS group, retrying with backoff while ctx lives.
+// Reports ok=false only when ctx ended first.
+func dialMulticast(ctx context.Context, purpose string) (lan.PacketConn, bool) {
+	wait := discoveryRetryMin
+	for {
+		if ctx.Err() != nil {
+			return nil, false
+		}
+		conn, err := lan.MulticastConn(nil)
+		if err == nil {
+			return conn, true
+		}
+		slog.Warn("cluster: mDNS discovery is on but this daemon could not "+
+			purpose+" the local network; retrying",
+			"err", err, "retry_in", wait)
+
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, false
+		case <-timer.C:
+		}
+		if wait *= 2; wait > discoveryRetryMax {
+			wait = discoveryRetryMax
+		}
+	}
+}
+
+// Discoverer returns the LAN discoverer, or nil when this daemon is not a hub
+// or discovery is off.
+func (cs *clusterState) Discoverer() *instances.Discoverer {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.discoverer
 }
 
 // effectiveRole is what this daemon calls itself on the wire. An empty role is
@@ -105,11 +183,10 @@ func effectiveRole(cfg *config.Config) string {
 }
 
 // localAddresses lists this machine's usable unicast addresses for the A/AAAA
-// records. Loopback and link-local are skipped: a peer cannot reach us on
-// either, so advertising them would only add noise to the UI.
+// records. Called per response, never cached — see Advertisement.Addrs.
 //
-// These are for display and diagnostics. What a hub actually dials is the
-// hostname, which is the whole point — an address goes stale, a name does not.
+// Loopback and link-local are skipped: a peer cannot reach us on either, so
+// advertising them would only add noise.
 func localAddresses() []netip.Addr {
 	ifaceAddrs, err := net.InterfaceAddrs()
 	if err != nil {
@@ -135,8 +212,13 @@ func localAddresses() []netip.Addr {
 	return out
 }
 
-// warnIfDiscoveryIsContainerised says so once at startup when discovery is on
-// inside a container.
+// containerWarnOnce keeps the container notice to one line per process. It is
+// reachable from every advertiser start, and a daemon whose config is edited a
+// few times should not repeat a paragraph it already printed.
+var containerWarnOnce sync.Once
+
+// warnIfDiscoveryIsContainerised says so once when discovery is on inside a
+// container.
 //
 // mDNS does not cross Docker's default bridge, which is how the daemon is
 // usually deployed — so the most likely outcome of switching discovery on in a
@@ -146,14 +228,16 @@ func localAddresses() []netip.Addr {
 // The check is deliberately coarse: it cannot tell host networking from bridged
 // networking, so it hedges rather than claiming discovery is broken.
 func warnIfDiscoveryIsContainerised() {
-	if !runningInContainer() {
-		return
-	}
-	slog.Warn("cluster: mDNS discovery is on inside a container; " +
-		"it does not cross Docker's default bridge, so unless this container uses " +
-		"host networking this daemon will neither see peers nor be seen. " +
-		"Set HEIMDALLM_CLUSTER_DISCOVERY=off to silence this, or address instances " +
-		"by hostname or a DHCP reservation instead.")
+	containerWarnOnce.Do(func() {
+		if !runningInContainer() {
+			return
+		}
+		slog.Warn("cluster: mDNS discovery is on inside a container; " +
+			"it does not cross Docker's default bridge, so unless this container uses " +
+			"host networking this daemon will neither see peers nor be seen. " +
+			"Set HEIMDALLM_CLUSTER_DISCOVERY=off to silence this, or address instances " +
+			"by hostname or a DHCP reservation instead.")
+	})
 }
 
 // runningInContainer is a best-effort guess, used only to decide whether to
@@ -172,45 +256,10 @@ func runningInContainer() bool {
 		strings.Contains(body, "kubepods")
 }
 
-// RunAdvertiser answers mDNS queries until ctx is cancelled. No-op when
-// discovery is off.
-func (cs *clusterState) RunAdvertiser(ctx context.Context) {
-	cs.mu.RLock()
-	advertiser := cs.advertiser
-	cs.mu.RUnlock()
-	if advertiser == nil {
-		return
-	}
-	advertiser.Run(ctx)
-}
-
-// RunDiscoverer drives the browse loop until ctx is cancelled. No-op on a
-// worker, or when discovery is off.
-func (cs *clusterState) RunDiscoverer(ctx context.Context) {
-	cs.mu.RLock()
-	discoverer := cs.discoverer
-	cs.mu.RUnlock()
-	if discoverer == nil {
-		return
-	}
-	discoverer.Run(ctx)
-}
-
-// Discoverer returns the LAN discoverer, or nil when this daemon is not a hub
-// or discovery is off.
-func (cs *clusterState) Discoverer() *instances.Discoverer {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
-	return cs.discoverer
-}
-
-// closeLANDiscovery releases the multicast sockets. Called on shutdown and
-// whenever a reload replaces them.
-func closeLANDiscovery(advertiser *lan.Advertiser, browser *lan.Browser) {
-	if advertiser != nil {
-		_ = advertiser.Close()
-	}
-	if browser != nil {
-		_ = browser.Close()
-	}
+// containerWarnOnceFired reports whether the container notice has been
+// considered. Test seam: sync.Once exposes no state of its own.
+func containerWarnOnceFired() bool {
+	fired := true
+	containerWarnOnce.Do(func() { fired = false })
+	return fired
 }

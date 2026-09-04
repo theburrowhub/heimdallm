@@ -14,7 +14,6 @@ import (
 
 	"github.com/heimdallm/daemon/internal/config"
 	"github.com/heimdallm/daemon/internal/instances"
-	"github.com/heimdallm/daemon/internal/lan"
 	"github.com/heimdallm/daemon/internal/server"
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
@@ -45,13 +44,13 @@ type clusterState struct {
 	// config.ClusterConfig.TakeoverAfterFailedProbes.
 	takeoverAfterFailedProbes int
 
-	// LAN discovery. All three are nil unless cluster.discovery is on, and
-	// the browser and discoverer are nil unless this daemon is also the hub.
-	// advertiser and browser own multicast sockets, so they are replaced (and
-	// the old ones closed) only when discoverySig changes — an unrelated
-	// config reload must not tear down and re-join the group.
-	advertiser   *lan.Advertiser
-	browser      *lan.Browser
+	// LAN discovery. Both are nil unless cluster.discovery is on, and the
+	// discoverer is nil unless this daemon is also the hub.
+	//
+	// Deliberately no sockets here: those belong to the loops in
+	// discovery_lan.go. A socket owned by this struct would have to be closed
+	// by whoever noticed the config changed, which on this daemon is the reload
+	// goroutine — while the loop using it is still reading.
 	discoverer   *instances.Discoverer
 	discoverySig discoverySignature
 
@@ -340,68 +339,35 @@ func newClusterState(cfg *config.Config, st *store.Store, broker *sse.Broker) *c
 	return cs
 }
 
-// applyDiscovery builds or rebuilds the mDNS pieces for cfg. Caller must not
-// hold cs.mu.
+// applyDiscovery records what discovery should be doing for cfg. Caller must
+// not hold cs.mu.
 //
-// Nothing has to be told to start a loop afterwards: any change to [cluster] or
-// server.port already forces a full poller restart (see
-// configReloadRestartSnapshot), and both discovery loops live on the poller
-// context, so they are torn down and started again with whatever this call
-// installed.
-//
-// The sockets are only touched when the advertisement itself changed. Config
-// reloads are frequent and mostly about other sections; leaving the multicast
-// group and re-joining it on every one of them would make this daemon flicker
-// in and out of its peers' listings for no reason.
+// It only ever touches state, never a socket. Nothing needs to be told to start
+// or stop a loop either: any change to [cluster] or server.port already forces
+// a full poller restart (see configReloadRestartSnapshot), and both discovery
+// loops live on the poller context — so they are torn down, close their own
+// sockets on the way out, and start again reading whatever this recorded.
 func (cs *clusterState) applyDiscovery(cfg *config.Config, registry *instances.Registry) {
 	sig := newDiscoverySignature(cfg, cfg.Server.Port)
 
 	cs.mu.Lock()
-	unchanged := cs.discoverySig == sig
-	if unchanged {
-		discoverer := cs.discoverer
-		cs.mu.Unlock()
-		if discoverer != nil {
-			discoverer.Update(registry, instances.DefaultDiscoveryInterval)
-		}
-		return
-	}
-	oldAdvertiser, oldBrowser := cs.advertiser, cs.browser
-	cs.mu.Unlock()
-
-	// Built outside the lock: joining a multicast group can block, and holding
-	// cs.mu across it would stall every routing decision in the daemon.
-	advertiser, browser := buildLANDiscovery(sig)
-
-	cs.mu.Lock()
 	cs.discoverySig = sig
-	cs.advertiser, cs.browser = advertiser, browser
 	switch {
-	case browser == nil:
+	case !sig.enabled || !sig.hub:
 		cs.discoverer = nil
 	case cs.discoverer == nil:
+		// Built without a browser. RunDiscoverer lends it one for the lifetime
+		// of the loop, so the cached view outlives a poller restart while the
+		// socket does not.
 		cs.discoverer = instances.NewDiscoverer(
-			registry, browser, instances.DefaultDiscoveryInterval, cs.factory)
-	default:
-		cs.discoverer.SetBrowser(browser)
-		cs.discoverer.Update(registry, instances.DefaultDiscoveryInterval)
+			registry, nil, instances.DefaultDiscoveryInterval, cs.factory)
 	}
+	discoverer := cs.discoverer
 	cs.mu.Unlock()
 
-	// Closed after the swap so nothing is left holding a socket we no longer
-	// track. The loops using them live on the poller context and have already
-	// been cancelled by the reload that got us here.
-	closeLANDiscovery(oldAdvertiser, oldBrowser)
-}
-
-// CloseDiscovery releases the multicast sockets on shutdown.
-func (cs *clusterState) CloseDiscovery() {
-	cs.mu.Lock()
-	advertiser, browser := cs.advertiser, cs.browser
-	cs.advertiser, cs.browser, cs.discoverer = nil, nil, nil
-	cs.discoverySig = discoverySignature{}
-	cs.mu.Unlock()
-	closeLANDiscovery(advertiser, browser)
+	if discoverer != nil {
+		discoverer.Update(registry, instances.DefaultDiscoveryInterval)
+	}
 }
 
 // Update swaps in a reloaded config. Called from the same reload path that
