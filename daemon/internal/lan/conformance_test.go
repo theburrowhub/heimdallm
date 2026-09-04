@@ -20,7 +20,7 @@ func TestAccumulatorCapsAddressesPerHost(t *testing.T) {
 	for i := range maxAddrsPerHost * 10 {
 		acc.addAddr("srv-a.local.", net.ParseIP(fmt.Sprintf("10.0.%d.%d", i/256, i%256)), netip.Addr{})
 	}
-	if got := len(acc.addrs[hostKey{netip.Addr{}, "srv-a.local."}]); got > maxAddrsPerHost {
+	if got := len(acc.addrs[recordKey{netip.Addr{}, "srv-a.local."}]); got > maxAddrsPerHost {
 		t.Fatalf("one hostname accumulated %d addresses, above the %d cap",
 			got, maxAddrsPerHost)
 	}
@@ -33,7 +33,7 @@ func TestAccumulatorStillDeduplicatesAddresses(t *testing.T) {
 	for range 5 {
 		acc.addAddr("srv-a.local.", net.ParseIP("10.0.0.11"), netip.Addr{})
 	}
-	if got := len(acc.addrs[hostKey{netip.Addr{}, "srv-a.local."}]); got != 1 {
+	if got := len(acc.addrs[recordKey{netip.Addr{}, "srv-a.local."}]); got != 1 {
 		t.Fatalf("recorded the same address %d times, want 1", got)
 	}
 }
@@ -90,7 +90,7 @@ func TestGoodbyeAlsoDropsTheAddresses(t *testing.T) {
 		A: net.ParseIP("192.168.1.20"),
 	}
 	acc.absorb(pack(t, ptrRR(), srvRR(), txtRR(), addr), owner)
-	if len(acc.addrs[hostKey{owner, "srv-a.local."}]) != 1 {
+	if len(acc.addrs[recordKey{owner, "srv-a.local."}]) != 1 {
 		t.Fatal("the address was not recorded")
 	}
 
@@ -98,7 +98,7 @@ func TestGoodbyeAlsoDropsTheAddresses(t *testing.T) {
 	goodbye.Hdr.Ttl = 0
 	acc.absorb(pack(t, goodbye), owner)
 
-	if got := acc.addrs[hostKey{owner, "srv-a.local."}]; len(got) != 0 {
+	if got := acc.addrs[recordKey{owner, "srv-a.local."}]; len(got) != 0 {
 		t.Fatalf("addresses survived the retraction: %v", got)
 	}
 }
@@ -328,13 +328,13 @@ func TestAForgedGoodbyeCannotStripAPeersAddresses(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			acc := newAccumulator()
 			acc.absorb(pack(t, ptrRR(), srvRR(), txtRR(), addr), owner)
-			if len(acc.addrs[hostKey{owner, "srv-a.local."}]) != 1 {
+			if len(acc.addrs[recordKey{owner, "srv-a.local."}]) != 1 {
 				t.Fatal("the address was not recorded")
 			}
 
 			acc.absorb(pack(t, tt.goodbye()), attacker)
 
-			if got := acc.addrs[hostKey{owner, "srv-a.local."}]; len(got) != 1 {
+			if got := acc.addrs[recordKey{owner, "srv-a.local."}]; len(got) != 1 {
 				t.Fatalf("a stranger's goodbye stripped the addresses: %v", got)
 			}
 			if len(acc.instances) != 1 {
@@ -361,7 +361,7 @@ func TestAnAdvertiserCanWithdrawItsOwnAddresses(t *testing.T) {
 	goodbye.Hdr.Ttl = 0
 	acc.absorb(pack(t, goodbye), owner)
 
-	if got := acc.addrs[hostKey{owner, "srv-a.local."}]; len(got) != 0 {
+	if got := acc.addrs[recordKey{owner, "srv-a.local."}]; len(got) != 0 {
 		t.Fatalf("the advertiser could not withdraw its own addresses: %v", got)
 	}
 }
@@ -405,7 +405,7 @@ func TestOneSenderCannotTouchAnothersAddresses(t *testing.T) {
 		goodbye.Hdr.Ttl = 0
 		acc.absorb(pack(t, goodbye), attacker)
 
-		if got := acc.addrs[hostKey{owner, "srv-a.local."}]; len(got) != 1 {
+		if got := acc.addrs[recordKey{owner, "srv-a.local."}]; len(got) != 1 {
 			t.Fatalf("the victim's addresses were stripped through an "+
 				"attacker-chosen SRV target: %v", got)
 		}
@@ -423,7 +423,7 @@ func TestOneSenderCannotTouchAnothersAddresses(t *testing.T) {
 		goodbye.Hdr.Ttl = 0
 		acc.absorb(pack(t, goodbye), attacker)
 
-		if got := acc.addrs[hostKey{owner, "srv-a.local."}]; len(got) != 1 {
+		if got := acc.addrs[recordKey{owner, "srv-a.local."}]; len(got) != 1 {
 			t.Fatalf("the victim's addresses were stripped by a first-claimer: %v", got)
 		}
 	})
@@ -460,5 +460,54 @@ func TestAPeerCarriesOnlyItsOwnSendersAddresses(t *testing.T) {
 	}
 	if len(peers[0].Addrs) != 1 || peers[0].Addrs[0].String() != "192.168.1.20" {
 		t.Fatalf("Addrs = %v, want just the owner's own", peers[0].Addrs)
+	}
+}
+
+// The window between a legitimate PTR and its SRV: an attacker sending a TTL-0
+// PTR for that instance before the SRV lands used to remove it, because there
+// was no recorded owner yet to compare against. Keying by sender closes the
+// window rather than narrowing it — there is no moment at which the victim's
+// entry is reachable by anyone else.
+func TestAGoodbyeCannotRaceAnAdvertisementThatIsStillArriving(t *testing.T) {
+	owner := netip.MustParseAddr("192.168.1.20")
+	attacker := netip.MustParseAddr("192.168.1.99")
+
+	acc := newAccumulator()
+
+	// The PTR arrives on its own, as a responder splitting its answer would.
+	acc.absorb(pack(t, ptrRR()), owner)
+
+	// The attacker retires it before the SRV has been seen.
+	goodbye := ptrRR()
+	goodbye.Hdr.Ttl = 0
+	acc.absorb(pack(t, goodbye), attacker)
+
+	// The rest of the legitimate advertisement follows.
+	acc.absorb(pack(t, srvRR(), txtRR()), owner)
+
+	peers := acc.peers()
+	if len(peers) != 1 {
+		t.Fatalf("got %d peers: a stranger's goodbye stopped a legitimate "+
+			"advertisement from forming", len(peers))
+	}
+	if peers[0].InstanceID != "srv-a" {
+		t.Fatalf("InstanceID = %q, want srv-a", peers[0].InstanceID)
+	}
+}
+
+// A peer must be one coherent advertisement from one sender. Accepting an SRV
+// from one host and a TXT from another is the shared-state problem again in a
+// different shape.
+func TestAPeerIsNotAssembledFromTwoSenders(t *testing.T) {
+	owner := netip.MustParseAddr("192.168.1.20")
+	attacker := netip.MustParseAddr("192.168.1.99")
+
+	acc := newAccumulator()
+	acc.absorb(pack(t, ptrRR(), srvRR()), owner)
+	// The attacker supplies the missing half.
+	acc.absorb(pack(t, txtRR()), attacker)
+
+	if got := acc.peers(); len(got) != 0 {
+		t.Fatalf("assembled a peer from two senders: %+v", got)
 	}
 }

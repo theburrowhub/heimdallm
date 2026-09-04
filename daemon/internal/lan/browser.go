@@ -153,46 +153,48 @@ func sourceAddr(from net.Addr) netip.Addr {
 
 // accumulator collects records across packets and joins them into peers.
 //
-// Everything an advertiser can influence is keyed by the address it was sent
-// from. That is the design rather than a check: a sender can only ever add to,
-// or withdraw from, its own entries, so there is no shared table for one host
-// on the link to poison on another's behalf. Two rounds of trying to police a
-// global address table with source checks produced a bypass each time — once
-// through an attacker-chosen SRV target naming somebody else's hostname, once
-// through claiming ownership of a name by advertising it first.
+// Every map is keyed by the address the record was sent from. That is the whole
+// security model of this type, and it is structural rather than a check: a
+// sender can only add to, or withdraw from, its own entries, so there is no
+// shared state for one host on the link to poison on another's behalf.
+//
+// It is structural because the alternative was tried. Policing shared tables
+// with source comparisons produced a bypass on every attempt — an
+// attacker-chosen SRV target naming somebody else's host, a hostname claimed by
+// advertising it first, and a TTL-0 PTR arriving before the victim's SRV did,
+// when there was no recorded owner to compare against yet. A check has to
+// anticipate the shape of the attack; a key does not.
+//
+// A peer is therefore one coherent advertisement from one sender: PTR, SRV and
+// TXT all from the same address, or no peer.
 type accumulator struct {
 	// instances are the record names seen in a PTR answer, i.e. the set of
-	// daemons that claim to exist.
-	instances map[string]bool
-	srv       map[string]*dns.SRV
-	txt       map[string][]string
-	source    map[string]netip.Addr // record name -> who advertised it
-
-	// addrs is keyed by (sender, host FQDN), which is what makes address
-	// ownership unforgeable.
-	addrs    map[hostKey][]netip.Addr
-	seenAddr map[addrKey]bool
+	// daemons that claim to exist, scoped to whoever claimed it.
+	instances map[recordKey]bool
+	srv       map[recordKey]*dns.SRV
+	txt       map[recordKey][]string
+	addrs     map[recordKey][]netip.Addr
+	seenAddr  map[addrKey]bool
 }
 
-// hostKey scopes a hostname's addresses to the sender that advertised them.
-type hostKey struct {
+// recordKey scopes a record name to the sender that advertised it.
+type recordKey struct {
 	source netip.Addr
-	host   string
+	name   string
 }
 
 // addrKey identifies one address under one sender's hostname.
 type addrKey struct {
-	host hostKey
+	host recordKey
 	addr netip.Addr
 }
 
 func newAccumulator() *accumulator {
 	return &accumulator{
-		instances: map[string]bool{},
-		srv:       map[string]*dns.SRV{},
-		txt:       map[string][]string{},
-		source:    map[string]netip.Addr{},
-		addrs:     map[hostKey][]netip.Addr{},
+		instances: map[recordKey]bool{},
+		srv:       map[recordKey]*dns.SRV{},
+		txt:       map[recordKey][]string{},
+		addrs:     map[recordKey][]netip.Addr{},
 		seenAddr:  map[addrKey]bool{},
 	}
 }
@@ -210,9 +212,7 @@ func (a *accumulator) absorb(packet []byte, source netip.Addr) {
 	for _, rr := range append(append([]dns.RR{}, msg.Answer...), msg.Extra...) {
 		// TTL 0 is a goodbye: the peer is leaving, so anything already
 		// collected for it is dropped rather than reported as present. Only
-		// this sender's own records, though — a goodbye is as unauthenticated
-		// as everything else here, and without that a single packet would
-		// evict somebody else's daemon from an in-flight browse.
+		// this sender's own records — the key sees to that.
 		if rr.Header().Ttl == 0 {
 			a.forget(rr, source)
 			continue
@@ -220,22 +220,15 @@ func (a *accumulator) absorb(packet []byte, source netip.Addr) {
 		switch rec := rr.(type) {
 		case *dns.PTR:
 			if strings.EqualFold(rec.Hdr.Name, serviceFQDN()) && !a.full() {
-				a.instances[strings.ToLower(rec.Ptr)] = true
+				a.instances[recordKey{source, strings.ToLower(rec.Ptr)}] = true
 			}
 		case *dns.SRV:
 			if !a.full() {
-				name := strings.ToLower(rec.Hdr.Name)
-				a.srv[name] = rec
-				// Remembered per record so a candidate can be required to sit
-				// on the same link as whoever advertised it, and so a goodbye
-				// can be matched against the advertiser.
-				if source.IsValid() {
-					a.source[name] = source
-				}
+				a.srv[recordKey{source, strings.ToLower(rec.Hdr.Name)}] = rec
 			}
 		case *dns.TXT:
 			if !a.full() {
-				a.txt[strings.ToLower(rec.Hdr.Name)] = rec.Txt
+				a.txt[recordKey{source, strings.ToLower(rec.Hdr.Name)}] = rec.Txt
 			}
 		case *dns.A:
 			a.addAddr(rec.Hdr.Name, rec.A, source)
@@ -245,43 +238,31 @@ func (a *accumulator) absorb(packet []byte, source netip.Addr) {
 	}
 }
 
-// forget drops what this sender previously advertised, and only that.
+// forget drops what this sender previously advertised, and only that. There is
+// no ownership check because there is nothing to check: the key already
+// restricts the reach to the sender's own records.
 func (a *accumulator) forget(rr dns.RR, source netip.Addr) {
 	name := strings.ToLower(rr.Header().Name)
 	switch rec := rr.(type) {
 	case *dns.PTR:
-		a.retract(strings.ToLower(rec.Ptr), source)
+		a.retract(recordKey{source, strings.ToLower(rec.Ptr)})
 	case *dns.A, *dns.AAAA:
-		// Only ever this sender's copy: the key includes the sender, so there
-		// is nothing else here to withdraw.
-		a.dropAddrs(hostKey{source, name})
+		a.dropAddrs(recordKey{source, name})
 	default:
-		a.retract(name, source)
+		a.retract(recordKey{source, name})
 	}
 }
 
-// retract drops a record name, but only for the sender that advertised it.
-//
-// A name nobody has advertised yet is left alone rather than pre-emptively
-// blocked: there is nothing to protect and no claim to compare against.
-func (a *accumulator) retract(name string, source netip.Addr) {
-	advertiser, known := a.source[name]
-	if known && source.IsValid() && advertiser.IsValid() && advertiser != source {
-		return // somebody else's daemon; not this sender's to retire
+func (a *accumulator) retract(key recordKey) {
+	if srv, ok := a.srv[key]; ok {
+		a.dropAddrs(recordKey{key.source, strings.ToLower(srv.Target)})
 	}
-	if srv, ok := a.srv[name]; ok {
-		// This sender's copy of the target's addresses. An attacker naming
-		// somebody else's hostname as their SRV target reaches only their own
-		// entry, because the key carries their address.
-		a.dropAddrs(hostKey{source, strings.ToLower(srv.Target)})
-	}
-	delete(a.instances, name)
-	delete(a.srv, name)
-	delete(a.txt, name)
-	delete(a.source, name)
+	delete(a.instances, key)
+	delete(a.srv, key)
+	delete(a.txt, key)
 }
 
-func (a *accumulator) dropAddrs(key hostKey) {
+func (a *accumulator) dropAddrs(key recordKey) {
 	for _, addr := range a.addrs[key] {
 		delete(a.seenAddr, addrKey{key, addr})
 	}
@@ -303,7 +284,7 @@ func (a *accumulator) addAddr(host string, ip net.IP, source netip.Addr) {
 		return
 	}
 	addr = addr.Unmap()
-	key := hostKey{source, strings.ToLower(host)}
+	key := recordKey{source, strings.ToLower(host)}
 	if _, known := a.addrs[key]; !known && len(a.addrs) >= maxRecordNames {
 		return
 	}
@@ -319,14 +300,17 @@ func (a *accumulator) addAddr(host string, ip net.IP, source netip.Addr) {
 	a.addrs[key] = append(a.addrs[key], addr)
 }
 
-// peers joins the collected records. An instance is only reported when it has
-// both an SRV (somewhere to connect) and a TXT (something to identify it);
-// either alone is an incomplete response we would only have to discard later.
+// peers joins the collected records.
+//
+// An instance is only reported when one sender supplied both an SRV (somewhere
+// to connect) and a TXT (something to identify it). Either alone is an
+// incomplete response, and accepting them from different senders would be the
+// shared-state problem again in another form.
 func (a *accumulator) peers() []Peer {
 	out := make([]Peer, 0, len(a.instances))
-	for name := range a.instances {
-		srv, hasSRV := a.srv[name]
-		txt, hasTXT := a.txt[name]
+	for key := range a.instances {
+		srv, hasSRV := a.srv[key]
+		txt, hasTXT := a.txt[key]
 		if !hasSRV || !hasTXT {
 			continue
 		}
@@ -336,11 +320,8 @@ func (a *accumulator) peers() []Peer {
 		}
 		peer.Hostname = strings.TrimSuffix(srv.Target, ".")
 		peer.Port = int(srv.Port)
-		peer.Source = a.source[name]
-		// The addresses this same sender published for its own SRV target.
-		// Reading a shared host table here is what let one advertiser supply
-		// another's addresses.
-		peer.Addrs = a.addrs[hostKey{peer.Source, strings.ToLower(srv.Target)}]
+		peer.Source = key.source
+		peer.Addrs = a.addrs[recordKey{key.source, strings.ToLower(srv.Target)}]
 		if peer.Scheme == "" {
 			peer.Scheme = "http"
 		}
