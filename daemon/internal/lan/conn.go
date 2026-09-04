@@ -48,6 +48,10 @@ func MulticastConn(iface *net.Interface) (PacketConn, error) {
 type memConn struct {
 	name string
 	in   chan memPacket
+	// done is closed by Close. Closing `in` instead would make a write from
+	// the other end panic, where a real socket returns an error — and the
+	// loops' whole error handling is built on getting an error.
+	done chan struct{}
 	peer *memConn
 
 	mu       sync.Mutex
@@ -76,10 +80,16 @@ func (a memAddr) String() string  { return string(a) }
 // on an unread response.
 func NewMemConn() (PacketConn, PacketConn) {
 	const buffer = 64
-	a := &memConn{name: "a", in: make(chan memPacket, buffer)}
-	b := &memConn{name: "b", in: make(chan memPacket, buffer)}
+	a := &memConn{name: "a", in: make(chan memPacket, buffer), done: make(chan struct{})}
+	b := &memConn{name: "b", in: make(chan memPacket, buffer), done: make(chan struct{})}
 	a.peer, b.peer = b, a
 	return a, b
+}
+
+func (c *memConn) isClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
 }
 
 func (c *memConn) ReadFrom(b []byte) (int, net.Addr, error) {
@@ -99,22 +109,23 @@ func (c *memConn) ReadFrom(b []byte) (int, net.Addr, error) {
 	}
 
 	select {
-	case pkt, ok := <-c.in:
-		if !ok {
-			return 0, nil, net.ErrClosed
-		}
+	case pkt := <-c.in:
 		n := copy(b, pkt.data)
 		return n, pkt.from, nil
+	case <-c.done:
+		return 0, nil, net.ErrClosed
 	case <-timeout:
 		return 0, nil, timeoutError{}
 	}
 }
 
 func (c *memConn) WriteTo(b []byte, _ net.Addr) (int, error) {
-	c.mu.Lock()
-	closed := c.closed
-	c.mu.Unlock()
-	if closed {
+	if c.isClosed() {
+		return 0, net.ErrClosed
+	}
+	// A closed peer is reported the way a real socket reports an unreachable
+	// destination: an error, not a panic.
+	if c.peer.isClosed() {
 		return 0, net.ErrClosed
 	}
 	// Copy: the caller owns b and is free to reuse it for the next packet.
@@ -122,6 +133,8 @@ func (c *memConn) WriteTo(b []byte, _ net.Addr) (int, error) {
 	copy(data, b)
 	select {
 	case c.peer.in <- memPacket{data: data, from: memAddr(c.name)}:
+	case <-c.peer.done:
+		return 0, net.ErrClosed
 	default:
 	}
 	return len(b), nil
@@ -136,12 +149,13 @@ func (c *memConn) SetReadDeadline(t time.Time) error {
 
 func (c *memConn) Close() error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.closed {
+		c.mu.Unlock()
 		return nil
 	}
 	c.closed = true
-	close(c.in)
+	c.mu.Unlock()
+	close(c.done)
 	return nil
 }
 

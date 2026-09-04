@@ -260,6 +260,12 @@ func runWithMulticast(ctx context.Context, p retryPolicy, purpose string, use fu
 	wait := p.min
 	for ctx.Err() == nil {
 		conn, err := p.dial()
+		// A dialler that reports neither a connection nor a failure would be a
+		// nil dereference two lines down. Nothing in production does that, and
+		// a panic in a background loop is too expensive to leave to trust.
+		if err == nil && conn == nil {
+			err = errors.New("the dialler returned no connection and no error")
+		}
 		if err != nil {
 			slog.Warn("cluster: mDNS discovery is on but this daemon could not "+
 				purpose+" the local network; retrying",

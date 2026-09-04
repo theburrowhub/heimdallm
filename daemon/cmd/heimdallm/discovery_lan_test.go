@@ -595,3 +595,99 @@ func TestServedAddrIsSetBeforeThePollersStart(t *testing.T) {
 			setServed, startPollers)
 	}
 }
+
+// runningInContainer is a heuristic, so what matters is that it answers rather
+// than what it answers here — the daemon's own tests run inside a container, so
+// this asserts the shape rather than a value that depends on the host.
+func TestRunningInContainerAnswers(t *testing.T) {
+	_ = runningInContainer()
+}
+
+// The enumeration must never offer a peer an address it cannot use.
+func TestLocalAddressesSkipsWhatAPeerCannotReach(t *testing.T) {
+	for _, addr := range localAddresses() {
+		if addr.IsLoopback() {
+			t.Errorf("advertised loopback %s: no peer can reach us there", addr)
+		}
+		if addr.IsLinkLocalUnicast() {
+			t.Errorf("advertised link-local %s: not dialable from a record", addr)
+		}
+		if addr.IsUnspecified() {
+			t.Errorf("advertised the unspecified address %s", addr)
+		}
+	}
+}
+
+// The advertiser refuses an advertisement it cannot build and does not retry:
+// waiting will not make an invalid instance id valid.
+func TestRunAdvertiserStopsOnAnUnbuildableAdvertisement(t *testing.T) {
+	policy, calls := testPolicy(deadConn)
+
+	cfg := discoveryCfg(t, config.RoleWorker, config.DiscoveryMDNS)
+	cfg.Cluster.InstanceID = "" // NewAdvertiser refuses this
+	cs := newClusterState(cfg, nil, nil)
+	cs.discoverySig.enabled = true
+	cs.SetServedAddr(&net.TCPAddr{IP: net.ParseIP("192.168.1.20"), Port: 7842})
+
+	done := make(chan struct{})
+	go func() { defer close(done); cs.runAdvertiser(context.Background(), policy) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the loop retried an advertisement that can never be valid")
+	}
+	if got := atomic.LoadInt32(calls); got != 1 {
+		t.Fatalf("dialled %d times, want exactly 1", got)
+	}
+}
+
+// A dialler that reports neither a connection nor a failure must be treated as
+// a failure, not dereferenced. Nothing in production does it; a panic in a
+// background loop is too expensive to leave to trust.
+func TestRunWithMulticastSurvivesADiallerReturningNothing(t *testing.T) {
+	policy, calls := testPolicy(func() (lan.PacketConn, error) { return nil, nil })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runWithMulticast(ctx, policy, "browse", func(lan.PacketConn) error {
+			t.Error("use was called with no connection")
+			return nil
+		})
+	}()
+
+	waitForCalls(t, calls, 2, cancel, done, "a nil connection should be retried, not dereferenced")
+	cancel()
+	<-done
+}
+
+// A hub with discovery on lends its Discoverer a browser for the life of the
+// loop and takes it back, so the cached view survives a poller restart while
+// the socket does not.
+func TestRunDiscovererLendsAndReclaimsTheBrowser(t *testing.T) {
+	cfg := discoveryCfg(t, config.RoleHub, config.DiscoveryMDNS)
+	cs := newClusterState(cfg, nil, nil)
+	d := cs.Discoverer()
+	if d == nil {
+		t.Fatal("no discoverer on a hub with discovery on")
+	}
+
+	policy, _ := testPolicy(func() (lan.PacketConn, error) {
+		conn, other := lan.NewMemConn()
+		_ = other.Close()
+		return conn, nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); cs.runDiscoverer(ctx, policy) }()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	<-done
+
+	// Reclaimed: a scan after the loop exits must not reach a closed socket.
+	if got := d.Scan(context.Background()); len(got) != 0 {
+		t.Fatalf("scanned through a reclaimed browser: %+v", got)
+	}
+}

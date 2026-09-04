@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -93,19 +94,28 @@ func newDiscoveryHTTPClient(addrs []netip.Addr, port int) *http.Client {
 		},
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
-				// Every advertised address is tried, so a dual-homed peer whose
-				// first address is unreachable from here still verifies.
+				if len(addrs) == 0 {
+					return nil, errors.New("instances: the peer advertised no usable address")
+				}
+				// Each address gets its own slice of the budget. Without that,
+				// an address that swallows connections rather than refusing
+				// them — trivial for an advertiser to publish — would consume
+				// the whole verification timeout and the peer's working
+				// address would never be tried.
+				share := perAddressDialTimeout(ctx, len(addrs))
 				var lastErr error
 				for _, addr := range addrs {
+					attemptCtx, cancel := context.WithTimeout(ctx, share)
 					target := net.JoinHostPort(addr.String(), strconv.Itoa(port))
-					conn, err := dialer.DialContext(ctx, network, target)
+					conn, err := dialer.DialContext(attemptCtx, network, target)
+					cancel()
 					if err == nil {
 						return conn, nil
 					}
 					lastErr = err
-				}
-				if lastErr == nil {
-					lastErr = errors.New("no advertised address was usable")
+					if ctx.Err() != nil {
+						break
+					}
 				}
 				return nil, lastErr
 			},
@@ -156,6 +166,22 @@ type Discoverer struct {
 	lastScan   time.Time
 }
 
+// perAddressDialTimeout splits whatever budget is left between the addresses
+// still to try, with a floor so a tight deadline does not make every attempt
+// fail instantly.
+func perAddressDialTimeout(ctx context.Context, n int) time.Duration {
+	const floor = 500 * time.Millisecond
+	deadline, ok := ctx.Deadline()
+	if !ok || n <= 0 {
+		return discoveryVerifyTimeout
+	}
+	share := time.Until(deadline) / time.Duration(n)
+	if share < floor {
+		return floor
+	}
+	return share
+}
+
 // NewDiscoverer builds a Discoverer. A nil browser makes every method a no-op,
 // which is what a daemon with discovery switched off gets.
 //
@@ -197,13 +223,26 @@ func (d *Discoverer) Update(reg *Registry, interval time.Duration) {
 func (d *Discoverer) SetBrowser(b PeerBrowser) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	// A typed nil pointer in a non-nil interface would defeat every nil check
-	// in this file, so an unusable browser is normalised to a true nil.
-	if b == nil {
+	// Normalised to a true nil, and reflect is needed to do it: an interface
+	// holding a nil pointer is itself non-nil, so `b == nil` would let one
+	// through and every later nil check in this file would pass on something
+	// that panics when called.
+	if b == nil || isNilPointer(b) {
 		d.browser = nil
 		return
 	}
 	d.browser = b
+}
+
+// isNilPointer reports whether v is an interface wrapping a nil pointer.
+func isNilPointer(v any) bool {
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Ptr, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan, reflect.Interface:
+		return rv.IsNil()
+	default:
+		return false
+	}
 }
 
 // Candidates returns the current view.
