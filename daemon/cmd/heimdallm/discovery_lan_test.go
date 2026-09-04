@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -95,7 +96,7 @@ func TestApplyDiscoveryFollowsTheConfigBothWays(t *testing.T) {
 // applyDiscovery must never touch a socket: it runs synchronously on the reload
 // path while the previous loops are still live, so anything it closed would be
 // closed out from under a running read.
-func TestApplyDiscoveryRecordsTheAdvertisedSignature(t *testing.T) {
+func TestApplyDiscoveryRecordsTheAdvertisedIdentity(t *testing.T) {
 	cfg := discoveryCfg(t, config.RoleWorker, config.DiscoveryMDNS)
 	cs := newClusterState(cfg, nil, nil)
 
@@ -103,11 +104,101 @@ func TestApplyDiscoveryRecordsTheAdvertisedSignature(t *testing.T) {
 	if !sig.enabled || sig.hub {
 		t.Fatalf("signature = %+v, want enabled and not a hub", sig)
 	}
-	if sig.id != "hub-1" || sig.name != "Local hub" || sig.port != 7842 {
-		t.Fatalf("signature = %+v, want the daemon's identity and port", sig)
+	if sig.id != "hub-1" || sig.name != "Local hub" {
+		t.Fatalf("signature = %+v, want the daemon's identity", sig)
 	}
 	if sig.role != config.RoleWorker {
 		t.Fatalf("role = %q, want %q", sig.role, config.RoleWorker)
+	}
+}
+
+// The advertised port comes from the bound listener, never from config.toml.
+// The listener is bound once at startup and no reload rebinds it, so a live
+// edit of server.port would otherwise have the daemon advertising a port
+// nothing is listening on.
+func TestAdvertisedPortComesFromTheListenerNotTheConfig(t *testing.T) {
+	cfg := discoveryCfg(t, config.RoleWorker, config.DiscoveryMDNS)
+	cs := newClusterState(cfg, nil, nil)
+	cs.SetServedAddr(&net.TCPAddr{IP: net.ParseIP("192.168.1.20"), Port: 7842})
+
+	// The operator edits the port; the listener does not move.
+	cfg.Server.Port = 9000
+	cs.Update(cfg)
+
+	if got := cs.servedAddr(); got == nil || got.Port != 7842 {
+		t.Fatalf("served addr = %v, want the bound port 7842", got)
+	}
+}
+
+// A daemon that only listens on loopback cannot be reached by any peer, and
+// bind_addr defaults to 127.0.0.1. Advertising anyway is worse than staying
+// quiet: the hub only offers peers it has already reached over HTTP, so the
+// machine would simply never appear, with nothing to explain why.
+func TestServedReachableFromLAN(t *testing.T) {
+	tests := []struct {
+		name string
+		addr *net.TCPAddr
+		want bool
+	}{
+		{"the default bind", &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 7842}, false},
+		{"ipv6 loopback", &net.TCPAddr{IP: net.ParseIP("::1"), Port: 7842}, false},
+		{"a LAN address", &net.TCPAddr{IP: net.ParseIP("192.168.1.20"), Port: 7842}, true},
+		{"all interfaces", &net.TCPAddr{IP: net.ParseIP("0.0.0.0"), Port: 7842}, true},
+		{"all interfaces v6", &net.TCPAddr{IP: net.ParseIP("::"), Port: 7842}, true},
+		{"no address at all", &net.TCPAddr{Port: 7842}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := servedReachableFromLAN(tt.addr); got != tt.want {
+				t.Fatalf("servedReachableFromLAN(%v) = %v, want %v", tt.addr, got, tt.want)
+			}
+		})
+	}
+}
+
+// Same rule, end to end: the advertiser declines rather than publishing an
+// address the server will refuse.
+func TestRunAdvertiserDeclinesALoopbackOnlyDaemon(t *testing.T) {
+	calls := stubDial(t, func() (lan.PacketConn, error) {
+		t.Error("dialled the multicast group despite a loopback-only bind")
+		return nil, errors.New("should not be reached")
+	})
+
+	cfg := discoveryCfg(t, config.RoleWorker, config.DiscoveryMDNS)
+	cs := newClusterState(cfg, nil, nil)
+	cs.SetServedAddr(&net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 7842})
+
+	done := make(chan struct{})
+	go func() { defer close(done); cs.RunAdvertiser(context.Background()) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunAdvertiser did not return on a loopback-only bind")
+	}
+	if got := atomic.LoadInt32(calls); got != 0 {
+		t.Fatalf("dialled %d times, want 0", got)
+	}
+}
+
+// And it declines before the listener's address is known, rather than guessing.
+func TestRunAdvertiserWaitsForTheServedAddress(t *testing.T) {
+	calls := stubDial(t, func() (lan.PacketConn, error) {
+		t.Error("dialled the multicast group with no served address")
+		return nil, errors.New("should not be reached")
+	})
+
+	cfg := discoveryCfg(t, config.RoleWorker, config.DiscoveryMDNS)
+	cs := newClusterState(cfg, nil, nil)
+
+	done := make(chan struct{})
+	go func() { defer close(done); cs.RunAdvertiser(context.Background()) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunAdvertiser did not return without a served address")
+	}
+	if got := atomic.LoadInt32(calls); got != 0 {
+		t.Fatalf("dialled %d times, want 0", got)
 	}
 }
 
@@ -129,6 +220,7 @@ func TestEffectiveRoleResolvesEmptyToStandalone(t *testing.T) {
 func TestRunLoopsReturnOnACancelledContext(t *testing.T) {
 	cfg := discoveryCfg(t, config.RoleHub, config.DiscoveryMDNS)
 	cs := newClusterState(cfg, nil, nil)
+	cs.SetServedAddr(&net.TCPAddr{IP: net.ParseIP("192.168.1.20"), Port: 7842})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -178,7 +270,7 @@ func stubDial(t *testing.T, dial func() (lan.PacketConn, error)) *int32 {
 	t.Helper()
 	var calls int32
 	realDial, realMin, realMax := dialMulticastGroup, discoveryRetryMin, discoveryRetryMax
-	discoveryRetryMin, discoveryRetryMax = time.Millisecond, 4*time.Millisecond
+	discoveryRetryMin, discoveryRetryMax = time.Millisecond, 200*time.Millisecond
 	dialMulticastGroup = func() (lan.PacketConn, error) {
 		atomic.AddInt32(&calls, 1)
 		return dial()
@@ -286,13 +378,40 @@ func TestRunWithMulticastStopsOnANonRetryableFailure(t *testing.T) {
 	}
 }
 
-// The backoff must not keep growing across a working stretch: a laptop that
-// discovered fine for hours and then slept should reconnect in seconds, not
-// after the two-minute ceiling.
-func TestRunWithMulticastResetsBackoffAfterASuccessfulDial(t *testing.T) {
-	var waits []time.Duration
-	var mu sync.Mutex
+// waitRecorder times the gap between one use() returning and the next one
+// starting — which is the backoff and nothing else. Timing across use() itself
+// would fold in whatever the body does and drown the signal; that is what made
+// the first version of this test unable to fail.
+type waitRecorder struct {
+	mu       sync.Mutex
+	lastExit time.Time
+	waits    []time.Duration
+}
 
+func (w *waitRecorder) enter() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.lastExit.IsZero() {
+		w.waits = append(w.waits, time.Since(w.lastExit))
+	}
+}
+
+func (w *waitRecorder) exit() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.lastExit = time.Now()
+}
+
+func (w *waitRecorder) observed() []time.Duration {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]time.Duration(nil), w.waits...)
+}
+
+// runUntilReconnects drives runWithMulticast until it has redialled n times.
+func runUntilReconnects(t *testing.T, n int32, body func(*waitRecorder) time.Duration) []time.Duration {
+	t.Helper()
+	rec := &waitRecorder{}
 	calls := stubDial(t, func() (lan.PacketConn, error) {
 		conn, other := lan.NewMemConn()
 		_ = other.Close()
@@ -303,38 +422,71 @@ func TestRunWithMulticastResetsBackoffAfterASuccessfulDial(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		last := time.Now()
-		runWithMulticast(ctx, "browse", func(conn lan.PacketConn) error {
-			mu.Lock()
-			waits = append(waits, time.Since(last))
-			mu.Unlock()
-			last = time.Now()
-			return conn.Close()
+		runWithMulticast(ctx, "browse", func(lan.PacketConn) error {
+			rec.enter()
+			if hold := body(rec); hold > 0 {
+				time.Sleep(hold)
+			}
+			rec.exit()
+			return nil
 		})
 	}()
 
-	deadline := time.After(5 * time.Second)
-	for atomic.LoadInt32(calls) < 6 {
+	deadline := time.After(20 * time.Second)
+	for atomic.LoadInt32(calls) < n {
 		select {
 		case <-deadline:
 			cancel()
 			<-done
-			t.Fatal("not enough reconnects observed")
+			t.Fatalf("only %d reconnects observed, wanted %d", atomic.LoadInt32(calls), n)
 		case <-time.After(time.Millisecond):
 		}
 	}
 	cancel()
 	<-done
+	return rec.observed()
+}
 
-	// With the reset, every gap is one discoveryRetryMin. Without it they would
-	// double until the ceiling, so the last gap would dwarf the first.
-	mu.Lock()
-	defer mu.Unlock()
+// A socket that dies the instant it is created — an interface with no
+// multicast route, a bridged container, a firewalled group — must not retry at
+// the floor forever. The ceiling exists for exactly that case.
+func TestRunWithMulticastBacksOffWhenTheSocketNeverWorks(t *testing.T) {
+	waits := runUntilReconnects(t, 6, func(*waitRecorder) time.Duration { return 0 })
+
 	if len(waits) < 4 {
-		t.Fatalf("only %d intervals observed", len(waits))
+		t.Fatalf("only %d waits observed", len(waits))
 	}
-	if waits[len(waits)-1] > 20*discoveryRetryMax {
-		t.Fatalf("gaps grew across successful dials (%v); backoff was not reset", waits)
+	// The waits must climb towards the ceiling. Keyed wrongly on a successful
+	// dial, every one of them would be the floor.
+	if last := waits[len(waits)-1]; last < 8*discoveryRetryMin {
+		t.Fatalf("waits stayed at the floor (%v); a socket that never works "+
+			"is retrying forever without backing off", waits)
+	}
+}
+
+// The other half of the same rule: a connection that genuinely worked clears
+// the previous failure, so a laptop resuming after hours asleep reconnects at
+// the floor rather than at the ceiling.
+func TestRunWithMulticastResetsBackoffAfterAConnectionThatLasted(t *testing.T) {
+	realEstablished := discoveryConnectionEstablished
+	discoveryConnectionEstablished = 5 * time.Millisecond
+	t.Cleanup(func() { discoveryConnectionEstablished = realEstablished })
+
+	// Each connection outlasts the threshold, so every reconnect counts as
+	// "it worked" and the wait must go back to the floor every time.
+	waits := runUntilReconnects(t, 6, func(*waitRecorder) time.Duration {
+		return 10 * time.Millisecond
+	})
+
+	if len(waits) < 4 {
+		t.Fatalf("only %d waits observed", len(waits))
+	}
+	for i, w := range waits {
+		if w > 8*discoveryRetryMin {
+			t.Fatalf("wait %d was %v, far above the floor %v: the backoff was "+
+				"not reset after a connection that lasted (all: %v)",
+				i, w, discoveryRetryMin, waits)
+		}
 	}
 }
 
@@ -345,7 +497,7 @@ func TestContainerWarningIsPrintedAtMostOnce(t *testing.T) {
 	warnIfDiscoveryIsContainerised()
 	// sync.Once is the guarantee; this asserts it is wired and does not panic
 	// on repeat, which is what the reload path does to it.
-	if !containerWarnOnceFired() {
-		t.Fatal("the once was never armed")
+	if !containerWarnEvaluated.Load() {
+		t.Fatal("the once was never evaluated")
 	}
 }

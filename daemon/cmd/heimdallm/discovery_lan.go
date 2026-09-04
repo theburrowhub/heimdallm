@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/heimdallm/daemon/internal/config"
@@ -30,29 +31,61 @@ import (
 var (
 	discoveryRetryMin = 5 * time.Second
 	discoveryRetryMax = 2 * time.Minute
+
+	// discoveryConnectionEstablished is how long a connection has to last
+	// before it counts as having worked. Past this, the previous failure is
+	// stale and the backoff starts over — so a laptop that discovered fine for
+	// hours and then slept reconnects in seconds rather than at the ceiling.
+	// Short of it, the socket never really worked and the backoff keeps
+	// climbing.
+	discoveryConnectionEstablished = 30 * time.Second
 )
 
-// discoverySignature is what this daemon would advertise, and whether it
-// browses. The loops read it to decide what to build; a reload that changes it
-// restarts them (see applyDiscovery).
+// discoverySignature is the identity this daemon would advertise, and whether
+// it browses. The loops read it to decide what to build; a reload that changes
+// it restarts them (see applyDiscovery).
+//
+// Deliberately no port. server.port is what the operator asked for, not
+// necessarily what is being served: the HTTP listener is bound once at startup
+// and no reload rebinds it, so a live edit from 7842 to 9000 would otherwise
+// have this daemon advertising a port nothing is listening on. The address
+// actually served is tracked separately, in clusterState.served.
 type discoverySignature struct {
 	enabled bool
 	hub     bool
 	id      string
 	name    string
 	role    string
-	port    int
 }
 
-func newDiscoverySignature(cfg *config.Config, port int) discoverySignature {
+func newDiscoverySignature(cfg *config.Config) discoverySignature {
 	return discoverySignature{
 		enabled: cfg.DiscoveryEnabled(),
 		hub:     cfg.IsHub(),
 		id:      cfg.Cluster.InstanceID,
 		name:    resolvedSelfName(cfg),
 		role:    effectiveRole(cfg),
-		port:    port,
 	}
+}
+
+// SetServedAddr records where the HTTP server is actually listening. Called
+// once at startup with the bound listener's own address, so discovery
+// advertises what a peer can really connect to rather than what config.toml
+// asked for.
+func (cs *clusterState) SetServedAddr(addr net.Addr) {
+	tcp, ok := addr.(*net.TCPAddr)
+	if !ok {
+		return
+	}
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.served = tcp
+}
+
+func (cs *clusterState) servedAddr() *net.TCPAddr {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.served
 }
 
 // discoverySignatureNow reads the current signature.
@@ -85,6 +118,25 @@ func (cs *clusterState) RunAdvertiser(ctx context.Context) {
 	if !sig.enabled {
 		return
 	}
+
+	// Nothing is advertised until we know where the server actually answers.
+	// Publishing a guess would be worse than publishing nothing: a hub only
+	// ever offers a peer it has already reached over HTTP, so an address the
+	// server refuses does not produce an error anyone sees — the machine just
+	// never appears, with nothing to explain why.
+	served := cs.servedAddr()
+	if served == nil {
+		slog.Warn("cluster: not advertising on the local network: " +
+			"the HTTP listener's address is not known yet")
+		return
+	}
+	if !servedReachableFromLAN(served) {
+		slog.Warn("cluster: not advertising on the local network: the daemon "+
+			"only listens on a loopback address, so no peer could reach it. "+
+			"Set server.bind_addr to a LAN address (or 0.0.0.0) to be discoverable.",
+			"bind_addr", served.IP.String(), "port", served.Port)
+		return
+	}
 	warnIfDiscoveryIsContainerised()
 
 	runWithMulticast(ctx, "advertise on", func(conn lan.PacketConn) error {
@@ -93,7 +145,7 @@ func (cs *clusterState) RunAdvertiser(ctx context.Context) {
 			InstanceName: sig.name,
 			Role:         sig.role,
 			Version:      version,
-			Port:         sig.port,
+			Port:         served.Port,
 			Addrs:        localAddresses,
 		}, slog.Default())
 		if err != nil {
@@ -101,11 +153,29 @@ func (cs *clusterState) RunAdvertiser(ctx context.Context) {
 			slog.Warn("cluster: could not start advertising on the local network", "err", err)
 			return errNotRetryable
 		}
+		// Run sends its TTL-0 goodbye before returning, and runWithMulticast
+		// closes the connection only after that — so the goodbye is on the
+		// wire rather than racing the close.
 		advertiser.Run(ctx)
-		// After Run, so the TTL-0 goodbye it sends on the way out has already
-		// been written rather than racing this close.
-		return advertiser.Close()
+		return nil
 	})
+}
+
+// servedReachableFromLAN reports whether a peer could connect to this address.
+// A loopback bind cannot be reached from another machine, and 0.0.0.0 / :: mean
+// every interface, which is exactly what discovery wants.
+func servedReachableFromLAN(addr *net.TCPAddr) bool {
+	ip, ok := netip.AddrFromSlice(addr.IP)
+	if !ok {
+		// No IP at all is how a wildcard listener reports itself on some
+		// platforms; treat it as "all interfaces" rather than refusing.
+		return len(addr.IP) == 0
+	}
+	ip = ip.Unmap()
+	if ip.IsUnspecified() {
+		return true
+	}
+	return !ip.IsLoopback()
 }
 
 // RunDiscoverer browses for peers until ctx is cancelled. No-op on a worker, or
@@ -127,19 +197,17 @@ func (cs *clusterState) RunDiscoverer(ctx context.Context) {
 			return errNotRetryable
 		}
 		discoverer.SetBrowser(browser)
-		defer func() {
-			// Cleared before the socket closes, so a scan triggered by the API
-			// cannot reach a browser whose connection is going away.
-			discoverer.SetBrowser(nil)
-			_ = browser.Close()
-		}()
+		// Cleared before runWithMulticast closes the socket, so a scan
+		// triggered by the API cannot reach a browser whose connection is
+		// going away.
+		defer discoverer.SetBrowser(nil)
 		discoverer.Run(ctx)
 		return nil
 	})
 }
 
 // runWithMulticast keeps a socket under use for as long as ctx lives: it dials,
-// hands the connection to use, and dials again when use returns.
+// hands the connection to use, closes it when use returns, and dials again.
 //
 // Redialling matters as much as the first attempt. A socket can fail before it
 // is ever obtained — a daemon that started before its network did, which is a
@@ -151,8 +219,9 @@ func (cs *clusterState) RunDiscoverer(ctx context.Context) {
 // prompt another attempt — and a laptop is exactly the machine this feature
 // exists for.
 //
-// The backoff means a permanently broken network costs one attempt every two
-// minutes rather than a spin.
+// runWithMulticast owns the connection throughout, including on the
+// non-retryable path. use is never responsible for closing it, so no branch can
+// return early and strand a joined multicast socket for the life of the daemon.
 func runWithMulticast(ctx context.Context, purpose string, use func(lan.PacketConn) error) {
 	wait := discoveryRetryMin
 	for ctx.Err() == nil {
@@ -168,19 +237,27 @@ func runWithMulticast(ctx context.Context, purpose string, use func(lan.PacketCo
 			continue
 		}
 
-		// A connection that lasted is not evidence the next one will, but it
-		// does mean the last failure is stale: start over from the short wait
-		// so a resume after hours of sleep is picked up in seconds.
-		wait = discoveryRetryMin
+		start := time.Now()
+		useErr := use(conn)
+		lasted := time.Since(start)
+		_ = conn.Close()
 
-		if err := use(conn); errors.Is(err, errNotRetryable) {
+		if errors.Is(useErr, errNotRetryable) || ctx.Err() != nil {
 			return
 		}
-		if ctx.Err() != nil {
-			return
+
+		// The reset is gated on the connection having actually lasted, not on
+		// the dial having succeeded. Joining the group can succeed on an
+		// interface with no multicast route, in a bridged container, or on a
+		// firewalled group — where the socket is unusable the moment it exists.
+		// Resetting on dial alone would retry that forever at the floor and the
+		// ceiling would never engage, which is precisely the case the redial
+		// was added for.
+		if lasted >= discoveryConnectionEstablished {
+			wait = discoveryRetryMin
 		}
 		slog.Info("cluster: mDNS "+purpose+" the local network stopped; reconnecting",
-			"retry_in", wait)
+			"lasted", lasted, "retry_in", wait)
 		if !sleepCtx(ctx, wait) {
 			return
 		}
@@ -266,7 +343,10 @@ func localAddresses() []netip.Addr {
 // containerWarnOnce keeps the container notice to one line per process. It is
 // reachable from every advertiser start, and a daemon whose config is edited a
 // few times should not repeat a paragraph it already printed.
-var containerWarnOnce sync.Once
+var (
+	containerWarnOnce      sync.Once
+	containerWarnEvaluated atomic.Bool
+)
 
 // warnIfDiscoveryIsContainerised says so once when discovery is on inside a
 // container.
@@ -280,6 +360,7 @@ var containerWarnOnce sync.Once
 // networking, so it hedges rather than claiming discovery is broken.
 func warnIfDiscoveryIsContainerised() {
 	containerWarnOnce.Do(func() {
+		containerWarnEvaluated.Store(true)
 		if !runningInContainer() {
 			return
 		}
@@ -305,12 +386,4 @@ func runningInContainer() bool {
 	return strings.Contains(body, "docker") ||
 		strings.Contains(body, "containerd") ||
 		strings.Contains(body, "kubepods")
-}
-
-// containerWarnOnceFired reports whether the container notice has been
-// considered. Test seam: sync.Once exposes no state of its own.
-func containerWarnOnceFired() bool {
-	fired := true
-	containerWarnOnce.Do(func() { fired = false })
-	return fired
 }
