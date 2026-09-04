@@ -20,7 +20,7 @@ func TestAccumulatorCapsAddressesPerHost(t *testing.T) {
 	for i := range maxAddrsPerHost * 10 {
 		acc.addAddr("srv-a.local.", net.ParseIP(fmt.Sprintf("10.0.%d.%d", i/256, i%256)), netip.Addr{})
 	}
-	if got := len(acc.addrs["srv-a.local."]); got > maxAddrsPerHost {
+	if got := len(acc.addrs[hostKey{netip.Addr{}, "srv-a.local."}]); got > maxAddrsPerHost {
 		t.Fatalf("one hostname accumulated %d addresses, above the %d cap",
 			got, maxAddrsPerHost)
 	}
@@ -33,7 +33,7 @@ func TestAccumulatorStillDeduplicatesAddresses(t *testing.T) {
 	for range 5 {
 		acc.addAddr("srv-a.local.", net.ParseIP("10.0.0.11"), netip.Addr{})
 	}
-	if got := len(acc.addrs["srv-a.local."]); got != 1 {
+	if got := len(acc.addrs[hostKey{netip.Addr{}, "srv-a.local."}]); got != 1 {
 		t.Fatalf("recorded the same address %d times, want 1", got)
 	}
 }
@@ -90,7 +90,7 @@ func TestGoodbyeAlsoDropsTheAddresses(t *testing.T) {
 		A: net.ParseIP("192.168.1.20"),
 	}
 	acc.absorb(pack(t, ptrRR(), srvRR(), txtRR(), addr), owner)
-	if len(acc.addrs["srv-a.local."]) != 1 {
+	if len(acc.addrs[hostKey{owner, "srv-a.local."}]) != 1 {
 		t.Fatal("the address was not recorded")
 	}
 
@@ -98,7 +98,7 @@ func TestGoodbyeAlsoDropsTheAddresses(t *testing.T) {
 	goodbye.Hdr.Ttl = 0
 	acc.absorb(pack(t, goodbye), owner)
 
-	if got := acc.addrs["srv-a.local."]; len(got) != 0 {
+	if got := acc.addrs[hostKey{owner, "srv-a.local."}]; len(got) != 0 {
 		t.Fatalf("addresses survived the retraction: %v", got)
 	}
 }
@@ -328,13 +328,13 @@ func TestAForgedGoodbyeCannotStripAPeersAddresses(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			acc := newAccumulator()
 			acc.absorb(pack(t, ptrRR(), srvRR(), txtRR(), addr), owner)
-			if len(acc.addrs["srv-a.local."]) != 1 {
+			if len(acc.addrs[hostKey{owner, "srv-a.local."}]) != 1 {
 				t.Fatal("the address was not recorded")
 			}
 
 			acc.absorb(pack(t, tt.goodbye()), attacker)
 
-			if got := acc.addrs["srv-a.local."]; len(got) != 1 {
+			if got := acc.addrs[hostKey{owner, "srv-a.local."}]; len(got) != 1 {
 				t.Fatalf("a stranger's goodbye stripped the addresses: %v", got)
 			}
 			if len(acc.instances) != 1 {
@@ -361,7 +361,104 @@ func TestAnAdvertiserCanWithdrawItsOwnAddresses(t *testing.T) {
 	goodbye.Hdr.Ttl = 0
 	acc.absorb(pack(t, goodbye), owner)
 
-	if got := acc.addrs["srv-a.local."]; len(got) != 0 {
+	if got := acc.addrs[hostKey{owner, "srv-a.local."}]; len(got) != 0 {
 		t.Fatalf("the advertiser could not withdraw its own addresses: %v", got)
+	}
+}
+
+// Address ownership is scoped to the sender, so neither of the two ways an
+// attacker previously reached somebody else's addresses works — and neither
+// works because there is nothing shared to reach, rather than because a check
+// caught it.
+func TestOneSenderCannotTouchAnothersAddresses(t *testing.T) {
+	owner := netip.MustParseAddr("192.168.1.20")
+	attacker := netip.MustParseAddr("192.168.1.99")
+
+	ownerAddr := &dns.A{
+		Hdr: dns.RR_Header{Name: "srv-a.local.", Rrtype: dns.TypeA,
+			Class: dns.ClassINET, Ttl: recordTTL},
+		A: net.ParseIP("192.168.1.20"),
+	}
+
+	t.Run("by naming their hostname as its own SRV target", func(t *testing.T) {
+		acc := newAccumulator()
+		acc.absorb(pack(t, ptrRR(), srvRR(), txtRR(), ownerAddr), owner)
+
+		// The attacker registers its own instance pointing at the victim's
+		// hostname, then retires it — which used to take the victim's
+		// addresses with it.
+		evilName := "evil._heimdallm._tcp.local."
+		evilSRV := &dns.SRV{
+			Hdr: dns.RR_Header{Name: evilName, Rrtype: dns.TypeSRV,
+				Class: dns.ClassINET, Ttl: recordTTL},
+			Port: 7842, Target: "srv-a.local.",
+		}
+		acc.absorb(pack(t,
+			&dns.PTR{Hdr: dns.RR_Header{Name: serviceFQDN(), Rrtype: dns.TypePTR,
+				Class: dns.ClassINET, Ttl: recordTTL}, Ptr: evilName},
+			evilSRV,
+			&dns.TXT{Hdr: dns.RR_Header{Name: evilName, Rrtype: dns.TypeTXT,
+				Class: dns.ClassINET, Ttl: recordTTL}, Txt: []string{"id=evil"}},
+		), attacker)
+
+		goodbye := &dns.SRV{Hdr: evilSRV.Hdr, Port: evilSRV.Port, Target: evilSRV.Target}
+		goodbye.Hdr.Ttl = 0
+		acc.absorb(pack(t, goodbye), attacker)
+
+		if got := acc.addrs[hostKey{owner, "srv-a.local."}]; len(got) != 1 {
+			t.Fatalf("the victim's addresses were stripped through an "+
+				"attacker-chosen SRV target: %v", got)
+		}
+	})
+
+	t.Run("by claiming their hostname first", func(t *testing.T) {
+		acc := newAccumulator()
+
+		// The attacker publishes an address for the victim's hostname before
+		// the victim does, which used to make it the owner.
+		acc.absorb(pack(t, &dns.A{Hdr: ownerAddr.Hdr, A: net.ParseIP("10.0.0.66")}), attacker)
+		acc.absorb(pack(t, ptrRR(), srvRR(), txtRR(), ownerAddr), owner)
+
+		goodbye := &dns.A{Hdr: ownerAddr.Hdr, A: net.ParseIP("10.0.0.66")}
+		goodbye.Hdr.Ttl = 0
+		acc.absorb(pack(t, goodbye), attacker)
+
+		if got := acc.addrs[hostKey{owner, "srv-a.local."}]; len(got) != 1 {
+			t.Fatalf("the victim's addresses were stripped by a first-claimer: %v", got)
+		}
+	})
+}
+
+// And a peer is reported with the addresses its own sender published, not with
+// whatever another sender attached to the same hostname.
+func TestAPeerCarriesOnlyItsOwnSendersAddresses(t *testing.T) {
+	owner := netip.MustParseAddr("192.168.1.20")
+	attacker := netip.MustParseAddr("192.168.1.99")
+
+	acc := newAccumulator()
+	// The attacker gets its address in first, under the victim's hostname.
+	acc.absorb(pack(t, &dns.A{
+		Hdr: dns.RR_Header{Name: "srv-a.local.", Rrtype: dns.TypeA,
+			Class: dns.ClassINET, Ttl: recordTTL},
+		A: net.ParseIP("10.0.0.66"),
+	}), attacker)
+	acc.absorb(pack(t, ptrRR(), srvRR(), txtRR(), &dns.A{
+		Hdr: dns.RR_Header{Name: "srv-a.local.", Rrtype: dns.TypeA,
+			Class: dns.ClassINET, Ttl: recordTTL},
+		A: net.ParseIP("192.168.1.20"),
+	}), owner)
+
+	peers := acc.peers()
+	if len(peers) != 1 {
+		t.Fatalf("got %d peers, want 1", len(peers))
+	}
+	for _, addr := range peers[0].Addrs {
+		if addr.String() == "10.0.0.66" {
+			t.Fatalf("the peer carries an address another sender attached to "+
+				"its hostname: %v", peers[0].Addrs)
+		}
+	}
+	if len(peers[0].Addrs) != 1 || peers[0].Addrs[0].String() != "192.168.1.20" {
+		t.Fatalf("Addrs = %v, want just the owner's own", peers[0].Addrs)
 	}
 }

@@ -213,7 +213,7 @@ func (a *Advertiser) respond(packet []byte, from net.Addr) {
 	reply.Answer = answers
 	reply.Authoritative = true
 
-	a.send(reply, from)
+	a.send(reply)
 }
 
 // recordsFor returns everything we hold that answers q.
@@ -323,10 +323,10 @@ func (a *Advertiser) goodbye() {
 	for _, rr := range msg.Answer {
 		rr.Header().Ttl = 0
 	}
-	a.send(msg, GroupAddr())
+	a.send(msg)
 }
 
-func (a *Advertiser) send(msg *dns.Msg, to net.Addr) {
+func (a *Advertiser) send(msg *dns.Msg) {
 	packed, err := msg.Pack()
 	if err != nil {
 		a.log.Debug("lan: packing a response failed", "err", err)
@@ -334,18 +334,9 @@ func (a *Advertiser) send(msg *dns.Msg, to net.Addr) {
 	}
 	// Always to the group. A unicast reply would reach only the asker, and mDNS
 	// peers legitimately learn from responses to questions they did not ask.
-	if _, err := a.conn.WriteTo(packed, responseTarget(to)); err != nil {
+	if _, err := a.conn.WriteTo(packed, GroupAddr()); err != nil {
 		a.log.Debug("lan: sending a response failed", "err", err)
 	}
-}
-
-// responseTarget keeps in-memory transports working: they route by pair, not by
-// address, so handing them the real multicast group would be meaningless.
-func responseTarget(from net.Addr) net.Addr {
-	if _, ok := from.(memAddr); ok {
-		return from
-	}
-	return GroupAddr()
 }
 
 // defaultHostname is this machine's mDNS name. Falls back to a generic label
