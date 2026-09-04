@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1738,6 +1740,73 @@ func TestPropagatePartitionPushesRoutingToHealthyRemote(t *testing.T) {
 	}
 	if got[0]["default_instance"] != "hub-1" {
 		t.Errorf("push.default_instance = %v, want the resolved fallback hub-1", got[0]["default_instance"])
+	}
+}
+
+// PR review feedback (#770): the propagation log switch checked
+// res.IdentityMismatch before the generic failure branch, so a push that
+// failed for a REASON OTHER than the mismatch (a genuine network/HTTP error
+// hit while also observing a mismatched identity) had that error silently
+// dropped — only the generic mismatch warning was logged, with nothing
+// pointing at the underlying failure.
+func TestPropagatePartitionLogsTheUnderlyingErrorAlongsideAnIdentityMismatch(t *testing.T) {
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/health":
+			// Registered as "srv-a"; reports itself as something else.
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status": "ok", "instance_id": "not-srv-a", "role": "worker",
+			})
+		case r.URL.Path == "/cluster/partition":
+			// Not a 404 (legacy): a genuine failure distinct from the mismatch.
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"internal error"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(remote.Close)
+
+	cfg := &config.Config{}
+	cfg.AI.Primary = "claude"
+	cfg.Cluster.Role = config.RoleHub
+	cfg.Cluster.InstanceID = "hub-1"
+	cfg.Cluster.DefaultInstance = "hub-1"
+	cfg.Cluster.Instances = map[string]config.InstanceConfig{
+		"hub-1": {Name: "hub", BaseURL: "http://127.0.0.1:7842", Token: "t"},
+		"srv-a": {Name: "srv-a", BaseURL: remote.URL, Token: "secret"},
+	}
+	cfg.Cluster.Routing = config.RoutingConfig{Orgs: map[string]string{"acme": "srv-a"}}
+	cfg.GitHub.PollInterval = "5m"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config invalid: %v", err)
+	}
+	cs := newClusterState(cfg, nil, nil)
+	cs.Prober().ProbeAll(context.Background())
+
+	var logs bytes.Buffer
+	originalLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(originalLogger) })
+
+	propagatePartition(context.Background(), cs)
+
+	got := logs.String()
+	if !strings.Contains(got, "internal error") {
+		t.Errorf("log output %q does not contain the underlying push error", got)
+	}
+	if !strings.Contains(got, "registered under one id") {
+		t.Errorf("log output %q does not contain the identity-mismatch warning", got)
+	}
+}
+
+// PR review feedback (#770): notAssignedNotesBucket must never be a string an
+// operator could legally register as a real instance id, or a coincidental
+// match would collide the not-assigned dedup bucket with that instance's own
+// deferral/dispatch-failure notices.
+func TestNotAssignedNotesBucketCannotBeARealInstanceID(t *testing.T) {
+	if err := config.ValidateInstanceID(notAssignedNotesBucket); err == nil {
+		t.Errorf("notAssignedNotesBucket %q validates as a real instance id; an operator could register it and collide with the not-assigned dedup bucket", notAssignedNotesBucket)
 	}
 }
 

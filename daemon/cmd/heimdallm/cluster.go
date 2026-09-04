@@ -621,7 +621,13 @@ func (cs *clusterState) noteDeferral(repo, op string, inst instances.Instance) {
 // covers repos with no resolvable owner at all (an unassigned repo with no
 // default_instance pushed yet), not only ones naming an instance this worker
 // cannot see in its own (empty, by design) registry.
-const notAssignedNotesBucket = "unassigned"
+//
+// Leading "#" is load-bearing, not decoration: config.ValidateInstanceID
+// requires an alphanumeric first character, so this string can never be a
+// real instance id an operator registers — a plain "unassigned" could,
+// which would silently collide this dedup bucket with that instance's own
+// deferral/dispatch-failure notices. PR review feedback (#770).
+const notAssignedNotesBucket = "#unassigned"
 
 // noteNotAssigned reports that this worker deliberately left repo alone
 // because the hub has not assigned it here — as opposed to verdictActLocally,
@@ -836,9 +842,16 @@ func propagatePartition(ctx context.Context, cs *clusterState) {
 			// operator has to fix the mismatch (update cluster.instances.*
 			// to the reported id, or restart the instance so it adopts the
 			// registered one).
+			//
+			// res.Error is included even though the withheld-on-legacy path
+			// already folds this same explanation into it: a mismatch
+			// observed alongside an UNRELATED push failure (a network error,
+			// a 500) would otherwise have that failure silently dropped —
+			// only this warning logged, with nothing pointing at the actual
+			// cause. PR review feedback (#770).
 			slog.Warn("cluster: instance is registered under one id but reports itself as another; its partition cannot be enforced until this is fixed",
 				"instance", res.InstanceID, "instance_name", res.Name,
-				"hint", "cluster.instances."+res.InstanceID)
+				"hint", "cluster.instances."+res.InstanceID, "err", res.Error)
 		case !res.OK && !res.Skipped:
 			slog.Warn("cluster: partition propagation failed", "instance", res.InstanceID, "instance_name", res.Name, "err", res.Error)
 		case res.Legacy && res.OK:
