@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"reflect"
 	"strings"
@@ -139,25 +140,61 @@ func TestAdvertisedPortComesFromTheListenerNotTheConfig(t *testing.T) {
 // bind_addr defaults to 127.0.0.1. Advertising anyway is worse than staying
 // quiet: the hub only offers peers it has already reached over HTTP, so the
 // machine would simply never appear, with nothing to explain why.
-func TestServedReachableFromLAN(t *testing.T) {
+// The rule has to agree with lan.Peer.DialAddrs. Advertising an address our
+// own verifier would refuse gives the worst outcome available: the daemon
+// announces itself, every hub declines to probe it, and nothing says why.
+func TestUnadvertisableBind(t *testing.T) {
 	tests := []struct {
-		name string
-		addr *net.TCPAddr
-		want bool
+		name       string
+		addr       *net.TCPAddr
+		wantReason string
 	}{
-		{"the default bind", &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 7842}, false},
-		{"ipv6 loopback", &net.TCPAddr{IP: net.ParseIP("::1"), Port: 7842}, false},
-		{"a LAN address", &net.TCPAddr{IP: net.ParseIP("192.168.1.20"), Port: 7842}, true},
-		{"all interfaces", &net.TCPAddr{IP: net.ParseIP("0.0.0.0"), Port: 7842}, true},
-		{"all interfaces v6", &net.TCPAddr{IP: net.ParseIP("::"), Port: 7842}, true},
-		{"no address at all", &net.TCPAddr{Port: 7842}, true},
+		{"a LAN address", &net.TCPAddr{IP: net.ParseIP("192.168.1.20"), Port: 7842}, ""},
+		{"all interfaces", &net.TCPAddr{IP: net.ParseIP("0.0.0.0"), Port: 7842}, ""},
+		{"all interfaces v6", &net.TCPAddr{IP: net.ParseIP("::"), Port: 7842}, ""},
+		{"no address at all", &net.TCPAddr{Port: 7842}, ""},
+		{"the default bind", &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 7842}, "loopback"},
+		{"ipv6 loopback", &net.TCPAddr{IP: net.ParseIP("::1"), Port: 7842}, "loopback"},
+		// Accepted before, and then refused by the verifier — the daemon
+		// advertised and was never probed.
+		{"ipv4 link-local", &net.TCPAddr{IP: net.ParseIP("169.254.10.1"), Port: 7842}, "link-local"},
+		{"ipv6 link-local", &net.TCPAddr{IP: net.ParseIP("fe80::1"), Port: 7842}, "link-local"},
+		{"multicast", &net.TCPAddr{IP: net.ParseIP("224.0.0.251"), Port: 7842}, "multicast"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := servedReachableFromLAN(tt.addr); got != tt.want {
-				t.Fatalf("servedReachableFromLAN(%v) = %v, want %v", tt.addr, got, tt.want)
+			got := unadvertisableBind(tt.addr)
+			if tt.wantReason == "" {
+				if got != "" {
+					t.Fatalf("refused a usable bind: %s", got)
+				}
+				return
+			}
+			if got == "" {
+				t.Fatalf("accepted %v, which the verifier would refuse", tt.addr.IP)
+			}
+			if !strings.Contains(got, tt.wantReason) {
+				t.Fatalf("reason = %q, want it to mention %q", got, tt.wantReason)
 			}
 		})
+	}
+}
+
+// Every bind this refuses must be one a hub would refuse to dial, and every
+// bind it accepts must be one a hub would accept — otherwise a daemon
+// advertises into silence.
+func TestBindRuleAgreesWithTheVerifier(t *testing.T) {
+	for _, ip := range []string{
+		"192.168.1.20", "10.0.0.11", "172.16.5.5",
+		"127.0.0.1", "::1", "169.254.10.1", "fe80::1", "224.0.0.251",
+	} {
+		addr := netip.MustParseAddr(ip)
+		advertisable := unadvertisableBind(&net.TCPAddr{IP: net.IP(addr.AsSlice()), Port: 7842}) == ""
+		dialable := len(lan.Peer{Addrs: []netip.Addr{addr}}.DialAddrs()) == 1
+		if advertisable != dialable {
+			t.Errorf("%s: advertisable=%v but dialable=%v; the two rules disagree",
+				ip, advertisable, dialable)
+		}
 	}
 }
 

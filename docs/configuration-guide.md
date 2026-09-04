@@ -1723,8 +1723,9 @@ defaults to `127.0.0.1`, and on that setting nothing else on the network can
 connect — so a daemon would advertise an address it then refuses. It declines to
 advertise at all in that case and logs why, because the alternative is a machine
 that simply never appears in the hub's list with nothing to explain it. Set
-`server.bind_addr` to a LAN address, or to `0.0.0.0`, on any instance you want
-discovered. Browsing is unaffected: a hub bound to loopback can still find and
+`server.bind_addr` to a routable LAN address, or to `0.0.0.0`, on any instance
+you want discovered — a loopback, link-local or multicast bind is refused, and
+refused for the same reasons a hub would decline to dial it. Browsing is unaffected: a hub bound to loopback can still find and
 register peers, it just cannot be found itself.
 
 The advertised port is the one the listener actually bound, not
@@ -1762,6 +1763,7 @@ and claim to be any instance. The design assumes that.
 | An address is never rewritten for you | A moved instance is a proposal on a card, so a rogue advertiser cannot redirect the hub by claiming a known id |
 | Only `<name>.local` is ever probed | An advertised hostname is turned into a URL and fetched, so anything else would be a request-forgery primitive handed to the subnet. A name like `metadata.google.internal` is refused, not resolved, and redirects are refused too |
 | Verification connects to the advertised address, never to whatever the name resolves to | A `.local` name constrains what a peer is *called*, not where it *points*: mDNS resolution is unauthenticated too, so anyone on the link could answer a query for `peer.local` with an address only the hub can reach — a cloud metadata endpoint being the obvious target. The probe dials an address published in the packet, and loopback, link-local and multicast addresses are refused |
+| And only on the link the advertisement came from | Refusing those address classes is not enough on a multi-homed hub, which can reach a VPN that an attacker on the LAN cannot. The advertised address must share a locally attached network with the packet's own source — the one field an advertiser cannot forge — so the reach never exceeds the link the advertisement arrived on |
 | A browse is bounded | One sender cannot make the hub hold unlimited records or open unlimited connections: records and peers are capped per scan and verification runs through a fixed pool |
 
 Turning discovery **on** is still a decision worth making deliberately:
