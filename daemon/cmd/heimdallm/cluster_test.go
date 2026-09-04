@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1525,11 +1527,13 @@ func TestClusterStateDispatchNilReceiverIsPermissive(t *testing.T) {
 
 // ------------------------------------------------- Automatic config propagation
 
-// propagateTarget is a fake worker that records PATCH /config bodies.
+// propagateTarget is a fake worker that records PATCH /config and PUT
+// /cluster/partition bodies.
 type propagateTarget struct {
 	*httptest.Server
-	mu      sync.Mutex
-	patches []map[string]any
+	mu         sync.Mutex
+	patches    []map[string]any
+	partitions []map[string]any
 }
 
 func newPropagateTarget(t *testing.T) *propagateTarget {
@@ -1546,6 +1550,13 @@ func newPropagateTarget(t *testing.T) *propagateTarget {
 			pt.patches = append(pt.patches, patch)
 			pt.mu.Unlock()
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		case r.URL.Path == "/cluster/partition" && r.Method == http.MethodPut:
+			var push map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&push)
+			pt.mu.Lock()
+			pt.partitions = append(pt.partitions, push)
+			pt.mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"changed": true})
 		default:
 			http.NotFound(w, r)
 		}
@@ -1558,6 +1569,12 @@ func (pt *propagateTarget) received() []map[string]any {
 	pt.mu.Lock()
 	defer pt.mu.Unlock()
 	return append([]map[string]any(nil), pt.patches...)
+}
+
+func (pt *propagateTarget) receivedPartitions() []map[string]any {
+	pt.mu.Lock()
+	defer pt.mu.Unlock()
+	return append([]map[string]any(nil), pt.partitions...)
 }
 
 func propagateHub(t *testing.T, remote *propagateTarget) *clusterState {
@@ -1675,6 +1692,124 @@ func TestPropagateClusterConfigToleratesUnreadableFile(t *testing.T) {
 	}
 }
 
+// propagatePartitionHub is propagateHub but with routing rules configured, so
+// propagatePartition has something real to push.
+func propagatePartitionHub(t *testing.T, remote *propagateTarget, routing config.RoutingConfig) *clusterState {
+	t.Helper()
+	cfg := &config.Config{}
+	cfg.AI.Primary = "claude"
+	cfg.Cluster.Role = config.RoleHub
+	cfg.Cluster.InstanceID = "hub-1"
+	cfg.Cluster.DefaultInstance = "hub-1"
+	cfg.Cluster.Instances = map[string]config.InstanceConfig{
+		"hub-1": {Name: "hub", BaseURL: "http://127.0.0.1:7842", Token: "t"},
+		"srv-a": {Name: "srv-a", BaseURL: remote.URL, Token: "secret"},
+	}
+	cfg.Cluster.Routing = routing
+	cfg.GitHub.PollInterval = "5m"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config invalid: %v", err)
+	}
+	cs := newClusterState(cfg, nil, nil)
+	cs.Prober().ProbeAll(context.Background())
+	return cs
+}
+
+// The wiring test for the mechanism that actually closes
+// theburrowhub/heimdallm#769: a hub's reload must push the ownership
+// partition — not just the general config — to every instance, each under
+// its own id, with the rules the hub's Router currently resolves.
+func TestPropagatePartitionPushesRoutingToHealthyRemote(t *testing.T) {
+	remote := newPropagateTarget(t)
+	cs := propagatePartitionHub(t, remote, config.RoutingConfig{
+		Orgs: map[string]string{"acme": "srv-a"},
+	})
+
+	propagatePartition(context.Background(), cs)
+
+	got := remote.receivedPartitions()
+	if len(got) != 1 {
+		t.Fatalf("remote received %d PUT /cluster/partition calls, want 1", len(got))
+	}
+	if got[0]["instance_id"] != "srv-a" {
+		t.Errorf("push = %+v, want instance_id=srv-a", got[0])
+	}
+	orgs, _ := got[0]["orgs"].(map[string]any)
+	if orgs["acme"] != "srv-a" {
+		t.Errorf("push.orgs = %v, want acme->srv-a", orgs)
+	}
+	if got[0]["default_instance"] != "hub-1" {
+		t.Errorf("push.default_instance = %v, want the resolved fallback hub-1", got[0]["default_instance"])
+	}
+}
+
+// PR review feedback (#770): the propagation log switch checked
+// res.IdentityMismatch before the generic failure branch, so a push that
+// failed for a REASON OTHER than the mismatch (a genuine network/HTTP error
+// hit while also observing a mismatched identity) had that error silently
+// dropped — only the generic mismatch warning was logged, with nothing
+// pointing at the underlying failure.
+func TestPropagatePartitionLogsTheUnderlyingErrorAlongsideAnIdentityMismatch(t *testing.T) {
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/health":
+			// Registered as "srv-a"; reports itself as something else.
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status": "ok", "instance_id": "not-srv-a", "role": "worker",
+			})
+		case r.URL.Path == "/cluster/partition":
+			// Not a 404 (legacy): a genuine failure distinct from the mismatch.
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"internal error"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(remote.Close)
+
+	cfg := &config.Config{}
+	cfg.AI.Primary = "claude"
+	cfg.Cluster.Role = config.RoleHub
+	cfg.Cluster.InstanceID = "hub-1"
+	cfg.Cluster.DefaultInstance = "hub-1"
+	cfg.Cluster.Instances = map[string]config.InstanceConfig{
+		"hub-1": {Name: "hub", BaseURL: "http://127.0.0.1:7842", Token: "t"},
+		"srv-a": {Name: "srv-a", BaseURL: remote.URL, Token: "secret"},
+	}
+	cfg.Cluster.Routing = config.RoutingConfig{Orgs: map[string]string{"acme": "srv-a"}}
+	cfg.GitHub.PollInterval = "5m"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config invalid: %v", err)
+	}
+	cs := newClusterState(cfg, nil, nil)
+	cs.Prober().ProbeAll(context.Background())
+
+	var logs bytes.Buffer
+	originalLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(originalLogger) })
+
+	propagatePartition(context.Background(), cs)
+
+	got := logs.String()
+	if !strings.Contains(got, "internal error") {
+		t.Errorf("log output %q does not contain the underlying push error", got)
+	}
+	if !strings.Contains(got, "registered under one id") {
+		t.Errorf("log output %q does not contain the identity-mismatch warning", got)
+	}
+}
+
+// PR review feedback (#770): notAssignedNotesBucket must never be a string an
+// operator could legally register as a real instance id, or a coincidental
+// match would collide the not-assigned dedup bucket with that instance's own
+// deferral/dispatch-failure notices.
+func TestNotAssignedNotesBucketCannotBeARealInstanceID(t *testing.T) {
+	if err := config.ValidateInstanceID(notAssignedNotesBucket); err == nil {
+		t.Errorf("notAssignedNotesBucket %q validates as a real instance id; an operator could register it and collide with the not-assigned dedup bucket", notAssignedNotesBucket)
+	}
+}
+
 func TestEnsureSelfInstanceDefaultsThePort(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Cluster.Role = config.RoleHub
@@ -1682,5 +1817,161 @@ func TestEnsureSelfInstanceDefaultsThePort(t *testing.T) {
 	ensureSelfInstance(cfg, "/data")
 	if got := cfg.Cluster.Instances["hub-1"].BaseURL; got != "http://127.0.0.1:7842" {
 		t.Errorf("base_url = %q, want the default port", got)
+	}
+}
+
+// ------------------------------------------------- verdictNotAssigned (worker fail-closed)
+
+// dispatchWorkerAwaitingRules builds a worker clusterState the hub has not
+// (yet, or ever) pushed a partition to: no registry, no routing rules —
+// exactly the state the remote instance behind theburrowhub/heimdallm#769
+// was found in, live: registered by the hub as "192-168-1-100-3000" but
+// carrying no [cluster.instances] and no [cluster.routing] of its own.
+func dispatchWorkerAwaitingRules(t *testing.T, selfID string) *clusterState {
+	t.Helper()
+	cfg := &config.Config{}
+	cfg.AI.Primary = "claude"
+	cfg.Cluster.Role = config.RoleWorker
+	cfg.Cluster.InstanceID = selfID
+	cfg.GitHub.PollInterval = "5m"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config invalid: %v", err)
+	}
+	return newClusterState(cfg, nil, nil)
+}
+
+// The central regression test for theburrowhub/heimdallm#769. Before this
+// fix, ownerVerdictFor's owner=="" branch always meant verdictActLocally —
+// so a worker with no rules yet dispatched nothing, hit that branch on every
+// repo it discovered, and reviewed all of them. It must now wait instead.
+func TestWorkerAwaitingRulesDoesNotActLocally(t *testing.T) {
+	cs := dispatchWorkerAwaitingRules(t, "srv-a")
+	if handled := cs.DispatchPRReview(context.Background(), "freepik-company/ai-platform-terraform", 77, ""); !handled {
+		t.Error("DispatchPRReview() = false on a worker with no partition rules, want true (must not review locally)")
+	}
+}
+
+// A repo explicitly routed to the hub (or another instance) must not be
+// taken over by a worker that cannot verify anyone's health — this is
+// WithheldFromWorker, not the ActLocally fallback a hub uses for the same
+// shape of "no usable owner found".
+func TestWorkerDoesNotTakeOverReposAssignedToTheHub(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.AI.Primary = "claude"
+	cfg.Cluster.Role = config.RoleWorker
+	cfg.Cluster.InstanceID = "srv-a"
+	cfg.Cluster.DefaultInstance = "hub-1"
+	cfg.Cluster.Routing = config.RoutingConfig{
+		Orgs: map[string]string{"freepik-company": "hub-1"},
+	}
+	cfg.GitHub.PollInterval = "5m"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config invalid: %v", err)
+	}
+	cs := newClusterState(cfg, nil, nil)
+	if handled := cs.DispatchPRReview(context.Background(), "freepik-company/ai-platform-terraform", 77, ""); !handled {
+		t.Error("DispatchPRReview() = false for a repo assigned to another instance, want true")
+	}
+}
+
+func TestOwnerCanHandleSkipsIssueWorkOnAnUnassignedRepo(t *testing.T) {
+	cs := dispatchWorkerAwaitingRules(t, "srv-a")
+	if !cs.OwnerCanHandle("freepik-company/ai-platform-terraform") {
+		t.Error("OwnerCanHandle() = false on a worker with no rules, want true (skip local triage)")
+	}
+}
+
+// noteNotAssigned must dedup like every other notice on this type: the first
+// call claims it, so a worker stuck unassigned does not re-warn on every poll
+// cycle.
+func TestClusterStateNoteNotAssignedIsDedupedPerUnit(t *testing.T) {
+	cs := dispatchWorkerAwaitingRules(t, "srv-a")
+	repo := "freepik-company/ai-platform-terraform"
+	cs.DispatchPRReview(context.Background(), repo, 77, "")
+	if cs.notes.claim(notAssignedNotesBucket, noticeSubject("not_assigned", dispatchUnit("review", repo))) {
+		t.Error("the first dispatch did not claim the not-assigned notice")
+	}
+}
+
+// ------------------------------------------------- Reload-time identity adoption
+
+// The hub assigns identity to a worker by writing instance_id directly into
+// its config.toml (PUT /cluster/partition) and letting the next reload pick
+// it up. This is what closes the Friday mismatch found live: registered by
+// the hub as "192-168-1-100-3000", reporting itself as "friday" on /health.
+func TestResolveReloadInstanceIDAdoptsTheHubAssignedID(t *testing.T) {
+	dir := t.TempDir()
+	newCfg := &config.Config{}
+	newCfg.Cluster.Role = config.RoleWorker
+	newCfg.Cluster.InstanceID = "192-168-1-100-3000"
+
+	got, err := resolveReloadInstanceID("friday", newCfg, dir)
+	if err != nil {
+		t.Fatalf("resolveReloadInstanceID: %v", err)
+	}
+	if got != "192-168-1-100-3000" {
+		t.Errorf("id = %q, want the hub-assigned id to win", got)
+	}
+}
+
+// The adopted id must survive a real process restart, not just live in memory
+// until the next reload — otherwise a restart between two pushes reverts the
+// daemon to its old identity and reopens the mismatch.
+func TestResolveReloadInstanceIDPersistsTheAdoptedIDToTheDataDir(t *testing.T) {
+	dir := t.TempDir()
+	newCfg := &config.Config{}
+	newCfg.Cluster.Role = config.RoleWorker
+	newCfg.Cluster.InstanceID = "192-168-1-100-3000"
+
+	if _, err := resolveReloadInstanceID("friday", newCfg, dir); err != nil {
+		t.Fatalf("resolveReloadInstanceID: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "instance_id"))
+	if err != nil {
+		t.Fatalf("instance_id was not persisted: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "192-168-1-100-3000" {
+		t.Errorf("persisted id = %q, want the adopted one", got)
+	}
+}
+
+// A hub's identity must never change under it in place: its own registry and
+// every routing rule still name the old id, and adopting a different one
+// mid-flight would silently orphan everything the hub itself owns.
+func TestResolveReloadInstanceIDNeverChangesAHubsIdentity(t *testing.T) {
+	dir := t.TempDir()
+	newCfg := &config.Config{}
+	newCfg.Cluster.Role = config.RoleHub
+	newCfg.Cluster.InstanceID = "some-other-id"
+
+	got, err := resolveReloadInstanceID("hub-1", newCfg, dir)
+	if err != nil {
+		t.Fatalf("resolveReloadInstanceID: %v", err)
+	}
+	if got != "hub-1" {
+		t.Errorf("id = %q, want the hub's existing identity kept", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "instance_id")); !os.IsNotExist(err) {
+		t.Error("instance_id file was written for a hub whose identity must not change")
+	}
+}
+
+// A reload carrying the same id this daemon already resolved must be a no-op:
+// no rewrite of the persisted file, no adoption path taken.
+func TestResolveReloadInstanceIDIsANoOpWhenTheIDMatches(t *testing.T) {
+	dir := t.TempDir()
+	newCfg := &config.Config{}
+	newCfg.Cluster.Role = config.RoleWorker
+	newCfg.Cluster.InstanceID = "srv-a"
+
+	got, err := resolveReloadInstanceID("srv-a", newCfg, dir)
+	if err != nil {
+		t.Fatalf("resolveReloadInstanceID: %v", err)
+	}
+	if got != "srv-a" {
+		t.Errorf("id = %q, want unchanged", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "instance_id")); !os.IsNotExist(err) {
+		t.Error("instance_id file was written despite the id already matching")
 	}
 }

@@ -321,6 +321,16 @@ func ValidateInstanceBaseURL(raw string) error {
 	return nil
 }
 
+// EnvPinnedInstanceID reports the instance id pinned by HEIMDALLM_INSTANCE_ID,
+// or "" if unset. A daemon started with this env var gets its identity
+// reapplied on every config load (see applyEnvOverrides), so any other id
+// accepted via PUT /cluster/partition would be silently undone on the very
+// next reload — the handler refuses the push instead of accepting an
+// identity that cannot stick.
+func EnvPinnedInstanceID() string {
+	return strings.TrimSpace(os.Getenv("HEIMDALLM_INSTANCE_ID"))
+}
+
 // validateCluster enforces the [cluster] invariants at boot. Every failure here
 // would otherwise surface as a routing hole: a repo nobody owns, a proxy route
 // pointing at a nonexistent instance, or two daemons believing they are the
@@ -392,10 +402,47 @@ func (c *Config) validateCluster() error {
 		}
 	}
 
-	// Every id referenced anywhere must exist in the registry. Checked only
-	// when the registry is populated so a worker that carries routing rules
-	// (pushed by the hub) but no registry of its own still boots.
-	if len(cl.Instances) > 0 {
+	// Slugs and instance-id values are validated regardless of whether this
+	// daemon carries a registry of its own: a worker can receive routing
+	// rules pushed by the hub (PUT /cluster/partition) while never
+	// registering a single instance locally, and a malformed slug or a value
+	// that is not a valid instance id is a bug in the push either way.
+	if cl.DefaultInstance != "" {
+		if err := ValidateInstanceID(cl.DefaultInstance); err != nil {
+			return fmt.Errorf("config: cluster.default_instance: %w", err)
+		}
+	}
+	for _, id := range cl.Routing.RoundRobinPool {
+		if err := ValidateInstanceID(id); err != nil {
+			return fmt.Errorf("config: cluster.routing.round_robin_pool: %w", err)
+		}
+	}
+	for org, id := range cl.Routing.Orgs {
+		if err := ValidateOrgSlug(org); err != nil {
+			return fmt.Errorf("config: cluster.routing.orgs key %q: %w", org, err)
+		}
+		if err := ValidateInstanceID(id); err != nil {
+			return fmt.Errorf("config: cluster.routing.orgs.%q: %w", org, err)
+		}
+	}
+	for repo, id := range cl.Routing.Repos {
+		if err := ValidateRepoSlug(repo); err != nil {
+			return fmt.Errorf("config: cluster.routing.repos key %q: %w", repo, err)
+		}
+		if err := ValidateInstanceID(id); err != nil {
+			return fmt.Errorf("config: cluster.routing.repos.%q: %w", repo, err)
+		}
+	}
+
+	// Every id referenced anywhere must also exist in the registry — but only
+	// when this daemon actually owns a registry to check membership against.
+	// A worker is not the owner of the registry (the hub is): it receives
+	// ids the hub already validated against its own, and rejecting them
+	// locally would make the fail-closed gate on Router.Owns permanent, even
+	// for a worker whose config.toml still carries a stale registry from
+	// before it was demoted from hub.
+	isWorker := strings.EqualFold(strings.TrimSpace(cl.Role), RoleWorker)
+	if len(cl.Instances) > 0 && !isWorker {
 		known := func(id, path string) error {
 			// This daemon's own id always counts as known, even when the
 			// operator has not written an entry for it: the runtime seeds one
@@ -420,17 +467,11 @@ func (c *Config) validateCluster() error {
 			}
 		}
 		for org, id := range cl.Routing.Orgs {
-			if err := ValidateOrgSlug(org); err != nil {
-				return fmt.Errorf("config: cluster.routing.orgs key %q: %w", org, err)
-			}
 			if err := known(id, fmt.Sprintf("cluster.routing.orgs.%q", org)); err != nil {
 				return err
 			}
 		}
 		for repo, id := range cl.Routing.Repos {
-			if err := ValidateRepoSlug(repo); err != nil {
-				return fmt.Errorf("config: cluster.routing.repos key %q: %w", repo, err)
-			}
 			if err := known(id, fmt.Sprintf("cluster.routing.repos.%q", repo)); err != nil {
 				return err
 			}

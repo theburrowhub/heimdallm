@@ -325,6 +325,241 @@ func TestPropagateSkipsDisabledAndTokenlessInstances(t *testing.T) {
 	}
 }
 
+// ------------------------------------------------------- PropagatePartition
+
+func TestPartitionPatchCarriesOnlyTheAssignedSubset(t *testing.T) {
+	patch := PartitionPatch("srv-a", PartitionRules{
+		DefaultInstance: "hub-1",
+		Orgs:            map[string]string{"acme": "srv-a"},
+		Repos:           map[string]string{"acme/tools": "hub-1"},
+	})
+	cluster, ok := patch["cluster"].(map[string]any)
+	if !ok {
+		t.Fatalf("patch = %v, want a cluster table", patch)
+	}
+	if cluster["instance_id"] != "srv-a" {
+		t.Errorf("instance_id = %v, want srv-a", cluster["instance_id"])
+	}
+	if cluster["default_instance"] != "hub-1" {
+		t.Errorf("default_instance = %v, want hub-1", cluster["default_instance"])
+	}
+	for _, forbidden := range []string{"role", "instances", "token", "probe_interval", "round_robin_pool"} {
+		if _, present := cluster[forbidden]; present {
+			t.Errorf("patch.cluster leaked %q; only the partition subset must travel", forbidden)
+		}
+	}
+	routing, ok := cluster["routing"].(map[string]any)
+	if !ok {
+		t.Fatalf("cluster.routing missing: %v", cluster)
+	}
+	if got := routing["orgs"].(map[string]any)["acme"]; got != "srv-a" {
+		t.Errorf("routing.orgs = %v, want acme->srv-a", routing["orgs"])
+	}
+	if got := routing["repos"].(map[string]any)["acme/tools"]; got != "hub-1" {
+		t.Errorf("routing.repos = %v, want acme/tools->hub-1", routing["repos"])
+	}
+}
+
+// partitionRemote is a fake instance whose /health, /cluster/partition and
+// /config behave independently, so the PropagatePartition tests can exercise
+// the modern path, the legacy fallback and the identity-mismatch case.
+type partitionRemote struct {
+	healthID       string // what /health reports as instance_id; "" omits it
+	partitionCode  int    // status PUT /cluster/partition answers with; 0 means 200
+	patchCalls     *int
+	partitionCalls *int
+}
+
+func (r partitionRemote) handler(w http.ResponseWriter, req *http.Request) {
+	switch {
+	case req.URL.Path == "/health":
+		body := map[string]any{"status": "ok", "role": "worker"}
+		if r.healthID != "" {
+			body["instance_id"] = r.healthID
+		}
+		_ = json.NewEncoder(w).Encode(body)
+	case req.URL.Path == "/cluster/partition":
+		if r.partitionCalls != nil {
+			*r.partitionCalls++
+		}
+		code := r.partitionCode
+		if code == 0 {
+			code = http.StatusOK
+		}
+		w.WriteHeader(code)
+		if code == http.StatusOK {
+			_ = json.NewEncoder(w).Encode(map[string]any{"changed": true})
+		} else {
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": "nope"})
+		}
+	case req.URL.Path == "/config" && req.Method == http.MethodPatch:
+		if r.patchCalls != nil {
+			*r.patchCalls++
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	default:
+		http.NotFound(w, req)
+	}
+}
+
+func TestPropagatePartitionPushesPerInstanceIdentity(t *testing.T) {
+	partitionCallsA, partitionCallsB := 0, 0
+	f := newPropagatorFixture(t, "hub", []string{"hub", "srv-a", "srv-b"}, func(id string) func(http.ResponseWriter, *http.Request) {
+		switch id {
+		case "srv-a":
+			return (partitionRemote{healthID: "srv-a", partitionCalls: &partitionCallsA}).handler
+		case "srv-b":
+			return (partitionRemote{healthID: "srv-b", partitionCalls: &partitionCallsB}).handler
+		default:
+			return okHandler(id)
+		}
+	})
+
+	results := f.prop.PropagatePartition(context.Background(), PartitionRules{
+		DefaultInstance: "hub",
+		Orgs:            map[string]string{"acme": "srv-a"},
+	}, nil)
+
+	byID := map[string]PartitionResult{}
+	for _, r := range results {
+		byID[r.InstanceID] = r
+	}
+	if !byID["hub"].Skipped || !byID["hub"].OK {
+		t.Errorf("hub result = %+v, want skipped and OK (self)", byID["hub"])
+	}
+	if !byID["srv-a"].OK || byID["srv-a"].Legacy {
+		t.Errorf("srv-a result = %+v, want OK via the modern path", byID["srv-a"])
+	}
+	if !byID["srv-b"].OK {
+		t.Errorf("srv-b result = %+v, want OK", byID["srv-b"])
+	}
+	if partitionCallsA != 1 || partitionCallsB != 1 {
+		t.Errorf("PUT /cluster/partition calls = a:%d b:%d, want 1 each", partitionCallsA, partitionCallsB)
+	}
+	body := f.daemons["srv-a"].seen()
+	last := body[len(body)-1]
+	if !strings.Contains(last.Body, `"instance_id":"srv-a"`) {
+		t.Errorf("srv-a's push body = %q, want its own id, not a shared one", last.Body)
+	}
+}
+
+func TestPropagatePartitionFallsBackToPatchOnLegacy404(t *testing.T) {
+	patchCalls := 0
+	f := newPropagatorFixture(t, "hub", []string{"hub", "srv-a"}, func(id string) func(http.ResponseWriter, *http.Request) {
+		if id == "srv-a" {
+			return (partitionRemote{healthID: "srv-a", partitionCode: http.StatusNotFound, patchCalls: &patchCalls}).handler
+		}
+		return okHandler(id)
+	})
+
+	results := f.prop.PropagatePartition(context.Background(), PartitionRules{Orgs: map[string]string{"acme": "srv-a"}}, nil)
+	byID := map[string]PartitionResult{}
+	for _, r := range results {
+		byID[r.InstanceID] = r
+	}
+	if !byID["srv-a"].OK || !byID["srv-a"].Legacy {
+		t.Errorf("srv-a result = %+v, want OK and Legacy=true", byID["srv-a"])
+	}
+	if patchCalls != 1 {
+		t.Errorf("PATCH /config calls = %d, want 1 (the legacy fallback)", patchCalls)
+	}
+}
+
+// The Friday case, live: registered under one id, reporting itself as
+// another. A legacy instance cannot adopt a new identity through PATCH
+// /config (its resolveReloadInstanceID does not exist yet), so pushing rules
+// under an id it does not recognise as itself would leave it filtering
+// everything out — the rules must be withheld, not silently misapplied.
+func TestPropagatePartitionWithholdsRulesFromALegacyMismatchedInstance(t *testing.T) {
+	patchCalls := 0
+	f := newPropagatorFixture(t, "hub", []string{"hub", "192-168-1-100-3000"}, func(id string) func(http.ResponseWriter, *http.Request) {
+		if id == "192-168-1-100-3000" {
+			return (partitionRemote{healthID: "friday", partitionCode: http.StatusNotFound, patchCalls: &patchCalls}).handler
+		}
+		return okHandler(id)
+	})
+
+	results := f.prop.PropagatePartition(context.Background(), PartitionRules{Orgs: map[string]string{"Muriano": "192-168-1-100-3000"}}, nil)
+	byID := map[string]PartitionResult{}
+	for _, r := range results {
+		byID[r.InstanceID] = r
+	}
+	res := byID["192-168-1-100-3000"]
+	if res.OK {
+		t.Errorf("result = %+v, want OK=false — rules must not be applied under a mismatched identity", res)
+	}
+	if !res.IdentityMismatch {
+		t.Errorf("result = %+v, want IdentityMismatch=true", res)
+	}
+	if res.Error == "" {
+		t.Error("result carries no error explaining the withheld push")
+	}
+	if patchCalls != 0 {
+		t.Errorf("PATCH /config calls = %d, want 0 (rules withheld, not applied)", patchCalls)
+	}
+}
+
+func TestPropagatePartitionSkipsSelfDisabledAndUnreachable(t *testing.T) {
+	off := newFakeDaemon(t, okHandler("off"))
+	cfg := cfgWith(config.RoleHub, "hub", "hub", map[string]config.InstanceConfig{
+		"hub":  {BaseURL: "http://127.0.0.1:7842", Token: "t"},
+		"off":  {BaseURL: off.URL, Token: "secret", Enabled: boolPtr(false)},
+		"dead": {BaseURL: "http://127.0.0.1:1", Token: "secret"},
+	}, config.RoutingConfig{})
+	reg := NewRegistry(cfg)
+	prop := NewPropagator(reg, func(inst Instance) *Client {
+		if inst.ID == "off" {
+			return NewClient(inst, off.Client())
+		}
+		return NewClient(inst, nil)
+	})
+
+	results := prop.PropagatePartition(context.Background(), PartitionRules{}, nil)
+	byID := map[string]PartitionResult{}
+	for _, r := range results {
+		byID[r.InstanceID] = r
+	}
+	if !byID["hub"].Skipped || !byID["hub"].OK {
+		t.Errorf("hub = %+v, want skipped and OK", byID["hub"])
+	}
+	if !byID["off"].Skipped || byID["off"].OK {
+		t.Errorf("off = %+v, want skipped and not OK", byID["off"])
+	}
+	if len(off.seen()) != 0 {
+		t.Error("a disabled instance must not be contacted")
+	}
+	if byID["dead"].OK || byID["dead"].Error == "" {
+		t.Errorf("dead = %+v, want a failure carrying the reason", byID["dead"])
+	}
+}
+
+// A 503 (still starting) must not be read as "this instance predates the
+// endpoint" — it will accept the same request once it finishes booting, so it
+// is reported as a plain failure to retry, not permanently downgraded to the
+// legacy PATCH path.
+func TestPropagatePartitionTreats503AsRetryNotLegacy(t *testing.T) {
+	patchCalls := 0
+	f := newPropagatorFixture(t, "hub", []string{"hub", "srv-a"}, func(id string) func(http.ResponseWriter, *http.Request) {
+		if id == "srv-a" {
+			return (partitionRemote{healthID: "srv-a", partitionCode: http.StatusServiceUnavailable, patchCalls: &patchCalls}).handler
+		}
+		return okHandler(id)
+	})
+
+	results := f.prop.PropagatePartition(context.Background(), PartitionRules{}, nil)
+	byID := map[string]PartitionResult{}
+	for _, r := range results {
+		byID[r.InstanceID] = r
+	}
+	res := byID["srv-a"]
+	if res.OK || res.Legacy {
+		t.Errorf("result = %+v, want OK=false Legacy=false on a 503", res)
+	}
+	if patchCalls != 0 {
+		t.Errorf("PATCH /config calls = %d, want 0 — a 503 must not trigger the legacy fallback", patchCalls)
+	}
+}
+
 func TestDetectDrift(t *testing.T) {
 	remote := map[string]any{
 		"review_mode":   "single",    // differs

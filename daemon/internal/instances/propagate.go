@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"reflect"
 	"sort"
 	"strings"
@@ -388,4 +390,178 @@ func sortedKeys(table map[string]any) []string {
 // instance that is not registered.
 func ErrNoTargets(targets []string) error {
 	return fmt.Errorf("instances: none of the requested targets are registered: %s", strings.Join(targets, ", "))
+}
+
+// ------------------------------------------------------- Partition propagation
+//
+// The ownership partition is deliberately not just another propagated config
+// key: cluster.* is (correctly) on the local-only denylist above, because
+// most of it — role, the registry, tokens — describes one machine. But the
+// partition itself (an instance's assigned identity, default_instance,
+// routing.orgs/repos) is the one piece of cluster.* that MUST reach every
+// instance, or a worker's Router has nothing to enforce and Owns() fails open
+// — the root cause of theburrowhub/heimdallm#769. This section is a narrow,
+// separate channel for exactly that subset, alongside (not instead of) the
+// denylist Propagate/FilterPropagatable still apply to everything else.
+
+// PartitionRules is the ownership partition the hub computed for the whole
+// fleet: every routing.orgs/routing.repos rule (not filtered to one instance
+// — a worker needs to see rules that point elsewhere too, to know a repo is
+// NOT its own) and the effective default_instance. DefaultInstance should be
+// Router.Fallback() (the resolved value), never the raw configured one, which
+// may itself be empty or point at an unusable instance.
+type PartitionRules struct {
+	DefaultInstance string
+	Orgs            map[string]string
+	Repos           map[string]string
+}
+
+// PartitionPatch renders rules as the [cluster] overlay a legacy instance —
+// one that predates PUT /cluster/partition — accepts through PATCH /config.
+// Sent directly via Client.PatchConfig, bypassing Propagate's
+// FilterPropagatable: that filter always strips cluster.* for the general
+// propagation path, which is correct there and exactly wrong here, since this
+// patch targets cluster.* on purpose and nothing else.
+//
+// targetID becomes cluster.instance_id in the patch, but PatchConfig merges
+// rather than replaces (config.DeepMerge on the receiving end), and a legacy
+// instance has no resolveReloadInstanceID to adopt an id that does not match
+// what it already resolved. PropagatePartition only takes this path once the
+// instance's own reported identity already matches targetID — see
+// pushPartitionTo.
+func PartitionPatch(targetID string, rules PartitionRules) map[string]any {
+	cluster := map[string]any{"instance_id": targetID}
+	if rules.DefaultInstance != "" {
+		cluster["default_instance"] = rules.DefaultInstance
+	}
+	routing := map[string]any{}
+	if len(rules.Orgs) > 0 {
+		routing["orgs"] = toAnyMap(rules.Orgs)
+	}
+	if len(rules.Repos) > 0 {
+		routing["repos"] = toAnyMap(rules.Repos)
+	}
+	if len(routing) > 0 {
+		cluster["routing"] = routing
+	}
+	return map[string]any{"cluster": cluster}
+}
+
+// toAnyMap widens a string map to map[string]any, the shape a TOML/JSON patch
+// body needs.
+func toAnyMap(in map[string]string) map[string]any {
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+// PartitionResult is the outcome of pushing the partition to one instance.
+type PartitionResult struct {
+	InstanceID string `json:"instance_id"`
+	Name       string `json:"name"`
+	OK         bool   `json:"ok"`
+	Skipped    bool   `json:"skipped,omitempty"`
+	Error      string `json:"error,omitempty"`
+	// Legacy reports that PUT /cluster/partition 404'd and the rules (if
+	// applied) went through the PATCH /config fallback instead.
+	Legacy bool `json:"legacy,omitempty"`
+	// IdentityMismatch reports that this instance's own /health disagrees
+	// with the id it is registered under. On the modern path PutPartition
+	// resolves this (the hub assigns the id and the instance adopts it); on
+	// the legacy path it cannot, so the rules are withheld instead of applied
+	// under an identity the instance does not recognise as itself.
+	IdentityMismatch bool `json:"identity_mismatch,omitempty"`
+}
+
+// PropagatePartition pushes rules to every usable, enabled, non-self
+// instance, each assigned its own registry id.
+//
+// targets restricts the push the same way Propagate's does; empty means every
+// usable instance. The hub enforces the partition through its own Router
+// directly and is always skipped, the same reasoning as Propagate's self
+// case.
+func (p *Propagator) PropagatePartition(ctx context.Context, rules PartitionRules, targets []string) []PartitionResult {
+	results := make([]PartitionResult, 0, p.registry.Len())
+	for _, inst := range p.registry.List() {
+		if len(targets) > 0 && !containsID(targets, inst.ID) {
+			continue
+		}
+		res := PartitionResult{InstanceID: inst.ID, Name: inst.Name}
+		switch {
+		case inst.Self:
+			res.Skipped, res.OK = true, true
+			res.Error = "hub enforces the partition through its own Router, not a push to itself"
+		case !inst.Enabled:
+			res.Skipped = true
+			res.Error = "instance is disabled"
+		case inst.TokenErr != nil:
+			res.Error = inst.TokenErr.Error()
+		default:
+			p.pushPartitionTo(ctx, inst, rules, &res)
+		}
+		results = append(results, res)
+	}
+	return results
+}
+
+// pushPartitionTo delivers rules to one instance, filling res in place.
+//
+// Health() runs first: it is the cheap, unauthenticated call, and it gives
+// reachability, the instance's own reported identity and its version in one
+// round trip — exactly what deciding between the modern and legacy paths (and
+// detecting an identity mismatch) needs, without a second call to an instance
+// that turns out to be unreachable.
+func (p *Propagator) pushPartitionTo(ctx context.Context, inst Instance, rules PartitionRules, res *PartitionResult) {
+	client := p.newClient(inst)
+	health, err := client.Health(ctx)
+	if err != nil {
+		res.Error = err.Error()
+		return
+	}
+	if health.InstanceID != "" && health.InstanceID != inst.ID {
+		res.IdentityMismatch = true
+	}
+
+	push := PartitionPush{
+		InstanceID:      inst.ID,
+		DefaultInstance: rules.DefaultInstance,
+		Orgs:            rules.Orgs,
+		Repos:           rules.Repos,
+		HubInstanceID:   p.registry.SelfID(),
+	}
+	if _, err := client.PutPartition(ctx, push); err != nil {
+		var se *StatusError
+		if errors.As(err, &se) && se.Status == http.StatusNotFound {
+			res.Legacy = true
+			if res.IdentityMismatch {
+				// The legacy PATCH /config path cannot adopt a new identity —
+				// that requires resolveReloadInstanceID, which does not exist
+				// on an instance old enough to 404 here. Applying the rules
+				// under an id this instance does not recognise as itself
+				// would leave it filtering with the wrong selfID: exactly
+				// the live mismatch behind theburrowhub/heimdallm#769
+				// (registered as "192-168-1-100-3000", reporting itself as
+				// "friday"). Withhold instead, and say so plainly enough for
+				// an operator to act: update and restart this instance.
+				res.Error = fmt.Sprintf(
+					"registered as %q but reports itself as %q; update this instance to receive its partition (rules withheld to avoid filtering under the wrong identity)",
+					inst.ID, health.InstanceID)
+				return
+			}
+			if _, patchErr := client.PatchConfig(ctx, PartitionPatch(inst.ID, rules)); patchErr != nil {
+				res.Error = patchErr.Error()
+				return
+			}
+			res.OK = true
+			return
+		}
+		// A 503 (still starting) is a plain failure to retry on the next
+		// propagation cycle, not "this instance predates the endpoint" — it
+		// will accept the same request once it finishes booting.
+		res.Error = err.Error()
+		return
+	}
+	res.OK = true
 }

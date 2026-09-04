@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/api/api_client.dart';
 import '../../core/instances/aggregation.dart';
 import '../../core/instances/instances_providers.dart';
+import '../../core/instances/models.dart' show RoutingRules;
 import '../instances/instances_screen.dart';
 import '../instances/widgets/instance_badge.dart';
 import '../instances/widgets/instance_selector.dart';
@@ -288,22 +289,21 @@ class SortNotifier extends Notifier<SortMode> {
 // ── Unified activity item ────────────────────────────────────────────────────
 
 sealed class _ActivityItem {
-  const _ActivityItem({this.instanceId = '', this.instanceName = ''});
-
-  /// Which instance served this row. Empty on a single-daemon install, where
-  /// no badge is rendered at all.
-  final String instanceId;
-  final String instanceName;
+  const _ActivityItem();
 }
 
 class _PRItem extends _ActivityItem {
-  final PR pr;
-  const _PRItem(this.pr, {super.instanceId, super.instanceName});
+  final InstanceGroup<PR> group;
+  const _PRItem(this.group);
+
+  PR get pr => group.value;
 }
 
 class _IssueItem extends _ActivityItem {
-  final TrackedIssue issue;
-  const _IssueItem(this.issue, {super.instanceId, super.instanceName});
+  final InstanceGroup<TrackedIssue> group;
+  const _IssueItem(this.group);
+
+  TrackedIssue get issue => group.value;
 }
 
 String _itemType(_ActivityItem item) => switch (item) {
@@ -313,6 +313,52 @@ String _itemType(_ActivityItem item) => switch (item) {
         ? 'dev'
         : 'it',
 };
+
+/// The identity key [groupByIdentity] collapses PR rows on: repo + number,
+/// not the local store id. A PR's `id` is a per-daemon SQLite row and is not
+/// comparable across instances (two daemons can independently assign PR #769
+/// different ids); `githubId` is not reliable either — the daemon's own
+/// GetPRByRepoNumber falls back away from it because GitHub's Search and
+/// Pulls APIs can return different global ids for the same PR. repo+number is
+/// what `reviewKeyFor` and `reconcileReviewing` already key on for the same
+/// reason.
+String _prIdentityKey(PR pr) => '${pr.repo}#${pr.number}';
+String _issueIdentityKey(TrackedIssue issue) => '${issue.repo}#${issue.number}';
+
+/// Picks which instance's row is authoritative for a group of the same PR or
+/// issue reported by several instances (theburrowhub/heimdallm#769).
+///
+/// In order: the routing owner, if routing is engaged and one of the
+/// candidates is it; otherwise whichever candidate actually has a review
+/// recorded (ties broken by the newer review) — a row with no work yet is
+/// less informative than one that does, regardless of registration order;
+/// otherwise the first candidate, deterministically.
+///
+/// [rules]'s `enabled` is checked explicitly rather than trusting
+/// `ownerFor` alone: the daemon's own `Router.OwnerFor` returns "" when
+/// routing is disabled, but `RoutingRules.ownerFor` does not re-derive that —
+/// it happily returns `defaultInstance` even with routing off, which would
+/// make a disabled fallback win over a real review.
+InstanceScoped<T> _preferOwner<T>(
+  List<InstanceScoped<T>> candidates, {
+  required String Function(T value) repoOf,
+  required bool Function(T value) hasWork,
+  required int Function(T value) reviewIdOf,
+  RoutingRules? rules,
+}) {
+  if (candidates.length == 1) return candidates.first;
+  if (rules != null && rules.enabled) {
+    final owner = rules.ownerFor(repoOf(candidates.first.value));
+    if (owner.isNotEmpty) {
+      final match = candidates.where((c) => c.instanceId == owner).firstOrNull;
+      if (match != null) return match;
+    }
+  }
+  final withWork = candidates.where((c) => hasWork(c.value)).toList();
+  if (withWork.isEmpty) return candidates.first;
+  withWork.sort((a, b) => reviewIdOf(b.value).compareTo(reviewIdOf(a.value)));
+  return withWork.first;
+}
 
 String _itemRepo(_ActivityItem item) => switch (item) {
   _PRItem(:final pr) => pr.repo,
@@ -438,6 +484,15 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
     // served it; the flat lists below are just their values.
     final prsAsync = ref.watch(prsByInstanceProvider);
     final issuesAsync = ref.watch(issuesByInstanceProvider);
+    // Discovery is global (every instance learns about every repo), so the
+    // same PR or issue legitimately arrives from more than one instance's
+    // fan-out — grouping below collapses those into one row instead of the
+    // duplicate rows behind theburrowhub/heimdallm#769. `.value` rather than
+    // `.future`/`.when`: the activity list must not block or spinner waiting
+    // on the control plane, and a standalone install's kNotAClusterHubError
+    // just leaves this null, which _preferOwner already treats the same as
+    // "no rules".
+    final routingRules = ref.watch(routingRulesProvider).value;
     final sort = ref.watch(reviewsSortProvider);
     final filters = ref.watch(activityFiltersProvider);
     final emptyToolbar = ActivityFilterBar(
@@ -477,24 +532,36 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
       ...issues.map((i) => i.repo),
     }..remove('');
 
+    // Group before building items, not after: the "N items" count and the
+    // filters below must see the collapsed rows, or a PR reported by two
+    // instances would count (and could be found by search) twice.
+    final prGroups = groupByIdentity<PR>(
+      prScoped.where((e) => e.value.repo.isNotEmpty).toList(),
+      keyOf: _prIdentityKey,
+      pick: (candidates) => _preferOwner<PR>(
+        candidates,
+        repoOf: (pr) => pr.repo,
+        hasWork: (pr) => pr.latestReview != null,
+        reviewIdOf: (pr) => pr.latestReview?.id ?? 0,
+        rules: routingRules,
+      ),
+    );
+    final issueGroups = groupByIdentity<TrackedIssue>(
+      issueScoped,
+      keyOf: _issueIdentityKey,
+      pick: (candidates) => _preferOwner<TrackedIssue>(
+        candidates,
+        repoOf: (issue) => issue.repo,
+        hasWork: (issue) => issue.latestReview != null,
+        reviewIdOf: (issue) => issue.latestReview?.id ?? 0,
+        rules: routingRules,
+      ),
+    );
+
     // Build unified list of items.
     final List<_ActivityItem> items = [
-      ...prScoped
-          .where((e) => e.value.repo.isNotEmpty)
-          .map(
-            (e) => _PRItem(
-              e.value,
-              instanceId: e.instanceId,
-              instanceName: e.instanceName,
-            ),
-          ),
-      ...issueScoped.map(
-        (e) => _IssueItem(
-          e.value,
-          instanceId: e.instanceId,
-          instanceName: e.instanceName,
-        ),
-      ),
+      ...prGroups.map(_PRItem.new),
+      ...issueGroups.map(_IssueItem.new),
     ];
 
     // Apply filters.
@@ -574,14 +641,8 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
         ...header,
         ...filtered.map(
           (item) => switch (item) {
-            _PRItem(:final pr, :final instanceId, :final instanceName) =>
-              _PRTile(
-                pr: pr,
-                instanceId: instanceId,
-                instanceName: instanceName,
-              ),
-            _IssueItem(:final issue, :final instanceId) =>
-              _IssueActivityTile(issue: issue, instanceId: instanceId),
+            _PRItem(:final group) => _PRTile(group: group),
+            _IssueItem(:final group) => _IssueActivityTile(group: group),
           },
         ),
       ],
@@ -650,38 +711,34 @@ class _ActivityTabState extends ConsumerState<_ActivityTab> {
 // ── PR Tile ───────────────────────────────────────────────────────────────────
 
 class _PRTile extends ConsumerStatefulWidget {
-  final PR pr;
-  final String instanceId;
-  final String instanceName;
-  const _PRTile({
-    required this.pr,
-    this.instanceId = '',
-    this.instanceName = '',
-  });
+  final InstanceGroup<PR> group;
+  const _PRTile({required this.group});
 
   @override
   ConsumerState<_PRTile> createState() => _PRTileState();
 }
 
 class _PRTileState extends ConsumerState<_PRTile> {
-  String get _reviewKey =>
-      reviewKeyFor(widget.instanceId, widget.pr.repo, widget.pr.number);
+  PR get _pr => widget.group.value;
+  String get _instanceId => widget.group.instanceId;
+
+  String get _reviewKey => reviewKeyFor(_instanceId, _pr.repo, _pr.number);
 
   /// The client for the instance holding this PR, not whichever one the
   /// dashboard is currently scoped to.
-  ApiClient get _api => clientForInstanceOf(ref, widget.instanceId);
+  ApiClient get _api => clientForInstanceOf(ref, _instanceId);
   bool _cancelling = false;
 
   Future<void> _triggerReview() async {
     // Optimistically mark as reviewing before the SSE event arrives.
     // Baseline = current latestReview.id (0 if none) so reconciliation can
     // later distinguish a stuck key from an in-progress re-review.
-    final baseline = widget.pr.latestReview?.id ?? 0;
+    final baseline = _pr.latestReview?.id ?? 0;
     ref
         .read(reviewingPRsProvider.notifier)
         .update((s) => {...s, _reviewKey: baseline});
     try {
-      await _api.triggerReview(widget.pr.id);
+      await _api.triggerReview(_pr.id);
     } catch (e) {
       ref
           .read(reviewingPRsProvider.notifier)
@@ -690,25 +747,48 @@ class _PRTileState extends ConsumerState<_PRTile> {
     }
   }
 
+  /// Dismisses the PR on EVERY instance that reported it, not just the
+  /// primary. A group exists because discovery is global — every member
+  /// still has its own local row for this PR — so dismissing only the
+  /// primary would leave the others' rows live, and the PR would reappear
+  /// (now with one fewer badge) on the next refresh.
   Future<void> _dismiss() async {
-    final api = _api;
-    try {
-      await api.dismissPR(widget.pr.id);
-      ref.invalidate(prsByInstanceProvider);
-      if (mounted) {
-        showToast(
-          context,
-          'PR #${widget.pr.number} dismissed',
-          duration: const Duration(seconds: 5),
-          actionLabel: 'Undo',
-          onAction: () async {
-            await api.undismissPR(widget.pr.id);
-            ref.invalidate(prsByInstanceProvider);
-          },
-        );
-      }
-    } catch (e) {
-      if (mounted) showToast(context, 'Error: $e', isError: true);
+    final members = widget.group.members;
+    final errors = <Object>[];
+    await Future.wait(
+      members.map((m) async {
+        try {
+          await clientForInstanceOf(ref, m.instanceId).dismissPR(m.value.id);
+        } catch (e) {
+          errors.add(e);
+        }
+      }),
+    );
+    ref.invalidate(prsByInstanceProvider);
+    if (!mounted) return;
+    if (errors.isEmpty) {
+      showToast(
+        context,
+        'PR #${_pr.number} dismissed',
+        duration: const Duration(seconds: 5),
+        actionLabel: 'Undo',
+        onAction: () async {
+          await Future.wait(
+            members.map((m) async {
+              try {
+                await clientForInstanceOf(ref, m.instanceId).undismissPR(m.value.id);
+              } catch (_) {
+                // Best-effort undo: a member that fails to un-dismiss stays
+                // dismissed there, which is recoverable from the Dismissed
+                // filter — better than blocking the other members' undo.
+              }
+            }),
+          );
+          ref.invalidate(prsByInstanceProvider);
+        },
+      );
+    } else {
+      showToast(context, 'Error dismissing PR #${_pr.number}: ${errors.first}', isError: true);
     }
   }
 
@@ -718,7 +798,7 @@ class _PRTileState extends ConsumerState<_PRTile> {
       builder: (dialogContext) => AlertDialog(
         title: const Text('Cancel this review?'),
         content: Text(
-          'The active agent process for ${widget.pr.repo} #${widget.pr.number} '
+          'The active agent process for ${_pr.repo} #${_pr.number} '
           'will be terminated. Other reviews will continue running.',
         ),
         actions: [
@@ -736,7 +816,7 @@ class _PRTileState extends ConsumerState<_PRTile> {
     if (confirmed != true || !mounted) return;
     setState(() => _cancelling = true);
     try {
-      await _api.cancelReview(widget.pr.id);
+      await _api.cancelReview(_pr.id);
       if (mounted) showToast(context, 'Cancellation requested');
     } catch (e) {
       if (mounted) {
@@ -748,7 +828,7 @@ class _PRTileState extends ConsumerState<_PRTile> {
 
   @override
   Widget build(BuildContext context) {
-    final pr = widget.pr;
+    final pr = _pr;
     final reviewed = pr.latestReview != null;
     final status = pr.reviewStatus;
     final failure = status != null && !status.active && status.error.isNotEmpty
@@ -764,7 +844,7 @@ class _PRTileState extends ConsumerState<_PRTile> {
         margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 3),
         child: InkWell(
           borderRadius: BorderRadius.circular(12),
-          onTap: () => context.push(prDetailRoute(pr.id, widget.instanceId)),
+          onTap: () => context.push(prDetailRoute(pr.id, _instanceId)),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
             child: Row(
@@ -815,12 +895,16 @@ class _PRTileState extends ConsumerState<_PRTile> {
                               overflow: TextOverflow.ellipsis,
                             ),
                           ),
-                          if (widget.instanceId.isNotEmpty) ...[
+                          if (widget.group.members.isNotEmpty) ...[
                             const SizedBox(width: 6),
-                            InstanceBadge(
-                              instanceId: widget.instanceId,
-                              instanceName: widget.instanceName,
-                              compact: true,
+                            Flexible(
+                              child: InstanceBadges(
+                                instances: [
+                                  for (final m in widget.group.orderedMembers)
+                                    (id: m.instanceId, name: m.instanceName),
+                                ],
+                                compact: true,
+                              ),
                             ),
                           ],
                         ],
@@ -950,45 +1034,60 @@ class _PRTileState extends ConsumerState<_PRTile> {
 }
 
 class _IssueActivityTile extends ConsumerStatefulWidget {
-  final TrackedIssue issue;
-  final String instanceId;
-  const _IssueActivityTile({required this.issue, this.instanceId = ''});
+  final InstanceGroup<TrackedIssue> group;
+  const _IssueActivityTile({required this.group});
 
   @override
   ConsumerState<_IssueActivityTile> createState() => _IssueActivityTileState();
 }
 
 class _IssueActivityTileState extends ConsumerState<_IssueActivityTile> {
-  String get _type => _itemType(_IssueItem(widget.issue));
+  TrackedIssue get _issue => widget.group.value;
+  String get _instanceId => widget.group.instanceId;
+  String get _type => _itemType(_IssueItem(widget.group));
 
-  /// The client for the instance holding this issue.
-  ApiClient get _api => clientForInstanceOf(ref, widget.instanceId);
-
+  /// Dismisses the issue on every instance that reported it — see
+  /// _PRTileState._dismiss for why this must fan out rather than touch only
+  /// the primary.
   Future<void> _dismiss() async {
-    final api = _api;
-    try {
-      await api.dismissIssue(widget.issue.id);
-      ref.invalidate(issuesByInstanceProvider);
-      if (mounted) {
-        showToast(
-          context,
-          'Issue #${widget.issue.number} dismissed',
-          duration: const Duration(seconds: 5),
-          actionLabel: 'Undo',
-          onAction: () async {
-            await api.undismissIssue(widget.issue.id);
-            ref.invalidate(issuesByInstanceProvider);
-          },
-        );
-      }
-    } catch (e) {
-      if (mounted) showToast(context, 'Error: $e', isError: true);
+    final members = widget.group.members;
+    final errors = <Object>[];
+    await Future.wait(
+      members.map((m) async {
+        try {
+          await clientForInstanceOf(ref, m.instanceId).dismissIssue(m.value.id);
+        } catch (e) {
+          errors.add(e);
+        }
+      }),
+    );
+    ref.invalidate(issuesByInstanceProvider);
+    if (!mounted) return;
+    if (errors.isEmpty) {
+      showToast(
+        context,
+        'Issue #${_issue.number} dismissed',
+        duration: const Duration(seconds: 5),
+        actionLabel: 'Undo',
+        onAction: () async {
+          await Future.wait(
+            members.map((m) async {
+              try {
+                await clientForInstanceOf(ref, m.instanceId).undismissIssue(m.value.id);
+              } catch (_) {}
+            }),
+          );
+          ref.invalidate(issuesByInstanceProvider);
+        },
+      );
+    } else {
+      showToast(context, 'Error dismissing issue #${_issue.number}: ${errors.first}', isError: true);
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final issue = widget.issue;
+    final issue = _issue;
     final reviewed = issue.latestReview != null;
     final severity = issue.latestReview?.severity ?? '';
     // auto_implement_no_changes is a terminal "needs attention" state —
@@ -1004,8 +1103,7 @@ class _IssueActivityTileState extends ConsumerState<_IssueActivityTile> {
         margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 3),
         child: InkWell(
           borderRadius: BorderRadius.circular(12),
-          onTap: () =>
-              context.push(issueDetailRoute(issue.id, widget.instanceId)),
+          onTap: () => context.push(issueDetailRoute(issue.id, _instanceId)),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
             child: Row(
@@ -1042,11 +1140,29 @@ class _IssueActivityTileState extends ConsumerState<_IssueActivityTile> {
                         overflow: TextOverflow.ellipsis,
                       ),
                       const SizedBox(height: 4),
-                      Text(
-                        '${issue.repo} · #${issue.number} · ${issue.author}',
-                        style: Theme.of(context).textTheme.bodySmall,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
+                      Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              '${issue.repo} · #${issue.number} · ${issue.author}',
+                              style: Theme.of(context).textTheme.bodySmall,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          if (widget.group.members.isNotEmpty) ...[
+                            const SizedBox(width: 6),
+                            Flexible(
+                              child: InstanceBadges(
+                                instances: [
+                                  for (final m in widget.group.orderedMembers)
+                                    (id: m.instanceId, name: m.instanceName),
+                                ],
+                                compact: true,
+                              ),
+                            ),
+                          ],
+                        ],
                       ),
                     ],
                   ),

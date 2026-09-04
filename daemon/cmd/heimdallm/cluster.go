@@ -81,6 +81,16 @@ const (
 	// takeoverAfterFailedProbes consecutive failed probes. This daemon does its
 	// work, and says so loudly, because it may be duplicating it.
 	verdictTakeOver
+	// verdictNotAssigned: this daemon is a worker (cluster.role = "worker"),
+	// and repo resolves to no owner it can confirm is itself — no rule, no
+	// registered owner, or an owner it cannot use. Unlike verdictActLocally on
+	// a hub or standalone daemon, this must NOT be read as "acting locally is
+	// safe": a worker has no registry of its own to fall back on, the hub is
+	// the only authority on the partition, and reviewing everything it
+	// discovers while waiting for that partition is exactly the bug behind
+	// theburrowhub/heimdallm#769. The repo is left alone until the hub assigns
+	// it explicitly (PUT /cluster/partition). See Router.WithheldFromWorker.
+	verdictNotAssigned
 )
 
 // instanceNotes is the hub's short-term memory about each routed instance: the
@@ -389,9 +399,17 @@ func (cs *clusterState) Update(cfg *config.Config) (proberBuilt bool) {
 // loop covers its repos without any help from the hub, so dispatch only ever
 // accelerated work that instance would have found on its own tick.
 //
-// Fail-open in one place still: a nil prober means this daemon is not a hub
-// (only a hub builds one) and has nothing to observe the owner with, so it
-// dispatches and lets the RPC answer the question.
+// Fail-open in one place still, for a hub or standalone daemon: a nil prober
+// means this daemon is not a hub (only a hub builds one) and has nothing to
+// observe the owner with, so it dispatches and lets the RPC answer the
+// question.
+//
+// A worker inverts every one of the three verdictActLocally branches below
+// into verdictNotAssigned instead, via Router.WithheldFromWorker. A worker
+// has no registry of its own — the hub is the only authority on who owns
+// what — so "no owner resolvable" or "the resolved owner is not registered
+// here" means "the hub has not assigned this to me", not "acting locally is
+// safe". See verdictNotAssigned's own doc for why this distinction exists.
 func (cs *clusterState) ownerVerdictFor(repo string) (instances.Instance, ownerVerdict) {
 	if cs == nil {
 		return instances.Instance{}, verdictActLocally
@@ -406,10 +424,19 @@ func (cs *clusterState) ownerVerdictFor(repo string) (instances.Instance, ownerV
 
 	owner := router.OwnerFor(repo)
 	if owner == "" {
+		if router.WithheldFromWorker(repo) {
+			return instances.Instance{}, verdictNotAssigned
+		}
 		return instances.Instance{}, verdictActLocally
 	}
 	inst, found := registry.Get(owner)
-	if !found || inst.Self {
+	if !found {
+		if router.WithheldFromWorker(repo) {
+			return instances.Instance{}, verdictNotAssigned
+		}
+		return instances.Instance{}, verdictActLocally
+	}
+	if inst.Self {
 		return instances.Instance{}, verdictActLocally
 	}
 	// A rule can name an instance the operator has disabled, or one whose
@@ -420,6 +447,9 @@ func (cs *clusterState) ownerVerdictFor(repo string) (instances.Instance, ownerV
 	// instance is absent from HealthyIDs *and* is not ConfirmedDown (the
 	// prober has no state for it), which lands on verdictDeferToOwner.
 	if !inst.Usable() {
+		if router.WithheldFromWorker(repo) {
+			return instances.Instance{}, verdictNotAssigned
+		}
 		return instances.Instance{}, verdictActLocally
 	}
 	if prober == nil {
@@ -474,6 +504,9 @@ func (cs *clusterState) dispatch(ctx context.Context, repo, op string, do func(*
 		return false
 	case verdictDeferToOwner:
 		cs.noteDeferral(repo, op, inst)
+		return true
+	case verdictNotAssigned:
+		cs.noteNotAssigned(repo, op)
 		return true
 	default: // verdictActLocally
 		return false
@@ -583,6 +616,40 @@ func (cs *clusterState) noteDeferral(repo, op string, inst instances.Instance) {
 	slog.Debug(msg, args...)
 }
 
+// notAssignedNotesBucket is the instanceNotes key noteNotAssigned dedups
+// under. There is deliberately no real instance id to key by: verdictNotAssigned
+// covers repos with no resolvable owner at all (an unassigned repo with no
+// default_instance pushed yet), not only ones naming an instance this worker
+// cannot see in its own (empty, by design) registry.
+//
+// Leading "#" is load-bearing, not decoration: config.ValidateInstanceID
+// requires an alphanumeric first character, so this string can never be a
+// real instance id an operator registers — a plain "unassigned" could,
+// which would silently collide this dedup bucket with that instance's own
+// deferral/dispatch-failure notices. PR review feedback (#770).
+const notAssignedNotesBucket = "#unassigned"
+
+// noteNotAssigned reports that this worker deliberately left repo alone
+// because the hub has not assigned it here — as opposed to verdictActLocally,
+// which means there is genuinely nobody else to defer to. Silence here is
+// what an operator would read as "this worker just isn't reviewing
+// anything", so the first report per (operation, repo) is a WARN; later polls
+// of the same, still-unassigned unit log at Debug, the same dedup discipline
+// noteDeferral and noteDispatchFailure already use.
+//
+// Cleared, like every other note, on the next config reload — which is fine
+// here: a repo still unassigned after a reload is exactly the case worth
+// reporting again, not a repeat to swallow.
+func (cs *clusterState) noteNotAssigned(repo, op string) {
+	msg := "cluster: this worker has no partition rule for repo yet; waiting for the hub to push one (PUT /cluster/partition) instead of reviewing it"
+	args := []any{"repo", repo, "operation", op}
+	if cs.notes.claim(notAssignedNotesBucket, noticeSubject("not_assigned", dispatchUnit(op, repo))) {
+		slog.Warn(msg, args...)
+		return
+	}
+	slog.Debug(msg, args...)
+}
+
 // announceTakeover reports, once per (instance, operation, repo) outage, that
 // this daemon has stopped deferring to another instance and is doing its work.
 //
@@ -671,6 +738,11 @@ func (cs *clusterState) OwnerCanHandle(repo string) bool {
 		// the PR path logged it.
 		cs.noteDeferral(repo, "issue_triage", inst)
 		return true
+	case verdictNotAssigned:
+		// Same reasoning as dispatch's case: this worker is not the one to
+		// triage repo's issues, whether or not anyone else currently is.
+		cs.noteNotAssigned(repo, "issue_triage")
+		return true
 	default:
 		return verdict == verdictDispatch
 	}
@@ -737,22 +809,117 @@ func propagateClusterConfig(ctx context.Context, cfgPath string, cs *clusterStat
 	}
 }
 
-// resolveReloadInstanceID keeps this daemon's identity stable in memory across
-// reloads while recovering from booting before [cluster] existed: if identity
-// was never resolved (current is empty, because clustering was off when
-// ensureInstanceID ran at boot) and the newly reloaded config now wants
-// clustering, resolve — and, if needed, generate and persist — an identity now
-// instead of leaving it stuck at "" until the next full process restart.
+// propagatePartition pushes the ownership partition — this instance's
+// assigned identity, default_instance and routing.orgs/repos — to every
+// usable instance in the registry, each under its own id.
 //
+// This is the mechanism that actually closes theburrowhub/heimdallm#769: a
+// worker with no partition of its own fails closed (Router.worker treats "no
+// resolvable owner" as "not mine", not "act locally" — see Owns), so it needs
+// one of these pushes to own anything at all. Called alongside
+// propagateClusterConfig on every hub reload; the two never race over the
+// same keys — FilterPropagatable always strips cluster.* from the general
+// push, and this one touches nothing else — so there is nothing to order
+// between them.
+func propagatePartition(ctx context.Context, cs *clusterState) {
+	snap := cs.Snapshot()
+	if snap.Router == nil {
+		return
+	}
+	rules := snap.Router.RulesSnapshot()
+	results := snap.Propagator.PropagatePartition(ctx, instances.PartitionRules{
+		DefaultInstance: snap.Router.Fallback(),
+		Orgs:            rules.Orgs,
+		Repos:           rules.Repos,
+	}, nil)
+
+	for _, res := range results {
+		switch {
+		case res.IdentityMismatch:
+			// This is the Friday case, surfaced: registered under one id,
+			// reporting itself as another. Neither push path can enforce a
+			// partition an instance does not recognise as its own — the
+			// operator has to fix the mismatch (update cluster.instances.*
+			// to the reported id, or restart the instance so it adopts the
+			// registered one).
+			//
+			// res.Error is included even though the withheld-on-legacy path
+			// already folds this same explanation into it: a mismatch
+			// observed alongside an UNRELATED push failure (a network error,
+			// a 500) would otherwise have that failure silently dropped —
+			// only this warning logged, with nothing pointing at the actual
+			// cause. PR review feedback (#770).
+			slog.Warn("cluster: instance is registered under one id but reports itself as another; its partition cannot be enforced until this is fixed",
+				"instance", res.InstanceID, "instance_name", res.Name,
+				"hint", "cluster.instances."+res.InstanceID, "err", res.Error)
+		case !res.OK && !res.Skipped:
+			slog.Warn("cluster: partition propagation failed", "instance", res.InstanceID, "instance_name", res.Name, "err", res.Error)
+		case res.Legacy && res.OK:
+			slog.Info("cluster: instance predates PUT /cluster/partition; its rules were pushed through the legacy PATCH /config path instead",
+				"instance", res.InstanceID)
+		}
+	}
+}
+
+// resolveReloadInstanceID keeps this daemon's identity stable across reloads,
+// with two distinct jobs.
+//
+// The original one: recover from booting before [cluster] existed. If
+// identity was never resolved (current is empty, because clustering was off
+// when ensureInstanceID ran at boot) and the newly reloaded config now wants
+// clustering, resolve — and, if needed, generate and persist — an identity
+// now instead of leaving it stuck at "" until the next full process restart.
 // A "" selfID makes Router.Owns fail open (it treats an unidentifiable daemon
-// as owning everything), which is what let a hub silently keep reviewing repos
-// that were routed away from it after an operator added [cluster] without
-// restarting.
+// as owning everything), which is what let a hub silently keep reviewing
+// repos that were routed away from it after an operator added [cluster]
+// without restarting.
+//
+// The second: adopt an identity the hub assigned. PUT /cluster/partition
+// writes cluster.instance_id directly into a worker's config.toml — it is how
+// the hub reconciles a mismatch like theburrowhub/heimdallm#769's, where an
+// instance was registered under a slugified address ("192-168-1-100-3000")
+// while it reported itself as something else ("friday") — and the next
+// reload must pick that value up without a restart, the same way the first
+// job avoids one. Restricted to a non-hub: a hub's identity changing under it
+// in place would leave its own registry and every routing rule still naming
+// the old id, silently orphaning everything the hub itself owns.
 func resolveReloadInstanceID(current string, newCfg *config.Config, dataDir string) (string, error) {
+	explicit := strings.TrimSpace(newCfg.Cluster.InstanceID)
+	if explicit != "" && explicit != current && !newCfg.IsHub() {
+		if err := config.ValidateInstanceID(explicit); err != nil {
+			return "", err
+		}
+		if err := persistInstanceID(dataDir, explicit); err != nil {
+			return "", err
+		}
+		if current != "" {
+			slog.Warn("cluster: adopting the instance id assigned by the hub", "was", current, "now", explicit)
+		}
+		return explicit, nil
+	}
 	if strings.TrimSpace(current) != "" || !newCfg.ClusterEnabled() {
 		return current, nil
 	}
 	return ensureInstanceID(newCfg, dataDir)
+}
+
+// persistInstanceID writes id to <dataDir>/instance_id, overwriting whatever
+// was there.
+//
+// Deliberately O_TRUNC rather than ensureInstanceID's O_CREATE|O_EXCL: that
+// exclusivity resolves a startup race between two processes generating an id
+// at the same time by making the loser adopt the winner's value. Here the
+// value comes from outside (the hub) and must win outright — if it lost to a
+// stale file, an operator hand-editing or wiping config.toml back to the old
+// identity would keep this daemon reviewing under an id the hub no longer
+// recognises as the owner of anything, reopening the exact bug this call
+// exists to close.
+func persistInstanceID(dir, id string) error {
+	path := filepath.Join(dir, "instance_id")
+	if err := os.WriteFile(path, []byte(id+"\n"), instanceIDFileMode); err != nil {
+		return fmt.Errorf("instance_id: persist %s: %w", path, err)
+	}
+	return nil
 }
 
 // Router returns the live router. Never nil.

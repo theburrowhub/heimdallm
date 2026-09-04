@@ -200,6 +200,55 @@ func TestClientPatchConfigTolerantOfUnparseableSuccess(t *testing.T) {
 	}
 }
 
+func TestClientPutPartitionSendsTokenAndBody(t *testing.T) {
+	f := newFakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"instance_id": "srv-a", "changed": true})
+	})
+	c := NewClient(f.instance("srv-a"), f.Client())
+	push := PartitionPush{
+		InstanceID:      "srv-a",
+		DefaultInstance: "hub-1",
+		Orgs:            map[string]string{"acme": "srv-a"},
+		Repos:           map[string]string{},
+		HubInstanceID:   "hub-1",
+		HubVersion:      "0.8.18",
+	}
+	out, err := c.PutPartition(context.Background(), push)
+	if err != nil {
+		t.Fatalf("PutPartition() = %v", err)
+	}
+	if out["changed"] != true {
+		t.Errorf("response = %v, want changed=true", out)
+	}
+	req := f.seen()[0]
+	if req.Method != http.MethodPut || req.Path != "/cluster/partition" {
+		t.Errorf("request = %s %s, want PUT /cluster/partition", req.Method, req.Path)
+	}
+	if req.Token != "secret" {
+		t.Errorf("token = %q, want the instance token", req.Token)
+	}
+	if !strings.Contains(req.Body, "acme") || !strings.Contains(req.Body, "hub-1") {
+		t.Errorf("body = %q, want the pushed partition", req.Body)
+	}
+}
+
+// A 404 means the remote predates this endpoint — the caller (propagate.go)
+// needs to tell that apart from every other failure to fall back correctly.
+func TestClientPutPartitionSurfacesA404AsStatusError(t *testing.T) {
+	f := newFakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"not found"}`))
+	})
+	_, err := NewClient(f.instance("srv-a"), f.Client()).PutPartition(context.Background(), PartitionPush{InstanceID: "srv-a"})
+	var se *StatusError
+	if !errors.As(err, &se) {
+		t.Fatalf("error = %v, want a *StatusError", err)
+	}
+	if se.Status != http.StatusNotFound {
+		t.Errorf("Status = %d, want 404", se.Status)
+	}
+}
+
 func TestClientStatusErrorClassification(t *testing.T) {
 	tests := []struct {
 		name         string

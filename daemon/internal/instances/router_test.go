@@ -167,10 +167,14 @@ func TestRouterWithoutSelfIDOwnsEverything(t *testing.T) {
 	}
 }
 
-// Routing configured but no owner resolvable anywhere: still permissive, so a
-// repo never goes unreviewed with nothing to explain why.
+// Routing configured but no owner resolvable anywhere: on a hub or standalone
+// daemon this stays permissive, so a repo never goes unreviewed with nothing
+// to explain why. (A worker is the opposite on purpose — see
+// TestRouterWorkerUnassignedRepoIsNotOwned — because a worker has no registry
+// of its own to fall back on: an unresolvable owner there means the hub has
+// not assigned this repo to it, not that nobody has.)
 func TestRouterOwnsWhenNoFallbackResolvable(t *testing.T) {
-	cfg := cfgWith(config.RoleWorker, "self", "", nil, config.RoutingConfig{
+	cfg := cfgWith(config.RoleHub, "self", "", nil, config.RoutingConfig{
 		Orgs: map[string]string{"other": "somewhere"},
 	})
 	r := NewRouter(NewRegistry(cfg), cfg)
@@ -179,6 +183,130 @@ func TestRouterOwnsWhenNoFallbackResolvable(t *testing.T) {
 	}
 	if !r.Owns("unmatched/repo") {
 		t.Error("Owns() = false with no resolvable owner; must default to true")
+	}
+}
+
+// The central fix: a worker with no routing rules at all (the hub has not
+// pushed a partition yet, or never will) must not fall back to owning
+// everything the way a hub or a standalone daemon does. Silently acting on
+// unassigned work is exactly how theburrowhub/heimdallm#769 got reviewed
+// twice by an instance the hub had not routed it to.
+func TestRouterWorkerWithoutRulesOwnsNothing(t *testing.T) {
+	cfg := cfgWith(config.RoleWorker, "srv-a", "", nil, config.RoutingConfig{})
+	r := NewRouter(NewRegistry(cfg), cfg)
+	if r.Owns("freepik-company/ai-platform-terraform") {
+		t.Error("Owns() = true on a worker with no rules; want false (fail-closed)")
+	}
+	if got := r.FilterOwned([]string{"a/b", "c/d"}); len(got) != 0 {
+		t.Errorf("FilterOwned() = %v, want empty on a worker with no rules", got)
+	}
+}
+
+// A worker owns exactly what the hub routed to it, and nothing routed to a
+// different instance — even without a local registry to check either id
+// against.
+func TestRouterWorkerOwnsOnlyItsAssignments(t *testing.T) {
+	cfg := cfgWith(config.RoleWorker, "srv-a", "hub-1", nil, config.RoutingConfig{
+		Orgs: map[string]string{"Muriano": "srv-a", "freepik-company": "hub-1"},
+	})
+	r := NewRouter(NewRegistry(cfg), cfg)
+	if !r.Owns("Muriano/iron-quiniela") {
+		t.Error("Owns() = false for an org explicitly routed to this worker")
+	}
+	if r.Owns("freepik-company/ai-platform-terraform") {
+		t.Error("Owns() = true for an org routed to a different instance")
+	}
+}
+
+// A repo neither an explicit rule nor default_instance covers belongs to
+// nobody as far as this worker can tell, and "belongs to nobody" must not be
+// read as "belongs to me".
+func TestRouterWorkerUnassignedRepoIsNotOwned(t *testing.T) {
+	cfg := cfgWith(config.RoleWorker, "srv-a", "", nil, config.RoutingConfig{
+		Orgs: map[string]string{"Muriano": "srv-a"},
+	})
+	r := NewRouter(NewRegistry(cfg), cfg)
+	if r.Owns("theburrowhub/heimdallm") {
+		t.Error("Owns() = true for a repo no rule and no default_instance covers; want false on a worker")
+	}
+}
+
+// Without an identity there is no way to tell "assigned to me" from
+// "assigned to someone else", so a worker must withhold, not guess.
+func TestRouterWorkerWithoutIdentityOwnsNothing(t *testing.T) {
+	cfg := cfgWith(config.RoleWorker, "", "hub-1", nil, config.RoutingConfig{
+		Orgs: map[string]string{"acme": "hub-1"},
+	})
+	r := NewRouter(NewRegistry(cfg), cfg)
+	if r.Owns("acme/tools") {
+		t.Error("Owns() = true on a worker without an instance_id; want false")
+	}
+}
+
+// A worker has no registry of its own to validate default_instance against —
+// the hub already did that before pushing it. Update must not discard a
+// pushed default_instance just because the local registry is empty.
+func TestRouterKeepsConfiguredFallbackWithoutARegistry(t *testing.T) {
+	cfg := cfgWith(config.RoleWorker, "srv-a", "hub-1", nil, config.RoutingConfig{})
+	r := NewRouter(NewRegistry(cfg), cfg)
+	if got := r.Fallback(); got != "hub-1" {
+		t.Errorf("Fallback() = %q, want %q (pushed default_instance preserved without a registry)", got, "hub-1")
+	}
+}
+
+func TestRouterFilterOwnedIsEmptyOnAWorkerAwaitingRules(t *testing.T) {
+	cfg := cfgWith(config.RoleWorker, "srv-a", "", nil, config.RoutingConfig{})
+	r := NewRouter(NewRegistry(cfg), cfg)
+	in := []string{"a/one", "b/two"}
+	if got := r.FilterOwned(in); len(got) != 0 {
+		t.Errorf("FilterOwned(%v) = %v, want empty while the worker has no rules", in, got)
+	}
+}
+
+// WithheldFromWorker is what lets the dispatch layer above tell "not mine,
+// stand down" apart from "act locally" — it must be false for every
+// non-worker role (the fail-closed gate is worker-only) and must mirror
+// !Owns() for a worker in every shape of rule.
+func TestRouterWithheldFromWorker(t *testing.T) {
+	tests := []struct {
+		name    string
+		role    string
+		selfID  string
+		def     string
+		routing config.RoutingConfig
+		repo    string
+		want    bool
+	}{
+		{"non-worker never withheld", config.RoleHub, "hub-1", "", config.RoutingConfig{}, "a/b", false},
+		{"standalone never withheld", "", "", "", config.RoutingConfig{}, "a/b", false},
+		{"worker without identity", config.RoleWorker, "", "hub-1", config.RoutingConfig{}, "a/b", true},
+		{"worker owns it", config.RoleWorker, "srv-a", "", config.RoutingConfig{Orgs: map[string]string{"a": "srv-a"}}, "a/b", false},
+		{"worker routed elsewhere", config.RoleWorker, "srv-a", "", config.RoutingConfig{Orgs: map[string]string{"a": "hub-1"}}, "a/b", true},
+		{"worker unassigned", config.RoleWorker, "srv-a", "", config.RoutingConfig{}, "a/b", true},
+		{"worker via default_instance", config.RoleWorker, "srv-a", "srv-a", config.RoutingConfig{}, "a/b", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := cfgWith(tt.role, tt.selfID, tt.def, nil, tt.routing)
+			r := NewRouter(NewRegistry(cfg), cfg)
+			if got := r.WithheldFromWorker(tt.repo); got != tt.want {
+				t.Errorf("WithheldFromWorker(%q) = %v, want %v", tt.repo, got, tt.want)
+			}
+		})
+	}
+}
+
+// The worker gate must not leak into the roles it was not built for: a
+// standalone or hub daemon with no rules must keep owning everything, which
+// is the existing single-daemon-install invariant this fix must not break.
+func TestRouterStandaloneUnaffectedByTheWorkerGate(t *testing.T) {
+	cfg := cfgWith("", "", "", nil, config.RoutingConfig{})
+	r := NewRouter(NewRegistry(cfg), cfg)
+	if !r.Owns("anything/at-all") {
+		t.Error("Owns() = false on a standalone daemon with no cluster config; want true")
+	}
+	if r.WithheldFromWorker("anything/at-all") {
+		t.Error("WithheldFromWorker() = true on a standalone daemon; want false")
 	}
 }
 

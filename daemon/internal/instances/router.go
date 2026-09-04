@@ -32,6 +32,14 @@ type Router struct {
 	fallback string   // owner of everything no rule claims
 	enabled  bool     // false => this daemon owns every repo (single-daemon behaviour)
 
+	// worker marks a daemon with cluster.role = "worker". It flips Owns from
+	// permissive to fail-closed: a worker has no registry of its own (the hub
+	// owns it), so it cannot fall back to "own everything" the way a hub or
+	// standalone daemon does without reopening the duplicate-review bug the
+	// partition exists to prevent (theburrowhub/heimdallm#769). See Owns and
+	// WithheldFromWorker.
+	worker bool
+
 	counters sync.Map // op -> *atomic.Uint64
 }
 
@@ -48,8 +56,10 @@ func (r *Router) Update(reg *Registry, cfg *config.Config) {
 		reg = &Registry{byID: map[string]Instance{}}
 	}
 	var rules config.RoutingConfig
+	worker := false
 	if cfg != nil {
 		rules = cfg.Cluster.Routing
+		worker = strings.EqualFold(strings.TrimSpace(cfg.Cluster.Role), config.RoleWorker)
 	}
 
 	usable := reg.EnabledIDs()
@@ -63,7 +73,13 @@ func (r *Router) Update(reg *Registry, cfg *config.Config) {
 	// every unrouted repo, so fall back to the first pool member. The pool is
 	// sorted, and every daemon shares the same config, so all of them reach
 	// the same answer without coordinating.
-	if fallback == "" || !containsID(usable, fallback) {
+	//
+	// The "unknown" half of that check only applies with a registry to judge
+	// it against (len(usable) > 0). A worker has none by design — the hub
+	// owns the registry and already validated default_instance before
+	// pushing it (PUT /cluster/partition) — so an empty usable set must never
+	// be read as "default_instance is unknown" and silently discarded.
+	if fallback == "" || (len(usable) > 0 && !containsID(usable, fallback)) {
 		if len(pool) > 0 {
 			fallback = pool[0]
 		} else {
@@ -73,8 +89,11 @@ func (r *Router) Update(reg *Registry, cfg *config.Config) {
 
 	// The feature only engages once there is something to route between. A
 	// registry with fewer than two usable instances and no rules behaves
-	// exactly like a single-daemon install.
-	enabled := rules.Configured() || len(usable) > 1
+	// exactly like a single-daemon install — except for a worker, which is
+	// always "in the feature": its whole reason to exist is a partition it
+	// does not get to opt out of just because the hub has not pushed rules
+	// yet (see Owns).
+	enabled := worker || rules.Configured() || len(usable) > 1
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -83,6 +102,7 @@ func (r *Router) Update(reg *Registry, cfg *config.Config) {
 	r.pool = pool
 	r.fallback = fallback
 	r.enabled = enabled
+	r.worker = worker
 }
 
 // resolvePool intersects the configured pool with the usable instances,
@@ -208,25 +228,69 @@ func (r *Router) OwnerFor(repo string) string {
 
 // Owns reports whether this daemon should poll, review and merge repo.
 //
-// This is the single guard that partitions autonomous work. It is deliberately
-// permissive in every ambiguous case: with routing disabled, with no identity
-// of our own, or with no owner resolvable, it returns true. Acting twice is
-// recoverable (the in-flight claims and dedup catch it); acting never is not —
-// a repo would silently go unreviewed with nothing to indicate why.
+// This is the single guard that partitions autonomous work. Off a worker it
+// is deliberately permissive in every ambiguous case: with routing disabled,
+// with no identity of our own, or with no owner resolvable, it returns true.
+// Acting twice is recoverable (the in-flight claims and dedup catch it);
+// acting never is not — a repo would silently go unreviewed with nothing to
+// indicate why.
+//
+// A worker inverts that default. It has no registry of its own to fall back
+// on — the hub is the only authority on the partition — so "no owner
+// resolvable" means "the hub has not assigned this to me", not "nobody
+// owns it". Falling back to permissive there is exactly the bug behind
+// theburrowhub/heimdallm#769: a worker with no rules yet reviewed every repo
+// it discovered, duplicating whatever its hub (or another worker) already
+// reviewed. See WithheldFromWorker for the flip side callers use to tell
+// "not mine" apart from "act locally" instead of just skipping in silence.
 func (r *Router) Owns(repo string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	if r.worker {
+		if r.selfID == "" {
+			return false
+		}
+		owner := r.workerOwnerLocked(repo)
+		return owner != "" && owner == r.selfID
+	}
 	if !r.enabled || r.selfID == "" {
 		return true
 	}
-	owner := r.ruleForLocked(repo)
-	if owner == "" {
-		owner = r.fallback
-	}
+	owner := r.workerOwnerLocked(repo)
 	if owner == "" {
 		return true
 	}
 	return owner == r.selfID
+}
+
+// workerOwnerLocked resolves repo > org > fallback precedence. Named for its
+// worker use in WithheldFromWorker, but it is the same resolution Owns uses
+// on every role; call with r.mu already held.
+func (r *Router) workerOwnerLocked(repo string) string {
+	owner := r.ruleForLocked(repo)
+	if owner == "" {
+		owner = r.fallback
+	}
+	return owner
+}
+
+// WithheldFromWorker reports that this daemon is a worker deliberately
+// sitting out repo — no identity yet, or a rule (or the lack of one) that
+// resolves to a different instance — as opposed to actually owning it. Always
+// false for a hub or standalone daemon, whose Owns() never withholds this
+// way. Dispatch uses this to log "waiting for the hub to assign this" instead
+// of a review just silently not happening, and to avoid taking over work that
+// was never this daemon's to take over in the first place.
+func (r *Router) WithheldFromWorker(repo string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if !r.worker {
+		return false
+	}
+	if r.selfID == "" {
+		return true
+	}
+	return r.workerOwnerLocked(repo) != r.selfID
 }
 
 // FilterOwned returns the subset of repos this daemon owns, preserving order.
@@ -235,9 +299,13 @@ func (r *Router) FilterOwned(repos []string) []string {
 		return repos
 	}
 	r.mu.RLock()
-	enabled, selfID := r.enabled, r.selfID
+	enabled, selfID, worker := r.enabled, r.selfID, r.worker
 	r.mu.RUnlock()
-	if !enabled || selfID == "" {
+	// A worker never takes the shortcut of returning everything: even with no
+	// identity or no rules yet, Owns() already resolves each repo to false,
+	// and looping through it here (rather than early-returning repos
+	// verbatim) is what makes that fail-closed.
+	if !worker && (!enabled || selfID == "") {
 		return repos
 	}
 	out := make([]string, 0, len(repos))
