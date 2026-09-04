@@ -291,7 +291,6 @@ func (a *Advertiser) allRecords() []dns.RR {
 }
 
 func (a *Advertiser) addressRecords() []dns.RR {
-	const ttl = 120
 	if a.ad.Addrs == nil {
 		return nil
 	}
