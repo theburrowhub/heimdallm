@@ -400,4 +400,41 @@ void main() {
       expect(indicator.color, isNot(Colors.red.shade400));
     },
   );
+
+  testWidgets(
+    'unavailable bucket is dimmed rather than shown as an exhausted 0/0 quota',
+    (tester) async {
+      await _useWideViewport(tester);
+
+      await tester.pumpWidget(
+        _host(
+          loadStats: () async => <String, dynamic>{},
+          loadRateLimits: () async => <String, dynamic>{
+            // No observation ever happened AND the GitHub fallback failed:
+            // the daemon reports limit=remaining=used=reset=0 with
+            // source: 'unavailable'. Naively this is limit=0 → frac=0.0,
+            // which would render exactly like a real 0/0 exhausted quota.
+            'search': <String, dynamic>{
+              'limit': 0,
+              'remaining': 0,
+              'used': 0,
+              'reset': 0,
+              'source': 'unavailable',
+            },
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Search'), findsOneWidget);
+      expect(find.text('0 / 0'), findsOneWidget);
+      expect(find.text('unavailable'), findsOneWidget);
+      expect(find.text('no traffic yet'), findsNothing);
+
+      final valueText = tester.widget<Text>(find.text('0 / 0'));
+      // Must not be styled as "low" (red) — that would read as "exhausted",
+      // but the truth is "we don't know".
+      expect(valueText.style?.color, isNot(Colors.red.shade400));
+    },
+  );
 }

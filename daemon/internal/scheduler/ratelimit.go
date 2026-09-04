@@ -76,6 +76,10 @@ type resourceBudget struct {
 // as last observed from GitHub's X-RateLimit-* response headers. Exposed via
 // Snapshots() for callers that report the raw budget (e.g. the GET
 // /github/rate_limit HTTP handler) rather than just gating on it.
+//
+// Limit and Used are a coupled pair as far as Observe's merge logic is
+// concerned (see its doc comment): treat a snapshot with Limit <= 0 as
+// carrying no denominator at all, not as "Limit unknown but Used known".
 type RateSnapshot struct {
 	Limit      int
 	Remaining  int
@@ -153,6 +157,16 @@ func (r *RateLimiter) tokenPool(resource string) chan struct{} {
 // behind a proxy) can omit X-RateLimit-Limit, and losing the last-known limit
 // would leave observability callers unable to report a denominator even
 // though the resource has been observed before.
+//
+// The two fields are merged together, not independently: a snapshot with
+// Limit <= 0 always keeps BOTH the previous limit and the previous used,
+// even if snapshot.Used is itself meaningful. This holds today because the
+// only producer of RateSnapshot (parsed X-RateLimit-* headers) never sets a
+// nonzero Used without a nonzero Limit — Used is either read from the
+// X-RateLimit-Used header (which implies Limit was present too) or derived
+// from Limit-Remaining, so it's zero whenever Limit is. A caller that could
+// legitimately know Used without Limit would need Observe to merge the two
+// fields independently instead.
 func (r *RateLimiter) Observe(resource string, snapshot RateSnapshot) {
 	if resource == "" {
 		return

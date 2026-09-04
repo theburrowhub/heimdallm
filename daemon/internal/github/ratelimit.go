@@ -81,7 +81,12 @@ func ParseRateLimitHeaders(resp *http.Response) (ParsedRateLimit, bool) {
 	} else if limit > 0 {
 		// GitHub always sends X-RateLimit-Used, but derive it defensively so a
 		// proxy that strips the header doesn't leave the UI with a blank "used".
+		// Clamp at 0: a proxy or API anomaly reporting Remaining > Limit must
+		// not surface as a negative "used".
 		used = limit - remaining
+		if used < 0 {
+			used = 0
+		}
 	}
 
 	var reset time.Time

@@ -80,6 +80,13 @@ func TestBuildRateLimitView_WindowAlreadyReset(t *testing.T) {
 	if view.Search.Source != "window_reset" {
 		t.Errorf("Search.Source = %q, want %q", view.Search.Source, "window_reset")
 	}
+	// ObservedAt must still report when the stale snapshot was last measured —
+	// zero would be indistinguishable from a bucket that was never observed
+	// at all (source == "endpoint").
+	wantObservedAt := now.Add(-65 * time.Second).Unix()
+	if view.Search.ObservedAt != wantObservedAt {
+		t.Errorf("Search.ObservedAt = %d, want %d (the last real observation, not 0)", view.Search.ObservedAt, wantObservedAt)
+	}
 }
 
 // TestBuildRateLimitView_NeverObservedUsesFallback verifies that a bucket with
@@ -138,6 +145,16 @@ func TestBuildRateLimitView_FallbackErrorWithPartialObservationsStillSucceeds(t 
 	}
 	if view.Core.Source != "observed" || view.Core.Remaining != 4937 {
 		t.Errorf("Core = %+v, want the still-valid observed snapshot", view.Core)
+	}
+	// The unobserved buckets must carry an explicit "unavailable" source, not
+	// the Go zero value "" — a consumer switching on Source (e.g. the Flutter
+	// card deciding whether to dim a bucket) would otherwise silently fall
+	// through to treating an unknown state as a real, exhausted 0/0 quota.
+	if view.Search.Source != "unavailable" {
+		t.Errorf("Search.Source = %q, want %q", view.Search.Source, "unavailable")
+	}
+	if view.GraphQL.Source != "unavailable" {
+		t.Errorf("GraphQL.Source = %q, want %q", view.GraphQL.Source, "unavailable")
 	}
 }
 

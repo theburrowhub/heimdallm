@@ -17,8 +17,8 @@ type rateLimitBucketView struct {
 	Remaining  int    `json:"remaining"`
 	Used       int    `json:"used"`
 	Reset      int64  `json:"reset"`
-	Source     string `json:"source"`      // "observed" | "window_reset" | "endpoint"
-	ObservedAt int64  `json:"observed_at"` // unix seconds; 0 when source == "endpoint"
+	Source     string `json:"source"`      // "observed" | "window_reset" | "endpoint" | "unavailable"
+	ObservedAt int64  `json:"observed_at"` // unix seconds of the last real observation; 0 only when source == "endpoint" or "unavailable" (no observation ever happened)
 }
 
 // rateLimitView is the full GET /github/rate_limit response body.
@@ -70,9 +70,14 @@ func buildRateLimitView(now time.Time, snaps map[string]scheduler.RateSnapshot, 
 		// A bucket was never observed and GitHub's own endpoint is also
 		// unavailable (e.g. a circuit-breaker cooldown). Only fail the whole
 		// request if there is truly nothing to report; otherwise serve what
-		// was observed and leave the unobserved buckets zeroed.
+		// was observed and mark the rest explicitly unavailable rather than
+		// leaving them at the Go zero value, whose Source ("") is not one of
+		// the documented states a consumer switches on.
 		if len(missing) == len(rateLimitResources) {
 			return nil, fmt.Errorf("rate limit: no observations yet and fallback failed: %w", err)
+		}
+		for _, resource := range missing {
+			*buckets[resource] = rateLimitBucketView{Source: "unavailable"}
 		}
 		return view, nil
 	}
@@ -101,22 +106,29 @@ func buildRateLimitView(now time.Time, snaps map[string]scheduler.RateSnapshot, 
 // bucket is back at full quota) — reporting it verbatim would show an
 // exhausted bucket forever, so it's replaced with a fresh, empty window.
 func observedBucketView(now time.Time, snap scheduler.RateSnapshot) rateLimitBucketView {
+	var observedAtUnix int64
+	if !snap.ObservedAt.IsZero() {
+		observedAtUnix = snap.ObservedAt.Unix()
+	}
+
 	if !snap.Reset.IsZero() && !now.Before(snap.Reset) {
+		// ObservedAt still reports the last real measurement even though
+		// the reported remaining/used are inferred (not measured): the
+		// resource WAS observed before, just not since GitHub rolled the
+		// window over. Reporting 0 here would be indistinguishable from a
+		// bucket that has never been observed at all (source == "endpoint").
 		return rateLimitBucketView{
-			Limit:     snap.Limit,
-			Remaining: snap.Limit,
-			Used:      0,
-			Reset:     0,
-			Source:    "window_reset",
+			Limit:      snap.Limit,
+			Remaining:  snap.Limit,
+			Used:       0,
+			Reset:      0,
+			Source:     "window_reset",
+			ObservedAt: observedAtUnix,
 		}
 	}
 	var resetUnix int64
 	if !snap.Reset.IsZero() {
 		resetUnix = snap.Reset.Unix()
-	}
-	var observedAtUnix int64
-	if !snap.ObservedAt.IsZero() {
-		observedAtUnix = snap.ObservedAt.Unix()
 	}
 	return rateLimitBucketView{
 		Limit:      snap.Limit,

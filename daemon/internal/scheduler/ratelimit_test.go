@@ -217,3 +217,28 @@ func TestRateLimiter_Observe_MergesLimitWhenNewObservationOmitsIt(t *testing.T) 
 		t.Errorf("ObservedAt after merge = %v, want %v (updated by second observation)", core.ObservedAt, later)
 	}
 }
+
+// TestRateLimiter_Observe_LimitAndUsedAreMergedAsACoupledPair documents (and
+// pins) the constraint spelled out in Observe's doc comment: Limit <= 0
+// discards the incoming Used too, even if the caller set a nonzero Used. This
+// is safe today because the only real producer (parsed X-RateLimit-* headers)
+// never sends a nonzero Used without a nonzero Limit — but a future caller
+// that violated the assumption would silently lose data, so pin the current
+// behavior with a test rather than leave it implicit.
+func TestRateLimiter_Observe_LimitAndUsedAreMergedAsACoupledPair(t *testing.T) {
+	rl := NewRateLimiter(100)
+	now := time.Now()
+
+	rl.Observe("core", RateSnapshot{Limit: 5000, Remaining: 4937, Used: 63, Reset: now.Add(time.Hour), ObservedAt: now})
+
+	// Hypothetical caller that violates the coupling: Limit <= 0 but Used set.
+	rl.Observe("core", RateSnapshot{Limit: 0, Used: 999, Remaining: 10, Reset: now.Add(time.Hour), ObservedAt: now})
+
+	core, ok := rl.Snapshots()["core"]
+	if !ok {
+		t.Fatal("Snapshots() missing \"core\"")
+	}
+	if core.Used != 63 {
+		t.Errorf("Used = %d, want 63 (the Limit<=0 observation's Used=999 must be discarded along with its missing Limit)", core.Used)
+	}
+}

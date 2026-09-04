@@ -512,8 +512,15 @@ class _GitHubRateLimitCardState extends ConsumerState<_GitHubRateLimitCard> {
     // but there's no measured usage or reset window behind them, so the row
     // is dimmed and doesn't show a live countdown.
     final noTrafficYet = raw['source'] == 'endpoint';
+    // "unavailable" means neither the tracker nor the GitHub fallback had
+    // anything to report (no observation ever, and the fallback call also
+    // failed). limit/remaining come back as 0/0, which would otherwise read
+    // as "low" (red, exhausted) — dim it like noTrafficYet instead, since
+    // the truth is "unknown", not "empty".
+    final unavailable = raw['source'] == 'unavailable';
+    final dimmed = noTrafficYet || unavailable;
     final frac = limit > 0 ? (remaining / limit).clamp(0.0, 1.0) : 0.0;
-    final low = !noTrafficYet && frac <= 0.1;
+    final low = !dimmed && frac <= 0.1;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
@@ -530,7 +537,7 @@ class _GitHubRateLimitCardState extends ConsumerState<_GitHubRateLimitCard> {
                 minHeight: 6,
                 color: low
                     ? Colors.red.shade400
-                    : (noTrafficYet ? Colors.grey.shade300 : null),
+                    : (dimmed ? Colors.grey.shade300 : null),
               ),
             ),
           ),
@@ -544,7 +551,7 @@ class _GitHubRateLimitCardState extends ConsumerState<_GitHubRateLimitCard> {
                 fontSize: 12,
                 color: low
                     ? Colors.red.shade400
-                    : (noTrafficYet ? Colors.grey.shade500 : null),
+                    : (dimmed ? Colors.grey.shade500 : null),
               ),
             ),
           ),
@@ -552,7 +559,9 @@ class _GitHubRateLimitCardState extends ConsumerState<_GitHubRateLimitCard> {
           SizedBox(
             width: 78,
             child: Text(
-              noTrafficYet ? 'no traffic yet' : _resetLabel(reset),
+              unavailable
+                  ? 'unavailable'
+                  : (noTrafficYet ? 'no traffic yet' : _resetLabel(reset)),
               textAlign: TextAlign.right,
               style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
             ),

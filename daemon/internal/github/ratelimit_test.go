@@ -177,6 +177,25 @@ func TestParseRateLimitHeaders_UsedDerivedWhenAbsent(t *testing.T) {
 	}
 }
 
+func TestParseRateLimitHeaders_DerivedUsedClampedAtZero(t *testing.T) {
+	// A proxy or API anomaly could report Remaining > Limit. The derived Used
+	// (Limit - Remaining) must never go negative — a negative "used" would be
+	// nonsensical to display.
+	resp := makeResp(http.StatusOK, map[string]string{
+		"X-RateLimit-Limit":     "30",
+		"X-RateLimit-Remaining": "42",
+		"X-RateLimit-Reset":     "1700000000",
+	})
+
+	parsed, ok := gh.ParseRateLimitHeaders(resp)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if parsed.Used != 0 {
+		t.Errorf("Used = %d, want 0 (clamped, not negative)", parsed.Used)
+	}
+}
+
 func TestParseRateLimitHeaders_LimitAbsentDoesNotBreakOK(t *testing.T) {
 	resp := makeResp(http.StatusOK, map[string]string{
 		"X-RateLimit-Remaining": "100",
