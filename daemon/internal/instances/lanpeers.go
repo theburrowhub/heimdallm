@@ -39,6 +39,15 @@ const DefaultDiscoveryInterval = 60 * time.Second
 // listening — so this trades latency for the chance of hearing a slow peer.
 const discoveryBrowseWindow = 2 * time.Second
 
+// discoveryVerifyTimeout bounds one peer's /health check.
+//
+// Much shorter than the control-plane default, because the caller and the
+// subject are on the same link and because the input is untrusted: anything on
+// the LAN can advertise an address that swallows connections, and a scan must
+// not be something a stranger can stall. A daemon one hop away that cannot
+// answer in this long is not one to propose adopting.
+const discoveryVerifyTimeout = 3 * time.Second
+
 // Candidate is one daemon seen on the network, after verification, joined with
 // what the registry already knows about it.
 type Candidate struct {
@@ -161,11 +170,37 @@ func (d *Discoverer) Scan(ctx context.Context) []Candidate {
 		return d.Candidates()
 	}
 
+	// Verified in parallel, like Prober.ProbeAll. Sequentially, one advertised
+	// address that accepts a connection and then says nothing would hold up
+	// every peer behind it, and a scan is something a stranger on the LAN can
+	// trigger the cost of.
+	verified := make([]Candidate, len(peers))
+	ok := make([]bool, len(peers))
+	var wg sync.WaitGroup
+	for i, peer := range peers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			verified[i], ok[i] = d.verify(ctx, peer)
+		}()
+	}
+	wg.Wait()
+
 	seen := make(map[string]bool, len(peers))
 	found := make([]Candidate, 0, len(peers))
-	for _, peer := range peers {
-		candidate, ok := d.verify(ctx, peer)
-		if !ok {
+	for i := range verified {
+		if !ok[i] {
+			continue
+		}
+		candidate := verified[i]
+		// The hub hears its own advertisement: the advertiser and the browser
+		// share the multicast group, so every response reaches both. Dropping
+		// it is not just tidiness. The hub's self entry is deliberately
+		// loopback (nothing ever dials it — the proxy short-circuits its own
+		// id and serves locally), so classifying it against the registry would
+		// call it address_changed and invite the operator to "correct" a
+		// working entry into one that only resolves from the hub itself.
+		if registry != nil && candidate.InstanceID == registry.SelfID() {
 			continue
 		}
 		// Two records claiming the same identity: keep the first. Which one
@@ -205,6 +240,8 @@ func (d *Discoverer) verify(ctx context.Context, peer lan.Peer) (Candidate, bool
 	}
 
 	probe := Instance{ID: "candidate", BaseURL: baseURL, Enabled: true}
+	ctx, cancel := context.WithTimeout(ctx, discoveryVerifyTimeout)
+	defer cancel()
 	health, err := d.newClient(probe).Health(ctx)
 	if err != nil {
 		slog.Debug("instances: a peer on the network did not answer /health",

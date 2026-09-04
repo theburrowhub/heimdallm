@@ -74,10 +74,15 @@ func peerFor(t *testing.T, rawURL, instanceID string) lan.Peer {
 var errBrowseFailed = errors.New("browse failed")
 
 func registryWith(t *testing.T, entries map[string]string) *Registry {
+	return registryWithSelf(t, entries, "")
+}
+
+func registryWithSelf(t *testing.T, entries map[string]string, selfID string) *Registry {
 	t.Helper()
 	cfg := &config.Config{Cluster: config.ClusterConfig{
-		Role:      config.RoleHub,
-		Instances: map[string]config.InstanceConfig{},
+		Role:       config.RoleHub,
+		InstanceID: selfID,
+		Instances:  map[string]config.InstanceConfig{},
 	}}
 	for id, baseURL := range entries {
 		cfg.Cluster.Instances[id] = config.InstanceConfig{
@@ -203,14 +208,51 @@ func TestDiscovererDropsWhatItCannotVerify(t *testing.T) {
 }
 
 func TestDiscovererDeduplicatesByIdentity(t *testing.T) {
-	_, peer := daemonAt(t, "srv-a", "Server A", "worker")
-	other := peer
-	other.Hostname = "srv-a.local"
+	// Two live daemons that both claim to be srv-a — one machine advertising
+	// on two interfaces, say. Both must verify, so that dedup is what collapses
+	// them rather than one of them simply failing to answer.
+	_, first := daemonAt(t, "srv-a", "Server A", "worker")
+	_, second := daemonAt(t, "srv-a", "Server A", "worker")
+	if first.BaseURL() == second.BaseURL() {
+		t.Fatal("the two fake daemons need different addresses to be a real test")
+	}
 
-	d := NewDiscoverer(registryWith(t, nil), &fakeBrowser{peers: []lan.Peer{peer, other}}, time.Minute, nil)
+	d := NewDiscoverer(registryWith(t, nil),
+		&fakeBrowser{peers: []lan.Peer{first, second}}, time.Minute, nil)
+
 	got := d.Scan(context.Background())
 	if len(got) != 1 {
 		t.Fatalf("got %d candidates for one instance, want 1: %+v", len(got), got)
+	}
+}
+
+// A scan must stay bounded no matter what is on the network: an advertised
+// address that accepts a connection and then never replies is trivial for
+// anyone on the LAN to publish.
+func TestDiscovererScanIsBoundedByASilentPeer(t *testing.T) {
+	// The handler must release when the client gives up: httptest's Close
+	// waits for in-flight handlers, so one that blocks unconditionally would
+	// hang the test rather than exercise the timeout.
+	silent := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	t.Cleanup(silent.Close)
+
+	_, good := daemonAt(t, "srv-a", "Server A", "worker")
+	peers := []lan.Peer{peerFor(t, silent.URL, "black-hole"), good}
+
+	d := NewDiscoverer(registryWith(t, nil), &fakeBrowser{peers: peers}, time.Minute, nil)
+
+	start := time.Now()
+	got := d.Scan(context.Background())
+	elapsed := time.Since(start)
+
+	// One verify timeout, not one per peer and not the client default.
+	if elapsed > 2*discoveryVerifyTimeout {
+		t.Errorf("scan took %s; a silent peer should not stall it", elapsed)
+	}
+	if len(got) != 1 || got[0].InstanceID != "srv-a" {
+		t.Fatalf("got %+v, want only the daemon that answered", got)
 	}
 }
 
@@ -347,5 +389,41 @@ func TestDiscoveryKeyIsNeverPropagated(t *testing.T) {
 		if !IsLocalOnly(key) {
 			t.Errorf("IsLocalOnly(%q) = false, want true", key)
 		}
+	}
+}
+
+// The advertiser and the browser share the multicast group, so a hub hears its
+// own advertisement. It must not appear in its own listing — and in particular
+// must not be reported as having moved: the hub's registry entry for itself is
+// deliberately loopback, so "correcting" it to the hostname the network
+// reported would replace a working entry with one only the hub can resolve.
+func TestDiscovererNeverOffersTheHubItself(t *testing.T) {
+	srv, peer := daemonAt(t, "hub-1", "Local hub", "hub")
+
+	d := NewDiscoverer(
+		registryWithSelf(t, map[string]string{"hub-1": "http://127.0.0.1:7842"}, "hub-1"),
+		&fakeBrowser{peers: []lan.Peer{peer}}, time.Minute, nil)
+
+	if got := d.Scan(context.Background()); len(got) != 0 {
+		t.Fatalf("the hub offered itself: %+v", got)
+	}
+	_ = srv
+}
+
+// Skipping self must not become "skip anything that looks like the hub": a
+// genuine second daemon still has to show up.
+func TestDiscovererStillOffersOtherDaemonsToAHub(t *testing.T) {
+	_, peer := daemonAt(t, "srv-a", "Server A", "worker")
+
+	d := NewDiscoverer(
+		registryWithSelf(t, map[string]string{"hub-1": "http://127.0.0.1:7842"}, "hub-1"),
+		&fakeBrowser{peers: []lan.Peer{peer}}, time.Minute, nil)
+
+	got := d.Scan(context.Background())
+	if len(got) != 1 || got[0].InstanceID != "srv-a" {
+		t.Fatalf("got %+v, want the one peer that is not the hub", got)
+	}
+	if got[0].Status != StatusNew {
+		t.Fatalf("status = %q, want new", got[0].Status)
 	}
 }
