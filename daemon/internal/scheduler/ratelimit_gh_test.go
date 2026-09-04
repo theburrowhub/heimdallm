@@ -14,7 +14,7 @@ func TestRateLimiter_ObserveHealthyBudgetDoesNotThrottle(t *testing.T) {
 	reset := time.Now().Add(1 * time.Hour)
 
 	// Observe a healthy budget (far above all thresholds).
-	rl.Observe("core", 5000, reset)
+	rl.Observe("core", RateSnapshot{Remaining: 5000, Reset: reset})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
@@ -43,7 +43,7 @@ func TestRateLimiter_ObserveDepletedBudgetThrottlesLowPriority(t *testing.T) {
 
 	// Observe remaining=50, which is below TierDiscovery threshold (100)
 	// but above TierWatch threshold (25).
-	rl.Observe("core", 50, reset)
+	rl.Observe("core", RateSnapshot{Remaining: 50, Reset: reset})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
@@ -69,7 +69,7 @@ func TestRateLimiter_HighPriorityTierNotThrottledWhenMediumWouldBe(t *testing.T)
 	reset := time.Now().Add(2 * time.Second) // long reset, would block
 
 	// remaining=50: above Watch threshold (25) but below Discovery threshold (100)
-	rl.Observe("core", 50, reset)
+	rl.Observe("core", RateSnapshot{Remaining: 50, Reset: reset})
 
 	// TierWatch should NOT block — remaining(50) >= threshold(25).
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
@@ -87,7 +87,7 @@ func TestRateLimiter_HighPriorityTierNotThrottledWhenMediumWouldBe(t *testing.T)
 	// but we can't wait 2s in a test. Instead verify that ctx cancellation
 	// interrupts the wait, which proves it would have waited.
 	rl2 := NewRateLimiter(100)
-	rl2.Observe("core", 50, time.Now().Add(2*time.Second))
+	rl2.Observe("core", RateSnapshot{Remaining: 50, Reset: time.Now().Add(2 * time.Second)})
 
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel2()
@@ -141,7 +141,7 @@ func TestRateLimiter_SecondaryCooldownExpiredDoesNotBlock(t *testing.T) {
 func TestRateLimiter_CtxCancelDuringBudgetWait(t *testing.T) {
 	rl := NewRateLimiter(100)
 	// Budget depleted, reset far in the future.
-	rl.Observe("core", 10, time.Now().Add(10*time.Second))
+	rl.Observe("core", RateSnapshot{Remaining: 10, Reset: time.Now().Add(10 * time.Second)})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -192,14 +192,14 @@ func TestRateLimiter_ObserveUpdatesExistingBudget(t *testing.T) {
 	rl := NewRateLimiter(100)
 
 	// First observation: healthy budget.
-	rl.Observe("core", 5000, time.Now().Add(1*time.Hour))
+	rl.Observe("core", RateSnapshot{Remaining: 5000, Reset: time.Now().Add(1 * time.Hour)})
 	rem, ok := rl.BudgetRemaining("core")
 	if !ok || rem != 5000 {
 		t.Errorf("BudgetRemaining after first observe: got (%d,%v), want (5000,true)", rem, ok)
 	}
 
 	// Second observation: updated budget.
-	rl.Observe("core", 42, time.Now().Add(1*time.Hour))
+	rl.Observe("core", RateSnapshot{Remaining: 42, Reset: time.Now().Add(1 * time.Hour)})
 	rem, ok = rl.BudgetRemaining("core")
 	if !ok || rem != 42 {
 		t.Errorf("BudgetRemaining after second observe: got (%d,%v), want (42,true)", rem, ok)
@@ -213,8 +213,8 @@ func TestRateLimiter_SearchResourceIndependentOfCore(t *testing.T) {
 	rl := NewRateLimiter(100)
 
 	// Core is healthy; search is depleted.
-	rl.Observe("core", 5000, time.Now().Add(1*time.Hour))
-	rl.Observe("search", 0, time.Now().Add(10*time.Second))
+	rl.Observe("core", RateSnapshot{Remaining: 5000, Reset: time.Now().Add(1 * time.Hour)})
+	rl.Observe("search", RateSnapshot{Remaining: 0, Reset: time.Now().Add(10 * time.Second)})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
@@ -230,7 +230,7 @@ func TestRateLimiter_SearchResourceIndependentOfCore(t *testing.T) {
 
 	// AcquireResource on "search" with Discovery should block (remaining=0 < 100).
 	rl2 := NewRateLimiter(100)
-	rl2.Observe("search", 0, time.Now().Add(10*time.Second))
+	rl2.Observe("search", RateSnapshot{Remaining: 0, Reset: time.Now().Add(10 * time.Second)})
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel2()
 	if err := rl2.AcquireResource(ctx2, TierDiscovery, "search"); err == nil {
@@ -240,8 +240,8 @@ func TestRateLimiter_SearchResourceIndependentOfCore(t *testing.T) {
 
 func TestRateLimiter_GraphQLResourceIndependentOfSearch(t *testing.T) {
 	rl := NewRateLimiter(2)
-	rl.Observe(SearchResource, 0, time.Now().Add(time.Hour))
-	rl.Observe(GraphQLResource, 5000, time.Now().Add(time.Hour))
+	rl.Observe(SearchResource, RateSnapshot{Remaining: 0, Reset: time.Now().Add(time.Hour)})
+	rl.Observe(GraphQLResource, RateSnapshot{Remaining: 5000, Reset: time.Now().Add(time.Hour)})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -313,7 +313,7 @@ func TestRateLimiter_RefillRestoresEveryResourcePool(t *testing.T) {
 func TestRateLimiter_ResetAlreadyPassedProceedsImmediately(t *testing.T) {
 	rl := NewRateLimiter(100)
 	// Observe a depleted budget with a reset time in the past.
-	rl.Observe("core", 0, time.Now().Add(-5*time.Second))
+	rl.Observe("core", RateSnapshot{Remaining: 0, Reset: time.Now().Add(-5 * time.Second)})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()

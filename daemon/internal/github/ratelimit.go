@@ -28,7 +28,9 @@ func (f RateLimitObserverFunc) ObserveResponse(resp *http.Response) { f(resp) }
 // ok is false when the response carries no X-RateLimit-* headers.
 type ParsedRateLimit struct {
 	Resource   string        // e.g. "core", "search"
+	Limit      int           // X-RateLimit-Limit (0 when absent)
 	Remaining  int           // X-RateLimit-Remaining
+	Used       int           // X-RateLimit-Used (derived from Limit-Remaining when absent)
 	Reset      time.Time     // X-RateLimit-Reset (unix epoch → time.Time)
 	RetryAfter time.Duration // Retry-After if present (0 when absent)
 }
@@ -64,6 +66,29 @@ func ParseRateLimitHeaders(resp *http.Response) (ParsedRateLimit, bool) {
 		resource = "core" // default to "core" when resource header is absent
 	}
 
+	var limit int
+	if limitStr := strings.TrimSpace(resp.Header.Get("X-RateLimit-Limit")); limitStr != "" {
+		if v, err := strconv.Atoi(limitStr); err == nil {
+			limit = v
+		}
+	}
+
+	var used int
+	if usedStr := strings.TrimSpace(resp.Header.Get("X-RateLimit-Used")); usedStr != "" {
+		if v, err := strconv.Atoi(usedStr); err == nil {
+			used = v
+		}
+	} else if limit > 0 {
+		// GitHub always sends X-RateLimit-Used, but derive it defensively so a
+		// proxy that strips the header doesn't leave the UI with a blank "used".
+		// Clamp at 0: a proxy or API anomaly reporting Remaining > Limit must
+		// not surface as a negative "used".
+		used = limit - remaining
+		if used < 0 {
+			used = 0
+		}
+	}
+
 	var reset time.Time
 	if resetStr := resp.Header.Get("X-RateLimit-Reset"); resetStr != "" {
 		if epoch, err := strconv.ParseInt(strings.TrimSpace(resetStr), 10, 64); err == nil {
@@ -83,7 +108,9 @@ func ParseRateLimitHeaders(resp *http.Response) (ParsedRateLimit, bool) {
 
 	return ParsedRateLimit{
 		Resource:   resource,
+		Limit:      limit,
 		Remaining:  remaining,
+		Used:       used,
 		Reset:      reset,
 		RetryAfter: retryAfter,
 	}, true

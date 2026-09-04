@@ -330,4 +330,111 @@ void main() {
       expect(find.text('3000 / 5000'), findsOneWidget);
     },
   );
+
+  testWidgets(
+    'observed bucket shows measured usage and its real reset window',
+    (tester) async {
+      await _useWideViewport(tester);
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+
+      await tester.pumpWidget(
+        _host(
+          loadStats: () async => <String, dynamic>{},
+          loadRateLimits: () async => <String, dynamic>{
+            'core': <String, dynamic>{
+              'limit': 5000,
+              'remaining': 4937,
+              'used': 63,
+              // A little past 48 minutes so a few ms of test overhead can't
+              // truncate .inMinutes down to 47 (mirrors the +91s margin the
+              // "resets 1m" case above uses for the same reason).
+              'reset': now + 48 * 60 + 30,
+              'source': 'observed',
+            },
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('4937 / 5000'), findsOneWidget);
+      expect(find.text('resets 48m'), findsOneWidget);
+      expect(find.text('no traffic yet'), findsNothing);
+    },
+  );
+
+  testWidgets(
+    'bucket with no traffic yet shows full quota, dimmed, without a countdown',
+    (tester) async {
+      await _useWideViewport(tester);
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+
+      await tester.pumpWidget(
+        _host(
+          loadStats: () async => <String, dynamic>{},
+          loadRateLimits: () async => <String, dynamic>{
+            'graphql': <String, dynamic>{
+              'limit': 5000,
+              'remaining': 5000,
+              'used': 0,
+              'reset': now + 60 * 60,
+              'source': 'endpoint',
+            },
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('GraphQL'), findsOneWidget);
+      expect(find.text('5000 / 5000'), findsOneWidget);
+      expect(find.text('no traffic yet'), findsOneWidget);
+      // The countdown that would normally appear for a real reset must not
+      // render alongside the "no traffic yet" marker.
+      expect(find.textContaining('resets '), findsNothing);
+
+      final indicator = tester.widget<LinearProgressIndicator>(
+        find.byType(LinearProgressIndicator),
+      );
+      // Dimmed, not the normal "healthy" (null → theme default) or "low"
+      // (red) color used for a measured bucket.
+      expect(indicator.color, isNotNull);
+      expect(indicator.color, isNot(Colors.red.shade400));
+    },
+  );
+
+  testWidgets(
+    'unavailable bucket is dimmed rather than shown as an exhausted 0/0 quota',
+    (tester) async {
+      await _useWideViewport(tester);
+
+      await tester.pumpWidget(
+        _host(
+          loadStats: () async => <String, dynamic>{},
+          loadRateLimits: () async => <String, dynamic>{
+            // No observation ever happened AND the GitHub fallback failed:
+            // the daemon reports limit=remaining=used=reset=0 with
+            // source: 'unavailable'. Naively this is limit=0 → frac=0.0,
+            // which would render exactly like a real 0/0 exhausted quota.
+            'search': <String, dynamic>{
+              'limit': 0,
+              'remaining': 0,
+              'used': 0,
+              'reset': 0,
+              'source': 'unavailable',
+            },
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Search'), findsOneWidget);
+      expect(find.text('0 / 0'), findsOneWidget);
+      expect(find.text('unavailable'), findsOneWidget);
+      expect(find.text('no traffic yet'), findsNothing);
+
+      final valueText = tester.widget<Text>(find.text('0 / 0'));
+      // Must not be styled as "low" (red) — that would read as "exhausted",
+      // but the truth is "we don't know".
+      expect(valueText.style?.color, isNot(Colors.red.shade400));
+    },
+  );
 }

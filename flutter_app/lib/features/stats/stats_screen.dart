@@ -407,8 +407,10 @@ class _BarChart extends StatelessWidget {
 }
 
 /// Live GitHub API rate limits (core / search / graphql) for the daemon's
-/// token. The countdown repaints every second, while a minute-level refresh
-/// keeps the remaining values current without adding meaningful API traffic.
+/// token. Backed by the daemon's in-memory tracker of real X-RateLimit-*
+/// response headers, so the minute-level refresh doesn't add any API traffic
+/// of its own (it only falls back to a live GitHub call for a bucket that
+/// hasn't been observed yet). The countdown itself repaints every second.
 class _GitHubRateLimitCard extends ConsumerStatefulWidget {
   const _GitHubRateLimitCard();
 
@@ -504,8 +506,21 @@ class _GitHubRateLimitCardState extends ConsumerState<_GitHubRateLimitCard> {
     final limit = (raw['limit'] as num?)?.toInt() ?? 0;
     final remaining = (raw['remaining'] as num?)?.toInt() ?? 0;
     final reset = (raw['reset'] as num?)?.toInt() ?? 0;
+    // "endpoint" means the daemon has never actually observed traffic for
+    // this bucket yet and is reporting GitHub's own GET /rate_limit as a
+    // denominator-only fallback — the numbers are real (the token's quota),
+    // but there's no measured usage or reset window behind them, so the row
+    // is dimmed and doesn't show a live countdown.
+    final noTrafficYet = raw['source'] == 'endpoint';
+    // "unavailable" means neither the tracker nor the GitHub fallback had
+    // anything to report (no observation ever, and the fallback call also
+    // failed). limit/remaining come back as 0/0, which would otherwise read
+    // as "low" (red, exhausted) — dim it like noTrafficYet instead, since
+    // the truth is "unknown", not "empty".
+    final unavailable = raw['source'] == 'unavailable';
+    final dimmed = noTrafficYet || unavailable;
     final frac = limit > 0 ? (remaining / limit).clamp(0.0, 1.0) : 0.0;
-    final low = frac <= 0.1;
+    final low = !dimmed && frac <= 0.1;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
@@ -520,7 +535,9 @@ class _GitHubRateLimitCardState extends ConsumerState<_GitHubRateLimitCard> {
               child: LinearProgressIndicator(
                 value: frac,
                 minHeight: 6,
-                color: low ? Colors.red.shade400 : null,
+                color: low
+                    ? Colors.red.shade400
+                    : (dimmed ? Colors.grey.shade300 : null),
               ),
             ),
           ),
@@ -532,7 +549,9 @@ class _GitHubRateLimitCardState extends ConsumerState<_GitHubRateLimitCard> {
               textAlign: TextAlign.right,
               style: TextStyle(
                 fontSize: 12,
-                color: low ? Colors.red.shade400 : null,
+                color: low
+                    ? Colors.red.shade400
+                    : (dimmed ? Colors.grey.shade500 : null),
               ),
             ),
           ),
@@ -540,7 +559,9 @@ class _GitHubRateLimitCardState extends ConsumerState<_GitHubRateLimitCard> {
           SizedBox(
             width: 78,
             child: Text(
-              _resetLabel(reset),
+              unavailable
+                  ? 'unavailable'
+                  : (noTrafficYet ? 'no traffic yet' : _resetLabel(reset)),
               textAlign: TextAlign.right,
               style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
             ),

@@ -138,3 +138,107 @@ func TestSetDiscoverySafetyThreshold(t *testing.T) {
 		}
 	})
 }
+
+// TestRateLimiter_Snapshots_ReturnsObservedResources verifies that Snapshots()
+// reports the last-observed state for every resource that has received at
+// least one Observe() call, keyed by resource name.
+func TestRateLimiter_Snapshots_ReturnsObservedResources(t *testing.T) {
+	rl := NewRateLimiter(100)
+	now := time.Now()
+	coreReset := now.Add(1 * time.Hour)
+	searchReset := now.Add(45 * time.Second)
+
+	rl.Observe("core", RateSnapshot{Limit: 5000, Remaining: 4937, Used: 63, Reset: coreReset, ObservedAt: now})
+	rl.Observe("search", RateSnapshot{Limit: 30, Remaining: 28, Used: 2, Reset: searchReset, ObservedAt: now})
+
+	snaps := rl.Snapshots()
+	if len(snaps) != 2 {
+		t.Fatalf("Snapshots() returned %d entries, want 2", len(snaps))
+	}
+
+	core, ok := snaps["core"]
+	if !ok {
+		t.Fatal("Snapshots() missing \"core\"")
+	}
+	if core.Limit != 5000 || core.Remaining != 4937 || core.Used != 63 || !core.Reset.Equal(coreReset) {
+		t.Errorf("core snapshot = %+v, want Limit=5000 Remaining=4937 Used=63 Reset=%v", core, coreReset)
+	}
+
+	search, ok := snaps["search"]
+	if !ok {
+		t.Fatal("Snapshots() missing \"search\"")
+	}
+	if search.Limit != 30 || search.Remaining != 28 || search.Used != 2 {
+		t.Errorf("search snapshot = %+v, want Limit=30 Remaining=28 Used=2", search)
+	}
+}
+
+// TestRateLimiter_Snapshots_EmptyWhenNothingObserved verifies the zero-traffic
+// case: no Observe() call yet means no snapshot, not a zero-valued one — the
+// caller (GET /github/rate_limit) uses this to distinguish "never measured"
+// from "measured and empty".
+func TestRateLimiter_Snapshots_EmptyWhenNothingObserved(t *testing.T) {
+	rl := NewRateLimiter(100)
+	snaps := rl.Snapshots()
+	if len(snaps) != 0 {
+		t.Errorf("Snapshots() on a fresh limiter = %+v, want empty", snaps)
+	}
+}
+
+// TestRateLimiter_Observe_MergesLimitWhenNewObservationOmitsIt verifies that a
+// later Observe() call without Limit/Used (e.g. from a 304 whose proxy
+// stripped X-RateLimit-Limit) does not erase the previously observed
+// denominator — only Remaining/Reset/ObservedAt are refreshed.
+func TestRateLimiter_Observe_MergesLimitWhenNewObservationOmitsIt(t *testing.T) {
+	rl := NewRateLimiter(100)
+	now := time.Now()
+
+	rl.Observe("core", RateSnapshot{Limit: 5000, Remaining: 4937, Used: 63, Reset: now.Add(time.Hour), ObservedAt: now})
+
+	// Second observation carries no Limit/Used (zero value) but a fresher Remaining/Reset.
+	later := now.Add(time.Minute)
+	rl.Observe("core", RateSnapshot{Remaining: 4900, Reset: now.Add(time.Hour), ObservedAt: later})
+
+	snaps := rl.Snapshots()
+	core, ok := snaps["core"]
+	if !ok {
+		t.Fatal("Snapshots() missing \"core\"")
+	}
+	if core.Limit != 5000 {
+		t.Errorf("Limit after merge = %d, want 5000 (preserved from first observation)", core.Limit)
+	}
+	if core.Used != 63 {
+		t.Errorf("Used after merge = %d, want 63 (preserved from first observation)", core.Used)
+	}
+	if core.Remaining != 4900 {
+		t.Errorf("Remaining after merge = %d, want 4900 (updated by second observation)", core.Remaining)
+	}
+	if !core.ObservedAt.Equal(later) {
+		t.Errorf("ObservedAt after merge = %v, want %v (updated by second observation)", core.ObservedAt, later)
+	}
+}
+
+// TestRateLimiter_Observe_LimitAndUsedAreMergedAsACoupledPair documents (and
+// pins) the constraint spelled out in Observe's doc comment: Limit <= 0
+// discards the incoming Used too, even if the caller set a nonzero Used. This
+// is safe today because the only real producer (parsed X-RateLimit-* headers)
+// never sends a nonzero Used without a nonzero Limit — but a future caller
+// that violated the assumption would silently lose data, so pin the current
+// behavior with a test rather than leave it implicit.
+func TestRateLimiter_Observe_LimitAndUsedAreMergedAsACoupledPair(t *testing.T) {
+	rl := NewRateLimiter(100)
+	now := time.Now()
+
+	rl.Observe("core", RateSnapshot{Limit: 5000, Remaining: 4937, Used: 63, Reset: now.Add(time.Hour), ObservedAt: now})
+
+	// Hypothetical caller that violates the coupling: Limit <= 0 but Used set.
+	rl.Observe("core", RateSnapshot{Limit: 0, Used: 999, Remaining: 10, Reset: now.Add(time.Hour), ObservedAt: now})
+
+	core, ok := rl.Snapshots()["core"]
+	if !ok {
+		t.Fatal("Snapshots() missing \"core\"")
+	}
+	if core.Used != 63 {
+		t.Errorf("Used = %d, want 63 (the Limit<=0 observation's Used=999 must be discarded along with its missing Limit)", core.Used)
+	}
+}

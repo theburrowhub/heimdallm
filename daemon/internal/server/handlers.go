@@ -2603,8 +2603,10 @@ func (srv *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleGitHubRateLimit returns the live GitHub API rate-limit buckets for the
-// daemon's token (core / search / graphql). It queries GitHub on each call, so
-// the UI should fetch it on demand rather than polling.
+// daemon's token (core / search / graphql). The values come from the
+// scheduler's in-memory tracker of real X-RateLimit-* response headers, not a
+// live GitHub call, so this is cheap to poll; GitHub's own GET /rate_limit is
+// only consulted as a fallback for a bucket that hasn't been observed yet.
 func (srv *Server) handleGitHubRateLimit(w http.ResponseWriter, r *http.Request) {
 	if srv.rateLimitFn == nil {
 		http.Error(w, `{"error":"rate limit lookup not available"}`, http.StatusServiceUnavailable)
