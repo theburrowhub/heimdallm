@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net/netip"
+	"sync"
 	"testing"
 	"time"
 
@@ -50,7 +51,7 @@ func testAdvertisement() Advertisement {
 		Version:      "0.8.17",
 		Hostname:     "mac-sergio.local.",
 		Port:         7842,
-		Addrs:        []netip.Addr{netip.MustParseAddr("10.0.0.11")},
+		Addrs:        func() []netip.Addr { return []netip.Addr{netip.MustParseAddr("10.0.0.11")} },
 	}
 }
 
@@ -105,7 +106,7 @@ func TestAdvertiseBrowseRoundTrip(t *testing.T) {
 // from — that is what makes a DHCP lease change a non-event.
 func TestBrowseAddressesPeerByHostnameNotIP(t *testing.T) {
 	ad := testAdvertisement()
-	ad.Addrs = []netip.Addr{netip.MustParseAddr("10.0.0.99")}
+	ad.Addrs = func() []netip.Addr { return []netip.Addr{netip.MustParseAddr("10.0.0.99")} }
 	browseConn := startAdvertiser(t, ad)
 
 	browser, _ := NewBrowser(browseConn, quietLogger())
@@ -364,5 +365,69 @@ func TestBrowseSortsPeersByInstanceID(t *testing.T) {
 		if peers[i].InstanceID != want {
 			t.Fatalf("peers[%d].InstanceID = %q, want %q", i, peers[i].InstanceID, want)
 		}
+	}
+}
+
+// The addresses go on the wire as they are at answer time, not as they were
+// when the advertiser was built. A daemon whose address changes underneath it
+// is the entire reason this feature exists, so an advertiser that cached them
+// would answer with the stale one after exactly the event it is meant to
+// survive.
+func TestAdvertiserReadsAddressesPerResponse(t *testing.T) {
+	var mu sync.Mutex
+	current := netip.MustParseAddr("10.0.0.11")
+
+	ad := testAdvertisement()
+	ad.Addrs = func() []netip.Addr {
+		mu.Lock()
+		defer mu.Unlock()
+		return []netip.Addr{current}
+	}
+	browseConn := startAdvertiser(t, ad)
+	browser, _ := NewBrowser(browseConn, quietLogger())
+
+	peers, err := browser.Browse(context.Background(), 500*time.Millisecond)
+	if err != nil || len(peers) != 1 {
+		t.Fatalf("Browse: %v, peers %+v", err, peers)
+	}
+	if got := peers[0].Addrs; len(got) != 1 || got[0].String() != "10.0.0.11" {
+		t.Fatalf("Addrs = %v, want [10.0.0.11]", got)
+	}
+
+	// The lease changes.
+	mu.Lock()
+	current = netip.MustParseAddr("10.0.0.99")
+	mu.Unlock()
+
+	peers, err = browser.Browse(context.Background(), 500*time.Millisecond)
+	if err != nil || len(peers) != 1 {
+		t.Fatalf("Browse: %v, peers %+v", err, peers)
+	}
+	if got := peers[0].Addrs; len(got) != 1 || got[0].String() != "10.0.0.99" {
+		t.Fatalf("Addrs = %v, want [10.0.0.99] — the advertiser cached them", got)
+	}
+	// And the name never moved, which is what a hub actually registers.
+	if peers[0].BaseURL() != "http://mac-sergio.local:7842" {
+		t.Fatalf("BaseURL = %q, want the hostname form", peers[0].BaseURL())
+	}
+}
+
+// An advertisement with no address source is still usable: the SRV target is a
+// name, and resolving it is the resolver's job.
+func TestAdvertiserWithoutAddressesStillAnnounces(t *testing.T) {
+	ad := testAdvertisement()
+	ad.Addrs = nil
+	browseConn := startAdvertiser(t, ad)
+
+	browser, _ := NewBrowser(browseConn, quietLogger())
+	peers, err := browser.Browse(context.Background(), 500*time.Millisecond)
+	if err != nil || len(peers) != 1 {
+		t.Fatalf("Browse: %v, peers %+v", err, peers)
+	}
+	if peers[0].BaseURL() != "http://mac-sergio.local:7842" {
+		t.Fatalf("BaseURL = %q, want the hostname form", peers[0].BaseURL())
+	}
+	if len(peers[0].Addrs) != 0 {
+		t.Fatalf("Addrs = %v, want none", peers[0].Addrs)
 	}
 }

@@ -27,7 +27,15 @@ type Advertisement struct {
 	Scheme       string // http unless set
 	Hostname     string // defaults to "<os hostname>.local."
 	Port         int
-	Addrs        []netip.Addr
+
+	// Addrs supplies the A/AAAA records, and is called per response rather
+	// than sampled once. A daemon's addresses are exactly the thing that
+	// changes underneath it — that is the bug this whole feature exists for —
+	// so an advertiser that captured them at startup would answer with a stale
+	// address after the very lease change it is meant to survive. nil means
+	// advertise no addresses, which is valid: the SRV target is a name, and
+	// resolving it is the resolver's job.
+	Addrs func() []netip.Addr
 }
 
 // Advertiser answers mDNS queries for this daemon's service record.
@@ -213,8 +221,11 @@ func (a *Advertiser) allRecords() []dns.RR {
 
 func (a *Advertiser) addressRecords() []dns.RR {
 	const ttl = 120
+	if a.ad.Addrs == nil {
+		return nil
+	}
 	var out []dns.RR
-	for _, addr := range a.ad.Addrs {
+	for _, addr := range a.ad.Addrs() {
 		if addr.Is4() {
 			out = append(out, &dns.A{
 				Hdr: dns.RR_Header{Name: a.ad.Hostname, Rrtype: dns.TypeA,
