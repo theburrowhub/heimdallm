@@ -55,6 +55,11 @@ type ClusterDeps struct {
 	Snapshot func() ClusterSnapshot
 	// Prober supplies observed health. May be nil in tests.
 	Prober *instances.Prober
+	// Discoverer supplies daemons seen on the local network. Nil whenever
+	// cluster.discovery is off, which is the default — the routes then answer
+	// with an empty, explicitly-disabled listing rather than 404ing, so the GUI
+	// can explain why it has nothing to show.
+	Discoverer *instances.Discoverer
 	// Store persists dispatch claims and instance state.
 	Store ClusterStore
 	// NewClient builds a client for an instance. Nil uses the real HTTP client.
@@ -124,6 +129,9 @@ func (srv *Server) mountClusterRoutes(r chi.Router) {
 	r.Delete("/instances/{id}", srv.hubOnly(srv.handleDeleteInstance))
 	r.Post("/instances/{id}/probe", srv.hubOnly(srv.handleProbeInstance))
 	r.Handle("/instances/{id}/proxy/*", srv.hubOnly(srv.handleInstanceProxy))
+
+	r.Get("/cluster/discovered", srv.hubOnly(srv.handleListDiscovered))
+	r.Post("/cluster/discovered/scan", srv.hubOnly(srv.handleScanDiscovered))
 
 	r.Get("/cluster/routing", srv.hubOnly(srv.handleGetRouting))
 	r.Put("/cluster/routing", srv.hubOnly(srv.handlePutRouting))
@@ -232,6 +240,19 @@ type registerInstanceRequest struct {
 	// SkipProbe registers without contacting the instance first. Useful when
 	// adding a machine that is not up yet; the default is to verify.
 	SkipProbe bool `json:"skip_probe"`
+
+	// ExpectInstanceID pins the identity the caller believes is at BaseURL.
+	// When set, the probe must find exactly that instance or the request is
+	// refused.
+	//
+	// This is what makes it safe to register something found over mDNS.
+	// Discovery is unauthenticated, so between the browse that proposed a peer
+	// and the click that registers it, the name could have been taken over by
+	// something else on the LAN. Sending the id observed at discovery time
+	// closes that window: the worst a rogue advertiser can do is appear in a
+	// list. Meaningless with SkipProbe, since there is then nothing to check
+	// the claim against.
+	ExpectInstanceID string `json:"expect_instance_id"`
 }
 
 func (srv *Server) handleRegisterInstance(w http.ResponseWriter, r *http.Request) {
@@ -270,6 +291,13 @@ func (srv *Server) handleRegisterInstance(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	req.ExpectInstanceID = strings.TrimSpace(req.ExpectInstanceID)
+	if req.ExpectInstanceID != "" && req.SkipProbe {
+		httpJSONErr(w, http.StatusBadRequest,
+			"expect_instance_id cannot be verified with skip_probe")
+		return
+	}
+
 	// Probe before writing. Registering an instance that answers is worth the
 	// extra round trip: the alternative is a registry entry that looks fine and
 	// silently never works, which is much harder to diagnose later.
@@ -286,6 +314,16 @@ func (srv *Server) handleRegisterInstance(w http.ResponseWriter, r *http.Request
 			return
 		}
 		health = h
+	}
+
+	// The pinned identity is checked against what the daemon says about
+	// itself, which is the only claim here that had to be served over HTTP by
+	// whoever actually holds the address.
+	if req.ExpectInstanceID != "" && health.InstanceID != req.ExpectInstanceID {
+		httpJSONErr(w, http.StatusConflict, fmt.Sprintf(
+			"%s identifies itself as %q, not %q; it may have been replaced since it was discovered",
+			req.BaseURL, health.InstanceID, req.ExpectInstanceID))
+		return
 	}
 
 	// Prefer the id the instance reports for itself: it is the identity it will

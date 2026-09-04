@@ -461,3 +461,139 @@ class InstanceDrift {
   String get displayName => name.isNotEmpty ? name : instanceId;
   bool get inSync => ok && drifts.isEmpty;
 }
+
+/// What a discovered peer is being offered as.
+///
+/// These describe the proposal, not something the hub has done. Discovery never
+/// registers anything and never rewrites an address.
+class PeerStatus {
+  /// A verified daemon nobody has registered yet.
+  static const newPeer = 'new';
+
+  /// Already in the registry at the same address. Shown so the list reads as
+  /// "here is the network" rather than implying everything on it needs action.
+  static const registered = 'registered';
+
+  /// A registered instance answering somewhere its `base_url` no longer points.
+  /// Its peers will be taking over the repositories it is still reviewing, so
+  /// this is the one worth interrupting the operator for.
+  static const addressChanged = 'address_changed';
+}
+
+/// One Heimdallm daemon the hub found on the local network over mDNS.
+///
+/// Everything here has already been verified by the daemon: the hub reached the
+/// peer over HTTP and let it identify itself, so the id and name are the
+/// instance's own claims about itself rather than whatever was advertised.
+class DiscoveredPeer {
+  final String instanceId;
+  final String name;
+  final String role;
+  final String version;
+
+  /// Where to reach it, built from its mDNS hostname rather than an IP — the
+  /// point of discovery is an address that survives the next DHCP lease.
+  final String baseUrl;
+  final String hostname;
+
+  /// The addresses it answered from. Diagnostics only; [baseUrl] is what gets
+  /// registered.
+  final List<String> addresses;
+
+  /// One of the [PeerStatus] values.
+  final String status;
+
+  /// The registry entry this peer matches, when it matches one.
+  final String registeredId;
+  final String registeredBaseUrl;
+
+  final DateTime? seenAt;
+
+  const DiscoveredPeer({
+    required this.instanceId,
+    required this.baseUrl,
+    this.name = '',
+    this.role = '',
+    this.version = '',
+    this.hostname = '',
+    this.addresses = const [],
+    this.status = PeerStatus.newPeer,
+    this.registeredId = '',
+    this.registeredBaseUrl = '',
+    this.seenAt,
+  });
+
+  factory DiscoveredPeer.fromJson(Map<String, dynamic> json) {
+    return DiscoveredPeer(
+      instanceId: (json['instance_id'] as String?) ?? '',
+      baseUrl: (json['base_url'] as String?) ?? '',
+      name: (json['name'] as String?) ?? '',
+      role: (json['role'] as String?) ?? '',
+      version: (json['version'] as String?) ?? '',
+      hostname: (json['hostname'] as String?) ?? '',
+      addresses:
+          (json['addresses'] as List<dynamic>?)
+              ?.map((e) => e.toString())
+              .toList() ??
+          const [],
+      status: (json['status'] as String?) ?? PeerStatus.newPeer,
+      registeredId: (json['registered_id'] as String?) ?? '',
+      registeredBaseUrl: (json['registered_base_url'] as String?) ?? '',
+      seenAt: InstanceState._parseTime(json['seen_at']),
+    );
+  }
+
+  /// Label for the UI. Never empty, so a row always renders something.
+  String get displayName => name.isNotEmpty ? name : instanceId;
+
+  /// Whether this peer is something the operator can act on: register it, or
+  /// repair the address of the entry it already has.
+  bool get isActionable => status != PeerStatus.registered;
+}
+
+/// The hub's view of the local network.
+class DiscoveredPeers {
+  /// Whether `cluster.discovery` is on. Carried separately from the list
+  /// because "switched off" and "found nothing" look identical when empty and
+  /// need completely different copy.
+  final bool enabled;
+  final DateTime? lastScan;
+  final List<DiscoveredPeer> peers;
+
+  const DiscoveredPeers({
+    this.enabled = false,
+    this.lastScan,
+    this.peers = const [],
+  });
+
+  static const DiscoveredPeers empty = DiscoveredPeers();
+
+  factory DiscoveredPeers.fromJson(Map<String, dynamic> json) {
+    return DiscoveredPeers(
+      enabled: json['enabled'] == true,
+      lastScan: InstanceState._parseTime(json['last_scan']),
+      peers:
+          (json['peers'] as List<dynamic>?)
+              ?.whereType<Map<String, dynamic>>()
+              .map(DiscoveredPeer.fromJson)
+              .toList() ??
+          const [],
+    );
+  }
+
+  /// Peers the operator has not registered yet.
+  List<DiscoveredPeer> get unregistered =>
+      peers.where((p) => p.status == PeerStatus.newPeer).toList();
+
+  /// Registered instances answering at an address the registry does not have.
+  List<DiscoveredPeer> get moved =>
+      peers.where((p) => p.status == PeerStatus.addressChanged).toList();
+
+  /// The moved entry for a registered instance, if the network says it has one.
+  DiscoveredPeer? movedFor(String instanceId) {
+    for (final peer in moved) {
+      if (peer.registeredId == instanceId) return peer;
+    }
+    return null;
+  }
+}

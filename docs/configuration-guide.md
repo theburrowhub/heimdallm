@@ -1500,6 +1500,7 @@ instance_id      = ""             # generated on first boot, kept in <data dir>/
 instance_name    = "main"         # defaults to the hostname
 default_instance = "hub-1"        # owns everything no rule claims
 probe_interval   = "30s"          # how often the hub health-checks the others
+discovery        = "off"          # off (default) | mdns; see 18.8
 
 # Instances are a TOML map keyed by id, not an array of tables: the config
 # schema validator rejects arrays of tables, and a map makes id uniqueness a
@@ -1514,7 +1515,7 @@ labels     = ["macos", "local"]
 
 [cluster.instances.srv-a]
 name      = "srv-a"
-base_url  = "http://10.0.0.11:7842"
+base_url  = "http://srv-a.local:7842"   # a hostname, not a pinned IP - see below
 token_env = "HEIMDALLM_SRV_A_TOKEN"
 enabled   = true                  # omit or true to participate
 
@@ -1543,13 +1544,21 @@ or `[cluster.routing]` written by an operator.
 Environment equivalents, for containers that should not carry a per-instance
 `config.toml`: `HEIMDALLM_CLUSTER_ROLE`, `HEIMDALLM_INSTANCE_ID`,
 `HEIMDALLM_INSTANCE_NAME`, `HEIMDALLM_CLUSTER_DEFAULT_INSTANCE`,
-`HEIMDALLM_CLUSTER_PROBE_INTERVAL`,
+`HEIMDALLM_CLUSTER_PROBE_INTERVAL`, `HEIMDALLM_CLUSTER_DISCOVERY`,
 `HEIMDALLM_CLUSTER_TAKEOVER_AFTER_FAILED_PROBES`.
 
-> **`base_url` on a DHCP host.** If an instance's address is not static, an
-> address change makes that instance permanently unreachable from the hub while
-> it keeps working perfectly — see §18.3.1. Give clustered hosts a static
-> address or a stable DNS name rather than an IP from a lease.
+**`base_url` takes a hostname, and it usually should.** Validation only requires
+an absolute `http`/`https` URL with a host and no credentials, query or
+fragment — so an mDNS `.local` name, a DNS record or a Tailscale name all work,
+and only the hostname is re-resolved on each request.
+
+Prefer one of those, a static address or a DHCP reservation over a literal IP
+from a lease. Nothing re-resolves a `base_url`: it changes only when someone
+edits it. So when a laptop or any DHCP host picks up a new address, its entry
+goes stale and that instance becomes permanently unreachable from the hub while
+it carries on working perfectly — which is the situation §18.3.1 exists to
+contain, and containing it is not the same as avoiding it. Section 18.8 covers
+discovering instances by name instead.
 
 ### 18.3 Routing modes
 
@@ -1692,7 +1701,98 @@ make down-instance NAME=b
 Each instance gets its own Compose project, hence its own containers and
 volumes. There is no second `web` service: the UI is served once, by the hub.
 
-### 18.8 CLI
+### 18.8 Discovering instances on the local network
+
+Off by default. Turn it on per daemon:
+
+```toml
+[cluster]
+discovery = "mdns"    # off (default) | mdns
+```
+
+Environment equivalent: `HEIMDALLM_CLUSTER_DISCOVERY`. The Instances tab also
+offers a one-click switch on the hub.
+
+Only the address the listener actually bound is advertised. With
+`server.bind_addr` set to one specific interface, that is the only address
+published — a machine with a VPN or a second NIC does not offer peers an address
+where nothing is listening.
+
+**The daemon must be listening somewhere a peer can reach it.** `server.bind_addr`
+defaults to `127.0.0.1`, and on that setting nothing else on the network can
+connect — so a daemon would advertise an address it then refuses. It declines to
+advertise at all in that case and logs why, because the alternative is a machine
+that simply never appears in the hub's list with nothing to explain it. Set
+`server.bind_addr` to a routable LAN address, or to `0.0.0.0`, on any instance
+you want discovered — a loopback, link-local or multicast bind is refused, and
+refused for the same reasons a hub would decline to dial it. Browsing is unaffected: a hub bound to loopback can still find and
+register peers, it just cannot be found itself.
+
+The advertised port is the one the listener actually bound, not
+`server.port` — the listener is claimed once at startup and no reload rebinds
+it, so a live port edit takes effect on restart and discovery keeps telling the
+truth in the meantime.
+
+A daemon with discovery on advertises itself as `_heimdallm._tcp.local`,
+carrying its instance id, name, role and version. A **hub** with discovery on
+also browses, and lists what it finds under *"found on this network, not
+registered"*, with a button to register each one.
+
+The point is not saving a few keystrokes. A discovered instance is registered
+by its mDNS hostname rather than the address it answered from, and a hostname
+is re-resolved on every request — so when that machine picks up a new DHCP
+lease, the hub follows it with no operator action. A pinned IP does not, and a
+stale one means the other instances take over its repositories while it is
+still reviewing them.
+
+The hub also notices when an *already registered* instance answers somewhere
+its `base_url` no longer points, and offers to correct it — one click, on the
+instance's own card.
+
+#### Discovery only proposes
+
+mDNS is unauthenticated: anything on the LAN can advertise `_heimdallm._tcp`
+and claim to be any instance. The design assumes that.
+
+| Guard | What it stops |
+|---|---|
+| Nothing is registered automatically | An advertiser can put a name in a list; only an operator can put it in the registry |
+| The API token never travels over mDNS | It has to reach you out of band, exactly as before |
+| Identity comes from the daemon, not the advertisement | The hub fetches the peer's `/health` and uses the id **it** reports; the TXT record is discarded. A peer that does not answer, or will not name itself, is never offered |
+| Registration pins the discovered id | If the machine at that address is no longer the one that was found, the registration is refused rather than silently pointed at whatever is there now |
+| An address is never rewritten for you | A moved instance is a proposal on a card, so a rogue advertiser cannot redirect the hub by claiming a known id |
+| Only `<name>.local` is ever probed | An advertised hostname is turned into a URL and fetched, so anything else would be a request-forgery primitive handed to the subnet. A name like `metadata.google.internal` is refused, not resolved, and redirects are refused too |
+| Verification connects to the advertised address, never to whatever the name resolves to | A `.local` name constrains what a peer is *called*, not where it *points*: mDNS resolution is unauthenticated too, so anyone on the link could answer a query for `peer.local` with an address only the hub can reach — a cloud metadata endpoint being the obvious target. The probe dials an address published in the packet, and loopback, link-local and multicast addresses are refused |
+| And only on the link the advertisement came from | Refusing those address classes is not enough on a multi-homed hub, which can reach a VPN that an attacker on the LAN cannot. The advertised address must share a locally attached network with the packet's source, and the check fails closed: a source on no attached network allows nothing, because a UDP source address is easy to spoof and any exception would just be the way around the rule. One consequence worth knowing: a routed mDNS relay will not work, which is consistent with discovery being link-local anyway |
+| A browse is bounded | One sender cannot make the hub hold unlimited records or open unlimited connections: records and peers are capped per scan and verification runs through a fixed pool |
+
+Turning discovery **on** is still a decision worth making deliberately:
+announcing a service on a shared corporate network is a choice, which is why
+the default is off rather than on.
+
+#### Where it does not reach
+
+**Containers.** mDNS does not cross Docker's default bridge — which is how the
+daemon is usually deployed. A container with discovery on will typically see
+nothing and be seen by nothing. Use `network_mode: host`, or set
+`HEIMDALLM_CLUSTER_DISCOVERY=off` and address instances by hostname. The daemon
+logs a warning at startup when it detects this combination.
+
+**A registered `.local` name still resolves at dial time.** Discovery hands the
+operator an address; from then on it is an ordinary `base_url`, resolved by the
+host's resolver like any other hostname. That resolution is not authenticated —
+which is true of DNS as well, and is the accepted trade for addressing an
+instance by name rather than by a pinned IP. What the checks above bound is the
+*unauthenticated* part: what discovery will propose, and what it will connect to
+before an operator has decided anything.
+
+**Anything past the subnet.** mDNS is link-local by definition. It will not find
+a machine in another VLAN, another office or a cloud VPC. Discovery is a
+convenience within one network, **not** a replacement for DNS, a VPN or
+Tailscale — and `base_url` accepts all of those, so a cross-site cluster is
+configured exactly as it is today.
+
+### 18.9 CLI
 
 `cli.toml` gains an instance map alongside the flat `host`/`token` pair, which
 keeps working and is presented as an instance called `local`:
@@ -2018,6 +2118,7 @@ max_days = 90   # env: HEIMDALLM_RETENTION_DAYS; set to 0 to disable purging
 # instance_name    = "main"   # env: HEIMDALLM_INSTANCE_NAME; defaults to the hostname
 # default_instance = "hub-1"  # owns every repository no rule claims
 # probe_interval   = "30s"    # how often the hub health-checks the others
+# discovery        = "off"    # off (default) | mdns; env: HEIMDALLM_CLUSTER_DISCOVERY
 
 # One entry per instance, keyed by id. Exactly one token source each.
 # [cluster.instances.hub-1]
@@ -2027,7 +2128,7 @@ max_days = 90   # env: HEIMDALLM_RETENTION_DAYS; set to 0 to disable purging
 # labels     = ["macos"]
 
 # [cluster.instances.srv-a]
-# base_url  = "http://10.0.0.11:7842"
+# base_url  = "http://srv-a.local:7842"   # prefer a hostname over a pinned IP
 # token_env = "HEIMDALLM_SRV_A_TOKEN"
 # enabled   = true
 

@@ -11,21 +11,30 @@ import 'enable_hub_action.dart';
 enum _TokenSource { inline, env, file }
 
 /// Add or edit a registered instance.
+///
+/// Pass [discovered] to prefill from a daemon found on the local network. It is
+/// deliberately a separate parameter from [existing]: passing a peer as
+/// `existing` would make this an edit dialog and send the save down the PATCH
+/// path, when what is wanted is a registration that has simply had its address
+/// filled in. The operator still types the token.
 Future<void> showInstanceDialog(
   BuildContext context,
   WidgetRef ref, {
   DaemonInstance? existing,
+  DiscoveredPeer? discovered,
 }) {
   return showDialog<void>(
     context: context,
-    builder: (context) => _InstanceDialog(existing: existing),
+    builder: (context) =>
+        _InstanceDialog(existing: existing, discovered: discovered),
   );
 }
 
 class _InstanceDialog extends ConsumerStatefulWidget {
-  const _InstanceDialog({this.existing});
+  const _InstanceDialog({this.existing, this.discovered});
 
   final DaemonInstance? existing;
+  final DiscoveredPeer? discovered;
 
   @override
   ConsumerState<_InstanceDialog> createState() => _InstanceDialogState();
@@ -48,8 +57,13 @@ class _InstanceDialogState extends ConsumerState<_InstanceDialog> {
   @override
   void initState() {
     super.initState();
-    _name = TextEditingController(text: widget.existing?.name ?? '');
-    _baseUrl = TextEditingController(text: widget.existing?.baseUrl ?? '');
+    final discovered = widget.discovered;
+    _name = TextEditingController(
+      text: widget.existing?.name ?? discovered?.displayName ?? '',
+    );
+    _baseUrl = TextEditingController(
+      text: widget.existing?.baseUrl ?? discovered?.baseUrl ?? '',
+    );
     _labels = TextEditingController(
       text: widget.existing?.labels.join(', ') ?? '',
     );
@@ -67,7 +81,13 @@ class _InstanceDialogState extends ConsumerState<_InstanceDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: Text(_isEdit ? 'Edit ${widget.existing!.displayName}' : 'Add instance'),
+      title: Text(
+        _isEdit
+            ? 'Edit ${widget.existing!.displayName}'
+            : widget.discovered != null
+            ? 'Register ${widget.discovered!.displayName}'
+            : 'Add instance',
+      ),
       content: SizedBox(
         width: 460,
         child: Form(
@@ -273,6 +293,11 @@ class _InstanceDialogState extends ConsumerState<_InstanceDialog> {
           name: _name.text.trim(),
           labels: labels,
           skipProbe: _skipProbe,
+          // Pin the identity seen when the peer was discovered. Between the
+          // browse that proposed it and this click, something else on the LAN
+          // could have taken the name; the daemon refuses the registration if
+          // the machine at this address is not the one that was found.
+          expectInstanceId: widget.discovered?.instanceId,
           token: _tokenSource == _TokenSource.inline ? token : null,
           tokenEnv: _tokenSource == _TokenSource.env ? token : null,
           tokenFile: _tokenSource == _TokenSource.file ? token : null,

@@ -553,6 +553,12 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 	cfg.Cluster.InstanceID = instanceID
 	ensureSelfInstance(cfg, dataDir())
 	clusterSt := newClusterState(cfg, s, broker)
+	// Discovery advertises where the server actually answers, not what
+	// config.toml asked for. The listener is already bound by this point and
+	// nothing rebinds it, so this is the only address a peer can ever reach.
+	if httpListener != nil {
+		clusterSt.SetServedAddr(httpListener.Addr())
+	}
 	if cfg.ClusterEnabled() {
 		slog.Info("cluster: multi-instance mode active",
 			"instance_id", instanceID, "role", cfg.Cluster.Role,
@@ -1291,6 +1297,23 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		go func() {
 			defer wg.Done()
 			clusterSt.RunProber(ctx)
+		}()
+
+		// mDNS: answer "which daemons are on this network" (any role), and on
+		// a hub, ask it. Both return immediately when cluster.discovery is off,
+		// which is the default — same no-op-goroutine trade as the prober.
+		// Living on the poller context is what makes a reload that flips
+		// discovery on or off take effect: any [cluster] change restarts the
+		// pollers, so these are rebuilt with it.
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			clusterSt.RunAdvertiser(ctx)
+		}()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			clusterSt.RunDiscoverer(ctx)
 		}()
 
 		// Tier 2: PR / issue polling — use the resolved interval which honours
@@ -6295,6 +6318,10 @@ func clusterConfigMap(c config.ClusterConfig) map[string]any {
 	if routingMode == "" {
 		routingMode = config.ModeAssignment
 	}
+	discovery := strings.ToLower(strings.TrimSpace(c.Discovery))
+	if discovery == "" {
+		discovery = config.DiscoveryOff
+	}
 	return map[string]any{
 		"role":             role,
 		"instance_id":      c.InstanceID,
@@ -6302,6 +6329,7 @@ func clusterConfigMap(c config.ClusterConfig) map[string]any {
 		"default_instance": c.DefaultInstance,
 		"probe_interval":   c.ProbeInterval,
 		"routing_mode":     routingMode,
+		"discovery":        discovery,
 		// Resolved rather than passed through, for the same reason role and
 		// routing_mode are: the TOML zero value means "the default", and a 0
 		// reaching the GUI would read as "take over immediately".

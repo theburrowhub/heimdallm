@@ -197,9 +197,9 @@ type MergeStatus struct {
 	MergeQueueEntryState string            `json:"merge_queue_entry_state,omitempty"`
 
 	// Refs and ownership.
-	BaseRef       string   `json:"base_ref"`
-	HeadRef       string   `json:"head_ref"`
-	HeadOID       string   `json:"head_oid"`
+	BaseRef string `json:"base_ref"`
+	HeadRef string `json:"head_ref"`
+	HeadOID string `json:"head_oid"`
 	// BaseOID is the commit the PR is currently based on, and BaseTipOID the
 	// current tip of the base branch. They differ exactly when the PR is out of
 	// date.
@@ -209,8 +209,8 @@ type MergeStatus struct {
 	// BEHIND, so a PR that is both behind and waiting on a review or a check
 	// never reports BEHIND at all. Verified against this repository: two open
 	// PRs whose base was hundreds of commits back both reported DIRTY.
-	BaseOID    string `json:"base_oid"`
-	BaseTipOID string `json:"base_tip_oid"`
+	BaseOID       string   `json:"base_oid"`
+	BaseTipOID    string   `json:"base_tip_oid"`
 	HeadRepo      string   `json:"head_repo"`
 	HeadIsFork    bool     `json:"head_is_fork"`
 	HeadRepoOwner string   `json:"head_repo_owner"`

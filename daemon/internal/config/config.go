@@ -1170,6 +1170,11 @@ func (c *Config) applyEnvOverrides() {
 				"value", v)
 		}
 	}
+	// Worth setting to "off" explicitly in a container image: mDNS does not
+	// cross Docker's default bridge, so leaving it on there is noise.
+	if v := os.Getenv("HEIMDALLM_CLUSTER_DISCOVERY"); v != "" {
+		c.Cluster.Discovery = v
+	}
 	if v := os.Getenv("HEIMDALLM_POLL_INTERVAL"); v != "" {
 		c.GitHub.PollInterval = v
 	}
