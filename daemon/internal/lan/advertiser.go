@@ -115,6 +115,18 @@ func (a *Advertiser) Close() error { return a.conn.Close() }
 // do.
 const maxConsecutiveReadErrors = 10
 
+// recordTTL is the lifetime published with every record.
+const recordTTL = 120
+
+// serviceEnumerationName is the DNS-SD meta-query asking which service types
+// exist on this link (RFC 6763 §9).
+const serviceEnumerationName = "_services._dns-sd._udp." + Domain + "."
+
+// unicastResponseBit is the top bit of an mDNS question's class field, used to
+// request a unicast reply (RFC 6762 §18.12). It is a flag, not part of the
+// class, and has to be masked off before comparing.
+const unicastResponseBit = 1 << 15
+
 // Run answers queries until ctx is cancelled or the socket stops working, then
 // sends a goodbye.
 //
@@ -174,9 +186,20 @@ func (a *Advertiser) respond(packet []byte, from net.Addr) {
 		return
 	}
 
+	// De-duplicated across questions: a query carrying both a PTR and an SRV
+	// question for this instance would otherwise repeat the whole record set,
+	// which is wasteful and can push the response past the MTU.
 	var answers []dns.RR
+	seen := map[string]bool{}
 	for _, q := range msg.Question {
-		answers = append(answers, a.recordsFor(q)...)
+		for _, rr := range a.recordsFor(q) {
+			key := rr.String()
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			answers = append(answers, rr)
+		}
 	}
 	if len(answers) == 0 {
 		return
@@ -200,45 +223,67 @@ func (a *Advertiser) respond(packet []byte, from net.Addr) {
 // enough: a browser asking only for PTR still gets the SRV, TXT and A it will
 // need next.
 func (a *Advertiser) recordsFor(q dns.Question) []dns.RR {
+	// The top bit of the class field is mDNS's unicast-response flag
+	// (RFC 6762 §18.12), not part of the class. Masking it is what stops a
+	// question with QU set being read as an unknown class and ignored; a class
+	// that is genuinely not INET is not ours to answer.
+	if q.Qclass&^unicastResponseBit != dns.ClassINET {
+		return nil
+	}
+
 	name := strings.ToLower(dns.Fqdn(q.Name))
 	service := strings.ToLower(serviceFQDN())
 	instance := strings.ToLower(a.instanceName)
 
 	switch name {
-	case service, "_services._dns-sd._udp." + Domain + ".":
-	case instance:
+	case serviceEnumerationName:
+		// The meta-query asks which service *types* exist here, so the answer
+		// is a PTR named after the meta-query itself pointing at the type
+		// (RFC 6763 §9). Replying with our own service's records instead
+		// answers a question nobody asked and leaves generic browsers unable
+		// to enumerate us at all.
+		if q.Qtype != dns.TypePTR && q.Qtype != dns.TypeANY {
+			return nil
+		}
+		return []dns.RR{&dns.PTR{
+			Hdr: dns.RR_Header{Name: serviceEnumerationName, Rrtype: dns.TypePTR,
+				Class: dns.ClassINET, Ttl: recordTTL},
+			Ptr: serviceFQDN(),
+		}}
+	case service, instance:
+		if q.Qtype != dns.TypePTR && q.Qtype != dns.TypeSRV &&
+			q.Qtype != dns.TypeTXT && q.Qtype != dns.TypeANY {
+			return nil
+		}
+		return a.allRecords()
 	case strings.ToLower(a.ad.Hostname):
-		// A host-only question: answer with addresses alone.
+		// A host question: addresses and nothing else. Gated on the type, or
+		// a PTR query for the hostname would be answered with A records.
+		if q.Qtype != dns.TypeA && q.Qtype != dns.TypeAAAA && q.Qtype != dns.TypeANY {
+			return nil
+		}
 		return a.addressRecords()
-	default:
-		return nil
 	}
-	if q.Qtype != dns.TypePTR && q.Qtype != dns.TypeSRV &&
-		q.Qtype != dns.TypeTXT && q.Qtype != dns.TypeANY {
-		return nil
-	}
-	return a.allRecords()
+	return nil
 }
 
 func (a *Advertiser) allRecords() []dns.RR {
-	const ttl = 120
-
 	records := []dns.RR{
 		&dns.PTR{
 			Hdr: dns.RR_Header{Name: serviceFQDN(), Rrtype: dns.TypePTR,
-				Class: dns.ClassINET, Ttl: ttl},
+				Class: dns.ClassINET, Ttl: recordTTL},
 			Ptr: a.instanceName,
 		},
 		&dns.SRV{
 			Hdr: dns.RR_Header{Name: a.instanceName, Rrtype: dns.TypeSRV,
-				Class: dns.ClassINET, Ttl: ttl},
+				Class: dns.ClassINET, Ttl: recordTTL},
 			Priority: 0, Weight: 0,
 			Port:   uint16(a.ad.Port),
 			Target: a.ad.Hostname,
 		},
 		&dns.TXT{
 			Hdr: dns.RR_Header{Name: a.instanceName, Rrtype: dns.TypeTXT,
-				Class: dns.ClassINET, Ttl: ttl},
+				Class: dns.ClassINET, Ttl: recordTTL},
 			Txt: a.txt,
 		},
 	}
@@ -255,14 +300,14 @@ func (a *Advertiser) addressRecords() []dns.RR {
 		if addr.Is4() {
 			out = append(out, &dns.A{
 				Hdr: dns.RR_Header{Name: a.ad.Hostname, Rrtype: dns.TypeA,
-					Class: dns.ClassINET, Ttl: ttl},
+					Class: dns.ClassINET, Ttl: recordTTL},
 				A: net.IP(addr.AsSlice()),
 			})
 			continue
 		}
 		out = append(out, &dns.AAAA{
 			Hdr: dns.RR_Header{Name: a.ad.Hostname, Rrtype: dns.TypeAAAA,
-				Class: dns.ClassINET, Ttl: ttl},
+				Class: dns.ClassINET, Ttl: recordTTL},
 			AAAA: net.IP(addr.AsSlice()),
 		})
 	}
@@ -308,15 +353,50 @@ func responseTarget(from net.Addr) net.Addr {
 // rather than failing: an advertisement with a wrong-but-present hostname is
 // still useful for the addresses it carries.
 func defaultHostname() string {
+	const fallback = "heimdallm." + Domain + "."
+
 	host, err := osHostname()
-	if err != nil || strings.TrimSpace(host) == "" {
-		return "heimdallm." + Domain + "."
+	if err != nil {
+		return fallback
 	}
 	// A machine configured with an FQDN ("mac.corp.example.com") still answers
 	// mDNS as its short name under .local.
+	host = strings.ToLower(strings.TrimSpace(host))
 	host = strings.TrimSuffix(host, "."+Domain)
 	if i := strings.Index(host, "."); i > 0 {
 		host = host[:i]
 	}
-	return fmt.Sprintf("%s.%s.", host, Domain)
+	// Sanitised into a legal label, and the fallback used when nothing legal
+	// survives. An over-long or exotic hostname otherwise produces a name that
+	// msg.Pack refuses, and packing failures are only logged at Debug — so the
+	// advertiser would answer nothing at all, for the life of the process,
+	// with no visible reason.
+	host = sanitizeLabel(host)
+	if host == "" {
+		return fallback
+	}
+	return host + "." + Domain + "."
+}
+
+// sanitizeLabel reduces s to a legal DNS label, or "" when nothing usable is
+// left. Legal here is the hostname rule: letters, digits and inner hyphens, at
+// most 63 characters.
+func sanitizeLabel(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if b.Len() >= 63 {
+			break
+		}
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-' || r == '_':
+			b.WriteByte('-')
+		}
+	}
+	label := strings.Trim(b.String(), "-")
+	if !isDNSLabel(label) {
+		return ""
+	}
+	return label
 }

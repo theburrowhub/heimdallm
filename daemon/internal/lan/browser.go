@@ -25,6 +25,13 @@ import (
 const (
 	maxPeers       = 64
 	maxRecordNames = 512
+
+	// maxAddrsPerHost bounds one hostname's address set. Capping the number of
+	// host keys is not enough on its own: a sender emitting many distinct A
+	// records for the *same* name grows that one entry without limit, which is
+	// the flood this file claims to defend against arriving through the door
+	// left open. A real host has a handful of interfaces.
+	maxAddrsPerHost = 16
 )
 
 // Browser asks the network which Heimdallm daemons are on it.
@@ -138,7 +145,14 @@ type accumulator struct {
 	srv       map[string]*dns.SRV
 	txt       map[string][]string
 	addrs     map[string][]netip.Addr // keyed by host FQDN
+	seenAddr  map[addrKey]bool        // dedup without a linear scan
 	source    map[string]netip.Addr   // keyed by record name
+}
+
+// addrKey identifies one address under one hostname.
+type addrKey struct {
+	host string
+	addr netip.Addr
 }
 
 func newAccumulator() *accumulator {
@@ -147,6 +161,7 @@ func newAccumulator() *accumulator {
 		srv:       map[string]*dns.SRV{},
 		txt:       map[string][]string{},
 		addrs:     map[string][]netip.Addr{},
+		seenAddr:  map[addrKey]bool{},
 		source:    map[string]netip.Addr{},
 	}
 }
@@ -178,8 +193,14 @@ func (a *accumulator) absorb(packet []byte, source netip.Addr) {
 	for _, rr := range append(append([]dns.RR{}, msg.Answer...), msg.Extra...) {
 		// TTL 0 is a goodbye: the peer is leaving, so anything already
 		// collected for it is dropped rather than reported as present.
+		//
+		// Only from whoever advertised it, though. A goodbye is as
+		// unauthenticated as everything else on this group, so without the
+		// source check any host on the link could evict a legitimate daemon
+		// from an in-flight browse simply by naming it — a denial of discovery
+		// that costs one packet.
 		if rr.Header().Ttl == 0 {
-			a.forget(rr)
+			a.forget(rr, source)
 			continue
 		}
 		switch rec := rr.(type) {
@@ -209,16 +230,44 @@ func (a *accumulator) absorb(packet []byte, source netip.Addr) {
 	}
 }
 
-func (a *accumulator) forget(rr dns.RR) {
+func (a *accumulator) forget(rr dns.RR, source netip.Addr) {
 	name := strings.ToLower(rr.Header().Name)
 	if ptr, ok := rr.(*dns.PTR); ok {
-		delete(a.instances, strings.ToLower(ptr.Ptr))
+		a.retract(strings.ToLower(ptr.Ptr), source)
 		return
+	}
+	a.retract(name, source)
+	// The host's addresses go too. Leaving them behind meant an instance
+	// re-advertised later in the same window was reported with the addresses
+	// it had just retracted.
+	if srv, ok := a.srv[name]; ok {
+		a.forgetAddrs(strings.ToLower(srv.Target))
+	}
+	a.forgetAddrs(name)
+}
+
+// retract drops a record name, but only for the sender that advertised it.
+// A name nobody has advertised yet is left alone rather than pre-emptively
+// blocked, since there is nothing to protect and no claim to compare against.
+func (a *accumulator) retract(name string, source netip.Addr) {
+	if advertiser, known := a.source[name]; known && source.IsValid() &&
+		advertiser.IsValid() && advertiser != source {
+		return // somebody else's daemon; not this sender's to retire
+	}
+	if srv, ok := a.srv[name]; ok {
+		a.forgetAddrs(strings.ToLower(srv.Target))
 	}
 	delete(a.instances, name)
 	delete(a.srv, name)
 	delete(a.txt, name)
 	delete(a.source, name)
+}
+
+func (a *accumulator) forgetAddrs(host string) {
+	for _, addr := range a.addrs[host] {
+		delete(a.seenAddr, addrKey{host, addr})
+	}
+	delete(a.addrs, host)
 }
 
 // full reports whether the accumulator has taken all it will hold. Records past
@@ -231,20 +280,24 @@ func (a *accumulator) full() bool {
 }
 
 func (a *accumulator) addAddr(host string, ip net.IP) {
-	if len(a.addrs) >= maxRecordNames {
-		return
-	}
 	addr, ok := netip.AddrFromSlice(ip)
 	if !ok {
 		return
 	}
 	addr = addr.Unmap()
 	key := strings.ToLower(host)
-	for _, existing := range a.addrs[key] {
-		if existing == addr {
-			return
-		}
+	if _, known := a.addrs[key]; !known && len(a.addrs) >= maxRecordNames {
+		return
 	}
+	if len(a.addrs[key]) >= maxAddrsPerHost {
+		return
+	}
+	// Deduplicated through a set rather than a scan of the slice: the slice
+	// scan was quadratic in the number of records a stranger chooses to send.
+	if a.seenAddr[addrKey{key, addr}] {
+		return
+	}
+	a.seenAddr[addrKey{key, addr}] = true
 	a.addrs[key] = append(a.addrs[key], addr)
 }
 
