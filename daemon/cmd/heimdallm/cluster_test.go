@@ -1246,6 +1246,12 @@ func TestClusterStateOwnerCanHandleDefersWhileMerelyUnreachable(t *testing.T) {
 	if !cs.OwnerCanHandle("theirs/repo") {
 		t.Error("OwnerCanHandle() = false, want true — issue triage must not be duplicated on one missed probe")
 	}
+	// Review feedback: skipping triage because a peer is unreachable is a
+	// state an operator needs to see, and this path recorded nothing at all
+	// while the PR path logged it through noteDeferral.
+	if cs.notes.claim("srv-a", noticeSubject("defer", dispatchUnit("issue_triage", "theirs/repo"))) {
+		t.Error("deferring issue triage left no record; the skip is invisible to the operator")
+	}
 }
 
 func TestClusterStateOwnerCanHandleFalseOnceConfirmedDown(t *testing.T) {

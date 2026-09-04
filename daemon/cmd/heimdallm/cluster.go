@@ -660,11 +660,20 @@ func (cs *clusterState) announceTakeover(repo, op string, inst instances.Instanc
 // ownerVerdictFor: it is still triaging its own repos.
 func (cs *clusterState) OwnerCanHandle(repo string) bool {
 	inst, verdict := cs.ownerVerdictFor(repo)
-	if verdict == verdictTakeOver {
+	switch verdict {
+	case verdictTakeOver:
 		cs.announceTakeover(repo, "issue_triage", inst, takeoverProbesFailed)
 		return false
+	case verdictDeferToOwner:
+		// Recorded through the same deduped channel dispatch uses. Leaving
+		// work to an unreachable peer is a state an operator needs to see, and
+		// issue triage was taking that decision with no record at all while
+		// the PR path logged it.
+		cs.noteDeferral(repo, "issue_triage", inst)
+		return true
+	default:
+		return verdict == verdictDispatch
 	}
-	return verdict == verdictDispatch || verdict == verdictDeferToOwner
 }
 
 // DispatchPRReview hands a PR review to the instance repo is routed to.

@@ -1568,11 +1568,25 @@ outage. Treat that event as *"this repository may be being reviewed twice"*,
 not merely as *"that instance is down"* — the underlying cause is very often a
 stale `base_url`.
 
-What is still not guaranteed: two daemons that start reviewing the same commit
-within the same few seconds each spend their own LLM budget before either
-reaches the publish boundary. Only one review is published, but the second
-review's cost is already incurred. The ownership partition, not this check, is
-what keeps that from happening routinely.
+What is still not guaranteed, in two parts.
+
+The publish-boundary check is check-then-act, not an atomic claim: GitHub
+offers no compare-and-swap on reviews, and two partitioned instances share no
+other store. Two daemons that cross that boundary within the same API round
+trip of each other both see no peer review and both submit, and two reviews are
+published. What the check buys is the size of that window — one request,
+instead of the several minutes a review takes — not its elimination.
+
+Separately, two daemons that start reviewing the same commit each spend their
+own AI budget before either reaches the boundary. That cost is bounded to once
+per commit: the losing daemon's local row is retired against the review that
+already exists, recording the reviewed SHA, so the next poll cycle skips the
+commit instead of re-reviewing it.
+
+The ownership partition, not this check, is what keeps either from happening
+routinely. If neither is acceptable for your estate, set
+`takeover_after_failed_probes` high enough that takeover never happens on its
+own and treat `instance_takeover` as a page.
 
 ### 18.4 What propagates, and what does not
 
