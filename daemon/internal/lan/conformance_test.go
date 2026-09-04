@@ -449,7 +449,7 @@ func TestAPeerCarriesOnlyItsOwnSendersAddresses(t *testing.T) {
 		A: net.ParseIP("192.168.1.20"),
 	}), owner)
 
-	peers := acc.peers()
+	peers := acc.peers(mustBrowser(t))
 	if len(peers) != 1 {
 		t.Fatalf("got %d peers, want 1", len(peers))
 	}
@@ -486,7 +486,7 @@ func TestAGoodbyeCannotRaceAnAdvertisementThatIsStillArriving(t *testing.T) {
 	// The rest of the legitimate advertisement follows.
 	acc.absorb(pack(t, srvRR(), txtRR()), owner)
 
-	peers := acc.peers()
+	peers := acc.peers(mustBrowser(t))
 	if len(peers) != 1 {
 		t.Fatalf("got %d peers: a stranger's goodbye stopped a legitimate "+
 			"advertisement from forming", len(peers))
@@ -508,7 +508,7 @@ func TestAPeerIsNotAssembledFromTwoSenders(t *testing.T) {
 	// The attacker supplies the missing half.
 	acc.absorb(pack(t, txtRR()), attacker)
 
-	if got := acc.peers(); len(got) != 0 {
+	if got := acc.peers(mustBrowser(t)); len(got) != 0 {
 		t.Fatalf("assembled a peer from two senders: %+v", got)
 	}
 }
@@ -586,7 +586,7 @@ func TestOneFloodingSenderCannotCrowdOutRealDaemons(t *testing.T) {
 	acc.absorb(pack(t, advertisementFor("zulu-two")...), real2)
 
 	found := map[string]bool{}
-	for _, p := range acc.peers() {
+	for _, p := range acc.peers(mustBrowser(t)) {
 		found[p.InstanceID] = true
 	}
 	for _, want := range []string{"zulu-one", "zulu-two"} {
@@ -617,4 +617,16 @@ func advertisementFor(id string) []dns.RR {
 		&dns.TXT{Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeTXT,
 			Class: dns.ClassINET, Ttl: recordTTL}, Txt: []string{"id=" + id}},
 	}
+}
+
+// mustBrowser builds a browser purely to supply a logger to accumulator.peers.
+func mustBrowser(t *testing.T) *Browser {
+	t.Helper()
+	a, b := NewMemConn()
+	t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
+	browser, err := NewBrowser(a, quietLogger())
+	if err != nil {
+		t.Fatalf("NewBrowser: %v", err)
+	}
+	return browser
 }
