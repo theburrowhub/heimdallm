@@ -32,6 +32,12 @@ const (
 	// the flood this file claims to defend against arriving through the door
 	// left open. A real host has a handful of interfaces.
 	maxAddrsPerHost = 16
+
+	// maxPeersPerSender bounds how much of the result one sender can occupy.
+	// The global cap alone let a flooder crowd real daemons out of it: peers
+	// are ordered by an instance id the sender chooses, so a few hundred
+	// entries named "aaa…" take every slot. A real host advertises one daemon.
+	maxPeersPerSender = 4
 )
 
 // Browser asks the network which Heimdallm daemons are on it.
@@ -135,6 +141,23 @@ func (b *Browser) query() error {
 		return err
 	}
 	return nil
+}
+
+// capPerSender keeps at most maxPeersPerSender entries from any one address,
+// preserving order.
+func capPerSender(peers []Peer) []Peer {
+	seen := map[netip.Addr]int{}
+	out := peers[:0]
+	for _, p := range peers {
+		if p.Source.IsValid() {
+			if seen[p.Source] >= maxPeersPerSender {
+				continue
+			}
+			seen[p.Source]++
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 // sourceAddr extracts the sender's IP, or the zero value when the transport
@@ -333,8 +356,11 @@ func (a *accumulator) peers() []Peer {
 		out = append(out, peer)
 	}
 	sortPeers(out)
-	// Sorted first, so a capped result is the same subset every time rather
-	// than whichever names Go's map iteration happened to yield.
+	// Trimmed per sender before the global cap, so filling the window with
+	// low-sorting names costs the flooder its own slots rather than everyone
+	// else's. Without this the sort — which is over an attacker-chosen id —
+	// decides who survives the truncation.
+	out = capPerSender(out)
 	if len(out) > maxPeers {
 		out = out[:maxPeers]
 	}
