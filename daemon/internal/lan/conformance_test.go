@@ -18,7 +18,7 @@ import (
 func TestAccumulatorCapsAddressesPerHost(t *testing.T) {
 	acc := newAccumulator()
 	for i := range maxAddrsPerHost * 10 {
-		acc.addAddr("srv-a.local.", net.ParseIP(fmt.Sprintf("10.0.%d.%d", i/256, i%256)))
+		acc.addAddr("srv-a.local.", net.ParseIP(fmt.Sprintf("10.0.%d.%d", i/256, i%256)), netip.Addr{})
 	}
 	if got := len(acc.addrs["srv-a.local."]); got > maxAddrsPerHost {
 		t.Fatalf("one hostname accumulated %d addresses, above the %d cap",
@@ -31,7 +31,7 @@ func TestAccumulatorCapsAddressesPerHost(t *testing.T) {
 func TestAccumulatorStillDeduplicatesAddresses(t *testing.T) {
 	acc := newAccumulator()
 	for range 5 {
-		acc.addAddr("srv-a.local.", net.ParseIP("10.0.0.11"))
+		acc.addAddr("srv-a.local.", net.ParseIP("10.0.0.11"), netip.Addr{})
 	}
 	if got := len(acc.addrs["srv-a.local."]); got != 1 {
 		t.Fatalf("recorded the same address %d times, want 1", got)
@@ -298,4 +298,70 @@ func pack(t *testing.T, answers ...dns.RR) []byte {
 		t.Fatalf("Pack: %v", err)
 	}
 	return packed
+}
+
+// The hole the source check was supposed to close, reopened by my own fix: a
+// refused retraction fell through and cleared the addresses anyway, so a forged
+// goodbye still emptied a legitimate peer even though the record survived.
+func TestAForgedGoodbyeCannotStripAPeersAddresses(t *testing.T) {
+	owner := netip.MustParseAddr("192.168.1.20")
+	attacker := netip.MustParseAddr("192.168.1.99")
+
+	addr := &dns.A{
+		Hdr: dns.RR_Header{Name: "srv-a.local.", Rrtype: dns.TypeA,
+			Class: dns.ClassINET, Ttl: recordTTL},
+		A: net.ParseIP("192.168.1.20"),
+	}
+
+	for _, tt := range []struct {
+		name    string
+		goodbye func() dns.RR
+	}{
+		{"an SRV goodbye", func() dns.RR { r := srvRR(); r.Hdr.Ttl = 0; return r }},
+		{"a TXT goodbye", func() dns.RR { r := txtRR(); r.Hdr.Ttl = 0; return r }},
+		{"an A goodbye", func() dns.RR {
+			r := &dns.A{Hdr: addr.Hdr, A: addr.A}
+			r.Hdr.Ttl = 0
+			return r
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			acc := newAccumulator()
+			acc.absorb(pack(t, ptrRR(), srvRR(), txtRR(), addr), owner)
+			if len(acc.addrs["srv-a.local."]) != 1 {
+				t.Fatal("the address was not recorded")
+			}
+
+			acc.absorb(pack(t, tt.goodbye()), attacker)
+
+			if got := acc.addrs["srv-a.local."]; len(got) != 1 {
+				t.Fatalf("a stranger's goodbye stripped the addresses: %v", got)
+			}
+			if len(acc.instances) != 1 {
+				t.Fatal("a stranger's goodbye evicted the instance")
+			}
+		})
+	}
+}
+
+// And the advertiser's own address goodbye still works, or a peer that really
+// moved would be reported at an address it no longer answers on.
+func TestAnAdvertiserCanWithdrawItsOwnAddresses(t *testing.T) {
+	owner := netip.MustParseAddr("192.168.1.20")
+	addr := &dns.A{
+		Hdr: dns.RR_Header{Name: "srv-a.local.", Rrtype: dns.TypeA,
+			Class: dns.ClassINET, Ttl: recordTTL},
+		A: net.ParseIP("192.168.1.20"),
+	}
+
+	acc := newAccumulator()
+	acc.absorb(pack(t, ptrRR(), srvRR(), txtRR(), addr), owner)
+
+	goodbye := &dns.A{Hdr: addr.Hdr, A: addr.A}
+	goodbye.Hdr.Ttl = 0
+	acc.absorb(pack(t, goodbye), owner)
+
+	if got := acc.addrs["srv-a.local."]; len(got) != 0 {
+		t.Fatalf("the advertiser could not withdraw its own addresses: %v", got)
+	}
 }
