@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net"
 	"os"
 	"reflect"
@@ -472,15 +474,76 @@ func TestRunWithMulticastResetsBackoffAfterAConnectionThatLasted(t *testing.T) {
 	}
 }
 
-// The container notice is a paragraph. Reloads are frequent; printing it again
-// on every one of them would be noise.
-func TestContainerWarningIsPrintedAtMostOnce(t *testing.T) {
+// The container notice explains a silent no-op, so the test asserts the line
+// was actually emitted — not merely that the once-block ran, which a mutation
+// deleting the log call would still satisfy.
+func TestContainerWarningIsEmittedOnceInAContainer(t *testing.T) {
+	var buf bytes.Buffer
+	realLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(realLogger) })
+
+	realDetect, realOnce := inContainer, containerWarnOnce
+	inContainer = func() bool { return true }
+	containerWarnOnce = new(sync.Once)
+	t.Cleanup(func() { inContainer, containerWarnOnce = realDetect, realOnce })
+
 	warnIfDiscoveryIsContainerised()
 	warnIfDiscoveryIsContainerised()
-	// sync.Once is the guarantee; this asserts it is wired and does not panic
-	// on repeat, which is what the reload path does to it.
-	if !containerWarnEvaluated.Load() {
-		t.Fatal("the once was never evaluated")
+	warnIfDiscoveryIsContainerised()
+
+	// The message names the escape hatch, which is the whole reason it exists.
+	if !strings.Contains(buf.String(), "HEIMDALLM_CLUSTER_DISCOVERY=off") {
+		t.Fatalf("the warning was not emitted, or lost its advice: %q", buf.String())
+	}
+	if got := strings.Count(buf.String(), "does not cross Docker"); got != 1 {
+		t.Fatalf("the warning was emitted %d times, want exactly 1", got)
+	}
+}
+
+// And it stays quiet on a machine that is not a container, so a desktop
+// install is not told about a limitation it does not have.
+func TestContainerWarningIsSilentOutsideAContainer(t *testing.T) {
+	var buf bytes.Buffer
+	realLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(realLogger) })
+
+	realDetect, realOnce := inContainer, containerWarnOnce
+	inContainer = func() bool { return false }
+	containerWarnOnce = new(sync.Once)
+	t.Cleanup(func() { inContainer, containerWarnOnce = realDetect, realOnce })
+
+	warnIfDiscoveryIsContainerised()
+
+	if strings.Contains(buf.String(), "does not cross Docker") {
+		t.Fatalf("warned outside a container: %q", buf.String())
+	}
+}
+
+// The container notice explains a silent no-op, and browsing is just as broken
+// on a bridged container as advertising — so a hub that only browses has to see
+// it too.
+func TestContainerWarningIsReachableFromBothLoops(t *testing.T) {
+	body, err := os.ReadFile("discovery_lan.go")
+	if err != nil {
+		t.Fatalf("reading discovery_lan.go: %v", err)
+	}
+	src := string(body)
+
+	for _, fn := range []string{"runAdvertiser", "runDiscoverer"} {
+		start := strings.Index(src, "func (cs *clusterState) "+fn+"(")
+		if start < 0 {
+			t.Fatalf("%s not found", fn)
+		}
+		end := strings.Index(src[start:], "\n}\n")
+		if end < 0 {
+			end = len(src) - start
+		}
+		if !strings.Contains(src[start:start+end], "warnIfDiscoveryIsContainerised()") {
+			t.Errorf("%s does not call warnIfDiscoveryIsContainerised; a container "+
+				"running only that loop gets no explanation for the silence", fn)
+		}
 	}
 }
 
@@ -530,31 +593,5 @@ func TestServedAddrIsSetBeforeThePollersStart(t *testing.T) {
 			"the advertiser will start before it knows the served address and "+
 			"will refuse to advertise for the life of the process",
 			setServed, startPollers)
-	}
-}
-
-// The container notice explains a silent no-op, and browsing is just as broken
-// on a bridged container as advertising — so a hub that only browses has to see
-// it too.
-func TestContainerWarningIsReachableFromBothLoops(t *testing.T) {
-	body, err := os.ReadFile("discovery_lan.go")
-	if err != nil {
-		t.Fatalf("reading discovery_lan.go: %v", err)
-	}
-	src := string(body)
-
-	for _, fn := range []string{"runAdvertiser", "runDiscoverer"} {
-		start := strings.Index(src, "func (cs *clusterState) "+fn+"(")
-		if start < 0 {
-			t.Fatalf("%s not found", fn)
-		}
-		end := strings.Index(src[start:], "\n}\n")
-		if end < 0 {
-			end = len(src) - start
-		}
-		if !strings.Contains(src[start:start+end], "warnIfDiscoveryIsContainerised()") {
-			t.Errorf("%s does not call warnIfDiscoveryIsContainerised; a container "+
-				"running only that loop gets no explanation for the silence", fn)
-		}
 	}
 }
