@@ -9,7 +9,6 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/heimdallm/daemon/internal/config"
@@ -394,12 +393,14 @@ func localAddresses() []netip.Addr {
 }
 
 // containerWarnOnce keeps the container notice to one line per process. It is
-// reachable from every advertiser start, and a daemon whose config is edited a
+// reachable from both discovery loops, and a daemon whose config is edited a
 // few times should not repeat a paragraph it already printed.
-var (
-	containerWarnOnce      sync.Once
-	containerWarnEvaluated atomic.Bool
-)
+// A pointer so a test can swap in a fresh one; a sync.Once cannot be copied.
+var containerWarnOnce = new(sync.Once)
+
+// inContainer is a variable so a test can assert what the warning does on a
+// machine that is not one. Nothing at runtime reassigns it.
+var inContainer = runningInContainer
 
 // warnIfDiscoveryIsContainerised says so once when discovery is on inside a
 // container.
@@ -413,17 +414,20 @@ var (
 // networking, so it hedges rather than claiming discovery is broken.
 func warnIfDiscoveryIsContainerised() {
 	containerWarnOnce.Do(func() {
-		containerWarnEvaluated.Store(true)
-		if !runningInContainer() {
+		if !inContainer() {
 			return
 		}
-		slog.Warn("cluster: mDNS discovery is on inside a container; " +
-			"it does not cross Docker's default bridge, so unless this container uses " +
-			"host networking this daemon will neither see peers nor be seen. " +
-			"Set HEIMDALLM_CLUSTER_DISCOVERY=off to silence this, or address instances " +
-			"by hostname or a DHCP reservation instead.")
+		slog.Warn(containerDiscoveryWarning)
 	})
 }
+
+// containerDiscoveryWarning is the message, named so a test can assert it was
+// actually emitted rather than that the once-block merely ran.
+const containerDiscoveryWarning = "cluster: mDNS discovery is on inside a " +
+	"container; it does not cross Docker's default bridge, so unless this " +
+	"container uses host networking this daemon will neither see peers nor be " +
+	"seen. Set HEIMDALLM_CLUSTER_DISCOVERY=off to silence this, or address " +
+	"instances by hostname or a DHCP reservation instead."
 
 // runningInContainer is a best-effort guess, used only to decide whether to
 // print a warning. A false positive costs one log line.

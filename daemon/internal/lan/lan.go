@@ -150,6 +150,48 @@ func isDNSLabel(s string) bool {
 	return true
 }
 
+// DialAddrs returns the advertised addresses that are safe to connect to.
+//
+// A peer must be reached by address rather than by resolving its name, and that
+// is a security requirement rather than an optimisation. Restricting a hostname
+// to `<label>.local` constrains what it is *called*, not what it *resolves to*:
+// mDNS resolution is itself unauthenticated, so anyone on the link can answer
+// the resolver's query for `peer.local` with any address they like — including
+// one only the hub can reach. `169.254.169.254` is the obvious prize, since a
+// cloud metadata endpoint is reachable from the hub and from nowhere else, so
+// having the hub fetch it is a real escalation rather than something the
+// attacker could have done directly.
+//
+// Filtering the advertised addresses instead removes the attacker's choice: the
+// hub only ever connects to a routable unicast address that was published in
+// the packet, which is an address the sender could have reached itself.
+//
+// Rejected, and why:
+//   - loopback: names the hub's own services, not the peer's
+//   - link-local (169.254/16, fe80::/10): the metadata range lives here, and a
+//     link-local address is not dialable from a record anyway
+//   - multicast, unspecified: not a host
+func (p Peer) DialAddrs() []netip.Addr {
+	out := make([]netip.Addr, 0, len(p.Addrs))
+	for _, addr := range p.Addrs {
+		if !addr.IsValid() {
+			continue
+		}
+		addr = addr.Unmap()
+		switch {
+		case addr.IsLoopback(),
+			addr.IsLinkLocalUnicast(),
+			addr.IsLinkLocalMulticast(),
+			addr.IsMulticast(),
+			addr.IsUnspecified(),
+			addr.IsInterfaceLocalMulticast():
+			continue
+		}
+		out = append(out, addr)
+	}
+	return out
+}
+
 // encodeTXT renders a peer's identity as DNS-SD TXT strings, in a stable order
 // so the same peer always produces byte-identical records.
 func encodeTXT(p Peer) []string {

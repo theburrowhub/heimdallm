@@ -1761,6 +1761,7 @@ and claim to be any instance. The design assumes that.
 | Registration pins the discovered id | If the machine at that address is no longer the one that was found, the registration is refused rather than silently pointed at whatever is there now |
 | An address is never rewritten for you | A moved instance is a proposal on a card, so a rogue advertiser cannot redirect the hub by claiming a known id |
 | Only `<name>.local` is ever probed | An advertised hostname is turned into a URL and fetched, so anything else would be a request-forgery primitive handed to the subnet. A name like `metadata.google.internal` is refused, not resolved, and redirects are refused too |
+| Verification connects to the advertised address, never to whatever the name resolves to | A `.local` name constrains what a peer is *called*, not where it *points*: mDNS resolution is unauthenticated too, so anyone on the link could answer a query for `peer.local` with an address only the hub can reach — a cloud metadata endpoint being the obvious target. The probe dials an address published in the packet, and loopback, link-local and multicast addresses are refused |
 | A browse is bounded | One sender cannot make the hub hold unlimited records or open unlimited connections: records and peers are capped per scan and verification runs through a fixed pool |
 
 Turning discovery **on** is still a decision worth making deliberately:
@@ -1774,6 +1775,14 @@ daemon is usually deployed. A container with discovery on will typically see
 nothing and be seen by nothing. Use `network_mode: host`, or set
 `HEIMDALLM_CLUSTER_DISCOVERY=off` and address instances by hostname. The daemon
 logs a warning at startup when it detects this combination.
+
+**A registered `.local` name still resolves at dial time.** Discovery hands the
+operator an address; from then on it is an ordinary `base_url`, resolved by the
+host's resolver like any other hostname. That resolution is not authenticated —
+which is true of DNS as well, and is the accepted trade for addressing an
+instance by name rather than by a pinned IP. What the checks above bound is the
+*unauthenticated* part: what discovery will propose, and what it will connect to
+before an operator has decided anything.
 
 **Anything past the subnet.** mDNS is link-local by definition. It will not find
 a machine in another VLAN, another office or a cloud VPC. Discovery is a

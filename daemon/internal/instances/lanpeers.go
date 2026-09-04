@@ -2,9 +2,13 @@ package instances
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/netip"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -63,19 +67,48 @@ const discoveryVerifyWorkers = 8
 // discoveryVerifyTimeout so the per-peer context is what normally expires.
 const discoveryHTTPTimeout = 5 * time.Second
 
-// newDiscoveryHTTPClient builds the client used to verify a discovered peer.
+// newDiscoveryHTTPClient builds the client used to verify one discovered peer.
 //
-// Redirects are refused, which matters more here than anywhere else in the
-// daemon: the address being fetched was supplied by an unauthenticated
-// advertisement, and following a redirect would let whoever sent it choose a
-// second URL that never had to pass the hostname check. One hop to a
-// .local name is the entire permitted reach.
-func newDiscoveryHTTPClient() *http.Client {
+// Two things are locked down here, and both matter because every input came
+// from an unauthenticated advertisement.
+//
+// Redirects are refused outright. Following one would let whoever sent the
+// advertisement choose a second URL that never had to pass any of these checks.
+//
+// More importantly the destination is pinned: DialContext ignores the hostname
+// entirely and connects to one of the addresses the peer published, filtered by
+// Peer.DialAddrs. Resolving the name instead would hand the choice of
+// destination straight back to the attacker — mDNS resolution is unauthenticated,
+// so anyone on the link can answer a query for "peer.local" with any address,
+// and a link-local metadata endpoint is reachable from the hub and from nowhere
+// else. Restricting the hostname to <label>.local constrains what a peer is
+// called; only pinning the dial constrains where the request goes.
+func newDiscoveryHTTPClient(addrs []netip.Addr, port int) *http.Client {
+	var dialer net.Dialer
 	return &http.Client{
 		Timeout: discoveryHTTPTimeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return fmt.Errorf("instances: refusing to follow a redirect from a "+
 				"discovered peer (to %s)", req.URL.Redacted())
+		},
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+				// Every advertised address is tried, so a dual-homed peer whose
+				// first address is unreachable from here still verifies.
+				var lastErr error
+				for _, addr := range addrs {
+					target := net.JoinHostPort(addr.String(), strconv.Itoa(port))
+					conn, err := dialer.DialContext(ctx, network, target)
+					if err == nil {
+						return conn, nil
+					}
+					lastErr = err
+				}
+				if lastErr == nil {
+					lastErr = errors.New("no advertised address was usable")
+				}
+				return nil, lastErr
+			},
 		},
 	}
 }
@@ -126,15 +159,11 @@ type Discoverer struct {
 // NewDiscoverer builds a Discoverer. A nil browser makes every method a no-op,
 // which is what a daemon with discovery switched off gets.
 //
-// factory is only used when it was supplied explicitly (tests do). Otherwise
-// verification goes through a client of this package's own making, because the
-// registry's default client follows redirects and a discovered address must not
-// be allowed to choose a second one.
+// A nil factory is the production path: verification then goes through a
+// per-peer client built by newDiscoveryHTTPClient, which pins the destination to
+// the peer's own advertised addresses. Tests pass a factory to reach an
+// httptest server instead.
 func NewDiscoverer(reg *Registry, browser PeerBrowser, interval time.Duration, factory ClientFactory) *Discoverer {
-	if factory == nil {
-		httpClient := newDiscoveryHTTPClient()
-		factory = func(inst Instance) *Client { return NewClient(inst, httpClient) }
-	}
 	if interval <= 0 {
 		interval = DefaultDiscoveryInterval
 	}
@@ -297,10 +326,21 @@ func (d *Discoverer) verify(ctx context.Context, peer lan.Peer) (Candidate, bool
 		return Candidate{}, false
 	}
 
+	// Pinned to what the peer published, never to what its name resolves to.
+	// A peer with no routable advertised address is not probed at all: the
+	// alternative is resolving the hostname, which is exactly the choice this
+	// is taking away from whoever sent the advertisement.
+	dialAddrs := peer.DialAddrs()
+	if len(dialAddrs) == 0 {
+		slog.Debug("instances: a peer on the network advertised no routable address",
+			"base_url", baseURL)
+		return Candidate{}, false
+	}
+
 	probe := Instance{ID: "candidate", BaseURL: baseURL, Enabled: true}
 	ctx, cancel := context.WithTimeout(ctx, discoveryVerifyTimeout)
 	defer cancel()
-	health, err := d.verifyClient(probe).Health(ctx)
+	health, err := d.verifyClient(probe, dialAddrs, peer.Port).Health(ctx)
 	if err != nil {
 		slog.Debug("instances: a peer on the network did not answer /health",
 			"base_url", baseURL, "err", err)
@@ -335,12 +375,16 @@ func (d *Discoverer) verify(ctx context.Context, peer lan.Peer) (Candidate, bool
 	}, true
 }
 
-// verifyClient builds the client used to probe one candidate.
-func (d *Discoverer) verifyClient(probe Instance) *Client {
+// verifyClient builds the client used to probe one candidate, pinned to that
+// peer's advertised addresses unless a factory was injected.
+func (d *Discoverer) verifyClient(probe Instance, addrs []netip.Addr, port int) *Client {
 	d.mu.RLock()
 	factory := d.newClient
 	d.mu.RUnlock()
-	return factory(probe)
+	if factory != nil {
+		return factory(probe)
+	}
+	return NewClient(probe, newDiscoveryHTTPClient(addrs, port))
 }
 
 // classify decides what the operator is being offered. Pure: registry in,

@@ -88,7 +88,10 @@ func peerFor(t *testing.T, rawURL, instanceID string) lan.Peer {
 		Hostname:   strings.ToLower(instanceID) + ".local",
 		Port:       port,
 		Scheme:     "http",
-		Addrs:      []netip.Addr{netip.MustParseAddr("127.0.0.1")},
+		// A routable-looking address (TEST-NET-1), because loopback is refused
+		// as a dial target. loopbackFactory overrides the dial anyway, so this
+		// is what a real peer would publish rather than where we connect.
+		Addrs: []netip.Addr{netip.MustParseAddr("192.0.2.10")},
 	}
 }
 
@@ -461,4 +464,59 @@ func srvLocalURL(srv *httptest.Server, id string) string {
 		panic(err)
 	}
 	return "http://" + strings.ToLower(id) + ".local:" + u.Port()
+}
+
+// Restricting the hostname to <label>.local constrains what a peer is called,
+// not where the name resolves — mDNS resolution is unauthenticated, so anyone
+// on the link can answer a query for "peer.local" with any address. The dial is
+// therefore pinned to what the peer published, and an advertisement offering
+// only an address the hub must not be sent to is refused rather than resolved.
+func TestDiscovererRefusesAPeerWithNoRoutableAddress(t *testing.T) {
+	_, peer := daemonAt(t, "srv-a", "Server A", "worker")
+
+	tests := []struct {
+		name  string
+		addrs []netip.Addr
+	}{
+		{"nothing advertised", nil},
+		{"loopback only", []netip.Addr{netip.MustParseAddr("127.0.0.1")}},
+		{"ipv6 loopback", []netip.Addr{netip.MustParseAddr("::1")}},
+		// The prize: reachable from the hub and from nowhere else.
+		{"cloud metadata", []netip.Addr{netip.MustParseAddr("169.254.169.254")}},
+		{"ipv6 link-local", []netip.Addr{netip.MustParseAddr("fe80::1")}},
+		{"multicast", []netip.Addr{netip.MustParseAddr("224.0.0.251")}},
+		{"unspecified", []netip.Addr{netip.MustParseAddr("0.0.0.0")}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hostile := peer
+			hostile.Addrs = tt.addrs
+
+			d := NewDiscoverer(registryWith(t, nil),
+				&fakeBrowser{peers: []lan.Peer{hostile}}, time.Minute, nil)
+
+			if got := d.Scan(context.Background()); len(got) != 0 {
+				t.Fatalf("offered a peer advertising %v: %+v", tt.addrs, got)
+			}
+		})
+	}
+}
+
+// And a routable address among the rejected ones is still usable, so a
+// dual-homed peer is not thrown away for also having a loopback record.
+func TestDiscovererKeepsTheRoutableAddressOfAMixedAdvertisement(t *testing.T) {
+	_, peer := daemonAt(t, "srv-a", "Server A", "worker")
+	peer.Addrs = []netip.Addr{
+		netip.MustParseAddr("127.0.0.1"),
+		netip.MustParseAddr("169.254.169.254"),
+		netip.MustParseAddr("192.0.2.10"),
+	}
+
+	d := NewDiscoverer(registryWith(t, nil),
+		&fakeBrowser{peers: []lan.Peer{peer}}, time.Minute, loopbackFactory())
+
+	got := d.Scan(context.Background())
+	if len(got) != 1 {
+		t.Fatalf("got %d candidates, want 1: %+v", len(got), got)
+	}
 }
