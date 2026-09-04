@@ -14,6 +14,7 @@ import (
 
 	"github.com/heimdallm/daemon/internal/config"
 	"github.com/heimdallm/daemon/internal/instances"
+	"github.com/heimdallm/daemon/internal/lan"
 	"github.com/heimdallm/daemon/internal/server"
 	"github.com/heimdallm/daemon/internal/sse"
 	"github.com/heimdallm/daemon/internal/store"
@@ -43,6 +44,16 @@ type clusterState struct {
 	// requires before it stops deferring to a routed owner. See
 	// config.ClusterConfig.TakeoverAfterFailedProbes.
 	takeoverAfterFailedProbes int
+
+	// LAN discovery. All three are nil unless cluster.discovery is on, and
+	// the browser and discoverer are nil unless this daemon is also the hub.
+	// advertiser and browser own multicast sockets, so they are replaced (and
+	// the old ones closed) only when discoverySig changes — an unrelated
+	// config reload must not tear down and re-join the group.
+	advertiser   *lan.Advertiser
+	browser      *lan.Browser
+	discoverer   *instances.Discoverer
+	discoverySig discoverySignature
 
 	// store and broker are retained (rather than only used inline at
 	// construction) so Update can lazily build a prober if this daemon is
@@ -325,7 +336,72 @@ func newClusterState(cfg *config.Config, st *store.Store, broker *sse.Broker) *c
 		)
 		cs.prober.SetSelfInfo(version, cfg.Cluster.Role)
 	}
+	cs.applyDiscovery(cfg, registry)
 	return cs
+}
+
+// applyDiscovery builds or rebuilds the mDNS pieces for cfg. Caller must not
+// hold cs.mu.
+//
+// Nothing has to be told to start a loop afterwards: any change to [cluster] or
+// server.port already forces a full poller restart (see
+// configReloadRestartSnapshot), and both discovery loops live on the poller
+// context, so they are torn down and started again with whatever this call
+// installed.
+//
+// The sockets are only touched when the advertisement itself changed. Config
+// reloads are frequent and mostly about other sections; leaving the multicast
+// group and re-joining it on every one of them would make this daemon flicker
+// in and out of its peers' listings for no reason.
+func (cs *clusterState) applyDiscovery(cfg *config.Config, registry *instances.Registry) {
+	sig := newDiscoverySignature(cfg, cfg.Server.Port)
+
+	cs.mu.Lock()
+	unchanged := cs.discoverySig == sig
+	if unchanged {
+		discoverer := cs.discoverer
+		cs.mu.Unlock()
+		if discoverer != nil {
+			discoverer.Update(registry, instances.DefaultDiscoveryInterval)
+		}
+		return
+	}
+	oldAdvertiser, oldBrowser := cs.advertiser, cs.browser
+	cs.mu.Unlock()
+
+	// Built outside the lock: joining a multicast group can block, and holding
+	// cs.mu across it would stall every routing decision in the daemon.
+	advertiser, browser := buildLANDiscovery(sig)
+
+	cs.mu.Lock()
+	cs.discoverySig = sig
+	cs.advertiser, cs.browser = advertiser, browser
+	switch {
+	case browser == nil:
+		cs.discoverer = nil
+	case cs.discoverer == nil:
+		cs.discoverer = instances.NewDiscoverer(
+			registry, browser, instances.DefaultDiscoveryInterval, cs.factory)
+	default:
+		cs.discoverer.SetBrowser(browser)
+		cs.discoverer.Update(registry, instances.DefaultDiscoveryInterval)
+	}
+	cs.mu.Unlock()
+
+	// Closed after the swap so nothing is left holding a socket we no longer
+	// track. The loops using them live on the poller context and have already
+	// been cancelled by the reload that got us here.
+	closeLANDiscovery(oldAdvertiser, oldBrowser)
+}
+
+// CloseDiscovery releases the multicast sockets on shutdown.
+func (cs *clusterState) CloseDiscovery() {
+	cs.mu.Lock()
+	advertiser, browser := cs.advertiser, cs.browser
+	cs.advertiser, cs.browser, cs.discoverer = nil, nil, nil
+	cs.discoverySig = discoverySignature{}
+	cs.mu.Unlock()
+	closeLANDiscovery(advertiser, browser)
 }
 
 // Update swaps in a reloaded config. Called from the same reload path that
@@ -373,6 +449,7 @@ func (cs *clusterState) Update(cfg *config.Config) (proberBuilt bool) {
 	if prober != nil && !proberBuilt {
 		prober.Update(registry, clusterProbeInterval(cfg))
 	}
+	cs.applyDiscovery(cfg, registry)
 	return proberBuilt
 }
 
@@ -1189,9 +1266,10 @@ func wireCluster(srv *server.Server, cs *clusterState, st *store.Store) {
 		return
 	}
 	deps := &server.ClusterDeps{
-		Snapshot:  cs.Snapshot,
-		Prober:    cs.Prober(),
-		NewClient: cs.factory,
+		Snapshot:   cs.Snapshot,
+		Prober:     cs.Prober(),
+		Discoverer: cs.Discoverer(),
+		NewClient:  cs.factory,
 	}
 	if st != nil {
 		deps.Store = st
