@@ -183,6 +183,19 @@ final configDriftProvider = FutureProvider<List<InstanceDrift>>((ref) async {
   return api.fetchConfigDrift();
 });
 
+/// Daemons the hub can see on the local network over mDNS.
+///
+/// Errors surface rather than degrading to empty, unlike
+/// [daemonInstancesProvider]. The registry has to keep working when the hub
+/// hiccups, because the whole dashboard hangs off it; this list does not, and
+/// a scan that quietly failed would read as "there is nothing on your network"
+/// — which is exactly the wrong thing to tell someone who is looking for a
+/// machine they know is switched on.
+final discoveredPeersProvider = FutureProvider<DiscoveredPeers>((ref) async {
+  final api = ref.watch(hubApiClientProvider);
+  return api.fetchDiscoveredPeers();
+});
+
 /// SSE clients, one per target instance.
 final instanceSseClientsProvider = Provider<Map<String, SseClient>>((ref) {
   final targets = ref.watch(targetInstancesProvider);
