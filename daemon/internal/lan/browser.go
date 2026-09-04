@@ -42,6 +42,15 @@ const (
 
 // Browser asks the network which Heimdallm daemons are on it.
 //
+// One responder can legitimately appear more than once. A multi-homed host
+// answering from two addresses produces two Peers with the same advertised
+// instance id, because records are keyed by the sender they arrived from and
+// merging across senders is the shared state that this package deliberately
+// does not keep. That is left for the consumer to collapse, which it can do
+// properly: instances.Discoverer verifies each candidate over HTTP and
+// deduplicates on the id the daemon reports for itself, rather than on the one
+// in the advertisement.
+//
 // One Browse is one question and a listening window: mDNS has no notion of a
 // complete answer, only of who happened to reply before we stopped listening.
 // Callers are expected to browse on a loop and treat the result as the current
@@ -122,7 +131,7 @@ func (b *Browser) Browse(ctx context.Context, window time.Duration) ([]Peer, err
 		acc.absorb(buf[:n], sourceAddr(from))
 	}
 
-	return acc.peers(), nil
+	return acc.peers(b), nil
 }
 
 // query asks the group for the service's PTR records.
@@ -145,19 +154,21 @@ func (b *Browser) query() error {
 
 // capPerSender keeps at most maxPeersPerSender entries from any one address,
 // preserving order.
-func capPerSender(peers []Peer) []Peer {
+func capPerSender(peers []Peer) ([]Peer, map[netip.Addr]int) {
 	seen := map[netip.Addr]int{}
+	dropped := map[netip.Addr]int{}
 	out := peers[:0]
 	for _, p := range peers {
 		if p.Source.IsValid() {
 			if seen[p.Source] >= maxPeersPerSender {
+				dropped[p.Source]++
 				continue
 			}
 			seen[p.Source]++
 		}
 		out = append(out, p)
 	}
-	return out
+	return out, dropped
 }
 
 // sourceAddr extracts the sender's IP, or the zero value when the transport
@@ -329,7 +340,7 @@ func (a *accumulator) addAddr(host string, ip net.IP, source netip.Addr) {
 // to connect) and a TXT (something to identify it). Either alone is an
 // incomplete response, and accepting them from different senders would be the
 // shared-state problem again in another form.
-func (a *accumulator) peers() []Peer {
+func (a *accumulator) peers(b *Browser) []Peer {
 	out := make([]Peer, 0, len(a.instances))
 	for key := range a.instances {
 		srv, hasSRV := a.srv[key]
@@ -360,8 +371,20 @@ func (a *accumulator) peers() []Peer {
 	// low-sorting names costs the flooder its own slots rather than everyone
 	// else's. Without this the sort — which is over an attacker-chosen id —
 	// decides who survives the truncation.
-	out = capPerSender(out)
+	out, dropped := capPerSender(out)
+	// Both truncations are reported. A silent drop is the worst outcome for
+	// whoever is trying to work out why their daemon is not in the list: they
+	// would see an incomplete answer with nothing anywhere saying it was
+	// trimmed, or by whom.
+	for source, n := range dropped {
+		b.log.Warn("lan: one sender advertised more daemons than we will accept "+
+			"from a single host; ignoring the excess",
+			"source", source.String(), "kept", maxPeersPerSender, "ignored", n)
+	}
 	if len(out) > maxPeers {
+		b.log.Warn("lan: more daemons answered than one browse will report; "+
+			"ignoring the excess",
+			"found", len(out), "kept", maxPeers)
 		out = out[:maxPeers]
 	}
 	return out
