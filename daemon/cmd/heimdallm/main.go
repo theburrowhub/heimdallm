@@ -6295,6 +6295,10 @@ func clusterConfigMap(c config.ClusterConfig) map[string]any {
 	if routingMode == "" {
 		routingMode = config.ModeAssignment
 	}
+	discovery := strings.ToLower(strings.TrimSpace(c.Discovery))
+	if discovery == "" {
+		discovery = config.DiscoveryOff
+	}
 	return map[string]any{
 		"role":             role,
 		"instance_id":      c.InstanceID,
@@ -6302,6 +6306,7 @@ func clusterConfigMap(c config.ClusterConfig) map[string]any {
 		"default_instance": c.DefaultInstance,
 		"probe_interval":   c.ProbeInterval,
 		"routing_mode":     routingMode,
+		"discovery":        discovery,
 		// Resolved rather than passed through, for the same reason role and
 		// routing_mode are: the TOML zero value means "the default", and a 0
 		// reaching the GUI would read as "take over immediately".

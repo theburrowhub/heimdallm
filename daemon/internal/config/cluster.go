@@ -19,6 +19,14 @@ const (
 	RoleWorker     = "worker"
 )
 
+// Discovery modes. Off is the zero value on purpose: mDNS is unauthenticated
+// and announcing a service on a corporate LAN should be a deliberate choice,
+// never something a daemon starts doing because it was upgraded.
+const (
+	DiscoveryOff  = "off"
+	DiscoveryMDNS = "mdns"
+)
+
 // Routing modes.
 //
 //   - ModeAssignment (default): repos are partitioned across instances and each
@@ -104,6 +112,12 @@ type ClusterConfig struct {
 	// DefaultTakeoverAfterFailedProbes.
 	TakeoverAfterFailedProbes *int `toml:"takeover_after_failed_probes,omitempty"`
 
+	// Discovery is "off" (default) or "mdns". When on, this daemon advertises
+	// itself on the local network and, if it is the hub, browses for peers.
+	// Discovery only ever proposes: registering an instance stays a deliberate
+	// operator action and the API token still has to arrive out of band.
+	Discovery string `toml:"discovery"`
+
 	Instances map[string]InstanceConfig `toml:"instances"` // [cluster.instances.<id>]
 	Routing   RoutingConfig             `toml:"routing"`
 }
@@ -172,12 +186,25 @@ func (r RoutingConfig) RoundRobinsOp(op string) bool {
 // IsHub reports whether this daemon mounts the control plane.
 func (c *Config) IsHub() bool { return strings.EqualFold(c.Cluster.Role, RoleHub) }
 
+// DiscoveryEnabled reports whether this daemon takes part in mDNS discovery.
+// Empty and "off" are the same answer, so no caller has to know that.
+func (c *Config) DiscoveryEnabled() bool {
+	return strings.EqualFold(strings.TrimSpace(c.Cluster.Discovery), DiscoveryMDNS)
+}
+
 // ClusterEnabled reports whether the daemon has any multi-instance
 // configuration at all. Used as the single guard that keeps the feature inert
 // on a config that never mentions [cluster].
+//
+// Discovery counts. A daemon that has only been told to advertise itself is
+// not yet in anyone's registry, but it still needs an identity to announce —
+// and resolvedSelfName returns nothing when this is false, which would leave
+// it advertising an unnamed service.
 func (c *Config) ClusterEnabled() bool {
 	role := strings.ToLower(strings.TrimSpace(c.Cluster.Role))
-	return (role != "" && role != RoleStandalone) || len(c.Cluster.Instances) > 0
+	return (role != "" && role != RoleStandalone) ||
+		len(c.Cluster.Instances) > 0 ||
+		c.DiscoveryEnabled()
 }
 
 // EnabledInstanceIDs returns the ids of every enabled instance, sorted so the
@@ -359,6 +386,13 @@ func (c *Config) validateCluster() error {
 	if n := cl.TakeoverAfterFailedProbes; n != nil && *n < 1 {
 		return fmt.Errorf("config: cluster.takeover_after_failed_probes must be >= 1 (got %d; omit it for the default of %d)",
 			*n, DefaultTakeoverAfterFailedProbes)
+	}
+
+	switch strings.ToLower(strings.TrimSpace(cl.Discovery)) {
+	case "", DiscoveryOff, DiscoveryMDNS:
+	default:
+		return fmt.Errorf("config: cluster.discovery %q must be %q or %q (or empty)",
+			cl.Discovery, DiscoveryOff, DiscoveryMDNS)
 	}
 
 	for id, inst := range cl.Instances {
