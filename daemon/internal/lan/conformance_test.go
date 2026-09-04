@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -509,5 +510,111 @@ func TestAPeerIsNotAssembledFromTwoSenders(t *testing.T) {
 
 	if got := acc.peers(); len(got) != 0 {
 		t.Fatalf("assembled a peer from two senders: %+v", got)
+	}
+}
+
+// Without the cache-flush bit a resolver merges a new address in beside the old
+// one and keeps answering with both until the old record expires — which is the
+// stale-address behaviour this feature exists to end. A daemon that moved would
+// stay resolvable at the address it just left.
+func TestUniqueRecordsSetTheCacheFlushBit(t *testing.T) {
+	adv := newTestAdvertiser(t)
+
+	got := adv.recordsFor(dns.Question{
+		Name: serviceFQDN(), Qtype: dns.TypeANY, Qclass: dns.ClassINET,
+	})
+	if len(got) == 0 {
+		t.Fatal("no records to inspect")
+	}
+
+	var sawUnique, sawShared bool
+	for _, rr := range got {
+		flush := rr.Header().Class&cacheFlush != 0
+		switch rr.(type) {
+		case *dns.PTR:
+			sawShared = true
+			// Shared: several hosts legitimately contribute entries under the
+			// service name, so claiming to be the authoritative set would
+			// erase the others from every resolver on the link.
+			if flush {
+				t.Errorf("PTR sets the cache-flush bit; it is a shared record type")
+			}
+		case *dns.SRV, *dns.TXT, *dns.A, *dns.AAAA:
+			sawUnique = true
+			if !flush {
+				t.Errorf("%T does not set the cache-flush bit; a resolver will "+
+					"keep the previous value alongside this one", rr)
+			}
+		}
+		if rr.Header().Class&^cacheFlush != dns.ClassINET {
+			t.Errorf("%T has class %d, want INET with only the flush bit added",
+				rr, rr.Header().Class)
+		}
+	}
+	if !sawUnique || !sawShared {
+		t.Fatalf("expected both shared and unique records, got %d records", len(got))
+	}
+}
+
+// The browser must still read records that carry the flush bit, or a
+// well-behaved responder would be invisible to us.
+func TestBrowseAcceptsRecordsWithTheCacheFlushBit(t *testing.T) {
+	browseConn := startAdvertiser(t, testAdvertisement())
+
+	browser, _ := NewBrowser(browseConn, quietLogger())
+	peers, err := browser.Browse(context.Background(), 500*time.Millisecond)
+	if err != nil || len(peers) != 1 {
+		t.Fatalf("Browse: %v, peers %+v — the flush bit made us unreadable", err, peers)
+	}
+}
+
+// One sender filling the window with low-sorting names must lose its own slots,
+// not everyone else's: the sort is over an id the sender chooses, so without a
+// per-sender cap it decides who survives the truncation.
+func TestOneFloodingSenderCannotCrowdOutRealDaemons(t *testing.T) {
+	flooder := netip.MustParseAddr("192.168.1.99")
+	real1 := netip.MustParseAddr("192.168.1.20")
+	real2 := netip.MustParseAddr("192.168.1.21")
+
+	acc := newAccumulator()
+	// Names that sort before anything a real daemon is likely to be called.
+	for i := range maxPeers * 2 {
+		id := fmt.Sprintf("aaa%04d", i)
+		acc.absorb(pack(t, advertisementFor(id)...), flooder)
+	}
+	acc.absorb(pack(t, advertisementFor("zulu-one")...), real1)
+	acc.absorb(pack(t, advertisementFor("zulu-two")...), real2)
+
+	found := map[string]bool{}
+	for _, p := range acc.peers() {
+		found[p.InstanceID] = true
+	}
+	for _, want := range []string{"zulu-one", "zulu-two"} {
+		if !found[want] {
+			t.Errorf("%q was crowded out of the result by a flooding sender", want)
+		}
+	}
+	fromFlooder := 0
+	for id := range found {
+		if strings.HasPrefix(id, "aaa") {
+			fromFlooder++
+		}
+	}
+	if fromFlooder > maxPeersPerSender {
+		t.Errorf("one sender occupies %d slots, above the %d cap",
+			fromFlooder, maxPeersPerSender)
+	}
+}
+
+// advertisementFor builds a complete advertisement for one instance id.
+func advertisementFor(id string) []dns.RR {
+	name := id + "._heimdallm._tcp.local."
+	return []dns.RR{
+		&dns.PTR{Hdr: dns.RR_Header{Name: serviceFQDN(), Rrtype: dns.TypePTR,
+			Class: dns.ClassINET, Ttl: recordTTL}, Ptr: name},
+		&dns.SRV{Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeSRV,
+			Class: dns.ClassINET, Ttl: recordTTL}, Port: 7842, Target: id + ".local."},
+		&dns.TXT{Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeTXT,
+			Class: dns.ClassINET, Ttl: recordTTL}, Txt: []string{"id=" + id}},
 	}
 }

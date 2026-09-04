@@ -127,6 +127,21 @@ const serviceEnumerationName = "_services._dns-sd._udp." + Domain + "."
 // class, and has to be masked off before comparing.
 const unicastResponseBit = 1 << 15
 
+// cacheFlush is the same top bit in a *response*, where it means "this is the
+// authoritative set for this name — replace what you have rather than adding
+// to it" (RFC 6762 §10.2).
+//
+// It matters more here than anywhere else in the protocol. Without it a
+// resolver merges our new address in beside the old one and keeps answering
+// with both until the old record expires, which is exactly the stale-address
+// behaviour this whole feature exists to end: a daemon that moves would be
+// resolvable at the address it just left for another two minutes.
+//
+// Set on the records that are uniquely ours — SRV, TXT and the addresses — and
+// deliberately not on PTR, which is a shared record type where several hosts
+// legitimately contribute entries under one name.
+const cacheFlush = 1 << 15
+
 // Run answers queries until ctx is cancelled or the socket stops working, then
 // sends a goodbye.
 //
@@ -137,8 +152,10 @@ func (a *Advertiser) Run(ctx context.Context) error {
 		"service", Service, "instance", a.instanceName,
 		"hostname", strings.TrimSuffix(a.ad.Hostname, "."), "port", a.ad.Port)
 
-	// The goodbye rides on a deferred call with its own deadline: by the time
-	// we get here ctx is already cancelled, so reusing it would send nothing.
+	// Deferred so it runs on every exit path, including the socket failures
+	// below. It takes no context: ctx is already cancelled by the time this
+	// runs, and the write is a single unacknowledged datagram with nothing to
+	// wait for.
 	defer a.goodbye()
 
 	buf := make([]byte, 9000) // jumbo frame; mDNS responses are far smaller
@@ -276,14 +293,14 @@ func (a *Advertiser) allRecords() []dns.RR {
 		},
 		&dns.SRV{
 			Hdr: dns.RR_Header{Name: a.instanceName, Rrtype: dns.TypeSRV,
-				Class: dns.ClassINET, Ttl: recordTTL},
+				Class: dns.ClassINET | cacheFlush, Ttl: recordTTL},
 			Priority: 0, Weight: 0,
 			Port:   uint16(a.ad.Port),
 			Target: a.ad.Hostname,
 		},
 		&dns.TXT{
 			Hdr: dns.RR_Header{Name: a.instanceName, Rrtype: dns.TypeTXT,
-				Class: dns.ClassINET, Ttl: recordTTL},
+				Class: dns.ClassINET | cacheFlush, Ttl: recordTTL},
 			Txt: a.txt,
 		},
 	}
@@ -299,14 +316,14 @@ func (a *Advertiser) addressRecords() []dns.RR {
 		if addr.Is4() {
 			out = append(out, &dns.A{
 				Hdr: dns.RR_Header{Name: a.ad.Hostname, Rrtype: dns.TypeA,
-					Class: dns.ClassINET, Ttl: recordTTL},
+					Class: dns.ClassINET | cacheFlush, Ttl: recordTTL},
 				A: net.IP(addr.AsSlice()),
 			})
 			continue
 		}
 		out = append(out, &dns.AAAA{
 			Hdr: dns.RR_Header{Name: a.ad.Hostname, Rrtype: dns.TypeAAAA,
-				Class: dns.ClassINET, Ttl: recordTTL},
+				Class: dns.ClassINET | cacheFlush, Ttl: recordTTL},
 			AAAA: net.IP(addr.AsSlice()),
 		})
 	}
