@@ -1701,7 +1701,66 @@ make down-instance NAME=b
 Each instance gets its own Compose project, hence its own containers and
 volumes. There is no second `web` service: the UI is served once, by the hub.
 
-### 18.8 CLI
+### 18.8 Discovering instances on the local network
+
+Off by default. Turn it on per daemon:
+
+```toml
+[cluster]
+discovery = "mdns"    # off (default) | mdns
+```
+
+Environment equivalent: `HEIMDALLM_CLUSTER_DISCOVERY`. The Instances tab also
+offers a one-click switch on the hub.
+
+A daemon with discovery on advertises itself as `_heimdallm._tcp.local`,
+carrying its instance id, name, role and version. A **hub** with discovery on
+also browses, and lists what it finds under *"found on this network, not
+registered"*, with a button to register each one.
+
+The point is not saving a few keystrokes. A discovered instance is registered
+by its mDNS hostname rather than the address it answered from, and a hostname
+is re-resolved on every request — so when that machine picks up a new DHCP
+lease, the hub follows it with no operator action. A pinned IP does not, and a
+stale one means the other instances take over its repositories while it is
+still reviewing them.
+
+The hub also notices when an *already registered* instance answers somewhere
+its `base_url` no longer points, and offers to correct it — one click, on the
+instance's own card.
+
+#### Discovery only proposes
+
+mDNS is unauthenticated: anything on the LAN can advertise `_heimdallm._tcp`
+and claim to be any instance. The design assumes that.
+
+| Guard | What it stops |
+|---|---|
+| Nothing is registered automatically | An advertiser can put a name in a list; only an operator can put it in the registry |
+| The API token never travels over mDNS | It has to reach you out of band, exactly as before |
+| Identity comes from the daemon, not the advertisement | The hub fetches the peer's `/health` and uses the id **it** reports; the TXT record is discarded. A peer that does not answer, or will not name itself, is never offered |
+| Registration pins the discovered id | If the machine at that address is no longer the one that was found, the registration is refused rather than silently pointed at whatever is there now |
+| An address is never rewritten for you | A moved instance is a proposal on a card, so a rogue advertiser cannot redirect the hub by claiming a known id |
+
+Turning discovery **on** is still a decision worth making deliberately:
+announcing a service on a shared corporate network is a choice, which is why
+the default is off rather than on.
+
+#### Where it does not reach
+
+**Containers.** mDNS does not cross Docker's default bridge — which is how the
+daemon is usually deployed. A container with discovery on will typically see
+nothing and be seen by nothing. Use `network_mode: host`, or set
+`HEIMDALLM_CLUSTER_DISCOVERY=off` and address instances by hostname. The daemon
+logs a warning at startup when it detects this combination.
+
+**Anything past the subnet.** mDNS is link-local by definition. It will not find
+a machine in another VLAN, another office or a cloud VPC. Discovery is a
+convenience within one network, **not** a replacement for DNS, a VPN or
+Tailscale — and `base_url` accepts all of those, so a cross-site cluster is
+configured exactly as it is today.
+
+### 18.9 CLI
 
 `cli.toml` gains an instance map alongside the flat `host`/`token` pair, which
 keeps working and is presented as an instance called `local`:
