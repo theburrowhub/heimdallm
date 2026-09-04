@@ -214,22 +214,49 @@ func TestDialAddrsFallsBackToTheClassFilterWithoutASource(t *testing.T) {
 	}
 }
 
-// A sender on no locally attached network at all — a routed relay, or an
-// unusual topology — is not an attack shape, and refusing it would break a
-// working setup for no gain.
-func TestDialAddrsAllowsASenderOnNoKnownLink(t *testing.T) {
+// A source on no locally attached network allows nothing.
+//
+// This deliberately fails closed. A UDP source address is trivially spoofed by
+// anyone on the same L2, so treating "off-link source" as a benign routed-relay
+// case turned the same-link rule into something an attacker switches off by
+// setting a field — and then names a VPN address the hub can reach and they
+// cannot.
+func TestDialAddrsFailsClosedOnAnUnrecognisedSource(t *testing.T) {
 	realPrefixes := localPrefixes
 	localPrefixes = func() []netip.Prefix {
-		return []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")}
+		return []netip.Prefix{
+			netip.MustParsePrefix("192.168.1.0/24"),
+			netip.MustParsePrefix("10.42.0.0/16"),
+		}
 	}
 	t.Cleanup(func() { localPrefixes = realPrefixes })
 
-	peer := Peer{
+	// The attack: spoof an off-link source, then name the VPN.
+	spoofed := Peer{
 		Source: netip.MustParseAddr("203.0.113.7"),
-		Addrs:  []netip.Addr{netip.MustParseAddr("203.0.113.8")},
+		Addrs: []netip.Addr{
+			netip.MustParseAddr("10.42.0.10"),
+			netip.MustParseAddr("192.168.1.20"),
+		},
 	}
-	if got := peer.DialAddrs(); len(got) != 1 {
-		t.Fatalf("DialAddrs = %v, want the relay case to be allowed", got)
+	if got := spoofed.DialAddrs(); len(got) != 0 {
+		t.Fatalf("DialAddrs = %v; a spoofed off-link source must allow nothing", got)
+	}
+}
+
+// And with no local prefixes at all — a host whose interfaces could not be
+// enumerated — nothing is dialable either, rather than everything.
+func TestDialAddrsFailsClosedWithoutLocalPrefixes(t *testing.T) {
+	realPrefixes := localPrefixes
+	localPrefixes = func() []netip.Prefix { return nil }
+	t.Cleanup(func() { localPrefixes = realPrefixes })
+
+	peer := Peer{
+		Source: netip.MustParseAddr("192.168.1.99"),
+		Addrs:  []netip.Addr{netip.MustParseAddr("192.168.1.20")},
+	}
+	if got := peer.DialAddrs(); len(got) != 0 {
+		t.Fatalf("DialAddrs = %v; with no known links nothing should be dialable", got)
 	}
 }
 

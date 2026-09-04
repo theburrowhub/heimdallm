@@ -293,3 +293,40 @@ func TestGroupAddrIsTheMDNSGroup(t *testing.T) {
 		t.Fatalf("GroupAddr = %s, want the mDNS group", got)
 	}
 }
+
+// DialAddrs skips the same-link check when a response carries no source
+// address, which is safe only because a real socket always carries one. That
+// is an assumption about the net package, so it gets an assertion rather than
+// a comment: if it ever stopped holding, the same-link rule would silently
+// become optional from the wire.
+func TestRealSocketAlwaysCarriesASource(t *testing.T) {
+	listener, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("cannot bind a local UDP socket here: %v", err)
+	}
+	defer listener.Close()
+
+	sender, err := net.Dial("udp4", listener.LocalAddr().String())
+	if err != nil {
+		t.Skipf("cannot dial the local UDP socket here: %v", err)
+	}
+	defer sender.Close()
+	if _, err := sender.Write([]byte("hello")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	_ = listener.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 32)
+	_, from, err := listener.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("ReadFrom: %v", err)
+	}
+
+	if _, ok := from.(*net.UDPAddr); !ok {
+		t.Fatalf("a UDP read reported %T, not *net.UDPAddr; sourceAddr would "+
+			"return nothing and the same-link check would be skipped", from)
+	}
+	if got := sourceAddr(from); !got.IsValid() {
+		t.Fatal("sourceAddr could not extract an address from a real UDP read")
+	}
+}

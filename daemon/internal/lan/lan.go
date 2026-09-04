@@ -194,6 +194,13 @@ func (p Peer) DialAddrs() []netip.Addr {
 		}
 		// Same link as whoever sent the advertisement.
 		//
+		// The IsValid guard is not a way around this: a real socket always
+		// reports a source (ReadFrom on a UDPConn yields a *net.UDPAddr), so an
+		// absent one means a transport that carries none — today only the
+		// in-memory pair used in tests. TestRealSocketAlwaysCarriesASource
+		// pins that, so the guard cannot quietly become reachable from the
+		// wire.
+		//
 		// The class filter above is not enough on a multi-homed host. A hub on
 		// both a LAN and a VPN can reach the VPN; an attacker on the LAN
 		// cannot — so an advertisement naming a VPN address would still be
@@ -242,23 +249,27 @@ func systemPrefixes() []netip.Prefix {
 // sameLink reports whether source and candidate fall inside the same locally
 // attached network.
 //
-// A host with no matching prefix at all is allowed through: that is a routed
-// mDNS relay or an unusual topology, not an attack shape, and refusing it
-// would break a setup that works today for no security gain — the check exists
-// to stop an advertiser naming a network it is not on, and if we cannot tell
-// which network anything is on there is nothing to enforce.
+// Fails closed: a source that matches no local prefix allows nothing.
+//
+// An earlier version let that case through, reasoning that a sender on no
+// attached network is a routed mDNS relay rather than an attack. That was
+// wrong, and wrong in the way that matters — a UDP source address is trivially
+// spoofed by anyone on the same L2, so "off-link source" was not a rare
+// topology, it was a flag an attacker sets to switch the check off. Having
+// added a same-link rule, leaving an unauthenticated way around it is worse
+// than not having added it.
+//
+// What this costs is a routed mDNS relay, which is outside the design anyway:
+// mDNS is link-local by definition and section 18.8 already says discovery
+// does not leave the subnet. What it buys is that the rule cannot be turned off
+// from the wire.
 func sameLink(source, candidate netip.Addr) bool {
-	matched := false
 	for _, prefix := range localPrefixes() {
-		if !prefix.Contains(source) {
-			continue
-		}
-		matched = true
-		if prefix.Contains(candidate) {
+		if prefix.Contains(source) && prefix.Contains(candidate) {
 			return true
 		}
 	}
-	return !matched
+	return false
 }
 
 // encodeTXT renders a peer's identity as DNS-SD TXT strings, in a stable order
