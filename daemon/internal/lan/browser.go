@@ -137,39 +137,6 @@ func (b *Browser) query() error {
 	return nil
 }
 
-// accumulator collects records across packets and joins them into peers.
-type accumulator struct {
-	// instances are the record names seen in a PTR answer, i.e. the set of
-	// daemons that claim to exist.
-	instances map[string]bool
-	srv       map[string]*dns.SRV
-	txt       map[string][]string
-	addrs     map[string][]netip.Addr // keyed by host FQDN
-	seenAddr  map[addrKey]bool        // dedup without a linear scan
-	// addrSource records who advertised each host's addresses, so a goodbye
-	// for them can be checked the same way a goodbye for an instance is.
-	addrSource map[string]netip.Addr
-	source     map[string]netip.Addr // keyed by record name
-}
-
-// addrKey identifies one address under one hostname.
-type addrKey struct {
-	host string
-	addr netip.Addr
-}
-
-func newAccumulator() *accumulator {
-	return &accumulator{
-		instances:  map[string]bool{},
-		srv:        map[string]*dns.SRV{},
-		txt:        map[string][]string{},
-		addrs:      map[string][]netip.Addr{},
-		seenAddr:   map[addrKey]bool{},
-		addrSource: map[string]netip.Addr{},
-		source:     map[string]netip.Addr{},
-	}
-}
-
 // sourceAddr extracts the sender's IP, or the zero value when the transport
 // does not carry one (the in-memory pair does not).
 func sourceAddr(from net.Addr) netip.Addr {
@@ -184,6 +151,52 @@ func sourceAddr(from net.Addr) netip.Addr {
 	return addr.Unmap()
 }
 
+// accumulator collects records across packets and joins them into peers.
+//
+// Everything an advertiser can influence is keyed by the address it was sent
+// from. That is the design rather than a check: a sender can only ever add to,
+// or withdraw from, its own entries, so there is no shared table for one host
+// on the link to poison on another's behalf. Two rounds of trying to police a
+// global address table with source checks produced a bypass each time — once
+// through an attacker-chosen SRV target naming somebody else's hostname, once
+// through claiming ownership of a name by advertising it first.
+type accumulator struct {
+	// instances are the record names seen in a PTR answer, i.e. the set of
+	// daemons that claim to exist.
+	instances map[string]bool
+	srv       map[string]*dns.SRV
+	txt       map[string][]string
+	source    map[string]netip.Addr // record name -> who advertised it
+
+	// addrs is keyed by (sender, host FQDN), which is what makes address
+	// ownership unforgeable.
+	addrs    map[hostKey][]netip.Addr
+	seenAddr map[addrKey]bool
+}
+
+// hostKey scopes a hostname's addresses to the sender that advertised them.
+type hostKey struct {
+	source netip.Addr
+	host   string
+}
+
+// addrKey identifies one address under one sender's hostname.
+type addrKey struct {
+	host hostKey
+	addr netip.Addr
+}
+
+func newAccumulator() *accumulator {
+	return &accumulator{
+		instances: map[string]bool{},
+		srv:       map[string]*dns.SRV{},
+		txt:       map[string][]string{},
+		source:    map[string]netip.Addr{},
+		addrs:     map[hostKey][]netip.Addr{},
+		seenAddr:  map[addrKey]bool{},
+	}
+}
+
 func (a *accumulator) absorb(packet []byte, source netip.Addr) {
 	var msg dns.Msg
 	if err := msg.Unpack(packet); err != nil {
@@ -196,13 +209,10 @@ func (a *accumulator) absorb(packet []byte, source netip.Addr) {
 	// its PTR, so both sections have to be read.
 	for _, rr := range append(append([]dns.RR{}, msg.Answer...), msg.Extra...) {
 		// TTL 0 is a goodbye: the peer is leaving, so anything already
-		// collected for it is dropped rather than reported as present.
-		//
-		// Only from whoever advertised it, though. A goodbye is as
-		// unauthenticated as everything else on this group, so without the
-		// source check any host on the link could evict a legitimate daemon
-		// from an in-flight browse simply by naming it — a denial of discovery
-		// that costs one packet.
+		// collected for it is dropped rather than reported as present. Only
+		// this sender's own records, though — a goodbye is as unauthenticated
+		// as everything else here, and without that a single packet would
+		// evict somebody else's daemon from an in-flight browse.
 		if rr.Header().Ttl == 0 {
 			a.forget(rr, source)
 			continue
@@ -217,7 +227,8 @@ func (a *accumulator) absorb(packet []byte, source netip.Addr) {
 				name := strings.ToLower(rec.Hdr.Name)
 				a.srv[name] = rec
 				// Remembered per record so a candidate can be required to sit
-				// on the same link as whoever advertised it.
+				// on the same link as whoever advertised it, and so a goodbye
+				// can be matched against the advertiser.
 				if source.IsValid() {
 					a.source[name] = source
 				}
@@ -234,71 +245,47 @@ func (a *accumulator) absorb(packet []byte, source netip.Addr) {
 	}
 }
 
+// forget drops what this sender previously advertised, and only that.
 func (a *accumulator) forget(rr dns.RR, source netip.Addr) {
 	name := strings.ToLower(rr.Header().Name)
 	switch rec := rr.(type) {
 	case *dns.PTR:
 		a.retract(strings.ToLower(rec.Ptr), source)
-	case *dns.A:
-		a.forgetAddrs(name, source)
-	case *dns.AAAA:
-		a.forgetAddrs(name, source)
+	case *dns.A, *dns.AAAA:
+		// Only ever this sender's copy: the key includes the sender, so there
+		// is nothing else here to withdraw.
+		a.dropAddrs(hostKey{source, name})
 	default:
-		// Retracting the instance takes its addresses with it, but only if the
-		// retraction was allowed. Clearing them regardless was the hole: the
-		// source check refused the record and the addresses went anyway, so a
-		// forged goodbye still emptied a legitimate peer.
-		if a.retract(name, source) {
-			return
-		}
+		a.retract(name, source)
 	}
 }
 
-// retract drops a record name, but only for the sender that advertised it, and
-// reports whether it acted.
+// retract drops a record name, but only for the sender that advertised it.
 //
 // A name nobody has advertised yet is left alone rather than pre-emptively
 // blocked: there is nothing to protect and no claim to compare against.
-func (a *accumulator) retract(name string, source netip.Addr) bool {
-	if !a.mayRetract(a.source[name], source) {
-		return false // somebody else's daemon; not this sender's to retire
+func (a *accumulator) retract(name string, source netip.Addr) {
+	advertiser, known := a.source[name]
+	if known && source.IsValid() && advertiser.IsValid() && advertiser != source {
+		return // somebody else's daemon; not this sender's to retire
 	}
 	if srv, ok := a.srv[name]; ok {
-		// Forced, because the SRV target's addresses belong to the instance
-		// being retired and the check has already passed for it.
-		a.dropAddrs(strings.ToLower(srv.Target))
+		// This sender's copy of the target's addresses. An attacker naming
+		// somebody else's hostname as their SRV target reaches only their own
+		// entry, because the key carries their address.
+		a.dropAddrs(hostKey{source, strings.ToLower(srv.Target)})
 	}
 	delete(a.instances, name)
 	delete(a.srv, name)
 	delete(a.txt, name)
 	delete(a.source, name)
-	return true
 }
 
-// forgetAddrs drops one host's addresses, subject to the same source check.
-func (a *accumulator) forgetAddrs(host string, source netip.Addr) {
-	if !a.mayRetract(a.addrSource[host], source) {
-		return
+func (a *accumulator) dropAddrs(key hostKey) {
+	for _, addr := range a.addrs[key] {
+		delete(a.seenAddr, addrKey{key, addr})
 	}
-	a.dropAddrs(host)
-}
-
-func (a *accumulator) dropAddrs(host string) {
-	for _, addr := range a.addrs[host] {
-		delete(a.seenAddr, addrKey{host, addr})
-	}
-	delete(a.addrs, host)
-	delete(a.addrSource, host)
-}
-
-// mayRetract reports whether source is entitled to withdraw something
-// advertised by advertiser. An unknown advertiser or a transport that carries
-// no source cannot be checked, and is allowed.
-func (a *accumulator) mayRetract(advertiser, source netip.Addr) bool {
-	if !advertiser.IsValid() || !source.IsValid() {
-		return true
-	}
-	return advertiser == source
+	delete(a.addrs, key)
 }
 
 // full reports whether the accumulator has taken all it will hold. Records past
@@ -316,25 +303,20 @@ func (a *accumulator) addAddr(host string, ip net.IP, source netip.Addr) {
 		return
 	}
 	addr = addr.Unmap()
-	key := strings.ToLower(host)
+	key := hostKey{source, strings.ToLower(host)}
 	if _, known := a.addrs[key]; !known && len(a.addrs) >= maxRecordNames {
 		return
 	}
 	if len(a.addrs[key]) >= maxAddrsPerHost {
 		return
 	}
-	// Deduplicated through a set rather than a scan of the slice: the slice
-	// scan was quadratic in the number of records a stranger chooses to send.
+	// Deduplicated through a set rather than a scan of the slice, which was
+	// quadratic in the number of records a stranger chooses to send.
 	if a.seenAddr[addrKey{key, addr}] {
 		return
 	}
 	a.seenAddr[addrKey{key, addr}] = true
 	a.addrs[key] = append(a.addrs[key], addr)
-	if source.IsValid() {
-		if _, known := a.addrSource[key]; !known {
-			a.addrSource[key] = source
-		}
-	}
 }
 
 // peers joins the collected records. An instance is only reported when it has
@@ -354,8 +336,11 @@ func (a *accumulator) peers() []Peer {
 		}
 		peer.Hostname = strings.TrimSuffix(srv.Target, ".")
 		peer.Port = int(srv.Port)
-		peer.Addrs = a.addrs[strings.ToLower(srv.Target)]
 		peer.Source = a.source[name]
+		// The addresses this same sender published for its own SRV target.
+		// Reading a shared host table here is what let one advertiser supply
+		// another's addresses.
+		peer.Addrs = a.addrs[hostKey{peer.Source, strings.ToLower(srv.Target)}]
 		if peer.Scheme == "" {
 			peer.Scheme = "http"
 		}
