@@ -92,6 +92,10 @@ func NewAdvertiser(conn PacketConn, ad Advertisement, log *slog.Logger) (*Advert
 	}, nil
 }
 
+// Close releases the underlying transport. Run must have returned first, so
+// the goodbye it sends on the way out still reaches the network.
+func (a *Advertiser) Close() error { return a.conn.Close() }
+
 // Run answers queries until ctx is cancelled, then sends a goodbye.
 func (a *Advertiser) Run(ctx context.Context) {
 	a.log.Info("lan: advertising on the local network",

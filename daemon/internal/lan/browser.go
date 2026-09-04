@@ -34,6 +34,9 @@ func NewBrowser(conn PacketConn, log *slog.Logger) (*Browser, error) {
 	return &Browser{conn: conn, log: log}, nil
 }
 
+// Close releases the underlying transport.
+func (b *Browser) Close() error { return b.conn.Close() }
+
 // Browse sends one PTR query and collects answers for the given window.
 //
 // Peers are returned sorted by instance id so a caller diffing two consecutive

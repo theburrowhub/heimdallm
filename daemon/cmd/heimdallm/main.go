@@ -1293,6 +1293,23 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 			clusterSt.RunProber(ctx)
 		}()
 
+		// mDNS: answer "which daemons are on this network" (any role), and on
+		// a hub, ask it. Both return immediately when cluster.discovery is off,
+		// which is the default — same no-op-goroutine trade as the prober.
+		// Living on the poller context is what makes a reload that flips
+		// discovery on or off take effect: any [cluster] change restarts the
+		// pollers, so these are rebuilt with it.
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			clusterSt.RunAdvertiser(ctx)
+		}()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			clusterSt.RunDiscoverer(ctx)
+		}()
+
 		// Tier 2: PR / issue polling — use the resolved interval which honours
 		// [polling].poll_interval > [github].poll_interval > 5m default.
 		cfgMu.Lock()
@@ -3220,6 +3237,10 @@ func runProcessWithDependencies(releaseLock bool, deps processDependencies) int 
 		workerCancel, publishWCancel, triageWCancel, refinementWCancel,
 		implementWCancel, statePollerCancel, stateWCancel,
 	}, exec.TerminateAll, producerSettleDelay)
+	// After the producers, so the advertiser's Run has already returned and
+	// sent its mDNS goodbye. Closing the socket first would swallow it and
+	// leave this daemon in its peers' listings until the record expired.
+	clusterSt.CloseDiscovery()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {

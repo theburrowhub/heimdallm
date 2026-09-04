@@ -115,6 +115,21 @@ func (d *Discoverer) Update(reg *Registry, interval time.Duration) {
 	}
 }
 
+// SetBrowser swaps the transport, for when a config reload replaces the
+// multicast socket. A nil browser switches discovery off without discarding
+// the object the HTTP handler already holds.
+func (d *Discoverer) SetBrowser(b PeerBrowser) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	// A typed nil pointer in a non-nil interface would defeat every nil check
+	// in this file, so an unusable browser is normalised to a true nil.
+	if b == nil {
+		d.browser = nil
+		return
+	}
+	d.browser = b
+}
+
 // Candidates returns the current view.
 func (d *Discoverer) Candidates() []Candidate {
 	d.mu.RLock()
