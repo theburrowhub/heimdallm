@@ -146,7 +146,10 @@ type accumulator struct {
 	txt       map[string][]string
 	addrs     map[string][]netip.Addr // keyed by host FQDN
 	seenAddr  map[addrKey]bool        // dedup without a linear scan
-	source    map[string]netip.Addr   // keyed by record name
+	// addrSource records who advertised each host's addresses, so a goodbye
+	// for them can be checked the same way a goodbye for an instance is.
+	addrSource map[string]netip.Addr
+	source     map[string]netip.Addr // keyed by record name
 }
 
 // addrKey identifies one address under one hostname.
@@ -157,12 +160,13 @@ type addrKey struct {
 
 func newAccumulator() *accumulator {
 	return &accumulator{
-		instances: map[string]bool{},
-		srv:       map[string]*dns.SRV{},
-		txt:       map[string][]string{},
-		addrs:     map[string][]netip.Addr{},
-		seenAddr:  map[addrKey]bool{},
-		source:    map[string]netip.Addr{},
+		instances:  map[string]bool{},
+		srv:        map[string]*dns.SRV{},
+		txt:        map[string][]string{},
+		addrs:      map[string][]netip.Addr{},
+		seenAddr:   map[addrKey]bool{},
+		addrSource: map[string]netip.Addr{},
+		source:     map[string]netip.Addr{},
 	}
 }
 
@@ -223,51 +227,78 @@ func (a *accumulator) absorb(packet []byte, source netip.Addr) {
 				a.txt[strings.ToLower(rec.Hdr.Name)] = rec.Txt
 			}
 		case *dns.A:
-			a.addAddr(rec.Hdr.Name, rec.A)
+			a.addAddr(rec.Hdr.Name, rec.A, source)
 		case *dns.AAAA:
-			a.addAddr(rec.Hdr.Name, rec.AAAA)
+			a.addAddr(rec.Hdr.Name, rec.AAAA, source)
 		}
 	}
 }
 
 func (a *accumulator) forget(rr dns.RR, source netip.Addr) {
 	name := strings.ToLower(rr.Header().Name)
-	if ptr, ok := rr.(*dns.PTR); ok {
-		a.retract(strings.ToLower(ptr.Ptr), source)
-		return
+	switch rec := rr.(type) {
+	case *dns.PTR:
+		a.retract(strings.ToLower(rec.Ptr), source)
+	case *dns.A:
+		a.forgetAddrs(name, source)
+	case *dns.AAAA:
+		a.forgetAddrs(name, source)
+	default:
+		// Retracting the instance takes its addresses with it, but only if the
+		// retraction was allowed. Clearing them regardless was the hole: the
+		// source check refused the record and the addresses went anyway, so a
+		// forged goodbye still emptied a legitimate peer.
+		if a.retract(name, source) {
+			return
+		}
 	}
-	a.retract(name, source)
-	// The host's addresses go too. Leaving them behind meant an instance
-	// re-advertised later in the same window was reported with the addresses
-	// it had just retracted.
-	if srv, ok := a.srv[name]; ok {
-		a.forgetAddrs(strings.ToLower(srv.Target))
-	}
-	a.forgetAddrs(name)
 }
 
-// retract drops a record name, but only for the sender that advertised it.
+// retract drops a record name, but only for the sender that advertised it, and
+// reports whether it acted.
+//
 // A name nobody has advertised yet is left alone rather than pre-emptively
-// blocked, since there is nothing to protect and no claim to compare against.
-func (a *accumulator) retract(name string, source netip.Addr) {
-	if advertiser, known := a.source[name]; known && source.IsValid() &&
-		advertiser.IsValid() && advertiser != source {
-		return // somebody else's daemon; not this sender's to retire
+// blocked: there is nothing to protect and no claim to compare against.
+func (a *accumulator) retract(name string, source netip.Addr) bool {
+	if !a.mayRetract(a.source[name], source) {
+		return false // somebody else's daemon; not this sender's to retire
 	}
 	if srv, ok := a.srv[name]; ok {
-		a.forgetAddrs(strings.ToLower(srv.Target))
+		// Forced, because the SRV target's addresses belong to the instance
+		// being retired and the check has already passed for it.
+		a.dropAddrs(strings.ToLower(srv.Target))
 	}
 	delete(a.instances, name)
 	delete(a.srv, name)
 	delete(a.txt, name)
 	delete(a.source, name)
+	return true
 }
 
-func (a *accumulator) forgetAddrs(host string) {
+// forgetAddrs drops one host's addresses, subject to the same source check.
+func (a *accumulator) forgetAddrs(host string, source netip.Addr) {
+	if !a.mayRetract(a.addrSource[host], source) {
+		return
+	}
+	a.dropAddrs(host)
+}
+
+func (a *accumulator) dropAddrs(host string) {
 	for _, addr := range a.addrs[host] {
 		delete(a.seenAddr, addrKey{host, addr})
 	}
 	delete(a.addrs, host)
+	delete(a.addrSource, host)
+}
+
+// mayRetract reports whether source is entitled to withdraw something
+// advertised by advertiser. An unknown advertiser or a transport that carries
+// no source cannot be checked, and is allowed.
+func (a *accumulator) mayRetract(advertiser, source netip.Addr) bool {
+	if !advertiser.IsValid() || !source.IsValid() {
+		return true
+	}
+	return advertiser == source
 }
 
 // full reports whether the accumulator has taken all it will hold. Records past
@@ -279,7 +310,7 @@ func (a *accumulator) full() bool {
 		len(a.txt) >= maxRecordNames
 }
 
-func (a *accumulator) addAddr(host string, ip net.IP) {
+func (a *accumulator) addAddr(host string, ip net.IP, source netip.Addr) {
 	addr, ok := netip.AddrFromSlice(ip)
 	if !ok {
 		return
@@ -299,6 +330,11 @@ func (a *accumulator) addAddr(host string, ip net.IP) {
 	}
 	a.seenAddr[addrKey{key, addr}] = true
 	a.addrs[key] = append(a.addrs[key], addr)
+	if source.IsValid() {
+		if _, known := a.addrSource[key]; !known {
+			a.addrSource[key] = source
+		}
+	}
 }
 
 // peers joins the collected records. An instance is only reported when it has
