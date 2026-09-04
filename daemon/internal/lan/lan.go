@@ -23,6 +23,7 @@ package lan
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"sort"
 	"strconv"
@@ -76,9 +77,13 @@ type Peer struct {
 	Hostname string
 	Port     int
 
-	// Addrs are the A/AAAA records that came with the response, kept for
-	// display and diagnostics only.
+	// Addrs are the A/AAAA records that came with the response.
 	Addrs []netip.Addr
+
+	// Source is the address the response actually arrived from, when the
+	// transport carries one. It is the only field an advertiser cannot forge,
+	// which is what makes it the basis for the same-link check in DialAddrs.
+	Source netip.Addr
 }
 
 // BaseURL renders the peer as a daemon base URL built from its hostname.
@@ -187,9 +192,73 @@ func (p Peer) DialAddrs() []netip.Addr {
 			addr.IsInterfaceLocalMulticast():
 			continue
 		}
+		// Same link as whoever sent the advertisement.
+		//
+		// The class filter above is not enough on a multi-homed host. A hub on
+		// both a LAN and a VPN can reach the VPN; an attacker on the LAN
+		// cannot — so an advertisement naming a VPN address would still be
+		// asking the hub to make a request the sender could not make itself,
+		// which is the definition of the problem. Requiring the address to
+		// share a local prefix with the packet's own source keeps the reach to
+		// the link the advertisement came from.
+		if p.Source.IsValid() && !sameLink(p.Source, addr) {
+			continue
+		}
 		out = append(out, addr)
 	}
 	return out
+}
+
+// localPrefixes is a variable so tests can describe a multi-homed host without
+// needing one.
+var localPrefixes = systemPrefixes
+
+// systemPrefixes returns the networks this machine is directly attached to.
+func systemPrefixes() []netip.Prefix {
+	ifaceAddrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil
+	}
+	out := make([]netip.Prefix, 0, len(ifaceAddrs))
+	for _, a := range ifaceAddrs {
+		ipNet, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		addr, ok := netip.AddrFromSlice(ipNet.IP)
+		if !ok {
+			continue
+		}
+		ones, _ := ipNet.Mask.Size()
+		prefix, err := addr.Unmap().Prefix(ones)
+		if err != nil {
+			continue
+		}
+		out = append(out, prefix)
+	}
+	return out
+}
+
+// sameLink reports whether source and candidate fall inside the same locally
+// attached network.
+//
+// A host with no matching prefix at all is allowed through: that is a routed
+// mDNS relay or an unusual topology, not an attack shape, and refusing it
+// would break a setup that works today for no security gain — the check exists
+// to stop an advertiser naming a network it is not on, and if we cannot tell
+// which network anything is on there is nothing to enforce.
+func sameLink(source, candidate netip.Addr) bool {
+	matched := false
+	for _, prefix := range localPrefixes() {
+		if !prefix.Contains(source) {
+			continue
+		}
+		matched = true
+		if prefix.Contains(candidate) {
+			return true
+		}
+	}
+	return !matched
 }
 
 // encodeTXT renders a peer's identity as DNS-SD TXT strings, in a stable order

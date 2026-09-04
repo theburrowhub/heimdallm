@@ -162,10 +162,10 @@ func (cs *clusterState) runAdvertiser(ctx context.Context, policy retryPolicy) {
 			"restart the daemon")
 		return
 	}
-	if !servedReachableFromLAN(served) {
-		slog.Warn("cluster: not advertising on the local network: the daemon "+
-			"only listens on a loopback address, so no peer could reach it. "+
-			"Set server.bind_addr to a LAN address (or 0.0.0.0) to be discoverable.",
+	if reason := unadvertisableBind(served); reason != "" {
+		slog.Warn("cluster: not advertising on the local network: "+reason+
+			" Set server.bind_addr to a routable LAN address (or 0.0.0.0) to be "+
+			"discoverable.",
 			"bind_addr", served.IP.String(), "port", served.Port)
 		return
 	}
@@ -191,21 +191,39 @@ func (cs *clusterState) runAdvertiser(ctx context.Context, policy retryPolicy) {
 	})
 }
 
-// servedReachableFromLAN reports whether a peer could connect to this address.
-// A loopback bind cannot be reached from another machine, and 0.0.0.0 / :: mean
-// every interface, which is exactly what discovery wants.
-func servedReachableFromLAN(addr *net.TCPAddr) bool {
+// unadvertisableBind explains why this listener address cannot be advertised,
+// or returns "" when it can.
+//
+// The rule has to agree with lan.Peer.DialAddrs, which is what a hub applies
+// to an advertisement. Advertising an address that our own verifier would
+// refuse produces the worst outcome available: the daemon announces itself,
+// every hub declines to probe it, and nothing anywhere says why.
+func unadvertisableBind(addr *net.TCPAddr) string {
 	ip, ok := netip.AddrFromSlice(addr.IP)
 	if !ok {
 		// No IP at all is how a wildcard listener reports itself on some
 		// platforms; treat it as "all interfaces" rather than refusing.
-		return len(addr.IP) == 0
+		if len(addr.IP) == 0 {
+			return ""
+		}
+		return "the listener's address could not be interpreted."
 	}
 	ip = ip.Unmap()
-	if ip.IsUnspecified() {
-		return true
+	switch {
+	case ip.IsUnspecified():
+		return "" // every interface, which is what discovery wants
+	case ip.IsLoopback():
+		return "the daemon only listens on a loopback address, so no peer could reach it."
+	case ip.IsLinkLocalUnicast():
+		// A peer would have to know which interface the address belongs to,
+		// and there is nowhere to say so in an A/AAAA record — so a hub
+		// refuses such an address and this daemon would never be verified.
+		return "the daemon listens on a link-local address, which cannot be " +
+			"reached from a DNS record without an interface scope."
+	case ip.IsMulticast():
+		return "the daemon's listen address is a multicast address, which is not a host."
 	}
-	return !ip.IsLoopback()
+	return ""
 }
 
 // RunDiscoverer browses for peers until ctx is cancelled. No-op on a worker, or

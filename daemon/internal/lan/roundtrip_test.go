@@ -515,7 +515,7 @@ func TestAccumulatorStopsGrowingUnderAFlood(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Pack: %v", err)
 		}
-		acc.absorb(packed)
+		acc.absorb(packed, netip.Addr{})
 	}
 
 	for what, got := range map[string]int{

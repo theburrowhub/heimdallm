@@ -139,3 +139,108 @@ func TestDialAddrsKeepsRoutableAddresses(t *testing.T) {
 		}
 	}
 }
+
+// Filtering by address class is not the same as binding to a link, and the
+// difference matters on a multi-homed hub: it can reach a VPN that an attacker
+// on the LAN cannot, so an advertisement naming a VPN address is still asking
+// the hub to make a request the sender could not make itself.
+func TestDialAddrsRequiresTheSameLinkAsTheSender(t *testing.T) {
+	// A hub attached to a LAN and a VPN.
+	realPrefixes := localPrefixes
+	localPrefixes = func() []netip.Prefix {
+		return []netip.Prefix{
+			netip.MustParsePrefix("192.168.1.0/24"),
+			netip.MustParsePrefix("10.42.0.0/16"),
+		}
+	}
+	t.Cleanup(func() { localPrefixes = realPrefixes })
+
+	lanSender := netip.MustParseAddr("192.168.1.99")
+
+	tests := []struct {
+		name string
+		addr string
+		want bool
+	}{
+		{"its own link", "192.168.1.20", true},
+		{"the VPN it is not on", "10.42.0.10", false},
+		{"somewhere else entirely", "172.16.0.5", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			peer := Peer{
+				Source: lanSender,
+				Addrs:  []netip.Addr{netip.MustParseAddr(tt.addr)},
+			}
+			got := len(peer.DialAddrs()) == 1
+			if got != tt.want {
+				t.Fatalf("DialAddrs kept %s = %v, want %v", tt.addr, got, tt.want)
+			}
+		})
+	}
+}
+
+// A sender on the VPN may name VPN addresses — the rule is "the link it came
+// from", not "the LAN".
+func TestDialAddrsAllowsTheSendersOwnLinkWhicheverItIs(t *testing.T) {
+	realPrefixes := localPrefixes
+	localPrefixes = func() []netip.Prefix {
+		return []netip.Prefix{
+			netip.MustParsePrefix("192.168.1.0/24"),
+			netip.MustParsePrefix("10.42.0.0/16"),
+		}
+	}
+	t.Cleanup(func() { localPrefixes = realPrefixes })
+
+	peer := Peer{
+		Source: netip.MustParseAddr("10.42.0.99"),
+		Addrs:  []netip.Addr{netip.MustParseAddr("10.42.0.10")},
+	}
+	if got := peer.DialAddrs(); len(got) != 1 {
+		t.Fatalf("DialAddrs = %v, want the sender's own link to be allowed", got)
+	}
+}
+
+// Without a source the class filter is all there is, which is the in-memory
+// transport's case and any transport that does not carry one.
+func TestDialAddrsFallsBackToTheClassFilterWithoutASource(t *testing.T) {
+	peer := Peer{Addrs: []netip.Addr{
+		netip.MustParseAddr("10.42.0.10"),
+		netip.MustParseAddr("127.0.0.1"),
+	}}
+	got := peer.DialAddrs()
+	if len(got) != 1 || got[0].String() != "10.42.0.10" {
+		t.Fatalf("DialAddrs = %v, want just the routable address", got)
+	}
+}
+
+// A sender on no locally attached network at all — a routed relay, or an
+// unusual topology — is not an attack shape, and refusing it would break a
+// working setup for no gain.
+func TestDialAddrsAllowsASenderOnNoKnownLink(t *testing.T) {
+	realPrefixes := localPrefixes
+	localPrefixes = func() []netip.Prefix {
+		return []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")}
+	}
+	t.Cleanup(func() { localPrefixes = realPrefixes })
+
+	peer := Peer{
+		Source: netip.MustParseAddr("203.0.113.7"),
+		Addrs:  []netip.Addr{netip.MustParseAddr("203.0.113.8")},
+	}
+	if got := peer.DialAddrs(); len(got) != 1 {
+		t.Fatalf("DialAddrs = %v, want the relay case to be allowed", got)
+	}
+}
+
+func TestSystemPrefixesDescribesThisMachine(t *testing.T) {
+	// Shape, not values: what this returns depends on the host.
+	for _, p := range systemPrefixes() {
+		if !p.IsValid() {
+			t.Errorf("systemPrefixes returned an invalid prefix %v", p)
+		}
+		if p.Addr() != p.Masked().Addr() {
+			t.Errorf("prefix %v is not masked to its network", p)
+		}
+	}
+}

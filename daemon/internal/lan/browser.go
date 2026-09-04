@@ -84,7 +84,7 @@ func (b *Browser) Browse(ctx context.Context, window time.Duration) ([]Peer, err
 		}
 		_ = b.conn.SetReadDeadline(time.Now().Add(remaining))
 
-		n, _, err := b.conn.ReadFrom(buf)
+		n, from, err := b.conn.ReadFrom(buf)
 		if err != nil {
 			var netErr net.Error
 			if errors.As(err, &netErr) && netErr.Timeout() {
@@ -106,7 +106,7 @@ func (b *Browser) Browse(ctx context.Context, window time.Duration) ([]Peer, err
 			continue
 		}
 		failures = 0
-		acc.absorb(buf[:n])
+		acc.absorb(buf[:n], sourceAddr(from))
 	}
 
 	return acc.peers(), nil
@@ -138,6 +138,7 @@ type accumulator struct {
 	srv       map[string]*dns.SRV
 	txt       map[string][]string
 	addrs     map[string][]netip.Addr // keyed by host FQDN
+	source    map[string]netip.Addr   // keyed by record name
 }
 
 func newAccumulator() *accumulator {
@@ -146,10 +147,25 @@ func newAccumulator() *accumulator {
 		srv:       map[string]*dns.SRV{},
 		txt:       map[string][]string{},
 		addrs:     map[string][]netip.Addr{},
+		source:    map[string]netip.Addr{},
 	}
 }
 
-func (a *accumulator) absorb(packet []byte) {
+// sourceAddr extracts the sender's IP, or the zero value when the transport
+// does not carry one (the in-memory pair does not).
+func sourceAddr(from net.Addr) netip.Addr {
+	udp, ok := from.(*net.UDPAddr)
+	if !ok {
+		return netip.Addr{}
+	}
+	addr, ok := netip.AddrFromSlice(udp.IP)
+	if !ok {
+		return netip.Addr{}
+	}
+	return addr.Unmap()
+}
+
+func (a *accumulator) absorb(packet []byte, source netip.Addr) {
 	var msg dns.Msg
 	if err := msg.Unpack(packet); err != nil {
 		return
@@ -173,7 +189,13 @@ func (a *accumulator) absorb(packet []byte) {
 			}
 		case *dns.SRV:
 			if !a.full() {
-				a.srv[strings.ToLower(rec.Hdr.Name)] = rec
+				name := strings.ToLower(rec.Hdr.Name)
+				a.srv[name] = rec
+				// Remembered per record so a candidate can be required to sit
+				// on the same link as whoever advertised it.
+				if source.IsValid() {
+					a.source[name] = source
+				}
 			}
 		case *dns.TXT:
 			if !a.full() {
@@ -196,6 +218,7 @@ func (a *accumulator) forget(rr dns.RR) {
 	delete(a.instances, name)
 	delete(a.srv, name)
 	delete(a.txt, name)
+	delete(a.source, name)
 }
 
 // full reports whether the accumulator has taken all it will hold. Records past
@@ -243,6 +266,7 @@ func (a *accumulator) peers() []Peer {
 		peer.Hostname = strings.TrimSuffix(srv.Target, ".")
 		peer.Port = int(srv.Port)
 		peer.Addrs = a.addrs[strings.ToLower(srv.Target)]
+		peer.Source = a.source[name]
 		if peer.Scheme == "" {
 			peer.Scheme = "http"
 		}
