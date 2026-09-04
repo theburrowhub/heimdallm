@@ -39,12 +39,89 @@ type clusterState struct {
 	selfName string
 	role     string
 
+	// takeoverAfterFailedProbes is how many consecutive failed probes the hub
+	// requires before it stops deferring to a routed owner. See
+	// config.ClusterConfig.TakeoverAfterFailedProbes.
+	takeoverAfterFailedProbes int
+
 	// store and broker are retained (rather than only used inline at
 	// construction) so Update can lazily build a prober if this daemon is
 	// promoted from worker/standalone to hub by a config reload instead of a
 	// restart. May be nil in tests.
 	store  instances.StateStore
 	broker *sse.Broker
+
+	// takeovers dedups the takeover announcement. Outside cs.mu on purpose:
+	// it is written from the dispatch path while cs.mu is held for reading,
+	// and giving it its own lock keeps that from becoming a lock-ordering
+	// question every future caller has to think about.
+	takeovers takeoverLedger
+}
+
+// ownerVerdict is what this daemon must do with one repo's autonomous work.
+//
+// The type exists because the previous boolean ("is the owner healthy?")
+// collapsed two very different situations into one answer. An owner that has
+// stopped working must be taken over or its repos go unreviewed; an owner that
+// is merely unreachable *from here* is still polling GitHub and reviewing its
+// own repos, so taking over publishes a second, independently-reasoned review
+// on the same PR. See theburrowhub/heimdallm#765.
+type ownerVerdict int
+
+const (
+	// verdictActLocally: nothing is routed away from this daemon — no owner is
+	// configured, the owner is this daemon, or the owner was never registered
+	// (a routing typo, where acting locally beats orphaning the repo).
+	verdictActLocally ownerVerdict = iota
+	// verdictDispatch: the owner is another instance we can currently reach.
+	verdictDispatch
+	// verdictDeferToOwner: the owner is another instance we cannot reach but
+	// have not yet given up on. The work is left to it.
+	verdictDeferToOwner
+	// verdictTakeOver: the owner is another instance we have given up on after
+	// takeoverAfterFailedProbes consecutive failed probes. This daemon does its
+	// work, and says so loudly, because it may be duplicating it.
+	verdictTakeOver
+)
+
+// takeoverLedger remembers which notices have already been reported for each
+// instance, so a poll loop reports a condition once instead of flooding the log
+// and the SSE stream with the same line every cycle, for every routed repo, for
+// as long as the outage lasts. Cleared per instance the moment that instance
+// answers a health probe again, so a second outage is reported as a new event
+// rather than swallowed as a repeat.
+//
+// subject is "<notice>:<repo>" so the takeover warning and the quieter defer
+// notice are deduped independently while recovery clears both at once.
+type takeoverLedger struct {
+	mu        sync.Mutex
+	announced map[string]map[string]bool // instance id -> subject -> announced
+}
+
+// claim reports whether this is the first notice for (instanceID, subject).
+func (l *takeoverLedger) claim(instanceID, subject string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.announced == nil {
+		l.announced = map[string]map[string]bool{}
+	}
+	subjects := l.announced[instanceID]
+	if subjects == nil {
+		subjects = map[string]bool{}
+		l.announced[instanceID] = subjects
+	}
+	if subjects[subject] {
+		return false
+	}
+	subjects[subject] = true
+	return true
+}
+
+// forget drops every notice recorded against instanceID.
+func (l *takeoverLedger) forget(instanceID string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.announced, instanceID)
 }
 
 // ensureSelfInstance gives a hub an entry for itself when the operator has not
@@ -88,12 +165,13 @@ func ensureSelfInstance(cfg *config.Config, dataDir string) {
 func newClusterState(cfg *config.Config, st *store.Store, broker *sse.Broker) *clusterState {
 	registry := instances.NewRegistry(cfg)
 	cs := &clusterState{
-		registry: registry,
-		router:   instances.NewRouter(registry, cfg),
-		selfID:   cfg.Cluster.InstanceID,
-		selfName: resolvedSelfName(cfg),
-		role:     cfg.Cluster.Role,
-		broker:   broker,
+		registry:                  registry,
+		router:                    instances.NewRouter(registry, cfg),
+		selfID:                    cfg.Cluster.InstanceID,
+		selfName:                  resolvedSelfName(cfg),
+		role:                      cfg.Cluster.Role,
+		takeoverAfterFailedProbes: clusterTakeoverThreshold(cfg),
+		broker:                    broker,
 	}
 	if st != nil {
 		cs.store = st
@@ -129,6 +207,7 @@ func (cs *clusterState) Update(cfg *config.Config) (proberBuilt bool) {
 	cs.selfID = cfg.Cluster.InstanceID
 	cs.selfName = resolvedSelfName(cfg)
 	cs.role = cfg.Cluster.Role
+	cs.takeoverAfterFailedProbes = clusterTakeoverThreshold(cfg)
 	router := cs.router
 	if cs.prober == nil && cfg.IsHub() {
 		cs.prober = instances.NewProber(
@@ -150,104 +229,230 @@ func (cs *clusterState) Update(cfg *config.Config) (proberBuilt bool) {
 	return proberBuilt
 }
 
-// resolveHealthyOwner returns the instance repo is routed to, when that
-// instance is registered, is not this daemon itself, and the prober currently
-// reports it reachable. ok=false covers every case where handing off to it
-// would be unsafe: no configured owner, an owner that resolves to self
-// (nothing to hand off — Owns(repo) would already be true), an owner that was
-// never registered, or one currently reported unreachable.
+// ownerVerdictFor resolves what this daemon must do with repo's autonomous
+// work, and is the single place the "unreachable vs not working" distinction
+// is made.
 //
-// Fail-open, by design, in two cases: a nil prober (this daemon is not a
-// hub — only a hub ever builds one, see newClusterState/Update) skips health
-// verification entirely, and a non-nil prober that has not probed owner yet
-// treats it as healthy too (Prober.HealthyIDs' own contract — refusing an
-// unprobed instance would stall every dispatch for the first probe interval
-// after a promotion or restart). Both converge on the same safety net:
-// dispatch()'s caller falls back to handling the work locally the moment the
-// RPC itself fails, so an owner that turns out to be genuinely unreachable
-// never loses the work — it costs one extra round trip, not a dropped review.
-func (cs *clusterState) resolveHealthyOwner(repo string) (inst instances.Instance, ok bool) {
+// The four outcomes are documented on ownerVerdict. Two of them are the old
+// fail-open behaviour under new names: verdictActLocally covers no configured
+// owner, an owner that resolves to this daemon (Owns(repo) would already be
+// true) and an owner that was never registered. verdictDispatch is the happy
+// path.
+//
+// The split that matters is between the other two. Before #765 an owner the
+// prober could not reach was treated as not working, and this daemon did its
+// work — which is correct for a machine that died and wrong for one that only
+// lost inbound reachability, because that machine is still polling GitHub and
+// reviewing the very repos it owns. Two daemons then reviewed the same PR and
+// published two independently-reasoned verdicts, with nothing to dedupe them.
+//
+// So an unreachable owner now yields verdictDeferToOwner until it has failed
+// takeoverAfterFailedProbes consecutive probes, and verdictTakeOver after
+// that. Deferring is not a hope that the work happens: the owner's own poll
+// loop covers its repos without any help from the hub, so dispatch only ever
+// accelerated work that instance would have found on its own tick.
+//
+// Fail-open in one place still: a nil prober means this daemon is not a hub
+// (only a hub builds one) and has nothing to observe the owner with, so it
+// dispatches and lets the RPC answer the question.
+func (cs *clusterState) ownerVerdictFor(repo string) (instances.Instance, ownerVerdict) {
 	if cs == nil {
-		return instances.Instance{}, false
+		return instances.Instance{}, verdictActLocally
 	}
 	cs.mu.RLock()
 	router, registry, prober := cs.router, cs.registry, cs.prober
+	threshold := cs.takeoverAfterFailedProbes
 	cs.mu.RUnlock()
 	if router == nil || registry == nil {
-		return instances.Instance{}, false
+		return instances.Instance{}, verdictActLocally
 	}
 
 	owner := router.OwnerFor(repo)
 	if owner == "" {
-		return instances.Instance{}, false
+		return instances.Instance{}, verdictActLocally
 	}
 	inst, found := registry.Get(owner)
 	if !found || inst.Self {
-		return instances.Instance{}, false
+		return instances.Instance{}, verdictActLocally
 	}
-	if prober != nil {
-		healthy := false
-		for _, id := range prober.HealthyIDs() {
-			if id == owner {
-				healthy = true
-				break
-			}
-		}
-		if !healthy {
-			return instances.Instance{}, false
+	// A rule can name an instance the operator has disabled, or one whose
+	// token no longer resolves. Such an instance is not running our work and
+	// never will, so deferring to it would orphan the repo — which is the
+	// failure mode dispatch-with-fallback exists to prevent. It is also why
+	// this check cannot be left to the HealthyIDs scan below: an unusable
+	// instance is absent from HealthyIDs *and* is not ConfirmedDown (the
+	// prober has no state for it), which lands on verdictDeferToOwner.
+	if !inst.Usable() {
+		return instances.Instance{}, verdictActLocally
+	}
+	if prober == nil {
+		return inst, verdictDispatch
+	}
+	if prober.ConfirmedDown(owner, threshold) {
+		return inst, verdictTakeOver
+	}
+	for _, id := range prober.HealthyIDs() {
+		if id == owner {
+			// Reachable again: forget the outage so a later one is announced
+			// as a new event instead of being swallowed as a repeat.
+			cs.takeovers.forget(owner)
+			return inst, verdictDispatch
 		}
 	}
-	return inst, true
+	return inst, verdictDeferToOwner
 }
 
 // dispatch sends a repo's work to the instance the router says owns it,
-// calling do against a client for that instance. It returns handled=true only
-// when the remote accepted the call.
+// calling do against a client for that instance.
 //
-// Every other outcome — no routed owner, the owner is this daemon itself, the
-// owner is not currently healthy, or the remote call errors — returns
-// handled=false so the caller falls back to acting locally. Before dispatch
-// existed, Owns()==false just meant the poller skipped the repo outright
-// (main.go's tier2Adapter did a bare `continue`/`return 0, nil`), so a repo
-// routed to an instance that was down, unreachable or simply never got the
-// dispatch went completely unreviewed with nothing to show for it. Falling
-// back to local handling is what makes routing safe to turn on.
-func (cs *clusterState) dispatch(ctx context.Context, repo string, do func(*instances.Client) error) (handled bool) {
-	inst, ok := cs.resolveHealthyOwner(repo)
-	if !ok {
+// handledElsewhere=true means the caller must NOT act on repo itself, for
+// either of two reasons: the owner accepted the call, or the owner is
+// unreachable from here but not confirmed down, in which case its own poll
+// loop is expected to cover the repo and doing the work here would duplicate
+// it. Only verdictActLocally and verdictTakeOver return false, and those are
+// exactly the cases where nobody else will act.
+//
+// Before dispatch existed, Owns()==false just meant the poller skipped the
+// repo outright (main.go's tier2Adapter did a bare `continue`/`return 0, nil`),
+// so a repo routed to an instance that never got the dispatch went completely
+// unreviewed with nothing to show for it. That safety net is still here — it
+// just no longer fires on the first missed health probe. See
+// theburrowhub/heimdallm#765.
+func (cs *clusterState) dispatch(ctx context.Context, repo, op string, do func(*instances.Client) error) (handledElsewhere bool) {
+	inst, verdict := cs.ownerVerdictFor(repo)
+	if verdict == verdictDispatch {
+		cs.mu.RLock()
+		factory := cs.factory
+		cs.mu.RUnlock()
+		err := do(factory(inst))
+		if err == nil {
+			return true
+		}
+		slog.Warn("cluster: dispatch to owning instance failed",
+			"repo", repo, "operation", op, "instance", inst.ID, "err", err)
+		// A failed RPC is fresher evidence than the last health tick, but it is
+		// no more evidence that the owner stopped *working* than a single
+		// failed probe is: an auth rotation, a full disk or one dropped packet
+		// all produce it. Only the probe history decides.
+		verdict = verdictDeferToOwner
+		if cs.confirmedDown(inst.ID) {
+			verdict = verdictTakeOver
+		}
+	}
+
+	switch verdict {
+	case verdictTakeOver:
+		cs.announceTakeover(repo, op, inst)
+		return false
+	case verdictDeferToOwner:
+		cs.noteDeferral(repo, op, inst)
+		return true
+	default: // verdictActLocally
 		return false
 	}
+}
+
+// confirmedDown reports whether the prober has given up on instanceID. A
+// daemon with no prober (not a hub) never gives up on anyone.
+func (cs *clusterState) confirmedDown(instanceID string) bool {
 	cs.mu.RLock()
-	factory := cs.factory
+	prober, threshold := cs.prober, cs.takeoverAfterFailedProbes
 	cs.mu.RUnlock()
+	return prober != nil && prober.ConfirmedDown(instanceID, threshold)
+}
 
-	if err := do(factory(inst)); err != nil {
-		slog.Warn("cluster: dispatch to owning instance failed; falling back to local review",
-			"repo", repo, "instance", inst.ID, "err", err)
+func (cs *clusterState) takeoverThreshold() int {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.takeoverAfterFailedProbes
+}
+
+func (cs *clusterState) probeFailures(instanceID string) int {
+	cs.mu.RLock()
+	prober := cs.prober
+	cs.mu.RUnlock()
+	if prober == nil {
+		return 0
+	}
+	return prober.State(instanceID).ConsecutiveFailures
+}
+
+// noteDeferral records that this daemon left an unreachable owner's work
+// alone. Reported once per (instance, repo) outage at Info and at Debug
+// thereafter: every poll cycle reaches this branch for every repo routed to the
+// unreachable instance, and an operator needs the fact, not one line per cycle.
+func (cs *clusterState) noteDeferral(repo, op string, inst instances.Instance) {
+	msg := "cluster: owning instance is unreachable but not confirmed down; leaving its work to it"
+	args := []any{
+		"repo", repo, "operation", op, "instance", inst.ID,
+		"failed_probes", cs.probeFailures(inst.ID),
+		"takeover_after_failed_probes", cs.takeoverThreshold(),
+	}
+	if cs.takeovers.claim(inst.ID, "defer:"+repo) {
+		slog.Info(msg, args...)
+		return
+	}
+	slog.Debug(msg, args...)
+}
+
+// announceTakeover reports, once per (instance, repo) outage, that this daemon
+// has started doing another instance's work.
+//
+// This exists because #765 was silent. The operator saw "instance became
+// unreachable", which reads as *that instance is not working* — not as *that
+// instance is working twice*. Neither the WARN nor the SSE event can tell a
+// dead machine from a partitioned one, so the message says what was observed
+// and what it may cost, and points at the setting that most often explains it:
+// a base_url holding an IP that DHCP has since moved.
+func (cs *clusterState) announceTakeover(repo, op string, inst instances.Instance) {
+	if !cs.takeovers.claim(inst.ID, "takeover:"+repo) {
+		return
+	}
+	failures := cs.probeFailures(inst.ID)
+	slog.Warn("cluster: taking over work from an instance that has stopped answering health probes; "+
+		"if it is alive and merely unreachable from here it is still reviewing this repository, so this work is being duplicated "+
+		"(the publish-boundary check should stop a second review from being posted, but the AI spend is already incurred)",
+		"repo", repo, "operation", op, "instance", inst.ID, "instance_name", inst.Name,
+		"failed_probes", failures, "base_url_hint", "cluster.instances."+inst.ID+".base_url")
+	if cs.broker == nil {
+		return
+	}
+	cs.broker.Publish(sse.Event{
+		Type: sse.EventInstanceTakeover,
+		Data: sseData(map[string]any{
+			"instance_id":   inst.ID,
+			"instance_name": inst.Name,
+			"repo":          repo,
+			"operation":     op,
+			"failed_probes": failures,
+		}),
+	})
+}
+
+// OwnerCanHandle reports whether repo is routed to another instance this daemon
+// should leave alone with work it cannot dispatch as a single RPC call — issue
+// triage, whose individual items are not known until deep inside per-repo
+// processing, unlike a PR review which has one PR id to hand off.
+//
+// false means either there is no routing away from this daemon, or its owner is
+// unregistered or confirmed down — in all of those cases the caller must act
+// locally instead of leaving the repo's issues unattended. An owner that is
+// merely unreachable returns true, for the reason spelled out on
+// ownerVerdictFor: it is still triaging its own repos.
+func (cs *clusterState) OwnerCanHandle(repo string) bool {
+	inst, verdict := cs.ownerVerdictFor(repo)
+	if verdict == verdictTakeOver {
+		cs.announceTakeover(repo, "issue_triage", inst)
 		return false
 	}
-	return true
+	return verdict == verdictDispatch || verdict == verdictDeferToOwner
 }
 
-// OwnerCanHandle reports whether repo is routed to another instance healthy
-// enough to be trusted with work this daemon cannot dispatch as a single RPC
-// call — issue triage, whose individual items are not known until deep inside
-// per-repo processing, unlike a PR review which has one PR id to hand off.
-//
-// false means either there is no routing away from this daemon, or the routed
-// owner is unregistered/unreachable — in both of those cases the caller must
-// still act locally instead of leaving the repo's issues unattended, exactly
-// as DispatchPRReview falls back for reviews.
-func (cs *clusterState) OwnerCanHandle(repo string) bool {
-	_, ok := cs.resolveHealthyOwner(repo)
-	return ok
-}
-
-// DispatchPRReview sends a PR review to the instance repo is routed to, if
-// that instance is registered, not self, and currently healthy. handled=false
-// means the caller must review the PR locally instead of dropping it.
+// DispatchPRReview hands a PR review to the instance repo is routed to.
+// true means the caller must not review the PR locally — see dispatch for the
+// two ways that happens.
 func (cs *clusterState) DispatchPRReview(ctx context.Context, repo string, prID int64, prURL string) bool {
-	return cs.dispatch(ctx, repo, func(client *instances.Client) error {
+	return cs.dispatch(ctx, repo, "review", func(client *instances.Client) error {
 		// An instance that does not own the repo has never seen the PR, so it
 		// has to adopt it before it can review it. Ignoring an add failure is
 		// deliberate: the PR may already be known there, in which case the
@@ -261,10 +466,10 @@ func (cs *clusterState) DispatchPRReview(ctx context.Context, repo string, prID 
 	})
 }
 
-// DispatchIssueReview sends issue-triage work to the instance repo is routed
-// to, if healthy. handled=false means the caller must process it locally.
+// DispatchIssueReview hands issue-triage work to the instance repo is routed
+// to. true means the caller must not process it locally.
 func (cs *clusterState) DispatchIssueReview(ctx context.Context, repo string, issueID int64) bool {
-	return cs.dispatch(ctx, repo, func(client *instances.Client) error {
+	return cs.dispatch(ctx, repo, "issue_review", func(client *instances.Client) error {
 		return client.TriggerIssueReview(ctx, issueID)
 	})
 }
@@ -407,6 +612,17 @@ func (e *clusterEvents) InstanceStateChanged(s instances.State) {
 			"error":         s.LastError,
 		}),
 	})
+}
+
+// clusterTakeoverThreshold resolves how many consecutive failed probes must
+// pass before the hub does a routed owner's work. Mirrors clusterProbeInterval:
+// an unset or nonsensical value falls back to the documented default rather
+// than to zero, which a bare >= comparison would read as "take over now".
+func clusterTakeoverThreshold(cfg *config.Config) int {
+	if cfg == nil || cfg.Cluster.TakeoverAfterFailedProbes == nil || *cfg.Cluster.TakeoverAfterFailedProbes < 1 {
+		return config.DefaultTakeoverAfterFailedProbes
+	}
+	return *cfg.Cluster.TakeoverAfterFailedProbes
 }
 
 func clusterProbeInterval(cfg *config.Config) time.Duration {

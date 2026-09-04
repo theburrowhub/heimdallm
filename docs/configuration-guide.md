@@ -1506,6 +1506,9 @@ base_url  = "http://10.0.0.11:7842"
 token_env = "HEIMDALLM_SRV_A_TOKEN"
 enabled   = true                  # omit or true to participate
 
+takeover_after_failed_probes = 3   # consecutive failed probes before the hub
+                                   # does an unreachable owner's work itself
+
 [cluster.routing]
 mode             = "assignment"   # assignment (default) | dispatch
 round_robin_pool = ["hub-1", "srv-a"]   # empty = every enabled instance
@@ -1521,7 +1524,13 @@ theburrowhub = "srv-a"
 Environment equivalents, for containers that should not carry a per-instance
 `config.toml`: `HEIMDALLM_CLUSTER_ROLE`, `HEIMDALLM_INSTANCE_ID`,
 `HEIMDALLM_INSTANCE_NAME`, `HEIMDALLM_CLUSTER_DEFAULT_INSTANCE`,
-`HEIMDALLM_CLUSTER_PROBE_INTERVAL`.
+`HEIMDALLM_CLUSTER_PROBE_INTERVAL`,
+`HEIMDALLM_CLUSTER_TAKEOVER_AFTER_FAILED_PROBES`.
+
+> **`base_url` on a DHCP host.** If an instance's address is not static, an
+> address change makes that instance permanently unreachable from the hub while
+> it keeps working perfectly — see §18.3.1. Give clustered hosts a static
+> address or a stable DNS name rather than an IP from a lease.
 
 ### 18.3 Routing modes
 
@@ -1536,6 +1545,33 @@ twice is a dispatch ledger keyed on `(operation, target, head SHA)`. Each
 daemon's own `reviews_in_flight` claims remain per-daemon. If you need two
 instances acting on the same repository concurrently, this feature does not
 provide that guarantee.
+
+### 18.3.1 When an instance is unreachable but still working
+
+The hub decides ownership from its routing rules, and reachability from its
+health probe. Those are separate facts, and a network partition is where they
+come apart: an instance whose address changed, whose VPN dropped, or that a
+firewall rule now blocks is unreachable *from the hub* while still reaching
+GitHub and reviewing every repository it owns.
+
+Two rules keep that from producing two reviews on one pull request:
+
+| Rule | What it does |
+|---|---|
+| `takeover_after_failed_probes` (default 3) | The hub leaves an unreachable owner's work alone until that owner has failed this many consecutive probes. Below the threshold it defers — the owner's own poll loop covers its repositories, so nothing is lost. Raise it to defer for longer; a very large value means "never take over, alert me instead". |
+| The publish-boundary check | Immediately before submitting a review, a daemon asks GitHub whether a review carrying the Heimdallm footer is already anchored to the same commit. If one is, it does not publish a second, and records the existing review against its own local row. This is the only check that survives a partition, because GitHub is the one place both instances can still reach. |
+
+When the hub does take over, it logs a `WARN` naming the repository and the
+instance, and emits an `instance_takeover` SSE event, once per repository per
+outage. Treat that event as *"this repository may be being reviewed twice"*,
+not merely as *"that instance is down"* — the underlying cause is very often a
+stale `base_url`.
+
+What is still not guaranteed: two daemons that start reviewing the same commit
+within the same few seconds each spend their own LLM budget before either
+reaches the publish boundary. Only one review is published, but the second
+review's cost is already incurred. The ownership partition, not this check, is
+what keeps that from happening routinely.
 
 ### 18.4 What propagates, and what does not
 

@@ -48,6 +48,13 @@ const (
 	// "we already covered this commit" from "we covered an earlier
 	// commit and nobody asked us to re-review yet".
 	SkipReasonNoReReviewRequest SkipReason = "no_rereview_request"
+
+	// SkipReasonPeerPublished means another Heimdallm instance had already
+	// published a review for this exact commit by the time this one reached
+	// the publish boundary. Only reachable in a cluster, and only when the
+	// hub took over a repo whose routed owner was unreachable rather than
+	// dead. See theburrowhub/heimdallm#765.
+	SkipReasonPeerPublished SkipReason = "peer_published"
 )
 
 // PRGate is the minimal PR view the guard evaluator needs. Callers synthesize

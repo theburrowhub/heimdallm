@@ -943,6 +943,23 @@ func (d *dispatchRemote) addPRCount() int {
 // health rather than the unprobed fail-open default.
 func dispatchHub(t *testing.T, remote *dispatchRemote) *clusterState {
 	t.Helper()
+	return dispatchHubWithBroker(t, remote, nil)
+}
+
+// probeUntilConfirmedDown runs enough probe cycles for the prober to give up
+// on the remote, i.e. to reach cluster.takeover_after_failed_probes.
+func probeUntilConfirmedDown(t *testing.T, cs *clusterState) {
+	t.Helper()
+	for i := 0; i < cs.takeoverThreshold(); i++ {
+		cs.Prober().ProbeAll(context.Background())
+	}
+	if !cs.confirmedDown("srv-a") {
+		t.Fatalf("prober still trusts srv-a after %d failed probes", cs.takeoverThreshold())
+	}
+}
+
+func dispatchHubWithBroker(t *testing.T, remote *dispatchRemote, broker *sse.Broker) *clusterState {
+	t.Helper()
 	cfg := &config.Config{}
 	cfg.AI.Primary = "claude"
 	cfg.Cluster.Role = config.RoleHub
@@ -956,7 +973,7 @@ func dispatchHub(t *testing.T, remote *dispatchRemote) *clusterState {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("config invalid: %v", err)
 	}
-	cs := newClusterState(cfg, nil, nil)
+	cs := newClusterState(cfg, nil, broker)
 	cs.Prober().ProbeAll(context.Background()) // establish real health, not the unprobed fail-open default
 	return cs
 }
@@ -980,32 +997,220 @@ func TestClusterStateDispatchPRReviewToHealthyOwner(t *testing.T) {
 // The whole point of dispatch-with-fallback: an owner that is down must never
 // make a PR go unreviewed. This is the exact gap that let overmind-swarm PRs
 // disappear from the queue entirely once routing engaged.
-func TestClusterStateDispatchPRReviewFallsBackWhenOwnerUnhealthy(t *testing.T) {
+//
+// #765 narrowed *when* it fires, not whether: the takeover now waits for
+// cluster.takeover_after_failed_probes consecutive failures instead of acting
+// on the first one. See TestClusterStateDispatchPRReviewDefersToAnOwnerNotYetConfirmedDown
+// for the case that used to duplicate reviews.
+func TestClusterStateDispatchPRReviewFallsBackWhenOwnerConfirmedDown(t *testing.T) {
 	remote := newDispatchRemote(t)
 	cs := dispatchHub(t, remote)
 	remote.setHealthy(false)
-	cs.Prober().ProbeAll(context.Background()) // observe the outage
+	probeUntilConfirmedDown(t, cs)
 
 	handled := cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "")
 	if handled {
-		t.Error("DispatchPRReview() = true, want false when the owner is unreachable")
+		t.Error("DispatchPRReview() = true, want false once the owner is confirmed down")
 	}
 	if remote.reviewCount() != 0 {
 		t.Errorf("review calls = %d, want 0 on an unhealthy owner", remote.reviewCount())
 	}
 }
 
+// The #765 regression test. One failed probe means "I cannot reach it", and a
+// partitioned owner is still polling GitHub and reviewing the repos it owns —
+// so reviewing here as well publishes two independently-reasoned verdicts on
+// the same PR. The hub must leave the work alone until it has real grounds to
+// believe the owner stopped working.
+func TestClusterStateDispatchPRReviewDefersToAnOwnerNotYetConfirmedDown(t *testing.T) {
+	remote := newDispatchRemote(t)
+	cs := dispatchHub(t, remote)
+	remote.setHealthy(false)
+	cs.Prober().ProbeAll(context.Background()) // exactly one failed probe
+
+	if cs.confirmedDown("srv-a") {
+		t.Fatal("one failed probe must not confirm an instance down")
+	}
+	if handled := cs.DispatchPRReview(context.Background(), "theirs/repo", 42, ""); !handled {
+		t.Error("DispatchPRReview() = false, want true — a single missed probe must not trigger a local takeover")
+	}
+}
+
 // A nominally healthy owner whose review call itself fails (transient error,
-// auth rotated, disk full) must also fall back rather than silently drop the
-// PR — the same guarantee, one layer deeper.
-func TestClusterStateDispatchPRReviewFallsBackOnRemoteError(t *testing.T) {
+// auth rotated, disk full) must not be taken over on the strength of that one
+// call: the RPC failing says nothing about whether the owner is still
+// reviewing its own repos. It falls back only once the probe history agrees
+// the owner is gone.
+func TestClusterStateDispatchPRReviewDefersOnRemoteError(t *testing.T) {
 	remote := newDispatchRemote(t)
 	cs := dispatchHub(t, remote)
 	remote.setFailNext(true)
 
 	handled := cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "")
+	if !handled {
+		t.Error("DispatchPRReview() = false, want true — a failed RPC to a healthy owner is not grounds to duplicate its work")
+	}
+}
+
+func TestClusterStateDispatchPRReviewFallsBackOnRemoteErrorFromADeadOwner(t *testing.T) {
+	remote := newDispatchRemote(t)
+	cs := dispatchHub(t, remote)
+	remote.setFailNext(true)
+	remote.setHealthy(false)
+	probeUntilConfirmedDown(t, cs)
+
+	handled := cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "")
 	if handled {
-		t.Error("DispatchPRReview() = true, want false when the remote call itself fails")
+		t.Error("DispatchPRReview() = true, want false when the owner is confirmed down and the call fails")
+	}
+}
+
+// A takeover is the operator's only signal that the hub may be duplicating a
+// partitioned instance's reviews, so it must reach the SSE stream — #765 was
+// invisible because only "instance became unreachable" was ever reported, and
+// that reads as "not working", not "working twice".
+func TestClusterStateAnnouncesATakeoverOnce(t *testing.T) {
+	broker := sse.NewBroker()
+	broker.Start()
+	defer broker.Stop()
+	sub := broker.Subscribe()
+	if sub == nil {
+		t.Fatal("broker subscribe returned nil")
+	}
+
+	remote := newDispatchRemote(t)
+	cs := dispatchHubWithBroker(t, remote, broker)
+	remote.setHealthy(false)
+	probeUntilConfirmedDown(t, cs)
+
+	// The prober shares this broker, so instance_down events land here too.
+	// Count only the takeovers.
+	drainTakeovers := func(wait time.Duration) int {
+		n := 0
+		deadline := time.After(wait)
+		for {
+			select {
+			case ev := <-sub:
+				if ev.Type == sse.EventInstanceTakeover {
+					n++
+				}
+			case <-deadline:
+				return n
+			}
+		}
+	}
+	drainTakeovers(300 * time.Millisecond) // discard the probe transitions
+
+	cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "")
+	if got := drainTakeovers(2 * time.Second); got != 1 {
+		t.Fatalf("instance_takeover events = %d, want 1 when the hub takes over a routed repo", got)
+	}
+
+	// Every poll cycle hits this path while the outage lasts; only the first
+	// one may be reported.
+	cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "")
+	if got := drainTakeovers(300 * time.Millisecond); got != 0 {
+		t.Errorf("instance_takeover events on the second cycle = %d, want 0", got)
+	}
+}
+
+// A recovered instance clears the ledger, so a second outage is reported as a
+// new event instead of being swallowed as a repeat of the first.
+func TestClusterStateReannouncesATakeoverAfterRecovery(t *testing.T) {
+	remote := newDispatchRemote(t)
+	cs := dispatchHub(t, remote)
+	remote.setHealthy(false)
+	probeUntilConfirmedDown(t, cs)
+	cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "")
+	if cs.takeovers.claim("srv-a", "takeover:theirs/repo") {
+		t.Fatal("takeover was not recorded as announced")
+	}
+
+	remote.setHealthy(true)
+	cs.Prober().ProbeAll(context.Background())
+	cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "") // reachable again
+
+	if !cs.takeovers.claim("srv-a", "takeover:theirs/repo") {
+		t.Error("recovery did not clear the takeover ledger; a second outage would go unreported")
+	}
+}
+
+// A routing rule naming a disabled instance (or one whose token stopped
+// resolving) must fall straight through to local handling. Deferring to it
+// would leave the repo unreviewed forever: it is absent from HealthyIDs and
+// the prober has no state for it, so it is never "confirmed down" either.
+func TestClusterStateActsLocallyWhenTheRoutedOwnerIsDisabled(t *testing.T) {
+	remote := newDispatchRemote(t)
+	cs := dispatchHub(t, remote)
+
+	cfg := &config.Config{}
+	cfg.AI.Primary = "claude"
+	cfg.Cluster.Role = config.RoleHub
+	cfg.Cluster.InstanceID = "hub-1"
+	disabled := false
+	cfg.Cluster.Instances = map[string]config.InstanceConfig{
+		"hub-1": {Name: "hub", BaseURL: "http://127.0.0.1:7842", Token: "t"},
+		"srv-a": {Name: "srv-a", BaseURL: remote.URL, Token: "secret", Enabled: &disabled},
+	}
+	cfg.Cluster.Routing = config.RoutingConfig{Orgs: map[string]string{"theirs": "srv-a"}}
+	cfg.GitHub.PollInterval = "5m"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config invalid: %v", err)
+	}
+	cs.Update(cfg)
+
+	if handled := cs.DispatchPRReview(context.Background(), "theirs/repo", 42, ""); handled {
+		t.Error("DispatchPRReview() = true, want false — a disabled owner is not going to review anything")
+	}
+	if !tier2ShouldProcessLocally(cs.Owns, cs.OwnerCanHandle, "theirs/repo") {
+		t.Error("issue triage deferred to a disabled instance; the repo would go unattended")
+	}
+}
+
+func TestClusterStateOwnerCanHandleDefersWhileMerelyUnreachable(t *testing.T) {
+	remote := newDispatchRemote(t)
+	cs := dispatchHub(t, remote)
+	remote.setHealthy(false)
+	cs.Prober().ProbeAll(context.Background())
+
+	if !cs.OwnerCanHandle("theirs/repo") {
+		t.Error("OwnerCanHandle() = false, want true — issue triage must not be duplicated on one missed probe")
+	}
+}
+
+func TestClusterStateOwnerCanHandleFalseOnceConfirmedDown(t *testing.T) {
+	remote := newDispatchRemote(t)
+	cs := dispatchHub(t, remote)
+	remote.setHealthy(false)
+	probeUntilConfirmedDown(t, cs)
+
+	if cs.OwnerCanHandle("theirs/repo") {
+		t.Error("OwnerCanHandle() = true, want false — a dead owner's issues must not go unattended")
+	}
+}
+
+func TestClusterTakeoverThresholdDefaults(t *testing.T) {
+	if got := clusterTakeoverThreshold(nil); got != config.DefaultTakeoverAfterFailedProbes {
+		t.Errorf("clusterTakeoverThreshold(nil) = %d, want %d", got, config.DefaultTakeoverAfterFailedProbes)
+	}
+	cfg := &config.Config{}
+	if got := clusterTakeoverThreshold(cfg); got != config.DefaultTakeoverAfterFailedProbes {
+		t.Errorf("unset threshold = %d, want the default %d", got, config.DefaultTakeoverAfterFailedProbes)
+	}
+	// A 0 or negative that slipped past validation must still resolve to the
+	// default rather than "take over on the first missed probe" (#765).
+	for _, bad := range []int{0, -3} {
+		n := bad
+		cfg.Cluster.TakeoverAfterFailedProbes = &n
+		if got := clusterTakeoverThreshold(cfg); got != config.DefaultTakeoverAfterFailedProbes {
+			t.Errorf("threshold %d resolved to %d, want the default %d",
+				bad, got, config.DefaultTakeoverAfterFailedProbes)
+		}
+	}
+	seven := 7
+	cfg.Cluster.TakeoverAfterFailedProbes = &seven
+	if got := clusterTakeoverThreshold(cfg); got != 7 {
+		t.Errorf("configured threshold = %d, want 7", got)
 	}
 }
 
@@ -1041,6 +1246,10 @@ func TestClusterStateDispatchNoOpWhenNotRouted(t *testing.T) {
 // id to dispatch at the point it decides whether to skip a repo. It must
 // agree with DispatchPRReview's notion of "safe to hand off" so a repo is
 // never left completely unattended just because its routed owner is down.
+//
+// Since #765 "down" means confirmed down, not merely unreachable — see
+// TestClusterStateOwnerCanHandleDefersWhileMerelyUnreachable for the
+// distinction and why triaging locally on one missed probe was wrong.
 func TestClusterStateOwnerCanHandleReflectsHealth(t *testing.T) {
 	remote := newDispatchRemote(t)
 	cs := dispatchHub(t, remote)
@@ -1053,9 +1262,9 @@ func TestClusterStateOwnerCanHandleReflectsHealth(t *testing.T) {
 	}
 
 	remote.setHealthy(false)
-	cs.Prober().ProbeAll(context.Background())
+	probeUntilConfirmedDown(t, cs)
 	if cs.OwnerCanHandle("theirs/repo") {
-		t.Error("OwnerCanHandle() = true for an unreachable owner")
+		t.Error("OwnerCanHandle() = true for an owner confirmed down")
 	}
 }
 

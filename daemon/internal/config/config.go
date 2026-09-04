@@ -1159,6 +1159,17 @@ func (c *Config) applyEnvOverrides() {
 	if v := os.Getenv("HEIMDALLM_CLUSTER_PROBE_INTERVAL"); v != "" {
 		c.Cluster.ProbeInterval = v
 	}
+	if v := os.Getenv("HEIMDALLM_CLUSTER_TAKEOVER_AFTER_FAILED_PROBES"); v != "" {
+		// An unparseable value is ignored rather than defaulted to 0, which a
+		// bare >= comparison would read as "take over on the first missed
+		// probe" — the #765 behaviour this setting exists to prevent.
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
+			c.Cluster.TakeoverAfterFailedProbes = &n
+		} else {
+			slog.Warn("config: ignoring HEIMDALLM_CLUSTER_TAKEOVER_AFTER_FAILED_PROBES, want a positive integer",
+				"value", v)
+		}
+	}
 	if v := os.Getenv("HEIMDALLM_POLL_INTERVAL"); v != "" {
 		c.GitHub.PollInterval = v
 	}

@@ -490,3 +490,81 @@ func TestProberSelfRowCarriesVersionAndRole(t *testing.T) {
 		t.Errorf("RemoteInstanceID = %q, want the hub's own id", self.RemoteInstanceID)
 	}
 }
+
+// ConfirmedDown is the #765 gate: it must be strictly harder to satisfy than
+// !Reachable, because "I cannot reach it" and "it stopped working" are only
+// the same statement outside a network partition.
+func TestProberConfirmedDownRequiresARunOfFailures(t *testing.T) {
+	a := newToggleDaemon(t, "a")
+	p := proberFixture(t, "hub", map[string]*toggleDaemon{"a": a}, nil, nil)
+	ctx := context.Background()
+
+	// Never probed: not confirmed down, matching HealthyIDs. Refusing to trust
+	// an unprobed instance would stall every decision after a hub restart.
+	if p.ConfirmedDown("a", 3) {
+		t.Error("ConfirmedDown() = true before any probe, want false")
+	}
+
+	a.setDown(true)
+	for i := 1; i <= 2; i++ {
+		p.ProbeAll(ctx)
+		if p.ConfirmedDown("a", 3) {
+			t.Fatalf("ConfirmedDown() = true after %d of 3 failures, want false", i)
+		}
+		if containsID(p.HealthyIDs(), "a") {
+			t.Fatalf("HealthyIDs() still lists a after %d failures — the two must differ", i)
+		}
+	}
+	p.ProbeAll(ctx)
+	if !p.ConfirmedDown("a", 3) {
+		t.Error("ConfirmedDown() = false after 3 consecutive failures, want true")
+	}
+}
+
+func TestProberConfirmedDownResetsOnRecovery(t *testing.T) {
+	a := newToggleDaemon(t, "a")
+	p := proberFixture(t, "hub", map[string]*toggleDaemon{"a": a}, nil, nil)
+	ctx := context.Background()
+
+	a.setDown(true)
+	for i := 0; i < 3; i++ {
+		p.ProbeAll(ctx)
+	}
+	if !p.ConfirmedDown("a", 3) {
+		t.Fatal("precondition: a should be confirmed down")
+	}
+
+	a.setDown(false)
+	p.ProbeAll(ctx)
+	if p.ConfirmedDown("a", 3) {
+		t.Error("ConfirmedDown() = true after a successful probe, want false")
+	}
+}
+
+func TestProberConfirmedDownClampsAThresholdBelowOne(t *testing.T) {
+	// A zero from a test double or a future caller must not silently mean
+	// "give up on the first missed probe" — that is exactly #765.
+	a := newToggleDaemon(t, "a")
+	p := proberFixture(t, "hub", map[string]*toggleDaemon{"a": a}, nil, nil)
+	if p.ConfirmedDown("a", 0) {
+		t.Error("ConfirmedDown(0) = true before any probe, want false")
+	}
+	a.setDown(true)
+	p.ProbeAll(context.Background())
+	if !p.ConfirmedDown("a", 0) {
+		t.Error("ConfirmedDown(0) = false after one failure, want true (clamped to 1)")
+	}
+	if !p.ConfirmedDown("a", -5) {
+		t.Error("ConfirmedDown(-5) = false after one failure, want true (clamped to 1)")
+	}
+}
+
+// The hub never probes itself over the network, so it must never be able to
+// conclude it is down and start deferring its own repos to nobody.
+func TestProberConfirmedDownNeverFiresForSelf(t *testing.T) {
+	p := proberFixture(t, "hub", nil, nil, nil)
+	p.ProbeAll(context.Background())
+	if p.ConfirmedDown("hub", 1) {
+		t.Error("ConfirmedDown(self) = true, want false")
+	}
+}

@@ -10,13 +10,20 @@ import (
 
 // PRReview models a single entry returned by
 // GET /repos/{owner}/{repo}/pulls/{n}/reviews. Only the fields the
-// review-state vigilance flow needs (#482) are unmarshalled — the API
-// payload also includes commit_id, html_url, etc., which we ignore.
+// review-state vigilance flow (#482) and the cross-instance duplicate guard
+// (#765) need are unmarshalled — the API payload also includes html_url,
+// author_association, etc., which we ignore.
 type PRReview struct {
-	ID          int64     `json:"id"`
-	User        User      `json:"user"`
-	State       string    `json:"state"` // APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED, PENDING
-	Body        string    `json:"body"`
+	ID    int64  `json:"id"`
+	User  User   `json:"user"`
+	State string `json:"state"` // APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED, PENDING
+	Body  string `json:"body"`
+	// CommitID is the commit the review is anchored to. Every review the
+	// daemon publishes goes through SubmitReviewForCommit, so this equals the
+	// HEAD SHA that was analysed — which is what makes it a usable dedup key
+	// for pipeline.PeerPublishedReviewID. Empty on reviews submitted without
+	// an anchor (legacy rows, some third-party bots).
+	CommitID    string    `json:"commit_id"`
 	SubmittedAt time.Time `json:"submitted_at"`
 }
 

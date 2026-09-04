@@ -43,6 +43,13 @@ const (
 // unauthenticated GET /health.
 const DefaultClusterProbeInterval = "30s"
 
+// DefaultTakeoverAfterFailedProbes is how many consecutive failed probes the
+// hub requires before it treats a routed owner as dead. Three probes is 90s at
+// the default interval — long enough to ride out a dropped packet, a daemon
+// restart or a brief DNS blip, short enough that a machine that really died
+// does not hold its repos hostage for long.
+const DefaultTakeoverAfterFailedProbes = 3
+
 // instanceIDPattern constrains instance ids to what is safe to interpolate into
 // a URL path segment (the hub proxies at /instances/{id}/proxy/*) and into a
 // TOML bare key. Deliberately stricter than necessary: no dots, no slashes, no
@@ -75,6 +82,27 @@ type ClusterConfig struct {
 
 	// ProbeInterval is the hub's health-poll cadence for the registry.
 	ProbeInterval string `toml:"probe_interval"`
+
+	// TakeoverAfterFailedProbes is how many consecutive failed health probes
+	// the hub requires before it stops deferring to a routed owner and does
+	// that owner's work itself.
+	//
+	// It exists because "I cannot reach it" and "it is not working" are not the
+	// same statement, and a network partition is exactly the case where they
+	// diverge: the owner keeps reaching GitHub and reviewing its own repos, so
+	// taking over publishes a second review on the same PR
+	// (theburrowhub/heimdallm#765). Raising this trades a longer window of
+	// unreviewed PRs when an instance genuinely dies against a smaller chance
+	// of duplicating the work of one that is merely unreachable; a very large
+	// value is effectively "never take over, alert me instead".
+	//
+	// A pointer, not an int, and the reason is load-bearing: BurntSushi/toml's
+	// isEmpty never treats an int as empty, so a plain int field makes
+	// ClusterConfig non-empty and every single-daemon install starts writing an
+	// inert [cluster] table into its own config.toml — the exact regression
+	// TestClusterSectionOmittedWhenUnused guards. nil means
+	// DefaultTakeoverAfterFailedProbes.
+	TakeoverAfterFailedProbes *int `toml:"takeover_after_failed_probes,omitempty"`
 
 	Instances map[string]InstanceConfig `toml:"instances"` // [cluster.instances.<id>]
 	Routing   RoutingConfig             `toml:"routing"`
@@ -251,6 +279,10 @@ func (c *Config) applyClusterDefaults() {
 	if c.Cluster.ProbeInterval == "" {
 		c.Cluster.ProbeInterval = DefaultClusterProbeInterval
 	}
+	if c.Cluster.TakeoverAfterFailedProbes == nil {
+		n := DefaultTakeoverAfterFailedProbes
+		c.Cluster.TakeoverAfterFailedProbes = &n
+	}
 }
 
 // ValidateInstanceID validates an instance id used as a [cluster.instances] key
@@ -310,6 +342,13 @@ func (c *Config) validateCluster() error {
 	}
 	if err := validatePositiveDuration("cluster.probe_interval", cl.ProbeInterval); err != nil {
 		return err
+	}
+	// Unset (nil) means the default. An explicit value below 1 is never what
+	// anyone meant and would read as "take over on the first missed probe" to a
+	// bare >= comparison, reintroducing #765 silently.
+	if n := cl.TakeoverAfterFailedProbes; n != nil && *n < 1 {
+		return fmt.Errorf("config: cluster.takeover_after_failed_probes must be >= 1 (got %d; omit it for the default of %d)",
+			*n, DefaultTakeoverAfterFailedProbes)
 	}
 
 	for id, inst := range cl.Instances {
