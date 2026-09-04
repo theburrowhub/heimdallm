@@ -20,6 +20,7 @@ func TestClusterConfigMap_CarriesRoleAndIdentityBack(t *testing.T) {
 		InstanceName:    "Local hub",
 		DefaultInstance: "hub-1",
 		ProbeInterval:   "30s",
+		Discovery:       config.DiscoveryMDNS,
 		Routing:         config.RoutingConfig{Mode: config.ModeDispatch},
 	})
 
@@ -30,6 +31,7 @@ func TestClusterConfigMap_CarriesRoleAndIdentityBack(t *testing.T) {
 		"default_instance":             "hub-1",
 		"probe_interval":               "30s",
 		"routing_mode":                 "dispatch",
+		"discovery":                    "mdns",
 		"takeover_after_failed_probes": config.DefaultTakeoverAfterFailedProbes,
 	}
 	for key, expected := range want {
@@ -53,6 +55,9 @@ func TestClusterConfigMap_ResolvesEmptyRoleToStandalone(t *testing.T) {
 	}
 	if got["routing_mode"] != config.ModeAssignment {
 		t.Errorf("routing_mode = %v, want %q", got["routing_mode"], config.ModeAssignment)
+	}
+	if got["discovery"] != config.DiscoveryOff {
+		t.Errorf("discovery = %v, want %q", got["discovery"], config.DiscoveryOff)
 	}
 }
 
