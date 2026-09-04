@@ -51,11 +51,10 @@ type clusterState struct {
 	store  instances.StateStore
 	broker *sse.Broker
 
-	// takeovers dedups the takeover announcement. Outside cs.mu on purpose:
-	// it is written from the dispatch path while cs.mu is held for reading,
-	// and giving it its own lock keeps that from becoming a lock-ordering
-	// question every future caller has to think about.
-	takeovers takeoverLedger
+	// notes is what this daemon remembers about each routed instance between
+	// poll cycles: which notices it already reported, and how many dispatches
+	// to it have failed in a row. See instanceNotes for the locking rationale.
+	notes instanceNotes
 }
 
 // ownerVerdict is what this daemon must do with one repo's autonomous work.
@@ -84,31 +83,40 @@ const (
 	verdictTakeOver
 )
 
-// takeoverLedger remembers which notices have already been reported for each
-// instance, so a poll loop reports a condition once instead of flooding the log
-// and the SSE stream with the same line every cycle, for every routed repo, for
-// as long as the outage lasts. Cleared per instance the moment that instance
-// answers a health probe again, so a second outage is reported as a new event
-// rather than swallowed as a repeat.
+// instanceNotes is the hub's short-term memory about each routed instance: the
+// notices already reported for it, and how many times a dispatch to it has
+// failed in a row.
 //
-// subject is "<notice>:<repo>" so the takeover warning and the quieter defer
-// notice are deduped independently while recovery clears both at once.
-type takeoverLedger struct {
+// Both are keyed by instance first so one call wipes everything about an
+// instance that recovered or was removed from the config — the same pruning
+// Prober.Update does for its own states.
+//
+// Its own mutex rather than cs.mu: every caller here also reads cs.mu (through
+// probeFailures / takeoverThreshold), and one lock covering both would make
+// every future caller reason about ordering. Nothing in this type touches
+// cs.mu, so there is no ordering to get wrong.
+type instanceNotes struct {
 	mu        sync.Mutex
-	announced map[string]map[string]bool // instance id -> subject -> announced
+	announced map[string]map[string]bool // instance id -> subject -> reported
+	failures  map[string]map[string]int  // instance id -> work unit -> consecutive failures
 }
 
 // claim reports whether this is the first notice for (instanceID, subject).
-func (l *takeoverLedger) claim(instanceID, subject string) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.announced == nil {
-		l.announced = map[string]map[string]bool{}
+//
+// subject carries the operation as well as the repo ("takeover:review|o/r"):
+// PR review and issue triage are taken over through different call paths, and
+// a repo-only key let whichever fired first silence the other, so the one
+// reported operation was whichever won the race.
+func (n *instanceNotes) claim(instanceID, subject string) bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.announced == nil {
+		n.announced = map[string]map[string]bool{}
 	}
-	subjects := l.announced[instanceID]
+	subjects := n.announced[instanceID]
 	if subjects == nil {
 		subjects = map[string]bool{}
-		l.announced[instanceID] = subjects
+		n.announced[instanceID] = subjects
 	}
 	if subjects[subject] {
 		return false
@@ -117,12 +125,81 @@ func (l *takeoverLedger) claim(instanceID, subject string) bool {
 	return true
 }
 
-// forget drops every notice recorded against instanceID.
-func (l *takeoverLedger) forget(instanceID string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	delete(l.announced, instanceID)
+// recordFailure increments the consecutive-failure count for one work unit and
+// returns the new total.
+func (n *instanceNotes) recordFailure(instanceID, unit string) int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.failures == nil {
+		n.failures = map[string]map[string]int{}
+	}
+	units := n.failures[instanceID]
+	if units == nil {
+		units = map[string]int{}
+		n.failures[instanceID] = units
+	}
+	units[unit]++
+	return units[unit]
 }
+
+// clearFailures resets one work unit's count after a dispatch succeeds. The
+// count has to be *consecutive* failures: a repo that fails once a day is a
+// blip, not an owner that has stopped accepting work.
+func (n *instanceNotes) clearFailures(instanceID, unit string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if units := n.failures[instanceID]; units != nil {
+		delete(units, unit)
+		if len(units) == 0 {
+			delete(n.failures, instanceID)
+		}
+	}
+}
+
+// forget drops every note about instanceID, so a later outage is reported as a
+// new event instead of being swallowed as a repeat of the last one.
+func (n *instanceNotes) forget(instanceID string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	delete(n.announced, instanceID)
+	delete(n.failures, instanceID)
+}
+
+// retain drops notes about instances that are no longer registered. Without it
+// a config reload that removes an instance leaks its entries for the lifetime
+// of the process.
+func (n *instanceNotes) retain(registered map[string]bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for id := range n.announced {
+		if !registered[id] {
+			delete(n.announced, id)
+		}
+	}
+	for id := range n.failures {
+		if !registered[id] {
+			delete(n.failures, id)
+		}
+	}
+}
+
+// takeoverReason says why this daemon stopped deferring to a routed owner.
+// Each has a different cause and a different thing for the operator to check,
+// so they must not share one message.
+type takeoverReason int
+
+const (
+	// takeoverProbesFailed: the owner stopped answering health probes. Usually
+	// a dead machine — or a stale base_url, which looks identical from here.
+	takeoverProbesFailed takeoverReason = iota
+	// takeoverDispatchRejected: the owner answers /health but keeps rejecting
+	// our authenticated calls. It is running, and it is refusing this work.
+	takeoverDispatchRejected
+	// takeoverNoObserver: this daemon is not a hub, so it has no health
+	// history for anyone and cannot claim the owner is fine. Handling the work
+	// locally on a failed RPC is what it always did.
+	takeoverNoObserver
+)
 
 // ensureSelfInstance gives a hub an entry for itself when the operator has not
 // written one.
@@ -183,7 +260,7 @@ func newClusterState(cfg *config.Config, st *store.Store, broker *sse.Broker) *c
 	// effort and a second source of truth for the same question.
 	if cfg.IsHub() {
 		cs.prober = instances.NewProber(
-			registry, clusterProbeInterval(cfg), cs.factory, cs.store, newClusterEvents(broker),
+			registry, clusterProbeInterval(cfg), cs.factory, cs.store, newClusterEvents(broker, cs.notes.forget),
 		)
 		cs.prober.SetSelfInfo(version, cfg.Cluster.Role)
 	}
@@ -211,13 +288,22 @@ func (cs *clusterState) Update(cfg *config.Config) (proberBuilt bool) {
 	router := cs.router
 	if cs.prober == nil && cfg.IsHub() {
 		cs.prober = instances.NewProber(
-			registry, clusterProbeInterval(cfg), cs.factory, cs.store, newClusterEvents(cs.broker),
+			registry, clusterProbeInterval(cfg), cs.factory, cs.store, newClusterEvents(cs.broker, cs.notes.forget),
 		)
 		cs.prober.SetSelfInfo(version, cfg.Cluster.Role)
 		proberBuilt = true
 	}
 	prober := cs.prober
 	cs.mu.Unlock()
+
+	// Drop notes about instances this reload removed. Prober.Update prunes its
+	// own states for the same reason; without this the notebook keeps entries
+	// for instances that no longer exist for the life of the process.
+	registered := make(map[string]bool, registry.Len())
+	for _, inst := range registry.List() {
+		registered[inst.ID] = true
+	}
+	cs.notes.retain(registered)
 
 	router.Update(registry, cfg)
 	// A prober built above this tick (proberBuilt) already has this exact
@@ -293,9 +379,6 @@ func (cs *clusterState) ownerVerdictFor(repo string) (instances.Instance, ownerV
 	}
 	for _, id := range prober.HealthyIDs() {
 		if id == owner {
-			// Reachable again: forget the outage so a later one is announced
-			// as a new event instead of being swallowed as a repeat.
-			cs.takeovers.forget(owner)
 			return inst, verdictDispatch
 		}
 	}
@@ -320,29 +403,23 @@ func (cs *clusterState) ownerVerdictFor(repo string) (instances.Instance, ownerV
 // theburrowhub/heimdallm#765.
 func (cs *clusterState) dispatch(ctx context.Context, repo, op string, do func(*instances.Client) error) (handledElsewhere bool) {
 	inst, verdict := cs.ownerVerdictFor(repo)
+	// Only read when the verdict is verdictTakeOver. Reaching that straight
+	// out of ownerVerdictFor means the prober gave up on the owner.
+	reason := takeoverProbesFailed
 	if verdict == verdictDispatch {
-		cs.mu.RLock()
-		factory := cs.factory
-		cs.mu.RUnlock()
-		err := do(factory(inst))
-		if err == nil {
+		unit := op + "|" + repo
+		if err := do(cs.clientFactory()(inst)); err == nil {
+			cs.notes.clearFailures(inst.ID, unit)
 			return true
+		} else {
+			cs.noteDispatchFailure(repo, op, inst, err)
 		}
-		slog.Warn("cluster: dispatch to owning instance failed",
-			"repo", repo, "operation", op, "instance", inst.ID, "err", err)
-		// A failed RPC is fresher evidence than the last health tick, but it is
-		// no more evidence that the owner stopped *working* than a single
-		// failed probe is: an auth rotation, a full disk or one dropped packet
-		// all produce it. Only the probe history decides.
-		verdict = verdictDeferToOwner
-		if cs.confirmedDown(inst.ID) {
-			verdict = verdictTakeOver
-		}
+		verdict, reason = cs.verdictAfterFailedDispatch(inst, op, repo)
 	}
 
 	switch verdict {
 	case verdictTakeOver:
-		cs.announceTakeover(repo, op, inst)
+		cs.announceTakeover(repo, op, inst, reason)
 		return false
 	case verdictDeferToOwner:
 		cs.noteDeferral(repo, op, inst)
@@ -350,6 +427,65 @@ func (cs *clusterState) dispatch(ctx context.Context, repo, op string, do func(*
 	default: // verdictActLocally
 		return false
 	}
+}
+
+// verdictAfterFailedDispatch decides what a rejected dispatch RPC means.
+//
+// It is a separate question from "is the owner answering health probes", and
+// conflating the two is how the first cut of this change broke the safety net:
+//
+//   - A daemon with no prober is not a hub (only a hub builds one), so it has
+//     no health history for anyone and no grounds to assert the owner is fine.
+//     Deferring there would skip the work forever with nothing able to escalate
+//     it. Handling it locally on a failed RPC is exactly what it did before
+//     #765, and what ownerVerdictFor's own comment promises.
+//   - On a hub, the probe is the *unauthenticated* GET /health while every
+//     dispatch RPC is authenticated. An owner that answers /health and rejects
+//     our calls — cluster token rotated on the remote, the repo missing from
+//     that remote's own config, a permission error — never accumulates a probe
+//     failure, so it would stay "healthy" and its work would be done by nobody.
+//     Counting consecutive rejections and escalating on the same threshold the
+//     probes use bounds that to takeoverAfterFailedProbes poll cycles.
+//
+// One rejection still means defer: an auth blip or a restarting remote produces
+// it, and the owner's own poll loop covers the repo in the meantime.
+func (cs *clusterState) verdictAfterFailedDispatch(inst instances.Instance, op, repo string) (ownerVerdict, takeoverReason) {
+	if !cs.hasProber() {
+		return verdictTakeOver, takeoverNoObserver
+	}
+	if cs.confirmedDown(inst.ID) {
+		return verdictTakeOver, takeoverProbesFailed
+	}
+	if n := cs.notes.recordFailure(inst.ID, op+"|"+repo); n >= cs.takeoverThreshold() {
+		return verdictTakeOver, takeoverDispatchRejected
+	}
+	return verdictDeferToOwner, takeoverProbesFailed
+}
+
+// noteDispatchFailure reports a rejected dispatch RPC once per (instance,
+// operation, repo) and at Debug thereafter. Undeduped it produced one WARN per
+// routed repo per poll cycle for the whole outage — the same flooding the
+// notices are deduped to avoid.
+func (cs *clusterState) noteDispatchFailure(repo, op string, inst instances.Instance, err error) {
+	msg := "cluster: dispatch to owning instance failed"
+	args := []any{"repo", repo, "operation", op, "instance", inst.ID, "err", err}
+	if cs.notes.claim(inst.ID, "rpc:"+op+"|"+repo) {
+		slog.Warn(msg, args...)
+		return
+	}
+	slog.Debug(msg, args...)
+}
+
+func (cs *clusterState) clientFactory() instances.ClientFactory {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.factory
+}
+
+func (cs *clusterState) hasProber() bool {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.prober != nil
 }
 
 // confirmedDown reports whether the prober has given up on instanceID. A
@@ -378,9 +514,10 @@ func (cs *clusterState) probeFailures(instanceID string) int {
 }
 
 // noteDeferral records that this daemon left an unreachable owner's work
-// alone. Reported once per (instance, repo) outage at Info and at Debug
-// thereafter: every poll cycle reaches this branch for every repo routed to the
-// unreachable instance, and an operator needs the fact, not one line per cycle.
+// alone. Reported once per (instance, operation, repo) outage at Info and at
+// Debug thereafter: every poll cycle reaches this branch for every repo routed
+// to the unreachable instance, and an operator needs the fact, not one line
+// per cycle.
 func (cs *clusterState) noteDeferral(repo, op string, inst instances.Instance) {
 	msg := "cluster: owning instance is unreachable but not confirmed down; leaving its work to it"
 	args := []any{
@@ -388,32 +525,56 @@ func (cs *clusterState) noteDeferral(repo, op string, inst instances.Instance) {
 		"failed_probes", cs.probeFailures(inst.ID),
 		"takeover_after_failed_probes", cs.takeoverThreshold(),
 	}
-	if cs.takeovers.claim(inst.ID, "defer:"+repo) {
+	if cs.notes.claim(inst.ID, "defer:"+op+"|"+repo) {
 		slog.Info(msg, args...)
 		return
 	}
 	slog.Debug(msg, args...)
 }
 
-// announceTakeover reports, once per (instance, repo) outage, that this daemon
-// has started doing another instance's work.
+// announceTakeover reports, once per (instance, operation, repo) outage, that
+// this daemon has stopped deferring to another instance and is doing its work.
 //
 // This exists because #765 was silent. The operator saw "instance became
 // unreachable", which reads as *that instance is not working* — not as *that
-// instance is working twice*. Neither the WARN nor the SSE event can tell a
-// dead machine from a partitioned one, so the message says what was observed
-// and what it may cost, and points at the setting that most often explains it:
-// a base_url holding an IP that DHCP has since moved.
-func (cs *clusterState) announceTakeover(repo, op string, inst instances.Instance) {
-	if !cs.takeovers.claim(inst.ID, "takeover:"+repo) {
+// instance is working twice*. The three reasons need different words because
+// they need different fixes: an unanswered probe most often means a base_url
+// holding an address DHCP has since moved, while a rejected RPC means the
+// instance is up and refusing the work, which is a token or config problem on
+// the remote.
+func (cs *clusterState) announceTakeover(repo, op string, inst instances.Instance, reason takeoverReason) {
+	if !cs.notes.claim(inst.ID, "takeover:"+op+"|"+repo) {
 		return
 	}
 	failures := cs.probeFailures(inst.ID)
-	slog.Warn("cluster: taking over work from an instance that has stopped answering health probes; "+
-		"if it is alive and merely unreachable from here it is still reviewing this repository, so this work is being duplicated "+
-		"(the publish-boundary check should stop a second review from being posted, but the AI spend is already incurred)",
+	args := []any{
 		"repo", repo, "operation", op, "instance", inst.ID, "instance_name", inst.Name,
-		"failed_probes", failures, "base_url_hint", "cluster.instances."+inst.ID+".base_url")
+		"failed_probes", failures,
+	}
+	var label string
+	switch reason {
+	case takeoverProbesFailed:
+		label = "probes_failed"
+		slog.Warn("cluster: taking over work from an instance that has stopped answering health probes; "+
+			"if it is alive and merely unreachable from here it is still reviewing this repository, so this work is "+
+			"being duplicated (the publish-boundary check should stop a second review from being posted, but the AI "+
+			"spend is already incurred)",
+			append(args, "base_url_hint", "cluster.instances."+inst.ID+".base_url")...)
+	case takeoverDispatchRejected:
+		label = "dispatch_rejected"
+		slog.Warn("cluster: taking over work from an instance that answers health probes but keeps rejecting our "+
+			"dispatch calls; it is running and refusing this work, so check its cluster token and whether the "+
+			"repository is configured on that instance at all",
+			append(args, "token_hint", "cluster.instances."+inst.ID+".token")...)
+	default: // takeoverNoObserver
+		// Not a hub: no prober, no health history, nothing to duplicate on the
+		// strength of. This is the plain pre-#765 local fallback, so it is not
+		// the operator alarm the other two are, and there is no /instances UI
+		// on a worker for an SSE event to reach.
+		slog.Info("cluster: dispatch failed and this daemon does not probe its peers; handling the work locally",
+			args...)
+		return
+	}
 	if cs.broker == nil {
 		return
 	}
@@ -424,6 +585,7 @@ func (cs *clusterState) announceTakeover(repo, op string, inst instances.Instanc
 			"instance_name": inst.Name,
 			"repo":          repo,
 			"operation":     op,
+			"reason":        label,
 			"failed_probes": failures,
 		}),
 	})
@@ -442,7 +604,7 @@ func (cs *clusterState) announceTakeover(repo, op string, inst instances.Instanc
 func (cs *clusterState) OwnerCanHandle(repo string) bool {
 	inst, verdict := cs.ownerVerdictFor(repo)
 	if verdict == verdictTakeOver {
-		cs.announceTakeover(repo, "issue_triage", inst)
+		cs.announceTakeover(repo, "issue_triage", inst, takeoverProbesFailed)
 		return false
 	}
 	return verdict == verdictDispatch || verdict == verdictDeferToOwner
@@ -588,16 +750,42 @@ func (cs *clusterState) RunProber(ctx context.Context) {
 
 // clusterEvents publishes instance up/down transitions onto the SSE stream so
 // the GUI can react without polling.
-type clusterEvents struct{ broker *sse.Broker }
+type clusterEvents struct {
+	broker *sse.Broker
+	// onRecovered is called with the instance id whenever a probe flips an
+	// instance back to reachable. Optional; nil in tests that only assert on
+	// the SSE stream.
+	onRecovered func(instanceID string)
+}
 
-func newClusterEvents(broker *sse.Broker) instances.EventPublisher {
-	if broker == nil {
+// newClusterEvents wires the prober's transition callback. It returns nil only
+// when there is nothing at all to do — a non-nil onRecovered matters even
+// without a broker, because the notes have to be cleared on recovery whether
+// or not anyone is watching the SSE stream.
+func newClusterEvents(broker *sse.Broker, onRecovered func(string)) instances.EventPublisher {
+	if broker == nil && onRecovered == nil {
 		return nil
 	}
-	return &clusterEvents{broker: broker}
+	return &clusterEvents{broker: broker, onRecovered: onRecovered}
 }
 
 func (e *clusterEvents) InstanceStateChanged(s instances.State) {
+	// Clear what we remember about an instance the moment it comes back, so a
+	// later outage is reported as a new event rather than swallowed as a repeat
+	// of the last one.
+	//
+	// This hangs off the prober's transition callback rather than off
+	// ownerVerdictFor's healthy branch, and the difference is not cosmetic:
+	// that branch runs on every poll cycle for a healthy instance, so clearing
+	// there reset the consecutive-dispatch-failure count before it could ever
+	// reach the threshold — an owner rejecting every RPC would have been
+	// deferred to forever.
+	if s.Reachable && e.onRecovered != nil {
+		e.onRecovered(s.InstanceID)
+	}
+	if e.broker == nil {
+		return
+	}
 	eventType := sse.EventInstanceDown
 	if s.Reachable {
 		eventType = sse.EventInstanceUp

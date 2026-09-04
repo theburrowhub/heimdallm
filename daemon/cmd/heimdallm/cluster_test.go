@@ -246,7 +246,7 @@ func TestClusterEventsPublishTransitions(t *testing.T) {
 		t.Fatal("broker subscribe returned nil")
 	}
 
-	events := newClusterEvents(broker)
+	events := newClusterEvents(broker, nil)
 	events.InstanceStateChanged(instances.State{InstanceID: "srv-a", Name: "srv-a", Reachable: false, LastError: "refused"})
 
 	select {
@@ -271,8 +271,13 @@ func TestClusterEventsPublishTransitions(t *testing.T) {
 
 func TestNewClusterEventsNilBroker(t *testing.T) {
 	// A daemon started without a broker must not panic when a probe flips.
-	if got := newClusterEvents(nil); got != nil {
-		t.Errorf("newClusterEvents(nil) = %v, want nil", got)
+	if got := newClusterEvents(nil, nil); got != nil {
+		t.Errorf("newClusterEvents(nil, nil) = %v, want nil", got)
+	}
+	// A recovery callback still needs a publisher even with no broker: the
+	// notes must be cleared on recovery whether or not anyone is watching.
+	if got := newClusterEvents(nil, func(string) {}); got == nil {
+		t.Error("newClusterEvents(nil, cb) = nil; the recovery callback would never fire")
 	}
 }
 
@@ -1039,8 +1044,7 @@ func TestClusterStateDispatchPRReviewDefersToAnOwnerNotYetConfirmedDown(t *testi
 // A nominally healthy owner whose review call itself fails (transient error,
 // auth rotated, disk full) must not be taken over on the strength of that one
 // call: the RPC failing says nothing about whether the owner is still
-// reviewing its own repos. It falls back only once the probe history agrees
-// the owner is gone.
+// reviewing its own repos.
 func TestClusterStateDispatchPRReviewDefersOnRemoteError(t *testing.T) {
 	remote := newDispatchRemote(t)
 	cs := dispatchHub(t, remote)
@@ -1049,6 +1053,73 @@ func TestClusterStateDispatchPRReviewDefersOnRemoteError(t *testing.T) {
 	handled := cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "")
 	if !handled {
 		t.Error("DispatchPRReview() = false, want true — a failed RPC to a healthy owner is not grounds to duplicate its work")
+	}
+}
+
+// PR review feedback: the health probe is unauthenticated while every dispatch
+// RPC is not, so an owner that answers /health and rejects our calls (cluster
+// token rotated on the remote, repo missing from its own config, permission
+// error) never accumulates a probe failure. Deferring on the probe history
+// alone would leave that work undone by anyone, forever.
+func TestClusterStateTakesOverAnOwnerThatKeepsRejectingDispatch(t *testing.T) {
+	remote := newDispatchRemote(t)
+	cs := dispatchHub(t, remote)
+	remote.setFailNext(true) // /health still 200s; only the RPC fails
+
+	for i := 1; i < cs.takeoverThreshold(); i++ {
+		if !cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "") {
+			t.Fatalf("took over after %d rejected RPCs, want to defer until %d", i, cs.takeoverThreshold())
+		}
+	}
+	if cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "") {
+		t.Errorf("still deferring after %d rejected RPCs to a probe-healthy owner; the work would never be done",
+			cs.takeoverThreshold())
+	}
+	if cs.confirmedDown("srv-a") {
+		t.Error("precondition broken: the owner answered every health probe, so it must not be confirmed down")
+	}
+}
+
+// The counter must be consecutive: a repo whose dispatch fails once, succeeds,
+// then fails again is a blip, not an owner refusing the work.
+func TestClusterStateDispatchFailureCounterResetsOnSuccess(t *testing.T) {
+	remote := newDispatchRemote(t)
+	cs := dispatchHub(t, remote)
+
+	for i := 1; i < cs.takeoverThreshold(); i++ {
+		remote.setFailNext(true)
+		if !cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "") {
+			t.Fatalf("took over after %d rejected RPCs, want to defer", i)
+		}
+		remote.setFailNext(false)
+		if !cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "") {
+			t.Fatal("a successful dispatch reported as not handled")
+		}
+	}
+	remote.setFailNext(true)
+	if !cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "") {
+		t.Error("took over on an isolated failure; the successes in between must reset the count")
+	}
+}
+
+// The counter is per (operation, repo): one repo the remote refuses must not
+// drag another repo, or another operation, into a takeover with it.
+func TestClusterStateDispatchFailureCounterIsPerWorkUnit(t *testing.T) {
+	remote := newDispatchRemote(t)
+	cs := dispatchHub(t, remote)
+	remote.setFailNext(true)
+
+	for i := 0; i < cs.takeoverThreshold(); i++ {
+		cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "")
+	}
+	if cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "") {
+		t.Fatal("precondition: theirs/repo should have been taken over by now")
+	}
+	if !cs.DispatchIssueReview(context.Background(), "theirs/repo", 99) {
+		t.Error("a repo taken over for review also took over issue triage on the first rejection")
+	}
+	if !cs.DispatchPRReview(context.Background(), "theirs/other", 43, "") {
+		t.Error("one repo's rejections triggered a takeover of a different repo")
 	}
 }
 
@@ -1122,16 +1193,15 @@ func TestClusterStateReannouncesATakeoverAfterRecovery(t *testing.T) {
 	remote.setHealthy(false)
 	probeUntilConfirmedDown(t, cs)
 	cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "")
-	if cs.takeovers.claim("srv-a", "takeover:theirs/repo") {
+	if cs.notes.claim("srv-a", "takeover:review|theirs/repo") {
 		t.Fatal("takeover was not recorded as announced")
 	}
 
 	remote.setHealthy(true)
-	cs.Prober().ProbeAll(context.Background())
-	cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "") // reachable again
+	cs.Prober().ProbeAll(context.Background()) // the transition clears the notes
 
-	if !cs.takeovers.claim("srv-a", "takeover:theirs/repo") {
-		t.Error("recovery did not clear the takeover ledger; a second outage would go unreported")
+	if !cs.notes.claim("srv-a", "takeover:review|theirs/repo") {
+		t.Error("recovery did not clear the notes; a second outage would go unreported")
 	}
 }
 
@@ -1265,6 +1335,84 @@ func TestClusterStateOwnerCanHandleReflectsHealth(t *testing.T) {
 	probeUntilConfirmedDown(t, cs)
 	if cs.OwnerCanHandle("theirs/repo") {
 		t.Error("OwnerCanHandle() = true for an owner confirmed down")
+	}
+}
+
+// PR review feedback (HIGH): only a hub builds a prober, so on a
+// worker/standalone daemon with routing configured confirmedDown() can never
+// become true. Deferring there would skip the work forever with nothing able
+// to escalate it — the exact class of bug dispatch-with-fallback exists to
+// prevent. A daemon that cannot observe its peers has no grounds to defer.
+func TestClusterStateWithoutAProberFallsBackLocallyOnRPCFailure(t *testing.T) {
+	remote := newDispatchRemote(t)
+	cs := dispatchHub(t, remote)
+
+	// Demote to a worker: same registry and routing, no prober.
+	cs.mu.Lock()
+	cs.prober = nil
+	cs.mu.Unlock()
+	if cs.hasProber() {
+		t.Fatal("precondition: the prober should be gone")
+	}
+
+	// Every cycle, not just the first: there is no failure count that can
+	// escalate on a daemon with no health history, so it must never defer.
+	remote.setFailNext(true)
+	for i := 1; i <= cs.takeoverThreshold()+1; i++ {
+		if cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "") {
+			t.Fatalf("DispatchPRReview() = true on attempt %d without a prober; the review would be skipped", i)
+		}
+	}
+}
+
+// A config reload that drops an instance must drop what we remember about it,
+// the way Prober.Update prunes its own states.
+func TestClusterStateUpdatePrunesNotesForRemovedInstances(t *testing.T) {
+	remote := newDispatchRemote(t)
+	cs := dispatchHub(t, remote)
+	remote.setHealthy(false)
+	probeUntilConfirmedDown(t, cs)
+	cs.DispatchPRReview(context.Background(), "theirs/repo", 42, "")
+	if cs.notes.claim("srv-a", "takeover:review|theirs/repo") {
+		t.Fatal("precondition: the takeover should be recorded")
+	}
+
+	// Reload without srv-a.
+	cfg := &config.Config{}
+	cfg.AI.Primary = "claude"
+	cfg.Cluster.Role = config.RoleHub
+	cfg.Cluster.InstanceID = "hub-1"
+	cfg.Cluster.Instances = map[string]config.InstanceConfig{
+		"hub-1": {Name: "hub", BaseURL: "http://127.0.0.1:7842", Token: "t"},
+	}
+	cfg.GitHub.PollInterval = "5m"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config invalid: %v", err)
+	}
+	cs.Update(cfg)
+
+	if !cs.notes.claim("srv-a", "takeover:review|theirs/repo") {
+		t.Error("notes for a removed instance survived the reload")
+	}
+}
+
+// The notes are keyed per operation as well as per repo: PR review and issue
+// triage are taken over through different call paths, and a repo-only key let
+// whichever fired first silence the other.
+func TestClusterStateNotesAreKeyedPerOperation(t *testing.T) {
+	var n instanceNotes
+	if !n.claim("srv-a", "takeover:review|o/r") {
+		t.Fatal("first review notice suppressed")
+	}
+	if !n.claim("srv-a", "takeover:issue_triage|o/r") {
+		t.Error("the review notice suppressed the issue-triage notice for the same repo")
+	}
+	if n.claim("srv-a", "takeover:review|o/r") {
+		t.Error("the review notice was reported twice")
+	}
+	n.forget("srv-a")
+	if !n.claim("srv-a", "takeover:review|o/r") {
+		t.Error("forget() did not clear the notice")
 	}
 }
 
